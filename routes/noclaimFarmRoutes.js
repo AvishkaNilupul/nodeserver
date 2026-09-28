@@ -211,7 +211,9 @@ router.get("/api/noclaim-farm/state", requireSuperadmin, async (req, res) => {
       `game=$(tr -d '\\n' < "$d" | sed -n 's/.*"FavouriteGames"[^[]*\\[[^"]*"\\([^"]*\\)".*/\\1/p'); ` +
       `n=$(grep -c '"ClientSecret"' "$d"); ` +
       `per=no; [ -f "$(dirname $(dirname "$d"))/.personal" ] && per=yes; ` +
-      `echo "$id|$game|$n|$per"; done; echo "BOTS_END"`;
+      `off=no; [ -f "$(dirname $(dirname "$d"))/.operatoroff" ] && off=yes; ` +
+      `auto=no; [ -f "$(dirname $(dirname "$d"))/.autostopped" ] && auto=yes; ` +
+      `echo "$id|$game|$n|$per|$off|$auto"; done; echo "BOTS_END"`;
     const out = await sh(script, { timeout: 25000 });
 
     const lines = out.split("\n");
@@ -232,12 +234,17 @@ router.get("/api/noclaim-farm/state", requireSuperadmin, async (req, res) => {
         const id = name.replace(CONTAINER_PREFIX, "");
         psMap[id] = { state, status };
       } else if (section === "bots" && line) {
-        const [id, game, n, per] = line.split("|");
+        const [id, game, n, per, off, auto] = line.split("|");
         bots.push({
           id,
           game: game || "",
           accounts: parseInt(n, 10) || 0,
           personal: per === "yes",
+          // Why a bot that is not running is down: stopped by the operator
+          // (.operatoroff) or parked by auto power on a dark game (.autostopped).
+          // Neither marker and not running = it died on its own.
+          operatorOff: off === "yes",
+          autoStopped: auto === "yes",
         });
       }
     }

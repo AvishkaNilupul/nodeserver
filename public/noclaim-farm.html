@@ -352,10 +352,12 @@ async function api(path,opts){var r=await fetch(path,Object.assign({headers:{'Co
 var openBots = {}; // id -> {tab, loadedAccounts, loadedDrops}
 var allBots = []; // last state sweep, used by the spent scanner
 var pollT=null;
+var PROVISIONING=false; // a bot build is in flight (from the last state sweep)
 
 async function loadState(force){
   try{
     var j=await api('/api/noclaim-farm/state');
+    PROVISIONING=!!j.provisioning;
     var bots=j.bots||[];
     var personalN=bots.filter(function(b){return b.personal;}).length;
     var fleetN=bots.length-personalN;
@@ -386,10 +388,17 @@ async function loadPool(){
   }catch(e){ $('stPool').textContent='?'; }
 }
 
+// Why a bot is (not) farming, from its container state and its markers. A bot
+// used to read "stopped" whether auto power parked it, you stopped it, or it
+// crashed — and "building…" forever when its container was simply gone.
 function stChip(b){
-  if(b.running) return '<span class="chip on">running</span>';
-  if(b.containerState==='exited') return '<span class="chip off">stopped</span>';
-  if(b.containerState==='none') return '<span class="chip warn">building…</span>';
+  var s=botStatus(b), tip=esc(b.containerStatus||'');
+  if(s==='running') return '<span class="chip on">running</span>';
+  if(s==='parked') return '<span class="chip off" title="auto power parked it — no live stream for its game; it starts again when one is live. '+tip+'">parked</span>';
+  if(s==='stopped') return '<span class="chip off" title="stopped by you — stays stopped until you press Restart. '+tip+'">stopped by you</span>';
+  if(s==='crashed') return '<span class="chip warn" title="not running, and neither you nor auto power stopped it: '+tip+' — Restart it">crashed</span>';
+  if(s==='building') return '<span class="chip warn">building…</span>';
+  if(s==='nocontainer') return '<span class="chip warn" title="its config exists but its container is gone — Restart cannot bring it back; release and re-create the bot">no container</span>';
   return '<span class="chip">'+esc(b.containerState||'?')+'</span>';
 }
 
@@ -433,7 +442,14 @@ function gameOf(b){ return b.game||'(any)'; }
 function slug(s){ return String(s||'').toLowerCase().replace(/[^a-z0-9]+/g,'-').replace(/^-|-$/g,'')||'game'; }
 // Stable per-game accent: hash the name to a hue so a game keeps its colour.
 function hueFor(s){ var h=0,str=String(s||'');for(var i=0;i<str.length;i++){h=(h*31+str.charCodeAt(i))>>>0;}return h%360; }
-function botStatus(b){ if(b.running)return'running'; if(b.containerState==='exited')return'stopped'; if(b.containerState==='none')return'building'; return'other'; }
+function botStatus(b){
+  if(b.running) return 'running';
+  if(b.containerState==='none') return (PROVISIONING&&!b.operatorOff)?'building':'nocontainer';
+  if(b.operatorOff) return 'stopped';
+  if(b.autoStopped) return 'parked';
+  if(b.containerState==='exited'||b.containerState==='dead') return 'crashed';
+  return 'other';
+}
 
 // Which game cards the operator has collapsed, remembered across reloads.
 function loadCollapsed(){ try{ return JSON.parse(localStorage.getItem('noclaimCollapsedGames')||'{}')||{}; }catch(e){ return {}; } }
@@ -449,12 +465,15 @@ function setAllGroupsCollapsed(val){
 }
 
 function groupSummaryHtml(list){
-  var running=0,building=0,stopped=0,accounts=0;
-  list.forEach(function(b){ accounts+=(b.accounts||0); var s=botStatus(b); if(s==='running')running++; else if(s==='building')building++; else if(s==='stopped')stopped++; });
+  var n={running:0,parked:0,stopped:0,crashed:0,building:0,nocontainer:0},accounts=0;
+  list.forEach(function(b){ accounts+=(b.accounts||0); var s=botStatus(b); if(n[s]!=null) n[s]++; });
   var h='<span class="cnt">'+list.length+' bot'+(list.length===1?'':'s')+' · '+accounts+' acct'+(accounts===1?'':'s')+'</span>';
-  if(running) h+='<span class="chip on">'+running+' running</span>';
-  if(building) h+='<span class="chip warn">'+building+' building</span>';
-  if(stopped) h+='<span class="chip off">'+stopped+' stopped</span>';
+  if(n.running) h+='<span class="chip on">'+n.running+' running</span>';
+  if(n.parked) h+='<span class="chip off">'+n.parked+' parked</span>';
+  if(n.stopped) h+='<span class="chip off">'+n.stopped+' stopped by you</span>';
+  if(n.crashed) h+='<span class="chip warn">'+n.crashed+' crashed</span>';
+  if(n.building) h+='<span class="chip warn">'+n.building+' building</span>';
+  if(n.nocontainer) h+='<span class="chip warn">'+n.nocontainer+' no container</span>';
   return h;
 }
 
