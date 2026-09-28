@@ -1,170 +1,200 @@
-// free_ggsel.js — owner request 2026-09-28 ("yes plati and ggsell"): take the
-// accounts off GGSel and let the other markets sell them.
+// delist-ggsel-everything.js — owner 2026-09-28: "delist everything on GGSel and
+// Plati, we will fix that later".
 //
-// GGSel's API cannot take an offer off sale (batch_pause answers 200 and a job
-// id but never applies; PATCH refuses `status`) — so the OWNER pauses the offers
-// in the GGSel seller panel, and this script only releases what is provably
-// safe afterwards:
-//   - only offers GGSel itself reports as NOT active (paused/draft/gone);
-//   - per (set) of our paused GGSel rows: R = accounts whose drops are reserved
-//     with tag "ggsel" for that set; GGSel's own counters give S (codes still in
-//     the offer) and X (codes it sold). X == 0 → every reserved account is still
-//     in the vault → release all R. X > 0 → release only when exactly X of R are
-//     connected (a buyer claimed them), and then release the rest. Anything
-//     else → keep all reserved (which ones sold cannot be told apart).
-//   - an account also on another market's active listing of the set is kept.
-// No-claim rows (origin "unclaimed") are left to the engine's reconcile, which
-// closes a non-active GGSel row itself. Rows released here are marked delisted.
+// The GGSel seller account is BLOCKED: every offer edit answers 422 "User is
+// blocked", and batch_pause answers 200 + a job id but never applies. What
+// still works is archiving an offer's products (its delivery codes):
+// DELETE /offers/{id}/products {product_ids} → the product reads "archived"
+// seconds later, and an offer with no in-stock product cannot be bought. So,
+// for EVERY GGSel offer (ours or not, active or paused) holding in-stock
+// products:
+//   1. our active row for it, if any, is marked delisted FIRST — the guardian
+//      and the no-claim engine read GGSel stock, and would otherwise count the
+//      vanishing codes as sales. A no-claim row's listed ledgers are parked
+//      "skipped" (held) and their owner tick cleared, which is what the
+//      engine's reconcile does for a market that was switched off;
+//   2. every in-stock product is archived, then read back;
+//   3. a product confirmed archived was unsold at that moment, so its
+//      account's (account, set, "ggsel") drop reservation is released — unless
+//      that account is live on another market's listing of the set. A code
+//      whose account cannot be matched to a reservation is archived only.
+// The offers stay listed on GGSel at 0 stock until the account is unblocked.
 //
-// Dry run by default (reads GGSel + DB, writes nothing but the before-state
-// JSON; also reports what an all-paused run WOULD release). --apply acts.
-// Run ON PROD from the repo root: node scripts/<this file> [--apply]
+// Run ON PROD from the repo root: node scripts/delist-ggsel-everything.js [--apply]
+// Dry run by default (reads only). Serial, ~1 s between GGSel calls. Undo
+// data: /root/_rehome_work/ggsel_everything_before_<ts>.json (rows, ledgers,
+// every product archived, every reservation field reset).
 const path = require("path");
 process.chdir(path.join(__dirname, ".."));
 const req = (m) => require(m.startsWith("./") ? path.join(__dirname, "..", m) : m);
 req("dotenv").config({ quiet: true });
 const fs = require("fs");
+const axios = req("axios");
 const mongoose = req("mongoose");
 const config = req("./config/config");
 
 const APPLY = process.argv.includes("--apply");
+const PACE_MS = 1000;
+const API = "https://seller.ggsel.com/api_sellers/v2";
 const TS = new Date().toISOString().replace(/[-:]/g, "").slice(0, 15) + "Z";
 const wait = (ms) => new Promise((r) => setTimeout(r, ms));
 const log = (...a) => console.log(new Date().toISOString().slice(11, 19), ...a);
+const loginOf = (value) => {
+  const m = /Login:\s*(\S+)/i.exec(String(value || ""));
+  return m ? m[1].toLowerCase() : "";
+};
 
 (async () => {
   await mongoose.connect(config.MONGO_URI);
   const mp = req("./utils/marketplaces");
+  const engine = req("./utils/unclaimedAutoList");
   const { releaseSetForAccounts } = req("./utils/dropReservation");
   const { logEvent } = req("./utils/systemLog");
-  const db = mongoose.connection.db;
-  const Listings = db.collection("marketplacelistings");
-
-  const rows = await Listings.find(
-    { marketplace: "ggsel", status: "active", rentFarm: { $ne: true } },
-    { projection: { externalId: 1, set: 1, origin: 1, note: 1, accountId: 1, units: 1, noclaimStock: 1, accountOffer: 1, unclaimedGame: 1, title: 1 } },
-  ).toArray();
-  const mine = rows.filter((r) => !(r.noclaimStock || r.accountOffer || r.unclaimedGame || r.origin === "unclaimed") && r.externalId && r.set);
-
-  // GGSel's own view of every offer: the paged list is only a fallback for an
-  // offer whose single read fails. If the LIST itself fails (GGSel's nginx
-  // 504s), "not in the list" proves nothing: such an offer reads as unknown,
-  // never as gone.
-  let list = [];
-  let listOk = true;
-  try {
-    list = await mp.ggselAllOffers();
-  } catch (e) {
-    listOk = false;
-    log("offer list unreadable (" + String(e.message).slice(0, 60) + ") — using single-offer reads only");
-  }
-  const status = new Map(list.map((o) => [String(o.id), String(o.status || "")]));
-  const offStatus = (ext) =>
-    status.has(String(ext)) ? status.get(String(ext)) : listOk ? "gone" : "";
-
-  // Counters per offer (one paced single-offer read each): status, codes still
-  // in stock, codes sold. ggselReadOffer is not exported, so this is the same
-  // GET it makes, with the same auth header.
-  const counters = new Map();
-  const axios = req("axios");
   const { loadSettings } = req("./utils/settings");
   const enc = (loadSettings().marketplaces || {}).ggsel || {};
   const apiKey = req("./utils/secretBox").decrypt(enc.apiKey || "") || enc.apiKey;
   const H = { Authorization: apiKey, "Content-Type": "application/json" };
-  for (const r of mine) {
-    const ext = String(r.externalId);
-    try {
-      const g = await axios.get("https://seller.ggsel.com/api_sellers/v2/offers/" + Number(ext), { headers: H, timeout: 20000 });
-      const d = (g.data && g.data.data) || g.data || {};
-      const split = !!d.has_splitted_products;
-      counters.set(ext, {
-        status: String(d.status || offStatus(ext)),
-        inStock: Number(split ? d.in_stock_splitted_products_count : d.in_stock_products_count) || 0,
-        sold: Number(split ? d.sold_splitted_products_count : d.sold_products_count) || 0,
-      });
-    } catch (e) {
-      counters.set(ext, { status: offStatus(ext), inStock: null, sold: null, err: e.response ? "HTTP " + e.response.status : e.message });
-    }
-    await wait(250);
-  }
+  const db = mongoose.connection.db;
+  const Listings = db.collection("marketplacelistings");
+  const Ledgers = db.collection("unclaimedaccounts");
 
-  // Reserved accounts per set (tag ggsel), with "any drop connected".
-  const setIds = [...new Set(mine.map((r) => String(r.set)))];
-  const resv = await db.collection("droplogs").aggregate([
-    { $match: { soldAt: { $ne: null }, soldToUsername: "ggsel", soldSetId: { $in: setIds } } },
-    { $group: { _id: { s: "$soldSetId", a: "$account" }, conn: { $max: { $cond: [{ $eq: ["$connected", true] }, 1, 0] } } } },
-  ]).toArray();
-  const bySet = new Map();
-  for (const x of resv) {
-    const m = bySet.get(String(x._id.s)) || new Map();
-    m.set(String(x._id.a), !!x.conn);
-    bySet.set(String(x._id.s), m);
+  async function gg(fn) {
+    for (let attempt = 0; ; attempt++) {
+      try {
+        const r = await fn();
+        await wait(PACE_MS);
+        return r;
+      } catch (e) {
+        const st = e.response && e.response.status;
+        if (attempt < 3 && (!st || st === 429 || st >= 500)) { await wait(20000); continue; }
+        throw e;
+      }
+    }
   }
-  const others = await Listings.find({ status: "active", marketplace: { $ne: "ggsel" }, set: { $in: mine.map((r) => r.set) } }, { projection: { set: 1, accountId: 1, units: 1 } }).toArray();
+  const products = async (offerId) => {
+    const out = [];
+    for (let page = 1; page <= 20; page++) {
+      const r = await gg(() => axios.get(`${API}/offers/${offerId}/products?page=${page}&limit=100`, { headers: H, timeout: 20000 }));
+      const rows = (r.data && r.data.data) || [];
+      out.push(...rows);
+      const pg = (r.data && r.data.pagination) || {};
+      if (!pg.has_next_page) break;
+    }
+    return out;
+  };
+
+  // Every offer GGSel has for us (the list 504s now and then — retried by gg).
+  let offers = [];
+  for (let attempt = 0; attempt < 4 && !offers.length; attempt++) {
+    try { offers = await mp.ggselAllOffers(); } catch (e) { log("offer list failed:", String(e.message).slice(0, 80)); await wait(20000); }
+  }
+  if (!offers.length) throw new Error("GGSel offer list unreadable — nothing done");
+
+  // Our rows (any status) by externalId, to know each offer's set and whether
+  // it is an active row the guardian/engine still reads.
+  const rows = await Listings.find({ marketplace: "ggsel" }, { projection: { externalId: 1, set: 1, status: 1, origin: 1, note: 1, rentFarm: 1, noclaimStock: 1, accountOffer: 1 } }).toArray();
+  const rowsByExt = new Map();
+  for (const r of rows) (rowsByExt.get(String(r.externalId)) || rowsByExt.set(String(r.externalId), []).get(String(r.externalId))).push(r);
+
+  // Accounts live on other markets, per set.
+  const others = await Listings.find({ status: "active", marketplace: { $ne: "ggsel" }, set: { $ne: null } }, { projection: { set: 1, accountId: 1, units: 1 } }).toArray();
   const liveElsewhere = new Set();
   for (const r of others) {
     for (const a of String(r.accountId || "").split(",").map((s) => s.trim()).filter(Boolean)) liveElsewhere.add(String(r.set) + "|" + a);
     for (const u of r.units || []) if (!u.deliveredAt && u.accountId) liveElsewhere.add(String(r.set) + "|" + String(u.accountId));
   }
 
-  // Decide per set, over every one of our GGSel rows of that set.
+  // Pass 1 (read): in-stock products of every offer.
   const plan = [];
-  const bySetRows = new Map();
-  for (const r of mine) (bySetRows.get(String(r.set)) || bySetRows.set(String(r.set), []).get(String(r.set))).push(r);
-  for (const [set, rs] of bySetRows.entries()) {
-    const c = rs.map((r) => counters.get(String(r.externalId)) || {});
-    const allOff = c.every((x) => x.status && x.status !== "active");
-    const known = c.every((x) => x.sold != null && x.inStock != null);
-    const X = c.reduce((n, x) => n + (Number(x.sold) || 0), 0);
-    const S = c.reduce((n, x) => n + (Number(x.inStock) || 0), 0);
-    const m = bySet.get(set) || new Map();
-    const R = [...m.keys()];
-    const connected = R.filter((a) => m.get(a));
-    let release = [];
-    let why = "";
-    if (!known) why = "counters unreadable";
-    else if (X === 0) { release = R; why = "nothing sold"; }
-    else if (connected.length === X) { release = R.filter((a) => !m.get(a)); why = "sold = connected"; }
-    else why = `sold ${X}, connected ${connected.length} — cannot tell which`;
-    release = release.filter((a) => !liveElsewhere.has(set + "|" + a));
-    plan.push({ set, rows: rs.map((r) => String(r._id)), exts: rs.map((r) => String(r.externalId)), allOff, S, X, R: R.length, release, why });
+  for (const [i, o] of offers.entries()) {
+    const ext = String(o.id);
+    let prods = [];
+    try { prods = (await products(ext)).filter((p) => p.status === "in_stock"); } catch (e) { log("products unreadable for", ext, String(e.message).slice(0, 60)); continue; }
+    if (!prods.length) continue;
+    const rs = rowsByExt.get(ext) || [];
+    plan.push({ ext, status: String(o.status || ""), title: String(o.title_en || o.title_ru || "").slice(0, 70), rows: rs.map((r) => ({ id: String(r._id), status: r.status, set: r.set ? String(r.set) : "", origin: r.origin || "", rentFarm: !!r.rentFarm })), products: prods.map((p) => ({ id: p.id, login: loginOf(p.value) })) });
+    if ((i + 1) % 100 === 0) log(`read ${i + 1}/${offers.length} offers, ${plan.length} hold stock`);
   }
-  const wouldIfPaused = plan.reduce((n, p) => n + p.release.length, 0);
-  const ready = plan.filter((p) => p.allOff);
-  const releaseNow = ready.reduce((n, p) => n + p.release.length, 0);
-  const statusCount = {};
-  for (const r of mine) { const s = (counters.get(String(r.externalId)) || {}).status || "?"; statusCount[s] = (statusCount[s] || 0) + 1; }
+  const codes = plan.reduce((n, p) => n + p.products.length, 0);
+  const untracked = plan.filter((p) => !p.rows.length).length;
+  const activeRows = plan.flatMap((p) => p.rows.filter((r) => r.status === "active"));
+  const noclaimRows = activeRows.filter((r) => r.origin === "unclaimed");
 
-  // Before-state for undo: rows + every reservation field that would be reset.
-  const pairs = ready.flatMap((p) => p.release.map((a) => [p.set, a]));
-  const drops = [];
-  for (let i = 0; i < pairs.length; i += 200) {
-    const chunk = pairs.slice(i, i + 200);
-    if (!chunk.length) break;
-    drops.push(...(await db.collection("droplogs").find(
-      { $or: chunk.map(([set, a]) => ({ account: new mongoose.Types.ObjectId(a), soldSetId: set, soldToUsername: "ggsel", soldAt: { $ne: null } })) },
-      { projection: { account: 1, soldAt: 1, soldToUsername: 1, soldToAdminId: 1, soldSetId: 1, soldBulkOrderId: 1 } },
-    ).toArray()));
-  }
-  const backup = `/root/_rehome_work/free_ggsel_before_${TS}.json`;
-  fs.writeFileSync(backup, JSON.stringify({ at: new Date(), apply: APPLY, rows, plan, reservations: drops }, null, 0));
-  log(`${APPLY ? "APPLY" : "DRY RUN"}: ${mine.length} GGSel rows (${rows.length - mine.length} left to their own layer), GGSel status ${JSON.stringify(statusCount)}. Sets ${plan.length}: ready (all offers off sale) ${ready.length}. Release now ${releaseNow} account/set pairs; if every offer were paused: ${wouldIfPaused}. Backup ${backup}`);
-  const whyCount = {};
-  for (const p of plan) whyCount[p.why.split(" —")[0]] = (whyCount[p.why.split(" —")[0]] || 0) + 1;
-  log("per-set verdicts:", JSON.stringify(whyCount));
-  if (!APPLY || !ready.length) { await mongoose.disconnect(); return; }
+  // Before-state: rows, no-claim ledgers, and reservations that may be reset.
+  const setIds = [...new Set(plan.flatMap((p) => p.rows.map((r) => r.set)).filter(Boolean))];
+  const drops = setIds.length
+    ? await db.collection("droplogs").find({ soldToUsername: "ggsel", soldAt: { $ne: null }, soldSetId: { $in: setIds } }, { projection: { account: 1, login: 1, soldAt: 1, soldToUsername: 1, soldToAdminId: 1, soldSetId: 1, soldBulkOrderId: 1 } }).toArray()
+    : [];
+  const ledgers = noclaimRows.length
+    ? await Ledgers.find({ status: "listed", market: "ggsel" }).project({ drops: 0 }).toArray()
+    : [];
+  const backup = `/root/_rehome_work/ggsel_everything_before_${TS}.json`;
+  fs.mkdirSync("/root/_rehome_work", { recursive: true });
+  fs.writeFileSync(backup, JSON.stringify({ at: new Date(), apply: APPLY, plan, rows: rows.filter((r) => r.status === "active"), ledgers, reservations: drops }, null, 0));
+  log(`${APPLY ? "APPLY" : "DRY RUN"}: ${offers.length} GGSel offers, ${plan.length} still hold ${codes} in-stock codes (${untracked} offers with no row of ours); ${activeRows.length} active rows to mark delisted (${noclaimRows.length} no-claim, ${ledgers.length} listed ledgers to hold). Backup ${backup}`);
+  if (!APPLY) { await mongoose.disconnect(); return; }
 
-  let released = 0;
-  for (const p of ready) {
-    for (const a of p.release) { await releaseSetForAccounts([a], p.set, "ggsel"); released++; }
-    await Listings.updateMany(
-      { _id: { $in: p.rows.map((id) => new mongoose.Types.ObjectId(id)) }, status: "active" },
-      { $set: { status: "delisted", lastError: "", note: `freed ${TS.slice(0, 8)}: GGSel switched off by the owner (offer paused on GGSel) — ${p.release.length} account(s) released (${p.why})` } },
-    );
+  // Reservation lookup: set|login → account ids reserved with tag ggsel.
+  const byLogin = new Map();
+  for (const d of drops) {
+    const k = String(d.soldSetId) + "|" + String(d.login || "").toLowerCase();
+    (byLogin.get(k) || byLogin.set(k, new Set()).get(k)).add(String(d.account));
   }
-  logEvent({ category: "listings", action: "ggsel_freed", actor: "claude (owner: free Plati + GGSel)", count: released, detail: `GGSel freed: ${ready.length} sets (paused offers), ${released} account/set reservations released. Undo: ${backup}` });
+
+  const out = { rowsDelisted: 0, ledgersHeld: 0, offers: 0, codesArchived: 0, codesNotConfirmed: 0, released: 0, keptLiveElsewhere: 0, unmatched: 0 };
+  // Phase A: rows off the books FIRST (see header), then archive the codes.
+  for (const [n, p] of plan.entries()) {
+    for (const r of p.rows.filter((x) => x.status === "active")) {
+      await Listings.updateOne(
+        { _id: new mongoose.Types.ObjectId(r.id), status: "active" },
+        { $set: { status: "delisted", lastError: "", note: `delisted ${TS.slice(0, 8)}: GGSel taken off by the owner — codes archived (seller account blocked, the offer itself cannot be paused)` } },
+      );
+      out.rowsDelisted++;
+      if (r.origin === "unclaimed" && r.set) {
+        const held = await Ledgers.find({ status: "listed", market: "ggsel", set: new mongoose.Types.ObjectId(r.set) }).toArray();
+        for (const l of held) {
+          const w = await Ledgers.updateOne({ _id: l._id, status: "listed" }, { $set: { status: "skipped", note: "held — GGSel taken off by the owner (codes archived)", lastCheckedAt: new Date() } });
+          if (w.modifiedCount) { out.ledgersHeld++; await engine.markOwnerUnlisted({ ...l, status: "skipped" }).catch(() => {}); }
+        }
+      }
+    }
+    const ids = p.products.map((x) => x.id);
+    for (let i = 0; i < ids.length; i += 100) {
+      try {
+        await gg(() => axios.delete(`${API}/offers/${p.ext}/products`, { headers: H, data: { product_ids: ids.slice(i, i + 100) }, timeout: 30000 }));
+      } catch (e) {
+        p.deleteError = e.response ? "HTTP " + e.response.status + " " + JSON.stringify(e.response.data).slice(0, 120) : e.message;
+      }
+    }
+    if ((n + 1) % 50 === 0) log(`archive requested for ${n + 1}/${plan.length} offers`);
+  }
+  // GGSel archives asynchronously (seconds): one wait, then read everything back.
+  await wait(20000);
+  // Phase B: confirm, and release what the archive proves unsold.
+  for (const p of plan) {
+    let after = [];
+    try { after = await products(p.ext); } catch { after = []; }
+    const archived = new Set(after.filter((x) => x.status === "archived").map((x) => x.id));
+    out.offers++;
+    const set = (p.rows.find((r) => r.set) || {}).set || "";
+    for (const prod of p.products) {
+      if (!archived.has(prod.id)) { out.codesNotConfirmed++; continue; }
+      out.codesArchived++;
+      const accts = set && prod.login ? byLogin.get(set + "|" + prod.login) : null;
+      if (!accts || !accts.size) { out.unmatched++; continue; }
+      for (const a of accts) {
+        if (liveElsewhere.has(set + "|" + a)) { out.keptLiveElsewhere++; continue; }
+        await releaseSetForAccounts([a], set, "ggsel");
+        out.released++;
+      }
+    }
+    if (out.offers % 50 === 0) log(`confirmed ${out.offers}/${plan.length}: codes archived ${out.codesArchived}, released ${out.released}`);
+  }
+  out.deleteErrors = plan.filter((p) => p.deleteError).map((p) => ({ ext: p.ext, why: p.deleteError })).slice(0, 20);
+  logEvent({ category: "listings", action: "ggsel_delisted_all", actor: "claude (owner: delist everything on GGSel)", count: out.released, detail: `GGSel emptied: ${out.offers} offers, ${out.codesArchived} codes archived (${out.codesNotConfirmed} not confirmed), ${out.rowsDelisted} rows delisted, ${out.ledgersHeld} no-claim ledgers held, ${out.released} reservations released, ${out.unmatched} codes with no reservation, ${out.keptLiveElsewhere} kept (live elsewhere). Undo: ${backup}` });
   await wait(1500);
-  log("DONE released", released);
+  log("DONE", JSON.stringify(out));
+  fs.writeFileSync(`/root/_rehome_work/ggsel_everything_result_${TS}.json`, JSON.stringify(out, null, 1));
   await mongoose.disconnect();
 })().catch(async (e) => {
   console.error("FATAL", e && e.stack ? e.stack.split("\n").slice(0, 4).join(" | ") : e);
