@@ -343,3 +343,14 @@ test("bot page hand sale: marks the bot's free accounts sold and returns their l
     h.restore();
   }
 });
+
+test("bot page: the only way to copy unsold accounts is the hand sale that marks them sold", () => {
+  // "Copy unsold" copied the free accounts and reserved nothing — the button
+  // the 09-18 bulk pull was made with. Copying ALL accounts stays (records),
+  // and says it reserves nothing.
+  const page = require("node:fs").readFileSync(require("node:path").join(__dirname, "..", "public", "noclaim-farm.html"), "utf8");
+  assert.doesNotMatch(page, /data-exp="copyunsold"|fmt==='copyunsold'/);
+  assert.match(page, /data-handsell="1"[^>]*>Sell &amp; copy unsold</);
+  assert.match(page, /data-exp="copy" title="[^"]*Reserves nothing[^"]*">Copy all user:pass</);
+  assert.match(page, /api\('\/api\/noclaim-farm\/bots\/'\+id\+'\/hand-sell'/);
+});

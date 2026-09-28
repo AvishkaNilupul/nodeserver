@@ -645,25 +645,19 @@ function exportAccounts(id,fmt){
     toast('Exported '+d.accounts.length+' account(s) as CSV.'); return;
   }
   function line(a){ return a.login+':'+(a.password||''); }
-  if(fmt==='copyunsold'){
-    // Only what can still go to a buyer: not ticked Sold, not ticked Listed, and
-    // not sold or on a listing by the server's records (a marketplace sale
-    // touches neither tick — see notForSale).
-    var free=d.accounts.filter(function(a){ return !a.manualSold&&!a.listed&&!a.notForSale; });
-    if(!free.length){ toast('No unsold, unlisted accounts on this bot.'); return; }
-    copyToClipboard(free.map(line).join('\n'),free.length+' unsold account'+(free.length===1?'':'s')+' of '+d.accounts.length+' (login:pass)');
-    return;
-  }
   var txt=d.accounts.map(line).join('\n');
   if(fmt==='copy'){ copyToClipboard(txt,d.accounts.length+' account'+(d.accounts.length===1?'':'s')+' (login:pass)'); return; }
   dlFile(base+'.txt','text/plain',txt);
   toast('Exported '+d.accounts.length+' account(s) as TXT.');
 }
 
-// Sell by hand: the server marks the accounts SOLD first, then answers their
-// logins — copying alone reserved nothing (19 accounts went to two buyers on
-// 2026-09-18). The clipboard write happens after a request, which iOS refuses,
-// so copyToClipboard falls back to a selectable box.
+// Sell & copy unsold: the server marks the accounts SOLD first, then answers
+// their logins. It replaced "Copy unsold", which copied free accounts and
+// reserved nothing, so the Eldorado offer could sell the same ones (19 accounts
+// went to two buyers on 2026-09-18). Only what can still go to a buyer is
+// offered: not ticked Sold or Listed, and not sold or on a listing by the
+// server's records (notForSale). The clipboard write happens after a request,
+// which iOS refuses, so copyToClipboard falls back to a selectable box.
 async function handSell(id,c,btn){
   var d=acctCache[id];
   var free=d?d.accounts.filter(function(a){ return !a.manualSold&&!a.listed&&!a.notForSale; }).length:0;
@@ -694,9 +688,8 @@ async function loadAccounts(id,c){
             '<button class="btn ghost sm" data-exp="csv" style="margin-left:auto;">Export CSV</button>'+
             '<button class="btn ghost sm" data-exp="txt">Export TXT</button>'+
             '<button class="btn ghost sm" data-exp="json">Export JSON</button>'+
-            '<button class="btn ghost sm" data-exp="copy">Copy user:pass</button>'+
-            '<button class="btn ghost sm" data-exp="copyunsold" title="Only accounts not sold (by hand or on a marketplace) and not on any listing. Copying reserves NOTHING — to sell, use Sell by hand">Copy unsold</button>'+
-            '<button class="btn sm" data-handsell="1" title="Sell accounts of this bot by hand: you choose how many; they are marked SOLD before their login:pass lines are copied, so no listing can sell them again, and they leave the bot on the next auto-list run (recycler)">Sell by hand</button>'+
+            '<button class="btn ghost sm" data-exp="copy" title="Every account on this bot, sold or not — for your own records. Reserves nothing: to give accounts to a buyer, use Sell &amp; copy unsold">Copy all user:pass</button>'+
+            '<button class="btn sm" data-handsell="1" title="Give unsold accounts to a buyer: you choose how many; they are marked SOLD before their login:pass lines are copied, so no listing (Eldorado, Gameflip…) can sell them too, and they leave the bot on the next auto-list run (recycler)">Sell &amp; copy unsold</button>'+
           '</div>';
     h+='<div class="tagrow" style="margin:-4px 0 8px;"><button class="btn ghost sm" data-reveal="1" type="button" title="Passwords and client tokens are hidden until you ask — opening this drawer is logged">Show passwords &amp; tokens</button><span class="muted" style="font-size:12px;">hidden on screen · Copy / Export still include them · every open is logged</span></div>';
     h+='<div class="tw wide creds-masked"><table><thead><tr><th style="width:46px;">Sold</th><th style="width:46px;">Listed</th><th style="width:52px;"></th><th>Login</th><th>Password</th><th>Twitch ID</th><th>ClientSecret (for manual listing)</th></tr></thead><tbody>';
@@ -705,8 +698,8 @@ async function loadAccounts(id,c){
       h+='<tr class="'+(a.manualSold||gone?'soldrow ':'')+(a.listed||(a.notForSale&&!gone)?'listedrow':'')+'">'+
          '<td><input type="checkbox" class="msold" data-secret="'+esc(a.clientSecret)+'"'+(a.manualSold?' checked':'')+' title="Sold by hand — tick when this account went to a buyer. It leaves its bot on the next auto-list run and goes to the recycler."></td>'+
          '<td><input type="checkbox" class="mlisted" data-secret="'+esc(a.clientSecret)+'"'+(a.listed?' checked':'')+' title="Listed — auto-ticked when the auto-lister puts this account on sale; do not sell it by hand"></td>'+
-         '<td><button class="btn ghost sm rowcopy" data-row="'+idx+'" type="button" title="Copy this row as login:password">Copy</button></td>'+
-         '<td>'+esc(a.login)+(a.notForSale?' <span class="chip '+(gone?'off':'on')+'" title="Not for sale — excluded from Copy unsold">'+esc(a.notForSale)+'</span>':'')+'</td><td class="mono">'+(a.password?'<span class="secret">'+esc(a.password)+'</span>':'<span class="muted">—</span>')+'</td>'+
+         '<td><button class="btn ghost sm rowcopy" data-row="'+idx+'" type="button" title="Copy this row as login:password. Reserves nothing — if it goes to a buyer, tick Sold">Copy</button></td>'+
+         '<td>'+esc(a.login)+(a.notForSale?' <span class="chip '+(gone?'off':'on')+'" title="Not for sale — excluded from Sell &amp; copy unsold">'+esc(a.notForSale)+'</span>':'')+'</td><td class="mono">'+(a.password?'<span class="secret">'+esc(a.password)+'</span>':'<span class="muted">—</span>')+'</td>'+
          '<td class="mono">'+esc(a.twitchId)+'</td>'+
          '<td class="mono"><span class="secret">'+esc(a.clientSecret)+'</span></td></tr>';
     });
