@@ -177,6 +177,16 @@ async function claimUnclaimedForGame(
 
   const n = Math.max(1, parseInt(want, 10) || 1);
   const required = coverage.requiredCounts(requiredDrops);
+  // An offer that declares no item list cannot be checked, so it never
+  // auto-delivers (owner, 2026-09-28): picking by game alone shipped whatever
+  // the ledger had. No stock, and the reason says how to turn it back on.
+  if (!required.size) {
+    if (shortfall) {
+      shortfall.detail =
+        "this offer declares no item list (requiredDrops) — declare what it sells to deliver it";
+    }
+    return [];
+  }
   // A coverage gate rejects most candidates on their drops alone, so read a
   // deeper slice — otherwise rare stock reads as no stock.
   const scan = required.size ? Math.max(n * 6, 200) : n * 6;
@@ -226,7 +236,11 @@ async function claimUnclaimedForGame(
       // Live Twitch inventory, not the ledger: an expired wave silently drops
       // out of what the buyer can claim, and only Twitch knows that.
       const verdict = await coverage.liveCoverage(row, required);
-      if (!verdict.ok) {
+      // Handing an account over needs a LIVE read: the database fallback is a
+      // snapshot that has missed expired waves before (order 99d443eb). Counting
+      // stock (dryRun) may still lean on it, so a Pi hiccup does not flap every
+      // offer's quantity — but nothing ships on it.
+      if (!verdict.ok || (verdict.degraded && !dryRun)) {
         rejected.push({ row, verdict });
         continue;
       }
@@ -266,6 +280,12 @@ async function claimUnclaimedForGame(
     shortfall.detail = coverage.summarizeMissing(
       rejected.map((r) => r.verdict.missing),
     );
+    const unread = rejected.filter((r) => r.verdict.degraded && r.verdict.ok).length;
+    if (unread) {
+      shortfall.detail =
+        (shortfall.detail ? shortfall.detail + "; " : "") +
+        unread + " account(s) could not be read live — held, not shipped on stale data";
+    }
     const claimed = rejected.filter((r) => r.verdict.claimed.length);
     if (claimed.length) {
       shortfall.claimed =
