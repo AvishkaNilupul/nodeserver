@@ -31,11 +31,10 @@ const coverage = require("./unclaimedCoverage");
 // account can never be handed out twice across platforms.
 const ELD_CLAIM_TAG = "eldorado";
 
-function eldoradoDeliveryCode(login, password) {
+// The one-time claim guide, factored out so a multi-account order can send it
+// ONCE instead of once per account (see eldoradoAccountsMessage).
+function eldoradoClaimGuide() {
   return (
-    "TWITCH DROP ACCOUNT\n\n" +
-    "Username: " + login + "\n" +
-    "Password: " + password + "\n\n" +
     "HOW TO CLAIM\n" +
     "1. Log in to this Twitch account and open " +
     "https://www.twitch.tv/drops/inventory\n" +
@@ -56,12 +55,47 @@ function eldoradoDeliveryCode(login, password) {
   );
 }
 
+function eldoradoDeliveryCode(login, password) {
+  return (
+    "TWITCH DROP ACCOUNT\n\n" +
+    "Username: " + login + "\n" +
+    "Password: " + password + "\n\n" +
+    eldoradoClaimGuide()
+  );
+}
+
+// Assemble the buyer-facing delivery message.
+//
+// A SINGLE-account order gets the full card above, byte-for-byte unchanged. A
+// MULTI-account order lists the credentials and then appends the ~1 KB claim
+// guide EXACTLY ONCE, instead of repeating the whole card per account. Repeating
+// it is what broke order 5e668ef3 on 2026-09-15: 15 accounts x the full guide was
+// a ~15 KB message, and Eldorado's TalkJS chat rejects a body that size with HTTP
+// 400 — so the send threw every 60-second tick and the paid order never delivered
+// until it was sent by hand. `creds` is [{login, password}]; only those two
+// fields are read, so callers pass their richer row objects directly.
+function eldoradoAccountsMessage(creds, qty) {
+  const list = Array.isArray(creds) ? creds : [];
+  if (!list.length) return "";
+  if (list.length === 1) {
+    return eldoradoDeliveryCode(list[0].login, list[0].password);
+  }
+  const total = list.length;
+  const blocks = list.map(
+    (c, i) =>
+      "=== ACCOUNT " + (i + 1) + " of " + total + " ===\n" +
+      "Username: " + c.login + "\n" +
+      "Password: " + c.password,
+  );
+  return blocks.join("\n\n") + "\n\n" + eldoradoClaimGuide();
+}
+
 // Atomically reserve up to `max` unsold accounts that each hold the whole
 // bundle. Mirrors the Digiseller claimer, including the cross-marketplace
 // exclusion: the buyer receives the whole account, so an account already
 // attached to any other live listing would ship that listing's drops too.
 // `claimTag` is which shop the reservation belongs to. It is a parameter and
-// not a constant because the Z2U fulfiller reuses this exact claim path: a
+// not a constant because other fulfillers reuse this exact claim path: a
 // second copy would drift, and a drifted copy of THIS function oversells an
 // account. The tag must be one of utils/marketClaimTags, or the drop archive
 // reads a merely-reserved account as really sold.
@@ -117,7 +151,7 @@ const ELD_SELLABLE_STATUSES = ["released", "skipped"];
 // Ceiling on the stock an unclaimed-backed offer may advertise. The count comes
 // from a dry-run claim, which resolves a credential per candidate, so it is
 // bounded rather than "however many the farm holds".
-const UNCLAIMED_STOCK_MAX = 25;
+const UNCLAIMED_STOCK_MAX = 80;
 
 // Most live inventory reads one call to claimUnclaimedForGame may make. Bounds
 // the Twitch fan-out of both delivery and the periodic stock sync.
@@ -272,7 +306,7 @@ async function claimUnclaimedForGame(
           status: "sold",
           soldAt: now,
           // Which shop actually took this unit. Defaulted rather than hardcoded
-          // so the Z2U fulfiller can reuse this claim path verbatim — a copy of
+          // so another fulfiller can reuse this claim path verbatim — a copy of
           // it would drift, and the drift would be an oversold account.
           market,
           note: market + " order " + (orderId || ""),
@@ -512,13 +546,7 @@ async function deliverOrder(order, { dryRun }) {
           (set ? "" : " (the listing's no-claim set is missing)"),
       };
     }
-    const blocks = picked.map((p) => eldoradoDeliveryCode(p.login, p.password));
-    const message =
-      qty > 1
-        ? blocks
-            .map((b, i) => "=== ACCOUNT " + (i + 1) + " of " + qty + " ===\n\n" + b)
-            .join("\n\n")
-        : blocks[0];
+    const message = eldoradoAccountsMessage(picked, qty);
     if (dryRun) {
       return {
         orderId,
@@ -590,13 +618,7 @@ async function deliverOrder(order, { dryRun }) {
             : ""),
       };
     }
-    const blocks = picked.map((p) => eldoradoDeliveryCode(p.login, p.password));
-    const message =
-      qty > 1
-        ? blocks
-            .map((b, i) => "=== ACCOUNT " + (i + 1) + " of " + qty + " ===\n\n" + b)
-            .join("\n\n")
-        : blocks[0];
+    const message = eldoradoAccountsMessage(picked, qty);
     if (dryRun) {
       return {
         orderId,
@@ -682,13 +704,7 @@ async function deliverOrder(order, { dryRun }) {
           " accounts still held the full set UNCLAIMED at delivery time",
       };
     }
-    const blocks = claimed.map((c) => eldoradoDeliveryCode(c.login, c.password));
-    const message =
-      qty > 1
-        ? blocks
-            .map((b, i) => "=== ACCOUNT " + (i + 1) + " of " + qty + " ===\n\n" + b)
-            .join("\n\n")
-        : blocks[0];
+    const message = eldoradoAccountsMessage(claimed, qty);
     await mp.eldoradoSendOrderMessage(order, message);
     await mp.eldoradoMarkDelivered(orderId);
     listing.units = (listing.units || []).concat(
@@ -723,7 +739,7 @@ async function deliverOrder(order, { dryRun }) {
 
   // Re-read each account's password at delivery time rather than trusting a
   // cached copy, so a rotated credential is never shipped stale.
-  const blocks = [];
+  const creds = [];
   for (const u of use) {
     const acct = await BotAccount.findById(u.accountId, {
       login: 1,
@@ -738,16 +754,9 @@ async function deliverOrder(order, { dryRun }) {
         error: "unit " + u.accountId + " has no readable credential",
       };
     }
-    blocks.push(eldoradoDeliveryCode(login, password));
+    creds.push({ login, password });
   }
-  const message =
-    qty > 1
-      ? blocks
-          .map(
-            (b, i) => "=== ACCOUNT " + (i + 1) + " of " + qty + " ===\n\n" + b,
-          )
-          .join("\n\n")
-      : blocks[0];
+  const message = eldoradoAccountsMessage(creds, qty);
 
   if (dryRun) {
     return {
@@ -1006,6 +1015,28 @@ async function alertUnfulfillable(order, why) {
   return true;
 }
 
+// PER-OFFER OFFLINE HOLD (operator away). Some offers must NOT auto-deliver for
+// a while: the operator is offline and wants the buyer TOLD so, then hands the
+// credential over by hand later. For an offer on this list the fulfiller posts
+// ONE canned message into the order chat and NEVER marks the order delivered —
+// no account is claimed, no rent-farm pool account is provisioned, no stock is
+// touched. The order stays Paid for manual fulfilment. Driven entirely by
+// settings (autoFarm.eldoradoOfflineHold = { message, offers: [offerId, …] })
+// so it can be turned off without a deploy, and it is a complete no-op for
+// every other offer and whenever the setting is empty. Dedupe is in-memory,
+// like alertedOrders: one reply per order per process. A restart may re-send
+// the reassurance, but eldoradoSendOrderMessage's idempotencyKey (order id +
+// message text) makes TalkJS dedupe it, so the buyer sees it at most once.
+function eldoradoOfflineHold(af) {
+  const cfg = (af && af.eldoradoOfflineHold) || null;
+  const offers = Array.isArray(cfg && cfg.offers) ? cfg.offers : [];
+  const message = String((cfg && cfg.message) || "").trim();
+  if (!offers.length || !message) return null;
+  return { offers: new Set(offers.map((o) => String(o))), message };
+}
+
+const offlineHoldSent = new Set();
+
 async function deliverPaidOrders() {
   const af = getAutoFarm() || {};
   if (!af.eldoradoAutoDeliver) return { skipped: "eldoradoAutoDeliver off" };
@@ -1013,6 +1044,7 @@ async function deliverPaidOrders() {
     return { skipped: "eldorado not configured" };
   }
   const dryRun = af.eldoradoDeliverDryRun !== false;
+  const offlineHold = eldoradoOfflineHold(af);
 
   let orders;
   try {
@@ -1044,6 +1076,44 @@ async function deliverPaidOrders() {
   const results = [];
   for (const order of orders) {
     try {
+      // PER-OFFER OFFLINE HOLD. Post the canned "away" reply once and leave the
+      // order Paid — never provision, claim, or mark delivered. This sits ABOVE
+      // the farm/bundle routing on purpose, so a rent-farm offer on the list
+      // cannot provision a pool account either. Scoped strictly to the offer
+      // ids in the setting; every other order falls through unchanged below.
+      if (offlineHold && offlineHold.offers.has(String(order.offerId || ""))) {
+        const orderId = String(order.id || "");
+        if (dryRun) {
+          results.push({
+            orderId,
+            dryRun: true,
+            wouldSend:
+              "offline-hold reply (" + offlineHold.message.length +
+              " chars), NOT delivered",
+          });
+          console.log(
+            "eldorado deliver (DRY RUN) " + orderId +
+              ": offline hold, would reply only",
+          );
+        } else if (offlineHoldSent.has(orderId)) {
+          results.push({ orderId, skipped: "offline hold: reply already sent" });
+        } else {
+          // Send first, record only on success: a throw is caught below and the
+          // reply is retried next tick rather than being silently swallowed.
+          await mp.eldoradoSendOrderMessage(order, offlineHold.message);
+          offlineHoldSent.add(orderId);
+          results.push({
+            orderId,
+            skipped: "offline hold: auto-reply sent, left undelivered for manual handling",
+          });
+          console.log(
+            "eldorado offline hold " + orderId +
+              ": auto-reply sent, NOT delivered",
+          );
+        }
+        continue;
+      }
+
       // Two products share this queue. A rent-farm order provisions a pool
       // account into the farm for a window; a bundle order hands over a farmed
       // account. deliverFarmOrder returns null when the order is not a rent-farm
@@ -1085,6 +1155,208 @@ async function deliverPaidOrders() {
     }
   }
   return { orders: orders.length, results };
+}
+
+// ---------------------------------------------------------------------------
+// Offer keep-alive
+// ---------------------------------------------------------------------------
+// Every Eldorado offer dies 21 days after it was last ACTIVATED (created or
+// resumed), at 18:00 that day. There is no renew endpoint, and expireDate sent
+// through the edit DTO is silently ignored (verified 2026-09-07). What DOES
+// restart the clock is a pause followed by a resume — verified live 2026-09-23
+// on offer d5283fa2, which went from 2026-09-27T18:00 to 2026-10-14T18:00 and
+// kept its id, price, quantity, title and order history. Re-creating offers
+// instead would spend a day of Eldorado's creation quota every three weeks,
+// mint new ids every listing row would have to follow, and throw each offer's
+// sales history away. 123 offers — all 87 rent-farm windows among them — were
+// due to expire together on 2026-09-27 when this was written.
+//
+// Only ACTIVE offers are renewed. A paused offer was paused by the owner or by
+// the stock sync, and a resume would put it back on sale; when the stock sync
+// resumes one of its own pauses, that resume restarts the clock anyway.
+// Kill switch: autoFarm.eldoradoKeepAlive = false.
+const KEEPALIVE_MS = 6 * 60 * 60 * 1000;
+const KEEPALIVE_WINDOW_MS = 5 * 24 * 60 * 60 * 1000;
+const KEEPALIVE_MAX_PER_PASS = 150;
+const KEEPALIVE_GAP_MS = 1500;
+
+function keepAliveSleep(ms) {
+  return new Promise((r) => setTimeout(r, ms));
+}
+
+// Eldorado sends expireDate with no zone ("2026-09-27T18:00:00"); read it as
+// UTC. A few hours either way is nothing against a five-day window.
+function eldoradoExpiryMs(expireDate) {
+  const s = String(expireDate || "").trim();
+  if (!s) return NaN;
+  return new Date(/(z|[+-]\d\d:?\d\d)$/i.test(s) ? s : s + "Z").getTime();
+}
+
+// The offers one pass renews: ACTIVE and expiring inside the window, soonest
+// first. Pure, so the rule is testable without Eldorado.
+function offersDueForRenewal(offers, now = Date.now(), windowMs = KEEPALIVE_WINDOW_MS) {
+  return (Array.isArray(offers) ? offers : [])
+    .map((o) => ({ o, at: eldoradoExpiryMs(o && o.expireDate) }))
+    .filter(
+      ({ o, at }) =>
+        !!o &&
+        !!o.id &&
+        o.offerState === "Active" &&
+        Number.isFinite(at) &&
+        at - now <= windowMs,
+    )
+    .sort((a, b) => a.at - b.at)
+    .map(({ o }) => o);
+}
+
+async function listOwnOffers() {
+  const out = [];
+  for (let page = 1; page <= 20; page++) {
+    const r = await mp.eldoradoMyListings(page, 50);
+    const results = (r && r.results) || [];
+    for (const x of results) {
+      const o = x && (x.offer || x);
+      if (o && o.id) out.push(o);
+    }
+    if (!results.length || page >= ((r && r.totalPages) || 1)) break;
+  }
+  return out;
+}
+
+// Pause + resume one offer and read it back. `ok` only when it is Active again
+// with a later expiry. Skipped when it is no longer Active, or when the stock
+// sync paused it on purpose while this ran (its row turned autoPaused) — that
+// pause means there is nothing to sell, so it stays.
+async function renewOffer(offerId) {
+  const before = await mp.eldoradoOffer(offerId);
+  if (!before || before.offerState !== "Active") {
+    return { offerId, skipped: "not active" };
+  }
+  const autoPausedNow = async () => {
+    const row = await MarketplaceListing.findOne(
+      { marketplace: "eldorado", externalId: String(offerId) },
+      { autoPaused: 1 },
+    )
+      .lean()
+      .catch(() => null);
+    return !!(row && row.autoPaused);
+  };
+  const flaggedBefore = await autoPausedNow();
+  let pauseError = "";
+  try {
+    await mp.eldoradoDelist(offerId);
+  } catch (e) {
+    pauseError = e.message;
+  }
+  let after = null;
+  for (let i = 0; i < 3; i++) {
+    if (!flaggedBefore && (await autoPausedNow())) {
+      return {
+        offerId,
+        title: before.offerTitle,
+        skipped: "paused by the stock sync meanwhile",
+      };
+    }
+    // A no-op on an offer that is still Active (e.g. the pause failed).
+    await mp.eldoradoRelist(offerId).catch(() => {});
+    after = await mp.eldoradoOffer(offerId).catch(() => null);
+    if (after && after.offerState === "Active") break;
+    await keepAliveSleep(2000);
+  }
+  return {
+    offerId,
+    title: before.offerTitle,
+    from: before.expireDate,
+    to: after ? after.expireDate : null,
+    state: after ? after.offerState : "unknown",
+    error: pauseError,
+    ok:
+      !!after &&
+      after.offerState === "Active" &&
+      eldoradoExpiryMs(after.expireDate) > eldoradoExpiryMs(before.expireDate),
+  };
+}
+
+async function renewExpiringOffers({ dryRun = false, now = Date.now() } = {}) {
+  const offers = await listOwnOffers();
+  const due = offersDueForRenewal(offers, now).slice(0, KEEPALIVE_MAX_PER_PASS);
+  const out = {
+    scanned: offers.length,
+    due: due.length,
+    renewed: [],
+    skipped: [],
+    failed: [],
+  };
+  if (dryRun) {
+    out.wouldRenew = due.map((o) => ({
+      offerId: o.id,
+      title: o.offerTitle,
+      expire: o.expireDate,
+    }));
+    return out;
+  }
+  for (const o of due) {
+    try {
+      const r = await renewOffer(o.id);
+      if (r.skipped) out.skipped.push(r);
+      else if (r.ok) out.renewed.push(r);
+      else out.failed.push(r);
+    } catch (e) {
+      out.failed.push({ offerId: o.id, title: o.offerTitle, error: e.message });
+    }
+    await keepAliveSleep(KEEPALIVE_GAP_MS);
+  }
+  return out;
+}
+
+// One log line, one SystemEvent and — only when something failed — one
+// Telegram per pass. An offer left PAUSED is the urgent case: it is off sale
+// until someone resumes it by hand.
+async function reportKeepAlive(r) {
+  console.log(
+    "eldorado keep-alive: renewed " + r.renewed.length + " of " + r.due +
+      " expiring offer(s)" +
+      (r.skipped.length ? ", skipped " + r.skipped.length : "") +
+      (r.failed.length ? ", FAILED " + r.failed.length : ""),
+  );
+  for (const f of r.failed) {
+    console.error(
+      "eldorado keep-alive failed:", f.offerId, f.title || "",
+      "state=" + (f.state || "?"), f.error || "",
+    );
+  }
+  try {
+    await require("./systemLog").logEvent({
+      category: "listings",
+      action: "eldorado_keepalive",
+      actor: "system",
+      severity: r.failed.length ? "warn" : "info",
+      count: r.renewed.length,
+      detail:
+        "renewed " + r.renewed.length + "/" + r.due + " Eldorado offer(s) near expiry" +
+        (r.skipped.length ? "; skipped " + r.skipped.length : "") +
+        (r.failed.length ? "; failed " + r.failed.length : ""),
+      meta: {
+        failed: r.failed.slice(0, 20),
+        skipped: r.skipped.slice(0, 20).map((s) => ({ offerId: s.offerId, why: s.skipped })),
+      },
+    });
+  } catch {
+    /* diagnostic only */
+  }
+  if (!r.failed.length) return;
+  const stuck = r.failed.filter((f) => f.state && f.state !== "Active");
+  const lines = r.failed
+    .slice(0, 10)
+    .map((f) => "• " + (f.title || f.offerId) + " — " + (f.state || "?"));
+  await require("./telegram")
+    .sendTelegram(
+      (stuck.length
+        ? "⚠️ Eldorado keep-alive left " + stuck.length + " offer(s) PAUSED — resume them on Eldorado:\n"
+        : "Eldorado keep-alive could not renew " + r.failed.length +
+          " offer(s) (still live, expiry unchanged):\n") + lines.join("\n"),
+    )
+    .catch(() => {});
 }
 
 // Delivery is only worth polling often — a buyer waiting on credentials is the
@@ -1133,12 +1405,32 @@ function start() {
   };
   const t2 = setTimeout(stockTick, 90 * 1000);
   if (t2.unref) t2.unref();
+
+  // Renews offers near their expiry; see renewExpiringOffers. Independent of
+  // eldoradoAutoDeliver — rent-farm windows and hand-made offers expire too.
+  const keepAliveTick = async () => {
+    try {
+      const af = getAutoFarm() || {};
+      if (af.eldoradoKeepAlive !== false && (mp.keyStatus().eldorado || {}).configured) {
+        const r = await renewExpiringOffers();
+        if (r.due) await reportKeepAlive(r);
+      }
+    } catch (e) {
+      console.error("eldorado keep-alive error:", e.message);
+    }
+    const t3 = setTimeout(keepAliveTick, KEEPALIVE_MS);
+    if (t3.unref) t3.unref();
+  };
+  const t3 = setTimeout(keepAliveTick, 5 * 60 * 1000);
+  if (t3.unref) t3.unref();
 }
 
 module.exports = {
   ELD_CLAIM_TAG,
   start,
   eldoradoDeliveryCode,
+  eldoradoClaimGuide,
+  eldoradoAccountsMessage,
   claimAccountsForSet,
   claimUnclaimedForGame,
   unclaimedGameFilter,
@@ -1148,6 +1440,11 @@ module.exports = {
   deliverOrder,
   deliverPaidOrders,
   syncBundleStock,
+  renewExpiringOffers,
+  renewOffer,
+  reportKeepAlive,
+  offersDueForRenewal,
+  eldoradoExpiryMs,
   // Exported for the S3 regression: the predicate is what decides whether a
   // PAID order parked by a kill switch is ever heard about, and a reworded
   // reason falling out of it would be indistinguishable from no problem.
