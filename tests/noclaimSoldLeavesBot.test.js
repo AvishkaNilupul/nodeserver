@@ -706,6 +706,7 @@ test("bot accounts route: a marketplace sale or a live listing marks the account
     [require.resolve("../models/UnclaimedAccount"), Unclaimed],
     [require.resolve("../models/AvailableAccount"), Pool],
     [require.resolve("../utils/botHosts"), fleet.hosts],
+    [require.resolve("../utils/systemLog"), { logEvent: () => {}, actorFromReq: () => "test" }],
   ]);
   const routerPath = require.resolve("../routes/noclaimFarmRoutes");
   const origLoad = Module._load;

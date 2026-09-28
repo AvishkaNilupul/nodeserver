@@ -533,6 +533,16 @@ router.get(
         listed: !!listedMap.get(u.ClientSecret),
         notForSale: notForSale.get(u.ClientSecret) || "",
       }));
+      // A record of who opened these credentials (owner, 2026-09-28): the
+      // drawer holds up to 70 passwords and tokens, and nothing said who looked.
+      logEvent({
+        category: "noclaim",
+        action: "credentials_viewed",
+        actor: actorFromReq(req),
+        subject: containerFor(id),
+        count: accounts.length,
+        detail: "opened the logins of no-claim bot " + id + " (" + accounts.length + " account(s))",
+      });
       res.json({
         success: true,
         game: (cfg.FavouriteGames || [])[0] || "",
