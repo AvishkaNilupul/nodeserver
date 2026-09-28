@@ -110,7 +110,7 @@ async function offerForListing(listing) {
 // so a buyer who paid for an offer promising {token}/{email} got the Twitch-
 // drops boilerplate instead, while the order was still confirmed delivered and
 // the ledger row stamped sold: an unrecoverable shortfall (finding F2a).
-// Eldorado (:397), Z2U (:579), PlayerAuctions (:325) and Gameflip (:419) all
+// Eldorado (:397), PlayerAuctions (:325) and Gameflip (:419) all
 // render through suppliedStock.deliveryText; this now does the same, and every
 // other stock source keeps g2gDeliveryCode byte for byte.
 //
@@ -1065,12 +1065,12 @@ async function alertSentAwaitingConfirm(order, why) {
 // How many units this row could ACTUALLY ship right now. Returns null for
 // "cannot tell", which callers must treat as "change nothing".
 //
-// This mirrors utils/z2uFulfiller.realStockFor rather than importing it, and
+// This keeps its own realStockFor rather than sharing one, and
 // that is a deliberate exception to the no-second-copy rule: the rule exists
 // because a drifted copy of a CLAIM function oversells an account. This one
 // only counts — every path through it is read-only or a dry run — so a local
-// version cannot hand anything out twice, and importing Z2U's would make G2G's
-// stock depend on Z2U's claim tag.
+// version cannot hand anything out twice, and sharing one would make G2G's
+// stock depend on another market's claim tag.
 async function realStockFor(row, listedElsewhere) {
   if (!row) return null;
   // Account listings (contract B5) come first: an offer-backed row also carries
