@@ -276,6 +276,177 @@ router.get("/api/unclaimed-auto/listings", requireSuperadmin, async (req, res) =
   }
 });
 
+// One line per no-claim game (owner, 2026-09-28): what is farming, what holds
+// stock, where it is on sale, what sold (and for how much), what sits idle, and
+// when the running wave ends. DB-only — the stock numbers come from the
+// holdings snapshot (utils/noclaimHoldings, the one the shop listings use), so
+// nothing here reads Twitch or a bot host.
+// A cold build reads the whole holdings snapshot (~20 s on prod), so the
+// answer is cached: the page gets the last one at once (with its age) and a
+// fresh one is built behind it once it is GS_TTL_MS old. ?refresh=1 waits for
+// a fresh build.
+const GS_TTL_MS = 10 * 60 * 1000;
+const gsCache = { value: null, at: 0, pending: null };
+function buildGamesSummary() {
+  if (!gsCache.pending) {
+    gsCache.pending = gamesSummary()
+      .then((v) => {
+        gsCache.value = v;
+        gsCache.at = Date.now();
+        return v;
+      })
+      .finally(() => {
+        gsCache.pending = null;
+      });
+  }
+  return gsCache.pending;
+}
+router.get("/api/unclaimed-auto/games-summary", requireSuperadmin, async (req, res) => {
+  try {
+    const stale = !gsCache.value || Date.now() - gsCache.at > GS_TTL_MS;
+    if (!gsCache.value || req.query.refresh === "1") await buildGamesSummary();
+    else if (stale) buildGamesSummary().catch((e) => console.error("games summary refresh failed:", e.message));
+    res.json({ success: true, cachedAt: new Date(gsCache.at), ...gsCache.value });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+async function gamesSummary(now = new Date()) {
+  const NoclaimHolding = require("../models/NoclaimHolding");
+  const TwitchCampaign = require("../models/TwitchCampaign");
+  const holdingsMod = require("../utils/noclaimHoldings");
+  const games = settings.getAutoFarm().noClaimGames || [];
+  const keyOf = (label) => {
+    const n = settings.normGameName(label);
+    return games.map((g) => settings.normGameName(g)).find((g) => g && n.includes(g)) || "";
+  };
+  const DAY = 864e5;
+  const since30 = new Date(now.getTime() - 30 * DAY);
+  const since7 = new Date(now.getTime() - 7 * DAY);
+  const [holdings, picker, ledgers, shopRows, campaigns] = await Promise.all([
+    NoclaimHolding.find({ inConfig: true }, { game: 1 }).lean(),
+    holdingsMod.pickerGames().catch(() => []),
+    UnclaimedAccount.find(
+      { $or: [{ status: { $in: ["listed", "manual"] } }, { status: "sold", soldAt: { $gte: since30 } }] },
+      { game: 1, status: 1, market: 1, soldAt: 1, soldPriceUsd: 1 },
+    ).lean(),
+    MarketplaceListing.find(
+      { status: "active", $or: [{ noclaimStock: true }, { origin: "unclaimed" }] },
+      { marketplace: 1, set: 1, accountLogin: 1, noclaimStock: 1, lotSize: 1, qtyTarget: 1, autoPaused: 1, "units.deliveredAt": 1 },
+    ).lean(),
+    TwitchCampaign.find(
+      { active: true, status: "ACTIVE", endAt: { $gt: now } },
+      { game: 1, endAt: 1, name: 1 },
+    ).lean(),
+  ]);
+  const setIds = [...new Set(shopRows.map((r) => String(r.set || "")).filter(Boolean))];
+  const sets = setIds.length ? await DropSet.find({ _id: { $in: setIds } }, { coverGame: 1, items: 1 }).lean() : [];
+  const setGame = new Map(
+    sets.map((s) => [String(s._id), s.coverGame || ((s.items || [])[0] || {}).game || ""]),
+  );
+
+  const out = new Map();
+  const row = (key) => {
+    if (!out.has(key)) {
+      out.set(key, {
+        game: key,
+        farming: 0,
+        holdingStock: 0,
+        free: 0,
+        freshFree: 0,
+        autoListed: { gameflipLive: 0, gameflipWaiting: 0, other: 0 },
+        onShopListings: 0,
+        shopOffers: [],
+        sold7: { n: 0, usd: 0 },
+        sold30: { n: 0, usd: 0 },
+        waveEndsAt: null,
+        waveName: "",
+      });
+    }
+    return out.get(key);
+  };
+  for (const g of games) row(settings.normGameName(g));
+  for (const h of holdings) {
+    const k = keyOf(h.game);
+    if (k) row(k).farming++;
+  }
+  for (const p of picker) {
+    const k = keyOf(p.game);
+    if (!k) continue;
+    const r = row(k);
+    r.holdingStock += p.accounts || 0;
+    r.free += p.free || 0;
+    r.freshFree += p.fresh || 0;
+  }
+  for (const l of ledgers) {
+    const k = keyOf(l.game);
+    if (!k) continue;
+    const r = row(k);
+    if (l.status === "manual") r.onShopListings++;
+    else if (l.status === "listed" && l.market !== "gameflip") r.autoListed.other++;
+    else if (l.status === "sold") {
+      const usd = Math.max(0, Number(l.soldPriceUsd) || 0);
+      r.sold30.n++;
+      r.sold30.usd += usd;
+      if (l.soldAt && new Date(l.soldAt) >= since7) {
+        r.sold7.n++;
+        r.sold7.usd += usd;
+      }
+    }
+  }
+  const liveGf = new Set();
+  for (const s of shopRows) {
+    const k = keyOf(setGame.get(String(s.set || "")) || "");
+    if (!k) continue;
+    const r = row(k);
+    if (s.noclaimStock) {
+      r.shopOffers.push({
+        market: s.marketplace,
+        paused: !!s.autoPaused,
+        stock: Number(s.qtyTarget) || 0,
+        delivered7: (s.units || []).filter((u) => u.deliveredAt && new Date(u.deliveredAt) >= since7).length,
+      });
+    } else if (s.marketplace === "gameflip" && !(Number(s.lotSize) > 0)) {
+      r.autoListed.gameflipLive++;
+      liveGf.add(String(s.accountLogin || "").toLowerCase());
+    }
+  }
+  for (const l of ledgers) {
+    if (l.status !== "listed" || l.market !== "gameflip") continue;
+    const k = keyOf(l.game);
+    if (k) row(k).autoListed.gameflipWaiting++;
+  }
+  for (const r of out.values()) {
+    r.autoListed.gameflipWaiting = Math.max(0, r.autoListed.gameflipWaiting - r.autoListed.gameflipLive);
+    r.sold7.usd = Math.round(r.sold7.usd * 100) / 100;
+    r.sold30.usd = Math.round(r.sold30.usd * 100) / 100;
+  }
+  for (const c of campaigns) {
+    const k = keyOf(c.game);
+    if (!k) continue;
+    const r = row(k);
+    if (!r.waveEndsAt || new Date(c.endAt) < new Date(r.waveEndsAt)) {
+      r.waveEndsAt = c.endAt;
+      r.waveName = c.name || "";
+    }
+  }
+  let snapshot = null;
+  try {
+    snapshot = await holdingsMod.summary();
+  } catch {
+    snapshot = null;
+  }
+  return {
+    at: now,
+    games: [...out.values()],
+    snapshot: snapshot
+      ? { accounts: snapshot.accounts, fresh: snapshot.fresh, stale: snapshot.stale, newestReadAt: snapshot.newestReadAt }
+      : null,
+  };
+}
+router.gamesSummary = gamesSummary;
+
 // Report-only listing drift: which live auto-lister bundles now advertise items
 // their accounts no longer hold (relist), or could be sold as a fuller bundle
 // (rebundle). DB-only — it reads the ledger snapshot the expiry pass refreshes

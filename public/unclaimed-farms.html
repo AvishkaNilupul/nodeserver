@@ -206,6 +206,22 @@
       <div class="stat"><b id="stRemoved">–</b><span>Manual sold</span></div>
     </div>
 
+    <div class="panel" id="gamesPanel">
+      <div class="hd">
+        <b>Games at a glance</b>
+        <span class="muted" id="gsNote" style="margin-left:10px;"></span>
+        <button class="btn ghost sm" id="gsBtn" style="margin-left:auto;">Refresh</button>
+      </div>
+      <div class="bd">
+        <div style="overflow-x:auto;">
+          <table>
+            <thead><tr><th>Game</th><th title="accounts in no-claim bots for this game">Farming</th><th title="accounts holding sellable (100%, unclaimed) drops of this game, from the stock snapshot">Holding stock</th><th title="holding stock and on no listing, offer or sale — what could still be sold">Free (idle)</th><th>Auto-listed</th><th>Your shop offers</th><th>Sold 7d</th><th>Sold 30d</th><th title="the running drop campaign that ends first">Wave ends</th></tr></thead>
+            <tbody id="gsBody"><tr><td colspan="9" class="muted" style="padding:14px;">loading…</td></tr></tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
     <div class="panel" id="bundlesPanel">
       <div class="hd">
         <b>Bundles</b>
@@ -488,7 +504,7 @@ function switchSec(sec){
     var el=$('sec-'+s); if(!el) return;
     el.classList.toggle('hidden', s!==sec);
   });
-  if(sec==='autolist'){ loadState(); loadBundles(); loadAccounts(); loadListings(); loadDrift(); }
+  if(sec==='autolist'){ loadState(); loadGamesSummary(); loadBundles(); loadAccounts(); loadListings(); loadDrift(); }
   if(sec==='noclaim' && !secLoaded.noclaim){ secLoaded.noclaim=true; $('sec-noclaim').innerHTML='<iframe src="/noclaim-farm.html?embed=1" title="No-claim farm"></iframe>'; }
   if(sec==='archive'){ secLoaded.archive=true; switchArcSub(arcSub); }
 }
@@ -645,6 +661,38 @@ var pricingCache=null, bundlesCache=[], repriceLast=null;
 
 function bundleToast(msg){ var el=$('bdMsg'); if(el) el.textContent=msg||''; }
 function money(n){ n=Number(n); return isFinite(n)?'$'+n.toFixed(2):'–'; }
+
+// ---- Games at a glance -----------------------------------------------------
+function untilText(at){
+  if(!at) return '—';
+  var ms=new Date(at).getTime()-Date.now();
+  if(!isFinite(ms)) return '—';
+  if(ms<=0) return 'ended';
+  var h=Math.round(ms/3600000);
+  return h<48?('in '+h+' h'):('in '+Math.round(h/24)+' d');
+}
+async function loadGamesSummary(refresh){
+  var body=$('gsBody'); if(!body) return;
+  if(refresh===true) $('gsNote').textContent='refreshing… (a full rebuild can take ~30 s)';
+  try{
+    var j=await api('/api/unclaimed-auto/games-summary'+(refresh===true?'?refresh=1':''));
+    var rows=(j.games||[]).filter(function(g){ return g.farming||g.holdingStock||g.sold30.n||g.autoListed.gameflipLive||g.shopOffers.length; });
+    body.innerHTML=rows.length?rows.map(function(g){
+      var al=g.autoListed||{};
+      var auto='Gameflip '+(al.gameflipLive||0)+' live'+(al.gameflipWaiting?' + '+al.gameflipWaiting+' queued':'')+(al.other?' · other '+al.other:'');
+      var shop=(g.shopOffers||[]).map(function(o){ return esc(o.market)+(o.paused?' (paused)':'')+' — stock '+o.stock+', '+o.delivered7+' sold 7d'; }).join('<br>')||'—';
+      if(g.onShopListings) shop+='<div class="muted" style="font-size:12px;">'+g.onShopListings+' account(s) committed</div>';
+      return '<tr><td><b>'+esc(g.game)+'</b></td><td>'+g.farming+'</td><td>'+g.holdingStock+'</td>'+
+        '<td>'+g.free+(g.freshFree!==g.free?' <span class="muted" title="read recently enough to sell now">('+g.freshFree+' fresh)</span>':'')+'</td>'+
+        '<td>'+auto+'</td><td style="font-size:12px;">'+shop+'</td>'+
+        '<td>'+g.sold7.n+' <span class="muted">'+money(g.sold7.usd)+'</span></td>'+
+        '<td>'+g.sold30.n+' <span class="muted">'+money(g.sold30.usd)+'</span></td>'+
+        '<td title="'+esc(g.waveName||'')+'">'+untilText(g.waveEndsAt)+'</td></tr>';
+    }).join(''):'<tr><td colspan="9" class="muted" style="padding:14px;">No no-claim game has accounts or sales yet.</td></tr>';
+    var sn=j.snapshot;
+    $('gsNote').textContent=(j.cachedAt?'as of '+new Date(j.cachedAt).toLocaleTimeString()+' · ':'')+(sn?('stock snapshot: '+sn.fresh+' of '+sn.accounts+' accounts read recently'):'');
+  }catch(e){ body.innerHTML='<tr><td colspan="9" class="muted" style="padding:14px;">'+esc(e.message)+'</td></tr>'; }
+}
 function pctTxt(n){ n=Number(n); if(!isFinite(n)) return ''; return (n>0?'+':'')+Math.round(n)+'%'; }
 function driftCell(n){
   n=Number(n);
@@ -1317,6 +1365,7 @@ $('arcItemBg').addEventListener('click',function(e){ if(e.target===this) this.cl
 // Bundles panel: refresh, reprice modal, pricing form.
 $('bdRefreshBtn').addEventListener('click',function(){ bundleToast(''); loadBundles(true); });
 $('driftBtn').addEventListener('click',loadDrift);
+$('gsBtn').addEventListener('click',function(){ loadGamesSummary(true); });
 async function applyRebundleFixes(){
   var btn=$('driftFixBtn'); var old=btn.textContent; btn.disabled=true; btn.textContent='Planning…';
   try{
