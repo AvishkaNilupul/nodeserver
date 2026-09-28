@@ -169,3 +169,69 @@ test("driftVerdict: no-stock and unknown", () => {
   assert.equal(driftVerdict([{ name: "x" }], []).verdict, "no-stock");
   assert.equal(driftVerdict([], [hd("x", "c")]).verdict, "unknown");
 });
+
+// --- 5. per-copy scope (owner, 2026-09-28) ------------------------------------
+// Rainbow Six gives three "Esports Pack 26 stage 2" per wave, one wave every two
+// to three days, and each wave expires a few days after it ends. Folding every
+// copy of a name into its first campaign read each NEW wave as "more of the same
+// event": 9× titles were raised to 12× and then over-advertised once the oldest
+// wave expired.
+
+const copies = (name, campaign, n) => Array.from({ length: n }, () => hd(name, campaign));
+const r6Held = (waves) => waves.flatMap((w) => copies("Esports Pack", "R6S S2 2026 " + w, 3));
+
+test("rebundleWithinScope: a new wave of a recurring drop is NOT the same event (9× stays 9×)", () => {
+  assert.equal(rebundleWithinScope([{ name: "Esports Pack", qty: 9 }], r6Held([8, 9, 10, 11])), null);
+});
+
+test("rebundleWithinScope: a recurring drop only counts inside the events other items name", () => {
+  const advertised = [{ name: "Esports Pack", qty: 9 }, { name: "Frost Uniform" }, { name: "Clanker", qty: 2 }];
+  const held = r6Held([8, 9, 10, 11]).concat(
+    hd("Frost Uniform", "Wasteland"),
+    copies("Clanker", "Wasteland", 2),
+  );
+  assert.equal(rebundleWithinScope(advertised, held), null, "the packs sit outside Wasteland");
+});
+
+test("rebundleWithinScope: an item in both days anchors nothing; Day 1 still completes, without Day 2's copy", () => {
+  const advertised = [{ name: "D1a" }, { name: "Loot Box" }];
+  const held = [hd("D1a", "Day1"), hd("D1b", "Day1"), hd("Loot Box", "Day1"), hd("Loot Box", "Day2"), hd("D2a", "Day2")];
+  const t = rebundleWithinScope(advertised, held);
+  assert.ok(t);
+  const byName = Object.fromEntries(t.map((x) => [x.name, x.qty]));
+  assert.deepEqual(byName, { D1a: 1, D1b: 1, "Loot Box": 1 });
+});
+
+test("rebundleWithinScope: more copies from the SAME campaign is still a rebundle (1× -> 3×)", () => {
+  const t = rebundleWithinScope([{ name: "Esports Pack", qty: 1 }], copies("Esports Pack", "R6S S2 2026 11", 3));
+  assert.ok(t);
+  assert.equal(t[0].qty, 3);
+});
+
+test("rebundleWithinScope: drops with no campaign give no scope evidence", () => {
+  assert.equal(rebundleWithinScope([{ name: "A" }], [{ name: "A" }, { name: "B" }]), null);
+});
+
+test("intersectCopies: what EVERY unit holds, per name and campaign", () => {
+  const { intersectCopies } = require("../utils/unclaimedListingAudit");
+  const a = r6Held([8, 9, 10, 11]).concat(hd("Frost", "W"));
+  const b = r6Held([9, 10, 11]);
+  const got = intersectCopies([a, b]).map((x) => x.campaign + ":" + x.name + "×" + x.qty).sort();
+  assert.deepEqual(got, [
+    "R6S S2 2026 10:Esports Pack×3",
+    "R6S S2 2026 11:Esports Pack×3",
+    "R6S S2 2026 9:Esports Pack×3",
+  ]);
+  assert.deepEqual(intersectCopies([]), []);
+});
+
+test("setItemsToRequired: a set item's copies survive (9× is not read as 1×)", () => {
+  const { setItemsToRequired } = require("../utils/unclaimedListingAudit");
+  assert.deepEqual(
+    setItemsToRequired({ items: [{ name: "Esports Pack", qty: 9 }, { name: "Frost" }, { name: " " }] }),
+    [
+      { name: "Esports Pack", qty: 9 },
+      { name: "Frost", qty: 1 },
+    ],
+  );
+});

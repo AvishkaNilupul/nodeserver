@@ -64,6 +64,9 @@ const { recordPoolUsage } = require("./poolUsageLog");
 // The per-(host, file) lock noclaimFleet.topUpBot takes on a bot config: an edit
 // here and a top-up there on the same config are serialized, never lost.
 const { withFileLock } = require("./fileLock");
+// Item-name counting shared with the delivery gate and the listing audit, so a
+// unit's "does it still hold its listing" check reads names exactly like they do.
+const coverage = require("./unclaimedCoverage");
 const AvailableAccount = require("../models/AvailableAccount");
 const BotAccount = require("../models/BotAccount");
 const DropSet = require("../models/DropSet");
@@ -878,6 +881,56 @@ function buyerClaimedListed(ledger, invData, sellable) {
     if (inCampaign || asReward) items.push(k);
   }
   return { claimed: items.length > 0, items };
+}
+
+// ---------------------------------------------------------------------------
+// Does a unit still hold what its listing promises? (owner, 2026-09-28)
+// ---------------------------------------------------------------------------
+// An event's wave expires a few days after its campaign ends and its drops
+// leave every account of that cohort at once; the listing text does not
+// change. Rainbow Six waves ("R6S S2 2026 N") each give three Esports Packs, so
+// on 2026-09-28 five live Gameflip listings said 12× or 11× while the account
+// on sale held 9×. The check pass only acted on a completely EMPTY account, so
+// a unit that had lost part of its bundle stayed on sale under the full title.
+
+// What the buyer of ONE unit is promised, as Map<normalised name, copies>: the
+// row's own declared list when it has one (a rebundled title), else the set's
+// items with their copies. A waiting Gameflip unit is promised the set — the
+// successor is published from it.
+function unitPromise(set, row) {
+  const declared =
+    row && Array.isArray(row.requiredDrops) && row.requiredDrops.length ? row.requiredDrops : null;
+  return coverage.requiredCounts(declared || (set && set.items) || []);
+}
+
+// Copies of each item held (one inventory entry per copy; a drop rebuilt from a
+// set carries its qty).
+function heldByName(drops) {
+  const out = new Map();
+  for (const d of drops || []) {
+    const k = coverage.normName(d && d.name);
+    if (!k) continue;
+    out.set(k, (out.get(k) || 0) + dropQty(d));
+  }
+  return out;
+}
+
+// [{ name, need, have }] the unit is short of; [] when it holds everything. A
+// set with no items promises nothing checkable, so it is never a shortfall.
+function unitShortfall(set, row, drops) {
+  const promise = unitPromise(set, row);
+  if (!promise.size) return [];
+  return coverage.shortOf(heldByName(drops), promise);
+}
+
+function shortSummary(missing) {
+  const list = missing || [];
+  return (
+    list
+      .slice(0, 4)
+      .map((m) => m.name + " " + m.have + "/" + m.need)
+      .join(", ") + (list.length > 4 ? " +" + (list.length - 4) + " more" : "")
+  );
 }
 
 // Which active-listing logins would block a fresh listing (one account, one
@@ -2284,11 +2337,18 @@ async function publishGameflipSuccessor(setId, excludeLogin, opts = {}) {
   // Never publish a unit the operator marked as sold-by-hand — the account
   // keeps farming but its credentials must not be handed to another buyer.
   const marked = await manualSoldOwnerKeys(waitingList);
-  const list = filterManualSoldLedgers(waitingList, marked);
+  // Units whose last inventory read failed go to the back (stable, so FIFO
+  // otherwise): the live read below is capped per call, and a few dead tokens
+  // at the head of the queue must not stop the chain for good.
+  const list = filterManualSoldLedgers(waitingList, marked).sort(
+    (a, b) => Number(/^check failed/.test(a.note || "")) - Number(/^check failed/.test(b.note || "")),
+  );
   if (!list.length) return { published: false, reason: "no waiting unit" };
   const drops = dropsFromSet(set);
   const game = set.coverGame || (drops[0] && drops[0].game) || "";
   const cls = await classificationForSet(set);
+  const skipped = { short: 0, sold: 0, unreadable: 0 };
+  let reads = 0;
   for (const waiting of list) {
     // The list was read before the lock was taken; re-read this unit so a
     // ledger another worker just sold/removed can never become the new head.
@@ -2296,11 +2356,37 @@ async function publishGameflipSuccessor(setId, excludeLogin, opts = {}) {
       _id: waiting._id,
       status: "listed",
     })
-      .select("_id")
       .lean()
       .catch(() => null);
     if (!still) continue;
     if (filterManualSoldLedgers([waiting], await manualSoldOwnerKeys([waiting])).length === 0) {
+      continue;
+    }
+    // Only a unit that holds the WHOLE set goes on sale under its title (owner,
+    // 2026-09-28): every unit of a cohort loses an expired wave at once, and a
+    // successor used to be published straight from the set with no look at the
+    // account. Cheap filters first — a pending strike, or a last read that
+    // already shows it short. A unit on a SOLD row of this set is a sale the
+    // check pass has not booked yet (the scan's chain repair runs before it),
+    // never stock. Then ONE live read right before its credentials go on sale;
+    // a read that fails skips the unit. Reads are capped per call, so a chain
+    // whose whole cohort lost a wave costs a few reads, not one per unit.
+    if (
+      Number(still.emptyReads) > 0 ||
+      ((still.drops || []).length && unitShortfall(set, null, still.drops).length)
+    ) {
+      skipped.short++;
+      continue;
+    }
+    if (await soldRowCarries(setId, still)) {
+      skipped.sold++;
+      continue;
+    }
+    if (reads >= SUCCESSOR_MAX_READS) break;
+    reads++;
+    const check = await verifyUnitHolds(still, set);
+    if (check.state !== "covers") {
+      skipped[check.state === "short" ? "short" : "unreadable"]++;
       continue;
     }
     const cred = await credentialForLedger(waiting);
@@ -2361,7 +2447,84 @@ async function publishGameflipSuccessor(setId, excludeLogin, opts = {}) {
       );
     }
   }
-  return { published: false, reason: "no publishable waiting unit" };
+  return { published: false, reason: "no publishable waiting unit", skipped };
+}
+
+// Live reads one publishGameflipSuccessor call may spend proving a waiting unit
+// still holds its set.
+const SUCCESSOR_MAX_READS = 3;
+
+// A waiting unit whose login is on a SOLD row of this set published after it
+// was listed: its buyer has it and the check pass has not booked the sale yet.
+// (A sold row from an earlier listing of a recycled account predates listedAt.)
+async function soldRowCarries(setId, ledger) {
+  const login = String((ledger && ledger.login) || "").trim();
+  if (!login) return false;
+  const esc = login.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const rows = await MarketplaceListing.find({
+    origin: ORIGIN,
+    set: setId,
+    marketplace: "gameflip",
+    status: "sold",
+    accountLogin: new RegExp("^" + esc + "$", "i"),
+  })
+    .lean()
+    .catch(() => []);
+  const since = ledger.listedAt ? new Date(ledger.listedAt).getTime() : 0;
+  return rows.some((r) => !r.createdAt || new Date(r.createdAt).getTime() >= since);
+}
+
+// One live read of a waiting unit against its set. "covers" refreshes its
+// snapshot and clears any strike; "short" records a strike (the check pass
+// confirms it and takes the unit off); "unreadable" changes nothing.
+async function verifyUnitHolds(ledger, set) {
+  const failed = async (why) => {
+    await UnclaimedAccount.updateOne(
+      { _id: ledger._id, status: "listed" },
+      { $set: { lastCheckedAt: new Date(), note: "check failed: " + why } },
+    ).catch(() => {});
+    return { state: "unreadable" };
+  };
+  const cand = await candForLedger(ledger).catch(() => null);
+  if (!cand) return failed("no pool credentials");
+  let inv;
+  try {
+    inv = await inventoryForCandidate(cand);
+  } catch (e) {
+    return failed(String((e && e.message) || e).slice(0, 200));
+  }
+  const drops = pickListingGroup(ledger.game, (inv && inv.sellable) || []).drops;
+  const snapshot = drops.map((d) => ({
+    name: d.name,
+    game: d.game || ledger.game,
+    campaign: d.campaign || "",
+    itemKey: d.itemKey || d.name,
+  }));
+  const missing = unitShortfall(set, null, drops);
+  if (!missing.length) {
+    await UnclaimedAccount.updateOne(
+      { _id: ledger._id, status: "listed" },
+      { $set: { drops: snapshot, lastCheckedAt: new Date(), emptyReads: 0, firstEmptyAt: null } },
+    ).catch(() => {});
+    return { state: "covers" };
+  }
+  const strike = shouldExpire(ledger, Date.now(), {
+    confirmPasses: settings.getUnclaimedPricing().expiryConfirmPasses,
+    empty: true,
+  });
+  await UnclaimedAccount.updateOne(
+    { _id: ledger._id, status: "listed" },
+    {
+      $set: {
+        drops: snapshot,
+        lastCheckedAt: new Date(),
+        emptyReads: strike.emptyReads,
+        firstEmptyAt: strike.firstEmptyAt,
+        note: SHORT_NOTE + shortSummary(missing) + " — not published as the next unit",
+      },
+    },
+  ).catch(() => {});
+  return { state: "short", missing };
 }
 
 // ---------------------------------------------------------------------------
@@ -2486,7 +2649,9 @@ async function delistRowVerified(row, reason = "", opts = {}) {
     claim,
     { $set: { status: "delisted", lastError: reason || "" } },
   ).catch(() => null);
-  return { ok: true, changed: !!(r && r.modifiedCount) };
+  // `outcome` "sold" = the platform refused because a buyer already took it; a
+  // caller about to treat the unit as unsold must book the sale instead.
+  return { ok: true, changed: !!(r && r.modifiedCount), outcome };
 }
 
 // Remove this ledger's unit from its marketplace listing.
@@ -2516,18 +2681,20 @@ async function removeUnitFromRowLocked(row, ledger, opts = {}) {
     if (String(row.accountLogin || "").toLowerCase() !== login) {
       return { ok: true, removed: false }; // not the live unit — never exposed
     }
+    let outcome = "";
     if (row.status === "active") {
       // A row we could not take off sale must NOT be replaced by a successor:
       // that would leave two live listings for one item, one of them selling
       // an account that is already gone.
       const d = await delistRowVerified(row, "");
       if (!d.ok) return { ok: false, removed: false, error: d.error };
+      outcome = d.outcome || "";
     }
     await publishGameflipSuccessor(row.set, ledger.login, {
       log: opts.log !== false,
       locked: true,
     });
-    return { ok: true, removed: true };
+    return { ok: true, removed: true, outcome };
   }
   const was = (row.units || []).length;
   const units = (row.units || []).filter(
@@ -2909,6 +3076,132 @@ async function expireAccount(ledger) {
       ")",
   });
   return !!(r && (r.matchedCount || r.n));
+}
+
+// SHORT path (owner, 2026-09-28): the account still holds drops, but fewer
+// than its listing promises — a wave of its bundle expired. Confirmed exactly
+// like an empty account (`expiryConfirmPasses` reads at least 20 minutes apart,
+// on the same emptyReads/firstEmptyAt strike record), then it comes off that
+// listing and is parked "skipped" (held). It stays in its no-claim bot, its
+// pool row is untouched, and the scan lists it again under what it really
+// holds. Gameflip only: the owner paused GGSel and Plati, so a short unit there
+// is only noted; a Gameflip lot member (unclaimedLots, off) is left to its lot.
+// Kill switch: autoFarm.unclaimedShrinkListings === false (detect and note only).
+const SHRINK_MARKETS = ["gameflip"];
+const SHORT_NOTE = "short of its listing: ";
+const SHRUNK_NOTE = "part of its bundle expired — off its listing, re-listing with what it holds (";
+
+function shrinkEnabled() {
+  return settings.getAutoFarm().unclaimedShrinkListings !== false;
+}
+
+// The check pass met a unit short of its listing. `liveRow` is the active row
+// selling THIS account right now (null for a waiting Gameflip unit); `snapshot`
+// is what the read found, stored as the ledger's drops[].
+async function handleShortUnit(ledger, missing, liveRow, snapshot, out, pricing) {
+  const why = shortSummary(missing);
+  if (!SHRINK_MARKETS.includes(ledger.market) || ledger.lotId || !shrinkEnabled()) {
+    out.shortHeld++;
+    await UnclaimedAccount.updateOne(
+      { _id: ledger._id, status: "listed" },
+      {
+        $set: {
+          lastCheckedAt: new Date(),
+          emptyReads: 0,
+          firstEmptyAt: null,
+          drops: snapshot,
+          note:
+            SHORT_NOTE + why + " — left as is (" +
+            (shrinkEnabled() ? (ledger.lotId ? "lot member" : (ledger.market || "?") + " paused") : "take-off switched off") +
+            ")",
+        },
+      },
+    ).catch(() => {});
+    return;
+  }
+  const passes = Math.max(1, Math.floor(Number(pricing && pricing.expiryConfirmPasses) || 0) || 2);
+  const decision = shouldExpire(ledger, Date.now(), { confirmPasses: passes, empty: true });
+  if (!decision.expire) {
+    out.shortStrikes++;
+    await UnclaimedAccount.updateOne(
+      { _id: ledger._id, status: "listed" },
+      {
+        $set: {
+          emptyReads: decision.emptyReads,
+          firstEmptyAt: decision.firstEmptyAt,
+          lastCheckedAt: new Date(),
+          drops: snapshot,
+          note:
+            SHORT_NOTE + why + " — strike " + decision.emptyReads + "/" + passes +
+            (decision.emptyReads >= passes ? ", awaiting the 20-minute confirmation gap" : ", awaiting confirmation"),
+        },
+      },
+    ).catch(() => {});
+    return;
+  }
+  const r = await takeShortUnitOff(ledger, missing, liveRow, snapshot);
+  if (r.result === "pulled") out.shrunk++;
+  else if (r.result === "sold") out.sold++;
+  else if (r.result === "failed") out.shrinkFailed++;
+  else out.shrinkWaiting++;
+}
+
+// Take a confirmed-short unit off its listing and park it. A live Gameflip unit
+// is on sale this minute, so its listing must not have just sold — a buyer may
+// be claiming its drops, which reads exactly like a shortfall. Only a listing
+// Gameflip itself reports "onsale" is taken down; anything else waits a pass.
+// Returns { result: "pulled" | "sold" | "failed" | "waiting" | "changed" }.
+async function takeShortUnitOff(ledger, missing, liveRow, snapshot) {
+  const why = shortSummary(missing);
+  if (liveRow && liveRow.marketplace === "gameflip") {
+    let st = "";
+    try {
+      st = String((await mp.gameflipListingStatus(liveRow.externalId)) || "");
+    } catch {
+      st = "";
+    }
+    if (st !== "onsale") return { result: "waiting", status: st || "unreadable" };
+    const r = await removeUnitFromRow(liveRow, ledger, { removeFromProduct: true, log: false });
+    if (!r || !r.ok) return { result: "failed", error: (r && r.error) || "delist failed" };
+    if (r.outcome === "sold") {
+      // Sold between the status read and the delist: book it as the sale it is.
+      await MarketplaceListing.updateOne(
+        { _id: liveRow._id, status: "delisted" },
+        { $set: { status: "sold", lastError: "" } },
+      ).catch(() => {});
+      await spendAccount(ledger, "gameflip sale", { removeFromProduct: false });
+      return { result: "sold" };
+    }
+  }
+  const res = await UnclaimedAccount.updateOne(
+    { _id: ledger._id, status: "listed" },
+    {
+      $set: {
+        status: "skipped",
+        note: SHRUNK_NOTE + why + ")",
+        lastCheckedAt: new Date(),
+        drops: snapshot,
+        emptyReads: 0,
+        firstEmptyAt: null,
+        lotId: "",
+      },
+    },
+  ).catch(() => null);
+  if (!(res && (res.matchedCount || res.n))) return { result: "changed" };
+  await markOwnerUnlisted(ledger);
+  logEvent({
+    category: "unclaimed",
+    action: "shrunk",
+    actor: "unclaimedAutoList",
+    subject: ledger.login || String(ledger._id || ""),
+    game: ledger.game || "",
+    count: 1,
+    detail:
+      "part of its bundle expired (" + why + ") — off its " + (ledger.market || "") + " listing" +
+      (liveRow ? " (was the unit on sale)" : "") +
+      "; kept in its no-claim bot, re-listing with what it holds",
+  });
+  return { result: "pulled" };
 }
 
 // Return an account's pool row to the general pool ("available"). Refuses
@@ -3629,6 +3922,23 @@ function reconcileRowPlan(row, isSellable) {
   return good.length ? { action: "repair", bad, good } : { action: "delist", bad, good: [] };
 }
 
+// The game a live row sells: its own listed units' game, else its set's.
+async function gameOfRow(row, ledgers) {
+  for (const l of ledgers || []) {
+    if (l.market === row.marketplace && String(l.set) === String(row.set) && l.game) return l.game;
+  }
+  const set = row.set ? await DropSet.findById(row.set).lean().catch(() => null) : null;
+  return (set && (set.coverGame || (set.items && set.items[0] && set.items[0].game))) || "";
+}
+
+// Whether the owner's per-game market list (settings.unclaimedGameMarkets)
+// still includes this market. No list for the game means every market.
+function marketAllowedForGame(game, market) {
+  const allowed = settings.gameMarketsFor ? settings.gameMarketsFor(game) : null;
+  if (!Array.isArray(allowed) || !allowed.length) return true;
+  return allowed.includes(market);
+}
+
 async function reconcileRowsPass(opts = {}) {
   const apply = opts.apply !== false;
   const out = { rows: 0, duplicates: 0, delisted: 0, repaired: 0, stranded: 0, offSale: 0, failed: 0, actions: [] };
@@ -3654,7 +3964,7 @@ async function reconcileRowsPass(opts = {}) {
   // Every listed unit, not just those of the sets that still have a live row —
   // a set whose only row was taken down is exactly where a stranded unit hides.
   const ledgers = await UnclaimedAccount.find({ status: "listed" })
-    .select("loginLower login set market lotId listedAt poolAccountId source")
+    .select("loginLower login set market lotId listedAt poolAccountId source game")
     .lean();
   const marked = await manualSoldOwnerKeys(ledgers);
   const sellable = new Set();
@@ -3865,6 +4175,65 @@ async function reconcileRowsPass(opts = {}) {
         }
         continue;
       }
+      // The owner took GGSel out of this game's markets (2026-09-28) and the
+      // offer is off sale on GGSel itself — paused by hand in the GGSel panel,
+      // because GGSel accepts the API pause but never applies it. Never switch
+      // such an offer back on: close it on our side and hand its accounts back
+      // as held stock for the markets the game still uses. A paused GGSel offer
+      // still carries its delivery codes, so it must not be re-activated
+      // before those codes are cleared.
+      const rowGame = await gameOfRow(row, ledgers);
+      if (status && rowGame && !marketAllowedForGame(rowGame, "ggsel")) {
+        out.marketOff = (out.marketOff || 0) + 1;
+        out.actions.push({
+          action: "market-off",
+          marketplace: "ggsel",
+          externalId: row.externalId,
+          detail: "GGSel is off for " + rowGame + " and the offer is " + status + " on GGSel — closed, accounts held",
+        });
+        if (!apply) continue;
+        await withSetMarketLock(row.set, "ggsel", async () => {
+          const fresh = await MarketplaceListing.findById(row._id).lean().catch(() => null);
+          if (!fresh || fresh.status !== "active") return;
+          await MarketplaceListing.updateOne(
+            { _id: fresh._id, status: "active" },
+            {
+              $set: {
+                status: "delisted",
+                lastError:
+                  "GGSel off for " + rowGame + " — offer " + status + " on GGSel, accounts released; " +
+                  "it still carries their codes, clear them before re-activating it",
+              },
+            },
+          ).catch(() => {});
+          const logins = new Set(
+            (fresh.units || [])
+              .filter((u) => !u.deliveredAt)
+              .map((u) => String(u.login || "").toLowerCase())
+              .filter(Boolean),
+          );
+          for (const l of ledgers) {
+            if (l.market !== "ggsel" || String(l.set) !== String(fresh.set)) continue;
+            if (!logins.has(String(l.loginLower || "").toLowerCase())) continue;
+            const r = await UnclaimedAccount.updateOne(
+              { _id: l._id, status: "listed" },
+              {
+                $set: {
+                  status: "skipped",
+                  note: "held — GGSel taken off " + rowGame + "; its offer was " + status + " on GGSel",
+                  lastCheckedAt: new Date(),
+                  lotId: "",
+                },
+              },
+            ).catch(() => null);
+            if (r && r.modifiedCount) {
+              out.marketOffHeld = (out.marketOffHeld || 0) + 1;
+              await markOwnerUnlisted(l);
+            }
+          }
+        });
+        continue;
+      }
       out.offSale = (out.offSale || 0) + 1;
       out.actions.push({
         action: "off-sale",
@@ -3883,16 +4252,20 @@ async function reconcileRowsPass(opts = {}) {
     }
   }
 
-  if (apply && (out.delisted || out.repaired || out.duplicates || out.stranded)) {
+  if (apply && (out.delisted || out.repaired || out.duplicates || out.stranded || out.marketOff)) {
     logEvent({
       category: "unclaimed",
       action: "reconciled",
       actor: "unclaimedAutoList",
-      count: out.delisted + out.repaired + out.stranded,
+      count: out.delisted + out.repaired + out.stranded + (out.marketOffHeld || 0),
       detail:
         "reconcile: " + out.delisted + " row(s) taken off sale, " + out.repaired +
         " repaired, " + out.duplicates + " duplicate(s), " + out.stranded +
-        " stranded unit(s) released, " + out.failed + " failed",
+        " stranded unit(s) released, " +
+        (out.marketOff
+          ? out.marketOff + " paused GGSel offer(s) closed (" + (out.marketOffHeld || 0) + " account(s) held), "
+          : "") +
+        out.failed + " failed",
     });
   }
   return out;
@@ -4201,6 +4574,16 @@ async function scanAndListPass() {
               );
               if (img) await fsp.unlink(img).catch(() => {});
             } else {
+              // A quantity row retitled to a fuller bundle (requiredDrops) sells
+              // any of its units, so an account holding only the set's smaller
+              // bundle must not join it (it would be sold as the fuller one).
+              if (unitShortfall(set, row, drops).length) {
+                skipped.push({
+                  login,
+                  error: "its " + market + " listing promises more than this account holds — not attached",
+                });
+                return;
+              }
               await addUnitToRow(row, withLogin);
             }
             await ledgerAccount(
@@ -4438,7 +4821,8 @@ async function removeManualSoldOwner(owner = {}) {
 // Expiry + sale pass:
 //   A) quantity-market sales (a stock drop on the item's product)
 //   B) per-ledger: claimed -> spent; all drops gone -> expired (off sale, the
-//      account stays in its no-claim bot);
+//      account stays in its no-claim bot); holds LESS than its listing
+//      promises -> strikes, then off that listing and held for re-listing;
 //      Gameflip live row sold -> spent + successor
 //   C) Gameflip chain repair
 async function expirySalePass() {
@@ -4450,6 +4834,14 @@ async function expirySalePass() {
     repaired: 0,
     manualSoldRemoved: 0,
     emptyStrikes: 0,
+    // Short of its listing (handleShortUnit): taken off / strike recorded /
+    // noted only (paused market, lot, switch off) / live listing not "onsale"
+    // this pass / take-off failed (retried next pass).
+    shrunk: 0,
+    shortStrikes: 0,
+    shortHeld: 0,
+    shrinkWaiting: 0,
+    shrinkFailed: 0,
     lots: null,
   };
   const pricing = settings.getUnclaimedPricing();
@@ -4534,15 +4926,50 @@ async function expirySalePass() {
 
   // B) Per-ledger claimed / expiry / Gameflip-sale checks. Marked ledgers
   // were removed at the top of this pass; the guard below is belt-and-braces
-  // for an owner tick that lands while the pass is running.
+  // for an owner tick that lands while the pass is running. A unit with a
+  // pending strike is read first, so a confirmed shortfall comes off in about
+  // twenty minutes instead of waiting its turn in the rotation.
   const rest = await UnclaimedAccount.find({
     status: "listed",
     _id: { $nin: msLedgers.map((l) => l._id) },
   })
-    .sort({ lastCheckedAt: 1, _id: 1 })
+    .sort({ emptyReads: -1, lastCheckedAt: 1, _id: 1 })
     .limit(Math.max(0, CHECK_LIMIT - msLedgers.length))
     .lean();
   const ledgers = rest;
+
+  // What each unit's listing promises: its set, and the active row selling it
+  // (a rebundled row declares its own list). Loaded once per pass.
+  const setsById = new Map();
+  const rowByLogin = new Map();
+  try {
+    const setIds = [...new Set(ledgers.map((l) => String(l.set || "")).filter(Boolean))];
+    if (setIds.length) {
+      for (const s of await DropSet.find({ _id: { $in: setIds } }).lean()) {
+        setsById.set(String(s._id), s);
+      }
+    }
+    const liveRows = await MarketplaceListing.find({
+      origin: ORIGIN,
+      status: "active",
+      marketplace: { $in: settings.UNCLAIMED_MARKETS },
+      ...NOT_LOT,
+    }).lean();
+    for (const r of liveRows) {
+      const logins =
+        r.marketplace === "gameflip"
+          ? [r.accountLogin]
+          : (r.units || []).filter((u) => !u.deliveredAt).map((u) => u.login);
+      for (const l of logins) {
+        const k = String(l || "").trim().toLowerCase();
+        if (k) rowByLogin.set(k, r);
+      }
+    }
+  } catch (e) {
+    // Without the promise nothing can be judged short — the pass carries on
+    // exactly as before (a covering read), and the next pass tries again.
+    console.error("unclaimedAutoList listing-promise load failed:", e.message);
+  }
 
   // Hunk 4: which of these ledgers' campaigns have ended (>1h ago) — loaded
   // ONCE per pass by campaign name; an ended campaign lets a single empty read
@@ -4649,23 +5076,35 @@ async function expirySalePass() {
       }
 
       out.checked++;
+      // The LISTED game's drops only (same rule as the scan pass), so a Rainbow
+      // Six listing is never judged — or shown — with the account's Call of
+      // Duty drops. This is also the ledger's refreshed snapshot.
+      const listedDrops = pickListingGroup(ledger.game, sellable).drops;
+      const snapshot = listedDrops.map((d) => ({
+        name: d.name,
+        game: d.game || ledger.game,
+        campaign: d.campaign || "",
+        itemKey: d.itemKey || d.name,
+      }));
+      // Does it still hold what its listing promises (count-aware)?
+      const row = rowByLogin.get(String(ledger.login || "").toLowerCase()) || null;
+      const liveRow =
+        row && row.marketplace === ledger.market && String(row.set) === String(ledger.set) ? row : null;
+      const set = setsById.get(String(ledger.set || "")) || null;
+      const missing = set ? unitShortfall(set, liveRow, listedDrops) : [];
+      if (missing.length) {
+        await handleShortUnit(ledger, missing, liveRow, snapshot, out, pricing);
+        return;
+      }
       await UnclaimedAccount.updateOne(
         { _id: ledger._id },
         {
           $set: {
             lastCheckedAt: new Date(),
-            // A non-empty read resets the expiry strikes (hunk 4).
+            // A read that covers the listing resets the strikes (hunk 4).
             emptyReads: 0,
             firstEmptyAt: null,
-            // Refresh the panel snapshot with the LISTED game's drops only
-            // (same rule as the scan pass), so a Rainbow Six listing never
-            // shows the account's Call of Duty drops.
-            drops: pickListingGroup(ledger.game, sellable).drops.map((d) => ({
-              name: d.name,
-              game: d.game || ledger.game,
-              campaign: d.campaign || "",
-              itemKey: d.itemKey || d.name,
-            })),
+            drops: snapshot,
             note: "",
           },
         },
@@ -4867,6 +5306,9 @@ module.exports = {
   manualSoldOwnerKeys,
   poolOwnerBlock,
   buyerClaimedListed,
+  unitPromise,
+  unitShortfall,
+  SUCCESSOR_MAX_READS,
   soldRetireReason,
   retireSoldFromBots,
   removeFromBotConfig,

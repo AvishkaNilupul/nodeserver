@@ -263,7 +263,7 @@
       </div>
       <div class="bd">
         <div class="muted" style="font-size:12px;margin-bottom:8px;">
-          Compares each live auto-lister bundle against the latest inventory scan (the engine refreshes it every ~10&nbsp;min). <b>Report only</b> — nothing is delisted automatically. <span class="chip warn">relist</span> = advertised drops expired off the accounts; <span class="chip warn">rebundle</span> = the accounts have farmed <em>new</em> items since listing. Run the fix command to act.
+          Compares each live auto-lister bundle against the account(s) a buyer would actually get, from the latest inventory scan (the engine refreshes it every ~20&nbsp;min). <span class="chip warn">relist</span> = advertised drops expired off them — on Gameflip the engine takes such a unit off by itself after two short reads and lists the account again with what it holds (GGSel/Plati are paused and left as is); <span class="chip warn">rebundle</span> = the account on sale farmed <em>more</em> of the same event since listing — the automatic rebundle raises Gameflip titles only after a live read confirms it.
         </div>
         <div style="overflow-x:auto;">
           <table>
@@ -515,7 +515,10 @@ async function loadState(){
          (lr.scan?' · listed '+((lr.scan.listed)||0):'')+
          (lr.scan&&lr.scan.notOwned?' · skipped '+lr.scan.notOwned+' owned by another system':'')+
          (lr.scan&&lr.scan.retire&&lr.scan.retire.retired?' · '+lr.scan.retire.retired+' sold account(s) taken out of their bots → recycler':'')+
-         (lr.check?' · sold '+((lr.check.sold)||0)+', expired '+((lr.check.expired)||0)+', released '+((lr.check.released)||0)+', removed '+((lr.check.manualSoldRemoved)||0):''))
+         (lr.check?' · sold '+((lr.check.sold)||0)+', expired '+((lr.check.expired)||0)+', released '+((lr.check.released)||0)+', removed '+((lr.check.manualSoldRemoved)||0):'')+
+         (lr.check&&lr.check.shrunk?' · '+lr.check.shrunk+' lost part of their bundle → off their listing, re-listing with what they hold':'')+
+         (lr.check&&lr.check.shortStrikes?' · '+lr.check.shortStrikes+' short of their listing (confirming)':'')+
+         (lr.check&&lr.check.shortHeld?' · '+lr.check.shortHeld+' short on a paused market (left as is)':''))
       : 'never run';
     $('pauseBtn').textContent=st.paused?'Resume auto':'Pause auto';
   }catch(e){ $('stEngine').textContent='state error'; }
