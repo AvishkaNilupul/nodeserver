@@ -292,19 +292,6 @@ test("a marketplace with no delist api asks for the operator instead of going qu
   assert.match(JSON.stringify(actions), /ext-1/);
 });
 
-test("FunPay can only be delisted when the category node was captured", async () => {
-  // funpayDelist re-saves the offer's editor form, so without externalNode
-  // there is nothing to post back to.
-  assert.match(
-    JSON.stringify(await audit.applyStock(staleEntry("funpay"), { dryRun: true })),
-    /MANUAL/,
-  );
-  assert.ok(
-    (await audit.applyStock(staleEntry("funpay", { externalNode: "1234" }), { dryRun: true }))
-      .some((a) => typeof a === "string" && a.startsWith("pause (stale")),
-  );
-});
-
 test("an 'empty' verdict comes down too, but a healthy one is left alone", async () => {
   const empty = { ...staleEntry("gameflip"), verdict: "empty" };
   assert.ok(

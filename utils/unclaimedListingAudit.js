@@ -361,6 +361,58 @@ function itemsToRequired(names) {
   return [...counts.entries()].map(([name, qty]) => ({ name, qty }));
 }
 
+// Has the stock grown past what the listing advertises? A no-claim account keeps
+// farming after it goes on sale, so an event's later waves land on accounts
+// already listed under the earlier, smaller bundle — and the scan only
+// re-groups RELEASED accounts, so a listed one never grows into the fuller
+// listing on its own. `advertised` is the listing's item list ([{name, qty}] or
+// bare names); `heldNames` is what the dominant cohort actually holds (the name
+// array dominantOffer returns, duplicates preserved for copies).
+//
+// Returns the extra copies when the held set is a strict SUPERSET, else null.
+// Count-aware on purpose: gaining a SECOND Esports Loot Box is a richer bundle
+// even though the name was already there — two loot boxes is a different product
+// from one, which a set-membership check would miss. A set that DROPPED an item
+// is NOT richer (that is "stale", judged elsewhere), so it returns null.
+function richerBundle(advertised, heldNames) {
+  const req = coverage.requiredCounts(advertised || []);
+  const have = coverage.requiredCounts(heldNames || []);
+  if (!req.size || !have.size) return null;
+  for (const [name, need] of req) if ((have.get(name) || 0) < need) return null;
+  const added = [];
+  for (const [name, has] of have) {
+    const extra = has - (req.get(name) || 0);
+    if (extra > 0) added.push({ name, qty: extra });
+  }
+  if (!added.length) return null;
+  return {
+    added,
+    items: [...have.entries()].map(([name, qty]) => ({ name, qty })),
+  };
+}
+
+// Compare a listing's advertised items against the biggest bundle its backing
+// accounts still hold (`dominant` = a dominantOffer result, or null). Pure, so
+// the caller decides where `dominant` comes from — the drift report feeds it the
+// ledger `drops[]` the expiry pass refreshes each tick, so no live read is made.
+//   ok        - advertised == what is held
+//   rebundle  - held is a STRICT SUPERSET (new items farmed since publish)
+//   relist    - held is MISSING an advertised item (a wave expired off them)
+//   no-stock  - no listed account holds anything (sold out / fully expired)
+//   unknown   - the listing never declared what it sells
+function classifyDrift(advertised, dominant) {
+  const req = coverage.requiredCounts(advertised || []);
+  if (!req.size) return { verdict: "unknown", missing: [], added: [] };
+  const heldNames = (dominant && dominant.items) || [];
+  if (!heldNames.length) return { verdict: "no-stock", missing: [], added: [] };
+  const missing = coverage.shortOf(coverage.requiredCounts(heldNames), req);
+  if (missing.length) return { verdict: "relist", missing, added: [] };
+  const richer = richerBundle(advertised, heldNames);
+  if (richer)
+    return { verdict: "rebundle", missing: [], added: richer.added, suggest: richer.items };
+  return { verdict: "ok", missing: [], added: [] };
+}
+
 // --- per-listing verdict --------------------------------------------------
 
 // What a listing claims to sell. `requiredDrops` is the declared contract; a
@@ -458,7 +510,13 @@ async function auditGame(game, { refresh = false } = {}) {
   const out = [];
   for (const listing of listings) {
     const advertised = await advertisedItems(listing);
-    out.push({ listing, advertised, ...judge(listing, advertised, stock) });
+    const judged = judge(listing, advertised, stock);
+    out.push({
+      listing,
+      advertised,
+      ...judged,
+      richer: richerBundle(advertised.items, (judged.suggest && judged.suggest.items) || []),
+    });
   }
   return { game, stock, listings: out };
 }
@@ -595,6 +653,7 @@ async function auditShop({
     }
     const { stock, candidates, truncated, via } = stockCache.get(key);
     const advertised = await advertisedItems(listing);
+    const judged = judge(listing, advertised, stock, { truncated });
     out.push({
       listing,
       set,
@@ -603,8 +662,324 @@ async function auditShop({
       candidates,
       truncated,
       advertised,
-      ...judge(listing, advertised, stock, { truncated }),
+      ...judged,
+      // A live-verified rebundle opportunity: the stock covers everything
+      // advertised AND holds strictly more. Null unless so.
+      richer: richerBundle(advertised.items, (judged.suggest && judged.suggest.items) || []),
     });
+  }
+  return out;
+}
+
+// --- report-only drift, no live reads -------------------------------------
+
+// Every active auto-lister bundle (`origin: "unclaimed"` + a set), judged
+// against the freshest inventory we have WITHOUT calling Twitch: the listed
+// ledgers' `drops[]`, which `expirySalePass` rewrites from a live read every
+// check tick (~10 min). That is what makes this cheap enough to hit on a button
+// and safe to run hourly — it touches no marketplace and no Pi. For a definitive
+// LIVE sweep, `auditShop` / `scripts/unclaimed-listing-audit.js --shop` remain
+// the tools; this one answers "which listings are drifting" at a glance so the
+// operator knows which ones to relist by hand.
+//
+// It is deliberately scoped to the engine's OWN rows: they are the ones that
+// carry a fixed advertised bundle AND a pool of listed ledgers behind them. A
+// claim-at-sale row (eldorado/PA, `unclaimedGame` only) advertises by game with
+// no listed ledgers to compare, and the live `listings.stale` health check
+// already watches those.
+// The markets whose listings pre-attach their own accounts (per set+market).
+// Claim-at-sale markets (eldorado/PA/g2g) advertise by GAME and pick at sale.
+const VAULT_MARKETS = ["gameflip", "ggsel", "digiseller"];
+
+// The fuller set to advertise that COMPLETES the events a listing already spans,
+// and NEVER adds a new one — so a "Day 1 only" bundle is completed to all of
+// Day 1, not inflated to Day 1 + Day 2. `advertised` is [{name,qty}] (the
+// listing's contract); `heldUnique` is what the fulfilling accounts hold, as
+// uniqueDrops ([{name,qty,campaign,...}]). Returns the target drops when
+// strictly fuller within scope, else null. Pure + tested. Count-aware, so
+// "9× Esports Pack" is a rebundle of "1×" (same event, more copies). Relies on
+// drops[].campaign, which the no-claim scan populates 100%.
+function rebundleWithinScope(advertised, heldUnique) {
+  const advCounts = coverage.requiredCounts(advertised || []);
+  if (!advCounts.size || !(heldUnique || []).length) return null;
+  const nameCampaign = new Map();
+  for (const d of heldUnique) {
+    const n = coverage.normName(d.name);
+    if (n && d.campaign) nameCampaign.set(n, String(d.campaign));
+  }
+  // The events the listing already advertises. An advertised item the accounts
+  // no longer hold is an expired wave (a "relist" case), NOT a rebundle.
+  const advCampaigns = new Set();
+  for (const n of advCounts.keys()) {
+    const c = nameCampaign.get(n);
+    if (!c) return null;
+    advCampaigns.add(c);
+  }
+  const inScope = heldUnique.filter((d) => advCampaigns.has(String(d.campaign || "")));
+  const heldCounts = new Map();
+  const repByName = new Map();
+  for (const d of inScope) {
+    const n = coverage.normName(d.name);
+    if (!n) continue;
+    heldCounts.set(n, (heldCounts.get(n) || 0) + (Number(d.qty) > 0 ? Number(d.qty) : 1));
+    if (!repByName.has(n)) repByName.set(n, d);
+  }
+  let advTotal = 0;
+  for (const [n, q] of advCounts) {
+    advTotal += q;
+    if ((heldCounts.get(n) || 0) < q) return null; // can't cover what it advertises
+  }
+  let heldTotal = 0;
+  for (const q of heldCounts.values()) heldTotal += q;
+  if (heldTotal <= advTotal) return null; // no growth within the advertised events
+  const target = [];
+  for (const [n, q] of heldCounts) {
+    const rep = repByName.get(n);
+    target.push({ name: rep.name, game: rep.game, campaign: rep.campaign, itemKey: rep.itemKey || rep.name, qty: q });
+  }
+  return target;
+}
+
+// What a listing's fulfilling accounts hold, as uniqueDrops, WITHOUT a live read
+// (the ledger drops[] the expiry pass refreshes each tick):
+//   - vault market + set        -> its own listed ledgers (set+market).
+//   - claim-at-sale + unclaimedGame -> the game's sellable pool (released/
+//     skipped/listed), which is what a by-game order would pick from.
+async function heldUniqueForListing(listing) {
+  const ual = require("./unclaimedAutoList");
+  let accounts = [];
+  if (VAULT_MARKETS.includes(listing.marketplace) && listing.set) {
+    accounts = await UnclaimedAccount.find(
+      { source: "noclaim", set: listing.set, market: listing.marketplace, status: "listed" },
+      { login: 1, drops: 1 },
+    ).lean();
+  } else if (listing.unclaimedGame) {
+    accounts = await UnclaimedAccount.find(
+      { source: "noclaim", game: gameFilter(listing.unclaimedGame), status: { $in: ["released", "skipped", "listed"] }, soldAt: null },
+      { login: 1, drops: 1 },
+    ).lean();
+  }
+  if (!accounts.length) return { held: [], count: 0 };
+  const dom = dominantOffer(accounts.map((a) => ({ items: a.drops || [], unreadable: false, row: { login: a.login } })));
+  const wantKeys = (dom.items || []).map(coverage.normName).sort().join("|");
+  let rep = null;
+  for (const a of accounts) {
+    const k = (a.drops || []).map((d) => coverage.normName(d.name)).sort().join("|");
+    if (k === wantKeys) { rep = a; break; }
+  }
+  const raw = (rep ? rep.drops : (dom.items || []).map((n) => ({ name: n }))) || [];
+  return { held: ual.uniqueDrops(raw), count: dom.count || 0 };
+}
+
+// Per-listing drift verdict from held (uniqueDrops), campaign-scoped:
+//   rebundle - a strictly fuller set WITHIN the advertised events (target set)
+//   relist   - an advertised item the accounts no longer hold (expired wave)
+//   no-stock - no backing accounts hold anything
+//   unknown  - the listing declares no item list
+//   ok       - advertised already matches what's held
+function driftVerdict(advertisedItems, heldUnique) {
+  const req = coverage.requiredCounts(advertisedItems || []);
+  if (!req.size) return { verdict: "unknown", added: [], missing: [] };
+  if (!(heldUnique || []).length) return { verdict: "no-stock", added: [], missing: [] };
+  const target = rebundleWithinScope(advertisedItems, heldUnique);
+  if (target) {
+    const added = [];
+    for (const d of target) {
+      const extra = (Number(d.qty) > 0 ? Number(d.qty) : 1) - (req.get(coverage.normName(d.name)) || 0);
+      if (extra > 0) added.push({ name: d.name, qty: extra });
+    }
+    return { verdict: "rebundle", target, added, missing: [] };
+  }
+  const heldCounts = new Map();
+  for (const d of heldUnique) {
+    const n = coverage.normName(d.name);
+    if (n) heldCounts.set(n, (heldCounts.get(n) || 0) + (Number(d.qty) > 0 ? Number(d.qty) : 1));
+  }
+  const missing = coverage.shortOf(heldCounts, req);
+  return { verdict: missing.length ? "relist" : "ok", added: [], missing };
+}
+
+// Every active no-claim listing this can auto-fix or report on, judged WITHOUT a
+// live read. Covers VAULT rows (origin:"unclaimed" set-backed on gameflip/ggsel/
+// digiseller) AND claim-at-sale rows (eldorado/PA/g2g by unclaimedGame). The
+// verdict is campaign-scoped, so a "Day 1 only" bundle is never inflated to a
+// two-day one. For a definitive LIVE sweep, `auditShop` remains the tool.
+async function listingDriftReport() {
+  const listings = await MarketplaceListing.find({
+    status: "active",
+    $or: [
+      { origin: "unclaimed", marketplace: { $in: VAULT_MARKETS }, set: { $exists: true, $ne: null } },
+      { marketplace: { $in: ["eldorado", "playerauctions", "g2g"] }, unclaimedGame: { $nin: ["", null] } },
+    ],
+  })
+    .sort({ updatedAt: -1 })
+    .lean();
+  if (!listings.length) return [];
+  const out = [];
+  for (const listing of listings) {
+    const advertised = await advertisedItems(listing);
+    const { held, count } = await heldUniqueForListing(listing);
+    const v = driftVerdict(advertised.items, held);
+    out.push({
+      id: String(listing._id),
+      marketplace: listing.marketplace,
+      externalId: listing.externalId,
+      url: listing.url || "",
+      title: listing.title || "",
+      price: Number(listing.price) || 0,
+      backing: count,
+      claimAtSale: !VAULT_MARKETS.includes(listing.marketplace),
+      advertised: advertised.items,
+      held: held.map((d) => (Number(d.qty) > 1 ? d.name + " ×" + d.qty : d.name)),
+      heldCount: count,
+      verdict: v.verdict,
+      added: v.added || [],
+      missing: v.missing || [],
+    });
+  }
+  // Worst first so the operator sees what needs acting on at the top.
+  const rank = { relist: 0, rebundle: 1, "no-stock": 2, unknown: 3, ok: 4 };
+  out.sort((a, b) => (rank[a.verdict] ?? 9) - (rank[b.verdict] ?? 9));
+  return out;
+}
+
+// --- rebundle apply: advertise the fuller set, SAME price ------------------
+
+// The markets a rebundle can be applied to IN PLACE (reversible text edits,
+// same price): gameflip (name/description patch), ggsel and eldorado (offer
+// update that preserves price + quantity). digiseller has no text-edit API (a
+// rebundle there is delist + republish, a new irreversible product id) and PA
+// edits can knock an offer out of Active, so both are left for a deliberate
+// step and never auto-touched.
+const REBUNDLE_INPLACE_MARKETS = ["gameflip", "ggsel", "eldorado"];
+// Never re-edit the same listing more than once an hour (flap guard for the
+// automatic pass).
+const REBUNDLE_COOLDOWN_MS = 60 * 60 * 1000;
+
+// The campaign-scoped fuller set for one listing, as full drop objects so the
+// title/description read like the auto-lister's own. `isRebundle` is false when
+// the listing already matches its events (nothing to do). Built from the ledger
+// drops[] the expiry pass refreshes each tick — no live read, no price change.
+async function rebundlePlan(listing) {
+  const ual = require("./unclaimedAutoList");
+  const { held, count } = await heldUniqueForListing(listing);
+  const advertised = await advertisedItems(listing);
+  const target = rebundleWithinScope(advertised.items, held);
+  const set = listing.set ? await DropSet.findById(listing.set).lean() : null;
+  const game =
+    listing.unclaimedGame || setGame(set) || (held[0] && held[0].game) || "";
+  const drops = target
+    ? ual.uniqueDrops(target.map((d) => ({ ...d, game: d.game || game })))
+    : [];
+  return {
+    isRebundle: !!target,
+    game,
+    backing: count,
+    title: target ? ual.listingTitle(game, drops, null) : "",
+    description: target ? ual.listingDescription(game, drops, listing.marketplace, null) : "",
+    requiredDrops: drops.map((d) => ({ name: d.name, qty: d.qty || 1 })),
+    advertised: advertised.items,
+  };
+}
+
+// Apply the rebundle to ONE listing at its CURRENT price (no reprice: the
+// marketplace primitives are called with no price field, so they leave it
+// alone). Reversible where it acts; digiseller is never touched here.
+async function applyRebundle(listing, { dryRun = true } = {}) {
+  const mp = require("./marketplaces");
+  const plan = await rebundlePlan(listing);
+  const rec = {
+    id: String(listing._id),
+    marketplace: listing.marketplace,
+    externalId: listing.externalId,
+    price: Number(listing.price) || 0,
+    verdict: plan.verdict,
+    fromItems: plan.advertised,
+    toItems: plan.requiredDrops,
+    newTitle: plan.title,
+    applied: false,
+    action: "",
+    note: "",
+  };
+  if (!plan.isRebundle || !plan.requiredDrops.length) {
+    rec.action = "skip";
+    rec.note = "not a rebundle (already matches its events, or nothing fuller in scope)";
+    return rec;
+  }
+  if (!REBUNDLE_INPLACE_MARKETS.includes(listing.marketplace)) {
+    rec.action = "needs-attention";
+    rec.note =
+      listing.marketplace +
+      " has no safe in-place edit (digiseller = delist+republish/irreversible; PA can drop Active) — handled separately";
+    return rec;
+  }
+  rec.action = "retitle-in-place";
+  if (dryRun) {
+    rec.note = "dry run — would retitle at $" + rec.price + " (unchanged)";
+    return rec;
+  }
+  // SAME PRICE: no price field passed, so each primitive leaves price (and
+  // eldorado quantity) alone.
+  if (listing.marketplace === "gameflip") {
+    await mp.gameflipReprice(listing.externalId, { title: plan.title, description: plan.description });
+  } else if (listing.marketplace === "ggsel") {
+    await mp.ggselUpdateOffer(listing.externalId, { title: plan.title, description: plan.description });
+  } else if (listing.marketplace === "eldorado") {
+    await mp.eldoradoUpdateOffer(listing.externalId, { title: plan.title, description: plan.description });
+  }
+  await MarketplaceListing.updateOne(
+    { _id: listing._id },
+    { $set: { title: plan.title, description: plan.description, requiredDrops: plan.requiredDrops, rebundledAt: new Date(), lastError: "" } },
+  );
+  rec.applied = true;
+  rec.note = "retitled at $" + rec.price + " (price unchanged)";
+  return rec;
+}
+
+// Drive the whole shop's rebundle fixes, serially (Gameflip's edit cycles the
+// listing off-sale and its limiter 429s on bursts, so paced). `markets` scopes
+// which to touch — default the two in-place ones. Returns a change report.
+async function rebundleAll({ dryRun = true, markets = null, auto = false, pauseMs = 8000 } = {}) {
+  const scope = Array.isArray(markets) && markets.length ? markets : REBUNDLE_INPLACE_MARKETS;
+  const rows = await listingDriftReport();
+  const targets = rows.filter((r) => r.verdict === "rebundle");
+  const out = [];
+  for (const t of targets) {
+    if (!scope.includes(t.marketplace)) {
+      const safe = REBUNDLE_INPLACE_MARKETS.includes(t.marketplace);
+      out.push({
+        id: t.id,
+        marketplace: t.marketplace,
+        externalId: t.externalId,
+        action: safe ? "skip" : "needs-attention",
+        applied: false,
+        note: safe ? "market not in scope" : t.marketplace + " needs manual handling (no safe in-place edit / blocked)",
+      });
+      continue;
+    }
+    const listing = await MarketplaceListing.findById(t.id).lean();
+    if (!listing) {
+      out.push({ id: t.id, marketplace: t.marketplace, action: "skip", applied: false, note: "listing gone" });
+      continue;
+    }
+    // Automatic pass: never re-edit a listing we touched in the last hour, so a
+    // noisy read can't put a listing into an off-sale/on-sale loop.
+    if (auto && !dryRun && listing.rebundledAt && Date.now() - new Date(listing.rebundledAt).getTime() < REBUNDLE_COOLDOWN_MS) {
+      out.push({ id: t.id, marketplace: t.marketplace, externalId: t.externalId, action: "skip", applied: false, note: "cooldown (rebundled within the hour)" });
+      continue;
+    }
+    let rec;
+    try {
+      rec = await applyRebundle(listing, { dryRun });
+    } catch (e) {
+      rec = { id: t.id, marketplace: t.marketplace, externalId: t.externalId, action: "error", applied: false, note: (e && e.message) || String(e) };
+    }
+    out.push(rec);
+    // Pace real Gameflip writes: each is an off-sale/patch/on-sale cycle behind
+    // a minutes-wide rate limiter.
+    if (!dryRun && rec.applied && listing.marketplace === "gameflip") {
+      await new Promise((r) => setTimeout(r, Math.max(0, pauseMs)));
+    }
   }
   return out;
 }
@@ -666,11 +1041,7 @@ async function applyStock(entry, { dryRun = true } = {}) {
     ggsel: () => mp.ggselDelist(id),
     zeusx: () => mp.zeusxDelist(id),
     g2g: () => mp.g2gDelist(id),
-    // FunPay re-saves the offer's editor form, so it needs the category node
-    // captured at publish time; without one there is nothing to post back to.
-    funpay: listing.externalNode
-      ? () => mp.funpayDelist(id, listing.externalNode)
-      : undefined,
+    // Markets with no delist API fall through to a manual note.
   }[listing.marketplace];
 
   if (covering <= 0 && (verdict === "stale" || verdict === "empty")) {
@@ -780,6 +1151,18 @@ module.exports = {
   liveStockForGame,
   dominantOffer,
   itemsToRequired,
+  richerBundle,
+  classifyDrift,
+  rebundleWithinScope,
+  driftVerdict,
+  heldUniqueForListing,
+  listingDriftReport,
+  VAULT_MARKETS,
+  REBUNDLE_INPLACE_MARKETS,
+  REBUNDLE_COOLDOWN_MS,
+  rebundlePlan,
+  applyRebundle,
+  rebundleAll,
   advertisedItems,
   judge,
   sharersForGame,
