@@ -1314,6 +1314,38 @@ function orderScanCandidates(work, gameListed) {
   return ordered;
 }
 
+// What one scan pass reads (owner, 2026-09-28). Games that can still take a
+// listing are read in orderScanCandidates' order, up to SCAN_LIMIT. A game at
+// its cap can list nothing, so its accounts get only CAPPED_SCAN_READS reads a
+// pass — they may hold another game's drops — rotating through the lane from
+// pass to pass. With both caps full every pass used to re-read the same sixty
+// accounts and list nothing: ~360 Twitch reads an hour through the bot host.
+const CAPPED_SCAN_READS = 5;
+let cappedScanCursor = 0;
+function scanBatch(ordered, gameListed) {
+  const listed = gameListed || new Map();
+  const capped = (c) => {
+    const k = gameCapKey(c && c.game) || String((c && c.game) || "");
+    return (listed.get(k) || 0) >= capForGame(k);
+  };
+  const open = [];
+  const full = [];
+  for (const c of ordered || []) (capped(c) ? full : open).push(c);
+  const batch = open.slice(0, SCAN_LIMIT);
+  const room = Math.min(CAPPED_SCAN_READS, SCAN_LIMIT - batch.length);
+  if (room > 0 && full.length) {
+    const start = cappedScanCursor % full.length;
+    const take = full.slice(start, start + room);
+    if (take.length < room) take.push(...full.slice(0, Math.min(start, room - take.length)));
+    cappedScanCursor = (start + take.length) % full.length;
+    batch.push(...take);
+  }
+  return batch;
+}
+
+// Waiting Gameflip units a bundle may queue behind its live one.
+const GAMEFLIP_WAITING_MAX = 5;
+
 // Sorted [itemKey, qty] pairs of a stored set (missing qty = 1, like the
 // pre-v3 rows), for the exact match against a signature's pairs.
 function setPairs(set) {
@@ -4494,7 +4526,7 @@ async function scanAndListPass() {
     const kb = padBot(b.botId);
     return ka < kb ? -1 : ka > kb ? 1 : 0;
   });
-  const batch = orderScanCandidates(work, gameListed).slice(0, SCAN_LIMIT);
+  const batch = scanBatch(orderScanCandidates(work, gameListed), gameListed);
 
   let listed = 0;
   const skipped = [];
@@ -4674,6 +4706,25 @@ async function scanAndListPass() {
                 cls,
               );
             } else {
+              // Gameflip sells one account per bundle at a time; the queue behind
+              // it only has to replace that one. A longer queue locks accounts
+              // nobody can buy here away from the shop's other channels and fills
+              // the game's cap, so a NEW bundle can never get a listing.
+              const waiting = await UnclaimedAccount.countDocuments({
+                set: set._id,
+                market: "gameflip",
+                status: "listed",
+                lotId: { $in: ["", null] },
+              });
+              if (waiting - 1 >= GAMEFLIP_WAITING_MAX) {
+                skipped.push({
+                  login,
+                  error:
+                    "Gameflip queue for this bundle is full (" + GAMEFLIP_WAITING_MAX +
+                    " waiting) — kept free for the other channels",
+                });
+                return;
+              }
               await ledgerAccount(
                 withLogin,
                 set,
@@ -5517,6 +5568,9 @@ module.exports = {
   GAME_CAP,
   capForGame,
   orderScanCandidates,
+  scanBatch,
+  CAPPED_SCAN_READS,
+  GAMEFLIP_WAITING_MAX,
   enabledMarketsForGame,
   TICK_MS,
   SCAN_LIMIT,

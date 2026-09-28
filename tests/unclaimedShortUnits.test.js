@@ -42,6 +42,8 @@ function matchValue(actual, cond) {
       if (op === "$in") return v.some((x) => values.some((a) => eq(a, x)));
       if (op === "$nin") return !v.some((x) => values.some((a) => eq(a, x)));
       if (op === "$ne") return !values.some((a) => eq(a, v));
+      if (op === "$all") return v.every((x) => values.some((a) => eq(a, x)));
+      if (op === "$size") return Array.isArray(actual) && actual.length === v;
       throw new Error("fake model: unsupported operator " + op);
     });
   }
@@ -652,6 +654,56 @@ test("successor: units whose last read failed go to the back, so dead tokens can
     assert.strictEqual(r.published, true, JSON.stringify(r));
     assert.strictEqual(r.login, "ud");
     assert.deepStrictEqual(h.fetched, ["s-d"], "the healthy unit is tried first");
+  } finally {
+    h.restore();
+  }
+});
+
+// --- 5. the scan's reads and the Gameflip queue ------------------------------------
+
+test("scanBatch: open games are read in full; a capped game gets a few rotating reads", () => {
+  const { scanBatch, CAPPED_SCAN_READS } = require("../utils/unclaimedAutoList");
+  const cands = (game, n) => Array.from({ length: n }, (_, i) => ({ game, login: game[0] + i }));
+  const listed = new Map([["overwatch", 50]]);
+  const settings = require("../utils/settings");
+  const origCap = settings.gameCapFor;
+  settings.gameCapFor = (g) => (/overwatch/.test(String(g)) ? 50 : 0);
+  try {
+    const ordered = cands("Rainbow Six Siege", 3).concat(cands("Overwatch", 12));
+    const first = scanBatch(ordered, listed);
+    assert.strictEqual(first.length, 3 + CAPPED_SCAN_READS);
+    assert.deepStrictEqual(first.slice(0, 3).map((c) => c.login), ["R0", "R1", "R2"], "open games first, in full");
+    const second = scanBatch(ordered, listed);
+    const owFirst = first.slice(3).map((c) => c.login);
+    const owSecond = second.slice(3).map((c) => c.login);
+    assert.notDeepStrictEqual(owSecond, owFirst, "the capped lane rotates from pass to pass");
+    assert.ok(owSecond.every((l) => !owFirst.includes(l)));
+  } finally {
+    settings.gameCapFor = origCap;
+  }
+});
+
+test("scan: a bundle with a full Gameflip queue leaves the account free", async () => {
+  const waitingLedgers = ["A", "B", "C", "D", "E"].map((x) => ledger(x, "q" + x.toLowerCase(), "S12"));
+  const h = withEngine({
+    sets: [SET12],
+    accounts: [["newbie", "s-new"]],
+    pool: [poolRow("P-new", "s-new")],
+    ledgers: [ledger("L", "liveone", "S12")].concat(waitingLedgers),
+    listings: [
+      { _id: "R1", origin: "unclaimed", marketplace: "gameflip", status: "active", set: "S12", accountLogin: "liveone", lotSize: 0, units: [] },
+    ],
+    inventory: { "s-new": r6Inv("newbie", [8, 9, 10, 11]) },
+    autoFarm: { unclaimedGameMarkets: { "rainbow six": ["gameflip"] } },
+  });
+  try {
+    const run = await h.engine.runOnce({ check: false });
+    assert.strictEqual(run.scan.listed, 0, JSON.stringify(run.scan));
+    assert.ok(
+      run.scan.skipped.some((x) => x.login === "newbie" && /queue for this bundle is full/.test(x.error)),
+      JSON.stringify(run.scan.skipped),
+    );
+    assert.ok(!h.Unclaimed.rows.some((l) => l.loginLower === "newbie"), "no ledger — it stays free");
   } finally {
     h.restore();
   }
