@@ -1389,6 +1389,49 @@ const CHECKS = [
   },
 
   {
+    id: "listings.byGame",
+    title: "By-game no-claim offers (retired path)",
+    group: "listings",
+    severity: "warn",
+    // Every no-claim offer sells through a no-claim SET since 2026-09-28
+    // (utils/noclaimStock: the whole farm, a live read of the set, fail closed,
+    // the sale stamped). A by-game (`unclaimedGame`) offer can no longer fill an
+    // order: its stock counts 0 and a paid order on it is held and paged. One
+    // still active is a leftover — an old script, or an offer nobody moved —
+    // and must go to a no-claim set or come off the market.
+    async run(ctx) {
+      const MarketplaceListing = ctx.dep("MarketplaceListing");
+      const rows = await MarketplaceListing.find(
+        { status: "active", unclaimedGame: { $nin: ["", null] }, noclaimStock: { $ne: true } },
+        { marketplace: 1, externalId: 1, title: 1, unclaimedGame: 1, autoPaused: 1 },
+      )
+        .sort({ _id: 1 })
+        .lean();
+      const n = rows.length;
+      return {
+        status: n ? "warn" : "ok",
+        measured: n,
+        threshold: "0 active by-game offers",
+        summary: n
+          ? n + " by-game offer(s) still active — they cannot deliver any more"
+          : "No by-game offer is active — every no-claim offer sells from a no-claim set",
+        detail:
+          "A by-game offer is held, never filled: move it to a no-claim set " +
+          "(Listings → Shop listings) or delist it on its market.",
+        items: capItems(
+          rows.map((r) => ({
+            market: r.marketplace,
+            offer: r.externalId,
+            game: r.unclaimedGame,
+            hidden: r.autoPaused ? "yes" : "no",
+            title: String(r.title || "").slice(0, 80),
+          })),
+        ),
+      };
+    },
+  },
+
+  {
     id: "gameflip.rentfarm",
     title: "Gameflip buffered offers can be honoured",
     // "rentfarm", not "listings": the board groups by subsystem, and the two

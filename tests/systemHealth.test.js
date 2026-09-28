@@ -1214,6 +1214,25 @@ test("an unreadable offer list is unknown, never ok", async () => {
  * One account, one bot
  * ========================================================================== */
 
+test("listings.byGame: an active by-game offer warns and is named; set rows and delisted rows are not", async () => {
+  const rows = [
+    listing({ marketplace: "playerauctions", externalId: "295798998", unclaimedGame: "Overwatch", autoPaused: true, title: "OW 6 items" }),
+    // A set offer that still carries the old flag sells from its set.
+    listing({ marketplace: "eldorado", externalId: "eld-set", unclaimedGame: "Overwatch", noclaimStock: true }),
+    listing({ marketplace: "eldorado", externalId: "eld-old", unclaimedGame: "Overwatch", status: "delisted" }),
+    listing({ marketplace: "eldorado", externalId: "eld-plain", unclaimedGame: "" }),
+  ];
+  const row = await runCheck("listings.byGame", healthyDeps({ MarketplaceListing: fakeModel(rows) }));
+  assert.strictEqual(row.status, "warn");
+  assert.strictEqual(row.measured, 1);
+  assert.deepStrictEqual(row.items, [
+    { market: "playerauctions", offer: "295798998", game: "Overwatch", hidden: "yes", title: "OW 6 items" },
+  ]);
+  const ok = await runCheck("listings.byGame", healthyDeps({ MarketplaceListing: fakeModel(rows.slice(1)) }));
+  assert.strictEqual(ok.status, "ok");
+  assert.strictEqual(ok.measured, 0);
+});
+
 test("fleet.oneHome: an account enabled in two bots fails the check and names both", async () => {
   const row = await runCheck(
     "fleet.oneHome",
