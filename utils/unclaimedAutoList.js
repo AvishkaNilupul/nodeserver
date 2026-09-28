@@ -26,10 +26,13 @@
 // Lifecycle per account (ledger: models/UnclaimedAccount.js):
 //   listed (one unit of an item on one market) ->
 //     sold   (its unit sold / buyer claimed) -> spent path (never pool-return)
-//     expired (all drops gone) -> unit removed -> released back to pool
-// Rules: never claim, never touch origin "auto"/"manual" rows, and only return
-// an account to the pool after ALL of its drops expired (confirmed by repeated
-// empty reads — see shouldExpire).
+//     expired (all drops gone) -> unit removed; the account stays in its
+//             no-claim bot (pool row still claimed) and is listed again once
+//             it farms new drops
+// Rules: never claim, never touch origin "auto"/"manual" rows, only expire an
+// account after ALL of its drops are gone (confirmed by repeated empty reads —
+// see shouldExpire), and never mark a pool row "available" while a no-claim bot
+// still holds the account (releaseToPool).
 //
 // v3 (docs/UNCLAIMED-BUNDLES-CONTRACT.md): an item's identity counts COPIES
 // ("4× Alpha Pack" ≠ "Alpha Pack"); listings are event-bundle aware (title,
@@ -877,6 +880,28 @@ async function soldMapForSecrets(secrets) {
   return map;
 }
 
+// The pool note the no-claim farm stamps when it claims an account for a bot
+// (utils/noclaimFleet.js CLAIM_NOTE_PREFIX, "noclaim-farm:<game>").
+const NOCLAIM_OWNER_NOTE = /^noclaim-farm:/i;
+
+// Why this pool row does NOT belong to the no-claim farm ("" = it does).
+//
+// Only an account the pool says the no-claim farm owns may be sold from a
+// no-claim bot. "available" means any system may claim it at any moment, and a
+// "claimed" row with another note (the auto-farm, a renter, a bot deploy) means
+// a CLAIMING bot may hold the same login — it claims whatever the account
+// farms, so a buyer would receive an account emptied under them. Both states
+// used to come from the auto-lister itself: expiry marked the row "available"
+// while the no-claim bot still held the account, and the auto-farm then claimed
+// it into a second bot (34 accounts into a Marvel Rivals bot on 2026-09-25).
+function poolOwnerBlock(pool) {
+  if (!pool) return "no pool row";
+  if (pool.status !== "claimed") return "pool row is " + (pool.status || "unset");
+  const note = String(pool.claimedNote || "").trim();
+  if (!NOCLAIM_OWNER_NOTE.test(note)) return "pool says: " + (note.slice(0, 60) || "(no note)");
+  return "";
+}
+
 // ---------------------------------------------------------------------------
 // Transport helpers
 // ---------------------------------------------------------------------------
@@ -931,8 +956,9 @@ async function mapLimit(items, n, fn) {
 // ---------------------------------------------------------------------------
 
 // All no-claim bot configs in ONE batched Pi round trip: enumerate the config
-// paths, then read them all (gzip/base64 batched). Returns flat account rows.
-async function collectNoClaimCandidates() {
+// paths, then read them all (gzip/base64 batched). Returns [{ path, id, cfg }],
+// `cfg` null when the file could not be read or parsed.
+async function readNoClaimConfigs() {
   const host = pi();
   const listOut = await sh(
     `ls -1d ${hosts.shq(BOTS_DIR)}/*/Configuration/config.json 2>/dev/null || true`,
@@ -944,17 +970,47 @@ async function collectNoClaimCandidates() {
     .filter(Boolean);
   if (!paths.length) return [];
   const files = await hosts.readFiles(host, paths);
-  const out = [];
-  for (const p of paths) {
+  return paths.map((p) => {
     const f = files[p];
-    if (!f || !f.ok || !f.text) continue;
-    let cfg;
-    try {
-      cfg = JSON.parse(f.text);
-    } catch {
-      continue; // corrupt config — the bots page already flags those
+    let cfg = null;
+    if (f && f.ok && f.text) {
+      try {
+        cfg = JSON.parse(f.text);
+      } catch {
+        cfg = null; // corrupt config — the bots page already flags those
+      }
     }
-    const id = String(p.split("/")[5] || "").replace(/[^0-9]/g, "");
+    return { path: p, id: String(p.split("/")[5] || "").replace(/[^0-9]/g, ""), cfg };
+  });
+}
+
+// Which no-claim bots hold this ClientSecret, from one read of every config.
+// `unreadable` counts configs that could not be read or parsed: any of them
+// may hold the account too, so a caller deciding it is gone must treat a
+// non-zero count as "not proven". So does an EMPTY listing — the fleet is never
+// empty, and the listing's `|| true` turns a failed `ls` into no output.
+async function botsHoldingSecret(secret) {
+  const s = String(secret || "");
+  const botIds = [];
+  let unreadable = 0;
+  const configs = await readNoClaimConfigs();
+  if (!configs.length) return { botIds, unreadable: 1 };
+  for (const { id, cfg } of configs) {
+    if (!cfg) {
+      unreadable++;
+      continue;
+    }
+    const users = (cfg.TwitchSettings && cfg.TwitchSettings.TwitchUsers) || [];
+    if (s && users.some((u) => u && String(u.ClientSecret || "") === s)) botIds.push(id);
+  }
+  return { botIds, unreadable };
+}
+
+// Flat account rows from every readable no-claim bot config.
+async function collectNoClaimCandidates() {
+  const out = [];
+  for (const { id, cfg } of await readNoClaimConfigs()) {
+    if (!cfg) continue;
     const game = (cfg.FavouriteGames || [])[0] || "";
     const users = (cfg.TwitchSettings && cfg.TwitchSettings.TwitchUsers) || [];
     for (const u of users) {
@@ -2484,7 +2540,7 @@ async function rebuildGgselOffer(oldRow, remainingUnits, opts = {}) {
 }
 
 // ---------------------------------------------------------------------------
-// Lifecycle: spent, expiry + pool return
+// Lifecycle: spent, expiry, pool return
 // ---------------------------------------------------------------------------
 
 // SPENT path: the buyer owns this account (a sale was detected, or a listed
@@ -2672,10 +2728,19 @@ async function spendAccount(ledger, reason, opts = {}) {
   ).catch((e) => console.error("unclaimed sale notify error:", e.message));
 }
 
-// EXPIRY path: all of this account's drops are gone. Remove its unit from its
-// listing and return it to the pool (only ever after ALL drops expired).
-async function expireAccount(ledger, opts = {}) {
-  const release = opts.release !== false;
+// EXPIRY path: every drop this account was listed with is gone. Take its unit
+// off its listing and park the ledger "expired" — and nothing else.
+//
+// The account is still in its no-claim bot, which keeps farming it: the next
+// event's drops are new stock, and the scan lists it again once it holds them.
+// So its pool row stays claimed by the no-claim farm. This used to call
+// releaseToPool(), which marked the row "available" while the bot still held
+// the account; every other system trusts the pool, and the auto-farm claimed
+// such accounts into claiming bots (32 sat in two bots at once for 54 hours
+// from 2026-09-25). Returns true when the ledger moved to "expired".
+const EXPIRED_NOTE = "drops expired — off sale, still farming in its no-claim bot";
+
+async function expireAccount(ledger) {
   try {
     const row = await rowForLedger(ledger);
     if (row) {
@@ -2684,20 +2749,19 @@ async function expireAccount(ledger, opts = {}) {
   } catch (e) {
     console.error("unclaimedAutoList expire remove-unit failed:", e.message);
   }
-  const ok = release ? await releaseToPool(ledger) : false;
   const at = new Date();
-  await UnclaimedAccount.updateOne(
+  const r = await UnclaimedAccount.updateOne(
     { _id: ledger._id, status: "listed" },
     {
       $set: {
-        status: ok ? "released" : "expired",
+        status: "expired",
         expiredAt: at,
-        releasedAt: ok ? at : null,
-        note: ok ? "drops expired — delisted + returned to pool" : "drops expired — delisted",
+        releasedAt: null,
+        note: EXPIRED_NOTE,
         lastCheckedAt: at,
       },
     },
-  ).catch(() => {});
+  ).catch(() => null);
   await markOwnerUnlisted(ledger);
   logEvent({
     category: "unclaimed",
@@ -2707,42 +2771,68 @@ async function expireAccount(ledger, opts = {}) {
     game: ledger.game || "",
     count: 1,
     detail:
-      "drops expired — delisted + " +
-      (ok ? "returned to pool" : "pool return pending") +
-      " (" + (ledger.source || "") + ")",
+      "drops expired — delisted; kept in its no-claim bot, pool row unchanged (" +
+      (ledger.source || "") +
+      ")",
   });
-  return ok;
+  return !!(r && (r.matchedCount || r.n));
 }
 
-// Release an account whose drops all expired: the no-claim pool row goes back
-// to available.
+// Return an account's pool row to the general pool ("available"). Refuses
+// (false) unless ALL of these hold:
+//  - its ledger is off sale and unsold right now (re-read here, never trusted
+//    from the caller's copy);
+//  - the pool row is "claimed" by the no-claim farm itself (note
+//    "noclaim-farm:…") and not fenced as hand-sold. A claimed row with any
+//    other note belongs to another system; the old version released those too
+//    — on 2026-09-25 it freed an account the auto-farm had claimed for Marvel
+//    Rivals four hours earlier;
+//  - no no-claim bot config holds the account any more. While a bot farms it,
+//    "available" invites the auto-farm, the rent-farm and the fleet sizer to
+//    claim it into a second bot. A config read that fails, or any config that
+//    cannot be read, counts as "still held" (fail closed);
+//  - the pool row did not change between those checks and the write.
+// The ledger keeps its status ("expired" is sold by nothing once the account
+// has left every bot) and gets releasedAt. Expiry no longer calls this — the
+// account stays in its bot; the operator's Delist can still ask for it.
+const RELEASE_NOTE = "released — left the no-claim farm (unclaimed auto-list)";
+const ON_SALE_OR_SOLD = ["listed", "manual", "sold", "removed"];
+
 async function releaseToPool(ledger) {
-  if (!ledger) return false;
-  if (ledger.source === "noclaim" && ledger.poolAccountId) {
-    const r = await AvailableAccount.updateOne(
-      { _id: ledger.poolAccountId, status: "claimed" },
-      {
-        $set: {
-          status: "available",
-          claimedNote: "expired — unclaimed auto-list release",
-        },
-      },
-    );
-    const cur = await AvailableAccount.findById(ledger.poolAccountId, {
-      status: 1,
-    }).lean();
-    if ((r.matchedCount || 0) > 0 || (cur && cur.status !== "claimed")) {
-      await recordPoolUsage([ledger.poolAccountId], {
-        event: "released",
-        actor: "unclaimedAutoList",
-        note: "expired — unclaimed auto-list release",
-        game: ledger.game || "",
-      }).catch(() => {});
-      return true;
-    }
+  if (!ledger || ledger.source !== "noclaim" || !ledger.poolAccountId) return false;
+  const cur = await UnclaimedAccount.findById(ledger._id, { status: 1 }).lean();
+  if (!cur || ON_SALE_OR_SOLD.includes(cur.status)) return false;
+  const pool = await AvailableAccount.findById(ledger.poolAccountId, {
+    status: 1,
+    claimedNote: 1,
+    clientSecret: 1,
+    manualSold: 1,
+  }).lean();
+  if (poolOwnerBlock(pool) || pool.manualSold || !pool.clientSecret) return false;
+  let held;
+  try {
+    held = await botsHoldingSecret(pool.clientSecret);
+  } catch (e) {
+    console.error("unclaimedAutoList release: bot configs unreadable:", e.message);
     return false;
   }
-  return false;
+  if (held.botIds.length || held.unreadable) return false;
+  const r = await AvailableAccount.updateOne(
+    { _id: pool._id, status: "claimed", claimedNote: pool.claimedNote },
+    { $set: { status: "available", claimedAt: null, claimedNote: RELEASE_NOTE } },
+  );
+  if (!(r && (r.matchedCount || r.n))) return false;
+  await UnclaimedAccount.updateOne(
+    { _id: ledger._id },
+    { $set: { releasedAt: new Date(), note: RELEASE_NOTE } },
+  ).catch(() => {});
+  await recordPoolUsage([ledger.poolAccountId], {
+    event: "released",
+    actor: "unclaimedAutoList",
+    note: RELEASE_NOTE,
+    game: ledger.game || "",
+  }).catch(() => {});
+  return true;
 }
 
 // Delist a set of rows (used by the operator override). Marks each row
@@ -3383,7 +3473,7 @@ async function scanAndListPass() {
   if (secrets.length) {
     const poolRows = await AvailableAccount.find(
       { clientSecret: { $in: secrets } },
-      { clientSecret: 1, password: 1, credPasswordEnc: 1, status: 1, manualSold: 1 },
+      { clientSecret: 1, password: 1, credPasswordEnc: 1, status: 1, manualSold: 1, claimedNote: 1 },
     ).lean();
     for (const p of poolRows) poolBySecret.set(p.clientSecret, p);
   }
@@ -3422,6 +3512,9 @@ async function scanAndListPass() {
   }
 
   const work = [];
+  // In a no-claim bot but not the no-claim farm's to sell (poolOwnerBlock):
+  // skipped before any inventory read, and reported in the pass result.
+  const notOwned = [];
   for (const c of cands) {
     const key = c.source + ":" + String(c.login || "").toLowerCase();
     if (already.has(key)) continue;
@@ -3432,6 +3525,11 @@ async function scanAndListPass() {
     if (c.source === "noclaim") {
       const pool = poolBySecret.get(c.clientSecret);
       if (pool && pool.manualSold) continue;
+      const why = poolOwnerBlock(pool);
+      if (why) {
+        notOwned.push({ login: c.login || "", botId: c.botId || "", why });
+        continue;
+      }
     }
     work.push(c);
   }
@@ -3729,7 +3827,16 @@ async function scanAndListPass() {
       console.error("unclaimedAutoList lot hook failed:", e.message);
     }
   }
-  return { candidates: work.length, scanned: batch.length, listed, repaired, lots, skipped };
+  return {
+    candidates: work.length,
+    scanned: batch.length,
+    listed,
+    repaired,
+    lots,
+    skipped,
+    notOwned: notOwned.length,
+    notOwnedSample: notOwned.slice(0, 10),
+  };
 }
 
 // Sets with gameflip ledgers but no live row get a live unit published again
@@ -3873,7 +3980,8 @@ async function removeManualSoldOwner(owner = {}) {
 
 // Expiry + sale pass:
 //   A) quantity-market sales (a stock drop on the item's product)
-//   B) per-ledger: claimed -> spent; all drops gone -> expired + pool return;
+//   B) per-ledger: claimed -> spent; all drops gone -> expired (off sale, the
+//      account stays in its no-claim bot);
 //      Gameflip live row sold -> spent + successor
 //   C) Gameflip chain repair
 async function expirySalePass() {
@@ -4071,8 +4179,9 @@ async function expirySalePass() {
         });
         if (decision.expire) {
           out.expired++;
-          const ok = await expireAccount(ledger);
-          if (ok) out.released++;
+          // Off sale only — the account stays in its no-claim bot, so its pool
+          // row stays claimed (`released` counts pool returns, never made here).
+          await expireAccount(ledger);
           return;
         }
         out.emptyStrikes++;
@@ -4307,6 +4416,7 @@ module.exports = {
   manualSoldKey,
   filterManualSoldLedgers,
   manualSoldOwnerKeys,
+  poolOwnerBlock,
   markOwnerListed,
   markOwnerUnlisted,
   sellableDropsFromNoClaimInv,

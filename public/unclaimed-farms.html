@@ -186,7 +186,7 @@
   </div>
 
   <div class="banner">
-    🛒 <b>Auto-list.</b> One listing per item (a game + its drop set), fed by accounts from both farms with 100%-unclaimed drops, on the same marketplaces as the auto-farm (Gameflip, Digiseller, GGSel — ZeusX stays manual). When a unit sells, Gameflip relists the next account and Digiseller/GGSel restock the same product — one account per buyer. A sold account is spent, never pool-returned; when <b>all</b> of an account's drops expire its unit is removed and the account goes <b>back to the pool</b>.
+    🛒 <b>Auto-list.</b> One listing per item (a game + its drop set), fed by accounts from both farms with 100%-unclaimed drops, on the same marketplaces as the auto-farm (Gameflip, Digiseller, GGSel — ZeusX stays manual). When a unit sells, Gameflip relists the next account and Digiseller/GGSel restock the same product — one account per buyer. A sold account is spent, never pool-returned; when <b>all</b> of an account's drops expire its unit comes off sale and the account <b>stays in its no-claim bot</b> — it is listed again once it farms new drops.
   </div>
 
   <div class="tabs">
@@ -513,6 +513,7 @@ async function loadState(){
     $('stLastRun').textContent=lr
       ? ('last run '+(lr.tookMs!=null?Math.round(lr.tookMs/1000)+'s':'')+
          (lr.scan?' · listed '+((lr.scan.listed)||0):'')+
+         (lr.scan&&lr.scan.notOwned?' · skipped '+lr.scan.notOwned+' owned by another system':'')+
          (lr.check?' · sold '+((lr.check.sold)||0)+', expired '+((lr.check.expired)||0)+', released '+((lr.check.released)||0)+', removed '+((lr.check.manualSoldRemoved)||0):''))
       : 'never run';
     $('pauseBtn').textContent=st.paused?'Resume auto':'Pause auto';
@@ -1345,9 +1346,9 @@ document.addEventListener('click',function(e){
     });
   }
   if(t.dataset&&t.dataset.delist){
-    if(!confirm('Delist ALL rows for this account? It goes back to the pool only if you choose release.')) return;
+    if(!confirm('Take this account off sale? It stays in its no-claim bot and keeps farming (it is not returned to the pool). If it still holds drops, a later scan may list it again. If you sold it by hand, use Sell instead.')) return;
     busy(null, async function(){
-      await api('/api/unclaimed-auto/delist/'+t.dataset.delist,{method:'POST',body:JSON.stringify({release:true})});
+      await api('/api/unclaimed-auto/delist/'+t.dataset.delist,{method:'POST',body:'{}'});
       loadAccounts(); loadListings(); loadState();
       return 'delisted';
     });

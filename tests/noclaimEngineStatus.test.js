@@ -138,12 +138,16 @@ function botConfig(logins) {
   };
 }
 
-// alpha's pool row. A plain (legacy, unencrypted) password reads as-is.
+// alpha's pool row. A plain (legacy, unencrypted) password reads as-is. The
+// claim note is the one the no-claim fleet stamps when it puts an account in a
+// bot (noclaimFleet.claimForGame) — the scan only lists accounts whose pool row
+// says the no-claim farm owns them (unclaimedAutoList.poolOwnerBlock).
 const poolAlpha = () => ({
   _id: "pool-alpha",
   clientSecret: "cs-alpha",
   password: "pw-alpha",
   status: "claimed",
+  claimedNote: "noclaim-farm:Test Game Zeta",
   manualSold: false,
   soldGames: [],
 });

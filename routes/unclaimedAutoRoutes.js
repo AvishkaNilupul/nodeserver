@@ -380,8 +380,11 @@ router.post("/api/unclaimed-auto/sell/:id", requireSuperadmin, async (req, res) 
   }
 });
 
-// Operator override: delist every row for the account NOW and (if the account
-// has no sellable drops left, i.e. a forced expiry) return it to the pool.
+// Operator override: take the account off sale NOW. It stays in its no-claim
+// bot and keeps farming (the next scan may list it again under what it really
+// holds), so its pool row is NOT returned. `release` is honoured only when no
+// no-claim bot holds the account any more (engine.releaseToPool refuses
+// otherwise) — "available" while a bot still farms it invites a second bot.
 router.post("/api/unclaimed-auto/delist/:id", requireSuperadmin, async (req, res) => {
   try {
     const id = String(req.params.id || "");
@@ -390,8 +393,16 @@ router.post("/api/unclaimed-auto/delist/:id", requireSuperadmin, async (req, res
     const ledger = await UnclaimedAccount.findById(id).lean();
     if (!ledger)
       return res.status(404).json({ success: false, message: "no such account" });
-    const release = !!req.body.release;
-    const ok = await engine.expireAccount(ledger, { release });
+    // Only a listed account has anything to delist. A stale page must never act
+    // on one that has since sold: the old route would return a sold account's
+    // pool row to "available".
+    if (ledger.status !== "listed")
+      return res
+        .status(409)
+        .json({ success: false, message: "account is not listed (" + ledger.status + ")" });
+    const wantRelease = !!(req.body && req.body.release);
+    const expired = await engine.expireAccount(ledger);
+    const released = wantRelease ? await engine.releaseToPool(ledger) : false;
     logEvent({
       category: "unclaimed",
       action: "manual_delist",
@@ -400,9 +411,13 @@ router.post("/api/unclaimed-auto/delist/:id", requireSuperadmin, async (req, res
       game: ledger.game || "",
       detail:
         "operator removed " + (ledger.market || "?") + " unit" +
-        (release ? " + pool return" : ""),
+        (released
+          ? " + pool return"
+          : wantRelease
+            ? " — pool return refused (a no-claim bot still holds it, or its pool row is not the no-claim farm's)"
+            : ""),
     });
-    res.json({ success: true, released: ok });
+    res.json({ success: true, expired, released });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
   }
