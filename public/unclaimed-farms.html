@@ -514,6 +514,7 @@ async function loadState(){
       ? ('last run '+(lr.tookMs!=null?Math.round(lr.tookMs/1000)+'s':'')+
          (lr.scan?' · listed '+((lr.scan.listed)||0):'')+
          (lr.scan&&lr.scan.notOwned?' · skipped '+lr.scan.notOwned+' owned by another system':'')+
+         (lr.scan&&lr.scan.retire&&lr.scan.retire.retired?' · '+lr.scan.retire.retired+' sold account(s) taken out of their bots → recycler':'')+
          (lr.check?' · sold '+((lr.check.sold)||0)+', expired '+((lr.check.expired)||0)+', released '+((lr.check.released)||0)+', removed '+((lr.check.manualSoldRemoved)||0):''))
       : 'never run';
     $('pauseBtn').textContent=st.paused?'Resume auto':'Pause auto';

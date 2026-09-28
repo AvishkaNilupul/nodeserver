@@ -257,7 +257,10 @@ function loadEngine(opts = {}) {
       env.shell.push({ script, input: o.input });
       if (script.startsWith("ls -1d ")) return { stdout: BOT_CONFIG_PATH + "\n" };
       if (script.startsWith("[ -f ")) return { stdout: JSON.stringify(env.config) };
-      return { stdout: "" }; // config write, docker restart / stop
+      // A config write lands, like on a real host: the engine reads the config
+      // back afterwards to prove the edit took.
+      if (script.startsWith("cat > ") && o.input) env.config = JSON.parse(o.input);
+      return { stdout: "" }; // docker restart / stop / inspect
     },
     async readFiles(host, paths) {
       const out = {};

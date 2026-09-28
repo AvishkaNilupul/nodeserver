@@ -61,6 +61,9 @@ const { recordListingSale } = require("./saleLearning");
 const { sendTelegram } = require("./telegram");
 const { logEvent } = require("./systemLog");
 const { recordPoolUsage } = require("./poolUsageLog");
+// The per-(host, file) lock noclaimFleet.topUpBot takes on a bot config: an edit
+// here and a top-up there on the same config are serialized, never lost.
+const { withFileLock } = require("./fileLock");
 const AvailableAccount = require("../models/AvailableAccount");
 const BotAccount = require("../models/BotAccount");
 const DropSet = require("../models/DropSet");
@@ -821,6 +824,62 @@ function ledgerCampaignsEnded(ledger, ended) {
   return names.every((n) => ended.has(g + "|" + n));
 }
 
+// Did a buyer claim a LISTED drop? Pure; `invData` is the Twitch inventory
+// ({ inProgress, drops }), `sellable` what it still holds unclaimed at 100%.
+//
+// A listed item counts as claimed only when BOTH hold:
+//  - fewer copies of it are still held unclaimed than the listing was made
+//    with (count-aware — "2 loot boxes" with one left has lost one), AND
+//  - the account shows a matching claim: the drop marked claimed inside a
+//    still-running campaign (same campaign when both are named), or a claimed
+//    reward of that name awarded at/after the listing. Once EVERY drop of a
+//    campaign is claimed Twitch drops the campaign from inProgress, so a
+//    full-bundle claim is only visible as a reward.
+// Either half alone is not a sale: copies vanish when a wave expires (the
+// expiry path handles that), and item names recur across campaigns — an
+// account migrated from a claiming bot carries claimed rewards of the same
+// names while every listed copy is still unclaimed (seen on prod 2026-09-11).
+function buyerClaimedListed(ledger, invData, sellable) {
+  const norm = (s) => String(s || "").trim().toLowerCase();
+  const listed = new Map(); // name -> { n, campaigns }
+  for (const d of (ledger && ledger.drops) || []) {
+    const k = norm(d && d.name);
+    if (!k) continue;
+    const e = listed.get(k) || { n: 0, campaigns: new Set() };
+    e.n++;
+    if (d.campaign) e.campaigns.add(norm(d.campaign));
+    listed.set(k, e);
+  }
+  if (!listed.size) return { claimed: false, items: [] };
+  const held = new Map();
+  for (const d of sellable || []) {
+    const k = norm(d && d.name);
+    if (k) held.set(k, (held.get(k) || 0) + 1);
+  }
+  const listedAt = ledger && ledger.listedAt ? new Date(ledger.listedAt).getTime() : 0;
+  const inv = invData || {};
+  const items = [];
+  for (const [k, e] of listed) {
+    if ((held.get(k) || 0) >= e.n) continue; // every listed copy still unclaimed
+    const inCampaign = (inv.inProgress || []).some(
+      (d) =>
+        d &&
+        d.claimed &&
+        norm(d.name) === k &&
+        (!e.campaigns.size || !d.campaign || e.campaigns.has(norm(d.campaign))),
+    );
+    const asReward = (inv.drops || []).some(
+      (d) =>
+        d &&
+        norm(d.name) === k &&
+        !!d.awardedAt &&
+        new Date(d.awardedAt).getTime() >= listedAt,
+    );
+    if (inCampaign || asReward) items.push(k);
+  }
+  return { claimed: items.length > 0, items };
+}
+
 // Which active-listing logins would block a fresh listing (one account, one
 // buyer). Mirrors autoLister.pickDeliveryAccounts.
 async function activeListingsForLogin(login) {
@@ -937,6 +996,81 @@ async function readConfigRaw(id) {
   );
 }
 
+// Bots the operator marked "my own" (a `.personal` file in the bot dir,
+// noclaimFleet.setPersonal). Their accounts are fenced with manualSold but were
+// never sold, so nothing here ever takes one out of its bot. One listing.
+async function personalBotIds() {
+  const out = await sh(
+    `for d in ${hosts.shq(BOTS_DIR)}/*/; do [ -f "$d.personal" ] && basename "$d"; done; true`,
+    { timeout: 20000 },
+  );
+  return new Set(
+    out
+      .split("\n")
+      .map((s) => s.trim())
+      .filter(Boolean),
+  );
+}
+
+// Take accounts OUT of one no-claim bot's config, by ClientSecret — the one
+// identity a config and the pool share (a Twitch login can be renamed).
+//
+// Read -> filter -> write under the same per-file lock as noclaimFleet.topUpBot,
+// written by tmp + mv and read back to prove the accounts are gone (the old
+// in-place `cat >` with no lock could lose a concurrent top-up, or tear the
+// config). A running bot restarts so it stops farming them now; a parked bot
+// reads the new config when it next starts — restarting it would wake it
+// against the auto-power watcher. A config left with no accounts is marked
+// .operatoroff and stopped: an empty config tight-loops, and the watcher starts
+// any stopped bot that lacks the marker. Throws when the config cannot be read,
+// parsed or rewritten; the caller then stamps nothing and retries next pass.
+async function removeFromBotConfig(botId, secrets) {
+  const id = String(botId || "").replace(/[^0-9]/g, "");
+  const want = new Set((secrets || []).map((s) => String(s || "")).filter(Boolean));
+  if (!id || !want.size) return { removed: [], left: null, restarted: false, parked: false };
+  const file = CONFIG_PATH(id);
+  return withFileLock(pi(), file, async () => {
+    const parse = (raw, what) => {
+      try {
+        return JSON.parse(raw);
+      } catch (e) {
+        throw new Error("bot " + id + " config " + what + " is not valid JSON (" + e.message + ")");
+      }
+    };
+    const cfg = parse(await readConfigRaw(id), "read");
+    const ts = cfg.TwitchSettings || (cfg.TwitchSettings = {});
+    const users = Array.isArray(ts.TwitchUsers) ? ts.TwitchUsers : [];
+    const isOut = (u) => want.has(String((u && u.ClientSecret) || ""));
+    const removed = users.filter(isOut).map((u) => String(u.ClientSecret));
+    if (!removed.length) return { removed: [], left: users.length, restarted: false, parked: false };
+    ts.TwitchUsers = users.filter((u) => !isOut(u));
+    await sh(
+      `cat > ${hosts.shq(file + ".tmp")} && mv ${hosts.shq(file + ".tmp")} ${hosts.shq(file)} && chmod 600 ${hosts.shq(file)}`,
+      { timeout: 20000, input: JSON.stringify(cfg, null, 2) },
+    );
+    const back = parse(await readConfigRaw(id), "re-read");
+    const still = ((back.TwitchSettings && back.TwitchSettings.TwitchUsers) || []).filter(isOut);
+    if (still.length) {
+      throw new Error("bot " + id + ": " + still.length + " account(s) still in the config after the write");
+    }
+    const left = ts.TwitchUsers.length;
+    const container = hosts.shq(containerFor(id));
+    if (!left) {
+      await sh(
+        `touch ${hosts.shq(BOTS_DIR + "/" + id + "/.operatoroff")}; docker stop ${container} >/dev/null 2>&1 || true`,
+        { timeout: 40000 },
+      );
+      return { removed, left: 0, restarted: false, parked: true };
+    }
+    const out = await sh(
+      `if [ "$(docker inspect -f '{{.State.Running}}' ${container} 2>/dev/null)" = "true" ]; ` +
+        `then docker restart ${container} >/dev/null 2>&1 && echo restarted; fi; true`,
+      { timeout: 60000 },
+    );
+    return { removed, left, restarted: /restarted/.test(out), parked: false };
+  });
+}
+
 // Bounded mapLimit: run `fn(item)` for up to `n` items concurrently.
 async function mapLimit(items, n, fn) {
   const out = new Array(items.length);
@@ -993,17 +1127,21 @@ async function botsHoldingSecret(secret) {
   const s = String(secret || "");
   const botIds = [];
   let unreadable = 0;
+  let game = ""; // the first holding bot's game (FavouriteGames[0])
   const configs = await readNoClaimConfigs();
-  if (!configs.length) return { botIds, unreadable: 1 };
+  if (!configs.length) return { botIds, unreadable: 1, game };
   for (const { id, cfg } of configs) {
     if (!cfg) {
       unreadable++;
       continue;
     }
     const users = (cfg.TwitchSettings && cfg.TwitchSettings.TwitchUsers) || [];
-    if (s && users.some((u) => u && String(u.ClientSecret || "") === s)) botIds.push(id);
+    if (s && users.some((u) => u && String(u.ClientSecret || "") === s)) {
+      botIds.push(id);
+      if (!game) game = (cfg.FavouriteGames || [])[0] || "";
+    }
   }
-  return { botIds, unreadable };
+  return { botIds, unreadable, game };
 }
 
 // Flat account rows from every readable no-claim bot config.
@@ -2543,6 +2681,26 @@ async function rebuildGgselOffer(oldRow, remainingUnits, opts = {}) {
 // Lifecycle: spent, expiry, pool return
 // ---------------------------------------------------------------------------
 
+// Take one sold account out of EVERY no-claim bot that holds it, found by its
+// ClientSecret across all configs — never by the ledger's remembered bot (stale
+// after a fleet repack; on 2026-09-28 five owner-listing sales were marked spent
+// on their ledgers while still in their bots) or by login (renamable).
+// `proven` = it is now in no config: every holder was edited and verified, and
+// every config was readable. Only then may the pool row say "spent" — the
+// recycler cannot see no-claim configs, so a stamp on an account that is still
+// farming lets it be recycled into a second bot. Throws when an edit fails.
+async function takeOutOfBots(ledger) {
+  const pool =
+    ledger && ledger.poolAccountId
+      ? await AvailableAccount.findById(ledger.poolAccountId, { clientSecret: 1 }).lean()
+      : null;
+  const secret = pool && pool.clientSecret ? String(pool.clientSecret) : "";
+  if (!secret) return { secret: "", proven: false, botIds: [], game: "" };
+  const held = await botsHoldingSecret(secret);
+  for (const id of held.botIds) await removeFromBotConfig(id, [secret]);
+  return { secret, proven: !held.unreadable, botIds: held.botIds, game: held.game };
+}
+
 // SPENT path: the buyer owns this account (a sale was detected, or a listed
 // drop flipped to claimed). Stop farming it, remove its unit from its listing
 // (unless the platform already consumed it), stamp the pool row so the
@@ -2583,47 +2741,21 @@ async function spendAccount(ledger, reason, opts = {}) {
   if (ledger.source === "noclaim") {
     const secrets = [];
     let game = ledger.game || "";
-    if (ledger.botId && ledger.container) {
-      try {
-        const raw = await readConfigRaw(ledger.botId);
-        if (raw) {
-          const cfg = JSON.parse(raw);
-          const users = (cfg.TwitchSettings && cfg.TwitchSettings.TwitchUsers) || [];
-          game = game || (cfg.FavouriteGames || [])[0] || "";
-          const victim = users.find(
-            (u) => String(u.Login || "").toLowerCase() === String(ledger.login || "").toLowerCase(),
-          );
-          const kept = victim
-            ? users.filter((u) => u.ClientSecret !== victim.ClientSecret)
-            : users;
-          cfg.TwitchSettings.TwitchUsers = kept;
-          await sh(
-            `cat > ${hosts.shq(CONFIG_PATH(ledger.botId))} && chmod 600 ${hosts.shq(CONFIG_PATH(ledger.botId))}`,
-            { timeout: 20000, input: JSON.stringify(cfg, null, 2) },
-          );
-          if (kept.length > 0) {
-            await sh(`docker restart ${hosts.shq(ledger.container)} 2>/dev/null || true`, {
-              timeout: 40000,
-            });
-          } else {
-            await sh(`docker stop ${hosts.shq(ledger.container)} 2>/dev/null || true`, {
-              timeout: 25000,
-            });
-          }
-          // Collect the secret ONLY once the account is really out of the bot:
-          // the config is written and the container has picked it up (a bot
-          // reads its config at startup only, so the restart is the step that
-          // ends the farming). Collecting it earlier — before the write, with a
-          // catch that swallows a Pi failure — stamped the pool row "spent" for
-          // an account still farming in a live container, which then reads as
-          // recyclable and can be deployed a second time. Fail closed instead:
-          // no stamp, the row stays claimed, the sweep can retry.
-          if (victim && victim.ClientSecret) secrets.push(victim.ClientSecret);
-        }
-      } catch (e) {
-        // Config surgery must never block the sale bookkeeping.
-        console.error("unclaimedAutoList: no-claim bot cleanup failed:", e.message);
-      }
+    let botIds = [];
+    try {
+      const out = await takeOutOfBots(ledger);
+      botIds = out.botIds;
+      game = game || out.game;
+      // Collect the secret ONLY once the account is provably out of every bot
+      // (see takeOutOfBots). Stamping it earlier — with a catch that swallows a
+      // host failure — marked the pool row "spent" for an account still farming
+      // in a live container, which then reads as recyclable and can be deployed
+      // a second time. Fail closed instead: no stamp, the row stays claimed, and
+      // retireSoldFromBots retries it on the next pass.
+      if (out.secret && out.proven) secrets.push(out.secret);
+    } catch (e) {
+      // Config surgery must never block the sale bookkeeping.
+      console.error("unclaimedAutoList: no-claim bot cleanup failed:", e.message);
     }
     if (secrets.length) {
       const rowsPool = await AvailableAccount.find(
@@ -2676,8 +2808,9 @@ async function spendAccount(ledger, reason, opts = {}) {
           loginLower,
           twitchId: ledger.twitchId || "",
           game,
-          botId: ledger.botId || "",
-          container: ledger.container || "",
+          // The bot it was really taken out of; the ledger's may be stale.
+          botId: botIds[0] || ledger.botId || "",
+          container: botIds[0] ? containerFor(botIds[0]) : ledger.container || "",
           sold: true,
           connected: false,
           soldWhy: label ? label + ": " + reason : "unclaimed auto-list: " + reason,
@@ -2833,6 +2966,318 @@ async function releaseToPool(ledger) {
     game: ledger.game || "",
   }).catch(() => {});
   return true;
+}
+
+// ---------------------------------------------------------------------------
+// Sold accounts leave their no-claim bot (owner's rule, 2026-09-28)
+// ---------------------------------------------------------------------------
+
+// A SOLD account must not stay in a no-claim bot: it leaves the bot and goes to
+// the recycler — a "spent — …" pool note plus the sold game in soldGames, the
+// hand-over utils/spentAccountEligibility reads. (An UNSOLD account whose event
+// ended stays and farms the next one — expireAccount.)
+//
+// Every path that sells an account is meant to do this itself, and several did
+// not: a sale through a by-game offer (Eldorado / PlayerAuctions / G2G) only
+// flips the ledger to "sold", the hand-sold tick deliberately left the account
+// farming, and a spend whose config edit failed was never retried — 114 sold
+// accounts were still in bots on 2026-09-28. This pass is the net under all of
+// them: it runs after every scan and retries until the account is provably out.
+//
+// Sold = a "sold" ledger whose sale has settled (an owner listing's unit once
+// its delivery was recorded; any other sale an hour after it — a claim-at-sale
+// order flips the ledger at claim time, before the hand-over), or a pool row
+// ticked manualSold (sold by hand). Never touched: a bot marked "my own"
+// (.personal — its accounts are fenced with manualSold but were never sold),
+// and a row whose pool note says it is rented to a renter.
+const RETIRE_MAX_PER_PASS = 60;
+const RETIRE_SETTLE_MS = 60 * 60000;
+const RETIRE_OWNER_SETTLE_MS = 30 * 60000;
+const RENTED_NOTE = /^rented to/i;
+const SPENT_NOTE = /^spent — /i;
+
+// Pure: why this account must leave its bot now, or "" to leave it there.
+//
+// A "sold" ledger is history once the pool row was claimed into a bot AFTER
+// the sale (claimedAt is stamped only by noclaimFleet.claimForGame and cleared
+// on release/recycle): the account was recycled and legitimately re-deployed —
+// for another game, its soldGames exclude the old one — and must stay.
+function reclaimedAfterSale(pool, ledger) {
+  return (
+    !!(pool && ledger && ledger.soldAt && pool.claimedAt) &&
+    new Date(pool.claimedAt).getTime() > new Date(ledger.soldAt).getTime()
+  );
+}
+
+function soldRetireReason(pool, ledger, now = Date.now()) {
+  if (!pool) return "";
+  if (ledger && ledger.status === "sold" && !reclaimedAfterSale(pool, ledger)) {
+    const at = ledger.manualListing ? ledger.manualDeliveredAt : ledger.soldAt;
+    const settle = ledger.manualListing ? RETIRE_OWNER_SETTLE_MS : RETIRE_SETTLE_MS;
+    if (at && now - new Date(at).getTime() >= settle) {
+      return (ledger.soldMarket || ledger.market || "marketplace") + " sale";
+    }
+  }
+  if (pool.manualSold === true) return "sold by hand";
+  return "";
+}
+
+// What a claim-at-sale unit sold for, when its ledger never recorded it: the
+// shelf price of the offer that delivered it (the fulfillers append the ledger
+// id to that row's units[] as contentId). Eldorado and G2G price per account;
+// PlayerAuctions counts ITEMS, so its price says nothing per account — 0 stays
+// "unknown", never a guess.
+async function deliveredUnitPrice(ledger) {
+  if (!ledger || ledger.soldPriceUsd > 0 || ledger.manualListing) return 0;
+  if (!["eldorado", "g2g"].includes(String(ledger.market || ""))) return 0;
+  const row = await MarketplaceListing.findOne(
+    { marketplace: ledger.market, "units.contentId": String(ledger._id) },
+    { price: 1 },
+  )
+    .lean()
+    .catch(() => null);
+  return row && Number(row.price) > 0 ? Number(row.price) : 0;
+}
+
+// Pool notes that belong to the no-claim farm's own history, besides its claim
+// note: held stock, and the Bots-page notes the Overwatch/CoD accounts carried
+// when they were migrated into no-claim bots by hand (2026-08-25/26) — stale
+// unless a managed bot really has the account deployed (checked by the caller).
+const NOCLAIM_LEGACY_NOTE = /^(unclaimed stock|deployed to |assigned to a bot|manual:)/i;
+
+// The recycler's hand-over for one account that just left every bot it was in.
+// `deployedElsewhere` = a managed bot has it deployed (BotAccount.configFile):
+// then the pool row belongs to that system and its note is left alone.
+async function handToRecycler(x, botIds, { deployedElsewhere = false } = {}) {
+  const { p, l, reason } = x;
+  const at = new Date();
+  const game = (l && l.game) || x.game || "";
+  const stampGame = settings.normGameName(game);
+  const games = new Set((Array.isArray(p.soldGames) ? p.soldGames : []).filter(Boolean));
+  if (stampGame) games.add(stampGame);
+  const note = String(p.claimedNote || "").trim();
+  // The sold game always goes on the row: its drops for that game are gone,
+  // whoever owns the account now. The NOTE is only this farm's to write when
+  // the row is its own (never an auto-farm or renter claim — that note is the
+  // other system's ownership record); a row that already says "spent — …"
+  // keeps its note (the recycler matches the prefix).
+  const ours =
+    !deployedElsewhere &&
+    (!note || NOCLAIM_OWNER_NOTE.test(note) || NOCLAIM_LEGACY_NOTE.test(note));
+  const spentNote = SPENT_NOTE.test(note)
+    ? note
+    : ours
+      ? "spent — " + reason + " (taken out of no-claim bot " + botIds.join(", ") + ")"
+      : "";
+  const r = await AvailableAccount.updateOne(
+    { _id: p._id, status: "claimed" },
+    { $set: { soldGames: [...games], ...(spentNote && spentNote !== note ? { claimedNote: spentNote } : {}) } },
+  );
+  if (r && (r.matchedCount || r.n)) {
+    await recordPoolUsage([p._id], {
+      event: "spent",
+      actor: "unclaimedAutoList",
+      note: spentNote || reason + " — taken out of no-claim bot " + botIds.join(", "),
+      game: stampGame || "",
+    }).catch(() => {});
+  }
+  const login = (l && l.login) || x.login || "";
+  const loginLower = String(login).toLowerCase();
+  await NoclaimSpentAccount.updateOne(
+    loginLower ? { loginLower } : { twitchId: x.twitchId || "", login },
+    {
+      $set: {
+        login,
+        loginLower,
+        twitchId: (l && l.twitchId) || x.twitchId || "",
+        game,
+        botId: botIds[0] || "",
+        container: botIds[0] ? containerFor(botIds[0]) : "",
+        sold: true,
+        connected: false,
+        soldWhy: reason + " — taken out of its bot, handed to the recycler",
+        tokenStatus: "ok",
+        actor: "unclaimedAutoList",
+        sweptAt: at,
+      },
+    },
+    { upsert: true },
+  ).catch(() => {});
+  if (l) {
+    const price = await deliveredUnitPrice(l);
+    await UnclaimedAccount.updateOne(
+      { _id: l._id, status: "sold" },
+      {
+        $set: {
+          note: "sold — taken out of its no-claim bot, handed to the recycler",
+          ...(l.soldMarket ? {} : { soldMarket: l.market || "" }),
+          ...(price ? { soldPriceUsd: price } : {}),
+          ...(l.manualListing && !l.manualSpentAt ? { manualSpentAt: at } : {}),
+        },
+      },
+    ).catch(() => {});
+  }
+  await markOwnerUnlisted({ source: "noclaim", poolAccountId: String(p._id) });
+}
+
+// The pass. `cands` are the account rows the scan just read out of every bot
+// config and `poolBySecret` their pool rows; both are only used to find who is
+// sold — membership is re-read fresh before anything is edited.
+async function retireSoldFromBots(cands, poolBySecret) {
+  const out = {
+    retired: 0, bots: 0, waiting: 0, skippedRented: 0, skippedPersonal: 0, foreignOwner: 0, errors: [],
+  };
+  if (settings.getAutoFarm().unclaimedRetireSold === false) return { ...out, off: true };
+  const bySecret = new Map();
+  for (const c of cands || []) {
+    if (c.source !== "noclaim" || !c.clientSecret) continue;
+    const p = poolBySecret.get(c.clientSecret);
+    if (p && p._id && !bySecret.has(c.clientSecret)) bySecret.set(c.clientSecret, { c, p });
+  }
+  if (!bySecret.size) return out;
+  const sold = await UnclaimedAccount.find(
+    {
+      source: "noclaim",
+      status: "sold",
+      poolAccountId: { $in: [...bySecret.values()].map((v) => String(v.p._id)) },
+    },
+    {
+      poolAccountId: 1, status: 1, soldAt: 1, market: 1, soldMarket: 1, soldPriceUsd: 1,
+      manualListing: 1, manualDeliveredAt: 1, manualSpentAt: 1, game: 1, login: 1, twitchId: 1,
+    },
+  ).lean();
+  const soldByPool = new Map(sold.map((l) => [String(l.poolAccountId), l]));
+  const now = Date.now();
+  const picks = new Map(); // clientSecret -> account to retire
+  for (const [secret, { c, p }] of bySecret) {
+    const l = soldByPool.get(String(p._id)) || null;
+    const reason = soldRetireReason(p, l, now);
+    if (!reason) {
+      // Sold, but the sale has not settled yet (not a sale it was recycled past).
+      if (l && !reclaimedAfterSale(p, l)) out.waiting++;
+      continue;
+    }
+    if (RENTED_NOTE.test(String(p.claimedNote || "").trim())) {
+      out.skippedRented++;
+      continue;
+    }
+    picks.set(secret, { p, l, reason, login: c.login, twitchId: c.twitchId, game: c.game, botId: c.botId });
+  }
+  if (!picks.size) return out;
+
+  // The personal markers first (one cheap listing), so the operator's own
+  // accounts never cost a full fleet read each pass. Fail closed: if the
+  // markers cannot be read, nothing is edited.
+  let personal;
+  try {
+    personal = await personalBotIds();
+  } catch (e) {
+    out.errors.push("could not read the bot markers: " + e.message);
+    return out;
+  }
+  for (const [secret, x] of picks) {
+    if (personal.has(String(x.botId))) {
+      out.skippedPersonal++;
+      picks.delete(secret);
+    }
+  }
+  if (!picks.size) return out;
+
+  // Fresh membership. Fail closed: with any config unreadable nothing is
+  // edited this pass — an unreadable config might hold one of these accounts.
+  let configs;
+  try {
+    configs = await readNoClaimConfigs();
+  } catch (e) {
+    out.errors.push("could not read the fleet: " + e.message);
+    return out;
+  }
+  if (!configs.length || configs.some((x) => !x.cfg)) {
+    out.errors.push("a no-claim config is unreadable — nothing taken out this pass");
+    return out;
+  }
+  const botsOf = new Map(); // clientSecret -> [bot ids holding it]
+  for (const { id, cfg } of configs) {
+    for (const u of (cfg.TwitchSettings && cfg.TwitchSettings.TwitchUsers) || []) {
+      const s = String((u && u.ClientSecret) || "");
+      if (!picks.has(s)) continue;
+      if (!botsOf.has(s)) botsOf.set(s, []);
+      if (!botsOf.get(s).includes(id)) botsOf.get(s).push(id);
+    }
+  }
+  const todo = [];
+  for (const [secret, x] of picks) {
+    const bots = botsOf.get(secret) || [];
+    if (!bots.length) continue; // already out since the scan read the configs
+    if (bots.some((id) => personal.has(id))) {
+      out.skippedPersonal++;
+      continue;
+    }
+    if (todo.length >= RETIRE_MAX_PER_PASS) break;
+    todo.push({ secret, bots, x });
+  }
+  // One config edit per bot: every account this pass takes out of it at once.
+  const perBot = new Map();
+  for (const t of todo) {
+    for (const id of t.bots) {
+      if (!perBot.has(id)) perBot.set(id, []);
+      perBot.get(id).push(t.secret);
+    }
+  }
+  const leftBots = new Map(); // clientSecret -> bot ids it is now out of
+  for (const [id, secrets] of perBot) {
+    try {
+      const res = await removeFromBotConfig(id, secrets);
+      out.bots++;
+      for (const s of res.removed) {
+        if (!leftBots.has(s)) leftBots.set(s, []);
+        leftBots.get(s).push(id);
+      }
+    } catch (e) {
+      out.errors.push("bot " + id + ": " + e.message);
+    }
+  }
+  // A managed (claiming) bot that has one of these accounts deployed owns its
+  // pool row: the account still leaves the no-claim bot, but that row's note is
+  // not ours to rewrite (handToRecycler).
+  const deployed = new Set(
+    (
+      await BotAccount.find(
+        { clientSecret: { $in: todo.map((t) => t.secret) }, configFile: { $nin: ["", null] } },
+        { clientSecret: 1 },
+      )
+        .lean()
+        .catch(() => [])
+    ).map((b) => String(b.clientSecret)),
+  );
+  for (const t of todo) {
+    const left = leftBots.get(t.secret) || [];
+    // Out of EVERY bot it was in, or the recycler does not get it yet.
+    if (left.length !== t.bots.length) continue;
+    try {
+      const deployedElsewhere = deployed.has(t.secret);
+      await handToRecycler(t.x, left, { deployedElsewhere });
+      if (deployedElsewhere) out.foreignOwner++;
+      out.retired++;
+    } catch (e) {
+      out.errors.push((t.x.login || "?") + ": " + e.message);
+    }
+  }
+  if (out.retired) {
+    logEvent({
+      category: "unclaimed",
+      action: "sold_retired",
+      actor: "unclaimedAutoList",
+      count: out.retired,
+      detail:
+        out.retired + " sold account(s) taken out of " + out.bots +
+        " no-claim bot(s) and handed to the recycler",
+    });
+  }
+  if (out.errors.length) {
+    console.error("unclaimedAutoList sold-account retire:", out.errors.slice(0, 5).join(" | "));
+  }
+  return out;
 }
 
 // Delist a set of rows (used by the operator override). Marks each row
@@ -3473,7 +3918,10 @@ async function scanAndListPass() {
   if (secrets.length) {
     const poolRows = await AvailableAccount.find(
       { clientSecret: { $in: secrets } },
-      { clientSecret: 1, password: 1, credPasswordEnc: 1, status: 1, manualSold: 1, claimedNote: 1 },
+      {
+        clientSecret: 1, password: 1, credPasswordEnc: 1, status: 1, manualSold: 1,
+        claimedNote: 1, claimedAt: 1, soldGames: 1,
+      },
     ).lean();
     for (const p of poolRows) poolBySecret.set(p.clientSecret, p);
   }
@@ -3827,6 +4275,14 @@ async function scanAndListPass() {
       console.error("unclaimedAutoList lot hook failed:", e.message);
     }
   }
+  // Sold accounts leave their bots and go to the recycler (retireSoldFromBots).
+  let retire = null;
+  try {
+    retire = await retireSoldFromBots(cands, poolBySecret);
+  } catch (e) {
+    console.error("unclaimedAutoList sold-account retire failed:", e.message);
+    retire = { error: e.message };
+  }
   return {
     candidates: work.length,
     scanned: batch.length,
@@ -3836,6 +4292,7 @@ async function scanAndListPass() {
     skipped,
     notOwned: notOwned.length,
     notOwnedSample: notOwned.slice(0, 10),
+    retire,
   };
 }
 
@@ -4149,20 +4606,12 @@ async function expirySalePass() {
         }
       }
 
-      const ledgerKeys = new Set(
-        (ledger.drops || []).map((d) => String(d.name || "").toLowerCase()),
-      );
-      let claimedNow = false;
-      if (cand.source === "noclaim") {
-        claimedNow = (inv.inProgress || []).some(
-          (d) => d.claimed && ledgerKeys.has(String(d.name || "").toLowerCase()),
-        );
-      } else {
-        claimedNow = (inv.drops || []).some(
-          (d) => d.claimed && ledgerKeys.has(String(d.name || "").toLowerCase()),
-        );
-      }
-      if (claimedNow) {
+      // A buyer claimed a listed drop (buyerClaimedListed). `inv` is
+      // inventoryForCandidate's WRAPPER — the Twitch inventory is inv.inv. This
+      // used to read inv.inProgress off the wrapper (always undefined), so a
+      // buyer's claim was never seen: the account ran into expiry instead of
+      // being spent.
+      if (buyerClaimedListed(ledger, inv && inv.inv, sellable).claimed) {
         out.sold++;
         await spendAccount(ledger, "buyer claimed a listed drop");
         return;
@@ -4417,6 +4866,11 @@ module.exports = {
   filterManualSoldLedgers,
   manualSoldOwnerKeys,
   poolOwnerBlock,
+  buyerClaimedListed,
+  soldRetireReason,
+  retireSoldFromBots,
+  removeFromBotConfig,
+  takeOutOfBots,
   markOwnerListed,
   markOwnerUnlisted,
   sellableDropsFromNoClaimInv,

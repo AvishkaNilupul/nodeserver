@@ -33,6 +33,7 @@ const { buildSetGridImage } = require("../utils/setImage");
 const AvailableAccount = require("../models/AvailableAccount");
 const BotAccount = require("../models/BotAccount");
 const NoclaimSpentAccount = require("../models/NoclaimSpentAccount");
+const UnclaimedAccount = require("../models/UnclaimedAccount");
 const { decrypt } = require("../utils/secretBox");
 const { recordPoolUsage } = require("../utils/poolUsageLog");
 const { logEvent, actorFromReq } = require("../utils/systemLog");
@@ -476,11 +477,25 @@ router.get(
       const pwMap = new Map();
       const soldMap = new Map();
       const listedMap = new Map();
+      const notForSale = new Map(); // clientSecret -> why it must not go to a buyer
       if (secrets.length) {
         const rows = await AvailableAccount.find(
           { clientSecret: { $in: secrets } },
-          { clientSecret: 1, password: 1, manualSold: 1, listed: 1 },
+          { clientSecret: 1, password: 1, manualSold: 1, listed: 1, claimedNote: 1 },
         ).lean();
+        // The two ticks above are not the only record of a sale. A sale through
+        // a marketplace offer flips the auto-lister's LEDGER to "sold" and
+        // touches neither tick, so a sold account read as unsold here and "Copy
+        // unsold" could hand it to a second buyer. A "listed"/"manual" ledger is
+        // an account on a listing right now.
+        const ledgers = await UnclaimedAccount.find(
+          {
+            poolAccountId: { $in: rows.map((r) => String(r._id)) },
+            status: { $in: ["sold", "listed", "manual"] },
+          },
+          { poolAccountId: 1, status: 1, market: 1, soldMarket: 1 },
+        ).lean();
+        const ledgerByPool = new Map(ledgers.map((l) => [String(l.poolAccountId), l]));
         for (const r of rows) {
           let pw = "";
           try {
@@ -491,6 +506,13 @@ router.get(
           pwMap.set(r.clientSecret, pw);
           soldMap.set(r.clientSecret, !!r.manualSold);
           listedMap.set(r.clientSecret, !!r.listed);
+          const l = ledgerByPool.get(String(r._id));
+          let why = "";
+          if (l && l.status === "sold") why = "sold on " + (l.soldMarket || l.market || "a marketplace");
+          else if (l && l.status === "manual") why = "on your no-claim listing";
+          else if (l) why = "on an auto-listing" + (l.market ? " (" + l.market + ")" : "");
+          else if (/^(spent|sold)/i.test(String(r.claimedNote || "").trim())) why = "spent";
+          if (why) notForSale.set(r.clientSecret, why);
         }
       }
       // Surface the credentials so the operator can list manually — this whole
@@ -502,6 +524,7 @@ router.get(
         clientSecret: u.ClientSecret || "",
         manualSold: !!soldMap.get(u.ClientSecret),
         listed: !!listedMap.get(u.ClientSecret),
+        notForSale: notForSale.get(u.ClientSecret) || "",
       }));
       res.json({
         success: true,
@@ -516,12 +539,15 @@ router.get(
 
 // ---------------------------------------------------------------------------
 // Manual "sold" tick — the operator handed this account to a buyer BY HAND.
-// The account keeps farming, but the tick is NOT memory-only: an account that
-// went to a buyer must come off every listing that still offers it, or the
-// platform can hand the same login to a second buyer. So ticking sold also
-// runs the unclaimed engine's manual-sold removal right here (delist from
-// every active row, park the ledger "removed", clear the listed tick) instead
-// of waiting up to a full auto-list pass for the same sweep to notice.
+// The tick is NOT memory-only: an account that went to a buyer must come off
+// every listing that still offers it, or the platform can hand the same login
+// to a second buyer. So ticking sold also runs the unclaimed engine's
+// manual-sold removal right here (delist from every active row, park the ledger
+// "removed", clear the listed tick) instead of waiting up to a full auto-list
+// pass for the same sweep to notice. The account itself leaves its bot on the
+// next auto-list pass and goes to the recycler (unclaimedAutoList
+// .retireSoldFromBots) — a sold account no longer keeps farming. Accounts in a
+// bot marked "my own" are never taken out.
 // ---------------------------------------------------------------------------
 router.post(
   "/api/noclaim-farm/accounts/:secret/manual-sold",
@@ -1011,6 +1037,15 @@ async function soldMapForSecrets(secrets) {
       { clientSecret: 1, soldGames: 1, claimedNote: 1 },
     ).lean(),
   ]);
+  // A marketplace sale of a no-claim account is recorded on the auto-lister's
+  // ledger (status "sold") and nowhere this scan used to look — an Eldorado
+  // sale read as unsold. (manualSold is NOT used: it also fences the
+  // operator's own personal-bot accounts, which were never sold.)
+  const soldLedgers = await UnclaimedAccount.find(
+    { poolAccountId: { $in: pool.map((p) => String(p._id)) }, status: "sold" },
+    { poolAccountId: 1, market: 1, soldMarket: 1 },
+  ).lean();
+  const soldByPool = new Map(soldLedgers.map((l) => [String(l.poolAccountId), l]));
   for (const b of bots) {
     let why = "";
     if (b.soldAt) why = "shop sale";
@@ -1020,6 +1055,11 @@ async function soldMapForSecrets(secrets) {
   }
   for (const p of pool) {
     if (map.has(p.clientSecret)) continue; // BotAccount signal already wins
+    const l = soldByPool.get(String(p._id));
+    if (l) {
+      map.set(p.clientSecret, { sold: true, why: "sold on " + (l.soldMarket || l.market || "a marketplace") });
+      continue;
+    }
     if (Array.isArray(p.soldGames) && p.soldGames.length) {
       // NOT proof of a sale: a previous spent sweep stamps soldGames for a
       // CONNECTED account too. Say "spent", not "sold", so the operator is not
