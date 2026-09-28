@@ -667,6 +667,19 @@ const REACTIVATE_LOOP_THRESHOLD = 3;
 // Auto-feed (Plati / GGSel quantity listings)
 // ------------------------------------------------------------------
 
+// May the auto-feed add accounts to this marketplace? Plati and GGSel each
+// have an owner's on/off switch (and Plati also stops while its seller is
+// blocked); every other market is always open here.
+function marketTakesNewStock(marketplace) {
+  if (marketplace === "digiseller") {
+    return typeof mp.digisellerTakesNewStock !== "function" || mp.digisellerTakesNewStock();
+  }
+  if (marketplace === "ggsel") {
+    return typeof mp.ggselTakesNewStock !== "function" || mp.ggselTakesNewStock();
+  }
+  return true;
+}
+
 // Did the marketplace refuse the stock read outright, rather than merely
 // answer with something we couldn't parse? A refusal is account-wide (the
 // seller is blocked, the key was revoked or lost its rights), so it hits every
@@ -1130,15 +1143,9 @@ async function feedListing(row, seenKeys, refusals) {
     }
     return 0;
   }
-  // Plati switched off, or its seller account blocked: the read and the sale
-  // bookkeeping above still run, but no new account is fed onto the product.
-  if (
-    row.marketplace === "digiseller" &&
-    typeof mp.digisellerTakesNewStock === "function" &&
-    !mp.digisellerTakesNewStock()
-  ) {
-    return 0;
-  }
+  // Plati or GGSel switched off (or the Plati seller blocked): the read and the
+  // sale bookkeeping above still run, but no new account is fed onto the offer.
+  if (!marketTakesNewStock(row.marketplace)) return 0;
   let claimed;
   let fulfiller = null;
   if (supplied) {

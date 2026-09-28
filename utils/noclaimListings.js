@@ -1787,15 +1787,15 @@ async function topUpRow(row) {
       return 0;
     }
     if (delistingState(cur)) return 0;
-    // Plati switched off, or its seller account blocked: never claim accounts
-    // onto a product nobody can buy.
-    if (
-      cur.marketplace === "digiseller" &&
-      typeof mp.digisellerTakesNewStock === "function" &&
-      !mp.digisellerTakesNewStock()
-    ) {
-      return 0;
-    }
+    // Plati or GGSel switched off (or the Plati seller blocked): never claim
+    // accounts onto an offer that is not to take new stock.
+    const takes =
+      cur.marketplace === "digiseller"
+        ? mp.digisellerTakesNewStock
+        : cur.marketplace === "ggsel"
+          ? mp.ggselTakesNewStock
+          : null;
+    if (typeof takes === "function" && !takes()) return 0;
     const want = Math.min(
       TOPUP_MAX_PER_ROW,
       (Number(cur.qtyTarget) || 0) - undeliveredUnits(cur).length,

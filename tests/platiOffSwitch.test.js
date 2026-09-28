@@ -10,6 +10,8 @@
 // These tests pin the fix: a blocked seller costs one log line per pause and no
 // requests inside it, the pause lifts on its own, and no automatic lister puts
 // new stock on Plati while the owner's switch is off or the seller is blocked.
+// GGSel got the same owner's switch the same day (autoFarm.ggselEnabled), when
+// the owner took both markets out to sell their accounts elsewhere.
 const test = require("node:test");
 const assert = require("node:assert");
 const Module = require("node:module");
@@ -200,12 +202,15 @@ function loadWith(modulePath, stubsByRequest) {
   }
 }
 
-function engineWith({ autoFarm, takes }) {
+function engineWith({ autoFarm, takes, ggselCat = "", lookups = [] }) {
   return loadWith("../utils/unclaimedAutoList", {
     "./settings": (real) => ({ ...real, getAutoFarm: () => autoFarm, gameMarketsFor: () => null }),
     "./marketplaces": (real) => ({
       ...real,
-      ggselResolveCategoryId: async () => "",
+      ggselResolveCategoryId: async (game) => {
+        lookups.push(game);
+        return ggselCat;
+      },
       ...(takes === undefined ? { digisellerTakesNewStock: undefined } : { digisellerTakesNewStock: () => takes }),
     }),
   });
@@ -224,6 +229,37 @@ test("no-claim auto-lister: Plati is offered only while it can take stock", asyn
     const { markets } = await engine.enabledMarketsForGame("Call of Duty: Black Ops 7");
     assert.deepStrictEqual(markets, want, why);
   }
+});
+
+test("no-claim auto-lister: GGSel is offered only while its switch is on — no lookup when off", async () => {
+  const base = { platiCategoryId: "34187", platiEnabled: false };
+  const onLookups = [];
+  const on = engineWith({ autoFarm: { ...base }, takes: true, ggselCat: "32450", lookups: onLookups });
+  const a = await on.enabledMarketsForGame("Call of Duty: Black Ops 7");
+  assert.deepStrictEqual(a.markets, ["gameflip", "ggsel"], "switch unset = on");
+  assert.strictEqual(a.ggselCategoryId, "32450");
+  assert.strictEqual(onLookups.length, 1);
+
+  const offLookups = [];
+  const off = engineWith({ autoFarm: { ...base, ggselEnabled: false }, takes: true, ggselCat: "32450", lookups: offLookups });
+  const b = await off.enabledMarketsForGame("Call of Duty: Black Ops 7");
+  assert.deepStrictEqual(b.markets, ["gameflip"], "owner switched GGSel off");
+  assert.strictEqual(b.ggselCategoryId, "", "no category, so a GGSel rebuild cannot republish");
+  assert.strictEqual(offLookups.length, 0, "and GGSel is not even asked for a category");
+});
+
+test("auto-farm lister: ggselTakesNewStock follows the owner's switch", () => {
+  const lister = loadWith("../utils/autoLister", {});
+  assert.strictEqual(lister.ggselTakesNewStock({}), true, "unset = on");
+  assert.strictEqual(lister.ggselTakesNewStock({ ggselEnabled: true }), true);
+  assert.strictEqual(lister.ggselTakesNewStock({ ggselEnabled: false }), false);
+});
+
+test("ggselTakesNewStock: the owner's switch", () => {
+  const on = loadMarketplaces({ answer: () => IN_STOCK(1), autoFarm: {} }).mod;
+  assert.strictEqual(on.ggselTakesNewStock(), true);
+  const off = loadMarketplaces({ answer: () => IN_STOCK(1), autoFarm: { ggselEnabled: false } }).mod;
+  assert.strictEqual(off.ggselTakesNewStock(), false);
 });
 
 test("auto-farm lister: platiTakesNewStock and the reason a listing got no Plati share", () => {
@@ -247,12 +283,12 @@ test("auto-farm lister: platiTakesNewStock and the reason a listing got no Plati
 // The guardian's auto-feed: reads (and books sales) as before, feeds nothing.
 // ---------------------------------------------------------------------------
 
-function loadGuardian({ takes }) {
+function loadGuardian({ takes, marketplace = "digiseller" }) {
   const world = { claims: 0, added: [], stockReads: 0, lastStock: [] };
   const row = {
-    _id: "listing-plati-1",
-    marketplace: "digiseller",
-    externalId: "6100001",
+    _id: "listing-" + marketplace + "-1",
+    marketplace,
+    externalId: marketplace === "ggsel" ? "103200001" : "6100001",
     qtyTarget: 4,
     lastStock: 2, // equal to the read below: no sale inferred
     set: "set-1",
@@ -272,9 +308,24 @@ function loadGuardian({ takes }) {
       return 2;
     },
     digisellerTakesNewStock: () => takes,
+    async ggselOfferStockDetailed() {
+      world.stockReads++;
+      return { stock: 2, reason: "" };
+    },
+    async ggselEnableAutoselling() {},
+    async ggselAddProducts(externalId, codes) {
+      world.added.push({ externalId, codes });
+    },
+    async ggselFinalizeStock() {
+      return { stock: 4, reactivated: false, pending: false };
+    },
+    async ggselOfferStock() {
+      return 2;
+    },
+    ggselTakesNewStock: () => takes,
   };
-  const fakeDs = {
-    DS_CLAIM_TAG: "digiseller",
+  const claimFor = (tag) => ({
+    [tag === "ggsel" ? "GG_CLAIM_TAG" : "DS_CLAIM_TAG"]: tag,
     async claimAccountsForSet(set, need) {
       world.claims++;
       return Array.from({ length: need }, (_, i) => ({
@@ -284,10 +335,11 @@ function loadGuardian({ takes }) {
       }));
     },
     async releaseAccounts() {},
-  };
+  });
   const stubs = new Map([
     [require.resolve("../utils/marketplaces"), fakeMp],
-    [require.resolve("../utils/digisellerFulfiller"), fakeDs],
+    [require.resolve("../utils/digisellerFulfiller"), claimFor("digiseller")],
+    [require.resolve("../utils/ggselFulfiller"), claimFor("ggsel")],
     [
       require.resolve("../models/AuditFinding"),
       {
@@ -397,4 +449,31 @@ test("guardian: Plati on → the same row is topped up as before", async () => {
   assert.strictEqual(world.claims, 1);
   assert.strictEqual(world.added.length, 1);
   assert.strictEqual(world.added[0].codes.length, 2);
+});
+
+test("guardian: GGSel off → the stock is still read, but no account is fed", async () => {
+  const { guardian, world, restore, row } = loadGuardian({ takes: false, marketplace: "ggsel" });
+  let fed;
+  try {
+    fed = await guardian.feedOne(row._id);
+  } finally {
+    restore();
+  }
+  assert.strictEqual(fed, 0);
+  assert.strictEqual(world.stockReads, 1, "the read still runs — it is what books a sale");
+  assert.strictEqual(world.claims, 0);
+  assert.strictEqual(world.added.length, 0);
+});
+
+test("guardian: GGSel on → the same offer is topped up as before", async () => {
+  const { guardian, world, restore, row } = loadGuardian({ takes: true, marketplace: "ggsel" });
+  let fed;
+  try {
+    fed = await guardian.feedOne(row._id);
+  } finally {
+    restore();
+  }
+  assert.strictEqual(fed, 2);
+  assert.strictEqual(world.claims, 1);
+  assert.strictEqual(world.added.length, 1);
 });

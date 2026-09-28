@@ -172,6 +172,12 @@ const AUTO_FARM_DEFAULTS = {
   // digisellerTakesNewStock), whatever this says.
   platiEnabled: true,
   ggselCategoryId: "",
+  // GGSel on/off for every AUTOMATIC lister — same reach and meaning as
+  // platiEnabled above: OFF = no new offer and no new product goes to GGSel;
+  // offers already there are left as they are. Set false on prod 2026-09-28:
+  // the owner took Plati and GGSel out ("use the accounts on the others, we
+  // will renovate there later").
+  ggselEnabled: true,
   // ZeusX auto-listing. Off unless the owner turns it on; a game only
   // lists when zeusxGames has its category, e.g.
   //   { overwatch: { serviceCategoryId: "1", serviceCategoryBaseId: "269" } }

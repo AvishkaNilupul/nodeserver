@@ -2541,6 +2541,15 @@ async function ggselFinalizeStock(offerId) {
 }
 
 // GGSel has no delete-offer API; pausing takes it off sale (reversible).
+// May an AUTOMATIC lister put new stock on GGSel — a new offer, or more
+// products on one? Only while the owner's switch is on (settings
+// autoFarm.ggselEnabled). Offers already on GGSel are not touched by this.
+function ggselTakesNewStock() {
+  const s = loadSettings() || {};
+  const af = s.autoFarm && typeof s.autoFarm === "object" ? s.autoFarm : {};
+  return af.ggselEnabled !== false;
+}
+
 async function ggselDelist(offerId) {
   const keys = requireKeys("ggsel");
   try {
@@ -6336,6 +6345,7 @@ module.exports = {
   ggselEnableAutoselling,
   ggselFinalizeStock,
   ggselDelist,
+  ggselTakesNewStock,
   zeusxTest,
   zeusxRefreshAccessToken,
   zeusxEnsureFreshToken,

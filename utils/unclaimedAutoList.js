@@ -1252,13 +1252,17 @@ async function enabledMarketsForGame(game) {
   const af = settings.getAutoFarm();
   const markets = ["gameflip"];
   if (platiTakesNewStock(af)) markets.push("digiseller");
+  // GGSel only while the owner's switch is on (autoFarm.ggselEnabled) — and
+  // no category lookup at all while it is off.
   let ggselCategoryId = "";
-  try {
-    ggselCategoryId = await mp.ggselResolveCategoryId(game);
-  } catch {
-    ggselCategoryId = "";
+  if (af.ggselEnabled !== false) {
+    try {
+      ggselCategoryId = await mp.ggselResolveCategoryId(game);
+    } catch {
+      ggselCategoryId = "";
+    }
+    if (!ggselCategoryId) ggselCategoryId = String(af.ggselCategoryId || "");
   }
-  if (!ggselCategoryId) ggselCategoryId = String(af.ggselCategoryId || "");
   if (ggselCategoryId) markets.push("ggsel");
   // Per-game restriction (settings.unclaimedGameMarkets): e.g. Overwatch on
   // Gameflip only, so the other accounts stay free for manual bulk sale.
@@ -2861,6 +2865,10 @@ async function rebuildGgselOffer(oldRow, remainingUnits, opts = {}) {
   const down = await delistRowVerified(current, "rebuilt after unit removal");
   if (!down.ok || !down.changed) return;
   if (!units.length) return;
+  // GGSel switched off: the old offer comes down, no replacement goes up. The
+  // remaining units' ledgers then sit on no live row, and the reconcile pass
+  // parks them held for the markets that are on.
+  if (settings.getAutoFarm().ggselEnabled === false) return;
   let img = "";
   try {
     img = await buildSetGridImage(set);

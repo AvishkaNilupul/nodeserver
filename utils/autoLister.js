@@ -68,6 +68,12 @@ function platiTakesNewStock(af) {
   return typeof mp.digisellerTakesNewStock === "function" ? mp.digisellerTakesNewStock() : true;
 }
 
+// GGSel takes new stock — a new offer, or more products on one — only while
+// the owner's switch is on (autoFarm.ggselEnabled).
+function ggselTakesNewStock(af) {
+  return !!af && af.ggselEnabled !== false;
+}
+
 // Why a listing got no Plati share, for its plati.error.
 function platiOffReason(af) {
   if (!af.platiCategoryId) return "no Plati category id in auto-farm settings";
@@ -1258,7 +1264,9 @@ async function retryMissingSecondaries(task) {
   // on each sweep.
   const platiMissing =
     !(L.plati && L.plati.externalId) && platiTakesNewStock(settings.getAutoFarm());
-  const ggselMissing = !(L.ggsel && L.ggsel.externalId);
+  // Same for GGSel: switched off, a task without a GGSel offer is complete.
+  const ggselMissing =
+    !(L.ggsel && L.ggsel.externalId) && ggselTakesNewStock(settings.getAutoFarm());
   // ZeusX was added after this retry existed, so it was only ever attempted in
   // the same second as the initial publish: a task listed before ZeusX was
   // switched on, or whose ZeusX publish failed once, never got an offer there
@@ -1637,9 +1645,11 @@ async function refillMarkets(task, { perMarketStock = 3 } = {}) {
   }
 
   // --- GGSel: live stock read, add products, resync sellable quantity.
+  // Never while GGSel is switched off.
   if (
     L.ggsel &&
     L.ggsel.externalId &&
+    ggselTakesNewStock(settings.getAutoFarm()) &&
     (await listingIsLive("ggsel", L.ggsel.externalId))
   ) {
     try {
@@ -1879,7 +1889,7 @@ async function listActivatedTask(taskId, { dryRun = false } = {}) {
   const g2gEnabled = !!af.g2gAuto && !!brandForGame(task.game);
   const marketOrder = ["gameflip"];
   if (platiEnabled) marketOrder.push("plati");
-  if (ggselCategoryId) marketOrder.push("ggsel");
+  if (ggselCategoryId && ggselTakesNewStock(af)) marketOrder.push("ggsel");
   if (zeusxEnabled) marketOrder.push("zeusx");
   if (eldoradoEnabled) marketOrder.push("eldorado");
   if (paEnabled) marketOrder.push("playerauctions");
@@ -2018,6 +2028,8 @@ async function listActivatedTask(taskId, { dryRun = false } = {}) {
       } catch (err) {
         ggsel.error = err.message;
       }
+    } else if (!ggselTakesNewStock(af)) {
+      ggsel.error = "GGSel is switched off in auto-farm settings";
     } else if (!ggselCategoryId) {
       ggsel.error =
         "no GGSel category found for " +
@@ -2222,7 +2234,7 @@ async function publishStackedListing({
   if (!ggselCategoryId) ggselCategoryId = String(af.ggselCategoryId || "");
   const marketOrder = ["gameflip"];
   if (platiEnabled) marketOrder.push("plati");
-  if (ggselCategoryId) marketOrder.push("ggsel");
+  if (ggselCategoryId && ggselTakesNewStock(af)) marketOrder.push("ggsel");
   const shares = { gameflip: [], plati: [], ggsel: [] };
   accounts.forEach((acc, i) => {
     shares[marketOrder[i % marketOrder.length]].push(acc);
@@ -2311,6 +2323,8 @@ async function publishStackedListing({
       } catch (err) {
         ggsel.error = err.message;
       }
+    } else if (!ggselTakesNewStock(af)) {
+      ggsel.error = "GGSel is switched off in auto-farm settings";
     } else if (!ggselCategoryId) {
       ggsel.error =
         "no GGSel category found for " +
@@ -3331,6 +3345,7 @@ module.exports = {
   isAutoOwned,
   // exported for tests
   platiTakesNewStock,
+  ggselTakesNewStock,
   platiOffReason,
   listingIsLive,
   buildTitle,
