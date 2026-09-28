@@ -62,6 +62,7 @@ const REAL_DEPS = {
   unclaimedCoverage: () => require("./unclaimedCoverage"),
   unclaimedListingAudit: () => require("./unclaimedListingAudit"),
   unclaimedAutoList: () => require("./unclaimedAutoList"),
+  fleetIntegrity: () => require("./fleetIntegrity"),
   marketplaces: () => require("./marketplaces"),
   connectors: () => require("./systemHealthConnectors"),
   eldoradoFarmService: () => require("./eldoradoFarmService"),
@@ -1743,6 +1744,41 @@ const CHECKS = [
           "; " +
           AUTOLIST_STALE_TICKS +
           " missed ticks is the budget.",
+      };
+    },
+  },
+
+  {
+    id: "fleet.oneHome",
+    title: "One account, one bot",
+    group: "pool",
+    severity: "critical",
+    // Reads every bot config on every host (one batched read per host) plus
+    // every no-claim bot config — the only true record of where an account
+    // farms. dupeGuard keeps an account to one regular config per host and
+    // never sees another host or the no-claim tree, which is how 32 accounts
+    // farmed in two bots at once for 54 hours from 2026-09-25.
+    timeoutMs: 150 * 1000,
+    async run(ctx) {
+      const integrity = ctx.dep("fleetIntegrity");
+      const r = await integrity.oneAccountOneBot();
+      const n = r.collisions.length;
+      const blind = r.unreadable.length;
+      return {
+        status: n ? "fail" : blind ? "warn" : "ok",
+        measured: n,
+        threshold: "0 accounts enabled in two bot configs",
+        summary: n
+          ? n + " account(s) are enabled in two or more bots at once"
+          : "every account farms in one bot (" + r.accounts + " accounts, " + r.configs + " configs)" +
+            (blind ? " — " + blind + " config(s) could not be read" : ""),
+        detail:
+          "Read-only. Decide which bot keeps each account and remove it from the " +
+          "others (a no-claim account that is sold goes to the recycler)." +
+          (blind ? " Unreadable: " + r.unreadable.slice(0, 5).join("; ") : ""),
+        items: capItems(
+          r.collisions.map((c) => ({ login: c.login, secret: c.secretTail, bots: c.homes.join(", ") })),
+        ),
       };
     },
   },

@@ -331,6 +331,9 @@ function healthyDeps(over = {}) {
     gatherPoolEligibility: async () => ({
       eligible: Array.from({ length: 364 }, (_, i) => ({ username: "p" + i })),
     }),
+    fleetIntegrity: {
+      oneAccountOneBot: async () => ({ at: now, configs: 40, accounts: 1800, collisions: [], unreadable: [] }),
+    },
     ...over,
   };
 }
@@ -1205,4 +1208,43 @@ test("an unreadable offer list is unknown, never ok", async () => {
   assert.strictEqual(out.status, "unknown");
   assert.ok(out.threshold && out.threshold.length, "even an unknown states its threshold");
   assert.match(out.detail, /failure to measure/);
+});
+
+/* ========================================================================== *
+ * One account, one bot
+ * ========================================================================== */
+
+test("fleet.oneHome: an account enabled in two bots fails the check and names both", async () => {
+  const row = await runCheck(
+    "fleet.oneHome",
+    healthyDeps({
+      fleetIntegrity: {
+        oneAccountOneBot: async () => ({
+          at: now,
+          configs: 41,
+          accounts: 1800,
+          collisions: [{ login: "twice", secretTail: "…abcd", homes: ["contabo/config_42.json", "no-claim bot 14"] }],
+          unreadable: [],
+        }),
+      },
+    }),
+  );
+  assert.strictEqual(row.status, "fail");
+  assert.strictEqual(row.measured, 1);
+  assert.deepStrictEqual(row.items, [{ login: "twice", secret: "…abcd", bots: "contabo/config_42.json, no-claim bot 14" }]);
+});
+
+test("fleet.oneHome: clean but with an unreadable config is a warning, not an all-clear", async () => {
+  const row = await runCheck(
+    "fleet.oneHome",
+    healthyDeps({
+      fleetIntegrity: {
+        oneAccountOneBot: async () => ({ at: now, configs: 30, accounts: 900, collisions: [], unreadable: ["pi: unreachable"] }),
+      },
+    }),
+  );
+  assert.strictEqual(row.status, "warn");
+  assert.match(row.summary, /could not be read/);
+  const ok = await runCheck("fleet.oneHome", healthyDeps());
+  assert.strictEqual(ok.status, "ok");
 });

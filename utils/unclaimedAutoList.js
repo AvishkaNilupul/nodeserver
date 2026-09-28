@@ -5555,6 +5555,7 @@ module.exports = {
   publishGameflipSuccessor,
   oldestListedUnit,
   collectNoClaimCandidates,
+  readNoClaimConfigs,
   inventoryForCandidate,
   candForLedger,
   runOnce,
