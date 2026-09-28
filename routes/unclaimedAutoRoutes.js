@@ -12,6 +12,7 @@ const { requireSuperadmin } = require("../middleware/auth");
 const { logEvent, actorFromReq } = require("../utils/systemLog");
 const settings = require("../utils/settings");
 const engine = require("../utils/unclaimedAutoList");
+const audit = require("../utils/unclaimedListingAudit");
 const MarketplaceListing = require("../models/MarketplaceListing");
 const UnclaimedAccount = require("../models/UnclaimedAccount");
 const DropSet = require("../models/DropSet");
@@ -268,6 +269,49 @@ router.get("/api/unclaimed-auto/listings", requireSuperadmin, async (req, res) =
       )
       .lean();
     res.json({ success: true, rows });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+// Report-only listing drift: which live auto-lister bundles now advertise items
+// their accounts no longer hold (relist), or could be sold as a fuller bundle
+// (rebundle). DB-only — it reads the ledger snapshot the expiry pass refreshes
+// each tick, so it makes NO marketplace or Pi call and is safe to hit on demand.
+// Nothing here changes a listing; the operator relists via the audit CLI.
+router.get("/api/unclaimed-auto/listing-health", requireSuperadmin, async (req, res) => {
+  try {
+    const rows = await audit.listingDriftReport();
+    const counts = rows.reduce((a, r) => {
+      a[r.verdict] = (a[r.verdict] || 0) + 1;
+      return a;
+    }, {});
+    res.json({ success: true, rows, counts });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+// Rebundle fix: rewrite drifted "rebundle" listings to advertise the fuller set
+// their accounts now hold, at the SAME price. Default is a DRY RUN (no writes);
+// pass { apply: true } to publish. Scoped to the in-place markets
+// (gameflip/ggsel) by default — digiseller has no text-edit API and is reported
+// as needs-republish rather than touched. Returns a change report either way.
+router.post("/api/unclaimed-auto/rebundle", requireSuperadmin, async (req, res) => {
+  try {
+    const dryRun = req.body.apply !== true;
+    const markets =
+      Array.isArray(req.body.markets) && req.body.markets.length
+        ? req.body.markets
+        : audit.REBUNDLE_INPLACE_MARKETS;
+    const report = await audit.rebundleAll({ dryRun, markets });
+    logEvent({
+      category: "unclaimed",
+      action: dryRun ? "rebundle_dryrun" : "rebundle_apply",
+      actor: actorFromReq(req),
+      meta: { applied: report.filter((r) => r.applied).length, markets },
+    });
+    res.json({ success: true, dryRun, markets, report });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
   }
@@ -797,6 +841,7 @@ const UNCLAIMED_PRICING_KEYS = {
   unclaimedFullEventBonusPct: ["number", 0, 1000, false, "fullEventBonusPct"],
   unclaimedRepriceExisting: ["boolean", null, null, false, "repriceExisting"],
   unclaimedRepriceDriftPct: ["number", 1, 1000, false, "repriceDriftPct"],
+  unclaimedAutoRebundle: ["boolean", null, null, false, "autoRebundle"],
   unclaimedGameflipLots: ["boolean", null, null, false, "lots"],
   unclaimedLotSize: ["number", 2, 100, true, "lotSize"],
   unclaimedLotDiscountPct: ["number", 0, 90, false, "lotDiscountPct"],
