@@ -26,7 +26,6 @@ const DropSet = require("../models/DropSet");
 const MarketplaceListing = require("../models/MarketplaceListing");
 const dsFulfiller = require("./digisellerFulfiller");
 const ggFulfiller = require("./ggselFulfiller");
-const fpFulfiller = require("./funpayFulfiller");
 const mp = require("./marketplaces");
 const { sendTelegram } = require("./telegram");
 const accountState = require("./twitchAccountState");
@@ -36,7 +35,6 @@ const CLAIM_TAGS = {
   ggsel: ggFulfiller.GG_CLAIM_TAG,
   digiseller: dsFulfiller.DS_CLAIM_TAG,
   gameflip: "gameflip",
-  funpay: fpFulfiller.FP_CLAIM_TAG,
 };
 
 // Last pass summary for the UI ("checking… found N").
@@ -318,7 +316,17 @@ async function runChecks(allRows, seenKeys) {
   // No-claim rows (docs/NOCLAIM-SHOP-LISTINGS-CONTRACT.md §6) are skipped for
   // the same reason: their units are no-claim farm accounts committed through
   // utils/noclaimStock's ledger, with no DropLog reservation behind them.
-  const rows = allRows.filter((r) => !r.accountOffer && !r.noclaimStock);
+  //
+  // Gameflip rent-farm buffer rows (docs/GAMEFLIP-RENT-FARM-CONTRACT.md) sell a
+  // rental window, not stock: no set, no accountId, just the pool account's
+  // login, held through utils/gameflipFarmService's rentFarmPoolId. Their set
+  // used to reach the DropSet lookup below as the string "undefined", and the
+  // CastError it threw killed every pass from that line on — claim-mismatch,
+  // redeemed-drops, orphaned reservations, autoResolveStale and auto-heal were
+  // all skipped fleet-wide, with one log line to show for it.
+  const rows = allRows.filter(
+    (r) => !r.accountOffer && !r.noclaimStock && !r.rentFarm,
+  );
   let found = 0;
   const flag = async (f) => {
     seenKeys.add(f.dedupeKey);
@@ -444,7 +452,11 @@ async function runChecks(allRows, seenKeys) {
 
   // 3. Redeemed drops: for each listing's set, accounts whose drops for the
   // set's items are already connected can no longer deliver those rewards.
-  const setIds = [...new Set(rows.map((r) => String(r.set)))];
+  // Only rows that HAVE a set: String() of a missing one is "undefined", which
+  // Mongoose refuses to cast and which fails the whole lookup, not just its row.
+  const setIds = [
+    ...new Set(rows.filter((r) => r.set).map((r) => String(r.set))),
+  ];
   const sets = setIds.length
     ? await DropSet.find({ _id: { $in: setIds } }, { items: 1, name: 1 }).lean()
     : [];
@@ -900,7 +912,7 @@ async function claimSupplied(row, need, target, seenKeys) {
 // bookkeeping failure must not undo a feed the platform has already accepted.
 //
 // The unit's `contentId` carries the SuppliedAccount id, matching what every
-// other ledger-backed fulfiller writes there (eldorado, g2g and z2u all put
+// other ledger-backed fulfiller writes there (eldorado and g2g both put
 // their `ledgerId` in this field). The platform's own content id goes onto the
 // ledger row instead, which is the only place a supplied unit is looked up
 // from. `accountId` stays empty because it is one of the two fields runChecks

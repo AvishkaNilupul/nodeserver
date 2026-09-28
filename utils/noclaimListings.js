@@ -598,7 +598,7 @@ async function publishVault(name, { set, body, title, description, priceUsd, cov
       // GGSel rows only: the category the offer was filed under. GGSel cannot
       // drop a single product, so taking one unit off republishes the offer
       // (rebuildGgsel) and needs the owner's category back. The field is
-      // FunPay's category node elsewhere; nothing reads it off a GGSel row.
+      // another market's category node elsewhere; nothing reads it off a GGSel row.
       externalNode: ggCategory,
       url: r.url || "",
       title,

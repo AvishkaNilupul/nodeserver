@@ -57,6 +57,12 @@ const AUTO_FARM_DEFAULTS = {
   // Bundles panel has a dry-run "Reprice" button either way.
   unclaimedRepriceExisting: false,
   unclaimedRepriceDriftPct: 20,
+  // Automatic campaign-scoped rebundle: every check tick, retitle any live
+  // gameflip/ggsel/eldorado no-claim listing that now under-advertises (its
+  // accounts farmed more items of the events it already sells), at the SAME
+  // price, with a 1-hour per-listing cooldown. Kill switch — ships OFF; the
+  // "Apply rebundle fixes" button in the Auto-list tab is the manual path.
+  unclaimedAutoRebundle: false,
   // Gameflip "lot of N accounts" listings (utils/unclaimedLots.js). Ships OFF.
   unclaimedGameflipLots: false,
   unclaimedLotSize: 5,
@@ -156,13 +162,6 @@ const AUTO_FARM_DEFAULTS = {
   platiCategoryId: "34187",
   platiAttributes: [{ attributeId: 91328, attributeValueId: 183570 }],
   ggselCategoryId: "",
-  // FunPay category ("node") per game, for market research only — FunPay has
-  // no cross-game search, so a game is invisible there until its node is
-  // known. The research scanner already learns nodes from our own FunPay
-  // listings (each one records the node it was published to), so this is only
-  // needed for games we have not published there yet.
-  //   { "overwatch 2": "2430", "rainbow six siege": "1813" }
-  funpayNodes: {},
   // ZeusX auto-listing. Off unless the owner turns it on; a game only
   // lists when zeusxGames has its category, e.g.
   //   { overwatch: { serviceCategoryId: "1", serviceCategoryBaseId: "269" } }
