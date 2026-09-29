@@ -241,7 +241,8 @@ or JSON:
           JSON still works too: raw <code>{ username, password, email }</code> credentials or a bot-config
           <code>{ Login, ClientSecret, UniqueId, Id }</code> entry, or a mix. Matched by username;
           if the same account already exists here it's filled in rather than duplicated, and anything
-          already running in a live bot is skipped automatically.
+          already running in a live bot is skipped automatically. Up to <b>10,000 accounts</b> per import —
+          split a bigger list into several pastes.
         </div>
       </div>
     </div>
@@ -287,7 +288,7 @@ or JSON:
     const r = await fetch(url, Object.assign({ credentials: "same-origin", headers: { "Content-Type": "application/json" } }, opts));
     if (r.status === 401) { window.location.href = "/admin-login.html"; throw new Error("unauth"); }
     let j = {}; try { j = await r.json(); } catch (e) {}
-    if (!r.ok || j.success === false) throw new Error(j.message || ("HTTP " + r.status));
+    if (!r.ok || j.success === false) throw new Error(j.message || (r.status === 413 ? "Too much in one paste — split it into smaller batches" : "HTTP " + r.status));
     return j;
   }
 
@@ -686,7 +687,10 @@ or JSON:
     const old = btn.textContent;
     btn.disabled = true; btn.textContent = "Importing…";
     try {
-      const r = await api("/account-pool/import", { method: "POST", body: JSON.stringify({ accounts: raw }) });
+      // Raw text/plain, not JSON: express.json is capped at 100kb app-wide, which
+      // refused a bulk paste with a 413. The import route reads text/plain up to
+      // 25mb (routes/accountPoolRoutes.js).
+      const r = await api("/account-pool/import", { method: "POST", headers: { "Content-Type": "text/plain; charset=utf-8" }, body: raw });
       const parts = [];
       if (r.added) parts.push(r.added + " added");
       if (r.merged) parts.push(r.merged + " filled in on existing entries");
