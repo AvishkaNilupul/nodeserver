@@ -32,6 +32,26 @@ test('a TalkJS USER id carries the "_n" suffix a conversation id does not', () =
   assert.strictEqual(mp.eldNymId("x"), mp.eldInternalId("x") + "_n");
 });
 
+test("a chat is 'ready' only once Eldorado has minted the conversation id", () => {
+  // Eldorado creates the TalkJS conversation LAZILY: a freshly-paid order carries
+  // talkJsConversationId=null until the chat is first opened, and the internal id
+  // we post to is sha1(that GUID) — with no GUID there is nothing to post to, and
+  // nothing we can invent (the GUID is Eldorado's, and it links the buyer in as a
+  // participant). The fulfillers gate on this so a chat-less order is HELD, not
+  // failed, and never has a pool account burned or stock claimed before it can be
+  // handed over. This was the 2026-09-20 "order has no talkJsConversationId" page.
+  assert.strictEqual(mp.eldoradoOrderChatReady(null), false);
+  assert.strictEqual(mp.eldoradoOrderChatReady({ sellerId: "s" }), false);
+  assert.strictEqual(mp.eldoradoOrderChatReady({ talkJsConversationId: null, sellerId: "s" }), false);
+  assert.strictEqual(mp.eldoradoOrderChatReady({ talkJsConversationId: "", sellerId: "s" }), false);
+  // sellerId is needed too — it derives the sender nymId on the send.
+  assert.strictEqual(mp.eldoradoOrderChatReady({ talkJsConversationId: "c-1" }), false);
+  assert.strictEqual(
+    mp.eldoradoOrderChatReady({ talkJsConversationId: "43a2c023-9dd3", sellerId: "c806ac96" }),
+    true,
+  );
+});
+
 test("internal id derivation is stable and collision-distinct", () => {
   const a = mp.eldInternalId("order-a");
   const b = mp.eldInternalId("order-b");

@@ -220,7 +220,23 @@
         await api("POST", `/ai-chat/chats/${chatId}/ask`, { content:text, mode });
         startPoll();
       }catch(e){
-        messagesEl.insertAdjacentHTML("beforeend", `<div class="msg assistant"><div class="avatar">AI</div><div class="bubble"><span class="err">⚠ ${esc(e.message)}</span></div></div>`);
+        // Do NOT dead-end here. Two common cases both mean the turn is actually
+        // running server-side: a mobile network blip that loses the RESPONSE to a
+        // POST that already landed (Safari shows this as a bare "Load failed"),
+        // and a 409 "a turn is already running" when the user retries after one.
+        // The turn is a detached background job, so the answer is still coming —
+        // check once and resume polling instead of showing a fatal error.
+        let resumed = false;
+        try{
+          const { chat } = await api("GET", `/ai-chat/chats/${chatId}`);
+          const last = chat && chat.messages[chat.messages.length-1];
+          if(last && last.role==="assistant" && last.status==="running"){
+            renderChat(chat); startPoll(); resumed = true;
+          }
+        }catch(_){ /* genuinely offline — fall through to the error bubble */ }
+        if(!resumed){
+          messagesEl.insertAdjacentHTML("beforeend", `<div class="msg assistant"><div class="avatar">AI</div><div class="bubble"><span class="err">⚠ ${esc(e.message)}</span></div></div>`);
+        }
       }finally{ sending=false; sendBtn.disabled=false; inputEl.focus(); }
     }
 

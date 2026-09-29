@@ -1,0 +1,288 @@
+From 7ecd75597fe608ef57ee11bd44f31bbb8ede673f Mon Sep 17 00:00:00 2001
+From: Hyperagent Developer Agent <oliiwjqc@polosmail.com>
+Date: Sat, 5 Sep 2026 00:09:44 +0900
+Subject: [PATCH 3/3] fix(autoFarmer): write internalSales on the two record()
+ paths that omitted it
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+processCampaign records internalSales on every path except reuse_existing
+(both the dry-run and the live record() call) and skip_host_offline. On those
+rows the field was the schema default on a fresh row, or whatever an earlier
+decision on the same (game, campaignId) row left there — which is how 15 Black
+Desert reuse rows came to say internalSales 0 while SaleSignal held 13 sales
+(FARM2-VERIFICATION §5.1). One field added to three record() calls; the value
+is the `internalSales` already computed at the top of the function from the
+same salesOf() the sellability gate used. Own commit so it can be held.
+
+What this deliberately does NOT do: widen the replay harness's write-map
+(decisionClasses.OMITS_INTERNAL_SALES). That map gates an integrity cross-check
+against the flat field, and every row written before this commit still carries
+the old value on these two paths. Widening it would turn the 15 Black Desert
+rows from `agree` back into `sales_count_mismatch`. Whether the flat field can
+be trusted is a property of WHEN the row was written, which the harness cannot
+see; rows written since the decisionInputs snapshot shipped never consult the
+flat field at all, so nothing is lost by leaving the map alone. A test pins
+that it stays.
+
+Four tests drive the real processCampaign: the host gate now records the sales
+the gate saw; the dry-run reuse record does too (the Black Desert path itself,
+reached via ctx.reusableMap and ctx.hostState.hasFile, no host needed); a stale
+leftover from an earlier decision is overwritten on re-decision; and the
+write-map is unchanged. The LIVE reuse record() call restarts containers and
+cannot be reached from a sandbox — it carries the identical one-field change
+and is covered by inspection only.
+
+Suite 698/699 vs 694/695 after the previous commit; the single failure is
+unchanged.
+---
+ docs/FARM2-VERIFICATION.md       |  12 ++-
+ tests/farm2InternalSales.test.js | 154 +++++++++++++++++++++++++++++++
+ utils/autoFarmer.js              |   3 +
+ utils/farm2/decisionClasses.js   |  10 ++
+ 4 files changed, 177 insertions(+), 2 deletions(-)
+ create mode 100644 tests/farm2InternalSales.test.js
+
+diff --git a/docs/FARM2-VERIFICATION.md b/docs/FARM2-VERIFICATION.md
+index a52f482..b29973d 100644
+--- a/docs/FARM2-VERIFICATION.md
++++ b/docs/FARM2-VERIFICATION.md
+@@ -211,8 +211,8 @@ schema default on a fresh row, **or as whatever an earlier decision on the same
+ | Path | `demandScore` | `internalSales` | `targetAccounts` |
+ |---|---|---|---|
+ | `skip_low_demand`, `skip_probe_budget` | effective (output) | written | — |
+-| `skip_host_offline` | raw | **not written** | — |
+-| `reuse_existing` (live and dry-run) | raw | **not written** | **not written** |
++| `skip_host_offline` | raw | **not written** *(written since commit 7)* | — |
++| `reuse_existing` (live and dry-run) | raw | **not written** *(written since commit 7)* | **not written** |
+ | `skip_ends_soon`, `skip_already_covered`, `skip_no_accounts`, `skip_no_capacity` | raw | written | **not written** |
+ | `farm`, `probe` | raw | written | written (`wanted`) |
+ | `skip_reuse_only` | (kept from the farm/probe write moments earlier) | kept | kept |
+@@ -249,6 +249,14 @@ paths too, so the row itself stops lying. Commit 6 makes `hadResearch` truthful
+ on the sellability skip. Rows from before those commits keep the behaviour
+ described above; `§9.1` is what would recover *them*.
+ 
++One thing commit 7 deliberately does **not** do: widen the harness's write-map
++(`classes.recordsInternalSales`). That map gates the integrity cross-check
++against the flat field, and every row written before commit 7 still carries the
++old value on those two paths — widening it would turn the 15 Black Desert rows
++from `agree` back into `sales_count_mismatch`. Trustworthiness of the flat field
++is a property of *when* a row was written, which the harness cannot see. Nothing
++is lost: rows written since commit 5 never consult the flat field at all.
++
+ ### 5.2 The lane's decision vocabulary WAS a strict subset of the legacy engine's
+ 
+ At `f7880c9`, `steps/decide.js` implemented the sellability stage and the
+diff --git a/tests/farm2InternalSales.test.js b/tests/farm2InternalSales.test.js
+new file mode 100644
+index 0000000..964ac01
+--- /dev/null
++++ b/tests/farm2InternalSales.test.js
+@@ -0,0 +1,154 @@
++// `internalSales` is written on the two record() paths that omitted it.
++//
++// utils/autoFarmer.js processCampaign records internalSales on every path
++// except reuse_existing (both the dry-run and the live record() call) and
++// skip_host_offline. On those rows the field was the schema default on a fresh
++// row, or a leftover from an earlier decision on the same (game, campaignId)
++// row — which is how 15 Black Desert reuse rows came to say internalSales 0
++// while SaleSignal held 13 sales (FARM2-VERIFICATION §5.1). The replay harness
++// no longer reads the field, and the recorded snapshot carries the truth, but a
++// row that lies is still a row that lies. One field on three record() calls,
++// in its own commit.
++//
++// Driven through the real processCampaign. The dry-run reuse path and the host
++// gate need no host; the LIVE reuse record() call restarts containers and is
++// not reachable from a sandbox — it carries the identical one-field change and
++// is covered by inspection only.
++//
++// What this commit deliberately does NOT change: the replay harness's write-map
++// (decisionClasses.OMITS_INTERNAL_SALES). That map gates an integrity check
++// against the flat field, and rows written BEFORE this commit still carry the
++// old value on these two paths. Widening the check would turn the 15 Black
++// Desert rows from `agree` back into `sales_count_mismatch`. Trustworthiness of
++// the field is a property of WHEN a row was written, not of its decision alone;
++// rows written since the snapshot shipped never consult the flat field anyway.
++const test = require("node:test");
++const assert = require("node:assert/strict");
++const mongoose = require("mongoose");
++const { MongoMemoryServer } = require("mongodb-memory-server");
++
++const AutoFarmTask = require("../models/AutoFarmTask");
++const FarmJob = require("../models/FarmJob");
++const autoFarmer = require("../utils/autoFarmer");
++const classes = require("../utils/farm2/decisionClasses");
++const settings = require("../utils/settings");
++
++let mem;
++
++test.before(async () => {
++  mem = await MongoMemoryServer.create();
++  await mongoose.connect(mem.getUri("farm2internalsales"));
++  await FarmJob.init();
++});
++
++test.after(async () => {
++  await mongoose.disconnect();
++  if (mem) await mem.stop();
++});
++
++const hoursAgo = (h) => new Date(Date.now() - h * 3600000);
++const hoursFromNow = (h) => new Date(Date.now() + h * 3600000);
++
++function ctxFor({ campaignId, research, sales, hostOnline = false }) {
++  return {
++    af: {
++      ...settings.getAutoFarm(),
++      dryRun: true,
++      probeColdStart: false,
++      maxPerGame: 30,
++      platiCategoryId: "",
++    },
++    host: null,
++    hostOnline,
++    budgetMap: new Map(),
++    infoMap: new Map([[campaignId, { research, sales }]]),
++    priorTasks: new Map(),
++  };
++}
++
++test("skip_host_offline now records the sales the gate saw", async () => {
++  const game = "Offline Sales Game";
++  await AutoFarmTask.deleteMany({ game });
++  const c = { game, campaignId: "os1", name: "Weekly", endAt: hoursFromNow(48) };
++  const r = await autoFarmer.processCampaign(
++    c,
++    ctxFor({
++      campaignId: "os1",
++      research: { demandScore: 90, sellers: 5, scannedAt: hoursAgo(1) },
++      sales: { count: 7, revenue: 35, avgPrice: 5 },
++      hostOnline: false,
++    }),
++  );
++  assert.equal(r.decision, "skip_host_offline");
++  const row = await AutoFarmTask.findOne({ game, campaignId: "os1" }).lean();
++  assert.equal(row.internalSales, 7, "was the schema default 0 before this commit");
++  assert.equal(row.decisionInputs.sales.count, 7, "and agrees with the recorded snapshot");
++});
++
++test("the dry-run reuse record — the Black Desert path — now records the sales the gate saw", async () => {
++  const game = "Reuse Sales Game";
++  await AutoFarmTask.deleteMany({ game });
++  const reusable = {
++    _id: new mongoose.Types.ObjectId(),
++    game,
++    campaignId: "old",
++    status: "completed",
++    assignedAccounts: ["a1", "a2", "a3"],
++    bots: [{ host: "local", file: "config_7.json", container: "bot7" }],
++  };
++  const ctx = ctxFor({
++    campaignId: "rs1",
++    research: { demandScore: 3.7, sellers: 10, scannedAt: hoursAgo(1) },
++    sales: { count: 13, revenue: 22.75, avgPrice: 1.75 },
++    hostOnline: true,
++  });
++  ctx.host = { id: "local", label: "Server" };
++  ctx.reusableMap = new Map([[game, reusable]]);
++  ctx.hostState = { hasFile: () => true, activateBot() {} };
++  const c = { game, campaignId: "rs1", name: "Weekly", endAt: hoursFromNow(48) };
++  const r = await autoFarmer.processCampaign(c, ctx);
++  assert.equal(r.decision, "reuse_existing");
++  assert.equal(r.dryRun, true);
++  const row = await AutoFarmTask.findOne({ game, campaignId: "rs1" }).lean();
++  assert.equal(row.internalSales, 13, "the exact value the Black Desert rows were missing");
++  assert.equal(row.decisionInputs.sales.count, 13);
++});
++
++test("a stale internalSales from an earlier decision is overwritten on re-decision", async () => {
++  // The leftover case: the row was once a farm decision recording 2 sales, then
++  // the host went away. Before this commit the reuse/offline record() left the
++  // 2 in place; now the field follows the decision.
++  const game = "Stale Sales Game";
++  await AutoFarmTask.deleteMany({ game });
++  const c = { game, campaignId: "ss1", name: "Weekly", endAt: hoursFromNow(48) };
++  await AutoFarmTask.create({
++    game,
++    campaignId: "ss1",
++    decision: "farm",
++    status: "skipped",
++    internalSales: 2,
++    decidedAt: hoursAgo(10),
++  });
++  await autoFarmer.processCampaign(
++    c,
++    ctxFor({
++      campaignId: "ss1",
++      research: { demandScore: 90, sellers: 5, scannedAt: hoursAgo(1) },
++      sales: { count: 9, revenue: 45, avgPrice: 5 },
++      hostOnline: false,
++    }),
++  );
++  const row = await AutoFarmTask.findOne({ game, campaignId: "ss1" }).lean();
++  assert.equal(row.decision, "skip_host_offline");
++  assert.equal(row.internalSales, 9, "not the leftover 2");
++});
++
++test("the replay harness's write-map is deliberately NOT widened — old rows still carry the old value", () => {
++  // If this ever flips, every pre-commit reuse_existing / skip_host_offline row
++  // with a stale internalSales becomes sales_count_mismatch in replay — the
++  // Black Desert rows among them. Trustworthiness is per row-write-time, and
++  // the harness has no way to know which rows predate this commit.
++  assert.equal(classes.recordsInternalSales("reuse_existing"), false);
++  assert.equal(classes.recordsInternalSales("skip_host_offline"), false);
++  assert.deepEqual([...classes.OMITS_INTERNAL_SALES].sort(), ["reuse_existing", "skip_host_offline"]);
++});
+diff --git a/utils/autoFarmer.js b/utils/autoFarmer.js
+index 926c3ee..cb81709 100644
+--- a/utils/autoFarmer.js
++++ b/utils/autoFarmer.js
+@@ -1703,6 +1703,7 @@ async function processCampaign(c, ctx) {
+         " unreachable — will retry next tick.",
+       demandScore,
+       hadResearch: !!research,
++      internalSales,
+     });
+     return { decision: "skip_host_offline" };
+   }
+@@ -1750,6 +1751,7 @@ async function processCampaign(c, ctx) {
+         reason,
+         demandScore,
+         hadResearch: !!research,
++        internalSales,
+         bots: bots.map((b) => ({ ...b, reused: true })),
+         plannedAccounts: 0,
+       });
+@@ -1792,6 +1794,7 @@ async function processCampaign(c, ctx) {
+       reason,
+       demandScore,
+       hadResearch: !!research,
++      internalSales,
+       bots: bots.map((b) => ({ ...b, reused: true, shared: true })),
+       assignedAccounts: mine,
+       plannedAccounts: mine.length,
+diff --git a/utils/farm2/decisionClasses.js b/utils/farm2/decisionClasses.js
+index cda060b..fe56071 100644
+--- a/utils/farm2/decisionClasses.js
++++ b/utils/farm2/decisionClasses.js
+@@ -178,6 +178,16 @@ function recordsEffectiveDemand(decision) {
+ // held 13 sales, the replay trusted the 0, skipped at the sellability gate and
+ // called every one a disagreement — while the live shadow lane, reading
+ // SaleSignal, agreed with legacy each time.
++//
++// DELIBERATELY NOT UPDATED when those two record() calls were fixed to write
++// internalSales (commit "internalSales written on the two paths that omitted
++// it"). This map gates an integrity CROSS-CHECK against the flat field, and
++// every row written before that fix still carries the old value on these
++// paths — widening the check would turn the 15 Black Desert rows from `agree`
++// back into `sales_count_mismatch`. Whether the field can be trusted is a
++// property of WHEN the row was written, which the harness cannot see; rows
++// written since the decisionInputs snapshot shipped never consult the flat
++// field at all, so nothing is lost by leaving these two here.
+ const OMITS_INTERNAL_SALES = Object.freeze(["reuse_existing", "skip_host_offline"]);
+ const WRITES_TARGET_ACCOUNTS = Object.freeze(["farm", "probe", "skip_reuse_only"]);
+ 
+-- 
+2.49.0
+

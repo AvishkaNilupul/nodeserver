@@ -94,6 +94,29 @@ test("recovering and failing again pages immediately", () => {
   assert.strictEqual(alert.shouldAlert({ state: "provisioned", attempts: 7 }), true);
 });
 
+test("waiting_chat is a soft hold: quiet at first, then reminds like a failure", () => {
+  // Eldorado creates the order chat lazily, so a just-paid order sits in
+  // "waiting_chat" until the buyer (or the operator opening the order page)
+  // starts it. Paging on the first ticks would be noise on an order that almost
+  // always delivers itself within a minute or two — but a chat that never opens
+  // must still be surfaced, so it re-pings on the same cadence as a hard failure
+  // (attempts accrue ~1 per tick, so the first page lands around ~10 min in).
+  for (const n of [1, 2, 3, 9, 11]) {
+    assert.strictEqual(
+      alert.shouldAlert({ state: "waiting_chat", attempts: n }),
+      false,
+      "attempt " + n + " should stay quiet",
+    );
+  }
+  for (const n of [10, 20, 30]) {
+    assert.strictEqual(
+      alert.shouldAlert({ state: "waiting_chat", attempts: n }),
+      true,
+      "attempt " + n + " should remind",
+    );
+  }
+});
+
 /* --------------------- every farm service is wired up -------------------- */
 
 test("all three farm services alert on every way an order can fail", () => {

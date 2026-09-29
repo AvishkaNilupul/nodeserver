@@ -254,6 +254,26 @@
       </div>
     </div>
 
+    <div class="panel" id="driftPanel">
+      <div class="hd">
+        <b>Listing drift check</b>
+        <span class="muted" id="driftSummary" style="margin-left:10px;"></span>
+        <button class="btn ghost sm" id="driftBtn" style="margin-left:auto;">Check listings now</button>
+        <button class="btn primary sm" id="driftFixBtn" style="margin-left:8px;">Apply rebundle fixes</button>
+      </div>
+      <div class="bd">
+        <div class="muted" style="font-size:12px;margin-bottom:8px;">
+          Compares each live auto-lister bundle against the latest inventory scan (the engine refreshes it every ~10&nbsp;min). <b>Report only</b> — nothing is delisted automatically. <span class="chip warn">relist</span> = advertised drops expired off the accounts; <span class="chip warn">rebundle</span> = the accounts have farmed <em>new</em> items since listing. Run the fix command to act.
+        </div>
+        <div style="overflow-x:auto;">
+          <table>
+            <thead><tr><th>Listing</th><th>Verdict</th><th>Advertised → held</th><th>Fix (run by hand)</th></tr></thead>
+            <tbody id="driftRows"><tr><td colspan="4" class="muted" style="padding:14px;">Click “Check listings now”.</td></tr></tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
     <div class="panel">
       <div class="hd"><b>Accounts</b> <span class="muted" id="acctTotal" style="margin-left:auto;"></span></div>
       <div class="bd">
@@ -468,7 +488,7 @@ function switchSec(sec){
     var el=$('sec-'+s); if(!el) return;
     el.classList.toggle('hidden', s!==sec);
   });
-  if(sec==='autolist'){ loadState(); loadBundles(); loadAccounts(); loadListings(); }
+  if(sec==='autolist'){ loadState(); loadBundles(); loadAccounts(); loadListings(); loadDrift(); }
   if(sec==='noclaim' && !secLoaded.noclaim){ secLoaded.noclaim=true; $('sec-noclaim').innerHTML='<iframe src="/noclaim-farm.html?embed=1" title="No-claim farm"></iframe>'; }
   if(sec==='archive'){ secLoaded.archive=true; switchArcSub(arcSub); }
 }
@@ -555,6 +575,58 @@ async function loadListings(){
       '</tr>';
     }).join('');
   }catch(e){ $('listRows').innerHTML='<tr><td colspan="6" class="muted" style="padding:14px;">'+esc(e.message)+'</td></tr>'; }
+}
+
+// ---- Listing drift check (report only) ------------------------------------
+function driftBadge(v){
+  var m={relist:['warn','relist'],rebundle:['warn','rebundle'],ok:['on','ok'],'no-stock':['off','no stock'],unknown:['','no item list']}[v]||['','?'];
+  return '<span class="chip '+m[0]+'">'+esc(m[1])+'</span>';
+}
+function driftItems(arr){
+  return (arr||[]).map(function(i){ return typeof i==='string'?i:(Number(i.qty)>1?(i.name+' ×'+i.qty):i.name); }).join(', ');
+}
+function driftFix(r){
+  // Report only: the operator runs one of these by hand. --shop --apply takes
+  // stale rows down and frees their accounts so the scan relists them; --retitle
+  // rewrites one row up to the fuller bundle its stock now holds.
+  if(r.verdict==='relist') return 'node scripts/unclaimed-listing-audit.js --shop --apply';
+  if(r.verdict==='rebundle') return 'node scripts/unclaimed-listing-audit.js --listing '+r.id+' --retitle --apply';
+  return '';
+}
+async function loadDrift(){
+  var btn=$('driftBtn'); var old=btn?btn.textContent:''; if(btn){btn.disabled=true;btn.textContent='Checking…';}
+  try{
+    var j=await api('/api/unclaimed-auto/listing-health');
+    var rows=j.rows||[]; var c=j.counts||{};
+    var parts=[];
+    if(c.relist) parts.push(c.relist+' relist');
+    if(c.rebundle) parts.push(c.rebundle+' rebundle');
+    if(c['no-stock']) parts.push(c['no-stock']+' no stock');
+    parts.push((c.ok||0)+' ok');
+    $('driftSummary').textContent=rows.length?parts.join(' · '):'';
+    var el=$('driftRows');
+    if(!rows.length){ el.innerHTML='<tr><td colspan="4" class="muted" style="padding:14px;">No active auto-lister bundle rows.</td></tr>'; return; }
+    var flagged=rows.filter(function(r){return r.verdict==='relist'||r.verdict==='rebundle';});
+    var show=flagged.length?flagged:rows;
+    el.innerHTML=show.map(function(r){
+      var adv=driftItems(r.advertised)||'–';
+      var held=driftItems(r.held);
+      var cmd=driftFix(r);
+      var extra='';
+      if(r.added&&r.added.length) extra+='<div class="muted" style="font-size:11px;">+ '+esc(driftItems(r.added))+'</div>';
+      if(r.missing&&r.missing.length) extra+='<div class="muted" style="font-size:11px;">missing '+esc(r.missing.map(function(m){return m.name;}).join(', '))+'</div>';
+      return '<tr>'+
+        '<td><span class="chip">'+esc(r.marketplace)+'</span> '+esc((r.title||'').slice(0,64))+'<div class="mono muted" style="font-size:11px;">'+esc(r.externalId||'')+' · '+r.backing+' acct</div></td>'+
+        '<td>'+driftBadge(r.verdict)+extra+'</td>'+
+        '<td style="font-size:12px;">'+esc(adv)+(held&&held!==adv?('<div class="muted">held: '+esc(held)+' ('+r.heldCount+')</div>'):'')+'</td>'+
+        '<td>'+(cmd?('<code class="mono" style="font-size:11px;word-break:break-all;">'+esc(cmd)+'</code>'):'<span class="muted">—</span>')+'</td>'+
+      '</tr>';
+    }).join('');
+    if(flagged.length && rows.length>flagged.length){
+      el.innerHTML+='<tr><td colspan="4" class="muted" style="padding:10px 14px;font-size:12px;">+ '+(rows.length-flagged.length)+' ok / no-stock row(s) not shown.</td></tr>';
+    }
+  }catch(e){ $('driftRows').innerHTML='<tr><td colspan="4" class="muted" style="padding:14px;">'+esc(e.message)+'</td></tr>'; }
+  finally{ if(btn){btn.disabled=false;btn.textContent=old;} }
 }
 
 // ---------------------------------------------------------------------------
@@ -1228,6 +1300,26 @@ $('arcItemBg').addEventListener('click',function(e){ if(e.target===this) this.cl
 
 // Bundles panel: refresh, reprice modal, pricing form.
 $('bdRefreshBtn').addEventListener('click',function(){ bundleToast(''); loadBundles(true); });
+$('driftBtn').addEventListener('click',loadDrift);
+async function applyRebundleFixes(){
+  var btn=$('driftFixBtn'); var old=btn.textContent; btn.disabled=true; btn.textContent='Planning…';
+  try{
+    var plan=await api('/api/unclaimed-auto/rebundle',{method:'POST',body:JSON.stringify({apply:false})});
+    var willApply=(plan.report||[]).filter(function(r){return r.action==='retitle-in-place';});
+    var needRepub=(plan.report||[]).filter(function(r){return r.action==='needs-republish'||r.action==='needs-attention';});
+    if(!willApply.length){ alert('No in-place rebundle fixes to apply right now.'+(needRepub.length?(' '+needRepub.length+' digiseller listing(s) would need delist+republish — handled separately.'):'')); return; }
+    var msg=willApply.length+' listing(s) will be retitled to the fuller set they now hold, at the SAME price (gameflip/ggsel, edited in place, reversible).'+(needRepub.length?('\n\n'+needRepub.length+' digiseller listing(s) need delist+republish (new id, irreversible) — NOT included here.'):'')+'\n\nApply now?';
+    if(!confirm(msg)) return;
+    btn.textContent='Applying…';
+    var res=await api('/api/unclaimed-auto/rebundle',{method:'POST',body:JSON.stringify({apply:true})});
+    var applied=(res.report||[]).filter(function(r){return r.applied;}).length;
+    var errs=(res.report||[]).filter(function(r){return r.action==='error';});
+    alert('Applied '+applied+' rebundle fix(es) at the same price.'+(errs.length?('\n'+errs.length+' error(s): '+errs.map(function(e){return e.marketplace+' — '+(e.note||'');}).join('; ')):''));
+    loadDrift();
+  }catch(e){ alert('Rebundle failed: '+e.message); }
+  finally{ btn.disabled=false; btn.textContent=old; }
+}
+$('driftFixBtn').addEventListener('click',applyRebundleFixes);
 $('repriceBtn').addEventListener('click',openReprice);
 $('repriceClose').addEventListener('click',function(){ $('repriceBg').classList.remove('show'); });
 $('repriceBg').addEventListener('click',function(e){ if(e.target===this) this.classList.remove('show'); });

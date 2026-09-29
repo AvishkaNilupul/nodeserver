@@ -1,0 +1,27 @@
+{
+  "updatedAt": "2026-08-27T02:30:04.216Z",
+  "pid": 34834,
+  "runId": "dashboard-1787786372896",
+  "connected": false,
+  "lastEventAt": 1787797801176,
+  "lastError": "Primary paper feed disconnected; retrying in 3 seconds",
+  "eventsSeen": 17025,
+  "decodedTrades": 17025,
+  "entries": 67,
+  "exits": 67,
+  "openPositions": 0,
+  "experimentId": "legacy-pattern-corrected-price",
+  "sourceMode": "primary-signatures-rpc-reparse",
+  "summary": {
+    "closed": 67,
+    "open": 0,
+    "wins": 31,
+    "losses": 36,
+    "winRate": 0.4626865671641791,
+    "realizedSol": -1.6185798793431756,
+    "unrealizedSol": 0,
+    "totalPnlSol": -1.6185798793431756,
+    "paperCapitalSol": 0.38142012065682823,
+    "startingCapitalSol": 2
+  }
+}

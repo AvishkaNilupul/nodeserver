@@ -102,6 +102,30 @@ function profileDescription(items, totalRewards) {
   return `Bundle of ${items.length} reward types — every account delivers at least ${totalRewards} rewards. ${preview}${items.length > 5 ? ", and more" : ""}. Live stock is verified against deliverable inventory before a quote.`;
 }
 
+// How many games one per-account aggregation covers. Any 12 games sit far below
+// the 100 MB $group ceiling (all 91 games together were 127,803 groups), while
+// keeping the round trips to a handful instead of one per game (~200 s).
+const CATALOG_PLAN_GAME_BATCH = 12;
+
+// Pure. Fold first-stage rows — { _id: { game, account, itemKey }, count } — into
+// the per-(game, account) rows the plan reads, the shape the removed second
+// $group produced: { _id: { game, account }, items: [{ itemKey, count }],
+// totalRewards }. `into` lets several batches accumulate into one map.
+function rollUpAccountRows(stageRows, into = new Map()) {
+  for (const row of stageRows || []) {
+    const id = (row && row._id) || {};
+    const key = String(id.game) + "\u0000" + String(id.account);
+    let acc = into.get(key);
+    if (!acc) {
+      acc = { _id: { game: id.game, account: id.account }, items: [], totalRewards: 0 };
+      into.set(key, acc);
+    }
+    acc.items.push({ itemKey: id.itemKey, count: row.count });
+    acc.totalRewards += Number(row.count) || 0;
+  }
+  return into;
+}
+
 async function buildCatalogProfilePlan({
   minStock = DEFAULT_MIN_STOCK,
   maxProfilesPerGame = DEFAULT_MAX_PROFILES_PER_GAME,
@@ -126,23 +150,40 @@ async function buildCatalogProfilePlan({
     soldAt: null,
     itemKey: { $ne: "" },
   };
+  // The split above was not enough. The per-account roll-up was still a SECOND
+  // $group that $pushed every (itemKey, count) of every account into memory at
+  // once, and from 2026-09-08 it threw "Exceeded memory limit for $group" on
+  // ~90% of variant syncs (measured on prod 2026-09-27 across 91 games: the full
+  // pipeline throws in 3 s, while the first, numeric stage alone passes at
+  // 127,803 groups and the biggest single game, Rocket League, is 13,864). So
+  // only the numeric stage runs in Mongo, a few games per aggregation so it
+  // stays bounded as DropLog grows, and the per-account roll-up is done here.
+  const collectRows = async () => {
+    const gameList = requestedGames?.length
+      ? [...new Set(requestedGames)]
+      : (await DropLog.distinct("game", match)).filter(Boolean);
+    const byAccount = new Map();
+    for (let i = 0; i < gameList.length; i += CATALOG_PLAN_GAME_BATCH) {
+      const stage = await DropLog.aggregate([
+        {
+          $match: {
+            ...match,
+            game: { $in: gameList.slice(i, i + CATALOG_PLAN_GAME_BATCH) },
+          },
+        },
+        {
+          $group: {
+            _id: { game: "$game", account: "$account", itemKey: "$itemKey" },
+            count: { $sum: "$count" },
+          },
+        },
+      ]);
+      rollUpAccountRows(stage, byAccount);
+    }
+    return [...byAccount.values()];
+  };
   const [rows, metaRows] = await Promise.all([
-    DropLog.aggregate([
-      { $match: match },
-      {
-        $group: {
-          _id: { game: "$game", account: "$account", itemKey: "$itemKey" },
-          count: { $sum: "$count" },
-        },
-      },
-      {
-        $group: {
-          _id: { game: "$_id.game", account: "$_id.account" },
-          items: { $push: { itemKey: "$_id.itemKey", count: "$count" } },
-          totalRewards: { $sum: "$count" },
-        },
-      },
-    ]),
+    collectRows(),
     DropLog.aggregate([
       { $match: match },
       {
@@ -336,4 +377,6 @@ module.exports = {
   profileTitle,
   collapseSubsetProfiles,
   buildCatalogProfilePlan,
+  rollUpAccountRows,
+  CATALOG_PLAN_GAME_BATCH,
 };

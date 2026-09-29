@@ -1,0 +1,52 @@
+{
+  "experiment": {
+    "id": "legacy-pattern-corrected-price",
+    "title": "Legacy Pattern Lab",
+    "subtitle": "corrected-price paper comparison",
+    "eyebrow": "LEGACY PATTERN OBSERVER",
+    "headline": "Repeated-entry comparison",
+    "description": "Keeps the old repeated-entry and exit pattern while recalculating routed swaps from their dominant SOL flow.",
+    "targetPattern": "repeat entry · corrected price",
+    "targetNote": "Same legacy trading pattern",
+    "leaderboardNote": "Fresh isolated results using the legacy trade pattern with corrected routed-swap prices. Fees and slippage remain disabled to preserve the old experiment settings.",
+    "comparisonUrl": "http://127.0.0.1:4177",
+    "comparisonLabel": "Open safer bot",
+    "theme": "legacy",
+    "tuningEnabled": false
+  },
+  "paperCapitalSol": 2,
+  "startingCapitalSol": 2,
+  "entrySizeSol": 0.42,
+  "maxOpenPositions": 3,
+  "cooldownSec": 0,
+  "maxEntriesPerMint": null,
+  "execution": {
+    "entryFeeBps": 0,
+    "exitFeeBps": 0,
+    "entrySlippageBps": 0,
+    "exitSlippageBps": 0,
+    "networkFeeSol": 0
+  },
+  "filter": {
+    "maxTokenAgeSec": 180,
+    "minRecentBuys": 3,
+    "minRecentBuyVolumeSol": 1.8,
+    "minUniqueBuyers": 2,
+    "minMedianBuySol": 0.02,
+    "maxLargestBuyShare": 0.8,
+    "minBuySellVolumeRatio": 1.1,
+    "maxPriceDeviationRatio": 0,
+    "maxBuySellRatio": 12,
+    "minScore": 0.62
+  },
+  "exit": {
+    "takeProfitBps": 450,
+    "trailingActivateBps": 250,
+    "trailingStopBps": 150,
+    "stopLossBps": 600,
+    "recoveryBps": 35,
+    "recoveryAfterDrawdownBps": 250,
+    "maxHoldSec": 180,
+    "hardTimeoutSec": 300
+  }
+}

@@ -54,7 +54,23 @@ const farmServiceOrderSchema = new mongoose.Schema(
       // forever over an order nobody is waiting for. Eldorado order e69b19d3
       // (Black Desert, 1 Year) was the first: it failed 25 times on a full
       // rental stack and the buyer cancelled before the fix landed.
-      enum: ["claimed", "provisioned", "sent", "delivered", "failed", "cancelled"],
+      //
+      // "waiting_chat" is a SOFT, self-healing hold, distinct from "failed": the
+      // order is fine, but its marketplace chat has not been created yet, so the
+      // credential cannot be posted (Eldorado mints the TalkJS conversation
+      // lazily — see utils/marketplaces.eldoradoOrderChatReady). It provisions
+      // nothing and burns no pool account; the next tick delivers the moment the
+      // conversation appears. The health check gives it the normal grace window
+      // before counting it undelivered, so a chat that opens quickly never pages.
+      enum: [
+        "claimed",
+        "provisioned",
+        "sent",
+        "delivered",
+        "failed",
+        "cancelled",
+        "waiting_chat",
+      ],
       default: "claimed",
       index: true,
     },

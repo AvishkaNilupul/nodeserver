@@ -5294,8 +5294,28 @@ const ELD_TALK_SESSION = crypto.randomUUID
   ? crypto.randomUUID()
   : crypto.randomBytes(16).toString("hex");
 
-// Post a message into an order's chat as the seller. `order` needs
-// `sellerId` and `talkJsConversationId` (both present on the order rows).
+// Is an order's chat ready to receive the credential? Eldorado mints the TalkJS
+// conversation LAZILY — a freshly-paid order carries `talkJsConversationId:
+// null` until the order chat is first opened (by the buyer, or by the operator
+// opening the order page), at which point the id appears on the order rows and
+// stays. The internal id we post to is `sha1(talkJsConversationId)`, so with no
+// GUID there is nothing to post to and nothing we can invent: the GUID is
+// Eldorado's to generate and to link the buyer to as a participant. A missing id
+// is therefore not an error, it is "not deliverable YET" — the only thing to do
+// is wait for it to appear. Callers gate on this to hold delivery quietly instead
+// of failing and paging the operator on an order that will deliver itself.
+//   Confirmed live 2026-09-20: two rent-farm orders paged as "no
+//   talkJsConversationId", then self-delivered minutes later once the id showed
+//   up on the very same seller-orders rows.
+function eldoradoOrderChatReady(order) {
+  return !!(order && order.talkJsConversationId && order.sellerId);
+}
+
+// Post a message into an order's chat as the seller. `order` needs `sellerId`
+// and `talkJsConversationId`. Both are on the order rows, but
+// `talkJsConversationId` is null until the chat exists (see
+// eldoradoOrderChatReady), so callers must gate on that helper first — this
+// throw is the last-resort guard, never the normal "not ready yet" path.
 async function eldoradoSendOrderMessage(order, text) {
   if (!order || !order.talkJsConversationId) {
     throw new Error("Eldorado chat: order has no talkJsConversationId");
@@ -6533,6 +6553,20 @@ async function playerauctionsMessages() {
   return await paGet(PA_USER_API, "/User/Messages", "PlayerAuctions messages");
 }
 
+// The message INBOX: a paginated list of threads, distinct from
+// playerauctionsMessages() above, which is the /User/Messages BADGE COUNTER
+// ({messageCount, pendingCount, …}). Reading the counter as a list silently
+// reports zero buyer messages forever — that is why the console Messages tab
+// showed nothing. Items are {id, subject, memberName, sendTimeString, unRead,
+// isFromSystem}; the per-thread transcript is playerauctionsMessageThread().
+async function playerauctionsInbox({ pageIndex = 1, pageSize = 20 } = {}) {
+  return await paGet(
+    PA_USER_API,
+    "/messages/inbox?pageIndex=" + pageIndex + "&pageSize=" + pageSize,
+    "PlayerAuctions inbox",
+  );
+}
+
 async function playerauctionsMessageThread(id, isFromSystem = false) {
   return await paGet(
     PA_USER_API,
@@ -7586,6 +7620,7 @@ module.exports = {
   eldoradoOrders,
   eldoradoPaidOrders,
   eldoradoOrderStateCounts,
+  eldoradoOrderChatReady,
   eldoradoSendOrderMessage,
   playerauctionsTest,
   playerauctionsMe,
@@ -7622,6 +7657,7 @@ module.exports = {
   playerauctionsOrderDetail,
   playerauctionsBalance,
   playerauctionsMessages,
+  playerauctionsInbox,
   playerauctionsMessageThread,
   playerauctionsNotifications,
   playerauctionsSnapshot,

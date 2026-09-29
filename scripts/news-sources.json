@@ -1,0 +1,47 @@
+{
+  "x": {
+    "handles": [
+      { "name": "FreeGameFinding",  "tag": "deals" },
+      { "name": "Wario64",          "tag": "deals" },
+      { "name": "Videogamedeals",   "tag": "deals" },
+      { "name": "IGDeals",          "tag": "deals" },
+      { "name": "cheapassgamer",    "tag": "deals" },
+      { "name": "Humble",           "tag": "deals" },
+      { "name": "Fanatical",        "tag": "deals" },
+      { "name": "GOGcom",           "tag": "deals" },
+      { "name": "EpicGames",        "tag": "official" },
+      { "name": "Steam",            "tag": "official" },
+      { "name": "PlayStation",      "tag": "official" },
+      { "name": "Xbox",             "tag": "official" },
+      { "name": "Rainbow6Game",     "tag": "drops" },
+      { "name": "PlayOverwatch",    "tag": "drops" },
+      { "name": "PlayApex",         "tag": "drops" },
+      { "name": "FortniteGame",     "tag": "drops" }
+    ],
+    "searches": [
+      { "q": "\"free game\" OR \"free to keep\" OR \"free for a limited time\" -filter:replies", "label": "free-games" },
+      { "q": "(\"twitch drops\" OR \"drops enabled\" OR \"watch to earn\") -filter:replies", "label": "drops" }
+    ]
+  },
+  "reddit": {
+    "subreddits": [
+      { "name": "FreeGameFindings", "listing": "new" },
+      { "name": "GameDeals",        "listing": "new" },
+      { "name": "FreeGamesOnSteam", "listing": "new" },
+      { "name": "twitch",           "listing": "new" }
+    ]
+  },
+  "drops": {
+    "activeGames": [
+      "Overwatch",
+      "Overwatch 2",
+      "Rainbow Six",
+      "Rainbow Six Siege",
+      "Apex Legends",
+      "Fortnite",
+      "Rust",
+      "Escape from Tarkov",
+      "Phasmophobia"
+    ]
+  }
+}

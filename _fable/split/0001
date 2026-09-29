@@ -1,0 +1,2315 @@
+From a4e4e21cfbfb61d60de15ddb3685d87e10f86d56 Mon Sep 17 00:00:00 2001
+From: Hyperagent Developer Agent <oliiwjqc@polosmail.com>
+Date: Fri, 4 Sep 2026 20:57:07 +0900
+Subject: [PATCH 1/3] =?UTF-8?q?feat(farm2):=20replay=20harness=20=E2=80=94?=
+ =?UTF-8?q?=20verify=20a=20lane=20against=20recorded=20history?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+The shadow comparison varies the ENGINE and the WORLD at the same time, so
+a difference cannot be attributed to either. The 6h staleness gate tried to
+hold the world still by proxy; on prod that left 0 comparable pairs out of
+300. Age is the wrong proxy in both directions — it discards a 200h-old
+decision on a game where nothing changed, and accepts a 20-minute-old one on
+a game rescanned in between.
+
+Replay holds the world still directly: reconstruct the inputs the legacy
+engine had at its decision time, run the same imported economics against
+them, compare. Every decision already recorded becomes a test case, offline,
+instead of waiting days per lane for fresh pairs across 34 lanes.
+
+MarketResearchSnapshot turns out to keep exactly what this needs — demandScore,
+sellers and `at`, one row per scan, 120 days — and SaleSignal is append-only,
+so window drift is two existence queries.
+
+Scoped to the sellability stage on purpose. Pool depth, capacity, host state
+and archive coverage are not snapshotted anywhere, so decisions downstream of
+that gate are reported as out of scope rather than scored. Measuring the
+reconstruction's blind spots and calling it engine disagreement is the same
+mistake the 6h gate made.
+
+No economics reimplemented: demandAllocation, salesOf, capForGame and
+marketStockFloor are all imported. Where that discipline costs fidelity —
+reconstructing a past avgPrice would mean copying the SaleSignal aggregation —
+the row is reported unreplayable instead of guessed. Only exact-fidelity rows
+count as evidence.
+
+Two pre-existing findings surfaced while building it, both documented:
+
+  * AutoFarmTask.demandScore is the raw market score on most rows but the
+    blended effective demand on skip_low_demand/skip_probe_budget, where
+    hadResearch is also hardcoded true even with no research at all.
+  * the lane's decision vocabulary is a strict subset of the legacy engine's.
+    decide.js has no time gate, coverage gate, pool-floor, capacity,
+    host-offline or reuse-only gate, so a live lane would spend on campaigns
+    the legacy engine correctly declines. Unobserved so far because the
+    comparison is broken — zero comparable pairs, zero chance to notice.
+    Not fixed here; named as lane_missing_gate so it stops reading as noise.
+
+Also: decide.js had the action-class mapping written out twice in the same
+file. Both now come from decisionClasses.js, and an unclassified decision
+returns "unknown" rather than falling through to "skip" — the old default
+would have made a new spend-class decision agree with an idle lane.
+
+autoFarmer.js and autoLister.js are untouched, not even an added export.
+laneReadiness keeps every existing blocker; requireReplay defaults to false
+so this cannot silently raise the bar on a live promotion path.
+
+24 new tests; the 63 existing farm2 tests pass unmodified. Suite 638/643 vs
+a 614/619 baseline — the same 5 pre-existing orphan-test failures either side.
+
+Proposal only. Nothing here is verified against production; the open
+questions are in docs/FARM2-VERIFICATION.md section 7.
+---
+ docs/FARM2-VERIFICATION.md     | 347 ++++++++++++++++++
+ scripts/farm2-replay.js        | 128 +++++++
+ tests/farm2Replay.test.js      | 616 +++++++++++++++++++++++++++++++
+ utils/farm2/decisionClasses.js | 209 +++++++++++
+ utils/farm2/index.js           | 110 +++++-
+ utils/farm2/replay.js          | 637 +++++++++++++++++++++++++++++++++
+ utils/farm2/steps/decide.js    |  62 +++-
+ 7 files changed, 2098 insertions(+), 11 deletions(-)
+ create mode 100644 docs/FARM2-VERIFICATION.md
+ create mode 100644 scripts/farm2-replay.js
+ create mode 100644 tests/farm2Replay.test.js
+ create mode 100644 utils/farm2/decisionClasses.js
+ create mode 100644 utils/farm2/replay.js
+
+diff --git a/docs/FARM2-VERIFICATION.md b/docs/FARM2-VERIFICATION.md
+new file mode 100644
+index 0000000..8bbdc0b
+--- /dev/null
++++ b/docs/FARM2-VERIFICATION.md
+@@ -0,0 +1,347 @@
++# Making a farm lane verifiable
++
++Status: **proposal.** Implemented and tested in the sandbox, verified against
++nothing real. Section 7 lists what has to be confirmed on production before any
++of it is trusted.
++
++Companion to `docs/FARM2-PLAN.md` (the architecture) and
++`docs/FARM2-TASK-comparison-evidence.md` (the task).
++
++---
++
++## 1. Why the current comparison cannot work
++
++`diffAgainstLegacy()` asks:
++
++> does the lane's decision **today** match the legacy engine's decision from
++> **whenever it last decided**?
++
++Two things differ between those two observations: the **engine** and the
++**world**. When the answers differ, nothing in the record says which one caused
++it. That is not a tuning problem, it is the experiment being malformed — and it
++explains the trial result exactly. All ten "disagreements" turned out to be both
++engines being right about different moments, because the legacy engine had
++decided 41–229 hours earlier and never revisits a campaign it has acted on.
++
++The 6-hour `COMPARABLE_WINDOW_MS` gate was the right diagnosis and the wrong
++cure. Age is a **proxy** for "the world has not moved", and it is wrong in both
++directions:
++
++- it **discards** a decision made 200 hours ago on a game where nothing has
++  changed since — still perfectly comparable;
++- it **accepts** a decision made 20 minutes ago on a game that was rescanned in
++  between — not comparable at all.
++
++Applied to prod it left **0 comparable pairs out of 300**, which is the honest
++consequence of a proxy that mostly measures how often the legacy engine happens
++to re-decide things. Tightening or loosening the window cannot fix it. Loosening
++readmits the ten false disagreements; tightening keeps the zero.
++
++**The fix is to stop holding the world still by proxy and hold it still
++directly.**
++
++## 2. What I propose: replay
++
++Reconstruct the inputs the legacy engine had **at the moment it decided**, run
++the lane's economics against those, and compare. The world is then fixed by
++construction and the only remaining variable is the engine.
++
++This also inverts the sample-size problem. Shadow comparison waits for fresh
++pairs to accumulate — days per lane, 34 lanes. Replay treats **every decision
++the legacy engine has already made** as a test case, available immediately,
++offline, with no engine running.
++
++```
++utils/farm2/replay.js          the harness
++utils/farm2/decisionClasses.js the shared decision vocabulary
++scripts/farm2-replay.js        operator CLI (read-only)
++tests/farm2Replay.test.js      24 tests
++```
++
++### The key enabler
++
++`models/MarketResearchSnapshot.js` already exists and already keeps what is
++needed: one row per game per scan, carrying `demandScore`, `sellers` and `at`,
++retained 120 days. `MarketResearch` itself is overwritten in place and keeps no
++history, which is why this looked unreconstructable — but the snapshot
++collection was added for trend analysis and happens to be exactly the historical
++research record replay needs.
++
++`models/SaleSignal.js` is append-only and timestamped, so whether the 45-day
++sales window's *contents* changed between then and now is two existence queries.
++
++### No second source of truth
++
++Every number comes from `autoFarmer`'s own exports — `demandAllocation`,
++`salesOf`, `capForGame`, `marketStockFloor`. The harness reconstructs **inputs**
++and compares **outputs**. It does not re-derive a single tier, boost, cap or
++threshold, so it cannot drift from the engine it is measuring.
++
++That discipline costs one thing, at `salesInputsFor()`: reconstructing a past
++`avgPrice` would mean copying the SaleSignal aggregation out of
++`internalSalesForGame` (the per-source grouping that fixes the phantom-demand
++bug). Rather than copy it, the harness detects whether it is safe to reuse the
++live value and **gives up honestly when it is not**. See §4.
++
++## 3. What replay can and cannot see
++
++Reconstructable for a past moment T:
++
++| Input | Source | Notes |
++|---|---|---|
++| `research.demandScore` | `MarketResearchSnapshot` | newest row with `at <= T` |
++| `research.sellers` | `MarketResearchSnapshot` | only read on the cold-start probe branch |
++| `research.scannedAt` | the snapshot's own `at` | that IS the scan moment |
++| `internalSales` | `SaleSignal` | see §4 — drift-detectable, sometimes exactly recoverable |
++
++**Not** reconstructable, and this bounds everything:
++
++| Input | Why |
++|---|---|
++| `af` settings | `utils/settings.js` is not versioned |
++| pool depth | `countReadyPool` is a live count |
++| container capacity | live host query |
++| host reachability | live SSH probe |
++| archive coverage | `archiveHoldersForCampaign` reads current inventory |
++
++Those four settle every decision **downstream** of the sellability gate. So
++replay is deliberately scoped to the demand stage, and reports downstream
++decisions as out of scope rather than pretending to score them. Measuring the
++reconstruction's blind spots and calling it engine disagreement is precisely the
++mistake the 6-hour gate made; repeating it with better tooling would be worse,
++not better.
++
++### Fidelity tiers
++
++Only `exact` counts as evidence.
++
++- **exact** — every input the decision depends on was recovered, *or is provably
++  irrelevant to it*
++- **partial** — something is assumed rather than known; reported, never counted
++- **unreplayable** — a required input cannot be recovered; reported with the
++  reason
++
++"Provably irrelevant" is doing real work. When the recorded sales count is 0 the
++sales boost is 0 and the cap is at its base **regardless of price**, so no price
++information is needed and the row is exact despite being unrecoverable in
++principle. Similarly, when `probeColdStart` is off the entire probe gate is
++inert and reconstructs exactly.
++
++## 4. How the scoring works
++
++Three shapes, depending on what the recorded decision proves about the demand
++stage.
++
++**(a) The legacy engine stopped at the sellability gate** (`skip_low_demand`,
++`skip_probe_budget`, `probe`). The stage's whole output is recorded, so this is
++a full check — and for the two skips it is **self-validating**: `autoFarmer`
++records `demandScore: alloc.demand` there, which is the blended effective demand
++*output*, so a replayed figure that matches confirms both the input
++reconstruction and the economics at once. That is hard to get by luck.
++
++**(b) The legacy engine got past that gate.** Whatever it did next, the stage
++must not have skipped. A replay that skips here is a real contradiction.
++
++**(c) The tier target is checkable** when `targetAccounts` was recorded. It is
++`wanted` from the coverage gate, rebuilt from the same imported helpers:
++`min(max(alloc.target, probe ? 0 : marketStockFloor(af)), alloc.cap || af.maxPerGame)`.
++
++A mismatch on (a)'s demand figure is reported as **inconclusive**, not
++*disagree* — the likeliest explanation is a missing input on our side, and
++blocking a promotion on our own reconstruction gap would repeat the original
++error in a new place.
++
++## 5. Two findings the harness surfaced while being built
++
++Both are pre-existing, neither is caused by this change, and the second is the
++more serious.
++
++### 5.1 `AutoFarmTask.demandScore` means two different things
++
++On the sellability-skip path `utils/autoFarmer.js` records
++`demandScore: alloc.demand` — the **blended effective demand**, an *output* —
++and hardcodes `hadResearch: true` **even when `research` was null**. Every other
++decision, `probe` included, is recorded further down with the raw
++`research ? research.demandScore : null` and a truthful `hadResearch`.
++
++So on `skip_low_demand` / `skip_probe_budget` rows those two fields are an
++output and a constant; everywhere else they are inputs. Anything reading them —
++a replay, a dashboard, an alert — has to branch on the decision beside them or
++it is silently comparing two different quantities. `hadResearch: true` on that
++path is simply incorrect and is worth fixing on its own merits, though not from
++this checkout (`autoFarmer.js` is additive-export-only here).
++
++Captured as `classes.recordsEffectiveDemand()`.
++
++### 5.2 The lane's decision vocabulary is a strict subset of the legacy engine's
++
++| Legacy can emit | Lane can emit |
++|---|---|
++| `farm`, `probe`, `reuse_existing` | `farm`, `probe`, `reuse_existing` |
++| `skip_low_demand`, `skip_probe_budget` | `skip_low_demand`, `skip_probe_budget` |
++| `skip_ends_soon` | — |
++| `skip_already_covered` | — |
++| `skip_no_accounts` | — |
++| `skip_no_capacity` | — |
++| `skip_host_offline` | — |
++| `skip_reuse_only` | — |
++
++`steps/decide.js` implements the sellability stage and the reuse-first check,
++and **nothing downstream of them**. It has no time gate, no coverage gate, no
++pool-floor gate, no capacity gate, no host-offline gate and no reuse-only gate.
++It imports `demandAllocation`, `salesOf`, `researchForGame`,
++`internalSalesForGame` and `reusableTaskForGame` from the brain, but not
++`countReadyPool`, `marketStockFloor`, `capForGame`, `fairShare`,
++`archiveHoldersByGame` or `ownedAccounts` — so `FARM2-PLAN.md`'s statement that
++all the economics are imported is currently aspirational rather than true.
++
++The consequence is concrete: **on any campaign the legacy engine settles with
++one of those six gates, a live lane would carry on and spend accounts.** The
++coverage gate is the one that matters most — it is named in `FARM2-PLAN.md` as
++one of the hard-won pieces (the wildcard bug that silently blocked all farming),
++and a lane with no coverage gate would re-buy accounts for demand that is
++already covered.
++
++**Nobody has observed this because the comparison is broken.** Zero comparable
++pairs means zero opportunities to notice. That is the strongest argument I have
++that the verification gap is not a reporting nicety: the trial's whole purpose
++is to catch exactly this class of defect, and it caught the reuse-first gap on
++day one precisely because a comparison happened to work that day.
++
++This proposal **does not implement the missing gates** — that is a larger change
++with its own risk surface and deserves its own review. What it does is make them
++*visible and named*: `classifyDisagreement()` labels such a difference
++`lane_missing_gate` rather than mixing it into a disagreement count, because the
++response is "implement the gate", not "work out which engine was right".
++
++## 6. Changes to the existing gate
++
++`laneReadiness()` keeps every existing blocker and adds:
++
++- **`caveats`** — standing facts about the *engine* that apply to every lane,
++  kept out of `warnings` (observations about *this lane's* evidence) so a clean
++  lane still reads as clean. Folding them in would make that list never empty
++  and train an operator to ignore it. The vocabulary gap in §5.2 lives here.
++- **`disagreementKinds`** — the taxonomy split. A row with no
++  `disagreementKind` counts as `unclassified`, never as benign, following the
++  discipline already established for `laneClass` and `stale`.
++- **`replay`** — an optional report from the harness. A replay **disagreement
++  blocks** promotion. Missing replay evidence is a caveat by default and a
++  blocker under `requireReplay: true`.
++
++`requireReplay` defaults to **false** deliberately. Raising the bar on a gate
++that already guards a live promotion path is a decision for review, not
++something this change should do quietly. **My recommendation is to turn it on**
++once §7 has been worked through, with `MIN_REPLAY_DECISIONS` at 20 — replay rows
++come from history rather than from waiting, so there is no reason to accept a
++thin sample.
++
++Also folded in: `steps/decide.js` had the action-class mapping written out
++**twice in the same file** (`classOf` for the stale branch, `actionClass` for
++the live one), with no shared definition — two copies of the rule that decides
++whether a lane may take over a real game. Both now come from
++`decisionClasses.js`, and an unclassified decision returns `"unknown"` rather
++than falling through to `"skip"`. The old default meant a decision added to the
++`AutoFarmTask` enum without being classified would read as "the lane is doing
++nothing" and agree with any skipping lane — the same
++absence-is-not-a-passing-value trap that has already bitten this comparison
++twice. A test now asserts that every value in the model's enum is classified.
++
++## 7. What this cannot tell you, and what needs checking on prod
++
++**I have verified none of this against production.** It runs against an
++in-process Mongo with fixtures I wrote. Everything below is a real hole, not a
++formality.
++
++### Weaknesses of the approach itself
++
++1. **Replay measures the demand stage, not the lane.** A lane could reproduce
++   every historical decision perfectly and still be unsafe, because the gates in
++   §5.2 do not exist. Replay agreement is **necessary, not sufficient**, and
++   should never be read as "safe to promote" on its own.
++2. **It proves decision parity, not outcome parity.** Both engines can decide
++   `farm 10` and one can execute it badly. Nothing here touches execution,
++   listing or delivery.
++3. **Settings are not versioned.** Today's `af` is applied to past decisions. If
++   `maxPerGame`, `perMarketStock` or the probe settings changed during the
++   window, rows either side of the change are replayed under the wrong
++   configuration and may disagree for a reason that is not the lane's fault. The
++   CLI prints the assumed values for this reason. **This is the largest
++   unquantified risk in the design.**
++4. **Cold-start probing weakens probe rows.** The concurrent-probe budget counts
++   tasks by *current* status, so probe-vs-`skip_probe_budget` is not
++   reconstructable when `probeColdStart` is on. Those rows come back `partial`
++   and do not count.
++5. **120-day horizon.** `MarketResearchSnapshot` has a TTL. Older decisions are
++   unreplayable, and a row close to the boundary may vanish mid-run.
++6. **Replay shares the lane's blind spots by construction.** It runs the same
++   imported economics, so a bug *inside* `demandAllocation` reproduces
++   identically in both and reads as agreement. It validates the lane's *use* of
++   the brain, not the brain.
++
++### Specific things to confirm on production
++
++- **Does `MarketResearchSnapshot` actually have the coverage assumed?** Rows per
++  game per scan, going back far enough, with `sellers` populated. If scans are
++  sparse or the collection is thinner than the model suggests, the exact-fidelity
++  count collapses and the whole approach needs re-costing. **Check this first —
++  everything else depends on it.**
++- **Run `node scripts/farm2-replay.js --days 110` and look at the real ratio.**
++  My claim is that this turns "0 comparable out of 300" into a usable sample. I
++  cannot demonstrate it. If `scored` comes back near zero the design has failed
++  on contact and the `gapCounts` breakdown will say which assumption broke.
++- **Whether the §5.2 gap shows up as real disagreements.** I predict a
++  meaningful number of `lane_missing_gate` rows on any game where the legacy
++  engine uses the coverage gate. If none appear, my reading of `decide.js` is
++  wrong and should be re-checked before anything is built on it.
++- **Whether `af` settings changed in the replay window.** Worth reconstructing
++  from deploy history or operator memory before trusting any run longer than a
++  few weeks.
++- **Whether `hadResearch: true` on the skip path has corrupted anything else.**
++  I found it while reading; I have not audited what else consumes that field.
++- **The five pre-existing test failures** (below) — I assumed they are all the
++  same orphan-file class as the documented one, but I have not confirmed that
++  against the branches those utils live on.
++
++## 8. Verification done in the sandbox
++
++- `tests/farm2Replay.test.js` — 24 new tests: the vocabulary, every fidelity
++  tier, the exact 171h trial case from the task brief, self-validating demand
++  figures, a genuine disagreement, the readiness integration.
++- All 63 pre-existing farm2 tests still pass, unmodified. No existing test was
++  edited or deleted.
++- `npx eslint utils/farm2 scripts/farm2-replay.js tests/farm2Replay.test.js` —
++  clean.
++- Full suite: **638 pass, 5 fail**, against a baseline of **614 pass, 5 fail**.
++  The five failures are identical before and after and are all the same class —
++  a test file whose util lives on another branch:
++  `dropSetsListLight` (`utils/archiveExclusions`, documented in the brief),
++  plus `coworkerActs`, `farmDuration`, `operatorFarm` and `webbotFarmWatcher`.
++  The brief expected only the first; the other four are equally pre-existing on
++  this checkout and are **not** caused by this work.
++
++Nothing in this change touches `utils/autoFarmer.js` or `utils/autoLister.js` —
++not even an added export. Nothing touches the lane runner, the budget arbiter,
++the shadow guards or the live-mode steps.
++
++## 9. If you want the stronger version later
++
++Two small, additive changes to `autoFarmer.js` would materially improve this.
++Both are out of scope here (this checkout is additive-export-only, and prod runs
++79 lines this tree does not have), so they are recorded rather than made:
++
++1. **`internalSalesForGame(game, { asOf })`** — one optional parameter, shifting
++   the aggregation window. It would make every drifted-sales row exactly
++   replayable instead of unreplayable, which is currently the single largest
++   source of dropped rows. Without it, the only alternative is copying the
++   aggregation, which is the second source of truth this engine exists to avoid.
++2. **Snapshot the decision inputs onto `AutoFarmTask`** — a `decisionInputs`
++   sub-document written at `record()` time carrying the research values, the
++   sales figures and the `af` fingerprint. That removes reconstruction entirely
++   for every decision made after it ships, and closes the settings-versioning
++   hole in §7.3.
++
++The second is the real fix, and it is small. Replay exists because the inputs
++were not recorded; recording them going forward makes replay exact rather than
++best-effort, and would let the readiness gate require full-fidelity evidence
++without the caveats above.
+diff --git a/scripts/farm2-replay.js b/scripts/farm2-replay.js
+new file mode 100644
+index 0000000..fc8ec5c
+--- /dev/null
++++ b/scripts/farm2-replay.js
+@@ -0,0 +1,128 @@
++// Replay the farm lane engine's economics against the decisions the LEGACY
++// engine actually recorded, and report whether they reproduce.
++//
++// This is the evidence the shadow comparison cannot produce. Once the legacy
++// engine acts on a campaign it never re-decides it, so a shadow lane is
++// compared against a decision made hours or days earlier under conditions that
++// no longer exist — on prod that left 0 comparable pairs out of 300. Replay
++// reconstructs the inputs of the moment the legacy engine decided and asks
++// whether the same economics reach the same answer, which turns months of
++// recorded history into evidence that is available immediately.
++//
++// READ-ONLY. Reads AutoFarmTask, MarketResearchSnapshot and SaleSignal; writes
++// nothing, contacts no host and no marketplace. Safe against production.
++//
++//   node scripts/farm2-replay.js                          # every game, 110 days
++//   node scripts/farm2-replay.js --game "Albion Online"   # one lane
++//   node scripts/farm2-replay.js --days 30 --limit 200
++//   node scripts/farm2-replay.js --json                   # machine-readable
++//   node scripts/farm2-replay.js --verbose                # list every row
++//
++// See docs/FARM2-VERIFICATION.md for what the numbers do and do not prove.
++require("dotenv").config();
++const mongoose = require("mongoose");
++const replay = require("../utils/farm2/replay");
++
++function arg(name, fallback = null) {
++  const i = process.argv.indexOf("--" + name);
++  if (i === -1) return fallback;
++  const v = process.argv[i + 1];
++  return v && !v.startsWith("--") ? v : true;
++}
++
++const GAME = arg("game", null);
++const DAYS = Number(arg("days", replay.DEFAULT_MAX_AGE_DAYS)) || replay.DEFAULT_MAX_AGE_DAYS;
++const LIMIT = Number(arg("limit", 500)) || 500;
++const JSON_OUT = process.argv.includes("--json");
++const VERBOSE = process.argv.includes("--verbose");
++
++function pct(n, d) {
++  if (!d) return "n/a";
++  return Math.round((n / d) * 100) + "%";
++}
++
++async function main() {
++  if (!process.env.MONGO_URI) {
++    console.error("MONGO_URI is not set — this script reads the live decision history.");
++    process.exit(1);
++  }
++  await mongoose.connect(process.env.MONGO_URI);
++
++  const report = await replay.replayHistory({
++    game: typeof GAME === "string" ? GAME : null,
++    maxAgeDays: DAYS,
++    limit: LIMIT,
++  });
++
++  if (JSON_OUT) {
++    console.log(JSON.stringify(report, null, 2));
++    await mongoose.disconnect();
++    return;
++  }
++
++  const scope = GAME ? `game "${GAME}"` : "all games";
++  console.log(`\nFarm2 replay — ${scope}, decisions from the last ${DAYS} days\n`);
++  console.log(`  examined      ${report.examined}`);
++  console.log(`  scored        ${report.scored}   (full-fidelity reconstructions — the only evidence)`);
++  console.log(`    agree       ${report.agree}   ${pct(report.agree, report.scored)}`);
++  console.log(`    disagree    ${report.disagree}`);
++  console.log(`  not scored:`);
++  console.log(`    partial     ${report.partialFidelity}   (an input was assumed rather than known)`);
++  console.log(`    inconclusive ${report.inconclusive}  (probably OUR gap, not an engine difference)`);
++  console.log(`    unreplayable ${report.unreplayable}`);
++  if (report.errors) console.log(`    errors      ${report.errors}`);
++
++  if (Object.keys(report.gapCounts).length) {
++    console.log(`\n  why rows could not be scored:`);
++    for (const [gap, n] of Object.entries(report.gapCounts).sort((a, b) => b[1] - a[1])) {
++      console.log(`    ${String(n).padStart(5)}  ${gap}`);
++    }
++  }
++
++  const games = Object.entries(report.perGame).sort((a, b) => b[1].total - a[1].total);
++  if (games.length > 1) {
++    console.log(`\n  per game:`);
++    console.log(`    ${"game".padEnd(28)} examined  scored  agree  disagree`);
++    for (const [game, s] of games) {
++      console.log(
++        `    ${game.slice(0, 28).padEnd(28)} ${String(s.total).padStart(8)}  ${String(s.scored).padStart(6)}  ${String(s.agree).padStart(5)}  ${String(s.disagree).padStart(8)}`,
++      );
++    }
++  }
++
++  if (report.disagreements.length) {
++    console.log(`\n  DISAGREEMENTS (${report.disagreements.length}) — each one is a lane bug or a legacy bug:`);
++    for (const d of report.disagreements.slice(0, 40)) {
++      const when = d.decidedAt ? new Date(d.decidedAt).toISOString().slice(0, 16) : "?";
++      console.log(`    ${when}  ${String(d.game).slice(0, 24).padEnd(24)} legacy=${String(d.legacyDecision).padEnd(20)} ${d.detail}`);
++    }
++    if (report.disagreements.length > 40) {
++      console.log(`    ... and ${report.disagreements.length - 40} more (use --json)`);
++    }
++  }
++
++  if (VERBOSE) {
++    console.log(`\n  every row:`);
++    for (const r of report.rows) {
++      const when = r.decidedAt ? new Date(r.decidedAt).toISOString().slice(0, 16) : "?";
++      console.log(
++        `    ${when}  ${String(r.game).slice(0, 22).padEnd(22)} ${String(r.legacyDecision).padEnd(20)} ${String(r.verdict).padEnd(13)} ${String(r.fidelity || "").padEnd(12)} ${r.detail || (r.notes || []).join("; ")}`,
++      );
++    }
++  }
++
++  console.log(
++    `\n  Settings assumed: ${JSON.stringify(report.afAssumed)}` +
++      `\n  utils/settings.js is not versioned, so these are TODAY's values applied to` +
++      `\n  past decisions. If any of them changed during the window, rows either side` +
++      `\n  of the change are being replayed under the wrong configuration.\n`,
++  );
++
++  await mongoose.disconnect();
++}
++
++main().catch(async (e) => {
++  console.error(e);
++  await mongoose.disconnect().catch(() => {});
++  process.exit(1);
++});
+diff --git a/tests/farm2Replay.test.js b/tests/farm2Replay.test.js
+new file mode 100644
+index 0000000..063eafd
+--- /dev/null
++++ b/tests/farm2Replay.test.js
+@@ -0,0 +1,616 @@
++// Coverage for the replay harness (utils/farm2/replay.js) and the shared
++// decision vocabulary (utils/farm2/decisionClasses.js).
++//
++// The point of replay is to remove the confound that made the shadow
++// comparison useless. diffAgainstLegacy varies the ENGINE and the WORLD at the
++// same time, so a difference cannot be attributed to either; the 6h staleness
++// gate tried to hold the world still by proxy and left 0 comparable pairs out
++// of 300 on prod. Replay holds the world still directly, by reconstructing the
++// inputs the legacy engine had, and so turns months of recorded decisions into
++// evidence that is available immediately.
++//
++// These tests pin the three properties that make that trustworthy:
++//   1. it reproduces recorded decisions when the inputs ARE recoverable
++//   2. it refuses to score anything when they are not, rather than guessing
++//   3. only full-fidelity rows count as evidence
++const test = require("node:test");
++const assert = require("node:assert/strict");
++const mongoose = require("mongoose");
++const { MongoMemoryServer } = require("mongodb-memory-server");
++
++const AutoFarmTask = require("../models/AutoFarmTask");
++const MarketResearchSnapshot = require("../models/MarketResearchSnapshot");
++const SaleSignal = require("../models/SaleSignal");
++const FarmJob = require("../models/FarmJob");
++const FarmLane = require("../models/FarmLane");
++const replay = require("../utils/farm2/replay");
++const classes = require("../utils/farm2/decisionClasses");
++const farm2 = require("../utils/farm2");
++
++let mem;
++
++test.before(async () => {
++  mem = await MongoMemoryServer.create();
++  await mongoose.connect(mem.getUri("farm2replay"));
++  await FarmJob.init();
++});
++
++test.after(async () => {
++  await mongoose.disconnect();
++  if (mem) await mem.stop();
++});
++
++const hoursAgo = (h) => new Date(Date.now() - h * 3600000);
++const daysAgo = (d) => new Date(Date.now() - d * 86400000);
++
++// Settings with cold-start probing OFF (the shipped default), which makes the
++// probe gate inert and therefore exactly reconstructable.
++const AF = {
++  maxPerGame: 30,
++  probeSize: 5,
++  probeColdStart: false,
++  probeMaxSellers: 1,
++  probeMaxGames: 8,
++  probeCooldownDays: 90,
++  perMarketStock: 3,
++  minHoursLeft: 12,
++  platiCategoryId: "",
++};
++
++async function reset(game) {
++  await Promise.all([
++    AutoFarmTask.deleteMany({ game }),
++    MarketResearchSnapshot.deleteMany({ gameKey: game.toLowerCase() }),
++    SaleSignal.deleteMany({ gameKey: game.toLowerCase() }),
++  ]);
++}
++
++// --- The vocabulary --------------------------------------------------------
++
++test("an unclassified decision is `unknown`, never a silent `skip`", () => {
++  // The old inline classifier ended in `return "skip"`, so a decision added to
++  // AutoFarmTask's enum without being classified would read as "the lane is
++  // doing nothing" and agree with any skipping lane. That is the same
++  // absence-is-not-a-passing-value trap the presence checks exist to close.
++  assert.equal(classes.actionClass("skip_low_demand"), "skip");
++  assert.equal(classes.actionClass("farm"), "spend");
++  assert.equal(classes.actionClass("reuse_existing"), "reuse");
++  assert.equal(classes.actionClass("skip_some_future_thing"), "unknown");
++  assert.equal(classes.actionClass(undefined), "unknown");
++});
++
++test("every decision in the AutoFarmTask enum is classified", () => {
++  // Guards against the table drifting from the model. If someone adds a
++  // decision to models/AutoFarmTask.js this fails here rather than silently
++  // scoring it as `unknown` in production.
++  const enumValues = AutoFarmTask.schema.path("decision").enumValues;
++  const unclassified = enumValues.filter((d) => classes.actionClass(d) === "unknown");
++  assert.deepEqual(unclassified, [], "unclassified decisions: " + unclassified.join(", "));
++});
++
++test("the lane's vocabulary gap is reported, not hidden", () => {
++  // The lane implements the sellability stage and reuse-first, and nothing
++  // downstream. This is the list of gates it has no equivalent of.
++  assert.ok(classes.LEGACY_ONLY_DECISIONS.includes("skip_already_covered"));
++  assert.ok(classes.LEGACY_ONLY_DECISIONS.includes("skip_ends_soon"));
++  assert.ok(classes.LEGACY_ONLY_DECISIONS.includes("skip_no_accounts"));
++  assert.ok(!classes.LANE_DECISIONS.includes("skip_already_covered"));
++});
++
++test("a disagreement caused by a missing gate is named as such", () => {
++  const t = classes.classifyDisagreement("farm", "skip_already_covered");
++  assert.equal(t.kind, "lane_missing_gate");
++  assert.match(t.note, /cannot currently emit/);
++
++  // Both engines can emit both of these, so a difference is a real mismatch
++  // that needs a human rather than a feature.
++  const g = classes.classifyDisagreement("farm", "reuse_existing");
++  assert.equal(g.kind, "class_mismatch");
++});
++
++test("demandScore means different things on different rows", () => {
++  // The sellability skip records the BLENDED effective demand; every other
++  // decision records the raw market score.
++  assert.equal(classes.recordsEffectiveDemand("skip_low_demand"), true);
++  assert.equal(classes.recordsEffectiveDemand("skip_probe_budget"), true);
++  assert.equal(classes.recordsEffectiveDemand("probe"), false, "probe records the raw score");
++  assert.equal(classes.recordsEffectiveDemand("farm"), false);
++});
++
++// --- Reconstruction fidelity ----------------------------------------------
++
++test("zero recorded sales is exactly replayable even when sales have since moved", async () => {
++  const game = "Zero Sales Game";
++  await reset(game);
++  // Sales landed AFTER the decision — irrelevant, because with a recorded count
++  // of 0 the sales boost was 0 and the price factor cannot apply.
++  await SaleSignal.create({
++    game,
++    gameKey: game.toLowerCase(),
++    source: "connected",
++    dedupeKey: "zs-1",
++    priceUsd: 12,
++    at: hoursAgo(2),
++  });
++  const task = { game, campaignId: "c1", decision: "farm", internalSales: 0, decidedAt: hoursAgo(50) };
++  const r = await replay.salesInputsFor(task);
++  assert.equal(r.fidelity, replay.FIDELITY.EXACT);
++  assert.deepEqual(r.sales, { count: 0, revenue: 0, avgPrice: 0 });
++});
++
++test("a drifted sales window is unreplayable rather than guessed", async () => {
++  const game = "Drifted Sales Game";
++  await reset(game);
++  await SaleSignal.create({
++    game,
++    gameKey: game.toLowerCase(),
++    source: "connected",
++    dedupeKey: "ds-1",
++    priceUsd: 20,
++    at: hoursAgo(1),
++  });
++  // The decision recorded 3 sales; one has landed since, so the average price
++  // at decision time is not recoverable. Substituting 0 would make
++  // priceFactor return a neutral 1 and silently change the sales boost.
++  const task = { game, campaignId: "c1", decision: "farm", internalSales: 3, decidedAt: hoursAgo(50) };
++  const r = await replay.salesInputsFor(task);
++  assert.equal(r.fidelity, replay.FIDELITY.UNREPLAYABLE);
++  assert.ok(r.gaps.includes("sales_window_drifted"));
++  assert.equal(r.sales, null, "no guessed value is offered");
++});
++
++test("a decision older than the snapshot TTL is unreplayable, and says why", async () => {
++  const game = "Ancient Game";
++  await reset(game);
++  const task = {
++    game,
++    campaignId: "c1",
++    decision: "farm",
++    demandScore: 40,
++    internalSales: 0,
++    decidedAt: daysAgo(200),
++  };
++  const r = await replay.researchInputsFor(task, { af: AF });
++  assert.equal(r.fidelity, replay.FIDELITY.UNREPLAYABLE);
++  assert.ok(r.gaps.includes("snapshot_expired"));
++  assert.match(r.note, /expire/);
++});
++
++test("a missing snapshot that CONTRADICTS the recorded score is unreplayable", async () => {
++  // No snapshot survives, but the task recorded a demand score — so research
++  // existed and our history is simply incomplete. Treating that as "never
++  // scanned" would send demandAllocation down the no-market-data probe branch
++  // and invent a disagreement out of a gap in our own records.
++  const game = "Missing Snapshot Game";
++  await reset(game);
++  const task = {
++    game,
++    campaignId: "c1",
++    decision: "farm",
++    demandScore: 55,
++    internalSales: 0,
++    decidedAt: hoursAgo(40),
++  };
++  const r = await replay.researchInputsFor(task, { af: AF });
++  assert.equal(r.fidelity, replay.FIDELITY.UNREPLAYABLE);
++  assert.ok(r.gaps.includes("snapshot_missing_but_research_recorded"));
++});
++
++test("a genuinely unscanned game reconstructs exactly as no-market-data", async () => {
++  const game = "Never Scanned Game";
++  await reset(game);
++  const task = {
++    game,
++    campaignId: "c1",
++    decision: "probe",
++    demandScore: null,
++    internalSales: 0,
++    decidedAt: hoursAgo(40),
++  };
++  const r = await replay.researchInputsFor(task, { af: AF });
++  assert.equal(r.fidelity, replay.FIDELITY.EXACT);
++  assert.equal(r.research, null);
++});
++
++// --- Replaying real decisions ---------------------------------------------
++
++test("THE TRIAL CASE: a 171h-old probe the staleness gate discarded is replayable evidence", async () => {
++  // This is the decision from docs/FARM2-TASK-comparison-evidence.md that the
++  // 6h window threw away: the legacy engine probed an untested game 171 hours
++  // ago. The shadow comparison can say nothing about it, because the probe has
++  // since run and changed the world.
++  //
++  // Replay does not care that the world moved. It asks whether the economics
++  // reproduce the decision GIVEN THE INPUTS OF THAT MOMENT — an untested game
++  // with no research and no sales — and that question is still answerable.
++  const game = "Plants on Fire";
++  await reset(game);
++  const decidedAt = hoursAgo(171);
++  const task = {
++    game,
++    campaignId: "c2",
++    decision: "probe",
++    demandScore: null,
++    hadResearch: false,
++    internalSales: 0,
++    targetAccounts: 5,
++    decidedAt,
++  };
++  const out = await replay.replayDecision(task, { af: AF });
++  assert.equal(out.fidelity, replay.FIDELITY.EXACT, out.notes && out.notes.join("; "));
++  assert.equal(out.verdict, "agree", out.detail);
++  assert.equal(out.replayed.probe, true);
++});
++
++test("a sellability skip is reproduced AND self-validating on its demand figure", async () => {
++  // skip_low_demand records `demandScore: alloc.demand`, the blended effective
++  // demand — an output. So reproducing it checks the input reconstruction and
++  // the economics at the same time: a matching number is hard to get by luck.
++  const game = "Dud Game";
++  await reset(game);
++  const decidedAt = hoursAgo(80);
++  await MarketResearchSnapshot.create({
++    game,
++    gameKey: game.toLowerCase(),
++    at: new Date(decidedAt.getTime() - 3600000),
++    demandScore: 4,
++    sellers: 25,
++  });
++  const task = {
++    game,
++    campaignId: "c3",
++    decision: "skip_low_demand",
++    // 4 market + 0 sales boost = 4 effective.
++    demandScore: 4,
++    hadResearch: true,
++    internalSales: 0,
++    targetAccounts: 0,
++    decidedAt,
++  };
++  const out = await replay.replayDecision(task, { af: AF });
++  assert.equal(out.fidelity, replay.FIDELITY.EXACT);
++  assert.equal(out.verdict, "agree", out.detail);
++  assert.equal(out.replayed.skip, true);
++});
++
++test("a demand figure that does not reproduce is inconclusive, not a disagreement", async () => {
++  // If the replayed effective demand misses the recorded one, the likeliest
++  // explanation is a missing input, not the engines differing. Calling that a
++  // disagreement would block a promotion on our own reconstruction gap.
++  const game = "Mismatch Game";
++  await reset(game);
++  const decidedAt = hoursAgo(80);
++  await MarketResearchSnapshot.create({
++    game,
++    gameKey: game.toLowerCase(),
++    at: new Date(decidedAt.getTime() - 3600000),
++    demandScore: 4,
++    sellers: 25,
++  });
++  const task = {
++    game,
++    campaignId: "c4",
++    decision: "skip_low_demand",
++    demandScore: 17, // not what a replay of these inputs produces
++    hadResearch: true,
++    internalSales: 0,
++    decidedAt,
++  };
++  const out = await replay.replayDecision(task, { af: AF });
++  assert.equal(out.verdict, "inconclusive", out.detail);
++  assert.match(out.detail, /missing an input rather than the engines disagreeing/);
++});
++
++test("a real economics disagreement IS caught", async () => {
++  // A high-demand game the legacy engine recorded as a sellability skip. The
++  // replay wants to farm it, and that is a genuine contradiction rather than a
++  // reconstruction gap.
++  const game = "Should Farm Game";
++  await reset(game);
++  const decidedAt = hoursAgo(80);
++  await MarketResearchSnapshot.create({
++    game,
++    gameKey: game.toLowerCase(),
++    at: new Date(decidedAt.getTime() - 3600000),
++    demandScore: 90,
++    sellers: 12,
++  });
++  const task = {
++    game,
++    campaignId: "c5",
++    decision: "skip_low_demand",
++    demandScore: 90,
++    hadResearch: true,
++    internalSales: 0,
++    decidedAt,
++  };
++  const out = await replay.replayDecision(task, { af: AF });
++  assert.equal(out.verdict, "disagree", out.detail);
++  assert.match(out.detail, /legacy skipped at the sellability gate/);
++});
++
++test("a downstream decision is scored only on the stage replay can see", async () => {
++  // skip_already_covered is settled by the coverage gate, which reads live
++  // archive inventory that nobody snapshots. All replay can legitimately assert
++  // is that the sellability stage PASSED — as it must have, for the legacy
++  // engine to have reached the coverage gate at all.
++  const game = "Covered Game";
++  await reset(game);
++  const decidedAt = hoursAgo(30);
++  await MarketResearchSnapshot.create({
++    game,
++    gameKey: game.toLowerCase(),
++    at: new Date(decidedAt.getTime() - 3600000),
++    demandScore: 70,
++    sellers: 8,
++  });
++  const task = {
++    game,
++    campaignId: "c6",
++    decision: "skip_already_covered",
++    demandScore: 70,
++    hadResearch: true,
++    internalSales: 0,
++    targetAccounts: 0,
++    decidedAt,
++  };
++  const out = await replay.replayDecision(task, { af: AF });
++  assert.equal(out.verdict, "agree", out.detail);
++  assert.equal(out.downstream, true, "flagged as scored on the stage only");
++});
++
++test("the recorded tier target is checked when there is one", async () => {
++  const game = "Target Game";
++  await reset(game);
++  const decidedAt = hoursAgo(30);
++  await MarketResearchSnapshot.create({
++    game,
++    gameKey: game.toLowerCase(),
++    at: new Date(decidedAt.getTime() - 3600000),
++    demandScore: 90,
++    sellers: 8,
++  });
++  const task = {
++    game,
++    campaignId: "c7",
++    decision: "farm",
++    demandScore: 90,
++    hadResearch: true,
++    internalSales: 0,
++    // Deliberately wrong: a proven seller's tier target is the cap (30), not 3.
++    targetAccounts: 3,
++    decidedAt,
++  };
++  const out = await replay.replayDecision(task, { af: AF });
++  assert.equal(out.verdict, "disagree", out.detail);
++  assert.match(out.detail, /tier target differs/);
++});
++
++test("probe decisions are only PARTIAL fidelity when cold-start probing is on", async () => {
++  // The concurrent-probe budget counts tasks by their CURRENT status, so how
++  // many games were probing at a past moment is not recoverable. That has to
++  // downgrade the row rather than being quietly assumed.
++  const game = "Cold Start Game";
++  await reset(game);
++  const task = {
++    game,
++    campaignId: "c8",
++    decision: "probe",
++    demandScore: null,
++    internalSales: 0,
++    decidedAt: hoursAgo(30),
++  };
++  const on = await replay.probeGateFor(task, { af: { ...AF, probeColdStart: true } });
++  assert.equal(on.fidelity, replay.FIDELITY.PARTIAL);
++  assert.ok(on.gaps.includes("probe_budget_unreconstructable"));
++
++  const off = await replay.probeGateFor(task, { af: AF });
++  assert.equal(off.fidelity, replay.FIDELITY.EXACT);
++});
++
++// --- The summary and the gate ---------------------------------------------
++
++test("only EXACT-fidelity rows count as evidence in the summary", () => {
++  const s = replay.summarise([
++    { game: "G", verdict: "agree", fidelity: replay.FIDELITY.EXACT },
++    { game: "G", verdict: "agree", fidelity: replay.FIDELITY.PARTIAL },
++    { game: "G", verdict: "disagree", fidelity: replay.FIDELITY.EXACT, detail: "d" },
++    { game: "G", verdict: "unreplayable", fidelity: replay.FIDELITY.UNREPLAYABLE, gaps: ["x"] },
++    { game: "G", verdict: "inconclusive", fidelity: replay.FIDELITY.EXACT },
++  ]);
++  assert.equal(s.examined, 5);
++  assert.equal(s.scored, 2, "the partial agreement is reported but not counted");
++  assert.equal(s.agree, 1);
++  assert.equal(s.disagree, 1);
++  assert.equal(s.partialFidelity, 1);
++  assert.equal(s.unreplayable, 1);
++  assert.equal(s.inconclusive, 1);
++  assert.equal(s.gapCounts.x, 1, "the reason a row was dropped is always reported");
++});
++
++test("replayHistory walks recorded decisions and groups them per game", async () => {
++  const game = "History Game";
++  await reset(game);
++  const decidedAt = hoursAgo(60);
++  await MarketResearchSnapshot.create({
++    game,
++    gameKey: game.toLowerCase(),
++    at: new Date(decidedAt.getTime() - 3600000),
++    demandScore: 3,
++    sellers: 30,
++  });
++  for (let i = 0; i < 3; i += 1) {
++    await AutoFarmTask.create({
++      game,
++      campaignId: "h" + i,
++      decision: "skip_low_demand",
++      status: "skipped",
++      demandScore: 3,
++      hadResearch: true,
++      internalSales: 0,
++      decidedAt,
++    });
++  }
++  const report = await replay.replayHistory({ game, af: AF });
++  assert.equal(report.examined, 3);
++  assert.equal(report.scored, 3);
++  assert.equal(report.agree, 3);
++  assert.equal(report.disagree, 0);
++  assert.equal(report.perGame[game].agree, 3);
++  assert.ok(report.afAssumed, "the settings the replay assumed are recorded");
++});
++
++test("replay disagreements block promotion", async () => {
++  await FarmJob.deleteMany({ laneKey: "replay gate" });
++  await FarmLane.deleteMany({ gameKey: "replay gate" });
++  const lane = await FarmLane.create({
++    game: "Replay Gate",
++    gameKey: "replay gate",
++    mode: "shadow",
++  });
++  // Enough agreeing shadow evidence to pass the existing gate on its own.
++  for (let i = 0; i < 3; i += 1) {
++    await FarmJob.create({
++      lane: "Replay Gate",
++      laneKey: "replay gate",
++      kind: "decide",
++      campaignId: "rg" + i,
++      status: "done",
++      shadow: true,
++      result: {
++        verdict: { decision: "farm" },
++        diff: { agree: true, laneClass: "spend", legacyClass: "spend", stale: false },
++      },
++    });
++  }
++  const clean = await farm2.laneReadiness(lane.toObject());
++  assert.equal(clean.ready, true, "baseline: shadow evidence alone passes");
++
++  const withReplay = await farm2.laneReadiness(lane.toObject(), {
++    replay: {
++      examined: 40,
++      scored: 30,
++      agree: 28,
++      disagree: 2,
++      unreplayable: 10,
++      inconclusive: 0,
++      disagreements: [
++        { legacyDecision: "skip_low_demand", detail: "replay wants farm 30" },
++        { legacyDecision: "farm", detail: "tier target differs" },
++      ],
++    },
++  });
++  assert.equal(withReplay.ready, false, "a replay disagreement is a blocker");
++  assert.match(withReplay.blockers.join(" "), /did not reproduce/);
++  assert.equal(withReplay.replay.disagree, 2);
++});
++
++test("requireReplay makes missing replay evidence a blocker, not a caveat", async () => {
++  await FarmJob.deleteMany({ laneKey: "require replay" });
++  await FarmLane.deleteMany({ gameKey: "require replay" });
++  const lane = await FarmLane.create({
++    game: "Require Replay",
++    gameKey: "require replay",
++    mode: "shadow",
++  });
++  for (let i = 0; i < 3; i += 1) {
++    await FarmJob.create({
++      lane: "Require Replay",
++      laneKey: "require replay",
++      kind: "decide",
++      campaignId: "rr" + i,
++      status: "done",
++      shadow: true,
++      result: {
++        verdict: { decision: "farm" },
++        diff: { agree: true, laneClass: "spend", legacyClass: "spend", stale: false },
++      },
++    });
++  }
++  const off = await farm2.laneReadiness(lane.toObject());
++  assert.equal(off.ready, true);
++  assert.match(off.caveats.join(" "), /no replay evidence/);
++
++  const on = await farm2.laneReadiness(lane.toObject(), { requireReplay: true });
++  assert.equal(on.ready, false);
++  assert.match(on.blockers.join(" "), /no replay evidence supplied/);
++});
++
++test("the vocabulary gap is a standing caveat on every lane, clean or not", async () => {
++  await FarmJob.deleteMany({ laneKey: "caveat lane" });
++  await FarmLane.deleteMany({ gameKey: "caveat lane" });
++  const lane = await FarmLane.create({
++    game: "Caveat Lane",
++    gameKey: "caveat lane",
++    mode: "shadow",
++  });
++  const r = await farm2.laneReadiness(lane.toObject());
++  assert.match(r.caveats.join(" "), /cannot emit/);
++  assert.match(r.caveats.join(" "), /skip_already_covered/);
++});
++
++test("a disagreement from a missing gate is reported as a feature gap", async () => {
++  await FarmJob.deleteMany({ laneKey: "gap lane" });
++  await FarmLane.deleteMany({ gameKey: "gap lane" });
++  const lane = await FarmLane.create({ game: "Gap Lane", gameKey: "gap lane", mode: "shadow" });
++  for (let i = 0; i < 3; i += 1) {
++    await FarmJob.create({
++      lane: "Gap Lane",
++      laneKey: "gap lane",
++      kind: "decide",
++      campaignId: "gl" + i,
++      status: "done",
++      shadow: true,
++      result: {
++        verdict: { decision: "farm" },
++        diff: {
++          agree: false,
++          laneDecision: "farm",
++          legacyDecision: "skip_already_covered",
++          laneClass: "spend",
++          legacyClass: "skip",
++          stale: false,
++          disagreementKind: "lane_missing_gate",
++        },
++      },
++    });
++  }
++  const r = await farm2.laneReadiness(lane.toObject());
++  assert.equal(r.ready, false);
++  assert.equal(r.disagreementKinds.lane_missing_gate, 3);
++  assert.match(r.blockers.join(" "), /missing feature, not a mystery/);
++});
++
++test("a disagreement with no kind is counted as unclassified, not benign", async () => {
++  // Same discipline as the laneClass and stale checks: a row that predates the
++  // taxonomy has not passed it.
++  await FarmJob.deleteMany({ laneKey: "unclassified lane" });
++  await FarmLane.deleteMany({ gameKey: "unclassified lane" });
++  const lane = await FarmLane.create({
++    game: "Unclassified Lane",
++    gameKey: "unclassified lane",
++    mode: "shadow",
++  });
++  await FarmJob.create({
++    lane: "Unclassified Lane",
++    laneKey: "unclassified lane",
++    kind: "decide",
++    campaignId: "u1",
++    status: "done",
++    shadow: true,
++    result: {
++      verdict: { decision: "farm" },
++      diff: {
++        agree: false,
++        laneDecision: "farm",
++        legacyDecision: "reuse_existing",
++        laneClass: "spend",
++        legacyClass: "reuse",
++        stale: false,
++      },
++    },
++  });
++  const r = await farm2.laneReadiness(lane.toObject());
++  assert.equal(r.disagreementKinds.unclassified, 1);
++  assert.equal(r.ready, false);
++});
+diff --git a/utils/farm2/decisionClasses.js b/utils/farm2/decisionClasses.js
+new file mode 100644
+index 0000000..970d684
+--- /dev/null
++++ b/utils/farm2/decisionClasses.js
+@@ -0,0 +1,209 @@
++// The decision vocabulary of the two engines, and the action classes the
++// shadow comparison is scored on.
++//
++// WHY THIS FILE EXISTS
++//
++// The action-class mapping was written out twice inside steps/decide.js — once
++// as `classOf` for the stale branch and once as `actionClass` for the live
++// branch — with no shared definition. Two copies of the rule that decides
++// whether a lane may take over a real game is exactly the drift risk this
++// engine exists to avoid: adding a decision to one copy and not the other
++// produces a comparison that silently scores it as `skip`, which reads as
++// "agrees with a lane that is doing nothing".
++//
++// It also gives the comparison something it did not have before: an explicit
++// record of WHICH decisions each engine is capable of emitting. That turns a
++// whole category of disagreement from noise into a named, actionable finding —
++// see LEGACY_ONLY_DECISIONS below.
++
++// Everything utils/autoFarmer.js can record. Kept in sync with the enum on
++// models/AutoFarmTask.js — that enum is the authority; this is the classifier.
++const LEGACY_DECISIONS = Object.freeze([
++  "farm",
++  "probe",
++  "reuse_existing",
++  "skip_low_demand",
++  "skip_probe_budget",
++  "skip_ends_soon",
++  "skip_no_accounts",
++  "skip_no_capacity",
++  "skip_host_offline",
++  "skip_already_covered",
++  "skip_reuse_only",
++]);
++
++// Everything utils/farm2/steps/decide.js can currently return.
++//
++// This is a STRICT SUBSET of the above, and that is a live finding rather than
++// a design choice: the lane implements the sellability stage (demandAllocation)
++// and the reuse-first check, and nothing downstream of them. It has no time
++// gate, no coverage gate, no pool-floor gate, no capacity gate, no host-offline
++// gate and no reuse-only gate.
++//
++// The consequence is specific and testable: on any campaign where the legacy
++// engine stops at one of those gates, the lane will carry on and say `farm` or
++// `probe`. That is a real disagreement — the lane would spend accounts the
++// legacy engine correctly declined to spend — and it must be reported as a lane
++// CAPABILITY GAP rather than mixed in with ordinary disagreements, because the
++// fix is "implement the gate", not "investigate which engine was right".
++const LANE_DECISIONS = Object.freeze([
++  "farm",
++  "probe",
++  "reuse_existing",
++  "skip_low_demand",
++  "skip_probe_budget",
++]);
++
++// The gates the lane cannot currently express.
++const LEGACY_ONLY_DECISIONS = Object.freeze(
++  LEGACY_DECISIONS.filter((d) => !LANE_DECISIONS.includes(d)),
++);
++
++// Decisions grouped by the ACTION they cause, not by their string.
++//
++// An earlier version lumped farm, probe and reuse_existing together as one
++// "act" class, and that hid the trial's first real finding: the lane said
++// `farm` (claim fresh pool accounts, burn a container slot) while the legacy
++// engine said `reuse_existing` (restart warm bots, spend nothing), and the
++// comparison called it agreement. Spending and reusing are different actions
++// with different costs, so they are different classes.
++//
++// Written as an explicit table rather than an if-chain with a default, so that
++// adding a decision to models/AutoFarmTask.js without classifying it here fails
++// LOUDLY (actionClass returns "unknown", which is not comparable) instead of
++// quietly landing in `skip`. A new spend-class decision defaulting to `skip`
++// would read as "agrees with a lane that is doing nothing" — the same
++// absence-is-not-a-passing-value trap that has already bitten this comparison
++// twice.
++const ACTION_CLASS = Object.freeze({
++  farm: "spend",
++  probe: "spend",
++  reuse_existing: "reuse",
++  skip_low_demand: "skip",
++  skip_probe_budget: "skip",
++  skip_ends_soon: "skip",
++  skip_no_accounts: "skip",
++  skip_no_capacity: "skip",
++  skip_host_offline: "skip",
++  skip_already_covered: "skip",
++  skip_reuse_only: "skip",
++});
++
++// "unknown" for anything unclassified — never a silent fallback to "skip".
++function actionClass(decision) {
++  return ACTION_CLASS[decision] || "unknown";
++}
++
++function laneCanEmit(decision) {
++  return LANE_DECISIONS.includes(decision);
++}
++
++// Which pipeline stage settles a decision.
++//
++// This matters for replay. The sellability stage (demandAllocation) is a pure
++// function of research + own sales + settings, all of which are recoverable for
++// a past moment. Everything downstream of it depends on state nobody snapshots
++// — pool depth, container capacity, host reachability, archive coverage — and
++// is therefore NOT replayable. Scoring a replay against a downstream decision
++// would be measuring the reconstruction's blind spots, not the engine.
++const DEMAND_STAGE_DECISIONS = Object.freeze([
++  "probe",
++  "skip_low_demand",
++  "skip_probe_budget",
++]);
++
++// Decisions that prove the demand stage PASSED (it wanted to farm) but that
++// were then settled by a later gate.
++const DOWNSTREAM_DECISIONS = Object.freeze([
++  "farm",
++  "reuse_existing",
++  "skip_ends_soon",
++  "skip_no_accounts",
++  "skip_no_capacity",
++  "skip_host_offline",
++  "skip_already_covered",
++  "skip_reuse_only",
++]);
++
++function isDemandStageDecision(decision) {
++  return DEMAND_STAGE_DECISIONS.includes(decision);
++}
++
++// The two decisions for which AutoFarmTask.demandScore is NOT the raw market
++// score.
++//
++// utils/autoFarmer.js records the sellability skip with
++// `demandScore: alloc.demand` — the BLENDED effective demand (market score plus
++// the internal-sales boost) — and hardcodes `hadResearch: true` on that path
++// even when there was no research document at all. Every other decision,
++// including `probe`, is recorded further down with the raw
++// `research ? research.demandScore : null` and a truthful `hadResearch`.
++//
++// So the same two fields mean different things depending on the decision beside
++// them: an input on most rows, an OUTPUT on these two, and a constant on one.
++// Anything reading AutoFarmTask.demandScore — a replay, a dashboard, an alert —
++// has to branch on this or it is silently comparing two different quantities.
++const EFFECTIVE_DEMAND_DECISIONS = Object.freeze(["skip_low_demand", "skip_probe_budget"]);
++
++function recordsEffectiveDemand(decision) {
++  return EFFECTIVE_DEMAND_DECISIONS.includes(decision);
++}
++
++// Why did these two decisions differ? The taxonomy is the actionable part: an
++// operator staring at "12 disagreements" cannot tell a lane bug from a missing
++// feature from an expected budget effect, and those need three different
++// responses.
++//
++//   agree             — same action class, nothing to explain
++//   lane_missing_gate — the legacy engine used a gate the lane does not
++//                       implement at all. Deterministic, not a mystery: the
++//                       lane WILL disagree here every time until the gate is
++//                       built. The most actionable output this produces.
++//   class_mismatch    — both engines could have produced either answer and they
++//                       differed. This is the one that needs a human.
++//   not_comparable    — one side is missing or unclassified.
++function classifyDisagreement(laneDecision, legacyDecision) {
++  const lc = actionClass(laneDecision);
++  const gc = actionClass(legacyDecision);
++  if (lc === "unknown" || gc === "unknown") {
++    return {
++      kind: "not_comparable",
++      laneClass: lc,
++      legacyClass: gc,
++      note: "at least one decision is not in the action-class table",
++    };
++  }
++  if (lc === gc) return { kind: "agree", laneClass: lc, legacyClass: gc };
++  if (!laneCanEmit(legacyDecision)) {
++    return {
++      kind: "lane_missing_gate",
++      laneClass: lc,
++      legacyClass: gc,
++      note:
++        `the legacy engine settled this with "${legacyDecision}", which the lane ` +
++        "engine cannot currently emit — the lane has no such gate, so it will " +
++        "disagree here on every campaign until one is implemented",
++    };
++  }
++  return {
++    kind: "class_mismatch",
++    laneClass: lc,
++    legacyClass: gc,
++    note: "both engines can emit both answers, and they differed",
++  };
++}
++
++module.exports = {
++  LEGACY_DECISIONS,
++  LANE_DECISIONS,
++  LEGACY_ONLY_DECISIONS,
++  ACTION_CLASS,
++  DEMAND_STAGE_DECISIONS,
++  DOWNSTREAM_DECISIONS,
++  EFFECTIVE_DEMAND_DECISIONS,
++  actionClass,
++  laneCanEmit,
++  isDemandStageDecision,
++  recordsEffectiveDemand,
++  classifyDisagreement,
++};
+diff --git a/utils/farm2/index.js b/utils/farm2/index.js
+index d0b0434..ebdb77e 100644
+--- a/utils/farm2/index.js
++++ b/utils/farm2/index.js
+@@ -69,10 +69,32 @@ async function seedTrialLanes({ games = TRIAL_GAMES, mode = "shadow" } = {}) {
+ // evidence, not by accident.
+ const MIN_SHADOW_DECISIONS = 3;
+ 
+-async function laneReadiness(lane) {
++// How many EXACT-fidelity replayed decisions constitute evidence, when replay
++// evidence is required. Higher than MIN_SHADOW_DECISIONS because replay rows
++// are cheap — they come from history rather than from waiting — so there is no
++// reason to accept a thin sample.
++const MIN_REPLAY_DECISIONS = 20;
++
++// `opts.replay` is a report from utils/farm2/replay.js (replayHistory), scoped
++// to this lane's game. It is passed IN rather than computed here so that
++// readiness stays a fast, read-only check the promotion dialog can call, while
++// the replay — which walks months of history — is run deliberately.
++//
++// `opts.requireReplay` decides whether missing replay evidence BLOCKS or merely
++// warns. It defaults to false so this change cannot silently raise the bar on
++// the existing gate; the recommendation to flip it is in
++// docs/FARM2-VERIFICATION.md and is a decision for review, not for this module.
++async function laneReadiness(lane, opts = {}) {
+   const FarmJob = require("../../models/FarmJob");
++  const classes = require("./decisionClasses");
++  const { replay = null, requireReplay = false } = opts;
+   const blockers = [];
+   const warnings = [];
++  // Standing facts about the ENGINE that apply to every lane, kept separate
++  // from `warnings` (which are observations about THIS lane's evidence) so that
++  // a clean lane still reads as clean. Folding them into warnings would make
++  // that list never empty and train an operator to ignore it.
++  const caveats = [];
+ 
+   // 1. The live path must actually exist on this host. A lane promoted on a
+   //    box running an older build would own its game with no way to farm it —
+@@ -176,6 +198,36 @@ async function laneReadiness(lane) {
+     );
+   }
+ 
++  // Split the disagreements by cause. A count on its own cannot distinguish a
++  // lane bug from a gate the lane has never had, and those need opposite
++  // responses — investigate vs. implement.
++  //
++  // `disagreementKind` is written only by the current diff. A disagreement
++  // WITHOUT it is counted as unclassified rather than assumed benign: absence
++  // of the field means "not scored by the current logic", never "passed it".
++  const missingGate = diffs.filter((d) => d.disagreementKind === "lane_missing_gate");
++  const genuineMismatch = diffs.filter((d) => d.disagreementKind === "class_mismatch");
++  const unclassified = diffs.filter((d) => !d.disagreementKind);
++  if (missingGate.length) {
++    const gates = [...new Set(missingGate.map((d) => d.legacyDecision))].join(", ");
++    blockers.push(
++      `${missingGate.length} disagreement(s) are the lane having no equivalent of a legacy gate (${gates}) — ` +
++        "the lane engine cannot emit those decisions at all, so it will disagree on every such " +
++        "campaign until the gate is implemented. This is a missing feature, not a mystery",
++    );
++  }
++
++  // The vocabulary gap is worth surfacing even on a lane that currently shows
++  // no disagreements, because whether it has bitten yet is a property of which
++  // campaigns happened to come up, not of the lane being safe.
++  if (classes.LEGACY_ONLY_DECISIONS.length) {
++    caveats.push(
++      `the lane engine cannot emit ${classes.LEGACY_ONLY_DECISIONS.length} of the legacy engine's ` +
++        `decisions (${classes.LEGACY_ONLY_DECISIONS.join(", ")}); on campaigns the legacy engine ` +
++        "settles with one of those, a live lane would carry on and spend instead",
++    );
++  }
++
+   // A large account-count gap is worth surfacing even when the action matches —
+   // same intent, very different spend, is still worth a look before promoting.
+   const bigGaps = compared.filter((d) => Math.abs(Number(d.accountDelta) || 0) >= 10);
+@@ -185,15 +237,68 @@ async function laneReadiness(lane) {
+     );
+   }
+ 
++  // --- Replay evidence -----------------------------------------------------
++  //
++  // Shadow comparisons answer "did the two engines agree on the campaigns that
++  // happened to come up while both were looking?". Replay answers "does the
++  // lane's economics reproduce what the legacy engine actually decided, given
++  // the inputs it had?" — over months of history rather than days of waiting.
++  // The second is the stronger evidence and the one that scales to 34 lanes.
++  let replaySummary = null;
++  if (replay && typeof replay === "object") {
++    replaySummary = {
++      examined: Number(replay.examined) || 0,
++      scored: Number(replay.scored) || 0,
++      agree: Number(replay.agree) || 0,
++      disagree: Number(replay.disagree) || 0,
++      unreplayable: Number(replay.unreplayable) || 0,
++      inconclusive: Number(replay.inconclusive) || 0,
++    };
++    if (replaySummary.disagree > 0) {
++      const sample = (replay.disagreements || [])
++        .slice(0, 3)
++        .map((d) => `${d.legacyDecision}: ${d.detail}`)
++        .join("; ");
++      blockers.push(
++        `${replaySummary.disagree} of ${replaySummary.scored} replayed decisions did not reproduce ` +
++          `the legacy engine's recorded outcome (${sample})`,
++      );
++    }
++    if (requireReplay && replaySummary.scored < MIN_REPLAY_DECISIONS) {
++      blockers.push(
++        `only ${replaySummary.scored} replayed decision(s) at full fidelity — need at least ` +
++          `${MIN_REPLAY_DECISIONS} (${replaySummary.examined} examined, ${replaySummary.unreplayable} ` +
++          `could not be reconstructed, ${replaySummary.inconclusive} inconclusive)`,
++      );
++    }
++  } else if (requireReplay) {
++    blockers.push(
++      "no replay evidence supplied — run the replay harness for this game before promoting",
++    );
++  } else {
++    caveats.push(
++      "no replay evidence — shadow comparisons alone only cover campaigns decided while both " +
++        "engines were looking; run scripts/farm2-replay.js for this game to check the economics " +
++        "against recorded history",
++    );
++  }
++
+   return {
+     ready: blockers.length === 0,
+     blockers,
+     warnings,
++    caveats,
+     shadowDecisions: decided,
+     compared: compared.length,
+     stale,
+     preGate,
+     disagreements: diffs.length,
++    disagreementKinds: {
++      lane_missing_gate: missingGate.length,
++      class_mismatch: genuineMismatch.length,
++      unclassified: unclassified.length,
++    },
++    replay: replaySummary,
+   };
+ }
+ 
+@@ -217,6 +322,9 @@ module.exports = {
+   seedTrialLanes,
+   laneReadiness,
+   ownership,
++  replay: require("./replay"),
++  decisionClasses: require("./decisionClasses"),
+   TRIAL_GAMES,
+   MIN_SHADOW_DECISIONS,
++  MIN_REPLAY_DECISIONS,
+ };
+diff --git a/utils/farm2/replay.js b/utils/farm2/replay.js
+new file mode 100644
+index 0000000..44d6734
+--- /dev/null
++++ b/utils/farm2/replay.js
+@@ -0,0 +1,637 @@
++// REPLAY — re-run the economics against the inputs the legacy engine actually
++// had, instead of against today's world.
++//
++// ---------------------------------------------------------------------------
++// WHY THE EXISTING COMPARISON CANNOT WORK
++// ---------------------------------------------------------------------------
++//
++// diffAgainstLegacy asks "does the lane's decision today match the legacy
++// engine's decision from whenever it last decided?". Two things differ between
++// those two observations: the ENGINE and the WORLD. When the answers differ you
++// cannot attribute the difference to either one, which is why all ten of the
++// trial's "disagreements" turned out to be both engines being right about
++// different moments.
++//
++// The 6h staleness gate was the right diagnosis and the wrong cure. Age is a
++// proxy for "the world has not moved", and a poor one in both directions: it
++// throws away a decision made 200h ago on a game where nothing has changed, and
++// it accepts one made 20 minutes ago on a game that was rescanned in between.
++// Applied to prod it left 0 comparable pairs out of 300, which is the honest
++// consequence of a proxy that is mostly measuring how often the legacy engine
++// happens to re-decide things.
++//
++// Replay removes the confound instead of gating on it. Hold the world fixed at
++// the moment the legacy engine decided, run the lane's economics against THAT
++// world, and the only remaining variable is the engine. It also turns the
++// sample-size problem inside out: rather than waiting days for fresh pairs to
++// accumulate, every decision the legacy engine has already made is a test case
++// available right now, offline.
++//
++// ---------------------------------------------------------------------------
++// WHAT IS AND IS NOT RECONSTRUCTABLE
++// ---------------------------------------------------------------------------
++//
++// Recoverable for a past moment T:
++//   research.demandScore  models/MarketResearchSnapshot — one row per game per
++//   research.sellers      scan, retained 120 days. MarketResearch itself is
++//                         overwritten in place and keeps no history, so the
++//                         snapshot collection is the only route to a past scan.
++//   internalSales         models/SaleSignal is append-only and timestamped, so
++//                         whether the 45-day window's CONTENTS changed between T
++//                         and now is a pair of existence queries.
++//
++// NOT recoverable, and this bounds everything below:
++//   af settings           utils/settings.js is not versioned. A change to
++//                         maxPerGame or the demand thresholds between T and now
++//                         is invisible, and would make a replay disagree for a
++//                         reason that is not the lane's fault.
++//   pool depth            countReadyPool is a live count.
++//   container capacity    a live host query.
++//   host reachability     a live SSH probe.
++//   archive coverage      archiveHoldersForCampaign reads current inventory.
++//
++// Those four settle every decision DOWNSTREAM of the sellability gate, so
++// replay is deliberately scoped to the demand stage and reports downstream
++// decisions as out of scope rather than pretending to score them. Measuring the
++// reconstruction's blind spots and calling it engine disagreement is exactly
++// the mistake the 6h gate made.
++//
++// ---------------------------------------------------------------------------
++// NO SECOND SOURCE OF TRUTH
++// ---------------------------------------------------------------------------
++//
++// Every number here comes from utils/autoFarmer.js's own exports —
++// demandAllocation, salesOf, capForGame, marketStockFloor. This module
++// reconstructs INPUTS and compares OUTPUTS; it does not re-derive a single
++// tier, boost or cap. The one place that discipline costs us is noted at
++// salesInputsFor(): reconstructing a past avgPrice would mean copying the
++// SaleSignal aggregation out of internalSalesForGame, so instead we detect
++// whether it is safe to reuse the live value and give up honestly when it is
++// not.
++
++const settings = require("../settings");
++const classes = require("./decisionClasses");
++
++// Load the legacy engine lazily, for the same reason steps/decide.js does: it
++// pulls a wide dependency graph and, on prod, a catalog integration that does
++// not exist in every checkout.
++function brain() {
++  return require("../autoFarmer");
++}
++
++// Mirrors SALES_WINDOW_MS in utils/autoFarmer.js. Used ONLY to ask "did the
++// window's contents change?", never to recompute a sales figure — see
++// salesInputsFor().
++const SALES_WINDOW_MS = 45 * 86400000;
++
++// models/MarketResearchSnapshot.js expires rows after 120 days, so a decision
++// older than that has no reconstructable research and is not replayable at all.
++// Held slightly inside the TTL: a row a few hours from expiry may already be
++// gone, and "the snapshot vanished mid-query" would read as "no research".
++const SNAPSHOT_RETENTION_DAYS = 120;
++const DEFAULT_MAX_AGE_DAYS = 110;
++
++// Fidelity of a reconstruction. Only `exact` is evidence.
++//
++//   exact         every input the decision depends on was recovered, or is
++//                 provably irrelevant to it
++//   partial       something is assumed rather than known (see `gaps`)
++//   unreplayable  a required input cannot be recovered at all
++const FIDELITY = Object.freeze({
++  EXACT: "exact",
++  PARTIAL: "partial",
++  UNREPLAYABLE: "unreplayable",
++});
++
++// --- Input reconstruction --------------------------------------------------
++
++// Own-sales input as the legacy engine saw it at time T.
++//
++// internalSalesForGame(game) aggregates SaleSignal rows in [now-45d, now].
++// At T the window was [T-45d, T]. The two aggregate the SAME row set iff
++// nothing entered after T and nothing aged out of the far end since. Both are
++// existence queries on an append-only, timestamped collection.
++//
++// When the set is unchanged we reuse the LIVE function's output verbatim, which
++// keeps internalSalesForGame the single source of truth for what a sale is
++// worth — the per-source grouping in there fixes a real phantom-demand bug
++// (connected writes one row per drop, listing_sold one per unit) and copying it
++// to shift a date is precisely the drift this engine exists to prevent.
++//
++// When the set HAS changed we cannot recover avgPrice, so we say so instead of
++// substituting 0 — priceFactor(0) returns a neutral 1, which would silently
++// change the sales boost and manufacture a disagreement the lane did not cause.
++//
++// The exception that makes most rows replayable anyway: when the recorded count
++// was 0, salesBoost is 0 and capForGame is at its base regardless of price, so
++// no price information is needed and the reconstruction is exact.
++async function salesInputsFor(task, { now = Date.now() } = {}) {
++  const b = brain();
++  const SaleSignal = require("../../models/SaleSignal");
++  const gameKey = String(task.game || "").toLowerCase();
++  const recordedCount = Math.max(0, Number(task.internalSales) || 0);
++  const decidedAt = task.decidedAt ? new Date(task.decidedAt).getTime() : null;
++
++  if (recordedCount === 0) {
++    return {
++      sales: { count: 0, revenue: 0, avgPrice: 0 },
++      fidelity: FIDELITY.EXACT,
++      gaps: [],
++      note: "no own sales at decision time — price factor cannot apply",
++    };
++  }
++
++  if (!decidedAt) {
++    return {
++      sales: null,
++      fidelity: FIDELITY.UNREPLAYABLE,
++      gaps: ["no_decided_at"],
++      note: "decision has no timestamp, so its sales window is unknown",
++    };
++  }
++
++  // Same source filter as internalSalesForGame — these two are what it counts.
++  const sources = { $in: ["connected", "listing_sold"] };
++  const [added, agedOut] = await Promise.all([
++    SaleSignal.countDocuments({ gameKey, source: sources, at: { $gt: new Date(decidedAt) } }),
++    SaleSignal.countDocuments({
++      gameKey,
++      source: sources,
++      at: { $gte: new Date(decidedAt - SALES_WINDOW_MS), $lt: new Date(now - SALES_WINDOW_MS) },
++    }),
++  ]);
++
++  if (added > 0 || agedOut > 0) {
++    return {
++      sales: null,
++      fidelity: FIDELITY.UNREPLAYABLE,
++      gaps: ["sales_window_drifted"],
++      note:
++        `${added} sale signal(s) landed after the decision and ${agedOut} aged out of ` +
++        "the 45-day window since — the average price at decision time is not recorded " +
++        "anywhere and cannot be recovered without duplicating the aggregation",
++    };
++  }
++
++  // The row set is unchanged, so the live figure IS the historical figure.
++  const live = b.salesOf(await b.internalSalesForGame(task.game));
++
++  // Integrity check. If the set really is unchanged the count must match what
++  // was recorded; if it does not, one of our assumptions about this collection
++  // is wrong and the reconstruction must not be trusted.
++  if (live.count !== recordedCount) {
++    return {
++      sales: null,
++      fidelity: FIDELITY.UNREPLAYABLE,
++      gaps: ["sales_count_mismatch"],
++      note:
++        `no rows entered or left the window, but the live count (${live.count}) differs ` +
++        `from the recorded one (${recordedCount}) — the window is not as stable as assumed`,
++    };
++  }
++
++  return { sales: live, fidelity: FIDELITY.EXACT, gaps: [], note: "" };
++}
++
++// Market research as the legacy engine saw it at time T.
++//
++// Returns the shape demandAllocation reads: { demandScore, sellers, scannedAt }.
++// scannedAt comes from the snapshot's own `at`, because that IS the moment the
++// scan happened — demandAllocation only tests it for null (a doc that exists but
++// has never been scanned takes the no-market-data branch).
++async function researchInputsFor(task, { af } = {}) {
++  const MarketResearchSnapshot = require("../../models/MarketResearchSnapshot");
++  const gameKey = String(task.game || "").toLowerCase();
++  const decidedAt = task.decidedAt ? new Date(task.decidedAt) : null;
++  if (!decidedAt) {
++    return { research: null, fidelity: FIDELITY.UNREPLAYABLE, gaps: ["no_decided_at"], note: "" };
++  }
++
++  const snap = await MarketResearchSnapshot.findOne({ gameKey, at: { $lte: decidedAt } })
++    .sort({ at: -1 })
++    .lean();
++
++  if (!snap) {
++    // Either the game had never been scanned by then, or the snapshot has
++    // expired. Those are opposite situations and confusing them would be a
++    // silent error, so distinguish them by age.
++    const ageDays = (Date.now() - decidedAt.getTime()) / 86400000;
++    if (ageDays > SNAPSHOT_RETENTION_DAYS) {
++      return {
++        research: null,
++        fidelity: FIDELITY.UNREPLAYABLE,
++        gaps: ["snapshot_expired"],
++        note: `decision is ${Math.round(ageDays)} days old; research snapshots expire at ${SNAPSHOT_RETENTION_DAYS}`,
++      };
++    }
++    // No snapshot and not old enough to have expired, so the game had never
++    // been scanned by then — UNLESS the task itself says otherwise. On any row
++    // that records the raw market score, a non-null demandScore proves a
++    // research document existed at decision time, and then a missing snapshot
++    // means the history is incomplete rather than the game being unscanned.
++    // Treating that as "no market data" would feed demandAllocation down the
++    // probe branch and manufacture a disagreement out of a gap in our records.
++    if (!classes.recordsEffectiveDemand(task.decision) && task.demandScore != null) {
++      return {
++        research: null,
++        fidelity: FIDELITY.UNREPLAYABLE,
++        gaps: ["snapshot_missing_but_research_recorded"],
++        note:
++          `the task recorded demandScore ${task.demandScore}, so research existed at decision ` +
++          "time, but no snapshot at or before that moment survives to reconstruct it",
++      };
++    }
++    return {
++      research: null,
++      fidelity: FIDELITY.EXACT,
++      gaps: [],
++      note: "no scan had happened for this game by then — the no-market-data branch",
++    };
++  }
++
++  const research = {
++    demandScore: Number(snap.demandScore || 0),
++    sellers: Number(snap.sellers || 0),
++    scannedAt: snap.at,
++  };
++
++  const gaps = [];
++  let fidelity = FIDELITY.EXACT;
++
++  // Cross-check the reconstruction against what the task recorded — but ONLY
++  // for decisions where that field is the raw market score.
++  //
++  // See classes.recordsEffectiveDemand: on the sellability-skip path the stored
++  // demandScore is the BLENDED effective demand (an output of the decision, not
++  // an input to it), so comparing it against a snapshot would be comparing two
++  // different quantities. `probe` is recorded on the ordinary path further down
++  // and DOES carry the raw score, so it is cross-checked like any other row.
++  if (!classes.recordsEffectiveDemand(task.decision) && task.demandScore != null) {
++    if (Number(task.demandScore) !== research.demandScore) {
++      gaps.push("research_snapshot_mismatch");
++      fidelity = FIDELITY.PARTIAL;
++    }
++  }
++
++  // `sellers` is only read on the cold-start probe branch. When cold-start
++  // probing is off the value cannot affect the outcome, so an imperfect one is
++  // harmless; when it is on, it decides probe-vs-skip.
++  if (af && af.probeColdStart && snap.sellers == null) {
++    gaps.push("sellers_unknown");
++    fidelity = FIDELITY.PARTIAL;
++  }
++
++  return { research, fidelity, gaps, note: "" };
++}
++
++// The cold-start probe gate as it stood at T.
++//
++// Half of it is reconstructable and half is not:
++//   recentlyFailed  reads completedAt, a stored timestamp — recoverable
++//   otherProbes     counts tasks whose status is ACTIVE/PLANNED right now.
++//                   Status is current state, not history, so how many games
++//                   were probing at T is not recoverable.
++//
++// When af.probeColdStart is off (the default) the whole gate is inert and
++// probeAllowed is unconditionally true, which is exact.
++async function probeGateFor(task, { af }) {
++  if (!af || !af.probeColdStart) {
++    return { probeAllowed: true, fidelity: FIDELITY.EXACT, gaps: [], note: "cold-start probing off" };
++  }
++  const AutoFarmTask = require("../../models/AutoFarmTask");
++  const decidedAt = task.decidedAt ? new Date(task.decidedAt) : null;
++  if (!decidedAt) {
++    return { probeAllowed: true, fidelity: FIDELITY.UNREPLAYABLE, gaps: ["no_decided_at"], note: "" };
++  }
++  const cooldownCut = new Date(
++    decidedAt.getTime() - Math.max(0, Number(af.probeCooldownDays) || 0) * 86400000,
++  );
++  const recentlyFailed = await AutoFarmTask.exists({
++    game: task.game,
++    probeOutcome: "expired",
++    completedAt: { $gte: cooldownCut, $lte: decidedAt },
++  });
++
++  return {
++    probeAllowed: !recentlyFailed,
++    fidelity: FIDELITY.PARTIAL,
++    gaps: ["probe_budget_unreconstructable"],
++    note:
++      "the post-failure cooldown was recovered from completedAt, but the concurrent-probe " +
++      "budget reads live task status and cannot be rebuilt for a past moment",
++  };
++}
++
++// Combine the three into one input set.
++async function reconstructInputs(task, { af, now = Date.now() } = {}) {
++  const af2 = af || settings.getAutoFarm();
++  const [salesPart, researchPart, probePart] = await Promise.all([
++    salesInputsFor(task, { now }),
++    researchInputsFor(task, { af: af2 }),
++    probeGateFor(task, { af: af2 }),
++  ]);
++
++  const parts = [salesPart, researchPart, probePart];
++  const gaps = parts.flatMap((p) => p.gaps);
++  const notes = parts.map((p) => p.note).filter(Boolean);
++
++  // Worst wins. A single unrecoverable input makes the whole reconstruction
++  // unusable — averaging fidelities would let a confident guess about one input
++  // paper over a blank in another.
++  let fidelity = FIDELITY.EXACT;
++  if (parts.some((p) => p.fidelity === FIDELITY.UNREPLAYABLE)) fidelity = FIDELITY.UNREPLAYABLE;
++  else if (parts.some((p) => p.fidelity === FIDELITY.PARTIAL)) fidelity = FIDELITY.PARTIAL;
++
++  return {
++    af: af2,
++    research: researchPart.research,
++    sales: salesPart.sales,
++    probeAllowed: probePart.probeAllowed,
++    fidelity,
++    gaps,
++    notes,
++    // Settings are not versioned, so this is an assumption on EVERY row rather
++    // than a per-row gap. Recorded so a reviewer can see which values the
++    // replay ran under and re-run with the ones that were actually live.
++    afAssumed: {
++      maxPerGame: af2.maxPerGame,
++      probeColdStart: !!af2.probeColdStart,
++      probeSize: af2.probeSize,
++      probeMaxSellers: af2.probeMaxSellers,
++      perMarketStock: af2.perMarketStock,
++      minHoursLeft: af2.minHoursLeft,
++    },
++  };
++}
++
++// --- The replay itself -----------------------------------------------------
++
++// Re-run the sellability stage for one recorded legacy decision.
++//
++// The verdict is deliberately narrow. It answers "does the economics path the
++// lane engine uses reproduce what the legacy engine recorded, given the same
++// inputs?" — not "would the lane have done the same thing", which additionally
++// depends on gates the lane does not implement and state nobody snapshots.
++async function replayDecision(task, { af, now = Date.now() } = {}) {
++  const b = brain();
++  const base = {
++    game: task.game,
++    campaignId: task.campaignId,
++    decidedAt: task.decidedAt || null,
++    legacyDecision: task.decision,
++    legacyTarget: Number(task.targetAccounts || 0),
++    legacyDemandScore: task.demandScore == null ? null : Number(task.demandScore),
++  };
++
++  const inputs = await reconstructInputs(task, { af, now });
++  if (inputs.fidelity === FIDELITY.UNREPLAYABLE) {
++    return {
++      ...base,
++      verdict: "unreplayable",
++      fidelity: inputs.fidelity,
++      gaps: inputs.gaps,
++      notes: inputs.notes,
++    };
++  }
++
++  // THE economics — imported, never re-derived.
++  const alloc = b.demandAllocation(inputs.research, inputs.af, inputs.sales, {
++    probeAllowed: inputs.probeAllowed,
++  });
++
++  const replayed = {
++    skip: !!alloc.skip,
++    probe: !!alloc.probe,
++    target: Math.max(0, Number(alloc.target) || 0),
++    cap: Number(alloc.cap) || 0,
++    demand: alloc.demand == null ? null : Number(alloc.demand),
++    effective: alloc.effective == null ? null : Number(alloc.effective),
++    probeBlocked: !!alloc.probeBlocked,
++  };
++
++  const out = { ...base, replayed, fidelity: inputs.fidelity, gaps: inputs.gaps, notes: inputs.notes };
++
++  // --- Score it ------------------------------------------------------------
++  //
++  // Three shapes of assertion, depending on what the recorded decision proves
++  // about the demand stage.
++
++  // (a) The legacy engine stopped AT the sellability gate. The stage's whole
++  //     output is recorded, so this is a full check — and a self-validating
++  //     one: the stored demandScore is alloc.demand, so a match confirms both
++  //     the input reconstruction and the economics at once.
++  if (classes.isDemandStageDecision(task.decision)) {
++    if (task.decision === "skip_low_demand" || task.decision === "skip_probe_budget") {
++      if (!replayed.skip) {
++        return {
++          ...out,
++          verdict: "disagree",
++          detail: `legacy skipped at the sellability gate; replay wants ${replayed.probe ? "probe" : "farm"} ${replayed.target}`,
++        };
++      }
++      if (base.legacyDemandScore != null && replayed.demand != null) {
++        // Both are already rounded by demandAllocation; compare with a small
++        // tolerance for float noise rather than exact equality.
++        const delta = Math.abs(replayed.demand - base.legacyDemandScore);
++        if (delta > 0.15) {
++          return {
++            ...out,
++            verdict: "inconclusive",
++            detail:
++              `both skip, but the replayed effective demand (${replayed.demand}) does not match ` +
++              `the recorded one (${base.legacyDemandScore}) — the reconstruction is probably ` +
++              "missing an input rather than the engines disagreeing",
++          };
++        }
++      }
++      return { ...out, verdict: "agree", detail: "sellability skip reproduced, demand figure matches" };
++    }
++    // probe
++    if (!replayed.probe) {
++      return {
++        ...out,
++        verdict: inputs.gaps.includes("probe_budget_unreconstructable") ? "inconclusive" : "disagree",
++        detail: `legacy probed; replay says ${replayed.skip ? "skip" : "farm " + replayed.target}`,
++      };
++    }
++    return { ...out, verdict: "agree", detail: "probe reproduced" };
++  }
++
++  // (b) The legacy engine got PAST the sellability gate — whatever it did next,
++  //     the stage must not have skipped.
++  if (replayed.skip) {
++    return {
++      ...out,
++      verdict: "disagree",
++      detail:
++        `legacy passed the sellability gate and settled with "${task.decision}", but the replay ` +
++        "skips at that gate — the lane would never have considered this campaign",
++    };
++  }
++
++  // (c) The tier target is checkable when the legacy engine recorded one.
++  //     targetAccounts is `wanted` from the coverage gate:
++  //       min(max(alloc.target, probe ? 0 : marketStockFloor(af)), alloc.cap || af.maxPerGame)
++  //     rebuilt here from the same imported helpers rather than re-derived.
++  if (base.legacyTarget > 0) {
++    let floor = 0;
++    try {
++      floor = replayed.probe ? 0 : Number(b.marketStockFloor(inputs.af)) || 0;
++    } catch {
++      // marketStockFloor consults the marketplaces module for key status; if
++      // that is unavailable the floor is unknown, not zero.
++      return {
++        ...out,
++        verdict: "inconclusive",
++        detail: "market stock floor unavailable, so the tier target cannot be rebuilt",
++      };
++    }
++    const cap = replayed.cap || Number(inputs.af.maxPerGame) || 0;
++    const wanted = Math.min(Math.max(replayed.target, floor), cap);
++    if (wanted !== base.legacyTarget) {
++      return {
++        ...out,
++        replayedWanted: wanted,
++        verdict: "disagree",
++        detail: `tier target differs — replay wants ${wanted}, legacy recorded ${base.legacyTarget}`,
++      };
++    }
++    return {
++      ...out,
++      replayedWanted: wanted,
++      verdict: "agree",
++      detail: `sellability passed and the tier target matches (${wanted})`,
++    };
++  }
++
++  return {
++    ...out,
++    verdict: "agree",
++    detail: "sellability passed, as it must have for the legacy engine to reach " + task.decision,
++    downstream: true,
++  };
++}
++
++// --- Batch + report --------------------------------------------------------
++
++// Replay every recorded legacy decision for a game (or for all games).
++//
++// Read-only end to end: it reads AutoFarmTask, MarketResearchSnapshot and
++// SaleSignal and writes nothing. Safe to point at a production dump.
++async function replayHistory({
++  game = null,
++  maxAgeDays = DEFAULT_MAX_AGE_DAYS,
++  limit = 500,
++  af = null,
++  now = Date.now(),
++} = {}) {
++  const AutoFarmTask = require("../../models/AutoFarmTask");
++  const q = { decidedAt: { $ne: null, $gte: new Date(now - maxAgeDays * 86400000) } };
++  if (game) q.game = game;
++
++  const tasks = await AutoFarmTask.find(q)
++    .sort({ decidedAt: -1 })
++    .limit(Math.max(1, limit))
++    .select("game campaignId decision demandScore hadResearch internalSales targetAccounts plannedAccounts decidedAt")
++    .lean();
++
++  const af2 = af || settings.getAutoFarm();
++  const rows = [];
++  for (const t of tasks) {
++    try {
++      rows.push(await replayDecision(t, { af: af2, now }));
++    } catch (e) {
++      // One malformed row must not cost the whole report, in the same spirit as
++      // the per-campaign boundary inside a lane.
++      rows.push({
++        game: t.game,
++        campaignId: t.campaignId,
++        legacyDecision: t.decision,
++        verdict: "error",
++        detail: String((e && e.message) || e),
++      });
++    }
++  }
++  return summarise(rows, { maxAgeDays, af: af2 });
++}
++
++function summarise(rows, { maxAgeDays, af } = {}) {
++  const by = (v) => rows.filter((r) => r.verdict === v);
++  const agree = by("agree");
++  const disagree = by("disagree");
++  const inconclusive = by("inconclusive");
++  const unreplayable = by("unreplayable");
++  const errored = by("error");
++
++  // Evidence is the EXACT-fidelity agreements and disagreements only. A partial
++  // reconstruction can still be reported, but it must not count toward a
++  // promotion decision — the same rule as the field-presence checks elsewhere
++  // in this engine: not scored by the current logic is never "passed it".
++  const scored = [...agree, ...disagree].filter((r) => r.fidelity === FIDELITY.EXACT);
++  const scoredAgree = scored.filter((r) => r.verdict === "agree");
++  const scoredDisagree = scored.filter((r) => r.verdict === "disagree");
++
++  // Why the unreplayable ones failed, so the gap between "rows examined" and
++  // "rows scored" is always explainable rather than a mystery number.
++  const gapCounts = {};
++  for (const r of rows) {
++    for (const g of r.gaps || []) gapCounts[g] = (gapCounts[g] || 0) + 1;
++  }
++
++  const perGame = {};
++  for (const r of rows) {
++    const k = r.game || "?";
++    perGame[k] = perGame[k] || { total: 0, scored: 0, agree: 0, disagree: 0 };
++    perGame[k].total += 1;
++    if (r.fidelity === FIDELITY.EXACT && (r.verdict === "agree" || r.verdict === "disagree")) {
++      perGame[k].scored += 1;
++      if (r.verdict === "agree") perGame[k].agree += 1;
++      else perGame[k].disagree += 1;
++    }
++  }
++
++  return {
++    examined: rows.length,
++    scored: scored.length,
++    agree: scoredAgree.length,
++    disagree: scoredDisagree.length,
++    // Reported but NOT counted as evidence.
++    partialFidelity: rows.filter((r) => r.fidelity === FIDELITY.PARTIAL).length,
++    inconclusive: inconclusive.length,
++    unreplayable: unreplayable.length,
++    errors: errored.length,
++    gapCounts,
++    perGame,
++    maxAgeDays,
++    afAssumed: af
++      ? {
++          maxPerGame: af.maxPerGame,
++          probeColdStart: !!af.probeColdStart,
++          probeSize: af.probeSize,
++          probeMaxSellers: af.probeMaxSellers,
++          perMarketStock: af.perMarketStock,
++        }
++      : null,
++    disagreements: scoredDisagree.map((r) => ({
++      game: r.game,
++      campaignId: r.campaignId,
++      decidedAt: r.decidedAt,
++      legacyDecision: r.legacyDecision,
++      detail: r.detail,
++    })),
++    rows,
++  };
++}
++
++module.exports = {
++  replayDecision,
++  replayHistory,
++  reconstructInputs,
++  salesInputsFor,
++  researchInputsFor,
++  probeGateFor,
++  summarise,
++  FIDELITY,
++  SNAPSHOT_RETENTION_DAYS,
++  DEFAULT_MAX_AGE_DAYS,
++};
+diff --git a/utils/farm2/steps/decide.js b/utils/farm2/steps/decide.js
+index 4b0f700..cb29871 100644
+--- a/utils/farm2/steps/decide.js
++++ b/utils/farm2/steps/decide.js
+@@ -17,6 +17,11 @@
+ // with its own retry clock, instead of a line in an in-memory progress array.
+ 
+ const settings = require("../../settings");
++// The action-class table and the two engines' decision vocabularies. This used
++// to be written out twice IN THIS FILE (`classOf` for the stale branch,
++// `actionClass` for the live one) with no shared definition — two copies of the
++// rule that gates whether a lane may take over a real game.
++const classes = require("../decisionClasses");
+ 
+ // Load the legacy engine lazily. autoFarmer pulls in a wide dependency graph
+ // (and, on prod, the catalog integration) and requires autoLister lazily itself
+@@ -301,11 +306,7 @@ async function diffAgainstLegacy(verdict) {
+   const legacyAt = legacy.decidedAt ? new Date(legacy.decidedAt).getTime() : 0;
+   const ageMs = legacyAt ? Date.now() - legacyAt : Infinity;
+ 
+-  const classOf = (d) => {
+-    if (d === "farm" || d === "probe") return "spend";
+-    if (d === "reuse_existing") return "reuse";
+-    return "skip";
+-  };
++  const classOf = classes.actionClass;
+ 
+   if (ageMs > COMPARABLE_WINDOW_MS) {
+     return {
+@@ -321,6 +322,10 @@ async function diffAgainstLegacy(verdict) {
+       laneClass: classOf(verdict.decision),
+       legacyClass: classOf(legacy.decision),
+       stale: true,
++      // Explicit reason code rather than leaving the caller to infer "why" from
++      // a combination of flags. Same discipline as the presence checks: a row
++      // states what happened to it, it is not read by elimination.
++      comparability: "stale",
+       legacyAgeHours: Number.isFinite(ageMs) ? Math.round(ageMs / 3600000) : null,
+       agree: null,
+     };
+@@ -338,17 +343,38 @@ async function diffAgainstLegacy(verdict) {
+   // Spending and reusing are different actions with different costs, so they
+   // are different classes. Getting this wrong is not a cosmetic reporting bug:
+   // the readiness gate is built on it.
+-  const actionClass = (d) => {
+-    if (d === "farm" || d === "probe") return "spend";
+-    if (d === "reuse_existing") return "reuse";
+-    return "skip";
+-  };
++  const actionClass = classes.actionClass;
+   const laneClass = actionClass(verdict.decision);
+   const legacyClass = actionClass(legacy.decision);
+   const sameClass = laneClass === legacyClass;
+   const acctDelta =
+     Number(verdict.plannedAccounts || 0) - Number(legacy.plannedAccounts || 0);
+ 
++  // An unclassified decision on either side is NOT a disagreement — it is a
++  // comparison we are not equipped to make. Scoring it as `false` would block
++  // promotion on a reporting gap; scoring it as `true` would pass a lane on a
++  // decision nobody classified. Both are wrong, so it is simply not evidence.
++  if (laneClass === "unknown" || legacyClass === "unknown") {
++    return {
++      legacyDecision: legacy.decision,
++      legacyPlanned: Number(legacy.plannedAccounts || 0),
++      laneDecision: verdict.decision,
++      lanePlanned: Number(verdict.plannedAccounts || 0),
++      laneClass,
++      legacyClass,
++      stale: false,
++      comparability: "unknown_class",
++      legacyAgeHours: Math.round(ageMs / 3600000),
++      agree: null,
++    };
++  }
++
++  // Why did they differ? "12 disagreements" is not actionable on its own: a
++  // disagreement caused by a gate the lane does not implement needs a feature,
++  // one caused by the arbiter needs no action at all, and only the remainder
++  // needs a human to work out which engine was right.
++  const taxonomy = classes.classifyDisagreement(verdict.decision, legacy.decision);
++
+   return {
+     legacyDecision: legacy.decision,
+     legacyPlanned: Number(legacy.plannedAccounts || 0),
+@@ -360,6 +386,17 @@ async function diffAgainstLegacy(verdict) {
+     legacyClass,
+     sameClass,
+     stale: false,
++    comparability: "comparable",
++    // The taxonomy of the difference (agree / lane_missing_gate /
++    // class_mismatch). `lane_missing_gate` is the important one: the lane's
++    // decision vocabulary is a strict subset of the legacy engine's, so on any
++    // campaign the legacy engine settles with a gate the lane does not
++    // implement, the lane will disagree deterministically until that gate is
++    // built. Reporting it as an ordinary disagreement sends an operator looking
++    // for a bug that is really a missing feature.
++    disagreementKind: taxonomy.kind,
++    disagreementNote: taxonomy.note || "",
++    laneCanEmitLegacy: classes.laneCanEmit(legacy.decision),
+     legacyAgeHours: Math.round(ageMs / 3600000),
+     accountDelta: acctDelta,
+     // "agree" is the headline the tab shows and what the readiness gate blocks
+@@ -376,4 +413,9 @@ module.exports = {
+   probeGate,
+   reuseCandidate,
+   COMPARABLE_WINDOW_MS,
++  // Re-exported so callers reading a diff do not need a second require to
++  // interpret it, and so there remains exactly one definition of these.
++  actionClass: classes.actionClass,
++  LANE_DECISIONS: classes.LANE_DECISIONS,
++  LEGACY_ONLY_DECISIONS: classes.LEGACY_ONLY_DECISIONS,
+ };
+-- 
+2.49.0
+
+

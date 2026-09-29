@@ -1,0 +1,5 @@
+{"type":"market","time":1,"mint":"demo","action":"buy","priceSol":1,"solVolume":0.4,"trader":"a"}
+{"type":"market","time":2,"mint":"demo","action":"buy","priceSol":1.1,"solVolume":0.4,"trader":"b"}
+{"type":"market","time":3,"mint":"demo","action":"buy","priceSol":1.2,"solVolume":0.4,"trader":"c"}
+{"type":"market","time":4,"mint":"demo","action":"buy","priceSol":1.3,"solVolume":0.4,"trader":"d"}
+{"type":"market","time":5,"mint":"demo","action":"buy","priceSol":1.36,"solVolume":0.4,"trader":"e"}

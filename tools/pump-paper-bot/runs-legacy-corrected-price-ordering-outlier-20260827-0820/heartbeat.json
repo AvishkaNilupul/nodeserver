@@ -1,0 +1,27 @@
+{
+  "updatedAt": "2026-08-26T23:19:22.418Z",
+  "pid": 32536,
+  "runId": "dashboard-1787785822341",
+  "connected": true,
+  "lastEventAt": 1787786362394,
+  "lastError": null,
+  "eventsSeen": 789,
+  "decodedTrades": 789,
+  "entries": 40,
+  "exits": 39,
+  "openPositions": 1,
+  "experimentId": "legacy-pattern-corrected-price",
+  "sourceMode": "primary-signatures-rpc-reparse",
+  "summary": {
+    "closed": 39,
+    "open": 1,
+    "wins": 20,
+    "losses": 19,
+    "winRate": 0.5128205128205128,
+    "realizedSol": 7.907440307949234,
+    "unrealizedSol": -0.018288045264984138,
+    "totalPnlSol": 7.8891522626842505,
+    "paperCapitalSol": 9.487440307949234,
+    "startingCapitalSol": 2
+  }
+}

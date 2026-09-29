@@ -38,6 +38,7 @@ const { recordPoolUsage } = require("../utils/poolUsageLog");
 const { logEvent, actorFromReq } = require("../utils/systemLog");
 const noclaimWatcher = require("../utils/noclaimWatcher");
 const unclaimedAutoList = require("../utils/unclaimedAutoList");
+const { lookupAccountByUsername } = require("../utils/accountLookup");
 
 const router = express.Router();
 
@@ -208,7 +209,8 @@ router.get("/api/noclaim-farm/state", requireSuperadmin, async (req, res) => {
       `id=$(basename $(dirname $(dirname "$d"))); ` +
       `game=$(tr -d '\\n' < "$d" | sed -n 's/.*"FavouriteGames"[^[]*\\[[^"]*"\\([^"]*\\)".*/\\1/p'); ` +
       `n=$(grep -c '"ClientSecret"' "$d"); ` +
-      `echo "$id|$game|$n"; done; echo "BOTS_END"`;
+      `per=no; [ -f "$(dirname $(dirname "$d"))/.personal" ] && per=yes; ` +
+      `echo "$id|$game|$n|$per"; done; echo "BOTS_END"`;
     const out = await sh(script, { timeout: 25000 });
 
     const lines = out.split("\n");
@@ -229,8 +231,13 @@ router.get("/api/noclaim-farm/state", requireSuperadmin, async (req, res) => {
         const id = name.replace(CONTAINER_PREFIX, "");
         psMap[id] = { state, status };
       } else if (section === "bots" && line) {
-        const [id, game, n] = line.split("|");
-        bots.push({ id, game: game || "", accounts: parseInt(n, 10) || 0 });
+        const [id, game, n, per] = line.split("|");
+        bots.push({
+          id,
+          game: game || "",
+          accounts: parseInt(n, 10) || 0,
+          personal: per === "yes",
+        });
       }
     }
     for (const b of bots) {
@@ -287,6 +294,162 @@ router.post("/api/noclaim-farm/bots", requireSuperadmin, async (req, res) => {
       .json({ success: false, message: err.message || "Create failed" });
   }
 });
+
+// ---------------------------------------------------------------------------
+// Personal ("my own") bot — add ONE account by username.
+//
+// Resolves that login's Twitch token + numeric id from wherever it lives (pool
+// / bot / unclaimed, via accountLookup), live-checks the token, fences its pool
+// row from the auto-lister (manualSold — a personal account is never auto-sold),
+// then builds a dedicated no-claim bot for it and marks it personal. This is the
+// by-hand scripts/noclaim-readd-sold-batch.js path turned into a one-field form.
+// ---------------------------------------------------------------------------
+router.post(
+  "/api/noclaim-farm/personal-bots",
+  requireSuperadmin,
+  async (req, res) => {
+    try {
+      const username = String(req.body.username || "").trim();
+      const game = String(req.body.game || "").trim() || "Overwatch";
+      if (!username)
+        return res
+          .status(400)
+          .json({ success: false, message: "Enter a username." });
+      try {
+        fleet.assertNoClaimGame(game);
+      } catch (e) {
+        return res
+          .status(e.status || 400)
+          .json({ success: false, message: e.message });
+      }
+
+      const look = await lookupAccountByUsername(username);
+      if (!look.found)
+        return res
+          .status(404)
+          .json({ success: false, message: `No account found for "${username}".` });
+
+      // Need a client token AND a numeric Twitch id (WatchRequest.GetPayload
+      // does Int32.Parse on the id). Prefer a single source carrying both.
+      const usable = (look.sources || []).find(
+        (s) => s.clientToken && /^[0-9]+$/.test(String(s.twitchId || "")),
+      );
+      const clientSecret = (usable && usable.clientToken) || "";
+      const twitchId = usable ? String(usable.twitchId) : "";
+      if (!clientSecret || !/^[0-9]+$/.test(twitchId)) {
+        const where =
+          look.primarySource ||
+          (look.sources || []).map((s) => s.source).join(", ");
+        return res.status(422).json({
+          success: false,
+          message: `"${username}" was found (${where}) but has no usable Twitch token + numeric id — it needs a token refresh before it can farm.`,
+        });
+      }
+
+      // Same token already in a no-claim config would fight itself. Refuse.
+      const inBots = await fleet.findSecretInConfigs(clientSecret);
+      if (inBots.length)
+        return res.status(409).json({
+          success: false,
+          message: `Already farming in no-claim bot(s) ${inBots.join(", ")} — remove it there first.`,
+        });
+
+      if (await fleet.provisionBusy())
+        return res.status(409).json({
+          success: false,
+          message: "A build/provision is already running. Try again shortly.",
+        });
+
+      // Live token check — never build a bot that would farm nothing.
+      try {
+        await twitchInventory.fetchInventory(clientSecret, { host: pi() });
+      } catch (e) {
+        return res.status(422).json({
+          success: false,
+          message: `Live token check failed (${
+            e && e.code === "token_invalid"
+              ? "token invalid"
+              : (e && e.message) || "error"
+          }) — refresh the token first.`,
+        });
+      }
+
+      // Personal = never auto-sold. If it has a pool row, fence it: manualSold
+      // is the flag scanAndListPass skips. Set-only (no $push → no enum risk).
+      const poolSrc = (look.sources || []).find((s) => s.source === "pool");
+      let fenced = false;
+      if (poolSrc && poolSrc.id) {
+        await AvailableAccount.updateOne(
+          { _id: poolSrc.id },
+          { $set: { manualSold: true } },
+        );
+        fenced = true;
+      }
+
+      const id = await fleet.nextBotId();
+      await fleet.createBotFromAccounts(
+        id,
+        [
+          {
+            username: (usable && usable.login) || username,
+            twitchId,
+            clientSecret,
+          },
+        ],
+        game,
+      );
+      await fleet.setPersonal(id, true);
+
+      logEvent({
+        category: "noclaim",
+        action: "personal_bot_created",
+        actor: actorFromReq(req),
+        subject: containerFor(id),
+        game,
+        detail: "personal no-claim bot " + id + " for " + username,
+      });
+      res.json({
+        success: true,
+        id,
+        container: containerFor(id),
+        game,
+        account: username,
+        fenced,
+        message: `Personal bot ${id} created for ${username} — farming ${game}, building on the host.`,
+      });
+    } catch (err) {
+      res
+        .status(err.status || 500)
+        .json({ success: false, message: err.message || "Create failed" });
+    }
+  },
+);
+
+// ---------------------------------------------------------------------------
+// Mark / unmark an existing bot as personal ("my own"). Flips the `.personal`
+// marker so the bot moves between the shared fleet list and the My-own section.
+// ---------------------------------------------------------------------------
+router.post(
+  "/api/noclaim-farm/bots/:id/personal",
+  requireSuperadmin,
+  async (req, res) => {
+    try {
+      const id = String(req.params.id).replace(/[^0-9]/g, "");
+      if (!id) return res.status(400).json({ success: false, message: "bad id" });
+      const on = !!req.body.personal;
+      await fleet.setPersonal(id, on);
+      logEvent({
+        category: "noclaim",
+        action: on ? "marked_personal" : "unmarked_personal",
+        actor: actorFromReq(req),
+        subject: containerFor(id),
+      });
+      res.json({ success: true, personal: on });
+    } catch (err) {
+      res.status(err.status || 500).json({ success: false, message: err.message });
+    }
+  },
+);
 
 // ---------------------------------------------------------------------------
 // Per-bot accounts (lazy — reads that bot's config from the Pi).

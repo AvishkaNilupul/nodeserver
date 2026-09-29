@@ -38,6 +38,7 @@ const unclaimedAllocator = require("./utils/unclaimedAllocator");
 const botHealthMonitor = require("./utils/botHealthMonitor");
 const accountPoolChecker = require("./utils/accountPoolChecker");
 const dropArchiveRoutes = require("./routes/dropArchiveRoutes");
+const accountApiRoutes = require("./routes/accountApiRoutes");
 const accountPoolRoutes = require("./routes/accountPoolRoutes");
 const spentAccountsRoutes = require("./routes/spentAccountsRoutes");
 const autoFarmRoutes = require("./routes/autoFarmRoutes");
@@ -84,6 +85,10 @@ const g2gSessionRefresher = require("./utils/g2gSessionRefresher");
 const g2gFulfiller = require("./utils/g2gFulfiller");
 const playerauctionsSessionWatch = require("./utils/playerauctionsSessionWatch");
 const playerauctionsRoutes = require("./routes/playerauctionsRoutes");
+// Token-gated (NOT session/2fa gated) one-click cookie hand-off — mounted early,
+// before the admin auth cascade, because the browser extension that calls it has
+// no admin session. See routes/paSessionInstallRoutes.js.
+const paSessionInstallRoutes = require("./routes/paSessionInstallRoutes");
 const marketplaceGuardian = require("./utils/marketplaceGuardian");
 const primeWatcher = require("./utils/primeWatcher");
 const campaignWatcher = require("./utils/campaignWatcher");
@@ -375,6 +380,12 @@ app.use(adminAuthRoutes);
 // 2FA setup + login second step. Mounted before the enforcement guard so an
 // admin who hasn't enrolled yet can still reach these to set it up.
 app.use(twoFactorRoutes);
+// One-click PlayerAuctions cookie hand-off. Gated by its own shared secret, not
+// the admin session, so it is mounted here — ahead of the enforce2fa cascade —
+// where the browser extension (which carries no admin session) can reach it.
+// Off entirely until a secret is set (404 otherwise).
+app.use(paSessionInstallRoutes);
+
 // Per-admin self-service settings (e.g. linking a personal Telegram chat).
 // Each route guards with requireAdmin; kept out of the 2FA enforcement gate so
 // it stays reachable like the security page.
@@ -665,6 +676,12 @@ app.use(enforce2fa, renterAdminRoutes);
 app.use(resellerAuthRoutes);
 app.use(resellerRoutes);
 app.use(enforce2fa, resellerAdminRoutes);
+// External account API (docs/ACCOUNT-API.md): a machine-to-machine
+// bearer-token realm that resolves a username to its client token across every
+// account source. Mounted BEFORE the blanket requireAdmin cascade — it presents
+// a static token, not a session, so the session guard would otherwise 401 it.
+// Every route inside self-guards with requireApiToken.
+app.use(accountApiRoutes);
 app.use(requireAdmin, enforce2fa, itemRoutes);
 app.use(requireAdmin, enforce2fa, inventoryRoutes);
 app.use(requireAdmin, enforce2fa, orderRoutes);

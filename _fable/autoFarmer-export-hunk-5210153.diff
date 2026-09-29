@@ -1,0 +1,83 @@
+commit 52101536f8744a61b61082ddb37469a4a7bae1a4
+Author: Hyperagent Developer Agent <oliiwjqc@polosmail.com>
+Date:   Fri Sep 4 22:40:47 2026 +0900
+
+    feat(farm2): the six downstream gates — host, time, coverage, pool floor, capacity, reuse-only
+    
+    At f7880c9 decide.js implemented the sellability stage and reuse-first and
+    nothing downstream, so its decision vocabulary was five of the legacy engine's
+    eleven. On any campaign the legacy engine settled with one of the other six
+    gates, a live lane would have carried on and spent fresh accounts. The
+    coverage gate is the one that matters most — its wildcard bug once blocked all
+    farming — and a lane without it would re-buy accounts for demand already
+    covered. There was also a phantom disagreement: with a zero grant the lane said
+    `farm` with plannedAccounts 0, which compared as spend against a legacy
+    skip_no_accounts.
+    
+    Unobserved because the comparison meant to catch it produced zero comparable
+    pairs.
+    
+    decideCampaign now runs all six gates IN THE LEGACY ORDER (the comparison is
+    only meaningful if both engines stop at the same gate for the same inputs):
+    
+      sellability -> host -> reuse-first -> time -> coverage -> pool floor ->
+      capacity -> reuse-only -> farm/probe
+    
+    Every gate comes from the legacy engine's own helpers, exposed by one additive
+    hunk on autoFarmer.js's module.exports (probeHost, isForcedGame, manualFarmMap,
+    activeAutoBotCount, autoSeatCapacity, readyPoolQuery, WILDCARD_CREDIT_CAP,
+    COUNT_MANUAL_AS_COVERAGE). Nothing else in that file changes; the hunk must be
+    applied onto prod's copy, per FARM2-PLAN's deployment note.
+    
+    The decision context legacy assembles once per tick (host probe, manual-bot
+    stash, owned set, archive coverage) is resolved lazily and memoised in the
+    cycle's shared hostCache, so lanes in one cycle share one host sweep, through
+    the SSH semaphore. It can also be handed in as legacy's ctx shape, which is how
+    the tests reach each gate without a host. Every gate is a read; a test asserts
+    a full pass writes nothing to AutoFarmTask or the pool.
+    
+    One place leans on the SHAPE of a legacy query rather than calling it:
+    recycledPoolCount composes the recycled pass of claimPoolAccounts from its
+    exported primitives, because legacy settles reuse-only at claim time and a lane
+    needs it at decision time. Flagged in the doc.
+    
+    targetAccounts now includes the market floor, as the legacy row's `wanted`
+    does and as the replay harness rebuilds.
+    
+    decisionClasses: LANE_DECISIONS covers the full vocabulary. Kept as a separate
+    declaration so the tripwire (LEGACY_ONLY_DECISIONS, lane_missing_gate) fires
+    again the next time the two drift apart. Three vocabulary tests inverted to
+    assert the gap is closed.
+    
+    21 new tests; the 87 existing farm2 tests pass. Suite 659/664 vs the same 5
+    pre-existing orphan-test failures.
+    
+    Known gaps, in the doc: the stash sweep runs per 3-minute lane cycle vs
+    legacy's 10-minute tick; a LIVE lane's skips are still not written to
+    AutoFarmTask (pre-existing shape, needs its own change).
+
+diff --git a/utils/autoFarmer.js b/utils/autoFarmer.js
+index 82c05bd..1ebc5b4 100644
+--- a/utils/autoFarmer.js
++++ b/utils/autoFarmer.js
+@@ -4474,4 +4474,20 @@ module.exports = {
+   // real accounts and new containers to do worse than reusing what is running.
+   // Caught by the shadow trial before any lane went live. Read-only query.
+   reusableTaskForGame,
++  // Additive exports for the lane engine's downstream gates
++  // (utils/farm2/steps/decide.js). The lane previously implemented only the
++  // sellability stage and reuse-first, so on any campaign this engine settles
++  // with the host, time, coverage, pool-floor, capacity or reuse-only gate a
++  // live lane would have carried on and spent. These let the lane run the SAME
++  // gates from the SAME helpers instead of re-deriving them. All are read-only
++  // (probeHost, manualFarmMap and autoSeatCapacity read the host, never write
++  // to it). No behaviour change to this engine.
++  probeHost,
++  isForcedGame,
++  manualFarmMap,
++  activeAutoBotCount,
++  autoSeatCapacity,
++  readyPoolQuery,
++  WILDCARD_CREDIT_CAP,
++  COUNT_MANUAL_AS_COVERAGE,
+ };

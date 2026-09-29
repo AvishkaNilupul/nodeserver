@@ -33,6 +33,21 @@ const epicAccountSchema = new mongoose.Schema(
     // Sales lifecycle — mirrors how Twitch bot accounts are handled: a sold
     // account stops being fed new claims.
     sold: { type: Boolean, default: false, index: true },
+
+    // Auto-claim bookkeeping (utils/epicAutoClaim). autoClaimLog is capped at
+    // ~20 entries and shows the recent (attempted, status, error) trail per
+    // account in the Epic tab.
+    autoClaimCount: { type: Number, default: 0 },
+    lastAutoClaimAt: { type: Date, default: null },
+    autoClaimLog: [
+      {
+        at: { type: Date, default: Date.now },
+        offerId: { type: String, default: "" },
+        status: { type: String, default: "" },
+        orderId: { type: String, default: "" },
+        error: { type: String, default: "" },
+      },
+    ],
   },
   { timestamps: true },
 );

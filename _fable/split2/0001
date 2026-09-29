@@ -1,0 +1,1508 @@
+From 762a60a296e2d80b4fb5445dff4406eeb3aae49a Mon Sep 17 00:00:00 2001
+From: Hyperagent Developer Agent <oliiwjqc@polosmail.com>
+Date: Sat, 5 Sep 2026 00:04:57 +0900
+Subject: [PATCH 1/3] feat(farm2): record the decision inputs on AutoFarmTask;
+ replay prefers them
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Replay existed because the inputs a decision saw were not recorded, so they
+had to be rebuilt after the fact — and every rebuild has a hole the prod runs
+found one at a time: research snapshots expire after 120 days, a sale since
+the decision loses the price and makes the row unreplayable, the probe budget
+can only be inferred by sensitivity analysis, and yesterday's decision was
+being replayed under today's settings (the design's "largest unquantified
+risk", FARM2-VERIFICATION §7.3). This records the inputs instead.
+
+A `decisionInputs` sub-document on AutoFarmTask, version 1: the research the
+gate was given (demandScore, sellers, scannedAt — or null, with an unscanned
+document kept distinct from no document), the sales exactly as salesOf()
+returned them (count, revenue, avgPrice), an af fingerprint of every setting
+the sellability stage, probe gate and tier target read, the probe gate's two
+outputs, and the market floor as a recorded value (it also depends on
+marketplace keys, so it is not re-derived).
+
+One shape, three writers, one reader. utils/decisionInputs.js is the only
+definition; autoFarmer.processCampaign, the lane's decide step and replay all
+import it and none describes it themselves.
+
+Legacy: a single `let recordedInputs` in processCampaign, populated the moment
+alloc is known and spread into record()'s $set — so EVERY record() call on
+EVERY path writes it, including reuse_existing and skip_host_offline (the two
+that never wrote internalSales), with no per-call-site edits. skip_reuse_only
+keeps the farm-time snapshot from the same tick. A re-decided RETRYABLE row
+gets a fresh snapshot each tick. This is the first commit in the series to
+touch the body of processCampaign: one require plus ~12 lines. Apply onto
+prod's copy with git am -3.
+
+Lane: decideCampaign builds the same object and carries it on every verdict;
+execute.js persists it from upsertTask and executeReuse, so a lane-created
+row is replayable exactly like a legacy one.
+
+Replay: reconstructInputs checks the snapshot FIRST. A recognised version is
+taken whole — exact fidelity, no gaps, no SaleSignal query, no snapshot
+lookup, no probe sensitivity check — and the recorded af fingerprint
+overrides today's for the fields it covers, so recorded rows replay under the
+settings then in force. Every row reports inputsBasis (recorded |
+reconstructed) and inputsVersion; the summary and CLI show the split;
+afAssumed is now labelled as applying to reconstructed rows only.
+
+Absence is never a passing value. A snapshot that exists but is not recognised
+(a later version, a malformed write) is reconstructed and carries
+decision_inputs_version_unknown — not trusted, not silently ignored. A row
+with no snapshot is reconstructed exactly as before, with no gap.
+
+Deliberately NOT recorded: pool depth, capacity, host state, archive coverage —
+the downstream gates' inputs. Replay's scope is unchanged. Nothing for rows
+written before this ships.
+
+AutoFarmTask declares the sub-schema (strict mode would otherwise drop it on
+$set — the model's own comments warn of this three times). af is Mixed so a
+setting can be added under the same version. ~200 bytes per row.
+
+processCampaign is exported (additive) so a test can drive the real record()
+on the three branches that need no host: the sellability skip, the host gate
+and the dry-run reuse.
+
+19 new tests. Suite 691/692 vs the de4facd baseline of 672/673; the single
+failure (dropSetsListLight) is pre-existing and unchanged.
+---
+ docs/FARM2-VERIFICATION.md        | 186 +++++++--
+ models/AutoFarmTask.js            |  47 +++
+ scripts/farm2-replay.js           |  15 +-
+ tests/farm2DecisionInputs.test.js | 653 ++++++++++++++++++++++++++++++
+ utils/autoFarmer.js               |  27 +-
+ utils/decisionInputs.js           | 113 ++++++
+ utils/farm2/replay.js             |  99 ++++-
+ utils/farm2/steps/decide.js       |  24 +-
+ utils/farm2/steps/execute.js      |   4 +
+ 9 files changed, 1114 insertions(+), 54 deletions(-)
+ create mode 100644 tests/farm2DecisionInputs.test.js
+ create mode 100644 utils/decisionInputs.js
+
+diff --git a/docs/FARM2-VERIFICATION.md b/docs/FARM2-VERIFICATION.md
+index b622944..a52f482 100644
+--- a/docs/FARM2-VERIFICATION.md
++++ b/docs/FARM2-VERIFICATION.md
+@@ -7,11 +7,18 @@ of it is trusted.
+ Companion to `docs/FARM2-PLAN.md` (the architecture) and
+ `docs/FARM2-TASK-comparison-evidence.md` (the task).
+ 
+-Two commits on this branch:
++The series on this branch, in order:
+ 
+ 1. **the replay harness** — the measurement (§1–§4)
+-2. **the six downstream gates** — the safety work (§5.2), done second but the
+-   prerequisite for the measurement meaning anything
++2. **the six downstream gates** — the safety work (§5.2)
++3. **probe-gate exactness** — the first prod run's finding (§7.4)
++4. **row fields are not inputs** — the second prod run's finding (§5.1)
++5. **recorded decision inputs** — replay stops reconstructing (§10)
++6. **`hadResearch` truthful on the sellability skip** — one token, own commit (§5.1)
++7. **`internalSales` written on the two paths that omitted it** — own commit (§5.1)
++
++Commits 6 and 7 change behaviour inside `utils/autoFarmer.js` and are separate so
++each can be deployed or held on its own.
+ 
+ ---
+ 
+@@ -58,12 +65,14 @@ the legacy engine has already made** as a test case, available immediately,
+ offline, with no engine running.
+ 
+ ```
+-utils/farm2/replay.js          the harness
+-utils/farm2/decisionClasses.js the shared decision vocabulary
+-utils/farm2/steps/decide.js    the six gates (commit 2)
+-scripts/farm2-replay.js        operator CLI (read-only)
+-tests/farm2Replay.test.js      37 tests
+-tests/farm2Gates.test.js       21 tests
++utils/farm2/replay.js               the harness
++utils/farm2/decisionClasses.js      the shared decision vocabulary
++utils/farm2/steps/decide.js         the six gates (commit 2)
++utils/decisionInputs.js             the recorded snapshot — one shape for both engines and replay (§10)
++scripts/farm2-replay.js             operator CLI (read-only)
++tests/farm2Replay.test.js           37 tests
++tests/farm2Gates.test.js            21 tests
++tests/farm2DecisionInputs.test.js   19 tests
+ ```
+ 
+ ### The key enabler
+@@ -227,10 +236,18 @@ replayed row carries `salesBasis` (`window_unchanged` | `recorded_zero`) so a
+ scored row can be traced to *why* its sales were trusted.
+ 
+ The cost is honest: a `reuse_existing` row whose sales window has moved since
+-the decision is now **unreplayable** rather than scored, because on that path
+-not even the count at decision time is recorded. For a game that sells steadily
+-(Black Desert, ~2 sales/week) that will drop older reuse rows out of the scored
+-set. `§9.1` (`internalSalesForGame(game, { asOf })`) is what would recover them.
++the decision is **unreplayable** rather than scored, because on that path not
++even the count at decision time is recorded. For a game that sells steadily
++(Black Desert, ~2 sales/week) that drops older reuse rows out of the scored set.
++On prod the third run showed it: unreplayable rose 11 → 45 while the 15 false
++disagreements became agreements.
++
++**For rows recorded since commit 5 (§10), neither cost applies.** The snapshot
++carries the sales the gate saw, so a reuse row replays exactly whatever the
++window did afterwards; and commit 7 writes the flat `internalSales` on those two
++paths too, so the row itself stops lying. Commit 6 makes `hadResearch` truthful
++on the sellability skip. Rows from before those commits keep the behaviour
++described above; `§9.1` is what would recover *them*.
+ 
+ ### 5.2 The lane's decision vocabulary WAS a strict subset of the legacy engine's
+ 
+@@ -375,8 +392,10 @@ formality.
+    `maxPerGame`, `perMarketStock` or the probe settings changed during the
+    window, rows either side of the change are replayed under the wrong
+    configuration and may disagree for a reason that is not the lane's fault. The
+-   CLI prints the assumed values for this reason. **This is the largest
+-   unquantified risk in the design.**
++   CLI prints the assumed values for this reason. **This was the largest
++   unquantified risk in the design.** *Closed for rows with a recorded snapshot
++   (§10): they replay under the settings then in force. Still applies to every
++   row from before commit 5 shipped.*
+ 4. **Cold-start probing weakens probe-reachable rows.** The concurrent-probe
+    budget counts tasks by *current* status, so on the two branches where
+    `demandAllocation` actually reads `probeAllowed` — no market data with a
+@@ -386,9 +405,11 @@ formality.
+    `probeColdStart` is ON, and the first version of the harness downgraded all
+    363 rows on this alone — 0 scored. Measured on those rows: 53 had no
+    snapshot (unreplayable), 27 sat on a probe-reachable branch (partial), 283
+-   did not. This version scores those 283.*
++   did not. This version scores those 283. Closed entirely for recorded rows
++   (§10): the snapshot carries `probeAllowed`, so nothing is inferred.*
+ 5. **120-day horizon.** `MarketResearchSnapshot` has a TTL. Older decisions are
+-   unreplayable, and a row close to the boundary may vanish mid-run.
++   unreplayable, and a row close to the boundary may vanish mid-run. *Recorded
++   rows (§10) do not read the snapshot collection at all.*
+ 6. **Replay shares the lane's blind spots by construction.** It runs the same
+    imported economics, so a bug *inside* `demandAllocation` reproduces
+    identically in both and reads as agreement. It validates the lane's *use* of
+@@ -446,6 +467,18 @@ formality.
+   new decisions should now appear in lane verdicts and, for campaigns the legacy
+   engine re-decides every tick (the RETRYABLE skips), agree with it. Any
+   `class_mismatch` on those is a real finding about one of the two engines.
++- **After commit 5 deploys, confirm the snapshot is being written.** Every new
++  `AutoFarmTask` row — legacy or lane, any decision — should carry
++  `decisionInputs.version: 1` with `research`, `sales`, `af`, `probeAllowed`
++  and `marketStockFloor` populated. A row with `decision` newer than the deploy
++  and no snapshot means the `processCampaign` hunk did not land on prod's copy
++  (its context lines were byte-identical at the last fingerprint, but prod-only
++  lines could sit between them — `git am -3`).
++- **Watch `inputsBasis.recorded` climb on each replay run.** It should track
++  the share of rows decided since the deploy, and `unreplayable` should fall
++  toward zero as pre-deploy rows age out of the 110-day window. If recorded
++  rows ever show a disagreement, that is a real finding: nothing on that row
++  was reconstructed.
+ - **Whether the §5.2 gap showed up as real disagreements** before this commit.
+   If none appeared on prod, my reading of `decide.js` at `f7880c9` was wrong and
+   the gates work should be re-examined.
+@@ -483,19 +516,37 @@ formality.
+   `farm2Replay.test.js` were inverted to assert the gap is closed; no other
+   existing test was edited.
+ - `npx eslint utils/farm2 utils/autoFarmer.js tests/farm2Gates.test.js` — clean.
+-- Full suite: the same 5 pre-existing failures either side, all one class — a
+-  test file whose util lives on another branch: `dropSetsListLight`
+-  (`utils/archiveExclusions`, documented in the brief), plus `coworkerActs`,
+-  `farmDuration`, `operatorFarm` and `webbotFarmWatcher`. The brief expected
+-  only the first; the other four are equally pre-existing on this checkout and
+-  are **not** caused by this work.
+-
+-`utils/autoLister.js` is untouched. `utils/autoFarmer.js` carries **exactly one
+-additive hunk**, on `module.exports`, adding eight existing names. Per
+-`FARM2-PLAN.md`'s deployment note, that hunk must be applied onto **prod's**
+-copy of the file (4,516 lines, with the catalog integration this checkout does
+-not have) — never by copying the local file up. Nothing touches the lane
+-runner, the budget arbiter, the shadow guards or the live-mode steps.
++- Full suite after commit 5: **691 pass / 1 fail** (692), against a baseline on
++  `de4facd` of 672 / 1 — exactly the 19 new tests. The single failure is
++  `dropSetsListLight.test.js`, which needs `utils/archiveExclusions.js` from
++  another branch; identical before and after. (The four orphaned test files
++  that failed in earlier runs were un-tracked at `f83acb9`.) A clean clone of
++  the target branch reports a higher pass total than this checkout because it
++  carries test files this branch does not; the delta, not the total, is the
++  claim.
++
++- `tests/farm2DecisionInputs.test.js` — 19 tests: the snapshot shape and its
++  version check; the model keeps the sub-document under strict mode; **the real
++  legacy `record()`**, driven through `processCampaign` on the three branches
++  that need no host (sellability skip, host gate, dry-run reuse) — the last two
++  being the paths that never wrote `internalSales`; a re-decided row gets a
++  fresh snapshot; the lane writes the same shape and `execute` persists it;
++  replay is exact from a snapshot alone, uses the recorded settings over
++  today's (with the reconstruction as a control that *does* disagree), recovers
++  a drifted reuse row and a cold-start probe row, reconstructs an unknown
++  version with a gap, and treats an old row exactly as before.
++
++`utils/autoLister.js` is untouched. `utils/autoFarmer.js` carries, across the
++series: the `module.exports` hunk (commit 2; commit 5 adds `processCampaign`
++so the real write path is testable); one `require` and a ~12-line hunk inside
++`processCampaign` that snapshots the inputs and writes them from every
++`record()` call (commit 5); one token on the sellability skip (commit 6); one
++field on three `record()` calls (commit 7). Commit 5 is the first in the series
++to touch the body of `processCampaign`. Per `FARM2-PLAN.md`'s deployment note,
++every hunk must be applied onto **prod's** copy of the file (4,516 lines, with
++the catalog integration this checkout does not have) with `git am -3` — never by
++copying the local file up. Nothing touches the lane runner, the budget arbiter,
++the shadow guards or the live-mode steps.
+ 
+ ## 9. If you want the stronger version later
+ 
+@@ -508,13 +559,68 @@ Both are out of scope here (this checkout is additive-export-only, and prod runs
+    replayable instead of unreplayable, which is currently the single largest
+    source of dropped rows. Without it, the only alternative is copying the
+    aggregation, which is the second source of truth this engine exists to avoid.
+-2. **Snapshot the decision inputs onto `AutoFarmTask`** — a `decisionInputs`
+-   sub-document written at `record()` time carrying the research values, the
+-   sales figures and the `af` fingerprint. That removes reconstruction entirely
+-   for every decision made after it ships, and closes the settings-versioning
+-   hole in §7.3.
+-
+-The second is the real fix, and it is small. Replay exists because the inputs
+-were not recorded; recording them going forward makes replay exact rather than
+-best-effort, and would let the readiness gate require full-fidelity evidence
+-without the caveats above.
++2. ~~**Snapshot the decision inputs onto `AutoFarmTask`**~~ — **done, commit 5.
++   See §10.**
++
++The first remains the only way to recover rows from *before* commit 5. It is
++not needed for anything recorded since.
++
++## 10. Recorded decision inputs (commit 5)
++
++Replay existed because the inputs a decision saw were not recorded, so they had
++to be rebuilt after the fact — and every rebuild has a hole the prod runs found
++one at a time: research snapshots expire (§7.5), a sale since the decision loses
++the price (§5.1), the probe budget can only be inferred (§7.4), and yesterday's
++decision was replayed under today's settings (§7.3). This commit records the
++inputs instead.
++
++**What.** A `decisionInputs` sub-document on `AutoFarmTask`:
++
++| field | source | why |
++|---|---|---|
++| `version` | `1` | checked for **equality** by the reader; anything else is reconstructed |
++| `at` | write time | — |
++| `research` | `{ demandScore, sellers, scannedAt }`, or `null` | what `demandAllocation` was given; an unscanned document is kept distinct from no document |
++| `sales` | `{ count, revenue, avgPrice }` | exactly what `salesOf()` returned |
++| `af` | `maxPerGame`, `probeColdStart`, `probeSize`, `probeMaxSellers`, `probeMaxGames`, `probeCooldownDays`, `perMarketStock`, `poolReserve`, `minHoursLeft` | every setting the sellability stage, the probe gate and the tier target read |
++| `probeAllowed`, `probeBudgetBlocked` | the probe gate's two outputs | the half that could never be rebuilt |
++| `marketStockFloor` | `alloc.probe ? 0 : marketStockFloor(af)` | the floor as it stood — it also depends on marketplace keys, so it is recorded as a value rather than re-derived |
++
++**Where it is written.** `utils/decisionInputs.js` is the **one** definition of
++the shape; the legacy engine, the lane and replay all import it and none
++describes it themselves.
++
++- Legacy: a `let recordedInputs` in `processCampaign`, populated the moment
++  `alloc` is known, and spread into `record()`'s `$set` — so **every** `record()`
++  call on **every** path writes it, including `reuse_existing` and
++  `skip_host_offline`, with no per-call-site edits. `skip_reuse_only`
++  (executeTask's later `updateOne`) keeps the farm-time snapshot from the same
++  tick. A re-decided RETRYABLE row gets a fresh snapshot each tick.
++- Lane: `decideCampaign` builds the same object and carries it on every verdict
++  via `common`; `execute.js` persists it from `upsertTask` and `executeReuse`.
++  A lane-created row is therefore replayable exactly like a legacy one.
++
++**How replay uses it.** `reconstructInputs` checks the snapshot **first**. A
++recognised version is taken whole — research, sales, the recorded `af`
++fingerprint overriding today's for the fields it covers, `probeAllowed`, the
++floor — with fidelity `exact`, no gaps, no `SaleSignal` query, no snapshot
++lookup, no probe sensitivity check. Every row reports `inputsBasis`
++(`recorded` | `reconstructed`) and `inputsVersion`; the summary and CLI show the
++split; `afAssumed` is now labelled as applying to reconstructed rows only.
++
++**What it deliberately does not do.**
++
++- A snapshot that *exists* but is not recognised — a later version, a malformed
++  write — is **not** trusted and **not** silently ignored: the row is
++  reconstructed and carries `decision_inputs_version_unknown`. A row with no
++  snapshot is reconstructed exactly as before, with no gap. Absence is never a
++  passing value.
++- It records the **sellability-stage** inputs only. Pool depth, container
++  capacity, host state and archive coverage — the inputs to the six downstream
++  gates — are not snapshotted. Replay's scope (§3) is unchanged; widening it is
++  a possible follow-up, not this commit.
++- It does nothing for rows written before it ships. Those keep every caveat in
++  §7 and every reconstruction path in §3–§4.
++
++**Cost.** Roughly 200 bytes per `AutoFarmTask` row, one row per game and
++campaign. Negligible.
+diff --git a/models/AutoFarmTask.js b/models/AutoFarmTask.js
+index 59bcf05..86f0bb1 100644
+--- a/models/AutoFarmTask.js
++++ b/models/AutoFarmTask.js
+@@ -126,6 +126,53 @@ const autoFarmTaskSchema = new mongoose.Schema(
+     // decision timestamp.
+     decidedAt: { type: Date, default: null, index: true },
+ 
++    // What the sellability gate actually saw when it decided — research, own
++    // sales, the settings in force, the probe gate's answer and the market
++    // floor — written by every record() call (utils/decisionInputs.js builds
++    // it). The lane engine's replay harness reads this instead of
++    // reconstructing those inputs after the fact; rows from before it shipped
++    // have none and are reconstructed as before. Versioned, and the reader
++    // checks the version for equality: an unknown shape is reconstructed, not
++    // trusted. Declared here or Mongoose strict mode drops it on $set (see
++    // bots.shared above). `af` is Mixed so a new setting can be added to the
++    // snapshot under the same version without a schema shuffle.
++    decisionInputs: {
++      type: new mongoose.Schema(
++        {
++          version: { type: Number, default: null },
++          at: { type: Date, default: null },
++          research: {
++            type: new mongoose.Schema(
++              {
++                demandScore: { type: Number, default: null },
++                sellers: { type: Number, default: null },
++                scannedAt: { type: Date, default: null },
++              },
++              { _id: false },
++            ),
++            default: null,
++          },
++          sales: {
++            type: new mongoose.Schema(
++              {
++                count: { type: Number, default: 0 },
++                revenue: { type: Number, default: 0 },
++                avgPrice: { type: Number, default: 0 },
++              },
++              { _id: false },
++            ),
++            default: null,
++          },
++          af: { type: mongoose.Schema.Types.Mixed, default: null },
++          probeAllowed: { type: Boolean, default: null },
++          probeBudgetBlocked: { type: Boolean, default: null },
++          marketStockFloor: { type: Number, default: null },
++        },
++        { _id: false },
++      ),
++      default: null,
++    },
++
+     executedAt: { type: Date, default: null },
+     completedAt: { type: Date, default: null },
+ 
+diff --git a/scripts/farm2-replay.js b/scripts/farm2-replay.js
+index fcfafeb..afca8dc 100644
+--- a/scripts/farm2-replay.js
++++ b/scripts/farm2-replay.js
+@@ -63,6 +63,12 @@ async function main() {
+   const scope = GAME ? `game "${GAME}"` : "all games";
+   console.log(`\nFarm2 replay — ${scope}, decisions from the last ${DAYS} days\n`);
+   console.log(`  examined      ${report.examined}`);
++  if (report.inputsBasis) {
++    console.log(
++      `    from recorded inputs ${report.inputsBasis.recorded}, reconstructed ${report.inputsBasis.reconstructed}` +
++        "   (recorded = decisionInputs snapshot on the row; these replay under the settings then in force)",
++    );
++  }
+   console.log(`  scored        ${report.scored}   (full-fidelity reconstructions — the only evidence)`);
+   console.log(`    agree       ${report.agree}   ${pct(report.agree, report.scored)}`);
+   console.log(`    disagree    ${report.disagree}`);
+@@ -128,10 +134,11 @@ async function main() {
+   }
+ 
+   console.log(
+-    `\n  Settings assumed: ${JSON.stringify(report.afAssumed)}` +
+-      `\n  utils/settings.js is not versioned, so these are TODAY's values applied to` +
+-      `\n  past decisions. If any of them changed during the window, rows either side` +
+-      `\n  of the change are being replayed under the wrong configuration.\n`,
++    `\n  Settings assumed for RECONSTRUCTED rows: ${JSON.stringify(report.afAssumed)}` +
++      `\n  utils/settings.js is not versioned, so for rows without a decisionInputs snapshot` +
++      `\n  these are TODAY's values applied to past decisions. If any of them changed during` +
++      `\n  the window, those rows are being replayed under the wrong configuration. Rows WITH` +
++      `\n  a snapshot replay under the settings they were decided with.\n`,
+   );
+ 
+   await mongoose.disconnect();
+diff --git a/tests/farm2DecisionInputs.test.js b/tests/farm2DecisionInputs.test.js
+new file mode 100644
+index 0000000..c3676a5
+--- /dev/null
++++ b/tests/farm2DecisionInputs.test.js
+@@ -0,0 +1,653 @@
++// Coverage for the recorded decision inputs (utils/decisionInputs.js): the
++// snapshot every legacy record() call now writes, the lane's copy of it, and
++// replay's preference for it over reconstruction.
++//
++// Replay exists because the inputs a decision saw were not recorded, so they
++// had to be rebuilt after the fact — and every rebuild has a hole: research
++// snapshots expire, a sale since the decision loses the price, the probe budget
++// can only be inferred, and yesterday's decision was replayed under today's
++// settings. Recording the inputs closes all four for every row written since.
++// These tests pin three things:
++//
++//   1. the real legacy record() writes a recognised snapshot (driven through
++//      processCampaign itself on the two branches that need no host)
++//   2. the lane writes the same shape, so its rows replay like any other
++//   3. replay uses a recognised snapshot and NOTHING else; an unknown version
++//      or no snapshot at all means reconstruct, never assume
++const test = require("node:test");
++const assert = require("node:assert/strict");
++const mongoose = require("mongoose");
++const { MongoMemoryServer } = require("mongodb-memory-server");
++
++const AutoFarmTask = require("../models/AutoFarmTask");
++const MarketResearch = require("../models/MarketResearch");
++const MarketResearchSnapshot = require("../models/MarketResearchSnapshot");
++const SaleSignal = require("../models/SaleSignal");
++const FarmJob = require("../models/FarmJob");
++const inputsMod = require("../utils/decisionInputs");
++const autoFarmer = require("../utils/autoFarmer");
++const decideStep = require("../utils/farm2/steps/decide");
++const executeStep = require("../utils/farm2/steps/execute");
++const replay = require("../utils/farm2/replay");
++const { BudgetCycle } = require("../utils/farm2/budget");
++const settings = require("../utils/settings");
++
++let mem;
++
++test.before(async () => {
++  mem = await MongoMemoryServer.create();
++  await mongoose.connect(mem.getUri("farm2inputs"));
++  await FarmJob.init();
++});
++
++test.after(async () => {
++  await mongoose.disconnect();
++  if (mem) await mem.stop();
++});
++
++const hoursAgo = (h) => new Date(Date.now() - h * 3600000);
++const hoursFromNow = (h) => new Date(Date.now() + h * 3600000);
++
++// Cold-start probing OFF (the probe gate is inert), dry-run ON so nothing the
++// legacy engine reaches could ever spend.
++function af(overrides = {}) {
++  return {
++    ...settings.getAutoFarm(),
++    probeColdStart: false,
++    dryRun: true,
++    minHoursLeft: 12,
++    maxPerGame: 30,
++    accountsPerBot: 10,
++    maxAutoBots: 20,
++    poolReserve: 20,
++    platiCategoryId: "",
++    forceGames: [],
++    ...overrides,
++  };
++}
++
++async function reset(game) {
++  await Promise.all([
++    AutoFarmTask.deleteMany({ game }),
++    MarketResearch.deleteMany({ game }),
++    MarketResearchSnapshot.deleteMany({ gameKey: game.toLowerCase() }),
++    SaleSignal.deleteMany({ gameKey: game.toLowerCase() }),
++  ]);
++}
++
++/* ------------------------------- the shape -------------------------------- */
++
++test("the snapshot carries version 1 and everything demandAllocation reads", () => {
++  const scanned = new Date("2026-09-01T00:00:00Z");
++  const di = inputsMod.buildDecisionInputs({
++    research: { demandScore: 3.7, sellers: 10, scannedAt: scanned, extra: "ignored" },
++    sales: { count: 13, revenue: 22.75, avgPrice: 1.75 },
++    af: af({ maxPerGame: 30, probeColdStart: true }),
++    probeAllowed: false,
++    probeBudgetBlocked: true,
++    floor: 6,
++  });
++  assert.equal(di.version, inputsMod.DECISION_INPUTS_VERSION);
++  assert.equal(di.version, 1);
++  assert.deepEqual(di.research, { demandScore: 3.7, sellers: 10, scannedAt: scanned });
++  assert.deepEqual(di.sales, { count: 13, revenue: 22.75, avgPrice: 1.75 });
++  for (const k of inputsMod.AF_FIELDS) assert.ok(k in di.af, `af.${k} recorded`);
++  assert.equal(di.af.maxPerGame, 30);
++  assert.equal(di.af.probeColdStart, true);
++  assert.equal(di.probeAllowed, false);
++  assert.equal(di.probeBudgetBlocked, true);
++  assert.equal(di.marketStockFloor, 6);
++  assert.ok(di.at instanceof Date);
++  assert.equal(inputsMod.isRecordedInputs(di), true);
++});
++
++test("no research is recorded as null; an unscanned document is NOT collapsed to null", () => {
++  // demandAllocation treats both as no-market-data, but they are different
++  // facts and the snapshot keeps them apart.
++  const none = inputsMod.buildDecisionInputs({
++    research: null,
++    sales: { count: 0 },
++    af: af(),
++    probeAllowed: true,
++    floor: 0,
++  });
++  assert.equal(none.research, null);
++  const unscanned = inputsMod.buildDecisionInputs({
++    research: { demandScore: 0, sellers: 0, scannedAt: null },
++    sales: { count: 0 },
++    af: af(),
++    probeAllowed: true,
++    floor: 0,
++  });
++  assert.deepEqual(unscanned.research, { demandScore: 0, sellers: 0, scannedAt: null });
++});
++
++test("the recogniser accepts only the version it knows — absence is never a passing value", () => {
++  const good = inputsMod.buildDecisionInputs({
++    research: null,
++    sales: { count: 0 },
++    af: af(),
++    probeAllowed: true,
++    floor: 0,
++  });
++  assert.equal(inputsMod.isRecordedInputs(good), true);
++  assert.equal(inputsMod.isRecordedInputs(undefined), false);
++  assert.equal(inputsMod.isRecordedInputs(null), false);
++  assert.equal(inputsMod.isRecordedInputs({}), false);
++  assert.equal(inputsMod.isRecordedInputs({ ...good, version: 2 }), false, "a later version is not understood");
++  assert.equal(inputsMod.isRecordedInputs({ ...good, version: undefined }), false);
++  assert.equal(inputsMod.isRecordedInputs({ ...good, sales: null }), false);
++  assert.equal(inputsMod.isRecordedInputs({ ...good, af: null }), false);
++  assert.equal(inputsMod.isRecordedInputs({ ...good, probeAllowed: "yes" }), false);
++});
++
++/* -------------------------------- the model ------------------------------- */
++
++test("AutoFarmTask keeps the sub-document — Mongoose strict mode would silently drop an undeclared path", async () => {
++  const game = "Model Round Trip";
++  await reset(game);
++  const di = inputsMod.buildDecisionInputs({
++    research: { demandScore: 42, sellers: 3, scannedAt: hoursAgo(2) },
++    sales: { count: 2, revenue: 10, avgPrice: 5 },
++    af: af(),
++    probeAllowed: true,
++    probeBudgetBlocked: false,
++    floor: 6,
++  });
++  await AutoFarmTask.findOneAndUpdate(
++    { game, campaignId: "m1" },
++    {
++      $set: {
++        game,
++        campaignId: "m1",
++        decision: "farm",
++        status: "planned",
++        decisionInputs: di,
++        decidedAt: new Date(),
++      },
++    },
++    { upsert: true, new: true, setDefaultsOnInsert: true },
++  );
++  const row = await AutoFarmTask.findOne({ game, campaignId: "m1" }).lean();
++  assert.ok(row.decisionInputs, "the sub-document survived the $set");
++  assert.equal(row.decisionInputs.version, 1);
++  assert.equal(row.decisionInputs.research.demandScore, 42);
++  assert.equal(row.decisionInputs.research.sellers, 3);
++  assert.equal(row.decisionInputs.sales.count, 2);
++  assert.equal(row.decisionInputs.sales.avgPrice, 5);
++  assert.equal(row.decisionInputs.af.maxPerGame, 30);
++  assert.equal(row.decisionInputs.probeAllowed, true);
++  assert.equal(row.decisionInputs.marketStockFloor, 6);
++  assert.equal(inputsMod.isRecordedInputs(row.decisionInputs), true, "and reads back as recognised");
++});
++
++/* ----------------------------- the legacy path ---------------------------- */
++
++// processCampaign(c, ctx) is the legacy per-campaign decision. Two of its
++// branches need no host at all: the sellability skip returns before the host
++// gate, and the host gate itself fires on hostOnline: false. Both go through
++// the REAL record(), so these exercise the actual hunk rather than a stand-in.
++// infoMap is supplied so the engine never reaches for a live market scan.
++function legacyCtx({ campaignId, research, sales, hostOnline = false, afOverrides = {} }) {
++  return {
++    af: af(afOverrides),
++    host: null,
++    hostOnline,
++    budgetMap: new Map(),
++    infoMap: new Map([[campaignId, { research, sales }]]),
++    priorTasks: new Map(),
++  };
++}
++
++test("LEGACY record(): the sellability skip writes a recognised snapshot of what it saw", async () => {
++  const game = "Legacy Skip Game";
++  await reset(game);
++  const research = { demandScore: 3, sellers: 20, scannedAt: hoursAgo(1) };
++  const sales = { count: 0, revenue: 0, avgPrice: 0 };
++  const c = { game, campaignId: "ls1", name: "Weekly", endAt: hoursFromNow(48) };
++  const r = await autoFarmer.processCampaign(c, legacyCtx({ campaignId: "ls1", research, sales }));
++  assert.equal(r.decision, "skip_low_demand");
++  const row = await AutoFarmTask.findOne({ game, campaignId: "ls1" }).lean();
++  assert.equal(row.decision, "skip_low_demand");
++  assert.equal(inputsMod.isRecordedInputs(row.decisionInputs), true, "snapshot present and recognised");
++  assert.equal(row.decisionInputs.research.demandScore, 3);
++  assert.equal(row.decisionInputs.research.sellers, 20);
++  assert.equal(row.decisionInputs.sales.count, 0);
++  assert.equal(row.decisionInputs.af.maxPerGame, 30);
++  assert.equal(row.decisionInputs.af.probeColdStart, false);
++  assert.equal(row.decisionInputs.probeAllowed, true, "cold-start off: the gate is inert");
++});
++
++test("LEGACY record(): skip_host_offline — a path that never wrote internalSales — carries the snapshot with the real sales", async () => {
++  const game = "Legacy Offline Game";
++  await reset(game);
++  const research = { demandScore: 90, sellers: 5, scannedAt: hoursAgo(1) };
++  const sales = { count: 7, revenue: 35, avgPrice: 5 };
++  const c = { game, campaignId: "lo1", name: "Weekly", endAt: hoursFromNow(48) };
++  const r = await autoFarmer.processCampaign(
++    c,
++    legacyCtx({ campaignId: "lo1", research, sales, hostOnline: false }),
++  );
++  assert.equal(r.decision, "skip_host_offline");
++  const row = await AutoFarmTask.findOne({ game, campaignId: "lo1" }).lean();
++  assert.equal(row.decision, "skip_host_offline");
++  // The Black Desert lesson: this path's flat fields cannot be trusted, but the
++  // snapshot carries what the gate actually saw.
++  assert.equal(row.decisionInputs.sales.count, 7);
++  assert.equal(row.decisionInputs.sales.avgPrice, 5);
++  assert.equal(row.decisionInputs.research.demandScore, 90);
++  assert.ok(row.decisionInputs.marketStockFloor > 0, "a non-probe records the real market floor");
++});
++
++test("LEGACY record(): a re-decided row gets a FRESH snapshot, not the old one", async () => {
++  // Retryable skips are re-decided every tick and record() is a $set upsert.
++  // The snapshot must move with the decision, or a re-decided row would carry
++  // the inputs of a decision it no longer represents.
++  const game = "Legacy Redecide Game";
++  await reset(game);
++  const c = { game, campaignId: "rd1", name: "Weekly", endAt: hoursFromNow(48) };
++  await autoFarmer.processCampaign(
++    c,
++    legacyCtx({
++      campaignId: "rd1",
++      research: { demandScore: 90, sellers: 5, scannedAt: hoursAgo(2) },
++      sales: { count: 1, revenue: 2, avgPrice: 2 },
++      hostOnline: false,
++    }),
++  );
++  const first = await AutoFarmTask.findOne({ game, campaignId: "rd1" }).lean();
++  assert.equal(first.decisionInputs.sales.count, 1);
++  await autoFarmer.processCampaign(
++    c,
++    legacyCtx({
++      campaignId: "rd1",
++      research: { demandScore: 90, sellers: 5, scannedAt: hoursAgo(1) },
++      sales: { count: 4, revenue: 8, avgPrice: 2 },
++      hostOnline: false,
++    }),
++  );
++  const second = await AutoFarmTask.findOne({ game, campaignId: "rd1" }).lean();
++  assert.equal(second.decisionInputs.sales.count, 4, "the snapshot followed the re-decision");
++  assert.ok(second.decisionInputs.at > first.decisionInputs.at);
++});
++
++test("LEGACY record(): the dry-run reuse path — the Black Desert path — carries the snapshot with the real sales", async () => {
++  // reuse_existing is the other path whose record() never wrote internalSales.
++  // Reachable without a host: the reusable task comes from ctx.reusableMap, the
++  // bot-file existence check is answered by ctx.hostState.hasFile, and dryRun
++  // records the plan instead of restarting anything.
++  const game = "Legacy Reuse Game";
++  await reset(game);
++  const reusable = {
++    _id: new mongoose.Types.ObjectId(),
++    game,
++    campaignId: "old",
++    status: "completed",
++    assignedAccounts: ["a1", "a2", "a3"],
++    bots: [{ host: "local", file: "config_7.json", container: "bot7" }],
++  };
++  const ctx = legacyCtx({
++    campaignId: "lr1",
++    research: { demandScore: 3.7, sellers: 10, scannedAt: hoursAgo(1) },
++    sales: { count: 13, revenue: 22.75, avgPrice: 1.75 },
++    hostOnline: true,
++  });
++  ctx.host = { id: "local", label: "Server" };
++  ctx.reusableMap = new Map([[game, reusable]]);
++  ctx.hostState = { hasFile: () => true, activateBot() {} };
++  const c = { game, campaignId: "lr1", name: "Weekly", endAt: hoursFromNow(48) };
++  const r = await autoFarmer.processCampaign(c, ctx);
++  assert.equal(r.decision, "reuse_existing");
++  assert.equal(r.dryRun, true, "nothing was restarted");
++  const row = await AutoFarmTask.findOne({ game, campaignId: "lr1" }).lean();
++  assert.equal(row.decision, "reuse_existing");
++  assert.equal(inputsMod.isRecordedInputs(row.decisionInputs), true);
++  assert.equal(row.decisionInputs.sales.count, 13, "the thirteen sales the gate saw are on the row");
++  assert.equal(row.decisionInputs.sales.avgPrice, 1.75);
++  assert.equal(row.decisionInputs.research.demandScore, 3.7);
++});
++
++/* ------------------------------- the lane path ---------------------------- */
++
++const laneCtx = () => ({
++  host: { id: "pi", label: "Pi" },
++  hostOnline: true,
++  farmMap: { map: new Map(), wildcard: new Set(), logins: new Set() },
++  owned: new Set(),
++  archiveHolders: new Map(),
++});
++
++test("LANE: the verdict carries the same snapshot, and upsertTask persists it", async () => {
++  const game = "Lane Inputs Game";
++  await reset(game);
++  await MarketResearch.create({ game, demandScore: 90, sellers: 8, scannedAt: new Date() });
++  const cycle = new BudgetCycle({ accounts: 30, seats: 30, containers: 3, perGameCap: 30 });
++  cycle.allocate([{ key: game.toLowerCase(), want: 30, weight: 1 }]);
++  const verdict = await decideStep.decideCampaign({
++    campaign: { game, campaignId: "li1", name: "Weekly", endAt: hoursFromNow(48) },
++    lane: { game, gameKey: game.toLowerCase(), mode: "shadow" },
++    cycle,
++    af: af(),
++    shadow: true,
++    hostCache: new Map(),
++    ctx: laneCtx(),
++  });
++  assert.equal(verdict.decision, "farm");
++  assert.equal(inputsMod.isRecordedInputs(verdict.decisionInputs), true, "a recognised snapshot rides on the verdict");
++  assert.equal(verdict.decisionInputs.research.demandScore, 90);
++  assert.ok(verdict.decisionInputs.marketStockFloor > 0);
++
++  const task = await executeStep.upsertTask(verdict, { dryRun: true });
++  const row = await AutoFarmTask.findById(task._id).lean();
++  assert.equal(inputsMod.isRecordedInputs(row.decisionInputs), true, "persisted exactly as legacy record() does");
++  assert.equal(row.decisionInputs.research.demandScore, 90);
++});
++
++test("LANE: a skip verdict carries the snapshot too — every verdict does", async () => {
++  const game = "Lane Skip Inputs";
++  await reset(game);
++  await MarketResearch.create({ game, demandScore: 2, sellers: 30, scannedAt: new Date() });
++  const v = await decideStep.decideCampaign({
++    campaign: { game, campaignId: "lsk1", endAt: hoursFromNow(48) },
++    lane: { game, gameKey: game.toLowerCase(), mode: "shadow" },
++    cycle: null,
++    af: af(),
++    shadow: true,
++    hostCache: new Map(),
++  });
++  assert.equal(v.decision, "skip_low_demand");
++  assert.equal(inputsMod.isRecordedInputs(v.decisionInputs), true);
++  assert.equal(v.decisionInputs.research.demandScore, 2);
++});
++
++test("LANE: executeReuse persists the snapshot on a dry-run reuse", async () => {
++  const game = "Reuse Inputs Game";
++  await reset(game);
++  const source = await AutoFarmTask.create({
++    game,
++    campaignId: "old",
++    decision: "farm",
++    status: "active",
++    assignedAccounts: ["a1", "a2"],
++    bots: [{ host: "pi", file: "config_1.json", container: "bot1" }],
++  });
++  const di = inputsMod.buildDecisionInputs({
++    research: { demandScore: 50, sellers: 2, scannedAt: hoursAgo(1) },
++    sales: { count: 1, revenue: 3, avgPrice: 3 },
++    af: af(),
++    probeAllowed: true,
++    floor: 6,
++  });
++  const r = await executeStep.executeReuse({
++    verdict: {
++      game,
++      campaignId: "new",
++      decision: "reuse_existing",
++      reuseTaskId: source._id,
++      reason: "recurring",
++      decisionInputs: di,
++    },
++    dryRun: true,
++  });
++  assert.equal(r.dryRun, true);
++  const row = await AutoFarmTask.findOne({ game, campaignId: "new" }).lean();
++  assert.equal(inputsMod.isRecordedInputs(row.decisionInputs), true);
++  assert.equal(row.decisionInputs.sales.count, 1);
++});
++
++/* --------------------------------- replay --------------------------------- */
++
++test("REPLAY: a row with a recorded snapshot is exact from the snapshot alone — no research snapshot, no SaleSignal", async () => {
++  const game = "Recorded Replay Game";
++  await reset(game);
++  const di = inputsMod.buildDecisionInputs({
++    research: { demandScore: 4, sellers: 25, scannedAt: hoursAgo(31) },
++    sales: { count: 0, revenue: 0, avgPrice: 0 },
++    af: af(),
++    probeAllowed: true,
++    probeBudgetBlocked: false,
++    floor: 6,
++  });
++  const task = {
++    game,
++    campaignId: "rr1",
++    decision: "skip_low_demand",
++    demandScore: 4,
++    hadResearch: true,
++    internalSales: 0,
++    decidedAt: hoursAgo(30),
++    decisionInputs: di,
++  };
++  const out = await replay.replayDecision(task, { af: af() });
++  assert.equal(out.inputsBasis, "recorded");
++  assert.equal(out.inputsVersion, 1);
++  assert.equal(out.salesBasis, "recorded");
++  assert.equal(out.fidelity, replay.FIDELITY.EXACT);
++  assert.deepEqual(out.gaps, []);
++  assert.equal(out.verdict, "agree", out.detail);
++});
++
++test("REPLAY: the recorded settings win over today's — the settings-versioning hole closed for recorded rows", async () => {
++  // Decided under maxPerGame 30 (tier target 30). Today maxPerGame is 10. A
++  // reconstruction rebuilds `wanted` as 10 and calls the recorded 30 a
++  // disagreement; the snapshot replays under the settings then in force.
++  const game = "Settings Drift Game";
++  await reset(game);
++  const di = inputsMod.buildDecisionInputs({
++    research: { demandScore: 90, sellers: 5, scannedAt: hoursAgo(31) },
++    sales: { count: 0, revenue: 0, avgPrice: 0 },
++    af: af({ maxPerGame: 30 }),
++    probeAllowed: true,
++    probeBudgetBlocked: false,
++    floor: 6,
++  });
++  const task = {
++    game,
++    campaignId: "sd1",
++    decision: "farm",
++    demandScore: 90,
++    hadResearch: true,
++    internalSales: 0,
++    targetAccounts: 30,
++    decidedAt: hoursAgo(30),
++    decisionInputs: di,
++  };
++  const today = af({ maxPerGame: 10 });
++  const withSnapshot = await replay.replayDecision(task, { af: today });
++  assert.equal(withSnapshot.inputsBasis, "recorded");
++  assert.equal(withSnapshot.verdict, "agree", withSnapshot.detail);
++  assert.equal(withSnapshot.replayedWanted, 30, "the tier target is rebuilt under the recorded maxPerGame");
++
++  // Control: the same row WITHOUT its snapshot, reconstructed under today's
++  // settings — the hole the snapshot exists to close.
++  await MarketResearchSnapshot.create({
++    game,
++    gameKey: game.toLowerCase(),
++    at: hoursAgo(31),
++    demandScore: 90,
++    sellers: 5,
++  });
++  const bare = { ...task };
++  delete bare.decisionInputs;
++  const reconstructed = await replay.replayDecision(bare, { af: today });
++  assert.equal(reconstructed.inputsBasis, "reconstructed");
++  assert.equal(reconstructed.verdict, "disagree", "today's cap applied to yesterday's decision");
++  assert.equal(reconstructed.kind, "tier_target");
++});
++
++test("REPLAY: a reuse row with a snapshot is exact although its sales window has moved — the reuse-row cost recovered", async () => {
++  const game = "Recovered Reuse Game";
++  await reset(game);
++  // A sale since the decision: reconstruction would be unreplayable here.
++  await SaleSignal.create({
++    game,
++    gameKey: game.toLowerCase(),
++    source: "listing_sold",
++    dedupeKey: `${game}-late`,
++    account: null,
++    priceUsd: 1.75,
++    at: hoursAgo(1),
++  });
++  const di = inputsMod.buildDecisionInputs({
++    research: { demandScore: 3.7, sellers: 10, scannedAt: hoursAgo(31) },
++    sales: { count: 13, revenue: 22.75, avgPrice: 1.75 },
++    af: af(),
++    probeAllowed: true,
++    probeBudgetBlocked: false,
++    floor: 6,
++  });
++  const task = {
++    game,
++    campaignId: "rc1",
++    decision: "reuse_existing",
++    demandScore: 3.7,
++    hadResearch: true,
++    internalSales: 0,
++    decidedAt: hoursAgo(30),
++    decisionInputs: di,
++  };
++  const out = await replay.replayDecision(task, { af: af() });
++  assert.equal(out.inputsBasis, "recorded");
++  assert.equal(out.salesCount, 13);
++  assert.equal(out.fidelity, replay.FIDELITY.EXACT);
++  assert.equal(out.verdict, "agree", out.detail);
++});
++
++test("REPLAY: with cold-start ON, a recorded probeAllowed makes the probe row exact — no sensitivity check needed", async () => {
++  const game = "Recorded Probe Game";
++  await reset(game);
++  const cold = af({ probeColdStart: true, probeMaxSellers: 1 });
++  const di = inputsMod.buildDecisionInputs({
++    research: { demandScore: 4, sellers: 0, scannedAt: hoursAgo(31) },
++    sales: { count: 0 },
++    af: cold,
++    probeAllowed: true,
++    probeBudgetBlocked: false,
++    floor: 0,
++  });
++  const task = {
++    game,
++    campaignId: "rp1",
++    decision: "probe",
++    demandScore: 4,
++    hadResearch: true,
++    internalSales: 0,
++    targetAccounts: 5,
++    decidedAt: hoursAgo(30),
++    decisionInputs: di,
++  };
++  const out = await replay.replayDecision(task, { af: cold });
++  assert.equal(out.inputsBasis, "recorded");
++  assert.equal(out.fidelity, replay.FIDELITY.EXACT, "the budget is known, not inferred");
++  assert.equal(out.probeGateMatters, null, "no sensitivity check was needed");
++  assert.equal(out.verdict, "agree", out.detail);
++});
++
++test("REPLAY: a snapshot of an unknown version is reconstructed, never trusted, and says so", async () => {
++  const game = "Future Version Game";
++  await reset(game);
++  await MarketResearchSnapshot.create({
++    game,
++    gameKey: game.toLowerCase(),
++    at: hoursAgo(31),
++    demandScore: 4,
++    sellers: 25,
++  });
++  // A v99 snapshot claiming demand 99. If it were trusted the replay would
++  // want to farm and call the recorded skip a disagreement.
++  const di = {
++    ...inputsMod.buildDecisionInputs({
++      research: { demandScore: 99, sellers: 0, scannedAt: hoursAgo(31) },
++      sales: { count: 0 },
++      af: af(),
++      probeAllowed: true,
++      floor: 0,
++    }),
++    version: 99,
++  };
++  const task = {
++    game,
++    campaignId: "fv1",
++    decision: "skip_low_demand",
++    demandScore: 4,
++    hadResearch: true,
++    internalSales: 0,
++    decidedAt: hoursAgo(30),
++    decisionInputs: di,
++  };
++  const out = await replay.replayDecision(task, { af: af() });
++  assert.equal(out.inputsBasis, "reconstructed", "the v99 snapshot was NOT used");
++  assert.ok(out.gaps.includes("decision_inputs_version_unknown"));
++  assert.match(out.notes.join(" "), /version 99/);
++  assert.equal(out.verdict, "agree", "reconstruction from the real research (demand 4) agrees with the recorded skip");
++});
++
++test("REPLAY: a row with no snapshot behaves exactly as before", async () => {
++  const game = "Old Row Game";
++  await reset(game);
++  await MarketResearchSnapshot.create({
++    game,
++    gameKey: game.toLowerCase(),
++    at: hoursAgo(31),
++    demandScore: 4,
++    sellers: 25,
++  });
++  const task = {
++    game,
++    campaignId: "or1",
++    decision: "skip_low_demand",
++    demandScore: 4,
++    hadResearch: true,
++    internalSales: 0,
++    decidedAt: hoursAgo(30),
++  };
++  const out = await replay.replayDecision(task, { af: af() });
++  assert.equal(out.inputsBasis, "reconstructed");
++  assert.equal(out.inputsVersion, null);
++  assert.ok(!out.gaps.includes("decision_inputs_version_unknown"), "absence is not an unknown version");
++  assert.equal(out.verdict, "agree", out.detail);
++});
++
++test("REPLAY: the summary reports how many rows came from snapshots", () => {
++  const s = replay.summarise([
++    { game: "G", verdict: "agree", fidelity: replay.FIDELITY.EXACT, inputsBasis: "recorded" },
++    { game: "G", verdict: "agree", fidelity: replay.FIDELITY.EXACT, inputsBasis: "recorded" },
++    { game: "G", verdict: "agree", fidelity: replay.FIDELITY.EXACT, inputsBasis: "reconstructed" },
++    {
++      game: "G",
++      verdict: "unreplayable",
++      fidelity: replay.FIDELITY.UNREPLAYABLE,
++      inputsBasis: "reconstructed",
++      gaps: [],
++    },
++  ]);
++  assert.deepEqual(s.inputsBasis, { recorded: 2, reconstructed: 2 });
++});
++
++test("REPLAY: replayHistory selects the snapshot off the row", async () => {
++  const game = "History Inputs Game";
++  await reset(game);
++  const di = inputsMod.buildDecisionInputs({
++    research: { demandScore: 3, sellers: 30, scannedAt: hoursAgo(31) },
++    sales: { count: 0 },
++    af: af(),
++    probeAllowed: true,
++    floor: 0,
++  });
++  await AutoFarmTask.create({
++    game,
++    campaignId: "hi1",
++    decision: "skip_low_demand",
++    status: "skipped",
++    demandScore: 3,
++    hadResearch: true,
++    internalSales: 0,
++    decidedAt: hoursAgo(30),
++    decisionInputs: di,
++  });
++  const report = await replay.replayHistory({ game, af: af() });
++  assert.equal(report.examined, 1);
++  assert.equal(report.inputsBasis.recorded, 1);
++  assert.equal(report.scored, 1);
++  assert.equal(report.agree, 1);
++});
+diff --git a/utils/autoFarmer.js b/utils/autoFarmer.js
+index 1ebc5b4..f5d4250 100644
+--- a/utils/autoFarmer.js
++++ b/utils/autoFarmer.js
+@@ -28,6 +28,7 @@ const suspendedAccounts = require("./suspendedAccounts");
+ const { recordPoolUsage } = require("./poolUsageLog");
+ const { recordAutoFarmEvent } = require("./autoFarmEventLog");
+ const { normGame } = require("./gameLabel");
++const { buildDecisionInputs } = require("./decisionInputs");
+ // Ownership boundary with the new lane engine (utils/farm2/*). Required
+ // directly rather than through utils/farm2/index.js so this stays a leaf
+ // dependency: ownership.js pulls in only ./settings, and reads the FarmLane
+@@ -1569,11 +1570,23 @@ async function processCampaign(c, ctx) {
+     return !prior || prior.decision !== decision;
+   }
+ 
++  // The inputs the sellability gate saw, snapshotted once `alloc` is known
++  // (below) and written by EVERY record() call on every path — including the
++  // ones that never wrote internalSales. The lane engine's replay reads it
++  // instead of reconstructing (utils/decisionInputs.js).
++  let recordedInputs = null;
+   async function record(fields) {
+     // upsert keeps the unique (game, campaignId) index happy on retries
+     return AutoFarmTask.findOneAndUpdate(
+       { game, campaignId: c.campaignId },
+-      { $set: { ...base, ...fields, decidedAt: new Date() } },
++      {
++        $set: {
++          ...base,
++          ...fields,
++          ...(recordedInputs ? { decisionInputs: recordedInputs } : {}),
++          decidedAt: new Date(),
++        },
++      },
+       { upsert: true, new: true, setDefaultsOnInsert: true },
+     );
+   }
+@@ -1618,6 +1631,14 @@ async function processCampaign(c, ctx) {
+     probeBudgetBlocked = !recentlyFailed && !underBudget;
+   }
+   const alloc = demandAllocation(research, af, sales, { probeAllowed });
++  recordedInputs = buildDecisionInputs({
++    research,
++    sales,
++    af,
++    probeAllowed,
++    probeBudgetBlocked,
++    floor: alloc.probe ? 0 : marketStockFloor(af),
++  });
+   if (alloc.skip) {
+     // A cold-start candidate held off by the BUDGET is queued, not rejected —
+     // record a RETRYABLE decision so it flows into a probe slot the moment one
+@@ -4490,4 +4511,8 @@ module.exports = {
+   readyPoolQuery,
+   WILDCARD_CREDIT_CAP,
+   COUNT_MANUAL_AS_COVERAGE,
++  // Additive export so the per-campaign decision can be driven directly by a
++  // test (tests/farm2DecisionInputs.test.js exercises the real record() path on
++  // the two branches that need no host). runOnce is unchanged.
++  processCampaign,
+ };
+diff --git a/utils/decisionInputs.js b/utils/decisionInputs.js
+new file mode 100644
+index 0000000..41b0cfe
+--- /dev/null
++++ b/utils/decisionInputs.js
+@@ -0,0 +1,113 @@
++// The inputs the sellability gate saw, snapshotted onto the AutoFarmTask row at
++// record() time.
++//
++// WHY THIS EXISTS
++//
++// utils/farm2/replay.js verifies a lane by re-running the economics against the
++// inputs the legacy engine had when it decided. Until this module existed those
++// inputs had to be RECONSTRUCTED after the fact, and every reconstruction has a
++// hole that the prod runs found one at a time:
++//
++//   research   from MarketResearchSnapshot — gone after 120 days, or never
++//              written for the moment in question
++//   sales      from a SaleSignal window-stability check — any sale since the
++//              decision makes the row unreplayable, because the price at
++//              decision time is recorded nowhere
++//   probe gate the concurrent-probe budget counts CURRENT task status, so it
++//              can only be inferred by sensitivity analysis, never rebuilt
++//   settings   utils/settings.js is not versioned, so yesterday's decision was
++//              being replayed under today's maxPerGame — the largest
++//              unquantified risk in the design (FARM2-VERIFICATION §7.3)
++//
++// Recording the inputs closes all four for every row written after this ships.
++// Rows written before it are reconstructed exactly as before.
++//
++// ONE SHAPE, THREE WRITERS, ONE READER. autoFarmer.processCampaign, the lane's
++// decide step and the replay harness all import this module; none of them
++// describes the shape itself. That is what keeps the three from drifting.
++//
++// VERSIONED, AND CHECKED FOR EQUALITY. The reader accepts a snapshot only when
++// `version` equals the version it knows. A row with no snapshot, a null one, or
++// an unrecognised version is reconstructed — never assumed to have matched.
++// Absence of a field is never a passing value; that trap has bitten this
++// codebase three times. Bump the version whenever the shape changes.
++
++const DECISION_INPUTS_VERSION = 1;
++
++// The settings demandAllocation, the probe gate and the tier target read. Only
++// these are snapshotted; the market floor they feed is recorded as a value.
++const AF_FIELDS = Object.freeze([
++  "maxPerGame",
++  "probeColdStart",
++  "probeSize",
++  "probeMaxSellers",
++  "probeMaxGames",
++  "probeCooldownDays",
++  "perMarketStock",
++  "poolReserve",
++  "minHoursLeft",
++]);
++
++function num(v) {
++  const n = Number(v);
++  return Number.isFinite(n) ? n : null;
++}
++
++// Build the snapshot from exactly what the decision used.
++//
++//   research   the MarketResearch doc (or null) demandAllocation was given
++//   sales      what salesOf() returned — { count, revenue, avgPrice }
++//   af         the settings object in force
++//   probeAllowed / probeBudgetBlocked   the probe gate's two outputs
++//   floor      `alloc.probe ? 0 : marketStockFloor(af)` at decision time
++function buildDecisionInputs({ research, sales, af, probeAllowed, probeBudgetBlocked, floor }) {
++  const afSnap = {};
++  for (const k of AF_FIELDS) {
++    if (af && af[k] !== undefined) afSnap[k] = af[k];
++  }
++  return {
++    version: DECISION_INPUTS_VERSION,
++    at: new Date(),
++    // null when there was no research document — demandAllocation's
++    // no-market-data branch. A document with scannedAt null takes the same
++    // branch and is recorded as such, not collapsed to null.
++    research: research
++      ? {
++          demandScore: num(research.demandScore),
++          sellers: num(research.sellers),
++          scannedAt: research.scannedAt ? new Date(research.scannedAt) : null,
++        }
++      : null,
++    sales: {
++      count: Math.max(0, num(sales && sales.count) || 0),
++      revenue: Math.max(0, num(sales && sales.revenue) || 0),
++      avgPrice: Math.max(0, num(sales && sales.avgPrice) || 0),
++    },
++    af: afSnap,
++    probeAllowed: probeAllowed !== false,
++    probeBudgetBlocked: probeBudgetBlocked === true,
++    marketStockFloor: Math.max(0, num(floor) || 0),
++  };
++}
++
++// Is this a snapshot the current reader understands? Equality on the version,
++// then the fields the economics actually consume must be present with the
++// right shape. Anything else is "reconstruct it".
++function isRecordedInputs(di) {
++  if (!di || typeof di !== "object") return false;
++  if (di.version !== DECISION_INPUTS_VERSION) return false;
++  if (!di.sales || typeof di.sales !== "object") return false;
++  if (!di.af || typeof di.af !== "object") return false;
++  if (di.research !== null && di.research !== undefined && typeof di.research !== "object") {
++    return false;
++  }
++  if (typeof di.probeAllowed !== "boolean") return false;
++  return true;
++}
++
++module.exports = {
++  DECISION_INPUTS_VERSION,
++  AF_FIELDS,
++  buildDecisionInputs,
++  isRecordedInputs,
++};
+diff --git a/utils/farm2/replay.js b/utils/farm2/replay.js
+index 2960ac4..b7b9456 100644
+--- a/utils/farm2/replay.js
++++ b/utils/farm2/replay.js
+@@ -71,6 +71,7 @@
+ 
+ const settings = require("../settings");
+ const classes = require("./decisionClasses");
++const inputsMod = require("../decisionInputs");
+ 
+ // Load the legacy engine lazily, for the same reason steps/decide.js does: it
+ // pulls a wide dependency graph and, on prod, a catalog integration that does
+@@ -374,6 +375,51 @@ function probeGateLoadBearing(research, af, sales) {
+ // Combine the three into one input set.
+ async function reconstructInputs(task, { af, now = Date.now() } = {}) {
+   const af2 = af || settings.getAutoFarm();
++
++  // RECORDED INPUTS FIRST. A snapshot the reader recognises IS what the decision
++  // saw — research, sales, the settings in force, the probe gate's answer, the
++  // market floor — so nothing below is reconstructed and today's settings are
++  // not applied to a past decision. That closes the settings-versioning hole
++  // (FARM2-VERIFICATION §7.3), the sales-window drift, the missing-snapshot and
++  // the probe-budget gaps, for every row written since the snapshot shipped.
++  //
++  // The recorded `af` fingerprint overrides today's values for the fields it
++  // covers; fields it does not cover (marketplace keys, say) keep today's, but
++  // the one thing those feed — the market floor — is recorded as a value.
++  const recorded = inputsMod.isRecordedInputs(task.decisionInputs) ? task.decisionInputs : null;
++  if (recorded) {
++    return {
++      af: { ...af2, ...recorded.af },
++      research: recorded.research || null,
++      sales: {
++        count: Number(recorded.sales.count) || 0,
++        revenue: Number(recorded.sales.revenue) || 0,
++        avgPrice: Number(recorded.sales.avgPrice) || 0,
++      },
++      salesBasis: "recorded",
++      probeAllowed: recorded.probeAllowed,
++      probeGateMatters: null,
++      floor: Number.isFinite(Number(recorded.marketStockFloor))
++        ? Number(recorded.marketStockFloor)
++        : null,
++      inputsBasis: "recorded",
++      inputsVersion: recorded.version,
++      fidelity: FIDELITY.EXACT,
++      gaps: [],
++      notes: [
++        `inputs recorded at decision time (decisionInputs v${recorded.version}) — nothing reconstructed, ` +
++          "replayed under the settings then in force",
++      ],
++      afAssumed: null,
++    };
++  }
++
++  // A snapshot that EXISTS but is not recognised — a later version, a malformed
++  // write — is neither trusted nor silently ignored: the row is reconstructed
++  // below and carries a gap saying why. Absence is never a passing value.
++  const unknownSnapshot =
++    task.decisionInputs != null && !inputsMod.isRecordedInputs(task.decisionInputs);
++
+   const [salesPart, researchPart, probePart] = await Promise.all([
+     salesInputsFor(task, { now }),
+     researchInputsFor(task, { af: af2 }),
+@@ -430,12 +476,25 @@ async function reconstructInputs(task, { af, now = Date.now() } = {}) {
+     // false: checked and found dead for these inputs (row stays exact)
+     // null: never checked (cold-start off, or an input was unreplayable)
+     probeGateMatters,
++    // No recorded floor on a reconstructed row; replayDecision reads today's.
++    floor: null,
++    inputsBasis: "reconstructed",
++    inputsVersion: null,
+     fidelity,
+-    gaps,
+-    notes,
+-    // Settings are not versioned, so this is an assumption on EVERY row rather
+-    // than a per-row gap. Recorded so a reviewer can see which values the
+-    // replay ran under and re-run with the ones that were actually live.
++    gaps: unknownSnapshot ? [...gaps, "decision_inputs_version_unknown"] : gaps,
++    notes: unknownSnapshot
++      ? [
++          ...notes,
++          `the row carries a decisionInputs snapshot of version ${
++            task.decisionInputs && task.decisionInputs.version
++          }, which this reader does not recognise — reconstructed instead, not trusted`,
++        ]
++      : notes,
++    // Settings are not versioned, so on a RECONSTRUCTED row this is an
++    // assumption rather than a per-row gap. Recorded so a reviewer can see
++    // which values the replay ran under and re-run with the ones that were
++    // actually live. (Recorded rows carry their own settings and never reach
++    // here.)
+     afAssumed: {
+       maxPerGame: af2.maxPerGame,
+       probeColdStart: !!af2.probeColdStart,
+@@ -480,6 +539,8 @@ async function replayDecision(task, { af, now = Date.now() } = {}) {
+       fidelity: inputs.fidelity,
+       gaps: inputs.gaps,
+       notes: inputs.notes,
++      inputsBasis: inputs.inputsBasis,
++      inputsVersion: inputs.inputsVersion,
+     };
+   }
+ 
+@@ -507,6 +568,10 @@ async function replayDecision(task, { af, now = Date.now() } = {}) {
+     probeGateMatters: inputs.probeGateMatters,
+     salesBasis: inputs.salesBasis,
+     salesCount: inputs.sales ? inputs.sales.count : null,
++    // recorded | reconstructed — whether this row's inputs came from the
++    // decisionInputs snapshot or were rebuilt after the fact
++    inputsBasis: inputs.inputsBasis,
++    inputsVersion: inputs.inputsVersion,
+   };
+ 
+   // --- Score it ------------------------------------------------------------
+@@ -577,7 +642,15 @@ async function replayDecision(task, { af, now = Date.now() } = {}) {
+   if (base.legacyTarget != null && base.legacyTarget > 0) {
+     let floor = 0;
+     try {
+-      floor = replayed.probe ? 0 : Number(b.marketStockFloor(inputs.af)) || 0;
++      // The floor as recorded at decision time when the row has a snapshot
++      // (already 0 for a probe); otherwise as today's marketplace
++      // configuration gives it.
++      floor =
++        inputs.floor != null
++          ? inputs.floor
++          : replayed.probe
++            ? 0
++            : Number(b.marketStockFloor(inputs.af)) || 0;
+     } catch {
+       // marketStockFloor consults the marketplaces module for key status; if
+       // that is unavailable the floor is unknown, not zero.
+@@ -634,7 +707,9 @@ async function replayHistory({
+   const tasks = await AutoFarmTask.find(q)
+     .sort({ decidedAt: -1 })
+     .limit(Math.max(1, limit))
+-    .select("game campaignId decision demandScore hadResearch internalSales targetAccounts plannedAccounts decidedAt")
++    .select(
++      "game campaignId decision demandScore hadResearch internalSales targetAccounts plannedAccounts decidedAt decisionInputs",
++    )
+     .lean();
+ 
+   const af2 = af || settings.getAutoFarm();
+@@ -705,6 +780,15 @@ function summarise(rows, { maxAgeDays, af } = {}) {
+     gapCounts,
+     perGame,
+     maxAgeDays,
++    // How many rows replayed from a recorded snapshot versus a reconstruction.
++    // As history rolls past the deploy that started recording, `recorded`
++    // should climb toward `examined` and `unreplayable` toward zero.
++    inputsBasis: {
++      recorded: rows.filter((r) => r.inputsBasis === "recorded").length,
++      reconstructed: rows.filter((r) => r.inputsBasis === "reconstructed").length,
++    },
++    // Applies to RECONSTRUCTED rows only — recorded rows replay under the
++    // settings they were decided with.
+     afAssumed: af
+       ? {
+           maxPerGame: af.maxPerGame,
+@@ -728,6 +812,7 @@ function summarise(rows, { maxAgeDays, af } = {}) {
+       decidedAt: r.decidedAt,
+       legacyDecision: r.legacyDecision,
+       kind: r.kind || "unclassified",
++      inputsBasis: r.inputsBasis || null,
+       salesBasis: r.salesBasis || null,
+       salesCount: r.salesCount == null ? null : r.salesCount,
+       detail: r.detail,
+diff --git a/utils/farm2/steps/decide.js b/utils/farm2/steps/decide.js
+index 1c4c2fd..6dc9a9c 100644
+--- a/utils/farm2/steps/decide.js
++++ b/utils/farm2/steps/decide.js
+@@ -22,6 +22,9 @@ const settings = require("../../settings");
+ // `actionClass` for the live one) with no shared definition — two copies of the
+ // rule that gates whether a lane may take over a real game.
+ const classes = require("../decisionClasses");
++// The decision-inputs snapshot the legacy engine also writes; one shape for
++// both engines and for replay (utils/decisionInputs.js).
++const { buildDecisionInputs } = require("../../decisionInputs");
+ 
+ // Load the legacy engine lazily. autoFarmer pulls in a wide dependency graph
+ // (and, on prod, the catalog integration) and requires autoLister lazily itself
+@@ -358,6 +361,23 @@ async function decideCampaign({ campaign, lane, cycle, af, shadow, hostCache, ct
+   const { probeAllowed, probeBudgetBlocked } = await probeGate(game, af2);
+   const alloc = b.demandAllocation(research, af2, salesRaw, { probeAllowed });
+ 
++  // Non-probe campaigns must at least fill every enabled market's shelf. Read
++  // here, once, because it is both a coverage-gate input and part of the
++  // recorded snapshot.
++  const floor = alloc.probe ? 0 : Number(b.marketStockFloor(af2)) || 0;
++
++  // What this decision saw, in the same shape the legacy engine records, so a
++  // lane-created row is replayable exactly as a legacy one. Carried on every
++  // verdict via `common`; the execute step persists it.
++  const recordedInputs = buildDecisionInputs({
++    research,
++    sales,
++    af: af2,
++    probeAllowed,
++    probeBudgetBlocked,
++    floor,
++  });
++
+   const demandScore = research ? Number(research.demandScore || 0) : null;
+   const hrs = campaign.endAt ? (new Date(campaign.endAt) - Date.now()) / 3600000 : Infinity;
+   const common = {
+@@ -370,6 +390,7 @@ async function decideCampaign({ campaign, lane, cycle, af, shadow, hostCache, ct
+     internalSales: sales.count,
+     effectiveDemand: alloc.effective ?? null,
+     hoursLeft: Number.isFinite(hrs) ? Math.round(hrs * 10) / 10 : null,
++    decisionInputs: recordedInputs,
+   };
+   const skip = (decision, reason, extra = {}) => ({
+     ...common,
+@@ -471,8 +492,7 @@ async function decideCampaign({ campaign, lane, cycle, af, shadow, hostCache, ct
+     otherHolders: cov.otherHolders,
+   };
+ 
+-  // Non-probe campaigns must at least fill every enabled market's shelf.
+-  const floor = alloc.probe ? 0 : Number(b.marketStockFloor(af2)) || 0;
++  // `floor` was read once, above, alongside the snapshot.
+   const wanted = Math.min(
+     Math.max(Number(alloc.target) || 0, floor),
+     alloc.cap || Number(af2.maxPerGame) || 0,
+diff --git a/utils/farm2/steps/execute.js b/utils/farm2/steps/execute.js
+index d16ce7b..a041c06 100644
+--- a/utils/farm2/steps/execute.js
++++ b/utils/farm2/steps/execute.js
+@@ -62,6 +62,9 @@ async function upsertTask(verdict, { dryRun = false } = {}) {
+         // A probe's stop-loss anchor is written once and never moved, so only
+         // stamp it when this is a probe that has not started before.
+         ...(verdict.probe ? { probeStartedAt: new Date() } : {}),
++        // The inputs this decision saw, in the shape the legacy engine records
++        // (utils/decisionInputs.js), so replay treats a lane row like any other.
++        ...(verdict.decisionInputs ? { decisionInputs: verdict.decisionInputs } : {}),
+       },
+     },
+     { upsert: true, new: true, setDefaultsOnInsert: true },
+@@ -188,6 +191,7 @@ async function executeReuse({ verdict, dryRun }) {
+         decidedAt: new Date(),
+         executedAt: new Date(),
+         rescanRequested: false,
++        ...(verdict.decisionInputs ? { decisionInputs: verdict.decisionInputs } : {}),
+       },
+     },
+     { upsert: true, new: true, setDefaultsOnInsert: true },
+-- 
+2.49.0
+
+

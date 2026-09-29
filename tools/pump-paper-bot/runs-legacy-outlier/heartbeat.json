@@ -1,0 +1,27 @@
+{
+  "updatedAt": "2026-08-26T23:10:16.124Z",
+  "pid": 27034,
+  "runId": "dashboard-1787784556020",
+  "connected": true,
+  "lastEventAt": 1787785815709,
+  "lastError": null,
+  "eventsSeen": 2719,
+  "decodedTrades": 2719,
+  "entries": 105,
+  "exits": 105,
+  "openPositions": 0,
+  "experimentId": "legacy-outlier-theory",
+  "sourceMode": "primary-dashboard-stream",
+  "summary": {
+    "closed": 105,
+    "open": 0,
+    "wins": 53,
+    "losses": 52,
+    "winRate": 0.5047619047619047,
+    "realizedSol": 199.0524894907747,
+    "unrealizedSol": 0,
+    "totalPnlSol": 199.0524894907747,
+    "paperCapitalSol": 201.05248949077523,
+    "startingCapitalSol": 2
+  }
+}

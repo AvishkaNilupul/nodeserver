@@ -191,6 +191,10 @@ const marketplaceListingSchema = new mongoose.Schema(
     // paused deliberately by the operator. Only rows carrying this flag are ever
     // resumed automatically.
     autoPaused: { type: Boolean, default: false },
+    // When the campaign-scoped auto-rebundle last retitled this listing to the
+    // fuller set its accounts had farmed. A one-hour cooldown reads this so the
+    // automatic pass can never put a listing into an off-sale/on-sale loop.
+    rebundledAt: { type: Date, default: null },
     // When the Z2U shelf keeper last extended this offer's duration.
     //
     // Z2U does NOT move the publish date when an offer is extended, and the

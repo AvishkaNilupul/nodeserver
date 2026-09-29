@@ -1,0 +1,514 @@
+{
+  "generatedAt": "2026-08-26T16:48:24.650Z",
+  "eventCount": 8163,
+  "trainEventCount": 5714,
+  "testEventCount": 2449,
+  "base": {
+    "train": {
+      "closed": 14,
+      "open": 0,
+      "wins": 8,
+      "losses": 6,
+      "winRate": 0.5714285714285714,
+      "realizedSol": -0.26182159460386184,
+      "unrealizedSol": 0,
+      "totalPnlSol": -0.26182159460386184,
+      "paperCapitalSol": 1.7381784053961378,
+      "startingCapitalSol": 2,
+      "trades": 14,
+      "maxDrawdownSol": 0.6510659562053411,
+      "expectancySol": -0.018701542471704417
+    },
+    "test": {
+      "closed": 28,
+      "open": 0,
+      "wins": 14,
+      "losses": 14,
+      "winRate": 0.5,
+      "realizedSol": 0.17619071704657802,
+      "unrealizedSol": 0,
+      "totalPnlSol": 0.17619071704657802,
+      "paperCapitalSol": 2.176190717046578,
+      "startingCapitalSol": 2,
+      "trades": 28,
+      "maxDrawdownSol": 0.27708288938413417,
+      "expectancySol": 0.006292525608806358
+    }
+  },
+  "selected": {
+    "overrides": {
+      "filter": {
+        "minRecentBuys": 5,
+        "minUniqueBuyers": 2,
+        "minRecentBuyVolumeSol": 1.2
+      },
+      "exit": {
+        "takeProfitBps": 300,
+        "stopLossBps": 600
+      }
+    },
+    "train": {
+      "closed": 25,
+      "open": 0,
+      "wins": 15,
+      "losses": 10,
+      "winRate": 0.6,
+      "realizedSol": 0.903354082793461,
+      "unrealizedSol": 0,
+      "totalPnlSol": 0.903354082793461,
+      "paperCapitalSol": 2.903354082793461,
+      "startingCapitalSol": 2,
+      "trades": 25,
+      "maxDrawdownSol": 0.4473304296029199,
+      "expectancySol": 0.03613416331173844
+    },
+    "test": {
+      "closed": 24,
+      "open": 0,
+      "wins": 12,
+      "losses": 12,
+      "winRate": 0.5,
+      "realizedSol": 0.3675764521585634,
+      "unrealizedSol": 0,
+      "totalPnlSol": 0.3675764521585634,
+      "paperCapitalSol": 2.3675764521585654,
+      "startingCapitalSol": 2,
+      "trades": 24,
+      "maxDrawdownSol": 0.3182277771556252,
+      "expectancySol": 0.015315685506606808
+    }
+  },
+  "topTrainingCandidates": [
+    {
+      "overrides": {
+        "filter": {
+          "minRecentBuys": 5,
+          "minUniqueBuyers": 2,
+          "minRecentBuyVolumeSol": 1.2
+        },
+        "exit": {
+          "takeProfitBps": 300,
+          "stopLossBps": 600
+        }
+      },
+      "train": {
+        "closed": 25,
+        "open": 0,
+        "wins": 15,
+        "losses": 10,
+        "winRate": 0.6,
+        "realizedSol": 0.903354082793461,
+        "unrealizedSol": 0,
+        "totalPnlSol": 0.903354082793461,
+        "paperCapitalSol": 2.903354082793461,
+        "startingCapitalSol": 2,
+        "trades": 25,
+        "maxDrawdownSol": 0.4473304296029199,
+        "expectancySol": 0.03613416331173844
+      },
+      "test": {
+        "closed": 24,
+        "open": 0,
+        "wins": 12,
+        "losses": 12,
+        "winRate": 0.5,
+        "realizedSol": 0.3675764521585634,
+        "unrealizedSol": 0,
+        "totalPnlSol": 0.3675764521585634,
+        "paperCapitalSol": 2.3675764521585654,
+        "startingCapitalSol": 2,
+        "trades": 24,
+        "maxDrawdownSol": 0.3182277771556252,
+        "expectancySol": 0.015315685506606808
+      }
+    },
+    {
+      "overrides": {
+        "filter": {
+          "minRecentBuys": 5,
+          "minUniqueBuyers": 2,
+          "minRecentBuyVolumeSol": 1.2
+        },
+        "exit": {
+          "takeProfitBps": 300,
+          "stopLossBps": 800
+        }
+      },
+      "train": {
+        "closed": 25,
+        "open": 0,
+        "wins": 15,
+        "losses": 10,
+        "winRate": 0.6,
+        "realizedSol": 0.903354082793461,
+        "unrealizedSol": 0,
+        "totalPnlSol": 0.903354082793461,
+        "paperCapitalSol": 2.903354082793461,
+        "startingCapitalSol": 2,
+        "trades": 25,
+        "maxDrawdownSol": 0.4473304296029199,
+        "expectancySol": 0.03613416331173844
+      },
+      "test": {
+        "closed": 24,
+        "open": 0,
+        "wins": 13,
+        "losses": 11,
+        "winRate": 0.5416666666666666,
+        "realizedSol": 0.4064492763633373,
+        "unrealizedSol": 0,
+        "totalPnlSol": 0.4064492763633373,
+        "paperCapitalSol": 2.406449276363339,
+        "startingCapitalSol": 2,
+        "trades": 24,
+        "maxDrawdownSol": 0.3182277771556252,
+        "expectancySol": 0.016935386515139053
+      }
+    },
+    {
+      "overrides": {
+        "filter": {
+          "minRecentBuys": 5,
+          "minUniqueBuyers": 2,
+          "minRecentBuyVolumeSol": 1.2
+        },
+        "exit": {
+          "takeProfitBps": 300,
+          "stopLossBps": 1000
+        }
+      },
+      "train": {
+        "closed": 25,
+        "open": 0,
+        "wins": 15,
+        "losses": 10,
+        "winRate": 0.6,
+        "realizedSol": 0.903354082793461,
+        "unrealizedSol": 0,
+        "totalPnlSol": 0.903354082793461,
+        "paperCapitalSol": 2.903354082793461,
+        "startingCapitalSol": 2,
+        "trades": 25,
+        "maxDrawdownSol": 0.4473304296029199,
+        "expectancySol": 0.03613416331173844
+      },
+      "test": {
+        "closed": 23,
+        "open": 0,
+        "wins": 12,
+        "losses": 11,
+        "winRate": 0.5217391304347826,
+        "realizedSol": 0.3516741577026752,
+        "unrealizedSol": 0,
+        "totalPnlSol": 0.3516741577026752,
+        "paperCapitalSol": 2.351674157702676,
+        "startingCapitalSol": 2,
+        "trades": 23,
+        "maxDrawdownSol": 0.3182277771556252,
+        "expectancySol": 0.015290180769681529
+      }
+    },
+    {
+      "overrides": {
+        "filter": {
+          "minRecentBuys": 5,
+          "minUniqueBuyers": 3,
+          "minRecentBuyVolumeSol": 1.2
+        },
+        "exit": {
+          "takeProfitBps": 300,
+          "stopLossBps": 600
+        }
+      },
+      "train": {
+        "closed": 25,
+        "open": 0,
+        "wins": 15,
+        "losses": 10,
+        "winRate": 0.6,
+        "realizedSol": 0.903354082793461,
+        "unrealizedSol": 0,
+        "totalPnlSol": 0.903354082793461,
+        "paperCapitalSol": 2.903354082793461,
+        "startingCapitalSol": 2,
+        "trades": 25,
+        "maxDrawdownSol": 0.4473304296029199,
+        "expectancySol": 0.03613416331173844
+      },
+      "test": {
+        "closed": 24,
+        "open": 0,
+        "wins": 12,
+        "losses": 12,
+        "winRate": 0.5,
+        "realizedSol": 0.3675764521585634,
+        "unrealizedSol": 0,
+        "totalPnlSol": 0.3675764521585634,
+        "paperCapitalSol": 2.3675764521585654,
+        "startingCapitalSol": 2,
+        "trades": 24,
+        "maxDrawdownSol": 0.3182277771556252,
+        "expectancySol": 0.015315685506606808
+      }
+    },
+    {
+      "overrides": {
+        "filter": {
+          "minRecentBuys": 5,
+          "minUniqueBuyers": 3,
+          "minRecentBuyVolumeSol": 1.2
+        },
+        "exit": {
+          "takeProfitBps": 300,
+          "stopLossBps": 800
+        }
+      },
+      "train": {
+        "closed": 25,
+        "open": 0,
+        "wins": 15,
+        "losses": 10,
+        "winRate": 0.6,
+        "realizedSol": 0.903354082793461,
+        "unrealizedSol": 0,
+        "totalPnlSol": 0.903354082793461,
+        "paperCapitalSol": 2.903354082793461,
+        "startingCapitalSol": 2,
+        "trades": 25,
+        "maxDrawdownSol": 0.4473304296029199,
+        "expectancySol": 0.03613416331173844
+      },
+      "test": {
+        "closed": 24,
+        "open": 0,
+        "wins": 13,
+        "losses": 11,
+        "winRate": 0.5416666666666666,
+        "realizedSol": 0.4064492763633373,
+        "unrealizedSol": 0,
+        "totalPnlSol": 0.4064492763633373,
+        "paperCapitalSol": 2.406449276363339,
+        "startingCapitalSol": 2,
+        "trades": 24,
+        "maxDrawdownSol": 0.3182277771556252,
+        "expectancySol": 0.016935386515139053
+      }
+    },
+    {
+      "overrides": {
+        "filter": {
+          "minRecentBuys": 5,
+          "minUniqueBuyers": 3,
+          "minRecentBuyVolumeSol": 1.2
+        },
+        "exit": {
+          "takeProfitBps": 300,
+          "stopLossBps": 1000
+        }
+      },
+      "train": {
+        "closed": 25,
+        "open": 0,
+        "wins": 15,
+        "losses": 10,
+        "winRate": 0.6,
+        "realizedSol": 0.903354082793461,
+        "unrealizedSol": 0,
+        "totalPnlSol": 0.903354082793461,
+        "paperCapitalSol": 2.903354082793461,
+        "startingCapitalSol": 2,
+        "trades": 25,
+        "maxDrawdownSol": 0.4473304296029199,
+        "expectancySol": 0.03613416331173844
+      },
+      "test": {
+        "closed": 23,
+        "open": 0,
+        "wins": 12,
+        "losses": 11,
+        "winRate": 0.5217391304347826,
+        "realizedSol": 0.3516741577026752,
+        "unrealizedSol": 0,
+        "totalPnlSol": 0.3516741577026752,
+        "paperCapitalSol": 2.351674157702676,
+        "startingCapitalSol": 2,
+        "trades": 23,
+        "maxDrawdownSol": 0.3182277771556252,
+        "expectancySol": 0.015290180769681529
+      }
+    },
+    {
+      "overrides": {
+        "filter": {
+          "minRecentBuys": 5,
+          "minUniqueBuyers": 4,
+          "minRecentBuyVolumeSol": 1.2
+        },
+        "exit": {
+          "takeProfitBps": 300,
+          "stopLossBps": 600
+        }
+      },
+      "train": {
+        "closed": 25,
+        "open": 0,
+        "wins": 15,
+        "losses": 10,
+        "winRate": 0.6,
+        "realizedSol": 0.903354082793461,
+        "unrealizedSol": 0,
+        "totalPnlSol": 0.903354082793461,
+        "paperCapitalSol": 2.903354082793461,
+        "startingCapitalSol": 2,
+        "trades": 25,
+        "maxDrawdownSol": 0.4473304296029199,
+        "expectancySol": 0.03613416331173844
+      },
+      "test": {
+        "closed": 24,
+        "open": 0,
+        "wins": 12,
+        "losses": 12,
+        "winRate": 0.5,
+        "realizedSol": 0.3675764521585634,
+        "unrealizedSol": 0,
+        "totalPnlSol": 0.3675764521585634,
+        "paperCapitalSol": 2.3675764521585654,
+        "startingCapitalSol": 2,
+        "trades": 24,
+        "maxDrawdownSol": 0.3182277771556252,
+        "expectancySol": 0.015315685506606808
+      }
+    },
+    {
+      "overrides": {
+        "filter": {
+          "minRecentBuys": 5,
+          "minUniqueBuyers": 4,
+          "minRecentBuyVolumeSol": 1.2
+        },
+        "exit": {
+          "takeProfitBps": 300,
+          "stopLossBps": 800
+        }
+      },
+      "train": {
+        "closed": 25,
+        "open": 0,
+        "wins": 15,
+        "losses": 10,
+        "winRate": 0.6,
+        "realizedSol": 0.903354082793461,
+        "unrealizedSol": 0,
+        "totalPnlSol": 0.903354082793461,
+        "paperCapitalSol": 2.903354082793461,
+        "startingCapitalSol": 2,
+        "trades": 25,
+        "maxDrawdownSol": 0.4473304296029199,
+        "expectancySol": 0.03613416331173844
+      },
+      "test": {
+        "closed": 24,
+        "open": 0,
+        "wins": 13,
+        "losses": 11,
+        "winRate": 0.5416666666666666,
+        "realizedSol": 0.4064492763633373,
+        "unrealizedSol": 0,
+        "totalPnlSol": 0.4064492763633373,
+        "paperCapitalSol": 2.406449276363339,
+        "startingCapitalSol": 2,
+        "trades": 24,
+        "maxDrawdownSol": 0.3182277771556252,
+        "expectancySol": 0.016935386515139053
+      }
+    },
+    {
+      "overrides": {
+        "filter": {
+          "minRecentBuys": 5,
+          "minUniqueBuyers": 4,
+          "minRecentBuyVolumeSol": 1.2
+        },
+        "exit": {
+          "takeProfitBps": 300,
+          "stopLossBps": 1000
+        }
+      },
+      "train": {
+        "closed": 25,
+        "open": 0,
+        "wins": 15,
+        "losses": 10,
+        "winRate": 0.6,
+        "realizedSol": 0.903354082793461,
+        "unrealizedSol": 0,
+        "totalPnlSol": 0.903354082793461,
+        "paperCapitalSol": 2.903354082793461,
+        "startingCapitalSol": 2,
+        "trades": 25,
+        "maxDrawdownSol": 0.4473304296029199,
+        "expectancySol": 0.03613416331173844
+      },
+      "test": {
+        "closed": 23,
+        "open": 0,
+        "wins": 12,
+        "losses": 11,
+        "winRate": 0.5217391304347826,
+        "realizedSol": 0.3516741577026752,
+        "unrealizedSol": 0,
+        "totalPnlSol": 0.3516741577026752,
+        "paperCapitalSol": 2.351674157702676,
+        "startingCapitalSol": 2,
+        "trades": 23,
+        "maxDrawdownSol": 0.3182277771556252,
+        "expectancySol": 0.015290180769681529
+      }
+    },
+    {
+      "overrides": {
+        "filter": {
+          "minRecentBuys": 5,
+          "minUniqueBuyers": 2,
+          "minRecentBuyVolumeSol": 1.2
+        },
+        "exit": {
+          "takeProfitBps": 450,
+          "stopLossBps": 600
+        }
+      },
+      "train": {
+        "closed": 25,
+        "open": 0,
+        "wins": 14,
+        "losses": 11,
+        "winRate": 0.56,
+        "realizedSol": 0.7514674153705019,
+        "unrealizedSol": 0,
+        "totalPnlSol": 0.7514674153705019,
+        "paperCapitalSol": 2.7514674153705014,
+        "startingCapitalSol": 2,
+        "trades": 25,
+        "maxDrawdownSol": 0.44733042960291947,
+        "expectancySol": 0.030058696614820076
+      },
+      "test": {
+        "closed": 24,
+        "open": 0,
+        "wins": 12,
+        "losses": 12,
+        "winRate": 0.5,
+        "realizedSol": 0.3675764521585634,
+        "unrealizedSol": 0,
+        "totalPnlSol": 0.3675764521585634,
+        "paperCapitalSol": 2.3675764521585654,
+        "startingCapitalSol": 2,
+        "trades": 24,
+        "maxDrawdownSol": 0.3182277771556252,
+        "expectancySol": 0.015315685506606808
+      }
+    }
+  ],
+  "note": "Candidate passed the held-out minimums. Review it before changing config.json."
+}

@@ -2435,6 +2435,47 @@
       // Manual sale: fetch the account's games, ask which one was sold,
       // then reserve that game's drops and pull the account from any live
       // listing selling it. The other games on the account stay sellable.
+      // Parse the operator's free-text "what did it sell for" entry into a
+      // price and an optional marketplace.
+      //
+      // Deliberately forgiving about how money gets typed: "$2.50", "2,50" and
+      // "2.50 USD" are all the same sale. An earlier strict version silently
+      // dropped every one of those to price 0 — which is precisely the blank
+      // this whole change exists to eliminate, so a parser that fails quietly
+      // would have reintroduced the bug it was fixing.
+      //
+      // Returns { priceUsd, marketplace, bad }. `bad` is true only for input
+      // that carries digits we could not read as money, so a plain marketplace
+      // name with no price ("digiseller") stays valid and empty stays valid.
+      // Exercised for real by tests/markSoldParse.test.js, which extracts THIS
+      // function out of the page rather than re-implementing it.
+      function parseSaleEntry(raw) {
+        const text = String(raw == null ? "" : raw)
+          .trim()
+          .replace(/[$£€¥]/g, "")
+          .replace(/\busd\b/gi, "")
+          .trim();
+        if (!text) return { priceUsd: 0, marketplace: "", bad: false };
+        // Comma as a decimal separator ("2,50"), but not as a thousands
+        // separator inside a larger number.
+        const money = text.replace(/(\d),(\d{1,2})(?!\d)/g, "$1.$2");
+        const m = money.match(/^([\d.]+)?\s*(.*)$/);
+        if (!m) return { priceUsd: 0, marketplace: "", bad: true };
+        const price = m[1] ? Number(m[1]) : 0;
+        const rest = String(m[2] || "").trim().toLowerCase();
+        // Digits present but unreadable, or an absurd amount: say so rather
+        // than recording a wrong number.
+        if (m[1] && !Number.isFinite(price)) {
+          return { priceUsd: 0, marketplace: "", bad: true };
+        }
+        if (price < 0 || price > 1000) {
+          return { priceUsd: 0, marketplace: "", bad: true };
+        }
+        // Leftover text that still contains digits means we misread it.
+        if (/\d/.test(rest)) return { priceUsd: 0, marketplace: "", bad: true };
+        return { priceUsd: price, marketplace: rest, bad: false };
+      }
+
       async function markSold(btn) {
         const id = btn.dataset.marksold;
         const login = btn.dataset.login || "";
@@ -2493,6 +2534,38 @@
           return;
         }
         const g = games[pick - 1];
+        // Capture what it SOLD FOR. The endpoint has always accepted
+        // `priceUsd` and `marketplace`; this form simply never sent them, so
+        // every hand-sale landed with price 0 and no marketplace — 390 of the
+        // 553 recorded sales, 71% of the entire sales history.
+        //
+        // That blank is expensive. Realised price is what utils/pricing.js
+        // anchors on, and utils/autoFarmer.js weights own-sales demand by how
+        // much they were worth (priceFactor), so an unpriced sale teaches the
+        // system that a game sells but not that it sells WELL. Only 3
+        // marketplaces have any priced evidence at all today; the operator's
+        // own daily hand-sales are the single biggest untapped source.
+        //
+        // One optional prompt, both values, skippable — blank keeps exactly
+        // today's behaviour rather than blocking a sale on bookkeeping.
+        const sale = prompt(
+          "What did it sell for? (optional — press OK to skip)\n\n" +
+            "Price in USD, optionally followed by the marketplace.\n" +
+            "  e.g.  2.50 digiseller\n" +
+            "  e.g.  1.75\n\n" +
+            "Recording this is what teaches pricing and demand what a\n" +
+            g.game + " account is actually worth.",
+          "",
+        );
+        if (sale === null) return; // Cancel means cancel the whole sale.
+        const { priceUsd, marketplace, bad } = parseSaleEntry(sale);
+        if (bad) {
+          return banner(
+            "Could not read \"" + sale + "\" — enter a USD amount like 2.50, " +
+              "optionally followed by a marketplace.",
+            "err",
+          );
+        }
         btn.disabled = true;
         try {
           const r = await api(
@@ -2500,7 +2573,11 @@
             {
               method: "POST",
               headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({ game: g.gameValue }),
+              body: JSON.stringify({
+                game: g.gameValue,
+                priceUsd,
+                marketplace,
+              }),
             },
           );
           let msg = r.message || "Marked sold.";

@@ -1,0 +1,3 @@
+{"type":"entry","mint":"demo","entryTime":3,"entryPriceSol":1.2,"sizeSol":0.42,"peakPriceSol":1.2,"troughPriceSol":1.2,"score":0.9061111111111112,"reason":"filter-pass"}
+{"type":"exit","mint":"demo","exitTime":4,"exitPriceSol":1.3,"pnlSol":0.03500000000000006,"holdSec":1,"reason":"take-profit"}
+{"type":"entry","mint":"demo","entryTime":5,"entryPriceSol":1.36,"sizeSol":0.42,"peakPriceSol":1.36,"troughPriceSol":1.36,"score":0.903888888888889,"reason":"filter-pass"}

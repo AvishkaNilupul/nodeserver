@@ -61,9 +61,17 @@ function shortfallMessage(res, qty) {
 
 // Should this attempt page the owner? First failure always; then every Nth, so
 // a stuck order keeps reminding without spamming.
+//
+// "waiting_chat" is throttled exactly like "failed" rather than alerting on
+// every tick: it is a soft hold (the buyer's order chat is not open yet), and
+// attempts accrue at ~1/tick, so the first page lands around attempt
+// REALERT_EVERY (~10 min) — long enough that a buyer who opens the chat promptly
+// is delivered in silence, soon enough that a genuinely stalled order is flagged
+// before it breaches the delivery promise. A first-tick page here would just be
+// noise on an order that almost always delivers itself within a minute or two.
 function shouldAlert(row) {
   if (!row) return true;
-  if (row.state !== "failed") return true;
+  if (row.state !== "failed" && row.state !== "waiting_chat") return true;
   const n = Number(row.attempts) || 0;
   return n > 0 && n % REALERT_EVERY === 0;
 }

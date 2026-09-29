@@ -1,0 +1,404 @@
+From 9f0d1b13118bf7a750fe6838379aebc7f6b8ccfc Mon Sep 17 00:00:00 2001
+From: Hyperagent Developer Agent <oliiwjqc@polosmail.com>
+Date: Fri, 4 Sep 2026 22:44:40 +0900
+Subject: [PATCH 3/3] fix(farm2): replay scores rows where the probe budget
+ cannot matter
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Run on prod (2026-09-04): 0 scored of 363. Every row came back partial with
+probe_budget_unreconstructable, because probeColdStart is ON there, so
+probeGateFor runs for every decision and downgrades every one. The budget
+half of that gate genuinely cannot be rebuilt — task status is current
+state, not history — and the first version let that fact taint rows it could
+not possibly affect. The design failed on first contact exactly as its own §7
+said to check for, and gapCounts named the assumption that broke.
+
+demandAllocation reads probeAllowed on two branches only: no market data
+with a sales boost under the half tier, and a sub-floor score with at most
+probeMaxSellers rival sellers. Everywhere else the value is dead, so not
+knowing it is provably irrelevant and the row is exact — the harness's own
+§3 rule, which it had applied to the sales price and to cold-start-off but
+not to this case. Measured on the 363 prod rows: 53 no snapshot
+(unreplayable, correct), 27 probe-reachable (partial, correct), 283 with
+research, sellers > probeMaxSellers and d below the half tier — 78% — which
+should be exact and now are.
+
+Decided by asking the economics rather than restating them.
+probeGateLoadBearing() runs demandAllocation with probeAllowed true and again
+with it false and compares the outputs; identical means the unknown budget
+cannot touch the row. Restating the two branch conditions here would have put
+DEMAND_HALF and the boost formula in a second place, to drift the first time
+the tiers moved. Each row now carries probeGateMatters (true / false / null)
+so the split is auditable in the JSON output.
+
+Six new tests. The pinned one: research present, sellers > probeMaxSellers,
+score below the half tier, probeColdStart ON → exact. The two probe-reachable
+branches stay partial. The summary scores the exact rows and no longer lists
+the gap for them.
+
+Suite 665/670, same 5 pre-existing orphan-test failures. No change to
+autoFarmer.js or autoLister.js in this commit.
+---
+ docs/FARM2-VERIFICATION.md |  37 ++++++--
+ tests/farm2Replay.test.js  | 168 +++++++++++++++++++++++++++++++++++++
+ utils/farm2/replay.js      |  65 +++++++++++++-
+ 3 files changed, 258 insertions(+), 12 deletions(-)
+
+diff --git a/docs/FARM2-VERIFICATION.md b/docs/FARM2-VERIFICATION.md
+index 1d259b1..1c4dc38 100644
+--- a/docs/FARM2-VERIFICATION.md
++++ b/docs/FARM2-VERIFICATION.md
+@@ -62,7 +62,7 @@ utils/farm2/replay.js          the harness
+ utils/farm2/decisionClasses.js the shared decision vocabulary
+ utils/farm2/steps/decide.js    the six gates (commit 2)
+ scripts/farm2-replay.js        operator CLI (read-only)
+-tests/farm2Replay.test.js      24 tests
++tests/farm2Replay.test.js      30 tests
+ tests/farm2Gates.test.js       21 tests
+ ```
+ 
+@@ -135,6 +135,17 @@ information is needed and the row is exact despite being unrecoverable in
+ principle. Similarly, when `probeColdStart` is off the entire probe gate is
+ inert and reconstructs exactly.
+ 
++The probe gate with `probeColdStart` **on** is the sharpest case. Its budget
++half is never reconstructable (§7.4), and the first version of the harness let
++that downgrade every row — on prod, all 363. But `demandAllocation` reads
++`probeAllowed` on only two branches; everywhere else the value is dead. Rather
++than restate those two conditions here (which would put `DEMAND_HALF` and the
++boost formula in a second place, to drift the first time the tiers move), the
++harness asks the economics directly: `probeGateLoadBearing()` runs
++`demandAllocation` with `probeAllowed` true and again with it false and compares
++the outputs. Identical means the unknown value cannot affect this row and the
++row is exact. Each row records `probeGateMatters` so the split is auditable.
++
+ ## 4. How the scoring works
+ 
+ Three shapes, depending on what the recorded decision proves about the demand
+@@ -326,12 +337,16 @@ formality.
+    configuration and may disagree for a reason that is not the lane's fault. The
+    CLI prints the assumed values for this reason. **This is the largest
+    unquantified risk in the design.**
+-4. **Cold-start probing weakens probe rows.** The concurrent-probe budget counts
+-   tasks by *current* status, so probe-vs-`skip_probe_budget` is not
+-   reconstructable when `probeColdStart` is on. Those rows come back `partial`
+-   and do not count. *(Prod run 2026-09-04: `probeColdStart` is ON, and this
+-   downgraded every one of 363 rows. Addressed in the follow-up commit — the
+-   downgrade now applies only where `probeAllowed` can change the output.)*
++4. **Cold-start probing weakens probe-reachable rows.** The concurrent-probe
++   budget counts tasks by *current* status, so on the two branches where
++   `demandAllocation` actually reads `probeAllowed` — no market data with a
++   sub-half sales boost, or a sub-floor score with at most `probeMaxSellers`
++   rivals — the row is `partial` and does not count. On every other branch the
++   value is dead and the row is exact (§3). *Prod run 2026-09-04:
++   `probeColdStart` is ON, and the first version of the harness downgraded all
++   363 rows on this alone — 0 scored. Measured on those rows: 53 had no
++   snapshot (unreplayable), 27 sat on a probe-reachable branch (partial), 283
++   did not. This version scores those 283.*
+ 5. **120-day horizon.** `MarketResearchSnapshot` has a TTL. Older decisions are
+    unreplayable, and a row close to the boundary may vanish mid-run.
+ 6. **Replay shares the lane's blind spots by construction.** It runs the same
+@@ -394,9 +409,13 @@ formality.
+ 
+ ## 8. Verification done in the sandbox
+ 
+-- `tests/farm2Replay.test.js` — 24 tests: the vocabulary, every fidelity tier,
++- `tests/farm2Replay.test.js` — 30 tests: the vocabulary, every fidelity tier,
+   the exact 171h trial case from the task brief, self-validating demand
+-  figures, a genuine disagreement, the readiness integration.
++  figures, a genuine disagreement, the readiness integration, and the
++  probe-gate cases from the prod run — the pinned one being: research present,
++  `sellers > probeMaxSellers`, score below the half tier, `probeColdStart` ON
++  → **exact**; the two probe-reachable branches → partial; and the summary
++  scoring such rows with the gap gone from `gapCounts`.
+ - `tests/farm2Gates.test.js` — 21 tests: each of the six gates reached in
+   isolation with the legacy row's decision and numbers, the legacy gate order,
+   forced-game bypass, reuse-before-time-gate, partial coverage, seat trimming,
+diff --git a/tests/farm2Replay.test.js b/tests/farm2Replay.test.js
+index 0526056..d40cce1 100644
+--- a/tests/farm2Replay.test.js
++++ b/tests/farm2Replay.test.js
+@@ -417,6 +417,174 @@ test("probe decisions are only PARTIAL fidelity when cold-start probing is on",
+   assert.equal(off.fidelity, replay.FIDELITY.EXACT);
+ });
+ 
++// --- The probe gate is only load-bearing on two branches --------------------
++//
++// Prod, 2026-09-04: probeColdStart is ON there, so probeGateFor downgraded every
++// one of 363 rows to partial and the harness scored nothing. The budget half of
++// the gate really is unreconstructable — but demandAllocation only READS
++// probeAllowed on two branches. Everywhere else the unknown value cannot change
++// the output, so the row is exact. Measured on those 363 rows: 53 had no
++// snapshot (unreplayable, correctly), 27 sat on a probe-reachable branch
++// (partial, correctly), 283 did not (78%) — and those must score exact.
++
++const COLD_START = { ...AF, probeColdStart: true, probeMaxSellers: 1 };
++
++test("THE PROD CASE: research, sellers > probeMaxSellers, d below the half tier is EXACT with cold-start ON", async () => {
++  // Below the demand floor WITH real rivals selling: the market has spoken, it
++  // is a plain skip, and probeAllowed is never consulted. The unreconstructable
++  // probe budget cannot touch this row.
++  const game = "Rival Heavy Game";
++  await reset(game);
++  const decidedAt = hoursAgo(30);
++  await MarketResearchSnapshot.create({
++    game,
++    gameKey: game.toLowerCase(),
++    at: new Date(decidedAt.getTime() - 3600000),
++    demandScore: 4,
++    sellers: 25, // > probeMaxSellers (1): a proven dud, not an untested market
++  });
++  const task = {
++    game,
++    campaignId: "p1",
++    decision: "skip_low_demand",
++    demandScore: 4,
++    hadResearch: true,
++    internalSales: 0,
++    decidedAt,
++  };
++  const out = await replay.replayDecision(task, { af: COLD_START });
++  assert.equal(out.fidelity, replay.FIDELITY.EXACT, (out.gaps || []).join(","));
++  assert.equal(out.verdict, "agree", out.detail);
++  assert.equal(out.probeGateMatters, false, "checked, and found irrelevant for these inputs");
++  assert.ok(!(out.gaps || []).includes("probe_budget_unreconstructable"));
++});
++
++test("high demand with cold-start ON is exact too — the tier is settled before probing is considered", async () => {
++  const game = "Proven Cold Start Game";
++  await reset(game);
++  const decidedAt = hoursAgo(30);
++  await MarketResearchSnapshot.create({
++    game,
++    gameKey: game.toLowerCase(),
++    at: new Date(decidedAt.getTime() - 3600000),
++    demandScore: 90,
++    sellers: 0, // few sellers, but irrelevant: d is far above the floor
++  });
++  const task = {
++    game,
++    campaignId: "p2",
++    decision: "farm",
++    demandScore: 90,
++    hadResearch: true,
++    internalSales: 0,
++    targetAccounts: 30,
++    decidedAt,
++  };
++  const out = await replay.replayDecision(task, { af: COLD_START });
++  assert.equal(out.fidelity, replay.FIDELITY.EXACT);
++  assert.equal(out.verdict, "agree", out.detail);
++  assert.equal(out.probeGateMatters, false);
++});
++
++test("a probe-REACHABLE branch stays partial: sub-floor score with an untested market", async () => {
++  // sellers <= probeMaxSellers and d below the floor is exactly where
++  // probeAllowed decides probe-vs-skip, and the budget half of it cannot be
++  // rebuilt. The honest answer is partial — reported, never counted.
++  const game = "Untested Cold Start Game";
++  await reset(game);
++  const decidedAt = hoursAgo(30);
++  await MarketResearchSnapshot.create({
++    game,
++    gameKey: game.toLowerCase(),
++    at: new Date(decidedAt.getTime() - 3600000),
++    demandScore: 4,
++    sellers: 0,
++  });
++  const task = {
++    game,
++    campaignId: "p3",
++    decision: "probe",
++    demandScore: 4,
++    hadResearch: true,
++    internalSales: 0,
++    targetAccounts: 5,
++    decidedAt,
++  };
++  const out = await replay.replayDecision(task, { af: COLD_START });
++  assert.equal(out.fidelity, replay.FIDELITY.PARTIAL);
++  assert.equal(out.probeGateMatters, true);
++  assert.ok(out.gaps.includes("probe_budget_unreconstructable"));
++});
++
++test("no market data and no sales is probe-reachable as well — partial", async () => {
++  // The other branch that reads probeAllowed: an unscanned game with no own
++  // sales is the original unknown-game probe.
++  const game = "Never Scanned Cold Start Game";
++  await reset(game);
++  const task = {
++    game,
++    campaignId: "p4",
++    decision: "probe",
++    demandScore: null,
++    hadResearch: false,
++    internalSales: 0,
++    decidedAt: hoursAgo(30),
++  };
++  const out = await replay.replayDecision(task, { af: COLD_START });
++  assert.equal(out.fidelity, replay.FIDELITY.PARTIAL);
++  assert.equal(out.probeGateMatters, true);
++});
++
++test("probeGateLoadBearing asks the economics rather than restating them", () => {
++  const rivals = { demandScore: 4, sellers: 25, scannedAt: new Date() };
++  const untested = { demandScore: 4, sellers: 0, scannedAt: new Date() };
++  const proven = { demandScore: 90, sellers: 0, scannedAt: new Date() };
++  const none = { count: 0, revenue: 0, avgPrice: 0 };
++  assert.equal(replay.probeGateLoadBearing(rivals, COLD_START, none), false);
++  assert.equal(replay.probeGateLoadBearing(untested, COLD_START, none), true);
++  assert.equal(replay.probeGateLoadBearing(proven, COLD_START, none), false);
++  assert.equal(replay.probeGateLoadBearing(null, COLD_START, none), true, "no market data probes");
++  // With cold-start OFF the sub-floor branch never probes, so probeAllowed is
++  // dead there — but the original no-market-data probe predates the cold-start
++  // switch and reads it regardless. Both are the economics' answer, not ours.
++  assert.equal(replay.probeGateLoadBearing(untested, AF, none), false);
++  assert.equal(replay.probeGateLoadBearing(null, AF, none), true);
++});
++
++test("when the probe gate is irrelevant the row drops the gap and the summary scores it", async () => {
++  const game = "Scored Cold Start Game";
++  await reset(game);
++  const decidedAt = hoursAgo(30);
++  await MarketResearchSnapshot.create({
++    game,
++    gameKey: game.toLowerCase(),
++    at: new Date(decidedAt.getTime() - 3600000),
++    demandScore: 3,
++    sellers: 40,
++  });
++  for (let i = 0; i < 3; i += 1) {
++    await AutoFarmTask.create({
++      game,
++      campaignId: "s" + i,
++      decision: "skip_low_demand",
++      status: "skipped",
++      demandScore: 3,
++      hadResearch: true,
++      internalSales: 0,
++      decidedAt,
++    });
++  }
++  const report = await replay.replayHistory({ game, af: COLD_START });
++  assert.equal(report.examined, 3);
++  assert.equal(report.scored, 3, "exact rows are scored");
++  assert.equal(report.agree, 3);
++  assert.equal(
++    report.gapCounts.probe_budget_unreconstructable,
++    undefined,
++    "the gap is gone from the breakdown for rows it cannot affect",
++  );
++});
++
+ // --- The summary and the gate ---------------------------------------------
+ 
+ test("only EXACT-fidelity rows count as evidence in the summary", () => {
+diff --git a/utils/farm2/replay.js b/utils/farm2/replay.js
+index 44d6734..48c34e6 100644
+--- a/utils/farm2/replay.js
++++ b/utils/farm2/replay.js
+@@ -322,6 +322,25 @@ async function probeGateFor(task, { af }) {
+   };
+ }
+ 
++// Does `probeAllowed` change what demandAllocation returns for these inputs?
++//
++// It is read on exactly two branches: no market data with a sales boost below
++// the half tier, and a sub-floor score with few enough rival sellers to count
++// as an untested market. On every other branch it cannot alter the output, so
++// not knowing it is provably irrelevant — §3's rule, applied to this input.
++//
++// Answered by asking demandAllocation itself, both ways, rather than by
++// restating those two conditions here. Restating them would need DEMAND_HALF,
++// the boost formula and probeMaxSellers spelled out in a second place — the
++// exact second source of truth this module exists to avoid — and would drift
++// the first time the tiers changed. The economics are the oracle.
++function probeGateLoadBearing(research, af, sales) {
++  const b = brain();
++  const allowed = b.demandAllocation(research, af, sales, { probeAllowed: true });
++  const denied = b.demandAllocation(research, af, sales, { probeAllowed: false });
++  return JSON.stringify(allowed) !== JSON.stringify(denied);
++}
++
+ // Combine the three into one input set.
+ async function reconstructInputs(task, { af, now = Date.now() } = {}) {
+   const af2 = af || settings.getAutoFarm();
+@@ -331,7 +350,35 @@ async function reconstructInputs(task, { af, now = Date.now() } = {}) {
+     probeGateFor(task, { af: af2 }),
+   ]);
+ 
+-  const parts = [salesPart, researchPart, probePart];
++  // The probe budget is never reconstructable (see probeGateFor), and with
++  // probeColdStart ON that downgraded EVERY row: 0 scored of 363 on prod
++  // (2026-09-04). But it only matters where it can change the answer. Measured
++  // on those same 363 rows: 283 had research, more rival sellers than
++  // probeMaxSellers and a sub-floor score — the branch where `probeAllowed` is
++  // dead — and so are exact. The remaining rows (no snapshot, or a genuinely
++  // probe-reachable branch) keep their honest verdicts.
++  let probe = probePart;
++  let probeGateMatters = null; // null: not applicable (gate inert or inputs unreplayable)
++  if (
++    probe.gaps.includes("probe_budget_unreconstructable") &&
++    salesPart.fidelity !== FIDELITY.UNREPLAYABLE &&
++    researchPart.fidelity !== FIDELITY.UNREPLAYABLE
++  ) {
++    probeGateMatters = probeGateLoadBearing(researchPart.research, af2, salesPart.sales);
++    if (!probeGateMatters) {
++      probe = {
++        ...probe,
++        fidelity: FIDELITY.EXACT,
++        gaps: probe.gaps.filter((g) => g !== "probe_budget_unreconstructable"),
++        note:
++          "probe gate is not load-bearing for these inputs — demandAllocation returns the " +
++          "same answer whether or not probing was allowed, so the unreconstructable budget " +
++          "cannot affect this row",
++      };
++    }
++  }
++
++  const parts = [salesPart, researchPart, probe];
+   const gaps = parts.flatMap((p) => p.gaps);
+   const notes = parts.map((p) => p.note).filter(Boolean);
+ 
+@@ -346,7 +393,11 @@ async function reconstructInputs(task, { af, now = Date.now() } = {}) {
+     af: af2,
+     research: researchPart.research,
+     sales: salesPart.sales,
+-    probeAllowed: probePart.probeAllowed,
++    probeAllowed: probe.probeAllowed,
++    // true: probeAllowed decides this row and its budget half is unknown
++    // false: checked and found dead for these inputs (row stays exact)
++    // null: never checked (cold-start off, or an input was unreplayable)
++    probeGateMatters,
+     fidelity,
+     gaps,
+     notes,
+@@ -409,7 +460,14 @@ async function replayDecision(task, { af, now = Date.now() } = {}) {
+     probeBlocked: !!alloc.probeBlocked,
+   };
+ 
+-  const out = { ...base, replayed, fidelity: inputs.fidelity, gaps: inputs.gaps, notes: inputs.notes };
++  const out = {
++    ...base,
++    replayed,
++    fidelity: inputs.fidelity,
++    gaps: inputs.gaps,
++    notes: inputs.notes,
++    probeGateMatters: inputs.probeGateMatters,
++  };
+ 
+   // --- Score it ------------------------------------------------------------
+   //
+@@ -630,6 +688,7 @@ module.exports = {
+   salesInputsFor,
+   researchInputsFor,
+   probeGateFor,
++  probeGateLoadBearing,
+   summarise,
+   FIDELITY,
+   SNAPSHOT_RETENTION_DAYS,
+-- 
+2.49.0
+

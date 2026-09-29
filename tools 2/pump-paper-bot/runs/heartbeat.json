@@ -1,0 +1,25 @@
+{
+  "updatedAt": "2026-08-26T16:57:07.821Z",
+  "pid": 8815,
+  "runId": "dashboard-1787762887714",
+  "connected": true,
+  "lastEventAt": 1787763427771,
+  "lastError": null,
+  "eventsSeen": 759,
+  "decodedTrades": 759,
+  "entries": 9,
+  "exits": 9,
+  "openPositions": 0,
+  "summary": {
+    "closed": 9,
+    "open": 0,
+    "wins": 5,
+    "losses": 4,
+    "winRate": 0.5555555555555556,
+    "realizedSol": 0.22479460577621468,
+    "unrealizedSol": 0,
+    "totalPnlSol": 0.22479460577621468,
+    "paperCapitalSol": 2.2247946057762156,
+    "startingCapitalSol": 2
+  }
+}

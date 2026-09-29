@@ -4152,7 +4152,35 @@ async function runOnce(opts = {}) {
         reprice = { error: e.message };
       }
     }
-    lastRun = { at: startedAt, scan, check, reprice, tookMs: Date.now() - startedAt.getTime() };
+    // Hunk 9: automatic campaign-scoped rebundle. When the owner turns
+    // unclaimedAutoRebundle on (default OFF), retitle any live
+    // gameflip/ggsel/eldorado no-claim listing that now under-advertises the
+    // events it already sells — at the SAME price, one edit per listing per
+    // hour (cooldown). Never inflates an intentional partial bundle: the target
+    // is scoped to the campaigns the listing already advertises.
+    let rebundle = null;
+    if (opts.check !== false && settings.getAutoFarm().unclaimedAutoRebundle) {
+      try {
+        const report = await require("./unclaimedListingAudit").rebundleAll({
+          dryRun: false,
+          auto: true,
+        });
+        const applied = report.filter((r) => r.applied);
+        rebundle = { applied: applied.length, total: report.length };
+        if (applied.length) {
+          logEvent({
+            category: "unclaimed",
+            action: "auto_rebundle",
+            actor: "unclaimedAutoList",
+            meta: { applied: applied.map((r) => r.marketplace + " " + r.externalId) },
+          });
+        }
+      } catch (e) {
+        console.error("unclaimedAutoList auto-rebundle failed:", e.message);
+        rebundle = { error: e.message };
+      }
+    }
+    lastRun = { at: startedAt, scan, check, reprice, rebundle, tookMs: Date.now() - startedAt.getTime() };
     return lastRun;
   } finally {
     running = false;

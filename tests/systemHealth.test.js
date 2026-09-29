@@ -59,6 +59,12 @@ function cmp(a, b) {
 }
 
 function eq(value, want) {
+  // Mongo matches a scalar against an array field when ANY element equals it
+  // (`listingExternalIds: "x"`); listings.stale finds a live unit's own ledger
+  // row that way.
+  if (Array.isArray(value) && !Array.isArray(want)) {
+    return value.some((v) => eq(v, want));
+  }
   if (want instanceof RegExp) return want.test(String(value == null ? "" : value));
   if (value instanceof Date || want instanceof Date) return cmp(value, want) === 0;
   // A missing field and an explicit null are the same thing to Mongo, and the
@@ -1016,6 +1022,101 @@ test("REGRESSION: listings.stale asks LIVE inventory, not the DB union", async (
     !calls.includes("accountCoverage"),
     "the DB union cannot see an expired wave — it must not be the verdict",
   );
+});
+
+test("REGRESSION: listings.stale judges a Gameflip live unit by the account it carries", async () => {
+  // Gameflip hands the buyer exactly the account baked into the listing. Its
+  // ledger row is `listed`, never a spare, so the spare-stock query read every
+  // live unit as "no sellable ledger row for this game/set" (6 false fails on
+  // 2026-09-27). The carried account is the only candidate that matters.
+  const unit = listing({
+    externalId: "gf-unit-1",
+    origin: "unclaimed",
+    accountLogin: "unit-acct",
+    requiredDrops: [{ name: "Sun Tea Icon", qty: 1 }],
+  });
+  const carried = {
+    source: "noclaim",
+    status: "listed",
+    soldAt: null,
+    login: "unit-acct",
+    game: "Overwatch",
+    listingExternalIds: ["gf-unit-1"],
+    drops: [],
+  };
+  const seen = [];
+  const deps = healthyDeps({
+    MarketplaceListing: fakeModel([unit]),
+    UnclaimedAccount: fakeModel([carried]),
+  });
+  deps.unclaimedCoverage = {
+    ...deps.unclaimedCoverage,
+    liveCoverage: async (row) => {
+      seen.push(row.login);
+      return { ok: true, degraded: false, source: "live" };
+    },
+  };
+  const ok = await runCheck("listings.stale", deps);
+  assert.strictEqual(ok.status, "ok");
+  assert.deepStrictEqual(seen, ["unit-acct"], "only the carried account is read");
+
+  // If the carried account no longer covers the listing, a spare that does
+  // cannot rescue it — the buyer would still receive the carried one.
+  deps.UnclaimedAccount = fakeModel([
+    carried,
+    { source: "noclaim", status: "released", soldAt: null, login: "spare", game: "Overwatch", drops: [] },
+  ]);
+  deps.unclaimedCoverage = {
+    ...deps.unclaimedCoverage,
+    liveCoverage: async (row) => ({ ok: row.login === "spare", degraded: false, source: "live" }),
+  };
+  const bad = await runCheck("listings.stale", deps);
+  assert.strictEqual(bad.status, "fail");
+  assert.strictEqual(bad.items[0].game, "Overwatch");
+});
+
+test("REGRESSION: eldorado.offers — auto-paused rows are not drift, offline-hold offers are a manual line", async () => {
+  const rows = [
+    // Paused by the stock sync itself ("paused: no claimable stock"); it keeps
+    // status active by design and resumes on its own.
+    listing({ marketplace: "eldorado", externalId: "eld-paused", autoPaused: true, title: "R6 bundle" }),
+    listing({ marketplace: "eldorado", externalId: "eld-live", title: "OW bundle" }),
+  ];
+  const offers = [
+    { id: "eld-paused", offerState: "Paused", offerTitle: "R6 bundle" },
+    { id: "eld-live", offerState: "Active", offerTitle: "OW bundle" },
+    { id: "eld-hold", offerState: "Active", offerTitle: "Overwatch Loot Boxes | Dupe Boxes" },
+  ];
+  const base = healthyDeps();
+  const deps = (autoFarm) => ({
+    ...base,
+    MarketplaceListing: fakeModel(rows),
+    marketplaces: {
+      ...base.marketplaces,
+      async eldoradoMyListings() {
+        return { totalPages: 1, results: offers };
+      },
+    },
+    eldoradoFarmService: { parseFarmOrder: async () => ({ days: 30, game: "x" }) },
+    settings: { getAutoFarm: () => autoFarm },
+  });
+
+  const held = await runCheck(
+    "eldorado.offers",
+    deps({ eldoradoOfflineHold: { message: "I'm offline", offers: ["eld-hold"] } }),
+  );
+  assert.strictEqual(held.status, "ok", JSON.stringify(held.items));
+  assert.strictEqual(held.measured, 0);
+  assert.match(String(held.detail), /offline-hold/);
+
+  // Without the hold the same offer is a real gap, and a non-paused row that
+  // Eldorado stopped selling is still drift.
+  const unheld = await runCheck("eldorado.offers", deps({}));
+  assert.strictEqual(unheld.status, "fail");
+  assert.deepStrictEqual(unheld.items.map((i) => i.offer), ["eld-hold"]);
+  offers[1].offerState = "Paused";
+  const drift = await runCheck("eldorado.offers", deps({}));
+  assert.deepStrictEqual(drift.items.map((i) => i.offer).sort(), ["eld-hold", "eld-live"]);
 });
 
 test("REGRESSION: a degraded coverage verdict never counts as covered", async () => {

@@ -1,0 +1,46 @@
+# Dependencies, generated output, and local tool state
+node_modules/
+.graphify/
+.git/
+.claude/
+.codex/
+marketplace/.venv/
+.venv/
+android/.gradle/
+android/build/
+android/app/build/
+
+# Runtime data and secrets
+.env
+.env.*
+admins.json
+scripts/accounts.json
+orderIds.json
+messages.json
+items.json
+inventory.json
+config/botHosts.json
+utils/settings.json
+android/keystore/
+android/local.properties
+android/key.properties
+*.jks
+*.keystore
+
+# User uploads, generated media, and temporary backups
+public/uploads/
+public/drop-images/
+public/noclaim-social/
+_deploy_backup_*
+_bk_*
+_cred_backfill_backup_*
+_TEMP_*
+*_TEMP.js
+*.bak
+*.bak-*
+*.bak_*
+server.js.bak*
+__pycache__/
+*.pyc
+.DS_Store
+._*

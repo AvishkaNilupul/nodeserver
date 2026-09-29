@@ -57,6 +57,12 @@ const AUTO_FARM_DEFAULTS = {
   // Bundles panel has a dry-run "Reprice" button either way.
   unclaimedRepriceExisting: false,
   unclaimedRepriceDriftPct: 20,
+  // Automatic campaign-scoped rebundle: every check tick, retitle any live
+  // gameflip/ggsel/eldorado no-claim listing that now under-advertises (its
+  // accounts farmed more items of the events it already sells), at the SAME
+  // price, with a 1-hour per-listing cooldown. Kill switch — ships OFF; the
+  // "Apply rebundle fixes" button in the Auto-list tab is the manual path.
+  unclaimedAutoRebundle: false,
   // Gameflip "lot of N accounts" listings (utils/unclaimedLots.js). Ships OFF.
   unclaimedGameflipLots: false,
   unclaimedLotSize: 5,
@@ -189,6 +195,43 @@ const AUTO_FARM_DEFAULTS = {
   // actually send the message and mark the order delivered, and logs what it
   // WOULD have sent. Leave true until a live order has been watched end to end.
   eldoradoDeliverDryRun: true,
+
+  // --- Eldorado "Overwatch Loot Boxes | Dupe Boxes" (utils/eldoradoDupeFulfiller.js
+  // + utils/twitchDupeCoord.js) --- SINGLE offer with a bespoke delivery
+  // pipeline: the buyer gets a t.me deep-link in the Eldorado chat, DMs our
+  // Telegram bot, the bot hands over Twitch creds + waits for /linked, then
+  // fires the same 2600-parallel ClaimDropRewards spam the operator runs by
+  // hand. The dupe-fire process runs on the Mac (single-flight via FIRE_LOCK)
+  // so nothing on prod ever calls Twitch directly.
+  //
+  // Ships OFF. Flip twitchDupeAuto on after (a) the pool has real logins,
+  // (b) the offer id matches the live offer, and (c) the Mac bot has been
+  // updated to poll and can round-trip a test order.
+  twitchDupeAuto: false,
+  // The Eldorado offer id we route through this pipeline. Any OTHER dupe-
+  // shaped offer must live in a separate settings key so this switch can't
+  // accidentally take on a listing whose fire path is different.
+  twitchDupeOfferId: "",
+  // Ordered list of farm-Twitch logins we may hand out, one per unit sold.
+  // Fresh-first — operator maintains order. `utils/twitchDupeCoord.js`
+  // dedupes and filters out any login already reserved by another active
+  // job before picking.
+  twitchDupePool: [],
+  // How many parallel ClaimDropRewards mutations the bot fires per drop.
+  // Matches the standalone bot's DEFAULT_FIRE_COUNT so we don't drift from
+  // what the operator hand-tests with.
+  twitchDupeFireCount: 2600,
+  // Telegram bot username buyers are deep-linked to (no leading @). Used to
+  // build the "t.me/<name>?start=<orderRef>" line the Eldorado chat message
+  // carries. Empty = the deep-link line is omitted and the fulfiller falls
+  // back to hand-off, so a bad deploy doesn't strand orders.
+  twitchDupeBotName: "",
+  // Owner's own Telegram chat_id for the silence-fallback DM. When a job
+  // sits at awaitingClaim past twitchDupeSilenceMinutes the fulfiller pages
+  // this chat with the orderRef + reserved user:pass so the owner can hand-
+  // deliver like today.
+  twitchDupeOwnerChatId: 0,
+  twitchDupeSilenceMinutes: 30,
 
   // --- PlayerAuctions (utils/marketplaces.js + utils/playerauctionsFulfiller.js) ---
   // Publishes farmed bundles as PlayerAuctions "Item" offers, one offer per
@@ -388,10 +431,25 @@ const ACCOUNT_LISTING_DEFAULTS = {
   lowStockWarnAt: 2, // Telegram warning when an offer drops to this
 };
 
+// Epic auto-claim (utils/epicAutoClaim.js). Ships OFF; when the operator
+// flips `enabled`, the Epic claimer will try the direct-API checkout for
+// every missing (account, freebie) pair before falling back to the current
+// Telegram tap-link. captchaKey is stored encrypted via secretBox; if it's
+// blank the auto path still handles claims Talon doesn't gate (which is
+// most of the time for warm accounts on quiet weeks).
+const EPIC_AUTO_CLAIM_DEFAULTS = {
+  enabled: false,
+  captchaProvider: "", // "" = auto-detect from key ("2captcha" or "capsolver")
+  captchaKey: "", // encrypted at rest via secretBox
+  perAccountCooldownH: 24,
+  dailyCap: 5,
+};
+
 const DEFAULTS = {
   require2fa: false,
   autoFarm: AUTO_FARM_DEFAULTS,
   accountListings: ACCOUNT_LISTING_DEFAULTS,
+  epicAutoClaim: EPIC_AUTO_CLAIM_DEFAULTS,
 };
 
 function loadSettings() {
@@ -827,6 +885,59 @@ function getAccountListingSettings() {
   };
 }
 
+// Epic auto-claim block accessors. captchaKey is encrypted at rest — the
+// getter returns the ciphertext (decrypted by callers with secretBox), the
+// setter re-encrypts any plaintext key the operator paste in.
+function getEpicAutoClaim() {
+  const s = loadSettings();
+  const cur = s.epicAutoClaim && typeof s.epicAutoClaim === "object"
+    ? s.epicAutoClaim
+    : {};
+  return { ...EPIC_AUTO_CLAIM_DEFAULTS, ...cur };
+}
+
+async function setEpicAutoClaim(patch, opts = {}) {
+  const secretBox = require("./secretBox");
+  const s = loadSettings();
+  const cur = s.epicAutoClaim && typeof s.epicAutoClaim === "object"
+    ? s.epicAutoClaim
+    : {};
+  const next = { ...EPIC_AUTO_CLAIM_DEFAULTS, ...cur, ...(patch || {}) };
+  if (Object.prototype.hasOwnProperty.call(patch || {}, "captchaKey")) {
+    const k = String(patch.captchaKey || "").trim();
+    next.captchaKey = k ? secretBox.encrypt(k) : "";
+  }
+  next.perAccountCooldownH = Math.max(
+    0,
+    Math.floor(Number(next.perAccountCooldownH) || 0),
+  );
+  next.dailyCap = Math.max(0, Math.floor(Number(next.dailyCap) || 0));
+  s.epicAutoClaim = next;
+  await saveSettings(s);
+  try {
+    const changed = {};
+    for (const k of Object.keys(patch || {})) {
+      const before = k === "captchaKey" ? (cur[k] ? "***" : "") : cur[k];
+      const after = k === "captchaKey" ? (next[k] ? "***" : "") : next[k];
+      if (JSON.stringify(before) !== JSON.stringify(after)) {
+        changed[k] = { from: before, to: after };
+      }
+    }
+    if (Object.keys(changed).length) {
+      require("./systemLog").logEvent({
+        category: "settings",
+        action: "epic_auto_claim_changed",
+        actor: opts.actor || "system",
+        subject: Object.keys(changed).join(","),
+        meta: changed,
+      });
+    }
+  } catch {
+    /* never block a settings write on its audit */
+  }
+  return s.epicAutoClaim;
+}
+
 module.exports = {
   loadSettings,
   saveSettings,
@@ -834,6 +945,8 @@ module.exports = {
   setRequire2fa,
   getAutoFarm,
   setAutoFarm,
+  getEpicAutoClaim,
+  setEpicAutoClaim,
   normGameName,
   isNoClaimGame,
   isReuseOnlyGame,
@@ -855,4 +968,5 @@ module.exports = {
   UNCLAIMED_MARKETS,
   UNCLAIMED_PRICING_DEFAULTS,
   ACCOUNT_LISTING_DEFAULTS,
+  EPIC_AUTO_CLAIM_DEFAULTS,
 };

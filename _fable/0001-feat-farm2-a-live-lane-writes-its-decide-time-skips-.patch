@@ -1,0 +1,814 @@
+From 2e0a95938cf1f81b55ddf1ac01f4366b48581471 Mon Sep 17 00:00:00 2001
+From: Hyperagent Developer Agent <oliiwjqc@polosmail.com>
+Date: Sat, 5 Sep 2026 01:02:56 +0900
+Subject: [PATCH] feat(farm2): a live lane writes its decide-time skips as the
+ rows legacy writes
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Closes FARM2-VERIFICATION §7.8. A live lane re-decides every campaign every
+cycle, but a campaign it decided NOT to farm left no AutoFarmTask row at all:
+the decision lived only in FarmJob, invisible to the Auto-farm tab, to replay
+and to anyone reading the shared collection. The World of Tanks incident set
+the rule for closing that — any row the lane writes must be one legacy already
+produces, because legacy's fleet sweeps read status and act on it.
+
+THE MAPPING IS THE IDENTITY ON `decision`. Since the six gates shipped the
+lane's skip vocabulary is legacy's, so every lane skip has a legacy equivalent
+and there is no lane skip without one. What differs per decision is the FIELD
+SET legacy's record() writes, which execute.legacySkipFields copies exactly:
+
+  skip_low_demand, skip_probe_budget   demandScore = EFFECTIVE demand
+                                        (alloc.demand — not the raw score),
+                                        hadResearch, internalSales
+  skip_host_offline, skip_ends_soon    demandScore raw, hadResearch,
+                                        internalSales
+  skip_already_covered                 + coverage
+  skip_no_accounts                     + coverage, plannedAccounts 0
+  skip_no_capacity                     + coverage, plannedAccounts = target
+  skip_reuse_only                      the claim-time END state: plannedAccounts
+                                        0, targetAccounts (the farm record's
+                                        wanted), coverage, executedAt, dryRun
+                                        false
+
+Common to all: status "skipped" (the one status no sweep acts on), reason,
+dryRun from af, rescanRequested false, decidedAt, decisionInputs. Nothing
+else — no targetAccounts where legacy writes none, no executedAt except where
+legacy stamps it.
+
+THE ONE EDGE: skip_reuse_only. Legacy never decides it; it records a farm row,
+the claim finds none of the game's own recycled accounts, and executeTask
+rewrites the row. The lane decides it up front (the six-gates pre-check) and
+writes that end state directly. Under af.dryRun legacy never reaches the
+claim — it records a planned farm — so no legacy row corresponds and the lane
+writes nothing there. That is the single "no equivalent" case; absence is its
+answer.
+
+THE GUARD. A skip row is written only when the (game, campaignId) row is
+absent or already skipped. Never over planned, active, completed, stopped or
+failed — those own bots, accounts and a history, and a $set of status
+"skipped" over one would orphan them. A live lane re-decides an ACTIVE
+campaign as skip_already_covered routinely, once its own accounts cover the
+demand, so this case is ordinary, not hypothetical. Deterministic pre-check;
+conditional upsert on status "skipped"; the unique (game, campaignId) index
+turns a concurrent non-skipped insert into a duplicate-key error that is
+treated as suppressed, never as a write. Suppressions are counted on the lane
+summary (skipsRecorded / skipsSuppressed).
+
+SHADOW LANES WRITE NOTHING. Legacy is still farming a shadow lane's game and
+writing its rows; an upsert would overwrite legacy's decision. recordSkip
+asserts on it as executeDecision does, and lane.js never calls it off the live
+path.
+
+Stated difference from legacy: legacy re-decides only RETRYABLE skips; the
+lane decides everything every cycle (its design, not this commit's), so a
+terminal skip row is rewritten each cycle here. Same shape, no reader — churn,
+not risk; the knob if it matters is "write only on change".
+
+Twelve tests: the mapping over the whole vocabulary; effective-vs-raw demand;
+per-decision fields against legacy's record() calls; the guard against every
+non-skipped status; rewrite of a skipped row on re-decision; the reuse-only
+edge in both modes; the shadow assertion; and five end-to-end runs through the
+real runLane — a sellability skip landing as a legacy row, skip_host_offline
+with no host, re-decision rewriting in place with a fresh snapshot, a shadow
+lane writing nothing, and a live lane NOT clobbering an ACTIVE task it
+re-decides as a skip.
+
+Suite 719/720 vs 707/708; the single failure is unchanged. autoFarmer.js and
+autoLister.js untouched.
+---
+ docs/FARM2-VERIFICATION.md   |  97 +++++++--
+ tests/farm2SkipRows.test.js  | 378 +++++++++++++++++++++++++++++++++++
+ utils/farm2/lane.js          |  26 +++
+ utils/farm2/steps/execute.js | 155 +++++++++++++-
+ 4 files changed, 643 insertions(+), 13 deletions(-)
+ create mode 100644 tests/farm2SkipRows.test.js
+
+diff --git a/docs/FARM2-VERIFICATION.md b/docs/FARM2-VERIFICATION.md
+index 51e9576..3c23367 100644
+--- a/docs/FARM2-VERIFICATION.md
++++ b/docs/FARM2-VERIFICATION.md
+@@ -431,17 +431,9 @@ formality.
+    times as often (once per cycle, shared across lanes, through the semaphore).
+    If that is too much for the Pi, the supervisor cadence or a TTL on the memo
+    is the knob — not skipping the sweep, which would change the coverage answer.
+-8. **A live lane's skips are not written to `AutoFarmTask`.** Legacy records
+-   every skip as a row with status `skipped`, which is what makes the RETRYABLE
+-   set re-decide and what the Auto-farm tab shows. `lane.js` only enqueues an
+-   execute job for `wouldFarm` verdicts, so a live lane's six new skips exist
+-   only as `FarmJob` rows. Harmless in shadow; a real gap in live mode, and
+-   pre-existing in shape (the two sellability skips had the same behaviour).
+-   Needs its own change in `lane.js`/`execute.js` — not made here, because it
+-   writes to a shared collection and deserves separate review. *One exception
+-   since commit 8 (§11): when a live reuse finds nothing it can sell,
+-   `executeReuse` now writes `skip_reuse_only` / `skip_no_accounts` itself,
+-   because the alternative — an empty ACTIVE row — is acted on by the sweeps.*
++8. ~~**A live lane's skips are not written to `AutoFarmTask`.**~~ **Closed by
++   commit 10 — see §12.** A live lane now writes each decide-time skip as the
++   row legacy writes for that decision; shadow lanes still write nothing.
+ 9. **`recycledPoolCount` depends on a query's shape** (§5.2). It has a test that
+    mirrors the `soldGames` term, but nothing ties it to `claimPoolAccounts`
+    mechanically.
+@@ -679,7 +671,8 @@ predicate `backfillActiveTasks` would have matched.
+ | `executeReuse`, `mine = 0` | **now**: `skip_reuse_only` / `skip_no_accounts`, skipped | yes |
+ | `executeReuse`, dry-run | `reuse_existing` planned, `plannedAccounts: 0` | yes — dry-run reuse |
+ | `executeReuse`, no bot restarted | `reuse_existing` failed | yes |
+-| lane skips (decide) | **nothing written** (§7.8) | an absence, not a shape |
++| lane skips (decide) | **was**: nothing written (§7.8) | an absence, not a shape |
++| lane skips (decide) | **now**: the legacy row for that skip (§12) | yes — by construction |
+ 
+ One difference remains by design: the lane writes `targetAccounts: mine.length`
+ on reuse rows where legacy leaves the field unwritten. For backfill the two
+@@ -711,3 +704,83 @@ two things is true, and only prod can say which:
+ 
+ Writing a second guard here would duplicate existing logic and hide whichever
+ of those it is. Declined on those grounds, not on risk.
++
++*Resolved on prod, 2026-09-05: neither. There was no leak. "Fresh" had been
++judged by `AvailableAccount.soldGames` being empty, but `soldGames` is stamped on
++sale, not on recycling; the gate matches `claimedNote`. Checked via
++`PoolUsageEvent`, all 36 accounts were "recycled after World of Tanks" —
++legitimate. The empty-ACTIVE-task bug was real regardless and the fix stands.*
++
++## 12. Lane skips are written as legacy rows (commit 10)
++
++§7.8, closed. A live lane re-decides every campaign every cycle; until this,
++a campaign it decided **not** to farm left no `AutoFarmTask` row at all — the
++decision lived only in `FarmJob`, invisible to the Auto-farm tab, to replay and
++to anyone reading the shared collection. §11's rule is how it is closed: **the
++lane writes only rows legacy already produces.**
++
++**The mapping is the identity on `decision`.** Since commit 2 the lane's skip
++vocabulary is legacy's, so every lane skip has a legacy equivalent — there is no
++lane skip without one. What differs per decision is the **field set** legacy's
++`record()` writes (§5.1), which `execute.legacySkipFields` copies exactly:
++
++| lane skip | legacy decision | fields, as legacy's `record()` writes them |
++|---|---|---|
++| `skip_low_demand` | same | `demandScore` = **effective** demand (`alloc.demand`, not the raw score), `hadResearch`, `internalSales` |
++| `skip_probe_budget` | same | as above |
++| `skip_host_offline` | same | `demandScore` raw, `hadResearch`, `internalSales` |
++| `skip_ends_soon` | same | as above |
++| `skip_already_covered` | same | as above + `coverage` |
++| `skip_no_accounts` | same | as above + `coverage`, `plannedAccounts: 0` |
++| `skip_no_capacity` | same | as above + `coverage`, `plannedAccounts` = the target it could not seat |
++| `skip_reuse_only` | same — **with one edge, below** | the claim-time end state: `plannedAccounts: 0`, `targetAccounts` (the farm record's `wanted`), `coverage`, `executedAt`, `dryRun: false` |
++
++Common to all: `status: "skipped"` (the one status no sweep acts on), `reason`,
++`dryRun: !!af.dryRun` (legacy's `base`), `rescanRequested: false`, `decidedAt`,
++and the `decisionInputs` snapshot like every other row the lane writes. Nothing
++else — no `targetAccounts` where legacy writes none, no `executedAt` except
++where legacy stamps it.
++
++**The one edge: `skip_reuse_only`.** Legacy never *decides* this. It records a
++farm/probe row, calls `executeTask`, and the claim finds none of the game's own
++recycled accounts, so `executeTask` rewrites the row as `skip_reuse_only` — the
++row it leaves therefore carries the farm record's `targetAccounts` and
++`coverage`, plus `executedAt` and `dryRun: false`. The lane decides it up front
++(the six-gates pre-check) and writes that **end state** directly; the transient
++`planned` row is not observable afterwards and is not reproduced. Under
++`af.dryRun`, legacy never reaches the claim — it records a planned farm and
++would only discover the emptiness at approval time — so **no legacy row
++corresponds** to a decide-time `skip_reuse_only` there, and the lane writes
++nothing. That is the single case of "no equivalent", and absence is its answer.
++
++**The guard.** A skip row is written only when the `(game, campaignId)` row is
++**absent or already `skipped`**. Never over `planned`, `active`, `completed`,
++`stopped` or `failed`: those own things — bots, accounts, a history — and a
++`$set` of `status: "skipped"` over one would orphan them (a lane re-decides an
++ACTIVE campaign as `skip_already_covered` routinely, once its own accounts cover
++the demand). The pre-check is deterministic; the write is a conditional upsert
++on `status: "skipped"`, and the unique `(game, campaignId)` index turns a
++concurrent non-skipped insert into a duplicate-key error that is treated as
++*suppressed*, never as a write. Suppressions are counted on the lane summary.
++
++**Shadow lanes write nothing.** The legacy engine is still farming a shadow
++lane's game and writing its `(game, campaignId)` rows; an upsert would overwrite
++legacy's decision with the lane's. `recordSkip` asserts on it, as
++`executeDecision` does, and `lane.js` never calls it off the live path — the
++same three-guard posture as spending.
++
++**What is different from legacy, and stated as such.** Legacy re-decides only
++RETRYABLE skips, stranded rows and rescans; terminal skips (`skip_low_demand`,
++`skip_ends_soon`) are written once and never revisited. The lane decides every
++campaign every cycle — that is its design, not this commit's — so a terminal
++skip row *is* rewritten each cycle here (`decidedAt` moves; the snapshot is
++refreshed). The row shape is identical either way and no sweep reads skipped
++rows, so this is churn, not risk: one upsert per skipped campaign per cycle. If
++that matters on prod, the knob is "write only when the decision or reason
++changed", not a different shape.
++
++**What to check on prod.** After deploy, every live lane's skipped campaigns
++should appear in the Auto-farm tab with the same decision the `FarmJob` row
++shows, and `replay` should score them from their snapshots
++(`inputsBasis: recorded`). `skipsSuppressed` on the lane summary should be
++non-zero only for campaigns with a live task — which is the guard working.
+diff --git a/tests/farm2SkipRows.test.js b/tests/farm2SkipRows.test.js
+new file mode 100644
+index 0000000..3f61f99
+--- /dev/null
++++ b/tests/farm2SkipRows.test.js
+@@ -0,0 +1,378 @@
++// A live lane's decide-time skips are written to AutoFarmTask as the rows
++// legacy writes (FARM2-VERIFICATION §7.8, closed; §12).
++//
++// Until this, a campaign a live lane decided NOT to farm left no AutoFarmTask
++// row: the decision lived only in FarmJob. The World of Tanks incident (§11)
++// set the rule for closing that — any row the lane writes must be one legacy
++// already produces, because legacy's sweeps read status and act on it. These
++// tests pin the mapping (identity on decision, legacy's field set per
++// decision), the one edge (skip_reuse_only, produced by legacy at claim time),
++// the guard (never over a row that owns something), and the shadow guarantee.
++const test = require("node:test");
++const assert = require("node:assert/strict");
++const mongoose = require("mongoose");
++const { MongoMemoryServer } = require("mongodb-memory-server");
++
++const AutoFarmTask = require("../models/AutoFarmTask");
++const FarmJob = require("../models/FarmJob");
++const FarmLane = require("../models/FarmLane");
++const TwitchCampaign = require("../models/TwitchCampaign");
++const MarketResearch = require("../models/MarketResearch");
++const laneMod = require("../utils/farm2/lane");
++const executeStep = require("../utils/farm2/steps/execute");
++const classes = require("../utils/farm2/decisionClasses");
++const settings = require("../utils/settings");
++
++let mem;
++
++test.before(async () => {
++  mem = await MongoMemoryServer.create();
++  await mongoose.connect(mem.getUri("farm2skiprows"));
++  await FarmJob.init();
++  await AutoFarmTask.init(); // the unique (game, campaignId) index is the guard's backstop
++});
++
++test.after(async () => {
++  await mongoose.disconnect();
++  if (mem) await mem.stop();
++});
++
++const hoursFromNow = (h) => new Date(Date.now() + h * 3600000);
++
++function af(overrides = {}) {
++  return {
++    ...settings.getAutoFarm(),
++    probeColdStart: false,
++    dryRun: false,
++    minHoursLeft: 12,
++    maxPerGame: 30,
++    platiCategoryId: "",
++    ...overrides,
++  };
++}
++
++const snapshot = () => ({
++  version: 1,
++  at: new Date(),
++  research: { demandScore: 2, sellers: 30, scannedAt: new Date() },
++  sales: { count: 0, revenue: 0, avgPrice: 0 },
++  af: { maxPerGame: 30 },
++  probeAllowed: true,
++  probeBudgetBlocked: false,
++  marketStockFloor: 6,
++});
++
++// A verdict in the shape decide.js produces for each skip.
++function skipVerdict(game, campaignId, decision, extra = {}) {
++  return {
++    game,
++    campaignId,
++    campaignName: "Weekly",
++    campaignEndAt: hoursFromNow(48),
++    decision,
++    wouldFarm: false,
++    plannedAccounts: 0,
++    targetAccounts: 0,
++    demandScore: 90,
++    effectiveDemand: 90,
++    hadResearch: true,
++    internalSales: 3,
++    reason: `reason for ${decision}`,
++    decisionInputs: snapshot(),
++    ...extra,
++  };
++}
++
++const coverage = { manualFarmers: 0, archiveHolders: 31, stashHolders: 2, otherHolders: 5 };
++
++async function liveLane(game) {
++  const gameKey = settings.normGameName(game);
++  await FarmLane.deleteMany({ gameKey });
++  return (await FarmLane.create({ game, gameKey, mode: "live", state: "idle" })).toObject();
++}
++
++async function campaign(game, campaignId) {
++  await TwitchCampaign.deleteMany({ campaignId });
++  await TwitchCampaign.create({
++    campaignId,
++    name: "Weekly",
++    game,
++    status: "ACTIVE",
++    active: true,
++    endAt: hoursFromNow(48),
++  });
++}
++
++async function research(game, demandScore) {
++  await MarketResearch.deleteMany({ game });
++  // Fresh, so a LIVE lane's freshResearchForGame does not try a market re-scan.
++  await MarketResearch.create({ game, demandScore, sellers: 20, scannedAt: new Date() });
++}
++
++/* -------------------------------- the mapping ----------------------------- */
++
++test("the mapping is the identity on decision, and every lane skip has a legacy equivalent", () => {
++  const skips = classes.LEGACY_DECISIONS.filter((d) => classes.actionClass(d) === "skip");
++  assert.equal(skips.length, 8);
++  for (const d of skips) {
++    assert.ok(classes.LANE_DECISIONS.includes(d), `${d} is a lane decision`);
++    const f = executeStep.legacySkipFields(skipVerdict("G", "c", d, { coverage }), af());
++    assert.equal(f.decision, d, "identity on decision");
++    assert.equal(f.status, "skipped", "the one status no sweep acts on");
++    assert.equal(f.rescanRequested, false);
++    assert.equal(f.decisionInputs.version, 1, "carries the snapshot like every lane row");
++  }
++  assert.throws(() => executeStep.legacySkipFields(skipVerdict("G", "c", "farm"), af()), /not a skip/);
++});
++
++test("the sellability skips record EFFECTIVE demand; every other skip records the raw score", () => {
++  // Legacy: `demandScore: alloc.demand` on skip_low_demand / skip_probe_budget,
++  // `demandScore` (raw) everywhere else (§5.1). An unscanned game that skips
++  // has raw null and effective 0 — the two must not be confused.
++  const noResearch = { demandScore: null, effectiveDemand: 0, hadResearch: false };
++  assert.equal(executeStep.legacySkipFields(skipVerdict("G", "c", "skip_low_demand", noResearch), af()).demandScore, 0);
++  assert.equal(executeStep.legacySkipFields(skipVerdict("G", "c", "skip_probe_budget", noResearch), af()).demandScore, 0);
++  assert.equal(executeStep.legacySkipFields(skipVerdict("G", "c", "skip_ends_soon", { demandScore: 90, effectiveDemand: 97 }), af()).demandScore, 90);
++  assert.equal(executeStep.legacySkipFields(skipVerdict("G", "c", "skip_host_offline", { demandScore: 90, effectiveDemand: 97 }), af()).demandScore, 90);
++});
++
++test("per-decision fields match the record() call legacy makes", () => {
++  const a = af({ dryRun: true });
++  const low = executeStep.legacySkipFields(skipVerdict("G", "c", "skip_low_demand"), a);
++  assert.equal("coverage" in low, false, "sellability skip writes no coverage");
++  assert.equal("plannedAccounts" in low, false);
++  assert.equal("targetAccounts" in low, false);
++  assert.equal(low.dryRun, true, "base carries af.dryRun");
++
++  const offline = executeStep.legacySkipFields(skipVerdict("G", "c", "skip_host_offline"), a);
++  assert.equal("coverage" in offline, false);
++  assert.equal(offline.internalSales, 3, "written since commit 7");
++
++  const covered = executeStep.legacySkipFields(skipVerdict("G", "c", "skip_already_covered", { coverage, targetAccounts: 30 }), a);
++  assert.deepEqual(covered.coverage, coverage);
++  assert.equal("plannedAccounts" in covered, false);
++  assert.equal("targetAccounts" in covered, false, "legacy does not write targetAccounts on this skip");
++
++  const noAcc = executeStep.legacySkipFields(skipVerdict("G", "c", "skip_no_accounts", { coverage, targetAccounts: 30 }), a);
++  assert.deepEqual(noAcc.coverage, coverage);
++  assert.equal(noAcc.plannedAccounts, 0);
++  assert.equal("targetAccounts" in noAcc, false);
++
++  const noCap = executeStep.legacySkipFields(skipVerdict("G", "c", "skip_no_capacity", { coverage, plannedAccounts: 12, targetAccounts: 30 }), a);
++  assert.deepEqual(noCap.coverage, coverage);
++  assert.equal(noCap.plannedAccounts, 12, "the target it could not seat, as legacy records");
++  assert.equal("targetAccounts" in noCap, false);
++
++  const reuseOnly = executeStep.legacySkipFields(skipVerdict("G", "c", "skip_reuse_only", { coverage, targetAccounts: 30 }), a);
++  assert.deepEqual(reuseOnly.coverage, coverage);
++  assert.equal(reuseOnly.plannedAccounts, 0);
++  assert.equal(reuseOnly.targetAccounts, 30, "the farm record's `wanted`, which the claim-time rewrite keeps");
++  assert.ok(reuseOnly.executedAt instanceof Date, "the claim-time rewrite stamps executedAt");
++  assert.equal(reuseOnly.dryRun, false, "the claim-time rewrite sets dryRun false");
++});
++
++/* --------------------------------- the guard ------------------------------ */
++
++const lane = { game: "Guard Game", gameKey: "guard game", mode: "live" };
++
++test("a skip never overwrites a row that owns something", async () => {
++  const game = "Guard Game";
++  await AutoFarmTask.deleteMany({ game });
++  await AutoFarmTask.create({
++    game,
++    campaignId: "g1",
++    decision: "farm",
++    status: "active",
++    assignedAccounts: ["a1", "a2"],
++    bots: [{ host: "pi", file: "config_1.json", container: "bot1" }],
++    executedAt: new Date(),
++  });
++  const r = await executeStep.recordSkip({ verdict: skipVerdict(game, "g1", "skip_low_demand"), lane, af: af(), shadow: false });
++  assert.equal(r.written, false);
++  assert.match(r.suppressed, /row is active/);
++  const row = await AutoFarmTask.findOne({ game, campaignId: "g1" }).lean();
++  assert.equal(row.status, "active", "untouched");
++  assert.equal(row.decision, "farm");
++  assert.deepEqual(row.assignedAccounts, ["a1", "a2"]);
++
++  for (const status of ["planned", "completed", "stopped", "failed"]) {
++    await AutoFarmTask.deleteMany({ game, campaignId: "g-" + status });
++    await AutoFarmTask.create({ game, campaignId: "g-" + status, decision: "farm", status });
++    const rr = await executeStep.recordSkip({ verdict: skipVerdict(game, "g-" + status, "skip_low_demand"), lane, af: af(), shadow: false });
++    assert.equal(rr.written, false, `${status} is never overwritten`);
++    assert.equal((await AutoFarmTask.findOne({ game, campaignId: "g-" + status }).lean()).status, status);
++  }
++});
++
++test("an absent row is written; a skipped row is rewritten on re-decision, with a fresh snapshot", async () => {
++  const game = "Guard Game";
++  await AutoFarmTask.deleteMany({ game, campaignId: "g2" });
++  const first = await executeStep.recordSkip({
++    verdict: skipVerdict(game, "g2", "skip_no_capacity", { coverage, plannedAccounts: 12 }),
++    lane,
++    af: af(),
++    shadow: false,
++  });
++  assert.equal(first.written, true);
++  assert.equal(first.previous, null);
++  const before = await AutoFarmTask.findOne({ game, campaignId: "g2" }).lean();
++  assert.equal(before.decision, "skip_no_capacity");
++  assert.equal(before.plannedAccounts, 12);
++
++  await new Promise((r) => setTimeout(r, 5));
++  const second = await executeStep.recordSkip({ verdict: skipVerdict(game, "g2", "skip_low_demand"), lane, af: af(), shadow: false });
++  assert.equal(second.written, true);
++  assert.equal(second.previous, "skip_no_capacity", "the transition is reported");
++  const after = await AutoFarmTask.findOne({ game, campaignId: "g2" }).lean();
++  assert.equal(after.decision, "skip_low_demand");
++  assert.equal(after.status, "skipped");
++  assert.ok(after.decidedAt > before.decidedAt, "decidedAt follows the re-decision, as legacy's does for retryable skips");
++  assert.equal(await AutoFarmTask.countDocuments({ game, campaignId: "g2" }), 1, "still one row");
++});
++
++test("skip_reuse_only: nothing under af.dryRun, the claim-time end state when live", async () => {
++  const game = "Guard Game";
++  await AutoFarmTask.deleteMany({ game, campaignId: "g3" });
++  const v = skipVerdict(game, "g3", "skip_reuse_only", { coverage, targetAccounts: 30 });
++  const dry = await executeStep.recordSkip({ verdict: v, lane, af: af({ dryRun: true }), shadow: false });
++  assert.equal(dry.written, false);
++  assert.match(dry.suppressed, /no legacy row corresponds/);
++  assert.equal(await AutoFarmTask.countDocuments({ game, campaignId: "g3" }), 0);
++
++  const live = await executeStep.recordSkip({ verdict: v, lane, af: af({ dryRun: false }), shadow: false });
++  assert.equal(live.written, true);
++  const row = await AutoFarmTask.findOne({ game, campaignId: "g3" }).lean();
++  assert.equal(row.decision, "skip_reuse_only");
++  assert.equal(row.status, "skipped");
++  assert.equal(row.plannedAccounts, 0);
++  assert.equal(row.targetAccounts, 30);
++  assert.equal(row.dryRun, false);
++  assert.ok(row.executedAt);
++  assert.deepEqual(row.coverage, coverage);
++});
++
++test("recordSkip refuses a shadow lane, and a non-live lane", async () => {
++  await assert.rejects(
++    () => executeStep.recordSkip({ verdict: skipVerdict("G", "c", "skip_low_demand"), lane, af: af(), shadow: true }),
++    /shadow lane/,
++  );
++  await assert.rejects(
++    () => executeStep.recordSkip({ verdict: skipVerdict("G", "c", "skip_low_demand"), lane: { ...lane, mode: "shadow" }, af: af(), shadow: false }),
++    /only a live lane/,
++  );
++});
++
++/* ------------------------------- end to end ------------------------------- */
++
++test("END TO END: a live lane's sellability skip lands in AutoFarmTask exactly as legacy would write it", async () => {
++  const game = "E2E Low Demand Game";
++  await AutoFarmTask.deleteMany({ game });
++  await FarmJob.deleteMany({ lane: game });
++  await research(game, 2); // below the floor with 20 sellers: a plain skip_low_demand
++  await campaign(game, "e2e-low");
++  const l = await liveLane(game);
++
++  const summary = await laneMod.runLane(l, { cycle: null, af: af(), hostCache: new Map() });
++  assert.deepEqual(summary.errors, [], summary.errors.join("; "));
++  assert.equal(summary.decisions.length, 1);
++  assert.equal(summary.decisions[0].decision, "skip_low_demand");
++  assert.equal(summary.skipsRecorded, 1);
++  assert.equal(summary.skipsSuppressed, 0);
++
++  const row = await AutoFarmTask.findOne({ game, campaignId: "e2e-low" }).lean();
++  assert.ok(row, "the skip is now a row");
++  assert.equal(row.decision, "skip_low_demand");
++  assert.equal(row.status, "skipped");
++  assert.equal(row.demandScore, 2, "effective demand — equals the raw score with no own sales");
++  assert.equal(row.hadResearch, true);
++  assert.equal(row.internalSales, 0);
++  assert.equal(row.dryRun, false);
++  assert.equal(row.rescanRequested, false);
++  assert.equal(row.decisionInputs.version, 1, "replay can read it without reconstructing");
++  assert.equal(row.decisionInputs.research.demandScore, 2);
++  assert.equal("coverage" in row === false || row.coverage == null || row.coverage.archiveHolders === 0, true);
++
++  // The FarmJob record is unchanged — the row is in addition to it, not instead.
++  assert.equal(await FarmJob.countDocuments({ lane: game, kind: "decide", status: "done" }), 1);
++});
++
++test("END TO END: with no farm host configured, a live lane writes skip_host_offline — as legacy does", async () => {
++  const game = "E2E Offline Game";
++  await AutoFarmTask.deleteMany({ game });
++  await research(game, 90); // passes sellability, stops at the host gate
++  await campaign(game, "e2e-off");
++  const l = await liveLane(game);
++
++  const summary = await laneMod.runLane(l, { cycle: null, af: af({ hostId: "does-not-exist-xyz" }), hostCache: new Map() });
++  assert.deepEqual(summary.errors, []);
++  assert.equal(summary.decisions[0].decision, "skip_host_offline");
++  assert.equal(summary.skipsRecorded, 1);
++  const row = await AutoFarmTask.findOne({ game, campaignId: "e2e-off" }).lean();
++  assert.equal(row.decision, "skip_host_offline");
++  assert.equal(row.status, "skipped");
++  assert.equal(row.demandScore, 90, "raw score on every non-sellability skip");
++  assert.equal(row.internalSales, 0, "written since commit 7");
++  assert.equal(row.decisionInputs.version, 1);
++});
++
++test("END TO END: the next cycle re-decides and rewrites the row — the retry state now lives where legacy's does", async () => {
++  const game = "E2E Retry Game";
++  await AutoFarmTask.deleteMany({ game });
++  await research(game, 90);
++  await campaign(game, "e2e-retry");
++  const l = await liveLane(game);
++  const a = af({ hostId: "does-not-exist-xyz" });
++
++  await laneMod.runLane(l, { cycle: null, af: a, hostCache: new Map() });
++  const first = await AutoFarmTask.findOne({ game, campaignId: "e2e-retry" }).lean();
++  await new Promise((r) => setTimeout(r, 5));
++  const again = await FarmLane.findById(l._id).lean();
++  const s2 = await laneMod.runLane(again, { cycle: null, af: a, hostCache: new Map() });
++  assert.equal(s2.skipsRecorded, 1);
++  const second = await AutoFarmTask.findOne({ game, campaignId: "e2e-retry" }).lean();
++  assert.equal(await AutoFarmTask.countDocuments({ game, campaignId: "e2e-retry" }), 1, "one row, rewritten");
++  assert.ok(second.decidedAt > first.decidedAt);
++  assert.ok(second.decisionInputs.at > first.decisionInputs.at, "a fresh snapshot each cycle");
++});
++
++test("END TO END: a SHADOW lane writes nothing — the legacy engine owns its rows", async () => {
++  const game = "E2E Shadow Game";
++  await AutoFarmTask.deleteMany({ game });
++  await research(game, 2);
++  await campaign(game, "e2e-shadow");
++  const gameKey = settings.normGameName(game);
++  await FarmLane.deleteMany({ gameKey });
++  const l = (await FarmLane.create({ game, gameKey, mode: "shadow", state: "idle" })).toObject();
++
++  const summary = await laneMod.runLane(l, { cycle: null, af: af(), hostCache: new Map() });
++  assert.equal(summary.decisions[0].decision, "skip_low_demand");
++  assert.equal(summary.skipsRecorded, 0);
++  assert.equal(await AutoFarmTask.countDocuments({ game }), 0, "no row: shadow changes nothing");
++});
++
++test("END TO END: a live lane does not clobber an ACTIVE task it re-decides as a skip", async () => {
++  // After farming, a game's own accounts cover its demand and the lane decides
++  // skip_already_covered for a campaign whose task is ACTIVE. That skip must be
++  // suppressed, not written over the running task.
++  const game = "E2E Active Game";
++  await AutoFarmTask.deleteMany({ game });
++  await research(game, 90);
++  await campaign(game, "e2e-active");
++  await AutoFarmTask.create({
++    game,
++    campaignId: "e2e-active",
++    decision: "farm",
++    status: "active",
++    assignedAccounts: ["x1"],
++    bots: [{ host: "pi", file: "config_2.json", container: "bot2" }],
++    executedAt: new Date(),
++  });
++  const l = await liveLane(game);
++  const summary = await laneMod.runLane(l, { cycle: null, af: af({ hostId: "does-not-exist-xyz" }), hostCache: new Map() });
++  assert.equal(summary.decisions[0].decision, "skip_host_offline");
++  assert.equal(summary.skipsRecorded, 0);
++  assert.equal(summary.skipsSuppressed, 1);
++  const row = await AutoFarmTask.findOne({ game, campaignId: "e2e-active" }).lean();
++  assert.equal(row.status, "active", "the running task is untouched");
++  assert.deepEqual(row.assignedAccounts, ["x1"]);
++});
+diff --git a/utils/farm2/lane.js b/utils/farm2/lane.js
+index 7958568..37b45e9 100644
+--- a/utils/farm2/lane.js
++++ b/utils/farm2/lane.js
+@@ -11,6 +11,7 @@
+ 
+ const settings = require("../settings");
+ const jobs = require("./jobs");
++const classes = require("./decisionClasses");
+ const decideStep = require("./steps/decide");
+ const verifyStep = require("./steps/verify");
+ const executeStep = require("./steps/execute");
+@@ -124,6 +125,10 @@ async function runLane(lane, { cycle, af, hostCache }) {
+     decisions: [],
+     executed: [],
+     alreadyExecuted: 0,
++    // Decide-time skips written to AutoFarmTask as legacy rows (live lanes
++    // only), and those suppressed because the row already owns something.
++    skipsRecorded: 0,
++    skipsSuppressed: 0,
+     listed: [],
+     jobsDrained: 0,
+     monitor: null,
+@@ -177,6 +182,27 @@ async function runLane(lane, { cycle, af, hostCache }) {
+         await jobs.finish(claimed, { verdict, diff });
+         summary.decisions.push({ ...verdict, diff });
+ 
++        // LIVE lanes write their decide-time skips to AutoFarmTask as the rows
++        // legacy writes (steps/execute.recordSkip), so the Auto-farm tab, replay
++        // and the retry picture are the same whichever engine owns a game.
++        // Shadow lanes write nothing: the legacy engine is still farming their
++        // game and owns its (game, campaignId) rows. A failure to record is
++        // noted on the lane and never fails the decision itself.
++        if (
++          !shadow &&
++          lane.mode === "live" &&
++          !verdict.wouldFarm &&
++          classes.actionClass(verdict.decision) === "skip"
++        ) {
++          try {
++            const rec = await executeStep.recordSkip({ verdict, lane, af, shadow: false });
++            if (rec.written) summary.skipsRecorded += 1;
++            else summary.skipsSuppressed += 1;
++          } catch (e) {
++            summary.errors.push(`${c.campaignId}: record skip: ${e.message}`);
++          }
++        }
++
+         if (verdict.wouldFarm && !shadow) {
+           // LIVE mode only: spend the granted budget and queue execution.
+           // Shadow lanes stop here by contract — nothing below this line may
+diff --git a/utils/farm2/steps/execute.js b/utils/farm2/steps/execute.js
+index 27dd78a..a980a58 100644
+--- a/utils/farm2/steps/execute.js
++++ b/utils/farm2/steps/execute.js
+@@ -71,6 +71,159 @@ async function upsertTask(verdict, { dryRun = false } = {}) {
+   );
+ }
+ 
++// ---------------------------------------------------------------------------
++// Decide-time skips, written as the rows legacy writes.
++//
++// A live lane re-decides every campaign every cycle. Until this existed, a
++// campaign it decided NOT to farm left no AutoFarmTask row at all: the decision
++// lived only in FarmJob, so the Auto-farm tab showed nothing, replay had
++// nothing to read, and the lane's retry state was invisible outside its own
++// queue (FARM2-VERIFICATION §7.8). The World of Tanks incident (§11) fixed the
++// rule for closing that: any row the lane writes must be a row legacy already
++// produces, because legacy's fleet sweeps read status and act on it.
++//
++// So the mapping is the IDENTITY on `decision` — since the six gates shipped,
++// the lane's skip vocabulary is legacy's — and per-decision on the FIELDS,
++// copied from the record() calls in autoFarmer.processCampaign:
++//
++//   skip_low_demand / skip_probe_budget   demandScore = the EFFECTIVE demand
++//                                          (alloc.demand — not the raw score),
++//                                          hadResearch, internalSales
++//   skip_host_offline / skip_ends_soon    demandScore raw, hadResearch,
++//                                          internalSales
++//   skip_already_covered                  the above + coverage
++//   skip_no_accounts                      the above + coverage, plannedAccounts 0
++//   skip_no_capacity                      the above + coverage, plannedAccounts
++//                                          = the target it could not seat
++//   skip_reuse_only                       the one edge. Legacy produces this at
++//                                          CLAIM time by rewriting a farm/probe
++//                                          row, so the row it leaves also has
++//                                          that record's targetAccounts and
++//                                          coverage, plus executedAt and dryRun
++//                                          false. The lane decides it up front
++//                                          and writes the same END state. Under
++//                                          af.dryRun legacy never reaches the
++//                                          claim — it records a planned farm —
++//                                          so no legacy row corresponds, and the
++//                                          lane writes nothing there.
++//
++// Every skip row is status "skipped" — the one status no sweep acts on — and
++// carries the decisionInputs snapshot like every other row the lane writes.
++// ---------------------------------------------------------------------------
++
++const SKIP_WITH_COVERAGE = new Set([
++  "skip_already_covered",
++  "skip_no_accounts",
++  "skip_no_capacity",
++  "skip_reuse_only",
++]);
++
++function legacySkipFields(verdict, af) {
++  const classes = require("../decisionClasses");
++  const d = verdict.decision;
++  if (classes.actionClass(d) !== "skip") {
++    throw new Error(`legacySkipFields: "${d}" is not a skip decision`);
++  }
++  const fields = {
++    game: verdict.game,
++    campaignId: verdict.campaignId,
++    campaignName: verdict.campaignName || "",
++    campaignEndAt: verdict.campaignEndAt || null,
++    decision: d,
++    status: "skipped",
++    reason: verdict.reason || "",
++    // record() writes the BLENDED effective demand on the sellability skip and
++    // the raw market score everywhere else (FARM2-VERIFICATION §5.1).
++    demandScore: classes.recordsEffectiveDemand(d)
++      ? (verdict.effectiveDemand ?? null)
++      : (verdict.demandScore ?? null),
++    hadResearch: !!verdict.hadResearch,
++    internalSales: verdict.internalSales || 0,
++    dryRun: !!(af && af.dryRun),
++    rescanRequested: false,
++    decidedAt: new Date(),
++    ...(verdict.decisionInputs ? { decisionInputs: verdict.decisionInputs } : {}),
++  };
++  if (SKIP_WITH_COVERAGE.has(d) && verdict.coverage) fields.coverage = verdict.coverage;
++  if (d === "skip_no_accounts") fields.plannedAccounts = 0;
++  if (d === "skip_no_capacity") fields.plannedAccounts = Number(verdict.plannedAccounts) || 0;
++  if (d === "skip_reuse_only") {
++    fields.plannedAccounts = 0;
++    fields.targetAccounts = Number(verdict.targetAccounts) || 0;
++    fields.dryRun = false;
++    fields.executedAt = new Date();
++  }
++  return fields;
++}
++
++// Write a live lane's decide-time skip as the legacy row. Returns
++// { written: true, previous } or { written: false, suppressed: <why> } —
++// suppression is a normal outcome, never an error.
++async function recordSkip({ verdict, lane, af, shadow }) {
++  // The same two guards as executeDecision. A shadow lane changes nothing —
++  // and the legacy engine is still farming a shadow lane's game and writing
++  // this very (game, campaignId) row; an upsert here would overwrite legacy's
++  // own decision with the lane's.
++  if (shadow) {
++    throw new Error(
++      "recordSkip reached from a shadow lane — refusing to write; this is a lane-runner bug",
++    );
++  }
++  if (!lane || lane.mode !== "live") {
++    throw new Error(
++      `recordSkip reached for lane "${lane && lane.game}" in mode "${lane && lane.mode}" — only a live lane writes rows`,
++    );
++  }
++
++  const AutoFarmTask = require("../../../models/AutoFarmTask");
++  const af2 = af || settings.getAutoFarm();
++
++  if (verdict.decision === "skip_reuse_only" && af2.dryRun) {
++    return {
++      written: false,
++      suppressed:
++        "dry-run: legacy would have recorded a planned farm and discovered reuse-only " +
++        "emptiness at approval time — no legacy row corresponds to a decide-time skip here",
++    };
++  }
++
++  // NEVER over a row that owns something. Legacy re-decides only rows that are
++  // absent, skipped-and-retryable, rescan-requested or stranded; a planned,
++  // active, completed, stopped or failed row is a task with a history and
++  // possibly bots and accounts, and a $set of status "skipped" over it would
++  // orphan those (the incident in §11 is what an unexpected row shape costs).
++  // The pre-check is deterministic; the conditional filter plus the unique
++  // (game, campaignId) index is the race backstop — a concurrent insert turns
++  // the upsert into a duplicate-key error, which is treated as suppressed.
++  const existing = await AutoFarmTask.findOne({
++    game: verdict.game,
++    campaignId: verdict.campaignId,
++  })
++    .select("status decision")
++    .lean();
++  if (existing && existing.status !== "skipped") {
++    return {
++      written: false,
++      suppressed: `row is ${existing.status} (${existing.decision}) — a skip never overwrites a task that owns something`,
++    };
++  }
++
++  const fields = legacySkipFields(verdict, af2);
++  try {
++    await AutoFarmTask.updateOne(
++      { game: verdict.game, campaignId: verdict.campaignId, status: "skipped" },
++      { $set: fields },
++      { upsert: true, setDefaultsOnInsert: true },
++    );
++  } catch (e) {
++    if (e && (e.code === 11000 || /duplicate key/i.test(e.message || ""))) {
++      return { written: false, suppressed: "a non-skipped row appeared concurrently — left alone" };
++    }
++    throw e;
++  }
++  return { written: true, decision: verdict.decision, previous: existing ? existing.decision : null };
++}
++
+ // Execute a REUSE decision: restart the game's existing warm bots rather than
+ // claiming fresh pool accounts.
+ //
+@@ -362,4 +515,4 @@ async function executeDecision({ verdict, lane, cycle, af, shadow }) {
+   };
+ }
+ 
+-module.exports = { executeDecision, executeReuse, upsertTask };
++module.exports = { executeDecision, executeReuse, upsertTask, recordSkip, legacySkipFields };
+-- 
+2.49.0
+

@@ -116,9 +116,22 @@ TalkJS chat**, which is a cross-origin iframe (`app.talkjs.com/app/49mLECOW/user
 
 What we have for it:
 - `GET /api/conversations/me/authorize` → `{ token }` — a TalkJS JWT for our user.
-- TalkJS appId `49mLECOW`; per-order `conversationId` comes from the order page's chat params.
+- TalkJS appId `49mLECOW`; each order row carries `talkJsConversationId` (and `sellerId`), and the
+  internal id we post to is `sha1(talkJsConversationId)[:20]`.
 - TalkJS client transport is a **websocket** plus `app.talkjs.com/api/v0` — undocumented for
   third-party server use. `cdn.talkjs.com/talk.js` exposes `sendMessage` over that transport.
+
+#### ⚠️ The conversation id is created LAZILY — corrected 2026-09-20
+
+`talkJsConversationId` is on the seller-orders rows (and on `GET /api/orders/me/{orderId}`), but it
+is **`null` on a freshly-paid order** and only fills in once the order chat is first opened — by the
+buyer, or by the operator opening the order page. The GUID is Eldorado's to mint (it links the buyer
+in as a TalkJS participant), so the server **cannot invent one**: with no GUID there is no internal
+id to post to. Two rent-farm orders paged as *"order has no talkJsConversationId"* on 2026-09-20 and
+then delivered themselves minutes later once the id appeared on the very same rows. So a missing id
+is **"not deliverable yet," not a failure**: `utils/eldoradoFarmService` now holds the order in a
+soft `waiting_chat` state and retries until the id shows up, paging only if the wait drags on. The
+readiness check is `utils/marketplaces.eldoradoOrderChatReady(order)`.
 
 Options, best first:
 1. **Hybrid (ship this first).** Server detects the paid order, reserves the leanest matching

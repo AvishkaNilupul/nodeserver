@@ -268,6 +268,48 @@ async function deliverFarmOrder(order, { dryRun } = {}) {
     return { orderId, farm: true, error: unreadable };
   }
 
+  // The buyer's order chat is created LAZILY by Eldorado — a freshly-paid order
+  // has no talkJsConversationId yet, and the credential can only be posted into a
+  // conversation that already exists. This is not a failure: hold the order in a
+  // soft "waiting_chat" state, provision NOTHING (so a scarce pristine pool
+  // account is never burned for an order we cannot hand over yet), and let a
+  // later tick deliver the instant the conversation appears. The two live orders
+  // that paged on 2026-09-20 resolved themselves exactly this way minutes later.
+  // The operator is paged only once the wait drags on: shouldAlert throttles
+  // waiting_chat like a failure, so the first page lands ~REALERT_EVERY attempts
+  // (≈10 min) in — by when they can nudge the buyer or open the order page (which
+  // itself starts the chat) instead of being woken for an order about to deliver.
+  if (!mp.eldoradoOrderChatReady(order)) {
+    // Set the state BEFORE asking shouldAlert: the throttle keys off it, and a
+    // fresh row is still "claimed" here, which would read as a first-time event
+    // and page on tick one — the opposite of the quiet hold we want.
+    row.state = "waiting_chat";
+    row.lastError =
+      "buyer's order chat is not open yet (Eldorado has not created the " +
+      "conversation) — holding to auto-deliver the moment it does";
+    const alert = farmAlert.shouldAlert(row);
+    await row.save();
+    if (alert) {
+      await farmAlert
+        .alertFarmFailure({
+          market: MARKET,
+          orderId,
+          offerTitle: row.offerTitle || parsed.title || "",
+          game: parsed.game,
+          days: parsed.days,
+          qty,
+          buyerUsername: row.buyerUsername || "",
+          reason:
+            "buyer has not opened the order chat, so no chat conversation exists " +
+            "to post the credential into. It will auto-deliver the moment they " +
+            "open it; to deliver now, open the order page (that starts the chat) " +
+            "or hand it over by hand.",
+        })
+        .catch(() => {});
+    }
+    return { orderId, farm: true, waiting: "chat-not-open" };
+  }
+
   try {
     // 1. Provision, unless a previous attempt already did.
     if (!row.provisionedAt) {
