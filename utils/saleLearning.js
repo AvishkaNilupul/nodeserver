@@ -45,6 +45,11 @@ async function recordListingSale({
   units = 1,
   at = new Date(),
   priceUsd = 0,
+  // Bulk packs (docs/bulk-packs/CONTRACT.md): `bulk` flags every unit so price
+  // anchors skip the discounted price; `logins` names the account behind each
+  // unit, so demand (deduped by login) counts N accounts, not one.
+  bulk = false,
+  logins = null,
 } = {}) {
   const n = Math.max(0, Math.floor(Number(units) || 0));
   if (!listing || !listing._id || !n) return 0;
@@ -78,11 +83,14 @@ async function recordListingSale({
               gameKey,
               itemKey: "",
               name: listing.title || "",
-              login: listing.accountLogin || "",
+              login:
+                (Array.isArray(logins) && logins[seq - start]) ||
+                (Array.isArray(logins) && logins.length ? "" : listing.accountLogin || ""),
               account: listing.accountId || null,
               source: "listing_sold",
               marketplace: listing.marketplace || "",
               priceUsd: Number(priceUsd) || Number(listing.price) || 0,
+              bulk: !!bulk,
               at,
             },
           },

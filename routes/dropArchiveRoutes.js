@@ -1004,7 +1004,12 @@ router.post(
       const idRe = new RegExp("(^|,\\s*)" + String(acc._id) + "(\\s*,|$)");
       const listings = await MarketplaceListing.find({
         status: "active",
-        accountId: idRe,
+        $or: [
+          { accountId: idRe },
+          // Bulk packs keep their accounts in units[] (docs/bulk-packs/CONTRACT.md);
+          // detachAccountFromListing hands those rows to the bulk system.
+          { bulkOfferId: { $ne: null }, "units.accountId": String(acc._id) },
+        ],
       }).lean();
       for (const row of listings) {
         if (!(await listingSellsGame(row, gameLabel))) continue;

@@ -988,6 +988,7 @@ test("BulkOffer defaults", async () => {
     "accountId",
     "at",
     "changedAt",
+    "keepReserved",
     "login",
     "orderId",
     "reason",
@@ -996,6 +997,7 @@ test("BulkOffer defaults", async () => {
   assert.equal(o.reserved[0].state, "on_offer");
   assert.equal(o.reserved[0].orderId, "");
   assert.equal(o.reserved[0].changedAt, null);
+  assert.equal(o.reserved[0].keepReserved, false);
   assert.ok(o.reserved[0].at instanceof Date);
   assert.equal(o.history[0]._id, undefined);
   assert.ok(o.history[0].at instanceof Date);

@@ -1173,11 +1173,24 @@ async function syncOnce() {
     try {
       const soldSet = await DropSet.findById(row.set).lean();
       if (soldSet) {
+        // A bulk pack (docs/bulk-packs/CONTRACT.md) is ONE listing holding N
+        // accounts: N units at the per-account price, one login each, flagged
+        // bulk so the discounted price never anchors single listings.
+        const packLogins = row.bulkOfferId
+          ? (row.units || []).map((u) => (u && u.login) || "").filter(Boolean)
+          : null;
+        const packSize = row.bulkOfferId
+          ? Math.max(1, (row.units || []).length)
+          : 1;
         await recordListingSale({
           listing: row,
           set: soldSet,
-          units: 1,
-          priceUsd: Number(row.price) || 0,
+          units: packSize,
+          priceUsd: row.bulkOfferId
+            ? Math.round(((Number(row.price) || 0) / packSize) * 100) / 100
+            : Number(row.price) || 0,
+          bulk: !!row.bulkOfferId,
+          logins: packLogins,
         });
       }
     } catch (e) {

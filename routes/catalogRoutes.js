@@ -545,6 +545,7 @@ async function profilePrices(profiles) {
           gameKey: { $in: games },
           source: "listing_sold",
           priceUsd: { $gt: 0 },
+          bulk: { $ne: true }, // bulk pack units never set a catalog price (docs/bulk-packs/CONTRACT.md)
         })
           .select("gameKey priceUsd")
           .sort({ at: -1 })
@@ -965,6 +966,7 @@ async function buildPublicCatalog() {
         gameKey: { $in: games },
         source: "listing_sold",
         priceUsd: { $gt: 0 },
+        bulk: { $ne: true }, // bulk pack units never set a catalog price (docs/bulk-packs/CONTRACT.md)
       })
         .select("gameKey priceUsd")
         .sort({ at: -1 })
@@ -2062,6 +2064,7 @@ router.post(
         gameKey: { $in: games },
         source: "listing_sold",
         priceUsd: { $gt: 0 },
+        bulk: { $ne: true }, // bulk pack units never set a catalog price (docs/bulk-packs/CONTRACT.md)
       })
         .select("gameKey priceUsd")
         .sort({ at: -1 })

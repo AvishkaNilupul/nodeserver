@@ -41,6 +41,7 @@ const REAL = {
   DropLog: () => require("../../models/DropLog"),
   DropSet: () => require("../../models/DropSet"),
   BotAccount: () => require("../../models/BotAccount"),
+  RenterAccount: () => require("../../models/RenterAccount"),
   telegram: () => require("../telegram"),
   systemLog: () => require("../systemLog"),
 };
@@ -395,9 +396,39 @@ async function unitHealth(accountIds) {
     const chunk = valid.slice(i, i + HEALTH_BATCH);
     const docs = await BotAccount.find(
       { _id: { $in: chunk } },
-      { login: 1, credPassword: 1, lastScanStatus: 1 },
+      { login: 1, credPassword: 1, lastScanStatus: 1, clientSecret: 1 },
     ).lean();
     for (const d of docs || []) byId.set(idString(d._id), d);
+  }
+  // Rented out (a RenterAccount holds the same token or login): the account
+  // farms for a renter now, so it must leave the pack — with its reservation
+  // KEPT (keepReserved), never handed back to other sellers mid-lease.
+  const rented = new Set();
+  const secrets = [];
+  const logins = [];
+  for (const acc of byId.values()) {
+    if (acc.clientSecret) secrets.push(String(acc.clientSecret));
+    if (acc.login) {
+      logins.push(String(acc.login));
+      logins.push(String(acc.login).toLowerCase());
+    }
+  }
+  if (secrets.length || logins.length) {
+    const hits = await dep("RenterAccount")
+      .find(
+        {
+          $or: [
+            ...(secrets.length ? [{ clientSecret: { $in: secrets } }] : []),
+            ...(logins.length ? [{ login: { $in: [...new Set(logins)] } }] : []),
+          ],
+        },
+        { clientSecret: 1, login: 1 },
+      )
+      .lean();
+    for (const h of hits || []) {
+      if (h.clientSecret) rented.add("s:" + String(h.clientSecret));
+      if (h.login) rented.add("l:" + String(h.login).toLowerCase());
+    }
   }
   const { decrypt } = dep("secretBox");
   for (const id of ids) {
@@ -406,6 +437,11 @@ async function unitHealth(accountIds) {
       out.set(id, { ok: false, reason: "account missing" });
     } else if (acc.lastScanStatus === "suspended") {
       out.set(id, { ok: false, reason: "suspended" });
+    } else if (
+      (acc.clientSecret && rented.has("s:" + String(acc.clientSecret))) ||
+      (acc.login && rented.has("l:" + String(acc.login).toLowerCase()))
+    ) {
+      out.set(id, { ok: false, reason: "rented out", keepReserved: true });
     } else if (!acc.credPassword || !decrypt(acc.credPassword)) {
       out.set(id, { ok: false, reason: "no password" });
     } else {

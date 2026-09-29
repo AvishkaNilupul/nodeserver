@@ -47,6 +47,10 @@ const reservedSchema = new mongoose.Schema(
     at: { type: Date, default: Date.now },
     changedAt: { type: Date, default: null },
     reason: { type: String, default: "" },
+    // The owner spent this account elsewhere (hand sale, renter): it leaves the
+    // pack but its reservation is NEVER handed back — releasing would put a
+    // spent account's drops back on sale. The safe direction is a kept hold.
+    keepReserved: { type: Boolean, default: false },
   },
   { _id: false },
 );

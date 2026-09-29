@@ -55,7 +55,8 @@ async function buildSnapshot() {
   const global = [];
 
   const signals = await SaleSignal.find(
-    { source: "listing_sold", priceUsd: { $gt: 0 }, at: { $gte: since } },
+    // bulk: discounted pack units never anchor single prices (docs/bulk-packs/CONTRACT.md)
+    { source: "listing_sold", priceUsd: { $gt: 0 }, at: { $gte: since }, bulk: { $ne: true } },
     { marketplace: 1, gameKey: 1, priceUsd: 1 },
   )
     .sort({ at: -1 })

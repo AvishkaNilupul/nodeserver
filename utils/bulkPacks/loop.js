@@ -625,6 +625,32 @@ async function setFor(offer, opts) {
 // A unit that is not FREE (per the caller's row, or the conditional $pull) is
 // never pulled; if it sold, the next reconcile records it as delivered.
 // Returns how many entries it moved (the contract's `void` callers ignore it).
+// Flag entries whose account the owner spent elsewhere, so their release
+// (phase 2) keeps the reservation instead of handing it back.
+async function markKeep(offer, accountIds) {
+  let n = 0;
+  for (const id of [...new Set((accountIds || []).map(str).filter(Boolean))]) {
+    const e = (offer.reserved || []).find(
+      (x) =>
+        x &&
+        str(x.accountId) === id &&
+        (x.state === "on_offer" || x.state === "retiring"),
+    );
+    if (!e || e.keepReserved) continue;
+    if (
+      await setEntryWhere(
+        offer,
+        { accountId: id, state: e.state },
+        { keepReserved: true },
+      )
+    ) {
+      e.keepReserved = true;
+      n++;
+    }
+  }
+  return n;
+}
+
 async function retireUnits(offer, row, accountIds, reason, { now } = {}) {
   const at = asDate(now);
   const ids = [...new Set((accountIds || []).map(str).filter(Boolean))];
@@ -689,6 +715,24 @@ async function retireUnits(offer, row, accountIds, reason, { now } = {}) {
 async function releaseEntry(offer, e, why, at, opts, out) {
   const id = str(e.accountId);
   const from = e.state;
+  // The owner spent this account elsewhere (hand sale, renter): it has left
+  // the pack, but its reservation is kept — never handed back (keepReserved).
+  if (e.keepReserved) {
+    const kept = await setEntry(offer, e, from, {
+      state: "released",
+      changedAt: at,
+      reason: ("kept reserved (not handed back): " + why).slice(0, 300),
+    });
+    if (kept) {
+      audit(
+        offer,
+        "release_kept",
+        "info",
+        (e.login || id) + " left the pack; its reservation is kept (" + why + ")",
+      );
+    }
+    return kept;
+  }
   // Only possible if the reservation was already handed back and re-taken by
   // another bulk offer — releasing now would free THAT offer's account.
   const held = await deps.BulkOffer.exists({
@@ -1191,6 +1235,10 @@ async function soldOut(offer, row, free, bad, ctx) {
 }
 
 async function retireBad(offer, row, bad, ctx) {
+  await markKeep(
+    offer,
+    bad.filter((b) => b && b.keepReserved).map((b) => b.accountId),
+  );
   const byReason = new Map();
   for (const b of bad) {
     const r = str(b.reason) || "failed its health check";
@@ -1222,7 +1270,13 @@ async function healthOf(ids, job) {
     const h =
       health && typeof health.get === "function" ? health.get(id) : null;
     // Unknown is not bad: only an explicit ok:false retires a unit.
-    if (h && h.ok === false) out.push({ accountId: id, reason: str(h.reason) });
+    if (h && h.ok === false) {
+      out.push({
+        accountId: id,
+        reason: str(h.reason),
+        keepReserved: !!h.keepReserved,
+      });
+    }
   }
   return out;
 }
@@ -1556,6 +1610,10 @@ async function maintainGameflip(offer, row, ctx, job) {
   );
   if (!r || !r.modifiedCount) return; // the row moved (sold?) — the next pass reads it
   const gone = { ...row, status: "delisted" };
+  await markKeep(
+    offer,
+    bad.filter((b) => b && b.keepReserved).map((b) => b.accountId),
+  );
   const n = await retireUnits(offer, gone, members, "pack withdrawn: " + why, {
     now: ctx.now,
   });
@@ -2003,6 +2061,100 @@ function status() {
   };
 }
 
+// Owner actions that spend an account elsewhere (drop-archive mark-sold,
+// renter reclaim) reach a bulk row through utils/listingDetach. A pack is sold
+// whole, so the account leaves the pack HERE — with its reservation kept
+// (keepReserved) — instead of the generic detach, which would republish a
+// different product. Returns listingDetach's shape: {detached, warnings}.
+async function takeAccountOut({ row, accountId, login, reason } = {}) {
+  const detached = [];
+  const warnings = [];
+  const label =
+    "bulk pack " + str(row && row.marketplace) + " " + str(row && (row.externalId || row._id));
+  const offerId = row && row.bulkOfferId;
+  if (!offerId) return { detached, warnings: ["not a bulk pack row"] };
+  const offer = await deps.BulkOffer.findById(offerId).lean();
+  if (!offer) {
+    return { detached, warnings: [label + ": its bulk offer is missing — check Bulk packs"] };
+  }
+  const want = str(accountId);
+  const wantLogin = str(login).toLowerCase();
+  const e = (offer.reserved || []).find(
+    (x) =>
+      x &&
+      ((want && str(x.accountId) === want) ||
+        (wantLogin && str(x.login).toLowerCase() === wantLogin)),
+  );
+  if (!e) return { detached, warnings: [label + ": the account is not in this pack"] };
+  if (e.state === "delivered") {
+    return {
+      detached,
+      warnings: [label + ": " + (e.login || e.accountId) + " was already delivered to a pack buyer"],
+    };
+  }
+  if (e.state === "released") return { detached, warnings };
+  const id = str(e.accountId);
+  const why = "owner: " + (str(reason) || "taken out");
+  await markKeep(offer, [id]);
+
+  if (offer.source !== "dropset") {
+    return { detached, warnings: [label + ": not an account pack — nothing to take out"] };
+  }
+  if (offer.market === "gameflip") {
+    // One listing is the whole pack: it comes down, the other accounts go back
+    // to stock on the next pass, this one stays reserved.
+    try {
+      await deps.markets.withdraw("gameflip", offer.externalId);
+    } catch (err) {
+      await raiseFlag(
+        offer,
+        "withdraw",
+        (e.login || id) + " was " + why + " but the Gameflip withdraw failed (" +
+          errText(err) + ") — the pack may have sold; check it by hand",
+      );
+      return {
+        detached,
+        warnings: [label + ": could not take the Gameflip pack down (" + errText(err) + ") — check Bulk packs"],
+      };
+    }
+    await deps.MarketplaceListing.updateOne(
+      { _id: row._id, bulkOfferId: offer._id, status: "active" },
+      { $set: { status: "delisted" } },
+    );
+    detached.push(label + " (whole pack withdrawn)");
+    audit(offer, "owner_took_account", "warn", (e.login || id) + " " + why + " — pack withdrawn");
+    notify(
+      "Bulk pack withdrawn: " + describe(offer) + "\n" + (e.login || id) + " was " + why +
+        ". The other accounts go back to stock; this one stays reserved.",
+    );
+    return { detached, warnings };
+  }
+  // Eldorado / G2G: the unit leaves the offer's shelf (phase 1 of I10); the
+  // loop requantifies and its phase 2 keeps the reservation.
+  const fresh = await deps.MarketplaceListing.findById(row._id).lean();
+  const n = await retireUnits(offer, fresh, [id], why);
+  if (!n) {
+    return {
+      detached,
+      warnings: [label + ": " + (e.login || id) + " is mid-delivery to a pack buyer — check Bulk packs"],
+    };
+  }
+  detached.push(label);
+  audit(offer, "owner_took_account", "info", (e.login || id) + " " + why);
+  try {
+    const after = await deps.MarketplaceListing.findById(row._id).lean();
+    const free = (after && after.units ? after.units : []).filter(isFree).length;
+    if (free >= (Number(offer.minQty) || 1)) {
+      await deps.markets.setQuantity(offer.market, offer.externalId, free);
+    } else {
+      await deps.markets.pause(offer.market, offer.externalId);
+    }
+  } catch (err) {
+    warnings.push(label + ": quantity not updated yet (" + errText(err) + ") — the next check fixes it");
+  }
+  return { detached, warnings };
+}
+
 module.exports = {
   RETIRE_GRACE_MS,
   READ_OFFER_EVERY_MS,
@@ -2012,6 +2164,8 @@ module.exports = {
   runOnce,
   retireUnits,
   reconcileUnits,
+  takeAccountOut,
+  markKeep,
   heartbeatLine,
   __setDeps,
   __resetDeps,

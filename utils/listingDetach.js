@@ -162,6 +162,29 @@ async function detachAccountFromListing(row, acc, opts = {}) {
       ],
     };
   }
+  // A bulk pack row (docs/bulk-packs/CONTRACT.md) is sold whole and owned by
+  // utils/bulkPacks: pulling one account out here, or republishing, would sell
+  // a different product. The bulk system takes the account out of the pack and
+  // KEEPS its reservation (the owner spent it elsewhere).
+  if (row && row.bulkOfferId) {
+    try {
+      return await require("./bulkPacks/loop").takeAccountOut({
+        row,
+        accountId: acc && acc._id ? String(acc._id) : "",
+        login: (acc && acc.login) || "",
+        reason: opts.reason || "removed",
+      });
+    } catch (e) {
+      return {
+        detached: [],
+        warnings: [
+          "bulk pack listing — could not take the account out automatically (" +
+            ((e && e.message) || e) +
+            "); withdraw the pack on the Bulk packs page",
+        ],
+      };
+    }
+  }
   const reason = opts.reason || "removed";
   const republish = opts.republish !== false;
   const detached = [];
