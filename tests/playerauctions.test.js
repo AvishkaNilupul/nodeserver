@@ -380,18 +380,24 @@ test("a dead session alerts once, and recovery alerts once", async () => {
   const realSend = tg.sendTelegram;
   const realTest = mp.playerauctionsTest;
   const realStatus = mp.keyStatus;
+  const realExpiry = mp.playerauctionsTokenExpiry;
   const sent = [];
   tg.sendTelegram = async (t) => sent.push(t);
   mp.keyStatus = () => ({ playerauctions: { configured: true } });
+  // Pin the (local, no-network) expiry read so the death-shape wording and the
+  // pre-expiry reminder are deterministic here — unknown expiry, so no reminder.
+  mp.playerauctionsTokenExpiry = () => ({ access: null, refresh: null });
   try {
     watch.state.alerted = false;
+    watch.state.warnedForExpiry = null;
     mp.playerauctionsTest = async () => ({ ok: false, detail: "session not accepted" });
     await watch.check();
     await watch.check();
     await watch.check();
     assert.strictEqual(sent.length, 1, "should alert once per outage, not per tick");
     assert.match(sent[0], /DEAD/);
-    assert.match(sent[0], /ONE session per account/);
+    // The alert always carries the one instruction that fixes the outage.
+    assert.match(sent[0], /copy the whole Cookie request header/i);
 
     mp.playerauctionsTest = async () => ({ ok: true, detail: "Connected" });
     await watch.check();
@@ -402,7 +408,9 @@ test("a dead session alerts once, and recovery alerts once", async () => {
     tg.sendTelegram = realSend;
     mp.playerauctionsTest = realTest;
     mp.keyStatus = realStatus;
+    mp.playerauctionsTokenExpiry = realExpiry;
     watch.state.alerted = false;
+    watch.state.warnedForExpiry = null;
   }
 });
 

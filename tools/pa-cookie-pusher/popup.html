@@ -1,0 +1,119 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <style>
+      body {
+        font: 13px/1.4 -apple-system, system-ui, sans-serif;
+        width: 320px;
+        margin: 0;
+        padding: 14px;
+        color: #e8e8ea;
+        background: #12161f;
+      }
+      h1 {
+        font-size: 14px;
+        margin: 0 0 10px;
+        color: #fff;
+      }
+      label {
+        display: block;
+        margin: 8px 0 3px;
+        color: #a8b0bd;
+        font-size: 12px;
+      }
+      input {
+        width: 100%;
+        box-sizing: border-box;
+        padding: 7px 8px;
+        border: 1px solid #2b3446;
+        border-radius: 7px;
+        background: #1b2130;
+        color: #e8e8ea;
+        font: inherit;
+      }
+      .row {
+        display: flex;
+        gap: 8px;
+        margin-top: 12px;
+      }
+      button {
+        flex: 1;
+        padding: 9px 10px;
+        border: 0;
+        border-radius: 8px;
+        background: #263044;
+        color: #fff;
+        font: inherit;
+        font-weight: 600;
+        cursor: pointer;
+      }
+      button.primary {
+        background-image: linear-gradient(90deg, #ff9900, #ff4d00);
+      }
+      button:disabled {
+        opacity: 0.5;
+        cursor: default;
+      }
+      .save {
+        margin-top: 10px;
+        background: transparent;
+        border: 1px solid #2b3446;
+        color: #a8b0bd;
+        font-weight: 500;
+      }
+      #status {
+        margin-top: 12px;
+        padding: 9px 10px;
+        border-radius: 8px;
+        font-size: 12px;
+        white-space: pre-wrap;
+        display: none;
+      }
+      #status.ok {
+        display: block;
+        background: #16351f;
+        color: #baf5c8;
+      }
+      #status.err {
+        display: block;
+        background: #3a1a1a;
+        color: #f6bcbc;
+      }
+      #status.info {
+        display: block;
+        background: #1b2130;
+        color: #a8b0bd;
+      }
+      details {
+        margin-top: 10px;
+      }
+      summary {
+        color: #7f8a9c;
+        cursor: pointer;
+        font-size: 12px;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>PlayerAuctions → redeemer</h1>
+
+    <button id="push" class="primary" disabled>Grab &amp; push to server</button>
+
+    <div id="status"></div>
+
+    <details>
+      <summary>Settings &amp; fallback</summary>
+      <label for="url">Server base URL</label>
+      <input id="url" type="text" placeholder="https://your-redeemer-host" />
+      <label for="secret">Install secret</label>
+      <input id="secret" type="password" placeholder="(from the server)" />
+      <button id="save" class="save">Save settings</button>
+      <div class="row">
+        <button id="copy">Copy cookie header</button>
+      </div>
+    </details>
+
+    <script src="popup.js"></script>
+  </body>
+</html>

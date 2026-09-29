@@ -1,0 +1,13 @@
+{
+  "manifest_version": 3,
+  "name": "PA Cookie Pusher",
+  "version": "1.0.0",
+  "description": "One click: grab the signed-in PlayerAuctions session cookie and install it on the redeemer server, so auto-delivery never goes dark.",
+  "permissions": ["cookies", "storage"],
+  "host_permissions": ["https://*.playerauctions.com/*"],
+  "optional_host_permissions": ["https://*/*", "http://*/*"],
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "PA Cookie Pusher"
+  }
+}
