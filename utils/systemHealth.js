@@ -69,6 +69,7 @@ const REAL_DEPS = {
   gameflipFarmService: () => require("./gameflipFarmService"),
   settings: () => require("./settings"),
   pricingEvidence: () => require("./pricingEvidence"),
+  backup: () => require("./backup"),
   // routes/renterAdminRoutes requires half the app, so like utils/operatorFarm
   // this is pulled in only at call time — a module-level require here would be
   // a load-order cycle.
@@ -1924,6 +1925,50 @@ const CHECKS = [
           "An account with no token cannot be dropped into a bot config, so it " +
           "is inert supply that every pool count still reports as stock. One " +
           "with a password can be re-authed; one without is dead weight.",
+      };
+    },
+  },
+
+  {
+    id: "backups.offsite",
+    title: "Daily backup saved and copied off-site",
+    group: "loops",
+    severity: "critical",
+    // Reads utils/backup's status.json + the backup dir only. Before this
+    // existed three of seven nightly runs died unnoticed and every copy lived
+    // on this one server.
+    async run(ctx) {
+      const s = await ctx.dep("backup").status();
+      const now = ctx.now().getTime();
+      const last = s.lastSuccess || null;
+      const ageH = last ? (now - Date.parse(last.at)) / 3600e3 : null;
+      const items = [];
+      if (ageH == null) items.push({ problem: "no successful backup recorded yet" });
+      else if (ageH > 26) items.push({ problem: "newest good backup is " + Math.round(ageH) + "h old" });
+      if (last && Array.isArray(last.problems) && last.problems.length) {
+        items.push({ problem: "newest backup was saved without: " + last.problems.join(", ") });
+      }
+      for (const h of s.offsiteHosts || []) {
+        const o = (s.offsite || {})[h];
+        if (!o) items.push({ host: h, problem: "no off-site copy recorded" });
+        else if (!o.ok) items.push({ host: h, problem: "last copy failed: " + (o.error || "?") });
+        else if (last && o.id !== last.id) items.push({ host: h, problem: "newest backup " + last.id + " not copied yet" });
+      }
+      const stale = ageH == null || ageH > 26;
+      return {
+        status: stale ? "fail" : items.length ? "warn" : "ok",
+        measured: ageH == null ? "none" : Math.round(ageH * 10) / 10 + "h",
+        threshold: "a good backup within 26h, verified on every off-site host",
+        summary: stale
+          ? "No good backup in the last 26 hours"
+          : items.length
+            ? items.length + " backup problem(s)"
+            : "Backed up " + Math.round(ageH) + "h ago, verified on " +
+              ((s.offsiteHosts || []).join(" + ") || "no off-site host"),
+        detail:
+          "utils/backup.js writes status.json after every run and every off-site " +
+          "copy (encrypted, checksum-verified). Retry a copy from /backup.html.",
+        items,
       };
     },
   },
