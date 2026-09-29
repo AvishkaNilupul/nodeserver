@@ -20,10 +20,21 @@ const LOG_TAIL = 3000;
 // Prints "<enabled>|<finished>|<pending>|<unknown>" over the config's ENABLED
 // logins. Per account, only lines since the container started count, and only
 // its last COMPLETE cycle (between its last two "Waiting 300 seconds" lines):
-//   finished = that cycle ended in "No broadcaster or campaign left" and no
-//              broadcast-wait / watching line appeared since the cycle began.
+//   finished = that cycle ended in "No broadcaster or campaign left", no
+//              broadcast-wait / watching line appeared since the cycle began,
+//              and the account logged no [ERR] since then either.
 //   pending  = a broadcast-wait or watching line since the cycle began.
 //   unknown  = anything else (no full cycle yet, errors, never logged).
+//
+// "Couldn't evaluate" is not "nothing left" (2026-09-29): when Twitch changed
+// a field's shape, every progress check threw, the bot logged "Error fetching
+// campaign progress", dropped the campaign and ended the cycle with "No
+// broadcaster or campaign left" — which read as finished and parked
+// twitchbotx53 with 11 unfarmed Plants on Fire accounts. So any [ERR] the
+// account logs after its last complete cycle began makes it unknown. Claim
+// errors are the exception: they happen before evaluation, say nothing about
+// what is left to farm, and repeat every cycle on an unlinkable drop, which
+// would otherwise keep such a bot up forever.
 const LOG_VERDICT_PY = [
   "import sys, json, re",
   "cfg, started = sys.argv[1], sys.argv[2]",
@@ -37,7 +48,8 @@ const LOG_VERDICT_PY = [
   "    print('ERR|config'); sys.exit(0)",
   "since = started.replace('T', ' ')[:19]",
   "acct = re.compile(r'\\[TwitchUser - ([A-Za-z0-9_]+)\\]')",
-  "prev, last, none_left, pend = {}, {}, {}, {}",
+  "claim_err = re.compile(r'Failed to claim|reward code|CLAIM ERROR', re.I)",
+  "prev, last, none_left, pend, err = {}, {}, {}, {}, {}",
   "for i, line in enumerate(sys.stdin):",
   "    if line[:19] < since:",
   "        continue",
@@ -53,12 +65,14 @@ const LOG_VERDICT_PY = [
   "    if ('No live broadcaster found' in line or 'No broadcaster found for this campaign' in line",
   "            or 'minutes watched' in line or 'Watching ' in line):",
   "        pend[a] = i",
+  "    if '[ERR]' in line and not claim_err.search(line):",
+  "        err[a] = i",
   "f = p = u = 0",
   "for a in enabled:",
   "    start = prev.get(a, -1)",
   "    if start >= 0 and pend.get(a, -1) > start:",
   "        p += 1",
-  "    elif start >= 0 and start < none_left.get(a, -1) < last.get(a, -1):",
+  "    elif start >= 0 and start < none_left.get(a, -1) < last.get(a, -1) and err.get(a, -1) < start:",
   "        f += 1",
   "    else:",
   "        u += 1",
