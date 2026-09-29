@@ -28,6 +28,7 @@ const hosts = require("./botHosts");
 const TwitchCampaign = require("../models/TwitchCampaign");
 const CampaignLiveState = require("../models/CampaignLiveState");
 const { botCompletion } = require("./farmCompletion");
+const { farmableCampaigns } = require("./campaignFarmability");
 const settings = require("./settings");
 const { recordAutoFarmEvent } = require("./autoFarmEventLog");
 
@@ -697,8 +698,10 @@ async function parkIdleNoCampaignBots(hostId, opts = {}) {
 
   // The campaign set a parked bot could be woken by — wakeFinishedBots filters
   // no-claim, so match against the same filtered set to keep park/wake symmetric.
-  const campaigns = (await liveCampaigns()).filter(
-    (c) => !settings.isNoClaimGame(c.game),
+  // A campaign whose every drop is subscription-only is nothing to farm: the
+  // bot itself logs "No campaign found" for it (utils/campaignFarmability.js).
+  const campaigns = await farmableCampaigns(
+    (await liveCampaigns()).filter((c) => !settings.isNoClaimGame(c.game)),
   );
   const parked = [];
 

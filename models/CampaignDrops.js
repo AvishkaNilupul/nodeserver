@@ -31,10 +31,17 @@ const campaignDropsSchema = new mongoose.Schema(
           dropId: { type: String, default: "" },
           name: { type: String, default: "" },
           itemKey: { type: String, default: "" },
+          // null = fetched before these were recorded (watchVersion < 1).
+          requiredMinutesWatched: { type: Number, default: null },
+          // > 0 = subscription-only: watching alone never earns it.
+          requiredSubs: { type: Number, default: null },
         },
       ],
       default: [],
     },
+    // utils/campaignFarmability.WATCH_VERSION the drops were recorded with; 0 =
+    // requiredSubs unknown, so the campaign is treated as farmable.
+    watchVersion: { type: Number, default: 0 },
     // When the manifest was last fetched from Twitch.
     fetchedAt: { type: Date, default: null },
   },

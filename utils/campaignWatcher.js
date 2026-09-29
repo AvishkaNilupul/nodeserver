@@ -12,6 +12,12 @@ const CampaignDrops = require("../models/CampaignDrops");
 const { fetchDropCampaigns, fetchCampaignDetails, itemKeyFor } = require("./twitchInventory");
 const { sendTelegram } = require("./telegram");
 const settings = require("./settings");
+const { WATCH_VERSION } = require("./campaignFarmability");
+
+function numOrNull(v) {
+  const n = Number(v);
+  return v == null || !Number.isFinite(n) ? null : n;
+}
 
 // Fast discovery: short flash/tournament drop campaigns can appear and end
 // within a few hours, so poll the campaign dashboard every 10 minutes to catch
@@ -100,14 +106,17 @@ async function refreshDropsManifests() {
   const ids = active.map((c) => c.campaignId);
   const existing = await CampaignDrops.find(
     { campaignId: { $in: ids } },
-    { campaignId: 1, fetchedAt: 1 },
+    { campaignId: 1, fetchedAt: 1, watchVersion: 1 },
   ).lean();
+  // A manifest saved before requiredSubs was recorded is re-fetched early:
+  // until it is, every park rule has to treat the campaign as farmable.
   const freshIds = new Set(
     existing
       .filter(
         (m) =>
           m.fetchedAt &&
-          now - new Date(m.fetchedAt).getTime() < MANIFEST_TTL_MS,
+          now - new Date(m.fetchedAt).getTime() < MANIFEST_TTL_MS &&
+          Number(m.watchVersion) >= WATCH_VERSION,
       )
       .map((m) => m.campaignId),
   );
@@ -132,6 +141,8 @@ async function refreshDropsManifests() {
           dropId: String(d.id || ""),
           name,
           itemKey: itemKeyFor(name, game),
+          requiredMinutesWatched: numOrNull(d.requiredMinutesWatched),
+          requiredSubs: numOrNull(d.requiredSubs),
         };
       });
       await CampaignDrops.updateOne(
@@ -141,6 +152,10 @@ async function refreshDropsManifests() {
             game: c.game,
             name: c.name,
             drops,
+            // Only claim the watchability fields when Twitch actually sent them.
+            watchVersion: drops.every((d) => d.requiredSubs != null)
+              ? WATCH_VERSION
+              : 0,
             fetchedAt: new Date(),
           },
         },

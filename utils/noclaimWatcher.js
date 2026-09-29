@@ -42,6 +42,7 @@ const campaignWatcher = require("./campaignWatcher");
 const { getStreamsLive, getGameDropsLive } = require("./twitchWatch");
 const { fetchCampaignDetails } = require("./twitchInventory");
 const { recordAutoFarmEvent } = require("./autoFarmEventLog");
+const { farmableCampaigns } = require("./campaignFarmability");
 
 // Keep these in lock-step with routes/noclaimFarmRoutes.js — same Pi dir + names.
 const HOST_ID = "contabo";
@@ -52,6 +53,74 @@ const containerFor = (id) => CONTAINER_PREFIX + id;
 const markerPath = (id) => BOTS_DIR + "/" + id + "/.autostopped"; // watcher park
 // `.operatoroff` (the operator's explicit Stop) is read by readBots and written
 // only by the routes; the watcher never needs its path, just its presence.
+// `.finished` = the watcher stopped the bot because every enabled account had
+// already finished the game's live campaigns. It records WHICH campaigns and
+// which config (md5), so the bot is not cold-started again for those same
+// campaigns — only a new campaign or a changed config (e.g. new accounts)
+// wakes it. JSON: { at, campaignIds: [...], accountsKey }.
+const finishedPath = (id) => BOTS_DIR + "/" + id + "/.finished";
+
+// A finished verdict is only trusted after the container has been up long
+// enough for every account to run a full 5-minute cycle since it started.
+const FINISH_MIN_UPTIME_S =
+  Number(process.env.NOCLAIM_FINISH_MIN_UPTIME_S) || 12 * 60;
+// A campaign is only recorded as "finished" if it was already active this long
+// before the stop — otherwise the bot may not have seen it in a full cycle yet,
+// and recording it would suppress the wake that should farm it.
+const FINISH_CAMPAIGN_MARGIN_MS = 30 * 60 * 1000;
+const LOG_TAIL = 3000;
+
+// Runs ON THE BOT HOST (python3), fed `docker logs --tail N` on stdin.
+// argv: <config.json path> <container StartedAt>. Prints
+// "<enabled>|<finished>|<pending>|<unknown>" over the config's ENABLED logins.
+// Per account, only lines since the container started count, and only its last
+// COMPLETE cycle (between its last two "Waiting 300 seconds" lines) decides:
+//   finished = that cycle ended in "No broadcaster or campaign left" and no
+//              broadcast-wait / watching line appeared since the cycle began.
+//   pending  = a broadcast-wait or watching line since the cycle began.
+//   unknown  = anything else (no full cycle yet, errors, never logged).
+// These are TwitchDropsBot's own lines — "No broadcaster or campaign left" is
+// what it prints when nothing is left for the account to farm.
+const LOG_VERDICT_PY = [
+  "import sys, json, re",
+  "cfg, started = sys.argv[1], sys.argv[2]",
+  "try:",
+  "    d = json.load(open(cfg))",
+  "    users = (d.get('TwitchSettings') or {}).get('TwitchUsers') or []",
+  "    enabled = set(str(u.get('Login') or '').strip().lower() for u in users",
+  "                  if isinstance(u, dict) and u.get('Enabled', True) is not False)",
+  "    enabled.discard('')",
+  "except Exception:",
+  "    print('ERR|config'); sys.exit(0)",
+  "since = started.replace('T', ' ')[:19]",
+  "acct = re.compile(r'\\[TwitchUser - ([A-Za-z0-9_]+)\\]')",
+  "prev, last, none_left, pend = {}, {}, {}, {}",
+  "for i, line in enumerate(sys.stdin):",
+  "    if line[:19] < since:",
+  "        continue",
+  "    m = acct.search(line)",
+  "    if not m:",
+  "        continue",
+  "    a = m.group(1).lower()",
+  "    if 'Waiting 300 seconds' in line:",
+  "        prev[a] = last.get(a, -1)",
+  "        last[a] = i",
+  "    if 'No broadcaster or campaign left' in line:",
+  "        none_left[a] = i",
+  "    if ('No live broadcaster found' in line or 'No broadcaster found for this campaign' in line",
+  "            or 'minutes watched' in line or 'Watching ' in line):",
+  "        pend[a] = i",
+  "f = p = u = 0",
+  "for a in enabled:",
+  "    start = prev.get(a, -1)",
+  "    if start >= 0 and pend.get(a, -1) > start:",
+  "        p += 1",
+  "    elif start >= 0 and start < none_left.get(a, -1) < last.get(a, -1):",
+  "        f += 1",
+  "    else:",
+  "        u += 1",
+  "print('%d|%d|%d|%d' % (len(enabled), f, p, u))",
+].join("\n");
 
 const TICK_MS = Number(process.env.NOCLAIM_WATCHER_TICK_MS) || 3 * 60 * 1000; // 3 min
 const RETRY_MS = 60 * 1000; // a failed pass retries on a short fuse
@@ -73,7 +142,7 @@ const state = {
   running: false,
   lastRun: null,
   lastError: "",
-  lastCounts: { games: 0, live: 0, started: 0, stopped: 0, errors: 0 },
+  lastCounts: { games: 0, live: 0, started: 0, stopped: 0, finished: 0, errors: 0 },
   games: [], // per-game verdict for the UI
   // gameKey -> ms the game first went dark this streak (hysteresis anchor).
   darkSince: {},
@@ -126,9 +195,14 @@ async function activeNoClaimCampaigns() {
       status: "ACTIVE",
       $or: [{ endAt: null }, { endAt: { $gt: now } }],
     },
-    { campaignId: 1, game: 1, name: 1 },
+    { campaignId: 1, game: 1, name: 1, startAt: 1, firstSeenAt: 1 },
   ).lean();
-  return rows.filter((c) => c.game && settings.isNoClaimGame(c.game));
+  // Subscription-only campaigns are nothing to farm — and one with no channel
+  // ACL ("DRON-E Chat Badge") read the game as live around the clock through
+  // the category directory, which kept every Rainbow Six bot up.
+  return farmableCampaigns(
+    rows.filter((c) => c.game && settings.isNoClaimGame(c.game)),
+  );
 }
 
 // Is any of these channels live now? Batched, early-exit on first live channel,
@@ -175,6 +249,7 @@ async function gameVerdicts() {
       checked: false,
       error: "",
       uncertain: false,
+      campaigns: [], // [{ id, startAt }] — the game's active farmable campaigns
     };
   }
   if (!keywords.length) return verdict;
@@ -201,6 +276,10 @@ async function gameVerdicts() {
     const v = verdict[k];
     v.checked = true;
     v.hadCampaign = forGame.length > 0;
+    v.campaigns = forGame.map((c) => ({
+      id: String(c.campaignId),
+      startAt: c.startAt || c.firstSeenAt || null,
+    }));
 
     if (!forGame.length) {
       // No active campaign for this game — there is literally nothing to farm
@@ -272,21 +351,49 @@ async function gameVerdicts() {
   return verdict;
 }
 
-// Read every no-claim bot from the Pi: id, config game, running?, autostopped?
-// One round trip (docker ps + a config sweep), same shape as the /state route.
+// Read every no-claim bot from the host: id, config game, running?, markers,
+// config fingerprint, and — for running bots — the finished verdict from its
+// own log. One round trip (docker ps + a config sweep + a per-bot log verdict
+// computed ON the host, so only one short line per bot crosses the link).
 async function readBots() {
+  const dir = hosts.shq(BOTS_DIR);
   const script =
     `echo "PS_START"; docker ps -a --filter name=^/${CONTAINER_PREFIX} --format '{{.Names}}|{{.State}}' 2>/dev/null; echo "PS_END"; ` +
-    `echo "BOTS_START"; for d in ${hosts.shq(BOTS_DIR)}/*/Configuration/config.json; do [ -f "$d" ] || continue; ` +
+    `echo "BOTS_START"; for d in ${dir}/*/Configuration/config.json; do [ -f "$d" ] || continue; ` +
     `id=$(basename $(dirname $(dirname "$d"))); ` +
     `game=$(tr -d '\\n' < "$d" | sed -n 's/.*"FavouriteGames"[^[]*\\[[^"]*"\\([^"]*\\)".*/\\1/p'); ` +
-    `mk=no; [ -f ${hosts.shq(BOTS_DIR)}/"$id"/.autostopped ] && mk=yes; ` +
-    `oo=no; [ -f ${hosts.shq(BOTS_DIR)}/"$id"/.operatoroff ] && oo=yes; ` +
-    `echo "$id|$game|$mk|$oo"; done; echo "BOTS_END"`;
-  const { stdout } = await hosts.runShell(pi(), script, { timeout: 25000 });
+    `mk=no; [ -f ${dir}/"$id"/.autostopped ] && mk=yes; ` +
+    `oo=no; [ -f ${dir}/"$id"/.operatoroff ] && oo=yes; ` +
+    `key=$(md5sum < "$d" 2>/dev/null | cut -c1-32); ` +
+    `fin=; [ -f ${dir}/"$id"/.finished ] && fin=$(head -c 4000 ${dir}/"$id"/.finished | tr -d '\\n|'); ` +
+    `echo "$id|$game|$mk|$oo|$key|$fin"; done; echo "BOTS_END"; ` +
+    `echo "LOGS_START"; for c in $(docker ps --filter name=${CONTAINER_PREFIX} --format '{{.Names}}' 2>/dev/null); do ` +
+    `case "$c" in ${CONTAINER_PREFIX}*) ;; *) continue ;; esac; ` +
+    `id=$(echo "$c" | sed 's/^${CONTAINER_PREFIX}//'); ` +
+    `st=$(docker inspect -f '{{.State.StartedAt}}' "$c" 2>/dev/null); ` +
+    `up=$(( $(date +%s) - $(date -d "$st" +%s 2>/dev/null || date +%s) )); ` +
+    `v=$(docker logs --tail ${LOG_TAIL} "$c" 2>&1 | python3 -c ${hosts.shq(LOG_VERDICT_PY)} ${dir}/"$id"/Configuration/config.json "$st" 2>/dev/null); ` +
+    `[ -n "$v" ] || v="ERR|py"; echo "$id|$up|$v"; done; echo "LOGS_END"`;
+  const { stdout } = await hosts.runShell(pi(), script, { timeout: 90000 });
+  return parseBots(stdout);
+}
+
+function parseMarker(text) {
+  if (!text) return null;
+  try {
+    const m = JSON.parse(text);
+    return m && typeof m === "object" ? m : null;
+  } catch {
+    return null;
+  }
+}
+
+// Pure parser for readBots' output (unit-tested).
+function parseBots(stdout) {
   const lines = String(stdout || "").split("\n");
   let section = "";
   const psMap = {};
+  const logs = {};
   const bots = [];
   for (const raw of lines) {
     const line = raw.trim();
@@ -294,20 +401,50 @@ async function readBots() {
     if (line === "PS_END") { section = ""; continue; }
     if (line === "BOTS_START") { section = "bots"; continue; }
     if (line === "BOTS_END") { section = ""; continue; }
+    if (line === "LOGS_START") { section = "logs"; continue; }
+    if (line === "LOGS_END") { section = ""; continue; }
     if (section === "ps" && line) {
       const [name, st] = line.split("|");
       psMap[name.replace(CONTAINER_PREFIX, "")] = st;
     } else if (section === "bots" && line) {
-      const [id, game, mk, oo] = line.split("|");
+      const [id, game, mk, oo, key, fin] = line.split("|");
       bots.push({
         id,
         game: game || "",
         autostopped: mk === "yes",
         operatorOff: oo === "yes",
+        accountsKey: key || "",
+        finishedMarker: parseMarker(fin),
       });
+    } else if (section === "logs" && line) {
+      const [id, up, enabled, finished, pending, unknown] = line.split("|");
+      if (enabled === "ERR") continue; // no verdict → never judged finished
+      logs[id] = {
+        uptimeS: Number(up) || 0,
+        enabled: Number(enabled) || 0,
+        finished: Number(finished) || 0,
+        pending: Number(pending) || 0,
+        unknown: Number(unknown) || 0,
+      };
     }
   }
-  for (const b of bots) b.running = psMap[b.id] === "running";
+  for (const b of bots) {
+    b.running = psMap[b.id] === "running";
+    const lv = logs[b.id] || null;
+    b.logVerdict = lv;
+    // Every enabled account showed a clean "nothing left" cycle since this
+    // container started, and it has been up long enough for that to mean
+    // something. Anything short of that keeps the bot up.
+    b.finishedNow = !!(
+      b.running &&
+      lv &&
+      lv.uptimeS >= FINISH_MIN_UPTIME_S &&
+      lv.enabled > 0 &&
+      lv.finished === lv.enabled &&
+      lv.pending === 0 &&
+      lv.unknown === 0
+    );
+  }
   return bots;
 }
 
@@ -331,43 +468,91 @@ function pi() {
 //          unverifiable catalog, so a restart's boot window can't wake bots for
 //          a campaign that does not exist).
 //   STOP:  game confidently dark + bot running.
+//   FINISHED: bot running + every enabled account has nothing left to farm
+//          (its own log says so) → stop it, whether or not the game is live.
+//          A live game used to cold-start every bot of that game, including
+//          ones whose accounts had already finished the campaign — 21 finished
+//          Overwatch bots sat running through each OWCS broadcast.
+//   A `.finished` marker then blocks the cold-start while the game's live
+//   campaigns are the same ones it finished and its config is unchanged.
+function verdictFor(verdict, label) {
+  const g = norm(label);
+  for (const k of Object.keys(verdict)) {
+    if (g === k || g.includes(k) || k.includes(g)) return verdict[k];
+  }
+  return null;
+}
+
+// Does the bot's `.finished` marker cover every farmable campaign that is live
+// for its game now, with the same config it finished with?
+function finishedCovers(b, v) {
+  const m = b && b.finishedMarker;
+  if (!m || !Array.isArray(m.campaignIds) || !m.campaignIds.length) return false;
+  if (!b.accountsKey || m.accountsKey !== b.accountsKey) return false;
+  const ids = ((v && v.campaigns) || []).map((c) => String(c.id));
+  if (!ids.length) return false;
+  return ids.every((id) => m.campaignIds.includes(id));
+}
+
+// Campaigns to record as finished: only ones active long enough that the bot
+// has certainly seen them in a full cycle.
+function markerCampaignIds(v, now = Date.now()) {
+  return ((v && v.campaigns) || [])
+    .filter((c) => {
+      const t = c.startAt ? new Date(c.startAt).getTime() : NaN;
+      return !Number.isFinite(t) || now - t >= FINISH_CAMPAIGN_MARGIN_MS;
+    })
+    .map((c) => String(c.id))
+    .sort();
+}
+
 function decideActions(bots, verdict) {
   const starts = [];
   const stops = [];
-  const match = (label) => {
-    const g = norm(label);
-    for (const k of Object.keys(verdict)) {
-      if (g === k || g.includes(k) || k.includes(g)) return verdict[k];
-    }
-    return null;
-  };
+  const finished = [];
   for (const b of bots) {
-    const v = match(b.game);
+    const v = verdictFor(verdict, b.game);
     if (!v) continue; // unknown game — never touch
-    if (v.live && !v.uncertain && !b.running && !b.operatorOff) {
+    if (b.running && b.finishedNow) {
+      finished.push(b.id);
+    } else if (
+      v.live &&
+      !v.uncertain &&
+      !b.running &&
+      !b.operatorOff &&
+      !finishedCovers(b, v)
+    ) {
       starts.push(b.id);
     } else if (v.canStop && b.running) {
       stops.push(b.id);
     }
   }
-  return { starts, stops };
+  return { starts, stops, finished };
 }
 
-// Apply start/stop on the Pi in ONE round trip. Starts clear the marker; stops
-// set it. Each action is independent (`;`, `|| true`) so one failure never
-// blocks the rest.
-async function applyActions(starts, stops) {
+// Apply start/stop on the host in ONE round trip. Starts clear the markers;
+// stops set `.autostopped`; finished stops also write `.finished` (JSON from
+// `markers[id]`). Each action is independent (`;`, `|| true`) so one failure
+// never blocks the rest.
+async function applyActions(starts, stops, finished = [], markers = {}) {
   const parts = [];
   for (const id of starts) {
     parts.push(
       `docker start ${hosts.shq(containerFor(id))} >/dev/null 2>&1 || true`,
-      `rm -f ${hosts.shq(markerPath(id))} || true`,
+      `rm -f ${hosts.shq(markerPath(id))} ${hosts.shq(finishedPath(id))} || true`,
     );
   }
   for (const id of stops) {
     parts.push(
       `docker stop ${hosts.shq(containerFor(id))} >/dev/null 2>&1 || true`,
       `touch ${hosts.shq(markerPath(id))} || true`,
+    );
+  }
+  for (const id of finished) {
+    parts.push(
+      `docker stop ${hosts.shq(containerFor(id))} >/dev/null 2>&1 || true`,
+      `touch ${hosts.shq(markerPath(id))} || true`,
+      `printf '%s' ${hosts.shq(markers[id] || "{}")} > ${hosts.shq(finishedPath(id))} || true`,
     );
   }
   if (!parts.length) return;
@@ -399,7 +584,7 @@ function resolveWithHysteresis(rawVerdict, now = Date.now()) {
 async function runOnce() {
   if (state.running) return state.lastCounts;
   state.running = true;
-  const counts = { games: 0, live: 0, started: 0, stopped: 0, errors: 0 };
+  const counts = { games: 0, live: 0, started: 0, stopped: 0, finished: 0, errors: 0 };
   try {
     if (!settings.getNoClaimGate().enabled) {
       // Off → do nothing at all (no Twitch calls, no SSH). Still publish a
@@ -418,12 +603,39 @@ async function runOnce() {
     counts.errors = keys.filter((k) => verdict[k].error).length;
 
     const bots = await readBots();
-    const { starts, stops } = decideActions(bots, verdict);
-    await applyActions(starts, stops);
+    const { starts, stops, finished } = decideActions(bots, verdict);
+    const now = Date.now();
+    const markers = {};
+    for (const id of finished) {
+      const b = bots.find((x) => x.id === id);
+      markers[id] = JSON.stringify({
+        at: new Date(now).toISOString(),
+        campaignIds: markerCampaignIds(verdictFor(verdict, b.game), now),
+        accountsKey: b.accountsKey || "",
+      });
+    }
+    await applyActions(starts, stops, finished, markers);
     counts.started = starts.length;
-    counts.stopped = stops.length;
+    counts.stopped = stops.length + finished.length;
+    counts.finished = finished.length;
 
     // Lifecycle log (shows in the Auto-farm tab's timeline too).
+    for (const id of finished) {
+      const b = bots.find((x) => x.id === id);
+      const lv = (b && b.logVerdict) || {};
+      await recordAutoFarmEvent({
+        type: "noclaim_autostop",
+        game: b ? b.game : "",
+        host: HOST_ID,
+        container: containerFor(id),
+        count: lv.enabled || 0,
+        actor: "noclaim-watcher",
+        reason:
+          "all " + (lv.enabled || 0) + " account(s) finished the live " +
+          "campaign(s) — stopping to save RAM; a new campaign or new " +
+          "accounts wake it",
+      });
+    }
     for (const id of stops) {
       const b = bots.find((x) => x.id === id);
       await recordAutoFarmEvent({
@@ -506,5 +718,9 @@ module.exports = {
   // exported for tests
   decideActions,
   resolveWithHysteresis,
+  parseBots,
+  finishedCovers,
+  markerCampaignIds,
+  LOG_VERDICT_PY,
   _state: state,
 };
