@@ -297,6 +297,21 @@ const marketplaceListingSchema = new mongoose.Schema(
     // now a lease that keeps the pointer; the pointer is cleared only once the
     // window is actually stamped.
     rentFarmSaleClaimedAt: { type: Date, default: null },
+    // Bulk packs (docs/bulk-packs/CONTRACT.md §3, hook H1): the BulkOffer this
+    // row belongs to, or null for every other listing. A bulk dropset/noclaim
+    // offer is ALSO an ordinary row with origin "manual", so delivery, sale
+    // detection and stock sync run through the existing fulfillers unchanged —
+    // and the few automatic sweeps that would still act on a manual row
+    // (guardian, dedupe, suspended retirement, relist, price evidence, public
+    // catalog; hooks H5–H12) skip rows where this is set. No enum changes.
+    // The bulk loop owns these rows: it never whole-array-saves `units`
+    // (CONTRACT I3) and it writes no row whose bulkOfferId is not its own.
+    bulkOfferId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "BulkOffer",
+      default: null,
+      index: true,
+    },
   },
   { timestamps: true },
 );

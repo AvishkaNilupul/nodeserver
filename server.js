@@ -51,6 +51,7 @@ const backupRoutes = require("./routes/backupRoutes");
 const shopRoutes = require("./routes/shopRoutes");
 const catalogRoutes = require("./routes/catalogRoutes");
 const bulkOrderRoutes = require("./routes/bulkOrderRoutes");
+const bulkPackRoutes = require("./routes/bulkPackRoutes");
 const renterAuthRoutes = require("./routes/renterAuthRoutes");
 const renterRoutes = require("./routes/renterRoutes");
 const renterAdminRoutes = require("./routes/renterAdminRoutes");
@@ -539,6 +540,13 @@ app.get("/bulk-orders.html", requireSuperadmin, enforce2fa, (req, res) => {
   res.sendFile(path.join(__dirname, "public", "bulk-orders.html"));
 });
 
+// Bulk packs (superadmin only) — proposes tiered bulk offers, publishes one only
+// when the owner clicks Send, then looks after the live ones
+// (docs/bulk-packs/CONTRACT.md). Gated here, before the static mount.
+app.get("/bulk-packs.html", requireSuperadmin, enforce2fa, (req, res) => {
+  res.sendFile(path.join(__dirname, "public", "bulk-packs.html"));
+});
+
 // Renters manager (superadmin only) — create renters, assign a bot slot, set
 // quota + access period, suspend, and approve their account submissions.
 app.get("/renters.html", requireSuperadmin, enforce2fa, (req, res) => {
@@ -716,6 +724,10 @@ app.use(enforce2fa, marketplaceRoutes);
 // stock. Mounted after marketplaceRoutes because it shares that tab's publish
 // modal, and every route inside is superadmin-only.
 app.use(enforce2fa, accountListingRoutes);
+// Bulk packs API (routes/bulkPackRoutes.js). No public routes, so it mounts
+// after the requireAdmin blanket; every route inside also self-guards with
+// requireSuperadmin.
+app.use(enforce2fa, bulkPackRoutes);
 app.use(enforce2fa, backupRoutes);
 app.use(enforce2fa, shopRoutes);
 app.use(enforce2fa, primeRoutes);
@@ -890,6 +902,13 @@ mongoose
       require("./utils/noclaimListings").start();
     } catch (err) {
       console.error("noclaimListings failed to start:", err.message);
+    }
+    // Bulk packs maintenance (maintains live offers; publishing needs autoFarm.bulkPacksEnabled)
+    // Guarded like noclaimListings above, for the same crash-loop reason.
+    try {
+      require("./utils/bulkPacks/loop").start();
+    } catch (err) {
+      console.error("bulkPacks loop failed to start:", err.message);
     }
     // No-claim fleet allocator: sizes each no-claim game's farming fleet and its
     // auto-list shelf from what the game actually sells. It MEASURES every pass

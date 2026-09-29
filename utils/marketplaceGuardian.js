@@ -1567,6 +1567,7 @@ async function runOnce() {
     const rows = await MarketplaceListing.find({
       status: "active",
       autoDeliver: true,
+      bulkOfferId: null, // bulk-pack rows are the bulk loop's (docs/bulk-packs/CONTRACT.md H5)
     }).lean();
     const seenKeys = new Set();
     const refusals = new Map();
@@ -1635,6 +1636,7 @@ async function feedOne(listingId) {
     _id: listingId,
     status: "active",
     autoDeliver: true,
+    bulkOfferId: null, // never feed a bulk-pack row (docs/bulk-packs/CONTRACT.md H5)
   }).lean();
   if (!row) {
     throw new Error("Listing is not an active auto-delivery listing");

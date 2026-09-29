@@ -174,8 +174,11 @@ async function scanGame(game, campaignsByGame, ctx = {}) {
     settle(platiScout(term)),
   ]);
   const cutoff = Date.now() - RECENT_DAYS * 86400000;
-  const gfSoldRel = relevant(gfSold, game);
-  const gfActiveRel = relevant(gfActive, game);
+  // Our own bulk packs never feed a Gameflip price anchor (docs/bulk-packs/CONTRACT.md H12).
+  const packIds = ctx.bulkPackIds || new Set();
+  const notPack = (r) => !packIds.has(String(r.url || "").split("/").pop());
+  const gfSoldRel = relevant(gfSold, game).filter(notPack);
+  const gfActiveRel = relevant(gfActive, game).filter(notPack);
   const ggRel = relevant(gg, game);
   const plRel = relevant(pl, game);
 
@@ -608,6 +611,18 @@ async function scanContext() {
     ctx.prior = await priorSnapshots();
   } catch (e) {
     console.error("scan context history:", e.message);
+  }
+  // Our Gameflip bulk-pack listing ids: priced per PACK, so scanGame drops them (docs/bulk-packs/CONTRACT.md H12).
+  try {
+    const packs = await MarketplaceListing.find(
+      { marketplace: "gameflip", bulkOfferId: { $ne: null } },
+      { externalId: 1 },
+    )
+      .limit(5000)
+      .lean();
+    ctx.bulkPackIds = new Set(packs.map((r) => String(r.externalId || "")).filter(Boolean));
+  } catch (e) {
+    console.error("scan context bulk packs:", e.message);
   }
   return ctx;
 }

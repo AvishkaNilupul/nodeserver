@@ -77,7 +77,8 @@ async function buildSnapshot() {
   // game needs a DropSet join we deliberately skip. They therefore feed only
   // the two buckets that do not need a game.
   const sold = await MarketplaceListing.find(
-    { status: "sold", price: { $gt: 0 }, updatedAt: { $gte: since } },
+    // bulkOfferId: bulk prices never anchor single listings (docs/bulk-packs/CONTRACT.md H10)
+    { status: "sold", price: { $gt: 0 }, updatedAt: { $gte: since }, bulkOfferId: null },
     { marketplace: 1, price: 1 },
   )
     .sort({ updatedAt: -1 })

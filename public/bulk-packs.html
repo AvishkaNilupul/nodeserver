@@ -1,0 +1,2062 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+<script>(function(){try{if(localStorage.getItem('theme')==='dark')document.documentElement.setAttribute('data-theme','dark');}catch(e){}try{if(/[?&]embed=1(&|$)/.test(location.search))document.documentElement.classList.add('embed');}catch(e){}})();</script>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Bulk packs | RedeemHub</title>
+<style>
+  :root{--bg:#f6f7fb;--surface:#ffffff;--surface-2:#f8fafc;--line:#e7eaf0;--ink:#0f172a;--muted:#6b7280;--accent:#4f46e5;--accent2:#6366f1;--green:#059669;--red:#dc2626;--yellow:#b45309;}
+  html[data-theme="dark"]{--bg:#0e1014;--surface:#161a22;--surface-2:#1e232e;--line:#2a3140;--ink:#e8ebf2;--muted:#9aa3b4;--green:#34d399;--red:#f87171;--yellow:#fbbf24;color-scheme:dark;}
+  html[data-theme="dark"] .nav .links a.active{background:rgba(99,102,241,0.20);}
+  html[data-theme="dark"] .nav .me .logout:hover{background:rgba(239,68,68,0.12);border-color:rgba(239,68,68,0.4);color:#f87171;}
+  html[data-theme="dark"] .pill.s-ok, html[data-theme="dark"] a.tier.live{background:rgba(52,211,153,.14);}
+  html[data-theme="dark"] .pill.s-warn, html[data-theme="dark"] .badge.b-noclaim{background:rgba(251,191,36,.14);}
+  html[data-theme="dark"] .pill.s-fail{background:rgba(248,113,113,.14);}
+  html[data-theme="dark"] .pill.s-info, html[data-theme="dark"] .badge.b-dropset{background:rgba(99,102,241,.20);color:#a5b4fc;}
+  html[data-theme="dark"] .note.warn{background:rgba(251,191,36,.10);border-color:rgba(251,191,36,.35);color:#fbbf24;}
+  html[data-theme="dark"] .note.bad{background:rgba(248,113,113,.10);border-color:rgba(248,113,113,.35);color:#fca5a5;}
+  html[data-theme="dark"] .note.good{background:rgba(52,211,153,.10);border-color:rgba(52,211,153,.35);color:#6ee7b7;}
+  html[data-theme="dark"] button.danger:hover{background:rgba(239,68,68,0.12);}
+  html[data-theme="dark"] table.rt tr.flash > td{background:rgba(99,102,241,.18);}
+  html[data-theme="dark"] .tabs button[aria-selected="true"]{color:#a5b4fc;border-bottom-color:#818cf8;}
+  html[data-theme="dark"] .page a, html[data-theme="dark"] .modal a{color:#a5b4fc;}
+  html[data-theme="dark"] .page a.tier.live{color:var(--green);}
+  * { margin:0; padding:0; box-sizing:border-box; }
+  [hidden] { display:none !important; }
+  body { font-family:"Inter","Segoe UI",Tahoma,sans-serif; background:var(--bg); color:var(--ink); height:100vh; display:flex; overflow:hidden; }
+
+  .nav { width:236px; background:var(--surface); border-right:1px solid var(--line); display:flex; flex-direction:column; flex-shrink:0; }
+  .nav .brand { display:flex; align-items:center; gap:10px; padding:18px 20px; border-bottom:1px solid var(--line); }
+  .nav .brand .mark { width:34px; height:34px; border-radius:10px; background:linear-gradient(135deg,var(--accent2),var(--accent)); display:grid; place-items:center; box-shadow:0 6px 14px rgba(79,70,229,0.32); }
+  .nav .brand b { font-size:15px; font-weight:700; line-height:1.15; }
+  .nav .brand b span { display:block; font-size:10.5px; color:var(--muted); font-weight:500; }
+  .nav .links { padding:12px; flex:1; display:flex; flex-direction:column; gap:4px; overflow-y:auto; }
+  .nav .links a { display:flex; align-items:center; gap:11px; padding:11px 13px; border-radius:10px; color:var(--muted); text-decoration:none; font-size:14px; font-weight:500; }
+  .nav .links a:hover { background:var(--surface-2); }
+  .nav .links a.active { background:#eef2ff; color:var(--accent); font-weight:600; }
+  .nav .me { border-top:1px solid var(--line); padding:14px; display:flex; align-items:center; gap:10px; }
+  .nav .me .av { width:36px; height:36px; border-radius:10px; background:linear-gradient(135deg,#34d399,#10b981); display:grid; place-items:center; color:#fff; font-weight:700; font-size:13px; flex-shrink:0; }
+  .nav .me .who { line-height:1.2; min-width:0; }
+  .nav .me .who b { font-size:13.5px; display:block; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; max-width:84px; }
+  .nav .me .who span { display:block; font-size:11px; color:var(--muted); }
+  .nav .me .actions { margin-left:auto; display:flex; gap:6px; }
+  .nav .me .logout { width:32px; height:32px; border-radius:9px; border:1px solid var(--line); background:var(--surface); color:var(--muted); display:grid; place-items:center; cursor:pointer; padding:0; }
+  .nav .me .logout:hover { color:#ef4444; border-color:#fecaca; background:#fef2f2; }
+
+  .page { flex:1; overflow-y:auto; padding:26px 30px 56px; min-width:0; }
+  h1 { font-size:22px; font-weight:800; }
+  .sub { color:var(--muted); font-size:13.5px; margin-top:4px; max-width:780px; line-height:1.45; }
+  .head { display:flex; align-items:flex-start; gap:18px; flex-wrap:wrap; margin:0 0 14px; }
+  .head-actions { margin-left:auto; display:flex; gap:8px; align-items:center; }
+  .muted { color:var(--muted); }
+  .mono { font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:12px; }
+  a { color:var(--accent); }
+
+  button { border:1px solid var(--line); border-radius:9px; background:var(--surface); color:var(--ink); padding:9px 14px; cursor:pointer; font:inherit; font-size:13.5px; }
+  button:hover { border-color:var(--accent); }
+  button.primary { color:#fff; border-color:var(--accent); background:var(--accent); }
+  button.primary:hover { background:var(--accent2); }
+  button:disabled { opacity:.5; cursor:not-allowed; }
+  button.icon { width:32px; height:32px; padding:0; display:grid; place-items:center; flex-shrink:0; }
+  button.sm { padding:6px 11px; font-size:12.5px; border-radius:8px; }
+  button.danger { color:var(--red); }
+  button.danger:hover { border-color:var(--red); background:#fef2f2; }
+  button.primary.danger { color:#fff; background:var(--red); border-color:var(--red); }
+  button.primary.danger:hover { background:var(--red); filter:brightness(1.08); }
+
+  .pill { display:inline-flex; align-items:center; gap:5px; border-radius:999px; padding:3px 10px; font-size:11.5px; font-weight:700; border:1px solid transparent; white-space:nowrap; }
+  .pill.s-ok { color:var(--green); background:#ecfdf5; }
+  .pill.s-warn { color:var(--yellow); background:#fffbeb; }
+  .pill.s-fail { color:var(--red); background:#fef2f2; }
+  .pill.s-off { color:var(--muted); background:var(--surface-2); border-color:var(--line); }
+  .pill.s-info { color:var(--accent); background:#eef2ff; }
+  .pill.sm { font-size:11px; padding:2px 8px; }
+
+  /* ---- Header strip: the three answers the owner opens this page for —
+     is it switched on, where can it sell, and is the background check alive. */
+  .strip { background:var(--surface); border:1px solid var(--line); border-radius:14px; padding:12px 16px; display:flex; gap:12px 24px; align-items:center; flex-wrap:wrap; }
+  .strip .grp { display:flex; align-items:center; gap:8px; flex-wrap:wrap; min-width:0; }
+  .strip .lbl { font-size:10.5px; font-weight:700; letter-spacing:.05em; text-transform:uppercase; color:var(--muted); }
+  .chips { display:flex; gap:6px; flex-wrap:wrap; min-width:0; }
+  /* A long gate reason is cut with an ellipsis; the whole text is in the tooltip. */
+  .mchip { max-width:330px; overflow:hidden; text-overflow:ellipsis; display:inline-block; }
+  .sw-chip { font-size:12.5px; padding:4px 12px; }
+  .hb { font-size:12.5px; color:var(--muted); line-height:1.45; }
+  .hb b { color:var(--ink); font-weight:650; }
+  .hb.stalled, .hb.stalled b { color:var(--yellow); }
+  .hb .err { color:var(--red); }
+
+  .note { margin-top:12px; border:1px solid var(--line); background:var(--surface-2); color:var(--ink); padding:10px 14px; border-radius:10px; font-size:13px; line-height:1.5; overflow-wrap:anywhere; }
+  .note.warn { border-color:#f0c36d; background:#fffbeb; color:#7a2e0b; }
+  .note.bad { border-color:#fecaca; background:#fef2f2; color:#991b1b; }
+  .note.good { border-color:#a7f3d0; background:#ecfdf5; color:#065f46; }
+  .note ul { margin:6px 0 0 18px; }
+  .note button { margin-left:8px; }
+
+  /* ---- Tabs ---- */
+  .tabs { display:flex; gap:2px; margin:18px 0 14px; border-bottom:1px solid var(--line); flex-wrap:wrap; }
+  .tabs button { border:none; border-bottom:2px solid transparent; border-radius:0; background:transparent; color:var(--muted); padding:10px 12px; font-weight:600; font-size:13.5px; margin-bottom:-1px; }
+  .tabs button:hover { color:var(--ink); border-color:transparent; border-bottom-color:var(--line); }
+  .tabs button[aria-selected="true"] { color:var(--accent); border-bottom-color:var(--accent); }
+  .tabs .cnt { display:inline-block; min-width:18px; padding:0 6px; margin-left:4px; border-radius:999px; background:var(--surface-2); border:1px solid var(--line); font-size:11px; line-height:17px; color:var(--ink); text-align:center; }
+  .tabs .cnt:empty { display:none; }
+
+  .bar { display:flex; align-items:center; gap:8px; flex-wrap:wrap; margin-bottom:12px; }
+  .bar .grow { flex:1; }
+  .bar .at { font-size:12px; color:var(--muted); }
+  .loading { color:var(--muted); font-size:13px; padding:18px 4px; }
+  .empty { background:var(--surface); border:1px solid var(--line); border-radius:14px; padding:34px 22px; text-align:center; color:var(--muted); font-size:13.5px; line-height:1.6; }
+  .empty b { display:block; color:var(--ink); font-size:15px; margin-bottom:6px; }
+
+  /* ---- Account pack cards ---- */
+  .pgrid { display:grid; grid-template-columns:repeat(auto-fill,minmax(370px,1fr)); gap:14px; }
+  .pcard { background:var(--surface); border:1px solid var(--line); border-radius:14px; padding:14px 16px; min-width:0; display:flex; flex-direction:column; gap:10px; }
+  .p-hd { display:flex; align-items:flex-start; gap:10px; }
+  .p-name { min-width:0; flex:1; }
+  .p-name b { display:block; font-size:14.5px; line-height:1.3; overflow-wrap:anywhere; }
+  .p-name span { display:block; font-size:12px; color:var(--muted); margin-top:2px; }
+  .badge { font-size:10.5px; font-weight:700; letter-spacing:.04em; text-transform:uppercase; border-radius:6px; padding:3px 7px; white-space:nowrap; flex-shrink:0; }
+  .badge.b-dropset { color:var(--accent); background:#eef2ff; }
+  .badge.b-noclaim { color:var(--yellow); background:#fffbeb; }
+  .thumbs { display:flex; gap:6px; flex-wrap:wrap; align-items:center; }
+  .thumbs img, .thumbs .ph { width:38px; height:38px; border-radius:8px; object-fit:cover; background:var(--surface-2); border:1px solid var(--line); }
+  .thumbs .ph { display:grid; place-items:center; font-size:13px; font-weight:700; color:var(--muted); }
+  .thumbs .more { font-size:12px; font-weight:700; color:var(--muted); padding:0 4px; cursor:default; }
+  .p-stats { display:flex; gap:6px; flex-wrap:wrap; }
+  .stat { background:var(--surface-2); border:1px solid var(--line); border-radius:9px; padding:4px 10px; font-size:12px; color:var(--muted); cursor:default; }
+  .stat b { color:var(--ink); font-size:14px; margin-right:3px; }
+  .mrows { display:flex; flex-direction:column; gap:10px; border-top:1px solid var(--line); padding-top:10px; }
+  .mrow { display:flex; flex-direction:column; gap:6px; }
+  .mrow .mh { display:flex; align-items:baseline; gap:8px; flex-wrap:wrap; font-size:12.5px; }
+  .mrow .mh b { font-size:13px; }
+  .tiers { display:flex; gap:6px; flex-wrap:wrap; }
+  .tier { font-size:12.5px; padding:7px 11px; border-radius:9px; font-weight:600; }
+  .tier[aria-disabled="true"] { opacity:.5; cursor:not-allowed; }
+  .tier[aria-disabled="true"]:hover { border-color:var(--line); }
+  a.tier.live { display:inline-flex; align-items:center; color:var(--green); background:#ecfdf5; border:1px solid transparent; text-decoration:none; }
+  a.tier.live:hover { border-color:var(--green); }
+  .why { font-size:11.5px; color:var(--yellow); line-height:1.4; }
+
+  /* ---- Tables (Farming packs, Live offers, History) ---- */
+  .tw { overflow-x:auto; -webkit-overflow-scrolling:touch; max-width:100%; background:var(--surface); border:1px solid var(--line); border-radius:14px; }
+  table.rt { width:100%; border-collapse:collapse; font-size:13px; }
+  table.rt th, table.rt td { text-align:left; padding:9px 12px; border-bottom:1px solid var(--line); vertical-align:top; }
+  table.rt th { font-size:10.5px; text-transform:uppercase; letter-spacing:.04em; color:var(--muted); font-weight:700; background:var(--surface-2); white-space:nowrap; }
+  table.rt tbody tr:last-child > td { border-bottom:none; }
+  table.rt td.num { white-space:nowrap; font-variant-numeric:tabular-nums; }
+  table.rt td.nw { white-space:nowrap; }
+  table.rt th.wrap { white-space:normal; min-width:90px; }
+  table.rt .acts { min-width:150px; }
+  .cv { min-width:0; }
+  table.rt tr.flash > td { background:#eef2ff; }
+  table.rt tr.detail > td { background:var(--surface-2); padding:12px 14px; }
+  .t-title { font-weight:600; overflow-wrap:anywhere; min-width:160px; }
+  .t-title a { text-decoration:none; }
+  .t-title a:hover { text-decoration:underline; }
+  .t-sub { font-size:11.5px; color:var(--muted); margin-top:3px; font-weight:400; }
+  .t-err { font-size:11.5px; color:var(--red); margin-top:3px; overflow-wrap:anywhere; font-weight:400; }
+  .flags { display:flex; gap:4px; flex-wrap:wrap; }
+  .acts { display:flex; gap:6px; flex-wrap:wrap; }
+  .total { margin:0 0 12px; font-size:13.5px; line-height:1.5; }
+
+  /* Offer details (one offer's accounts and history) */
+  .dfacts { display:grid; grid-template-columns:repeat(auto-fill,minmax(210px,1fr)); gap:6px 16px; font-size:12.5px; margin-bottom:10px; }
+  .dfacts span { display:block; font-size:10.5px; text-transform:uppercase; letter-spacing:.04em; color:var(--muted); font-weight:700; }
+  .dsec { font-size:12.5px; font-weight:700; margin:12px 0 6px; }
+  .mini-w { overflow-x:auto; max-width:100%; }
+  table.mini { border-collapse:collapse; font-size:12px; width:100%; }
+  table.mini th, table.mini td { text-align:left; padding:5px 8px; border-bottom:1px solid var(--line); white-space:nowrap; }
+  table.mini th { font-size:10.5px; text-transform:uppercase; color:var(--muted); }
+  ul.hist { list-style:none; font-size:12px; line-height:1.5; max-height:260px; overflow-y:auto; }
+  ul.hist li { padding:3px 0; border-bottom:1px dashed var(--line); overflow-wrap:anywhere; }
+  ul.hist .hwhen { color:var(--muted); white-space:nowrap; }
+
+  .capban { background:var(--surface); border:1px solid var(--line); border-radius:14px; padding:12px 16px; display:flex; gap:8px 22px; flex-wrap:wrap; align-items:baseline; margin-bottom:12px; font-size:13px; }
+  .capban .kv { display:flex; align-items:baseline; gap:6px; }
+  .capban .kv span { color:var(--muted); font-size:12px; }
+  .capban .kv b { font-size:17px; }
+  .capban .kv.main b { color:var(--accent); }
+  .capban.err { border-color:#f0c36d; align-items:center; }
+
+  /* ---- Settings form ---- */
+  .form { display:flex; flex-direction:column; gap:14px; max-width:900px; }
+  .fsec { background:var(--surface); border:1px solid var(--line); border-radius:14px; padding:14px 16px; }
+  .fsec h3 { font-size:14px; font-weight:700; margin-bottom:3px; }
+  .fsec .hint { font-size:12px; color:var(--muted); margin-bottom:11px; line-height:1.45; }
+  .fgrid { display:grid; grid-template-columns:repeat(auto-fill,minmax(210px,1fr)); gap:12px 14px; }
+  label.f { display:block; font-size:12px; font-weight:600; color:var(--muted); }
+  label.f input { display:block; margin-top:5px; width:100%; }
+  .fh { display:block; font-size:11.5px; font-weight:400; color:var(--muted); margin-top:4px; line-height:1.4; }
+  input[type="number"], input[type="text"] { padding:8px 10px; border-radius:9px; border:1.5px solid var(--line); background:var(--surface-2); color:var(--ink); font:inherit; font-size:13.5px; outline:none; }
+  input[type="number"]:focus, input[type="text"]:focus { border-color:var(--accent); box-shadow:0 0 0 4px rgba(79,70,229,0.12); }
+  input:disabled { opacity:.6; }
+  .trow { display:flex; gap:10px; align-items:flex-end; margin-bottom:8px; max-width:480px; }
+  .trow label.f { flex:1; }
+  .checks { display:flex; gap:18px; flex-wrap:wrap; }
+  .checks label { display:flex; gap:7px; align-items:center; font-size:13.5px; cursor:pointer; }
+  .checks input { width:16px; height:16px; accent-color:var(--accent); }
+  table.ptab { border-collapse:collapse; font-size:13px; margin:12px 0 4px; }
+  table.ptab th, table.ptab td { text-align:left; padding:5px 10px 5px 0; }
+  table.ptab th { font-size:10.5px; text-transform:uppercase; letter-spacing:.04em; color:var(--muted); }
+  table.ptab input { width:130px; }
+  .factions { display:flex; gap:8px; flex-wrap:wrap; align-items:center; }
+
+  /* ---- Dialog + toast ---- */
+  .overlay { position:fixed; inset:0; z-index:300; background:rgba(15,23,42,.45); display:flex; align-items:center; justify-content:center; padding:16px; }
+  .modal { background:var(--surface); color:var(--ink); border:1px solid var(--line); border-radius:14px; width:min(580px,100%); max-height:calc(100vh - 32px); overflow-y:auto; box-shadow:0 18px 60px rgba(0,0,0,.25); }
+  .m-hd { display:flex; align-items:center; gap:10px; padding:14px 16px; border-bottom:1px solid var(--line); }
+  .m-hd b { font-size:15px; flex:1; }
+  .m-bd { padding:14px 16px 4px; font-size:13.5px; line-height:1.55; }
+  .m-bd p + p, .m-bd p + label, .m-bd p + ul { margin-top:9px; }
+  .m-bd label.f { margin-top:12px; }
+  .m-msg { margin:10px 16px 0; }
+  .m-msg:empty { display:none; }
+  .m-ft { display:flex; gap:8px; justify-content:flex-end; padding:14px 16px 16px; flex-wrap:wrap; }
+  .sentence { font-size:14px; }
+  .qt { font-weight:650; overflow-wrap:anywhere; }
+  ul.facts { margin:10px 0 0 18px; color:var(--muted); font-size:12.5px; line-height:1.5; }
+  .toast { position:fixed; bottom:22px; right:22px; z-index:400; background:var(--ink); color:var(--bg); padding:11px 16px; border-radius:10px; font-size:13px; line-height:1.45; opacity:0; transform:translateY(8px); transition:.2s; pointer-events:none; max-width:420px; overflow-wrap:anywhere; }
+  .toast.show { opacity:1; transform:none; }
+  .toast.bad { background:var(--red); color:#fff; }
+
+  /* ---- Mobile (≤720px). The owner checks this from a phone too, and it is
+     embedded at ~375px wide (?embed=1). Nothing may need a sideways scroll:
+     the tables turn into stacked cards, each cell carrying its own label.
+     Desktop is untouched — everything lives inside this one query. ---- */
+  @media (max-width:720px) {
+    body { overflow-x:hidden; }
+    .page { padding:16px 12px 40px; overflow-x:hidden; }
+    h1 { font-size:19px; }
+    .sub { font-size:12.5px; }
+    .head { gap:10px; margin-bottom:12px; }
+    .head-actions { margin-left:0; width:100%; }
+    .head-actions button { flex:1; }
+    .strip { padding:11px 12px; gap:10px; flex-direction:column; align-items:stretch; }
+    .mchip { max-width:100%; }
+    .tabs { margin:14px 0 12px; }
+    .tabs button { padding:9px 8px; font-size:13px; }
+    .bar .at { width:100%; order:3; }
+    .pgrid { grid-template-columns:1fr; gap:11px; }
+    .pcard { padding:12px; border-radius:12px; }
+    .tier { padding:9px 11px; }
+    .capban { padding:10px 12px; gap:6px 16px; }
+    .tw { border:none; background:transparent; overflow:visible; border-radius:0; }
+    table.rt, table.rt tbody, table.rt tr, table.rt td { display:block; width:100%; }
+    table.rt thead { display:none; }
+    table.rt tbody tr { background:var(--surface); border:1px solid var(--line); border-radius:12px; margin-bottom:10px; padding:6px 0; }
+    table.rt td { border-bottom:none !important; padding:6px 12px; display:flex; gap:12px; justify-content:space-between; align-items:flex-start; text-align:right; }
+    table.rt td::before { content:attr(data-label); font-size:10.5px; font-weight:700; text-transform:uppercase; letter-spacing:.04em; color:var(--muted); text-align:left; flex-shrink:0; padding-top:2px; }
+    table.rt td.wide { display:block; text-align:left; }
+    table.rt td.nw { white-space:normal; }
+    table.rt .acts { min-width:0; }
+    table.rt td.wide::before { display:block; margin-bottom:3px; }
+    table.rt td:empty { display:none; }
+    table.rt tr.detail { padding:0; margin-top:-8px; border-top-left-radius:0; border-top-right-radius:0; }
+    table.rt tr.detail > td { display:block; text-align:left; }
+    table.rt tr.detail > td::before { content:none; }
+    .t-title { min-width:0; }
+    .acts, .flags, .tiers { justify-content:flex-end; }
+    table.rt td.wide .acts, table.rt td.wide .tiers { justify-content:flex-start; }
+    input[type="number"], input[type="text"] { font-size:16px; }
+    .fgrid { grid-template-columns:1fr; }
+    .trow { max-width:none; }
+    table.ptab input { width:100%; }
+    .overlay { padding:10px; align-items:flex-end; }
+    .modal { border-radius:12px; max-height:calc(100vh - 20px); }
+    .m-ft button { flex:1; }
+    .toast { left:12px; right:12px; bottom:12px; max-width:none; }
+  }
+
+  /* Embedded (?embed=1): admin-nav.js injects its own top bar + drawer at
+     ≤768px, which would duplicate the parent page's chrome inside the frame.
+     Outside any media query and !important on purpose — same as
+     farm-sizing.html, whose note explains why the unqualified rule lost. */
+  html.embed .nav, html.embed .mobile-topbar, html.embed .nav-backdrop { display:none !important; }
+  html.embed body { padding-top:0 !important; }
+</style>
+</head>
+
+<body>
+  <aside class="nav">
+    <div class="brand">
+      <span class="mark"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polygon points="12 2 2 8.5 12 15 22 8.5 12 2"></polygon><path d="M2 8.5v7L12 22l10-6.5v-7"></path></svg></span>
+      <b>RedeemHub<span>Admin console</span></b>
+    </div>
+    <nav class="links"></nav>
+    <div class="me">
+      <div class="av" id="meAvatar">--</div>
+      <div class="who"><b id="meName">Admin</b><span id="meRole">...</span></div>
+      <div class="actions">
+        <button class="logout" data-theme-toggle onclick="toggleTheme()" title="Toggle dark mode" aria-pressed="false"><svg class="t-moon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"></path></svg><svg class="t-sun" style="display:none" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4"></circle><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M6.34 17.66l-1.41 1.41M19.07 4.93l-1.41 1.41"></path></svg></button>
+        <button class="logout" id="logoutBtn" title="Log out"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"></path><polyline points="16 17 21 12 16 7"></polyline><line x1="21" y1="12" x2="9" y2="12"></line></svg></button>
+      </div>
+    </div>
+  </aside>
+
+  <main class="page">
+    <div class="head">
+      <div>
+        <h1>Bulk packs</h1>
+        <div class="sub">Bulk offers built from spare stock. Nothing is published until you press Send; after that the background check looks after each live offer (sales, sold out, expiry). Prices are fixed when sent and never repriced.</div>
+      </div>
+      <div class="head-actions">
+        <button class="primary" id="runBtn" type="button" title="Runs the background check once, now: sales, stock and expiry for every live offer. It never publishes anything.">Run check now</button>
+      </div>
+    </div>
+
+    <section class="strip" aria-label="Status">
+      <div class="grp">
+        <span class="lbl">Master switch</span>
+        <span class="pill s-off sw-chip" id="swChip">…</span>
+        <button type="button" class="sm" id="swBtn" disabled>…</button>
+      </div>
+      <div class="grp">
+        <span class="lbl">Markets</span>
+        <span class="chips" id="mkChips"><span class="pill s-off">…</span></span>
+      </div>
+      <div class="grp">
+        <span class="lbl">Background check</span>
+        <span class="hb" id="hb">…</span>
+      </div>
+    </section>
+    <div id="notices" role="status" aria-live="polite"></div>
+
+    <div class="tabs" role="tablist" aria-label="Bulk packs sections">
+      <button type="button" role="tab" id="tab-accounts" aria-controls="pane-accounts" aria-selected="true">Account packs</button>
+      <button type="button" role="tab" id="tab-farming" aria-controls="pane-farming" aria-selected="false" tabindex="-1">Farming packs</button>
+      <button type="button" role="tab" id="tab-live" aria-controls="pane-live" aria-selected="false" tabindex="-1">Live offers<span class="cnt" id="cntLive"></span></button>
+      <button type="button" role="tab" id="tab-history" aria-controls="pane-history" aria-selected="false" tabindex="-1">History</button>
+      <button type="button" role="tab" id="tab-settings" aria-controls="pane-settings" aria-selected="false" tabindex="-1">Settings</button>
+    </div>
+
+    <section class="pane" id="pane-accounts" role="tabpanel" aria-labelledby="tab-accounts">
+      <div class="bar"><span class="at" id="acctAt"></span><span class="grow"></span><button type="button" class="sm" id="acctRefresh" title="Re-reads spare stock now instead of using the last few minutes' figures.">Refresh proposals</button></div>
+      <div id="acctBody"></div>
+    </section>
+    <section class="pane" id="pane-farming" role="tabpanel" aria-labelledby="tab-farming" hidden>
+      <div class="bar"><span class="at" id="farmAt"></span><span class="grow"></span><button type="button" class="sm" id="farmRefresh" title="Re-reads farm demand and capacity now.">Refresh proposals</button></div>
+      <div id="farmBody"></div>
+    </section>
+    <section class="pane" id="pane-live" role="tabpanel" aria-labelledby="tab-live" hidden>
+      <div class="bar"><span class="at" id="liveAt"></span><span class="grow"></span><button type="button" class="sm" id="liveRefresh">Refresh</button><button type="button" class="sm danger" id="withdrawAllBtn" disabled>Withdraw all…</button></div>
+      <div id="liveBody"></div>
+    </section>
+    <section class="pane" id="pane-history" role="tabpanel" aria-labelledby="tab-history" hidden>
+      <div class="bar"><span class="at" id="histAt"></span><span class="grow"></span><button type="button" class="sm" id="histRefresh">Refresh</button></div>
+      <div id="histBody"></div>
+    </section>
+    <section class="pane" id="pane-settings" role="tabpanel" aria-labelledby="tab-settings" hidden>
+      <div id="cfgBody"></div>
+    </section>
+  </main>
+
+  <div class="overlay" id="overlay" hidden>
+    <div class="modal" role="dialog" aria-modal="true" aria-labelledby="mTitle">
+      <div class="m-hd"><b id="mTitle"></b><button type="button" class="icon" id="mClose" aria-label="Close">✕</button></div>
+      <div class="m-bd" id="mBody"></div>
+      <div class="m-msg" id="mMsg"></div>
+      <div class="m-ft"><button type="button" id="mCancel">Cancel</button><button type="button" class="primary" id="mOk">Confirm</button></div>
+    </div>
+  </div>
+  <div class="toast" id="toast" role="status" aria-live="polite"></div>
+
+  <script src="/theme.js"></script>
+  <script src="/admin-nav.js"></script>
+  <script>
+  (function () {
+    "use strict";
+
+    // ---- Constants. Mirrors docs/bulk-packs/MODULES.md (config.js / copy.js).
+    // The server is the authority for every one of these; the page only uses
+    // them to label things and to preview a title before the owner confirms.
+    var API = "/api/bulk-packs";
+    // Plain GETs only on the poll — the overview is a cheap read, and the Live
+    // offers table refreshes only while it is the tab on screen.
+    var POLL_MS = 60000;
+    // Ages are re-stamped from their timestamps on this tick, so a page left
+    // open never claims "last pass 1m ago" an hour later.
+    var TICK_MS = 20000;
+    var SUPPORTED = ["eldorado", "g2g", "gameflip"];
+    var FARM_MARKETS = ["eldorado", "g2g"];
+    var SOURCE_MARKETS = { dropset: ["eldorado", "g2g", "gameflip"], noclaim: ["eldorado", "g2g"], farm: ["eldorado", "g2g"] };
+    // Blocked by the owner (seller accounts blocked on those platforms). Always
+    // shown grey so nobody wonders whether they were forgotten.
+    var BLOCKED_LABELS = ["Plati", "GGSel"];
+    var MARKET_LABEL = { eldorado: "Eldorado", g2g: "G2G", gameflip: "Gameflip", plati: "Plati", digiseller: "Plati", ggsel: "GGSel" };
+    var SOURCE_WORD = { dropset: "farmed accounts", noclaim: "no-claim", farm: "farming" };
+    var SOURCE_BADGE = { dropset: "Farmed", noclaim: "No-claim", farm: "Farming" };
+    var TITLE_MAX = { eldorado: 160, g2g: 128, gameflip: 120 };
+    var STATE = {
+      sending: { label: "sending", cls: "s-info", tip: "Being published right now." },
+      live: { label: "live", cls: "s-ok", tip: "On sale." },
+      paused: { label: "paused", cls: "s-warn", tip: "Off sale for now. It can be resumed." },
+      sold_out: { label: "sold out", cls: "s-off", tip: "Fewer free accounts than the minimum order were left, so the offer was closed and the rest released." },
+      sold: { label: "sold", cls: "s-ok", tip: "The pack sold." },
+      withdrawn: { label: "withdrawn", cls: "s-off", tip: "Taken down." },
+      expired: { label: "expired", cls: "s-off", tip: "The marketplace expired or removed it." },
+      error: { label: "error", cls: "s-fail", tip: "Sending failed, so nothing went on sale." }
+    };
+    var UNIT_STATE = { on_offer: "on offer", retiring: "being released", released: "released", delivered: "delivered" };
+    var BASIS = { listing: "your cheapest live listing", set: "the set price", engine: "the pricing engine", "farm-table": "your farm price table", none: "no price reference" };
+    var KEY_LABEL = {
+      bulkPacksEnabled: "Master switch",
+      bulkPacksMarkets: "Markets",
+      bulkPackTiers: "Tiers",
+      bulkPackReserveSingles: "Keep for single listings",
+      bulkPackUnitsPerOffer: "Accounts per offer",
+      bulkFarmPrices: "Farm prices",
+      bulkFarmDurations: "Farm durations",
+      bulkFarmReserveSlots: "Farm slots kept free",
+      bulkFarmReservePristine: "Fresh accounts kept back",
+      bulkFarmMaxQty: "Max accounts per farming offer",
+      bulkPacksLoopMinutes: "Check every (minutes)",
+      bulkFarmSyncMinutes: "Farm capacity sync (minutes)"
+    };
+    var TABS = ["accounts", "farming", "live", "history", "settings"];
+
+    var S = {
+      ov: null, ovErr: "", ovBusy: false,
+      tab: "accounts",
+      acct: null, acctErr: "", acctBusy: false, acctStale: false, acctAgain: "",
+      farm: null, farmErr: "", farmBusy: false, farmStale: false, farmAgain: "",
+      live: null, liveErr: "", liveBusy: false, liveStale: false, liveAgain: false, liveAt: null, liveKey: "",
+      hist: null, histErr: "", histBusy: false, histStale: false, histAgain: false, histAt: null, histKey: "",
+      cfg: null, cfgErr: "", cfgBusy: false,
+      open: {},      // offer id -> { loading, err, offer } for the Details rows
+      openVer: 0,
+      flash: ""      // offer id to scroll to and highlight on the Live offers tab
+    };
+
+    // ---- Helpers ----
+    function el(id) { return document.getElementById(id); }
+    function esc(s) { return String(s == null ? "" : s).replace(/[&<>"']/g, function (c) { return ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]; }); }
+    function num(v) { var n = Number(v); return isFinite(n) ? n : 0; }
+    function toInt(v) { return Math.floor(num(v)); }
+    function money(v) { var n = Number(v); return isFinite(n) ? "$" + n.toFixed(2) : "—"; }
+    function pct(v) { return String(Math.round(num(v) * 100) / 100); }
+    function plural(n, one, many) { return n + " " + (n === 1 ? one : (many || one + "s")); }
+    function cap1(s) { s = String(s || ""); return s ? s.charAt(0).toUpperCase() + s.slice(1) : s; }
+    function trunc(s, n) { s = String(s == null ? "" : s); return s.length > n ? s.slice(0, n - 1) + "…" : s; }
+    function mLabel(m) { return MARKET_LABEL[m] || String(m || "?"); }
+    function farmTerm(days) { var d = toInt(days); return d === 365 ? "1 Year" : d + " Days"; }
+    function durWord(days) { var d = toInt(days); return d === 365 ? "1 year" : plural(d, "day"); }
+    function idOf(o) { return String((o && (o._id || o.id)) || ""); }
+    function bp() { return (S.ov && S.ov.settings) || (S.cfg && S.cfg.settings) || null; }
+
+    // Epoch ms or null — never a guess. An unparseable time renders as unknown.
+    function ts(v) {
+      if (v == null || v === "") return null;
+      var n = typeof v === "number" ? v : Date.parse(v);
+      return typeof n === "number" && isFinite(n) ? n : null;
+    }
+    function ago(at) {
+      if (at == null) return "time unknown";
+      var d = Date.now() - at;
+      if (d < 0) d = 0; // a server clock a few seconds ahead must not read "in 4s"
+      var s = Math.floor(d / 1000);
+      if (s < 60) return s + "s ago";
+      var m = Math.floor(s / 60);
+      if (m < 60) return m + "m ago";
+      var h = Math.floor(m / 60);
+      if (h < 48) return h + "h " + (m % 60) + "m ago";
+      return Math.floor(h / 24) + " days ago";
+    }
+    function agoSpan(at) {
+      return at == null ? "time unknown" : '<span data-ts="' + at + '" title="' + esc(new Date(at).toLocaleString()) + '">' + esc(ago(at)) + "</span>";
+    }
+    function when(at) { return at == null ? "—" : new Date(at).toLocaleString(); }
+    function tickAges() {
+      var nodes = document.querySelectorAll("[data-ts]");
+      for (var i = 0; i < nodes.length; i++) {
+        var at = Number(nodes[i].getAttribute("data-ts"));
+        nodes[i].textContent = ago(isFinite(at) ? at : null);
+      }
+    }
+
+    // Marketplace links and item images come from outside, so only plain web
+    // addresses are ever put in an href/src (never javascript: or the like).
+    function safeUrl(u) { u = String(u || "").trim(); return /^https?:\/\/[^\s"'<>]+$/i.test(u) ? u : ""; }
+    function safeImg(u) {
+      u = String(u || "").trim();
+      if (/^https?:\/\/[^\s"'<>]+$/i.test(u) || /^\/(?!\/)[^\s"'<>]*$/.test(u) || /^data:image\/(png|jpe?g|gif|webp);/i.test(u)) return u;
+      return "";
+    }
+    // Server validation messages name raw setting keys; show the label instead.
+    function plainErr(msg) {
+      return String(msg || "").replace(/\bbulk[A-Za-z]+\b/g, function (k) { return KEY_LABEL[k] || k; });
+    }
+
+    var toastTimer = null;
+    function toast(msg, bad) {
+      var t = el("toast");
+      t.textContent = msg;
+      t.className = "toast show" + (bad ? " bad" : "");
+      clearTimeout(toastTimer);
+      toastTimer = setTimeout(function () { t.className = "toast" + (bad ? " bad" : ""); }, bad ? 6500 : 3800);
+    }
+
+    function apiError(msg, status, data) { var e = new Error(msg); e.status = status; e.data = data; return e; }
+
+    // Every call: same-origin cookie, JSON in and out. 401 → login page;
+    // 403 and success:false → the server's own message, shown to the owner.
+    async function api(path, method, body) {
+      var init = { method: method || "GET", credentials: "same-origin", headers: { Accept: "application/json" } };
+      if (body !== undefined) {
+        init.headers["Content-Type"] = "application/json";
+        init.body = JSON.stringify(body);
+      }
+      var r;
+      try { r = await fetch(API + path, init); }
+      catch (e) { throw apiError("Could not reach the server. Check the connection and try again.", 0, null); }
+      var j = null;
+      try { j = await r.json(); } catch (e) { j = null; }
+      if (r.status === 401) {
+        location.href = "/admin-login.html";
+        throw apiError("Signed out. Sending you to the login page.", 401, j);
+      }
+      if (r.status === 403) {
+        throw apiError((j && j.message) || "Superadmin only: this page needs a superadmin session.", 403, j);
+      }
+      if (!j) throw apiError(r.ok ? "Unexpected answer from the server (not JSON)." : "The server answered HTTP " + r.status + ".", r.status, null);
+      if (!r.ok || j.success === false) throw apiError(j.message || j.error || ("The server answered HTTP " + r.status + "."), r.status, j);
+      return j;
+    }
+
+    // ---- Dialog. One modal for every confirm on the page. onOk resolves to:
+    //   false             → keep it open (a message was shown)
+    //   { doneHtml }      → keep it open showing the result, button becomes Close
+    //   { toast } / other → close it (and toast the text)
+    var M = { onOk: null, busy: false, back: null };
+    function openModal(o) {
+      M.back = document.activeElement;
+      el("mTitle").textContent = o.title || "";
+      el("mBody").innerHTML = o.html || "";
+      setMsg("", "");
+      var ok = el("mOk");
+      ok.hidden = false;
+      ok.textContent = o.okText || "Confirm";
+      ok.className = o.okClass || "primary";
+      ok.disabled = !!o.okDisabled;
+      el("mCancel").textContent = "Cancel";
+      el("mCancel").disabled = false;
+      M.onOk = o.onOk || null;
+      M.busy = false;
+      el("overlay").hidden = false;
+      if (o.onOpen) o.onOpen(el("mBody"));
+      var first = el("mBody").querySelector("input:not([disabled])");
+      try { (first || (ok.disabled ? el("mCancel") : ok)).focus(); } catch (e) {}
+    }
+    function closeModal() {
+      if (M.busy || el("overlay").hidden) return;
+      el("overlay").hidden = true;
+      el("mBody").innerHTML = "";
+      setMsg("", "");
+      M.onOk = null;
+      if (M.back && M.back.focus && document.body.contains(M.back)) { try { M.back.focus(); } catch (e) {} }
+      M.back = null;
+    }
+    function setMsg(kind, html) {
+      var b = el("mMsg");
+      b.className = "m-msg" + (kind ? " note " + kind : "");
+      b.innerHTML = html || "";
+    }
+    async function modalOk() {
+      if (!M.onOk || M.busy) return;
+      var ok = el("mOk"), cancel = el("mCancel"), label = ok.textContent;
+      M.busy = true;
+      ok.disabled = true;
+      cancel.disabled = true;
+      ok.textContent = "Working…";
+      setMsg("", "");
+      var res;
+      try {
+        res = await M.onOk();
+      } catch (e) {
+        res = false;
+        setMsg("bad", esc(plainErr((e && e.message) || "Failed.")));
+      }
+      M.busy = false;
+      cancel.disabled = false;
+      if (res === false) {
+        ok.disabled = false;
+        ok.textContent = label;
+        return;
+      }
+      if (res && res.doneHtml) {
+        setMsg(res.kind || "good", res.doneHtml);
+        ok.hidden = true;
+        cancel.textContent = "Close";
+        M.onOk = null;
+        el("mBody").querySelectorAll("input").forEach(function (x) { x.disabled = true; });
+        try { cancel.focus(); } catch (e) {}
+        return;
+      }
+      closeModal();
+      if (res && res.toast) toast(res.toast);
+    }
+
+    // ---- Overview + header strip ----
+    async function loadOverview() {
+      if (S.ovBusy) return;
+      S.ovBusy = true;
+      try {
+        var j = await api("/overview");
+        if (!j.settings || typeof j.settings !== "object") throw apiError("The overview had no settings in it.", 200, j);
+        S.ov = j;
+        S.ovErr = "";
+      } catch (e) {
+        S.ovErr = (e && e.message) || "request failed";
+      } finally {
+        S.ovBusy = false;
+        renderHeader();
+      }
+    }
+
+    function renderHeader() {
+      var ov = S.ov, b = ov && ov.settings;
+      var chip = el("swChip"), btn = el("swBtn");
+      if (!b) {
+        chip.className = "pill s-off sw-chip";
+        chip.textContent = S.ovErr ? "unknown" : "…";
+        btn.disabled = true;
+        btn.className = "sm";
+        btn.textContent = "Switch on";
+      } else {
+        var on = b.enabled === true;
+        chip.className = "pill sw-chip " + (on ? "s-ok" : "s-off");
+        chip.textContent = on ? "ON" : "OFF";
+        chip.title = on ? "Bulk packs is switched on: offers can be sent." : "Bulk packs is switched off: sending, refilling and resuming are refused.";
+        btn.disabled = false;
+        btn.className = "sm" + (on ? " danger" : " primary");
+        btn.textContent = on ? "Switch off" : "Switch on";
+      }
+      el("mkChips").innerHTML = marketChips(ov);
+      renderHeartbeat();
+
+      var n = "";
+      if (S.ovErr) {
+        n += '<div class="note bad"><b>Could not load the overview:</b> ' + esc(S.ovErr) +
+          (ov ? " Showing the last one read." : "") + "</div>";
+      }
+      if (b && b.enabled !== true) {
+        n += '<div class="note warn"><b>Bulk packs is switched off.</b> Sending, refilling and resuming offers are refused. ' +
+          "Offers already live stay up and are still looked after: sales, sold out and expiry keep being handled.</div>";
+      }
+      el("notices").innerHTML = n;
+      var c = ov && ov.counts;
+      el("cntLive").textContent = c && toInt(c.open) > 0 ? String(toInt(c.open)) : "";
+    }
+
+    // One chip per market. Green only when every kind of pack that market
+    // carries can be delivered; otherwise amber with the gate's own reason.
+    function marketChips(ov) {
+      if (!ov || !ov.settings) return '<span class="pill s-off">' + (S.ovErr ? "unknown" : "…") + "</span>";
+      var b = ov.settings, gates = ov.gates || {};
+      var chosen = Array.isArray(b.markets) ? b.markets : [];
+      var out = SUPPORTED.map(function (m) {
+        var name = mLabel(m), g = gates[m] || {};
+        if (g.blocked) return chipHtml("s-off", name + " · blocked", name + " is blocked. Nothing is ever listed there.");
+        if (chosen.indexOf(m) === -1) {
+          return chipHtml("s-off", name + " · off", name + " is not ticked in Settings → Markets, so nothing is proposed or sent there.");
+        }
+        var open = [], closed = [], lines = [];
+        Object.keys(SOURCE_MARKETS).forEach(function (src) {
+          if (SOURCE_MARKETS[src].indexOf(m) === -1) return;
+          var gg = g[src];
+          if (!gg || typeof gg !== "object") return;
+          if (gg.ok === true) {
+            open.push(src);
+            lines.push(cap1(SOURCE_WORD[src]) + ": open");
+          } else {
+            closed.push({ src: src, reason: String(gg.reason || "closed") });
+            lines.push(cap1(SOURCE_WORD[src]) + ": " + (gg.reason || "closed"));
+          }
+        });
+        var tip = name + "\n" + lines.join("\n");
+        if (!open.length && !closed.length) return chipHtml("s-off", name + " · unknown", name + ": no delivery gate was reported.");
+        if (!closed.length) return chipHtml("s-ok", name + " · live", tip);
+        if (!open.length) return chipHtml("s-warn", name + " · " + closed[0].reason, tip);
+        return chipHtml("s-warn", name + " · " + SOURCE_WORD[closed[0].src] + ": " + closed[0].reason +
+          (closed.length > 1 ? " (+" + (closed.length - 1) + " more)" : ""), tip);
+      });
+      BLOCKED_LABELS.forEach(function (label) {
+        out.push(chipHtml("s-off", label + " · blocked", label + " is blocked: the seller account there is blocked, so bulk packs never lists there."));
+      });
+      return out.join("");
+    }
+    function chipHtml(cls, text, tip) {
+      return '<span class="pill mchip ' + cls + '" title="' + esc(tip || text) + '">' + esc(text) + "</span>";
+    }
+
+    function renderHeartbeat() {
+      var box = el("hb"), ov = S.ov;
+      if (!ov || !ov.settings) {
+        box.className = "hb";
+        box.textContent = S.ovErr ? "not known" : "…";
+        box.title = "";
+        return;
+      }
+      var lp = ov.loop || {}, counts = ov.counts || {}, b = ov.settings;
+      var at = ts(lp.lastRunAt);
+      var every = toInt(b.loopMinutes) || 5;
+      var parts = [at == null ? "no pass yet" : "last pass <b>" + agoSpan(at) + "</b>"];
+      var openN = counts.open != null ? toInt(counts.open) : (lp.lastSummary && lp.lastSummary.open != null ? toInt(lp.lastSummary.open) : null);
+      if (openN != null) parts.push("open <b>" + openN + "</b>");
+      // Three missed passes plus grace: past that, the rows below are history.
+      var stalled = at != null && Date.now() - at > (every * 3 + 3) * 60000;
+      if (stalled) parts.push("<b>looks stalled</b>");
+      if (lp.lastError) parts.push('<span class="err">last error: ' + esc(trunc(lp.lastError, 90)) + "</span>");
+      box.className = "hb" + (stalled ? " stalled" : "");
+      box.innerHTML = parts.join(" · ");
+      box.title = heartbeatTip(lp, counts, every);
+    }
+    function heartbeatTip(lp, counts, every) {
+      var lines = ["Runs every " + every + " min. It looks after live offers (sales, sold out, expiry, stock) and never publishes anything."];
+      var s = lp.lastSummary;
+      if (s && typeof s === "object") {
+        lines.push("Last pass: open " + toInt(s.open) + " (accounts " + toInt(s.accounts) + ", farming " + toInt(s.farming) + ")" +
+          " · sold +" + toInt(s.sold) + " · paused " + toInt(s.paused) + " · being released " + toInt(s.retiring) +
+          " · released " + toInt(s.released) + " · errors " + toInt(s.errors));
+      }
+      if (lp.passes != null) lines.push("Passes since the server started: " + toInt(lp.passes));
+      var bs = counts.byState;
+      if (bs && typeof bs === "object" && !Array.isArray(bs)) {
+        var list = Object.keys(bs).filter(function (k) { return toInt(bs[k]) > 0; }).map(function (k) {
+          return (STATE[k] ? STATE[k].label : k) + " " + toInt(bs[k]);
+        });
+        if (list.length) lines.push("Offers by state: " + list.join(", "));
+      }
+      if (lp.lastError) lines.push("Last error: " + lp.lastError);
+      return lines.join("\n");
+    }
+
+    function openSwitch() {
+      var b = S.ov && S.ov.settings;
+      if (!b) return;
+      var next = b.enabled !== true;
+      openModal({
+        title: next ? "Switch bulk packs on?" : "Switch bulk packs off?",
+        html: next
+          ? "<p>You can then send offers from the proposals. Nothing is published until you press Send on one; the background check only looks after offers that are already live.</p>"
+          : "<p>Offers already live <b>stay live</b> and keep being looked after: sales, sold out and expiry. Sending new offers, refilling and resuming are refused until you switch it back on.</p>" +
+            "<p>To take offers down, use Withdraw in Live offers.</p>",
+        okText: next ? "Switch on" : "Switch off",
+        okClass: next ? "primary" : "primary danger",
+        onOk: async function () {
+          await api("/settings", "POST", { patch: { bulkPacksEnabled: next } });
+          afterChange({ acct: true, farm: true });
+          return { toast: next ? "Bulk packs switched on." : "Bulk packs switched off." };
+        }
+      });
+    }
+
+    async function runNow() {
+      var btn = el("runBtn"), label = btn.textContent;
+      btn.disabled = true;
+      btn.textContent = "Checking…";
+      try {
+        var j = await api("/run-now", "POST", {});
+        toast(runSummary(j));
+      } catch (e) {
+        toast("Check failed: " + plainErr(e.message), true);
+      } finally {
+        btn.disabled = false;
+        btn.textContent = label;
+        afterChange({ live: true, hist: true, acct: true, farm: true });
+      }
+    }
+    function runSummary(j) {
+      var s = (j && (j.summary || j.result)) || j || {};
+      if (s.open === undefined && s.sold === undefined) return (j && j.message) || "Check finished.";
+      return "Check finished: open " + toInt(s.open) + " · sold +" + toInt(s.sold) + " · paused " + toInt(s.paused) +
+        " · being released " + toInt(s.retiring) + " · released " + toInt(s.released) +
+        (toInt(s.errors) ? " · errors " + toInt(s.errors) : "");
+    }
+
+    // After anything that changes offers or stock: re-read the overview, and
+    // mark the tab data old so each tab re-reads when it is next on screen.
+    function afterChange(o) {
+      o = o || {};
+      loadOverview();
+      if (o.live) S.liveStale = true;
+      if (o.hist) S.histStale = true;
+      if (o.acct) S.acctStale = true;
+      if (o.farm) S.farmStale = true;
+      if (S.tab === "live" && S.liveStale) loadLive(true);
+      else if (S.tab === "history" && S.histStale) loadHist(true);
+      else if (S.tab === "accounts" && S.acctStale) loadAccounts(false);
+      else if (S.tab === "farming" && S.farmStale) loadFarm(false);
+    }
+
+    // ---- Tabs ----
+    function setTab(t, fromHash) {
+      if (TABS.indexOf(t) === -1) t = "accounts";
+      S.tab = t;
+      TABS.forEach(function (k) {
+        var on = k === t;
+        var b = el("tab-" + k);
+        b.setAttribute("aria-selected", on ? "true" : "false");
+        b.tabIndex = on ? 0 : -1;
+        el("pane-" + k).hidden = !on;
+      });
+      if (!fromHash) {
+        try { history.replaceState(null, "", location.pathname + location.search + "#" + t); } catch (e) {}
+      }
+      if (t === "accounts") { if (!S.acct || S.acctStale) loadAccounts(false); else renderAccounts(); }
+      else if (t === "farming") { if (!S.farm || S.farmStale) loadFarm(false); else renderFarm(); }
+      else if (t === "live") { if (!S.live || S.liveStale) loadLive(!!S.live); else renderLive(true); }
+      else if (t === "history") { if (!S.hist || S.histStale) loadHist(!!S.hist); else renderHist(true); }
+      else if (t === "settings") { if (!S.cfg && !S.cfgBusy) loadCfg(); }
+    }
+
+    function emptyHtml(head, text) {
+      return '<div class="empty"><b>' + esc(head) + "</b>" + esc(text) + "</div>";
+    }
+    function errNote(what, msg, retryAct) {
+      return '<div class="note bad" style="margin:0 0 12px"><b>Could not load ' + esc(what) + ":</b> " + esc(msg) +
+        (retryAct ? '<button type="button" class="sm" data-act="' + retryAct + '">Try again</button>' : "") + "</div>";
+    }
+    function unwrapProps(j) {
+      if (j && Array.isArray(j.items)) return j;
+      var n = j && (j.proposals || j.result || j.data);
+      if (n && Array.isArray(n.items)) return n;
+      throw apiError("The server's answer had no proposal list.", 200, j);
+    }
+
+    // A tier the owner cannot send is still clickable: on a phone there is no
+    // tooltip, so tapping it says why (aria-disabled, not the disabled attribute).
+    function tierButton(act, ref, label, why, tip) {
+      return '<button type="button" class="tier" data-act="' + act + '" ' + ref +
+        (why ? ' aria-disabled="true" data-why="' + esc(why) + '"' : "") +
+        ' title="' + esc(why || tip || "") + '">' + esc(label) + "</button>";
+    }
+    function liveLink(label, id) {
+      return '<a class="tier live" href="#live" data-act="goto-offer" data-id="' + esc(id) +
+        '" title="Already live. Opens it in Live offers.">' + esc(label) + " · Live ›</a>";
+    }
+    function uniq(list) {
+      var out = [];
+      list.forEach(function (x) { if (x && out.indexOf(x) === -1) out.push(x); });
+      return out;
+    }
+    // A table cell whose content is ONE element: on a phone each row becomes a
+    // card and the cell a "label … value" line, which needs exactly two parts.
+    function td(label, html, cls) {
+      return "<td" + (cls ? ' class="' + cls + '"' : "") + ' data-label="' + esc(label) + '"><div class="cv">' + html + "</div></td>";
+    }
+
+    // ---- Account packs ----
+    // A read asked for while one is in flight is queued, not dropped: the one
+    // in flight may have started before the change the caller just made.
+    async function loadAccounts(refresh) {
+      if (S.acctBusy) { S.acctAgain = S.acctAgain || (refresh ? "refresh" : "plain"); return; }
+      S.acctBusy = true;
+      renderAccounts();
+      try {
+        var j = await api("/proposals/accounts" + (refresh ? "?refresh=1" : ""));
+        S.acct = unwrapProps(j);
+        S.acctErr = "";
+        S.acctStale = false;
+      } catch (e) {
+        S.acctErr = (e && e.message) || "request failed";
+      } finally {
+        S.acctBusy = false;
+        var again = S.acctAgain;
+        S.acctAgain = "";
+        if (again) loadAccounts(again === "refresh"); else renderAccounts();
+      }
+    }
+
+    function renderAccounts() {
+      var btn = el("acctRefresh");
+      btn.disabled = S.acctBusy;
+      btn.textContent = S.acctBusy ? "Reading…" : "Refresh proposals";
+      var at = S.acct ? ts(S.acct.at) : null;
+      el("acctAt").innerHTML = at != null ? "Proposals as of " + agoSpan(at) : "";
+      var box = el("acctBody");
+      var html = S.acctErr ? errNote("account packs", S.acctErr, "reload-acct") : "";
+      if (!S.acct) {
+        box.innerHTML = html + (S.acctBusy ? '<div class="loading">Reading spare stock for every set… this can take a few seconds.</div>' : "");
+        return;
+      }
+      var items = S.acct.items;
+      if (!items.length) {
+        box.innerHTML = html + emptyHtml("No account packs to propose right now", accountsEmptyHint());
+        return;
+      }
+      box.innerHTML = html + '<div class="pgrid">' + items.map(acctCard).join("") + "</div>";
+    }
+    function accountsEmptyHint() {
+      var b = bp();
+      if (!b) return "No set has enough spare accounts for the smallest pack.";
+      var mins = (Array.isArray(b.tiers) ? b.tiers : []).map(function (t) { return toInt(t.minQty); }).filter(function (n) { return n > 0; });
+      var min = mins.length ? Math.min.apply(null, mins) : 5;
+      if (!Array.isArray(b.markets) || !b.markets.length) return "No market is ticked in Settings → Markets.";
+      return "A set shows up here once it has at least " + min + " spare accounts after keeping " + toInt(b.reserveSingles) + " back for single listings.";
+    }
+
+    function acctCard(it, i) {
+      var set = it.set || {};
+      var src = it.source === "noclaim" ? "noclaim" : "dropset";
+      var free = toInt(it.free), reserve = toInt(it.reserve), surplus = toInt(it.surplus);
+      var h = '<article class="pcard">';
+      h += '<div class="p-hd"><div class="p-name"><b>' + esc(set.name || "Unnamed set") + "</b>" +
+        (set.game ? "<span>" + esc(set.game) + "</span>" : "") + "</div>" +
+        '<span class="badge b-' + src + '" title="' + esc(src === "noclaim"
+          ? "No-claim: the buyer logs in, links their own game account and claims the rewards. Stock is a shared shelf, picked at sale."
+          : "Farmed: the drops are already claimed on each account. Accounts are reserved when you send.") + '">' +
+        SOURCE_BADGE[src] + "</span></div>";
+      h += thumbs(set);
+      h += '<div class="p-stats">' +
+        stat(free, "free", src === "noclaim" ? "Accounts on the no-claim shelf for this set." : "Accounts holding this bundle that are not on any listing.") +
+        (src === "dropset" || reserve > 0 ? stat(reserve, "kept for singles", "Held back for your single listings (Settings → Keep for single listings).") : "") +
+        stat(surplus, "spare", "What bulk offers can use.") + "</div>";
+      var rows = (Array.isArray(it.markets) ? it.markets : []).map(function (m, mi) { return acctMarketRow(it, i, m, mi); }).join("");
+      h += '<div class="mrows">' + (rows || '<div class="muted">No market is open for this kind of pack.</div>') + "</div>";
+      return h + "</article>";
+    }
+    function stat(n, label, tip) {
+      return '<span class="stat" title="' + esc(tip) + '"><b>' + n + "</b>" + esc(label) + "</span>";
+    }
+    function thumbs(set) {
+      var items = Array.isArray(set.items) ? set.items : [];
+      var shown = items.slice(0, 6), more = items.length - shown.length;
+      var h = shown.map(function (x) {
+        var name = String((x && x.name) || "Item"), q = toInt(x && x.qty);
+        var tip = name + (q > 1 ? " ×" + q : "");
+        var src = safeImg(x && x.image);
+        return src
+          ? '<img src="' + esc(src) + '" alt="' + esc(name) + '" title="' + esc(tip) + '" loading="lazy" referrerpolicy="no-referrer">'
+          : '<span class="ph" title="' + esc(tip) + '">' + esc(name.charAt(0).toUpperCase() || "?") + "</span>";
+      }).join("");
+      if (!shown.length) {
+        var cover = safeImg(set.image);
+        if (cover) h = '<img src="' + esc(cover) + '" alt="' + esc(set.name || "Set") + '" loading="lazy" referrerpolicy="no-referrer">';
+      }
+      if (more > 0) {
+        h += '<span class="more" title="' + esc(items.slice(6).map(function (x) { return x && x.name; }).filter(Boolean).join(", ")) + '">+' + more + "</span>";
+      }
+      return h ? '<div class="thumbs">' + h + "</div>" : "";
+    }
+
+    function acctMarketRow(it, i, m, mi) {
+      var market = m.market, name = mLabel(market), gate = m.gate || {};
+      var anchor = num(m.anchor);
+      var h = '<div class="mrow"><div class="mh"><b>' + esc(name) + "</b>" +
+        (anchor > 0
+          ? '<span class="muted">single ' + money(anchor) + " · from " + esc(BASIS[m.basis] || m.basis || "a price reference") + "</span>"
+          : '<span class="muted">no single price to start from</span>') + "</div>";
+      var reasons = [];
+      var btns = (Array.isArray(m.tiers) ? m.tiers : []).map(function (t, ti) {
+        return acctTierBtn(it, m, t, i, mi, ti, reasons);
+      }).join("");
+      h += '<div class="tiers">' + (btns || '<span class="muted">No tiers set.</span>') + "</div>";
+      if (gate.ok === false) h += '<div class="why">Closed on ' + esc(name) + ": " + esc(gate.reason || "delivery is not switched on") + "</div>";
+      else if (reasons.length) h += '<div class="why">' + esc(uniq(reasons).join(" ")) + "</div>";
+      return h + "</div>";
+    }
+    function acctTierBtn(it, m, t, i, mi, ti, reasons) {
+      var market = m.market, isGf = market === "gameflip";
+      var minQty = toInt(t.minQty), d = num(t.discountPct);
+      var price = isGf ? num(t.packPrice) : num(t.unitPrice);
+      if (t.liveOfferId) return liveLink(isGf ? "Pack of " + minQty : minQty + "+", t.liveOfferId);
+      var label = !(price > 0)
+        ? (isGf ? "Pack of " + minQty : minQty + "+") + " · no price"
+        : (isGf ? "Pack of " + minQty + " — " + money(price) : minQty + "+ at " + money(price) + " each");
+      var gate = m.gate || {}, why = "";
+      if (gate.ok === false) {
+        why = "Closed on " + mLabel(market) + ": " + (gate.reason || "delivery is not switched on") + ".";
+      } else if (!(price > 0)) {
+        why = "No price to start from on " + mLabel(market) + ": no live single listing and no set price.";
+        reasons.push(why);
+      } else if (t.fits !== true) {
+        why = it.source === "noclaim"
+          ? minQty + "+ needs " + minQty + " accounts on the " + mLabel(market) + " no-claim shelf; there are fewer now."
+          : minQty + "+ needs " + minQty + " spare accounts; " + toInt(it.surplus) + " spare now.";
+        reasons.push(why);
+      }
+      var tip = (isGf ? "One Gameflip listing: " + minQty + " accounts sold and delivered together" : "Buyers order at least " + minQty + " accounts") +
+        (d > 0 ? ", " + pct(d) + "% off the single price." : ".");
+      return tierButton("send-acct", 'data-i="' + i + '" data-m="' + mi + '" data-t="' + ti + '"', label, why, tip);
+    }
+
+    // Title preview, built the way copy.js builds it (CONTRACT: accountsTitle /
+    // farmTitle). The server makes the real one; the dialog says so.
+    function accountsTitlePreview(base, market, minQty, d) {
+      base = String(base || "").trim() || "Twitch Drops bundle";
+      var suffix = market === "gameflip"
+        ? " — PACK OF " + minQty + " ACCOUNTS"
+        : " — BULK " + minQty + "+ accounts" + (num(d) > 0 ? " (" + pct(d) + "% off)" : "");
+      var max = TITLE_MAX[market] || 120;
+      if (base.length + suffix.length > max) base = base.slice(0, Math.max(1, max - suffix.length - 1)).replace(/\s+$/, "") + "…";
+      return base + suffix;
+    }
+    function farmTitlePreview(game, days, minQty, market) {
+      var t = String(game || "") + " Twitch Drops Automatic Farming " + farmTerm(days) + " — Bulk " + minQty + "+ Accounts";
+      if (t.length > (TITLE_MAX[market] || 120)) t = t.replace(/ Accounts$/, "");
+      return t;
+    }
+
+    function openSendAcct(i, mi, ti) {
+      var it = S.acct && S.acct.items && S.acct.items[i];
+      var m = it && Array.isArray(it.markets) ? it.markets[mi] : null;
+      var t = m && Array.isArray(m.tiers) ? m.tiers[ti] : null;
+      if (!t) return;
+      var b = bp() || {};
+      var set = it.set || {}, market = m.market, name = mLabel(market);
+      var isGf = market === "gameflip", src = it.source === "noclaim" ? "noclaim" : "dropset";
+      var minQty = toInt(t.minQty), d = num(t.discountPct), unit = num(t.unitPrice), pack = num(t.packPrice);
+      var surplus = Math.max(0, toInt(it.surplus));
+      var maxU = Math.max(minQty, surplus);
+      var def = Math.max(minQty, Math.min(toInt(b.unitsPerOffer) || 20, surplus));
+      var title = accountsTitlePreview(set.name, market, minQty, d);
+      var setId = String(set.id || set._id || "");
+
+      function sentence(n) {
+        var q = '<span class="qt">“' + esc(title) + '”</span>';
+        if (isGf) {
+          return "List " + q + " on Gameflip as one pack of " + minQty + " accounts for <b>" + money(pack) + "</b>; " +
+            minQty + " accounts will be reserved and delivered together.";
+        }
+        if (src === "noclaim") {
+          return "List " + q + " on " + esc(name) + " at <b>" + money(unit) + "</b> per account, showing up to <b>" + n +
+            "</b> accounts from the shared no-claim shelf. Nothing is reserved now: an account is picked when an order comes in.";
+        }
+        return "List " + q + " on " + esc(name) + " at <b>" + money(unit) + "</b> per account; <b>" + n + "</b> accounts will be reserved.";
+      }
+
+      var facts = [];
+      facts.push(isGf
+        ? "Gameflip sells the pack as one item; the buyer receives " + minQty + " separate accounts, each holding the whole bundle."
+        : "Buyers must order at least " + minQty + " accounts. Each account holds the whole bundle.");
+      if (num(m.anchor) > 0) facts.push((d > 0 ? pct(d) + "% off" : "No discount on") + " the single price of " + money(m.anchor) + " (" + (BASIS[m.basis] || m.basis || "price reference") + ").");
+      facts.push("The price is fixed once sent. Bulk offers are never repriced.");
+      if (src === "dropset") facts.push("Reserved accounts leave single-listing stock until they sell or you withdraw the offer.");
+      facts.push("Title preview: the final title starts from your cheapest single listing's title when there is one.");
+
+      var html = '<p class="sentence" id="sendSentence">' + sentence(def) + "</p>";
+      if (!isGf) {
+        html += '<label class="f">Accounts on this offer' +
+          '<input type="number" id="sendUnits" min="' + minQty + '" max="' + maxU + '" step="1" value="' + def + '" inputmode="numeric">' +
+          '<span class="fh">From ' + minQty + " to " + maxU + (src === "noclaim" ? " (the server caps it at this market's share of the shelf)." : " (the spare accounts in this set).") + "</span></label>";
+      }
+      html += '<ul class="facts">' + facts.map(function (f) { return "<li>" + esc(f) + "</li>"; }).join("") + "</ul>";
+      if (b.enabled !== true) html += '<div class="note warn">Bulk packs is switched off, so the server will refuse this. Switch it on at the top of the page first.</div>';
+
+      openModal({
+        title: "Send to " + name,
+        html: html,
+        okText: "Send",
+        onOpen: function (body) {
+          var inp = body.querySelector("#sendUnits");
+          if (!inp) return;
+          inp.addEventListener("input", function () {
+            var n = Number(inp.value);
+            el("sendSentence").innerHTML = sentence(Number.isInteger(n) && n > 0 ? n : "?");
+          });
+        },
+        onOk: async function () {
+          var payload = { source: src, setId: setId, market: market, minQty: minQty };
+          if (!isGf) {
+            var n = Number(el("sendUnits").value);
+            if (!Number.isInteger(n) || n < minQty || n > maxU) {
+              setMsg("bad", "Enter a whole number of accounts from " + minQty + " to " + maxU + ".");
+              return false;
+            }
+            payload.units = n;
+          }
+          var j = await api("/send", "POST", payload);
+          afterChange({ acct: true, live: true });
+          return { doneHtml: sentHtml(j, market) };
+        }
+      });
+    }
+
+    function sentHtml(j, market) {
+      var o = (j && j.offer) || {};
+      var mk = o.market || market;
+      var st = STATE[o.state];
+      var h = "<b>Sent.</b> The offer is " + esc(st ? st.label : "live") + " on " + esc(mLabel(mk)) + ".";
+      var url = safeUrl(o.url);
+      if (url) h += ' <a href="' + esc(url) + '" target="_blank" rel="noopener noreferrer">Open it on ' + esc(mLabel(mk)) + " ↗</a>";
+      var id = idOf(o);
+      if (id) h += ' · <a href="#live" data-act="goto-offer" data-id="' + esc(id) + '">See it in Live offers</a>';
+      if (j && j.message) h += '<div class="t-sub">' + esc(j.message) + "</div>";
+      return h;
+    }
+
+    // ---- Farming packs ----
+    async function loadFarm(refresh) {
+      if (S.farmBusy) { S.farmAgain = S.farmAgain || (refresh ? "refresh" : "plain"); return; }
+      S.farmBusy = true;
+      renderFarm();
+      try {
+        var j = await api("/proposals/farming" + (refresh ? "?refresh=1" : ""));
+        S.farm = unwrapProps(j);
+        S.farmErr = "";
+        S.farmStale = false;
+      } catch (e) {
+        S.farmErr = (e && e.message) || "request failed";
+      } finally {
+        S.farmBusy = false;
+        var again = S.farmAgain;
+        S.farmAgain = "";
+        if (again) loadFarm(again === "refresh"); else renderFarm();
+      }
+    }
+
+    function renderFarm() {
+      var btn = el("farmRefresh");
+      btn.disabled = S.farmBusy;
+      btn.textContent = S.farmBusy ? "Reading…" : "Refresh proposals";
+      var p = S.farm;
+      var at = p ? ts(p.at) : null;
+      el("farmAt").innerHTML = at != null ? "Proposals as of " + agoSpan(at) : "";
+      var box = el("farmBody");
+      var html = S.farmErr ? errNote("farming packs", S.farmErr, "reload-farm") : "";
+      if (!p) {
+        box.innerHTML = html + (S.farmBusy ? '<div class="loading">Reading farm demand and free capacity…</div>' : "");
+        return;
+      }
+      html += capBanner(p);
+      var items = p.items;
+      if (!items.length) {
+        var b = bp();
+        var durs = b && Array.isArray(b.farmDurations) && b.farmDurations.length ? b.farmDurations.map(durWord).join(", ") : "the durations you offer";
+        box.innerHTML = html + emptyHtml("No farming packs to propose", "No farm orders in the last 60 days for " + durs + ".");
+        return;
+      }
+      // One column per market that appears in any proposal, in the usual order.
+      var cols = [];
+      items.forEach(function (it) {
+        (Array.isArray(it.markets) ? it.markets : []).forEach(function (m) {
+          if (m && m.market && cols.indexOf(m.market) === -1) cols.push(m.market);
+        });
+      });
+      cols.sort(function (a, c) {
+        var x = FARM_MARKETS.indexOf(a), y = FARM_MARKETS.indexOf(c);
+        return (x === -1 ? 99 : x) - (y === -1 ? 99 : y);
+      });
+      var adv = toInt(p.advertisable);
+      var head = "<tr><th>Game</th><th>Duration</th><th>Orders (60 days)</th>" +
+        cols.map(function (m) { return "<th>" + esc(mLabel(m)) + "</th>"; }).join("") + "</tr>";
+      var rows = items.map(function (it, i) {
+        var list = Array.isArray(it.markets) ? it.markets : [];
+        var h = "<tr>";
+        h += td("Game", "<b>" + esc(it.game || "—") + "</b>", "wide");
+        h += td("Duration", esc(durWord(it.days)), "nw");
+        h += td("Orders (60 days)", toInt(it.orders) +
+          (it.accounts != null ? ' <span class="muted">· ' + plural(toInt(it.accounts), "account") + "</span>" : ""), "num");
+        cols.forEach(function (mk) {
+          var mi = -1;
+          for (var k = 0; k < list.length; k++) { if (list[k] && list[k].market === mk) { mi = k; break; } }
+          h += td(mLabel(mk), mi === -1 ? '<span class="muted">—</span>' : farmCell(it, list[mi], i, mi, adv), "wide");
+        });
+        return h + "</tr>";
+      }).join("");
+      var note = cols.length ? "" : '<div class="note warn" style="margin:0 0 12px">These proposals carry no market rows, so nothing can be sent from here. Refresh, or check Settings → Markets.</div>';
+      box.innerHTML = html + note + '<div class="tw"><table class="rt"><thead>' + head + "</thead><tbody>" + rows + "</tbody></table></div>";
+    }
+
+    function capBanner(p) {
+      var c = p.capacity || {};
+      if (c.error) {
+        return '<div class="capban err"><span class="pill s-warn">capacity unknown</span><span>Could not read farm capacity: ' + esc(c.error) +
+          ". Nothing can be advertised until it reads again.</span></div>";
+      }
+      var b = bp() || {};
+      var adv = toInt(p.advertisable);
+      var tip = "Can advertise now is the smallest of: max accounts per farming offer (" + toInt(b.farmMaxQty) +
+        "), best stack room (" + toInt(c.bestStackRoom) + "), free slots minus the " + toInt(b.farmReserveSlots) +
+        " kept free (" + (toInt(c.totalFree) - toInt(b.farmReserveSlots)) + "), fresh accounts minus the " +
+        toInt(b.farmReservePristine) + " kept back (" + (toInt(c.pristine) - toInt(b.farmReservePristine)) + ").";
+      var at = ts(c.at);
+      return '<div class="capban" title="' + esc(tip) + '">' +
+        kv("Best stack room", toInt(c.bestStackRoom), "Free slots on the single emptiest stack (one order must fit on one stack).") +
+        kv("Free slots", toInt(c.totalFree), "Free farm slots across all running stacks.") +
+        kv("Fresh accounts", toInt(c.pristine), "Unused pool accounts ready to farm.") +
+        '<span class="kv main" title="' + esc(tip) + '"><span>Can advertise now</span><b>' + adv + "</b></span>" +
+        (at != null ? '<span class="kv"><span>read ' + agoSpan(at) + "</span></span>" : "") + "</div>";
+    }
+    function kv(label, value, tip) {
+      return '<span class="kv" title="' + esc(tip) + '"><span>' + esc(label) + "</span><b>" + value + "</b></span>";
+    }
+
+    function farmCell(it, m, i, mi, adv) {
+      var gate = m.gate || {}, name = mLabel(m.market), reasons = [];
+      var btns = (Array.isArray(m.tiers) ? m.tiers : []).map(function (t, ti) {
+        var minQty = toInt(t.minQty), price = num(t.unitPrice), d = num(t.discountPct);
+        if (t.liveOfferId) return liveLink(minQty + "+", t.liveOfferId);
+        var why = "";
+        if (gate.ok === false) {
+          why = "Closed on " + name + ": " + (gate.reason || "delivery is not switched on") + ".";
+        } else if (!(price > 0)) {
+          why = "No farm price for " + durWord(it.days) + " on " + name + ". Set one in Settings → Farm prices.";
+          reasons.push(why);
+        } else if (t.fits === false || adv < minQty) {
+          why = minQty + "+ needs room for " + minQty + " accounts; " + adv + " can be advertised now.";
+          reasons.push(why);
+        }
+        var tip = "Buyers order at least " + minQty + " accounts" + (d > 0 ? ", " + pct(d) + "% off the farm price." : ".");
+        return tierButton("send-farm", 'data-i="' + i + '" data-m="' + mi + '" data-t="' + ti + '"',
+          price > 0 ? minQty + "+ at " + money(price) + " each" : minQty + "+ · no price", why, tip);
+      }).join("");
+      var h = '<div class="tiers">' + (btns || '<span class="muted">No tiers set.</span>') + "</div>";
+      if (gate.ok === false) h += '<div class="why">Closed: ' + esc(gate.reason || "delivery is not switched on") + "</div>";
+      else if (reasons.length) h += '<div class="why">' + esc(uniq(reasons).join(" ")) + "</div>";
+      return h;
+    }
+
+    function openSendFarm(i, mi, ti) {
+      var p = S.farm, it = p && p.items && p.items[i];
+      var m = it && Array.isArray(it.markets) ? it.markets[mi] : null;
+      var t = m && Array.isArray(m.tiers) ? m.tiers[ti] : null;
+      if (!t) return;
+      var b = bp() || {};
+      var market = m.market, name = mLabel(market);
+      var minQty = toInt(t.minQty), d = num(t.discountPct), unit = num(t.unitPrice);
+      var adv = toInt(p.advertisable);
+      var days = toInt(it.days), game = String(it.game || "");
+      var title = farmTitlePreview(game, days, minQty, market);
+      var facts = [
+        "Each account farms " + game + " for " + durWord(days) + " from the order. Slots and fresh accounts are set up when an order comes in; logins arrive in the order chat.",
+        (d > 0 ? pct(d) + "% off" : "No discount on") + " the farm price of " + money(m.anchor) + " per account.",
+        "The price is fixed once sent. Bulk offers are never repriced.",
+        "The quantity follows free farm capacity: the background check pauses the offer when there is no room for " + minQty +
+          " and resumes it when there is again (only while bulk packs is switched on).",
+        "Title preview: the server builds the final title and checks the farm services read it back correctly."
+      ];
+      var html = '<p class="sentence">List <span class="qt">“' + esc(title) + '”</span> on ' + esc(name) + " at <b>" + money(unit) +
+        "</b> per account; buyers can order " + minQty + " to <b>" + adv + "</b> accounts.</p>" +
+        '<label class="f">Accounts on this offer<input type="number" value="' + adv + '" readonly disabled>' +
+        '<span class="fh">Set by free farm capacity right now (Can advertise now).</span></label>' +
+        '<ul class="facts">' + facts.map(function (f) { return "<li>" + esc(f) + "</li>"; }).join("") + "</ul>";
+      if (b.enabled !== true) html += '<div class="note warn">Bulk packs is switched off, so the server will refuse this. Switch it on at the top of the page first.</div>';
+      openModal({
+        title: "Send farming pack to " + name,
+        html: html,
+        okText: "Send",
+        onOk: async function () {
+          var j = await api("/send", "POST", { source: "farm", game: game, days: days, market: market, minQty: minQty, units: adv });
+          afterChange({ farm: true, live: true });
+          return { doneHtml: sentHtml(j, market) };
+        }
+      });
+    }
+
+    // ---- Live offers + History ----
+    function listOf(j) {
+      var a = j && (j.offers || j.items || j.data);
+      if (Array.isArray(a)) return a;
+      throw apiError("The server's answer had no offer list.", 200, j);
+    }
+
+    async function loadLive(quiet) {
+      if (S.liveBusy) { S.liveAgain = true; return; }
+      S.liveBusy = true;
+      if (!quiet) renderLive(true);
+      try {
+        var j = await api("/offers?scope=open&limit=100");
+        S.live = listOf(j);
+        S.liveErr = "";
+        S.liveStale = false;
+        S.liveAt = Date.now();
+      } catch (e) {
+        S.liveErr = (e && e.message) || "request failed";
+      } finally {
+        S.liveBusy = false;
+        if (S.liveAgain) { S.liveAgain = false; loadLive(true); } else renderLive(false);
+      }
+    }
+    async function loadHist(quiet) {
+      if (S.histBusy) { S.histAgain = true; return; }
+      S.histBusy = true;
+      if (!quiet) renderHist(true);
+      try {
+        var j = await api("/offers?scope=closed&limit=100");
+        S.hist = listOf(j);
+        S.histErr = "";
+        S.histStale = false;
+        S.histAt = Date.now();
+      } catch (e) {
+        S.histErr = (e && e.message) || "request failed";
+      } finally {
+        S.histBusy = false;
+        if (S.histAgain) { S.histAgain = false; loadHist(true); } else renderHist(false);
+      }
+    }
+
+    function kindLabel(o) {
+      if (o.kind === "farming" || o.source === "farm") return "Farming · " + durWord(o.days);
+      return "Accounts · " + (o.source === "noclaim" ? "no-claim" : "farmed");
+    }
+    function tierLabel(o) {
+      var n = toInt(o.minQty);
+      return o.market === "gameflip" ? "pack " + n : "min " + n;
+    }
+    function priceLabel(o) {
+      return o.market === "gameflip" ? money(o.packPrice) + " / pack" : money(o.unitPrice) + " each";
+    }
+    function titleCell(o, withAge) {
+      var url = safeUrl(o.url), title = o.title || "(no title)";
+      var what = o.source === "farm" ? o.game : (o.setName || o.game);
+      var bits = [];
+      if (what) bits.push(esc(what));
+      if (withAge && ts(o.createdAt) != null) bits.push("sent " + agoSpan(ts(o.createdAt)));
+      return '<div class="t-title">' + (url ? '<a href="' + esc(url) + '" target="_blank" rel="noopener noreferrer">' + esc(title) + "</a>" : esc(title)) + "</div>" +
+        (bits.length ? '<div class="t-sub">' + bits.join(" · ") + "</div>" : "") +
+        (o.lastError ? '<div class="t-err">' + esc(trunc(o.lastError, 240)) + "</div>" : "");
+    }
+    function stateCell(o) {
+      var st = STATE[o.state] || { label: String(o.state || "unknown"), cls: "s-off", tip: "" };
+      var h = '<span class="pill sm ' + st.cls + '" title="' + esc(st.tip) + '">' + esc(st.label) + "</span>";
+      if (o.lowStock) h += '<span class="pill sm s-warn" title="Fewer accounts available than the minimum order. Shown for information: nothing is changed automatically.">low stock</span>';
+      if (o.autoPaused) h += '<span class="pill sm s-warn" title="Paused by the background check, not by you. It resumes by itself when there is room again, while bulk packs is switched on.">auto-paused</span>';
+      return '<div class="flags">' + h + "</div>";
+    }
+    function countsCell(o) {
+      var free = o.source === "dropset" ? toInt(o.freeCount) : toInt(o.advertisedQty);
+      var freeTip = o.source === "dropset"
+        ? "Reserved accounts still free on this offer"
+        : (o.source === "farm" ? "Quantity the offer shows (follows free farm capacity)" : "Quantity the offer shows (shared no-claim shelf)");
+      var h = '<span title="' + esc(freeTip) + '">' + free + '</span> / <span title="Accounts delivered">' + toInt(o.unitsDelivered) +
+        '</span> / <span title="Orders">' + toInt(o.ordersCount) + "</span>";
+      if (toInt(o.retiringCount) > 0) h += '<div class="t-sub">' + toInt(o.retiringCount) + " being released</div>";
+      return h;
+    }
+    function actBtn(act, id, label, tip, cls) {
+      return '<button type="button" class="sm' + (cls ? " " + cls : "") + '" data-act="' + act + '" data-id="' + esc(id) + '" title="' + esc(tip) + '">' + esc(label) + "</button>";
+    }
+    function actionsCell(o) {
+      var id = idOf(o), mk = o.market, st = o.state;
+      if (!id) return "";
+      var b = [];
+      if (st === "sending") {
+        b.push('<span class="muted" title="Being published right now. Refresh in a moment.">publishing…</span>');
+      } else {
+        // Gameflip has no pause: a pack is either listed or withdrawn.
+        if (mk !== "gameflip" && st === "live") b.push(actBtn("pause", id, "Pause", "Take it off sale for now. You can resume it."));
+        if (mk !== "gameflip" && st === "paused") b.push(actBtn("resume", id, "Resume", "Put it back on sale. Needs the master switch on and enough stock or capacity."));
+        if (o.source === "dropset" && (mk === "eldorado" || mk === "g2g") && (st === "live" || st === "paused")) {
+          b.push(actBtn("refill", id, "Refill", "Add more spare accounts from the same set to this offer."));
+        }
+        b.push(actBtn("withdraw", id, "Withdraw", "Take it down for good.", "danger"));
+      }
+      b.push(actBtn("details", id, S.open[id] ? "Hide" : "Details", "The accounts on this offer and its history."));
+      return '<div class="acts">' + b.join("") + "</div>";
+    }
+
+    function liveRow(o) {
+      var id = idOf(o);
+      var h = '<tr data-offer="' + esc(id) + '"' + (S.flash && S.flash === id ? ' class="flash"' : "") + ">";
+      h += td("Market", "<b>" + esc(mLabel(o.market)) + "</b>");
+      h += td("Kind", esc(kindLabel(o)));
+      h += td("Offer", titleCell(o, true), "wide");
+      h += td("Tier", esc(tierLabel(o)) + (num(o.discountPct) > 0 ? '<div class="t-sub">' + esc(pct(o.discountPct)) + "% off</div>" : ""), "nw");
+      h += td("Price", esc(priceLabel(o)), "num");
+      h += td("Free / delivered / orders", countsCell(o), "num");
+      h += td("State", stateCell(o));
+      h += td("Actions", actionsCell(o), "wide");
+      h += "</tr>";
+      if (S.open[id]) h += '<tr class="detail"><td colspan="8">' + detailHtml(id) + "</td></tr>";
+      return h;
+    }
+    function histRow(o) {
+      var id = idOf(o);
+      var closedAt = ts(o.closedAt) != null ? ts(o.closedAt) : ts(o.updatedAt);
+      var h = '<tr data-offer="' + esc(id) + '">';
+      h += td("Closed", esc(closedAt == null ? "—" : new Date(closedAt).toLocaleDateString()), "nw");
+      h += td("Market", "<b>" + esc(mLabel(o.market)) + "</b>");
+      h += td("Kind", esc(kindLabel(o)));
+      h += td("Offer", titleCell(o, false), "wide");
+      h += td("Tier", esc(tierLabel(o)), "nw");
+      h += td("Price", esc(priceLabel(o)), "num");
+      h += td("State", stateCell(o) + (toInt(o.retiringCount) > 0 ? '<div class="t-sub">' + toInt(o.retiringCount) + " being released</div>" : ""));
+      h += td("Sold", plural(toInt(o.ordersCount), "order") + " · " + plural(toInt(o.unitsDelivered), "account"), "num");
+      h += td("Revenue", money(num(o.revenueUsd)), "num");
+      h += td("", id ? actBtn("details", id, S.open[id] ? "Hide" : "Details", "The accounts on this offer and its history.") : "");
+      h += "</tr>";
+      if (S.open[id]) h += '<tr class="detail"><td colspan="10">' + detailHtml(id) + "</td></tr>";
+      return h;
+    }
+
+    function renderLive(force) {
+      var btn = el("liveRefresh");
+      btn.disabled = S.liveBusy;
+      btn.textContent = S.liveBusy ? "Reading…" : "Refresh";
+      el("withdrawAllBtn").disabled = !(S.live && S.live.length);
+      el("liveAt").innerHTML = S.liveAt != null ? "Read " + agoSpan(S.liveAt) + " · offers are checked in the background too" : "";
+      // Rebuilt only when something really moved, so a poll never steals the
+      // focus or the scroll from a button the owner is about to press.
+      var key = JSON.stringify([S.live, S.liveErr, S.openVer, S.flash, !S.live && S.liveBusy]);
+      if (!force && key === S.liveKey) return;
+      S.liveKey = key;
+      var box = el("liveBody");
+      var html = S.liveErr ? errNote("live offers", S.liveErr, "reload-live") : "";
+      if (!S.live) {
+        box.innerHTML = html + (S.liveBusy ? '<div class="loading">Reading open offers…</div>' : "");
+        return;
+      }
+      if (!S.live.length) {
+        box.innerHTML = html + emptyHtml("No open bulk offers", "Send one from Account packs or Farming packs.");
+      } else {
+        box.innerHTML = html + '<div class="tw"><table class="rt"><thead><tr><th>Market</th><th>Kind</th><th>Offer</th><th>Tier</th><th>Price</th>' +
+          '<th class="wrap" title="Free accounts / accounts delivered / orders">Free / delivered / orders</th><th>State</th><th>Actions</th></tr></thead><tbody>' +
+          S.live.map(liveRow).join("") + "</tbody></table></div>";
+      }
+      if (S.flash && !S.liveBusy) {
+        var id = S.flash;
+        var row = box.querySelector('tr[data-offer="' + (window.CSS && CSS.escape ? CSS.escape(id) : id.replace(/[^A-Za-z0-9_-]/g, "")) + '"]');
+        if (row) {
+          try { row.scrollIntoView({ block: "center", behavior: "smooth" }); } catch (e) { row.scrollIntoView(); }
+          setTimeout(function () {
+            if (S.flash === id) { S.flash = ""; renderLive(false); }
+          }, 2600);
+        } else {
+          S.flash = "";
+          toast("That offer is not open any more. It may be in History.");
+        }
+      }
+    }
+
+    function renderHist(force) {
+      var btn = el("histRefresh");
+      btn.disabled = S.histBusy;
+      btn.textContent = S.histBusy ? "Reading…" : "Refresh";
+      el("histAt").innerHTML = S.histAt != null ? "Read " + agoSpan(S.histAt) : "";
+      var key = JSON.stringify([S.hist, S.histErr, S.openVer, !S.hist && S.histBusy]);
+      if (!force && key === S.histKey) return;
+      S.histKey = key;
+      var box = el("histBody");
+      var html = S.histErr ? errNote("history", S.histErr, "reload-hist") : "";
+      if (!S.hist) {
+        box.innerHTML = html + (S.histBusy ? '<div class="loading">Reading closed offers…</div>' : "");
+        return;
+      }
+      if (!S.hist.length) {
+        box.innerHTML = html + emptyHtml("No closed bulk offers yet", "Offers show up here once they sell out, sell, expire or are withdrawn.");
+        return;
+      }
+      var orders = 0, accounts = 0, revenue = 0;
+      S.hist.forEach(function (o) {
+        orders += toInt(o.ordersCount);
+        accounts += toInt(o.unitsDelivered);
+        revenue += num(o.revenueUsd);
+      });
+      html += '<div class="total"><b>' + plural(orders, "order") + " · " + plural(accounts, "account") + " sold · " + money(revenue) +
+        '</b> <span class="muted">at our listed prices, before marketplace fees · last ' + plural(S.hist.length, "closed offer") + "</span></div>";
+      box.innerHTML = html + '<div class="tw"><table class="rt"><thead><tr><th>Closed</th><th>Market</th><th>Kind</th><th>Offer</th><th>Tier</th>' +
+        "<th>Price</th><th>State</th><th>Sold</th><th>Revenue</th><th></th></tr></thead><tbody>" +
+        S.hist.map(histRow).join("") + "</tbody></table></div>";
+    }
+
+    function rerenderOffers() {
+      if (S.tab === "live") renderLive(true);
+      else if (S.tab === "history") renderHist(true);
+    }
+    function findOffer(id) {
+      var lists = [S.live || [], S.hist || []];
+      for (var l = 0; l < lists.length; l++) {
+        for (var k = 0; k < lists[l].length; k++) { if (idOf(lists[l][k]) === id) return lists[l][k]; }
+      }
+      return null;
+    }
+
+    // One offer's accounts (logins only — never a password) and its history.
+    async function toggleDetails(id) {
+      if (S.open[id]) {
+        delete S.open[id];
+        S.openVer++;
+        rerenderOffers();
+        return;
+      }
+      S.open[id] = { loading: true };
+      S.openVer++;
+      rerenderOffers();
+      var next;
+      try {
+        var j = await api("/offers/" + encodeURIComponent(id));
+        next = { offer: j.offer || j };
+      } catch (e) {
+        next = { err: (e && e.message) || "request failed" };
+      }
+      if (!S.open[id]) return; // closed again while it loaded
+      S.open[id] = next;
+      S.openVer++;
+      rerenderOffers();
+    }
+    function detailHtml(id) {
+      var d = S.open[id];
+      if (!d) return "";
+      if (d.loading) return '<div class="loading">Reading the offer…</div>';
+      if (d.err) return '<div class="note bad" style="margin:0">Could not load this offer: ' + esc(d.err) + "</div>";
+      var o = d.offer || {};
+      var facts = [
+        ["Sent", when(ts(o.createdAt)) + (o.createdBy ? " by " + o.createdBy : "")],
+        ["Single price when sent", num(o.anchorPrice) > 0 ? money(o.anchorPrice) + (o.anchorBasis ? " (" + (BASIS[o.anchorBasis] || o.anchorBasis) + ")" : "") : "—"],
+        ["Quantity shown", o.advertisedQty != null ? String(toInt(o.advertisedQty)) : "—"],
+        ["Marketplace offer id", o.externalId || "—"],
+        ["Last sale", when(ts(o.lastOrderAt))],
+        ["Revenue", money(num(o.revenueUsd)) + " at the listed price"],
+        ["Last synced", when(ts(o.lastSyncAt))],
+        ["Closed", when(ts(o.closedAt))]
+      ];
+      var h = '<div class="dfacts">' + facts.map(function (f) {
+        return "<div><span>" + esc(f[0]) + "</span>" + esc(f[1]) + "</div>";
+      }).join("") + "</div>";
+      if (o.lastError) h += '<div class="note bad" style="margin:0 0 8px">Last error: ' + esc(o.lastError) + "</div>";
+      var res = Array.isArray(o.reserved) ? o.reserved : [];
+      if (res.length) {
+        var byState = {};
+        res.forEach(function (u) { var k = (u && u.state) || "unknown"; byState[k] = (byState[k] || 0) + 1; });
+        h += '<div class="dsec">Accounts (' + res.length + "): " + esc(Object.keys(byState).map(function (k) {
+          return (UNIT_STATE[k] || k) + " " + byState[k];
+        }).join(" · ")) + "</div>";
+        h += '<div class="mini-w"><table class="mini"><thead><tr><th>Login</th><th>State</th><th>Order</th><th>Changed</th><th>Note</th></tr></thead><tbody>' +
+          res.map(function (u) {
+            u = u || {};
+            return '<tr><td class="mono">' + esc(u.login || u.accountId || "—") + "</td><td>" + esc(UNIT_STATE[u.state] || u.state || "—") +
+              '</td><td class="mono">' + esc(u.orderId || "—") + "</td><td>" + esc(when(ts(u.changedAt) != null ? ts(u.changedAt) : ts(u.at))) +
+              "</td><td>" + esc(u.reason || "") + "</td></tr>";
+          }).join("") + "</tbody></table></div>";
+      } else if (o.source === "dropset") {
+        h += '<div class="dsec">No accounts recorded on this offer.</div>';
+      }
+      var hist = Array.isArray(o.history) ? o.history.slice().reverse() : [];
+      if (hist.length) {
+        h += '<div class="dsec">History (latest first)</div><ul class="hist">' + hist.map(function (x) {
+          x = x || {};
+          return '<li><span class="hwhen">' + esc(when(ts(x.at))) + "</span> <b>" + esc(x.action || "") + "</b> " + esc(x.detail || "") +
+            (x.actor ? ' <span class="muted">(' + esc(x.actor) + ")</span>" : "") + "</li>";
+        }).join("") + "</ul>";
+      }
+      return h;
+    }
+
+    // ---- Offer actions ----
+    async function simpleAction(btn, id, act) {
+      var o = findOffer(id);
+      btn.disabled = true;
+      try {
+        var j = await api("/offers/" + encodeURIComponent(id) + "/" + act, "POST", {});
+        toast((act === "pause" ? "Paused" : "Resumed") + (o && o.title ? ": " + trunc(o.title, 80) : ".") + (j.message ? " " + j.message : ""));
+      } catch (e) {
+        toast((act === "pause" ? "Pause" : "Resume") + " failed: " + plainErr(e.message), true);
+        btn.disabled = false;
+      } finally {
+        afterChange({ live: true, hist: true, acct: true, farm: true });
+      }
+    }
+
+    function openRefill(id) {
+      var o = findOffer(id);
+      if (!o) return;
+      var b = bp() || {};
+      var def = Math.max(1, Math.min(20, (toInt(b.unitsPerOffer) || 20) - toInt(o.freeCount)));
+      openModal({
+        title: "Refill offer",
+        html: '<p>Add accounts to <span class="qt">“' + esc(o.title || "this offer") + "”</span> on " + esc(mLabel(o.market)) + ".</p>" +
+          "<p>They come from the same set's spare accounts (keeping " + toInt(b.reserveSingles) + " back for single listings), " +
+          "are reserved for this offer, and the quantity on " + esc(mLabel(o.market)) + " is updated to match. The price does not change.</p>" +
+          '<label class="f">Accounts to add<input type="number" id="refillAdd" min="1" max="100" step="1" value="' + def + '" inputmode="numeric">' +
+          '<span class="fh">' + toInt(o.freeCount) + " free on the offer now.</span></label>" +
+          (b.enabled !== true ? '<div class="note warn">Bulk packs is switched off, so the server will refuse this.</div>' : ""),
+        okText: "Add accounts",
+        onOk: async function () {
+          var n = Number(el("refillAdd").value);
+          if (!Number.isInteger(n) || n < 1 || n > 100) {
+            setMsg("bad", "Enter a whole number of accounts from 1 to 100.");
+            return false;
+          }
+          var j = await api("/offers/" + encodeURIComponent(id) + "/refill", "POST", { add: n });
+          afterChange({ live: true, acct: true });
+          return { doneHtml: "<b>Done.</b> " + esc(j.message || "The accounts were added and the offer's quantity updated.") };
+        }
+      });
+    }
+
+    function openWithdraw(id) {
+      var o = findOffer(id);
+      if (!o) return;
+      var what;
+      if (o.source === "dropset" && o.market === "gameflip") {
+        what = "The pack is delisted on Gameflip, then its accounts are released. If it has already sold, nothing changes and the sale is recorded.";
+      } else if (o.source === "dropset") {
+        what = "The offer is taken down. Accounts that have not sold go back to normal stock after a short safety wait (about two minutes, on a later background check).";
+      } else if (o.source === "noclaim") {
+        what = "The offer is taken down. No-claim stock is a shared shelf, so nothing needs releasing.";
+      } else {
+        what = "The offer is taken down. Orders already placed are not affected.";
+      }
+      openModal({
+        title: "Withdraw offer?",
+        html: '<p>Withdraw <span class="qt">“' + esc(o.title || "this offer") + "”</span> from " + esc(mLabel(o.market)) + "?</p><p>" + esc(what) + "</p>" +
+          "<p>This cannot be undone; to sell it again, send a new offer.</p>",
+        okText: "Withdraw",
+        okClass: "primary danger",
+        onOk: async function () {
+          var j = await api("/offers/" + encodeURIComponent(id) + "/withdraw", "POST", {});
+          delete S.open[id];
+          afterChange({ live: true, hist: true, acct: true, farm: true });
+          return { toast: "Withdrawn: " + trunc(o.title || "offer", 80) + (j.message ? ". " + j.message : "") };
+        }
+      });
+    }
+
+    function openWithdrawAll() {
+      var n = S.live ? S.live.length : 0;
+      openModal({
+        title: "Withdraw every open offer?",
+        html: "<p>This takes down <b>every open bulk offer</b>" + (n ? " (" + plural(n, "offer") + " on this page)" : "") + " on every market.</p>" +
+          "<p>Accounts that have not sold are released back to normal stock after a short safety wait. Anything already sold is not affected.</p>" +
+          '<label class="f">Type WITHDRAW to confirm<input type="text" id="waConfirm" autocomplete="off" autocapitalize="characters" spellcheck="false"></label>',
+        okText: "Withdraw all",
+        okClass: "primary danger",
+        okDisabled: true,
+        onOpen: function (body) {
+          var inp = body.querySelector("#waConfirm");
+          inp.addEventListener("input", function () { el("mOk").disabled = inp.value.trim() !== "WITHDRAW"; });
+        },
+        onOk: async function () {
+          var typed = el("waConfirm").value.trim();
+          if (typed !== "WITHDRAW") {
+            setMsg("bad", "Type WITHDRAW (in capitals) to confirm.");
+            return false;
+          }
+          var j;
+          try {
+            j = await api("/withdraw-all", "POST", { confirm: typed });
+          } catch (e) {
+            // Partial failure still carries the per-offer results; show them.
+            if (!(e.data && Array.isArray(e.data.results))) throw e;
+            j = e.data;
+          }
+          S.open = {};
+          S.openVer++;
+          afterChange({ live: true, hist: true, acct: true, farm: true });
+          return withdrawAllResult(j);
+        }
+      });
+    }
+    function withdrawAllResult(j) {
+      var rs = Array.isArray(j && j.results) ? j.results : [];
+      if (!rs.length) return { doneHtml: "<b>Done.</b> " + esc((j && j.message) || "There were no open offers to withdraw.") };
+      var bad = rs.filter(function (r) { return r && r.success === false; });
+      var good = rs.length - bad.length;
+      var h = "<b>Done.</b> " + plural(good, "offer") + " withdrawn" + (bad.length ? ", " + bad.length + " failed" : "") + ".";
+      if (bad.length) {
+        h += "<ul>" + bad.slice(0, 10).map(function (r) {
+          var name = (r.offer && r.offer.title) || r.title || r.offerId || r.id || "offer";
+          return "<li>" + esc(trunc(name, 80)) + ": " + esc(plainErr(r.message || "failed")) + "</li>";
+        }).join("") + (bad.length > 10 ? "<li>…and " + (bad.length - 10) + " more</li>" : "") + "</ul>";
+      }
+      return { doneHtml: h, kind: bad.length ? "warn" : "good" };
+    }
+
+    function gotoOffer(id) {
+      id = String(id || "");
+      if (!el("overlay").hidden) closeModal();
+      if (!id) return;
+      S.flash = id;
+      S.liveStale = true;
+      setTab("live");
+    }
+
+    // ---- Settings ----
+    // Whole-number settings, with the same limits the server enforces
+    // (docs/bulk-packs/API-UI.md, settings whitelist).
+    var INT_FIELDS = [
+      { id: "fReserveSingles", key: "bulkPackReserveSingles", bp: "reserveSingles", min: 0, max: 100, sec: "acct", label: "Keep for single listings", hint: "Spare accounts per set that bulk offers never take." },
+      { id: "fUnitsPerOffer", key: "bulkPackUnitsPerOffer", bp: "unitsPerOffer", min: 1, max: 80, sec: "acct", label: "Accounts per offer", hint: "Default number of accounts put on one offer." },
+      { id: "fFarmSlots", key: "bulkFarmReserveSlots", bp: "farmReserveSlots", min: 0, max: 500, sec: "farm", label: "Farm slots kept free", hint: "Bot slots never advertised, left for single farm orders." },
+      { id: "fFarmPristine", key: "bulkFarmReservePristine", bp: "farmReservePristine", min: 0, max: 500, sec: "farm", label: "Fresh accounts kept back", hint: "Unused pool accounts never advertised." },
+      { id: "fFarmMax", key: "bulkFarmMaxQty", bp: "farmMaxQty", min: 1, max: 100, sec: "farm", label: "Max accounts per farming offer", hint: "The most one farming offer shows." },
+      { id: "fLoop", key: "bulkPacksLoopMinutes", bp: "loopMinutes", min: 2, max: 60, sec: "loop", label: "Check every (minutes)", hint: "How often the background check looks after live offers." },
+      { id: "fFarmSync", key: "bulkFarmSyncMinutes", bp: "farmSyncMinutes", min: 5, max: 120, sec: "loop", label: "Farm capacity sync (minutes)", hint: "How often farming offers are matched to free capacity." }
+    ];
+    var cfgTiers = [];   // working copy while editing: [{minQty, discountPct}] as typed
+    var cfgPrices = {};  // working copy: { eldorado: {"120": "3"}, g2g: {...} } as typed
+
+    async function loadCfg() {
+      if (S.cfgBusy) return;
+      S.cfgBusy = true;
+      S.cfg = null;
+      renderCfg();
+      try {
+        var j = await api("/settings");
+        if (!j.settings || typeof j.settings !== "object") throw apiError("The server's answer had no settings.", 200, j);
+        S.cfg = j;
+        S.cfgErr = "";
+      } catch (e) {
+        S.cfgErr = (e && e.message) || "request failed";
+      } finally {
+        S.cfgBusy = false;
+        renderCfg();
+      }
+    }
+
+    function intInput(f, b) {
+      return '<label class="f">' + esc(f.label) +
+        '<input type="number" id="' + f.id + '" min="' + f.min + '" max="' + f.max + '" step="1" inputmode="numeric" value="' + esc(b[f.bp] == null ? "" : toInt(b[f.bp])) + '">' +
+        '<span class="fh">' + esc(f.hint) + " " + f.min + "–" + f.max + ".</span></label>";
+    }
+    function intInputs(sec, b) {
+      return INT_FIELDS.filter(function (f) { return f.sec === sec; }).map(function (f) { return intInput(f, b); }).join("");
+    }
+
+    function renderCfg() {
+      var box = el("cfgBody");
+      if (!S.cfg) {
+        box.innerHTML = S.cfgErr ? errNote("settings", S.cfgErr, "reload-cfg") : '<div class="loading">Reading settings…</div>';
+        return;
+      }
+      var b = S.cfg.settings || {};
+      cfgTiers = (Array.isArray(b.tiers) ? b.tiers : []).map(function (t) {
+        return { minQty: String(t && t.minQty != null ? t.minQty : ""), discountPct: String(t && t.discountPct != null ? t.discountPct : "") };
+      });
+      if (!cfgTiers.length) cfgTiers = [{ minQty: "5", discountPct: "5" }];
+      cfgPrices = {};
+      FARM_MARKETS.forEach(function (m) {
+        cfgPrices[m] = {};
+        var src = (b.farmPrices && b.farmPrices[m]) || {};
+        Object.keys(src).forEach(function (k) { cfgPrices[m][k] = String(src[k]); });
+      });
+      var chosen = Array.isArray(b.markets) ? b.markets : [];
+      var durs = Array.isArray(b.farmDurations) ? b.farmDurations.map(toInt).join(", ") : "";
+
+      var h = '<form id="cfgForm" class="form" novalidate autocomplete="off">';
+      h += '<div class="muted" style="font-size:12.5px">Saved changes are used from the next background pass and the next proposals read. The master switch is at the top of the page.</div>';
+
+      h += '<section class="fsec"><h3>Tiers</h3><div class="hint">A buyer who orders at least this many accounts pays the single price minus the discount. ' +
+        "1 to 4 tiers · 2–100 accounts · 0–60% off.</div>" +
+        '<div id="tierRows"></div><button type="button" class="sm" id="addTier">Add tier</button></section>';
+
+      h += '<section class="fsec"><h3>Markets</h3><div class="hint">Where bulk offers may be sent. Gameflip takes farmed-account packs only. Plati and GGSel are blocked and never offered.</div>' +
+        '<div class="checks">' + SUPPORTED.map(function (m) {
+          return '<label><input type="checkbox" id="fMk-' + m + '"' + (chosen.indexOf(m) !== -1 ? " checked" : "") + "> " + esc(mLabel(m)) + "</label>";
+        }).join("") + "</div></section>";
+
+      h += '<section class="fsec"><h3>Account packs</h3><div class="hint">Farmed and no-claim accounts sold in bulk.</div>' +
+        '<div class="fgrid">' + intInputs("acct", b) + "</div></section>";
+
+      h += '<section class="fsec"><h3>Farming packs</h3><div class="hint">Fresh accounts farming one game for a fixed window, set up when an order comes in.</div>' +
+        '<label class="f" style="max-width:420px">Durations (days)<input type="text" id="fDurations" inputmode="numeric" placeholder="120, 180, 365" value="' + esc(durs) + '">' +
+        '<span class="fh">1 to 6 durations, 1–730 days each, separated by commas.</span></label>' +
+        '<div class="mini-w"><table class="ptab"><thead><tr><th>Duration</th>' +
+        FARM_MARKETS.map(function (m) { return "<th>" + esc(mLabel(m)) + " · $ per account</th>"; }).join("") +
+        '</tr></thead><tbody id="priceRows"></tbody></table></div>' +
+        '<span class="fh" style="margin-bottom:12px">Price per account for the whole window, $0.50–$100. Leave a box empty for no offer at that duration.</span>' +
+        '<div class="fgrid">' + intInputs("farm", b) + "</div></section>";
+
+      h += '<section class="fsec"><h3>Background check</h3><div class="hint">It keeps live offers in line with stock and never publishes.</div>' +
+        '<div class="fgrid">' + intInputs("loop", b) + "</div></section>";
+
+      h += '<div id="cfgErrors"></div>';
+      h += '<div class="factions"><button type="submit" class="primary" id="cfgSave">Save settings</button>' +
+        '<button type="button" id="cfgUndo">Undo changes</button></div>';
+      h += "</form>";
+      box.innerHTML = h;
+      renderTierRows();
+      renderPriceRows();
+    }
+
+    function renderTierRows() {
+      var box = el("tierRows");
+      if (!box) return;
+      box.innerHTML = cfgTiers.map(function (t, k) {
+        return '<div class="trow">' +
+          '<label class="f">Minimum accounts<input type="number" min="2" max="100" step="1" inputmode="numeric" data-tier="' + k + '" data-f="minQty" value="' + esc(t.minQty) + '"></label>' +
+          '<label class="f">Discount %<input type="number" min="0" max="60" step="any" inputmode="decimal" data-tier="' + k + '" data-f="discountPct" value="' + esc(t.discountPct) + '"></label>' +
+          '<button type="button" class="sm danger" data-act="del-tier" data-k="' + k + '"' + (cfgTiers.length <= 1 ? " disabled" : "") + ">Remove</button></div>";
+      }).join("");
+      el("addTier").disabled = cfgTiers.length >= 4;
+    }
+
+    function parseDurations(txt, errs) {
+      var parts = String(txt || "").split(/[\s,;]+/).filter(Boolean);
+      var out = [];
+      parts.forEach(function (p) {
+        var n = Number(p);
+        if (!Number.isInteger(n) || n < 1 || n > 730) { if (errs) errs.push('Durations: "' + p + '" is not a whole number of days from 1 to 730.'); return; }
+        if (out.indexOf(n) === -1) out.push(n);
+      });
+      if (errs && !parts.length) errs.push("Durations: enter at least one duration.");
+      if (errs && out.length > 6) errs.push("Durations: at most 6.");
+      return out.sort(function (a, c) { return a - c; });
+    }
+
+    function renderPriceRows() {
+      var tb = el("priceRows"), inp = el("fDurations");
+      if (!tb || !inp) return;
+      var durs = parseDurations(inp.value, null);
+      if (!durs.length) {
+        tb.innerHTML = '<tr><td colspan="' + (FARM_MARKETS.length + 1) + '" class="muted">Enter at least one duration above.</td></tr>';
+        return;
+      }
+      tb.innerHTML = durs.map(function (d) {
+        return "<tr><td><b>" + esc(durWord(d)) + "</b></td>" + FARM_MARKETS.map(function (m) {
+          var v = cfgPrices[m] ? cfgPrices[m][String(d)] : null;
+          return '<td><input type="number" min="0.5" max="100" step="any" inputmode="decimal" placeholder="no offer" data-price="' + m + '" data-days="' + d +
+            '" value="' + esc(v == null ? "" : v) + '" aria-label="' + esc(mLabel(m) + " price for " + durWord(d)) + '"></td>';
+        }).join("") + "</tr>";
+      }).join("");
+    }
+
+    // Reads the form, checks it against the same limits the server uses, and
+    // returns only the keys that changed. The master switch is never in here —
+    // it has its own confirm at the top, so a stale form can never flip it.
+    function readCfg() {
+      var b = S.cfg.settings || {}, errs = [], patch = {};
+
+      var tiers = [], seen = {};
+      if (!cfgTiers.length) errs.push("Add at least one tier.");
+      if (cfgTiers.length > 4) errs.push("At most 4 tiers.");
+      cfgTiers.forEach(function (t, k) {
+        var qs = String(t.minQty).trim(), ds = String(t.discountPct).trim();
+        var q = Number(qs), dp = Number(ds), bad = false;
+        if (qs === "" || !Number.isInteger(q) || q < 2 || q > 100) { errs.push("Tier " + (k + 1) + ": minimum must be a whole number of accounts from 2 to 100."); bad = true; }
+        if (ds === "" || !isFinite(dp) || dp < 0 || dp > 60) { errs.push("Tier " + (k + 1) + ": discount must be from 0 to 60%."); bad = true; }
+        if (bad) return;
+        if (seen[q]) { errs.push("Two tiers start at " + q + " accounts. Each tier needs its own minimum."); return; }
+        seen[q] = true;
+        tiers.push({ minQty: q, discountPct: Math.round(dp * 100) / 100 });
+      });
+      tiers.sort(function (a, c) { return a.minQty - c.minQty; });
+      var oldTiers = (Array.isArray(b.tiers) ? b.tiers : []).map(function (t) { return { minQty: num(t.minQty), discountPct: num(t.discountPct) }; })
+        .sort(function (a, c) { return a.minQty - c.minQty; });
+      if (JSON.stringify(tiers) !== JSON.stringify(oldTiers)) patch.bulkPackTiers = tiers;
+
+      var markets = SUPPORTED.filter(function (m) { var c = el("fMk-" + m); return c && c.checked; });
+      var oldMarkets = (Array.isArray(b.markets) ? b.markets : []).slice().sort().join(",");
+      if (markets.slice().sort().join(",") !== oldMarkets) patch.bulkPacksMarkets = markets;
+
+      INT_FIELDS.forEach(function (f) {
+        var s = String(el(f.id).value).trim(), n = Number(s);
+        if (s === "" || !Number.isInteger(n) || n < f.min || n > f.max) { errs.push(f.label + " must be a whole number from " + f.min + " to " + f.max + "."); return; }
+        if (n !== num(b[f.bp])) patch[f.key] = n;
+      });
+
+      var durs = parseDurations(el("fDurations").value, errs);
+      var oldDurs = (Array.isArray(b.farmDurations) ? b.farmDurations : []).map(num).sort(function (a, c) { return a - c; });
+      if (JSON.stringify(durs) !== JSON.stringify(oldDurs)) patch.bulkFarmDurations = durs;
+
+      // Farm prices: only the durations on screen are compared. When anything
+      // differs the whole table is sent, keeping the stored prices of
+      // durations not on screen so re-adding one brings its price back.
+      var prices = {}, pricesChanged = false;
+      FARM_MARKETS.forEach(function (m) {
+        prices[m] = {};
+        var stored = (b.farmPrices && b.farmPrices[m]) || {};
+        Object.keys(stored).forEach(function (k) {
+          if (durs.indexOf(Number(k)) !== -1) return;
+          var n = num(stored[k]);
+          if (n >= 0.5 && n <= 100) prices[m][k] = n;
+        });
+        durs.forEach(function (d) {
+          var k = String(d);
+          var raw = cfgPrices[m] ? cfgPrices[m][k] : null;
+          var s = raw == null ? "" : String(raw).trim();
+          var old = stored[k] != null && num(stored[k]) > 0 ? num(stored[k]) : null;
+          if (s === "") { if (old != null) pricesChanged = true; return; }
+          var n = Number(s);
+          if (!isFinite(n) || n < 0.5 || n > 100) { errs.push(mLabel(m) + " price for " + durWord(d) + " must be from $0.50 to $100."); return; }
+          n = Math.round(n * 100) / 100;
+          prices[m][k] = n;
+          if (old == null || Math.abs(old - n) > 1e-9) pricesChanged = true;
+        });
+      });
+      if (pricesChanged) patch.bulkFarmPrices = prices;
+
+      return { errors: errs, patch: patch, noMarkets: !markets.length };
+    }
+
+    function showCfgNote(kind, head, list) {
+      var box = el("cfgErrors");
+      if (!box) return;
+      if (!head && !(list && list.length)) { box.innerHTML = ""; return; }
+      box.innerHTML = '<div class="note' + (kind ? " " + kind : "") + '" style="margin:0">' + (head ? "<b>" + esc(head) + "</b>" : "") +
+        (list && list.length ? "<ul>" + list.map(function (x) { return "<li>" + esc(x) + "</li>"; }).join("") + "</ul>" : "") + "</div>";
+    }
+
+    async function saveCfg() {
+      if (!S.cfg) return;
+      var r = readCfg();
+      if (r.errors.length) { showCfgNote("bad", "Not saved. Please fix:", r.errors); return; }
+      var keys = Object.keys(r.patch);
+      if (!keys.length) { showCfgNote("", "Nothing changed.", []); return; }
+      var btn = el("cfgSave");
+      btn.disabled = true;
+      btn.textContent = "Saving…";
+      showCfgNote("", "", []);
+      try {
+        await api("/settings", "POST", { patch: r.patch });
+        toast("Saved: " + keys.map(function (k) { return KEY_LABEL[k] || k; }).join(", ") + "." +
+          (r.noMarkets ? " No market is ticked, so nothing can be sent." : ""));
+        afterChange({ acct: true, farm: true });
+        await loadCfg();
+      } catch (e) {
+        var list = e.data && Array.isArray(e.data.errors) && e.data.errors.length ? e.data.errors.map(plainErr) : [plainErr(e.message)];
+        showCfgNote("bad", "The server did not save it:", list);
+        btn.disabled = false;
+        btn.textContent = "Save settings";
+      }
+    }
+
+    // ---- Wiring ----
+    el("runBtn").addEventListener("click", runNow);
+    el("swBtn").addEventListener("click", openSwitch);
+    el("acctRefresh").addEventListener("click", function () { loadAccounts(true); });
+    el("farmRefresh").addEventListener("click", function () { loadFarm(true); });
+    el("liveRefresh").addEventListener("click", function () { loadLive(true); });
+    el("histRefresh").addEventListener("click", function () { loadHist(true); });
+    el("withdrawAllBtn").addEventListener("click", openWithdrawAll);
+    el("mOk").addEventListener("click", modalOk);
+    el("mCancel").addEventListener("click", closeModal);
+    el("mClose").addEventListener("click", closeModal);
+    el("overlay").addEventListener("click", function (e) { if (e.target === el("overlay")) closeModal(); });
+    document.addEventListener("keydown", function (e) {
+      if (el("overlay").hidden) return;
+      if (e.key === "Escape") closeModal();
+      // Enter in a dialog field confirms, exactly as the button would (and only
+      // when the button is enabled — the typed WITHDRAW gate still applies).
+      else if (e.key === "Enter" && e.target && e.target.tagName === "INPUT" && el("mBody").contains(e.target) &&
+        !el("mOk").disabled && !el("mOk").hidden) {
+        e.preventDefault();
+        modalOk();
+      }
+    });
+
+    TABS.forEach(function (k, idx) {
+      var b = el("tab-" + k);
+      b.addEventListener("click", function () { setTab(k); });
+      b.addEventListener("keydown", function (e) {
+        var d = e.key === "ArrowRight" ? 1 : (e.key === "ArrowLeft" ? -1 : 0);
+        if (!d) return;
+        e.preventDefault();
+        var next = TABS[(idx + d + TABS.length) % TABS.length];
+        setTab(next);
+        el("tab-" + next).focus();
+      });
+    });
+    window.addEventListener("hashchange", function () {
+      var t = location.hash.replace(/^#/, "");
+      if (TABS.indexOf(t) !== -1 && t !== S.tab) setTab(t, true);
+    });
+
+    // Every data-act control on the page, including rows rebuilt on refresh.
+    document.addEventListener("click", function (e) {
+      var t = e.target && e.target.closest ? e.target.closest("[data-act]") : null;
+      if (!t) return;
+      var act = t.getAttribute("data-act");
+      if (t.getAttribute("aria-disabled") === "true") {
+        e.preventDefault();
+        toast(t.getAttribute("data-why") || "Not available.", true);
+        return;
+      }
+      var id = t.getAttribute("data-id") || "";
+      var i = Number(t.getAttribute("data-i")), mi = Number(t.getAttribute("data-m")), ti = Number(t.getAttribute("data-t"));
+      switch (act) {
+        case "send-acct": openSendAcct(i, mi, ti); break;
+        case "send-farm": openSendFarm(i, mi, ti); break;
+        case "goto-offer": e.preventDefault(); gotoOffer(id); break;
+        case "pause": case "resume": simpleAction(t, id, act); break;
+        case "refill": openRefill(id); break;
+        case "withdraw": openWithdraw(id); break;
+        case "details": toggleDetails(id); break;
+        case "reload-acct": loadAccounts(false); break;
+        case "reload-farm": loadFarm(false); break;
+        case "reload-live": loadLive(false); break;
+        case "reload-hist": loadHist(false); break;
+        case "reload-cfg": loadCfg(); break;
+        case "del-tier": {
+          var k = Number(t.getAttribute("data-k"));
+          if (cfgTiers.length > 1 && k >= 0 && k < cfgTiers.length) { cfgTiers.splice(k, 1); renderTierRows(); }
+          break;
+        }
+        default: break;
+      }
+    });
+
+    // Settings form: typed values live in the working copies until Save.
+    el("cfgBody").addEventListener("input", function (e) {
+      var t = e.target;
+      if (t.hasAttribute("data-tier")) {
+        var k = Number(t.getAttribute("data-tier"));
+        if (cfgTiers[k]) cfgTiers[k][t.getAttribute("data-f")] = t.value;
+      } else if (t.hasAttribute("data-price")) {
+        var m = t.getAttribute("data-price"), d = t.getAttribute("data-days");
+        if (!cfgPrices[m]) cfgPrices[m] = {};
+        if (String(t.value).trim() === "") delete cfgPrices[m][d];
+        else cfgPrices[m][d] = t.value;
+      }
+    });
+    el("cfgBody").addEventListener("change", function (e) {
+      if (e.target && e.target.id === "fDurations") renderPriceRows();
+    });
+    el("cfgBody").addEventListener("click", function (e) {
+      var t = e.target;
+      if (t && t.id === "addTier") {
+        if (cfgTiers.length >= 4) return;
+        var top = cfgTiers.reduce(function (mx, x) { return Math.max(mx, toInt(x.minQty)); }, 0);
+        cfgTiers.push({ minQty: String(Math.min(100, top > 0 ? top * 2 : 5)), discountPct: "" });
+        renderTierRows();
+      } else if (t && t.id === "cfgUndo") {
+        renderCfg();
+        showCfgNote("", "Changes undone.", []);
+      }
+    });
+    el("cfgBody").addEventListener("submit", function (e) {
+      e.preventDefault();
+      saveCfg();
+    });
+
+    // An item picture that fails to load becomes its letter tile.
+    document.addEventListener("error", function (e) {
+      var t = e.target;
+      if (!t || t.tagName !== "IMG" || !t.closest || !t.closest(".thumbs")) return;
+      var ph = document.createElement("span");
+      ph.className = "ph";
+      ph.title = t.title || t.alt || "";
+      ph.textContent = String(t.alt || "?").charAt(0).toUpperCase();
+      if (t.parentNode) t.parentNode.replaceChild(ph, t);
+    }, true);
+
+    el("logoutBtn").addEventListener("click", async function () {
+      try { await fetch("/admin-logout", { method: "POST", credentials: "same-origin" }); } catch (e) {}
+      location.href = "/admin-login.html";
+    });
+
+    // Name + avatar (admin-nav.js fills the role line and handles a lost session).
+    fetch("/whoami", { credentials: "same-origin", headers: { Accept: "application/json" } })
+      .then(function (r) { return r.ok ? r.json() : null; })
+      .then(function (d) {
+        var a = d && d.admin;
+        if (!a) return;
+        var name = String(a.username || a.id || "Admin");
+        el("meName").textContent = name;
+        el("meAvatar").textContent = name.slice(0, 2).toUpperCase();
+      })
+      .catch(function () {});
+
+    setInterval(tickAges, TICK_MS);
+    // Only a visible tab polls; coming back to the tab refreshes at once.
+    setInterval(function () {
+      if (document.visibilityState !== "visible") return;
+      loadOverview();
+      if (S.tab === "live") loadLive(true);
+    }, POLL_MS);
+    document.addEventListener("visibilitychange", function () {
+      if (document.visibilityState !== "visible") return;
+      loadOverview();
+      if (S.tab === "live") loadLive(true);
+    });
+
+    loadOverview();
+    var startTab = location.hash.replace(/^#/, "");
+    setTab(TABS.indexOf(startTab) !== -1 ? startTab : "accounts", TABS.indexOf(startTab) !== -1);
+  })();
+  </script>
+</body>
+</html>

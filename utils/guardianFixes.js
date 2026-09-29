@@ -369,7 +369,8 @@ async function fixDedupe(f) {
     });
   }
   if (!or.length) throw httpError(400, "Finding has no account to de-duplicate");
-  const listings = await MarketplaceListing.find({ status: "active", $or: or }).lean();
+  // bulkOfferId: a bulk-pack row is never the detached loser (docs/bulk-packs/CONTRACT.md H6)
+  const listings = await MarketplaceListing.find({ status: "active", bulkOfferId: null, $or: or }).lean();
   if (listings.length < 2) {
     // The duplicate cleared on its own between the sweep and this fix.
     return (

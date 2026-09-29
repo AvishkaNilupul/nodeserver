@@ -229,6 +229,12 @@
           superOnly: true,
         },
         {
+          href: "/bulk-packs.html",
+          label: "Bulk packs",
+          icon: ICONS.bulkOrders,
+          superOnly: true,
+        },
+        {
           href: "/integrity.html",
           label: "Integrity",
           icon: ICONS.integrity,

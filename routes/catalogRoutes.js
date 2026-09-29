@@ -1026,7 +1026,8 @@ async function buildPublicCatalog() {
   if (buyIds.length) {
     try {
       const rows = await MarketplaceListing.find(
-        { set: { $in: buyIds }, status: "active" },
+        // bulkOfferId: a bulk pack is never a public buy link (docs/bulk-packs/CONTRACT.md H11)
+        { set: { $in: buyIds }, status: "active", bulkOfferId: null },
         { set: 1, marketplace: 1, url: 1, price: 1, status: 1 },
       ).lean();
       for (const row of rows) {

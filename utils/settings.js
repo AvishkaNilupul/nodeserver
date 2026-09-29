@@ -387,6 +387,49 @@ const AUTO_FARM_DEFAULTS = {
   // task's accounts + the campaign's watch minutes, so a new pre-order card
   // gets its ETA within minutes instead of the 6-hour variant sync. 0 = off.
   catalogPreorderSyncMinutes: 10,
+
+  // --- Bulk packs (utils/bulkPacks/*, docs/bulk-packs/CONTRACT.md §6) ---
+  // A separate subsystem that PROPOSES bulk offers — N+ accounts at a tier
+  // discount — and publishes one only when the owner clicks Send; its loop
+  // then looks after the live offers. Read ONLY through getBulkPacks(), which
+  // clamps every value below.
+  //
+  // SHIPS DARK. While bulkPacksEnabled is false, send / refill / resume are
+  // refused and the loop only does safety maintenance on offers that already
+  // exist (reconcile, sold / expired detection, pausing, releasing).
+  bulkPacksEnabled: false,
+  // Markets a bulk offer may go to (subset of eldorado / g2g / gameflip).
+  // Plati/Digiseller and GGSel are not bulk-pack markets at all — owner block
+  // since 2026-09-28 — and getBulkPacks drops them whatever is stored here.
+  bulkPacksMarkets: ["eldorado", "g2g", "gameflip"],
+  // Quantity tiers. On eldorado/g2g one unit is ALWAYS one account and the tier
+  // is the offer's minimum order; on gameflip one listing is one pack of
+  // exactly minQty accounts. No multiplier anywhere (CONTRACT §2).
+  bulkPackTiers: [
+    { minQty: 5, discountPct: 5 },
+    { minQty: 10, discountPct: 10 },
+  ],
+  // Free accounts per bundle always kept back for the ordinary single listings.
+  bulkPackReserveSingles: 5,
+  // Default accounts reserved behind one eldorado/g2g account offer.
+  bulkPackUnitsPerOffer: 20,
+  // Farming packs: price per account (USD) by market and term in days.
+  bulkFarmPrices: {
+    eldorado: { "120": 3, "180": 4, "365": 7 },
+    g2g: { "120": 3, "180": 4, "365": 7 },
+  },
+  // Farming terms (days) the bundler proposes.
+  bulkFarmDurations: [120, 180, 365],
+  // Bot slots and pristine pool accounts a farming offer never advertises —
+  // kept for single farm orders.
+  bulkFarmReserveSlots: 20,
+  bulkFarmReservePristine: 20,
+  // The most accounts one farming offer advertises.
+  bulkFarmMaxQty: 20,
+  // Maintenance loop interval, and how often a farming offer's advertised
+  // quantity is re-checked against live capacity (minutes).
+  bulkPacksLoopMinutes: 5,
+  bulkFarmSyncMinutes: 15,
 };
 
 // ---------------------------------------------------------------------------
@@ -902,6 +945,122 @@ function getNoclaimShopSettings() {
   };
 }
 
+// ---------------------------------------------------------------------------
+// Bulk packs (docs/bulk-packs/CONTRACT.md §6)
+// ---------------------------------------------------------------------------
+// Typed, clamped view of the bulkPack* / bulkFarm* keys — the getFarmSizing
+// convention: `afIn` is optional, so a caller (or a test) that already holds
+// the auto-farm object passes it in instead of re-reading settings.json.
+//
+// A key that is ABSENT (undefined / null) reads as its shipped default. A key
+// that is present but unusable is not quietly swapped for the default where
+// that could publish something the owner did not ask for:
+//   enabled        strictly `=== true` — "true" as a string stays OFF
+//   markets        subset of eldorado/g2g/gameflip, order kept, deduped;
+//                  empty -> [] (no market), never the default list
+//   tiers          integer minQty 2..100 and discountPct 0..60, else the entry
+//                  is dropped (never clamped into a discount nobody set);
+//                  first entry per minQty wins; sorted; at most 4;
+//                  nothing valid left -> the default tiers
+//   farmPrices     eldorado/g2g only, days 1..730, price > 0, else dropped
+//   farmDurations  integers 1..730, deduped, sorted; empty -> []
+//   counts         integers, clamped into their range; blank or non-numeric
+//                  -> default (Number(null) is 0, so null is not a number here)
+// Every array and object returned is a fresh copy: a caller mutating its `bp`
+// can never corrupt AUTO_FARM_DEFAULTS for the rest of the process.
+//
+// The two market lists mirror utils/bulkPacks/config.js (SUPPORTED_MARKETS and
+// SOURCE_MARKETS.farm) rather than requiring it: settings.js is loaded very
+// early and stays free of subsystem imports. tests/bulkPacksConfig.test.js
+// pins the pair.
+const BULK_PACK_MARKETS = ["eldorado", "g2g", "gameflip"];
+const BULK_FARM_MARKETS = ["eldorado", "g2g"];
+
+function bulkNum(v) {
+  if (typeof v === "number") return v;
+  if (typeof v === "string" && v.trim()) return Number(v);
+  return NaN;
+}
+function bulkInt(v, d, lo, hi) {
+  const n = bulkNum(v);
+  return Number.isFinite(n) ? Math.min(hi, Math.max(lo, Math.floor(n))) : d;
+}
+function bulkMarkets(v) {
+  if (v == null) return [...AUTO_FARM_DEFAULTS.bulkPacksMarkets];
+  if (!Array.isArray(v)) return [];
+  const out = [];
+  for (const x of v) {
+    const m = typeof x === "string" ? x.trim().toLowerCase() : "";
+    if (BULK_PACK_MARKETS.includes(m) && !out.includes(m)) out.push(m);
+  }
+  return out;
+}
+function bulkTiers(v) {
+  const out = [];
+  for (const t of Array.isArray(v) ? v : []) {
+    if (!t || typeof t !== "object") continue;
+    const minQty = bulkNum(t.minQty);
+    const discountPct = bulkNum(t.discountPct);
+    if (!Number.isInteger(minQty) || minQty < 2 || minQty > 100) continue;
+    if (!Number.isFinite(discountPct) || discountPct < 0 || discountPct > 60) continue;
+    if (out.some((x) => x.minQty === minQty)) continue;
+    out.push({ minQty, discountPct });
+  }
+  out.sort((a, b) => a.minQty - b.minQty);
+  if (out.length) return out.slice(0, 4);
+  return AUTO_FARM_DEFAULTS.bulkPackTiers.map((t) => ({
+    minQty: t.minQty,
+    discountPct: t.discountPct,
+  }));
+}
+function bulkFarmPriceTable(v) {
+  const src = v == null ? AUTO_FARM_DEFAULTS.bulkFarmPrices : v;
+  const isMap = (o) => !!o && typeof o === "object" && !Array.isArray(o);
+  const out = {};
+  for (const market of BULK_FARM_MARKETS) {
+    out[market] = {};
+    const table = isMap(src) ? src[market] : null;
+    if (!isMap(table)) continue;
+    for (const [key, raw] of Object.entries(table)) {
+      if (!/^\d+$/.test(key.trim())) continue;
+      const days = Number(key);
+      if (days < 1 || days > 730) continue;
+      const price = bulkNum(raw);
+      if (!Number.isFinite(price) || price <= 0) continue;
+      if (out[market][String(days)] === undefined) out[market][String(days)] = price;
+    }
+  }
+  return out;
+}
+function bulkDurations(v) {
+  if (v == null) return [...AUTO_FARM_DEFAULTS.bulkFarmDurations];
+  if (!Array.isArray(v)) return [];
+  const days = new Set();
+  for (const x of v) {
+    const n = bulkNum(x);
+    if (Number.isInteger(n) && n >= 1 && n <= 730) days.add(n);
+  }
+  return [...days].sort((a, b) => a - b);
+}
+function getBulkPacks(afIn) {
+  const af = afIn && typeof afIn === "object" ? afIn : getAutoFarm() || {};
+  const D = AUTO_FARM_DEFAULTS;
+  return {
+    enabled: af.bulkPacksEnabled === true,
+    markets: bulkMarkets(af.bulkPacksMarkets),
+    tiers: bulkTiers(af.bulkPackTiers),
+    reserveSingles: bulkInt(af.bulkPackReserveSingles, D.bulkPackReserveSingles, 0, 100),
+    unitsPerOffer: bulkInt(af.bulkPackUnitsPerOffer, D.bulkPackUnitsPerOffer, 1, 80),
+    farmPrices: bulkFarmPriceTable(af.bulkFarmPrices),
+    farmDurations: bulkDurations(af.bulkFarmDurations),
+    farmReserveSlots: bulkInt(af.bulkFarmReserveSlots, D.bulkFarmReserveSlots, 0, 500),
+    farmReservePristine: bulkInt(af.bulkFarmReservePristine, D.bulkFarmReservePristine, 0, 500),
+    farmMaxQty: bulkInt(af.bulkFarmMaxQty, D.bulkFarmMaxQty, 1, 100),
+    loopMinutes: bulkInt(af.bulkPacksLoopMinutes, D.bulkPacksLoopMinutes, 2, 60),
+    farmSyncMinutes: bulkInt(af.bulkFarmSyncMinutes, D.bulkFarmSyncMinutes, 5, 120),
+  };
+}
+
 module.exports = {
   loadSettings,
   saveSettings,
@@ -928,6 +1087,7 @@ module.exports = {
   setCatalogConfig,
   getAccountListingSettings,
   getNoclaimShopSettings,
+  getBulkPacks,
   UNCLAIMED_MARKETS,
   UNCLAIMED_PRICING_DEFAULTS,
   ACCOUNT_LISTING_DEFAULTS,

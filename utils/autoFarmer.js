@@ -4758,6 +4758,7 @@ async function backfillActiveTasks(af, host, progress) {
           set: task.listing.setId,
           marketplace: "gameflip",
           status: "active",
+          bulkOfferId: null, // never grow a bulk pack's queue (docs/bulk-packs/CONTRACT.md H8)
         },
         { $inc: { qtyRemaining: addNow } },
       );

@@ -414,7 +414,8 @@ async function retireFromLiveListings({ onProgress } = {}) {
   }
 
   const live = await MarketplaceListing.find(
-    { status: "active" },
+    // bulkOfferId: the bulk loop retires its own suspended members (docs/bulk-packs/CONTRACT.md H7)
+    { status: "active", bulkOfferId: null },
     {
       accountId: 1,
       accountLogin: 1,

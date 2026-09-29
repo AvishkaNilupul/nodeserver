@@ -1250,6 +1250,7 @@ async function syncOnce() {
     // is belt-and-braces, but the guard is explicit rather than relying on data
     // that a future import could change.
     if (!row.autoDeliver) continue;
+    if (row.bulkOfferId) continue; // a bulk pack is never relisted (docs/bulk-packs/CONTRACT.md H9)
     if ((Number(row.qtyRemaining) || 0) <= 0) continue;
     let img = "";
     try {
@@ -1299,6 +1300,7 @@ async function syncOnce() {
     // transient failures the retry exists for — the same starvation this file
     // already documents twice.
     rentFarm: { $ne: true },
+    bulkOfferId: null, // a bulk pack is never relisted (docs/bulk-packs/CONTRACT.md H9)
     qtyRemaining: { $gt: 0 },
     lastError: /^auto-relist failed/,
     $or: [
