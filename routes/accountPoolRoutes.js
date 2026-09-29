@@ -265,9 +265,24 @@ router.get("/account-pool/export-needs-auth", requireSuperadmin, async (req, res
   }
 });
 
-router.post("/account-pool/import", requireSuperadmin, async (req, res) => {
+// The page posts the paste as raw text/plain. As JSON it hit the app-wide
+// express.json({ limit: "100kb" }) in server.js — about 180 token-fetcher
+// lines — and a bulk paste was refused with a 413 before it reached this
+// route. 25mb matches nginx's client_max_body_size on prod. A JSON body
+// ({ accounts: "<text>" } or { accounts: [...] }) is still accepted.
+const importPasteBody = express.text({ type: ["text/plain"], limit: "25mb" });
+// 25mb of short login:password:token lines is ~300k accounts, and an import is
+// synchronous work on the process every marketplace poller shares: measured
+// ~90ms of event-loop stall per 1,000 accounts (4s at 50k), and past ~120k the
+// auto-check enqueue's push(...ids) overflows the stack after the rows are
+// already written. So the count is capped too, before anything is written;
+// 10,000 keeps the stall to about a second.
+const MAX_IMPORT_ACCOUNTS = 10000;
+
+router.post("/account-pool/import", requireSuperadmin, importPasteBody, async (req, res) => {
   try {
-    let list = req.body && req.body.accounts;
+    let list =
+      typeof req.body === "string" ? req.body : req.body && req.body.accounts;
     let badLines = [];
     if (typeof list === "string") {
       // Tolerate a loosely-pasted object sequence, same as the drops-archive
@@ -321,6 +336,15 @@ router.post("/account-pool/import", requireSuperadmin, async (req, res) => {
       return res
         .status(400)
         .json({ success: false, message: "Expected an array of accounts" });
+    }
+    if (list.length > MAX_IMPORT_ACCOUNTS) {
+      return res.status(413).json({
+        success: false,
+        message:
+          list.length.toLocaleString("en-US") +
+          " accounts in one paste — import at most " +
+          MAX_IMPORT_ACCOUNTS.toLocaleString("en-US") + " at a time",
+      });
     }
 
     // Normalize input to one internal shape. Fields are read independently
