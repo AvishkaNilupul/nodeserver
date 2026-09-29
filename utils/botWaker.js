@@ -27,8 +27,10 @@
 const hosts = require("./botHosts");
 const TwitchCampaign = require("../models/TwitchCampaign");
 const CampaignLiveState = require("../models/CampaignLiveState");
+const path = require("path");
 const { botCompletion } = require("./farmCompletion");
 const { farmableCampaigns } = require("./campaignFarmability");
+const botLogVerdict = require("./botLogVerdict");
 const settings = require("./settings");
 const { recordAutoFarmEvent } = require("./autoFarmEventLog");
 
@@ -414,6 +416,7 @@ async function stopFinishedBots(hostId, opts = {}) {
   const requireEarned = !!settings.getAutoFarm().verifyEarnedBeforePark;
 
   const stopped = [];
+  const logCandidates = [];
   for (const container of running) {
     const file = fileForContainer(container);
     if (!file) continue;
@@ -433,7 +436,10 @@ async function stopFinishedBots(hostId, opts = {}) {
     // "running" indefinitely.
     const empty = !verdict.total;
     if (!empty) {
-      if (!verdict.stoppable) continue;
+      if (!verdict.stoppable) {
+        logCandidates.push({ container, file, verdict });
+        continue;
+      }
       // Same test wakeTrigger applies, run against the verdict's own evidence:
       // any live campaign for an assigned game that this verdict cannot have
       // seen means "unknown", not "finished".
@@ -514,7 +520,123 @@ async function stopFinishedBots(hostId, opts = {}) {
       log("Could not stop " + container + ": " + (e.message || e), "warn");
     }
   }
+  // Second opinion from the bot itself for everything the data verdict could
+  // not clear (utils/botLogVerdict.js).
+  if (logCandidates.length && settings.getAutoFarm().parkNothingLeftBots !== false) {
+    try {
+      for (const x of await parkNothingLeft(host, logCandidates, campaigns, log)) {
+        stopped.push(x);
+      }
+    } catch (e) {
+      log("Nothing-left check failed on " + host.id + ": " + (e.message || e), "warn");
+    }
+  }
   return { stopped };
+}
+
+// Park bots whose OWN log says every enabled account has nothing left to farm,
+// when the server's verdict still reads them as unfinished. That verdict leans
+// on DropLog ↔ campaign-manifest matching, which misses campaigns a bot can
+// never earn (a linked game account, drops only a subscriber gets) and item
+// names that do not line up — Contabo's twitchbot/x18/x41/x50/x53 sat running
+// for days logging "No broadcaster or campaign left" on every account.
+//
+// SAFETY (fail toward farming):
+//   * Never a renter's bot — a registered rental stack, or any config holding a
+//     RenterAccount — whatever its log says (renter start/stop has its own
+//     contract: Renter.botStoppedAt).
+//   * Never a bot the scanner sees in-progress work on an assigned game.
+//   * Every enabled account needs a clean full cycle since the container last
+//     started (botLogVerdict.isNothingLeft); anything unclear keeps it up.
+//   * A campaign for its games that started within NOTHING_LEFT_MARGIN_MS may
+//     not have been through a full cycle yet — keep the bot up.
+//   * Recorded with parkedAt = now − margin and a reason wakeFinishedBots wakes
+//     without grace, so the next campaign that starts wakes it.
+const NOTHING_LEFT_MARGIN_MS = 30 * 60 * 1000;
+const NOTHING_LEFT_REASON =
+  "nothing_left — every account's own log says no campaign is left to farm";
+
+async function parkNothingLeft(host, candidates, campaigns, log) {
+  if (host.runtime === "native") return [];
+  const stacks = require("./renterBotStacks");
+  const rental = await stacks.dedicatedConfigSet(); // throws → touch nothing
+  let pool = candidates.filter(
+    (c) =>
+      c.verdict.total > 0 &&
+      c.verdict.working === 0 &&
+      !rental.has(stacks.stackKey(host.id, c.file)),
+  );
+  if (!pool.length) return [];
+  const raw = await hosts.readFiles(host, pool.map((c) => c.file));
+  const RenterAccount = require("../models/RenterAccount");
+  const keep = [];
+  for (const c of pool) {
+    const e = raw[c.file];
+    if (!e || !e.ok) continue;
+    let data;
+    try {
+      data = JSON.parse(e.text);
+    } catch {
+      continue;
+    }
+    const secrets = (((data.TwitchSettings || {}).TwitchUsers) || [])
+      .map((u) => String((u && u.ClientSecret) || "").trim())
+      .filter(Boolean);
+    if (!secrets.length) continue;
+    const renters = await RenterAccount.countDocuments({ clientSecret: { $in: secrets } });
+    if (renters) continue;
+    keep.push(c);
+  }
+  pool = keep;
+  if (!pool.length) return [];
+  const verdicts = await botLogVerdict.hostLogVerdicts(
+    host,
+    pool.map((c) => ({ container: c.container, configPath: path.posix.join(host.dir, c.file) })),
+  );
+  const parkedAt = new Date(Date.now() - NOTHING_LEFT_MARGIN_MS);
+  const out = [];
+  for (const c of pool) {
+    if (!botLogVerdict.isNothingLeft(verdicts[c.container])) continue;
+    const games = c.verdict.assignedGames || [];
+    const fresh = wakeTrigger(new Set(games.map(norm)), parkedAt, campaigns, 0);
+    if (fresh) {
+      log("Keeping " + c.container + " — " + (fresh.game || "a game it farms") +
+        " has a campaign too new for its log to have covered.");
+      continue;
+    }
+    try {
+      await recordParked(host.id, c.container, {
+        parkedAt: parkedAt.toISOString(),
+        games,
+        accounts: c.verdict.total,
+        reason: NOTHING_LEFT_REASON,
+      });
+    } catch (e) {
+      log("Could not record park for " + c.container + " — leaving it running: " + (e.message || e), "warn");
+      continue;
+    }
+    await hosts.setRestartPolicy(host, c.container, "no").catch(() => {});
+    try {
+      await hosts.dockerContainer(host, "stop", c.container);
+    } catch (e) {
+      await hosts.restoreRestartPolicy(host, c.container).catch(() => {});
+      log("Could not stop " + c.container + ": " + (e.message || e), "warn");
+      continue;
+    }
+    await recordAutoFarmEvent({
+      type: "parked",
+      game: games.join(", "),
+      host: host.id,
+      container: c.container,
+      count: c.verdict.total,
+      reason: NOTHING_LEFT_REASON,
+      actor: "stopFinishedBots",
+    });
+    out.push({ container: c.container, accounts: c.verdict.total, empty: false, nothingLeft: true });
+    log("Parked " + c.container + " — all " + c.verdict.total +
+      " account(s) report nothing left to farm [" + games.join(", ") + "].");
+  }
+  return out;
 }
 
 // Park a RUNNING bot that is only waiting for a broadcast — every one of its
@@ -783,6 +905,7 @@ async function parkIdleNoCampaignBots(hostId, opts = {}) {
 }
 
 module.exports = {
+  NOTHING_LEFT_REASON,
   wakeFinishedBots,
   stopFinishedBots,
   parkIdleBots,

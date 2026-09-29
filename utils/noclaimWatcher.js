@@ -60,67 +60,17 @@ const markerPath = (id) => BOTS_DIR + "/" + id + "/.autostopped"; // watcher par
 // wakes it. JSON: { at, campaignIds: [...], accountsKey }.
 const finishedPath = (id) => BOTS_DIR + "/" + id + "/.finished";
 
-// A finished verdict is only trusted after the container has been up long
-// enough for every account to run a full 5-minute cycle since it started.
-const FINISH_MIN_UPTIME_S =
-  Number(process.env.NOCLAIM_FINISH_MIN_UPTIME_S) || 12 * 60;
 // A campaign is only recorded as "finished" if it was already active this long
 // before the stop — otherwise the bot may not have seen it in a full cycle yet,
 // and recording it would suppress the wake that should farm it.
 const FINISH_CAMPAIGN_MARGIN_MS = 30 * 60 * 1000;
-const LOG_TAIL = 3000;
-
-// Runs ON THE BOT HOST (python3), fed `docker logs --tail N` on stdin.
-// argv: <config.json path> <container StartedAt>. Prints
-// "<enabled>|<finished>|<pending>|<unknown>" over the config's ENABLED logins.
-// Per account, only lines since the container started count, and only its last
-// COMPLETE cycle (between its last two "Waiting 300 seconds" lines) decides:
-//   finished = that cycle ended in "No broadcaster or campaign left" and no
-//              broadcast-wait / watching line appeared since the cycle began.
-//   pending  = a broadcast-wait or watching line since the cycle began.
-//   unknown  = anything else (no full cycle yet, errors, never logged).
-// These are TwitchDropsBot's own lines — "No broadcaster or campaign left" is
-// what it prints when nothing is left for the account to farm.
-const LOG_VERDICT_PY = [
-  "import sys, json, re",
-  "cfg, started = sys.argv[1], sys.argv[2]",
-  "try:",
-  "    d = json.load(open(cfg))",
-  "    users = (d.get('TwitchSettings') or {}).get('TwitchUsers') or []",
-  "    enabled = set(str(u.get('Login') or '').strip().lower() for u in users",
-  "                  if isinstance(u, dict) and u.get('Enabled', True) is not False)",
-  "    enabled.discard('')",
-  "except Exception:",
-  "    print('ERR|config'); sys.exit(0)",
-  "since = started.replace('T', ' ')[:19]",
-  "acct = re.compile(r'\\[TwitchUser - ([A-Za-z0-9_]+)\\]')",
-  "prev, last, none_left, pend = {}, {}, {}, {}",
-  "for i, line in enumerate(sys.stdin):",
-  "    if line[:19] < since:",
-  "        continue",
-  "    m = acct.search(line)",
-  "    if not m:",
-  "        continue",
-  "    a = m.group(1).lower()",
-  "    if 'Waiting 300 seconds' in line:",
-  "        prev[a] = last.get(a, -1)",
-  "        last[a] = i",
-  "    if 'No broadcaster or campaign left' in line:",
-  "        none_left[a] = i",
-  "    if ('No live broadcaster found' in line or 'No broadcaster found for this campaign' in line",
-  "            or 'minutes watched' in line or 'Watching ' in line):",
-  "        pend[a] = i",
-  "f = p = u = 0",
-  "for a in enabled:",
-  "    start = prev.get(a, -1)",
-  "    if start >= 0 and pend.get(a, -1) > start:",
-  "        p += 1",
-  "    elif start >= 0 and start < none_left.get(a, -1) < last.get(a, -1):",
-  "        f += 1",
-  "    else:",
-  "        u += 1",
-  "print('%d|%d|%d|%d' % (len(enabled), f, p, u))",
-].join("\n");
+// The per-bot "nothing left to farm" classifier (runs on the host, reads the
+// bot's own log) is shared with the managed-bot park: utils/botLogVerdict.js.
+const {
+  LOG_VERDICT_PY,
+  LOG_TAIL,
+  isNothingLeft,
+} = require("./botLogVerdict");
 
 const TICK_MS = Number(process.env.NOCLAIM_WATCHER_TICK_MS) || 3 * 60 * 1000; // 3 min
 const RETRY_MS = 60 * 1000; // a failed pass retries on a short fuse
@@ -435,15 +385,7 @@ function parseBots(stdout) {
     // Every enabled account showed a clean "nothing left" cycle since this
     // container started, and it has been up long enough for that to mean
     // something. Anything short of that keeps the bot up.
-    b.finishedNow = !!(
-      b.running &&
-      lv &&
-      lv.uptimeS >= FINISH_MIN_UPTIME_S &&
-      lv.enabled > 0 &&
-      lv.finished === lv.enabled &&
-      lv.pending === 0 &&
-      lv.unknown === 0
-    );
+    b.finishedNow = !!(b.running && isNothingLeft(lv));
   }
   return bots;
 }
