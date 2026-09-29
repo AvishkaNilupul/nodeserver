@@ -89,6 +89,7 @@ const fakeSend = {
   resumeOffer: sendFn("resumeOffer"),
   withdrawOffer: sendFn("withdrawOffer"),
   withdrawAll: sendFn("withdrawAll"),
+  releaseHeld: sendFn("releaseHeld"),
 };
 
 const LOOP_STATUS = {
@@ -444,6 +445,7 @@ const ENDPOINTS = [
   ["POST", "/api/bulk-packs/offers/" + OID + "/pause"],
   ["POST", "/api/bulk-packs/offers/" + OID + "/resume"],
   ["POST", "/api/bulk-packs/offers/" + OID + "/withdraw"],
+  ["POST", "/api/bulk-packs/offers/" + OID + "/release-held"],
   ["POST", "/api/bulk-packs/withdraw-all"],
   ["POST", "/api/bulk-packs/run-now"],
   ["GET", "/api/bulk-packs/settings"],
@@ -1061,6 +1063,112 @@ test("withdraw-all requires the exact confirm word", async () => {
   });
   assert.equal(r.status, 502);
   assert.equal(r.body.message, "1 of 2 failed");
+});
+
+// docs/bulk-packs/FIXES-1.md, send "New" releaseHeld + router bullet.
+test("release-held requires the exact RELEASE word, forwards it with the session actor, and passes send.js status through", async () => {
+  const p = "/api/bulk-packs/offers/" + OID + "/release-held";
+  for (const body of [
+    undefined,
+    {},
+    { confirm: "release" },
+    { confirm: " RELEASE" },
+    { confirm: "RELEASE " },
+    { confirm: true },
+    { confirm: ["RELEASE"] },
+    { confirm: "WITHDRAW" },
+  ]) {
+    const r = await call("POST", p, { body });
+    assert.equal(r.status, 400, JSON.stringify(body));
+    assert.equal(r.body.success, false);
+    assert.match(r.body.message, /RELEASE/);
+    assert.match(r.body.message, /NOT live/);
+  }
+  assert.equal(count("releaseHeld"), 0);
+
+  const before = count("invalidate");
+  let r = await call("POST", p, { body: { confirm: "RELEASE" } });
+  assert.equal(r.status, 200);
+  assert.equal(r.body.success, true);
+  assert.deepEqual(last("releaseHeld"), {
+    offerId: OID,
+    confirm: "RELEASE",
+    actor: "admin:root",
+  });
+  assert.equal(count("invalidate"), before + 1);
+
+  nextResult.releaseHeld = {
+    success: false,
+    status: 409,
+    message: "could not withdraw it on eldorado first — nothing released",
+  };
+  r = await call("POST", p, { body: { confirm: "RELEASE" } });
+  assert.equal(r.status, 409);
+  assert.equal(
+    r.body.message,
+    "could not withdraw it on eldorado first — nothing released",
+  );
+
+  nextResult.releaseHeld = {
+    success: false,
+    status: 400,
+    message: "this offer holds no accounts",
+  };
+  r = await call("POST", p, { body: { confirm: "RELEASE" } });
+  assert.equal(r.status, 400);
+
+  nextResult.releaseHeld = new Error("send exploded");
+  r = await call("POST", p, { body: { confirm: "RELEASE" } });
+  assert.equal(r.status, 500);
+  assert.equal(r.body.message, "send exploded");
+
+  const n = count("releaseHeld");
+  r = await call("POST", "/api/bulk-packs/offers/nope/release-held", {
+    body: { confirm: "RELEASE" },
+  });
+  assert.equal(r.status, 404);
+  assert.equal(count("releaseHeld"), n, "a malformed id never reaches send.js");
+});
+
+test("release-held stays available while switched off; a send.js without releaseHeld is a 503", async () => {
+  reset({ bulkPacksEnabled: false });
+  const p = "/api/bulk-packs/offers/" + OID + "/release-held";
+  let r = await call("POST", p, { body: { confirm: "RELEASE" } });
+  assert.equal(r.status, 200, "it only takes things down (CONTRACT I8)");
+  assert.equal(count("releaseHeld"), 1);
+  bulkPackRoutes.__setDeps({ send: { ...fakeSend, releaseHeld: undefined } });
+  r = await call("POST", p, { body: { confirm: "RELEASE" } });
+  assert.equal(r.status, 503);
+  assert.equal(r.body.code, "module_unavailable");
+  assert.equal(count("releaseHeld"), 1);
+});
+
+// docs/bulk-packs/FIXES-1.md L8 + router bullet: offer views include attention.
+test("offer views include attention: the loop's flag, and '' when nothing is flagged", async () => {
+  const flag =
+    "Needs attention (withdraw): Gameflip would not take the pack down — check it";
+  await BulkOffer.collection.updateOne(
+    { _id: ids.E },
+    { $set: { attention: flag } },
+  );
+  try {
+    let r = await call("GET", "/api/bulk-packs/offers?scope=closed");
+    assert.equal(r.status, 200);
+    const byId = Object.fromEntries(r.body.offers.map((o) => [o.id, o]));
+    assert.equal(byId[String(ids.E)].attention, flag);
+    assert.equal(byId[String(ids.C)].attention, "");
+    r = await call("GET", "/api/bulk-packs/offers?scope=open");
+    for (const o of r.body.offers) assert.equal(o.attention, "");
+    r = await call("GET", "/api/bulk-packs/offers/" + ids.E);
+    assert.equal(r.body.offer.attention, flag);
+    r = await call("GET", "/api/bulk-packs/offers/" + ids.A);
+    assert.equal(r.body.offer.attention, "");
+  } finally {
+    await BulkOffer.collection.updateOne(
+      { _id: ids.E },
+      { $unset: { attention: "" } },
+    );
+  }
 });
 
 test("a send.js without the function is a 503, never a crash", async () => {

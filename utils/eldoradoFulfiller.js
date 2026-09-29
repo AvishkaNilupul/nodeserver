@@ -20,6 +20,7 @@ const { decrypt } = require("./secretBox");
 const {
   reserveSetOnAccount,
   releaseAccountsForTag,
+  releaseSetForAccounts,
 } = require("./dropReservation");
 const { getAutoFarm, getAccountListingSettings } = require("./settings");
 const mp = require("./marketplaces");
@@ -122,7 +123,10 @@ async function claimAccountsForSet(set, max, { claimTag = ELD_CLAIM_TAG } = {}) 
     // A unit with no readable password is not deliverable, so never let it
     // stand behind the offer's quantity.
     if (!login || !password) {
-      await releaseAccounts([c.accountId], claimTag);
+      // Scoped to THIS set (docs/bulk-packs/CONTRACT.md I1): a tag-wide release
+      // would also free the account's other drops reserved — or already SOLD —
+      // under the same marketplace tag for a different set.
+      await releaseSetForAccounts([c.accountId], String(set._id), claimTag);
       continue;
     }
     claimed.push({ accountId: String(c.accountId), login, password });
@@ -528,7 +532,10 @@ async function deliverOrder(order, { dryRun }) {
   // auto-delivery listing at all — it is a service (e.g. "Automatic farming,
   // 120 days") or an offer the operator fulfils by hand. Skip it quietly rather
   // than erroring every tick for an order the bot was never meant to deliver.
-  if (!listing.autoClaimSet && !(listing.units || []).length) {
+  // A bulk pack row (docs/bulk-packs/FIXES-1.md L5) is never that: with every
+  // unit pulled it is a paid order short of stock, so it falls to the units
+  // tail below, which pages.
+  if (!listing.autoClaimSet && !(listing.units || []).length && !listing.bulkOfferId) {
     return {
       orderId,
       skipped: "manual-delivery listing (no unclaimedGame and no reserved units)",
@@ -573,7 +580,12 @@ async function deliverOrder(order, { dryRun }) {
 
     const claimed = await unclaimedOnly(await claimAccountsForSet(set, qty));
     if (claimed.length < qty) {
-      await releaseAccounts(claimed.map((c) => c.accountId)).catch(() => {});
+      // Scoped to this set, never tag-wide (see claimAccountsForSet).
+      await releaseSetForAccounts(
+        claimed.map((c) => c.accountId),
+        String(set._id),
+        ELD_CLAIM_TAG,
+      ).catch(() => {});
       return {
         orderId,
         error:
@@ -604,6 +616,9 @@ async function deliverOrder(order, { dryRun }) {
     return {
       orderId,
       error:
+        // A bulk pack row short of free units is a PAID order that cannot ship
+        // (docs/bulk-packs/FIXES-1.md L5): the prefix is in ALERT_REASONS.
+        (listing.bulkOfferId ? "bulk pack short: " : "") +
         "not enough reserved stock (" +
         free.length +
         " of " +
@@ -764,6 +779,24 @@ async function syncBundleStock({ dryRun = false } = {}) {
         listedElsewhere,
       ).length;
     }
+    // A bulk pack row (docs/bulk-packs/FIXES-1.md R3-3, R3-4): below its
+    // offer's minimum order nothing can be bought, so it counts as empty and is
+    // paused like one; and a bulk offer that is not "live" (owner pause, closed,
+    // held) is never resumed from here. A failed read changes nothing this pass.
+    let bulkLive = true;
+    if (row.bulkOfferId) {
+      let bulk = null;
+      try {
+        bulk = await require("../models/BulkOffer")
+          .findById(row.bulkOfferId, { minQty: 1, state: 1 })
+          .lean();
+      } catch (e) {
+        console.error("eldorado bulk offer read:", e.message);
+        continue;
+      }
+      if (bulk && real < (Number(bulk.minQty) || 0)) real = 0;
+      if (bulk && bulk.state !== "live") bulkLive = false;
+    }
     let offer = null;
     try {
       offer = await mp.eldoradoOffer(row.externalId);
@@ -783,7 +816,7 @@ async function syncBundleStock({ dryRun = false } = {}) {
       continue;
     }
     // Only resume what WE paused — never override a deliberate pause.
-    if (real > 0 && offer.offerState === "Paused" && row.autoPaused) {
+    if (real > 0 && offer.offerState === "Paused" && row.autoPaused && bulkLive) {
       changes.push({ title: row.title, action: "resume (" + real + " back in stock)" });
       if (!dryRun) {
         await mp.eldoradoRelist(row.externalId).catch(() => {});
@@ -831,11 +864,14 @@ async function syncBundleStock({ dryRun = false } = {}) {
 // §8b) — the same paid-and-stuck state as "free in the no-claim farm", and the
 // same page. The no-claim kill switch ("no-claim listing auto-delivery is off")
 // is already covered by SWITCHED_OFF_SKIPS.
+//
+// "bulk pack short" is a bulk pack row without enough free units for a paid
+// order (docs/bulk-packs/FIXES-1.md L5) — the same stuck-and-paid state.
 const SWITCHED_OFF_SKIPS = /auto-delivery is off/i;
 const ALERT_REASONS = new RegExp(
   "out of stock|no listing row|no unsold account|ambiguous|cannot be " +
     "identified|no sellable|free in the no-claim farm|AccountOffer is " +
-    "missing|rendered empty|no free no-claim account|" +
+    "missing|rendered empty|no free no-claim account|bulk pack short|" +
     SWITCHED_OFF_SKIPS.source,
   "i",
 );
@@ -1094,14 +1130,58 @@ async function listOwnOffers() {
   return out;
 }
 
+// The bulk pack behind an Eldorado offer id (docs/bulk-packs/FIXES-1.md R3-4),
+// found by the BulkOffer's own externalId and by the listing row's
+// bulkOfferId: null when there is none, else { notLive } — the first state
+// that is not "live", or "". A failed read is null, the way autoPausedNow
+// reads a failed lookup as "not paused", so every other offer renews exactly
+// as before.
+async function bulkOfferFor(offerId) {
+  try {
+    const BulkOffer = require("../models/BulkOffer");
+    const id = String(offerId || "");
+    if (!id) return null;
+    const states = (
+      await BulkOffer.find({ market: "eldorado", externalId: id }, { state: 1 })
+        .limit(5)
+        .lean()
+    ).map((b) => b.state);
+    const row = await MarketplaceListing.findOne(
+      { marketplace: "eldorado", externalId: id, bulkOfferId: { $ne: null } },
+      { bulkOfferId: 1 },
+    ).lean();
+    if (row) {
+      const b = await BulkOffer.findById(row.bulkOfferId, { state: 1 }).lean();
+      if (b) states.push(b.state);
+    }
+    if (!states.length && !row) return null;
+    return { notLive: states.find((s) => s !== "live") || "" };
+  } catch {
+    return null;
+  }
+}
+
 // Pause + resume one offer and read it back. `ok` only when it is Active again
 // with a later expiry. Skipped when it is no longer Active, or when the stock
 // sync paused it on purpose while this ran (its row turned autoPaused) — that
 // pause means there is nothing to sell, so it stays.
+//
+// A bulk offer that is not "live" (paused by its owner or its loop, sold out,
+// withdrawn, held after an unknown publish) is never resumed by this
+// (FIXES-1 R3-4): it is skipped untouched, and one that stops being live
+// while this runs is left paused.
 async function renewOffer(offerId) {
   const before = await mp.eldoradoOffer(offerId);
   if (!before || before.offerState !== "Active") {
     return { offerId, skipped: "not active" };
+  }
+  const bulk = await bulkOfferFor(offerId);
+  if (bulk && bulk.notLive) {
+    return {
+      offerId,
+      title: before.offerTitle,
+      skipped: "bulk offer is " + bulk.notLive + " — the keep-alive never resumes it",
+    };
   }
   const autoPausedNow = async () => {
     const row = await MarketplaceListing.findOne(
@@ -1126,6 +1206,14 @@ async function renewOffer(offerId) {
         offerId,
         title: before.offerTitle,
         skipped: "paused by the stock sync meanwhile",
+      };
+    }
+    const bulkNow = bulk ? await bulkOfferFor(offerId) : null;
+    if (bulkNow && bulkNow.notLive) {
+      return {
+        offerId,
+        title: before.offerTitle,
+        skipped: "bulk offer turned " + bulkNow.notLive + " meanwhile — left paused",
       };
     }
     // A no-op on an offer that is still Active (e.g. the pause failed).

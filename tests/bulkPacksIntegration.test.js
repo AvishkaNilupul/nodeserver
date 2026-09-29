@@ -247,8 +247,8 @@ test("eldorado dropset: send → real delivery → sold out → leftovers releas
   assert.ok(calls.some((c) => c[0] === "eldoradoDelist" && c[1] === row.externalId));
   assert.equal(o.reserved.filter((e) => e.state === "retiring").length, 4);
 
-  // Pass 2 (after the 2-minute grace): the 4 leftovers go back to stock.
-  await loop.runOnce({ now: at(5) });
+  // Pass 2 (after the 15-minute grace, FIXES-1 L2): the 4 leftovers go back to stock.
+  await loop.runOnce({ now: at(17) });
   o = await BulkOffer.findById(offer._id).lean();
   const delivered = o.reserved.filter((e) => e.state === "delivered");
   const released = o.reserved.filter((e) => e.state === "released");
@@ -288,7 +288,8 @@ test("owner hand-sale of a pack account: it leaves the pack and its reservation 
     "quantity follows the shelf",
   );
 
-  await loop.runOnce({ now: at(10) });
+  // Past the 15-minute grace (FIXES-1 L2) since the take-out.
+  await loop.runOnce({ now: at(35) });
   const o = await BulkOffer.findById(offerId).lean();
   const e = o.reserved.find((x) => String(x.accountId) === String(victim.accountId));
   assert.equal(e.state, "released");
@@ -328,7 +329,7 @@ test("gameflip pack: one listing holds all 5 accounts; a sale finalises the offe
   assert.equal(row.units.length, 5);
   // What gameflipFulfiller.syncOnce does when Gameflip reports the sale.
   await MarketplaceListing.updateOne({ _id: row._id }, { $set: { status: "sold" } });
-  await loop.runOnce({ now: at(15) });
+  await loop.runOnce({ now: at(40) });
   const o = await BulkOffer.findById(offerId).lean();
   assert.equal(o.state, "sold");
   assert.equal(o.reserved.filter((e) => e.state === "delivered").length, 5);
@@ -355,13 +356,13 @@ test("rented-out member: the gameflip pack is withdrawn, the others released, th
     login: acc.login,
   });
 
-  await loop.runOnce({ now: at(20) });
+  await loop.runOnce({ now: at(45) });
   let o = await BulkOffer.findById(offerId).lean();
   assert.equal(o.state, "withdrawn");
   assert.ok(calls.some((c) => c[0] === "gameflipDelist" && c[1] === row.externalId));
   assert.equal((await MarketplaceListing.findById(row._id).lean()).status, "delisted");
 
-  await loop.runOnce({ now: at(25) });
+  await loop.runOnce({ now: at(61) }); // past the 15-minute grace (FIXES-1 L2)
   o = await BulkOffer.findById(offerId).lean();
   for (const e of o.reserved) {
     const res = await reservationOf(e.accountId);

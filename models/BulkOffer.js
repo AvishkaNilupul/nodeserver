@@ -137,6 +137,11 @@ const bulkOfferSchema = new mongoose.Schema(
     lastSyncAt: { type: Date, default: null },
     lastCheckAt: { type: Date, default: null },
     lastError: { type: String, default: "" },
+    // A standing problem the owner must look at ("Needs attention (key): …"),
+    // raised once by the loop and cleared only by the check that raised it
+    // (docs/bulk-packs/FIXES-1.md L8). Separate from lastError, which carries
+    // transient loop errors and send failures: one must never wipe the other.
+    attention: { type: String, default: "" },
     history: { type: [historySchema], default: [] },
     createdBy: { type: String, default: "" },
     closedAt: { type: Date, default: null },

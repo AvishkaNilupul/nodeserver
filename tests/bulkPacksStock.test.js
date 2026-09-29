@@ -358,6 +358,118 @@ test("releaseUnits: bad market / missing set skip, a set id works, a read error 
   assert.throws(() => stock.__setDeps({ DropLogs: {} }), /unknown dependency/);
 });
 
+// FIXES-1 S7: releaseSetForAccounts swallows its own DropLog write error
+// (.catch(() => {}), utils/dropReservation.js:167) and returns normally, so a
+// returned call proves nothing. The REAL release runs here with that write
+// failing: the unit must come back in `failed` (retryable), never `released`.
+test("releaseUnits (S7): a release whose write is swallowed lands in failed; the retry releases it", async () => {
+  await reset();
+  const set = await makeSet("Rust bundle", KEYS);
+  const alpha = await makeAccount("alpha");
+  await giveDrops(alpha, KEYS);
+  const [unit] = await stock.reserve({ set, n: 1, market: "eldorado" });
+
+  const hadOwn = Object.prototype.hasOwnProperty.call(DropLog, "updateMany");
+  const realUpdateMany = DropLog.updateMany;
+  let swallowed = 0;
+  DropLog.updateMany = function (filter, update, ...rest) {
+    if (update && update.$set && update.$set.soldAt === null) {
+      swallowed += 1;
+      return Promise.reject(new Error("write failed"));
+    }
+    return realUpdateMany.call(this, filter, update, ...rest);
+  };
+  let res;
+  try {
+    res = await stock.releaseUnits({ set, market: "eldorado", accountIds: [unit.accountId] });
+  } finally {
+    if (hadOwn) DropLog.updateMany = realUpdateMany;
+    else delete DropLog.updateMany;
+  }
+  assert.equal(swallowed, 1, "the real release ran and its write failed silently");
+  assert.deepEqual(res.released, [], "a swallowed write is not a release");
+  assert.deepEqual(res.skipped, []);
+  assert.equal(res.failed.length, 1);
+  assert.equal(res.failed[0].accountId, unit.accountId);
+  assert.match(res.failed[0].reason, /release did not take/);
+  for (const r of await rowsOf(alpha, KEYS)) {
+    assert.equal(r.soldToUsername, "eldorado", "still reserved for the offer");
+    assert.equal(r.soldSetId, String(set._id));
+  }
+
+  // Retrying a `failed` unit is safe: the next pass releases it for real.
+  res = await stock.releaseUnits({ set, market: "eldorado", accountIds: [unit.accountId] });
+  assert.deepEqual(res, { released: [unit.accountId], skipped: [], failed: [] });
+  for (const r of await rowsOf(alpha, KEYS)) assert.equal(r.soldAt, null);
+});
+
+test("releaseUnits (S7): another claim of the freed account under the same tag is not read as ours surviving", async () => {
+  await reset();
+  const set = await makeSet("Rust bundle", KEYS);
+  const alpha = await makeAccount("alpha");
+  await giveDrops(alpha, KEYS);
+  const [unit] = await stock.reserve({ set, n: 1, market: "eldorado" });
+  const real = require("../utils/dropReservation");
+  const later = new Date(Date.now() + 60 * 1000);
+  stock.__setDeps({
+    dropReservation: {
+      setKeys: real.setKeys,
+      releaseSetForAccounts: async (ids, setId, tag) => {
+        await real.releaseSetForAccounts(ids, setId, tag);
+        // An ordinary Eldorado listing of the same set claims the account
+        // before our re-check runs: same tag, same set — a NEW stamp.
+        await DropLog.updateMany(
+          { account: alpha._id, itemKey: { $in: KEYS }, soldAt: null },
+          { $set: { soldAt: later, soldToUsername: tag, soldSetId: setId } },
+        );
+      },
+    },
+  });
+  let res;
+  try {
+    res = await stock.releaseUnits({ set, market: "eldorado", accountIds: [unit.accountId] });
+  } finally {
+    stock.__resetDeps();
+  }
+  // Ours WAS released. Reporting `failed` would get their reservation freed
+  // by the retry — one account on two listings.
+  assert.deepEqual(res, { released: [unit.accountId], skipped: [], failed: [] });
+  for (const r of await rowsOf(alpha, KEYS)) assert.equal(r.soldAt.getTime(), later.getTime());
+});
+
+test("releaseUnits (S7): a re-check that cannot be read is skipped as unverified, never retried", async () => {
+  await reset();
+  const set = await makeSet("Rust bundle", KEYS);
+  const alpha = await makeAccount("alpha");
+  await giveDrops(alpha, KEYS);
+  const [unit] = await stock.reserve({ set, n: 1, market: "g2g" });
+  let counts = 0;
+  stock.__setDeps({
+    DropLog: {
+      // isStillOurs reads two counts; the third is the post-release re-check.
+      countDocuments: (...a) => {
+        counts += 1;
+        if (counts > 2) throw new Error("db blip");
+        return DropLog.countDocuments(...a);
+      },
+      distinct: (...a) => DropLog.distinct(...a),
+    },
+  });
+  let res;
+  try {
+    res = await stock.releaseUnits({ set, market: "g2g", accountIds: [unit.accountId] });
+  } finally {
+    stock.__resetDeps();
+  }
+  assert.deepEqual(res, {
+    released: [],
+    skipped: [{ accountId: unit.accountId, reason: "release unverified: db blip" }],
+    failed: [],
+  });
+  // It had in fact taken — which is exactly why an unverified release must not be retried.
+  for (const r of await rowsOf(alpha, KEYS)) assert.equal(r.soldAt, null);
+});
+
 // ---------------------------------------------------------------------------
 // unitHealth
 // ---------------------------------------------------------------------------
@@ -508,6 +620,69 @@ test("advertisable: min of max qty, best stack, free minus reserve, pristine min
   assert.equal(farmCapacity.advertisable(cap(50, 100, 100), null), 0);
   assert.equal(farmCapacity.advertisable(cap(50, 100, 100), { ...bp, farmReserveSlots: undefined }), 0);
   assert.equal(farmCapacity.advertisable(cap("x", 100, 100), bp), 0);
+});
+
+// ---------------------------------------------------------------------------
+// farmCapacity.shareFor (FIXES-1 S1)
+// ---------------------------------------------------------------------------
+
+test("shareFor (S1): open farm offers split the shared capacity equally, deterministically, summing to it", () => {
+  farmCapacity.__resetDeps();
+  const [a1, a2, a3] = ["64f0000000000000000000a1", "64f0000000000000000000a2", "64f0000000000000000000a3"];
+  const ids = [a3, a1, a2];
+  // The reviewers' repro (three farm offers, advertisable 20): 7 + 7 + 6, not 3 x 20.
+  // floor(20 / 3) = 6 each; the remainder goes to the two lowest ids.
+  assert.equal(farmCapacity.shareFor(a1, ids, 20), 7);
+  assert.equal(farmCapacity.shareFor(a2, ids, 20), 7);
+  assert.equal(farmCapacity.shareFor(a3, ids, 20), 6);
+  // The order of `ids` never matters, and the offer counts itself when unlisted.
+  assert.equal(farmCapacity.shareFor(a3, [...ids].reverse(), 20), 6);
+  assert.equal(farmCapacity.shareFor(a3, [a2, a1], 20), 6);
+  // A repeat is one sharer (send passes the open ids plus itself).
+  assert.equal(farmCapacity.shareFor(a1, [a1, a1, a2], 10), 5);
+  assert.equal(farmCapacity.shareFor(a1, new Set([a1, a2]), 10), 5);
+  // An ObjectId, its string and a doc are the same offer.
+  const oid = new mongoose.Types.ObjectId();
+  assert.equal(farmCapacity.shareFor(oid, [String(oid)], 9), 9);
+  assert.equal(farmCapacity.shareFor(String(oid), [oid, { _id: oid }], 9), 9);
+  // Alone it gets everything; with no id it takes the last (smallest) share.
+  assert.equal(farmCapacity.shareFor(a1, [], 13), 13);
+  assert.equal(farmCapacity.shareFor("", [a1, a2], 10), 3);
+  // Unreadable capacity is 0, never "plenty"; a fraction is floored.
+  for (const bad of [0, -4, NaN, undefined, null, "x", Infinity]) {
+    assert.equal(farmCapacity.shareFor(a1, ids, bad), 0, String(bad));
+  }
+  assert.equal(farmCapacity.shareFor(a1, [a1], 7.9), 7);
+  assert.equal(farmCapacity.shareFor(a1, null, 7), 7);
+  // The shares never sum past the capacity, and never waste it.
+  for (let n = 1; n <= 6; n++) {
+    const list = Array.from({ length: n }, (_, i) => String(i + 1).padStart(24, "0"));
+    for (let avail = 0; avail <= 25; avail++) {
+      const shares = list.map((id) => farmCapacity.shareFor(id, list, avail));
+      assert.equal(shares.reduce((x, y) => x + y, 0), avail, n + " offers / " + avail);
+      assert.ok(Math.max(...shares) - Math.min(...shares) <= 1, "an equal split");
+    }
+  }
+});
+
+test("shareFor (S1): the split is utils/suppliedStock.js shareOfShelf, handed clean input", () => {
+  const seen = [];
+  farmCapacity.__setDeps({
+    suppliedStock: {
+      shareOfShelf: (free, self, list) => {
+        seen.push([free, self, list]);
+        return 99;
+      },
+    },
+  });
+  // Deduplicated ids, a floored whole, and a share capped at the whole.
+  assert.equal(farmCapacity.shareFor("b", ["b", "a", "a", ""], 12.5), 12);
+  assert.deepEqual(seen, [[12, "b", ["b", "a"]]]);
+  farmCapacity.__resetDeps();
+  const real = require("../utils/suppliedStock");
+  for (const [self, list, avail] of [["b", ["a", "b", "c"], 11], ["", ["a"], 5], ["z", [], 4]]) {
+    assert.equal(farmCapacity.shareFor(self, list, avail), real.shareOfShelf(avail, self, list));
+  }
 });
 
 // ---------------------------------------------------------------------------

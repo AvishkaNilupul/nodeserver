@@ -533,6 +533,19 @@ async function deliverOrder(order, { dryRun }) {
 
   const stock = await pickStock(listing, order, { dryRun });
   if (stock === null) {
+    // A bulk pack row (docs/bulk-packs/FIXES-1.md L5) is never a hand-filled
+    // listing: no pick there means a PAID order short of free units, and any
+    // error pages the operator.
+    if (listing.bulkOfferId) {
+      return {
+        orderId,
+        error:
+          "bulk pack short: not enough reserved stock (" +
+          undeliveredUnits(listing).filter((u) => !u.orderId).length +
+          " of " + qty + ") — restock the offer, then this order will " +
+          "deliver on the next tick",
+      };
+    }
     // Neither a stock source nor a reserved unit: this is a service listing
     // ("Automatic farming 180 days") or one the operator fills by hand. Skip
     // quietly rather than erroring every minute for an order we were never
@@ -566,6 +579,19 @@ async function deliverOrder(order, { dryRun }) {
     ? picked.map((p) => unit(p, p.password))
     : await credentialsFor(picked, { listing, orderId });
   const unreadable = creds.filter((c) => !c.password);
+  if (unreadable.length && listing.bulkOfferId) {
+    // A bulk pack row (docs/bulk-packs/FIXES-1.md R3-5) is never released
+    // here: the release below is tag-wide and could free another set's SOLD
+    // drops on the same account. The units stay on the row for the bulk loop's
+    // health check, which retires "no password" units; the error pages.
+    return {
+      orderId,
+      error:
+        "bulk pack: " + unreadable.length + " of " + qty +
+        " account(s) had no readable password — not shipped, left for the " +
+        "bulk check to retire",
+    };
+  }
   if (unreadable.length) {
     // An offer-backed row has no accountId at all — contract B5 leaves it empty
     // on purpose so marketplaceGuardian does not raise a duplicate finding on
@@ -1153,6 +1179,23 @@ async function syncStock() {
     // null means "could not tell". Never write a guess into a live offer —
     // advertising 0 by accident takes a working listing off sale.
     if (real == null) continue;
+    // A bulk pack row (docs/bulk-packs/FIXES-1.md R3-3): below its offer's
+    // minimum order nothing can be bought, so it counts as empty and is
+    // delisted like one; and a bulk offer that is not "live" (owner pause,
+    // closed, held) is never relisted from here. A failed read skips the row.
+    let bulkLive = true;
+    if (row.bulkOfferId) {
+      let bulk = null;
+      try {
+        bulk = await require("../models/BulkOffer")
+          .findById(row.bulkOfferId, { minQty: 1, state: 1 })
+          .lean();
+      } catch {
+        continue;
+      }
+      if (bulk && real < (Number(bulk.minQty) || 0)) real = 0;
+      if (bulk && bulk.state !== "live") bulkLive = false;
+    }
     if (dryRun) {
       changes.push({ offer: row.externalId, wouldSet: real });
       continue;
@@ -1165,7 +1208,7 @@ async function syncStock() {
         changes.push({ offer: row.externalId, delisted: true });
       } else {
         await mp.g2gSetQuantity(row.externalId, real);
-        if (row.autoPaused) {
+        if (row.autoPaused && bulkLive) {
           await mp.g2gRelist(row.externalId);
           row.autoPaused = false;
           await row.save();

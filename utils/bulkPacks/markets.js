@@ -36,8 +36,10 @@
 //   farm g2g           scripts/g2g-farm-listings.js:111-131, :177-188
 //
 // Refusals made BEFORE any marketplace write throw an Error whose `code` is
-// "BULK_PACK_REFUSED": nothing was published, nothing needs undoing. Any other
-// error from a publish may have left something live and is reported as such.
+// "BULK_PACK_REFUSED": nothing was published, nothing needs undoing. EVERY
+// error a publish function throws also carries `outcome` — "not_created" or
+// "may_be_live" — and `externalId` when the market's id is known
+// (docs/bulk-packs/FIXES-1.md S2/S5; see "Publish outcomes" below).
 //
 // Dependencies are lazy and injectable (CONTRACT §9): __setDeps(partial) /
 // __resetDeps(). Only node built-ins load with this file, so requiring it
@@ -573,25 +575,304 @@ async function packCode(units) {
 }
 
 // ---------------------------------------------------------------------------
+// Publish outcomes (docs/bulk-packs/FIXES-1.md S2/S5)
+// ---------------------------------------------------------------------------
+//
+// What a failed publish left behind decides whether the caller may hand the
+// accounts back ("not_created") or must HOLD them ("may_be_live"): releasing
+// accounts a live offer still sells is how one account sells twice. The
+// verdict follows the connector STEP the error came from — the same status
+// means opposite things at different steps. Line numbers: utils/marketplaces.js.
+//
+//   Nothing sent yet (a refusal, a DB read, a cover) -> not_created.
+//   Gameflip, gameflipPublish :280-431
+//     keys :127-137, "Gameflip minimum price is $0.75" :289-291, the POST
+//     "Gameflip create: …" :295-325 -> not_created: no listing id exists, and
+//     anything the POST made is a codeless draft nobody can buy.
+//     "could not attach the delivery content (draft ID discarded)" :340-357 and
+//     "Gameflip created ID but could not put it on sale (draft discarded)"
+//     :408-426 -> listing ID EXISTS, and its discard is .catch(() => {}): the
+//     status patch may have landed with every credential attached. So
+//     mp.gameflipDelist(ID) (draft, then delete, :940-961): resolves ->
+//     not_created; HTTP 404 -> not_created (Gameflip has no such listing — the
+//     discard took; gameflipFulfiller.js:1001-1006 releases on that same 404);
+//     anything else (429, sold, …) -> may_be_live + ID.
+//   G2G, g2gPublish :3077-3202
+//     keys, brand, price, the shape/settings READS, the token refresh ->
+//     not_created. "G2G create offer failed…" / "G2G create: no offer id…"
+//     :3140-3150 -> not_created (the POST makes an empty shell: price 0, qty 0).
+//     "G2G publish offer failed…" (the PUT that fills the shell and sets it
+//     live, :3186-3189): an ANSWERED rejection — 4xx, or G2G's in-band error
+//     code :2786-2794 — -> not_created; a 5xx, a timeout or a dropped
+//     connection may have been applied (the codebase's own rule,
+//     utils/noclaimListings.js:305-313 writeMaybeLanded) -> may_be_live, no id
+//     (the message does not carry it).
+//     "G2G publish: offer ID did not read back as a live offer" :3195-3200 (the
+//     PUT answered 200) -> mp.g2gDelist(ID) (:2932-2934): resolves ->
+//     not_created; any failure -> may_be_live + ID.
+//   Eldorado, eldoradoPublish :4581-4645
+//     keys, title, cover, the game-slot READ, image upload, price, a session
+//     refresh (the request it renews was refused) -> not_created. The create
+//     POST "Eldorado publish failed…" (eldError :4347-4370): HTTP 4xx incl. 429
+//     -> not_created; 5xx / no status / timeout -> may_be_live, no id.
+//   No-claim: the layer answers {success:false, message} and drops the
+//     error's status, so its MESSAGE is read (eldError / g2gError write
+//     "failed (HTTP nnn)" into it). Its own refusals (utils/noclaimListings.js
+//     :437-447, :683-720) -> not_created; its orphan "published on … delist it
+//     by hand: ID" (:650-675) -> may_be_live + ID; the rest by the market rules.
+//   The mp call returned, then something failed (no id, no row) -> may_be_live.
+//   Anything unrecognised -> may_be_live: the wrong "not_created" releases
+//   accounts a live offer still sells; the wrong "may_be_live" only holds them
+//   until the owner has looked.
+const NOT_CREATED = "not_created";
+const MAY_BE_LIVE = "may_be_live";
+
+const GF_ONSALE_RE = /Gameflip created (\S+) but could not put it on sale/;
+const GF_DRAFT_RE = /draft (\S+) discarded/;
+const GF_BEFORE_ID = [/^gameflip is not configured/i, /^Gameflip minimum price is/i, /^Gameflip create: /];
+
+const G2G_READBACK_RE = /offer (\S+) did not read back/;
+const G2G_PUT_RE = /^G2G publish offer failed/;
+const G2G_CREATE_RE = /^G2G create(?: offer failed|: no offer id)/;
+const G2G_BEFORE_CREATE = [
+  /^g2g is not configured/i,
+  /^G2G brand_id is required/,
+  /^G2G needs /, // "a price above 0" :3098, or the attributes it lacks :3051-3064
+  /^G2G's minimum price is/,
+  /^G2G refresh/, // g2gRefreshAccess :2678-2724 — a token call, never the offer
+  /^G2G (?:list offers|get offer|relation|collections|product settings) failed/,
+  /^G2G: no product \(relation_id\)/,
+  /^G2G: no delivery method available/,
+];
+
+const ELD_CREATE_RE = /^Eldorado publish failed/;
+const ELD_BEFORE_CREATE = [
+  /^eldorado is not configured/i,
+  /^Eldorado: a title is required/,
+  /^Eldorado: a cover image is required/,
+  /^Eldorado: could not resolve a Twitch Drops game slot/,
+  /^Eldorado image upload (?:failed|returned no paths)/,
+  /^Eldorado: invalid price/,
+  /^Eldorado session refresh failed/,
+];
+
+const NOCLAIM_BEFORE = [
+  /^No-claim listings are switched off/,
+  /^No-claim auto-delivery is switched off/,
+  /is not supported for no-claim listings yet/,
+  /^Not a no-claim listing/,
+  /^Out of stock — no free no-claim account/,
+  /^Could not count the no-claim stock right now/,
+  /free account\(s\) for this bundle are already advertised/,
+];
+const NOCLAIM_ORPHAN_RE = /^published on .+? but the row could not be saved — delist it by hand: (\S+)/;
+
+// The same words noclaimListings.writeMaybeLanded treats as "may have landed".
+const TRANSPORT_RE = /timeout|timed out|ETIMEDOUT|ECONNRESET|ECONNABORTED|socket hang up|network/i;
+
+// One publish call's progress: nothing sent / the market call made / it returned.
+function publishTrace(market, kind) {
+  return { market: normMarket(market), kind, sent: false, returned: false, externalId: "" };
+}
+
+async function sendPublish(t, call) {
+  t.sent = true;
+  const r = await call();
+  t.returned = true;
+  t.externalId = cleanId(r && (r.externalId || r.id));
+  return r;
+}
+
+// An id worth addressing: never "", "undefined" or "null" (String(undefined)
+// lands in messages when a response carried no id).
+function cleanId(v) {
+  const s = v == null ? "" : String(v).trim();
+  return !s || /^(?:undefined|null)$/i.test(s) ? "" : s;
+}
+
+function judged(err, outcome, externalId, step, cleanup) {
+  err.outcome = outcome;
+  err.externalId = cleanId(externalId);
+  err.publishStep = step;
+  if (cleanup) err.cleanup = cleanup;
+  return err;
+}
+
+// The HTTP status of a connector error: err.status (apiError, eldError,
+// g2gError and AxiosError all set it), the response's, or the
+// "failed (HTTP nnn)" eldError / g2gError write into the message. 0 = none.
+function statusOf(e) {
+  for (const v of [e && e.status, e && e.response && e.response.status]) {
+    const n = Number(v);
+    if (Number.isInteger(n) && n >= 100 && n <= 599) return n;
+  }
+  const m = /\bfailed \(HTTP (\d{3})\)/.exec(msgOf(e));
+  return m ? Number(m[1]) : 0;
+}
+
+// utils/noclaimListings.js:305-313: an answered 4xx was not applied; a 5xx, a
+// timeout or a dropped connection may have been.
+function writeMayHaveLanded(e) {
+  const st = statusOf(e);
+  if (st >= 400 && st < 500) return false;
+  if (st >= 500) return true;
+  return TRANSPORT_RE.test(msgOf(e)) || TRANSPORT_RE.test(String((e && e.code) || ""));
+}
+
+function delistVerdict(message) {
+  try {
+    const mp = d("mp");
+    return typeof mp.delistOutcome === "function" ? mp.delistOutcome(message) || "" : "";
+  } catch {
+    return "";
+  }
+}
+
+// The half-made Gameflip listing `id` is taken down with the real delist
+// (draft, then delete). Only a delist that worked, or Gameflip saying it has
+// no such listing, proves nobody can buy the pack's credentials.
+async function gameflipTakeDown(err, id) {
+  try {
+    await d("mp").gameflipDelist(id);
+  } catch (e) {
+    const why = msgOf(e);
+    if (statusOf(e) === 404) {
+      err.message += " — listing " + id + " no longer exists on Gameflip (404): nothing is on sale";
+      return judged(err, NOT_CREATED, id, "gameflip-listing", { tried: true, ok: true, error: why });
+    }
+    const verdict = delistVerdict(why);
+    err.message +=
+      verdict === "sold"
+        ? " — Gameflip says listing " + id + " already SOLD: its buyer holds the pack's credentials"
+        : " — taking listing " + id + " down failed too (" + why + "): it may be ON SALE with the " +
+          "pack's credentials";
+    console.error("bulkPacks/markets: Gameflip listing " + id + " may be live: " + err.message);
+    return judged(err, MAY_BE_LIVE, id, "gameflip-listing", { tried: true, ok: false, error: why, verdict });
+  }
+  err.message += " — listing " + id + " was taken down again (draft + delete): nothing is on sale";
+  return judged(err, NOT_CREATED, id, "gameflip-listing", { tried: true, ok: true, error: "" });
+}
+
+async function judgeGameflip(err) {
+  const msg = msgOf(err);
+  const hit = GF_ONSALE_RE.exec(msg) || GF_DRAFT_RE.exec(msg);
+  if (hit) {
+    const id = cleanId(hit[1]);
+    // "created undefined": the patch and the code went to /listing/undefined,
+    // so whatever the POST made is a codeless draft nobody can buy.
+    if (!id) return judged(err, NOT_CREATED, "", "gameflip-listing");
+    return gameflipTakeDown(err, id);
+  }
+  if (GF_BEFORE_ID.some((re) => re.test(msg))) return judged(err, NOT_CREATED, "", "gameflip-create");
+  return judged(err, MAY_BE_LIVE, "", "gameflip-unknown");
+}
+
+// The G2G offer `id` answered the PUT but not the read-back: take it off sale
+// with the real delist before anything may be released.
+async function g2gTakeDown(err, id) {
+  try {
+    await d("mp").g2gDelist(id);
+  } catch (e) {
+    const why = msgOf(e);
+    err.message += " — delisting offer " + id + " failed too (" + why + "): it may be LIVE";
+    console.error("bulkPacks/markets: G2G offer " + id + " may be live: " + err.message);
+    return judged(err, MAY_BE_LIVE, id, "g2g-readback", { tried: true, ok: false, error: why });
+  }
+  err.message += " — offer " + id + " was delisted: nothing is on sale";
+  return judged(err, NOT_CREATED, id, "g2g-readback", { tried: true, ok: true, error: "" });
+}
+
+async function judgeG2g(err) {
+  const msg = msgOf(err);
+  const back = G2G_READBACK_RE.exec(msg);
+  if (back) {
+    const id = cleanId(back[1]);
+    if (!id) return judged(err, MAY_BE_LIVE, "", "g2g-readback");
+    return g2gTakeDown(err, id);
+  }
+  if (G2G_PUT_RE.test(msg)) {
+    return judged(err, writeMayHaveLanded(err) ? MAY_BE_LIVE : NOT_CREATED, "", "g2g-put");
+  }
+  if (G2G_CREATE_RE.test(msg)) return judged(err, NOT_CREATED, "", "g2g-create");
+  if (G2G_BEFORE_CREATE.some((re) => re.test(msg))) {
+    return judged(err, NOT_CREATED, "", "g2g-before-create");
+  }
+  return judged(err, MAY_BE_LIVE, "", "g2g-unknown");
+}
+
+// The one request eldoradoPublish does not wrap in eldError: the trade-
+// environment library READ behind eldoradoResolveGame (:4495-4506).
+function isEldoradoLibraryRead(e) {
+  const url = e && e.config && e.config.url;
+  return typeof url === "string" && /\/api\/library\//.test(url);
+}
+
+function judgeEldorado(err) {
+  const msg = msgOf(err);
+  const create = ELD_CREATE_RE.test(msg);
+  if (!create && (ELD_BEFORE_CREATE.some((re) => re.test(msg)) || isEldoradoLibraryRead(err))) {
+    return judged(err, NOT_CREATED, "", "eldorado-before-create");
+  }
+  const st = statusOf(err);
+  const step = create ? "eldorado-create" : "eldorado-unknown";
+  return judged(err, st >= 400 && st < 500 ? NOT_CREATED : MAY_BE_LIVE, "", step);
+}
+
+async function judgeMarketError(market, err) {
+  if (market === "gameflip") return judgeGameflip(err);
+  if (market === "g2g") return judgeG2g(err);
+  if (market === "eldorado") return judgeEldorado(err);
+  return judged(err, MAY_BE_LIVE, "", "unknown");
+}
+
+async function judgeNoclaim(market, err) {
+  const msg = msgOf(err);
+  const orphan = NOCLAIM_ORPHAN_RE.exec(msg);
+  if (orphan) {
+    // "(the platform returned no id)" is orphanedPublish's no-id placeholder.
+    const id = orphan[1].startsWith("(") ? "" : orphan[1];
+    return judged(err, MAY_BE_LIVE, id, "noclaim-orphan");
+  }
+  if (NOCLAIM_BEFORE.some((re) => re.test(msg))) return judged(err, NOT_CREATED, "", "noclaim-before");
+  return judgeMarketError(market, err);
+}
+
+// The error, with its verdict attached. Never throws, and a verdict it cannot
+// reach is the safe one.
+async function classifyPublish(e, t) {
+  const err = e instanceof Error ? e : new Error(msgOf(e));
+  if (err.outcome === NOT_CREATED || err.outcome === MAY_BE_LIVE) return err;
+  if (!t.sent) return judged(err, NOT_CREATED, "", "before-publish");
+  if (t.returned) return judged(err, MAY_BE_LIVE, t.externalId, "after-publish");
+  try {
+    return await (t.kind === "noclaim" ? judgeNoclaim(t.market, err) : judgeMarketError(t.market, err));
+  } catch {
+    return judged(err, MAY_BE_LIVE, "", "unjudged");
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Publishing
 // ---------------------------------------------------------------------------
 
 // Dropset account packs. `units` = the accounts already RESERVED for this
 // offer ([{accountId, login}], CONTRACT I1). Returns {externalId, url, price};
 // `price` is what the market really charges (per account on Eldorado/G2G, per
-// pack on Gameflip).
-async function publishAccounts({
-  market,
-  set,
-  game,
-  title,
-  description,
-  unitPrice,
-  packPrice,
-  minQty,
-  units,
-  coverPath,
-} = {}) {
+// pack on Gameflip). A throw carries `outcome` / `externalId` (above).
+async function publishAccounts(args) {
+  const a = args || {};
+  const t = publishTrace(a.market, "accounts");
+  try {
+    return await publishAccountsNow(a, t);
+  } catch (e) {
+    throw await classifyPublish(e, t);
+  }
+}
+
+async function publishAccountsNow(
+  { market, set, game, title, description, unitPrice, packPrice, minQty, units, coverPath },
+  t,
+) {
   const m = marketFor(market, ACCOUNT_MARKETS, "account packs");
   if (!set || typeof set !== "object") throw refuse("No drop set to publish");
   // Mirrors gameflipFulfiller.publishAutoDelivery's routing rule (:286-303): a
@@ -631,15 +912,17 @@ async function publishAccounts({
     await assertGate(m, "dropset");
     // utils/autoLister.js:997-1004 plus the tier's minimum order. No other
     // extras: autoLister sends none (deliveryTime stays the connector default).
-    const r = await mp.eldoradoPublish({
-      game: g,
-      title,
-      description,
-      priceUsd,
-      quantity: list.length,
-      minQuantity: min,
-      coverImagePath: cover,
-    });
+    const r = await sendPublish(t, () =>
+      mp.eldoradoPublish({
+        game: g,
+        title,
+        description,
+        priceUsd,
+        quantity: list.length,
+        minQuantity: min,
+        coverImagePath: cover,
+      }),
+    );
     return published(m, r, priceUsd, title);
   }
 
@@ -652,15 +935,17 @@ async function publishAccounts({
     await assertGate(m, "dropset");
     // utils/autoLister.js:1074-1085 with the tier as min_qty. Relation,
     // attributes and delivery method are left to g2gPublish, as autoLister does.
-    const r = await mp.g2gPublish({
-      serviceId: mp.G2G_ITEMS_SERVICE,
-      brandId: brand.brandId,
-      title,
-      description,
-      priceUsd,
-      qty: list.length,
-      minQty: min,
-    });
+    const r = await sendPublish(t, () =>
+      mp.g2gPublish({
+        serviceId: mp.G2G_ITEMS_SERVICE,
+        brandId: brand.brandId,
+        title,
+        description,
+        priceUsd,
+        qty: list.length,
+        minQty: min,
+      }),
+    );
     return published(m, r, priceUsd, title);
   }
 
@@ -672,15 +957,19 @@ async function publishAccounts({
   await assertGate(m, "dropset");
   const code = await packCode(list);
   const cover = coverPath || fallbackCover(set);
-  // utils/unclaimedLots.js:303-309. gameflipPublish discards its own draft on
-  // any failure after create (marketplaces.js:340-356, :408-426).
-  const r = await mp.gameflipPublish({
-    title,
-    description,
-    priceUsd: price,
-    imagePath: cover || undefined,
-    autoDeliverCode: code,
-  });
+  // utils/unclaimedLots.js:303-309. gameflipPublish TRIES to discard its own
+  // draft on a failure after create (marketplaces.js:340-356, :408-426), but
+  // swallows that delete's failure — so a throw from here is judged, and the
+  // listing taken down again, by classifyPublish (above).
+  const r = await sendPublish(t, () =>
+    mp.gameflipPublish({
+      title,
+      description,
+      priceUsd: price,
+      imagePath: cover || undefined,
+      autoDeliverCode: code,
+    }),
+  );
   return published(m, r, price, title);
 }
 
@@ -688,18 +977,22 @@ async function publishAccounts({
 // its own row), handed the ctx the Listings publish route builds for a no-claim
 // set (routes/marketplaceRoutes.js:1019, :1028-1074, :1093-1124). Returns
 // {rowId, externalId, url, price, quantity}; `quantity` is what the row says it
-// advertises (the layer caps it to the set's share of the shelf).
-async function publishNoclaim({
-  market,
-  set,
-  game,
-  title,
-  description,
-  unitPrice,
-  quantity,
-  minQty,
-  coverPath,
-} = {}) {
+// advertises (the layer caps it to the set's share of the shelf). A throw
+// carries `outcome` / `externalId` (see "Publish outcomes").
+async function publishNoclaim(args) {
+  const a = args || {};
+  const t = publishTrace(a.market, "noclaim");
+  try {
+    return await publishNoclaimNow(a, t);
+  } catch (e) {
+    throw await classifyPublish(e, t);
+  }
+}
+
+async function publishNoclaimNow(
+  { market, set, game, title, description, unitPrice, quantity, minQty, coverPath },
+  t,
+) {
   const m = marketFor(market, QTY_MARKETS, "no-claim packs");
   if (!set || typeof set !== "object" || !set._id) throw refuse("No drop set to publish");
   if (set.stockSource !== "noclaim") {
@@ -759,7 +1052,7 @@ async function publishNoclaim({
   } else {
     body.g2g = { qty, minQty: min };
   }
-  const r = await d("noclaimListings").publishNoclaim(m, {
+  const ctx = {
     set,
     body,
     title,
@@ -769,20 +1062,27 @@ async function publishNoclaim({
     coverPath: fallbackCover(set),
     cat,
     pubGame,
-  });
+  };
+  t.sent = true;
+  const r = await d("noclaimListings").publishNoclaim(m, ctx);
   if (!r || r.success !== true) {
     // Not a refusal: the layer's failure can come after the platform took the
-    // offer (its orphanedPublish tells the owner to delist it by hand).
+    // offer (its orphanedPublish tells the owner to delist it by hand). Its
+    // message is judged by classifyPublish.
     throw new Error((r && r.message) || "The no-claim publish failed");
   }
-  const rowId = r.id ? String(r.id) : "";
-  const externalId = r.externalId ? String(r.externalId) : "";
+  t.returned = true;
+  const rowId = cleanId(r.id);
+  const externalId = cleanId(r.externalId);
+  t.externalId = externalId;
   if (!rowId || !externalId) {
     const msg =
       "The no-claim layer reported success without a row or offer id (" +
       (externalId || "no offer id") + ") — check Listings by hand";
     console.error("bulkPacks/markets: " + msg);
-    throw new Error(msg);
+    // may_be_live (classifyPublish: the call returned). The row the layer
+    // saved, if any, is named so the caller can find it.
+    throw Object.assign(new Error(msg), { rowId });
   }
   let advertised = qty;
   try {
@@ -804,16 +1104,21 @@ async function publishNoclaim({
 
 // Farming packs: fresh accounts farming `game` for `days`, provisioned at sale
 // by the existing farm services, which find the order by its TITLE. No row.
-async function publishFarm({
-  market,
-  game,
-  days,
-  title,
-  description,
-  unitPrice,
-  quantity,
-  minQty,
-} = {}) {
+// A throw carries `outcome` / `externalId` (see "Publish outcomes").
+async function publishFarm(args) {
+  const a = args || {};
+  const t = publishTrace(a.market, "farm");
+  try {
+    return await publishFarmNow(a, t);
+  } catch (e) {
+    throw await classifyPublish(e, t);
+  }
+}
+
+async function publishFarmNow(
+  { market, game, days, title, description, unitPrice, quantity, minQty },
+  t,
+) {
   const m = marketFor(market, QTY_MARKETS, "farming packs");
   const g = String(game || "").trim();
   if (!g) throw refuse("A farming offer needs its game");
@@ -834,16 +1139,18 @@ async function publishFarm({
     }
     try {
       // scripts/eldorado-farm-listings.js:177-185 plus the tier's minimum.
-      const r = await mp.eldoradoPublish({
-        game: g,
-        title,
-        description,
-        priceUsd,
-        quantity: qty,
-        minQuantity: min,
-        coverImagePath: cover,
-        deliveryTime: "Minute20",
-      });
+      const r = await sendPublish(t, () =>
+        mp.eldoradoPublish({
+          game: g,
+          title,
+          description,
+          priceUsd,
+          quantity: qty,
+          minQuantity: min,
+          coverImagePath: cover,
+          deliveryTime: "Minute20",
+        }),
+      );
       return published(m, r, priceUsd, title);
     } finally {
       // scripts/eldorado-farm-listings.js:192 — the promo cover is a temp file.
@@ -871,18 +1178,20 @@ async function publishFarm({
   if (!shape || !shape.relationId) {
     throw refuse("G2G has no product (relation) for " + g + " — nothing was published");
   }
-  const r = await mp.g2gPublish({
-    serviceId: mp.G2G_ITEMS_SERVICE,
-    brandId: brand.brandId,
-    relationId: shape.relationId,
-    offerAttributes: shape.attributes,
-    collectionTree: shape.collectionTree,
-    title,
-    description,
-    priceUsd,
-    qty,
-    minQty: min,
-  });
+  const r = await sendPublish(t, () =>
+    mp.g2gPublish({
+      serviceId: mp.G2G_ITEMS_SERVICE,
+      brandId: brand.brandId,
+      relationId: shape.relationId,
+      offerAttributes: shape.attributes,
+      collectionTree: shape.collectionTree,
+      title,
+      description,
+      priceUsd,
+      qty,
+      minQty: min,
+    }),
+  );
   return published(m, r, priceUsd, title);
 }
 

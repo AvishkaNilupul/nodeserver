@@ -396,7 +396,7 @@ const CHECKS = [
       const liveIds = new Set(live.map((o) => String(o.id)));
       const rows = await MarketplaceListing.find(
         { marketplace: "eldorado", status: "active" },
-        { externalId: 1, title: 1, price: 1, autoPaused: 1 },
+        { externalId: 1, title: 1, price: 1, autoPaused: 1, bulkOfferId: 1 },
       )
         .limit(2000)
         .lean();
@@ -429,6 +429,10 @@ const CHECKS = [
         // intended state, not drift. Counting it made the board fail on two such
         // R6 offers on 2026-09-27.
         if (r.autoPaused) continue;
+        // A bulk pack row (docs/bulk-packs/FIXES-1.md R3-8) stays "active" while
+        // its bulk loop pauses the offer (sold out, owner pause); the loop owns
+        // that state, so it is not drift. It still counts as tracked below.
+        if (r.bulkOfferId) continue;
         if (!liveIds.has(String(r.externalId))) {
           problems.push({
             kind: "we say active, Eldorado does not",
@@ -1011,6 +1015,9 @@ const CHECKS = [
           status: "active",
           autoPaused: { $ne: true },
           price: { $gt: REALISED_CEILING_USD },
+          // A bulk pack row (docs/bulk-packs/FIXES-1.md R3-8): a Gameflip pack
+          // is priced for N accounts, so the one-account ceiling says nothing.
+          bulkOfferId: null,
         },
         {
           title: 1,
@@ -1141,6 +1148,8 @@ const CHECKS = [
           status: "active",
           autoPaused: { $ne: true },
           marketplace: { $in: [...ceilings.keys()] },
+          // Bulk pack rows too, as in listings.overpriced (FIXES-1 R3-8).
+          bulkOfferId: null,
         },
         { title: 1, marketplace: 1, externalId: 1, url: 1, price: 1, origin: 1 },
       )

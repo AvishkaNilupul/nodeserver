@@ -157,6 +157,7 @@
   .t-title a:hover { text-decoration:underline; }
   .t-sub { font-size:11.5px; color:var(--muted); margin-top:3px; font-weight:400; }
   .t-err { font-size:11.5px; color:var(--red); margin-top:3px; overflow-wrap:anywhere; font-weight:400; }
+  .t-att { font-size:11.5px; color:var(--yellow); margin-top:3px; overflow-wrap:anywhere; font-weight:600; }
   .flags { display:flex; gap:4px; flex-wrap:wrap; }
   .acts { display:flex; gap:6px; flex-wrap:wrap; }
   .total { margin:0 0 12px; font-size:13.5px; line-height:1.5; }
@@ -396,8 +397,9 @@
       sold: { label: "sold", cls: "s-ok", tip: "The pack sold." },
       withdrawn: { label: "withdrawn", cls: "s-off", tip: "Taken down." },
       expired: { label: "expired", cls: "s-off", tip: "The marketplace expired or removed it." },
-      error: { label: "error", cls: "s-fail", tip: "Sending failed, so nothing went on sale." }
+      error: { label: "error", cls: "s-fail", tip: "Sending failed. If it still holds accounts, the marketplace's answer was unclear: check whether the offer is live before releasing them." }
     };
+    var CLOSED_STATES = ["sold_out", "sold", "withdrawn", "expired", "error"];
     var UNIT_STATE = { on_offer: "on offer", retiring: "being released", released: "released", delivered: "delivered" };
     var BASIS = { listing: "your cheapest live listing", set: "the set price", engine: "the pricing engine", "farm-table": "your farm price table", none: "no price reference" };
     var KEY_LABEL = {
@@ -1307,7 +1309,20 @@
       if (withAge && ts(o.createdAt) != null) bits.push("sent " + agoSpan(ts(o.createdAt)));
       return '<div class="t-title">' + (url ? '<a href="' + esc(url) + '" target="_blank" rel="noopener noreferrer">' + esc(title) + "</a>" : esc(title)) + "</div>" +
         (bits.length ? '<div class="t-sub">' + bits.join(" · ") + "</div>" : "") +
+        (o.attention ? '<div class="t-att">' + esc(trunc(attentionText(o.attention), 240)) + "</div>" : "") +
         (o.lastError ? '<div class="t-err">' + esc(trunc(o.lastError, 240)) + "</div>" : "");
+    }
+    // The loop's "look at this" flag (kept apart from lastError), worded once.
+    function attentionText(a) {
+      a = String(a || "");
+      return /^needs attention/i.test(a) ? a : "Needs attention: " + a;
+    }
+    // A closed offer that still holds accounts: after a publish whose outcome
+    // was unknown they stay reserved until the owner releases them by hand.
+    function holdsAccounts(o) {
+      if (!(o.open === false || CLOSED_STATES.indexOf(o.state) !== -1)) return false;
+      if (toInt(o.freeCount) > 0) return true;
+      return (Array.isArray(o.reserved) ? o.reserved : []).some(function (u) { return u && u.state === "on_offer"; });
     }
     function stateCell(o) {
       var st = STATE[o.state] || { label: String(o.state || "unknown"), cls: "s-off", tip: "" };
@@ -1373,10 +1388,15 @@
       h += td("Offer", titleCell(o, false), "wide");
       h += td("Tier", esc(tierLabel(o)), "nw");
       h += td("Price", esc(priceLabel(o)), "num");
-      h += td("State", stateCell(o) + (toInt(o.retiringCount) > 0 ? '<div class="t-sub">' + toInt(o.retiringCount) + " being released</div>" : ""));
+      var held = holdsAccounts(o);
+      h += td("State", stateCell(o) + (toInt(o.retiringCount) > 0 ? '<div class="t-sub">' + toInt(o.retiringCount) + " being released</div>" : "") +
+        (held && toInt(o.freeCount) > 0 ? '<div class="t-sub">' + plural(toInt(o.freeCount), "account") + " still held</div>" : ""));
       h += td("Sold", plural(toInt(o.ordersCount), "order") + " · " + plural(toInt(o.unitsDelivered), "account"), "num");
       h += td("Revenue", money(num(o.revenueUsd)), "num");
-      h += td("", id ? actBtn("details", id, S.open[id] ? "Hide" : "Details", "The accounts on this offer and its history.") : "");
+      var acts = [];
+      if (id && held) acts.push(actBtn("release-held", id, "Release held accounts…", "Only after you checked the marketplace: the offer is NOT live.", "danger"));
+      if (id) acts.push(actBtn("details", id, S.open[id] ? "Hide" : "Details", "The accounts on this offer and its history."));
+      h += td("", acts.length ? '<div class="acts">' + acts.join("") + "</div>" : "");
       h += "</tr>";
       if (S.open[id]) h += '<tr class="detail"><td colspan="10">' + detailHtml(id) + "</td></tr>";
       return h;
@@ -1506,6 +1526,7 @@
       var h = '<div class="dfacts">' + facts.map(function (f) {
         return "<div><span>" + esc(f[0]) + "</span>" + esc(f[1]) + "</div>";
       }).join("") + "</div>";
+      if (o.attention) h += '<div class="note warn" style="margin:0 0 8px">' + esc(attentionText(o.attention)) + "</div>";
       if (o.lastError) h += '<div class="note bad" style="margin:0 0 8px">Last error: ' + esc(o.lastError) + "</div>";
       var res = Array.isArray(o.reserved) ? o.reserved : [];
       if (res.length) {
@@ -1601,6 +1622,46 @@
           delete S.open[id];
           afterChange({ live: true, hist: true, acct: true, farm: true });
           return { toast: "Withdrawn: " + trunc(o.title || "offer", 80) + (j.message ? ". " + j.message : "") };
+        }
+      });
+    }
+
+    // A closed offer still holding accounts (FIXES-1 "releaseHeld"): the owner
+    // checks the marketplace first, then types RELEASE. The server takes the
+    // offer down there first when its id is known and releases nothing if that
+    // fails; the accounts then go back after the loop's safety wait.
+    function openReleaseHeld(id) {
+      var o = findOffer(id);
+      if (!o) return;
+      var n = toInt(o.freeCount), ext = String(o.externalId || ""), mk = mLabel(o.market);
+      openModal({
+        title: "Release held accounts?",
+        html: '<p><span class="qt">“' + esc(o.title || "this offer") + "”</span> on " + esc(mk) + " is closed" +
+          (n > 0 ? " but still holds " + esc(plural(n, "account")) : " but still holds accounts") + ".</p>" +
+          '<div class="note warn"><b>Only after you checked the marketplace: the offer is NOT live.</b> ' +
+          (ext ? "Look up offer " + esc(ext) + " on " + esc(mk) + "." : "Its offer id is unknown, so search " + esc(mk) + " for the title.") +
+          " While it is live, a buyer can still pay for these accounts.</div>" +
+          "<p>" + (ext ? "The offer is taken down on " + esc(mk) + " first; if that fails, nothing is released. " : "") +
+          "The held accounts then go back to normal stock after a short safety wait (about two minutes, on a later background check).</p>" +
+          '<label class="f">Type RELEASE to confirm<input type="text" id="rhConfirm" autocomplete="off" autocapitalize="characters" spellcheck="false"></label>',
+        okText: "Release accounts",
+        okClass: "primary danger",
+        okDisabled: true,
+        onOpen: function (body) {
+          var inp = body.querySelector("#rhConfirm");
+          inp.addEventListener("input", function () { el("mOk").disabled = inp.value.trim() !== "RELEASE"; });
+        },
+        onOk: async function () {
+          var typed = el("rhConfirm").value.trim();
+          if (typed !== "RELEASE") {
+            setMsg("bad", "Type RELEASE (in capitals) to confirm.");
+            return false;
+          }
+          var j = await api("/offers/" + encodeURIComponent(id) + "/release-held", "POST", { confirm: typed });
+          delete S.open[id];
+          S.openVer++;
+          afterChange({ live: true, hist: true, acct: true, farm: true });
+          return { doneHtml: "<b>Done.</b> " + esc(j.message || "The held accounts go back to normal stock after the safety wait.") };
         }
       });
     }
@@ -1964,6 +2025,7 @@
         case "pause": case "resume": simpleAction(t, id, act); break;
         case "refill": openRefill(id); break;
         case "withdraw": openWithdraw(id); break;
+        case "release-held": openReleaseHeld(id); break;
         case "details": toggleDetails(id); break;
         case "reload-acct": loadAccounts(false); break;
         case "reload-farm": loadFarm(false); break;

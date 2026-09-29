@@ -452,8 +452,9 @@ test("a dropped unit whose reservation is no longer ours is retired, never put b
   const e = entryOf(await getOffer(offerId), ids[6]);
   assert.equal(e.state, "retiring");
   assert.match(e.reason, /no longer reserved/);
-  // Phase 2 hands it back through releaseUnits, which skips it as "not ours".
-  await pass(at(4));
+  // Phase 2 (15 minutes later, FIXES-1 L2) hands it back through releaseUnits,
+  // which skips it as "not ours".
+  await pass(at(16));
   const done = entryOf(await getOffer(offerId), ids[6]);
   assert.equal(done.state, "released");
   assert.match(done.reason, /^not ours/);
@@ -491,16 +492,16 @@ test("a retiring unit a stale save put back FREE is pulled again and its clock r
   assert.equal(s.retiring, 1);
   assert.deepEqual(fx.calls.release, []);
 
-  await pass(at(4)); // one minute after the re-pull
+  await pass(at(17)); // 14 minutes after the re-pull
   assert.deepEqual(fx.calls.release, []);
-  await pass(at(5)); // two minutes after the re-pull
+  await pass(at(18)); // 15 minutes after the re-pull (FIXES-1 L2)
   assert.deepEqual(fx.calls.release, [ids[7]]);
   e = entryOf(await getOffer(offerId), ids[7]);
   assert.equal(e.state, "released");
   assert.equal(e.reason, "test retire");
 });
 
-test("retired units are released only after 2 minutes, through releaseUnits for this set and market", async () => {
+test("retired units are released only after 15 minutes, through releaseUnits for this set and market", async () => {
   const { offerId, rowId, ids, set } = await dropsetOffer({
     n: 10,
     market: "g2g",
@@ -514,10 +515,10 @@ test("retired units are released only after 2 minutes, through releaseUnits for 
       now: at(0),
     },
   );
-  const s1 = await pass(at(1));
+  const s1 = await pass(at(14));
   assert.deepEqual(fx.calls.release, []);
   assert.equal(s1.retiring, 2);
-  const s2 = await pass(at(2));
+  const s2 = await pass(at(15)); // RETIRE_GRACE_MS (FIXES-1 L2)
   assert.deepEqual(fx.calls.release.sort(), [ids[8], ids[9]].sort());
   assert.equal(s2.released, 2);
   assert.ok(
@@ -532,7 +533,7 @@ test("retired units are released only after 2 minutes, through releaseUnits for 
     8,
     "the rest stay on sale",
   );
-  await pass(at(9));
+  await pass(at(30));
   assert.equal(fx.calls.release.length, 2, "never released twice");
 });
 
@@ -657,7 +658,7 @@ test("release guards: another bulk offer's account, a failed release, a missing 
     },
   );
   fx.releaseThrows = 1; // the first release attempt (a.ids[6]) fails
-  const s = await pass(at(3));
+  const s = await pass(at(15)); // RETIRE_GRACE_MS (FIXES-1 L2)
   assert.ok(
     !fx.calls.release.includes(shared),
     "never releases an account another offer holds",
@@ -674,9 +675,9 @@ test("release guards: another bulk offer's account, a failed release, a missing 
   assert.equal(s.errors, 1);
   assert.match(offer.lastError, /^Loop: release of .* failed/);
 
-  await pass(at(4)); // the clock restarted at the failure
+  await pass(at(16)); // the clock restarted at the failure
   assert.ok(!fx.calls.release.includes(a.ids[6]));
-  await pass(at(6));
+  await pass(at(30));
   assert.deepEqual(fx.calls.release, [a.ids[6]]);
   offer = await getOffer(a.offerId);
   assert.equal(entryOf(offer, a.ids[6]).state, "released");
@@ -689,11 +690,11 @@ test("release guards: another bulk offer's account, a failed release, a missing 
     [b.ids[0]],
     "withdraw",
     {
-      now: at(10),
+      now: at(40),
     },
   );
   await DropSet.deleteOne({ _id: b.set._id });
-  const s2 = await pass(at(15));
+  const s2 = await pass(at(55));
   assert.equal(s2.errors, 1);
   assert.equal(entryOf(await getOffer(b.offerId), b.ids[0]).state, "retiring");
   assert.ok(!fx.calls.release.includes(b.ids[0]));
@@ -726,7 +727,7 @@ test("a FREE copy of a unit that already sold is pulled off the row", async () =
 // Dropset eldorado / g2g
 // ---------------------------------------------------------------------------
 
-test("sold out: pause first, then retire the free units; release 2 minutes later", async () => {
+test("sold out: pause first, then retire the free units; release 15 minutes later", async () => {
   const { offerId, rowId, ids, externalId } = await dropsetOffer({
     n: 6,
     minQty: 5,
@@ -774,9 +775,9 @@ test("sold out: pause first, then retire the free units; release 2 minutes later
   );
   assert.ok(fx.calls.invalidate >= 1, "proposals are told the slot freed up");
 
-  await pass(at(3));
+  await pass(at(16));
   assert.deepEqual(fx.calls.release, []);
-  const s3 = await pass(at(4));
+  const s3 = await pass(at(17)); // RETIRE_GRACE_MS (FIXES-1 L2)
   assert.deepEqual(fx.calls.release.sort(), ids.slice(2).sort());
   assert.equal(s3.released, 4);
   offer = await getOffer(offerId);
@@ -784,9 +785,10 @@ test("sold out: pause first, then retire the free units; release 2 minutes later
   for (const id of ids.slice(2))
     assert.equal(entryOf(offer, id).state, "released");
 
-  // Nothing left retiring: the closed offer is no longer visited.
+  // Nothing left retiring: later passes (inside the 24-hour watch window of
+  // FIXES-1 L2) release nothing more and alert nothing more.
   const calls = fx.calls.release.length;
-  await pass(at(20));
+  await pass(at(40));
   assert.equal(fx.calls.release.length, calls);
   assert.equal(
     tg(/^Bulk offer sold out/).length,
@@ -882,7 +884,7 @@ test("switched off: sold-out, expiry and releases still run (I8)", async () => {
   const { offerId, ids } = await dropsetOffer({ n: 3, minQty: 5 });
   await pass(at(1));
   assert.equal((await getOffer(offerId)).state, "sold_out");
-  await pass(at(4));
+  await pass(at(16));
   assert.deepEqual(fx.calls.release.sort(), ids.slice().sort());
 });
 
@@ -899,7 +901,7 @@ test("an expired offer (read every 30 minutes) removes the row and retires its u
   assert.equal(fx.calls.readOffer.length, 2);
   let offer = await getOffer(offerId);
   assert.equal(offer.state, "live");
-  assert.match(offer.lastError, /^Needs attention \(gone\)/);
+  assert.match(offer.attention, /^Needs attention \(gone\)/); // FIXES-1 L8
   assert.equal(tg(/needs attention/).length, 1);
   await pass(at(62));
   assert.equal(tg(/needs attention/).length, 1, "flagged once");
@@ -914,7 +916,7 @@ test("an expired offer (read every 30 minutes) removes the row and retires its u
   assert.equal(row.units.length, 0);
   for (const id of ids) assert.equal(entryOf(offer, id).state, "retiring");
   assert.equal(tg(/^Bulk offer expired/).length, 1);
-  await pass(at(96));
+  await pass(at(108));
   assert.equal(fx.calls.release.length, 6);
 });
 
@@ -974,7 +976,7 @@ test("a row that does not point back at the offer is never written; a lost point
   const rowA = await getRow(a.rowId);
   assert.equal(rowA.units.length, 5, "a row that is not ours is never healed");
   const offerA = await getOffer(a.offerId);
-  assert.match(offerA.lastError, /^Needs attention \(row\)/);
+  assert.match(offerA.attention, /^Needs attention \(row\)/); // FIXES-1 L8
   assert.ok(
     offerA.reserved.every((e) => e.state === "on_offer"),
     "and nothing is released",
@@ -1067,7 +1069,7 @@ test("gameflip: a sold pack is finalised and its accounts are never released", a
   assert.equal(fx.calls.telegram.length, 1);
 });
 
-test("gameflip: a removed pack expires, a delisted one is withdrawn; both release after 2 minutes", async () => {
+test("gameflip: a removed pack expires, a delisted one is withdrawn; both release after 15 minutes", async () => {
   const removed = await dropsetOffer({
     market: "gameflip",
     n: 5,
@@ -1095,9 +1097,9 @@ test("gameflip: a removed pack expires, a delisted one is withdrawn; both releas
     "the row already says the listing is dead",
   );
   assert.deepEqual(fx.calls.pause, []);
-  await pass(at(2));
+  await pass(at(15));
   assert.deepEqual(fx.calls.release, []);
-  await pass(at(3));
+  await pass(at(16)); // RETIRE_GRACE_MS (FIXES-1 L2)
   assert.deepEqual(
     fx.calls.release.sort(),
     [...removed.ids, ...delisted.ids].sort(),
@@ -1133,7 +1135,7 @@ test("gameflip: an unhealthy account withdraws the pack; a failed withdraw leave
   assert.equal((await getRow(rowId)).status, "delisted");
   assert.ok(offer.reserved.every((e) => e.state === "retiring"));
   assert.equal(tg(/^Bulk pack withdrawn \(integrity\)/).length, 1);
-  await pass(at(14));
+  await pass(at(26));
   assert.equal(fx.calls.release.length, 5);
 });
 

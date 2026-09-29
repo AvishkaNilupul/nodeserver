@@ -16,6 +16,7 @@ const MarketplaceListing = require("../models/MarketplaceListing");
 const DropSet = require("../models/DropSet");
 const CampaignDrops = require("../models/CampaignDrops");
 const realSettings = require("../utils/settings");
+const { shareOfShelf } = require("../utils/suppliedStock");
 const config = require("../utils/bulkPacks/config");
 const send = require("../utils/bulkPacks/send");
 
@@ -203,7 +204,12 @@ function called(name) {
   return mk.calls.filter((c) => c[0] === name);
 }
 function maybeFail(name) {
-  if (mk.fail[name]) throw new Error(mk.fail[name]);
+  const f = mk.fail[name];
+  if (!f) return;
+  // A string is a plain Error; an object also carries what markets.js puts
+  // on a publish failure (FIXES-1 S2/S5: outcome, externalId, code).
+  if (typeof f === "string") throw new Error(f);
+  throw Object.assign(new Error(f.message), f);
 }
 const fakeMarkets = {
   gameOfSet: (set) =>
@@ -298,7 +304,33 @@ const fakeFarmCapacity = {
             ),
           ),
         ),
+  // FIXES-1 S1: an equal, deterministic split (utils/suppliedStock.js).
+  shareFor: (selfId, ids, available) => shareOfShelf(available, selfId, ids),
 };
+
+// The shared per-offer lock (utils/bulkPacks/lock.js, FIXES-1): an in-process
+// FIFO mutex keyed by String(offerId), not re-entrant.
+const fakeLock = (() => {
+  const tails = new Map();
+  return {
+    async withOfferLock(offerId, fn) {
+      const key = String(offerId);
+      const prev = tails.get(key) || Promise.resolve();
+      let release;
+      const gate = new Promise((r) => (release = r));
+      const tail = prev.then(() => gate);
+      tails.set(key, tail);
+      await prev;
+      try {
+        return await fn();
+      } finally {
+        release();
+        if (tails.get(key) === tail) tails.delete(key);
+      }
+    },
+    __reset: () => tails.clear(),
+  };
+})();
 
 // Phase 1 of CONTRACT I10 as MODULES §loop describes it: conditional $pull of
 // the FREE unit, then the reserved entry goes retiring.
@@ -380,6 +412,7 @@ function installFakes() {
     markets: fakeMarkets,
     farmCapacity: fakeFarmCapacity,
     loop: fakeLoop,
+    lock: fakeLock,
     proposals: fakeProposals,
     noclaimListings: fakeNoclaimListings,
     noclaimStock: fakeNoclaimStock,
@@ -483,6 +516,7 @@ test.beforeEach(async () => {
   copyState.farmTitle = null;
   events.length = 0;
   telegrams.length = 0;
+  fakeLock.__reset();
   installFakes();
 });
 
@@ -861,7 +895,12 @@ test("a short reservation is handed straight back and nothing is listed", async 
 test("publish failure: every reservation released, offer error, owner paged, no row", async () => {
   const set = await makeSet();
   st.pool = accounts(30);
-  mk.fail.publishAccounts = "Eldorado create: HTTP 500";
+  // FIXES-1 S2/S5: only a failure markets.js classified as "nothing was
+  // created" releases; an unclassified one HOLDS (bulkPacksSendRaces.test.js).
+  mk.fail.publishAccounts = {
+    message: "Eldorado create: HTTP 500",
+    outcome: "not_created",
+  };
   const r = await sendDropset(set, "eldorado");
   assert.equal(r.status, 502);
   assert.match(r.message, /Eldorado refused the offer/);
@@ -881,7 +920,7 @@ test("publish failure: every reservation released, offer error, owner paged, no 
 test("a release that fails is left to the loop as retiring, never forgotten", async () => {
   const set = await makeSet();
   st.pool = accounts(30);
-  mk.fail.publishAccounts = "HTTP 503";
+  mk.fail.publishAccounts = { message: "HTTP 503", outcome: "not_created" };
   st.releaseThrows = true;
   const r = await sendDropset(set, "eldorado");
   assert.equal(r.status, 502);
@@ -1224,11 +1263,14 @@ test("farm happy path: no row, the title round-trips through the real Eldorado a
     units: 12,
   });
   assert.equal(g.status, 200, g.message);
+  // FIXES-1 S1: the 20 farmable accounts are shared with the open Rust 120
+  // offer, so this one advertises its share (10), below the owner's 12.
   assert.equal(
     g.offer.advertisedQty,
-    12,
-    "the owner's count caps what is advertised",
+    10,
+    "its share of the shared farm capacity",
   );
+  assert.equal(called("publishFarm")[1][1].quantity, 10);
   assert.match(called("publishFarm")[1][1].title, /1 Year/);
 });
 

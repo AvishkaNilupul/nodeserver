@@ -1179,6 +1179,13 @@ async function syncOnce() {
         const packLogins = row.bulkOfferId
           ? (row.units || []).map((u) => (u && u.login) || "").filter(Boolean)
           : null;
+        // The account behind each of those logins, same order (FIXES-1 R3-1):
+        // a pack unit its buyer later connects is then one sale, not two.
+        const packAccountIds = row.bulkOfferId
+          ? (row.units || [])
+              .filter((u) => u && u.login)
+              .map((u) => String(u.accountId || ""))
+          : null;
         const packSize = row.bulkOfferId
           ? Math.max(1, (row.units || []).length)
           : 1;
@@ -1191,6 +1198,7 @@ async function syncOnce() {
             : Number(row.price) || 0,
           bulk: !!row.bulkOfferId,
           logins: packLogins,
+          accountIds: packAccountIds,
         });
       }
     } catch (e) {

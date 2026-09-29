@@ -26,6 +26,12 @@
 //     cannot be proven the accounts stay reserved — one pack of stock lost at
 //     worst, never one account sold to two buyers.
 //   * Only rows whose bulkOfferId is this offer's are ever written (I11).
+//   * A publish that failed without proof that nothing went on sale HOLDS its
+//     accounts (FIXES-1 S2/S5): only the owner's "Release held accounts"
+//     (releaseHeld), after checking the market, lets them go.
+//   * Every write to an offer after its creation runs inside the ONE
+//     per-offer lock the maintenance loop also takes (utils/bulkPacks/lock.js,
+//     FIXES-1 S4/S6), and re-reads the offer inside it.
 //
 // Dependencies are lazy and injectable (CONTRACT §9): tests replace any of
 // them with __setDeps and never touch the network or utils/settings.json.
@@ -75,6 +81,11 @@ const deps = {
   // Phase 1 of CONTRACT I10 (retireUnits) is the loop's; withdraw reuses it.
   get loop() {
     return overrides.loop || require("./loop");
+  },
+  // The ONE per-offer mutex, shared with the loop's per-offer pass
+  // (docs/bulk-packs/FIXES-1.md): withOfferLock(offerId, fn).
+  get lock() {
+    return overrides.lock || require("./lock");
   },
   get proposals() {
     return overrides.proposals || require("./proposals");
@@ -284,9 +295,90 @@ function invalidateProposals() {
   }
 }
 
-// One action per offer at a time, in-process (CONTRACT I7: the router and the
-// loop are the only callers, both in the server process). A double-clicked
-// Withdraw must not run two delists and two retirements side by side.
+// FIXES-1 S4/S6: one action per offer at a time, and the loop's per-offer
+// pass is one of them. Every write to an offer after its creation runs inside
+// the shared per-offer lock (utils/bulkPacks/lock.js) and re-reads the offer
+// inside it — never a snapshot taken before the lock. The key is the id as
+// String(offer._id) renders it (lower-case hex), so an id the router got in
+// capitals still meets the loop's key. The lock is NOT re-entrant: code
+// already inside an offer's lock calls the *Locked variants below, never the
+// exported functions.
+function offerKey(id) {
+  return String(id || "")
+    .trim()
+    .toLowerCase();
+}
+function underOfferLock(offerId, fn) {
+  return deps.lock.withOfferLock(offerKey(offerId), fn);
+}
+
+// The id a new offer is created with, minted first so sendOffer can hold the
+// offer's lock from the moment the offer exists (FIXES-1).
+function newOfferId() {
+  const { Types } = require("mongoose");
+  return new Types.ObjectId();
+}
+
+// FIXES-1 S2/S5: markets.js classifies every publish failure. Only one it
+// proved left nothing on sale ("not_created", or its own refusal before any
+// marketplace call) may hand accounts back. "may_be_live" — or no
+// classification at all — is an unknown outcome, and an unknown outcome HOLDS.
+function publishNotCreated(e) {
+  return !!e && (e.code === "BULK_PACK_REFUSED" || e.outcome === "not_created");
+}
+
+// FIXES-1 S1: farm capacity (bot slots + the pristine pool) is ONE pool shared
+// by every open farming offer, whatever its game, term or market. An offer may
+// advertise only its share of what is advertisable, counting itself as a
+// sharer (farmCapacity.shareFor — the split the loop applies each pass). Offers
+// still being sent count as sharers too, so two sends at once never both take
+// the whole pool.
+async function farmShareFor(self, bp) {
+  const fc = deps.farmCapacity;
+  const cap = (await fc.read({ force: true })) || {};
+  const available = Math.max(
+    0,
+    Math.floor(Number(fc.advertisable(cap, bp)) || 0),
+  );
+  const selfId = String(self._id);
+  const others = await deps.BulkOffer.find(
+    { source: "farm", open: true, _id: { $ne: self._id } },
+    { _id: 1 },
+  )
+    .limit(500)
+    .lean();
+  const ids = [
+    ...new Set([...(others || []).map((o) => String(o._id)), selfId]),
+  ].sort();
+  const share = Math.max(
+    0,
+    Math.floor(Number(fc.shareFor(selfId, ids, available)) || 0),
+  );
+  return {
+    cap,
+    available,
+    share: Math.min(share, available),
+    sharers: ids.length - 1,
+  };
+}
+
+function farmShareShort(share, available, sharers, minQty) {
+  return (
+    "Only " +
+    share +
+    " of the " +
+    available +
+    " account(s) that can be farmed right now are this offer's share — " +
+    "capacity is already advertised by " +
+    sharers +
+    " other farm offer(s) (minimum order " +
+    minQty +
+    ")"
+  );
+}
+
+// In-process mutex for sendOffer's slot check-and-create (CONTRACT I6
+// backstop, keyed "slot:<slotKey>"). Offers themselves use the shared lock.
 const locks = new Map();
 async function withLock(key, fn) {
   const prev = locks.get(key) || Promise.resolve();
@@ -354,13 +446,22 @@ async function freshOffer(id) {
   return deps.BulkOffer.findById(id).lean();
 }
 
-// The offer's own row, and only it (I11).
+// The offer's own row, and only it (I11). FIXES-1 S3: a missing pointer is not
+// a missing row — a send that died between writing its row and going live
+// leaves `listing` empty while the row sells — so the row is also looked for
+// by its bulkOfferId (as the loop's loadRow does) before anything decides
+// there is none.
 async function ownRow(offer) {
-  if (!offer || !offer.listing) return null;
-  return deps.MarketplaceListing.findOne({
-    _id: offer.listing,
-    bulkOfferId: offer._id,
-  }).lean();
+  if (!offer || !offer._id) return null;
+  const ML = deps.MarketplaceListing;
+  if (offer.listing) {
+    const row = await ML.findOne({
+      _id: offer.listing,
+      bulkOfferId: offer._id,
+    }).lean();
+    if (row) return row;
+  }
+  return ML.findOne({ bulkOfferId: offer._id }).lean();
 }
 
 // The row shape every unit takes (mirrors autoLister.publishEldoradoShare /
@@ -439,9 +540,42 @@ async function markEntries(offerId, accountIds, state, reason, extra = {}) {
 //                        left to hand back — the loop's convention)
 //   anything else, or a release that threw -> "retiring", so the loop's phase
 //                        2 re-reads the row and releases it (after isStillOurs)
+//   kept (keepReserved)  -> left exactly as it is: an account the owner spent
+//                        elsewhere (hand sale, renter) is NEVER handed back,
+//                        whichever path closes the offer (models/BulkOffer.js)
 async function releaseAndRecord(offerId, set, market, accountIds, reason) {
-  const ids = uniqIds(accountIds);
-  const out = { released: [], notOurs: [], pending: [] };
+  const asked = uniqIds(accountIds);
+  const out = { released: [], notOurs: [], pending: [], kept: [] };
+  if (!asked.length) return out;
+  let cur;
+  try {
+    cur = await freshOffer(offerId);
+  } catch (e) {
+    // Cannot tell which ones are kept: the loop's phase 2 re-reads and decides.
+    out.pending = asked;
+    await markEntries(
+      offerId,
+      asked,
+      "retiring",
+      reason +
+        " — the offer could not be re-read (" +
+        errMsg(e) +
+        "), the maintenance loop retries",
+    );
+    return out;
+  }
+  const keptIds = new Set(
+    ((cur && cur.reserved) || [])
+      .filter(
+        (e) =>
+          e &&
+          e.keepReserved === true &&
+          (e.state === "on_offer" || e.state === "retiring"),
+      )
+      .map((e) => String(e.accountId)),
+  );
+  out.kept = asked.filter((id) => keptIds.has(id));
+  const ids = asked.filter((id) => !keptIds.has(id));
   if (!ids.length) return out;
   let r = null;
   let failure = "";
@@ -593,6 +727,85 @@ async function failSend(
     fresh = null;
   }
   return result(status, message, fresh ? { offer: fresh } : {});
+}
+
+// FIXES-1 S2/S5: a publish that failed without proof that nothing went on
+// sale. Gameflip can throw with the listing on sale and every pack credential
+// in its delivery code; G2G can throw after its PUT set the offer live. So
+// nothing is handed back: the reserved entries stay on_offer, the offer closes
+// "error" with whatever id the market gave, and the owner is paged to look —
+// then "Release held accounts" (releaseHeld) lets them go.
+async function holdUnknownPublish(ctx, e) {
+  const { offer, market, actor } = ctx;
+  const msg = errMsg(e);
+  const externalId = String((e && e.externalId) || "").trim();
+  ctx.externalId = externalId;
+  const held = ctx.got.length;
+  const where =
+    "may be live on " + label(market) + " (" + (externalId || "no id") + ")";
+  const lastError = held
+    ? "publish outcome unknown — " +
+      where +
+      ": check it, then Release held accounts"
+    : "publish outcome unknown — " +
+      where +
+      ": check it and take it down by hand" +
+      (ctx.source === "noclaim" ? " (Listings → Shop listings)" : "");
+  try {
+    await closeOffer(offer._id, "error", {
+      lastError,
+      action: "send_held",
+      detail: lastError + " — " + label(market) + " said: " + msg,
+      actor,
+      extra: { externalId },
+    });
+  } catch (e2) {
+    console.error(
+      "bulkPacks: could not close held offer " + String(offer._id) + ":",
+      errMsg(e2),
+    );
+  }
+  alert(
+    "⚠️ Bulk pack publish outcome UNKNOWN — " +
+      label(market) +
+      " " +
+      (externalId || "(no id)") +
+      "\n\n" +
+      String(ctx.title || "") +
+      "\n\n" +
+      (held
+        ? held +
+          " reserved account(s) are HELD, not released. Check " +
+          label(market) +
+          ': if the offer is NOT live, press "Release held accounts" on the ' +
+          "Bulk packs page; if it is, take it down first."
+        : "Check " +
+          label(market) +
+          " and take it down by hand if it is live.") +
+      "\n\n" +
+      label(market) +
+      " said: " +
+      msg,
+  );
+  await audit({
+    action: "send_held",
+    severity: "error",
+    message: lastError + " — " + msg,
+    offer,
+    actor,
+    meta: { externalId, held, outcome: String((e && e.outcome) || "") },
+  });
+  let fresh = null;
+  try {
+    fresh = await freshOffer(offer._id);
+  } catch {
+    fresh = null;
+  }
+  return result(
+    502,
+    lastError + " (" + label(market) + " said: " + msg + ")",
+    fresh ? { offer: fresh } : {},
+  );
 }
 
 function parseUnits(v) {
@@ -990,12 +1203,67 @@ async function sendOfferInner(input, actor) {
       input,
       actor,
     );
+  // The send holds the new offer's lock from the moment the offer exists
+  // (FIXES-1): no maintenance pass, withdraw or take-out acts on a half-sent
+  // offer. Its id is minted here so the lock is taken before the create.
+  const offerId = newOfferId();
+  return underOfferLock(offerId, () =>
+    createAndSend(offerId, {
+      bp,
+      actor,
+      source,
+      market,
+      set,
+      game,
+      days,
+      minQty,
+      discountPct,
+      units,
+      isPack,
+      kind,
+      slotKey,
+      anchor,
+      anchorBasis,
+      unitPrice,
+      packPrice,
+      title,
+      description,
+      alreadyLive,
+    }),
+  );
+}
+
+// Steps 5 and 6, inside the new offer's lock.
+async function createAndSend(offerId, p) {
+  const {
+    bp,
+    actor,
+    source,
+    market,
+    set,
+    game,
+    days,
+    minQty,
+    discountPct,
+    units,
+    isPack,
+    kind,
+    slotKey,
+    anchor,
+    anchorBasis,
+    unitPrice,
+    packPrice,
+    title,
+    description,
+    alreadyLive,
+  } = p;
   // The index is the guarantee. The in-process slot lock plus the look-up is a
   // backstop for the window after a deploy before Mongo has built the index.
   const created = await withLock("slot:" + slotKey, async () => {
     if (await deps.BulkOffer.exists({ slotKey, open: true })) return null;
     try {
       return await deps.BulkOffer.create({
+        _id: offerId,
         kind,
         source,
         market,
@@ -1531,6 +1799,8 @@ async function sendDropsetQty(ctx) {
       coverPath: cover,
     });
   } catch (e) {
+    // S2/S5: G2G can throw after its PUT already set the offer live.
+    if (!publishNotCreated(e)) return holdUnknownPublish(ctx, e);
     const rel = await releaseAndRecord(
       offer._id,
       set,
@@ -1669,8 +1939,10 @@ async function sendGameflipPack(ctx) {
       coverPath: cover,
     });
   } catch (e) {
-    // gameflipPublish discards its draft (credentials and all) before it
-    // throws, so a refused publish leaves no code on Gameflip to protect.
+    // S2/S5: gameflipPublish can throw with the listing ON SALE and every
+    // pack credential in its code (its clean-up DELETE fails silently). Only
+    // a failure markets.js proved left nothing on Gameflip hands them back.
+    if (!publishNotCreated(e)) return holdUnknownPublish(ctx, e);
     const rel = await releaseAndRecord(
       offer._id,
       set,
@@ -1857,6 +2129,7 @@ async function sendNoclaim(ctx) {
       coverPath: cover,
     });
   } catch (e) {
+    if (!publishNotCreated(e)) return holdUnknownPublish(ctx, e);
     return failSend(
       ctx,
       502,
@@ -1968,9 +2241,19 @@ async function sendNoclaim(ctx) {
     await finalizeLive(
       ctx,
       { listing: rowId, advertisedQty: landed, unitPrice: price },
-      landed + " no-claim account(s) landed — below the " + minQty + "+ minimum",
+      landed +
+        " no-claim account(s) landed — below the " +
+        minQty +
+        "+ minimum",
     );
-    const w = await withdrawOffer({ offerId: String(offer._id), actor: ctx.actor });
+    // This send already holds the offer's lock, which is not re-entrant: the
+    // lock-free withdraw, never withdrawOffer (it would wait on itself).
+    let w;
+    try {
+      w = await withdrawLocked(String(offer._id), ctx.actor);
+    } catch (e) {
+      w = result(500, "Server error: " + errMsg(e));
+    }
     return {
       success: false,
       status: 409,
@@ -1980,7 +2263,12 @@ async function sendNoclaim(ctx) {
         " left for this offer, below the " +
         minQty +
         "+ minimum), so the offer was taken back down" +
-        (w && w.success ? "" : " — check it on " + label(market) + ": " + ((w && w.message) || "")),
+        (w && w.success
+          ? ""
+          : " — check it on " +
+            label(market) +
+            ": " +
+            ((w && w.message) || "")),
       offer: (w && w.offer) || undefined,
     };
   }
@@ -2000,18 +2288,14 @@ async function sendNoclaim(ctx) {
 // provision purchaseQuantity accounts when an order lands.
 async function sendFarm(ctx) {
   const { bp, market, minQty, units } = ctx;
-  const cap = (await deps.farmCapacity.read({ force: true })) || {};
-  const adv = Math.max(
-    0,
-    Math.floor(Number(deps.farmCapacity.advertisable(cap, bp)) || 0),
-  );
-  const q = Math.min(adv, units || Infinity);
-  if (!(q >= minQty)) {
+  // S1: this offer's SHARE of the capacity, never the whole of it.
+  const { cap, available, share, sharers } = await farmShareFor(ctx.offer, bp);
+  if (!(available >= minQty)) {
     return failSend(
       ctx,
       409,
       "Only " +
-        adv +
+        available +
         " account(s) can be farmed right now — best stack room " +
         (Number(cap.bestStackRoom) || 0) +
         ", " +
@@ -2024,6 +2308,14 @@ async function sendFarm(ctx) {
         bp.farmReservePristine +
         ")" +
         (cap.error ? " — capacity read failed: " + cap.error : ""),
+    );
+  }
+  const q = Math.min(share, units || Infinity);
+  if (!(q >= minQty)) {
+    return failSend(
+      ctx,
+      409,
+      farmShareShort(share, available, sharers, minQty),
     );
   }
   let pub;
@@ -2039,6 +2331,7 @@ async function sendFarm(ctx) {
       minQty,
     });
   } catch (e) {
+    if (!publishNotCreated(e)) return holdUnknownPublish(ctx, e);
     return failSend(
       ctx,
       502,
@@ -2087,207 +2380,260 @@ async function sendFarm(ctx) {
 // refillOffer — dropset Eldorado / G2G only
 // ---------------------------------------------------------------------------
 async function refillOffer({ offerId, add, actor } = {}) {
-  return withLock("offer:" + String(offerId), () =>
-    guarded("refill", async () => {
-      const bp = readBulkPacks();
-      if (!bp || bp.enabled !== true)
-        return result(409, "Bulk packs are switched off");
-      const addN = toInt(add);
-      if (!Number.isInteger(addN) || addN < 1 || addN > MAX_UNITS) {
-        return result(
-          400,
-          "Add a whole number of accounts from 1 to " + MAX_UNITS,
-        );
-      }
-      const offer = await loadOffer(offerId);
-      if (!offer) return result(404, "Offer not found");
-      if (!offer.open || !["live", "paused"].includes(offer.state)) {
-        return result(
-          409,
-          "Only a live or paused offer can be refilled (this one is " +
-            offer.state +
-            ")",
-          { offer },
-        );
-      }
-      if (offer.source !== "dropset" || !QTY_MARKETS.includes(offer.market)) {
-        return result(
-          409,
-          "Only farmed-account offers on Eldorado or G2G can be refilled",
-          { offer },
-        );
-      }
-      const gate = deps.config.currentGate(offer.market, offer.source);
-      if (!gate || !gate.ok)
-        return result(
-          409,
-          (gate && gate.reason) || "Delivery is switched off",
-          { offer },
-        );
-      const set = offer.set
-        ? await deps.DropSet.findById(offer.set).lean()
-        : null;
-      if (!set)
-        return result(404, "This offer's set no longer exists", { offer });
-      const row = await ownRow(offer);
-      if (!row || row.status !== "active") {
-        return result(
-          409,
-          "This offer's listing is no longer active — it cannot take more accounts",
-          { offer },
-        );
-      }
-
-      const free = (await deps.stock.freeDropsetAccounts(set)).length;
-      const surplus = free - bp.reserveSingles;
-      const n = Math.min(addN, surplus);
-      if (!(n >= 1)) {
-        return result(
-          409,
-          "Only " +
-            free +
-            " free account(s) hold this bundle (keeping " +
-            bp.reserveSingles +
-            " for single listings)",
-          { offer },
-        );
-      }
-      const raw = await deps.stock.reserve({ set, n, market: offer.market });
-      const seen = new Set();
-      const got = [];
-      for (const a of Array.isArray(raw) ? raw : []) {
-        const id = String((a && a.accountId) || "");
-        if (!id || seen.has(id)) continue;
-        seen.add(id);
-        got.push({ accountId: id, login: String((a && a.login) || "") });
-      }
-      if (!got.length)
-        return result(409, "No account could be reserved right now", { offer });
-
-      // Our record first (the authority, CONTRACT I3), then the row. A crash in
-      // between leaves an on_offer entry missing from an active row, which the
-      // loop's reconcile re-$pushes.
-      const at = new Date();
-      try {
-        await deps.BulkOffer.updateOne(
-          { _id: offer._id },
-          {
-            $push: {
-              reserved: { $each: got.map((a) => reservedEntry(a, at)) },
-            },
-          },
-        );
-      } catch (e) {
-        try {
-          await deps.stock.releaseUnits({
-            set,
-            market: offer.market,
-            accountIds: got.map((a) => a.accountId),
-          });
-        } catch (e2) {
-          console.error(
-            "bulkPacks refill: release after a failed record also failed:",
-            errMsg(e2),
-          );
-        }
-        return result(
-          500,
-          "Could not record the reserved accounts: " + errMsg(e),
-          { offer },
-        );
-      }
-
-      // One atomic $push per unit — never a whole-array save (CONTRACT I3).
-      const added = [];
-      const notAdded = [];
-      for (const a of got) {
-        try {
-          const r = await deps.MarketplaceListing.updateOne(
-            {
-              _id: row._id,
-              bulkOfferId: offer._id,
-              status: "active",
-              "units.accountId": { $ne: a.accountId },
-            },
-            { $push: { units: unitDoc(a, at) }, $inc: { qtyTarget: 1 } },
-          );
-          (Number(r && r.modifiedCount) === 1 ? added : notAdded).push(a);
-        } catch (e) {
-          console.error(
-            "bulkPacks refill: $push of " + a.accountId + " failed:",
-            errMsg(e),
-          );
-          notAdded.push(a);
-        }
-      }
-      // Never reached the row (it went inactive under us), so nothing can sell
-      // them through it: hand them back.
-      let releasedBack = 0;
-      if (notAdded.length) {
-        const rel = await releaseAndRecord(
-          offer._id,
-          set,
-          offer.market,
-          notAdded.map((a) => a.accountId),
-          "refill: the listing stopped taking accounts",
-        );
-        releasedBack = rel.released.length;
-      }
-
-      // Re-read, then advertise exactly the free units the row now holds.
-      const fresh = await ownRow(offer);
-      const freeCount = sellableCount(fresh, await freshOffer(offer._id));
-      let qtyNote = "";
-      const set$ = { lastError: "" };
-      try {
-        await deps.markets.setQuantity(
-          offer.market,
-          offer.externalId,
-          freeCount,
-        );
-        set$.advertisedQty = freeCount;
-      } catch (e) {
-        qtyNote =
-          " — the quantity update failed (" +
-          errMsg(e) +
-          "); the maintenance loop retries";
-        set$.lastError = ("refill quantity: " + errMsg(e)).slice(0, 400);
-      }
-      const detail =
-        "+" +
-        added.length +
-        " account(s)" +
-        (notAdded.length
-          ? ", " +
-            notAdded.length +
-            " not added (" +
-            releasedBack +
-            " released)"
-          : "") +
-        "; " +
-        freeCount +
-        " on offer" +
-        qtyNote;
-      await deps.BulkOffer.updateOne(
-        { _id: offer._id },
-        { $set: set$, $push: { history: hist("refilled", detail, actor) } },
+  return guarded("refill", async () => {
+    const bp = readBulkPacks();
+    if (!bp || bp.enabled !== true)
+      return result(409, "Bulk packs are switched off");
+    const addN = toInt(add);
+    if (!Number.isInteger(addN) || addN < 1 || addN > MAX_UNITS) {
+      return result(
+        400,
+        "Add a whole number of accounts from 1 to " + MAX_UNITS,
       );
-      const out = await freshOffer(offer._id);
-      await audit({
-        action: "refilled",
-        message: detail,
-        offer: out,
-        actor,
-        meta: { added: added.length },
+    }
+    if (!isIdLike(offerId)) return result(404, "Offer not found");
+    return underOfferLock(offerId, () =>
+      refillLocked(offerId, addN, bp, actor),
+    );
+  });
+}
+
+// S4/S6: everything below runs inside the offer's lock, from a FRESH read. A
+// maintenance pass that closed the offer (sold out, expired) before the lock
+// was ours is seen here and refused — reserving into a closed offer strands
+// the accounts on_offer where nothing ever releases them — and a pass that
+// wants to heal the row waits until the new units are on it.
+async function refillLocked(offerId, addN, bp, actor) {
+  const offer = await loadOffer(offerId);
+  if (!offer) return result(404, "Offer not found");
+  if (!offer.open || !["live", "paused"].includes(offer.state)) {
+    return result(
+      409,
+      "Only a live or paused offer can be refilled (this one is " +
+        offer.state +
+        ")",
+      { offer },
+    );
+  }
+  if (offer.source !== "dropset" || !QTY_MARKETS.includes(offer.market)) {
+    return result(
+      409,
+      "Only farmed-account offers on Eldorado or G2G can be refilled",
+      { offer },
+    );
+  }
+  const gate = deps.config.currentGate(offer.market, offer.source);
+  if (!gate || !gate.ok)
+    return result(409, (gate && gate.reason) || "Delivery is switched off", {
+      offer,
+    });
+  const set = offer.set ? await deps.DropSet.findById(offer.set).lean() : null;
+  if (!set) return result(404, "This offer's set no longer exists", { offer });
+  const row = await ownRow(offer);
+  if (!row || row.status !== "active") {
+    return result(
+      409,
+      "This offer's listing is no longer active — it cannot take more accounts",
+      { offer },
+    );
+  }
+
+  const free = (await deps.stock.freeDropsetAccounts(set)).length;
+  const surplus = free - bp.reserveSingles;
+  const n = Math.min(addN, surplus);
+  if (!(n >= 1)) {
+    return result(
+      409,
+      "Only " +
+        free +
+        " free account(s) hold this bundle (keeping " +
+        bp.reserveSingles +
+        " for single listings)",
+      { offer },
+    );
+  }
+  const raw = await deps.stock.reserve({ set, n, market: offer.market });
+  const seen = new Set();
+  const got = [];
+  for (const a of Array.isArray(raw) ? raw : []) {
+    const id = String((a && a.accountId) || "");
+    if (!id || seen.has(id)) continue;
+    seen.add(id);
+    got.push({ accountId: id, login: String((a && a.login) || "") });
+  }
+  if (!got.length)
+    return result(409, "No account could be reserved right now", { offer });
+  const gotIds = got.map((a) => a.accountId);
+
+  // Our record first (the authority, CONTRACT I3), then the row. The write
+  // re-checks that the offer is still open and live/paused — a backstop for
+  // the lock, never a substitute for it.
+  const at = new Date();
+  let recorded = false;
+  try {
+    const r = await deps.BulkOffer.updateOne(
+      { _id: offer._id, open: true, state: { $in: ["live", "paused"] } },
+      {
+        $push: {
+          reserved: { $each: got.map((a) => reservedEntry(a, at)) },
+        },
+      },
+    );
+    recorded = Number(r && r.matchedCount) === 1;
+  } catch (e) {
+    try {
+      await deps.stock.releaseUnits({
+        set,
+        market: offer.market,
+        accountIds: gotIds,
       });
-      invalidateProposals();
-      if (!added.length)
-        return result(409, "No account could be added: " + detail, {
-          offer: out,
-        });
-      return result(200, "Refilled: " + detail, { offer: out });
-    }),
+    } catch (e2) {
+      console.error(
+        "bulkPacks refill: release after a failed record also failed:",
+        errMsg(e2),
+      );
+    }
+    return result(500, "Could not record the reserved accounts: " + errMsg(e), {
+      offer,
+    });
+  }
+  if (!recorded) {
+    // It closed between the check and the write. None of them reached the
+    // row: record them retiring (never untracked) and hand them straight back.
+    await deps.BulkOffer.updateOne(
+      { _id: offer._id },
+      {
+        $push: {
+          reserved: {
+            $each: got.map((a) => ({
+              ...reservedEntry(a, at),
+              state: "retiring",
+              changedAt: at,
+              reason: "refill: the offer closed",
+            })),
+          },
+        },
+      },
+    ).catch(() => {});
+    await releaseAndRecord(
+      offer._id,
+      set,
+      offer.market,
+      gotIds,
+      "refill: the offer closed",
+    );
+    return result(
+      409,
+      "The offer closed while it was being refilled — nothing was added",
+      { offer: (await freshOffer(offer._id)) || offer },
+    );
+  }
+
+  // One atomic $push per unit — never a whole-array save (CONTRACT I3).
+  const pushed = [];
+  const missed = [];
+  for (const a of got) {
+    try {
+      const r = await deps.MarketplaceListing.updateOne(
+        {
+          _id: row._id,
+          bulkOfferId: offer._id,
+          status: "active",
+          "units.accountId": { $ne: a.accountId },
+        },
+        { $push: { units: unitDoc(a, at) }, $inc: { qtyTarget: 1 } },
+      );
+      (Number(r && r.modifiedCount) === 1 ? pushed : missed).push(a);
+    } catch (e) {
+      console.error(
+        "bulkPacks refill: $push of " + a.accountId + " failed:",
+        errMsg(e),
+      );
+      missed.push(a);
+    }
+  }
+
+  // Re-read the row. A $push that missed is NOT proof the unit is off the row
+  // (a clobber heal put it there first, or the write landed and only its
+  // answer was lost): an account that is on the row is on offer — releasing it
+  // would sell it twice (S3).
+  const fresh = await ownRow(offer);
+  const onRow = new Set(
+    ((fresh && fresh.units) || []).map((u) => String(u.accountId)),
   );
+  const alreadyOn = missed.filter((a) => onRow.has(a.accountId));
+  const absent = missed.filter((a) => !onRow.has(a.accountId));
+  const rowActive = !!fresh && fresh.status === "active";
+  let queued = 0;
+  let releasedBack = 0;
+  if (absent.length) {
+    if (rowActive) {
+      // The row still sells: the loop's reconcile re-$pushes an on_offer
+      // entry missing from an active row. They stay on offer.
+      queued = absent.length;
+    } else {
+      // The row stopped selling before they reached it, so nothing can sell
+      // them through it: hand them back.
+      const rel = await releaseAndRecord(
+        offer._id,
+        set,
+        offer.market,
+        absent.map((a) => a.accountId),
+        "refill: the listing stopped taking accounts",
+      );
+      releasedBack = rel.released.length;
+    }
+  }
+  const added = pushed.length + alreadyOn.length;
+
+  // Advertise exactly the free units the row now holds.
+  const freeCount = sellableCount(fresh, await freshOffer(offer._id));
+  let qtyNote = "";
+  const set$ = { lastError: "" };
+  try {
+    await deps.markets.setQuantity(offer.market, offer.externalId, freeCount);
+    set$.advertisedQty = freeCount;
+  } catch (e) {
+    qtyNote =
+      " — the quantity update failed (" +
+      errMsg(e) +
+      "); the maintenance loop retries";
+    set$.lastError = ("refill quantity: " + errMsg(e)).slice(0, 400);
+  }
+  const detail =
+    "+" +
+    added +
+    " account(s)" +
+    (queued
+      ? ", " +
+        queued +
+        " more reserved for the maintenance loop to put on the listing"
+      : "") +
+    (absent.length && !queued
+      ? ", " + absent.length + " not added (" + releasedBack + " released)"
+      : "") +
+    "; " +
+    freeCount +
+    " on offer" +
+    qtyNote;
+  await deps.BulkOffer.updateOne(
+    { _id: offer._id },
+    { $set: set$, $push: { history: hist("refilled", detail, actor) } },
+  );
+  const out = await freshOffer(offer._id);
+  await audit({
+    action: "refilled",
+    message: detail,
+    offer: out,
+    actor,
+    meta: { added, queued },
+  });
+  invalidateProposals();
+  if (!added && !queued)
+    return result(409, "No account could be added: " + detail, {
+      offer: out,
+    });
+  return result(200, "Refilled: " + detail, { offer: out });
 }
 
 // ---------------------------------------------------------------------------
@@ -2297,260 +2643,274 @@ async function refillOffer({ offerId, add, actor } = {}) {
 // Manual pause: the owner's, so autoPaused is false and nothing resumes it by
 // itself. Allowed while bulk packs are switched off (it is a safety action).
 async function pauseOffer({ offerId, actor } = {}) {
-  return withLock("offer:" + String(offerId), () =>
-    guarded("pause", async () => {
-      const offer = await loadOffer(offerId);
-      if (!offer) return result(404, "Offer not found");
-      if (!offer.open || offer.state === "sending") {
-        return result(
-          409,
-          "Only a live offer can be paused (this one is " + offer.state + ")",
-          { offer },
-        );
-      }
-      if (offer.market === "gameflip") {
-        return result(
-          409,
-          "A Gameflip pack cannot be paused — withdraw it instead",
-          { offer },
-        );
-      }
-      if (offer.state === "paused") {
-        if (!offer.autoPaused) return result(200, "Already paused", { offer });
-        // Paused by the loop; the owner now keeps it paused.
-        await deps.BulkOffer.updateOne(
-          { _id: offer._id, state: "paused" },
-          {
-            $set: { autoPaused: false },
-            $push: {
-              history: hist(
-                "paused",
-                "kept paused by the owner — it will not resume by itself",
-                actor,
-              ),
-            },
-          },
-        );
-        const out = await freshOffer(offer._id);
-        await audit({
-          action: "paused",
-          message: "kept paused by the owner",
-          offer: out,
-          actor,
-        });
-        return result(200, "Kept paused — it will not resume by itself", {
-          offer: out,
-        });
-      }
-      try {
-        await deps.markets.pause(offer.market, offer.externalId);
-      } catch (e) {
-        // "must be active" / 404: already off sale, which is what was asked.
-        if (!deps.delistOutcome(errMsg(e))) {
-          await noteError(offer._id, "pause failed: " + errMsg(e), actor);
-          return result(
-            502,
-            "Could not pause the offer on " +
-              label(offer.market) +
-              ": " +
-              errMsg(e),
-            { offer },
-          );
-        }
-      }
-      if (offer.listing) {
-        // The row's own flag belongs to the existing stock syncs, which resume
-        // only what they paused themselves: clear it so they never undo this.
-        await deps.MarketplaceListing.updateOne(
-          { _id: offer.listing, bulkOfferId: offer._id },
-          { $set: { autoPaused: false } },
-        ).catch(() => {});
-      }
-      await deps.BulkOffer.updateOne(
-        { _id: offer._id, open: true },
-        {
-          $set: {
-            state: "paused",
-            open: true,
-            autoPaused: false,
-            lastError: "",
-          },
-          $push: { history: hist("paused", "paused by the owner", actor) },
+  return guarded("pause", async () => {
+    if (!isIdLike(offerId)) return result(404, "Offer not found");
+    return underOfferLock(offerId, () => pauseLocked(offerId, actor));
+  });
+}
+
+// S4/S6: inside the offer's lock, from a fresh read.
+async function pauseLocked(offerId, actor) {
+  const offer = await loadOffer(offerId);
+  if (!offer) return result(404, "Offer not found");
+  if (!offer.open || offer.state === "sending") {
+    return result(
+      409,
+      "Only a live offer can be paused (this one is " + offer.state + ")",
+      { offer },
+    );
+  }
+  if (offer.market === "gameflip") {
+    return result(
+      409,
+      "A Gameflip pack cannot be paused — withdraw it instead",
+      { offer },
+    );
+  }
+  if (offer.state === "paused") {
+    if (!offer.autoPaused) return result(200, "Already paused", { offer });
+    // Paused by the loop; the owner now keeps it paused.
+    await deps.BulkOffer.updateOne(
+      { _id: offer._id, state: "paused" },
+      {
+        $set: { autoPaused: false },
+        $push: {
+          history: hist(
+            "paused",
+            "kept paused by the owner — it will not resume by itself",
+            actor,
+          ),
         },
+      },
+    );
+    const out = await freshOffer(offer._id);
+    await audit({
+      action: "paused",
+      message: "kept paused by the owner",
+      offer: out,
+      actor,
+    });
+    return result(200, "Kept paused — it will not resume by itself", {
+      offer: out,
+    });
+  }
+  try {
+    await deps.markets.pause(offer.market, offer.externalId);
+  } catch (e) {
+    // "must be active" / 404: already off sale, which is what was asked.
+    if (!deps.delistOutcome(errMsg(e))) {
+      await noteError(offer._id, "pause failed: " + errMsg(e), actor);
+      return result(
+        502,
+        "Could not pause the offer on " +
+          label(offer.market) +
+          ": " +
+          errMsg(e),
+        { offer },
       );
-      const out = await freshOffer(offer._id);
-      await audit({
-        action: "paused",
-        message: "paused by the owner",
-        offer: out,
-        actor,
-      });
-      alert(
-        "⏸ Bulk offer paused: " + offer.title + " — " + label(offer.market),
-      );
-      return result(200, "Paused", { offer: out });
-    }),
+    }
+  }
+  if (offer.listing) {
+    // The row's own flag belongs to the existing stock syncs, which resume
+    // only what they paused themselves: clear it so they never undo this.
+    await deps.MarketplaceListing.updateOne(
+      { _id: offer.listing, bulkOfferId: offer._id },
+      { $set: { autoPaused: false } },
+    ).catch(() => {});
+  }
+  await deps.BulkOffer.updateOne(
+    { _id: offer._id, open: true },
+    {
+      $set: {
+        state: "paused",
+        open: true,
+        autoPaused: false,
+        lastError: "",
+      },
+      $push: { history: hist("paused", "paused by the owner", actor) },
+    },
   );
+  const out = await freshOffer(offer._id);
+  await audit({
+    action: "paused",
+    message: "paused by the owner",
+    offer: out,
+    actor,
+  });
+  alert("⏸ Bulk offer paused: " + offer.title + " — " + label(offer.market));
+  return result(200, "Paused", { offer: out });
 }
 
 async function resumeOffer({ offerId, actor } = {}) {
-  return withLock("offer:" + String(offerId), () =>
-    guarded("resume", async () => {
-      const bp = readBulkPacks();
-      if (!bp || bp.enabled !== true)
-        return result(409, "Bulk packs are switched off");
-      const offer = await loadOffer(offerId);
-      if (!offer) return result(404, "Offer not found");
-      if (!offer.open || offer.state !== "paused") {
+  return guarded("resume", async () => {
+    const bp = readBulkPacks();
+    if (!bp || bp.enabled !== true)
+      return result(409, "Bulk packs are switched off");
+    if (!isIdLike(offerId)) return result(404, "Offer not found");
+    return underOfferLock(offerId, () => resumeLocked(offerId, bp, actor));
+  });
+}
+
+// S4/S6: inside the offer's lock, from a fresh read.
+async function resumeLocked(offerId, bp, actor) {
+  const offer = await loadOffer(offerId);
+  if (!offer) return result(404, "Offer not found");
+  if (!offer.open || offer.state !== "paused") {
+    return result(
+      409,
+      "Only a paused offer can be resumed (this one is " + offer.state + ")",
+      { offer },
+    );
+  }
+  if (offer.market === "gameflip") {
+    return result(409, "A Gameflip pack cannot be paused or resumed", {
+      offer,
+    });
+  }
+  const gate = deps.config.currentGate(offer.market, offer.source);
+  if (!gate || !gate.ok)
+    return result(409, (gate && gate.reason) || "Delivery is switched off", {
+      offer,
+    });
+
+  // Enough behind it to honour a minimum order, and the quantity it may show.
+  let qty = null;
+  if (offer.source === "farm") {
+    // S1: its SHARE of the farm capacity, counting itself as a sharer.
+    const { cap, available, share, sharers } = await farmShareFor(offer, bp);
+    if (available < offer.minQty) {
+      return result(
+        409,
+        "Only " +
+          available +
+          " account(s) can be farmed right now (minimum order " +
+          offer.minQty +
+          ") — best stack room " +
+          (Number(cap.bestStackRoom) || 0) +
+          ", " +
+          (Number(cap.totalFree) || 0) +
+          " free slot(s), " +
+          (Number(cap.pristine) || 0) +
+          " pristine account(s)" +
+          (cap.error ? " — " + cap.error : ""),
+        { offer },
+      );
+    }
+    if (share < offer.minQty) {
+      return result(
+        409,
+        farmShareShort(share, available, sharers, offer.minQty),
+        { offer },
+      );
+    }
+    qty = share;
+  } else {
+    const row = await ownRow(offer);
+    if (!row || row.status !== "active") {
+      return result(409, "This offer's listing is no longer active", {
+        offer,
+      });
+    }
+    if (offer.source === "noclaim") {
+      // The no-claim layer's own stock sync sets its quantity.
+      let share;
+      try {
+        share = Math.floor(
+          Number(await deps.noclaimStock.stockForListing(row)) || 0,
+        );
+      } catch (e) {
+        return result(
+          502,
+          "Could not count the no-claim stock right now: " + errMsg(e),
+          { offer },
+        );
+      }
+      if (share < offer.minQty) {
         return result(
           409,
-          "Only a paused offer can be resumed (this one is " +
-            offer.state +
+          "Only " +
+            share +
+            " no-claim account(s) are free for this offer (minimum order " +
+            offer.minQty +
             ")",
           { offer },
         );
       }
-      if (offer.market === "gameflip") {
-        return result(409, "A Gameflip pack cannot be paused or resumed", {
-          offer,
-        });
-      }
-      const gate = deps.config.currentGate(offer.market, offer.source);
-      if (!gate || !gate.ok)
+    } else {
+      const free = sellableCount(row, offer);
+      if (free < offer.minQty) {
         return result(
           409,
-          (gate && gate.reason) || "Delivery is switched off",
-          { offer },
-        );
-
-      // Enough behind it to honour a minimum order.
-      let qty = null;
-      if (offer.source === "farm") {
-        const cap = (await deps.farmCapacity.read({ force: true })) || {};
-        const q = Math.max(
-          0,
-          Math.floor(Number(deps.farmCapacity.advertisable(cap, bp)) || 0),
-        );
-        if (q < offer.minQty) {
-          return result(
-            409,
-            "Only " +
-              q +
-              " account(s) can be farmed right now (minimum order " +
-              offer.minQty +
-              ") — best stack room " +
-              (Number(cap.bestStackRoom) || 0) +
-              ", " +
-              (Number(cap.totalFree) || 0) +
-              " free slot(s), " +
-              (Number(cap.pristine) || 0) +
-              " pristine account(s)" +
-              (cap.error ? " — " + cap.error : ""),
-            { offer },
-          );
-        }
-        qty = q;
-      } else {
-        const row = await ownRow(offer);
-        if (!row || row.status !== "active") {
-          return result(409, "This offer's listing is no longer active", {
-            offer,
-          });
-        }
-        if (offer.source === "noclaim") {
-          let share;
-          try {
-            share = Math.floor(
-              Number(await deps.noclaimStock.stockForListing(row)) || 0,
-            );
-          } catch (e) {
-            return result(
-              502,
-              "Could not count the no-claim stock right now: " + errMsg(e),
-              { offer },
-            );
-          }
-          if (share < offer.minQty) {
-            return result(
-              409,
-              "Only " +
-                share +
-                " no-claim account(s) are free for this offer (minimum order " +
-                offer.minQty +
-                ")",
-              { offer },
-            );
-          }
-        } else {
-          const free = sellableCount(row, offer);
-          if (free < offer.minQty) {
-            return result(
-              409,
-              "Only " +
-                free +
-                " account(s) left on this offer (minimum order " +
-                offer.minQty +
-                ") — refill it first",
-              { offer },
-            );
-          }
-          qty = free;
-        }
-      }
-
-      try {
-        await deps.markets.resume(offer.market, offer.externalId);
-      } catch (e) {
-        await noteError(offer._id, "resume failed: " + errMsg(e), actor);
-        return result(
-          502,
-          "Could not resume the offer on " +
-            label(offer.market) +
-            ": " +
-            errMsg(e),
+          "Only " +
+            free +
+            " account(s) left on this offer (minimum order " +
+            offer.minQty +
+            ") — refill it first",
           { offer },
         );
       }
-      const set$ = {
+      qty = free;
+    }
+  }
+
+  // S8: the quantity FIRST. Resumed at a stale (larger) quantity the offer
+  // would sell accounts or farm slots it no longer has, so only a quantity
+  // the market accepted may go live.
+  if (qty != null) {
+    try {
+      await deps.markets.setQuantity(offer.market, offer.externalId, qty);
+    } catch (e) {
+      await noteError(
+        offer._id,
+        "resume: the quantity update failed (" + errMsg(e) + ") — not resumed",
+        actor,
+      );
+      return result(
+        502,
+        "Could not set the offer's quantity to " +
+          qty +
+          " on " +
+          label(offer.market) +
+          ": " +
+          errMsg(e) +
+          " — it was NOT resumed",
+        { offer: (await freshOffer(offer._id)) || offer },
+      );
+    }
+    await deps.BulkOffer.updateOne(
+      { _id: offer._id },
+      { $set: { advertisedQty: qty } },
+    );
+  }
+  try {
+    await deps.markets.resume(offer.market, offer.externalId);
+  } catch (e) {
+    await noteError(offer._id, "resume failed: " + errMsg(e), actor);
+    return result(
+      502,
+      "Could not resume the offer on " + label(offer.market) + ": " + errMsg(e),
+      { offer: (await freshOffer(offer._id)) || offer },
+    );
+  }
+  const detail =
+    "resumed by the owner" + (qty != null ? " at quantity " + qty : "");
+  await deps.BulkOffer.updateOne(
+    { _id: offer._id, open: true },
+    {
+      $set: {
         state: "live",
         open: true,
         autoPaused: false,
         lastError: "",
-      };
-      let qtyNote = "";
-      if (qty != null && qty !== offer.advertisedQty) {
-        try {
-          await deps.markets.setQuantity(offer.market, offer.externalId, qty);
-          set$.advertisedQty = qty;
-        } catch (e) {
-          qtyNote =
-            " (quantity update failed: " +
-            errMsg(e) +
-            " — the maintenance loop retries)";
-        }
-      }
-      await deps.BulkOffer.updateOne(
-        { _id: offer._id, open: true },
-        {
-          $set: set$,
-          $push: {
-            history: hist("resumed", "resumed by the owner" + qtyNote, actor),
-          },
-        },
-      );
-      const out = await freshOffer(offer._id);
-      await audit({
-        action: "resumed",
-        message: "resumed by the owner" + qtyNote,
-        offer: out,
-        actor,
-      });
-      alert(
-        "▶️ Bulk offer resumed: " + offer.title + " — " + label(offer.market),
-      );
-      return result(200, "Resumed" + qtyNote, { offer: out });
-    }),
+        ...(qty != null ? { advertisedQty: qty } : {}),
+      },
+      $push: { history: hist("resumed", detail, actor) },
+    },
   );
+  const out = await freshOffer(offer._id);
+  await audit({ action: "resumed", message: detail, offer: out, actor });
+  alert("▶️ Bulk offer resumed: " + offer.title + " — " + label(offer.market));
+  return result(200, "Resumed", { offer: out });
 }
 
 // ---------------------------------------------------------------------------
@@ -2558,37 +2918,80 @@ async function resumeOffer({ offerId, actor } = {}) {
 // ---------------------------------------------------------------------------
 
 async function withdrawOffer({ offerId, actor } = {}) {
-  return withLock("offer:" + String(offerId), () =>
-    guarded("withdraw", async () => {
-      const offer = await loadOffer(offerId);
-      if (!offer) return result(404, "Offer not found");
-      if (!offer.open)
-        return result(
-          409,
-          "This offer is already closed (" + offer.state + ")",
-          { offer },
-        );
-      if (offer.state === "sending") {
-        const since = new Date(
-          offer.updatedAt || offer.createdAt || 0,
-        ).getTime();
-        if (!(Date.now() - since >= SENDING_STALE_MS)) {
-          return result(
-            409,
-            "This offer is still being sent — try again in a few minutes",
-            { offer },
-          );
-        }
-        if (!offer.externalId) return abandonInterruptedSend(offer, actor);
-        // The publish landed and was recorded: take it down like a live one.
-      }
-      if (offer.source === "farm") return withdrawFarm(offer, actor);
-      if (offer.source === "noclaim") return withdrawNoclaim(offer, actor);
-      if (offer.market === "gameflip")
-        return withdrawGameflipPack(offer, actor);
-      return withdrawDropsetQty(offer, actor);
-    }),
+  return guarded("withdraw", async () => {
+    if (!isIdLike(offerId)) return result(404, "Offer not found");
+    return underOfferLock(offerId, () => withdrawLocked(offerId, actor));
+  });
+}
+
+// S4/S6: inside the offer's lock, from a fresh read. Also what code that
+// already holds the lock (a send taking its own offer back down) calls.
+async function withdrawLocked(offerId, actor) {
+  let offer = await loadOffer(offerId);
+  if (!offer) return result(404, "Offer not found");
+  if (!offer.open)
+    return result(409, "This offer is already closed (" + offer.state + ")", {
+      offer,
+    });
+  if (offer.state === "sending") {
+    const since = new Date(offer.updatedAt || offer.createdAt || 0).getTime();
+    if (!(Date.now() - since >= SENDING_STALE_MS)) {
+      return result(
+        409,
+        "This offer is still being sent — try again in a few minutes",
+        { offer },
+      );
+    }
+  }
+  // S3: an offer with no pointer to its row still has its row when the send
+  // died after writing it — find it before anything decides there is none.
+  offer = await healRowPointer(offer, actor);
+  // Interrupted before its publish was recorded and no row of ours exists.
+  if (offer.state === "sending" && !offer.externalId)
+    return abandonInterruptedSend(offer, actor);
+  // The publish landed and was recorded: take it down like a live one.
+  return withdrawBySource(offer, actor);
+}
+
+function withdrawBySource(offer, actor) {
+  if (offer.source === "farm") return withdrawFarm(offer, actor);
+  if (offer.source === "noclaim") return withdrawNoclaim(offer, actor);
+  if (offer.market === "gameflip") return withdrawGameflipPack(offer, actor);
+  return withdrawDropsetQty(offer, actor);
+}
+
+// S3: a send that died between writing its row and going live leaves the
+// offer without `listing` (and, if its "published" write failed too, without
+// `externalId`) while the row sells. Find the row by bulkOfferId and write the
+// pointer back, so every path below — and the loop — sees the row.
+async function healRowPointer(offer, actor) {
+  if (offer.source === "farm" || (offer.listing && offer.externalId))
+    return offer;
+  const row = await ownRow(offer);
+  if (!row) return offer;
+  const $set = {};
+  if (!offer.listing || String(offer.listing) !== String(row._id))
+    $set.listing = row._id;
+  if (!offer.externalId && String(row.externalId || "").trim())
+    $set.externalId = String(row.externalId).trim();
+  if (!Object.keys($set).length) return offer;
+  await deps.BulkOffer.updateOne(
+    { _id: offer._id },
+    {
+      $set,
+      $push: {
+        history: hist(
+          "row_found",
+          "listing row " +
+            String(row._id) +
+            " found by its bulkOfferId" +
+            ($set.externalId ? " (offer " + $set.externalId + ")" : ""),
+          actor,
+        ),
+      },
+    },
   );
+  return (await freshOffer(offer._id)) || { ...offer, ...$set };
 }
 
 async function closeWithdrawn(offer, actor, detail, extra = {}) {
@@ -2614,6 +3017,11 @@ async function closeWithdrawn(offer, actor, detail, extra = {}) {
 // offer went up, so the owner is told to look, and only what provably cannot
 // be delivered is handed back.
 async function abandonInterruptedSend(offer, actor) {
+  // S3: only an offer with NO row of ours was interrupted before it could
+  // sell. One with a row is taken down through it like a live one, so no
+  // entry whose unit is not FREE there is ever released.
+  if (offer.source !== "farm" && (await ownRow(offer)))
+    return withdrawBySource(offer, actor);
   const onOffer = (offer.reserved || [])
     .filter((r) => r.state === "on_offer")
     .map((r) => r.accountId);
@@ -2634,6 +3042,7 @@ async function abandonInterruptedSend(offer, actor) {
           "interrupted send",
         );
         released = rel.released.length;
+        kept = rel.kept.length;
       } else {
         kept = onOffer.length;
       }
@@ -2721,9 +3130,10 @@ async function withdrawDropsetQty(offer, actor) {
   const onOffer = (cur.reserved || []).filter((r) => r.state === "on_offer");
 
   if (!fresh) {
-    // No row of ours holds these accounts, so nothing can sell them: they go
-    // straight back (each after isStillOurs).
+    // No row of ours holds these accounts (S3: looked for by bulkOfferId too),
+    // so nothing can sell them: they go straight back (each after isStillOurs).
     let released = 0;
+    let kept = 0;
     if (onOffer.length) {
       const set = cur.set ? await deps.DropSet.findById(cur.set).lean() : null;
       if (!set) {
@@ -2750,6 +3160,7 @@ async function withdrawDropsetQty(offer, actor) {
         "withdrawn (no listing row)",
       );
       released = rel.released.length;
+      kept = rel.kept.length;
     }
     return closeWithdrawn(
       offer,
@@ -2758,7 +3169,10 @@ async function withdrawDropsetQty(offer, actor) {
         label(offer.market) +
         "; " +
         released +
-        " account(s) released",
+        " account(s) released" +
+        (kept
+          ? ", " + kept + " kept reserved (taken out of the pack by the owner)"
+          : ""),
     );
   }
 
@@ -2921,10 +3335,30 @@ async function withdrawGameflipPack(offer, actor) {
     );
   }
   const cur = (await freshOffer(offer._id)) || offer;
-  const ids = (cur.reserved || [])
-    .filter((r) => r.state === "on_offer")
-    .map((r) => r.accountId);
-  let rel = { released: [], notOurs: [], pending: [] };
+  // S3: an entry whose unit is not FREE on the row went to a buyer — it is
+  // recorded delivered, never released.
+  const ids = [];
+  const sold = {};
+  for (const r of (cur.reserved || []).filter((e) => e.state === "on_offer")) {
+    const taken =
+      fresh &&
+      (fresh.units || []).find(
+        (u) => String(u.accountId) === String(r.accountId) && !isFree(u),
+      );
+    if (taken) sold[String(r.accountId)] = String(taken.orderId || "");
+    else ids.push(String(r.accountId));
+  }
+  const soldIds = Object.keys(sold);
+  if (soldIds.length) {
+    await markEntries(
+      offer._id,
+      soldIds,
+      "delivered",
+      "sold before the withdraw",
+      { orderIds: sold },
+    );
+  }
+  let rel = { released: [], notOurs: [], pending: [], kept: [] };
   if (ids.length) {
     const set = cur.set ? await deps.DropSet.findById(cur.set).lean() : null;
     if (!set) {
@@ -2953,7 +3387,13 @@ async function withdrawGameflipPack(offer, actor) {
       " account(s) released" +
       (rel.pending.length
         ? ", " + rel.pending.length + " pending the maintenance loop"
-        : ""),
+        : "") +
+      (rel.kept.length
+        ? ", " +
+          rel.kept.length +
+          " kept reserved (taken out of the pack by the owner)"
+        : "") +
+      (soldIds.length ? ", " + soldIds.length + " already sold" : ""),
   );
 }
 
@@ -3114,6 +3554,214 @@ async function withdrawFarm(offer, actor) {
   );
 }
 
+// ---------------------------------------------------------------------------
+// releaseHeld — the owner's release after an unknown publish outcome
+// ---------------------------------------------------------------------------
+
+// A CLOSED offer that still holds on_offer entries — a publish whose outcome
+// was unknown (S2/S5), or a Gameflip orphan whose delist never succeeded —
+// keeps its accounts reserved until the owner has checked the market. This is
+// the owner's button for it, behind a typed "RELEASE". It takes the offer off
+// the market first when its id is known — a failure releases nothing, unless
+// the market answered that there is no such offer (404) — then marks the held
+// entries retiring (changedAt now), so the maintenance loop hands each one
+// back only after its grace and re-checks (CONTRACT I10); the loop never
+// releases an on_offer entry of a closed offer by itself. With no id known
+// there is nothing to call: the owner's typed RELEASE, after checking the
+// market by hand, is the proof. Allowed while bulk packs are switched off: it
+// is a clean-up, never a publish.
+async function releaseHeld({ offerId, confirm, actor } = {}) {
+  return guarded("release held", async () => {
+    if (confirm !== "RELEASE") {
+      return result(
+        400,
+        "Type RELEASE to confirm — only after you checked the marketplace: the offer is NOT live",
+      );
+    }
+    if (!isIdLike(offerId)) return result(404, "Offer not found");
+    return underOfferLock(offerId, () => releaseHeldLocked(offerId, actor));
+  });
+}
+
+// A withdraw failure that says the offer does not exist: a 404 status, or the
+// "not found" / HTTP 404 message the connectors pass on (the same text
+// marketplaces.delistOutcome reads as gone). A "sold" answer never counts.
+function withdrawSaysNoSuchOffer(e) {
+  const msg = errMsg(e);
+  if (deps.delistOutcome(msg) === "sold") return false;
+  const status = Number(
+    (e && (e.status || (e.response && e.response.status))) || 0,
+  );
+  if (status === 404) return true;
+  return /not found|does not exist|http_status"?\s*:\s*404|\b(http|status|code)\W{0,3}404\b/i.test(
+    msg,
+  );
+}
+
+// Inside the offer's lock, from a fresh read (S4/S6).
+async function releaseHeldLocked(offerId, actor) {
+  const offer = await loadOffer(offerId);
+  if (!offer) return result(404, "Offer not found");
+  if (offer.open) {
+    return result(
+      409,
+      "This offer is still open (" + offer.state + ") — withdraw it instead",
+      { offer },
+    );
+  }
+  const onOffer = (offer.reserved || []).filter(
+    (r) => r && r.state === "on_offer",
+  );
+  // An account the owner took out of the pack stays reserved for good.
+  const held = onOffer.filter((r) => r.keepReserved !== true);
+  if (!held.length) {
+    return result(
+      409,
+      onOffer.length
+        ? "The only accounts still held here were taken out of the pack by the owner — they stay reserved"
+        : "This offer holds no accounts",
+      { offer },
+    );
+  }
+  const mk = label(offer.market);
+  // Its row, if it has one (S3). A listing the sync already saw sell went to
+  // a buyer: nothing of it is released.
+  const row = await ownRow(offer);
+  if (row && row.status === "sold") {
+    return result(
+      409,
+      "This offer's listing sold — nothing was released; the maintenance loop records the sale",
+      { offer },
+    );
+  }
+  let offNote = "";
+  if (offer.externalId) {
+    try {
+      await deps.markets.withdraw(offer.market, offer.externalId);
+      offNote = "taken off " + mk + " (" + offer.externalId + ")";
+    } catch (e) {
+      const msg = errMsg(e);
+      const outcome = deps.delistOutcome(msg) || "";
+      // Only an answer that the offer does not exist (a 404 — Gameflip's own
+      // draft discard deletes the listing) means "not live". Anything else —
+      // "sold", "must be active", a 5xx, a timeout — proves nothing, so
+      // nothing is released (FIXES-1 releaseHeld addendum).
+      if (!withdrawSaysNoSuchOffer(e)) {
+        await noteError(
+          offer._id,
+          "release held: " +
+            mk +
+            " did not take " +
+            offer.externalId +
+            " down (" +
+            msg +
+            ") — nothing released",
+          actor,
+          "release_held_refused",
+        );
+        return result(
+          409,
+          "Nothing released — " +
+            mk +
+            " did not take " +
+            offer.externalId +
+            " down: " +
+            msg +
+            (outcome === "sold"
+              ? " (it SOLD — deliver the order by hand)"
+              : ""),
+          { offer: (await freshOffer(offer._id)) || offer },
+        );
+      }
+      offNote = "no such offer on " + mk + " (" + msg + ")";
+    }
+  }
+  if (row && row.status === "active") {
+    await deps.MarketplaceListing.updateOne(
+      { _id: row._id, bulkOfferId: offer._id, status: "active" },
+      { $set: { status: "delisted", lastError: "" } },
+    );
+  }
+  const rowNow = row ? await ownRow(offer) : null;
+  // S3: never release an entry whose unit is not FREE on its row.
+  const retire = [];
+  const sold = {};
+  for (const r of held) {
+    const taken =
+      rowNow &&
+      (rowNow.units || []).find(
+        (u) => String(u.accountId) === String(r.accountId) && !isFree(u),
+      );
+    if (taken) sold[String(r.accountId)] = String(taken.orderId || "");
+    else retire.push(String(r.accountId));
+  }
+  const soldIds = Object.keys(sold);
+  if (soldIds.length) {
+    await markEntries(
+      offer._id,
+      soldIds,
+      "delivered",
+      "sold before the release",
+      { orderIds: sold },
+    );
+  }
+  if (retire.length) {
+    await markEntries(
+      offer._id,
+      retire,
+      "retiring",
+      "held accounts released by the owner after checking " + mk,
+    );
+  }
+  const after = (await freshOffer(offer._id)) || offer;
+  const retiring = retire.filter((id) =>
+    (after.reserved || []).some(
+      (r) => String(r.accountId) === id && r.state === "retiring",
+    ),
+  ).length;
+  if (retire.length && !retiring) {
+    return result(
+      500,
+      "Could not mark the held accounts for release — nothing was released" +
+        (offNote ? " (" + offNote + ")" : ""),
+      { offer: after },
+    );
+  }
+  const detail =
+    retiring +
+    " held account(s) retiring — the maintenance loop hands each one back after the safety wait" +
+    (soldIds.length ? "; " + soldIds.length + " already sold" : "") +
+    (onOffer.length > held.length
+      ? "; " +
+        (onOffer.length - held.length) +
+        " kept (taken out of the pack by the owner)"
+      : "") +
+    (offNote ? "; " + offNote : "");
+  await deps.BulkOffer.updateOne(
+    { _id: offer._id },
+    {
+      $set: {
+        lastError: ("held accounts released by the owner: " + detail).slice(
+          0,
+          400,
+        ),
+      },
+      $push: { history: hist("release_held", detail, actor) },
+    },
+  );
+  const out = (await freshOffer(offer._id)) || after;
+  await audit({
+    action: "release_held",
+    severity: "warn",
+    message: detail,
+    offer: out,
+    actor,
+    meta: { retiring, sold: soldIds.length },
+  });
+  invalidateProposals();
+  return result(200, "Released: " + detail, { offer: out });
+}
+
 // Every open offer, one at a time — never a parallel fan-out against live
 // markets.
 async function withdrawAll({ actor } = {}) {
@@ -3177,6 +3825,7 @@ module.exports = {
   resumeOffer,
   withdrawOffer,
   withdrawAll,
+  releaseHeld,
   isFree,
   SENDING_STALE_MS,
   __setDeps,

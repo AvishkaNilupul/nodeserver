@@ -27,6 +27,7 @@ const REAL = {
   rentFarmCapacity: () => require("../rentFarmCapacity"),
   operatorFarm: () => require("../operatorFarm"),
   FarmServiceOrder: () => require("../../models/FarmServiceOrder"),
+  suppliedStock: () => require("../suppliedStock"),
   now: () => Date.now,
 };
 
@@ -172,6 +173,34 @@ function advertisable(cap, bp) {
   return Math.max(0, Math.floor(v));
 }
 
+function idOf(v) {
+  if (v == null) return "";
+  if (typeof v === "object" && typeof v.toHexString === "function") return v.toHexString();
+  if (typeof v === "object" && v._id != null) return idOf(v._id);
+  return String(v).trim();
+}
+
+// One open farm offer's share of `available` (docs/bulk-packs/FIXES-1.md S1).
+// The capacity is ONE pool — every open farm offer is filled from the same
+// stacks and the same pristine accounts — so each advertises its share, never
+// the whole of it (three offers each advertising all 20 is 60 on sale).
+//
+// The split is utils/suppliedStock.js shareOfShelf, the codebase's one rule for
+// dividing a shelf between the offers that sell it: floor(available / n) each,
+// the remainder one apiece to the lowest-sorting ids, so the shares sum to
+// EXACTLY `available` and an offer keeps its rank between passes. `selfId` is
+// counted as a sharer whether or not `ids` lists it; ids are deduplicated
+// (shareOfShelf counts a repeat twice); a missing selfId takes the last share.
+// Returns an integer >= 0; an unreadable `available` is 0.
+function shareFor(selfId, ids, available) {
+  const total = Math.floor(Number(available));
+  if (!Number.isFinite(total) || total <= 0) return 0;
+  const list = ids instanceof Set ? [...ids] : Array.isArray(ids) ? ids : [];
+  const unique = [...new Set(list.map(idOf).filter(Boolean))];
+  const share = Math.floor(Number(dep("suppliedStock").shareOfShelf(total, idOf(selfId), unique)));
+  return Number.isFinite(share) && share > 0 ? Math.min(share, total) : 0;
+}
+
 // Rent-farm demand: FarmServiceOrder rows created in the last `days` days
 // (default 60, 1..365), excluding cancelled ones, grouped by (game, days),
 // most orders first. accounts = accounts handed over (accounts.length), or the
@@ -223,6 +252,7 @@ module.exports = {
   ERROR_CACHE_MS,
   read,
   advertisable,
+  shareFor,
   demand,
   __setDeps,
   __resetDeps,

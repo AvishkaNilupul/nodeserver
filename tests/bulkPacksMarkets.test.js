@@ -1002,7 +1002,498 @@ test("coverForFarm: the promo cover, with no term line when no days are given", 
   assert.strictEqual(await markets.coverForFarm(""), "");
 });
 
-/* ------------------------------- 9. Tripwires ---------------------------- */
+/* ---------------- 9. Publish outcomes (FIXES-1 S2/S5) -------------------- */
+//
+// Every publish throw carries `outcome` ("not_created" -> the caller releases;
+// "may_be_live" -> it HOLDS the accounts) and `externalId` when known. Each
+// fake below throws the exact shape utils/marketplaces.js throws at that step —
+// message AND status — so these verdicts are the ones the real connectors get.
+// The last test here pins those texts to the connector source.
+
+// apiError (marketplaces.js:160-170): "<prefix>: <body json>", status from the response.
+function gfError(prefix, status, body) {
+  const e = new Error(prefix + ": " + JSON.stringify(body || { status: "FAILURE" }));
+  e.status = status;
+  return e;
+}
+
+// eldError (marketplaces.js:4347-4370).
+function eldError(label, status, detail) {
+  const e = new Error(
+    label + " failed" + (status ? " (HTTP " + status + ")" : "") + (detail ? ": " + detail : ""),
+  );
+  e.__eld = true;
+  e.status = status;
+  return e;
+}
+
+// g2gError (marketplaces.js:2636-2659).
+function g2gError(what, status, detail) {
+  const e = new Error(what + " failed" + (status ? " (HTTP " + status + ")" : "") + ": " + detail);
+  e.__g2g = true;
+  e.status = status;
+  return e;
+}
+
+// A spy that throws a FRESH error from `make` on every call.
+function throwing(make) {
+  return spy(async () => {
+    throw make();
+  });
+}
+
+async function thrown(promise) {
+  try {
+    await promise;
+  } catch (e) {
+    return e;
+  }
+  return assert.fail("the publish was expected to throw");
+}
+
+async function quietly(fn) {
+  const q = quietConsole();
+  try {
+    return await fn();
+  } finally {
+    q.restore();
+  }
+}
+
+function gfPackArgs(env) {
+  const list = units(5);
+  seedAccounts(env, list);
+  return accountArgs({ market: "gameflip", title: PACK_TITLE, units: list, packPrice: 5.5, unitPrice: 0 });
+}
+
+const GF_RATE = { status: "FAILURE", error: { code: 429, message: "Too many attempts - Retry later" } };
+// marketplaces.js:420-425 — the listing exists; its own discard may have failed.
+const gfOnsaleError = () => gfError("Gameflip created L9 but could not put it on sale (draft discarded)", 429, GF_RATE);
+// marketplaces.js:351-356 — the delivery code PUT failed on a created draft.
+const gfCodeError = () =>
+  gfError("Gameflip could not attach the delivery content (draft D7 discarded)", 400, {
+    status: "FAILURE",
+    error: { code: 400, message: "code for digital goods already exists" },
+  });
+
+test("S2: a refusal, or any failure before the market call, is not_created", async () => {
+  let env = setup();
+  let err = await thrown(markets.publishAccounts(accountArgs({ market: "plati" })));
+  assert.strictEqual(err.code, "BULK_PACK_REFUSED", "a refusal keeps its code");
+  assert.strictEqual(err.outcome, "not_created");
+  assert.strictEqual(err.externalId, "");
+
+  // The pack's password read fails: nothing reached Gameflip.
+  env = setup({
+    deps: {
+      BotAccount: {
+        find: () => ({
+          lean: async () => {
+            throw new Error("db down");
+          },
+        }),
+      },
+    },
+  });
+  err = await thrown(
+    markets.publishAccounts(accountArgs({ market: "gameflip", title: PACK_TITLE, units: units(5), packPrice: 5 })),
+  );
+  assert.strictEqual(err.outcome, "not_created");
+  assert.notStrictEqual(err.code, "BULK_PACK_REFUSED");
+  assert.strictEqual(env.mp.gameflipPublish.calls.length, 0);
+
+  setup();
+  err = await thrown(markets.publishFarm(farmArgs({ days: 180 })));
+  assert.strictEqual(err.outcome, "not_created");
+  err = await thrown(markets.publishNoclaim(noclaimArgs({ quantity: 4 })));
+  assert.strictEqual(err.outcome, "not_created");
+});
+
+test("S5 gameflip: an error before a listing id exists is not_created, and nothing is taken down", async () => {
+  const cases = [
+    ["no keys", () => new Error("gameflip is not configured — set its API keys first")],
+    ["price floor", () => new Error("Gameflip minimum price is $0.75")],
+    ["the create answered 429", () => gfError("Gameflip create", 429, GF_RATE)],
+    ["the create timed out", () => new Error("Gameflip create: timeout of 30000ms exceeded")],
+    // listingId undefined: the patch and the code went to /listing/undefined.
+    ["no id in the create response", () => new Error("Gameflip created undefined but could not put it on sale (draft discarded): x")],
+  ];
+  for (const [name, make] of cases) {
+    const env = setup({ mp: fakeMp({ gameflipPublish: throwing(make) }) });
+    const err = await thrown(markets.publishAccounts(gfPackArgs(env)));
+    assert.strictEqual(err.outcome, "not_created", name);
+    assert.strictEqual(err.externalId, "", name);
+    assert.notStrictEqual(err.code, "BULK_PACK_REFUSED", name);
+    assert.strictEqual(env.mp.gameflipDelist.calls.length, 0, name + ": nothing to take down");
+  }
+});
+
+test("S5 gameflip: a listing that exists after the throw is taken down (gameflipDelist) — done -> not_created", async () => {
+  for (const [make, id] of [[gfOnsaleError, "L9"], [gfCodeError, "D7"]]) {
+    const env = setup({ mp: fakeMp({ gameflipPublish: throwing(make) }) });
+    const err = await thrown(markets.publishAccounts(gfPackArgs(env)));
+    assert.deepStrictEqual(env.mp.gameflipDelist.calls, [[id]], "the real draft-then-delete delist");
+    assert.strictEqual(err.outcome, "not_created", id);
+    assert.strictEqual(err.externalId, id);
+    assert.deepStrictEqual(err.cleanup, { tried: true, ok: true, error: "" });
+    assert.match(err.message, /discarded.*taken down again/);
+  }
+});
+
+test("S5 gameflip: the take-down answers 404 (Gameflip's own discard took) -> not_created", async () => {
+  const env = setup({
+    mp: fakeMp({
+      gameflipPublish: throwing(gfOnsaleError),
+      gameflipDelist: throwing(() =>
+        gfError("Gameflip delist", 404, { status: "FAILURE", error: { code: 404, message: "Not found" } }),
+      ),
+    }),
+  });
+  const err = await thrown(markets.publishAccounts(gfPackArgs(env)));
+  assert.deepStrictEqual(env.mp.gameflipDelist.calls, [["L9"]]);
+  assert.strictEqual(err.outcome, "not_created");
+  assert.strictEqual(err.externalId, "L9");
+  assert.match(err.message, /no longer exists on Gameflip \(404\)/);
+});
+
+test("S5 gameflip: the take-down fails -> may_be_live + the listing id (the pack may be on sale)", async () => {
+  const failures = [
+    ["rate limited", () => gfError("Gameflip delist", 429, GF_RATE), /may be ON SALE/],
+    ["timed out", () => new Error("Gameflip delist: timeout of 20000ms exceeded"), /may be ON SALE/],
+    ["already sold", () => gfError("Gameflip delist", 400, { message: "listing (sold)" }), /already SOLD/],
+  ];
+  for (const [make, id] of [[gfOnsaleError, "L9"], [gfCodeError, "D7"]]) {
+    for (const [name, fail, re] of failures) {
+      const env = setup({
+        mp: fakeMp({ gameflipPublish: throwing(make), gameflipDelist: throwing(fail) }),
+      });
+      const err = await quietly(() => thrown(markets.publishAccounts(gfPackArgs(env))));
+      assert.deepStrictEqual(env.mp.gameflipDelist.calls, [[id]], name);
+      assert.strictEqual(err.outcome, "may_be_live", id + " / " + name);
+      assert.strictEqual(err.externalId, id, name);
+      assert.strictEqual(err.cleanup.ok, false, name);
+      assert.match(err.message, re, name);
+      assert.notStrictEqual(err.code, "BULK_PACK_REFUSED");
+    }
+  }
+});
+
+test("S5 gameflip: an unrecognised publish error is may_be_live with no id, and nothing is called", async () => {
+  const env = setup({ mp: fakeMp({ gameflipPublish: throwing(() => new Error("something new broke")) }) });
+  const err = await thrown(markets.publishAccounts(gfPackArgs(env)));
+  assert.strictEqual(err.outcome, "may_be_live");
+  assert.strictEqual(err.externalId, "");
+  assert.strictEqual(env.mp.gameflipDelist.calls.length, 0);
+});
+
+test("S5 gameflip: an accepted publish with no listing id is may_be_live", async () => {
+  const env = setup({ mp: fakeMp({ gameflipPublish: spy(async () => ({ url: "" })) }) });
+  const err = await quietly(() => thrown(markets.publishAccounts(gfPackArgs(env))));
+  assert.strictEqual(err.outcome, "may_be_live");
+  assert.strictEqual(err.externalId, "");
+  assert.match(err.message, /no offer id/);
+});
+
+const g2gAccountArgs = () => accountArgs({ market: "g2g", units: units(6) });
+const G2G_FARM_TITLE = "Rust Twitch Drops Automatic Farming 180 Days — Bulk 5+";
+const g2gFarmArgs = () => farmArgs({ market: "g2g", days: 180, title: G2G_FARM_TITLE });
+
+test("S5 g2g: everything before the create, and the create itself (an empty shell), is not_created", async () => {
+  const cases = [
+    () => new Error("g2g is not configured — set its API keys first"),
+    () => new Error("G2G brand_id is required (the game)"),
+    () => new Error("G2G needs a price above 0"),
+    () => new Error("G2G's minimum price is 1.00"),
+    () => g2gError("G2G list offers", 503, "Service Unavailable"),
+    () => g2gError("G2G relation", undefined, "timeout of 30000ms exceeded"),
+    () => g2gError("G2G collections", 500, "boom"),
+    () => new Error("G2G: no product (relation_id) for brand brand-rust under Game Items — this game cannot be listed there"),
+    () => new Error("G2G needs Platform for this game and we have no offer of our own to copy it from."),
+    () => g2gError("G2G product settings", 502, "Bad Gateway"),
+    () => new Error("G2G: no delivery method available for this game — cannot publish"),
+    () => new Error("G2G refresh: no session stored — paste a G2G session once"),
+    () => g2gError("G2G refresh", 400, "invalid refresh token"),
+    () => g2gError("G2G create offer", 500, "Internal Server Error"),
+    () => g2gError("G2G create offer", undefined, "timeout of 30000ms exceeded"),
+    () => new Error("G2G create: no offer id in response: {}"),
+  ];
+  for (const make of cases) {
+    for (const [path_, args] of [["accounts", g2gAccountArgs], ["farm", g2gFarmArgs]]) {
+      const env = setup({ mp: fakeMp({ g2gPublish: throwing(make) }) });
+      const err = await thrown(
+        path_ === "farm" ? markets.publishFarm(args()) : markets.publishAccounts(args()),
+      );
+      assert.strictEqual(err.outcome, "not_created", path_ + ": " + err.message);
+      assert.strictEqual(err.externalId, "");
+      assert.strictEqual(env.mp.g2gDelist.calls.length, 0, err.message);
+    }
+  }
+});
+
+test("S5 g2g: the PUT that fills the shell — an answered rejection is not_created, a write that may have landed is may_be_live", async () => {
+  const cases = [
+    [() => g2gError("G2G publish offer", 400, "Missing mandatory parameter: currency"), "not_created"],
+    [() => g2gError("G2G publish offer", 401, "unauthorised"), "not_created"],
+    [() => g2gError("G2G publish offer", 429, "Too many requests"), "not_created"],
+    // 200 with an in-band error code (marketplaces.js:2786-2794): no status, answered.
+    [() => new Error("G2G publish offer failed: Invalid unit price"), "not_created"],
+    [() => g2gError("G2G publish offer", 502, "Bad Gateway"), "may_be_live"],
+    [() => g2gError("G2G publish offer", undefined, "timeout of 30000ms exceeded"), "may_be_live"],
+    [() => g2gError("G2G publish offer", undefined, "socket hang up"), "may_be_live"],
+    [() => g2gError("G2G publish offer", undefined, "read ECONNRESET"), "may_be_live"],
+  ];
+  for (const [make, want] of cases) {
+    const env = setup({ mp: fakeMp({ g2gPublish: throwing(make) }) });
+    const err = await thrown(markets.publishAccounts(g2gAccountArgs()));
+    assert.strictEqual(err.outcome, want, err.message);
+    assert.strictEqual(err.externalId, "", "the PUT's message does not carry the id");
+    assert.strictEqual(env.mp.g2gDelist.calls.length, 0);
+  }
+});
+
+test("S5 g2g: an offer that did not read back is delisted (g2gDelist) — done -> not_created, failed -> may_be_live + id", async () => {
+  // The reviewers' repro: review-ssm/g2gReadbackOrphan.test.js.
+  const readBack = () => new Error("G2G publish: offer G2G-777 did not read back as a live offer");
+  for (const [path_, run] of [
+    ["accounts", () => markets.publishAccounts(g2gAccountArgs())],
+    ["farm", () => markets.publishFarm(g2gFarmArgs())],
+  ]) {
+    let env = setup({ mp: fakeMp({ g2gPublish: throwing(readBack) }) });
+    let err = await thrown(run());
+    assert.deepStrictEqual(env.mp.g2gDelist.calls, [["G2G-777"]], path_);
+    assert.strictEqual(err.outcome, "not_created", path_);
+    assert.strictEqual(err.externalId, "G2G-777");
+    assert.deepStrictEqual(err.cleanup, { tried: true, ok: true, error: "" });
+    assert.match(err.message, /did not read back.*was delisted/);
+
+    env = setup({
+      mp: fakeMp({
+        g2gPublish: throwing(readBack),
+        g2gDelist: throwing(() => g2gError("G2G update offer", 429, "Too many requests")),
+      }),
+    });
+    err = await quietly(() => thrown(run()));
+    assert.deepStrictEqual(env.mp.g2gDelist.calls, [["G2G-777"]]);
+    assert.strictEqual(err.outcome, "may_be_live", path_);
+    assert.strictEqual(err.externalId, "G2G-777");
+    assert.strictEqual(err.cleanup.ok, false);
+    assert.match(err.message, /may be LIVE/);
+  }
+});
+
+test("S5 g2g: an unrecognised error is may_be_live with no id", async () => {
+  const env = setup({ mp: fakeMp({ g2gPublish: throwing(() => new Error("G2G said something new")) }) });
+  const err = await thrown(markets.publishAccounts(g2gAccountArgs()));
+  assert.strictEqual(err.outcome, "may_be_live");
+  assert.strictEqual(err.externalId, "");
+  assert.strictEqual(env.mp.g2gDelist.calls.length, 0);
+});
+
+test("S5 eldorado: the create POST — 4xx (incl. 429) is not_created; 5xx, no status or a timeout is may_be_live (no id)", async () => {
+  const cases = [
+    [() => eldError("Eldorado publish", 400, "Offer main image is missing."), "not_created"],
+    [() => eldError("Eldorado publish", 401, "session not accepted"), "not_created"],
+    [() => eldError("Eldorado publish", 429), "not_created"],
+    [() => new Error("Eldorado publish failed (HTTP 429)"), "not_created"], // status only in the text
+    [() => eldError("Eldorado publish", 500, "Internal Server Error"), "may_be_live"],
+    [() => eldError("Eldorado publish", 503), "may_be_live"],
+    [() => eldError("Eldorado publish", undefined, "timeout of 45000ms exceeded"), "may_be_live"],
+    // The offer was created; saving the renewed cookie after it failed.
+    [() => eldError("Eldorado publish", undefined, "EACCES: permission denied, open 'settings.json'"), "may_be_live"],
+  ];
+  for (const [make, want] of cases) {
+    for (const [path_, run] of [
+      ["accounts", () => markets.publishAccounts(accountArgs())],
+      ["farm", () => markets.publishFarm(farmArgs())],
+    ]) {
+      setup({ mp: fakeMp({ eldoradoPublish: throwing(make) }) });
+      const err = await thrown(run());
+      assert.strictEqual(err.outcome, want, path_ + ": " + err.message);
+      assert.strictEqual(err.externalId, "", "Eldorado's errors carry no offer id");
+    }
+  }
+});
+
+test("S5 eldorado: every step before the create POST is not_created, whatever its status", async () => {
+  const LIB = "https://www.eldorado.gg/api/library/235/CustomItem?locale=en-US";
+  const cases = [
+    () => new Error("eldorado is not configured — set its API keys first"),
+    () => new Error("Eldorado: a title is required"),
+    () => new Error("Eldorado: a cover image is required (the API rejects offers without one)"),
+    () => new Error("Eldorado: could not resolve a Twitch Drops game slot"),
+    () => eldError("Eldorado image upload", 503, "Service Unavailable"),
+    () => eldError("Eldorado image upload", undefined, "timeout of 90000ms exceeded"),
+    () => new Error("Eldorado image upload returned no paths"),
+    () => new Error("Eldorado: invalid price"),
+    () => eldError("Eldorado session refresh", 401, "session not accepted"),
+    // The trade-environment library READ: a raw AxiosError, not wrapped by eldError.
+    () => Object.assign(new Error("timeout of 45000ms exceeded"), { isAxiosError: true, code: "ECONNABORTED", config: { url: LIB } }),
+    () => Object.assign(new Error("Request failed with status code 502"), { isAxiosError: true, status: 502, config: { url: LIB } }),
+  ];
+  for (const make of cases) {
+    setup({ mp: fakeMp({ eldoradoPublish: throwing(make) }) });
+    const err = await thrown(markets.publishAccounts(accountArgs()));
+    assert.strictEqual(err.outcome, "not_created", err.message);
+  }
+});
+
+test("S5 eldorado: an unrecognised error follows the status rule; an id-less success is may_be_live", async () => {
+  setup({ mp: fakeMp({ eldoradoPublish: throwing(() => Object.assign(new Error("odd"), { status: 403 })) }) });
+  assert.strictEqual((await thrown(markets.publishAccounts(accountArgs()))).outcome, "not_created");
+  setup({ mp: fakeMp({ eldoradoPublish: throwing(() => new Error("odd")) }) });
+  assert.strictEqual((await thrown(markets.publishAccounts(accountArgs()))).outcome, "may_be_live");
+  setup({ mp: fakeMp({ eldoradoPublish: spy(async () => ({ url: "" })) }) });
+  const err = await quietly(() => thrown(markets.publishFarm(farmArgs())));
+  assert.strictEqual(err.outcome, "may_be_live");
+  assert.strictEqual(err.externalId, "");
+});
+
+// The no-claim layer answers {success:false, message} — the connector's
+// status is gone, so the MESSAGE is what gets judged.
+function noclaimLayer(answer) {
+  return {
+    noclaimListings: {
+      publishNoclaim: spy(async () => (typeof answer === "string" ? { success: false, message: answer } : answer)),
+    },
+  };
+}
+
+const NC_G2G_SET = { ...NC_SET, coverGame: "Rust", items: [{ name: "Hoodie", game: "Rust" }] };
+const ncG2gArgs = () =>
+  noclaimArgs({ market: "g2g", set: NC_G2G_SET, game: "Rust", title: ACC_TITLE, unitPrice: 1.5, quantity: 12, minQty: 10 });
+
+test("S5 no-claim: the layer's own refusals are not_created; its orphan is may_be_live + the offer id", async () => {
+  for (const message of [
+    "No-claim listings are switched off",
+    "No-claim auto-delivery is switched off",
+    "Zeusx is not supported for no-claim listings yet — use Gameflip, GGSel, Plati, Eldorado, PlayerAuctions or G2G",
+    "Not a no-claim listing — it has no no-claim stock to deliver",
+    "Out of stock — no free no-claim account holds this whole bundle right now",
+    "Could not count the no-claim stock right now: snapshot unreadable",
+    "All 7 free account(s) for this bundle are already advertised by your other no-claim listings — delist one first, or wait for more stock",
+  ]) {
+    setup({ deps: noclaimLayer(message) });
+    const err = await thrown(markets.publishNoclaim(noclaimArgs()));
+    assert.strictEqual(err.outcome, "not_created", message);
+    assert.strictEqual(err.message, message, "the layer's words reach the owner unchanged");
+  }
+  setup({ deps: noclaimLayer("published on Eldorado but the row could not be saved — delist it by hand: E77") });
+  let err = await thrown(markets.publishNoclaim(noclaimArgs()));
+  assert.strictEqual(err.outcome, "may_be_live");
+  assert.strictEqual(err.externalId, "E77");
+  setup({
+    deps: noclaimLayer(
+      "published on G2G but the row could not be saved — delist it by hand: (the platform returned no id)",
+    ),
+  });
+  err = await thrown(markets.publishNoclaim(ncG2gArgs()));
+  assert.strictEqual(err.outcome, "may_be_live");
+  assert.strictEqual(err.externalId, "", "orphanedPublish's no-id placeholder is not an id");
+});
+
+test("S5 no-claim: a market error the layer passes on is judged by its market's rules, from its text", async () => {
+  const eldorado = [
+    ["Eldorado publish failed (HTTP 400): Offer main image is missing.", "not_created"],
+    ["Eldorado publish failed (HTTP 429)", "not_created"],
+    ["Eldorado publish failed (HTTP 503): Service Unavailable", "may_be_live"],
+    ["Eldorado publish failed: timeout of 45000ms exceeded", "may_be_live"],
+    ["Eldorado image upload failed (HTTP 500): boom", "not_created"],
+    ["Eldorado: could not resolve a Twitch Drops game slot", "not_created"],
+    ["Cannot read properties of undefined (reading 'externalId')", "may_be_live"],
+  ];
+  for (const [message, want] of eldorado) {
+    setup({ deps: noclaimLayer(message) });
+    assert.strictEqual((await thrown(markets.publishNoclaim(noclaimArgs()))).outcome, want, message);
+  }
+  const g2g = [
+    ["G2G create offer failed (HTTP 500): boom", "not_created"],
+    ["G2G publish offer failed (HTTP 400): Missing mandatory parameter: currency", "not_created"],
+    ["G2G publish offer failed: timeout of 30000ms exceeded", "may_be_live"],
+    ["G2G publish offer failed (HTTP 504): Gateway Timeout", "may_be_live"],
+    ["G2G product settings failed (HTTP 500): boom", "not_created"],
+  ];
+  for (const [message, want] of g2g) {
+    const env = setup({ deps: noclaimLayer(message) });
+    assert.strictEqual((await thrown(markets.publishNoclaim(ncG2gArgs()))).outcome, want, message);
+    assert.strictEqual(env.mp.g2gDelist.calls.length, 0);
+  }
+  // A read-back failure through the layer is taken down exactly like a direct one.
+  let env = setup({ deps: noclaimLayer("G2G publish: offer G5 did not read back as a live offer") });
+  let err = await thrown(markets.publishNoclaim(ncG2gArgs()));
+  assert.deepStrictEqual(env.mp.g2gDelist.calls, [["G5"]]);
+  assert.strictEqual(err.outcome, "not_created");
+  assert.strictEqual(err.externalId, "G5");
+  env = setup({
+    mp: fakeMp({ g2gDelist: throwing(() => g2gError("G2G update offer", undefined, "socket hang up")) }),
+    deps: noclaimLayer("G2G publish: offer G5 did not read back as a live offer"),
+  });
+  err = await quietly(() => thrown(markets.publishNoclaim(ncG2gArgs())));
+  assert.strictEqual(err.outcome, "may_be_live");
+  assert.strictEqual(err.externalId, "G5");
+  // The layer throwing instead of answering is judged the same way.
+  setup({
+    deps: {
+      noclaimListings: {
+        publishNoclaim: throwing(() => new Error("Eldorado publish failed (HTTP 502): Bad Gateway")),
+      },
+    },
+  });
+  assert.strictEqual((await thrown(markets.publishNoclaim(noclaimArgs()))).outcome, "may_be_live");
+});
+
+test("S5 no-claim: a success missing either id is may_be_live, naming what is known", async () => {
+  // "undefined" is what the layer writes when Eldorado answered without an id.
+  setup({ deps: noclaimLayer({ success: true, id: "row-1", externalId: "undefined", url: "" }) });
+  let err = await quietly(() => thrown(markets.publishNoclaim(noclaimArgs())));
+  assert.strictEqual(err.outcome, "may_be_live");
+  assert.strictEqual(err.externalId, "");
+  assert.strictEqual(err.rowId, "row-1");
+  setup({ deps: noclaimLayer({ success: true, id: "", externalId: "nc-9" }) });
+  err = await quietly(() => thrown(markets.publishNoclaim(noclaimArgs())));
+  assert.strictEqual(err.outcome, "may_be_live");
+  assert.strictEqual(err.externalId, "nc-9");
+});
+
+test("S5: the connector texts the verdicts key on are still the ones the connectors throw", () => {
+  const read = (f) => fs.readFileSync(path.join(__dirname, "..", "utils", f), "utf8");
+  const pins = {
+    "marketplaces.js": [
+      'marketplace + " is not configured — set its API keys first"',
+      '"Gameflip minimum price is $0.75"',
+      'apiError("Gameflip create", e)',
+      '"Gameflip could not attach the delivery content (draft " +',
+      '"Gameflip created " +',
+      '" but could not put it on sale (draft discarded)"',
+      'apiError("Gameflip delist", e)',
+      'what: "G2G create offer"',
+      '"G2G create: no offer id in response: "',
+      'what: "G2G publish offer"',
+      '"G2G publish: offer " + offerId + " did not read back as a live offer"',
+      '"G2G: no delivery method available for this game — cannot publish"',
+      'eldError("Eldorado publish", e)',
+      'eldError("Eldorado image upload", e)',
+      'eldError("Eldorado session refresh", e)',
+      '"Eldorado: could not resolve a Twitch Drops game slot"',
+      '" failed" + (status ? " (HTTP " + status + ")" : "")',
+    ],
+    "noclaimListings.js": [
+      '" but the row could not be saved — delist it by hand: "',
+      '"(the platform returned no id)"',
+      '"Out of stock — no free no-claim account holds this whole bundle right now"',
+      '"Could not count the no-claim stock right now: "',
+      '" free account(s) for this bundle are already advertised by your other "',
+    ],
+    // The 404 the Gameflip take-down treats as "no such listing" is the one the
+    // fulfiller already retires rows and releases accounts on.
+    "gameflipFulfiller.js": ["if (e && e.status === 404) {"],
+  };
+  for (const [file, needles] of Object.entries(pins)) {
+    const src = read(file);
+    for (const n of needles) assert.ok(src.includes(n), "utils/" + file + " no longer contains " + n);
+  }
+});
+
+/* ------------------------------ 10. Tripwires ---------------------------- */
 
 test("the test's parser copy is the real farm-title parser, byte for byte", () => {
   const src = fs.readFileSync(path.join(__dirname, "..", "utils", "eldoradoFarmService.js"), "utf8");

@@ -28,14 +28,23 @@
 // the row (a lost unit is pushed back, a unit that came back is pulled again),
 // never the other way round.
 //
-// WHY A RETIRED UNIT WAITS TWO MINUTES (I10)
+// WHY A RETIRED UNIT WAITS FIFTEEN MINUTES (I10, FIXES-1 L2)
 // A unit we pull may be exactly the one a fulfiller is delivering from its
 // in-memory copy; its save then puts the unit back carrying deliveredAt /
 // orderId. So release is two-phase: phase 1 takes the unit off the row and
 // marks it "retiring"; phase 2, on a later pass at least RETIRE_GRACE_MS after
 // the last change, re-reads the row — back and FREE: pull again and restart the
 // clock; back and not FREE: it SOLD ("delivered", never released); still absent:
-// release the reservation (I1) and mark it "released".
+// release the reservation (I1) and mark it "released". Two minutes proved too
+// short (review repro F-D: a slow chat send outlived it), and a closed offer is
+// still watched for WATCH_WINDOW_MS afterwards: a released account that comes
+// back SOLD is recorded, re-reserved and always reported.
+//
+// ONE WRITER AT A TIME (FIXES-1 L3)
+// Every pass over an offer, and the owner's take-out, runs inside
+// lock.withOfferLock and re-reads the offer there; send.js does the same. The
+// few decisions that would undo an owner action (the clobber heal, a release)
+// re-read their entry once more right before they write.
 //
 // Nothing FREE (I2: no deliveredAt, messagedAt or orderId) is ever assumed sold,
 // and nothing that is not FREE is ever released or pulled.
@@ -45,8 +54,12 @@ const { OPEN_STATES } = require("./config");
 const ACTOR = "bulkPacks";
 const FIRST_DELAY_MS = 120 * 1000;
 // Phase 2 of I10: how long a retired unit must stay off the row before its
-// reservation is handed back.
-const RETIRE_GRACE_MS = 2 * 60 * 1000;
+// reservation is handed back (FIXES-1 L2).
+const RETIRE_GRACE_MS = 15 * 60 * 1000;
+// A closed dropset offer is still visited this long after it closed (and after
+// its latest release), so an account delivered after we released it is caught
+// (FIXES-1 L2).
+const WATCH_WINDOW_MS = 24 * 60 * 60 * 1000;
 const READ_OFFER_EVERY_MS = 30 * 60 * 1000;
 // A send that has not finished in this long has died (the server restarted
 // mid-send). Its reservations are left alone — the market may hold a live offer
@@ -55,11 +68,16 @@ const STUCK_SENDING_MS = 15 * 60 * 1000;
 const OFFER_LIMIT = 500;
 const FARM_ORDER_LIMIT = 500;
 
-// lastError prefixes. A "Loop:" error clears itself on the next clean pass; a
-// "Needs attention (key):" flag is raised once (one Telegram) and cleared only
-// by the check that raised it, so a standing problem never re-pages every pass.
+// Two separate fields (FIXES-1 L8). `lastError` carries a "Loop:" error, which
+// clears itself on the next clean pass (and never overwrites another writer's
+// message). `attention` carries a "Needs attention (key):" flag, raised once
+// (one Telegram) and cleared only by the check that raised it, so a standing
+// problem never re-pages every pass — and a loop error in between can no
+// longer wipe it or make it page again.
 const LOOP_ERROR_PREFIX = "Loop: ";
 const FLAG_RE = /^Needs attention \(([a-z]+)\): /;
+// Why an entry the owner took out is leaving the pack (FIXES-1 L1).
+const TAKEN_OUT = "taken out by the owner";
 
 const MARKET_LABELS = {
   eldorado: "Eldorado",
@@ -141,6 +159,15 @@ const deps = {
   },
   get proposals() {
     return over.proposals || require("./proposals");
+  },
+  get lock() {
+    return over.lock || require("./lock");
+  },
+  get dropReservation() {
+    return over.dropReservation || require("../dropReservation");
+  },
+  get suppliedStock() {
+    return over.suppliedStock || require("../suppliedStock");
   },
 };
 function __setDeps(partial) {
@@ -379,14 +406,16 @@ async function stillIn(offer, states, extra = {}) {
   return !!hit;
 }
 
+// FIXES-1 L8: a flag lives in `attention` and is deduped on it, so a loop
+// error written to `lastError` in between neither wipes it nor re-pages it.
 async function raiseFlag(offer, key, text, { telegram = true } = {}) {
   const msg = ("Needs attention (" + key + "): " + text).slice(0, 500);
-  if (str(offer.lastError) === msg) return false;
+  if (str(offer.attention) === msg) return false;
   await deps.BulkOffer.updateOne(
     { _id: offer._id },
-    { $set: { lastError: msg } },
+    { $set: { attention: msg } },
   );
-  offer.lastError = msg;
+  offer.attention = msg;
   audit(offer, "attention_" + key, "warn", text);
   if (telegram)
     notify("Bulk packs — needs attention: " + describe(offer) + "\n\n" + text);
@@ -394,31 +423,63 @@ async function raiseFlag(offer, key, text, { telegram = true } = {}) {
 }
 
 async function clearFlag(offer, key) {
-  const m = FLAG_RE.exec(str(offer.lastError));
+  const m = FLAG_RE.exec(str(offer.attention));
   if (!m || m[1] !== key) return;
   await deps.BulkOffer.updateOne(
-    { _id: offer._id, lastError: offer.lastError },
-    { $set: { lastError: "" } },
+    { _id: offer._id, attention: offer.attention },
+    { $set: { attention: "" } },
   );
-  offer.lastError = "";
+  offer.attention = "";
 }
 
+// `lastError` only (L8). Never over another writer's message: send.js leaves
+// the reason an offer closed there (e.g. "publish outcome unknown — may be
+// live …"), and a loop error must not hide it; the heartbeat, the audit log and
+// status().lastError still carry the loop's error.
+// offerId -> the loop error last logged for it, so a standing error on an
+// offer whose lastError belongs to another writer is not re-logged every pass.
+const noted = new Map();
 async function noteLoopError(offer, text) {
   const msg = (LOOP_ERROR_PREFIX + text).slice(0, 500);
+  const id = String(offer._id);
   // Logged and audited when it CHANGES; a standing error shows in the
   // heartbeat's error count and in status().lastError instead.
-  if (str(offer.lastError) === msg) return;
-  console.error("bulkPacks: offer " + String(offer._id) + ": " + text);
+  if (str(offer.lastError) === msg || noted.get(id) === msg) return;
+  noted.set(id, msg);
+  console.error("bulkPacks: offer " + id + ": " + text);
   try {
-    await deps.BulkOffer.updateOne(
-      { _id: offer._id },
+    const r = await deps.BulkOffer.updateOne(
+      {
+        _id: offer._id,
+        $or: [
+          { lastError: { $in: ["", null] } },
+          { lastError: { $regex: /^Loop: / } },
+        ],
+      },
       { $set: { lastError: msg } },
     );
-    offer.lastError = msg;
+    if (r && r.modifiedCount) offer.lastError = msg;
   } catch {
     /* the heartbeat still counts it */
   }
   audit(offer, "loop_error", "warn", text);
+}
+
+// One reserved entry as it is in the database NOW (FIXES-1 L3): the pass's own
+// copy was read when the pass took the lock, and a decision that would undo an
+// owner action must not rest on it. `null` when no entry of this account is in
+// that state any more.
+async function freshEntry(offer, accountId, state) {
+  const doc = await deps.BulkOffer.findOne(
+    {
+      _id: offer._id,
+      reserved: { $elemMatch: { accountId: str(accountId), state } },
+    },
+    { "reserved.$": 1 },
+  ).lean();
+  return doc && Array.isArray(doc.reserved) && doc.reserved[0]
+    ? doc.reserved[0]
+    : null;
 }
 
 // Counters only ever grow ($max): a unit lost from the row by a concurrent save
@@ -715,9 +776,14 @@ async function retireUnits(offer, row, accountIds, reason, { now } = {}) {
 async function releaseEntry(offer, e, why, at, opts, out) {
   const id = str(e.accountId);
   const from = e.state;
+  // FIXES-1 L3: keepReserved is read from the database here, never taken from
+  // the pass's copy — an owner take-out may have set it since.
+  const now = await freshEntry(offer, id, from);
+  if (!now) return false; // it moved on under us: the next pass reads it
+  if (now.keepReserved === true) e.keepReserved = true;
   // The owner spent this account elsewhere (hand sale, renter): it has left
   // the pack, but its reservation is kept — never handed back (keepReserved).
-  if (e.keepReserved) {
+  const keep = async () => {
     const kept = await setEntry(offer, e, from, {
       state: "released",
       changedAt: at,
@@ -728,11 +794,15 @@ async function releaseEntry(offer, e, why, at, opts, out) {
         offer,
         "release_kept",
         "info",
-        (e.login || id) + " left the pack; its reservation is kept (" + why + ")",
+        (e.login || id) +
+          " left the pack; its reservation is kept (" +
+          why +
+          ")",
       );
     }
     return kept;
-  }
+  };
+  if (e.keepReserved) return keep();
   // Only possible if the reservation was already handed back and re-taken by
   // another bulk offer — releasing now would free THAT offer's account.
   const held = await deps.BulkOffer.exists({
@@ -770,14 +840,28 @@ async function releaseEntry(offer, e, why, at, opts, out) {
     return false;
   }
   const pending = "releasing: " + why;
+  // Conditional on keepReserved still being unset, so a take-out that lands
+  // between the read above and this write can never be released over.
+  const marked = {
+    state: "released",
+    changedAt: at,
+    reason: pending,
+  };
   if (
-    !(await setEntry(offer, e, from, {
-      state: "released",
-      changedAt: at,
-      reason: pending,
-    }))
-  )
+    !(await setEntryWhere(
+      offer,
+      { accountId: id, state: from, keepReserved: { $ne: true } },
+      marked,
+    ))
+  ) {
+    const again = await freshEntry(offer, id, from);
+    if (again && again.keepReserved === true) {
+      e.keepReserved = true;
+      return keep();
+    }
     return false;
+  }
+  Object.assign(e, marked);
   let res;
   try {
     res = await deps.stock.releaseUnits({
@@ -814,7 +898,10 @@ async function releaseEntry(offer, e, why, at, opts, out) {
     const back = {
       state: "retiring",
       changedAt: at,
-      reason: ("release will retry (" + errText(why2) + "): " + why).slice(0, 300),
+      reason: ("release will retry (" + errText(why2) + "): " + why).slice(
+        0,
+        300,
+      ),
     };
     await setEntryWhere(
       offer,
@@ -822,7 +909,9 @@ async function releaseEntry(offer, e, why, at, opts, out) {
       back,
     );
     Object.assign(e, back);
-    out.errors.push("release of " + (e.login || id) + " will retry: " + errText(why2));
+    out.errors.push(
+      "release of " + (e.login || id) + " will retry: " + errText(why2),
+    );
     return false;
   }
   const skipped = ((res && res.skipped) || []).find(
@@ -874,6 +963,12 @@ async function writeNotes(offer, notes, at) {
       "had a FREE copy of a SOLD unit — copy pulled",
       "warn",
     ],
+    [
+      "units_zombie",
+      notes.zombies || [],
+      "were back on the row after their release — copy pulled",
+      "warn",
+    ],
   ].filter(([, list]) => list.length);
   if (!lines.length) return;
   const text = (list, verb) =>
@@ -903,16 +998,113 @@ async function writeNotes(offer, notes, at) {
   }
 }
 
-// Reconcile reserved[] (the authority) with the row, per MODULES §loop:
+// A sale of an account the owner had taken out of the pack (keepReserved): it
+// did not leave in time, so the buyer got an account the owner also spent
+// elsewhere. Always reported.
+async function ownerTakenDelivered(offer, e, orderId, at) {
+  const name = str(e.login) || str(e.accountId);
+  const text =
+    name +
+    " was " +
+    TAKEN_OUT +
+    " but a pack buyer received it (order " +
+    (str(orderId) || "no order id") +
+    ") — check it is not sold twice";
+  await deps.BulkOffer.updateOne(
+    { _id: offer._id },
+    { $push: { history: hist("owner_taken_delivered", text, at) } },
+  );
+  audit(offer, "owner_taken_delivered", "error", text, {
+    meta: { accountId: str(e.accountId), login: str(e.login), orderId },
+  });
+  notify("Bulk packs — " + text + "\n" + describe(offer));
+}
+
+// FIXES-1 L2: an account we RELEASED shows up SOLD on our row — a fulfiller
+// delivered it from a copy of the row it read before the unit was pulled. It
+// is recorded delivered, re-reserved for the set so nobody else sells it, and
+// ALWAYS reported: it may already have been sold a second time.
+async function deliveredAfterRelease(offer, e, orderId, at, opts, out) {
+  const id = str(e.accountId);
+  const name = str(e.login) || id;
+  let result;
+  let rereserved = false;
+  if (e.keepReserved) {
+    result = "its reservation was never handed back (the owner took it out)";
+  } else {
+    const set = await setFor(offer, opts);
+    if (!set) {
+      result = "NOT re-reserved: its DropSet is missing";
+    } else {
+      try {
+        rereserved = !!(await deps.dropReservation.reserveSetOnAccount(
+          id,
+          set,
+          { soldToUsername: offer.market, soldSetId: String(set._id) },
+        ));
+        result = rereserved
+          ? "re-reserved for this set"
+          : "NOT re-reserved: its drops are no longer free (reserved or redeemed elsewhere)";
+      } catch (err) {
+        result = "NOT re-reserved: " + errText(err);
+        out.errors.push("re-reserve of " + name + " failed: " + errText(err));
+      }
+    }
+  }
+  const order = str(orderId) || "no order id";
+  const moved = await setEntry(offer, e, "released", {
+    state: "delivered",
+    orderId: str(orderId),
+    changedAt: at,
+    reason: ("delivered after release (order " + order + "); " + result).slice(
+      0,
+      300,
+    ),
+  });
+  const text =
+    "released account " +
+    name +
+    " was delivered after release — check it is not sold twice (order " +
+    order +
+    "; " +
+    result +
+    ")";
+  await deps.BulkOffer.updateOne(
+    { _id: offer._id },
+    { $push: { history: hist("delivered_after_release", text, at) } },
+  );
+  audit(offer, "delivered_after_release", "error", text, {
+    meta: { accountId: id, login: str(e.login), orderId, rereserved },
+  });
+  notify("Bulk packs — " + text + "\n" + describe(offer));
+  return moved;
+}
+
+// Reconcile reserved[] (the authority) with the row, per MODULES §loop and
+// FIXES-1 L1–L3:
 //   on_offer  on the row, not FREE           -> delivered
 //             on the row, FREE               -> on sale, nothing to do
 //             absent, row active, offer open -> put back (only while the
-//                                               reservation is still ours)
+//                                               reservation is still ours and
+//                                               the owner has not taken it out:
+//                                               read fresh, L3)
 //             absent otherwise               -> retiring
 //   retiring  on the row, not FREE           -> delivered (it sold)
 //             on the row, FREE               -> pulled again, clock restarts
 //             absent >= RETIRE_GRACE_MS      -> released (I1)
-//   no row at all -> nothing can sell these units: released now (I1)
+//   released  on the row, not FREE           -> delivered AFTER release:
+//                                               re-reserved, always reported (L2)
+//             on the row, FREE               -> pulled again (a zombie), never
+//                                               released a second time
+//             (only an account's LATEST entry: an older released entry of an
+//             account the offer took back since is history)
+//   no row at all -> OPEN offer: nothing can sell these units, released now
+//             (I1). CLOSED offer: never a direct release — retiring entries
+//             wait out RETIRE_GRACE_MS as usual.
+//   CLOSED offer: an on_offer entry is HELD (a publish whose outcome is
+//             unknown may be live, FIXES-1 S2/S5 + addendum). The loop only
+//             records its sale; it is never retired, released, pulled or put
+//             back — the owner's release-held marks it retiring.
 // A sold Gameflip pack counts every unit delivered: the code on the listing
 // held them all. Returns {delivered, released, readded, repulled}; `errors`
 // and `rowChanged` ride along non-enumerably.
@@ -925,13 +1117,20 @@ async function reconcileUnits(offer, row, now = new Date(), opts = {}) {
     enumerable: false,
     writable: true,
   });
-  const live = ((offer && offer.reserved) || []).filter(
-    (e) =>
-      e &&
-      str(e.accountId) &&
-      (e.state === "on_offer" || e.state === "retiring"),
+  const all = ((offer && offer.reserved) || []).filter(
+    (e) => e && str(e.accountId),
   );
-  if (!live.length) return out;
+  const live = all.filter(
+    (e) => e.state === "on_offer" || e.state === "retiring",
+  );
+  const latest = new Map();
+  for (const e of all) latest.set(str(e.accountId), e);
+  const watched = row
+    ? all.filter(
+        (e) => e.state === "released" && latest.get(str(e.accountId)) === e,
+      )
+    : [];
+  if (!live.length && !watched.length) return out;
   const notes = {
     delivered: [],
     readded: [],
@@ -939,13 +1138,38 @@ async function reconcileUnits(offer, row, now = new Date(), opts = {}) {
     retired: [],
     released: [],
     duplicates: [],
+    zombies: [],
   };
   const who = (e) => str(e.login) || str(e.accountId);
 
-  if (!row) {
+  if (!row && offer.open) {
+    // An OPEN offer with no row: no fulfiller can deliver these units, so
+    // they go back at once (the caller takes the market offer down).
     for (const e of live) {
       if (
         await releaseEntry(offer, e, "the listing row is gone", at, opts, out)
+      ) {
+        out.released++;
+        notes.released.push(who(e));
+      }
+    }
+    await writeNotes(offer, notes, at);
+    return out;
+  }
+  if (!row) {
+    // A CLOSED offer with no row: never a direct release (FIXES-1 addendum).
+    // Its on_offer entries are HELD; a retiring one follows the normal two
+    // phases — absent, so released once RETIRE_GRACE_MS has passed.
+    for (const e of live) {
+      if (e.state !== "retiring") continue;
+      const since = ms(e.changedAt);
+      if (since == null) {
+        await setEntry(offer, e, "retiring", { changedAt: at });
+        continue;
+      }
+      if (at.getTime() - since < RETIRE_GRACE_MS) continue;
+      if (
+        await releaseEntry(offer, e, str(e.reason) || "retired", at, opts, out)
       ) {
         out.released++;
         notes.released.push(who(e));
@@ -974,6 +1198,8 @@ async function reconcileUnits(offer, row, now = new Date(), opts = {}) {
       if (await setEntry(offer, e, e.state, patch)) {
         out.delivered++;
         notes.delivered.push(who(e));
+        if (e.keepReserved)
+          await ownerTakenDelivered(offer, e, patch.orderId, at);
       }
       // A FREE copy of an account that has already sold must never stay on sale.
       if (taken && freeCopies.length && (await pullFree(offer, row._id, id))) {
@@ -984,8 +1210,34 @@ async function reconcileUnits(offer, row, now = new Date(), opts = {}) {
     }
 
     if (e.state === "on_offer") {
+      // HELD (FIXES-1 addendum): an on_offer entry of a CLOSED offer is never
+      // retired, released, pulled or put back by the loop — its publish may
+      // be live with no way for us to know. Only a sale (above) is recorded;
+      // the owner's release-held marks it retiring.
+      if (!offer.open) continue;
       if (freeCopies.length) continue; // on sale, as it should be
       if (rowActive && offer.open) {
+        // L3: putting it back would undo an owner take-out that landed after
+        // this pass read the offer, so the entry is read again first.
+        const cur = await freshEntry(offer, id, "on_offer");
+        if (!cur) continue; // it moved on under us: the next pass reads it
+        if (cur.keepReserved === true) {
+          e.keepReserved = true;
+          // L1: the owner took it out and it is off the row already. A
+          // Gameflip member stays on_offer: its account is in the pack's code,
+          // so maintainGameflip takes the whole pack down instead.
+          if (offer.market === "gameflip") continue;
+          if (
+            await setEntry(offer, e, "on_offer", {
+              state: "retiring",
+              changedAt: at,
+              reason: TAKEN_OUT,
+            })
+          ) {
+            notes.retired.push(who(e));
+          }
+          continue;
+        }
         const set = await setFor(offer, opts);
         const ours = set
           ? await deps.stock.isStillOurs({
@@ -1053,6 +1305,40 @@ async function reconcileUnits(offer, row, now = new Date(), opts = {}) {
       notes.released.push(who(e));
     }
   }
+
+  // L2: the watch on accounts already handed back.
+  for (const e of watched) {
+    const id = str(e.accountId);
+    const copies = byId.get(id) || [];
+    // An order an earlier "delivered" entry of the same account already
+    // accounts for is not a delivery after this release.
+    const accounted = new Set(
+      all
+        .filter(
+          (x) => x !== e && x.state === "delivered" && str(x.accountId) === id,
+        )
+        .map((x) => str(x.orderId)),
+    );
+    const taken = copies.find(
+      (u) => !isFree(u) && !accounted.has(str(u.orderId)),
+    );
+    if (taken || packSold) {
+      const orderId = taken
+        ? str(taken.orderId)
+        : "gf:" + str(offer.externalId);
+      if (await deliveredAfterRelease(offer, e, orderId, at, opts, out)) {
+        out.delivered++;
+        notes.delivered.push(who(e));
+      }
+      continue;
+    }
+    // Back FREE: a stale whole-array save put a released account on sale
+    // again. Off the row, and never released a second time.
+    if (copies.some(isFree) && (await pullFree(offer, row._id, id))) {
+      out.rowChanged = true;
+      notes.zombies.push(who(e));
+    }
+  }
   await writeNotes(offer, notes, at);
   return out;
 }
@@ -1095,23 +1381,40 @@ function salesFromUnits(row, mode) {
 
 async function missingRow(offer, ctx, job) {
   const now = ctx.now;
-  if (
-    offer.market === "gameflip" &&
-    !offer.open &&
-    !["withdrawn", "expired"].includes(offer.state)
-  ) {
-    // Only a pack we know was taken down (withdrawn / expired) may give its
-    // accounts back without a row to read.
-    await raiseFlag(
-      offer,
-      "row",
-      "the listing row is missing and the pack was never withdrawn (" +
-        offer.state +
-        ") — nothing was released; check the Gameflip listing by hand",
-    );
+  if (!offer.open) {
+    // Closed. Only what somebody RETIRED goes back, after the usual grace —
+    // every path that retires a unit takes its listing down first (send's
+    // withdraw and release-held included). An on_offer entry of a closed
+    // offer is HELD: a publish whose outcome is unknown may be live with no
+    // row (FIXES-1 S2/S5 + addendum), and the owner releases it after
+    // checking the marketplace. Never a direct release here.
+    const entries = (offer.reserved || []).filter((e) => e && str(e.accountId));
+    if (
+      offer.source === "dropset" &&
+      entries.some((e) => e.state === "retiring")
+    ) {
+      const rec = await reconcileUnits(offer, null, now, { sets: ctx.sets });
+      ctx.summary.released += rec.released;
+      job.errors.push(...rec.errors);
+    }
+    if (
+      offer.market === "gameflip" &&
+      entries.some((e) => e.state === "on_offer") &&
+      !["withdrawn", "expired"].includes(offer.state)
+    ) {
+      // Only a pack we know was taken down (withdrawn / expired) may give its
+      // accounts back without a row to read.
+      await raiseFlag(
+        offer,
+        "row",
+        "the listing row is missing and the pack was never withdrawn (" +
+          offer.state +
+          ") — nothing was released; check the Gameflip listing by hand",
+      );
+    }
     return;
   }
-  if (offer.market === "gameflip" && offer.open) {
+  if (offer.market === "gameflip") {
     // The pack's code rides on the Gameflip listing itself: withdraw it FIRST
     // (I9) and hand the accounts back only once that has worked.
     try {
@@ -1247,9 +1550,13 @@ async function retireBad(offer, row, bad, ctx) {
   }
   let n = 0;
   for (const [reason, ids] of byReason) {
-    n += await retireUnits(offer, row, ids, "health: " + reason, {
-      now: ctx.now,
-    });
+    n += await retireUnits(
+      offer,
+      row,
+      ids,
+      reason === TAKEN_OUT ? TAKEN_OUT : "health: " + reason,
+      { now: ctx.now },
+    );
   }
   return n;
 }
@@ -1425,28 +1732,36 @@ async function maintainDropset(offer, ctx, job) {
     return maintainGameflip(offer, cur, ctx, job);
 
   await countSales(offer, salesFromUnits(cur, "dropset"), ctx);
-  if (!offer.open) {
-    // Closed with units still coming back: anything FREE left on sale goes too.
-    await retireUnits(
-      offer,
-      cur,
-      freeOnOffer(offer, cur).map((u) => u.accountId),
-      "offer is " + offer.state,
-      {
-        now: ctx.now,
-      },
-    );
-    return;
-  }
+  // Closed: the reconcile above finished its retiring units and watched its
+  // released ones; an on_offer entry left on a closed offer is HELD and only
+  // the owner's release-held lets it go (FIXES-1 addendum).
+  if (!offer.open) return;
   if (cur.status !== "active") return closeForRow(offer, cur, ctx);
   if ((await readExpiry(offer, ctx, job)) === "expired")
     return expireAccountsOffer(offer, cur, ctx);
 
   const free = freeOnOffer(offer, cur);
-  const bad = await healthOf(
-    free.map((u) => u.accountId),
-    job,
+  // L1: an account the owner took out (keepReserved) that is still FREE on the
+  // row must leave the pack — every pass, like an unhealthy one: the quantity
+  // drops first, then it is retired (a no-op while it is not FREE).
+  const keepIds = new Set(
+    (offer.reserved || [])
+      .filter((e) => e && e.state === "on_offer" && e.keepReserved === true)
+      .map((e) => str(e.accountId)),
   );
+  const bad = [
+    ...free
+      .filter((u) => keepIds.has(u.accountId))
+      .map((u) => ({
+        accountId: u.accountId,
+        reason: TAKEN_OUT,
+        keepReserved: true,
+      })),
+    ...(await healthOf(
+      free.filter((u) => !keepIds.has(u.accountId)).map((u) => u.accountId),
+      job,
+    )),
+  ];
   const good = free.length - bad.length;
   if (good < Number(offer.minQty)) return soldOut(offer, cur, free, bad, ctx);
   if (bad.length) {
@@ -1550,21 +1865,23 @@ async function maintainGameflip(offer, row, ctx, job) {
     }
     return;
   }
-  if (!offer.open) {
-    // Only a pack whose listing is known dead may give its accounts back (I9).
-    if (row.status === "delisted" || row.status === "removed") {
-      await retireUnits(
-        offer,
-        row,
-        freeOnOffer(offer, row).map((u) => u.accountId),
-        "pack " + row.status,
-        {
-          now: ctx.now,
-        },
-      );
-    }
-    return;
-  }
+  const members = (offer.reserved || []).filter(
+    (e) => e && e.state === "on_offer" && str(e.accountId),
+  );
+  // L1: a member the owner took out (keepReserved) must leave the pack, and a
+  // Gameflip pack only leaves whole — so it is a bad member, every pass, until
+  // the withdraw has worked.
+  const takenOut = members
+    .filter((e) => e.keepReserved === true)
+    .map((e) => ({
+      accountId: str(e.accountId),
+      reason: TAKEN_OUT,
+      keepReserved: true,
+    }));
+  // Closed: every close path retires the pack's members itself, so an on_offer
+  // entry left on a closed pack is HELD — only the owner's release-held lets
+  // it go (FIXES-1 addendum; I9).
+  if (!offer.open) return;
   if (row.status === "removed" || row.status === "delisted")
     return closeForRow(offer, row, ctx);
   if (row.status !== "active") {
@@ -1580,15 +1897,44 @@ async function maintainGameflip(offer, row, ctx, job) {
     return;
   }
 
-  const members = (offer.reserved || [])
-    .filter((e) => e && e.state === "on_offer" && str(e.accountId))
-    .map((e) => str(e.accountId));
-  const bad = await healthOf(members, job);
+  const bad = [
+    ...takenOut,
+    ...(await healthOf(
+      members
+        .filter((e) => e.keepReserved !== true)
+        .map((e) => str(e.accountId)),
+      job,
+    )),
+  ];
   if (!bad.length) {
     await clearFlag(offer, "withdraw");
     return;
   }
-  const why = bad.map((b) => b.reason || "unhealthy").join("; ");
+  await withdrawPack(offer, row, bad, ctx);
+}
+
+// Take a Gameflip pack down because of `bad` members (I9): the withdraw FIRST;
+// only once it has worked is the row marked delisted and every member retired
+// (the ones the owner took out keep their reservation). A failed withdraw
+// leaves everything as it is — the pack may have sold — and raises the
+// "withdraw" flag once; the next pass tries again (FIXES-1 L1). The flag is
+// cleared once the pack is down and no taken-out member is left on offer.
+// Returns true when the pack was taken down.
+async function withdrawPack(offer, row, bad, ctx) {
+  const reasons = [...new Set(bad.map((b) => str(b.reason) || "unhealthy"))];
+  const why = reasons.join("; ");
+  const ownerOnly = reasons.every((r) => r === TAKEN_OUT);
+  const lead = ownerOnly
+    ? "an account the owner took out is still in the pack"
+    : "a pack account failed its health check (" + why + ")";
+  if (!str(offer.externalId)) {
+    await raiseFlag(
+      offer,
+      "withdraw",
+      lead + " but the pack has no Gameflip listing id — take it down by hand",
+    );
+    return false;
+  }
   try {
     await deps.markets.withdraw("gameflip", offer.externalId);
   } catch (e) {
@@ -1596,47 +1942,66 @@ async function maintainGameflip(offer, row, ctx, job) {
     await raiseFlag(
       offer,
       "withdraw",
-      "a pack account failed its health check (" +
-        why +
-        ") but the Gameflip withdraw failed (" +
+      lead +
+        " but the Gameflip withdraw failed (" +
         errText(e) +
         ") — it may have sold; check it by hand",
     );
-    return;
+    return false;
   }
   const r = await deps.MarketplaceListing.updateOne(
     { _id: row._id, bulkOfferId: offer._id, status: "active" },
     { $set: { status: "delisted" } },
   );
-  if (!r || !r.modifiedCount) return; // the row moved (sold?) — the next pass reads it
+  if (!r || !r.modifiedCount) return false; // the row moved (sold?) — the next pass reads it
   const gone = { ...row, status: "delisted" };
-  await markKeep(
-    offer,
-    bad.filter((b) => b && b.keepReserved).map((b) => b.accountId),
-  );
+  const keptIds = bad
+    .filter((b) => b && b.keepReserved)
+    .map((b) => str(b.accountId));
+  await markKeep(offer, keptIds);
+  const members = (offer.reserved || [])
+    .filter((e) => e && e.state === "on_offer" && str(e.accountId))
+    .map((e) => str(e.accountId));
   const n = await retireUnits(offer, gone, members, "pack withdrawn: " + why, {
     now: ctx.now,
   });
   if (
-    await transition(offer, "withdrawn", {
+    !(offer.reserved || []).some(
+      (e) => e && e.state === "on_offer" && e.keepReserved === true,
+    )
+  ) {
+    await clearFlag(offer, "withdraw");
+  }
+  const kept = new Set(keptIds).size;
+  if (
+    offer.open &&
+    (await transition(offer, "withdrawn", {
       now: ctx.now,
-      detail: "unhealthy account: " + why,
-    })
+      detail: (ownerOnly ? "" : "unhealthy account: ") + why,
+    }))
   ) {
     ctx.changed = true;
-    audit(offer, "integrity_withdrawn", "warn", "pack withdrawn: " + why, {
-      count: n,
-    });
+    audit(
+      offer,
+      ownerOnly ? "owner_withdrawn" : "integrity_withdrawn",
+      "warn",
+      "pack withdrawn: " + why,
+      { count: n },
+    );
     notify(
-      "Bulk pack withdrawn (integrity): " +
+      (ownerOnly
+        ? "Bulk pack withdrawn: "
+        : "Bulk pack withdrawn (integrity): ") +
         describe(offer) +
         "\n" +
         why +
-        ". The " +
-        n +
-        " account(s) go back to stock.",
+        ". " +
+        Math.max(0, n - kept) +
+        " account(s) go back to stock" +
+        (kept ? "; " + kept + " spent elsewhere stay reserved." : "."),
     );
   }
+  return true;
 }
 
 async function maintainNoclaim(offer, ctx, job) {
@@ -1663,27 +2028,95 @@ async function maintainNoclaim(offer, ctx, job) {
   }
 }
 
+// One capacity read per pass (farmCapacity caches it anyway).
 async function capacityFor(ctx) {
   if (!ctx.cap) {
+    const unreadable = (error) => ({
+      bestStackRoom: 0,
+      totalFree: 0,
+      pristine: 0,
+      at: null,
+      error,
+    });
     ctx.cap = Promise.resolve()
       .then(() => deps.farmCapacity.read())
-      .catch((e) => ({
-        bestStackRoom: 0,
-        totalFree: 0,
-        pristine: 0,
-        at: null,
-        error: errText(e),
-      }));
+      .then((c) =>
+        c && typeof c === "object"
+          ? c
+          : unreadable("the capacity read returned nothing"),
+      )
+      .catch((e) => unreadable(errText(e)));
   }
   return ctx.cap;
 }
 
-function capacityText(cap, q) {
+// FIXES-1 S1: the rent-farm capacity is SHARED by every open farm offer
+// (live or paused — a paused one comes back and needs its part). The whole
+// `available` is split between them, deterministically by id, and an offer
+// only ever acts on its own share. Read fresh (under this offer's lock) so a
+// farm offer sent or closed a moment ago is counted as it is now. Returns
+// {share, available, sharers}, or null (with a loop error) when the share
+// cannot be worked out — then nothing is paused, resumed or requantified.
+async function farmShare(offer, cap, ctx, job) {
+  let available = Math.floor(
+    Number(deps.farmCapacity.advertisable(cap, ctx.bp)),
+  );
+  if (!Number.isFinite(available) || available < 0) available = 0;
+  const self = String(offer._id);
+  const rows = await deps.BulkOffer.find(
+    {
+      open: true,
+      kind: "farming",
+      source: "farm",
+      state: { $in: ["live", "paused"] },
+    },
+    { _id: 1 },
+  )
+    .sort({ _id: 1 })
+    .limit(OFFER_LIMIT)
+    .lean();
+  const ids = [
+    ...new Set([...(rows || []).map((r) => String(r._id)), self]),
+  ].sort();
+  const fc = deps.farmCapacity;
+  let share;
+  try {
+    share =
+      typeof fc.shareFor === "function"
+        ? fc.shareFor(self, ids, available)
+        : // The same equal split farmCapacity.shareFor wraps (FIXES-1 S1).
+          deps.suppliedStock.shareOfShelf(available, self, ids);
+  } catch (e) {
+    job.errors.push(
+      "farm capacity share failed (" + errText(e) + ") — sync skipped",
+    );
+    return null;
+  }
+  share = Math.floor(Number(share));
+  if (!Number.isFinite(share) || share < 0) {
+    job.errors.push(
+      "farm capacity share unreadable (" + str(share) + ") — sync skipped",
+    );
+    return null;
+  }
+  return { share: Math.min(share, available), available, sharers: ids.length };
+}
+
+function capacityText(cap, q, sh) {
   if (!cap) return "capacity for " + q;
   if (cap.error) return "capacity unreadable (" + cap.error + ")";
+  const shared =
+    sh && sh.sharers > 1
+      ? ", its share of " +
+        sh.available +
+        " across " +
+        sh.sharers +
+        " farm offers"
+      : "";
   return (
     "capacity for " +
     q +
+    shared +
     " (best stack room " +
     (Number(cap.bestStackRoom) || 0) +
     ", free slots " +
@@ -1744,95 +2177,7 @@ async function maintainFarm(offer, ctx, job) {
   const every =
     Math.max(1, Number(ctx.bp.farmSyncMinutes) || SAFE_BP.farmSyncMinutes) *
     60000;
-  if (due(offer.lastSyncAt, every, ctx.now)) {
-    job.patch.lastSyncAt = ctx.now;
-    const cap = await capacityFor(ctx);
-    let q = Math.floor(Number(deps.farmCapacity.advertisable(cap, ctx.bp)));
-    if (!Number.isFinite(q) || q < 0) q = 0;
-    const minQty = Number(offer.minQty);
-    if (offer.state === "live" && q < minQty) {
-      await deps.markets.pause(offer.market, offer.externalId);
-      if (
-        await transition(offer, "paused", {
-          from: ["live"],
-          set: { autoPaused: true },
-          now: ctx.now,
-          detail: capacityText(cap, q) + " < minimum " + minQty,
-        })
-      ) {
-        ctx.changed = true;
-        audit(
-          offer,
-          "paused",
-          "warn",
-          "auto-paused: " + capacityText(cap, q) + " < minimum " + minQty,
-          { count: q },
-        );
-        notify(
-          "Bulk farming offer paused: " +
-            describe(offer) +
-            "\n" +
-            capacityText(cap, q) +
-            ", below the minimum order of " +
-            minQty +
-            ". It resumes by itself once capacity returns" +
-            (ctx.bp.enabled === true
-              ? "."
-              : " and bulk packs are switched on."),
-        );
-      }
-    } else if (
-      offer.state === "paused" &&
-      offer.autoPaused === true &&
-      q >= minQty
-    ) {
-      // Only an offer the loop paused itself, never while switched off (I8),
-      // never with the delivery gate shut (I4).
-      if (
-        ctx.bp.enabled === true &&
-        safeGate(offer.market, "farm").ok &&
-        (await stillIn(offer, ["paused"], { autoPaused: true }))
-      ) {
-        // Quantity first, so the offer never comes back advertising more than
-        // the farm can take.
-        if (q !== Number(offer.advertisedQty)) {
-          await deps.markets.setQuantity(offer.market, offer.externalId, q);
-          await deps.BulkOffer.updateOne(
-            { _id: offer._id },
-            { $set: { advertisedQty: q } },
-          );
-          offer.advertisedQty = q;
-        }
-        await deps.markets.resume(offer.market, offer.externalId);
-        if (
-          await transition(offer, "live", {
-            from: ["paused"],
-            set: { autoPaused: false },
-            now: ctx.now,
-            detail: capacityText(cap, q),
-          })
-        ) {
-          ctx.changed = true;
-          audit(
-            offer,
-            "resumed",
-            "info",
-            "auto-resumed: " + capacityText(cap, q),
-            { count: q },
-          );
-          notify(
-            "Bulk farming offer resumed: " +
-              describe(offer) +
-              "\n" +
-              capacityText(cap, q) +
-              ".",
-          );
-        }
-      }
-    } else if (offer.state === "live" && q !== Number(offer.advertisedQty)) {
-      await syncQuantity(offer, q, ctx);
-    }
-  }
+  if (due(offer.lastSyncAt, every, ctx.now)) await syncFarm(offer, ctx, job);
   if ((await readExpiry(offer, ctx, job)) === "expired") {
     if (
       await transition(offer, "expired", {
@@ -1849,6 +2194,106 @@ async function maintainFarm(offer, ctx, job) {
       );
       notify("Bulk farming offer expired: " + describe(offer));
     }
+  }
+}
+
+// The farm capacity sync of one offer (every bp.farmSyncMinutes).
+async function syncFarm(offer, ctx, job) {
+  const cap = await capacityFor(ctx);
+  if (cap.error) {
+    // FIXES-1 L6: an unreadable capacity is not "no capacity". Nothing is
+    // paused, resumed or requantified on it, nobody is paged — a loop error
+    // only, and the sync is tried again next pass (lastSyncAt stays).
+    job.errors.push(
+      "farm capacity unreadable (" + cap.error + ") — capacity sync skipped",
+    );
+    return;
+  }
+  const sh = await farmShare(offer, cap, ctx, job);
+  if (!sh) return;
+  job.patch.lastSyncAt = ctx.now;
+  // S1: this offer's share, never the whole of `available`.
+  const q = sh.share;
+  const minQty = Number(offer.minQty);
+  if (offer.state === "live" && q < minQty) {
+    await deps.markets.pause(offer.market, offer.externalId);
+    if (
+      await transition(offer, "paused", {
+        from: ["live"],
+        set: { autoPaused: true },
+        now: ctx.now,
+        detail: capacityText(cap, q, sh) + " < minimum " + minQty,
+      })
+    ) {
+      ctx.changed = true;
+      audit(
+        offer,
+        "paused",
+        "warn",
+        "auto-paused: " + capacityText(cap, q, sh) + " < minimum " + minQty,
+        { count: q },
+      );
+      notify(
+        "Bulk farming offer paused: " +
+          describe(offer) +
+          "\n" +
+          capacityText(cap, q, sh) +
+          ", below the minimum order of " +
+          minQty +
+          ". It resumes by itself once capacity returns" +
+          (ctx.bp.enabled === true ? "." : " and bulk packs are switched on."),
+      );
+    }
+  } else if (
+    offer.state === "paused" &&
+    offer.autoPaused === true &&
+    q >= minQty
+  ) {
+    // Only an offer the loop paused itself, never while switched off (I8),
+    // never with the delivery gate shut (I4).
+    if (
+      ctx.bp.enabled === true &&
+      safeGate(offer.market, "farm").ok &&
+      (await stillIn(offer, ["paused"], { autoPaused: true }))
+    ) {
+      // Quantity first, so the offer never comes back advertising more than
+      // the farm can take.
+      if (q !== Number(offer.advertisedQty)) {
+        await deps.markets.setQuantity(offer.market, offer.externalId, q);
+        await deps.BulkOffer.updateOne(
+          { _id: offer._id },
+          { $set: { advertisedQty: q } },
+        );
+        offer.advertisedQty = q;
+      }
+      await deps.markets.resume(offer.market, offer.externalId);
+      if (
+        await transition(offer, "live", {
+          from: ["paused"],
+          set: { autoPaused: false },
+          now: ctx.now,
+          detail: capacityText(cap, q, sh),
+        })
+      ) {
+        ctx.changed = true;
+        audit(
+          offer,
+          "resumed",
+          "info",
+          "auto-resumed: " + capacityText(cap, q, sh),
+          { count: q },
+        );
+        notify(
+          "Bulk farming offer resumed: " +
+            describe(offer) +
+            "\n" +
+            capacityText(cap, q, sh) +
+            ".",
+        );
+      }
+    }
+  } else if (offer.state === "live" && q !== Number(offer.advertisedQty)) {
+    await syncQuantity(offer, q, ctx);
   }
 }
 
@@ -1882,6 +2327,7 @@ async function handleOffer(offer, ctx) {
   }
   // A clean pass clears the loop's OWN previous error — conditionally, so an
   // error another writer (send.js) left since is never wiped.
+  if (!job.errors.length) noted.delete(String(offer._id));
   if (
     !job.errors.length &&
     str(offer.lastError).startsWith(LOOP_ERROR_PREFIX)
@@ -1960,38 +2406,106 @@ function finalCounts(offers, summary) {
   }
 }
 
+// What one pass (or one maintainOffer call) shares: the clock, the settings,
+// the counters, a DropSet cache and the one capacity read.
+function passContext(now) {
+  return {
+    now: asDate(now),
+    bp: readBp(),
+    summary: emptySummary(),
+    sets: new Map(),
+    changed: false,
+    cap: null,
+  };
+}
+
+// The pass over ONE offer, run while holding its lock (FIXES-1 L3). The offer
+// is read here, never taken from a list read before the lock: a take-out or a
+// send action that ran while this pass waited is seen. A failure is recorded
+// on the offer (still inside the lock) and returned, never thrown.
+async function maintainOfferLocked(offerId, ctx) {
+  const offer = await deps.BulkOffer.findById(offerId, { history: 0 }).lean();
+  if (!offer) return { offer: null, error: "" };
+  try {
+    await handleOffer(offer, ctx);
+    return { offer, error: "" };
+  } catch (e) {
+    const error = errText(e);
+    await noteLoopError(offer, error);
+    return { offer, error };
+  }
+}
+
+// Maintain one offer now, under its lock — what runOnce does for every offer
+// it visits. Standalone (no pass context), it builds its own and tells the
+// proposals cache when something changed. Resolves {offer, error, summary}:
+// `offer` as the pass left it (null when it does not exist), `error` the
+// pass's error text ("" when clean). Never call it while holding this offer's
+// lock (the lock is not re-entrant).
+async function maintainOffer(offerId, { now, ctx } = {}) {
+  const own = !ctx;
+  const c = ctx || passContext(now);
+  const res = await deps.lock.withOfferLock(offerId, () =>
+    maintainOfferLocked(offerId, c),
+  );
+  if (own) {
+    if (res.error) c.summary.errors++;
+    if (res.offer) finalCounts([res.offer], c.summary);
+    if (c.changed) invalidateProposals();
+  }
+  return { offer: res.offer, error: res.error, summary: c.summary };
+}
+
+// Which offers a pass visits: every open one, every one with units on their
+// way back to stock, and — for WATCH_WINDOW_MS — every closed dropset offer
+// and every dropset offer that released an account (FIXES-1 L2).
+function passQuery(now) {
+  const since = new Date(now.getTime() - WATCH_WINDOW_MS);
+  return {
+    $or: [
+      { open: true },
+      { "reserved.state": "retiring" },
+      { source: "dropset", open: false, closedAt: { $gte: since } },
+      {
+        source: "dropset",
+        reserved: {
+          $elemMatch: { state: "released", changedAt: { $gte: since } },
+        },
+      },
+    ],
+  };
+}
+
 // One pass. Safety maintenance runs whatever bulkPacksEnabled says (I8); only
 // resuming and growing an offer need it on.
 async function runOnce({ now = new Date() } = {}) {
   if (state.running)
     return { ...emptySummary(), skipped: "a pass is already running" };
   state.running = true;
-  const summary = emptySummary();
-  let offers = [];
+  let ctx;
+  let summary = emptySummary();
+  const offers = [];
   let lastError = "";
   try {
-    const ctx = {
-      now: asDate(now),
-      bp: readBp(),
-      summary,
-      sets: new Map(),
-      changed: false,
-      cap: null,
-    };
-    offers = await deps.BulkOffer.find(
-      { $or: [{ open: true }, { "reserved.state": "retiring" }] },
-      { history: 0 },
-    )
+    ctx = passContext(now);
+    summary = ctx.summary;
+    const ids = await deps.BulkOffer.find(passQuery(ctx.now), { _id: 1 })
       .sort({ lastSyncAt: 1, _id: 1 })
       .limit(OFFER_LIMIT)
       .lean();
-    for (const offer of offers) {
+    for (const { _id } of ids) {
       try {
-        await handleOffer(offer, ctx);
+        const r = await maintainOffer(_id, { ctx });
+        if (r.offer) offers.push(r.offer);
+        if (r.error) {
+          summary.errors++;
+          lastError = r.error;
+        }
       } catch (e) {
+        // The offer could not even be read (or its lock refused).
         summary.errors++;
         lastError = errText(e);
-        await noteLoopError(offer, lastError);
+        console.error("bulkPacks: offer " + String(_id) + ": " + lastError);
       }
     }
     if (ctx.changed) invalidateProposals();
@@ -2065,103 +2579,246 @@ function status() {
 // renter reclaim) reach a bulk row through utils/listingDetach. A pack is sold
 // whole, so the account leaves the pack HERE — with its reservation kept
 // (keepReserved) — instead of the generic detach, which would republish a
-// different product. Returns listingDetach's shape: {detached, warnings}.
+// different product. Runs under the offer's lock and reads the offer and its
+// row inside it (FIXES-1 L3/L4). Returns listingDetach's shape:
+// {detached, warnings}.
 async function takeAccountOut({ row, accountId, login, reason } = {}) {
+  const offerId = row && row.bulkOfferId;
+  if (!offerId) return { detached: [], warnings: ["not a bulk pack row"] };
+  return deps.lock.withOfferLock(offerId, () =>
+    takeAccountOutLocked({ row, accountId, login, reason }),
+  );
+}
+
+// FIXES-1 L4: the account's LIVE entry (on_offer first, then retiring) — never
+// an older released/delivered one while a live one exists (an account the
+// offer released and took back later has both). With no live entry, its
+// latest entry says what became of it.
+function entryForTakeOut(offer, accountId, login) {
+  const want = str(accountId);
+  const wantLogin = str(login).toLowerCase();
+  const all = ((offer && offer.reserved) || []).filter(Boolean);
+  // By account id when there is one (two accounts can share a login); by
+  // login only when the id finds nothing.
+  let mine = want ? all.filter((x) => str(x.accountId) === want) : [];
+  if (!mine.length && wantLogin) {
+    mine = all.filter((x) => str(x.login).toLowerCase() === wantLogin);
+  }
+  return (
+    mine.find((x) => x.state === "on_offer") ||
+    mine.find((x) => x.state === "retiring") ||
+    mine[mine.length - 1] ||
+    null
+  );
+}
+
+async function takeAccountOutLocked({ row, accountId, login, reason }) {
   const detached = [];
   const warnings = [];
   const label =
-    "bulk pack " + str(row && row.marketplace) + " " + str(row && (row.externalId || row._id));
-  const offerId = row && row.bulkOfferId;
-  if (!offerId) return { detached, warnings: ["not a bulk pack row"] };
-  const offer = await deps.BulkOffer.findById(offerId).lean();
+    "bulk pack " +
+    str(row && row.marketplace) +
+    " " +
+    str(row && (row.externalId || row._id));
+  const offer = await deps.BulkOffer.findById(row.bulkOfferId, {
+    history: 0,
+  }).lean();
   if (!offer) {
-    return { detached, warnings: [label + ": its bulk offer is missing — check Bulk packs"] };
+    return {
+      detached,
+      warnings: [label + ": its bulk offer is missing — check Bulk packs"],
+    };
   }
-  const want = str(accountId);
-  const wantLogin = str(login).toLowerCase();
-  const e = (offer.reserved || []).find(
-    (x) =>
-      x &&
-      ((want && str(x.accountId) === want) ||
-        (wantLogin && str(x.login).toLowerCase() === wantLogin)),
-  );
-  if (!e) return { detached, warnings: [label + ": the account is not in this pack"] };
+  const e = entryForTakeOut(offer, accountId, login);
+  if (!e) {
+    return {
+      detached,
+      warnings: [label + ": the account is not in this pack"],
+    };
+  }
+  const name = str(e.login) || str(e.accountId);
   if (e.state === "delivered") {
     return {
       detached,
-      warnings: [label + ": " + (e.login || e.accountId) + " was already delivered to a pack buyer"],
+      warnings: [
+        label + ": " + name + " was already delivered to a pack buyer",
+      ],
     };
   }
-  if (e.state === "released") return { detached, warnings };
+  if (e.state === "released") return { detached, warnings }; // left the pack already
+  if (offer.source !== "dropset") {
+    return {
+      detached,
+      warnings: [label + ": not an account pack — nothing to take out"],
+    };
+  }
   const id = str(e.accountId);
   const why = "owner: " + (str(reason) || "taken out");
+  const ctx = passContext(new Date());
+  // First, whatever happens next: this account's reservation is never handed
+  // back by this pack (the owner spent it), and every later pass keeps taking
+  // it out until it has left (FIXES-1 L1).
   await markKeep(offer, [id]);
-
-  if (offer.source !== "dropset") {
-    return { detached, warnings: [label + ": not an account pack — nothing to take out"] };
-  }
-  if (offer.market === "gameflip") {
-    // One listing is the whole pack: it comes down, the other accounts go back
-    // to stock on the next pass, this one stays reserved.
-    try {
-      await deps.markets.withdraw("gameflip", offer.externalId);
-    } catch (err) {
-      await raiseFlag(
-        offer,
-        "withdraw",
-        (e.login || id) + " was " + why + " but the Gameflip withdraw failed (" +
-          errText(err) + ") — the pack may have sold; check it by hand",
-      );
-      return {
-        detached,
-        warnings: [label + ": could not take the Gameflip pack down (" + errText(err) + ") — check Bulk packs"],
-      };
-    }
-    await deps.MarketplaceListing.updateOne(
-      { _id: row._id, bulkOfferId: offer._id, status: "active" },
-      { $set: { status: "delisted" } },
+  if (e.state === "retiring") {
+    // Already off the shelf and on its way back: now it stays reserved.
+    audit(
+      offer,
+      "owner_took_account",
+      "info",
+      name + " " + why + " (already leaving the pack)",
     );
-    detached.push(label + " (whole pack withdrawn)");
-    audit(offer, "owner_took_account", "warn", (e.login || id) + " " + why + " — pack withdrawn");
-    notify(
-      "Bulk pack withdrawn: " + describe(offer) + "\n" + (e.login || id) + " was " + why +
-        ". The other accounts go back to stock; this one stays reserved.",
-    );
+    detached.push(label + " (already leaving the pack)");
     return { detached, warnings };
   }
-  // Eldorado / G2G: the unit leaves the offer's shelf (phase 1 of I10); the
-  // loop requantifies and its phase 2 keeps the reservation.
-  const fresh = await deps.MarketplaceListing.findById(row._id).lean();
-  const n = await retireUnits(offer, fresh, [id], why);
+  const { row: cur, problem } = await loadRow(offer, ctx.now);
+  if (problem || !cur) {
+    return {
+      detached,
+      warnings: [
+        label +
+          ": " +
+          (problem || "its listing row is missing") +
+          " — the account is marked to leave the pack; the maintenance loop finishes it",
+      ],
+    };
+  }
+
+  if (offer.market === "gameflip") {
+    // One listing is the whole pack: it comes down, the other accounts go back
+    // to stock, this one stays reserved.
+    if (cur.status === "sold") {
+      // Too late: the pack buyer has its code. The next pass records the
+      // sale and reports this account (it was also spent elsewhere).
+      return {
+        detached,
+        warnings: [
+          label +
+            ": the pack already sold — " +
+            name +
+            " went to the pack buyer; check it is not sold twice",
+        ],
+      };
+    }
+    if (cur.status !== "active") {
+      audit(
+        offer,
+        "owner_took_account",
+        "info",
+        name + " " + why + " (pack already down)",
+      );
+      detached.push(label + " (pack already taken down)");
+      return { detached, warnings };
+    }
+    const down = await withdrawPack(
+      offer,
+      cur,
+      [{ accountId: id, reason: TAKEN_OUT, keepReserved: true }],
+      ctx,
+    );
+    if (ctx.changed) invalidateProposals();
+    if (!down) {
+      return {
+        detached,
+        warnings: [
+          label +
+            ": could not take the Gameflip pack down yet (" +
+            (FLAG_RE.test(str(offer.attention))
+              ? str(offer.attention).replace(FLAG_RE, "")
+              : "the listing row changed") +
+            ") — the maintenance loop keeps trying; check Bulk packs",
+        ],
+      };
+    }
+    audit(
+      offer,
+      "owner_took_account",
+      "warn",
+      name + " " + why + " — pack withdrawn",
+    );
+    detached.push(label + " (whole pack withdrawn)");
+    return { detached, warnings };
+  }
+
+  // Eldorado / G2G: the unit leaves the offer's shelf (phase 1 of I10); phase
+  // 2 keeps the reservation.
+  const n = await retireUnits(offer, cur, [id], why, { now: ctx.now });
   if (!n) {
     return {
       detached,
-      warnings: [label + ": " + (e.login || id) + " is mid-delivery to a pack buyer — check Bulk packs"],
+      warnings: [
+        label +
+          ": " +
+          name +
+          " is mid-delivery to a pack buyer — the maintenance loop takes it out if that delivery does not complete; check Bulk packs",
+      ],
     };
   }
   detached.push(label);
-  audit(offer, "owner_took_account", "info", (e.login || id) + " " + why);
+  audit(offer, "owner_took_account", "info", name + " " + why);
+  // FIXES-1 L7: what the offer can still sell is its on_offer entries' FREE
+  // units — a retiring unit that is back on the row is not stock.
   try {
-    const after = await deps.MarketplaceListing.findById(row._id).lean();
-    const free = (after && after.units ? after.units : []).filter(isFree).length;
-    if (free >= (Number(offer.minQty) || 1)) {
-      await deps.markets.setQuantity(offer.market, offer.externalId, free);
-    } else {
-      await deps.markets.pause(offer.market, offer.externalId);
+    const after = await rereadRow(offer, cur);
+    const fresh =
+      (await deps.BulkOffer.findById(offer._id, { history: 0 }).lean()) ||
+      offer;
+    const free = freeOnOffer(fresh, after).length;
+    const minQty = Number(fresh.minQty) || 1;
+    if (fresh.state === "live") {
+      if (free >= minQty) {
+        await deps.markets.setQuantity(fresh.market, fresh.externalId, free);
+        await deps.BulkOffer.updateOne(
+          { _id: fresh._id },
+          { $set: { advertisedQty: free } },
+        );
+      } else {
+        const detail = "below the minimum after an owner take-out";
+        await deps.markets.pause(fresh.market, fresh.externalId);
+        if (
+          await transition(fresh, "paused", {
+            from: ["live"],
+            set: { autoPaused: false },
+            now: ctx.now,
+            detail: free + " free < minimum " + minQty + " — " + detail,
+          })
+        ) {
+          audit(fresh, "paused", "warn", "paused: " + detail, { count: free });
+          notify(
+            "Bulk offer paused: " +
+              describe(fresh) +
+              "\n" +
+              name +
+              " was taken out by the owner; " +
+              free +
+              " account(s) left, " +
+              detail +
+              " of " +
+              minQty +
+              ". The next check closes it as sold out.",
+          );
+        }
+      }
     }
   } catch (err) {
-    warnings.push(label + ": quantity not updated yet (" + errText(err) + ") — the next check fixes it");
+    warnings.push(
+      label +
+        ": quantity not updated yet (" +
+        errText(err) +
+        ") — the next check fixes it",
+    );
   }
   return { detached, warnings };
 }
 
 module.exports = {
   RETIRE_GRACE_MS,
+  WATCH_WINDOW_MS,
   READ_OFFER_EVERY_MS,
   start,
   stop,
   status,
   runOnce,
+  maintainOffer,
   retireUnits,
   reconcileUnits,
   takeAccountOut,

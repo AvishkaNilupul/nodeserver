@@ -310,15 +310,53 @@ async function isStillOurs(opts) {
   return foreign === 0;
 }
 
+// This account's set rows that carry our tag and set right now — the rows
+// isStillOurs() judges, minus the unreserved ones.
+function reservedRowsFilter(accountId, set, market) {
+  return {
+    account: accountId,
+    itemKey: { $in: dep("dropReservation").setKeys(set) },
+    connected: { $ne: true },
+    soldAt: { $ne: null },
+    soldToUsername: market,
+    soldSetId: idString(set._id),
+  };
+}
+
+// The reservation's stamp(s): the soldAt values of those rows, in ms. One
+// reservation writes one `now` on every row it takes (dropReservation.js:37-47),
+// so a row with a DIFFERENT soldAt after our release is somebody else's new
+// reservation under the same tag and set — not ours surviving.
+async function reservationStamps(accountId, set, market) {
+  const vals = await dep("DropLog").distinct("soldAt", reservedRowsFilter(accountId, set, market));
+  return [
+    ...new Set(
+      (vals || []).map((v) => (v == null ? NaN : new Date(v).getTime())).filter(Number.isFinite),
+    ),
+  ];
+}
+
+async function stampsRemain(accountId, set, market, stamps) {
+  const n = await dep("DropLog").countDocuments({
+    ...reservedRowsFilter(accountId, set, market),
+    soldAt: { $in: stamps.map((ms) => new Date(ms)) },
+  });
+  return n > 0;
+}
+
 // Release our reservation of `set` on each account, one at a time, and only
 // where isStillOurs() holds. Returns:
 //   released — ids whose reservation was released
 //   skipped  — [{accountId, reason}] not released and NOT to be retried
-//              ("not ours", "unsupported market", "set missing", or a release
-//              that threw part-way: it may have taken, and a retry could free
-//              a reservation somebody else made since)
-//   failed   — [{accountId, reason}] ownership could not be read (DB error);
-//              nothing was written, so a later pass may safely retry them.
+//              ("not ours", "unsupported market", "set missing", a release
+//              that threw part-way, or a release whose outcome could not be
+//              re-read: either may have taken, and a retry could free a
+//              reservation somebody else made since)
+//   failed   — [{accountId, reason}] safe to retry on a later pass: ownership
+//              could not be read (DB error, nothing written), or the release
+//              did not take (FIXES-1 S7: releaseSetForAccounts swallows its
+//              own write error, dropReservation.js:167, so a returned call
+//              proves nothing — the re-read found our own stamp still there).
 async function releaseUnits(opts) {
   const ids = uniqueIds(opts && opts.accountIds);
   const market = normMarket(opts && opts.market);
@@ -345,22 +383,42 @@ async function releaseUnits(opts) {
   const { releaseSetForAccounts } = dep("dropReservation");
   for (const id of ids) {
     let ours;
+    let stamps = [];
     try {
       ours = await isStillOurs({ accountId: id, set, market });
+      if (ours) stamps = await reservationStamps(id, set, market);
     } catch (e) {
       failed.push({ accountId: id, reason: errText(e) });
       continue;
     }
-    if (!ours) {
+    // No stamp although isStillOurs held a moment ago: the rows changed under
+    // us, so nothing here is provably ours to free.
+    if (!ours || !stamps.length) {
       skipped.push({ accountId: id, reason: "not ours" });
       continue;
     }
     try {
       await releaseSetForAccounts([id], setId, market);
-      released.push(id);
     } catch (e) {
       skipped.push({ accountId: id, reason: "release error: " + errText(e) });
+      continue;
     }
+    // FIXES-1 S7: re-read. Still ours WITH our own stamp -> the write did not
+    // happen; report it for a retry instead of calling it released.
+    let held;
+    try {
+      held =
+        (await isStillOurs({ accountId: id, set, market })) &&
+        (await stampsRemain(id, set, market, stamps));
+    } catch (e) {
+      skipped.push({ accountId: id, reason: "release unverified: " + errText(e) });
+      continue;
+    }
+    if (held) {
+      failed.push({ accountId: id, reason: "release did not take — the reservation is still in place" });
+      continue;
+    }
+    released.push(id);
   }
   return { released, skipped, failed };
 }

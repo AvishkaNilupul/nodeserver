@@ -131,6 +131,7 @@ const LIST_DEFAULT = 100;
 const LIST_MAX = 500;
 const HISTORY_KEEP = 60;
 const WITHDRAW_ALL_CONFIRM = "WITHDRAW";
+const RELEASE_HELD_CONFIRM = "RELEASE";
 const OFF_MESSAGE = "Bulk packs are switched off";
 const BLOCK_NOTE = "owner block since 2026-09-28";
 
@@ -409,6 +410,13 @@ const LIST_PROJECTION = {
   "reserved.changedAt": 0,
 };
 
+// What the owner must look at (docs/bulk-packs/FIXES-1.md L8): the loop's
+// deduped flag, separate from lastError. Always a string in both offer views,
+// "" when nothing is flagged.
+function attentionOf(o) {
+  return o && typeof o.attention === "string" ? o.attention : "";
+}
+
 function scopeFilter(scope) {
   if (scope === "open") return { open: true };
   if (scope === "closed") return { open: false };
@@ -447,7 +455,12 @@ router.get("/api/bulk-packs/offers", requireSuperadmin, async (req, res) => {
       ]),
     ]);
     const offers = rows.map((o) => {
-      const out = { ...o, id: String(o._id), ...reservedCounts(o.reserved) };
+      const out = {
+        ...o,
+        id: String(o._id),
+        attention: attentionOf(o),
+        ...reservedCounts(o.reserved),
+      };
       delete out.reserved;
       return out;
     });
@@ -499,6 +512,7 @@ router.get(
         offer: {
           ...o,
           id: String(o._id),
+          attention: attentionOf(o),
           history,
           ...reservedCounts(o.reserved),
         },
@@ -656,6 +670,40 @@ router.post(
   "/api/bulk-packs/offers/:id/withdraw",
   requireSuperadmin,
   offerAction("withdrawOffer", "withdraw", { invalidates: true }),
+);
+
+// A CLOSED offer that still holds accounts after a publish whose outcome was
+// unknown (docs/bulk-packs/FIXES-1.md, send "New" releaseHeld): once the owner
+// has checked the marketplace and the offer is NOT live, send.releaseHeld takes
+// it down there first when its id is known, then lets the loop release the
+// held accounts. The exact, case-sensitive word is required here and again in
+// send.js. It only takes things down, so it stays available while switched off.
+router.post(
+  "/api/bulk-packs/offers/:id/release-held",
+  requireSuperadmin,
+  async (req, res) => {
+    const offerId = offerIdOf(req);
+    if (!offerId) return offerNotFound(res);
+    const confirm = bodyOf(req).confirm;
+    if (confirm !== RELEASE_HELD_CONFIRM) {
+      return res.status(400).json({
+        success: false,
+        message:
+          'Type RELEASE (in capitals) as "confirm" — only after you checked ' +
+          "the marketplace: the offer is NOT live",
+      });
+    }
+    const { mod, error } = loadDep("send", ["releaseHeld"]);
+    if (error) return unavailable(res, "send", error);
+    let r;
+    try {
+      r = await mod.releaseHeld({ offerId, confirm, actor: actorFromReq(req) });
+    } catch (err) {
+      r = { success: false, status: 500, message: errMsg(err) };
+    }
+    invalidateProposals();
+    return replyWith(res, r, "release held accounts");
+  },
 );
 
 // Takes every open offer down. The exact, case-sensitive word is required.
