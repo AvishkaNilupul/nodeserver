@@ -143,7 +143,17 @@ async function ensureStackWithRoom(renter, needed, actor = "operator-farm") {
   const key = (h, f) => String(h || "local") + "|" + String(f || "");
   const current = bots.find((b) => key(b.host, b.file) === key(renter.botHost, renter.botFile));
 
-  if (current && Number(current.remaining) >= want) {
+  // Room alone is not enough to STAY, either. If the holder is parked on a
+  // stack whose container is not running, its free slots are worthless and the
+  // holder must follow the free space to a live stack — the same way it already
+  // follows it out of a full one. Only an explicit `false` moves us: `null`
+  // (host not reachable this tick) keeps the holder where it is rather than
+  // stampeding every buyer onto another host over a blinked SSH read.
+  if (
+    current &&
+    Number(current.remaining) >= want &&
+    (current.running !== false || !Number(current.accounts))
+  ) {
     return { renter, stack: current, moved: false };
   }
 
@@ -153,8 +163,11 @@ async function ensureStackWithRoom(renter, needed, actor = "operator-farm") {
   const target = renterAdmin().chooseStackWithRoom(bots, want);
   if (!target) {
     const detail = current
-      ? "the holder's stack " + renter.botFile + " is full (" +
-        current.accounts + "/" + current.capacity + ")"
+      ? current.running === false
+        ? "the holder's stack " + renter.botFile +
+          " has room but its container is STOPPED"
+        : "the holder's stack " + renter.botFile + " is full (" +
+          current.accounts + "/" + current.capacity + ")"
       : "the holder's stack " + renter.botFile + " could not be read";
     const e = new Error(
       "No rental bot stack has room for " + want + " more account(s) — " + detail +
@@ -207,8 +220,17 @@ async function previewFreshAccounts({ count = 1 } = {}) {
       ? (opts.bots || []).find((b) => key(b.host, b.file) === key(renter.botHost, renter.botFile))
       : null;
     const best = renterAdmin().chooseStackWithRoom(opts.bots || [], 1);
-    stack = cur && Number(cur.remaining) > 0 ? cur : best || cur;
-    stackRoom = Math.max(0, Number(stack && stack.remaining) || 0);
+    // Same rule as ensureStackWithRoom: the holder's own stack only counts if
+    // it has room AND is running, otherwise the preview promises a slot on a
+    // container that will never read it.
+    stack =
+      cur && Number(cur.remaining) > 0 && cur.running !== false
+        ? cur
+        : best || cur;
+    stackRoom =
+      stack && stack.running === false
+        ? 0
+        : Math.max(0, Number(stack && stack.remaining) || 0);
   } catch (e) {
     stack = null;
     stackRoom = 0;
@@ -238,7 +260,17 @@ async function previewFreshAccounts({ count = 1 } = {}) {
     stackCapacity: stack ? stack.capacity : null,
     stackRoom,
     offlineHosts,
-    blockedBy: willAdd > 0 ? null : (stackRoom <= 0 ? "stack-full" : (eligible.length ? "quota" : "no-eligible-accounts")),
+    stackRunning: stack ? (stack.running === undefined ? null : stack.running) : null,
+    blockedBy:
+      willAdd > 0
+        ? null
+        : stack && stack.running === false
+          ? "stack-stopped"
+          : stackRoom <= 0
+            ? "stack-full"
+            : eligible.length
+              ? "quota"
+              : "no-eligible-accounts",
     willAdd,
     holderExists: !!renter,
     preview: eligible.slice(0, willAdd).map((a) => ({
@@ -332,21 +364,58 @@ async function farmFreshAccounts({
     },
   });
 
-  // Restart the holder's bot once so it picks up the new accounts (best effort:
-  // a stopped bot stays stopped until the operator starts it).
+  // Make the bot actually pick the new accounts up. A running container is
+  // restarted; a STOPPED one is now STARTED.
+  //
+  // It used to be left exactly as it was, silently, returning `restarted:false`
+  // to callers that never read it — which is how a paid order could be marked
+  // delivered against a container that was not running at all: the buyer's
+  // account sat in a config file nobody was reading (2026-09-20, 13 orders x
+  // 30h). startConfigContainer registers the compose service if it is missing
+  // and refuses an empty config; we call it AFTER the accounts are written, so
+  // its `no_accounts` guard cannot bite us.
   let restarted = false;
+  let startError = "";
   if (added.length) {
     try {
-      const { containerForFile, restartConfigContainer } = botConfig();
+      const { containerForFile, restartConfigContainer, startConfigContainer } =
+        botConfig();
       const container = containerForFile(renter.botFile);
       const states = await hosts.dockerPs(host);
       const st = container && states[container];
-      if (st && st.state === "running") {
+      if (st && /^running/i.test(String(st.state || ""))) {
         await restartConfigContainer(host, renter.botFile);
-        restarted = true;
+      } else {
+        await startConfigContainer(host, renter.botFile);
       }
-    } catch {
-      /* best effort */
+      restarted = true;
+    } catch (e) {
+      // Still best-effort: the accounts ARE placed and a paid order must not be
+      // rolled back over a docker hiccup. But no longer SILENT — "delivered to
+      // a bot that is not running" is the one outcome that must never pass
+      // unnoticed, and it previously left no trace anywhere.
+      startError = ((e && e.message) || String(e)).slice(0, 300);
+      logEvent({
+        category: "renter",
+        action: "operator_bot_start_failed",
+        actor,
+        severity: "error",
+        subject: renter.botHost + "/" + renter.botFile,
+        count: added.length,
+        detail:
+          "placed " + added.length + " account(s) but could not start the bot: " +
+          startError + " — those buyers are NOT farming",
+      });
+      try {
+        require("./telegram").sendTelegram(
+          "\u26a0\ufe0f Rent-farm accounts placed but the bot is NOT running\n" +
+            "stack: " + renter.botHost + "/" + renter.botFile + "\n" +
+            "accounts: " + added.map((a) => a.login).join(", ") + "\n" +
+            "error: " + startError,
+        ).catch(() => {});
+      } catch {
+        /* the SystemEvent above is the durable record */
+      }
     }
   }
 
