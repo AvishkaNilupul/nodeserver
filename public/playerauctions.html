@@ -81,6 +81,15 @@
     return fetch(path, { credentials: "same-origin" }).then(function (r) { return r.json(); });
   }
 
+  function post(path, body) {
+    return fetch(path, {
+      method: "POST",
+      credentials: "same-origin",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body || {}),
+    }).then(function (r) { return r.json(); });
+  }
+
   // PlayerAuctions allows one session per account, so a dead session is an
   // expected state with a known one-step fix — say exactly that, not "error".
   function renderSessionDead(msg, howToFix) {
@@ -201,11 +210,20 @@
         if (!r.success) return show('<div class="empty">' + esc(r.message) + "</div>");
         var items = (r.data && (r.data.items || r.data.list || r.data)) || [];
         if (!Array.isArray(items)) items = [];
-        show(table(["From", "Subject", "When"], items.map(function (m) {
-          return [esc(m.senderName || m.from || "—"),
-            esc(m.title || m.subject || m.content || "—"),
-            esc(m.createTime || m.date || "")];
-        })));
+        if (!items.length) return show('<div class="empty">Nothing here.</div>');
+        var rows = items.map(function (m) {
+          var who = esc(m.memberName || m.senderName || m.from || "—");
+          if (m.isFromSystem) who += ' <span class="muted">(system)</span>';
+          var subj = esc(m.subject || m.title || m.content || "—");
+          if (m.unRead) subj = "<strong>" + subj + "</strong>";
+          var when = esc(m.sendTimeString || m.createTime || m.date || "");
+          return '<tr style="cursor:pointer" onclick="window.__paThread(' + Number(m.id) +
+            ',' + (m.isFromSystem ? "true" : "false") + ')"><td>' + who +
+            "</td><td>" + subj + "</td><td>" + when + "</td></tr>";
+        }).join("");
+        show('<div class="muted" style="margin-bottom:10px">Click a row to read the conversation.</div>' +
+          '<div class="scroll"><table><thead><tr><th>From</th><th>Subject</th><th>When</th>' +
+          "</tr></thead><tbody>" + rows + "</tbody></table></div>");
       });
       return;
     }
@@ -220,6 +238,72 @@
   }
 
   window.__paTab = function (t) { state.tab = t; loadTab(); };
+
+  window.__paThread = function (id, isSystem) {
+    show('<div class="empty">Loading conversation…</div>');
+    get("/playerauctions/messages/" + encodeURIComponent(id) + "?system=" + (isSystem ? "true" : "false"))
+      .then(function (r) {
+        if (!r.success) return show('<div class="empty">' + esc(r.message) + "</div>");
+        var d = r.data || {};
+        var head =
+          '<button onclick="window.__paTab(\'messages\')">← Back to messages</button>' +
+          '<div style="margin:12px 0 2px"><strong>' + esc(d.subject || "Conversation") + "</strong></div>" +
+          '<div class="muted" style="margin-bottom:12px">' +
+          (d.orderId ? "Order " + esc(d.orderId) + " · " : "") +
+          (d.buyerName ? "Buyer " + esc(d.buyerName) + " · " : "") +
+          esc(d.orderStatus || "") + "</div>";
+        var msgs = (d.comments || []).map(function (c) {
+          var side = c.mine ? "flex-end" : "flex-start";
+          var bg = c.mine ? "#173a2a" : "#182335";
+          return '<div style="display:flex;justify-content:' + side + ';margin:8px 0">' +
+            '<div style="max-width:80%;background:' + bg + ';border:1px solid var(--line);' +
+            'border-radius:10px;padding:8px 12px">' +
+            '<div class="muted" style="font-size:12px;margin-bottom:4px">' +
+            esc(c.who) + " · " + esc(c.at) + "</div>" +
+            '<div style="white-space:pre-wrap;word-break:break-word">' + esc(c.text) + "</div></div></div>";
+        }).join("");
+        state.thread = { id: id, isSystem: isSystem, orderId: d.orderId };
+        var composer = "";
+        if (d.orderId && !isSystem) {
+          composer =
+            '<div style="margin-top:14px;border-top:1px solid var(--line);padding-top:12px">' +
+            '<textarea id="paReplyText" maxlength="300" rows="3" placeholder="Reply to ' +
+            esc(d.buyerName || "buyer") + '…" style="width:100%;background:#0b1220;color:var(--text);' +
+            'border:1px solid var(--line);border-radius:8px;padding:8px 10px;font:inherit;resize:vertical"></textarea>' +
+            '<div style="display:flex;align-items:center;gap:12px;margin-top:8px">' +
+            '<button class="primary" id="paSendBtn" onclick="window.__paSend()">Send reply</button>' +
+            '<span class="muted">Max 300 characters · goes to the buyer on PlayerAuctions</span>' +
+            '<span id="paReplyMsg" class="muted" style="margin-left:auto"></span></div></div>';
+        }
+        show(head + (msgs || '<div class="empty">No messages in this thread.</div>') + composer);
+      });
+  };
+
+  window.__paSend = function () {
+    var t = state.thread || {};
+    var el = document.getElementById("paReplyText");
+    var msg = document.getElementById("paReplyMsg");
+    var btn = document.getElementById("paSendBtn");
+    if (!el || !t.orderId) return;
+    var text = (el.value || "").trim();
+    if (!text) { if (msg) msg.textContent = "Type a message first."; return; }
+    if (text.length > 300) { if (msg) msg.textContent = "Over the 300-character limit."; return; }
+    if (btn) btn.disabled = true;
+    if (msg) msg.textContent = "Sending…";
+    post("/playerauctions/messages/reply", { orderId: t.orderId, content: text })
+      .then(function (r) {
+        if (r && r.success) {
+          window.__paThread(t.id, t.isSystem);
+        } else {
+          if (btn) btn.disabled = false;
+          if (msg) msg.textContent = "Failed: " + ((r && r.message) || "unknown error");
+        }
+      })
+      .catch(function (e) {
+        if (btn) btn.disabled = false;
+        if (msg) msg.textContent = "Failed: " + (e.message || "network error");
+      });
+  };
 
   window.__paCheck = function () {
     get("/playerauctions/health").then(function () { boot(); });

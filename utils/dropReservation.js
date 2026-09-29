@@ -155,7 +155,7 @@ async function releaseAccountsForTag(accountIds, tag) {
 // Release one set's reservation from specific accounts (e.g. a Shop refund
 // frees only the refunded set's drops, leaving the buyer's other games on the
 // same account untouched). An optional `tag` narrows the release to rows
-// reserved by that claim owner, so e.g. a guardian fix on a FunPay listing
+// reserved by that claim owner, so e.g. a guardian fix on a listing
 // can't free drops a Shop buyer paid for.
 async function releaseSetForAccounts(accountIds, soldSetId, tag) {
   const ids = (Array.isArray(accountIds) ? accountIds : [accountIds])

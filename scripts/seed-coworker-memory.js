@@ -225,7 +225,7 @@ const SEED = [
   {
     key: "marketplaces", topic: "marketplaces", pinned: false,
     text:
-      "Publish targets: plati, ggsel, zeusx, digiseller, g2g, funpay, z2u. Digiseller has NO edit API " +
+      "Publish targets: plati, ggsel, zeusx, digiseller, g2g. Digiseller has NO edit API " +
       "(text changes require republishing). Gameflip cannot edit an on-sale listing (draft -> patch -> " +
       "onsale). Compare across them with db_group by marketplace.",
   },

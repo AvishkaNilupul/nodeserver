@@ -13,7 +13,7 @@ const marketplaceListingSchema = new mongoose.Schema(
       // UnclaimedAccount, and pointing it at some near-enough set would just
       // mislabel what the buyer receives.
       // An account listing (accountOffer, below) has none either, for the same
-      // reason plus a sharper one: z2uFulfiller picks its branch by asking
+      // reason plus a sharper one: a fulfiller picks its branch by asking
       // `row.set` FIRST, so a set left on an offer-backed row would quietly
       // deliver somebody else's archive account against the owner's stock.
       // An owner-made no-claim row (`noclaimStock`, below) is the opposite
@@ -31,12 +31,9 @@ const marketplaceListingSchema = new mongoose.Schema(
         "digiseller",
         "g2g",
         "ggsel",
-        "funpay",
-        "epicnpc",
         "zeusx",
         "eldorado",
         "playerauctions",
-        "z2u",
       ],
       required: true,
       index: true,
@@ -60,7 +57,7 @@ const marketplaceListingSchema = new mongoose.Schema(
       default: "manual",
       index: true,
     },
-    // FunPay has no per-offer API: delisting re-saves the offer's editor form,
+    // Some markets have no per-offer API: delisting re-saves the editor form,
     // which needs the category node id. Stored here at publish time.
     externalNode: { type: String, default: "" },
     url: { type: String, default: "" },
@@ -202,15 +199,10 @@ const marketplaceListingSchema = new mongoose.Schema(
     // paused deliberately by the operator. Only rows carrying this flag are ever
     // resumed automatically.
     autoPaused: { type: Boolean, default: false },
-    // When the Z2U shelf keeper last extended this offer's duration.
-    //
-    // Z2U does NOT move the publish date when an offer is extended, and the
-    // published date plus the duration is the only expiry signal the seller
-    // panel gives. So an extended offer keeps computing as overdue forever, and
-    // without this the keeper re-extends the same offers on every tick —
-    // hammering a rate-limited endpoint to no effect. Ours to remember, because
-    // Z2U will not tell us.
-    lastExtendedAt: { type: Date, default: null },
+    // When the campaign-scoped auto-rebundle last retitled this listing to the
+    // fuller set its accounts had farmed. A one-hour cooldown reads this so the
+    // automatic pass can never put a listing into an off-sale/on-sale loop.
+    rebundledAt: { type: Date, default: null },
     lastError: { type: String, default: "" },
     // Gameflip auto-delivery: the farmed account attached to this listing as
     // an auto-delivered digital code. The account is reserved (soldAt) while

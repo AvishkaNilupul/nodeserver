@@ -190,7 +190,35 @@ function assertCapacity(current, additions, capacity) {
 // do not spread a handful of accounts across many running containers.
 function chooseAvailableStack(stacks) {
   return (Array.isArray(stacks) ? stacks : [])
-    .filter((stack) => Number(stack.remaining) > 0)
+    // Room is not enough — something has to be READING the config. A stopped
+    // container advertises its whole capacity and farms nothing, so a paid
+    // rent-farm order routed there is money taken for no service (2026-09-20:
+    // 13 orders, 30h, dropCount:0 the only tell).
+    //
+    // `running === false` is the ONLY value that disqualifies. `null` means we
+    // could not ask the host (slow link, dockerPs failed) and must stay
+    // eligible: an unreachable host is not a dead stack, and refusing it would
+    // take every rent-farm offer off sale whenever the Pi blinks. Rows from
+    // callers that never set the flag are `undefined` and also stay eligible,
+    // so this is backward-compatible with every existing caller.
+    //
+    // EXCEPT an EMPTY stack, which is eligible even while stopped. A freshly
+    // provisioned stack has no container yet — provisionEmptyConfig deliberately
+    // does not start one, and startConfigContainer refuses an empty config
+    // because an accountless bot spins in a login-retry loop. Without this
+    // exception a brand-new stack could never be chosen (not running) and never
+    // start (no accounts), so once every running stack filled, orders would fail
+    // with no_stack_room and there would be no way to add capacity.
+    //
+    // It does not reopen the 2026-09-20 trap, which was a stack holding real
+    // buyers whose container was never started: farmFreshAccounts now writes the
+    // accounts and then STARTS the container, alerting if that fails. "Stopped
+    // and empty" is un-started; "stopped and occupied" is broken.
+    .filter(
+      (stack) =>
+        Number(stack.remaining) > 0 &&
+        (stack.running !== false || !Number(stack.accounts)),
+    )
     .slice()
     .sort((a, b) => {
       const aLocal = hostId(a.host) === "local" ? 1 : 0;

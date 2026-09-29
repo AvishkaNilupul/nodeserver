@@ -45,7 +45,7 @@ const suppliedAccountSchema = new mongoose.Schema(
     // Lifecycle. available -> fed | sold; removed = withdrawn by the owner.
     //
     // "fed"  = handed to a platform's own vault (a Digiseller content unit, a
-    //          GGSel content unit, a FunPay secret, a Gameflip code, a ZeusX
+    //          GGSel content unit, a Gameflip code, a ZeusX
     //          field). The platform will hand it to the next buyer without ever
     //          calling us back, so the row is no longer sellable ANYWHERE else —
     //          but it is not yet known to have reached a buyer, which is why it
@@ -66,12 +66,10 @@ const suppliedAccountSchema = new mongoose.Schema(
         "gameflip",
         "digiseller",
         "ggsel",
-        "funpay",
         "zeusx",
         "eldorado",
         "playerauctions",
         "g2g",
-        "z2u",
       ],
       default: "",
       index: true,

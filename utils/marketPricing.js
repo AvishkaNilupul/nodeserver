@@ -31,7 +31,7 @@
 //   gameflip    92   0.75   1.25     1.28   4.50
 //   ggsel       13   0.75   0.75     1.17   3.00
 //
-// Every other market — zeusx, playerauctions, g2g, eldorado, epicnpc, funpay —
+// Every other market — zeusx, playerauctions, g2g, eldorado —
 // has NEVER recorded a priced sale. Any price there is inference, and this
 // module says so rather than inventing evidence.
 //

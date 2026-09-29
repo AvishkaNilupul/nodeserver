@@ -53,7 +53,7 @@ const marketResearchSchema = new mongoose.Schema(
     ownSales: { type: Number, default: 0 },
     ownRevenue: { type: Number, default: 0 },
     // Those sales split by marketplace: { zeusx: { sales, revenue }, ... }.
-    // For ZeusX, Z2U and EpicNPC this is the ONLY demand signal that exists —
+    // For ZeusX this is the ONLY demand signal that exists —
     // ZeusX publishes no keyword search and the other two sit behind bot
     // protection a server-side fetch cannot pass, so their competitors are
     // unobservable. What we sell there is still measurable, and it is the

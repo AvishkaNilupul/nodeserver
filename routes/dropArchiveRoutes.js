@@ -26,6 +26,13 @@ const {
 } = require("../utils/archiveExclusions");
 const archiveSnapshot = require("../utils/archiveSnapshot");
 const unclaimedAutoList = require("../utils/unclaimedAutoList");
+const {
+  lookupAccountByUsername,
+  suggestUsernames,
+  // Re-picks the most authoritative token AFTER the Epic rows are filtered out.
+  pickPrimary,
+} = require("../utils/accountLookup");
+const { logEvent, actorFromReq } = require("../utils/systemLog");
 
 // Reservation tags written by the marketplace fulfillers into
 // DropLog.soldToUsername. A drop carrying one is attached to a live
@@ -342,6 +349,161 @@ router.get("/drops-archive/accounts", requireSuperadmin, async (req, res) => {
     res.status(500).json({ success: false, message: "Server error" });
   }
 });
+
+// ------------------------------------------------------------------
+// Username -> client token (for the Twitch inventory checker)
+// ------------------------------------------------------------------
+// twitch-inventory.html can only ask Twitch anything with an account's live
+// ClientSecret, which until now had to be pasted by hand or arrive through the
+// Bots page's "Check drops" link. This resolves a LOGIN to that token out of
+// whichever collection the account currently lives in — bot, pool, unclaimed,
+// supplied stock or renter inventory — so the operator can type a username
+// instead of first hunting down its token.
+//
+// Superadmin + session gated: it hands back a live Twitch token, the same
+// secret /twitch-inventory.html already receives in its URL hash today. It asks
+// accountLookup for NO credentials, so no password or email is ever decrypted
+// on this path, and Epic rows are dropped — their token is an Epic refresh
+// token, which Twitch's GQL would only reject.
+//
+// A miss returns 404 plus prefix suggestions, so a half-remembered login is
+// recoverable without a second endpoint.
+const TOKEN_LOOKUP_SOURCE_LABEL = {
+  bot: "Drops Archive bot",
+  pool: "Account pool",
+  unclaimed: "No-claim farm",
+  supplied: "Supplied stock",
+  renter: "Renter inventory",
+};
+
+// One short human line per match, so the operator can tell two rows for the
+// same login apart (which bot it sits on, what the pool thinks of it).
+function tokenSourceDetail(s) {
+  const m = s.meta || {};
+  const bits = [];
+  if (s.source === "bot") {
+    if (m.host) bits.push(m.host + (m.container ? " / " + m.container : ""));
+    if (m.configFile) bits.push(m.configFile);
+    if (m.enabled === false) bits.push("disabled");
+    if (m.soldAt) bits.push("sold");
+  } else if (s.source === "pool") {
+    if (m.status) bits.push(m.status);
+    if (Array.isArray(m.soldGames) && m.soldGames.length) {
+      bits.push("sold: " + m.soldGames.join(", "));
+    }
+  } else if (s.source === "unclaimed") {
+    if (m.game) bits.push(m.game);
+    if (m.status) bits.push(m.status);
+    if (m.soldAt) bits.push("sold");
+  } else if (s.source === "supplied") {
+    if (m.market) bits.push(m.market);
+    if (m.status) bits.push(m.status);
+  } else if (s.source === "renter") {
+    if (m.host) bits.push(m.host);
+    if (m.enabled === false) bits.push("disabled");
+  }
+  return bits.join(" · ");
+}
+
+router.get(
+  "/drops-archive/account-token",
+  requireSuperadmin,
+  async (req, res) => {
+    const username = String(req.query.username || "").trim();
+    if (!username) {
+      return res
+        .status(400)
+        .json({ success: false, message: "Username required" });
+    }
+
+    let result;
+    try {
+      result = await lookupAccountByUsername(username, {
+        includeCredentials: false,
+      });
+    } catch (err) {
+      console.error("drops-archive account-token error:", err.message);
+      return res.status(500).json({ success: false, message: "Server error" });
+    }
+
+    // Twitch tokens only — an Epic refresh token is not something this page can
+    // use, and offering it would only produce a confusing Twitch error.
+    const sources = (result.sources || []).filter(
+      (s) => s.tokenType === "twitch_client_secret",
+    );
+    const withToken = sources.filter((s) => s.clientToken);
+    const { clientToken, primarySource } = pickPrimary(withToken);
+
+    // The same login can carry DIFFERENT tokens in different collections (a
+    // pool row whose secret has since been rotated on the bot, say). Offer each
+    // distinct token so the operator can try the other one when the first is
+    // dead, instead of going back to hunting by hand.
+    const byToken = new Map();
+    for (const s of withToken) {
+      const opt = byToken.get(s.clientToken) || {
+        clientToken: s.clientToken,
+        login: s.login || username,
+        sources: [],
+      };
+      opt.sources.push(s.source);
+      byToken.set(s.clientToken, opt);
+    }
+
+    logEvent({
+      category: "accounts",
+      action: "ui_token_lookup",
+      actor: actorFromReq(req),
+      severity: "info",
+      subject: username,
+      detail: result.found
+        ? "inventory-checker token lookup hit (" + sources.length + " source(s))"
+        : "inventory-checker token lookup miss",
+      meta: {
+        found: result.found,
+        twitchSources: sources.length,
+        withToken: withToken.length,
+        primarySource,
+      },
+    });
+
+    if (!sources.length) {
+      let suggestions = [];
+      try {
+        suggestions = await suggestUsernames(username);
+      } catch {
+        /* suggestions are a nicety; a miss is still a clean 404 */
+      }
+      return res.status(404).json({
+        success: false,
+        code: "not_found",
+        username,
+        found: false,
+        suggestions,
+        message: "No account with that username.",
+      });
+    }
+
+    // Found, but possibly tokenless (a bot row whose secret was never stored,
+    // an unclaimed row with no pool parent). That is a real answer, not an
+    // error — the page says so instead of pretending the login doesn't exist.
+    return res.json({
+      success: true,
+      found: true,
+      username,
+      login: (withToken[0] || sources[0]).login || username,
+      clientToken,
+      primarySource,
+      sources: sources.map((s) => ({
+        source: s.source,
+        label: TOKEN_LOOKUP_SOURCE_LABEL[s.source] || s.source,
+        login: s.login || "",
+        hasToken: !!s.clientToken,
+        detail: tokenSourceDetail(s),
+      })),
+      options: [...byToken.values()],
+    });
+  },
+);
 
 // ------------------------------------------------------------------
 // Bad-token accounts (dead accounts) — their own tab + bulk removal

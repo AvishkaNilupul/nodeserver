@@ -18,7 +18,7 @@
 //                                         through spendAccount, so this is the
 //                                         most complete unit count we have
 //   SaleSignal        "listing_sold"    — Gameflip + Digiseller/GGSel only.
-//                                         Eldorado / PlayerAuctions / Z2U / G2G
+//                                         Eldorado / PlayerAuctions / G2G
 //                                         write no signal at all
 //   SaleSignal        "connected"       — the drop scanner saw a buyer link the
 //                                         account. Proves a sale but names no
@@ -132,7 +132,7 @@ async function soldUnitsByBucket({ days = 30 } = {}) {
   };
 
   // 1. The unclaimed ledger — every automated channel, including the four
-  //    (Eldorado, PlayerAuctions, Z2U, G2G) that write no SaleSignal.
+  //    (Eldorado, PlayerAuctions, G2G) that write no SaleSignal.
   const ledgers = await UnclaimedAccount.find(
     { status: "sold", soldAt: { $gte: since } },
     { login: 1, game: 1, market: 1, soldAt: 1, set: 1, soldPriceUsd: 1, soldMarket: 1 },

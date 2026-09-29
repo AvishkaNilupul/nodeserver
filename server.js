@@ -85,6 +85,10 @@ const g2gSessionRefresher = require("./utils/g2gSessionRefresher");
 const g2gFulfiller = require("./utils/g2gFulfiller");
 const playerauctionsSessionWatch = require("./utils/playerauctionsSessionWatch");
 const playerauctionsRoutes = require("./routes/playerauctionsRoutes");
+// Token-gated (NOT session/2fa gated) one-click cookie hand-off — mounted early,
+// before the admin auth cascade, because the browser extension that calls it has
+// no admin session. See routes/paSessionInstallRoutes.js.
+const paSessionInstallRoutes = require("./routes/paSessionInstallRoutes");
 const marketplaceGuardian = require("./utils/marketplaceGuardian");
 const primeWatcher = require("./utils/primeWatcher");
 const campaignWatcher = require("./utils/campaignWatcher");
@@ -379,6 +383,12 @@ app.use(twoFactorRoutes);
 // Per-admin self-service settings (e.g. linking a personal Telegram chat).
 // Each route guards with requireAdmin; kept out of the 2FA enforcement gate so
 // it stays reachable like the security page.
+// One-click PlayerAuctions cookie hand-off. Gated by its own shared secret, not
+// the admin session, so it is mounted here — ahead of the enforce2fa cascade —
+// where the browser extension (which carries no admin session) can reach it.
+// Off entirely until a secret is set (404 otherwise).
+app.use(paSessionInstallRoutes);
+
 app.use(settingsRoutes);
 app.use(enforce2fa, adminManageRoutes);
 

@@ -209,7 +209,7 @@ async function statsForOffers(stock, ids) {
 // Where each offer is published, for the rows list. One query for the page.
 //
 // autoPaused/lastError are part of that answer (S8): every marketplace stock
-// sync pauses an offer-backed row — Eldorado pause, PA hide, G2G delist, Z2U
+// sync pauses an offer-backed row — Eldorado pause, PA hide, G2G delist
 // off_line — while leaving status:"active", so a row the offer is HIDDEN on is
 // indistinguishable from a live one unless these two travel with it. This is
 // the only page that lists account listings, and the owner finds problems by

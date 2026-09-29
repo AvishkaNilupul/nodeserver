@@ -60,7 +60,7 @@ const SystemHealthRun = require("../models/SystemHealthRun");
 
 const router = express.Router();
 
-// Z2U is deliberately excluded everywhere: no capture, no card, no category.
+// Markets with no console surface are simply absent from MARKETS below.
 const MARKETS = [
   "gameflip",
   "digiseller",
@@ -69,7 +69,6 @@ const MARKETS = [
   "eldorado",
   "playerauctions",
   "g2g",
-  "funpay",
 ];
 const MARKET_SET = new Set(MARKETS);
 
@@ -538,11 +537,6 @@ router.get(
     try {
       const market = String(req.params.market || "").toLowerCase();
       const category = String(req.params.category || "").toLowerCase();
-      if (market === "z2u") {
-        return res
-          .status(400)
-          .json({ success: false, message: "z2u is deliberately excluded from the console" });
-      }
       if (!MARKET_SET.has(market)) {
         return res.status(400).json({ success: false, message: "unknown marketplace" });
       }

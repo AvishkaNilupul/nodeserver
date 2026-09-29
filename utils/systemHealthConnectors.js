@@ -36,9 +36,9 @@
 // marketplace is actually earning.
 const CONNECTOR_GROUP = "Connectors";
 
-// The eight the owner sells on. z2u is deliberately absent: it is run and
-// watched separately (utils/z2uFulfiller.js keeps its own shelf), so probing it
-// here would only add a ninth live call for a surface nobody reads on this page.
+// The seven the owner sells on. Each is probed with one live call, so this
+// list is deliberately short: a surface nobody reads on this page is not
+// worth an extra hourly probe.
 const MARKETS = [
   { id: "gameflip", label: "Gameflip", test: "gameflipTest" },
   { id: "digiseller", label: "Digiseller / Plati", test: "digisellerTest" },
@@ -47,17 +47,16 @@ const MARKETS = [
   { id: "eldorado", label: "Eldorado", test: "eldoradoTest" },
   { id: "playerauctions", label: "PlayerAuctions", test: "playerauctionsTest" },
   { id: "g2g", label: "G2G", test: "g2gTest" },
-  { id: "funpay", label: "FunPay", test: "funpayTest" },
 ];
 
 // Space between two live probes. Sized against Gameflip, the only one of the
-// eight with a rate limiter we have actually tripped; the others are far more
-// forgiving. Seven gaps ~= 10.5s added to an hourly run.
+// seven with a rate limiter we have actually tripped; the others are far more
+// forgiving. Six gaps ~= 9s added to an hourly run.
 const GAP_MS = 1500;
 
 // Local watchdog on each probe. The underlying axios calls already set 20-30s
-// timeouts of their own, but not every path through them is bounded (FunPay
-// scrapes HTML, G2G may refresh a token mid-call), and one hung connector must
+// timeouts of their own, but not every path through them is bounded (some
+// scrape HTML, G2G may refresh a token mid-call), and one hung connector must
 // never be able to hold the whole hourly run open.
 const CALL_BUDGET_MS = 30000;
 
@@ -88,8 +87,8 @@ const GATEWAY_STATUSES = new Set([408, 502, 503, 504, 520, 521, 522, 524]);
 const AUTH_STATUSES = new Set([401, 403]);
 
 // The credential actually being refused, in the words each connector uses.
-// eldError/paError write "session not accepted"; funpayTest writes "golden_key
-// not accepted"; digisellerToken throws "apilogin failed: ..."; Plati says
+// eldError/paError write "session not accepted"; digisellerToken throws
+// "apilogin failed: ..."; Plati says
 // "продавец товара заблокирован" when the seller account itself is blocked.
 const AUTH_MESSAGE_RE =
   /not accepted|unauthori[sz]ed|forbidden|account suspended|apilogin failed|invalid[ _-]?(?:api[ _-]?)?(?:key|token|secret|credential|session)|token (?:is )?(?:expired|invalid)|golden_key|заблокирован/i;
@@ -432,7 +431,7 @@ function describeOutcome({ market, outcome, err, detail, elapsedMs, live, budget
 
 /**
  * One check per marketplace: gameflip, digiseller, ggsel, zeusx, eldorado,
- * playerauctions, g2g, funpay. Always resolves, always returns one result per
+ * playerauctions and g2g. Always resolves, always returns one result per
  * market, never throws — a connector sweep that can die takes the whole health
  * run with it.
  *

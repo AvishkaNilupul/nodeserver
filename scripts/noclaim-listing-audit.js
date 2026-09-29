@@ -10,7 +10,7 @@
 // regular auto-farm CLAIMS as it farms, so its Drop Archive accounts are the
 // wrong stock for those games — that is the whole reason the no-claim farm
 // exists. Eldorado and PlayerAuctions guard this at publish and at delivery;
-// Gameflip, GGSel, Digiseller, ZeusX, EpicNPC and FunPay do not.
+// Gameflip, GGSel, Digiseller and ZeusX do not.
 //
 // WHY THIS DOES NOT DELIST ON GAME NAME ALONE
 // A listing for a no-claim game is only broken if it cannot actually be
@@ -20,7 +20,7 @@
 // ZERO deliverable accounts is proposed for delisting. Anything still
 // fulfillable is reported and left alone.
 //
-// EpicNPC has no delist API (it is a browser bridge), so those are reported for
+// Markets with no delist API are reported for
 // the operator to remove by hand rather than silently marked done.
 require("dotenv").config();
 const mongoose = require("mongoose");
@@ -42,7 +42,7 @@ const DELAY_MS = parseInt(
 );
 
 // Markets we can take a listing down on programmatically.
-// Mirrors the dispatch in routes/marketplaceRoutes.js. Only EpicNPC is absent
+// Mirrors the dispatch in routes/marketplaceRoutes.js. Markets with no API are absent
 // there too — it is a browser bridge with no per-offer API.
 const DELISTERS = {
   gameflip: (r) => mp.gameflipDelist(r.externalId),
@@ -51,7 +51,6 @@ const DELISTERS = {
   ggsel: (r) => mp.ggselDelist(r.externalId),
   zeusx: (r) => mp.zeusxDelist(r.externalId),
   eldorado: (r) => mp.eldoradoDelist(r.externalId),
-  funpay: (r) => mp.funpayDelist(r.externalId, r.externalNode),
   playerauctions: (r) => mp.playerauctionsDelist(r.externalId),
 };
 

@@ -59,13 +59,13 @@ const SUPPORTED_MARKETS = VAULT_MARKETS.concat(CLAIM_AT_SALE_MARKETS);
 
 // Most accounts a claim-at-sale offer may advertise (before it is shared out
 // among the set's other claim-at-sale offers).
-const ADVERTISE_MAX = 25;
+const ADVERTISE_MAX = 80;
 
 // Ceiling on one claim. A marketplace "quantity" is not always a number of
 // accounts (PlayerAuctions counts ITEMS), so a caller passing one straight
 // through could otherwise drain the farm. A short claim is recoverable;
 // accounts handed out by mistake are not.
-const MAX_CLAIM = 50;
+const MAX_CLAIM = 80;
 
 const MARKET_LABELS = {
   gameflip: "Gameflip",
@@ -74,10 +74,7 @@ const MARKET_LABELS = {
   eldorado: "Eldorado",
   playerauctions: "PlayerAuctions",
   g2g: "G2G",
-  funpay: "FunPay",
   zeusx: "ZeusX",
-  epicnpc: "EpicNPC",
-  z2u: "Z2U",
 };
 
 const MODES = ["fed", "sold"];

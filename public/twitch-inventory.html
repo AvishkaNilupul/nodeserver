@@ -71,6 +71,26 @@
   .btn-secondary { background: var(--panel-2); border: 1px solid var(--border); }
   .btn-secondary:hover { background: #2a2a30; }
 
+  .or-sep { display: flex; align-items: center; gap: 10px; margin: 16px 0 14px; color: var(--muted); font-size: 12px; }
+  .or-sep::before, .or-sep::after { content: ""; flex: 1; height: 1px; background: var(--border); }
+
+  #lookupInfo { display: none; margin-top: 12px; font-size: 12.5px; color: var(--muted); }
+  #lookupInfo.on { display: block; }
+  #lookupInfo b { color: var(--text); }
+  .chips { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 8px; }
+  .src-chip {
+    background: var(--panel-2); border: 1px solid var(--border); border-radius: 999px;
+    padding: 4px 11px; font-size: 11.5px; color: var(--muted);
+  }
+  .src-chip b { font-size: 11.5px; }
+  .src-chip.notoken { opacity: .55; }
+  .chips button {
+    background: var(--panel-2); border: 1px solid var(--border); color: var(--text);
+    font-size: 11.5px; font-weight: 600; padding: 5px 11px; border-radius: 999px;
+  }
+  .chips button:hover { background: #2a2a30; }
+  .chips button.active { border-color: var(--accent); color: var(--accent); }
+
   details.advanced { margin-top: 12px; }
   details.advanced summary { cursor: pointer; color: var(--muted); font-size: 12px; }
   .hint { font-size: 12px; color: var(--muted); margin-top: 8px; }
@@ -216,11 +236,22 @@
 <body>
 <header>
   <h1>Twitch Drops Inventory Checker</h1>
-  <p>Paste your Twitch auth token to see your in-progress drops, progress, and what's claimable.</p>
+  <p id="subtitle">Look an account up by username, or paste a Twitch auth token, to see its in-progress drops, progress, and what's claimable.</p>
 </header>
 
 <div class="container">
   <div class="controls">
+    <div class="row">
+      <div class="field">
+        <label for="username">Account username — looks its saved client token up in the database</label>
+        <input id="username" type="text" placeholder="e.g. mybotaccount123" autocomplete="off" spellcheck="false" />
+      </div>
+      <button id="lookupBtn">Look up &amp; check</button>
+    </div>
+    <div id="lookupInfo"></div>
+
+    <div class="or-sep"><span>or paste a token directly</span></div>
+
     <div class="row">
       <div class="field">
         <label for="token">Twitch OAuth token (your bot's <code>ClientSecret</code>, or the twitch.tv <code>auth-token</code> cookie)</label>
@@ -248,9 +279,9 @@
     </details>
 
     <div class="hint" style="margin-top:12px;">
-      Where to find your token: it's the <code>ClientSecret</code> value inside your bot's <code>settings.json</code> (the bot uses it directly as the Twitch auth token). Keep the Android client-id default in that case.
+      By username: any account this system knows about — a Drops Archive bot, the pool, a no-claim farm, supplied stock or renter inventory — is resolved to its stored <code>ClientSecret</code> and checked straight away. Nothing is farmed or changed; the lookup only reads.
+      By token: it's the <code>ClientSecret</code> value inside your bot's <code>settings.json</code> (the bot uses it directly as the Twitch auth token). Keep the Android client-id default in that case.
       Alternatively, open <a class="link" href="https://www.twitch.tv" target="_blank" rel="noopener">twitch.tv</a> logged in → DevTools (F12) → Application → Cookies → copy <code>auth-token</code> (then switch to the web client-id in Advanced).
-      Your token stays in your browser and is sent only to Twitch's API.
     </div>
   </div>
 
@@ -270,7 +301,7 @@
   <div id="results"></div>
 </div>
 
-<footer>Runs entirely in your browser. No data is sent anywhere except Twitch's GraphQL API.</footer>
+<footer>Inventory is read in your browser, straight from Twitch's GraphQL API. A username lookup asks this server for that account's stored token — nothing else leaves the page.</footer>
 
 <script>
 const GQL_URL = "https://gql.twitch.tv/gql";
@@ -334,6 +365,15 @@ const filtersEl = $("filters");
 let lastCampaigns = [];
 let lastClaimed = [];
 let activeFilter = "all";
+// Last successful username lookup: { login, clientToken, primarySource,
+// sources[], options[] }. Kept so the source chips can switch between the
+// several tokens one login can legitimately have (see below).
+let lastLookup = null;
+// The exact token applyToken() last wrote into the box. Lets a later lookup
+// clear a stale auto-filled token without throwing away one that was pasted
+// by hand.
+let appliedToken = "";
+const DEFAULT_SUBTITLE = ($("subtitle") || {}).textContent || "";
 
 window.addEventListener("DOMContentLoaded", () => {
   const saved = localStorage.getItem("tdi_token");
@@ -350,17 +390,18 @@ window.addEventListener("DOMContentLoaded", () => {
     const params = new URLSearchParams(hash);
     const hToken = params.get("token");
     const hLogin = params.get("login");
+    const hUser = params.get("username") || hLogin;
     if (hToken) {
-      $("token").value = hToken;
-      // A bot ClientSecret always pairs with the Android client-id, so force the
-      // default here (overriding any remembered web client-id) to avoid a mismatch.
-      $("clientId").value = DEFAULT_CLIENT_ID;
-      if (hLogin) {
-        const sub = document.querySelector("header p");
-        if (sub) sub.textContent = "Checking drops for " + hLogin;
-      }
+      applyToken(hToken, hLogin);
+      if (hLogin) $("username").value = hLogin;
       history.replaceState(null, "", location.pathname + location.search);
       checkInventory();
+    } else if (hUser) {
+      // No token in the link — just a name. Resolve it here instead, so a page
+      // that only knows the login can still deep-link into this checker.
+      $("username").value = hUser;
+      history.replaceState(null, "", location.pathname + location.search);
+      lookupUsername(hUser);
     }
   }
 });
@@ -373,6 +414,176 @@ $("toggleTok").addEventListener("click", () => {
 
 $("fetchBtn").addEventListener("click", checkInventory);
 $("token").addEventListener("keydown", (e) => { if (e.key === "Enter") checkInventory(); });
+
+// ---------------------------------------------------------------------------
+// Username lookup
+// ---------------------------------------------------------------------------
+// Most accounts here already have their Twitch token stored server-side, so
+// hunting one down by hand to paste in was busywork. /drops-archive/account-token
+// resolves a login to that token across every account source (bot, pool,
+// no-claim, supplied stock, renter inventory) for the signed-in superadmin.
+// The token itself is only ever put in the token box — never in the URL, never
+// in a data- attribute — so it can't leak into history or a copied link.
+const lookupInfoEl = $("lookupInfo");
+
+$("lookupBtn").addEventListener("click", () => lookupUsername());
+$("username").addEventListener("keydown", (e) => { if (e.key === "Enter") lookupUsername(); });
+
+// Typing a token by hand means the panel's "found <login>" story no longer
+// describes what's in the box, so drop it. applyToken() sets .value directly,
+// which fires no input event, so a lookup never clears its own panel.
+$("token").addEventListener("input", () => {
+  if (!lastLookup) return;
+  lastLookup = null;
+  setLookupInfo("");
+  setSubtitle(DEFAULT_SUBTITLE);
+});
+
+lookupInfoEl.addEventListener("click", (e) => {
+  const sug = e.target.closest("button[data-suggest]");
+  if (sug) { lookupUsername(sug.dataset.suggest); return; }
+  const alt = e.target.closest("button[data-token-idx]");
+  if (alt && lastLookup) {
+    const idx = Number(alt.dataset.tokenIdx);
+    const opt = (lastLookup.options || [])[idx];
+    if (!opt) return;
+    applyToken(opt.clientToken, lastLookup.login);
+    renderLookupSources(lastLookup, idx);
+    checkInventory();
+  }
+});
+
+function setSubtitle(text) {
+  const sub = $("subtitle");
+  if (sub) sub.textContent = text;
+}
+
+function setLookupInfo(html) {
+  lookupInfoEl.innerHTML = html || "";
+  lookupInfoEl.classList.toggle("on", !!html);
+}
+
+// Fill the token box from a lookup (or a #token= link) and pin the client-id.
+function applyToken(token, login) {
+  $("token").value = token;
+  appliedToken = token;
+  // A stored ClientSecret is always an Android-app token, so force that
+  // client-id over any remembered web one — a mismatched pair just 401s.
+  $("clientId").value = DEFAULT_CLIENT_ID;
+  if (login) setSubtitle("Checking drops for " + login);
+}
+
+// Looking up another account means the one on screen is no longer the subject:
+// drop its results, its summary and — most importantly — anything selected for
+// a listing, so two accounts' drops can never end up in one set.
+function resetAccountView() {
+  lastCampaigns = [];
+  lastClaimed = [];
+  resultsEl.innerHTML = "";
+  summaryEl.style.display = "none";
+  filtersEl.style.display = "none";
+  picked.clear();
+  refreshSelBar();
+  setSubtitle(DEFAULT_SUBTITLE);
+}
+
+async function lookupUsername(nameOverride) {
+  const name = String(nameOverride != null ? nameOverride : $("username").value).trim();
+  if (!name) { setStatus("Enter a username to look up.", "error"); return; }
+  if (nameOverride != null) $("username").value = name;
+
+  $("lookupBtn").disabled = true;
+  setLookupInfo("");
+  lastLookup = null;
+  resetAccountView();
+  setStatus("Looking up " + name + " in the account database…");
+
+  try {
+    const res = await fetch("/drops-archive/account-token?username=" + encodeURIComponent(name), {
+      headers: { "Accept": "application/json" },
+      credentials: "same-origin"
+    });
+    let data = null;
+    try { data = await res.json(); } catch { /* an HTML error page, handled below */ }
+
+    if (res.status === 401 || res.status === 403) {
+      setStatus("Your admin session has expired — reload the page and sign in again.", "error");
+      return;
+    }
+    if (res.status === 404) {
+      setStatus("No account called \"" + name + "\" in the database.", "error");
+      renderSuggestions((data && data.suggestions) || []);
+      return;
+    }
+    if (!res.ok || !data || !data.success) {
+      setStatus((data && data.message) || ("Lookup failed (HTTP " + res.status + ")."), "error");
+      return;
+    }
+
+    lastLookup = data;
+    renderLookupSources(data, 0);
+    if (!data.clientToken) {
+      // The row exists but carries no token (a bot row whose secret was never
+      // stored, a no-claim row with no pool parent). Say so plainly rather
+      // than firing a request at Twitch with an empty token — and take the
+      // PREVIOUS account's auto-filled token back out of the box, or the next
+      // "Check Inventory" would quietly show that account's drops under this
+      // name. A hand-pasted token is left alone.
+      if (appliedToken && $("token").value === appliedToken) {
+        $("token").value = "";
+        appliedToken = "";
+      }
+      setStatus("Found " + data.login + ", but no client token is stored for it — paste one below.", "error");
+      return;
+    }
+    applyToken(data.clientToken, data.login);
+    checkInventory();
+  } catch (err) {
+    setStatus("Lookup failed: " + (err.message || err), "error");
+  } finally {
+    $("lookupBtn").disabled = false;
+  }
+}
+
+function renderLookupSources(data, activeIdx) {
+  const chips = (data.sources || []).map(s =>
+    '<span class="src-chip' + (s.hasToken ? "" : " notoken") + '">' +
+      "<b>" + escapeHtml(s.label || s.source) + "</b>" +
+      (s.detail ? " · " + escapeHtml(s.detail) : "") +
+      (s.hasToken ? "" : " · no token") +
+    "</span>"
+  ).join("");
+
+  let html = "Found <b>" + escapeHtml(data.login || data.username) + "</b>" +
+    (data.primarySource ? " — using the token from <b>" + escapeHtml(data.primarySource) + "</b>" : "") +
+    '<div class="chips">' + chips + "</div>";
+
+  // One login can hold different tokens in different collections — e.g. a pool
+  // row whose secret was rotated after the account was deployed on a bot. If a
+  // token turns out to be dead, the other one is one click away.
+  const opts = data.options || [];
+  if (opts.length > 1) {
+    html += "This login has " + opts.length + " different stored tokens:" +
+      '<div class="chips">' + opts.map((o, i) =>
+        '<button type="button" data-token-idx="' + i + '"' +
+        (i === activeIdx ? ' class="active"' : "") + ">Use the " +
+        escapeHtml(o.sources.join(" / ")) + " token</button>"
+      ).join("") + "</div>";
+  }
+  setLookupInfo(html);
+}
+
+function renderSuggestions(list) {
+  if (!list.length) {
+    setLookupInfo("No similar usernames in the database either. Check the spelling, or paste the token directly below.");
+    return;
+  }
+  setLookupInfo("Did you mean:" +
+    '<div class="chips">' + list.map(s =>
+      '<button type="button" data-suggest="' + escapeAttr(s.login) + '">' +
+      escapeHtml(s.login) + " <span style=\"opacity:.6\">(" + escapeHtml(s.sources.join(", ")) + ")</span></button>"
+    ).join("") + "</div>");
+}
 
 filtersEl.addEventListener("click", (e) => {
   const b = e.target.closest("button[data-filter]");

@@ -134,7 +134,7 @@ async function scanAccount(acc) {
     return { ok: false, error: acc.lastScanError };
   }
 
-  const { twitchId, login, drops } = inv;
+  const { twitchId, login, drops, inProgress } = inv;
   const newDrops = await upsertDrops(
     acc._id,
     acc.renter,
@@ -153,12 +153,33 @@ async function scanAccount(acc) {
   // Do NOT port that block here (no farmControl / stopFarmingGame on the renter
   // path) or rented accounts would stop farming the instant they're connected.
   acc.dropCount = await RenterDrop.countDocuments({ account: acc._id });
+  // Farming-progress bookkeeping — the SAME definition of "pending" the
+  // operator scanner uses (utils/dropScanner.js): work is outstanding only
+  // while the drop still needs watch time, so required>0 and current<required.
+  // A claimed drop is already banked, and an event drop that arrives with
+  // required=0 is complete on arrival; counting either would make a finished
+  // account look permanently busy.
+  //
+  // This is the only field that separates "this rent-farm account is watching a
+  // stream right now" from "this rent-farm account is doing nothing" —
+  // dropCount cannot, because it is monotonic and claimed-only.
+  const pending = (inProgress || []).filter(
+    (d) => !d.claimed && (d.required || 0) > 0 && (d.current || 0) < d.required,
+  );
+  acc.inProgressCount = pending.length;
+  acc.inProgressGames = [...new Set(pending.map((d) => d.game).filter(Boolean))];
+  acc.farmingSnapshotAt = now;
   acc.lastScanAt = now;
   acc.lastScanStatus = "ok";
   acc.lastScanError = "";
   await acc.save();
   state.sessionNewDrops += newDrops;
-  return { ok: true, newDrops, total: acc.dropCount };
+  return {
+    ok: true,
+    newDrops,
+    total: acc.dropCount,
+    inProgress: acc.inProgressCount,
+  };
 }
 
 // Renters whose access is over (suspended, or lease end in the past): their
