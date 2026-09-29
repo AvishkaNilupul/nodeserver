@@ -39,6 +39,7 @@ const unclaimedAllocator = require("./utils/unclaimedAllocator");
 const botHealthMonitor = require("./utils/botHealthMonitor");
 const accountPoolChecker = require("./utils/accountPoolChecker");
 const dropArchiveRoutes = require("./routes/dropArchiveRoutes");
+const accountApiRoutes = require("./routes/accountApiRoutes");
 const accountPoolRoutes = require("./routes/accountPoolRoutes");
 const spentAccountsRoutes = require("./routes/spentAccountsRoutes");
 const autoFarmRoutes = require("./routes/autoFarmRoutes");
@@ -67,6 +68,8 @@ const bannedRoutes = require("./routes/bannedRoutes");
 const epicAccountRoutes = require("./routes/epicAccountRoutes");
 const twitchFollowRoutes = require("./routes/twitchFollowRoutes");
 const twitchFollowRunner = require("./utils/twitchFollowRunner");
+const twitchClaimRoutes = require("./routes/twitchClaimRoutes");
+const digitalOceanRoutes = require("./routes/digitalOceanRoutes");
 const twoFactorRoutes = require("./routes/twoFactorRoutes");
 const settingsRoutes = require("./routes/settingsRoutes");
 const dropScanner = require("./utils/dropScanner");
@@ -78,7 +81,6 @@ const eldoradoSessionRefresher = require("./utils/eldoradoSessionRefresher");
 const eldoradoFulfiller = require("./utils/eldoradoFulfiller");
 const playerauctionsSessionRefresher = require("./utils/playerauctionsSessionRefresher");
 const playerauctionsFulfiller = require("./utils/playerauctionsFulfiller");
-const z2uFulfiller = require("./utils/z2uFulfiller");
 const g2gSessionRefresher = require("./utils/g2gSessionRefresher");
 const g2gFulfiller = require("./utils/g2gFulfiller");
 const playerauctionsSessionWatch = require("./utils/playerauctionsSessionWatch");
@@ -423,6 +425,13 @@ app.get("/bots.html", requireSuperadmin, enforce2fa, (req, res) => {
   res.sendFile(path.join(__dirname, "public", "bots.html"));
 });
 
+// DigitalOcean droplet creator (public/do-servers.html): spins up / lists /
+// destroys droplets that auto-deploy the twitch claim bot. Superadmin-only —
+// it spends real money and destroys infra, same tier as the Bots page.
+app.get("/do-servers.html", requireSuperadmin, enforce2fa, (req, res) => {
+  res.sendFile(path.join(__dirname, "public", "do-servers.html"));
+});
+
 // Combined Unclaimed farms tab: auto-list panel + the two farm consoles
 // embedded as sections (?embed=1 hides each page's own sidebar).
 app.get("/unclaimed-farms.html", requireSuperadmin, enforce2fa, async (req, res) => {
@@ -657,6 +666,12 @@ app.use(enforce2fa, renterAdminRoutes);
 app.use(resellerAuthRoutes);
 app.use(resellerRoutes);
 app.use(enforce2fa, resellerAdminRoutes);
+// External account API (docs/ACCOUNT-API.md): a machine-to-machine
+// bearer-token realm that resolves a username to its client token across every
+// account source. Mounted BEFORE the blanket requireAdmin cascade — it presents
+// a static token, not a session, so the session guard would otherwise 401 it.
+// Every route inside self-guards with requireApiToken.
+app.use(accountApiRoutes);
 app.use(requireAdmin, enforce2fa, itemRoutes);
 app.use(requireAdmin, enforce2fa, inventoryRoutes);
 app.use(requireAdmin, enforce2fa, orderRoutes);
@@ -698,6 +713,14 @@ app.use(enforce2fa, radarRoutes);
 app.use(enforce2fa, bannedRoutes);
 app.use(enforce2fa, epicAccountRoutes);
 app.use(enforce2fa, twitchFollowRoutes);
+// Drop-claim race UI (public/twitch-claim.html): port of the CLI spammer that
+// fires N parallel DropsPage_ClaimDropRewards mutations at one dropInstanceID
+// so Twitch's inventory service sees N distinct "devices" landing at once.
+// Each route self-guards with requireAdmin — enforce2fa gates it behind 2FA.
+app.use(enforce2fa, twitchClaimRoutes);
+// DigitalOcean droplet creator API (routes/digitalOceanRoutes.js). Each route
+// self-guards with requireSuperadmin; enforce2fa gates it behind 2FA.
+app.use(enforce2fa, digitalOceanRoutes);
 app.use(requireAdmin, enforce2fa, aiChatRoutes);
 
 // =========================
@@ -817,14 +840,6 @@ mongoose
     // server's copy — unpreventable, and silent until a buyer is left waiting.
     // This checks every 5 minutes and Telegrams once when it breaks.
     playerauctionsSessionWatch.start();
-    // Z2U shelf keeper + auto-delivery. A Z2U offer carries a DURATION and the
-    // site silently takes it off sale when that runs out, which is why 34 of the
-    // account's 47 offers were dark on 2026-09-08 while only 2 were really empty.
-    // This extends what is about to lapse, relists what lapsed, pulls down
-    // anything we can no longer back with claimable stock, and hands over the
-    // credential on a waiting order. Self-guards on autoFarm.z2uAuto /
-    // z2uAutoDeliver, and both halves ship in dry-run.
-    z2uFulfiller.start();
     // G2G. Every Twitch-Drops offer we sell there sits in Game Items, a
     // MANUAL-delivery category with no code vault, so this drives G2G's own
     // view-details -> delivering -> delivered-quantity state machine and hands

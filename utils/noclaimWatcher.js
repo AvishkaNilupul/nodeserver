@@ -44,8 +44,8 @@ const { fetchCampaignDetails } = require("./twitchInventory");
 const { recordAutoFarmEvent } = require("./autoFarmEventLog");
 
 // Keep these in lock-step with routes/noclaimFarmRoutes.js — same Pi dir + names.
-const HOST_ID = "pi";
-const BASE = "/home/avishka/twitchbot-noclaim";
+const HOST_ID = "contabo";
+const BASE = "/home/ubuntu/twitchbot-noclaim";
 const BOTS_DIR = BASE + "/bots";
 const CONTAINER_PREFIX = "noclaim-bot-";
 const containerFor = (id) => CONTAINER_PREFIX + id;
