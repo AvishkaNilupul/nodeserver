@@ -221,6 +221,19 @@ async function holderQuota() {
   return { max, used, remaining: Math.max(0, max - used) };
 }
 
+// A stack's room as the provisioning path counts it. `running === false` zeroes
+// it only when the stack already HOLDS accounts: stopped and occupied is broken
+// (2026-09-20, buyers in a config nobody read). Stopped and EMPTY is a stack
+// provisionEmptyConfig made and nothing has started yet — chooseAvailableStack
+// picks it and farmFreshAccounts starts its container right after the first
+// write — so its room is real. Same rule as ensureStackWithRoom above and
+// utils/renterBotStacks.chooseAvailableStack; the preview must not disagree.
+function usableRoom(stack) {
+  if (!stack) return 0;
+  if (stack.running === false && Number(stack.accounts) > 0) return 0;
+  return Math.max(0, Number(stack.remaining) || 0);
+}
+
 // Read-only: what WOULD happen, without touching anything. Lets the coworker
 // (or the UI) check availability before committing.
 async function previewFreshAccounts({ count = 1 } = {}) {
@@ -241,16 +254,14 @@ async function previewFreshAccounts({ count = 1 } = {}) {
       : null;
     const best = renterAdmin().chooseStackWithRoom(opts.bots || [], 1);
     // Same rule as ensureStackWithRoom: the holder's own stack only counts if
-    // it has room AND is running, otherwise the preview promises a slot on a
-    // container that will never read it.
-    stack =
-      cur && Number(cur.remaining) > 0 && cur.running !== false
-        ? cur
-        : best || cur;
-    stackRoom =
-      stack && stack.running === false
-        ? 0
-        : Math.max(0, Number(stack && stack.remaining) || 0);
+    // it has room AND something will read it — running, or empty and about to
+    // be started by its first delivery. A stopped stack that already holds
+    // accounts counts for nothing: the preview must not promise a slot on a
+    // container that will never read it. Until 2026-09-30 an empty stopped
+    // stack counted for nothing too, so every dry run said "stack-stopped" the
+    // moment the holder's stack filled and the next one was brand new.
+    stack = usableRoom(cur) > 0 ? cur : best || cur;
+    stackRoom = usableRoom(stack);
   } catch (e) {
     stack = null;
     stackRoom = 0;
@@ -281,10 +292,12 @@ async function previewFreshAccounts({ count = 1 } = {}) {
     stackRoom,
     offlineHosts,
     stackRunning: stack ? (stack.running === undefined ? null : stack.running) : null,
+    // Empty and not started yet: its container starts on the first delivery.
+    stackNotStarted: !!stack && stack.running === false && !Number(stack.accounts),
     blockedBy:
       willAdd > 0
         ? null
-        : stack && stack.running === false
+        : stack && stack.running === false && Number(stack.accounts) > 0
           ? "stack-stopped"
           : stackRoom <= 0
             ? "stack-full"

@@ -379,6 +379,29 @@ function pickDefaultTemplate(files) {
   return cfgs[0] || null;
 }
 
+// Turn a cloned template into an EMPTY stack: no Twitch or Kick users, and no
+// config-level farming games. The template is normally `config.json`, a WORKING
+// operator bot, and its root FavouriteGames are that bot's own games (on contabo
+// 2026-09-30: Warframe / Summer Game Fest / Assassin's Creed Black Flag, the
+// games its 99 accounts farm). Every new stack is a rental one: rent-farm
+// accounts are pinned per account to the game the buyer paid for, and a renter
+// alone on a bot gets the root list from setConfigGames. Inherited operator
+// favourites would only pull those accounts onto games nobody bought — the live
+// rental stacks (config_06, config_54) all carry an empty root list. Every other
+// setting, OnlyFavouriteGames included, stays exactly as the template has it.
+function emptyStackConfig(template) {
+  const data = template && typeof template === "object" ? template : {};
+  if (!data.TwitchSettings || typeof data.TwitchSettings !== "object") {
+    data.TwitchSettings = {};
+  }
+  data.TwitchSettings.TwitchUsers = [];
+  if (data.KickSettings && typeof data.KickSettings === "object") {
+    data.KickSettings.KickUsers = [];
+  }
+  data.FavouriteGames = [];
+  return data;
+}
+
 // Add a new service (mirroring the existing twitchbotxN ones) to a compose
 // document given its raw YAML text. Uses js-yaml to parse + re-emit so
 // hand-written indentation can't be corrupted. Returns the new text plus
@@ -2034,13 +2057,7 @@ async function provisionEmptyConfig(host) {
     } catch {
       throw new Error("Template config is not valid JSON");
     }
-    if (!data.TwitchSettings || typeof data.TwitchSettings !== "object") {
-      data.TwitchSettings = {};
-    }
-    data.TwitchSettings.TwitchUsers = [];
-    if (data.KickSettings && typeof data.KickSettings === "object") {
-      data.KickSettings.KickUsers = [];
-    }
+    data = emptyStackConfig(data);
     await hosts.writeFileAtomic(host, slot.file, JSON.stringify(data, null, 2));
     try {
       if (composeFile) {
@@ -2078,6 +2095,7 @@ module.exports.addServiceToComposeText = addServiceToComposeText;
 module.exports.addAccountsToConfig = addAccountsToConfig;
 module.exports.addRenterAccountsToConfig = addRenterAccountsToConfig;
 module.exports.provisionEmptyConfig = provisionEmptyConfig;
+module.exports.emptyStackConfig = emptyStackConfig;
 module.exports.countConfigAccounts = countConfigAccounts;
 module.exports.getConfigGames = getConfigGames;
 module.exports.setConfigGames = setConfigGames;
