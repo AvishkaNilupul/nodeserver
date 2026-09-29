@@ -201,6 +201,26 @@ async function ensureStackWithRoom(renter, needed, actor = "operator-farm") {
   return { renter, stack: target, moved: true };
 }
 
+// Read-only: how much of the holder's own account limit (Renter.maxAccounts) is
+// left — the SAME count farmFreshAccounts refuses on ("The operator holder is at
+// its account limit"). null when the holder does not exist yet.
+//
+// This is the third ceiling beside pool supply and stack slots, and on
+// 2026-09-28 it was the one that bit: the holder sat at 250/250 for seven hours
+// and four paid Eldorado orders failed every tick, while 340 pristine pool
+// accounts and 117 free stack slots made every capacity dial read fine. The
+// capacity watcher (utils/rentFarmCapacity) reads this so it can never again be
+// the limit nobody is watching.
+async function holderQuota() {
+  const renter = await Renter.findOne({ usernameLower: OPERATOR_USERNAME })
+    .select("maxAccounts")
+    .lean();
+  if (!renter) return null;
+  const used = await RenterAccount.countDocuments({ renter: renter._id });
+  const max = Number(renter.maxAccounts) || 0;
+  return { max, used, remaining: Math.max(0, max - used) };
+}
+
 // Read-only: what WOULD happen, without touching anything. Lets the coworker
 // (or the UI) check availability before committing.
 async function previewFreshAccounts({ count = 1 } = {}) {
@@ -470,6 +490,7 @@ module.exports = {
   OPERATOR_MAX_ACCOUNTS,
   ensureOperatorRenter,
   ensureStackWithRoom,
+  holderQuota,
   previewFreshAccounts,
   farmFreshAccounts,
 };

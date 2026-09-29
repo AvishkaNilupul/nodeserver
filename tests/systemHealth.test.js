@@ -197,7 +197,9 @@ const listing = (over = {}) => ({
 // and LOW_WATER are the REAL ones on purpose: the check's whole design claim is
 // that the page and the Telegram alert cannot disagree because they share one
 // function, and a fake threshold here would quietly retire that claim.
-function fakeCapacity({ stacks = [], offlineHosts = [] } = {}) {
+// `quota` is the holder renter's { max, used, remaining }; it caps totalFree
+// exactly as rentFarmCapacity.snapshot() does.
+function fakeCapacity({ stacks = [], offlineHosts = [], quota = null } = {}) {
   const rows = stacks.map((s) => ({
     host: s.host || "pi",
     file: s.file || "config_31.json",
@@ -209,10 +211,15 @@ function fakeCapacity({ stacks = [], offlineHosts = [] } = {}) {
     LOW_WATER: rentFarm.LOW_WATER,
     levelFor: rentFarm.levelFor,
     async snapshot() {
+      const stackFree = rows.reduce((n, s) => n + s.remaining, 0);
+      const binds = !!quota && quota.remaining < stackFree;
       return {
         stacks: rows,
         offlineHosts,
-        totalFree: rows.reduce((n, s) => n + s.remaining, 0),
+        totalFree: binds ? quota.remaining : stackFree,
+        stackFree,
+        quota,
+        limitedBy: binds ? "holder-limit" : "stacks",
         totalCapacity: rows.reduce((n, s) => n + s.capacity, 0),
         readable: rows.length,
       };
@@ -529,6 +536,41 @@ test("an offline host does not spoil a HEALTHY verdict", async () => {
   );
   assert.strictEqual(check.status, "ok");
   assert.strictEqual(check.measured, 137);
+});
+
+test("REGRESSION 2026-09-28: a holder at its account limit fails despite free slots", async () => {
+  // Seven hours, four paid Eldorado orders refused "at its account limit
+  // (250)", and this check read green off 117 free stack slots.
+  const check = await runCheck(
+    "rentfarm.capacity",
+    healthyDeps({
+      rentFarmCapacity: fakeCapacity({
+        stacks: [{ host: "contabo", capacity: 50, used: 5 }],
+        quota: { max: 250, used: 250, remaining: 0 },
+      }),
+    }),
+  );
+  assert.strictEqual(check.status, "fail");
+  assert.strictEqual(check.measured, 0, "the page shows what an order can USE");
+  assert.match(check.summary, /account limit \(250\/250 used\)/);
+  assert.match(check.summary, /stacks have 45 free/, "and still shows the stack room");
+  assert.match(check.detail, /operator-selffarm/, "say which limit to raise");
+});
+
+test("an offline host does not withhold a holder-limit verdict", async () => {
+  // Unread hosts can only add stack slots; they cannot lift the holder's limit,
+  // so the partial-read downgrade to `unknown` must not apply here.
+  const check = await runCheck(
+    "rentfarm.capacity",
+    healthyDeps({
+      rentFarmCapacity: fakeCapacity({
+        stacks: [{ host: "contabo", capacity: 50, used: 5 }],
+        offlineHosts: ["Pi"],
+        quota: { max: 250, used: 250, remaining: 0 },
+      }),
+    }),
+  );
+  assert.strictEqual(check.status, "fail");
 });
 
 test("no readable stack at all is unknown with no number claimed", async () => {

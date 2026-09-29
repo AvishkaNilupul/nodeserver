@@ -585,8 +585,11 @@ const CHECKS = [
       // be sitting there free. Reporting "0 free" off a partial read is exactly
       // the Pi-hiccup-as-marketplace-fault mistake, so a bad verdict built on an
       // incomplete read is downgraded to `unknown`. A GOOD verdict survives —
-      // hosts we could not read can only add slots, never remove them.
-      if (snap.offlineHosts.length && status !== "ok") {
+      // hosts we could not read can only add slots, never remove them. Nor can
+      // they lift the holder's account limit: when THAT is what binds, the bad
+      // verdict stands whatever the unread hosts hold.
+      const holderLimited = snap.limitedBy === "holder-limit" && !!snap.quota;
+      if (snap.offlineHosts.length && status !== "ok" && !holderLimited) {
         status = "unknown";
         note =
           "verdict withheld: " +
@@ -599,17 +602,30 @@ const CHECKS = [
         status,
         measured: snap.totalFree,
         threshold,
-        summary:
-          snap.totalFree +
-          " free slot(s) across " +
-          snap.readable +
-          " readable stack(s) of " +
-          snap.totalCapacity +
-          " total",
+        summary: holderLimited
+          ? snap.totalFree +
+            " usable slot(s) — capped by the rent-farm holder's account limit (" +
+            snap.quota.used +
+            "/" +
+            snap.quota.max +
+            " used); the stacks have " +
+            snap.stackFree +
+            " free of " +
+            snap.totalCapacity
+          : snap.totalFree +
+            " free slot(s) across " +
+            snap.readable +
+            " readable stack(s) of " +
+            snap.totalCapacity +
+            " total",
         detail:
           note ||
-          "One order holds one slot until its window lapses (180-day and " +
-            "1-year windows are sold), so slots free far slower than they fill.",
+          (holderLimited
+            ? "Raise the Account limit of the holder renter operator-selffarm " +
+              "(Renters page): every rent-farm order is refused at that limit, " +
+              "however many stack slots are free."
+            : "One order holds one slot until its window lapses (180-day and " +
+              "1-year windows are sold), so slots free far slower than they fill."),
         items: capItems(
           snap.stacks
             .slice()
