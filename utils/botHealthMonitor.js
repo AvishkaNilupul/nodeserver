@@ -80,7 +80,18 @@ const DECAY_MIN_GAP = Number(process.env.BOT_DECAY_MIN_GAP) || 10; // ignore tin
 const DECAY_MIN_UPTIME_MS =
   Number(process.env.BOT_DECAY_MIN_UPTIME_MS) || 60 * 60 * 1000; // settle before judging
 const DECAY_ACTION = (process.env.BOT_DECAY_ACTION || "alert").toLowerCase(); // "alert" | "restart"
-const DECAY_LOG_CAP = 2000; // max log lines pulled per container per scan
+// Only the native (botctl) path still pulls a capped tail; docker hosts count
+// distinct accounts ON the host over the whole window (see LOG_SCAN_AWK).
+const DECAY_LOG_CAP = 2000;
+// A decay verdict also needs the log to reach back this far: rotation under a
+// log flood can leave only minutes of history, too little to see every
+// account's 5-minute cycle.
+const DECAY_MIN_COVERAGE_MS =
+  Number(process.env.BOT_DECAY_MIN_COVERAGE_MS) || 30 * 60 * 1000;
+// Twitch GQL parse errors a bot may log since it (re)started before we say
+// Twitch changed something it cannot read.
+const PARSE_ERR_MIN = Number(process.env.BOT_PARSE_ERR_MIN) || 20;
+const LOG_SCAN_TIMEOUT_MS = 180 * 1000;
 
 // No bare exception-type patterns here (e.g. /System\.Exception/): the bot
 // logs its own caught-and-retried GraphQL failures as "[ERR] ... (attempt
@@ -136,6 +147,10 @@ const state = {
 const tracked = new Map();
 // `${hostId}:${container}` -> decay tracking entry (last counts + cooldown)
 const decayTracked = new Map();
+// `${hostId}:${container}` -> GQL parse-error tracking entry
+const parseTracked = new Map();
+// hostId -> Set of "response shape changed" texts already reported
+const shapeSeen = new Map();
 // hostId -> { signature, lastAlertAt, stale, missingImage, expectedId }
 const buildTracked = new Map();
 // hostId -> { pct, alerting, lastAlertAt }
@@ -374,9 +389,180 @@ function parseUptimeMs(status) {
   return mult ? parseInt(num[1], 10) * mult : null;
 }
 
+// --- per-bot log scan (one host round trip) --------------------------------
+//
+// The decay check used to pull `docker logs --since 6h --tail 2000` and count
+// the distinct accounts in that. On 2026-09-29 contabo/twitchbotx44 wrote
+// ~45,000 lines an hour (a GQL parse error's stack trace, ~1,100 times an
+// hour), so 2,000 lines were the last 21 SECONDS: 23 of 132 accounts happened
+// to print in them, the bot read as "decayed" and was restarted — while all
+// 132 had logged in every one of the previous six hours. The count now runs ON
+// the host over the whole window (one short summary per bot crosses the link),
+// and a verdict needs the log to reach back DECAY_MIN_COVERAGE_MS.
+//
+// The same pass reports what such a flood is: TwitchDropsBot's GQL parse
+// failures ("JsonException ... Path: $.data...") since the bot started — the
+// Plants on Fire campaign went unfarmed for hours behind exactly that — and
+// the "Twitch response shape changed" warnings a tolerant build logs when it
+// absorbs a new shape.
+//
+// Input: `docker logs -t` (docker's RFC3339 time on every line). `st` = the
+// container's StartedAt (19 chars): parse errors from before a restart are
+// history, not a current fault. POSIX awk only (mawk / gawk / BWK).
+const LOG_SCAN_AWK = [
+  "NR == 1 { first = substr($1, 1, 19) }",
+  "{",
+  "  if (match($0, /TwitchUser - [A-Za-z0-9_]+/)) u[substr($0, RSTART + 13, RLENGTH - 13)] = 1",
+  "  if (substr($1, 1, 19) >= st) {",
+  '    if (index($0, "JsonException")) {',
+  "      j++",
+  '      if (match($0, /Path: [^ |]+/)) { p = substr($0, RSTART + 6, RLENGTH - 6); gsub(/\\[[0-9]+\\]/, "[N]", p); jp[p]++ }',
+  "    }",
+  '    if (index($0, "Twitch response shape changed")) {',
+  '      t = $0; sub(/^.*Twitch response shape changed/, "", t); gsub(/\\|/, "/", t)',
+  "      if (!(t in sc) && ns < 10) { sc[t] = 1; ns++ }",
+  "    }",
+  "  }",
+  "}",
+  "END {",
+  "  n = 0; for (k in u) n++",
+  '  print "FIRST|" first; print "USERS|" n; print "JSON|" (j + 0)',
+  '  for (k in jp) print "JPATH|" jp[k] "|" k',
+  '  for (k in sc) print "SHAPE|" k',
+  "}",
+].join("\n");
+
+function logScanScript(containers, window = DECAY_WINDOW) {
+  const shq = hosts.shq;
+  return containers
+    .filter((c) => /^[A-Za-z0-9_.-]+$/.test(c))
+    .map(
+      (c) =>
+        "c=" + shq(c) + "; " +
+        "st=$(docker inspect -f '{{.State.StartedAt}}' \"$c\" 2>/dev/null | cut -c1-19); " +
+        "echo \"SCAN|$c|$st\"; " +
+        "docker logs -t --since " + shq(window) + " \"$c\" 2>&1 | awk -v st=\"$st\" " + shq(LOG_SCAN_AWK) + "; " +
+        "echo \"END|$c\"",
+    )
+    .join("; ");
+}
+
+// Pure parser for logScanScript's output (unit-tested).
+function parseLogScan(stdout) {
+  const out = {};
+  let cur = null;
+  for (const raw of String(stdout || "").split("\n")) {
+    const line = raw.trim();
+    if (line.startsWith("SCAN|")) {
+      const [, c, st] = line.split("|");
+      cur = out[c] = { startedAt: st || "", first: "", active: 0, jsonErrors: 0, jsonPaths: [], shapes: [] };
+      continue;
+    }
+    if (line.startsWith("END|")) {
+      cur = null;
+      continue;
+    }
+    if (!cur) continue;
+    const [kind, a, ...rest] = line.split("|");
+    if (kind === "FIRST") cur.first = a || "";
+    else if (kind === "USERS") cur.active = Number(a) || 0;
+    else if (kind === "JSON") cur.jsonErrors = Number(a) || 0;
+    else if (kind === "JPATH") cur.jsonPaths.push({ count: Number(a) || 0, path: rest.join("|") });
+    else if (kind === "SHAPE") cur.shapes.push([a, ...rest].join("|").trim());
+  }
+  for (const c of Object.values(out)) c.jsonPaths.sort((x, y) => y.count - x.count);
+  return out;
+}
+
+// How far back the scanned log reaches, or null when it had no lines.
+function logCoverageMs(scan, now) {
+  const t = scan && scan.first ? Date.parse(scan.first + "Z") : NaN;
+  return Number.isFinite(t) ? now - t : null;
+}
+
+// --- GQL parse errors + absorbed shape changes -----------------------------
+
+async function checkParseErrors(host, container, scan, now) {
+  const k = key(host.id, container);
+  let entry = parseTracked.get(k);
+  if (!entry) {
+    entry = { lastAlertAt: 0, alerting: false };
+    parseTracked.set(k, entry);
+  }
+  entry.jsonErrors = scan.jsonErrors;
+  entry.topPath = (scan.jsonPaths[0] || {}).path || "";
+  const head = host.label + "/" + container;
+  if (scan.jsonErrors < PARSE_ERR_MIN) {
+    if (entry.alerting) {
+      entry.alerting = false;
+      await sendTelegram("✅ " + head + " no longer logs Twitch GQL parse errors.").catch(() => {});
+    }
+    return;
+  }
+  entry.alerting = true;
+  if (now - entry.lastAlertAt < REMINDER_MS) return;
+  entry.lastAlertAt = now;
+  const paths = scan.jsonPaths
+    .slice(0, 2)
+    .map((p) => p.path + " ×" + p.count)
+    .join("; ");
+  logEvent({
+    category: "bots",
+    action: "gql_parse_errors",
+    actor: "healthMonitor",
+    severity: "error",
+    host: host.id,
+    container,
+    count: scan.jsonErrors,
+    detail: (paths || "no path in the error").slice(0, 300),
+  });
+  await sendTelegram(
+    "🧩 " + head + ": " + scan.jsonErrors + " Twitch GQL parse errors since it started" +
+      (paths ? " (" + paths + ")" : "") +
+      ". The bot cannot read part of Twitch's response, so whatever sits behind it — a campaign, " +
+      "an inventory — is skipped, not farmed (how Plants on Fire went unfarmed on 2026-09-29). " +
+      "Fix: roll out a bot build that tolerates the new shape (Bots page).",
+  ).catch(() => {});
+}
+
+async function alertNewShapes(host, items) {
+  let seen = shapeSeen.get(host.id);
+  if (!seen) {
+    seen = new Set();
+    shapeSeen.set(host.id, seen);
+  }
+  const fresh = [];
+  for (const it of items) {
+    if (!it.text || seen.has(it.text)) continue;
+    seen.add(it.text);
+    fresh.push(it);
+  }
+  if (!fresh.length) return;
+  for (const it of fresh) {
+    logEvent({
+      category: "bots",
+      action: "gql_shape_changed",
+      actor: "healthMonitor",
+      severity: "warn",
+      host: host.id,
+      container: it.container,
+      detail: it.text.slice(0, 300),
+    });
+  }
+  await sendTelegram(
+    "🧩 " + host.label + ": Twitch changed a GQL response shape and the bot absorbed it — nothing is " +
+      "broken yet: " +
+      fresh
+        .slice(0, 5)
+        .map((it) => it.text + " [" + it.container + "]")
+        .join("; ") +
+      ". Worth a look before a change like this lands on a field the bot needs.",
+  ).catch(() => {});
+}
+
 // --- thread-decay scan ----------------------------------------------------
 
-async function checkDecay(host, container, psState, now) {
+async function checkDecay(host, container, psState, now, { scan, configText } = {}) {
   const k = key(host.id, container);
 
   // Settle guard: skip freshly (re)started containers. Their logs don't yet
@@ -390,7 +576,7 @@ async function checkDecay(host, container, psState, now) {
   try {
     const file = fileForContainer(container);
     if (!file) return;
-    enabled = countEnabled(await hosts.readFile(host, file));
+    enabled = countEnabled(configText != null ? configText : await hosts.readFile(host, file));
   } catch {
     return; // missing / unreadable / unparseable config — no decay signal
   }
@@ -398,23 +584,39 @@ async function checkDecay(host, container, psState, now) {
 
   // Distinct accounts active in the recent window.
   let active;
-  try {
-    const logs = await hosts.dockerLogs(host, container, {
-      tail: DECAY_LOG_CAP,
-      since: DECAY_WINDOW,
-    });
-    active = countActiveUsernames(logs);
-  } catch {
-    return; // log pull failed — skip this scan, not a decay signal
+  let coverageMs = null;
+  if (scan) {
+    active = scan.active;
+    coverageMs = logCoverageMs(scan, now);
+    if (coverageMs == null || coverageMs < DECAY_MIN_COVERAGE_MS) {
+      // Too little history to judge either way — never a restart.
+      const e = decayTracked.get(k) || { lastAlertAt: 0, lastActionAt: 0 };
+      Object.assign(e, { enabled, active, coverageMs, inconclusive: true });
+      decayTracked.set(k, e);
+      return;
+    }
+  } else {
+    // Native hosts (botctl) have no time filter: capped tail only.
+    try {
+      const logs = await hosts.dockerLogs(host, container, {
+        tail: DECAY_LOG_CAP,
+        since: DECAY_WINDOW,
+      });
+      active = countActiveUsernames(logs);
+    } catch {
+      return; // log pull failed — skip this scan, not a decay signal
+    }
   }
 
   let entry = decayTracked.get(k);
   if (!entry) {
-    entry = { lastAlertAt: 0, lastActionAt: 0, enabled, active };
+    entry = { lastAlertAt: 0, lastActionAt: 0 };
     decayTracked.set(k, entry);
   }
   entry.enabled = enabled;
   entry.active = active;
+  entry.coverageMs = coverageMs;
+  entry.inconclusive = false;
 
   if (!isDecayed({ enabled, active })) return;
   if (now - entry.lastAlertAt < REMINDER_MS) return; // cooldown
@@ -494,18 +696,51 @@ async function decayScanHost(host, now) {
     return; // host unreachable — not a decay signal
   }
   const running = Object.keys(states).filter(
-    (name) =>
-      (name === "twitchbot" || /^twitchbotx\d+$/.test(name)) &&
-      states[name].state === "running",
+    (name) => isFarmBot(name) && states[name].state === "running",
   );
-  for (const container of running) {
-    await checkDecay(host, container, states[container], now).catch(() => {});
-  }
-  // Forget containers that are no longer running so their cooldown resets.
+  // Forget containers that are no longer running so their cooldowns reset.
   const seen = new Set(running.map((c) => key(host.id, c)));
-  for (const k of Array.from(decayTracked.keys())) {
-    if (k.startsWith(host.id + ":") && !seen.has(k)) decayTracked.delete(k);
+  for (const m of [decayTracked, parseTracked]) {
+    for (const k of Array.from(m.keys())) {
+      if (k.startsWith(host.id + ":") && !seen.has(k)) m.delete(k);
+    }
   }
+  if (!running.length) return;
+  if (host.runtime === "native") {
+    for (const container of running) {
+      await checkDecay(host, container, states[container], now).catch(() => {});
+    }
+    return;
+  }
+  // One round trip for every config, one for every bot's log summary.
+  let configs = {};
+  try {
+    configs = await hosts.readFiles(host, running.map(fileForContainer).filter(Boolean));
+  } catch {
+    configs = {};
+  }
+  let scans;
+  try {
+    const { stdout } = await hosts.runShell(host, logScanScript(running, DECAY_WINDOW), {
+      timeout: LOG_SCAN_TIMEOUT_MS,
+    });
+    scans = parseLogScan(stdout);
+  } catch {
+    return; // log scan failed — not a decay or parse signal
+  }
+  const shapes = [];
+  for (const container of running) {
+    const scan = scans[container];
+    if (!scan) continue;
+    await checkParseErrors(host, container, scan, now).catch(() => {});
+    for (const text of scan.shapes) shapes.push({ container, text });
+    const f = configs[fileForContainer(container)];
+    await checkDecay(host, container, states[container], now, {
+      scan,
+      configText: f && f.ok ? f.text : null,
+    }).catch(() => {});
+  }
+  if (shapes.length) await alertNewShapes(host, shapes).catch(() => {});
 }
 
 // --- stale-build + disk helpers (pure; exported for unit tests) -----------
@@ -901,6 +1136,18 @@ function status() {
         lastActionAt: v.lastActionAt
           ? new Date(v.lastActionAt).toISOString()
           : null,
+        coverageMin: v.coverageMs == null ? null : Math.round(v.coverageMs / 60000),
+        inconclusive: !!v.inconclusive,
+      })),
+      minCoverageMs: DECAY_MIN_COVERAGE_MS,
+    },
+    parse: {
+      minErrors: PARSE_ERR_MIN,
+      containers: Array.from(parseTracked.entries()).map(([k, v]) => ({
+        key: k,
+        jsonErrors: v.jsonErrors || 0,
+        topPath: v.topPath || "",
+        alerting: !!v.alerting,
       })),
     },
     build: {
@@ -943,6 +1190,10 @@ module.exports = {
   sharedImageId,
   shortImageId,
   diskPct,
+  LOG_SCAN_AWK,
+  logScanScript,
+  parseLogScan,
+  logCoverageMs,
   // Orchestration entrypoints exposed for integration tests (each drives one
   // scan of a host against an injectable `hosts` layer).
   decayScanHost,
