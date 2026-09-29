@@ -25,6 +25,8 @@ const { fetchInventory, fetchDropCampaigns } = require("../utils/twitchInventory
 const { recordPoolUsage } = require("../utils/poolUsageLog");
 const { usageSince, summarizeUsageRows } = require("../utils/poolUsageWatcher");
 const poolStock = require("../utils/poolStock");
+const tokenReplace = require("../utils/tokenReplace");
+const { actorFromReq } = require("../utils/systemLog");
 
 const router = express.Router();
 
@@ -278,6 +280,23 @@ const importPasteBody = express.text({ type: ["text/plain"], limit: "25mb" });
 // already written. So the count is capped too, before anything is written;
 // 10,000 keeps the stall to about a second.
 const MAX_IMPORT_ACCOUNTS = 10000;
+
+// Put a freshly minted token on accounts that ALREADY exist. The import below
+// only fills in blanks and skips accounts a bot uses, so a re-minted token had
+// no way in — not into the pool row, the bot config, or a renter's row. Each
+// token is verified against Twitch (right account, passes integrity, sees
+// campaigns) before anything is written; utils/tokenReplace.js has the rules.
+// Never echoes a token back.
+router.post("/account-pool/replace-tokens", requireSuperadmin, importPasteBody, async (req, res) => {
+  try {
+    const input = typeof req.body === "string" ? req.body : req.body && (req.body.accounts || req.body);
+    const out = await tokenReplace.replaceTokens(input, { actor: actorFromReq(req) });
+    res.json({ success: true, replaced: out.results.filter((r) => r.ok).length, ...out });
+  } catch (err) {
+    console.error("account-pool replace-tokens error:", err.message);
+    res.status(err.status || 500).json({ success: false, message: err.status ? err.message : "Server error" });
+  }
+});
 
 router.post("/account-pool/import", requireSuperadmin, importPasteBody, async (req, res) => {
   try {
