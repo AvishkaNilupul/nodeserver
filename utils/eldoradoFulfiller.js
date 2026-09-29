@@ -1169,7 +1169,10 @@ async function bulkOfferFor(offerId) {
 // A bulk offer that is not "live" (paused by its owner or its loop, sold out,
 // withdrawn, held after an unknown publish) is never resumed by this
 // (FIXES-1 R3-4): it is skipped untouched, and one that stops being live
-// while this runs is left paused.
+// while this runs is left paused. It can still stop being live just before
+// the relist lands — its owner's or its loop's pause is a no-op on an offer
+// this already paused — so after a relist the bulk state is read once more,
+// and a bulk offer no longer live is paused again at once (FIXES-2 V3).
 async function renewOffer(offerId) {
   const before = await mp.eldoradoOffer(offerId);
   if (!before || before.offerState !== "Active") {
@@ -1192,6 +1195,42 @@ async function renewOffer(offerId) {
       .catch(() => null);
     return !!(row && row.autoPaused);
   };
+  // FIXES-2 V3 (bulk offers only): a relist of ours may have put back on sale
+  // a bulk offer that stopped being live meanwhile — take it off again now.
+  const pauseAgain = async (notLive) => {
+    let error = "";
+    try {
+      await mp.eldoradoDelist(offerId);
+    } catch (e) {
+      error = (e && e.message) || String(e);
+    }
+    const what =
+      "bulk offer " + offerId + " (" + (before.offerTitle || "untitled") +
+      ") turned " + notLive + " while the keep-alive renewed it";
+    if (!error) {
+      console.log("eldorado keep-alive: " + what + " — paused it again");
+    } else {
+      console.error("eldorado keep-alive: " + what + " — could NOT pause it again: " + error);
+      try {
+        require("./telegram")
+          .sendTelegram(
+            "⚠️ Eldorado keep-alive: " + what + " and could NOT pause it again — " +
+              "it may be on sale on Eldorado. Pause it there by hand.\n\n" + error,
+          )
+          .catch(() => {});
+      } catch {
+        /* the page is best-effort; the log line above stands */
+      }
+    }
+    return {
+      offerId,
+      title: before.offerTitle,
+      skipped:
+        "bulk offer turned " + notLive + " while it was renewed — " +
+        (error ? "could NOT pause it again (" + error + ")" : "paused it again"),
+      ...(error ? { error } : {}),
+    };
+  };
   const flaggedBefore = await autoPausedNow();
   let pauseError = "";
   try {
@@ -1200,6 +1239,7 @@ async function renewOffer(offerId) {
     pauseError = e.message;
   }
   let after = null;
+  let relisted = false;
   for (let i = 0; i < 3; i++) {
     if (!flaggedBefore && (await autoPausedNow())) {
       return {
@@ -1210,6 +1250,8 @@ async function renewOffer(offerId) {
     }
     const bulkNow = bulk ? await bulkOfferFor(offerId) : null;
     if (bulkNow && bulkNow.notLive) {
+      // An earlier relist of this renewal may yet have landed.
+      if (relisted) return pauseAgain(bulkNow.notLive);
       return {
         offerId,
         title: before.offerTitle,
@@ -1218,10 +1260,14 @@ async function renewOffer(offerId) {
     }
     // A no-op on an offer that is still Active (e.g. the pause failed).
     await mp.eldoradoRelist(offerId).catch(() => {});
+    relisted = true;
     after = await mp.eldoradoOffer(offerId).catch(() => null);
     if (after && after.offerState === "Active") break;
     await keepAliveSleep(2000);
   }
+  // FIXES-2 V3: once more, after the relist.
+  const bulkAfter = bulk ? await bulkOfferFor(offerId) : null;
+  if (bulkAfter && bulkAfter.notLive) return pauseAgain(bulkAfter.notLive);
   return {
     offerId,
     title: before.offerTitle,

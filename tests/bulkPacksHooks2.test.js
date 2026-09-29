@@ -1,6 +1,7 @@
 // Bulk packs — review round 1, the hooks in EXISTING files owned by X4
 // (docs/bulk-packs/FIXES-1.md "Fulfillers + router + page" and "Existing-system
-// items from review 3"): L5, R3-1, R3-3, R3-4, R3-5, R3-8 and the page.
+// items from review 3"): L5, R3-1, R3-3, R3-4, R3-5, R3-8 and the page; and
+// docs/bulk-packs/FIXES-2.md V3 (the Eldorado keep-alive side).
 //
 // Each test reproduces the reviewed scenario and asserts the FIXED outcome,
 // next to an ordinary (non-bulk) control that must behave exactly as before.
@@ -37,6 +38,9 @@ const world = {
   gfSold: new Set(),
   gfLive: new Set(),
   onEldDelist: null,
+  // Runs inside eldoradoRelist, BEFORE it applies; return false to leave the
+  // offer as it is (a relist that has not landed yet).
+  onEldRelist: null,
 };
 const count = (name, id) =>
   world.calls.filter((c) => c[0] === name && (id === undefined || c[1] === id)).length;
@@ -72,8 +76,9 @@ mp.eldoradoDelist = rec("eldoradoDelist", async (id) => {
   if (o) o.offerState = "Paused";
   if (world.onEldDelist) await world.onEldDelist(String(id));
 });
-mp.eldoradoRelist = rec("eldoradoRelist", (id) => {
+mp.eldoradoRelist = rec("eldoradoRelist", async (id) => {
   const o = world.eld.get(String(id));
+  if (world.onEldRelist && (await world.onEldRelist(String(id))) === false) return;
   if (o) {
     o.offerState = "Active";
     o.expireDate = later(21);
@@ -227,6 +232,7 @@ beforeEach(async () => {
   world.gfSold = new Set();
   world.gfLive = new Set();
   world.onEldDelist = null;
+  world.onEldRelist = null;
   await Promise.all([
     MarketplaceListing.collection.deleteMany({}),
     BulkOffer.collection.deleteMany({}),
@@ -577,6 +583,136 @@ test("R3-4 eldorado keep-alive pass: a held bulk offer is reported skipped (no p
   assert.equal(count("eldoradoDelist") + count("eldoradoRelist"), 0);
   await eldorado.reportKeepAlive(out);
   assert.equal(world.telegram.length, 0, "a skip is not a failure");
+});
+
+// ------------------------------------------------ FIXES-2 V3 keep-alive side --
+
+// The owner's (or the bulk loop's) pause landing while the renewal's relist is
+// in flight: on an offer the keep-alive has just paused, markets.pause is a
+// no-op on Eldorado, so only the bulk state changes — and then the relist puts
+// the offer back on sale.
+function turnWhileRelisting(externalId, filter, patch) {
+  world.onEldRelist = async (id) => {
+    if (id === externalId) await BulkOffer.collection.updateOne(filter, { $set: patch });
+  };
+}
+const renewable = (id, extra = {}) => ({
+  id,
+  offerState: "Active",
+  quantity: 5,
+  expireDate: later(2),
+  offerTitle: "offer " + id,
+  ...extra,
+});
+
+test("V3 keep-alive: a bulk offer that stops being live as the renewal relists it is paused again at once; live bulk and plain offers renew as before", async () => {
+  // A dropset pack, found through its listing row.
+  const pack = await insertOffer({ externalId: "v3-pack" });
+  await insertRow({ marketplace: "eldorado", externalId: "v3-pack", bulkOfferId: pack });
+  world.eld.set("v3-pack", renewable("v3-pack"));
+  turnWhileRelisting("v3-pack", { _id: pack }, { state: "paused" });
+  let r = await eldorado.renewOffer("v3-pack");
+  assert.equal(r.skipped, "bulk offer turned paused while it was renewed — paused it again");
+  assert.equal(r.ok, undefined, "not reported as a renewal");
+  assert.equal(count("eldoradoRelist", "v3-pack"), 1);
+  assert.equal(count("eldoradoDelist", "v3-pack"), 2, "paused again right after the relist");
+  assert.equal(world.eld.get("v3-pack").offerState, "Paused");
+
+  // A farm offer (found by its own externalId) withdrawn meanwhile. A closed
+  // farm offer is outside the bulk loop's pass: nothing else would take it down.
+  const farmOffer = await insertOffer({ kind: "farming", source: "farm", externalId: "v3-farm" });
+  world.eld.set("v3-farm", renewable("v3-farm"));
+  turnWhileRelisting("v3-farm", { _id: farmOffer }, { state: "withdrawn", open: false, closedAt: new Date() });
+  r = await eldorado.renewOffer("v3-farm");
+  assert.equal(r.skipped, "bulk offer turned withdrawn while it was renewed — paused it again");
+  assert.equal(count("eldoradoDelist", "v3-farm"), 2);
+  assert.equal(world.eld.get("v3-farm").offerState, "Paused");
+
+  // Controls: a bulk offer that stays live renews with one pause and one
+  // resume, and so does an offer with no bulk pack behind it.
+  world.onEldRelist = null;
+  await insertOffer({ externalId: "v3-live" });
+  world.eld.set("v3-live", renewable("v3-live"));
+  r = await eldorado.renewOffer("v3-live");
+  assert.equal(r.ok, true);
+  assert.equal(r.skipped, undefined);
+  assert.equal(count("eldoradoDelist", "v3-live"), 1);
+  assert.equal(count("eldoradoRelist", "v3-live"), 1);
+  assert.equal(world.eld.get("v3-live").offerState, "Active");
+
+  await insertRow({ marketplace: "eldorado", externalId: "v3-plain", origin: "auto" });
+  world.eld.set("v3-plain", renewable("v3-plain"));
+  r = await eldorado.renewOffer("v3-plain");
+  assert.equal(r.ok, true);
+  assert.equal(r.state, "Active");
+  assert.equal(count("eldoradoOffer", "v3-plain"), 2, "read before and after, as before");
+  assert.equal(count("eldoradoDelist", "v3-plain"), 1);
+  assert.equal(count("eldoradoRelist", "v3-plain"), 1);
+  assert.equal(world.eld.get("v3-plain").offerState, "Active");
+  assert.equal(world.telegram.length, 0);
+  assert.deepEqual(world.mpHits, []);
+});
+
+test("V3 keep-alive: a relist that lands late is taken back when the bulk offer turned meanwhile", async () => {
+  const pack = await insertOffer({ externalId: "v3-late" });
+  world.eld.set("v3-late", renewable("v3-late"));
+  let relists = 0;
+  world.onEldRelist = async (id) => {
+    if (id !== "v3-late" || ++relists > 1) return true;
+    // Eldorado takes the resume but still reads Paused; it lands a moment
+    // later — and meanwhile the loop pauses the pack (a no-op on Eldorado).
+    setTimeout(() => {
+      const o = world.eld.get("v3-late");
+      o.offerState = "Active";
+      o.expireDate = later(21);
+    }, 300);
+    await BulkOffer.collection.updateOne({ _id: pack }, { $set: { state: "paused", autoPaused: true } });
+    return false;
+  };
+  const r = await eldorado.renewOffer("v3-late");
+  assert.equal(r.skipped, "bulk offer turned paused while it was renewed — paused it again");
+  assert.equal(count("eldoradoRelist", "v3-late"), 1, "never relisted a second time");
+  assert.equal(count("eldoradoDelist", "v3-late"), 2);
+  assert.equal(world.eld.get("v3-late").offerState, "Paused");
+});
+
+test("V3 keep-alive pass: a re-pause that fails pages the owner once and is reported as a skip, never as a renewal to resume by hand", async () => {
+  const farmOffer = await insertOffer({ kind: "farming", source: "farm", externalId: "v3-fail" });
+  world.eld.set("v3-fail", renewable("v3-fail", { expireDate: later(1), offerTitle: "Rust farming bulk" }));
+  turnWhileRelisting("v3-fail", { _id: farmOffer }, { state: "paused" });
+  const realDelist = mp.eldoradoDelist;
+  let delists = 0;
+  mp.eldoradoDelist = async (id) => {
+    if (String(id) === "v3-fail" && ++delists === 2) {
+      world.calls.push(["eldoradoDelist", id]);
+      throw new Error("Eldorado delist failed (HTTP 503)");
+    }
+    return realDelist(id);
+  };
+  let out;
+  try {
+    out = await eldorado.renewExpiringOffers({});
+  } finally {
+    mp.eldoradoDelist = realDelist;
+  }
+  assert.equal(out.due, 1);
+  assert.equal(out.renewed.length, 0);
+  assert.equal(out.failed.length, 0);
+  assert.equal(out.skipped.length, 1);
+  assert.equal(
+    out.skipped[0].skipped,
+    "bulk offer turned paused while it was renewed — could NOT pause it again (Eldorado delist failed (HTTP 503))",
+  );
+  assert.equal(count("eldoradoDelist", "v3-fail"), 2);
+  assert.equal(world.eld.get("v3-fail").offerState, "Active", "still on sale — why the owner is paged");
+  const pages = world.telegram.filter((m) => m.includes("v3-fail"));
+  assert.equal(pages.length, 1);
+  assert.match(pages[0], /Rust farming bulk/);
+  assert.match(pages[0], /could NOT pause it again/);
+  assert.match(pages[0], /Pause it there by hand/);
+  await eldorado.reportKeepAlive(out);
+  assert.equal(world.telegram.length, 1, "the pass report adds no 'resume them on Eldorado' page");
+  assert.deepEqual(world.mpHits, []);
 });
 
 // ------------------------------------------------------ R3-1 sale learning --

@@ -2,6 +2,9 @@
 // (docs/bulk-packs/FIXES-1.md L1–L4, L6–L8, S1 loop side, lock.js, and the
 // coordinator's addendum: a CLOSED offer's on_offer entries are HELD).
 //
+// Part 4 pins the round-2 fixes (docs/bulk-packs/FIXES-2.md Y1: V1 loop side,
+// V2, V3 loop side, V4) — each test failed on the round-1 loop.
+//
 // Part 1 ports the adversarial reviewer's repros F-A … F-D (scratchpad
 // bulkLoopAdversarial.test.js) and asserts the FIXED outcome. Like the repros
 // they run the REAL loop, stock, markets, reservation layer, Eldorado delivery
@@ -248,14 +251,28 @@ function useReal() {
       },
     },
     proposals: { invalidate() {} },
-    lock: {
-      withOfferLock(id, fn) {
-        r.locked.push(String(id));
-        return lock.withOfferLock(id, fn);
-      },
-    },
+    lock: recordingLock(r.locked),
   });
   return r;
+}
+
+// The real lock, every take recorded in `locked` (the pass's non-waiting try
+// included, whether or not it ran — `busy` lists the ones that found the offer
+// held, FIXES-2 V2).
+function recordingLock(locked, busy = []) {
+  return {
+    withOfferLock(id, fn) {
+      locked.push(String(id));
+      return lock.withOfferLock(id, fn);
+    },
+    async tryWithOfferLock(id, fn) {
+      locked.push(String(id));
+      const r = await lock.tryWithOfferLock(id, fn);
+      if (!r.ran) busy.push(String(id));
+      return r;
+    },
+    holdsAny: () => lock.holdsAny(),
+  };
 }
 
 // A live dropset offer exactly as send.sendOffer leaves it: n accounts that
@@ -960,10 +977,17 @@ function useFakes() {
     gate: { ok: true, reason: "" },
     bad: new Map(),
     notOurs: new Set(),
-    readState: "active",
+    // What readOffer answers: readStates (per externalId) first, then
+    // readState for every offer; with neither, the market mirrors what we did
+    // (a live offer reads "active", anything else "paused") — a test stages a
+    // relist behind our back by answering "active" for a paused one.
+    readState: null,
+    readStates: new Map(),
     failPause: false,
     failSetQuantity: false,
     onSetQuantity: null,
+    onPause: null,
+    onReadOffer: null,
     advertisable: 10,
     cap: {
       bestStackRoom: 30,
@@ -985,7 +1009,9 @@ function useFakes() {
       telegram: [],
       events: [],
       locked: [],
+      busy: [],
       rereserve: [],
+      market: [], // every market call in order: [verb, externalId, n?]
     },
   };
   loop.__resetDeps();
@@ -1020,23 +1046,39 @@ function useFakes() {
     },
     markets: {
       async pause(m, id) {
+        if (f.onPause) await f.onPause(m, id);
         f.calls.pause.push([m, id]);
         if (f.failPause) throw new Error("pause refused");
+        f.calls.market.push(["pause", id]);
       },
       async resume(m, id) {
         f.calls.resume.push([m, id]);
+        f.calls.market.push(["resume", id]);
       },
       async setQuantity(m, id, n) {
         if (f.onSetQuantity) await f.onSetQuantity(m, id, n);
         f.calls.setQuantity.push([m, id, n]);
         if (f.failSetQuantity) throw new Error("quantity refused");
+        f.calls.market.push(["setQuantity", id, n]);
       },
       async withdraw(m, id) {
         f.calls.withdraw.push([m, id]);
       },
       async readOffer(m, id) {
         f.calls.readOffer.push([m, id]);
-        return { state: f.readState, quantity: 0 };
+        if (f.onReadOffer) await f.onReadOffer(m, id);
+        if (f.readStates.has(id)) {
+          return { state: f.readStates.get(id), quantity: 0 };
+        }
+        if (f.readState) return { state: f.readState, quantity: 0 };
+        const o = await BulkOffer.findOne(
+          { externalId: id },
+          { state: 1 },
+        ).lean();
+        return {
+          state: o && o.state === "live" ? "active" : "paused",
+          quantity: 0,
+        };
       },
     },
     farmCapacity: {
@@ -1078,12 +1120,7 @@ function useFakes() {
         return f.rereserve;
       },
     },
-    lock: {
-      withOfferLock(id, fn) {
-        f.calls.locked.push(String(id));
-        return lock.withOfferLock(id, fn);
-      },
-    },
+    lock: recordingLock(f.calls.locked, f.calls.busy),
   });
   return f;
 }
@@ -1677,7 +1714,7 @@ test("L2 released entries are watched: a SOLD copy is recorded, re-reserved and 
   assert.ok(f.calls.telegram.some((t) => /NOT re-reserved/.test(t)));
 });
 
-test("L3 a pass takes each offer's lock, and reads the offer only once it holds it", async () => {
+test("L3 + V2 a pass never waits for a held offer: it is skipped (busy), and the next pass reads it fresh under its lock", async () => {
   await clean();
   const f = useFakes();
   const at = clock();
@@ -1698,19 +1735,26 @@ test("L3 a pass takes each offer's lock, and reads the offer only once it holds 
       { $pull: { units: { accountId: ids[0] } } },
     );
   });
-  let done = false;
-  const passP = pass(at(0)).then((s) => {
-    done = true;
-    return s;
-  });
+  const passP = pass(at(0));
   try {
-    await sleep(50);
-    assert.equal(done, false, "the pass waits for the offer's lock");
+    // Before FIXES-2 V2 the pass queued behind the holder here.
+    const s = await Promise.race([passP, sleep(2000).then(() => "stalled")]);
+    assert.notEqual(s, "stalled", "the pass does not wait for the lock");
+    assert.equal(s.busy, 1);
+    assert.equal(s.open, 1, "a busy offer is still counted open");
+    assert.deepEqual(f.calls.busy, [String(offerId)]);
+    assert.equal(
+      (await getOffer(offerId)).lastSyncAt,
+      null,
+      "not maintained this pass",
+    );
   } finally {
     release();
     await holder;
     await passP;
   }
+  const s2 = await pass(at(5));
+  assert.equal(s2.busy, 0);
   assert.ok(f.calls.locked.includes(String(offerId)));
   assert.ok(
     !unitIds(await getRow(rowId)).includes(ids[0]),
@@ -1900,4 +1944,703 @@ test("lock: an offer id and a function are required; an ObjectId and its string 
   hold();
   await stuck;
   assert.equal(lock.__size(), 0);
+});
+
+// ===========================================================================
+// Part 4 — FIXES-2 round 2 (Y1): V1 loop side, V2, V3 loop side, V4
+// ===========================================================================
+
+// A pass with its heartbeat line captured instead of swallowed.
+async function passLines(now, lines) {
+  const orig = console.log;
+  console.log = (...a) => {
+    const line = a.join(" ");
+    if (line.startsWith("bulkPacks:")) lines.push(line);
+    else orig(...a);
+  };
+  try {
+    return await loop.runOnce({ now });
+  } finally {
+    console.log = orig;
+  }
+}
+
+const historyOf = (o, action) =>
+  (o.history || []).filter((h) => h.action === action);
+const sortCalls = (list) => [...list].map((c) => c.join("|")).sort();
+
+// ---- V1: the farm sharers, and resplitFarm --------------------------------
+
+test("V1 a farm offer still being SENT is a sharer: the pass splits the capacity with it, as send.js does", async () => {
+  await clean();
+  const f = useFakes();
+  const at = clock();
+  f.advertisable = 20;
+  const A = await farmOffer({ state: "live", advertisedQty: 20 });
+  const S = await farmOffer({ state: "sending", advertisedQty: 0 });
+  await pass(at(0));
+  // Round 1 counted live|paused only: A kept all 20 while S's send took 10.
+  const ids = [A, S].map((o) => String(o.offerId)).sort();
+  assert.deepEqual(f.calls.shareFor, [[String(A.offerId), ids, 20]]);
+  assert.deepEqual(f.calls.setQuantity, [["eldorado", A.externalId, 10]]);
+  assert.equal((await getOffer(A.offerId)).advertisedQty, 10);
+  // A re-split leaves an offer being sent to its own send: its lock is never
+  // asked for (the send calls resplitFarm itself when it is done).
+  f.calls.locked.length = 0;
+  const r = await loop.resplitFarm({ now: at(1) });
+  assert.equal(r.offers, 1);
+  assert.ok(!f.calls.locked.includes(String(S.offerId)));
+});
+
+test("V1 resplitFarm syncs every open farm offer NOW under its own lock, whatever farmSyncMinutes says", async () => {
+  await clean();
+  const f = useFakes();
+  const at = clock();
+  f.advertisable = 20;
+  const A = await farmOffer({ state: "live", advertisedQty: 20 });
+  const B = await farmOffer({ state: "live", advertisedQty: 10 });
+  // A synced a minute ago with the whole pool to itself; B was resumed a
+  // moment ago on its share of the two (send.resumeOffer).
+  await BulkOffer.updateOne(
+    { _id: A.offerId },
+    { $set: { lastSyncAt: at(-1), lastCheckAt: at(-1) } },
+  );
+  await BulkOffer.updateOne(
+    { _id: B.offerId },
+    { $set: { lastSyncAt: at(0), lastCheckAt: at(0) } },
+  );
+  await pass(at(1));
+  assert.deepEqual(
+    f.calls.setQuantity,
+    [],
+    "not due: A still has all 20 on sale",
+  );
+
+  f.calls.locked.length = 0;
+  const r = await loop.resplitFarm({ now: at(1) });
+  assert.equal(r.offers, 2);
+  assert.equal(r.errors, 0, r.lastError);
+  assert.deepEqual(f.calls.setQuantity, [["eldorado", A.externalId, 10]]);
+  const a = await getOffer(A.offerId);
+  assert.equal(a.advertisedQty, 10);
+  assert.equal(new Date(a.lastSyncAt).getTime(), at(1).getTime());
+  assert.equal((await getOffer(B.offerId)).advertisedQty, 10);
+  for (const o of [A, B]) {
+    assert.equal(
+      f.calls.locked.filter((id) => id === String(o.offerId)).length,
+      2,
+      "one lock per round (shrink, then grow)",
+    );
+  }
+});
+
+test("V1 resplitFarm shrinks every offer before any grows: the total on sale never exceeds the pool", async () => {
+  await clean();
+  const f = useFakes();
+  const at = clock();
+  f.advertisable = 20;
+  // B (the LOWER id, so first in id order) was auto-paused short; A has the
+  // whole pool on sale. Their shares are now 10 each.
+  const B = await farmOffer({
+    state: "paused",
+    autoPaused: true,
+    advertisedQty: 0,
+  });
+  const A = await farmOffer({ state: "live", advertisedQty: 20 });
+  const r = await loop.resplitFarm({ now: at(0) });
+  assert.equal(r.errors, 0, r.lastError);
+  assert.deepEqual(f.calls.market, [
+    ["setQuantity", A.externalId, 10],
+    ["setQuantity", B.externalId, 10],
+    ["resume", B.externalId],
+  ]);
+  // Replay what the market had on sale after each call.
+  const qty = { [A.externalId]: 20, [B.externalId]: 0 };
+  const on = { [A.externalId]: true, [B.externalId]: false };
+  for (const [verb, id, n] of f.calls.market) {
+    if (verb === "setQuantity") qty[id] = n;
+    if (verb === "resume") on[id] = true;
+    if (verb === "pause") on[id] = false;
+    const total = Object.keys(qty).reduce(
+      (t, k) => t + (on[k] ? qty[k] : 0),
+      0,
+    );
+    assert.ok(total <= 20, total + " on sale after " + verb + " " + id);
+  }
+  const a = await getOffer(A.offerId);
+  const b = await getOffer(B.offerId);
+  assert.equal(a.advertisedQty, 10);
+  assert.equal(b.state, "live");
+  assert.equal(b.autoPaused, false);
+  assert.equal(b.advertisedQty, 10);
+});
+
+test("V1 resplitFarm refuses to run inside any offer's lock, and WAITS for a busy farm offer instead of skipping it", async () => {
+  await clean();
+  const f = useFakes();
+  const at = clock();
+  f.advertisable = 20;
+  const A = await farmOffer({ state: "live", advertisedQty: 20 });
+  const B = await farmOffer({ state: "live", advertisedQty: 10 });
+  // From inside an offer's lock (a send that did not release first): refused
+  // at once — it would take the other offers' locks while holding this one.
+  await lock.withOfferLock(B.offerId, async () => {
+    await assert.rejects(
+      loop.resplitFarm({ now: at(0) }),
+      /must not run inside a bulk offer's lock/,
+    );
+  });
+  assert.deepEqual(f.calls.market, []);
+
+  // A is busy (an owner action holds it): the re-split waits for it, because
+  // skipping it would leave it on its old share.
+  let release;
+  const gate = new Promise((r) => (release = r));
+  const holder = lock.withOfferLock(A.offerId, () => gate);
+  let done = false;
+  const p = loop.resplitFarm({ now: at(1) }).then((r) => {
+    done = true;
+    return r;
+  });
+  try {
+    await sleep(100);
+    assert.equal(done, false, "waits for A's lock");
+    assert.deepEqual(f.calls.market, []);
+  } finally {
+    release();
+    await holder;
+  }
+  const r = await p;
+  assert.equal(r.errors, 0, r.lastError);
+  assert.deepEqual(f.calls.setQuantity, [["eldorado", A.externalId, 10]]);
+});
+
+test("V1 resplitFarm on an unreadable capacity pauses, resumes and requantifies nothing — a loop error on each offer (L6)", async () => {
+  await clean();
+  const f = useFakes();
+  const at = clock();
+  const A = await farmOffer({ state: "live", advertisedQty: 20 });
+  const B = await farmOffer({
+    state: "paused",
+    autoPaused: true,
+    advertisedQty: 0,
+  });
+  f.advertisable = 40;
+  f.cap = { ...f.cap, error: "ssh: connect timed out" };
+  const r = await loop.resplitFarm({ now: at(0) });
+  assert.deepEqual(f.calls.market, []);
+  assert.ok(r.errors >= 2);
+  assert.match(r.lastError, /farm capacity unreadable/);
+  for (const o of [A, B]) {
+    const x = await getOffer(o.offerId);
+    assert.match(
+      x.lastError,
+      /^Loop: farm re-split: farm capacity unreadable \(ssh: connect timed out\)/,
+    );
+    assert.equal(x.lastSyncAt, null, "not synced: the next pass tries again");
+  }
+  assert.equal(f.calls.telegram.length, 0, "nobody is paged");
+});
+
+// ---- V2: the pass never waits for a lock; per-offer clock and settings -----
+
+test("V2 a send in flight (its offer's lock held) no longer stalls the pass: the rest is maintained, it is counted busy", async () => {
+  await clean();
+  const f = useFakes();
+  const at = clock();
+  // S: an offer an owner send is publishing right now (created first, so the
+  // round-1 pass reached it first and queued behind the send's lock).
+  const S = await farmOffer({ state: "sending", advertisedQty: 0 });
+  // D: a live pack that must close sold out this pass (3 free < minimum 5).
+  const D = await dsOffer({ n: 3, minQty: 5, advertisedQty: 3 });
+  let release;
+  const gate = new Promise((r) => (release = r));
+  const sending = lock.withOfferLock(S.offerId, () => gate);
+  const lines = [];
+  const passP = passLines(at(0), lines);
+  try {
+    const s = await Promise.race([passP, sleep(3000).then(() => "stalled")]);
+    assert.notEqual(
+      s,
+      "stalled",
+      "the pass finished while the send held its lock",
+    );
+    assert.equal(s.busy, 1);
+    assert.equal(s.errors, 0);
+    assert.equal(s.open, 1, "the offer being sent is still counted open");
+    assert.deepEqual(f.calls.busy, [String(S.offerId)]);
+    assert.equal(
+      (await getOffer(D.offerId)).state,
+      "sold_out",
+      "D was handled while the send ran",
+    );
+    assert.deepEqual(f.calls.pause, [["eldorado", D.externalId]]);
+    assert.equal(lines.length, 1);
+    assert.match(lines[0], /\| released 0 \| busy 1 \| errors 0$/);
+    assert.equal(loop.status().lastSummary.busy, 1);
+  } finally {
+    release();
+    await sending;
+    await passP;
+  }
+  const s2 = await pass(at(5));
+  assert.equal(s2.busy, 0, "visited again once the send is done");
+});
+
+test("V2 each offer's clock is the pass's base time plus the real time the pass has run: a slow offer no longer back-dates the next", async () => {
+  await clean();
+  const f = useFakes();
+  const base = new Date(Date.now() + 60e3);
+  // X (first by id): its market read takes 1.2 s. Y: sold out this pass.
+  const X = await dsOffer({ n: 6, minQty: 5 });
+  const Y = await dsOffer({ n: 3, minQty: 5, advertisedQty: 3 });
+  f.onReadOffer = async (m, id) => {
+    if (id === X.externalId) await sleep(1200);
+  };
+  const t0 = Date.now();
+  await pass(base);
+  const took = Date.now() - t0;
+  const x = await getOffer(X.offerId);
+  assert.equal(
+    new Date(x.lastSyncAt).getTime(),
+    base.getTime(),
+    "the first offer keeps the base time exactly (tests control it)",
+  );
+  const y = await getOffer(Y.offerId);
+  assert.equal(y.state, "sold_out");
+  const stamps = [
+    ...y.reserved.map((e) => new Date(e.changedAt).getTime()),
+    new Date(y.closedAt).getTime(),
+  ].map((t) => t - base.getTime());
+  for (const d of stamps) {
+    // Round 1 stamped every one of them with the base: 0.
+    assert.ok(
+      d >= 1200 && d <= took + 50,
+      d + " ms after the base (pass ran " + took + " ms)",
+    );
+  }
+});
+
+test("V2 the settings are read again for each offer: switching bulk packs off mid-pass holds for the offers after the switch", async () => {
+  await clean();
+  const f = useFakes();
+  const at = clock();
+  const X = await dsOffer({ n: 6, minQty: 5 });
+  // Y: auto-paused for capacity, which is back — it would resume.
+  const Y = await farmOffer({
+    state: "paused",
+    autoPaused: true,
+    advertisedQty: 5,
+  });
+  f.advertisable = 10;
+  f.onReadOffer = async (m, id) => {
+    // The owner switches bulk packs off while the pass is on X.
+    if (id === X.externalId) f.bp = bpObj({ enabled: false });
+  };
+  await pass(at(0));
+  assert.deepEqual(f.calls.resume, [], "not resumed after the switch-off");
+  assert.equal((await getOffer(Y.offerId)).state, "paused");
+  f.onReadOffer = null;
+  f.bp = bpObj();
+  await pass(at(16));
+  assert.deepEqual(
+    f.calls.resume,
+    [["eldorado", Y.externalId]],
+    "on again: it resumes",
+  );
+});
+
+// ---- V3: an offer we took off sale that the market shows active ----------
+
+test("V3 a PAUSED offer the market shows active is paused again at that read, with a history line (Eldorado and G2G)", async () => {
+  await clean();
+  const f = useFakes();
+  const at = clock();
+  const P = await dsOffer({ n: 6, state: "paused" }); // owner-paused pack
+  const F = await farmOffer({
+    market: "g2g",
+    state: "paused",
+    autoPaused: false,
+    advertisedQty: 5,
+  });
+  const L = await dsOffer({ n: 6 }); // live: "active" is right for it
+  for (const o of [P, F, L]) f.readStates.set(o.externalId, "active");
+  await pass(at(0));
+  assert.deepEqual(
+    sortCalls(f.calls.pause),
+    sortCalls([
+      ["eldorado", P.externalId],
+      ["g2g", F.externalId],
+    ]),
+  );
+  for (const o of [P, F]) {
+    const x = await getOffer(o.offerId);
+    assert.equal(x.state, "paused", "our state is unchanged");
+    assert.equal(x.open, true);
+    const h = historyOf(x, "repaused");
+    assert.equal(h.length, 1);
+    assert.match(
+      h[0].detail,
+      /showed the offer active while it is paused here — paused it again/,
+    );
+  }
+  assert.equal(historyOf(await getOffer(L.offerId), "repaused").length, 0);
+  assert.equal(
+    f.calls.telegram.filter((t) => /^Bulk offer paused again/.test(t)).length,
+    2,
+  );
+  assert.ok(
+    f.calls.events.some(
+      (e) => e.action === "repaused" && e.severity === "warn",
+    ),
+  );
+
+  // Read every 30 minutes, not every pass.
+  await pass(at(5));
+  assert.equal(f.calls.pause.length, 2);
+  // Paused on the market now: nothing more to do.
+  f.readStates.clear();
+  await pass(at(31));
+  assert.equal(f.calls.pause.length, 2);
+  assert.equal(
+    f.calls.readOffer.filter(([, id]) => id === P.externalId).length,
+    2,
+    "read again after 30 minutes",
+  );
+});
+
+test("V3 a CLOSED dropset offer is read inside its 24-hour watch and paused again when shown active; held, Gameflip and later offers are not read", async () => {
+  await clean();
+  const f = useFakes();
+  const T = Date.now();
+  const W = await dsOffer({ n: 6 }); // Eldorado, withdrawn
+  const G = await dsOffer({ n: 6, market: "g2g" }); // G2G, sold out
+  const H = await dsOffer({ n: 6 }); // held after an unknown publish ("error")
+  const GF = await dsOffer({ n: 5, market: "gameflip" }); // a withdrawn pack
+  const close = (o, state) =>
+    BulkOffer.updateOne(
+      { _id: o.offerId },
+      { $set: { state, closedAt: new Date(T), lastCheckAt: new Date(T) } },
+    );
+  await close(W, "withdrawn");
+  await close(G, "sold_out");
+  await close(H, "error");
+  await close(GF, "withdrawn");
+  for (const o of [W, G, H, GF]) f.readStates.set(o.externalId, "active");
+
+  await pass(new Date(T + 60 * 60e3));
+  assert.deepEqual(
+    sortCalls(f.calls.pause),
+    sortCalls([
+      ["eldorado", W.externalId],
+      ["g2g", G.externalId],
+    ]),
+  );
+  const read = new Set(f.calls.readOffer.map(([, id]) => id));
+  assert.ok(!read.has(H.externalId), "a held offer is the owner's to settle");
+  assert.ok(!read.has(GF.externalId), "a Gameflip pack has no pause");
+  for (const [o, st] of [
+    [W, "withdrawn"],
+    [G, "sold_out"],
+  ]) {
+    const x = await getOffer(o.offerId);
+    assert.equal(x.state, st);
+    assert.equal(x.open, false);
+    const h = historyOf(x, "repaused");
+    assert.equal(h.length, 1);
+    assert.match(h[0].detail, new RegExp("while it is " + st + " here"));
+  }
+  // Every 30 minutes inside the window…
+  await pass(new Date(T + 70 * 60e3));
+  assert.equal(f.calls.pause.length, 2);
+  await pass(new Date(T + 95 * 60e3));
+  assert.equal(f.calls.pause.length, 4, "still shown active: paused again");
+  // …and never after it.
+  const n = f.calls.readOffer.length;
+  await pass(new Date(T + 25 * 60 * 60e3));
+  assert.equal(f.calls.readOffer.length, n);
+});
+
+test("V3 a re-pause that fails is a loop error, and the market is read again on the next pass", async () => {
+  await clean();
+  const f = useFakes();
+  const at = clock();
+  const P = await dsOffer({ n: 6, state: "paused" });
+  f.readStates.set(P.externalId, "active");
+  f.failPause = true;
+  const s = await pass(at(0));
+  assert.equal(s.errors, 1);
+  let x = await getOffer(P.offerId);
+  assert.match(
+    x.lastError,
+    /^Loop: Eldorado shows this paused offer ACTIVE and pausing it again failed: pause refused/,
+  );
+  assert.equal(x.lastCheckAt, null, "not counted as read");
+  f.failPause = false;
+  await pass(at(5));
+  assert.equal(
+    f.calls.readOffer.filter(([, id]) => id === P.externalId).length,
+    2,
+  );
+  x = await getOffer(P.offerId);
+  assert.equal(x.lastError, "", "cleared by the clean pass");
+  assert.equal(historyOf(x, "repaused").length, 1);
+});
+
+test("V3 an offer this very pass paused is not 'paused again' by the read right behind that pause", async () => {
+  await clean();
+  const f = useFakes();
+  const at = clock();
+  const A = await farmOffer({ state: "live", advertisedQty: 10 });
+  f.advertisable = 3; // < minimum 5: the farm sync pauses it
+  f.readStates.set(A.externalId, "active"); // the read lags behind the pause
+  await pass(at(0));
+  assert.deepEqual(f.calls.pause, [["eldorado", A.externalId]]);
+  const a = await getOffer(A.offerId);
+  assert.equal(a.state, "paused");
+  assert.equal(historyOf(a, "repaused").length, 0);
+  // The next read, half an hour on, still says active: that is paused again.
+  await pass(at(31));
+  assert.equal(f.calls.pause.length, 2);
+  assert.equal(historyOf(await getOffer(A.offerId), "repaused").length, 1);
+});
+
+// ---- V4: a take-out lowers the market BEFORE the unit leaves --------------
+
+test("V4 take-out: the quantity comes down BEFORE the unit leaves the row", async () => {
+  await clean();
+  const f = useFakes();
+  const { offerId, rowId, ids, externalId } = await dsOffer({
+    n: 7,
+    advertisedQty: 7,
+  });
+  let unitsAtQuantity = null;
+  f.onSetQuantity = async () => {
+    unitsAtQuantity = unitIds(await getRow(rowId));
+  };
+  const out = await loop.takeAccountOut({
+    row: await getRow(rowId),
+    accountId: ids[0],
+    reason: "sold manually",
+  });
+  assert.equal(out.detached.length, 1, JSON.stringify(out));
+  assert.deepEqual(out.warnings, []);
+  assert.deepEqual(f.calls.setQuantity, [["eldorado", externalId, 6]]);
+  assert.ok(
+    unitsAtQuantity.includes(ids[0]),
+    "lowered while the unit was still on the row",
+  );
+  assert.ok(!unitIds(await getRow(rowId)).includes(ids[0]), "then it left");
+  const o = await getOffer(offerId);
+  assert.equal(o.advertisedQty, 6);
+  const e = entriesOf(o, ids[0])[0];
+  assert.equal(e.state, "retiring");
+  assert.equal(e.keepReserved, true);
+});
+
+test("V4 take-out below the minimum: the offer is paused BEFORE the unit leaves the row", async () => {
+  await clean();
+  const f = useFakes();
+  const { offerId, rowId, ids, externalId } = await dsOffer({
+    n: 5,
+    minQty: 5,
+  });
+  let unitsAtPause = null;
+  f.onPause = async () => {
+    unitsAtPause = unitIds(await getRow(rowId));
+  };
+  const out = await loop.takeAccountOut({
+    row: await getRow(rowId),
+    accountId: ids[0],
+    reason: "sold manually",
+  });
+  assert.equal(out.detached.length, 1, JSON.stringify(out));
+  assert.deepEqual(f.calls.pause, [["eldorado", externalId]]);
+  assert.ok(
+    unitsAtPause.includes(ids[0]),
+    "paused while the unit was still on the row",
+  );
+  assert.ok(!unitIds(await getRow(rowId)).includes(ids[0]));
+  const o = await getOffer(offerId);
+  assert.equal(o.state, "paused");
+  assert.equal(o.autoPaused, false);
+});
+
+test("V4 a quantity call that fails still takes the account out; the error is noted and the next pass lowers the market", async () => {
+  await clean();
+  const f = useFakes();
+  const at = clock();
+  const { offerId, rowId, ids, externalId } = await dsOffer({
+    n: 7,
+    advertisedQty: 7,
+  });
+  f.failSetQuantity = true;
+  const out = await loop.takeAccountOut({
+    row: await getRow(rowId),
+    accountId: ids[0],
+    reason: "sold manually",
+  });
+  assert.equal(out.detached.length, 1, "it leaves anyway: the owner spent it");
+  assert.match(
+    out.warnings.join(" "),
+    /quantity not updated yet \(quantity refused\)/,
+  );
+  assert.ok(!unitIds(await getRow(rowId)).includes(ids[0]));
+  let o = await getOffer(offerId);
+  assert.equal(entriesOf(o, ids[0])[0].state, "retiring");
+  assert.equal(o.advertisedQty, 7);
+  assert.match(
+    o.lastError,
+    /^Loop: take-out of login_\S+: the market was not lowered \(quantity refused\)/,
+  );
+  f.failSetQuantity = false;
+  await pass(at(1));
+  o = await getOffer(offerId);
+  assert.deepEqual(f.calls.setQuantity.slice(-1), [
+    ["eldorado", externalId, 6],
+  ]);
+  assert.equal(o.advertisedQty, 6);
+  assert.equal(o.lastError, "", "the next pass corrected it");
+});
+
+test("V4 a pause that fails still takes the account out; the next pass closes the offer sold out", async () => {
+  await clean();
+  const f = useFakes();
+  const at = clock();
+  const { offerId, rowId, ids } = await dsOffer({ n: 5, minQty: 5 });
+  f.failPause = true;
+  const out = await loop.takeAccountOut({
+    row: await getRow(rowId),
+    accountId: ids[0],
+    reason: "sold manually",
+  });
+  assert.equal(out.detached.length, 1, JSON.stringify(out));
+  assert.match(out.warnings.join(" "), /pause refused/);
+  let o = await getOffer(offerId);
+  assert.equal(o.state, "live", "not marked paused while the market is not");
+  assert.equal(entriesOf(o, ids[0])[0].state, "retiring");
+  assert.match(o.lastError, /^Loop: take-out of .*pause refused/);
+  f.failPause = false;
+  await pass(at(1));
+  o = await getOffer(offerId);
+  assert.equal(o.state, "sold_out");
+});
+
+test("V4 a take-out only ever LOWERS the quantity — growing it is the pass's job, behind I4/I8", async () => {
+  await clean();
+  const f = useFakes();
+  // Switched off: 8 free, 5 advertised (the pass was not allowed to grow it).
+  f.bp = bpObj({ enabled: false });
+  const { offerId, rowId, ids } = await dsOffer({ n: 8, advertisedQty: 5 });
+  const out = await loop.takeAccountOut({
+    row: await getRow(rowId),
+    accountId: ids[0],
+    reason: "sold manually",
+  });
+  assert.equal(out.detached.length, 1, JSON.stringify(out));
+  assert.deepEqual(
+    f.calls.setQuantity,
+    [],
+    "7 left >= 5 advertised: nothing to lower",
+  );
+  assert.equal((await getOffer(offerId)).advertisedQty, 5);
+});
+
+// ---- lock.js: tryWithOfferLock, holdsAny ---------------------------------
+
+test("lock: tryWithOfferLock runs fn only if the offer is free — held or queued answers {ran:false} at once", async () => {
+  lock.__reset();
+  assert.deepEqual(await lock.tryWithOfferLock("T", async () => "v"), {
+    ran: true,
+    value: "v",
+  });
+  assert.equal(lock.__size(), 0);
+  const order = [];
+  let release;
+  const gate = new Promise((r) => (release = r));
+  const holder = lock.withOfferLock("T", () => gate);
+  const busy = { ran: false, value: undefined };
+  assert.deepEqual(
+    await lock.tryWithOfferLock("T", async () => order.push("try1")),
+    busy,
+  );
+  const queued = lock.withOfferLock("T", async () => order.push("queued"));
+  assert.deepEqual(
+    await lock.tryWithOfferLock("T", async () => order.push("try2")),
+    busy,
+  );
+  assert.deepEqual(await lock.tryWithOfferLock("U", async () => 1), {
+    ran: true,
+    value: 1,
+  });
+  release();
+  await holder;
+  await queued;
+  assert.deepEqual(order, ["queued"], "a busy try never runs, never queues");
+
+  // Taken through a try, the offer is held like any other holder's.
+  let release2;
+  const gate2 = new Promise((r) => (release2 = r));
+  const t = lock.tryWithOfferLock("T", () => gate2.then(() => "late"));
+  let waited = false;
+  const w = lock.withOfferLock("T", async () => {
+    waited = true;
+  });
+  await sleep(10);
+  assert.equal(waited, false);
+  assert.deepEqual(await lock.tryWithOfferLock("T", async () => 0), busy);
+  release2();
+  assert.deepEqual(await t, { ran: true, value: "late" });
+  await w;
+  assert.equal(waited, true);
+
+  // fn's error releases the lock and rejects; re-entry is refused, not "busy".
+  await assert.rejects(
+    lock.tryWithOfferLock("T", async () => {
+      throw new Error("boom");
+    }),
+    /boom/,
+  );
+  await lock.withOfferLock("T", async () => {
+    await assert.rejects(
+      lock.tryWithOfferLock("T", async () => 1),
+      /not re-entrant/,
+    );
+  });
+  await assert.rejects(
+    lock.tryWithOfferLock(null, async () => 1),
+    TypeError,
+  );
+  await assert.rejects(lock.tryWithOfferLock("T", null), TypeError);
+  assert.equal(lock.__size(), 0);
+});
+
+test("lock: holdsAny is true only inside a holder's own context", async () => {
+  lock.__reset();
+  assert.equal(lock.holdsAny(), false);
+  let inside;
+  let nested;
+  let later;
+  await lock.withOfferLock("H", async () => {
+    inside = lock.holdsAny();
+    await lock.withOfferLock("I", async () => {
+      nested = lock.holdsAny();
+    });
+    later = sleep(20).then(() => lock.holdsAny());
+  });
+  assert.equal(inside, true);
+  assert.equal(nested, true);
+  assert.equal(lock.holdsAny(), false);
+  assert.equal(
+    await later,
+    false,
+    "work that outlives the holder holds nothing",
+  );
+  assert.deepEqual(
+    await lock.tryWithOfferLock("J", async () => lock.holdsAny()),
+    {
+      ran: true,
+      value: true,
+    },
+  );
 });

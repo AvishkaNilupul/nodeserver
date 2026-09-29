@@ -771,7 +771,7 @@ test("sold out: pause first, then retire the free units; release 15 minutes late
   assert.equal(s.open, 0);
   assert.equal(
     lines[0],
-    "bulkPacks: pass — open 0 (acct 0, farm 0) | sold +1 | paused 0 | retiring 4 | released 0 | errors 0",
+    "bulkPacks: pass — open 0 (acct 0, farm 0) | sold +1 | paused 0 | retiring 4 | released 0 | busy 0 | errors 0",
   );
   assert.ok(fx.calls.invalidate >= 1, "proposals are told the slot freed up");
 
@@ -1354,7 +1354,7 @@ test("heartbeat: one line per pass, idle passes included", async () => {
   const before = loop.status().passes;
   const s = await pass(at(0), lines);
   assert.deepEqual(lines, [
-    "bulkPacks: pass — open 0 (acct 0, farm 0) | sold +0 | paused 0 | retiring 0 | released 0 | errors 0",
+    "bulkPacks: pass — open 0 (acct 0, farm 0) | sold +0 | paused 0 | retiring 0 | released 0 | busy 0 | errors 0",
   ]);
   assert.deepEqual(s, {
     open: 0,
@@ -1364,6 +1364,7 @@ test("heartbeat: one line per pass, idle passes included", async () => {
     paused: 0,
     retiring: 0,
     released: 0,
+    busy: 0,
     errors: 0,
   });
   const st = loop.status();
@@ -1378,7 +1379,7 @@ test("heartbeat: one line per pass, idle passes included", async () => {
   const more = [];
   await pass(at(1), more);
   assert.deepEqual(more, [
-    "bulkPacks: pass — open 2 (acct 1, farm 1) | sold +0 | paused 1 | retiring 0 | released 0 | errors 0",
+    "bulkPacks: pass — open 2 (acct 1, farm 1) | sold +0 | paused 1 | retiring 0 | released 0 | busy 0 | errors 0",
   ]);
 });
 

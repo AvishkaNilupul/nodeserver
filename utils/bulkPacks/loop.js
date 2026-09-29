@@ -40,11 +40,22 @@
 // still watched for WATCH_WINDOW_MS afterwards: a released account that comes
 // back SOLD is recorded, re-reserved and always reported.
 //
-// ONE WRITER AT A TIME (FIXES-1 L3)
-// Every pass over an offer, and the owner's take-out, runs inside
-// lock.withOfferLock and re-reads the offer there; send.js does the same. The
-// few decisions that would undo an owner action (the clobber heal, a release)
-// re-read their entry once more right before they write.
+// ONE WRITER AT A TIME (FIXES-1 L3, FIXES-2 V2)
+// Every pass over an offer, and the owner's take-out, runs inside the offer's
+// lock and re-reads the offer there; send.js does the same. The few decisions
+// that would undo an owner action (the clobber heal, a release) re-read their
+// entry once more right before they write. The pass never WAITS for a lock
+// (lock.tryWithOfferLock): an offer a send or an owner action holds is skipped
+// and counted "busy" — one slow publish used to stall every other offer's
+// sold-out, expiry and integrity work. Each offer gets its own clock (the
+// pass's `now` plus the real time the pass has run) and a fresh settings read.
+//
+// FARM CAPACITY IS ONE SHARED POOL (FIXES-1 S1, FIXES-2 V1)
+// Every open farm offer (sending, live or paused — the list send.js counts)
+// advertises only its share. When a farm send or resume finishes, send.js
+// calls resplitFarm(), which syncs every farm offer at once — shrinking ones
+// first — instead of leaving the others on their old, larger share until their
+// next farmSyncMinutes sync.
 //
 // Nothing FREE (I2: no deliveredAt, messagedAt or orderId) is ever assumed sold,
 // and nothing that is not FREE is ever released or pulled.
@@ -96,6 +107,14 @@ const ROW_FIELDS = {
   title: 1,
 };
 const HOLDING_STATES = ["on_offer", "retiring", "delivered"];
+// The farm offers that share the rent-farm capacity: every OPEN one (sending,
+// live, paused) — the same query send.js's farmShareFor uses (FIXES-2 V1).
+const farmSharers = () => ({ source: "farm", open: true });
+// States in which WE took an offer off sale (paused, or closed with its stock
+// going back). A market read that says "active" for one of them is paused
+// again at that read (FIXES-2 V3). Not "error": a held offer whose publish
+// outcome is unknown is the owner's to settle, and not "sold".
+const QUIET_STATES = ["paused", "sold_out", "withdrawn", "expired"];
 
 // A settings read that fails must not stop the SAFETY maintenance, and must not
 // open anything either: switched off, so nothing is resumed or grown.
@@ -1710,10 +1729,83 @@ async function readExpiry(offer, ctx, job) {
   } else if (seen.state === "active" || seen.state === "paused") {
     await clearFlag(offer, "gone");
   }
+  if (seen.state === "active") await repauseIfActive(offer, ctx, job);
   return seen.state;
 }
 
+// FIXES-2 V3: the market says "active" for an offer WE took off sale (paused,
+// sold out, withdrawn, expired) — something put it back on sale behind our back
+// (the Eldorado keep-alive's pause+resume racing our pause, a hand relist). A
+// buyer there would be sold stock that is on its way back to the shelf, so it
+// is paused again at that read, with a history line, an audit event and a
+// Telegram. Eldorado/G2G only (a Gameflip pack has no pause and reads
+// "unknown"). A pause that fails is a loop error and the market is read again
+// on the next pass instead of in half an hour. Returns true when it paused.
+async function repauseIfActive(offer, ctx, job) {
+  if (!QUIET_STATES.includes(offer.state)) return false;
+  if (offer.market !== "eldorado" && offer.market !== "g2g") return false;
+  // This very pass paused it: the read right behind that pause is lag.
+  if (job.pausedNow) return false;
+  const where = label(offer.market);
+  try {
+    await deps.markets.pause(offer.market, offer.externalId);
+  } catch (e) {
+    delete job.patch.lastCheckAt;
+    job.errors.push(
+      where +
+        " shows this " +
+        offer.state +
+        " offer ACTIVE and pausing it again failed: " +
+        errText(e),
+    );
+    return false;
+  }
+  const text =
+    where +
+    " showed the offer active while it is " +
+    offer.state +
+    " here — paused it again";
+  await deps.BulkOffer.updateOne(
+    { _id: offer._id },
+    { $push: { history: hist("repaused", text, ctx.now) } },
+  );
+  audit(offer, "repaused", "warn", text);
+  notify(
+    "Bulk offer paused again: " +
+      describe(offer) +
+      "\n" +
+      text +
+      ". Check " +
+      where +
+      " for an order placed while it was on sale.",
+  );
+  return true;
+}
+
+// FIXES-2 V3: a CLOSED dropset offer is still watched for WATCH_WINDOW_MS after
+// it closed (FIXES-1 L2); the market read (every READ_OFFER_EVERY_MS) is part of
+// that watch, so an offer we closed that comes back on sale is paused again.
+// Only the "gone"/"expired" handling of an open offer is not repeated here — a
+// closed offer has nothing left to take down.
+async function watchClosedMarket(offer, ctx, job) {
+  if (offer.open || !QUIET_STATES.includes(offer.state)) return;
+  if (offer.market !== "eldorado" && offer.market !== "g2g") return;
+  const closed = ms(offer.closedAt);
+  if (closed == null || ctx.now.getTime() - closed > WATCH_WINDOW_MS) return;
+  if (!due(offer.lastCheckAt, READ_OFFER_EVERY_MS, ctx.now)) return;
+  job.patch.lastCheckAt = ctx.now;
+  const seen = await readOfferSafe(offer);
+  if (seen.state === "active") await repauseIfActive(offer, ctx, job);
+}
+
 async function maintainDropset(offer, ctx, job) {
+  const closed = !offer.open;
+  await maintainDropsetRow(offer, ctx, job);
+  // FIXES-2 V3: inside its watch window a closed offer's market is read too.
+  if (closed) await watchClosedMarket(offer, ctx, job);
+}
+
+async function maintainDropsetRow(offer, ctx, job) {
   const { row, problem } = await loadRow(offer, ctx.now);
   if (problem) {
     await raiseFlag(offer, "row", problem);
@@ -2050,11 +2142,14 @@ async function capacityFor(ctx) {
   return ctx.cap;
 }
 
-// FIXES-1 S1: the rent-farm capacity is SHARED by every open farm offer
-// (live or paused — a paused one comes back and needs its part). The whole
-// `available` is split between them, deterministically by id, and an offer
-// only ever acts on its own share. Read fresh (under this offer's lock) so a
-// farm offer sent or closed a moment ago is counted as it is now. Returns
+// FIXES-1 S1: the rent-farm capacity is SHARED by every open farm offer. The
+// whole `available` is split between them, deterministically by id, and an
+// offer only ever acts on its own share. The sharers are EXACTLY the list
+// send.js counts (FIXES-2 V1): every open farm offer — sending (its send takes
+// its share as it publishes), live, or paused (it comes back and needs its
+// part). Counting fewer than send.js did let the two disagree, so the shares
+// could add up to more than `available`. Read fresh (under this offer's lock)
+// so a farm offer sent or closed a moment ago is counted as it is now. Returns
 // {share, available, sharers}, or null (with a loop error) when the share
 // cannot be worked out — then nothing is paused, resumed or requantified.
 async function farmShare(offer, cap, ctx, job) {
@@ -2063,15 +2158,7 @@ async function farmShare(offer, cap, ctx, job) {
   );
   if (!Number.isFinite(available) || available < 0) available = 0;
   const self = String(offer._id);
-  const rows = await deps.BulkOffer.find(
-    {
-      open: true,
-      kind: "farming",
-      source: "farm",
-      state: { $in: ["live", "paused"] },
-    },
-    { _id: 1 },
-  )
+  const rows = await deps.BulkOffer.find(farmSharers(), { _id: 1 })
     .sort({ _id: 1 })
     .limit(OFFER_LIMIT)
     .lean();
@@ -2197,8 +2284,12 @@ async function maintainFarm(offer, ctx, job) {
   }
 }
 
-// The farm capacity sync of one offer (every bp.farmSyncMinutes).
-async function syncFarm(offer, ctx, job) {
+// The farm capacity sync of one offer (every bp.farmSyncMinutes, or at once
+// from resplitFarm). `shrinkOnly` (resplitFarm's first round, FIXES-2 V1):
+// act only if this offer must come DOWN (pause, or a lower quantity); an offer
+// that would grow or resume is left for the second round, so the offers never
+// advertise more than the pool together while the shares move.
+async function syncFarm(offer, ctx, job, { shrinkOnly = false } = {}) {
   const cap = await capacityFor(ctx);
   if (cap.error) {
     // FIXES-1 L6: an unreadable capacity is not "no capacity". Nothing is
@@ -2211,12 +2302,24 @@ async function syncFarm(offer, ctx, job) {
   }
   const sh = await farmShare(offer, cap, ctx, job);
   if (!sh) return;
-  job.patch.lastSyncAt = ctx.now;
   // S1: this offer's share, never the whole of `available`.
   const q = sh.share;
   const minQty = Number(offer.minQty);
+  if (
+    shrinkOnly &&
+    !(
+      offer.state === "live" &&
+      (q < minQty || q < (Number(offer.advertisedQty) || 0))
+    )
+  ) {
+    return;
+  }
+  job.patch.lastSyncAt = ctx.now;
   if (offer.state === "live" && q < minQty) {
     await deps.markets.pause(offer.market, offer.externalId);
+    // This pass took it off sale itself: a market read right behind the pause
+    // that still says "active" is lag, not a relist (FIXES-2 V3).
+    job.pausedNow = true;
     if (
       await transition(offer, "paused", {
         from: ["live"],
@@ -2359,6 +2462,8 @@ const state = {
   passes: 0,
 };
 
+// `busy`: offers skipped this pass because a send or an owner action held
+// their lock (FIXES-2 V2) — visited again next pass.
 function emptySummary() {
   return {
     open: 0,
@@ -2368,6 +2473,7 @@ function emptySummary() {
     paused: 0,
     retiring: 0,
     released: 0,
+    busy: 0,
     errors: 0,
   };
 }
@@ -2388,6 +2494,8 @@ function heartbeatLine(s) {
     s.retiring +
     " | released " +
     s.released +
+    " | busy " +
+    (Number(s.busy) || 0) +
     " | errors " +
     s.errors
   );
@@ -2438,23 +2546,61 @@ async function maintainOfferLocked(offerId, ctx) {
 
 // Maintain one offer now, under its lock — what runOnce does for every offer
 // it visits. Standalone (no pass context), it builds its own and tells the
-// proposals cache when something changed. Resolves {offer, error, summary}:
-// `offer` as the pass left it (null when it does not exist), `error` the
-// pass's error text ("" when clean). Never call it while holding this offer's
-// lock (the lock is not re-entrant).
-async function maintainOffer(offerId, { now, ctx } = {}) {
+// proposals cache when something changed. By default it waits for the lock;
+// `ifFree` (the pass, FIXES-2 V2) runs only if nobody holds or waits for it
+// and otherwise returns at once with busy:true. Resolves
+// {offer, error, busy, summary}: `offer` as the pass left it (null when it does
+// not exist or was busy), `error` the pass's error text ("" when clean). Never
+// call it while holding this offer's lock (the lock is not re-entrant).
+async function maintainOffer(offerId, { now, ctx, ifFree = false } = {}) {
   const own = !ctx;
   const c = ctx || passContext(now);
-  const res = await deps.lock.withOfferLock(offerId, () =>
-    maintainOfferLocked(offerId, c),
-  );
+  const run = () => maintainOfferLocked(offerId, c);
+  let res;
+  if (ifFree) {
+    const t = await deps.lock.tryWithOfferLock(offerId, run);
+    if (!t || t.ran !== true) {
+      if (own) c.summary.busy++;
+      return { offer: null, error: "", busy: true, summary: c.summary };
+    }
+    res = t.value;
+  } else {
+    res = await deps.lock.withOfferLock(offerId, run);
+  }
   if (own) {
     if (res.error) c.summary.errors++;
     if (res.offer) finalCounts([res.offer], c.summary);
     if (c.changed) invalidateProposals();
   }
-  return { offer: res.offer, error: res.error, summary: c.summary };
+  return {
+    offer: res.offer,
+    error: res.error,
+    busy: false,
+    summary: c.summary,
+  };
 }
+
+// FIXES-2 V2: each offer's own clock and settings, set just before its turn.
+// `now` is the pass's base time plus the real time the pass has run so far —
+// a unit retired late in a long pass (slow market calls) carries the time it
+// really left, so its retire grace is not cut short by the stall, while tests
+// keep control of the base — and the settings are read again, so switching
+// bulk packs off mid-pass holds for every offer after the switch. Under
+// CLOCK_SLACK_MS of running the base is kept exactly: the grace, the read
+// cadence and the farm sync are minutes, and millisecond drift would only make
+// their boundaries jitter from pass to pass.
+const CLOCK_SLACK_MS = 1000;
+function passClock(ctx) {
+  return { base: ctx.now.getTime(), started: Date.now() };
+}
+function forOffer(ctx, clock) {
+  const ran = Date.now() - clock.started;
+  ctx.now = new Date(clock.base + (ran >= CLOCK_SLACK_MS ? ran : 0));
+  ctx.bp = readBp();
+}
+
+// What finalCounts reads of an offer the pass could not visit (busy).
+const COUNT_FIELDS = { open: 1, kind: 1, state: 1, "reserved.state": 1 };
 
 // Which offers a pass visits: every open one, every one with units on their
 // way back to stock, and — for WATCH_WINDOW_MS — every closed dropset offer
@@ -2477,7 +2623,9 @@ function passQuery(now) {
 }
 
 // One pass. Safety maintenance runs whatever bulkPacksEnabled says (I8); only
-// resuming and growing an offer need it on.
+// resuming and growing an offer need it on. An offer whose lock is held (a
+// send in flight, an owner action) is skipped and counted busy — the pass
+// never waits for one (FIXES-2 V2).
 async function runOnce({ now = new Date() } = {}) {
   if (state.running)
     return { ...emptySummary(), skipped: "a pass is already running" };
@@ -2489,13 +2637,23 @@ async function runOnce({ now = new Date() } = {}) {
   try {
     ctx = passContext(now);
     summary = ctx.summary;
+    const clock = passClock(ctx);
     const ids = await deps.BulkOffer.find(passQuery(ctx.now), { _id: 1 })
       .sort({ lastSyncAt: 1, _id: 1 })
       .limit(OFFER_LIMIT)
       .lean();
     for (const { _id } of ids) {
       try {
-        const r = await maintainOffer(_id, { ctx });
+        forOffer(ctx, clock);
+        const r = await maintainOffer(_id, { ctx, ifFree: true });
+        if (r.busy) {
+          summary.busy++;
+          // Still counted as it stands: a read only, nothing is written
+          // without the lock.
+          const seen = await deps.BulkOffer.findById(_id, COUNT_FIELDS).lean();
+          if (seen) offers.push(seen);
+          continue;
+        }
         if (r.offer) offers.push(r.offer);
         if (r.error) {
           summary.errors++;
@@ -2525,6 +2683,108 @@ async function runOnce({ now = new Date() } = {}) {
     console.log(heartbeatLine(summary));
   }
   return summary;
+}
+
+// FIXES-2 V1: re-split the rent-farm capacity NOW. send.js calls it once a
+// farm send or resume has finished (after it released that offer's lock): the
+// new sharer has taken its share, so every other farm offer must come down to
+// its new, smaller one at once — not at its next farmSyncMinutes sync, while
+// the offers together advertise more than the farm can take. Every open live
+// or paused farm offer is synced under its own lock (WAITED for: skipping a
+// busy one would leave it on its old share), ignoring the throttle, in two
+// rounds — first only the offers that must shrink (pause, lower), then all of
+// them (grow, resume, behind the usual I4/I8 guards) — so the total advertised
+// only ever goes down while the shares move. An offer still being sent is left
+// to its own send, which calls this again when it is done. One capacity read
+// for the whole re-split.
+//
+// It holds one lock at a time and REFUSES to start (rejects) while its caller
+// holds any offer's lock: waiting for offer B while holding A deadlocks
+// against B's holder waiting for A. Everything else is noted on its offer
+// (lastError) and counted, never thrown. Resolves
+// {offers, changed, errors, lastError}.
+async function resplitFarm({ now } = {}) {
+  const l = deps.lock;
+  if (typeof l.holdsAny === "function" && l.holdsAny()) {
+    throw new Error(
+      "resplitFarm must not run inside a bulk offer's lock — call it after the lock is released",
+    );
+  }
+  const ctx = passContext(now);
+  const clock = passClock(ctx);
+  const out = { offers: 0, changed: false, errors: 0, lastError: "" };
+  let ids;
+  try {
+    ids = await deps.BulkOffer.find(
+      { ...farmSharers(), state: { $in: ["live", "paused"] } },
+      { _id: 1 },
+    )
+      .sort({ _id: 1 })
+      .limit(OFFER_LIMIT)
+      .lean();
+  } catch (e) {
+    out.errors++;
+    out.lastError = errText(e);
+    console.error("bulkPacks: farm re-split failed:", out.lastError);
+    return out;
+  }
+  out.offers = ids.length;
+  for (const shrinkOnly of [true, false]) {
+    for (const { _id } of ids) {
+      try {
+        const r = await l.withOfferLock(_id, () => {
+          // The clock once the lock is held: waiting for it takes time.
+          forOffer(ctx, clock);
+          return resyncFarmLocked(_id, ctx, { shrinkOnly });
+        });
+        if (r && r.error) {
+          out.errors++;
+          out.lastError = r.error;
+        }
+      } catch (e) {
+        out.errors++;
+        out.lastError = errText(e);
+        console.error(
+          "bulkPacks: farm re-split of offer " +
+            String(_id) +
+            ": " +
+            out.lastError,
+        );
+      }
+    }
+  }
+  out.changed = ctx.changed;
+  if (ctx.changed) invalidateProposals();
+  return out;
+}
+
+// One farm offer's share sync for resplitFarm, run under its lock and read
+// fresh there: only an open live/paused farm offer is synced. A failure is
+// noted on the offer (a "Loop:" error the next clean pass clears).
+async function resyncFarmLocked(offerId, ctx, opts) {
+  const offer = await deps.BulkOffer.findById(offerId, { history: 0 }).lean();
+  if (
+    !offer ||
+    offer.source !== "farm" ||
+    !offer.open ||
+    !["live", "paused"].includes(offer.state)
+  ) {
+    return { offer, error: "" };
+  }
+  const job = { patch: {}, errors: [] };
+  try {
+    await syncFarm(offer, ctx, job, opts);
+    if (Object.keys(job.patch).length) {
+      await deps.BulkOffer.updateOne({ _id: offer._id }, { $set: job.patch });
+      Object.assign(offer, job.patch);
+    }
+  } catch (e) {
+    job.errors.push(errText(e));
+  }
+  if (!job.errors.length) return { offer, error: "" };
+  const error = "farm re-split: " + job.errors.join("; ");
+  await noteLoopError(offer, error);
+  return { offer, error };
 }
 
 function schedule(delayMs) {
@@ -2739,75 +2999,107 @@ async function takeAccountOutLocked({ row, accountId, login, reason }) {
     return { detached, warnings };
   }
 
-  // Eldorado / G2G: the unit leaves the offer's shelf (phase 1 of I10); phase
-  // 2 keeps the reservation.
+  // Eldorado / G2G (FIXES-2 V4): the market comes down FIRST — to what the
+  // offer can still sell without this account — and only THEN does the unit
+  // leave the row (phase 1 of I10; phase 2 keeps the reservation). The other
+  // way round, the offer advertised a unit the row no longer held, and a buyer
+  // of the full quantity paid for an order the fulfiller could not fill.
+  const marketError = await lowerForTakeOut(offer, cur, id, name, ctx);
+  // The account was spent elsewhere, so it leaves whether or not the market
+  // call worked; a failed one is noted and the next pass lowers the market
+  // (syncQuantity, or sold out below the minimum).
   const n = await retireUnits(offer, cur, [id], why, { now: ctx.now });
-  if (!n) {
-    return {
-      detached,
-      warnings: [
-        label +
-          ": " +
-          name +
-          " is mid-delivery to a pack buyer — the maintenance loop takes it out if that delivery does not complete; check Bulk packs",
-      ],
-    };
-  }
-  detached.push(label);
-  audit(offer, "owner_took_account", "info", name + " " + why);
-  // FIXES-1 L7: what the offer can still sell is its on_offer entries' FREE
-  // units — a retiring unit that is back on the row is not stock.
-  try {
-    const after = await rereadRow(offer, cur);
-    const fresh =
-      (await deps.BulkOffer.findById(offer._id, { history: 0 }).lean()) ||
-      offer;
-    const free = freeOnOffer(fresh, after).length;
-    const minQty = Number(fresh.minQty) || 1;
-    if (fresh.state === "live") {
-      if (free >= minQty) {
-        await deps.markets.setQuantity(fresh.market, fresh.externalId, free);
-        await deps.BulkOffer.updateOne(
-          { _id: fresh._id },
-          { $set: { advertisedQty: free } },
-        );
-      } else {
-        const detail = "below the minimum after an owner take-out";
-        await deps.markets.pause(fresh.market, fresh.externalId);
-        if (
-          await transition(fresh, "paused", {
-            from: ["live"],
-            set: { autoPaused: false },
-            now: ctx.now,
-            detail: free + " free < minimum " + minQty + " — " + detail,
-          })
-        ) {
-          audit(fresh, "paused", "warn", "paused: " + detail, { count: free });
-          notify(
-            "Bulk offer paused: " +
-              describe(fresh) +
-              "\n" +
-              name +
-              " was taken out by the owner; " +
-              free +
-              " account(s) left, " +
-              detail +
-              " of " +
-              minQty +
-              ". The next check closes it as sold out.",
-          );
-        }
-      }
-    }
-  } catch (err) {
+  if (marketError) {
     warnings.push(
       label +
         ": quantity not updated yet (" +
-        errText(err) +
+        marketError +
         ") — the next check fixes it",
     );
+    await noteLoopError(
+      offer,
+      "take-out of " +
+        name +
+        ": the market was not lowered (" +
+        marketError +
+        ") — the next pass corrects it",
+    );
   }
+  if (!n) {
+    warnings.unshift(
+      label +
+        ": " +
+        name +
+        " is mid-delivery to a pack buyer — the maintenance loop takes it out if that delivery does not complete; check Bulk packs",
+    );
+    return { detached, warnings };
+  }
+  detached.push(label);
+  audit(offer, "owner_took_account", "info", name + " " + why);
   return { detached, warnings };
+}
+
+// FIXES-2 V4 + FIXES-1 L7, before a take-out's unit leaves the row: what the
+// offer can still sell afterwards is its on_offer entries' FREE units, less
+// the leaving account and any other the owner took out (keepReserved — they
+// leave on the next pass; a retiring unit back on the row is not stock
+// either). At or above the minimum a live offer's quantity comes down to that
+// (never up: growing is the pass's, behind I4/I8); below it the offer is
+// paused (live -> paused, autoPaused false) and the next pass closes it sold
+// out. Returns "" or the market call's error text — never throws.
+async function lowerForTakeOut(offer, row, accountId, name, ctx) {
+  if (offer.state !== "live") return "";
+  const leaving = new Set(
+    (offer.reserved || [])
+      .filter((e) => e && e.state === "on_offer" && e.keepReserved === true)
+      .map((e) => str(e.accountId)),
+  );
+  leaving.add(str(accountId));
+  const free = freeOnOffer(offer, row).filter(
+    (u) => !leaving.has(u.accountId),
+  ).length;
+  const minQty = Number(offer.minQty) || 1;
+  try {
+    if (free >= minQty) {
+      const advertised = Number(offer.advertisedQty) || 0;
+      if (advertised > 0 && free >= advertised) return "";
+      await deps.markets.setQuantity(offer.market, offer.externalId, free);
+      await deps.BulkOffer.updateOne(
+        { _id: offer._id },
+        { $set: { advertisedQty: free } },
+      );
+      offer.advertisedQty = free;
+      return "";
+    }
+    const detail = "below the minimum after an owner take-out";
+    await deps.markets.pause(offer.market, offer.externalId);
+    if (
+      await transition(offer, "paused", {
+        from: ["live"],
+        set: { autoPaused: false },
+        now: ctx.now,
+        detail: free + " free < minimum " + minQty + " — " + detail,
+      })
+    ) {
+      audit(offer, "paused", "warn", "paused: " + detail, { count: free });
+      notify(
+        "Bulk offer paused: " +
+          describe(offer) +
+          "\n" +
+          name +
+          " was taken out by the owner; " +
+          free +
+          " account(s) left, " +
+          detail +
+          " of " +
+          minQty +
+          ". The next check closes it as sold out.",
+      );
+    }
+    return "";
+  } catch (err) {
+    return errText(err);
+  }
 }
 
 module.exports = {
@@ -2819,6 +3111,7 @@ module.exports = {
   status,
   runOnce,
   maintainOffer,
+  resplitFarm,
   retireUnits,
   reconcileUnits,
   takeAccountOut,

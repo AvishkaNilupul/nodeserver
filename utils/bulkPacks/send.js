@@ -377,6 +377,41 @@ function farmShareShort(share, available, sharers, minQty) {
   );
 }
 
+// FIXES-2 V1 (send side): a farm offer that just went live — sent, or resumed
+// by the owner — is one more sharer of the farm capacity, while every OTHER
+// open farm offer still advertises the share it had before (until its own
+// farm sync, up to bp.farmSyncMinutes later): together they would advertise
+// more farming than the farm can take. So the split is redone at once:
+// loop.resplitFarm syncs every open farm offer now, each under its own lock,
+// shrinking before growing. Called only AFTER this offer's lock is released
+// (the lock is not re-entrant and resplitFarm takes this offer's lock too).
+// It never fails the action it follows: an error is logged, and each offer's
+// next farm sync corrects the split.
+async function resplitFarmAfter(what, offer, actor) {
+  try {
+    const loop = deps.loop;
+    if (!loop || typeof loop.resplitFarm !== "function") {
+      throw new Error("loop.resplitFarm is not available");
+    }
+    await loop.resplitFarm({ now: new Date() });
+  } catch (e) {
+    const message =
+      "farm capacity re-split after the " +
+      what +
+      " failed (" +
+      errMsg(e) +
+      ") — the other farm offers keep their old share until their next farm sync";
+    console.error("bulkPacks: " + message);
+    await audit({
+      action: "resplit_failed",
+      severity: "warn",
+      message,
+      offer,
+      actor,
+    });
+  }
+}
+
 // In-process mutex for sendOffer's slot check-and-create (CONTRACT I6
 // backstop, keyed "slot:<slotKey>"). Offers themselves use the shared lock.
 const locks = new Map();
@@ -1207,7 +1242,7 @@ async function sendOfferInner(input, actor) {
   // (FIXES-1): no maintenance pass, withdraw or take-out acts on a half-sent
   // offer. Its id is minted here so the lock is taken before the create.
   const offerId = newOfferId();
-  return underOfferLock(offerId, () =>
+  const sent = await underOfferLock(offerId, () =>
     createAndSend(offerId, {
       bp,
       actor,
@@ -1231,6 +1266,12 @@ async function sendOfferInner(input, actor) {
       alreadyLive,
     }),
   );
+  // FIXES-2 V1: a farm offer that went live re-splits the farm capacity —
+  // here, after its own lock was released.
+  if (source === "farm" && sent && sent.success) {
+    await resplitFarmAfter("farm send", sent.offer, actor);
+  }
+  return sent;
 }
 
 // Steps 5 and 6, inside the new offer's lock.
@@ -2747,7 +2788,20 @@ async function resumeOffer({ offerId, actor } = {}) {
     if (!bp || bp.enabled !== true)
       return result(409, "Bulk packs are switched off");
     if (!isIdLike(offerId)) return result(404, "Offer not found");
-    return underOfferLock(offerId, () => resumeLocked(offerId, bp, actor));
+    const resumed = await underOfferLock(offerId, () =>
+      resumeLocked(offerId, bp, actor),
+    );
+    // FIXES-2 V1: a farm offer back on sale re-splits the farm capacity —
+    // here, after its own lock was released.
+    if (
+      resumed &&
+      resumed.success &&
+      resumed.offer &&
+      resumed.offer.source === "farm"
+    ) {
+      await resplitFarmAfter("farm resume", resumed.offer, actor);
+    }
+    return resumed;
   });
 }
 
@@ -3563,9 +3617,11 @@ async function withdrawFarm(offer, actor) {
 // keeps its accounts reserved until the owner has checked the market. This is
 // the owner's button for it, behind a typed "RELEASE". It takes the offer off
 // the market first when its id is known — a failure releases nothing, unless
-// the market answered that there is no such offer (404) — then marks the held
-// entries retiring (changedAt now), so the maintenance loop hands each one
-// back only after its grace and re-checks (CONTRACT I10); the loop never
+// the market answered that the offer is already not live (FIXES-2 V5: no such
+// offer / 404, "must be active", already paused…); an answer that it SOLD
+// refuses and says so — then marks the held entries retiring (changedAt
+// now), so the maintenance loop hands each one back only after its grace and
+// re-checks (CONTRACT I10); the loop never
 // releases an on_offer entry of a closed offer by itself. With no id known
 // there is nothing to call: the owner's typed RELEASE, after checking the
 // market by hand, is the proof. Allowed while bulk packs are switched off: it
@@ -3583,19 +3639,36 @@ async function releaseHeld({ offerId, confirm, actor } = {}) {
   });
 }
 
-// A withdraw failure that says the offer does not exist: a 404 status, or the
-// "not found" / HTTP 404 message the connectors pass on (the same text
-// marketplaces.delistOutcome reads as gone). A "sold" answer never counts.
-function withdrawSaysNoSuchOffer(e) {
+// FIXES-2 V5: what a failed take-down tells releaseHeld about the offer,
+// read with marketplaces.delistOutcome — the classifier every other withdraw
+// path in this file uses — over the message, together with the verdict
+// markets.js attaches to it (err.outcome, the same classifier):
+//   "sold"     the market says it sold: a buyer holds (or is owed) it
+//   "missing"  no such offer: a 404 status, or the "not found" / HTTP 404
+//              text the connectors pass on
+//   "off"      already not live: "must be active" (Eldorado's answer for an
+//              offer that is not active — paused, expired), already paused /
+//              inactive / hidden / cancelled / delisted
+//   ""         anything else — a 5xx, a 429, a timeout, a dead session —
+//              proves nothing
+function heldWithdrawVerdict(e) {
   const msg = errMsg(e);
-  if (deps.delistOutcome(msg) === "sold") return false;
+  const byText = deps.delistOutcome(msg) || "";
+  const attached = String((e && e.outcome) || "");
+  if (byText === "sold" || attached === "sold") return "sold";
   const status = Number(
     (e && (e.status || (e.response && e.response.status))) || 0,
   );
-  if (status === 404) return true;
-  return /not found|does not exist|http_status"?\s*:\s*404|\b(http|status|code)\W{0,3}404\b/i.test(
-    msg,
-  );
+  if (
+    status === 404 ||
+    /not found|does not exist|http_status"?\s*:\s*404|\b(http|status|code)\W{0,3}404\b/i.test(
+      msg,
+    )
+  ) {
+    return "missing";
+  }
+  if (byText === "gone" || attached === "gone") return "off";
+  return "";
 }
 
 // Inside the offer's lock, from a fresh read (S4/S6).
@@ -3641,12 +3714,39 @@ async function releaseHeldLocked(offerId, actor) {
       offNote = "taken off " + mk + " (" + offer.externalId + ")";
     } catch (e) {
       const msg = errMsg(e);
-      const outcome = deps.delistOutcome(msg) || "";
-      // Only an answer that the offer does not exist (a 404 — Gameflip's own
-      // draft discard deletes the listing) means "not live". Anything else —
-      // "sold", "must be active", a 5xx, a timeout — proves nothing, so
-      // nothing is released (FIXES-1 releaseHeld addendum).
-      if (!withdrawSaysNoSuchOffer(e)) {
+      // FIXES-2 V5: an answer that the offer is already not live — no such
+      // offer (a 404: Gameflip's own draft discard deletes the listing), or
+      // off sale already ("must be active", already paused…) — is what the
+      // take-down was for, so the release goes on. "Sold" means a buyer has
+      // it, and anything else — a 5xx, a 429, a timeout — proves nothing:
+      // both refuse, and nothing is released.
+      const verdict = heldWithdrawVerdict(e);
+      if (verdict === "sold") {
+        await noteError(
+          offer._id,
+          "release held: " +
+            mk +
+            " says " +
+            offer.externalId +
+            " SOLD (" +
+            msg +
+            ") — nothing released",
+          actor,
+          "release_held_refused",
+        );
+        return result(
+          409,
+          "Nothing released — " +
+            mk +
+            " says " +
+            offer.externalId +
+            " already SOLD: " +
+            msg +
+            " — a buyer has these accounts, so they stay reserved (deliver the order by hand if it was not)",
+          { offer: (await freshOffer(offer._id)) || offer },
+        );
+      }
+      if (!verdict) {
         await noteError(
           offer._id,
           "release held: " +
@@ -3666,14 +3766,16 @@ async function releaseHeldLocked(offerId, actor) {
             " did not take " +
             offer.externalId +
             " down: " +
-            msg +
-            (outcome === "sold"
-              ? " (it SOLD — deliver the order by hand)"
-              : ""),
+            msg,
           { offer: (await freshOffer(offer._id)) || offer },
         );
       }
-      offNote = "no such offer on " + mk + " (" + msg + ")";
+      offNote =
+        (verdict === "missing" ? "no such offer on " : "already off sale on ") +
+        mk +
+        " (" +
+        msg +
+        ")";
     }
   }
   if (row && row.status === "active") {

@@ -1,5 +1,6 @@
 // Bulk packs — send.js under races and unknown publish outcomes
-// (docs/bulk-packs/FIXES-1.md: S1, S2/S5, S3, S4/S6, S8, releaseHeld).
+// (docs/bulk-packs/FIXES-1.md: S1, S2/S5, S3, S4/S6, S8, releaseHeld;
+// docs/bulk-packs/FIXES-2.md: V1 send side, V5).
 //
 // Ports of the adversarial reviewers' repros (scratchpad review-ssm/:
 // farmOvercommit, gameflipSendRelease, g2gReadbackOrphan,
@@ -288,14 +289,25 @@ const fakeLock = (() => {
         if (tails.get(key) === tail) tails.delete(key);
       }
     },
+    // The offer ids held (or queued for) right now.
+    lockedKeys: () => [...tails.keys()],
     __reset: () => tails.clear(),
   };
 })();
 
 // Phase 1 of CONTRACT I10 (the loop's retireUnits): conditional $pull of the
 // FREE unit, then the reserved entry goes retiring.
-const loopState = { calls: [] };
+//
+// resplitFarm (FIXES-2 V1, the loop's export): recorded with the offer locks
+// held at the moment it is called; `resplitImpl`, when a test sets one, is
+// what it then does.
+const loopState = { calls: [], resplits: [], resplitImpl: null };
 const fakeLoop = {
+  resplitFarm: async (opts) => {
+    loopState.resplits.push({ opts, locked: fakeLock.lockedKeys() });
+    if (loopState.resplitImpl) return loopState.resplitImpl(opts);
+    return {};
+  },
   retireUnits: async (offer, row, accountIds, reason) => {
     loopState.calls.push({ accountIds: [...accountIds], reason });
     const now = new Date();
@@ -559,6 +571,8 @@ test.beforeEach(async () => {
   resetMarkets();
   resetCapacity();
   loopState.calls = [];
+  loopState.resplits = [];
+  loopState.resplitImpl = null;
   ncl.calls = [];
   events.length = 0;
   telegrams.length = 0;
@@ -825,7 +839,7 @@ test("releaseHeld: typed RELEASE, off the market first, then the held entries re
   assert.match(open.message, /still open/);
 });
 
-test("releaseHeld: a withdraw answering 'no such offer' (404) proceeds; any other withdraw failure releases nothing", async () => {
+test("releaseHeld: a withdraw answering 'no such offer' (404) proceeds; a failure that proves nothing releases nothing", async () => {
   const set = await makeSet();
   st.pool = accounts(24);
   const hold = async (market, externalId) => {
@@ -877,21 +891,17 @@ test("releaseHeld: a withdraw answering 'no such offer' (404) proceeds; any othe
   assert.equal(entries(await offerOf(gid), "retiring").length, 5);
   assert.equal(st.releaseCalls.length, 0, "the loop releases, after its grace");
 
-  // Eldorado: "must be active" says it exists (paused) — not proof of
-  // anything a release needs; "not found" says it does not exist.
+  // Eldorado: a 5xx proves nothing; "not found" says it does not exist.
+  // ("must be active" and the other already-off-sale answers: FIXES-2 V5,
+  // tested below.)
   const eid = await hold("eldorado", "E-5");
-  mk.fail = {
-    withdraw:
-      'Eldorado pause: {"message":"To pause an offer it must be active"}',
-  };
-  assert.equal((await release(eid)).status, 409);
-  assert.equal(await stillHeld(eid), 5);
   mk.fail = { withdraw: "Eldorado pause: HTTP 500 upstream" };
   assert.equal((await release(eid)).status, 409);
   assert.equal(await stillHeld(eid), 5);
   mk.fail = { withdraw: 'Eldorado delist: {"message":"Offer not found"}' };
   const eok = await release(eid);
   assert.equal(eok.status, 200, eok.message);
+  assert.match(eok.message, /no such offer on Eldorado/);
   assert.equal(entries(await offerOf(eid), "retiring").length, 5);
 
   // G2G: a 404 status on the error proceeds as well.
@@ -978,6 +988,126 @@ test("releaseHeld never hands back a kept (keepReserved) account or one a buyer 
   });
   assert.equal(again.status, 409);
   assert.match(again.message, /taken out of the pack/);
+});
+
+// FIXES-2 V5: marketplaces.delistOutcome decides. "gone" (not found / 404,
+// "must be active", already paused / inactive / delisted…) is what the
+// take-down was for; "sold" refuses and says so; anything else refuses.
+test("V5 releaseHeld: a take-down that says the offer is already not live proceeds; 'sold' refuses and says so; anything else refuses as before", async () => {
+  const set = await makeSet();
+  st.pool = accounts(80);
+  let n = 0;
+  const hold = async (market) => {
+    const externalId = market.toUpperCase() + "-V5-" + ++n;
+    mk.fail = {
+      publishAccounts: {
+        message: market + " publish failed mid-way",
+        outcome: "may_be_live",
+        externalId,
+      },
+    };
+    const r = await sendDropset(set, market, { units: 5 });
+    mk.fail = {};
+    assert.equal(r.status, 502, r.message);
+    return String(r.offer._id);
+  };
+  const releaseWith = async (offerId, fail) => {
+    mk.fail = { withdraw: fail };
+    try {
+      return await send.releaseHeld({
+        offerId,
+        confirm: "RELEASE",
+        actor: "owner",
+      });
+    } finally {
+      mk.fail = {};
+    }
+  };
+
+  // Already not live: the held entries retire for the loop, as after a
+  // successful take-down.
+  for (const [market, fail, note] of [
+    [
+      "eldorado",
+      'Eldorado pause: {"message":"To pause an offer it must be active"}',
+      /already off sale on Eldorado/,
+    ],
+    [
+      "eldorado",
+      "Eldorado delist failed (HTTP 400): To pause an offer it must be active.",
+      /already off sale on Eldorado/,
+    ],
+    [
+      "eldorado",
+      "Eldorado delist: offer already paused",
+      /already off sale on Eldorado/,
+    ],
+    [
+      "g2g",
+      "G2G update offer: offer already delisted",
+      /already off sale on G2G/,
+    ],
+    // The verdict markets.js attaches (the same classifier) counts too.
+    [
+      "g2g",
+      { message: "G2G update offer failed (HTTP 400)", outcome: "gone" },
+      /already off sale on G2G/,
+    ],
+    [
+      "gameflip",
+      "Gameflip delist: listing already inactive",
+      /already off sale on Gameflip/,
+    ],
+  ]) {
+    const id = await hold(market);
+    const r = await releaseWith(id, fail);
+    assert.equal(r.status, 200, JSON.stringify(fail) + " -> " + r.message);
+    assert.equal(r.success, true);
+    assert.match(r.message, note);
+    const o = await offerOf(id);
+    assert.equal(entries(o, "on_offer").length, 0, JSON.stringify(fail));
+    assert.equal(entries(o, "retiring").length, 5, "the loop hands them back");
+    assert.ok(o.history.some((h) => h.action === "release_held"));
+  }
+  assert.equal(st.releaseCalls.length, 0, "never released by the click itself");
+
+  // Sold: refused, and the answer says so. Nothing moves.
+  for (const [market, fail] of [
+    ["gameflip", "Gameflip delist: listing already sold"],
+    [
+      "gameflip",
+      { message: "Gameflip delist failed (HTTP 409)", outcome: "sold" },
+    ],
+    ["eldorado", "Eldorado delist: offer (sold)"],
+  ]) {
+    const id = await hold(market);
+    const r = await releaseWith(id, fail);
+    assert.equal(r.status, 409, JSON.stringify(fail));
+    assert.equal(r.success, false);
+    assert.match(r.message, /^Nothing released — .* already SOLD/);
+    const o = await offerOf(id);
+    assert.equal(entries(o, "on_offer").length, 5, "still held");
+    assert.equal(entries(o, "retiring").length, 0);
+    assert.match(o.lastError, /SOLD/);
+    assert.ok(o.history.some((h) => h.action === "release_held_refused"));
+  }
+
+  // Anything else proves nothing: refused exactly as before.
+  for (const [market, fail] of [
+    ["eldorado", "Eldorado pause: HTTP 500 upstream"],
+    ["g2g", { message: "G2G update offer: Too many requests", status: 429 }],
+    ["gameflip", "Gameflip delist: timeout of 20000ms exceeded"],
+    // A dead session says nothing about the offer.
+    ["eldorado", "Eldorado delist: session expired — log in again"],
+  ]) {
+    const id = await hold(market);
+    const r = await releaseWith(id, fail);
+    assert.equal(r.status, 409, JSON.stringify(fail));
+    assert.match(r.message, /^Nothing released — .* did not take .* down/);
+    assert.doesNotMatch(r.message, /SOLD/);
+    assert.equal(entries(await offerOf(id), "on_offer").length, 5);
+  }
+  assert.equal(st.releaseCalls.length, 0);
 });
 
 // ---------------------------------------------------------------------------
@@ -1519,4 +1649,204 @@ test("S8: resume sets the quantity first — a quantity the market refused never
   );
   assert.equal(ok.offer.advertisedQty, 7);
   assert.equal(ok.offer.state, "live");
+});
+
+// ---------------------------------------------------------------------------
+// FIXES-2 V1 (send side) — a farm offer going live re-splits the capacity now
+// ---------------------------------------------------------------------------
+
+// What loop.resplitFarm does (FIXES-2 V1, loop side), as far as send.js is
+// concerned: every open farm offer (sending | live | paused), each under its
+// own lock, is synced NOW to its share of the capacity — shrinking first.
+async function simulatedResplit() {
+  const available = fakeFarmCapacity.advertisable(
+    await fakeFarmCapacity.read(),
+    fakeSettings.getBulkPacks(),
+  );
+  const ids = (
+    await BulkOffer.find(
+      {
+        source: "farm",
+        open: true,
+        state: { $in: ["sending", "live", "paused"] },
+      },
+      { _id: 1 },
+    ).lean()
+  )
+    .map((o) => String(o._id))
+    .sort();
+  for (const growing of [false, true]) {
+    for (const id of ids) {
+      await fakeLock.withOfferLock(id, async () => {
+        const o = await offerOf(id);
+        if (!o || o.state !== "live") return;
+        const share = shareOfShelf(available, id, ids);
+        const had = Number(o.advertisedQty) || 0;
+        if (growing ? share <= had : share >= had) return;
+        await fakeMarkets.setQuantity(o.market, o.externalId, share);
+        await BulkOffer.updateOne(
+          { _id: o._id },
+          { $set: { advertisedQty: share } },
+        );
+      });
+    }
+  }
+}
+
+// A call that deadlocks (a re-split waiting on the caller's own lock) fails
+// the test instead of hanging it.
+function inTime(p, ms = 3000) {
+  return Promise.race([p, sleep(ms).then(() => ({ status: "timeout" }))]);
+}
+
+async function quietErrors(fn) {
+  const lines = [];
+  const orig = console.error;
+  console.error = (...a) => lines.push(a.map(String).join(" "));
+  try {
+    return { value: await fn(), lines };
+  } finally {
+    console.error = orig;
+  }
+}
+
+test("V1: a farm send re-splits the capacity once its own lock is released — the older offer is cut to its share at once", async () => {
+  loopState.resplitImpl = simulatedResplit;
+  // advertisable = min(farmMaxQty 20, room 30, 60 - 20, 60 - 20) = 20.
+  const a = await inTime(farm(120, 5));
+  assert.equal(a.status, 200, a.message);
+  assert.equal((await offerOf(a.offer._id)).advertisedQty, 20, "alone");
+  mk.calls = [];
+  // The reviewer's repro: with no re-split, A keeps advertising all 20 until
+  // its own farm sync while B advertises its share of [A, B] — 30 for 20.
+  const b = await inTime(farm(180, 5));
+  assert.notEqual(
+    b.status,
+    "timeout",
+    "the re-split never waits on the send's own lock",
+  );
+  assert.equal(b.status, 200, b.message);
+  const ids = [String(a.offer._id), String(b.offer._id)].sort();
+  const aNow = await offerOf(a.offer._id);
+  const bNow = await offerOf(b.offer._id);
+  assert.equal(bNow.advertisedQty, shareOfShelf(20, String(bNow._id), ids));
+  assert.equal(
+    aNow.advertisedQty,
+    shareOfShelf(20, String(aNow._id), ids),
+    "A is cut to its share when B goes live, not at its next farm sync",
+  );
+  assert.equal(aNow.advertisedQty + bNow.advertisedQty, 20);
+  assert.deepEqual(
+    mk.calls.filter((c) => c[0] === "setQuantity").map((c) => [c[2], c[3]]),
+    [[aNow.externalId, aNow.advertisedQty]],
+  );
+  // One re-split per farm send, each called with no offer lock held.
+  assert.equal(loopState.resplits.length, 2);
+  for (const r of loopState.resplits) {
+    assert.deepEqual(r.locked, [], "called after the send's lock was released");
+    assert.ok(r.opts && r.opts.now instanceof Date, "with {now}");
+  }
+});
+
+test("V1: a farm resume re-splits too; a re-split that throws or is missing never fails the action; nothing else re-splits", async () => {
+  const a = await farm(120, 5);
+  const b = await farm(180, 5);
+  assert.equal(b.status, 200, b.message);
+  assert.equal(loopState.resplits.length, 2);
+  const aid = String(a.offer._id);
+  const bid = String(b.offer._id);
+  // The recorder alone changed nothing: A still shows the whole pool (the
+  // state the reviewer's repro starts from), B its share.
+  assert.equal((await offerOf(aid)).advertisedQty, 20);
+
+  // A pause changes no share (a paused offer keeps its part).
+  assert.equal((await send.pauseOffer({ offerId: bid })).status, 200);
+  assert.equal(loopState.resplits.length, 2);
+
+  // The owner resumes B: B at its share first, then the re-split cuts A —
+  // before the resume answers.
+  loopState.resplitImpl = simulatedResplit;
+  const r = await inTime(send.resumeOffer({ offerId: bid, actor: "owner" }));
+  assert.notEqual(r.status, "timeout");
+  assert.equal(r.status, 200, r.message);
+  assert.equal(loopState.resplits.length, 3);
+  assert.deepEqual(loopState.resplits[2].locked, []);
+  assert.ok(loopState.resplits[2].opts.now instanceof Date);
+  const ids = [aid, bid].sort();
+  assert.equal((await offerOf(bid)).advertisedQty, shareOfShelf(20, bid, ids));
+  assert.equal(
+    (await offerOf(aid)).advertisedQty,
+    shareOfShelf(20, aid, ids),
+    "A cut to its share by the resume's re-split",
+  );
+
+  // A re-split that throws is logged and audited; the send stands.
+  loopState.resplitImpl = async () => {
+    throw new Error("capacity read exploded");
+  };
+  const c = await quietErrors(() => farm(365, 5));
+  assert.equal(c.value.status, 200, c.value.message);
+  assert.equal(c.value.success, true);
+  const cid = String(c.value.offer._id);
+  assert.equal((await offerOf(cid)).state, "live");
+  assert.equal(loopState.resplits.length, 4);
+  assert.ok(
+    c.lines.some((l) =>
+      /re-split after the farm send failed \(capacity read exploded\)/.test(l),
+    ),
+    c.lines.join("\n"),
+  );
+  assert.ok(
+    events.some(
+      (e) =>
+        e.action === "resplit_failed" &&
+        /capacity read exploded/.test(e.message),
+    ),
+  );
+
+  // A loop without resplitFarm: the resume stands, the gap is logged.
+  loopState.resplitImpl = null;
+  assert.equal((await send.pauseOffer({ offerId: cid })).status, 200);
+  send.__setDeps({ loop: { retireUnits: fakeLoop.retireUnits } });
+  const d = await quietErrors(() =>
+    send.resumeOffer({ offerId: cid, actor: "owner" }),
+  );
+  send.__setDeps({ loop: fakeLoop });
+  assert.equal(d.value.status, 200, d.value.message);
+  assert.equal((await offerOf(cid)).state, "live");
+  assert.ok(
+    d.lines.some((l) =>
+      /re-split after the farm resume failed \(loop\.resplitFarm is not available\)/.test(
+        l,
+      ),
+    ),
+  );
+  assert.equal(loopState.resplits.length, 4);
+
+  // Nothing but a farm offer going live re-splits: a refused farm send, a
+  // failed farm publish, a refused resume, an account pack.
+  const before = loopState.resplits.length;
+  const short = await farm(365, 10); // a quarter of 20 < its minimum of 10
+  assert.equal(short.status, 409, short.message);
+  // Room enough for a share of 10, so this one gets as far as its publish.
+  af.bulkFarmMaxQty = 100;
+  cap.value = {
+    ...cap.value,
+    bestStackRoom: 100,
+    totalFree: 200,
+    pristine: 200,
+  };
+  mk.fail.publishFarm = {
+    message: "Eldorado create: HTTP 400",
+    outcome: "not_created",
+  };
+  const refused = await farm(120, 10);
+  mk.fail = {};
+  assert.equal(refused.status, 502, refused.message);
+  assert.equal((await send.resumeOffer({ offerId: aid })).status, 409);
+  const set = await makeSet();
+  st.pool = accounts(8);
+  const pack = await sendDropset(set, "eldorado", { units: 5 });
+  assert.equal(pack.status, 200, pack.message);
+  assert.equal(loopState.resplits.length, before);
 });
