@@ -680,8 +680,64 @@ async function dockerPs(host) {
   return states;
 }
 
+// ----------------------------------------------------------------------------
+// Container-start observers
+// ----------------------------------------------------------------------------
+
+// `docker restart` STARTS a stopped container, and many paths use it only to
+// make a bot reload an edited config — which is how parked bots were woken
+// about daily for weeks with nothing recording who did it (2026-09, the
+// contabo twitchbotx8/x19/x11 wake/park flap). Every start made through this
+// module is reported to these observers with the code path that asked for it;
+// utils/botWaker.js registers one so a parked bot that anything other than the
+// waker starts is recorded with its starter. Observers run inline, must be
+// cheap and synchronous, and one that throws is ignored.
+const startObservers = [];
+
+function onContainerStart(fn) {
+  if (typeof fn === "function" && !startObservers.includes(fn)) {
+    startObservers.push(fn);
+  }
+}
+
+const APP_ROOT = path.resolve(__dirname, "..");
+
+// The first `max` frames of `stack` outside this file, innermost first, as
+// "fn (utils/x.js:12) < caller (utils/y.js:34)". "" when there are none.
+function callerFrames(stack, max = 2) {
+  const out = [];
+  for (const line of String(stack || "").split("\n").slice(1)) {
+    const m = /^\s*at (?:async )?(?:(.+?) \()?(.+?):(\d+):\d+\)?\s*$/.exec(line);
+    if (!m || m[2] === __filename || m[2].startsWith("node:")) continue;
+    const file = path.isAbsolute(m[2]) ? path.relative(APP_ROOT, m[2]) : m[2];
+    out.push((m[1] ? m[1] + " " : "") + "(" + file + ":" + m[3] + ")");
+    if (out.length >= max) break;
+  }
+  return out.join(" < ");
+}
+
+function notifyStart(host, action, container, caller) {
+  for (const fn of startObservers) {
+    try {
+      fn({ hostId: host.id, action, container, caller });
+    } catch {
+      /* an observer must never break a docker operation */
+    }
+  }
+}
+
 // Run a single-container docker verb (restart/start/stop/rm -f).
 async function dockerContainer(host, action, container) {
+  const starts = action === "start" || action === "restart";
+  // Captured before the first await, while the caller is still on the stack.
+  const caller =
+    starts && startObservers.length ? callerFrames(new Error().stack) : "";
+  const out = await containerVerb(host, action, container);
+  if (starts) notifyStart(host, action, container, caller);
+  return out;
+}
+
+async function containerVerb(host, action, container) {
   if (isNative(host)) {
     return (await botctl(host, [action, container])).trim();
   }
@@ -837,7 +893,16 @@ async function dockerStats(host) {
   return out;
 }
 
+// `compose up -d` starts a stopped service too, so it reports like a start
+// (see onContainerStart).
 async function composeUp(host, container) {
+  const caller = startObservers.length ? callerFrames(new Error().stack) : "";
+  const out = await composeUpService(host, container);
+  notifyStart(host, "compose up", container, caller);
+  return out;
+}
+
+async function composeUpService(host, container) {
   if (isNative(host)) {
     return (
       await botctl(host, ["start", container], { timeout: 120000 })
@@ -1019,6 +1084,8 @@ module.exports = {
   composeWrite,
   dockerPs,
   dockerContainer,
+  onContainerStart,
+  callerFrames,
   dockerLogs,
   dockerStats,
   hostStats,
