@@ -88,6 +88,8 @@ function load({ bots, offlineHosts = [] } = {}) {
           ),
         gatherPoolEligibility: async () => ({ candidates: [], eligible: [] }),
         availableRentalStack: async () => null,
+        // The real separation rule: a direct renter's own bot never takes buyers.
+        usableForHolder: (b) => !(b.directAssigned || []).length,
       };
     }
     if (from && request === "./systemLog") {

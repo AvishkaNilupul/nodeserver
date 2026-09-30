@@ -341,8 +341,8 @@
         const act = btn.dataset.act;
         btn.disabled = true; btn.textContent = act==="start" ? "Starting…" : "Stopping…";
         try {
-          await api("/renter/bot/"+act, { method:"POST" });
-          toast(act==="start" ? "Bot starting" : "Bot stopped");
+          const d = await api("/renter/bot/"+act, { method:"POST" });
+          toast(act==="start" ? (d && d.skipped ? "Bot starting — " + d.message : "Bot starting") : "Bot stopped");
           await loadMe();
         } catch(e){
           if (e.message!=="auth") toast(e.message);

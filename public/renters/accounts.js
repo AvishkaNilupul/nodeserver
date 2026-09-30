@@ -296,7 +296,9 @@
         body: JSON.stringify({ days }),
       });
       RT.toast((d.farmUntil ? "Farms until " + RT.fmtDate(d.farmUntil) : "Farming window cleared") +
-        (d.placed ? " — its window had ended, so it was put back on " + d.stack : "") +
+        (d.placed ? " — it was off the bot, so it was put back on " + d.stack : "") +
+        (d.placed && d.startError ? " (but that bot could not be reloaded yet: " + d.startError + " — it is retried every 5 min)" : "") +
+        (!d.placed && d.stack ? " — it was already farming on " + d.stack : "") +
         (d.ordersUpdated ? " (order updated)" : ""));
       RT.reloadMany(["accounts"]);
     } catch (e) {

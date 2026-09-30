@@ -149,8 +149,13 @@ async function ensureStackWithRoom(renter, needed, actor = "operator-farm") {
   // follows it out of a full one. Only an explicit `false` moves us: `null`
   // (host not reachable this tick) keeps the holder where it is rather than
   // stampeding every buyer onto another host over a blinked SSH read.
+  //
+  // Nor is a stack a direct renter has since been given: buyers and direct
+  // renters never share a stack (renterAdminRoutes.usableForHolder), so the
+  // holder moves on instead of filling someone's own bot with paid buyers.
   if (
     current &&
+    renterAdmin().usableForHolder(current) &&
     Number(current.remaining) >= want &&
     (current.running !== false || !Number(current.accounts))
   ) {
@@ -264,7 +269,8 @@ async function previewFreshAccounts({ count = 1 } = {}) {
     // container that will never read it. Until 2026-09-30 an empty stopped
     // stack counted for nothing too, so every dry run said "stack-stopped" the
     // moment the holder's stack filled and the next one was brand new.
-    stack = usableRoom(cur) > 0 ? cur : best || cur;
+    const curUsable = cur && renterAdmin().usableForHolder(cur) ? cur : null;
+    stack = usableRoom(curUsable) > 0 ? curUsable : best || curUsable;
     stackRoom = usableRoom(stack);
   } catch (e) {
     stack = null;

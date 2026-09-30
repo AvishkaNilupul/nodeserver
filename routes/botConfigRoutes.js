@@ -12,7 +12,7 @@ const {
   markDeployedPoolAccountsClaimed,
 } = require("../utils/poolPasswords");
 const { withFileLock } = require("../utils/fileLock");
-const { setUsersGamesBySecret } = require("../utils/renterBotOps");
+const { setUsersGamesBySecret, reservedSlots } = require("../utils/renterBotOps");
 const {
   dedicatedConfigSet,
   registerStack,
@@ -1733,8 +1733,24 @@ async function addAccountsToConfig(host, file, accounts) {
 // config — never touching BotAccount, so renter tokens stay out of the
 // operator's cross-host index and the Drops Archive. Stamped with the owning
 // renter so the inventory is scoped to them.
-async function upsertRenterAccounts(accounts, host, file, renterId) {
+async function upsertRenterAccounts(accounts, host, file, renterId, opts = {}) {
   if (!accounts.length) return;
+  // A row being (re)placed starts a FRESH window when it had ENDED (its term
+  // was pulled; left ended it farmed invisibly to the lapse sweep, every quota
+  // and the scanner) or changes renter (the old renter's — or buyer's — term is
+  // not the new one's). A live row of the same renter keeps its window: that
+  // is a stack move (scripts/move-renter-*.js), never an extension.
+  const secrets = accounts.map((u) => u.ClientSecret);
+  const before = await RenterAccount.find(
+    { clientSecret: { $in: secrets } },
+    { clientSecret: 1, renter: 1, farmEndedAt: 1 },
+  )
+    .lean()
+    .catch(() => []);
+  const fresh = before
+    .filter((r) => r.farmEndedAt || String(r.renter) !== String(renterId))
+    .map((r) => r._id);
+  const hasWindow = Object.prototype.hasOwnProperty.call(opts || {}, "farmUntil");
   const ops = accounts.map((u) => ({
     updateOne: {
       filter: { clientSecret: u.ClientSecret },
@@ -1748,19 +1764,38 @@ async function upsertRenterAccounts(accounts, host, file, renterId) {
           container: containerForFile(file),
           host: host.id,
           enabled: u.Enabled !== false,
+          ...(hasWindow ? { farmUntil: opts.farmUntil || null, farmEndedAt: null } : {}),
         },
       },
       upsert: true,
     },
   }));
   await RenterAccount.bulkWrite(ops, { ordered: false }).catch(() => {});
+  if (fresh.length) {
+    await RenterAccount.updateMany(
+      { _id: { $in: fresh } },
+      {
+        $set: {
+          farmEndedAt: null,
+          ...(hasWindow ? {} : { farmUntil: null }),
+          expiryAttempts: 0,
+          expiryLastError: "",
+          expiryAlertedAt: null,
+        },
+        $unset: { expiryOwedFiles: "" },
+      },
+    ).catch((e) => console.error("renter ledger: fresh-window reset failed:", e.message));
+  }
 }
 
 // Renter counterpart of addAccountsToConfig: append already-parsed TwitchUsers
 // entries to a renter's bot config (same read → push → atomic write path the
 // operator uses) but sync the RenterAccount inventory instead of BotAccount.
 // Callers should dedupe first (dedupeAccounts, which cross-checks both indexes).
-async function addRenterAccountsToConfig(host, file, accounts, renterId) {
+// `opts.farmUntil` (a Date, or null for open-ended) stamps the window in the
+// same write that records the placement, so a crash between the two cannot
+// leave a placed account with the wrong window.
+async function addRenterAccountsToConfig(host, file, accounts, renterId, opts = {}) {
   if (!validFile(file)) throw new Error("Invalid config file");
   if (!Array.isArray(accounts) || !accounts.length) return { added: 0, total: 0 };
   return withFileLock(host, file, async () => {
@@ -1780,8 +1815,14 @@ async function addRenterAccountsToConfig(host, file, accounts, renterId) {
       ).map((u) => u.ClientSecret),
     );
     const fresh = accounts.filter((a) => a && !present.has(a.ClientSecret));
+    // Slots held for another renter's stopped accounts count as used — the
+    // same rule the stack pickers apply — so an add cannot fill them and make
+    // that renter's next Start fail "stack full". Fail-open (0) on a read error.
+    const reserved = fresh.length
+      ? await reservedSlots(host.id, file, present, { except: renterId })
+      : 0;
     assertCapacity(
-      data.TwitchSettings.TwitchUsers.length,
+      data.TwitchSettings.TwitchUsers.length + reserved,
       fresh.length,
       stack.capacity,
     );
@@ -1799,7 +1840,7 @@ async function addRenterAccountsToConfig(host, file, accounts, renterId) {
     }
     const total = data.TwitchSettings.TwitchUsers.length;
     await hosts.writeFileAtomic(host, file, JSON.stringify(data, null, 2));
-    await upsertRenterAccounts(accounts, host, file, renterId);
+    await upsertRenterAccounts(accounts, host, file, renterId, opts);
     return { added: fresh.length, total };
   });
 }

@@ -188,8 +188,17 @@
         !confirm("Restart this renter's bot? Every account on it reloads (other renters and rent-farm buyers too) — about a minute of watching lost.")) return;
     if (el) el.disabled = true;
     try {
-      await api("/renters/" + id + "/bot/" + action, { method: "POST" });
-      toast(action === "start" ? "Bot started" : action === "stop" ? "Bot stopped" : "Bot restarting");
+      const d = await api("/renters/" + id + "/bot/" + action, { method: "POST" });
+      // A start puts back only what fits: say so instead of "started" over
+      // accounts that are on no bot.
+      toast(
+        action === "start"
+          ? d && d.skipped
+            ? "Bot started — but " + d.skipped + " account(s) could not be put back (" +
+              (d.skippedReason || "no room") + ")"
+            : "Bot started"
+          : action === "stop" ? "Bot stopped" : "Bot restarting",
+      );
       await RT.reloadMany(["renters", "bots"]);
       // Not awaited, same as the original: the detail modal refreshes itself.
       if (RT.state.CURRENT === id) RT.detail.reopen();

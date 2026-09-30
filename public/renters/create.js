@@ -34,9 +34,15 @@
   function botOptionLabel(b) {
     const capacity = Number(b.capacity) || 10;
     const accounts = Number(b.accounts) || 0;
-    const who = (b.renters || []).length
-      ? " — shared with " + b.renters.join(", ")
-      : " — free";
+    // A stack of paid rent-farm buyers is never "free", even once the holder
+    // has moved on to fill the next one: it cannot become a renter's own bot.
+    const names = (b.renters || []).filter((n) => String(n).toLowerCase() !== "operator-selffarm");
+    const buyers = Number(b.holderRows) || 0;
+    const holderHere = (b.renters || []).some((n) => String(n).toLowerCase() === "operator-selffarm");
+    const parts = [];
+    if (names.length) parts.push("shared with " + names.join(", "));
+    if (buyers || holderHere) parts.push((buyers ? buyers + " " : "") + "rent-farm buyers — not for a renter");
+    const who = parts.length ? " — " + parts.join("; ") : " — free";
     return (b.hostLabel || b.host) + " · " + b.file + " · " +
       accounts + "/" + capacity + " accounts" + who;
   }

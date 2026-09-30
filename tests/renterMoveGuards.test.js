@@ -58,6 +58,11 @@ Module._load = function (request, parent, isMain) {
         ...real,
         resolveHost: (v) => ({ id: v || "local", label: v || "local" }),
         dockerPs: async () => ({}),
+        listHosts: () => [{ id: "contabo", label: "contabo" }],
+        // One empty, free rental stack for the Quick-farm picker.
+        readdir: async () => ["config_60.json"],
+        readFiles: async (h, files) =>
+          Object.fromEntries(files.map((f) => [f, { ok: true, text: JSON.stringify({ TwitchSettings: { TwitchUsers: [] } }) }])),
       };
     }
     if (request === "../utils/renterBotOps") {
@@ -313,4 +318,24 @@ test("an account PARKED by the Gameflip buffer (renewal pending) cannot be moved
   const del = await call("DELETE", "/renter-accounts/" + acc._id + "?force=1");
   assert.equal(del.status, 409);
   assert.ok(await RenterAccount.findById(acc._id).lean());
+});
+
+test("REGRESSION: a Quick farm whose move is declined leaves the renter WITHOUT a stack", async () => {
+  // Review 3 (2026-10-01): Quick farm saved an auto-assigned stack onto the
+  // renter BEFORE the needsForce / buffer refusals, so one "Cancel" silently
+  // took a whole stack (up to 50 slots) out of rent-farm capacity.
+  await reset();
+  await require("../models/RenterBotStack").create({ host: "contabo", file: "config_60.json", capacity: 50 });
+  const a = await mk("quickrenter", { botFile: "", ...LIVE });
+  const b = await mk("botfarm1", { botFile: "config_05.json", ...LIVE });
+  await RenterAccount.create({ renter: b._id, clientSecret: "tokQ", login: "accQ", host: "contabo", configFile: "config_05.json" });
+  const res = await call("POST", "/renters/" + a._id + "/accounts/manual", {
+    username: "accQ", token: "tokQ", quick: true, autoAssign: true, games: ["Rust"], farmDays: 7,
+  });
+  assert.equal(res.status, 409);
+  assert.equal((await res.json()).needsForce, true);
+  const after = await Renter.findById(a._id).lean();
+  assert.equal(after.botFile, "", "no stack taken by a refused request");
+  assert.deepEqual(world.written, []);
+  await require("../models/RenterBotStack").deleteMany({});
 });

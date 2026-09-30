@@ -84,6 +84,11 @@ const renterAccountSchema = new mongoose.Schema(
     expiryAttempts: { type: Number, default: 0 },
     expiryLastError: { type: String, default: "" },
     expiryAlertedAt: { type: Date, default: null },
+    // Config files this lapsed account was pulled from (or could not be) on a
+    // failed attempt: the next attempt re-checks them even though the account
+    // is no longer found there — a bot whose reload failed still has it
+    // loaded, so the row is not "ended" until each of these has reloaded.
+    expiryOwedFiles: { type: [String], default: undefined },
   },
   { timestamps: true },
 );

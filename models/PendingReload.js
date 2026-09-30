@@ -16,6 +16,11 @@ const pendingReloadSchema = new mongoose.Schema(
     file: { type: String, required: true },
     since: { type: Date, default: Date.now },
     reason: { type: String, default: "" },
+    // Sweeper bookkeeping (renterBotOps.sweepPendingReloads): failed retries,
+    // the last error, and when it last paged about this file.
+    attempts: { type: Number, default: 0 },
+    lastError: { type: String, default: "" },
+    alertedAt: { type: Date, default: null },
   },
   { timestamps: true },
 );

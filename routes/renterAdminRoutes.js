@@ -42,7 +42,29 @@ const {
   applyRenterGames,
   restartIfRunning,
   locateSecrets,
+  markReloadOwed,
+  clearReloadOwed,
 } = require("../utils/renterBotOps");
+const busy = require("../utils/renterAccountBusy");
+
+// Operator actions that stop, start or re-lease a renter take the same
+// in-process mark as the lease-end sweep (utils/renterExpiry), so the two can
+// never interleave on one renter: a renewal landing mid-stop would otherwise be
+// stamped "stopped", and a stop landing mid-start would pull what was just put
+// back. Returns the release function, or null after answering 409.
+function markRenterBusy(res, renterId) {
+  const release = busy.tryAcquire(["renter:" + String(renterId)]);
+  if (!release) {
+    res.status(409).json({
+      success: false,
+      busy: true,
+      message:
+        "This renter's farming is being stopped or started right now (lease end, suspend or " +
+        "another action) — try again in a minute.",
+    });
+  }
+  return release;
+}
 
 // The rent-farm holder (operator-selffarm) is not a renter: its accounts are
 // PAID buyers spread over many stacks. A renter-level start copied every one of
@@ -123,7 +145,13 @@ async function pendingByRenter() {
 // operator bots are never valid targets even if a client posts one directly.
 // A stack already used by another renter is allowed, subject to its account
 // capacity when accounts are added.
-async function resolveAssignment(botHost, botFile) {
+//
+// A direct renter's bot is a stack of its own: never one that holds (or is
+// assigned to) the rent-farm holder's paid buyers — mixing them is how one
+// renter's lease end, Stop or games change reached 49 buyers. Checked from the
+// ledger (no host read) and only when the assignment CHANGES, so a renter
+// already sharing a legacy stack can still save its lease or notes.
+async function resolveAssignment(botHost, botFile, { current = null } = {}) {
   botHost = String(botHost || "");
   botFile = String(botFile || "");
   if (!botFile) return { botHost: botHost || "", botFile: "" };
@@ -131,6 +159,34 @@ async function resolveAssignment(botHost, botFile) {
   if (!host) throw new Error("Unknown host");
   if (!validFile(botFile)) throw new Error("Invalid config file");
   await requireStack(host.id, botFile);
+  const unchanged =
+    current &&
+    String(current.botFile || "") === botFile &&
+    (hosts.resolveHost(current.botHost) || {}).id === host.id;
+  if (!unchanged) {
+    const holder = await Renter.findOne(
+      { usernameLower: OPERATOR_HOLDER_USERNAME },
+      { _id: 1, botHost: 1, botFile: 1 },
+    ).lean();
+    if (holder) {
+      const buyers = await RenterAccount.countDocuments({
+        renter: holder._id,
+        enabled: true,
+        farmEndedAt: null,
+        configFile: botFile,
+        host: host.id === "local" ? { $in: ["local", "", null] } : host.id,
+      });
+      const holderHere =
+        holder.botFile === botFile && (hosts.resolveHost(holder.botHost) || {}).id === host.id;
+      if (buyers || holderHere) {
+        throw new Error(
+          botFile + " on " + host.label + " holds " +
+            (buyers ? buyers + " paid rent-farm buyer(s)" : "the rent-farm holder") +
+            " — a renter's own bot must be a stack of its own. Pick another stack.",
+        );
+      }
+    }
+  }
   return { botHost: host.id, botFile };
 }
 
@@ -891,10 +947,19 @@ router.get("/renters/:id", requireSuperadmin, async (req, res) => {
 
 // UPDATE a renter (quota / lease / bot / name / notes).
 router.put("/renters/:id", requireSuperadmin, async (req, res) => {
+  let release = null;
   try {
-    const r = await Renter.findById(req.params.id);
+    let r = await Renter.findById(req.params.id);
     if (!r) return res.status(404).json({ success: false, message: "Not found" });
     const b = req.body || {};
+    // A lease change can resume farming, and must not interleave with the
+    // lease-end sweep stopping the same renter (see markRenterBusy).
+    if (b.accessEnd !== undefined && !isOperatorHolder(r)) {
+      release = markRenterBusy(res, r._id);
+      if (!release) return;
+      r = await Renter.findById(req.params.id); // fresh, under the mark
+      if (!r) return res.status(404).json({ success: false, message: "Not found" });
+    }
     if (isOperatorHolder(r)) {
       // Its account limit is raised from this very form (the 09-28 outage), so
       // that — and the name / notes — stay editable. Nothing that re-points,
@@ -922,6 +987,7 @@ router.put("/renters/:id", requireSuperadmin, async (req, res) => {
       const { botHost, botFile } = await resolveAssignment(
         b.botHost !== undefined ? b.botHost : r.botHost,
         b.botFile !== undefined ? b.botFile : r.botFile,
+        { current: r },
       );
       r.botHost = botHost;
       r.botFile = botFile;
@@ -939,6 +1005,7 @@ router.put("/renters/:id", requireSuperadmin, async (req, res) => {
     if (b.accessStart !== undefined)
       r.accessStart = b.accessStart ? new Date(b.accessStart) : null;
     let resumeFarming = false;
+    let repairFarming = false;
     if (b.accessEnd !== undefined) {
       const wasExpired = !!(r.accessEnd && new Date(r.accessEnd) <= new Date());
       r.accessEnd = b.accessEnd ? new Date(b.accessEnd) : null;
@@ -947,26 +1014,55 @@ router.put("/renters/:id", requireSuperadmin, async (req, res) => {
       // save). The stop stamp is cleared only once that worked, so the renter's
       // page never says "Running" over a bot their accounts are not in. A stop
       // the renter / operator / a suspend chose stays a stop — Start ends it.
+      //
+      // A lease-end stop that FAILED part-way never stamped botStoppedAt, yet
+      // may already have pulled some accounts (their bot's reload was what
+      // failed). Renewing then repairs: a start only puts back accounts found
+      // in NO config, so for a renter whose accounts are all in place it adds
+      // nothing.
       if (!r.accessEnd || r.accessEnd > new Date()) {
         const leaseStop =
           r.botStoppedAt &&
           (r.botStopReason === "lease" || (!r.botStopReason && wasExpired));
         if (leaseStop && r.status !== "suspended" && r.botFile) resumeFarming = true;
+        else if (!r.botStoppedAt && wasExpired && r.status !== "suspended" && r.botFile) {
+          repairFarming = true;
+        }
       }
     }
     await r.save();
     let farmingResumed = null;
-    if (resumeFarming) {
+    let farmingNote = "";
+    let restored = 0;
+    if (resumeFarming || repairFarming) {
       const host = hosts.resolveHost(r.botHost);
       try {
         if (!host) throw new Error("unknown bot host");
-        await startRenterFarming(r, host);
-        r.botStoppedAt = null;
-        r.botStopReason = "";
-        await r.save();
-        farmingResumed = true;
+        const live = await RenterAccount.countDocuments({ renter: r._id, enabled: true, farmEndedAt: null });
+        if (live || resumeFarming) {
+          const out = await startRenterFarming(r, host);
+          restored = out.added || 0;
+          const skipped = Array.isArray(out.skipped) ? out.skipped : [];
+          if (resumeFarming) {
+            r.botStoppedAt = null;
+            r.botStopReason = "";
+            await r.save();
+          }
+          if (skipped.length) {
+            farmingResumed = "partial";
+            farmingNote =
+              skipped.length + " account(s) could not be put back (" + skipped[0].reason +
+              ") — free a slot or raise the stack's capacity, then press Start.";
+          } else if (resumeFarming || restored) {
+            farmingResumed = true;
+            if (repairFarming && restored) {
+              farmingNote = restored + " account(s) a failed lease-end stop had pulled were put back.";
+            }
+          }
+        }
       } catch (e) {
         farmingResumed = false;
+        farmingNote = "Farming could not be resumed: " + (e.message || e);
         console.error("renter lease renewal: could not resume farming for " + r.username + ":", e.message);
       }
     }
@@ -988,9 +1084,11 @@ router.put("/renters/:id", requireSuperadmin, async (req, res) => {
         }
       }
     }
-    res.json({ success: true, renter: sanitizeRenter(r), gamesApplied, farmingResumed });
+    res.json({ success: true, renter: sanitizeRenter(r), gamesApplied, farmingResumed, farmingNote, restored });
   } catch (err) {
     res.status(400).json({ success: false, message: err.message });
+  } finally {
+    if (release) release();
   }
 });
 
@@ -1019,10 +1117,15 @@ router.get("/renters/:id/password", requireSuperadmin, async (req, res) => {
 
 // SUSPEND — block access AND stop their bot.
 router.post("/renters/:id/suspend", requireSuperadmin, async (req, res) => {
+  let release = null;
   try {
-    const r = await Renter.findById(req.params.id);
+    let r = await Renter.findById(req.params.id);
     if (!r) return res.status(404).json({ success: false, message: "Not found" });
     if (isOperatorHolder(r)) return refuseHolder(res, "suspended");
+    release = markRenterBusy(res, r._id);
+    if (!release) return;
+    r = await Renter.findById(req.params.id); // fresh, under the mark
+    if (!r) return res.status(404).json({ success: false, message: "Not found" });
     r.status = "suspended";
     let botStopped = false;
     if (r.botFile) {
@@ -1047,6 +1150,8 @@ router.post("/renters/:id/suspend", requireSuperadmin, async (req, res) => {
   } catch (err) {
     console.error("renter suspend error:", err.message);
     res.status(500).json({ success: false, message: "Server error" });
+  } finally {
+    if (release) release();
   }
 });
 
@@ -1054,19 +1159,44 @@ router.post("/renters/:id/suspend", requireSuperadmin, async (req, res) => {
 // renter from their own page — starts it when ready). A suspend that stopped
 // their farming leaves it stopped: botStoppedAt stays set, so the renter's
 // page shows "Stopped" with a Start button instead of "Running" over a bot
-// their accounts were pulled out of. A suspend whose stop never happened
-// (botStoppedAt still null) simply carries on farming.
+// their accounts were pulled out of.
+//
+// A suspend whose stop FAILED part-way (botStoppedAt never stamped) may already
+// have pulled some of their accounts — their bot's reload is what failed — so
+// unsuspending repairs: a start puts back only accounts found in NO config
+// (none at all when the stop never happened). Only while their lease is live.
 router.post("/renters/:id/unsuspend", requireSuperadmin, async (req, res) => {
+  let release = null;
   try {
+    const exists = await Renter.findById(req.params.id, { _id: 1 }).lean();
+    if (!exists) return res.status(404).json({ success: false, message: "Not found" });
+    release = markRenterBusy(res, exists._id);
+    if (!release) return;
     const r = await Renter.findByIdAndUpdate(
       req.params.id,
       { $set: { status: "active" } },
       { new: true },
     );
     if (!r) return res.status(404).json({ success: false, message: "Not found" });
-    res.json({ success: true, renter: sanitizeRenter(r) });
+    let farmingRepaired = null;
+    if (!r.botStoppedAt && r.botFile && !isBlocked(r) && !isOperatorHolder(r)) {
+      const host = hosts.resolveHost(r.botHost);
+      const live = await RenterAccount.countDocuments({ renter: r._id, enabled: true, farmEndedAt: null });
+      if (host && live) {
+        try {
+          const out = await startRenterFarming(r, host);
+          farmingRepaired = out.added || 0;
+        } catch (e) {
+          farmingRepaired = false;
+          console.error("renter unsuspend: could not repair farming for " + r.username + ":", e.message);
+        }
+      }
+    }
+    res.json({ success: true, renter: sanitizeRenter(r), farmingRepaired });
   } catch (err) {
     res.status(400).json({ success: false, message: err.message });
+  } finally {
+    if (release) release();
   }
 });
 
@@ -1301,6 +1431,7 @@ router.post("/renters/:id/bot/:action", requireSuperadmin, async (req, res) => {
   if (!["start", "stop", "restart"].includes(action)) {
     return res.status(400).json({ success: false, message: "Unknown action" });
   }
+  let release = null;
   try {
     const r = await Renter.findById(req.params.id);
     if (r && isOperatorHolder(r)) {
@@ -1321,6 +1452,10 @@ router.post("/renters/:id/bot/:action", requireSuperadmin, async (req, res) => {
     // the config(s); a container is only ever stopped once nothing else is in
     // it. "restart" reloads the renter's own bot (every account on it).
     let detail = null;
+    if (action === "start" || action === "stop") {
+      release = markRenterBusy(res, r._id);
+      if (!release) return;
+    }
     if (action === "start") {
       detail = await startRenterFarming(r, host);
       r.botStoppedAt = null;
@@ -1335,8 +1470,17 @@ router.post("/renters/:id/bot/:action", requireSuperadmin, async (req, res) => {
       // Never "restart" a bot whose config is empty: `docker restart` would
       // START it, and an accountless TwitchDropsBot spins in a login-retry
       // loop that has filled a disk before. A stop now empties a lone
-      // renter's bot, so this is the normal state after one.
-      const n = await countConfigAccounts(host, r.botFile).catch(() => null);
+      // renter's bot, so this is the normal state after one. An unreadable
+      // config (host offline) is NOT an empty one: that is reported as such.
+      let n;
+      try {
+        const data = JSON.parse(await hosts.readFile(host, r.botFile));
+        const users = data && data.TwitchSettings && data.TwitchSettings.TwitchUsers;
+        n = Array.isArray(users) ? users.length : 0;
+      } catch (e) {
+        if (!(e && e.code === "ENOENT")) throw e;
+        n = 0;
+      }
       if (n === 0) {
         return res.status(400).json({
           success: false,
@@ -1345,10 +1489,13 @@ router.post("/renters/:id/bot/:action", requireSuperadmin, async (req, res) => {
       }
       await restartConfigContainer(host, r.botFile);
     }
+    const skipped = detail && Array.isArray(detail.skipped) ? detail.skipped : [];
     res.json({
       success: true,
       running: action !== "stop",
-      skipped: detail && Array.isArray(detail.skipped) ? detail.skipped.length : 0,
+      skipped: skipped.length,
+      skippedReason: skipped.length ? skipped[0].reason : "",
+      added: detail && typeof detail.added === "number" ? detail.added : undefined,
     });
   } catch (e) {
     const msg =
@@ -1366,6 +1513,8 @@ router.post("/renters/:id/bot/:action", requireSuperadmin, async (req, res) => {
       console.error("renter bot " + action + " error:", e.message);
     }
     res.status(status).json({ success: false, message: msg });
+  } finally {
+    if (release) release();
   }
 });
 
@@ -1394,6 +1543,8 @@ router.delete("/renters/:id", requireSuperadmin, async (req, res) => {
       if (!host) {
         return res.status(409).json({ success: false, message: "The renter's bot host is unknown — nothing was deleted." });
       }
+      const release = markRenterBusy(res, target._id);
+      if (!release) return;
       try {
         await stopRenterFarming(target, host);
       } catch (e) {
@@ -1401,6 +1552,8 @@ router.delete("/renters/:id", requireSuperadmin, async (req, res) => {
           success: false,
           message: "Could not pull the renter's accounts off the bot (" + (e.message || e) + ") — nothing was deleted.",
         });
+      } finally {
+        release();
       }
     }
     const r = await Renter.findByIdAndDelete(req.params.id);
@@ -1722,91 +1875,196 @@ function loginMatcher(login) {
   return { $regex: "^" + escapeRegExp(String(login || "")) + "$", $options: "i" };
 }
 
-// Put an ENDED window's account back on a bot so a renewal (or a make-good)
-// actually farms. The lapse sweep pulled it out of its config and blanked
-// configFile, so re-arming farmUntil alone — which is all "Farm days" used to
-// do — reported "Farms until …" for an account nothing was reading.
-//   holder (rent-farm buyer): the holder's current stack with room (the same
-//     picker every sale uses), pinned to the order's game;
-//   direct renter: their own bot, with their games — only while their lease
-//     is live.
-// Returns { placed, host, file, alreadyIn? }. Throws with .status on refusal.
-async function rePlaceEndedAccount(acc) {
-  const renter = await Renter.findById(acc.renter);
-  if (!renter) throw Object.assign(new Error("The account's renter no longer exists."), { status: 409 });
-  let host;
-  let file;
-  let games = [];
-  if (isOperatorHolder(renter)) {
-    const { stack } = await require("../utils/operatorFarm").ensureStackWithRoom(renter, 1, "renew-window");
-    host = hosts.resolveHost(stack.host);
-    file = stack.file;
-    const order = await FarmServiceOrder.findOne(
-      { "accounts.login": loginMatcher(acc.login) },
-      { game: 1 },
-    ).lean();
-    if (order && order.game) games = [order.game];
-  } else {
+// Put a window's account back on a bot so a renewal (or a make-good) actually
+// farms. Needed when the row is ENDED (the lapse sweep pulled it and blanked
+// configFile), STUCK (a lapsed window the sweep has not confirmed pulled —
+// its old bot may still owe a reload) or UNPLACED (no configFile): re-arming
+// farmUntil alone — all "Farm days" used to do — answered "Farms until …" for
+// an account nothing was reading.
+//   - where it already farms (on its own host or the target's) the row is only
+//     re-pointed: never a second copy (two bots on one token = the ban case);
+//     a host that cannot be read refuses (it might be there);
+//   - a stuck row goes back into the file it is recorded in when that still
+//     exists (one copy; its bot owes a reload anyway);
+//   - otherwise the holder's current stack with room (the picker every sale
+//     uses), pinned to the LATEST order's game — refused when no game is known
+//     (an empty list farms everything or nothing) — or a direct renter's own
+//     bot with their games, only while their lease is live and their farming
+//     is not stopped.
+// The window is written in the same write that records the placement, and the
+// bot's reload is recorded as owed BEFORE any container call: a container call
+// that fails is reported (startError), never thrown — the account IS placed.
+// Returns { placed, host, file, startError?, alreadyIn? }. Throws with .status
+// on a refusal, before anything is written.
+async function ensurePlaced(acc, renter, farmUntil) {
+  const holder = isOperatorHolder(renter);
+  if (!holder) {
     if (isBlocked(renter)) {
       throw Object.assign(
         new Error("Renter " + renter.username + " is suspended or past their lease — extend the lease first."),
         { status: 409 },
       );
     }
+    if (renter.botStoppedAt) {
+      throw Object.assign(
+        new Error(
+          "Renter " + renter.username + "'s farming is stopped" +
+            (renter.botStopReason ? " (" + renter.botStopReason + ")" : "") +
+            " — press Start on their bot first; Farm days only puts an account back on a bot that farms.",
+        ),
+        { status: 409 },
+      );
+    }
     if (!renter.botFile) {
       throw Object.assign(new Error("Renter " + renter.username + " has no bot assigned."), { status: 409 });
     }
-    host = hosts.resolveHost(renter.botHost);
-    file = renter.botFile;
-    games = Array.isArray(renter.farmGames) ? renter.farmGames.filter(Boolean) : [];
   }
+
+  // Already farming somewhere? Looked for BEFORE a target is picked (picking
+  // one can move the holder to another stack) — on the host the row last
+  // named (a stuck pull may have left it loaded there) and the renter's own /
+  // the holder's current host. Found = only re-pointed, no game needed.
+  const searched = new Set();
+  const findExisting = async (h) => {
+    if (!h || searched.has(h.id)) return null;
+    searched.add(h.id);
+    const problems = [];
+    let located;
+    try {
+      located = await locateSecrets(h, [acc.clientSecret], { problems });
+    } catch (e) {
+      throw Object.assign(
+        new Error("Could not check " + (h.label || h.id) + " for the account (" + (e.message || e) + ") — try again when it is reachable."),
+        { status: e.unreachable ? 502 : 409 },
+      );
+    }
+    if (located.size) {
+      const where = [...located.keys()][0];
+      await RenterAccount.updateOne(
+        { _id: acc._id },
+        { $set: { host: h.id, configFile: where, container: containerForFile(where) || "", enabled: true } },
+      );
+      return { placed: false, host: h.id, file: where, alreadyIn: [...located.keys()] };
+    }
+    if (problems.length) {
+      throw Object.assign(
+        new Error("Part of " + (h.label || h.id) + " could not be read (" + problems[0] + ") — the account might be there."),
+        { status: 409 },
+      );
+    }
+    return null;
+  };
+  for (const h of [hosts.resolveHost(acc.host), hosts.resolveHost(renter.botHost)]) {
+    const hit = await findExisting(h);
+    if (hit) return hit;
+  }
+
+  // Games, before anything is written: a buyer's account farms its LATEST
+  // order's game; with none known it would farm everything or nothing.
+  let games = [];
+  if (holder) {
+    const order = await FarmServiceOrder.findOne({ "accounts.login": loginMatcher(acc.login) }, { game: 1 })
+      .sort({ createdAt: -1 })
+      .lean();
+    if (order && order.game) games = [order.game];
+    else if (Array.isArray(acc.favouriteGames)) games = acc.favouriteGames.filter(Boolean);
+    if (!games.length) {
+      throw Object.assign(
+        new Error(
+          "No game is known for " + (acc.login || "this account") + " (no rent-farm order names it and " +
+            "it had none saved) — add it by hand with its game instead.",
+        ),
+        { status: 409 },
+      );
+    }
+  }
+
+  // The target: a stuck row's own recorded file when it still exists, else the
+  // holder's stack with room / the renter's own bot.
+  const recordedHost = acc.configFile ? hosts.resolveHost(acc.host) : null;
+  let host = null;
+  let file = null;
+  if (recordedHost && validFile(acc.configFile)) {
+    const listed = await hosts.readdir(recordedHost, { retries: 1 }).catch(() => null);
+    if (listed && listed.includes(acc.configFile)) {
+      host = recordedHost;
+      file = acc.configFile;
+    }
+  }
+  const pickDefault = async () => {
+    if (holder) {
+      const { stack } = await require("../utils/operatorFarm").ensureStackWithRoom(renter, 1, "renew-window");
+      return { host: hosts.resolveHost(stack.host), file: stack.file };
+    }
+    return { host: hosts.resolveHost(renter.botHost), file: renter.botFile };
+  };
+  if (!host) ({ host, file } = await pickDefault());
   if (!host) throw Object.assign(new Error("Unknown bot host for the target stack."), { status: 409 });
+  // The holder may just have moved to a stack on a host not searched yet.
+  const late = await findExisting(host);
+  if (late) return late;
+  if (!holder) games = await renterDefaultGames(renter, host);
   if (!games.length && Array.isArray(acc.favouriteGames)) games = acc.favouriteGames.filter(Boolean);
 
-  // Already farming somewhere on that host (put back by hand)? Then there is
-  // nothing to place — just point the ledger at it.
-  const located = await locateSecrets(host, [acc.clientSecret], [file]);
-  if (located.size) {
-    const where = [...located.keys()][0];
-    await RenterAccount.updateOne(
-      { _id: acc._id },
-      { $set: { host: host.id, configFile: where, container: containerForFile(where) || "", enabled: true } },
-    );
-    return { placed: false, host: host.id, file: where, alreadyIn: [...located.keys()] };
+  const entry = {
+    ClientSecret: acc.clientSecret,
+    Login: acc.login || "",
+    UniqueId: acc.uniqueId || "",
+    Id: acc.twitchId || "",
+    Enabled: true,
+    FavouriteGames: games,
+  };
+  try {
+    await addRenterAccountsToConfig(host, file, [entry], renter._id, { farmUntil });
+  } catch (e) {
+    // The stuck row's own file is full now: fall back to the usual target.
+    if (e && e.code === "rental_stack_full" && file === acc.configFile) {
+      const alt = await pickDefault();
+      if (!alt.host || (alt.host.id === host.id && alt.file === file)) throw e;
+      host = alt.host;
+      file = alt.file;
+      await addRenterAccountsToConfig(host, file, [entry], renter._id, { farmUntil });
+    } else {
+      throw e;
+    }
   }
 
-  await addRenterAccountsToConfig(
-    host,
-    file,
-    [{
-      ClientSecret: acc.clientSecret,
-      Login: acc.login || "",
-      UniqueId: acc.uniqueId || "",
-      Id: acc.twitchId || "",
-      Enabled: true,
-      FavouriteGames: games,
-    }],
-    renter._id,
-  );
   // Make the bot pick it up: restart a running one, start a stopped one (the
-  // same rule operatorFarm follows after every sale).
-  const container = containerForFile(file);
-  const states = await hosts.dockerPs(host).catch(() => null);
-  const st = states && container ? states[container] : null;
-  if (st && /^running/i.test(String(st.state || ""))) {
-    await restartConfigContainer(host, file);
-  } else {
-    await startConfigContainer(host, file);
+  // same rule operatorFarm follows after every sale). Recorded as owed first;
+  // cleared only once it really happened (an unreadable state stays owed —
+  // `compose up` does not reload a running bot — for the sweeper).
+  await markReloadOwed(host, file, "accounts added");
+  let startError = "";
+  try {
+    const container = containerForFile(file);
+    const states = await hosts.dockerPs(host).catch(() => null);
+    const st = states && container ? states[container] : null;
+    if (states && st && /^running/i.test(String(st.state || ""))) {
+      const r = await restartConfigContainer(host, file);
+      if (r && r.restarted === false) startError = "container restarts are disabled on this server";
+      else await clearReloadOwed(host, file);
+    } else {
+      await startConfigContainer(host, file);
+      // It was stopped: it just started on the new config. When its state could
+      // not be read it may have been running (start is then a no-op), so the
+      // reload stays owed for the sweeper.
+      if (states) await clearReloadOwed(host, file);
+    }
+  } catch (e) {
+    startError = String((e && e.message) || e).slice(0, 200);
   }
-  return { placed: true, host: host.id, file };
+  return { placed: true, host: host.id, file, startError };
 }
 
 // SET / CLEAR one account's farming window after the fact ("give it 15 more
 // days", "make it open-ended"). Days are counted from now; days = 0 clears it.
-// A window that had already ENDED is put back on a bot first (see
-// rePlaceEndedAccount), and the rent-farm order's copy of the window is kept in
-// step, with a SystemEvent recording the change.
+// An account that is off every bot (window ended, a pull the sweep could not
+// confirm, or never placed) is put back first (see ensurePlaced), and the
+// rent-farm order's copy of the window is kept in step, with a SystemEvent
+// recording the change. The row is marked busy (utils/renterAccountBusy) so
+// the lapse sweep cannot pull it in the middle.
 router.post("/renter-accounts/:id/farm", requireSuperadmin, async (req, res) => {
+  let release = null;
   try {
     if (!mongoose.isValidObjectId(req.params.id)) {
       return res.status(400).json({ success: false, message: "Bad account id" });
@@ -1822,30 +2080,57 @@ router.post("/renter-accounts/:id/farm", requireSuperadmin, async (req, res) => 
     } else if (Number.isFinite(days) && days > 0) {
       farmUntil = new Date(Date.now() + days * 86400000);
     }
+    release = busy.tryAcquire([req.params.id]);
+    if (!release) {
+      return res.status(409).json({
+        success: false,
+        busy: true,
+        message: "This account is being pulled off its bot or placed right now — try again in a minute.",
+      });
+    }
     const acc = await RenterAccount.findById(req.params.id).lean();
     if (!acc) return res.status(404).json({ success: false, message: "Not found" });
+    const renter = await Renter.findById(acc.renter);
+    if (!renter) {
+      return res.status(409).json({ success: false, message: "The account's renter no longer exists." });
+    }
 
+    const now = Date.now();
     const ended = !!acc.farmEndedAt || (!acc.configFile && acc.enabled === false);
-    const liveAgain = farmUntil === null || farmUntil > new Date();
+    const lapsed = !ended && !!acc.farmUntil && new Date(acc.farmUntil).getTime() <= now;
+    const stuck = !ended && (Number(acc.expiryAttempts) > 0 || lapsed);
+    const unplaced = !ended && !acc.configFile;
+    const liveAgain = farmUntil === null || farmUntil.getTime() > now;
+    const needsPlace = liveAgain && (ended || stuck || unplaced);
+    if (needsPlace && farmUntil === null && isOperatorHolder(renter)) {
+      return res.status(400).json({
+        success: false,
+        message: "A rent-farm buyer's account needs an end date — give it a number of days.",
+      });
+    }
     let placement = null;
-    if (ended && liveAgain) {
+    if (needsPlace) {
       try {
-        placement = await rePlaceEndedAccount(acc);
+        placement = await ensurePlaced(acc, renter, farmUntil);
       } catch (e) {
         const status = e.status || botWriteStatus(e);
         return res.status(status === 500 ? 502 : status).json({
           success: false,
           message:
-            "This window had already ended and the account is off the bot, and it " +
-            "could not be put back: " + (e.message || "error") + " Nothing was changed.",
+            "This account is off the bot and could not be put back: " + (e.message || "error") +
+            " Nothing was changed.",
         });
       }
     }
-    const set = { farmUntil, farmEndedAt: null, expiryAttempts: 0, expiryLastError: "" };
+    const set = { farmUntil, farmEndedAt: null, expiryAttempts: 0, expiryLastError: "", expiryAlertedAt: null };
     if (placement) set.enabled = true;
     // Clearing farmEndedAt re-arms the sweep for the new window, the same way
     // extending a renter's lease clears botStoppedAt.
-    const updated = await RenterAccount.findByIdAndUpdate(acc._id, { $set: set }, { new: true }).lean();
+    const updated = await RenterAccount.findByIdAndUpdate(
+      acc._id,
+      { $set: set, ...(placement ? { $unset: { expiryOwedFiles: "" } } : {}) },
+      { new: true },
+    ).lean();
 
     // The order's copy of the window, so the console and any later delivery
     // check agree with what the bot will do.
@@ -1868,11 +2153,12 @@ router.post("/renter-accounts/:id/farm", requireSuperadmin, async (req, res) => 
       subject: acc.login || String(acc._id),
       detail:
         "window " + (acc.farmUntil ? new Date(acc.farmUntil).toISOString().slice(0, 10) : "open") +
-        (acc.farmEndedAt ? " (ended)" : "") + " → " +
+        (acc.farmEndedAt ? " (ended)" : stuck ? " (lapsed, not yet pulled)" : "") + " → " +
         (farmUntil ? farmUntil.toISOString().slice(0, 10) : "open-ended") +
         (placement
           ? placement.placed
-            ? "; put back on " + placement.host + "/" + placement.file
+            ? "; put back on " + placement.host + "/" + placement.file +
+              (placement.startError ? " (bot not reloaded: " + placement.startError + ")" : "")
             : "; already in " + placement.host + "/" + placement.file
           : "") +
         (ordersUpdated ? "; " + ordersUpdated + " order(s) updated" : ""),
@@ -1882,11 +2168,14 @@ router.post("/renter-accounts/:id/farm", requireSuperadmin, async (req, res) => 
       farmUntil: updated.farmUntil || null,
       placed: placement ? placement.placed : false,
       stack: placement ? placement.host + "/" + placement.file : null,
+      startError: placement && placement.startError ? placement.startError : "",
       ordersUpdated,
     });
   } catch (err) {
     console.error("renter account farm error:", err.message);
     res.status(500).json({ success: false, message: "Server error" });
+  } finally {
+    if (release) release();
   }
 });
 
@@ -2086,6 +2375,7 @@ router.post(
   "/renters/:id/accounts/manual",
   requireSuperadmin,
   async (req, res) => {
+    let releaseRow = null;
     try {
       const body = req.body || {};
       const quick = body.quick === true;
@@ -2165,41 +2455,9 @@ router.post(
         });
       }
 
-      if (!renter.botFile && quick && body.autoAssign === true) {
-        assignedStack = await availableRentalStack();
-        if (!assignedStack) {
-          return res.status(409).json({
-            success: false,
-            message: "No available rental bot stack has room right now",
-          });
-        }
-        renter.botHost = assignedStack.host;
-        renter.botFile = assignedStack.file;
-        renter.botStoppedAt = null;
-        await renter.save();
-        assignedForQuick = true;
-      }
-      if (!renter.botFile) {
-        return res
-          .status(400)
-          .json({ success: false, message: "Renter has no bot assigned" });
-      }
-      const host = hosts.resolveHost(renter.botHost);
-      if (!host) {
-        if (assignedForQuick) {
-          renter.botHost = "";
-          renter.botFile = "";
-          await renter.save().catch(() => {});
-        }
-        return res
-          .status(400)
-          .json({ success: false, message: "Renter's host is unknown" });
-      }
-
-      const notes = [];
-      let partial = false;
-      if (tokenNote) notes.push(tokenNote);
-
+      // Every refusal below comes BEFORE Quick farm assigns a stack: a stack
+      // saved onto the renter and then abandoned by a 409 (a declined move, a
+      // buffer refusal) silently took up to 50 slots away from rent-farm sales.
       // Look up where the account currently lives — READS ONLY. Nothing is torn
       // down until the destination write below has succeeded. The identity
       // fields come from whichever trace exists so the config entry can carry
@@ -2215,6 +2473,18 @@ router.post(
       const otherRenterAcc = await RenterAccount.findOne({
         $or: [{ clientSecret: token }, { login: loginRe }],
       });
+      // The row being moved is marked busy: the lapse sweep must not pull the
+      // account while it is being written into this renter's bot.
+      if (otherRenterAcc) {
+        releaseRow = busy.tryAcquire([otherRenterAcc._id]);
+        if (!releaseRow) {
+          return res.status(409).json({
+            success: false,
+            busy: true,
+            message: "That account is being pulled off its bot or placed right now — try again in a minute.",
+          });
+        }
+      }
       // Taking an account OFF another renter ends their farming on it. That is
       // the point when the account is simply sitting there, but it must never
       // happen by accident to a renter with a live lease or to a paying
@@ -2279,6 +2549,41 @@ router.post(
           }
         }
       }
+      if (!renter.botFile && quick && body.autoAssign === true) {
+        assignedStack = await availableRentalStack();
+        if (!assignedStack) {
+          return res.status(409).json({
+            success: false,
+            message: "No available rental bot stack has room right now",
+          });
+        }
+        renter.botHost = assignedStack.host;
+        renter.botFile = assignedStack.file;
+        renter.botStoppedAt = null;
+        await renter.save();
+        assignedForQuick = true;
+      }
+      if (!renter.botFile) {
+        return res
+          .status(400)
+          .json({ success: false, message: "Renter has no bot assigned" });
+      }
+      const host = hosts.resolveHost(renter.botHost);
+      if (!host) {
+        if (assignedForQuick) {
+          renter.botHost = "";
+          renter.botFile = "";
+          await renter.save().catch(() => {});
+        }
+        return res
+          .status(400)
+          .json({ success: false, message: "Renter's host is unknown" });
+      }
+
+      const notes = [];
+      let partial = false;
+      if (tokenNote) notes.push(tokenNote);
+
       const poolRow = await AvailableAccount.findOne({
         usernameLower: lower,
       }).lean();
@@ -2312,7 +2617,8 @@ router.post(
       // source-first order could strand an account (delisted, removed from its
       // bot, its RenterAccount row deleted) with nowhere left to land.
       try {
-        await addRenterAccountsToConfig(host, renter.botFile, [acct], renter._id);
+        // A requested window is written with the placement itself.
+        await addRenterAccountsToConfig(host, renter.botFile, [acct], renter._id, farmUntil ? { farmUntil } : {});
       } catch (e) {
         if (assignedForQuick) {
           renter.botHost = "";
@@ -2605,6 +2911,8 @@ router.post(
     } catch (err) {
       console.error("renter manual add error:", err.message);
       res.status(500).json({ success: false, message: "Server error" });
+    } finally {
+      if (releaseRow) releaseRow();
     }
   },
 );

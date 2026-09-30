@@ -34,6 +34,19 @@ const fakeHosts = (real) => ({
   resolveHost: (v) => ({ id: v || "local", label: v || "local" }),
   dockerPs: async () => JSON.parse(JSON.stringify(world.ps)),
   readdir: async () => Object.keys(world.files),
+  readFile: async (h, f) => {
+    if (world.readFails) {
+      const e = new Error("ssh: connect to host contabo port 22: Connection timed out");
+      e.unreachable = true;
+      throw e;
+    }
+    if (!world.files[f]) {
+      const e = new Error("No such file " + f);
+      e.code = "ENOENT";
+      throw e;
+    }
+    return world.files[f];
+  },
   readFiles: async (h, files) =>
     Object.fromEntries(files.map((f) => [f, world.files[f] ? { ok: true, text: world.files[f] } : { ok: false, error: "Not found" }])),
 });
@@ -46,7 +59,10 @@ Module._load = function (request, parent, isMain) {
       const real = realLoad.call(this, request, parent, isMain);
       return {
         ...real,
-        startRenterFarming: async (r) => { world.started.push(r.username); return { added: 1, skipped: [], running: true }; },
+        startRenterFarming: async (r) => {
+          world.started.push(r.username);
+          return world.startResult || { added: 1, skipped: [], running: true };
+        },
         stopRenterFarming: async (r) => { world.stopped.push(r.username); return { mode: "detached", removed: 1, files: [] }; },
       };
     }
@@ -109,7 +125,8 @@ test.after(async () => {
 });
 
 async function reset() {
-  Object.assign(world, { started: [], stopped: [], restarted: [], configCount: 5, files: {} });
+  Object.assign(world, { started: [], stopped: [], restarted: [], configCount: 5, files: {}, startResult: null, readFails: false });
+  require("../utils/renterAccountBusy")._reset();
   await Promise.all([Renter.deleteMany({}), RenterAccount.deleteMany({}), RenterBotStack.deleteMany({})]);
 }
 
@@ -126,17 +143,38 @@ function mk(username, fields = {}) {
   return Renter.create({ username, usernameLower: username.toLowerCase(), passwordHash: "x", botHost: "contabo", ...fields });
 }
 
+function cfgWith(n) {
+  return JSON.stringify({
+    TwitchSettings: { TwitchUsers: Array.from({ length: n }, (_, i) => ({ ClientSecret: "s" + i })) },
+  });
+}
+
 test("REGRESSION: 'Restart' refuses a bot whose config is empty", async () => {
   await reset();
   const r = await mk("bulksellerhaz", { botFile: "config_22.json" });
-  world.configCount = 0;
+  world.files["config_22.json"] = cfgWith(0);
   const res = await call("POST", "/renters/" + r._id + "/bot/restart");
   assert.equal(res.status, 400);
   assert.deepEqual(world.restarted, []);
-  world.configCount = 3;
+  world.files["config_22.json"] = cfgWith(3);
   const ok = await call("POST", "/renters/" + r._id + "/bot/restart");
   assert.equal(ok.status, 200);
   assert.deepEqual(world.restarted, ["config_22.json"]);
+});
+
+test("REGRESSION: 'Restart' on an OFFLINE host says so — not 'no accounts'", async () => {
+  await reset();
+  const r = await mk("bulksellerhaz", { botFile: "config_22.json" });
+  world.files["config_22.json"] = cfgWith(3);
+  world.readFails = true;
+  try {
+    const res = await call("POST", "/renters/" + r._id + "/bot/restart");
+    assert.equal(res.status, 502);
+    assert.match((await res.json()).message, /offline/);
+    assert.deepEqual(world.restarted, []);
+  } finally {
+    world.readFails = false;
+  }
 });
 
 test("operator Stop / Start record why the farming stopped", async () => {
@@ -259,4 +297,115 @@ test("stack pickers keep buyers and direct renters apart; a stopped renter keeps
   const forRenter = await renterAdminRoutes.availableRentalStack();
   assert.ok(forRenter, "a stack is offered");
   assert.ok(!["config_54.json", "config_03.json"].includes(forRenter.file), JSON.stringify(forRenter));
+});
+
+// ---------------------------------------------------------------------------
+// Round 3 (second review)
+// ---------------------------------------------------------------------------
+async function liveRow(r, secret) {
+  return RenterAccount.create({ renter: r._id, clientSecret: secret, login: secret, host: "contabo", configFile: r.botFile });
+}
+
+test("REGRESSION: renewing after a lease-end stop that FAILED part-way puts back what it had pulled", async () => {
+  await reset();
+  // botStoppedAt never stamped: the stop pulled the account, then its bot's reload failed.
+  const r = await mk("jhonkwiall", { botFile: "config_03.json", accessEnd: new Date(Date.now() - 86400000) });
+  await liveRow(r, "jhonacct");
+  const res = await call("PUT", "/renters/" + r._id, { accessEnd: "2027-01-31" });
+  const d = await res.json();
+  assert.equal(res.status, 200, JSON.stringify(d));
+  assert.deepEqual(world.started, ["jhonkwiall"], "a repair start (it adds only accounts found in no config)");
+  assert.equal(d.farmingResumed, true);
+  assert.equal(d.restored, 1);
+  assert.match(d.farmingNote, /failed lease-end stop had pulled/);
+});
+
+test("extending a LIVE lease starts nothing", async () => {
+  await reset();
+  const r = await mk("live", { botFile: "config_05.json", accessEnd: new Date(Date.now() + 86400000) });
+  await liveRow(r, "l1");
+  const d = await (await call("PUT", "/renters/" + r._id, { accessEnd: "2029-01-01" })).json();
+  assert.equal(d.farmingResumed, null);
+  assert.deepEqual(world.started, []);
+});
+
+test("REGRESSION: a renewal that could put back only SOME accounts says so", async () => {
+  await reset();
+  const r = await mk("jhonkwiall", {
+    botFile: "config_03.json", accessEnd: new Date(Date.now() - 86400000),
+    botStoppedAt: new Date(), botStopReason: "lease",
+  });
+  await liveRow(r, "a1");
+  world.startResult = { added: 1, skipped: [{ login: "a2", file: "config_03.json", reason: "stack config_03.json is full (50/50)" }], running: true };
+  const d = await (await call("PUT", "/renters/" + r._id, { accessEnd: "2027-01-31" })).json();
+  assert.equal(d.farmingResumed, "partial");
+  assert.match(d.farmingNote, /1 account\(s\) could not be put back \(stack config_03\.json is full/);
+});
+
+test("a lease change while the sweep is stopping the same renter answers 409 busy", async () => {
+  await reset();
+  const r = await mk("jhonkwiall", { botFile: "config_03.json", accessEnd: new Date(Date.now() - 1000) });
+  const release = require("../utils/renterAccountBusy").tryAcquire(["renter:" + String(r._id)]);
+  try {
+    const res = await call("PUT", "/renters/" + r._id, { accessEnd: "2027-01-31" });
+    assert.equal(res.status, 409);
+    assert.equal((await res.json()).busy, true);
+  } finally {
+    release();
+  }
+  assert.ok((await Renter.findById(r._id).lean()).accessEnd < new Date(), "unchanged");
+  // A save that does not touch the lease is not held up.
+  const ok = await call("PUT", "/renters/" + r._id, { notes: "hi" });
+  assert.equal(ok.status, 200);
+});
+
+test("REGRESSION: unsuspending after a suspend whose stop FAILED part-way repairs the farming", async () => {
+  await reset();
+  const r = await mk("susp2", { botFile: "config_05.json", status: "suspended", botStoppedAt: null });
+  await liveRow(r, "s1");
+  const d = await (await call("POST", "/renters/" + r._id + "/unsuspend")).json();
+  assert.equal(d.success, true);
+  assert.deepEqual(world.started, ["susp2"]);
+  assert.equal(d.farmingRepaired, 1);
+});
+
+test("unsuspend of an EXPIRED renter repairs nothing (its lease is over)", async () => {
+  await reset();
+  const r = await mk("susp3", {
+    botFile: "config_05.json", status: "suspended", botStoppedAt: null, accessEnd: new Date(Date.now() - 1000),
+  });
+  await liveRow(r, "s3");
+  await call("POST", "/renters/" + r._id + "/unsuspend");
+  assert.deepEqual(world.started, []);
+});
+
+test("suspend while the sweep holds the renter answers 409 busy", async () => {
+  await reset();
+  const r = await mk("susp4", { botFile: "config_05.json" });
+  const release = require("../utils/renterAccountBusy").tryAcquire(["renter:" + String(r._id)]);
+  try {
+    const res = await call("POST", "/renters/" + r._id + "/suspend");
+    assert.equal(res.status, 409);
+  } finally {
+    release();
+  }
+  assert.equal((await Renter.findById(r._id).lean()).status, "active");
+});
+
+test("REGRESSION: a direct renter cannot be assigned a stack of rent-farm buyers; an unchanged legacy assignment still saves", async () => {
+  await reset();
+  await RenterBotStack.create({ host: "contabo", file: "config_03.json", capacity: 50 });
+  await RenterBotStack.create({ host: "contabo", file: "config_09.json", capacity: 50 });
+  const holder = await mk("operator-selffarm", { botFile: "config_54.json", maxAccounts: 2000 });
+  await RenterAccount.create({ renter: holder._id, clientSecret: "b1", login: "b1", host: "contabo", configFile: "config_03.json" });
+  // jhonkwiall already shares config_03 with 49 buyers (legacy): its modal must still save.
+  const legacy = await mk("jhonkwiall", { botFile: "config_03.json" });
+  const ok = await call("PUT", "/renters/" + legacy._id, { botHost: "contabo", botFile: "config_03.json", notes: "renewed" });
+  assert.equal(ok.status, 200, JSON.stringify(await ok.json()));
+  // A NEW assignment onto the buyers' stack is refused…
+  const other = await mk("newrenter", { botFile: "config_09.json" });
+  const bad = await call("PUT", "/renters/" + other._id, { botHost: "contabo", botFile: "config_03.json" });
+  assert.equal(bad.status, 400);
+  assert.match((await bad.json()).message, /paid rent-farm buyer/);
+  assert.equal((await Renter.findById(other._id).lean()).botFile, "config_09.json");
 });

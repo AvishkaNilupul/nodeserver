@@ -61,6 +61,11 @@ const renterSchema = new mongoose.Schema(
     // or "renter" (their own Stop button). A lease extension resumes farming
     // only when the lease end was the reason — a stop someone chose stays a stop.
     botStopReason: { type: String, default: "" },
+    // "host/file" configs a FAILED stop pulled this renter's accounts from (or
+    // could not): the next attempt re-checks them even though the accounts are
+    // no longer found there — a bot whose reload failed still has them loaded,
+    // so the stop is not reported done until each has reloaded.
+    stopOwedFiles: { type: [String], default: undefined },
     // Stamped when the "lease expiring soon" heads-up was sent for the CURRENT
     // accessEnd, so the sweep warns once per lease, not once per tick. A lease
     // extension moves accessEnd, which re-arms the warning (see renterExpiry).

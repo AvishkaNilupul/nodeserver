@@ -11,11 +11,14 @@ const Module = require("node:module");
 const mongoose = require("mongoose");
 const { MongoMemoryServer } = require("mongodb-memory-server");
 
-const calls = { stop: [], restartIfRunning: [], removed: [], settled: [], telegram: [], events: [] };
+const calls = { stop: [], restartIfRunning: [], removed: [], settled: [], telegram: [], events: [], pendingSweeps: 0 };
 // The per-account sweep's view of the hosts: file -> Set of secrets in it.
 const hostFiles = { contabo: {} };
 const failSettle = new Set(); // files whose reload throws
 const owed = new Set(); // models PendingReload: files whose reload is still owed
+// renterExpiry destructures these at load, so a test that must interleave a
+// write uses a hook the fakes call, not a swapped function.
+const hooks = { beforeDetach: null, beforeStop: null };
 const fakeOps = {
   locateSecrets: async (host, secrets) => {
     const out = new Map();
@@ -26,12 +29,20 @@ const fakeOps = {
     return out;
   },
   detachFromFile: async (host, file, secrets) => {
+    if (hooks.beforeDetach) await hooks.beforeDetach();
     const set = (hostFiles[host.id] || {})[file];
     if (!set) return { removed: 0, remaining: null, games: new Map(), missing: true };
     let removed = 0;
-    for (const x of secrets) if (set.delete(x)) { removed++; calls.removed.push(host.id + "/" + file + ":" + x); }
+    const games = new Map();
+    for (const x of secrets) {
+      if (set.delete(x)) {
+        removed++;
+        calls.removed.push(host.id + "/" + file + ":" + x);
+        games.set(x, ["Overwatch"]);
+      }
+    }
     if (removed && set.size) owed.add(file);
-    return { removed, remaining: set.size, games: new Map(), missing: false, stopped: set.size === 0 };
+    return { removed, remaining: set.size, games, missing: false, stopped: set.size === 0 };
   },
   settleAfterDetach: async (host, file, det) => {
     if (det.missing) return "missing";
@@ -48,6 +59,7 @@ const fakeOps = {
     return "restarted";
   },
   stopRenterFarming: async (renter, host) => {
+    if (hooks.beforeStop) await hooks.beforeStop();
     calls.stop.push(renter.username);
     return {
       mode: "detached",
@@ -58,6 +70,10 @@ const fakeOps = {
   restartIfRunning: async (host, file) => {
     calls.restartIfRunning.push(host.id + "/" + file);
     return false;
+  },
+  sweepPendingReloads: async () => {
+    calls.pendingSweeps = (calls.pendingSweeps || 0) + 1;
+    return { settled: 0, failed: 0, paged: 0 };
   },
 };
 const realLoad = Module._load;
@@ -103,6 +119,10 @@ test.after(async () => {
 
 async function reset() {
   for (const k of Object.keys(calls)) calls[k] = [];
+  calls.pendingSweeps = 0;
+  hooks.beforeDetach = null;
+  hooks.beforeStop = null;
+  require("../utils/renterAccountBusy")._reset();
   hostFiles.contabo = {};
   failSettle.clear();
   owed.clear();
@@ -192,6 +212,7 @@ test("a lapsed window is pulled, its bot reloaded, and ONE digest names the orde
   const row = await RenterAccount.findOne({ login: "buyer1" }).lean();
   assert.ok(row.farmEndedAt);
   assert.equal(row.configFile, "");
+  assert.deepEqual(row.favouriteGames, ["Overwatch"], "its games are kept for a renewal");
   const msg = calls.telegram.find((m) => /farming window\(s\) ended/.test(m));
   assert.ok(msg, calls.telegram.join("\n"));
   assert.match(msg, /buyer1 — eldorado order e328ee9d \(JumpyPage-etjK\) — Overwatch 30d/);
@@ -302,4 +323,101 @@ test("describeStop says which bot was emptied and stopped", () => {
     { id: "local", label: "Local" },
   );
   assert.equal(s, "1 account(s) pulled off config_22.json on Local. Now empty and stopped: config_22.json.");
+});
+
+// ---- round 3 (second review) ------------------------------------------------
+
+test("REGRESSION: a failed reload of a file found only by SCANNING is not forgotten on the next tick", async () => {
+  await reset();
+  const holder = await mk("operator-selffarm", { botFile: "config_54.json" });
+  // The ledger says config_02; the account really sits in config_03 too.
+  await lapsed(holder, "twice", { configFile: "config_02.json" });
+  hostFiles.contabo["config_02.json"] = new Set(["cs-x"]);
+  hostFiles.contabo["config_03.json"] = new Set(["cs-twice", "cs-y"]);
+  failSettle.add("config_03.json");
+
+  await renterExpiry.sweepOnce(); // pulled from config_03, its reload failed
+  let row = await RenterAccount.findOne({ login: "twice" }).lean();
+  assert.equal(row.farmEndedAt, null);
+  assert.deepEqual(row.expiryOwedFiles, ["config_03.json"]);
+
+  // Tick 2: the account is no longer FOUND in config_03 — but config_03's bot
+  // still has it loaded. Before, this tick stamped it ended ("pulled off").
+  await renterExpiry.sweepOnce();
+  row = await RenterAccount.findOne({ login: "twice" }).lean();
+  assert.equal(row.farmEndedAt, null, "not ended while config_03 still owes its reload");
+  assert.ok(!calls.telegram.some((m) => /window\(s\) ended/.test(m)));
+
+  failSettle.clear();
+  await renterExpiry.sweepOnce();
+  row = await RenterAccount.findOne({ login: "twice" }).lean();
+  assert.ok(row.farmEndedAt, "ended once the owed reload happened");
+  assert.equal(row.expiryOwedFiles, undefined);
+  assert.ok(calls.settled.includes("contabo/config_03.json (owed) removed=0"), calls.settled.join(" | "));
+});
+
+test("a row another operation has marked busy is left to the next tick", async () => {
+  await reset();
+  const holder = await mk("operator-selffarm", { botFile: "config_54.json" });
+  const a = await lapsed(holder, "busy1");
+  hostFiles.contabo["config_02.json"] = new Set(["cs-busy1", "cs-z"]);
+  const release = require("../utils/renterAccountBusy").tryAcquire([a._id]);
+  try {
+    const out = await renterExpiry.sweepAccounts(new Date());
+    assert.equal(out.busy, 1);
+    assert.deepEqual(calls.removed, [], "not pulled while busy");
+  } finally {
+    release();
+  }
+  await renterExpiry.sweepAccounts(new Date());
+  assert.deepEqual(calls.removed, ["contabo/config_02.json:cs-busy1"]);
+});
+
+test("REGRESSION: a window re-armed WHILE it is being pulled is never stamped ended over the extension", async () => {
+  await reset();
+  const holder = await mk("operator-selffarm", { botFile: "config_54.json" });
+  const a = await lapsed(holder, "raced");
+  hostFiles.contabo["config_02.json"] = new Set(["cs-raced", "cs-z"]);
+  hooks.beforeDetach = async () => {
+    // A writer that does not take the busy mark re-arms it mid-pull.
+    await RenterAccount.updateOne({ _id: a._id }, { $set: { farmUntil: new Date(Date.now() + 30 * 86400000) } });
+  };
+  await renterExpiry.sweepOnce();
+  const row = await RenterAccount.findById(a._id).lean();
+  assert.equal(row.farmEndedAt, null, "the extension stands");
+  assert.equal(row.configFile, "", "and the row says it is on no bot, so Farm days re-places it");
+  assert.ok(calls.telegram.some((m) => /changed WHILE their lapsed term was being pulled/.test(m)));
+});
+
+test("every tick retries the reloads still owed", async () => {
+  await reset();
+  await renterExpiry.sweepOnce();
+  await renterExpiry.sweepOnce();
+  assert.equal(calls.pendingSweeps, 2);
+});
+
+test("a renter an operator action has marked busy is not stopped this tick", async () => {
+  await reset();
+  const r = await mk("wasd", { botFile: "config_03.json", accessEnd: new Date(Date.now() - 60000) });
+  const release = require("../utils/renterAccountBusy").tryAcquire(["renter:" + String(r._id)]);
+  try {
+    await renterExpiry.sweepOnce();
+    assert.deepEqual(calls.stop, []);
+  } finally {
+    release();
+  }
+  await renterExpiry.sweepOnce();
+  assert.deepEqual(calls.stop, ["wasd"]);
+});
+
+test("REGRESSION: a lease renewed WHILE its lease-end stop runs is not stamped stopped", async () => {
+  await reset();
+  const r = await mk("renewme", { botFile: "config_03.json", accessEnd: new Date(Date.now() - 60000) });
+  hooks.beforeStop = async () => {
+    await Renter.updateOne({ _id: r._id }, { $set: { accessEnd: new Date(Date.now() + 30 * 86400000) } });
+  };
+  await renterExpiry.sweepOnce();
+  const after = await Renter.findById(r._id).lean();
+  assert.equal(after.botStoppedAt, null, "the renewal stands");
+  assert.ok(calls.telegram.some((m) => /renewed or unsuspended WHILE its lease ended stop ran/.test(m)));
 });

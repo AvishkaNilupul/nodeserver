@@ -40,6 +40,7 @@ function load({ bots = STACKS, offlineHosts = [] } = {}) {
         rentalStackOptions: async () => ({ bots, offlineHosts }),
         chooseStackWithRoom: (list, needed) =>
           (list || [])
+            .filter((b) => !(b.directAssigned || []).length) // the real picker's separation rule
             .filter((b) => Number(b.remaining) >= Math.max(1, Number(needed) || 1))
             // Prefer remote hosts, then the fullest stack — the real ordering.
             .sort((a, b) => {
@@ -50,6 +51,8 @@ function load({ bots = STACKS, offlineHosts = [] } = {}) {
             })[0] || null,
         gatherPoolEligibility: async () => ({ candidates: [], eligible: [] }),
         availableRentalStack: async () => null,
+        // The real separation rule: a direct renter's own bot never takes buyers.
+        usableForHolder: (b) => !(b.directAssigned || []).length,
       };
     }
     if (fromOperatorFarm && request === "./systemLog") {
@@ -175,5 +178,23 @@ test("a holder whose stack cannot be read still finds one that can", async () =>
     const out = await mod.ensureStackWithRoom(renter, 1, "test");
     assert.strictEqual(out.moved, true);
     assert.ok(Number(out.stack.remaining) >= 1);
+  } finally { restore(); }
+});
+
+test("REGRESSION: the holder leaves its stack once a direct renter has been given it, room or not", async () => {
+  // 2026-09-30 review: the holder stayed on a stack with room even after a
+  // direct renter was assigned to it, so the next sale landed a paid buyer in
+  // that renter's own bot — the mix whose lease end reached 49 buyers.
+  const { mod, restore } = load({
+    bots: [
+      { host: "pi", file: "config_30.json", capacity: 10, accounts: 3, remaining: 7, directAssigned: ["jhonkwiall"] },
+      { host: "pi", file: "config_35.json", capacity: 10, accounts: 2, remaining: 8 },
+    ],
+  });
+  try {
+    const renter = fakeRenter("pi", "config_30.json");
+    const out = await mod.ensureStackWithRoom(renter, 1, "test");
+    assert.strictEqual(out.moved, true);
+    assert.strictEqual(renter.botFile, "config_35.json");
   } finally { restore(); }
 });

@@ -222,7 +222,13 @@
     if (suspend && !confirm("Suspend this renter? Their access is blocked and their farming stops (a shared bot keeps running for the other renters).")) return;
     try {
       const d = await api("/renters/" + id + "/" + (suspend ? "suspend" : "unsuspend"), { method: "POST" });
-      toast(suspend ? ("Suspended" + (d.botStopped ? " · bot stopped" : "")) : "Unsuspended");
+      toast(
+        suspend
+          ? "Suspended" + (d.botStopped ? " · bot stopped" : " · its bot could NOT be stopped yet — retried every 5 min")
+          : "Unsuspended" +
+            (d.farmingRepaired > 0 ? " · " + d.farmingRepaired + " account(s) a failed suspend had pulled were put back" : "") +
+            (d.farmingRepaired === false ? " · some accounts may be off the bot — press Start" : ""),
+      );
       await RT.reloadMany(["renters", "bots"]);
       // Only refresh the modal when it is showing THIS renter: suspend is also
       // fired from the list rows, where no modal is open.
@@ -774,7 +780,9 @@
       toast(
         (d.gamesApplied ? "Saved — games armed on their accounts" : "Saved") +
         (d.farmingResumed === true ? " · lease renewed, farming resumed" : "") +
-        (d.farmingResumed === false ? " · lease renewed, but farming could NOT be resumed — press Start" : ""),
+        (d.farmingResumed === "partial" ? " · lease renewed, farming PARTLY resumed" : "") +
+        (d.farmingResumed === false ? " · lease renewed, but farming could NOT be resumed — press Start" : "") +
+        (d.farmingNote ? " — " + d.farmingNote : ""),
       );
       await RT.reloadMany(["renters"]);
       open(id);

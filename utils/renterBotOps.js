@@ -221,29 +221,56 @@ async function containerRunning(host, container) {
   return !!(st && /^running/i.test(String(st.state || "")));
 }
 
-// Restart a config's container ONLY if it is running. `docker restart` on a
-// stopped container STARTS it — which is how a stopped, expired renter came
-// back to life whenever something else on its stack was restarted.
+// Restart a config's container ONLY if it is running AND its config still has
+// accounts. `docker restart` on a stopped container STARTS it — which is how a
+// stopped, expired renter came back to life whenever something else on its
+// stack was restarted. Decided under the file lock, re-reading the file, so a
+// concurrent stop that just emptied it cannot be undone by a restart; an EMPTY
+// file whose container runs is stopped for good instead (restart policy "no":
+// an accountless bot spins in a login-retry loop).
 // Returns true when restarted, false when it was not running. Throws when the
 // host cannot say whether it is running, or when restarts are disabled on this
 // server (a reload that never happened must not be reported as done).
 async function restartIfRunning(host, file) {
   const container = cfg().containerForFile(file);
   if (!container) return false;
-  const running = await containerRunning(host, container);
-  if (running === null) {
-    const e = new Error("Could not read container state on " + host.id);
-    e.unreachable = true;
-    throw e;
-  }
-  if (!running) return false;
-  const r = await cfg().restartConfigContainer(host, file);
-  if (r && r.restarted === false) {
-    const e = new Error("Container restarts are disabled on this server — " + file + " was not reloaded");
-    e.code = "disabled";
-    throw e;
-  }
-  return true;
+  return withFileLock(host, file, async () => {
+    let users = null;
+    try {
+      users = configUsers(JSON.parse(await hosts.readFile(host, file))).length;
+    } catch (e) {
+      if (!(e && e.code === "ENOENT")) throw e;
+      return false; // no file, nothing to reload
+    }
+    const running = await containerRunning(host, container);
+    if (running === null) {
+      const e = new Error("Could not read container state on " + host.id);
+      e.unreachable = true;
+      throw e;
+    }
+    if (!running) return false;
+    if (users === 0) {
+      // Stopped for good. Either step failing is thrown, so the caller keeps
+      // the reload owed: a failed policy clear is recorded as such (the
+      // sweeper re-applies it even once the bot is stopped — a reboot would
+      // otherwise start this accountless bot).
+      let policyErr = null;
+      await hosts.setRestartPolicy(host, container, "no").catch((e) => {
+        policyErr = e;
+      });
+      if (policyErr) await markReloadOwed(host, file, "restart-policy");
+      await hosts.dockerContainer(host, "stop", container);
+      if (policyErr) throw policyErr;
+      return false;
+    }
+    const r = await cfg().restartConfigContainer(host, file);
+    if (r && r.restarted === false) {
+      const e = new Error("Container restarts are disabled on this server — " + file + " was not reloaded");
+      e.code = "disabled";
+      throw e;
+    }
+    return true;
+  });
 }
 
 // ---- owed reloads (models/PendingReload) ----------------------------------
@@ -269,35 +296,187 @@ async function isReloadOwed(host, file) {
   return !!row;
 }
 
+// Retry every owed reload, whoever recorded it (a stop, a lapsed window, a
+// start that failed after writing) — not only when something happens to touch
+// the same file again. Each is settled like any other: reloaded if running,
+// a file left empty stopped with restart policy "no". A reload that stays owed
+// past PAGE_AFTER_MS pages once, then at most every REPAGE_MS. Run from the
+// renter expiry tick (every 5 min); entries younger than `minAgeMs` are left
+// to the operation that is still settling them.
+const OWED_PAGE_AFTER_MS = 30 * 60 * 1000;
+const OWED_REPAGE_MS = 6 * 60 * 60 * 1000;
+async function sweepPendingReloads({ minAgeMs = 2 * 60 * 1000, notify = true } = {}) {
+  const now = Date.now();
+  const rows = await pendingReload()
+    .find({ since: { $lte: new Date(now - minAgeMs) } })
+    .sort({ since: 1 })
+    .limit(50)
+    .lean();
+  const out = { settled: 0, failed: 0, paged: 0 };
+  for (const row of rows) {
+    const host = hosts.resolveHost(row.host);
+    let err = "";
+    if (!host) {
+      err = "unknown host '" + row.host + "'";
+    } else {
+      try {
+        // restartIfRunning also stops a running bot whose file is empty, so a
+        // failed restart-policy clear ("restart-policy") is settled the same way.
+        const container = cfg().containerForFile(row.file);
+        if (/restart-policy/.test(row.reason || "") && container) {
+          await hosts.setRestartPolicy(host, container, "no");
+        }
+        await restartIfRunning(host, row.file);
+        await clearReloadOwed(host, row.file);
+        out.settled++;
+        continue;
+      } catch (e) {
+        err = String((e && e.message) || e).slice(0, 200);
+      }
+    }
+    out.failed++;
+    const pageDue =
+      now - new Date(row.since).getTime() >= OWED_PAGE_AFTER_MS &&
+      (!row.alertedAt || now - new Date(row.alertedAt).getTime() >= OWED_REPAGE_MS);
+    await pendingReload()
+      .updateOne(
+        { _id: row._id },
+        { $inc: { attempts: 1 }, $set: { lastError: err, ...(pageDue && notify ? { alertedAt: new Date() } : {}) } },
+      )
+      .catch(() => {});
+    if (pageDue && notify) {
+      out.paged++;
+      await require("./telegram")
+        .sendTelegram(
+          "🚨 Bot " + row.host + "/" + row.file + " still has to reload (" + (row.reason || "accounts removed") +
+            ") and cannot: " + err + ". Until it does, accounts taken out of its config keep " +
+            "farming (bots read their config only at startup). Retrying every 5 min.",
+        )
+        .catch(() => {});
+    }
+  }
+  return out;
+}
+
+// The config files on `host` that must be readable for a stop / locate to be
+// trusted: every registered rental stack there. Any other operator config
+// that cannot be read is skipped with a warning (one corrupt operator config
+// must not block every renter on the host).
+async function stackFilesOn(hostId) {
+  try {
+    const rows = await require("../models/RenterBotStack")
+      .find({ host: hostId, enabled: true }, { file: 1 })
+      .lean();
+    return rows.map((r) => r.file);
+  } catch {
+    return [];
+  }
+}
+
+// Slots in `file` held for accounts that belong there but are not in it right
+// now: an ACTIVE direct renter's enabled, live rows recorded in the file whose
+// token is not physically present (the renter pressed Stop, or a stop is
+// half-done). Another renter's add, or a sale, must not fill them — that
+// renter's next Start would fail "stack full". The rent-farm holder's rows
+// reserve nothing (a buyer not in its file has lapsed or moved), nor do a
+// blocked (suspended / expired) renter's, nor lapsed windows. `except` is the
+// renter whose own accounts are being put back (its reservation is what it is
+// using). The same rule as the stack pickers (renterAdminRoutes
+// rentalStackOptions). Fail-open: a failed read reserves nothing.
+async function reservedSlots(hostId, file, presentSecrets, { except = null } = {}) {
+  try {
+    const hid = hostIdOf(hostId);
+    const rows = await RenterAccount.find(
+      {
+        enabled: true,
+        farmEndedAt: null,
+        configFile: file,
+        host: hid === "local" ? { $in: ["local", "", null] } : hid,
+      },
+      { renter: 1, clientSecret: 1, farmUntil: 1 },
+    ).lean();
+    const now = Date.now();
+    const present = presentSecrets instanceof Set ? presentSecrets : new Set(presentSecrets || []);
+    const candidates = rows.filter(
+      (r) =>
+        r.clientSecret &&
+        !present.has(r.clientSecret) &&
+        String(r.renter) !== String(except || "") &&
+        !(r.farmUntil && new Date(r.farmUntil).getTime() <= now),
+    );
+    if (!candidates.length) return 0;
+    const owners = await Renter.find(
+      { _id: { $in: [...new Set(candidates.map((r) => String(r.renter)))] } },
+      { username: 1, usernameLower: 1, status: 1, accessEnd: 1 },
+    ).lean();
+    const reserving = new Set(
+      owners.filter((o) => !isOperatorHolder(o) && !isBlocked(o)).map((o) => String(o._id)),
+    );
+    return candidates.filter((r) => reserving.has(String(r.renter))).length;
+  } catch (e) {
+    console.error("[renterBotOps] reserved slots of " + file + " (counting none):", e.message);
+    return 0;
+  }
+}
+
 // Where each of `secrets` really is on `host`: Map<file, Set<secret>>, from ONE
 // batched read of every config there. Pointers go stale (a stack moved, a
 // consolidation, an old manual copy), so a stop looks where the accounts
-// really are, not only where the ledger says. A config that cannot be read or
-// parsed FAILS the call (a secret in it could survive a "successful" stop);
-// only a file that is simply gone is skipped.
-async function locateSecrets(host, secrets) {
+// really are, not only where the ledger says.
+//   - a registered rental stack, or a file in `mustRead`, that cannot be read
+//     or parsed is a PROBLEM (a secret in it could survive a "successful"
+//     stop). The remote batch reports any unreadable file as "Not found", so
+//     for a file readdir just listed that counts as unreadable too;
+//   - any other unreadable config (an operator's own bot) is skipped with a
+//     warning: one corrupt operator file must not block every renter's stop
+//     on the host;
+//   - a secret found in a config this server cannot edit (a name validFile
+//     rejects, e.g. config_03-backup.json) is logged and left alone: no bot
+//     reads such a file (containers map only config_NN.json / config.json),
+//     so it is not farming from there.
+// Problems THROW, unless the caller passes a `problems` array to collect them
+// in — a stop does, so it can pull what it can reach first and fail after.
+async function locateSecrets(host, secrets, { mustRead = [], problems = null } = {}) {
   const out = new Map();
   if (!secrets.length) return out;
   const want = new Set(secrets);
+  const must = new Set([...(await stackFilesOn(host.id)), ...mustRead]);
   const files = (await hosts.readdir(host, { retries: 1 })).filter((f) =>
     CONFIG_RE.test(f),
   );
   if (!files.length) return out;
   const read = await hosts.readFiles(host, files);
+  const problem = (msg) => {
+    if (!problems) throw new Error(msg);
+    problems.push(msg);
+  };
   for (const f of files) {
     const r = read[f];
-    if (!r || !r.ok) {
-      if (r && /not found/i.test(String(r.error || ""))) continue;
-      throw new Error("Could not read " + host.id + "/" + f + ": " + ((r && r.error) || "no answer"));
+    let data = null;
+    if (r && r.ok) {
+      try {
+        data = JSON.parse(r.text);
+      } catch {
+        data = null;
+      }
     }
-    let data;
-    try {
-      data = JSON.parse(r.text);
-    } catch {
-      throw new Error("Unparseable config " + host.id + "/" + f);
+    if (!data) {
+      if (must.has(f)) {
+        problem("Could not read " + host.id + "/" + f + ": " + ((r && r.error) || "unparseable"));
+      } else {
+        console.warn("[renterBotOps] skipped unreadable config " + host.id + "/" + f);
+      }
+      continue;
     }
     for (const u of configUsers(data)) {
       if (u && typeof u === "object" && want.has(u.ClientSecret)) {
+        if (!cfg().validFile(f)) {
+          console.warn(
+            "[renterBotOps] an account sits in " + host.id + "/" + f +
+              " (not a bot's config — nothing reads it); left alone",
+          );
+          continue;
+        }
         if (!out.has(f)) out.set(f, new Set());
         out.get(f).add(u.ClientSecret);
       }
@@ -307,8 +486,8 @@ async function locateSecrets(host, secrets) {
 }
 
 // Every config file on `host` that holds any of `secrets` (see locateSecrets).
-async function filesHoldingSecrets(host, secrets) {
-  return [...(await locateSecrets(host, secrets)).keys()];
+async function filesHoldingSecrets(host, secrets, opts) {
+  return [...(await locateSecrets(host, secrets, opts)).keys()];
 }
 
 // Pull `secrets` out of ONE file, under its lock, and settle the container in
@@ -317,8 +496,9 @@ async function filesHoldingSecrets(host, secrets) {
 // "empty" inside the lock is what stops a sale that lands a buyer in the gap
 // from being killed by a stop decided on stale data. A file that still holds
 // accounts is marked "reload owed" when anything was removed (settle below
-// does the reload, outside the lock). Remembers each removed account's own
-// games so a later start can put them back exactly.
+// does the reload, outside the lock; the owed-reload sweeper retries it).
+// Remembers each removed account's own games so a later start can put them
+// back exactly.
 // Returns { removed, remaining, games: Map<secret,string[]>, missing, stopped }.
 async function detachFromFile(host, file, secrets) {
   return withFileLock(host, file, async () => {
@@ -350,9 +530,14 @@ async function detachFromFile(host, file, secrets) {
     if (remaining === 0) {
       const container = cfg().containerForFile(file);
       if (container) {
-        await hosts.setRestartPolicy(host, container, "no").catch((e) =>
-          console.error("[renterBotOps] could not clear restart policy of " + container + ":", e.message),
-        );
+        try {
+          await hosts.setRestartPolicy(host, container, "no");
+        } catch (e) {
+          // A reboot would start this accountless bot (login-retry loop): the
+          // owed-reload sweeper retries the policy until it sticks.
+          console.error("[renterBotOps] could not clear restart policy of " + container + ":", e.message);
+          await markReloadOwed(host, file, "restart-policy");
+        }
         try {
           await hosts.dockerContainer(host, "stop", container);
         } catch (e) {
@@ -371,11 +556,12 @@ async function detachFromFile(host, file, secrets) {
 // removed from it, or a reload failed earlier (PendingReload) — and only if it
 // is running (a stopped bot reads the new config whenever it next starts).
 // Nothing removed and nothing owed = nothing restarted. A reload that fails
-// stays owed and the error propagates (the caller retries).
+// stays owed and the error propagates (the caller retries; so does the
+// owed-reload sweeper).
 async function settleAfterDetach(host, file, det) {
   if (det.missing) return "missing";
   if (det.stopped) {
-    await clearReloadOwed(host, file);
+    if (!(await isReloadOwedFor(host, file, "restart-policy"))) await clearReloadOwed(host, file);
     return "stopped";
   }
   const owed = det.removed > 0 || (await isReloadOwed(host, file));
@@ -384,16 +570,21 @@ async function settleAfterDetach(host, file, det) {
   await clearReloadOwed(host, file);
   return restarted ? "restarted" : "left-stopped";
 }
+async function isReloadOwedFor(host, file, reason) {
+  const row = await pendingReload().findOne({ host: host.id, file }, { reason: 1 }).lean().catch(() => null);
+  return !!(row && new RegExp(reason).test(row.reason || ""));
+}
 
 // Stop ONE renter's farming: pull THEIR accounts out of every config they are
 // in on the hosts involved (their own bot's host plus every host their ledger
 // rows name) — found by one batched read per host, so a stale pointer cannot
 // hide one — then settle each file (see settleAfterDetach). Never stops a
-// container that still holds anyone else; never starts one.
-// Throws (the caller retries) when a host cannot be read or a ledger row names
-// an unknown host: a stop that cannot be verified is not reported as done.
-// Returns { mode: "stopped" | "detached", removed, files: [...] } — "stopped"
-// when at least one file ended up empty and its container was stopped.
+// container that still holds anyone else; never starts one. Each pulled
+// account's own games are saved as soon as its file is done.
+// Whatever can be done IS done; then it throws (the caller retries) if any of
+// it could not be verified (an unreadable stack, a ledger row on an unknown
+// host): a stop that cannot be verified is not reported as done.
+// Returns { mode: "stopped" | "detached", removed, files: [...] }.
 async function stopRenterFarming(renter, host) {
   const rows = await RenterAccount.find(
     { renter: renter._id, enabled: true },
@@ -405,33 +596,75 @@ async function stopRenterFarming(renter, host) {
     const hid = hostIdOf(r.host);
     if (r.configFile && !hostIds.includes(hid)) hostIds.push(hid);
   }
-  const unknown = hostIds.filter((hid) => hid !== host.id && !hosts.resolveHost(hid));
-  if (unknown.length) {
-    throw new Error(
-      "Renter " + renter.username + " has accounts on unknown bot host(s) " + unknown.join(", ") +
-        " — cannot verify they were pulled",
-    );
+  // Files an earlier, failed attempt pulled from: re-checked (their reload may
+  // still be owed) although the accounts are no longer found there.
+  const owedEarlier = new Map(); // hostId -> Set(file)
+  const fresh = await Renter.findById(renter._id, { stopOwedFiles: 1 }).lean().catch(() => null);
+  const earlierList = (fresh && fresh.stopOwedFiles) || renter.stopOwedFiles || [];
+  for (const k of earlierList) {
+    const i = String(k).indexOf("/");
+    if (i <= 0) continue;
+    const hid = k.slice(0, i);
+    if (!owedEarlier.has(hid)) owedEarlier.set(hid, new Set());
+    owedEarlier.get(hid).add(k.slice(i + 1));
+    if (!hostIds.includes(hid)) hostIds.push(hid);
   }
   const files = [];
+  const problems = []; // what could not be located (strings)
+  const errors = []; // what failed while pulling / reloading (Errors)
   let removedTotal = 0;
   let stoppedAny = false;
-  const savedGames = new Map();
   for (const hid of hostIds) {
     const h = hid === host.id ? host : hosts.resolveHost(hid);
-    const located = await locateSecrets(h, secrets);
+    if (!h) {
+      problems.push("accounts on unknown bot host '" + hid + "'");
+      files.push({ host: hid, file: null, error: "unknown host" });
+      for (const f of owedEarlier.get(hid) || []) files.push({ host: hid, file: f, error: "unknown host" });
+      continue;
+    }
+    const recorded = rows
+      .filter((r) => r.configFile && hostIdOf(r.host) === h.id)
+      .map((r) => r.configFile);
+    let located;
+    try {
+      // Unreadable files are collected, not thrown: every file that CAN be
+      // read is still pulled below, and the stop fails afterwards.
+      located = await locateSecrets(h, secrets, { mustRead: recorded, problems });
+    } catch (e) {
+      // readdir / the batched read itself failed: nothing on this host is known.
+      problems.push(h.id + ": " + String((e && e.message) || e));
+      for (const f of owedEarlier.get(h.id) || []) files.push({ host: h.id, file: f, error: "host not read" });
+      continue;
+    }
     const targets = new Set(located.keys());
     if (h.id === host.id && renter.botFile) targets.add(renter.botFile);
-    for (const r of rows) if (r.configFile && hostIdOf(r.host) === h.id) targets.add(r.configFile);
+    for (const f of recorded) targets.add(f);
+    for (const f of owedEarlier.get(h.id) || []) targets.add(f);
     for (const file of targets) {
       if (!cfg().validFile(file)) continue;
-      const det = await detachFromFile(h, file, secrets);
+      // One file failing (unreadable, SSH drop, a reload that cannot happen)
+      // must not leave the renter's accounts in the files after it.
+      let det;
+      try {
+        det = await detachFromFile(h, file, secrets);
+      } catch (e) {
+        errors.push(e);
+        files.push({ host: h.id, file, error: String((e && e.message) || e).slice(0, 200) });
+        continue;
+      }
       if (det.missing) {
         files.push({ host: h.id, file, missing: true });
         continue;
       }
-      for (const [sec, g] of det.games) savedGames.set(sec, g);
+      await saveGames(renter, det.games);
       removedTotal += det.removed;
-      const action = await settleAfterDetach(h, file, det);
+      let action;
+      try {
+        action = await settleAfterDetach(h, file, det);
+      } catch (e) {
+        errors.push(e); // the reload stays owed (PendingReload) and is retried
+        action = "reload-owed";
+      }
       if (action === "stopped") stoppedAny = true;
       files.push({
         host: h.id,
@@ -442,33 +675,59 @@ async function stopRenterFarming(renter, host) {
       });
     }
   }
-  // Keep each pulled account's own games for the next start — and FORGET a
-  // saved list when the account had none, so an older one cannot come back.
-  // Best effort: the stop itself has happened and must not be reported failed.
-  if (savedGames.size) {
-    const ops = [...savedGames.entries()].map(([secret, g]) => ({
-      updateOne: {
-        filter: { renter: renter._id, clientSecret: secret },
-        update: g.length ? { $set: { favouriteGames: g } } : { $unset: { favouriteGames: "" } },
-      },
-    }));
-    await RenterAccount.bulkWrite(ops, { ordered: false }).catch((e) =>
-      console.error("[renterBotOps] save games on stop:", e.message),
+  const owedNow = files.filter((f) => f.file && (f.error || f.action === "reload-owed")).map((f) => f.host + "/" + f.file);
+  if (owedNow.length) {
+    await Renter.updateOne({ _id: renter._id }, { $set: { stopOwedFiles: owedNow } }).catch(() => {});
+  } else if (earlierList.length) {
+    await Renter.updateOne({ _id: renter._id }, { $unset: { stopOwedFiles: "" } }).catch(() => {});
+  }
+  if (problems.length || errors.length) {
+    const msgs = [...problems, ...errors.map((x) => String((x && x.message) || x))];
+    const e = new Error(
+      "Renter " + renter.username + ": " + msgs.join("; ") + " — cannot verify every account was pulled",
     );
+    // Keep a failure's code (e.g. "disabled": container restarts are off here)
+    // for the callers that word their answer by it.
+    const coded = errors.find((x) => x && x.code);
+    if (coded) e.code = coded.code;
+    if (errors.some((x) => x && x.unreachable)) e.unreachable = true;
+    e.partial = { removed: removedTotal, files };
+    throw e;
   }
   return { mode: stoppedAny ? "stopped" : "detached", removed: removedTotal, files };
 }
 
-// Start ONE renter's farming: put back each of THEIR enabled accounts that is
-// on no config of the host, into the file its ledger row names (or the
-// renter's own bot when it names none, or names a file that no longer exists),
-// as many as each stack's capacity allows, then make sure the renter's bot is
-// running (and reload any other file that got accounts back).
+// Keep each pulled account's own games for the next start — and FORGET a
+// saved list when the account had none, so an older one cannot come back.
+// Best effort: the stop itself has happened and must not be reported failed.
+async function saveGames(renter, games) {
+  if (!games || !games.size) return;
+  const ops = [...games.entries()].map(([secret, g]) => ({
+    updateOne: {
+      filter: { renter: renter._id, clientSecret: secret },
+      update: g.length ? { $set: { favouriteGames: g } } : { $unset: { favouriteGames: "" } },
+    },
+  }));
+  await RenterAccount.bulkWrite(ops, { ordered: false }).catch((e) =>
+    console.error("[renterBotOps] save games on stop:", e.message),
+  );
+}
+
+// Start ONE renter's farming: put back each of THEIR enabled, live accounts
+// that is on no config of the host, into the file its ledger row names (or
+// the renter's own bot when it names none, or names a file that no longer
+// exists), as many as each stack's capacity allows, then make sure the
+// renter's bot is running (and reload any other file that got accounts back).
 //   - an account already in some config on the host is NOT re-added (it would
 //     farm in two bots); its ledger row is pointed at where it really is;
+//   - a window that already lapsed is never put back (that is renewal's job);
 //   - only rows actually put back are re-pointed;
 //   - capacity is per file and partial: what does not fit is reported, and the
-//     call only fails when NOTHING could be put back.
+//     call only fails when NOTHING could be put back;
+//   - every file written is recorded as owing a reload BEFORE any container
+//     call, and the renter's stop stamp is cleared as soon as accounts are
+//     back in a config — so a container call that fails afterwards is retried
+//     by the owed-reload sweeper, and the lease-end sweep still covers them.
 // Returns { added, skipped, running: true }.
 async function startRenterFarming(renter, host) {
   const home = renter.botFile;
@@ -476,10 +735,12 @@ async function startRenterFarming(renter, host) {
   // a start on its behalf (a manual add onto its stack) only ever touches its
   // CURRENT stack's own rows — it never re-homes or restores the rest.
   const holder = isOperatorHolder(renter);
+  const now = Date.now();
   const rows = (
-    await RenterAccount.find({ renter: renter._id, enabled: true }).lean()
+    await RenterAccount.find({ renter: renter._id, enabled: true, farmEndedAt: null }).lean()
   ).filter((a) =>
     a.clientSecret &&
+    !(a.farmUntil && new Date(a.farmUntil).getTime() <= now) &&
     (holder
       ? a.configFile === home && hostIdOf(a.host) === host.id
       : !a.configFile || hostIdOf(a.host) === host.id),
@@ -487,9 +748,11 @@ async function startRenterFarming(renter, host) {
   let added = 0;
   const skipped = [];
   const touched = new Set();
+  const placedIn = new Map(); // secret -> file it already farms in (not re-added)
   if (rows.length) {
-    const located = await locateSecrets(host, rows.map((a) => a.clientSecret));
-    const where = new Map();
+    const recorded = rows.map((a) => a.configFile).filter(Boolean);
+    const located = await locateSecrets(host, rows.map((a) => a.clientSecret), { mustRead: recorded });
+    const where = placedIn;
     for (const [f, set] of located) for (const sec of set) if (!where.has(sec)) where.set(sec, f);
     // Already placed somewhere: fix the pointer if it is stale, add nothing.
     for (const a of rows) {
@@ -521,9 +784,19 @@ async function startRenterFarming(renter, host) {
         );
         let fresh = accts.filter((a) => !present.has(a.clientSecret));
         if (stack) {
-          const room = Math.max(0, Number(stack.capacity) - users.length);
+          // Other renters' reserved slots count as used: filling them would
+          // make THEIR next Start fail.
+          const reserved = await reservedSlots(host.id, file, present, { except: renter._id });
+          const used = users.length + reserved;
+          const room = Math.max(0, Number(stack.capacity) - used);
           for (const a of fresh.slice(room)) {
-            skipped.push({ login: a.login || "", file, reason: "stack " + file + " is full (" + users.length + "/" + stack.capacity + ")" });
+            skipped.push({
+              login: a.login || "",
+              file,
+              reason:
+                "stack " + file + " is full (" + users.length + "/" + stack.capacity +
+                (reserved ? ", " + reserved + " held for a stopped renter" : "") + ")",
+            });
           }
           fresh = fresh.slice(0, room);
         }
@@ -546,6 +819,7 @@ async function startRenterFarming(renter, host) {
           }),
         );
         await hosts.writeFileAtomic(host, file, JSON.stringify(data, null, 2));
+        await markReloadOwed(host, file, "accounts added");
         return fresh;
       });
       if (put.length) {
@@ -558,6 +832,11 @@ async function startRenterFarming(renter, host) {
         ).catch(() => {});
       }
     }
+    if (added) {
+      // Farming again the moment the accounts are in a config: the lease-end
+      // sweep must see this renter, whatever the container calls below do.
+      await Renter.updateOne({ _id: renter._id }, { $set: { botStoppedAt: null, botStopReason: "" } }).catch(() => {});
+    }
     if (missing.length && !added) {
       const e = new Error(
         skipped.length
@@ -568,62 +847,130 @@ async function startRenterFarming(renter, host) {
       throw e;
     }
   }
-  // The renter's own bot must be running; any OTHER file that got accounts
-  // back is reloaded if running (it keeps whatever state it was in otherwise).
-  let wasRunning = false;
+  // Any OTHER file that got accounts back is reloaded if running (it keeps
+  // whatever state it was in otherwise — a shared bot someone stopped is not
+  // ours to start). Done FIRST, so a failure to start the renter's own bot
+  // below cannot leave them unreloaded; one that fails here stays owed and
+  // the owed-reload sweeper retries it.
+  for (const f of touched) {
+    if (f === home) continue;
+    try {
+      await restartIfRunning(host, f);
+      await clearReloadOwed(host, f);
+    } catch (e) {
+      console.error("[renterBotOps] reload " + f + " after start (stays owed):", e.message);
+    }
+  }
+  // The renter's own bot must be running — unless it holds no accounts at all
+  // while theirs farm in other files (moved there): an empty bot only spins in
+  // a login-retry loop, and "no accounts" would fail a start that did its job.
+  let homeCount = null;
+  try {
+    homeCount = configUsers(JSON.parse(await hosts.readFile(host, home))).length;
+  } catch {
+    homeCount = null; // let startConfigContainer report it
+  }
+  const elsewhere =
+    [...touched].some((f) => f !== home) || [...placedIn.values()].some((f) => f !== home);
+  if (homeCount === 0 && elsewhere) {
+    return { added, skipped, running: true, homeEmpty: true };
+  }
+  let homeState = "unknown";
   try {
     const states = await hosts.dockerPs(host);
     const st = states[cfg().containerForFile(home)];
-    wasRunning = !!(st && /^running/i.test(st.state || ""));
+    homeState = st && /^running/i.test(st.state || "") ? "running" : "stopped";
   } catch {
-    wasRunning = false;
+    homeState = "unknown";
   }
   await cfg().startConfigContainer(host, home);
-  if (touched.has(home) && wasRunning) {
-    await cfg().restartConfigContainer(host, home).catch(() => {});
-  }
-  for (const f of touched) {
-    if (f === home) continue;
-    await restartIfRunning(host, f).catch((e) =>
-      console.error("[renterBotOps] reload " + f + " after start:", e.message),
-    );
+  if (touched.has(home)) {
+    // A bot that was stopped just started on the new config. One that was
+    // already running must be restarted to read it (`compose up -d` leaves a
+    // running container alone). When its state could not be read, the owed
+    // mark stays: the sweeper reloads it if it runs.
+    if (homeState === "stopped") {
+      await clearReloadOwed(host, home);
+    } else if (homeState === "running") {
+      try {
+        const r = await cfg().restartConfigContainer(host, home);
+        if (!(r && r.restarted === false)) await clearReloadOwed(host, home);
+      } catch (e) {
+        console.error("[renterBotOps] reload " + home + " after start (stays owed):", e.message);
+      }
+    }
   }
   return { added, skipped, running: true };
 }
 
-// Apply a games list for ONE renter. Decided under the file lock from what is
-// really in the file: when every account there is this renter's, the whole
-// config is written (root list + switch, shows as "Farming" in the Bots UI);
-// otherwise only their accounts change. Any per-account games saved by an
-// earlier stop are forgotten, so the next start uses THIS list.
-// Returns { scope: "config" | "own-accounts", games }.
+// Apply a games list for ONE renter, in every file their accounts are
+// recorded in on the renter's host (their own bot, plus any file an account
+// was moved to). Decided per file under its lock from what is really in it:
+// when every account there is this renter's, the whole config is written
+// (root list + switch, shows as "Farming" in the Bots UI); otherwise only
+// their accounts change. Per-account games saved by an earlier stop are
+// forgotten, so the next start uses THIS list.
+// Returns { scope: "config" | "own-accounts", games } (scope of the own bot).
 async function applyRenterGames(renter, host, games) {
   if (!cfg().validFile(renter.botFile)) throw new Error("Invalid config file");
   const list = cfg()
     .parseGamesList(games)
     .slice(0, 50)
     .map((g) => g.slice(0, 100));
-  const secrets = await renterSecrets(renter._id);
+  const rows = await RenterAccount.find(
+    { renter: renter._id, enabled: true },
+    { clientSecret: 1, host: 1, configFile: 1 },
+  ).lean();
+  const secrets = rows.map((r) => r.clientSecret).filter(Boolean);
+  const files = new Set([renter.botFile]);
+  for (const r of rows) {
+    if (r.configFile && hostIdOf(r.host) === host.id && cfg().validFile(r.configFile)) files.add(r.configFile);
+  }
   let scope = "own-accounts";
-  await withFileLock(host, renter.botFile, async () => {
-    const data = JSON.parse(await hosts.readFile(host, renter.botFile));
-    if (allUsersIn(data, secrets)) {
-      scope = "config";
-      setWholeConfigGames(data, list);
-    } else {
-      setUsersGamesBySecret(data, secrets, list);
+  const others = []; // other files written: their bots must reload to apply it
+  for (const file of files) {
+    await withFileLock(host, file, async () => {
+      let data;
+      try {
+        data = JSON.parse(await hosts.readFile(host, file));
+      } catch (e) {
+        if (e && e.code === "ENOENT" && file !== renter.botFile) return;
+        throw e;
+      }
+      if (file === renter.botFile) {
+        if (allUsersIn(data, secrets)) {
+          scope = "config";
+          setWholeConfigGames(data, list);
+        } else {
+          setUsersGamesBySecret(data, secrets, list);
+        }
+      } else {
+        // Any other file is shared or someone else's: only this renter's own
+        // accounts change, and only when they are really in it.
+        const mine = new Set(secrets);
+        if (!configUsers(data).some((u) => u && typeof u === "object" && mine.has(u.ClientSecret))) return;
+        setUsersGamesBySecret(data, secrets, list);
+        others.push(file);
+      }
+      await hosts.writeFileAtomic(host, file, JSON.stringify(data, null, 2));
+      if (file !== renter.botFile) await markReloadOwed(host, file, "games changed");
+    });
+  }
+  // The renter's own bot is reloaded by the caller (as before); the others
+  // here, if running. One that cannot be stays owed for the sweeper.
+  for (const file of others) {
+    try {
+      await restartIfRunning(host, file);
+      await clearReloadOwed(host, file);
+    } catch (e) {
+      console.error("[renterBotOps] reload " + file + " after games change (stays owed):", e.message);
     }
-    await hosts.writeFileAtomic(
-      host,
-      renter.botFile,
-      JSON.stringify(data, null, 2),
-    );
-  });
+  }
   await RenterAccount.updateMany(
     { renter: renter._id, favouriteGames: { $exists: true } },
     { $unset: { favouriteGames: "" } },
   ).catch((e) => console.error("[renterBotOps] forget saved games:", e.message));
-  return { scope, games: list };
+  return { scope, games: list, otherFiles: others };
 }
 
 module.exports = {
@@ -646,5 +993,8 @@ module.exports = {
   detachFromFile,
   settleAfterDetach,
   markReloadOwed,
+  clearReloadOwed,
   isReloadOwed,
+  sweepPendingReloads,
+  reservedSlots,
 };

@@ -354,8 +354,9 @@ async function botControl(action, req, res) {
     // Shared-bot aware: when other renters share this config, start/stop only
     // moves THIS renter's accounts in or out of it — never the container the
     // others are farming on.
+    let out = null;
     if (action === "start") {
-      await startRenterFarming(req.renter, bot.host);
+      out = await startRenterFarming(req.renter, bot.host);
     } else {
       await stopRenterFarming(req.renter, bot.host);
     }
@@ -370,7 +371,17 @@ async function botControl(action, req, res) {
     await req.renter
       .save()
       .catch((e) => console.error("renter botStoppedAt:", e.message));
-    res.json({ success: true, running: action === "start" });
+    // A start puts back only what fits: tell the renter when some of their
+    // accounts are still off the bot instead of a plain "running".
+    const skipped = out && Array.isArray(out.skipped) ? out.skipped.length : 0;
+    res.json({
+      success: true,
+      running: action === "start",
+      skipped,
+      ...(skipped
+        ? { message: skipped + " of your account(s) could not be put back — the bot is full. Ask the operator." }
+        : {}),
+    });
   } catch (e) {
     if (e.code === "disabled") {
       return res
