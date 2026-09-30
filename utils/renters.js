@@ -42,6 +42,17 @@ function isBlocked(renter) {
   return !renter || renter.status === "suspended" || isExpired(renter);
 }
 
+// The internal holder renter every rent-farm ("Automatic Farming") sale is
+// provisioned under (utils/operatorFarm.js OPERATOR_USERNAME). It is NOT a
+// renter: its accounts are paid buyers spread over many stacks, so renter-level
+// start / stop / suspend / delete / lease / bot changes must never touch it.
+const OPERATOR_HOLDER_USERNAME = "operator-selffarm";
+function isOperatorHolder(renter) {
+  if (!renter) return false;
+  const u = String(renter.usernameLower || renter.username || "").toLowerCase();
+  return u === OPERATOR_HOLDER_USERNAME;
+}
+
 // Public-safe view — never leaks the password hash.
 function sanitizeRenter(renter) {
   if (!renter) return null;
@@ -164,6 +175,8 @@ module.exports = {
   normGames,
   isExpired,
   isBlocked,
+  OPERATOR_HOLDER_USERNAME,
+  isOperatorHolder,
   sanitizeRenter,
   getById,
   createRenter,

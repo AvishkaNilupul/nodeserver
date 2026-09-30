@@ -39,6 +39,11 @@
 
   function fmtDate(d){ return d ? new Date(d).toLocaleDateString() : "—"; }
 
+  // The rent-farm holder (operator-selffarm) is not a renter: its accounts are
+  // paid buyers spread over many stacks, so it gets no start / stop / suspend /
+  // delete buttons here (the server refuses those too).
+  function isHolder(name){ return String(name == null ? "" : name).toLowerCase() === "operator-selffarm"; }
+
   function remaining(end){ if(!end) return "no expiry"; const ms=new Date(end)-Date.now(); if(ms<=0) return "expired"; const dd=Math.floor(ms/864e5); return dd>=1?dd+"d left":Math.max(1,Math.floor(ms/36e5))+"h left"; }
 
   // ---- badges (pure -> html string) ---------------------------------------
@@ -174,7 +179,7 @@
   }
 
   window.RT = {
-    $, esc, toast, api, fmtDate, remaining,
+    $, esc, toast, api, fmtDate, remaining, isHolder,
     statusBadge, botStatusHtml, botPill, scanBadge, farmCell, secret, hostSelectHtml, setMetric,
     openModal, closeModal, modalEl, onClose,
     on,

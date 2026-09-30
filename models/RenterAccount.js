@@ -71,6 +71,11 @@ const renterAccountSchema = new mongoose.Schema(
     // from lastScanAt, which also moves on a FAILED scan — a stale snapshot
     // must never be read as a fresh zero.
     farmingSnapshotAt: { type: Date, default: null, index: true },
+    // The account's own FavouriteGames as they were in the config when a stop
+    // pulled it out (utils/renterBotOps.stopRenterFarming), so the next start
+    // puts it back farming exactly what it farmed before. Unset = never stopped
+    // by that path; a start then falls back to the renter's farmGames.
+    favouriteGames: { type: [String], default: undefined },
   },
   { timestamps: true },
 );

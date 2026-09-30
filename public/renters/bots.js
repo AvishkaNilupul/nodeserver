@@ -51,9 +51,11 @@
       '<div class="meta" data-pill="' + esc(b.renterId) + '">' + runPill + '</div>' +
       '<div class="meta mono">' + esc(b.container || "") + '</div>' +
       '<div class="acts">' +
-        '<button class="btn sm" data-act="botOp" data-op="start" data-id="' + esc(b.renterId) + '">Start</button>' +
-        '<button class="btn ghost sm" data-act="botOp" data-op="restart" data-id="' + esc(b.renterId) + '">Restart</button>' +
-        '<button class="btn warn sm" data-act="botOp" data-op="stop" data-id="' + esc(b.renterId) + '">Stop</button>' +
+        (RT.isHolder(b.username)
+          ? '<span class="muted" style="font-size:12px" title="Paid rent-farm buyers across many stacks — manage those bots on the Bots page">rent-farm holder</span>'
+          : '<button class="btn sm" data-act="botOp" data-op="start" data-id="' + esc(b.renterId) + '">Start</button>' +
+            '<button class="btn ghost sm" data-act="botOp" data-op="restart" data-id="' + esc(b.renterId) + '">Restart</button>' +
+            '<button class="btn warn sm" data-act="botOp" data-op="stop" data-id="' + esc(b.renterId) + '">Stop</button>') +
         '<button class="btn ghost sm" data-act="botLogs" data-id="' + esc(b.renterId) + '">Logs</button>' +
         '<button class="btn ghost sm" data-act="botManage" data-id="' + esc(b.renterId) + '">Manage</button>' +
       '</div></div>';
@@ -177,6 +179,13 @@
   // ---- start / stop / restart ----
 
   async function botOp(id, action, el) {
+    // Stop only pulls THIS renter's accounts (the bot keeps running for anyone
+    // else on it); restart reloads EVERY account on the bot, other renters'
+    // and rent-farm buyers' included — so both ask first.
+    if (action === "stop" &&
+        !confirm("Stop this renter's farming? Their accounts are taken off the bot; anyone else on it keeps farming.")) return;
+    if (action === "restart" &&
+        !confirm("Restart this renter's bot? Every account on it reloads (other renters and rent-farm buyers too) — about a minute of watching lost.")) return;
     if (el) el.disabled = true;
     try {
       await api("/renters/" + id + "/bot/" + action, { method: "POST" });

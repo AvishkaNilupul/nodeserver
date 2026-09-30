@@ -31,13 +31,32 @@ const {
   revealPassword,
   normGames,
   MIN_PASSWORD,
+  isOperatorHolder,
+  OPERATOR_HOLDER_USERNAME,
 } = require("../utils/renters");
 const {
   otherSharers,
   stopRenterFarming,
   startRenterFarming,
   applyRenterGames,
+  restartIfRunning,
 } = require("../utils/renterBotOps");
+
+// The rent-farm holder (operator-selffarm) is not a renter: its accounts are
+// PAID buyers spread over many stacks. A renter-level start copied every one of
+// them into a single config, a stop halted a whole stack of buyers, and a
+// delete orphaned every paid window. Refuse all of those server-side.
+function refuseHolder(res, what) {
+  return res.status(409).json({
+    success: false,
+    holder: true,
+    message:
+      OPERATOR_HOLDER_USERNAME +
+      " holds the paid rent-farm windows, spread over many stacks — it cannot be " +
+      what +
+      " as a renter. Manage those bots from the Bots page, one stack at a time.",
+  });
+}
 const MarketplaceListing = require("../models/MarketplaceListing");
 const { detachAccountFromListing } = require("../utils/listingDetach");
 const hosts = require("../utils/botHosts");
@@ -807,6 +826,29 @@ router.put("/renters/:id", requireSuperadmin, async (req, res) => {
     const r = await Renter.findById(req.params.id);
     if (!r) return res.status(404).json({ success: false, message: "Not found" });
     const b = req.body || {};
+    if (isOperatorHolder(r)) {
+      // Its account limit is raised from this very form (the 09-28 outage), so
+      // that — and the name / notes — stay editable. Nothing that re-points,
+      // re-games or puts a lease on the holder does. The modal posts every
+      // field back on each save (dates as YYYY-MM-DD), so compare what would
+      // actually CHANGE, by calendar day for the dates.
+      const day = (v) => {
+        if (!v) return "";
+        const d = new Date(v);
+        return isNaN(d.getTime()) ? String(v) : d.toISOString().slice(0, 10);
+      };
+      const changed = [];
+      if (b.botHost !== undefined && String(b.botHost || "") !== String(r.botHost || "")) changed.push("bot host");
+      if (b.botFile !== undefined && String(b.botFile || "") !== String(r.botFile || "")) changed.push("bot");
+      if (b.farmGames !== undefined &&
+          JSON.stringify(normGames(b.farmGames)) !== JSON.stringify(r.farmGames || [])) changed.push("games");
+      if (b.accessStart !== undefined && day(b.accessStart) !== day(r.accessStart)) changed.push("access start");
+      if (b.accessEnd !== undefined && day(b.accessEnd) !== day(r.accessEnd)) changed.push("access end");
+      if (changed.length) {
+        return refuseHolder(res, "re-assigned, re-gamed or given a lease (" + changed.join(", ") + ")");
+      }
+      for (const k of ["botHost", "botFile", "farmGames", "accessStart", "accessEnd"]) delete b[k];
+    }
     if (b.botHost !== undefined || b.botFile !== undefined) {
       const { botHost, botFile } = await resolveAssignment(
         b.botHost !== undefined ? b.botHost : r.botHost,
@@ -845,7 +887,9 @@ router.put("/renters/:id", requireSuperadmin, async (req, res) => {
       if (host) {
         try {
           const out = await applyRenterGames(r, host, r.farmGames);
-          await restartConfigContainer(host, r.botFile).catch(() => {});
+          // Only a RUNNING bot needs the reload — restarting a stopped one
+          // would start it (and revive whatever is still in its config).
+          await restartIfRunning(host, r.botFile).catch(() => {});
           gamesApplied = out.scope;
         } catch (e) {
           console.error("renter games apply:", e.message);
@@ -886,6 +930,7 @@ router.post("/renters/:id/suspend", requireSuperadmin, async (req, res) => {
   try {
     const r = await Renter.findById(req.params.id);
     if (!r) return res.status(404).json({ success: false, message: "Not found" });
+    if (isOperatorHolder(r)) return refuseHolder(res, "suspended");
     r.status = "suspended";
     let botStopped = false;
     if (r.botFile) {
@@ -1161,6 +1206,9 @@ router.post("/renters/:id/bot/:action", requireSuperadmin, async (req, res) => {
   }
   try {
     const r = await Renter.findById(req.params.id);
+    if (r && isOperatorHolder(r)) {
+      return refuseHolder(res, { start: "started", stop: "stopped", restart: "restarted" }[action]);
+    }
     if (!r || !r.botFile) {
       return res
         .status(400)
@@ -1172,9 +1220,9 @@ router.post("/renters/:id/bot/:action", requireSuperadmin, async (req, res) => {
         .status(400)
         .json({ success: false, message: "Renter's host is unknown" });
     }
-    // Shared-bot aware: on a config with other active renters, start/stop
-    // moves only THIS renter's accounts in or out of the config instead of
-    // touching the container everyone shares.
+    // Renter-scoped: start/stop move only THIS renter's accounts in or out of
+    // the config(s); a container is only ever stopped once nothing else is in
+    // it. "restart" reloads the renter's own bot (every account on it).
     if (action === "start") {
       await startRenterFarming(r, host);
       r.botStoppedAt = null;
@@ -1207,6 +1255,9 @@ router.post("/renters/:id/bot/:action", requireSuperadmin, async (req, res) => {
 // DELETE a renter (their config + accounts are left in place for the operator).
 router.delete("/renters/:id", requireSuperadmin, async (req, res) => {
   try {
+    const target = await Renter.findById(req.params.id, { username: 1, usernameLower: 1 }).lean();
+    if (!target) return res.status(404).json({ success: false, message: "Not found" });
+    if (isOperatorHolder(target)) return refuseHolder(res, "deleted");
     const r = await Renter.findByIdAndDelete(req.params.id);
     if (!r) return res.status(404).json({ success: false, message: "Not found" });
     // Tear down the renter's standalone inventory too (their tenant boundary).

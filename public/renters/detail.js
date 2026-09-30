@@ -104,9 +104,11 @@
         esc(RT.remaining(r.accessEnd)) + '</div>' +
       '<div class="meta">Last in: ' + (r.lastLoginAt ? esc(new Date(r.lastLoginAt).toLocaleDateString()) : "never") + '</div>' +
       '<div class="acts"><button class="btn ghost sm" data-act="openRenter" data-id="' + id + '">Manage</button>' +
-        (r.status === "suspended"
-          ? '<button class="btn sm" data-act="setSusp" data-val="false" data-id="' + id + '">Unsuspend</button>'
-          : '<button class="btn warn sm" data-act="setSusp" data-val="true" data-id="' + id + '">Suspend</button>') +
+        (RT.isHolder(r.username)
+          ? ''
+          : r.status === "suspended"
+            ? '<button class="btn sm" data-act="setSusp" data-val="false" data-id="' + id + '">Unsuspend</button>'
+            : '<button class="btn warn sm" data-act="setSusp" data-val="true" data-id="' + id + '">Suspend</button>') +
       '</div></div>';
   }
 
@@ -326,9 +328,11 @@
             '<input id="eCap" type="number" min="1" max="100" value="' + (bot.capacity == null ? '' : Number(bot.capacity)) + '" style="width:56px" title="Rental stack capacity — how many accounts this bot may hold"/>' +
             '<button class="btn ghost sm" id="eCapBtn" data-act="setStackCap" data-id="' + id + '">Set</button>' +
             '<span style="flex:1"></span>' +
-            '<button class="btn sm" data-act="botOp" data-op="start" data-id="' + id + '">Start</button>' +
-            '<button class="btn ghost sm" data-act="botOp" data-op="restart" data-id="' + id + '">Restart</button>' +
-            '<button class="btn warn sm" data-act="botOp" data-op="stop" data-id="' + id + '">Stop</button>' +
+            (RT.isHolder(r.username)
+              ? '<span class="muted" style="font-size:12px">Rent-farm holder — its buyers sit in many stacks; manage those bots on the Bots page.</span>'
+              : '<button class="btn sm" data-act="botOp" data-op="start" data-id="' + id + '">Start</button>' +
+                '<button class="btn ghost sm" data-act="botOp" data-op="restart" data-id="' + id + '">Restart</button>' +
+                '<button class="btn warn sm" data-act="botOp" data-op="stop" data-id="' + id + '">Stop</button>') +
             '<button class="btn ghost sm" id="logBtn" data-act="modalLogs" data-id="' + id + '">Logs</button>'
           : '<span style="flex:1"></span>' +
             '<span class="muted" style="font-size:12px">Host</span>' + RT.hostSelectHtml("eBotHost") +
@@ -353,10 +357,12 @@
       '<div id="botLogBox"></div>' +
       '<div style="display:flex;gap:8px;margin-top:12px;flex-wrap:wrap">' +
         '<button class="btn ghost sm" data-act="resetPw" data-id="' + id + '">Reset password</button>' +
-        (r.status === "suspended"
-          ? '<button class="btn sm" data-act="setSusp" data-val="false" data-id="' + id + '">Unsuspend</button>'
-          : '<button class="btn warn sm" data-act="setSusp" data-val="true" data-id="' + id + '">Suspend + stop bot</button>') +
-        '<button class="btn danger sm" data-act="delRenter" data-id="' + id + '">Delete renter</button>' +
+        (RT.isHolder(r.username)
+          ? ''
+          : (r.status === "suspended"
+              ? '<button class="btn sm" data-act="setSusp" data-val="false" data-id="' + id + '">Unsuspend</button>'
+              : '<button class="btn warn sm" data-act="setSusp" data-val="true" data-id="' + id + '">Suspend + stop bot</button>') +
+            '<button class="btn danger sm" data-act="delRenter" data-id="' + id + '">Delete renter</button>') +
       '</div>' +
       '<div class="credbox" style="margin-top:12px">Login <code>' + esc(r.username) + '</code> &nbsp;·&nbsp; Password <code id="pwView">••••••••</code> ' +
         '<button class="btn ghost sm" style="margin-left:8px" data-act="showPw" data-id="' + id + '">Show</button> ' +

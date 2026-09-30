@@ -18,11 +18,9 @@ const RenterAccount = require("../models/RenterAccount");
 const hosts = require("./botHosts");
 const { sendTelegram } = require("./telegram");
 const { logEvent } = require("./systemLog");
-const {
-  removeAccountFromConfig,
-  restartConfigContainer,
-} = require("../routes/botConfigRoutes");
-const { stopRenterFarming } = require("./renterBotOps");
+const { removeAccountFromConfig } = require("../routes/botConfigRoutes");
+const { stopRenterFarming, restartIfRunning } = require("./renterBotOps");
+const { OPERATOR_HOLDER_USERNAME } = require("./renters");
 
 const INTERVAL_MS = 5 * 60 * 1000; // every 5 minutes
 // How close to accessEnd the "expiring soon" heads-up fires.
@@ -96,10 +94,12 @@ async function sweepAccounts(now) {
         " — pulled off the bot.",
     );
   }
-  // One restart per affected bot, after all its accounts are out.
+  // One restart per affected bot, after all its accounts are out — and only
+  // for a bot that is RUNNING. `docker restart` starts a stopped container,
+  // which is how a stopped (expired) renter's bot used to come back to life.
   for (const b of touchedBots.values()) {
     try {
-      await restartConfigContainer(b.host, b.file);
+      await restartIfRunning(b.host, b.file);
     } catch (e) {
       console.error(
         "[renterExpiry] could not restart " + b.file + ":",
@@ -141,60 +141,53 @@ async function sweepOnce() {
     console.log("[renterExpiry] expiry warning sent for " + r.username);
   }
 
-  // 2) Expired (lease end in the past), assigned a bot, not already stopped by
-  // us: stop the bot and tell the operator it happened.
+  // 2) Expired (lease end in the past) OR suspended, assigned a bot, not
+  // already stopped by us: pull their accounts off the bot and tell the
+  // operator. Suspended renters are here so a suspend whose stop failed (host
+  // offline at the time) is retried instead of being forgotten. The rent-farm
+  // holder is never a renter to stop — its accounts are paid buyers.
   const expired = await Renter.find({
-    accessEnd: { $ne: null, $lte: now },
     botFile: { $gt: "" },
     botStoppedAt: null,
+    usernameLower: { $ne: OPERATOR_HOLDER_USERNAME },
+    $or: [{ accessEnd: { $ne: null, $lte: now } }, { status: "suspended" }],
   });
   for (const r of expired) {
     const host = hosts.resolveHost(r.botHost);
-    if (!host) continue;
+    if (!host) {
+      console.error(
+        "[renterExpiry] renter " + r.username + " has an unknown bot host '" +
+          (r.botHost || "") + "' — cannot stop it",
+      );
+      continue;
+    }
+    const why =
+      r.accessEnd && new Date(r.accessEnd) <= now ? "lease ended" : "suspended";
     try {
-      // Shared-bot aware: alone on the config the container is stopped; when
-      // other active renters share it, only this renter's accounts are pulled
-      // so the others keep farming.
+      // Only this renter's accounts are pulled, wherever they are; a bot left
+      // empty is stopped for good, a bot others still farm on keeps running.
       const out = await stopRenterFarming(r, host);
       r.botStoppedAt = new Date();
       await r.save();
+      const detail = describeStop(out, host);
       logEvent({
         category: "renting",
-        action: "lease_ended",
+        action: why === "lease ended" ? "lease_ended" : "suspend_stop_retried",
         actor: "renterExpiry",
         subject: r.username || "",
         host: r.botHost || "",
         container: r.botFile || "",
-        detail:
-          out.mode === "stopped"
-            ? "lease ended — bot " + r.botFile + " stopped"
-            : "lease ended — " +
-              out.removed +
-              " account(s) pulled off shared bot " +
-              r.botFile,
+        detail: why + " — " + detail,
       });
       console.log(
-        "[renterExpiry] stopped farming for expired renter " + r.username,
+        "[renterExpiry] stopped farming for " + why + " renter " + r.username,
       );
       await sendTelegram(
-        "⏰ Renter lease ended: " +
-          r.username +
-          " — " +
-          (out.mode === "stopped"
-            ? "bot " +
-              r.botFile +
-              " on " +
-              (host.label || r.botHost) +
-              " was stopped."
-            : out.removed +
-              " account(s) pulled off shared bot " +
-              r.botFile +
-              " on " +
-              (host.label || r.botHost) +
-              " (other renters keep farming)."),
+        (why === "lease ended" ? "⏰ Renter lease ended: " : "⏸ Renter suspended: ") +
+          r.username + " — " + detail,
       );
     } catch (e) {
-      // Host offline / no container — try again next tick (botStoppedAt stays
+      // Host offline / unreadable — try again next tick (botStoppedAt stays
       // null so it isn't marked done prematurely).
       console.error(
         "[renterExpiry] could not stop bot for " + r.username + ":",
@@ -204,10 +197,28 @@ async function sweepOnce() {
   }
 }
 
+// One line for the operator: how many accounts came off which bots, and what
+// became of each container.
+function describeStop(out, host) {
+  const files = (out && out.files) || [];
+  const touched = files.filter((f) => f.removed > 0);
+  const stopped = files.filter((f) => f.action === "stopped").map((f) => f.file);
+  const kept = files
+    .filter((f) => f.removed > 0 && f.action !== "stopped")
+    .map((f) => f.file);
+  let s =
+    (out ? out.removed : 0) + " account(s) pulled off " +
+    (touched.length ? touched.map((f) => f.file).join(", ") : "their bot") +
+    " on " + (host.label || host.id) + ".";
+  if (stopped.length) s += " Now empty and stopped: " + stopped.join(", ") + ".";
+  if (kept.length) s += " Other accounts on " + kept.join(", ") + " keep farming.";
+  return s;
+}
+
 function start() {
   if (timer) return;
   // First sweep one interval out, so it doesn't run during the boot storm.
   scheduleNext();
 }
 
-module.exports = { start, sweepOnce, sweepAccounts };
+module.exports = { start, sweepOnce, sweepAccounts, describeStop };
