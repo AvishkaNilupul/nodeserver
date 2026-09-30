@@ -1043,8 +1043,12 @@ async function deliverPaidOrders() {
     orders = await mp.eldoradoPaidOrders();
   } catch (e) {
     console.error("eldorado fulfiller: could not read orders:", e.message);
+    // Paged once it keeps failing — a paid order that is never READ creates no
+    // row, so nothing else could ever notice it (utils/intakeWatch).
+    await require("./intakeWatch").failed("Eldorado", e).catch(() => {});
     return { error: e.message };
   }
+  await require("./intakeWatch").ok("Eldorado").catch(() => {});
   if (!orders.length) return { orders: 0 };
 
   // The pool is the hard limit on rent-farm sales, and it is small. Surface it

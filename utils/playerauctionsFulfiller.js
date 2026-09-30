@@ -1040,8 +1040,10 @@ async function deliverPendingOrders() {
     orders = await mp.playerauctionsPendingOrders();
   } catch (e) {
     console.error("playerauctions fulfiller: could not read orders:", e.message);
+    await require("./intakeWatch").failed("PlayerAuctions", e).catch(() => {});
     return { error: e.message };
   }
+  await require("./intakeWatch").ok("PlayerAuctions").catch(() => {});
   if (!orders.length) return { orders: 0 };
 
   // The pool is the hard limit on rent-farm sales, and it is small. Surface it

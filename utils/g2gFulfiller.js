@@ -1029,13 +1029,26 @@ async function deliverPendingOrders() {
   try {
     counts = await mp.g2gOrderCounts();
   } catch (e) {
+    console.error("g2g fulfiller: could not read order counts:", e.message);
+    await require("./intakeWatch").failed("G2G", e).catch(() => {});
     return { error: e.message };
   }
   const waiting = Number(counts && counts.preparing) || 0;
   const delivering = Number(counts && counts.delivering) || 0;
-  if (!waiting && !delivering) return { checked: 0 };
+  if (!waiting && !delivering) {
+    await require("./intakeWatch").ok("G2G").catch(() => {});
+    return { checked: 0 };
+  }
 
-  const orders = await mp.g2gPendingOrders({});
+  let orders;
+  try {
+    orders = await mp.g2gPendingOrders({});
+  } catch (e) {
+    console.error("g2g fulfiller: could not read pending orders:", e.message);
+    await require("./intakeWatch").failed("G2G", e).catch(() => {});
+    return { error: e.message };
+  }
+  await require("./intakeWatch").ok("G2G").catch(() => {});
   const results = [];
   for (const order of orders) {
     let r;

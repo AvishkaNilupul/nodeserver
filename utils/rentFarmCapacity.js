@@ -195,6 +195,166 @@ async function checkOnce({ notify = true } = {}) {
   return snap;
 }
 
+// ------------------------------------------------------------------
+// Dead stacks (2026-10-01). A rental stack that HOLDS accounts but whose
+// container is not running — or whose config file is missing or unreadable —
+// has every buyer on it farming nothing. The level alarm above only reports
+// "dead" slots inside a low/empty message, the host watchdog treats a plain
+// `docker stop` (exit 143) as intentional, and the health monitor only reads
+// running containers, so such a stack could sit dead with nobody told.
+// Latched per stack: one page when it goes dead, a reminder every
+// DEAD_REMIND_MS while it stays dead, one line when it recovers.
+// ------------------------------------------------------------------
+const DEAD_REMIND_MS = 6 * 60 * 60 * 1000;
+const deadAlerted = new Map(); // "host/file" -> last page ms
+
+let deps = {};
+const REAL = {
+  rentalStackOptions: () => renterAdmin().rentalStackOptions(),
+  listStacks: () => require("./renterBotStacks").listStacks(),
+  gatherPoolEligibility: () => renterAdmin().gatherPoolEligibility(),
+  holderId: async () => {
+    const Renter = require("../models/Renter");
+    const h = await Renter.findOne({ usernameLower: "operator-selffarm" }, { _id: 1 }).lean();
+    return h ? h._id : null;
+  },
+  countRows: (q) => require("../models/RenterAccount").countDocuments(q),
+  snapshot: () => snapshot(),
+  now: () => Date.now(),
+};
+function dep(name) {
+  return Object.prototype.hasOwnProperty.call(deps, name) ? deps[name] : REAL[name];
+}
+
+async function deadStacksCheck({ notify = true } = {}) {
+  const { bots = [], offlineHosts = [] } = await dep("rentalStackOptions")();
+  const offline = new Set((offlineHosts || []).map((h) => h.id || h));
+  const registered = await dep("listStacks")();
+  const now = dep("now")();
+  const dead = [];
+  for (const b of bots) {
+    const inFile = Number(b.physical != null ? b.physical : b.accounts) || 0;
+    if (b.running === false && inFile > 0) {
+      dead.push({ key: b.host + "/" + b.file, accounts: inFile, why: "its container is NOT running" });
+    }
+  }
+  const seen = new Set(bots.map((b) => b.host + "/" + b.file));
+  for (const st of registered || []) {
+    const key = String(st.host || "local") + "/" + st.file;
+    if (offline.has(String(st.host || "local")) || seen.has(key)) continue;
+    dead.push({ key, accounts: null, why: "its config file is missing or unreadable" });
+  }
+  const deadKeys = new Set(dead.map((d) => d.key));
+  const page = [];
+  for (const d of dead) {
+    const last = deadAlerted.get(d.key);
+    if (!last || now - last >= DEAD_REMIND_MS) {
+      page.push(d);
+      if (notify) deadAlerted.set(d.key, now);
+    }
+  }
+  const recovered = [...deadAlerted.keys()].filter((k) => !deadKeys.has(k));
+  if (notify) {
+    if (page.length) {
+      await sendTelegram(
+        "🛑 Rental stack(s) holding accounts are NOT farming:\n" +
+          page
+            .map((d) => "• " + d.key + (d.accounts != null ? " (" + d.accounts + " accounts)" : "") + " — " + d.why)
+            .join("\n") +
+          "\n\nEvery buyer / renter account on it is getting nothing. Start the container " +
+          "(Bots page) or find the config; this reminds every 6 h while it lasts.",
+      ).catch((e) => console.error("rentFarmCapacity telegram failed:", e.message));
+      logEvent({
+        category: "renter",
+        action: "rental_stack_dead",
+        actor: "rentFarmCapacity",
+        severity: "error",
+        count: page.length,
+        detail: page.map((d) => d.key + ": " + d.why).join(" | ").slice(0, 480),
+      }).catch(() => {});
+    }
+    for (const k of recovered) {
+      deadAlerted.delete(k);
+      await sendTelegram("✅ Rental stack " + k + " is farming again.").catch(() => {});
+    }
+  }
+  return { dead, paged: page.map((d) => d.key), recovered };
+}
+
+// ------------------------------------------------------------------
+// Runway (2026-10-01). "10 slots left" was about a day of notice at ~10 sales
+// a day, and the pristine pool had no push at all until an order failed
+// (2026-09-21). Both are now judged in DAYS at the trailing 7-day rate: warn
+// under WARN_DAYS, page under CRIT_DAYS, once per level change, and again daily
+// while critical.
+// ------------------------------------------------------------------
+const WARN_DAYS = 10;
+const CRIT_DAYS = 4;
+const RUNWAY_REMIND_MS = 24 * 60 * 60 * 1000;
+const runwayState = { slots: { level: "ok", at: 0 }, pool: { level: "ok", at: 0 } };
+
+function runwayLevel(days) {
+  if (days == null || !isFinite(days)) return "ok";
+  if (days < CRIT_DAYS) return "critical";
+  if (days < WARN_DAYS) return "warn";
+  return "ok";
+}
+
+async function runwayCheck({ notify = true } = {}) {
+  const now = dep("now")();
+  const since = new Date(now - 7 * 86400000);
+  const holder = await dep("holderId")();
+  if (!holder) return null;
+  const [made, ended] = await Promise.all([
+    dep("countRows")({ renter: holder, createdAt: { $gte: since } }),
+    dep("countRows")({ renter: holder, farmEndedAt: { $gte: since } }),
+  ]);
+  const takenPerDay = made / 7; // pristine accounts consumed (every sale + buffer)
+  const netSlotsPerDay = (made - ended) / 7; // slots consumed net of windows ending
+  const snap = await dep("snapshot")();
+  const pool = await dep("gatherPoolEligibility")();
+  const eligible = pool && Array.isArray(pool.eligible) ? pool.eligible.length : null;
+  const out = {
+    takenPerDay: Math.round(takenPerDay * 10) / 10,
+    netSlotsPerDay: Math.round(netSlotsPerDay * 10) / 10,
+    freeSlots: snap.totalFree,
+    eligible,
+    slotDays: netSlotsPerDay > 0 ? snap.totalFree / netSlotsPerDay : null,
+    poolDays: takenPerDay > 0 && eligible != null ? eligible / takenPerDay : null,
+  };
+  const checks = [
+    ["slots", out.slotDays, "rental stack slots", out.freeSlots + " free, ~" + out.netSlotsPerDay + "/day net",
+      "Register another rental stack (50 slots) before they run out."],
+    ["pool", out.poolDays, "pristine pool accounts", (eligible == null ? "?" : eligible) + " eligible, ~" + out.takenPerDay + "/day taken",
+      "Restock the pool (or move empty no-claim accounts back) before rent-farm orders start failing."],
+  ];
+  for (const [kind, days, what, detail, fix] of checks) {
+    const level = runwayLevel(days);
+    const st = runwayState[kind];
+    const changed = level !== st.level;
+    const remind = level === "critical" && now - st.at >= RUNWAY_REMIND_MS;
+    if (notify && level !== "ok" && (changed || remind)) {
+      await sendTelegram(
+        (level === "critical" ? "🛑 " : "⚠️ ") + "Rent-farm " + what + " run out in about " +
+          Math.max(0, Math.floor(days)) + " day(s) (" + detail + "). " + fix,
+      ).catch((e) => console.error("rentFarmCapacity telegram failed:", e.message));
+      logEvent({
+        category: "renter",
+        action: "rent_farm_runway_" + kind,
+        actor: "rentFarmCapacity",
+        severity: level === "critical" ? "error" : "warn",
+        count: Math.floor(days),
+        detail,
+      }).catch(() => {});
+      st.at = now;
+    } else if (notify && changed && level === "ok" && st.level !== "ok") {
+      await sendTelegram("✅ Rent-farm " + what + " runway is healthy again (" + detail + ").").catch(() => {});
+    }
+    if (notify) st.level = level;
+  }
+  return out;
+}
+
 function start() {
   if (timer) return;
   timer = true;
@@ -205,6 +365,23 @@ function start() {
       // A host read failing is not a capacity emergency; it is a read failure.
       // Log it and try again next tick rather than crying wolf.
       console.error("rentFarmCapacity check failed:", e.message);
+    }
+    try {
+      await deadStacksCheck({});
+    } catch (e) {
+      console.error("rentFarmCapacity dead-stack check failed:", e.message);
+    }
+    try {
+      await runwayCheck({});
+    } catch (e) {
+      console.error("rentFarmCapacity runway check failed:", e.message);
+    }
+    try {
+      // Ledger vs configs (dead tokens, not farming, farming past the end,
+      // doubles, wrong game) — gated to at most hourly inside.
+      await require("./renterIntegrity").checkOnce({});
+    } catch (e) {
+      console.error("renter integrity check failed:", e.message);
     } finally {
       const t = setTimeout(tick, TICK_MS);
       if (t.unref) t.unref();
@@ -215,5 +392,13 @@ function start() {
 }
 
 module.exports = { TICK_MS, LOW_WATER, snapshot, levelFor, describe, checkOnce, start,
-  // testing seam: the alert-state latch
-  _reset: () => { lastLevel = null; } };
+  deadStacksCheck, runwayCheck, runwayLevel, WARN_DAYS, CRIT_DAYS,
+  // testing seams: the alert-state latches, and injectable reads
+  __setDeps: (d) => { deps = { ...deps, ...(d || {}) }; },
+  _reset: () => {
+    lastLevel = null;
+    deadAlerted.clear();
+    runwayState.slots = { level: "ok", at: 0 };
+    runwayState.pool = { level: "ok", at: 0 };
+    deps = {};
+  } };
