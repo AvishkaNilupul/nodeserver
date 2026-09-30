@@ -1890,6 +1890,59 @@ router.post("/renter-accounts/:id/farm", requireSuperadmin, async (req, res) => 
   }
 });
 
+// CLOSE a rent-farm order the buyer walked away from (cancelled, refunded,
+// disputed and lost): the order is marked "cancelled" — no service provisions a
+// cancelled row again — and every account it holds has its window ended now,
+// so renterExpiry pulls it off the bot on its next tick (≤5 min) and the slot
+// comes back. A human decision on purpose (utils/farmOrderWatch only pages):
+// "gone from the pending list" is also what a failed read looks like.
+router.post("/renters/farm-orders/:orderId/close", requireSuperadmin, async (req, res) => {
+  try {
+    const orderId = String(req.params.orderId || "").trim();
+    if (!orderId) return res.status(400).json({ success: false, message: "Order id required" });
+    const row = await FarmServiceOrder.findOne({ orderId });
+    if (!row) return res.status(404).json({ success: false, message: "No rent-farm order " + orderId });
+    if (row.state === "cancelled") {
+      return res.json({ success: true, already: true, ended: 0, note: "Already closed." });
+    }
+    const reason = String((req.body && req.body.reason) || "closed by the operator").slice(0, 200);
+    const now = new Date();
+    const holder = await Renter.findOne({ usernameLower: OPERATOR_HOLDER_USERNAME }, { _id: 1 }).lean();
+    let ended = 0;
+    for (const a of row.accounts || []) {
+      if (!a || !a.login) continue;
+      if (holder) {
+        const r = await RenterAccount.updateOne(
+          { renter: holder._id, login: loginMatcher(a.login), farmEndedAt: null },
+          { $set: { farmUntil: now } },
+        );
+        ended += (r && (r.modifiedCount || r.nModified)) || 0;
+      }
+      a.farmUntil = now;
+    }
+    row.state = "cancelled";
+    row.lastError = ("closed by the operator: " + reason).slice(0, 400);
+    await row.save();
+    logEvent({
+      category: "marketplace",
+      action: "farm_order_closed",
+      actor: (req.session && req.session.admin && req.session.admin.username) || "superadmin",
+      subject: orderId,
+      count: ended,
+      detail: reason + " — " + ended + " farming window(s) ended",
+    });
+    res.json({
+      success: true,
+      ended,
+      note:
+        "Order closed. " + ended + " account(s) will be pulled off the bot within about 5 minutes.",
+    });
+  } catch (err) {
+    console.error("farm order close error:", err.message);
+    res.status(500).json({ success: false, message: "Server error" });
+  }
+});
+
 // REMOVE one renter account (e.g. a dead one): pulled out of its bot config
 // (with a restart so the change takes effect if the container is running) and
 // deleted from the renter's inventory. The renter's farmed drops (RenterDrop)

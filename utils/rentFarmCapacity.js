@@ -382,6 +382,13 @@ function start() {
       await require("./renterIntegrity").checkOnce({});
     } catch (e) {
       console.error("renter integrity check failed:", e.message);
+    }
+    try {
+      // Rent-farm orders cancelled / refunded / disputed on the platform while
+      // their accounts keep farming — pages only, never closes (hourly inside).
+      await require("./farmOrderWatch").checkOnce({});
+    } catch (e) {
+      console.error("farm order watch failed:", e.message);
     } finally {
       const t = setTimeout(tick, TICK_MS);
       if (t.unref) t.unref();

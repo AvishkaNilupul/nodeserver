@@ -256,8 +256,10 @@ async function deliverFarmOrder(order, { dryRun } = {}) {
   // Claim the order. The unique index is what stops two ticks provisioning the
   // same order twice.
   let row = await FarmServiceOrder.findOne({ orderId: key });
-  if (row && row.state === "delivered") {
-    return { orderId, farm: true, skipped: "already delivered" };
+  // A CANCELLED row is closed (the buyer walked away / was refunded) — it must
+  // never provision, even while the platform still lists the order as paid.
+  if (row && (row.state === "delivered" || row.state === "cancelled")) {
+    return { orderId, farm: true, skipped: "already " + row.state };
   }
   if (!row) {
     try {
