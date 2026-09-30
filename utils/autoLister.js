@@ -643,11 +643,18 @@ async function pickDeliveryAccounts(task, max, items) {
   const rented = await require("./rentedAccounts").rentedAccountIds(
     verified.map((a) => a.accountId),
   );
+  // One Twitch account can have two BotAccount records (utils/accountTwins.js):
+  // pick it once, and not at all when its other record's copy of these drops
+  // is already reserved, sold or claimed.
+  const twins = require("./accountTwins");
+  const keys = [...new Set((items || []).map((i) => i && i.itemKey).filter(Boolean))];
+  const gone = await twins.goneKeysFor(verified.map((a) => a.login), keys);
   const out = [];
-  for (const acc of verified) {
+  for (const acc of twins.onePerLogin(verified)) {
     if (out.length >= max) break;
     if (used.has(String(acc.login).toLowerCase())) continue;
     if (rented.has(String(acc.accountId))) continue;
+    if (twins.hitsAny(gone.get(twins.loginKey(acc.login)), keys)) continue;
     out.push(acc);
   }
   return out;

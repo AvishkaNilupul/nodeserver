@@ -126,8 +126,14 @@ async function claimAccountsForSet(set, max, { claimTag = ELD_CLAIM_TAG } = {}) 
     await loginsOnActiveListings(),
   );
   const claimed = [];
+  // One Twitch account once per claim, however many BotAccount records it has
+  // (utils/accountTwins.js): order c8650c3c was sent marolw93x7w twice.
+  // availableAccountsForSet already offers one record per login; this is the
+  // last check, on the login actually read back for delivery.
+  const loginsTaken = new Set();
   for (const c of candidates) {
     if (claimed.length >= want) break;
+    if (loginsTaken.has(String(c.login || "").trim().toLowerCase())) continue;
     const ok = await reserveSetOnAccount(c.accountId, set, {
       soldToUsername: claimTag,
       soldSetId: String(set._id),
@@ -140,15 +146,18 @@ async function claimAccountsForSet(set, max, { claimTag = ELD_CLAIM_TAG } = {}) 
     }).lean();
     const login = account ? account.login || account.credUsername || "" : "";
     const password = account ? decrypt(account.credPassword) : "";
+    const key = String(login).trim().toLowerCase();
     // A unit with no readable password is not deliverable, so never let it
-    // stand behind the offer's quantity.
-    if (!login || !password) {
+    // stand behind the offer's quantity — and a login already in this claim
+    // would hand the same account over twice.
+    if (!login || !password || loginsTaken.has(key)) {
       // Scoped to THIS set (docs/bulk-packs/CONTRACT.md I1): a tag-wide release
       // would also free the account's other drops reserved — or already SOLD —
       // under the same marketplace tag for a different set.
       await releaseSetForAccounts([c.accountId], String(set._id), claimTag);
       continue;
     }
+    loginsTaken.add(key);
     claimed.push({ accountId: String(c.accountId), login, password });
   }
   return claimed;

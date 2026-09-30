@@ -248,7 +248,14 @@ async function availableAccountsForSet(set) {
       a.minCount - b.minCount ||
       String(a.login || "").localeCompare(String(b.login || "")),
   );
-  return out;
+  // One Twitch account can have two BotAccount records (utils/accountTwins.js).
+  // Offer it once — the best-ranked record — and not at all when its other
+  // record's copy of these drops is already reserved, sold or claimed.
+  const twins = require("../utils/accountTwins");
+  const gone = await twins.goneKeysFor(out.map((o) => o.login), keys);
+  return twins
+    .onePerLogin(out)
+    .filter((o) => !twins.hitsAny(gone.get(twins.loginKey(o.login)), keys));
 }
 
 function stockForSetFromHoldings(set, holdings) {
@@ -266,6 +273,10 @@ function stockForSetFromHoldings(set, holdings) {
   let stock = 0;
   let bestMin = -1;
   let bestMap = null;
+  // One Twitch account counts once, however many records it has, and a twin
+  // whose drops are gone on its other record does not count at all
+  // (utils/accountTwins.js; stockForSets attaches `goneKeys`).
+  const counted = new Set();
   for (const row of holdings) {
     if (scopeIds.size && !scopeIds.has(String(row.accountId || ""))) {
       continue;
@@ -281,6 +292,11 @@ function stockForSetFromHoldings(set, holdings) {
     ) {
       continue;
     }
+    const login = String(row.login || "")
+      .trim()
+      .toLowerCase();
+    if (login && counted.has(login)) continue;
+    if (row.goneKeys && keys.some((key) => row.goneKeys.has(key))) continue;
     const counts = row.counts;
     let ok = true;
     let min = Infinity;
@@ -293,6 +309,7 @@ function stockForSetFromHoldings(set, holdings) {
       if (count < min) min = count;
     }
     if (!ok) continue;
+    if (login) counted.add(login);
     stock += 1;
     if (min > bestMin) {
       bestMin = min;
@@ -355,6 +372,13 @@ async function stockForSets(sets) {
       login: account.login || "",
       counts: m,
     });
+  }
+  // Twins whose drops are gone on their other record (utils/accountTwins.js).
+  const twins = require("../utils/accountTwins");
+  const gone = await twins.goneKeysFor(holdings.map((h) => h.login), allKeys);
+  for (const h of holdings) {
+    const g = gone.get(twins.loginKey(h.login));
+    if (g) h.goneKeys = g;
   }
   // For each set, count sellable accounts that hold all its keys and remember
   // the one with the most spare copies for the ×N preview.
