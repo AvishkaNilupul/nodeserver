@@ -1045,10 +1045,10 @@ async function deliverPaidOrders() {
     console.error("eldorado fulfiller: could not read orders:", e.message);
     // Paged once it keeps failing — a paid order that is never READ creates no
     // row, so nothing else could ever notice it (utils/intakeWatch).
-    await require("./intakeWatch").failed("Eldorado", e).catch(() => {});
+    await intakeWatch("failed", "Eldorado", e);
     return { error: e.message };
   }
-  await require("./intakeWatch").ok("Eldorado").catch(() => {});
+  await intakeWatch("ok", "Eldorado");
   if (!orders.length) return { orders: 0 };
 
   // The pool is the hard limit on rent-farm sales, and it is small. Surface it
@@ -1564,6 +1564,17 @@ function start() {
   };
   const t3 = setTimeout(keepAliveTick, 5 * 60 * 1000);
   if (t3.unref) t3.unref();
+}
+
+// The intake-failure watch (utils/intakeWatch) must never break a delivery
+// tick: not by rejecting, and not by failing to load (a require that throws
+// happens before any .catch could apply).
+function intakeWatch(fn, ...args) {
+  try {
+    return Promise.resolve(require("./intakeWatch")[fn](...args)).catch(() => {});
+  } catch {
+    return Promise.resolve();
+  }
 }
 
 module.exports = {

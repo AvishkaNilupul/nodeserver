@@ -13,6 +13,11 @@
 //   double         one token enabled in two configs
 //   wrongGame      a rent-farm buyer's account pinned to games that do not
 //                  include the game its order sold
+//   orphan         a token enabled in a RENTAL STACK with no ledger row at all
+//                  — it never expires, is never scanned, sits outside every
+//                  quota and the never-sell index
+//   unreadable     a rental stack's config that cannot be read (nothing in it
+//                  can be checked — or pulled by a stop)
 // Reads ONE batched config listing per host that carries a rental stack (the
 // Pi and the no-claim tree are fleetIntegrity's job). A finding pages only
 // after it is seen on two checks in a row (a sale landing between the ledger
@@ -56,7 +61,7 @@ function blocked(r, now) {
 //   live:    RenterAccount rows with farmEndedAt null (enabled)
 //   ended:   RenterAccount rows with farmEndedAt set
 //   renters: Map(id -> renter), holderId, orders: Map(lowerLogin -> order)
-function classify({ homes, live, ended, renters, holderId, orders, now }) {
+function classify({ homes, live, ended, renters, holderId, orders, now, known = null, stackKeys = null, unreadableStacks = [] }) {
   const where = new Map(); // secret -> [{ key, running, games }]
   for (const h of homes) {
     for (const u of usersOf(h.cfg)) {
@@ -82,11 +87,13 @@ function classify({ homes, live, ended, renters, holderId, orders, now }) {
     const homesOf = where.get(String(a.clientSecret)) || [];
     const windowLive = !a.farmUntil || new Date(a.farmUntil).getTime() > now;
     if (!windowLive) continue; // renterExpiry's business (and it alerts when stuck)
-    if (a.lastScanStatus === "token_invalid") {
-      add("deadToken", a, "the scanner reports its token invalid (password changed?)");
-    }
     const ownerBlocked = !isHolder && blocked(r, now);
     const ownerStopped = !isHolder && r && r.botStoppedAt;
+    // A dead token matters only on an account that is meant to be farming —
+    // not on an expired, suspended or stopped renter's (nobody is owed it).
+    if (a.lastScanStatus === "token_invalid" && !ownerBlocked && !ownerStopped) {
+      add("deadToken", a, "the scanner reports its token invalid (password changed?)");
+    }
     if (ownerBlocked) {
       const running = homesOf.filter((x) => x.running !== false);
       if (running.length) {
@@ -119,6 +126,30 @@ function classify({ homes, live, ended, renters, holderId, orders, now }) {
       add("farmingPastEnd", a, "its window ended but it still farms in " + running.map((x) => x.key).join(", "));
     }
   }
+  // Rental-stack entries nobody owns: in a stack's config, enabled, and no
+  // RenterAccount row at all (`known` = every secret the ledger has).
+  if (known && stackKeys) {
+    for (const h of homes) {
+      if (!stackKeys.has(h.host + "/" + h.file)) continue;
+      for (const u of usersOf(h.cfg)) {
+        if (!isEnabled(u) || known.has(String(u.ClientSecret))) continue;
+        add(
+          "orphan",
+          { clientSecret: String(u.ClientSecret), login: u.Login || "", renter: "" },
+          "enabled in " + h.host + "/" + h.file + " with no renter / buyer row — it never expires",
+        );
+      }
+    }
+  }
+  for (const key of unreadableStacks) {
+    findings.push({
+      kind: "unreadable",
+      id: "unreadable:" + key,
+      login: key,
+      renter: "",
+      detail: "this rental stack's config cannot be read — nothing in it can be checked, or pulled by a stop",
+    });
+  }
   return findings;
 }
 
@@ -128,8 +159,10 @@ async function gather() {
   const now = dep("now")();
   const stacks = await dep("listStacks")();
   const hostIds = [...new Set((stacks || []).map((s) => String(s.host || "local")))];
+  const stackKeys = new Set((stacks || []).map((s) => String(s.host || "local") + "/" + s.file));
   const homes = [];
   const unreadable = [];
+  const unreadableStacks = [];
   for (const hid of hostIds) {
     const host = hosts.resolveHost(hid);
     if (!host) {
@@ -158,7 +191,10 @@ async function gather() {
         }
       }
       if (!cfg) {
-        if (!(r && /not found/i.test(String(r.error || "")))) unreadable.push(hid + "/" + f);
+        // readdir just listed it, so "Not found" from the batched read means
+        // unreadable (the remote batch reports every failure that way).
+        unreadable.push(hid + "/" + f);
+        if (stackKeys.has(hid + "/" + f)) unreadableStacks.push(hid + "/" + f);
         continue;
       }
       const m = f.match(/^config_0*(\d+)\.json$/);
@@ -176,7 +212,7 @@ async function gather() {
   const Renter = dep("Renter")();
   const FarmServiceOrder = dep("FarmServiceOrder")();
   const since = new Date(now - 30 * DAY_MS);
-  const [live, ended, renterRows] = await Promise.all([
+  const [live, ended, renterRows, knownList] = await Promise.all([
     RenterAccount.find(
       { enabled: true, farmEndedAt: null },
       { renter: 1, clientSecret: 1, login: 1, host: 1, configFile: 1, lastScanStatus: 1, farmUntil: 1 },
@@ -188,7 +224,12 @@ async function gather() {
       { renter: 1, clientSecret: 1, login: 1 },
     ).lean(),
     Renter.find({}, { username: 1, usernameLower: 1, status: 1, accessEnd: 1, botStoppedAt: 1 }).lean(),
+    // Every secret the ledger has at all (any renter, live or ended), for the
+    // orphan check. A failed read skips that check rather than calling every
+    // entry an orphan.
+    RenterAccount.distinct("clientSecret").catch(() => null),
   ]);
+  const known = Array.isArray(knownList) ? new Set(knownList.map(String)) : null;
   const renters = new Map(renterRows.map((r) => [String(r._id), r]));
   const holder = renterRows.find((r) => lower(r.usernameLower || r.username) === "operator-selffarm");
   const holderId = holder ? String(holder._id) : null;
@@ -201,7 +242,7 @@ async function gather() {
     : [];
   const orders = new Map();
   for (const o of orderRows) for (const x of o.accounts || []) orders.set(lower(x.login), o);
-  return { homes, live, ended, renters, holderId, orders, now, unreadable };
+  return { homes, live, ended, renters, holderId, orders, now, unreadable, known, stackKeys, unreadableStacks };
 }
 
 // Latches: finding id -> { seen: consecutive checks, pagedAt }
@@ -230,6 +271,8 @@ async function checkOnce({ notify = true, force = false } = {}) {
   if (notify && toPage.length) {
     const orderOf = (f) => g.orders.get(lower(f.login));
     const who = (f) => {
+      if (f.kind === "orphan") return "no ledger row";
+      if (f.kind === "unreadable") return "rental stack";
       const o = orderOf(f);
       if (o) return (o.market || "?") + " order " + String(o.orderId || "").slice(0, 8) + (o.buyerUsername ? " (" + o.buyerUsername + ")" : "");
       const r = g.renters.get(f.renter);
@@ -241,6 +284,8 @@ async function checkOnce({ notify = true, force = false } = {}) {
       farmingPastEnd: "farming past its end",
       double: "in two bots",
       wrongGame: "wrong game",
+      orphan: "in a stack with no ledger row",
+      unreadable: "unreadable stack",
     };
     await dep("sendTelegram")(
       "🔎 Renter / rent-farm integrity: " + toPage.length + " problem(s)\n" +

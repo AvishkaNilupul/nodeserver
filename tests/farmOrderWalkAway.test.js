@@ -56,6 +56,7 @@ async function seed() {
   await FarmServiceOrder.create({ orderId: "eld-cancel-1", market: "eldorado", buyerUsername: "JumpyPage", game: "Overwatch", days: 365, state: "delivered", accounts: [{ login: "buyer1" }] });
   await FarmServiceOrder.create({ orderId: "eld-ok-2", market: "eldorado", game: "Rust", days: 180, state: "delivered", accounts: [{ login: "other" }] });
   await FarmServiceOrder.create({ orderId: "g2g:777", market: "g2g", game: "Rust", days: 120, state: "delivered", accounts: [{ login: "g2gbuyer" }], createdAt: new Date(NOW - 5 * 86400000) });
+  await RenterAccount.create({ renter: holder._id, clientSecret: "c3", login: "g2gbuyer", host: "contabo", configFile: "config_02.json", farmUntil: new Date(NOW + 100 * 86400000) });
   return holder;
 }
 
@@ -75,7 +76,7 @@ test("REGRESSION: an order Eldorado lists as Canceled pages with its logins — 
   });
   const r = await watch.checkOnce({ force: true });
   assert.equal(r.paged, 1);
-  assert.match(sent[0], /Eldorado eld-canc is CANCELED \(buyer JumpyPage\) — Overwatch 365d — still farming: buyer1/);
+  assert.match(sent[0], /Eldorado order eld-cancel-1 is CANCELED \(buyer JumpyPage\) — Overwatch 365d — still farming: Buyer1/);
   const row = await FarmServiceOrder.findOne({ orderId: "eld-cancel-1" }).lean();
   assert.equal(row.state, "delivered", "never closed automatically");
   // Same hour again: quiet; a day later: reminded.
@@ -103,7 +104,7 @@ test("a G2G order with a refunded quantity pages; an unreadable list is a note, 
   });
   const r = await watch.checkOnce({ force: true });
   assert.equal(r.paged, 1);
-  assert.match(sent[0], /G2G 777 is REFUNDED \(1\)/);
+  assert.match(sent[0], /G2G order g2g:777 is REFUNDED \(1\)/);
   assert.equal(r.notes.length, 2, "both Eldorado lists noted as unreadable");
   watch._reset();
 });
@@ -133,4 +134,135 @@ test("REGRESSION: every farm service treats a cancelled row as closed (never pro
     const src = fs.readFileSync(path.join(__dirname, "..", "utils", f), "utf8");
     assert.match(src, /if \(row && \(row\.state === "delivered" \|\| row\.state === "cancelled"\)\) \{/, f);
   }
+});
+
+// ---- review 3 (2026-10-01) ----------------------------------------------
+test("REGRESSION: a failed read does not re-arm the daily latch (no re-page of every order next hour)", async () => {
+  await seed();
+  const sent = [];
+  watch._reset();
+  let clock = NOW;
+  let eldDown = false;
+  watch.__setDeps({
+    now: () => clock,
+    mp: () => ({
+      eldoradoOrders: async ({ orderState }) => {
+        if (eldDown) throw new Error("503");
+        return orderState === "Canceled" ? [{ id: "eld-cancel-1" }] : [];
+      },
+      g2gOrder: async () => ({ purchased_qty: 1, delivered_qty: 1, refunded_qty: 0, order_item_status: "completed" }),
+    }),
+    sendTelegram: async (m) => sent.push(m),
+    logEvent: () => {},
+  });
+  await watch.checkOnce({ force: true });
+  assert.equal(sent.length, 1);
+  clock += 3600000;
+  eldDown = true;
+  await watch.checkOnce(); // unreadable: the order is simply not seen this hour
+  eldDown = false;
+  clock += 3600000;
+  await watch.checkOnce();
+  assert.equal(sent.length, 1, "the latch from the first page still holds");
+  watch._reset();
+});
+
+test("REGRESSION: an order whose windows already ENDED is not paged (nothing left to stop)", async () => {
+  const holder = await seed();
+  await RenterAccount.updateOne({ renter: holder._id, login: "Buyer1" }, { $set: { farmEndedAt: new Date(NOW - 86400000), enabled: false } });
+  const sent = [];
+  watch._reset();
+  watch.__setDeps({
+    now: () => NOW,
+    mp: () => ({
+      eldoradoOrders: async ({ orderState }) => (orderState === "Canceled" ? [{ id: "eld-cancel-1" }] : []),
+      g2gOrder: async () => ({ refunded_qty: 0, order_item_status: "completed" }),
+    }),
+    sendTelegram: async (m) => sent.push(m),
+    logEvent: () => {},
+  });
+  const r = await watch.checkOnce({ force: true });
+  assert.equal(r.paged, 0);
+  assert.equal(sent.length, 0);
+  watch._reset();
+});
+
+test("G2G's own status field (order_item_status) is read", async () => {
+  await seed();
+  const sent = [];
+  watch._reset();
+  watch.__setDeps({
+    now: () => NOW,
+    mp: () => ({
+      eldoradoOrders: async () => [],
+      g2gOrder: async () => ({ refunded_qty: 0, order_item_status: "cancelled" }),
+    }),
+    sendTelegram: async (m) => sent.push(m),
+    logEvent: () => {},
+  });
+  const r = await watch.checkOnce({ force: true });
+  assert.equal(r.paged, 1);
+  assert.match(sent[0], /G2G order g2g:777 is CANCELLED/);
+  watch._reset();
+});
+
+test("a huge batch stays under Telegram's message limit", async () => {
+  const holder = await seed();
+  const ids = [];
+  for (let i = 0; i < 40; i++) {
+    const logins = Array.from({ length: 30 }, (_, j) => "bulk" + i + "x" + j + "-averyveryverylongloginname");
+    await FarmServiceOrder.create({
+      orderId: "eld-bulk-" + i + "-0000-1111-2222-333333333333", market: "eldorado", buyerUsername: "BulkBuyer" + i,
+      game: "Overwatch", days: 30, state: "delivered", accounts: logins.map((l) => ({ login: l })),
+    });
+    for (const l of logins.slice(0, 8)) {
+      await RenterAccount.create({ renter: holder._id, clientSecret: "s-" + l, login: l, host: "contabo", configFile: "config_02.json", farmUntil: new Date(NOW + 9e9) });
+    }
+    ids.push({ id: "eld-bulk-" + i + "-0000-1111-2222-333333333333" });
+  }
+  const sent = [];
+  watch._reset();
+  watch.__setDeps({
+    now: () => NOW,
+    mp: () => ({ eldoradoOrders: async ({ orderState }) => (orderState === "Canceled" ? ids : []), g2gOrder: async () => ({}) }),
+    sendTelegram: async (m) => sent.push(m),
+    logEvent: () => {},
+  });
+  await watch.checkOnce({ force: true });
+  assert.equal(sent.length, 1);
+  assert.ok(sent[0].length <= 3800, "length " + sent[0].length);
+  assert.match(sent[0], /\+3 more/, "logins per order are capped");
+  watch._reset();
+});
+
+test("REGRESSION: closing an OLD order leaves a re-sold login farming for its NEWER order", async () => {
+  const holder = await seed();
+  // Buyer1's account was recycled and sold again under a newer order.
+  await FarmServiceOrder.create({
+    orderId: "eld-newer-9", market: "eldorado", game: "Overwatch", days: 30, state: "delivered",
+    accounts: [{ login: "BUYER1" }], createdAt: new Date(Date.now() + 1000),
+  });
+  const res = await fetch(baseUrl + "/renters/farm-orders/eld-cancel-1/close", {
+    method: "POST",
+    headers: { Cookie: cookie, "Content-Type": "application/json", Accept: "application/json" },
+    body: JSON.stringify({ reason: "refunded" }),
+  });
+  const d = await res.json();
+  assert.equal(res.status, 200, JSON.stringify(d));
+  assert.equal(d.ended, 0);
+  assert.match(d.keptForNewer.join(" "), /buyer1 \(now order eld-newer-9\)/);
+  const row = await RenterAccount.findOne({ renter: holder._id, login: "Buyer1" }).lean();
+  assert.ok(new Date(row.farmUntil) > new Date(), "the newer buyer keeps farming");
+});
+
+test("closing ends EVERY live holder row of a login (duplicates included)", async () => {
+  const holder = await seed();
+  await RenterAccount.create({ renter: holder._id, clientSecret: "c1b", login: "buyer1", host: "contabo", configFile: "config_03.json", farmUntil: new Date(NOW + 300 * 86400000) });
+  const res = await fetch(baseUrl + "/renters/farm-orders/eld-cancel-1/close", {
+    method: "POST",
+    headers: { Cookie: cookie, "Content-Type": "application/json", Accept: "application/json" },
+    body: JSON.stringify({}),
+  });
+  const d = await res.json();
+  assert.equal(d.ended, 2);
 });

@@ -58,9 +58,11 @@ function operatorFarm() {
   return require("./operatorFarm");
 }
 
-// What room is left, per stack and in total. Read-only.
-async function snapshot() {
-  const { bots = [], offlineHosts = [] } = await renterAdmin().rentalStackOptions();
+// What room is left, per stack and in total. Read-only. `options` = a stack
+// listing already read this tick (rentalStackOptions), so one tick reads the
+// hosts once, not once per check.
+async function snapshot(options = null) {
+  const { bots = [], offlineHosts = [] } = options || (await renterAdmin().rentalStackOptions());
   // Rent-farm capacity is what the HOLDER may use: a direct renter's own bot
   // never takes a buyer (renterAdminRoutes.usableForHolder), so its free slots
   // are not ours to count. Rows from an older stack reader (no flag) count.
@@ -152,8 +154,8 @@ function describe(snap) {
   );
 }
 
-async function checkOnce({ notify = true } = {}) {
-  const snap = await snapshot();
+async function checkOnce({ notify = true, options = null } = {}) {
+  const snap = await snapshot(options);
   const level = levelFor(snap.totalFree);
   const changed = level !== lastLevel;
   snap.level = level;
@@ -219,30 +221,53 @@ const REAL = {
     return h ? h._id : null;
   },
   countRows: (q) => require("../models/RenterAccount").countDocuments(q),
-  snapshot: () => snapshot(),
+  // Live ledger rows recorded in one stack file.
+  ledgerCount: (host, file) =>
+    require("../models/RenterAccount").countDocuments({
+      enabled: true,
+      farmEndedAt: null,
+      configFile: file,
+      host: host === "local" ? { $in: ["local", "", null] } : host,
+    }),
+  // Every pool claim still held that was made since `since` — auto-farm, the
+  // no-claim fleet, renters and rent-farm alike draw from the same pool.
+  poolClaims: (since) =>
+    require("../models/AvailableAccount").countDocuments({ claimedAt: { $gte: since } }),
+  snapshot: (options) => snapshot(options),
   now: () => Date.now(),
 };
 function dep(name) {
   return Object.prototype.hasOwnProperty.call(deps, name) ? deps[name] : REAL[name];
 }
 
-async function deadStacksCheck({ notify = true } = {}) {
-  const { bots = [], offlineHosts = [] } = await dep("rentalStackOptions")();
+async function deadStacksCheck({ notify = true, options = null } = {}) {
+  const { bots = [], offlineHosts = [] } = options || (await dep("rentalStackOptions")());
   const offline = new Set((offlineHosts || []).map((h) => h.id || h));
   const registered = await dep("listStacks")();
   const now = dep("now")();
+  const byKey = new Map(bots.map((b) => [b.host + "/" + b.file, b]));
+  const inFileOf = (b) => Number(b.physical != null ? b.physical : b.accounts) || 0;
   const dead = [];
   for (const b of bots) {
-    const inFile = Number(b.physical != null ? b.physical : b.accounts) || 0;
-    if (b.running === false && inFile > 0) {
-      dead.push({ key: b.host + "/" + b.file, accounts: inFile, why: "its container is NOT running" });
+    if (b.running === false && inFileOf(b) > 0) {
+      dead.push({ key: b.host + "/" + b.file, accounts: inFileOf(b), why: "its container is NOT running" });
     }
   }
-  const seen = new Set(bots.map((b) => b.host + "/" + b.file));
+  // A registered stack whose config could not be read on a host that WAS
+  // read: dead only if the ledger still records live accounts in it — a
+  // stale registration with nothing in it is no emergency.
   for (const st of registered || []) {
-    const key = String(st.host || "local") + "/" + st.file;
-    if (offline.has(String(st.host || "local")) || seen.has(key)) continue;
-    dead.push({ key, accounts: null, why: "its config file is missing or unreadable" });
+    const host = String(st.host || "local");
+    const key = host + "/" + st.file;
+    if (offline.has(host) || byKey.has(key)) continue;
+    let n = null;
+    try {
+      n = await dep("ledgerCount")(host, st.file);
+    } catch {
+      n = null; // unknown: still worth the page
+    }
+    if (n === 0) continue;
+    dead.push({ key, accounts: n, why: "its config file is missing or unreadable" });
   }
   const deadKeys = new Set(dead.map((d) => d.key));
   const page = [];
@@ -253,7 +278,23 @@ async function deadStacksCheck({ notify = true } = {}) {
       if (notify) deadAlerted.set(d.key, now);
     }
   }
-  const recovered = [...deadAlerted.keys()].filter((k) => !deadKeys.has(k));
+  // "Farming again" only for what was SEEN farming this tick. A stack on a
+  // host that could not be read, or whose container state is unknown, keeps
+  // its latch (and says nothing); one no longer recorded as holding accounts
+  // just drops it.
+  const recovered = [];
+  const dropped = [];
+  for (const k of deadAlerted.keys()) {
+    if (deadKeys.has(k)) continue;
+    const host = k.slice(0, k.indexOf("/"));
+    if (offline.has(host)) continue;
+    const b = byKey.get(k);
+    if (b) {
+      if (b.running === true || (b.running === false && inFileOf(b) === 0)) recovered.push(k);
+    } else {
+      dropped.push(k);
+    }
+  }
   if (notify) {
     if (page.length) {
       await sendTelegram(
@@ -277,6 +318,7 @@ async function deadStacksCheck({ notify = true } = {}) {
       deadAlerted.delete(k);
       await sendTelegram("✅ Rental stack " + k + " is farming again.").catch(() => {});
     }
+    for (const k of dropped) deadAlerted.delete(k);
   }
   return { dead, paged: page.map((d) => d.key), recovered };
 }
@@ -293,43 +335,64 @@ const CRIT_DAYS = 4;
 const RUNWAY_REMIND_MS = 24 * 60 * 60 * 1000;
 const runwayState = { slots: { level: "ok", at: 0 }, pool: { level: "ok", at: 0 } };
 
-function runwayLevel(days) {
+// A level is left only with some margin (critical below CRIT_DAYS, back to
+// warn from CRIT_DAYS * 1.25; warn below WARN_DAYS, back to ok from
+// WARN_DAYS * 1.2), so a runway hovering at a line does not flap every tick.
+function runwayLevel(days, prev = "ok") {
   if (days == null || !isFinite(days)) return "ok";
   if (days < CRIT_DAYS) return "critical";
+  if (prev === "critical" && days < CRIT_DAYS * 1.25) return "critical";
   if (days < WARN_DAYS) return "warn";
+  if (prev !== "ok" && days < WARN_DAYS * 1.2) return "warn";
   return "ok";
 }
 
-async function runwayCheck({ notify = true } = {}) {
+async function runwayCheck({ notify = true, snap: given = null } = {}) {
   const now = dep("now")();
   const since = new Date(now - 7 * 86400000);
   const holder = await dep("holderId")();
   if (!holder) return null;
-  const [made, ended] = await Promise.all([
+  const [made, ended, claimed] = await Promise.all([
     dep("countRows")({ renter: holder, createdAt: { $gte: since } }),
     dep("countRows")({ renter: holder, farmEndedAt: { $gte: since } }),
+    Promise.resolve()
+      .then(() => dep("poolClaims")(since))
+      .catch(() => null),
   ]);
-  const takenPerDay = made / 7; // pristine accounts consumed (every sale + buffer)
+  const takenPerDay = made / 7; // pristine accounts the rent-farm consumed
+  // The pool is shared: auto-farm draws from the same accounts, at several
+  // times the rent-farm's rate. Judge the pool by everything taken from it.
+  const poolTakenPerDay = Math.max(takenPerDay, (Number(claimed) || 0) / 7);
   const netSlotsPerDay = (made - ended) / 7; // slots consumed net of windows ending
-  const snap = await dep("snapshot")();
+  const snap = given || (await dep("snapshot")());
   const pool = await dep("gatherPoolEligibility")();
   const eligible = pool && Array.isArray(pool.eligible) ? pool.eligible.length : null;
   const out = {
     takenPerDay: Math.round(takenPerDay * 10) / 10,
+    poolTakenPerDay: Math.round(poolTakenPerDay * 10) / 10,
     netSlotsPerDay: Math.round(netSlotsPerDay * 10) / 10,
     freeSlots: snap.totalFree,
     eligible,
     slotDays: netSlotsPerDay > 0 ? snap.totalFree / netSlotsPerDay : null,
-    poolDays: takenPerDay > 0 && eligible != null ? eligible / takenPerDay : null,
+    poolDays: poolTakenPerDay > 0 && eligible != null ? eligible / poolTakenPerDay : null,
   };
+  // The fix depends on which wall is nearer: a holder at its account limit
+  // is not helped by another stack.
+  const holderWall = snap.limitedBy === "holder-limit";
   const checks = [
-    ["slots", out.slotDays, "rental stack slots", out.freeSlots + " free, ~" + out.netSlotsPerDay + "/day net",
-      "Register another rental stack (50 slots) before they run out."],
-    ["pool", out.poolDays, "pristine pool accounts", (eligible == null ? "?" : eligible) + " eligible, ~" + out.takenPerDay + "/day taken",
+    ["slots", out.slotDays,
+      holderWall ? "rent-farm holder account-limit room" : "rental stack slots",
+      out.freeSlots + " free, ~" + out.netSlotsPerDay + "/day net",
+      holderWall
+        ? "The stacks have room — raise operator-selffarm's Account limit on the Renters page."
+        : "Register another rental stack (50 slots) before they run out."],
+    ["pool", out.poolDays, "pristine pool accounts",
+      (eligible == null ? "?" : eligible) + " eligible, ~" + out.poolTakenPerDay +
+        "/day taken by everything that draws on the pool (rent-farm ~" + out.takenPerDay + "/day)",
       "Restock the pool (or move empty no-claim accounts back) before rent-farm orders start failing."],
   ];
   for (const [kind, days, what, detail, fix] of checks) {
-    const level = runwayLevel(days);
+    const level = runwayLevel(days, runwayState[kind].level);
     const st = runwayState[kind];
     const changed = level !== st.level;
     const remind = level === "critical" && now - st.at >= RUNWAY_REMIND_MS;
@@ -355,40 +418,64 @@ async function runwayCheck({ notify = true } = {}) {
   return out;
 }
 
+// One tick of every check. The hosts are read ONCE (the stack listing is
+// shared); each check runs under a time limit, so one that hangs (a host
+// read, a Telegram call) cannot silence the others or stop the next tick; a
+// check still running from an earlier tick is skipped rather than stacked.
+const CHECK_TIMEOUT_MS = 5 * 60 * 1000;
+const inFlight = new Set();
+async function guarded(name, fn, timeoutMs) {
+  if (inFlight.has(name)) {
+    console.error("rentFarmCapacity: " + name + " is still running from an earlier tick — skipped");
+    return { skipped: true };
+  }
+  inFlight.add(name);
+  const run = Promise.resolve()
+    .then(fn)
+    .finally(() => inFlight.delete(name));
+  let t = null;
+  const limit = new Promise((_, reject) => {
+    t = setTimeout(() => reject(new Error(name + " timed out after " + Math.round(timeoutMs / 1000) + " s")), timeoutMs);
+    if (t.unref) t.unref();
+  });
+  try {
+    return { value: await Promise.race([run, limit]) };
+  } catch (e) {
+    console.error("rentFarmCapacity " + name + " failed:", e.message);
+    return { error: e.message };
+  } finally {
+    clearTimeout(t);
+    run.catch(() => {}); // a timed-out check that fails later must not go unhandled
+  }
+}
+
+async function tickOnce({ timeoutMs = CHECK_TIMEOUT_MS } = {}) {
+  const out = {};
+  // A host read failing is not a capacity emergency; it is a read failure:
+  // the checks that need the listing wait for the next tick.
+  const listing = await guarded("stack read", () => dep("rentalStackOptions")(), timeoutMs);
+  const options = listing.value || null;
+  if (options) {
+    const cap = await guarded("capacity check", () => checkOnce({ options }), timeoutMs);
+    out.capacity = cap;
+    out.dead = await guarded("dead-stack check", () => deadStacksCheck({ options }), timeoutMs);
+    if (cap.value) out.runway = await guarded("runway check", () => runwayCheck({ snap: cap.value }), timeoutMs);
+  }
+  // Ledger vs configs (dead tokens, not farming, farming past the end,
+  // doubles, wrong game, orphans) — gated to at most hourly inside.
+  out.integrity = await guarded("integrity check", () => require("./renterIntegrity").checkOnce({}), timeoutMs);
+  // Rent-farm orders cancelled / refunded / disputed on the platform while
+  // their accounts keep farming — pages only, never closes (hourly inside).
+  out.orders = await guarded("order watch", () => require("./farmOrderWatch").checkOnce({}), timeoutMs);
+  return out;
+}
+
 function start() {
   if (timer) return;
   timer = true;
   const tick = async () => {
     try {
-      await checkOnce({});
-    } catch (e) {
-      // A host read failing is not a capacity emergency; it is a read failure.
-      // Log it and try again next tick rather than crying wolf.
-      console.error("rentFarmCapacity check failed:", e.message);
-    }
-    try {
-      await deadStacksCheck({});
-    } catch (e) {
-      console.error("rentFarmCapacity dead-stack check failed:", e.message);
-    }
-    try {
-      await runwayCheck({});
-    } catch (e) {
-      console.error("rentFarmCapacity runway check failed:", e.message);
-    }
-    try {
-      // Ledger vs configs (dead tokens, not farming, farming past the end,
-      // doubles, wrong game) — gated to at most hourly inside.
-      await require("./renterIntegrity").checkOnce({});
-    } catch (e) {
-      console.error("renter integrity check failed:", e.message);
-    }
-    try {
-      // Rent-farm orders cancelled / refunded / disputed on the platform while
-      // their accounts keep farming — pages only, never closes (hourly inside).
-      await require("./farmOrderWatch").checkOnce({});
-    } catch (e) {
-      console.error("farm order watch failed:", e.message);
+      await tickOnce();
     } finally {
       const t = setTimeout(tick, TICK_MS);
       if (t.unref) t.unref();
@@ -398,7 +485,7 @@ function start() {
   if (t.unref) t.unref();
 }
 
-module.exports = { TICK_MS, LOW_WATER, snapshot, levelFor, describe, checkOnce, start,
+module.exports = { TICK_MS, LOW_WATER, snapshot, levelFor, describe, checkOnce, start, tickOnce,
   deadStacksCheck, runwayCheck, runwayLevel, WARN_DAYS, CRIT_DAYS,
   // testing seams: the alert-state latches, and injectable reads
   __setDeps: (d) => { deps = { ...deps, ...(d || {}) }; },
@@ -408,4 +495,5 @@ module.exports = { TICK_MS, LOW_WATER, snapshot, levelFor, describe, checkOnce, 
     runwayState.slots = { level: "ok", at: 0 };
     runwayState.pool = { level: "ok", at: 0 };
     deps = {};
+    inFlight.clear();
   } };

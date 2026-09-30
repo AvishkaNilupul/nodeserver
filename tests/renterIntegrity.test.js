@@ -55,6 +55,38 @@ test("classify finds each class, and nothing on healthy rows", () => {
   assert.ok(!f.some((x) => x.login === "s1"), "a renter who pressed Stop is not 'not farming'");
 });
 
+test("REGRESSION: a dead token on an expired, suspended or stopped renter's account is not paged (nobody is owed it)", () => {
+  const f = run({
+    live: [
+      row("W", "wdead", { lastScanStatus: "token_invalid" }), // lease over
+      row("S", "sdead", { lastScanStatus: "token_invalid" }), // pressed Stop
+      row("J", "jdead", { lastScanStatus: "token_invalid", configFile: "config_03.json" }),
+    ],
+    ended: [],
+  });
+  const dead = f.filter((x) => x.kind === "deadToken").map((x) => x.login);
+  assert.deepEqual(dead, ["jdead"], "only the active, farming renter's");
+});
+
+test("an entry in a RENTAL STACK with no ledger row at all is an orphan; operator configs are not judged", () => {
+  const f = run({
+    homes: [
+      { host: "contabo", file: "config_03.json", running: true, cfg: cfg([u("b1", ["Overwatch"]), u("stray")]) },
+      { host: "contabo", file: "config_40.json", running: true, cfg: cfg([u("operatorOwn")]) }, // not a stack
+    ],
+    live: [row("H", "b1")],
+    ended: [],
+    known: new Set(["b1"]),
+    stackKeys: new Set(["contabo/config_03.json"]),
+  });
+  assert.deepEqual(f.filter((x) => x.kind === "orphan").map((x) => x.login), ["stray"]);
+});
+
+test("an unreadable rental stack is a finding of its own", () => {
+  const f = run({ homes: [], live: [], ended: [], unreadableStacks: ["contabo/config_07.json"] });
+  assert.deepEqual(f.map((x) => x.id), ["unreadable:contabo/config_07.json"]);
+});
+
 test("a window that already lapsed is renterExpiry's business, not a finding", () => {
   const f = run({ live: [row("H", "old", { farmUntil: new Date(NOW - 1000), lastScanStatus: "token_invalid" })], ended: [] });
   assert.deepEqual(f, []);
@@ -78,6 +110,7 @@ test("checkOnce pages a finding only when seen twice, then daily, then says all 
     listStacks: async () => [{ host: "contabo", file: "config_03.json" }],
     RenterAccount: () => ({
       find: (q) => ({ lean: async () => (q.farmEndedAt === null ? live : []) }),
+      distinct: async () => live.map((x) => x.clientSecret),
     }),
     Renter: () => model(() => [...renters.values()]),
     FarmServiceOrder: () => model(() => [{ orderId: "e328ee9d-1", market: "eldorado", buyerUsername: "JumpyPage", game: "Overwatch", accounts: [{ login: "dead" }] }]),
@@ -111,7 +144,7 @@ test("checkOnce runs at most hourly unless forced", async () => {
     now: () => NOW,
     hosts: () => ({ resolveHost: () => null }),
     listStacks: async () => { n++; return []; },
-    RenterAccount: () => ({ find: () => ({ lean: async () => [] }) }),
+    RenterAccount: () => ({ find: () => ({ lean: async () => [] }), distinct: async () => [] }),
     Renter: () => ({ find: () => ({ lean: async () => [] }) }),
     FarmServiceOrder: () => ({ find: () => ({ lean: async () => [] }) }),
     sendTelegram: async () => {},

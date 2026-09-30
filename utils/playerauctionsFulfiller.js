@@ -1040,10 +1040,10 @@ async function deliverPendingOrders() {
     orders = await mp.playerauctionsPendingOrders();
   } catch (e) {
     console.error("playerauctions fulfiller: could not read orders:", e.message);
-    await require("./intakeWatch").failed("PlayerAuctions", e).catch(() => {});
+    await intakeWatch("failed", "PlayerAuctions", e);
     return { error: e.message };
   }
-  await require("./intakeWatch").ok("PlayerAuctions").catch(() => {});
+  await intakeWatch("ok", "PlayerAuctions");
   if (!orders.length) return { orders: 0 };
 
   // The pool is the hard limit on rent-farm sales, and it is small. Surface it
@@ -1215,6 +1215,17 @@ function start() {
   };
   const t2 = setTimeout(stockTick, 100 * 1000);
   if (t2.unref) t2.unref();
+}
+
+// The intake-failure watch (utils/intakeWatch) must never break a delivery
+// tick: not by rejecting, and not by failing to load (a require that throws
+// happens before any .catch could apply).
+function intakeWatch(fn, ...args) {
+  try {
+    return Promise.resolve(require("./intakeWatch")[fn](...args)).catch(() => {});
+  } catch {
+    return Promise.resolve();
+  }
 }
 
 module.exports = {

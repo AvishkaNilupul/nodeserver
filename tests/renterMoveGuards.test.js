@@ -20,7 +20,7 @@ const { MongoMemoryServer } = require("mongodb-memory-server");
 process.env.SESSION_SECRET ||= "renter-move-guards-test";
 process.env.CRED_SECRET ||= "renter-move-guards-cred";
 
-const world = { written: [], removed: [], stopped: [], stopFails: null };
+const world = { written: [], removed: [], stopped: [], stopFails: null, located: null, detachFails: null };
 
 const realLoad = Module._load;
 Module._load = function (request, parent, isMain) {
@@ -79,6 +79,18 @@ Module._load = function (request, parent, isMain) {
           return { mode: "detached", removed: 1, files: [] };
         },
         startRenterFarming: async () => ({ added: 0, skipped: [], running: true }),
+        // Account removal pulls through these (every config on the host).
+        locateSecrets: async () => new Map(world.located || []),
+        detachFromFile: async (host, file, secrets) => {
+          if (world.detachFails) {
+            const e = new Error(world.detachFails);
+            e.unreachable = true;
+            throw e;
+          }
+          world.removed.push(file + ":" + secrets[0]);
+          return { removed: 1, remaining: 5, games: new Map(), missing: false, stopped: false };
+        },
+        settleAfterDetach: async () => "restarted",
       };
     }
   }
@@ -123,7 +135,8 @@ test.after(async () => {
 });
 
 async function reset() {
-  Object.assign(world, { written: [], removed: [], stopped: [], stopFails: null });
+  Object.assign(world, { written: [], removed: [], stopped: [], stopFails: null, located: null, detachFails: null });
+  require("../utils/renterAccountBusy")._reset();
   await Promise.all([
     Renter.deleteMany({}),
     RenterAccount.deleteMany({}),
@@ -275,8 +288,61 @@ test("REGRESSION: removing a paid rent-farm account asks first, then closes the 
   res = await call("DELETE", "/renter-accounts/" + acc._id + "?force=1");
   assert.equal(res.status, 200);
   assert.equal(await RenterAccount.findById(acc._id).lean(), null);
+  assert.deepEqual(world.removed, ["config_02.json:tokP"], "pulled off its bot");
   const o = await FarmServiceOrder.findOne({ orderId: "r6-30d-x" }).lean();
   assert.ok(new Date(o.accounts[0].farmUntil) <= new Date(), "order window closed now");
+});
+
+test("REGRESSION: a removal whose bot write fails changes NOTHING — the order window is untouched", async () => {
+  await reset();
+  const holder = await mk("operator-selffarm", { botFile: "config_54.json" });
+  const until = new Date(Date.now() + 30 * 86400000);
+  const acc = await RenterAccount.create({
+    renter: holder._id, clientSecret: "tokF", login: "Paid2", host: "contabo", configFile: "config_02.json", farmUntil: until,
+  });
+  await FarmServiceOrder.create({
+    orderId: "r6-30d-y", market: "eldorado", game: "Rainbow Six Siege", days: 30, state: "delivered",
+    accounts: [{ login: "paid2", farmUntil: until }],
+  });
+  world.detachFails = "ssh: connect timed out";
+  try {
+    const res = await call("DELETE", "/renter-accounts/" + acc._id + "?force=1");
+    assert.equal(res.status, 502);
+  } finally {
+    world.detachFails = null;
+  }
+  assert.ok(await RenterAccount.findById(acc._id).lean(), "row kept");
+  const o = await FarmServiceOrder.findOne({ orderId: "r6-30d-y" }).lean();
+  assert.equal(new Date(o.accounts[0].farmUntil).toISOString(), until.toISOString(), "the order still says it farms");
+});
+
+test("an account found in ANOTHER config too is pulled from every one of them", async () => {
+  await reset();
+  const r = await mk("rainbowsix", { botFile: "config_16.json", ...LIVE });
+  const acc = await RenterAccount.create({ renter: r._id, clientSecret: "t8", login: "r8", host: "contabo", configFile: "config_16.json" });
+  world.located = [["config_21.json", new Set(["t8"])]];
+  const res = await call("DELETE", "/renter-accounts/" + acc._id);
+  assert.equal(res.status, 200);
+  assert.deepEqual(world.removed.sort(), ["config_16.json:t8", "config_21.json:t8"]);
+  world.located = null;
+});
+
+test("removing an already-ENDED paid row needs no yes, and rewrites no order", async () => {
+  await reset();
+  const holder = await mk("operator-selffarm", { botFile: "config_54.json" });
+  const past = new Date(Date.now() - 5 * 86400000);
+  const acc = await RenterAccount.create({
+    renter: holder._id, clientSecret: "tokE", login: "Ended1", host: "contabo", configFile: "", enabled: false,
+    farmUntil: past, farmEndedAt: past,
+  });
+  await FarmServiceOrder.create({
+    orderId: "ow-old", market: "eldorado", game: "Overwatch", days: 30, state: "delivered",
+    accounts: [{ login: "ended1", farmUntil: past }],
+  });
+  const res = await call("DELETE", "/renter-accounts/" + acc._id);
+  assert.equal(res.status, 200, "no prompt");
+  const o = await FarmServiceOrder.findOne({ orderId: "ow-old" }).lean();
+  assert.equal(new Date(o.accounts[0].farmUntil).toISOString(), past.toISOString(), "history kept");
 });
 
 test("an account backing a live Gameflip offer cannot be removed", async () => {

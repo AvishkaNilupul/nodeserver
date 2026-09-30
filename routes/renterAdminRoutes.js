@@ -44,6 +44,8 @@ const {
   locateSecrets,
   markReloadOwed,
   clearReloadOwed,
+  detachFromFile,
+  settleAfterDetach,
 } = require("../utils/renterBotOps");
 const busy = require("../utils/renterAccountBusy");
 
@@ -2198,14 +2200,28 @@ router.post("/renters/farm-orders/:orderId/close", requireSuperadmin, async (req
     const now = new Date();
     const holder = await Renter.findOne({ usernameLower: OPERATOR_HOLDER_USERNAME }, { _id: 1 }).lean();
     let ended = 0;
+    const keptForNewer = [];
     for (const a of row.accounts || []) {
       if (!a || !a.login) continue;
       if (holder) {
-        const r = await RenterAccount.updateOne(
-          { renter: holder._id, login: loginMatcher(a.login), farmEndedAt: null },
-          { $set: { farmUntil: now } },
-        );
-        ended += (r && (r.modifiedCount || r.nModified)) || 0;
+        // The account may have been sold again since (a recycled login): its
+        // current window then belongs to the NEWER order, and closing this old
+        // one must not end that buyer's farming.
+        const latest = await FarmServiceOrder.findOne(
+          { "accounts.login": loginMatcher(a.login) },
+          { orderId: 1 },
+        )
+          .sort({ createdAt: -1 })
+          .lean();
+        if (latest && latest.orderId !== row.orderId) {
+          keptForNewer.push(a.login + " (now order " + latest.orderId + ")");
+        } else {
+          const r = await RenterAccount.updateMany(
+            { renter: holder._id, login: loginMatcher(a.login), farmEndedAt: null },
+            { $set: { farmUntil: now } },
+          );
+          ended += (r && (r.modifiedCount || r.nModified)) || 0;
+        }
       }
       a.farmUntil = now;
     }
@@ -2223,8 +2239,10 @@ router.post("/renters/farm-orders/:orderId/close", requireSuperadmin, async (req
     res.json({
       success: true,
       ended,
+      keptForNewer,
       note:
-        "Order closed. " + ended + " account(s) will be pulled off the bot within about 5 minutes.",
+        "Order closed. " + ended + " account(s) will be pulled off the bot within about 5 minutes." +
+        (keptForNewer.length ? " Left farming for a newer order: " + keptForNewer.join(", ") + "." : ""),
     });
   } catch (err) {
     console.error("farm order close error:", err.message);
@@ -2232,19 +2250,31 @@ router.post("/renters/farm-orders/:orderId/close", requireSuperadmin, async (req
   }
 });
 
-// REMOVE one renter account (e.g. a dead one): pulled out of its bot config
-// (with a restart so the change takes effect if the container is running) and
-// deleted from the renter's inventory. The renter's farmed drops (RenterDrop)
-// are kept — they are history, not the account.
+// REMOVE one renter account (e.g. a dead one): pulled off EVERY config on its
+// host that holds it (not only the one its row names — a stale pointer must
+// not leave it farming with no row behind it), each bot it left reloaded if
+// running, and only then deleted from the renter's inventory. A rent-farm
+// buyer's order window is closed only once the account is really off the
+// bots; a host that cannot be read or written refuses with nothing changed.
+// The renter's farmed drops (RenterDrop) are kept — history, not the account.
 router.delete(
   "/renter-accounts/:id",
   requireSuperadmin,
   async (req, res) => {
+    let release = null;
     try {
       if (!mongoose.isValidObjectId(req.params.id)) {
         return res
           .status(400)
           .json({ success: false, message: "Bad account id" });
+      }
+      release = busy.tryAcquire([req.params.id]);
+      if (!release) {
+        return res.status(409).json({
+          success: false,
+          busy: true,
+          message: "This account is being pulled off its bot or placed right now — try again in a minute.",
+        });
       }
       const acc = await RenterAccount.findById(req.params.id);
       if (!acc)
@@ -2252,10 +2282,12 @@ router.delete(
 
       // A rent-farm buyer's account: a live Gameflip offer still SELLS it, and
       // a paid window / order would end without anyone noticing. Refuse the
-      // former outright, confirm the latter, and close the order's window.
+      // former outright, confirm the latter.
       const owner = await Renter.findById(acc.renter, { username: 1, usernameLower: 1 }).lean();
-      let closedOrders = 0;
-      if (owner && isOperatorHolder(owner) && acc.login) {
+      const holderOwned = !!owner && isOperatorHolder(owner);
+      const now = new Date();
+      let order = null;
+      if (holderOwned && acc.login) {
         const bufferRow = await MarketplaceListing.findOne(
           {
             rentFarm: true,
@@ -2278,12 +2310,16 @@ router.delete(
                   bufferRow.externalId + " is being renewed or returned) — let the buffer finish first.",
           });
         }
-        const liveWindow = !acc.farmEndedAt && acc.farmUntil && new Date(acc.farmUntil) > new Date();
-        const order = await FarmServiceOrder.findOne(
+        order = await FarmServiceOrder.findOne(
           { "accounts.login": loginMatcher(acc.login) },
           { orderId: 1, market: 1, buyerUsername: 1 },
-        ).lean();
-        if ((liveWindow || order) && String(req.query.force || "") !== "1") {
+        )
+          .sort({ createdAt: -1 })
+          .lean();
+        // Only a window that is still running needs a yes: removing an ended
+        // one ends nobody's farming.
+        const liveWindow = !acc.farmEndedAt && (!acc.farmUntil || new Date(acc.farmUntil) > now);
+        if (liveWindow && String(req.query.force || "") !== "1") {
           return res.status(409).json({
             success: false,
             needsForce: true,
@@ -2291,75 +2327,108 @@ router.delete(
               "This is a paid rent-farm account" +
               (order ? " (" + (order.market || "?") + " order " + String(order.orderId || "").slice(0, 8) +
                 (order.buyerUsername ? ", buyer " + order.buyerUsername : "") + ")" : "") +
-              (liveWindow ? ", farming until " + new Date(acc.farmUntil).toISOString().slice(0, 10) : "") +
+              (acc.farmUntil ? ", farming until " + new Date(acc.farmUntil).toISOString().slice(0, 10) : "") +
               ". Removing it ends the buyer's farming now.",
-          });
-        }
-        if (order) {
-          const r = await FarmServiceOrder.updateMany(
-            { "accounts.login": loginMatcher(acc.login) },
-            { $set: { "accounts.$[a].farmUntil": new Date() } },
-            { arrayFilters: [{ "a.login": loginMatcher(acc.login) }] },
-          ).catch(() => null);
-          closedOrders = (r && (r.modifiedCount || r.nModified)) || 0;
-          logEvent({
-            category: "renter",
-            action: "farm_window_removed",
-            actor: (req.session && req.session.admin && req.session.admin.username) || "superadmin",
-            subject: acc.login,
-            detail: "paid rent-farm account removed by hand; order window closed now",
           });
         }
       }
 
-      let pulled = false;
-      let note = "";
-      if (acc.configFile) {
-        const host = hosts.resolveHost(acc.host);
-        if (host) {
+      // Off the bots FIRST — every config on its host that holds it.
+      let pulled = 0;
+      const notes = [];
+      const host = hosts.resolveHost(acc.host);
+      if (!host && acc.configFile) {
+        return res.status(409).json({
+          success: false,
+          message: "The account's bot host '" + (acc.host || "") + "' is unknown — nothing was removed.",
+        });
+      }
+      if (host && acc.clientSecret) {
+        const problems = [];
+        let located;
+        try {
+          located = await locateSecrets(host, [acc.clientSecret], {
+            mustRead: acc.configFile ? [acc.configFile] : [],
+            problems,
+          });
+        } catch (e) {
+          return res.status(e.unreachable ? 502 : 409).json({
+            success: false,
+            message: "The bot host could not be read (" + (e.message || e) + ") — nothing was removed.",
+          });
+        }
+        if (problems.length) {
+          return res.status(409).json({
+            success: false,
+            message: "Part of the bot host could not be read (" + problems[0] + ") — nothing was removed.",
+          });
+        }
+        const files = new Set(located.keys());
+        if (acc.configFile && validFile(acc.configFile)) files.add(acc.configFile);
+        for (const file of files) {
           try {
-            const removed = await removeAccountFromConfig(host, acc.configFile, {
-              clientSecret: acc.clientSecret,
-              login: acc.login,
-            });
-            if (removed) {
-              pulled = true;
-              try {
-                const states = await hosts.dockerPs(host);
-                const st = states[containerForFile(acc.configFile)];
-                if (st && /^running/i.test(st.state || "")) {
-                  await restartConfigContainer(host, acc.configFile);
-                }
-              } catch {
-                note = "Removed, but the bot could not be restarted.";
-              }
+            const det = await detachFromFile(host, file, [acc.clientSecret]);
+            if (det.missing) continue;
+            pulled += det.removed;
+            try {
+              await settleAfterDetach(host, file, det);
+            } catch (e) {
+              // Out of the file; its bot still has it loaded until the reload
+              // the owed-reload sweeper retries.
+              notes.push("Removed from " + file + ", but that bot could not be reloaded yet (" +
+                (e.message || e) + ") — retried every 5 min.");
             }
           } catch (e) {
-            // Host offline: refuse rather than leave a ghost entry farming in
-            // the config with no matching inventory row.
-            return res.status(502).json({
+            return res.status(e.unreachable ? 502 : 409).json({
               success: false,
               message:
-                "The bot host is unreachable — try again when it is online (" +
-                e.message +
-                ")",
+                "Could not take the account out of " + file + " (" + (e.message || e) + ")" +
+                (pulled ? " — it was taken out of " + pulled + " other config(s); the row is kept, try again." : " — nothing was removed."),
             });
           }
         }
       }
+
+      // Only now that it is off the bots: close the buyer's LIVE order window
+      // (a historic order's recorded window is left as it was).
+      let closedOrders = 0;
+      if (holderOwned && acc.login && order && !acc.farmEndedAt) {
+        const r = await FarmServiceOrder.updateMany(
+          { "accounts.login": loginMatcher(acc.login) },
+          { $set: { "accounts.$[a].farmUntil": now } },
+          {
+            // Still-running (or open) windows only. An array filter takes one
+            // top-level field per identifier, so no $or: `$not $lte` matches
+            // null / missing / later-than-now alike.
+            arrayFilters: [{ "a.login": loginMatcher(acc.login), "a.farmUntil": { $not: { $lte: now } } }],
+          },
+        ).catch((e) => {
+          console.error("remove account: order window close failed:", e.message);
+          return null;
+        });
+        closedOrders = (r && (r.modifiedCount || r.nModified)) || 0;
+        logEvent({
+          category: "renter",
+          action: "farm_window_removed",
+          actor: (req.session && req.session.admin && req.session.admin.username) || "superadmin",
+          subject: acc.login,
+          detail: "paid rent-farm account removed by hand; order window closed now",
+        });
+      }
       await RenterAccount.deleteOne({ _id: acc._id });
       res.json({
         success: true,
-        pulled,
+        pulled: pulled > 0,
+        closedOrders,
         note:
-          note ||
-          (pulled
-            ? "Account removed and pulled off the bot."
-            : "Account removed."),
+          notes.join(" ") ||
+          (pulled ? "Account removed and pulled off the bot." : "Account removed."),
       });
     } catch (err) {
       console.error("renter account delete error:", err.message);
       res.status(500).json({ success: false, message: "Server error" });
+    } finally {
+      if (release) release();
     }
   },
 );

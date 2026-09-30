@@ -1030,13 +1030,13 @@ async function deliverPendingOrders() {
     counts = await mp.g2gOrderCounts();
   } catch (e) {
     console.error("g2g fulfiller: could not read order counts:", e.message);
-    await require("./intakeWatch").failed("G2G", e).catch(() => {});
+    await intakeWatch("failed", "G2G", e);
     return { error: e.message };
   }
   const waiting = Number(counts && counts.preparing) || 0;
   const delivering = Number(counts && counts.delivering) || 0;
   if (!waiting && !delivering) {
-    await require("./intakeWatch").ok("G2G").catch(() => {});
+    await intakeWatch("ok", "G2G");
     return { checked: 0 };
   }
 
@@ -1045,10 +1045,10 @@ async function deliverPendingOrders() {
     orders = await mp.g2gPendingOrders({});
   } catch (e) {
     console.error("g2g fulfiller: could not read pending orders:", e.message);
-    await require("./intakeWatch").failed("G2G", e).catch(() => {});
+    await intakeWatch("failed", "G2G", e);
     return { error: e.message };
   }
-  await require("./intakeWatch").ok("G2G").catch(() => {});
+  await intakeWatch("ok", "G2G");
   const results = [];
   for (const order of orders) {
     let r;
@@ -1358,6 +1358,17 @@ async function sweepConfirmedFarmOrders() {
   const af = getAutoFarm() || {};
   if (!af.g2gAutoDeliver) return { skipped: "g2gAutoDeliver is off" };
   return farmService.closeConfirmedFarmOrders();
+}
+
+// The intake-failure watch (utils/intakeWatch) must never break a delivery
+// tick: not by rejecting, and not by failing to load (a require that throws
+// happens before any .catch could apply).
+function intakeWatch(fn, ...args) {
+  try {
+    return Promise.resolve(require("./intakeWatch")[fn](...args)).catch(() => {});
+  } catch {
+    return Promise.resolve();
+  }
 }
 
 module.exports = {

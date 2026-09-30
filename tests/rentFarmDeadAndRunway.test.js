@@ -9,11 +9,17 @@ const assert = require("node:assert/strict");
 const Module = require("node:module");
 
 const sent = [];
+// The hourly checks the tick also runs (stubbed: tickOnce is tested for its
+// guards, they have suites of their own).
+const tickMods = { integrity: { checkOnce: async () => null }, orders: { checkOnce: async () => null } };
 const realLoad = Module._load;
 Module._load = function (request, parent, isMain) {
   if (parent && /utils[\\/]rentFarmCapacity\.js$/.test(parent.filename || "")) {
     if (request === "./telegram") return { sendTelegram: async (m) => { sent.push(m); } };
     if (request === "./systemLog") return { logEvent: async () => {} };
+    if (request === "./renterIntegrity") return tickMods.integrity;
+    if (request === "./farmOrderWatch") return tickMods.orders;
+    if (request === "./operatorFarm") return { holderQuota: async () => null };
   }
   return realLoad.call(this, request, parent, isMain);
 };
@@ -24,7 +30,8 @@ let clock = 1_700_000_000_000;
 function setup(over = {}) {
   sent.length = 0;
   cap._reset();
-  cap.__setDeps({ now: () => clock, ...over });
+  // No database here: the ledger / pool reads are always injected.
+  cap.__setDeps({ now: () => clock, ledgerCount: async () => 3, poolClaims: async () => 0, ...over });
 }
 
 const BOTS = (states) => ({
@@ -119,4 +126,117 @@ test("no sales in 7 days means no runway alarm", async () => {
   const out = await cap.runwayCheck();
   assert.equal(out.slotDays, null);
   assert.equal(sent.length, 0);
+});
+
+// ---- review 3 (2026-10-01) ----------------------------------------------
+test("REGRESSION: a host going OFFLINE after a dead-stack page is not 'farming again'", async () => {
+  let listing = BOTS({ x3: false });
+  setup({
+    rentalStackOptions: async () => listing,
+    listStacks: async () => [{ host: "contabo", file: "config_03.json" }],
+  });
+  await cap.deadStacksCheck();
+  assert.equal(sent.length, 1);
+  listing = { bots: [], offlineHosts: [{ id: "contabo" }] };
+  const r = await cap.deadStacksCheck();
+  assert.deepEqual(r.recovered, []);
+  assert.ok(!sent.some((m) => /farming again/.test(m)));
+  // Unknown container state (docker ps failed) is not recovery either.
+  listing = BOTS({ x3: null });
+  await cap.deadStacksCheck();
+  assert.ok(!sent.some((m) => /farming again/.test(m)));
+  // Seen running: now it is.
+  listing = BOTS({ x3: true });
+  await cap.deadStacksCheck();
+  assert.ok(sent.some((m) => /config_03\.json is farming again/.test(m)));
+});
+
+test("REGRESSION: a stale registration whose config is missing and that holds NO ledger accounts does not page", async () => {
+  setup({
+    rentalStackOptions: async () => ({ bots: [], offlineHosts: [] }),
+    listStacks: async () => [{ host: "contabo", file: "config_40.json" }, { host: "contabo", file: "config_41.json" }],
+    ledgerCount: async (host, file) => (file === "config_41.json" ? 7 : 0),
+  });
+  const r = await cap.deadStacksCheck();
+  assert.deepEqual(r.paged, ["contabo/config_41.json"]);
+  assert.match(sent[0], /config_41\.json \(7 accounts\) — its config file is missing/);
+});
+
+test("REGRESSION: the pool runway counts EVERY draw on the pool, not just rent-farm's", async () => {
+  setup({
+    holderId: async () => "h1",
+    countRows: async (q) => (q.createdAt ? 70 : 0), // rent-farm: 10/day
+    poolClaims: async () => 280, // everything: 40/day
+    snapshot: async () => ({ totalFree: 500 }),
+    gatherPoolEligibility: async () => ({ eligible: new Array(200).fill({}) }),
+  });
+  const out = await cap.runwayCheck();
+  assert.equal(out.poolDays, 5, "200 eligible / 40 a day — not 20 days");
+  assert.match(sent.find((m) => /pool accounts/.test(m)), /~40\/day taken by everything that draws on the pool \(rent-farm ~10\/day\)/);
+});
+
+test("REGRESSION: when the holder's account LIMIT is the wall, the runway says raise the limit (not 'register a stack')", async () => {
+  setup({
+    holderId: async () => "h1",
+    countRows: async (q) => (q.createdAt ? 70 : 0),
+    snapshot: async () => ({ totalFree: 20, limitedBy: "holder-limit" }),
+    gatherPoolEligibility: async () => ({ eligible: new Array(900).fill({}) }),
+  });
+  await cap.runwayCheck();
+  const m = sent.find((x) => /account-limit room/.test(x));
+  assert.ok(m, sent.join(" | "));
+  assert.match(m, /raise operator-selffarm's Account limit/);
+  assert.doesNotMatch(m, /Register another rental stack/);
+});
+
+test("REGRESSION: a runway hovering at the line does not flap warn / ok every tick", async () => {
+  let free = 98; // 9.8 days at 10/day
+  setup({
+    holderId: async () => "h1",
+    countRows: async (q) => (q.createdAt ? 70 : 0),
+    snapshot: async () => ({ totalFree: free }),
+    gatherPoolEligibility: async () => ({ eligible: new Array(900).fill({}) }),
+  });
+  await cap.runwayCheck();
+  assert.equal(sent.length, 1);
+  free = 103; // 10.3 days: inside the margin — still "warn", nothing sent
+  await cap.runwayCheck();
+  free = 97;
+  await cap.runwayCheck();
+  assert.equal(sent.length, 1, sent.join(" | "));
+  free = 125; // 12.5 days: clearly healthy
+  await cap.runwayCheck();
+  assert.ok(sent.some((m) => /healthy again/.test(m)));
+  assert.equal(cap.runwayLevel(10.5, "warn"), "warn");
+  assert.equal(cap.runwayLevel(4.5, "critical"), "critical");
+  assert.equal(cap.runwayLevel(5.5, "critical"), "warn");
+});
+
+test("REGRESSION: one tick reads the hosts ONCE, and a hung check cannot stop the others", async () => {
+  let reads = 0;
+  setup({
+    rentalStackOptions: async () => {
+      reads++;
+      return BOTS({ x3: true });
+    },
+    listStacks: async () => [],
+    holderId: async () => null,
+  });
+  let orderWatched = 0;
+  tickMods.integrity = { checkOnce: () => new Promise(() => {}) }; // hangs forever
+  tickMods.orders = { checkOnce: async () => { orderWatched++; return null; } };
+  try {
+    cap.__setDeps({ snapshot: undefined });
+    const out = await cap.tickOnce({ timeoutMs: 50 });
+    assert.equal(reads, 1, "one stack read shared by capacity, dead-stack and runway");
+    assert.ok(out.capacity.value, "the capacity check used the shared listing");
+    assert.match(String(out.integrity.error), /timed out/);
+    assert.equal(orderWatched, 1, "the order watch still ran");
+    // Next tick: the hung check is skipped, not stacked.
+    const again = await cap.tickOnce({ timeoutMs: 50 });
+    assert.equal(again.integrity.skipped, true);
+  } finally {
+    tickMods.integrity = { checkOnce: async () => null };
+    tickMods.orders = { checkOnce: async () => null };
+  }
 });

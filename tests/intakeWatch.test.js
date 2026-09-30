@@ -72,12 +72,16 @@ test("markets are tracked independently", async () => {
 test("all three order-API fulfillers report every intake read to the watchdog", () => {
   const read = (f) => fs.readFileSync(path.join(__dirname, "..", "utils", f), "utf8");
   const eld = read("eldoradoFulfiller.js");
-  assert.match(eld, /intakeWatch"\)\.failed\("Eldorado", e\)/);
-  assert.match(eld, /intakeWatch"\)\.ok\("Eldorado"\)/);
+  assert.match(eld, /intakeWatch\("failed", "Eldorado", e\)/);
+  assert.match(eld, /intakeWatch\("ok", "Eldorado"\)/);
   const pa = read("playerauctionsFulfiller.js");
-  assert.match(pa, /intakeWatch"\)\.failed\("PlayerAuctions", e\)/);
-  assert.match(pa, /intakeWatch"\)\.ok\("PlayerAuctions"\)/);
+  assert.match(pa, /intakeWatch\("failed", "PlayerAuctions", e\)/);
+  assert.match(pa, /intakeWatch\("ok", "PlayerAuctions"\)/);
   const g2g = read("g2gFulfiller.js");
-  assert.equal((g2g.match(/intakeWatch"\)\.failed\("G2G", e\)/g) || []).length, 2, "both G2G reads");
+  assert.equal((g2g.match(/intakeWatch\("failed", "G2G", e\)/g) || []).length, 2, "both G2G reads");
+  // The watch can never break a tick — not even by failing to load.
+  for (const src of [eld, pa, g2g]) {
+    assert.match(src, /function intakeWatch\(fn, \.\.\.args\) \{\n  try \{\n    return Promise\.resolve\(require\("\.\/intakeWatch"\)\[fn\]\(\.\.\.args\)\)\.catch\(\(\) => \{\}\);\n  \} catch \{/);
+  }
   assert.match(g2g, /orders = await mp\.g2gPendingOrders\(\{\}\);\n  \} catch \(e\) \{/, "the second G2G read is guarded");
 });
