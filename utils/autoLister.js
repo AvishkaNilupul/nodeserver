@@ -852,6 +852,10 @@ async function publishGgselShare({
         accounts.length +
         " account(s)",
       autoDeliver: true,
+      // Both fields, like the Drop Archive publish route writes them: the
+      // guardian's per-account checks read accountId, and a share recorded by
+      // login alone stayed invisible to them until its first refill.
+      accountId: accounts.map((a) => String(a.accountId || "")).filter(Boolean).join(","),
       accountLogin: accounts.map((a) => a.login).join(", "),
       qtyTarget: accounts.length,
     });
@@ -1455,6 +1459,18 @@ async function retryMissingSecondaries(task) {
         try {
           const r = await publishGgselShare({
             ...base,
+            // Same reason as Eldorado above: the Gameflip row's copy tells a
+            // GGSel buyer to message the seller "on Gameflip". GGSel gets its
+            // own support line, exactly as the first publish builds it.
+            description: buildDescription({
+              game: task.game,
+              items: (set.items || []).map((i) =>
+                i && typeof i.toObject === "function" ? i.toObject() : i,
+              ),
+              campaignName: task.campaignName,
+              postEvent: !!L.postEvent,
+              marketplace: "ggsel",
+            }),
             accounts,
             categoryId: t.slice("ggsel:".length),
           });

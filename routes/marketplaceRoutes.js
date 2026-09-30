@@ -1403,8 +1403,10 @@ router.post("/marketplaces/publish", requireSuperadmin, async (req, res) => {
                   claimed.map((c) => c.ledgerId),
                 );
               } else {
+                // This set only — never the account's other GGSel sets.
                 await ggFulfiller.releaseAccounts(
                   claimed.map((c) => c.accountId),
+                  set._id,
                 );
               }
               throw err;
@@ -1810,10 +1812,62 @@ router.delete(
       row.status = "delisted";
       row.lastError = "";
       await row.save();
+      // GGSel: pausing leaves every code in the offer's vault, and a paused
+      // offer that is ever re-activated sells them all again — including
+      // accounts handed back below and sold elsewhere since. Take the codes
+      // out now (the row is already delisted, so no stock reader counts the
+      // vanishing codes as sales), and hand back ONLY the accounts GGSel then
+      // proves never sold, for THIS row's set. Account-listing and no-claim
+      // shop rows keep their own layers' hand-back below.
+      let ggVault = null;
+      if (
+        row.marketplace === "ggsel" &&
+        !row.accountOffer &&
+        !row.noclaimStock &&
+        typeof mp.ggselEmptyVault === "function"
+      ) {
+        try {
+          ggVault = await mp.ggselEmptyVault(row.externalId);
+          const archiveRow = !!row.set && row.origin !== "unclaimed";
+          const rel = archiveRow
+            ? await ggFulfiller.releaseProvenUnsold(row, ggVault)
+            : null;
+          ggVault.summary =
+            "vault emptied: " +
+            ggVault.archived.length +
+            " code(s) archived, " +
+            ggVault.sold.length +
+            " sold" +
+            (ggVault.left.length
+              ? ", " + ggVault.left.length + " still in stock (kept reserved)"
+              : "") +
+            (rel
+              ? "; " +
+                rel.released.length +
+                " account(s) back in stock" +
+                (rel.keptSold.length
+                  ? ", " + rel.keptSold.length + " kept (sold)"
+                  : "")
+              : "");
+        } catch (err) {
+          // Nothing is known about the codes, so nothing is handed back.
+          ggVault = {
+            error: err.message,
+            summary:
+              "codes could not be read (" +
+              String(err.message || "error").slice(0, 120) +
+              ") — accounts kept reserved",
+          };
+        }
+        row.note = (row.note ? row.note + " " : "") + "— GGSel " + ggVault.summary;
+        await row.save();
+      }
       // A delisted auto-delivery listing frees its reserved account(s).
       if (row.autoDeliver && row.accountId) {
         if (row.marketplace === "ggsel") {
-          await ggFulfiller.releaseAccounts(row.accountId.split(","));
+          // Handled above from GGSel's own product states: an account whose
+          // code SOLD is the buyer's, and the old tag-wide release here also
+          // freed every other set the account had sold on GGSel.
         } else if (row.marketplace === "digiseller") {
           await dsFulfiller.releaseAccounts(row.accountId.split(","));
         } else {
@@ -1924,6 +1978,7 @@ router.delete(
             }
           : {}),
         ...(noclaim ? { noclaim } : {}),
+        ...(ggVault ? { ggsel: ggVault.summary } : {}),
       });
     } catch (err) {
       console.error("marketplace delist error:", err.message);

@@ -1258,7 +1258,13 @@ async function feedListing(row, seenKeys, refusals) {
             console.error("guardian supplied release error:", e.message),
           );
       } else {
-        await fulfiller.releaseAccounts(claimed.map((c) => c.accountId));
+        // Scoped to this listing's set: the GGSel release is set-scoped and
+        // takes it (a tag-wide one freed every other set the account had
+        // already sold on GGSel). Digiseller's release ignores the argument.
+        await fulfiller.releaseAccounts(
+          claimed.map((c) => c.accountId),
+          row.set,
+        );
       }
     }
     // An offer archived on the platform's side can never accept products

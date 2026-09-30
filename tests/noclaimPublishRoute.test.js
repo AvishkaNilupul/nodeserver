@@ -252,6 +252,13 @@ const mpStub = {
   funpayDelist: delister("funpayDelist"),
   zeusxDelist: delister("zeusxDelist"),
   z2uDelist: delister("z2uDelist"),
+  // A delisted GGSel offer's codes are archived and read back, and only what
+  // GGSel then proves unsold is handed back (2026-10-01).
+  async ggselEmptyVault(...args) {
+    calls.mp.push({ fn: "ggselEmptyVault", args });
+    calls.order.push("mp.ggselEmptyVault");
+    return { archived: [{ id: 1, login: "arch_one" }], sold: [{ id: 2, login: "arch_two" }], left: [] };
+  },
 };
 
 // An archive claim reached from a no-claim publish is the very failure this
@@ -276,6 +283,11 @@ const gfStub = {
 const ggStub = {
   claimAccountsForSet: noArchiveClaim,
   releaseAccounts: releaser("ggsel"),
+  async releaseProvenUnsold(row, vault) {
+    calls.order.push("release:ggsel-proven");
+    calls.release.push(["ggsel-proven", row._id, vault]);
+    return { released: ["arch_one"], keptSold: [], keptLeft: [], notOnRow: [] };
+  },
 };
 const dsStub = {
   claimAccountsForSet: noArchiveClaim,
@@ -963,13 +975,22 @@ test("delist: an archive row is delisted exactly as before, and the no-claim hoo
     accountId: "acct-1,acct-2",
   });
   let json = await delist(gg._id);
-  assert.deepEqual(json, { success: true }, "byte-identical answer");
+  // GGSel changed on purpose (2026-10-01): the old tag-wide release of every
+  // account on the row — sold ones included — is replaced by emptying the
+  // offer's vault and handing back only what GGSel proves unsold, after the
+  // row is already delisted.
+  assert.equal(json.success, true);
+  assert.match(json.ggsel, /vault emptied: 1 code\(s\) archived, 1 sold; 1 account\(s\) back in stock/);
   assert.deepEqual(calls.order, [
     "mp.ggselDelist",
     "save:delisted",
-    "release:ggsel",
+    "mp.ggselEmptyVault",
+    "release:ggsel-proven",
+    "save:delisted",
   ]);
-  assert.deepEqual(calls.release, [["ggsel", ["acct-1", "acct-2"]]]);
+  assert.equal(calls.release.length, 1);
+  assert.equal(calls.release[0][0], "ggsel-proven", "never the tag-wide release");
+  assert.equal(calls.release[0][1], gg._id);
 
   // Sold on Gameflip: marked sold, the sale learned, nothing released.
   calls.order.length = 0;

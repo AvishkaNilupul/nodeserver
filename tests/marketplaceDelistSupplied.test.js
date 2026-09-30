@@ -42,6 +42,7 @@ const calls = { ggsel: [], delist: [], released: [] };
 const real = {
   ggselPublish: mp.ggselPublish,
   ggselDelist: mp.ggselDelist,
+  ggselEmptyVault: mp.ggselEmptyVault,
   ggRelease: ggFulfiller.releaseAccounts,
   zeusxPublish: mp.zeusxPublish,
   zeusxDelist: mp.zeusxDelist,
@@ -65,6 +66,9 @@ test.before(async () => {
   mp.ggselDelist = async (id) => {
     calls.delist.push(id);
   };
+  // No codes in the vault: the account-listing delists below never reach it,
+  // and the archive row's hand-back is proven from these product states.
+  mp.ggselEmptyVault = async () => ({ archived: [], sold: [], left: [] });
   ggFulfiller.releaseAccounts = async (ids) => {
     calls.released.push(ids);
   };
@@ -111,6 +115,7 @@ test.after(async () => {
   Object.assign(mp, {
     ggselPublish: real.ggselPublish,
     ggselDelist: real.ggselDelist,
+    ggselEmptyVault: real.ggselEmptyVault,
     zeusxPublish: real.zeusxPublish,
     zeusxDelist: real.zeusxDelist,
     zeusxOffer: real.zeusxOffer,
@@ -251,7 +256,7 @@ test("S1: an account still committed to a paid order is left alone", async () =>
   assert.equal(held.orderId, "order-77");
 });
 
-test("an ordinary DropSet-backed delist is untouched", async () => {
+test("an ordinary DropSet-backed delist never takes the account-listing path", async () => {
   const set = await DropSet.create({ name: "Drops bundle", price: 12 });
   const row = await MarketplaceListing.create({
     set: set._id,
@@ -268,9 +273,14 @@ test("an ordinary DropSet-backed delist is untouched", async () => {
 
   const json = await delist(String(row._id));
 
-  // Byte-identical to what it always answered: no `returned`, no `message`.
-  assert.deepEqual(json, { success: true });
-  assert.deepEqual(calls.released, [["acct-1", "acct-2"]]);
+  // No `returned` / `message`: the account-listing hand-back never runs for it.
+  // Its GGSel hand-back is the vault proof (2026-10-01): nothing in the vault,
+  // nothing handed back — the old answer released every account on the row,
+  // sold ones included, across every set they were reserved for.
+  assert.equal(json.success, true);
+  assert.equal(json.returned, undefined);
+  assert.match(json.ggsel, /vault emptied: 0 code\(s\) archived, 0 sold; 0 account\(s\) back in stock/);
+  assert.deepEqual(calls.released, [], "the tag-wide release is gone");
   const after = await MarketplaceListing.findById(row._id).lean();
   assert.equal(after.status, "delisted");
 });

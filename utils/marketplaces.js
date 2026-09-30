@@ -2563,6 +2563,108 @@ async function ggselDelist(offerId) {
   }
 }
 
+// Every product (delivery code) on a GGSel offer, all pages:
+// [{ id, status, value, created_at }]. `status` is GGSel's own word, verified
+// live 2026-09-30 across 598 offers: "in_stock" (in the vault — sold the moment
+// the offer is active and a buyer pays), "sold" (handed to a buyer) or
+// "archived" (taken out by us; it can never sell). This is the ONLY place GGSel
+// says which account a buyer received: the stock counters just go down.
+const GG_PRODUCTS_PAGE = 100;
+async function ggselOfferProducts(offerId) {
+  const keys = requireKeys("ggsel");
+  const out = [];
+  for (let page = 1; page <= 50; page++) {
+    let r;
+    try {
+      r = await withNetRetries(() =>
+        axios.get(
+          GG_API +
+            "/offers/" +
+            Number(offerId) +
+            "/products?page=" +
+            page +
+            "&limit=" +
+            GG_PRODUCTS_PAGE,
+          { headers: ggHeaders(keys), timeout: 25000 },
+        ),
+      );
+    } catch (e) {
+      throw apiError("GGSel products", e);
+    }
+    const rows = Array.isArray(r.data && r.data.data) ? r.data.data : [];
+    out.push(...rows);
+    const pg = (r.data && r.data.pagination) || {};
+    const more =
+      pg.has_next_page === undefined
+        ? rows.length === GG_PRODUCTS_PAGE
+        : !!pg.has_next_page;
+    if (!more) break;
+  }
+  return out;
+}
+
+// The login a delivery code carries ("Login: <login>", as ggselDeliveryCode
+// and the no-claim engine write it), lowercased; "" when the code has none.
+function ggselCodeLogin(value) {
+  const m = /Login:\s*(\S+)/i.exec(String(value || ""));
+  return m ? m[1].toLowerCase() : "";
+}
+
+// Take every still-sellable code OUT of a GGSel offer's vault and prove it.
+//
+// Pausing (ggselDelist) leaves the codes attached, and a paused offer that is
+// re-activated — by hand in the dashboard, or by any stock heal — sells every
+// one of them again, including accounts released and sold elsewhere since:
+// 2,390 such leftover codes sat in paused offers on 2026-09-28. So a delist
+// that hands accounts back must first archive their codes, and may hand back
+// only what GGSel then reports archived.
+//
+// Returns what the platform proved, never a guess:
+//   archived  [{ id, login }]  in stock before, archived now — never sold
+//   sold      [{ id, login }]  a buyer holds these; never release them
+//   left      [{ id, login }]  still in stock after the wait — NOT released
+// Throws only when the products cannot be read at all: then nothing is known
+// and the caller must release nothing.
+async function ggselEmptyVault(offerId, { settleMs = 15000, polls = 3 } = {}) {
+  const keys = requireKeys("ggsel");
+  const view = (p) => ({ id: p.id, login: ggselCodeLogin(p.value) });
+  let products = await ggselOfferProducts(offerId);
+  const want = products
+    .filter((p) => p && p.status === "in_stock")
+    .map((p) => p.id);
+  for (let i = 0; i < want.length; i += 100) {
+    try {
+      await axios.delete(GG_API + "/offers/" + Number(offerId) + "/products", {
+        headers: ggHeaders(keys),
+        data: { product_ids: want.slice(i, i + 100) },
+        timeout: 30000,
+      });
+    } catch (e) {
+      // The read-back below is the only verdict: a refused or timed-out
+      // archive leaves the code in_stock, and an in_stock code is never
+      // handed back.
+      console.error(
+        "ggsel archive products failed for offer " + offerId + ": " + e.message,
+      );
+    }
+  }
+  const wanted = new Set(want);
+  // GGSel archives through an async job (seconds), so read back until every
+  // requested code has settled or the polls run out.
+  for (let k = 0; want.length && k < Math.max(1, polls); k++) {
+    await new Promise((r) => setTimeout(r, Math.max(0, settleMs) / Math.max(1, polls)));
+    products = await ggselOfferProducts(offerId);
+    if (!products.some((p) => wanted.has(p.id) && p.status === "in_stock")) break;
+  }
+  return {
+    archived: products
+      .filter((p) => wanted.has(p.id) && p.status === "archived")
+      .map(view),
+    sold: products.filter((p) => p.status === "sold").map(view),
+    left: products.filter((p) => p.status === "in_stock").map(view),
+  };
+}
+
 // ------------------------------------------------------------------
 // G2G (g2g.com)
 //
@@ -6357,6 +6459,9 @@ module.exports = {
   ggselEnableAutoselling,
   ggselFinalizeStock,
   ggselDelist,
+  ggselOfferProducts,
+  ggselCodeLogin,
+  ggselEmptyVault,
   ggselTakesNewStock,
   zeusxTest,
   zeusxRefreshAccessToken,
