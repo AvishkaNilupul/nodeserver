@@ -89,9 +89,13 @@ router.get("/renter/me", requireRenter, async (req, res) => {
       try {
         const states = await hosts.dockerPs(host);
         const st = states[containerForFile(r.botFile)];
-        running = !!(st && /^running/i.test(st.state || ""));
+        // THEIR farming, not the container's: on a shared bot the container
+        // keeps running for everyone else after this renter's Stop (their
+        // accounts are pulled out), and showing "Running" there hid the Start
+        // button they need to get farming back.
+        running = r.botStoppedAt ? false : !!(st && /^running/i.test(st.state || ""));
       } catch {
-        running = null;
+        running = r.botStoppedAt ? false : null;
       }
     }
     const pending = await pendingAccountCount(r._id);
@@ -362,6 +366,7 @@ async function botControl(action, req, res) {
     // routes in renterAdminRoutes. Best-effort: bookkeeping must not fail the
     // action itself.
     req.renter.botStoppedAt = action === "start" ? null : new Date();
+    req.renter.botStopReason = action === "start" ? "" : "renter";
     await req.renter
       .save()
       .catch((e) => console.error("renter botStoppedAt:", e.message));
@@ -376,6 +381,12 @@ async function botControl(action, req, res) {
       return res.status(400).json({
         success: false,
         message: "Your bot has no accounts yet — ask the operator to add them.",
+      });
+    }
+    if (e.code === "rental_stack_full") {
+      return res.status(409).json({
+        success: false,
+        message: "Your bot has no free slot to put your accounts back — ask the operator.",
       });
     }
     if (e.unreachable) {

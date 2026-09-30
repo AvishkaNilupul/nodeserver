@@ -61,7 +61,11 @@ function operatorFarm() {
 // What room is left, per stack and in total. Read-only.
 async function snapshot() {
   const { bots = [], offlineHosts = [] } = await renterAdmin().rentalStackOptions();
-  const stacks = bots.map((b) => ({
+  // Rent-farm capacity is what the HOLDER may use: a direct renter's own bot
+  // never takes a buyer (renterAdminRoutes.usableForHolder), so its free slots
+  // are not ours to count. Rows from an older stack reader (no flag) count.
+  const usable = renterAdmin().usableForHolder || (() => true);
+  const stacks = bots.filter((b) => usable(b)).map((b) => ({
     host: b.host,
     file: b.file,
     used: Number(b.accounts) || 0,

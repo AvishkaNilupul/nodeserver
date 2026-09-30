@@ -103,7 +103,7 @@ async function ensureOperatorRenter({ actor = "operator-farm" } = {}) {
   // Needs a bot slot to farm on. Reuses the same stack picker the Quick-farm
   // auto-assign uses, so capacity rules are identical.
   if (!renter.botFile) {
-    const stack = await renterAdmin().availableRentalStack();
+    const stack = await renterAdmin().availableRentalStack({ forHolder: true });
     if (!stack) {
       const e = new Error(
         "No rental bot stack has room right now — free a slot or raise a stack's capacity.",

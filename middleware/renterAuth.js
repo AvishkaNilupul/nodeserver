@@ -5,7 +5,7 @@
 // The lease + suspension are enforced on EVERY request, not just at login — a
 // renter whose access period lapses or who gets suspended is locked out on
 // their very next call, and their session is destroyed.
-const { getById, isBlocked } = require("../utils/renters");
+const { getById, isBlocked, isOperatorHolder } = require("../utils/renters");
 
 function wantsHtml(req) {
   return req.accepts(["json", "html"]) === "html";
@@ -38,7 +38,9 @@ async function requireRenter(req, res, next) {
     if (!renter) {
       return denyBlocked(req, res);
     }
-    if (isBlocked(renter)) {
+    // The rent-farm holder is an internal container of paid buyers, never a
+    // renter who logs in: a session for it could Stop or re-game every buyer.
+    if (isBlocked(renter) || isOperatorHolder(renter)) {
       return denyBlocked(req, res);
     }
     // Attach the fresh record so routes derive scope from the DB, not the

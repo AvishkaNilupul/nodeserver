@@ -356,7 +356,7 @@
       '</div>' +
       '<div id="botLogBox"></div>' +
       '<div style="display:flex;gap:8px;margin-top:12px;flex-wrap:wrap">' +
-        '<button class="btn ghost sm" data-act="resetPw" data-id="' + id + '">Reset password</button>' +
+        (RT.isHolder(r.username) ? '' : '<button class="btn ghost sm" data-act="resetPw" data-id="' + id + '">Reset password</button>') +
         (RT.isHolder(r.username)
           ? ''
           : (r.status === "suspended"
@@ -364,9 +364,11 @@
               : '<button class="btn warn sm" data-act="setSusp" data-val="true" data-id="' + id + '">Suspend + stop bot</button>') +
             '<button class="btn danger sm" data-act="delRenter" data-id="' + id + '">Delete renter</button>') +
       '</div>' +
-      '<div class="credbox" style="margin-top:12px">Login <code>' + esc(r.username) + '</code> &nbsp;·&nbsp; Password <code id="pwView">••••••••</code> ' +
-        '<button class="btn ghost sm" style="margin-left:8px" data-act="showPw" data-id="' + id + '">Show</button> ' +
-        '<button class="btn ghost sm" id="copyLoginBtn" data-act="copyLogin" data-id="' + id + '">Copy login</button></div>' +
+      (RT.isHolder(r.username)
+        ? '<div class="credbox" style="margin-top:12px"><span class="muted">Internal rent-farm holder — it has no renter login.</span></div>'
+        : '<div class="credbox" style="margin-top:12px">Login <code>' + esc(r.username) + '</code> &nbsp;·&nbsp; Password <code id="pwView">••••••••</code> ' +
+          '<button class="btn ghost sm" style="margin-left:8px" data-act="showPw" data-id="' + id + '">Show</button> ' +
+          '<button class="btn ghost sm" id="copyLoginBtn" data-act="copyLogin" data-id="' + id + '">Copy login</button></div>') +
       '<h2 style="font-size:14px;margin:18px 0 8px">Accounts <span class="muted" style="font-size:12px;font-weight:600">(' + num(accs.length) + ')</span></h2>' +
       accountRows(accs) +
       '<div class="credbox" style="margin-top:10px">' +
@@ -754,7 +756,11 @@
           accessEnd: val("eEnd") || null,
         }),
       });
-      toast(d.gamesApplied ? "Saved — games armed on their accounts" : "Saved");
+      toast(
+        (d.gamesApplied ? "Saved — games armed on their accounts" : "Saved") +
+        (d.farmingResumed === true ? " · lease renewed, farming resumed" : "") +
+        (d.farmingResumed === false ? " · lease renewed, but farming could NOT be resumed — press Start" : ""),
+      );
       await RT.reloadMany(["renters"]);
       open(id);
     } catch (e) {

@@ -320,6 +320,9 @@ async function rentalStackOptions() {
             rows.push({
               ...stack,
               accounts: users.length,
+              secrets: new Set(
+                users.filter((u) => u && typeof u === "object").map((u) => u.ClientSecret),
+              ),
               container: container || null,
               running: states
                 ? !!(st && /^running/i.test(String(st.state || "")))
@@ -335,19 +338,56 @@ async function rentalStackOptions() {
       }
     }),
   );
+  // Who is in each stack according to the ledger: the rent-farm holder's
+  // live rows, and the enabled rows of ACTIVE direct renters that are not
+  // physically in the file — a renter who pressed Stop (or whose farming is
+  // paused) keeps their slots, so a sale cannot fill them and make their next
+  // Start fail. Blocked (suspended / expired) renters reserve nothing.
+  const [ledger, renterRows] = await Promise.all([
+    RenterAccount.find(
+      { enabled: true, farmEndedAt: null, configFile: { $gt: "" } },
+      { renter: 1, host: 1, configFile: 1, clientSecret: 1 },
+    ).lean(),
+    Renter.find({}, { username: 1, usernameLower: 1, status: 1, accessEnd: 1, botHost: 1, botFile: 1 }).lean(),
+  ]);
+  const renterById = new Map(renterRows.map((r) => [String(r._id), r]));
+  const holderIds = new Set(renterRows.filter((r) => isOperatorHolder(r)).map((r) => String(r._id)));
+  const holderRows = new Map();
+  const reservedRows = new Map();
+  const physical = new Map();
+  for (const h of perHost) for (const st of h.rows) physical.set(stackKey(h.meta.id, st.file), st.secrets);
+  for (const a of ledger) {
+    const k = stackKey(a.host, a.configFile);
+    if (holderIds.has(String(a.renter))) {
+      holderRows.set(k, (holderRows.get(k) || 0) + 1);
+      continue;
+    }
+    const owner = renterById.get(String(a.renter));
+    if (!owner || isBlocked(owner)) continue;
+    const inFile = physical.get(k);
+    if (inFile && !inFile.has(a.clientSecret)) reservedRows.set(k, (reservedRows.get(k) || 0) + 1);
+  }
+
   const out = [];
   const offline = [];
   for (const h of perHost) {
     if (!h.online) offline.push({ id: h.meta.id, label: h.meta.label });
     for (const stack of h.rows) {
       const capacity = Math.max(1, Number(stack.capacity) || 10);
+      const k = stackKey(h.meta.id, stack.file);
+      const reserved = reservedRows.get(k) || 0;
+      const used = stack.accounts + reserved;
       out.push({
         host: h.meta.id,
         hostLabel: h.meta.label,
         file: stack.file,
         capacity,
-        accounts: stack.accounts,
-        remaining: Math.max(0, capacity - stack.accounts),
+        // In the file, plus slots held for a stopped renter's accounts.
+        accounts: used,
+        physical: stack.accounts,
+        reserved,
+        holderRows: holderRows.get(k) || 0,
+        remaining: Math.max(0, capacity - used),
         // Carried through so the picker and the capacity alarm can both tell a
         // stack with room from a stack that can actually farm. null = unknown.
         container: stack.container || null,
@@ -355,12 +395,8 @@ async function rentalStackOptions() {
       });
     }
   }
-  const assigned = await Renter.find(
-    { botFile: { $gt: "" } },
-    { botHost: 1, botFile: 1, username: 1 },
-  ).lean();
   const amap = new Map();
-  for (const a of assigned) {
+  for (const a of renterRows.filter((r) => r.botFile)) {
     const k = stackKey(a.botHost, a.botFile);
     if (!amap.has(k)) amap.set(k, []);
     amap.get(k).push(a.username);
@@ -369,13 +405,28 @@ async function rentalStackOptions() {
     const names = amap.get(stackKey(o.host, o.file)) || [];
     o.assignedTo = names[0] || null;
     o.renters = names;
+    // A direct renter's own bot (assigned to someone other than the holder).
+    o.directAssigned = names.filter((n) => !isOperatorHolder({ username: n }));
   });
   return { bots: out, offlineHosts: offline };
 }
 
-async function availableRentalStack() {
+// Holder buyers and direct renters are kept in separate stacks: a stack that is
+// some direct renter's bot never takes a rent-farm buyer, and a stack holding
+// (or assigned to) the holder never becomes a direct renter's bot. Mixing them
+// is how one renter's lease end, Stop or games change reached 49 paid buyers.
+function usableForHolder(b) {
+  return !(b.directAssigned || []).length;
+}
+function usableForRenter(b) {
+  return !Number(b.holderRows) && !(b.renters || []).some((n) => isOperatorHolder({ username: n }));
+}
+
+async function availableRentalStack({ forHolder = false } = {}) {
   const options = await rentalStackOptions();
-  return chooseAvailableStack(options.bots);
+  return chooseAvailableStack(
+    (options.bots || []).filter(forHolder ? usableForHolder : usableForRenter),
+  );
 }
 
 router.get("/renters/bots", requireSuperadmin, async (req, res) => {
@@ -887,15 +938,38 @@ router.put("/renters/:id", requireSuperadmin, async (req, res) => {
       r.maxAccounts = Math.max(0, Math.floor(Number(b.maxAccounts) || 0));
     if (b.accessStart !== undefined)
       r.accessStart = b.accessStart ? new Date(b.accessStart) : null;
+    let resumeFarming = false;
     if (b.accessEnd !== undefined) {
+      const wasExpired = !!(r.accessEnd && new Date(r.accessEnd) <= new Date());
       r.accessEnd = b.accessEnd ? new Date(b.accessEnd) : null;
-      // A lease that now ends in the future (or never) invalidates the "expiry
-      // sweep already stopped this bot" stamp — without this, the sweep (which
-      // filters on botStoppedAt: null) would never stop the bot when the
-      // extended lease lapses.
-      if (!r.accessEnd || r.accessEnd > new Date()) r.botStoppedAt = null;
+      // A lease that now ends in the future (or never) after the LEASE END
+      // stopped the farming: put the renter's accounts back (below, after the
+      // save). The stop stamp is cleared only once that worked, so the renter's
+      // page never says "Running" over a bot their accounts are not in. A stop
+      // the renter / operator / a suspend chose stays a stop — Start ends it.
+      if (!r.accessEnd || r.accessEnd > new Date()) {
+        const leaseStop =
+          r.botStoppedAt &&
+          (r.botStopReason === "lease" || (!r.botStopReason && wasExpired));
+        if (leaseStop && r.status !== "suspended" && r.botFile) resumeFarming = true;
+      }
     }
     await r.save();
+    let farmingResumed = null;
+    if (resumeFarming) {
+      const host = hosts.resolveHost(r.botHost);
+      try {
+        if (!host) throw new Error("unknown bot host");
+        await startRenterFarming(r, host);
+        r.botStoppedAt = null;
+        r.botStopReason = "";
+        await r.save();
+        farmingResumed = true;
+      } catch (e) {
+        farmingResumed = false;
+        console.error("renter lease renewal: could not resume farming for " + r.username + ":", e.message);
+      }
+    }
     // Arm the new games on their existing accounts right away (best effort —
     // an offline host doesn't fail the save; the list still applies to any
     // account added later).
@@ -914,7 +988,7 @@ router.put("/renters/:id", requireSuperadmin, async (req, res) => {
         }
       }
     }
-    res.json({ success: true, renter: sanitizeRenter(r), gamesApplied });
+    res.json({ success: true, renter: sanitizeRenter(r), gamesApplied, farmingResumed });
   } catch (err) {
     res.status(400).json({ success: false, message: err.message });
   }
@@ -961,6 +1035,7 @@ router.post("/renters/:id/suspend", requireSuperadmin, async (req, res) => {
           await stopRenterFarming(r, host);
           botStopped = true;
           r.botStoppedAt = new Date();
+          r.botStopReason = "suspend";
         } catch (e) {
           // Host offline / no container — access is still blocked; report it.
           console.error("suspend stop bot:", e.message);
@@ -975,13 +1050,17 @@ router.post("/renters/:id/suspend", requireSuperadmin, async (req, res) => {
   }
 });
 
-// UNSUSPEND — restore access. Does NOT auto-start the bot (operator starts it
-// from the Renting section when ready).
+// UNSUSPEND — restore access. Does NOT auto-start the bot (operator — or the
+// renter from their own page — starts it when ready). A suspend that stopped
+// their farming leaves it stopped: botStoppedAt stays set, so the renter's
+// page shows "Stopped" with a Start button instead of "Running" over a bot
+// their accounts were pulled out of. A suspend whose stop never happened
+// (botStoppedAt still null) simply carries on farming.
 router.post("/renters/:id/unsuspend", requireSuperadmin, async (req, res) => {
   try {
     const r = await Renter.findByIdAndUpdate(
       req.params.id,
-      { $set: { status: "active", botStoppedAt: null } },
+      { $set: { status: "active" } },
       { new: true },
     );
     if (!r) return res.status(404).json({ success: false, message: "Not found" });
@@ -1241,23 +1320,43 @@ router.post("/renters/:id/bot/:action", requireSuperadmin, async (req, res) => {
     // Renter-scoped: start/stop move only THIS renter's accounts in or out of
     // the config(s); a container is only ever stopped once nothing else is in
     // it. "restart" reloads the renter's own bot (every account on it).
+    let detail = null;
     if (action === "start") {
-      await startRenterFarming(r, host);
+      detail = await startRenterFarming(r, host);
       r.botStoppedAt = null;
+      r.botStopReason = "";
       await r.save();
     } else if (action === "stop") {
-      await stopRenterFarming(r, host);
+      detail = await stopRenterFarming(r, host);
       r.botStoppedAt = new Date();
+      r.botStopReason = "operator";
       await r.save();
     } else {
+      // Never "restart" a bot whose config is empty: `docker restart` would
+      // START it, and an accountless TwitchDropsBot spins in a login-retry
+      // loop that has filled a disk before. A stop now empties a lone
+      // renter's bot, so this is the normal state after one.
+      const n = await countConfigAccounts(host, r.botFile).catch(() => null);
+      if (n === 0) {
+        return res.status(400).json({
+          success: false,
+          message: "This bot has no accounts in its config — use Start (it puts the renter's accounts back first).",
+        });
+      }
       await restartConfigContainer(host, r.botFile);
     }
-    res.json({ success: true, running: action !== "stop" });
+    res.json({
+      success: true,
+      running: action !== "stop",
+      skipped: detail && Array.isArray(detail.skipped) ? detail.skipped.length : 0,
+    });
   } catch (e) {
     const msg =
       e.code === "no_accounts"
         ? "The bot has no accounts yet — add some first."
-        : e.code === "disabled"
+        : e.code === "rental_stack_full"
+          ? e.message
+          : e.code === "disabled"
           ? "Bot control is disabled on this server."
           : e.unreachable
             ? "The bot host is offline right now."
@@ -2923,9 +3022,13 @@ module.exports.availableRentalStack = availableRentalStack;
 // holder's stack on EVERY provision with these: a stack chosen once, when it had
 // room, is not a stack that still has room a hundred sales later.
 module.exports.rentalStackOptions = rentalStackOptions;
+// The HOLDER's picker (operatorFarm): never a direct renter's bot.
 module.exports.chooseStackWithRoom = (bots, needed) =>
   chooseAvailableStack(
     (Array.isArray(bots) ? bots : []).filter(
-      (b) => Number(b.remaining) >= Math.max(1, Math.floor(Number(needed) || 1)),
+      (b) =>
+        usableForHolder(b) &&
+        Number(b.remaining) >= Math.max(1, Math.floor(Number(needed) || 1)),
     ),
   );
+module.exports.usableForHolder = usableForHolder;

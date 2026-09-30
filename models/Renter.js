@@ -56,6 +56,11 @@ const renterSchema = new mongoose.Schema(
     // Stamped when a suspend/expiry sweep has already stopped their bot, so the
     // sweep doesn't keep issuing stop calls every tick.
     botStoppedAt: { type: Date, default: null },
+    // WHY the renter's farming is stopped, while botStoppedAt is set:
+    // "lease" (the expiry sweep), "suspend", "operator" (Stop on /renters.html)
+    // or "renter" (their own Stop button). A lease extension resumes farming
+    // only when the lease end was the reason — a stop someone chose stays a stop.
+    botStopReason: { type: String, default: "" },
     // Stamped when the "lease expiring soon" heads-up was sent for the CURRENT
     // accessEnd, so the sweep warns once per lease, not once per tick. A lease
     // extension moves accessEnd, which re-arms the warning (see renterExpiry).

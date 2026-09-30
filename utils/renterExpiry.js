@@ -105,7 +105,7 @@ async function sweepAccounts(now) {
     const recordedFiles = new Set(accounts.map((a) => a.configFile).filter(Boolean));
     let located;
     try {
-      located = await locateSecrets(host, secrets, [...recordedFiles]);
+      located = await locateSecrets(host, secrets);
     } catch (e) {
       const reason = "could not read " + host.id + "'s configs: " + String(e.message || e).slice(0, 160);
       for (const a of accounts) stuck.push({ a, reason });
@@ -117,7 +117,9 @@ async function sweepAccounts(now) {
       try {
         const det = await detachFromFile(host, file, secrets);
         if (det.missing) continue;
-        await settleAfterDetach(host, file, det, { reloadOwed: recordedFiles.has(file) });
+        // Reloads the bot when something was removed now, or a reload failed
+        // on an earlier tick (PendingReload) — never otherwise.
+        await settleAfterDetach(host, file, det);
       } catch (e) {
         failedFile.set(file, String((e && e.message) || e).slice(0, 160));
       }
@@ -340,7 +342,9 @@ async function sweepOnce() {
       // Only this renter's accounts are pulled, wherever they are; a bot left
       // empty is stopped for good, a bot others still farm on keeps running.
       const out = await stopRenterFarming(r, host);
+      stopFailures.delete(String(r._id));
       r.botStoppedAt = new Date();
+      r.botStopReason = why === "lease ended" ? "lease" : "suspend";
       await r.save();
       const detail = describeStop(out, host);
       logEvent({
@@ -361,14 +365,32 @@ async function sweepOnce() {
       );
     } catch (e) {
       // Host offline / unreadable — try again next tick (botStoppedAt stays
-      // null so it isn't marked done prematurely).
+      // null so it isn't marked done prematurely). A renter whose stop keeps
+      // failing is farming past its lease: page once it has for ~30 minutes,
+      // then at most daily.
       console.error(
         "[renterExpiry] could not stop bot for " + r.username + ":",
         e.message,
       );
+      const key = String(r._id);
+      const f = stopFailures.get(key) || { n: 0, alertedAt: 0 };
+      f.n += 1;
+      if (f.n >= STUCK_ALERT_ATTEMPTS && Date.now() - f.alertedAt > STUCK_REALERT_MS) {
+        f.alertedAt = Date.now();
+        await sendTelegram(
+          "🚨 Renter " + r.username + " (" + why + ") could NOT be stopped after " + f.n +
+            " attempts — their accounts may still be farming. Last error: " +
+            String(e.message || e).slice(0, 200),
+        ).catch(() => {});
+      }
+      stopFailures.set(key, f);
     }
   }
 }
+
+// Per-renter count of consecutive failed lease-end / suspend stops (in memory:
+// a restart re-arms the page, which is the wanted direction).
+const stopFailures = new Map();
 
 // One line for the operator: how many accounts came off which bots, and what
 // became of each container.

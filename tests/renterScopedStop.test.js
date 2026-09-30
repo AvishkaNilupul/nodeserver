@@ -143,6 +143,7 @@ Module._load = function (request, parent, isMain) {
 const Renter = require("../models/Renter");
 const RenterAccount = require("../models/RenterAccount");
 const RenterBotStack = require("../models/RenterBotStack");
+const PendingReload = require("../models/PendingReload");
 const ops = require("../utils/renterBotOps");
 
 let mongod;
@@ -164,7 +165,12 @@ async function reset() {
   world.ps = { local: {}, contabo: {} };
   world.ops = [];
   world.psFails = false;
-  await Promise.all([Renter.deleteMany({}), RenterAccount.deleteMany({}), RenterBotStack.deleteMany({})]);
+  await Promise.all([
+    Renter.deleteMany({}),
+    RenterAccount.deleteMany({}),
+    RenterBotStack.deleteMany({}),
+    PendingReload.deleteMany({}),
+  ]);
 }
 
 function user(secret, games = []) {
@@ -318,20 +324,40 @@ test("a stopped shared bot is left stopped — pulling one renter never STARTS i
   assert.deepEqual(out.files.map((f) => f.action), ["left-stopped"]);
 });
 
-test("a retry after a failed reload still reloads (the accounts were already pulled)", async () => {
+test("a retry after a failed reload still reloads (the reload was recorded as owed)", async () => {
   await reset();
   const holder = await mkRenter("operator-selffarm", { botFile: "config_54.json" });
   const r = await mkRenter("jhonkwiall", { botFile: "config_03.json" });
   await mkAccount(holder, "buyer1", { configFile: "config_03.json" });
   await mkAccount(r, "jhonacct", { configFile: "config_03.json" });
-  // First attempt already removed the account, then the restart failed.
-  putConfig("contabo", "config_03.json", [user("buyer1")]);
+  putConfig("contabo", "config_03.json", [user("buyer1"), user("jhonacct")]);
   world.ps.contabo.twitchbotx3 = { state: "running" };
-
+  // First attempt: the account comes out, then the reload cannot happen.
+  world.psFails = true;
+  await assert.rejects(ops.stopRenterFarming(r, HOST));
+  assert.ok(await PendingReload.findOne({ host: "contabo", file: "config_03.json" }).lean(), "owed reload recorded");
+  // The retry removes nothing — but the owed reload still happens, once.
+  world.psFails = false;
+  world.ops = [];
   const out = await ops.stopRenterFarming(r, HOST);
-
   assert.equal(out.removed, 0);
-  assert.deepEqual(docker(), [["restart", "contabo", "twitchbotx3"]], "the owed reload happens");
+  assert.deepEqual(docker(), [["restart", "contabo", "twitchbotx3"]]);
+  assert.equal(await PendingReload.countDocuments({}), 0, "cleared once done");
+});
+
+test("REGRESSION: a repeated stop that removes nothing and owes nothing restarts NOTHING", async () => {
+  await reset();
+  const holder = await mkRenter("operator-selffarm", { botFile: "config_54.json" });
+  const r = await mkRenter("jhonkwiall", { botFile: "config_03.json" });
+  await mkAccount(holder, "buyer1", { configFile: "config_03.json" });
+  await mkAccount(r, "jhonacct", { configFile: "config_03.json" });
+  putConfig("contabo", "config_03.json", [user("buyer1"), user("jhonacct")]);
+  world.ps.contabo.twitchbotx3 = { state: "running" };
+  await ops.stopRenterFarming(r, HOST);
+  world.ops = [];
+  await ops.stopRenterFarming(r, HOST);
+  await ops.stopRenterFarming(r, HOST);
+  assert.deepEqual(docker(), [], "the 49-buyer bot is not restarted by repeated Stop presses");
 });
 
 test("an unreadable container state after pulling accounts throws (the sweep retries) and starts nothing", async () => {
@@ -366,9 +392,9 @@ test("a stale ledger pointer: the renter's account found in ANOTHER config is pu
   assert.deepEqual(secretsIn("contabo", "config_03.json"), ["buyer1"]);
   assert.deepEqual(secretsIn("contabo", "config_15.json"), ["other"]);
   const restarted = docker().filter((o) => o[0] === "restart").map((o) => o[2]).sort();
-  // config_03 reloads (account pulled); config_15 reloads because the ledger
-  // placed the account there (a pull may have happened on an earlier attempt).
-  assert.deepEqual(restarted, ["twitchbotx15", "twitchbotx3"]);
+  // Only the file the account was really in reloads; the stale pointer's file
+  // (another tenant's bot) had nothing removed and owes nothing.
+  assert.deepEqual(restarted, ["twitchbotx3"]);
 });
 
 test("a missing config file is reported, not fatal (the dangling-slot case)", async () => {
@@ -403,19 +429,35 @@ test("REGRESSION: start never copies accounts that live in other stacks into the
   for (const a of others) assert.equal(a.configFile, "config_02.json", a.clientSecret + " was repointed");
 });
 
-test("start refuses to overfill a rental stack", async () => {
+test("start never overfills a rental stack: it puts back what fits and reports the rest", async () => {
   await reset();
   const r = await mkRenter("bulkfarm2", { botFile: "config_21.json", botHost: "local" });
   await RenterBotStack.create({ host: "local", file: "config_21.json", capacity: 2 });
   await mkAccount(r, "a1", { configFile: "config_21.json", host: "local" });
   await mkAccount(r, "a2", { configFile: "config_21.json", host: "local" });
   putConfig("local", "config_21.json", [user("someone-else")]);
+  world.ps.local.twitchbotx21 = { state: "running" };
+
+  const out = await ops.startRenterFarming(r, { id: "local", label: "local" });
+
+  assert.equal(out.added, 1);
+  assert.equal(out.skipped.length, 1);
+  assert.match(out.skipped[0].reason, /config_21\.json is full/);
+  assert.equal(secretsIn("local", "config_21.json").length, 2, "capacity respected");
+});
+
+test("start with NO room at all fails loudly and writes nothing", async () => {
+  await reset();
+  const r = await mkRenter("bulkfarm2", { botFile: "config_21.json", botHost: "local" });
+  await RenterBotStack.create({ host: "local", file: "config_21.json", capacity: 1 });
+  await mkAccount(r, "a1", { configFile: "config_21.json", host: "local" });
+  putConfig("local", "config_21.json", [user("someone-else")]);
 
   await assert.rejects(
     ops.startRenterFarming(r, { id: "local", label: "local" }),
     (e) => e.code === "rental_stack_full",
   );
-  assert.deepEqual(secretsIn("local", "config_21.json"), ["someone-else"], "nothing written");
+  assert.deepEqual(secretsIn("local", "config_21.json"), ["someone-else"]);
 });
 
 test("stop then start puts each account back with its own games", async () => {
@@ -449,4 +491,136 @@ test("otherSharers counts renters whose accounts sit in the file, not just those
 
   const names = (await ops.otherSharers(jhon)).map((r) => r.username);
   assert.deepEqual(names, ["operator-selffarm"]);
+});
+
+// ---------------------------------------------------------------------------
+// Follow-ups from the 2026-10-01 adversarial review of the first version.
+// ---------------------------------------------------------------------------
+test("start puts an account back into the file its ledger row names, not the renter's home", async () => {
+  await reset();
+  const r = await mkRenter("bulkfarm2", { botFile: "config_21.json", botHost: "local" });
+  await mkAccount(r, "home1", { configFile: "config_21.json", host: "local" });
+  await mkAccount(r, "moved1", { configFile: "config_16.json", host: "local" }); // move-renter-accounts
+  putConfig("local", "config_21.json", [user("x")]);
+  putConfig("local", "config_16.json", [user("y")]);
+  world.ps.local.twitchbotx21 = { state: "running" };
+  world.ps.local.twitchbotx16 = { state: "running" };
+
+  const out = await ops.startRenterFarming(r, { id: "local", label: "local" });
+
+  assert.equal(out.added, 2);
+  assert.ok(secretsIn("local", "config_21.json").includes("home1"));
+  assert.ok(secretsIn("local", "config_16.json").includes("moved1"), "back in its own file");
+  assert.ok(!secretsIn("local", "config_21.json").includes("moved1"));
+});
+
+test("start never adds an account that already farms in another config — it re-points the row", async () => {
+  await reset();
+  const r = await mkRenter("escapefrom", { botFile: "config_04.json" });
+  await mkAccount(r, "e1", { configFile: "config_04.json" });
+  putConfig("contabo", "config_04.json", [user("z")]);
+  putConfig("contabo", "config_05.json", [user("e1")]); // really farming here
+  world.ps.contabo.twitchbotx4 = { state: "running" };
+
+  const out = await ops.startRenterFarming(r, HOST);
+
+  assert.equal(out.added, 0);
+  assert.deepEqual(secretsIn("contabo", "config_04.json"), ["z"], "no second copy");
+  assert.equal((await RenterAccount.findOne({ clientSecret: "e1" }).lean()).configFile, "config_05.json");
+});
+
+test("REGRESSION: a start for the rent-farm holder never restores accounts from other stacks", async () => {
+  await reset();
+  const holder = await mkRenter("operator-selffarm", { botFile: "config_54.json" });
+  await mkAccount(holder, "stray", { configFile: "" }); // unplaced holder row
+  await mkAccount(holder, "lost", { configFile: "config_31.json" }); // file gone
+  await mkAccount(holder, "own", { configFile: "config_54.json" });
+  putConfig("contabo", "config_54.json", [user("own")]);
+  world.ps.contabo.twitchbotx54 = { state: "running" };
+
+  const out = await ops.startRenterFarming(holder, HOST);
+
+  assert.equal(out.added, 0);
+  assert.deepEqual(secretsIn("contabo", "config_54.json"), ["own"]);
+});
+
+test("an unreadable config fails the stop instead of letting a secret survive in it", async () => {
+  await reset();
+  const r = await mkRenter("jhonkwiall", { botFile: "config_03.json" });
+  await mkAccount(r, "jhonacct", { configFile: "config_03.json" });
+  putConfig("contabo", "config_03.json", [user("jhonacct")]);
+  world.fs.contabo["config_07.json"] = "{ not json";
+
+  await assert.rejects(ops.stopRenterFarming(r, HOST), /Unparseable config contabo\/config_07\.json/);
+});
+
+test("ledger rows on an UNKNOWN host fail the stop (it cannot be verified)", async () => {
+  await reset();
+  const r = await mkRenter("ghost", { botFile: "config_03.json" });
+  await mkAccount(r, "g1", { configFile: "config_09.json", host: "phone" });
+  putConfig("contabo", "config_03.json", [user("other")]);
+  await assert.rejects(ops.stopRenterFarming(r, HOST), /unknown bot host\(s\) phone/);
+});
+
+test("with container restarts disabled a reload is NOT reported as done", async () => {
+  await reset();
+  const holder = await mkRenter("operator-selffarm", { botFile: "config_54.json" });
+  const r = await mkRenter("jhonkwiall", { botFile: "config_03.json" });
+  await mkAccount(holder, "buyer1", { configFile: "config_03.json" });
+  await mkAccount(r, "jhonacct", { configFile: "config_03.json" });
+  putConfig("contabo", "config_03.json", [user("buyer1"), user("jhonacct")]);
+  world.ps.contabo.twitchbotx3 = { state: "running" };
+  const real = fakeCfg.restartConfigContainer;
+  fakeCfg.restartConfigContainer = async () => ({ restarted: false });
+  try {
+    await assert.rejects(ops.stopRenterFarming(r, HOST), (e) => e.code === "disabled");
+  } finally {
+    fakeCfg.restartConfigContainer = real;
+  }
+  assert.ok(await PendingReload.findOne({ file: "config_03.json" }).lean(), "still owed");
+});
+
+test("a stop FORGETS a saved games list when the account had none", async () => {
+  await reset();
+  const r = await mkRenter("escapefrom", { botFile: "config_04.json" });
+  const holder = await mkRenter("operator-selffarm", { botFile: "config_54.json" });
+  await mkAccount(holder, "buyer1", { configFile: "config_04.json" });
+  await mkAccount(r, "e1", { configFile: "config_04.json", favouriteGames: ["Old Game"] });
+  putConfig("contabo", "config_04.json", [user("buyer1", ["Overwatch"]), user("e1", [])]);
+  world.ps.contabo.twitchbotx4 = { state: "running" };
+
+  await ops.stopRenterFarming(r, HOST);
+
+  const row = await RenterAccount.findOne({ clientSecret: "e1" }).lean();
+  assert.equal(row.favouriteGames, undefined, "no stale list left to come back");
+});
+
+test("a games change forgets per-account games saved by an earlier stop", async () => {
+  await reset();
+  const r = await mkRenter("escapefrom", { botFile: "config_04.json" });
+  await mkAccount(r, "e1", { configFile: "config_04.json", favouriteGames: ["Old Game"] });
+  putConfig("contabo", "config_04.json", [user("other", ["Overwatch"])]); // renter stopped
+  await ops.applyRenterGames(r, HOST, ["New Game"]);
+  const row = await RenterAccount.findOne({ clientSecret: "e1" }).lean();
+  assert.equal(row.favouriteGames, undefined);
+});
+
+test("REGRESSION: arming games never pins a blank co-tenant once the global switch is already on", () => {
+  const data = {
+    FavouriteGames: [],
+    TwitchSettings: {
+      OnlyFavouriteGames: true,
+      TwitchUsers: [user("mine", ["x"]), user("blank", [])],
+    },
+  };
+  ops.setUsersGamesBySecret(data, ["mine"], ["Rust"]);
+  const blank = data.TwitchSettings.TwitchUsers.find((u) => u.ClientSecret === "blank");
+  assert.deepEqual(blank.FavouriteGames, [], "not re-gamed");
+  // With the switch OFF (wander mode) the old protection still applies.
+  const off = {
+    FavouriteGames: [],
+    TwitchSettings: { OnlyFavouriteGames: false, TwitchUsers: [user("mine"), user("blank", [])] },
+  };
+  ops.setUsersGamesBySecret(off, ["mine"], ["Rust"]);
+  assert.deepEqual(off.TwitchSettings.TwitchUsers[1].FavouriteGames, ["Rust"]);
 });

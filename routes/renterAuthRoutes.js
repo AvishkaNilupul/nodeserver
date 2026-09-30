@@ -1,6 +1,12 @@
 const express = require("express");
 
-const { authenticate, isBlocked, isExpired, sanitizeRenter } = require("../utils/renters");
+const {
+  authenticate,
+  isBlocked,
+  isExpired,
+  isOperatorHolder,
+  sanitizeRenter,
+} = require("../utils/renters");
 const { requireRenter } = require("../middleware/renterAuth");
 const { loginLimiter } = require("../utils/rateLimit");
 
@@ -32,7 +38,8 @@ router.post("/renter-login", loginLimiter, async (req, res) => {
         .json({ success: false, message: "Username and password required" });
     }
     const renter = await authenticate(username, password);
-    if (!renter) {
+    // The rent-farm holder never logs in (same answer as a wrong password).
+    if (!renter || isOperatorHolder(renter)) {
       return res
         .status(401)
         .json({ success: false, message: "Invalid credentials" });

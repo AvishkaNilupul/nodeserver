@@ -15,6 +15,7 @@ const calls = { stop: [], restartIfRunning: [], removed: [], settled: [], telegr
 // The per-account sweep's view of the hosts: file -> Set of secrets in it.
 const hostFiles = { contabo: {} };
 const failSettle = new Set(); // files whose reload throws
+const owed = new Set(); // models PendingReload: files whose reload is still owed
 const fakeOps = {
   locateSecrets: async (host, secrets) => {
     const out = new Map();
@@ -29,16 +30,22 @@ const fakeOps = {
     if (!set) return { removed: 0, remaining: null, games: new Map(), missing: true };
     let removed = 0;
     for (const x of secrets) if (set.delete(x)) { removed++; calls.removed.push(host.id + "/" + file + ":" + x); }
-    return { removed, remaining: set.size, games: new Map(), missing: false };
+    if (removed && set.size) owed.add(file);
+    return { removed, remaining: set.size, games: new Map(), missing: false, stopped: set.size === 0 };
   },
-  settleAfterDetach: async (host, file, det, opts) => {
+  settleAfterDetach: async (host, file, det) => {
+    if (det.missing) return "missing";
+    if (det.stopped) return "stopped";
+    const isOwed = owed.has(file);
+    if (!(det.removed > 0 || isOwed)) return "unchanged";
     if (failSettle.has(file)) {
       const e = new Error("Could not read container state on " + host.id);
       e.unreachable = true;
-      throw e;
+      throw e; // stays owed
     }
-    calls.settled.push(host.id + "/" + file + (opts && opts.reloadOwed ? " (owed)" : "") + " removed=" + det.removed);
-    return det.remaining === 0 ? "stopped" : "restarted";
+    owed.delete(file);
+    calls.settled.push(host.id + "/" + file + (isOwed && !det.removed ? " (owed)" : "") + " removed=" + det.removed);
+    return "restarted";
   },
   stopRenterFarming: async (renter, host) => {
     calls.stop.push(renter.username);
@@ -98,6 +105,7 @@ async function reset() {
   for (const k of Object.keys(calls)) calls[k] = [];
   hostFiles.contabo = {};
   failSettle.clear();
+  owed.clear();
   await Promise.all([
     Renter.deleteMany({}),
     RenterAccount.deleteMany({}),
@@ -180,7 +188,7 @@ test("a lapsed window is pulled, its bot reloaded, and ONE digest names the orde
   await renterExpiry.sweepOnce();
 
   assert.deepEqual(calls.removed, ["contabo/config_02.json:cs-buyer1"]);
-  assert.deepEqual(calls.settled, ["contabo/config_02.json (owed) removed=1"]);
+  assert.deepEqual(calls.settled, ["contabo/config_02.json removed=1"]);
   const row = await RenterAccount.findOne({ login: "buyer1" }).lean();
   assert.ok(row.farmEndedAt);
   assert.equal(row.configFile, "");
