@@ -141,8 +141,15 @@ test("extending a LIVE window also moves the order's copy, and is logged", async
   const o = await FarmServiceOrder.findOne({ orderId: "a86efe89" }).lean();
   assert.equal(new Date(o.accounts[0].farmUntil).toISOString(), new Date(d.farmUntil).toISOString());
   assert.equal(world.placed.length, 0, "a live window is not re-placed");
-  await new Promise((r) => setTimeout(r, 30));
-  assert.ok(await SystemEvent.findOne({ action: "farm_window_set", subject: "Mirsv80l" }).lean());
+  // The route logs without awaiting (an audit write must never fail the
+  // request), so poll for it rather than guess a delay — a fixed 30 ms was
+  // flaky under the full suite's load.
+  let ev = null;
+  for (let i = 0; i < 100 && !ev; i++) {
+    ev = await SystemEvent.findOne({ action: "farm_window_set", subject: "Mirsv80l" }).lean();
+    if (!ev) await new Promise((r) => setTimeout(r, 20));
+  }
+  assert.ok(ev, "farm_window_set logged");
 });
 
 test("REGRESSION: renewing an ENDED rent-farm window puts the account back on a bot, pinned to its game", async () => {
