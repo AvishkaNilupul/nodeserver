@@ -367,6 +367,42 @@ async function deliverFarmOrder(order, { dryRun } = {}) {
     return { orderId, farm: true, error: unreadable };
   }
 
+  // The buyer's order chat is created LAZILY by Eldorado — a freshly-paid order
+  // has no talkJsConversationId yet, and the credential can only be posted into
+  // a conversation that exists. Not a failure: hold the order in "waiting_chat",
+  // provision NOTHING (no scarce pristine account burned, and no farming window
+  // started before the buyer can receive the login), and deliver the moment the
+  // conversation appears. It pages only if the wait drags on (~10 min), when
+  // opening the order page (which starts the chat) or a nudge to the buyer helps.
+  if (!mp.eldoradoOrderChatReady(order)) {
+    // State first: shouldAlert's throttle keys off it (a fresh "claimed" row
+    // would read as a first failure and page on tick one).
+    row.state = "waiting_chat";
+    row.lastError =
+      "buyer's order chat is not open yet (Eldorado has not created the " +
+      "conversation) — holding to auto-deliver the moment it does";
+    const alert = farmAlert.shouldAlert(row);
+    await row.save();
+    if (alert) {
+      await farmAlert
+        .alertFarmFailure({
+          market: MARKET,
+          orderId,
+          offerTitle: row.offerTitle || parsed.title || "",
+          game: parsed.game,
+          days: parsed.days,
+          qty,
+          buyerUsername: row.buyerUsername || "",
+          reason:
+            "the buyer has not opened the order chat, so there is no conversation to " +
+            "post the login into. It auto-delivers the moment they open it; to deliver " +
+            "now, open the order page on Eldorado (that starts the chat).",
+        })
+        .catch(() => {});
+    }
+    return { orderId, farm: true, waiting: "chat-not-open" };
+  }
+
   try {
     // 1. Provision, unless a previous attempt already did.
     if (!row.provisionedAt) {

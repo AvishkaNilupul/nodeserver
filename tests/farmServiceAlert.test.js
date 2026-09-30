@@ -94,6 +94,23 @@ test("recovering and failing again pages immediately", () => {
   assert.strictEqual(alert.shouldAlert({ state: "provisioned", attempts: 7 }), true);
 });
 
+test("waiting_chat is a soft hold: quiet at first, then reminds like a failure", () => {
+  for (const n of [1, 2, 3, 9, 11]) {
+    assert.strictEqual(alert.shouldAlert({ state: "waiting_chat", attempts: n }), false, "attempt " + n);
+  }
+  for (const n of [10, 20, 30]) {
+    assert.strictEqual(alert.shouldAlert({ state: "waiting_chat", attempts: n }), true, "attempt " + n);
+  }
+});
+
+test("the Eldorado farm service holds a chat-less order BEFORE provisioning anything", () => {
+  const src = require("node:fs").readFileSync(require("node:path").join(__dirname, "..", "utils", "eldoradoFarmService.js"), "utf8");
+  const hold = src.indexOf("if (!mp.eldoradoOrderChatReady(order)) {");
+  const provision = src.indexOf("// 1. Provision, unless a previous attempt already did.");
+  assert.ok(hold > 0 && provision > hold, "the hold must come before provisioning");
+  assert.match(src.slice(hold, provision), /row\.state = "waiting_chat";[\s\S]*farmAlert\.shouldAlert\(row\)/);
+});
+
 /* --------------------- every farm service is wired up -------------------- */
 
 test("all three farm services alert on every way an order can fail", () => {

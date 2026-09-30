@@ -61,9 +61,14 @@ function shortfallMessage(res, qty) {
 
 // Should this attempt page the owner? First failure always; then every Nth, so
 // a stuck order keeps reminding without spamming.
+//
+// "waiting_chat" (the buyer's Eldorado order chat is not open yet) is throttled
+// exactly like "failed": attempts accrue ~1 per tick, so the first page lands
+// around attempt REALERT_EVERY (~10 min) — quiet for a chat that opens promptly,
+// loud for one that never does.
 function shouldAlert(row) {
   if (!row) return true;
-  if (row.state !== "failed") return true;
+  if (row.state !== "failed" && row.state !== "waiting_chat") return true;
   const n = Number(row.attempts) || 0;
   return n > 0 && n % REALERT_EVERY === 0;
 }
