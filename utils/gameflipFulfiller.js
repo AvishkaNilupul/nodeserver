@@ -234,8 +234,19 @@ async function accountListingText(
     });
     if (!items.length)
       return { title: fallbackTitle, description: fallbackDescription };
+    // A set spanning several games (a whole-account bundle) is not "<game>
+    // Twitch Drops": the house title names only the first item's game over the
+    // WHOLE count — "Rocket League Twitch Drops (58 Items)" for an account with
+    // 22 Rocket League drops. Keep the caller's title instead (the set name on
+    // publish, the previous unit's title on relist); the description still
+    // lists every item with its game.
+    const multiGame =
+      new Set(items.map((i) => i.game).filter(Boolean)).size > 1;
     return {
-      title: buildTitle({ game: primaryGame, items }),
+      title:
+        multiGame && fallbackTitle
+          ? fallbackTitle
+          : buildTitle({ game: primaryGame, items }),
       description: buildDescription({ game: primaryGame, items }),
     };
   } catch {

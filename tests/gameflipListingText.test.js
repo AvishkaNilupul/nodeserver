@@ -111,3 +111,54 @@ test("an unreadable account falls back to the caller's set-built text", async ()
     assert.deepStrictEqual(t, { title: "set title", description: "set description" });
   });
 });
+
+// A whole-account bundle spans several games. The house title names only the
+// first item's game over the whole count, so a 58-item account holding 22
+// Rocket League drops went out as "Rocket League Twitch Drops (58 Items)".
+// For such a set the caller's own title (the set name; the previous unit's
+// title on relist) is kept, while the description still lists every item.
+const MIXED = {
+  items: [
+    { itemKey: "octane decal|rocket league", name: "Octane Decal", game: "Rocket League", qty: 1 },
+    { itemKey: "boost trail|rocket league", name: "Boost Trail", game: "Rocket League", qty: 1 },
+    { itemKey: "finals mask|the finals", name: "Finals Mask", game: "THE FINALS", qty: 1 },
+    { itemKey: "tarkov patch|escape from tarkov", name: "Tarkov Patch", game: "Escape from Tarkov", qty: 1 },
+  ],
+};
+const mixedRows = () => MIXED.items.map((i) => row(i.name, i.game));
+
+test("a multi-game set keeps the caller's title instead of '<first game> Twitch Drops'", async () => {
+  await withDrops(mixedRows(), async () => {
+    const setName = "Rocket League + THE FINALS + Tarkov — 4 Twitch Drops, full account";
+    const { title, description } = await accountListingText(MIXED, "acc1", setName, "fb");
+    assert.strictEqual(title, setName);
+    assert.doesNotMatch(title, /^Rocket League Twitch Drops/);
+    // Every item is still listed, each with its own game.
+    assert.strictEqual(description.match(/^- /gm).length, 4);
+    assert.match(description, /- Finals Mask \(THE FINALS\)/);
+    assert.match(description, /- Tarkov Patch \(Escape from Tarkov\)/);
+  });
+});
+
+test("a relisted multi-game unit keeps the previous unit's title", async () => {
+  await withDrops(mixedRows(), async () => {
+    const prev = "Rocket League + THE FINALS + Tarkov — 4 Twitch Drops, full account";
+    const first = await accountListingText(MIXED, "acc1", prev, "fb");
+    const next = await accountListingText(MIXED, "acc2", first.title, first.description);
+    assert.strictEqual(next.title, prev);
+  });
+});
+
+test("a multi-game set with no caller title still gets the house title", async () => {
+  await withDrops(mixedRows(), async () => {
+    const { title } = await accountListingText(MIXED, "acc1", "", "fb");
+    assert.match(title, /^Rocket League Twitch Drops \(4 Items\)/);
+  });
+});
+
+test("a single-game set is unchanged: the house title, not the caller's", async () => {
+  await withDrops(fatAccount(), async () => {
+    const { title } = await accountListingText(SET, "acc1", "some caller title", "fb");
+    assert.match(title, /^Overwatch 2 Twitch Drops \(5 Items\)/);
+  });
+});
