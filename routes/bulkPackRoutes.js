@@ -126,6 +126,9 @@ function invalidateProposals() {
 // ---------------------------------------------------------------------------
 const OBJECT_ID_RE = /^[a-f0-9]{24}$/i;
 const MAX_UNITS = 500; // sanity bound on units / add; send.js checks real stock
+// Sanity bound on an owner-typed price per ACCOUNT (docs/bulk-packs/PACKS-2.md
+// §3). send.js applies the real price rules (floor per listing, confirm band).
+const MAX_CUSTOM_UNIT_PRICE = 1000;
 const MAX_GAME_LEN = 200;
 const LIST_DEFAULT = 100;
 const LIST_MAX = 500;
@@ -143,6 +146,15 @@ function bodyOf(req) {
 function toNum(v) {
   if (typeof v === "number") return v;
   if (typeof v === "string" && v.trim()) return Number(v.trim());
+  return NaN;
+}
+// A price: a finite JSON number, or a plain decimal string ("1.25"). Hex,
+// exponent and "$" strings, booleans, arrays and objects are NaN.
+function toPrice(v) {
+  if (typeof v === "number") return Number.isFinite(v) ? v : NaN;
+  if (typeof v === "string" && /^\s*(\d+(\.\d+)?|\.\d+)\s*$/.test(v)) {
+    return Number(v.trim());
+  }
   return NaN;
 }
 function clampInt(v, d, lo, hi) {
@@ -531,6 +543,12 @@ router.get(
 // operator object ({"$ne": …}) can never ride into a query, `actor` always
 // comes from the session, and a source only carries the fields its slot uses
 // (a farm send never carries a setId: slotKey would key on it — CONTRACT I6).
+//
+// `units` stays in ACCOUNTS: send.js turns it into whole packs,
+// floor(units / N) (docs/bulk-packs/PACKS-2.md §3). `customUnitPrice` is the
+// owner's price per ACCOUNT (a number, or undefined for the tier price) and
+// `confirmPrice` always a boolean: true only for a real JSON true, the owner's
+// answer to a 409 {code:"price_confirm"} from send.js.
 function parseSendBody(body) {
   const errors = [];
   const source =
@@ -578,9 +596,55 @@ function parseSendBody(body) {
       errors.push("days must be a whole number 1..730");
     }
   }
-  return { errors, args: { source, setId, game, days, market, minQty, units } };
+  // Optional, any source. Only the type and a sanity range are checked here;
+  // send.js applies the price rules (a pack below the market floor → 400;
+  // outside the confirm band → 409 price_confirm unless confirmPrice).
+  let customUnitPrice;
+  if (
+    body.customUnitPrice !== undefined &&
+    body.customUnitPrice !== null &&
+    body.customUnitPrice !== ""
+  ) {
+    const p = toPrice(body.customUnitPrice);
+    if (!Number.isFinite(p) || p <= 0 || p > MAX_CUSTOM_UNIT_PRICE) {
+      errors.push(
+        "customUnitPrice must be a price per account above $0 and at most $" +
+          MAX_CUSTOM_UNIT_PRICE +
+          " (leave it out for the tier price)",
+      );
+    } else {
+      customUnitPrice = p;
+    }
+  }
+  // It waives a price check, so nothing but a JSON boolean is read: "true",
+  // 1 or "yes" are refused rather than guessed at.
+  let confirmPrice = false;
+  if (body.confirmPrice !== undefined && body.confirmPrice !== null) {
+    if (typeof body.confirmPrice === "boolean") {
+      confirmPrice = body.confirmPrice;
+    } else {
+      errors.push("confirmPrice must be true or false");
+    }
+  }
+  return {
+    errors,
+    args: {
+      source,
+      setId,
+      game,
+      days,
+      market,
+      minQty,
+      units,
+      customUnitPrice,
+      confirmPrice,
+    },
+  };
 }
 
+// send.js's answer goes back as it is, `code` included: the page recognises a
+// 409 {code:"price_confirm", message} and resends with confirmPrice:true only
+// after the owner ticked "I checked this price".
 router.post("/api/bulk-packs/send", requireSuperadmin, async (req, res) => {
   if (refuseWhileOff(res)) return;
   const { errors, args } = parseSendBody(bodyOf(req));

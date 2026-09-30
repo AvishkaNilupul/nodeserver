@@ -14,9 +14,10 @@
 //   farmCapacity.shareFor(selfId, ids, n)  utils/suppliedStock.js shareOfShelf
 //   markets publish errors                 err.outcome / err.externalId / err.code
 //   the loop's per-offer pass              a scripted pass under the same lock
-// Memory Mongo with the real BulkOffer / MarketplaceListing / DropSet models
-// and the real farm-order parsers; no network, and the real
-// utils/settings.json is never read.
+// Memory Mongo with the real BulkOffer / MarketplaceListing / DropSet models,
+// the real pack maths and buyer copy (PACKS-2: one listing = one pack of N
+// accounts; every quantity is in packs) and the real farm-order parsers; no
+// network, and the real utils/settings.json is never read.
 const test = require("node:test");
 const assert = require("node:assert/strict");
 const mongoose = require("mongoose");
@@ -29,6 +30,9 @@ const CampaignDrops = require("../models/CampaignDrops");
 const realSettings = require("../utils/settings");
 const { shareOfShelf } = require("../utils/suppliedStock");
 const config = require("../utils/bulkPacks/config");
+const realPricing = require("../utils/bulkPacks/pricing");
+const realCopy = require("../utils/bulkPacks/copy");
+const { packsFor } = require("../utils/bulkPacks/packMath");
 const send = require("../utils/bulkPacks/send");
 
 let mongod;
@@ -61,62 +65,9 @@ const fakeSettings = {
   isNoClaimGame: (g) => /overwatch/i.test(String(g || "")),
 };
 
-const round2 = (x) => Math.round(x * 100) / 100;
-const fakePricing = {
-  unitPrice: ({ anchor, discountPct, market }) =>
-    anchor > 0
-      ? Math.max(
-          config.MARKET_FLOORS[market],
-          round2(anchor * (1 - discountPct / 100)),
-        )
-      : 0,
-  packPrice: ({ anchor, discountPct, size }) =>
-    anchor > 0 && size > 0
-      ? Math.max(
-          0.75,
-          Math.round(size * anchor * (1 - discountPct / 100) * 4) / 4,
-        )
-      : 0,
-  farmUnitPrice: ({ farmPrices, market, days, discountPct }) => {
-    const a = Number(
-      farmPrices && farmPrices[market] && farmPrices[market][String(days)],
-    );
-    return a > 0
-      ? Math.max(
-          config.MARKET_FLOORS[market],
-          round2(a * (1 - discountPct / 100)),
-        )
-      : 0;
-  },
-  pickAnchor: ({ set }) =>
-    Number(set.price) > 0
-      ? { anchor: Number(set.price), basis: "set", listingId: "" }
-      : { anchor: 0, basis: "none", listingId: "" },
-};
-
-const fakeCopy = {
-  baseTitleForSet: ({ set }) => set.name || "Twitch Drops bundle",
-  accountsTitle: (a) =>
-    a.market === "gameflip"
-      ? a.baseTitle + " — PACK OF " + a.minQty + " ACCOUNTS"
-      : a.baseTitle +
-        " — BULK " +
-        a.minQty +
-        "+ accounts (" +
-        a.discountPct +
-        "% off)",
-  accountsDescription: ({ minQty }) =>
-    "Each account holds the whole bundle. Minimum order " + minQty + ".",
-  farmTitle: (a) =>
-    a.game +
-    " Twitch Drops Automatic Farming " +
-    (a.days === 365 ? "1 Year" : a.days + " Days") +
-    " — Bulk " +
-    a.minQty +
-    "+ Accounts",
-  farmDescription: ({ game, days, minQty }) =>
-    "Minimum order " + minQty + ". Each account farms " + game + " " + days,
-};
+// The real pack maths and buyer copy (pure).
+const fakePricing = realPricing;
+const fakeCopy = realCopy;
 
 // The stock layer: `held` stands in for the DropLog reservations
 // (accountId -> market tag).
@@ -189,7 +140,7 @@ const fakeMarkets = {
     return {
       externalId: "EXT-" + ++mk.seq,
       url: "https://market.test/offer/" + mk.seq,
-      price: args.market === "gameflip" ? args.packPrice : args.unitPrice,
+      price: args.packPrice,
     };
   },
   publishNoclaim: async (args) => {
@@ -200,17 +151,17 @@ const fakeMarkets = {
       marketplace: args.market,
       externalId: "NC-" + ++mk.seq,
       title: args.title,
-      price: args.unitPrice,
+      price: args.packPrice,
       status: "active",
       origin: "manual",
       noclaimStock: true,
-      qtyTarget: args.quantity,
+      qtyTarget: mk.noclaimLanded != null ? mk.noclaimLanded : args.quantity,
     });
     return {
       rowId: String(row._id),
       externalId: row.externalId,
       url: "https://market.test/nc/" + mk.seq,
-      price: args.unitPrice,
+      price: args.packPrice,
       ...(mk.noclaimLanded != null ? { quantity: mk.noclaimLanded } : {}),
     };
   },
@@ -220,7 +171,7 @@ const fakeMarkets = {
     return {
       externalId: "FARM-" + ++mk.seq,
       url: "https://market.test/farm/" + mk.seq,
-      price: args.unitPrice,
+      price: args.packPrice,
     };
   },
   pause: async (market, id) => {
@@ -354,6 +305,9 @@ const fakeNoclaimListings = {
   },
 };
 
+// A no-claim row's share of the shelf, in accounts (noclaimStock.stockForListing).
+const nc = { share: 10 };
+
 const events = [];
 const telegrams = [];
 
@@ -370,7 +324,7 @@ function installFakes() {
     lock: fakeLock,
     proposals: { invalidate: () => {} },
     noclaimListings: fakeNoclaimListings,
-    noclaimStock: { stockForListing: async () => 10 },
+    noclaimStock: { stockForListing: async () => nc.share },
     logEvent: async (e) => {
       events.push(e);
     },
@@ -528,7 +482,8 @@ async function closeSoldOut(offer, row, insidePause) {
       },
     );
   }
-  if (row.units.filter(isFree).length >= offer.minQty) return;
+  // PACKS-2 §4: a partial pack can never sell.
+  if (packsFor(row.units.filter(isFree).length, offer.minQty) >= 1) return;
   await insidePause();
   await fakeMarkets.pause(offer.market, offer.externalId);
   await MarketplaceListing.updateOne(
@@ -574,6 +529,7 @@ test.beforeEach(async () => {
   loopState.resplits = [];
   loopState.resplitImpl = null;
   ncl.calls = [];
+  nc.share = 10;
   events.length = 0;
   telegrams.length = 0;
   fakeLock.__reset();
@@ -674,9 +630,9 @@ test("g2gReadbackOrphan: a G2G offer that did not read back is HELD with its id 
   assert.equal(offer.state, "error");
   assert.equal(offer.open, false);
   assert.match(offer.lastError, /may be live on G2G \(G2G-777\)/);
-  assert.equal(entries(offer, "on_offer").length, 8);
+  assert.equal(entries(offer, "on_offer").length, 5, "8 accounts = one pack of 5");
   assert.equal(st.releaseCalls.length, 0);
-  assert.equal(st.held.size, 8, "nothing is free stock while it may sell");
+  assert.equal(st.held.size, 5, "nothing is free stock while it may sell");
   assert.equal(
     called("withdraw").length,
     0,
@@ -697,7 +653,7 @@ test("an unclassified publish failure holds; markets' own refusal or 'not_create
     o.lastError,
     /^publish outcome unknown — may be live on Eldorado \(no id\)/,
   );
-  assert.equal(entries(o, "on_offer").length, 6);
+  assert.equal(entries(o, "on_offer").length, 5, "6 accounts = one pack of 5");
   assert.equal(st.releaseCalls.length, 0);
 
   mk.fail.publishAccounts = {
@@ -708,8 +664,8 @@ test("an unclassified publish failure holds; markets' own refusal or 'not_create
   assert.equal(r2.status, 502);
   assert.match(r2.message, /Eldorado refused the offer/);
   const o2 = await offerOf(r2.offer._id);
-  assert.equal(entries(o2, "released").length, 6);
-  assert.equal(st.held.size, 6, "only the held offer's 6 stay reserved");
+  assert.equal(entries(o2, "released").length, 5);
+  assert.equal(st.held.size, 5, "only the held offer's 5 stay reserved");
 });
 
 test("farm and no-claim publishes with an unknown outcome close with the id they may be live under (S2/S5)", async () => {
@@ -795,7 +751,7 @@ test("releaseHeld: typed RELEASE, off the market first, then the held entries re
     [["g2g", "G2G-777"]],
   );
   let o = await offerOf(id);
-  assert.equal(entries(o, "on_offer").length, 8);
+  assert.equal(entries(o, "on_offer").length, 5, "8 accounts = one pack of 5");
 
   mk.fail = {};
   const t0 = Date.now();
@@ -807,7 +763,7 @@ test("releaseHeld: typed RELEASE, off the market first, then the held entries re
   assert.equal(ok.status, 200, ok.message);
   assert.equal(ok.success, true);
   o = await offerOf(id);
-  assert.equal(entries(o, "retiring").length, 8);
+  assert.equal(entries(o, "retiring").length, 5);
   assert.ok(
     entries(o, "retiring").every(
       (e) => e.changedAt && e.changedAt.getTime() >= t0,
@@ -820,7 +776,7 @@ test("releaseHeld: typed RELEASE, off the market first, then the held entries re
     0,
     "the loop's phase 2 hands them back after the grace, not the click",
   );
-  assert.equal(st.held.size, 8);
+  assert.equal(st.held.size, 5);
   assert.equal(o.state, "error");
   assert.equal(o.open, false);
   assert.ok(o.history.some((h) => h.action === "release_held"));
@@ -1281,29 +1237,30 @@ test("refillRace: a loop pass waits for a refill, so its accounts are never rele
     },
   });
   send.__setDeps({ MarketplaceListing: racing });
-  const r1 = await send.refillOffer({ offerId, add: 3, actor: "t" });
+  const r1 = await send.refillOffer({ offerId, add: 5, actor: "t" });
   send.__setDeps({ MarketplaceListing });
   assert.ok(pass, "the pass came due mid-refill");
   assert.equal(passFinishedMidRefill, false, "it waited for the offer's lock");
   assert.deepEqual(await pass.promise, [], "nothing to heal after the refill");
   assert.equal(r1.status, 200, r1.message);
-  assert.match(r1.message, /\+3 account/);
+  assert.match(r1.message, /\+5 account/);
 
   const offer = await offerOf(offerId);
   const row = await rowOf(offerId);
-  assert.equal(entries(offer, "on_offer").length, 8);
+  assert.equal(entries(offer, "on_offer").length, 10);
   assert.equal(entries(offer, "released").length, 0);
   assert.equal(st.releaseCalls.length, 0);
-  assert.equal(row.units.length, 8);
-  assert.equal(new Set(row.units.map((u) => u.accountId)).size, 8);
+  assert.equal(row.units.length, 10);
+  assert.equal(new Set(row.units.map((u) => u.accountId)).size, 10);
   for (const e of entries(offer)) {
     assert.equal(st.held.get(e.accountId), "eldorado", "still reserved");
   }
   assert.deepEqual(
     called("setQuantity").map((c) => c[3]),
-    [8],
+    [2],
+    "10 free accounts = 2 packs of 5",
   );
-  assert.equal(offer.advertisedQty, 8);
+  assert.equal(offer.advertisedQty, 2);
 });
 
 test("refillRace backstop: even a pass that slips in without the lock cannot make a refill release accounts on the row", async () => {
@@ -1327,25 +1284,25 @@ test("refillRace backstop: even a pass that slips in without the lock cannot mak
     },
   });
   send.__setDeps({ MarketplaceListing: racing });
-  const r1 = await send.refillOffer({ offerId, add: 3, actor: "t" });
+  const r1 = await send.refillOffer({ offerId, add: 5, actor: "t" });
   send.__setDeps({ MarketplaceListing });
   assert.equal(
     healed.length,
-    3,
-    "the pass put the 3 new units on the row first",
+    5,
+    "the pass put the 5 new units on the row first",
   );
   assert.equal(r1.status, 200, r1.message);
-  assert.match(r1.message, /\+3 account/);
+  assert.match(r1.message, /\+5 account/);
   const offer = await offerOf(offerId);
   const row = await rowOf(offerId);
-  assert.equal(entries(offer, "on_offer").length, 8);
+  assert.equal(entries(offer, "on_offer").length, 10);
   assert.equal(entries(offer, "released").length, 0, "none released");
   assert.equal(st.releaseCalls.length, 0);
-  assert.equal(row.units.length, 8);
-  assert.equal(new Set(row.units.map((u) => u.accountId)).size, 8);
+  assert.equal(row.units.length, 10);
+  assert.equal(new Set(row.units.map((u) => u.accountId)).size, 10);
   assert.deepEqual(
     called("setQuantity").map((c) => c[3]),
-    [8],
+    [2],
   );
 });
 
@@ -1368,7 +1325,7 @@ test("refillSoldOutStrand: a refill clicked while the loop closes the offer sold
   let refillFinishedMidPass = null;
   await loopPass(offerId, (offer, r) =>
     closeSoldOut(offer, r, async () => {
-      refill = track(send.refillOffer({ offerId, add: 3, actor: "owner" }));
+      refill = track(send.refillOffer({ offerId, add: 5, actor: "owner" }));
       refillFinishedMidPass = await settleWithin(refill, 250);
     }),
   );
@@ -1464,18 +1421,21 @@ test("sendOffer holds the new offer's lock from its creation: a withdraw clicked
   );
   const o = await offerOf(r.offer._id);
   assert.equal(o.state, "withdrawn");
-  assert.equal(entries(o, "retiring").length, 6);
+  assert.equal(entries(o, "retiring").length, 5, "6 accounts = one pack of 5");
   assert.equal(st.releaseCalls.length, 0);
 });
 
-test("a no-claim send that landed below its minimum takes itself down inside its own lock (no deadlock)", async () => {
+test("a no-claim send whose shelf shrank below one pack mid-publish takes itself down inside its own lock (no deadlock)", async () => {
   const set = await makeSet({
     name: "OW no-claim",
     stockSource: "noclaim",
     items: [{ itemKey: "ow:1", name: "Skin", game: "Overwatch" }],
   });
   st.noclaim = { free: 30, share: { eldorado: 12, g2g: 12 } };
-  mk.noclaimLanded = 3;
+  // 2 packs asked for; the layer capped it to 1, and this row's own share
+  // (3 accounts) is not one whole pack of 5.
+  mk.noclaimLanded = 1;
+  nc.share = 3;
   const r = await Promise.race([
     send.sendOffer({
       source: "noclaim",
@@ -1545,12 +1505,12 @@ test("farmOvercommit: farm offers split one capacity; a send whose share is belo
   assert.equal(a.status, 200, a.message);
   assert.equal(
     a.offer.advertisedQty,
-    7,
-    "alone: its share is 20, the owner's 7 caps it",
+    1,
+    "alone: its share is 20, the owner's 7 caps it: one pack of 5",
   );
   const b = await farm(180, 5);
   assert.equal(b.status, 200, b.message);
-  assert.equal(b.offer.advertisedQty, 10, "20 shared by 2 open farm offers");
+  assert.equal(b.offer.advertisedQty, 2, "20 shared by 2 open farm offers: 10 = 2 packs");
   const c = await farm(365, 10);
   assert.equal(c.status, 409);
   assert.match(
@@ -1560,16 +1520,16 @@ test("farmOvercommit: farm offers split one capacity; a send whose share is belo
   assert.equal((await offerOf(c.offer._id)).state, "error");
   assert.deepEqual(
     called("publishFarm").map((x) => x[1].quantity),
-    [7, 10],
+    [1, 2],
     "the third was never published",
   );
   const d = await farm(365, 5);
   assert.equal(d.status, 200, d.message);
   const ids = [a, b, d].map((x) => String(x.offer._id)).sort();
   const dShare = shareOfShelf(20, String(d.offer._id), ids);
-  assert.equal(d.offer.advertisedQty, dShare);
-  assert.equal(called("publishFarm")[2][1].quantity, dShare);
   assert.ok(dShare < 20 / 2, "a third sharer gets a third");
+  assert.equal(d.offer.advertisedQty, packsFor(dShare, 5));
+  assert.equal(called("publishFarm")[2][1].quantity, packsFor(dShare, 5));
 });
 
 test("a farm offer resumes at its share of the capacity, quantity first; too small a share is refused (S1, S8)", async () => {
@@ -1607,19 +1567,20 @@ test("a farm offer resumes at its share of the capacity, quantity first; too sma
     ["setQuantity", "resume"],
     "the quantity first",
   );
-  assert.equal(mk.calls[0][3], share);
-  assert.equal(ok.offer.advertisedQty, share);
+  assert.equal(mk.calls[0][3], packsFor(share, 5), "in packs");
+  assert.equal(ok.offer.advertisedQty, packsFor(share, 5));
   assert.equal(ok.offer.state, "live");
 });
 
 test("S8: resume sets the quantity first — a quantity the market refused never goes live", async () => {
   const set = await makeSet();
   st.pool = accounts(12);
-  const r = await sendDropset(set, "eldorado", { units: 8 });
+  const r = await sendDropset(set, "eldorado", { units: 10 });
   const id = String(r.offer._id);
+  assert.equal(r.offer.advertisedQty, 2);
   assert.equal((await send.pauseOffer({ offerId: id })).status, 200);
   const row = await rowOf(id);
-  await deliver(row._id, [row.units[0].accountId], "ORD-1"); // 7 left
+  await deliver(row._id, [row.units[0].accountId], "ORD-1"); // 9 left = 1 pack
 
   mk.calls = [];
   mk.fail.setQuantity = "Eldorado set quantity: HTTP 500";
@@ -1633,7 +1594,7 @@ test("S8: resume sets the quantity first — a quantity the market refused never
   );
   let o = await offerOf(id);
   assert.equal(o.state, "paused");
-  assert.equal(o.advertisedQty, 8, "still what the market last accepted");
+  assert.equal(o.advertisedQty, 2, "still what the market last accepted");
   assert.match(o.lastError, /quantity update failed/);
 
   mk.fail = {};
@@ -1643,11 +1604,11 @@ test("S8: resume sets the quantity first — a quantity the market refused never
   assert.deepEqual(
     mk.calls.map((c) => [c[0], c[3]]),
     [
-      ["setQuantity", 7],
+      ["setQuantity", 1],
       ["resume", undefined],
     ],
   );
-  assert.equal(ok.offer.advertisedQty, 7);
+  assert.equal(ok.offer.advertisedQty, 1);
   assert.equal(ok.offer.state, "live");
 });
 
@@ -1680,13 +1641,14 @@ async function simulatedResplit() {
       await fakeLock.withOfferLock(id, async () => {
         const o = await offerOf(id);
         if (!o || o.state !== "live") return;
-        const share = shareOfShelf(available, id, ids);
+        // PACKS-2 §4: each offer's share (accounts) -> whole packs.
+        const packs = packsFor(shareOfShelf(available, id, ids), o.minQty);
         const had = Number(o.advertisedQty) || 0;
-        if (growing ? share <= had : share >= had) return;
-        await fakeMarkets.setQuantity(o.market, o.externalId, share);
+        if (growing ? packs <= had : packs >= had) return;
+        await fakeMarkets.setQuantity(o.market, o.externalId, packs);
         await BulkOffer.updateOne(
           { _id: o._id },
-          { $set: { advertisedQty: share } },
+          { $set: { advertisedQty: packs } },
         );
       });
     }
@@ -1715,7 +1677,7 @@ test("V1: a farm send re-splits the capacity once its own lock is released — t
   // advertisable = min(farmMaxQty 20, room 30, 60 - 20, 60 - 20) = 20.
   const a = await inTime(farm(120, 5));
   assert.equal(a.status, 200, a.message);
-  assert.equal((await offerOf(a.offer._id)).advertisedQty, 20, "alone");
+  assert.equal((await offerOf(a.offer._id)).advertisedQty, 4, "alone: 20 accounts = 4 packs");
   mk.calls = [];
   // The reviewer's repro: with no re-split, A keeps advertising all 20 until
   // its own farm sync while B advertises its share of [A, B] — 30 for 20.
@@ -1729,13 +1691,13 @@ test("V1: a farm send re-splits the capacity once its own lock is released — t
   const ids = [String(a.offer._id), String(b.offer._id)].sort();
   const aNow = await offerOf(a.offer._id);
   const bNow = await offerOf(b.offer._id);
-  assert.equal(bNow.advertisedQty, shareOfShelf(20, String(bNow._id), ids));
+  assert.equal(bNow.advertisedQty, packsFor(shareOfShelf(20, String(bNow._id), ids), 5));
   assert.equal(
     aNow.advertisedQty,
-    shareOfShelf(20, String(aNow._id), ids),
+    packsFor(shareOfShelf(20, String(aNow._id), ids), 5),
     "A is cut to its share when B goes live, not at its next farm sync",
   );
-  assert.equal(aNow.advertisedQty + bNow.advertisedQty, 20);
+  assert.equal((aNow.advertisedQty + bNow.advertisedQty) * 5, 20, "packs x 5 = the 20 farmable accounts");
   assert.deepEqual(
     mk.calls.filter((c) => c[0] === "setQuantity").map((c) => [c[2], c[3]]),
     [[aNow.externalId, aNow.advertisedQty]],
@@ -1757,7 +1719,7 @@ test("V1: a farm resume re-splits too; a re-split that throws or is missing neve
   const bid = String(b.offer._id);
   // The recorder alone changed nothing: A still shows the whole pool (the
   // state the reviewer's repro starts from), B its share.
-  assert.equal((await offerOf(aid)).advertisedQty, 20);
+  assert.equal((await offerOf(aid)).advertisedQty, 4, "20 accounts = 4 packs");
 
   // A pause changes no share (a paused offer keeps its part).
   assert.equal((await send.pauseOffer({ offerId: bid })).status, 200);
@@ -1773,10 +1735,10 @@ test("V1: a farm resume re-splits too; a re-split that throws or is missing neve
   assert.deepEqual(loopState.resplits[2].locked, []);
   assert.ok(loopState.resplits[2].opts.now instanceof Date);
   const ids = [aid, bid].sort();
-  assert.equal((await offerOf(bid)).advertisedQty, shareOfShelf(20, bid, ids));
+  assert.equal((await offerOf(bid)).advertisedQty, packsFor(shareOfShelf(20, bid, ids), 5));
   assert.equal(
     (await offerOf(aid)).advertisedQty,
-    shareOfShelf(20, aid, ids),
+    packsFor(shareOfShelf(20, aid, ids), 5),
     "A cut to its share by the resume's re-split",
   );
 

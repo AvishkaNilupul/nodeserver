@@ -312,6 +312,14 @@ const marketplaceListingSchema = new mongoose.Schema(
       default: null,
       index: true,
     },
+    // Bulk packs v2 (docs/bulk-packs/PACKS-2.md §1): a bulk row is ONE item
+    // priced as a whole pack, so one unit the buyer buys is this many accounts
+    // (N >= 2). 0 — every other listing — is "not a pack", and such a row stays
+    // one unit = one account. Read it only through utils/bulkPacks/packMath.js
+    // (packSizeOf / accountsForUnits / packsFor), the ONE place a pack is
+    // multiplied: a quantity read in the wrong unit is how PlayerAuctions order
+    // 16474028 shipped eleven accounts for a $5 sale.
+    bulkPackSize: { type: Number, default: 0 },
   },
   { timestamps: true },
 );

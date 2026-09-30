@@ -26,6 +26,7 @@ const mp = require("./marketplaces");
 const operatorFarm = require("./operatorFarm");
 const farmAlert = require("./farmServiceAlert");
 const provisioning = require("./farmProvisioning");
+const { accountsForUnits } = require("./bulkPacks/packMath");
 
 // Which marketplace this service speaks for, used in failure alerts.
 const MARKET = "g2g";
@@ -188,6 +189,29 @@ async function deliverFarmOrder(order, { dryRun } = {}) {
   const key = farmOrderKey(orderId);
   const qty = Math.max(1, parseInt(order && order.purchasedQty, 10) || 1);
 
+  // Bulk packs v2 (docs/bulk-packs/PACKS-2.md §2): on a bulk pack farming
+  // offer each unit bought is a pack of N accounts. `qty` stays in G2G's units
+  // — it is what G2G is told (delivered_qty), a pack being ONE — and `accounts`
+  // is what is provisioned, recorded as the row's quantity, alerted on and
+  // handed over. Every other farming offer: accounts === qty, as before. The
+  // lookup is shared with the Eldorado service (one copy), asked before
+  // anything else, dry run included; an unreadable answer waits for the next
+  // tick with nothing provisioned, never a guess.
+  let bulk = null;
+  try {
+    bulk = await require("./eldoradoFarmService").bulkFarmPack(order && order.offerId, MARKET);
+  } catch (e) {
+    return {
+      orderId,
+      farm: true,
+      error:
+        "could not read the bulk offer behind farming offer " +
+        String((order && order.offerId) || "") + " (" + (e && e.message) + ") — " +
+        "nothing provisioned, the next tick retries",
+    };
+  }
+  const accounts = bulk ? accountsForUnits(bulk.pack, qty) : qty;
+
   // A title we cannot read is still a PAID order.
   //
   // These two checks used to return here, ABOVE the FarmServiceOrder claim — so
@@ -207,13 +231,13 @@ async function deliverFarmOrder(order, { dryRun } = {}) {
 
   if (dryRun) {
     if (unreadable) return { orderId, farm: true, dryRun: true, error: unreadable };
-    const avail = await operatorFarm.previewFreshAccounts({ count: qty });
+    const avail = await operatorFarm.previewFreshAccounts({ count: accounts });
     return {
       orderId,
       farm: true,
       dryRun: true,
       wouldSend:
-        qty + "x " + parsed.game + " for " + parsed.days + " days " +
+        accounts + "x " + parsed.game + " for " + parsed.days + " days " +
         "(pool eligible: " + avail.eligibleTotal + ", would add: " + avail.willAdd + ")",
     };
   }
@@ -234,12 +258,22 @@ async function deliverFarmOrder(order, { dryRun } = {}) {
         buyerUsername: String((order && order.buyerId) || ""),
         game: parsed.game,
         days: parsed.days,
-        quantity: qty,
+        quantity: accounts,
       });
     } catch (e) {
       if (e && e.code === 11000)
         return { orderId, farm: true, skipped: "claimed by another tick" };
       throw e;
+    }
+    // A pack order's units and pack size (PACKS-2 §2). FarmServiceOrder
+    // declares no `note` path, so it is written schema-less; the next save
+    // below persists it.
+    if (bulk) {
+      row.set(
+        "note",
+        require("./eldoradoFarmService").packNote(bulk, qty, accounts),
+        { strict: false },
+      );
     }
   }
   row.attempts += 1;
@@ -258,7 +292,7 @@ async function deliverFarmOrder(order, { dryRun } = {}) {
           offerTitle: row.offerTitle || parsed.title || "",
           game: parsed.game || parsed.rawGame || "",
           days: parsed.days || 0,
-          qty,
+          qty: accounts,
           buyerUsername: row.buyerUsername || "",
           reason: unreadable,
         })
@@ -274,7 +308,7 @@ async function deliverFarmOrder(order, { dryRun } = {}) {
       // Asking for `qty` again and overwriting row.accounts is what stranded the
       // accounts a previous attempt had already pinned to a bot — see
       // utils/farmProvisioning for the whole failure.
-      const need = provisioning.stillNeeded(row, qty);
+      const need = provisioning.stillNeeded(row, accounts);
       const res = need
         ? await operatorFarm.farmFreshAccounts({
             game: parsed.game,
@@ -289,7 +323,7 @@ async function deliverFarmOrder(order, { dryRun } = {}) {
         added,
         res && res.farmUntil,
       );
-      if (row.accounts.length < qty) {
+      if (row.accounts.length < accounts) {
         // Keep WHY. farmFreshAccounts hands back skipped:[{username, reason}]
         // with the real error behind each rejected account; recording only the
         // count is what made order 4b20765f undiagnosable.
@@ -297,7 +331,7 @@ async function deliverFarmOrder(order, { dryRun } = {}) {
         row.state = "failed";
         row.lastError = farmAlert.shortfallMessage(
           { added: row.accounts, skipped: (res && res.skipped) || [] },
-          qty,
+          accounts,
         );
         await row.save();
         if (alert) {
@@ -307,7 +341,7 @@ async function deliverFarmOrder(order, { dryRun } = {}) {
             offerTitle: row.offerTitle || parsed.title || "",
             game: parsed.game,
             days: parsed.days,
-            qty,
+            qty: accounts,
             buyerUsername: row.buyerUsername || "",
             reason: row.lastError,
           });
@@ -337,7 +371,7 @@ async function deliverFarmOrder(order, { dryRun } = {}) {
             offerTitle: row.offerTitle || parsed.title || "",
             game: parsed.game,
             days: parsed.days,
-            qty,
+            qty: accounts,
             buyerUsername: row.buyerUsername || "",
             reason: row.lastError,
           });
@@ -404,7 +438,8 @@ async function deliverFarmOrder(order, { dryRun } = {}) {
       await row.save();
     }
 
-    // 3. Only now is the order delivered — if G2G will take the count.
+    // 3. Only now is the order delivered — if G2G will take the count. The
+    // count is `qty`, in G2G's units: a pack delivered is ONE (PACKS-2 §2).
     const confirm = await confirmFarmOnG2g(row, orderId, qty);
     if (!confirm.confirmed) {
       return {
@@ -438,7 +473,7 @@ async function deliverFarmOrder(order, { dryRun } = {}) {
         offerTitle: row.offerTitle || (parsed && parsed.title) || "",
         game: (parsed && parsed.game) || row.game || "",
         days: (parsed && parsed.days) || row.days || 0,
-        qty,
+        qty: accounts,
         buyerUsername: row.buyerUsername || "",
         reason: row.lastError,
       });

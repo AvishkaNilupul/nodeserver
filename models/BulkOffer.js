@@ -2,9 +2,11 @@ const mongoose = require("mongoose");
 const { OPEN_STATES, CLOSED_STATES } = require("../utils/bulkPacks/config");
 
 // One bulk offer sent by the owner from the Bulk packs page
-// (docs/bulk-packs/CONTRACT.md §5): N+ accounts of one bundle at a tier
-// discount (kind "accounts", source dropset / noclaim) or N+ fresh accounts
-// farming one game for D days (kind "farming", source farm), on ONE market.
+// (docs/bulk-packs/CONTRACT.md §5, PACKS-2.md): packs of N accounts of one
+// bundle at a tier discount (kind "accounts", source dropset / noclaim) or
+// packs of N fresh accounts farming one game for D days (kind "farming",
+// source farm), on ONE market. One listing unit = one PACK of N accounts,
+// priced as the whole pack (PACKS-2 §1).
 //
 // dropset/noclaim offers also own an ordinary MarketplaceListing row (`listing`,
 // whose bulkOfferId points back here) so the existing fulfillers deliver them
@@ -96,17 +98,26 @@ const bulkOfferSchema = new mongoose.Schema(
     game: { type: String, default: "" },
     // Farming term in days (farm offers only).
     days: { type: Number, default: 0 },
-    // eldorado/g2g: the offer's minimum order, in ACCOUNTS (one unit is always
-    // one account). gameflip: the pack size. No multiplier anywhere (§2).
+    // The tier = the PACK SIZE N, on every market (PACKS-2 §1): one unit a
+    // buyer buys is N accounts. The listing rows carry it as bulkPackSize;
+    // utils/bulkPacks/packMath.js is the one place that multiplies.
     minQty: { type: Number, required: true },
+    // The discount the offer's copy states: the tier's, or — for a custom
+    // price — the one that price really gives off the anchor (whole %, never
+    // rounded up).
     discountPct: { type: Number, default: 0 },
     // The single price the discount was taken off, and where it came from:
     // "listing" | "set" | "engine" | "farm-table".
     anchorPrice: { type: Number, default: 0 },
     anchorBasis: { type: String, default: "" },
     // Fixed when sent; the system never reprices a live bulk offer.
+    // unitPrice: per ACCOUNT (the owner's custom price, or the pack price / N).
+    // packPrice: what one unit — one pack of N — costs, on every market.
     unitPrice: { type: Number, default: 0 },
-    packPrice: { type: Number, default: 0 }, // gameflip only
+    packPrice: { type: Number, default: 0 },
+    // The owner typed the price per account (send's customUnitPrice) instead
+    // of taking the tier's price (PACKS-2 §3).
+    customPrice: { type: Boolean, default: false },
     title: { type: String, default: "" },
     description: { type: String, default: "" },
     listing: {
@@ -129,6 +140,7 @@ const bulkOfferSchema = new mongoose.Schema(
     autoPaused: { type: Boolean, default: false },
     lowStock: { type: Boolean, default: false },
     reserved: { type: [reservedSchema], default: [] },
+    // What the market advertises, in PACKS (a Gameflip pack listing is 1).
     advertisedQty: { type: Number, default: 0 },
     unitsDelivered: { type: Number, default: 0 },
     ordersCount: { type: Number, default: 0 },

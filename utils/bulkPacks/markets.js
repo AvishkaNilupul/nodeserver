@@ -5,10 +5,16 @@
 // publishes anything. send.js, loop.js and the router go through here, so the
 // rules that have cost real money when they broke live in one place:
 //
-//   * Unit semantics (CONTRACT §2). On Eldorado / G2G one unit is ALWAYS one
-//     account and the tier is the offer's minimum order; on Gameflip one
-//     listing is ONE pack of exactly `minQty` accounts, every credential inside
-//     its auto-delivery code. No multiplier anywhere.
+//   * Unit semantics (docs/bulk-packs/PACKS-2.md §1, replacing CONTRACT §2).
+//     A bulk listing is ONE item priced as the WHOLE pack of N (= the tier's
+//     `minQty`) accounts, on every market. Eldorado / G2G: quantity = the
+//     number of PACKS on offer, minQuantity / minQty = 1, price = the pack
+//     price; one unit bought is N accounts (utils/bulkPacks/packMath.js is the
+//     one place that multiplies). Gameflip: one listing is ONE pack of exactly
+//     N accounts, every credential inside its auto-delivery code. Every title
+//     must say "PACK OF N", and a pack price that reads like one account's
+//     price is refused — PlayerAuctions order 16474028 shipped 11 accounts for
+//     $5 because a quantity meant something else.
 //   * Nothing is published on a closed delivery gate (CONTRACT I4), on a
 //     blocked market (Plati / GGSel, owner block since 2026-09-28), or under a
 //     title the farm services would misread (CONTRACT I5) — an account title
@@ -46,6 +52,8 @@
 // never pulls in a marketplace connector, a model or the settings file.
 // ---------------------------------------------------------------------------
 const path = require("path");
+// Pure (no I/O): the one place packs and accounts are converted.
+const { packsFor } = require("./packMath");
 
 // Between two accounts in a Gameflip pack's delivery code — the divider
 // utils/unclaimedLots.js:54 (LOT_SEPARATOR) already uses for its lots.
@@ -138,7 +146,6 @@ const REAL_DEPS = {
   listingGame: () => require("../listingGame"),
   listingCategory: () => require("../listingCategory"),
   noclaimListings: () => require("../noclaimListings"),
-  noclaimStock: () => require("../noclaimStock"),
   // The real farm-title parser (CONTRACT I5). Its termToDays is the one the
   // Eldorado farm service reads orders with; the G2G service's copy (via
   // utils/playerauctionsFarmService.js:48) is identical.
@@ -244,21 +251,22 @@ function positivePrice(v, what) {
   return n;
 }
 
-// The price Eldorado will really charge: marketplaces.js eldPrice (:4572-4576)
-// rounds to cents and lifts to ELD_MIN_PRICE ($0.50). Sending it pre-applied
-// changes nothing on Eldorado and keeps the recorded price honest.
-function eldoradoPrice(unitPrice) {
+// The price Eldorado will really charge for one unit (one pack): marketplaces.js
+// eldPrice (:4572-4576) rounds to cents and lifts to ELD_MIN_PRICE ($0.50).
+// Sending it pre-applied changes nothing on Eldorado and keeps the recorded
+// price honest.
+function eldoradoPrice(price) {
   const mp = d("mp");
   const floor = Number(mp.ELD_MIN_PRICE) > 0 ? Number(mp.ELD_MIN_PRICE) : 0.5;
-  return Math.max(floor, round2(unitPrice));
+  return Math.max(floor, round2(price));
 }
 
 // g2gPublish REJECTS a sub-floor price, so the floor is applied here and
 // carried onto what we record — utils/autoLister.js:1069-1072.
-function g2gPrice(unitPrice) {
+function g2gPrice(price) {
   const mp = d("mp");
   const floor = Number(mp.G2G_MIN_PRICE) > 0 ? Number(mp.G2G_MIN_PRICE) : 1;
-  return Math.max(floor, round2(unitPrice));
+  return Math.max(floor, round2(price));
 }
 
 function normWords(s) {
@@ -297,6 +305,36 @@ function checkCopy(market, title, description, { farm }) {
         "would take its orders (CONTRACT I5)",
     );
   }
+}
+
+// PACKS-2 §3: the listing IS the pack. A title that does not say "PACK OF N"
+// sells N accounts at what reads like the price of one — every buyer would
+// dispute it — so it is refused here, whoever built it.
+function checkPackTitle(market, title, n) {
+  if (!new RegExp("\\bPACK\\s+OF\\s+" + n + "\\b", "i").test(String(title || ""))) {
+    throw refuse(
+      label(market) + ' pack titles must say "PACK OF ' + n + '": the listing is ONE pack of ' +
+        n + " accounts, and a buyer must see that before paying",
+    );
+  }
+}
+
+// PACKS-2 §3: `packPrice` is what ONE unit (one pack) costs — the only price
+// sent to any market. `unitPrice`, when given, is its per-account equivalent;
+// a pack under three quarters of N of those is a per-account price passed as
+// the pack price (a whole pack sold for about one account's price) and is
+// refused. Rounding and the floors never come near that line.
+function checkPackPrice(market, packPrice, unitPrice, n) {
+  const pack = positivePrice(packPrice, "packPrice (the price of one pack)");
+  const each = Number(unitPrice);
+  if (Number.isFinite(each) && each > 0 && pack < 0.75 * each * n) {
+    throw refuse(
+      "A pack of " + n + " priced $" + round2(pack).toFixed(2) + " with $" + round2(each).toFixed(2) +
+        " per account does not add up — refusing a pack price that reads like one account's " +
+        "(one unit on " + label(market) + " is the whole pack of " + n + ")",
+    );
+  }
+  return pack;
 }
 
 // The same read-back the farm services do on every order (CONTRACT I5), minus
@@ -442,12 +480,50 @@ function gameOfSet(set) {
   }
 }
 
-// The set's grid cover (utils/setImage.js:138 buildSetGridImage): a TEMP file
-// the caller may delete when done, or "" when none could be built — the same
-// try/catch-to-"" every caller of it uses (e.g. utils/autoLister.js:1340-1345).
-// Never returns a file under public/.
-async function coverForSet(set) {
+// {packSize, discountPct} for the pack cover builders, or null when the caller
+// asked for no pack cover (no packSize >= 2).
+function packCoverOpts(opts) {
+  const n = Math.floor(Number(opts && opts.packSize));
+  if (!Number.isFinite(n) || n < 2) return null;
+  const dp = Number(opts.discountPct);
+  return { packSize: n, discountPct: Number.isFinite(dp) && dp > 0 ? dp : 0 };
+}
+
+// setImage's pack cover builders (PACKS-2 §5) arrive with a later change:
+// reached lazily, and "" (never a throw) when absent, failing or empty, so the
+// caller falls back to today's cover.
+async function packCover(fnName, args, what) {
+  let si;
+  try {
+    si = d("setImage");
+  } catch (e) {
+    console.error("bulkPacks/markets: setImage unavailable for the " + what + ":", msgOf(e));
+    return "";
+  }
+  if (!si || typeof si[fnName] !== "function") return "";
+  try {
+    const p = await si[fnName](...args);
+    return typeof p === "string" && p ? p : "";
+  } catch (e) {
+    console.error("bulkPacks/markets: " + what + " failed (falling back to the plain cover):", msgOf(e));
+    return "";
+  }
+}
+
+// The set's cover: a TEMP file the caller may delete when done, or "" when
+// none could be built — the same try/catch-to-"" every caller of the builders
+// uses (e.g. utils/autoLister.js:1340-1345). Never returns a file under
+// public/. With opts.packSize (PACKS-2 §3/§5), setImage.buildBulkCoverImage
+// (set, {packSize, discountPct}) — the grid with a "PACK OF N ACCOUNTS" banner
+// and a "-D%" tag — when that builder exists; otherwise, or when it fails, the
+// plain grid cover (utils/setImage.js:138 buildSetGridImage).
+async function coverForSet(set, opts) {
   if (!set || typeof set !== "object") return "";
+  const pack = packCoverOpts(opts);
+  if (pack) {
+    const p = await packCover("buildBulkCoverImage", [set, pack], "pack cover");
+    if (p) return p;
+  }
   try {
     return (await d("setImage").buildSetGridImage(set)) || "";
   } catch (e) {
@@ -486,8 +562,13 @@ async function gameDropImages(game, limit) {
 // The farming promo cover, exactly as scripts/eldorado-farm-listings.js:170-176
 // builds it (utils/setImage.js:365 buildPromoCoverImage). `days` is optional:
 // with it the subtitle is the term ("120 Days Service"), as in the script.
-// Returns a TEMP file (the caller may delete it), or "" on failure.
-async function coverForFarm(game, days) {
+// With opts.packSize (PACKS-2 §3/§5), setImage.buildBulkFarmCoverImage(game,
+// days, {packSize, discountPct}) — the promo cover with the pack banner and the
+// term — when that builder exists (it is also handed the drop images this
+// function found, as `itemImages`); otherwise, or when it fails, the plain
+// promo cover. Returns a TEMP file (the caller may delete it), or "" on
+// failure.
+async function coverForFarm(game, days, opts) {
   const g = String(game || "").trim();
   if (!g) return "";
   let itemImages = [];
@@ -495,6 +576,17 @@ async function coverForFarm(game, days) {
     itemImages = await gameDropImages(g, 30);
   } catch {
     itemImages = [];
+  }
+  const pack = packCoverOpts(opts);
+  if (pack) {
+    // No images found here: the builder looks them up itself.
+    const packOpts = itemImages.length ? { ...pack, itemImages: itemImages.slice() } : pack;
+    const p = await packCover(
+      "buildBulkFarmCoverImage",
+      [g, Number(days) > 0 ? Number(days) : 0, packOpts],
+      "farm pack cover",
+    );
+    if (p) return p;
   }
   try {
     return (
@@ -856,9 +948,14 @@ async function classifyPublish(e, t) {
 // ---------------------------------------------------------------------------
 
 // Dropset account packs. `units` = the accounts already RESERVED for this
-// offer ([{accountId, login}], CONTRACT I1). Returns {externalId, url, price};
-// `price` is what the market really charges (per account on Eldorado/G2G, per
-// pack on Gameflip). A throw carries `outcome` / `externalId` (above).
+// offer ([{accountId, login}], CONTRACT I1) — whole packs of `minQty` (the
+// pack size N). `packPrice` is the price of ONE pack, the only price sent;
+// `unitPrice` (optional) is its per-account equivalent, used only to catch a
+// per-account price passed as the pack price. Returns {externalId, url, price};
+// `price` is what the market really charges for one unit = one pack.
+// Eldorado / G2G publish quantity = packs (units / N), minimum order 1; a
+// Gameflip pack is exactly N accounts in one listing. A throw carries
+// `outcome` / `externalId` (above).
 async function publishAccounts(args) {
   const a = args || {};
   const t = publishTrace(a.market, "accounts");
@@ -887,7 +984,7 @@ async function publishAccountsNow(
         "auto-farm's claimed archive",
     );
   }
-  const min = wholeAtLeast(minQty, 2, "minQty");
+  const min = wholeAtLeast(minQty, 2, "minQty (the pack size)");
   const list = checkUnits(units);
   if (m === "gameflip" && list.length !== min) {
     throw refuse(
@@ -896,30 +993,41 @@ async function publishAccountsNow(
   }
   if (m !== "gameflip" && list.length < min) {
     throw refuse(
-      "Only " + list.length + " account(s) for a minimum order of " + min +
+      "Only " + list.length + " account(s) for a pack of " + min +
         " — the offer could never be bought",
     );
   }
+  if (m !== "gameflip" && list.length % min !== 0) {
+    throw refuse(
+      list.length + " accounts do not make whole packs of " + min +
+        " — a partial pack can never be sold, so it is never put on offer",
+    );
+  }
+  // What the market counts: packs (a Gameflip listing is always one).
+  const packs = m === "gameflip" ? 1 : packsFor(list.length, min);
   checkCopy(m, title, description, { farm: false });
+  checkPackTitle(m, title, min);
+  const pack = checkPackPrice(m, packPrice, unitPrice, min);
   const mp = d("mp");
 
   if (m === "eldorado") {
-    const priceUsd = eldoradoPrice(positivePrice(unitPrice, "unitPrice"));
+    const priceUsd = eldoradoPrice(pack);
     // Eldorado rejects an offer without a main image; the Listings route falls
     // back the same way (marketplaceRoutes.js:1496-1508, gridImage || cover).
     const cover = coverPath || fallbackCover(set);
     if (!cover) throw refuse("Eldorado needs a cover image and none could be built for this set");
     await assertGate(m, "dropset");
-    // utils/autoLister.js:997-1004 plus the tier's minimum order. No other
-    // extras: autoLister sends none (deliveryTime stays the connector default).
+    // utils/autoLister.js:997-1004, but one unit is one PACK (PACKS-2 §1):
+    // quantity = packs, minimum order 1, the pack's price. No other extras:
+    // autoLister sends none (deliveryTime stays the connector default).
     const r = await sendPublish(t, () =>
       mp.eldoradoPublish({
         game: g,
         title,
         description,
         priceUsd,
-        quantity: list.length,
-        minQuantity: min,
+        quantity: packs,
+        minQuantity: 1,
         coverImagePath: cover,
       }),
     );
@@ -931,10 +1039,11 @@ async function publishAccountsNow(
     // skipped, never approximated (utils/autoLister.js:1036-1042, :1061-1062).
     const brand = d("g2gGames").brandForGame(g);
     if (!brand || !brand.brandId) throw refuse("no G2G brand for " + (g || "this game"));
-    const priceUsd = g2gPrice(positivePrice(unitPrice, "unitPrice"));
+    const priceUsd = g2gPrice(pack);
     await assertGate(m, "dropset");
-    // utils/autoLister.js:1074-1085 with the tier as min_qty. Relation,
-    // attributes and delivery method are left to g2gPublish, as autoLister does.
+    // utils/autoLister.js:1074-1085, one unit = one PACK: qty = packs,
+    // min_qty 1. Relation, attributes and delivery method are left to
+    // g2gPublish, as autoLister does.
     const r = await sendPublish(t, () =>
       mp.g2gPublish({
         serviceId: mp.G2G_ITEMS_SERVICE,
@@ -942,15 +1051,15 @@ async function publishAccountsNow(
         title,
         description,
         priceUsd,
-        qty: list.length,
-        minQty: min,
+        qty: packs,
+        minQty: 1,
       }),
     );
     return published(m, r, priceUsd, title);
   }
 
   // Gameflip: ONE listing, ONE pack of exactly `min` accounts.
-  const price = round2(positivePrice(packPrice, "packPrice"));
+  const price = round2(pack);
   if (price < GAMEFLIP_MIN_PRICE) {
     throw refuse("Gameflip's minimum price is $" + GAMEFLIP_MIN_PRICE.toFixed(2));
   }
@@ -975,10 +1084,15 @@ async function publishAccountsNow(
 
 // No-claim packs: the existing no-claim layer publishes (claim-at-sale shelf,
 // its own row), handed the ctx the Listings publish route builds for a no-claim
-// set (routes/marketplaceRoutes.js:1019, :1028-1074, :1093-1124). Returns
-// {rowId, externalId, url, price, quantity}; `quantity` is what the row says it
-// advertises (the layer caps it to the set's share of the shelf). A throw
-// carries `outcome` / `externalId` (see "Publish outcomes").
+// set (routes/marketplaceRoutes.js:1019, :1028-1074, :1093-1124). PACKS-2 §3:
+// `quantity` is the number of PACKS of `minQty` (N) accounts, the minimum
+// order is 1 and `packPrice` (one pack) is the price. Returns
+// {rowId, externalId, url, price, quantity}; `quantity` is the packs the row
+// says it advertises. The layer caps it by the set's share of the shelf
+// counted in ACCOUNTS (utils/noclaimListings.js publishClaimAtSale), so a
+// value below the packs asked for means the shelf shrank mid-publish and the
+// caller must re-count before trusting it. A throw carries `outcome` /
+// `externalId` (see "Publish outcomes").
 async function publishNoclaim(args) {
   const a = args || {};
   const t = publishTrace(a.market, "noclaim");
@@ -990,7 +1104,7 @@ async function publishNoclaim(args) {
 }
 
 async function publishNoclaimNow(
-  { market, set, game, title, description, unitPrice, quantity, minQty, coverPath },
+  { market, set, game, title, description, unitPrice, packPrice, quantity, minQty, coverPath },
   t,
 ) {
   const m = marketFor(market, QTY_MARKETS, "no-claim packs");
@@ -998,28 +1112,12 @@ async function publishNoclaimNow(
   if (set.stockSource !== "noclaim") {
     throw refuse("Not a no-claim set — it has no no-claim stock to deliver");
   }
-  const min = wholeAtLeast(minQty, 2, "minQty");
-  // publishClaimAtSale caps the minimum to the advertised quantity
-  // (utils/noclaimListings.js:722-728): a quantity under the tier would publish
-  // the discount with a smaller minimum order.
-  const qty = wholeAtLeast(quantity, min, "quantity (accounts on the offer)");
-  let cap = 80;
-  try {
-    const n = Number(d("noclaimStock").ADVERTISE_MAX);
-    if (Number.isFinite(n) && n > 0) cap = n;
-  } catch {
-    cap = 80;
-  }
-  if (min > cap) {
-    throw refuse(
-      "A no-claim offer advertises at most " + cap + " accounts, under the minimum order of " + min,
-    );
-  }
+  const min = wholeAtLeast(minQty, 2, "minQty (the pack size)");
+  const qty = wholeAtLeast(quantity, 1, "quantity (packs on the offer)");
   checkCopy(m, title, description, { farm: false });
-  const priceUsd =
-    m === "eldorado"
-      ? eldoradoPrice(positivePrice(unitPrice, "unitPrice"))
-      : g2gPrice(positivePrice(unitPrice, "unitPrice"));
+  checkPackTitle(m, title, min);
+  const pack = checkPackPrice(m, packPrice, unitPrice, min);
+  const priceUsd = m === "eldorado" ? eldoradoPrice(pack) : g2gPrice(pack);
   // marketplaceRoutes.js:1019 — listingGame({set, offer, game: body.game}).
   const pubGame = String(d("listingGame").listingGame({ set, game }) || "").trim();
   await assertGate(m, "noclaim");
@@ -1040,6 +1138,7 @@ async function publishNoclaimNow(
 
   // The request body the route would have received; publishNoclaim reads only
   // the market's own block (noclaimListings.js:689-694, :733-744, :765-781).
+  // One unit is one pack: quantity = packs, minimum order 1.
   const body = {
     setId: String(set._id),
     marketplaces: [m],
@@ -1048,9 +1147,9 @@ async function publishNoclaimNow(
     price: priceUsd,
   };
   if (m === "eldorado") {
-    body.eldorado = { quantity: qty, minQuantity: min, game: pubGame };
+    body.eldorado = { quantity: qty, minQuantity: 1, game: pubGame };
   } else {
-    body.g2g = { qty, minQty: min };
+    body.g2g = { qty, minQty: 1 };
   }
   const ctx = {
     set,
@@ -1092,19 +1191,23 @@ async function publishNoclaimNow(
   } catch {
     advertised = qty;
   }
-  if (advertised < min) {
+  if (advertised < qty) {
     console.error(
       "bulkPacks/markets: no-claim " + label(m) + " offer " + externalId + " went live advertising " +
-        advertised + " < its minimum order " + min + " (the shelf shrank between the check and the " +
-        "publish) — its minimum was lowered to " + advertised,
+        advertised + " of the " + qty + " pack(s) of " + min + " asked for — the no-claim layer " +
+        "capped it by the shelf (counted in accounts): the shelf shrank between the check and " +
+        "the publish, so the pack count must be re-checked",
     );
   }
   return { rowId, externalId, url: r.url || "", price: priceUsd, quantity: advertised };
 }
 
 // Farming packs: fresh accounts farming `game` for `days`, provisioned at sale
-// by the existing farm services, which find the order by its TITLE. No row.
-// A throw carries `outcome` / `externalId` (see "Publish outcomes").
+// by the existing farm services, which find the order by its TITLE (and, after
+// PACKS-2 §2, provision purchaseQuantity x the offer's pack size). No row.
+// `quantity` = packs of `minQty` (N) accounts, minimum order 1, `packPrice` =
+// one pack. `discountPct` (optional) is the "-D%" the pack cover shows. A
+// throw carries `outcome` / `externalId` (see "Publish outcomes").
 async function publishFarm(args) {
   const a = args || {};
   const t = publishTrace(a.market, "farm");
@@ -1116,7 +1219,7 @@ async function publishFarm(args) {
 }
 
 async function publishFarmNow(
-  { market, game, days, title, description, unitPrice, quantity, minQty },
+  { market, game, days, title, description, unitPrice, packPrice, quantity, minQty, discountPct },
   t,
 ) {
   const m = marketFor(market, QTY_MARKETS, "farming packs");
@@ -1124,21 +1227,24 @@ async function publishFarmNow(
   if (!g) throw refuse("A farming offer needs its game");
   const term = wholeAtLeast(days, 1, "days");
   if (term > 730) throw refuse("days must be 730 or fewer (got " + days + ")");
-  const min = wholeAtLeast(minQty, 2, "minQty");
-  const qty = wholeAtLeast(quantity, min, "quantity (accounts on the offer)");
+  const min = wholeAtLeast(minQty, 2, "minQty (the pack size)");
+  const qty = wholeAtLeast(quantity, 1, "quantity (packs on the offer)");
   checkCopy(m, title, description, { farm: true });
+  checkPackTitle(m, title, min);
   checkFarmRoundTrip(title, g, term);
+  const pack = checkPackPrice(m, packPrice, unitPrice, min);
   const mp = d("mp");
 
   if (m === "eldorado") {
-    const priceUsd = eldoradoPrice(positivePrice(unitPrice, "unitPrice"));
+    const priceUsd = eldoradoPrice(pack);
     await assertGate(m, "farm");
-    const cover = await coverForFarm(g, term);
+    const cover = await coverForFarm(g, term, { packSize: min, discountPct });
     if (!cover) {
       throw refuse("The farming cover could not be built — Eldorado rejects an offer without one");
     }
     try {
-      // scripts/eldorado-farm-listings.js:177-185 plus the tier's minimum.
+      // scripts/eldorado-farm-listings.js:177-185, one unit = one PACK:
+      // quantity = packs, minimum order 1, the pack's price.
       const r = await sendPublish(t, () =>
         mp.eldoradoPublish({
           game: g,
@@ -1146,7 +1252,7 @@ async function publishFarmNow(
           description,
           priceUsd,
           quantity: qty,
-          minQuantity: min,
+          minQuantity: 1,
           coverImagePath: cover,
           deliveryTime: "Minute20",
         }),
@@ -1166,7 +1272,7 @@ async function publishFarmNow(
   if (!brand || !brand.brandId) {
     throw refuse("no hand-checked G2G brand for " + g + " — never approximated");
   }
-  const priceUsd = g2gPrice(positivePrice(unitPrice, "unitPrice"));
+  const priceUsd = g2gPrice(pack);
   await assertGate(m, "farm");
   let shape;
   try {
@@ -1189,7 +1295,7 @@ async function publishFarmNow(
       description,
       priceUsd,
       qty,
-      minQty: min,
+      minQty: 1,
     }),
   );
   return published(m, r, priceUsd, title);

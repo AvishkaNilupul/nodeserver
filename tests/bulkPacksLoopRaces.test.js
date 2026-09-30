@@ -106,6 +106,28 @@ const dropReservation = require("../utils/dropReservation");
 const { shareOfShelf } = require("../utils/suppliedStock");
 const eldoradoFulfiller = require("../utils/eldoradoFulfiller");
 const { detachAccountFromListing } = require("../utils/listingDetach");
+const { packsFor, packSizeOf } = require("../utils/bulkPacks/packMath");
+
+// PACKS-2 §1: every bulk row carries bulkPackSize N. Written through the raw
+// collection, so it is stored whether or not the schema has the path yet
+// (insertMany drops a path the schema does not know); the loop reads rows lean
+// with a projection that names it.
+const setPackSize = (rowId, n) =>
+  MarketplaceListing.collection.updateOne(
+    { _id: rowId },
+    { $set: { bulkPackSize: n } },
+  );
+
+// The units a buyer buys on a row to receive `accounts` accounts, read the way
+// the Eldorado fulfiller reads its row — a hydrated MarketplaceListing through
+// packMath (PACKS-2 §2: accounts = units × packSizeOf(row)). Once the model
+// carries bulkPackSize one unit is one pack; a model without the path reads
+// every row as ×1, one unit one account.
+async function unitsForAccounts(rowId, accounts) {
+  const n = packSizeOf(await MarketplaceListing.findById(rowId));
+  assert.equal(accounts % n, 0, "whole packs only");
+  return accounts / n;
+}
 
 const AF = {
   bulkPacksEnabled: true,
@@ -352,7 +374,8 @@ async function seedPack({
       minQty,
     }),
     reserved: units.map((u) => ({ ...u, state: "on_offer", at: new Date() })),
-    advertisedQty: gf ? 1 : n,
+    // PACKS-2 §3: the market advertises whole PACKS of minQty.
+    advertisedQty: gf ? 1 : packsFor(n, minQty),
     createdBy: "test",
   });
   const now = new Date();
@@ -380,6 +403,7 @@ async function seedPack({
       })),
     },
   ]);
+  await setPackSize(row._id, minQty);
   await BulkOffer.updateOne({ _id: offer._id }, { $set: { listing: row._id } });
   return { set, offerId: offer._id, rowId: row._id, externalId, units };
 }
@@ -514,10 +538,13 @@ test("F-A gameflip take-out: if the pack sells before the withdraw works, the ta
 test("F-B take-out of a re-reserved account picks its LIVE entry, not the old released one (L4, L7)", async () => {
   await clean();
   useReal();
-  const pack = await seedPack({ prefix: "fb", n: 6, minQty: 5 });
+  // 10 accounts = 2 packs of 5 on sale (PACKS-2 §3).
+  const pack = await seedPack({ prefix: "fb", n: 10, minQty: 5 });
   const A = pack.units[0];
+  const qtyCalls = () => calls.filter((c) => c[0] === "eldoradoSetQuantity");
 
   // A loses its password: retired, and released after the 15-minute grace.
+  // 9 accounts left = 1 pack: the market comes down first.
   await BotAccount.updateOne(
     { _id: A.accountId },
     { $set: { credPassword: "" } },
@@ -525,6 +552,8 @@ test("F-B take-out of a re-reserved account picks its LIVE entry, not the old re
   await pass(plus(1));
   let o = await getOffer(pack.offerId);
   assert.equal(liveEntry(o, A.accountId).state, "retiring");
+  assert.deepEqual(qtyCalls(), [["eldoradoSetQuantity", pack.externalId, 1]]);
+  assert.equal(o.advertisedQty, 1);
   await pass(plus(17));
   o = await getOffer(pack.offerId);
   assert.equal(entriesOf(o, A.accountId)[0].state, "released");
@@ -580,7 +609,9 @@ test("F-B take-out of a re-reserved account picks its LIVE entry, not the old re
   );
 
   // A pass leaves A on sale: only an account's LATEST entry speaks for it,
-  // so its FREE copy is not a "zombie" of the old released entry (L2).
+  // so its FREE copy is not a "zombie" of the old released entry (L2). With
+  // A back there are 10 again = 2 packs: the pass grows the market (on, gate
+  // open).
   await pass(plus(20));
   assert.equal(
     (await getRow(pack.rowId)).units.filter(
@@ -588,6 +619,11 @@ test("F-B take-out of a re-reserved account picks its LIVE entry, not the old re
     ).length,
     1,
   );
+  assert.deepEqual(qtyCalls().pop(), [
+    "eldoradoSetQuantity",
+    pack.externalId,
+    2,
+  ]);
 
   // The owner hand-sells A (drop-archive mark-sold -> listingDetach).
   const out = await detachAccountFromListing(
@@ -605,22 +641,30 @@ test("F-B take-out of a re-reserved account picks its LIVE entry, not the old re
     ],
   );
   assert.ok(!unitIds(await getRow(pack.rowId)).includes(String(A.accountId)));
-  const lastQty = calls.filter((c) => c[0] === "eldoradoSetQuantity").pop();
-  assert.deepEqual(lastQty, ["eldoradoSetQuantity", pack.externalId, 5]);
-  assert.equal(o.advertisedQty, 5, "L7: the new quantity is recorded");
+  // 9 left without A = ONE whole pack: lowered to it (L7, PACKS-2 §4).
+  assert.deepEqual(qtyCalls().pop(), [
+    "eldoradoSetQuantity",
+    pack.externalId,
+    1,
+  ]);
+  assert.equal(o.advertisedQty, 1, "L7: the new quantity is recorded");
 
-  // The next buyer of 6 cannot receive the account the owner just sold.
+  // The next buyer of a pack gets five accounts — never the one the owner
+  // just sold.
   const del = await eldoradoFulfiller.deliverOrder(
-    { id: "fb-order", offerId: pack.externalId, purchaseQuantity: 6 },
+    {
+      id: "fb-order",
+      offerId: pack.externalId,
+      purchaseQuantity: await unitsForAccounts(pack.rowId, 5),
+    },
     { dryRun: false },
   );
-  assert.ok(!del.delivered, JSON.stringify(del));
-  assert.match(String(del.error), /not enough reserved stock/);
-  assert.ok(
-    !(await getRow(pack.rowId)).units.some(
-      (u) => String(u.accountId) === String(A.accountId) && u.orderId,
-    ),
+  assert.ok(del.delivered && !del.error, JSON.stringify(del));
+  const sold = (await getRow(pack.rowId)).units.filter(
+    (u) => u.orderId === "fb-order",
   );
+  assert.equal(sold.length, 5);
+  assert.ok(!sold.some((u) => String(u.accountId) === String(A.accountId)));
 
   // After the grace its reservation is kept, never handed back.
   await pass(plus(40));
@@ -691,12 +735,20 @@ test("F-C an owner take-out landing mid-pass waits for the pass and is never und
   o = await getOffer(pack.offerId);
   assert.equal(liveEntry(o, A.accountId).state, "retiring");
 
-  // A buyer of 6 does not get it.
+  // A buyer of the one pack left gets the five other accounts, never A.
   const del = await eldoradoFulfiller.deliverOrder(
-    { id: "fc-order", offerId: pack.externalId, purchaseQuantity: 6 },
+    {
+      id: "fc-order",
+      offerId: pack.externalId,
+      purchaseQuantity: await unitsForAccounts(pack.rowId, 5),
+    },
     { dryRun: false },
   );
-  assert.ok(!del.delivered, JSON.stringify(del));
+  assert.ok(del.delivered && !del.error, JSON.stringify(del));
+  const sold = (await getRow(pack.rowId)).units.filter(
+    (u) => u.orderId === "fc-order",
+  );
+  assert.equal(sold.length, 5);
   assert.ok(
     !(await getRow(pack.rowId)).units.some(
       (u) => String(u.accountId) === String(A.accountId) && u.orderId,
@@ -772,8 +824,10 @@ test("F-D slow delivery vs owner withdraw: nothing is released inside the 15-min
   const pack = await seedPack({ prefix: "fd", n: 6, minQty: 5 });
   let open;
   knobs.eldSendGate = new Promise((res) => (open = res));
+  // One pack of five (PACKS-2 §2).
+  const units = await unitsForAccounts(pack.rowId, 5);
   const p = eldoradoFulfiller.deliverOrder(
-    { id: "fd-order", offerId: pack.externalId, purchaseQuantity: 5 },
+    { id: "fd-order", offerId: pack.externalId, purchaseQuantity: units },
     { dryRun: false },
   );
   let o;
@@ -791,7 +845,7 @@ test("F-D slow delivery vs owner withdraw: nothing is released inside the 15-min
     open();
   }
   const del = await p;
-  assert.equal(del.delivered, 5, JSON.stringify(del));
+  assert.ok(del.delivered && !del.error, JSON.stringify(del));
 
   await pass(plus(9));
   o = await getOffer(pack.offerId);
@@ -832,8 +886,10 @@ test("F-D slower than the grace: a released account that comes back SOLD is reco
   const pack = await seedPack({ prefix: "fl", n: 6, minQty: 5 });
   let open;
   knobs.eldSendGate = new Promise((res) => (open = res));
+  // One pack of five (PACKS-2 §2).
+  const units = await unitsForAccounts(pack.rowId, 5);
   const p = eldoradoFulfiller.deliverOrder(
-    { id: "fl-order", offerId: pack.externalId, purchaseQuantity: 5 },
+    { id: "fl-order", offerId: pack.externalId, purchaseQuantity: units },
     { dryRun: false },
   );
   let o;
@@ -849,7 +905,7 @@ test("F-D slower than the grace: a released account that comes back SOLD is reco
     open();
   }
   const del = await p;
-  assert.equal(del.delivered, 5, JSON.stringify(del));
+  assert.ok(del.delivered && !del.error, JSON.stringify(del));
 
   // The closed offer is still watched: the sold copies are caught.
   await pass(plus(25));
@@ -1159,7 +1215,13 @@ async function dsOffer({
       state: "on_offer",
       at: new Date(),
     })),
-    advertisedQty: advertisedQty == null ? n : advertisedQty,
+    // PACKS-2 §3: whole PACKS of minQty (a Gameflip listing is one pack).
+    advertisedQty:
+      advertisedQty == null
+        ? market === "gameflip"
+          ? 1
+          : packsFor(n, minQty)
+        : advertisedQty,
   });
   const [row] = await MarketplaceListing.insertMany([
     {
@@ -1185,14 +1247,16 @@ async function dsOffer({
       })),
     },
   ]);
+  await setPackSize(row._id, minQty);
   await BulkOffer.updateOne({ _id: offer._id }, { $set: { listing: row._id } });
   return { set, ids, offerId: offer._id, rowId: row._id, externalId };
 }
 
+// `advertisedQty` is in PACKS of minQty (PACKS-2 §3): 2 = 10 accounts at 5.
 async function farmOffer({
   market = "eldorado",
   minQty = 5,
-  advertisedQty = 10,
+  advertisedQty = 2,
   state = "live",
   autoPaused = false,
 } = {}) {
@@ -1234,11 +1298,11 @@ test("L6 an unreadable farm capacity pauses, resumes and requantifies nothing �
   await clean();
   const f = useFakes();
   const at = clock();
-  const live = await farmOffer({ state: "live", advertisedQty: 10 });
+  const live = await farmOffer({ state: "live", advertisedQty: 2 });
   const paused = await farmOffer({
     state: "paused",
     autoPaused: true,
-    advertisedQty: 5,
+    advertisedQty: 1,
   });
   f.advertisable = 40;
   f.cap = {
@@ -1283,26 +1347,28 @@ test("L6 an unreadable farm capacity pauses, resumes and requantifies nothing �
   assert.equal(a.lastError, "", "the loop's own error cleared");
 });
 
-test("S1 open farm offers share the capacity by id: each is paused, resumed and requantified on ITS share", async () => {
+test("S1 + PACKS-2 §4 open farm offers share the capacity by id: each is paused, resumed and requantified on the PACKS its share makes", async () => {
   await clean();
   const f = useFakes();
   const at = clock();
-  const A = await farmOffer({ state: "live", advertisedQty: 20 });
-  const B = await farmOffer({ state: "live", advertisedQty: 20 });
+  // Packs of 5; A and B each advertise 4 packs (20 accounts).
+  const A = await farmOffer({ state: "live", advertisedQty: 4 });
+  const B = await farmOffer({ state: "live", advertisedQty: 4 });
   const C = await farmOffer({
     state: "paused",
     autoPaused: false,
-    advertisedQty: 5,
+    advertisedQty: 1,
   });
-  await farmOffer({ state: "withdrawn", advertisedQty: 5 }); // closed: not a sharer
+  await farmOffer({ state: "withdrawn", advertisedQty: 1 }); // closed: not a sharer
   const ids = [A, B, C].map((o) => String(o.offerId)).sort();
 
-  f.advertisable = 20;
+  f.advertisable = 33;
   await pass(at(0));
-  // 20 over three offers is 7 + 7 + 6 by id — never 20 each.
+  // 33 accounts over three offers is 11 each by id — 2 packs of 5 apiece
+  // (the odd account of each share is never advertised), never 33 each.
   assert.deepEqual(f.calls.setQuantity, [
-    ["eldorado", A.externalId, 7],
-    ["eldorado", B.externalId, 7],
+    ["eldorado", A.externalId, 2],
+    ["eldorado", B.externalId, 2],
   ]);
   assert.equal(f.calls.shareFor.length, 3);
   for (const [self, list, available] of f.calls.shareFor) {
@@ -1312,7 +1378,7 @@ test("S1 open farm offers share the capacity by id: each is paused, resumed and 
       ids,
       "every open live|paused farm offer, sorted by id",
     );
-    assert.equal(available, 20);
+    assert.equal(available, 33, "the split is in accounts");
   }
   assert.equal(
     (await getOffer(C.offerId)).state,
@@ -1320,7 +1386,7 @@ test("S1 open farm offers share the capacity by id: each is paused, resumed and 
     "an owner pause stays",
   );
 
-  // 12 over three is 4 each < minimum 5: both live ones pause.
+  // 12 over three is 4 accounts each — not one pack of 5: both live pause.
   f.advertisable = 12;
   await pass(at(16));
   assert.deepEqual(f.calls.pause, [
@@ -1333,26 +1399,35 @@ test("S1 open farm offers share the capacity by id: each is paused, resumed and 
     assert.equal(x.autoPaused, true);
   }
   assert.ok(
-    f.calls.telegram.some((t) =>
-      /its share of 12 across 3 farm offers/.test(t),
+    f.calls.telegram.some(
+      (t) =>
+        /capacity for 4 account\(s\) = 0 pack\(s\) of 5, its share of 12 across 3 farm offers/.test(
+          t,
+        ) && /less than one pack of 5/.test(t),
     ),
   );
 
-  // 30 over three is 10 each: both resume, quantity first.
-  f.advertisable = 30;
+  // 45 over three is 15 each = 3 packs: both resume, quantity first.
+  f.advertisable = 45;
   await pass(at(32));
   assert.deepEqual(f.calls.setQuantity.slice(2), [
-    ["eldorado", A.externalId, 10],
-    ["eldorado", B.externalId, 10],
+    ["eldorado", A.externalId, 3],
+    ["eldorado", B.externalId, 3],
   ]);
   assert.deepEqual(f.calls.resume, [
     ["eldorado", A.externalId],
     ["eldorado", B.externalId],
   ]);
+  assert.deepEqual(f.calls.market.slice(-4), [
+    ["setQuantity", A.externalId, 3],
+    ["resume", A.externalId],
+    ["setQuantity", B.externalId, 3],
+    ["resume", B.externalId],
+  ]);
   for (const o of [A, B]) {
     const x = await getOffer(o.offerId);
     assert.equal(x.state, "live");
-    assert.equal(x.advertisedQty, 10);
+    assert.equal(x.advertisedQty, 3);
   }
   assert.equal((await getOffer(C.offerId)).state, "paused");
 });
@@ -1361,9 +1436,10 @@ test("L8 a flag lives in `attention`: a loop error in lastError neither wipes it
   await clean();
   const f = useFakes();
   const at = clock();
-  const { offerId } = await dsOffer({ n: 6, advertisedQty: 9 });
+  // 6 accounts = 1 pack of 5, advertised as 2.
+  const { offerId } = await dsOffer({ n: 6, advertisedQty: 2 });
   f.readState = "gone"; // flagged, never acted on
-  f.failSetQuantity = true; // the shrink to 6 fails: a loop error
+  f.failSetQuantity = true; // the shrink to 1 pack fails: a loop error
   await pass(at(0));
   let o = await getOffer(offerId);
   assert.match(o.attention, /^Needs attention \(gone\)/);
@@ -1387,14 +1463,15 @@ test("L8 a flag lives in `attention`: a loop error in lastError neither wipes it
   o = await getOffer(offerId);
   assert.equal(o.attention, "");
   assert.equal(o.lastError, "");
-  assert.equal(o.advertisedQty, 6);
+  assert.equal(o.advertisedQty, 1);
 });
 
 test("L8 a loop error never overwrites another writer's lastError, and a standing one is logged once", async () => {
   await clean();
   const f = useFakes();
   const at = clock();
-  const { offerId } = await dsOffer({ n: 6, advertisedQty: 9 });
+  // 6 accounts = 1 pack of 5, advertised as 2: the shrink fails every pass.
+  const { offerId } = await dsOffer({ n: 6, advertisedQty: 2 });
   await BulkOffer.updateOne(
     { _id: offerId },
     { $set: { lastError: "refill quantity: Eldorado said 500" } },
@@ -1421,10 +1498,8 @@ test("L1 an account the owner took out that is still FREE on the row leaves on t
   await clean();
   const f = useFakes();
   const at = clock();
-  const { offerId, rowId, ids, externalId } = await dsOffer({
-    n: 7,
-    advertisedQty: 7,
-  });
+  // 10 accounts = 2 packs of 5; without the taken-out one, 9 = 1 pack.
+  const { offerId, rowId, ids, externalId } = await dsOffer({ n: 10 });
   // The take-out found it mid-delivery (or died after marking it): on_offer,
   // keepReserved, and FREE on the row again.
   await setEntryState(offerId, ids[0], { keepReserved: true });
@@ -1433,7 +1508,7 @@ test("L1 an account the owner took out that is still FREE on the row leaves on t
     unitsAtQuantity = unitIds(await getRow(rowId));
   };
   await pass(at(0));
-  assert.deepEqual(f.calls.setQuantity, [["eldorado", externalId, 6]]);
+  assert.deepEqual(f.calls.setQuantity, [["eldorado", externalId, 1]]);
   assert.ok(
     unitsAtQuantity.includes(ids[0]),
     "the quantity dropped before the unit left the row",
@@ -1526,14 +1601,16 @@ test("L7 a take-out that leaves fewer than the minimum pauses the offer; the nex
 test("L7 after a take-out the quantity counts on_offer entries' FREE units only — a retiring unit back on the row is not stock", async () => {
   await clean();
   const f = useFakes();
+  // 11 accounts = 2 packs of 5 (+1).
   const { offerId, rowId, ids, externalId } = await dsOffer({
-    n: 7,
+    n: 11,
     minQty: 5,
   });
+  assert.equal((await getOffer(offerId)).advertisedQty, 2);
   await loop.retireUnits(
     await getOffer(offerId),
     await getRow(rowId),
-    [ids[6]],
+    [ids[10]],
     "test",
     {
       now: new Date(),
@@ -1546,8 +1623,8 @@ test("L7 after a take-out the quantity counts on_offer entries' FREE units only 
       $push: {
         units: {
           contentId: "",
-          accountId: ids[6],
-          login: "login_" + ids[6],
+          accountId: ids[10],
+          login: "login_" + ids[10],
           addedAt: new Date(),
           deliveredAt: null,
           orderId: "",
@@ -1562,9 +1639,10 @@ test("L7 after a take-out the quantity counts on_offer entries' FREE units only 
     reason: "sold manually",
   });
   assert.equal(out.detached.length, 1);
-  // 7 − the retiring one − the one taken out; the old code counted 6 FREE row units.
-  assert.deepEqual(f.calls.setQuantity, [["eldorado", externalId, 5]]);
-  assert.equal((await getOffer(offerId)).advertisedQty, 5);
+  // 11 − the retiring one − the one taken out = 9 = ONE pack. Counting the
+  // FREE row units (10 = two packs) would have left the market at 2.
+  assert.deepEqual(f.calls.setQuantity, [["eldorado", externalId, 1]]);
+  assert.equal((await getOffer(offerId)).advertisedQty, 1);
   assert.deepEqual(f.calls.pause, []);
 });
 
@@ -1976,14 +2054,16 @@ test("V1 a farm offer still being SENT is a sharer: the pass splits the capacity
   const f = useFakes();
   const at = clock();
   f.advertisable = 20;
-  const A = await farmOffer({ state: "live", advertisedQty: 20 });
+  // A advertises the whole pool: 4 packs of 5.
+  const A = await farmOffer({ state: "live", advertisedQty: 4 });
   const S = await farmOffer({ state: "sending", advertisedQty: 0 });
   await pass(at(0));
   // Round 1 counted live|paused only: A kept all 20 while S's send took 10.
   const ids = [A, S].map((o) => String(o.offerId)).sort();
   assert.deepEqual(f.calls.shareFor, [[String(A.offerId), ids, 20]]);
-  assert.deepEqual(f.calls.setQuantity, [["eldorado", A.externalId, 10]]);
-  assert.equal((await getOffer(A.offerId)).advertisedQty, 10);
+  // A's share: 10 accounts = 2 packs.
+  assert.deepEqual(f.calls.setQuantity, [["eldorado", A.externalId, 2]]);
+  assert.equal((await getOffer(A.offerId)).advertisedQty, 2);
   // A re-split leaves an offer being sent to its own send: its lock is never
   // asked for (the send calls resplitFarm itself when it is done).
   f.calls.locked.length = 0;
@@ -1997,8 +2077,9 @@ test("V1 resplitFarm syncs every open farm offer NOW under its own lock, whateve
   const f = useFakes();
   const at = clock();
   f.advertisable = 20;
-  const A = await farmOffer({ state: "live", advertisedQty: 20 });
-  const B = await farmOffer({ state: "live", advertisedQty: 10 });
+  // Packs of 5: A has the whole pool (4 packs), B its half (2 packs).
+  const A = await farmOffer({ state: "live", advertisedQty: 4 });
+  const B = await farmOffer({ state: "live", advertisedQty: 2 });
   // A synced a minute ago with the whole pool to itself; B was resumed a
   // moment ago on its share of the two (send.resumeOffer).
   await BulkOffer.updateOne(
@@ -2020,11 +2101,11 @@ test("V1 resplitFarm syncs every open farm offer NOW under its own lock, whateve
   const r = await loop.resplitFarm({ now: at(1) });
   assert.equal(r.offers, 2);
   assert.equal(r.errors, 0, r.lastError);
-  assert.deepEqual(f.calls.setQuantity, [["eldorado", A.externalId, 10]]);
+  assert.deepEqual(f.calls.setQuantity, [["eldorado", A.externalId, 2]]);
   const a = await getOffer(A.offerId);
-  assert.equal(a.advertisedQty, 10);
+  assert.equal(a.advertisedQty, 2);
   assert.equal(new Date(a.lastSyncAt).getTime(), at(1).getTime());
-  assert.equal((await getOffer(B.offerId)).advertisedQty, 10);
+  assert.equal((await getOffer(B.offerId)).advertisedQty, 2);
   for (const o of [A, B]) {
     assert.equal(
       f.calls.locked.filter((id) => id === String(o.offerId)).length,
@@ -2040,39 +2121,44 @@ test("V1 resplitFarm shrinks every offer before any grows: the total on sale nev
   const at = clock();
   f.advertisable = 20;
   // B (the LOWER id, so first in id order) was auto-paused short; A has the
-  // whole pool on sale. Their shares are now 10 each.
+  // whole pool on sale (4 packs of 5). Their shares are now 10 accounts =
+  // 2 packs each.
   const B = await farmOffer({
     state: "paused",
     autoPaused: true,
     advertisedQty: 0,
   });
-  const A = await farmOffer({ state: "live", advertisedQty: 20 });
+  const A = await farmOffer({ state: "live", advertisedQty: 4 });
   const r = await loop.resplitFarm({ now: at(0) });
   assert.equal(r.errors, 0, r.lastError);
   assert.deepEqual(f.calls.market, [
-    ["setQuantity", A.externalId, 10],
-    ["setQuantity", B.externalId, 10],
+    ["setQuantity", A.externalId, 2],
+    ["setQuantity", B.externalId, 2],
     ["resume", B.externalId],
   ]);
-  // Replay what the market had on sale after each call.
-  const qty = { [A.externalId]: 20, [B.externalId]: 0 };
+  // Replay what the market had on sale after each call, in ACCOUNTS (every
+  // unit on sale is a pack of 5).
+  const qty = { [A.externalId]: 4, [B.externalId]: 0 };
   const on = { [A.externalId]: true, [B.externalId]: false };
   for (const [verb, id, n] of f.calls.market) {
     if (verb === "setQuantity") qty[id] = n;
     if (verb === "resume") on[id] = true;
     if (verb === "pause") on[id] = false;
-    const total = Object.keys(qty).reduce(
-      (t, k) => t + (on[k] ? qty[k] : 0),
+    const accounts = Object.keys(qty).reduce(
+      (t, k) => t + (on[k] ? qty[k] * 5 : 0),
       0,
     );
-    assert.ok(total <= 20, total + " on sale after " + verb + " " + id);
+    assert.ok(
+      accounts <= 20,
+      accounts + " accounts on sale after " + verb + " " + id,
+    );
   }
   const a = await getOffer(A.offerId);
   const b = await getOffer(B.offerId);
-  assert.equal(a.advertisedQty, 10);
+  assert.equal(a.advertisedQty, 2);
   assert.equal(b.state, "live");
   assert.equal(b.autoPaused, false);
-  assert.equal(b.advertisedQty, 10);
+  assert.equal(b.advertisedQty, 2);
 });
 
 test("V1 resplitFarm refuses to run inside any offer's lock, and WAITS for a busy farm offer instead of skipping it", async () => {
@@ -2080,8 +2166,9 @@ test("V1 resplitFarm refuses to run inside any offer's lock, and WAITS for a bus
   const f = useFakes();
   const at = clock();
   f.advertisable = 20;
-  const A = await farmOffer({ state: "live", advertisedQty: 20 });
-  const B = await farmOffer({ state: "live", advertisedQty: 10 });
+  // Packs of 5: A has the whole pool (4 packs), B its half (2 packs).
+  const A = await farmOffer({ state: "live", advertisedQty: 4 });
+  const B = await farmOffer({ state: "live", advertisedQty: 2 });
   // From inside an offer's lock (a send that did not release first): refused
   // at once — it would take the other offers' locks while holding this one.
   await lock.withOfferLock(B.offerId, async () => {
@@ -2112,14 +2199,14 @@ test("V1 resplitFarm refuses to run inside any offer's lock, and WAITS for a bus
   }
   const r = await p;
   assert.equal(r.errors, 0, r.lastError);
-  assert.deepEqual(f.calls.setQuantity, [["eldorado", A.externalId, 10]]);
+  assert.deepEqual(f.calls.setQuantity, [["eldorado", A.externalId, 2]]);
 });
 
 test("V1 resplitFarm on an unreadable capacity pauses, resumes and requantifies nothing — a loop error on each offer (L6)", async () => {
   await clean();
   const f = useFakes();
   const at = clock();
-  const A = await farmOffer({ state: "live", advertisedQty: 20 });
+  const A = await farmOffer({ state: "live", advertisedQty: 4 });
   const B = await farmOffer({
     state: "paused",
     autoPaused: true,
@@ -2152,7 +2239,7 @@ test("V2 a send in flight (its offer's lock held) no longer stalls the pass: the
   // round-1 pass reached it first and queued behind the send's lock).
   const S = await farmOffer({ state: "sending", advertisedQty: 0 });
   // D: a live pack that must close sold out this pass (3 free < minimum 5).
-  const D = await dsOffer({ n: 3, minQty: 5, advertisedQty: 3 });
+  const D = await dsOffer({ n: 3, minQty: 5, advertisedQty: 1 });
   let release;
   const gate = new Promise((r) => (release = r));
   const sending = lock.withOfferLock(S.offerId, () => gate);
@@ -2193,7 +2280,7 @@ test("V2 each offer's clock is the pass's base time plus the real time the pass 
   const base = new Date(Date.now() + 60e3);
   // X (first by id): its market read takes 1.2 s. Y: sold out this pass.
   const X = await dsOffer({ n: 6, minQty: 5 });
-  const Y = await dsOffer({ n: 3, minQty: 5, advertisedQty: 3 });
+  const Y = await dsOffer({ n: 3, minQty: 5, advertisedQty: 1 });
   f.onReadOffer = async (m, id) => {
     if (id === X.externalId) await sleep(1200);
   };
@@ -2230,7 +2317,7 @@ test("V2 the settings are read again for each offer: switching bulk packs off mi
   const Y = await farmOffer({
     state: "paused",
     autoPaused: true,
-    advertisedQty: 5,
+    advertisedQty: 1,
   });
   f.advertisable = 10;
   f.onReadOffer = async (m, id) => {
@@ -2261,7 +2348,7 @@ test("V3 a PAUSED offer the market shows active is paused again at that read, wi
     market: "g2g",
     state: "paused",
     autoPaused: false,
-    advertisedQty: 5,
+    advertisedQty: 1,
   });
   const L = await dsOffer({ n: 6 }); // live: "active" is right for it
   for (const o of [P, F, L]) f.readStates.set(o.externalId, "active");
@@ -2391,7 +2478,7 @@ test("V3 an offer this very pass paused is not 'paused again' by the read right 
   await clean();
   const f = useFakes();
   const at = clock();
-  const A = await farmOffer({ state: "live", advertisedQty: 10 });
+  const A = await farmOffer({ state: "live", advertisedQty: 2 });
   f.advertisable = 3; // < minimum 5: the farm sync pauses it
   f.readStates.set(A.externalId, "active"); // the read lags behind the pause
   await pass(at(0));
@@ -2407,13 +2494,12 @@ test("V3 an offer this very pass paused is not 'paused again' by the read right 
 
 // ---- V4: a take-out lowers the market BEFORE the unit leaves --------------
 
-test("V4 take-out: the quantity comes down BEFORE the unit leaves the row", async () => {
+test("V4 + PACKS-2 §4 take-out: the market comes down to the whole packs left BEFORE the unit leaves the row", async () => {
   await clean();
   const f = useFakes();
-  const { offerId, rowId, ids, externalId } = await dsOffer({
-    n: 7,
-    advertisedQty: 7,
-  });
+  // 10 accounts = 2 packs of 5; the take-out leaves 9 = 1 pack.
+  const { offerId, rowId, ids, externalId } = await dsOffer({ n: 10 });
+  assert.equal((await getOffer(offerId)).advertisedQty, 2);
   let unitsAtQuantity = null;
   f.onSetQuantity = async () => {
     unitsAtQuantity = unitIds(await getRow(rowId));
@@ -2425,20 +2511,32 @@ test("V4 take-out: the quantity comes down BEFORE the unit leaves the row", asyn
   });
   assert.equal(out.detached.length, 1, JSON.stringify(out));
   assert.deepEqual(out.warnings, []);
-  assert.deepEqual(f.calls.setQuantity, [["eldorado", externalId, 6]]);
+  assert.deepEqual(f.calls.setQuantity, [["eldorado", externalId, 1]]);
   assert.ok(
     unitsAtQuantity.includes(ids[0]),
     "lowered while the unit was still on the row",
   );
   assert.ok(!unitIds(await getRow(rowId)).includes(ids[0]), "then it left");
-  const o = await getOffer(offerId);
-  assert.equal(o.advertisedQty, 6);
+  let o = await getOffer(offerId);
+  assert.equal(o.advertisedQty, 1);
   const e = entriesOf(o, ids[0])[0];
   assert.equal(e.state, "retiring");
   assert.equal(e.keepReserved, true);
+
+  // Another take-out: 8 left is still ONE pack — nothing to lower.
+  await loop.takeAccountOut({
+    row: await getRow(rowId),
+    accountId: ids[1],
+    reason: "sold manually",
+  });
+  assert.equal(f.calls.setQuantity.length, 1);
+  assert.deepEqual(f.calls.pause, []);
+  o = await getOffer(offerId);
+  assert.equal(o.state, "live");
+  assert.equal(o.advertisedQty, 1);
 });
 
-test("V4 take-out below the minimum: the offer is paused BEFORE the unit leaves the row", async () => {
+test("V4 + PACKS-2 §4 take-out leaving less than one pack: the offer is paused BEFORE the unit leaves the row", async () => {
   await clean();
   const f = useFakes();
   const { offerId, rowId, ids, externalId } = await dsOffer({
@@ -2464,16 +2562,29 @@ test("V4 take-out below the minimum: the offer is paused BEFORE the unit leaves 
   const o = await getOffer(offerId);
   assert.equal(o.state, "paused");
   assert.equal(o.autoPaused, false);
+  assert.deepEqual(f.calls.setQuantity, [], "paused, never set to 0 packs");
+  assert.ok(
+    o.history.some((h) =>
+      /^4 free < one pack of 5 — below the minimum after an owner take-out$/.test(
+        h.detail,
+      ),
+    ),
+  );
+  assert.ok(
+    f.calls.telegram.some((t) =>
+      /4 account\(s\) left — less than one pack of 5\. The next check closes it as sold out\./.test(
+        t,
+      ),
+    ),
+  );
 });
 
 test("V4 a quantity call that fails still takes the account out; the error is noted and the next pass lowers the market", async () => {
   await clean();
   const f = useFakes();
   const at = clock();
-  const { offerId, rowId, ids, externalId } = await dsOffer({
-    n: 7,
-    advertisedQty: 7,
-  });
+  // 10 accounts = 2 packs; the take-out leaves 9 = 1 pack.
+  const { offerId, rowId, ids, externalId } = await dsOffer({ n: 10 });
   f.failSetQuantity = true;
   const out = await loop.takeAccountOut({
     row: await getRow(rowId),
@@ -2488,7 +2599,7 @@ test("V4 a quantity call that fails still takes the account out; the error is no
   assert.ok(!unitIds(await getRow(rowId)).includes(ids[0]));
   let o = await getOffer(offerId);
   assert.equal(entriesOf(o, ids[0])[0].state, "retiring");
-  assert.equal(o.advertisedQty, 7);
+  assert.equal(o.advertisedQty, 2);
   assert.match(
     o.lastError,
     /^Loop: take-out of login_\S+: the market was not lowered \(quantity refused\)/,
@@ -2497,9 +2608,9 @@ test("V4 a quantity call that fails still takes the account out; the error is no
   await pass(at(1));
   o = await getOffer(offerId);
   assert.deepEqual(f.calls.setQuantity.slice(-1), [
-    ["eldorado", externalId, 6],
+    ["eldorado", externalId, 1],
   ]);
-  assert.equal(o.advertisedQty, 6);
+  assert.equal(o.advertisedQty, 1);
   assert.equal(o.lastError, "", "the next pass corrected it");
 });
 
@@ -2529,9 +2640,10 @@ test("V4 a pause that fails still takes the account out; the next pass closes th
 test("V4 a take-out only ever LOWERS the quantity — growing it is the pass's job, behind I4/I8", async () => {
   await clean();
   const f = useFakes();
-  // Switched off: 8 free, 5 advertised (the pass was not allowed to grow it).
+  // Switched off: 15 free = 3 packs, 1 advertised (the pass was not allowed
+  // to grow it).
   f.bp = bpObj({ enabled: false });
-  const { offerId, rowId, ids } = await dsOffer({ n: 8, advertisedQty: 5 });
+  const { offerId, rowId, ids } = await dsOffer({ n: 15, advertisedQty: 1 });
   const out = await loop.takeAccountOut({
     row: await getRow(rowId),
     accountId: ids[0],
@@ -2541,9 +2653,9 @@ test("V4 a take-out only ever LOWERS the quantity — growing it is the pass's j
   assert.deepEqual(
     f.calls.setQuantity,
     [],
-    "7 left >= 5 advertised: nothing to lower",
+    "14 left = 2 packs >= 1 advertised: nothing to lower",
   );
-  assert.equal((await getOffer(offerId)).advertisedQty, 5);
+  assert.equal((await getOffer(offerId)).advertisedQty, 1);
 });
 
 // ---- lock.js: tryWithOfferLock, holdsAny ---------------------------------

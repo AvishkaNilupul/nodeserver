@@ -190,12 +190,12 @@ async function reservationOf(accountId) {
   return d ? { soldAt: d.soldAt, tag: d.soldToUsername, setId: d.soldSetId } : null;
 }
 
-test("eldorado dropset: send → real delivery → sold out → leftovers released, sold ones kept", async () => {
+test("eldorado dropset pack: send → real delivery of a pack → sold out → leftovers released, sold ones kept", async () => {
   const { set, ids } = await seedSet({
     name: "Rust bundle",
     itemKey: "rust|ak",
     game: "Rust",
-    accounts: 12,
+    accounts: 20,
     prefix: "rust",
     market: "eldorado",
     price: 2,
@@ -211,15 +211,18 @@ test("eldorado dropset: send → real delivery → sold out → leftovers releas
   });
   assert.equal(r.success, true, r.message);
   const pub = calls.find((c) => c[0] === "eldoradoPublish")[1];
-  assert.equal(pub.quantity, 10);
-  assert.equal(pub.minQuantity, 5);
-  assert.equal(pub.priceUsd, 1.9); // $2 single, 5% off
+  // PACKS-2: one unit = one pack of 5; quantity counts PACKS.
+  assert.equal(pub.quantity, 2);
+  assert.equal(pub.minQuantity, 1);
+  assert.equal(pub.priceUsd, 9.5); // 5 × $2 single × 0.95
+  assert.match(pub.title, /PACK OF 5 ACCOUNTS/);
   assert.doesNotMatch(pub.title, /Automatic\s+Farming/i);
 
   const offer = await BulkOffer.findById(r.offer._id || r.offer.id).lean();
   assert.equal(offer.state, "live");
   const row = await MarketplaceListing.findOne({ bulkOfferId: offer._id }).lean();
   assert.equal(row.origin, "manual");
+  assert.equal(row.bulkPackSize, 5);
   assert.equal(row.units.length, 10);
   for (const u of row.units) {
     const res = await reservationOf(u.accountId);
@@ -228,51 +231,60 @@ test("eldorado dropset: send → real delivery → sold out → leftovers releas
     assert.equal(res.setId, String(set._id));
   }
 
-  // A real paid order for 6 accounts through the REAL Eldorado delivery path.
+  // A real paid order for ONE pack through the REAL Eldorado delivery path.
   const del = await eldoradoFulfiller.deliverOrder(
-    { id: "order-1", offerId: row.externalId, purchaseQuantity: 6 },
+    { id: "order-1", offerId: row.externalId, purchaseQuantity: 1 },
     { dryRun: false },
   );
-  assert.equal(del.delivered, 6, JSON.stringify(del));
+  assert.ok(!del.error, JSON.stringify(del));
   const msg = calls.find((c) => c[0] === "eldoradoSendOrderMessage");
-  assert.ok(msg && /ACCOUNT 6 of 6/.test(msg[2]), "six accounts in one message");
+  assert.ok(msg && /ACCOUNT 5 of 5/.test(msg[2]), "five accounts in one message");
+  assert.ok(!/ACCOUNT 6 of/.test(msg[2]), "never more than the pack");
+  let fresh = await MarketplaceListing.findById(row._id).lean();
+  assert.equal(fresh.units.filter((u) => u.orderId === "order-1").length, 5);
+  assert.ok(
+    calls.some((c) => c[0] === "eldoradoSetQuantity" && c[1] === row.externalId && c[2] === 1),
+    "one pack left on sale",
+  );
 
-  // Pass 1: counts the sale; 4 left < min 5 → paused, leftovers retiring.
+  // One of the 5 left loses its password: 4 good accounts cannot make a pack.
+  const broken = fresh.units.find((u) => !u.orderId);
+  await BotAccount.updateOne({ _id: broken.accountId }, { $set: { credPassword: "" } });
   await loop.runOnce({ now: at(1) });
   let o = await BulkOffer.findById(offer._id).lean();
   assert.equal(o.state, "sold_out");
   assert.equal(o.open, false);
-  assert.equal(o.unitsDelivered, 6);
+  assert.equal(o.unitsDelivered, 5);
   assert.equal(o.ordersCount, 1);
   assert.ok(calls.some((c) => c[0] === "eldoradoDelist" && c[1] === row.externalId));
-  assert.equal(o.reserved.filter((e) => e.state === "retiring").length, 4);
+  assert.equal(o.reserved.filter((e) => e.state === "retiring").length, 5);
 
-  // Pass 2 (after the 15-minute grace, FIXES-1 L2): the 4 leftovers go back to stock.
+  // Pass 2 (after the 15-minute grace, FIXES-1 L2): the 5 leftovers go back to stock.
   await loop.runOnce({ now: at(17) });
   o = await BulkOffer.findById(offer._id).lean();
   const delivered = o.reserved.filter((e) => e.state === "delivered");
   const released = o.reserved.filter((e) => e.state === "released");
-  assert.equal(delivered.length, 6);
-  assert.equal(released.length, 4);
+  assert.equal(delivered.length, 5);
+  assert.equal(released.length, 5);
   for (const e of delivered) assert.ok((await reservationOf(e.accountId)).soldAt, "sold stays reserved");
   for (const e of released) assert.equal((await reservationOf(e.accountId)).soldAt, null, "leftover released");
-  assert.equal(ids.length, 12);
+  assert.equal(ids.length, 20);
 });
 
-test("owner hand-sale of a pack account: it leaves the pack and its reservation is KEPT", async () => {
+test("owner hand-sale of a pack account: the market drops to whole packs first, the account stays reserved", async () => {
   const set = await DropSet.findOne({ name: "Rust bundle" }).lean();
   const r = await send.sendOffer({
     source: "dropset",
     setId: String(set._id),
     market: "eldorado",
     minQty: 5,
-    units: 6,
+    units: 10,
     actor: "test",
   });
   assert.equal(r.success, true, r.message);
   const offerId = r.offer._id || r.offer.id;
   const row = await MarketplaceListing.findOne({ bulkOfferId: offerId });
-  assert.equal(row.units.length, 6);
+  assert.equal(row.units.length, 10);
   const victim = row.units[0];
 
   const out = await detachAccountFromListing(
@@ -282,10 +294,10 @@ test("owner hand-sale of a pack account: it leaves the pack and its reservation 
   );
   assert.equal(out.detached.length, 1, JSON.stringify(out));
   const after = await MarketplaceListing.findById(row._id).lean();
-  assert.equal(after.units.length, 5);
+  assert.equal(after.units.length, 9);
   assert.ok(
-    calls.some((c) => c[0] === "eldoradoSetQuantity" && c[1] === row.externalId && c[2] === 5),
-    "quantity follows the shelf",
+    calls.some((c) => c[0] === "eldoradoSetQuantity" && c[1] === row.externalId && c[2] === 1),
+    "9 accounts left = 1 whole pack on sale",
   );
 
   // Past the 15-minute grace (FIXES-1 L2) since the take-out.

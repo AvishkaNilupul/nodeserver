@@ -26,10 +26,30 @@ const { getAutoFarm, getAccountListingSettings } = require("./settings");
 const mp = require("./marketplaces");
 const UnclaimedAccount = require("../models/UnclaimedAccount");
 const farmService = require("./eldoradoFarmService");
+const { packSizeOf, accountsForUnits, packsFor } = require("./bulkPacks/packMath");
 
 // Distinct from the Shop / Gameflip / GGSel / Digiseller tags so the same
 // account can never be handed out twice across platforms.
 const ELD_CLAIM_TAG = "eldorado";
+
+// Bulk packs v2 (docs/bulk-packs/PACKS-2.md §1-§2). A bulk pack row is ONE
+// item priced as a whole pack: Eldorado counts PACKS (the offer's quantity,
+// the order's purchaseQuantity), and we hand over and reserve ACCOUNTS. The
+// conversion goes through utils/bulkPacks/packMath and nowhere else. Every
+// other row is not a pack, and both helpers hand its own count back untouched,
+// so an ordinary listing takes exactly the path it took before packs existed.
+//
+// Accounts one order of `qty` units takes off this row.
+function accountsForOrder(listing, qty) {
+  return packSizeOf(listing) > 1 ? accountsForUnits(listing, qty) : qty;
+}
+
+// What this row may advertise with `freeAccounts` accounts left on it: whole
+// packs on a bulk pack row — a partial pack can never sell — else the count.
+function advertisedFor(listing, freeAccounts) {
+  const n = packSizeOf(listing);
+  return n > 1 ? packsFor(freeAccounts, n) : freeAccounts;
+}
 
 // The one-time claim guide, factored out so a multi-account order can send it
 // ONCE instead of once per account (see eldoradoAccountsMessage).
@@ -257,6 +277,18 @@ async function deliverOrder(order, { dryRun }) {
     return { orderId, skipped: "already delivered" };
   }
 
+  // A bulk pack row must know its pack size (docs/bulk-packs/PACKS-2.md §1):
+  // without it this order would be read as single accounts and a pack buyer
+  // short-changed. Refuse and page ("bulk pack short") — deliver it by hand.
+  if (listing.bulkOfferId && packSizeOf(listing) < 2) {
+    return {
+      orderId,
+      error:
+        "bulk pack short: this bulk listing has no pack size recorded — " +
+        "nothing was sent; deliver it by hand",
+    };
+  }
+
   // ACCOUNT LISTINGS (docs/ACCOUNT-LISTINGS-CONTRACT.md B5). The stock is the
   // exact list of accounts the owner pasted onto the offer, claimed one ledger
   // row per unit — no DropSet, no DropLog row, no reservation. The whole branch
@@ -396,12 +428,15 @@ async function deliverOrder(order, { dryRun }) {
     }
     const DropSet = require("../models/DropSet");
     const set = await DropSet.findById(listing.set).lean();
+    // A bulk pack row sells whole packs: `qty` packs are qty × N accounts
+    // (docs/bulk-packs/PACKS-2.md §2). Every other row: `qty` itself.
+    const want = accountsForOrder(listing, qty);
     // mode "sold" + this order's id is the resume anchor: a retry after a send
     // that threw gets back the SAME accounts this order already took, never a
     // fresh set (the e69b19d3 lesson). `dryRun` must reach the claim, or a dry
     // run would sell the ledger for an order it never sends.
     const picked = set
-      ? await ncs.claimForSet(set, qty, {
+      ? await ncs.claimForSet(set, want, {
           market: "eldorado",
           listingId: String(listing._id),
           orderId,
@@ -409,28 +444,31 @@ async function deliverOrder(order, { dryRun }) {
           dryRun,
         })
       : [];
-    if (picked.length < qty) {
+    if (picked.length < want) {
       // Hold the order rather than ship a short account, and release nothing:
       // what was taken stays sold to THIS order and the next tick resumes it.
+      // A bulk pack short of a whole pack is the same paid-and-stuck order,
+      // named so it pages as one (FIXES-1 L5).
       const advertised =
         (listing.requiredDrops || []).length || ((set && set.items) || []).length;
       return {
         orderId,
         error:
-          "only " + picked.length + " of " + qty + " account(s) could be claimed" +
+          (listing.bulkOfferId ? "bulk pack short: " : "") +
+          "only " + picked.length + " of " + want + " account(s) could be claimed" +
           " — no free no-claim account holds all " + advertised +
           " advertised item(s)" +
           (set ? "" : " (the listing's no-claim set is missing)"),
       };
     }
-    const message = eldoradoAccountsMessage(picked, qty);
+    const message = eldoradoAccountsMessage(picked, want);
     if (dryRun) {
       return {
         orderId,
         dryRun: true,
         source: "noclaim-set:" + String(listing.set),
         wouldSend:
-          qty + " account(s) [" + picked.map((p) => p.login).join(", ") + "], " +
+          want + " account(s) [" + picked.map((p) => p.login).join(", ") + "], " +
           message.length + " chars",
         preview: message,
       };
@@ -458,7 +496,7 @@ async function deliverOrder(order, { dryRun }) {
         picked.map((p) => p.ledgerId),
         {
           market: "eldorado",
-          priceUsd: eldoradoUnitPriceUsd(order, qty, listing.price),
+          priceUsd: noclaimAccountPriceUsd(order, qty, listing),
           orderId,
           reason: "eldorado order " + orderId,
         },
@@ -466,7 +504,7 @@ async function deliverOrder(order, { dryRun }) {
     } catch (e) {
       console.error("eldorado no-claim markSold " + orderId + ":", e.message);
     }
-    return { orderId, delivered: qty, source: "noclaim-set:" + String(listing.set) };
+    return { orderId, delivered: want, source: "noclaim-set:" + String(listing.set) };
   }
 
   // A by-game offer (retired — see claimUnclaimedForGame). Only an order a
@@ -611,8 +649,11 @@ async function deliverOrder(order, { dryRun }) {
     return { orderId, delivered: qty, source: "dropset:" + set.name };
   }
 
+  // A bulk pack row hands over whole packs: `qty` packs are qty × N accounts
+  // (docs/bulk-packs/PACKS-2.md §2). Every other row: `qty` itself.
+  const need = accountsForOrder(listing, qty);
   const free = undeliveredUnits(listing);
-  if (free.length < qty) {
+  if (free.length < need) {
     return {
       orderId,
       error:
@@ -622,12 +663,12 @@ async function deliverOrder(order, { dryRun }) {
         "not enough reserved stock (" +
         free.length +
         " of " +
-        qty +
+        need +
         ") — " +
         "restock the offer, then this order will deliver on the next tick",
     };
   }
-  const use = free.slice(0, qty);
+  const use = free.slice(0, need);
 
   // Re-read each account's password at delivery time rather than trusting a
   // cached copy, so a rotated credential is never shipped stale.
@@ -648,13 +689,13 @@ async function deliverOrder(order, { dryRun }) {
     }
     creds.push({ login, password });
   }
-  const message = eldoradoAccountsMessage(creds, qty);
+  const message = eldoradoAccountsMessage(creds, need);
 
   if (dryRun) {
     return {
       orderId,
       dryRun: true,
-      wouldSend: qty + " account(s), " + message.length + " chars",
+      wouldSend: need + " account(s), " + message.length + " chars",
     };
   }
 
@@ -677,11 +718,13 @@ async function deliverOrder(order, { dryRun }) {
   listing.markModified("units");
   await listing.save();
 
+  // Whole packs on a bulk pack row (a partial pack can never sell), the free
+  // account count on every other row.
   await mp
-    .eldoradoSetQuantity(offerId, undeliveredUnits(listing).length)
+    .eldoradoSetQuantity(offerId, advertisedFor(listing, undeliveredUnits(listing).length))
     .catch((e) => console.error("eldorado post-delivery quantity:", e.message));
 
-  return { orderId, delivered: qty };
+  return { orderId, delivered: need };
 }
 
 // What ONE unit of an order sold for, for the no-claim sale ledger
@@ -702,6 +745,20 @@ function eldoradoUnitPriceUsd(order, qty, listingPrice) {
   if (Number.isFinite(paid) && paid > 0) return Math.round((paid / n) * 100) / 100;
   const own = Number(listingPrice);
   return Number.isFinite(own) && own > 0 ? own : 0;
+}
+
+// What each ACCOUNT of a no-claim order sold for — the ledger holds one row per
+// account. An ordinary row is eldoradoUnitPriceUsd exactly as before. On a bulk
+// pack row (docs/bulk-packs/PACKS-2.md) one unit is a pack of N accounts: the
+// order's total is spread over all of its accounts, and the fallback — the
+// row's price, which is one PACK's price — over the pack's N, so a pack sale
+// never books N times its money.
+function noclaimAccountPriceUsd(order, qty, listing) {
+  const n = packSizeOf(listing);
+  if (n < 2) return eldoradoUnitPriceUsd(order, qty, listing.price);
+  const pack = Number(listing.price);
+  const each = Number.isFinite(pack) && pack > 0 ? Math.round((pack / n) * 100) / 100 : 0;
+  return eldoradoUnitPriceUsd(order, accountsForUnits(listing, qty), each);
 }
 
 
@@ -783,6 +840,11 @@ async function syncBundleStock({ dryRun = false } = {}) {
     // offer's minimum order nothing can be bought, so it counts as empty and is
     // paused like one; and a bulk offer that is not "live" (owner pause, closed,
     // held) is never resumed from here. A failed read changes nothing this pass.
+    //
+    // A v2 pack row (bulkPackSize >= 2, docs/bulk-packs/PACKS-2.md §2) is sold
+    // one PACK per unit: it advertises the whole packs its accounts fill, and
+    // 0 packs pauses it exactly like an empty shelf. That replaces the minimum
+    // rule above for such a row.
     let bulkLive = true;
     if (row.bulkOfferId) {
       let bulk = null;
@@ -794,7 +856,8 @@ async function syncBundleStock({ dryRun = false } = {}) {
         console.error("eldorado bulk offer read:", e.message);
         continue;
       }
-      if (bulk && real < (Number(bulk.minQty) || 0)) real = 0;
+      if (packSizeOf(row) > 1) real = advertisedFor(row, real);
+      else if (bulk && real < (Number(bulk.minQty) || 0)) real = 0;
       if (bulk && bulk.state !== "live") bulkLive = false;
     }
     let offer = null;

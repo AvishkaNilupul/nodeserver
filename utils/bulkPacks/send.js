@@ -32,6 +32,15 @@
 //   * Every write to an offer after its creation runs inside the ONE
 //     per-offer lock the maintenance loop also takes (utils/bulkPacks/lock.js,
 //     FIXES-1 S4/S6), and re-reads the offer inside it.
+//   * One listing unit is one PACK of N (= the tier's minQty) accounts, priced
+//     as the whole pack, on every market (docs/bulk-packs/PACKS-2.md). Every
+//     quantity sent to a market or recorded as advertisedQty is in PACKS;
+//     every reservation is whole packs of accounts; packs are counted only
+//     with packMath.packsFor, and every bulk row carries bulkPackSize: N (the
+//     fulfillers multiply with packMath.accountsForUnits).
+//   * A custom price per account is refused below the market's floor for the
+//     pack (400), and needs the owner's explicit confirmPrice when it is far
+//     from the single price (409 price_confirm) — before anything is created.
 //
 // Dependencies are lazy and injectable (CONTRACT §9): tests replace any of
 // them with __setDeps and never touch the network or utils/settings.json.
@@ -64,6 +73,10 @@ const deps = {
   },
   get pricing() {
     return overrides.pricing || require("./pricing");
+  },
+  // PACKS-2 §1: the ONE place packs and accounts are converted (pure).
+  get packMath() {
+    return overrides.packMath || require("./packMath");
   },
   get copy() {
     return overrides.copy || require("./copy");
@@ -132,8 +145,9 @@ function __resetDeps() {
 // Constants and small helpers
 // ---------------------------------------------------------------------------
 
-// Markets where one unit is one account and the tier is the offer's minimum
-// order (CONTRACT §2). Gameflip sells one fixed pack per listing instead.
+// Markets whose listing carries a QUANTITY — of packs (PACKS-2 §1): one unit
+// bought is one pack of N accounts, the minimum order is 1. Gameflip sells one
+// fixed pack per listing instead.
 const QTY_MARKETS = ["eldorado", "g2g"];
 
 // A "sending" offer older than this is an interrupted send (a crash between
@@ -229,10 +243,40 @@ function hist(action, detail, actor) {
   };
 }
 
+// Every market sells a pack as one item (PACKS-2 §1).
 function priceText(offer) {
-  return offer.market === "gameflip"
-    ? "pack of " + offer.minQty + " for " + money(offer.packPrice)
-    : money(offer.unitPrice) + " each";
+  return (
+    "pack of " +
+    offer.minQty +
+    " for " +
+    money(offer.packPrice) +
+    " (" +
+    money(offer.unitPrice) +
+    " each" +
+    (offer.customPrice ? ", custom price" : "") +
+    ")"
+  );
+}
+
+// Whole packs of `size` that `accounts` accounts fill (packMath, PACKS-2 §1).
+function packsOf(accounts, size) {
+  return deps.packMath.packsFor(accounts, size);
+}
+
+// How a price reads in a history line or a message.
+function packDetail(packs, size, packPrice, unitPrice, custom) {
+  return (
+    packs +
+    " pack(s) of " +
+    size +
+    " at " +
+    money(packPrice) +
+    " per pack (" +
+    money(unitPrice) +
+    " each" +
+    (custom ? ", custom price" : "") +
+    ")"
+  );
 }
 
 // Telegram is never awaited and can never break an action (CONTRACT I13).
@@ -371,9 +415,9 @@ function farmShareShort(share, available, sharers, minQty) {
     " account(s) that can be farmed right now are this offer's share — " +
     "capacity is already advertised by " +
     sharers +
-    " other farm offer(s) (minimum order " +
+    " other farm offer(s) (one pack is " +
     minQty +
-    ")"
+    " accounts)"
   );
 }
 
@@ -450,12 +494,13 @@ function readBulkPacks() {
   }
 }
 
-// The set's grid cover is a temp file (utils/setImage writes into
-// os.tmpdir()); the auto-lister deletes it after publishing and so do we. A
-// path outside the temp dir is never touched.
-async function coverFor(set) {
+// The set's cover is a temp file (utils/setImage writes into os.tmpdir()); the
+// auto-lister deletes it after publishing and so do we. A path outside the
+// temp dir is never touched. PACKS-2 §3: the pack cover ({packSize,
+// discountPct}), which markets.coverForSet falls back from to the plain grid.
+async function coverFor(set, pack) {
   try {
-    const p = await deps.markets.coverForSet(set);
+    const p = await deps.markets.coverForSet(set, pack);
     return typeof p === "string" ? p : "";
   } catch (e) {
     console.error(
@@ -698,7 +743,8 @@ async function noteError(offerId, message, actor, action = "error") {
 // ---------------------------------------------------------------------------
 
 // A refusal BEFORE any offer exists: nothing to close, nothing to release.
-async function refuse(status, message, input, actor) {
+// `extra` rides on the answer (e.g. {code: "price_confirm", price: {...}}).
+async function refuse(status, message, input, actor, extra) {
   await audit({
     action: "send_refused",
     severity: status >= 500 ? "error" : "warn",
@@ -710,9 +756,10 @@ async function refuse(status, message, input, actor) {
       minQty: input && input.minQty,
       setId: String((input && input.setId) || ""),
       game: String((input && input.game) || ""),
+      ...(extra && extra.code ? { code: extra.code } : {}),
     },
   });
-  return result(status, message);
+  return result(status, message, extra);
 }
 
 // A failure AFTER the offer was created: it closes the offer "error" with the
@@ -855,6 +902,139 @@ function parseUnits(v) {
   return { value: n };
 }
 
+// PACKS-2 §3: the owner's price per ACCOUNT (send body `customUnitPrice`),
+// optional. A number, or a plain decimal string; anything else is refused.
+function parseCustomPrice(v) {
+  // Absent, or a blank form field: no custom price.
+  if (v === undefined || v === null || (typeof v === "string" && !v.trim())) {
+    return { value: null };
+  }
+  const n =
+    typeof v === "number"
+      ? v
+      : typeof v === "string" && /^\s*\d+(?:\.\d+)?\s*$/.test(v)
+        ? Number(v)
+        : NaN;
+  if (!Number.isFinite(n) || n <= 0) {
+    return {
+      error: "The custom price per account must be a price above $0",
+    };
+  }
+  return { value: n };
+}
+
+// Step 3's money (PACKS-2 §3), before anything exists. The tier's price: the
+// whole pack (pricing.packPriceFor — Gameflip's $0.25 grid, cents elsewhere,
+// never under the market's floor, which is per LISTING) and its per-account
+// equivalent. A custom price per account: the pack is round2(price x N);
+//   - a pack under the market's floor is refused outright (400) — the floor
+//     is the market's own minimum per listing;
+//   - under 70% of the single price, under the set's minPriceUsd (when > 0)
+//     or above the single price needs the owner's confirmPrice === true, else
+//     409 {code: "price_confirm", message, price: {...}}.
+// Answers {ok: true, unitPrice, packPrice, customPrice, discountPct} or
+// {ok: false, status, message, extra}.
+async function priceThePack({
+  pricing,
+  custom,
+  confirmPrice,
+  anchor,
+  anchorBasis,
+  minPriceUsd,
+  discountPct,
+  market,
+  size,
+}) {
+  if (custom == null) {
+    const packPrice =
+      Number(
+        await pricing.packPriceFor({ anchor, discountPct, size, market }),
+      ) || 0;
+    const unitPrice =
+      Number(await pricing.perAccountPrice({ packPrice, size })) || 0;
+    if (!(packPrice > 0) || !(unitPrice > 0)) {
+      return {
+        ok: false,
+        status: 409,
+        message: "Could not work out a price for this pack",
+      };
+    }
+    return { ok: true, packPrice, unitPrice, customPrice: false, discountPct };
+  }
+  const floors = (deps.config && deps.config.MARKET_FLOORS) || {};
+  const floor = has(floors, market) ? Number(floors[market]) || 0 : 0;
+  const rv =
+    (await pricing.reviewCustomPrice({
+      unitPrice: custom,
+      anchor,
+      minPriceUsd,
+      market,
+      size,
+    })) || {};
+  const packPrice = Number(rv.packPrice) || 0;
+  const price = {
+    customUnitPrice: custom,
+    packPrice,
+    packSize: size,
+    anchorPrice: anchor,
+    anchorBasis,
+    minPriceUsd,
+    floor,
+    pctOfAnchor: Number(rv.pctOfAnchor) || 0,
+    reasons: Array.isArray(rv.warnings) ? rv.warnings.map(String) : [],
+  };
+  if (rv.valid !== true) {
+    return {
+      ok: false,
+      status: 400,
+      message:
+        "The custom price was refused: " + (rv.error || "it is not a usable price"),
+      extra: { code: "price_invalid", price },
+    };
+  }
+  if (rv.belowFloor || !(packPrice > 0) || !(packPrice >= floor)) {
+    return {
+      ok: false,
+      status: 400,
+      message:
+        "A pack of " +
+        size +
+        " at " +
+        money(custom) +
+        " per account is " +
+        money(packPrice) +
+        " — below " +
+        label(market) +
+        "'s " +
+        money(floor) +
+        " minimum per listing",
+      extra: { code: "price_below_floor", price },
+    };
+  }
+  if (price.reasons.length && confirmPrice !== true) {
+    return {
+      ok: false,
+      status: 409,
+      message:
+        "Check this price: " +
+        price.reasons.join("; ") +
+        ". The pack of " +
+        size +
+        " would sell for " +
+        money(packPrice) +
+        ". Tick “I checked this price” and send it again to list it anyway.",
+      extra: { code: "price_confirm", price },
+    };
+  }
+  return {
+    ok: true,
+    packPrice,
+    unitPrice: Number(rv.unitPrice) || custom,
+    customPrice: true,
+    discountPct: Math.max(0, Math.floor(Number(rv.impliedDiscountPct) || 0)),
+  };
+}
+
 // CONTRACT I5: a farming title must come back through the REAL order parsers
 // as exactly this game and term, or the farm service would provision the
 // wrong thing (or nothing) for a paid order. Returns "" when it does.
@@ -959,28 +1139,37 @@ async function sendOfferInner(input, actor) {
   if (!tier) {
     return refuse(
       400,
-      "No bulk tier has a minimum of " +
+      "No bulk tier is a pack of " +
         String(input.minQty) +
-        " — the tiers are " +
-        ((bp.tiers || []).map((t) => t.minQty + "+").join(", ") || "none"),
+        " — the tiers are packs of " +
+        ((bp.tiers || []).map((t) => t.minQty).join(", ") || "none"),
       input,
       actor,
     );
   }
+  // PACKS-2 §1: the tier is the pack size N — one unit bought = N accounts.
   const minQty = tier.minQty;
   const discountPct = tier.discountPct;
   const unitsIn = parseUnits(input.units);
   if (unitsIn.error) return refuse(400, unitsIn.error, input, actor);
   const units = unitsIn.value;
+  const customIn = parseCustomPrice(input.customUnitPrice);
+  if (customIn.error) {
+    return refuse(400, customIn.error, input, actor, {
+      code: "price_invalid",
+    });
+  }
+  const confirmPrice = input.confirmPrice === true;
+  // Gameflip: one listing is exactly one pack (`units` does not apply).
   const isPack = source === "dropset" && market === "gameflip";
   if (units != null && !isPack && units < minQty) {
     return refuse(
       400,
-      "An offer with a minimum order of " +
+      "An offer of packs of " +
         minQty +
-        " must carry at least " +
+        " must carry at least one pack (" +
         minQty +
-        " accounts",
+        " accounts)",
       input,
       actor,
     );
@@ -1079,26 +1268,23 @@ async function sendOfferInner(input, actor) {
   }
 
   // Step 3 — the price, fixed now and never changed while the offer is live.
+  // PACKS-2 §3: the listing's price is the WHOLE pack of minQty accounts.
   const pricing = deps.pricing;
   let anchor = 0;
   let anchorBasis = "";
   let anchorRow = null;
-  let unitPrice = 0;
-  let packPrice = 0;
+  let minPriceUsd = 0;
   if (source === "farm") {
-    const table = (bp.farmPrices && bp.farmPrices[market]) || {};
-    anchor = Number(table[String(days)]) || 0;
-    anchorBasis = "farm-table";
-    unitPrice =
+    anchor =
       Number(
-        await pricing.farmUnitPrice({
+        await pricing.farmAnchor({
           farmPrices: bp.farmPrices,
           market,
           days,
-          discountPct,
         }),
       ) || 0;
-    if (!(unitPrice > 0)) {
+    anchorBasis = "farm-table";
+    if (!(anchor > 0)) {
       return refuse(
         409,
         "No farming price is set for " + label(market) + " " + days + " days",
@@ -1140,22 +1326,26 @@ async function sendOfferInner(input, actor) {
     anchorRow = a.listingId
       ? rows.find((r) => String(r._id) === String(a.listingId)) || null
       : null;
-    unitPrice =
-      Number(await pricing.unitPrice({ anchor, discountPct, market })) || 0;
-    if (isPack)
-      packPrice =
-        Number(
-          await pricing.packPrice({ anchor, discountPct, size: minQty }),
-        ) || 0;
-    if (!(unitPrice > 0) || (isPack && !(packPrice > 0))) {
-      return refuse(
-        409,
-        "Could not work out a price for this pack",
-        input,
-        actor,
-      );
-    }
+    minPriceUsd = Math.max(0, Number(set.minPriceUsd) || 0);
   }
+  const priced = await priceThePack({
+    pricing,
+    custom: customIn.value,
+    confirmPrice,
+    anchor,
+    anchorBasis,
+    minPriceUsd,
+    discountPct,
+    market,
+    size: minQty,
+  });
+  if (!priced.ok) {
+    return refuse(priced.status, priced.message, input, actor, priced.extra);
+  }
+  const { unitPrice, packPrice, customPrice } = priced;
+  // The discount the copy states: the tier's, or the one a custom price gives.
+  const shownDiscount = priced.discountPct;
+  const pack = { packSize: minQty, discountPct: shownDiscount };
 
   // Step 4 — the copy.
   const copy = deps.copy;
@@ -1171,7 +1361,7 @@ async function sendOfferInner(input, actor) {
         baseTitle,
         market,
         minQty,
-        discountPct,
+        discountPct: shownDiscount,
       });
       description = await copy.accountsDescription({
         setName: set.name,
@@ -1216,6 +1406,18 @@ async function sendOfferInner(input, actor) {
       actor,
     );
   }
+  // PACKS-2 §3: the listing IS one pack — a buyer must read that in the title
+  // (markets.js refuses the publish too; this refuses before any reservation).
+  if (!new RegExp("\\bPACK\\s+OF\\s+" + minQty + "\\b", "i").test(title)) {
+    return refuse(
+      409,
+      'The title does not say "PACK OF ' +
+        minQty +
+        '" — refusing to publish a pack a buyer could read as one account',
+      input,
+      actor,
+    );
+  }
 
   // Step 5 — the offer record. The partial unique index on slotKey is what
   // turns a second click on the same slot into a 409 (CONTRACT I6).
@@ -1252,7 +1454,7 @@ async function sendOfferInner(input, actor) {
       game,
       days,
       minQty,
-      discountPct,
+      discountPct: shownDiscount,
       units,
       isPack,
       kind,
@@ -1261,6 +1463,8 @@ async function sendOfferInner(input, actor) {
       anchorBasis,
       unitPrice,
       packPrice,
+      customPrice,
+      pack,
       title,
       description,
       alreadyLive,
@@ -1294,6 +1498,8 @@ async function createAndSend(offerId, p) {
     anchorBasis,
     unitPrice,
     packPrice,
+    customPrice,
+    pack,
     title,
     description,
     alreadyLive,
@@ -1318,6 +1524,7 @@ async function createAndSend(offerId, p) {
         anchorBasis,
         unitPrice,
         packPrice,
+        customPrice: customPrice === true,
         title,
         description,
         state: "sending",
@@ -1330,11 +1537,13 @@ async function createAndSend(offerId, p) {
             label(market) +
               " · " +
               SOURCE_LABELS[source] +
-              " · min " +
+              " · pack of " +
               minQty +
-              " (" +
-              discountPct +
-              "% off)",
+              " for " +
+              money(packPrice) +
+              (customPrice
+                ? " (custom price " + money(unitPrice) + " each)"
+                : " (" + discountPct + "% off)"),
             actor,
           ),
         ],
@@ -1364,6 +1573,9 @@ async function createAndSend(offerId, p) {
     description,
     unitPrice,
     packPrice,
+    customPrice: customPrice === true,
+    // PACKS-2: the pack size and the discount the covers show.
+    pack: pack || { packSize: minQty, discountPct },
     got: [],
     published: false,
     externalId: "",
@@ -1542,16 +1754,22 @@ async function orphanAfterPublish(ctx, why) {
     }
     if (existing) {
       ctx.rowId = existing._id;
+      const packs =
+        market === "gameflip" ? 1 : packsOf(ctx.got.length, ctx.minQty);
       return finalizeLive(
         ctx,
         {
           listing: existing._id,
-          advertisedQty: ctx.got.length,
-          ...(market === "gameflip"
-            ? { packPrice: ctx.packPrice }
-            : { unitPrice: ctx.unitPrice }),
+          advertisedQty: packs,
+          packPrice: ctx.packPrice,
+          unitPrice: ctx.unitPrice,
         },
-        ctx.got.length + " account(s) (row recovered after a failed write)",
+        packs +
+          " pack(s) of " +
+          ctx.minQty +
+          " (" +
+          ctx.got.length +
+          " account(s); row recovered after a failed write)",
       );
     }
     if (existing === undefined) {
@@ -1705,7 +1923,9 @@ async function unitsLostDuringSend(ctx) {
 }
 
 // Take units that lost their reservation off a quantity row (conditional $pull
-// of the FREE unit only, CONTRACT I3) and advertise what is left.
+// of the FREE unit only, CONTRACT I3) and advertise the whole packs left — or
+// pause the offer when not even one pack is left (a partial pack can never
+// sell; the loop then closes it sold out and retires the leftovers).
 async function dropLostUnits(ctx, rowId, lost) {
   for (const id of lost) {
     await deps.MarketplaceListing.updateOne(
@@ -1744,12 +1964,19 @@ async function dropLostUnits(ctx, rowId, lost) {
     bulkOfferId: ctx.offer._id,
   }).lean();
   const n = sellableCount(row, await freshOffer(ctx.offer._id));
+  const packs = packsOf(n, ctx.minQty);
   let note = "";
   try {
-    await deps.markets.setQuantity(ctx.market, ctx.externalId, n);
+    if (packs >= 1) {
+      await deps.markets.setQuantity(ctx.market, ctx.externalId, packs);
+    } else {
+      await deps.markets.pause(ctx.market, ctx.externalId);
+    }
   } catch (e) {
     note =
-      " (quantity update failed: " +
+      " (" +
+      (packs >= 1 ? "quantity update" : "pause") +
+      " failed: " +
       errMsg(e) +
       " — the maintenance loop retries)";
   }
@@ -1757,7 +1984,12 @@ async function dropLostUnits(ctx, rowId, lost) {
     lost.length +
     " account(s) lost their reservation while the offer was being sent and were taken off it; " +
     n +
-    " left on offer" +
+    " account(s) left = " +
+    packs +
+    " whole pack(s) of " +
+    ctx.minQty +
+    " on offer" +
+    (packs >= 1 ? "" : " — not one whole pack, so the offer was paused") +
     note;
   alert(
     "⚠️ Bulk offer integrity: " +
@@ -1775,56 +2007,110 @@ async function dropLostUnits(ctx, rowId, lost) {
     actor: ctx.actor,
     meta: { lost },
   });
-  return { n, note };
+  return { n, packs, note };
 }
 
-// dropset on Eldorado / G2G: one offer, quantity = reserved accounts, minimum
-// order = the tier. The accounts ride on the row as units[] for the existing
-// fulfillers' reserved-units branch.
+// The accounts `packs` whole packs of `size` hold — packMath.accountsForUnits,
+// the one multiplier (PACKS-2 §1), on the shape the offer's row carries.
+function accountsIn(offerId, size, packs) {
+  return deps.packMath.accountsForUnits(
+    { bulkOfferId: offerId, bulkPackSize: size },
+    packs,
+  );
+}
+
+// A reservation that came back short of whole packs: the accounts beyond the
+// last whole pack can never be sold on this offer (a partial pack never
+// sells), so they go straight back (they never reached a row). Returns the
+// accounts kept, in whole packs, and records them as the send's own.
+async function keepWholePacks(ctx, got, why) {
+  const packs = packsOf(got.length, ctx.minQty);
+  const keep = accountsIn(ctx.offer._id, ctx.minQty, packs);
+  if (got.length <= keep) return got;
+  const extra = got.slice(keep).map((a) => a.accountId);
+  await releaseAndRecord(ctx.offer._id, ctx.set, ctx.market, extra, why);
+  ctx.got = got.slice(0, keep);
+  return ctx.got;
+}
+
+function rowNote(ctx, packs, accounts) {
+  return (
+    "bulk pack: " +
+    packs +
+    " pack(s) of " +
+    ctx.minQty +
+    " at " +
+    money(ctx.packPrice) +
+    " per pack (" +
+    (ctx.customPrice
+      ? "custom price " + money(ctx.unitPrice) + " each"
+      : ctx.discountPct + "% off") +
+    "), " +
+    accounts +
+    " reserved"
+  );
+}
+
+// dropset on Eldorado / G2G (PACKS-2 §3): one offer whose quantity is PACKS of
+// minQty (N) accounts, minimum order 1, priced per pack. Packs reserved =
+// min(units ? floor(units/N) : floor(bp.unitsPerOffer/N), floor(surplus/N)),
+// at least one; accounts reserved = packs x N. They ride on the row (which
+// carries bulkPackSize: N) as units[] for the existing fulfillers'
+// reserved-units branch, which hands over packMath.accountsForUnits(row, qty)
+// accounts per order.
 async function sendDropsetQty(ctx) {
   const { bp, set, market, minQty, units, offer } = ctx;
   const free = (await deps.stock.freeDropsetAccounts(set)).length;
   const surplus = free - bp.reserveSingles;
-  const n = Math.min(units || bp.unitsPerOffer, surplus);
-  if (!(n >= minQty)) {
+  const room = packsOf(surplus, minQty);
+  const wanted = packsOf(units || bp.unitsPerOffer, minQty);
+  const packs = Math.min(wanted, room);
+  if (!(packs >= 1)) {
     return failSend(
       ctx,
       409,
-      "Only " +
-        free +
-        " free account(s) hold this bundle (keeping " +
-        bp.reserveSingles +
-        " for single listings) — a " +
-        minQty +
-        "+ offer needs " +
-        (minQty + bp.reserveSingles),
+      room >= 1
+        ? "Accounts per offer (" +
+            bp.unitsPerOffer +
+            ") is less than one pack of " +
+            minQty +
+            " — type the number of accounts, or raise it in Settings"
+        : "Only " +
+            free +
+            " free account(s) hold this bundle (keeping " +
+            bp.reserveSingles +
+            " for single listings) — one pack of " +
+            minQty +
+            " needs " +
+            (minQty + bp.reserveSingles),
     );
   }
-  const got = await reserveInto(ctx, n);
-  if (got.length < minQty) {
+  const n = accountsIn(offer._id, minQty, packs);
+  const reserved = await reserveInto(ctx, n);
+  if (packsOf(reserved.length, minQty) < 1) {
     await releaseAndRecord(
       offer._id,
       set,
       market,
-      got.map((a) => a.accountId),
+      reserved.map((a) => a.accountId),
       "short reservation",
     );
     return failSend(
       ctx,
       409,
       "Only " +
-        got.length +
+        reserved.length +
         " of " +
         n +
-        " account(s) could be reserved (a " +
-        minQty +
-        "+ offer needs " +
+        " account(s) could be reserved (one pack needs " +
         minQty +
         ") — nothing was listed",
     );
   }
+  const got = await keepWholePacks(ctx, reserved, "short reservation: not a whole pack");
+  const gotPacks = packsOf(got.length, minQty);
 
-  const cover = await coverFor(set);
+  const cover = await coverFor(set, ctx.pack);
   let pub;
   try {
     pub = await deps.markets.publishAccounts({
@@ -1834,7 +2120,7 @@ async function sendDropsetQty(ctx) {
       title: ctx.title,
       description: ctx.description,
       unitPrice: ctx.unitPrice,
-      packPrice: 0,
+      packPrice: ctx.packPrice,
       minQty,
       units: got.map((a) => ({ accountId: a.accountId, login: a.login })),
       coverPath: cover,
@@ -1868,8 +2154,10 @@ async function sendDropsetQty(ctx) {
   if (!ctx.externalId)
     return orphanAfterPublish(ctx, "the market answered without an offer id");
 
+  // What the market really charges for one unit = one pack.
   const price =
-    Number(pub && pub.price) > 0 ? Number(pub.price) : ctx.unitPrice;
+    Number(pub && pub.price) > 0 ? Number(pub.price) : ctx.packPrice;
+  ctx.packPrice = price;
   const now = new Date();
   let row;
   try {
@@ -1884,14 +2172,9 @@ async function sendDropsetQty(ctx) {
       status: "active",
       origin: "manual",
       bulkOfferId: offer._id,
-      note:
-        "bulk pack: min " +
-        minQty +
-        " (" +
-        ctx.discountPct +
-        "% off), " +
-        got.length +
-        " reserved",
+      // PACKS-2 §1: one unit sold on this row = this many accounts.
+      bulkPackSize: minQty,
+      note: rowNote(ctx, gotPacks, got.length),
       autoDeliver: false,
       qtyTarget: got.length,
       units: got.map((a) => unitDoc(a, now)),
@@ -1900,12 +2183,12 @@ async function sendDropsetQty(ctx) {
     return orphanAfterPublish(ctx, errMsg(e));
   }
   ctx.rowId = row._id;
-  let advertised = got.length;
+  let advertised = gotPacks;
   let lostNote = "";
   const lost = await unitsLostDuringSend(ctx);
   if (lost.length) {
     const d = await dropLostUnits(ctx, row._id, lost);
-    advertised = d.n;
+    advertised = d.packs;
     lostNote =
       "; " +
       lost.length +
@@ -1914,12 +2197,16 @@ async function sendDropsetQty(ctx) {
   }
   return finalizeLive(
     ctx,
-    { listing: row._id, advertisedQty: advertised, unitPrice: price },
-    advertised +
-      " account(s) at " +
-      money(price) +
-      " each, minimum order " +
-      minQty +
+    {
+      listing: row._id,
+      advertisedQty: advertised,
+      packPrice: price,
+      unitPrice: ctx.unitPrice,
+    },
+    packDetail(advertised, minQty, price, ctx.unitPrice, ctx.customPrice) +
+      ", " +
+      got.length +
+      " account(s) reserved" +
       lostNote,
   );
 }
@@ -1964,7 +2251,7 @@ async function sendGameflipPack(ctx) {
     );
   }
 
-  const cover = await coverFor(set);
+  const cover = await coverFor(set, ctx.pack);
   let pub;
   try {
     pub = await deps.markets.publishAccounts({
@@ -2011,6 +2298,7 @@ async function sendGameflipPack(ctx) {
 
   const price =
     Number(pub && pub.price) > 0 ? Number(pub.price) : ctx.packPrice;
+  ctx.packPrice = price;
   const now = new Date();
   const logins = got.map((a) => a.login);
   let row;
@@ -2029,14 +2317,9 @@ async function sendGameflipPack(ctx) {
       status: "active",
       origin: "manual",
       bulkOfferId: offer._id,
-      note:
-        "bulk pack: min " +
-        minQty +
-        " (" +
-        ctx.discountPct +
-        "% off), " +
-        got.length +
-        " reserved",
+      // PACKS-2 §1: the one pack this listing is holds this many accounts.
+      bulkPackSize: minQty,
+      note: rowNote(ctx, 1, got.length),
       autoDeliver: true,
       qtyRemaining: 0,
       qtyTarget: 0,
@@ -2108,27 +2391,34 @@ async function sendGameflipPack(ctx) {
       ctx,
       {
         listing: row._id,
-        advertisedQty: got.length,
+        advertisedQty: 1,
         packPrice: price,
+        unitPrice: ctx.unitPrice,
         lastError: message.slice(0, 400),
       },
-      "pack of " +
-        got.length +
-        " account(s) for " +
-        money(price) +
+      packDetail(1, minQty, price, ctx.unitPrice, ctx.customPrice) +
         " — " +
         message,
     );
   }
+  // advertisedQty counts packs: a Gameflip pack listing is exactly one.
   return finalizeLive(
     ctx,
-    { listing: row._id, advertisedQty: got.length, packPrice: price },
-    "pack of " + got.length + " account(s) for " + money(price),
+    {
+      listing: row._id,
+      advertisedQty: 1,
+      packPrice: price,
+      unitPrice: ctx.unitPrice,
+    },
+    packDetail(1, minQty, price, ctx.unitPrice, ctx.customPrice),
   );
 }
 
-// noclaim on Eldorado / G2G: a claim-at-sale offer through the no-claim layer,
-// published exactly as the Shop-listings route publishes one, then linked.
+// noclaim on Eldorado / G2G (PACKS-2 §3): a claim-at-sale offer through the
+// no-claim layer, published exactly as the Shop-listings route publishes one,
+// then linked — the row gets bulkOfferId AND bulkPackSize: N in one update.
+// Quantity = packs: packsFor(share, N), at least one, capped by the owner's
+// accounts (or bp.unitsPerOffer); minimum order 1; the pack's price.
 async function sendNoclaim(ctx) {
   const { bp, set, market, minQty, units, offer } = ctx;
   const c = await deps.stock.noclaimCounts(set);
@@ -2137,7 +2427,8 @@ async function sendNoclaim(ctx) {
     Math.floor(Number(c && c.share && c.share[market]) || 0),
   );
   const free = Math.max(0, Math.floor(Number(c && c.free) || 0));
-  if (share < minQty) {
+  const room = packsOf(share, minQty);
+  if (!(room >= 1)) {
     return failSend(
       ctx,
       409,
@@ -2147,15 +2438,24 @@ async function sendNoclaim(ctx) {
         free +
         " free no-claim account(s) are not already advertised on " +
         label(market) +
-        " — a " +
-        minQty +
-        "+ offer needs " +
+        " — one pack needs " +
         minQty,
     );
   }
-  const quantity = Math.min(units || bp.unitsPerOffer, share);
+  const packs = Math.min(packsOf(units || bp.unitsPerOffer, minQty), room);
+  if (!(packs >= 1)) {
+    return failSend(
+      ctx,
+      409,
+      "Accounts per offer (" +
+        bp.unitsPerOffer +
+        ") is less than one pack of " +
+        minQty +
+        " — type the number of accounts, or raise it in Settings",
+    );
+  }
 
-  const cover = await coverFor(set);
+  const cover = await coverFor(set, ctx.pack);
   let pub;
   try {
     pub = await deps.markets.publishNoclaim({
@@ -2165,7 +2465,8 @@ async function sendNoclaim(ctx) {
       title: ctx.title,
       description: ctx.description,
       unitPrice: ctx.unitPrice,
-      quantity,
+      packPrice: ctx.packPrice,
+      quantity: packs,
       minQty,
       coverPath: cover,
     });
@@ -2200,7 +2501,8 @@ async function sendNoclaim(ctx) {
     try {
       const r = await deps.MarketplaceListing.updateOne(
         { _id: rowId, bulkOfferId: null },
-        { $set: { bulkOfferId: offer._id } },
+        // PACKS-2 §3: the pack size rides on the same update as the link.
+        { $set: { bulkOfferId: offer._id, bulkPackSize: minQty } },
       );
       linked = Number(r && r.matchedCount) === 1;
       if (!linked) linkErr = "the new no-claim row was not found";
@@ -2271,21 +2573,83 @@ async function sendNoclaim(ctx) {
     }
   }
   const price =
-    Number(pub && pub.price) > 0 ? Number(pub.price) : ctx.unitPrice;
-  // publishNoclaim caps the advertised quantity to this offer's share of the
-  // shelf and lowers minQuantity with it when the shelf shrank mid-publish
-  // (markets.publishNoclaim logs that and answers the real quantity). A tier
-  // price live at a smaller minimum order is not what the owner sent, so it
-  // goes straight back down through the normal withdraw path.
-  const landed = Number(pub && pub.quantity);
-  if (Number.isFinite(landed) && landed < minQty) {
+    Number(pub && pub.price) > 0 ? Number(pub.price) : ctx.packPrice;
+  ctx.packPrice = price;
+
+  // The no-claim layer caps the quantity by the set's share of the shelf
+  // counted in ACCOUNTS — it knows nothing of packs — and the shelf can shrink
+  // between the count above and the publish. So this offer's own share is
+  // counted again now, and it never advertises more whole packs than that
+  // share fills: fewer -> the quantity comes down; not one whole pack (or a
+  // shrink the layer reported that cannot be re-counted) -> the offer goes
+  // straight back down through the normal withdraw path.
+  const landed = Math.floor(Number(pub && pub.quantity));
+  let advertised = Number.isFinite(landed) && landed > 0 ? landed : packs;
+  let recount = null;
+  let recountErr = "";
+  try {
+    const row = await deps.MarketplaceListing.findOne({
+      _id: rowId,
+      bulkOfferId: offer._id,
+    }).lean();
+    if (row) {
+      recount = packsOf(
+        Math.floor(Number(await deps.noclaimStock.stockForListing(row)) || 0),
+        minQty,
+      );
+    } else {
+      recountErr = "the linked row could not be read back";
+    }
+  } catch (e) {
+    recountErr = errMsg(e);
+  }
+  let shrinkNote = "";
+  let takeDown = "";
+  if (recount != null && recount < advertised) {
+    if (recount < 1) {
+      takeDown =
+        "not one whole pack of " + minQty + " is left for this offer";
+    } else {
+      try {
+        await deps.markets.setQuantity(market, ctx.externalId, recount);
+        shrinkNote =
+          "; the shelf shrank mid-publish: " +
+          recount +
+          " of " +
+          advertised +
+          " pack(s) kept on offer";
+        advertised = recount;
+      } catch (e) {
+        takeDown =
+          "the quantity could not be lowered to " +
+          recount +
+          " pack(s) (" +
+          errMsg(e) +
+          ")";
+      }
+    }
+  } else if (recount == null && advertised < packs) {
+    takeDown =
+      "only " +
+      advertised +
+      " of " +
+      packs +
+      " pack(s) landed and the shelf could not be re-counted (" +
+      recountErr +
+      ")";
+  }
+  if (takeDown) {
     await finalizeLive(
       ctx,
-      { listing: rowId, advertisedQty: landed, unitPrice: price },
-      landed +
-        " no-claim account(s) landed — below the " +
-        minQty +
-        "+ minimum",
+      {
+        listing: rowId,
+        advertisedQty: advertised,
+        packPrice: price,
+        unitPrice: ctx.unitPrice,
+      },
+      packDetail(advertised, minQty, price, ctx.unitPrice, ctx.customPrice) +
+        " landed — the no-claim shelf shrank: " +
+        takeDown,
     );
     // This send already holds the offer's lock, which is not re-entrant: the
     // lock-free withdraw, never withdrawOffer (it would wait on itself).
@@ -2299,11 +2663,9 @@ async function sendNoclaim(ctx) {
       success: false,
       status: 409,
       message:
-        "The no-claim shelf shrank while publishing (only " +
-        landed +
-        " left for this offer, below the " +
-        minQty +
-        "+ minimum), so the offer was taken back down" +
+        "The no-claim shelf shrank while publishing (" +
+        takeDown +
+        "), so the offer was taken back down" +
         (w && w.success
           ? ""
           : " — check it on " +
@@ -2313,20 +2675,24 @@ async function sendNoclaim(ctx) {
       offer: (w && w.offer) || undefined,
     };
   }
-  const advertised = Number.isFinite(landed) && landed > 0 ? landed : quantity;
   return finalizeLive(
     ctx,
-    { listing: rowId, advertisedQty: advertised, unitPrice: price },
-    advertised +
-      " no-claim account(s) advertised at " +
-      money(price) +
-      " each, minimum order " +
-      minQty,
+    {
+      listing: rowId,
+      advertisedQty: advertised,
+      packPrice: price,
+      unitPrice: ctx.unitPrice,
+    },
+    packDetail(advertised, minQty, price, ctx.unitPrice, ctx.customPrice) +
+      " (no-claim, claimed at sale)" +
+      shrinkNote,
   );
 }
 
 // farm on Eldorado / G2G: no row — the farm services read the title and
-// provision purchaseQuantity accounts when an order lands.
+// provision purchaseQuantity x the offer's pack size accounts when an order
+// lands (PACKS-2 §2). Quantity = packs: packsFor(this offer's share of the
+// farm capacity, N), capped by the owner's accounts; at least one pack.
 async function sendFarm(ctx) {
   const { bp, market, minQty, units } = ctx;
   // S1: this offer's SHARE of the capacity, never the whole of it.
@@ -2351,8 +2717,16 @@ async function sendFarm(ctx) {
         (cap.error ? " — capacity read failed: " + cap.error : ""),
     );
   }
-  const q = Math.min(share, units || Infinity);
-  if (!(q >= minQty)) {
+  if (!(packsOf(share, minQty) >= 1)) {
+    return failSend(
+      ctx,
+      409,
+      farmShareShort(share, available, sharers, minQty),
+    );
+  }
+  // `units` are accounts: the offer carries the whole packs they fill.
+  const q = packsOf(units ? Math.min(share, units) : share, minQty);
+  if (!(q >= 1)) {
     return failSend(
       ctx,
       409,
@@ -2368,8 +2742,10 @@ async function sendFarm(ctx) {
       title: ctx.title,
       description: ctx.description,
       unitPrice: ctx.unitPrice,
+      packPrice: ctx.packPrice,
       quantity: q,
       minQty,
+      discountPct: ctx.pack ? ctx.pack.discountPct : 0,
     });
   } catch (e) {
     if (!publishNotCreated(e)) return holdUnknownPublish(ctx, e);
@@ -2401,25 +2777,26 @@ async function sendFarm(ctx) {
     );
   }
   const price =
-    Number(pub && pub.price) > 0 ? Number(pub.price) : ctx.unitPrice;
+    Number(pub && pub.price) > 0 ? Number(pub.price) : ctx.packPrice;
+  ctx.packPrice = price;
   return finalizeLive(
     ctx,
-    { advertisedQty: q, unitPrice: price },
-    q +
-      " account(s) farming " +
+    { advertisedQty: q, packPrice: price, unitPrice: ctx.unitPrice },
+    packDetail(q, minQty, price, ctx.unitPrice, ctx.customPrice) +
+      ", farming " +
       ctx.game +
       " for " +
       ctx.days +
-      " days at " +
-      money(price) +
-      " each, minimum order " +
-      minQty,
+      " days",
   );
 }
 
 // ---------------------------------------------------------------------------
 // refillOffer — dropset Eldorado / G2G only
 // ---------------------------------------------------------------------------
+// `add` is in ACCOUNTS; a refill adds WHOLE packs (PACKS-2 §3): the accounts
+// reserved are the whole packs of the offer's size that min(add, surplus)
+// fills, and the offer then advertises packsFor(free units, N).
 async function refillOffer({ offerId, add, actor } = {}) {
   return guarded("refill", async () => {
     const bp = readBulkPacks();
@@ -2479,23 +2856,37 @@ async function refillLocked(offerId, addN, bp, actor) {
     );
   }
 
+  const size = Math.floor(Number(offer.minQty)) || 0;
+  if (!(addN >= size)) {
+    return result(
+      400,
+      "A refill adds whole packs — add at least " +
+        size +
+        " accounts (one pack of " +
+        size +
+        ")",
+      { offer },
+    );
+  }
   const free = (await deps.stock.freeDropsetAccounts(set)).length;
   const surplus = free - bp.reserveSingles;
-  const n = Math.min(addN, surplus);
-  if (!(n >= 1)) {
+  const addPacks = packsOf(Math.min(addN, surplus), size);
+  if (!(addPacks >= 1)) {
     return result(
       409,
       "Only " +
         free +
         " free account(s) hold this bundle (keeping " +
         bp.reserveSingles +
-        " for single listings)",
+        " for single listings) — a refill adds whole packs of " +
+        size,
       { offer },
     );
   }
+  const n = accountsIn(offer._id, size, addPacks);
   const raw = await deps.stock.reserve({ set, n, market: offer.market });
   const seen = new Set();
-  const got = [];
+  let got = [];
   for (const a of Array.isArray(raw) ? raw : []) {
     const id = String((a && a.accountId) || "");
     if (!id || seen.has(id)) continue;
@@ -2504,7 +2895,7 @@ async function refillLocked(offerId, addN, bp, actor) {
   }
   if (!got.length)
     return result(409, "No account could be reserved right now", { offer });
-  const gotIds = got.map((a) => a.accountId);
+  let gotIds = got.map((a) => a.accountId);
 
   // Our record first (the authority, CONTRACT I3), then the row. The write
   // re-checks that the offer is still open and live/paused — a backstop for
@@ -2570,6 +2961,31 @@ async function refillLocked(offerId, addN, bp, actor) {
     );
   }
 
+  // Whole packs only: accounts beyond the last whole pack (a short
+  // reservation) never reach the row. They are recorded above, so their
+  // release is tracked (released, or retiring for the loop to retry).
+  const keep = accountsIn(offer._id, size, packsOf(got.length, size));
+  if (got.length > keep) {
+    await releaseAndRecord(
+      offer._id,
+      set,
+      offer.market,
+      gotIds.slice(keep),
+      "refill: not a whole pack",
+    );
+    got = got.slice(0, keep);
+    gotIds = gotIds.slice(0, keep);
+  }
+  if (!got.length) {
+    return result(
+      409,
+      "Fewer than " +
+        size +
+        " account(s) could be reserved — a refill adds whole packs, so nothing was added",
+      { offer: (await freshOffer(offer._id)) || offer },
+    );
+  }
+
   // One atomic $push per unit — never a whole-array save (CONTRACT I3).
   const pushed = [];
   const missed = [];
@@ -2627,19 +3043,25 @@ async function refillLocked(offerId, addN, bp, actor) {
   }
   const added = pushed.length + alreadyOn.length;
 
-  // Advertise exactly the free units the row now holds.
+  // Advertise exactly the whole packs the row's free units now fill.
   const freeCount = sellableCount(fresh, await freshOffer(offer._id));
+  const packs = packsOf(freeCount, size);
   let qtyNote = "";
   const set$ = { lastError: "" };
-  try {
-    await deps.markets.setQuantity(offer.market, offer.externalId, freeCount);
-    set$.advertisedQty = freeCount;
-  } catch (e) {
+  if (packs >= 1) {
+    try {
+      await deps.markets.setQuantity(offer.market, offer.externalId, packs);
+      set$.advertisedQty = packs;
+    } catch (e) {
+      qtyNote =
+        " — the quantity update failed (" +
+        errMsg(e) +
+        "); the maintenance loop retries";
+      set$.lastError = ("refill quantity: " + errMsg(e)).slice(0, 400);
+    }
+  } else {
     qtyNote =
-      " — the quantity update failed (" +
-      errMsg(e) +
-      "); the maintenance loop retries";
-    set$.lastError = ("refill quantity: " + errMsg(e)).slice(0, 400);
+      " — not one whole pack on offer, the maintenance loop closes it";
   }
   const detail =
     "+" +
@@ -2655,6 +3077,10 @@ async function refillLocked(offerId, addN, bp, actor) {
       : "") +
     "; " +
     freeCount +
+    " account(s) = " +
+    packs +
+    " pack(s) of " +
+    size +
     " on offer" +
     qtyNote;
   await deps.BulkOffer.updateOne(
@@ -2827,18 +3253,20 @@ async function resumeLocked(offerId, bp, actor) {
       offer,
     });
 
-  // Enough behind it to honour a minimum order, and the quantity it may show.
+  // At least one whole pack behind it, and the quantity — in PACKS of
+  // offer.minQty accounts (PACKS-2 §1) — it may show.
+  const size = offer.minQty;
   let qty = null;
   if (offer.source === "farm") {
     // S1: its SHARE of the farm capacity, counting itself as a sharer.
     const { cap, available, share, sharers } = await farmShareFor(offer, bp);
-    if (available < offer.minQty) {
+    if (packsOf(available, size) < 1) {
       return result(
         409,
         "Only " +
           available +
-          " account(s) can be farmed right now (minimum order " +
-          offer.minQty +
+          " account(s) can be farmed right now (one pack is " +
+          size +
           ") — best stack room " +
           (Number(cap.bestStackRoom) || 0) +
           ", " +
@@ -2850,14 +3278,12 @@ async function resumeLocked(offerId, bp, actor) {
         { offer },
       );
     }
-    if (share < offer.minQty) {
-      return result(
-        409,
-        farmShareShort(share, available, sharers, offer.minQty),
-        { offer },
-      );
+    if (packsOf(share, size) < 1) {
+      return result(409, farmShareShort(share, available, sharers, size), {
+        offer,
+      });
     }
-    qty = share;
+    qty = packsOf(share, size);
   } else {
     const row = await ownRow(offer);
     if (!row || row.status !== "active") {
@@ -2866,7 +3292,8 @@ async function resumeLocked(offerId, bp, actor) {
       });
     }
     if (offer.source === "noclaim") {
-      // The no-claim layer's own stock sync sets its quantity.
+      // Its share of the shelf, in whole packs; the no-claim stock sync keeps
+      // it there afterwards.
       let share;
       try {
         share = Math.floor(
@@ -2879,31 +3306,32 @@ async function resumeLocked(offerId, bp, actor) {
           { offer },
         );
       }
-      if (share < offer.minQty) {
+      if (packsOf(share, size) < 1) {
         return result(
           409,
           "Only " +
             share +
-            " no-claim account(s) are free for this offer (minimum order " +
-            offer.minQty +
+            " no-claim account(s) are free for this offer (one pack is " +
+            size +
             ")",
           { offer },
         );
       }
+      qty = packsOf(share, size);
     } else {
       const free = sellableCount(row, offer);
-      if (free < offer.minQty) {
+      if (packsOf(free, size) < 1) {
         return result(
           409,
           "Only " +
             free +
-            " account(s) left on this offer (minimum order " +
-            offer.minQty +
+            " account(s) left on this offer (one pack is " +
+            size +
             ") — refill it first",
           { offer },
         );
       }
-      qty = free;
+      qty = packsOf(free, size);
     }
   }
 
@@ -2923,7 +3351,7 @@ async function resumeLocked(offerId, bp, actor) {
         502,
         "Could not set the offer's quantity to " +
           qty +
-          " on " +
+          " pack(s) on " +
           label(offer.market) +
           ": " +
           errMsg(e) +
@@ -2947,7 +3375,8 @@ async function resumeLocked(offerId, bp, actor) {
     );
   }
   const detail =
-    "resumed by the owner" + (qty != null ? " at quantity " + qty : "");
+    "resumed by the owner" +
+    (qty != null ? " at " + qty + " pack(s) of " + size : "");
   await deps.BulkOffer.updateOne(
     { _id: offer._id, open: true },
     {
@@ -3468,7 +3897,8 @@ async function withdrawNoclaim(offer, actor) {
         marketplace: offer.market,
         externalId: offer.externalId,
       },
-      { $set: { bulkOfferId: offer._id } },
+      // PACKS-2 §1: a bulk row always carries its pack size.
+      { $set: { bulkOfferId: offer._id, bulkPackSize: offer.minQty } },
     ).catch(() => {});
     row = await ownRow(offer);
   }

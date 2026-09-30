@@ -7,17 +7,18 @@
 //
 //   dropset eldorado/g2g  reconcile reserved[] with the row, count sales,
 //                         retire unhealthy units, pause + retire a sold-out
-//                         offer, keep the advertised quantity equal to the free
-//                         units, notice an expired offer (every 30 min)
+//                         offer (fewer free than one pack), keep the advertised
+//                         quantity equal to the whole packs the free units
+//                         make, notice an expired offer (every 30 min)
 //   dropset gameflip      finalise a sold pack, retire a removed/delisted one,
 //                         withdraw a pack holding an unhealthy account (I9)
 //   noclaim               notice a dead row, count sales, flag low stock
 //                         (display only — the no-claim syncs own the quantity)
-//   farm                  pause when rent-farm capacity cannot cover the
-//                         minimum order, resume an offer IT paused once it can
-//                         (never while bulk packs are switched off, I8), keep
-//                         the quantity equal to capacity, count sales from
-//                         FarmServiceOrder, notice expiry
+//   farm                  pause when its share of the rent-farm capacity
+//                         cannot fill one pack, resume an offer IT paused once
+//                         it can (never while bulk packs are switched off, I8),
+//                         keep the quantity equal to the packs its share makes,
+//                         count sales from FarmServiceOrder, notice expiry
 //
 // WHY THE ROW IS NEVER WHOLE-ARRAY SAVED (I3)
 // The fulfillers load a MarketplaceListing, spend seconds on the marketplace,
@@ -57,10 +58,22 @@
 // first — instead of leaving the others on their old, larger share until their
 // next farmSyncMinutes sync.
 //
+// ONE LISTING = ONE PACK (docs/bulk-packs/PACKS-2.md §1, §4)
+// A bulk listing is one item priced as a whole pack of N accounts, so what the
+// MARKET counts (quantity, units bought) is packs, while everything the loop
+// reserves, retires or releases is an account. The advertised quantity is
+// packsFor(free accounts, N) — utils/bulkPacks/packMath.js, the one place a pack
+// is converted; nothing here multiplies. Fewer than N free accounts is sold
+// out: a partial pack can never sell, so the leftovers go back (two-phase). A
+// farm offer's capacity share (accounts) is advertised as packs too, and a
+// no-claim offer is low on stock when its share cannot fill one pack.
+//
 // Nothing FREE (I2: no deliveredAt, messagedAt or orderId) is ever assumed sold,
 // and nothing that is not FREE is ever released or pulled.
 
 const { OPEN_STATES } = require("./config");
+// Pure (no I/O): the pack maths every bulk-pack module shares (PACKS-2 §1).
+const { packsFor, packSizeOf } = require("./packMath");
 
 const ACTOR = "bulkPacks";
 const FIRST_DELAY_MS = 120 * 1000;
@@ -103,6 +116,7 @@ const ROW_FIELDS = {
   status: 1,
   units: 1,
   bulkOfferId: 1,
+  bulkPackSize: 1,
   noclaimStock: 1,
   title: 1,
 };
@@ -232,10 +246,41 @@ function describe(offer) {
     label(offer && offer.market)
   );
 }
+// PACKS-2 §1: N, the accounts ONE unit bought on the market hands over. A
+// row-backed offer (dropset, no-claim) is sized by its tier (minQty, the pack
+// it was sent as) AND by its row (packMath.packSizeOf — what the fulfiller
+// multiplies by). The two are written equal at send; should they ever
+// disagree, the LARGER is used, so the packs advertised can never ask the
+// fulfiller for more accounts than the offer holds under either reading. A
+// farm offer has no row: its N is minQty.
+function packSize(offer, row) {
+  const m = Math.floor(Number(offer && offer.minQty));
+  const tier = Number.isFinite(m) && m >= 1 ? m : 1;
+  return row ? Math.max(tier, packSizeOf(row)) : tier;
+}
+
+// Every market sells a whole pack at the pack price (PACKS-2 §3); the
+// per-account figure rides along. An offer with no pack price recorded shows
+// its per-account price.
 function priceText(offer) {
-  return offer.market === "gameflip"
-    ? money(offer.packPrice) + " per pack of " + offer.minQty
-    : money(offer.unitPrice) + " each, min " + offer.minQty;
+  const n = packSize(offer, null);
+  const pack = Number(offer.packPrice) || 0;
+  const unit = Number(offer.unitPrice) || 0;
+  if (offer.market === "gameflip" || (pack > 0 && !(unit > 0)))
+    return money(pack) + " per pack of " + n;
+  if (pack > 0)
+    return money(pack) + " per pack of " + n + " (≈ " + money(unit) + " each)";
+  return money(unit) + " each, in packs of " + n;
+}
+
+// What the sales so far brought in: packs × the pack price (PACKS-2 §3). An
+// offer with no pack price recorded falls back to accounts × its per-account
+// price. Money only — the pack→account conversion is packMath's.
+function revenueOf(offer, packs, accounts) {
+  const pack = Number(offer.packPrice) || 0;
+  return pack > 0
+    ? round2(packs * pack)
+    : round2(accounts * (Number(offer.unitPrice) || 0));
 }
 
 // CONTRACT I2.
@@ -503,11 +548,21 @@ async function freshEntry(offer, accountId, state) {
 
 // Counters only ever grow ($max): a unit lost from the row by a concurrent save
 // must not un-count a sale, and a repeated pass must not re-announce one.
+// `s.units` is ACCOUNTS handed over; `s.packs` (with `s.packSize`) the whole
+// packs they make, which the revenue is counted from (PACKS-2 §3).
 async function countSales(offer, s, ctx, { revenue, quiet = false } = {}) {
   const orders = Math.max(0, Math.floor(Number(s.orders) || 0));
   const units = Math.max(0, Math.floor(Number(s.units) || 0));
+  const size = Math.floor(Number(s.packSize));
+  const n = Number.isFinite(size) && size >= 2 ? size : 0;
+  const packs =
+    s.packs == null ? null : Math.max(0, Math.floor(Number(s.packs) || 0));
   const rev = round2(
-    revenue != null ? revenue : units * (Number(offer.unitPrice) || 0),
+    revenue != null
+      ? revenue
+      : packs != null
+        ? revenueOf(offer, packs, units)
+        : units * (Number(offer.unitPrice) || 0),
   );
   const before = {
     orders: Number(offer.ordersCount) || 0,
@@ -518,6 +573,11 @@ async function countSales(offer, s, ctx, { revenue, quiet = false } = {}) {
     return;
   const dOrders = Math.max(0, orders - before.orders);
   const dUnits = Math.max(0, units - before.units);
+  // "(P pack(s) of N)" beside the accounts, for an offer sold in packs.
+  const packNote = (p) => (n ? " (" + p + " pack(s) of " + n + ")" : "");
+  const newPacks = n
+    ? "+" + Math.max(0, packsFor(units, n) - packsFor(before.units, n))
+    : "";
   const update = {
     $max: {
       ordersCount: orders,
@@ -530,7 +590,12 @@ async function countSales(offer, s, ctx, { revenue, quiet = false } = {}) {
     update.$push = {
       history: hist(
         "sale",
-        "+" + dOrders + " order(s), +" + dUnits + " account(s)",
+        "+" +
+          dOrders +
+          " order(s), +" +
+          dUnits +
+          " account(s)" +
+          packNote(newPacks),
         ctx.now,
       ),
     };
@@ -546,11 +611,15 @@ async function countSales(offer, s, ctx, { revenue, quiet = false } = {}) {
       dOrders +
       " order(s), +" +
       dUnits +
-      " account(s) — total " +
+      " account(s)" +
+      packNote(newPacks) +
+      " — total " +
       offer.ordersCount +
       " order(s), " +
       offer.unitsDelivered +
-      " account(s), " +
+      " account(s)" +
+      packNote(n ? packsFor(offer.unitsDelivered, n) : 0) +
+      ", " +
       money(offer.revenueUsd);
     audit(offer, "sale", "info", "bulk sale: " + text, { count: dUnits });
     if (!quiet)
@@ -1398,6 +1467,12 @@ function salesFromUnits(row, mode) {
   };
 }
 
+// The whole packs of N that the accounts counted in `s` make (PACKS-2 §3:
+// revenue is per pack).
+function withPacks(s, n) {
+  return { ...s, packs: packsFor(s.units, n), packSize: n };
+}
+
 async function missingRow(offer, ctx, job) {
   const now = ctx.now;
   if (!offer.open) {
@@ -1497,7 +1572,10 @@ async function missingRow(offer, ctx, job) {
   }
 }
 
-async function soldOut(offer, row, free, bad, ctx) {
+// Sold out (PACKS-2 §4): fewer than N good accounts left — a partial pack can
+// never sell. The offer is paused FIRST, then the leftovers go back through
+// phase 1 of I10.
+async function soldOut(offer, row, free, bad, ctx, n) {
   const good = free.length - bad.length;
   if (offer.state === "live") {
     // Throws on failure: nothing is retired while the offer may still sell.
@@ -1509,13 +1587,13 @@ async function soldOut(offer, row, free, bad, ctx) {
     offer,
     row,
     free.filter((u) => !badIds.has(u.accountId)).map((u) => u.accountId),
-    "sold out: " + good + " free < minimum " + offer.minQty,
+    "sold out: " + good + " free < one pack of " + n,
     { now: ctx.now },
   );
   const detail =
     good +
-    " free < minimum " +
-    offer.minQty +
+    " free < one pack of " +
+    n +
     "; " +
     free.length +
     " unit(s) retiring";
@@ -1536,8 +1614,8 @@ async function soldOut(offer, row, free, bad, ctx) {
         describe(offer) +
         "\n" +
         good +
-        " account(s) left, below the minimum order of " +
-        offer.minQty +
+        " account(s) left — less than one pack of " +
+        n +
         ". The offer is paused; " +
         free.length +
         " account(s) go back to stock" +
@@ -1607,9 +1685,9 @@ async function healthOf(ids, job) {
   return out;
 }
 
-// Keep the advertised quantity equal to what can be delivered. Shrinking is
-// safety and always runs; growing is selling more, so it needs bulk packs on
-// (I8) and the delivery gate open (I4).
+// Keep the advertised quantity — whole PACKS (PACKS-2 §4) — equal to what can
+// be delivered. Shrinking is safety and always runs; growing is selling more,
+// so it needs bulk packs on (I8) and the delivery gate open (I4).
 async function syncQuantity(offer, q, ctx) {
   const cur = Number(offer.advertisedQty) || 0;
   if (q === cur) return;
@@ -1624,9 +1702,13 @@ async function syncQuantity(offer, q, ctx) {
     { $set: { advertisedQty: q } },
   );
   offer.advertisedQty = q;
-  audit(offer, "quantity", "info", "advertised quantity " + cur + " -> " + q, {
-    count: q,
-  });
+  audit(
+    offer,
+    "quantity",
+    "info",
+    "advertised quantity " + cur + " -> " + q + " pack(s)",
+    { count: q },
+  );
 }
 
 async function expireAccountsOffer(offer, row, ctx) {
@@ -1823,7 +1905,9 @@ async function maintainDropsetRow(offer, ctx, job) {
   if (offer.market === "gameflip")
     return maintainGameflip(offer, cur, ctx, job);
 
-  await countSales(offer, salesFromUnits(cur, "dropset"), ctx);
+  // PACKS-2 §4: the market sells whole packs of n accounts.
+  const n = packSize(offer, cur);
+  await countSales(offer, withPacks(salesFromUnits(cur, "dropset"), n), ctx);
   // Closed: the reconcile above finished its retiring units and watched its
   // released ones; an on_offer entry left on a closed offer is HELD and only
   // the owner's release-held lets it go (FIXES-1 addendum).
@@ -1855,19 +1939,24 @@ async function maintainDropsetRow(offer, ctx, job) {
     )),
   ];
   const good = free.length - bad.length;
-  if (good < Number(offer.minQty)) return soldOut(offer, cur, free, bad, ctx);
+  // A partial pack can never sell: fewer than n good accounts is sold out, and
+  // the leftovers go back (PACKS-2 §4). Otherwise the market is offered the
+  // whole packs they make; any extra accounts stay on the row for the next
+  // pack (a refill completes it, or they go back once the offer sells out).
+  if (good < n) return soldOut(offer, cur, free, bad, ctx, n);
+  const packs = packsFor(good, n);
   if (bad.length) {
     // Shrink what is advertised BEFORE the units leave the row (I10 phase 1).
-    if (offer.state === "live" && Number(offer.advertisedQty) > good) {
-      await deps.markets.setQuantity(offer.market, offer.externalId, good);
+    if (offer.state === "live" && Number(offer.advertisedQty) > packs) {
+      await deps.markets.setQuantity(offer.market, offer.externalId, packs);
       await deps.BulkOffer.updateOne(
         { _id: offer._id },
-        { $set: { advertisedQty: good } },
+        { $set: { advertisedQty: packs } },
       );
-      offer.advertisedQty = good;
+      offer.advertisedQty = packs;
     }
-    const n = await retireBad(offer, cur, bad, ctx);
-    if (n) {
+    const retired = await retireBad(offer, cur, bad, ctx);
+    if (retired) {
       const list = bad.map(
         (b) =>
           (free.find((u) => u.accountId === b.accountId) || {}).login +
@@ -1879,24 +1968,28 @@ async function maintainDropsetRow(offer, ctx, job) {
         offer,
         "integrity_retired",
         "warn",
-        n + " unhealthy unit(s) retired: " + list.join(", "),
-        { count: n },
+        retired + " unhealthy unit(s) retired: " + list.join(", "),
+        { count: retired },
       );
       notify(
         "Bulk offer integrity: " +
           describe(offer) +
           "\n" +
-          n +
+          retired +
           " account(s) taken off the offer: " +
           list.slice(0, 10).join(", ") +
           ". " +
           good +
-          " still on sale.",
+          " still on sale (" +
+          packs +
+          " pack(s) of " +
+          n +
+          ").",
       );
     }
     return;
   }
-  if (offer.state === "live") await syncQuantity(offer, good, ctx);
+  if (offer.state === "live") await syncQuantity(offer, packs, ctx);
 }
 
 async function maintainGameflip(offer, row, ctx, job) {
@@ -2105,14 +2198,17 @@ async function maintainNoclaim(offer, ctx, job) {
   if (!row) return missingRow(offer, ctx, job);
   await clearFlag(offer, "row");
   job.patch.lastSyncAt = ctx.now;
-  await countSales(offer, salesFromUnits(row, "noclaim"), ctx);
+  const n = packSize(offer, row);
+  await countSales(offer, withPacks(salesFromUnits(row, "noclaim"), n), ctx);
   if (!offer.open) return;
   if (row.status !== "active") return closeForRow(offer, row, ctx);
-  // Display only (MODULES §loop): the existing no-claim syncs own the quantity.
+  // Display only (MODULES §loop): the existing no-claim syncs own the quantity
+  // (they advertise packsFor(share, N) themselves, PACKS-2 §2). Low stock =
+  // the shelf share (accounts) cannot fill one whole pack (PACKS-2 §4).
   try {
     const share = Number(await deps.noclaimStock.stockForListing(row));
     if (Number.isFinite(share)) {
-      const low = share < Number(offer.minQty);
+      const low = packsFor(share, n) < 1;
       if (low !== !!offer.lowStock) job.patch.lowStock = low;
     }
   } catch {
@@ -2189,8 +2285,12 @@ async function farmShare(offer, cap, ctx, job) {
   return { share: Math.min(share, available), available, sharers: ids.length };
 }
 
-function capacityText(cap, q, sh) {
-  if (!cap) return "capacity for " + q;
+// `sh.share` is ACCOUNTS (bot slots + pristine pool); the market is offered
+// the whole packs of n they make (PACKS-2 §4).
+function capacityText(cap, sh, n) {
+  const accounts = sh ? sh.share : 0;
+  const packs = " account(s) = " + packsFor(accounts, n) + " pack(s) of " + n;
+  if (!cap) return "capacity for " + accounts + packs;
   if (cap.error) return "capacity unreadable (" + cap.error + ")";
   const shared =
     sh && sh.sharers > 1
@@ -2202,7 +2302,8 @@ function capacityText(cap, q, sh) {
       : "";
   return (
     "capacity for " +
-    q +
+    accounts +
+    packs +
     shared +
     " (best stack room " +
     (Number(cap.bestStackRoom) || 0) +
@@ -2239,11 +2340,21 @@ async function countFarmSales(offer, ctx) {
     .sort({ createdAt: -1 })
     .limit(FARM_ORDER_LIMIT)
     .lean();
+  const n = packSize(offer, null);
   let units = 0;
+  let packs = 0;
   let last = null;
   for (const r of rows) {
+    // The ACCOUNTS this order takes. On a bulk offer the farm services
+    // provision purchaseQuantity × minQty (PACKS-2 §2) and list each account
+    // handed over in `accounts`; the larger of `quantity` and that list is the
+    // order's size whichever of the two the row carries yet, so a row that
+    // records the units bought is still counted in full once provisioned.
     const q = Math.floor(Number(r.quantity));
-    units += q >= 1 ? q : Math.max(1, ((r && r.accounts) || []).length);
+    const listed = ((r && r.accounts) || []).length;
+    const accounts = Math.max(q >= 1 ? q : 0, listed, 1);
+    units += accounts;
+    packs += packsFor(accounts, n);
     const t = ms(r.createdAt);
     if (t != null && (last == null || t > last)) last = t;
   }
@@ -2252,6 +2363,8 @@ async function countFarmSales(offer, ctx) {
     {
       orders: rows.length,
       units,
+      packs,
+      packSize: n,
       lastOrderAt: last == null ? null : new Date(last),
     },
     ctx,
@@ -2302,20 +2415,23 @@ async function syncFarm(offer, ctx, job, { shrinkOnly = false } = {}) {
   }
   const sh = await farmShare(offer, cap, ctx, job);
   if (!sh) return;
-  // S1: this offer's share, never the whole of `available`.
-  const q = sh.share;
-  const minQty = Number(offer.minQty);
+  // S1: this offer's share, never the whole of `available` — ACCOUNTS. The
+  // market sells whole packs of n (PACKS-2 §4): q packs, and a share that
+  // cannot fill one pack pauses the offer.
+  const n = packSize(offer, null);
+  const q = packsFor(sh.share, n);
   if (
     shrinkOnly &&
     !(
       offer.state === "live" &&
-      (q < minQty || q < (Number(offer.advertisedQty) || 0))
+      (q < 1 || q < (Number(offer.advertisedQty) || 0))
     )
   ) {
     return;
   }
   job.patch.lastSyncAt = ctx.now;
-  if (offer.state === "live" && q < minQty) {
+  const short = " — less than one pack of " + n;
+  if (offer.state === "live" && q < 1) {
     await deps.markets.pause(offer.market, offer.externalId);
     // This pass took it off sale itself: a market read right behind the pause
     // that still says "active" is lag, not a relist (FIXES-2 V3).
@@ -2325,7 +2441,7 @@ async function syncFarm(offer, ctx, job, { shrinkOnly = false } = {}) {
         from: ["live"],
         set: { autoPaused: true },
         now: ctx.now,
-        detail: capacityText(cap, q, sh) + " < minimum " + minQty,
+        detail: capacityText(cap, sh, n) + short,
       })
     ) {
       ctx.changed = true;
@@ -2333,25 +2449,20 @@ async function syncFarm(offer, ctx, job, { shrinkOnly = false } = {}) {
         offer,
         "paused",
         "warn",
-        "auto-paused: " + capacityText(cap, q, sh) + " < minimum " + minQty,
-        { count: q },
+        "auto-paused: " + capacityText(cap, sh, n) + short,
+        { count: sh.share },
       );
       notify(
         "Bulk farming offer paused: " +
           describe(offer) +
           "\n" +
-          capacityText(cap, q, sh) +
-          ", below the minimum order of " +
-          minQty +
+          capacityText(cap, sh, n) +
+          short +
           ". It resumes by itself once capacity returns" +
           (ctx.bp.enabled === true ? "." : " and bulk packs are switched on."),
       );
     }
-  } else if (
-    offer.state === "paused" &&
-    offer.autoPaused === true &&
-    q >= minQty
-  ) {
+  } else if (offer.state === "paused" && offer.autoPaused === true && q >= 1) {
     // Only an offer the loop paused itself, never while switched off (I8),
     // never with the delivery gate shut (I4).
     if (
@@ -2375,7 +2486,7 @@ async function syncFarm(offer, ctx, job, { shrinkOnly = false } = {}) {
           from: ["paused"],
           set: { autoPaused: false },
           now: ctx.now,
-          detail: capacityText(cap, q, sh),
+          detail: capacityText(cap, sh, n),
         })
       ) {
         ctx.changed = true;
@@ -2383,14 +2494,14 @@ async function syncFarm(offer, ctx, job, { shrinkOnly = false } = {}) {
           offer,
           "resumed",
           "info",
-          "auto-resumed: " + capacityText(cap, q, sh),
-          { count: q },
+          "auto-resumed: " + capacityText(cap, sh, n),
+          { count: sh.share },
         );
         notify(
           "Bulk farming offer resumed: " +
             describe(offer) +
             "\n" +
-            capacityText(cap, q, sh) +
+            capacityText(cap, sh, n) +
             ".",
         );
       }
@@ -3043,10 +3154,12 @@ async function takeAccountOutLocked({ row, accountId, login, reason }) {
 // offer can still sell afterwards is its on_offer entries' FREE units, less
 // the leaving account and any other the owner took out (keepReserved — they
 // leave on the next pass; a retiring unit back on the row is not stock
-// either). At or above the minimum a live offer's quantity comes down to that
-// (never up: growing is the pass's, behind I4/I8); below it the offer is
-// paused (live -> paused, autoPaused false) and the next pass closes it sold
-// out. Returns "" or the market call's error text — never throws.
+// either). The market counts whole PACKS of n (PACKS-2 §4): while they still
+// fill one, a live offer's quantity comes down to packsFor(freeAfter, n)
+// (never up: growing is the pass's, behind I4/I8); with not even one pack left
+// the offer is paused (live -> paused, autoPaused false) and the next pass
+// closes it sold out. Returns "" or the market call's error text — never
+// throws.
 async function lowerForTakeOut(offer, row, accountId, name, ctx) {
   if (offer.state !== "live") return "";
   const leaving = new Set(
@@ -3058,17 +3171,18 @@ async function lowerForTakeOut(offer, row, accountId, name, ctx) {
   const free = freeOnOffer(offer, row).filter(
     (u) => !leaving.has(u.accountId),
   ).length;
-  const minQty = Number(offer.minQty) || 1;
+  const n = packSize(offer, row);
+  const packs = packsFor(free, n);
   try {
-    if (free >= minQty) {
+    if (packs >= 1) {
       const advertised = Number(offer.advertisedQty) || 0;
-      if (advertised > 0 && free >= advertised) return "";
-      await deps.markets.setQuantity(offer.market, offer.externalId, free);
+      if (advertised > 0 && packs >= advertised) return "";
+      await deps.markets.setQuantity(offer.market, offer.externalId, packs);
       await deps.BulkOffer.updateOne(
         { _id: offer._id },
-        { $set: { advertisedQty: free } },
+        { $set: { advertisedQty: packs } },
       );
-      offer.advertisedQty = free;
+      offer.advertisedQty = packs;
       return "";
     }
     const detail = "below the minimum after an owner take-out";
@@ -3078,7 +3192,7 @@ async function lowerForTakeOut(offer, row, accountId, name, ctx) {
         from: ["live"],
         set: { autoPaused: false },
         now: ctx.now,
-        detail: free + " free < minimum " + minQty + " — " + detail,
+        detail: free + " free < one pack of " + n + " — " + detail,
       })
     ) {
       audit(offer, "paused", "warn", "paused: " + detail, { count: free });
@@ -3089,10 +3203,8 @@ async function lowerForTakeOut(offer, row, accountId, name, ctx) {
           name +
           " was taken out by the owner; " +
           free +
-          " account(s) left, " +
-          detail +
-          " of " +
-          minQty +
+          " account(s) left — less than one pack of " +
+          n +
           ". The next check closes it as sold out.",
       );
     }

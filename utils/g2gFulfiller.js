@@ -32,10 +32,32 @@ const mp = require("./marketplaces");
 const chat = require("./g2gChat");
 const eld = require("./eldoradoFulfiller");
 const farmService = require("./g2gFarmService");
+const { packSizeOf, accountsForUnits, packsFor } = require("./bulkPacks/packMath");
 
 // Distinct from every other platform's tag so one account can never be handed
 // out twice across marketplaces. Must be listed in utils/marketClaimTags.js.
 const G2G_CLAIM_TAG = "g2g";
+
+// Bulk packs v2 (docs/bulk-packs/PACKS-2.md §1-§2). A bulk pack row is ONE
+// item priced as a whole pack: G2G counts PACKS (purchased_qty, delivered_qty,
+// the offer's quantity) and we hand over and reserve ACCOUNTS — a pack of 5
+// delivered is delivered_qty 1. The conversion goes through
+// utils/bulkPacks/packMath and nowhere else. Every other row is not a pack, and
+// both helpers hand its own count back untouched, so an ordinary listing takes
+// exactly the path it took before packs existed.
+//
+// Accounts one order of `qty` units takes off this row.
+function accountsForOrder(listing, qty) {
+  return packSizeOf(listing) > 1 ? accountsForUnits(listing, qty) : qty;
+}
+
+// The count G2G is told for `accounts` accounts: whole packs on a bulk pack
+// row, the count itself on every other row. Also what a bulk row may
+// advertise — a partial pack can never sell.
+function unitsFor(listing, accounts) {
+  const n = packSizeOf(listing);
+  return n > 1 ? packsFor(accounts, n) : accounts;
+}
 
 const DELIVER_TICK_MS = 60 * 1000;
 const STOCK_TICK_MS = 15 * 60 * 1000;
@@ -172,10 +194,17 @@ async function markNoclaimSold(listing, order, units) {
     const qty = Math.max(1, order.purchasedQty || 1);
     // The order's own total when G2G states it in dollars, else the row's price.
     const usd = String(order.currency || "USD").toUpperCase() === "USD";
+    // Each ledger row is ONE account. On a bulk pack row one unit is a pack of
+    // N accounts (docs/bulk-packs/PACKS-2.md): the total is spread over every
+    // account, and the row's price — one PACK's price — over the pack's N, so
+    // a pack sale never books N times its money. Ordinary rows: as before.
+    const n = packSizeOf(listing);
     const priceUsd =
       usd && Number(order.amount) > 0
-        ? Math.round((Number(order.amount) / qty) * 100) / 100
-        : Number(listing.price) || 0;
+        ? Math.round((Number(order.amount) / accountsForOrder(listing, qty)) * 100) / 100
+        : n > 1
+          ? Math.round(((Number(listing.price) || 0) / n) * 100) / 100
+          : Number(listing.price) || 0;
     await require("./noclaimStock").markSold(ids, {
       market: G2G_CLAIM_TAG,
       priceUsd,
@@ -196,7 +225,14 @@ async function markNoclaimSold(listing, order, units) {
 // failed delivery and must never read as one: thrown as an error, it paged "the
 // bot cannot ship it — needs delivering by hand" about a buyer who already had
 // the account, which invites a second account going out.
-async function confirmOnG2g(listing, orderId, n, source) {
+//
+// `n` is the ACCOUNTS this order was handed. What G2G is told — and what the
+// result reports — is in G2G's own units: the same number on an ordinary row,
+// whole packs on a bulk pack row (docs/bulk-packs/PACKS-2.md §2), so every
+// caller, the first send and the resume paths alike, reports packs and never
+// accounts.
+async function confirmOnG2g(listing, orderId, accounts, source) {
+  const n = unitsFor(listing, accounts);
   try {
     await mp.g2gSetDeliveredQty(orderId, n);
   } catch (e) {
@@ -239,6 +275,18 @@ function buildMessage(order, blocks) {
 // account missing half the advertised items is a dispute.
 async function pickStock(listing, order, { dryRun }) {
   const qty = Math.max(1, order.purchasedQty || 1);
+  // A bulk pack row hands over whole packs: `qty` packs are qty × N accounts
+  // (docs/bulk-packs/PACKS-2.md §2). Every other row: `qty` itself. A pack
+  // order whose quantity cannot be read is refused — it can never come out as
+  // "no accounts at all" and ship an empty hand-over.
+  const want = accountsForOrder(listing, qty);
+  if (packSizeOf(listing) > 1 && !(want >= 1)) {
+    return {
+      error:
+        "bulk pack: could not read how many packs this order bought (" +
+        String(order.purchasedQty) + ")",
+    };
+  }
 
   // No-claim Shop listings (docs/NOCLAIM-SHOP-LISTINGS-CONTRACT.md §8c) come
   // FIRST. Such a row keeps its `set`, so further down it would fall into the
@@ -257,7 +305,7 @@ async function pickStock(listing, order, { dryRun }) {
     const DropSet = require("../models/DropSet");
     const set = listing.set ? await DropSet.findById(listing.set).lean() : null;
     if (!set) return { error: "listing's DropSet is missing" };
-    const picked = await ncs.claimForSet(set, qty, {
+    const picked = await ncs.claimForSet(set, want, {
       market: G2G_CLAIM_TAG,
       listingId: String(listing._id),
       orderId: String(order.orderItemId || ""),
@@ -268,19 +316,21 @@ async function pickStock(listing, order, { dryRun }) {
     if (dryRun) {
       // No note on a full pick, so the rehearsal names the accounts it would send.
       const note =
-        picked.length < qty
-          ? "only " + picked.length + " of " + qty +
+        picked.length < want
+          ? "only " + picked.length + " of " + want +
             " free no-claim account(s) hold this bundle"
           : "";
       return { picked, source, note };
     }
-    if (picked.length < qty) {
+    if (picked.length < want) {
       // Never a short shipment. A "sold" claim cannot be handed back, so what
       // was taken stays sold to THIS order: the next tick's resume returns it
-      // and only tops up the difference.
+      // and only tops up the difference. A bulk pack short of whole packs is
+      // named as one (FIXES-1 L5); any error pages on G2G.
       return {
         error:
-          "only " + picked.length + " of " + qty + " no-claim account(s) " +
+          (listing.bulkOfferId ? "bulk pack short: " : "") +
+          "only " + picked.length + " of " + want + " no-claim account(s) " +
           "claimed — no free no-claim account holds all " +
           ((listing.requiredDrops || []).length || (set.items || []).length) +
           " advertised item(s)",
@@ -388,10 +438,11 @@ async function pickStock(listing, order, { dryRun }) {
     return { picked, source: "supplied" };
   }
 
-  // Pre-reserved units (the shape publishG2gShare creates).
+  // Pre-reserved units (the shape publishG2gShare creates). A bulk pack row
+  // takes exactly its packs' accounts, never one more.
   const free = undeliveredUnits(listing).filter((u) => !u.orderId);
-  if (free.length >= qty) {
-    return { picked: free.slice(0, qty), source: "units", fromUnits: true };
+  if (free.length >= want) {
+    return { picked: free.slice(0, want), source: "units", fromUnits: true };
   }
   return null; // no stock source at all -> caller decides (manual listing)
 }
@@ -408,6 +459,18 @@ async function deliverOrder(order, { dryRun }) {
   });
   if (!listing) {
     return { orderId, skipped: "no listing row for offer " + offerId };
+  }
+
+  // A bulk pack row must know its pack size (docs/bulk-packs/PACKS-2.md §1):
+  // without it this order would be read as single accounts and a pack buyer
+  // short-changed. Refuse (G2G errors page) — deliver it by hand.
+  if (listing.bulkOfferId && packSizeOf(listing) < 2) {
+    return {
+      orderId,
+      error:
+        "bulk pack short: this bulk listing has no pack size recorded — " +
+        "nothing was sent; deliver it by hand",
+    };
   }
 
   // Idempotence. Units already carrying this order mean stock is spent on it,
@@ -434,7 +497,22 @@ async function deliverOrder(order, { dryRun }) {
       await listing.save();
       await markSuppliedDelivered(listing, orderId);
       await markNoclaimSold(listing, order, byHand);
-      return { orderId, delivered: mine.length, source: "confirmed-on-g2g" };
+      // In G2G's units: whole packs on a bulk pack row (PACKS-2 §2).
+      return { orderId, delivered: unitsFor(listing, mine.length), source: "confirmed-on-g2g" };
+    }
+    // A bulk pack row reserves an order's whole packs at once (PACKS-2 §2), so
+    // fewer accounts than that under this order id is a short pack: it is never
+    // re-sent or confirmed as if it were whole — it pages, and a human checks
+    // the order. Unreachable through the paths that reserve (they take every
+    // account the order needs, or none); a guard, not a flow.
+    if (packSizeOf(listing) > 1 && mine.length < accountsForOrder(listing, qty)) {
+      return {
+        orderId,
+        error:
+          "bulk pack short: only " + mine.length + " of " +
+          accountsForOrder(listing, qty) + " account(s) are reserved for this " +
+          "order — nothing re-sent or confirmed; check the order by hand",
+      };
     }
     if (mine.every((u) => u.messagedAt)) {
       // The credential really reached the buyer (only the chat send stamps
@@ -531,6 +609,9 @@ async function deliverOrder(order, { dryRun }) {
     };
   }
 
+  // The accounts this order takes: `qty` on an ordinary row, qty × N on a bulk
+  // pack row (PACKS-2 §2). G2G itself is only ever told units (confirmOnG2g).
+  const want = accountsForOrder(listing, qty);
   const stock = await pickStock(listing, order, { dryRun });
   if (stock === null) {
     // A bulk pack row (docs/bulk-packs/FIXES-1.md L5) is never a hand-filled
@@ -542,7 +623,7 @@ async function deliverOrder(order, { dryRun }) {
         error:
           "bulk pack short: not enough reserved stock (" +
           undeliveredUnits(listing).filter((u) => !u.orderId).length +
-          " of " + qty + ") — restock the offer, then this order will " +
+          " of " + want + ") — restock the offer, then this order will " +
           "deliver on the next tick",
       };
     }
@@ -565,7 +646,7 @@ async function deliverOrder(order, { dryRun }) {
       source: stock.source,
       wouldSend:
         stock.note ||
-        qty + " account(s) [" + picked.map((p) => p.login).join(", ") + "]",
+        want + " account(s) [" + picked.map((p) => p.login).join(", ") + "]",
     };
   }
 
@@ -587,7 +668,7 @@ async function deliverOrder(order, { dryRun }) {
     return {
       orderId,
       error:
-        "bulk pack: " + unreadable.length + " of " + qty +
+        "bulk pack: " + unreadable.length + " of " + want +
         " account(s) had no readable password — not shipped, left for the " +
         "bulk check to retire",
     };
@@ -722,7 +803,8 @@ async function deliverOrder(order, { dryRun }) {
   await listing.save();
   await markNoclaimSold(listing, order, unitsForOrder(listing, orderId));
 
-  return confirmOnG2g(listing, orderId, qty, stock.source);
+  // `want` accounts went out; confirmOnG2g tells G2G the units (packs).
+  return confirmOnG2g(listing, orderId, want, stock.source);
 }
 
 // The shape every caller of credentialsFor consumes: the four fields pickStock
@@ -1183,6 +1265,11 @@ async function syncStock() {
     // minimum order nothing can be bought, so it counts as empty and is
     // delisted like one; and a bulk offer that is not "live" (owner pause,
     // closed, held) is never relisted from here. A failed read skips the row.
+    //
+    // A v2 pack row (bulkPackSize >= 2, docs/bulk-packs/PACKS-2.md §2) is sold
+    // one PACK per unit: it advertises the whole packs its accounts fill, and
+    // 0 packs delists it exactly like an empty shelf. That replaces the minimum
+    // rule above for such a row.
     let bulkLive = true;
     if (row.bulkOfferId) {
       let bulk = null;
@@ -1193,7 +1280,8 @@ async function syncStock() {
       } catch {
         continue;
       }
-      if (bulk && real < (Number(bulk.minQty) || 0)) real = 0;
+      if (packSizeOf(row) > 1) real = unitsFor(row, real);
+      else if (bulk && real < (Number(bulk.minQty) || 0)) real = 0;
       if (bulk && bulk.state !== "live") bulkLive = false;
     }
     if (dryRun) {

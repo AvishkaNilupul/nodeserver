@@ -248,19 +248,19 @@ beforeEach(async () => {
 test("L5 eldorado: a bulk row short of free units — or with none left — is a paging error; ordinary rows unchanged", async () => {
   const offer = await insertOffer({});
   const five = [1, 2, 3, 4, 5].map((i) => unit(oid(), "short" + i));
-  await insertRow({ marketplace: "eldorado", externalId: "eld-bulk-short", bulkOfferId: offer, units: five });
-  // The reviewers' repro (F-E): the buyer pays for 6, one account was taken out.
+  await insertRow({ marketplace: "eldorado", externalId: "eld-bulk-short", bulkOfferId: offer, bulkPackSize: 5, units: five });
+  // The reviewers' repro (F-E), in packs (PACKS-2): 2 packs of 5 paid, 5 accounts left.
   const r = await eldorado.deliverOrder(
-    { id: "l5-e1", offerId: "eld-bulk-short", purchaseQuantity: 6 },
+    { id: "l5-e1", offerId: "eld-bulk-short", purchaseQuantity: 2 },
     { dryRun: false },
   );
-  assert.match(String(r.error), /^bulk pack short: not enough reserved stock \(5 of 6\)/);
+  assert.match(String(r.error), /^bulk pack short: not enough reserved stock \(5 of 10\)/);
   assert.equal(eldorado.alertsOperator(r.error), true, "a short bulk pack pages the owner");
 
   // Every unit pulled (a withdraw with no sales): still a paid order short of stock.
-  await insertRow({ marketplace: "eldorado", externalId: "eld-bulk-empty", bulkOfferId: offer, units: [] });
+  await insertRow({ marketplace: "eldorado", externalId: "eld-bulk-empty", bulkOfferId: offer, bulkPackSize: 5, units: [] });
   const z = await eldorado.deliverOrder(
-    { id: "l5-e2", offerId: "eld-bulk-empty", purchaseQuantity: 5 },
+    { id: "l5-e2", offerId: "eld-bulk-empty", purchaseQuantity: 1 },
     { dryRun: false },
   );
   assert.equal(z.skipped, undefined, "never the silent manual-delivery skip");
@@ -318,17 +318,17 @@ test("L5 eldorado: the paid-order tick pages the owner once for a short bulk pac
 // ------------------------------------------------------------------ L5 g2g --
 
 test("L5 g2g: a bulk row with too few free units is an alerting error, not the silent manual-delivery skip", async () => {
-  await insertRow({ marketplace: "g2g", externalId: "g2g-bulk-short", bulkOfferId: oid(), units: [unit(oid(), "g1")] });
+  await insertRow({ marketplace: "g2g", externalId: "g2g-bulk-short", bulkOfferId: oid(), bulkPackSize: 5, units: [unit(oid(), "g1")] });
   const r = await g2g.deliverOrder(
-    { orderItemId: "l5-g1", offerId: "g2g-bulk-short", purchasedQty: 5 },
+    { orderItemId: "l5-g1", offerId: "g2g-bulk-short", purchasedQty: 1 },
     { dryRun: false },
   );
   assert.equal(r.skipped, undefined);
   assert.match(String(r.error), /^bulk pack short: not enough reserved stock \(1 of 5\)/);
 
-  await insertRow({ marketplace: "g2g", externalId: "g2g-bulk-empty", bulkOfferId: oid(), units: [] });
+  await insertRow({ marketplace: "g2g", externalId: "g2g-bulk-empty", bulkOfferId: oid(), bulkPackSize: 5, units: [] });
   const z = await g2g.deliverOrder(
-    { orderItemId: "l5-g2", offerId: "g2g-bulk-empty", purchasedQty: 5 },
+    { orderItemId: "l5-g2", offerId: "g2g-bulk-empty", purchasedQty: 1 },
     { dryRun: false },
   );
   assert.match(String(z.error), /^bulk pack short: not enough reserved stock \(0 of 5\)/);
@@ -386,18 +386,27 @@ test("R3-5 g2g: an unreadable password on a bulk row releases nothing tag-wide a
     ]);
   };
   await reserved();
+  const accId2 = oid();
+  await BotAccount.collection.insertOne({
+    _id: accId2,
+    clientSecret: "cs-r35b",
+    login: "nopw2",
+    credUsername: "nopw2",
+    hasPassword: false,
+  });
   await insertRow({
     marketplace: "g2g",
     externalId: "g2g-bulk-nopw",
     bulkOfferId: oid(),
+    bulkPackSize: 2,
     set: bulkSet,
-    units: [unit(accId, "nopw1")],
+    units: [unit(accId, "nopw1"), unit(accId2, "nopw2")],
   });
   const r = await g2g.deliverOrder(
     { orderItemId: "r35-1", offerId: "g2g-bulk-nopw", purchasedQty: 1 },
     { dryRun: false },
   );
-  assert.match(String(r.error), /^bulk pack: 1 of 1 account\(s\) had no readable password/);
+  assert.match(String(r.error), /^bulk pack: 2 of 2 account\(s\) had no readable password/);
   let logs = await DropLog.collection.find({ account: accId }).toArray();
   assert.equal(logs.length, 2);
   for (const l of logs) {
@@ -405,7 +414,7 @@ test("R3-5 g2g: an unreadable password on a bulk row releases nothing tag-wide a
     assert.equal(l.soldToUsername, "g2g");
   }
   const row = await rowBy("g2g-bulk-nopw");
-  assert.equal(row.units.length, 1, "the unit stays for the bulk loop's health check");
+  assert.equal(row.units.length, 2, "the units stay for the bulk loop's health check");
   assert.equal(row.units[0].orderId, "");
   assert.equal(count("g2gStartDeliver") + count("g2gMarkDelivering"), 0);
 

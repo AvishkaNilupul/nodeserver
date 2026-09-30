@@ -8,9 +8,12 @@
 // proving no real connector, model or settings module was ever loaded.
 //
 // The rules under test are the ones that cost money when they break:
-//   1. Unit semantics: Eldorado/G2G quantity = accounts, the tier is the
-//      minimum order; a Gameflip pack is ONE listing whose code holds exactly
-//      `minQty` accounts, divided by PACK_SEPARATOR.
+//   1. Unit semantics (PACKS-2 §1): one listing unit = one PACK of N (the
+//      tier's minQty) accounts, priced whole. Eldorado/G2G quantity = packs,
+//      minimum order 1, price = the pack price; the title must say
+//      "PACK OF N" and a pack price that reads like one account's is refused.
+//      A Gameflip pack is ONE listing whose code holds exactly N accounts,
+//      divided by PACK_SEPARATOR.
 //   2. Refusals happen before any marketplace call (closed gate, blocked
 //      market, farm-looking account title, short/duplicate units, unreadable
 //      password, code over GAMEFLIP_CODE_MAX).
@@ -120,7 +123,8 @@ function setup(over = {}) {
     gate: { ok: true, reason: "" },
     gateCalls: [],
     accounts: new Map(),
-    rowQty: 20,
+    // What the no-claim layer's row says it advertises (packs).
+    rowQty: 4,
   };
   env.deps = {
     mp: env.mp,
@@ -222,20 +226,23 @@ const SET = {
   coverGame: "Rust",
   items: [{ name: "Hoodie", game: "Rust", image: "/drop-images/hoodie.png", qty: 1 }],
 };
-const ACC_TITLE = "Rust Twitch Drops bundle — BULK 5+ accounts (5% off)";
+// PACKS-2 §3: every market's title says what the listing is.
+const ACC_TITLE = "Rust Twitch Drops bundle — PACK OF 5 ACCOUNTS (-5%)";
 const PACK_TITLE = "Rust Twitch Drops bundle — PACK OF 5 ACCOUNTS";
+const ACC_DESC = "PACK OF 5 ACCOUNTS — each purchase is a pack of 5 separate accounts.";
 
+// Two whole packs of 5 at $5.94 a pack ($1.19 each).
 function accountArgs(over = {}) {
   return {
     market: "eldorado",
     set: SET,
     game: "Rust",
     title: ACC_TITLE,
-    description: "Each account holds the whole bundle. Minimum order 5 accounts.",
+    description: ACC_DESC,
     unitPrice: 1.19,
-    packPrice: 0,
+    packPrice: 5.94,
     minQty: 5,
-    units: units(7),
+    units: units(10),
     coverPath: "/tmp/grid.png",
     ...over,
   };
@@ -248,31 +255,38 @@ test("constants: the separator and the Gameflip code cap", () => {
   assert.strictEqual(markets.GAMEFLIP_CODE_MAX, 10000);
 });
 
-test("eldorado account pack: quantity = accounts, minQuantity = tier, autoLister's shape", async () => {
+test("eldorado account pack: quantity = PACKS, minQuantity 1, price = the pack, autoLister's shape", async () => {
   const env = setup();
   const r = await markets.publishAccounts(accountArgs());
-  assert.deepStrictEqual(r, { externalId: "eld-1", url: "https://eld/eld-1", price: 1.19 });
+  assert.deepStrictEqual(r, { externalId: "eld-1", url: "https://eld/eld-1", price: 5.94 });
   assert.strictEqual(env.mp.eldoradoPublish.calls.length, 1);
   assert.deepStrictEqual(env.mp.eldoradoPublish.calls[0][0], {
     game: "Rust",
     title: ACC_TITLE,
-    description: "Each account holds the whole bundle. Minimum order 5 accounts.",
-    priceUsd: 1.19,
-    quantity: 7,
-    minQuantity: 5,
+    description: ACC_DESC,
+    priceUsd: 5.94,
+    quantity: 2, // 10 accounts = 2 packs of 5
+    minQuantity: 1,
     coverImagePath: "/tmp/grid.png",
   });
   assert.deepStrictEqual(env.gateCalls, [["eldorado", "dropset"]]);
   assert.strictEqual(callCount(env.mp), 1, "exactly one marketplace call");
+  // One pack.
+  await markets.publishAccounts(accountArgs({ units: units(5) }));
+  assert.strictEqual(env.mp.eldoradoPublish.calls[1][0].quantity, 1);
+  assert.strictEqual(env.mp.eldoradoPublish.calls[1][0].minQuantity, 1);
 });
 
-test("eldorado: the price Eldorado really charges is recorded ($0.50 floor, cents)", async () => {
+test("eldorado: the price Eldorado really charges for a pack is recorded ($0.50 floor, cents)", async () => {
   const env = setup();
-  const low = await markets.publishAccounts(accountArgs({ unitPrice: 0.3 }));
+  const low = await markets.publishAccounts(accountArgs({ packPrice: 0.3, unitPrice: 0.06 }));
   assert.strictEqual(low.price, 0.5);
   assert.strictEqual(env.mp.eldoradoPublish.calls[0][0].priceUsd, 0.5);
-  const odd = await markets.publishAccounts(accountArgs({ unitPrice: 1.234 }));
-  assert.strictEqual(odd.price, 1.23);
+  const odd = await markets.publishAccounts(accountArgs({ packPrice: 6.234, unitPrice: 1.25 }));
+  assert.strictEqual(odd.price, 6.23);
+  // No per-account figure given: the pack price alone decides.
+  const bare = await markets.publishAccounts(accountArgs({ unitPrice: undefined }));
+  assert.strictEqual(bare.price, 5.94);
 });
 
 test("eldorado: no grid cover falls back to the Listings route's default cover", async () => {
@@ -296,22 +310,54 @@ test("eldorado: an accepted publish with no offer id is an error, not a row-less
   assert.strictEqual(env.mp.eldoradoPublish.calls.length, 1);
 });
 
-test("g2g account pack: hand-checked brand, $1 floor, qty = accounts, minQty = tier", async () => {
+test("g2g account pack: hand-checked brand, $1 floor per listing, qty = PACKS, minQty 1", async () => {
   const env = setup();
   const r = await markets.publishAccounts(
-    accountArgs({ market: "g2g", unitPrice: 0.8, units: units(6) }),
+    accountArgs({ market: "g2g", packPrice: 0.8, unitPrice: 0.16, units: units(15) }),
   );
   assert.deepStrictEqual(r, { externalId: "g2g-1", url: "https://g2g/g2g-1", price: 1 });
   assert.deepStrictEqual(env.mp.g2gPublish.calls[0][0], {
     serviceId: "svc-game-items",
     brandId: "brand-rust",
     title: ACC_TITLE,
-    description: "Each account holds the whole bundle. Minimum order 5 accounts.",
+    description: ACC_DESC,
     priceUsd: 1,
-    qty: 6,
-    minQty: 5,
+    qty: 3,
+    minQty: 1,
   });
   assert.deepStrictEqual(env.gateCalls, [["g2g", "dropset"]]);
+});
+
+test("account packs: a partial pack, a title without the pack, or a per-account price as the pack price is refused", async () => {
+  for (const market of ["eldorado", "g2g"]) {
+    for (const [name, over, re] of [
+      ["7 accounts are not whole packs of 5", { units: units(7) }, /7 accounts do not make whole packs of 5/],
+      ["11 accounts are not whole packs of 5", { units: units(11) }, /whole packs of 5/],
+      ["a v1 title", { title: "Rust Twitch Drops bundle — BULK 5+ accounts (5% off)" }, /must say "PACK OF 5"/],
+      ["the wrong pack size", { title: "Rust Twitch Drops bundle — PACK OF 50 ACCOUNTS" }, /must say "PACK OF 5"/],
+      ["a single account's price for the pack", { packPrice: 1.19, unitPrice: 1.19 }, /does not add up/],
+      ["no pack price", { packPrice: 0 }, /packPrice/],
+      ["a pack price that is not a number", { packPrice: "abc" }, /packPrice/],
+    ]) {
+      const env = setup();
+      await assert.rejects(markets.publishAccounts(accountArgs({ market, ...over })), refused(re), market + ": " + name);
+      assert.strictEqual(callCount(env.mp), 0, market + ": " + name);
+    }
+  }
+  // Gameflip: the same title and price guards.
+  const env = setup();
+  const list = units(5);
+  seedAccounts(env, list);
+  await assert.rejects(
+    markets.publishAccounts(accountArgs({ market: "gameflip", title: "Rust bundle x5", units: list, packPrice: 5 })),
+    refused(/must say "PACK OF 5"/),
+  );
+  await assert.rejects(
+    markets.publishAccounts(accountArgs({ market: "gameflip", title: PACK_TITLE, units: list, packPrice: 1.19, unitPrice: 1.19 })),
+    refused(/does not add up/),
+  );
+  assert.strictEqual(callCount(env.mp), 0);
+  assert.strictEqual(env.deps.BotAccount.find.calls.length, 0, "no password read for a refused pack");
 });
 
 test("g2g: a game without a G2G brand is refused, never approximated", async () => {
@@ -390,7 +436,14 @@ test("gameflip pack: a default tier of 10 fits under GAMEFLIP_CODE_MAX", async (
   const list = units(10);
   seedAccounts(env, list);
   await markets.publishAccounts(
-    accountArgs({ market: "gameflip", title: PACK_TITLE, units: list, minQty: 10, packPrice: 9 }),
+    accountArgs({
+      market: "gameflip",
+      title: "Rust Twitch Drops bundle — PACK OF 10 ACCOUNTS",
+      units: list,
+      minQty: 10,
+      packPrice: 9,
+      unitPrice: 0.9,
+    }),
   );
   const code = env.mp.gameflipPublish.calls[0][0].autoDeliverCode;
   assert.strictEqual(code.split(markets.PACK_SEPARATOR).length, 10);
@@ -450,7 +503,14 @@ test("gameflip pack: a code over GAMEFLIP_CODE_MAX is refused, never truncated",
   seedAccounts(env, list);
   await assert.rejects(
     markets.publishAccounts(
-      accountArgs({ market: "gameflip", title: PACK_TITLE, units: list, minQty: 20, packPrice: 18 }),
+      accountArgs({
+        market: "gameflip",
+        title: "Rust Twitch Drops bundle — PACK OF 20 ACCOUNTS",
+        units: list,
+        minQty: 20,
+        packPrice: 18,
+        unitPrice: 0.9,
+      }),
     ),
     (err) => {
       refused(/over the 10000/)(err);
@@ -473,7 +533,7 @@ test("gameflip pack: exactly minQty accounts, and Gameflip's $0.75 minimum", asy
   );
   await assert.rejects(
     markets.publishAccounts(
-      accountArgs({ market: "gameflip", title: PACK_TITLE, units: units(5), packPrice: 0.5 }),
+      accountArgs({ market: "gameflip", title: PACK_TITLE, units: units(5), packPrice: 0.5, unitPrice: 0.1 }),
     ),
     refused(/minimum price is \$0\.75/),
   );
@@ -486,13 +546,13 @@ test("gameflip pack: exactly minQty accounts, and Gameflip's $0.75 minimum", asy
 test("account packs refuse before any marketplace call", async () => {
   const long = (n) => "x".repeat(n);
   const cases = [
-    ["fewer accounts than the minimum order", { units: units(4) }, /could never be bought/],
+    ["fewer accounts than one pack", { units: units(4) }, /could never be bought/],
     ["an account twice", { units: [...units(5), units(1)[0]] }, /on this offer twice/],
     ["a login twice", { units: [...units(5), { accountId: oid(99), login: "BULKUSER01" }] }, /twice/],
     ["a unit without its login", { units: [...units(5), { accountId: oid(98) }] }, /id and login/],
     ["no units", { units: [] }, /No accounts/],
     ["minQty 1 is not a bulk tier", { minQty: 1 }, /minQty/],
-    ["a farm-looking account title", { title: "Rust Twitch Drops Automatic Farming — BULK 5+" }, /must not contain "Automatic Farming"/],
+    ["a farm-looking account title", { title: "Rust Twitch Drops Automatic Farming — PACK OF 5 ACCOUNTS" }, /must not contain "Automatic Farming"/],
     ["an eldorado title Eldorado would cut", { title: long(161) }, /cuts titles at 160/],
     ["a g2g title G2G would cut", { market: "g2g", title: long(129) }, /cuts titles at 128/],
     ["a gameflip title Gameflip would cut", { market: "gameflip", packPrice: 5, units: units(5), title: long(121) }, /cuts titles at 120/],
@@ -500,7 +560,7 @@ test("account packs refuse before any marketplace call", async () => {
     ["a no-claim game from the claimed archive", { game: "Overwatch" }, /no-claim game/],
     ["a no-claim set", { set: { ...SET, stockSource: "noclaim" } }, /publishNoclaim/],
     ["no set", { set: null }, /No drop set/],
-    ["a zero price", { unitPrice: 0 }, /unitPrice must be a price above/],
+    ["a zero pack price", { packPrice: 0 }, /packPrice \(the price of one pack\) must be a price above/],
     ["Plati (blocked)", { market: "plati" }, /blocked by the owner/],
     ["Plati as digiseller (blocked)", { market: "digiseller" }, /blocked by the owner/],
     ["GGSel (blocked)", { market: "ggsel" }, /blocked by the owner/],
@@ -551,8 +611,9 @@ const NC_SET = {
   coverGame: "Overwatch",
   items: [{ name: "Spray", game: "Overwatch", image: "/drop-images/spray.png", qty: 1 }],
 };
-const NC_TITLE = "Overwatch Twitch Drops bundle — BULK 5+ accounts (5% off)";
+const NC_TITLE = "Overwatch Twitch Drops bundle — PACK OF 5 ACCOUNTS (-5%)";
 
+// Four packs of 5 at $11.88 a pack ($2.38 each).
 function noclaimArgs(over = {}) {
   return {
     market: "eldorado",
@@ -560,23 +621,24 @@ function noclaimArgs(over = {}) {
     game: "Overwatch",
     title: NC_TITLE,
     description: "Log in, link your own game account and claim the rewards.",
-    unitPrice: 2.5,
-    quantity: 20,
+    unitPrice: 2.38,
+    packPrice: 11.88,
+    quantity: 4,
     minQty: 5,
     coverPath: "/tmp/grid.png",
     ...over,
   };
 }
 
-test("no-claim eldorado: the ctx the Listings route builds, and the layer publishes", async () => {
+test("no-claim eldorado: the ctx the Listings route builds — quantity = packs, minimum 1, the pack price", async () => {
   const env = setup();
   const r = await markets.publishNoclaim(noclaimArgs());
   assert.deepStrictEqual(r, {
     rowId: "row-1",
     externalId: "nc-1",
     url: "https://market/nc-1",
-    price: 2.5,
-    quantity: 20,
+    price: 11.88,
+    quantity: 4,
   });
   const calls = env.deps.noclaimListings.publishNoclaim.calls;
   assert.strictEqual(calls.length, 1);
@@ -585,29 +647,41 @@ test("no-claim eldorado: the ctx the Listings route builds, and the layer publis
   assert.strictEqual(ctx.set, NC_SET);
   assert.strictEqual(ctx.title, NC_TITLE);
   assert.strictEqual(ctx.description, "Log in, link your own game account and claim the rewards.");
-  assert.strictEqual(ctx.priceUsd, 2.5);
+  assert.strictEqual(ctx.priceUsd, 11.88);
+  assert.strictEqual(ctx.body.price, 11.88);
   assert.strictEqual(ctx.gridImage, "/tmp/grid.png");
   assert.strictEqual(ctx.coverPath, DEFAULT_COVER, "coverImagePath(set)'s fallback");
   assert.deepStrictEqual(ctx.cat, {}, "Eldorado needs no category");
   assert.strictEqual(ctx.pubGame, "Overwatch");
-  assert.deepStrictEqual(ctx.body.eldorado, { quantity: 20, minQuantity: 5, game: "Overwatch" });
+  assert.deepStrictEqual(ctx.body.eldorado, { quantity: 4, minQuantity: 1, game: "Overwatch" });
   assert.strictEqual(ctx.body.g2g, undefined);
   assert.deepStrictEqual(ctx.body.marketplaces, ["eldorado"]);
   assert.deepStrictEqual(env.gateCalls, [["eldorado", "noclaim"]]);
   assert.strictEqual(callCount(env.mp), 0, "the no-claim layer is the one that publishes");
 });
 
-test("no-claim g2g: category resolved from the brand exactly as the route does, $1 floor", async () => {
+const G2G_TEN_TITLE = "Rust Twitch Drops bundle — PACK OF 10 ACCOUNTS (-10%)";
+
+test("no-claim g2g: category resolved from the brand exactly as the route does, $1 floor per listing", async () => {
   const env = setup();
   const set = { ...NC_SET, coverGame: "Rust", items: [{ name: "Hoodie", game: "Rust" }] };
   const r = await markets.publishNoclaim(
-    noclaimArgs({ market: "g2g", set, game: "Rust", title: ACC_TITLE, unitPrice: 0.9, quantity: 12, minQty: 10 }),
+    noclaimArgs({
+      market: "g2g",
+      set,
+      game: "Rust",
+      title: G2G_TEN_TITLE,
+      packPrice: 0.9,
+      unitPrice: 0.09,
+      quantity: 2,
+      minQty: 10,
+    }),
   );
   assert.strictEqual(r.price, 1);
   const [name, ctx] = env.deps.noclaimListings.publishNoclaim.calls[0];
   assert.strictEqual(name, "g2g");
   assert.deepStrictEqual(ctx.cat, { serviceId: "svc-game-items", brandId: "brand-rust", seoTerm: "rust-items" });
-  assert.deepStrictEqual(ctx.body.g2g, { qty: 12, minQty: 10 });
+  assert.deepStrictEqual(ctx.body.g2g, { qty: 2, minQty: 1 });
   assert.strictEqual(ctx.body.eldorado, undefined);
   assert.strictEqual(ctx.priceUsd, 1);
   assert.strictEqual(ctx.pubGame, "Rust");
@@ -641,14 +715,18 @@ test("no-claim: the layer's failure is thrown as-is (it may follow a live publis
   assert.strictEqual(env.deps.noclaimListings.publishNoclaim.calls.length, 1);
 });
 
-test("no-claim refusals: short quantity, wrong set, Gameflip, farm title, closed gate", async () => {
+test("no-claim refusals: no pack, wrong set, Gameflip, farm title, no pack title, per-account price, closed gate", async () => {
   const cases = [
-    ["quantity under the tier", { quantity: 4 }, /quantity/],
+    ["no pack on offer", { quantity: 0 }, /quantity \(packs on the offer\)/],
+    ["a fraction of a pack", { quantity: 1.5 }, /quantity/],
+    ["a pack of one", { minQty: 1 }, /minQty/],
     ["a dropset set", { set: SET }, /Not a no-claim set/],
     ["Gameflip (not in v1)", { market: "gameflip" }, /not supported for no-claim packs/],
     ["GGSel (blocked)", { market: "ggsel" }, /blocked by the owner/],
     ["a farm-looking title", { title: "Overwatch Twitch Drops Automatic Farming 120 Days" }, /must not contain/],
-    ["a tier above what an offer may advertise", { minQty: 81, quantity: 90 }, /at most 80/],
+    ["a v1 title", { title: "Overwatch Twitch Drops bundle — BULK 5+ accounts (5% off)" }, /must say "PACK OF 5"/],
+    ["a single account's price for the pack", { packPrice: 2.38, unitPrice: 2.38 }, /does not add up/],
+    ["no pack price", { packPrice: undefined }, /packPrice/],
   ];
   for (const [name, over, re] of cases) {
     const env = setup();
@@ -661,9 +739,9 @@ test("no-claim refusals: short quantity, wrong set, Gameflip, farm title, closed
   assert.strictEqual(env.deps.noclaimListings.publishNoclaim.calls.length, 0);
 });
 
-test("no-claim: the advertised quantity is read back from the row and a short one is flagged", async () => {
+test("no-claim: the advertised packs are read back from the row, and a shelf the layer capped is flagged", async () => {
   const env = setup();
-  env.rowQty = 3;
+  env.rowQty = 1;
   const q = quietConsole();
   let r;
   try {
@@ -671,32 +749,48 @@ test("no-claim: the advertised quantity is read back from the row and a short on
   } finally {
     q.restore();
   }
-  assert.strictEqual(r.quantity, 3);
-  assert.ok(q.lines.some((l) => /minimum order 5/.test(l)), "the lowered minimum is logged");
+  assert.strictEqual(r.quantity, 1);
+  assert.ok(
+    q.lines.some((l) => /advertising 1 of the 4 pack\(s\) of 5 asked for/.test(l)),
+    "the capped quantity is logged: " + q.lines.join(" | "),
+  );
+  // Nothing capped: nothing logged.
+  const env2 = setup();
+  env2.rowQty = 4;
+  const q2 = quietConsole();
+  try {
+    assert.strictEqual((await markets.publishNoclaim(noclaimArgs())).quantity, 4);
+  } finally {
+    q2.restore();
+  }
+  assert.deepStrictEqual(q2.lines, []);
 });
 
 /* ------------------------------ 5. Farm packs ---------------------------- */
 
-const FARM_TITLE_120 = "Rust Twitch Drops Automatic Farming 120 Days — Bulk 5+ Accounts";
+const FARM_TITLE_120 = "Rust Twitch Drops Automatic Farming 120 Days — PACK OF 5 ACCOUNTS";
+const FARM_DESC = "Each purchase is a pack of 5 separate Twitch accounts, each farmed for Rust for 120 days.";
 
+// Three packs of 5 at $14.25 a pack ($2.85 each).
 function farmArgs(over = {}) {
   return {
     market: "eldorado",
     game: "Rust",
     days: 120,
     title: FARM_TITLE_120,
-    description: "Minimum order 5 accounts. Each account farms Rust for 120 days.",
+    description: FARM_DESC,
     unitPrice: 2.85,
-    quantity: 12,
+    packPrice: 14.25,
+    quantity: 3,
     minQty: 5,
     ...over,
   };
 }
 
-test("farm eldorado: the farm script's cover and publish, plus the tier's minimum", async () => {
+test("farm eldorado: the farm script's cover and publish — quantity = packs, minimum 1, the pack price", async () => {
   const env = setup();
   const r = await markets.publishFarm(farmArgs());
-  assert.deepStrictEqual(r, { externalId: "eld-1", url: "https://eld/eld-1", price: 2.85 });
+  assert.deepStrictEqual(r, { externalId: "eld-1", url: "https://eld/eld-1", price: 14.25 });
 
   const promo = env.deps.setImage.buildPromoCoverImage.calls;
   assert.strictEqual(promo.length, 1);
@@ -716,10 +810,10 @@ test("farm eldorado: the farm script's cover and publish, plus the tier's minimu
   assert.deepStrictEqual(env.mp.eldoradoPublish.calls[0][0], {
     game: "Rust",
     title: FARM_TITLE_120,
-    description: "Minimum order 5 accounts. Each account farms Rust for 120 days.",
-    priceUsd: 2.85,
-    quantity: 12,
-    minQuantity: 5,
+    description: FARM_DESC,
+    priceUsd: 14.25,
+    quantity: 3,
+    minQuantity: 1,
     coverImagePath: "/tmp/promo-cover-test.png",
     deliveryTime: "Minute20",
   });
@@ -737,7 +831,7 @@ test("farm eldorado: 365 days reads as \"1 Year\", and a failed publish still re
   });
   await assert.rejects(
     markets.publishFarm(
-      farmArgs({ days: 365, title: "Rust Twitch Drops Automatic Farming 1 Year — Bulk 5+ Accounts" }),
+      farmArgs({ days: 365, title: "Rust Twitch Drops Automatic Farming 1 Year — PACK OF 5 ACCOUNTS" }),
     ),
     /HTTP 429/,
   );
@@ -745,10 +839,12 @@ test("farm eldorado: 365 days reads as \"1 Year\", and a failed publish still re
   assert.deepStrictEqual(env.deps.fsp.unlink.calls, [["/tmp/promo-cover-test.png"]]);
 });
 
-test("farm g2g: brand + the shape resolved from our own offers, qty and minQty", async () => {
+test("farm g2g: brand + the shape resolved from our own offers, qty = packs, minQty 1, $1 floor per listing", async () => {
   const env = setup();
-  const title = "Rust Twitch Drops Automatic Farming 180 Days — Bulk 5+";
-  const r = await markets.publishFarm(farmArgs({ market: "g2g", days: 180, title, unitPrice: 0.95 }));
+  const title = "Rust Twitch Drops Automatic Farming 180 Days — PACK OF 5";
+  const r = await markets.publishFarm(
+    farmArgs({ market: "g2g", days: 180, title, packPrice: 0.95, unitPrice: 0.19 }),
+  );
   assert.deepStrictEqual(r, { externalId: "g2g-1", url: "https://g2g/g2g-1", price: 1 });
   assert.deepStrictEqual(env.mp.g2gResolveOfferShape.calls, [[{ brandId: "brand-rust" }]]);
   assert.deepStrictEqual(env.mp.g2gPublish.calls[0][0], {
@@ -758,25 +854,32 @@ test("farm g2g: brand + the shape resolved from our own offers, qty and minQty",
     offerAttributes: [{ collection_id: "c-platform", dataset_id: "d-pc" }],
     collectionTree: ["tree-1"],
     title,
-    description: "Minimum order 5 accounts. Each account farms Rust for 120 days.",
+    description: FARM_DESC,
     priceUsd: 1,
-    qty: 12,
-    minQty: 5,
+    qty: 3,
+    minQty: 1,
   });
   assert.strictEqual(env.deps.setImage.buildPromoCoverImage.calls.length, 0, "G2G takes no cover");
 });
 
 test("farm refusals: the title must round-trip through the farm parser (CONTRACT I5)", async () => {
   const cases = [
-    ["no Automatic Farming", { title: "Rust Twitch Drops 120 Days — Bulk 5+ Accounts" }, /must contain "Automatic Farming"/],
+    ["no Automatic Farming", { title: "Rust Twitch Drops 120 Days — PACK OF 5 ACCOUNTS" }, /must contain "Automatic Farming"/],
+    ["no pack in the title", { title: "Rust Twitch Drops Automatic Farming 120 Days" }, /must say "PACK OF 5"/],
+    ["a single account's price for the pack", { packPrice: 2.85, unitPrice: 2.85 }, /does not add up/],
+    ["a pack of one", { minQty: 1 }, /minQty/],
     ["a term the parser reads differently", { days: 180 }, /read this title as 120 days, not 180/],
     ["a game the parser reads differently", { game: "Rust Console" }, /read this title's game as "Rust"/],
     ["Gameflip (not in v1)", { market: "gameflip" }, /not supported for farming packs/],
     ["no game", { game: "" }, /needs its game/],
     ["zero days", { days: 0 }, /days must be/],
-    ["quantity under the tier", { quantity: 4 }, /quantity/],
+    ["no pack on offer", { quantity: 0 }, /quantity \(packs on the offer\)/],
     ["a title G2G would cut", { market: "g2g", title: FARM_TITLE_120 + "x".repeat(70) }, /cuts titles at 128/],
-    ["no G2G brand", { market: "g2g", game: "Apex Legends", title: "Apex Legends Twitch Drops Automatic Farming 120 Days" }, /no hand-checked G2G brand/],
+    [
+      "no G2G brand",
+      { market: "g2g", game: "Apex Legends", title: "Apex Legends Twitch Drops Automatic Farming 120 Days — PACK OF 5 ACCOUNTS" },
+      /no hand-checked G2G brand/,
+    ],
   ];
   for (const [name, over, re] of cases) {
     const env = setup();
@@ -1002,6 +1105,109 @@ test("coverForFarm: the promo cover, with no term line when no days are given", 
   assert.strictEqual(await markets.coverForFarm(""), "");
 });
 
+// PACKS-2 §3/§5: the pack covers are setImage's newer builders — reached
+// lazily, with today's covers as the fallback when they are absent, fail or
+// build nothing.
+test("coverForSet with a pack: setImage.buildBulkCoverImage(set, {packSize, discountPct}), else the grid", async () => {
+  const bulk = spy(async () => "/tmp/bulk-set-test.png");
+  let env = setup({
+    deps: {
+      setImage: {
+        buildSetGridImage: spy(async () => "/tmp/set-grid-test.png"),
+        buildBulkCoverImage: bulk,
+      },
+    },
+  });
+  assert.strictEqual(await markets.coverForSet(SET, { packSize: 5, discountPct: 5 }), "/tmp/bulk-set-test.png");
+  assert.deepStrictEqual(bulk.calls, [[SET, { packSize: 5, discountPct: 5 }]]);
+  assert.strictEqual(env.deps.setImage.buildSetGridImage.calls.length, 0);
+  // No pack asked for: today's grid, the pack builder untouched.
+  assert.strictEqual(await markets.coverForSet(SET), "/tmp/set-grid-test.png");
+  assert.strictEqual(await markets.coverForSet(SET, { packSize: 1 }), "/tmp/set-grid-test.png");
+  assert.strictEqual(bulk.calls.length, 1);
+  // A junk discount reaches the builder as 0.
+  await markets.coverForSet(SET, { packSize: "10", discountPct: "x" });
+  assert.deepStrictEqual(bulk.calls[1], [SET, { packSize: 10, discountPct: 0 }]);
+
+  // The builder is missing (the setImage module predates it), builds nothing,
+  // or throws: the plain grid, every time.
+  for (const pack of [undefined, spy(async () => ""), spy(async () => { throw new Error("sharp exploded"); })]) {
+    env = setup({
+      deps: {
+        setImage: {
+          buildSetGridImage: spy(async () => "/tmp/set-grid-test.png"),
+          ...(pack ? { buildBulkCoverImage: pack } : {}),
+        },
+      },
+    });
+    const q = quietConsole();
+    try {
+      assert.strictEqual(await markets.coverForSet(SET, { packSize: 5, discountPct: 5 }), "/tmp/set-grid-test.png");
+    } finally {
+      q.restore();
+    }
+    assert.strictEqual(env.deps.setImage.buildSetGridImage.calls.length, 1);
+  }
+});
+
+test("coverForFarm with a pack: setImage.buildBulkFarmCoverImage(game, days, {packSize, discountPct, itemImages}), else the promo", async () => {
+  const bulk = spy(async () => "/tmp/bulk-farm-test.png");
+  let env = setup({
+    deps: {
+      setImage: {
+        buildPromoCoverImage: spy(async () => "/tmp/promo-cover-test.png"),
+        buildBulkFarmCoverImage: bulk,
+      },
+    },
+  });
+  assert.strictEqual(
+    await markets.coverForFarm("Rust", 365, { packSize: 10, discountPct: 10 }),
+    "/tmp/bulk-farm-test.png",
+  );
+  assert.deepStrictEqual(bulk.calls, [
+    ["Rust", 365, { packSize: 10, discountPct: 10, itemImages: ["/drop-images/a.png", "/drop-images/b.png"] }],
+  ]);
+  assert.strictEqual(env.deps.setImage.buildPromoCoverImage.calls.length, 0);
+
+  for (const pack of [undefined, spy(async () => ""), spy(async () => { throw new Error("font missing"); })]) {
+    env = setup({
+      deps: {
+        setImage: {
+          buildPromoCoverImage: spy(async () => "/tmp/promo-cover-test.png"),
+          ...(pack ? { buildBulkFarmCoverImage: pack } : {}),
+        },
+      },
+    });
+    const q = quietConsole();
+    try {
+      assert.strictEqual(await markets.coverForFarm("Rust", 120, { packSize: 5, discountPct: 5 }), "/tmp/promo-cover-test.png");
+    } finally {
+      q.restore();
+    }
+    assert.strictEqual(env.deps.setImage.buildPromoCoverImage.calls[0][0].serviceText, "120 Days Service");
+  }
+});
+
+test("farm eldorado publish uses the pack cover (and removes it afterwards) when the builder exists", async () => {
+  const bulk = spy(async () => "/tmp/bulk-farm-test.png");
+  const env = setup({
+    deps: {
+      setImage: {
+        buildPromoCoverImage: spy(async () => "/tmp/promo-cover-test.png"),
+        buildBulkFarmCoverImage: bulk,
+      },
+    },
+  });
+  await markets.publishFarm(farmArgs({ discountPct: 5 }));
+  assert.deepStrictEqual(bulk.calls[0].slice(0, 2), ["Rust", 120]);
+  assert.deepStrictEqual(
+    { packSize: bulk.calls[0][2].packSize, discountPct: bulk.calls[0][2].discountPct },
+    { packSize: 5, discountPct: 5 },
+  );
+  assert.strictEqual(env.mp.eldoradoPublish.calls[0][0].coverImagePath, "/tmp/bulk-farm-test.png");
+  assert.deepStrictEqual(env.deps.fsp.unlink.calls, [["/tmp/bulk-farm-test.png"]], "temp cover removed");
+});
+
 /* ---------------- 9. Publish outcomes (FIXES-1 S2/S5) -------------------- */
 //
 // Every publish throw carries `outcome` ("not_created" -> the caller releases;
@@ -1105,7 +1311,7 @@ test("S2: a refusal, or any failure before the market call, is not_created", asy
   setup();
   err = await thrown(markets.publishFarm(farmArgs({ days: 180 })));
   assert.strictEqual(err.outcome, "not_created");
-  err = await thrown(markets.publishNoclaim(noclaimArgs({ quantity: 4 })));
+  err = await thrown(markets.publishNoclaim(noclaimArgs({ quantity: 0 })));
   assert.strictEqual(err.outcome, "not_created");
 });
 
@@ -1194,8 +1400,8 @@ test("S5 gameflip: an accepted publish with no listing id is may_be_live", async
   assert.match(err.message, /no offer id/);
 });
 
-const g2gAccountArgs = () => accountArgs({ market: "g2g", units: units(6) });
-const G2G_FARM_TITLE = "Rust Twitch Drops Automatic Farming 180 Days — Bulk 5+";
+const g2gAccountArgs = () => accountArgs({ market: "g2g", units: units(5) });
+const G2G_FARM_TITLE = "Rust Twitch Drops Automatic Farming 180 Days — PACK OF 5";
 const g2gFarmArgs = () => farmArgs({ market: "g2g", days: 180, title: G2G_FARM_TITLE });
 
 test("S5 g2g: everything before the create, and the create itself (an empty shell), is not_created", async () => {
@@ -1360,7 +1566,16 @@ function noclaimLayer(answer) {
 
 const NC_G2G_SET = { ...NC_SET, coverGame: "Rust", items: [{ name: "Hoodie", game: "Rust" }] };
 const ncG2gArgs = () =>
-  noclaimArgs({ market: "g2g", set: NC_G2G_SET, game: "Rust", title: ACC_TITLE, unitPrice: 1.5, quantity: 12, minQty: 10 });
+  noclaimArgs({
+    market: "g2g",
+    set: NC_G2G_SET,
+    game: "Rust",
+    title: G2G_TEN_TITLE,
+    unitPrice: 1.5,
+    packPrice: 15,
+    quantity: 1,
+    minQty: 10,
+  });
 
 test("S5 no-claim: the layer's own refusals are not_created; its orphan is may_be_live + the offer id", async () => {
   for (const message of [

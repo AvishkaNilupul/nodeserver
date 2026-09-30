@@ -1,8 +1,10 @@
 // Coverage for utils/bulkPacks/copy.js — no Mongo connection, no network, no
 // settings file (docs/bulk-packs/API-UI.md "Tests" A2, CONTRACT I5, MODULES.md
-// §copy.js):
-//   1. Account titles: exact formats, every market's length limit (the suffix
-//      is never the part cut), and they NEVER match the farm-title regex.
+// §copy.js, PACKS-2.md §3 — one listing = one pack of N, on every market):
+//   1. Account titles: "<base> — PACK OF N ACCOUNTS" on every market, " (-D%)"
+//      only when it fits with the base whole, every market's length limit
+//      (the pack suffix is never the part cut), and they NEVER match the
+//      farm-title regex.
 //   2. stripBulkSuffix undoes every suffix this module adds, and nothing else.
 //   3. Account descriptions: the required buyer statements per market/source,
 //      the DESC_MAX limit, and never a login or password.
@@ -73,14 +75,14 @@ function termLabel(days) {
   return days === 365 ? "1 Year" : days + " Days";
 }
 
-// Longest game whose FULL title (with " Accounts") fits, per combination.
+// Longest game whose FULL title (with " ACCOUNTS") fits, per combination.
 function maxFullGame(market, days, n) {
   const fixed = (
     " Twitch Drops Automatic Farming " +
     termLabel(days) +
-    " — Bulk " +
+    " — PACK OF " +
     n +
-    "+ Accounts"
+    " ACCOUNTS"
   ).length;
   return TITLE_MAX[market] - fixed;
 }
@@ -118,7 +120,7 @@ for (const market of FARM_MARKETS) {
       BOUNDARY_GAMES.push(
         nameOfLength(full),
         nameOfLength(full + 1),
-        nameOfLength(full + " Accounts".length),
+        nameOfLength(full + " ACCOUNTS".length),
       );
     }
   }
@@ -177,43 +179,44 @@ async function assertFarmRoundTrip(title, { game, days }) {
 // account titles
 // ---------------------------------------------------------------------------
 
-test("accountsTitle: the exact formats per market", () => {
+test("accountsTitle: the exact format, the same on every market (PACKS-2 §3)", () => {
   const base = "Rust Twitch Drops bundle";
-  // The Send-dialog example in API-UI.md.
-  assert.equal(
-    accountsTitle({ baseTitle: base, market: "eldorado", minQty: 5, discountPct: 5 }),
-    "Rust Twitch Drops bundle — BULK 5+ accounts (5% off)",
-  );
-  assert.equal(
-    accountsTitle({ baseTitle: base, market: "g2g", minQty: 10, discountPct: 10 }),
-    "Rust Twitch Drops bundle — BULK 10+ accounts (10% off)",
-  );
-  assert.equal(
-    accountsTitle({ baseTitle: base, market: "gameflip", minQty: 5, discountPct: 5 }),
-    "Rust Twitch Drops bundle — PACK OF 5 ACCOUNTS",
-  );
+  for (const market of ACCOUNT_MARKETS) {
+    assert.equal(
+      accountsTitle({ baseTitle: base, market, minQty: 5, discountPct: 5 }),
+      "Rust Twitch Drops bundle — PACK OF 5 ACCOUNTS (-5%)",
+      market,
+    );
+    assert.equal(
+      accountsTitle({ baseTitle: base, market, minQty: 10, discountPct: 10 }),
+      "Rust Twitch Drops bundle — PACK OF 10 ACCOUNTS (-10%)",
+      market,
+    );
+  }
 });
 
-test("accountsTitle: '(0% off)' is left out; the % shown is the priced one", () => {
+test("accountsTitle: '(-0%)' is never shown; the % shown is the priced one", () => {
   for (const discountPct of [0, undefined, null, NaN, "x", -5]) {
-    assert.equal(
-      accountsTitle({ baseTitle: "Rust", market: "eldorado", minQty: 5, discountPct }),
-      "Rust — BULK 5+ accounts",
-      "discountPct " + String(discountPct),
-    );
+    for (const market of ACCOUNT_MARKETS) {
+      assert.equal(
+        accountsTitle({ baseTitle: "Rust", market, minQty: 5, discountPct }),
+        "Rust — PACK OF 5 ACCOUNTS",
+        market + " discountPct " + String(discountPct),
+      );
+    }
   }
   assert.equal(
     accountsTitle({ baseTitle: "Rust", market: "g2g", minQty: 5, discountPct: 7.5 }),
-    "Rust — BULK 5+ accounts (7.5% off)",
+    "Rust — PACK OF 5 ACCOUNTS (-7.5%)",
   );
   // pricing.js caps a discount at the settings' 60%, so the title does too.
   assert.equal(
     accountsTitle({ baseTitle: "Rust", market: "eldorado", minQty: 5, discountPct: 90 }),
-    "Rust — BULK 5+ accounts (60% off)",
+    "Rust — PACK OF 5 ACCOUNTS (-60%)",
   );
 });
 
-test("accountsTitle: fits every market's limit; the base is cut with '…', never the suffix", () => {
+test("accountsTitle: fits every market's limit; ' (-D%)' only when it fits whole; the base is cut with '…', never the pack suffix", () => {
   const long =
     "Rust Twitch Drops (12 Items) — Garage Door Skin + Hazmat Suit Bundle " +
     "With An Extra Long Name +10 more, and some words to overflow any limit";
@@ -223,20 +226,26 @@ test("accountsTitle: fits every market's limit; the base is cut with '…', neve
         for (let len = 0; len <= 400; len += 7) {
           const base = (long + " " + long + " " + long).slice(0, len).trim();
           const title = accountsTitle({ baseTitle: base, market, minQty, discountPct });
-          const suffix =
-            market === "gameflip"
-              ? " — PACK OF " + minQty + " ACCOUNTS"
-              : " — BULK " + minQty + "+ accounts" + (discountPct ? " (" + discountPct + "% off)" : "");
+          const suffix = " — PACK OF " + minQty + " ACCOUNTS";
+          const tag = discountPct ? " (-" + discountPct + "%)" : "";
           const where = market + " n=" + minQty + " d=" + discountPct + " len=" + len;
           assert.ok(title.length <= TITLE_MAX[market], where + ": " + title.length);
-          assert.ok(title.endsWith(suffix), where + ": suffix kept: " + title);
           assert.ok(!FARM_TITLE_RE.test(title), where + ": reads as a farm title");
           assert.ok(title.isWellFormed(), where + ": well-formed UTF-16");
+          assert.ok(new RegExp("PACK OF " + minQty + " ACCOUNTS").test(title), where + ": states the pack");
+          const whole = (base || "Twitch Drops bundle") + suffix + tag;
+          if (whole.length <= TITLE_MAX[market]) {
+            assert.equal(title, whole, where + ": base whole, tag kept");
+            if (base) assert.equal(stripBulkSuffix(title), base, where + ": strip round-trips");
+            continue;
+          }
+          // The tag is the optional part: dropped before the base is cut.
+          assert.ok(title.endsWith(suffix), where + ": ends on the pack suffix: " + title);
           const room = TITLE_MAX[market] - suffix.length;
-          if (base && base.length <= room) {
-            assert.equal(title, base + suffix, where + ": short base kept whole");
+          if (base.length <= room) {
+            assert.equal(title, base + suffix, where + ": base kept whole, tag dropped");
             assert.equal(stripBulkSuffix(title), base, where + ": strip round-trips");
-          } else if (base) {
+          } else {
             assert.ok(title.slice(0, -suffix.length).endsWith("…"), where + ": cut marked");
             assert.ok(
               base.startsWith(title.slice(0, -suffix.length - 1)),
@@ -246,6 +255,18 @@ test("accountsTitle: fits every market's limit; the base is cut with '…', neve
         }
       }
     }
+  }
+});
+
+test("accountsTitle: the discount tag appears exactly while base + pack + tag fit", () => {
+  for (const market of ACCOUNT_MARKETS) {
+    const max = TITLE_MAX[market];
+    const suffix = " — PACK OF 5 ACCOUNTS";
+    const tag = " (-5%)";
+    const fits = "R".repeat(max - suffix.length - tag.length);
+    assert.equal(accountsTitle({ baseTitle: fits, market, minQty: 5, discountPct: 5 }), fits + suffix + tag);
+    const over = fits + "R";
+    assert.equal(accountsTitle({ baseTitle: over, market, minQty: 5, discountPct: 5 }), over + suffix, market + ": tag dropped, base whole");
   }
 });
 
@@ -278,7 +299,7 @@ test("accountsTitle: THROWS rather than publish a title the farm service would t
   }
 });
 
-test("accountsTitle: only account-pack markets, only whole minQty >= 1", () => {
+test("accountsTitle: only account-pack markets, only a whole pack size >= 2", () => {
   for (const market of ["ggsel", "plati", "digiseller", "playerauctions", "zeusx", "Eldorado", "", undefined]) {
     assert.throws(
       () => accountsTitle({ baseTitle: "Rust", market, minQty: 5 }),
@@ -286,23 +307,24 @@ test("accountsTitle: only account-pack markets, only whole minQty >= 1", () => {
       "market " + String(market),
     );
   }
-  for (const minQty of [0, -1, 2.5, "abc", "", undefined, null, NaN]) {
+  for (const minQty of [0, 1, -1, 2.5, "abc", "", undefined, null, NaN]) {
     assert.throws(
       () => accountsTitle({ baseTitle: "Rust", market: "eldorado", minQty }),
       /minQty/,
       "minQty " + String(minQty),
     );
   }
+  assert.throws(() => accountsTitle({ baseTitle: "Rust", market: "g2g", minQty: 1 }), /pack of one is a single listing/);
   assert.equal(
     accountsTitle({ baseTitle: "Rust", market: "eldorado", minQty: "5", discountPct: 5 }),
-    "Rust — BULK 5+ accounts (5% off)",
+    "Rust — PACK OF 5 ACCOUNTS (-5%)",
   );
 });
 
 test("accountsTitle: one line, single spaces; no base -> 'Twitch Drops bundle'; no doubled suffix", () => {
   assert.equal(
     accountsTitle({ baseTitle: "  Rust\n\tTwitch   Drops \r\n", market: "eldorado", minQty: 5, discountPct: 5 }),
-    "Rust Twitch Drops — BULK 5+ accounts (5% off)",
+    "Rust Twitch Drops — PACK OF 5 ACCOUNTS (-5%)",
   );
   for (const baseTitle of ["", "   ", null, undefined]) {
     assert.equal(
@@ -310,10 +332,14 @@ test("accountsTitle: one line, single spaces; no base -> 'Twitch Drops bundle'; 
       "Twitch Drops bundle — PACK OF 5 ACCOUNTS",
     );
   }
-  assert.equal(
-    accountsTitle({ baseTitle: "Rust — BULK 5+ accounts (5% off)", market: "eldorado", minQty: 10, discountPct: 10 }),
-    "Rust — BULK 10+ accounts (10% off)",
-  );
+  // An old v1 title or a v2 one never stacks a second suffix.
+  for (const baseTitle of ["Rust — BULK 5+ accounts (5% off)", "Rust — PACK OF 5 ACCOUNTS (-5%)", "Rust — PACK OF 5 ACCOUNTS"]) {
+    assert.equal(
+      accountsTitle({ baseTitle, market: "eldorado", minQty: 10, discountPct: 10 }),
+      "Rust — PACK OF 10 ACCOUNTS (-10%)",
+      baseTitle,
+    );
+  }
 });
 
 // ---------------------------------------------------------------------------
@@ -322,10 +348,17 @@ test("accountsTitle: one line, single spaces; no base -> 'Twitch Drops bundle'; 
 
 test("stripBulkSuffix: removes every suffix this module adds", () => {
   const cases = [
+    // v2 (PACKS-2 §3).
+    ["Rust — PACK OF 5 ACCOUNTS (-5%)", "Rust"],
+    ["Rust — PACK OF 10 ACCOUNTS (-7.5%)", "Rust"],
+    ["Rust — PACK OF 5 ACCOUNTS", "Rust"],
+    ["Rust — PACK OF 5 ACCOUNTS (−5%)", "Rust"], // a typographic minus
+    ["Rust Twitch Drops Automatic Farming 120 Days — PACK OF 5 ACCOUNTS", "Rust Twitch Drops Automatic Farming 120 Days"],
+    ["Rust Twitch Drops Automatic Farming 1 Year — PACK OF 10", "Rust Twitch Drops Automatic Farming 1 Year"],
+    // v1, still stripped.
     ["Rust — BULK 5+ accounts (5% off)", "Rust"],
     ["Rust — BULK 10+ accounts", "Rust"],
     ["Rust — BULK 5+ accounts (7.5% off)", "Rust"],
-    ["Rust — PACK OF 5 ACCOUNTS", "Rust"],
     ["Rust Twitch Drops Automatic Farming 120 Days — Bulk 5+ Accounts", "Rust Twitch Drops Automatic Farming 120 Days"],
     ["Rust Twitch Drops Automatic Farming 1 Year — Bulk 10+", "Rust Twitch Drops Automatic Farming 1 Year"],
     // Any case, and a dash a sanitiser may have flattened.
@@ -353,6 +386,8 @@ test("stripBulkSuffix: leaves every other title alone", () => {
     "Starter Pack",
     "Bulk Buy Edition",
     "Rust — Pack Opening Bundle",
+    "Rust — Pack of Wolves Skin",
+    "Rust (-5%)",
     "Rust — Bulk Discount Weekend",
     "Rust Twitch Drops Automatic Farming 120 Days",
   ]) {
@@ -373,6 +408,10 @@ test("baseTitleForSet: anchor title (unsuffixed) -> set name -> 'Twitch Drops bu
     baseTitleForSet({ set, anchorRow: { title: "Rust Twitch Drops — BULK 5+ accounts (5% off)" } }),
     "Rust Twitch Drops",
   );
+  assert.equal(
+    baseTitleForSet({ set, anchorRow: { title: "Rust Twitch Drops — PACK OF 5 ACCOUNTS (-5%)" } }),
+    "Rust Twitch Drops",
+  );
   for (const anchorRow of [null, undefined, {}, { title: "" }, { title: "   " }, { title: " — BULK 5+ accounts" }]) {
     assert.equal(baseTitleForSet({ set, anchorRow }), "Rust — Winter Event", JSON.stringify(anchorRow));
   }
@@ -391,7 +430,7 @@ const ITEMS = [
   { name: "Assault Rifle Skin" },
 ];
 
-test("accountsDescription (eldorado/g2g, dropset): whole bundle per account + the minimum order", () => {
+test("accountsDescription (eldorado/g2g, dropset): each purchase is a pack; buying 2 = 2 packs", () => {
   for (const market of ["eldorado", "g2g"]) {
     const d = accountsDescription({
       setName: "Rust — Winter Event",
@@ -401,10 +440,13 @@ test("accountsDescription (eldorado/g2g, dropset): whole bundle per account + th
       minQty: 5,
       source: "dropset",
     });
+    assert.ok(d.startsWith("PACK OF 5 ACCOUNTS — each purchase is a pack of 5 separate accounts."), market);
+    assert.ok(d.includes("Buying 2 = 2 packs (10 accounts), 3 = 3 packs (15 accounts)"), market);
+    assert.ok(d.includes("Quantity = packs: a quantity of 1 is one pack of 5 accounts"), market);
     assert.ok(d.includes("Each account holds the whole bundle:"), market);
-    assert.ok(d.includes("the minimum order is 5 accounts"), market);
-    assert.ok(d.includes("Minimum order: 5 accounts."), market);
-    assert.ok(d.includes("Set the quantity to 5 or more"), market);
+    // v1's wording would have a buyer set quantity 5 meaning 5 accounts.
+    assert.ok(!/minimum order/i.test(d), market + ": no minimum-order wording");
+    assert.ok(!/Set the quantity to 5 or more/i.test(d), market);
     assert.ok(d.includes("- 2× Hazmat Suit\n- Garage Door\n- Assault Rifle Skin"), market);
     assert.ok(d.includes("Rust — Winter Event"), market);
     assert.ok(d.includes("press Connect"), market);
@@ -426,11 +468,12 @@ test("accountsDescription (gameflip, dropset): you receive N separate accounts",
     minQty: 10,
     source: "dropset",
   });
-  assert.ok(d.startsWith("PACK OF 10 ACCOUNTS — you receive 10 separate accounts in this one purchase."));
+  assert.ok(d.startsWith("PACK OF 10 ACCOUNTS — each purchase is a pack of 10 separate accounts."));
   assert.ok(d.includes("You receive 10 separate accounts"));
   assert.ok(d.includes("Each account holds the whole bundle:"));
   assert.ok(d.includes("message me here on Gameflip"));
-  assert.ok(!d.includes("Minimum order:"), "no quantity on a Gameflip pack");
+  assert.ok(!/minimum order/i.test(d), "no quantity on a Gameflip pack");
+  assert.ok(!d.includes("Buying 2"), "a Gameflip pack is one listing, bought once");
   assert.ok(!d.includes("order chat"), "Gameflip delivers by code");
 });
 
@@ -449,7 +492,9 @@ test("accountsDescription (noclaim): the buyer logs in, links their own game acc
       market + ": " + d,
     );
     assert.ok(d.includes("Each account holds the whole bundle:"), market);
-    assert.ok(d.includes("Minimum order: 5 accounts."), market);
+    assert.ok(d.includes("each purchase is a pack of 5 separate accounts"), market);
+    assert.ok(d.includes("Buying 2 = 2 packs (10 accounts)"), market);
+    assert.ok(!/minimum order/i.test(d), market);
     assert.ok(!d.includes("press Connect"), market + ": claimed-pack copy on a no-claim pack");
   }
 });
@@ -464,6 +509,7 @@ test("accountsDescription: refuses what v1 does not sell", () => {
     assert.throws(() => accountsDescription({ ...base, market, source: "dropset" }), /not offered/);
   }
   assert.throws(() => accountsDescription({ ...base, market: "eldorado", source: "dropset", minQty: 0 }), /minQty/);
+  assert.throws(() => accountsDescription({ ...base, market: "eldorado", source: "dropset", minQty: 1 }), /pack of one/);
 });
 
 test("accountsDescription: never over DESC_MAX — as many items as fit, then '…and N more'", () => {
@@ -538,18 +584,18 @@ test("farmTerm: '1 Year' for 365, else 'N Days'; only whole days 1..730", () => 
   }
 });
 
-test("farmTitle: the exact format", () => {
+test("farmTitle: the exact format (PACKS-2 §3)", () => {
   assert.equal(
     farmTitle({ game: "Rust", days: 120, minQty: 5, market: "eldorado" }),
-    "Rust Twitch Drops Automatic Farming 120 Days — Bulk 5+ Accounts",
+    "Rust Twitch Drops Automatic Farming 120 Days — PACK OF 5 ACCOUNTS",
   );
   assert.equal(
     farmTitle({ game: "Rust", days: 365, minQty: 10, market: "g2g" }),
-    "Rust Twitch Drops Automatic Farming 1 Year — Bulk 10+ Accounts",
+    "Rust Twitch Drops Automatic Farming 1 Year — PACK OF 10 ACCOUNTS",
   );
   assert.equal(
     farmTitle({ game: "  Rust  ", days: "180", minQty: "5", market: "g2g" }),
-    "Rust Twitch Drops Automatic Farming 180 Days — Bulk 5+ Accounts",
+    "Rust Twitch Drops Automatic Farming 180 Days — PACK OF 5 ACCOUNTS",
     "outer spaces trimmed, numeric strings accepted",
   );
 });
@@ -589,7 +635,7 @@ test("farmTitle round-trips any configurable duration (30/90/730)", async () => 
   }
 });
 
-test("farmTitle: long game names up to each market's exact limit, then ' Accounts' drops, then THROW", async () => {
+test("farmTitle: long game names up to each market's exact limit, then ' ACCOUNTS' drops, then THROW", async () => {
   for (const market of FARM_MARKETS) {
     const max = TITLE_MAX[market];
     for (const days of TERMS) {
@@ -598,29 +644,29 @@ test("farmTitle: long game names up to each market's exact limit, then ' Account
         const full = maxFullGame(market, days, minQty);
         assert.ok(full > 40, where + ": room for a real game name");
 
-        // Longest game that keeps " Accounts": exactly at the limit.
+        // Longest game that keeps " ACCOUNTS": exactly at the limit.
         const g1 = nameOfLength(full);
         const t1 = farmTitle({ game: g1, days, minQty, market });
         assert.equal(t1.length, max, where);
-        assert.ok(t1.endsWith(" — Bulk " + minQty + "+ Accounts"), where + ": " + t1);
+        assert.ok(t1.endsWith(" — PACK OF " + minQty + " ACCOUNTS"), where + ": " + t1);
         await assertFarmRoundTrip(t1, { game: g1, days });
 
-        // One longer: " Accounts" is dropped, the rest is intact.
+        // One longer: " ACCOUNTS" is dropped, the pack size and the rest stay.
         const g2 = nameOfLength(full + 1);
         const t2 = farmTitle({ game: g2, days, minQty, market });
-        assert.ok(t2.endsWith(" — Bulk " + minQty + "+"), where + ": " + t2);
+        assert.ok(t2.endsWith(" — PACK OF " + minQty), where + ": " + t2);
         assert.ok(t2.length <= max, where);
         await assertFarmRoundTrip(t2, { game: g2, days });
 
         // Longest game at all: the short form exactly at the limit.
-        const g3 = nameOfLength(full + " Accounts".length);
+        const g3 = nameOfLength(full + " ACCOUNTS".length);
         const t3 = farmTitle({ game: g3, days, minQty, market });
         assert.equal(t3.length, max, where);
         await assertFarmRoundTrip(t3, { game: g3, days });
 
         // One more character: the game cannot be shortened, so refuse.
         assert.throws(
-          () => farmTitle({ game: nameOfLength(full + " Accounts".length + 1), days, minQty, market }),
+          () => farmTitle({ game: nameOfLength(full + " ACCOUNTS".length + 1), days, minQty, market }),
           /cannot be shortened/,
           where,
         );
@@ -639,7 +685,7 @@ test("farmTitle refuses a game the real parsers would misread — and only such 
       for (const game of termHazards) {
         assert.throws(() => farmTitle({ game, days, minQty: 5, market }), /farming term/, game);
         // The refusal is earned: the unguarded title really is misread.
-        const naive = game + " Twitch Drops Automatic Farming " + termLabel(days) + " — Bulk 5+ Accounts";
+        const naive = game + " Twitch Drops Automatic Farming " + termLabel(days) + " — PACK OF 5 ACCOUNTS";
         assert.notEqual(
           eldFarm.termToDays(naive),
           days,
@@ -649,7 +695,7 @@ test("farmTitle refuses a game the real parsers would misread — and only such 
       }
       for (const game of splitHazards) {
         assert.throws(() => farmTitle({ game, days, minQty: 5, market }), /Twitch Drops/, game);
-        const naive = game + " Twitch Drops Automatic Farming " + termLabel(days) + " — Bulk 5+ Accounts";
+        const naive = game + " Twitch Drops Automatic Farming " + termLabel(days) + " — PACK OF 5 ACCOUNTS";
         assert.notEqual(naive.split(GAME_SPLIT)[0].trim(), game, "the real split would cut " + game);
       }
     }
@@ -670,7 +716,7 @@ test("farmTitle: only farm markets, a real game, whole days 1..730, whole minQty
   for (const days of [0, 731, 12.5, "x", undefined]) {
     assert.throws(() => farmTitle({ ...ok, days }), /days must be/, "days " + String(days));
   }
-  for (const minQty of [0, -2, 1.5, undefined, "x"]) {
+  for (const minQty of [0, 1, -2, 1.5, undefined, "x"]) {
     assert.throws(() => farmTitle({ ...ok, minQty }), /minQty/, "minQty " + String(minQty));
   }
 });
@@ -689,11 +735,12 @@ test("account titles and farm titles never cross: bulk account titles are never 
 // farm descriptions
 // ---------------------------------------------------------------------------
 
-test("farmDescription: the bulk house copy — minimum order, full window, order chat, keep linked, no password change", () => {
+test("farmDescription: the pack house copy — a pack per purchase, 2 = 2 packs, full window, order chat, keep linked, no password change", () => {
   const d = farmDescription({ game: "Rust", days: 120, minQty: 5 });
-  assert.ok(d.startsWith("Automatic Farm on our Twitch for the game Rust"), "house opening line");
-  assert.ok(d.includes("The minimum order is 5 accounts"));
-  assert.ok(d.includes("set the quantity to 5 or more"));
+  assert.ok(d.startsWith("Automatic Farm on our Twitch for the game Rust — PACK OF 5 ACCOUNTS"), "house opening line");
+  assert.ok(d.includes("Each purchase is a pack of 5 separate Twitch accounts"));
+  assert.ok(d.includes("Buying 2 = 2 packs (10 accounts)"));
+  assert.ok(!/minimum order|set the quantity to/i.test(d), "no v1 minimum-order wording");
   assert.ok(d.includes("each one is farmed for Rust for the whole period [120 days]"));
   assert.ok(d.includes("arrive in the order chat"));
   assert.ok(d.includes("Keep every account linked"));
@@ -736,6 +783,7 @@ test("farmDescription: refuses bad input instead of promising the wrong thing", 
   assert.throws(() => farmDescription({ ...ok, game: "Rust\nx" }), /single line/);
   assert.throws(() => farmDescription({ ...ok, days: 0 }), /days must be/);
   assert.throws(() => farmDescription({ ...ok, minQty: 0 }), /minQty/);
+  assert.throws(() => farmDescription({ ...ok, minQty: 1 }), /pack of one/);
   assert.throws(() => farmDescription({ ...ok, game: "Rust " + "x".repeat(900) }), /over the/);
 });
 
@@ -745,7 +793,7 @@ test("the module is pure: __setDeps / __resetDeps exist and change nothing", () 
   copy.__setDeps({ anything: true });
   assert.equal(
     farmTitle({ game: "Rust", days: 120, minQty: 5, market: "eldorado" }),
-    "Rust Twitch Drops Automatic Farming 120 Days — Bulk 5+ Accounts",
+    "Rust Twitch Drops Automatic Farming 120 Days — PACK OF 5 ACCOUNTS",
   );
   copy.__resetDeps();
 });

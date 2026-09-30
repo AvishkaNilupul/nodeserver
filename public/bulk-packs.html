@@ -132,7 +132,8 @@
   .mrow .mh { display:flex; align-items:baseline; gap:8px; flex-wrap:wrap; font-size:12.5px; }
   .mrow .mh b { font-size:13px; }
   .tiers { display:flex; gap:6px; flex-wrap:wrap; }
-  .tier { font-size:12.5px; padding:7px 11px; border-radius:9px; font-weight:600; }
+  .tier { font-size:12.5px; padding:7px 11px; border-radius:9px; font-weight:600; text-align:left; line-height:1.3; }
+  .tier .each { display:block; font-size:11px; font-weight:500; color:var(--muted); margin-top:1px; }
   .tier[aria-disabled="true"] { opacity:.5; cursor:not-allowed; }
   .tier[aria-disabled="true"]:hover { border-color:var(--line); }
   a.tier.live { display:inline-flex; align-items:center; color:var(--green); background:#ecfdf5; border:1px solid transparent; text-decoration:none; }
@@ -158,6 +159,7 @@
   .t-sub { font-size:11.5px; color:var(--muted); margin-top:3px; font-weight:400; }
   .t-err { font-size:11.5px; color:var(--red); margin-top:3px; overflow-wrap:anywhere; font-weight:400; }
   .t-att { font-size:11.5px; color:var(--yellow); margin-top:3px; overflow-wrap:anywhere; font-weight:600; }
+  .t-price { display:inline-flex; gap:6px; align-items:center; flex-wrap:wrap; }
   .flags { display:flex; gap:4px; flex-wrap:wrap; }
   .acts { display:flex; gap:6px; flex-wrap:wrap; }
   .total { margin:0 0 12px; font-size:13.5px; line-height:1.5; }
@@ -190,6 +192,11 @@
   label.f { display:block; font-size:12px; font-weight:600; color:var(--muted); }
   label.f input { display:block; margin-top:5px; width:100%; }
   .fh { display:block; font-size:11.5px; font-weight:400; color:var(--muted); margin-top:4px; line-height:1.4; }
+  .fh b { color:var(--ink); font-weight:650; }
+  .fh.warn, .fh.warn b { color:var(--yellow); }
+  .fh.bad, .fh.bad b { color:var(--red); }
+  label.pc-check { display:flex; gap:8px; align-items:center; margin-top:8px; font-weight:650; cursor:pointer; }
+  label.pc-check input { width:16px; height:16px; flex-shrink:0; accent-color:var(--accent); }
   input[type="number"], input[type="text"] { padding:8px 10px; border-radius:9px; border:1.5px solid var(--line); background:var(--surface-2); color:var(--ink); font:inherit; font-size:13.5px; outline:none; }
   input[type="number"]:focus, input[type="text"]:focus { border-color:var(--accent); box-shadow:0 0 0 4px rgba(79,70,229,0.12); }
   input:disabled { opacity:.6; }
@@ -234,7 +241,8 @@
     .head { gap:10px; margin-bottom:12px; }
     .head-actions { margin-left:0; width:100%; }
     .head-actions button { flex:1; }
-    .strip { padding:11px 12px; gap:10px; flex-direction:column; align-items:stretch; }
+    /* nowrap: a wrapping column sizes each line to its widest chip, not the screen */
+    .strip { padding:11px 12px; gap:10px; flex-direction:column; align-items:stretch; flex-wrap:nowrap; }
     .mchip { max-width:100%; }
     .tabs { margin:14px 0 12px; }
     .tabs button { padding:9px 8px; font-size:13px; }
@@ -300,7 +308,7 @@
     <div class="head">
       <div>
         <h1>Bulk packs</h1>
-        <div class="sub">Bulk offers built from spare stock. Nothing is published until you press Send; after that the background check looks after each live offer (sales, sold out, expiry). Prices are fixed when sent and never repriced.</div>
+        <div class="sub">Bulk offers built from spare stock. Each listing sells whole packs (for example a pack of 5 accounts at one price) on every market. Nothing is published until you press Send; after that the background check looks after each live offer (sales, sold out, expiry). Prices are fixed when sent and never repriced.</div>
       </div>
       <div class="head-actions">
         <button class="primary" id="runBtn" type="button" title="Runs the background check once, now: sales, stock and expiry for every live offer. It never publishes anything.">Run check now</button>
@@ -389,11 +397,23 @@
     var SOURCE_WORD = { dropset: "farmed accounts", noclaim: "no-claim", farm: "farming" };
     var SOURCE_BADGE = { dropset: "Farmed", noclaim: "No-claim", farm: "Farming" };
     var TITLE_MAX = { eldorado: 160, g2g: 128, gameflip: 120 };
+    // The lowest price one LISTING (= one pack) may have (config.js
+    // MARKET_FLOORS). Only for the hint under a typed price: the server
+    // refuses below it whatever the page says.
+    var MARKET_FLOORS = { eldorado: 0.5, g2g: 1, gameflip: 0.75 };
+    // The router's bounds: units (accounts) per send / refill, and a typed
+    // price per account.
+    var MAX_UNITS = 500;
+    var MAX_CUSTOM = 1000;
+    // A typed price per account below this share of the single price, or
+    // above the single price, needs "I checked this price" (PACKS-2 §3). The
+    // server decides; the page only warns ahead.
+    var CONFIRM_LOW = 0.7;
     var STATE = {
       sending: { label: "sending", cls: "s-info", tip: "Being published right now." },
       live: { label: "live", cls: "s-ok", tip: "On sale." },
       paused: { label: "paused", cls: "s-warn", tip: "Off sale for now. It can be resumed." },
-      sold_out: { label: "sold out", cls: "s-off", tip: "Fewer free accounts than the minimum order were left, so the offer was closed and the rest released." },
+      sold_out: { label: "sold out", cls: "s-off", tip: "Fewer free accounts than one pack were left (a part of a pack can never sell), so the offer was closed and the rest released." },
       sold: { label: "sold", cls: "s-ok", tip: "The pack sold." },
       withdrawn: { label: "withdrawn", cls: "s-off", tip: "Taken down." },
       expired: { label: "expired", cls: "s-off", tip: "The marketplace expired or removed it." },
@@ -405,7 +425,7 @@
     var KEY_LABEL = {
       bulkPacksEnabled: "Master switch",
       bulkPacksMarkets: "Markets",
-      bulkPackTiers: "Tiers",
+      bulkPackTiers: "Pack sizes",
       bulkPackReserveSingles: "Keep for single listings",
       bulkPackUnitsPerOffer: "Accounts per offer",
       bulkFarmPrices: "Farm prices",
@@ -446,6 +466,66 @@
     function durWord(days) { var d = toInt(days); return d === 365 ? "1 year" : plural(d, "day"); }
     function idOf(o) { return String((o && (o._id || o.id)) || ""); }
     function bp() { return (S.ov && S.ov.settings) || (S.cfg && S.cfg.settings) || null; }
+    function round2(x) { var n = Number(x); return isFinite(n) ? Math.round(n * 100) / 100 : 0; }
+    // A whole count >= 0 (a negative one, e.g. spare accounts below the
+    // singles reserve, is none), or null when the field is missing or not a
+    // number (a field an older server answer does not have yet).
+    function count0(v) {
+      if (v == null || v === "" || typeof v === "boolean" || typeof v === "object") return null;
+      var n = Number(v);
+      return isFinite(n) ? Math.max(0, Math.floor(n)) : null;
+    }
+
+    // ---- Packs (docs/bulk-packs/PACKS-2.md): one listing = one pack of N
+    // accounts at one price, on every market. The server fixes every price
+    // and count; the page only shows them and previews what a send would do.
+    function packName(n) { return "Pack of " + n; }
+    // A proposal tier's price for ONE pack of minQty accounts. Proposals carry
+    // packPrice on every market; an older answer had it on Gameflip only and
+    // the price per account elsewhere, so then it is minQty × unitPrice.
+    // 0 = no price.
+    function tierPack(t) {
+      if (!t || t.priced === false) return 0;
+      var n = toInt(t.minQty), pack = num(t.packPrice);
+      if (!(pack > 0) && n >= 1 && num(t.unitPrice) > 0) pack = round2(num(t.unitPrice) * n);
+      return pack > 0 ? pack : 0;
+    }
+    function eachOf(pack, n) { return n >= 1 && pack > 0 ? round2(pack / n) : 0; }
+    // Whole packs of minQty a NEW offer on this market could carry now.
+    // Proposals carry packsAvailable — on the tier, or on the market row as a
+    // number or a {packSize: packs} map. `room` is the accounts the page knows
+    // of (the set's spare accounts, or what farm capacity can advertise) and
+    // caps it, so whichever way the field is meant the answer never exceeds
+    // what `room` allows. null = unknown. The server re-reads and caps it.
+    function packsAvail(m, t, room) {
+      var n = toInt(t && t.minQty);
+      if (!(n >= 1)) return 0;
+      var r = count0(room);
+      var bound = r == null ? null : Math.floor(r / n);
+      var v = count0(t && t.packsAvailable);
+      var pa = m ? m.packsAvailable : null;
+      if (v == null && pa && typeof pa === "object" && !Array.isArray(pa)) v = count0(pa[String(n)]);
+      else if (v == null) v = count0(pa);
+      if (v == null) return bound;
+      return bound == null ? v : Math.min(v, bound);
+    }
+    // The "Custom price per account" box: empty, a price, or a reason it is not one.
+    function parsePrice(s) {
+      s = String(s == null ? "" : s).trim().replace(/^\$\s*/, "");
+      if (!s) return { empty: true };
+      if (!/^(\d+(\.\d+)?|\.\d+)$/.test(s)) return { bad: "Enter a price per account like 1.10, or leave the box empty." };
+      var v = Number(s);
+      if (!(v > 0)) return { bad: "The price must be above $0." };
+      if (v > MAX_CUSTOM) return { bad: "At most " + money(MAX_CUSTOM) + " per account." };
+      return { value: v };
+    }
+    // "12% below the single price of $1.25" for a price per account.
+    function vsSingle(unit, anchor) {
+      if (!(anchor > 0)) return "no single price to compare with";
+      var d = (unit - anchor) / anchor * 100, a = Math.round(Math.abs(d));
+      if (a === 0) return "the same as the single price of " + money(anchor);
+      return a + "% " + (d < 0 ? "below" : "above") + " the single price of " + money(anchor);
+    }
 
     // Epoch ms or null — never a guess. An unparseable time renders as unknown.
     function ts(v) {
@@ -528,6 +608,8 @@
 
     // ---- Dialog. One modal for every confirm on the page. onOk resolves to:
     //   false             → keep it open (a message was shown)
+    //   { stay, okDisabled, okText } → keep it open, button as given (the
+    //                       price_confirm answer: disabled until the tick)
     //   { doneHtml }      → keep it open showing the result, button becomes Close
     //   { toast } / other → close it (and toast the text)
     var M = { onOk: null, busy: false, back: null };
@@ -581,9 +663,9 @@
       }
       M.busy = false;
       cancel.disabled = false;
-      if (res === false) {
-        ok.disabled = false;
-        ok.textContent = label;
+      if (res === false || (res && res.stay)) {
+        ok.disabled = !!(res && res.okDisabled);
+        ok.textContent = (res && res.okText) || label;
         return;
       }
       if (res && res.doneHtml) {
@@ -829,11 +911,16 @@
 
     // A tier the owner cannot send is still clickable: on a phone there is no
     // tooltip, so tapping it says why (aria-disabled, not the disabled attribute).
-    function tierButton(act, ref, label, why, tip) {
+    // `sub` is the small second line ("≈ $1.19 each").
+    function tierButton(act, ref, label, why, tip, sub) {
       return '<button type="button" class="tier" data-act="' + act + '" ' + ref +
         (why ? ' aria-disabled="true" data-why="' + esc(why) + '"' : "") +
-        ' title="' + esc(why || tip || "") + '">' + esc(label) + "</button>";
+        ' title="' + esc(why || tip || "") + '">' + esc(label) +
+        (sub ? '<small class="each">' + esc(sub) + "</small>" : "") + "</button>";
     }
+    // "Pack of 5 — $5.94" over "≈ $1.19 each", the same on every market.
+    function packLabel(n, pack) { return pack > 0 ? packName(n) + " — " + money(pack) : packName(n) + " · no price"; }
+    function eachLabel(n, pack) { return pack > 0 ? "≈ " + money(eachOf(pack, n)) + " each" : ""; }
     function liveLink(label, id) {
       return '<a class="tier live" href="#live" data-act="goto-offer" data-id="' + esc(id) +
         '" title="Already live. Opens it in Live offers.">' + esc(label) + " · Live ›</a>";
@@ -896,7 +983,7 @@
       var mins = (Array.isArray(b.tiers) ? b.tiers : []).map(function (t) { return toInt(t.minQty); }).filter(function (n) { return n > 0; });
       var min = mins.length ? Math.min.apply(null, mins) : 5;
       if (!Array.isArray(b.markets) || !b.markets.length) return "No market is ticked in Settings → Markets.";
-      return "A set shows up here once it has at least " + min + " spare accounts after keeping " + toInt(b.reserveSingles) + " back for single listings.";
+      return "A set shows up here once it has enough spare accounts for the smallest pack (" + min + ") after keeping " + toInt(b.reserveSingles) + " back for single listings.";
     }
 
     function acctCard(it, i) {
@@ -961,46 +1048,145 @@
     }
     function acctTierBtn(it, m, t, i, mi, ti, reasons) {
       var market = m.market, isGf = market === "gameflip";
-      var minQty = toInt(t.minQty), d = num(t.discountPct);
-      var price = isGf ? num(t.packPrice) : num(t.unitPrice);
-      if (t.liveOfferId) return liveLink(isGf ? "Pack of " + minQty : minQty + "+", t.liveOfferId);
-      var label = !(price > 0)
-        ? (isGf ? "Pack of " + minQty : minQty + "+") + " · no price"
-        : (isGf ? "Pack of " + minQty + " — " + money(price) : minQty + "+ at " + money(price) + " each");
+      var n = toInt(t.minQty), d = num(t.discountPct);
+      var pack = tierPack(t);
+      if (t.liveOfferId) return liveLink(packName(n), t.liveOfferId);
       var gate = m.gate || {}, why = "";
       if (gate.ok === false) {
         why = "Closed on " + mLabel(market) + ": " + (gate.reason || "delivery is not switched on") + ".";
-      } else if (!(price > 0)) {
+      } else if (!(pack > 0)) {
         why = "No price to start from on " + mLabel(market) + ": no live single listing and no set price.";
         reasons.push(why);
       } else if (t.fits !== true) {
         why = it.source === "noclaim"
-          ? minQty + "+ needs " + minQty + " accounts on the " + mLabel(market) + " no-claim shelf; there are fewer now."
-          : minQty + "+ needs " + minQty + " spare accounts; " + toInt(it.surplus) + " spare now.";
+          ? "A pack of " + n + " needs " + n + " accounts on the " + mLabel(market) + " no-claim shelf; there are fewer now."
+          : "A pack of " + n + " needs " + n + " spare accounts; " + toInt(it.surplus) + " spare now.";
         reasons.push(why);
       }
-      var tip = (isGf ? "One Gameflip listing: " + minQty + " accounts sold and delivered together" : "Buyers order at least " + minQty + " accounts") +
+      var tip = (isGf
+        ? "One Gameflip listing: " + n + " accounts sold and delivered together"
+        : "One listing sells packs of " + n + " accounts at one price per pack; a buyer can buy several packs") +
         (d > 0 ? ", " + pct(d) + "% off the single price." : ".");
-      return tierButton("send-acct", 'data-i="' + i + '" data-m="' + mi + '" data-t="' + ti + '"', label, why, tip);
+      return tierButton("send-acct", 'data-i="' + i + '" data-m="' + mi + '" data-t="' + ti + '"', packLabel(n, pack), why, tip, eachLabel(n, pack));
     }
 
-    // Title preview, built the way copy.js builds it (CONTRACT: accountsTitle /
-    // farmTitle). The server makes the real one; the dialog says so.
+    // Title preview, built the way copy.js builds it (PACKS-2 §3: the same
+    // "PACK OF N ACCOUNTS" suffix on every market, the discount only when it
+    // fits). The server makes the real one; the dialog says so.
     function accountsTitlePreview(base, market, minQty, d) {
       base = String(base || "").trim() || "Twitch Drops bundle";
-      var suffix = market === "gameflip"
-        ? " — PACK OF " + minQty + " ACCOUNTS"
-        : " — BULK " + minQty + "+ accounts" + (num(d) > 0 ? " (" + pct(d) + "% off)" : "");
+      var suffix = " — PACK OF " + minQty + " ACCOUNTS";
+      var off = num(d) > 0 ? " (-" + pct(d) + "%)" : "";
       var max = TITLE_MAX[market] || 120;
       if (base.length + suffix.length > max) base = base.slice(0, Math.max(1, max - suffix.length - 1)).replace(/\s+$/, "") + "…";
-      return base + suffix;
+      var t = base + suffix;
+      return off && t.length + off.length <= max ? t + off : t;
     }
     function farmTitlePreview(game, days, minQty, market) {
-      var t = String(game || "") + " Twitch Drops Automatic Farming " + farmTerm(days) + " — Bulk " + minQty + "+ Accounts";
-      if (t.length > (TITLE_MAX[market] || 120)) t = t.replace(/ Accounts$/, "");
+      var t = String(game || "") + " Twitch Drops Automatic Farming " + farmTerm(days) + " — PACK OF " + minQty + " ACCOUNTS";
+      if (t.length > (TITLE_MAX[market] || 120)) t = t.replace(/ ACCOUNTS$/, "");
       return t;
     }
 
+    // The "Custom price per account" box and the price_confirm answer of one
+    // Send dialog (PACKS-2 §3/§6). o: { market, n (pack size), anchor (single
+    // price per account), minUnit (the set's minimum per account, 0 = none),
+    // tierPack (the tier's price per pack), okText, onChange(parsed) }.
+    //
+    // A 409 {code:"price_confirm"} shows the server's message and an
+    // "I checked this price" tick; Send stays disabled until it is ticked and
+    // then resends with confirmPrice:true. The tick answers the ONE price the
+    // server asked about: typing another price withdraws it.
+    function priceControl(o) {
+      var asked = null;   // the price (as a key) the server asked to confirm
+      var sentKey = null; // the price the last send carried
+      function read() { var i = el("sendCustom"); return parsePrice(i ? i.value : ""); }
+      function keyOf(pr) { return pr && pr.value != null ? String(pr.value) : ""; }
+      // Per pack: the typed price × N, or the tier's; null while the box is bad.
+      function pack(pr) { return pr.bad ? null : (pr.value != null ? round2(pr.value * o.n) : o.tierPack); }
+      function html() {
+        var each = eachOf(o.tierPack, o.n);
+        return '<label class="f">Custom price per account <span class="muted">(optional)</span>' +
+          '<input type="text" id="sendCustom" inputmode="decimal" autocomplete="off" spellcheck="false"' +
+          (each > 0 ? ' placeholder="' + esc("Tier price ≈ " + money(each)) + '"' : "") + ">" +
+          '<span class="fh" id="customHint"></span></label><div id="pcBox" hidden></div>';
+      }
+      function hint(pr) {
+        if (pr.bad) return { cls: "bad", html: esc(pr.bad) };
+        if (pr.empty) {
+          return { cls: "", html: o.tierPack > 0
+            ? "Empty: the tier price, <b>" + esc(money(o.tierPack)) + "</b> per pack of " + o.n + " (≈ " + esc(money(eachOf(o.tierPack, o.n))) + " each)."
+            : "Empty: the tier price." };
+        }
+        var p = round2(pr.value * o.n), floor = MARKET_FLOORS[o.market] || 0;
+        var h = "Pack of " + o.n + ": <b>" + esc(money(p)) + "</b> · " + esc(vsSingle(pr.value, o.anchor)) + ".";
+        if (p < floor) {
+          return { cls: "bad", html: h + " That is below " + esc(mLabel(o.market)) + "'s minimum of " + esc(money(floor)) + " per listing, so it will be refused." };
+        }
+        var why = o.anchor > 0 && pr.value > o.anchor ? "Above the single price"
+          : (o.anchor > 0 && pr.value < CONFIRM_LOW * o.anchor ? "More than " + Math.round((1 - CONFIRM_LOW) * 100) + "% below the single price"
+            : (o.minUnit > 0 && pr.value < o.minUnit ? "Below this set's minimum price of " + money(o.minUnit) : ""));
+        return why ? { cls: "warn", html: h + " " + esc(why) + ": you will be asked to confirm it." } : { cls: "", html: h };
+      }
+      function clearAsk() {
+        asked = null;
+        var b = el("pcBox");
+        if (b) { b.hidden = true; b.innerHTML = ""; }
+        var ok = el("mOk");
+        if (ok && M.onOk && !M.busy) { ok.disabled = false; ok.textContent = o.okText || "Send"; }
+      }
+      function refresh() {
+        var pr = read(), hb = el("customHint"), h = hint(pr);
+        if (hb) { hb.className = "fh" + (h.cls ? " " + h.cls : ""); hb.innerHTML = h.html; }
+        if (asked !== null && keyOf(pr) !== asked) clearAsk();
+        if (o.onChange) o.onChange(pr);
+      }
+      function wire(body) {
+        var i = body.querySelector("#sendCustom");
+        if (i) i.addEventListener("input", refresh);
+        refresh();
+      }
+      // Adds customUnitPrice / confirmPrice to the send body; false = not sendable.
+      function apply(payload) {
+        var pr = read();
+        if (pr.bad) { setMsg("bad", esc(pr.bad)); return false; }
+        if (pr.value != null) payload.customUnitPrice = pr.value;
+        var k = keyOf(pr);
+        if (asked !== null && k === asked) {
+          var tick = el("pcTick");
+          if (!(tick && tick.checked)) { setMsg("bad", "Tick “I checked this price” to send at this price, or change the price."); return false; }
+          payload.confirmPrice = true;
+        }
+        sentKey = k;
+        return true;
+      }
+      // A send error: the dialog result for a price_confirm, else null.
+      function answer(e) {
+        var d = e && e.data;
+        if (!(e && e.status === 409 && d && d.code === "price_confirm")) return null;
+        if (keyOf(read()) !== sentKey) {
+          // The price was changed while it was sending: that answer is stale.
+          clearAsk();
+          setMsg("warn", "The server asked to confirm the price you had typed before. Press Send again to check this one.");
+          return { stay: true, okDisabled: false, okText: o.okText || "Send" };
+        }
+        asked = sentKey;
+        var b = el("pcBox"), msg = String(d.message || "This price is far from the single price.");
+        // send.js words it "Check this price: …"; only a bare message gets the heading.
+        b.innerHTML = '<div class="note warn" style="margin:12px 0 0">' + (/^\s*check this price/i.test(msg) ? "" : "<b>Check this price.</b> ") +
+          esc(msg) + '<label class="pc-check"><input type="checkbox" id="pcTick"> I checked this price</label></div>';
+        b.hidden = false;
+        var tick = el("pcTick");
+        tick.addEventListener("change", function () { if (M.onOk && !M.busy) el("mOk").disabled = !tick.checked; });
+        try { tick.focus(); } catch (x) {}
+        return { stay: true, okDisabled: true, okText: "Send at this price" };
+      }
+      return { html: html, wire: wire, read: read, pack: pack, apply: apply, answer: answer };
+    }
+
+    // Account packs: one listing per (set, market, pack size). Eldorado / G2G
+    // carry a number of PACKS (the owner picks it; sent as units = packs × N
+    // accounts, PACKS-2 §3); a Gameflip listing is exactly one pack.
     function openSendAcct(i, mi, ti) {
       var it = S.acct && S.acct.items && S.acct.items[i];
       var m = it && Array.isArray(it.markets) ? it.markets[mi] : null;
@@ -1009,41 +1195,69 @@
       var b = bp() || {};
       var set = it.set || {}, market = m.market, name = mLabel(market);
       var isGf = market === "gameflip", src = it.source === "noclaim" ? "noclaim" : "dropset";
-      var minQty = toInt(t.minQty), d = num(t.discountPct), unit = num(t.unitPrice), pack = num(t.packPrice);
-      var surplus = Math.max(0, toInt(it.surplus));
-      var maxU = Math.max(minQty, surplus);
-      var def = Math.max(minQty, Math.min(toInt(b.unitsPerOffer) || 20, surplus));
-      var title = accountsTitlePreview(set.name, market, minQty, d);
+      var n = Math.max(1, toInt(t.minQty)), d = num(t.discountPct), anchor = num(m.anchor);
+      var tierP = tierPack(t);
+      var spare = Math.max(0, toInt(it.surplus));
+      var avail = packsAvail(m, t, it.surplus);
+      // What one send may carry: the packs available, and units ≤ MAX_UNITS.
+      var cap = Math.max(1, Math.floor(MAX_UNITS / n));
+      var maxP = Math.max(1, Math.min(avail == null ? cap : avail, cap));
+      var defP = Math.max(1, Math.min(Math.floor((toInt(b.unitsPerOffer) || 20) / n) || 1, maxP));
       var setId = String(set.id || set._id || "");
+      var pc = priceControl({ market: market, n: n, anchor: anchor, minUnit: num(set.minPriceUsd), tierPack: tierP, okText: "Send", onChange: redraw });
 
-      function sentence(n) {
-        var q = '<span class="qt">“' + esc(title) + '”</span>';
+      function packsTyped() {
+        var inp = el("sendPacks");
+        if (!inp) return 1;
+        var v = Number(inp.value);
+        return Number.isInteger(v) && v >= 1 ? v : null;
+      }
+      function sentence() {
+        var pr = pc.read(), p = pc.pack(pr), custom = pr.value != null;
+        var q = '<span class="qt">“' + esc(accountsTitlePreview(set.name, market, n, custom ? 0 : d)) + "”</span>";
+        var price = p == null ? "<b>?</b>" : "<b>" + esc(money(p)) + "</b>";
+        var each = p == null ? "" : " (≈ " + esc(money(eachOf(p, n))) + " per account" + (custom ? ", your price" : "") + ")";
         if (isGf) {
-          return "List " + q + " on Gameflip as one pack of " + minQty + " accounts for <b>" + money(pack) + "</b>; " +
-            minQty + " accounts will be reserved and delivered together.";
+          return "List " + q + " on Gameflip as one pack of " + n + " accounts for " + price + each + "; " +
+            n + " accounts will be reserved and delivered together.";
         }
+        var k = packsTyped();
+        var packs = k == null ? "<b>?</b> packs" : "<b>" + esc(plural(k, "pack")) + "</b>";
         if (src === "noclaim") {
-          return "List " + q + " on " + esc(name) + " at <b>" + money(unit) + "</b> per account, showing up to <b>" + n +
-            "</b> accounts from the shared no-claim shelf. Nothing is reserved now: an account is picked when an order comes in.";
+          return "List " + q + " on " + esc(name) + ": packs of " + n + " accounts at " + price + " per pack" + each +
+            ", showing up to " + packs + " from the shared no-claim shelf. Nothing is reserved now: accounts are picked when an order comes in.";
         }
-        return "List " + q + " on " + esc(name) + " at <b>" + money(unit) + "</b> per account; <b>" + n + "</b> accounts will be reserved.";
+        return "List " + q + " on " + esc(name) + ": " + packs + " of " + n + " accounts at " + price + " per pack" + each + "; " +
+          (k == null ? "" : "<b>" + esc(plural(k * n, "account")) + "</b> ") + "will be reserved.";
+      }
+      function redraw() {
+        var s = el("sendSentence");
+        if (s) s.innerHTML = sentence();
       }
 
       var facts = [];
       facts.push(isGf
-        ? "Gameflip sells the pack as one item; the buyer receives " + minQty + " separate accounts, each holding the whole bundle."
-        : "Buyers must order at least " + minQty + " accounts. Each account holds the whole bundle.");
-      if (num(m.anchor) > 0) facts.push((d > 0 ? pct(d) + "% off" : "No discount on") + " the single price of " + money(m.anchor) + " (" + (BASIS[m.basis] || m.basis || "price reference") + ").");
+        ? "Gameflip sells the pack as one item: the buyer receives " + n + " separate accounts, each holding the whole bundle."
+        : "One listing, one price per pack: a buyer who buys 2 gets 2 packs (" + 2 * n + " accounts). Each account holds the whole bundle.");
+      if (anchor > 0 && tierP > 0) {
+        facts.push("Tier price: " + money(tierP) + " per pack, " + (d > 0 ? pct(d) + "% off" : "no discount on") + " the single price of " +
+          money(anchor) + " per account (" + (BASIS[m.basis] || m.basis || "price reference") + ").");
+      }
       facts.push("The price is fixed once sent. Bulk offers are never repriced.");
       if (src === "dropset") facts.push("Reserved accounts leave single-listing stock until they sell or you withdraw the offer.");
+      if (src === "noclaim") facts.push("After sending, the pack count on " + name + " follows the shelf: whole packs only.");
       facts.push("Title preview: the final title starts from your cheapest single listing's title when there is one.");
 
-      var html = '<p class="sentence" id="sendSentence">' + sentence(def) + "</p>";
+      var html = '<p class="sentence" id="sendSentence"></p>';
       if (!isGf) {
-        html += '<label class="f">Accounts on this offer' +
-          '<input type="number" id="sendUnits" min="' + minQty + '" max="' + maxU + '" step="1" value="' + def + '" inputmode="numeric">' +
-          '<span class="fh">From ' + minQty + " to " + maxU + (src === "noclaim" ? " (the server caps it at this market's share of the shelf)." : " (the spare accounts in this set).") + "</span></label>";
+        var room = src === "noclaim"
+          ? "The server caps it at this market's share of the no-claim shelf."
+          : (avail == null ? spare + " spare accounts in this set." : plural(spare, "spare account") + " in this set = " + plural(avail, "whole pack") + ".");
+        html += '<label class="f">Packs on this offer' +
+          '<input type="number" id="sendPacks" min="1" max="' + maxP + '" step="1" value="' + defP + '" inputmode="numeric">' +
+          '<span class="fh">1 to ' + maxP + ", each pack is " + n + " accounts. " + esc(room) + "</span></label>";
       }
+      html += pc.html();
       html += '<ul class="facts">' + facts.map(function (f) { return "<li>" + esc(f) + "</li>"; }).join("") + "</ul>";
       if (b.enabled !== true) html += '<div class="note warn">Bulk packs is switched off, so the server will refuse this. Switch it on at the top of the page first.</div>';
 
@@ -1052,24 +1266,29 @@
         html: html,
         okText: "Send",
         onOpen: function (body) {
-          var inp = body.querySelector("#sendUnits");
-          if (!inp) return;
-          inp.addEventListener("input", function () {
-            var n = Number(inp.value);
-            el("sendSentence").innerHTML = sentence(Number.isInteger(n) && n > 0 ? n : "?");
-          });
+          var inp = body.querySelector("#sendPacks");
+          if (inp) inp.addEventListener("input", redraw);
+          pc.wire(body); // draws the price hint and the sentence
         },
         onOk: async function () {
-          var payload = { source: src, setId: setId, market: market, minQty: minQty };
+          var payload = { source: src, setId: setId, market: market, minQty: n };
           if (!isGf) {
-            var n = Number(el("sendUnits").value);
-            if (!Number.isInteger(n) || n < minQty || n > maxU) {
-              setMsg("bad", "Enter a whole number of accounts from " + minQty + " to " + maxU + ".");
+            var k = packsTyped();
+            if (k == null || k > maxP) {
+              setMsg("bad", "Enter a whole number of packs from 1 to " + maxP + ".");
               return false;
             }
-            payload.units = n;
+            payload.units = k * n;
           }
-          var j = await api("/send", "POST", payload);
+          if (!pc.apply(payload)) return false;
+          var j;
+          try {
+            j = await api("/send", "POST", payload);
+          } catch (e) {
+            var asked = pc.answer(e);
+            if (asked !== null) return asked;
+            throw e;
+          }
           afterChange({ acct: true, live: true });
           return { doneHtml: sentHtml(j, market) };
         }
@@ -1080,7 +1299,13 @@
       var o = (j && j.offer) || {};
       var mk = o.market || market;
       var st = STATE[o.state];
-      var h = "<b>Sent.</b> The offer is " + esc(st ? st.label : "live") + " on " + esc(mLabel(mk)) + ".";
+      var h = "<b>Sent.</b> The offer is " + esc(st ? st.label : "live") + " on " + esc(mLabel(mk));
+      var pk = offerPack(o);
+      if (toInt(o.minQty) >= 2 && pk.pack > 0) {
+        h += ": packs of " + pk.n + " at " + esc(money(pk.pack)) + " per pack" + (o.customPrice === true ? " (your price)" : "");
+        if (mk !== "gameflip" && toInt(o.advertisedQty) > 0) h += ", " + esc(plural(toInt(o.advertisedQty), "pack")) + " on sale";
+      }
+      h += ".";
       var url = safeUrl(o.url);
       if (url) h += ' <a href="' + esc(url) + '" target="_blank" rel="noopener noreferrer">Open it on ' + esc(mLabel(mk)) + " ↗</a>";
       var id = idOf(o);
@@ -1189,21 +1414,22 @@
     function farmCell(it, m, i, mi, adv) {
       var gate = m.gate || {}, name = mLabel(m.market), reasons = [];
       var btns = (Array.isArray(m.tiers) ? m.tiers : []).map(function (t, ti) {
-        var minQty = toInt(t.minQty), price = num(t.unitPrice), d = num(t.discountPct);
-        if (t.liveOfferId) return liveLink(minQty + "+", t.liveOfferId);
+        var n = toInt(t.minQty), pack = tierPack(t), d = num(t.discountPct);
+        if (t.liveOfferId) return liveLink(packName(n), t.liveOfferId);
         var why = "";
         if (gate.ok === false) {
           why = "Closed on " + name + ": " + (gate.reason || "delivery is not switched on") + ".";
-        } else if (!(price > 0)) {
+        } else if (!(pack > 0)) {
           why = "No farm price for " + durWord(it.days) + " on " + name + ". Set one in Settings → Farm prices.";
           reasons.push(why);
-        } else if (t.fits === false || adv < minQty) {
-          why = minQty + "+ needs room for " + minQty + " accounts; " + adv + " can be advertised now.";
+        } else if (t.fits === false || adv < n) {
+          why = "A pack of " + n + " needs room for " + n + " accounts; " + adv + " can be advertised now.";
           reasons.push(why);
         }
-        var tip = "Buyers order at least " + minQty + " accounts" + (d > 0 ? ", " + pct(d) + "% off the farm price." : ".");
+        var tip = "One listing sells packs of " + n + " farming accounts at one price per pack; a buyer can buy several packs" +
+          (d > 0 ? ", " + pct(d) + "% off the farm price." : ".");
         return tierButton("send-farm", 'data-i="' + i + '" data-m="' + mi + '" data-t="' + ti + '"',
-          price > 0 ? minQty + "+ at " + money(price) + " each" : minQty + "+ · no price", why, tip);
+          packLabel(n, pack), why, tip, eachLabel(n, pack));
       }).join("");
       var h = '<div class="tiers">' + (btns || '<span class="muted">No tiers set.</span>') + "</div>";
       if (gate.ok === false) h += '<div class="why">Closed: ' + esc(gate.reason || "delivery is not switched on") + "</div>";
@@ -1218,30 +1444,60 @@
       if (!t) return;
       var b = bp() || {};
       var market = m.market, name = mLabel(market);
-      var minQty = toInt(t.minQty), d = num(t.discountPct), unit = num(t.unitPrice);
+      var n = Math.max(1, toInt(t.minQty)), d = num(t.discountPct), anchor = num(m.anchor);
+      var tierP = tierPack(t);
       var adv = toInt(p.advertisable);
+      // Whole packs free capacity allows now (the server gives each open farm
+      // offer its share of it and keeps the count in line afterwards).
+      var avail = packsAvail(m, t, adv);
+      var packs = Math.max(0, Math.min(avail == null ? Math.floor(adv / n) : avail, Math.floor(MAX_UNITS / n)));
       var days = toInt(it.days), game = String(it.game || "");
-      var title = farmTitlePreview(game, days, minQty, market);
+      var title = farmTitlePreview(game, days, n, market);
+      var pc = priceControl({ market: market, n: n, anchor: anchor, minUnit: 0, tierPack: tierP, okText: "Send", onChange: redraw });
+      function sentence() {
+        var pr = pc.read(), pk = pc.pack(pr), custom = pr.value != null;
+        var price = pk == null ? "<b>?</b>" : "<b>" + esc(money(pk)) + "</b>";
+        var each = pk == null ? "" : " (≈ " + esc(money(eachOf(pk, n))) + " per account" + (custom ? ", your price" : "") + ")";
+        return "List <span class=\"qt\">“" + esc(title) + "”</span> on " + esc(name) + ": packs of " + n + " accounts at " + price +
+          " per pack" + each + "; buyers can buy up to <b>" + esc(plural(packs, "pack")) + "</b> now (" + esc(plural(packs * n, "account")) + ").";
+      }
+      function redraw() {
+        var s = el("sendSentence");
+        if (s) s.innerHTML = sentence();
+      }
       var facts = [
         "Each account farms " + game + " for " + durWord(days) + " from the order. Slots and fresh accounts are set up when an order comes in; logins arrive in the order chat.",
-        (d > 0 ? pct(d) + "% off" : "No discount on") + " the farm price of " + money(m.anchor) + " per account.",
+        "One listing, one price per pack: a buyer who buys 2 gets 2 packs (" + 2 * n + " accounts).",
+        tierP > 0 ? "Tier price: " + money(tierP) + " per pack, " + (d > 0 ? pct(d) + "% off" : "no discount on") + " the farm price of " + money(anchor) + " per account." : "",
         "The price is fixed once sent. Bulk offers are never repriced.",
-        "The quantity follows free farm capacity: the background check pauses the offer when there is no room for " + minQty +
+        "The pack count follows free farm capacity: the background check pauses the offer when there is no room for a pack of " + n +
           " and resumes it when there is again (only while bulk packs is switched on).",
         "Title preview: the server builds the final title and checks the farm services read it back correctly."
-      ];
-      var html = '<p class="sentence">List <span class="qt">“' + esc(title) + '”</span> on ' + esc(name) + " at <b>" + money(unit) +
-        "</b> per account; buyers can order " + minQty + " to <b>" + adv + "</b> accounts.</p>" +
-        '<label class="f">Accounts on this offer<input type="number" value="' + adv + '" readonly disabled>' +
-        '<span class="fh">Set by free farm capacity right now (Can advertise now).</span></label>' +
+      ].filter(Boolean);
+      var html = '<p class="sentence" id="sendSentence"></p>' +
+        '<label class="f">Packs on this offer<input type="number" value="' + packs + '" readonly disabled>' +
+        '<span class="fh">Set by free farm capacity right now: ' + esc(plural(adv, "account")) + " can be advertised = " + esc(plural(packs, "whole pack")) + " of " + n + ".</span></label>" +
+        pc.html() +
         '<ul class="facts">' + facts.map(function (f) { return "<li>" + esc(f) + "</li>"; }).join("") + "</ul>";
       if (b.enabled !== true) html += '<div class="note warn">Bulk packs is switched off, so the server will refuse this. Switch it on at the top of the page first.</div>';
       openModal({
         title: "Send farming pack to " + name,
         html: html,
         okText: "Send",
+        onOpen: function (body) { pc.wire(body); },
         onOk: async function () {
-          var j = await api("/send", "POST", { source: "farm", game: game, days: days, market: market, minQty: minQty, units: adv });
+          var payload = { source: "farm", game: game, days: days, market: market, minQty: n };
+          // units stay in accounts (whole packs); with no room the server answers why.
+          if (packs >= 1) payload.units = packs * n;
+          if (!pc.apply(payload)) return false;
+          var j;
+          try {
+            j = await api("/send", "POST", payload);
+          } catch (e) {
+            var asked = pc.answer(e);
+            if (asked !== null) return asked;
+            throw e;
+          }
           afterChange({ farm: true, live: true });
           return { doneHtml: sentHtml(j, market) };
         }
@@ -1294,12 +1550,55 @@
       if (o.kind === "farming" || o.source === "farm") return "Farming · " + durWord(o.days);
       return "Accounts · " + (o.source === "noclaim" ? "no-claim" : "farmed");
     }
-    function tierLabel(o) {
-      var n = toInt(o.minQty);
-      return o.market === "gameflip" ? "pack " + n : "min " + n;
+    // An offer's pack size (minQty = N accounts) and its prices. Offers carry
+    // packPrice on every market; one without it is shown per account.
+    function offerPack(o) {
+      var n = Math.max(1, toInt(o && o.minQty)), pack = num(o && o.packPrice);
+      return { n: n, pack: pack > 0 ? pack : 0, each: pack > 0 ? eachOf(pack, n) : num(o && o.unitPrice) };
     }
-    function priceLabel(o) {
-      return o.market === "gameflip" ? money(o.packPrice) + " / pack" : money(o.unitPrice) + " each";
+    function isCustom(o) { return !!o && o.customPrice === true; }
+    function customTag() {
+      return '<span class="pill sm s-info" title="You typed this price when you sent it; it is not the tier price.">custom</span>';
+    }
+    // "Pack of 5 — $5.94" over "≈ $1.19 each · 5% off", like the tier
+    // buttons; a typed price gets the "custom" tag (and no tier discount).
+    function packCell(o) {
+      var pk = offerPack(o), d = num(o.discountPct), sub = [];
+      var main = pk.pack > 0 ? packName(pk.n) + " — " + money(pk.pack) : packName(pk.n) + (pk.each > 0 ? " · " + money(pk.each) + " each" : "");
+      if (pk.pack > 0 && pk.each > 0) sub.push("≈ " + money(pk.each) + " each");
+      if (d > 0 && !isCustom(o)) sub.push(pct(d) + "% off");
+      return '<span class="t-price">' + esc(main) + (isCustom(o) ? customTag() : "") + "</span>" +
+        (sub.length ? '<div class="t-sub">' + esc(sub.join(" · ")) + "</div>" : "");
+    }
+    // Whole packs the offer can still sell. Dropset: the reserved accounts
+    // still free on it (BulkOffer.reserved is the authority), in whole packs —
+    // a part of a pack can never sell. No-claim / farming: the pack count the
+    // marketplace shows.
+    function packsLeft(o) {
+      var n = offerPack(o).n;
+      if (o.source === "dropset") return Math.floor(toInt(o.freeCount) / n);
+      return Math.max(0, toInt(o.advertisedQty));
+    }
+    function packsLeftCell(o) {
+      var n = offerPack(o).n, k = packsLeft(o), sub = "", tip;
+      if (o.source === "dropset") {
+        var free = toInt(o.freeCount);
+        tip = plural(free, "reserved account") + " still free on this offer = " + plural(k, "whole pack") + " of " + n + ".";
+        if (free % n) tip += " The " + plural(free % n, "account") + " left over cannot sell as a pack and go back to stock when the rest sells out.";
+        sub = plural(free, "account");
+      } else {
+        tip = o.source === "farm" ? "Packs the offer shows. It follows free farm capacity." : "Packs the offer shows: whole packs of the shared no-claim shelf.";
+      }
+      var h = '<span title="' + esc(tip) + '"><b>' + k + "</b></span>" + (sub ? '<div class="t-sub">' + esc(sub) + "</div>" : "");
+      if (toInt(o.retiringCount) > 0) h += '<div class="t-sub">' + toInt(o.retiringCount) + " being released</div>";
+      return h;
+    }
+    // Sold, in packs: accounts delivered ÷ N (a buyer of 2 packs got 2 × N).
+    function soldCell(o) {
+      var n = offerPack(o).n, acc = toInt(o.unitsDelivered);
+      return '<span title="' + esc(plural(acc, "account") + " delivered") + '">' + esc(plural(Math.floor(acc / n), "pack")) + "</span>" +
+        '<div class="t-sub">' + esc(plural(toInt(o.ordersCount), "order")) + "</div>" +
+        (acc ? '<div class="t-sub">' + esc(plural(acc, "account")) + "</div>" : "");
     }
     function titleCell(o, withAge) {
       var url = safeUrl(o.url), title = o.title || "(no title)";
@@ -1327,19 +1626,9 @@
     function stateCell(o) {
       var st = STATE[o.state] || { label: String(o.state || "unknown"), cls: "s-off", tip: "" };
       var h = '<span class="pill sm ' + st.cls + '" title="' + esc(st.tip) + '">' + esc(st.label) + "</span>";
-      if (o.lowStock) h += '<span class="pill sm s-warn" title="Fewer accounts available than the minimum order. Shown for information: nothing is changed automatically.">low stock</span>';
+      if (o.lowStock) h += '<span class="pill sm s-warn" title="Not enough accounts for one pack right now. Shown for information: nothing is changed automatically.">low stock</span>';
       if (o.autoPaused) h += '<span class="pill sm s-warn" title="Paused by the background check, not by you. It resumes by itself when there is room again, while bulk packs is switched on.">auto-paused</span>';
       return '<div class="flags">' + h + "</div>";
-    }
-    function countsCell(o) {
-      var free = o.source === "dropset" ? toInt(o.freeCount) : toInt(o.advertisedQty);
-      var freeTip = o.source === "dropset"
-        ? "Reserved accounts still free on this offer"
-        : (o.source === "farm" ? "Quantity the offer shows (follows free farm capacity)" : "Quantity the offer shows (shared no-claim shelf)");
-      var h = '<span title="' + esc(freeTip) + '">' + free + '</span> / <span title="Accounts delivered">' + toInt(o.unitsDelivered) +
-        '</span> / <span title="Orders">' + toInt(o.ordersCount) + "</span>";
-      if (toInt(o.retiringCount) > 0) h += '<div class="t-sub">' + toInt(o.retiringCount) + " being released</div>";
-      return h;
     }
     function actBtn(act, id, label, tip, cls) {
       return '<button type="button" class="sm' + (cls ? " " + cls : "") + '" data-act="' + act + '" data-id="' + esc(id) + '" title="' + esc(tip) + '">' + esc(label) + "</button>";
@@ -1369,9 +1658,9 @@
       h += td("Market", "<b>" + esc(mLabel(o.market)) + "</b>");
       h += td("Kind", esc(kindLabel(o)));
       h += td("Offer", titleCell(o, true), "wide");
-      h += td("Tier", esc(tierLabel(o)) + (num(o.discountPct) > 0 ? '<div class="t-sub">' + esc(pct(o.discountPct)) + "% off</div>" : ""), "nw");
-      h += td("Price", esc(priceLabel(o)), "num");
-      h += td("Free / delivered / orders", countsCell(o), "num");
+      h += td("Pack", packCell(o), "num");
+      h += td("Packs left", packsLeftCell(o), "num");
+      h += td("Sold", soldCell(o), "num");
       h += td("State", stateCell(o));
       h += td("Actions", actionsCell(o), "wide");
       h += "</tr>";
@@ -1386,19 +1675,18 @@
       h += td("Market", "<b>" + esc(mLabel(o.market)) + "</b>");
       h += td("Kind", esc(kindLabel(o)));
       h += td("Offer", titleCell(o, false), "wide");
-      h += td("Tier", esc(tierLabel(o)), "nw");
-      h += td("Price", esc(priceLabel(o)), "num");
+      h += td("Pack", packCell(o), "num");
       var held = holdsAccounts(o);
       h += td("State", stateCell(o) + (toInt(o.retiringCount) > 0 ? '<div class="t-sub">' + toInt(o.retiringCount) + " being released</div>" : "") +
         (held && toInt(o.freeCount) > 0 ? '<div class="t-sub">' + plural(toInt(o.freeCount), "account") + " still held</div>" : ""));
-      h += td("Sold", plural(toInt(o.ordersCount), "order") + " · " + plural(toInt(o.unitsDelivered), "account"), "num");
+      h += td("Sold", soldCell(o), "num");
       h += td("Revenue", money(num(o.revenueUsd)), "num");
       var acts = [];
       if (id && held) acts.push(actBtn("release-held", id, "Release held accounts…", "Only after you checked the marketplace: the offer is NOT live.", "danger"));
       if (id) acts.push(actBtn("details", id, S.open[id] ? "Hide" : "Details", "The accounts on this offer and its history."));
       h += td("", acts.length ? '<div class="acts">' + acts.join("") + "</div>" : "");
       h += "</tr>";
-      if (S.open[id]) h += '<tr class="detail"><td colspan="10">' + detailHtml(id) + "</td></tr>";
+      if (S.open[id]) h += '<tr class="detail"><td colspan="9">' + detailHtml(id) + "</td></tr>";
       return h;
     }
 
@@ -1422,8 +1710,8 @@
       if (!S.live.length) {
         box.innerHTML = html + emptyHtml("No open bulk offers", "Send one from Account packs or Farming packs.");
       } else {
-        box.innerHTML = html + '<div class="tw"><table class="rt"><thead><tr><th>Market</th><th>Kind</th><th>Offer</th><th>Tier</th><th>Price</th>' +
-          '<th class="wrap" title="Free accounts / accounts delivered / orders">Free / delivered / orders</th><th>State</th><th>Actions</th></tr></thead><tbody>' +
+        box.innerHTML = html + '<div class="tw"><table class="rt"><thead><tr><th>Market</th><th>Kind</th><th>Offer</th><th title="Pack size and the price of one pack">Pack</th>' +
+          '<th title="Whole packs the offer can still sell">Packs left</th><th title="Packs and orders sold">Sold</th><th>State</th><th>Actions</th></tr></thead><tbody>' +
           S.live.map(liveRow).join("") + "</tbody></table></div>";
       }
       if (S.flash && !S.liveBusy) {
@@ -1459,16 +1747,17 @@
         box.innerHTML = html + emptyHtml("No closed bulk offers yet", "Offers show up here once they sell out, sell, expire or are withdrawn.");
         return;
       }
-      var orders = 0, accounts = 0, revenue = 0;
+      var orders = 0, accounts = 0, packs = 0, revenue = 0;
       S.hist.forEach(function (o) {
         orders += toInt(o.ordersCount);
         accounts += toInt(o.unitsDelivered);
+        packs += Math.floor(toInt(o.unitsDelivered) / offerPack(o).n);
         revenue += num(o.revenueUsd);
       });
-      html += '<div class="total"><b>' + plural(orders, "order") + " · " + plural(accounts, "account") + " sold · " + money(revenue) +
+      html += '<div class="total"><b>' + plural(packs, "pack") + " (" + plural(accounts, "account") + ") in " + plural(orders, "order") + " · " + money(revenue) +
         '</b> <span class="muted">at our listed prices, before marketplace fees · last ' + plural(S.hist.length, "closed offer") + "</span></div>";
-      box.innerHTML = html + '<div class="tw"><table class="rt"><thead><tr><th>Closed</th><th>Market</th><th>Kind</th><th>Offer</th><th>Tier</th>' +
-        "<th>Price</th><th>State</th><th>Sold</th><th>Revenue</th><th></th></tr></thead><tbody>" +
+      box.innerHTML = html + '<div class="tw"><table class="rt"><thead><tr><th>Closed</th><th>Market</th><th>Kind</th><th>Offer</th>' +
+        '<th title="Pack size and the price of one pack">Pack</th><th>State</th><th>Sold</th><th>Revenue</th><th></th></tr></thead><tbody>' +
         S.hist.map(histRow).join("") + "</tbody></table></div>";
     }
 
@@ -1513,10 +1802,14 @@
       if (d.loading) return '<div class="loading">Reading the offer…</div>';
       if (d.err) return '<div class="note bad" style="margin:0">Could not load this offer: ' + esc(d.err) + "</div>";
       var o = d.offer || {};
+      var pk = offerPack(o);
       var facts = [
         ["Sent", when(ts(o.createdAt)) + (o.createdBy ? " by " + o.createdBy : "")],
+        ["Pack", packName(pk.n) + (num(o.discountPct) > 0 && !isCustom(o) ? " · " + pct(o.discountPct) + "% off" : "")],
+        ["Price", (pk.pack > 0 ? money(pk.pack) + " per pack · ≈ " + money(pk.each) + " per account" : (pk.each > 0 ? money(pk.each) + " per account" : "—")) +
+          (isCustom(o) ? " · custom price" : "")],
         ["Single price when sent", num(o.anchorPrice) > 0 ? money(o.anchorPrice) + (o.anchorBasis ? " (" + (BASIS[o.anchorBasis] || o.anchorBasis) + ")" : "") : "—"],
-        ["Quantity shown", o.advertisedQty != null ? String(toInt(o.advertisedQty)) : "—"],
+        ["Packs shown on the market", o.market === "gameflip" ? "one listing = one pack" : (o.advertisedQty != null ? String(toInt(o.advertisedQty)) : "—")],
         ["Marketplace offer id", o.externalId || "—"],
         ["Last sale", when(ts(o.lastOrderAt))],
         ["Revenue", money(num(o.revenueUsd)) + " at the listed price"],
@@ -1571,29 +1864,43 @@
       }
     }
 
+    // Refill adds whole packs (PACKS-2 §3). The owner picks packs; `add` is
+    // sent in ACCOUNTS, packs × N, like units on a send.
     function openRefill(id) {
       var o = findOffer(id);
       if (!o) return;
       var b = bp() || {};
-      var def = Math.max(1, Math.min(20, (toInt(b.unitsPerOffer) || 20) - toInt(o.freeCount)));
+      var n = offerPack(o).n, mk = mLabel(o.market);
+      var free = toInt(o.freeCount), now = Math.floor(free / n);
+      var maxP = Math.max(1, Math.floor(100 / n));
+      var def = Math.max(1, Math.min(maxP, Math.floor((toInt(b.unitsPerOffer) || 20) / n) - now));
+      function hint() {
+        var v = Number(el("refillAdd").value);
+        var add = Number.isInteger(v) && v >= 1 ? plural(v, "pack") + " = " + plural(v * n, "account") + ". " : "";
+        el("refillHint").textContent = add + "On the offer now: " + plural(now, "pack") + " (" + plural(free, "free account") + ").";
+      }
       openModal({
         title: "Refill offer",
-        html: '<p>Add accounts to <span class="qt">“' + esc(o.title || "this offer") + "”</span> on " + esc(mLabel(o.market)) + ".</p>" +
-          "<p>They come from the same set's spare accounts (keeping " + toInt(b.reserveSingles) + " back for single listings), " +
-          "are reserved for this offer, and the quantity on " + esc(mLabel(o.market)) + " is updated to match. The price does not change.</p>" +
-          '<label class="f">Accounts to add<input type="number" id="refillAdd" min="1" max="100" step="1" value="' + def + '" inputmode="numeric">' +
-          '<span class="fh">' + toInt(o.freeCount) + " free on the offer now.</span></label>" +
+        html: '<p>Add packs to <span class="qt">“' + esc(o.title || "this offer") + "”</span> on " + esc(mk) + ".</p>" +
+          "<p>Each pack is " + n + " accounts from the same set's spare accounts (keeping " + toInt(b.reserveSingles) + " back for single listings). " +
+          "They are reserved for this offer and the pack count on " + esc(mk) + " is updated to match. The price does not change.</p>" +
+          '<label class="f">Packs to add<input type="number" id="refillAdd" min="1" max="' + maxP + '" step="1" value="' + def + '" inputmode="numeric">' +
+          '<span class="fh" id="refillHint"></span></label>' +
           (b.enabled !== true ? '<div class="note warn">Bulk packs is switched off, so the server will refuse this.</div>' : ""),
-        okText: "Add accounts",
+        okText: "Add packs",
+        onOpen: function (body) {
+          body.querySelector("#refillAdd").addEventListener("input", hint);
+          hint();
+        },
         onOk: async function () {
-          var n = Number(el("refillAdd").value);
-          if (!Number.isInteger(n) || n < 1 || n > 100) {
-            setMsg("bad", "Enter a whole number of accounts from 1 to 100.");
+          var k = Number(el("refillAdd").value);
+          if (!Number.isInteger(k) || k < 1 || k > maxP) {
+            setMsg("bad", "Enter a whole number of packs from 1 to " + maxP + ".");
             return false;
           }
-          var j = await api("/offers/" + encodeURIComponent(id) + "/refill", "POST", { add: n });
+          var j = await api("/offers/" + encodeURIComponent(id) + "/refill", "POST", { add: k * n });
           afterChange({ live: true, acct: true });
-          return { doneHtml: "<b>Done.</b> " + esc(j.message || "The accounts were added and the offer's quantity updated.") };
+          return { doneHtml: "<b>Done.</b> " + esc(j.message || "The packs were added and the offer's pack count updated.") };
         }
       });
     }
@@ -1730,10 +2037,10 @@
     // (docs/bulk-packs/API-UI.md, settings whitelist).
     var INT_FIELDS = [
       { id: "fReserveSingles", key: "bulkPackReserveSingles", bp: "reserveSingles", min: 0, max: 100, sec: "acct", label: "Keep for single listings", hint: "Spare accounts per set that bulk offers never take." },
-      { id: "fUnitsPerOffer", key: "bulkPackUnitsPerOffer", bp: "unitsPerOffer", min: 1, max: 80, sec: "acct", label: "Accounts per offer", hint: "Default number of accounts put on one offer." },
+      { id: "fUnitsPerOffer", key: "bulkPackUnitsPerOffer", bp: "unitsPerOffer", min: 1, max: 80, sec: "acct", label: "Accounts per offer", hint: "Default accounts put on one offer, in whole packs (rounded down, at least one pack)." },
       { id: "fFarmSlots", key: "bulkFarmReserveSlots", bp: "farmReserveSlots", min: 0, max: 500, sec: "farm", label: "Farm slots kept free", hint: "Bot slots never advertised, left for single farm orders." },
       { id: "fFarmPristine", key: "bulkFarmReservePristine", bp: "farmReservePristine", min: 0, max: 500, sec: "farm", label: "Fresh accounts kept back", hint: "Unused pool accounts never advertised." },
-      { id: "fFarmMax", key: "bulkFarmMaxQty", bp: "farmMaxQty", min: 1, max: 100, sec: "farm", label: "Max accounts per farming offer", hint: "The most one farming offer shows." },
+      { id: "fFarmMax", key: "bulkFarmMaxQty", bp: "farmMaxQty", min: 1, max: 100, sec: "farm", label: "Max accounts per farming offer", hint: "The most accounts one farming offer shows, in whole packs." },
       { id: "fLoop", key: "bulkPacksLoopMinutes", bp: "loopMinutes", min: 2, max: 60, sec: "loop", label: "Check every (minutes)", hint: "How often the background check looks after live offers." },
       { id: "fFarmSync", key: "bulkFarmSyncMinutes", bp: "farmSyncMinutes", min: 5, max: 120, sec: "loop", label: "Farm capacity sync (minutes)", hint: "How often farming offers are matched to free capacity." }
     ];
@@ -1790,9 +2097,9 @@
       var h = '<form id="cfgForm" class="form" novalidate autocomplete="off">';
       h += '<div class="muted" style="font-size:12.5px">Saved changes are used from the next background pass and the next proposals read. The master switch is at the top of the page.</div>';
 
-      h += '<section class="fsec"><h3>Tiers</h3><div class="hint">A buyer who orders at least this many accounts pays the single price minus the discount. ' +
-        "1 to 4 tiers · 2–100 accounts · 0–60% off.</div>" +
-        '<div id="tierRows"></div><button type="button" class="sm" id="addTier">Add tier</button></section>';
+      h += '<section class="fsec"><h3>Pack sizes</h3><div class="hint">Each size is one kind of listing: a pack of that many accounts, priced at the single price minus the discount, per pack, on every market. ' +
+        "1 to 4 sizes · 2–100 accounts · 0–60% off.</div>" +
+        '<div id="tierRows"></div><button type="button" class="sm" id="addTier">Add pack size</button></section>';
 
       h += '<section class="fsec"><h3>Markets</h3><div class="hint">Where bulk offers may be sent. Gameflip takes farmed-account packs only. Plati and GGSel are blocked and never offered.</div>' +
         '<div class="checks">' + SUPPORTED.map(function (m) {
@@ -1828,7 +2135,7 @@
       if (!box) return;
       box.innerHTML = cfgTiers.map(function (t, k) {
         return '<div class="trow">' +
-          '<label class="f">Minimum accounts<input type="number" min="2" max="100" step="1" inputmode="numeric" data-tier="' + k + '" data-f="minQty" value="' + esc(t.minQty) + '"></label>' +
+          '<label class="f">Accounts per pack<input type="number" min="2" max="100" step="1" inputmode="numeric" data-tier="' + k + '" data-f="minQty" value="' + esc(t.minQty) + '"></label>' +
           '<label class="f">Discount %<input type="number" min="0" max="60" step="any" inputmode="decimal" data-tier="' + k + '" data-f="discountPct" value="' + esc(t.discountPct) + '"></label>' +
           '<button type="button" class="sm danger" data-act="del-tier" data-k="' + k + '"' + (cfgTiers.length <= 1 ? " disabled" : "") + ">Remove</button></div>";
       }).join("");
@@ -1872,15 +2179,15 @@
       var b = S.cfg.settings || {}, errs = [], patch = {};
 
       var tiers = [], seen = {};
-      if (!cfgTiers.length) errs.push("Add at least one tier.");
-      if (cfgTiers.length > 4) errs.push("At most 4 tiers.");
+      if (!cfgTiers.length) errs.push("Add at least one pack size.");
+      if (cfgTiers.length > 4) errs.push("At most 4 pack sizes.");
       cfgTiers.forEach(function (t, k) {
         var qs = String(t.minQty).trim(), ds = String(t.discountPct).trim();
         var q = Number(qs), dp = Number(ds), bad = false;
-        if (qs === "" || !Number.isInteger(q) || q < 2 || q > 100) { errs.push("Tier " + (k + 1) + ": minimum must be a whole number of accounts from 2 to 100."); bad = true; }
-        if (ds === "" || !isFinite(dp) || dp < 0 || dp > 60) { errs.push("Tier " + (k + 1) + ": discount must be from 0 to 60%."); bad = true; }
+        if (qs === "" || !Number.isInteger(q) || q < 2 || q > 100) { errs.push("Pack size " + (k + 1) + ": accounts per pack must be a whole number from 2 to 100."); bad = true; }
+        if (ds === "" || !isFinite(dp) || dp < 0 || dp > 60) { errs.push("Pack size " + (k + 1) + ": discount must be from 0 to 60%."); bad = true; }
         if (bad) return;
-        if (seen[q]) { errs.push("Two tiers start at " + q + " accounts. Each tier needs its own minimum."); return; }
+        if (seen[q]) { errs.push("Two pack sizes are " + q + " accounts. Each needs its own size."); return; }
         seen[q] = true;
         tiers.push({ minQty: q, discountPct: Math.round(dp * 100) / 100 });
       });

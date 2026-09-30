@@ -19,6 +19,17 @@ const MarketplaceListing = require("../models/MarketplaceListing");
 const FarmServiceOrder = require("../models/FarmServiceOrder");
 const DropSet = require("../models/DropSet");
 const loop = require("../utils/bulkPacks/loop");
+const { packsFor } = require("../utils/bulkPacks/packMath");
+
+// PACKS-2 §1: every bulk row carries bulkPackSize N. Written through the raw
+// collection, so it is stored whether or not the schema has the path yet
+// (insertMany drops a path the schema does not know); the loop reads rows lean
+// with a projection that names it.
+const setPackSize = (rowId, n) =>
+  MarketplaceListing.collection.updateOne(
+    { _id: rowId },
+    { $set: { bulkPackSize: n } },
+  );
 
 const T0 = new Date("2026-09-30T00:00:00Z");
 const at = (min) => new Date(T0.getTime() + min * 60000);
@@ -200,6 +211,10 @@ const entryOf = (offer, id) => offer.reserved.find((e) => e.accountId === id);
 const unitIds = (row) => row.units.map((u) => u.accountId);
 const tg = (re) => fx.calls.telegram.filter((t) => re.test(t));
 
+// A live dropset offer as send.js leaves it (PACKS-2 §3): one listing = one
+// pack of minQty accounts, the row sized bulkPackSize = minQty, the market
+// advertising whole PACKS. `packPrice` 0 = an offer with no pack price
+// recorded (revenue then falls back to accounts × unitPrice).
 async function dropsetOffer({
   market = "eldorado",
   minQty = 5,
@@ -208,6 +223,7 @@ async function dropsetOffer({
   advertisedQty,
   unitPrice = 1.5,
   packPrice = 0,
+  bulkPackSize = minQty,
 } = {}) {
   seq++;
   const set = await DropSet.create({
@@ -240,7 +256,12 @@ async function dropsetOffer({
       state: "on_offer",
       at: T0,
     })),
-    advertisedQty: advertisedQty == null ? n : advertisedQty,
+    advertisedQty:
+      advertisedQty == null
+        ? market === "gameflip"
+          ? 1
+          : packsFor(n, minQty)
+        : advertisedQty,
   });
   // insertMany: defaults and casting, without the create-time audit hook.
   const [row] = await MarketplaceListing.insertMany([
@@ -249,7 +270,7 @@ async function dropsetOffer({
       marketplace: market,
       externalId,
       title: offer.title,
-      price: market === "gameflip" ? packPrice : unitPrice,
+      price: packPrice > 0 || market === "gameflip" ? packPrice : unitPrice,
       status: "active",
       origin: "manual",
       bulkOfferId: offer._id,
@@ -267,18 +288,21 @@ async function dropsetOffer({
       })),
     },
   ]);
+  if (bulkPackSize) await setPackSize(row._id, bulkPackSize);
   await BulkOffer.updateOne({ _id: offer._id }, { $set: { listing: row._id } });
   return { set, ids, offerId: offer._id, rowId: row._id, externalId };
 }
 
+// `advertisedQty` is in PACKS (PACKS-2 §3): 2 = 10 accounts at minQty 5.
 async function farmOffer({
   market = "eldorado",
   minQty = 5,
-  advertisedQty = 10,
+  advertisedQty = 2,
   state = "live",
   autoPaused = false,
   externalId,
   unitPrice = 3.8,
+  packPrice = 0,
 } = {}) {
   seq++;
   const ext = externalId || "farm-ext-" + seq;
@@ -295,6 +319,7 @@ async function farmOffer({
     minQty,
     discountPct: 5,
     unitPrice,
+    packPrice,
     title,
     externalId: ext,
     state,
@@ -309,6 +334,8 @@ async function noclaimOffer({
   market = "eldorado",
   minQty = 5,
   units = [],
+  packPrice = 0,
+  bulkPackSize = minQty,
 } = {}) {
   seq++;
   const set = await DropSet.create({
@@ -325,10 +352,11 @@ async function noclaimOffer({
     game: "Overwatch",
     minQty,
     unitPrice: 2,
-    title: "Overwatch bundle " + seq + " — BULK " + minQty + "+ accounts",
+    packPrice,
+    title: "Overwatch bundle " + seq + " — PACK OF " + minQty + " ACCOUNTS",
     externalId: ext,
     state: "live",
-    advertisedQty: 10,
+    advertisedQty: 2,
     slotKey: ["accounts", "noclaim", String(set._id), market, minQty].join("|"),
   });
   const [row] = await MarketplaceListing.insertMany([
@@ -345,6 +373,7 @@ async function noclaimOffer({
       units,
     },
   ]);
+  if (bulkPackSize) await setPackSize(row._id, bulkPackSize);
   await BulkOffer.updateOne({ _id: offer._id }, { $set: { listing: row._id } });
   return { offerId: offer._id, rowId: row._id, externalId: ext };
 }
@@ -727,12 +756,18 @@ test("a FREE copy of a unit that already sold is pulled off the row", async () =
 // Dropset eldorado / g2g
 // ---------------------------------------------------------------------------
 
-test("sold out: pause first, then retire the free units; release 15 minutes later", async () => {
+test("PACKS-2 §4 sold out: a pack sells, the leftovers are fewer than one pack — paused first, retired, released 15 minutes later", async () => {
+  // 7 accounts = 1 pack of 5 on sale + 2 extra accounts on the row.
   const { offerId, rowId, ids, externalId } = await dropsetOffer({
-    n: 6,
+    n: 7,
     minQty: 5,
+    unitPrice: 1.43,
+    packPrice: 7.13,
   });
-  // One order takes two units (Eldorado stamps deliveredAt + orderId together).
+  assert.equal((await getOffer(offerId)).advertisedQty, 1);
+  // One order buys ONE unit = one pack: Eldorado's fulfiller hands over five
+  // accounts (deliveredAt + orderId stamped together).
+  const pack = ids.slice(0, 5);
   await MarketplaceListing.updateOne(
     { _id: rowId },
     {
@@ -741,48 +776,63 @@ test("sold out: pause first, then retire the free units; release 15 minutes late
         "units.$[u].orderId": "order-A",
       },
     },
-    { arrayFilters: [{ "u.accountId": { $in: [ids[0], ids[1]] } }] },
+    { arrayFilters: [{ "u.accountId": { $in: pack } }] },
   );
   const lines = [];
   const s = await pass(at(2), lines);
   assert.deepEqual(fx.calls.pause, [["eldorado", externalId]]);
+  assert.deepEqual(fx.calls.setQuantity, [], "paused, never re-quantified");
   let offer = await getOffer(offerId);
   let row = await getRow(rowId);
   assert.equal(offer.state, "sold_out");
   assert.equal(offer.open, false);
   assert.ok(offer.closedAt);
   assert.equal(offer.advertisedQty, 0);
-  assert.equal(entryOf(offer, ids[0]).state, "delivered");
-  assert.equal(entryOf(offer, ids[1]).state, "delivered");
-  for (const id of ids.slice(2))
-    assert.equal(entryOf(offer, id).state, "retiring");
+  for (const id of pack) assert.equal(entryOf(offer, id).state, "delivered");
+  // The two leftovers can never make a pack: they go back (two-phase).
+  for (const id of ids.slice(5)) {
+    const e = entryOf(offer, id);
+    assert.equal(e.state, "retiring");
+    assert.equal(e.reason, "sold out: 2 free < one pack of 5");
+  }
   assert.deepEqual(
     unitIds(row).sort(),
-    [ids[0], ids[1]].sort(),
+    pack.slice().sort(),
     "only the sold units stay",
   );
   assert.equal(row.status, "delisted");
   assert.equal(offer.ordersCount, 1);
-  assert.equal(offer.unitsDelivered, 2);
+  assert.equal(offer.unitsDelivered, 5);
+  assert.equal(offer.revenueUsd, 7.13, "one pack at the pack price");
   assert.equal(tg(/^Bulk offer sold out/).length, 1);
-  assert.equal(tg(/^Bulk sale/).length, 1);
+  assert.match(
+    tg(/^Bulk offer sold out/)[0],
+    /2 account\(s\) left — less than one pack of 5/,
+  );
+  const sale = tg(/^Bulk sale/);
+  assert.equal(sale.length, 1);
+  assert.match(sale[0], /\$7\.13 per pack of 5 \(≈ \$1\.43 each\)/);
+  assert.match(
+    sale[0],
+    /\+1 order\(s\), \+5 account\(s\) \(\+1 pack\(s\) of 5\)/,
+  );
   assert.equal(s.sold, 1);
-  assert.equal(s.retiring, 4);
+  assert.equal(s.retiring, 2);
   assert.equal(s.open, 0);
   assert.equal(
     lines[0],
-    "bulkPacks: pass — open 0 (acct 0, farm 0) | sold +1 | paused 0 | retiring 4 | released 0 | busy 0 | errors 0",
+    "bulkPacks: pass — open 0 (acct 0, farm 0) | sold +1 | paused 0 | retiring 2 | released 0 | busy 0 | errors 0",
   );
   assert.ok(fx.calls.invalidate >= 1, "proposals are told the slot freed up");
 
   await pass(at(16));
   assert.deepEqual(fx.calls.release, []);
   const s3 = await pass(at(17)); // RETIRE_GRACE_MS (FIXES-1 L2)
-  assert.deepEqual(fx.calls.release.sort(), ids.slice(2).sort());
-  assert.equal(s3.released, 4);
+  assert.deepEqual(fx.calls.release.sort(), ids.slice(5).sort());
+  assert.equal(s3.released, 2);
   offer = await getOffer(offerId);
-  assert.equal(entryOf(offer, ids[0]).state, "delivered");
-  for (const id of ids.slice(2))
+  for (const id of pack) assert.equal(entryOf(offer, id).state, "delivered");
+  for (const id of ids.slice(5))
     assert.equal(entryOf(offer, id).state, "released");
 
   // Nothing left retiring: later passes (inside the 24-hour watch window of
@@ -796,7 +846,37 @@ test("sold out: pause first, then retire the free units; release 15 minutes late
     "alerts fire on state changes only",
   );
   row = await getRow(rowId);
-  assert.equal(row.units.length, 2);
+  assert.equal(row.units.length, 5);
+});
+
+test("PACKS-2 §4 a pass with at least one whole pack left keeps the extra accounts on the row — only fewer than N is sold out", async () => {
+  // 12 accounts = 2 packs + 2 extra; a pack sells -> 7 = 1 pack + 2 extra.
+  const { offerId, rowId, ids, externalId } = await dropsetOffer({
+    n: 12,
+    minQty: 5,
+    packPrice: 7.13,
+  });
+  await MarketplaceListing.updateOne(
+    { _id: rowId },
+    {
+      $set: {
+        "units.$[u].deliveredAt": at(1),
+        "units.$[u].orderId": "order-B",
+      },
+    },
+    { arrayFilters: [{ "u.accountId": { $in: ids.slice(0, 5) } }] },
+  );
+  await pass(at(2));
+  const offer = await getOffer(offerId);
+  assert.equal(offer.state, "live");
+  assert.deepEqual(fx.calls.pause, []);
+  assert.deepEqual(fx.calls.setQuantity, [["eldorado", externalId, 1]]);
+  assert.equal(offer.advertisedQty, 1);
+  assert.equal(offer.revenueUsd, 7.13);
+  for (const id of ids.slice(5))
+    assert.equal(entryOf(offer, id).state, "on_offer", "all 7 stay on sale");
+  assert.equal((await getRow(rowId)).units.length, 12);
+  assert.deepEqual(fx.calls.release, []);
 });
 
 test("sold out with a failed pause retires nothing and retries next pass", async () => {
@@ -823,18 +903,17 @@ test("sold out with a failed pause retires nothing and retries next pass", async
   for (const id of ids) assert.equal(entryOf(offer, id).state, "retiring");
 });
 
-test("an unhealthy unit is retired after the advertised quantity has been lowered", async () => {
-  const { offerId, rowId, ids, externalId } = await dropsetOffer({
-    n: 8,
-    advertisedQty: 8,
-  });
+test("an unhealthy unit is retired after the advertised packs have been lowered", async () => {
+  // 10 accounts = 2 packs of 5; one fails its health check -> 9 = 1 pack.
+  const { offerId, rowId, ids, externalId } = await dropsetOffer({ n: 10 });
+  assert.equal((await getOffer(offerId)).advertisedQty, 2);
   fx.bad.set(ids[3], "no password");
   let unitsAtQuantityCall = null;
   fx.onSetQuantity = async () => {
     unitsAtQuantityCall = unitIds(await getRow(rowId));
   };
   await pass(at(1));
-  assert.deepEqual(fx.calls.setQuantity, [["eldorado", externalId, 7]]);
+  assert.deepEqual(fx.calls.setQuantity, [["eldorado", externalId, 1]]);
   assert.ok(
     unitsAtQuantityCall.includes(ids[3]),
     "the quantity dropped before the unit left the row",
@@ -843,24 +922,31 @@ test("an unhealthy unit is retired after the advertised quantity has been lowere
   const offer = await getOffer(offerId);
   assert.equal(entryOf(offer, ids[3]).state, "retiring");
   assert.match(entryOf(offer, ids[3]).reason, /health: no password/);
-  assert.equal(offer.advertisedQty, 7);
+  assert.equal(offer.advertisedQty, 1);
   assert.equal(offer.state, "live");
   assert.equal(tg(/^Bulk offer integrity/).length, 1);
+  assert.match(
+    tg(/^Bulk offer integrity/)[0],
+    /1 account\(s\) taken off the offer: login_\S+ \(no password\)\. 9 still on sale \(1 pack\(s\) of 5\)/,
+  );
   await pass(at(2));
   assert.equal(tg(/^Bulk offer integrity/).length, 1);
 });
 
-test("quantity follows the free units: shrinking always, growing only when switched on with the gate open", async () => {
-  const shrink = await dropsetOffer({ n: 6, advertisedQty: 9 });
-  const grow = await dropsetOffer({ n: 10, advertisedQty: 6 });
+test("PACKS-2 §4 the market is offered the whole PACKS the free accounts make: shrinking always, growing only when switched on with the gate open", async () => {
+  // 6 free = 1 pack (advertised 3): shrinks to 1. 14 free = 2 packs + 4
+  // extra accounts (advertised 1): grows to 2 — the 4 extra stay on the row.
+  const shrink = await dropsetOffer({ n: 6, advertisedQty: 3 });
+  const grow = await dropsetOffer({ n: 14, advertisedQty: 1 });
   fx.bp = bp({ enabled: false });
   await pass(at(1));
   assert.deepEqual(
     fx.calls.setQuantity,
-    [["eldorado", shrink.externalId, 6]],
+    [["eldorado", shrink.externalId, 1]],
     "no growth while switched off",
   );
-  assert.equal((await getOffer(grow.offerId)).advertisedQty, 6);
+  assert.equal((await getOffer(shrink.offerId)).advertisedQty, 1);
+  assert.equal((await getOffer(grow.offerId)).advertisedQty, 1);
 
   fx.bp = bp({ enabled: true });
   fx.gate = { ok: false, reason: "Eldorado delivery is in dry-run" };
@@ -873,10 +959,50 @@ test("quantity follows the free units: shrinking always, growing only when switc
 
   fx.gate = { ok: true, reason: "" };
   await pass(at(3));
-  assert.deepEqual(fx.calls.setQuantity[1], ["eldorado", grow.externalId, 10]);
-  assert.equal((await getOffer(grow.offerId)).advertisedQty, 10);
+  assert.deepEqual(fx.calls.setQuantity[1], ["eldorado", grow.externalId, 2]);
+  const g = await getOffer(grow.offerId);
+  assert.equal(g.advertisedQty, 2);
+  assert.equal(g.state, "live");
+  assert.ok(
+    g.reserved.every((e) => e.state === "on_offer"),
+    "a partial pack is not a sold-out offer: nothing retired",
+  );
+  assert.equal((await getRow(grow.rowId)).units.length, 14);
   await pass(at(4));
   assert.equal(fx.calls.setQuantity.length, 2, "no call once it matches");
+  assert.deepEqual(fx.calls.pause, []);
+  assert.deepEqual(fx.calls.release, []);
+});
+
+test("PACKS-2 §1 the pack size is the row's bulkPackSize and the offer's minQty — the LARGER when they disagree, minQty when the row has none", async () => {
+  // A row sized 10 under a 5+ offer: the fulfiller hands over 10 per unit, so
+  // 14 free accounts are ONE pack, never two.
+  const big = await dropsetOffer({ n: 14, advertisedQty: 1, bulkPackSize: 10 });
+  // A row with no size recorded (0): the offer's own pack of 5 still rules.
+  const none = await dropsetOffer({ n: 14, advertisedQty: 1, bulkPackSize: 0 });
+  await pass(at(1));
+  assert.deepEqual(fx.calls.setQuantity, [["eldorado", none.externalId, 2]]);
+  assert.equal((await getOffer(big.offerId)).advertisedQty, 1);
+  assert.equal((await getOffer(none.offerId)).advertisedQty, 2);
+
+  // 9 free accounts cannot fill the row's pack of 10: sold out, all retired.
+  await MarketplaceListing.updateOne(
+    { _id: big.rowId },
+    {
+      $set: {
+        "units.$[u].deliveredAt": at(2),
+        "units.$[u].orderId": "order-big",
+      },
+    },
+    { arrayFilters: [{ "u.accountId": { $in: big.ids.slice(0, 5) } }] },
+  );
+  await pass(at(3));
+  const o = await getOffer(big.offerId);
+  assert.equal(o.state, "sold_out");
+  for (const id of big.ids.slice(5)) {
+    assert.equal(entryOf(o, id).state, "retiring");
+    assert.equal(entryOf(o, id).reason, "sold out: 9 free < one pack of 10");
+  }
 });
 
 test("switched off: sold-out, expiry and releases still run (I8)", async () => {
@@ -1196,22 +1322,65 @@ test("noclaim: counters from delivery records, low stock is display only, a dead
   assert.deepEqual(fx.calls.release, []);
 });
 
+test("PACKS-2 §4 noclaim: low stock = the shelf share cannot fill ONE pack; sales are revenue per pack", async () => {
+  // Packs of 10: one order bought one pack, ten accounts handed over.
+  const units = Array.from({ length: 10 }, (_, i) => ({
+    contentId: "c" + i,
+    login: "nc" + i,
+    deliveredAt: at(1),
+    orderId: "o-pack",
+  }));
+  const { offerId } = await noclaimOffer({
+    minQty: 10,
+    packPrice: 17.1,
+    units,
+  });
+  fx.share = 9; // nine accounts: not one pack of 10
+  await pass(at(2));
+  let offer = await getOffer(offerId);
+  assert.equal(offer.lowStock, true);
+  assert.equal(offer.ordersCount, 1);
+  assert.equal(offer.unitsDelivered, 10);
+  assert.equal(offer.revenueUsd, 17.1, "one pack at the pack price");
+  assert.match(tg(/^Bulk sale/)[0], /\(\+1 pack\(s\) of 10\)/);
+  fx.share = 10; // exactly one pack
+  await pass(at(3));
+  assert.equal((await getOffer(offerId)).lowStock, false);
+  fx.share = 19;
+  await pass(at(4));
+  assert.equal((await getOffer(offerId)).lowStock, false);
+  assert.deepEqual(fx.calls.pause, [], "display only — never acts");
+  assert.deepEqual(fx.calls.setQuantity, []);
+
+  // A row sized larger than the offer's minQty is read by its larger pack.
+  const odd = await noclaimOffer({ minQty: 5, bulkPackSize: 10 });
+  fx.share = 9;
+  await pass(at(5));
+  assert.equal((await getOffer(odd.offerId)).lowStock, true);
+  offer = await getOffer(offerId);
+  assert.equal(offer.lowStock, true, "the first offer reads the same share");
+});
+
 // ---------------------------------------------------------------------------
 // Farm
 // ---------------------------------------------------------------------------
 
-test("farm: pauses when capacity is short, and resumes only when switched on", async () => {
+test("PACKS-2 §4 farm: its capacity share (accounts) is advertised as whole packs; less than one pack pauses it, and it resumes only when switched on", async () => {
   const { offerId, externalId } = await farmOffer({
     minQty: 5,
-    advertisedQty: 10,
+    advertisedQty: 2,
   });
-  fx.advertisable = 3;
+  fx.advertisable = 4; // 4 accounts: not one pack of 5
   await pass(at(0));
   assert.deepEqual(fx.calls.pause, [["eldorado", externalId]]);
   let offer = await getOffer(offerId);
   assert.equal(offer.state, "paused");
   assert.equal(offer.autoPaused, true);
   assert.equal(tg(/^Bulk farming offer paused/).length, 1);
+  assert.match(
+    tg(/^Bulk farming offer paused/)[0],
+    /capacity for 4 account\(s\) = 0 pack\(s\) of 5 .* — less than one pack of 5/,
+  );
 
   fx.advertisable = 12;
   fx.bp = bp({ enabled: false });
@@ -1233,24 +1402,52 @@ test("farm: pauses when capacity is short, and resumes only when switched on", a
   );
   assert.deepEqual(fx.calls.resume, []);
 
+  // 12 accounts = 2 packs of 5 (the 2 extra are never advertised). The offer
+  // was left at 3 packs, so its quantity comes down to 2 BEFORE it resumes.
+  await BulkOffer.updateOne({ _id: offerId }, { $set: { advertisedQty: 3 } });
   await pass(at(36));
   assert.deepEqual(
     fx.calls.setQuantity,
-    [["eldorado", externalId, 12]],
+    [["eldorado", externalId, 2]],
     "quantity set before resuming",
   );
   assert.deepEqual(fx.calls.resume, [["eldorado", externalId]]);
   offer = await getOffer(offerId);
   assert.equal(offer.state, "live");
   assert.equal(offer.autoPaused, false);
-  assert.equal(offer.advertisedQty, 12);
+  assert.equal(offer.advertisedQty, 2);
   assert.equal(tg(/^Bulk farming offer resumed/).length, 1);
+  assert.match(
+    tg(/^Bulk farming offer resumed/)[0],
+    /capacity for 12 account\(s\) = 2 pack\(s\) of 5/,
+  );
   assert.equal(tg(/^Bulk farming offer paused/).length, 1);
 
-  // Live and capacity moves: the quantity follows (shrinking needs no switch).
-  fx.advertisable = 8;
+  // Live and capacity moves: the packs follow (shrinking needs no switch).
+  fx.advertisable = 9; // one pack of 5
   await pass(at(52));
-  assert.deepEqual(fx.calls.setQuantity[1], ["eldorado", externalId, 8]);
+  assert.deepEqual(fx.calls.setQuantity[1], ["eldorado", externalId, 1]);
+  assert.equal((await getOffer(offerId)).advertisedQty, 1);
+  // Exactly one pack's worth is still one pack: live, nothing paused.
+  fx.advertisable = 5;
+  await pass(at(68));
+  assert.equal((await getOffer(offerId)).state, "live");
+  assert.equal(fx.calls.pause.length, 1);
+  assert.equal(fx.calls.setQuantity.length, 2);
+});
+
+test("PACKS-2 §4 farm: a pack size of 10 needs ten accounts of capacity per unit it advertises", async () => {
+  const { offerId, externalId } = await farmOffer({
+    minQty: 10,
+    advertisedQty: 2,
+  });
+  fx.advertisable = 19; // one pack of 10, never "19 units"
+  await pass(at(0));
+  assert.deepEqual(fx.calls.setQuantity, [["eldorado", externalId, 1]]);
+  fx.advertisable = 9;
+  await pass(at(16));
+  assert.deepEqual(fx.calls.pause, [["eldorado", externalId]]);
+  assert.equal((await getOffer(offerId)).state, "paused");
 });
 
 test("farm: an owner-paused offer is never resumed, nor one whose delivery gate is shut", async () => {
@@ -1332,6 +1529,41 @@ test("farm: sales come from FarmServiceOrder by the offer id the farm services r
   assert.equal(tg(/^Bulk sale/).length, 2);
   await pass(at(10));
   assert.equal(tg(/^Bulk sale/).length, 2, "no repeat");
+});
+
+test("PACKS-2 §2/§3 farm: sales are counted in accounts and packs, revenue per pack — whether an order row records its accounts or its units", async () => {
+  const { offerId, externalId } = await farmOffer({
+    minQty: 5,
+    unitPrice: 3.8,
+    packPrice: 19,
+  });
+  const order = (o) =>
+    FarmServiceOrder.create({
+      market: "eldorado",
+      game: "Rust",
+      days: 180,
+      offerId: externalId,
+      state: "delivered",
+      ...o,
+    });
+  // Two packs bought: the farm service provisions 2 × 5 = 10 accounts.
+  await order({ orderId: "p1", quantity: 10 });
+  // One pack whose row records the units bought (1) — counted by the five
+  // accounts it lists once provisioned.
+  await order({
+    orderId: "p2",
+    quantity: 1,
+    accounts: Array.from({ length: 5 }, (_, i) => ({ login: "f" + i })),
+  });
+  await pass(at(0));
+  const offer = await getOffer(offerId);
+  assert.equal(offer.ordersCount, 2);
+  assert.equal(offer.unitsDelivered, 15);
+  assert.equal(offer.revenueUsd, 57, "3 packs × $19");
+  const sale = tg(/^Bulk sale/);
+  assert.equal(sale.length, 1);
+  assert.match(sale[0], /\$19\.00 per pack of 5 \(≈ \$3\.80 each\)/);
+  assert.match(sale[0], /\+15 account\(s\) \(\+3 pack\(s\) of 5\)/);
 });
 
 test("farm: expiry is read every 30 minutes", async () => {

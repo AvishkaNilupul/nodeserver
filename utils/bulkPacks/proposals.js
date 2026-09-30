@@ -22,6 +22,18 @@
 //
 // Every sibling module is reached lazily through `deps` (CONTRACT §9), so the
 // tests fake them and nothing here loads a marketplace client at boot.
+//
+// ONE LISTING = ONE PACK (docs/bulk-packs/PACKS-2.md §4). A tier of minQty N
+// is a listing of packs of N accounts on EVERY market, priced as the whole
+// pack by pricing.packPriceFor — the price send.js publishes, its market floor
+// per LISTING (so the old "G2G's $1 per-account floor eats the discount" case
+// is gone). Each tier shows that pack price, what it comes to per account,
+// whether a pack fits (the stock room — dropset surplus, the no-claim market
+// share, or a new farm offer's capacity share — holds at least N) and how
+// many whole packs the room makes (packsAvailable).
+
+// Pure (no I/O): the pack maths every bulk-pack module shares (PACKS-2 §1).
+const { packsFor } = require("./packMath");
 
 // Results live this long; `refresh` (or invalidate()) bypasses.
 const CACHE_MS = 5 * 60 * 1000;
@@ -148,6 +160,69 @@ function clampLimit(v) {
   const n = Number(v);
   if (!Number.isInteger(n) || n < 1) return LIMIT_DEFAULT;
   return Math.min(n, LIMIT_MAX);
+}
+// Cents, half away from zero on the decimal value (the toPrecision step drops
+// the binary noise of the multiply, as pricing.round2 does).
+function round2(x) {
+  const n = Number(x);
+  if (!Number.isFinite(n)) return 0;
+  const r = Math.round(Number((n * 100).toPrecision(15))) / 100;
+  return r === 0 ? 0 : r;
+}
+
+// PACKS-2 §3: the whole-pack price, from the ONE pricing function send.js
+// publishes with. Missing is a wiring bug, said plainly — never a page of
+// silently skipped sets.
+function packPricer(pricing) {
+  if (!pricing || typeof pricing.packPriceFor !== "function") {
+    throw new Error(
+      "utils/bulkPacks/pricing.js has no packPriceFor (docs/bulk-packs/PACKS-2.md §3)",
+    );
+  }
+  return (args) => num(pricing.packPriceFor(args));
+}
+
+// One tier of one market, in packs (PACKS-2 §4): the pack price, its
+// per-account equivalent, whether one pack fits `room` (accounts) and how many
+// whole packs the room makes. No price reference = nothing send.js would
+// publish, so an unpriced tier never fits (the button would only come back
+// 409).
+function packTier({ price, anchor, market, minQty, discountPct, room }) {
+  const size = Number.isInteger(minQty) && minQty >= 1 ? minQty : 0;
+  const packPrice = size ? price({ anchor, discountPct, size, market }) : 0;
+  const priced = packPrice > 0;
+  const packsAvailable = packsFor(room, size);
+  return {
+    minQty,
+    discountPct,
+    unitPrice: priced ? round2(packPrice / size) : 0,
+    packPrice: priced ? packPrice : 0,
+    priced,
+    fits: priced && packsAvailable >= 1,
+    packsAvailable,
+  };
+}
+
+// The share of `available` farm capacity a NEW farm offer would get
+// (FIXES-1 S1): every open farm offer is a sharer — the list send.js counts,
+// sending included (FIXES-2 V1) — and the new one joins with the newest id,
+// so it sorts last. farmCapacity.shareFor is the one split rule; a split that
+// cannot be read is no room (nothing fits), never a guess.
+const NEW_FARM_SHARER = "~new farm offer"; // sorts after every ObjectId hex
+function newFarmShare(farmCapacity, open, available) {
+  if (!(available > 0)) return 0;
+  const ids = open.map((o) => String(o._id)).concat(NEW_FARM_SHARER);
+  try {
+    return Math.min(
+      count(farmCapacity.shareFor(NEW_FARM_SHARER, ids, available)),
+      available,
+    );
+  } catch (e) {
+    console.warn(
+      "bulkPacks proposals: farm capacity share failed: " + errText(e),
+    );
+    return 0;
+  }
 }
 function isTrue(v) {
   return v === true || v === 1 || v === "1" || v === "true";
@@ -318,6 +393,8 @@ async function accountProposals({
 
 async function buildAccountProposals(limit, startedAt) {
   const { config, settings, pricing } = deps;
+  // First, before any DB work: without it there is nothing to price.
+  const price = packPricer(pricing);
   const bp = settings.getBulkPacks();
   const tiers = Array.isArray(bp && bp.tiers) ? bp.tiers : [];
   const reserve = count(bp && bp.reserveSingles);
@@ -517,10 +594,12 @@ async function buildAccountProposals(limit, startedAt) {
       markets: marketList.map((market) => {
         const a = pricing.pickAnchor({ rows, set, market }) || {};
         const anchor = num(a.anchor);
+        // tierQuote only normalises the tier list here (whole minQty, the
+        // EFFECTIVE discount); every price is the pack price below.
         const quotes = pricing.tierQuote({ anchor, market, tiers });
-        // What a tier must fit into: the surplus over the singles reserve
-        // (dropset, every market), or the share of the no-claim shelf a NEW
-        // offer on this market would get.
+        // What a pack must fit into (accounts): the surplus over the singles
+        // reserve (dropset, every market), or the share of the no-claim shelf
+        // a NEW offer on this market would get.
         const room =
           source === "noclaim"
             ? count(entry.share && entry.share[market])
@@ -539,18 +618,15 @@ async function buildAccountProposals(limit, startedAt) {
               market,
               minQty,
             });
-            const unitPrice = num(q && q.unitPrice);
-            const packPrice = num(q && q.packPrice);
-            // No price reference = nothing send.js would publish, so the page
-            // must not offer the button (it would only come back 409).
-            const priced = market === "gameflip" ? packPrice > 0 : unitPrice > 0;
             return {
-              minQty,
-              discountPct: num(q && q.discountPct),
-              unitPrice,
-              packPrice,
-              priced,
-              fits: priced && minQty > 0 && room >= minQty,
+              ...packTier({
+                price,
+                anchor,
+                market,
+                minQty,
+                discountPct: num(q && q.discountPct),
+                room,
+              }),
               liveOfferId: liveBySlot.get(slot) || null,
             };
           }),
@@ -559,7 +635,9 @@ async function buildAccountProposals(limit, startedAt) {
     };
   }
 
-  // One set's bad data (a pricing throw) skips that set, never the page.
+  // One set's bad data (a pricing throw) skips that set, never the page. (A
+  // missing packPriceFor failed the whole build up front instead: it would
+  // skip every set, which reads as "nothing to propose".)
   const items = [];
   for (const [list, source] of [
     [countedD, "dropset"],
@@ -622,6 +700,8 @@ async function farmProposals({ refresh = false } = {}) {
 
 async function buildFarmProposals(startedAt) {
   const { config, settings, pricing, farmCapacity } = deps;
+  // First, before any read: without it there is nothing to price.
+  const price = packPricer(pricing);
   const bp = settings.getBulkPacks();
   const tiers = Array.isArray(bp && bp.tiers) ? bp.tiers : [];
   const durations = new Set(
@@ -685,6 +765,11 @@ async function buildFarmProposals(startedAt) {
     picked.push(known || { game, days, orders: 0, accounts: 0, markets: {} });
   }
 
+  // The room a NEW farm offer would get: its share of the advertisable
+  // capacity, split with every farm offer already open (send.js publishes
+  // exactly that share, FIXES-1 S1). Packs of N fit when it holds N accounts.
+  const share = newFarmShare(farmCapacity, open, advertisable);
+
   const marketList = marketsFor(config, "farm", bp);
   const gate = gateReader(config);
   const items = picked.map((d) => {
@@ -699,47 +784,52 @@ async function buildFarmProposals(startedAt) {
       // The demand read's per-market order counts (renamed: `markets` is the
       // proposal list, the same shape as an account item's).
       demandByMarket: plainCounts(d.markets),
-      markets: marketList.map((market) => ({
-        market,
-        gate: gate(market, "farm"),
-        anchor: farmAnchor(bp.farmPrices, market, days),
-        basis: "farm-table",
-        tiers: tiers.map((t) => {
-          const minQty = num(t && t.minQty);
-          const discountPct = num(t && t.discountPct);
-          const slot = config.slotKey({
-            kind: "farming",
-            source: "farm",
-            game,
-            days,
-            market,
-            minQty,
-          });
-          const unitPrice = num(
-            pricing.farmUnitPrice({
-              farmPrices: bp.farmPrices,
-              market,
+      markets: marketList.map((market) => {
+        // The farm table's per-account price for this term is the anchor; a
+        // pack is N of them, less the tier discount (PACKS-2 §3/§4).
+        const anchor = farmAnchor(bp.farmPrices, market, days);
+        return {
+          market,
+          gate: gate(market, "farm"),
+          anchor,
+          basis: "farm-table",
+          tiers: tiers.map((t) => {
+            const minQty = num(t && t.minQty);
+            const slot = config.slotKey({
+              kind: "farming",
+              source: "farm",
+              game,
               days,
-              discountPct,
-            }),
-          );
-          return {
-            minQty,
-            discountPct,
-            unitPrice,
-            packPrice: 0,
-            priced: unitPrice > 0,
-            // send.js refuses below minQty advertisable accounts, and with no
-            // farm price for this market/duration.
-            fits: unitPrice > 0 && minQty > 0 && advertisable >= minQty,
-            liveOfferId: liveBySlot.get(slot) || null,
-          };
-        }),
-      })),
+              market,
+              minQty,
+            });
+            return {
+              ...packTier({
+                price,
+                anchor,
+                market,
+                minQty,
+                discountPct: num(t && t.discountPct),
+                room: share,
+              }),
+              liveOfferId: liveBySlot.get(slot) || null,
+            };
+          }),
+        };
+      }),
     };
   });
 
-  return { at: new Date(startedAt), capacity, advertisable, items };
+  return {
+    at: new Date(startedAt),
+    capacity,
+    advertisable,
+    // A new farm offer's share of `advertisable`, and the farm offers it
+    // would share with (itself included).
+    share,
+    sharers: open.length + 1,
+    items,
+  };
 }
 
 module.exports = {

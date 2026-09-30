@@ -25,9 +25,44 @@ const operatorFarm = require("./operatorFarm");
 const mp = require("./marketplaces");
 const farmAlert = require("./farmServiceAlert");
 const provisioning = require("./farmProvisioning");
+const { packSizeOf, accountsForUnits } = require("./bulkPacks/packMath");
 
 // Which marketplace this service speaks for, used in failure alerts.
 const MARKET = "eldorado";
+
+// Bulk packs v2 (docs/bulk-packs/PACKS-2.md §2). A bulk FARMING offer is one
+// item priced as a pack: one unit bought is N fresh accounts farming for the
+// term. A farm offer has no listing row, so its N is the BulkOffer's minQty,
+// found by the marketplace offer id the order was placed on. Returns
+// { pack, id, size, state } — `pack` is the row-shaped input
+// utils/bulkPacks/packMath (the ONE multiplier) takes — or null for every other
+// farming offer, which provisions exactly as before. Any state counts: an order
+// placed while the offer was live is owed its packs after a pause or withdraw.
+// A failed read THROWS: reading it as "not a pack" would provision one account
+// for a paid pack of N. Required lazily so an ordinary order loads nothing new.
+// Shared with utils/g2gFarmService (one copy, as with the title parse).
+async function bulkFarmPack(offerId, market = MARKET) {
+  const id = String(offerId || "");
+  if (!id) return null;
+  const b = await require("../models/BulkOffer")
+    .findOne({ externalId: id, kind: "farming", market }, { minQty: 1, state: 1 })
+    .lean();
+  if (!b) return null;
+  const pack = { bulkOfferId: b._id, bulkPackSize: b.minQty };
+  const size = packSizeOf(pack);
+  if (size < 2) return null;
+  return { pack, id: String(b._id), size, state: String(b.state || "") };
+}
+
+// What the FarmServiceOrder row records about a pack order: its quantity is
+// the ACCOUNTS provisioned (what every reader of that field counts), so the
+// units bought and the pack size are written here.
+function packNote(bulk, units, accounts) {
+  return (
+    "bulk pack order: " + units + " pack(s) of " + bulk.size + " accounts = " +
+    accounts + " accounts (bulk offer " + bulk.id + ")"
+  );
+}
 
 // Our own naming convention, so this parse is a contract with ourselves:
 //   "<Game> Twitch Drops Automatic Farming 120 Days"
@@ -168,7 +203,29 @@ async function deliverFarmOrder(order, { dryRun } = {}) {
   if (!parsed) return null;
 
   const orderId = String(order.id || "");
-  const qty = Math.max(1, parseInt(order.purchaseQuantity, 10) || 1);
+  const units = Math.max(1, parseInt(order.purchaseQuantity, 10) || 1);
+
+  // What the buyer bought, in accounts: `units` on every farming offer, as
+  // before — and on a bulk pack farming offer each unit is a pack of N
+  // (docs/bulk-packs/PACKS-2.md §2). Asked before anything else, dry run
+  // included; an unreadable answer waits for the next tick with nothing
+  // provisioned, never a guess.
+  let bulk = null;
+  try {
+    bulk = await bulkFarmPack(order.offerId);
+  } catch (e) {
+    return {
+      orderId,
+      farm: true,
+      error:
+        "could not read the bulk offer behind farming offer " +
+        String(order.offerId || "") + " (" + (e && e.message) + ") — " +
+        "nothing provisioned, the next tick retries",
+    };
+  }
+  // `qty` below is ALWAYS accounts: what is provisioned, recorded as the
+  // row's quantity, alerted on and handed over.
+  const qty = bulk ? accountsForUnits(bulk.pack, units) : units;
 
   // A title we cannot read is still a PAID order.
   //
@@ -242,6 +299,10 @@ async function deliverFarmOrder(order, { dryRun } = {}) {
         return { orderId, farm: true, skipped: "claimed by another tick" };
       throw e;
     }
+    // A pack order's units and pack size (PACKS-2 §2). FarmServiceOrder
+    // declares no `note` path, so it is written schema-less; the next save
+    // below persists it.
+    if (bulk) row.set("note", packNote(bulk, units, qty), { strict: false });
   }
   row.attempts += 1;
 
@@ -401,4 +462,6 @@ module.exports = {
   parseFarmOrder,
   farmDeliveryMessage,
   deliverFarmOrder,
+  bulkFarmPack,
+  packNote,
 };

@@ -818,6 +818,8 @@ test("send forwards only whitelisted primitives, per source; the actor is the se
     market: "eldorado",
     minQty: 5,
     units: 12,
+    customUnitPrice: undefined,
+    confirmPrice: false,
     actor: "admin:root",
   });
 
@@ -839,6 +841,8 @@ test("send forwards only whitelisted primitives, per source; the actor is the se
     market: "g2g",
     minQty: 10,
     units: undefined,
+    customUnitPrice: undefined,
+    confirmPrice: false,
     actor: "admin:root",
   });
 
@@ -919,6 +923,177 @@ test("send refuses malformed bodies and blocked markets before send.js is called
     assert.match(r.body.message, /blocked/);
   }
   assert.equal(count("sendOffer"), 0);
+});
+
+// docs/bulk-packs/PACKS-2.md §3 + §6: the owner's price per account and the
+// answer to a price_confirm reach send.js as a number and a boolean.
+test("send passes customUnitPrice as a number and confirmPrice as a boolean, for every source", async () => {
+  const send = async (body) => {
+    const r = await call("POST", "/api/bulk-packs/send", { body });
+    assert.equal(r.status, 200, JSON.stringify(body));
+    return last("sendOffer");
+  };
+  let a = await send({ ...VALID_SEND, units: 20, customUnitPrice: 1.1 });
+  assert.equal(a.customUnitPrice, 1.1);
+  assert.equal(a.confirmPrice, false, "absent -> false, never undefined");
+  assert.equal(a.units, 20, "units stay in accounts");
+
+  a = await send({
+    ...VALID_SEND,
+    customUnitPrice: " 0.85 ",
+    confirmPrice: true,
+  });
+  assert.equal(a.customUnitPrice, 0.85);
+  assert.equal(typeof a.customUnitPrice, "number");
+  assert.equal(a.confirmPrice, true);
+
+  a = await send({ ...VALID_SEND, customUnitPrice: 1000, confirmPrice: false });
+  assert.equal(a.customUnitPrice, 1000, "the sanity bound itself is allowed");
+  assert.equal(a.confirmPrice, false);
+
+  // "Not given" the same way units reads it: undefined, null and "".
+  for (const customUnitPrice of [undefined, null, ""]) {
+    a = await send({ ...VALID_SEND, customUnitPrice, confirmPrice: null });
+    assert.ok("customUnitPrice" in a);
+    assert.equal(a.customUnitPrice, undefined, JSON.stringify(customUnitPrice));
+    assert.equal(a.confirmPrice, false);
+  }
+
+  a = await send({
+    source: "farm",
+    game: "Rust",
+    days: 180,
+    market: "g2g",
+    minQty: 10,
+    units: 20,
+    customUnitPrice: "6.5",
+    confirmPrice: true,
+  });
+  assert.deepEqual(a, {
+    source: "farm",
+    setId: undefined,
+    game: "Rust",
+    days: 180,
+    market: "g2g",
+    minQty: 10,
+    units: 20,
+    customUnitPrice: 6.5,
+    confirmPrice: true,
+    actor: "admin:root",
+  });
+  a = await send({
+    ...VALID_SEND,
+    market: "gameflip",
+    source: "dropset",
+    customUnitPrice: 0.9,
+  });
+  assert.equal(a.market, "gameflip");
+  assert.equal(a.customUnitPrice, 0.9);
+  a = await send({
+    ...VALID_SEND,
+    source: "noclaim",
+    market: "g2g",
+    customUnitPrice: 2,
+    confirmPrice: true,
+  });
+  assert.equal(a.source, "noclaim");
+  assert.equal(a.customUnitPrice, 2);
+  assert.equal(a.confirmPrice, true);
+});
+
+test("send refuses a customUnitPrice or confirmPrice of the wrong type with a 400 before send.js", async () => {
+  const badPrices = [
+    0,
+    -1,
+    -0.01,
+    1000.01,
+    1e6,
+    "abc",
+    "1,10",
+    "$1.10",
+    "0x10",
+    "1e2",
+    "Infinity",
+    "NaN",
+    " ",
+    "1.",
+    "-2",
+    true,
+    false,
+    [1.1],
+    { $gt: 0 },
+  ];
+  for (const customUnitPrice of badPrices) {
+    const r = await call("POST", "/api/bulk-packs/send", {
+      body: { ...VALID_SEND, customUnitPrice },
+    });
+    assert.equal(r.status, 400, JSON.stringify(customUnitPrice));
+    assert.equal(r.body.success, false);
+    assert.match(r.body.message, /customUnitPrice/);
+  }
+  const badConfirms = ["true", "false", "yes", "", 1, 0, [true], {}, { $ne: false }];
+  for (const confirmPrice of badConfirms) {
+    const r = await call("POST", "/api/bulk-packs/send", {
+      body: { ...VALID_SEND, customUnitPrice: 1.1, confirmPrice },
+    });
+    assert.equal(r.status, 400, JSON.stringify(confirmPrice));
+    assert.equal(r.body.success, false);
+    assert.match(r.body.message, /confirmPrice must be true or false/);
+  }
+  // Both wrong at once: both are named.
+  const r = await call("POST", "/api/bulk-packs/send", {
+    body: { ...VALID_SEND, customUnitPrice: "cheap", confirmPrice: "true" },
+  });
+  assert.equal(r.status, 400);
+  assert.equal(r.body.errors.length, 2);
+  assert.equal(count("sendOffer"), 0);
+});
+
+test("a price_confirm 409 from send.js reaches the page with its code and message; the resend carries confirmPrice:true", async () => {
+  const message =
+    "$0.80 per account is 36% below the single price ($1.25) — tick “I checked this price” and send again";
+  nextResult.sendOffer = {
+    success: false,
+    status: 409,
+    code: "price_confirm",
+    message,
+  };
+  let r = await call("POST", "/api/bulk-packs/send", {
+    body: { ...VALID_SEND, units: 20, customUnitPrice: 0.8 },
+  });
+  assert.equal(r.status, 409);
+  assert.equal(r.body.success, false);
+  assert.equal(r.body.code, "price_confirm");
+  assert.equal(r.body.message, message);
+  assert.equal(last("sendOffer").confirmPrice, false);
+  assert.equal(last("sendOffer").customUnitPrice, 0.8);
+
+  nextResult.sendOffer = {
+    success: true,
+    status: 200,
+    offer: { _id: OID, state: "live", customPrice: true, unitPrice: 0.8, packPrice: 4 },
+  };
+  r = await call("POST", "/api/bulk-packs/send", {
+    body: { ...VALID_SEND, units: 20, customUnitPrice: 0.8, confirmPrice: true },
+  });
+  assert.equal(r.status, 200);
+  assert.equal(r.body.success, true);
+  assert.equal(r.body.offer.customPrice, true);
+  assert.equal(last("sendOffer").confirmPrice, true);
+  assert.equal(last("sendOffer").customUnitPrice, 0.8);
+
+  // A hard refusal (pack below the market floor) is send.js's 400, as is.
+  nextResult.sendOffer = {
+    success: false,
+    status: 400,
+    message: "A pack of 5 at $0.05 is below the Eldorado minimum of $0.50",
+  };
+  r = await call("POST", "/api/bulk-packs/send", {
+    body: { ...VALID_SEND, customUnitPrice: 0.01, confirmPrice: true },
+  });
+  assert.equal(r.status, 400);
+  assert.match(r.body.message, /below the Eldorado minimum/);
+  assert.equal(r.body.code, undefined);
 });
 
 test("switched off (I8): send / refill / resume are refused; pause, withdraw, withdraw-all and run-now still work", async () => {

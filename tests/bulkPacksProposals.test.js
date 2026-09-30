@@ -76,6 +76,8 @@ function resetWorld() {
       noclaimCounts: [],
       read: [],
       demand: [],
+      shareFor: [],
+      packPriceFor: [],
       getAutoFarm: 0,
     },
   });
@@ -99,6 +101,31 @@ const fakeSettings = {
 
 const round2 = (x) => (Number.isFinite(x) ? Math.round(x * 100) / 100 : 0);
 const roundQuarter = (x) => Math.round(x * 4) / 4;
+
+// PACKS-2 §3 pricing.packPriceFor({anchor, discountPct, size, market}): the
+// WHOLE pack — size × anchor less the discount (0..60%), Gameflip on the $0.25
+// grid, Eldorado/G2G to the cent, never below the market floor (per LISTING).
+// utils/bulkPacks/pricing.js gains it in the same change (owner P2): once it
+// exports it the real function runs here, else the contract's formula below.
+const realPricing = require("../utils/bulkPacks/pricing");
+function contractPackPriceFor({ anchor, discountPct, size, market } = {}) {
+  const a = Number(anchor);
+  const n = Number(size);
+  if (!(a > 0) || !Number.isInteger(n) || n < 1) return 0;
+  if (!Object.prototype.hasOwnProperty.call(config.MARKET_FLOORS, market))
+    return 0;
+  const d = Math.min(60, Math.max(0, Number(discountPct) || 0));
+  const raw = n * a * (1 - d / 100);
+  return Math.max(
+    config.MARKET_FLOORS[market],
+    market === "gameflip" ? roundQuarter(raw) : round2(raw),
+  );
+}
+const packPriceFor =
+  typeof realPricing.packPriceFor === "function"
+    ? realPricing.packPriceFor
+    : contractPackPriceFor;
+
 const fakePricing = {
   // MODULES §pricing.pickAnchor
   pickAnchor({ rows, set, market }) {
@@ -154,6 +181,10 @@ const fakePricing = {
           round2(anchor * (1 - discountPct / 100)),
         )
       : 0;
+  },
+  packPriceFor(args) {
+    world.calls.packPriceFor.push({ ...args });
+    return packPriceFor(args);
   },
 };
 
@@ -221,6 +252,16 @@ const fakeFarmCapacity = {
       ...d,
       markets: { ...(d.markets || {}) },
     }));
+  },
+  // FIXES-1 S1 farmCapacity.shareFor: an equal split of `available`,
+  // floor(available / n) each and the remainder one apiece to the
+  // lowest-sorting ids; selfId always counts as a sharer.
+  shareFor(selfId, ids, available) {
+    world.calls.shareFor.push([String(selfId), [...ids], available]);
+    const list = [...new Set([...ids.map(String), String(selfId)])].sort();
+    const n = list.length;
+    const rank = list.indexOf(String(selfId));
+    return Math.floor(available / n) + (rank < available % n ? 1 : 0);
   },
 };
 
@@ -513,7 +554,8 @@ test("tier fit rules: dropset surplus over the singles reserve, no-claim market 
   const res = await proposals.accountProposals();
   assert.ok(res.at instanceof Date);
 
-  // Apex: 25 free, 5 kept for singles -> surplus 20: every tier fits everywhere.
+  // Apex: 25 free, 5 kept for singles -> surplus 20: every tier fits
+  // everywhere — 4 packs of 5, or 2 packs of 10 (PACKS-2 §4).
   const B = byName(res, "Apex bundle");
   assert.equal(B.source, "dropset");
   assert.deepEqual([B.free, B.reserve, B.surplus], [25, 5, 20]);
@@ -521,21 +563,33 @@ test("tier fit rules: dropset surplus over the singles reserve, no-claim market 
     B.markets.map((m) => m.market),
     ["eldorado", "g2g", "gameflip"],
   );
-  for (const m of B.markets)
+  for (const m of B.markets) {
     assert.ok(
       m.tiers.every((t) => t.fits),
       m.market,
     );
+    assert.deepEqual(
+      m.tiers.map((t) => [t.minQty, t.packsAvailable]),
+      [
+        [5, 4],
+        [10, 2],
+      ],
+      m.market,
+    );
+  }
 
-  // Rust: 12 free -> surplus 7: the 5+ tier fits, the 10+ tier does not.
+  // Rust: 12 free -> surplus 7: one pack of 5 fits (the 2 extra accounts
+  // make no pack), a pack of 10 does not.
   const A = byName(res, "Rust bundle");
   assert.deepEqual([A.free, A.reserve, A.surplus], [12, 5, 7]);
   for (const m of A.markets) {
-    assert.equal(m.tiers.find((t) => t.minQty === 5).fits, true, m.market);
-    assert.equal(m.tiers.find((t) => t.minQty === 10).fits, false, m.market);
+    const five = m.tiers.find((t) => t.minQty === 5);
+    const ten = m.tiers.find((t) => t.minQty === 10);
+    assert.deepEqual([five.fits, five.packsAvailable], [true, 1], m.market);
+    assert.deepEqual([ten.fits, ten.packsAvailable], [false, 0], m.market);
   }
 
-  // No-claim: surplus = free (no singles reserve), a tier fits by the
+  // No-claim: surplus = free (no singles reserve), a pack fits by the
   // market's share of the shelf, and Gameflip is not a no-claim market.
   const E = byName(res, "OW no-claim");
   assert.equal(E.source, "noclaim");
@@ -545,8 +599,11 @@ test("tier fit rules: dropset surplus over the singles reserve, no-claim market 
     ["eldorado", "g2g"],
   );
   assert.equal(tierOf(E, "eldorado", 5).fits, true); // share 6
+  assert.equal(tierOf(E, "eldorado", 5).packsAvailable, 1);
   assert.equal(tierOf(E, "eldorado", 10).fits, false);
+  assert.equal(tierOf(E, "eldorado", 10).packsAvailable, 0);
   assert.equal(tierOf(E, "g2g", 5).fits, false); // share 3
+  assert.equal(tierOf(E, "g2g", 5).packsAvailable, 0);
   assert.equal(E.set.game, "Overwatch 2");
 
   // Small Rust: upper bound 6 - 5 reserve can never fit a 5+ tier, so it is
@@ -601,44 +658,126 @@ test("tier fit rules: dropset surplus over the singles reserve, no-claim market 
     "liveOfferId",
     "minQty",
     "packPrice",
+    "packsAvailable",
     "priced",
     "unitPrice",
   ]);
 });
 
-test("prices: lowest active non-bulk row is the anchor, else the set price; gameflip gets a pack price", async () => {
+test("PACKS-2 §4 prices: every market lists ONE pack at its pack price (packPriceFor) with the per-account equivalent; the anchor is the lowest active non-bulk row, else the set price", async () => {
   await seed();
   const res = await proposals.accountProposals();
   const A = byName(res, "Rust bundle");
-  // Eldorado: rows at 2.0 and 2.5; the 1.0 bulk row and the 0.5 sold row are ignored.
+  const quote = (m) =>
+    m.tiers.map((t) => [t.minQty, t.discountPct, t.packPrice, t.unitPrice]);
+  // Eldorado: rows at 2.0 and 2.5; the 1.0 bulk row and the 0.5 sold row are
+  // ignored. Pack of 5 at 5% off: 5 × 2 × 0.95 = $9.50 ($1.90 each).
   const el = marketOf(A, "eldorado");
   assert.equal(el.anchor, 2);
   assert.equal(el.basis, "listing");
-  assert.deepEqual(
-    el.tiers.map((t) => [t.minQty, t.discountPct, t.unitPrice, t.packPrice]),
-    [
-      [5, 5, 1.9, 0],
-      [10, 10, 1.8, 0],
-    ],
-  );
-  // G2G: only a delisted row -> the set's own price.
+  assert.deepEqual(quote(el), [
+    [5, 5, 9.5, 1.9],
+    [10, 10, 18, 1.8],
+  ]);
+  // G2G: only a delisted row -> the set's own price, priced per pack too.
   const g2g = marketOf(A, "g2g");
   assert.equal(g2g.anchor, 3);
   assert.equal(g2g.basis, "set");
-  // Gameflip: one listing = one pack of exactly minQty accounts.
+  assert.deepEqual(quote(g2g), [
+    [5, 5, 14.25, 2.85],
+    [10, 10, 27, 2.7],
+  ]);
+  // Gameflip: one listing = one pack of exactly minQty accounts, on the
+  // $0.25 grid.
   const gf = marketOf(A, "gameflip");
-  assert.deepEqual(
-    gf.tiers.map((t) => [t.minQty, t.packPrice]),
-    [
-      [5, 14.25],
-      [10, 27],
-    ],
+  assert.deepEqual(quote(gf), [
+    [5, 5, 14.25, 2.85],
+    [10, 10, 27, 2.7],
+  ]);
+  for (const m of A.markets)
+    assert.ok(
+      m.tiers.every((t) => t.priced),
+      m.market,
+    );
+  // Every price came from packPriceFor, with the tier as the pack size.
+  assert.ok(
+    world.calls.packPriceFor.some(
+      (c) =>
+        c.market === "g2g" &&
+        c.size === 10 &&
+        c.anchor === 3 &&
+        c.discountPct === 10,
+    ),
   );
   // Apex G2G has its own listing row.
   const B = byName(res, "Apex bundle");
   assert.equal(marketOf(B, "g2g").anchor, 1.6);
   assert.equal(marketOf(B, "g2g").basis, "listing");
+  assert.deepEqual(quote(marketOf(B, "g2g")), [
+    [5, 5, 7.6, 1.52],
+    [10, 10, 14.4, 1.44],
+  ]);
   assert.equal(marketOf(B, "eldorado").basis, "set");
+  // Gameflip rounds the whole pack to a quarter: 5 × 2 × 0.95 = 9.50.
+  assert.deepEqual(quote(marketOf(B, "gameflip"))[0], [5, 5, 9.5, 1.9]);
+});
+
+test("PACKS-2 §4 G2G's $1 floor is per PACK: a cheap bundle keeps its discount (the old per-account floor ate it)", async () => {
+  await seed();
+  const cheap = await DropSet.create({
+    name: "Cheap Rust bundle",
+    items: [item("Twig", "Rust")],
+    price: 0.8,
+  });
+  const tiny = await DropSet.create({
+    name: "Tiny Rust bundle",
+    items: [item("Pebble", "Rust")],
+    price: 0.15,
+  });
+  for (const s of [cheap, tiny]) {
+    world.upper[s.name] = 30;
+    world.free[s.name] = 30;
+  }
+  proposals.invalidate();
+  const res = await proposals.accountProposals({ refresh: true });
+  // $0.80 single: per account $0.76 / $0.72 — below G2G's $1, which used to
+  // clamp both tiers to $1.00 each (no discount at all). Per pack it is
+  // $3.80 / $7.20, well above the $1 listing floor.
+  const g2g = marketOf(byName(res, "Cheap Rust bundle"), "g2g");
+  assert.deepEqual(
+    g2g.tiers.map((t) => [t.minQty, t.packPrice, t.unitPrice, t.fits]),
+    [
+      [5, 3.8, 0.76, true],
+      [10, 7.2, 0.72, true],
+    ],
+  );
+  // $0.15 single: a pack of 5 at 5% off is $0.71 — lifted to the $1 floor
+  // of the LISTING ($0.20 each), never to $1 per account.
+  const low = marketOf(byName(res, "Tiny Rust bundle"), "g2g");
+  assert.deepEqual(low.tiers[0].packPrice, 1);
+  assert.deepEqual(low.tiers[0].unitPrice, 0.2);
+  // 10 × 0.15 × 0.9 = 1.35: above the floor, priced as is.
+  assert.deepEqual(low.tiers[1].packPrice, 1.35);
+  // Eldorado's floor is $0.50 per listing: 5 × 0.15 × 0.95 = 0.7125 -> $0.71.
+  const el = marketOf(byName(res, "Tiny Rust bundle"), "eldorado");
+  assert.deepEqual(el.tiers[0].packPrice, 0.71);
+  // Gameflip: 0.7125 on the quarter grid is $0.75 — its own floor.
+  const gf = marketOf(byName(res, "Tiny Rust bundle"), "gameflip");
+  assert.deepEqual(gf.tiers[0].packPrice, 0.75);
+});
+
+test("proposals refuse to guess without pricing.packPriceFor (PACKS-2 §3)", async () => {
+  await seed();
+  const { packPriceFor: _drop, ...noPack } = fakePricing;
+  proposals.__setDeps({ pricing: noPack });
+  try {
+    await assert.rejects(proposals.accountProposals(), /packPriceFor/);
+    await assert.rejects(proposals.farmProposals(), /packPriceFor/);
+    assert.equal(world.calls.stockForSets.length, 0, "failed before any read");
+  } finally {
+    proposals.__setDeps({ pricing: fakePricing });
+  }
+  assert.ok((await proposals.accountProposals()).items.length > 0);
 });
 
 test("liveOfferId: the OPEN offer on that exact slot only", async () => {
@@ -962,20 +1101,32 @@ test("farm: demand on the configured terms, farm-table prices, capacity fit, liv
   assert.equal(el.anchor, 4);
   assert.equal(el.basis, "farm-table");
   assert.deepEqual(el.gate, { ok: true, reason: "" });
-  assert.deepEqual(
-    el.tiers.map((t) => [
+  // PACKS-2 §4: a pack of N at the farm-table price less the discount
+  // (5 × $4 × 0.95 = $19.00, $3.80 each). The room is a NEW offer's share:
+  // two farm offers are open, so it gets 8 / 3 = 2 accounts — not one pack.
+  assert.equal(res.share, 2);
+  assert.equal(res.sharers, 3);
+  const farmQuote = (m) =>
+    m.tiers.map((t) => [
       t.minQty,
       t.discountPct,
-      t.unitPrice,
       t.packPrice,
+      t.unitPrice,
       t.fits,
+      t.packsAvailable,
       t.liveOfferId,
-    ]),
-    [
-      [5, 5, 3.8, 0, true, null],
-      [10, 10, 3.6, 0, false, null], // 8 advertisable < 10
-    ],
+    ]);
+  assert.deepEqual(farmQuote(el), [
+    [5, 5, 19, 3.8, false, 0, null],
+    [10, 10, 36, 3.6, false, 0, null],
+  ]);
+  const shared = world.calls.shareFor[0];
+  assert.deepEqual(
+    shared[1].slice(0, 2),
+    [String(O.liveFarm._id), String(O.liveFarmOld._id)].sort(),
   );
+  assert.equal(shared[1].length, 3, "the open farm offers + the new one");
+  assert.equal(shared[2], 8);
   assert.equal(rust.markets[1].tiers[1].liveOfferId, String(O.liveFarm._id));
   const valorant = res.items[2];
   assert.deepEqual([valorant.orders, valorant.accounts], [0, 0]);
@@ -984,15 +1135,63 @@ test("farm: demand on the configured terms, farm-table prices, capacity fit, liv
     String(O.liveFarmOld._id),
   );
   assert.equal(valorant.markets[0].anchor, 7);
+  assert.deepEqual(
+    [
+      valorant.markets[0].tiers[0].packPrice,
+      valorant.markets[0].tiers[0].unitPrice,
+    ],
+    [33.25, 6.65],
+  );
 
-  // A term with no farm-table price proposes no price.
+  // More capacity: min(20 max, 30 room, 60-20 slots, 80-20 pristine) = 20
+  // advertisable, a new offer's share 20 / 3 = 6 -> one pack of 5 fits, a
+  // pack of 10 does not.
+  proposals.invalidate();
+  world.capacity.bestStackRoom = 30;
+  const more = await proposals.farmProposals();
+  assert.equal(more.advertisable, 20);
+  assert.equal(more.share, 6);
+  assert.deepEqual(farmQuote(more.items[0].markets[0]), [
+    [5, 5, 19, 3.8, true, 1, null],
+    [10, 10, 36, 3.6, false, 0, null],
+  ]);
+
+  // A term with no farm-table price proposes no price, and nothing fits.
   proposals.invalidate();
   world.bp.farmDurations = [120, 180, 365, 90];
   const withApex = await proposals.farmProposals();
   const apex = withApex.items.find((i) => i.game === "Apex Legends");
   assert.equal(withApex.items[0], apex, "most orders first");
   assert.equal(apex.markets[0].anchor, 0);
-  assert.ok(apex.markets[0].tiers.every((t) => t.unitPrice === 0));
+  assert.ok(
+    apex.markets[0].tiers.every(
+      (t) => t.unitPrice === 0 && t.packPrice === 0 && !t.priced && !t.fits,
+    ),
+  );
+});
+
+test("PACKS-2 §4 farm: with no other farm offer open a new one gets the whole advertisable capacity, in whole packs", async () => {
+  await seed();
+  await BulkOffer.updateMany(
+    { kind: "farming" },
+    { $set: { state: "withdrawn", open: false } },
+  );
+  world.capacity.bestStackRoom = 17; // advertisable = min(20, 17, 40, 60) = 17
+  const res = await proposals.farmProposals();
+  assert.equal(res.advertisable, 17);
+  assert.equal(res.share, 17);
+  assert.equal(res.sharers, 1);
+  const rust = res.items.find((i) => i.game === "Rust");
+  for (const m of rust.markets) {
+    assert.deepEqual(
+      m.tiers.map((t) => [t.minQty, t.fits, t.packsAvailable, t.liveOfferId]),
+      [
+        [5, true, 3, null], // 17 accounts = 3 packs of 5 (2 left over)
+        [10, true, 1, null], // = 1 pack of 10
+      ],
+      m.market,
+    );
+  }
 });
 
 test("farm: top 30 by orders, live slots appended, gates, no capacity -> nothing fits", async () => {

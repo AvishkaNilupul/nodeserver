@@ -1,11 +1,13 @@
-// Bulk packs — send.js (docs/bulk-packs/MODULES.md §send.js, API-UI.md Tests A5).
+// Bulk packs — send.js (docs/bulk-packs/MODULES.md §send.js, API-UI.md Tests A5,
+// PACKS-2.md §3: one listing = one pack of N accounts, priced whole).
 //
 // Memory Mongo with the REAL BulkOffer / MarketplaceListing / DropSet models,
 // the REAL delivery gate (utils/bulkPacks/config.js, fed a fake settings
-// object) and the REAL farm-order parsers (eldoradoFarmService /
-// g2gFarmService, fed a CampaignDrops row). Every sibling module and every
-// marketplace is a fake that records its calls: no network, and the real
-// utils/settings.json is never read.
+// object), the REAL pack maths (packMath / pricing) and buyer copy (copy.js —
+// a test may override one of its functions), and the REAL farm-order parsers
+// (eldoradoFarmService / g2gFarmService, fed a CampaignDrops row). Every other
+// sibling module and every marketplace is a fake that records its calls: no
+// network, and the real utils/settings.json is never read.
 const test = require("node:test");
 const assert = require("node:assert/strict");
 const mongoose = require("mongoose");
@@ -18,6 +20,9 @@ const CampaignDrops = require("../models/CampaignDrops");
 const realSettings = require("../utils/settings");
 const { shareOfShelf } = require("../utils/suppliedStock");
 const config = require("../utils/bulkPacks/config");
+const realPricing = require("../utils/bulkPacks/pricing");
+const realCopy = require("../utils/bulkPacks/copy");
+const packMath = require("../utils/bulkPacks/packMath");
 const send = require("../utils/bulkPacks/send");
 
 let mongod;
@@ -52,92 +57,21 @@ const fakeSettings = {
     /overwatch|rainbow six|call of duty/i.test(String(g || "")),
 };
 
-const round2 = (x) => Math.round(x * 100) / 100;
-const fakePricing = {
-  unitPrice: ({ anchor, discountPct, market }) =>
-    anchor > 0
-      ? Math.max(
-          config.MARKET_FLOORS[market],
-          round2(anchor * (1 - discountPct / 100)),
-        )
-      : 0,
-  packPrice: ({ anchor, discountPct, size }) =>
-    anchor > 0 && size > 0
-      ? Math.max(
-          0.75,
-          Math.round(size * anchor * (1 - discountPct / 100) * 4) / 4,
-        )
-      : 0,
-  farmUnitPrice: ({ farmPrices, market, days, discountPct }) => {
-    const a = Number(
-      farmPrices && farmPrices[market] && farmPrices[market][String(days)],
-    );
-    return a > 0
-      ? Math.max(
-          config.MARKET_FLOORS[market],
-          round2(a * (1 - discountPct / 100)),
-        )
-      : 0;
-  },
-  pickAnchor: ({ rows, set, market }) => {
-    const c = (rows || [])
-      .filter(
-        (r) =>
-          r.marketplace === market &&
-          r.status === "active" &&
-          !r.bulkOfferId &&
-          String(r.set) === String(set._id) &&
-          r.price > 0,
-      )
-      .sort((a, b) => a.price - b.price);
-    if (c.length)
-      return {
-        anchor: c[0].price,
-        basis: "listing",
-        listingId: String(c[0]._id),
-      };
-    if (Number(set.price) > 0)
-      return { anchor: Number(set.price), basis: "set", listingId: "" };
-    return { anchor: 0, basis: "none", listingId: "" };
-  },
-};
+// The real pack maths (pure). Kept behind a name so a test can wrap one call.
+const fakePricing = realPricing;
 
+// The real buyer copy; a test may override one function with copyState.
 const copyState = { accountsTitle: null, farmTitle: null };
 const fakeCopy = {
-  baseTitleForSet: ({ set, anchorRow }) =>
-    anchorRow && anchorRow.title
-      ? anchorRow.title
-      : set.name || "Twitch Drops bundle",
+  baseTitleForSet: (a) => realCopy.baseTitleForSet(a),
   accountsTitle: (a) =>
     copyState.accountsTitle
       ? copyState.accountsTitle(a)
-      : a.market === "gameflip"
-        ? a.baseTitle + " — PACK OF " + a.minQty + " ACCOUNTS"
-        : a.baseTitle +
-          " — BULK " +
-          a.minQty +
-          "+ accounts (" +
-          a.discountPct +
-          "% off)",
-  accountsDescription: ({ minQty }) =>
-    "Each account holds the whole bundle. Minimum order " + minQty + ".",
+      : realCopy.accountsTitle(a),
+  accountsDescription: (a) => realCopy.accountsDescription(a),
   farmTitle: (a) =>
-    copyState.farmTitle
-      ? copyState.farmTitle(a)
-      : a.game +
-        " Twitch Drops Automatic Farming " +
-        (a.days === 365 ? "1 Year" : a.days + " Days") +
-        " — Bulk " +
-        a.minQty +
-        "+ Accounts",
-  farmDescription: ({ game, days, minQty }) =>
-    "Minimum order " +
-    minQty +
-    ". Each account farms " +
-    game +
-    " for " +
-    days +
-    " days.",
+    copyState.farmTitle ? copyState.farmTitle(a) : realCopy.farmTitle(a),
+  farmDescription: (a) => realCopy.farmDescription(a),
 };
 
 // The stock layer: `held` stands in for the DropLog reservations
@@ -199,6 +133,7 @@ function resetMarkets() {
   mk.noId = false;
   mk.seq = 0;
   mk.onPublish = null;
+  mk.noclaimLanded = null;
 }
 function called(name) {
   return mk.calls.filter((c) => c[0] === name);
@@ -211,10 +146,14 @@ function maybeFail(name) {
   if (typeof f === "string") throw new Error(f);
   throw Object.assign(new Error(f.message), f);
 }
+// PACKS-2 §3: every publish is priced per PACK (packPrice) on every market.
 const fakeMarkets = {
   gameOfSet: (set) =>
     set.coverGame || (set.items && set.items[0] && set.items[0].game) || "",
-  coverForSet: async () => "",
+  coverForSet: async (set, pack) => {
+    mk.calls.push(["coverForSet", String(set && set._id), pack]);
+    return "";
+  },
   publishAccounts: async (args) => {
     mk.calls.push(["publishAccounts", args]);
     if (mk.onPublish) await mk.onPublish(args);
@@ -222,14 +161,15 @@ const fakeMarkets = {
     return {
       externalId: mk.noId ? "" : "EXT-" + ++mk.seq,
       url: "https://market.test/offer/" + mk.seq,
-      price: args.market === "gameflip" ? args.packPrice : args.unitPrice,
+      price: args.packPrice,
     };
   },
   publishNoclaim: async (args) => {
     mk.calls.push(["publishNoclaim", args]);
     maybeFail("publishNoclaim");
     // What noclaimListings.publishClaimAtSale writes: a claim-at-sale row,
-    // origin manual, noclaimStock, no units.
+    // origin manual, noclaimStock, no units, qtyTarget = what it advertises.
+    const landed = mk.noclaimLanded != null ? mk.noclaimLanded : args.quantity;
     const row = await MarketplaceListing.create({
       set: args.set._id,
       marketplace: args.market,
@@ -237,18 +177,19 @@ const fakeMarkets = {
       url: "https://market.test/nc/" + mk.seq,
       title: args.title,
       description: args.description,
-      price: args.unitPrice,
+      price: args.packPrice,
       status: "active",
       origin: "manual",
       noclaimStock: true,
-      qtyTarget: args.quantity,
+      qtyTarget: landed,
       autoDeliver: false,
     });
     return {
       rowId: String(row._id),
       externalId: row.externalId,
       url: row.url,
-      price: args.unitPrice,
+      price: args.packPrice,
+      quantity: landed,
     };
   },
   publishFarm: async (args) => {
@@ -257,7 +198,7 @@ const fakeMarkets = {
     return {
       externalId: "FARM-" + ++mk.seq,
       url: "https://market.test/farm/" + mk.seq,
-      price: args.unitPrice,
+      price: args.packPrice,
     };
   },
   pause: async (market, id) => {
@@ -724,7 +665,7 @@ test("an account title that reads as Automatic Farming is refused before anythin
 // dropset on Eldorado / G2G
 // ---------------------------------------------------------------------------
 
-test("eldorado dropset happy path: reserved units ride on a manual row owned by the offer", async () => {
+test("eldorado dropset happy path: whole packs of reserved units ride on a manual row owned by the offer", async () => {
   const set = await makeSet();
   st.pool = accounts(30);
   await singleListing(set, "eldorado", 2.4);
@@ -743,23 +684,42 @@ test("eldorado dropset happy path: reserved units ride on a manual row owned by 
   assert.equal(offer.kind, "accounts");
   assert.equal(offer.anchorPrice, 2);
   assert.equal(offer.anchorBasis, "listing");
-  assert.equal(offer.unitPrice, 1.9);
-  assert.equal(offer.advertisedQty, 20, "min(unitsPerOffer 20, surplus 30-5)");
+  // PACKS-2 §3: the pack is priced whole — 5 x $2 x 0.95.
+  assert.equal(offer.packPrice, 9.5);
+  assert.equal(offer.unitPrice, 1.9, "its per-account equivalent");
+  assert.equal(offer.customPrice, false);
+  assert.equal(
+    offer.advertisedQty,
+    4,
+    "packs: min(unitsPerOffer 20 / 5, surplus (30-5) / 5) = 4",
+  );
   assert.equal(
     offer.slotKey,
     ["accounts", "dropset", String(set._id), "eldorado", 5].join("|"),
   );
-  assert.equal(entries(offer, "on_offer").length, 20);
+  assert.equal(entries(offer, "on_offer").length, 20, "4 packs x 5 accounts");
   assert.equal(offer.externalId, "EXT-1");
+  assert.equal(
+    offer.title,
+    "Rust Twitch Drops — Hoodie + AK Skin — PACK OF 5 ACCOUNTS (-5%)",
+    "the anchor row's title, then the pack",
+  );
+  assert.match(offer.description, /^PACK OF 5 ACCOUNTS — each purchase is a pack of 5 separate accounts\./);
 
   const pub = called("publishAccounts")[0][1];
   assert.equal(pub.market, "eldorado");
   assert.equal(pub.minQty, 5);
+  assert.equal(pub.packPrice, 9.5);
   assert.equal(pub.unitPrice, 1.9);
   assert.equal(pub.units.length, 20);
   assert.ok(pub.units.every((u) => !("password" in u)));
   assert.equal(st.reserveCalls[0].market, "eldorado");
   assert.equal(st.reserveCalls[0].n, 20);
+  // The pack cover: pack size and the discount the title shows.
+  assert.deepEqual(
+    called("coverForSet").map((c) => c[2]),
+    [{ packSize: 5, discountPct: 5 }],
+  );
 
   const row = await MarketplaceListing.findOne({
     bulkOfferId: offer._id,
@@ -771,9 +731,15 @@ test("eldorado dropset happy path: reserved units ride on a manual row owned by 
   assert.equal(row.externalId, "EXT-1");
   assert.equal(row.status, "active");
   assert.equal(row.autoDeliver, false);
-  assert.equal(row.qtyTarget, 20);
-  assert.equal(row.price, 1.9);
-  assert.equal(row.note, "bulk pack: min 5 (5% off), 20 reserved");
+  assert.equal(row.qtyTarget, 20, "the accounts on the row");
+  assert.equal(row.price, 9.5, "one unit sold = one pack");
+  assert.equal(row.bulkPackSize, 5, "PACKS-2 §1: the fulfillers multiply by it");
+  assert.equal(packMath.accountsForUnits(row, 2), 10, "2 units bought = 10 accounts");
+  assert.equal(row.title, offer.title);
+  assert.equal(
+    row.note,
+    "bulk pack: 4 pack(s) of 5 at $9.50 per pack (5% off), 20 reserved",
+  );
   assert.equal(
     row.accountLogin,
     "",
@@ -796,28 +762,45 @@ test("eldorado dropset happy path: reserved units ride on a manual row owned by 
 
   assert.ok(
     telegrams.some((t) =>
-      /Bulk offer live: .* — Eldorado, \$1\.90 each/.test(t),
+      /Bulk offer live: .* — Eldorado, pack of 5 for \$9\.50 \(\$1\.90 each\)/.test(t),
     ),
+    telegrams.join("\n"),
   );
   assert.ok(events.some((e) => e.category === "bulk" && e.action === "sent"));
   assert.equal(proposalsState.invalidated, 1);
 });
 
-test("g2g dropset honours the owner's account count", async () => {
+test("g2g dropset honours the owner's account count in whole packs", async () => {
   const set = await makeSet();
   st.pool = accounts(30);
   const r = await sendDropset(set, "g2g", { units: 8, minQty: 10 });
-  assert.equal(r.status, 400, "8 accounts cannot carry a 10+ minimum");
+  assert.equal(r.status, 400, "8 accounts cannot fill one pack of 10");
+  assert.match(r.message, /at least one pack \(10 accounts\)/);
   const ok = await sendDropset(set, "g2g", { units: 8 });
   assert.equal(ok.status, 200, ok.message);
+  assert.equal(st.reserveCalls[0].n, 5, "8 accounts fill ONE pack of 5 — the other 3 are never reserved");
   const row = await MarketplaceListing.findOne({
     bulkOfferId: ok.offer._id,
   }).lean();
   assert.equal(row.marketplace, "g2g");
-  assert.equal(row.units.length, 8);
-  assert.equal(row.qtyTarget, 8);
-  assert.equal(ok.offer.advertisedQty, 8);
+  assert.equal(row.units.length, 5);
+  assert.equal(row.qtyTarget, 5);
+  assert.equal(row.bulkPackSize, 5);
+  assert.equal(row.price, 9.5);
+  assert.equal(ok.offer.advertisedQty, 1);
   assert.equal(ok.offer.unitPrice, 1.9);
+  assert.equal(ok.offer.packPrice, 9.5);
+  const pub = called("publishAccounts")[0][1];
+  assert.equal(pub.units.length, 5);
+  assert.match(pub.title, / — PACK OF 5 ACCOUNTS \(-5%\)$/);
+
+  // Ten tier: 12 accounts fill one pack of 10.
+  const ten = await sendDropset(set, "g2g", { units: 12, minQty: 10 });
+  assert.equal(ten.status, 200, ten.message);
+  assert.equal(st.reserveCalls[1].n, 10);
+  assert.equal(ten.offer.advertisedQty, 1);
+  assert.equal(ten.offer.packPrice, 18, "10 x $2 x 0.90");
+  assert.equal((await MarketplaceListing.findOne({ bulkOfferId: ten.offer._id }).lean()).bulkPackSize, 10);
 });
 
 test("a second click on the same slot is a 409 and reserves nothing; a closed slot can be re-sent", async () => {
@@ -1052,12 +1035,29 @@ test("a reservation moved mid-publish never rides on the new row (quantity marke
   assert.equal(row.units.length, 19);
   assert.ok(!row.units.some((u) => u.accountId === movedId()));
   assert.equal(row.qtyTarget, 19);
+  // 19 accounts fill 3 whole packs of 5; the 4 left over never sell.
   assert.deepEqual(
     called("setQuantity").map((c) => [c[1], c[2], c[3]]),
-    [["eldorado", "EXT-1", 19]],
+    [["eldorado", "EXT-1", 3]],
   );
-  assert.equal(r.offer.advertisedQty, 19);
-  assert.ok(telegrams.some((t) => /integrity/.test(t)));
+  assert.equal(r.offer.advertisedQty, 3);
+  assert.ok(telegrams.some((t) => /integrity/.test(t) && /3 whole pack\(s\) of 5/.test(t)));
+});
+
+test("a reservation moved mid-publish that leaves no whole pack pauses the offer", async () => {
+  const set = await makeSet();
+  st.pool = accounts(30);
+  loopReleasesOneMidPublish();
+  const r = await sendDropset(set, "eldorado", { units: 5 });
+  assert.equal(r.status, 200, r.message);
+  assert.equal((await MarketplaceListing.findOne({ bulkOfferId: r.offer._id }).lean()).units.length, 4);
+  assert.deepEqual(
+    called("pause").map((c) => [c[1], c[2]]),
+    [["eldorado", "EXT-1"]],
+    "4 accounts are not a pack of 5: off sale, never a quantity of 0",
+  );
+  assert.equal(called("setQuantity").length, 0);
+  assert.equal(r.offer.advertisedQty, 0);
 });
 
 test("a reservation moved mid-publish takes the whole Gameflip pack down", async () => {
@@ -1099,7 +1099,9 @@ test("gameflip pack happy path: exactly minQty accounts in one never-relisted ro
   const pub = called("publishAccounts")[0][1];
   assert.equal(pub.market, "gameflip");
   assert.equal(pub.packPrice, 9.5); // roundQuarter(5 × 2 × 0.95)
+  assert.equal(pub.unitPrice, 1.9);
   assert.equal(pub.units.length, 5);
+  assert.equal(pub.title, "Rust Twitch Drops bundle — PACK OF 5 ACCOUNTS (-5%)");
 
   const row = await MarketplaceListing.findOne({
     bulkOfferId: r.offer._id,
@@ -1113,10 +1115,15 @@ test("gameflip pack happy path: exactly minQty accounts in one never-relisted ro
   assert.equal(row.accountLogin, "acc1, acc2, acc3, acc4, acc5");
   assert.equal(row.units.length, 5);
   assert.equal(row.price, 9.5);
+  assert.equal(row.bulkPackSize, 5, "the one pack this listing is");
   assert.equal(row.lotSize, 0, "not an unclaimed lot row");
-  assert.equal(row.note, "bulk pack: min 5 (5% off), 5 reserved");
+  assert.equal(
+    row.note,
+    "bulk pack: 1 pack(s) of 5 at $9.50 per pack (5% off), 5 reserved",
+  );
   assert.equal(r.offer.packPrice, 9.5);
-  assert.equal(r.offer.advertisedQty, 5);
+  assert.equal(r.offer.unitPrice, 1.9);
+  assert.equal(r.offer.advertisedQty, 1, "one pack listing");
   assert.ok(telegrams.some((t) => /Gameflip, pack of 5 for \$9\.50/.test(t)));
 });
 
@@ -1194,8 +1201,16 @@ test("noclaim happy path: published through the no-claim layer, then linked to t
   });
   assert.equal(r.status, 200, r.message);
   const pub = called("publishNoclaim")[0][1];
-  assert.equal(pub.quantity, 12, "min(unitsPerOffer 20, share 12)");
+  assert.equal(
+    pub.quantity,
+    2,
+    "packs: min(unitsPerOffer 20 / 5, share 12 / 5) = 2",
+  );
   assert.equal(pub.minQty, 5);
+  assert.equal(pub.packPrice, 9.5, "5 x the set's $2 x 0.95");
+  assert.equal(pub.unitPrice, 1.9);
+  assert.match(pub.title, / — PACK OF 5 ACCOUNTS \(-5%\)$/);
+  assert.match(pub.description, /log in, link your own game account, then claim the rewards yourself/);
   assert.equal(
     st.reserveCalls.length,
     0,
@@ -1203,10 +1218,12 @@ test("noclaim happy path: published through the no-claim layer, then linked to t
   );
   const row = await MarketplaceListing.findById(r.offer.listing).lean();
   assert.equal(String(row.bulkOfferId), String(r.offer._id));
+  assert.equal(row.bulkPackSize, 5, "set in the same update as the link");
   assert.equal(row.noclaimStock, true);
   assert.equal(row.origin, "manual");
   assert.equal(r.offer.state, "live");
-  assert.equal(r.offer.advertisedQty, 12);
+  assert.equal(r.offer.advertisedQty, 2);
+  assert.equal(r.offer.packPrice, 9.5);
   assert.equal(r.offer.externalId, row.externalId);
 
   const short = await send.sendOffer({
@@ -1246,12 +1263,20 @@ test("farm happy path: no row, the title round-trips through the real Eldorado a
   assert.equal(offer.days, 120);
   assert.equal(offer.slotKey, "farming|farm|Rust@120|eldorado|5");
   assert.equal(offer.anchorBasis, "farm-table");
-  assert.equal(offer.unitPrice, 2.85); // $3 × 0.95
-  assert.equal(offer.advertisedQty, 20); // min(farmMaxQty 20, room 30, 60-20, 60-20)
+  assert.equal(offer.anchorPrice, 3);
+  // PACKS-2 §3: N x the farm unit price after the discount.
+  assert.equal(offer.packPrice, 14.25); // 5 × $3 × 0.95
+  assert.equal(offer.unitPrice, 2.85);
+  // 20 farmable accounts (min(farmMaxQty 20, room 30, 60-20, 60-20)) = 4 packs.
+  assert.equal(offer.advertisedQty, 4);
   const pub = called("publishFarm")[0][1];
-  assert.equal(pub.quantity, 20);
+  assert.equal(pub.quantity, 4);
   assert.equal(pub.minQty, 5);
-  assert.match(pub.title, /^Rust Twitch Drops Automatic Farming 120 Days/);
+  assert.equal(pub.packPrice, 14.25);
+  assert.equal(pub.discountPct, 5, "the pack cover's -D%");
+  // The REAL copy, read back by the REAL farm parsers (farmTitleProblem).
+  assert.equal(pub.title, "Rust Twitch Drops Automatic Farming 120 Days — PACK OF 5 ACCOUNTS");
+  assert.match(pub.description, /Each purchase is a pack of 5 separate Twitch accounts/);
   assert.equal(await MarketplaceListing.countDocuments({}), 0);
 
   const g = await send.sendOffer({
@@ -1264,14 +1289,18 @@ test("farm happy path: no row, the title round-trips through the real Eldorado a
   });
   assert.equal(g.status, 200, g.message);
   // FIXES-1 S1: the 20 farmable accounts are shared with the open Rust 120
-  // offer, so this one advertises its share (10), below the owner's 12.
+  // offer, so this one's share is 10 (below the owner's 12): one pack of 10.
   assert.equal(
     g.offer.advertisedQty,
-    10,
-    "its share of the shared farm capacity",
+    1,
+    "its share of the shared farm capacity, in packs",
   );
-  assert.equal(called("publishFarm")[1][1].quantity, 10);
-  assert.match(called("publishFarm")[1][1].title, /1 Year/);
+  assert.equal(g.offer.packPrice, 63, "10 × $7 × 0.90");
+  assert.equal(called("publishFarm")[1][1].quantity, 1);
+  assert.equal(
+    called("publishFarm")[1][1].title,
+    "Rust Twitch Drops Automatic Farming 1 Year — PACK OF 10 ACCOUNTS",
+  );
 });
 
 test("farm refusals: title that would not round-trip, unknown game, short capacity, bad term", async () => {
@@ -1689,11 +1718,12 @@ test("an interrupted send: refused while fresh; once stale, eldorado accounts go
 // refill, pause, resume
 // ---------------------------------------------------------------------------
 
-test("refill: atomic $push per unit, reserved[] authority, quantity re-read from the row", async () => {
+test("refill: whole packs, atomic $push per unit, reserved[] authority, packs re-read from the row", async () => {
   const set = await makeSet();
   st.pool = accounts(30);
   const r = await sendDropset(set, "eldorado", { units: 6 });
   assert.equal(r.status, 200);
+  assert.equal(r.offer.advertisedQty, 1, "6 accounts = one pack of 5");
   const row = await MarketplaceListing.findOne({
     bulkOfferId: r.offer._id,
   }).lean();
@@ -1706,12 +1736,24 @@ test("refill: atomic $push per unit, reserved[] authority, quantity re-read from
       },
     );
   };
-  const f = await send.refillOffer({
+  // Fewer accounts than one pack: refused before anything is reserved.
+  const tiny = await send.refillOffer({
     offerId: String(r.offer._id),
     add: 4,
     actor: "admin:t",
   });
+  assert.equal(tiny.status, 400);
+  assert.match(tiny.message, /whole packs — add at least 5 accounts/);
+  assert.equal(st.reserveCalls.length, 1, "only the send reserved");
+
+  // 7 accounts are one whole pack of 5: 5 reserved, never 7.
+  const f = await send.refillOffer({
+    offerId: String(r.offer._id),
+    add: 7,
+    actor: "admin:t",
+  });
   assert.equal(f.status, 200, f.message);
+  assert.equal(st.reserveCalls[1].n, 5);
   const after = await MarketplaceListing.findById(row._id).lean();
   assert.equal(after.units.length, 10);
   assert.equal(after.qtyTarget, 10);
@@ -1724,18 +1766,20 @@ test("refill: atomic $push per unit, reserved[] authority, quantity re-read from
     "the concurrent delivery stamp survives the refill",
   );
   assert.ok(stamped.deliveredAt);
+  // 9 free units (one went to ORD-7) = 1 whole pack of 5.
   assert.deepEqual(
     called("setQuantity").map((c) => c[3]),
-    [9],
+    [1],
   );
   const offer = await BulkOffer.findById(r.offer._id).lean();
-  assert.equal(offer.advertisedQty, 9);
+  assert.equal(offer.advertisedQty, 1);
   assert.equal(entries(offer, "on_offer").length, 10);
 
   // Only dropset eldorado/g2g offers refill; and not past the singles reserve.
   st.pool = st.pool.slice(0, 12); // 12 held-or-free, 10 held -> 2 free, surplus -3
-  const none = await send.refillOffer({ offerId: String(r.offer._id), add: 4 });
+  const none = await send.refillOffer({ offerId: String(r.offer._id), add: 5 });
   assert.equal(none.status, 409);
+  assert.match(none.message, /a refill adds whole packs of 5/);
   assert.equal(
     (await send.refillOffer({ offerId: String(r.offer._id), add: 0 })).status,
     400,
@@ -1787,7 +1831,7 @@ test("pause and resume: manual pause is not auto-resumable; resume needs stock a
   );
   assert.ok(telegrams.some((t) => /paused/.test(t)));
 
-  // Two units sell while paused: 4 left < minimum 5.
+  // Two units sell while paused: 3 left — not one pack of 5.
   const row = await MarketplaceListing.findOne({
     bulkOfferId: r.offer._id,
   }).lean();
@@ -1810,7 +1854,7 @@ test("pause and resume: manual pause is not auto-resumable; resume needs stock a
   assert.match(short.message, /refill it first/);
   assert.equal(called("resume").length, 0);
 
-  const f = await send.refillOffer({ offerId: String(r.offer._id), add: 3 });
+  const f = await send.refillOffer({ offerId: String(r.offer._id), add: 5 });
   assert.equal(f.status, 200, f.message);
   resetSettings({ eldoradoDeliverDryRun: true });
   assert.equal(
@@ -1826,6 +1870,15 @@ test("pause and resume: manual pause is not auto-resumable; resume needs stock a
   assert.equal(ok.status, 200, ok.message);
   assert.equal(ok.offer.state, "live");
   assert.equal(called("resume").length, 1);
+  // 3 + 5 = 8 free = one whole pack, set before the resume (S8).
+  assert.deepEqual(
+    mk.calls.filter((c) => c[0] === "setQuantity" || c[0] === "resume").slice(-2).map((c) => [c[0], c[3]]),
+    [
+      ["setQuantity", 1],
+      ["resume", undefined],
+    ],
+  );
+  assert.equal(ok.offer.advertisedQty, 1);
 
   const g = await sendDropset(set, "gameflip");
   assert.equal(
@@ -1892,4 +1945,421 @@ test("never throws: a failing dependency is a 500 and the offer is closed", asyn
   const w = await send.withdrawOffer({ offerId: String(offer._id) });
   assert.equal(w.status, 500);
   assert.equal(w.success, false);
+});
+
+// ---------------------------------------------------------------------------
+// PACKS-2 §3 — custom prices
+// ---------------------------------------------------------------------------
+
+async function nothingHappened() {
+  assert.equal(await BulkOffer.countDocuments({}), 0, "no offer created");
+  assert.equal(st.reserveCalls.length, 0, "nothing reserved");
+  assert.equal(
+    mk.calls.filter((c) => /^publish/.test(c[0])).length,
+    0,
+    "nothing published",
+  );
+}
+
+test("custom price: a pack below the market's floor per listing is a HARD 400 on every market, confirmed or not", async () => {
+  const set = await makeSet();
+  st.pool = accounts(30);
+  // 5 x $0.09 = $0.45 < Eldorado's $0.50; 5 x $0.19 = $0.95 < G2G's $1;
+  // 5 x $0.14 = $0.70 < Gameflip's $0.75.
+  for (const [market, customUnitPrice, floor] of [
+    ["eldorado", 0.09, "$0.50"],
+    ["g2g", 0.19, "$1.00"],
+    ["gameflip", 0.14, "$0.75"],
+  ]) {
+    for (const confirmPrice of [undefined, true]) {
+      const r = await sendDropset(set, market, { customUnitPrice, confirmPrice });
+      assert.equal(r.status, 400, market + " " + confirmPrice);
+      assert.equal(r.success, false);
+      assert.equal(r.code, "price_below_floor");
+      assert.match(r.message, new RegExp("below .*'s \\" + floor + " minimum per listing"));
+      assert.equal(r.price.floor, config.MARKET_FLOORS[market]);
+    }
+  }
+  const f = await send.sendOffer({
+    source: "farm",
+    game: "Rust",
+    days: 120,
+    market: "eldorado",
+    minQty: 5,
+    customUnitPrice: 0.09,
+    confirmPrice: true,
+  });
+  assert.equal(f.status, 400);
+  assert.equal(f.code, "price_below_floor");
+  await nothingHappened();
+  // Exactly at the floor is a price.
+  const at = await sendDropset(set, "eldorado", { customUnitPrice: 0.1, confirmPrice: true });
+  assert.equal(at.status, 200, at.message);
+  assert.equal(at.offer.packPrice, 0.5);
+});
+
+test("custom price under 70% of the single price: 409 price_confirm, then confirmPrice === true sends it", async () => {
+  const set = await makeSet(); // set.price $2 is the anchor
+  st.pool = accounts(30);
+  const r = await sendDropset(set, "eldorado", { customUnitPrice: 1.2 });
+  assert.equal(r.status, 409);
+  assert.equal(r.success, false);
+  assert.equal(r.code, "price_confirm");
+  assert.match(r.message, /\$1\.20 per account is 40% below the single price of \$2\.00/);
+  assert.match(r.message, /pack of 5 would sell for \$6\.00/);
+  assert.deepEqual(
+    {
+      customUnitPrice: r.price.customUnitPrice,
+      packPrice: r.price.packPrice,
+      packSize: r.price.packSize,
+      anchorPrice: r.price.anchorPrice,
+      anchorBasis: r.price.anchorBasis,
+      floor: r.price.floor,
+      pctOfAnchor: r.price.pctOfAnchor,
+    },
+    {
+      customUnitPrice: 1.2,
+      packPrice: 6,
+      packSize: 5,
+      anchorPrice: 2,
+      anchorBasis: "set",
+      floor: 0.5,
+      pctOfAnchor: 60,
+    },
+  );
+  assert.equal(r.price.reasons.length, 1);
+  // Only the boolean true confirms.
+  for (const confirmPrice of ["true", 1, "yes", {}]) {
+    const again = await sendDropset(set, "eldorado", { customUnitPrice: 1.2, confirmPrice });
+    assert.equal(again.status, 409, JSON.stringify(confirmPrice));
+    assert.equal(again.code, "price_confirm");
+  }
+  await nothingHappened();
+
+  const ok = await sendDropset(set, "eldorado", { customUnitPrice: 1.2, confirmPrice: true });
+  assert.equal(ok.status, 200, ok.message);
+  const offer = await BulkOffer.findById(ok.offer._id).lean();
+  assert.equal(offer.customPrice, true);
+  assert.equal(offer.unitPrice, 1.2, "stored per account");
+  assert.equal(offer.packPrice, 6, "stored per pack: round2(1.2 x 5)");
+  assert.equal(offer.anchorPrice, 2);
+  assert.equal(offer.discountPct, 40, "the discount the price really gives");
+  assert.match(offer.title, / — PACK OF 5 ACCOUNTS \(-40%\)$/);
+  const pub = called("publishAccounts")[0][1];
+  assert.equal(pub.packPrice, 6);
+  assert.equal(pub.unitPrice, 1.2);
+  assert.deepEqual(called("coverForSet")[0][2], { packSize: 5, discountPct: 40 });
+  const row = await MarketplaceListing.findOne({ bulkOfferId: offer._id }).lean();
+  assert.equal(row.price, 6);
+  assert.equal(row.bulkPackSize, 5);
+  assert.match(row.note, /custom price \$1\.20 each/);
+  assert.ok(telegrams.some((t) => /pack of 5 for \$6\.00 \(\$1\.20 each, custom price\)/.test(t)), telegrams.join("\n"));
+});
+
+test("custom price above the single price, or under the set's minPriceUsd, needs the confirm too", async () => {
+  st.pool = accounts(60);
+  const set = await makeSet();
+  const high = await sendDropset(set, "g2g", { customUnitPrice: 2.5 });
+  assert.equal(high.status, 409);
+  assert.equal(high.code, "price_confirm");
+  assert.match(high.message, /\$2\.50 per account is above the single price of \$2\.00/);
+  const highOk = await sendDropset(set, "g2g", { customUnitPrice: 2.5, confirmPrice: true });
+  assert.equal(highOk.status, 200, highOk.message);
+  assert.equal(highOk.offer.packPrice, 12.5);
+  assert.equal(highOk.offer.discountPct, 0);
+  assert.match(highOk.offer.title, / — PACK OF 5 ACCOUNTS$/, "no discount tag on a markup");
+
+  // minPriceUsd $1.80 on a $2 set: $1.50 is 75% of the anchor (fine) but
+  // under the bundle's own minimum.
+  const guarded = await makeSet({ name: "Rust guarded bundle", minPriceUsd: 1.8 });
+  const low = await sendDropset(guarded, "eldorado", { customUnitPrice: 1.5 });
+  assert.equal(low.status, 409);
+  assert.equal(low.code, "price_confirm");
+  assert.match(low.message, /below this bundle's minimum price of \$1\.80/);
+  assert.equal(low.price.minPriceUsd, 1.8);
+  const lowOk = await sendDropset(guarded, "eldorado", { customUnitPrice: 1.5, confirmPrice: true });
+  assert.equal(lowOk.status, 200, lowOk.message);
+  assert.equal(lowOk.offer.customPrice, true);
+});
+
+test("custom price within 70%..100% of the single price needs no confirm", async () => {
+  const set = await makeSet();
+  st.pool = accounts(30);
+  const r = await sendDropset(set, "gameflip", { customUnitPrice: 1.6 });
+  assert.equal(r.status, 200, r.message);
+  assert.equal(r.offer.customPrice, true);
+  assert.equal(r.offer.unitPrice, 1.6);
+  assert.equal(r.offer.packPrice, 8, "round2(1.6 x 5), Gameflip included");
+  assert.equal(r.offer.discountPct, 20);
+  assert.equal(called("publishAccounts")[0][1].packPrice, 8);
+  assert.match(r.offer.title, / — PACK OF 5 ACCOUNTS \(-20%\)$/);
+  // A numeric string from a form is a price too.
+  const s2 = await sendDropset(set, "eldorado", { customUnitPrice: "1.75" });
+  assert.equal(s2.status, 200, s2.message);
+  assert.equal(s2.offer.unitPrice, 1.75);
+  assert.equal(s2.offer.packPrice, 8.75);
+});
+
+test("custom price input that is not a price is a 400 before anything happens", async () => {
+  const set = await makeSet();
+  st.pool = accounts(30);
+  for (const customUnitPrice of ["abc", -1, 0, "0", {}, [1], true, NaN, Infinity, "1,5", " "]) {
+    const r = await sendDropset(set, "eldorado", { customUnitPrice });
+    if (customUnitPrice === " ") {
+      // Blank is "no custom price".
+      assert.equal(r.status, 200, r.message);
+      assert.equal(r.offer.customPrice, false);
+      continue;
+    }
+    assert.equal(r.status, 400, JSON.stringify(customUnitPrice));
+    assert.equal(r.code, "price_invalid");
+  }
+});
+
+test("custom price on a farming pack: the farm table is the anchor; N x the custom price", async () => {
+  const r = await send.sendOffer({
+    source: "farm",
+    game: "Rust",
+    days: 120,
+    market: "g2g",
+    minQty: 5,
+    customUnitPrice: 2,
+  });
+  assert.equal(r.status, 409, "$2 is 67% of the $3 farm price");
+  assert.equal(r.code, "price_confirm");
+  assert.equal(r.price.anchorBasis, "farm-table");
+  assert.equal(await BulkOffer.countDocuments({}), 0);
+  const ok = await send.sendOffer({
+    source: "farm",
+    game: "Rust",
+    days: 120,
+    market: "g2g",
+    minQty: 5,
+    customUnitPrice: 2,
+    confirmPrice: true,
+  });
+  assert.equal(ok.status, 200, ok.message);
+  assert.equal(ok.offer.customPrice, true);
+  assert.equal(ok.offer.unitPrice, 2);
+  assert.equal(ok.offer.packPrice, 10);
+  const pub = called("publishFarm")[0][1];
+  assert.equal(pub.packPrice, 10);
+  assert.equal(pub.discountPct, 33, "rounded down: never overstated");
+});
+
+// ---------------------------------------------------------------------------
+// PACKS-2 §3 — packs reserved and advertised
+// ---------------------------------------------------------------------------
+
+test("packs reserved at send = min(units / N, unitsPerOffer / N, surplus / N), whole packs only", async () => {
+  const set = await makeSet();
+  // 17 free - 5 singles = 12 surplus = 2 packs of 5 (unitsPerOffer 20 = 4).
+  st.pool = accounts(17);
+  const a = await sendDropset(set, "eldorado");
+  assert.equal(a.status, 200, a.message);
+  assert.equal(st.reserveCalls[0].n, 10);
+  assert.equal(a.offer.advertisedQty, 2);
+  assert.equal(called("publishAccounts")[0][1].units.length, 10);
+
+  // The owner's 14 accounts = 2 packs, whatever else is free.
+  resetStock();
+  st.pool = accounts(40);
+  const b = await sendDropset(set, "g2g", { units: 14 });
+  assert.equal(b.status, 200, b.message);
+  assert.equal(st.reserveCalls[0].n, 10);
+  assert.equal(b.offer.advertisedQty, 2);
+  assert.equal(entries(await BulkOffer.findById(b.offer._id).lean(), "on_offer").length, 10);
+
+  // Accounts per offer below one pack, and no count typed: refused, with why.
+  resetSettings({ bulkPackUnitsPerOffer: 3 });
+  const c = await sendDropset(set, "eldorado", { minQty: 10 });
+  assert.equal(c.status, 409);
+  assert.match(c.message, /Accounts per offer \(3\) is less than one pack of 10/);
+});
+
+test("a reservation short of whole packs keeps the whole packs and hands the rest straight back", async () => {
+  const set = await makeSet();
+  st.pool = accounts(30);
+  st.reserveLimit = 13; // asked for 20 (4 packs), got 13
+  const r = await sendDropset(set, "eldorado");
+  assert.equal(r.status, 200, r.message);
+  assert.equal(st.releaseCalls.length, 1, "the 3 beyond the last whole pack");
+  assert.equal(st.releaseCalls[0].accountIds.length, 3);
+  assert.equal(st.held.size, 10);
+  const offer = await BulkOffer.findById(r.offer._id).lean();
+  assert.equal(entries(offer, "on_offer").length, 10);
+  assert.equal(entries(offer, "released").length, 3);
+  assert.equal(offer.advertisedQty, 2);
+  const pub = called("publishAccounts")[0][1];
+  assert.equal(pub.units.length, 10, "never a partial pack on offer");
+  const row = await MarketplaceListing.findOne({ bulkOfferId: offer._id }).lean();
+  assert.equal(row.units.length, 10);
+  assert.ok(
+    entries(offer, "released").every((e) => !row.units.some((u) => u.accountId === e.accountId)),
+  );
+});
+
+test("a title that does not say PACK OF N is refused before anything is reserved", async () => {
+  const set = await makeSet();
+  st.pool = accounts(30);
+  copyState.accountsTitle = (a) => a.baseTitle + " — BULK " + a.minQty + "+ accounts";
+  const r = await sendDropset(set, "eldorado");
+  assert.equal(r.status, 409);
+  assert.match(r.message, /does not say "PACK OF 5"/);
+  copyState.accountsTitle = null;
+  copyState.farmTitle = (a) =>
+    a.game + " Twitch Drops Automatic Farming " + a.days + " Days — Bulk " + a.minQty + "+";
+  const f = await send.sendOffer({ source: "farm", game: "Rust", days: 120, market: "g2g", minQty: 5 });
+  assert.equal(f.status, 409);
+  assert.match(f.message, /does not say "PACK OF 5"/);
+  await nothingHappened();
+});
+
+test("titles on every market state the pack; the farm title round-trips through the real parsers", async () => {
+  st.pool = accounts(60);
+  const set = await makeSet();
+  const eldFarm = require("../utils/eldoradoFarmService");
+  const g2gFarm = require("../utils/g2gFarmService");
+  for (const market of ["eldorado", "g2g", "gameflip"]) {
+    const r = await sendDropset(set, market, { minQty: 10, units: 10 });
+    assert.equal(r.status, 200, market + ": " + r.message);
+    assert.equal(r.offer.title, "Rust Twitch Drops bundle — PACK OF 10 ACCOUNTS (-10%)", market);
+    assert.equal(await eldFarm.parseFarmOrder({ orderOfferDetails: { offerTitle: r.offer.title } }), null);
+  }
+  for (const [market, days] of [
+    ["eldorado", 180],
+    ["g2g", 365],
+  ]) {
+    const r = await send.sendOffer({ source: "farm", game: "Rust", days, market, minQty: 5 });
+    assert.equal(r.status, 200, r.message);
+    assert.match(r.offer.title, / — PACK OF 5 ACCOUNTS$/);
+    const eld = await eldFarm.parseFarmOrder({ orderOfferDetails: { offerTitle: r.offer.title } });
+    const g2g = await g2gFarm.parseFarmOrder({ title: r.offer.title });
+    for (const parsed of [eld, g2g]) {
+      assert.equal(parsed.game, "Rust");
+      assert.equal(parsed.days, days);
+    }
+  }
+});
+
+test("no-claim: packs capped by the owner's accounts; the pack price; bulkPackSize on the linked row", async () => {
+  const set = await makeSet({
+    name: "OW no-claim",
+    stockSource: "noclaim",
+    items: [{ itemKey: "ow:1", name: "Skin", game: "Overwatch" }],
+  });
+  st.noclaim = { free: 40, share: { eldorado: 30, g2g: 30 } };
+  ncStock.share = 30;
+  const r = await send.sendOffer({ source: "noclaim", setId: String(set._id), market: "g2g", minQty: 5, units: 7 });
+  assert.equal(r.status, 200, r.message);
+  assert.equal(called("publishNoclaim")[0][1].quantity, 1, "7 accounts = one pack");
+  assert.equal(r.offer.advertisedQty, 1);
+  const row = await MarketplaceListing.findById(r.offer.listing).lean();
+  assert.equal(row.bulkPackSize, 5);
+  assert.equal(row.price, 9.5);
+
+  // One pack is more than this offer's share: refused before any publish.
+  st.noclaim = { free: 40, share: { eldorado: 4, g2g: 30 } };
+  const short = await send.sendOffer({ source: "noclaim", setId: String(set._id), market: "eldorado", minQty: 5 });
+  assert.equal(short.status, 409);
+  assert.match(short.message, /Only 4 of 40 .* one pack needs 5/);
+  assert.equal(called("publishNoclaim").length, 1);
+});
+
+test("no-claim: a shelf that shrank mid-publish never leaves more packs advertised than its share fills", async () => {
+  const set = await makeSet({
+    name: "OW no-claim",
+    stockSource: "noclaim",
+    items: [{ itemKey: "ow:1", name: "Skin", game: "Overwatch" }],
+  });
+  const send1 = () => send.sendOffer({ source: "noclaim", setId: String(set._id), market: "eldorado", minQty: 5 });
+  st.noclaim = { free: 30, share: { eldorado: 12, g2g: 0 } };
+
+  // 2 packs asked and landed; the row's own share now fills only 1.
+  ncStock.share = 7;
+  const one = await send1();
+  assert.equal(one.status, 200, one.message);
+  assert.deepEqual(
+    called("setQuantity").map((c) => [c[1], c[3]]),
+    [["eldorado", 1]],
+  );
+  assert.equal(one.offer.advertisedQty, 1);
+  assert.equal(one.offer.state, "live");
+  assert.equal((await send.withdrawOffer({ offerId: String(one.offer._id) })).status, 200);
+
+  // Not one whole pack left for it: taken straight back down.
+  resetMarkets();
+  ncStock.share = 3;
+  const none = await send1();
+  assert.equal(none.status, 409);
+  assert.match(none.message, /shrank while publishing \(not one whole pack of 5 is left for this offer\)/);
+  const o = await BulkOffer.findById(none.offer._id).lean();
+  assert.equal(o.state, "withdrawn");
+  assert.deepEqual(called("withdraw").map((c) => c[1]), ["eldorado"]);
+
+  // The layer capped it (1 of 2) and the share cannot be re-counted: down too.
+  resetMarkets();
+  mk.noclaimLanded = 1;
+  send.__setDeps({
+    noclaimStock: {
+      stockForListing: async () => {
+        throw new Error("snapshot unreadable");
+      },
+    },
+  });
+  const unknown = await send1();
+  assert.equal(unknown.status, 409);
+  assert.match(unknown.message, /only 1 of 2 pack\(s\) landed and the shelf could not be re-counted \(snapshot unreadable\)/);
+  send.__setDeps({ noclaimStock: fakeNoclaimStock });
+
+  // Enough for what landed: left alone.
+  resetMarkets();
+  ncStock.share = 12;
+  const fine = await send1();
+  assert.equal(fine.status, 200, fine.message);
+  assert.equal(called("setQuantity").length, 0);
+  assert.equal(fine.offer.advertisedQty, 2);
+});
+
+test("farm: packs = packsFor(share, N), capped by the owner's accounts", async () => {
+  const r = await send.sendOffer({ source: "farm", game: "Rust", days: 120, market: "eldorado", minQty: 5, units: 7 });
+  assert.equal(r.status, 200, r.message);
+  assert.equal(r.offer.advertisedQty, 1, "7 accounts = one pack of 5");
+  assert.equal(called("publishFarm")[0][1].quantity, 1);
+  const g = await send.sendOffer({ source: "farm", game: "Rust", days: 180, market: "eldorado", minQty: 5, units: 12 });
+  assert.equal(g.status, 200, g.message);
+  assert.equal(g.offer.advertisedQty, 2, "its share (10 of 20) caps the owner's 12: 2 packs");
+});
+
+test("resume sets the quantity in packs first: no-claim at its share, farm at its capacity share", async () => {
+  const set = await makeSet({
+    name: "OW no-claim",
+    stockSource: "noclaim",
+    items: [{ itemKey: "ow:1", name: "Skin", game: "Overwatch" }],
+  });
+  st.noclaim = { free: 30, share: { eldorado: 20, g2g: 0 } };
+  ncStock.share = 20;
+  const r = await send.sendOffer({ source: "noclaim", setId: String(set._id), market: "eldorado", minQty: 5 });
+  assert.equal(r.status, 200, r.message);
+  assert.equal((await send.pauseOffer({ offerId: String(r.offer._id) })).status, 200);
+  ncStock.share = 12;
+  mk.calls = [];
+  const ok = await send.resumeOffer({ offerId: String(r.offer._id) });
+  assert.equal(ok.status, 200, ok.message);
+  assert.deepEqual(
+    mk.calls.map((c) => [c[0], c[3]]),
+    [
+      ["setQuantity", 2],
+      ["resume", undefined],
+    ],
+  );
+  assert.equal(ok.offer.advertisedQty, 2);
+  // Not one pack behind it: refused, nothing called.
+  assert.equal((await send.pauseOffer({ offerId: String(r.offer._id) })).status, 200);
+  ncStock.share = 4;
+  mk.calls = [];
+  const short = await send.resumeOffer({ offerId: String(r.offer._id) });
+  assert.equal(short.status, 409);
+  assert.match(short.message, /one pack is 5/);
+  assert.equal(mk.calls.length, 0);
 });

@@ -1,10 +1,17 @@
 // Bulk packs — pure buyer copy: the titles and descriptions a bulk offer is
-// published with (docs/bulk-packs/CONTRACT.md I5, MODULES.md §copy.js).
+// published with (docs/bulk-packs/PACKS-2.md §3, CONTRACT.md I5, MODULES.md
+// §copy.js).
+//
+// PACKS-2 (owner decision 2026-09-30): a bulk listing is ONE item priced as the
+// whole pack, on every market. Every title says "PACK OF N ACCOUNTS" and every
+// description says that each purchase is a pack of N separate accounts — a
+// buyer must never read the pack price as the price of one account, nor set a
+// quantity of 5 believing it means 5 accounts (it means 5 packs).
 //
 // PURE: no DB, no network. Every function returns text that is safe to publish
 // on the named market as-is, or THROWS. The publishers cut an over-long title
 // silently (utils/marketplaces.js: eldoradoPublish at 160, g2gPublish at 128,
-// gameflipPublish at 120), and that cut would drop the "BULK 5+" part or the
+// gameflipPublish at 120), and that cut would drop the "PACK OF N" part or the
 // farming term, so a title is fitted here or refused here, never cut there.
 //
 // Two parsers read these titles back after a sale, and both are contracts:
@@ -62,11 +69,13 @@ const GAME_SPLIT_RE = /\s+Twitch\s+Drops\b/i;
 
 // Every suffix this module appends, in any letter case, after an em dash, en
 // dash or hyphen (in case a sanitiser flattened the dash):
-//   " — BULK 5+ accounts (5% off)"   " — BULK 5+ accounts"   accountsTitle eldorado/g2g
-//   " — PACK OF 5 ACCOUNTS"                                    accountsTitle gameflip
-//   " — Bulk 5+ Accounts"            " — Bulk 5+"             farmTitle
+//   " — PACK OF 5 ACCOUNTS (-5%)"   " — PACK OF 5 ACCOUNTS"   accountsTitle (v2)
+//   " — PACK OF 5 ACCOUNTS"         " — PACK OF 5"            farmTitle (v2)
+// and the v1 ones, still stripped so an old title never stacks a suffix:
+//   " — BULK 5+ accounts (5% off)"  " — BULK 5+ accounts"
+//   " — Bulk 5+ Accounts"           " — Bulk 5+"
 const BULK_SUFFIX_RE =
-  /\s*[—–-]\s*(?:bulk\s+\d+\s*\+(?:\s*accounts?)?(?:\s*\(\s*\d+(?:\.\d+)?\s*%\s*off\s*\))?|pack\s+of\s+\d+\s+accounts?)\s*$/i;
+  /\s*[—–-]\s*(?:bulk\s+\d+\s*\+(?:\s*accounts?)?(?:\s*\(\s*\d+(?:\.\d+)?\s*%\s*off\s*\))?|pack\s+of\s+\d+(?:\s+accounts?)?(?:\s*\(\s*[-−]\s*\d+(?:\.\d+)?\s*%\s*\))?)\s*$/i;
 
 // Control characters and line/paragraph separators; a title is one line.
 const CONTROL_RE = /[\u0000-\u001f\u007f-\u009f\u2028\u2029]/;
@@ -95,6 +104,18 @@ function positiveInt(v, what) {
   if (!Number.isInteger(n) || n < 1) {
     throw new Error(
       what + " must be a whole number of 1 or more (got " + str(v) + ")",
+    );
+  }
+  return n;
+}
+
+// A pack holds at least two accounts: a "pack" of one is a single listing,
+// which packMath.packSizeOf reads as one (the settings clamp tiers to 2..100).
+function packSize(v) {
+  const n = positiveInt(v, "minQty (the pack size)");
+  if (n < 2) {
+    throw new Error(
+      "minQty (the pack size) must be 2 or more — a pack of one is a single listing",
     );
   }
   return n;
@@ -144,27 +165,27 @@ function stripBulkSuffix(title) {
   return s;
 }
 
-// eldorado / g2g: `${base} — BULK ${minQty}+ accounts (${d}% off)`, with the
-//                 "(0% off)" left out;
-// gameflip:       `${base} — PACK OF ${minQty} ACCOUNTS`.
-// The base is shortened with "…" so the whole title fits TITLE_MAX[market];
-// the suffix is the part a bulk buyer must see, so it is never the part cut.
-// The "% off" is the discount the price is built with (pricing.js
-// effectiveDiscount). THROWS if the title would read as a rent-farm title.
+// Every market (PACKS-2 §3): `${base} — PACK OF ${minQty} ACCOUNTS`, then
+// " (-D%)" appended ONLY if it fits with the base whole — the discount tag is
+// the optional part, and the base (what is in the bundle) is never cut to make
+// room for it. A base too long for the pack suffix alone is shortened with "…"
+// so the whole title fits TITLE_MAX[market]; the pack suffix is the part a
+// buyer must see, so it is never the part cut. D is the discount the price is
+// built with (pricing.js effectiveDiscount; for a custom price, the discount it
+// really gives); "(-0%)" is never shown. THROWS if the title would read as a
+// rent-farm title.
 function accountsTitle({ baseTitle, market, minQty, discountPct } = {}) {
   requireMarket(market, ACCOUNT_MARKETS, "account packs");
-  const n = positiveInt(minQty, "minQty");
-  let suffix;
-  if (market === "gameflip") {
-    suffix = " — PACK OF " + n + " ACCOUNTS";
-  } else {
-    const shown = round2(effectiveDiscount(discountPct));
-    suffix =
-      " — BULK " + n + "+ accounts" + (shown > 0 ? " (" + shown + "% off)" : "");
-  }
+  const n = packSize(minQty);
+  const suffix = " — PACK OF " + n + " ACCOUNTS";
+  const shown = round2(effectiveDiscount(discountPct));
+  const tag = shown > 0 ? " (-" + shown + "%)" : "";
   const max = TITLE_MAX[market];
   const base = stripBulkSuffix(oneLine(baseTitle)) || DEFAULT_BASE;
-  const title = fitBase(base, max - suffix.length) + suffix;
+  const title =
+    tag && (base + suffix + tag).length <= max
+      ? base + suffix + tag
+      : fitBase(base, max - suffix.length) + suffix;
   if (title.length > max) {
     // Unreachable by construction; refuse rather than let the publisher cut.
     throw new Error(
@@ -215,16 +236,24 @@ function headingFor(game, setName) {
   return (game ? game + " " : "") + DEFAULT_BASE;
 }
 
-function composeAccounts({ market, source, n, heading, shown, hidden }) {
-  const lines = [];
-  if (market === "gameflip") {
+// PACKS-2 §3: every market says what ONE purchase is (a pack of N separate
+// accounts); on the quantity markets it also says what a quantity is (packs).
+function packLines(market, n) {
+  const lines = [
+    "PACK OF " + n + " ACCOUNTS — each purchase is a pack of " + n +
+      " separate accounts.",
+  ];
+  if (market !== "gameflip") {
     lines.push(
-      "PACK OF " + n + " ACCOUNTS — you receive " + n +
-        " separate accounts in this one purchase.",
+      "Buying 2 = 2 packs (" + 2 * n + " accounts), 3 = 3 packs (" + 3 * n +
+        " accounts), and so on.",
     );
-  } else {
-    lines.push("BULK PACK — the minimum order is " + n + " accounts.");
   }
+  return lines;
+}
+
+function composeAccounts({ market, source, n, heading, shown, hidden }) {
+  const lines = packLines(market, n);
   lines.push("", heading, "", "Each account holds the whole bundle:");
   if (shown.length) {
     lines.push(...shown);
@@ -256,8 +285,9 @@ function composeAccounts({ market, source, n, heading, shown, hidden }) {
     );
   } else {
     lines.push(
-      "Minimum order: " + n + " accounts. Set the quantity to " + n +
-        " or more — every unit is one more account with the whole bundle.",
+      "Quantity = packs: a quantity of 1 is one pack of " + n + " accounts, " +
+        "and every extra unit is one more pack of " + n + " accounts, each " +
+        "with the whole bundle.",
       "",
       "Automatic delivery: the login details for every account in your order " +
         "arrive in the order chat.",
@@ -281,11 +311,13 @@ function composeAccounts({ market, source, n, heading, shown, hidden }) {
 
 // Plain buyer copy for an account pack (source "dropset" or "noclaim"), at
 // most DESC_MAX[market] characters: as many item lines as fit, then
-// "…and N more". Says that each account holds the whole bundle, the minimum
-// order (eldorado/g2g) or "you receive N separate accounts" (gameflip), and
-// for no-claim stock that the buyer logs in, links their own game account and
-// claims the rewards. Reads only the named fields, so credentials that ride
-// along on the argument object can never reach the text.
+// "…and N more". Says that each purchase is a pack of N separate accounts
+// (every market), that a quantity counts packs — buying 2 = 2 packs
+// (eldorado/g2g) — or that the code lists the N accounts (gameflip), that
+// each account holds the whole bundle, and for no-claim stock that the buyer
+// logs in, links their own game account and claims the rewards. Reads only
+// the named fields, so credentials that ride along on the argument object can
+// never reach the text.
 function accountsDescription({
   setName,
   items,
@@ -305,7 +337,7 @@ function accountsDescription({
     SOURCE_MARKETS[source],
     source === "noclaim" ? "no-claim packs" : "account packs",
   );
-  const n = positiveInt(minQty, "minQty");
+  const n = packSize(minQty);
   const heading = headingFor(
     oneLine(game).slice(0, DESC_GAME_MAX).trim(),
     oneLine(setName).slice(0, DESC_SET_MAX).trim(),
@@ -388,33 +420,36 @@ function farmGame(game) {
   return g;
 }
 
-// `${game} Twitch Drops Automatic Farming ${farmTerm(days)} — Bulk ${minQty}+ Accounts`
-// If that is over TITLE_MAX[market], " Accounts" is dropped; if it is still
-// over, THROWS — the game cannot be shortened, or the farm could not resolve
-// it. Only markets that carry farming packs (eldorado, g2g).
+// `${game} Twitch Drops Automatic Farming ${farmTerm(days)} — PACK OF ${minQty} ACCOUNTS`
+// (PACKS-2 §3). If that is over TITLE_MAX[market], " ACCOUNTS" is dropped; if
+// it is still over, THROWS — the game cannot be shortened, or the farm could
+// not resolve it. The pack words carry no "N days" and no "Twitch Drops", so
+// the farm services still read the game and the term exactly (CONTRACT I5).
+// Only markets that carry farming packs (eldorado, g2g).
 function farmTitle({ game, days, minQty, market } = {}) {
   requireMarket(market, FARM_MARKETS, "farming packs");
   const g = farmGame(game);
   const term = farmTerm(days);
-  const n = positiveInt(minQty, "minQty");
+  const n = packSize(minQty);
   const max = TITLE_MAX[market];
-  const short = g + " Twitch Drops Automatic Farming " + term + " — Bulk " + n + "+";
-  const full = short + " Accounts";
+  const short = g + " Twitch Drops Automatic Farming " + term + " — PACK OF " + n;
+  const full = short + " ACCOUNTS";
   if (full.length <= max) return full;
   if (short.length <= max) return short;
   throw new Error(
     "the farm title for " + g + " is " + short.length + " characters even " +
-      "without \" Accounts\", over " + market + "'s " + max + "; the game " +
+      "without \" ACCOUNTS\", over " + market + "'s " + max + "; the game " +
       "name cannot be shortened or the farm services could not read it back",
   );
 }
 
-// The bulk version of the house farm copy (scripts/eldorado-farm-listings.js
-// description()): same sections and voice, plus the minimum order, the
-// one-window-per-account promise and where the login details arrive. Game and
-// term come from the same arguments as the title, so they cannot drift apart
-// (the R6 listing that sold 180 days while promising 120). At most the
-// smallest DESC_MAX of the farm markets (Eldorado's 2,000).
+// The pack version of the house farm copy (scripts/eldorado-farm-listings.js
+// description()): same sections and voice, plus what one purchase is (a pack
+// of N accounts — buying 2 = 2 packs), the one-window-per-account promise and
+// where the login details arrive. Game and term come from the same arguments
+// as the title, so they cannot drift apart (the R6 listing that sold 180 days
+// while promising 120). At most the smallest DESC_MAX of the farm markets
+// (Eldorado's 2,000).
 function farmDescription({ game, days, minQty } = {}) {
   const raw = str(game);
   if (CONTROL_RE.test(raw)) {
@@ -423,16 +458,17 @@ function farmDescription({ game, days, minQty } = {}) {
   const g = raw.trim();
   if (!g) throw new Error("a farming pack needs a game");
   const d = farmDays(days);
-  const n = positiveInt(minQty, "minQty");
+  const n = packSize(minQty);
   const text = [
-    "Automatic Farm on our Twitch for the game " + g +
-      " — BULK ORDER, minimum " + n + " accounts",
+    "Automatic Farm on our Twitch for the game " + g + " — PACK OF " + n +
+      " ACCOUNTS",
     "",
-    "Bulk Order: The minimum order is " + n + " accounts — set the quantity " +
-      "to " + n + " or more. Every unit is a separate Twitch account, and " +
-      "each one is farmed for " + g + " for the whole period [" + d + " days].",
+    "Pack of " + n + " accounts: Each purchase is a pack of " + n +
+      " separate Twitch accounts, and each one is farmed for " + g +
+      " for the whole period [" + d + " days]. Buying 2 = 2 packs (" + 2 * n +
+      " accounts), 3 = 3 packs (" + 3 * n + " accounts), and so on.",
     "",
-    "Delivery: The login details for every account in your order arrive in " +
+    "Delivery: The login details for every account in your pack arrive in " +
       "the order chat.",
     "",
     "Activation & Timing: After purchasing, link each received account to " +
