@@ -1316,3 +1316,92 @@ test("fleet.oneHome: clean but with an unreadable config is a warning, not an al
   const ok = await runCheck("fleet.oneHome", healthyDeps());
   assert.strictEqual(ok.status, "ok");
 });
+
+/* ========================================================================== *
+ * eldorado.offers — a listing taken off sale that is on sale again
+ * ========================================================================== */
+
+// On 2026-09-28 offer 00ec3522 came back on sale while its row had said
+// "delisted" since 09-07, and this check called it "sellable bundle offer with
+// no listing row" — true of no row, and it sent the reader hunting for a row
+// that was there. The offer list is Eldorado's OWN, read once per run.
+function eldoradoDeps({ offers, rows, hold = null, listingModel = null }) {
+  return healthyDeps({
+    MarketplaceListing: listingModel || fakeModel(rows),
+    marketplaces: {
+      async eldoradoMyListings() {
+        return { results: offers, totalPages: 1 };
+      },
+    },
+    eldoradoFarmService: {
+      async parseFarmOrder() {
+        return { game: "Rainbow Six Siege", days: 180 };
+      },
+    },
+    settings: { getAutoFarm: () => (hold ? { eldoradoOfflineHold: hold } : {}) },
+  });
+}
+const eldOffer = (id, over = {}) => ({ id, offerState: "Active", offerTitle: "Offer " + id, ...over });
+const eldRow = (id, over = {}) =>
+  listing({ marketplace: "eldorado", externalId: id, title: "Offer " + id, origin: "manual", ...over });
+
+test("eldorado.offers: a live offer behind a delisted or sold row is named as back on sale", async () => {
+  const row = await runCheck(
+    "eldorado.offers",
+    eldoradoDeps({
+      rows: [eldRow("eld-ok"), eldRow("eld-back", { status: "delisted" }), eldRow("eld-sold", { status: "sold" })],
+      offers: [
+        eldOffer("eld-ok"),
+        eldOffer("eld-back"),
+        eldOffer("eld-sold"),
+        eldOffer("eld-orphan"),
+        eldOffer("eld-paused", { offerState: "Paused" }),
+      ],
+    }),
+  );
+  assert.strictEqual(row.status, "fail");
+  assert.strictEqual(row.measured, 3);
+  const byOffer = new Map(row.items.map((it) => [it.offer, it]));
+  assert.strictEqual(byOffer.get("eld-back").kind, "live on Eldorado but our row says delisted");
+  assert.match(byOffer.get("eld-back").why, /took off sale is on sale again/);
+  assert.strictEqual(byOffer.get("eld-sold").kind, "live on Eldorado but our row says sold");
+  // A live offer with no row at all is still the untracked-offer finding.
+  assert.strictEqual(byOffer.get("eld-orphan").kind, "sellable bundle offer with no listing row");
+  assert.strictEqual(byOffer.get("eld-orphan").why, undefined);
+  assert.ok(!byOffer.has("eld-ok"), "an active row's live offer is tracked");
+  assert.ok(!byOffer.has("eld-paused"), "only live offers are judged");
+  assert.match(row.summary, /our row says delisted/);
+  assert.match(row.summary, /no listing row/);
+});
+
+test("eldorado.offers: the offline hold still wins, and a failed status read keeps the old label", async () => {
+  // An offer on the offline hold is a manual line whatever its row says.
+  const held = await runCheck(
+    "eldorado.offers",
+    eldoradoDeps({
+      rows: [eldRow("eld-held", { status: "delisted" })],
+      offers: [eldOffer("eld-held")],
+      hold: { message: "away until 02:30 UTC", offers: ["eld-held"] },
+    }),
+  );
+  assert.strictEqual(held.status, "ok");
+  assert.match(held.detail, /offline-hold offer/);
+
+  // The status read is extra detail on a finding that stands without it: if it
+  // fails, the offer is still flagged, under the old label.
+  const base = fakeModel([eldRow("eld-back", { status: "delisted" })]);
+  const flaky = {
+    ...base,
+    find(query) {
+      if (query && query.externalId && query.externalId.$in) throw new Error("socket closed");
+      return base.find(query);
+    },
+  };
+  const row = await runCheck(
+    "eldorado.offers",
+    eldoradoDeps({ listingModel: flaky, offers: [eldOffer("eld-back")] }),
+  );
+  assert.strictEqual(row.status, "fail");
+  assert.strictEqual(row.measured, 1);
+  assert.strictEqual(row.items[0].kind, "sellable bundle offer with no listing row");
+});

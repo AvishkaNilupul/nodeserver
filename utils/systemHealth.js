@@ -352,6 +352,12 @@ const CHECKS = [
     //     today, across 29 games — but publishing one for a game the farm does
     //     not know creates an offer that takes money and can never be filled,
     //     and nothing else would notice until a buyer paid.
+    //
+    // A fourth came later. BACK ON SALE: an offer whose row we took off sale
+    // (delisted, sold, removed) can go Active again. On 2026-09-28 the stock
+    // sync re-opened 00ec3522, delisted since 09-07, by pushing its quantity,
+    // and this check called it "no listing row" — which sent the reader
+    // looking for a row that was there all along. It is named for what it is.
     async run(ctx) {
       const mp = ctx.dep("marketplaces");
       const MarketplaceListing = ctx.dep("MarketplaceListing");
@@ -442,6 +448,7 @@ const CHECKS = [
         }
       }
 
+      const untracked = [];
       for (const o of live) {
         const title = String(o.offerTitle || "");
         const isFarm = /\bAutomatic\s+Farming\b/i.test(title);
@@ -469,12 +476,51 @@ const CHECKS = [
             manualLine.push(title.slice(0, 70));
             continue;
           }
-          problems.push({
-            kind: "sellable bundle offer with no listing row",
-            offer: String(o.id),
-            title: title.slice(0, 70),
-          });
+          untracked.push({ offer: String(o.id), title: title.slice(0, 70) });
         }
+      }
+
+      // A live offer with no ACTIVE row may still have a row: one we took off
+      // sale. One read names the status of every such row. A failed read keeps
+      // the old label, so the offer is flagged either way; an active row found
+      // here (a row past the limit above) means the offer is tracked after all.
+      let rowStatuses = new Map();
+      if (untracked.length) {
+        try {
+          const others = await MarketplaceListing.find(
+            { marketplace: "eldorado", externalId: { $in: untracked.map((u) => u.offer) } },
+            { externalId: 1, status: 1 },
+          )
+            .limit(2000)
+            .lean();
+          for (const r of others) {
+            const id = String(r.externalId);
+            if (!rowStatuses.has(id)) rowStatuses.set(id, new Set());
+            rowStatuses.get(id).add(String(r.status || "?"));
+          }
+        } catch {
+          rowStatuses = new Map();
+        }
+      }
+      for (const u of untracked) {
+        const statuses = rowStatuses.get(u.offer);
+        if (statuses && statuses.has("active")) continue;
+        if (statuses && statuses.size) {
+          problems.push({
+            kind: "live on Eldorado but our row says " + [...statuses].join("/"),
+            offer: u.offer,
+            title: u.title,
+            why:
+              "a listing we took off sale is on sale again — pause it on Eldorado, " +
+              "or relist its row if it should sell",
+          });
+          continue;
+        }
+        problems.push({
+          kind: "sellable bundle offer with no listing row",
+          offer: u.offer,
+          title: u.title,
+        });
       }
 
       const n = problems.length;
@@ -496,7 +542,9 @@ const CHECKS = [
           "Read from Eldorado's own offer list. A rent-farm offer is matched by " +
           "TITLE rather than by a listing row, so it is checked against the real " +
           "resolver instead of being counted as untracked. Auto-paused rows " +
-          "(paused by the stock sync, resumed by it) are not drift." +
+          "(paused by the stock sync, resumed by it) are not drift. A live offer " +
+          "whose row is delisted, sold or removed is named by that status: a " +
+          "listing taken off sale that is on sale again." +
           manualNote,
         items: capItems(problems),
       };
