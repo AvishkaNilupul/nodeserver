@@ -375,12 +375,6 @@ async function sweepOnce() {
   await sweepAccounts(now).catch((e) =>
     console.error("[renterExpiry] account sweep error:", e.message),
   );
-  // Every reload still owed — by a stop, a lapsed window or a start that
-  // failed after writing — is retried here, not only when something happens
-  // to touch the same file again (and pages when one stays owed).
-  await sweepPendingReloads().catch((e) =>
-    console.error("[renterExpiry] owed-reload sweep error:", e.message),
-  );
   await advanceDigest(now).catch((e) =>
     console.error("[renterExpiry] ending-soon digest error:", e.message),
   );
@@ -436,17 +430,21 @@ async function sweepOnce() {
       release();
     }
   }
+
+  // Every reload still owed — by a stop, a lapsed window or a start that
+  // failed after writing — is retried here, not only when something happens
+  // to touch the same file again (and pages when one stays owed). Last in the
+  // tick, so a host outage it has to wait out never delays a lease-end stop.
+  await sweepPendingReloads().catch((e) =>
+    console.error("[renterExpiry] owed-reload sweep error:", e.message),
+  );
 }
 
 async function stopExpiredRenter(r, now) {
-  const host = hosts.resolveHost(r.botHost);
-  if (!host) {
-    console.error(
-      "[renterExpiry] renter " + r.username + " has an unknown bot host '" +
-        (r.botHost || "") + "' — cannot stop it",
-    );
-    return;
-  }
+  // An unknown own host no longer skips the renter: every account on a KNOWN
+  // host is still pulled, and the stop then fails like any unverifiable one
+  // (retried each tick, paged after ~30 min) instead of only a console line.
+  const host = hosts.resolveHost(r.botHost) || null;
   const why =
     r.accessEnd && new Date(r.accessEnd) <= now ? "lease ended" : "suspended";
   try {
@@ -468,7 +466,7 @@ async function stopExpiredRenter(r, now) {
       ).catch(() => {});
       return;
     }
-    const detail = describeStop(out, host);
+    const detail = describeStop(out, host || { id: String(r.botHost || "?") });
     logEvent({
       category: "renting",
       action: why === "lease ended" ? "lease_ended" : "suspend_stop_retried",

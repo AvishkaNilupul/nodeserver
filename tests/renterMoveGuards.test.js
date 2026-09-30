@@ -56,7 +56,8 @@ Module._load = function (request, parent, isMain) {
       const real = realLoad.call(this, request, parent, isMain);
       return {
         ...real,
-        resolveHost: (v) => ({ id: v || "local", label: v || "local" }),
+        // "phone" is a retired host (no longer configured).
+        resolveHost: (v) => (v === "phone" ? null : { id: v || "local", label: v || "local" }),
         dockerPs: async () => ({}),
         listHosts: () => [{ id: "contabo", label: "contabo" }],
         // One empty, free rental stack for the Quick-farm picker.
@@ -404,4 +405,34 @@ test("REGRESSION: a Quick farm whose move is declined leaves the renter WITHOUT 
   assert.equal(after.botFile, "", "no stack taken by a refused request");
   assert.deepEqual(world.written, []);
   await require("../models/RenterBotStack").deleteMany({});
+});
+
+test("REGRESSION: removing an ENDED row pulls nothing (a copy on a bot now was put there on purpose)", async () => {
+  await reset();
+  const r = await mk("rainbowsix", { botFile: "config_16.json", ...LIVE });
+  const acc = await RenterAccount.create({
+    renter: r._id, clientSecret: "tokReused", login: "reused1", host: "contabo",
+    configFile: "", enabled: false, farmEndedAt: new Date(Date.now() - 86400000),
+  });
+  world.located = [["config_40.json", new Set(["tokReused"])]]; // back on an operator bot
+  const res = await call("DELETE", "/renter-accounts/" + acc._id);
+  assert.equal(res.status, 200);
+  assert.deepEqual(world.removed, [], "the operator bot keeps it");
+  assert.equal(await RenterAccount.findById(acc._id).lean(), null);
+});
+
+test("a row on a RETIRED host asks first, then removes the row with a warning", async () => {
+  await reset();
+  const r = await mk("rainbowsix", { botFile: "config_16.json", ...LIVE });
+  const acc = await RenterAccount.create({ renter: r._id, clientSecret: "tokPh", login: "ph1", host: "phone", configFile: "config_14.json" });
+  const res1 = await call("DELETE", "/renter-accounts/" + acc._id);
+  assert.equal(res1.status, 409);
+  const d1 = await res1.json();
+  assert.equal(d1.needsForce, true);
+  assert.match(d1.message, /bot host 'phone' is unknown/);
+  assert.ok(await RenterAccount.findById(acc._id).lean(), "kept until confirmed");
+  const res2 = await call("DELETE", "/renter-accounts/" + acc._id + "?force=1");
+  assert.equal(res2.status, 200);
+  assert.match((await res2.json()).note, /take it off that bot by hand/);
+  assert.equal(await RenterAccount.findById(acc._id).lean(), null);
 });

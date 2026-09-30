@@ -1779,13 +1779,18 @@ async function upsertRenterAccounts(accounts, host, file, renterId, opts = {}) {
   // and the scanner) or changes renter (the old renter's — or buyer's — term is
   // not the new one's). A live row of the same renter keeps its window: that
   // is a stack move (scripts/move-renter-*.js), never an extension.
+  // `opts.keepWindow` (the stack-move scripts): a move is never a new window —
+  // ended stays ended, a lapsed window stays lapsed (the sweep pulls it), and
+  // nothing becomes open-ended.
   const secrets = accounts.map((u) => u.ClientSecret);
-  const before = await RenterAccount.find(
-    { clientSecret: { $in: secrets } },
-    { clientSecret: 1, renter: 1, farmEndedAt: 1 },
-  )
-    .lean()
-    .catch(() => []);
+  const before = opts && opts.keepWindow
+    ? []
+    : await RenterAccount.find(
+        { clientSecret: { $in: secrets } },
+        { clientSecret: 1, renter: 1, farmEndedAt: 1 },
+      )
+        .lean()
+        .catch(() => []);
   const fresh = before
     .filter((r) => r.farmEndedAt || String(r.renter) !== String(renterId))
     .map((r) => r._id);

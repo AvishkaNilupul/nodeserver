@@ -209,6 +209,7 @@ async function checkOnce({ notify = true, options = null } = {}) {
 // ------------------------------------------------------------------
 const DEAD_REMIND_MS = 6 * 60 * 60 * 1000;
 const deadAlerted = new Map(); // "host/file" -> last page ms
+const missingSeen = new Set(); // registered stacks whose config was unreadable last tick
 
 let deps = {};
 const REAL = {
@@ -244,9 +245,20 @@ const REAL = {
     )
       .sort({ startedAt: 1 })
       .lean();
-    const pts = rows
-      .map((r) => ({ t: new Date(r.startedAt).getTime(), n: Number(r.checks && r.checks[0] && r.checks[0].measured) }))
-      .filter((p) => Number.isFinite(p.n));
+    // Only runs whose check really measured: a check that threw or timed out
+    // is stored as measured:null (status "unknown"), and Number(null) is 0 —
+    // one failed run read as the whole pool leaving (a false page).
+    const all = rows
+      .map((r) => r.checks && r.checks[0])
+      .map((c, i) => ({ c, t: new Date(rows[i].startedAt).getTime() }))
+      .filter(({ c }) => c && typeof c.measured === "number" && Number.isFinite(c.measured) && c.status !== "unknown")
+      .map(({ c, t }) => ({ t, n: c.measured }));
+    // One sample per 6 hours: accounts that leave eligibility and come back
+    // within the hour (a listing, a task) are churn, not burn.
+    const pts = [];
+    for (const p of all) {
+      if (!pts.length || p.t - pts[pts.length - 1].t >= 6 * 3600000) pts.push(p);
+    }
     if (pts.length < 2) return null;
     const days = (pts[pts.length - 1].t - pts[0].t) / 86400000;
     if (days < 1) return null;
@@ -267,6 +279,7 @@ async function deadStacksCheck({ notify = true, options = null } = {}) {
   const registered = await dep("listStacks")();
   const now = dep("now")();
   const byKey = new Map(bots.map((b) => [b.host + "/" + b.file, b]));
+  const missingSeenNow = new Set();
   const inFileOf = (b) => Number(b.physical != null ? b.physical : b.accounts) || 0;
   const dead = [];
   for (const b of bots) {
@@ -288,7 +301,18 @@ async function deadStacksCheck({ notify = true, options = null } = {}) {
       n = null; // unknown: still worth the page
     }
     if (n === 0) continue;
+    // Seen on two ticks in a row before it counts: one batched-read glitch
+    // must not page every stack on the host.
+    if (!missingSeen.has(key)) {
+      missingSeenNow.add(key);
+      continue;
+    }
+    missingSeenNow.add(key);
     dead.push({ key, accounts: n, why: "its config file is missing or unreadable" });
+  }
+  if (notify) {
+    missingSeen.clear();
+    for (const k of missingSeenNow) missingSeen.add(k);
   }
   const deadKeys = new Set(dead.map((d) => d.key));
   const page = [];
@@ -318,14 +342,18 @@ async function deadStacksCheck({ notify = true, options = null } = {}) {
   }
   if (notify) {
     if (page.length) {
-      await sendTelegram(
+      const LIST = 30;
+      let msg =
         "🛑 Rental stack(s) holding accounts are NOT farming:\n" +
-          page
-            .map((d) => "• " + d.key + (d.accounts != null ? " (" + d.accounts + " accounts)" : "") + " — " + d.why)
-            .join("\n") +
-          "\n\nEvery buyer / renter account on it is getting nothing. Start the container " +
-          "(Bots page) or find the config; this reminds every 6 h while it lasts.",
-      ).catch((e) => console.error("rentFarmCapacity telegram failed:", e.message));
+        page
+          .slice(0, LIST)
+          .map((d) => "• " + d.key + (d.accounts != null ? " (" + d.accounts + " accounts)" : "") + " — " + d.why)
+          .join("\n") +
+        (page.length > LIST ? "\n… and " + (page.length - LIST) + " more" : "") +
+        "\n\nEvery buyer / renter account on it is getting nothing. Start the container " +
+        "(Bots page) or find the config; this reminds every 6 h while it lasts.";
+      if (msg.length > 3800) msg = msg.slice(0, 3799) + "…"; // Telegram rejects over 4096
+      await sendTelegram(msg).catch((e) => console.error("rentFarmCapacity telegram failed:", e.message));
       logEvent({
         category: "renter",
         action: "rental_stack_dead",
@@ -403,7 +431,9 @@ async function runwayCheck({ notify = true, snap: given = null } = {}) {
   // is not helped by another stack.
   const holderWall = snap.limitedBy === "holder-limit";
   const checks = [
-    ["slots", out.slotDays,
+    // A host that could not be read counts its slots as 0 — no slot runway is
+    // judged during an outage (the capacity check says the host is offline).
+    ["slots", (snap.offlineHosts || []).length ? null : out.slotDays,
       holderWall ? "rent-farm holder account-limit room" : "rental stack slots",
       out.freeSlots + " free, ~" + out.netSlotsPerDay + "/day net",
       holderWall
@@ -448,12 +478,25 @@ async function runwayCheck({ notify = true, snap: given = null } = {}) {
 // read, a Telegram call) cannot silence the others or stop the next tick; a
 // check still running from an earlier tick is skipped rather than stacked.
 const CHECK_TIMEOUT_MS = 5 * 60 * 1000;
+const STUCK_TICKS = 3; // a check skipped this many ticks in a row pages once
 const inFlight = new Set();
+const skippedTicks = new Map();
 async function guarded(name, fn, timeoutMs) {
   if (inFlight.has(name)) {
+    const n = (skippedTicks.get(name) || 0) + 1;
+    skippedTicks.set(name, n);
     console.error("rentFarmCapacity: " + name + " is still running from an earlier tick — skipped");
+    // Its own alarms are silent while it hangs: say so, once.
+    if (n === STUCK_TICKS) {
+      sendTelegram(
+        "⚠️ Rent-farm watchdog: the " + name + " has been stuck for " + n + " ticks (~" +
+          Math.round((n * TICK_MS) / 60000) + " min) — its alarms are silent until it finishes. " +
+          "Check the server logs / restart if it does not recover.",
+      ).catch(() => {});
+    }
     return { skipped: true };
   }
+  skippedTicks.delete(name);
   inFlight.add(name);
   const run = Promise.resolve()
     .then(fn)
@@ -517,8 +560,10 @@ module.exports = { TICK_MS, LOW_WATER, snapshot, levelFor, describe, checkOnce, 
   _reset: () => {
     lastLevel = null;
     deadAlerted.clear();
+    missingSeen.clear();
     runwayState.slots = { level: "ok", at: 0 };
     runwayState.pool = { level: "ok", at: 0 };
     deps = {};
     inFlight.clear();
+    skippedTicks.clear();
   } };

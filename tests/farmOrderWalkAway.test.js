@@ -266,3 +266,52 @@ test("closing ends EVERY live holder row of a login (duplicates included)", asyn
   const d = await res.json();
   assert.equal(d.ended, 2);
 });
+
+// ---- review 5 (2026-10-01) ----------------------------------------------
+test("REGRESSION: a page recorded before a restart still holds the day (SystemEvent.at)", async () => {
+  await seed();
+  const SystemEvent = require("../models/SystemEvent");
+  await SystemEvent.deleteMany({});
+  await SystemEvent.create({
+    category: "marketplace", action: "farm_order_walked_away_page", actor: "farmOrderWatch",
+    subject: "eld-cancel-1|CANCELED", at: new Date(NOW - 3600000),
+  });
+  const sent = [];
+  watch._reset(); // a fresh process
+  watch.__setDeps({
+    now: () => NOW,
+    mp: () => ({
+      eldoradoOrders: async ({ orderState }) => (orderState === "Canceled" ? [{ id: "eld-cancel-1" }] : []),
+      g2gOrder: async () => ({ refunded_qty: 0, order_item_status: "completed" }),
+    }),
+    sendTelegram: async (m) => sent.push(m),
+    logEvent: () => {},
+  });
+  const r = await watch.checkOnce({ force: true });
+  assert.equal(r.paged, 0, "paged an hour before the restart: not again today");
+  await SystemEvent.deleteMany({});
+  watch._reset();
+});
+
+test("REGRESSION: an old cancelled order whose login was SOLD AGAIN is not paged (the newer buyer owns it)", async () => {
+  await seed();
+  await FarmServiceOrder.create({
+    orderId: "eld-newer-2", market: "eldorado", game: "Overwatch", days: 30, state: "delivered",
+    accounts: [{ login: "Buyer1" }], createdAt: new Date(Date.now() + 1000),
+  });
+  const sent = [];
+  watch._reset();
+  watch.__setDeps({
+    now: () => NOW,
+    mp: () => ({
+      eldoradoOrders: async ({ orderState }) => (orderState === "Canceled" ? [{ id: "eld-cancel-1" }] : []),
+      g2gOrder: async () => ({ refunded_qty: 0, order_item_status: "completed" }),
+    }),
+    sendTelegram: async (m) => sent.push(m),
+    logEvent: () => {},
+  });
+  const r = await watch.checkOnce({ force: true });
+  assert.equal(r.paged, 0);
+  assert.equal(sent.length, 0);
+  watch._reset();
+});

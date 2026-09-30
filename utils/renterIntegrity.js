@@ -78,8 +78,15 @@ function classify({ homes, live, ended, renters, holderId, orders, now, known = 
   }
   const scannedHosts = new Set(homes.map((h) => h.host));
   const findings = [];
-  const add = (kind, row, detail) =>
-    findings.push({ kind, id: kind + ":" + row.clientSecret, login: row.login || "", renter: String(row.renter), detail });
+  const ids = new Set();
+  // One finding per id: the same token twice (two stacks, or twice in one
+  // file) must not count as "seen twice" on its first check.
+  const add = (kind, row, detail) => {
+    const id = kind + ":" + row.clientSecret;
+    if (ids.has(id)) return;
+    ids.add(id);
+    findings.push({ kind, id, login: row.login || "", renter: String(row.renter), detail });
+  };
 
   for (const a of live) {
     const r = renters.get(String(a.renter));
@@ -142,6 +149,8 @@ function classify({ homes, live, ended, renters, holderId, orders, now, known = 
     }
   }
   for (const key of unreadableStacks) {
+    if (ids.has("unreadable:" + key)) continue;
+    ids.add("unreadable:" + key);
     findings.push({
       kind: "unreadable",
       id: "unreadable:" + key,
@@ -163,10 +172,14 @@ async function gather() {
   const homes = [];
   const unreadable = [];
   const unreadableStacks = [];
+  // Hosts that could not be read at all: every config-based finding on them
+  // is unknown this check (not "gone").
+  const hostFailures = [];
   for (const hid of hostIds) {
     const host = hosts.resolveHost(hid);
     if (!host) {
       unreadable.push(hid + ": unknown host");
+      hostFailures.push(hid);
       continue;
     }
     let files;
@@ -178,6 +191,7 @@ async function gather() {
       states = await hosts.dockerPs(host).catch(() => null);
     } catch (e) {
       unreadable.push(hid + ": " + String((e && e.message) || e).slice(0, 120));
+      hostFailures.push(hid);
       continue;
     }
     for (const f of files) {
@@ -242,13 +256,15 @@ async function gather() {
     : [];
   const orders = new Map();
   for (const o of orderRows) for (const x of o.accounts || []) orders.set(lower(x.login), o);
-  return { homes, live, ended, renters, holderId, orders, now, unreadable, known, stackKeys, unreadableStacks };
+  return { homes, live, ended, renters, holderId, orders, now, unreadable, known, stackKeys, unreadableStacks, hostFailures };
 }
 
 // Latches: finding id -> { seen: consecutive checks, pagedAt }
 const seen = new Map();
 let lastRunAt = 0;
-let lastHadFindings = false;
+// Something was PAGED and has not been cleared since: the only time an
+// "all clear" means anything.
+let pagedOutstanding = false;
 
 async function checkOnce({ notify = true, force = false } = {}) {
   const now = dep("now")();
@@ -257,7 +273,11 @@ async function checkOnce({ notify = true, force = false } = {}) {
   const g = await gather();
   const findings = classify(g);
   const ids = new Set(findings.map((f) => f.id));
-  for (const id of [...seen.keys()]) if (!ids.has(id)) seen.delete(id);
+  // A check that could not read a whole host (or the ledger's secret list) is
+  // PARTIAL: what it did not see is unknown, not fixed — its latches stay and
+  // it never says "all clear".
+  const partial = (g.hostFailures || []).length > 0 || g.known === null;
+  if (!partial) for (const id of [...seen.keys()]) if (!ids.has(id)) seen.delete(id);
   const toPage = [];
   for (const f of findings) {
     const s = seen.get(f.id) || { seen: 0, pagedAt: 0 };
@@ -287,15 +307,16 @@ async function checkOnce({ notify = true, force = false } = {}) {
       orphan: "in a stack with no ledger row",
       unreadable: "unreadable stack",
     };
-    await dep("sendTelegram")(
+    let msg =
       "🔎 Renter / rent-farm integrity: " + toPage.length + " problem(s)\n" +
-        toPage
-          .slice(0, LIST_MAX)
-          .map((f) => "• " + labels[f.kind] + ": " + f.login + " — " + who(f) + " — " + f.detail)
-          .join("\n") +
-        (toPage.length > LIST_MAX ? "\n… and " + (toPage.length - LIST_MAX) + " more" : "") +
-        (g.unreadable.length ? "\n(not read: " + g.unreadable.slice(0, 5).join(", ") + ")" : ""),
-    ).catch((e) => console.error("renterIntegrity telegram failed:", e.message));
+      toPage
+        .slice(0, LIST_MAX)
+        .map((f) => "• " + labels[f.kind] + ": " + f.login + " — " + who(f) + " — " + String(f.detail).slice(0, 220))
+        .join("\n") +
+      (toPage.length > LIST_MAX ? "\n… and " + (toPage.length - LIST_MAX) + " more" : "") +
+      (g.unreadable.length ? "\n(not read: " + g.unreadable.slice(0, 5).join(", ") + ")" : "");
+    if (msg.length > 3800) msg = msg.slice(0, 3799) + "…"; // Telegram rejects over 4096
+    await dep("sendTelegram")(msg).catch((e) => console.error("renterIntegrity telegram failed:", e.message));
     try {
       dep("logEvent")({
         category: "renter",
@@ -309,11 +330,12 @@ async function checkOnce({ notify = true, force = false } = {}) {
       /* diagnostics only */
     }
   }
-  if (notify && lastHadFindings && !findings.length) {
+  if (notify && toPage.length) pagedOutstanding = true;
+  if (notify && pagedOutstanding && !partial && !findings.length) {
     await dep("sendTelegram")("✅ Renter / rent-farm integrity: no problems left.").catch(() => {});
+    pagedOutstanding = false;
   }
-  if (notify) lastHadFindings = findings.length > 0;
-  return { findings, paged: toPage.map((f) => f.id), unreadable: g.unreadable };
+  return { findings, paged: toPage.map((f) => f.id), unreadable: g.unreadable, partial };
 }
 
 module.exports = {
@@ -327,6 +349,6 @@ module.exports = {
     deps = {};
     seen.clear();
     lastRunAt = 0;
-    lastHadFindings = false;
+    pagedOutstanding = false;
   },
 };

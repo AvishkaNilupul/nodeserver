@@ -800,7 +800,7 @@ test("an owed reload that keeps failing pages after 30 minutes, then not again f
   assert.equal(out.paged, 0, "not again within 6 h");
   const row = await PendingReload.findOne({}).lean();
   assert.equal(row.attempts, 3);
-  assert.match(row.lastError, /container state/);
+  assert.match(row.lastError, /host unreachable/, "one read per host, not a retry cycle per row");
 });
 
 test("an owed reload on an unknown host is kept (and pages), never dropped", async () => {
@@ -937,4 +937,135 @@ test("a games change never writes the whole-config list into a file that is not 
   await ops.applyRenterGames(r, HOST, ["Rust"]);
   assert.deepEqual(readConfig("contabo", "config_06.json").FavouriteGames, ["Keep"], "root list untouched");
   assert.deepEqual(readConfig("contabo", "config_04.json").FavouriteGames, ["Rust"], "own bot: whole config");
+});
+
+// ---------------------------------------------------------------------------
+// Review 4 (round 3 at cc6edb3)
+// ---------------------------------------------------------------------------
+test("REGRESSION: a Start whose own bot is empty STARTS the stopped file that holds only their accounts (else 'running' over nothing)", async () => {
+  await reset();
+  const r = await mkRenter("escapefrom", { botFile: "config_04.json" });
+  await mkAccount(r, "e1", { configFile: "config_06.json" });
+  putConfig("contabo", "config_04.json", []);
+  putConfig("contabo", "config_06.json", []); // their own Stop emptied it and stopped it
+  world.ps.contabo.twitchbotx6 = { state: "exited" };
+  const out = await ops.startRenterFarming(r, HOST);
+  assert.equal(out.added, 1);
+  assert.equal(out.running, true);
+  assert.equal(world.ps.contabo.twitchbotx6.state, "running", "started, not left stopped");
+});
+
+test("a SHARED stopped bot is left stopped — and the start says their accounts there are not farming", async () => {
+  await reset();
+  const holder = await mkRenter("operator-selffarm", { botFile: "config_54.json" });
+  const r = await mkRenter("escapefrom", { botFile: "config_04.json" });
+  await mkAccount(holder, "buyer", { configFile: "config_06.json" });
+  await mkAccount(r, "e1", { configFile: "config_06.json" });
+  putConfig("contabo", "config_04.json", []);
+  putConfig("contabo", "config_06.json", [user("buyer")]);
+  world.ps.contabo.twitchbotx6 = { state: "exited" }; // someone else stopped it
+  const out = await ops.startRenterFarming(r, HOST);
+  assert.equal(out.running, false);
+  assert.equal(world.ps.contabo.twitchbotx6.state, "exited", "not ours to start");
+  assert.ok(out.skipped.some((x) => /config_06\.json is stopped and also holds others/.test(x.reason)), JSON.stringify(out.skipped));
+});
+
+test("REGRESSION: a start first reloads the bot a failed stop left the account LOADED in — and refuses if it cannot (no double farming)", async () => {
+  await reset();
+  const r = await mkRenter("wasd", { botFile: "config_15.json" });
+  await mkAccount(r, "wasdacct", { configFile: "config_15.json" });
+  putConfig("contabo", "config_15.json", [user("other")]);
+  putConfig("contabo", "config_03.json", [user("buyer1")]); // pulled from here; its reload failed
+  world.ps.contabo.twitchbotx3 = { state: "running" };
+  world.ps.contabo.twitchbotx15 = { state: "running" };
+  await Renter.updateOne({ _id: r._id }, { $set: { stopOwedFiles: ["contabo/config_03.json"] } });
+  await PendingReload.create({ host: "contabo", file: "config_03.json", since: new Date(), reason: "accounts removed", markedAt: new Date() });
+  const realRestart = fakeCfg.restartConfigContainer;
+  fakeCfg.restartConfigContainer = async (h, f) => {
+    if (f === "config_03.json") throw new Error("docker: timeout");
+    return realRestart(h, f);
+  };
+  try {
+    await assert.rejects(ops.startRenterFarming(r, HOST), (e) => e.code === "reload_pending");
+  } finally {
+    fakeCfg.restartConfigContainer = realRestart;
+  }
+  assert.deepEqual(secretsIn("contabo", "config_15.json"), ["other"], "not placed while config_03 may still run it");
+  // The reload can happen now: done first, then the account goes back.
+  world.ops = [];
+  const out = await ops.startRenterFarming(await Renter.findById(r._id), HOST);
+  assert.equal(out.added, 1);
+  const i03 = world.ops.findIndex((o) => o[0] === "restart" && o[2] === "twitchbotx3");
+  const iw = world.ops.findIndex((o) => o[0] === "write" && o[2] === "config_15.json");
+  assert.ok(i03 > -1 && iw > -1 && i03 < iw, "config_03 reloaded BEFORE the account was written back: " + JSON.stringify(world.ops));
+  assert.equal((await Renter.findById(r._id).lean()).stopOwedFiles, undefined);
+});
+
+test("REGRESSION: a stop against an OFFLINE host still says so (unreachable → 502), not a plain failure", async () => {
+  await reset();
+  const r = await mkRenter("jhonkwiall", { botFile: "config_03.json" });
+  await mkAccount(r, "jhonacct", { configFile: "config_03.json" });
+  putConfig("contabo", "config_03.json", [user("jhonacct")]);
+  const realReaddir = fakeHosts.readdir;
+  fakeHosts.readdir = async () => {
+    throw Object.assign(new Error("ssh: connect to host contabo port 22: timed out"), { unreachable: true });
+  };
+  try {
+    await assert.rejects(ops.stopRenterFarming(r, HOST), (e) => e.unreachable === true);
+  } finally {
+    fakeHosts.readdir = realReaddir;
+  }
+});
+
+test("REGRESSION: a reload that began before another operation marked the file does not wipe that mark", async () => {
+  await reset();
+  const began = new Date(Date.now() - 5000);
+  await PendingReload.create({ host: "contabo", file: "config_03.json", since: new Date(), reason: "accounts removed", markedAt: new Date() });
+  await ops.clearReloadOwed(HOST, "config_03.json", { before: began });
+  assert.equal(await PendingReload.countDocuments({}), 1, "a later mark survives");
+  await ops.clearReloadOwed(HOST, "config_03.json", { before: new Date(Date.now() + 1000) });
+  assert.equal(await PendingReload.countDocuments({}), 0);
+});
+
+test("REGRESSION: a start that fails on a LATER file has already cleared the stop stamp (the lease sweep still sees the renter)", async () => {
+  await reset();
+  const r = await mkRenter("escapefrom", { botFile: "config_04.json", botStoppedAt: new Date(), botStopReason: "operator" });
+  await mkAccount(r, "a1", { configFile: "config_04.json" });
+  await mkAccount(r, "b1", { configFile: "config_07.json" });
+  putConfig("contabo", "config_04.json", []);
+  putConfig("contabo", "config_07.json", [user("x")]);
+  const realWrite = fakeHosts.writeFileAtomic;
+  fakeHosts.writeFileAtomic = async (h, f, text) => {
+    if (f === "config_07.json") throw new Error("disk full");
+    return realWrite(h, f, text);
+  };
+  try {
+    await assert.rejects(ops.startRenterFarming(r, HOST), /disk full/);
+  } finally {
+    fakeHosts.writeFileAtomic = realWrite;
+  }
+  assert.deepEqual(secretsIn("contabo", "config_04.json"), ["a1"]);
+  assert.equal((await Renter.findById(r._id).lean()).botStoppedAt, null);
+});
+
+test("REGRESSION: placement reads the host STRICTLY — an unreadable operator config refuses the start (the account could be in it)", async () => {
+  await reset();
+  const r = await mkRenter("escapefrom", { botFile: "config_04.json" });
+  await mkAccount(r, "e1", { configFile: "config_04.json" });
+  putConfig("contabo", "config_04.json", []);
+  world.fs.contabo["config_40.json"] = "{ corrupt";
+  await assert.rejects(ops.startRenterFarming(r, HOST), /Could not read contabo\/config_40\.json/);
+  assert.deepEqual(secretsIn("contabo", "config_04.json"), [], "nothing placed on a guess");
+});
+
+test("REGRESSION: a lease-end stop whose own host is UNKNOWN still pulls accounts on known hosts, then fails (retried, paged)", async () => {
+  await reset();
+  const r = await mkRenter("ghost2", { botFile: "config_09.json", botHost: "phone" });
+  await mkAccount(r, "g0", { configFile: "config_03.json", host: "contabo" });
+  const holder = await mkRenter("operator-selffarm", { botFile: "config_54.json" });
+  await mkAccount(holder, "buyer1", { configFile: "config_03.json" });
+  putConfig("contabo", "config_03.json", [user("buyer1"), user("g0")]);
+  world.ps.contabo.twitchbotx3 = { state: "running" };
+  await assert.rejects(ops.stopRenterFarming(r, null), /own bot host 'phone' is unknown/);
+  assert.deepEqual(secretsIn("contabo", "config_03.json"), ["buyer1"], "the known host was pulled");
 });

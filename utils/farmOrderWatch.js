@@ -20,7 +20,9 @@
 // windows ended) is not paged at all — there is nothing left to stop.
 const DAY_MS = 24 * 60 * 60 * 1000;
 const MIN_INTERVAL_MS = 55 * 60 * 1000;
-const G2G_LOOKBACK_MS = 60 * DAY_MS;
+// Longer than any window sold (up to a year): a 180-day G2G window refunded in
+// its fourth month must still be seen.
+const G2G_LOOKBACK_MS = 400 * DAY_MS;
 const LIST_MAX = 15;
 const LOGINS_MAX = 5;
 const MESSAGE_MAX = 3800; // Telegram rejects over 4096
@@ -127,6 +129,26 @@ async function liveLogins(found, now) {
   return live;
 }
 
+// lower login -> the orderId of the newest FarmServiceOrder naming it.
+async function latestOrderByLogin(FarmServiceOrder, lowerLogins) {
+  const out = new Map();
+  if (!lowerLogins.length) return out;
+  const esc = (x) => x.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const rows = await FarmServiceOrder.find(
+    { "accounts.login": { $in: lowerLogins.map((l) => new RegExp("^" + esc(l) + "$", "i")) } },
+    { orderId: 1, createdAt: 1, "accounts.login": 1 },
+  )
+    .sort({ createdAt: 1 })
+    .lean();
+  for (const o of rows) {
+    for (const a of o.accounts || []) {
+      const k = String(a.login || "").toLowerCase();
+      if (lowerLogins.includes(k)) out.set(k, o.orderId); // ascending: the last one wins
+    }
+  }
+  return out;
+}
+
 async function checkOnce({ notify = true, force = false } = {}) {
   const now = dep("now")();
   if (!force && now - lastRunAt < MIN_INTERVAL_MS) return null;
@@ -137,12 +159,18 @@ async function checkOnce({ notify = true, force = false } = {}) {
   const g2g = await g2gFindings(FarmServiceOrder, notes, now);
   const all = [...eld.found, ...g2g.found];
   const live = await liveLogins(all, now);
-  // Only orders that still have an account farming are worth a page.
+  // A login counts for THIS order only while this is the latest order naming
+  // it: a recycled account sold again belongs to the newer buyer (the close
+  // route leaves it farming — "keptForNewer"), so the old order is not paged
+  // over it.
+  const latest = await latestOrderByLogin(FarmServiceOrder, [...live.keys()]);
+  // Only orders that still have an account farming for them are worth a page.
   const found = [];
   for (const f of all) {
     const logins = (f.row.accounts || [])
-      .map((a) => live.get(String(a.login || "").toLowerCase()))
-      .filter(Boolean);
+      .map((a) => String(a.login || "").toLowerCase())
+      .filter((k) => live.has(k) && (!latest.has(k) || latest.get(k) === f.row.orderId))
+      .map((k) => live.get(k));
     if (logins.length) found.push({ ...f, logins });
   }
 
@@ -152,14 +180,15 @@ async function checkOnce({ notify = true, force = false } = {}) {
   const recent = new Map(); // key -> ms of its last recorded page
   if (keys.length) {
     try {
+      // SystemEvent's own time field is `at` (it has no createdAt).
       const rows = await dep("SystemEvent")()
         .find(
-          { action: PAGE_ACTION, subject: { $in: keys }, createdAt: { $gte: new Date(now - DAY_MS) } },
-          { subject: 1, createdAt: 1 },
+          { action: PAGE_ACTION, subject: { $in: keys }, at: { $gte: new Date(now - DAY_MS) } },
+          { subject: 1, at: 1 },
         )
         .lean();
       for (const r of rows) {
-        const t = new Date(r.createdAt).getTime();
+        const t = new Date(r.at).getTime();
         if (!recent.has(r.subject) || t > recent.get(r.subject)) recent.set(r.subject, t);
       }
     } catch {

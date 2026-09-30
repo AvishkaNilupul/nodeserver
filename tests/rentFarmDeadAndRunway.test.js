@@ -67,8 +67,10 @@ test("a registered stack whose config is missing pages; an offline host's stacks
     rentalStackOptions: async () => ({ bots: [], offlineHosts: [{ id: "pi" }] }),
     listStacks: async () => [{ host: "contabo", file: "config_40.json" }, { host: "pi", file: "config_31.json" }],
   });
-  const r = await cap.deadStacksCheck();
-  assert.deepEqual(r.paged, ["contabo/config_40.json"]);
+  let r = await cap.deadStacksCheck();
+  assert.deepEqual(r.paged, [], "one unreadable read is not yet a dead stack");
+  r = await cap.deadStacksCheck();
+  assert.deepEqual(r.paged, ["contabo/config_40.json"], "the second tick in a row is");
   assert.match(sent[0], /config file is missing or unreadable/);
 });
 
@@ -157,6 +159,7 @@ test("REGRESSION: a stale registration whose config is missing and that holds NO
     listStacks: async () => [{ host: "contabo", file: "config_40.json" }, { host: "contabo", file: "config_41.json" }],
     ledgerCount: async (host, file) => (file === "config_41.json" ? 7 : 0),
   });
+  await cap.deadStacksCheck();
   const r = await cap.deadStacksCheck();
   assert.deepEqual(r.paged, ["contabo/config_41.json"]);
   assert.match(sent[0], /config_41\.json \(7 accounts\) — its config file is missing/);
@@ -259,8 +262,50 @@ test("REGRESSION: one tick reads the hosts ONCE, and a hung check cannot stop th
     // Next tick: the hung check is skipped, not stacked.
     const again = await cap.tickOnce({ timeoutMs: 50 });
     assert.equal(again.integrity.skipped, true);
+    // Still hung on the third skipped tick: one page — its alarms are silent.
+    sent.length = 0;
+    await cap.tickOnce({ timeoutMs: 50 });
+    await cap.tickOnce({ timeoutMs: 50 });
+    await new Promise((r) => setImmediate(r));
+    assert.equal(sent.filter((m) => /integrity check has been stuck for 3 ticks/.test(m)).length, 1, sent.join(" | "));
+    await cap.tickOnce({ timeoutMs: 50 });
+    await new Promise((r) => setImmediate(r));
+    assert.equal(sent.filter((m) => /has been stuck/.test(m)).length, 1, "once, not every tick");
   } finally {
     tickMods.integrity = { checkOnce: async () => null };
     tickMods.orders = { checkOnce: async () => null };
   }
+});
+
+test("REGRESSION: a health run whose pool check FAILED (measured null) is not read as the pool emptying", async () => {
+  const t0 = Date.UTC(2026, 8, 24);
+  const runs = [676, 675, null, 674, 673, 672, 671].map((n, i) => ({
+    startedAt: new Date(t0 + i * 86400000),
+    checks: [n === null ? { id: "pool.health", status: "unknown", measured: null } : { id: "pool.health", status: "ok", measured: n }],
+  }));
+  const realFind = require("../models/SystemHealthRun").find;
+  require("../models/SystemHealthRun").find = () => ({ sort: () => ({ lean: async () => runs }) });
+  try {
+    sent.length = 0;
+    cap._reset();
+    cap.__setDeps({ now: () => t0 + 7 * 86400000, holderId: async () => "h1", countRows: async () => 0,
+      snapshot: async () => ({ totalFree: 500 }), gatherPoolEligibility: async () => ({ eligible: new Array(671).fill({}) }) });
+    const out = await cap.runwayCheck();
+    assert.ok(out.poolTakenPerDay < 2, "about 1/day, not ~100: " + out.poolTakenPerDay);
+    assert.equal(sent.length, 0);
+  } finally {
+    require("../models/SystemHealthRun").find = realFind;
+  }
+});
+
+test("no slot runway is judged while a stack host is offline (its slots read as 0)", async () => {
+  setup({
+    holderId: async () => "h1",
+    countRows: async (q) => (q.createdAt ? 70 : 0),
+    snapshot: async () => ({ totalFree: 0, offlineHosts: ["contabo"] }),
+    gatherPoolEligibility: async () => ({ eligible: new Array(900).fill({}) }),
+  });
+  const out = await cap.runwayCheck();
+  assert.equal(out.slotDays, 0);
+  assert.ok(!sent.some((m) => /slots run out/.test(m)), sent.join(" | "));
 });

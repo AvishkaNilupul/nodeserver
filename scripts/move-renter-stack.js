@@ -144,6 +144,23 @@ function die(m) { console.error("ABORT: " + m); process.exit(1); }
     die("refusing to move entries with no ledger row: fix or remove them first, or they become untracked on the destination");
   }
 
+  // Capacity exactly as the destination write will count it, per renter group
+  // (other renters' reserved slots included — utils/renterBotOps.reservedSlots),
+  // BEFORE anything is stopped: a write refused after the source was stopped
+  // left renter groups half-written.
+  {
+    const { reservedSlots } = require(path.join(APP, "utils", "renterBotOps"));
+    const present = new Set(dstUsers.filter(u => u && typeof u === "object").map(u => u.ClientSecret));
+    let fill = dstUsers.length;
+    for (const [rid, list] of groups) {
+      const reserved = await reservedSlots(TO, DEST, present, { except: rid });
+      if (fill + reserved + list.length > Number(dstStack.capacity)) {
+        die(`destination would hold ${fill + list.length} + ${reserved} slot(s) held for stopped renters — over its capacity ${dstStack.capacity}`);
+      }
+      fill += list.length;
+    }
+  }
+
   // --- renters whose HOLDER stack is this file ------------------------------
   const holders = renters.filter(r => String(r.botHost||"local") === FROM && r.botFile === CFG);
   if (holders.length) {
@@ -170,13 +187,34 @@ function die(m) { console.error("ABORT: " + m); process.exit(1); }
   try { await bc.stopConfigContainer(src, CFG); console.log("      stopped " + srcContainer); }
   catch (e) { console.log("      (stop failed, continuing: " + e.message + ")"); }
 
-  // 2. write to the destination, one renter at a time
+  // 2. write to the destination, one renter at a time. A move keeps every
+  // window as it was (keepWindow). A write that still fails is rolled back:
+  // what was written leaves the (not yet started) destination, its ledger
+  // points back at the source, and the source starts again — as it was.
   console.log("[2/7] writing entries to the destination…");
   let moved = 0;
-  for (const [rid, list] of groups) {
-    const res = await bc.addRenterAccountsToConfig(dst, DEST, list, rid);
-    moved += res.added;
-    console.log(`      ${String(rname.get(rid) || rid).padEnd(22)} added=${res.added} (config now ${res.total})`);
+  const writtenSecrets = [];
+  try {
+    for (const [rid, list] of groups) {
+      const res = await bc.addRenterAccountsToConfig(dst, DEST, list, rid, { keepWindow: true });
+      moved += res.added;
+      writtenSecrets.push(...list.map(e => e.ClientSecret));
+      console.log(`      ${String(rname.get(rid) || rid).padEnd(22)} added=${res.added} (config now ${res.total})`);
+    }
+  } catch (err) {
+    console.log("      !! destination write failed: " + err.message + " — rolling back");
+    for (const sec of writtenSecrets) {
+      await bc.removeAccountFromConfig(dst, DEST, { clientSecret: sec }).catch((e) => console.log("      (remove " + String(sec).slice(0, 8) + "… failed: " + e.message + ")"));
+    }
+    if (writtenSecrets.length) {
+      await RenterAccount.updateMany(
+        { clientSecret: { $in: writtenSecrets } },
+        { $set: { host: src.id, configFile: CFG, container: srcContainer } },
+      ).catch((e) => console.log("      (ledger roll-back failed: " + e.message + ")"));
+    }
+    try { await bc.startConfigContainer(src, CFG); console.log("      source restarted"); }
+    catch (e) { console.log("      !! source could not be restarted: " + e.message); }
+    throw err;
   }
 
   // 3. start the destination

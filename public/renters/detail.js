@@ -224,7 +224,12 @@
       const d = await api("/renters/" + id + "/" + (suspend ? "suspend" : "unsuspend"), { method: "POST" });
       toast(
         suspend
-          ? "Suspended" + (d.botStopped ? " · bot stopped" : " · its bot could NOT be stopped yet — retried every 5 min")
+          ? "Suspended" +
+            (d.botStopped
+              ? " · bot stopped"
+              : d.hasBot
+                ? " · its bot could NOT be stopped yet — retried every 5 min"
+                : "")
           : "Unsuspended" +
             (d.farmingRepaired > 0 ? " · " + d.farmingRepaired + " account(s) a failed suspend had pulled were put back" : "") +
             (d.farmingRepaired === false ? " · some accounts may be off the bot — press Start" : ""),

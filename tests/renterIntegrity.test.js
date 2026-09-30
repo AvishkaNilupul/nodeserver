@@ -155,3 +155,72 @@ test("checkOnce runs at most hourly unless forced", async () => {
   assert.equal(n, 1);
   ri._reset();
 });
+
+// ---- review 5 (2026-10-01) ----------------------------------------------
+function harness({ readFails = () => false, live = () => [], known = () => null, sent }) {
+  let clock = NOW;
+  ri._reset();
+  ri.__setDeps({
+    now: () => clock,
+    hosts: () => ({
+      resolveHost: (id) => ({ id }),
+      readdir: async () => {
+        if (readFails()) throw Object.assign(new Error("ssh: timed out"), { unreachable: true });
+        return ["config_03.json"];
+      },
+      readFiles: async () => ({ "config_03.json": { ok: true, text: JSON.stringify(cfg([u("dead", ["Overwatch"])])) } }),
+      dockerPs: async () => ({ twitchbotx3: { state: "running" } }),
+    }),
+    listStacks: async () => [{ host: "contabo", file: "config_03.json" }],
+    RenterAccount: () => ({
+      find: (q) => ({ lean: async () => (q.farmEndedAt === null ? live() : []) }),
+      distinct: async () => (known() === null ? Promise.reject(new Error("db")) : known()),
+    }),
+    Renter: () => ({ find: () => ({ lean: async () => [...renters.values()] }) }),
+    FarmServiceOrder: () => ({ find: () => ({ lean: async () => [] }) }),
+    sendTelegram: async (m) => sent.push(m),
+    logEvent: () => {},
+  });
+  return { tick: async () => { clock += 60 * 60000; return ri.checkOnce({ force: true }); } };
+}
+
+test("REGRESSION: a host that cannot be read keeps the latches and never says 'all clear'", async () => {
+  const sent = [];
+  let down = false;
+  const liveRows = [row("H", "dead", { lastScanStatus: "token_invalid", configFile: "config_03.json" })];
+  const h = harness({ readFails: () => down, live: () => liveRows, known: () => ["dead"], sent });
+  await h.tick();
+  await h.tick();
+  assert.equal(sent.length, 1, "paged on the second sighting");
+  down = true;
+  const r = await h.tick();
+  assert.equal(r.partial, true);
+  assert.ok(!sent.some((m) => /no problems left/.test(m)), "no false all-clear");
+  down = false;
+  await h.tick();
+  assert.equal(sent.length, 1, "back up: the daily latch still holds (no re-page 2 h later)");
+  ri._reset();
+});
+
+test("REGRESSION: a finding seen once and never paged is followed by no 'all clear'", async () => {
+  const sent = [];
+  let liveRows = [row("H", "dead", { lastScanStatus: "token_invalid", configFile: "config_03.json" })];
+  const h = harness({ live: () => liveRows, known: () => ["dead"], sent });
+  await h.tick(); // seen once, not paged
+  liveRows = [row("H", "dead", { configFile: "config_03.json" })];
+  await h.tick();
+  assert.equal(sent.length, 0, "nothing was paged, so nothing is 'cleared'");
+  ri._reset();
+});
+
+test("REGRESSION: the same orphan token twice (two stacks) is ONE finding — the seen-twice wait holds", () => {
+  const f = ri.classify({
+    homes: [
+      { host: "contabo", file: "config_03.json", running: true, cfg: cfg([u("stray")]) },
+      { host: "contabo", file: "config_05.json", running: true, cfg: cfg([u("stray")]) },
+    ],
+    live: [], ended: [], renters, holderId: "H", orders: new Map(), now: NOW,
+    known: new Set(), stackKeys: new Set(["contabo/config_03.json", "contabo/config_05.json"]),
+  });
+  assert.equal(f.filter((x) => x.kind === "orphan").length, 1);
+});

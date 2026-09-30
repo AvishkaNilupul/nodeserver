@@ -65,6 +65,7 @@ Module._load = function (request, parent, isMain) {
         ...real,
         locateSecrets: async (host) => {
           world.locateCalls.push(host.id);
+          if (world.locateThrows) throw Object.assign(new Error("ssh: timed out"), { unreachable: true });
           return world.located instanceof Map && world.located.host
             ? (world.located.host === host.id ? world.located : new Map())
             : world.located;
@@ -168,6 +169,7 @@ test("extending a LIVE window also moves the order's copy, and is logged", async
     orderId: "a86efe89", market: "eldorado", game: "Overwatch", days: 365, state: "delivered",
     accounts: [{ login: "mirsv80l", farmUntil: acc.farmUntil }],
   });
+  world.located = new Map([["config_06.json", new Set(["cs-mirs"])]]); // it IS on its bot
 
   const res = await farm(acc._id, { days: 30 });
   const d = await res.json();
@@ -443,4 +445,38 @@ test("the account is looked for on the host its row last named BEFORE the holder
   assert.equal(d.placed, false);
   assert.equal(d.stack, "pi/config_31.json");
   assert.equal(world.locateCalls[0], "pi");
+});
+
+test("REGRESSION: a LIVE row the ledger calls placed but that is on no bot is put back, not just extended", async () => {
+  await reset();
+  const h = await holder();
+  const acc = await RenterAccount.create({
+    renter: h._id, clientSecret: "cs-lost", login: "lost1", host: "contabo",
+    configFile: "config_05.json", farmUntil: new Date(Date.now() + 5 * 86400000),
+  });
+  await order("lost1", "Overwatch");
+  world.running = { twitchbotx5: { state: "running" } };
+  // world.located is empty: the account is in no config on its host.
+  const d = await (await farm(acc._id, { days: 30 })).json();
+  assert.equal(d.placed, true, JSON.stringify(d));
+  assert.equal(d.stack, "contabo/config_05.json", "back into the file it is recorded in");
+});
+
+test("a live row whose host cannot be read is just extended (no placement on a guess)", async () => {
+  await reset();
+  const h = await holder();
+  const acc = await RenterAccount.create({
+    renter: h._id, clientSecret: "cs-dark", login: "dark1", host: "contabo",
+    configFile: "config_05.json", farmUntil: new Date(Date.now() + 5 * 86400000),
+  });
+  world.located = null; // the stub below throws
+  const realLocate = world.locateThrows;
+  world.locateThrows = true;
+  try {
+    const d = await (await farm(acc._id, { days: 30 })).json();
+    assert.equal(d.placed, false);
+    assert.equal(world.placed.length, 0);
+  } finally {
+    world.locateThrows = realLocate;
+  }
 });

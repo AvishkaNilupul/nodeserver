@@ -36,6 +36,7 @@ const stacks = require(path.join(APP, "utils", "renterBotStacks"));
 const RenterAccount = require(path.join(APP, "models", "RenterAccount"));
 const Renter = require(path.join(APP, "models", "Renter"));
 const { logEvent } = require(path.join(APP, "utils", "systemLog"));
+const { reservedSlots } = require(path.join(APP, "utils", "renterBotOps"));
 
 function arg(n, d = null) { const i = process.argv.indexOf("--" + n); return i > -1 ? process.argv[i + 1] : d; }
 const APPLY = process.argv.includes("--apply");
@@ -113,6 +114,21 @@ function split(s) { const [h, f] = String(s || "").split("/"); return { h, f }; 
   if (orphans.length) die("entries with no RenterAccount row: " + orphans.join(", "));
   const renters = await Renter.find({}).select("username botHost botFile").lean();
   const rname = new Map(renters.map(r => [String(r._id), r.username]));
+
+  // Capacity exactly as the destination write will count it — the stack's
+  // registered capacity, less what is in it, less slots held for OTHER
+  // renters' stopped accounts (utils/renterBotOps.reservedSlots) — checked per
+  // renter group BEFORE the source is touched: a write refused after the
+  // source was emptied left the accounts on no bot.
+  const present = new Set(dstUsers.filter(u => u && typeof u === "object").map(u => u.ClientSecret));
+  let fill = dstUsers.length;
+  for (const [rid, l] of groups) {
+    const reserved = await reservedSlots(d.h, d.f, present, { except: rid });
+    if (fill + reserved + l.length > Number(dstStack.capacity)) {
+      die(`destination ${TO} would hold ${fill + l.length} + ${reserved} slot(s) held for stopped renters — over its capacity ${dstStack.capacity}`);
+    }
+    fill += l.length;
+  }
   console.log("\n  moving:");
   for (const [rid, l] of groups) console.log(`    ${String(rname.get(rid) || rid).padEnd(22)} ${l.length}`);
   console.log(`  source after: ${srcUsers.length - entries.length}   destination after: ${dstUsers.length + entries.length}`);
@@ -128,11 +144,31 @@ function split(s) { const [h, f] = String(s || "").split("/"); return { h, f }; 
   try { await bc.restartConfigContainer(srcHost, s.f); console.log("      ok"); }
   catch (e) { console.log("      (restart failed: " + e.message + ")"); }
 
-  // 2. into the destination (this repoints the ledger)
+  // 2. into the destination (this repoints the ledger). A move keeps every
+  // window as it was (keepWindow). A write that still fails puts the rest
+  // back into the source, so nothing is left on no bot.
   console.log("[3/4] writing to the destination…");
-  for (const [rid, l] of groups) {
-    const res = await bc.addRenterAccountsToConfig(dstHost, d.f, l, rid);
-    console.log(`      ${String(rname.get(rid) || rid).padEnd(22)} added=${res.added} (now ${res.total})`);
+  const written = new Set();
+  try {
+    for (const [rid, l] of groups) {
+      const res = await bc.addRenterAccountsToConfig(dstHost, d.f, l, rid, { keepWindow: true });
+      for (const e of l) written.add(e.ClientSecret);
+      console.log(`      ${String(rname.get(rid) || rid).padEnd(22)} added=${res.added} (now ${res.total})`);
+    }
+  } catch (err) {
+    console.log("      !! destination write failed: " + err.message + " — putting the rest back into the source");
+    for (const [rid, l] of groups) {
+      const back = l.filter(e => !written.has(e.ClientSecret));
+      if (!back.length) continue;
+      try {
+        await bc.addRenterAccountsToConfig(srcHost, s.f, back, rid, { keepWindow: true });
+        console.log(`      put back ${back.length} for ${rname.get(rid) || rid}`);
+      } catch (e2) {
+        console.log(`      !! COULD NOT put back (${e2.message}) — on no bot now: ${back.map(e => e.Login).join(", ")}`);
+      }
+    }
+    try { await bc.restartConfigContainer(srcHost, s.f); } catch (e3) { console.log("      (source restart failed: " + e3.message + ")"); }
+    throw err;
   }
   console.log("[4/4] starting/restarting the destination…");
   try {

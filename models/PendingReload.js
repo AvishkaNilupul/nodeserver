@@ -16,6 +16,11 @@ const pendingReloadSchema = new mongoose.Schema(
     file: { type: String, required: true },
     since: { type: Date, default: Date.now },
     reason: { type: String, default: "" },
+    // When the file last changed in a way that owes a reload (every mark
+    // sets it). A reload clears the row only when it began AFTER this, so a
+    // change another operation made while that reload was under way is never
+    // wiped by it (renterBotOps.clearReloadOwed `before`).
+    markedAt: { type: Date, default: null },
     // Sweeper bookkeeping (renterBotOps.sweepPendingReloads): failed retries,
     // the last error, and when it last paged about this file.
     attempts: { type: Number, default: 0 },
