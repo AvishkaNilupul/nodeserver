@@ -569,16 +569,21 @@
     if (btn) { btn.disabled = true; btn.textContent = "Starting…"; }
     if (info) info.textContent = "Finding an available rental bot…";
     try {
-      const d = await api("/renters/" + encodeURIComponent(renter.id) + "/accounts/manual", {
-        method: "POST",
-        body: JSON.stringify({
-          username,
-          quick: true,
-          autoAssign: true,
-          games: [game],
-          farmDays,
-        }),
-      });
+      const payload = { username, quick: true, autoAssign: true, games: [game], farmDays };
+      let d;
+      try {
+        d = await api("/renters/" + encodeURIComponent(renter.id) + "/accounts/manual", {
+          method: "POST",
+          body: JSON.stringify(payload),
+        });
+      } catch (e) {
+        // Taking the account off another renter / a paying buyer needs a yes.
+        if (!(e.data && e.data.needsForce) || !confirm(e.message + "\n\nMove it anyway?")) throw e;
+        d = await api("/renters/" + encodeURIComponent(renter.id) + "/accounts/manual", {
+          method: "POST",
+          body: JSON.stringify({ ...payload, force: true }),
+        });
+      }
       toast(d.note || "Farming started");
       await RT.reloadMany(["renters", "bots"]);
       const user = $("qUser");
@@ -609,10 +614,20 @@
     const btn = $("mAddBtn");
     if (btn) { btn.disabled = true; btn.textContent = "Adding…"; }
     try {
-      const d = await api("/renters/" + id + "/accounts/manual", {
-        method: "POST",
-        body: JSON.stringify({ username, password, token, farmDays: intVal("mDays") }),
-      });
+      const payload = { username, password, token, farmDays: intVal("mDays") };
+      let d;
+      try {
+        d = await api("/renters/" + id + "/accounts/manual", {
+          method: "POST",
+          body: JSON.stringify(payload),
+        });
+      } catch (e) {
+        if (!(e.data && e.data.needsForce) || !confirm(e.message + "\n\nMove it anyway?")) throw e;
+        d = await api("/renters/" + id + "/accounts/manual", {
+          method: "POST",
+          body: JSON.stringify({ ...payload, force: true }),
+        });
+      }
       toast(d.note || "Account added");
       await RT.reloadMany(["renters", "bots"]);
       // Re-renders the modal, which also resets the form and the button — but
@@ -807,9 +822,14 @@
   }
 
   async function delRenter(id) {
-    if (!confirm("Delete this renter? Their accounts and drops inventory are removed; the bot config file is left on the host.")) return;
+    if (!confirm("Delete this renter? Their accounts are pulled off the bot first (they stop farming), then their inventory and drops are removed.")) return;
     try {
-      await api("/renters/" + id, { method: "DELETE" });
+      try {
+        await api("/renters/" + id, { method: "DELETE" });
+      } catch (e) {
+        if (!(e.data && e.data.needsForce) || !confirm(e.message + "\n\nDelete anyway?")) throw e;
+        await api("/renters/" + id + "?force=1", { method: "DELETE" });
+      }
       toast("Deleted");
       RT.closeModal();
       await RT.reloadMany(["renters", "bots"]);

@@ -263,7 +263,14 @@
     const a = findAcc(id) || {};
     if (!confirm("Remove " + (a.login || "this account") + " from this renter? It is pulled off the bot and deleted from their inventory (farmed drops stay in the archive).")) return;
     try {
-      const d = await RT.api("/renter-accounts/" + id, { method: "DELETE" });
+      let d;
+      try {
+        d = await RT.api("/renter-accounts/" + id, { method: "DELETE" });
+      } catch (e) {
+        // A paid rent-farm window / order: removing it ends the buyer's farming.
+        if (!(e.data && e.data.needsForce) || !confirm(e.message + "\n\nRemove it anyway?")) throw e;
+        d = await RT.api("/renter-accounts/" + id + "?force=1", { method: "DELETE" });
+      }
       RT.toast(d.note || "Account removed");
       await RT.reloadMany(["renters", "bots", "accounts"]);
       RT.detail.reopen();

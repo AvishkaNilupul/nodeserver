@@ -1372,9 +1372,37 @@ router.post("/renters/:id/bot/:action", requireSuperadmin, async (req, res) => {
 // DELETE a renter (their config + accounts are left in place for the operator).
 router.delete("/renters/:id", requireSuperadmin, async (req, res) => {
   try {
-    const target = await Renter.findById(req.params.id, { username: 1, usernameLower: 1 }).lean();
+    const target = await Renter.findById(req.params.id);
     if (!target) return res.status(404).json({ success: false, message: "Not found" });
     if (isOperatorHolder(target)) return refuseHolder(res, "deleted");
+    // Deleting the rows alone left every account FARMING in its config with no
+    // row behind it — never expiring, never scanned, and out of the index that
+    // keeps a rented account from being sold. Pull them off the bots first;
+    // that needs a confirmation, and a stop that cannot happen deletes nothing.
+    const live = await RenterAccount.countDocuments({ renter: target._id, enabled: true, farmEndedAt: null });
+    if (live) {
+      if (String(req.query.force || "") !== "1") {
+        return res.status(409).json({
+          success: false,
+          needsForce: true,
+          message:
+            "This renter still has " + live + " account(s). Deleting pulls them off the bot first " +
+            "(they stop farming), then removes the renter's inventory and drops.",
+        });
+      }
+      const host = hosts.resolveHost(target.botHost);
+      if (!host) {
+        return res.status(409).json({ success: false, message: "The renter's bot host is unknown — nothing was deleted." });
+      }
+      try {
+        await stopRenterFarming(target, host);
+      } catch (e) {
+        return res.status(e.unreachable ? 502 : 409).json({
+          success: false,
+          message: "Could not pull the renter's accounts off the bot (" + (e.message || e) + ") — nothing was deleted.",
+        });
+      }
+    }
     const r = await Renter.findByIdAndDelete(req.params.id);
     if (!r) return res.status(404).json({ success: false, message: "Not found" });
     // Tear down the renter's standalone inventory too (their tenant boundary).
@@ -1880,6 +1908,58 @@ router.delete(
       if (!acc)
         return res.status(404).json({ success: false, message: "Not found" });
 
+      // A rent-farm buyer's account: a live Gameflip offer still SELLS it, and
+      // a paid window / order would end without anyone noticing. Refuse the
+      // former outright, confirm the latter, and close the order's window.
+      const owner = await Renter.findById(acc.renter, { username: 1, usernameLower: 1 }).lean();
+      let closedOrders = 0;
+      if (owner && isOperatorHolder(owner) && acc.login) {
+        const bufferRow = await MarketplaceListing.findOne(
+          { rentFarm: true, status: "active", accountLogin: loginMatcher(acc.login) },
+          { externalId: 1 },
+        ).lean();
+        if (bufferRow) {
+          return res.status(409).json({
+            success: false,
+            message:
+              "This account backs a LIVE Gameflip rent-farm offer (" + bufferRow.externalId +
+              ") — take the offer down first; the buffer then returns the account itself.",
+          });
+        }
+        const liveWindow = !acc.farmEndedAt && acc.farmUntil && new Date(acc.farmUntil) > new Date();
+        const order = await FarmServiceOrder.findOne(
+          { "accounts.login": loginMatcher(acc.login) },
+          { orderId: 1, market: 1, buyerUsername: 1 },
+        ).lean();
+        if ((liveWindow || order) && String(req.query.force || "") !== "1") {
+          return res.status(409).json({
+            success: false,
+            needsForce: true,
+            message:
+              "This is a paid rent-farm account" +
+              (order ? " (" + (order.market || "?") + " order " + String(order.orderId || "").slice(0, 8) +
+                (order.buyerUsername ? ", buyer " + order.buyerUsername : "") + ")" : "") +
+              (liveWindow ? ", farming until " + new Date(acc.farmUntil).toISOString().slice(0, 10) : "") +
+              ". Removing it ends the buyer's farming now.",
+          });
+        }
+        if (order) {
+          const r = await FarmServiceOrder.updateMany(
+            { "accounts.login": loginMatcher(acc.login) },
+            { $set: { "accounts.$[a].farmUntil": new Date() } },
+            { arrayFilters: [{ "a.login": loginMatcher(acc.login) }] },
+          ).catch(() => null);
+          closedOrders = (r && (r.modifiedCount || r.nModified)) || 0;
+          logEvent({
+            category: "renter",
+            action: "farm_window_removed",
+            actor: (req.session && req.session.admin && req.session.admin.username) || "superadmin",
+            subject: acc.login,
+            detail: "paid rent-farm account removed by hand; order window closed now",
+          });
+        }
+      }
+
       let pulled = false;
       let note = "";
       if (acc.configFile) {
@@ -2072,6 +2152,60 @@ router.post(
       const otherRenterAcc = await RenterAccount.findOne({
         $or: [{ clientSecret: token }, { login: loginRe }],
       });
+      // Taking an account OFF another renter ends their farming on it. That is
+      // the point when the account is simply sitting there, but it must never
+      // happen by accident to a renter with a live lease or to a paying
+      // rent-farm buyer (their window and order would vanish silently). Ask
+      // first (409 needsForce → the page confirms and resends with force).
+      if (otherRenterAcc && String(otherRenterAcc.renter) !== String(renter._id)) {
+        const owner = await Renter.findById(otherRenterAcc.renter, {
+          username: 1, usernameLower: 1, status: 1, accessEnd: 1,
+        }).lean();
+        const holderOwned = !!owner && isOperatorHolder(owner);
+        if (holderOwned) {
+          const bufferRow = await MarketplaceListing.findOne(
+            { rentFarm: true, status: "active", accountLogin: loginRe },
+            { externalId: 1, marketplace: 1 },
+          ).lean();
+          if (bufferRow) {
+            return res.status(409).json({
+              success: false,
+              message:
+                "This account backs a LIVE Gameflip rent-farm offer (" + bufferRow.externalId +
+                ") — anyone can still buy it. Take that offer down first.",
+            });
+          }
+        }
+        if (body.force !== true) {
+          const reasons = [];
+          if (owner && !holderOwned && !isBlocked(owner)) {
+            reasons.push("it farms for renter " + owner.username + ", whose lease is active");
+          }
+          if (!otherRenterAcc.farmEndedAt && otherRenterAcc.farmUntil && new Date(otherRenterAcc.farmUntil) > new Date()) {
+            reasons.push("its paid farming window runs until " + new Date(otherRenterAcc.farmUntil).toISOString().slice(0, 10));
+          }
+          if (holderOwned) {
+            const order = await FarmServiceOrder.findOne(
+              { "accounts.login": loginMatcher(otherRenterAcc.login || username) },
+              { orderId: 1, market: 1, buyerUsername: 1 },
+            ).lean();
+            if (order) {
+              reasons.push(
+                "it was sold as a rent-farm order (" + (order.market || "?") + " " +
+                  String(order.orderId || "").slice(0, 8) +
+                  (order.buyerUsername ? ", buyer " + order.buyerUsername : "") + ")",
+              );
+            }
+          }
+          if (reasons.length) {
+            return res.status(409).json({
+              success: false,
+              needsForce: true,
+              message: "Moving this account here ends its farming elsewhere: " + reasons.join("; ") + ".",
+            });
+          }
+        }
+      }
       const poolRow = await AvailableAccount.findOne({
         usernameLower: lower,
       }).lean();
@@ -2299,7 +2433,12 @@ router.post(
           }
         }
         if (!keepRow) {
-          await RenterAccount.deleteOne({ _id: otherRenterAcc._id });
+          // Only while it is still the OTHER renter's row. When the account kept
+          // its token, the write above already re-pointed this very row to the
+          // new renter (the ledger upserts by token) — deleting it by _id alone
+          // left the account farming with no row at all: never expiring, never
+          // scanned, outside every quota and the never-sell index.
+          await RenterAccount.deleteOne({ _id: otherRenterAcc._id, renter: otherRenterAcc.renter });
           notes.push(
             sameConfig
               ? "Took over from another renter on the shared config."
@@ -2307,6 +2446,14 @@ router.post(
           );
         }
       }
+
+      // Out of every auto-farm task: autoLister hands an assignedAccounts login to
+      // a BUYER, and the reaper recycles it back to the pool — both would take a
+      // rented account (the same guard movePoolAccountToRenter applies).
+      await AutoFarmTask.updateMany(
+        { assignedAccounts: { $in: [username, lower] } },
+        { $pull: { assignedAccounts: { $in: [username, lower] } } },
+      ).catch((e) => console.error("manual add: auto-farm task detach:", e.message));
 
       // Park the credentials in the account pool so the Creds reveal can always
       // find the password later, and mark it claimed so no new bot grabs it.

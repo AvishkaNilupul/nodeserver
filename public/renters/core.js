@@ -33,7 +33,12 @@
   async function api(path, opts){
     const res = await fetch(path, { credentials:"same-origin", headers:{"Content-Type":"application/json"}, ...opts });
     let d={}; try{ d=await res.json(); }catch(e){}
-    if (!res.ok || d.success===false) throw new Error(d.message || "Request failed ("+res.status+")");
+    if (!res.ok || d.success===false) {
+      // Keep the body: a 409 { needsForce } means "confirm, then resend with force".
+      const e = new Error(d.message || "Request failed ("+res.status+")");
+      e.data = d; e.status = res.status;
+      throw e;
+    }
     return d;
   }
 
