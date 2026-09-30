@@ -77,7 +77,7 @@ router.get("/renter/me", requireRenter, async (req, res) => {
     const host = hosts.resolveHost(r.botHost);
     // Quota "used" comes from the renter's OWN inventory, so it's correct even
     // when the bot host is offline.
-    const used = await RenterAccount.countDocuments({ renter: r._id });
+    const used = await RenterAccount.countDocuments({ renter: r._id, farmEndedAt: null });
     let running = null; // null = unknown (host offline / not assigned)
     let games = [];
     if (r.botFile && host) {
@@ -471,7 +471,7 @@ router.post("/renter/submit", renterSubmitLimiter, requireRenter, async (req, re
     }
     // Quota: accounts already in their inventory + already-pending + this batch
     // must fit. Counted from RenterAccount (their own inventory), not the config.
-    const used = await RenterAccount.countDocuments({ renter: r._id });
+    const used = await RenterAccount.countDocuments({ renter: r._id, farmEndedAt: null });
     const pending = await pendingAccountCount(r._id);
     const max = Number(r.maxAccounts) || 0;
     const remaining = max - used - pending;

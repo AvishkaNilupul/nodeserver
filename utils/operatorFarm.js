@@ -216,7 +216,11 @@ async function holderQuota() {
     .select("maxAccounts")
     .lean();
   if (!renter) return null;
-  const used = await RenterAccount.countDocuments({ renter: renter._id });
+  // LIVE windows only. A window that lapsed keeps its row (renterExpiry stamps
+  // farmEndedAt and leaves it for the roster), and counting those made the
+  // limit a lifetime-sales counter: 2000 would have been hit ~March 2027 and
+  // every rent-farm order refused again, exactly as on 09-28.
+  const used = await RenterAccount.countDocuments({ renter: renter._id, farmEndedAt: null });
   const max = Number(renter.maxAccounts) || 0;
   return { max, used, remaining: Math.max(0, max - used) };
 }
@@ -268,7 +272,7 @@ async function previewFreshAccounts({ count = 1 } = {}) {
     offlineHosts = ["(stack read failed: " + e.message + ")"];
   }
   const used = renter
-    ? await RenterAccount.countDocuments({ renter: renter._id })
+    ? await RenterAccount.countDocuments({ renter: renter._id, farmEndedAt: null })
     : 0;
   const quotaRemaining = renter
     ? Math.max(0, (Number(renter.maxAccounts) || 0) - used)
@@ -340,7 +344,8 @@ async function farmFreshAccounts({
   const host = hosts.resolveHost(renter.botHost);
   if (!host) throw badRequest("The holder renter's host is unknown.");
 
-  const used = await RenterAccount.countDocuments({ renter: renter._id });
+  // Live windows only — see holderQuota.
+  const used = await RenterAccount.countDocuments({ renter: renter._id, farmEndedAt: null });
   const quotaRemaining = Math.max(0, (Number(renter.maxAccounts) || 0) - used);
   if (quotaRemaining <= 0) {
     throw conflict(

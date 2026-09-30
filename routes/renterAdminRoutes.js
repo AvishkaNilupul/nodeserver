@@ -142,9 +142,11 @@ async function renterDefaultGames(renter, host) {
 // be a countDocuments per renter inside the map, and against the Atlas shared
 // tier (which serialises concurrent queries) ten renters cost ~1.7s of the
 // page's load for a number that one aggregate answers in one round trip.
+// LIVE accounts only: a lapsed window (farmEndedAt set) is off the bot and no
+// longer uses the renter's quota — the same rule the add paths enforce.
 async function usedByRenter(ids) {
   const rows = await RenterAccount.aggregate([
-    ...(ids ? [{ $match: { renter: { $in: ids } } }] : []),
+    { $match: { farmEndedAt: null, ...(ids ? { renter: { $in: ids } } : {}) } },
     { $group: { _id: "$renter", n: { $sum: 1 } } },
   ]);
   return new Map(rows.map((r) => [String(r._id), r.n]));
@@ -153,7 +155,7 @@ async function usedByRenter(ids) {
 async function renterListView(r, pmap, umap) {
   const used = umap
     ? umap.get(String(r._id)) || 0
-    : await RenterAccount.countDocuments({ renter: r._id });
+    : await RenterAccount.countDocuments({ renter: r._id, farmEndedAt: null });
   const p = pmap.get(String(r._id)) || { batches: 0, accounts: 0 };
   return {
     ...sanitizeRenter(r),
@@ -414,10 +416,21 @@ router.get("/renter-bots", requireSuperadmin, async (req, res) => {
             _id: "$renter",
             n: { $sum: 1 },
             // Token health per renter, so a dead token shows up in the
-            // overview instead of silently farming nothing.
+            // overview instead of silently farming nothing. Only while the
+            // window is live: a buyer changing the password AFTER their term
+            // ended is not a problem to chase.
             bad: {
               $sum: {
-                $cond: [{ $eq: ["$lastScanStatus", "token_invalid"] }, 1, 0],
+                $cond: [
+                  {
+                    $and: [
+                      { $eq: ["$lastScanStatus", "token_invalid"] },
+                      { $not: [{ $ifNull: ["$farmEndedAt", false] }] },
+                    ],
+                  },
+                  1,
+                  0,
+                ],
               },
             },
           },
@@ -431,7 +444,7 @@ router.get("/renter-bots", requireSuperadmin, async (req, res) => {
       // derived from the page's rows: a search or a page boundary would
       // otherwise undercount it. Indexed on lastScanStatus.
       RenterAccount.aggregate([
-        { $match: { lastScanStatus: "token_invalid" } },
+        { $match: { lastScanStatus: "token_invalid", farmEndedAt: null } },
         { $count: "n" },
       ]),
     ]);
@@ -1733,7 +1746,7 @@ router.post(
         return res.status(404).json({ success: false, message: "Not found" });
       let assignedStack = null;
       let assignedForQuick = false;
-      const used = await RenterAccount.countDocuments({ renter: renter._id });
+      const used = await RenterAccount.countDocuments({ renter: renter._id, farmEndedAt: null });
       if (used + 1 > (Number(renter.maxAccounts) || 0)) {
         return res.status(400).json({
           success: false,
@@ -2256,7 +2269,7 @@ router.post(
         const { kept, skipped: sk } = await dedupeAccounts(parsed);
         skipped = sk.length;
         if (sk.length) skipReason = sk[0].reason || "";
-        const used = await RenterAccount.countDocuments({ renter: renter._id });
+        const used = await RenterAccount.countDocuments({ renter: renter._id, farmEndedAt: null });
         if (used + kept.length > (Number(renter.maxAccounts) || 0)) {
           return res.status(400).json({
             success: false,
@@ -2617,7 +2630,7 @@ router.get(
       if (!renter)
         return res.status(404).json({ success: false, message: "Not found" });
       const requested = Math.floor(Number(req.query.count) || 0);
-      const used = await RenterAccount.countDocuments({ renter: renter._id });
+      const used = await RenterAccount.countDocuments({ renter: renter._id, farmEndedAt: null });
       const quotaRemaining = Math.max(
         0,
         (Number(renter.maxAccounts) || 0) - used,
@@ -2674,7 +2687,7 @@ router.post(
           .status(400)
           .json({ success: false, message: "count must be a positive number" });
       }
-      const used = await RenterAccount.countDocuments({ renter: renter._id });
+      const used = await RenterAccount.countDocuments({ renter: renter._id, farmEndedAt: null });
       const quotaRemaining = Math.max(
         0,
         (Number(renter.maxAccounts) || 0) - used,

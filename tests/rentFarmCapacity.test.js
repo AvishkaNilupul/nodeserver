@@ -22,6 +22,12 @@ function load({ bots, offlineHosts = [] }) {
     if (from && request === "./systemLog") {
       return { logEvent: async () => {} };
     }
+    // The holder's account limit is a DB read; with no holder the stacks bind,
+    // which is what these tests are about. (Unstubbed, the read waited on a
+    // database that is not there and every test timed out at 10s.)
+    if (from && request === "./operatorFarm") {
+      return { holderQuota: async () => null };
+    }
     return realLoad.call(this, request, parent, isMain);
   };
   try {

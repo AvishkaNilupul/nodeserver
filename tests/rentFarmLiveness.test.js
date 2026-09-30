@@ -203,6 +203,9 @@ function loadCapacity({ bots, offlineHosts = [] }) {
     }
     if (from && request === "./telegram") return { sendTelegram: async () => {} };
     if (from && request === "./systemLog") return { logEvent: async () => {} };
+    // No holder: the stacks bind (a real holderQuota read waits on a database
+    // that is not there and times the test out).
+    if (from && request === "./operatorFarm") return { holderQuota: async () => null };
     return realLoad.call(this, request, parent, isMain);
   };
   try {

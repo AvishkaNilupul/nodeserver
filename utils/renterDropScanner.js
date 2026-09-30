@@ -202,7 +202,11 @@ async function blockedRenterIds() {
 async function nextDueAccount() {
   const cutoff = new Date(Date.now() - state.perAccountMs);
   const blocked = await blockedRenterIds();
+  // A lapsed window (farmEndedAt set) is off our bots and belongs to its buyer:
+  // it leaves the rotation instead of being rescanned forever (~11 a day, so
+  // the rotation would otherwise grow without bound).
   const q = {
+    farmEndedAt: null,
     $or: [{ lastScanAt: null }, { lastScanAt: { $lte: cutoff } }],
   };
   if (blocked.length) q.renter = { $nin: blocked };
@@ -280,10 +284,11 @@ async function getProgress() {
   // operator sees matches what the rotation will actually scan.
   const blocked = await blockedRenterIds();
   const dueQ = {
+    farmEndedAt: null,
     $or: [{ lastScanAt: null }, { lastScanAt: { $lte: cutoff } }],
   };
   if (blocked.length) dueQ.renter = { $nin: blocked };
-  const [total, scannedWindow, due, paused, ok, tokenInvalid, errored, totalDrops] =
+  const [total, scannedWindow, due, paused, ok, tokenInvalid, errored, totalDrops, ended] =
     await Promise.all([
       RenterAccount.countDocuments({}),
       RenterAccount.countDocuments({ lastScanAt: { $gt: cutoff } }),
@@ -291,10 +296,11 @@ async function getProgress() {
       blocked.length
         ? RenterAccount.countDocuments({ renter: { $in: blocked } })
         : 0,
-      RenterAccount.countDocuments({ lastScanStatus: "ok" }),
-      RenterAccount.countDocuments({ lastScanStatus: "token_invalid" }),
-      RenterAccount.countDocuments({ lastScanStatus: "error" }),
+      RenterAccount.countDocuments({ lastScanStatus: "ok", farmEndedAt: null }),
+      RenterAccount.countDocuments({ lastScanStatus: "token_invalid", farmEndedAt: null }),
+      RenterAccount.countDocuments({ lastScanStatus: "error", farmEndedAt: null }),
       RenterDrop.countDocuments({}),
+      RenterAccount.countDocuments({ farmEndedAt: { $ne: null } }),
     ]);
   return {
     enabled: state.enabled,
@@ -313,6 +319,8 @@ async function getProgress() {
       tokenInvalid,
       error: errored,
       totalDrops,
+      // Windows that lapsed: kept for the roster, no longer scanned.
+      ended,
     },
     session: {
       scanned: state.sessionScanned,
