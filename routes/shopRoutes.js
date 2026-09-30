@@ -167,10 +167,16 @@ async function sellableAccountMap(ids) {
   if (!ids.length) return new Map();
   const accs = await BotAccount.find(
     { _id: { $in: ids } },
-    { login: 1, credPassword: 1, hasPassword: 1, lastScanStatus: 1 },
+    { login: 1, credPassword: 1, hasPassword: 1, lastScanStatus: 1, clientSecret: 1 },
   ).lean();
+  // An account in a renter's bot stack belongs to that renter (rented out, a
+  // rent-farm window, or theirs) — never sellable, even when its old operator
+  // record kept a password and unreserved drops (utils/rentedAccounts.js).
+  const renters = require("../utils/rentedAccounts");
+  const rented = await renters.rentedIndex();
   const map = new Map();
   for (const a of accs) {
+    if (renters.isRented(rented, a)) continue;
     // Accounts without a stored password can't be delivered, so they're
     // excluded from the sellable pool. Same for a dead Twitch token: the
     // credentials likely changed, so the delivered login may not work — and a

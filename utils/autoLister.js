@@ -638,10 +638,16 @@ async function pickDeliveryAccounts(task, max, items) {
   // committed sales; this also guards the window before a concurrent listing
   // commits its reservation.
   const used = await loginsOnActiveListings();
+  // An account in a renter's bot stack is the renter's — never a delivery
+  // account (utils/rentedAccounts.js), whatever its old task still says.
+  const rented = await require("./rentedAccounts").rentedAccountIds(
+    verified.map((a) => a.accountId),
+  );
   const out = [];
   for (const acc of verified) {
     if (out.length >= max) break;
     if (used.has(String(acc.login).toLowerCase())) continue;
+    if (rented.has(String(acc.accountId))) continue;
     out.push(acc);
   }
   return out;
