@@ -109,25 +109,43 @@ async function canonicalGame(raw, knownGames) {
   if (!want) return "";
   const games = knownGames || [];
   const hit = games.find(
-    (g) => normGame(g) === want || normGameStripped(g) === wantStripped,
+    (g) => normGame(g) === want || (wantStripped && normGameStripped(g) === wantStripped),
   );
   if (hit) return hit;
   // "Call of Duty: Modern Warfare 4" should still reach the farm's "Call of
-  // Duty"; a short fragment must not match half the catalogue.
+  // Duty"; a short fragment must not match half the catalogue. When several
+  // known names fit, the MOST SPECIFIC one wins (list order used to decide, so
+  // "Call of Duty" could beat "Call of Duty: Warzone"), and a known name that
+  // normalises to almost nothing (a non-Latin title folds to "") never
+  // matches — it used to prefix-match every title.
   if (want.length >= 6) {
-    return (
-      games.find((g) => want.startsWith(normGame(g))) ||
-      games.find((g) => normGame(g).startsWith(want)) ||
-      games.find((g) => wantStripped.startsWith(normGameStripped(g))) ||
-      games.find((g) => normGameStripped(g).startsWith(wantStripped)) ||
-      ""
-    );
+    const usable = games.filter((g) => normGame(g).length >= 3 || normGameStripped(g).length >= 3);
+    const best = (cands, score) =>
+      cands.reduce((b, g) => (b === "" || score(g) > score(b) ? g : b), "");
+    const tries = [
+      // a known name the title starts with: the longest such name
+      [(g) => normGame(g).length >= 3 && want.startsWith(normGame(g)), (g) => normGame(g).length],
+      // a known name that starts with the title: the closest (shortest) one
+      [(g) => normGame(g).length >= 3 && normGame(g).startsWith(want), (g) => -normGame(g).length],
+      // The same on the accent-stripped spelling — only when the stripped title
+      // is itself meaningful ("" would prefix every name there is).
+      [(g) => wantStripped.length >= 6 && normGameStripped(g).length >= 3 && wantStripped.startsWith(normGameStripped(g)), (g) => normGameStripped(g).length],
+      [(g) => wantStripped.length >= 6 && normGameStripped(g).length >= 3 && normGameStripped(g).startsWith(wantStripped), (g) => -normGameStripped(g).length],
+    ];
+    for (const [pred, score] of tries) {
+      const hit2 = best(usable.filter(pred), score);
+      if (hit2) return hit2;
+    }
+    return "";
   }
   return "";
 }
 
 // Games the farm has actually seen campaigns for, which is what a bot config's
-// game pin has to match.
+// game pin has to match — plus the games announced on Twitch whose first
+// campaign the scanner has not recorded yet (the same list Eldorado sells
+// from: utils/eldoradoFarmService.ANNOUNCED_FARM_GAMES), so a launch-week game
+// sells here too instead of every order failing until the scanner catches up.
 let gamesCache = { at: 0, list: [] };
 async function knownFarmGames() {
   if (gamesCache.list.length && Date.now() - gamesCache.at < 30 * 60e3) {
@@ -137,8 +155,19 @@ async function knownFarmGames() {
   const CampaignDrops = require("../models/CampaignDrops");
   const a = await AutoFarmTask.distinct("game").catch(() => []);
   const b = await CampaignDrops.distinct("game").catch(() => []);
-  const list = [...new Set([...(a || []), ...(b || [])].filter(Boolean))];
-  if (list.length) gamesCache = { at: Date.now(), list };
+  const seen = [...new Set([...(a || []), ...(b || [])].filter(Boolean))];
+  let announced = [];
+  try {
+    announced = require("./eldoradoFarmService").ANNOUNCED_FARM_GAMES || [];
+  } catch {
+    announced = [];
+  }
+  const have = new Set(seen.map(normGame));
+  const list = seen.concat(announced.filter((g) => !have.has(normGame(g))));
+  // Cached only when the scanner's own games came back: an empty read is a
+  // failed read, and caching the announced names alone would refuse every
+  // other game for half an hour.
+  if (seen.length) gamesCache = { at: Date.now(), list };
   return list;
 }
 
@@ -307,7 +336,7 @@ async function deliverFarmOrder(order, { dryRun } = {}) {
   const orderId = rawOrderId;
   const key = farmOrderKey(rawOrderId);
   const units = await farmQuantity(order);
-  const qty = units.qty;
+  let qty = units.qty;
 
   // A title we cannot read is still a PAID order.
   //
@@ -372,8 +401,18 @@ async function deliverFarmOrder(order, { dryRun } = {}) {
   }
   row.attempts += 1;
 
+  // Once anything is provisioned, the count / game / term it was provisioned
+  // for stand (utils/farmProvisioning.freezeOrder): a later tick that cannot
+  // read the price evidence any more (the offer closed) must not shrink it.
+  const fz = provisioning.freezeOrder(row, { qty, game: parsed.game, days: parsed.days });
+  qty = fz.qty;
+  if (fz.frozen) {
+    parsed.game = fz.game;
+    parsed.days = fz.days;
+  }
+
   // The unreadable-title refusal, now that there is a row to hang it on.
-  if (unreadable) {
+  if (unreadable && !fz.frozen) {
     const alert = farmAlert.shouldAlert(row);
     row.state = "failed";
     row.lastError = unreadable;

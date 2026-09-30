@@ -213,7 +213,7 @@ async function deliverFarmOrder(order, { dryRun } = {}) {
         "nothing provisioned, the next tick retries",
     };
   }
-  const accounts = bulk ? accountsForUnits(bulk.pack, qty) : qty;
+  let accounts = bulk ? accountsForUnits(bulk.pack, qty) : qty;
 
   // A title we cannot read is still a PAID order.
   //
@@ -294,8 +294,18 @@ async function deliverFarmOrder(order, { dryRun } = {}) {
   }
   row.attempts += 1;
 
+  // Once anything is provisioned, the account count / game / term it was
+  // provisioned for stand (utils/farmProvisioning.freezeOrder). `qty` — G2G's
+  // own unit count, what delivered_qty is told — is the order's and unchanged.
+  const fz = provisioning.freezeOrder(row, { qty: accounts, game: parsed.game, days: parsed.days });
+  accounts = fz.qty;
+  if (fz.frozen) {
+    parsed.game = fz.game;
+    parsed.days = fz.days;
+  }
+
   // The unreadable-title refusal, now that there is a row to hang it on.
-  if (unreadable) {
+  if (unreadable && !fz.frozen) {
     const alert = farmAlert.shouldAlert(row);
     row.state = "failed";
     row.lastError = unreadable;
