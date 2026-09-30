@@ -23,6 +23,7 @@ const AvailableAccount = require("../models/AvailableAccount");
 const { decrypt } = require("./secretBox");
 const operatorFarm = require("./operatorFarm");
 const farmAlert = require("./farmServiceAlert");
+const farmHandover = require("./farmHandover");
 const provisioning = require("./farmProvisioning");
 
 // Which marketplace this service speaks for, used in failure alerts.
@@ -457,6 +458,7 @@ async function deliverFarmOrder(order, { dryRun } = {}) {
             qty,
             buyerUsername: row.buyerUsername || "",
             reason: row.lastError,
+            logins: farmHandover.loginsOf(row),
           });
         }
         return { orderId, farm: true, error: row.lastError };
@@ -488,20 +490,27 @@ async function deliverFarmOrder(order, { dryRun } = {}) {
             qty,
             buyerUsername: row.buyerUsername || "",
             reason: row.lastError,
+            logins: farmHandover.loginsOf(row),
           });
         }
         return { orderId, farm: true, error: row.lastError };
       }
+      // The window counts from this hand-over (see utils/farmHandover).
+      const until = farmHandover.untilFrom(parsed.days);
       const messages = copy.deliveryMessages(creds, {
         kind: "farm",
         days: parsed.days,
         game: parsed.game,
+        until,
       });
       for (const m of messages) {
         await mp.playerauctionsSendOrderMessage(orderId, m);
       }
       row.messageSentAt = new Date();
       row.state = "sent";
+      await farmHandover
+        .stampFromHandover(row, until)
+        .catch((e) => console.error("playerauctions farm " + orderId + ": window re-stamp failed:", e.message));
       await row.save();
     }
 
@@ -532,8 +541,15 @@ async function deliverFarmOrder(order, { dryRun } = {}) {
     };
   } catch (e) {
     const alertErr = farmAlert.shouldAlert(row);
-    row.state = "failed";
-    row.lastError = String(e.message || e).slice(0, 400);
+    // After the login reached the buyer only the confirmation can have failed:
+    // the row stays "sent" and the page says so (utils/farmHandover).
+    const sent = !!row.messageSentAt;
+    if (sent) {
+      farmHandover.sentButUnconfirmed(row, MARKET, e);
+    } else {
+      row.state = "failed";
+      row.lastError = String(e.message || e).slice(0, 400);
+    }
     await row.save().catch(() => {});
     if (alertErr) {
       await farmAlert.alertFarmFailure({
@@ -545,9 +561,11 @@ async function deliverFarmOrder(order, { dryRun } = {}) {
         qty,
         buyerUsername: row.buyerUsername || "",
         reason: row.lastError,
+        logins: farmHandover.loginsOf(row),
+        sent,
       });
     }
-    return { orderId, farm: true, error: row.lastError };
+    return { orderId, farm: true, error: row.lastError, ...(sent ? { sent: true } : {}) };
   }
 }
 

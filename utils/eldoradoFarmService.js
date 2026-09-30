@@ -24,6 +24,7 @@ const { decrypt } = require("./secretBox");
 const operatorFarm = require("./operatorFarm");
 const mp = require("./marketplaces");
 const farmAlert = require("./farmServiceAlert");
+const farmHandover = require("./farmHandover");
 const provisioning = require("./farmProvisioning");
 const { packSizeOf, accountsForUnits, titlePackSize } = require("./bulkPacks/packMath");
 
@@ -162,9 +163,10 @@ async function parseFarmOrder(order) {
 
 // The buyer-facing hand-over. Mirrors the copy the operator sends by hand: the
 // credential, then the two things that actually matter (keep it linked, don't
-// change it), then the feedback ask.
-function farmDeliveryMessage(accounts, days, game) {
-  const term = days === 365 ? "1 year" : days + " days";
+// change it), then the feedback ask. `until` (the window's end, counted from
+// this hand-over — utils/farmHandover) is stated as a date.
+function farmDeliveryMessage(accounts, days, game, { until = null } = {}) {
+  const term = farmHandover.termWords(days);
   const forGame = game ? " for " + game : "";
   const blocks = accounts.map(
     (a, i) =>
@@ -175,7 +177,8 @@ function farmDeliveryMessage(accounts, days, game) {
   );
   return (
     blocks.join("\n\n") +
-    "\n\nYour " + term + " of automatic farming starts now.\n\n" +
+    "\n\nYour " + term + " of automatic farming starts now" +
+    (until ? " and runs until " + farmHandover.dayText(until) + " (UTC)" : "") + ".\n\n" +
     "KEEP THIS ACCOUNT LINKED to your game account. Our farm watches every " +
     "drop event" + forGame + " and claims the items automatically the moment " +
     "they unlock — you do not have to watch any streams or do anything at " +
@@ -446,6 +449,7 @@ async function deliverFarmOrder(order, { dryRun } = {}) {
             qty,
             buyerUsername: row.buyerUsername || "",
             reason: row.lastError,
+            logins: farmHandover.loginsOf(row),
           });
         }
         return { orderId, farm: true, error: row.lastError };
@@ -477,16 +481,22 @@ async function deliverFarmOrder(order, { dryRun } = {}) {
             qty,
             buyerUsername: row.buyerUsername || "",
             reason: row.lastError,
+            logins: farmHandover.loginsOf(row),
           });
         }
         return { orderId, farm: true, error: row.lastError };
       }
+      // The window counts from this hand-over (see utils/farmHandover).
+      const until = farmHandover.untilFrom(parsed.days);
       await mp.eldoradoSendOrderMessage(
         order,
-        farmDeliveryMessage(creds, parsed.days, parsed.game),
+        farmDeliveryMessage(creds, parsed.days, parsed.game, { until }),
       );
       row.messageSentAt = new Date();
       row.state = "sent";
+      await farmHandover
+        .stampFromHandover(row, until)
+        .catch((e) => console.error("eldorado farm " + orderId + ": window re-stamp failed:", e.message));
       await row.save();
     }
 
@@ -509,8 +519,15 @@ async function deliverFarmOrder(order, { dryRun } = {}) {
     };
   } catch (e) {
     const alertErr = farmAlert.shouldAlert(row);
-    row.state = "failed";
-    row.lastError = String(e.message || e).slice(0, 400);
+    // After the login reached the buyer only the confirmation can have failed:
+    // the row stays "sent" (the next tick only confirms) and the page says so.
+    const sent = !!row.messageSentAt;
+    if (sent) {
+      farmHandover.sentButUnconfirmed(row, MARKET, e);
+    } else {
+      row.state = "failed";
+      row.lastError = String(e.message || e).slice(0, 400);
+    }
     await row.save().catch(() => {});
     if (alertErr) {
       await farmAlert.alertFarmFailure({
@@ -522,9 +539,11 @@ async function deliverFarmOrder(order, { dryRun } = {}) {
         qty,
         buyerUsername: row.buyerUsername || "",
         reason: row.lastError,
+        logins: farmHandover.loginsOf(row),
+        sent,
       });
     }
-    return { orderId, farm: true, error: row.lastError };
+    return { orderId, farm: true, error: row.lastError, ...(sent ? { sent: true } : {}) };
   }
 }
 

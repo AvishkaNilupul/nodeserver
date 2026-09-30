@@ -25,6 +25,7 @@ const { decrypt } = require("./secretBox");
 const mp = require("./marketplaces");
 const operatorFarm = require("./operatorFarm");
 const farmAlert = require("./farmServiceAlert");
+const farmHandover = require("./farmHandover");
 const provisioning = require("./farmProvisioning");
 const { accountsForUnits, titlePackSize } = require("./bulkPacks/packMath");
 
@@ -95,14 +96,16 @@ async function credentialsFor(added) {
   return out;
 }
 
-function farmMessage(creds, { game, days }) {
+// `until` is the window's end, counted from this hand-over (utils/farmHandover).
+function farmMessage(creds, { game, days }, { until = null } = {}) {
   // Lazy require: g2gFulfiller requires this module, so pulling it in at load
   // time would be a cycle and the export would be undefined here.
   const { g2gDeliveryCode } = require("./g2gFulfiller");
   const lines = creds.map((c) => g2gDeliveryCode(c.login, c.password));
   return (
     "Your " + game + " Twitch Drops automatic farming is now running for " +
-    days + " days.\n\n" +
+    farmHandover.termWords(days) +
+    (until ? ", until " + farmHandover.dayText(until) + " (UTC)" : "") + ".\n\n" +
     lines.join("\n") +
     "\n\nThe account above is already connected and farming for you. Sign in " +
     "to Twitch with it any time to see the drops as they arrive, and keep it " +
@@ -357,6 +360,7 @@ async function deliverFarmOrder(order, { dryRun } = {}) {
             qty: accounts,
             buyerUsername: row.buyerUsername || "",
             reason: row.lastError,
+            logins: farmHandover.loginsOf(row),
           });
         }
         return { orderId, farm: true, error: row.lastError };
@@ -387,6 +391,7 @@ async function deliverFarmOrder(order, { dryRun } = {}) {
             qty: accounts,
             buyerUsername: row.buyerUsername || "",
             reason: row.lastError,
+            logins: farmHandover.loginsOf(row),
           });
         }
         return { orderId, farm: true, error: row.lastError };
@@ -395,7 +400,9 @@ async function deliverFarmOrder(order, { dryRun } = {}) {
       // transitions are idempotent enough to re-run.
       await mp.g2gStartDeliver(orderId).catch(() => {});
       await mp.g2gMarkDelivering(orderId).catch(() => {});
-      const message = farmMessage(creds, parsed);
+      // The window counts from this hand-over (see utils/farmHandover).
+      const until = farmHandover.untilFrom(parsed.days);
+      const message = farmMessage(creds, parsed, { until });
       try {
         await chat.sendToBuyer(order.buyerId, message);
       } catch (e) {
@@ -448,6 +455,9 @@ async function deliverFarmOrder(order, { dryRun } = {}) {
       }
       row.messageSentAt = new Date();
       row.state = "sent";
+      await farmHandover
+        .stampFromHandover(row, until)
+        .catch((e) => console.error("g2g farm " + orderId + ": window re-stamp failed:", e.message));
       await row.save();
     }
 
@@ -476,8 +486,15 @@ async function deliverFarmOrder(order, { dryRun } = {}) {
     };
   } catch (e) {
     const alertErr = farmAlert.shouldAlert(row);
-    row.state = "failed";
-    row.lastError = String(e.message || e).slice(0, 400);
+    // After the login reached the buyer only the confirmation can have failed:
+    // the row stays "sent" and the page says so (utils/farmHandover).
+    const sent = !!row.messageSentAt;
+    if (sent) {
+      farmHandover.sentButUnconfirmed(row, MARKET, e);
+    } else {
+      row.state = "failed";
+      row.lastError = String(e.message || e).slice(0, 400);
+    }
     await row.save().catch(() => {});
     if (alertErr) {
       await farmAlert.alertFarmFailure({
@@ -489,9 +506,11 @@ async function deliverFarmOrder(order, { dryRun } = {}) {
         qty: accounts,
         buyerUsername: row.buyerUsername || "",
         reason: row.lastError,
+        logins: farmHandover.loginsOf(row),
+        sent,
       });
     }
-    return { orderId, farm: true, error: row.lastError };
+    return { orderId, farm: true, error: row.lastError, ...(sent ? { sent: true } : {}) };
   }
 }
 

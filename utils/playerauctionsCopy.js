@@ -18,6 +18,7 @@
 // Both builders below hard-guarantee the limit: they drop optional trailing
 // sentences until the text fits, rather than truncating mid-credential.
 const LIMIT = 300;
+const { termWords, dayText } = require("./farmHandover");
 
 // Assemble `head` (never dropped) plus as many `tail` sentences as fit.
 // Returns the longest result within `limit`.
@@ -63,12 +64,16 @@ function bundleDeliveryMessage(accounts) {
 // The buyer bought a window of automated farming on an account we keep running.
 // The game is accepted (and ignored) so this matches farmInstruction's shape —
 // naming it would not fit in 300 characters alongside the credential.
-function farmDeliveryMessage(accounts, days, _game) {
+// `until` (the window's end, counted from this hand-over — utils/farmHandover)
+// costs ~20 characters and is part of the head: the date the farming ends is
+// what a buyer needs most after the login.
+function farmDeliveryMessage(accounts, days, _game, until = null) {
   const list = Array.isArray(accounts) ? accounts : [accounts];
-  const term = days === 365 ? "1 year" : days + " days";
+  const term = termWords(days);
   const head =
     (list.length > 1 ? list.length + " accounts:\n" : "") + credBlock(list);
-  return fit(head + "\n\nYour " + term + " of automatic farming starts now.", [
+  return fit(head + "\n\nYour " + term + " of automatic farming starts now" +
+    (until ? " (until " + dayText(until) + ")" : "") + ".", [
     "Keep it linked to your game account and do not change the password or email, or the farm stops.",
     "Details are in this offer's delivery instructions.",
     "Any problem, reply here first.",
@@ -115,7 +120,7 @@ function bundleInstruction() {
 }
 
 function farmInstruction(days, game) {
-  const term = days === 365 ? "1 year" : days + " days";
+  const term = termWords(days);
   return clampInstruction(
     [
       "AUTOMATIC FARMING - " + term.toUpperCase(),
@@ -140,11 +145,11 @@ function farmInstruction(days, game) {
 // The caller MUST send every message before confirming delivery, and must
 // reserve the accounts before sending, so that a failure part-way through
 // resends the same credentials instead of claiming fresh ones.
-function deliveryMessages(accounts, { kind = "bundle", days, game } = {}) {
+function deliveryMessages(accounts, { kind = "bundle", days, game, until = null } = {}) {
   const list = Array.isArray(accounts) ? accounts : [accounts];
   const single =
     kind === "farm"
-      ? farmDeliveryMessage(list, days, game)
+      ? farmDeliveryMessage(list, days, game, until)
       : bundleDeliveryMessage(list);
   if (single.length <= LIMIT) return [single];
 
@@ -180,8 +185,9 @@ function deliveryMessages(accounts, { kind = "bundle", days, game } = {}) {
   // Tail note on its own message when there is room for a useful one.
   const note =
     kind === "farm"
-      ? "Your " + (days === 365 ? "1 year" : days + " days") +
-        " of automatic farming starts now. Keep the accounts linked and do not " +
+      ? "Your " + termWords(days) + " of automatic farming starts now" +
+        (until ? " (until " + dayText(until) + ")" : "") +
+        ". Keep the accounts linked and do not " +
         "change any passwords or emails. Details are in this offer's delivery " +
         "instructions."
       : "Log in on Twitch, open Drops & Rewards > Inventory, and press Connect " +
