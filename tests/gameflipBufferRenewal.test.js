@@ -41,7 +41,11 @@ const fakeMp = {
   gameflipPublish: async (args) => {
     if (world.publishFails) throw new Error(world.publishFails);
     const id = "gf-new-" + (world.published.length + 1);
-    world.published.push({ id, ...args });
+    const login = (/Username: (\S+)/.exec(args.autoDeliverCode || "") || [])[1];
+    const ra = login
+      ? await require("../models/RenterAccount").findOne({ login }).lean()
+      : null;
+    world.published.push({ id, ...args, farmUntilAtPublish: ra && ra.farmUntil });
     return { externalId: id, url: "https://gameflip.com/item/" + id };
   },
   gameflipDelist: async (id) => {
@@ -212,6 +216,11 @@ test("REGRESSION: an offer that expired unsold is relisted with the SAME account
   assert.equal(world.removedFromConfig.length, 0, "the account never left its bot");
   assert.equal(world.published.length, 1);
   assert.match(world.published[0].autoDeliverCode, /Username: shelf1\nPassword: pw-shelf1/);
+  assert.match(world.published[0].autoDeliverCode, /\n\nOffer ref: \d{8}-[A-Z0-9]{4}$/, "unique code — Gameflip refuses a duplicate");
+  assert.ok(
+    world.published[0].farmUntilAtPublish > new Date(Date.now() + 360 * 86400000),
+    "the placeholder window was pushed out BEFORE the listing could sell",
+  );
   assert.match(world.published[0].title, /Rust Twitch Drops Automatic Farming 180 Days/);
   const fresh = await MarketplaceListing.findOne({ externalId: "gf-new-1" }).lean();
   assert.equal(fresh.status, "active");
@@ -219,6 +228,7 @@ test("REGRESSION: an offer that expired unsold is relisted with the SAME account
   assert.equal(fresh.rentFarmDays, 180);
   const old = await MarketplaceListing.findById(listing._id).lean();
   assert.equal(old.rentFarmPoolId, "", "the old row no longer points at it");
+  assert.equal(old.rentFarmRenewingAt, null, "lease released");
   assert.match(old.lastError, /renewed as gf-new-1/);
   const p = await AvailableAccount.findById(pool._id).lean();
   assert.equal(p.status, "claimed");
@@ -252,10 +262,12 @@ test("a failed publish keeps the account parked for the next pass and counts the
   assert.equal(out.renewed, 0);
   assert.equal(out.reclaimed, 0);
   const old = await MarketplaceListing.findById(listing._id).lean();
-  assert.equal(old.rentFarmPoolId, String(pool._id), "pointer put back");
+  assert.equal(old.rentFarmPoolId, String(pool._id), "the row never stopped owning it");
+  assert.equal(old.rentFarmRenewingAt, null, "lease released");
   assert.equal(old.rentFarmRenewFailures, 1);
   assert.equal((await AvailableAccount.findById(pool._id).lean()).status, "claimed");
   assert.equal(world.removedFromConfig.length, 0);
+  assert.equal(world.fresh.length, 0, "its slot is NOT refilled with a fresh account");
 });
 
 test("a Gameflip rate limit stops the pass instead of hammering it", async () => {
@@ -327,6 +339,7 @@ test("REGRESSION: a full buffer no longer skips returning an account stuck on a 
 test("with the buffer OFF, a stranded account is still returned (and nothing is published)", async () => {
   await reset();
   world.af.gameflipRentFarm = false;
+  world.af.gfBufferDryRun = undefined; // the DEFAULT (dry) must not keep it parked either
   const { pool } = await parked();
 
   const out = await svc.topUpBuffer({ dryRun: false });
@@ -353,7 +366,8 @@ test("a renewed listing that cannot be recorded is delisted and the account stay
   }
   assert.deepEqual(world.delisted, ["gf-new-1"]);
   const old = await MarketplaceListing.findById(listing._id).lean();
-  assert.equal(old.rentFarmPoolId, String(pool._id), "pointer back after the delist");
+  assert.equal(old.rentFarmPoolId, String(pool._id), "still owns the account");
+  assert.equal(old.rentFarmRenewingAt, null);
   assert.equal(old.rentFarmRenewFailures, 1);
 });
 
@@ -375,15 +389,20 @@ test("REGRESSION: a renewed listing that is LIVE with no row keeps the account c
     MarketplaceListing.prototype.save = realSave;
   }
   const old = await MarketplaceListing.findById(listing._id).lean();
-  assert.equal(old.rentFarmPoolId, "", "no pointer left for a reclaim to follow");
+  assert.equal(old.rentFarmPoolId, String(pool._id), "the row still owns the account…");
+  assert.ok(old.rentFarmRenewingAt, "…under a lease, so nothing releases it");
   assert.equal((await AvailableAccount.findById(pool._id).lean()).status, "claimed");
-  assert.ok(world.alerts.some((a) => /STILL LIVE AND SELLABLE/.test(a.reason)));
+  assert.equal(world.removedFromConfig.length, 0, "not pulled off its bot");
+  assert.ok(world.alerts.some((a) => /LIVE AND SELLABLE with no row/.test(a.reason)));
+  assert.match(world.alerts.find((a) => /LIVE AND SELLABLE/.test(a.reason)).reason, /^pool \S+ \/ shelf1:/, "pool id and login lead the page");
 });
 
 test("isRenewing: fresh expired rows are renewing, overdue or failing ones are stranded", () => {
   const now = Date.now();
   const base = { status: "removed", rentFarmExpiredAt: new Date(now - 60000) };
   assert.equal(svc.isRenewing(base, now), true);
+  assert.equal(svc.isRenewing({ ...base, rentFarmRenewingAt: new Date(now - 60000) }, now), true, "in flight");
+  assert.equal(svc.isRenewing({ ...base, rentFarmRenewingAt: new Date(now - svc.RENEW_LEASE_MS - 1) }, now), false, "cut off");
   assert.equal(svc.isRenewing({ ...base, rentFarmExpiredAt: new Date(now - 7 * 3600000) }, now), false);
   assert.equal(svc.isRenewing({ ...base, rentFarmRenewFailures: svc.RENEW_MAX_FAILURES }, now), false);
   assert.equal(svc.isRenewing({ status: "delisted", rentFarmExpiredAt: new Date(now) }, now), false);
@@ -406,4 +425,60 @@ test("the watcher keeps an expired buffered account only for a renewal, and neve
   assert.match(src.slice(at - 900, at), /const renew =\s*status === "expired" && !!row\.rentFarm && !!row\.rentFarmPoolId &&\s*gfFarm\.renewsOnExpiry\(\);/);
   assert.match(seg, /\.\.\.\(renew \? \{ rentFarmExpiredAt: new Date\(\) \} : \{\}\)/);
   assert.match(seg, /if \(!renew\) \{\s*await releaseBufferedRow\(/);
+});
+
+test("REGRESSION: in dry run a parked account is returned, never left holding its slot", async () => {
+  await reset();
+  world.af.gfBufferDryRun = true;
+  const { pool } = await parked();
+  const out = await svc.topUpBuffer({ dryRun: true });
+  assert.equal(out.reclaimed, 1);
+  assert.equal(world.published.length, 0);
+  assert.equal((await AvailableAccount.findById(pool._id).lean()).status, "available");
+});
+
+test("REGRESSION: a failed catalogue read never releases parked accounts", async () => {
+  await reset();
+  world.af.gfRentFarmGames = []; // falls back to AutoFarmTask, which is empty here
+  const { pool, listing } = await parked();
+  const out = await svc.topUpBuffer({ dryRun: false });
+  assert.equal(out.reclaimed, 0);
+  assert.equal((await MarketplaceListing.findById(listing._id).lean()).rentFarmPoolId, String(pool._id));
+  assert.equal((await AvailableAccount.findById(pool._id).lean()).status, "claimed");
+});
+
+test("Gameflip refusing the code ('already exists') returns the account at once", async () => {
+  await reset();
+  await othersLive(180);
+  const { pool } = await parked();
+  world.publishFails = "Gameflip publish failed: code for digital goods already exists";
+  const out = await svc.topUpBuffer({ dryRun: false });
+  assert.equal(out.reclaimed, 1);
+  assert.equal((await AvailableAccount.findById(pool._id).lean()).status, "available");
+});
+
+test("REGRESSION: a renewal cut off mid-publish is never retried automatically — it pages once and holds", async () => {
+  await reset();
+  await othersLive(180);
+  const { pool, listing } = await parked({
+    row: { rentFarmRenewingAt: new Date(Date.now() - svc.RENEW_LEASE_MS - 60000) },
+  });
+  await svc.topUpBuffer({ dryRun: false });
+  await svc.topUpBuffer({ dryRun: false });
+  assert.equal(world.published.length, 0, "no second listing with the same credentials");
+  assert.equal(world.fresh.length, 0, "and no fresh account for its slot");
+  const pages = world.alerts.filter((a) => /cut off mid-publish/.test(a.reason));
+  assert.equal(pages.length, 1);
+  assert.match(pages[0].reason, /Check Gameflip for a LIVE listing/);
+  const row = await MarketplaceListing.findById(listing._id).lean();
+  assert.equal(row.rentFarmPoolId, String(pool._id));
+  assert.equal((await AvailableAccount.findById(pool._id).lean()).status, "claimed");
+});
+
+test("a leased row is refused by releaseBuffered (its new listing may be live)", async () => {
+  await reset();
+  const { listing } = await parked({ row: { rentFarmRenewingAt: new Date() } });
+  const row = await MarketplaceListing.findById(listing._id).lean();
+  const r = await svc.releaseBuffered(row, { reason: "test" });
+  assert.equal(r.released, false);
 });

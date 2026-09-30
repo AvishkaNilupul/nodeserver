@@ -308,6 +308,14 @@ const marketplaceListingSchema = new mongoose.Schema(
     // How many renewals of this expired row have failed. After a few the account
     // is simply returned to the pool, as before renewal existed.
     rentFarmRenewFailures: { type: Number, default: 0 },
+    // Renewal LEASE on an expired row: set while a renewal is publishing. The
+    // row keeps rentFarmPoolId throughout (so a crash mid-publish never leaves
+    // the account unowned) and nothing releases a leased row. A lease older
+    // than a renewal can take means a renewal was cut off — possibly AFTER its
+    // listing went live — so it is never retried automatically: a human is
+    // paged once (rentFarmRenewStaleAlertedAt) to check Gameflip first.
+    rentFarmRenewingAt: { type: Date, default: null },
+    rentFarmRenewStaleAlertedAt: { type: Date, default: null },
     // Bulk packs (docs/bulk-packs/CONTRACT.md §3, hook H1): the BulkOffer this
     // row belongs to, or null for every other listing. A bulk dropset/noclaim
     // offer is ALSO an ordinary row with origin "manual", so delivery, sale
