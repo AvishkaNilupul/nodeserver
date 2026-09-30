@@ -57,6 +57,12 @@ const AUTO_FARM_DEFAULTS = {
   // Bundles panel has a dry-run "Reprice" button either way.
   unclaimedRepriceExisting: false,
   unclaimedRepriceDriftPct: 20,
+  // Automatic campaign-scoped rebundle: every check tick, retitle any live
+  // gameflip/ggsel/eldorado no-claim listing that now under-advertises (its
+  // accounts farmed more items of the events it already sells), at the SAME
+  // price, with a 1-hour per-listing cooldown. Kill switch — ships OFF; the
+  // "Apply rebundle fixes" button in the Auto-list tab is the manual path.
+  unclaimedAutoRebundle: false,
   // Gameflip "lot of N accounts" listings (utils/unclaimedLots.js). Ships OFF.
   unclaimedGameflipLots: false,
   unclaimedLotSize: 5,
@@ -155,14 +161,23 @@ const AUTO_FARM_DEFAULTS = {
   // GGSel picks per game automatically; this is only a manual override.
   platiCategoryId: "34187",
   platiAttributes: [{ attributeId: 91328, attributeValueId: 183570 }],
+  // Plati (Digiseller) on/off for every AUTOMATIC lister — the auto-farm
+  // lister, the no-claim auto-lister, the guardian's auto-feed and the
+  // no-claim top-up. OFF = no new product and no new account goes to Plati;
+  // listings already there are left exactly as they are. A blank category
+  // above can never turn Plati off (it falls back to the default), so this is
+  // the switch. Set false on prod 2026-09-28 while the seller account is
+  // blocked ("продавец товара заблокирован"): nothing listed there can sell.
+  // A blocked seller also stops new listings on its own (marketplaces.js
+  // digisellerTakesNewStock), whatever this says.
+  platiEnabled: true,
   ggselCategoryId: "",
-  // FunPay category ("node") per game, for market research only — FunPay has
-  // no cross-game search, so a game is invisible there until its node is
-  // known. The research scanner already learns nodes from our own FunPay
-  // listings (each one records the node it was published to), so this is only
-  // needed for games we have not published there yet.
-  //   { "overwatch 2": "2430", "rainbow six siege": "1813" }
-  funpayNodes: {},
+  // GGSel on/off for every AUTOMATIC lister — same reach and meaning as
+  // platiEnabled above: OFF = no new offer and no new product goes to GGSel;
+  // offers already there are left as they are. Set false on prod 2026-09-28:
+  // the owner took Plati and GGSel out ("use the accounts on the others, we
+  // will renovate there later").
+  ggselEnabled: true,
   // ZeusX auto-listing. Off unless the owner turns it on; a game only
   // lists when zeusxGames has its category, e.g.
   //   { overwatch: { serviceCategoryId: "1", serviceCategoryBaseId: "269" } }
@@ -372,6 +387,49 @@ const AUTO_FARM_DEFAULTS = {
   // task's accounts + the campaign's watch minutes, so a new pre-order card
   // gets its ETA within minutes instead of the 6-hour variant sync. 0 = off.
   catalogPreorderSyncMinutes: 10,
+
+  // --- Bulk packs (utils/bulkPacks/*, docs/bulk-packs/CONTRACT.md §6) ---
+  // A separate subsystem that PROPOSES bulk offers — N+ accounts at a tier
+  // discount — and publishes one only when the owner clicks Send; its loop
+  // then looks after the live offers. Read ONLY through getBulkPacks(), which
+  // clamps every value below.
+  //
+  // SHIPS DARK. While bulkPacksEnabled is false, send / refill / resume are
+  // refused and the loop only does safety maintenance on offers that already
+  // exist (reconcile, sold / expired detection, pausing, releasing).
+  bulkPacksEnabled: false,
+  // Markets a bulk offer may go to (subset of eldorado / g2g / gameflip).
+  // Plati/Digiseller and GGSel are not bulk-pack markets at all — owner block
+  // since 2026-09-28 — and getBulkPacks drops them whatever is stored here.
+  bulkPacksMarkets: ["eldorado", "g2g", "gameflip"],
+  // Quantity tiers. On eldorado/g2g one unit is ALWAYS one account and the tier
+  // is the offer's minimum order; on gameflip one listing is one pack of
+  // exactly minQty accounts. No multiplier anywhere (CONTRACT §2).
+  bulkPackTiers: [
+    { minQty: 5, discountPct: 5 },
+    { minQty: 10, discountPct: 10 },
+  ],
+  // Free accounts per bundle always kept back for the ordinary single listings.
+  bulkPackReserveSingles: 5,
+  // Default accounts reserved behind one eldorado/g2g account offer.
+  bulkPackUnitsPerOffer: 20,
+  // Farming packs: price per account (USD) by market and term in days.
+  bulkFarmPrices: {
+    eldorado: { "120": 3, "180": 4, "365": 7 },
+    g2g: { "120": 3, "180": 4, "365": 7 },
+  },
+  // Farming terms (days) the bundler proposes.
+  bulkFarmDurations: [120, 180, 365],
+  // Bot slots and pristine pool accounts a farming offer never advertises —
+  // kept for single farm orders.
+  bulkFarmReserveSlots: 20,
+  bulkFarmReservePristine: 20,
+  // The most accounts one farming offer advertises.
+  bulkFarmMaxQty: 20,
+  // Maintenance loop interval, and how often a farming offer's advertised
+  // quantity is re-checked against live capacity (minutes).
+  bulkPacksLoopMinutes: 5,
+  bulkFarmSyncMinutes: 15,
 };
 
 // ---------------------------------------------------------------------------
@@ -388,10 +446,47 @@ const ACCOUNT_LISTING_DEFAULTS = {
   lowStockWarnAt: 2, // Telegram warning when an offer drops to this
 };
 
+// ---------------------------------------------------------------------------
+// No-claim Shop listings (docs/NOCLAIM-SHOP-LISTINGS-CONTRACT.md §1e)
+// ---------------------------------------------------------------------------
+// TOP LEVEL, deliberately NOT inside autoFarm, for the same reason as
+// accountListings above: these switches gate the owner's hand-made no-claim
+// listings and a paid buyer's delivery, so a setAutoFarm write from the
+// Auto-farm tab must never be able to flip them as a side effect — even though
+// the stock is the no-claim farm. Read through getNoclaimShopSettings().
+const NOCLAIM_SHOP_DEFAULTS = {
+  enabled: true, // routes, UI, publishing, the lifecycle pass
+  autoDeliver: true, // kill switch over every no-claim claim
+  sweep: true, // background holding sweep
+  sweepPerTick: 30, // live inventory reads per sweep tick (1..200)
+  sweepEveryMin: 10, // (2..240)
+  maxAgeHours: 8, // snapshot older than this is "stale" (1..72)
+  refreshBudget: 120, // reads for an on-demand refresh (1..400)
+  topUp: true, // refill GGSel/Plati rows back to their quantity
+  healthPerPass: 20, // live re-checks of committed vault units per pass (0..100)
+  passEveryMin: 10, // lifecycle pass interval (2..120)
+};
+
+// Epic auto-claim (utils/epicAutoClaim.js). Ships OFF by default; when the
+// operator flips `enabled`, the Epic claimer will try the direct-API checkout
+// for every missing (account, freebie) pair before falling back to the current
+// Telegram tap-link. captchaKey is stored encrypted via secretBox; if it's
+// blank the auto path still handles claims Talon doesn't gate (which is
+// most of the time for warm accounts on quiet weeks).
+const EPIC_AUTO_CLAIM_DEFAULTS = {
+  enabled: false,
+  captchaProvider: "", // "" = auto-detect from key ("2captcha" or "capsolver")
+  captchaKey: "", // encrypted at rest via secretBox
+  perAccountCooldownH: 24,
+  dailyCap: 5,
+};
+
 const DEFAULTS = {
   require2fa: false,
   autoFarm: AUTO_FARM_DEFAULTS,
   accountListings: ACCOUNT_LISTING_DEFAULTS,
+  noclaimShop: NOCLAIM_SHOP_DEFAULTS,
+  epicAutoClaim: EPIC_AUTO_CLAIM_DEFAULTS,
 };
 
 function loadSettings() {
@@ -827,6 +922,213 @@ function getAccountListingSettings() {
   };
 }
 
+// No-claim Shop switches (docs/NOCLAIM-SHOP-LISTINGS-CONTRACT.md §1e), read
+// fresh each call exactly the getAccountListingSettings way, for the same
+// reasons: one live settings edit stops every no-claim claim without a
+// restart, and the merge is load-bearing — loadSettings merges DEFAULTS only
+// SHALLOWLY, so a partial `noclaimShop` block would read every unwritten key
+// back as undefined, and an undefined `enabled` / `autoDeliver` reads as OFF on
+// a paid buyer's claim-at-sale delivery. Defaults go under the live values.
+//
+// Every number is clamped into the range the contract names, and a blank, null
+// or non-numeric value degrades to the default (the catalogMinutes rule above —
+// `num` alone would read a null as 0, because Number(null) is 0). These are
+// read budgets and timer intervals: a hand-typed 0 must not become a sweep that
+// reads nothing or a timer that fires continuously, and a hand-typed string
+// must not poison the gate.
+function noclaimShopInt(v, d, lo, hi) {
+  if (v == null || (typeof v === "string" && !v.trim())) return d;
+  const n = Number(v);
+  return Number.isFinite(n) ? Math.min(hi, Math.max(lo, Math.floor(n))) : d;
+}
+function getNoclaimShopSettings() {
+  const s = loadSettings();
+  const cur =
+    s.noclaimShop && typeof s.noclaimShop === "object" ? s.noclaimShop : {};
+  const D = NOCLAIM_SHOP_DEFAULTS;
+  return {
+    enabled: cur.enabled == null ? D.enabled : !!cur.enabled,
+    autoDeliver: cur.autoDeliver == null ? D.autoDeliver : !!cur.autoDeliver,
+    sweep: cur.sweep == null ? D.sweep : !!cur.sweep,
+    sweepPerTick: noclaimShopInt(cur.sweepPerTick, D.sweepPerTick, 1, 200),
+    sweepEveryMin: noclaimShopInt(cur.sweepEveryMin, D.sweepEveryMin, 2, 240),
+    maxAgeHours: noclaimShopInt(cur.maxAgeHours, D.maxAgeHours, 1, 72),
+    refreshBudget: noclaimShopInt(cur.refreshBudget, D.refreshBudget, 1, 400),
+    topUp: cur.topUp == null ? D.topUp : !!cur.topUp,
+    healthPerPass: noclaimShopInt(cur.healthPerPass, D.healthPerPass, 0, 100),
+    passEveryMin: noclaimShopInt(cur.passEveryMin, D.passEveryMin, 2, 120),
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Bulk packs (docs/bulk-packs/CONTRACT.md §6)
+// ---------------------------------------------------------------------------
+// Typed, clamped view of the bulkPack* / bulkFarm* keys — the getFarmSizing
+// convention: `afIn` is optional, so a caller (or a test) that already holds
+// the auto-farm object passes it in instead of re-reading settings.json.
+//
+// A key that is ABSENT (undefined / null) reads as its shipped default. A key
+// that is present but unusable is not quietly swapped for the default where
+// that could publish something the owner did not ask for:
+//   enabled        strictly `=== true` — "true" as a string stays OFF
+//   markets        subset of eldorado/g2g/gameflip, order kept, deduped;
+//                  empty -> [] (no market), never the default list
+//   tiers          integer minQty 2..100 and discountPct 0..60, else the entry
+//                  is dropped (never clamped into a discount nobody set);
+//                  first entry per minQty wins; sorted; at most 4;
+//                  nothing valid left -> the default tiers
+//   farmPrices     eldorado/g2g only, days 1..730, price > 0, else dropped
+//   farmDurations  integers 1..730, deduped, sorted; empty -> []
+//   counts         integers, clamped into their range; blank or non-numeric
+//                  -> default (Number(null) is 0, so null is not a number here)
+// Every array and object returned is a fresh copy: a caller mutating its `bp`
+// can never corrupt AUTO_FARM_DEFAULTS for the rest of the process.
+//
+// The two market lists mirror utils/bulkPacks/config.js (SUPPORTED_MARKETS and
+// SOURCE_MARKETS.farm) rather than requiring it: settings.js is loaded very
+// early and stays free of subsystem imports. tests/bulkPacksConfig.test.js
+// pins the pair.
+const BULK_PACK_MARKETS = ["eldorado", "g2g", "gameflip"];
+const BULK_FARM_MARKETS = ["eldorado", "g2g"];
+
+function bulkNum(v) {
+  if (typeof v === "number") return v;
+  if (typeof v === "string" && v.trim()) return Number(v);
+  return NaN;
+}
+function bulkInt(v, d, lo, hi) {
+  const n = bulkNum(v);
+  return Number.isFinite(n) ? Math.min(hi, Math.max(lo, Math.floor(n))) : d;
+}
+function bulkMarkets(v) {
+  if (v == null) return [...AUTO_FARM_DEFAULTS.bulkPacksMarkets];
+  if (!Array.isArray(v)) return [];
+  const out = [];
+  for (const x of v) {
+    const m = typeof x === "string" ? x.trim().toLowerCase() : "";
+    if (BULK_PACK_MARKETS.includes(m) && !out.includes(m)) out.push(m);
+  }
+  return out;
+}
+function bulkTiers(v) {
+  const out = [];
+  for (const t of Array.isArray(v) ? v : []) {
+    if (!t || typeof t !== "object") continue;
+    const minQty = bulkNum(t.minQty);
+    const discountPct = bulkNum(t.discountPct);
+    if (!Number.isInteger(minQty) || minQty < 2 || minQty > 100) continue;
+    if (!Number.isFinite(discountPct) || discountPct < 0 || discountPct > 60) continue;
+    if (out.some((x) => x.minQty === minQty)) continue;
+    out.push({ minQty, discountPct });
+  }
+  out.sort((a, b) => a.minQty - b.minQty);
+  if (out.length) return out.slice(0, 4);
+  return AUTO_FARM_DEFAULTS.bulkPackTiers.map((t) => ({
+    minQty: t.minQty,
+    discountPct: t.discountPct,
+  }));
+}
+function bulkFarmPriceTable(v) {
+  const src = v == null ? AUTO_FARM_DEFAULTS.bulkFarmPrices : v;
+  const isMap = (o) => !!o && typeof o === "object" && !Array.isArray(o);
+  const out = {};
+  for (const market of BULK_FARM_MARKETS) {
+    out[market] = {};
+    const table = isMap(src) ? src[market] : null;
+    if (!isMap(table)) continue;
+    for (const [key, raw] of Object.entries(table)) {
+      if (!/^\d+$/.test(key.trim())) continue;
+      const days = Number(key);
+      if (days < 1 || days > 730) continue;
+      const price = bulkNum(raw);
+      if (!Number.isFinite(price) || price <= 0) continue;
+      if (out[market][String(days)] === undefined) out[market][String(days)] = price;
+    }
+  }
+  return out;
+}
+function bulkDurations(v) {
+  if (v == null) return [...AUTO_FARM_DEFAULTS.bulkFarmDurations];
+  if (!Array.isArray(v)) return [];
+  const days = new Set();
+  for (const x of v) {
+    const n = bulkNum(x);
+    if (Number.isInteger(n) && n >= 1 && n <= 730) days.add(n);
+  }
+  return [...days].sort((a, b) => a - b);
+}
+function getBulkPacks(afIn) {
+  const af = afIn && typeof afIn === "object" ? afIn : getAutoFarm() || {};
+  const D = AUTO_FARM_DEFAULTS;
+  return {
+    enabled: af.bulkPacksEnabled === true,
+    markets: bulkMarkets(af.bulkPacksMarkets),
+    tiers: bulkTiers(af.bulkPackTiers),
+    reserveSingles: bulkInt(af.bulkPackReserveSingles, D.bulkPackReserveSingles, 0, 100),
+    unitsPerOffer: bulkInt(af.bulkPackUnitsPerOffer, D.bulkPackUnitsPerOffer, 1, 80),
+    farmPrices: bulkFarmPriceTable(af.bulkFarmPrices),
+    farmDurations: bulkDurations(af.bulkFarmDurations),
+    farmReserveSlots: bulkInt(af.bulkFarmReserveSlots, D.bulkFarmReserveSlots, 0, 500),
+    farmReservePristine: bulkInt(af.bulkFarmReservePristine, D.bulkFarmReservePristine, 0, 500),
+    farmMaxQty: bulkInt(af.bulkFarmMaxQty, D.bulkFarmMaxQty, 1, 100),
+    loopMinutes: bulkInt(af.bulkPacksLoopMinutes, D.bulkPacksLoopMinutes, 2, 60),
+    farmSyncMinutes: bulkInt(af.bulkFarmSyncMinutes, D.bulkFarmSyncMinutes, 5, 120),
+  };
+}
+
+// Epic auto-claim block accessors. captchaKey is encrypted at rest — the
+// getter returns the ciphertext (decrypted by callers with secretBox), the
+// setter re-encrypts any plaintext key the operator pastes in.
+function getEpicAutoClaim() {
+  const s = loadSettings();
+  const cur = s.epicAutoClaim && typeof s.epicAutoClaim === "object"
+    ? s.epicAutoClaim
+    : {};
+  return { ...EPIC_AUTO_CLAIM_DEFAULTS, ...cur };
+}
+
+async function setEpicAutoClaim(patch, opts = {}) {
+  const secretBox = require("./secretBox");
+  const s = loadSettings();
+  const cur = s.epicAutoClaim && typeof s.epicAutoClaim === "object"
+    ? s.epicAutoClaim
+    : {};
+  const next = { ...EPIC_AUTO_CLAIM_DEFAULTS, ...cur, ...(patch || {}) };
+  if (Object.prototype.hasOwnProperty.call(patch || {}, "captchaKey")) {
+    const k = String(patch.captchaKey || "").trim();
+    next.captchaKey = k ? secretBox.encrypt(k) : "";
+  }
+  next.perAccountCooldownH = Math.max(
+    0,
+    Math.floor(Number(next.perAccountCooldownH) || 0),
+  );
+  next.dailyCap = Math.max(0, Math.floor(Number(next.dailyCap) || 0));
+  s.epicAutoClaim = next;
+  await saveSettings(s);
+  try {
+    const changed = {};
+    for (const k of Object.keys(patch || {})) {
+      const before = k === "captchaKey" ? (cur[k] ? "***" : "") : cur[k];
+      const after = k === "captchaKey" ? (next[k] ? "***" : "") : next[k];
+      if (JSON.stringify(before) !== JSON.stringify(after)) {
+        changed[k] = { from: before, to: after };
+      }
+    }
+    if (Object.keys(changed).length) {
+      require("./systemLog").logEvent({
+        category: "settings",
+        action: "epic_auto_claim_changed",
+        actor: opts.actor || "system",
+        subject: Object.keys(changed).join(","),
+        meta: changed,
+      });
+    }
+  } catch {
+    /* never block a settings write on its audit */
+  }
+  return s.epicAutoClaim;
+}
+
 module.exports = {
   loadSettings,
   saveSettings,
@@ -834,6 +1136,8 @@ module.exports = {
   setRequire2fa,
   getAutoFarm,
   setAutoFarm,
+  getEpicAutoClaim,
+  setEpicAutoClaim,
   normGameName,
   isNoClaimGame,
   isReuseOnlyGame,
@@ -852,7 +1156,11 @@ module.exports = {
   getCatalogConfig,
   setCatalogConfig,
   getAccountListingSettings,
+  getNoclaimShopSettings,
+  getBulkPacks,
   UNCLAIMED_MARKETS,
   UNCLAIMED_PRICING_DEFAULTS,
   ACCOUNT_LISTING_DEFAULTS,
+  NOCLAIM_SHOP_DEFAULTS,
+  EPIC_AUTO_CLAIM_DEFAULTS,
 };

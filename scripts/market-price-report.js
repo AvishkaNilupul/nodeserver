@@ -41,13 +41,10 @@ const FLOORS = {
   gameflip: 0.75,
   ggsel: 0.3,
   g2g: 1,
-  z2u: 1,
-  epicnpc: 0.5,
-  funpay: 0.3,
 };
 
 // Only these three publish a searchable rival page. ZeusX has no keyword
-// search at all; Z2U, EpicNPC and FunPay sit behind bot protection a
+// search at all; some markets sit behind bot protection a
 // server-side fetch cannot pass. For the rest, our own sales are the only
 // evidence there will ever be — and mostly there are none.
 const SCOUTABLE = new Set(["gameflip", "ggsel", "digiseller"]);

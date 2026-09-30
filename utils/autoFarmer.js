@@ -40,10 +40,14 @@ const {
 // model lazily, so there is no load-order coupling and no require cycle back
 // into this file.
 const farm2Ownership = require("./farm2/ownership");
+const DropSet = require("../models/DropSet");
+const catalogRoutes = require("../routes/catalogRoutes");
+const { stampPreorderSet } = require("./catalogPreorder");
 
 const TICK_MS = 10 * 60 * 1000; // scan every 10 minutes
 const FIRST_TICK_DELAY_MS = 90 * 1000; // let the campaign watcher seed first
 const DECISION_READ_CONCURRENCY = 4;
+const CATALOG_VARIANT_SYNC_MS = 6 * 60 * 60 * 1000;
 
 // Demand tiers (demandScore is 0-100 from utils/marketResearch.js).
 const DEMAND_FULL = 40; // proven seller -> full allocation
@@ -192,6 +196,7 @@ const state = {
   // Epoch ms of the last container repack. Same reasoning: a restart just means
   // the next tick may re-check a plan that turns out not to be worth running.
   lastRepackAt: 0,
+  lastCatalogVariantSyncAt: 0,
 };
 
 // Live progress log for the UI: every scan appends human-readable steps here
@@ -253,6 +258,42 @@ function readyPoolQuery() {
     // can sign in and take whatever the next campaign farms). The no-claim claim
     // path has always excluded these; this keeps the auto-farmer, farm2 (which
     // composes this query) and the recycler on one definition of "ready".
+    manualSold: { $ne: true },
+    // An account holding farmed-but-UNCLAIMED drops is stock, not supply: every
+    // auto-farm bot claims all claimable drops within a minute of starting, which
+    // destroys no-claim-game stock (Rainbow Six / Overwatch items are only
+    // sellable unclaimed). The pool checker normally takes such accounts out of
+    // the pool (utils/poolStock.holdForStock), but anything that puts one back as
+    // "available" opens a window before the next check — on 2026-09-23 backfill
+    // claimed 16 of them into CONTROL Resonant / REMATCH bots inside that window.
+    // Absent/null counts as 0, so never-checked rows are unaffected.
+    unclaimedDropCount: { $not: { $gt: 0 } },
+  };
+}
+
+// Only a claim the auto-farm itself made is the auto-farm's to hand back. The
+// three recycle paths below (task retirement, the retro-reaper, probe expiry)
+// used to flip ANY claimed pool row among a task's accounts back to
+// "available" — including rows other subsystems hold on purpose: unclaimed
+// stock held by utils/poolStock ("unclaimed stock — …"), no-claim bot accounts
+// ("noclaim-farm:…"), spent/sold notes, renter leases, audit quarantines and
+// personal (manualSold) accounts. The retro-reaper re-runs over EVERY completed
+// task on EVERY tick, so held stock was released and re-held about every 23
+// minutes (a "📦 Account pool check" Telegram each time, ~315 in 10 days), and
+// backfill claimed some of it into claiming bots in between.
+const AUTO_FARM_CLAIM_NOTE = /^auto-farm( backfill)?:/i;
+
+function isAutoFarmClaimNote(note) {
+  return AUTO_FARM_CLAIM_NOTE.test(String(note || ""));
+}
+
+function recyclableClaimQuery(logins) {
+  return {
+    usernameLower: {
+      $in: [...new Set((logins || []).map((u) => String(u).toLowerCase()))],
+    },
+    status: "claimed",
+    claimedNote: AUTO_FARM_CLAIM_NOTE,
     manualSold: { $ne: true },
   };
 }
@@ -978,36 +1019,53 @@ async function unrecyclableLogins(logins) {
   const BotAccount = require("../models/BotAccount");
   const DropLog = require("../models/DropLog");
   const MarketplaceListing = require("../models/MarketplaceListing");
-  const [soldRows, dropSold, dropConnected, listedRows] = await Promise.all([
-    BotAccount.find(
-      { login: { $in: logins }, soldAt: { $ne: null } },
-      { login: 1 },
-    )
-      .lean()
-      .catch(() => []),
-    DropLog.distinct("login", {
-      login: { $in: logins },
-      soldAt: { $ne: null },
-    }).catch(() => []),
-    DropLog.distinct("login", {
-      login: { $in: logins },
-      connected: true,
-    }).catch(() => []),
-    // Accounts attached to a live listing are promised stock a buyer can
-    // purchase at any moment. Back in the pool they would be re-claimed and
-    // redeployed while on sale — a bot logged in and rewriting the config of
-    // an account mid-handover to a buyer.
-    MarketplaceListing.find(
-      { status: "active", accountLogin: { $ne: "" } },
-      { accountLogin: 1 },
-    )
-      .lean()
-      .catch(() => []),
-  ]);
+  const RenterAccount = require("../models/RenterAccount");
+  const [soldRows, dropSold, dropConnected, listedRows, leasedRows] =
+    await Promise.all([
+      BotAccount.find(
+        { login: { $in: logins }, soldAt: { $ne: null } },
+        { login: 1 },
+      )
+        .lean()
+        .catch(() => []),
+      DropLog.distinct("login", {
+        login: { $in: logins },
+        soldAt: { $ne: null },
+      }).catch(() => []),
+      DropLog.distinct("login", {
+        login: { $in: logins },
+        connected: true,
+      }).catch(() => []),
+      // Accounts attached to a live listing are promised stock a buyer can
+      // purchase at any moment. Back in the pool they would be re-claimed and
+      // redeployed while on sale — a bot logged in and rewriting the config of
+      // an account mid-handover to a buyer.
+      MarketplaceListing.find(
+        { status: "active", accountLogin: { $ne: "" } },
+        { accountLogin: 1 },
+      )
+        .lean()
+        .catch(() => []),
+      // An account RENTED OUT to a renter is invisible to every check above
+      // by construction: the renting recipe clears its BotAccount placement
+      // and disables it (guard 2) and pulls it from every AutoFarmTask
+      // (guard 4), so nothing here would spare it — and recycling one hands a
+      // LEASED account back to the sellable pool while the renter is still
+      // paying for it. Found 2026-09-20: four of renter bulkfarm2's accounts
+      // had been recycled mid-lease, two then listed for sale. Erring towards
+      // "leave it claimed" is the rule this function already follows.
+      RenterAccount.find(
+        { login: { $in: logins }, enabled: true, farmEndedAt: null },
+        { login: 1 },
+      )
+        .lean()
+        .catch(() => []),
+    ]);
   const out = new Set();
   for (const r of soldRows) out.add(String(r.login || "").toLowerCase());
   for (const l of dropSold) out.add(String(l || "").toLowerCase());
   for (const l of dropConnected) out.add(String(l || "").toLowerCase());
+  for (const r of leasedRows) out.add(String(r.login || "").toLowerCase());
   const wanted = new Set(lower);
   for (const r of listedRows) {
     for (const l of String(r.accountLogin || "").split(/[,\s]+/)) {
@@ -1932,6 +1990,26 @@ async function processCampaign(c, ctx) {
     const mine = (reusable.assignedAccounts || []).filter(
       (u) => !spokenFor.has(String(u).toLowerCase()),
     );
+    // Give the reused accounts this game back (completeEndedTasks took it off
+    // and disabled the ones left with none — see utils/reuseRearm), then
+    // restart the bots whose config changed: `docker start` above is a no-op on
+    // a running container and a bot reads its config only at startup.
+    if (started.length && mine.length) {
+      const rearm = await require("./reuseRearm").rearmReusedAccounts({
+        bots,
+        logins: mine,
+        game,
+      });
+      if (rearm.error) progress("Reuse re-arm skipped: " + rearm.error, "warn");
+      for (const cb of rearm.changedBots || []) {
+        await hosts
+          .dockerContainer(hosts.resolveHost(cb.host), "restart", cb.container)
+          .catch((e) => progress("Restart " + cb.container + " failed: " + e.message, "warn"));
+      }
+      if (rearm.rearmed) {
+        progress("Re-armed " + rearm.rearmed + " reused account(s) for " + game + ".");
+      }
+    }
     if (recordedInputs) {
       recordedInputs = withReuseInputs(
         recordedInputs,
@@ -2495,6 +2573,28 @@ async function executeTask(task, ctx, { append = false } = {}) {
       },
     },
   );
+  if (ok && !append) {
+    try {
+      const autoLister = require("./autoLister");
+      const research = await MarketResearch.findOne({ game: task.game }).lean();
+      await stampPreorderSet(
+        {
+          ...task.toObject(),
+          status: "active",
+          assignedAccounts: finalAccounts,
+        },
+        {
+          DropSet,
+          campaignItems: autoLister.campaignItems,
+          derivePrice: autoLister.derivePrice,
+          research,
+        },
+      );
+      catalogRoutes.invalidateCatalogCache();
+    } catch (err) {
+      console.error("catalog preorder stamp failed:", err.message);
+    }
+  }
   if (append) {
     if (deployed.length) {
       await recordAutoFarmEvent({
@@ -2661,18 +2761,15 @@ async function reapRetiredBots(af, host, progress) {
         (u) => !sold.has(u.toLowerCase()) && !stillFarming.has(u.toLowerCase()),
       );
       if (back.length) {
+        // Auto-farm's own claims only — see recyclableClaimQuery. This pass
+        // re-reads every completed task on every tick, so anything it wrongly
+        // matches is released again ~every 23 minutes.
         const poolRows = await AvailableAccount.find(
-          {
-            usernameLower: { $in: back.map((u) => u.toLowerCase()) },
-            status: "claimed",
-          },
+          recyclableClaimQuery(back),
           { _id: 1 },
         ).lean();
         const r = await AvailableAccount.updateMany(
-          {
-            usernameLower: { $in: back.map((u) => u.toLowerCase()) },
-            status: "claimed",
-          },
+          recyclableClaimQuery(back),
           {
             $set: {
               status: "available",
@@ -2915,7 +3012,7 @@ async function completeEndedTasks() {
     // Containers other ACTIVE tasks still use must survive this task ending.
     const others = await AutoFarmTask.find(
       { status: "active", _id: { $ne: t._id } },
-      { bots: 1 },
+      { bots: 1, game: 1, assignedAccounts: 1 },
     ).lean();
     const sharedKeys = new Set();
     for (const o of others) {
@@ -2924,6 +3021,21 @@ async function completeEndedTasks() {
     const mine = new Set(
       (t.assignedAccounts || []).map((u) => String(u).toLowerCase()),
     );
+    // Accounts another ACTIVE task for the SAME game still farms. A recurring
+    // campaign's next wave is reused onto the same accounts, and when that
+    // reuse lands BEFORE this wave ends, stripping the game here (and disabling
+    // the ones left with none) switched the new wave off the moment the old one
+    // closed — RavenQuest "September 05" (18/18), SMITE 2 "Sept Wk 4" (14/14)
+    // and Active Matter "Week II" (18/42) all sat disabled from their first
+    // hour on 2026-09-25/26. Their game stays and they are not recycled.
+    const endedGame = String(t.game || "").trim().toLowerCase();
+    const stillNeeded = new Set();
+    for (const o of others) {
+      if (String(o.game || "").trim().toLowerCase() !== endedGame) continue;
+      for (const u of o.assignedAccounts || []) {
+        stillNeeded.add(String(u).toLowerCase());
+      }
+    }
     const stopped = [];
     const removed = [];
     const trimmed = [];
@@ -2952,6 +3064,13 @@ async function completeEndedTasks() {
           let changed = 0;
           for (const u of users) {
             if (!u || !mine.has(String(u.Login || "").toLowerCase())) continue;
+            if (stillNeeded.has(String(u.Login || "").toLowerCase())) {
+              // The next wave of this game farms it — leave it armed.
+              if (u.Enabled !== false) {
+                stillEnabled.add(String(u.Login || "").toLowerCase());
+              }
+              continue;
+            }
             const own = Array.isArray(u.FavouriteGames) ? u.FavouriteGames : [];
             const next = own.filter(
               (f) =>
@@ -3020,8 +3139,21 @@ async function completeEndedTasks() {
           (u) =>
             !sold.has(String(u).toLowerCase()) &&
             // Still running for a co-tenant task — see `stillEnabled` above.
-            !stillEnabled.has(String(u).toLowerCase()),
+            !stillEnabled.has(String(u).toLowerCase()) &&
+            // Assigned to the next wave of this game — see `stillNeeded`.
+            !stillNeeded.has(String(u).toLowerCase()),
         );
+        if (stillNeeded.size) {
+          const kept = t.assignedAccounts.filter((u) =>
+            stillNeeded.has(String(u).toLowerCase()),
+          ).length;
+          if (kept) {
+            progress(
+              "Kept " + kept + " account(s) armed for " + t.game +
+                ": the next wave of the same game farms them.",
+            );
+          }
+        }
         if (stillEnabled.size) {
           progress(
             "Kept " +
@@ -3030,18 +3162,13 @@ async function completeEndedTasks() {
           );
         }
         if (back.length) {
+          // Auto-farm's own claims only — see recyclableClaimQuery.
           const poolRows = await AvailableAccount.find(
-            {
-              usernameLower: { $in: back.map((u) => String(u).toLowerCase()) },
-              status: "claimed",
-            },
+            recyclableClaimQuery(back),
             { _id: 1 },
           ).lean();
           const r = await AvailableAccount.updateMany(
-            {
-              usernameLower: { $in: back.map((u) => String(u).toLowerCase()) },
-              status: "claimed",
-            },
+            recyclableClaimQuery(back),
             {
               $set: {
                 status: "available",
@@ -3202,13 +3329,13 @@ async function expireStaleProbes(af, progress) {
           (u) => !sold.has(String(u).toLowerCase()),
         );
         if (back.length) {
-          const lower = back.map((u) => String(u).toLowerCase());
+          // Auto-farm's own claims only — see recyclableClaimQuery.
           const poolRows = await AvailableAccount.find(
-            { usernameLower: { $in: lower }, status: "claimed" },
+            recyclableClaimQuery(back),
             { _id: 1 },
           ).lean();
           const r = await AvailableAccount.updateMany(
-            { usernameLower: { $in: lower }, status: "claimed" },
+            recyclableClaimQuery(back),
             {
               $set: {
                 status: "available",
@@ -3284,9 +3411,60 @@ async function runOnce() {
   progressBegin();
   try {
     const af = cfg();
+    const catalogChanges = await catalogRoutes
+      .updateAutofarmCatalogStates()
+      .catch((e) => {
+        progress("Catalog state refresh failed: " + e.message, "warn");
+        return 0;
+      });
+    if (catalogChanges) {
+      progress("Updated " + catalogChanges + " event catalog listing(s).");
+    }
+    if (
+      !state.lastCatalogVariantSyncAt ||
+      Date.now() - state.lastCatalogVariantSyncAt >= CATALOG_VARIANT_SYNC_MS
+    ) {
+      const started = catalogRoutes.startVariantSync({
+        apply: true,
+        source: "auto-farm",
+        syncEventSets: true,
+        onFinish(job) {
+          if (job.error) {
+            progress(
+              "Scheduled catalog inventory sync failed: " + job.error,
+              "warn",
+            );
+          } else {
+            state.lastCatalogVariantSyncAt = Date.now();
+            progress(
+              "Scheduled catalog inventory sync completed: " +
+                (job.result?.count || 0) +
+                " profile(s) across " +
+                (job.result?.games || 0) +
+                " game(s); " +
+                (job.result?.eventSets?.stocked || 0) +
+                " stocked event set(s).",
+            );
+          }
+          recordAutoFarmEvent({
+            type: "catalog_sync",
+            count: Number(job.result?.count) || 0,
+            actor: "auto-farm",
+            reason: job.error
+              ? `failed: ${job.error}`
+              : `${Number(job.result?.games) || 0} games; ${Number(job.result?.eventSets?.stocked) || 0} stocked event sets`,
+          });
+        },
+      });
+      if (started) {
+        progress("Started scheduled catalog inventory sync (6-hour cycle).");
+      } else {
+        progress("Scheduled catalog sync skipped: another sync is running.");
+      }
+    }
     if (!af.enabled) {
       progress("Auto farmer is disabled in settings — nothing to do.", "warn");
-      state.lastSummary = { enabled: false };
+      state.lastSummary = { enabled: false, catalogChanges };
       return state.lastSummary;
     }
     progress(
@@ -4217,6 +4395,7 @@ async function runOnce() {
       poolSpendable: spendable,
       candidates: candidates.length,
       completed,
+      catalogChanges,
       results,
     };
     return state.lastSummary;
@@ -4579,6 +4758,7 @@ async function backfillActiveTasks(af, host, progress) {
           set: task.listing.setId,
           marketplace: "gameflip",
           status: "active",
+          bulkOfferId: null, // never grow a bulk pack's queue (docs/bulk-packs/CONTRACT.md H8)
         },
         { $inc: { qtyRemaining: addNow } },
       );
@@ -4689,6 +4869,14 @@ function start() {
 }
 
 module.exports = {
+  // exported for the read-only allocation forecast (utils/allocationForecast.js).
+  // The forecast reuses the SAME clamp-chain helpers the tick uses so its numbers
+  // match the engine by construction; all are pure/DB-only (no host SSH).
+  countReadyPool,
+  marketStockFloor,
+  researchForGame,
+  archiveHoldersByGame,
+  ownedAccounts,
   start,
   runOnce,
   rescanAll,
@@ -4711,14 +4899,6 @@ module.exports = {
   mapWithConcurrency,
   createSeatCounter,
   buildDecisionHostState,
-  // exported for the read-only allocation forecast (utils/allocationForecast.js).
-  // The forecast reuses the SAME clamp-chain helpers the tick uses so its numbers
-  // match the engine by construction; all are pure/DB-only (no host SSH).
-  countReadyPool,
-  marketStockFloor,
-  researchForGame,
-  archiveHoldersByGame,
-  ownedAccounts,
   // Additive export for the lane engine's decide step (utils/farm2/steps/decide.js),
   // so a LIVE lane makes its decision on the same freshly-rescanned research this
   // engine would have used. Shadow lanes deliberately call researchForGame instead,
@@ -4744,6 +4924,8 @@ module.exports = {
   activeAutoBotCount,
   autoSeatCapacity,
   readyPoolQuery,
+  isAutoFarmClaimNote,
+  recyclableClaimQuery,
   WILDCARD_CREDIT_CAP,
   COUNT_MANUAL_AS_COVERAGE,
   // Additive export so the per-campaign decision can be driven directly by a

@@ -15,6 +15,11 @@ module.exports = {
   // Admin key used to gate redeem-code generation (/generate)
   ADMIN_KEY: required("ADMIN_KEY"),
 
+  // Bearer token for the external account API (routes/accountApiRoutes.js).
+  // Optional: when unset the whole API is disabled (returns 503) rather than
+  // falling open — it hands out account credentials, so it must fail closed.
+  ACCOUNT_API_TOKEN: process.env.ACCOUNT_API_TOKEN || "",
+
   // MongoDB connection string
   MONGO_URI: required("MONGO_URI"),
 

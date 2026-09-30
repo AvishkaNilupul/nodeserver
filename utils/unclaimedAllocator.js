@@ -81,13 +81,25 @@ async function plan({ days = 30, withFleet = true } = {}) {
   if (withFleet) {
     try {
       fleetState = await fleet.readFleet();
+      fleetState.unusable = await unusableBots(fleetState.bots);
     } catch (e) {
+      fleetState = null;
       fleetError = e.message || String(e);
     }
   } else {
     fleetError = "fleet read skipped by the caller";
   }
   const fleetKnown = !!fleetState;
+
+  // Which games have a drop campaign running right now. Farming more of a dark
+  // game only strands accounts (CoD, 2026-09-27); an unreadable list withholds
+  // growth everywhere rather than guessing.
+  let campaignGames = null;
+  try {
+    campaignGames = await activeCampaignBuckets();
+  } catch (e) {
+    campaignGames = null;
+  }
 
   // Accounts per game currently in a no-claim bot config, and which bots have
   // room. A bot's config game is the label the container actually farms, so it
@@ -99,6 +111,8 @@ async function plan({ days = 30, withFleet = true } = {}) {
       const key = farmDemand.bucketFor(b.game);
       if (!key) continue;
       assigned.set(key, (assigned.get(key) || 0) + b.accounts);
+      // A bot that cannot farm what it is given never gets a top-up.
+      if (fleetState.unusable && fleetState.unusable.has(String(b.id))) continue;
       const room = Math.max(0, fleet.MAX_PER_BOT - b.accounts);
       if (room > 0) {
         (roomBots.get(key) || roomBots.set(key, []).get(key)).push({
@@ -119,7 +133,8 @@ async function plan({ days = 30, withFleet = true } = {}) {
 
   const games = rows.map((r) => {
     const have = fleetKnown ? assigned.get(r.key) || 0 : r.onHand + r.stock.inFlight;
-    const fleetNeed = fleetKnown ? Math.max(0, r.target - have) : 0;
+    const hasCampaign = !!(campaignGames && campaignGames.has(r.key));
+    const fleetNeed = fleetKnown && hasCampaign ? Math.max(0, r.target - have) : 0;
 
     // The shelf. `unclaimedGameCaps` limits how many of a game's farmed accounts
     // may sit on auto-listings; over the cap they are held for hand sales. When
@@ -130,6 +145,12 @@ async function plan({ days = 30, withFleet = true } = {}) {
     const shelfNeed = Math.max(0, r.target - effectiveCap);
 
     const notes = [];
+    if (fleetKnown && !hasCampaign)
+      notes.push(
+        campaignGames
+          ? "no active drop campaign — growth withheld"
+          : "campaign list unreadable — growth withheld",
+      );
     if (!fleetKnown)
       notes.push(
         (withFleet ? "Pi unreachable" : "fleet not read") +
@@ -207,6 +228,46 @@ async function plan({ days = 30, withFleet = true } = {}) {
     },
   };
   state.lastPlan = out;
+  return out;
+}
+
+// Bots a top-up must never feed, as Map<bot id, why> (owner, 2026-09-28): one
+// with no container, one the operator stopped (.operatoroff — auto power leaves
+// it off), and a personal "my own" bot. On 2026-09-27 seven fresh pool accounts
+// went into CoD bot 10: no container, stopped, and no CoD campaign. Throws when
+// the markers cannot be read, so the caller withholds growth.
+async function unusableBots(bots) {
+  const out = new Map();
+  for (const b of bots || []) {
+    if (b.containerState === "none") out.set(String(b.id), "no container");
+  }
+  const hosts = require("./botHosts");
+  const raw = await fleet.sh(
+    `for d in ${hosts.shq(fleet.BOTS_DIR)}/*/; do id=$(basename "$d"); ` +
+      `[ -f "$d.operatoroff" ] && echo "$id off"; [ -f "$d.personal" ] && echo "$id personal"; done; true`,
+    { timeout: 20000 },
+  );
+  for (const line of String(raw || "").split("\n")) {
+    const [id, what] = line.trim().split(/\s+/);
+    if (!id || !what) continue;
+    if (!out.has(id)) out.set(id, what === "off" ? "stopped by the operator" : "personal bot");
+  }
+  return out;
+}
+
+// Normalised games (farmDemand buckets) with a drop campaign running now — the
+// catalog query the auto-power watcher uses.
+async function activeCampaignBuckets(now = new Date()) {
+  const TwitchCampaign = require("../models/TwitchCampaign");
+  const rows = await TwitchCampaign.find(
+    { active: true, status: "ACTIVE", $or: [{ endAt: null }, { endAt: { $gt: now } }] },
+    { game: 1 },
+  ).lean();
+  const out = new Set();
+  for (const c of rows) {
+    const k = farmDemand.bucketFor(c && c.game);
+    if (k) out.add(k);
+  }
   return out;
 }
 

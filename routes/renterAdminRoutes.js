@@ -1839,6 +1839,12 @@ router.post(
         listingFilter.push({
           accountId: new RegExp("(^|,\\s*)" + String(acctRow._id) + "(\\s*,|$)"),
         });
+        // Bulk packs keep their accounts in units[] (docs/bulk-packs/CONTRACT.md);
+        // detachAccountFromListing hands those rows to the bulk system.
+        listingFilter.push({
+          bulkOfferId: { $ne: null },
+          "units.accountId": String(acctRow._id),
+        });
       }
       const liveListings = await MarketplaceListing.find({
         status: "active",

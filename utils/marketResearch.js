@@ -18,7 +18,6 @@ const {
   gameflipSoldScout,
   platiScout,
   ggselScout,
-  funpayScout,
 } = require("./priceScout");
 const mp = require("./marketplaces");
 const settings = require("./settings");
@@ -161,57 +160,6 @@ function relevant(rows, game) {
   });
 }
 
-// FunPay node ids per game, learned from our own listings and overridable by
-// hand. FunPay has no cross-game search — each game's Twitch-drop category is a
-// separate page — so research can only see a game there once it knows the node.
-// Every FunPay listing we publish records its node (externalNode, needed for
-// delisting), which makes the map build itself for every game we already sell,
-// with autoFarm.funpayNodes covering anything not published yet.
-async function funpayNodeMap() {
-  const map = {};
-  try {
-    const af = settings.getAutoFarm();
-    const manual = (af && af.funpayNodes) || {};
-    for (const [g, node] of Object.entries(manual)) {
-      const n = String(node || "").trim();
-      if (g && n) map[String(g).toLowerCase()] = n;
-    }
-  } catch {
-    /* settings unreadable — fall back to whatever our listings teach us */
-  }
-  try {
-    const rows = await MarketplaceListing.find({
-      marketplace: "funpay",
-      externalNode: { $nin: ["", null] },
-    })
-      .select("set externalNode")
-      .lean();
-    if (rows.length) {
-      const sets = await DropSet.find({
-        _id: { $in: rows.map((r) => r.set) },
-      })
-        .select("coverGame items.game")
-        .lean();
-      const gameOf = {};
-      for (const s of sets) {
-        const g =
-          s.coverGame ||
-          (Array.isArray(s.items) && s.items[0] && s.items[0].game) ||
-          "";
-        if (g) gameOf[String(s._id)] = g.toLowerCase();
-      }
-      for (const r of rows) {
-        const g = gameOf[String(r.set)];
-        // A hand-set override wins over anything inferred.
-        if (g && !map[g]) map[g] = String(r.externalNode);
-      }
-    }
-  } catch (e) {
-    console.error("funpay node map:", e.message);
-  }
-  return map;
-}
-
 async function scanGame(game, campaignsByGame, ctx = {}) {
   const term = game + " twitch drops";
   const settle = (p) =>
@@ -219,17 +167,18 @@ async function scanGame(game, campaignsByGame, ctx = {}) {
       (v) => v,
       () => [],
     );
-  const fpNode = (ctx.funpayNodes || {})[game.toLowerCase()] || "";
-  const [gfSold, gfActive, gg, pl, fp] = await Promise.all([
+  const [gfSold, gfActive, gg, pl] = await Promise.all([
     settle(gameflipSoldScout(term, MAX_SCAN_ROWS)),
     settle(gameflipScout(term)),
     settle(ggselScout(term)),
     settle(platiScout(term)),
-    fpNode ? settle(funpayScout(fpNode, ctx.usdPerEur || 1)) : Promise.resolve([]),
   ]);
   const cutoff = Date.now() - RECENT_DAYS * 86400000;
-  const gfSoldRel = relevant(gfSold, game);
-  const gfActiveRel = relevant(gfActive, game);
+  // Our own bulk packs never feed a Gameflip price anchor (docs/bulk-packs/CONTRACT.md H12).
+  const packIds = ctx.bulkPackIds || new Set();
+  const notPack = (r) => !packIds.has(String(r.url || "").split("/").pop());
+  const gfSoldRel = relevant(gfSold, game).filter(notPack);
+  const gfActiveRel = relevant(gfActive, game).filter(notPack);
   const ggRel = relevant(gg, game);
   const plRel = relevant(pl, game);
 
@@ -287,20 +236,6 @@ async function scanGame(game, campaignsByGame, ctx = {}) {
       ...competitionOf({ plati: plRel }),
     },
   };
-  // FunPay only appears for games whose node we know. Its rows need no
-  // relevance filter — the whole node IS this game's Twitch-drop market — and
-  // it publishes no sale counters, so it contributes competition and price
-  // only, never demand.
-  if (fpNode) {
-    markets.funpay = {
-      node: fpNode,
-      totalSold: 0,
-      active: fp.length,
-      lowest: lowestOf(fp),
-      median: medianPrice(fp),
-      ...competitionOf({ funpay: fp }),
-    };
-  }
 
   // Money the markets moved recently, as far as anything dates its sales.
   // Gameflip is the only one that does, so this is a floor on real turnover,
@@ -310,7 +245,10 @@ async function scanGame(game, campaignsByGame, ctx = {}) {
   const lifetime = markets.ggsel.totalSold + markets.plati.totalSold;
   // Typical price across every live listing anywhere, so a game that only
   // sells on the Russian markets still gets a price signal.
-  const typicalPrice = medianPrice([...gfActiveRel, ...ggRel, ...plRel, ...fp]);
+  // (FunPay's rows used to join this median; the scout went with the FunPay
+  // integration on 2026-09-20 and its `fp` left behind threw a ReferenceError
+  // on every game, so no research was saved from then until this fix.)
+  const typicalPrice = medianPrice([...gfActiveRel, ...ggRel, ...plRel]);
 
   // GGSel and Plati never date a sale, but their lifetime counters move, and
   // the previous scan recorded where they stood. The difference is real units
@@ -344,7 +282,6 @@ async function scanGame(game, campaignsByGame, ctx = {}) {
     gameflip: gfActiveRel,
     ggsel: ggRel,
     plati: plRel,
-    funpay: fp,
   });
   const competitionScore = round1(100 * sat(comp.sellers, HALF_SELLERS));
   // Never negative: a crowded market is worth nothing, not less than nothing,
@@ -574,7 +511,7 @@ async function ownStats() {
 
   // The same sales split by marketplace. This is the only demand signal that
   // exists at all for the markets nothing can scout: ZeusX publishes no
-  // keyword search, and Z2U and EpicNPC sit behind bot protection that a
+  // keyword search, and some markets sit behind bot protection that a
   // server-side fetch cannot pass. We cannot see their competitors — but we
   // can see what WE sell there, which is the number that decides where stock
   // should go next.
@@ -658,16 +595,9 @@ async function priorSnapshots() {
 }
 
 // Everything a scan needs that is the same for every game, resolved once per
-// pass rather than per game: which FunPay node each game lives in, the FX rate
-// for FunPay's prices (its /en/ pages quote EUR), and the history each game is
-// compared against.
+// pass rather than per game: our own seller id and the history each game is
 async function scanContext() {
-  const ctx = { funpayNodes: {}, usdPerEur: 1, prior: {}, gfOwnerId: "" };
-  try {
-    ctx.funpayNodes = await funpayNodeMap();
-  } catch (e) {
-    console.error("scan context funpay nodes:", e.message);
-  }
+  const ctx = { prior: {}, gfOwnerId: "" };
   // Our own Gameflip seller id, so scanGame can leave our rows out of the
   // "lowest rival price". Resolved ONCE per pass (cached an hour inside mp);
   // "" when Gameflip is not configured or unreachable, which scanGame treats
@@ -682,12 +612,17 @@ async function scanContext() {
   } catch (e) {
     console.error("scan context history:", e.message);
   }
+  // Our Gameflip bulk-pack listing ids: priced per PACK, so scanGame drops them (docs/bulk-packs/CONTRACT.md H12).
   try {
-    // usdRate("EUR") gives EUR per USD; FunPay prices are EUR, so invert.
-    const eurPerUsd = await mp.usdRate("EUR");
-    if (eurPerUsd > 0) ctx.usdPerEur = 1 / eurPerUsd;
+    const packs = await MarketplaceListing.find(
+      { marketplace: "gameflip", bulkOfferId: { $ne: null } },
+      { externalId: 1 },
+    )
+      .limit(5000)
+      .lean();
+    ctx.bulkPackIds = new Set(packs.map((r) => String(r.externalId || "")).filter(Boolean));
   } catch (e) {
-    console.error("scan context fx:", e.message);
+    console.error("scan context bulk packs:", e.message);
   }
   return ctx;
 }
@@ -954,6 +889,5 @@ module.exports = {
   unclaimedStats,
   priorSnapshots,
   dueGames,
-  funpayNodeMap,
   recommend,
 };

@@ -12,8 +12,11 @@ const { requireSuperadmin } = require("../middleware/auth");
 const { logEvent, actorFromReq } = require("../utils/systemLog");
 const settings = require("../utils/settings");
 const engine = require("../utils/unclaimedAutoList");
+const audit = require("../utils/unclaimedListingAudit");
 const MarketplaceListing = require("../models/MarketplaceListing");
 const UnclaimedAccount = require("../models/UnclaimedAccount");
+const AvailableAccount = require("../models/AvailableAccount");
+const { loginsOnActiveListings } = require("../utils/listedLogins");
 const DropSet = require("../models/DropSet");
 const MarketResearch = require("../models/MarketResearch");
 
@@ -273,6 +276,220 @@ router.get("/api/unclaimed-auto/listings", requireSuperadmin, async (req, res) =
   }
 });
 
+// One line per no-claim game (owner, 2026-09-28): what is farming, what holds
+// stock, where it is on sale, what sold (and for how much), what sits idle, and
+// when the running wave ends. DB-only — the stock numbers come from the
+// holdings snapshot (utils/noclaimHoldings, the one the shop listings use), so
+// nothing here reads Twitch or a bot host.
+// A cold build reads the whole holdings snapshot (~20 s on prod), so the
+// answer is cached: the page gets the last one at once (with its age) and a
+// fresh one is built behind it once it is GS_TTL_MS old. ?refresh=1 waits for
+// a fresh build.
+const GS_TTL_MS = 10 * 60 * 1000;
+const gsCache = { value: null, at: 0, pending: null };
+function buildGamesSummary() {
+  if (!gsCache.pending) {
+    gsCache.pending = gamesSummary()
+      .then((v) => {
+        gsCache.value = v;
+        gsCache.at = Date.now();
+        return v;
+      })
+      .finally(() => {
+        gsCache.pending = null;
+      });
+  }
+  return gsCache.pending;
+}
+router.get("/api/unclaimed-auto/games-summary", requireSuperadmin, async (req, res) => {
+  try {
+    const stale = !gsCache.value || Date.now() - gsCache.at > GS_TTL_MS;
+    if (!gsCache.value || req.query.refresh === "1") await buildGamesSummary();
+    else if (stale) buildGamesSummary().catch((e) => console.error("games summary refresh failed:", e.message));
+    res.json({ success: true, cachedAt: new Date(gsCache.at), ...gsCache.value });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+async function gamesSummary(now = new Date()) {
+  const NoclaimHolding = require("../models/NoclaimHolding");
+  const TwitchCampaign = require("../models/TwitchCampaign");
+  const holdingsMod = require("../utils/noclaimHoldings");
+  const games = settings.getAutoFarm().noClaimGames || [];
+  const keyOf = (label) => {
+    const n = settings.normGameName(label);
+    return games.map((g) => settings.normGameName(g)).find((g) => g && n.includes(g)) || "";
+  };
+  const DAY = 864e5;
+  const since30 = new Date(now.getTime() - 30 * DAY);
+  const since7 = new Date(now.getTime() - 7 * DAY);
+  const [holdings, picker, ledgers, shopRows, campaigns] = await Promise.all([
+    NoclaimHolding.find({ inConfig: true }, { game: 1 }).lean(),
+    holdingsMod.pickerGames().catch(() => []),
+    UnclaimedAccount.find(
+      { $or: [{ status: { $in: ["listed", "manual"] } }, { status: "sold", soldAt: { $gte: since30 } }] },
+      { game: 1, status: 1, market: 1, soldAt: 1, soldPriceUsd: 1 },
+    ).lean(),
+    MarketplaceListing.find(
+      { status: "active", $or: [{ noclaimStock: true }, { origin: "unclaimed" }] },
+      { marketplace: 1, set: 1, accountLogin: 1, noclaimStock: 1, lotSize: 1, qtyTarget: 1, autoPaused: 1, "units.deliveredAt": 1 },
+    ).lean(),
+    TwitchCampaign.find(
+      { active: true, status: "ACTIVE", endAt: { $gt: now } },
+      { game: 1, endAt: 1, name: 1 },
+    ).lean(),
+  ]);
+  const setIds = [...new Set(shopRows.map((r) => String(r.set || "")).filter(Boolean))];
+  const sets = setIds.length ? await DropSet.find({ _id: { $in: setIds } }, { coverGame: 1, items: 1 }).lean() : [];
+  const setGame = new Map(
+    sets.map((s) => [String(s._id), s.coverGame || ((s.items || [])[0] || {}).game || ""]),
+  );
+
+  const out = new Map();
+  const row = (key) => {
+    if (!out.has(key)) {
+      out.set(key, {
+        game: key,
+        farming: 0,
+        holdingStock: 0,
+        free: 0,
+        freshFree: 0,
+        autoListed: { gameflipLive: 0, gameflipWaiting: 0, other: 0 },
+        onShopListings: 0,
+        shopOffers: [],
+        sold7: { n: 0, usd: 0 },
+        sold30: { n: 0, usd: 0 },
+        waveEndsAt: null,
+        waveName: "",
+      });
+    }
+    return out.get(key);
+  };
+  for (const g of games) row(settings.normGameName(g));
+  for (const h of holdings) {
+    const k = keyOf(h.game);
+    if (k) row(k).farming++;
+  }
+  for (const p of picker) {
+    const k = keyOf(p.game);
+    if (!k) continue;
+    const r = row(k);
+    r.holdingStock += p.accounts || 0;
+    r.free += p.free || 0;
+    r.freshFree += p.fresh || 0;
+  }
+  for (const l of ledgers) {
+    const k = keyOf(l.game);
+    if (!k) continue;
+    const r = row(k);
+    if (l.status === "manual") r.onShopListings++;
+    else if (l.status === "listed" && l.market !== "gameflip") r.autoListed.other++;
+    else if (l.status === "sold") {
+      const usd = Math.max(0, Number(l.soldPriceUsd) || 0);
+      r.sold30.n++;
+      r.sold30.usd += usd;
+      if (l.soldAt && new Date(l.soldAt) >= since7) {
+        r.sold7.n++;
+        r.sold7.usd += usd;
+      }
+    }
+  }
+  const liveGf = new Set();
+  for (const s of shopRows) {
+    const k = keyOf(setGame.get(String(s.set || "")) || "");
+    if (!k) continue;
+    const r = row(k);
+    if (s.noclaimStock) {
+      r.shopOffers.push({
+        market: s.marketplace,
+        paused: !!s.autoPaused,
+        stock: Number(s.qtyTarget) || 0,
+        delivered7: (s.units || []).filter((u) => u.deliveredAt && new Date(u.deliveredAt) >= since7).length,
+      });
+    } else if (s.marketplace === "gameflip" && !(Number(s.lotSize) > 0)) {
+      r.autoListed.gameflipLive++;
+      liveGf.add(String(s.accountLogin || "").toLowerCase());
+    }
+  }
+  for (const l of ledgers) {
+    if (l.status !== "listed" || l.market !== "gameflip") continue;
+    const k = keyOf(l.game);
+    if (k) row(k).autoListed.gameflipWaiting++;
+  }
+  for (const r of out.values()) {
+    r.autoListed.gameflipWaiting = Math.max(0, r.autoListed.gameflipWaiting - r.autoListed.gameflipLive);
+    r.sold7.usd = Math.round(r.sold7.usd * 100) / 100;
+    r.sold30.usd = Math.round(r.sold30.usd * 100) / 100;
+  }
+  for (const c of campaigns) {
+    const k = keyOf(c.game);
+    if (!k) continue;
+    const r = row(k);
+    if (!r.waveEndsAt || new Date(c.endAt) < new Date(r.waveEndsAt)) {
+      r.waveEndsAt = c.endAt;
+      r.waveName = c.name || "";
+    }
+  }
+  let snapshot = null;
+  try {
+    snapshot = await holdingsMod.summary();
+  } catch {
+    snapshot = null;
+  }
+  return {
+    at: now,
+    games: [...out.values()],
+    snapshot: snapshot
+      ? { accounts: snapshot.accounts, fresh: snapshot.fresh, stale: snapshot.stale, newestReadAt: snapshot.newestReadAt }
+      : null,
+  };
+}
+router.gamesSummary = gamesSummary;
+
+// Report-only listing drift: which live auto-lister bundles now advertise items
+// their accounts no longer hold (relist), or could be sold as a fuller bundle
+// (rebundle). DB-only — it reads the ledger snapshot the expiry pass refreshes
+// each tick, so it makes NO marketplace or Pi call and is safe to hit on demand.
+// Nothing here changes a listing; the operator relists via the audit CLI.
+router.get("/api/unclaimed-auto/listing-health", requireSuperadmin, async (req, res) => {
+  try {
+    const rows = await audit.listingDriftReport();
+    const counts = rows.reduce((a, r) => {
+      a[r.verdict] = (a[r.verdict] || 0) + 1;
+      return a;
+    }, {});
+    res.json({ success: true, rows, counts });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+// Rebundle fix: rewrite drifted "rebundle" listings to advertise the fuller set
+// their accounts now hold, at the SAME price. Default is a DRY RUN (no writes);
+// pass { apply: true } to publish. Scoped to the in-place markets
+// (gameflip/ggsel) by default — digiseller has no text-edit API and is reported
+// as needs-republish rather than touched. Returns a change report either way.
+router.post("/api/unclaimed-auto/rebundle", requireSuperadmin, async (req, res) => {
+  try {
+    const dryRun = req.body.apply !== true;
+    const markets =
+      Array.isArray(req.body.markets) && req.body.markets.length
+        ? req.body.markets
+        : audit.REBUNDLE_INPLACE_MARKETS;
+    const report = await audit.rebundleAll({ dryRun, markets });
+    logEvent({
+      category: "unclaimed",
+      action: dryRun ? "rebundle_dryrun" : "rebundle_apply",
+      actor: actorFromReq(req),
+      meta: { applied: report.filter((r) => r.applied).length, markets },
+    });
+    res.json({ success: true, dryRun, markets, report });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+});
+
 // Manual "list now" — runs the candidate scan + publish pass only.
 router.post("/api/unclaimed-auto/scan", requireSuperadmin, async (req, res) => {
   try {
@@ -336,8 +553,11 @@ router.post("/api/unclaimed-auto/sell/:id", requireSuperadmin, async (req, res) 
   }
 });
 
-// Operator override: delist every row for the account NOW and (if the account
-// has no sellable drops left, i.e. a forced expiry) return it to the pool.
+// Operator override: take the account off sale NOW. It stays in its no-claim
+// bot and keeps farming (the next scan may list it again under what it really
+// holds), so its pool row is NOT returned. `release` is honoured only when no
+// no-claim bot holds the account any more (engine.releaseToPool refuses
+// otherwise) — "available" while a bot still farms it invites a second bot.
 router.post("/api/unclaimed-auto/delist/:id", requireSuperadmin, async (req, res) => {
   try {
     const id = String(req.params.id || "");
@@ -346,8 +566,16 @@ router.post("/api/unclaimed-auto/delist/:id", requireSuperadmin, async (req, res
     const ledger = await UnclaimedAccount.findById(id).lean();
     if (!ledger)
       return res.status(404).json({ success: false, message: "no such account" });
-    const release = !!req.body.release;
-    const ok = await engine.expireAccount(ledger, { release });
+    // Only a listed account has anything to delist. A stale page must never act
+    // on one that has since sold: the old route would return a sold account's
+    // pool row to "available".
+    if (ledger.status !== "listed")
+      return res
+        .status(409)
+        .json({ success: false, message: "account is not listed (" + ledger.status + ")" });
+    const wantRelease = !!(req.body && req.body.release);
+    const expired = await engine.expireAccount(ledger);
+    const released = wantRelease ? await engine.releaseToPool(ledger) : false;
     logEvent({
       category: "unclaimed",
       action: "manual_delist",
@@ -356,9 +584,13 @@ router.post("/api/unclaimed-auto/delist/:id", requireSuperadmin, async (req, res
       game: ledger.game || "",
       detail:
         "operator removed " + (ledger.market || "?") + " unit" +
-        (release ? " + pool return" : ""),
+        (released
+          ? " + pool return"
+          : wantRelease
+            ? " — pool return refused (a no-claim bot still holds it, or its pool row is not the no-claim farm's)"
+            : ""),
     });
-    res.json({ success: true, released: ok });
+    res.json({ success: true, expired, released });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
   }
@@ -797,6 +1029,7 @@ const UNCLAIMED_PRICING_KEYS = {
   unclaimedFullEventBonusPct: ["number", 0, 1000, false, "fullEventBonusPct"],
   unclaimedRepriceExisting: ["boolean", null, null, false, "repriceExisting"],
   unclaimedRepriceDriftPct: ["number", 1, 1000, false, "repriceDriftPct"],
+  unclaimedAutoRebundle: ["boolean", null, null, false, "autoRebundle"],
   unclaimedGameflipLots: ["boolean", null, null, false, "lots"],
   unclaimedLotSize: ["number", 2, 100, true, "lotSize"],
   unclaimedLotDiscountPct: ["number", 0, 90, false, "lotDiscountPct"],
@@ -952,38 +1185,73 @@ router.post("/api/unclaimed-auto/pricing", requireSuperadmin, async (req, res) =
   }
 });
 
-// Bulk credential export for hand sales: the HELD (status "skipped") ledgers
-// of one game — accounts that still hold their unclaimed drops but sit on no
-// auto-listing (over the cap, or freed from a marketplace). text/plain
-// `login:password` lines, audited by count only. Optional ?source=noclaim
-// and ?status=skipped|listed (default skipped — listed accounts are on sale and
-// must not be hand-sold without the manual-sold tick).
+// Bulk HAND SALE of one game's held accounts (owner, 2026-09-28). The held
+// ("skipped") ledgers still hold their unclaimed drops and sit on no listing.
+// Each exported account is MARKED SOLD before its login is handed out
+// (engine.handSellAccounts): before, the export reserved nothing, re-exported
+// accounts already sold by hand, and the Eldorado shop offer could sell the
+// same accounts a minute later. The next scan takes them out of their bots.
+// Body: { game, count (1-200, required unless dryRun), dryRun, format:
+// "lp" login:password (default) | "lpc" login:password:clientSecret }.
+// dryRun answers JSON { free } — how many could be sold now — and changes
+// nothing. The sale answers text/plain lines, audited by count.
+const HAND_SALE_MAX = 200;
+
 router.post("/api/unclaimed-auto/export-creds", requireSuperadmin, async (req, res) => {
   try {
     const body = req.body || {};
     const game = String(body.game || "").trim();
     if (!game) return res.status(400).json({ success: false, message: "game required" });
-    const status = body.status === "listed" ? "listed" : "skipped";
-    const source = body.source === "noclaim" ? body.source : "";
-    const limit = Math.min(2000, Math.max(1, parseInt(body.limit, 10) || 500));
+    const dryRun = body.dryRun === true;
+    const count = parseInt(body.count, 10);
+    if (!dryRun && !(count >= 1 && count <= HAND_SALE_MAX)) {
+      return res.status(400).json({
+        success: false,
+        message: "count required: how many accounts you are selling (1-" + HAND_SALE_MAX + ")",
+      });
+    }
+    const withSecret = body.format === "lpc";
     const want = settings.normGameName(game);
-    const filter = { status };
-    if (source) filter.source = source;
-    const ledgers = await UnclaimedAccount.find(filter, {
-      login: 1,
-      game: 1,
-      source: 1,
-      poolAccountId: 1,
-      drops: 1,
-      bundleLabel: 1,
-    })
-      .sort({ updatedAt: -1 })
+    const ledgers = await UnclaimedAccount.find(
+      { status: "skipped", source: "noclaim" },
+      { login: 1, loginLower: 1, game: 1, source: 1, poolAccountId: 1, botId: 1, container: 1, twitchId: 1, drops: 1, lastCheckedAt: 1 },
+    )
       .limit(4000)
       .lean();
-    const mine = ledgers.filter((l) => settings.normGameName(l.game) === want).slice(0, limit);
+    const mine = ledgers.filter((l) => settings.normGameName(l.game) === want);
+    const pools = mine.length
+      ? await AvailableAccount.find(
+          { _id: { $in: mine.map((l) => l.poolAccountId).filter(Boolean) } },
+          { status: 1, manualSold: 1, listed: 1, claimedNote: 1, soldGames: 1, clientSecret: 1, password: 1, credPasswordEnc: 1 },
+        ).lean()
+      : [];
+    const poolById = new Map(pools.map((p) => [String(p._id), p]));
+    const onListing = await loginsOnActiveListings();
+    // Free = what a buyer could still get and nobody else is selling: pool row
+    // claimed, not ticked sold or listed, not spent/rented, not sold for this
+    // game, with a password and token; the login on no active listing.
+    const free = mine.filter((l) => {
+      const p = poolById.get(String(l.poolAccountId || ""));
+      if (!p || p.status !== "claimed" || p.manualSold === true || p.listed === true) return false;
+      if (/^(sold|spent|rented)/i.test(String(p.claimedNote || "").trim())) return false;
+      if ((p.soldGames || []).some((g) => settings.normGameName(g) === want)) return false;
+      if (!p.clientSecret || !(p.password || p.credPasswordEnc)) return false;
+      return !onListing.has(String(l.loginLower || l.login || "").toLowerCase());
+    });
+    // The fullest accounts first (the latest read), freshest read breaking ties.
+    free.sort(
+      (a, b) =>
+        (b.drops || []).length - (a.drops || []).length ||
+        new Date(b.lastCheckedAt || 0).getTime() - new Date(a.lastCheckedAt || 0).getTime(),
+    );
+    if (dryRun) return res.json({ success: true, game, free: free.length, max: HAND_SALE_MAX });
+
+    const actor = actorFromReq(req) || "admin";
     const lines = [];
     let skippedNoPw = 0;
-    for (const l of mine) {
+    let lost = 0;
+    for (const l of free) {
+      if (lines.length >= count) break;
       let cred = null;
       try {
         cred = await engine.credentialForLedger(l);
@@ -994,20 +1262,32 @@ router.post("/api/unclaimed-auto/export-creds", requireSuperadmin, async (req, r
         skippedNoPw++;
         continue;
       }
-      lines.push(cred.login + ":" + cred.password);
+      const [r] = await engine.handSellAccounts(
+        [{ login: l.login, poolAccountId: l.poolAccountId, game: l.game, botId: l.botId, container: l.container, twitchId: l.twitchId }],
+        { game, actor, reason: "bulk hand sale from the Unclaimed farms page" },
+      );
+      if (!r || !r.sold) {
+        lost++;
+        continue;
+      }
+      const p = poolById.get(String(l.poolAccountId)) || {};
+      lines.push(cred.login + ":" + cred.password + (withSecret ? ":" + (p.clientSecret || "") : ""));
     }
     logEvent({
       category: "unclaimed",
       action: "creds_exported",
-      actor: (req.session && req.session.admin && req.session.admin.username) || "admin",
+      actor,
       game,
       count: lines.length,
-      detail: status + " " + (source || "all") + " accounts exported for manual bulk sale (" + lines.length + ", " + skippedNoPw + " without password)",
+      detail:
+        lines.length + " held account(s) sold by hand and exported (" + count + " asked, " +
+        skippedNoPw + " without password, " + lost + " taken by another channel meanwhile)",
     });
     res.set("Content-Type", "text/plain; charset=utf-8");
     res.set("Cache-Control", "no-store");
     res.set("X-Exported-Count", String(lines.length));
     res.set("X-Skipped-No-Password", String(skippedNoPw));
+    res.set("X-Taken-Meanwhile", String(lost));
     res.send(lines.join("\n") + (lines.length ? "\n" : ""));
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });

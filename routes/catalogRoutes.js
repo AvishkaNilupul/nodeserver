@@ -38,6 +38,9 @@ const {
   syncActivePreorders,
   syncHistoricalEventSets,
 } = require("../utils/catalogPreorder");
+// The one pricing engine every listing path shares. See utils/pricing.js for
+// why four divergent pricers were collapsed into it.
+const pricing = require("../utils/pricing");
 const {
   getCatalogConfig,
   setCatalogConfig,
@@ -491,20 +494,45 @@ async function updateAutofarmCatalogStates() {
   return changed;
 }
 
+// Catalog profile pricing now goes through the shared engine (utils/pricing.js)
+// like every other listing path.
+//
+// WHAT THIS REPLACED, AND WHY
+// The old body multiplied a per-reward rate by the reward count:
+//
+//     base = catalogRate * rewards          // LINEAR, UNCAPPED
+//
+// `catalogRate` was the median (price / rewards) of already-approved sets, so
+// small sets priced ~$1.50 for 1-2 rewards produced a rate near $1.00 per
+// reward -- which a 40-reward World of Tanks profile then turned into $227.86.
+// 48 profiles ended up above $50 in a business whose highest realised sale on
+// record is $4.50. The public catalog hid most of it behind clampPublicPrice's
+// $2.99 cap, but DropSet.price carried the real number, and anything reading
+// `price` (the shop, any future marketplace publish) would have used it.
+//
+// Prod's own sold-listing data (see the calibration table in utils/pricing.js)
+// shows the realised MEDIAN is flat across bundle size -- ~$1.25 whether the
+// account holds 1 drop or 58 -- so proportional scaling is contradicted by
+// every row of evidence. `catalogPricePerReward` is therefore deliberately
+// ignored: it is derived from ASKING prices, not sales, and multiplying by it
+// was the defect. The parameter is kept so existing callers still typecheck.
 function recommendedProfilePrice(
   profile,
   marketMedian = 0,
-  catalogPricePerReward = 0,
+  catalogPricePerReward = 0, // eslint-disable-line no-unused-vars -- see above
+  salePrices = [],
 ) {
   const rewards = Math.max(1, Number(profile.totalRewards) || 1);
-  const observed = Number(marketMedian) || 0;
-  const catalogRate = Number(catalogPricePerReward) || 0;
-  const base = catalogRate
-    ? catalogRate * rewards
-    : observed
-      ? observed * Math.max(0.45, Math.min(1.6, rewards / 30))
-      : Math.max(0.75, rewards * 0.1);
-  return Math.round(Math.max(0.5, base * 0.94) * 100) / 100;
+  const { price } = pricing.priceListing({
+    evidence: {
+      // Realised sales for this game: the strongest evidence available here.
+      game: Array.isArray(salePrices) ? salePrices : [],
+      // The median stands in only when there are no per-sale rows to pass.
+      researchMedian: Number(marketMedian) || 0,
+    },
+    itemCount: rewards,
+  });
+  return price;
 }
 
 async function profilePrices(profiles) {
@@ -517,6 +545,7 @@ async function profilePrices(profiles) {
           gameKey: { $in: games },
           source: "listing_sold",
           priceUsd: { $gt: 0 },
+          bulk: { $ne: true }, // bulk pack units never set a catalog price (docs/bulk-packs/CONTRACT.md)
         })
           .select("gameKey priceUsd")
           .sort({ at: -1 })
@@ -559,7 +588,15 @@ async function profilePrices(profiles) {
         {
           observed,
           catalogRate,
-          recommended: recommendedProfilePrice(profile, observed, catalogRate),
+          // Hand the engine the RAW realised prices, not just their median:
+          // it needs the sample count to decide whether the evidence is thick
+          // enough to trust, and the maximum to derive the ceiling from.
+          recommended: recommendedProfilePrice(
+            profile,
+            observed,
+            catalogRate,
+            byGame.get(game) || [],
+          ),
         },
       ];
     }),
@@ -929,6 +966,7 @@ async function buildPublicCatalog() {
         gameKey: { $in: games },
         source: "listing_sold",
         priceUsd: { $gt: 0 },
+        bulk: { $ne: true }, // bulk pack units never set a catalog price (docs/bulk-packs/CONTRACT.md)
       })
         .select("gameKey priceUsd")
         .sort({ at: -1 })
@@ -990,7 +1028,8 @@ async function buildPublicCatalog() {
   if (buyIds.length) {
     try {
       const rows = await MarketplaceListing.find(
-        { set: { $in: buyIds }, status: "active" },
+        // bulkOfferId: a bulk pack is never a public buy link (docs/bulk-packs/CONTRACT.md H11)
+        { set: { $in: buyIds }, status: "active", bulkOfferId: null },
         { set: 1, marketplace: 1, url: 1, price: 1, status: 1 },
       ).lean();
       for (const row of rows) {
@@ -2025,6 +2064,7 @@ router.post(
         gameKey: { $in: games },
         source: "listing_sold",
         priceUsd: { $gt: 0 },
+        bulk: { $ne: true }, // bulk pack units never set a catalog price (docs/bulk-packs/CONTRACT.md)
       })
         .select("gameKey priceUsd")
         .sort({ at: -1 })

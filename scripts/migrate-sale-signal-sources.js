@@ -10,7 +10,7 @@
 //   1. dedupeKey "manual-sold:*" — the operator's hand-delivered sales.
 //   2. dedupeKey "reserved:*" whose drops were stamped with a real buyer.
 //      Stocking claims stamp DropLog.soldToUsername with the fulfiller's claim
-//      tag ("gameflip", "ggsel", "digiseller", "funpay", "zeusx", and the
+//      tag ("gameflip", "ggsel", "digiseller", "zeusx", and the
 //      "-manual" variants); anything else — a Shop buyer's username, "bulk:*"
 //      — is a person who paid.
 //
@@ -35,7 +35,6 @@ const STOCK_TAGS = new Set([
   "ggsel",
   "digiseller",
   "digiseller-manual",
-  "funpay",
   "zeusx",
 ]);
 

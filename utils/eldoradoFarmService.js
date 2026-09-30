@@ -25,9 +25,44 @@ const operatorFarm = require("./operatorFarm");
 const mp = require("./marketplaces");
 const farmAlert = require("./farmServiceAlert");
 const provisioning = require("./farmProvisioning");
+const { packSizeOf, accountsForUnits, titlePackSize } = require("./bulkPacks/packMath");
 
 // Which marketplace this service speaks for, used in failure alerts.
 const MARKET = "eldorado";
+
+// Bulk packs v2 (docs/bulk-packs/PACKS-2.md §2). A bulk FARMING offer is one
+// item priced as a pack: one unit bought is N fresh accounts farming for the
+// term. A farm offer has no listing row, so its N is the BulkOffer's minQty,
+// found by the marketplace offer id the order was placed on. Returns
+// { pack, id, size, state } — `pack` is the row-shaped input
+// utils/bulkPacks/packMath (the ONE multiplier) takes — or null for every other
+// farming offer, which provisions exactly as before. Any state counts: an order
+// placed while the offer was live is owed its packs after a pause or withdraw.
+// A failed read THROWS: reading it as "not a pack" would provision one account
+// for a paid pack of N. Required lazily so an ordinary order loads nothing new.
+// Shared with utils/g2gFarmService (one copy, as with the title parse).
+async function bulkFarmPack(offerId, market = MARKET) {
+  const id = String(offerId || "");
+  if (!id) return null;
+  const b = await require("../models/BulkOffer")
+    .findOne({ externalId: id, kind: "farming", market }, { minQty: 1, state: 1 })
+    .lean();
+  if (!b) return null;
+  const pack = { bulkOfferId: b._id, bulkPackSize: b.minQty };
+  const size = packSizeOf(pack);
+  if (size < 2) return null;
+  return { pack, id: String(b._id), size, state: String(b.state || "") };
+}
+
+// What the FarmServiceOrder row records about a pack order: its quantity is
+// the ACCOUNTS provisioned (what every reader of that field counts), so the
+// units bought and the pack size are written here.
+function packNote(bulk, units, accounts) {
+  return (
+    "bulk pack order: " + units + " pack(s) of " + bulk.size + " accounts = " +
+    accounts + " accounts (bulk offer " + bulk.id + ")"
+  );
+}
 
 // Our own naming convention, so this parse is a contract with ourselves:
 //   "<Game> Twitch Drops Automatic Farming 120 Days"
@@ -72,8 +107,28 @@ async function canonicalGame(raw, knownGames) {
   return hit || "";
 }
 
+// Games announced on Twitch whose first campaign the drop scanner has not
+// recorded yet. A rent-farm window is sold for a GAME, not a campaign: the
+// account is pinned to the game and farms each campaign as it goes live, the
+// same way it waits between events for any other game. Without this a
+// launch-week game cannot be sold at all — parseFarmOrder refuses a game no
+// campaign has named, and the order sits failed until the scanner catches up
+// while the buyer waits out the 20-minute delivery guarantee.
+//
+// Spell each one exactly as Twitch's category name: it becomes the account's
+// game pin, which the bot matches against campaign game names. An entry is
+// harmless once the scanner has seen the game (it is then known anyway).
+//   AION 2 — global early access 2026-09-30, launch 2026-10-05; NC's
+//   "War for Atreia" event brings drops for Global servers only.
+const ANNOUNCED_FARM_GAMES = ["AION 2"];
+
+function withAnnounced(games) {
+  const have = new Set(games.map(normGame));
+  return games.concat(ANNOUNCED_FARM_GAMES.filter((g) => !have.has(normGame(g))));
+}
+
 // Games the farm has actually seen campaigns for, which is what a bot config's
-// game pin has to match.
+// game pin has to match, plus the announced ones above.
 let gamesCache = { at: 0, list: [] };
 async function knownFarmGames() {
   if (gamesCache.list.length && Date.now() - gamesCache.at < 30 * 60e3) {
@@ -83,8 +138,12 @@ async function knownFarmGames() {
   const CampaignDrops = require("../models/CampaignDrops");
   const a = await AutoFarmTask.distinct("game").catch(() => []);
   const b = await CampaignDrops.distinct("game").catch(() => []);
-  const list = [...new Set([...(a || []), ...(b || [])].filter(Boolean))];
-  if (list.length) gamesCache = { at: Date.now(), list };
+  const seen = [...new Set([...(a || []), ...(b || [])].filter(Boolean))];
+  // Cached only when the scanner's own games came back: an empty read is a
+  // failed read, and caching the announced names alone would refuse every
+  // other game for half an hour.
+  const list = withAnnounced(seen);
+  if (seen.length) gamesCache = { at: Date.now(), list };
   return list;
 }
 
@@ -168,7 +227,29 @@ async function deliverFarmOrder(order, { dryRun } = {}) {
   if (!parsed) return null;
 
   const orderId = String(order.id || "");
-  const qty = Math.max(1, parseInt(order.purchaseQuantity, 10) || 1);
+  const units = Math.max(1, parseInt(order.purchaseQuantity, 10) || 1);
+
+  // What the buyer bought, in accounts: `units` on every farming offer, as
+  // before — and on a bulk pack farming offer each unit is a pack of N
+  // (docs/bulk-packs/PACKS-2.md §2). Asked before anything else, dry run
+  // included; an unreadable answer waits for the next tick with nothing
+  // provisioned, never a guess.
+  let bulk = null;
+  try {
+    bulk = await bulkFarmPack(order.offerId);
+  } catch (e) {
+    return {
+      orderId,
+      farm: true,
+      error:
+        "could not read the bulk offer behind farming offer " +
+        String(order.offerId || "") + " (" + (e && e.message) + ") — " +
+        "nothing provisioned, the next tick retries",
+    };
+  }
+  // `qty` below is ALWAYS accounts: what is provisioned, recorded as the
+  // row's quantity, alerted on and handed over.
+  const qty = bulk ? accountsForUnits(bulk.pack, units) : units;
 
   // A title we cannot read is still a PAID order.
   //
@@ -182,12 +263,24 @@ async function deliverFarmOrder(order, { dryRun } = {}) {
   // makes it visible, alertable and de-duplicated by the same `attempts` counter
   // every other failure uses. The refusal itself is unchanged: guessing a game
   // or a term would provision the wrong thing.
-  const unreadable = !parsed.days
+  // A pack title with no matching bulk offer (a publish whose outcome was
+  // unknown, so no offer id was recorded) must never provision x1: the buyer
+  // paid for N accounts per unit. Refused on the row like any unreadable order.
+  const titleN = titlePackSize(parsed.title);
+  const packMismatch =
+    titleN && (!bulk || bulk.size !== titleN)
+      ? "the title promises PACK OF " + titleN + " ACCOUNTS but " +
+        (bulk
+          ? "its bulk offer is a pack of " + bulk.size
+          : "no bulk offer matches offer " + String(order.offerId || "")) +
+        " — nothing provisioned; deliver it by hand"
+      : "";
+  const unreadable = packMismatch || (!parsed.days
     ? 'could not read a farming term from "' + parsed.title + '"'
     : !parsed.game
       ? 'the farm does not know a game called "' + parsed.rawGame + '" — ' +
         "add an alias in utils/eldoradoFarmService before this can auto-deliver"
-      : "";
+      : "");
 
   if (dryRun) {
     if (unreadable) return { orderId, farm: true, dryRun: true, error: unreadable };
@@ -242,6 +335,10 @@ async function deliverFarmOrder(order, { dryRun } = {}) {
         return { orderId, farm: true, skipped: "claimed by another tick" };
       throw e;
     }
+    // A pack order's units and pack size (PACKS-2 §2). FarmServiceOrder
+    // declares no `note` path, so it is written schema-less; the next save
+    // below persists it.
+    if (bulk) row.set("note", packNote(bulk, units, qty), { strict: false });
   }
   row.attempts += 1;
 
@@ -398,7 +495,10 @@ module.exports = {
   termToDays,
   canonicalGame,
   knownFarmGames,
+  ANNOUNCED_FARM_GAMES,
   parseFarmOrder,
   farmDeliveryMessage,
   deliverFarmOrder,
+  bulkFarmPack,
+  packNote,
 };

@@ -62,12 +62,14 @@ const REAL_DEPS = {
   unclaimedCoverage: () => require("./unclaimedCoverage"),
   unclaimedListingAudit: () => require("./unclaimedListingAudit"),
   unclaimedAutoList: () => require("./unclaimedAutoList"),
+  fleetIntegrity: () => require("./fleetIntegrity"),
   marketplaces: () => require("./marketplaces"),
   connectors: () => require("./systemHealthConnectors"),
   eldoradoFarmService: () => require("./eldoradoFarmService"),
   gameflipFarmService: () => require("./gameflipFarmService"),
   settings: () => require("./settings"),
   pricingEvidence: () => require("./pricingEvidence"),
+  backup: () => require("./backup"),
   // routes/renterAdminRoutes requires half the app, so like utils/operatorFarm
   // this is pulled in only at call time — a module-level require here would be
   // a load-order cycle.
@@ -350,6 +352,12 @@ const CHECKS = [
     //     today, across 29 games — but publishing one for a game the farm does
     //     not know creates an offer that takes money and can never be filled,
     //     and nothing else would notice until a buyer paid.
+    //
+    // A fourth came later. BACK ON SALE: an offer whose row we took off sale
+    // (delisted, sold, removed) can go Active again. On 2026-09-28 the stock
+    // sync re-opened 00ec3522, delisted since 09-07, by pushing its quantity,
+    // and this check called it "no listing row" — which sent the reader
+    // looking for a row that was there all along. It is named for what it is.
     async run(ctx) {
       const mp = ctx.dep("marketplaces");
       const MarketplaceListing = ctx.dep("MarketplaceListing");
@@ -394,15 +402,43 @@ const CHECKS = [
       const liveIds = new Set(live.map((o) => String(o.id)));
       const rows = await MarketplaceListing.find(
         { marketplace: "eldorado", status: "active" },
-        { externalId: 1, title: 1, price: 1 },
+        { externalId: 1, title: 1, price: 1, autoPaused: 1, bulkOfferId: 1 },
       )
         .limit(2000)
         .lean();
+      // Every active row — auto-paused ones too — still owns its offer, so an
+      // Active offer behind one is tracked, not "no listing row".
       const rowIds = new Set(rows.map((r) => String(r.externalId)));
+
+      // Offers on the offline hold (autoFarm.eldoradoOfflineHold) are a manual
+      // line on purpose: the fulfiller sends the canned reply and the operator
+      // hands the goods over, so "no listing row" is their designed state.
+      // Parsed the way eldoradoFulfiller.eldoradoOfflineHold does — a hold with
+      // no message is off.
+      let holdOffers = new Set();
+      try {
+        const hold = (ctx.dep("settings").getAutoFarm() || {}).eldoradoOfflineHold;
+        if (hold && String(hold.message || "").trim() && Array.isArray(hold.offers)) {
+          holdOffers = new Set(hold.offers.map((o) => String(o)));
+        }
+      } catch {
+        /* settings unreadable — judge every offer, as before */
+      }
+      const manualLine = [];
 
       const problems = [];
 
       for (const r of rows) {
+        // An auto-paused row is one the stock sync paused itself ("paused: no
+        // claimable stock") and resumes on its own when stock returns; it keeps
+        // status "active" by design, so Eldorado not showing it Active is the
+        // intended state, not drift. Counting it made the board fail on two such
+        // R6 offers on 2026-09-27.
+        if (r.autoPaused) continue;
+        // A bulk pack row (docs/bulk-packs/FIXES-1.md R3-8) stays "active" while
+        // its bulk loop pauses the offer (sold out, owner pause); the loop owns
+        // that state, so it is not drift. It still counts as tracked below.
+        if (r.bulkOfferId) continue;
         if (!liveIds.has(String(r.externalId))) {
           problems.push({
             kind: "we say active, Eldorado does not",
@@ -412,6 +448,7 @@ const CHECKS = [
         }
       }
 
+      const untracked = [];
       for (const o of live) {
         const title = String(o.offerTitle || "");
         const isFarm = /\bAutomatic\s+Farming\b/i.test(title);
@@ -435,15 +472,62 @@ const CHECKS = [
           continue;
         }
         if (!rowIds.has(String(o.id))) {
-          problems.push({
-            kind: "sellable bundle offer with no listing row",
-            offer: String(o.id),
-            title: title.slice(0, 70),
-          });
+          if (holdOffers.has(String(o.id))) {
+            manualLine.push(title.slice(0, 70));
+            continue;
+          }
+          untracked.push({ offer: String(o.id), title: title.slice(0, 70) });
         }
       }
 
+      // A live offer with no ACTIVE row may still have a row: one we took off
+      // sale. One read names the status of every such row. A failed read keeps
+      // the old label, so the offer is flagged either way; an active row found
+      // here (a row past the limit above) means the offer is tracked after all.
+      let rowStatuses = new Map();
+      if (untracked.length) {
+        try {
+          const others = await MarketplaceListing.find(
+            { marketplace: "eldorado", externalId: { $in: untracked.map((u) => u.offer) } },
+            { externalId: 1, status: 1 },
+          )
+            .limit(2000)
+            .lean();
+          for (const r of others) {
+            const id = String(r.externalId);
+            if (!rowStatuses.has(id)) rowStatuses.set(id, new Set());
+            rowStatuses.get(id).add(String(r.status || "?"));
+          }
+        } catch {
+          rowStatuses = new Map();
+        }
+      }
+      for (const u of untracked) {
+        const statuses = rowStatuses.get(u.offer);
+        if (statuses && statuses.has("active")) continue;
+        if (statuses && statuses.size) {
+          problems.push({
+            kind: "live on Eldorado but our row says " + [...statuses].join("/"),
+            offer: u.offer,
+            title: u.title,
+            why:
+              "a listing we took off sale is on sale again — pause it on Eldorado, " +
+              "or relist its row if it should sell",
+          });
+          continue;
+        }
+        problems.push({
+          kind: "sellable bundle offer with no listing row",
+          offer: u.offer,
+          title: u.title,
+        });
+      }
+
       const n = problems.length;
+      const manualNote = manualLine.length
+        ? " " + manualLine.length + " offline-hold offer(s) with no listing row " +
+          "are a manual line and not counted: " + manualLine.join("; ").slice(0, 160) + "."
+        : "";
       return {
         status: n ? "fail" : "ok",
         measured: n,
@@ -457,7 +541,11 @@ const CHECKS = [
         detail:
           "Read from Eldorado's own offer list. A rent-farm offer is matched by " +
           "TITLE rather than by a listing row, so it is checked against the real " +
-          "resolver instead of being counted as untracked.",
+          "resolver instead of being counted as untracked. Auto-paused rows " +
+          "(paused by the stock sync, resumed by it) are not drift. A live offer " +
+          "whose row is delisted, sold or removed is named by that status: a " +
+          "listing taken off sale that is on sale again." +
+          manualNote,
         items: capItems(problems),
       };
     },
@@ -550,8 +638,11 @@ const CHECKS = [
       // be sitting there free. Reporting "0 free" off a partial read is exactly
       // the Pi-hiccup-as-marketplace-fault mistake, so a bad verdict built on an
       // incomplete read is downgraded to `unknown`. A GOOD verdict survives —
-      // hosts we could not read can only add slots, never remove them.
-      if (snap.offlineHosts.length && status !== "ok") {
+      // hosts we could not read can only add slots, never remove them. Nor can
+      // they lift the holder's account limit: when THAT is what binds, the bad
+      // verdict stands whatever the unread hosts hold.
+      const holderLimited = snap.limitedBy === "holder-limit" && !!snap.quota;
+      if (snap.offlineHosts.length && status !== "ok" && !holderLimited) {
         status = "unknown";
         note =
           "verdict withheld: " +
@@ -564,17 +655,30 @@ const CHECKS = [
         status,
         measured: snap.totalFree,
         threshold,
-        summary:
-          snap.totalFree +
-          " free slot(s) across " +
-          snap.readable +
-          " readable stack(s) of " +
-          snap.totalCapacity +
-          " total",
+        summary: holderLimited
+          ? snap.totalFree +
+            " usable slot(s) — capped by the rent-farm holder's account limit (" +
+            snap.quota.used +
+            "/" +
+            snap.quota.max +
+            " used); the stacks have " +
+            snap.stackFree +
+            " free of " +
+            snap.totalCapacity
+          : snap.totalFree +
+            " free slot(s) across " +
+            snap.readable +
+            " readable stack(s) of " +
+            snap.totalCapacity +
+            " total",
         detail:
           note ||
-          "One order holds one slot until its window lapses (180-day and " +
-            "1-year windows are sold), so slots free far slower than they fill.",
+          (holderLimited
+            ? "Raise the Account limit of the holder renter operator-selffarm " +
+              "(Renters page): every rent-farm order is refused at that limit, " +
+              "however many stack slots are free."
+            : "One order holds one slot until its window lapses (180-day and " +
+              "1-year windows are sold), so slots free far slower than they fill."),
         items: capItems(
           snap.stacks
             .slice()
@@ -697,6 +801,7 @@ const CHECKS = [
           unclaimedGame: 1,
           set: 1,
           origin: 1,
+          accountLogin: 1,
         },
       ).sort({ _id: 1 })
           .lean();
@@ -767,7 +872,7 @@ const CHECKS = [
               status: { $in: audit.SELLABLE_STATUSES },
               soldAt: null,
             };
-        const candidates = await UnclaimedAccount.find(query, {
+        const fields = {
           login: 1,
           game: 1,
           drops: 1,
@@ -776,9 +881,33 @@ const CHECKS = [
           // to null, every verdict degrades to the DB union, and this check
           // silently becomes the very thing it is meant to replace.
           poolAccountId: 1,
-        })
-          .limit(STALE_CANDIDATE_POOL)
-          .lean();
+        };
+        // A Gameflip live unit carries ONE account's credentials and Gameflip
+        // hands exactly that account to the buyer, so it is the only candidate
+        // that matters. Its ledger row is `listed` — never one of the spare
+        // SELLABLE_STATUSES the query above matches — so every live unit read
+        // "no sellable ledger row for this game/set" (6 false fails on
+        // 2026-09-27, each backed by an account the unclaimed engine re-reads
+        // every pass). Judge the attached row; no spare can stand in for it.
+        const attached =
+          listing.marketplace === "gameflip" && listing.accountLogin
+            ? await UnclaimedAccount.find(
+                {
+                  source: "noclaim",
+                  status: "listed",
+                  soldAt: null,
+                  listingExternalIds: String(listing.externalId),
+                },
+                fields,
+              )
+                .limit(3)
+                .lean()
+            : [];
+        const candidates = attached.length
+          ? attached
+          : await UnclaimedAccount.find(query, fields)
+              .limit(STALE_CANDIDATE_POOL)
+              .lean();
 
         // The ledger-only pass is an ordering hint, never a verdict: ledger
         // `drops[]` is whatever the last no-claim scan wrote (3-6 items on rows
@@ -827,7 +956,7 @@ const CHECKS = [
           marketplace: listing.marketplace,
           externalId: listing.externalId,
           title: String(listing.title || "").slice(0, 120),
-          game: listing.unclaimedGame || "",
+          game: listing.unclaimedGame || (candidates[0] && candidates[0].game) || "",
           advertised: (listing.requiredDrops || []).length,
           candidates: candidates.length,
           missing: candidates.length
@@ -871,6 +1000,58 @@ const CHECKS = [
   },
 
   {
+    id: "listings.rebundle",
+    title: "Bundles smaller than the stock behind them",
+    group: "listings",
+    severity: "warn",
+    // A no-claim account keeps farming after it goes on sale, so an event's
+    // later waves land on accounts already listed under the earlier, smaller
+    // bundle. The auto-lister's scan only re-groups RELEASED accounts, so a
+    // LISTED one never grows into the fuller listing on its own — nothing
+    // noticed until now. Read-only: the operator relists with the audit CLI.
+    // DB-only — it reads the ledger drops[] expirySalePass refreshes each tick,
+    // so it makes no marketplace or Pi call.
+    async run(ctx) {
+      const audit = ctx.dep("unclaimedListingAudit");
+      let rows = [];
+      try {
+        rows = await audit.listingDriftReport();
+      } catch (e) {
+        return {
+          status: "unknown",
+          measured: null,
+          threshold: "0 live bundles smaller than their stock",
+          summary: "drift report failed: " + e.message,
+        };
+      }
+      const grown = rows.filter((r) => r.verdict === "rebundle");
+      return {
+        status: grown.length ? "warn" : "ok",
+        measured: grown.length,
+        threshold: "0 live bundles smaller than their stock",
+        summary: grown.length
+          ? grown.length +
+            " live bundle(s) advertise fewer items than their accounts now hold"
+          : "Every live auto-lister bundle matches the stock behind it",
+        detail:
+          "The accounts kept farming after listing and gained items; relist to " +
+          "sell the fuller bundle (scripts/unclaimed-listing-audit.js --listing " +
+          "<id> --retitle --apply). Read-only.",
+        items: capItems(
+          grown.map((r) => ({
+            marketplace: r.marketplace,
+            externalId: r.externalId,
+            title: String(r.title || "").slice(0, 120),
+            advertised: (r.advertised || []).length,
+            added: (r.added || []).map((a) => a.name).join(", "),
+            url: r.url,
+          })),
+        ),
+      };
+    },
+  },
+
+  {
     id: "listings.overpriced",
     title: "Listings above the realised ceiling",
     group: "listings",
@@ -882,6 +1063,9 @@ const CHECKS = [
           status: "active",
           autoPaused: { $ne: true },
           price: { $gt: REALISED_CEILING_USD },
+          // A bulk pack row (docs/bulk-packs/FIXES-1.md R3-8): a Gameflip pack
+          // is priced for N accounts, so the one-account ceiling says nothing.
+          bulkOfferId: null,
         },
         {
           title: 1,
@@ -1012,6 +1196,8 @@ const CHECKS = [
           status: "active",
           autoPaused: { $ne: true },
           marketplace: { $in: [...ceilings.keys()] },
+          // Bulk pack rows too, as in listings.overpriced (FIXES-1 R3-8).
+          bulkOfferId: null,
         },
         { title: 1, marketplace: 1, externalId: 1, url: 1, price: 1, origin: 1 },
       )
@@ -1272,6 +1458,49 @@ const CHECKS = [
           (notReached ? ", " + notReached + " left for the next run" : "") +
           ". Absence from the id list is never treated as proof.",
         items: capItems(ghosts),
+      };
+    },
+  },
+
+  {
+    id: "listings.byGame",
+    title: "By-game no-claim offers (retired path)",
+    group: "listings",
+    severity: "warn",
+    // Every no-claim offer sells through a no-claim SET since 2026-09-28
+    // (utils/noclaimStock: the whole farm, a live read of the set, fail closed,
+    // the sale stamped). A by-game (`unclaimedGame`) offer can no longer fill an
+    // order: its stock counts 0 and a paid order on it is held and paged. One
+    // still active is a leftover — an old script, or an offer nobody moved —
+    // and must go to a no-claim set or come off the market.
+    async run(ctx) {
+      const MarketplaceListing = ctx.dep("MarketplaceListing");
+      const rows = await MarketplaceListing.find(
+        { status: "active", unclaimedGame: { $nin: ["", null] }, noclaimStock: { $ne: true } },
+        { marketplace: 1, externalId: 1, title: 1, unclaimedGame: 1, autoPaused: 1 },
+      )
+        .sort({ _id: 1 })
+        .lean();
+      const n = rows.length;
+      return {
+        status: n ? "warn" : "ok",
+        measured: n,
+        threshold: "0 active by-game offers",
+        summary: n
+          ? n + " by-game offer(s) still active — they cannot deliver any more"
+          : "No by-game offer is active — every no-claim offer sells from a no-claim set",
+        detail:
+          "A by-game offer is held, never filled: move it to a no-claim set " +
+          "(Listings → Shop listings) or delist it on its market.",
+        items: capItems(
+          rows.map((r) => ({
+            market: r.marketplace,
+            offer: r.externalId,
+            game: r.unclaimedGame,
+            hidden: r.autoPaused ? "yes" : "no",
+            title: String(r.title || "").slice(0, 80),
+          })),
+        ),
       };
     },
   },
@@ -1637,6 +1866,41 @@ const CHECKS = [
   },
 
   {
+    id: "fleet.oneHome",
+    title: "One account, one bot",
+    group: "pool",
+    severity: "critical",
+    // Reads every bot config on every host (one batched read per host) plus
+    // every no-claim bot config — the only true record of where an account
+    // farms. dupeGuard keeps an account to one regular config per host and
+    // never sees another host or the no-claim tree, which is how 32 accounts
+    // farmed in two bots at once for 54 hours from 2026-09-25.
+    timeoutMs: 150 * 1000,
+    async run(ctx) {
+      const integrity = ctx.dep("fleetIntegrity");
+      const r = await integrity.oneAccountOneBot();
+      const n = r.collisions.length;
+      const blind = r.unreadable.length;
+      return {
+        status: n ? "fail" : blind ? "warn" : "ok",
+        measured: n,
+        threshold: "0 accounts enabled in two bot configs",
+        summary: n
+          ? n + " account(s) are enabled in two or more bots at once"
+          : "every account farms in one bot (" + r.accounts + " accounts, " + r.configs + " configs)" +
+            (blind ? " — " + blind + " config(s) could not be read" : ""),
+        detail:
+          "Read-only. Decide which bot keeps each account and remove it from the " +
+          "others (a no-claim account that is sold goes to the recycler)." +
+          (blind ? " Unreadable: " + r.unreadable.slice(0, 5).join("; ") : ""),
+        items: capItems(
+          r.collisions.map((c) => ({ login: c.login, secret: c.secretTail, bots: c.homes.join(", ") })),
+        ),
+      };
+    },
+  },
+
+  {
     id: "pool.health",
     title: "Pristine accounts ready to sell",
     group: "pool",
@@ -1718,6 +1982,50 @@ const CHECKS = [
           "An account with no token cannot be dropped into a bot config, so it " +
           "is inert supply that every pool count still reports as stock. One " +
           "with a password can be re-authed; one without is dead weight.",
+      };
+    },
+  },
+
+  {
+    id: "backups.offsite",
+    title: "Daily backup saved and copied off-site",
+    group: "loops",
+    severity: "critical",
+    // Reads utils/backup's status.json + the backup dir only. Before this
+    // existed three of seven nightly runs died unnoticed and every copy lived
+    // on this one server.
+    async run(ctx) {
+      const s = await ctx.dep("backup").status();
+      const now = ctx.now().getTime();
+      const last = s.lastSuccess || null;
+      const ageH = last ? (now - Date.parse(last.at)) / 3600e3 : null;
+      const items = [];
+      if (ageH == null) items.push({ problem: "no successful backup recorded yet" });
+      else if (ageH > 26) items.push({ problem: "newest good backup is " + Math.round(ageH) + "h old" });
+      if (last && Array.isArray(last.problems) && last.problems.length) {
+        items.push({ problem: "newest backup was saved without: " + last.problems.join(", ") });
+      }
+      for (const h of s.offsiteHosts || []) {
+        const o = (s.offsite || {})[h];
+        if (!o) items.push({ host: h, problem: "no off-site copy recorded" });
+        else if (!o.ok) items.push({ host: h, problem: "last copy failed: " + (o.error || "?") });
+        else if (last && o.id !== last.id) items.push({ host: h, problem: "newest backup " + last.id + " not copied yet" });
+      }
+      const stale = ageH == null || ageH > 26;
+      return {
+        status: stale ? "fail" : items.length ? "warn" : "ok",
+        measured: ageH == null ? "none" : Math.round(ageH * 10) / 10 + "h",
+        threshold: "a good backup within 26h, verified on every off-site host",
+        summary: stale
+          ? "No good backup in the last 26 hours"
+          : items.length
+            ? items.length + " backup problem(s)"
+            : "Backed up " + Math.round(ageH) + "h ago, verified on " +
+              ((s.offsiteHosts || []).join(" + ") || "no off-site host"),
+        detail:
+          "utils/backup.js writes status.json after every run and every off-site " +
+          "copy (encrypted, checksum-verified). Retry a copy from /backup.html.",
+        items,
       };
     },
   },

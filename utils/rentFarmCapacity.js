@@ -15,6 +15,15 @@
 // layer above that: it says how much room is left in TOTAL, and shouts before the
 // last of it goes.
 //
+// "Room" is capped by a second wall: the holder renter's own account limit
+// (Renter.maxAccounts), which farmFreshAccounts enforces before it ever looks at
+// a stack. On 2026-09-28 the holder sat at 250/250 for seven hours and four paid
+// Eldorado orders failed every tick while this module reported 117 free slots —
+// the same "every dial said fine" failure, one layer up. totalFree is therefore
+// the stacks' free slots CAPPED by what the holder may still hold, and every
+// consumer (the Telegram alert, the health page, the Gameflip buffer's reserve
+// floor) reads that one number.
+//
 // WHY IT ONLY ALERTS, AND DOES NOT TAKE OFFERS OFF SALE
 // Pausing a rent-farm offer at zero capacity is the obviously "safe" move, and it
 // was deliberately not built. Five of the nine live rent-farm offers are on
@@ -45,6 +54,9 @@ let lastLevel = null;
 function renterAdmin() {
   return require("../routes/renterAdminRoutes");
 }
+function operatorFarm() {
+  return require("./operatorFarm");
+}
 
 // What room is left, per stack and in total. Read-only.
 async function snapshot() {
@@ -72,10 +84,19 @@ async function snapshot() {
   // a stopped stack that already HOLDS accounts is dead capacity.
   const live = stacks.filter((s) => s.running !== false || !s.used);
   const dead = stacks.filter((s) => s.running === false && s.used > 0);
+  const stackFree = live.reduce((n, s) => n + s.remaining, 0);
+  // A failed read here throws, like a failed stack read: callers already treat
+  // a failed snapshot as "unknown" / "do not publish", never as a number.
+  const quota = await operatorFarm().holderQuota();
+  const quotaBinds = !!quota && quota.remaining < stackFree;
   return {
     stacks,
     offlineHosts: offlineHosts.map((h) => h.label || h.id),
-    totalFree: live.reduce((n, s) => n + s.remaining, 0),
+    totalFree: quotaBinds ? quota.remaining : stackFree,
+    stackFree,
+    // { max, used, remaining } of the holder renter, or null before it exists.
+    quota,
+    limitedBy: quotaBinds ? "holder-limit" : "stacks",
     deadFree: dead.reduce((n, s) => n + s.remaining, 0),
     deadStacks: dead.map((s) => s.host + "/" + s.file),
     totalCapacity: stacks.reduce((n, s) => n + s.capacity, 0),
@@ -97,13 +118,26 @@ function describe(snap) {
     .map(
       (s) =>
         "  " + s.host + "/" + s.file + "  " + s.used + "/" + s.capacity +
+        // Same split as snapshot(): stopped-and-occupied is dead, but
+        // stopped-and-EMPTY is merely un-started — its slots ARE counted,
+        // because the first delivery writes the accounts and starts it.
         (s.running === false
-          ? "  (container STOPPED — these slots do not count)"
+          ? s.used > 0
+            ? "  (container STOPPED — these slots do not count)"
+            : "  (not started yet — starts on its first delivery; counted)"
           : ""),
     );
+  const q = snap.quota;
+  const head =
+    snap.limitedBy === "holder-limit"
+      ? snap.totalFree + " usable slot(s) — capped by the rent-farm holder's account " +
+        "limit (" + q.used + "/" + q.max + " used); the " + snap.readable +
+        " stack(s) themselves have " + snap.stackFree + " free"
+      : snap.totalFree + " free slot(s) across " + snap.readable + " stack(s)";
   return (
-    snap.totalFree + " free slot(s) across " + snap.readable + " stack(s)\n" +
+    head + "\n" +
     lines.join("\n") +
+    (q ? "\n  holder account limit  " + q.used + "/" + q.max : "") +
     (snap.deadFree
       ? "\n\n" + snap.deadFree + " further slot(s) sit on STOPPED stacks and are " +
         "NOT counted: " + snap.deadStacks.join(", ")
@@ -127,11 +161,17 @@ async function checkOnce({ notify = true } = {}) {
       level === "empty"
         ? "🛑 Rent-farm capacity is GONE — the next 'Automatic Farming' order cannot be filled."
         : "⚠️ Rent-farm capacity is low — only " + snap.totalFree + " slot(s) left.";
+    // The fix depends on WHICH wall it is: raising a stack does nothing for a
+    // holder at its account limit, and vice versa.
+    const fix =
+      snap.limitedBy === "holder-limit"
+        ? "The stacks have room — the holder renter operator-selffarm is at its " +
+          "account limit. Raise its Account limit on the Renters page before the next sale."
+        : "Raise a stack's capacity or register another bot config before the next sale.";
     await sendTelegram(
       head + "\n\n" + describe(snap) +
         "\n\nAn order takes one slot per account and holds it until its window " +
-        "lapses (you sell 180-day and 1-year windows). Raise a stack's capacity " +
-        "or register another bot config before the next sale.",
+        "lapses (you sell 180-day and 1-year windows). " + fix,
     ).catch((e) => console.error("rentFarmCapacity telegram failed:", e.message));
     logEvent({
       category: "renter",

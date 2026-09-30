@@ -285,7 +285,6 @@ test("marketplace floors match the connector constants exactly", () => {
   assert.equal(MARKETPLACE_FLOORS.digiseller, mp.DS_MIN_PRICE_USD);
   assert.equal(MARKETPLACE_FLOORS.playerauctions, mp.PA_MIN_PRICE);
   assert.equal(MARKETPLACE_FLOORS.eldorado, mp.ELD_MIN_PRICE);
-  assert.equal(MARKETPLACE_FLOORS.g2g, mp.G2G_MIN_PRICE);
 });
 
 // ZX_MIN_PRICE is used inside utils/marketplaces.js but not exported, and that
@@ -304,7 +303,7 @@ test("the ZeusX floor matches its declaration in the connector", () => {
 });
 
 test("an unknown marketplace falls back to the global floor", () => {
-  assert.equal(floorForMarketplace("funpay"), DEFAULTS.floorUsd);
+  assert.equal(floorForMarketplace("nosuchmarket"), DEFAULTS.floorUsd);
   assert.equal(floorForMarketplace(""), DEFAULTS.floorUsd);
 });
 

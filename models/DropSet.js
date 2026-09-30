@@ -62,6 +62,11 @@ const dropSetSchema = new mongoose.Schema(
     // BotAccount rows can share a login. IDs take precedence over login scope.
     accountScopeIds: { type: [String], default: [] },
     sourceType: { type: String, default: "" },
+    // Where this listing's delivery stock comes from. "" = the Drop Archive
+    // (DropLog, claimed drops) — every set before this field existed. "noclaim"
+    // = the no-claim farm's unclaimed drops (utils/noclaimStock.js): such a set
+    // is never sold by the internal Shop and never claims archive stock.
+    stockSource: { type: String, enum: ["", "noclaim"], default: "", index: true },
     sourceEventKey: { type: String, default: "", index: true },
     sourceEventName: { type: String, default: "" },
     sourceCampaignIds: { type: [String], default: [] },

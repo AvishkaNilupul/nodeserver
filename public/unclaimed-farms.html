@@ -186,7 +186,7 @@
   </div>
 
   <div class="banner">
-    🛒 <b>Auto-list.</b> One listing per item (a game + its drop set), fed by accounts from both farms with 100%-unclaimed drops, on the same marketplaces as the auto-farm (Gameflip, Digiseller, GGSel — ZeusX stays manual). When a unit sells, Gameflip relists the next account and Digiseller/GGSel restock the same product — one account per buyer. A sold account is spent, never pool-returned; when <b>all</b> of an account's drops expire its unit is removed and the account goes <b>back to the pool</b>.
+    🛒 <b>Auto-list.</b> One listing per item (a game + its drop set), fed by accounts from both farms with 100%-unclaimed drops, on the same marketplaces as the auto-farm (Gameflip, Digiseller, GGSel — ZeusX stays manual). When a unit sells, Gameflip relists the next account and Digiseller/GGSel restock the same product — one account per buyer. A sold account is spent, never pool-returned; when <b>all</b> of an account's drops expire its unit comes off sale and the account <b>stays in its no-claim bot</b> — it is listed again once it farms new drops.
   </div>
 
   <div class="tabs">
@@ -204,6 +204,22 @@
       <div class="stat"><b id="stReleased">–</b><span>Back to pool</span></div>
       <div class="stat"><b id="stSkipped">–</b><span>Skipped</span></div>
       <div class="stat"><b id="stRemoved">–</b><span>Manual sold</span></div>
+    </div>
+
+    <div class="panel" id="gamesPanel">
+      <div class="hd">
+        <b>Games at a glance</b>
+        <span class="muted" id="gsNote" style="margin-left:10px;"></span>
+        <button class="btn ghost sm" id="gsBtn" style="margin-left:auto;">Refresh</button>
+      </div>
+      <div class="bd">
+        <div style="overflow-x:auto;">
+          <table>
+            <thead><tr><th>Game</th><th title="accounts in no-claim bots for this game">Farming</th><th title="accounts holding sellable (100%, unclaimed) drops of this game, from the stock snapshot">Holding stock</th><th title="holding stock and on no listing, offer or sale — what could still be sold">Free (idle)</th><th>Auto-listed</th><th>Your shop offers</th><th>Sold 7d</th><th>Sold 30d</th><th title="the running drop campaign that ends first">Wave ends</th></tr></thead>
+            <tbody id="gsBody"><tr><td colspan="9" class="muted" style="padding:14px;">loading…</td></tr></tbody>
+          </table>
+        </div>
+      </div>
     </div>
 
     <div class="panel" id="bundlesPanel">
@@ -251,6 +267,26 @@
         <button class="btn ghost sm" id="refreshBtn">Check expiry / sales</button>
         <button class="btn ghost sm" id="pauseBtn">Pause auto</button>
         <span class="muted" id="runResult"></span>
+      </div>
+    </div>
+
+    <div class="panel" id="driftPanel">
+      <div class="hd">
+        <b>Listing drift check</b>
+        <span class="muted" id="driftSummary" style="margin-left:10px;"></span>
+        <button class="btn ghost sm" id="driftBtn" style="margin-left:auto;">Check listings now</button>
+        <button class="btn primary sm" id="driftFixBtn" style="margin-left:8px;">Apply rebundle fixes</button>
+      </div>
+      <div class="bd">
+        <div class="muted" style="font-size:12px;margin-bottom:8px;">
+          Compares each live auto-lister bundle against the account(s) a buyer would actually get, from the latest inventory scan (the engine refreshes it every ~20&nbsp;min). <span class="chip warn">relist</span> = advertised drops expired off them — on Gameflip the engine takes such a unit off by itself after two short reads and lists the account again with what it holds (GGSel/Plati are paused and left as is); <span class="chip warn">rebundle</span> = the account on sale farmed <em>more</em> of the same event since listing — the automatic rebundle raises Gameflip titles only after a live read confirms it.
+        </div>
+        <div style="overflow-x:auto;">
+          <table>
+            <thead><tr><th>Listing</th><th>Verdict</th><th>Advertised → held</th><th>Fix (run by hand)</th></tr></thead>
+            <tbody id="driftRows"><tr><td colspan="4" class="muted" style="padding:14px;">Click “Check listings now”.</td></tr></tbody>
+          </table>
+        </div>
       </div>
     </div>
 
@@ -468,7 +504,7 @@ function switchSec(sec){
     var el=$('sec-'+s); if(!el) return;
     el.classList.toggle('hidden', s!==sec);
   });
-  if(sec==='autolist'){ loadState(); loadBundles(); loadAccounts(); loadListings(); }
+  if(sec==='autolist'){ loadState(); loadGamesSummary(); loadBundles(); loadAccounts(); loadListings(); loadDrift(); }
   if(sec==='noclaim' && !secLoaded.noclaim){ secLoaded.noclaim=true; $('sec-noclaim').innerHTML='<iframe src="/noclaim-farm.html?embed=1" title="No-claim farm"></iframe>'; }
   if(sec==='archive'){ secLoaded.archive=true; switchArcSub(arcSub); }
 }
@@ -493,7 +529,12 @@ async function loadState(){
     $('stLastRun').textContent=lr
       ? ('last run '+(lr.tookMs!=null?Math.round(lr.tookMs/1000)+'s':'')+
          (lr.scan?' · listed '+((lr.scan.listed)||0):'')+
-         (lr.check?' · sold '+((lr.check.sold)||0)+', expired '+((lr.check.expired)||0)+', released '+((lr.check.released)||0)+', removed '+((lr.check.manualSoldRemoved)||0):''))
+         (lr.scan&&lr.scan.notOwned?' · skipped '+lr.scan.notOwned+' owned by another system':'')+
+         (lr.scan&&lr.scan.retire&&lr.scan.retire.retired?' · '+lr.scan.retire.retired+' sold account(s) taken out of their bots → recycler':'')+
+         (lr.check?' · sold '+((lr.check.sold)||0)+', expired '+((lr.check.expired)||0)+', released '+((lr.check.released)||0)+', removed '+((lr.check.manualSoldRemoved)||0):'')+
+         (lr.check&&lr.check.shrunk?' · '+lr.check.shrunk+' lost part of their bundle → off their listing, re-listing with what they hold':'')+
+         (lr.check&&lr.check.shortStrikes?' · '+lr.check.shortStrikes+' short of their listing (confirming)':'')+
+         (lr.check&&lr.check.shortHeld?' · '+lr.check.shortHeld+' short on a paused market (left as is)':''))
       : 'never run';
     $('pauseBtn').textContent=st.paused?'Resume auto':'Pause auto';
   }catch(e){ $('stEngine').textContent='state error'; }
@@ -557,6 +598,58 @@ async function loadListings(){
   }catch(e){ $('listRows').innerHTML='<tr><td colspan="6" class="muted" style="padding:14px;">'+esc(e.message)+'</td></tr>'; }
 }
 
+// ---- Listing drift check (report only) ------------------------------------
+function driftBadge(v){
+  var m={relist:['warn','relist'],rebundle:['warn','rebundle'],ok:['on','ok'],'no-stock':['off','no stock'],unknown:['','no item list']}[v]||['','?'];
+  return '<span class="chip '+m[0]+'">'+esc(m[1])+'</span>';
+}
+function driftItems(arr){
+  return (arr||[]).map(function(i){ return typeof i==='string'?i:(Number(i.qty)>1?(i.name+' ×'+i.qty):i.name); }).join(', ');
+}
+function driftFix(r){
+  // Report only: the operator runs one of these by hand. --shop --apply takes
+  // stale rows down and frees their accounts so the scan relists them; --retitle
+  // rewrites one row up to the fuller bundle its stock now holds.
+  if(r.verdict==='relist') return 'node scripts/unclaimed-listing-audit.js --shop --apply';
+  if(r.verdict==='rebundle') return 'node scripts/unclaimed-listing-audit.js --listing '+r.id+' --retitle --apply';
+  return '';
+}
+async function loadDrift(){
+  var btn=$('driftBtn'); var old=btn?btn.textContent:''; if(btn){btn.disabled=true;btn.textContent='Checking…';}
+  try{
+    var j=await api('/api/unclaimed-auto/listing-health');
+    var rows=j.rows||[]; var c=j.counts||{};
+    var parts=[];
+    if(c.relist) parts.push(c.relist+' relist');
+    if(c.rebundle) parts.push(c.rebundle+' rebundle');
+    if(c['no-stock']) parts.push(c['no-stock']+' no stock');
+    parts.push((c.ok||0)+' ok');
+    $('driftSummary').textContent=rows.length?parts.join(' · '):'';
+    var el=$('driftRows');
+    if(!rows.length){ el.innerHTML='<tr><td colspan="4" class="muted" style="padding:14px;">No active auto-lister bundle rows.</td></tr>'; return; }
+    var flagged=rows.filter(function(r){return r.verdict==='relist'||r.verdict==='rebundle';});
+    var show=flagged.length?flagged:rows;
+    el.innerHTML=show.map(function(r){
+      var adv=driftItems(r.advertised)||'–';
+      var held=driftItems(r.held);
+      var cmd=driftFix(r);
+      var extra='';
+      if(r.added&&r.added.length) extra+='<div class="muted" style="font-size:11px;">+ '+esc(driftItems(r.added))+'</div>';
+      if(r.missing&&r.missing.length) extra+='<div class="muted" style="font-size:11px;">missing '+esc(r.missing.map(function(m){return m.name;}).join(', '))+'</div>';
+      return '<tr>'+
+        '<td><span class="chip">'+esc(r.marketplace)+'</span> '+esc((r.title||'').slice(0,64))+'<div class="mono muted" style="font-size:11px;">'+esc(r.externalId||'')+' · '+r.backing+' acct</div></td>'+
+        '<td>'+driftBadge(r.verdict)+extra+'</td>'+
+        '<td style="font-size:12px;">'+esc(adv)+(held&&held!==adv?('<div class="muted">held: '+esc(held)+' ('+r.heldCount+')</div>'):'')+'</td>'+
+        '<td>'+(cmd?('<code class="mono" style="font-size:11px;word-break:break-all;">'+esc(cmd)+'</code>'):'<span class="muted">—</span>')+'</td>'+
+      '</tr>';
+    }).join('');
+    if(flagged.length && rows.length>flagged.length){
+      el.innerHTML+='<tr><td colspan="4" class="muted" style="padding:10px 14px;font-size:12px;">+ '+(rows.length-flagged.length)+' ok / no-stock row(s) not shown.</td></tr>';
+    }
+  }catch(e){ $('driftRows').innerHTML='<tr><td colspan="4" class="muted" style="padding:14px;">'+esc(e.message)+'</td></tr>'; }
+  finally{ if(btn){btn.disabled=false;btn.textContent=old;} }
+}
+
 // ---------------------------------------------------------------------------
 // Bundles — per-game event bundles held by unclaimed accounts, what is listed
 // where, and the analytics price vs the live price. Reprice runs as a dry-run
@@ -568,6 +661,38 @@ var pricingCache=null, bundlesCache=[], repriceLast=null;
 
 function bundleToast(msg){ var el=$('bdMsg'); if(el) el.textContent=msg||''; }
 function money(n){ n=Number(n); return isFinite(n)?'$'+n.toFixed(2):'–'; }
+
+// ---- Games at a glance -----------------------------------------------------
+function untilText(at){
+  if(!at) return '—';
+  var ms=new Date(at).getTime()-Date.now();
+  if(!isFinite(ms)) return '—';
+  if(ms<=0) return 'ended';
+  var h=Math.round(ms/3600000);
+  return h<48?('in '+h+' h'):('in '+Math.round(h/24)+' d');
+}
+async function loadGamesSummary(refresh){
+  var body=$('gsBody'); if(!body) return;
+  if(refresh===true) $('gsNote').textContent='refreshing… (a full rebuild can take ~30 s)';
+  try{
+    var j=await api('/api/unclaimed-auto/games-summary'+(refresh===true?'?refresh=1':''));
+    var rows=(j.games||[]).filter(function(g){ return g.farming||g.holdingStock||g.sold30.n||g.autoListed.gameflipLive||g.shopOffers.length; });
+    body.innerHTML=rows.length?rows.map(function(g){
+      var al=g.autoListed||{};
+      var auto='Gameflip '+(al.gameflipLive||0)+' live'+(al.gameflipWaiting?' + '+al.gameflipWaiting+' queued':'')+(al.other?' · other '+al.other:'');
+      var shop=(g.shopOffers||[]).map(function(o){ return esc(o.market)+(o.paused?' (paused)':'')+' — stock '+o.stock+', '+o.delivered7+' sold 7d'; }).join('<br>')||'—';
+      if(g.onShopListings) shop+='<div class="muted" style="font-size:12px;">'+g.onShopListings+' account(s) committed</div>';
+      return '<tr><td><b>'+esc(g.game)+'</b></td><td>'+g.farming+'</td><td>'+g.holdingStock+'</td>'+
+        '<td>'+g.free+(g.freshFree!==g.free?' <span class="muted" title="read recently enough to sell now">('+g.freshFree+' fresh)</span>':'')+'</td>'+
+        '<td>'+auto+'</td><td style="font-size:12px;">'+shop+'</td>'+
+        '<td>'+g.sold7.n+' <span class="muted">'+money(g.sold7.usd)+'</span></td>'+
+        '<td>'+g.sold30.n+' <span class="muted">'+money(g.sold30.usd)+'</span></td>'+
+        '<td title="'+esc(g.waveName||'')+'">'+untilText(g.waveEndsAt)+'</td></tr>';
+    }).join(''):'<tr><td colspan="9" class="muted" style="padding:14px;">No no-claim game has accounts or sales yet.</td></tr>';
+    var sn=j.snapshot;
+    $('gsNote').textContent=(j.cachedAt?'as of '+new Date(j.cachedAt).toLocaleTimeString()+' · ':'')+(sn?('stock snapshot: '+sn.fresh+' of '+sn.accounts+' accounts read recently'):'');
+  }catch(e){ body.innerHTML='<tr><td colspan="9" class="muted" style="padding:14px;">'+esc(e.message)+'</td></tr>'; }
+}
 function pctTxt(n){ n=Number(n); if(!isFinite(n)) return ''; return (n>0?'+':'')+Math.round(n)+'%'; }
 function driftCell(n){
   n=Number(n);
@@ -641,7 +766,7 @@ function renderGameRows(g){
     '<span class="chip" title="per-game auto-list cap (unclaimedGameCaps)">cap '+(cap?esc(cap):'default')+'</span>'+
     '<span class="chip" title="allowed marketplaces (unclaimedGameMarkets)">markets: '+esc(mk)+'</span>'+
     '<span class="muted" style="font-weight:500;">'+events.length+' event'+(events.length===1?'':'s')+' · '+sets.length+' bundle'+(sets.length===1?'':'s')+'</span>'+
-    '<button type="button" class="btn ghost sm" data-exportheld="'+esc(g.game||'')+'"'+(held&&g.game?'':' disabled')+' title="Export login:password lines for the held (unlisted) accounts of this game — audited">Export held creds</button>'+
+    '<button type="button" class="btn ghost sm" data-exportheld="'+esc(g.game||'')+'"'+(held&&g.game?'':' disabled')+' title="Sell held (unlisted) accounts of this game by hand: you choose how many; they are marked SOLD before their login:password lines are shown, so no listing can sell them again, and they leave their bots on the next run — audited">Sell held by hand</button>'+
     '</div></td></tr>';
   if(!sets.length) return head+'<tr><td></td><td colspan="7" class="muted">No bundles listed for this game yet.</td></tr>';
   return head+sets.map(function(s){
@@ -712,34 +837,45 @@ async function loadLots(){
   }
 }
 
-// ---- Export held creds (manual bulk sale) -----------------------------------
-// POST /export-creds {game} answers text/plain login:password lines (header
-// X-Exported-Count), so this bypasses the JSON helper: readonly textarea +
-// Copy + Download .txt.
+// ---- Sell held by hand (manual bulk sale) ------------------------------------
+// POST /export-creds {game, dryRun:true} answers how many held accounts are free;
+// {game, count} MARKS that many SOLD and answers their text/plain login:password
+// lines (header X-Exported-Count), so the sale bypasses the JSON helper:
+// readonly textarea + Copy + Download .txt.
 
 async function exportHeldCreds(game, btn){
   game=String(game||'').trim();
   if(!game) return;
   if(btn) btn.disabled=true;
-  bundleToast('exporting held creds for '+game+'…');
   try{
-    var r=await fetch('/api/unclaimed-auto/export-creds',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({game:game})});
+    var probe=await api('/api/unclaimed-auto/export-creds',{method:'POST',body:JSON.stringify({game:game,dryRun:true})});
+    var free=Number(probe&&probe.free)||0;
+    if(!free){ bundleToast('No free held '+game+' accounts to sell right now.'); return; }
+    var ans=prompt(free+' held '+game+' account'+(free===1?'':'s')+' can be sold by hand.\n\nHow many are you selling? They are marked SOLD now (no listing can sell them again) and leave their bots on the next run.', String(Math.min(10,free)));
+    if(ans==null) return;
+    var n=parseInt(ans,10);
+    if(!(n>=1)){ bundleToast('Enter how many accounts (1–'+Math.min(free,Number(probe.max)||200)+').'); return; }
+    n=Math.min(n,free,Number(probe.max)||200);
+    if(!confirm('Mark '+n+' '+game+' account'+(n===1?'':'s')+' SOLD and show their logins?\n\nThis is a sale: they come off every listing and leave their bots on the next run (recycler).')) return;
+    bundleToast('selling '+n+' held '+game+' account'+(n===1?'':'s')+' by hand…');
+    var r=await fetch('/api/unclaimed-auto/export-creds',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({game:game,count:n})});
     if(!r.ok){ var msg='HTTP '+r.status; try{ var ej=await r.json(); if(ej&&ej.message) msg=ej.message; }catch(e){} throw new Error(msg); }
     var text=await r.text();
-    var n=parseInt(r.headers.get('X-Exported-Count'),10);
-    if(!isFinite(n)) n=text.split(/\r?\n/).filter(Boolean).length;
+    var got=parseInt(r.headers.get('X-Exported-Count'),10);
+    if(!isFinite(got)) got=text.split(/\r?\n/).filter(Boolean).length;
     var skipped=parseInt(r.headers.get('X-Skipped-No-Password'),10);
-    showBundleCreds(game, text, n, isFinite(skipped)?skipped:0);
-    bundleToast('exported '+n+' credential'+(n===1?'':'s')+' for '+game);
-  }catch(e){ bundleToast('Export failed: '+e.message); }
+    var lost=parseInt(r.headers.get('X-Taken-Meanwhile'),10);
+    showBundleCreds(game, text, got, isFinite(skipped)?skipped:0);
+    bundleToast('sold '+got+' by hand for '+game+(isFinite(lost)&&lost?' ('+lost+' taken by another channel meanwhile)':''));
+  }catch(e){ bundleToast('Hand sale failed: '+e.message); }
   finally{ if(btn) btn.disabled=false; }
 }
 
 function showBundleCreds(game, text, count, skipped){
   var box=$('bdCreds'); if(!box) return;
   box.classList.add('show');
-  box.innerHTML='<div class="row"><b style="font-size:13px;">Held credentials — '+esc(game)+'</b>'+
-    '<span class="muted">'+count+' line'+(count===1?'':'s')+' · login:password'+(skipped?' · '+skipped+' without password skipped':'')+' · this export is audited</span>'+
+  box.innerHTML='<div class="row"><b style="font-size:13px;">Sold by hand — '+esc(game)+'</b>'+
+    '<span class="muted">'+count+' line'+(count===1?'':'s')+' · login:password · marked SOLD — they leave their bots on the next run'+(skipped?' · '+skipped+' without password skipped':'')+' · audited</span>'+
     '<button type="button" class="btn ghost sm" id="bdCredsCopyBtn" style="margin-left:auto;">Copy</button>'+
     '<button type="button" class="btn ghost sm" id="bdCredsDlBtn">Download .txt</button>'+
     '<button type="button" class="btn ghost sm" id="bdCredsCloseBtn">Close</button></div>'+
@@ -1228,6 +1364,27 @@ $('arcItemBg').addEventListener('click',function(e){ if(e.target===this) this.cl
 
 // Bundles panel: refresh, reprice modal, pricing form.
 $('bdRefreshBtn').addEventListener('click',function(){ bundleToast(''); loadBundles(true); });
+$('driftBtn').addEventListener('click',loadDrift);
+$('gsBtn').addEventListener('click',function(){ loadGamesSummary(true); });
+async function applyRebundleFixes(){
+  var btn=$('driftFixBtn'); var old=btn.textContent; btn.disabled=true; btn.textContent='Planning…';
+  try{
+    var plan=await api('/api/unclaimed-auto/rebundle',{method:'POST',body:JSON.stringify({apply:false})});
+    var willApply=(plan.report||[]).filter(function(r){return r.action==='retitle-in-place';});
+    var needRepub=(plan.report||[]).filter(function(r){return r.action==='needs-republish'||r.action==='needs-attention';});
+    if(!willApply.length){ alert('No in-place rebundle fixes to apply right now.'+(needRepub.length?(' '+needRepub.length+' digiseller listing(s) would need delist+republish — handled separately.'):'')); return; }
+    var msg=willApply.length+' listing(s) will be retitled to the fuller set they now hold, at the SAME price (gameflip/ggsel, edited in place, reversible).'+(needRepub.length?('\n\n'+needRepub.length+' digiseller listing(s) need delist+republish (new id, irreversible) — NOT included here.'):'')+'\n\nApply now?';
+    if(!confirm(msg)) return;
+    btn.textContent='Applying…';
+    var res=await api('/api/unclaimed-auto/rebundle',{method:'POST',body:JSON.stringify({apply:true})});
+    var applied=(res.report||[]).filter(function(r){return r.applied;}).length;
+    var errs=(res.report||[]).filter(function(r){return r.action==='error';});
+    alert('Applied '+applied+' rebundle fix(es) at the same price.'+(errs.length?('\n'+errs.length+' error(s): '+errs.map(function(e){return e.marketplace+' — '+(e.note||'');}).join('; ')):''));
+    loadDrift();
+  }catch(e){ alert('Rebundle failed: '+e.message); }
+  finally{ btn.disabled=false; btn.textContent=old; }
+}
+$('driftFixBtn').addEventListener('click',applyRebundleFixes);
 $('repriceBtn').addEventListener('click',openReprice);
 $('repriceClose').addEventListener('click',function(){ $('repriceBg').classList.remove('show'); });
 $('repriceBg').addEventListener('click',function(e){ if(e.target===this) this.classList.remove('show'); });
@@ -1253,9 +1410,9 @@ document.addEventListener('click',function(e){
     });
   }
   if(t.dataset&&t.dataset.delist){
-    if(!confirm('Delist ALL rows for this account? It goes back to the pool only if you choose release.')) return;
+    if(!confirm('Take this account off sale? It stays in its no-claim bot and keeps farming (it is not returned to the pool). If it still holds drops, a later scan may list it again. If you sold it by hand, use Sell instead.')) return;
     busy(null, async function(){
-      await api('/api/unclaimed-auto/delist/'+t.dataset.delist,{method:'POST',body:JSON.stringify({release:true})});
+      await api('/api/unclaimed-auto/delist/'+t.dataset.delist,{method:'POST',body:'{}'});
       loadAccounts(); loadListings(); loadState();
       return 'delisted';
     });

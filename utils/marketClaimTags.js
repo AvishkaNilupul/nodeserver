@@ -18,14 +18,11 @@ const MARKET_CLAIM_TAGS = [
   "gameflip",
   "digiseller",
   "ggsel",
-  "funpay",
   "zeusx",
   "eldorado",
   "playerauctions",
   "g2g",
   "plati",
-  "epicnpc",
-  "z2u",
 ];
 
 const MARKET_CLAIM_TAG_SET = new Set(MARKET_CLAIM_TAGS);

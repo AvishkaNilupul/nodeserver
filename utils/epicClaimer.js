@@ -13,6 +13,7 @@
 const EpicAccount = require("../models/EpicAccount");
 const EpicFreebie = require("../models/EpicFreebie");
 const epic = require("./epicClient");
+const epicAutoClaim = require("./epicAutoClaim");
 const { decrypt, encrypt } = require("./secretBox");
 const { sendTelegram } = require("./telegram");
 
@@ -128,7 +129,25 @@ async function processAccount(acc, liveFreebies, notify, priceByNamespace) {
     acc.lastError = "";
     const missing = liveFreebies.filter((f) => !ownsOffer(acc, f));
     if (notify && !acc.sold) {
-      for (const f of missing) await pingClaim(acc, f, accessToken);
+      for (const f of missing) {
+        // Try the direct-API auto-claim first. If it succeeded — or if it
+        // ran and got a definitive "already owned" — skip the Telegram tap
+        // link for this offer. The library re-sync on the next tick will
+        // confirm ownership landed. Only ping the operator when the auto
+        // path is disabled, throttled, or actually failed.
+        const auto = await epicAutoClaim.attemptAutoClaim(
+          acc,
+          f,
+          accessToken,
+        );
+        if (
+          auto.attempted &&
+          (auto.status === "claimed" || auto.status === "already_owned")
+        ) {
+          continue;
+        }
+        await pingClaim(acc, f, accessToken);
+      }
     }
     return missing.length;
   } catch (err) {

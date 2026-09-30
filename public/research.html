@@ -704,7 +704,6 @@
             "</div>"
           );
         }
-        var fp = m.funpay || {};
         // "N sellers / M products" everywhere: rows are not rivals.
         function rivals(x) {
           return (
@@ -717,8 +716,8 @@
           );
         }
         // Where our own money actually came from. This is the ONLY demand
-        // signal for ZeusX, Z2U and EpicNPC — none of them can be scouted, so
-        // what we sell there is all we can see of them.
+        // signal for ZeusX — it cannot be scouted, so
+        // what we sell there is all we can see of it.
         var byMarket = r.ownByMarket || {};
         var marketLines = Object.keys(byMarket)
           .sort(function (a, b) {
@@ -760,17 +759,6 @@
             "lifetime sales: " + (pl.totalSold || 0),
             rivals(pl),
           ]) +
-          (fp.node
-            ? block("FunPay", [
-                "category node: " + esc(String(fp.node)),
-                rivals(fp),
-                "no sale counters published",
-              ])
-            : block("FunPay", [
-                "no category node known —",
-                "publish once, or set",
-                "autoFarm.funpayNodes",
-              ])) +
           block("You", [
             "farmed accounts: " + (r.farmedAccounts || 0),
             "farmed drops: " + (r.farmedItems || 0),

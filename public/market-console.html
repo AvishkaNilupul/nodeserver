@@ -276,7 +276,7 @@
         (idle.length
           ? '<div class="sub" style="margin-top:16px">No listings recorded: ' +
             esc(idle.map(function (m) { return m.market; }).join(", ")) +
-            ". Z2U is excluded from this console by design.</div>"
+            ".</div>"
           : "");
 
       Array.prototype.forEach.call(page.querySelectorAll(".mcard"), function (el) {

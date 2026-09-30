@@ -8,13 +8,17 @@ const marketplaceListingSchema = new mongoose.Schema(
       type: mongoose.Schema.Types.ObjectId,
       ref: "DropSet",
       // Required for every listing whose stock is the Drop Archive — the set IS
-      // what gets claimed at delivery. A row backed by the no-claim farm has no
-      // DropSet at all: it claims by GAME out of UnclaimedAccount, and pointing
-      // it at some near-enough set would just mislabel what the buyer receives.
+      // what gets claimed at delivery. A row backed by the no-claim AUTO-lister
+      // (`unclaimedGame`) has no DropSet at all: it claims by GAME out of
+      // UnclaimedAccount, and pointing it at some near-enough set would just
+      // mislabel what the buyer receives.
       // An account listing (accountOffer, below) has none either, for the same
-      // reason plus a sharper one: z2uFulfiller picks its branch by asking
+      // reason plus a sharper one: a fulfiller picks its branch by asking
       // `row.set` FIRST, so a set left on an offer-backed row would quietly
       // deliver somebody else's archive account against the owner's stock.
+      // An owner-made no-claim row (`noclaimStock`, below) is the opposite
+      // case: it KEEPS its set (a DropSet with stockSource "noclaim"), so the
+      // set stays required for it.
       required: function () {
         return !this.unclaimedGame && !this.accountOffer;
       },
@@ -27,12 +31,9 @@ const marketplaceListingSchema = new mongoose.Schema(
         "digiseller",
         "g2g",
         "ggsel",
-        "funpay",
-        "epicnpc",
         "zeusx",
         "eldorado",
         "playerauctions",
-        "z2u",
       ],
       required: true,
       index: true,
@@ -56,7 +57,7 @@ const marketplaceListingSchema = new mongoose.Schema(
       default: "manual",
       index: true,
     },
-    // FunPay has no per-offer API: delisting re-saves the offer's editor form,
+    // Some markets have no per-offer API: delisting re-saves the editor form,
     // which needs the category node id. Stored here at publish time.
     externalNode: { type: String, default: "" },
     url: { type: String, default: "" },
@@ -156,6 +157,13 @@ const marketplaceListingSchema = new mongoose.Schema(
     // farm: claim accounts holding this row's `set` at delivery time instead of
     // consuming a pre-reserved unit. Mutually exclusive with `unclaimedGame`.
     autoClaimSet: { type: Boolean, default: false, index: true },
+    // No-claim Shop listings (docs/NOCLAIM-SHOP-LISTINGS-CONTRACT.md): this
+    // row's stock is the no-claim farm, claimed through utils/noclaimStock.js
+    // (vault markets at publish, claim-at-sale markets when an order lands).
+    // The row keeps `set` (a DropSet with stockSource "noclaim") so the Listings
+    // page and the delete guard still see it, but every consumer checks THIS
+    // flag before `set`, `unclaimedGame` or `autoClaimSet`.
+    noclaimStock: { type: Boolean, default: false, index: true },
     // Account listings (docs/ACCOUNT-LISTINGS-CONTRACT.md): a fourth stock mode.
     // This row's stock is not the Drop Archive and not the no-claim farm but an
     // explicit list of accounts the owner pasted in, held one row per account in
@@ -191,15 +199,10 @@ const marketplaceListingSchema = new mongoose.Schema(
     // paused deliberately by the operator. Only rows carrying this flag are ever
     // resumed automatically.
     autoPaused: { type: Boolean, default: false },
-    // When the Z2U shelf keeper last extended this offer's duration.
-    //
-    // Z2U does NOT move the publish date when an offer is extended, and the
-    // published date plus the duration is the only expiry signal the seller
-    // panel gives. So an extended offer keeps computing as overdue forever, and
-    // without this the keeper re-extends the same offers on every tick —
-    // hammering a rate-limited endpoint to no effect. Ours to remember, because
-    // Z2U will not tell us.
-    lastExtendedAt: { type: Date, default: null },
+    // When the campaign-scoped auto-rebundle last retitled this listing to the
+    // fuller set its accounts had farmed. A one-hour cooldown reads this so the
+    // automatic pass can never put a listing into an off-sale/on-sale loop.
+    rebundledAt: { type: Date, default: null },
     lastError: { type: String, default: "" },
     // Gameflip auto-delivery: the farmed account attached to this listing as
     // an auto-delivered digital code. The account is reserved (soldAt) while
@@ -294,6 +297,29 @@ const marketplaceListingSchema = new mongoose.Schema(
     // now a lease that keeps the pointer; the pointer is cleared only once the
     // window is actually stamped.
     rentFarmSaleClaimedAt: { type: Date, default: null },
+    // Bulk packs (docs/bulk-packs/CONTRACT.md §3, hook H1): the BulkOffer this
+    // row belongs to, or null for every other listing. A bulk dropset/noclaim
+    // offer is ALSO an ordinary row with origin "manual", so delivery, sale
+    // detection and stock sync run through the existing fulfillers unchanged —
+    // and the few automatic sweeps that would still act on a manual row
+    // (guardian, dedupe, suspended retirement, relist, price evidence, public
+    // catalog; hooks H5–H12) skip rows where this is set. No enum changes.
+    // The bulk loop owns these rows: it never whole-array-saves `units`
+    // (CONTRACT I3) and it writes no row whose bulkOfferId is not its own.
+    bulkOfferId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "BulkOffer",
+      default: null,
+      index: true,
+    },
+    // Bulk packs v2 (docs/bulk-packs/PACKS-2.md §1): a bulk row is ONE item
+    // priced as a whole pack, so one unit the buyer buys is this many accounts
+    // (N >= 2). 0 — every other listing — is "not a pack", and such a row stays
+    // one unit = one account. Read it only through utils/bulkPacks/packMath.js
+    // (packSizeOf / accountsForUnits / packsFor), the ONE place a pack is
+    // multiplied: a quantity read in the wrong unit is how PlayerAuctions order
+    // 16474028 shipped eleven accounts for a $5 sale.
+    bulkPackSize: { type: Number, default: 0 },
   },
   { timestamps: true },
 );

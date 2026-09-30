@@ -72,6 +72,18 @@
       .toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
       .toast.err { background: #b91c1c; }
       .spin { display: inline-block; width: 13px; height: 13px; border: 2px solid currentColor; border-right-color: transparent; border-radius: 50%; animation: sp .7s linear infinite; vertical-align: -2px; margin-right: 6px; }
+      .badge { display: inline-block; padding: 2px 8px; border-radius: 999px; font-size: 11.5px; font-weight: 600; border: 1px solid var(--line); margin: 0 4px 2px 0; white-space: nowrap; }
+      .badge.ok { color: var(--green); border-color: currentColor; }
+      .badge.bad { color: var(--red); border-color: currentColor; }
+      .badge.none { color: var(--muted); }
+      .stat-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); gap: 12px; margin-bottom: 12px; }
+      .stat { background: var(--surface-2); border: 1px solid var(--line); border-radius: 10px; padding: 11px 13px; font-size: 13px; }
+      .stat .k { color: var(--muted); font-size: 11.5px; text-transform: uppercase; letter-spacing: .03em; font-weight: 600; margin-bottom: 4px; }
+      .stat .v { font-weight: 600; }
+      .stat .e { color: var(--red); font-size: 12px; margin-top: 4px; word-break: break-word; }
+      ul.incl { margin: 6px 0 0; padding-left: 18px; color: var(--muted); font-size: 13px; line-height: 1.6; }
+      code { font-size: 12px; background: var(--surface-2); padding: 1px 5px; border-radius: 5px; }
+      @media (max-width: 760px) { .nav { display: none; } main { padding: 20px 16px; } table { font-size: 12.5px; } }
       @keyframes sp { to { transform: rotate(360deg); } }
     </style>
   </head>
@@ -100,7 +112,23 @@
 
     <main>
       <h1>Backup &amp; Restore</h1>
-      <div class="sub">A full backup contains your entire database (orders, accounts, inventory, drops, messages…), uploaded images, and bot/host config. Daily automatic backups run on the server; you can also back up on demand and download.</div>
+      <div class="sub">A full backup contains your entire database (orders, accounts, inventory, drops, messages…), uploaded images, and bot/host config. Daily automatic backups run on the server and an encrypted copy of each one is sent to the other servers; you can also back up on demand and download.</div>
+
+      <div class="card">
+        <h2>Backup health</h2>
+        <p class="hint" id="statusHint">Loading…</p>
+        <div class="stat-grid" id="statusGrid"></div>
+        <details>
+          <summary class="muted" style="cursor:pointer;font-size:13px;">What each backup contains</summary>
+          <ul class="incl">
+            <li>The whole database, twice: readable JSON (used by Restore below) and a <code>mongodump</code> archive that also keeps indexes</li>
+            <li>Uploaded images and cached drop images</li>
+            <li>Site settings, host list, and the live bot configs from every bot server, including the no-claim bots</li>
+            <li>The deployed app code as it runs on this server</li>
+            <li>An <b>encrypted</b> secrets bundle: <code>.env</code>, admin logins, database credentials, nginx/TLS, pm2, cron and the side apps in <code>/opt</code></li>
+          </ul>
+        </details>
+      </div>
 
       <div class="card">
         <h2>Back up now</h2>
@@ -113,7 +141,7 @@
 
       <div class="card">
         <h2>Saved backups</h2>
-        <p class="hint">Newest first. Daily backups are kept on the server (last 14). Download any to keep an off-server copy.</p>
+        <p class="hint">Newest first. The last 14 are kept on this server, and the last 14 encrypted copies on each off-site server. The Off-site column shows which servers hold a verified copy.</p>
         <div id="list"><div class="muted">Loading…</div></div>
       </div>
 
@@ -151,6 +179,58 @@
         return b.toFixed(b < 10 && i > 0 ? 1 : 0) + " " + u[i];
       }
       function fmtDate(s) { try { return new Date(s).toLocaleString(); } catch (e) { return s; } }
+      function esc(s) {
+        return String(s == null ? "" : s).replace(/[&<>"']/g, function (c) {
+          return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c];
+        });
+      }
+      function ago(s) {
+        if (!s) return "never";
+        var m = Math.round((Date.now() - new Date(s).getTime()) / 60000);
+        if (m < 1) return "just now";
+        if (m < 60) return m + " min ago";
+        var h = Math.round(m / 60);
+        return h < 48 ? h + " h ago" : Math.round(h / 24) + " days ago";
+      }
+      var OFFSITE = [];
+      function offsiteBadges(off) {
+        if (!OFFSITE.length) return '<span class="badge none">not configured</span>';
+        return OFFSITE.map(function (h) {
+          var r = off && off[h];
+          if (!r) return '<span class="badge none" title="No copy recorded">' + esc(h) + ' –</span>';
+          if (r.ok) return '<span class="badge ok" title="Verified copy ' + esc(fmtDate(r.at)) + '">' + esc(h) + ' ✓</span>';
+          return '<span class="badge bad" title="' + esc(r.error || "failed") + '">' + esc(h) + ' ✗</span>';
+        }).join("");
+      }
+
+      async function loadStatus() {
+        try {
+          var s = await api("/backups/status");
+          OFFSITE = s.offsiteHosts || [];
+          var last = s.lastSuccess, run = s.lastRun;
+          var fresh = last && (Date.now() - new Date(last.at).getTime()) < 26 * 3600 * 1000;
+          var cells = [];
+          cells.push('<div class="stat"><div class="k">Last good backup</div><div class="v">' +
+            (last ? '<span class="badge ' + (fresh ? "ok" : "bad") + '">' + esc(ago(last.at)) + '</span> ' + esc(fmtSize(last.size)) : '<span class="badge bad">none recorded</span>') +
+            '</div>' + (last && last.problems && last.problems.length ? '<div class="e">Saved without: ' + esc(last.problems.join(", ")) + '</div>' : '') +
+            (run && !run.ok ? '<div class="e">Last attempt failed ' + esc(ago(run.at)) + ': ' + esc(run.error) + '</div>' : '') + '</div>');
+          cells.push('<div class="stat"><div class="k">Next automatic backup</div><div class="v">' + esc(fmtDate(s.nextRunAt)) + '</div><div class="muted" style="font-size:12px;margin-top:4px;">Daily at ' + esc(s.schedule) + '</div></div>');
+          OFFSITE.forEach(function (h) {
+            var o = (s.offsite || {})[h];
+            cells.push('<div class="stat"><div class="k">Off-site: ' + esc(h) + '</div><div class="v">' +
+              (!o ? '<span class="badge none">no copy yet</span>' : o.ok ? '<span class="badge ok">verified ' + esc(ago(o.at)) + '</span>' : '<span class="badge bad">failed ' + esc(ago(o.at)) + '</span>') +
+              '</div>' + (o && !o.ok && o.error ? '<div class="e">' + esc(o.error) + '</div>' : '') +
+              '<div class="muted" style="font-size:12px;margin-top:4px;">~/' + esc(s.offsiteDir) + ' · keeps ' + esc(s.offsiteRetention) + '</div></div>');
+          });
+          $("statusGrid").innerHTML = cells.join("");
+          $("statusHint").innerHTML = "Off-site copies and the secrets bundle are encrypted with the key in <code>" + esc(s.keyFile) + "</code>" +
+            (s.keyPresent ? "" : " (created on the first backup)") +
+            ". Keep a copy of that key somewhere safe off this server, such as a password manager. Without it the off-site copies can't be decrypted." +
+            (s.busy ? " <b>A backup is running now.</b>" : "") + (s.replicating ? " <b>Copying off-site now.</b>" : "");
+        } catch (e) {
+          $("statusHint").textContent = "Could not load backup status: " + e.message;
+        }
+      }
 
       async function api(url, opts) {
         var r = await fetch(url, Object.assign({ credentials: "same-origin" }, opts || {}));
@@ -165,16 +245,33 @@
           var b = r.backups || [];
           if (!b.length) { $("list").innerHTML = '<div class="muted">No backups yet. Click “Back up now”.</div>'; return; }
           var rows = b.map(function (x) {
-            var safety = x.id.indexOf("pre-restore") !== -1 ? ' <span class="muted">(safety)</span>' : (x.id.indexOf("daily") !== -1 ? '' : '');
-            return '<tr><td>' + x.id + safety + '</td><td>' + fmtDate(x.createdAt) + '</td><td>' + fmtSize(x.size) + '</td>' +
+            var safety = x.id.indexOf("pre-restore") !== -1 ? ' <span class="muted">(safety)</span>' : "";
+            return '<tr><td>' + esc(x.id) + safety + '</td><td>' + esc(fmtDate(x.createdAt)) + '</td><td>' + esc(fmtSize(x.size)) + '</td>' +
+              '<td>' + offsiteBadges(x.offsite) + '</td>' +
               '<td><div class="acts">' +
               '<a class="btn btn-sm" href="/backups/download/' + encodeURIComponent(x.id) + '">Download</a>' +
-              '<button class="btn btn-sm btn-danger" onclick="delBackup(\'' + x.id + '\')">Delete</button>' +
+              '<button class="btn btn-sm" onclick="replicate(\'' + esc(x.id) + '\', this)" title="Encrypt and copy this backup to the off-site servers again">Copy off-site</button>' +
+              '<button class="btn btn-sm btn-danger" onclick="delBackup(\'' + esc(x.id) + '\')">Delete</button>' +
               '</div></td></tr>';
           }).join("");
-          $("list").innerHTML = '<table><thead><tr><th>Backup</th><th>Created</th><th>Size</th><th></th></tr></thead><tbody>' + rows + '</tbody></table>';
+          $("list").innerHTML = '<table><thead><tr><th>Backup</th><th>Created</th><th>Size</th><th>Off-site</th><th></th></tr></thead><tbody>' + rows + '</tbody></table>';
         } catch (e) { $("list").innerHTML = '<div class="muted">Failed to load: ' + e.message + '</div>'; }
       }
+
+      window.replicate = async function (id, btn) {
+        var old = btn.textContent;
+        btn.disabled = true; btn.innerHTML = '<span class="spin"></span>Copying…';
+        try {
+          var r = await api("/backups/" + encodeURIComponent(id) + "/replicate", { method: "POST" });
+          var res = r.results || {};
+          if (res.skipped) toast("Not copied: " + res.skipped, true);
+          else {
+            var bad = Object.keys(res).filter(function (h) { return !res[h].ok; });
+            toast(bad.length ? "Copy failed on " + bad.join(", ") : "Copied and verified on " + Object.keys(res).join(", "), !!bad.length);
+          }
+        } catch (e) { toast("Copy failed: " + e.message, true); }
+        finally { btn.disabled = false; btn.textContent = old; loadStatus(); loadList(); }
+      };
 
       window.delBackup = async function (id) {
         if (!confirm("Delete backup " + id + "? This cannot be undone.")) return;
@@ -190,9 +287,12 @@
         try {
           var r = await api("/backups/run", { method: "POST" });
           var counts = Object.values(r.manifest.collections || {}).reduce(function (a, n) { return a + n; }, 0);
-          toast("Backup created: " + r.id + " · " + counts + " records · " + fmtSize(r.size));
+          var missing = (r.manifest.problems || []);
+          toast("Backup created: " + r.id + " · " + counts + " records · " + fmtSize(r.size) +
+            (missing.length ? " · saved WITHOUT " + missing.join(", ") : " · copying off-site…"), !!missing.length);
           if (download) window.location.href = "/backups/download/" + encodeURIComponent(r.id);
-          loadList();
+          loadList(); loadStatus();
+          setTimeout(function () { loadStatus(); loadList(); }, 60000);
         } catch (e) { toast("Backup failed: " + e.message, true); }
         finally { b1.disabled = b2.disabled = false; (download ? b1 : b2).textContent = old; }
       }
@@ -221,7 +321,7 @@
         finally { btn.disabled = true; btn.textContent = old; }
       });
 
-      loadList();
+      loadStatus().then(loadList);
     </script>
   </body>
 </html>

@@ -85,7 +85,7 @@ function listingGame(src) {
   return "";
 }
 
-// Lookup over a settings map keyed by game name (autoFarm.funpayNodes and
+// Lookup over a settings map keyed by game name (autoFarm category maps and
 // friends are owner-typed objects, so their keys carry the same trademark /
 // spacing drift the drop archive already tolerates). Exact key first — an
 // operator who typed a key deliberately gets it verbatim — then the

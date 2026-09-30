@@ -543,10 +543,10 @@
 
         var body = list.map(function (c) {
           // A connector check names one marketplace, and the natural thing to do
-          // when looking at it is to open that marketplace. Z2U is excluded from
-          // the console, so it stays a plain row.
+          // when looking at it is to open that marketplace. A market with no
+          // console surface stays a plain row.
           var mk = /^connector\.([a-z0-9]+)$/.exec(String(c.id || ""));
-          var market = mk && mk[1] !== "all" && mk[1] !== "z2u" ? mk[1] : "";
+          var market = mk && mk[1] !== "all" ? mk[1] : "";
           return '<div class="chk' + (market ? " linked" : "") + '"' +
             (market ? ' data-market="' + esc(market) + '" role="link" tabindex="0"' : "") + ">" +
             '<div class="t">' +

@@ -4,7 +4,7 @@
 // WHY THIS EXISTS
 // We only sell one product: Twitch drop accounts. Yet three markets still made
 // the owner type a placement by hand on every publish (Plati/Digiseller's
-// cataloguer category + attributes, GGSel's per-game category, FunPay's bare
+// cataloguer category + attributes, GGSel's per-game category and G2G's
 // numeric node), while utils/autoLister.js has been publishing to seven markets
 // with no human at all. This module is the auto-lister's knowledge lifted out
 // so the manual modal can use it too — see docs/ACCOUNT-LISTINGS-CONTRACT.md.
@@ -14,7 +14,7 @@
 // 1. EACH "NO ANSWER" STAYS DIFFERENT. A miss on GGSel means "fall back to the
 //    configured default"; a miss on G2G means "this game is NOT LISTABLE there
 //    and never will be" (utils/g2gGames.js NOT_LISTABLE — Overwatch, Siege);
-//    a miss on FunPay means "nobody has mapped this game's node yet". An
+//    a miss means "nobody has mapped this game yet". An
 //    "always pick something" rule is exactly how a Twitch-drop bundle ends up
 //    filed under the wrong game's forum, which is the failure brandForGame
 //    returning null exists to prevent. So resolution NEVER guesses: it returns
@@ -60,7 +60,7 @@ const DEGRADED_TTL_MS = 15 * 1000;
 // These are the four boxes on the Listings modal and the four branches that get
 // a server-side fallback in POST /marketplaces/publish. The rest resolve with
 // no UI already and are here only so one call can answer for all of them.
-const MARKETS_NEEDING_CATEGORY = ["ggsel", "digiseller", "funpay", "g2g"];
+const MARKETS_NEEDING_CATEGORY = ["ggsel", "digiseller", "g2g"];
 
 // ---------------------------------------------------------------------------
 // Dependency seam
@@ -69,7 +69,6 @@ const MARKETS_NEEDING_CATEGORY = ["ggsel", "digiseller", "funpay", "g2g"];
 const REAL_DEPS = {
   marketplaces: () => require("./marketplaces"),
   g2gGames: () => require("./g2gGames"),
-  epicnpc: () => require("./epicnpcCatalog"),
   settings: () => require("./settings"),
   // Feature A's canonical game resolver. Only touched when the caller hands us
   // a listing/set/offer instead of a plain string, so this module still loads
@@ -322,37 +321,6 @@ const RESOLVERS = {
     });
   },
 
-  // FunPay is a bare numeric node typed from memory, and a wrong one lists the
-  // account in a different game's section where nobody looking for this game
-  // will ever see it. So the match is EXACT on the normalised name — no fuzzy
-  // fallback, the same rule epicnpcCatalog.nodeForGame enforces and for the
-  // same reason.
-  async funpay(ctx, game) {
-    if (!game) {
-      return miss(
-        "funpay",
-        "No game on this listing, so no FunPay node can be matched",
-      );
-    }
-    const map = autoFarm(ctx).funpayNodes || {};
-    const want = normGame(game);
-    let node = "";
-    for (const key of Object.keys(map)) {
-      if (normGame(key) === want) {
-        node = String(map[key] || "").trim();
-        break;
-      }
-    }
-    if (!node) return miss("funpay", "No FunPay node mapped for " + game);
-    // `node` is the contract's name; `nodeId` is what the publish route reads
-    // (routes/marketplaceRoutes.js:842 `if (!fp.nodeId)`). Both are written so
-    // merging this straight into the publish body works either way.
-    return ok("funpay", {
-      value: { node, nodeId: node },
-      label: "FunPay node " + node,
-      source: "settings",
-    });
-  },
 
   // On G2G the brand IS the game, and a null brand is a DELIBERATE refusal:
   // those games have no creatable Game Items product at all (probed live
@@ -524,75 +492,7 @@ const RESOLVERS = {
     });
   },
 
-  // EpicNPC is a forum: the node decides which game's board the thread lands
-  // on. nodeForGame is exact-match by design and returns null rather than the
-  // nearest board.
-  async epicnpc(ctx, game) {
-    if (!game) {
-      return miss(
-        "epicnpc",
-        "No game on this listing, so no EpicNPC node can be resolved",
-      );
-    }
-    const hit = ctx.dep("epicnpc").nodeForGame(game);
-    if (!hit) return miss("epicnpc", "EpicNPC has no forum for " + game);
-    return ok("epicnpc", {
-      value: { node: hit.node },
-      label: "EpicNPC > " + (hit.name || game),
-      source: "static",
-    });
-  },
 
-  // Z2U's "category" is the (service, game) pair its own seller panel uses, and
-  // BOTH are numeric group ids — z2uGameOptions(service, game) feeds them
-  // straight into /downloadTemp (marketplaces.js:7317-7331). So a game NAME has
-  // to be turned into that pair first, off the seller's own group list; a
-  // caller that already knows the pair passes it in opts.z2u and skips the
-  // extra round trip.
-  async z2u(ctx, game, ms, opts) {
-    const mp = ctx.dep("marketplaces");
-    const pin = opts.z2u || {};
-    let service = String(pin.service || "");
-    let gameId = String(pin.game || "");
-    if (!service || !gameId) {
-      if (!game) {
-        return miss(
-          "z2u",
-          "No game on this listing, so no Z2U group can be resolved",
-        );
-      }
-      const groups =
-        (await tryCall(() => mp.z2uGroups(), ms, "Z2U group list")) || [];
-      const hit = groups.find((g) => g && labelCarriesGame(g.label, game));
-      if (!hit) {
-        return miss("z2u", "Z2U has no seller group for " + game);
-      }
-      service = String(hit.service);
-      gameId = String(hit.game);
-    }
-    const info = await tryCall(
-      () => mp.z2uGameOptions(service, gameId),
-      ms,
-      "Z2U template lookup",
-    );
-    if (!info || !info.gameName) {
-      return miss(
-        "z2u",
-        "Z2U did not return a template for " + (game || gameId),
-      );
-    }
-    return ok("z2u", {
-      // `game` rides along because service+gameName alone cannot address the
-      // group again — the ids are what every other Z2U call takes.
-      value: {
-        gameName: info.gameName,
-        service: info.service || service,
-        game: gameId,
-      },
-      label: "Z2U " + info.gameName,
-      source: "catalog",
-    });
-  },
 };
 
 // zeusxGameConfig's matching rule (marketplaces.js), reimplemented over the
@@ -612,10 +512,10 @@ function zeusxPinned(map, game) {
 // ---------------------------------------------------------------------------
 
 // Only the resolvers that leave the process are cached. Caching a settings read
-// would be worse than useless: the owner fixes a missing FunPay node, reopens
-// the modal, and for thirty minutes still sees "No FunPay node mapped" — with
+// would be worse than useless: the owner fixes a missing category, reopens
+// the modal, and for thirty minutes still sees the old miss — with
 // no cost saved, because the read was a local file to begin with.
-const NETWORK_MARKETS = new Set(["ggsel", "zeusx", "playerauctions", "z2u"]);
+const NETWORK_MARKETS = new Set(["ggsel", "zeusx", "playerauctions"]);
 
 const cache = new Map(); // key -> { until, resolution }
 // In-flight de-duplication. Two modal opens a second apart must not both enter
@@ -641,7 +541,7 @@ function clearCache() {
 // funnelled through utils/listingGame, so a caller that has the row but not the
 // name does not have to spell the precedence chain out again.
 //
-// opts = { deps, timeoutMs, noCache, z2u }
+// opts = { deps, timeoutMs, noCache }
 //
 // NEVER throws and never rejects: a miss is a Resolution with ok:false, because
 // the only caller is an HTTP route that must not 500 on an unmapped game.

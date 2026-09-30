@@ -59,7 +59,7 @@ const unclaimedAccountSchema = new mongoose.Schema(
     // Which marketplace this account is attached to as a stock unit:
     // "gameflip" (live unit or waiting in the relist chain), "digiseller" or
     // "ggsel" (a delivery-code unit on the set's product), "eldorado"/"playerauctions" (handed to
-    // a buyer in an Eldorado order chat), "z2u" (handed over in a Z2U order
+    // a buyer in an Eldorado order chat), "g2g" (handed over on a G2G order
     // delivery), "g2g" (handed over on a G2G order). "" while deciding.
     market: {
       type: String,
@@ -70,7 +70,6 @@ const unclaimedAccountSchema = new mongoose.Schema(
         "ggsel",
         "eldorado",
         "playerauctions",
-        "z2u",
         "g2g",
       ],
       default: "",
@@ -80,9 +79,23 @@ const unclaimedAccountSchema = new mongoose.Schema(
     // Lifecycle. listed -> sold | expired; expired -> released once the pool
     // return has happened. "skipped" = a candidate that failed eligibility and
     // was recorded with a note so the panel shows why it never listed.
+    // "manual" = committed to an owner's hand-made no-claim listing (a vault
+    // unit on sale, or mid-publish — docs/NOCLAIM-SHOP-LISTINGS-CONTRACT.md).
+    // The auto-lister skips it like "listed", but none of its passes
+    // (reconcile / expiry / repair / cap) ever touch it. manual -> sold on a
+    // sale; a release puts back manualPriorStatus (below), or deletes the row
+    // when the manual claim created it.
     status: {
       type: String,
-      enum: ["listed", "sold", "expired", "released", "skipped", "removed"],
+      enum: [
+        "listed",
+        "sold",
+        "expired",
+        "released",
+        "skipped",
+        "removed",
+        "manual",
+      ],
       default: "skipped",
       index: true,
     },
@@ -125,6 +138,22 @@ const unclaimedAccountSchema = new mongoose.Schema(
     bundleLabel: { type: String, default: "" },
     // Gameflip lot this waiting unit is a member of ("" = not in a lot).
     lotId: { type: String, default: "", index: true },
+    // Owner-made no-claim listings (docs/NOCLAIM-SHOP-LISTINGS-CONTRACT.md).
+    // The MarketplaceListing _id this account is committed to ("" while the
+    // publish is in flight), the status it had before the manual claim ("" =
+    // this ledger row was created by the manual claim and is deleted on
+    // release), when it was claimed, and when its post-sale bookkeeping
+    // (bot removal + pool stamps, unclaimedAutoList.spendAccount) ran.
+    manualListing: { type: String, default: "", index: true },
+    manualPriorStatus: { type: String, default: "" },
+    manualAt: { type: Date, default: null },
+    manualSpentAt: { type: Date, default: null },
+    // When the buyer actually GOT this account (markSold). A claim-at-sale
+    // order flips the ledger to "sold" the moment it claims, before the
+    // credential is sent — the post-sale bookkeeping waits for this stamp so
+    // an order that is still being retried (or never completes) does not have
+    // its accounts pulled out of their bots first.
+    manualDeliveredAt: { type: Date, default: null },
   },
   { timestamps: true },
 );

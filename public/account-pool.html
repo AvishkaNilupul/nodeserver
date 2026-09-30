@@ -149,6 +149,7 @@
         <input type="checkbox" id="includeClaimed" style="cursor:pointer;" /> Include claimed
       </label>
       <button class="btn-ghost btn-sm" id="checkUncheckedBtn" title="Queue accounts that have a token but haven't fed the drops archive yet. By default only the available accounts shown here; tick 'Include claimed' to also backfill claimed accounts.">Sync to drop archive</button>
+      <button class="btn-ghost btn-sm" id="replaceTokensBtn" title="Put freshly minted tokens on accounts that already exist (in the pool, a bot or a renter's bot) — each is verified against Twitch first">Replace dead tokens</button>
       <button class="btn-sm" id="importBtn">Import accounts</button>
     </div>
   </div>
@@ -249,6 +250,35 @@ or JSON:
     <footer>
       <button class="btn-ghost" id="importCancel">Cancel</button>
       <button id="importSubmit">Import</button>
+    </footer>
+  </div>
+</div>
+
+<div class="modal-bg" id="replaceBg">
+  <div class="modal" style="max-width:680px;">
+    <header><b>Replace dead tokens</b><button class="x" id="replaceClose">&times;</button></header>
+    <div class="mbody">
+      <div>
+        <label class="lbl">Freshly minted tokens — token-fetcher JSON, or login:token lines</label>
+        <textarea id="replaceInput" placeholder='[
+  { "Login": "…", "ClientSecret": "…", "UniqueId": "…", "Id": "…" }
+]
+
+or one per line:
+login:token'></textarea>
+        <div class="hint" style="margin-top:8px;">
+          For accounts that already exist — in the pool, in a bot, or in a renter's bot — whose token died.
+          Every token is <b>checked against Twitch first</b>: it must log in as that exact account, pass the
+          integrity check and see campaigns. Only then is it written to the pool row, every bot config the
+          account is in, and its renter row; a running bot whose config changes is restarted. Several JSON
+          arrays pasted back to back are fine. Up to <b>25 accounts</b> per paste.
+        </div>
+        <div id="replaceResults" style="margin-top:12px;display:none;font-size:13px;"></div>
+      </div>
+    </div>
+    <footer>
+      <button class="btn-ghost" id="replaceCancel">Close</button>
+      <button id="replaceSubmit">Verify &amp; replace</button>
     </footer>
   </div>
 </div>
@@ -680,6 +710,44 @@ or JSON:
   $("importClose").addEventListener("click", () => $("importBg").classList.remove("show"));
   $("importCancel").addEventListener("click", () => $("importBg").classList.remove("show"));
   $("importBg").addEventListener("click", (e) => { if (e.target === $("importBg")) $("importBg").classList.remove("show"); });
+  // Replace dead tokens — see routes/accountPoolRoutes.js /account-pool/replace-tokens.
+  $("replaceTokensBtn").addEventListener("click", () => {
+    $("replaceInput").value = "";
+    $("replaceResults").innerHTML = "";
+    $("replaceResults").style.display = "none";
+    $("replaceBg").classList.add("show");
+  });
+  $("replaceClose").addEventListener("click", () => $("replaceBg").classList.remove("show"));
+  $("replaceCancel").addEventListener("click", () => $("replaceBg").classList.remove("show"));
+  $("replaceBg").addEventListener("click", (e) => { if (e.target === $("replaceBg")) $("replaceBg").classList.remove("show"); });
+  $("replaceSubmit").addEventListener("click", async () => {
+    const raw = $("replaceInput").value.trim();
+    if (!raw) { toast("Paste the new tokens first", true); return; }
+    const btn = $("replaceSubmit");
+    const old = btn.textContent;
+    btn.disabled = true; btn.textContent = "Verifying with Twitch…";
+    try {
+      const r = await api("/account-pool/replace-tokens", { method: "POST", headers: { "Content-Type": "text/plain; charset=utf-8" }, body: raw });
+      const row = (ok, who, text, note) =>
+        '<div style="padding:7px 0;border-bottom:1px solid var(--line);"><b style="color:var(' + (ok ? "--green" : "--red") + ');">' +
+        (ok ? "✓ " : "✗ ") + esc(who) + "</b> — " + esc(text) + (note ? '<div class="hint">' + esc(note) + "</div>" : "") + "</div>";
+      const rows = (r.results || []).map((x) => x.ok
+        ? row(true, x.login, "updated " + x.updated.join(", ") + (x.restarted.length ? "; restarted " + x.restarted.join(", ") : ""), (x.notes || []).join(" · "))
+        : row(false, x.login, x.reason || "not replaced"));
+      (r.bad || []).forEach((b) => rows.push(row(false, b.login || b.where, b.reason)));
+      $("replaceResults").innerHTML = rows.join("") || '<div class="hint">Nothing to replace.</div>';
+      $("replaceResults").style.display = "block";
+      // The tokens have been used — don't leave them sitting in the page.
+      $("replaceInput").value = "";
+      toast((r.replaced || 0) + " of " + ((r.results || []).length) + " token(s) replaced");
+      if (r.replaced) load();
+    } catch (err) {
+      toast(err.message, true);
+    } finally {
+      btn.disabled = false; btn.textContent = old;
+    }
+  });
+
   $("importSubmit").addEventListener("click", async () => {
     const raw = $("importInput").value.trim();
     if (!raw) { toast("Paste some accounts first", true); return; }

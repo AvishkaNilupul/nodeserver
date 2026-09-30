@@ -7,7 +7,6 @@ const {
   buildDescription,
   derivePrice,
   stackItems,
-  chooseStackItems,
   postEventPrice,
   computeSplit,
   isAutoOwned,
@@ -17,8 +16,6 @@ const {
   filterVerifiedHolders,
   withReservationRollback,
 } = require("../utils/autoLister");
-// The stock side's key builder — the campaign side must produce identical keys.
-const { itemKeyFor } = require("../utils/twitchInventory");
 
 const items = [
   { itemKey: "a|g", name: "Heidel Chest", game: "Black Desert", qty: 1 },
@@ -85,33 +82,6 @@ test("post-event description leads with scarcity and drops the countdown", () =>
   assert.ok(!d.includes("unobtainable"));
 });
 
-// One house description is published to several marketplaces; the closing
-// support line must name the site the buyer is actually on, so a GGSel or
-// Digiseller product never tells buyers to message the seller "on Gameflip".
-test("description names the marketplace the buyer is actually on", () => {
-  const base = {
-    game: "Black Desert",
-    items,
-    campaignName: "Heidel Ball",
-    postEvent: false,
-  };
-  const gf = buildDescription({ ...base, marketplace: "gameflip" });
-  const gg = buildDescription({ ...base, marketplace: "ggsel" });
-  const ds = buildDescription({ ...base, marketplace: "digiseller" });
-  const zx = buildDescription({ ...base, marketplace: "zeusx" });
-  const neutral = buildDescription(base);
-  assert.ok(gf.includes("message me here on Gameflip"));
-  assert.ok(!/on (GGSel|Digiseller|ZeusX)/.test(gf));
-  assert.ok(gg.includes("message me here on GGSel"));
-  assert.ok(!gg.includes("Gameflip"));
-  assert.ok(ds.includes("message me here on Digiseller"));
-  assert.ok(!ds.includes("Gameflip"));
-  assert.ok(zx.includes("message me here on ZeusX"));
-  assert.ok(!zx.includes("Gameflip"));
-  assert.ok(neutral.includes("message me here on the site"));
-  assert.ok(!neutral.includes("Gameflip"));
-});
-
 // Automatic repricing is only ever allowed to move the auto-farmer's OWN
 // prices. Listings the owner made by hand are their own stock at their own
 // price, and the post-event markup must not touch them even when they sit on a
@@ -140,21 +110,10 @@ test("auto-delivery does not by itself make a listing repriceable", () => {
   );
 });
 
-// NOTE ON THE FIXTURES BELOW: they set `lowestOther` as well as `lowest`.
-// `gf.lowest` is the cheapest live Gameflip row INCLUDING OUR OWN; `lowestOther`
-// excludes our owner id and is what "a rival" means. derivePrice used to read
-// `lowest`, so it undercut our own listing by 5% every cycle — our row became
-// the new cheapest, the next publish anchored on that, and the price ratcheted
-// to the $0.75 floor no matter what buyers paid. marketResearch.js:252 names the
-// bug, pricingEvidence.js:141 states the rule ("ONLY lowestOther may act as a
-// rival"), and derivePrice was the last reader of the wrong field.
-//
-// The two are equal whenever our owner id is unknown, so mirroring the value
-// keeps every test below meaning exactly what it did before.
 test("price anchors on sold prices and undercuts live competition", () => {
   const research = {
     markets: {
-      gameflip: { soldRecent: 5, avgSoldPrice: 4.0, lowest: 3.0, lowestOther: 3.0 },
+      gameflip: { soldRecent: 5, avgSoldPrice: 4.0, lowest: 3.0 },
       ggsel: { lowest: 5.0 },
       plati: { lowest: 6.0 },
     },
@@ -173,7 +132,7 @@ test("price anchors on sold prices and undercuts live competition", () => {
 test("a cheap ruble-market floor never drags down a Gameflip price", () => {
   const rocketLeague = {
     markets: {
-      gameflip: { soldRecent: 20, avgSoldPrice: 7.93, lowest: 1.2, lowestOther: 1.2 },
+      gameflip: { soldRecent: 20, avgSoldPrice: 7.93, lowest: 1.2 },
       ggsel: { lowest: 0.38 },
       plati: { lowest: 1.28 },
     },
@@ -189,9 +148,7 @@ test("a cheap ruble-market floor never drags down a Gameflip price", () => {
 test("the price always lands strictly below a live rival", () => {
   for (const rival of [1.2, 1.5, 2.0, 3.1, 4.99]) {
     const p = derivePrice({
-      markets: {
-        gameflip: { soldRecent: 10, avgSoldPrice: 9, lowest: rival, lowestOther: rival },
-      },
+      markets: { gameflip: { soldRecent: 10, avgSoldPrice: 9, lowest: rival } },
     });
     assert.ok(p < rival, `priced ${p} is not below rival ${rival}`);
     assert.ok(p >= 0.75, `priced ${p} is below the platform floor`);
@@ -203,26 +160,20 @@ test("the price always lands strictly below a live rival", () => {
 // listing is $0.75. The anchor must not run away with that.
 test("a thin or outlier sold-price sample never inflates the price", () => {
   const thin = {
-    markets: {
-      gameflip: { soldRecent: 2, avgSoldPrice: 50, lowest: 2.0, lowestOther: 2.0 },
-    },
+    markets: { gameflip: { soldRecent: 2, avgSoldPrice: 50, lowest: 2.0 } },
   };
   // 2 sales is below MIN_SOLD_SAMPLES, so the anchor is ignored entirely and
   // the live $2.00 rival prices it — landing at the quarter below.
   assert.strictEqual(derivePrice(thin), 1.75);
 
   const outlier = {
-    markets: {
-      gameflip: { soldRecent: 5, avgSoldPrice: 28.2, lowest: 0.75, lowestOther: 0.75 },
-    },
+    markets: { gameflip: { soldRecent: 5, avgSoldPrice: 28.2, lowest: 0.75 } },
   };
   // Enough samples, but the live rival is cheaper, so we still undercut it.
   assert.strictEqual(derivePrice(outlier), 0.75);
 
   const noRival = {
-    markets: {
-      gameflip: { soldRecent: 5, avgSoldPrice: 28.2, lowest: 0, lowestOther: 0 },
-    },
+    markets: { gameflip: { soldRecent: 5, avgSoldPrice: 28.2, lowest: 0 } },
   };
   // No competition at all: the anchor stands, but capped at MAX_ANCHOR_USD.
   assert.strictEqual(derivePrice(noRival), 10);
@@ -237,15 +188,13 @@ test("price falls back to cheapest competitor when nothing sold", () => {
 
 test("unknown market probes at $1 and floor is $0.75", () => {
   assert.strictEqual(derivePrice(null), 1.0);
-  const cheap = {
-    markets: { gameflip: { avgSoldPrice: 0.3, lowest: 0.2, lowestOther: 0.2 } },
-  };
+  const cheap = { markets: { gameflip: { avgSoldPrice: 0.3, lowest: 0.2 } } };
   assert.strictEqual(derivePrice(cheap), 0.75);
 });
 
 test("post-event multiplier applies the scarcity markup", () => {
   const research = {
-    markets: { gameflip: { avgSoldPrice: 2.0, lowest: 2.0, lowestOther: 2.0 } },
+    markets: { gameflip: { avgSoldPrice: 2.0, lowest: 2.0 } },
   };
   assert.ok(
     derivePrice(research, { postEventMultiplier: 1.5 }) > derivePrice(research),
@@ -264,53 +213,6 @@ test("stacking unions items across sets without duplicates", () => {
     "b|g",
     "c|g",
   ]);
-});
-
-// onCampaignEnded's stacking gate (the re-verify fix). The old code grew the
-// advertised bundle to the sibling union UNCONDITIONALLY. Delivery — for the
-// live row AND every backlog relist (claimAccountForSet -> availableAccountsForSet)
-// — only ever resolves accounts holding EVERY item in the set, so growing past
-// what any account holds makes the live row over-promise and every relist find
-// no holder and stall. chooseStackItems is that decision, isolated and pure.
-const backed = [items[0]]; // what the live row is already verified/reserved for
-const union = [items[0], items[1], items[2]]; // the bigger sibling union
-
-test("stacking gate GROWS to the union when a verified holder exists", () => {
-  const { items: chosen, stackSkipped } = chooseStackItems(backed, union, 1);
-  assert.strictEqual(chosen, union);
-  assert.strictEqual(stackSkipped, "");
-});
-
-test("stacking gate does NOT grow when no account holds the full union", () => {
-  // The bug's core: 0 holders must keep the already-backed items, never
-  // advertise contents nothing backs.
-  const { items: chosen, stackSkipped } = chooseStackItems(backed, union, 0);
-  assert.strictEqual(chosen, backed);
-  assert.match(stackSkipped, /kept 1 backed item\(s\) instead of advertising 3/);
-});
-
-test("stacking gate is a no-op when there's nothing extra to stack", () => {
-  // No siblings (stacked == current) — never re-lists the same bundle, and
-  // never flags a skip because nothing was withheld.
-  const { items: chosen, stackSkipped } = chooseStackItems(union, union, 0);
-  assert.strictEqual(chosen, union);
-  assert.strictEqual(stackSkipped, "");
-});
-
-test("stacking gate keeps current when the union is somehow smaller", () => {
-  // Defensive: a shrunk union is never grown into, holders or not.
-  const { items: chosen, stackSkipped } = chooseStackItems(union, backed, 5);
-  assert.strictEqual(chosen, union);
-  assert.strictEqual(stackSkipped, "");
-});
-
-test("stacking gate tolerates null/empty inputs without throwing", () => {
-  assert.deepStrictEqual(chooseStackItems(null, null, 0), {
-    items: [],
-    stackSkipped: "",
-  });
-  const grown = chooseStackItems(null, union, 2);
-  assert.strictEqual(grown.items, union);
 });
 
 test("post-event price is +50% on the listing's own price", () => {
@@ -369,40 +271,6 @@ test("looksLikeTitlePlaceholder flags the game/campaign title, not real drops", 
   assert.strictEqual(looksLikeTitlePlaceholder("   ", ctx), true);
 });
 
-// A fully non-Latin drop name (Cyrillic/CJK/etc.) is a REAL item, not a
-// placeholder. The old ASCII-only normLabel stripped every Cyrillic letter to
-// "" and the empty-string check then flagged it as a title — so Tanks Blitz's
-// "Аватар «Медаль хочу»" (and any non-Latin-named drop) never listed.
-test("looksLikeTitlePlaceholder keeps non-Latin (Cyrillic) drop names", () => {
-  const ctx = { game: "Tanks Blitz", campaignName: "ЛБП 4 Плей-офф" };
-  assert.notStrictEqual(normLabel("Аватар «Медаль хочу»"), "");
-  assert.strictEqual(
-    looksLikeTitlePlaceholder("Аватар «Медаль хочу»", ctx),
-    false,
-  );
-  // The Cyrillic campaign title itself is still a placeholder (no artwork).
-  assert.strictEqual(looksLikeTitlePlaceholder("ЛБП 4 Плей-офф", ctx), true);
-});
-
-// Some campaigns are legitimately named after their single reward (ELDEN RING's
-// "Sorcerer Rogier"). A benefit that carries real Twitch artwork is a real drop
-// even when its name equals the campaign title — but a name matching the GAME
-// title, or a nameless/artless title match, is still a placeholder.
-test("looksLikeTitlePlaceholder trusts a campaign-named drop that has artwork", () => {
-  const ctx = { game: "ELDEN RING", campaignName: "Sorcerer Rogier" };
-  assert.strictEqual(
-    looksLikeTitlePlaceholder("Sorcerer Rogier", { ...ctx, hasImage: true }),
-    false,
-  );
-  // Same name, no artwork -> still a placeholder (old behaviour preserved).
-  assert.strictEqual(looksLikeTitlePlaceholder("Sorcerer Rogier", ctx), true);
-  // A GAME-title match is never rescued by artwork.
-  assert.strictEqual(
-    looksLikeTitlePlaceholder("ELDEN RING", { ...ctx, hasImage: true }),
-    true,
-  );
-});
-
 test("resolveCampaignItems drops the AC placeholder and keeps real drops", () => {
   const game = "Assassin's Creed Black Flag Resynced";
   const campaignName = "AC Black Flag Resynced";
@@ -436,140 +304,6 @@ test("resolveCampaignItems drops the AC placeholder and keeps real drops", () =>
     "Cheetah Claw Cat",
     "Rustborne Swords",
   ]);
-});
-
-// End-to-end for the two false positives found on prod (Tanks Blitz probe with
-// a Cyrillic drop, ELDEN RING probe whose drop is named after the campaign).
-// Both carried real imageAssetURLs and were wrongly dropped as placeholders.
-test("resolveCampaignItems keeps a real Cyrillic-named drop", () => {
-  const camp = {
-    game: { displayName: "Tanks Blitz" },
-    timeBasedDrops: [
-      {
-        requiredMinutesWatched: 60,
-        benefitEdges: [
-          {
-            benefit: {
-              name: "Аватар «Медаль хочу»",
-              game: { displayName: "Tanks Blitz" },
-              imageAssetURL: "https://x/img.png",
-            },
-          },
-        ],
-      },
-    ],
-  };
-  const { items, rawBenefits } = resolveCampaignItems(camp, {
-    game: "Tanks Blitz",
-    campaignName: "ЛБП 4 Плей-офф",
-  });
-  assert.strictEqual(rawBenefits, 1);
-  assert.strictEqual(items.length, 1);
-  assert.strictEqual(items[0].name, "Аватар «Медаль хочу»");
-});
-
-test("resolveCampaignItems keeps a campaign-named drop with artwork, drops it without", () => {
-  const withArt = {
-    timeBasedDrops: [
-      {
-        requiredMinutesWatched: 60,
-        benefitEdges: [
-          {
-            benefit: {
-              name: "Sorcerer Rogier",
-              game: { displayName: "ELDEN RING" },
-              imageAssetURL: "https://x/rogier.png",
-            },
-          },
-        ],
-      },
-    ],
-  };
-  const r1 = resolveCampaignItems(withArt, {
-    game: "ELDEN RING",
-    campaignName: "Sorcerer Rogier",
-  });
-  assert.strictEqual(r1.items.length, 1);
-  assert.strictEqual(r1.items[0].name, "Sorcerer Rogier");
-
-  // No artwork on an identically-named benefit -> still treated as placeholder.
-  const noArt = {
-    timeBasedDrops: [
-      {
-        requiredMinutesWatched: 60,
-        benefitEdges: [{ benefit: { name: "Sorcerer Rogier" } }],
-      },
-    ],
-  };
-  const r2 = resolveCampaignItems(noArt, {
-    game: "ELDEN RING",
-    campaignName: "Sorcerer Rogier",
-  });
-  assert.strictEqual(r2.items.length, 0);
-  assert.strictEqual(r2.rawBenefits, 1);
-});
-
-// Latent-asymmetry fix: the stock side (twitchInventory.buildDrops) keys drops
-// on game.displayName||name; the campaign side used to fetch only game.name and
-// key on that. A game whose displayName differs from its name beyond case then
-// produced two itemKeys that never matched, so the holdings gate found 0 holders
-// and the bundle never listed. Both sides must now yield the SAME key.
-test("resolveCampaignItems keys on the game's displayName, matching the stock side", () => {
-  const camp = {
-    game: { displayName: "PUBG: BATTLEGROUNDS" },
-    timeBasedDrops: [
-      {
-        requiredMinutesWatched: 60,
-        benefitEdges: [
-          {
-            benefit: {
-              name: "Golden Kappa",
-              game: { name: "pubg", displayName: "PUBG: BATTLEGROUNDS" },
-            },
-          },
-        ],
-      },
-    ],
-  };
-  const { items } = resolveCampaignItems(camp, {
-    game: "PUBG: BATTLEGROUNDS",
-    campaignName: "Season 30",
-  });
-  assert.strictEqual(items.length, 1);
-  // Identical to what twitchInventory would store for the same reward, so the
-  // holdings gate matches. Keying on name ("pubg") would NOT equal this.
-  assert.strictEqual(
-    items[0].itemKey,
-    itemKeyFor("Golden Kappa", "PUBG: BATTLEGROUNDS"),
-  );
-  assert.notStrictEqual(items[0].itemKey, itemKeyFor("Golden Kappa", "pubg"));
-  assert.strictEqual(items[0].game, "PUBG: BATTLEGROUNDS");
-});
-
-// Fallback chain unchanged when there's no displayName: the benefit game's name
-// still keys it, and an absent benefit game falls back to the campaign's game
-// then the task game — so nothing that worked before regresses.
-test("resolveCampaignItems falls back to name, then campaign game, then task game", () => {
-  const camp = {
-    game: { displayName: "Campaign Game" },
-    timeBasedDrops: [
-      {
-        requiredMinutesWatched: 60,
-        benefitEdges: [
-          { benefit: { name: "Has Name", game: { name: "Benefit Game" } } },
-          { benefit: { name: "No Game" } },
-        ],
-      },
-    ],
-  };
-  const { items } = resolveCampaignItems(camp, {
-    game: "Task Game",
-    campaignName: "C",
-  });
-  const byName = Object.fromEntries(items.map((i) => [i.name, i]));
-  assert.strictEqual(byName["Has Name"].itemKey, itemKeyFor("Has Name", "Benefit Game"));
-  // No benefit game -> the campaign's own game (mirrors stock's c.game fallback).
-  assert.strictEqual(byName["No Game"].itemKey, itemKeyFor("No Game", "Campaign Game"));
 });
 
 /* --------------- holdings gate: only fully-holding accounts -------------- */

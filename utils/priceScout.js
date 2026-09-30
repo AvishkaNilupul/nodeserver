@@ -186,15 +186,6 @@ async function ggselScout(term) {
   return rows;
 }
 
-// FunPay has no API and no cross-game search, but it does not need one: each
-// game's Twitch-drop category ("node") is its own public page, and everything
-// on that page is that game's market. That makes it a cleaner signal than the
-// text searches the other markets need — no relevance filtering, no bleed from
-// unrelated products. The page is served without the golden_key, so this reads
-// as an anonymous visitor and never touches the seller session.
-//
-// Prices are shown in the page's own currency (EUR on /en/), so they are
-// converted to USD by the caller-supplied rate.
 const FP_ROW = /class="tc-item"/g;
 
 // Titles come out of raw HTML, so entities are still encoded ("Jynxzi&#039;s").
@@ -213,43 +204,6 @@ function decodeEntities(s) {
 function fpField(chunk, re) {
   const m = chunk.match(re);
   return m ? decodeEntities(String(m[1])).trim() : "";
-}
-
-function parseFunpayRows(html, usdPerUnit) {
-  const text = String(html || "");
-  const out = [];
-  // Split on the row marker: each chunk holds exactly one offer's markup.
-  const parts = text.split(FP_ROW).slice(1);
-  for (const chunk of parts) {
-    const price = Number(fpField(chunk, /class="tc-price"[^>]*data-s="([0-9.]+)"/));
-    if (!(price > 0)) continue;
-    const title = fpField(chunk, /class="tc-desc-text">([\s\S]*?)<\/div>/)
-      .replace(/\s+/g, " ")
-      .trim();
-    out.push({
-      title,
-      price: round2(price * (Number(usdPerUnit) || 1)),
-      url: "",
-      seller: fpField(chunk, /\/users\/(\d+)\//),
-      sellerName: fpField(chunk, /class="media-user-name">([\s\S]*?)<\/div>/)
-        .replace(/\s+/g, " ")
-        .trim(),
-      // FunPay publishes no per-offer sale counter.
-      sold: undefined,
-    });
-    if (out.length >= MAX_ROWS) break;
-  }
-  return out;
-}
-
-async function funpayScout(nodeId, usdPerUnit) {
-  const node = String(nodeId || "").trim();
-  if (!node) return [];
-  const r = await remoteHttp.fetchText(
-    "https://funpay.com/en/lots/" + encodeURIComponent(node) + "/",
-    { timeout: TIMEOUT },
-  );
-  return parseFunpayRows(r.text, usdPerUnit);
 }
 
 // G2G's public storefront search needs the catalog service + brand (game);
@@ -329,7 +283,5 @@ module.exports = {
   gameflipSoldScout,
   platiScout,
   ggselScout,
-  funpayScout,
   g2gScout,
-  parseFunpayRows,
 };

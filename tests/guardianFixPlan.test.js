@@ -43,14 +43,6 @@ test("GGSel dead-token never offers a fix — its API rejects every delete", () 
   assert.strictEqual(fixPlanFor(finding(), gg), null);
 });
 
-test("FunPay dead-token keeps its existing replace path", () => {
-  const fp = { _id: "l3", marketplace: "funpay", externalId: "73358473", status: "active" };
-  const plan = fixPlanFor(finding(), fp);
-  assert.ok(plan);
-  assert.strictEqual(plan.action, "replace");
-  assert.strictEqual(plan.label, "Replace account");
-});
-
 test("an inactive listing is never fixed, however well recorded", () => {
   const lst = DS([{ accountId: "acc1", contentId: "299264577" }]);
   lst.status = "delisted";

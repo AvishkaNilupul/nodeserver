@@ -45,8 +45,13 @@ async function getRentedConfigSet() {
   }
 }
 
-// Default image used when a new bot can't inherit one from an existing service.
-const DEFAULT_IMAGE = "avishkarex/twitchbot:latest";
+// Farm bots (rent-farm + auto-farm) run the LOCAL-ONLY image the Bots-page
+// rollout (utils/botUpdater.js) builds and maintains. Never a Docker Hub name:
+// "avishkarex/twitchbot" on Docker Hub is a stale pre-July build that watches
+// without being credited, and a missing local tag would silently pull it.
+// Inheriting only this image family means a service left on another tag can
+// never be copied into a new bot.
+const DEFAULT_IMAGE = "twitchbot-farm:latest";
 // Hard cap on accounts accepted in one paste, as a sanity/DoS guard.
 const MAX_BULK_ACCOUNTS = 2000;
 
@@ -374,6 +379,29 @@ function pickDefaultTemplate(files) {
   return cfgs[0] || null;
 }
 
+// Turn a cloned template into an EMPTY stack: no Twitch or Kick users, and no
+// config-level farming games. The template is normally `config.json`, a WORKING
+// operator bot, and its root FavouriteGames are that bot's own games (on contabo
+// 2026-09-30: Warframe / Summer Game Fest / Assassin's Creed Black Flag, the
+// games its 99 accounts farm). Every new stack is a rental one: rent-farm
+// accounts are pinned per account to the game the buyer paid for, and a renter
+// alone on a bot gets the root list from setConfigGames. Inherited operator
+// favourites would only pull those accounts onto games nobody bought — the live
+// rental stacks (config_06, config_54) all carry an empty root list. Every other
+// setting, OnlyFavouriteGames included, stays exactly as the template has it.
+function emptyStackConfig(template) {
+  const data = template && typeof template === "object" ? template : {};
+  if (!data.TwitchSettings || typeof data.TwitchSettings !== "object") {
+    data.TwitchSettings = {};
+  }
+  data.TwitchSettings.TwitchUsers = [];
+  if (data.KickSettings && typeof data.KickSettings === "object") {
+    data.KickSettings.KickUsers = [];
+  }
+  data.FavouriteGames = [];
+  return data;
+}
+
 // Add a new service (mirroring the existing twitchbotxN ones) to a compose
 // document given its raw YAML text. Uses js-yaml to parse + re-emit so
 // hand-written indentation can't be corrupted. Returns the new text plus
@@ -387,7 +415,7 @@ function addServiceToComposeText(raw, container, file) {
   let image = DEFAULT_IMAGE;
   for (const key of Object.keys(doc.services)) {
     const svc = doc.services[key];
-    if (svc && typeof svc.image === "string" && svc.image) {
+    if (svc && typeof svc.image === "string" && /^twitchbot-farm(:|$)/.test(svc.image)) {
       image = svc.image;
       break;
     }
@@ -396,6 +424,8 @@ function addServiceToComposeText(raw, container, file) {
   doc.services[container] = {
     image,
     container_name: container,
+    environment: ["INSIDE_DOCKER=true"],
+    user: "0:0",
     restart: "always",
     // Caps each container's own stdout/stderr log (separate from the app's
     // internal log files under ./logs) so a bot stuck retrying in a tight
@@ -408,7 +438,7 @@ function addServiceToComposeText(raw, container, file) {
       driver: "json-file",
       options: { "max-size": "10m", "max-file": "3" },
     },
-    volumes: ["./" + file + ":/app/config.json", "./logs:/app/logs"],
+    volumes: ["./" + file + ":/app/Configuration/config.json", "./logs:/app/logs"],
   };
 
   const text = yaml.dump(doc, { lineWidth: -1, noRefs: true });
@@ -2027,13 +2057,7 @@ async function provisionEmptyConfig(host) {
     } catch {
       throw new Error("Template config is not valid JSON");
     }
-    if (!data.TwitchSettings || typeof data.TwitchSettings !== "object") {
-      data.TwitchSettings = {};
-    }
-    data.TwitchSettings.TwitchUsers = [];
-    if (data.KickSettings && typeof data.KickSettings === "object") {
-      data.KickSettings.KickUsers = [];
-    }
+    data = emptyStackConfig(data);
     await hosts.writeFileAtomic(host, slot.file, JSON.stringify(data, null, 2));
     try {
       if (composeFile) {
@@ -2067,9 +2091,11 @@ module.exports.parseGamesList = parseGamesList;
 module.exports.dedupeAccounts = dedupeAccounts;
 module.exports.validFile = validFile;
 module.exports.containerForFile = containerForFile;
+module.exports.addServiceToComposeText = addServiceToComposeText;
 module.exports.addAccountsToConfig = addAccountsToConfig;
 module.exports.addRenterAccountsToConfig = addRenterAccountsToConfig;
 module.exports.provisionEmptyConfig = provisionEmptyConfig;
+module.exports.emptyStackConfig = emptyStackConfig;
 module.exports.countConfigAccounts = countConfigAccounts;
 module.exports.getConfigGames = getConfigGames;
 module.exports.setConfigGames = setConfigGames;

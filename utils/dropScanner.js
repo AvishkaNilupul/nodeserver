@@ -41,6 +41,7 @@ const { cacheImage } = require("./imageCache");
 const accountState = require("./twitchAccountState");
 const suspendedAccounts = require("./suspendedAccounts");
 const { logEvent } = require("./systemLog");
+const { sendTelegram } = require("./telegram");
 const { stopFarmingGame } = require("./farmControl");
 
 // Marketplace claim tags: a DropLog reserved with one of these is merely
@@ -435,10 +436,72 @@ function logStatusChange(acc, prev, worker) {
   }
 }
 
+// New bans found by the scanner, told to the operator in ONE Telegram per batch.
+// The scanner is where a ban is usually noticed first (the next scan's token is
+// rejected and the existence probe says gone), yet until 2026-09-25 it told
+// nobody: the only "🚫 confirmed gone" Telegram came from the tick's suspension
+// sweep, and that one was mostly re-announcing old bans. The two lists mean
+// different things and are kept apart: an account that was scanning fine and is
+// now gone is a real ban; one that was already gone the very first time this
+// system read it (e.g. a config imported from another host) has an unknown ban
+// date — 44 of those surfaced at once in the 2026-09-20 pi→contabo move.
+const BAN_NEWS_FLUSH_MS = 10 * 60 * 1000;
+const banNews = { banned: [], deadOnArrival: [], timer: null };
+
+function noteNewBan(acc, prevStatus) {
+  const login = acc.login || String(acc._id);
+  const firstRead = !prevStatus || prevStatus === "pending";
+  (firstRead ? banNews.deadOnArrival : banNews.banned).push(login);
+  if (!banNews.timer) {
+    banNews.timer = setTimeout(() => {
+      flushBanNews().catch(() => {});
+    }, BAN_NEWS_FLUSH_MS);
+    if (banNews.timer.unref) banNews.timer.unref();
+  }
+}
+
+function listLogins(list, max = 15) {
+  return (
+    list.slice(0, max).join(", ") +
+    (list.length > max ? " (+" + (list.length - max) + " more)" : "")
+  );
+}
+
+async function flushBanNews() {
+  const banned = banNews.banned.splice(0);
+  const doa = banNews.deadOnArrival.splice(0);
+  if (banNews.timer) clearTimeout(banNews.timer);
+  banNews.timer = null;
+  const parts = [];
+  if (banned.length) {
+    parts.push(
+      "🚫 Twitch banned " +
+        banned.length +
+        " account(s) that were working until now: " +
+        listLogins(banned) +
+        ".",
+    );
+  }
+  if (doa.length) {
+    parts.push(
+      doa.length +
+        " account(s) were already gone the first time they were scanned (ban date unknown): " +
+        listLogins(doa) +
+        ".",
+    );
+  }
+  if (!parts.length) return;
+  await sendTelegram("Drop scanner: " + parts.join(" ")).catch(() => {});
+}
+
+const SUSPENDED_ERROR =
+  "Account no longer exists on Twitch (suspended or deleted)";
+
 async function scanAccount(acc, worker) {
   const host = worker.host.transport === "local" ? null : worker.host;
   const now = new Date();
   const prevStatus = acc.lastScanStatus;
+  const prevSuspendedAt = acc.suspendedAt || null;
   let inv;
   try {
     inv = await fetchInventory(acc.clientSecret, { host });
@@ -452,25 +515,35 @@ async function scanAccount(acc, worker) {
     // does not exist any more". One extra token-less query settles it, and only a
     // definite `gone` upgrades the verdict — an UNKNOWN (rate limit, 5xx) leaves
     // token_invalid standing, exactly as before.
+    //
+    // Except for an account ALREADY known to be gone: there, only a definite
+    // "exists" (it came back) may demote the verdict. An inconclusive probe or a
+    // plain scan error proves nothing, and demoting on one sent the row back to
+    // token_invalid, where the tick's sweep re-probed it, stamped a fresh
+    // suspendedAt and announced it as a brand-new ban — every day.
+    let seen = null;
     if (acc.lastScanStatus === "token_invalid" && (acc.login || "")) {
-      const seen = await accountState.probeAccount(acc.login);
-      if (seen === accountState.GONE) {
-        acc.lastScanStatus = "suspended";
-        acc.suspendedAt = acc.suspendedAt || now;
-        acc.lastScanError =
-          "Account no longer exists on Twitch (suspended or deleted)";
-        // The same Twitch account often exists twice: here as a deployed
-        // BotAccount and again as the AvailableAccount pool row it came from.
-        // Marking only this side leaves the twin looking alive until the pool's
-        // own once-a-day probe happens to reach it, and the suspension sweep
-        // then reports that stale twin as a BRAND NEW ban — measured on prod,
-        // 50 of the 67 "newly banned" accounts in the 2026-08-18 Telegram alert
-        // were re-discoveries of bans already announced on 08-05/06/10/11.
-        // Propagating immediately is what keeps one ban to one notification.
-        await suspendedAccounts
-          .propagateSuspensionToPool([acc.login])
-          .catch(() => {});
-      }
+      seen = await accountState.probeAccount(acc.login);
+    }
+    if (prevStatus === "suspended" && seen !== accountState.EXISTS) {
+      acc.lastScanStatus = "suspended";
+      acc.lastScanError = SUSPENDED_ERROR;
+    } else if (seen === accountState.GONE) {
+      acc.lastScanStatus = "suspended";
+      acc.suspendedAt = acc.suspendedAt || now;
+      acc.lastScanError = SUSPENDED_ERROR;
+      if (!prevSuspendedAt) noteNewBan(acc, prevStatus);
+      // The same Twitch account often exists twice: here as a deployed
+      // BotAccount and again as the AvailableAccount pool row it came from.
+      // Marking only this side leaves the twin looking alive until the pool's
+      // own once-a-day probe happens to reach it, and the suspension sweep
+      // then reports that stale twin as a BRAND NEW ban — measured on prod,
+      // 50 of the 67 "newly banned" accounts in the 2026-08-18 Telegram alert
+      // were re-discoveries of bans already announced on 08-05/06/10/11.
+      // Propagating immediately is what keeps one ban to one notification.
+      await suspendedAccounts
+        .propagateSuspensionToPool([acc.login])
+        .catch(() => {});
     }
     await acc.save();
     logStatusChange(acc, prevStatus, worker);
@@ -910,4 +983,5 @@ module.exports = {
   setIntervalMs,
   backfillItemKeys,
   upsertDrops,
+  __test: { scanAccount, flushBanNews, banNews },
 };

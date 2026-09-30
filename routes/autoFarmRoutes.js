@@ -543,6 +543,10 @@ router.post("/auto-farm/settings", requireSuperadmin, async (req, res) => {
         /[^0-9]/g,
         "",
       );
+    // Plati / GGSel on/off for every automatic lister (utils/settings.js
+    // platiEnabled, ggselEnabled).
+    if ("platiEnabled" in b) patch.platiEnabled = !!b.platiEnabled;
+    if ("ggselEnabled" in b) patch.ggselEnabled = !!b.ggselEnabled;
     if ("ggselCategoryId" in b)
       patch.ggselCategoryId = String(b.ggselCategoryId || "").replace(
         /[^0-9]/g,
