@@ -651,3 +651,45 @@ test("farm order ids are namespaced away from the other marketplaces", () => {
   assert.strictEqual(farm.farmOrderKey("1788804161980Y02Q-1"), "g2g:1788804161980Y02Q-1");
   assert.notStrictEqual(farm.farmOrderKey("123"), pa.farmOrderKey("123"));
 });
+
+/* ------------- my_offers paging: a page past the end answers 404 ------------- */
+
+// Measured on the live account 2026-09-30: 120 offers read 60 at a time →
+// pages 1 and 2 hold 60 each, page 3 answers HTTP 404 "Data was not found".
+// That 404 stopped every G2G publish (the offer-shape lookup lists our offers).
+function offersPage(n, from) {
+  return Array.from({ length: n }, (_, i) => ({
+    offer_id: "G" + (from + i),
+    title: "t" + (from + i),
+    status: "live",
+    brand_id: "lgc_game_1",
+  }));
+}
+
+test("g2gListOffers: a 404 on a page past the last one is the end of the list, not a failure", async () => {
+  const { mp, calls } = loadG2G({
+    respond: (call) => {
+      if (!/my_offers/.test(call.url)) return okBody({});
+      const page = Number(call.params.page);
+      if (page === 1) return okBody({ results: offersPage(60, 0) });
+      if (page === 2) return okBody({ results: offersPage(60, 60) });
+      throw httpError(404, { code: 4040, messages: [{ text: "Data was not found" }] });
+    },
+  });
+  const rows = await mp.g2gListOffers({ pageSize: 60, maxPages: 3 });
+  assert.strictEqual(rows.length, 120);
+  assert.strictEqual(rows[119].offerId, "G119");
+  assert.strictEqual(sellerCalls(calls).filter((c) => /my_offers/.test(c.url)).length, 3);
+});
+
+test("g2gListOffers: a 404 on page 1 is still a real error", async () => {
+  const { mp } = loadG2G({
+    respond: (call) => {
+      if (/my_offers/.test(call.url)) {
+        throw httpError(404, { code: 4040, messages: [{ text: "Data was not found" }] });
+      }
+      return okBody({});
+    },
+  });
+  await assert.rejects(() => mp.g2gListOffers({ pageSize: 60, maxPages: 3 }), /G2G list offers failed \(HTTP 404\)/);
+});

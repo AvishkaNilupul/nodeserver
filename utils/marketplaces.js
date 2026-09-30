@@ -2839,11 +2839,23 @@ async function g2gListOffers({ pageSize = 100, maxPages = 30, status } = {}) {
     // check silently stopped protecting against duplicates past offer 20.
     const params = { page, page_size: pageSize };
     if (status) params.status = status;
-    const p = await g2gRequest(
-      "get",
-      "/v3/offer/seller/" + encodeURIComponent(seller) + "/my_offers",
-      { params, what: "G2G list offers" },
-    );
+    let p;
+    try {
+      p = await g2gRequest(
+        "get",
+        "/v3/offer/seller/" + encodeURIComponent(seller) + "/my_offers",
+        { params, what: "G2G list offers" },
+      );
+    } catch (e) {
+      // G2G answers a page PAST the last one with HTTP 404 "Data was not found"
+      // instead of an empty page. When the offer count is an exact multiple of
+      // the page size (120 offers read 60 at a time, 2026-09-30) the loop asks
+      // for that page, and treating the 404 as a failure stopped every G2G
+      // publish before it began. Past page 1 it is simply the end of the list;
+      // a 404 on page 1 is still a real error.
+      if (page > 1 && e && (e.status === 404 || /\(HTTP 404\)/.test(String(e.message)))) break;
+      throw e;
+    }
     const rows = (p && (p.results || p.offers)) || [];
     for (const o of rows) {
       out.push({
