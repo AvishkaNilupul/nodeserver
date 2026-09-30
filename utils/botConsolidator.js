@@ -159,6 +159,10 @@ async function collectNamedContainers(host, names) {
       unreadable.push({ container, file: null, error: "unrecognised name" });
       continue;
     }
+    // A rental stack's accounts are renters' and paid buyers', tracked by a
+    // ledger this tool does not re-point: never repacked.
+    const refusal = await require("../routes/botConfigRoutes").rentalStackRefusal(host.id, file);
+    if (refusal) throw new Error(refusal);
     try {
       out.push(await readContainer(host, container, file));
     } catch (e) {

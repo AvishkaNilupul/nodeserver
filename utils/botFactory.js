@@ -38,7 +38,11 @@ function findNextSlot(files) {
       if (max < 1) max = 1;
       continue;
     }
-    const m = f.match(/^config_0*(\d+)\.json$/);
+    // Archived and backup copies count too (config_59.json.deleted-<ts>,
+    // config_59.json.bak): a slot number is never handed out twice, so a
+    // ledger row, an owed reload or a stack registration that still names an
+    // old number can never land on a new bot.
+    const m = f.match(/^config_0*(\d+)\.json(?:$|\.)/);
     if (m) {
       const n = parseInt(m[1], 10);
       if (n > max) max = n;

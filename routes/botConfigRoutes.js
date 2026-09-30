@@ -22,6 +22,37 @@ const {
 
 const router = express.Router();
 
+// A rental stack is never deleted or moved by the operator's bot tools: its
+// accounts are renters' and paid rent-farm buyers', its ledger (RenterAccount)
+// points at it, and neither tool re-points the ledger — the accounts would sit
+// on no bot while every record said they farm. scripts/move-renter-stack.js
+// moves one with its ledger. Returns the refusal text, or "" when the file is
+// not a rental stack (fails CLOSED: an unreadable registry refuses).
+async function rentalStackRefusal(hostId, file) {
+  try {
+    const RenterBotStack = require("../models/RenterBotStack");
+    const hid = String(hostId || "local");
+    const [stack, live] = await Promise.all([
+      RenterBotStack.findOne({ host: hid, file, enabled: true }, { _id: 1 }).lean(),
+      RenterAccount.countDocuments({
+        configFile: file,
+        enabled: true,
+        farmEndedAt: null,
+        host: hid === "local" ? { $in: ["local", "", null] } : hid,
+      }),
+    ]);
+    if (!stack && !live) return "";
+    return (
+      file + " on " + hid + " is a rental stack" +
+      (live ? " holding " + live + " renter / rent-farm account(s)" : "") +
+      " — the Bots page cannot delete or move it (its ledger would point at nothing). " +
+      "Move it with scripts/move-renter-stack.js, or empty and unregister it first."
+    );
+  } catch (e) {
+    return "Could not check whether " + file + " is a rental stack (" + e.message + ") — refusing.";
+  }
+}
+
 // Config files that are rented out to a renter (managed in the Renting section,
 // not on the operator's Bots page). Returned as a Set of "<hostId>|<file>" so
 // the bot-list endpoints can keep renter bots out of the operator's own view.
@@ -357,7 +388,11 @@ function findNextSlot(files) {
       if (max < 1) max = 1;
       continue;
     }
-    const m = f.match(/^config_0*(\d+)\.json$/);
+    // Archived and backup copies count too (config_59.json.deleted-<ts>,
+    // config_59.json.bak): a slot number is never handed out twice, so a
+    // ledger row, an owed reload or a stack registration that still names an
+    // old number can never land on a new bot.
+    const m = f.match(/^config_0*(\d+)\.json(?:$|\.)/);
     if (m) {
       const n = parseInt(m[1], 10);
       if (n > max) max = n;
@@ -1286,6 +1321,8 @@ router.post("/bot-configs/move", requireSuperadmin, async (req, res) => {
   if (!validFile(file)) {
     return res.status(400).json({ success: false, message: "Invalid file" });
   }
+  const refusal = await rentalStackRefusal(fromHost.id, file);
+  if (refusal) return res.status(409).json({ success: false, message: refusal });
   const start = body.start !== false; // default true
   if (!ALLOW_RESTART && start) {
     return res.status(403).json({
@@ -1624,6 +1661,8 @@ router.delete(
     if (!container) {
       return res.status(400).json({ success: false, message: "Invalid file" });
     }
+    const refusal = await rentalStackRefusal(host.id, file);
+    if (refusal) return res.status(409).json({ success: false, message: refusal });
     try {
       if (!(await hosts.exists(host, file))) {
         return res
@@ -2138,6 +2177,7 @@ module.exports.addRenterAccountsToConfig = addRenterAccountsToConfig;
 module.exports.provisionEmptyConfig = provisionEmptyConfig;
 module.exports.emptyStackConfig = emptyStackConfig;
 module.exports.countConfigAccounts = countConfigAccounts;
+module.exports.rentalStackRefusal = rentalStackRefusal;
 module.exports.getConfigGames = getConfigGames;
 module.exports.setConfigGames = setConfigGames;
 module.exports.getAccountGames = getAccountGames;

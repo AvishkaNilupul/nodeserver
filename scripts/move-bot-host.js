@@ -70,6 +70,10 @@ async function main() {
   const dst = hosts.resolveHost(DST_ID);
   if (!src || !dst) throw new Error("unknown host id");
   if (src.id === dst.id) throw new Error("source and destination are the same host");
+  // A rental stack moves with its ledger (scripts/move-renter-stack.js); this
+  // tool re-points BotAccount only and would strand every renter / buyer row.
+  const refusal = await bc.rentalStackRefusal(src.id, FILE);
+  if (refusal) throw new Error(refusal);
   console.log(`== ${src.id}:${FILE} (${CONTAINER}) -> ${dst.id}:${DEST} (${DST_CONTAINER})   APPLY=${APPLY}`);
 
   const data = JSON.parse(await hosts.readFile(src, FILE));
