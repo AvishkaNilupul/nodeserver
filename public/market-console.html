@@ -355,6 +355,16 @@
 
     function rowOrders(r) {
       var bad = r.state === "failed" || r.state === "cancelled";
+      // Each account's LIVE window from the ledger: when it ends, and whether
+      // it is really on a bot — what decides a close or an extension.
+      var chips = (r.live || []).map(function (a) {
+        var cls = !a.known ? "s-unknown" : a.ended ? "s-unknown" : a.onBot ? "s-ok" : "s-fail";
+        var txt = esc(a.login) + " · " +
+          (!a.known ? "no ledger row" : a.ended ? "window ended"
+            : (a.farmUntil ? "until " + esc(String(a.farmUntil).slice(0, 10)) : "open-ended") +
+              (a.onBot ? "" : " · OFF BOT"));
+        return '<span class="pill ' + cls + '">' + txt + "</span>";
+      }).join(" ");
       return '<div class="row"><div class="r1">' +
         '<span class="t">' + esc(r.offerTitle || r.game || r.orderId) + "</span>" +
         '<span class="amt"><span class="pill ' + (bad ? "s-fail" : r.state === "delivered" ? "s-ok" : "s-warn") + '">' + esc(r.state) + "</span></span></div>" +
@@ -363,8 +373,41 @@
         "<span>" + ((r.accounts || []).length) + " account(s)</span>" +
         (r.attempts > 1 ? "<span>" + r.attempts + " tries</span>" : "") +
         "<span>" + esc(when(r.createdAt)) + "</span></div>" +
+        (chips ? '<div class="r2">' + chips + "</div>" : "") +
         (r.lastError ? '<div class="err">' + esc(r.lastError) + "</div>" : "") +
+        (r.state !== "cancelled" && (r.accounts || []).length
+          ? '<div class="r2"><button class="closeorder" data-close="' + esc(r.orderId) + '">Close &amp; end windows</button></div>'
+          : "") +
         "</div>";
+    }
+
+    // Close a rent-farm order the buyer walked away from (refund, cancel, lost
+    // dispute): marks it cancelled and ends its accounts' windows, so the lapse
+    // sweep pulls them off the bot within ~5 min. A human decision (the order
+    // watch only pages), so it asks first.
+    async function closeOrder(orderId, btn) {
+      var reason = prompt(
+        "Close rent-farm order " + orderId + "?\n\nIts accounts stop farming within about 5 minutes " +
+          "(a login that was sold again under a newer order keeps farming for that order).\n\nReason:",
+        "refunded / cancelled by the buyer",
+      );
+      if (reason === null) return;
+      if (btn) btn.disabled = true;
+      try {
+        var r = await fetch("/renters/farm-orders/" + encodeURIComponent(orderId) + "/close", {
+          method: "POST",
+          credentials: "same-origin",
+          headers: { "Content-Type": "application/json", Accept: "application/json" },
+          body: JSON.stringify({ reason: reason }),
+        });
+        var j = await r.json().catch(function () { return null; });
+        if (!r.ok || !j || j.success === false) throw new Error((j && j.message) || ("HTTP " + r.status));
+        alert(j.note || "Order closed.");
+        if (btn) btn.textContent = "Closed";
+      } catch (e) {
+        alert("Could not close it: " + e.message);
+        if (btn) btn.disabled = false;
+      }
     }
 
     function rowErrors(r) {
@@ -763,6 +806,11 @@
         if (el.__bound) return;
         el.__bound = true;
         el.onclick = function () { openTrail(el.getAttribute("data-order")); };
+      });
+      Array.prototype.forEach.call(document.querySelectorAll("button.closeorder"), function (el) {
+        if (el.__bound) return;
+        el.__bound = true;
+        el.onclick = function () { closeOrder(el.getAttribute("data-close"), el); };
       });
     }
 

@@ -674,6 +674,38 @@ router.get(
           .sort({ createdAt: -1, _id: -1 })
           .limit(limit + 1)
           .lean();
+        // Each account's LIVE window from the rent-farm ledger (the order row
+        // only records what was handed over): when it ends, whether it ended,
+        // and whether it is on a bot — what an operator needs before closing
+        // or extending an order. Best-effort: a failed read shows no chips.
+        try {
+          const Renter = require("../models/Renter");
+          const RenterAccount = require("../models/RenterAccount");
+          const holder = await Renter.findOne({ usernameLower: "operator-selffarm" }, { _id: 1 }).lean();
+          const logins = [...new Set(rows.flatMap((o) => (o.accounts || []).map((a) => String(a.login || "").toLowerCase())).filter(Boolean))];
+          if (holder && logins.length) {
+            const esc = (x) => x.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+            const ledger = await RenterAccount.find(
+              { renter: holder._id, login: { $in: logins.map((l) => new RegExp("^" + esc(l) + "$", "i")) } },
+              { login: 1, farmUntil: 1, farmEndedAt: 1, configFile: 1, enabled: 1 },
+            ).lean();
+            const byLogin = new Map(ledger.map((a) => [String(a.login || "").toLowerCase(), a]));
+            for (const o of rows) {
+              o.live = (o.accounts || []).map((a) => {
+                const l = byLogin.get(String(a.login || "").toLowerCase());
+                return {
+                  login: a.login || "",
+                  farmUntil: (l && l.farmUntil) || a.farmUntil || null,
+                  ended: !!(l && l.farmEndedAt),
+                  onBot: !!(l && l.configFile && l.enabled !== false),
+                  known: !!l,
+                };
+              });
+            }
+          }
+        } catch (e) {
+          console.error("market console orders ledger join:", e.message);
+        }
         return res.json({
           success: true,
           ...paginate(rows, limit, "createdAt"),
