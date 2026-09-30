@@ -5,7 +5,7 @@
 // The lease + suspension are enforced on EVERY request, not just at login — a
 // renter whose access period lapses or who gets suspended is locked out on
 // their very next call, and their session is destroyed.
-const { getById, isBlocked, isOperatorHolder } = require("../utils/renters");
+const { getById, isBlocked, isOperatorHolder, notStarted } = require("../utils/renters");
 
 function wantsHtml(req) {
   return req.accepts(["json", "html"]) === "html";
@@ -40,8 +40,19 @@ async function requireRenter(req, res, next) {
     }
     // The rent-farm holder is an internal container of paid buyers, never a
     // renter who logs in: a session for it could Stop or re-game every buyer.
-    if (isBlocked(renter) || isOperatorHolder(renter)) {
+    // A lease that has not started yet opens nothing either.
+    if (isBlocked(renter) || isOperatorHolder(renter) || notStarted(renter)) {
       return denyBlocked(req, res);
+    }
+    // A password reset or a suspend bumps the renter's session epoch: a
+    // session opened before it is over (a stolen cookie, or the old password's
+    // holder, does not outlive the reset). Sessions from before epochs existed
+    // carry none and match a renter still at 0.
+    if ((Number(sess.epoch) || 0) !== (Number(renter.sessionEpoch) || 0)) {
+      // Not "access ended": the renter only has to sign in again.
+      if (req.session) req.session.destroy(() => {});
+      if (wantsHtml(req)) return res.redirect("/renter-login.html");
+      return res.status(401).json({ success: false, message: "Your session has ended — please sign in again." });
     }
     // Attach the fresh record so routes derive scope from the DB, not the
     // session snapshot (which could be stale after an admin edit).

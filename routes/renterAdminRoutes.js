@@ -1129,6 +1129,9 @@ router.post("/renters/:id/suspend", requireSuperadmin, async (req, res) => {
     r = await Renter.findById(req.params.id); // fresh, under the mark
     if (!r) return res.status(404).json({ success: false, message: "Not found" });
     r.status = "suspended";
+    // Every open portal session ends now — and stays ended after an unsuspend
+    // (middleware/renterAuth compares the epoch).
+    r.sessionEpoch = (Number(r.sessionEpoch) || 0) + 1;
     let botStopped = false;
     if (r.botFile) {
       const host = hosts.resolveHost(r.botHost);

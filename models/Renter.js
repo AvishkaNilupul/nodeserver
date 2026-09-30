@@ -53,6 +53,11 @@ const renterSchema = new mongoose.Schema(
 
     // Bookkeeping.
     lastLoginAt: { type: Date, default: null },
+    // Bumped by a password reset and by a suspend: every portal session
+    // carries the epoch it logged in under and dies when they differ, so a
+    // reset really locks out whoever held the old password (or a stolen
+    // cookie), and an unsuspend does not revive sessions from before.
+    sessionEpoch: { type: Number, default: 0 },
     // Stamped when a suspend/expiry sweep has already stopped their bot, so the
     // sweep doesn't keep issuing stop calls every tick.
     botStoppedAt: { type: Date, default: null },

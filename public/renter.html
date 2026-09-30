@@ -176,7 +176,7 @@
         return d;
       }
 
-      const ACC_LABEL = { active:"Active", pending:"Awaiting activation", issue:"Needs fixing" };
+      const ACC_LABEL = { active:"Active", pending:"Awaiting activation", issue:"Needs fixing", ended:"Farming ended" };
       function accBadge(s){ const cls = s==="active"?"ok":s==="issue"?"bad":"wait"; return '<span class="badge '+cls+'">'+(ACC_LABEL[s]||s)+"</span>"; }
 
       function fmtDate(d){ return d ? new Date(d).toLocaleDateString() : "—"; }

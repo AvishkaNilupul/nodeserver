@@ -42,6 +42,13 @@ function isBlocked(renter) {
   return !renter || renter.status === "suspended" || isExpired(renter);
 }
 
+// A lease that has not STARTED yet (accessStart in the future). The portal is
+// closed until then; the bots are not touched by this (isBlocked is what the
+// expiry sweep acts on, and it does not include it).
+function notStarted(renter) {
+  return !!(renter && renter.accessStart && new Date(renter.accessStart) > new Date());
+}
+
 // The internal holder renter every rent-farm ("Automatic Farming") sale is
 // provisioned under (utils/operatorFarm.js OPERATOR_USERNAME). It is NOT a
 // renter: its accounts are paid buyers spread over many stacks, so renter-level
@@ -73,6 +80,25 @@ function sanitizeRenter(renter) {
     notes: renter.notes || "",
     createdAt: renter.createdAt,
     updatedAt: renter.updatedAt,
+  };
+}
+
+// The renter's OWN view of their record (portal): no operator notes, and no
+// host / config file — those are the operator's business.
+function portalRenter(renter) {
+  if (!renter) return null;
+  return {
+    id: String(renter._id),
+    username: renter.username,
+    displayName: renter.displayName || "",
+    status: renter.status,
+    farmGames: Array.isArray(renter.farmGames) ? renter.farmGames : [],
+    maxAccounts: Number(renter.maxAccounts) || 0,
+    accessStart: renter.accessStart || null,
+    accessEnd: renter.accessEnd || null,
+    expired: isExpired(renter),
+    blocked: isBlocked(renter),
+    notStarted: notStarted(renter),
   };
 }
 
@@ -152,7 +178,8 @@ async function setPassword(id, password) {
   const passwordHash = await bcrypt.hash(password, BCRYPT_ROUNDS);
   const renter = await Renter.findByIdAndUpdate(
     id,
-    { $set: { passwordHash, passwordEnc: encrypt(password) } },
+    // The epoch bump ends every session opened with the old password.
+    { $set: { passwordHash, passwordEnc: encrypt(password) }, $inc: { sessionEpoch: 1 } },
     { new: true },
   );
   if (!renter) throw new Error("Renter not found");
@@ -183,4 +210,6 @@ module.exports = {
   authenticate,
   setPassword,
   revealPassword,
+  notStarted,
+  portalRenter,
 };

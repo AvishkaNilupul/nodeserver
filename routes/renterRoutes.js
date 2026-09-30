@@ -137,6 +137,8 @@ router.get("/renter/accounts", requireRenter, async (req, res) => {
       lastScanStatus: 1,
       dropCount: 1,
       lastScanAt: 1,
+      farmUntil: 1,
+      farmEndedAt: 1,
     })
       .sort({ login: 1 })
       .lean();
@@ -145,9 +147,12 @@ router.get("/renter/accounts", requireRenter, async (req, res) => {
       accounts: accs.map((a) => ({
         id: String(a._id),
         login: a.login || "",
-        status: botStatus(a.lastScanStatus),
+        // A window that ended is off the bot: "ended", not "active" — the
+        // last scan of an account nothing farms any more was still "ok".
+        status: a.farmEndedAt ? "ended" : botStatus(a.lastScanStatus),
         dropCount: a.dropCount || 0,
         lastScanAt: a.lastScanAt || null,
+        farmUntil: a.farmUntil || null,
       })),
     });
   } catch (err) {
