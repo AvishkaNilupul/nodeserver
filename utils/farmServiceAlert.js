@@ -83,7 +83,9 @@ async function alertFarmFailure({
   reason = "",
   buyerUsername = "",
 }) {
-  const detail = String(reason || "unknown").slice(0, 400);
+  // 900, not 400: buffer pages lead with the pool id and login but carry the
+  // instruction at the end, and 400 cut exactly that off (2026-10-01 review).
+  const detail = String(reason || "unknown").slice(0, 900);
   // Always on the console, whatever Telegram does — pm2 logs are the fallback
   // record and this failure previously left no trace there beyond the count.
   console.error(

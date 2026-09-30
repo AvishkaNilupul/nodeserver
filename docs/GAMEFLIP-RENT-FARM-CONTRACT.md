@@ -186,21 +186,34 @@ One check, `gameflip.rentfarm`:
 4. **A failed publish releases the account immediately** — a pristine account
    held by a listing that does not exist is the leak this codebase has hit
    repeatedly.
-5. **Delisted, cancelled or 404 ⇒ the account goes back to the pool.** The
-   watcher's retire path fires for `expired`/`cancelled`/404; it calls
-   `releaseBuffered` for a `rentFarm` row rather than the DropSet-scoped
-   `releaseAccount`.
-   **Amended 2026-10-01 — expired unsold ⇒ relist the SAME account.** Gameflip
-   lists everything for 30 days, and after a month on a claiming stack the
-   account is no longer pristine (82 of 87 held claimed drops on 09-30), so
-   returning it only burned a fresh pristine account (and two stack restarts) on
-   the replacement. While the buffer runs (on, not dry run) the watcher retires
-   an expired row with `rentFarmExpiredAt` and KEEPS `rentFarmPoolId`; the next
-   pass (`settleStranded` → `renewExpired`) relists that account when its slot
-   is still wanted and not live, the account is still farming on the holder with
-   a live token, and free slots are not under the reserve. The old row's pointer
-   is taken first; a failed publish puts it back (`rentFarmRenewFailures`, max
-   3); a live listing that could not be recorded keeps the account claimed and
-   pages. Anything that cannot be renewed goes back to the pool as before.
-   `cancelled` never renews (a refunded buyer has seen the credentials).
+5. **Delisted or 404 ⇒ the account goes back to the pool; cancelled ⇒ it is
+   burned; expired unsold ⇒ it is relisted with the SAME account.**
+   (Rewritten 2026-10-01 after two adversarial reviews.)
+   - The watcher retires `expired` / `cancelled` / 404 rows. 404 and delisted
+     rows are released (`releaseBuffered`). A `cancelled` listing's buyer was
+     refunded after SEEING the credentials: the account comes off the bot but is
+     burned (pool row stays claimed, labelled) — never resold.
+   - An EXPIRED unsold row, while the buffer really runs (on, not dry run, keys
+     configured), keeps `rentFarmPoolId` and gets `rentFarmExpiredAt`. After a
+     month on a claiming stack the account is not pristine any more (82 of 87
+     held claimed drops on 09-30), so returning it only burned a fresh pristine
+     account and two stack restarts on the replacement.
+   - `settleStranded` (every pass, before the "buffer is full" return) renews a
+     parked row (`renewExpired`) when its slot is wanted and not live, the
+     account is healthy on the holder, and free slots are not under the reserve;
+     otherwise it is returned. Parked slots count as FILLED, so a fresh account
+     never takes one. Off / dry run / unconfigured: parked accounts are returned.
+   - `renewExpired` takes a LEASE (`rentFarmRenewingAt`, our own timestamp); the
+     row keeps owning the account throughout. It re-stamps the placeholder
+     window (checked) BEFORE publishing, publishes with a FIXED "Offer ref" per
+     row (so a retry after a crash is refused by Gameflip as a duplicate instead
+     of creating a second live listing), records the new row, and only then
+     hands over. A failure ends the lease and counts (`rentFarmRenewFailures`,
+     max 3, then the old release). "Code already exists", an unreadable
+     confirmation, or a live listing with no row HOLD the account (lease kept)
+     and page.
+   - A lease older than a renewal can take is never retried automatically:
+     `settleStaleLease` finishes the handover if a recorded row or order names
+     the account, else keeps it HELD and pages once per lease. Nothing releases
+     a leased row (`releaseBuffered` refuses it).
 6. Bounded work per pass, everywhere.

@@ -1968,15 +1968,25 @@ router.delete(
       let closedOrders = 0;
       if (owner && isOperatorHolder(owner) && acc.login) {
         const bufferRow = await MarketplaceListing.findOne(
-          { rentFarm: true, status: "active", accountLogin: loginMatcher(acc.login) },
-          { externalId: 1 },
+          {
+            rentFarm: true,
+            accountLogin: loginMatcher(acc.login),
+            $or: [
+              { status: "active" },
+              { status: { $in: ["removed", "delisted"] }, rentFarmPoolId: { $nin: ["", null] } },
+            ],
+          },
+          { externalId: 1, status: 1 },
         ).lean();
         if (bufferRow) {
           return res.status(409).json({
             success: false,
             message:
-              "This account backs a LIVE Gameflip rent-farm offer (" + bufferRow.externalId +
-              ") — take the offer down first; the buffer then returns the account itself.",
+              bufferRow.status === "active"
+                ? "This account backs a LIVE Gameflip rent-farm offer (" + bufferRow.externalId +
+                  ") — take the offer down first; the buffer then returns the account itself."
+                : "This account is parked by the Gameflip rent-farm buffer (offer " +
+                  bufferRow.externalId + " is being renewed or returned) — let the buffer finish first.",
           });
         }
         const liveWindow = !acc.farmEndedAt && acc.farmUntil && new Date(acc.farmUntil) > new Date();
@@ -2217,15 +2227,25 @@ router.post(
         const holderOwned = !!owner && isOperatorHolder(owner);
         if (holderOwned) {
           const bufferRow = await MarketplaceListing.findOne(
-            { rentFarm: true, status: "active", accountLogin: loginRe },
-            { externalId: 1, marketplace: 1 },
+            {
+              rentFarm: true,
+              accountLogin: loginRe,
+              $or: [
+                { status: "active" },
+                { status: { $in: ["removed", "delisted"] }, rentFarmPoolId: { $nin: ["", null] } },
+              ],
+            },
+            { externalId: 1, marketplace: 1, status: 1 },
           ).lean();
           if (bufferRow) {
             return res.status(409).json({
               success: false,
               message:
-                "This account backs a LIVE Gameflip rent-farm offer (" + bufferRow.externalId +
-                ") — anyone can still buy it. Take that offer down first.",
+                bufferRow.status === "active"
+                  ? "This account backs a LIVE Gameflip rent-farm offer (" + bufferRow.externalId +
+                    ") — anyone can still buy it. Take that offer down first."
+                  : "This account is parked by the Gameflip rent-farm buffer (offer " +
+                    bufferRow.externalId + " is being renewed or returned) — let the buffer finish first.",
             });
           }
         }

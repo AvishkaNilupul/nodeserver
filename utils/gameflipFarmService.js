@@ -443,7 +443,7 @@ async function handBackOrAlert(poolId, note, ctx = {}) {
   return out || { ok: false, reason };
 }
 
-async function handBackToPool(poolId, note) {
+async function handBackToPool(poolId, note, { burned = false } = {}) {
   const pool = await AvailableAccount.findById(poolId, {
     username: 1,
     clientSecret: 1,
@@ -520,6 +520,30 @@ async function handBackToPool(poolId, note) {
       }
     }
     await RenterAccount.deleteOne({ _id: acct._id }).catch(() => {});
+  }
+
+  // BURNED: a buyer who was refunded has seen these credentials (a Gameflip
+  // listing that ended "cancelled"). Off the bot, yes — but never back into the
+  // pool as available, where it would be sold to someone else while the refunded
+  // buyer still holds the password. It stays claimed, labelled.
+  if (burned) {
+    await AvailableAccount.updateOne(
+      { _id: poolId, status: "claimed" },
+      {
+        $set: {
+          claimedNote: (
+            "burned — credentials seen by a Gameflip buyer whose purchase was cancelled; " +
+            "never resell (" + String(note || "") + ")"
+          ).slice(0, 300),
+        },
+      },
+    ).catch(() => null);
+    await recordPoolUsage(poolId, {
+      event: "held",
+      actor: "gameflip-buffer",
+      note: ("burned: " + String(note || "")).slice(0, 200),
+    }).catch(() => {});
+    return { ok: true, returned: false, burned: true, login: pool.username || "" };
   }
 
   // Scoped to a row we still hold. Releasing anything broader could clobber a
@@ -612,14 +636,24 @@ async function liveBufferRows() {
 //
 // `status` can never be "sold" here. That is the whole point of the guard: an
 // account behind a SOLD offer belongs to a buyer.
-async function strandedRows(limit) {
+async function strandedRows(limit, { releaseLane = false } = {}) {
+  const q = {
+    marketplace: MARKET,
+    rentFarm: true,
+    status: { $in: ["removed", "delisted"] },
+    rentFarmPoolId: { $nin: ["", null] },
+  };
+  if (releaseLane) {
+    // What the release sweep may take: never a leased row (a renewal is, or
+    // was, publishing its credentials), and never an expired row still parked
+    // for renewal — filtered HERE, not after the limit, or five parked rows
+    // would starve every delisted / 404 row forever. An expired row that was
+    // later DELISTED by hand is released like any delisted row.
+    q.rentFarmRenewingAt = null;
+    q.$or = [{ rentFarmExpiredAt: null }, { status: "delisted" }];
+  }
   return MarketplaceListing.find(
-    {
-      marketplace: MARKET,
-      rentFarm: true,
-      status: { $in: ["removed", "delisted"] },
-      rentFarmPoolId: { $nin: ["", null] },
-    },
+    q,
     {
       externalId: 1,
       title: 1,
@@ -634,6 +668,8 @@ async function strandedRows(limit) {
       rentFarmPoolId: 1,
       rentFarmExpiredAt: 1,
       rentFarmRenewFailures: 1,
+      rentFarmRenewingAt: 1,
+      rentFarmRenewStaleAlertedAt: 1,
       lastError: 1,
       updatedAt: 1,
     },
@@ -641,6 +677,13 @@ async function strandedRows(limit) {
     .sort({ updatedAt: 1 })
     .limit(Math.max(1, limit))
     .lean();
+}
+
+// A renewal lease older than a renewal can take: the renewal was cut off
+// (restart, crash) — possibly AFTER its listing went live or even sold.
+function isStaleLease(row, now = Date.now()) {
+  return !!(row && row.rentFarmRenewingAt) &&
+    now - new Date(row.rentFarmRenewingAt).getTime() >= RENEW_LEASE_MS;
 }
 
 // An expired row waiting for (or retrying) its renewal, as opposed to an
@@ -743,7 +786,8 @@ async function topUpBuffer(opts = {}) {
   if (!cfg.enabled || !configured) {
     lastPass = { at: new Date(), reasons: new Map(), stopped: "" };
     const cat = await desiredCatalogue().catch(() => ({ games: [], wanted: [] }));
-    await settleStranded(cat, new Set(), cfg, out, { canRenew: false });
+    const parked = await parkedRows().catch(() => null);
+    await settleStranded(cat, new Set(), cfg, out, { canRenew: false, parked });
     out.stopped = !cfg.enabled ? "gameflipRentFarm off" : "gameflip not configured";
     return out;
   }
@@ -751,11 +795,26 @@ async function topUpBuffer(opts = {}) {
   lastPass = { at: new Date(), reasons: new Map(), stopped: "" };
 
   const [cat, live] = await Promise.all([desiredCatalogue(), liveBufferRows()]);
-  out.live = live.length;
+  // Parked renewals, read AFTER the live rows: a row the watcher retired in
+  // between shows up in both, and must count as parked, not live. A failed read
+  // stops the pass — guessing "none parked" would give their slots to fresh
+  // pristine accounts.
+  let parked;
+  try {
+    parked = await parkedRows();
+  } catch (e) {
+    out.stopped = "could not read parked renewals: " + String((e && e.message) || e).slice(0, 120);
+    lastPass.stopped = out.stopped;
+    return out;
+  }
+  const parkedIds = new Set(parked.map((p) => String(p._id)));
+  out.live = live.filter((r) => !parkedIds.has(String(r._id))).length;
   out.wanted = cat.wanted.length;
 
   const haveKey = new Set(
-    live.map((r) => slotKey(r.rentFarmGame, r.rentFarmDays)),
+    live
+      .filter((r) => !parkedIds.has(String(r._id)))
+      .map((r) => slotKey(r.rentFarmGame, r.rentFarmDays)),
   );
 
   // Accounts parked on dead offers FIRST — and before the "buffer is full"
@@ -767,7 +826,7 @@ async function topUpBuffer(opts = {}) {
   // publish, so it spends this pass's publish budget, and a slot whose renewal
   // is pending counts as filled (a fresh account must not take it).
   let publishBudget = cfg.perPass;
-  const settled = await settleStranded(cat, haveKey, cfg, out, { canRenew });
+  const settled = await settleStranded(cat, haveKey, cfg, out, { canRenew, parked });
   publishBudget -= settled.published;
   if (settled.stop) {
     out.stopped = settled.stop;
@@ -862,7 +921,7 @@ async function topUpBuffer(opts = {}) {
 // A row with a renewal lease is never touched; a stale lease pages a human.
 // Bounded: at most perPass publishes and perPass releases per pass.
 // Returns { published, stop }.
-async function settleStranded(cat, haveKey, cfg, out, { canRenew = true } = {}) {
+async function settleStranded(cat, haveKey, cfg, out, { canRenew = true, parked = null } = {}) {
   const wanted = new Map((cat.wanted || []).map((w) => [w.key, w]));
   // An empty catalogue is a failed read (catalogueGames swallows errors), not
   // an order to return every parked account.
@@ -881,27 +940,11 @@ async function settleStranded(cat, haveKey, cfg, out, { canRenew = true } = {}) 
     if (r && r.released) out.reclaimed++;
   };
 
-  for (const row of await parkedRows().catch(() => [])) {
+  for (const row of parked || []) {
     const key = slotKey(row.rentFarmGame, row.rentFarmDays);
     if (row.rentFarmRenewingAt) {
-      haveKey.add(key);
-      const age = Date.now() - new Date(row.rentFarmRenewingAt).getTime();
-      if (age >= RENEW_LEASE_MS && !row.rentFarmRenewStaleAlertedAt) {
-        await MarketplaceListing.updateOne(
-          { _id: row._id, rentFarmRenewStaleAlertedAt: null },
-          { $set: { rentFarmRenewStaleAlertedAt: new Date() } },
-        ).catch(() => {});
-        await alertBufferStopped(
-          "renewal-interrupted",
-          "pool " + String(row.rentFarmPoolId) + " / " + (row.accountLogin || "?") +
-            ": the renewal of expired offer " + (row.externalId || row._id) +
-            " was cut off mid-publish (restart?). Check Gameflip for a LIVE listing " +
-            "carrying " + (row.accountLogin || "this login") + " before anything else. If " +
-            "there is one, record or delist it; if there is none, clear " +
-            "rentFarmRenewingAt on the row and the buffer will retry. The account is " +
-            "still claimed and farming, and nothing will release it meanwhile.",
-        );
-      }
+      haveKey.add(key); // in flight, or held: never a slot for a fresh account
+      if (isStaleLease(row)) await settleStaleLease(row);
       continue;
     }
     const want = wanted.get(key);
@@ -940,7 +983,7 @@ async function settleStranded(cat, haveKey, cfg, out, { canRenew = true } = {}) 
         }
         if (r.stop) stop = "renewal hit a Gameflip limit: " + r.reason;
         if (!r.release) {
-          noteReason(key, "renewal failed (retried next pass): " + r.reason);
+          noteReason(key, "renewal " + (r.held ? "held" : "failed (retried next pass)") + ": " + r.reason);
           continue;
         }
         haveKey.delete(key);
@@ -950,11 +993,76 @@ async function settleStranded(cat, haveKey, cfg, out, { canRenew = true } = {}) 
     await release(row, why);
   }
 
-  for (const row of await strandedRows(cfg.perPass).catch(() => [])) {
-    if (row.rentFarmExpiredAt) continue; // handled above
+  for (const row of await strandedRows(cfg.perPass, { releaseLane: true }).catch(() => [])) {
     await release(row, "offer is " + row.status + " — reclaiming the buffered account");
   }
   return { published, stop };
+}
+
+// A renewal cut off mid-publish (its lease went stale). If a RECORDED listing
+// row — live or sold — or a rent-farm order already names the account, the
+// renewal did finish and only the handover write was lost: finish it here.
+// Otherwise the account stays HELD (claimed, on its bot, not on sale, not in
+// the pool) and a human is paged once per lease: a listing may exist on
+// Gameflip with no row, live or already sold, and only a look at Gameflip can
+// say which. Nothing here ever releases or re-publishes a held account.
+async function settleStaleLease(row) {
+  const poolId = String(row.rentFarmPoolId || "");
+  const since = new Date(row.rentFarmRenewingAt);
+  let other = null;
+  let order = null;
+  try {
+    other = await MarketplaceListing.findOne(
+      {
+        _id: { $ne: row._id },
+        marketplace: MARKET,
+        rentFarm: true,
+        $or: [
+          { rentFarmPoolId: poolId },
+          ...(row.accountLogin ? [{ accountLogin: row.accountLogin, createdAt: { $gte: since } }] : []),
+        ],
+      },
+      { externalId: 1, status: 1 },
+    ).lean();
+    if (!other && row.accountLogin) {
+      order = await FarmServiceOrder.findOne(
+        { market: MARKET, "accounts.login": row.accountLogin, createdAt: { $gte: since } },
+        { orderId: 1 },
+      ).lean();
+    }
+  } catch (e) {
+    return { held: true, reason: "reconcile read failed: " + e.message };
+  }
+  if (other || order) {
+    await MarketplaceListing.updateOne(
+      { _id: row._id, rentFarmPoolId: poolId, rentFarmRenewingAt: row.rentFarmRenewingAt },
+      {
+        $set: {
+          rentFarmPoolId: "",
+          rentFarmRenewingAt: null,
+          lastError:
+            "expired unsold — renewed as " + (other ? other.externalId : "order " + order.orderId) +
+            " (handover finished by reconcile)",
+        },
+      },
+    ).catch(() => {});
+    return { resolved: true };
+  }
+  if (!row.rentFarmRenewStaleAlertedAt) {
+    await alertBufferStopped(
+      "renewal-interrupted",
+      "pool " + poolId + " / " + (row.accountLogin || "?") + ": renewal of " +
+        (row.externalId || row._id) + " was cut off mid-publish; no recorded listing names " +
+        "the account. It is HELD (claimed, on its bot, off sale, out of the pool). Do not " +
+        "clear anything by hand: first check Gameflip for ANY listing, live or sold, " +
+        "carrying this login.",
+    );
+    await MarketplaceListing.updateOne(
+      { _id: row._id, rentFarmRenewStaleAlertedAt: null },
+      { $set: { rentFarmRenewStaleAlertedAt: new Date() } },
+    ).catch(() => {});
+  }
+  return { held: true };
 }
 
 // Can this parked account be sold again as it is? Everything a live offer
@@ -992,11 +1100,13 @@ async function renewalHealth(poolId) {
 // refuses a listing whose digital-goods code is identical to one already on
 // another of our listings ("code for digital goods already exists") — and the
 // expired listing still carries the old code.
-function renewalRef() {
-  return (
-    new Date().toISOString().slice(0, 10).replace(/-/g, "") + "-" +
-    Math.random().toString(36).slice(2, 6).toUpperCase()
-  );
+// FIXED per expired row (not random): if an earlier attempt's listing went
+// live without being recorded, a retry carries the very same code and Gameflip
+// refuses it as a duplicate — a crash can never put the same credentials in
+// two live listings. It differs from the expired listing's own code (which is
+// the original, or an earlier renewal's) so the renewal itself is accepted.
+function renewalRef(row) {
+  return "R" + String((row && row._id) || "").slice(-8).toUpperCase();
 }
 
 // Relist an offer that EXPIRED unsold, with the SAME account. The row keeps
@@ -1027,6 +1137,10 @@ async function renewExpired(row, want) {
   if (!health.ok) return { release: true, reason: health.reason };
   const creds = health.creds;
 
+  // The lease stamp is ours (not read back from the update): whatever the
+  // driver returns, every later write is keyed on exactly this value. A new
+  // lease re-arms the stale-lease page.
+  const leaseAt = new Date();
   let lease;
   try {
     lease = await MarketplaceListing.findOneAndUpdate(
@@ -1037,14 +1151,27 @@ async function renewExpired(row, want) {
         rentFarmExpiredAt: { $ne: null },
         rentFarmRenewingAt: null,
       },
-      { $set: { rentFarmRenewingAt: new Date() } },
-      { new: true },
+      { $set: { rentFarmRenewingAt: leaseAt, rentFarmRenewStaleAlertedAt: null } },
     );
   } catch (e) {
     return { reason: "could not take the renewal lease: " + String((e && e.message) || e).slice(0, 120) };
   }
   if (!lease) return { reason: "the row changed meanwhile" };
-  const leaseAt = lease.rentFarmRenewingAt;
+  // Hold: keep the lease (nothing releases or re-publishes a leased row) and
+  // say why. Used when a listing with these credentials may exist unrecorded.
+  const hold = async (why) => {
+    await MarketplaceListing.updateOne(
+      { _id: row._id, rentFarmRenewingAt: leaseAt },
+      { $set: { lastError: ("renewal HELD: " + why).slice(0, 400), rentFarmRenewStaleAlertedAt: new Date() } },
+    ).catch(() => {});
+    await alertBufferStopped(
+      "renewal-held",
+      "pool " + poolId + " / " + creds.login + ": " + why + " The account is HELD (claimed, " +
+        "on its bot, off sale, out of the pool). Check Gameflip for ANY listing, live or sold, " +
+        "carrying this login before clearing anything.",
+    );
+    return { held: true, reason: why };
+  };
 
   // End the lease after a failure, counting it. The row never stopped owning
   // the account; if even this write fails the lease stays (a stale lease pages)
@@ -1068,12 +1195,20 @@ async function renewExpired(row, want) {
     }
   };
 
+  let stamped;
   try {
-    await restampWindow(creds.clientSecret, BUFFER_WINDOW_DAYS);
+    stamped = await restampWindow(creds.clientSecret, BUFFER_WINDOW_DAYS);
   } catch (e) {
     const reason = "placeholder restamp failed: " + String((e && e.message) || e).slice(0, 120);
     await failed(reason);
     return { reason };
+  }
+  if (!stamped || !stamped.ok) {
+    // The account left the holder between the health read and now: never put
+    // an account that is on no bot back on sale.
+    const reason = "account is no longer on the holder's bot (restamp matched nothing)";
+    await failed(reason);
+    return { release: true, reason };
   }
 
   const title = offerTitle(want.game, term);
@@ -1101,15 +1236,17 @@ async function renewExpired(row, want) {
       imagePath: cover,
       autoDeliverCode:
         bufferedDeliveryCode(creds.login, creds.password, term.days, want.game) +
-        "\n\nOffer ref: " + renewalRef(),
+        "\n\nOffer ref: " + renewalRef(row),
     });
   } catch (e) {
     const reason = String((e && e.message) || e).slice(0, 300);
-    await failed(reason);
     if (/already exists/i.test(reason)) {
-      // Deterministic: retrying would fail the same way three times over.
-      return { release: true, reason: "Gameflip refuses the code (" + reason.slice(0, 120) + ")" };
+      // This renewal's code (fixed per row) is already on one of our
+      // listings: an earlier attempt most likely went live without being
+      // recorded. Selling it again would be two live listings — hold.
+      return await hold("Gameflip already has a listing with this renewal's code (an earlier attempt went live unrecorded?).");
     }
+    await failed(reason);
     return { reason, stop: /429|too many|rate/i.test(reason) };
   } finally {
     if (cover) await fsp.unlink(cover).catch(() => {});
@@ -1138,12 +1275,17 @@ async function renewExpired(row, want) {
     const reason = String((e && e.message) || e).slice(0, 200);
     // A write can succeed while its acknowledgement is lost: look before
     // taking a recorded listing down.
-    const exists = await MarketplaceListing.findOne(
-      { marketplace: MARKET, externalId: r.externalId },
-      { _id: 1 },
-    )
-      .lean()
-      .catch(() => null);
+    let exists;
+    try {
+      exists = await MarketplaceListing.findOne(
+        { marketplace: MARKET, externalId: r.externalId },
+        { _id: 1 },
+      ).lean();
+    } catch {
+      // Cannot tell whether it was recorded: taking a recorded listing down, or
+      // leaving an unrecorded one up, are both wrong. Hold and ask.
+      return await hold("renewed listing " + r.externalId + " is live, and whether it was recorded could not be read.");
+    }
     if (!exists) {
       let delisted = false;
       try {
@@ -1162,14 +1304,7 @@ async function renewExpired(row, want) {
       }
       // Live, sellable, and no row names it. The lease STAYS, so nothing
       // releases the account while that listing sells it.
-      await alertBufferStopped(
-        "orphan-renewal",
-        "pool " + poolId + " / " + creds.login + ": renewed listing " + r.externalId +
-          " is LIVE AND SELLABLE with no row (" + reason + "). Take it down on " +
-          "Gameflip, then clear rentFarmRenewingAt on row " + String(row._id) +
-          " (or return the account to the pool by hand).",
-      );
-      return { reason: "renewed listing is live with no row: " + reason };
+      return await hold("renewed listing " + r.externalId + " is LIVE AND SELLABLE with no row (" + reason.slice(0, 80) + "); take it down on Gameflip.");
     }
   }
 
@@ -1186,14 +1321,13 @@ async function renewExpired(row, want) {
       },
     );
   } catch (e) {
-    // Two rows name the account; the old one is still leased, so nothing
-    // releases it. Say so.
-    await alertBufferStopped(
-      "renewal-handover",
-      "pool " + poolId + " / " + creds.login + ": renewed as " + r.externalId +
-        " (live, recorded), but the expired row " + String(row._id) +
-        " could not let go of the account (" + String((e && e.message) || e).slice(0, 80) +
-        "). Clear its rentFarmPoolId and rentFarmRenewingAt by hand.",
+    // The new row is recorded and owns the account; the old one could not let
+    // go. It stays leased (nothing releases it), and once the lease goes stale
+    // settleStaleLease finds the new row and finishes the handover itself.
+    console.error(
+      "gameflip buffer: renewal handover of " + (row.externalId || row._id) + " -> " +
+        r.externalId + " failed (finished automatically later):",
+      (e && e.message) || e,
     );
   }
   logEvent({
@@ -1790,7 +1924,7 @@ async function releaseBuffered(rowIn, opts = {}) {
   }
 
   const reason = String(opts.reason || "unsold buffered offer came down");
-  const back = await handBackToPool(poolId, reason).catch((e) => ({
+  const back = await handBackToPool(poolId, reason, { burned: !!opts.burned }).catch((e) => ({
     ok: false,
     reason: String((e && e.message) || e).slice(0, 200),
   }));
@@ -1868,6 +2002,9 @@ async function bufferState() {
     stranded: [],
     // Expired-unsold offers waiting for their same-account renewal.
     renewing: 0,
+    // Renewals cut off mid-publish: the account is held until a human checks
+    // Gameflip (never released or re-published automatically).
+    held: [],
     problems: [],
     // Which JOINS could not be read this pass. Empty means every one of them
     // loaded — it does NOT mean nothing is wrong. A verdict drawn from a join
@@ -2128,11 +2265,26 @@ async function bufferState() {
   }
 
   // Accounts still held by offers that are dead on Gameflip.
-  const deadRows = await strandedRows(MAX_BUFFER_ROWS).catch(() => []);
+  let deadRows = [];
+  try {
+    deadRows = await strandedRows(MAX_BUFFER_ROWS);
+  } catch (e) {
+    state.unreadable.push("dead rows: " + String((e && e.message) || e).slice(0, 120));
+  }
   // Expired-unsold rows waiting for their renewal are not stuck — they are the
-  // normal 30-day cycle. Only a renewal that is overdue or keeps failing is.
+  // normal 30-day cycle. A renewal cut off mid-publish is HELD and needs a
+  // human (the next pass will NOT return it — see settleStaleLease). The rest
+  // are genuinely stranded, and the next pass returns them.
   state.renewing = deadRows.filter((r) => isRenewing(r)).length;
-  state.stranded = deadRows.filter((r) => !isRenewing(r)).map(
+  state.held = deadRows
+    .filter((r) => isStaleLease(r))
+    .map((r) => ({
+      externalId: r.externalId,
+      login: r.accountLogin || "",
+      poolId: String(r.rentFarmPoolId || ""),
+      since: r.rentFarmRenewingAt || null,
+    }));
+  state.stranded = deadRows.filter((r) => !isRenewing(r) && !isStaleLease(r)).map(
     (r) => ({
       externalId: r.externalId,
       title: r.title || "",
@@ -2251,6 +2403,7 @@ module.exports = {
   renewsOnExpiry,
   renewExpired,
   isRenewing,
+  isStaleLease,
   RENEW_MAX_FAILURES,
   RENEW_LEASE_MS,
   freeSlots,

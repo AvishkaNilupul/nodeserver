@@ -140,9 +140,9 @@ async function releaseAccount(accountId, setId) {
 // Best-effort, matching the release calls it sits beside: the row is already
 // terminal by the time this runs, and a hand-back that fails puts the pool id
 // back on the row for gameflipFarmService's stranded-row sweep to retry.
-async function releaseBufferedRow(row, reason) {
+async function releaseBufferedRow(row, reason, opts = {}) {
   try {
-    const r = await gfFarm.releaseBuffered(row, { reason });
+    const r = await gfFarm.releaseBuffered(row, { reason, ...opts });
     if (!r || !r.released) {
       // A refusal here is not noise. "Nothing happened" with no reason is how a
       // leaked pristine account stays invisible for weeks.
@@ -1077,10 +1077,16 @@ async function syncOnce() {
     // returning it and burning a fresh pristine one on the replacement (after a
     // month on a claiming stack it is not pristine any more anyway). Never for
     // "cancelled" — a paid-then-refunded listing's credentials have been seen —
-    // and only while the buffer is really running to renew it.
-    const renew =
-      status === "expired" && !!row.rentFarm && !!row.rentFarmPoolId &&
-      gfFarm.renewsOnExpiry();
+    // and only while the buffer is really running to renew it. A "cancelled"
+    // rent-farm row's account is BURNED on release (the refunded buyer saw it).
+    let renew = false;
+    try {
+      renew =
+        status === "expired" && !!row.rentFarm && !!row.rentFarmPoolId &&
+        gfFarm.renewsOnExpiry();
+    } catch {
+      renew = false; // a settings read failing must not stop the sale watcher
+    }
     if (status === "expired" || status === "cancelled") {
       const retired = await MarketplaceListing.findOneAndUpdate(
         { _id: row._id, status: "active" },
@@ -1097,7 +1103,9 @@ async function syncOnce() {
       // Same split as the 404 branch: a rent-farm row has no set.
       if (retired && row.rentFarm) {
         if (!renew) {
-          await releaseBufferedRow(row, "gameflip reports \"" + status + "\"");
+          await releaseBufferedRow(row, "gameflip reports \"" + status + "\"", {
+            burned: status === "cancelled",
+          });
         }
       } else if (retired && row.accountId) {
         await releaseAccount(row.accountId, row.set).catch(() => {});

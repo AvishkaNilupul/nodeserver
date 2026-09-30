@@ -1596,6 +1596,8 @@ const CHECKS = [
       const sold = Array.isArray(state.sold) ? state.sold : [];
       const missing = Array.isArray(state.missing) ? state.missing : [];
       const stranded = Array.isArray(state.stranded) ? state.stranded : [];
+      // Renewals cut off mid-publish: HELD until a human checks Gameflip.
+      const held = Array.isArray(state.held) ? state.held : [];
       const cap = state.capacity || {};
       const target = Number(state.target) || 0;
       const reserve = Number(state.reserve) || 0;
@@ -1663,7 +1665,7 @@ const CHECKS = [
 
       const status = dead.length
         ? "fail"
-        : unstarted.length || floorHit || idleUnexplained || stranded.length
+        : unstarted.length || floorHit || idleUnexplained || stranded.length || held.length
           ? "warn"
           : shortUnexplained
             ? "unknown"
@@ -1684,6 +1686,12 @@ const CHECKS = [
       if (stranded.length)
         parts.push(
           stranded.length + " stranded buffered account(s) with no live offer",
+        );
+      if (held.length)
+        parts.push(
+          held.length + " renewal(s) cut off mid-publish — account HELD until someone checks " +
+            "Gameflip for a live or sold listing carrying: " +
+            held.slice(0, 5).map((h) => h.login || h.poolId).join(", "),
         );
       if (unstarted.length)
         parts.push(

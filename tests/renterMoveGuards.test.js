@@ -296,3 +296,21 @@ test("an ordinary renter's account removes as before (no prompt)", async () => {
   assert.equal(res.status, 200);
   assert.equal(await RenterAccount.findById(acc._id).lean(), null);
 });
+
+test("an account PARKED by the Gameflip buffer (renewal pending) cannot be moved or removed either", async () => {
+  await reset();
+  const a = await mk("newrenter", { botFile: "config_04.json", ...LIVE });
+  const holder = await mk("operator-selffarm", { botFile: "config_54.json" });
+  const acc = await RenterAccount.create({ renter: holder._id, clientSecret: "tokP", login: "parked1", host: "contabo", configFile: "config_02.json" });
+  const row = new MarketplaceListing({
+    marketplace: "gameflip", externalId: "gf-exp-1", status: "removed", rentFarm: true,
+    accountLogin: "parked1", rentFarmPoolId: "p9", rentFarmExpiredAt: new Date(),
+  });
+  await row.save({ validateBeforeSave: false });
+  const add = await call("POST", "/renters/" + a._id + "/accounts/manual", { username: "parked1", token: "tokP", force: true });
+  assert.equal(add.status, 409);
+  assert.match((await add.json()).message, /parked by the Gameflip rent-farm buffer/);
+  const del = await call("DELETE", "/renter-accounts/" + acc._id + "?force=1");
+  assert.equal(del.status, 409);
+  assert.ok(await RenterAccount.findById(acc._id).lean());
+});
