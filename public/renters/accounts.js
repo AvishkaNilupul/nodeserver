@@ -288,7 +288,9 @@
         method: "POST",
         body: JSON.stringify({ days }),
       });
-      RT.toast(d.farmUntil ? "Farms until " + RT.fmtDate(d.farmUntil) : "Farming window cleared");
+      RT.toast((d.farmUntil ? "Farms until " + RT.fmtDate(d.farmUntil) : "Farming window cleared") +
+        (d.placed ? " — its window had ended, so it was put back on " + d.stack : "") +
+        (d.ordersUpdated ? " (order updated)" : ""));
       RT.reloadMany(["accounts"]);
     } catch (e) {
       RT.toast(e.message);

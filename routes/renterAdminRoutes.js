@@ -32,6 +32,7 @@ const {
   normGames,
   MIN_PASSWORD,
   isOperatorHolder,
+  isBlocked,
   OPERATOR_HOLDER_USERNAME,
 } = require("../utils/renters");
 const {
@@ -40,6 +41,7 @@ const {
   startRenterFarming,
   applyRenterGames,
   restartIfRunning,
+  locateSecrets,
 } = require("../utils/renterBotOps");
 
 // The rent-farm holder (operator-selffarm) is not a renter: its accounts are
@@ -58,6 +60,8 @@ function refuseHolder(res, what) {
   });
 }
 const MarketplaceListing = require("../models/MarketplaceListing");
+const FarmServiceOrder = require("../models/FarmServiceOrder");
+const { logEvent } = require("../utils/systemLog");
 const { detachAccountFromListing } = require("../utils/listingDetach");
 const hosts = require("../utils/botHosts");
 const { decrypt, encrypt } = require("../utils/secretBox");
@@ -79,6 +83,7 @@ const {
   parseAccounts,
   dedupeAccounts,
   addRenterAccountsToConfig,
+  startConfigContainer,
   provisionEmptyConfig,
   getConfigGames,
   removeAccountFromConfig,
@@ -1584,8 +1589,96 @@ router.get("/renter-accounts", requireSuperadmin, async (req, res) => {
   }
 });
 
+// The rent-farm order a login was sold under, if any (case-insensitive: prod
+// logins carry capitals in one place and not the other).
+function loginMatcher(login) {
+  return { $regex: "^" + escapeRegExp(String(login || "")) + "$", $options: "i" };
+}
+
+// Put an ENDED window's account back on a bot so a renewal (or a make-good)
+// actually farms. The lapse sweep pulled it out of its config and blanked
+// configFile, so re-arming farmUntil alone — which is all "Farm days" used to
+// do — reported "Farms until …" for an account nothing was reading.
+//   holder (rent-farm buyer): the holder's current stack with room (the same
+//     picker every sale uses), pinned to the order's game;
+//   direct renter: their own bot, with their games — only while their lease
+//     is live.
+// Returns { placed, host, file, alreadyIn? }. Throws with .status on refusal.
+async function rePlaceEndedAccount(acc) {
+  const renter = await Renter.findById(acc.renter);
+  if (!renter) throw Object.assign(new Error("The account's renter no longer exists."), { status: 409 });
+  let host;
+  let file;
+  let games = [];
+  if (isOperatorHolder(renter)) {
+    const { stack } = await require("../utils/operatorFarm").ensureStackWithRoom(renter, 1, "renew-window");
+    host = hosts.resolveHost(stack.host);
+    file = stack.file;
+    const order = await FarmServiceOrder.findOne(
+      { "accounts.login": loginMatcher(acc.login) },
+      { game: 1 },
+    ).lean();
+    if (order && order.game) games = [order.game];
+  } else {
+    if (isBlocked(renter)) {
+      throw Object.assign(
+        new Error("Renter " + renter.username + " is suspended or past their lease — extend the lease first."),
+        { status: 409 },
+      );
+    }
+    if (!renter.botFile) {
+      throw Object.assign(new Error("Renter " + renter.username + " has no bot assigned."), { status: 409 });
+    }
+    host = hosts.resolveHost(renter.botHost);
+    file = renter.botFile;
+    games = Array.isArray(renter.farmGames) ? renter.farmGames.filter(Boolean) : [];
+  }
+  if (!host) throw Object.assign(new Error("Unknown bot host for the target stack."), { status: 409 });
+  if (!games.length && Array.isArray(acc.favouriteGames)) games = acc.favouriteGames.filter(Boolean);
+
+  // Already farming somewhere on that host (put back by hand)? Then there is
+  // nothing to place — just point the ledger at it.
+  const located = await locateSecrets(host, [acc.clientSecret], [file]);
+  if (located.size) {
+    const where = [...located.keys()][0];
+    await RenterAccount.updateOne(
+      { _id: acc._id },
+      { $set: { host: host.id, configFile: where, container: containerForFile(where) || "", enabled: true } },
+    );
+    return { placed: false, host: host.id, file: where, alreadyIn: [...located.keys()] };
+  }
+
+  await addRenterAccountsToConfig(
+    host,
+    file,
+    [{
+      ClientSecret: acc.clientSecret,
+      Login: acc.login || "",
+      UniqueId: acc.uniqueId || "",
+      Id: acc.twitchId || "",
+      Enabled: true,
+      FavouriteGames: games,
+    }],
+    renter._id,
+  );
+  // Make the bot pick it up: restart a running one, start a stopped one (the
+  // same rule operatorFarm follows after every sale).
+  const container = containerForFile(file);
+  const states = await hosts.dockerPs(host).catch(() => null);
+  const st = states && container ? states[container] : null;
+  if (st && /^running/i.test(String(st.state || ""))) {
+    await restartConfigContainer(host, file);
+  } else {
+    await startConfigContainer(host, file);
+  }
+  return { placed: true, host: host.id, file };
+}
+
 // SET / CLEAR one account's farming window after the fact ("give it 15 more
 // days", "make it open-ended"). Days are counted from now; days = 0 clears it.
+// A window that had already ENDED is put back on a bot first (see
+// rePlaceEndedAccount), and the rent-farm order's copy of the window is kept in
+// step, with a SystemEvent recording the change.
 router.post("/renter-accounts/:id/farm", requireSuperadmin, async (req, res) => {
   try {
     if (!mongoose.isValidObjectId(req.params.id)) {
@@ -1602,15 +1695,68 @@ router.post("/renter-accounts/:id/farm", requireSuperadmin, async (req, res) => 
     } else if (Number.isFinite(days) && days > 0) {
       farmUntil = new Date(Date.now() + days * 86400000);
     }
-    const acc = await RenterAccount.findByIdAndUpdate(
-      req.params.id,
-      // Clearing farmEndedAt re-arms the sweep for the new window, the same way
-      // extending a renter's lease clears botStoppedAt.
-      { $set: { farmUntil, farmEndedAt: null } },
-      { new: true },
-    ).lean();
+    const acc = await RenterAccount.findById(req.params.id).lean();
     if (!acc) return res.status(404).json({ success: false, message: "Not found" });
-    res.json({ success: true, farmUntil: acc.farmUntil || null });
+
+    const ended = !!acc.farmEndedAt || (!acc.configFile && acc.enabled === false);
+    const liveAgain = farmUntil === null || farmUntil > new Date();
+    let placement = null;
+    if (ended && liveAgain) {
+      try {
+        placement = await rePlaceEndedAccount(acc);
+      } catch (e) {
+        const status = e.status || botWriteStatus(e);
+        return res.status(status === 500 ? 502 : status).json({
+          success: false,
+          message:
+            "This window had already ended and the account is off the bot, and it " +
+            "could not be put back: " + (e.message || "error") + " Nothing was changed.",
+        });
+      }
+    }
+    const set = { farmUntil, farmEndedAt: null, expiryAttempts: 0, expiryLastError: "" };
+    if (placement) set.enabled = true;
+    // Clearing farmEndedAt re-arms the sweep for the new window, the same way
+    // extending a renter's lease clears botStoppedAt.
+    const updated = await RenterAccount.findByIdAndUpdate(acc._id, { $set: set }, { new: true }).lean();
+
+    // The order's copy of the window, so the console and any later delivery
+    // check agree with what the bot will do.
+    let ordersUpdated = 0;
+    if (acc.login) {
+      const r = await FarmServiceOrder.updateMany(
+        { "accounts.login": loginMatcher(acc.login) },
+        { $set: { "accounts.$[a].farmUntil": farmUntil } },
+        { arrayFilters: [{ "a.login": loginMatcher(acc.login) }] },
+      ).catch((e) => {
+        console.error("farm window: order sync failed:", e.message);
+        return null;
+      });
+      ordersUpdated = (r && (r.modifiedCount || r.nModified)) || 0;
+    }
+    logEvent({
+      category: "renter",
+      action: "farm_window_set",
+      actor: (req.session && req.session.admin && req.session.admin.username) || "superadmin",
+      subject: acc.login || String(acc._id),
+      detail:
+        "window " + (acc.farmUntil ? new Date(acc.farmUntil).toISOString().slice(0, 10) : "open") +
+        (acc.farmEndedAt ? " (ended)" : "") + " → " +
+        (farmUntil ? farmUntil.toISOString().slice(0, 10) : "open-ended") +
+        (placement
+          ? placement.placed
+            ? "; put back on " + placement.host + "/" + placement.file
+            : "; already in " + placement.host + "/" + placement.file
+          : "") +
+        (ordersUpdated ? "; " + ordersUpdated + " order(s) updated" : ""),
+    });
+    res.json({
+      success: true,
+      farmUntil: updated.farmUntil || null,
+      placed: placement ? placement.placed : false,
+      stack: placement ? placement.host + "/" + placement.file : null,
+      ordersUpdated,
+    });
   } catch (err) {
     console.error("renter account farm error:", err.message);
     res.status(500).json({ success: false, message: "Server error" });
