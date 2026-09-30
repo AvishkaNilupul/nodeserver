@@ -107,8 +107,28 @@ async function canonicalGame(raw, knownGames) {
   return hit || "";
 }
 
+// Games announced on Twitch whose first campaign the drop scanner has not
+// recorded yet. A rent-farm window is sold for a GAME, not a campaign: the
+// account is pinned to the game and farms each campaign as it goes live, the
+// same way it waits between events for any other game. Without this a
+// launch-week game cannot be sold at all — parseFarmOrder refuses a game no
+// campaign has named, and the order sits failed until the scanner catches up
+// while the buyer waits out the 20-minute delivery guarantee.
+//
+// Spell each one exactly as Twitch's category name: it becomes the account's
+// game pin, which the bot matches against campaign game names. An entry is
+// harmless once the scanner has seen the game (it is then known anyway).
+//   AION 2 — global early access 2026-09-30, launch 2026-10-05; NC's
+//   "War for Atreia" event brings drops for Global servers only.
+const ANNOUNCED_FARM_GAMES = ["AION 2"];
+
+function withAnnounced(games) {
+  const have = new Set(games.map(normGame));
+  return games.concat(ANNOUNCED_FARM_GAMES.filter((g) => !have.has(normGame(g))));
+}
+
 // Games the farm has actually seen campaigns for, which is what a bot config's
-// game pin has to match.
+// game pin has to match, plus the announced ones above.
 let gamesCache = { at: 0, list: [] };
 async function knownFarmGames() {
   if (gamesCache.list.length && Date.now() - gamesCache.at < 30 * 60e3) {
@@ -118,8 +138,12 @@ async function knownFarmGames() {
   const CampaignDrops = require("../models/CampaignDrops");
   const a = await AutoFarmTask.distinct("game").catch(() => []);
   const b = await CampaignDrops.distinct("game").catch(() => []);
-  const list = [...new Set([...(a || []), ...(b || [])].filter(Boolean))];
-  if (list.length) gamesCache = { at: Date.now(), list };
+  const seen = [...new Set([...(a || []), ...(b || [])].filter(Boolean))];
+  // Cached only when the scanner's own games came back: an empty read is a
+  // failed read, and caching the announced names alone would refuse every
+  // other game for half an hour.
+  const list = withAnnounced(seen);
+  if (seen.length) gamesCache = { at: Date.now(), list };
   return list;
 }
 
@@ -471,6 +495,7 @@ module.exports = {
   termToDays,
   canonicalGame,
   knownFarmGames,
+  ANNOUNCED_FARM_GAMES,
   parseFarmOrder,
   farmDeliveryMessage,
   deliverFarmOrder,
