@@ -1871,6 +1871,10 @@ test("L3 a release re-reads keepReserved: a take-out landing after the pass read
   assert.equal(e.state, "released");
   assert.match(e.reason, /^kept reserved/);
   assert.ok(!f.calls.release.includes(ids[7]), "never handed back");
+  // Its history note says so — never "released back to stock" (2026-09-30).
+  const acts = (await getOffer(offerId)).history.map((h) => h.action + ": " + h.detail);
+  assert.ok(acts.some((h) => /^units_kept: 1 unit\(s\) left the pack — kept reserved, never back on sale/.test(h)), acts.join("\n"));
+  assert.ok(!acts.some((h) => h.startsWith("units_released")), acts.join("\n"));
 });
 
 test("maintainOffer(offerId, {now}) runs one offer's pass under its lock", async () => {

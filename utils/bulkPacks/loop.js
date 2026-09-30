@@ -1046,6 +1046,12 @@ async function writeNotes(offer, notes, at) {
     ],
     ["units_released", notes.released, "released back to stock", "info"],
     [
+      "units_kept",
+      notes.kept || [],
+      "left the pack — kept reserved, never back on sale",
+      "info",
+    ],
+    [
       "units_duplicate",
       notes.duplicates,
       "had a FREE copy of a SOLD unit — copy pulled",
@@ -1225,10 +1231,15 @@ async function reconcileUnits(offer, row, now = new Date(), opts = {}) {
     repulled: [],
     retired: [],
     released: [],
+    kept: [],
     duplicates: [],
     zombies: [],
   };
   const who = (e) => str(e.login) || str(e.accountId);
+  // A keepReserved unit (renter, hand sale) left the pack but was NOT handed
+  // back — its note must never read "released back to stock" (2026-09-30: the
+  // owner saw that line for two leased renter accounts that stayed reserved).
+  const noteReleased = (n, e) => (e.keepReserved ? n.kept : n.released).push(who(e));
 
   if (!row && offer.open) {
     // An OPEN offer with no row: no fulfiller can deliver these units, so
@@ -1238,7 +1249,7 @@ async function reconcileUnits(offer, row, now = new Date(), opts = {}) {
         await releaseEntry(offer, e, "the listing row is gone", at, opts, out)
       ) {
         out.released++;
-        notes.released.push(who(e));
+        noteReleased(notes, e);
       }
     }
     await writeNotes(offer, notes, at);
@@ -1260,7 +1271,7 @@ async function reconcileUnits(offer, row, now = new Date(), opts = {}) {
         await releaseEntry(offer, e, str(e.reason) || "retired", at, opts, out)
       ) {
         out.released++;
-        notes.released.push(who(e));
+        noteReleased(notes, e);
       }
     }
     await writeNotes(offer, notes, at);
@@ -1390,7 +1401,7 @@ async function reconcileUnits(offer, row, now = new Date(), opts = {}) {
       await releaseEntry(offer, e, str(e.reason) || "retired", at, opts, out)
     ) {
       out.released++;
-      notes.released.push(who(e));
+      noteReleased(notes, e);
     }
   }
 

@@ -528,6 +528,10 @@ test("a retiring unit a stale save put back FREE is pulled again and its clock r
   e = entryOf(await getOffer(offerId), ids[7]);
   assert.equal(e.state, "released");
   assert.equal(e.reason, "test retire");
+  // A real hand-back is noted as one; nothing claims it was kept.
+  const acts = (await getOffer(offerId)).history.map((h) => h.action + ": " + h.detail);
+  assert.ok(acts.some((h) => /^units_released: 1 unit\(s\) released back to stock/.test(h)), acts.join("\n"));
+  assert.ok(!acts.some((h) => h.startsWith("units_kept")), acts.join("\n"));
 });
 
 test("retired units are released only after 15 minutes, through releaseUnits for this set and market", async () => {
