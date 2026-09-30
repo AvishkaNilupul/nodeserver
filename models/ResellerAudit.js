@@ -19,6 +19,9 @@ const resellerAuditSchema = new mongoose.Schema(
         "showcase",
         "reclaim_showcase",
         "reclaim",
+        // A reclaim of an account the reseller had SOLD: the sale is kept on
+        // the account (it must never return to stock), only the hold goes.
+        "reclaim_sold_kept",
         "status_change",
         "create",
         "update",
