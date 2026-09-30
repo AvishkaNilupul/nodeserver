@@ -275,10 +275,14 @@ async function insertOffer(doc) {
 async function insertRow(doc) {
   const _id = oid();
   const now = new Date();
+  // A pack title only on a real pack row: production never has one elsewhere,
+  // and packMath.packMismatch refuses an order whose title promises a pack
+  // the row does not record.
+  const n = doc && doc.bulkOfferId ? Number(doc.bulkPackSize) || 0 : 0;
   await MarketplaceListing.collection.insertOne({
     _id,
     set: oid(),
-    title: "Rust Twitch Drops bundle — PACK OF 5 ACCOUNTS",
+    title: n >= 2 ? "Rust Twitch Drops bundle — PACK OF " + n + " ACCOUNTS" : "Rust Twitch Drops bundle",
     price: 4,
     status: "active",
     origin: "manual",
@@ -830,7 +834,8 @@ test("eldorado syncBundleStock: a pack row advertises whole packs, 0 packs pause
   await eldorado.syncBundleStock({ dryRun: false });
   assert.deepEqual(calls("eldoradoSetQuantity", "eld-sync-pack"), [["eldoradoSetQuantity", "eld-sync-pack", 2]], "12 accounts = 2 packs");
   assert.deepEqual(calls("eldoradoSetQuantity", "eld-sync-single"), [["eldoradoSetQuantity", "eld-sync-single", 3]]);
-  assert.deepEqual(calls("eldoradoSetQuantity", "eld-sync-v1"), [["eldoradoSetQuantity", "eld-sync-v1", 7]], "v1: its minimum rule, as before");
+  assert.deepEqual(calls("eldoradoSetQuantity", "eld-sync-v1"), [], "a bulk row with no pack size is never advertised");
+  assert.equal(calls("eldoradoDelist", "eld-sync-v1").length, 1, "…it is paused (delivery refuses it too)");
   assert.equal(calls("eldoradoRelist", "eld-sync-owner").length, 0, "an owner-paused pack is never resumed");
 
   // 4 accounts cannot fill a pack of 5: paused, like an empty shelf.
@@ -870,7 +875,8 @@ test("g2g syncStock: a pack row advertises whole packs, 0 packs delists, a pack 
   assert.equal(res.checked, 3);
   assert.deepEqual(calls("g2gSetQuantity", "g2g-sync-pack"), [["g2gSetQuantity", "g2g-sync-pack", 2]], "12 accounts = 2 packs");
   assert.deepEqual(calls("g2gSetQuantity", "g2g-sync-single"), [["g2gSetQuantity", "g2g-sync-single", 3]]);
-  assert.deepEqual(calls("g2gSetQuantity", "g2g-sync-v1"), [["g2gSetQuantity", "g2g-sync-v1", 7]]);
+  assert.deepEqual(calls("g2gSetQuantity", "g2g-sync-v1"), [], "a bulk row with no pack size is never advertised");
+  assert.equal(calls("g2gDelist", "g2g-sync-v1").length, 1, "…it is taken off sale (delivery refuses it too)");
 
   world.calls.length = 0;
   world.ncStock.set("g2g-sync-pack", 4);
@@ -980,7 +986,10 @@ test("eldorado farm edges: no offer id or another market's bulk offer is × 1; a
 
   // A closed bulk offer's order is still owed its packs.
   await insertOffer({ kind: "farming", source: "farm", state: "withdrawn", open: false, externalId: "eld-farm-closed", minQty: 10 });
-  const c = await eldFarm.deliverFarmOrder(eldFarmOrder("ef-e3", "eld-farm-closed", 1), { dryRun: false });
+  const c = await eldFarm.deliverFarmOrder(
+    eldFarmOrder("ef-e3", "eld-farm-closed", 1, "Rust Twitch Drops Automatic Farming 120 Days — PACK OF 10 ACCOUNTS"),
+    { dryRun: false },
+  );
   assert.equal(c.delivered, 10);
 
   // The bulk read fails: nothing provisioned, no row claimed, retried next tick.
@@ -992,7 +1001,10 @@ test("eldorado farm edges: no offer id or another market's bulk offer is × 1; a
   });
   let d;
   try {
-    d = await eldFarm.deliverFarmOrder(eldFarmOrder("ef-e4", "eld-farm-closed", 1), { dryRun: false });
+    d = await eldFarm.deliverFarmOrder(
+      eldFarmOrder("ef-e4", "eld-farm-closed", 1, "Rust Twitch Drops Automatic Farming 120 Days — PACK OF 10 ACCOUNTS"),
+      { dryRun: false },
+    );
   } finally {
     BulkOffer.findOne = realFindOne;
   }
@@ -1067,4 +1079,43 @@ test("a bulk row without a pack size refuses the order, pages, and sends nothing
   const g = await g2g.deliverOrder(g2gOrder("g-nosize", "g2g-nosize", 1), { dryRun: false });
   assert.match(String(g.error), /bulk pack short: .*no pack size/);
   assert.equal(stamped(await rowBy("g2g-nosize"), "g-nosize").length, 0, "no unit spent");
+});
+
+// Review round (pack math, finding 1): a farming pack whose publish outcome was
+// unknown has no offer id on its BulkOffer. If it is live anyway, its orders
+// carry the pack title but match no bulk offer — they must be REFUSED (paged),
+// never provisioned x1.
+test("farm: a PACK OF N title with no matching bulk offer provisions nothing on Eldorado or G2G", async () => {
+  const before = world.provisions.length;
+  const e = await eldFarm.deliverFarmOrder(eldFarmOrder("ef-orphan", "eld-farm-unknown", 1), { dryRun: false });
+  assert.ok(e.error || e.skipped, JSON.stringify(e));
+  assert.match(String(e.error || e.skipped), /PACK OF 5 ACCOUNTS but no bulk offer matches/);
+  const erow = await FarmServiceOrder.findOne({ orderId: "ef-orphan" }).lean();
+  assert.ok(erow && erow.state !== "delivered", "recorded as a refused paid order, not delivered");
+  const g = await g2gFarm.deliverFarmOrder(g2gFarmOrder("gf-orphan", "g2g-farm-unknown", 1), { dryRun: false });
+  assert.match(String(g.error || g.skipped), /PACK OF 5 ACCOUNTS but no bulk offer matches/);
+  // A pack title whose bulk offer is a different size is refused too.
+  await insertOffer({ kind: "farming", source: "farm", market: "eldorado", minQty: 10, externalId: "eld-farm-mismatch" });
+  const m = await eldFarm.deliverFarmOrder(eldFarmOrder("ef-mismatch", "eld-farm-mismatch", 1), { dryRun: false });
+  assert.match(String(m.error || m.skipped), /PACK OF 5 ACCOUNTS but its bulk offer is a pack of 10/);
+  assert.equal(world.provisions.length, before, "nothing provisioned");
+  assert.equal(calls("eldoradoSendOrderMessage", "ef-orphan").length, 0);
+});
+
+// Review round (finding 2): an ordinary-looking row that carries a pack title
+// (a pack row whose link was lost) is refused at delivery and paused by the sync.
+test("a row whose title promises a pack it does not record is refused and paused", async () => {
+  const units = await seedUnits("ttl", 10);
+  await insertRow({
+    marketplace: "eldorado",
+    externalId: "eld-title-only",
+    noclaimStock: false,
+    title: "Overwatch Twitch Drops — PACK OF 5 ACCOUNTS",
+    units,
+  });
+  const r = await eldorado.deliverOrder(eldOrder("o-title-only", "eld-title-only", 1), { dryRun: false });
+  assert.match(String(r.error), /bulk pack short: the title promises PACK OF 5 ACCOUNTS but the listing records no pack/);
+  assert.equal(eldorado.alertsOperator(r.error), true);
+  assert.equal(calls("eldoradoSendOrderMessage", "o-title-only").length, 0);
+  assert.equal(stamped(await rowBy("eld-title-only"), "o-title-only").length, 0);
 });

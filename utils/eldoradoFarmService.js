@@ -25,7 +25,7 @@ const operatorFarm = require("./operatorFarm");
 const mp = require("./marketplaces");
 const farmAlert = require("./farmServiceAlert");
 const provisioning = require("./farmProvisioning");
-const { packSizeOf, accountsForUnits } = require("./bulkPacks/packMath");
+const { packSizeOf, accountsForUnits, titlePackSize } = require("./bulkPacks/packMath");
 
 // Which marketplace this service speaks for, used in failure alerts.
 const MARKET = "eldorado";
@@ -239,12 +239,24 @@ async function deliverFarmOrder(order, { dryRun } = {}) {
   // makes it visible, alertable and de-duplicated by the same `attempts` counter
   // every other failure uses. The refusal itself is unchanged: guessing a game
   // or a term would provision the wrong thing.
-  const unreadable = !parsed.days
+  // A pack title with no matching bulk offer (a publish whose outcome was
+  // unknown, so no offer id was recorded) must never provision x1: the buyer
+  // paid for N accounts per unit. Refused on the row like any unreadable order.
+  const titleN = titlePackSize(parsed.title);
+  const packMismatch =
+    titleN && (!bulk || bulk.size !== titleN)
+      ? "the title promises PACK OF " + titleN + " ACCOUNTS but " +
+        (bulk
+          ? "its bulk offer is a pack of " + bulk.size
+          : "no bulk offer matches offer " + String(order.offerId || "")) +
+        " — nothing provisioned; deliver it by hand"
+      : "";
+  const unreadable = packMismatch || (!parsed.days
     ? 'could not read a farming term from "' + parsed.title + '"'
     : !parsed.game
       ? 'the farm does not know a game called "' + parsed.rawGame + '" — ' +
         "add an alias in utils/eldoradoFarmService before this can auto-deliver"
-      : "";
+      : "");
 
   if (dryRun) {
     if (unreadable) return { orderId, farm: true, dryRun: true, error: unreadable };

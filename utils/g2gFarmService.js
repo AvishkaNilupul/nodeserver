@@ -26,7 +26,7 @@ const mp = require("./marketplaces");
 const operatorFarm = require("./operatorFarm");
 const farmAlert = require("./farmServiceAlert");
 const provisioning = require("./farmProvisioning");
-const { accountsForUnits } = require("./bulkPacks/packMath");
+const { accountsForUnits, titlePackSize } = require("./bulkPacks/packMath");
 
 // Which marketplace this service speaks for, used in failure alerts.
 const MARKET = "g2g";
@@ -222,12 +222,23 @@ async function deliverFarmOrder(order, { dryRun } = {}) {
   //
   // (The alias hint also named playerauctionsFarmService — a copy-paste that
   // would have sent whoever hit this to the wrong file.)
-  const unreadable = !parsed.days
+  // A pack title with no matching bulk offer must never provision x1 (see
+  // utils/eldoradoFarmService): refused on the row like any unreadable order.
+  const titleN = titlePackSize(parsed.title);
+  const packMismatch =
+    titleN && (!bulk || bulk.size !== titleN)
+      ? "the title promises PACK OF " + titleN + " ACCOUNTS but " +
+        (bulk
+          ? "its bulk offer is a pack of " + bulk.size
+          : "no bulk offer matches offer " + String((order && order.offerId) || "")) +
+        " — nothing provisioned; deliver it by hand"
+      : "";
+  const unreadable = packMismatch || (!parsed.days
     ? 'could not read a farming term from "' + parsed.title + '"'
     : !parsed.game
       ? 'the farm does not know a game called "' + parsed.rawGame + '" — ' +
         "add an alias in utils/g2gFarmService before this can auto-deliver"
-      : "";
+      : "");
 
   if (dryRun) {
     if (unreadable) return { orderId, farm: true, dryRun: true, error: unreadable };

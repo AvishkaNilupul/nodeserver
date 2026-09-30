@@ -32,7 +32,7 @@ const mp = require("./marketplaces");
 const chat = require("./g2gChat");
 const eld = require("./eldoradoFulfiller");
 const farmService = require("./g2gFarmService");
-const { packSizeOf, accountsForUnits, packsFor } = require("./bulkPacks/packMath");
+const { packSizeOf, accountsForUnits, packsFor, packMismatch } = require("./bulkPacks/packMath");
 
 // Distinct from every other platform's tag so one account can never be handed
 // out twice across marketplaces. Must be listed in utils/marketClaimTags.js.
@@ -464,12 +464,12 @@ async function deliverOrder(order, { dryRun }) {
   // A bulk pack row must know its pack size (docs/bulk-packs/PACKS-2.md §1):
   // without it this order would be read as single accounts and a pack buyer
   // short-changed. Refuse (G2G errors page) — deliver it by hand.
-  if (listing.bulkOfferId && packSizeOf(listing) < 2) {
+  const packProblem = packMismatch(listing);
+  if (packProblem) {
     return {
       orderId,
       error:
-        "bulk pack short: this bulk listing has no pack size recorded — " +
-        "nothing was sent; deliver it by hand",
+        "bulk pack short: " + packProblem + " — nothing was sent; deliver it by hand",
     };
   }
 
@@ -1280,7 +1280,10 @@ async function syncStock() {
       } catch {
         continue;
       }
-      if (packSizeOf(row) > 1) real = unitsFor(row, real);
+      // A pack title the row cannot honour — or a bulk row with no pack size —
+      // is never on sale (packMath.packMismatch; delivery refuses it too).
+      if (packMismatch(row)) real = 0;
+      else if (packSizeOf(row) > 1) real = unitsFor(row, real);
       else if (bulk && real < (Number(bulk.minQty) || 0)) real = 0;
       if (bulk && bulk.state !== "live") bulkLive = false;
     }

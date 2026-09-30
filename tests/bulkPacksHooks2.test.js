@@ -443,9 +443,9 @@ test("R3-5 g2g: an unreadable password on a bulk row releases nothing tag-wide a
 
 test("R3-3 eldorado syncBundleStock: a no-claim bulk row below its minimum pauses, resumes at the minimum, never over an owner pause", async () => {
   const live = await insertOffer({ source: "noclaim", minQty: 5, externalId: "eld-nc-bulk" });
-  await insertRow({ marketplace: "eldorado", externalId: "eld-nc-bulk", noclaimStock: true, set: oid(), bulkOfferId: live });
+  await insertRow({ marketplace: "eldorado", externalId: "eld-nc-bulk", noclaimStock: true, set: oid(), bulkOfferId: live, bulkPackSize: 5 });
   const ownerPaused = await insertOffer({ source: "noclaim", minQty: 5, state: "paused", externalId: "eld-nc-owner" });
-  await insertRow({ marketplace: "eldorado", externalId: "eld-nc-owner", noclaimStock: true, set: oid(), bulkOfferId: ownerPaused, autoPaused: true });
+  await insertRow({ marketplace: "eldorado", externalId: "eld-nc-owner", noclaimStock: true, set: oid(), bulkOfferId: ownerPaused, bulkPackSize: 5, autoPaused: true });
   await insertRow({ marketplace: "eldorado", externalId: "eld-nc-single", noclaimStock: true, set: oid() });
   world.eld.set("eld-nc-bulk", { id: "eld-nc-bulk", offerState: "Active", quantity: 8 });
   world.eld.set("eld-nc-owner", { id: "eld-nc-owner", offerState: "Paused", quantity: 2 });
@@ -468,7 +468,7 @@ test("R3-3 eldorado syncBundleStock: a no-claim bulk row below its minimum pause
   world.nc.set("eld-nc-bulk", 5);
   await eldorado.syncBundleStock({ dryRun: false });
   assert.equal(count("eldoradoRelist", "eld-nc-bulk"), 1);
-  assert.deepEqual(world.calls.find((c) => c[0] === "eldoradoSetQuantity" && c[1] === "eld-nc-bulk"), ["eldoradoSetQuantity", "eld-nc-bulk", 5]);
+  assert.deepEqual(world.calls.find((c) => c[0] === "eldoradoSetQuantity" && c[1] === "eld-nc-bulk"), ["eldoradoSetQuantity", "eld-nc-bulk", 1]);
   r = await rowBy("eld-nc-bulk");
   assert.equal(r.autoPaused, false);
   assert.equal(count("eldoradoRelist", "eld-nc-owner"), 0);
@@ -495,9 +495,9 @@ test("R3-3 eldorado syncBundleStock: a no-claim bulk row below its minimum pause
 test("R3-3 g2g syncStock: a no-claim bulk row below its minimum is delisted, relisted at the minimum, never over an owner pause", async () => {
   world.af = { g2gAutoDeliver: true, g2gSyncStock: true, g2gDeliverDryRun: false };
   const live = await insertOffer({ source: "noclaim", market: "g2g", minQty: 5, externalId: "g2g-nc-bulk" });
-  await insertRow({ marketplace: "g2g", externalId: "g2g-nc-bulk", noclaimStock: true, set: oid(), bulkOfferId: live });
+  await insertRow({ marketplace: "g2g", externalId: "g2g-nc-bulk", noclaimStock: true, set: oid(), bulkOfferId: live, bulkPackSize: 5 });
   const ownerPaused = await insertOffer({ source: "noclaim", market: "g2g", minQty: 5, state: "paused", externalId: "g2g-nc-owner" });
-  await insertRow({ marketplace: "g2g", externalId: "g2g-nc-owner", noclaimStock: true, set: oid(), bulkOfferId: ownerPaused, autoPaused: true });
+  await insertRow({ marketplace: "g2g", externalId: "g2g-nc-owner", noclaimStock: true, set: oid(), bulkOfferId: ownerPaused, bulkPackSize: 5, autoPaused: true });
   await insertRow({ marketplace: "g2g", externalId: "g2g-nc-single", noclaimStock: true, set: oid() });
   world.nc.set("g2g-nc-bulk", 3);
   world.nc.set("g2g-nc-owner", 6);
@@ -517,7 +517,7 @@ test("R3-3 g2g syncStock: a no-claim bulk row below its minimum is delisted, rel
   world.calls.length = 0;
   world.nc.set("g2g-nc-bulk", 5);
   res = await g2g.syncStock();
-  assert.deepEqual(world.calls.find((c) => c[0] === "g2gSetQuantity" && c[1] === "g2g-nc-bulk"), ["g2gSetQuantity", "g2g-nc-bulk", 5]);
+  assert.deepEqual(world.calls.find((c) => c[0] === "g2gSetQuantity" && c[1] === "g2g-nc-bulk"), ["g2gSetQuantity", "g2g-nc-bulk", 1]);
   assert.equal(count("g2gRelist", "g2g-nc-bulk"), 1);
   assert.equal((await rowBy("g2g-nc-bulk")).autoPaused, false);
 

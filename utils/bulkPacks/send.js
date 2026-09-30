@@ -2469,6 +2469,8 @@ async function sendNoclaim(ctx) {
       quantity: packs,
       minQty,
       coverPath: cover,
+      // Born linked: no moment in which the pack row reads as an ordinary one.
+      rowExtra: { bulkOfferId: offer._id, bulkPackSize: minQty },
     });
   } catch (e) {
     if (!publishNotCreated(e)) return holdUnknownPublish(ctx, e);
@@ -2500,7 +2502,9 @@ async function sendNoclaim(ctx) {
   if (rowId) {
     try {
       const r = await deps.MarketplaceListing.updateOne(
-        { _id: rowId, bulkOfferId: null },
+        // Normally the row was created linked (rowExtra); this confirms it, and
+        // links it if an older no-claim layer ignored the extra fields.
+        { _id: rowId, bulkOfferId: { $in: [null, offer._id] } },
         // PACKS-2 §3: the pack size rides on the same update as the link.
         { $set: { bulkOfferId: offer._id, bulkPackSize: minQty } },
       );

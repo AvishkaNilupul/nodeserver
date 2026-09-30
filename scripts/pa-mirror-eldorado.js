@@ -76,6 +76,9 @@ async function main() {
   const eld = await MarketplaceListing.find({
     marketplace: "eldorado",
     status: "active",
+    // A bulk pack is never mirrored: PlayerAuctions would sell it as single
+    // accounts (docs/bulk-packs/CONTRACT.md).
+    bulkOfferId: null,
   }).lean();
   const bundles = eld.filter((r) => !FARM_TITLE.test(r.title || ""));
 

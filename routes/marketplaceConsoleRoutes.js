@@ -50,6 +50,7 @@
 //     ~1800 rows and units[] is the big field.
 // ---------------------------------------------------------------------------
 const express = require("express");
+const { packSizeOf } = require("../utils/bulkPacks/packMath");
 
 const { requireSuperadmin, enforce2fa } = require("../middleware/auth");
 const MarketplaceListing = require("../models/MarketplaceListing");
@@ -209,6 +210,8 @@ async function rollup() {
       lastError: 1,
       updatedAt: 1,
       "units.deliveredAt": 1,
+      bulkOfferId: 1,
+      bulkPackSize: 1,
     },
   )
     // Sorted, and the cap is reported. An UNSORTED .limit() drops rows in
@@ -260,7 +263,9 @@ async function rollup() {
     if (r.lastError && r.status === "active") p.errors += 1;
     if (r.lastError) p.errorsHistorical += 1;
     p.unitsSold += Number(r.unitsSold) || 0;
-    const price = Number(r.price) || 0;
+    // A bulk pack row's price is for the whole pack of N accounts; each
+    // delivered account carries 1/N of it (docs/bulk-packs/PACKS-2.md).
+    const price = (Number(r.price) || 0) / packSizeOf(r);
     for (const u of r.units || []) {
       if (!u.deliveredAt) continue;
       const at = new Date(u.deliveredAt);

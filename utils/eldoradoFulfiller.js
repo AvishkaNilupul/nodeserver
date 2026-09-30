@@ -26,7 +26,7 @@ const { getAutoFarm, getAccountListingSettings } = require("./settings");
 const mp = require("./marketplaces");
 const UnclaimedAccount = require("../models/UnclaimedAccount");
 const farmService = require("./eldoradoFarmService");
-const { packSizeOf, accountsForUnits, packsFor } = require("./bulkPacks/packMath");
+const { packSizeOf, accountsForUnits, packsFor, packMismatch } = require("./bulkPacks/packMath");
 
 // Distinct from the Shop / Gameflip / GGSel / Digiseller tags so the same
 // account can never be handed out twice across platforms.
@@ -280,12 +280,12 @@ async function deliverOrder(order, { dryRun }) {
   // A bulk pack row must know its pack size (docs/bulk-packs/PACKS-2.md §1):
   // without it this order would be read as single accounts and a pack buyer
   // short-changed. Refuse and page ("bulk pack short") — deliver it by hand.
-  if (listing.bulkOfferId && packSizeOf(listing) < 2) {
+  const packProblem = packMismatch(listing);
+  if (packProblem) {
     return {
       orderId,
       error:
-        "bulk pack short: this bulk listing has no pack size recorded — " +
-        "nothing was sent; deliver it by hand",
+        "bulk pack short: " + packProblem + " — nothing was sent; deliver it by hand",
     };
   }
 
@@ -865,7 +865,10 @@ async function syncBundleStock({ dryRun = false } = {}) {
         console.error("eldorado bulk offer read:", e.message);
         continue;
       }
-      if (packSizeOf(row) > 1) real = advertisedFor(row, real);
+      // A pack title the row cannot honour — or a bulk row with no pack size —
+      // is never on sale (packMath.packMismatch; delivery refuses it too).
+      if (packMismatch(row)) real = 0;
+      else if (packSizeOf(row) > 1) real = advertisedFor(row, real);
       else if (bulk && real < (Number(bulk.minQty) || 0)) real = 0;
       if (bulk && bulk.state !== "live") bulkLive = false;
     }

@@ -447,6 +447,10 @@ async function publishNoclaim(name, ctx = {}) {
     return { success: false, message: "Not a no-claim listing — it has no no-claim stock to deliver" };
   }
   const p = {
+    // Bulk packs (docs/bulk-packs/PACKS-2.md): the row is BORN linked to its
+    // bulk offer with its pack size, so there is no moment in which a pack
+    // listing reads as an ordinary one. Only these two fields pass through.
+    rowExtra: bulkRowExtra(c.rowExtra),
     set: c.set,
     body: c.body || {},
     title: c.title,
@@ -674,9 +678,18 @@ function orphanedPublish(name, rawId, err, accounts) {
 // Eldorado / PlayerAuctions / G2G: nothing is claimed now. The offer
 // advertises what the farm can really hand over (capped), and the market's
 // fulfiller claims one account per unit when a paid order lands.
+function bulkRowExtra(x) {
+  if (!x || typeof x !== "object") return {};
+  const out = {};
+  if (x.bulkOfferId) out.bulkOfferId = x.bulkOfferId;
+  const n = Math.floor(Number(x.bulkPackSize));
+  if (Number.isFinite(n) && n >= 2) out.bulkPackSize = n;
+  return out.bulkOfferId && out.bulkPackSize ? out : {};
+}
+
 async function publishClaimAtSale(
   name,
-  { set, body, title, description, priceUsd, cover, cat, pubGame },
+  { set, body, title, description, priceUsd, cover, cat, pubGame, rowExtra },
 ) {
   const st = await ncs.stockForSet(set);
   const free = Math.max(0, Math.floor(Number(st && st.free) || 0));
@@ -799,6 +812,7 @@ async function publishClaimAtSale(
         "no-claim auto-delivery: an account is claimed when an order lands (" + quantity +
         " advertised)",
       ...ncs.rowFields(set, name, []),
+      ...(rowExtra || {}),
     });
   } catch (e) {
     return orphanedPublish(name, externalId, e, 0);

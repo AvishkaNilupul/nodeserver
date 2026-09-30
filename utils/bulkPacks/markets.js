@@ -1104,7 +1104,7 @@ async function publishNoclaim(args) {
 }
 
 async function publishNoclaimNow(
-  { market, set, game, title, description, unitPrice, packPrice, quantity, minQty, coverPath },
+  { market, set, game, title, description, unitPrice, packPrice, quantity, minQty, coverPath, rowExtra },
   t,
 ) {
   const m = marketFor(market, QTY_MARKETS, "no-claim packs");
@@ -1161,6 +1161,8 @@ async function publishNoclaimNow(
     coverPath: fallbackCover(set),
     cat,
     pubGame,
+    // The row is created linked (bulkOfferId + bulkPackSize), PACKS-2 §3.
+    rowExtra: rowExtra && typeof rowExtra === "object" ? rowExtra : undefined,
   };
   t.sent = true;
   const r = await d("noclaimListings").publishNoclaim(m, ctx);
