@@ -1071,6 +1071,16 @@ async function syncOnce() {
     //
     // utils/autoLister.js already treats "expired" as gone (`if (status &&
     // status !== "expired")`); this watcher simply never learned it.
+    //
+    // A buffered rent-farm offer that simply EXPIRED unsold keeps its account
+    // for a renewal: the next buffer pass relists that same account instead of
+    // returning it and burning a fresh pristine one on the replacement (after a
+    // month on a claiming stack it is not pristine any more anyway). Never for
+    // "cancelled" — a paid-then-refunded listing's credentials have been seen —
+    // and only while the buffer is really running to renew it.
+    const renew =
+      status === "expired" && !!row.rentFarm && !!row.rentFarmPoolId &&
+      gfFarm.renewsOnExpiry();
     if (status === "expired" || status === "cancelled") {
       const retired = await MarketplaceListing.findOneAndUpdate(
         { _id: row._id, status: "active" },
@@ -1078,13 +1088,17 @@ async function syncOnce() {
           $set: {
             status: "removed",
             lastError:
-              "gameflip reports \"" + status + "\" — retired by the watcher",
+              "gameflip reports \"" + status + "\" — retired by the watcher" +
+              (renew ? "; account kept for a same-account renewal" : ""),
+            ...(renew ? { rentFarmExpiredAt: new Date() } : {}),
           },
         },
       ).catch(() => null);
       // Same split as the 404 branch: a rent-farm row has no set.
       if (retired && row.rentFarm) {
-        await releaseBufferedRow(row, "gameflip reports \"" + status + "\"");
+        if (!renew) {
+          await releaseBufferedRow(row, "gameflip reports \"" + status + "\"");
+        }
       } else if (retired && row.accountId) {
         await releaseAccount(row.accountId, row.set).catch(() => {});
       } else if (retired && row.accountOffer) {

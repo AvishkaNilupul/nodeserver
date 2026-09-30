@@ -1753,7 +1753,11 @@ const CHECKS = [
             ? " " +
               stranded.length +
               " account(s) still held by dead offers; the next top-up pass " +
-              "reclaims those."
+              "returns them to the pool (or relists one that expired unsold)."
+            : "") +
+          (Number(state.renewing) > 0
+            ? " " + Number(state.renewing) + " offer(s) expired unsold and are " +
+              "waiting for their same-account renewal (normal 30-day cycle)."
             : ""),
         items: capItems([
           ...dead.map((o) => ({

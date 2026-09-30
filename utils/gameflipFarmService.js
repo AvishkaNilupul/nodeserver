@@ -116,6 +116,13 @@ const CATALOGUE_DAYS_BACK = 90;
 // NEWEST rows and `truncated` says so out loud.
 const MAX_BUFFER_ROWS = 400;
 
+// Renewal of offers that EXPIRED unsold (Gameflip lists everything for 30 days).
+// A failed renewal is retried on later passes; after this many the account is
+// returned to the pool the old way. A row waiting longer than RENEW_STUCK_MS is
+// reported as stranded rather than "renewing".
+const RENEW_MAX_FAILURES = 3;
+const RENEW_STUCK_MS = 6 * 60 * 60 * 1000;
+
 // Lazy requires: these live on the renter-admin / bot-config routers, exactly as
 // utils/operatorFarm.js takes them, so module load order stays irrelevant and no
 // circular require can bite at boot.
@@ -151,6 +158,15 @@ function config() {
       ? af.gfRentFarmGames.map((g) => String(g || "").trim()).filter(Boolean)
       : [],
   };
+}
+
+// Does an unsold offer that EXPIRES keep its account for a renewal (true), or
+// go straight back to the pool (false)? Only while the buffer is really
+// running: with the service off or in dry run nothing would ever renew it, and
+// an account parked for a renewal that never comes is a leak.
+function renewsOnExpiry() {
+  const cfg = config();
+  return cfg.enabled && cfg.af.gfBufferDryRun === false;
 }
 
 // ------------------------------------------------------------------
@@ -612,12 +628,23 @@ async function strandedRows(limit) {
       rentFarmGame: 1,
       rentFarmDays: 1,
       rentFarmPoolId: 1,
+      rentFarmExpiredAt: 1,
+      rentFarmRenewFailures: 1,
+      lastError: 1,
       updatedAt: 1,
     },
   )
     .sort({ updatedAt: 1 })
     .limit(Math.max(1, limit))
     .lean();
+}
+
+// An expired row waiting for (or retrying) its renewal, as opposed to an
+// account genuinely stuck on a dead offer.
+function isRenewing(row, now = Date.now()) {
+  if (!row || row.status !== "removed" || !row.rentFarmExpiredAt) return false;
+  if ((Number(row.rentFarmRenewFailures) || 0) >= RENEW_MAX_FAILURES) return false;
+  return now - new Date(row.rentFarmExpiredAt).getTime() < RENEW_STUCK_MS;
 }
 
 // Tell the owner the buffer stopped filling. Uses the SHARED alert path rather
@@ -659,12 +686,23 @@ async function topUpBuffer(opts = {}) {
     wanted: 0,
     published: 0,
     reclaimed: 0,
+    renewed: 0,
     stopped: "",
     shortfall: [],
     capacity: null,
   };
 
   if (!cfg.enabled) {
+    // Off: nothing is published or renewed — but an account still parked on a
+    // dead offer goes back to the pool, because nothing else ever returns it.
+    if (!dryRun) {
+      for (const row of await strandedRows(cfg.perPass)) {
+        const r = await releaseBuffered(row, {
+          reason: "offer is " + row.status + " and the buffer is off — reclaiming the buffered account",
+        }).catch((e) => ({ released: false, error: String(e.message || e) }));
+        if (r && r.released) out.reclaimed++;
+      }
+    }
     out.stopped = "gameflipRentFarm off";
     return out;
   }
@@ -682,6 +720,25 @@ async function topUpBuffer(opts = {}) {
   const haveKey = new Set(
     live.map((r) => slotKey(r.rentFarmGame, r.rentFarmDays)),
   );
+
+  // Accounts parked on dead offers FIRST — and before the "buffer is full"
+  // return below, which used to skip this entirely whenever every wanted slot
+  // was live, leaving such accounts on a bot and holding a rental slot until
+  // renterExpiry pulled them a year later without ever returning them.
+  // An offer that EXPIRED unsold is relisted with its own account when its slot
+  // is still wanted; everything else goes back to the pool. A renewal is a
+  // publish, so it spends this pass's publish budget.
+  let publishBudget = cfg.perPass;
+  if (!dryRun) {
+    const settled = await settleStranded(cat, haveKey, cfg, out);
+    publishBudget -= settled.published;
+    if (settled.stop) {
+      out.stopped = settled.stop;
+      lastPass.stopped = settled.stop;
+      return out;
+    }
+  }
+
   const missing = cat.wanted.filter((w) => !haveKey.has(w.key));
   if (!missing.length) {
     out.stopped = "buffer is full";
@@ -689,19 +746,7 @@ async function topUpBuffer(opts = {}) {
     return out;
   }
 
-  // Reclaim first, and only then publish. A dead row holding an account is a
-  // slot we already own; taking it back before asking the pool for a new one is
-  // both cheaper and strictly safer than publishing into a tighter floor.
-  if (!dryRun) {
-    for (const row of await strandedRows(cfg.perPass)) {
-      const r = await releaseBuffered(row, {
-        reason: "offer is " + row.status + " — reclaiming the buffered account",
-      }).catch((e) => ({ released: false, error: String(e.message || e) }));
-      if (r && r.released) out.reclaimed++;
-    }
-  }
-
-  const budget = Math.min(cfg.perPass, missing.length);
+  const budget = Math.min(Math.max(0, publishBudget), missing.length);
   for (let i = 0; i < budget; i++) {
     const want = missing[i];
 
@@ -769,6 +814,257 @@ async function topUpBuffer(opts = {}) {
   }
 
   return out;
+}
+
+// Settle up to perPass rows that are dead on Gameflip but still hold an
+// account: renew the ones that expired unsold (same account, new listing), and
+// return the rest to the pool. Mutates `haveKey` with every slot it renews.
+// Returns { published, stop } — publishes spent, and a reason to stop the pass.
+async function settleStranded(cat, haveKey, cfg, out) {
+  const wanted = new Map(cat.wanted.map((w) => [w.key, w]));
+  let published = 0;
+  let stop = "";
+  let cap = null;
+  for (const row of await strandedRows(cfg.perPass)) {
+    const key = slotKey(row.rentFarmGame, row.rentFarmDays);
+    const want = wanted.get(key);
+    const failures = Number(row.rentFarmRenewFailures) || 0;
+    const expired = row.status === "removed" && !!row.rentFarmExpiredAt;
+    let why;
+    if (!expired) {
+      why = "offer is " + row.status + " — reclaiming the buffered account";
+    } else if (!want) {
+      why = "expired unsold and no longer in the catalogue — returning the account";
+    } else if (haveKey.has(key)) {
+      why = "expired unsold and its slot was refilled meanwhile — returning the account";
+    } else if (failures >= RENEW_MAX_FAILURES) {
+      why = "renewal failed " + failures + " time(s) — returning the account";
+    } else {
+      // Renewable. Budget or a rate limit can defer it to a later pass; the
+      // account simply stays where it is, farming, until then.
+      if (stop || published >= cfg.perPass) continue;
+      if (cap === null) cap = await freeSlots();
+      if (cap.ok && cap.totalFree < cfg.reserve) {
+        // The floor wins. Renewing keeps a slot a paid order may need; below
+        // the reserve the unsold offer gives it back instead. An unreadable
+        // capacity is no reason to release — renewal takes no NEW slot.
+        why =
+          "expired unsold while free slots (" + cap.totalFree + ") are under the " +
+          cfg.reserve + " reserve — returning the account so a paid order can have its slot";
+      } else {
+        published++;
+        const r = await renewExpired(row, want);
+        if (r.renewed) {
+          haveKey.add(key);
+          out.renewed++;
+          out.live++;
+          continue;
+        }
+        if (r.stop) stop = "renewal hit a Gameflip limit: " + r.reason;
+        if (!r.release) {
+          noteReason(key, "renewal failed (retried next pass): " + r.reason);
+          continue;
+        }
+        why = "expired offer cannot be renewed (" + r.reason + ") — returning the account";
+      }
+    }
+    const r = await releaseBuffered(row, { reason: why }).catch((e) => ({
+      released: false,
+      error: String(e.message || e),
+    }));
+    if (r && r.released) out.reclaimed++;
+  }
+  return { published, stop };
+}
+
+// Can this parked account be sold again as it is? Everything a live offer
+// needs: readable credentials, a pool row we still hold, and the account still
+// farming on the holder's bot with a working token. Anything short of that goes
+// back to the pool instead of back on sale.
+async function renewalHealth(poolId) {
+  const creds = await poolCredentials(poolId);
+  if (!creds || !creds.login || !creds.password || !creds.clientSecret) {
+    return { ok: false, reason: "no readable credentials" };
+  }
+  const pool = await AvailableAccount.findById(poolId, { status: 1, manualSold: 1 }).lean();
+  if (!pool || pool.status !== "claimed") {
+    return { ok: false, reason: "pool row is no longer claimed" };
+  }
+  if (pool.manualSold) return { ok: false, reason: "account was sold by hand" };
+  const acct = await RenterAccount.findOne({ clientSecret: creds.clientSecret }).lean();
+  const holder = await Renter.findOne(
+    { usernameLower: operatorFarm.OPERATOR_USERNAME },
+    { _id: 1 },
+  ).lean();
+  if (!acct || !holder || String(acct.renter) !== String(holder._id)) {
+    return { ok: false, reason: "account is not on the holder's bot any more" };
+  }
+  if (acct.enabled === false || !acct.configFile || acct.farmEndedAt) {
+    return { ok: false, reason: "account is not farming" };
+  }
+  if (acct.lastScanStatus === "token_invalid") {
+    return { ok: false, reason: "account token is dead" };
+  }
+  return { ok: true, creds };
+}
+
+// Relist an offer that EXPIRED unsold, with the SAME account. Order matters for
+// the two failures that cost money:
+//   1. the old row's pointer is taken FIRST (conditionally), so no concurrent
+//      reclaim can hand the account back to the pool while a new listing is
+//      being published with its credentials;
+//   2. a publish that fails puts the pointer back (retried next pass);
+//   3. a publish that succeeds but cannot be recorded is delisted, and only a
+//      listing that is really down gives the pointer back — a live listing with
+//      no row keeps the account claimed and pages a human.
+// Returns { renewed } | { release: true, reason } | { reason, stop? }.
+async function renewExpired(row, want) {
+  const poolId = String(row.rentFarmPoolId || "");
+  const term =
+    TERMS.find((t) => t.days === want.days) || {
+      days: want.days,
+      label: want.days + " Days",
+      priceUsd: want.priceUsd,
+    };
+  const health = await renewalHealth(poolId).catch((e) => ({
+    ok: false,
+    reason: "health read failed: " + String((e && e.message) || e).slice(0, 120),
+    transient: true,
+  }));
+  if (!health.ok) {
+    // A failed READ is not evidence the account is bad — retry next pass.
+    return health.transient
+      ? { reason: health.reason }
+      : { release: true, reason: health.reason };
+  }
+  const creds = health.creds;
+
+  const claimed = await MarketplaceListing.findOneAndUpdate(
+    {
+      _id: row._id,
+      status: "removed",
+      rentFarmPoolId: poolId,
+      rentFarmExpiredAt: { $ne: null },
+    },
+    { $set: { rentFarmPoolId: "" } },
+  );
+  if (!claimed) return { reason: "the row changed meanwhile" };
+  const giveBack = (reason) =>
+    MarketplaceListing.updateOne(
+      { _id: row._id, rentFarmPoolId: "" },
+      {
+        $set: { rentFarmPoolId: poolId, lastError: ("renewal failed: " + reason).slice(0, 400) },
+        $inc: { rentFarmRenewFailures: 1 },
+      },
+    ).catch(() => {});
+
+  const title = offerTitle(want.game, term);
+  let cover = "";
+  let r;
+  try {
+    try {
+      cover = await buildPromoCoverImage({
+        title: want.game + " Twitch Drops Automatic Farming",
+        serviceText: term.label + " Service",
+        bullets: [
+          "Fully Automated Farming",
+          "Account-Safe and Undetectable",
+          "Reliable Daily Rewards",
+        ],
+        twitchTiles: true,
+      });
+    } catch {
+      cover = "";
+    }
+    r = await mp.gameflipPublish({
+      title,
+      description: offerDescription(want.game, term),
+      priceUsd: term.priceUsd,
+      imagePath: cover,
+      autoDeliverCode: bufferedDeliveryCode(
+        creds.login,
+        creds.password,
+        term.days,
+        want.game,
+      ),
+    });
+  } catch (e) {
+    const reason = String((e && e.message) || e).slice(0, 300);
+    await giveBack(reason);
+    return { reason, stop: /429|too many|rate/i.test(reason) };
+  } finally {
+    if (cover) await fsp.unlink(cover).catch(() => {});
+  }
+
+  try {
+    await createBufferedRow({
+      marketplace: MARKET,
+      externalId: r.externalId,
+      url: r.url || "",
+      title,
+      description: offerDescription(want.game, term),
+      price: term.priceUsd,
+      status: "active",
+      origin: "manual",
+      note: "rent-farm buffer (renewed after expiry): " + creds.login,
+      autoDeliver: true,
+      qtyRemaining: 0,
+      accountLogin: creds.login,
+      rentFarm: true,
+      rentFarmGame: want.game,
+      rentFarmDays: term.days,
+      rentFarmPoolId: poolId,
+    });
+  } catch (e) {
+    const reason = String((e && e.message) || e).slice(0, 200);
+    let delisted = false;
+    try {
+      await mp.gameflipDelist(r.externalId);
+      delisted = true;
+    } catch (de) {
+      console.error(
+        "gameflip buffer: could not delist renewed listing " + r.externalId +
+          " after a failed row write:",
+        de.message,
+      );
+    }
+    if (delisted) {
+      await giveBack("renewed listing could not be recorded (" + reason + "); it was delisted");
+      return { reason: "could not record the renewed listing: " + reason };
+    }
+    // Live, sellable, and no row names it. Keep the pointer OFF the old row so
+    // nothing hands the account back to the pool while this listing still sells
+    // it; the account stays claimed and farming. A human must take it down.
+    await alertBufferStopped(
+      "orphan-renewal",
+      "renewed " + (row.externalId || row._id) + " as " + r.externalId +
+        " but could not record it (" + reason + "). THE LISTING IS STILL LIVE AND " +
+        "SELLABLE with " + creds.login + " attached — take it down by hand. The " +
+        "account is still claimed and on its bot (pool " + poolId + ").",
+    );
+    return { reason: "renewed listing is live with no row: " + reason };
+  }
+
+  // Keep renterExpiry away from an account that is on sale again: its
+  // placeholder window started when it was FIRST published.
+  await restampWindow(creds.clientSecret, BUFFER_WINDOW_DAYS).catch((e) =>
+    console.error("gameflip buffer: renewal restamp failed:", e.message),
+  );
+  await MarketplaceListing.updateOne(
+    { _id: row._id },
+    { $set: { lastError: "expired unsold — renewed as " + r.externalId } },
+  ).catch(() => {});
+  logEvent({
+    category: "marketplace",
+    action: "gameflip_buffer_renewed",
+    actor: "gameflip-buffer",
+    subject: want.game,
+    count: 1,
+    detail:
+      title + " $" + term.priceUsd + " — " + creds.login + " relisted as " +
+      r.externalId + " (was " + (row.externalId || row._id) + ", expired unsold)",
+  }).catch(() => {});
+  return { renewed: true, externalId: r.externalId };
 }
 
 // Publish ONE buffered offer. Returns "stop" when the failure means every
@@ -1419,6 +1715,8 @@ async function bufferState() {
     sold: [],
     missing: [],
     stranded: [],
+    // Expired-unsold offers waiting for their same-account renewal.
+    renewing: 0,
     problems: [],
     // Which JOINS could not be read this pass. Empty means every one of them
     // loaded — it does NOT mean nothing is wrong. A verdict drawn from a join
@@ -1679,7 +1977,11 @@ async function bufferState() {
   }
 
   // Accounts still held by offers that are dead on Gameflip.
-  state.stranded = (await strandedRows(MAX_BUFFER_ROWS).catch(() => [])).map(
+  const deadRows = await strandedRows(MAX_BUFFER_ROWS).catch(() => []);
+  // Expired-unsold rows waiting for their renewal are not stuck — they are the
+  // normal 30-day cycle. Only a renewal that is overdue or keeps failing is.
+  state.renewing = deadRows.filter((r) => isRenewing(r)).length;
+  state.stranded = deadRows.filter((r) => !isRenewing(r)).map(
     (r) => ({
       externalId: r.externalId,
       title: r.title || "",
@@ -1795,6 +2097,10 @@ module.exports = {
   bufferState,
   // exported for tests and for the tracker's own capacity line
   config,
+  renewsOnExpiry,
+  renewExpired,
+  isRenewing,
+  RENEW_MAX_FAILURES,
   freeSlots,
   roomForOneMore,
   slotKey,

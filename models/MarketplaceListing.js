@@ -297,6 +297,17 @@ const marketplaceListingSchema = new mongoose.Schema(
     // now a lease that keeps the pointer; the pointer is cleared only once the
     // window is actually stamped.
     rentFarmSaleClaimedAt: { type: Date, default: null },
+    // An UNSOLD buffered offer that reached Gameflip's 30-day expiry. The watcher
+    // retires the row but keeps rentFarmPoolId, and the next buffer pass relists
+    // the SAME account under a new listing (utils/gameflipFarmService
+    // renewExpired) instead of returning it and burning a fresh pristine account
+    // on the replacement: after a month on a claiming stack the old account is
+    // no longer pristine anyway (82 of 87 held claimed drops on 2026-09-30).
+    // Null on every row that did not expire unsold.
+    rentFarmExpiredAt: { type: Date, default: null },
+    // How many renewals of this expired row have failed. After a few the account
+    // is simply returned to the pool, as before renewal existed.
+    rentFarmRenewFailures: { type: Number, default: 0 },
     // Bulk packs (docs/bulk-packs/CONTRACT.md §3, hook H1): the BulkOffer this
     // row belongs to, or null for every other listing. A bulk dropset/noclaim
     // offer is ALSO an ordinary row with origin "manual", so delivery, sale
