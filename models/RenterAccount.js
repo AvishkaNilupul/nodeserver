@@ -76,6 +76,14 @@ const renterAccountSchema = new mongoose.Schema(
     // puts it back farming exactly what it farmed before. Unset = never stopped
     // by that path; a start then falls back to the renter's farmGames.
     favouriteGames: { type: [String], default: undefined },
+    // A lapsed window that could not be pulled off its bot yet (host offline,
+    // container state unreadable, unknown host). utils/renterExpiry retries it
+    // every tick and pages once it has been stuck for a while — the row is only
+    // stamped farmEndedAt once the account is really off every config on its
+    // host and the bot has reloaded.
+    expiryAttempts: { type: Number, default: 0 },
+    expiryLastError: { type: String, default: "" },
+    expiryAlertedAt: { type: Date, default: null },
   },
   { timestamps: true },
 );

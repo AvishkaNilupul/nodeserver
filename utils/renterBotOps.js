@@ -235,19 +235,20 @@ async function restartIfRunning(host, file) {
   return true;
 }
 
-// Every config file on `host` that holds any of `secrets`, from ONE batched
-// read. Pointers go stale (a stack moved, a consolidation, an old manual copy),
-// so a stop looks where the accounts really are, not only where the ledger says.
-// `required` files must be readable; any other unreadable file is skipped.
-async function filesHoldingSecrets(host, secrets, required = []) {
-  if (!secrets.length) return [];
+// Where each of `secrets` really is on `host`: Map<file, Set<secret>>, from ONE
+// batched read of every config there. Pointers go stale (a stack moved, a
+// consolidation, an old manual copy), so a stop looks where the accounts
+// really are, not only where the ledger says. `required` files must be
+// readable (a missing one is fine); any other unreadable file is skipped.
+async function locateSecrets(host, secrets, required = []) {
+  const out = new Map();
+  if (!secrets.length) return out;
   const want = new Set(secrets);
   const files = (await hosts.readdir(host, { retries: 1 })).filter((f) =>
     CONFIG_RE.test(f),
   );
-  if (!files.length) return [];
+  if (!files.length) return out;
   const read = await hosts.readFiles(host, files);
-  const out = [];
   for (const f of files) {
     const r = read[f];
     let data = null;
@@ -264,11 +265,19 @@ async function filesHoldingSecrets(host, secrets, required = []) {
       }
       continue;
     }
-    if (configUsers(data).some((u) => u && typeof u === "object" && want.has(u.ClientSecret))) {
-      out.push(f);
+    for (const u of configUsers(data)) {
+      if (u && typeof u === "object" && want.has(u.ClientSecret)) {
+        if (!out.has(f)) out.set(f, new Set());
+        out.get(f).add(u.ClientSecret);
+      }
     }
   }
   return out;
+}
+
+// Every config file on `host` that holds any of `secrets` (see locateSecrets).
+async function filesHoldingSecrets(host, secrets, required = []) {
+  return [...(await locateSecrets(host, secrets, required)).keys()];
 }
 
 // Pull `secrets` out of ONE file under its lock. Remembers each removed
@@ -544,6 +553,7 @@ module.exports = {
   startRenterFarming,
   applyRenterGames,
   restartIfRunning,
+  locateSecrets,
   filesHoldingSecrets,
   detachFromFile,
   settleAfterDetach,

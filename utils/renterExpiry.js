@@ -15,14 +15,29 @@
 // so a lapse is never silent.
 const Renter = require("../models/Renter");
 const RenterAccount = require("../models/RenterAccount");
+const FarmServiceOrder = require("../models/FarmServiceOrder");
+const SystemEvent = require("../models/SystemEvent");
 const hosts = require("./botHosts");
 const { sendTelegram } = require("./telegram");
 const { logEvent } = require("./systemLog");
-const { removeAccountFromConfig } = require("../routes/botConfigRoutes");
-const { stopRenterFarming, restartIfRunning } = require("./renterBotOps");
+const {
+  stopRenterFarming,
+  locateSecrets,
+  detachFromFile,
+  settleAfterDetach,
+} = require("./renterBotOps");
 const { OPERATOR_HOLDER_USERNAME } = require("./renters");
 
 const INTERVAL_MS = 5 * 60 * 1000; // every 5 minutes
+// A lapsed window that could not be pulled off its bot pages after this many
+// ticks (~30 min), then at most once a day while it stays stuck.
+const STUCK_ALERT_ATTEMPTS = 6;
+const STUCK_REALERT_MS = 24 * 60 * 60 * 1000;
+// The daily "windows ending soon" digest: how far ahead, and the JST hour it
+// goes out (the owner works in JST).
+const ADVANCE_MS = 3 * 24 * 60 * 60 * 1000;
+const DIGEST_HOUR_JST = 9;
+const LIST_MAX = 20;
 // How close to accessEnd the "expiring soon" heads-up fires.
 const WARN_MS = 3 * 24 * 60 * 60 * 1000; // 3 days
 
@@ -51,68 +66,226 @@ function daysLeft(end, now) {
 }
 
 // Per-account leases (RenterAccount.farmUntil): pull just the lapsed account
-// out of the renter's config and leave the rest of the bot farming. The row is
-// kept (disabled, stamped) so the operator still sees it in the roster with its
-// drops, rather than it silently vanishing.
+// out of the config it is REALLY in and leave the rest of the bot farming. The
+// row is kept (disabled, stamped) so the operator still sees it in the roster
+// with its drops, rather than it silently vanishing.
+//
+// A row is stamped farmEndedAt only once the account is confirmed off every
+// config on its host AND each bot it left has reloaded (or was not running).
+// Before 2026-10-01 it was stamped whenever the ONE recorded file did not
+// throw — a moved stack (ENOENT), an unknown host or a failed restart all
+// reported "pulled off the bot" while the account kept farming.
 async function sweepAccounts(now) {
   const due = await RenterAccount.find({
     farmUntil: { $ne: null, $lte: now },
     farmEndedAt: null,
   });
-  const touchedBots = new Map();
+  if (!due.length) return { ended: [], stuck: [] };
+
+  const byHost = new Map();
+  const unknownHost = [];
   for (const a of due) {
     const host = hosts.resolveHost(a.host);
-    if (a.configFile && host) {
+    if (!host) {
+      unknownHost.push(a);
+      continue;
+    }
+    if (!byHost.has(host.id)) byHost.set(host.id, { host, accounts: [] });
+    byHost.get(host.id).accounts.push(a);
+  }
+
+  const ended = [];
+  const stuck = [];
+  for (const a of unknownHost) {
+    stuck.push({ a, reason: "unknown bot host '" + (a.host || "") + "'" });
+  }
+
+  for (const { host, accounts } of byHost.values()) {
+    const secrets = accounts.map((a) => a.clientSecret).filter(Boolean);
+    const recordedFiles = new Set(accounts.map((a) => a.configFile).filter(Boolean));
+    let located;
+    try {
+      located = await locateSecrets(host, secrets, [...recordedFiles]);
+    } catch (e) {
+      const reason = "could not read " + host.id + "'s configs: " + String(e.message || e).slice(0, 160);
+      for (const a of accounts) stuck.push({ a, reason });
+      continue;
+    }
+    const files = [...new Set([...recordedFiles, ...located.keys()])];
+    const failedFile = new Map(); // file -> reason
+    for (const file of files) {
       try {
-        const removed = await removeAccountFromConfig(host, a.configFile, {
-          clientSecret: a.clientSecret,
-          login: a.login,
-        });
-        if (removed) touchedBots.set(host.id + "|" + a.configFile, { host, file: a.configFile });
+        const det = await detachFromFile(host, file, secrets);
+        if (det.missing) continue;
+        await settleAfterDetach(host, file, det, { reloadOwed: recordedFiles.has(file) });
       } catch (e) {
-        // Host offline — leave farmEndedAt null and retry next tick.
-        console.error(
-          "[renterExpiry] could not pull " + (a.login || a._id) + ":",
-          e.message,
-        );
-        continue;
+        failedFile.set(file, String((e && e.message) || e).slice(0, 160));
       }
     }
+    for (const a of accounts) {
+      // Stuck only if a file THIS account was in (or is recorded in) failed —
+      // the pull or the reload may not have happened there.
+      const mine = new Set([a.configFile].filter(Boolean));
+      for (const [f, set] of located) if (set.has(a.clientSecret)) mine.add(f);
+      const bad = [...mine].find((f) => failedFile.has(f));
+      if (bad) stuck.push({ a, reason: bad + ": " + failedFile.get(bad) });
+      else ended.push(a);
+    }
+  }
+
+  for (const a of ended) {
     a.farmEndedAt = new Date();
     a.enabled = false;
     a.configFile = "";
     a.container = "";
+    a.expiryAttempts = 0;
+    a.expiryLastError = "";
     await a.save();
-    const renter = await Renter.findById(a.renter, { username: 1 }).lean();
-    console.log(
-      "[renterExpiry] farming window ended for " + (a.login || a._id),
-    );
-    await sendTelegram(
-      "⌛ Account farming window ended: " +
-        (a.login || String(a._id)) +
-        (renter ? " (renter " + renter.username + ")" : "") +
-        " — pulled off the bot.",
+    console.log("[renterExpiry] farming window ended for " + (a.login || a._id));
+  }
+  const nowMs = Date.now();
+  const toAlert = [];
+  for (const { a, reason } of stuck) {
+    a.expiryAttempts = (Number(a.expiryAttempts) || 0) + 1;
+    a.expiryLastError = reason;
+    const due =
+      a.expiryAttempts >= STUCK_ALERT_ATTEMPTS &&
+      (!a.expiryAlertedAt || nowMs - new Date(a.expiryAlertedAt).getTime() > STUCK_REALERT_MS);
+    if (due) {
+      a.expiryAlertedAt = new Date();
+      toAlert.push({ a, reason });
+    }
+    await a.save().catch((e) => console.error("[renterExpiry] save stuck row:", e.message));
+    console.error(
+      "[renterExpiry] could not pull " + (a.login || a._id) + " (attempt " + a.expiryAttempts + "): " + reason,
     );
   }
-  // One restart per affected bot, after all its accounts are out — and only
-  // for a bot that is RUNNING. `docker restart` starts a stopped container,
-  // which is how a stopped (expired) renter's bot used to come back to life.
-  for (const b of touchedBots.values()) {
-    try {
-      await restartIfRunning(b.host, b.file);
-    } catch (e) {
-      console.error(
-        "[renterExpiry] could not restart " + b.file + ":",
-        e.message,
-      );
+
+  if (ended.length) {
+    const info = await windowInfo(ended);
+    await sendTelegram(
+      "⌛ " + ended.length + " farming window(s) ended — pulled off the bots:\n" +
+        listLines(ended, info),
+    ).catch(() => {});
+    logEvent({
+      category: "renting",
+      action: "farm_windows_ended",
+      actor: "renterExpiry",
+      count: ended.length,
+      detail: ended.map((a) => a.login || String(a._id)).join(", ").slice(0, 480),
+    });
+  }
+  if (toAlert.length) {
+    const info = await windowInfo(toAlert.map((x) => x.a));
+    await sendTelegram(
+      "🚨 " + toAlert.length + " lapsed farming window(s) could NOT be pulled off their bot — " +
+        "they are still farming past the end of their term. Retrying every 5 min:\n" +
+        toAlert
+          .slice(0, LIST_MAX)
+          .map((x) => "• " + describeAccount(x.a, info) + " — " + x.reason)
+          .join("\n") +
+        (toAlert.length > LIST_MAX ? "\n… and " + (toAlert.length - LIST_MAX) + " more" : ""),
+    ).catch(() => {});
+  }
+  return { ended, stuck };
+}
+
+// Order / renter context for a batch of accounts: the rent-farm order each
+// login was sold under (market, order, buyer, game, term), else its renter.
+async function windowInfo(accounts) {
+  const logins = [...new Set(accounts.map((a) => String(a.login || "")).filter(Boolean))];
+  const lower = logins.map((l) => l.toLowerCase());
+  const byLogin = new Map();
+  if (logins.length) {
+    const orders = await FarmServiceOrder.find(
+      { "accounts.login": { $in: [...new Set([...logins, ...lower])] } },
+      { orderId: 1, market: 1, buyerUsername: 1, game: 1, days: 1, "accounts.login": 1 },
+    )
+      .lean()
+      .catch(() => []);
+    for (const o of orders) {
+      for (const x of o.accounts || []) byLogin.set(String(x.login || "").toLowerCase(), o);
     }
   }
+  const renterIds = [...new Set(accounts.map((a) => String(a.renter)))];
+  const renters = await Renter.find({ _id: { $in: renterIds } }, { username: 1 })
+    .lean()
+    .catch(() => []);
+  const byRenter = new Map(renters.map((r) => [String(r._id), r.username]));
+  return { byLogin, byRenter };
+}
+
+function describeAccount(a, info) {
+  const o = info.byLogin.get(String(a.login || "").toLowerCase());
+  const who = o
+    ? (o.market || "?") + " order " + String(o.orderId || "").slice(0, 8) +
+      (o.buyerUsername ? " (" + o.buyerUsername + ")" : "") +
+      (o.game ? " — " + o.game + (o.days ? " " + o.days + "d" : "") : "")
+    : "renter " + (info.byRenter.get(String(a.renter)) || "?");
+  return (a.login || String(a._id)) + " — " + who;
+}
+
+function listLines(accounts, info) {
+  return (
+    accounts.slice(0, LIST_MAX).map((a) => "• " + describeAccount(a, info)).join("\n") +
+    (accounts.length > LIST_MAX ? "\n… and " + (accounts.length - LIST_MAX) + " more" : "")
+  );
+}
+
+// JST calendar day and hour for a timestamp (the owner's clock).
+function jst(nowMs) {
+  const d = new Date(nowMs + 9 * 3600 * 1000);
+  return { day: d.toISOString().slice(0, 10), hour: d.getUTCHours() };
+}
+
+// Once a day (after DIGEST_HOUR_JST, JST): every window that will lapse in the
+// next ADVANCE_MS, with its order, so a renewal can be offered before the
+// account is pulled — and so the day's pulls are no surprise. Deduped by a
+// SystemEvent per JST day, so a restart does not send it twice.
+async function advanceDigest(now) {
+  const { day, hour } = jst(now.getTime());
+  if (hour < DIGEST_HOUR_JST) return false;
+  const already = await SystemEvent.findOne(
+    { action: "farm_windows_ending_digest", subject: day },
+    { _id: 1 },
+  )
+    .lean()
+    .catch(() => null);
+  if (already) return false;
+  const soon = await RenterAccount.find(
+    { farmEndedAt: null, farmUntil: { $gt: now, $lte: new Date(now.getTime() + ADVANCE_MS) } },
+    { login: 1, renter: 1, farmUntil: 1 },
+  )
+    .sort({ farmUntil: 1 })
+    .lean();
+  // Record the day first: a Telegram hiccup must not turn into a resend every
+  // five minutes.
+  await logEvent({
+    category: "renting",
+    action: "farm_windows_ending_digest",
+    actor: "renterExpiry",
+    subject: day,
+    count: soon.length,
+  });
+  if (!soon.length) return true;
+  const info = await windowInfo(soon);
+  const lines = soon.slice(0, LIST_MAX).map(
+    (a) => "• " + new Date(a.farmUntil).toISOString().slice(0, 10) + " " + describeAccount(a, info),
+  );
+  await sendTelegram(
+    "📅 " + soon.length + " farming window(s) end in the next 3 days:\n" + lines.join("\n") +
+      (soon.length > LIST_MAX ? "\n… and " + (soon.length - LIST_MAX) + " more" : ""),
+  ).catch(() => {});
+  return true;
 }
 
 async function sweepOnce() {
   const now = new Date();
   await sweepAccounts(now).catch((e) =>
     console.error("[renterExpiry] account sweep error:", e.message),
+  );
+  await advanceDigest(now).catch((e) =>
+    console.error("[renterExpiry] ending-soon digest error:", e.message),
   );
 
   // 1) Leases inside their final WARN_MS: tell the operator once per lease so
@@ -221,4 +394,11 @@ function start() {
   scheduleNext();
 }
 
-module.exports = { start, sweepOnce, sweepAccounts, describeStop };
+module.exports = {
+  start,
+  sweepOnce,
+  sweepAccounts,
+  advanceDigest,
+  describeStop,
+  STUCK_ALERT_ATTEMPTS,
+};
