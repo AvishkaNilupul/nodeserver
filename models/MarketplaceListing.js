@@ -297,6 +297,10 @@ const marketplaceListingSchema = new mongoose.Schema(
     // now a lease that keeps the pointer; the pointer is cleared only once the
     // window is actually stamped.
     rentFarmSaleClaimedAt: { type: Date, default: null },
+    // Retries of a sale that died half-way (gameflipFarmService.
+    // retryUnfinishedSales): counted so a sale that cannot be finished stops
+    // being retried after a couple of hours (the health page keeps showing it).
+    rentFarmSaleAttempts: { type: Number, default: 0 },
     // An UNSOLD buffered offer that reached Gameflip's 30-day expiry. The watcher
     // retires the row but keeps rentFarmPoolId, and the next buffer pass relists
     // the SAME account under a new listing (utils/gameflipFarmService

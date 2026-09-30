@@ -437,6 +437,9 @@ function bufferRows(state) {
       kind: "summary",
       headline: state.summary || "",
       enabled: !!state.enabled,
+      // Carried through so the console can say DRY RUN instead of a green
+      // "buffer on" over a buffer that publishes nothing.
+      dryRun: !!state.dryRun,
       configured: !!state.configured,
       target,
       reserve: Number(state.reserve) || 0,

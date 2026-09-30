@@ -24,6 +24,8 @@ process.env.SESSION_SECRET ||= "gf-buffer-renewal-test";
 process.env.CRED_SECRET ||= "gf-buffer-renewal-cred";
 
 const world = {
+  poolEligible: 1000,
+  telegrams: [],
   af: {},
   free: 300,
   published: [],
@@ -40,6 +42,9 @@ const fakeMp = {
   keyStatus: () => ({ gameflip: { configured: true } }),
   gameflipPublish: async (args) => {
     if (world.publishFails) throw new Error(world.publishFails);
+    if (world.publishFailsFor && world.publishFailsFor.test(args.title || "")) {
+      throw new Error("Gameflip publish failed: title rejected");
+    }
     const id = "gf-new-" + (world.published.length + 1);
     const login = (/Username: (\S+)/.exec(args.autoDeliverCode || "") || [])[1];
     const ra = login
@@ -82,6 +87,7 @@ Module._load = function (request, parent, isMain) {
         OPERATOR_USERNAME: "operator-selffarm",
         farmFreshAccounts: async (args) => {
           world.fresh.push(args);
+          if (world.freshImpl) return world.freshImpl(args);
           const e = new Error("No eligible pristine pool accounts right now");
           e.status = 409;
           throw e;
@@ -98,6 +104,10 @@ Module._load = function (request, parent, isMain) {
     }
     if (request === "./systemLog") return { logEvent: async (e) => world.events.push(e) };
     if (request === "./poolUsageLog") return { recordPoolUsage: async () => {} };
+    if (request === "../routes/renterAdminRoutes") {
+      return { gatherPoolEligibility: async () => ({ eligible: new Array(world.poolEligible).fill({}) }) };
+    }
+    if (request === "./telegram") return { sendTelegram: async (m) => { world.telegrams.push(m); } };
   }
   return realLoad.call(this, request, parent, isMain);
 };
@@ -133,8 +143,13 @@ async function reset() {
     events: [],
     fresh: [],
     removedFromConfig: [],
+    poolEligible: 1000,
+    telegrams: [],
+    freshImpl: null,
+    publishFailsFor: null,
   });
   svc._reset();
+  svc._resetBadOfferAlerts();
   await Promise.all([
     AvailableAccount.deleteMany({}),
     MarketplaceListing.deleteMany({}),
@@ -596,4 +611,139 @@ test("bufferState reports a cut-off renewal as HELD (needs a human), not as stra
   assert.equal(st.held.length, 1);
   assert.equal(st.held[0].login, "shelf1");
   assert.equal(st.stranded.length, 0);
+});
+
+// ---------------------------------------------------------------------------
+// Fix 13 (Gameflip robustness)
+// ---------------------------------------------------------------------------
+const FarmServiceOrder = require("../models/FarmServiceOrder");
+
+async function soldHalfway({ login = "sold1", days = 30, claimedMinsAgo = 60 } = {}) {
+  const pool = await AvailableAccount.create({
+    username: login, usernameLower: login, clientSecret: "cs-" + login, password: encrypt("pw-" + login),
+    hasPassword: true, status: "claimed", claimedNote: "rented to operator-selffarm",
+  });
+  await RenterAccount.create({
+    renter: holder._id, clientSecret: "cs-" + login, login, host: "contabo", configFile: "config_02.json",
+    enabled: true, farmUntil: new Date(Date.now() + 300 * 86400000),
+  });
+  const listing = new MarketplaceListing({
+    marketplace: "gameflip", externalId: "gf-sold-" + login, title: "Rust Twitch Drops Automatic Farming " + days + " Days",
+    status: "sold", rentFarm: true, rentFarmGame: "Rust", rentFarmDays: days, rentFarmPoolId: String(pool._id),
+    rentFarmSaleClaimedAt: new Date(Date.now() - claimedMinsAgo * 60000), accountLogin: login,
+  });
+  await listing.save({ validateBeforeSave: false });
+  return { pool, listing };
+}
+
+test("REGRESSION: a sale that died half-way is FINISHED by the retry sweep (window stamped, order recorded, pointer cleared)", async () => {
+  await reset();
+  await FarmServiceOrder.deleteMany({});
+  const { listing } = await soldHalfway();
+  const out = await svc.retryUnfinishedSales();
+  assert.equal(out.finished, 1, JSON.stringify(out));
+  const row = await MarketplaceListing.findById(listing._id).lean();
+  assert.equal(row.rentFarmPoolId, "", "the sale is complete");
+  const order = await FarmServiceOrder.findOne({ orderId: "gf:gf-sold-sold1" }).lean();
+  assert.ok(order);
+  const acct = await RenterAccount.findOne({ login: "sold1" }).lean();
+  assert.ok(acct.farmUntil < new Date(Date.now() + 31 * 86400000), "the 30-day window, not the 365-day placeholder");
+});
+
+test("a retry never pushes a recorded window later (the order row already holds it)", async () => {
+  await reset();
+  await FarmServiceOrder.deleteMany({});
+  const recorded = new Date(Date.now() + 10 * 86400000);
+  await soldHalfway({ login: "sold2" });
+  await FarmServiceOrder.create({
+    orderId: "gf:gf-sold-sold2", market: "gameflip", game: "Rust", days: 30, state: "delivered",
+    accounts: [{ login: "sold2", farmUntil: recorded }],
+  });
+  await svc.retryUnfinishedSales();
+  const acct = await RenterAccount.findOne({ login: "sold2" }).lean();
+  assert.ok(acct.farmUntil > new Date(Date.now() + 200 * 86400000), "not restamped (the recorded window stands)");
+});
+
+test("a sale still inside its claim lease is left alone; one that cannot finish stops being retried", async () => {
+  await reset();
+  await FarmServiceOrder.deleteMany({});
+  await soldHalfway({ login: "fresh1", claimedMinsAgo: 1 });
+  let out = await svc.retryUnfinishedSales();
+  assert.equal(out.retried, 0, "the first pass is still working on it");
+  // A sale that cannot finish (its ledger row is gone) is retried at most SALE_RETRY_MAX times.
+  await reset();
+  const { listing } = await soldHalfway({ login: "broken1" });
+  await RenterAccount.deleteMany({ login: "broken1" });
+  for (let i = 0; i < svc.SALE_RETRY_MAX + 3; i++) {
+    await MarketplaceListing.updateOne({ _id: listing._id }, { $set: { rentFarmSaleClaimedAt: new Date(Date.now() - 3600000) } });
+    await svc.retryUnfinishedSales();
+  }
+  const row = await MarketplaceListing.findById(listing._id).lean();
+  assert.equal(row.rentFarmSaleAttempts, svc.SALE_RETRY_MAX);
+  assert.equal(world.alerts.filter((a) => /no RenterAccount holds token/.test(a.reason)).length, 2, "paged on the first and the last attempt only");
+});
+
+test("REGRESSION: the buffer never takes the last pristine accounts (pool reserve)", async () => {
+  await reset();
+  world.poolEligible = 50; // == the default reserve
+  const out = await svc.topUpBuffer({ dryRun: false });
+  assert.match(out.stopped, /pool reserve reached — 50 pristine account\(s\) left, 50 kept/);
+  assert.equal(world.fresh.length, 0, "no pristine account claimed");
+  assert.equal(world.alerts.filter((a) => a.orderId === "buffer:pool-reserve").length, 1);
+  assert.equal(world.alerts.find((a) => a.orderId === "buffer:pool-reserve").kind, "buffer", "never worded as a lost order");
+  await svc.topUpBuffer({ dryRun: false });
+  assert.equal(world.alerts.filter((a) => a.orderId === "buffer:pool-reserve").length, 1, "latched");
+});
+
+test("REGRESSION: a LIVE offer whose account was hand-sold is paged (once a day), never silently kept on sale", async () => {
+  await reset();
+  const pool = await AvailableAccount.create({
+    username: "live1", usernameLower: "live1", clientSecret: "cs-live1", password: encrypt("pw"), hasPassword: true,
+    status: "claimed", claimedNote: "rented to operator-selffarm", manualSold: true,
+  });
+  await RenterAccount.create({ renter: holder._id, clientSecret: "cs-live1", login: "live1", host: "contabo", configFile: "config_02.json", enabled: true });
+  const row = new MarketplaceListing({
+    marketplace: "gameflip", externalId: "gf-live-bad", status: "active", rentFarm: true, rentFarmGame: "Rust",
+    rentFarmDays: 180, rentFarmPoolId: String(pool._id), accountLogin: "live1",
+  });
+  await row.save({ validateBeforeSave: false });
+  const r1 = await svc.alertBadLiveOffers();
+  assert.equal(r1.paged, 1, JSON.stringify(r1));
+  assert.match(world.telegrams[0], /gf-live-bad — Rust 180d — live1: the pool account was sold by hand/);
+  const r2 = await svc.alertBadLiveOffers();
+  assert.equal(r2.paged, 0, "not again today");
+  assert.deepEqual(world.delisted, [], "never delisted by itself");
+});
+
+test("a sale whose account is on NO bot is recorded AND paged (Farm days puts it back)", async () => {
+  await reset();
+  await FarmServiceOrder.deleteMany({});
+  const { listing } = await soldHalfway({ login: "offbot1" });
+  await RenterAccount.updateOne({ login: "offbot1" }, { $set: { configFile: "" } });
+  await svc.retryUnfinishedSales();
+  assert.ok(await FarmServiceOrder.findOne({ orderId: "gf:gf-sold-offbot1" }).lean(), "recorded");
+  assert.ok(world.alerts.some((a) => /is on NO bot config/.test(a.reason) && (a.logins || []).includes("offbot1")));
+  assert.equal((await MarketplaceListing.findById(listing._id).lean()).rentFarmPoolId, "");
+});
+
+test("REGRESSION: a (game, term) whose publish failed waits before it is tried again — other keys go first", async () => {
+  await reset();
+  let n = 0;
+  world.freshImpl = async () => {
+    n += 1;
+    const login = "fresh" + n;
+    const pool = await AvailableAccount.create({
+      username: login, usernameLower: login, clientSecret: "cs-" + login, password: encrypt("pw-" + login),
+      hasPassword: true, status: "claimed", claimedNote: "rented to operator-selffarm",
+    });
+    await RenterAccount.create({ renter: holder._id, clientSecret: "cs-" + login, login, host: "contabo", configFile: "config_54.json", enabled: true });
+    return { added: [{ login, poolId: String(pool._id) }], farmUntil: new Date(Date.now() + 365 * 86400000) };
+  };
+  world.publishFailsFor = /120 Days/;
+  const out1 = await svc.topUpBuffer({ dryRun: false });
+  assert.equal(out1.published, 2, "the other two terms went up");
+  const claimsAfter1 = world.fresh.length;
+  const out2 = await svc.topUpBuffer({ dryRun: false });
+  assert.equal(out2.published, 0);
+  assert.equal(world.fresh.length, claimsAfter1, "the failing key was NOT retried at once (no account claimed, no restarts)");
 });

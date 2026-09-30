@@ -460,7 +460,9 @@
       // change and the pill does not.
       var pills =
         (r.enabled
-          ? '<span class="pill s-ok">buffer on</span>'
+          ? r.dryRun
+            ? '<span class="pill s-warn">buffer DRY RUN — publishes nothing</span>'
+            : '<span class="pill s-ok">buffer on</span>'
           : '<span class="pill s-fail">buffer OFF</span>') +
         (r.configured ? "" : '<span class="pill s-fail">no Gameflip API keys</span>') +
         (r.lastPassRan

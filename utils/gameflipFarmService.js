@@ -83,6 +83,8 @@ const RENT_SLOT_RESERVE = 40;
 // purchasable (see gameflipPublish) — so a hundred publishes in one tick is
 // exactly how a pass produces a pile of unbuyable listings.
 const GF_BUFFER_PER_PASS = 5;
+// Pristine pool accounts the buffer never takes (autoFarm.gfPoolReserve).
+const GF_POOL_RESERVE = 50;
 
 // The ladder, frozen by the contract. Gameflip is priced ABOVE Eldorado
 // ($3/$4/$7) deliberately: the only hard evidence of Gameflip rent-farm demand
@@ -156,6 +158,10 @@ function config() {
     target: num(af.gfBufferTarget, GF_BUFFER_TARGET),
     reserve: num(af.gfRentSlotReserve, RENT_SLOT_RESERVE),
     perPass: Math.max(1, num(af.gfBufferPerPass, GF_BUFFER_PER_PASS)),
+    // Pristine pool accounts the buffer never takes (B5): shelf offers must not
+    // eat the last accounts a PAID on-demand order needs. ~4-5 days of
+    // on-demand sales at ~11/day.
+    poolReserve: num(af.gfPoolReserve, GF_POOL_RESERVE),
     // An explicit game list pins the catalogue to exactly what is live on
     // Eldorado without waiting for the AutoFarmTask window to agree.
     games: Array.isArray(af.gfRentFarmGames)
@@ -354,6 +360,10 @@ function noteReason(key, reason) {
 // a pass publishes again, and on restart — a fresh reminder after a deploy is
 // wanted, not noise.
 let reserveAlerted = false;
+let poolReserveAlerted = false;
+const keyCooldown = new Map(); // "(game)|(days)" -> { n: failures in a row, until: ms }
+let capUnreadableAlertedAt = 0;
+const CAP_UNREADABLE_REALERT_MS = 6 * 60 * 60 * 1000;
 
 // ------------------------------------------------------------------
 // Pool credentials + handing an account back.
@@ -739,6 +749,9 @@ async function parkedRows() {
 // delivered", so the ids below are written to make it unmistakable that no
 // order is involved and nobody is waiting on a delivery.
 async function alertBufferStopped(reason, detail) {
+  // The shared alert, in its BUFFER form (B12): its own header and action —
+  // "rent-farm order NOT delivered" was the paid-order header, and a buffer
+  // housekeeping page worded like a lost order trains the owner to skim.
   await farmAlert
     .alertFarmFailure({
       market: MARKET,
@@ -748,6 +761,7 @@ async function alertBufferStopped(reason, detail) {
       days: 0,
       qty: 0,
       reason: detail,
+      kind: "buffer",
     })
     .catch(() => {});
 }
@@ -840,10 +854,58 @@ async function topUpBuffer(opts = {}) {
     reserveAlerted = false;
     return out;
   }
+  // A (game, term) whose publish just failed waits before it is tried again
+  // (B8): the keys are walked in the same order every pass, so one that keeps
+  // failing was retried FIRST every pass — an account claimed and handed back,
+  // two restarts, each time. Other keys go first meanwhile.
+  const nowMs = Date.now();
+  const ready = missing.filter((w) => {
+    const c = keyCooldown.get(w.key);
+    if (c && c.until > nowMs) {
+      noteReason(w.key, "cooling down after " + c.n + " failed publish(es) — retried after " + new Date(c.until).toISOString().slice(11, 16) + "Z");
+      return false;
+    }
+    return true;
+  });
 
-  const budget = Math.min(Math.max(0, publishBudget), missing.length);
+  const budget = Math.min(Math.max(0, publishBudget), ready.length);
+
+  // THE POOL RESERVE (B5): the buffer never takes the last pristine accounts.
+  // Read once per pass (the provisioner's own filter); every publish spends one.
+  let poolLeft = null;
+  if (budget > 0 && cfg.poolReserve > 0) {
+    try {
+      const { eligible } = await require("../routes/renterAdminRoutes").gatherPoolEligibility();
+      poolLeft = (eligible || []).length;
+    } catch (e) {
+      out.stopped = "pool unreadable: " + String((e && e.message) || e).slice(0, 120);
+      lastPass.stopped = out.stopped;
+      return out;
+    }
+  }
+
   for (let i = 0; i < budget; i++) {
-    const want = missing[i];
+    const want = ready[i];
+
+    if (poolLeft !== null && poolLeft <= cfg.poolReserve) {
+      out.stopped =
+        "pool reserve reached — " + poolLeft + " pristine account(s) left, " +
+        cfg.poolReserve + " kept for paid on-demand orders";
+      lastPass.stopped = out.stopped;
+      for (let j = i; j < ready.length; j++) {
+        noteReason(ready[j].key, out.stopped);
+        out.shortfall.push({ ...ready[j], reason: out.stopped });
+      }
+      if (!poolReserveAlerted) {
+        poolReserveAlerted = true;
+        await alertBufferStopped(
+          "pool-reserve",
+          out.stopped + ". The buffer publishes nothing new until the pool is restocked.",
+        );
+      }
+      break;
+    }
+    if (poolLeft !== null) poolReserveAlerted = false;
 
     // THE FLOOR, RE-READ BEFORE EVERY SINGLE PUBLISH.
     //
@@ -858,15 +920,18 @@ async function topUpBuffer(opts = {}) {
       // An unreadable capacity answer is NOT evidence that there is room.
       out.stopped = "capacity unreadable: " + cap.error;
       lastPass.stopped = out.stopped;
-      for (let j = i; j < missing.length; j++) {
-        noteReason(missing[j].key, out.stopped);
-        out.shortfall.push({ ...missing[j], reason: out.stopped });
+      for (let j = i; j < ready.length; j++) {
+        noteReason(ready[j].key, out.stopped);
+        out.shortfall.push({ ...ready[j], reason: out.stopped });
       }
-      await alertBufferStopped(
-        "capacity-unreadable",
-        "could not read rental stack capacity, so the buffer stopped rather " +
-          "than guess there was room: " + cap.error,
-      );
+      if (Date.now() - capUnreadableAlertedAt >= CAP_UNREADABLE_REALERT_MS) {
+        capUnreadableAlertedAt = Date.now();
+        await alertBufferStopped(
+          "capacity-unreadable",
+          "could not read rental stack capacity, so the buffer stopped rather " +
+            "than guess there was room: " + cap.error,
+        );
+      }
       break;
     }
     if (!roomForOneMore(cap, cfg.reserve)) {
@@ -878,16 +943,18 @@ async function topUpBuffer(opts = {}) {
             cap.offlineHosts.join(", ") + ")"
           : "");
       lastPass.stopped = out.stopped;
-      for (let j = i; j < missing.length; j++) {
-        noteReason(missing[j].key, out.stopped);
-        out.shortfall.push({ ...missing[j], reason: out.stopped });
+      for (let j = i; j < ready.length; j++) {
+        noteReason(ready[j].key, out.stopped);
+        out.shortfall.push({ ...ready[j], reason: out.stopped });
       }
       if (!reserveAlerted) {
         reserveAlerted = true;
         await alertBufferStopped(
           "reserve-floor",
           out.stopped + ". " + out.live + " buffered offer(s) live of " +
-            cfg.target + " wanted; the buffer will shrink until slots free up.",
+            cfg.target + " wanted. The buffer stops GROWING — its live offers keep " +
+            "their slots until they sell or expire. If paid orders need the room, " +
+            "add a rental stack or lower the buffer target.",
         );
       }
       break;
@@ -904,7 +971,19 @@ async function topUpBuffer(opts = {}) {
       continue;
     }
 
+    const before = out.published;
     const published = await publishOne(want, out);
+    if (poolLeft !== null && published !== "stop") poolLeft -= 1; // it took one (or handed it back)
+    if (out.published > before) {
+      keyCooldown.delete(want.key);
+    } else if (published !== "stop") {
+      // This key failed (a "stop" is about the pool, not the key): 1 h, then
+      // doubling, at most 6 h.
+      const c = keyCooldown.get(want.key) || { n: 0, until: 0 };
+      c.n += 1;
+      c.until = Date.now() + Math.min(6, 2 ** (c.n - 1)) * 3600000;
+      keyCooldown.set(want.key, c);
+    }
     if (published === "stop") break;
   }
 
@@ -1590,7 +1669,7 @@ async function restampWindow(clientSecret, days) {
 
 // A buffered offer sold. Called by utils/gameflipFulfiller when a rentFarm row
 // goes sold, BEFORE the DropSet-scoped auto-delivery lane it must never reach.
-async function onBufferedSale(rowIn) {
+async function onBufferedSale(rowIn, { alert = true } = {}) {
   const id = rowIn && rowIn._id;
   if (!id) return { skipped: "no row" };
 
@@ -1674,17 +1753,20 @@ async function onBufferedSale(rowIn) {
       { $set: { lastError: ("rent-farm sale: " + detail).slice(0, 400) } },
     ).catch(() => {});
     // This one IS a paid order, so the shared alert's wording is exactly right.
-    await farmAlert
-      .alertFarmFailure({
-        market: MARKET,
-        orderId,
-        offerTitle: row.title || "",
-        game,
-        days,
-        qty: 1,
-        reason: detail,
-      })
-      .catch(() => {});
+    // (A retry pass pages only on its first and its last attempt.)
+    if (alert) {
+      await farmAlert
+        .alertFarmFailure({
+          market: MARKET,
+          orderId,
+          offerTitle: row.title || "",
+          game,
+          days,
+          qty: 1,
+          reason: detail,
+        })
+        .catch(() => {});
+    }
     return { listingId: String(id), orderId, poolId, error: detail };
   };
 
@@ -1728,17 +1810,25 @@ async function onBufferedSale(rowIn) {
     );
   }
 
-  // 1. The window the buyer actually bought.
+  // 1. The window the buyer actually bought — unless an earlier attempt got as
+  // far as recording the sale (it died on the very last write): that window
+  // stands, a retry must not push it later each time.
   let stamped;
-  try {
-    stamped = await restampWindow(creds.clientSecret, days);
-  } catch (e) {
-    return fail(
-      "could not stamp the farming window for " + (creds.login || poolId) +
-        " (" + String((e && e.message) || e).slice(0, 120) +
-        ") — the buyer's window has NOT started; this retries once the claim " +
-        "lease lapses",
-    );
+  const already = await FarmServiceOrder.findOne({ orderId }, { accounts: 1 }).lean().catch(() => null);
+  const priorUntil = already && already.accounts && already.accounts[0] && already.accounts[0].farmUntil;
+  if (priorUntil) {
+    stamped = { ok: true, farmUntil: new Date(priorUntil) };
+  } else {
+    try {
+      stamped = await restampWindow(creds.clientSecret, days);
+    } catch (e) {
+      return fail(
+        "could not stamp the farming window for " + (creds.login || poolId) +
+          " (" + String((e && e.message) || e).slice(0, 120) +
+          ") — the buyer's window has NOT started; this retries once the claim " +
+          "lease lapses",
+      );
+    }
   }
   if (!stamped.ok) {
     return fail(
@@ -1746,6 +1836,16 @@ async function onBufferedSale(rowIn) {
         " — the account is not farming, so the buyer is getting nothing",
     );
   }
+  // Sold — but is the account really on a bot? (B6) The sale is recorded
+  // either way (the buyer has the credentials); an account that is on no bot
+  // or disabled is paged so it can be put back ("Farm days" re-places it).
+  const onBot = await RenterAccount.findOne(
+    { clientSecret: creds.clientSecret },
+    { configFile: 1, enabled: 1 },
+  )
+    .lean()
+    .catch(() => null);
+  const offBot = onBot && (!onBot.configFile || onBot.enabled === false);
 
   // 2. The record. `delivered` on creation, not queued: Gameflip released the
   // credentials to the buyer at the moment of payment, so there is no hand-over
@@ -1830,6 +1930,24 @@ async function onBufferedSale(rowIn) {
       (row.title || "") + " — " + creds.login + " now farms " + days +
       "d until " + stamped.farmUntil.toISOString().slice(0, 10),
   }).catch(() => {});
+  if (offBot) {
+    await farmAlert
+      .alertFarmFailure({
+        market: MARKET,
+        orderId,
+        offerTitle: row.title || "",
+        game,
+        days,
+        qty: 1,
+        logins: [creds.login],
+        reason:
+          "sold and recorded, but " + creds.login + " is " +
+          (onBot.enabled === false ? "disabled on its bot" : "on NO bot config") +
+          " — the buyer's window is running while nothing farms it. Put it back with " +
+          "\"Farm days\" on /renters.html.",
+      })
+      .catch(() => {});
+  }
 
   // The replacement is deliberately NOT published here: it would run inside the
   // watcher's tick and share its failure. The next topUpBuffer pass fills the
@@ -1843,6 +1961,81 @@ async function onBufferedSale(rowIn) {
     farmUntil: stamped.farmUntil,
     recorded,
   };
+}
+
+// A sale that died half-way (pm2 restart, a Mongo hiccup between the claim and
+// the stamp) is resumable — its claim is a lease that keeps the pool id — but
+// only if something calls onBufferedSale again: the watcher sees each row go
+// sold ONCE. This finds those rows (rent-farm, sold, pool id still set, lease
+// lapsed) and finishes them: on the buffer's 15-minute clock, at most
+// SALE_RETRY_MAX attempts per sale (~2 h), paging on the first and the last
+// only — the health page keeps showing whatever is left.
+const SALE_RETRY_MAX = 8;
+async function retryUnfinishedSales({ limit = 10 } = {}) {
+  const cutoff = new Date(Date.now() - SALE_LEASE_MS);
+  const rows = await MarketplaceListing.find({
+    rentFarm: true,
+    status: "sold",
+    rentFarmPoolId: { $nin: ["", null] },
+    rentFarmSaleAttempts: { $not: { $gte: SALE_RETRY_MAX } },
+    $or: [
+      { rentFarmSaleClaimedAt: null },
+      { rentFarmSaleClaimedAt: { $exists: false } },
+      { rentFarmSaleClaimedAt: { $lte: cutoff } },
+    ],
+  })
+    .sort({ updatedAt: 1 })
+    .limit(limit);
+  const out = { retried: 0, finished: 0, failed: 0 };
+  for (const row of rows) {
+    const attempt = (Number(row.rentFarmSaleAttempts) || 0) + 1;
+    await MarketplaceListing.updateOne({ _id: row._id }, { $inc: { rentFarmSaleAttempts: 1 } }).catch(() => {});
+    out.retried++;
+    try {
+      const r = await onBufferedSale(row, { alert: attempt === 1 || attempt >= SALE_RETRY_MAX });
+      if (r && r.error) out.failed++;
+      else if (r && !r.skipped) out.finished++;
+    } catch (e) {
+      out.failed++;
+      console.error("gameflip rent-farm sale retry " + row.externalId + ":", e.message);
+    }
+  }
+  return out;
+}
+
+// LIVE offers whose account cannot deliver (B6): hand-sold, back in the pool,
+// gone, on no bot, disabled, or a dead token. They keep selling until someone
+// acts, and the health page's red card is not a page. Latched per offer: one
+// Telegram, a reminder daily while it stays live. Nothing is delisted here —
+// taking an offer down stays a human decision (Listings page). A read that
+// could not be completed alerts nothing (it would only be a guess).
+const BAD_OFFER_REMIND_MS = 24 * 60 * 60 * 1000;
+const badOfferAlerted = new Map(); // listingId -> ms
+async function alertBadLiveOffers({ notify = true } = {}) {
+  const state = await bufferState();
+  if ((state.unreadable || []).length) return { skipped: "partial read", unreadable: state.unreadable };
+  const now = Date.now();
+  const live = new Set((state.problems || []).map((p) => p.listingId));
+  for (const k of [...badOfferAlerted.keys()]) if (!live.has(k)) badOfferAlerted.delete(k);
+  const toPage = (state.problems || []).filter((p) => {
+    const last = badOfferAlerted.get(p.listingId);
+    return !last || now - last >= BAD_OFFER_REMIND_MS;
+  });
+  if (notify && toPage.length) {
+    for (const p of toPage) badOfferAlerted.set(p.listingId, now);
+    let msg =
+      "⚠️ " + toPage.length + " LIVE Gameflip rent-farm offer(s) sell an account that cannot deliver:\n" +
+      toPage
+        .slice(0, 15)
+        .map((p) => "• " + (p.externalId || p.listingId) + " — " + (p.game || "?") + " " + (p.days || "?") + "d — " +
+          (p.login || "?") + ": " + p.problem)
+        .join("\n") +
+      (toPage.length > 15 ? "\n… and " + (toPage.length - 15) + " more" : "") +
+      "\n\nTake it down on the Listings page (the buffer republishes the slot with a healthy account).";
+    if (msg.length > 3800) msg = msg.slice(0, 3799) + "…";
+    await require("./telegram").sendTelegram(msg).catch(() => {});
+  }
+  return { paged: notify ? toPage.length : 0, problems: (state.problems || []).length };
 }
 
 // ------------------------------------------------------------------
@@ -2067,14 +2260,18 @@ async function bufferState() {
     }
   }
 
+  // A read that FAILED is recorded as unreadable, never swallowed into an
+  // empty list: an empty live list made the critical check say "ok" while it
+  // had seen nothing (B11).
   const [cat, liveRows] = await Promise.all([
-    desiredCatalogue().catch(() => ({
-      games: [],
-      wanted: [],
-      total: 0,
-      truncated: false,
-    })),
-    liveBufferRows().catch(() => []),
+    desiredCatalogue().catch((e) => {
+      state.unreadable.push("catalogue: " + String((e && e.message) || e).slice(0, 120));
+      return { games: [], wanted: [], total: 0, truncated: false };
+    }),
+    liveBufferRows().catch((e) => {
+      state.unreadable.push("live offers: " + String((e && e.message) || e).slice(0, 120));
+      return [];
+    }),
   ]);
   state.games = cat.games;
   state.catalogue = { total: cat.total, truncated: !!cat.truncated };
@@ -2203,7 +2400,10 @@ async function bufferState() {
     .sort({ updatedAt: -1 })
     .limit(MAX_BUFFER_ROWS)
     .lean()
-    .catch(() => []);
+    .catch((e) => {
+      state.unreadable.push("sold offers: " + String((e && e.message) || e).slice(0, 120));
+      return [];
+    });
   if (soldRows.length >= MAX_BUFFER_ROWS) {
     state.notes.push(
       "Sold history capped at " + MAX_BUFFER_ROWS + " rows (newest first) — " +
@@ -2396,6 +2596,10 @@ module.exports = {
   // the four
   topUpBuffer,
   onBufferedSale,
+  retryUnfinishedSales,
+  SALE_RETRY_MAX,
+  alertBadLiveOffers,
+  _resetBadOfferAlerts: () => badOfferAlerted.clear(),
   releaseBuffered,
   bufferState,
   // exported for tests and for the tracker's own capacity line
@@ -2414,5 +2618,8 @@ module.exports = {
   _reset: () => {
     lastPass = { at: null, reasons: new Map(), stopped: "" };
     reserveAlerted = false;
+    poolReserveAlerted = false;
+    capUnreadableAlertedAt = 0;
+    keyCooldown.clear();
   },
 };

@@ -94,6 +94,10 @@ async function alertFarmFailure({
   // The login already reached the buyer: only confirming the delivery on the
   // market failed. Worded so nobody hands it over a second time.
   sent = false,
+  // "buffer": Gameflip buffer housekeeping — NO buyer order is involved, so it
+  // must never read "order NOT delivered" (that trains the owner to skim the
+  // one alert that means money).
+  kind = "order",
 }) {
   // 900, not 400: buffer pages lead with the pool id and login but carry the
   // instruction at the end, and 400 cut exactly that off (2026-10-01 review).
@@ -105,6 +109,22 @@ async function alertFarmFailure({
       " (" + game + " " + days + "d x" + qty + "): " + detail,
   );
   const list = (Array.isArray(logins) ? logins : []).filter(Boolean);
+  if (kind === "buffer") {
+    console.error(market + " rent-farm buffer (" + orderId + "): " + detail);
+    await sendTelegram(
+      "🧺 " + market + " rent-farm BUFFER (" + String(orderId).replace(/^buffer:/, "") +
+        ") — no buyer order is involved.\n" + detail,
+    ).catch((e) => console.error("farm alert telegram failed:", e.message));
+    await logEvent({
+      category: "marketplace",
+      action: "gameflip_buffer_alert",
+      actor: market || "farm-service",
+      severity: "warn",
+      subject: orderId,
+      detail,
+    }).catch(() => {});
+    return;
+  }
   const text =
     (sent
       ? "⚠️ " + market + " rent-farm order DELIVERED to the buyer but not yet confirmed on " + market + "\n"

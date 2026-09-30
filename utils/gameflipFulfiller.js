@@ -1470,6 +1470,21 @@ function start() {
   if (t.unref) t.unref();
 
   const bufferTick = async () => {
+    // Sales that died half-way are finished first (a buyer has paid for them).
+    try {
+      const s = await gfFarm.retryUnfinishedSales();
+      if (s && s.retried) {
+        console.log("gameflip rent-farm: retried " + s.retried + " unfinished sale(s), finished " + s.finished);
+      }
+    } catch (e) {
+      console.error("gameflip rent-farm sale retry error:", e.message);
+    }
+    // Live offers whose account cannot deliver are paged (never delisted here).
+    try {
+      await gfFarm.alertBadLiveOffers();
+    } catch (e) {
+      console.error("gameflip rent-farm bad-offer check error:", e.message);
+    }
     try {
       const r = await gfFarm.topUpBuffer();
       if (r && (r.published || r.stopped)) {
