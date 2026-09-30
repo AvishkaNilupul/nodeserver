@@ -229,10 +229,31 @@ const REAL = {
       configFile: file,
       host: host === "local" ? { $in: ["local", "", null] } : host,
     }),
-  // Every pool claim still held that was made since `since` — auto-farm, the
-  // no-claim fleet, renters and rent-farm alike draw from the same pool.
-  poolClaims: (since) =>
-    require("../models/AvailableAccount").countDocuments({ claimedAt: { $gte: since } }),
+  // How fast pristine accounts LEAVE the pool: every hourly system-health run
+  // stores the pristine-eligible count (check pool.health — the provisioner's
+  // own filter), so the drops between consecutive runs over the last 7 days
+  // are every consumer's draw (auto-farm, the no-claim fleet, renters,
+  // rent-farm) with restocks left out. A raw claim count reads recycled
+  // re-claims and bulk moves as pristine burn (95/day measured on 2026-10-01
+  // against a real ~25-35/day). Null with under a day of history.
+  poolTrend: async (now) => {
+    const SystemHealthRun = require("../models/SystemHealthRun");
+    const rows = await SystemHealthRun.find(
+      { startedAt: { $gte: new Date(now - 7 * 86400000) }, "checks.id": "pool.health" },
+      { startedAt: 1, checks: { $elemMatch: { id: "pool.health" } } },
+    )
+      .sort({ startedAt: 1 })
+      .lean();
+    const pts = rows
+      .map((r) => ({ t: new Date(r.startedAt).getTime(), n: Number(r.checks && r.checks[0] && r.checks[0].measured) }))
+      .filter((p) => Number.isFinite(p.n));
+    if (pts.length < 2) return null;
+    const days = (pts[pts.length - 1].t - pts[0].t) / 86400000;
+    if (days < 1) return null;
+    let out = 0;
+    for (let i = 1; i < pts.length; i++) out += Math.max(0, pts[i - 1].n - pts[i].n);
+    return { outflowPerDay: out / days, days };
+  },
   snapshot: (options) => snapshot(options),
   now: () => Date.now(),
 };
@@ -352,17 +373,19 @@ async function runwayCheck({ notify = true, snap: given = null } = {}) {
   const since = new Date(now - 7 * 86400000);
   const holder = await dep("holderId")();
   if (!holder) return null;
-  const [made, ended, claimed] = await Promise.all([
+  const [made, ended, trend] = await Promise.all([
     dep("countRows")({ renter: holder, createdAt: { $gte: since } }),
     dep("countRows")({ renter: holder, farmEndedAt: { $gte: since } }),
     Promise.resolve()
-      .then(() => dep("poolClaims")(since))
+      .then(() => dep("poolTrend")(now))
       .catch(() => null),
   ]);
   const takenPerDay = made / 7; // pristine accounts the rent-farm consumed
   // The pool is shared: auto-farm draws from the same accounts, at several
-  // times the rent-farm's rate. Judge the pool by everything taken from it.
-  const poolTakenPerDay = Math.max(takenPerDay, (Number(claimed) || 0) / 7);
+  // times the rent-farm's rate. Judge it by what really left it (all
+  // consumers, restocks not counted), or — with under a day of history — by
+  // the rent-farm's own draw.
+  const poolTakenPerDay = trend ? Math.max(takenPerDay, trend.outflowPerDay) : takenPerDay;
   const netSlotsPerDay = (made - ended) / 7; // slots consumed net of windows ending
   const snap = given || (await dep("snapshot")());
   const pool = await dep("gatherPoolEligibility")();
@@ -387,8 +410,10 @@ async function runwayCheck({ notify = true, snap: given = null } = {}) {
         ? "The stacks have room — raise operator-selffarm's Account limit on the Renters page."
         : "Register another rental stack (50 slots) before they run out."],
     ["pool", out.poolDays, "pristine pool accounts",
-      (eligible == null ? "?" : eligible) + " eligible, ~" + out.poolTakenPerDay +
-        "/day taken by everything that draws on the pool (rent-farm ~" + out.takenPerDay + "/day)",
+      (eligible == null ? "?" : eligible) + " eligible, ~" + out.poolTakenPerDay + "/day " +
+        (trend
+          ? "leaving the pool over the last " + Math.round(trend.days) + " days (every consumer; restocks not counted; rent-farm ~" + out.takenPerDay + "/day)"
+          : "taken by rent-farm (no pool history yet)"),
       "Restock the pool (or move empty no-claim accounts back) before rent-farm orders start failing."],
   ];
   for (const [kind, days, what, detail, fix] of checks) {

@@ -31,7 +31,7 @@ function setup(over = {}) {
   sent.length = 0;
   cap._reset();
   // No database here: the ledger / pool reads are always injected.
-  cap.__setDeps({ now: () => clock, ledgerCount: async () => 3, poolClaims: async () => 0, ...over });
+  cap.__setDeps({ now: () => clock, ledgerCount: async () => 3, poolTrend: async () => null, ...over });
 }
 
 const BOTS = (states) => ({
@@ -166,13 +166,37 @@ test("REGRESSION: the pool runway counts EVERY draw on the pool, not just rent-f
   setup({
     holderId: async () => "h1",
     countRows: async (q) => (q.createdAt ? 70 : 0), // rent-farm: 10/day
-    poolClaims: async () => 280, // everything: 40/day
+    poolTrend: async () => ({ outflowPerDay: 40, days: 7 }), // everything: 40/day
     snapshot: async () => ({ totalFree: 500 }),
     gatherPoolEligibility: async () => ({ eligible: new Array(200).fill({}) }),
   });
   const out = await cap.runwayCheck();
   assert.equal(out.poolDays, 5, "200 eligible / 40 a day — not 20 days");
-  assert.match(sent.find((m) => /pool accounts/.test(m)), /~40\/day taken by everything that draws on the pool \(rent-farm ~10\/day\)/);
+  assert.match(sent.find((m) => /pool accounts/.test(m)), /~40\/day leaving the pool over the last 7 days \(every consumer; restocks not counted; rent-farm ~10\/day\)/);
+});
+
+test("the pool trend is the DROPS between hourly health runs — a restock is not read as negative burn", async () => {
+  const t0 = Date.UTC(2026, 8, 24);
+  const series = [317, 239, 230, 206, 206, 713, 676]; // one run a day; an import on day 5
+  const realFind = require("../models/SystemHealthRun").find;
+  require("../models/SystemHealthRun").find = () => ({
+    sort: () => ({
+      lean: async () => series.map((n, i) => ({ startedAt: new Date(t0 + i * 86400000), checks: [{ id: "pool.health", measured: n }] })),
+    }),
+  });
+  try {
+    sent.length = 0;
+    cap._reset();
+    // The REAL poolTrend (reading the stubbed health runs), not an injected one.
+    cap.__setDeps({ now: () => t0 + 7 * 86400000, holderId: async () => "h1", countRows: async () => 0,
+      snapshot: async () => ({ totalFree: 500 }), gatherPoolEligibility: async () => ({ eligible: new Array(676).fill({}) }) });
+    const real = await cap.runwayCheck();
+    // Drops: 78 + 9 + 24 + 0 + 37 = 148 over 6 days.
+    assert.equal(real.poolTakenPerDay, Math.round((148 / 6) * 10) / 10);
+    assert.ok(real.poolDays > 25, "676 left at ~25/day");
+  } finally {
+    require("../models/SystemHealthRun").find = realFind;
+  }
 });
 
 test("REGRESSION: when the holder's account LIMIT is the wall, the runway says raise the limit (not 'register a stack')", async () => {
