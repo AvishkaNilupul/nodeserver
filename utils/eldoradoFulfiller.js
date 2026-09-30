@@ -722,10 +722,19 @@ async function syncBundleStock({ dryRun = false } = {}) {
   // Archive; `unclaimedGame` rows are backed by the no-claim ledger and were
   // not covered here at all, so their advertised quantity was whatever they
   // were published with, for as long as they stayed up.
+  //
+  // Every clause pins status "active": a delisted, sold or removed row is not
+  // ours to put stock behind. The autoClaimSet clause once had no status, and
+  // both halves of this loop then brought delisted offers back on sale. A
+  // quantity push re-opens an offer Eldorado CLOSED when its last unit sold:
+  // offer 00ec3522, delisted since 2026-09-07, went back Active on 2026-09-28
+  // on "0 -> 1". The resume branch re-opened 48a19c2e, a row delisted while
+  // this sync had it paused, whenever its set gained an account. A pause of
+  // our own keeps status "active" (autoPaused), so it still resumes here.
   const rows = await MarketplaceListing.find({
     marketplace: "eldorado",
     $or: [
-      { autoClaimSet: true },
+      { autoClaimSet: true, status: "active" },
       { unclaimedGame: { $nin: ["", null] }, status: "active" },
       // Account listings. Without this clause an offer-backed row is invisible
       // here, so its advertised quantity would stay at whatever it was
@@ -1081,6 +1090,7 @@ async function deliverPaidOrders() {
 // Only ACTIVE offers are renewed. A paused offer was paused by the owner or by
 // the stock sync, and a resume would put it back on sale; when the stock sync
 // resumes one of its own pauses, that resume restarts the clock anyway.
+// And only offers that are still ours to sell: see renewalBlockedByRow.
 // Kill switch: autoFarm.eldoradoKeepAlive = false.
 const KEEPALIVE_MS = 6 * 60 * 60 * 1000;
 const KEEPALIVE_WINDOW_MS = 5 * 24 * 60 * 60 * 1000;
@@ -1161,10 +1171,43 @@ async function bulkOfferFor(offerId) {
   }
 }
 
+// The skip result for an offer that must NOT be renewed, or null when it may.
+// An offer with no listing row at all is a rent-farm window or a hand-made
+// offer, and keeping those alive is what the keep-alive is for. An offer whose
+// every row is delisted, sold or removed was taken off sale here. Renewing it
+// keeps it on sale against our own records for another 21 days, every 21 days:
+// that is how 00ec3522, delisted since 2026-09-07, was given until 10-19 after
+// it came back on 2026-09-28. It is left to lapse, not paused: the row, not
+// this loop, decides what is on sale. A failed lookup skips this pass too — a
+// Mongo hiccup is not a verdict, and the offer is due again in six hours.
+async function renewalBlockedByRow(offerId) {
+  let rows;
+  try {
+    rows = await MarketplaceListing.find(
+      { marketplace: "eldorado", externalId: String(offerId) },
+      { status: 1 },
+    ).lean();
+  } catch (e) {
+    return {
+      offerId,
+      skipped: "listing row lookup failed (" + e.message + "), retried next pass",
+    };
+  }
+  if (!rows || !rows.length) return null;
+  if (rows.some((r) => r.status === "active")) return null;
+  const rowStatus = [...new Set(rows.map((r) => r.status || "?"))].join("/");
+  return {
+    offerId,
+    rowStatus,
+    skipped: "our listing row is " + rowStatus + " — not renewed, left to expire",
+  };
+}
+
 // Pause + resume one offer and read it back. `ok` only when it is Active again
-// with a later expiry. Skipped when it is no longer Active, or when the stock
-// sync paused it on purpose while this ran (its row turned autoPaused) — that
-// pause means there is nothing to sell, so it stays.
+// with a later expiry. Skipped when its listing row was taken off sale (see
+// renewalBlockedByRow), when it is no longer Active, or when the stock sync
+// paused it on purpose while this ran (its row turned autoPaused) — that pause
+// means there is nothing to sell, so it stays.
 //
 // A bulk offer that is not "live" (paused by its owner or its loop, sold out,
 // withdrawn, held after an unknown publish) is never resumed by this
@@ -1174,6 +1217,8 @@ async function bulkOfferFor(offerId) {
 // this already paused — so after a relist the bulk state is read once more,
 // and a bulk offer no longer live is paused again at once (FIXES-2 V3).
 async function renewOffer(offerId) {
+  const blocked = await renewalBlockedByRow(offerId);
+  if (blocked) return blocked;
   const before = await mp.eldoradoOffer(offerId);
   if (!before || before.offerState !== "Active") {
     return { offerId, skipped: "not active" };
@@ -1293,17 +1338,20 @@ async function renewExpiringOffers({ dryRun = false, now = Date.now() } = {}) {
     failed: [],
   };
   if (dryRun) {
-    out.wouldRenew = due.map((o) => ({
-      offerId: o.id,
-      title: o.offerTitle,
-      expire: o.expireDate,
-    }));
+    // The same row gate as a real pass, so a preview never lists an offer the
+    // pass would refuse.
+    out.wouldRenew = [];
+    for (const o of due) {
+      const blocked = await renewalBlockedByRow(o.id);
+      if (blocked) out.skipped.push({ title: o.offerTitle, ...blocked });
+      else out.wouldRenew.push({ offerId: o.id, title: o.offerTitle, expire: o.expireDate });
+    }
     return out;
   }
   for (const o of due) {
     try {
       const r = await renewOffer(o.id);
-      if (r.skipped) out.skipped.push(r);
+      if (r.skipped) out.skipped.push({ title: o.offerTitle, ...r });
       else if (r.ok) out.renewed.push(r);
       else out.failed.push(r);
     } catch (e) {
@@ -1328,6 +1376,15 @@ async function reportKeepAlive(r) {
     console.error(
       "eldorado keep-alive failed:", f.offerId, f.title || "",
       "state=" + (f.state || "?"), f.error || "",
+    );
+  }
+  // Live on Eldorado while our row says it is off sale: name it, so a human can
+  // pause it now or relist the row if it is meant to be selling.
+  for (const s of r.skipped) {
+    if (!s.rowStatus) continue;
+    console.log(
+      "eldorado keep-alive: not renewing " + s.offerId + " " + (s.title || "") +
+        " — " + s.skipped,
     );
   }
   try {
