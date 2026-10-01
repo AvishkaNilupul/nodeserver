@@ -514,20 +514,59 @@ test("the delivery verbs are PUTs against the order item, with seller_id", async
   await mp.g2gMarkDelivering(id);
   await mp.g2gSetDeliveredQty(id, 1);
 
+  // The delivered count reads the item first (GET), then PUTs.
   assert.deepStrictEqual(
     calls.map((c) => c.method),
-    ["put", "put", "put"],
+    ["put", "put", "get", "put"],
   );
   assert.deepStrictEqual(
     calls.map((c) => c.url.replace("https://sls.g2g.com/order/item/", "")),
     [
       id + "/start_deliver",
       id + "/mark_as_delivering",
+      id,
       id + "/delivered_qty",
     ],
   );
-  for (const c of calls) assert.strictEqual(c.body.seller_id, SELLER);
-  assert.strictEqual(calls[2].body.delivery_qty, 1);
+  for (const c of calls) assert.strictEqual(c.params.seller_id, SELLER);
+  assert.strictEqual(calls[0].body.seller_id, SELLER);
+  assert.strictEqual(calls[1].body.seller_id, SELLER);
+});
+
+// 2026-10-01: G2G's own seller page sends ORDER.UPDATE_DELIVERED_QTY(item,
+// { qty }, { seller_id }) — body { qty }, seller_id in the query. The body this
+// sent before ({ seller_id, delivery_qty }) was answered HTTP 500 every time.
+test("REGRESSION: the delivered count is G2G's own request — body { qty }, seller_id in the query", async () => {
+  const { mp, calls } = loadG2G({
+    respond: (c) => (c.method === "get" ? okBody({ purchased_qty: 2, delivered_qty: 0 }) : okBody({ order_delivery_item: { delivery_qty: 2 } })),
+  });
+  await mp.g2gSetDeliveredQty("1790817293060OS4Y-1", 2);
+  const put = calls.find((c) => c.method === "put");
+  assert.strictEqual(put.url, "https://sls.g2g.com/order/item/1790817293060OS4Y-1/delivered_qty");
+  assert.deepStrictEqual(put.body, { qty: 2 });
+  assert.deepStrictEqual(put.params, { seller_id: SELLER });
+});
+
+test("the delivered count sends only what is still undelivered, and nothing when it is all delivered", async () => {
+  // Partly delivered (by hand, or a retry after a success): 3 bought, 1 done.
+  let t = loadG2G({
+    respond: (c) => (c.method === "get" ? okBody({ purchased_qty: 3, delivered_qty: 1 }) : okBody({})),
+  });
+  await t.mp.g2gSetDeliveredQty("A-1", 3);
+  assert.deepStrictEqual(t.calls.find((c) => c.method === "put").body, { qty: 2 });
+  // More asked than bought: never more than the order holds.
+  t = loadG2G({
+    respond: (c) => (c.method === "get" ? okBody({ purchased_qty: 2, delivered_qty: 0 }) : okBody({})),
+  });
+  await t.mp.g2gSetDeliveredQty("B-1", 5);
+  assert.deepStrictEqual(t.calls.find((c) => c.method === "put").body, { qty: 2 });
+  // Already fully delivered: success, no PUT at all.
+  t = loadG2G({
+    respond: (c) => (c.method === "get" ? okBody({ purchased_qty: 2, delivered_qty: 2 }) : okBody({})),
+  });
+  const r = await t.mp.g2gSetDeliveredQty("C-1", 2);
+  assert.strictEqual(r.alreadyDelivered, true);
+  assert.ok(!t.calls.some((c) => c.method === "put"), "nothing sent");
 });
 
 /* ------------------- 8. required vs optional credentials ---------------- */

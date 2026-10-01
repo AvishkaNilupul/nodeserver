@@ -3525,20 +3525,35 @@ async function g2gMarkDelivering(orderItemId) {
   );
 }
 
+// Tell G2G `qty` units of an order shipped ("I delivered N").
+//
+// The request is the one G2G's own seller page sends (www.g2g.com
+// seller-order-item chunk: ORDER.UPDATE_DELIVERED_QTY(item, {qty}, {seller_id})):
+// PUT /order/item/<id>/delivered_qty with body { qty } and seller_id in the
+// QUERY. This sent { seller_id, delivery_qty } until 2026-10-01 — `delivery_qty`
+// is the name on the delivery RECORD, not the request — and G2G answered HTTP
+// 500 to every one, so the owner marked every G2G order delivered by hand.
+//
+// `qty` is the quantity delivered NOW: G2G adds it to the item's delivered_qty
+// (and records one delivery of that size). So the item is read first and only
+// what is still undelivered is sent — a retry after a success, or an order
+// partly delivered by hand, can never be over-counted. Nothing left to deliver
+// is a success with nothing sent.
 async function g2gSetDeliveredQty(orderItemId, qty) {
-  const n = Math.max(1, Number(qty) || 1);
-  // seller_id goes in the QUERY as well as the body. Its siblings
-  // (start_deliver, mark_as_delivering) accept it in the body alone, but this
-  // endpoint answers HTTP 400 "Missing mandatory parameter: seller_id" to a
-  // body-only PUT — so the counter that tells G2G an order shipped was the one
-  // call in the chain that could never succeed. Sending it both ways satisfies
-  // whichever the endpoint actually reads and costs nothing if it ignores one.
+  const want = Math.max(1, Math.floor(Number(qty) || 1));
+  const item = await g2gOrder(orderItemId);
+  const purchased = Number(item && item.purchased_qty) || 0;
+  const delivered = Number(item && item.delivered_qty) || 0;
+  const add = (purchased ? Math.min(want, purchased) : want) - delivered;
+  if (add <= 0) {
+    return { alreadyDelivered: true, delivered_qty: delivered, purchased_qty: purchased };
+  }
   return g2gRequest(
     "put",
     "/order/item/" + encodeURIComponent(orderItemId) + "/delivered_qty",
     {
       params: { seller_id: g2gSellerId() },
-      body: { seller_id: g2gSellerId(), delivery_qty: n },
+      body: { qty: add },
       what: "G2G delivered qty",
     },
   );
