@@ -65,30 +65,39 @@ async function enforceSingleHome(hosts, host, file, text) {
       } catch {
         continue;
       }
-      const users = usersOf(data);
-      if (!users.length) continue;
-      const removed = [];
-      const kept = users.filter((u) => {
-        const s = secretOf(u);
-        if (!s || !claimed.has(s) || u.Enabled === false) return true;
-        removed.push(u.Login || s.slice(0, 6));
-        return false;
-      });
-      if (!removed.length) continue;
+      const strip = (d) => {
+        const removed = [];
+        const kept = usersOf(d).filter((u) => {
+          const s = secretOf(u);
+          if (!s || !claimed.has(s) || u.Enabled === false) return true;
+          removed.push(u.Login || s.slice(0, 6));
+          return false;
+        });
+        return { removed, kept };
+      };
+      if (!usersOf(data).length || !strip(data).removed.length) continue;
       // Re-read right before writing: another writer may have changed the
       // sibling since the batched read (this runs outside that file's lock —
       // taking it here, inside a write that may hold another file's lock,
-      // could deadlock). A changed sibling is left for the next write.
+      // could deadlock). The strip is applied to what is there NOW: skipping
+      // a changed sibling left the token enabled in two configs.
       let current = null;
       try {
         current = await hosts.readFile(host, f);
       } catch {
         current = null;
       }
+      if (current === null) continue;
       if (current !== entry.text) {
-        console.warn("[dupeGuard] " + host.id + "/" + f + " changed meanwhile — left for the next write");
-        continue;
+        try {
+          data = JSON.parse(current);
+        } catch {
+          console.warn("[dupeGuard] " + host.id + "/" + f + " changed meanwhile and no longer parses — left alone");
+          continue;
+        }
       }
+      const { removed, kept } = strip(data);
+      if (!removed.length) continue;
       data.TwitchSettings.TwitchUsers = kept;
       const key = String(host && host.id) + "|" + f;
       healingWrites.add(key);

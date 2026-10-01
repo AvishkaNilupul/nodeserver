@@ -263,14 +263,21 @@
     const a = findAcc(id) || {};
     if (!confirm("Remove " + (a.login || "this account") + " from this renter? It is pulled off the bot and deleted from their inventory (farmed drops stay in the archive).")) return;
     try {
-      let d;
-      try {
-        d = await RT.api("/renter-accounts/" + id, { method: "DELETE" });
-      } catch (e) {
-        // A paid rent-farm window / order: removing it ends the buyer's farming.
-        if (!(e.data && e.data.needsForce) || !confirm(e.message + "\n\nRemove it anyway?")) throw e;
-        d = await RT.api("/renter-accounts/" + id + "?force=1", { method: "DELETE" });
+      // Each "are you sure" is its own answer: ending a buyer's paid farming
+      // (?force=1) and removing a row whose bot host cannot be read
+      // (?skipPull=1) are asked, and sent, separately.
+      const params = new URLSearchParams();
+      let d = null;
+      for (let round = 0; round < 3 && !d; round++) {
+        const qs = params.toString();
+        try {
+          d = await RT.api("/renter-accounts/" + id + (qs ? "?" + qs : ""), { method: "DELETE" });
+        } catch (e) {
+          if (!(e.data && e.data.needsForce) || !confirm(e.message + "\n\nRemove it anyway?")) throw e;
+          params.set(e.data.needsSkipPull ? "skipPull" : "force", "1");
+        }
       }
+      if (!d) throw new Error("Not removed.");
       RT.toast(d.note || "Account removed");
       await RT.reloadMany(["renters", "bots", "accounts"]);
       RT.detail.reopen();

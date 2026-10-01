@@ -225,37 +225,67 @@ async function catalogueGames() {
 // where two thirds of the games are missing their 1-year offer. `truncated`
 // travels with it so the tracker can say the cap was reached instead of
 // implying the catalogue is simply that size.
-// Lower-cased names of every game that had a campaign running at some point in
-// the last DARK_GAME_DAYS. `distinct` for the same bytes reason as above.
-// null = UNKNOWN — a failed read, or nothing at all came back (a broken campaign
-// watcher is not evidence that every game went dark) — and the caller then
-// treats no game as dark.
-async function gamesWithRecentCampaigns() {
+// What the campaign history says, lower-cased: `recent` = games with a campaign
+// running at some point in the last DARK_GAME_DAYS, `ever` = games with any
+// campaign on record. `distinct` for the same bytes reason as above.
+// null = UNKNOWN, and the caller then treats no game as dark:
+//   - a failed read;
+//   - nothing at all came back;
+//   - the campaign watcher has not refreshed anything for WATCHER_STALE_MS —
+//     a stalled watcher leaves a stale but non-empty history, and games would
+//     go dark one by one while their campaigns simply went unseen.
+const WATCHER_STALE_MS = 48 * 60 * 60 * 1000;
+async function campaignHistory() {
   const TwitchCampaign = require("../models/TwitchCampaign");
-  const since = new Date(Date.now() - DARK_GAME_DAYS * 86400000);
+  const now = Date.now();
+  const since = new Date(now - DARK_GAME_DAYS * 86400000);
   try {
-    const names = await TwitchCampaign.distinct("game", {
-      $or: [
-        { endAt: { $gte: since } },
-        { endAt: null, lastSeenAt: { $gte: since } },
-      ],
-    });
-    const set = new Set(
-      (names || []).map((g) => String(g || "").trim().toLowerCase()).filter(Boolean),
-    );
-    return set.size ? set : null;
+    const fresh = await TwitchCampaign.exists({ lastSeenAt: { $gte: new Date(now - WATCHER_STALE_MS) } });
+    if (!fresh) return null;
+    const [recentNames, everNames] = await Promise.all([
+      TwitchCampaign.distinct("game", {
+        $or: [
+          { endAt: { $gte: since } },
+          { endAt: null, lastSeenAt: { $gte: since } },
+        ],
+      }),
+      TwitchCampaign.distinct("game"),
+    ]);
+    const norm = (names) =>
+      new Set((names || []).map((g) => String(g || "").trim().toLowerCase()).filter(Boolean));
+    const recent = norm(recentNames);
+    if (!recent.size) return null;
+    return { recent, ever: norm(everNames) };
   } catch {
     return null;
   }
 }
 
+// Kept for callers that only want the recent set (null = unknown).
+async function gamesWithRecentCampaigns() {
+  const h = await campaignHistory();
+  return h ? h.recent : null;
+}
+
 async function desiredCatalogue() {
   const cfg = config();
   const games = await catalogueGames();
-  const recent = await gamesWithRecentCampaigns();
-  const dark = recent
-    ? games.filter((g) => !recent.has(String(g).trim().toLowerCase()))
+  const history = await campaignHistory();
+  // Dark = campaigns on record, none lately. A game with NO campaign on record
+  // (announced and not yet run — "AION 2" — or a name the watcher spells
+  // differently) is not evidence of anything, and stays.
+  let dark = history
+    ? games.filter((g) => {
+        const k = String(g).trim().toLowerCase();
+        return history.ever.has(k) && !history.recent.has(k);
+      })
     : [];
+  // Every game dark at once is a broken signal, not a dead shelf.
+  let campaignsUnknown = !history;
+  if (games.length && dark.length === games.length) {
+    dark = [];
+    campaignsUnknown = true;
+  }
   const darkSet = new Set(dark);
   const all = [];
   for (const game of games) {
@@ -273,7 +303,7 @@ async function desiredCatalogue() {
   return {
     games,
     dark,
-    campaignsUnknown: !recent,
+    campaignsUnknown,
     terms: TERMS,
     target: cfg.target,
     total: all.length,
@@ -2103,7 +2133,11 @@ async function alertBadLiveOffers({ notify = true } = {}) {
           (p.login || "?") + ": " + p.problem)
         .join("\n") +
       (toPage.length > 15 ? "\n… and " + (toPage.length - 15) + " more" : "") +
-      "\n\nTake it down on the Listings page (the buffer republishes the slot with a healthy account).";
+      "\n\nTake it down on the Listings page (the buffer republishes the slot with a healthy account" +
+      ((state.dark || []).length
+        ? " — except for games with no Twitch campaign lately: " + state.dark.slice(0, 10).join(", ")
+        : "") +
+      ").";
     if (msg.length > 3800) msg = msg.slice(0, 3799) + "…";
     await require("./telegram").sendTelegram(msg).catch(() => {});
   }
@@ -2680,6 +2714,7 @@ module.exports = {
   catalogueGames,
   desiredCatalogue,
   gamesWithRecentCampaigns,
+  campaignHistory,
   DARK_GAME_DAYS,
   offerTitle,
   offerDescription,

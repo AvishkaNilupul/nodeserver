@@ -1006,7 +1006,7 @@ router.put("/renters/:id", requireSuperadmin, async (req, res) => {
     if (b.maxAccounts !== undefined)
       r.maxAccounts = Math.max(0, Math.floor(Number(b.maxAccounts) || 0));
     if (b.accessStart !== undefined)
-      r.accessStart = b.accessStart ? new Date(b.accessStart) : null;
+      r.accessStart = require("../utils/renters").parseAccessStart(b.accessStart);
     let resumeFarming = false;
     let repairFarming = false;
     if (b.accessEnd !== undefined) {
@@ -1498,7 +1498,10 @@ router.post("/renters/:id/bot/:action", requireSuperadmin, async (req, res) => {
     const skipped = detail && Array.isArray(detail.skipped) ? detail.skipped : [];
     res.json({
       success: true,
-      running: action !== "stop",
+      running: action !== "stop" && !(detail && detail.nothingToPlace),
+      ...(detail && detail.nothingToPlace
+        ? { note: "Farming is on again — this renter has no accounts yet; ones added now go straight onto the bot." }
+        : {}),
       skipped: skipped.length,
       skippedReason: skipped.length ? skipped[0].reason : "",
       added: detail && typeof detail.added === "number" ? detail.added : undefined,
@@ -1973,6 +1976,14 @@ async function ensurePlaced(acc, renter, farmUntil) {
     const hit = await findExisting(h);
     if (hit) return hit;
   }
+  // Then every other configured host, still before a target is picked. A row's
+  // host can be stale (a dangling slot, an old cross-host move), and a copy on
+  // a host nobody named is still a second bot on the same token — the ban case.
+  // A host that cannot be read refuses, as above (the account might be there).
+  for (const h0 of hosts.listHosts()) {
+    const hit = await findExisting(hosts.resolveHost(h0.id));
+    if (hit) return hit;
+  }
 
   // Games, before anything is written: a buyer's account farms its LATEST
   // order's game; with none known it would farm everything or nothing.
@@ -2128,7 +2139,10 @@ router.post("/renter-accounts/:id/farm", requireSuperadmin, async (req, res) => 
       const h = hosts.resolveHost(acc.host);
       if (h && acc.clientSecret) {
         try {
-          offBot = (await locateSecrets(h, [acc.clientSecret], { problems: [] })).size === 0;
+          // A file that could not be read is not evidence the account is gone.
+          const problems = [];
+          const found = await locateSecrets(h, [acc.clientSecret], { problems });
+          offBot = found.size === 0 && problems.length === 0;
         } catch {
           offBot = false;
         }
@@ -2367,12 +2381,13 @@ router.delete(
       // Off the bots FIRST — every config on its host that holds it. An ENDED
       // row was already confirmed off every config by the lapse sweep: a copy
       // found now was put there on purpose since (the account re-used on an
-      // operator bot), so nothing is pulled for it. With ?force=1 a row whose
-      // host is gone or unreadable can still be removed — the pull is skipped
-      // and the answer says so.
+      // operator bot), so nothing is pulled for it. With ?skipPull=1 — its OWN
+      // confirmation, never implied by ?force=1 (which only answers "this ends
+      // a buyer's paid farming") — a row whose host is gone or unreadable can
+      // still be removed: the pull is skipped and the answer says so.
       let pulled = 0;
       const notes = [];
-      const forced = String(req.query.force || "") === "1";
+      const forced = String(req.query.skipPull || "") === "1";
       const host = hosts.resolveHost(acc.host);
       const pullable = !acc.farmEndedAt && !!acc.clientSecret;
       if (pullable && !host && acc.configFile) {
@@ -2380,6 +2395,7 @@ router.delete(
           return res.status(409).json({
             success: false,
             needsForce: true,
+            needsSkipPull: true,
             message:
               "The account's bot host '" + (acc.host || "") + "' is unknown, so it cannot be taken off that " +
               "bot from here. Remove the row anyway (take it off the bot by hand)?",
@@ -2403,6 +2419,7 @@ router.delete(
           return res.status(readErr && readErr.unreachable ? 502 : 409).json({
             success: false,
             needsForce: true,
+            needsSkipPull: true,
             message:
               (readErr
                 ? "The bot host could not be read (" + (readErr.message || readErr) + ")"
@@ -2562,6 +2579,17 @@ router.post(
       }
       releaseRenter = markRenterBusy(res, renter._id);
       if (!releaseRenter) return;
+      // Re-read under the mark: a stop or lease end that finished between the
+      // read above and the mark is seen now, not after the account is placed.
+      if (!isOperatorHolder(renter)) {
+        const now2 = await Renter.findById(renter._id, { status: 1, accessEnd: 1, botStoppedAt: 1 }).lean();
+        if (!now2 || isBlocked(now2) || now2.botStoppedAt) {
+          return res.status(409).json({
+            success: false,
+            message: "Renter " + renter.username + " was stopped or blocked a moment ago — check the renter and try again.",
+          });
+        }
+      }
       let assignedStack = null;
       let assignedForQuick = false;
       const used = await RenterAccount.countDocuments({ renter: renter._id, farmEndedAt: null });
@@ -2877,18 +2905,20 @@ router.post(
                 ") — it will farm in both until you free it there.",
             );
           } else {
-            if (removed) {
-              try {
-                await settleAfterDetach(srcHost, botHit.configFile, det);
-              } catch {
-                notes.push(
-                  "Removed from " +
-                    botHit.configFile +
-                    " on " +
-                    srcHost.label +
-                    ", but that bot could not be reloaded yet — retried every 5 min.",
-                );
-              }
+            // Even when the pull removed nothing: writing the destination first
+            // let dupeGuard strip the account from this file already, and that
+            // bot still has it loaded until it reloads (dupeGuard recorded the
+            // reload as owed; settleAfterDetach does it now).
+            try {
+              await settleAfterDetach(srcHost, botHit.configFile, det);
+            } catch {
+              notes.push(
+                "Removed from " +
+                  botHit.configFile +
+                  " on " +
+                  srcHost.label +
+                  ", but that bot could not be reloaded yet — retried every 5 min.",
+              );
             }
             botHit.configFile = "";
             botHit.container = "";
@@ -2938,7 +2968,9 @@ router.post(
                 (removeErr.message || removeErr) +
                 " — free it there manually.",
             );
-          } else if (removed) {
+          } else {
+            // Also when the pull removed nothing (dupeGuard got there first and
+            // left the reload owed): see the operator-bot branch above.
             try {
               await settleAfterDetach(srcHost, otherRenterAcc.configFile, det);
             } catch {
@@ -3172,6 +3204,16 @@ router.post(
       }
       release = markRenterBusy(res, renter._id);
       if (!release) return;
+      if (tokensPasted) {
+        // Re-read under the mark (see manual add).
+        const now2 = await Renter.findById(renter._id, { status: 1, accessEnd: 1, botStoppedAt: 1 }).lean();
+        if (!now2 || isBlocked(now2) || now2.botStoppedAt) {
+          return res.status(409).json({
+            success: false,
+            message: "Renter " + renter.username + " was stopped or blocked a moment ago — check the renter and try again.",
+          });
+        }
+      }
       const host = hosts.resolveHost(renter.botHost);
       if (!host) {
         return res
@@ -3604,10 +3646,27 @@ router.post(
   "/renters/:id/accounts/from-pool",
   requireSuperadmin,
   async (req, res) => {
+    let release = null;
     try {
-      const renter = await Renter.findById(req.params.id);
+      let renter = await Renter.findById(req.params.id);
       if (!renter)
         return res.status(404).json({ success: false, message: "Not found" });
+      // The same rule as manual add / approve: accounts put on a bot for a
+      // renter who is suspended, past their lease or stopped would farm outside
+      // everything that stops them. Marked busy so a lease-end stop cannot run
+      // in the middle, and re-read under the mark.
+      release = markRenterBusy(res, renter._id);
+      if (!release) return;
+      renter = await Renter.findById(req.params.id);
+      if (!renter) return res.status(404).json({ success: false, message: "Not found" });
+      if (!isOperatorHolder(renter) && (isBlocked(renter) || renter.botStoppedAt)) {
+        return res.status(409).json({
+          success: false,
+          message: isBlocked(renter)
+            ? "Renter " + renter.username + " is suspended or past their lease — extend it before adding accounts."
+            : "Renter " + renter.username + "'s farming is stopped — press Start on their bot first.",
+        });
+      }
       if (!renter.botFile) {
         return res
           .status(400)
@@ -3697,6 +3756,8 @@ router.post(
     } catch (err) {
       console.error("renter from-pool add error:", err.message);
       res.status(500).json({ success: false, message: "Server error" });
+    } finally {
+      if (release) release();
     }
   },
 );

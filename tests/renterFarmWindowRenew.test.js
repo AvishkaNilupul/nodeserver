@@ -63,9 +63,13 @@ Module._load = function (request, parent, isMain) {
       const real = realLoad.call(this, request, parent, isMain);
       return {
         ...real,
-        locateSecrets: async (host) => {
+        locateSecrets: async (host, secrets, opts = {}) => {
           world.locateCalls.push(host.id);
           if (world.locateThrows) throw Object.assign(new Error("ssh: timed out"), { unreachable: true });
+          if (world.locateProblem && opts.problems) {
+            opts.problems.push(world.locateProblem);
+            return new Map();
+          }
           return world.located instanceof Map && world.located.host
             ? (world.located.host === host.id ? world.located : new Map())
             : world.located;
@@ -77,6 +81,7 @@ Module._load = function (request, parent, isMain) {
       return {
         ...real,
         resolveHost: (v) => ({ id: v || "local", label: v || "local" }),
+        listHosts: () => (world.hostList || real.listHosts()),
         readdir: async () => world.files.slice(),
         dockerPs: async () => {
           if (world.psFails) throw new Error("ssh: timed out");
@@ -131,7 +136,7 @@ test.after(async () => {
 async function reset() {
   Object.assign(world, {
     placed: [], started: [], restarted: [], located: new Map(), running: {},
-    startFails: false, psFails: false, locateCalls: [],
+    startFails: false, psFails: false, locateCalls: [], hostList: null, locateProblem: null,
   });
   require("../utils/renterAccountBusy")._reset();
   await Promise.all([
@@ -479,4 +484,46 @@ test("a live row whose host cannot be read is just extended (no placement on a g
   } finally {
     world.locateThrows = realLocate;
   }
+});
+
+test("REGRESSION (review 2026-10-01): a stale host pointer never puts a live account on a SECOND host — every host is searched first", async () => {
+  await reset();
+  const h = await holder();
+  // The row says "pi", but the account really farms in local/config_21.
+  const acc = await RenterAccount.create({
+    renter: h._id, clientSecret: "cs-stray", login: "stray1", host: "pi",
+    configFile: "", enabled: false, farmUntil: new Date(Date.now() - 86400000), farmEndedAt: new Date(),
+  });
+  await FarmServiceOrder.create({
+    orderId: "stray-1", market: "eldorado", game: "Overwatch", days: 30, state: "delivered",
+    accounts: [{ login: "stray1", farmUntil: acc.farmUntil }],
+  });
+  world.hostList = [{ id: "pi" }, { id: "contabo" }, { id: "local" }];
+  const found = new Map([["config_21.json", new Set(["cs-stray"])]]);
+  found.host = "local";
+  world.located = found;
+  const res = await farm(acc._id, { days: 30 });
+  const d = await res.json();
+  assert.equal(res.status, 200, JSON.stringify(d));
+  assert.equal(world.placed.length, 0, "no second copy written anywhere");
+  assert.ok(world.locateCalls.includes("local"), "the unnamed host was searched");
+  const row = await RenterAccount.findById(acc._id).lean();
+  assert.equal(row.host, "local");
+  assert.equal(row.configFile, "config_21.json", "re-pointed to where it really farms");
+});
+
+test("REGRESSION (review 2026-10-01): extending a LIVE window while part of its host cannot be read just extends it", async () => {
+  await reset();
+  const h = await holder();
+  const acc = await RenterAccount.create({
+    renter: h._id, clientSecret: "cs-live", login: "live1", host: "contabo",
+    configFile: "config_06.json", farmUntil: new Date(Date.now() + 5 * 86400000),
+  });
+  world.locateProblem = "Could not read contabo/config_06.json: timed out";
+  const res = await farm(acc._id, { days: 30 });
+  const d = await res.json();
+  assert.equal(res.status, 200, JSON.stringify(d));
+  assert.equal(d.placed, false);
+  assert.equal(world.placed.length, 0);
+  assert.ok(new Date((await RenterAccount.findById(acc._id).lean()).farmUntil) > new Date(Date.now() + 29 * 86400000));
 });

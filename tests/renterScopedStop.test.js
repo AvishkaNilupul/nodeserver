@@ -1069,3 +1069,69 @@ test("REGRESSION: a lease-end stop whose own host is UNKNOWN still pulls account
   await assert.rejects(ops.stopRenterFarming(r, null), /own bot host 'phone' is unknown/);
   assert.deepEqual(secretsIn("contabo", "config_03.json"), ["buyer1"], "the known host was pulled");
 });
+
+// ---------------------------------------------------------------------------
+// Review 2026-10-01 (seventh pass)
+// ---------------------------------------------------------------------------
+test("REGRESSION: a STOPPED renter with no accounts can be started — the stop is cleared, nothing is started", async () => {
+  await reset();
+  const r = await mkRenter("emptyone", { botFile: "config_09.json", botStoppedAt: new Date(), botStopReason: "operator" });
+  putConfig("contabo", "config_09.json", []);
+  const out = await ops.startRenterFarming(r, HOST);
+  assert.equal(out.nothingToPlace, true);
+  assert.equal(out.added, 0);
+  const fresh = await Renter.findById(r._id).lean();
+  assert.equal(fresh.botStoppedAt, null, "farming is no longer stopped — accounts can be added again");
+  assert.deepEqual(docker(), [], "no empty bot was started");
+});
+
+test("REGRESSION: the owed-reload sweeper settles a 'restart-policy' row whose container no longer exists", async () => {
+  await reset();
+  putConfig("contabo", "config_31.json", []);
+  await PendingReload.create({ host: "contabo", file: "config_31.json", since: new Date(Date.now() - 3600000), reason: "restart-policy", markedAt: new Date(Date.now() - 3600000) });
+  const realPolicy = fakeHosts.setRestartPolicy;
+  fakeHosts.setRestartPolicy = async () => { throw new Error("Error response from daemon: No such container: twitchbotx31"); };
+  try {
+    const out = await ops.sweepPendingReloads({ minAgeMs: 0, notify: true });
+    assert.equal(out.settled, 1, JSON.stringify(out));
+  } finally {
+    fakeHosts.setRestartPolicy = realPolicy;
+  }
+  assert.equal(await PendingReload.countDocuments({}), 0);
+  assert.equal(world.telegram.length, 0, "no page every 6 h forever");
+});
+
+test("REGRESSION: a reload owed on a host this server no longer knows does not block the renter forever", async () => {
+  await reset();
+  const r = await mkRenter("movedaway", { botFile: "config_09.json", stopOwedFiles: ["phone/config_14.json"] });
+  putConfig("contabo", "config_09.json", [user("tok-ma")]);
+  await mkAccount(r, "tok-ma", { configFile: "config_09.json" });
+  world.ps.contabo.twitchbotx9 = { state: "running" };
+  await ops.startRenterFarming(r, HOST); // no reload_pending refusal
+  const fresh = await Renter.findById(r._id).lean();
+  assert.deepEqual(fresh.stopOwedFiles || [], [], "the entry is dropped");
+  assert.equal(world.telegram.filter((m) => /no longer knows/.test(m)).length, 1, "said once");
+  // A later stop does not fail over it either.
+  const s = await ops.stopRenterFarming(await Renter.findById(r._id), HOST);
+  assert.ok(s.removed >= 1);
+});
+
+test("REGRESSION: an unparseable file NO bot reads (a backup) never blocks a placement", async () => {
+  await reset();
+  const r = await mkRenter("placer", { botFile: "config_09.json" });
+  putConfig("contabo", "config_09.json", [user("someone-else")]);
+  world.fs.contabo["config_03-backup.json"] = "{ not json";
+  await mkAccount(r, "tok-pl", { configFile: "config_09.json" });
+  world.ps.contabo.twitchbotx9 = { state: "running" };
+  // The real rule (routes/botConfigRoutes FILE_RE): a backup name is no bot's config.
+  const realValid = fakeCfg.validFile;
+  fakeCfg.validFile = (f) => typeof f === "string" && /^config(_\d{1,3})?\.json$/.test(f);
+  let out;
+  try {
+    out = await ops.startRenterFarming(r, HOST);
+  } finally {
+    fakeCfg.validFile = realValid;
+  }
+  assert.equal(out.added, 1, JSON.stringify(out));
+  assert.ok(secretsIn("contabo", "config_09.json").includes("tok-pl"));
+});

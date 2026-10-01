@@ -59,7 +59,7 @@ const farmServiceOrderSchema = new mongoose.Schema(
       // rental stack and the buyer cancelled before the fix landed.
       // "waiting_chat" is a SOFT, self-healing hold, distinct from "failed": the
       // order is fine, but its marketplace chat does not exist yet (Eldorado
-      // mints it lazily — marketplaces.eldoradoOrderChatReady), so the
+      // mints it lazily — eldoradoFarmService.orderChatReady), so the
       // credential cannot be posted. It provisions nothing and burns no pool
       // account; the next tick delivers the moment the conversation appears.
       enum: ["claimed", "provisioned", "sent", "delivered", "failed", "cancelled", "waiting_chat"],

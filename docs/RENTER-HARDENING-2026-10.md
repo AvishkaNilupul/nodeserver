@@ -35,7 +35,13 @@ this work changes. `docs/` and `tests/` are not deployed.
   `eldoradoFarmService.orderChatReady` (kept out of `marketplaces.js` on purpose
   — other work streams edit and deploy that file).
 - The window counts from the hand-over, and the message states the end date
-  ("runs until 2027-04-01 (UTC)", "2 years" instead of "730 days").
+  ("runs until 2027-04-01 (UTC)", "2 years" instead of "730 days"). The date is
+  pinned on the order (`handoverUntil`) at the first send attempt, so a retry
+  sends byte-identical text (Eldorado's idempotency key and G2G's duplicate
+  check hash the body); the ledger gets max(pinned, now + days).
+- The hand-over re-stamp matches accounts by token, not login (duplicate-login
+  twins keep their own windows). A G2G "paste it by hand" page stamps the
+  ledger to the date in the text before it goes out.
 - A failure after the login was sent never reports the order "NOT delivered".
 - An order's size / game / term are frozen once any account is provisioned.
 - G2G / PlayerAuctions match the most specific game name and accept announced
@@ -56,10 +62,17 @@ this work changes. `docs/` and `tests/` are not deployed.
   auto-delisted.
 - A failing (game, term) cools down (1 h doubling to 6 h) instead of being
   retried first every pass.
-- **Dark games**: a game with no Twitch campaign at any point in 45 days gets no
-  new offer and no renewal (its expired offers' accounts go back to the pool);
-  live offers stay up. Unknown/empty campaign history darkens nothing. On
-  2026-10-01 this removed nothing (oldest: Escape from Tarkov, 33 days).
+- **Dark games**: a game with campaigns on record but none at any point in 45
+  days gets no new offer and no renewal (its expired offers' accounts go back to
+  the pool); live offers stay up. Nothing is dark when the campaign history is
+  unreadable or empty, when the campaign watcher has refreshed nothing for 48 h,
+  or when every catalogue game would be dark; a game with no campaign on record
+  at all (announced, e.g. AION 2) is never dark. On 2026-10-01 this removed
+  nothing (oldest: Escape from Tarkov, 33 days).
+- The unfinished-sale sweep only looks at sold rows touched in the last 7 days,
+  re-stamps only the holder's row (never another renter's lease on the same
+  token), and pages only when it gives up. A delivered sale whose account is
+  off its bot pages "DELIVERED … but NOT FARMING", not "NOT delivered".
 - Offer text says drops come with the game's campaigns (applies to new
   publishes and renewals; live listings keep their text until renewed).
 
@@ -78,9 +91,31 @@ this work changes. `docs/` and `tests/` are not deployed.
 
 ### Renter portal
 - A password reset or suspend ends every existing session (`sessionEpoch`).
-- 10 failed logins in 15 min lock that username for 30 min (+ Telegram).
-- A renter whose access has not started is refused; `whoami` returns the
-  renter's own view only; ended accounts show as "Farming ended".
+- 10 failed logins in 15 min from one address lock that username+address pair
+  for 30 min; 20 failures across addresses page the operator once. The
+  renter's own correct password is never refused because of other addresses.
+- A renter whose access has not started is refused; a start date picked in the
+  console opens at 00:00 JST that day; `whoami` returns the renter's own view
+  only; ended accounts show as "Farming ended".
+
+### Renter operations (seventh review pass)
+- "Farm days" searches every configured host before it writes a new copy (a
+  stale host pointer can no longer put a live account on a second host), and
+  an unreadable stack while extending a live window just extends it.
+- Start on a stopped renter with no accounts clears the stop ("farming is on
+  again — add accounts").
+- Add from pool refuses suspended / lapsed / stopped renters like manual add;
+  manual add and approve re-check the renter under the busy mark.
+- "Remove account": ending a buyer's paid farming (`?force=1`) and removing a
+  row whose bot host cannot be read (`?skipPull=1`) are separate confirmations.
+- Owed reloads: a removed container's policy row settles; an owed reload on a
+  host this server no longer knows is dropped with one Telegram instead of
+  blocking the renter; the retry sweep runs even if the lease step throws.
+- Strict placement reads ignore unreadable files no bot reads (backups).
+- dupeGuard strips a sibling that changed under it from its fresh text.
+- Manual add always reloads the bot it took the account from.
+- `move-renter-stack.js` refuses a same-host move (its rollback cannot work
+  there).
 
 ### Infrastructure
 - The Bots page / consolidator / `move-bot-host.js` refuse to delete, move or
@@ -118,9 +153,20 @@ this work changes. `docs/` and `tests/` are not deployed.
   owner call on what the console should show.
 - **Live campaign status line in hand-over messages**: would add a DB read to
   every delivery; the copy change covers the expectation.
-- `scripts/eldorado-farm-listings.js` still says "new Drops every day 15 hours
-  during GMT" in the Eldorado offer description — owner's listing copy, only
-  used when the owner republishes.
+- `scripts/eldorado-farm-listings.js` and `utils/bulkPacks/copy.js` still say
+  "new Drops every day" — the owner's listing copy / another work stream; the
+  87 live Gameflip offers keep their old text until renewed (from 10-09).
+- Other remote config writers (`utils/tokenReplace.js`, `utils/unclaimedAutoList.js`,
+  `utils/noclaimFleet.js`, `routes/noclaimFarmRoutes.js`) still use an unchecked
+  `cat > tmp && mv` (or `cat` onto the live file) — outside the renter scope;
+  offered as a separate task.
+- Known, accepted edges (from the reviews): bot numbers above 999 would be
+  invisible to the 3-digit config-name rules (numbers are < 100 today); a
+  failed reload mark plus a failed reload can let a stop retry report done;
+  the stack-move rollback can restart a source that was already stopped; a
+  Close clicked while a delivery tick runs for the same order can be undone by
+  it; G2G/PA game-prefix matching has no word boundary ("Rusty Lake" → Rust),
+  as before.
 
 ## Deploy record
 See the bottom of this file (filled in at deploy time).

@@ -72,6 +72,12 @@ function die(m) { console.error("ABORT: " + m); process.exit(1); }
   const dst = hosts.resolveHost(TO);
   if (!src) die("unknown source host " + FROM);
   if (!dst) die("unknown destination host " + TO);
+  // Cross-host only. On one host, writing a group into the destination makes
+  // dupeGuard strip those tokens from the source in the same write, so a
+  // rollback that "points the ledger back at the source" would point it at a
+  // file that no longer holds them — accounts on no bot while the ledger says
+  // they farm. A same-host move is a rename / slot change, not this script.
+  if (src.id === dst.id) die("source and destination are the same host (" + src.id + ") — this script moves a stack BETWEEN hosts");
 
   const srcContainer = bc.containerForFile(CFG);
   const dstContainer = bc.containerForFile(DEST);

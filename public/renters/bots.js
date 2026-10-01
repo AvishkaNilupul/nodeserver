@@ -193,7 +193,9 @@
       // accounts that are on no bot.
       toast(
         action === "start"
-          ? d && d.skipped
+          ? d && d.note
+            ? d.note
+            : d && d.skipped
             ? "Bot started — but " + d.skipped + " account(s) could not be put back (" +
               (d.skippedReason || "no room") + ")"
             : "Bot started"

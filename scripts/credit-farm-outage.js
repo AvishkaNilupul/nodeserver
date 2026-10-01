@@ -20,6 +20,10 @@
 //
 // SAFETY: never shortens a window; refuses a credit over 14 days (a typo in
 // --hours / --from should not hand out months); prints every row it would move.
+// It credits whoever is recorded in the stack NOW: a buyer placed there after
+// the outage is credited too, and one moved elsewhere since is not — read the
+// dry-run list before --apply. Run it when nothing else is moving accounts
+// (it does not take the server's in-process busy marks).
 const path = require("path");
 const APP = path.resolve(__dirname, "..");
 require("dotenv").config({ path: path.join(APP, ".env"), quiet: true });

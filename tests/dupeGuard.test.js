@@ -1,7 +1,7 @@
 // utils/dupeGuard (2026-10-01): a moved account is stripped from sibling
 // configs AND the sibling is recorded as owing a reload (out of the config is
 // not out of a running bot); a sibling that changed since the batched read is
-// left alone (no lost update); the guard skips only its own heal writes, not
+// stripped from its fresh text (no lost update, no double); the guard skips only its own heal writes, not
 // every write that happens to run meanwhile.
 const test = require("node:test");
 const assert = require("node:assert/strict");
@@ -53,21 +53,26 @@ test("a moved account is stripped from the sibling AND the sibling owes a reload
   assert.deepEqual(owed, ["contabo/config_03.json: dupe guard: accounts moved to config_05.json"]);
 });
 
-test("REGRESSION: a sibling that changed since the batched read is left alone (no lost update)", async () => {
+test("REGRESSION: a sibling that changed since the batched read is stripped from what is there NOW — no lost update, and no token left enabled twice", async () => {
   owed.length = 0;
   let hosts = null;
   hosts = fakeHosts(
     { "config_03.json": cfg([u("a"), u("b")]), "config_05.json": cfg([u("a")]) },
     {
       onRead: async (f) => {
-        // Another (locked) writer removes "b" from config_03 in between.
-        if (f === "config_03.json") hosts.files["config_03.json"] = cfg([u("a")]);
+        // Another (locked) writer adds "c" to config_03 in between.
+        if (f === "config_03.json") hosts.files["config_03.json"] = cfg([u("a"), u("b"), u("c")]);
       },
     },
   );
   const healed = await guard.enforceSingleHome(hosts, HOST, "config_05.json", hosts.files["config_05.json"]);
-  assert.deepEqual(healed, []);
-  assert.deepEqual(JSON.parse(hosts.files["config_03.json"]).TwitchSettings.TwitchUsers.map((x) => x.ClientSecret), ["a"], "the other writer's change stands");
+  assert.deepEqual(healed, [{ file: "config_03.json", removed: ["a"] }]);
+  assert.deepEqual(
+    JSON.parse(hosts.files["config_03.json"]).TwitchSettings.TwitchUsers.map((x) => x.ClientSecret),
+    ["b", "c"],
+    "the other writer's change stands AND the moved token is gone",
+  );
+  assert.deepEqual(owed, ["contabo/config_03.json: dupe guard: accounts moved to config_05.json"]);
 });
 
 test("REGRESSION: a write that runs WHILE a heal is under way is still guarded", async () => {

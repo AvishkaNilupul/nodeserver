@@ -351,7 +351,13 @@ async function sweepPendingReloads({ minAgeMs = 2 * 60 * 1000, notify = true } =
         // failed restart-policy clear ("restart-policy") is settled the same way.
         const container = cfg().containerForFile(row.file);
         if (/restart-policy/.test(row.reason || "") && container) {
-          await hosts.setRestartPolicy(host, container, "no");
+          try {
+            await hosts.setRestartPolicy(host, container, "no");
+          } catch (e) {
+            // A container that no longer exists has no policy to clear and
+            // nothing a reboot could start: settled, not retried forever.
+            if (!/no such container/i.test(String((e && e.message) || ""))) throw e;
+          }
         }
         const began = new Date();
         await restartIfRunning(host, row.file);
@@ -491,9 +497,11 @@ async function locateSecrets(host, secrets, { mustRead = [], problems = null, st
       }
     }
     if (!data) {
-      // `strict` (placement): ANY unreadable config is a problem — an account
-      // that sits in it would read as "on no bot" and be placed a second time.
-      if (strict || must.has(f)) {
+      // `strict` (placement): any unreadable config a BOT reads is a problem —
+      // an account that sits in it would read as "on no bot" and be placed a
+      // second time. A file no bot reads (a backup, an archived name) cannot
+      // farm anything, so it never blocks a placement.
+      if ((strict && cfg().validFile(f)) || must.has(f)) {
         problem("Could not read " + host.id + "/" + f + ": " + ((r && r.error) || "unparseable"));
       } else {
         console.warn("[renterBotOps] skipped unreadable config " + host.id + "/" + f);
@@ -660,6 +668,13 @@ async function stopRenterFarming(renter, host) {
   let stoppedAny = false;
   for (const hid of hostIds) {
     const h = host && hid === host.id ? host : hosts.resolveHost(hid);
+    if (!h && owedEarlier.has(hid) && !rows.some((r) => r.configFile && hostIdOf(r.host) === hid)) {
+      // Named only by a reload an earlier stop could not finish, on a host this
+      // server no longer knows: dropped (said once), never a stop that fails
+      // every day for the rest of the lease.
+      for (const f of owedEarlier.get(hid)) await noteUnknownOwed(renter, hid + "/" + f);
+      continue;
+    }
     if (!h) {
       problems.push("accounts on unknown bot host '" + hid + "'");
       files.push({ host: hid, file: null, error: "unknown host" });
@@ -976,7 +991,19 @@ async function startRenterFarming(renter, host) {
     homeState = "unknown";
   }
   const began = new Date();
-  await cfg().startConfigContainer(host, home);
+  try {
+    await cfg().startConfigContainer(host, home);
+  } catch (e) {
+    // Nothing of theirs to put on a bot, and their bot is empty: there is
+    // nothing to start — but farming is no longer STOPPED, or a stopped renter
+    // whose accounts were all removed could never be given new ones (manual
+    // add and approve refuse a stopped renter; this Start was the way out).
+    if (e && e.code === "no_accounts" && !rows.length) {
+      await unstamp();
+      return { added, skipped, running: false, nothingToPlace: true };
+    }
+    throw e;
+  }
   if (touched.has(home)) {
     // A bot that was stopped just started on the new config. One that was
     // already running must be restarted to read it (`compose up -d` leaves a
@@ -1000,6 +1027,26 @@ async function startRenterFarming(renter, host) {
 // pulled out of by a stop or a lapse whose reload FAILED still has it loaded.
 // Reload those first (and forget them once done); a reload that cannot happen
 // refuses — putting the account back anywhere now would farm it twice.
+// An owed reload recorded against a host this server no longer knows. Said
+// once per entry (Telegram + SystemEvent); the caller drops the entry.
+async function noteUnknownOwed(renter, key) {
+  const msg =
+    "Renter " + ((renter && renter.username) || "?") + ": a reload was owed on " + key +
+    ", a bot host this server no longer knows — dropped. If that host still runs bots, " +
+    "check by hand that it does not still farm this renter's accounts.";
+  console.error("[renterBotOps] " + msg);
+  // Out of the renter's record now, so it is said once, not on every Start.
+  await Renter.updateOne({ _id: renter && renter._id }, { $pull: { stopOwedFiles: key } }).catch(() => {});
+  await require("./telegram").sendTelegram("⚠️ " + msg).catch(() => {});
+  try {
+    require("./systemLog")
+      .logEvent({ category: "renter", action: "owed_reload_unknown_host", actor: "renterBotOps", subject: key, detail: msg })
+      .catch(() => {});
+  } catch {
+    /* diagnostics only */
+  }
+}
+
 async function settleOwedBeforePlacing(renter, rows) {
   const owed = new Map(); // hostId -> Set(file)
   const add = (hid, f) => {
@@ -1027,7 +1074,13 @@ async function settleOwedBeforePlacing(renter, rows) {
         if (cause && cause.unreachable) e.unreachable = true;
         return e;
       };
-      if (!h) throw refuse("unknown host");
+      if (!h) {
+        // A host this server no longer knows (retired / renamed): nothing here
+        // can reload it, and refusing would block this renter for good. Dropped
+        // (the entry is cleared below) and said once.
+        await noteUnknownOwed(renter, hid + "/" + f);
+        continue;
+      }
       if (!(await isReloadOwed(h, f))) continue;
       const began = new Date();
       try {

@@ -26,44 +26,77 @@ function saveSession(req) {
   });
 }
 
-// Per-USERNAME failed-login lockout (2026-10-01). loginLimiter is per IP, so
-// guessing one renter's password from many addresses was unlimited. After
-// LOCK_AFTER failures inside LOCK_WINDOW_MS the username is refused for
-// LOCK_MS (the same answer as the IP limiter, correct password or not), and the
-// operator is told once per lock. In-process (the server is one process, as
-// utils/fileLock assumes); a restart clears it.
+// Failed renter logins (2026-10-01).
+//   - per (username, address): LOCK_AFTER failures inside LOCK_WINDOW_MS lock
+//     that PAIR for LOCK_MS — the right password from that address waits too.
+//     A lock on the username alone let anyone who knew it lock the renter out
+//     from a single address, again and again.
+//   - per username, across addresses: past ALERT_AFTER failures inside the
+//     window the operator is told once — guessing spread over many addresses
+//     is seen, without ever refusing the renter's own correct password.
+// In-process (the server is one process, as utils/fileLock assumes); a restart
+// clears it. Both maps are pruned, so failures for made-up usernames cannot
+// grow them without bound.
 const LOCK_AFTER = 10;
+const ALERT_AFTER = 20;
 const LOCK_WINDOW_MS = 15 * 60 * 1000;
 const LOCK_MS = 30 * 60 * 1000;
-const failures = new Map(); // usernameLower -> { n, first, lockedUntil }
+const MAX_KEYS = 5000;
+const pairFailures = new Map(); // "user|ip" -> { n, first, lockedUntil }
+const userFailures = new Map(); // user -> { n, first, ips, alerted }
 
-function lockState(key, now) {
-  const f = failures.get(key);
+function liveEntry(map, key, now) {
+  const f = map.get(key);
   if (!f) return null;
   if (f.lockedUntil && f.lockedUntil > now) return f;
-  if (now - f.first > LOCK_WINDOW_MS && !(f.lockedUntil > now)) {
-    failures.delete(key);
+  if (now - f.first > LOCK_WINDOW_MS) {
+    map.delete(key);
     return null;
   }
   return f;
 }
 
-function recordFailure(key, now, ip) {
-  let f = lockState(key, now);
-  if (!f) {
-    f = { n: 0, first: now, lockedUntil: 0 };
-    failures.set(key, f);
+function prune(map, now) {
+  if (map.size <= MAX_KEYS) return;
+  for (const [k, f] of map) {
+    if (!(f.lockedUntil > now) && now - f.first > LOCK_WINDOW_MS) map.delete(k);
   }
-  f.n += 1;
-  if (f.n >= LOCK_AFTER && !(f.lockedUntil > now)) {
-    f.lockedUntil = now + LOCK_MS;
+  for (const k of map.keys()) {
+    if (map.size <= MAX_KEYS) break;
+    map.delete(k); // oldest first (insertion order)
+  }
+}
+
+function recordFailure(user, ip, now) {
+  const addr = String(ip || "?");
+  const pk = user + "|" + addr;
+  let p = liveEntry(pairFailures, pk, now);
+  if (!p) {
+    p = { n: 0, first: now, lockedUntil: 0 };
+    pairFailures.set(pk, p);
+  }
+  p.n += 1;
+  if (p.n >= LOCK_AFTER && !(p.lockedUntil > now)) p.lockedUntil = now + LOCK_MS;
+  let u = liveEntry(userFailures, user, now);
+  if (!u) {
+    u = { n: 0, first: now, ips: new Set(), alerted: false };
+    userFailures.set(user, u);
+  }
+  u.n += 1;
+  if (u.ips.size < 100) u.ips.add(addr);
+  if (u.n >= ALERT_AFTER && !u.alerted) {
+    u.alerted = true;
     require("../utils/telegram")
       .sendTelegram(
-        "🔒 Renter login for '" + key + "' locked for " + LOCK_MS / 60000 + " min after " + f.n +
-          " failed passwords in " + Math.round((now - f.first) / 60000) + " min (last from " + (ip || "?") + ").",
+        "🔒 Renter login '" + user + "': " + u.n + " failed passwords in " +
+          Math.max(1, Math.round((now - u.first) / 60000)) + " min from " + u.ips.size +
+          " address(es) (last " + addr + "). Each address is locked out after " + LOCK_AFTER +
+          " failures; the renter's own correct password still works.",
       )
       .catch(() => {});
   }
+  prune(pairFailures, now);
+  prune(userFailures, now);
 }
 
 // RENTER LOGIN — separate realm. On success the session carries ONLY
@@ -80,7 +113,8 @@ router.post("/renter-login", loginLimiter, async (req, res) => {
     }
     const key = String(username).trim().toLowerCase().slice(0, 64);
     const now = Date.now();
-    const lock = lockState(key, now);
+    const pairKey = key + "|" + String(req.ip || "?");
+    const lock = liveEntry(pairFailures, pairKey, now);
     if (lock && lock.lockedUntil > now) {
       return res
         .status(429)
@@ -89,12 +123,12 @@ router.post("/renter-login", loginLimiter, async (req, res) => {
     const renter = await authenticate(username, password);
     // The rent-farm holder never logs in (same answer as a wrong password).
     if (!renter || isOperatorHolder(renter)) {
-      if (!renter) recordFailure(key, now, req.ip);
+      if (!renter) recordFailure(key, req.ip, now);
       return res
         .status(401)
         .json({ success: false, message: "Invalid credentials" });
     }
-    failures.delete(key);
+    pairFailures.delete(pairKey);
     // Valid password but no access: be specific so the renter knows why.
     if (isBlocked(renter)) {
       const message =
@@ -111,7 +145,9 @@ router.post("/renter-login", loginLimiter, async (req, res) => {
         success: false,
         code: "not_started",
         message:
-          "Your access starts on " + new Date(renter.accessStart).toISOString().slice(0, 10) + ".",
+          "Your access starts on " +
+            new Date(new Date(renter.accessStart).getTime() + 9 * 3600000).toISOString().slice(0, 10) +
+            " (Japan time).",
       });
     }
 
@@ -151,4 +187,8 @@ router.get("/renter/whoami", requireRenter, (req, res) => {
 });
 
 module.exports = router;
-module.exports._resetLoginLocks = () => failures.clear();
+module.exports._resetLoginLocks = () => {
+  pairFailures.clear();
+  userFailures.clear();
+};
+module.exports._loginLockSizes = () => ({ pairs: pairFailures.size, users: userFailures.size });

@@ -371,6 +371,21 @@ async function advanceDigest(now) {
 }
 
 async function sweepOnce() {
+  try {
+    await sweepLeases();
+  } finally {
+    // Every reload still owed — by a stop, a lapsed window or a start that
+    // failed after writing — is retried here, not only when something happens
+    // to touch the same file again (and pages when one stays owed). Last in the
+    // tick, so a host outage it has to wait out never delays a lease-end stop —
+    // and in a `finally`, so nothing above that throws can starve it.
+    await sweepPendingReloads().catch((e) =>
+      console.error("[renterExpiry] owed-reload sweep error:", e.message),
+    );
+  }
+}
+
+async function sweepLeases() {
   const now = new Date();
   await sweepAccounts(now).catch((e) =>
     console.error("[renterExpiry] account sweep error:", e.message),
@@ -391,18 +406,25 @@ async function sweepOnce() {
   for (const r of expiring) {
     const windowStart = new Date(new Date(r.accessEnd).getTime() - WARN_MS);
     if (r.expiryWarnedAt && r.expiryWarnedAt >= windowStart) continue;
-    r.expiryWarnedAt = now;
-    await r.save();
-    await sendTelegram(
-      "⏳ Renter lease expiring: " +
-        r.username +
-        " ends in " +
-        daysLeft(r.accessEnd, now) +
-        " day(s) (" +
-        new Date(r.accessEnd).toISOString().slice(0, 10) +
-        "). Renew it or the bot stops automatically.",
-    );
-    console.log("[renterExpiry] expiry warning sent for " + r.username);
+    // One renter whose record will not save must not stop the rest of the
+    // tick (the lease-end stops and the owed-reload retries below).
+    try {
+      // A targeted write, not r.save(): a record that fails validation
+      // elsewhere still gets its warning stamp.
+      await Renter.updateOne({ _id: r._id }, { $set: { expiryWarnedAt: now } });
+      await sendTelegram(
+        "⏳ Renter lease expiring: " +
+          r.username +
+          " ends in " +
+          daysLeft(r.accessEnd, now) +
+          " day(s) (" +
+          new Date(r.accessEnd).toISOString().slice(0, 10) +
+          "). Renew it or the bot stops automatically.",
+      );
+      console.log("[renterExpiry] expiry warning sent for " + r.username);
+    } catch (e) {
+      console.error("[renterExpiry] expiry warning for " + r.username + " failed:", e.message);
+    }
   }
 
   // 2) Expired (lease end in the past) OR suspended, assigned a bot, not
@@ -431,13 +453,6 @@ async function sweepOnce() {
     }
   }
 
-  // Every reload still owed — by a stop, a lapsed window or a start that
-  // failed after writing — is retried here, not only when something happens
-  // to touch the same file again (and pages when one stays owed). Last in the
-  // tick, so a host outage it has to wait out never delays a lease-end stop.
-  await sweepPendingReloads().catch((e) =>
-    console.error("[renterExpiry] owed-reload sweep error:", e.message),
-  );
 }
 
 async function stopExpiredRenter(r, now) {

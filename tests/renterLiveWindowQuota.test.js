@@ -125,3 +125,25 @@ test("the scanner's rotation query leaves ended windows out", () => {
   const fn = src.slice(src.indexOf("async function nextDueAccount()"));
   assert.match(fn.slice(0, 900), /farmEndedAt: null,/);
 });
+
+test("REGRESSION (review 2026-10-01): Add from pool refuses a renter whose farming is stopped or whose lease is over — like manual add", async () => {
+  await Promise.all([Renter.deleteMany({}), RenterAccount.deleteMany({})]);
+  const stopped = await seed("stoppedone", { live: 0, max: 10 });
+  await Renter.updateOne({ _id: stopped._id }, { $set: { botStoppedAt: new Date(), botStopReason: "operator" } });
+  let res = await fetch(baseUrl + "/renters/" + stopped._id + "/accounts/from-pool", {
+    method: "POST",
+    headers: { Cookie: cookie, Accept: "application/json", "Content-Type": "application/json" },
+    body: JSON.stringify({ count: 1 }),
+  });
+  assert.equal(res.status, 409, await res.clone().text());
+  assert.match((await res.json()).message, /farming is stopped/);
+  const lapsed = await seed("lapsedone", { live: 0, max: 10 });
+  await Renter.updateOne({ _id: lapsed._id }, { $set: { accessEnd: new Date(Date.now() - 86400000) } });
+  res = await fetch(baseUrl + "/renters/" + lapsed._id + "/accounts/from-pool", {
+    method: "POST",
+    headers: { Cookie: cookie, Accept: "application/json", "Content-Type": "application/json" },
+    body: JSON.stringify({ count: 1 }),
+  });
+  assert.equal(res.status, 409);
+  assert.match((await res.json()).message, /past their lease/);
+});

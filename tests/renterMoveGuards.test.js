@@ -429,9 +429,15 @@ test("a row on a RETIRED host asks first, then removes the row with a warning", 
   assert.equal(res1.status, 409);
   const d1 = await res1.json();
   assert.equal(d1.needsForce, true);
+  assert.equal(d1.needsSkipPull, true, "its own confirmation");
   assert.match(d1.message, /bot host 'phone' is unknown/);
   assert.ok(await RenterAccount.findById(acc._id).lean(), "kept until confirmed");
-  const res2 = await call("DELETE", "/renter-accounts/" + acc._id + "?force=1");
+  // REGRESSION (2026-10-01): ?force=1 answers "end the buyer's paid farming"
+  // and must not also mean "skip the pull".
+  const resF = await call("DELETE", "/renter-accounts/" + acc._id + "?force=1");
+  assert.equal(resF.status, 409);
+  assert.ok(await RenterAccount.findById(acc._id).lean(), "force alone does not skip the pull");
+  const res2 = await call("DELETE", "/renter-accounts/" + acc._id + "?skipPull=1");
   assert.equal(res2.status, 200);
   assert.match((await res2.json()).note, /take it off that bot by hand/);
   assert.equal(await RenterAccount.findById(acc._id).lean(), null);

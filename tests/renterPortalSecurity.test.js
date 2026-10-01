@@ -69,11 +69,15 @@ async function reset() {
   await Promise.all([Renter.deleteMany({}), RenterAccount.deleteMany({})]);
 }
 
-function login(username, password) {
+function login(username, password, ip = null) {
   ipSeq += 1;
   return fetch(baseUrl + "/renter-login", {
     method: "POST",
-    headers: { "Content-Type": "application/json", Accept: "application/json", "X-Forwarded-For": "10.0." + (ipSeq >> 8) + "." + (ipSeq & 255) },
+    headers: {
+      "Content-Type": "application/json",
+      Accept: "application/json",
+      "X-Forwarded-For": ip || "10.0." + (ipSeq >> 8) + "." + (ipSeq & 255),
+    },
     body: JSON.stringify({ username, password }),
   });
 }
@@ -116,20 +120,40 @@ test("REGRESSION: a suspend ends sessions for good — an unsuspend does not rev
   assert.equal((await get("/renter/me", cookie)).status, 401);
 });
 
-test("REGRESSION: one username is locked after 10 wrong passwords from 10 different addresses, and the operator is told once", async () => {
+test("REGRESSION: 10 wrong passwords from ONE address lock that address out — not the renter, who still signs in from elsewhere", async () => {
   await reset();
   await mkRenter("tenant3");
   for (let i = 0; i < 10; i++) {
-    const res = await login("tenant3", "wrong" + i);
+    const res = await login("tenant3", "wrong" + i, "10.9.9.9");
     assert.equal(res.status, 401);
   }
-  const locked = await login("tenant3", "Passw0rd!long");
-  assert.equal(locked.status, 429, "even the right password waits out the lock");
-  assert.equal(pages.length, 1);
-  assert.match(pages[0], /Renter login for 'tenant3' locked/);
-  // Another renter is unaffected.
+  const locked = await login("tenant3", "Passw0rd!long", "10.9.9.9");
+  assert.equal(locked.status, 429, "that address waits out its lock, even with the right password");
+  assert.equal((await login("tenant3", "Passw0rd!long", "10.8.8.8")).status, 200, "the renter is not locked out");
+  assert.equal(pages.length, 0, "ten failures from one address is the IP limiter's business, not a page");
+  // Another renter is unaffected. (That one address has also used up the
+  // per-IP limiter's budget, which is the limiter's own, older rule.)
   await mkRenter("tenant4");
-  assert.equal((await login("tenant4", "Passw0rd!long")).status, 200);
+  assert.equal((await login("tenant4", "Passw0rd!long", "10.7.7.7")).status, 200);
+});
+
+test("REGRESSION: guessing spread over many addresses pages the operator once — and never refuses the right password", async () => {
+  await reset();
+  await mkRenter("tenant3b");
+  for (let i = 0; i < 25; i++) {
+    assert.equal((await login("tenant3b", "wrong" + i)).status, 401);
+  }
+  assert.equal(pages.length, 1, "told once");
+  assert.match(pages[0], /Renter login 'tenant3b': 20 failed passwords .* from 20 address/);
+  assert.equal((await login("tenant3b", "Passw0rd!long")).status, 200);
+});
+
+test("failures for made-up usernames cannot grow the lock maps without bound", async () => {
+  await reset();
+  const sizes = () => renterAuthRoutes._loginLockSizes();
+  for (let i = 0; i < 40; i++) await login("nobody" + i, "x");
+  assert.equal(sizes().pairs, 40);
+  assert.equal(sizes().users, 40);
 });
 
 test("a successful login clears the failure count", async () => {
@@ -179,4 +203,16 @@ test("the portal shows an ENDED window as ended, not 'active'", async () => {
   assert.equal(by.liveacct.status, "active");
   assert.ok(by.liveacct.farmUntil);
   for (const a of d.accounts) assert.ok(!("clientSecret" in a) && !("token" in a), "no token reaches the renter");
+});
+
+test("REGRESSION: an access start picked as a date opens at 00:00 JST that day, not 09:00", async () => {
+  const { parseAccessStart } = require("../utils/renters");
+  assert.equal(parseAccessStart("2026-10-01").toISOString(), "2026-09-30T15:00:00.000Z");
+  assert.equal(parseAccessStart("2026-10-01T05:00:00Z").toISOString(), "2026-10-01T05:00:00.000Z", "a full timestamp is kept");
+  assert.equal(parseAccessStart(""), null);
+  await reset();
+  // "From today" (JST) — open now, whatever the UTC hour.
+  const todayJst = new Date(Date.now() + 9 * 3600000).toISOString().slice(0, 10);
+  await createRenter({ username: "tenant9", password: "Passw0rd!long", maxAccounts: 5, accessStart: todayJst });
+  assert.equal((await login("tenant9", "Passw0rd!long")).status, 200);
 });

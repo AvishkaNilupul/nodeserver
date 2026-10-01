@@ -878,3 +878,31 @@ test("review 2026-10-01: a sale never re-stamps ANOTHER renter's row holding the
   assert.equal(after.farmUntil.getTime(), before.getTime(), "the other renter's lease is untouched");
   assert.notEqual((await MarketplaceListing.findById(listing._id).lean()).rentFarmPoolId, "", "the sale stays open for a human");
 });
+
+test("B10 (review): a stalled campaign watcher, an all-dark catalogue, or a game with NO campaign on record darkens nothing", async () => {
+  await reset();
+  await TwitchCampaign.deleteMany({});
+  try {
+    world.af.gfRentFarmGames = ["Rust", "Escape from Tarkov", "AION 2"];
+    await campaign("Rust", new Date(Date.now() - 10 * dayMs));
+    await campaign("Escape from Tarkov", new Date(Date.now() - 60 * dayMs));
+    // Fresh watcher: EFT is dark; AION 2 has no campaign on record — not dark.
+    let cat = await svc.desiredCatalogue();
+    assert.deepEqual(cat.dark, ["Escape from Tarkov"]);
+    assert.ok(cat.wanted.some((w) => w.game === "AION 2"), "an announced game with no history stays");
+    // The watcher stalls: nothing seen for three days.
+    await TwitchCampaign.updateMany({}, { $set: { lastSeenAt: new Date(Date.now() - 3 * dayMs) } });
+    cat = await svc.desiredCatalogue();
+    assert.deepEqual(cat.dark, []);
+    assert.equal(cat.campaignsUnknown, true);
+    // Fresh again, but every catalogue game would be dark: a broken signal.
+    await TwitchCampaign.updateMany({}, { $set: { lastSeenAt: new Date() } });
+    world.af.gfRentFarmGames = ["Escape from Tarkov"];
+    await campaign("Other Game", new Date(Date.now() + dayMs));
+    cat = await svc.desiredCatalogue();
+    assert.deepEqual(cat.dark, []);
+    assert.equal(cat.campaignsUnknown, true);
+  } finally {
+    await TwitchCampaign.deleteMany({});
+  }
+});

@@ -421,3 +421,21 @@ test("REGRESSION: a lease renewed WHILE its lease-end stop runs is not stamped s
   assert.equal(after.botStoppedAt, null, "the renewal stands");
   assert.ok(calls.telegram.some((m) => /renewed or unsuspended WHILE its lease ended stop ran/.test(m)));
 });
+
+test("REGRESSION (review 2026-10-01): the owed-reload retries run even when the lease part of the tick throws", async () => {
+  await reset();
+  const realFind = Renter.find;
+  let thrown = 0;
+  Renter.find = function (...args) {
+    thrown += 1;
+    throw new Error("Atlas: operation exceeded time limit");
+  };
+  const before = calls.pendingSweeps || 0;
+  try {
+    await assert.rejects(renterExpiry.sweepOnce(), /exceeded time limit/);
+  } finally {
+    Renter.find = realFind;
+  }
+  assert.ok(thrown >= 1);
+  assert.equal((calls.pendingSweeps || 0) - before, 1, "the sweeper still ran");
+});
