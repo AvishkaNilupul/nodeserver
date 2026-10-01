@@ -924,14 +924,16 @@ const RELIST_LEASE_MS = 10 * 60 * 1000;
 // 429 to everything else this process does — relists ("Too many attempts"),
 // publishes, the health page's probe. Rotated like the fallback lane above, so
 // a long tail is still covered in ceil(n / limit) passes rather than starved.
-const UNPLACED_POLL_LIMIT = 25;
+// Kept well under what trips the limiter: "a handful of calls in a minute earns
+// 429 for several minutes" (reference_gameflip_api_limits).
+const UNPLACED_POLL_LIMIT = 15;
 let unplacedCursor = 0;
 
 // Lapsed listings ended per pass. Each one costs two writes (off sale, delete),
 // so a backlog is worked off over a few minutes instead of in one burst, with a
 // gap between ends because Gameflip's limiter counts writes too.
-const LAPSED_END_LIMIT = 5;
-const LAPSED_END_GAP_MS = 1500;
+const LAPSED_END_LIMIT = 3;
+const LAPSED_END_GAP_MS = 2000;
 
 // RENEWAL. An auto-delivery listing that expired UNSOLD has not used up its
 // unit: retiring it ended the chain, and on 2026-10-01 that would have dropped
@@ -1767,6 +1769,9 @@ module.exports = {
   start,
   // exported for tests
   relistRetryDelayMs,
+  UNPLACED_POLL_LIMIT,
+  LAPSED_END_LIMIT,
+  LAPSED_RENEW_PER_PASS,
   isOutOfStockError,
   RELIST_RETRY_MAX_MS,
 };

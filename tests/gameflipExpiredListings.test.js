@@ -148,26 +148,31 @@ test("a 'ready' listing past its expiry is retired too, without an off-sale patc
 });
 
 test("the backlog is bounded: individual reads and ends per pass are capped and rotate", async () => {
-  // 30 unplaced rows, all lapsed: one pass reads at most 25 and ends at most 5.
-  for (let i = 0; i < 30; i++) {
+  // More unplaced rows than one pass may read, all lapsed: a pass reads at most
+  // UNPLACED_POLL_LIMIT of them and ends at most LAPSED_END_LIMIT.
+  const N = gf.UNPLACED_POLL_LIMIT + 5;
+  for (let i = 0; i < N; i++) {
     const id = "gf-old-" + String(i).padStart(2, "0");
     await row(id);
     world.state[id] = { status: "onsale", expiration: PAST, expired: true };
   }
   await gf.syncOnce();
-  assert.ok(world.stateReads.length <= 25, "read " + world.stateReads.length + " in one pass");
-  assert.strictEqual(world.ended.length, 5);
+  assert.ok(
+    world.stateReads.length <= gf.UNPLACED_POLL_LIMIT,
+    "read " + world.stateReads.length + " in one pass",
+  );
+  assert.strictEqual(world.ended.length, gf.LAPSED_END_LIMIT);
   const firstReads = new Set(world.stateReads);
   world.stateReads = [];
   await gf.syncOnce();
-  assert.strictEqual(world.ended.length, 10, "the next pass ends the next five");
+  assert.strictEqual(world.ended.length, 2 * gf.LAPSED_END_LIMIT, "the next pass ends the next batch");
   assert.ok(
     world.stateReads.some((id) => !firstReads.has(id)),
     "the read window must move, or the tail is never reached",
   );
   assert.strictEqual(
     await MarketplaceListing.countDocuments({ status: "removed" }),
-    10,
+    2 * gf.LAPSED_END_LIMIT,
   );
 });
 
@@ -249,7 +254,7 @@ test("one renewal per pass, and a hand-made listing is never republished", async
   world.state["gf-handmade"] = { status: "onsale", expiration: PAST, expired: true };
   const pub = fakePublisher();
   await gf.syncOnce(pub.opts);
-  assert.strictEqual(world.ended.length, 3, "all three are taken off Gameflip");
+  assert.strictEqual(world.ended.length, Math.min(3, gf.LAPSED_END_LIMIT), "all three are taken off Gameflip");
   assert.strictEqual(pub.calls.length, 1, "but only one publish a pass");
   await gf.syncOnce(pub.opts);
   assert.strictEqual(pub.calls.length, 2);
