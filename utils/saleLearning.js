@@ -28,6 +28,44 @@ function gamesForSet(set) {
   return [...new Set(set.items.map((i) => i && i.game).filter(Boolean))];
 }
 
+// SaleSignal.account is an ObjectId, and ONLY a value that is exactly one ObjectId may
+// be stored there. A quantity listing's `accountId` can be a comma-joined LIST of the
+// several accounts attached to it ("<hex24>,<hex24>,<hex24>"): casting that threw
+// inside updateOne, the catch below swallowed it, and the sale was never recorded
+// while `unitsSold` had already been incremented. On production (2026-10-01) 65 of the
+// 79 live GGSel offers are of this kind, so every REAL sale on them would have vanished
+// without a trace.
+// Anything that is not one id means "no single account", which is null: the pool of
+// logins is still kept in `login`, and internalSalesForGame counts an account-less unit
+// through its dedupeKey, as the comment on recordListingSale describes.
+const OBJECT_ID_RE = /^[a-f0-9]{24}$/i;
+function singleAccountId(value) {
+  const s = String(value == null ? "" : value).trim();
+  return OBJECT_ID_RE.test(s) ? s : null;
+}
+
+// The catch around the write MUST stay: demand learning is best-effort and has to
+// be unable to fail a sale, a restock or a delist. But a swallowed error that nobody
+// can see is how every sale on a multi-account listing could vanish, so anything other than the
+// benign race (a duplicate key: another pass wrote the same unit first, nothing is
+// lost) is reported. At most one line a minute, because a database outage would
+// otherwise print one per unit.
+const DROPPED_WARN_EVERY_MS = 60 * 1000;
+let lastDroppedWarnAt = 0;
+function reportDropped(dedupeKey, err) {
+  if (err && err.code === 11000) return;
+  const now = Date.now();
+  if (now - lastDroppedWarnAt < DROPPED_WARN_EVERY_MS) return;
+  lastDroppedWarnAt = now;
+  try {
+    console.warn(
+      "[saleLearning] sale signal NOT recorded for " + dedupeKey + ": " + (err && err.message ? err.message : err),
+    );
+  } catch {
+    /* logging must never be able to fail a sale */
+  }
+}
+
 // Write one signal per (game, unit) for a listing that sold `units` units.
 //
 // The unit index comes from an atomic $inc on the listing, so two overlapping
@@ -66,11 +104,11 @@ async function recordListingSale({
   for (let seq = start; seq < end; seq++) {
     for (const game of games) {
       const gameKey = String(game).toLowerCase();
+      const dedupeKey = "sold:" + String(listing._id) + ":" + gameKey + ":" + seq;
       try {
         const r = await SaleSignal.updateOne(
           {
-            dedupeKey:
-              "sold:" + String(listing._id) + ":" + gameKey + ":" + seq,
+            dedupeKey,
           },
           {
             $setOnInsert: {
@@ -79,7 +117,7 @@ async function recordListingSale({
               itemKey: "",
               name: listing.title || "",
               login: listing.accountLogin || "",
-              account: listing.accountId || null,
+              account: singleAccountId(listing.accountId),
               source: "listing_sold",
               marketplace: listing.marketplace || "",
               priceUsd: Number(priceUsd) || Number(listing.price) || 0,
@@ -89,10 +127,12 @@ async function recordListingSale({
           { upsert: true },
         );
         if (r.upsertedCount) written++;
-      } catch {
+      } catch (err) {
         // Duplicate key (a racing pass got there first) or a transient write
         // error. Demand learning is best-effort by design — it must never be
-        // able to fail a sale, a restock or a delist.
+        // able to fail a sale, a restock or a delist. Anything but the benign
+        // duplicate is reported (throttled) so a dropped sale is no longer silent.
+        reportDropped(dedupeKey, err);
       }
     }
   }
