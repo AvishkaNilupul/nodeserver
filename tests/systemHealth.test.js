@@ -1490,16 +1490,28 @@ test("whyNotActive says only what it measured", () => {
     ),
     /sold out/,
   );
-  // Closed by EXPIRY is not "its last unit sold": stamping units there would
-  // mark unsold accounts delivered.
+  // Closed at 0 with units on our row, past its expireDate: the double-sale
+  // warning stays, and since expiry looks the same from here, both readings
+  // are named — the order book decides, never "stamp it" blindly.
   const unsold = { units: [{ deliveredAt: null }] };
   const why = health.whyNotActive(
     { offerState: "Closed", quantity: 0, expireDate: "2026-09-20T18:00:00" },
     unsold,
     { now: new Date("2026-10-01T00:00:00Z") },
   );
-  assert.match(why, /closed it when it expired \(2026-09-20\)/);
-  assert.doesNotMatch(why, /never recorded/);
+  assert.match(why, /reached its expireDate \(2026-09-20\)/);
+  assert.match(why, /check Eldorado's orders/);
+  assert.match(why, /twice/);
+  assert.doesNotMatch(why, /find the order, stamp the unit/);
+  // Expired with nothing of ours on it: plainly closed on expiry.
+  assert.match(
+    health.whyNotActive(
+      { offerState: "Closed", quantity: 0, expireDate: "2026-09-20T18:00:00" },
+      { units: [{ deliveredAt: new Date() }] },
+      { now: new Date("2026-10-01T00:00:00Z") },
+    ),
+    /closed it when it expired \(2026-09-20\)/,
+  );
   assert.match(
     health.whyNotActive({ offerState: "Closed", quantity: 3 }, unsold),
     /Closed with 3 still listed/,
@@ -1736,4 +1748,40 @@ test("REGRESSION 2026-10-01: a Gameflip listing past its expiry is a ghost, not 
   assert.ok(!by.has("gf-fresh"));
   assert.match(check.summary, /2 expired/);
   assert.deepStrictEqual(asked.sort(), ["gf-fresh", "gf-lapsed", "gf-ready-lapsed"]);
+});
+
+test("eldorado.offers: a partial read with nothing wrong in it is unknown, never 'all fine'", async () => {
+  const deps = eldoradoDeps({ rows: [eldRow("eld-ok")], offers: [eldOffer("eld-ok")] });
+  deps.marketplaces = {
+    async eldoradoMyListings(page) {
+      return { totalPages: 25, results: page === 1 ? [eldOffer("eld-ok")] : [] };
+    },
+  };
+  const row = await runCheck("eldorado.offers", deps);
+  assert.strictEqual(row.status, "unknown");
+  assert.match(row.summary, /read only in part/);
+  assert.match(row.detail, /20 of 25 page\(s\)/);
+});
+
+test("one sale of a multi-game bundle counts once toward a ceiling, not once per game or per record", async () => {
+  // recordListingSale writes one signal per (game, unit) at the full price, and
+  // the same sale's row is marked sold too: three entries for ONE $7.99 sale.
+  const L = "6aaaaaaaaaaaaaaaaaaaaaaa";
+  const check = await runCheck(
+    "listings.overpriced",
+    healthyDeps({
+      SaleSignal: fakeModel([
+        ...fiveSales("gameflip", 4.5),
+        sig("gameflip", 7.99, { dedupeKey: "sold:" + L + ":rocket league:0" }),
+        sig("gameflip", 7.99, { dedupeKey: "sold:" + L + ":tom clancy's rainbow six: siege:0" }),
+      ]),
+      MarketplaceListing: fakeModel([
+        listing({ _id: L, externalId: "gf-mega-sold", status: "sold", price: 7.99, updatedAt: ago(HOUR) }),
+        listing({ externalId: "gf-seven", price: 7 }),
+      ]),
+    }),
+  );
+  assert.match(check.threshold, /\$4\.50 realised ceiling/);
+  assert.deepStrictEqual(check.items.map((i) => i.externalId), ["gf-seven"]);
+  assert.match(check.detail, /top sales: \$7\.99, \$4\.50, \$4\.50/);
 });

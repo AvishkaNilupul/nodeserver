@@ -541,6 +541,9 @@ async function gameflipEndListing(listingId, { status = "onsale" } = {}) {
     if (e && e.status === 404) return { deleted: true };
     throw apiError("Gameflip end listing (confirm)", e);
   }
+  // Deleted listings answer 404 (reference_gameflip_api_limits); a soft-delete
+  // status, should Gameflip ever use one, is just as gone.
+  if (/^(deleted|removed)$/i.test(String(still))) return { deleted: true };
   const err = new Error(
     "Gameflip end listing: " + listingId + ' still exists after the delete (status "' +
       still + '") — left as it is for the next pass',

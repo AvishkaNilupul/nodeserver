@@ -97,6 +97,7 @@ test.beforeEach(async () => {
   await DropLog.deleteMany({});
   world.telegrams = [];
   world.sweepFails = false;
+  gf.resetRenewalAlert();
   world.onsale = new Set();
   world.state = {};
   world.ended = [];
@@ -450,4 +451,61 @@ test("a stale 'ending' stamp is cleared once the listing is live again — a lat
     assert.strictEqual(r.status, "active");
     assert.strictEqual(r.lastError, "", id + " keeps a stale stamp");
   }
+});
+
+test("our own half-done end (off sale landed, delete did not) is resumed, not stranded in draft", async () => {
+  // A draft is never "expired", so without the stamp check the row would sit
+  // active forever with its account reserved and its chain never renewed.
+  await row("gf-halfdone", {
+    autoDeliver: true,
+    origin: "auto",
+    qtyRemaining: 4,
+    lastError: "expired on Gameflip — ending (2026-08-25)",
+  });
+  world.state["gf-halfdone"] = { status: "draft", expiration: PAST, expired: false };
+  const pub = fakePublisher();
+  await gf.syncOnce(pub.opts);
+  assert.deepStrictEqual(world.ended, [{ id: "gf-halfdone", status: "draft" }]);
+  const after = await MarketplaceListing.findOne({ externalId: "gf-halfdone" }).lean();
+  assert.strictEqual(after.status, "removed");
+  assert.match(after.lastError, /renewed as gf-new-1/);
+  assert.strictEqual(pub.calls[0].qtyRemaining, 4);
+});
+
+test("a draft that is not ours to finish keeps the recoverable branch it always had", async () => {
+  await row("gf-parked", { autoDeliver: true, origin: "auto", qtyRemaining: 1 });
+  world.state["gf-parked"] = { status: "draft", expiration: PAST, expired: false };
+  await gf.syncOnce(fakePublisher().opts);
+  const after = await MarketplaceListing.findOne({ externalId: "gf-parked" }).lean();
+  assert.strictEqual(after.status, "active");
+  assert.deepStrictEqual(world.ended, []);
+  assert.match(after.lastError, /NOT purchasable/);
+});
+
+test("the account link is kept when its hand-back did not take — a leak can be found, a cleared link cannot", async () => {
+  const set = new mongoose.Types.ObjectId();
+  const acct = new mongoose.Types.ObjectId();
+  await row("gf-stuckrelease", { set, autoDeliver: true, origin: "auto", accountId: String(acct), accountLogin: "acct-s", qtyRemaining: 1 });
+  world.state["gf-stuckrelease"] = { status: "onsale", expiration: PAST, expired: true };
+  await reserve("acct-s", set, acct);
+  const orig = DropLog.updateMany;
+  DropLog.updateMany = async () => ({ modifiedCount: 0 }); // the release write silently fails
+  try {
+    await gf.syncOnce(fakePublisher().opts);
+  } finally {
+    DropLog.updateMany = orig;
+  }
+  const after = await MarketplaceListing.findOne({ externalId: "gf-stuckrelease" }).lean();
+  assert.strictEqual(after.status, "removed");
+  assert.strictEqual(after.accountId, String(acct));
+});
+
+test("a bulk pack row's reservation is never handed back from here — its loop owns it", async () => {
+  const set = new mongoose.Types.ObjectId();
+  await row("gf-pack", { set, autoDeliver: true, origin: "auto", bulkOfferId: new mongoose.Types.ObjectId(), accountLogin: "packmember", qtyRemaining: 0 });
+  world.state["gf-pack"] = { status: "onsale", expiration: PAST, expired: true };
+  await reserve("packmember", set);
+  await gf.syncOnce(fakePublisher().opts);
+  assert.strictEqual(await DropLog.countDocuments({ soldAt: { $ne: null } }), 1);
+  assert.strictEqual((await MarketplaceListing.findOne({ externalId: "gf-pack" }).lean()).status, "removed");
 });

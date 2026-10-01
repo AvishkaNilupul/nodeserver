@@ -543,16 +543,19 @@ async function publishSuppliedAutoDelivery({
 // this third one a retired account listing leaves its account stuck at "fed"
 // with no live listing behind it — stock the owner paid for and can no longer
 // sell. Best-effort, like both of its siblings.
+// Resolves true when the hand-back went through (or there was nothing to hand
+// back), false when it failed — the existing callers ignore it.
 async function releaseSuppliedUnits(row, reason) {
   const ids = (row.units || [])
     .map((u) => (u && u.contentId ? String(u.contentId) : ""))
     .filter(Boolean);
-  if (!ids.length) return;
+  if (!ids.length) return true;
   try {
     const supplied = require("./suppliedStock");
     await supplied.releaseClaim(ids, {
       orderId: (row.units[0] && row.units[0].orderId) || "",
     });
+    return true;
   } catch (e) {
     console.error(
       "gameflip account listing " +
@@ -562,6 +565,7 @@ async function releaseSuppliedUnits(row, reason) {
         "): could not hand its accounts back:",
       e.message,
     );
+    return false;
   }
 }
 
@@ -962,6 +966,32 @@ const LAPSED_ENDING_RE = /^expired on Gameflip — ending \(([^)]*)\)/;
 // readUnplacedStatus's answer for a row it has fully settled itself.
 const LAPSED_DONE = "\u0000lapsed-settled";
 
+// Did the hand-back of `accountId`'s reservation for `setId` take? releaseAccount
+// swallows its own write errors, so the reservations are counted instead. A
+// failed count reads as "not released": the link is then kept, never lost.
+async function setReleased(accountId, setId) {
+  if (!accountId || !setId) return false;
+  try {
+    const left = await DropLog.countDocuments({
+      account: accountId,
+      soldSetId: String(setId),
+      soldToUsername: GF_CLAIM_TAG,
+      soldAt: { $ne: null },
+    });
+    return left === 0;
+  } catch {
+    return false;
+  }
+}
+
+// Out-of-stock renewals page the owner at most once an hour, as one summary:
+// a fleet-wide dip during a backlog would otherwise send one message per row.
+const RENEWAL_ALERT_EVERY_MS = 60 * 60 * 1000;
+let renewalAlertAt = 0;
+function resetRenewalAlert() {
+  renewalAlertAt = 0;
+}
+
 // Drop an "ending" stamp from a row whose listing is live again. Conditional on
 // the stamp still being there, so it can never clear anything else.
 async function clearStaleEndingStamp(row) {
@@ -1089,23 +1119,40 @@ async function settleLapsed(row, { expiration } = {}) {
   ).catch(() => null);
   if (!retired) return false;
   const why = "listing expired on Gameflip " + date;
+  // `released` gates the clearing below: the link is the only handle left on
+  // a reservation whose hand-back failed, so it stays until one succeeds
+  // (a leaked reservation can be found and freed; a cleared one cannot).
+  let released = true;
   if (row.rentFarm) {
     if (!keep) await releaseBufferedRow(row, why);
   } else if (row.accountId) {
     await releaseAccount(row.accountId, row.set).catch(() => {});
+    released = await setReleased(row.accountId, row.set);
   } else if (row.accountOffer) {
-    await releaseSuppliedUnits(row, why);
-  } else if (row.autoDeliver && !row.noclaimStock) {
+    released = (await releaseSuppliedUnits(row, why)) !== false;
+  } else if (
+    row.autoDeliver &&
+    !row.noclaimStock &&
+    !row.bulkOfferId &&
+    !row.lotId &&
+    !(Number(row.lotSize) > 0)
+  ) {
+    // A bulk pack or a lot is handed back by its own loop, never from here.
     await releaseHeadAccount(row).catch((e) =>
       console.error("gameflip head row " + row.externalId + " release:", e.message),
     );
   }
   if (row.noclaimStock) await retireNoclaimUnit(row, why);
-  if (!row.rentFarm) {
+  if (!row.rentFarm && released) {
     await MarketplaceListing.updateOne(
       { _id: row._id },
       { $set: { accountId: "", units: [] } },
     ).catch(() => {});
+  } else if (!row.rentFarm) {
+    console.error(
+      "gameflip listing " + row.externalId + ": its stock could not be handed back — " +
+        "the account link is kept on the row for a retry by hand",
+    );
   }
   console.error(
     "gameflip listing " + row.externalId + " expired " + date +
@@ -1249,19 +1296,38 @@ async function syncOnce({
     } catch (e) {
       // A 404 on a row this watcher had stamped as ending: the delete went
       // through but its settlement was never recorded. Finish it here instead
-      // of letting the plain 404 branch end the chain.
-      const m = LAPSED_ENDING_RE.exec(String(row.lastError || ""));
-      if (e && e.status === 404 && m) {
-        await settleLapsed(row, { expiration: m[1] });
-        return LAPSED_DONE;
+      // of letting the plain 404 branch end the chain. The stamp is re-read
+      // from the database when this pass's copy lacks it: an overlapping pass
+      // (a manual /marketplaces/sync beside the tick) may have stamped and
+      // ended it after this pass loaded its rows.
+      if (e && e.status === 404) {
+        let m = LAPSED_ENDING_RE.exec(String(row.lastError || ""));
+        if (!m) {
+          const fresh = await MarketplaceListing.findById(row._id, { lastError: 1 })
+            .lean()
+            .catch(() => null);
+          m = LAPSED_ENDING_RE.exec(String((fresh && fresh.lastError) || ""));
+        }
+        if (m) {
+          await settleLapsed(row, { expiration: m[1] });
+          return LAPSED_DONE;
+        }
       }
       throw e;
     }
-    if (!st.expired || st.status === "expired") {
-      // A stamp left by an end that failed, on a listing that is live again
+    const stamp = LAPSED_ENDING_RE.exec(String(row.lastError || ""));
+    // OUR OWN half-done end: the off-sale patch landed (draft) but the delete
+    // did not — a 429, a timeout, or a 200 Gameflip's limiter swallowed. A draft
+    // is never "expired", so without this the row would sit active for good,
+    // its account reserved and its chain never renewed. Resume the end.
+    const resumeEnd = !!stamp && st.status === "draft";
+    if (!resumeEnd && (!st.expired || st.status === "expired")) {
+      // A stamp left by an end that failed, on a listing that is LIVE again
       // (renewed by hand on Gameflip): clear it, or a later 404 — the owner
       // deleting it — would be read as ours to renew.
-      if (!st.expired) await clearStaleEndingStamp(row);
+      if (!st.expired && (st.status === "onsale" || st.status === "ready")) {
+        await clearStaleEndingStamp(row);
+      }
       return st.status || "";
     }
     if (!bulkSwept || lapsedEnded >= LAPSED_END_LIMIT) return "";
@@ -1269,18 +1335,22 @@ async function syncOnce({
       await new Promise((r) => setTimeout(r, LAPSED_END_GAP_MS));
     }
     lapsedEnded += 1;
-    const date = String(st.expiration || "").slice(0, 10) || "?";
-    await MarketplaceListing.updateOne(
-      { _id: row._id, status: "active" },
-      { $set: { lastError: LAPSED_ENDING + date + ")" } },
-    ).catch(() => {});
+    const date = resumeEnd
+      ? stamp[1]
+      : String(st.expiration || "").slice(0, 10) || "?";
+    if (!resumeEnd) {
+      await MarketplaceListing.updateOne(
+        { _id: row._id, status: "active" },
+        { $set: { lastError: LAPSED_ENDING + date + ")" } },
+      ).catch(() => {});
+    }
     try {
       await mp.gameflipEndListing(row.externalId, { status: st.status });
     } catch (e) {
       // Gone between the read and the end: the same outcome as ending it.
       if (!(e && e.status === 404)) throw e;
     }
-    await settleLapsed(row, { expiration: st.expiration });
+    await settleLapsed(row, { expiration: resumeEnd ? date : st.expiration });
     return LAPSED_DONE;
   }
   let renewed = 0;
@@ -1817,13 +1887,24 @@ async function syncOnce({
           },
         ).catch(() => {});
         console.error("gameflip renewal " + row.externalId + " failed: " + msg);
-        if (dry && attempts === RELIST_ALERT_AT_ATTEMPT) {
+        if (
+          dry &&
+          attempts >= RELIST_ALERT_AT_ATTEMPT &&
+          Date.now() - renewalAlertAt >= RENEWAL_ALERT_EVERY_MS
+        ) {
+          renewalAlertAt = Date.now();
+          const waiting = await MarketplaceListing.countDocuments({
+            marketplace: "gameflip",
+            status: "removed",
+            lastError: /^expired on Gameflip — renewal pending \(attempt \d+ failed: Out of stock/,
+          }).catch(() => 0);
           sendTelegram(
-            "⚠️ Gameflip renewal is OUT OF STOCK\n\n" +
-              (row.title || "(untitled listing)") +
-              "\n" + (Number(row.qtyRemaining) || 0) + " more unit(s) owed after this one." +
-              "\nIts listing expired on Gameflip; no unsold account holds the whole " +
-              "bundle right now. Retrying every few hours (up to 12 h apart).",
+            "⚠️ Gameflip renewals are OUT OF STOCK\n\n" +
+              Math.max(1, waiting) + " expired listing(s) cannot be renewed yet — no " +
+              "unsold account holds the whole bundle right now (e.g. " +
+              (row.title || "an untitled listing") + ", " +
+              (Number(row.qtyRemaining) || 0) + " more unit(s) owed).\n" +
+              "They retry on their own, up to 12 h apart. At most one of these an hour.",
           ).catch((err) => console.error("gameflip renewal alert:", err.message));
         }
       } finally {
@@ -1922,6 +2003,7 @@ module.exports = {
   UNPLACED_POLL_LIMIT,
   LAPSED_END_LIMIT,
   LAPSED_RENEW_PER_PASS,
+  resetRenewalAlert,
   isOutOfStockError,
   RELIST_RETRY_MAX_MS,
 };

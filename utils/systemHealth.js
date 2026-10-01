@@ -269,10 +269,28 @@ function whyNotActive(offer, row, { complete = true, now = new Date() } = {}) {
     const qty = Number(offer.quantity) || 0;
     const exp = Date.parse(String(offer.expireDate || ""));
     const at = now instanceof Date ? now.getTime() : Date.now();
-    if (Number.isFinite(exp) && exp <= at) {
+    const expired = Number.isFinite(exp) && exp <= at;
+    const expDay = String(offer.expireDate || "").slice(0, 10);
+    // Quantity 0 with units still on our row is the double-sale shape, and its
+    // warning outlives the expireDate: an offer that closed on expiry looks the
+    // same from here, so both readings are named and the order book decides.
+    if (qty === 0 && undelivered > 0) {
       return (
-        "Eldorado closed it when it expired (" + String(offer.expireDate).slice(0, 10) +
-        ") — renew it on Eldorado if it should sell, otherwise take the row off sale"
+        "Eldorado closed it at quantity 0 but our row still holds " + undelivered +
+        " undelivered unit(s) — " +
+        (expired
+          ? "either its last unit sold (a sale whose delivery was never recorded) " +
+            "or it reached its expireDate (" + expDay + "): check Eldorado's orders " +
+            "for this offer before stamping anything. "
+          : "its last unit sold, so this is a sale whose delivery was never " +
+            "recorded: find the order, stamp the unit and retire the row. ") +
+        "Never push stock to this offer — it would sell the same account twice"
+      );
+    }
+    if (expired) {
+      return (
+        "Eldorado closed it when it expired (" + expDay + ") — renew it on " +
+        "Eldorado if it should sell, otherwise take the row off sale"
       );
     }
     if (qty > 0) {
@@ -281,13 +299,10 @@ function whyNotActive(offer, row, { complete = true, now = new Date() } = {}) {
         "on Eldorado before changing the row"
       );
     }
-    return undelivered > 0
-      ? "Eldorado closed it at quantity 0 (its last unit sold), but our row still " +
-          "holds " + undelivered + " undelivered unit(s) — a sale whose delivery was " +
-          "never recorded. Find the order, stamp the unit and retire the row; never " +
-          "push stock to this offer, it would sell the same account twice"
-      : "sold out — every unit was delivered and Eldorado closed the offer, but " +
-          "the row was never retired; mark it sold";
+    return (
+      "sold out — every unit was delivered and Eldorado closed the offer, but " +
+      "the row was never retired; mark it sold"
+    );
   }
   if (state === "Paused") {
     return (
@@ -490,15 +505,31 @@ async function realisedSales(ctx) {
           at: { $gte: since },
           bulk: { $ne: true },
         },
-        { marketplace: 1, priceUsd: 1, name: 1 },
+        { marketplace: 1, priceUsd: 1, name: 1, dedupeKey: 1 },
       )
         .sort({ at: -1 })
         .limit(20000)
         .lean();
-      for (const s of signals) {
-        if (isRentFarmTitle(s.name)) continue;
-        add(s.marketplace, s.priceUsd);
-      }
+      // ONE entry per SALE. recordListingSale writes one signal per (game,
+      // unit) at the full price — dedupeKey "sold:<listingId>:<gameKey>:<seq>"
+      // — so a 2-game bundle sold once is two signals, and the same sale's row
+      // is marked "sold" as well. Counted per entry, a single $7.99 sale of a
+      // multi-game bundle would by itself satisfy the 3-sale ceiling rule.
+      const seenSale = new Set();
+      const signalListings = new Set();
+      signals.forEach((sg, i) => {
+        if (isRentFarmTitle(sg.name)) return;
+        const m = /^sold:([0-9a-f]{24}):.*:(\d+)$/i.exec(String(sg.dedupeKey || ""));
+        if (m) signalListings.add(m[1].toLowerCase());
+        const key = m
+          ? "unit:" + m[1].toLowerCase() + ":" + m[2]
+          : sg._id
+            ? "sig:" + String(sg._id)
+            : "row:" + i;
+        if (seenSale.has(key)) return;
+        seenSale.add(key);
+        add(sg.marketplace, sg.priceUsd);
+      });
 
       const sold = await MarketplaceListing.find(
         {
@@ -516,6 +547,8 @@ async function realisedSales(ctx) {
         .lean();
       for (const r of sold) {
         if (isRentFarmTitle(r.title)) continue;
+        // Its sale is already counted from its own signals.
+        if (r._id && signalListings.has(String(r._id).toLowerCase())) continue;
         add(r.marketplace, r.price);
       }
 
@@ -784,12 +817,19 @@ const CHECKS = [
       }
 
       const n = problems.length;
+      // A list read only in part cannot clear the offers it never saw: an
+      // untracked bundle offer on an unread page is a paid order nobody can
+      // deliver. Problems found are still real; "all fine" is never claimed.
+      const partial = listComplete
+        ? ""
+        : " Eldorado's offer list was read only in part (" + Math.min(page - 1, totalPages) +
+          " of " + totalPages + " page(s)) — offers on the unread pages were not checked.";
       const manualNote = manualLine.length
         ? " " + manualLine.length + " offline-hold offer(s) with no listing row " +
           "are a manual line and not counted: " + manualLine.join("; ").slice(0, 160) + "."
         : "";
       return {
-        status: n ? "fail" : "ok",
+        status: n ? "fail" : listComplete ? "ok" : "unknown",
         measured: n,
         threshold:
           "0 mismatches between Eldorado's " + live.length +
@@ -797,7 +837,10 @@ const CHECKS = [
         summary: n
           ? n + " Eldorado offer(s) do not line up with our stock: " +
             [...new Set(problems.map((p) => p.kind))].join("; ")
-          : "All " + live.length + " live Eldorado offers are tracked and fillable",
+          : listComplete
+            ? "All " + live.length + " live Eldorado offers are tracked and fillable"
+            : "No mismatch among the " + live.length + " live offer(s) read, but " +
+              "Eldorado's list was read only in part",
         detail:
           "Read from Eldorado's own offer list. A rent-farm offer is matched by " +
           "TITLE rather than by a listing row, so it is checked against the real " +
@@ -807,6 +850,7 @@ const CHECKS = [
           "listing taken off sale that is on sale again. A row Eldorado does not " +
           "show as Active carries Eldorado's own state and quantity: Closed with " +
           "units still on our row is a delivered sale that was never recorded." +
+          partial +
           manualNote,
         items: capItems(problems),
       };
