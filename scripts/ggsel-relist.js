@@ -36,6 +36,11 @@ const mongoose = req("mongoose");
 const config = req("./config/config");
 
 const APPLY = process.argv.includes("--apply");
+// A dry run resolves GGSel categories only when asked: each lookup is a GGSel
+// call (the first builds a 100-offer history), and GGSel stopped answering this
+// server for ~10 h after the wipe's ~7,500 reads (2026-09-30). The apply run
+// resolves them once, paced.
+const DRY_CATS = process.argv.includes("--cats");
 const LIMIT = Number((process.argv.find((a) => a.startsWith("--limit=")) || "").split("=")[1]) || 0;
 const PACE_MS = 12000;
 const MAX_PER_OFFER = 3;
@@ -112,14 +117,15 @@ const plain = (items) => (items || []).map((i) => (i && typeof i.toObject === "f
   for (const [i, c] of chosen.entries()) {
     const n = Math.min(MAX_PER_OFFER, Math.floor(c.spare / 2));
     const entry = { set: c.sid, game: c.task.game, title: String(c.gfRow.title || "").slice(0, 100), gfPrice: c.gfRow.price, spare: c.spare, qty: n, task: String(c.task._id), taskStatus: c.task.status };
-    const cat = await categoryFor(c.task.game);
-    entry.categoryId = cat;
-    if (!cat) { entry.error = "no GGSel category for " + c.task.game; results.push(entry); log(`[${i + 1}/${chosen.length}] SKIP`, entry.error); continue; }
     if (!APPLY) {
+      if (DRY_CATS) entry.categoryId = await categoryFor(c.task.game);
       entry.venuePrice = await autoLister.venuePrice("ggsel", c.gfRow.price, { title: c.gfRow.title });
       results.push(entry);
       continue;
     }
+    const cat = await categoryFor(c.task.game);
+    entry.categoryId = cat;
+    if (!cat) { entry.error = "no GGSel category for " + c.task.game; results.push(entry); log(`[${i + 1}/${chosen.length}] SKIP`, entry.error); continue; }
     // Fresh pick at publish time — the earlier count is only the plan.
     const accounts = (await autoLister.pickDeliveryAccounts(c.task, 30, c.set.items || [])).slice(0, n);
     if (!accounts.length) { entry.error = "no spare account at publish time"; results.push(entry); continue; }
@@ -211,10 +217,11 @@ const plain = (items) => (items || []).map((i) => (i && typeof i.toObject === "f
     log(summary);
     fs.writeFileSync(`/root/_rehome_work/ggsel_relist_${TS}.json`, JSON.stringify({ at: new Date(), results, cleared, skipped }, null, 1));
   } else {
-    const noCat = results.filter((x) => x.error);
-    const prices = results.filter((x) => x.venuePrice).map((x) => [x.gfPrice, x.venuePrice]);
-    log("dry run: categories resolved for", results.length - noCat.length, "of", results.length, "| no category:", JSON.stringify([...new Set(noCat.map((x) => x.game))]));
-    log("price gameflip -> ggsel (first 12):", JSON.stringify(prices.slice(0, 12)));
+    if (DRY_CATS) {
+      const noCat = results.filter((x) => !x.categoryId);
+      log("dry run: categories resolved for", results.length - noCat.length, "of", results.length, "| no category:", JSON.stringify([...new Set(noCat.map((x) => x.game))]));
+    }
+    for (const x of results) log("  plan", x.qty + "x", "$" + x.gfPrice, "-> GGSel $" + x.venuePrice, "| spare", x.spare, "|", x.game, "|", x.title.slice(0, 80));
     fs.writeFileSync(`/root/_rehome_work/ggsel_relist_dry_${TS}.json`, JSON.stringify({ at: new Date(), results, skipped }, null, 1));
   }
   await mongoose.disconnect();
