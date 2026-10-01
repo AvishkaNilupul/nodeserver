@@ -916,6 +916,23 @@ let fallbackCursor = 0;
 // backoff, so the lease must comfortably outlast that on a 60s tick.
 const RELIST_LEASE_MS = 10 * 60 * 1000;
 
+// How many rows one pass may read one by one when they sit in NEITHER bulk
+// sweep. Normally that is a handful — a sale the sold sweep has not caught up
+// with, a 404 — and every one of them is read. On 2026-10-01 it was 98 EXPIRED
+// listings (see readUnplacedStatus), read individually on every 60s tick: about
+// a hundred status GETs a minute, the request storm that kept Gameflip answering
+// 429 to everything else this process does — relists ("Too many attempts"),
+// publishes, the health page's probe. Rotated like the fallback lane above, so
+// a long tail is still covered in ceil(n / limit) passes rather than starved.
+const UNPLACED_POLL_LIMIT = 25;
+let unplacedCursor = 0;
+
+// Lapsed listings ended per pass. Each one costs two writes (off sale, delete),
+// so a backlog is worked off over a few minutes instead of in one burst, with a
+// gap between ends because Gameflip's limiter counts writes too.
+const LAPSED_END_LIMIT = 5;
+const LAPSED_END_GAP_MS = 1500;
+
 // One watcher pass: mark sold listings sold and relist the next unit of any
 // chain that still has quantity left.
 async function syncOnce() {
@@ -994,20 +1011,77 @@ async function syncOnce() {
         " rows this pass",
     );
   }
+  // Rows neither bulk sweep could place each cost a live read below. Bound and
+  // rotate that lane (UNPLACED_POLL_LIMIT) so a backlog of them can never turn
+  // every tick into a burst of individual GETs again.
+  let unplacedSkip = null;
+  if (soldIds && liveIds) {
+    const unplaced = due.filter(
+      (r) => !soldIds.has(r.externalId) && !liveIds.has(r.externalId),
+    );
+    if (unplaced.length > UNPLACED_POLL_LIMIT) {
+      const start = unplacedCursor % unplaced.length;
+      let pick = unplaced.slice(start, start + UNPLACED_POLL_LIMIT);
+      if (pick.length < UNPLACED_POLL_LIMIT) {
+        pick = pick.concat(unplaced.slice(0, UNPLACED_POLL_LIMIT - pick.length));
+      }
+      unplacedCursor = (start + UNPLACED_POLL_LIMIT) % unplaced.length;
+      const keep = new Set(pick.map((r) => String(r._id)));
+      unplacedSkip = new Set(
+        unplaced.filter((r) => !keep.has(String(r._id))).map((r) => String(r._id)),
+      );
+      console.error(
+        "gameflip watcher: " + unplaced.length + " row(s) in neither sweep — " +
+          "reading " + pick.length + " this pass",
+      );
+    }
+  }
+  // A row Gameflip still calls onsale/ready/draft whose 30-day expiry has
+  // passed (mp.gameflipIsExpired): out of search, so no buyer can reach it, yet
+  // a bare status read says "onsale" and the row stayed active forever — its
+  // account reserved, its owed units never relisted, one GET into the limiter
+  // every tick. It is ended on Gameflip FIRST (off sale, then deleted) and only
+  // then reported "expired", so the expired branch below hands its account back
+  // only once nothing can sell it. Releasing an account behind a listing a buyer
+  // could still pay for is the double sale this file exists to prevent, so an
+  // end that throws leaves the row exactly as it was (a 404 means it is already
+  // gone and takes the 404 branch), and a row past this pass's budget answers
+  // "" and waits for the next pass.
+  let lapsedEnded = 0;
+  async function readUnplacedStatus(row) {
+    if (typeof mp.gameflipListingState !== "function") {
+      return mp.gameflipListingStatus(row.externalId);
+    }
+    const st = (await mp.gameflipListingState(row.externalId)) || {};
+    if (!st.expired || st.status === "expired") return st.status || "";
+    if (lapsedEnded >= LAPSED_END_LIMIT) return "";
+    if (lapsedEnded > 0) {
+      await new Promise((r) => setTimeout(r, LAPSED_END_GAP_MS));
+    }
+    lapsedEnded += 1;
+    await mp.gameflipEndListing(row.externalId, { status: st.status });
+    console.error(
+      "gameflip listing " + row.externalId + " expired " +
+        String(st.expiration || "?").slice(0, 10) + ' while Gameflip still said "' +
+        st.status + '" — ended on Gameflip; retiring it',
+    );
+    return "expired";
+  }
   for (const row of due) {
+    if (unplacedSkip && unplacedSkip.has(String(row._id))) continue;
     let status;
     try {
       // A row in neither sweep is unaccounted for (deleted, expired, still a
       // draft), so it still gets its own status call — that is the only path
-      // that can retire a 404'd row, and there are only ever a handful.
+      // that can retire a 404'd row or a lapsed one.
       status =
         soldIds && liveIds
           ? soldIds.has(row.externalId)
             ? "sold"
             : liveIds.has(row.externalId)
               ? "onsale"
-              : await mp.gameflipListingStatus(row.externalId)
-          : await mp.gameflipListingStatus(row.externalId);
+              : await readUnplacedStatus(row)
+          : await readUnplacedStatus(row);
     } catch (e) {
       // A 404 means the listing is gone from Gameflip for good. Plain `continue`
       // leaves the row active forever: the watcher re-reads it every tick, the
