@@ -156,10 +156,12 @@ this work changes. `docs/` and `tests/` are not deployed.
 - `scripts/eldorado-farm-listings.js` and `utils/bulkPacks/copy.js` still say
   "new Drops every day" — the owner's listing copy / another work stream; the
   87 live Gameflip offers keep their old text until renewed (from 10-09).
-- Other remote config writers (`utils/tokenReplace.js`, `utils/unclaimedAutoList.js`,
-  `utils/noclaimFleet.js`, `routes/noclaimFarmRoutes.js`) still use an unchecked
-  `cat > tmp && mv` (or `cat` onto the live file) — outside the renter scope;
-  offered as a separate task.
+- ~~Other remote config writers still unchecked~~ — DONE 2026-10-01 (branch
+  `fix/remote-write-size-check` `bf3f466`): `utils/tokenReplace.js`,
+  `utils/unclaimedAutoList.js`, `utils/noclaimFleet.js` (create + top-up) and
+  `routes/noclaimFarmRoutes.js` (spent/remove, which wrote straight onto the
+  live config) all build `botHosts.guardedWriteScript` now; see the deploy
+  record below.
 - Known, accepted edges (from the reviews): bot numbers above 999 would be
   invisible to the 3-digit config-name rules (numbers are < 100 today); a
   failed reload mark plus a failed reload can let a stop retry report done;
@@ -188,6 +190,15 @@ this work changes. `docs/` and `tests/` are not deployed.
   and no error from any changed module. Pre-existing noise seen: PlayerAuctions
   session refresh 429 (Cloudflare), G2G delivered-count HTTP 500.
 - Backed up to GitHub: `origin/fix/renter-hardening`.
+- **2026-10-01 04:09:44 UTC** — remote-write size check, 5 files ==
+  `fix/remote-write-size-check` `bf3f466` (`utils/botHosts.js` 984736d8→381e8cd1,
+  `routes/noclaimFarmRoutes.js` 66014ef1→e5a4c1fb, `utils/noclaimFleet.js`
+  9171655a→cee2b54d, `utils/tokenReplace.js` 2d53cf1c→20e3c110,
+  `utils/unclaimedAutoList.js` 6d1b6c0a→4ec71a38), same routine; backup
+  `_deploy_backup_20261001040820_remote-write-guard/`; pm2 restart 10
+  (0 unstable). The guarded command was first tried on the real Contabo and Pi
+  in /tmp (whole write lands 600; a short one is refused, the file untouched).
+  GitHub: `origin/fix/remote-write-size-check`.
 
 ## Rollback
 On prod, from the app root, with `BK` = the backup dir named below:
