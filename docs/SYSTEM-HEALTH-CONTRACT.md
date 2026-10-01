@@ -70,7 +70,7 @@ A page that answers "is everything working?" without anyone re-checking by hand.
 | `rentfarm.capacity` | can the next Automatic-Farming order be filled? | total free stack slots = 0 |
 | `rentfarm.coverage` | does every live rent-farm offer have a way to be delivered? | an offer on a market with no farm service AND no stock |
 | `listings.stale` | is anything selling drops that expired? | any active listing whose advertised items no account holds |
-| `listings.overpriced` | is anything priced above what has ever sold? | active, not-paused, price > realised ceiling, excluding platform floors |
+| `listings.overpriced` | is anything priced above what has ever sold? | active, not-paused, SYSTEM-priced (origin ≠ manual), price > realised ceiling (highest drop-bundle sale in 180 days; $4.50 fallback), excluding platform floors. An owner-priced (manual) row above it only warns (amended 2026-10-01) |
 | `autolist.running` | is the unclaimed auto-lister still ticking? | last run older than N ticks |
 | `bundles.sane` | do bundle titles match their contents? | title item count disagrees with the set |
 | `pool.health` | is there sellable stock and usable accounts? | eligible pristine accounts below a floor |
