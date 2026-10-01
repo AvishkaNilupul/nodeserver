@@ -212,6 +212,21 @@ this work changes. `docs/` and `tests/` are not deployed.
   tick; both units stamped delivered. Backup
   `_deploy_backup_20261001053810_g2g-delivered-qty`; pm2 restart 12. GitHub:
   `origin/fix/g2g-delivered-qty`.
+- **2026-10-01 07:15:39 UTC** — G2G delivery proofs. G2G holds an order's
+  income until a delivery-proof image is uploaded
+  (`require_delivery_proof_to_credit_income` on every order item, completed ones
+  included). `marketplaces.g2gUploadDeliveryProof` does G2G's own seller-page
+  flow (`GET /order/upload_url` → multipart POST to the pre-signed storage form
+  → `POST /order/item/<id>/delivery_proof {upload_list, seller_id}`);
+  `g2gFulfiller.sweepDeliveryProofs` (every 10 min, 8 uploads per pass) uploads
+  one "Delivery confirmation" card (order, offer, accounts, time sent, "sent in
+  the G2G chat" — never the credential) to each fully delivered order OUR chat
+  send handed over that has no proof, and stamps owner-confirmed units
+  delivered. Orders the bot did not send are skipped (4 on deploy day — upload
+  those by hand). Files: `utils/marketplaces.js` 6742d3e1→d0f22a92 (merged onto
+  the 06:39Z gameflip deploy), `utils/g2gFulfiller.js` db76fa9b→86935238,
+  `utils/playerauctionsProof.js` d88db6a1→cc92c8f4 (PA card byte-identical).
+  Backup `_deploy_backup_20261001071336_g2g-delivery-proof`; pm2 restart 14.
 
 ## Rollback
 On prod, from the app root, with `BK` = the backup dir named below:
