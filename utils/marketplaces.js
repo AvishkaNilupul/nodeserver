@@ -3641,7 +3641,11 @@ async function g2gUploadDeliveryProof(orderItemId, png, { fileName } = {}) {
     { body: { upload_list: [fields.key], seller_id: g2gSellerId() }, what: "G2G delivery proof" },
   );
   const results = (p && p.results) || [];
-  if (!results.includes(fields.key)) {
+  // G2G answers with the stored file's NAME, not the upload key: the key
+  // "delivery_proof/<uuid>.png" comes back as "<uuid>.png" (seen live on
+  // 2026-10-01 — every proof was accepted and still reported as refused).
+  const base = String(fields.key).split("/").pop();
+  if (!results.some((r) => r === fields.key || r === base)) {
     throw new Error("G2G delivery proof: the uploaded file was not accepted (" + JSON.stringify(results).slice(0, 120) + ")");
   }
   return { key: fields.key, results };

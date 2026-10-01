@@ -626,6 +626,34 @@ test("a delivery proof the storage refuses, or G2G does not accept, is an error"
   }
 });
 
+// Live shape (2026-10-01): the upload key is "delivery_proof/<uuid>.png" and
+// G2G's accept list names only "<uuid>.png". All ten proofs that day were
+// accepted (total_uploaded_proofs 1) yet each logged "not accepted".
+test("G2G naming the accepted proof by its file name, not the full key, is a success", async () => {
+  const key = "delivery_proof/8c400457-c37e-4c3c-a6b2-a1e3c74be2eb.png";
+  const respond = (accepted) => (c) => {
+    if (c.method === "get") return okBody({ url: "https://bucket.example/upload", fields: { key } });
+    return okBody({ results: accepted });
+  };
+  const realFetch = global.fetch;
+  global.fetch = async () => ({ ok: true, status: 204, text: async () => "" });
+  try {
+    const r = await loadG2G({ respond: respond(["8c400457-c37e-4c3c-a6b2-a1e3c74be2eb.png"]) }).mp.g2gUploadDeliveryProof("A-1", Buffer.from("x"));
+    assert.strictEqual(r.key, key);
+    // A different file, or a name that merely ends the same way, is still a refusal.
+    await assert.rejects(
+      loadG2G({ respond: respond(["0de9dc53-7937-4ba7-8e31-2c3c17fb8aa9.png"]) }).mp.g2gUploadDeliveryProof("A-1", Buffer.from("x")),
+      /not accepted/,
+    );
+    await assert.rejects(
+      loadG2G({ respond: respond(["x-8c400457-c37e-4c3c-a6b2-a1e3c74be2eb.png"]) }).mp.g2gUploadDeliveryProof("A-1", Buffer.from("x")),
+      /not accepted/,
+    );
+  } finally {
+    global.fetch = realFetch;
+  }
+});
+
 /* ------------------- 8. required vs optional credentials ---------------- */
 
 test("g2g asks for the refresh trio and NOT a short-lived access token", () => {

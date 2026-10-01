@@ -227,6 +227,15 @@ this work changes. `docs/` and `tests/` are not deployed.
   the 06:39Z gameflip deploy), `utils/g2gFulfiller.js` db76fa9b→86935238,
   `utils/playerauctionsProof.js` d88db6a1→cc92c8f4 (PA card byte-identical).
   Backup `_deploy_backup_20261001071336_g2g-delivery-proof`; pm2 restart 14.
+  Result: all 10 of our delivered orders show `total_uploaded_proofs: 1` on G2G
+  (07:29Z).
+- **2026-10-01 (proof-accept fix)**: every one of those uploads also logged
+  "the uploaded file was not accepted". The upload key is
+  `delivery_proof/<uuid>.png`, but G2G's accept list names only `<uuid>.png`, so
+  the exact-match check failed on a success. It now accepts either the key or its
+  file name, and nothing else. `utils/marketplaces.js` d0f22a92→f37d8657 (only
+  that check changed). The harm was log noise and one wasted retry per order:
+  the next sweep saw the proof and skipped it, and no page fired.
 
 ## Rollback
 On prod, from the app root, with `BK` = the backup dir named below:
