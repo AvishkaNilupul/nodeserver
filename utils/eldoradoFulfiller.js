@@ -1579,6 +1579,7 @@ function start() {
         for (const c of changes) {
           console.log("eldorado stock sync: " + c.action + " — " + c.title);
         }
+        await rotateNoclaimOffers();
       }
     } catch (e) {
       console.error("eldorado stock sync error:", e.message);
@@ -1606,6 +1607,19 @@ function start() {
   };
   const t3 = setTimeout(keepAliveTick, 5 * 60 * 1000);
   if (t3.unref) t3.unref();
+}
+
+// A no-claim offer the sync paused because its bundle expired off every account
+// is switched to the bundle the farm holds now — same offer, same price
+// (utils/noclaimOfferRotation, owner rule 2026-10-02). It has its own kill
+// switch; a missing module or a failed pass never breaks the stock tick.
+async function rotateNoclaimOffers() {
+  try {
+    const r = await require("./noclaimOfferRotation").rotationPass();
+    for (const line of (r && r.log) || []) console.log("noclaim offer rotation: " + line);
+  } catch (e) {
+    console.error("noclaim offer rotation error:", e.message);
+  }
 }
 
 // The intake-failure watch (utils/intakeWatch) must never break a delivery
