@@ -519,13 +519,20 @@ async function realisedSales(ctx) {
       const signalListings = new Set();
       signals.forEach((sg, i) => {
         if (isRentFarmTitle(sg.name)) return;
-        const m = /^sold:([0-9a-f]{24}):.*:(\d+)$/i.exec(String(sg.dedupeKey || ""));
+        const dk = String(sg.dedupeKey || "");
+        const m = /^sold:([0-9a-f]{24}):.*:(\d+)$/i.exec(dk);
+        // A hand-recorded sale writes one signal per (account, game) at the
+        // price typed — "manual-sold:<accountId>:<game>" — so one account
+        // sold by hand is one sale, however many games it carried.
+        const hand = /^manual-sold:([0-9a-f]{24}):/i.exec(dk);
         if (m) signalListings.add(m[1].toLowerCase());
         const key = m
           ? "unit:" + m[1].toLowerCase() + ":" + m[2]
-          : sg._id
-            ? "sig:" + String(sg._id)
-            : "row:" + i;
+          : hand
+            ? "hand:" + hand[1].toLowerCase()
+            : sg._id
+              ? "sig:" + String(sg._id)
+              : "row:" + i;
         if (seenSale.has(key)) return;
         seenSale.add(key);
         add(sg.marketplace, sg.priceUsd);
@@ -712,6 +719,7 @@ const CHECKS = [
       const manualLine = [];
 
       const problems = [];
+      let unverified = 0;
 
       for (const r of rows) {
         // An auto-paused row is one the stock sync paused itself ("paused: no
@@ -726,6 +734,12 @@ const CHECKS = [
         if (r.bulkOfferId) continue;
         if (!liveIds.has(String(r.externalId))) {
           const o = offerById.get(String(r.externalId)) || null;
+          // Not found in a list read only in part proves nothing: counted as
+          // unverified, never as a mismatch.
+          if (!o && !listComplete) {
+            unverified += 1;
+            continue;
+          }
           problems.push({
             kind: "we say active, Eldorado does not",
             offer: r.externalId,
@@ -823,7 +837,12 @@ const CHECKS = [
       const partial = listComplete
         ? ""
         : " Eldorado's offer list was read only in part (" + Math.min(page - 1, totalPages) +
-          " of " + totalPages + " page(s)) — offers on the unread pages were not checked.";
+          " of " + totalPages + " page(s)) — offers on the unread pages were not checked" +
+          (unverified
+            ? ", and " + unverified + " active row(s) whose offer was not among the " +
+              "pages read are unverified, not counted"
+            : "") +
+          ".";
       const manualNote = manualLine.length
         ? " " + manualLine.length + " offline-hold offer(s) with no listing row " +
           "are a manual line and not counted: " + manualLine.join("; ").slice(0, 160) + "."

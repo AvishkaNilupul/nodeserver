@@ -1527,7 +1527,10 @@ test("whyNotActive says only what it measured", () => {
 });
 
 test("eldorado.offers: a list read only in part never tells the reader an offer is gone", async () => {
-  const deps = eldoradoDeps({ rows: [eldRow("eld-beyond")], offers: [eldOffer("eld-other")] });
+  const deps = eldoradoDeps({
+    rows: [eldRow("eld-beyond"), eldRow("eld-other")],
+    offers: [eldOffer("eld-other")],
+  });
   deps.marketplaces = {
     async eldoradoMyListings(page) {
       // 25 pages exist; the check stops at its cap.
@@ -1535,10 +1538,12 @@ test("eldorado.offers: a list read only in part never tells the reader an offer 
     },
   };
   const row = await runCheck("eldorado.offers", deps);
-  const it = row.items.find((i) => i.offer === "eld-beyond");
-  assert.ok(it);
-  assert.match(it.eldoradoState, /part of Eldorado's list/);
-  assert.match(it.why, /unverified/);
+  // Not found in a partial read proves nothing: no mismatch is claimed for it,
+  // and nothing claims all is well either.
+  assert.ok(!row.items.some((i) => i.offer === "eld-beyond"));
+  assert.strictEqual(row.measured, 0);
+  assert.strictEqual(row.status, "unknown");
+  assert.match(row.detail, /1 active row\(s\) whose offer was not among the pages read are unverified/);
 });
 
 // realisedSales() fixtures: SaleSignal rows and the listing rows the three
@@ -1784,4 +1789,24 @@ test("one sale of a multi-game bundle counts once toward a ceiling, not once per
   assert.match(check.threshold, /\$4\.50 realised ceiling/);
   assert.deepStrictEqual(check.items.map((i) => i.externalId), ["gf-seven"]);
   assert.match(check.detail, /top sales: \$7\.99, \$4\.50, \$4\.50/);
+});
+
+test("an account sold by hand game by game is one sale, not one per game", async () => {
+  // dropArchiveRoutes records "manual-sold:<accountId>:<game>" per game at the
+  // price typed; three games on one account must not make a price level alone.
+  const A = "6bbbbbbbbbbbbbbbbbbbbbbb";
+  const check = await runCheck(
+    "listings.overpriced",
+    healthyDeps({
+      SaleSignal: fakeModel([
+        ...fiveSales("gameflip", 4.5),
+        ...["rust", "warframe", "rocket league"].map((g) =>
+          sig("", 9.99, { name: "manual sale", dedupeKey: "manual-sold:" + A + ":" + g }),
+        ),
+      ]),
+      MarketplaceListing: fakeModel([listing({ externalId: "gf-nine", price: 9 })]),
+    }),
+  );
+  assert.match(check.threshold, /\$4\.50 realised ceiling/);
+  assert.deepStrictEqual(check.items.map((i) => i.externalId), ["gf-nine"]);
 });

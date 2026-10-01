@@ -1887,9 +1887,12 @@ async function syncOnce({
           },
         ).catch(() => {});
         console.error("gameflip renewal " + row.externalId + " failed: " + msg);
+        // Only when a row FIRST reaches its RELIST_ALERT_AT_ATTEMPT-th miss —
+        // a chain stuck for days must not page every hour, nor after every
+        // restart — and at most once an hour across rows, as one summary.
         if (
           dry &&
-          attempts >= RELIST_ALERT_AT_ATTEMPT &&
+          attempts === RELIST_ALERT_AT_ATTEMPT &&
           Date.now() - renewalAlertAt >= RENEWAL_ALERT_EVERY_MS
         ) {
           renewalAlertAt = Date.now();
