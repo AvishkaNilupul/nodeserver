@@ -321,10 +321,33 @@ function healthyDeps(over = {}) {
     settings: {
       getAutoFarm: () => ({ unclaimedAutoList: true, unclaimedAutoListPaused: false }),
     },
-    // listings.venuePrice builds one ceiling per marketplace from realised
-    // sales. Gameflip's fixture rows sit under a $5.00 max, so the healthy
-    // fixture must not trip it; ggsel is present but under MIN_VENUE_SALES, to
-    // pin the rule that an unmeasured venue is skipped rather than judged.
+    // listings.venuePrice and listings.overpriced build their ceilings from
+    // realised drop-bundle sales (SaleSignal + sold rows + delivered units on
+    // the unit-ledger markets). Gameflip's fixture sales top out at $4.50 — the
+    // 2026-09-09 figure the overpriced tests below are written against — so the
+    // healthy fixture trips neither; ggsel is present but under
+    // MIN_CEILING_SALES, to pin the rule that an unmeasured venue is skipped
+    // rather than judged.
+    SaleSignal: fakeModel(
+      [
+        ["gameflip", 0.75],
+        ["gameflip", 1.25],
+        ["gameflip", 1.25],
+        ["gameflip", 1.5],
+        ["gameflip", 2.0],
+        ["gameflip", 4.5],
+        ["ggsel", 0.75],
+        ["ggsel", 0.75],
+      ].map(([marketplace, priceUsd]) => ({
+        source: "listing_sold",
+        marketplace,
+        priceUsd,
+        name: "Overwatch Twitch Drops (6 Items)",
+        at: ago(48 * HOUR),
+      })),
+    ),
+    // No longer read by any check (realisedSales replaced it); kept so a check
+    // that regressed to the pricer's snapshot would still see this fixture.
     pricingEvidence: {
       async snapshot() {
         return {
@@ -1404,4 +1427,255 @@ test("eldorado.offers: the offline hold still wins, and a failed status read kee
   assert.strictEqual(row.status, "fail");
   assert.strictEqual(row.measured, 1);
   assert.strictEqual(row.items[0].kind, "sellable bundle offer with no listing row");
+});
+
+/* ========================================================================== *
+ * 2026-10-01 board: every red and every "unknown" traced to its cause
+ * ========================================================================== */
+
+test("REGRESSION 2026-10-01: a Closed offer whose row still holds a unit is named as an unrecorded sale", async () => {
+  // Brawlhalla offer 24596a46: the order was delivered and marked on Eldorado
+  // during the 09-29 Atlas write block, the unit stamp failed to save, and the
+  // row went on saying "1 unit in stock" behind an offer Eldorado had CLOSED at
+  // quantity 0. The old item said only "we say active, Eldorado does not".
+  const row = await runCheck(
+    "eldorado.offers",
+    eldoradoDeps({
+      rows: [
+        eldRow("eld-lost", {
+          origin: "auto",
+          units: [{ accountId: "a1", login: "qrimet", deliveredAt: null, orderId: "" }],
+        }),
+        eldRow("eld-soldout", {
+          units: [{ accountId: "a2", login: "x", deliveredAt: ago(HOUR), orderId: "o-1" }],
+        }),
+        eldRow("eld-handpaused"),
+        eldRow("eld-vanished"),
+        eldRow("eld-live"),
+      ],
+      offers: [
+        eldOffer("eld-lost", { offerState: "Closed", quantity: 0 }),
+        eldOffer("eld-soldout", { offerState: "Closed", quantity: 0 }),
+        eldOffer("eld-handpaused", { offerState: "Paused", quantity: 3 }),
+        eldOffer("eld-live"),
+      ],
+    }),
+  );
+  assert.strictEqual(row.status, "fail");
+  assert.strictEqual(row.measured, 4);
+  const by = new Map(row.items.map((it) => [it.offer, it]));
+  const lost = by.get("eld-lost");
+  assert.strictEqual(lost.kind, "we say active, Eldorado does not");
+  assert.strictEqual(lost.eldoradoState, "Closed");
+  assert.strictEqual(lost.eldoradoQty, 0);
+  assert.match(lost.why, /never recorded/);
+  assert.match(lost.why, /twice/, "the double-sale hazard must be spelled out");
+  assert.match(by.get("eld-soldout").why, /sold out/);
+  assert.strictEqual(by.get("eld-handpaused").eldoradoState, "Paused");
+  assert.match(by.get("eld-handpaused").why, /paused on Eldorado by hand/);
+  assert.strictEqual(by.get("eld-vanished").eldoradoState, "not in Eldorado's list");
+  assert.strictEqual(by.get("eld-vanished").eldoradoQty, null);
+  assert.ok(!by.has("eld-live"));
+});
+
+test("whyNotActive: no offer, an unknown state, and units already delivered", () => {
+  assert.match(health.whyNotActive(null, {}), /no longer lists/);
+  assert.match(health.whyNotActive({ offerState: "UnderReview" }, {}), /UnderReview/);
+  assert.match(
+    health.whyNotActive(
+      { offerState: "Closed", quantity: 0 },
+      { units: [{ deliveredAt: new Date() }, { deliveredAt: new Date() }] },
+    ),
+    /sold out/,
+  );
+});
+
+// realisedSales() fixtures: SaleSignal rows and the listing rows the three
+// evidence sources read.
+const sig = (marketplace, priceUsd, over = {}) => ({
+  source: "listing_sold",
+  marketplace,
+  priceUsd,
+  name: "Overwatch Twitch Drops (6 Items)",
+  at: ago(48 * HOUR),
+  ...over,
+});
+const fiveSales = (marketplace, top) =>
+  [1, 1.25, 1.5, 2, top].map((p) => sig(marketplace, p));
+
+test("REGRESSION 2026-10-01: the overpriced ceiling is measured, not the 09-09 constant", async () => {
+  // A $5.00 bundle had sold, and the check still claimed "$4.50 is the highest
+  // price any sale fetched".
+  const check = await runCheck(
+    "listings.overpriced",
+    healthyDeps({
+      SaleSignal: fakeModel(fiveSales("gameflip", 5)),
+      MarketplaceListing: fakeModel([
+        listing({ externalId: "gf-at-5", price: 5 }),
+        listing({ externalId: "gf-over", price: 5.5 }),
+      ]),
+    }),
+  );
+  assert.strictEqual(check.measured, 1);
+  assert.deepStrictEqual(check.items.map((i) => i.externalId), ["gf-over"]);
+  assert.match(check.threshold, /\$5\.00 realised ceiling/);
+  assert.match(check.detail, /highest price any of 5 drop-bundle sale/);
+});
+
+test("rent-farm windows and bulk packs never raise a bundle ceiling", async () => {
+  // Three "Fortnite ... Automatic Farming 1 Year" windows sold at $8.00 in
+  // September; through the pricer's snapshot they became Gameflip's ceiling.
+  const check = await runCheck(
+    "listings.overpriced",
+    healthyDeps({
+      SaleSignal: fakeModel([
+        ...fiveSales("gameflip", 4.5),
+        sig("gameflip", 9, { name: "Rust Twitch Drops Automatic Farming 180 Days" }),
+        sig("gameflip", 9, { bulk: true }),
+      ]),
+      MarketplaceListing: fakeModel([
+        listing({ externalId: "gf-farm-sold", status: "sold", price: 8, rentFarm: true, title: "Fortnite Twitch Drops Automatic Farming 1 Year", updatedAt: ago(HOUR) }),
+        listing({ externalId: "gf-bulk-sold", status: "sold", price: 12, bulkOfferId: "b1", updatedAt: ago(HOUR) }),
+        listing({ externalId: "gf-six", price: 6 }),
+      ]),
+    }),
+  );
+  assert.match(check.threshold, /\$4\.50 realised ceiling/);
+  assert.deepStrictEqual(check.items.map((i) => i.externalId), ["gf-six"]);
+});
+
+test("owner-priced listings above the ceiling warn; a system-priced one fails", async () => {
+  // feedback_manual_listings_never_repriced: a hand-made row is the owner's
+  // price. Three deliberately $7.99 whole-account bundles turned the whole board
+  // "Something is broken" on 2026-10-01.
+  const manualOnly = await runCheck(
+    "listings.overpriced",
+    healthyDeps({
+      MarketplaceListing: fakeModel([
+        listing({ marketplace: "eldorado", externalId: "eld-mega", price: 7.99, origin: "manual" }),
+      ]),
+    }),
+  );
+  assert.strictEqual(manualOnly.status, "warn");
+  assert.strictEqual(manualOnly.measured, 1);
+  assert.match(manualOnly.summary, /owner-priced/);
+
+  const mixed = await runCheck(
+    "listings.overpriced",
+    healthyDeps({
+      MarketplaceListing: fakeModel([
+        listing({ marketplace: "eldorado", externalId: "eld-mega", price: 7.99, origin: "manual" }),
+        listing({ externalId: "gf-auto", price: 6.5, origin: "auto" }),
+        listing({ externalId: "gf-noclaim", price: 6.5, origin: "unclaimed" }),
+      ]),
+    }),
+  );
+  assert.strictEqual(mixed.status, "fail");
+  assert.strictEqual(mixed.measured, 3);
+  assert.match(mixed.summary, /2 priced by the system, 1 by hand/);
+});
+
+test("thin or unreadable sale evidence falls back to the measured $4.50, and says so", async () => {
+  const thin = await runCheck(
+    "listings.overpriced",
+    healthyDeps({ SaleSignal: fakeModel([sig("gameflip", 9)]) }),
+  );
+  assert.match(thin.threshold, /\$4\.50/);
+  assert.match(thin.detail, /too few to set a ceiling/);
+
+  const broken = await runCheck(
+    "listings.overpriced",
+    healthyDeps({ SaleSignal: explodingModel("socket closed") }),
+  );
+  assert.notStrictEqual(broken.status, "unknown", "a fallback ceiling still measures");
+  assert.match(broken.threshold, /\$4\.50/);
+  assert.match(broken.detail, /could not be read/);
+});
+
+test("REGRESSION 2026-10-01: Eldorado's delivered units are its realised sales", async () => {
+  // Eldorado writes no SaleSignal, so its ceiling was its 5 rows ever marked
+  // sold, all $1.00 — and 45 Eldorado listings "asked more than Eldorado had
+  // ever paid" while 101 units had sold there at up to $3.56.
+  const delivered = (n, price, over = {}) =>
+    listing({
+      marketplace: "eldorado",
+      externalId: "eld-hist-" + price + "-" + n,
+      price,
+      units: Array.from({ length: n }, (_, i) => ({
+        accountId: "a" + i,
+        login: "l" + i,
+        deliveredAt: ago(24 * HOUR),
+        orderId: "o-" + price + "-" + i,
+      })),
+      ...over,
+    });
+  const check = await runCheck(
+    "listings.venuePrice",
+    healthyDeps({
+      MarketplaceListing: fakeModel([
+        delivered(4, 1),
+        delivered(2, 3.56),
+        // Never evidence: a farm window, a bulk pack, an undelivered unit, and a
+        // delivery older than the window.
+        delivered(3, 7, { title: "Overwatch Twitch Drops Automatic Farming 180 Days" }),
+        delivered(3, 9, { bulkOfferId: "b1" }),
+        listing({ marketplace: "eldorado", externalId: "eld-undelivered", price: 8, units: [{ accountId: "u", deliveredAt: null, orderId: "" }] }),
+        listing({ marketplace: "eldorado", externalId: "eld-ancient", price: 8, units: [{ accountId: "v", deliveredAt: ago(400 * 24 * HOUR), orderId: "old" }] }),
+        // Live asks being judged.
+        listing({ marketplace: "eldorado", externalId: "eld-ok", price: 2.99 }),
+        listing({ marketplace: "eldorado", externalId: "eld-high", price: 4 }),
+      ]),
+    }),
+  );
+  assert.strictEqual(check.status, "warn");
+  const eld = check.items.filter((i) => i.marketplace === "eldorado");
+  // Judged as live asks: the two $8 rows (their units are not evidence) and the
+  // $4 one. The farm window is never judged; the bulk row is not a bundle ask.
+  assert.deepStrictEqual(
+    eld.map((i) => i.externalId).sort(),
+    ["eld-ancient", "eld-high", "eld-undelivered"],
+  );
+  for (const i of eld) assert.strictEqual(i.venueMax, 3.56, "Eldorado's ceiling is its own delivered units");
+  assert.match(check.detail, /eldorado \$3\.56/);
+});
+
+test("REGRESSION 2026-10-01: a Gameflip listing past its expiry is a ghost, not 'still live'", async () => {
+  // 98 of 396 active rows had expired (the oldest 08-25) while Gameflip still
+  // answered "onsale" to a direct read; the check confirmed them "still live"
+  // and stayed unknown for weeks.
+  const asked = [];
+  const mp = {
+    async gameflipListingIdsByStatus() {
+      return new Set(CAPPED_200);
+    },
+    async gameflipListingState(id) {
+      asked.push(id);
+      if (id === "gf-lapsed") return { status: "onsale", expiration: "2026-08-25T17:06:48.066Z", expired: true };
+      if (id === "gf-ready-lapsed") return { status: "ready", expiration: "2026-08-15T00:00:00.000Z", expired: true };
+      return { status: "onsale", expiration: "2026-10-01T00:00:00.000Z", expired: false };
+    },
+    async gameflipListingStatus() {
+      throw new Error("the expiry-aware read must be preferred");
+    },
+  };
+  const check = await runCheck(
+    "listings.ghost",
+    healthyDeps({
+      MarketplaceListing: fakeModel([
+        listing({ externalId: "gf-lapsed", accountLogin: "acct-9" }),
+        listing({ externalId: "gf-ready-lapsed" }),
+        listing({ externalId: "gf-fresh" }),
+      ]),
+      marketplaces: mp,
+    }),
+  );
+  assert.strictEqual(check.status, "fail");
+  assert.strictEqual(check.measured, 2);
+  const by = new Map(check.items.map((i) => [i.externalId, i]));
+  assert.match(by.get("gf-lapsed").marketplaceStatus, /^expired since 2026-08-25/);
+  assert.match(by.get("gf-lapsed").marketplaceStatus, /still says "onsale"/);
+  assert.match(by.get("gf-ready-lapsed").marketplaceStatus, /expired since 2026-08-15/);
+  assert.ok(!by.has("gf-fresh"));
+  assert.match(check.summary, /2 expired/);
+  assert.deepStrictEqual(asked.sort(), ["gf-fresh", "gf-lapsed", "gf-ready-lapsed"]);
 });
