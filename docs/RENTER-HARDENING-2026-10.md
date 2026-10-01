@@ -169,13 +169,31 @@ this work changes. `docs/` and `tests/` are not deployed.
   as before.
 
 ## Deploy record
-See the bottom of this file (filled in at deploy time).
+- **2026-10-01 03:44:29 UTC (12:44 JST)** — 51 files (44 replaced, 7 new) ==
+  `fix/renter-hardening` `81847c8`, targeted copy. Every prod file was
+  fingerprinted against the base `e5d666c` first (all 44 matched; the 7 new
+  ones were absent), the staged copies hash-verified, the 40 server modules
+  load-tested, then `pm2 restart redeemer` (restart 9, 0 unstable; "MongoDB
+  connected", "Server started").
+- Backup: `_deploy_backup_20261001034221_renter-hardening/` at the app root,
+  with `MANIFEST.txt` (path, base blob, deployed blob) and `NEWFILES.txt`.
+  **Fingerprint against the deployed blobs in that MANIFEST next time.**
+- Not deployed: `utils/marketplaces.js` (prod carries another work stream's
+  GGSel changes, `69f65c3f` at deploy time; this branch no longer edits it —
+  it was checked to export every `mp.*` function the deployed code calls),
+  `docs/` and `tests/`.
+- Checked after the restart: protected pages and APIs answer 401, the renter
+  login answers 400 to an empty body, the market console Orders tab returns
+  live window chips from the real ledger (read-only harness, writes blocked),
+  and no error from any changed module. Pre-existing noise seen: PlayerAuctions
+  session refresh 429 (Cloudflare), G2G delivered-count HTTP 500.
+- Backed up to GitHub: `origin/fix/renter-hardening`.
 
 ## Rollback
 On prod, from the app root, with `BK` = the backup dir named below:
 
 ```bash
-BK=_deploy_backup_<ts>_renter-hardening
+BK=_deploy_backup_20261001034221_renter-hardening
 while read f base new; do
   if [ "$base" = "MISSING" ]; then rm -f "$f"; else cp -p "$BK/$f" "$f.rhold" && mv -f "$f.rhold" "$f"; fi
 done < "$BK/MANIFEST.txt"
