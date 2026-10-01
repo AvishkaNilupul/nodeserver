@@ -47,8 +47,8 @@ function escapeRegExp(s) {
 // earlier. Returns how many ledger rows moved.
 async function stampFromHandover(row, until) {
   const at = new Date(until);
-  const logins = (row.accounts || []).map((a) => String((a && a.login) || "").trim()).filter(Boolean);
-  if (!logins.length) return 0;
+  const accts = (row.accounts || []).filter((a) => a && String(a.login || "").trim());
+  if (!accts.length) return 0;
   for (const a of row.accounts || []) {
     if (!a.farmUntil || new Date(a.farmUntil) < at) a.farmUntil = at;
   }
@@ -56,16 +56,65 @@ async function stampFromHandover(row, until) {
   const RenterAccount = require("../models/RenterAccount");
   const holder = await Renter.findOne({ usernameLower: HOLDER }, { _id: 1 }).lean();
   if (!holder) return 0;
+  // Each account by its TOKEN (read from its pool row) where that can be read:
+  // a login is not an identity in this pool — duplicate logins are a known
+  // population — and a login match would move a twin's window as well. An
+  // account whose pool row cannot be read falls back to its login.
+  const poolIds = accts.map((a) => String(a.poolId || "")).filter((x) => /^[a-f0-9]{24}$/i.test(x));
+  let secretByPool = new Map();
+  if (poolIds.length) {
+    const AvailableAccount = require("../models/AvailableAccount");
+    const pools = await AvailableAccount.find({ _id: { $in: poolIds } }, { clientSecret: 1 })
+      .lean()
+      .catch(() => []);
+    secretByPool = new Map(pools.filter((p) => p.clientSecret).map((p) => [String(p._id), p.clientSecret]));
+  }
+  const secrets = [];
+  const logins = [];
+  for (const a of accts) {
+    const cs = secretByPool.get(String(a.poolId || ""));
+    if (cs) secrets.push(cs);
+    else logins.push(String(a.login).trim());
+  }
+  const which = [];
+  if (secrets.length) which.push({ clientSecret: { $in: secrets } });
+  if (logins.length) {
+    which.push({ login: { $in: logins.map((l) => new RegExp("^" + escapeRegExp(l) + "$", "i")) } });
+  }
   const r = await RenterAccount.updateMany(
     {
       renter: holder._id,
       farmEndedAt: null,
       farmUntil: { $ne: null, $lt: at },
-      login: { $in: logins.map((l) => new RegExp("^" + escapeRegExp(l) + "$", "i")) },
+      $or: which,
     },
     { $set: { farmUntil: at } },
   );
   return (r && (r.modifiedCount || r.nModified)) || 0;
+}
+
+// The date the hand-over names, fixed at the FIRST send attempt and saved on
+// the order BEFORE anything is sent. A retry — a send that timed out after it
+// reached the buyer, a send retried after UTC midnight, a moderated G2G send
+// re-offered later — must rebuild the SAME text: Eldorado's idempotency key and
+// G2G's duplicate check are both computed from the message body, so a new date
+// is a new message and the buyer gets the login twice, with two different end
+// dates. The ledger is still stamped to end no earlier than now + days when the
+// login really goes out (see `handoverStamp`), so a late hand-over never gives
+// the buyer less than the date they were told.
+async function pinUntil(row, days) {
+  if (row.handoverUntil) return new Date(row.handoverUntil);
+  const until = untilFrom(days);
+  row.handoverUntil = until;
+  await row.save();
+  return until;
+}
+
+// What the ledger is stamped to when the login goes out: the pinned date, or
+// now + days if the hand-over is happening later than that date assumed.
+function handoverStamp(pinned, days) {
+  const now = untilFrom(days);
+  return new Date(Math.max(new Date(pinned).getTime(), now.getTime()));
 }
 
 // A failure after the login reached the buyer: the row stays "sent" (the next
@@ -87,4 +136,4 @@ function loginsOf(row) {
   return ((row && row.accounts) || []).map((a) => String((a && a.login) || "")).filter(Boolean);
 }
 
-module.exports = { termWords, untilFrom, dayText, stampFromHandover, sentButUnconfirmed, loginsOf };
+module.exports = { termWords, untilFrom, dayText, pinUntil, handoverStamp, stampFromHandover, sentButUnconfirmed, loginsOf };

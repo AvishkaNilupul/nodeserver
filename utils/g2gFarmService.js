@@ -410,8 +410,9 @@ async function deliverFarmOrder(order, { dryRun } = {}) {
       // transitions are idempotent enough to re-run.
       await mp.g2gStartDeliver(orderId).catch(() => {});
       await mp.g2gMarkDelivering(orderId).catch(() => {});
-      // The window counts from this hand-over (see utils/farmHandover).
-      const until = farmHandover.untilFrom(parsed.days);
+      // The window counts from this hand-over; the date in the text is pinned
+      // at the first attempt so a retry sends the same body (utils/farmHandover).
+      const until = await farmHandover.pinUntil(row, parsed.days);
       const message = farmMessage(creds, parsed, { until });
       try {
         await chat.sendToBuyer(order.buyerId, message);
@@ -441,6 +442,11 @@ async function deliverFarmOrder(order, { dryRun } = {}) {
         const WAITING = "waiting for the operator to paste the credential";
         const attempts = Number(row.attempts) || 0;
         const firstAsk = row.lastError !== WAITING;
+        // The text the operator pastes names `until`: the ledger must end no
+        // earlier than that, whenever the paste happens (never moved earlier).
+        await farmHandover
+          .stampFromHandover(row, until)
+          .catch((err) => console.error("g2g farm " + orderId + ": window re-stamp failed:", err.message));
         if (firstAsk || (attempts > 0 && attempts % farmAlert.REALERT_EVERY === 0)) {
           await require("./telegram").sendTelegram(
             "G2G rent-farm order " + orderId + " is provisioned and FARMING, " +
@@ -466,7 +472,7 @@ async function deliverFarmOrder(order, { dryRun } = {}) {
       row.messageSentAt = new Date();
       row.state = "sent";
       await farmHandover
-        .stampFromHandover(row, until)
+        .stampFromHandover(row, farmHandover.handoverStamp(until, parsed.days))
         .catch((e) => console.error("g2g farm " + orderId + ": window re-stamp failed:", e.message));
       await row.save();
     }

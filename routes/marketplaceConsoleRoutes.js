@@ -689,7 +689,19 @@ router.get(
               { renter: holder._id, login: { $in: logins.map((l) => new RegExp("^" + esc(l) + "$", "i")) } },
               { login: 1, farmUntil: 1, farmEndedAt: 1, configFile: 1, enabled: 1 },
             ).lean();
-            const byLogin = new Map(ledger.map((a) => [String(a.login || "").toLowerCase(), a]));
+            // One row per login: the LIVE one, latest window first — an old
+            // ended row or a duplicate-login twin must not stand in for it.
+            const byLogin = new Map();
+            for (const a of ledger) {
+              const k = String(a.login || "").toLowerCase();
+              const cur = byLogin.get(k);
+              const better =
+                !cur ||
+                (!!cur.farmEndedAt && !a.farmEndedAt) ||
+                (!!cur.farmEndedAt === !!a.farmEndedAt &&
+                  new Date(a.farmUntil || 0).getTime() > new Date(cur.farmUntil || 0).getTime());
+              if (better) byLogin.set(k, a);
+            }
             for (const o of rows) {
               o.live = (o.accounts || []).map((a) => {
                 const l = byLogin.get(String(a.login || "").toLowerCase());

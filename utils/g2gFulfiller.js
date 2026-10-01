@@ -1091,13 +1091,16 @@ async function deliverPendingOrders() {
         shouted.add(shoutId);
         console.error(
           "g2g deliver " + shoutId +
-            (r.awaitingConfirm ? " SENT in chat, confirm it on G2G: " : " NOT delivered: ") +
+            (r.awaitingConfirm || r.sent ? " SENT in chat, confirm it on G2G: " : " NOT delivered: ") +
             why,
         );
       }
     }
     if (needsAHuman && !dryRun) {
-      if (r.awaitingConfirm && !r.error) {
+      // `sent` with an error: the login reached the buyer and only a later
+      // step failed (utils/farmHandover.sentButUnconfirmed) — the buyer is
+      // served, so this must never read "cannot ship it".
+      if ((r.awaitingConfirm && !r.error) || (r.error && r.sent)) {
         await alertSentAwaitingConfirm(order, why);
       } else {
         await alertUnshippable(order, why, {

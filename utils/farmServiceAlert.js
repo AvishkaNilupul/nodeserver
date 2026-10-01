@@ -97,6 +97,9 @@ async function alertFarmFailure({
   // "buffer": Gameflip buffer housekeeping — NO buyer order is involved, so it
   // must never read "order NOT delivered" (that trains the owner to skim the
   // one alert that means money).
+  // "not_farming": a DELIVERED order (Gameflip hands the login over at
+  // payment) whose account is not on a bot — the buyer is owed farming, not
+  // a second login.
   kind = "order",
 }) {
   // 900, not 400: buffer pages lead with the pool id and login but carry the
@@ -105,7 +108,8 @@ async function alertFarmFailure({
   // Always on the console, whatever Telegram does — pm2 logs are the fallback
   // record and this failure previously left no trace there beyond the count.
   console.error(
-    market + " farm order " + orderId + (sent ? " SENT, NOT CONFIRMED" : " FAILED") +
+    market + " farm order " + orderId +
+      (kind === "not_farming" ? " DELIVERED, NOT FARMING" : sent ? " SENT, NOT CONFIRMED" : " FAILED") +
       " (" + game + " " + days + "d x" + qty + "): " + detail,
   );
   const list = (Array.isArray(logins) ? logins : []).filter(Boolean);
@@ -125,10 +129,13 @@ async function alertFarmFailure({
     }).catch(() => {});
     return;
   }
+  const notFarming = kind === "not_farming";
   const text =
-    (sent
-      ? "⚠️ " + market + " rent-farm order DELIVERED to the buyer but not yet confirmed on " + market + "\n"
-      : "⚠️ " + market + " rent-farm order NOT delivered\n") +
+    (notFarming
+      ? "🟠 " + market + " rent-farm order DELIVERED (the buyer has the login) but NOT FARMING\n"
+      : sent
+        ? "⚠️ " + market + " rent-farm order DELIVERED to the buyer but not yet confirmed on " + market + "\n"
+        : "⚠️ " + market + " rent-farm order NOT delivered\n") +
     "order: " + orderId + "\n" +
     (offerTitle ? "offer: " + String(offerTitle).slice(0, 120) + "\n" : "") +
     (buyerUsername ? "buyer: " + buyerUsername + "\n" : "") +
@@ -138,10 +145,12 @@ async function alertFarmFailure({
         (list.length > MAX_LOGINS ? " +" + (list.length - MAX_LOGINS) + " more" : "") + "\n"
       : "") +
     "reason: " + detail +
-    (sent
-      ? "\n\nDo NOT send the login again — the buyer has it. The confirmation retries " +
-        "every tick; or mark the order delivered on " + market + " by hand."
-      : "");
+    (notFarming
+      ? "\n\nDo NOT send the login again — the buyer has it. Put the account back on a bot."
+      : sent
+        ? "\n\nDo NOT send the login again — the buyer has it. The confirmation retries " +
+          "every tick; or mark the order delivered on " + market + " by hand."
+        : "");
   // Best-effort on both trails: an alert that throws must never be the reason a
   // retry does not happen.
   await sendTelegram(text).catch((e) =>
@@ -149,7 +158,7 @@ async function alertFarmFailure({
   );
   await logEvent({
     category: "marketplace",
-    action: sent ? "farm_order_unconfirmed" : "farm_order_failed",
+    action: notFarming ? "farm_order_not_farming" : sent ? "farm_order_unconfirmed" : "farm_order_failed",
     actor: market || "farm-service",
     severity: "error",
     subject: orderId,

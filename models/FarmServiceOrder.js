@@ -44,6 +44,9 @@ const farmServiceOrderSchema = new mongoose.Schema(
     // Never mark delivered before the credential has actually reached the buyer.
     provisionedAt: { type: Date, default: null },
     messageSentAt: { type: Date, default: null },
+    // The end date the hand-over message names, pinned at the first send
+    // attempt so every retry sends the same text (utils/farmHandover.pinUntil).
+    handoverUntil: { type: Date, default: null },
     deliveredAt: { type: Date, default: null },
 
     state: {

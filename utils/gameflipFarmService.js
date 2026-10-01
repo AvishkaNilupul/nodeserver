@@ -62,6 +62,8 @@ const MARKET = "gameflip";
 // enough to outlast the two DB round trips the sale makes, short enough that a
 // process killed mid-sale is retried within the hour rather than never.
 const SALE_LEASE_MS = 10 * 60 * 1000;
+// How far back the unfinished-sale sweep looks (see retryUnfinishedSales).
+const SALE_SWEEP_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
 
 // The placeholder window a BUFFERED account farms on while its offer sits
 // unsold. Long on purpose: while nobody has bought anything, `farmUntil` means
@@ -493,6 +495,9 @@ async function handBackOrAlert(poolId, note, ctx = {}) {
       days: ctx.days || 0,
       qty: 1,
       reason: detail,
+      // Shelf housekeeping, never a buyer's order: it must not read "order
+      // NOT delivered" (B12).
+      kind: "buffer",
     })
     .catch(() => {});
   return out || { ok: false, reason };
@@ -1705,8 +1710,16 @@ async function publishOne(want, out) {
 // an adjustment of the existing value.
 async function restampWindow(clientSecret, days) {
   const farmUntil = new Date(Date.now() + days * 86400000);
+  // Only the rent-farm holder's row: a token that has since moved to another
+  // renter must never have THAT renter's window rewritten by a Gameflip sale or
+  // renewal (a 300-day lease cut to a 120-day term). No holder, no match.
+  const holder = await Renter.findOne(
+    { usernameLower: operatorFarm.OPERATOR_USERNAME },
+    { _id: 1 },
+  ).lean();
+  if (!holder) return { ok: false, farmUntil };
   const r = await RenterAccount.updateOne(
-    { clientSecret },
+    { clientSecret, renter: holder._id },
     { $set: { farmUntil, farmEndedAt: null } },
   );
   return {
@@ -1988,6 +2001,10 @@ async function onBufferedSale(rowIn, { alert = true } = {}) {
         days,
         qty: 1,
         logins: [creds.login],
+        // Gameflip handed the buyer the login at payment: this is a delivered
+        // order that is not farming, never "NOT delivered" (that wording invites
+        // a second hand-over or a refund).
+        kind: "not_farming",
         reason:
           "sold and recorded, but " + creds.login + " is " +
           (onBot.enabled === false ? "disabled on its bot" : "on NO bot config") +
@@ -2026,6 +2043,11 @@ async function retryUnfinishedSales({ limit = 10 } = {}) {
     status: "sold",
     rentFarmPoolId: { $nin: ["", null] },
     rentFarmSaleAttempts: { $not: { $gte: SALE_RETRY_MAX } },
+    // Recent sales only. Every attempt bumps updatedAt, so a sale being retried
+    // stays inside this window for all of its attempts; a row sold long ago that
+    // still names an account is a human's to look at, never something to
+    // "finish" — re-stamping it could re-open a window that was ended on purpose.
+    updatedAt: { $gte: new Date(Date.now() - SALE_SWEEP_MAX_AGE_MS) },
     $or: [
       { rentFarmSaleClaimedAt: null },
       { rentFarmSaleClaimedAt: { $exists: false } },
@@ -2040,7 +2062,9 @@ async function retryUnfinishedSales({ limit = 10 } = {}) {
     await MarketplaceListing.updateOne({ _id: row._id }, { $inc: { rentFarmSaleAttempts: 1 } }).catch(() => {});
     out.retried++;
     try {
-      const r = await onBufferedSale(row, { alert: attempt === 1 || attempt >= SALE_RETRY_MAX });
+      // The watcher already paged this sale's first failure; the sweep pages
+      // once more, when it gives up.
+      const r = await onBufferedSale(row, { alert: attempt >= SALE_RETRY_MAX });
       if (r && r.error) out.failed++;
       else if (r && !r.skipped) out.finished++;
     } catch (e) {

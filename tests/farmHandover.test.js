@@ -196,3 +196,81 @@ test("REGRESSION: when only confirming the delivery fails, the row stays 'sent' 
   );
   assert.equal(sent.length, 1, "handed over exactly once");
 });
+
+test("REGRESSION: a retried hand-over sends the SAME text — the end date is pinned at the first attempt", async () => {
+  // Eldorado's idempotency key and G2G's duplicate check hash the message body;
+  // a date that moved with the clock (a retry after UTC midnight) made a send
+  // that had in fact reached the buyer go out a second time.
+  const { holder, pool } = await seedFlow();
+  const bodies = [];
+  let sendFails = true;
+  await withStubs(
+    [
+      [operatorFarm, "farmFreshAccounts", async ({ days }) => {
+        const farmUntil = new Date(Date.now() + days * DAY);
+        await RenterAccount.create({ renter: holder._id, clientSecret: "cs1", login: "buyer1", host: "contabo", configFile: "config_54.json", farmUntil });
+        return { added: [{ login: "buyer1", poolId: String(pool._id) }], farmUntil };
+      }],
+      [mp, "eldoradoSendOrderMessage", async (o, m) => { bodies.push(m); if (sendFails) throw new Error("socket timeout"); }],
+      [mp, "eldoradoMarkDelivered", async () => ({})],
+    ],
+    async () => {
+      await eld.deliverFarmOrder(ORDER);
+      const pinned = (await FarmServiceOrder.findOne({ orderId: ORDER.id }).lean()).handoverUntil;
+      assert.ok(pinned, "pinned before the first send");
+      sendFails = false;
+      const r2 = await eld.deliverFarmOrder(ORDER);
+      assert.equal(r2.delivered, 1, JSON.stringify(r2));
+      assert.equal(bodies.length, 2);
+      assert.equal(bodies[1], bodies[0], "byte-identical retry");
+      const row = await FarmServiceOrder.findOne({ orderId: ORDER.id }).lean();
+      assert.equal(new Date(row.handoverUntil).getTime(), new Date(pinned).getTime(), "never re-pinned");
+    },
+  );
+});
+
+test("a hand-over that happens a day after its pin still gives the buyer now + days on the ledger (never less than the text)", async () => {
+  const { holder, pool } = await seedFlow();
+  const bodies = [];
+  await withStubs(
+    [
+      [operatorFarm, "farmFreshAccounts", async ({ days }) => {
+        const farmUntil = new Date(Date.now() + days * DAY);
+        await RenterAccount.create({ renter: holder._id, clientSecret: "cs1", login: "buyer1", host: "contabo", configFile: "config_54.json", farmUntil });
+        return { added: [{ login: "buyer1", poolId: String(pool._id) }], farmUntil };
+      }],
+      [mp, "eldoradoSendOrderMessage", async (o, m) => { bodies.push(m); }],
+      [mp, "eldoradoMarkDelivered", async () => ({})],
+    ],
+    async () => {
+      // Provisioned and pinned yesterday (the send never happened), handed over now.
+      await FarmServiceOrder.create({
+        orderId: ORDER.id, market: "eldorado", game: "Overwatch", days: 30, quantity: 1, state: "provisioned",
+        provisionedAt: new Date(Date.now() - DAY),
+        handoverUntil: new Date(Date.now() - DAY + 30 * DAY),
+        accounts: [{ login: "buyer1", poolId: String(pool._id), farmUntil: new Date(Date.now() - DAY + 30 * DAY) }],
+      });
+      await RenterAccount.create({ renter: holder._id, clientSecret: "cs1", login: "buyer1", host: "contabo", configFile: "config_54.json", farmUntil: new Date(Date.now() - DAY + 30 * DAY) });
+      const r = await eld.deliverFarmOrder(ORDER);
+      assert.equal(r.delivered, 1, JSON.stringify(r));
+    },
+  );
+  const pinnedDay = new Date(Date.now() - DAY + 30 * DAY).toISOString().slice(0, 10);
+  assert.match(bodies[0], new RegExp("runs until " + pinnedDay));
+  const acc = await RenterAccount.findOne({ login: "buyer1" }).lean();
+  assert.ok(acc.farmUntil.getTime() > Date.now() + 30 * DAY - 60e3, "the ledger counts from the real hand-over");
+});
+
+test("REGRESSION: the hand-over re-stamp matches each account by TOKEN — a duplicate-login twin is not moved", async () => {
+  await Promise.all([Renter.deleteMany({}), RenterAccount.deleteMany({}), AvailableAccount.deleteMany({})]);
+  const holder = await Renter.create({ username: "operator-selffarm", usernameLower: "operator-selffarm", passwordHash: "x" });
+  const pool = await AvailableAccount.create({ username: "twin", usernameLower: "twin", clientSecret: "csA" });
+  const now = Date.now();
+  await RenterAccount.create({ renter: holder._id, clientSecret: "csA", login: "twin", farmUntil: new Date(now + 10 * DAY) });
+  await RenterAccount.create({ renter: holder._id, clientSecret: "csB", login: "twin", farmUntil: new Date(now + 10 * DAY) });
+  const until = new Date(now + 30 * DAY);
+  const moved = await handover.stampFromHandover({ accounts: [{ login: "twin", poolId: String(pool._id) }] }, until);
+  assert.equal(moved, 1);
+  assert.equal((await RenterAccount.findOne({ clientSecret: "csA" }).lean()).farmUntil.getTime(), until.getTime());
+  assert.equal((await RenterAccount.findOne({ clientSecret: "csB" }).lean()).farmUntil.getTime(), now + 10 * DAY, "the twin keeps its own window");
+});

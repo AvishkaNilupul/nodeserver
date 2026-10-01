@@ -534,8 +534,9 @@ async function deliverFarmOrder(order, { dryRun } = {}) {
         }
         return { orderId, farm: true, error: row.lastError };
       }
-      // The window counts from this hand-over (see utils/farmHandover).
-      const until = farmHandover.untilFrom(parsed.days);
+      // The window counts from this hand-over; the date in the text is pinned
+      // at the first attempt so a retry sends the same body (utils/farmHandover).
+      const until = await farmHandover.pinUntil(row, parsed.days);
       const messages = copy.deliveryMessages(creds, {
         kind: "farm",
         days: parsed.days,
@@ -548,7 +549,7 @@ async function deliverFarmOrder(order, { dryRun } = {}) {
       row.messageSentAt = new Date();
       row.state = "sent";
       await farmHandover
-        .stampFromHandover(row, until)
+        .stampFromHandover(row, farmHandover.handoverStamp(until, parsed.days))
         .catch((e) => console.error("playerauctions farm " + orderId + ": window re-stamp failed:", e.message));
       await row.save();
     }

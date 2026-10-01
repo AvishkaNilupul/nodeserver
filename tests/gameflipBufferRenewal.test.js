@@ -680,7 +680,9 @@ test("a sale still inside its claim lease is left alone; one that cannot finish 
   }
   const row = await MarketplaceListing.findById(listing._id).lean();
   assert.equal(row.rentFarmSaleAttempts, svc.SALE_RETRY_MAX);
-  assert.equal(world.alerts.filter((a) => /no RenterAccount holds token/.test(a.reason)).length, 2, "paged on the first and the last attempt only");
+  // The watcher pages a sale's first failure; the sweep pages once more, when
+  // it gives up — never on every retry.
+  assert.equal(world.alerts.filter((a) => /no RenterAccount holds token/.test(a.reason)).length, 1, "the sweep pages on its last attempt only");
 });
 
 test("REGRESSION: the buffer never takes the last pristine accounts (pool reserve)", async () => {
@@ -723,6 +725,10 @@ test("a sale whose account is on NO bot is recorded AND paged (Farm days puts it
   await svc.retryUnfinishedSales();
   assert.ok(await FarmServiceOrder.findOne({ orderId: "gf:gf-sold-offbot1" }).lean(), "recorded");
   assert.ok(world.alerts.some((a) => /is on NO bot config/.test(a.reason) && (a.logins || []).includes("offbot1")));
+  assert.ok(
+    world.alerts.filter((a) => /is on NO bot config/.test(a.reason)).every((a) => a.kind === "not_farming"),
+    "a delivered sale is paged as NOT FARMING, never as 'NOT delivered'",
+  );
   assert.equal((await MarketplaceListing.findById(listing._id).lean()).rentFarmPoolId, "");
 });
 
@@ -845,4 +851,30 @@ test("B10: buyer-facing copy no longer promises drops every day — it says drop
   const code = svc.bufferedDeliveryCode("u1", "p1", 180, "Rust");
   assert.doesNotMatch(code, /keep appearing/);
   assert.match(code, /Items appear whenever Rust runs a Twitch Drops campaign during your 180 days/);
+});
+
+test("review 2026-10-01: the sale sweep leaves alone a sold row nothing has touched for a week", async () => {
+  await reset();
+  await FarmServiceOrder.deleteMany({});
+  const { listing } = await soldHalfway({ login: "old1" });
+  await MarketplaceListing.collection.updateOne({ _id: listing._id }, { $set: { updatedAt: new Date(Date.now() - 8 * 86400000) } });
+  const out = await svc.retryUnfinishedSales();
+  assert.equal(out.retried, 0);
+  const acct = await RenterAccount.findOne({ login: "old1" }).lean();
+  assert.ok(acct.farmUntil > new Date(Date.now() + 299 * 86400000), "its window was not re-stamped");
+  assert.equal(await FarmServiceOrder.countDocuments({}), 0, "no order recorded");
+});
+
+test("review 2026-10-01: a sale never re-stamps ANOTHER renter's row holding the same token", async () => {
+  await reset();
+  await FarmServiceOrder.deleteMany({});
+  const other = await Renter.create({ username: "wasd", usernameLower: "wasd", passwordHash: "x" });
+  const { listing } = await soldHalfway({ login: "moved1" });
+  await RenterAccount.updateOne({ login: "moved1" }, { $set: { renter: other._id } });
+  const before = (await RenterAccount.findOne({ login: "moved1" }).lean()).farmUntil;
+  const r = await svc.onBufferedSale(listing);
+  assert.match(String(r.error), /no RenterAccount holds token/);
+  const after = await RenterAccount.findOne({ login: "moved1" }).lean();
+  assert.equal(after.farmUntil.getTime(), before.getTime(), "the other renter's lease is untouched");
+  assert.notEqual((await MarketplaceListing.findById(listing._id).lean()).rentFarmPoolId, "", "the sale stays open for a human");
 });

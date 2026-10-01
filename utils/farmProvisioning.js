@@ -105,7 +105,12 @@ function freezeOrder(row, reading) {
       frozen: true,
     };
   }
+  // Record the whole reading, not just the count: once something is provisioned
+  // the frozen game and term are read back from the row, so they must be the
+  // ones this tick provisions for, not whatever the order's first tick read.
   if (Number(reading.qty) > 0 && Number(row.quantity) !== Number(reading.qty)) row.quantity = Number(reading.qty);
+  if (reading.game && row.game !== reading.game) row.game = reading.game;
+  if (Number(reading.days) > 0 && Number(row.days) !== Number(reading.days)) row.days = Number(reading.days);
   return { qty: reading.qty, game: reading.game, days: reading.days, frozen: false };
 }
 

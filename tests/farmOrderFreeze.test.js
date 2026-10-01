@@ -15,6 +15,21 @@ test("before anything is held the fresh reading is used — and recorded", () =>
   assert.equal(row.quantity, 10, "the reading is what the order is for now");
 });
 
+test("REGRESSION: before anything is held the GAME and TERM are recorded too, so a frozen tick reads back what was provisioned", () => {
+  // The first tick created the row with no game resolved; a later tick resolved
+  // Overwatch and provisioned it. The frozen ticks after that must top up and
+  // hand over for Overwatch, not for the first tick's empty reading.
+  const row = { quantity: 1, accounts: [], game: "", days: 0 };
+  freezeOrder(row, { qty: 1, game: "Overwatch", days: 180 });
+  assert.equal(row.game, "Overwatch");
+  assert.equal(row.days, 180);
+  row.accounts.push({ login: "a1" });
+  const fz = freezeOrder(row, { qty: 1, game: "", days: 0 });
+  assert.equal(fz.frozen, true);
+  assert.equal(fz.game, "Overwatch");
+  assert.equal(fz.days, 180);
+});
+
 test("REGRESSION: once accounts are held, a re-read pack size (offer edited / closed) cannot change the order", () => {
   const row = { quantity: 10, accounts: [{ login: "a1" }, { login: "a2" }, { login: "a3" }], game: "Overwatch", days: 30 };
   // The bulk offer closed: the fresh reading says 1 account, and no game.

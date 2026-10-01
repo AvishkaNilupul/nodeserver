@@ -138,3 +138,33 @@ test("all three farm services alert on every way an order can fail", () => {
     assert.match(src, /const MARKET = "/, f + " has no MARKET constant for its alerts");
   }
 });
+
+test("a DELIVERED order that is not farming is worded as such — never 'NOT delivered'", async () => {
+  const Module = require("node:module");
+  const sent = [];
+  const events = [];
+  const realLoad = Module._load;
+  Module._load = function (request, parent, isMain) {
+    if (parent && /utils[\\/]farmServiceAlert\.js$/.test(parent.filename || "")) {
+      if (request === "./telegram") return { sendTelegram: async (m) => { sent.push(m); } };
+      if (request === "./systemLog") return { logEvent: async (e) => { events.push(e); } };
+    }
+    return realLoad.call(this, request, parent, isMain);
+  };
+  try {
+    delete require.cache[require.resolve("../utils/farmServiceAlert")];
+    const fresh = require("../utils/farmServiceAlert");
+    await fresh.alertFarmFailure({
+      market: "gameflip", orderId: "gf:abc", game: "Rust", days: 180, qty: 1,
+      logins: ["acct1"], kind: "not_farming", reason: "sold and recorded, but acct1 is on NO bot config",
+    });
+  } finally {
+    Module._load = realLoad;
+    delete require.cache[require.resolve("../utils/farmServiceAlert")];
+  }
+  assert.equal(sent.length, 1);
+  assert.match(sent[0], /DELIVERED \(the buyer has the login\) but NOT FARMING/);
+  assert.doesNotMatch(sent[0], /NOT delivered/);
+  assert.match(sent[0], /Do NOT send the login again/);
+  assert.equal(events[0].action, "farm_order_not_farming");
+});

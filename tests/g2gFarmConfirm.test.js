@@ -85,11 +85,11 @@ test("deliverFarmOrder reports 'sent, confirm it', never an error, on a refused 
   assert.strictEqual((FARM.match(/mp\.g2gSetDeliveredQty\(/g) || []).length, 1);
 });
 
-test("the fulfiller pages a farm 'awaitingConfirm' as SENT, not as a failure", () => {
+test("the fulfiller pages a farm 'awaitingConfirm' — or an error AFTER the login was sent — as SENT, not as a failure", () => {
   // deliverFarmOrder's result is the loop's `r`, so the bundle path's routing
   // covers rent-farm orders too.
   assert.match(FULFILLER, /\(await farmService\.deliverFarmOrder\(order, \{ dryRun \}\)\) \|\|/);
-  assert.match(FULFILLER, /if \(r\.awaitingConfirm && !r\.error\) \{\s*await alertSentAwaitingConfirm/);
+  assert.match(FULFILLER, /if \(\(r\.awaitingConfirm && !r\.error\) \|\| \(r\.error && r\.sent\)\) \{\s*await alertSentAwaitingConfirm/);
 });
 
 /* ------------------ closing rows the owner confirmed by hand --------------- */
