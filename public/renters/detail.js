@@ -43,6 +43,15 @@
     const d = new Date(v);
     return isNaN(d.getTime()) ? "" : d.toISOString().slice(0, 10);
   }
+  // The access START is kept as 00:00 JST of the chosen day (the server reads
+  // a bare date that way, utils/renters.parseAccessStart), so the form shows
+  // the JST calendar day — the UTC day is the day before, and every Save would
+  // move the start one day earlier.
+  function jstDateVal(v) {
+    if (!v) return "";
+    const d = new Date(v);
+    return isNaN(d.getTime()) ? "" : new Date(d.getTime() + 9 * 3600e3).toISOString().slice(0, 10);
+  }
 
   // ---- renters list ----
 
@@ -327,7 +336,7 @@
         '<div><label class="fld">Games to farm <span class="muted">(armed on their accounts)</span></label><input id="eGames" placeholder="e.g. Rust, VALORANT" value="' + esc((r.farmGames || []).join(", ")) + '"/></div>' +
       '</div>' +
       '<div class="grid3" style="margin-top:12px">' +
-        '<div><label class="fld">Access start</label><input id="eStart" type="date" value="' + esc(dateVal(r.accessStart)) + '"/></div>' +
+        '<div><label class="fld">Access start</label><input id="eStart" type="date" value="' + esc(jstDateVal(r.accessStart)) + '"/></div>' +
         '<div><label class="fld">Access end</label><input id="eEnd" type="date" value="' + esc(dateVal(r.accessEnd)) + '"/></div>' +
         '<div style="display:flex;align-items:flex-end"><button class="btn" style="width:100%" data-act="saveRenter" data-id="' + id + '">Save changes</button></div>' +
       '</div>' +

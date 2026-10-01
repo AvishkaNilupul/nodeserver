@@ -274,3 +274,15 @@ test("REGRESSION: the hand-over re-stamp matches each account by TOKEN — a dup
   assert.equal((await RenterAccount.findOne({ clientSecret: "csA" }).lean()).farmUntil.getTime(), until.getTime());
   assert.equal((await RenterAccount.findOne({ clientSecret: "csB" }).lean()).farmUntil.getTime(), now + 10 * DAY, "the twin keeps its own window");
 });
+
+test("the hand-over re-stamp falls back to the login when the pool's token is on no holder row", async () => {
+  await Promise.all([Renter.deleteMany({}), RenterAccount.deleteMany({}), AvailableAccount.deleteMany({})]);
+  const holder = await Renter.create({ username: "operator-selffarm", usernameLower: "operator-selffarm", passwordHash: "x" });
+  const pool = await AvailableAccount.create({ username: "drift", usernameLower: "drift", clientSecret: "cs-new" });
+  const now = Date.now();
+  await RenterAccount.create({ renter: holder._id, clientSecret: "cs-old", login: "drift", farmUntil: new Date(now + 10 * DAY) });
+  const until = new Date(now + 30 * DAY);
+  const moved = await handover.stampFromHandover({ accounts: [{ login: "drift", poolId: String(pool._id) }] }, until);
+  assert.equal(moved, 1);
+  assert.equal((await RenterAccount.findOne({ login: "drift" }).lean()).farmUntil.getTime(), until.getTime());
+});

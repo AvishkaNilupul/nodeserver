@@ -1844,7 +1844,7 @@ async function onBufferedSale(rowIn, { alert = true } = {}) {
       { $set: { lastError: ("rent-farm sale: " + detail).slice(0, 400) } },
     ).catch(() => {});
     // This one IS a paid order, so the shared alert's wording is exactly right.
-    // (A retry pass pages only on its first and its last attempt.)
+    // (The watcher pages the first failure; the retry sweep only its last.)
     if (alert) {
       await farmAlert
         .alertFarmFailure({

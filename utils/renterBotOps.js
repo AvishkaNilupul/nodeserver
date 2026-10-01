@@ -999,8 +999,20 @@ async function startRenterFarming(renter, host) {
     // whose accounts were all removed could never be given new ones (manual
     // add and approve refuse a stopped renter; this Start was the way out).
     if (e && e.code === "no_accounts" && !rows.length) {
-      await unstamp();
-      return { added, skipped, running: false, nothingToPlace: true };
+      // `rows` is only THIS host's: a renter with live accounts recorded on
+      // another host has something to place — that stays an error (and the
+      // stop stays), never "nothing to do".
+      const now2 = new Date();
+      const liveElsewhere = await RenterAccount.exists({
+        renter: renter._id,
+        enabled: true,
+        farmEndedAt: null,
+        $or: [{ farmUntil: null }, { farmUntil: { $gt: now2 } }],
+      });
+      if (!liveElsewhere) {
+        await unstamp();
+        return { added, skipped, running: false, nothingToPlace: true };
+      }
     }
     throw e;
   }

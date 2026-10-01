@@ -69,11 +69,21 @@ async function stampFromHandover(row, until) {
       .catch(() => []);
     secretByPool = new Map(pools.filter((p) => p.clientSecret).map((p) => [String(p._id), p.clientSecret]));
   }
+  // A pool token no holder row carries (the two sides refreshed apart) falls
+  // back to the login too, rather than leaving that account un-stamped.
+  const poolSecrets = [...new Set(accts.map((a) => secretByPool.get(String(a.poolId || ""))).filter(Boolean))];
+  const ledgerHas = poolSecrets.length
+    ? new Set(
+        (await RenterAccount.find({ renter: holder._id, clientSecret: { $in: poolSecrets } }, { clientSecret: 1 })
+          .lean()
+          .catch(() => [])).map((r) => r.clientSecret),
+      )
+    : new Set();
   const secrets = [];
   const logins = [];
   for (const a of accts) {
     const cs = secretByPool.get(String(a.poolId || ""));
-    if (cs) secrets.push(cs);
+    if (cs && ledgerHas.has(cs)) secrets.push(cs);
     else logins.push(String(a.login).trim());
   }
   const which = [];

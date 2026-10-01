@@ -246,7 +246,8 @@ test("every delivered_qty call goes through confirmOnG2g", () => {
 
 test("a sent order pages 'confirm it', on its own dedupe", () => {
   assert.match(FULFILLER, /r\.pending \|\| r\.awaitingConfirm/);
-  assert.match(FULFILLER, /if \(r\.awaitingConfirm && !r\.error\) \{\s*await alertSentAwaitingConfirm/);
+  // …and so does a farm order that errored AFTER its login was sent (2026-10-01).
+  assert.match(FULFILLER, /if \(\(r\.awaitingConfirm && !r\.error\) \|\| \(r\.error && r\.sent\)\) \{\s*await alertSentAwaitingConfirm/);
   const fn = FULFILLER.slice(FULFILLER.indexOf("async function alertSentAwaitingConfirm("));
   assert.match(fn, /confirmAsked\.has\(id\)/);
   assert.doesNotMatch(fn.slice(0, fn.indexOf("\n}\n")), /alerted\./);

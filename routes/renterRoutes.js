@@ -379,13 +379,16 @@ async function botControl(action, req, res) {
     // A start puts back only what fits: tell the renter when some of their
     // accounts are still off the bot instead of a plain "running".
     const skipped = out && Array.isArray(out.skipped) ? out.skipped.length : 0;
+    const nothing = !!(out && out.nothingToPlace);
     res.json({
       success: true,
-      running: action === "start",
+      running: action === "start" && !nothing,
       skipped,
-      ...(skipped
-        ? { message: skipped + " of your account(s) could not be put back — the bot is full. Ask the operator." }
-        : {}),
+      ...(nothing
+        ? { message: "You have no accounts on the bot yet — ask the operator to add them." }
+        : skipped
+          ? { message: skipped + " of your account(s) could not be put back — the bot is full. Ask the operator." }
+          : {}),
     });
   } catch (e) {
     if (e.code === "disabled") {

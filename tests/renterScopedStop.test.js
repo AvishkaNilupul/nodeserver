@@ -1135,3 +1135,13 @@ test("REGRESSION: an unparseable file NO bot reads (a backup) never blocks a pla
   assert.equal(out.added, 1, JSON.stringify(out));
   assert.ok(secretsIn("contabo", "config_09.json").includes("tok-pl"));
 });
+
+test("REGRESSION (review 8): Start on a stopped renter whose live accounts sit on ANOTHER host keeps the stop and says so", async () => {
+  await reset();
+  const r = await mkRenter("splitone", { botFile: "config_09.json", botStoppedAt: new Date(), botStopReason: "operator" });
+  putConfig("contabo", "config_09.json", []);
+  await mkAccount(r, "tok-elsewhere", { host: "local", configFile: "config_02.json" });
+  await assert.rejects(ops.startRenterFarming(r, HOST), (e) => e.code === "no_accounts");
+  const fresh = await Renter.findById(r._id).lean();
+  assert.ok(fresh.botStoppedAt, "the stop stays — their accounts were not put back");
+});
