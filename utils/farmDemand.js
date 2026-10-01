@@ -103,38 +103,99 @@ function bucketLabel(key) {
 // Sold units — the union, deduped by login
 // ---------------------------------------------------------------------------
 
-// One entry per account we can prove was sold in the window, keyed by lowercased
-// login. `sources` records every place that noticed, which is what makes the
-// coverage gaps visible in the UI instead of silently shrinking the number.
-//
-// A row with no login is still counted (quantity listings hand out a unit
-// without naming the account) under a synthetic key, so anonymous unit sales are
-// not collapsed into one.
-async function soldUnitsByBucket({ days = 30 } = {}) {
-  const keys = noClaimKeys();
-  const since = new Date(Date.now() - Math.max(1, days) * DAY_MS);
-  const out = new Map(); // bucket -> Map(loginKey -> { sources:Set, price, market, at })
+// ONE SALE, ONE DATE. A source's timestamp is only a sale date when it marks the
+// sale itself (ledger soldAt) or its first visible effect (a marketplace's
+// listing_sold, the scanner's first `connected`). The other two witnesses only
+// CONFIRM a sale: NoclaimSpentAccount.sweptAt is when a bot was cleaned, and a
+// hand-sold pool row has no date at all (its updatedAt moves on any write). On
+// 2026-09-28 the sold-account backfill swept 142 sales made days or weeks
+// earlier and touched 136 hand-sold rows, and dating them by those writes read
+// Overwatch as 94.5 sales a week instead of ~60–75. So every source is read
+// over the window plus PRIOR_DAYS of history, an account is dated by its
+// EARLIEST dating evidence, and it counts in the window only when that date is
+// inside it. Confirming-only accounts are reported as `undated` and drive
+// nothing — since 2026-09-28 every sale path (hand sales included) writes a
+// ledger row, so only legacy hand sales land there.
+const DATING_SOURCES = new Set(["ledger", "listing_sold", "connected"]);
+const PRIOR_DAYS = 90;
+
+// The union as a pure accumulator, so the dating rules are testable without a
+// database: `add(game, login, source, extra)` one piece of evidence at a time,
+// then `split(since)`. Accounts are keyed by lowercased login; anonymous
+// quantity-listing units get a synthetic key, so a hundred unit sales never
+// collapse into one. `split` returns
+//   { units: Map(bucket -> Map(id -> unit)), undated: Map(bucket -> n) }
+// where `units` holds only the sales whose FIRST dated evidence is inside the
+// window, each { sources:Set, priceUsd, market, at, firstAt }: `market` is the
+// market of the earliest dated evidence, `at` the latest evidence of any kind.
+function saleAccumulator(keys = noClaimKeys()) {
+  const all = new Map(); // bucket -> Map(loginKey -> unit)
 
   const add = (game, login, source, extra = {}) => {
     const bucket = bucketFor(game, keys);
     if (!bucket) return;
-    const inner = out.get(bucket) || out.set(bucket, new Map()).get(bucket);
+    const inner = all.get(bucket) || all.set(bucket, new Map()).get(bucket);
     const id = lower(login) || `anon:${source}:${extra.dedupe || inner.size}`;
-    const cur = inner.get(id) || { sources: new Set(), priceUsd: 0, market: "", at: null };
+    const cur =
+      inner.get(id) ||
+      { sources: new Set(), priceUsd: 0, market: "", at: null, firstAt: null, confirmedAt: null };
     cur.sources.add(source);
     // Keep the best price any source names — a connection flip proves the sale
     // but carries no price, so taking the max is how a sale keeps its money when
     // only one of its two witnesses saw it.
     if (extra.priceUsd > cur.priceUsd) cur.priceUsd = extra.priceUsd;
-    if (!cur.market && extra.market) cur.market = extra.market;
-    if (extra.at && (!cur.at || extra.at > cur.at)) cur.at = extra.at;
+    const at = extra.at ? new Date(extra.at) : null;
+    if (at && (!cur.at || at > cur.at)) cur.at = at;
+    if (DATING_SOURCES.has(source)) {
+      const first = extra.firstAt ? new Date(extra.firstAt) : at;
+      if (first && (!cur.firstAt || first < cur.firstAt)) {
+        cur.firstAt = first;
+        if (extra.market) cur.market = extra.market;
+      } else if (!cur.market && extra.market) {
+        cur.market = extra.market;
+      }
+    } else if (at && (!cur.confirmedAt || at > cur.confirmedAt)) {
+      cur.confirmedAt = at;
+    }
     inner.set(id, cur);
   };
+
+  const split = (since) => {
+    const units = new Map();
+    const undated = new Map();
+    for (const [bucket, inner] of all) {
+      const keep = new Map();
+      let n = 0;
+      for (const [id, unit] of inner) {
+        if (unit.firstAt) {
+          if (unit.firstAt >= since) keep.set(id, unit);
+        } else if (unit.confirmedAt && unit.confirmedAt >= since) {
+          n++;
+        }
+      }
+      units.set(bucket, keep);
+      undated.set(bucket, n);
+    }
+    return { units, undated };
+  };
+
+  return { add, split };
+}
+
+// Every no-claim sale with evidence, read from the four sources over the window
+// plus PRIOR_DAYS of history and dated by saleAccumulator's rules. Returns
+//   { since, units: Map(bucket -> Map(id -> unit)), undated: Map(bucket -> n) }.
+async function saleEvidenceByBucket({ days = 30, priorDays = PRIOR_DAYS } = {}) {
+  const keys = noClaimKeys();
+  const since = new Date(Date.now() - Math.max(1, days) * DAY_MS);
+  const lookSince = new Date(since.getTime() - Math.max(0, priorDays) * DAY_MS);
+  const acc = saleAccumulator(keys);
+  const add = acc.add;
 
   // 1. The unclaimed ledger — every automated channel, including the four
   //    (Eldorado, PlayerAuctions, G2G) that write no SaleSignal.
   const ledgers = await UnclaimedAccount.find(
-    { status: "sold", soldAt: { $gte: since } },
+    { status: "sold", soldAt: { $gte: lookSince } },
     { login: 1, game: 1, market: 1, soldAt: 1, set: 1, soldPriceUsd: 1, soldMarket: 1 },
   ).lean();
   // Rows sold since `soldPriceUsd` shipped carry the price they ACTUALLY sold
@@ -195,7 +256,7 @@ async function soldUnitsByBucket({ days = 30 } = {}) {
       {
         $match: {
           gameKey: { $in: mineKeys },
-          at: { $gte: since },
+          at: { $gte: lookSince },
           source: { $in: REAL_SALE_SOURCES },
         },
       },
@@ -227,6 +288,8 @@ async function soldUnitsByBucket({ days = 30 } = {}) {
           // money when only one of its two witnesses saw it.
           priceUsd: { $max: { $ifNull: ["$priceUsd", 0] } },
           at: { $max: "$at" },
+          // The first time anyone saw this sale — what dates it.
+          first: { $min: "$at" },
         },
       },
     ]);
@@ -237,15 +300,16 @@ async function soldUnitsByBucket({ days = 30 } = {}) {
           priceUsd: Number(row.priceUsd) || 0,
           market: (row.markets || []).find(Boolean) || "",
           at: row.at,
+          firstAt: row.first,
           dedupe: login,
         });
       }
     }
   }
 
-  // 3. What the operator swept out of a no-claim bot as sold or connected. This
-  //    is the only witness for an account hand-sold in bulk that the buyer has
-  //    not linked yet.
+  // 3. What the operator swept out of a no-claim bot as sold or connected. It
+  //    CONFIRMS a sale (the only witness for an account hand-sold in bulk that
+  //    the buyer has not linked yet) but sweptAt is when the bot was cleaned.
   const spent = await NoclaimSpentAccount.find(
     { sweptAt: { $gte: since }, $or: [{ sold: true }, { connected: true }] },
     { loginLower: 1, login: 1, game: 1, sweptAt: 1 },
@@ -254,9 +318,8 @@ async function soldUnitsByBucket({ days = 30 } = {}) {
     add(s.game, s.loginLower || s.login, "swept", { at: s.sweptAt });
   }
 
-  // 4. The hand-sold tick on the pool row. `manualSold` carries no date, so it
-  //    can only be attributed to a window through the pool row's own updatedAt —
-  //    approximate, and marked as such by its source name.
+  // 4. The hand-sold tick on the pool row. `manualSold` carries no date; its
+  //    updatedAt only says the row was written in the window, so it confirms.
   const manual = await AvailableAccount.find(
     { manualSold: true, updatedAt: { $gte: since } },
     { usernameLower: 1, username: 1, soldGames: 1, claimedNote: 1, updatedAt: 1 },
@@ -272,7 +335,13 @@ async function soldUnitsByBucket({ days = 30 } = {}) {
     }
   }
 
-  return out;
+  return { since, ...acc.split(since) };
+}
+
+// The accounts sold in the window, per bucket — Map(bucket -> Map(id -> unit)).
+// Kept as the original name and shape for callers that only want the units.
+async function soldUnitsByBucket({ days = 30 } = {}) {
+  return (await saleEvidenceByBucket({ days })).units;
 }
 
 // ---------------------------------------------------------------------------
@@ -372,16 +441,76 @@ async function timeToSaleByBucket({ days = 90 } = {}) {
 // The snapshot the allocator and the UI both read
 // ---------------------------------------------------------------------------
 
+// Markets where the unclaimed auto-lister commits accounts up front (the
+// shelf, capped by unclaimedGameCaps). Everything else — Eldorado,
+// PlayerAuctions, G2G, hand sales — claims an account only when a buyer pays.
+const SHELF_MARKETS = new Set(["gameflip", "ggsel", "digiseller"]);
+// The short window the demand rate also looks at, so a rise shows within two
+// weeks while a dip never shrinks the rate faster than the full window.
+const SHORT_WINDOW_DAYS = 14;
+
+// Per-week demand from a game's in-window units, split by where it sold.
+//   shelfPerWeek — RAW rate of shelf-market sales (a shelf is never out of stock)
+//   otherPerWeek — IN-STOCK rate of every other sale (see sizing.inStockRate):
+//                  a claim-at-sale offer with no matching accounts sells nothing,
+//                  and those days are a stock-out, not missing buyers
+// each the larger of the full-window and the 14-day rate. Pure; `now` pinnable.
+function demandRates(units, { days = 30, shortDays = SHORT_WINDOW_DAYS, now = Date.now() } = {}) {
+  const shortW = Math.max(1, Math.min(shortDays, days));
+  const shortSince = now - shortW * DAY_MS;
+  const dayOf = (t) => new Date(t).toISOString().slice(0, 10);
+  let shelf = 0;
+  let shelfShort = 0;
+  let other = 0;
+  let otherShort = 0;
+  const otherDays = new Set();
+  const otherDaysShort = new Set();
+  for (const u of units || []) {
+    const t = u && u.firstAt ? new Date(u.firstAt).getTime() : NaN;
+    if (!Number.isFinite(t)) continue;
+    const recent = t >= shortSince;
+    if (SHELF_MARKETS.has(lower(u.market))) {
+      shelf++;
+      if (recent) shelfShort++;
+    } else {
+      other++;
+      otherDays.add(dayOf(t));
+      if (recent) {
+        otherShort++;
+        otherDaysShort.add(dayOf(t));
+      }
+    }
+  }
+  const shelfPerWeek = Math.max(
+    sizing.salesPerWeek(shelf, days),
+    sizing.salesPerWeek(shelfShort, shortW),
+  );
+  const otherPerWeek = Math.max(
+    sizing.inStockRate({ count: other, sellingDays: otherDays.size, windowDays: days }),
+    sizing.inStockRate({ count: otherShort, sellingDays: otherDaysShort.size, windowDays: shortW }),
+  );
+  return {
+    shelfPerWeek: round1(shelfPerWeek),
+    otherPerWeek: round1(otherPerWeek),
+    sellingDays: otherDays.size,
+    shelfSales: shelf,
+    otherSales: other,
+  };
+}
+
+const round1 = (n) => Math.round((Number(n) || 0) * 10) / 10;
+
 // One row per no-claim game: what it sells, what it holds, how long that lasts,
 // and what the sizing model says it should hold. Deliberately returns the
 // EVIDENCE alongside the number — an operator has to be able to see why a game
 // is being told to grow before they let anything act on it.
 async function unclaimedDemandSnapshot({ days = 30, ttsDays = 90 } = {}) {
-  const [sold, stock, tts] = await Promise.all([
-    soldUnitsByBucket({ days }),
+  const [evidence, stock, tts] = await Promise.all([
+    saleEvidenceByBucket({ days }),
     stockByBucket(),
     timeToSaleByBucket({ days: ttsDays }),
   ]);
+  const sold = evidence.units;
   const cfg = settings.getNoclaimSizing ? settings.getNoclaimSizing() : {};
   const keys = noClaimKeys();
   const rows = [];
@@ -405,15 +534,20 @@ async function unclaimedDemandSnapshot({ days = 30, ttsDays = 90 } = {}) {
     }
     const count = units.size;
     const avgPrice = priced ? Math.round((revenue / priced) * 100) / 100 : 0;
-    const perWeek = Math.round(sizing.salesPerWeek(count, days) * 10) / 10;
+    const rates = demandRates(units.values(), { days });
+    const perWeek = round1(rates.shelfPerWeek + rates.otherPerWeek);
 
     const coverageDays = numOr(cfg.coverageDaysFor && cfg.coverageDaysFor(key), cfg.coverageDays);
     const safetyStock = numOr(cfg.safetyStockFor && cfg.safetyStockFor(key), cfg.safetyStock);
     const min = numOr(cfg.minFor && cfg.minFor(key), 0);
     const max = numOr(cfg.maxFor && cfg.maxFor(key), sizing.HARD_MAX_ACCOUNTS);
 
-    const target = sizing.coverageTarget({
-      salesPerWeek: perWeek,
+    // The shelf ties up what it holds whatever it sells; the rest of the
+    // demand needs its own cover (sizing.shelfAwareTarget).
+    const { target, parts } = sizing.shelfAwareTarget({
+      shelfHeld: st.listed,
+      shelfPerWeek: rates.shelfPerWeek,
+      otherPerWeek: rates.otherPerWeek,
       coverageDays,
       safetyStock,
       min,
@@ -427,12 +561,26 @@ async function unclaimedDemandSnapshot({ days = 30, ttsDays = 90 } = {}) {
       key,
       label: bucketLabel(key),
       windowDays: days,
-      sales: { count, perWeek, revenue: Math.round(revenue * 100) / 100, avgPrice, priced, bySource, byMarket },
+      sales: {
+        count,
+        perWeek,
+        rawPerWeek: round1(sizing.salesPerWeek(count, days)),
+        shelfPerWeek: rates.shelfPerWeek,
+        otherPerWeek: rates.otherPerWeek,
+        sellingDays: rates.sellingDays,
+        undated: evidence.undated.get(key) || 0,
+        revenue: Math.round(revenue * 100) / 100,
+        avgPrice,
+        priced,
+        bySource,
+        byMarket,
+      },
       stock: st,
       onHand,
       timeToSale: t,
       daysOfCover: Number.isFinite(cover) ? Math.round(cover * 10) / 10 : null,
       policy: { coverageDays, safetyStock, min, max },
+      targetParts: parts,
       ...gap,
       weight: sizing.revenueWeight({ salesPerWeek: perWeek, avgPrice }),
     });
@@ -492,6 +640,11 @@ module.exports = {
   noClaimKeys,
   bucketFor,
   bucketLabel,
+  DATING_SOURCES,
+  SHELF_MARKETS,
+  saleAccumulator,
+  demandRates,
+  saleEvidenceByBucket,
   soldUnitsByBucket,
   stockByBucket,
   timeToSaleByBucket,

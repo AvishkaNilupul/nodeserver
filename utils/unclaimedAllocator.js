@@ -101,18 +101,26 @@ async function plan({ days = 30, withFleet = true } = {}) {
     campaignGames = null;
   }
 
-  // Accounts per game currently in a no-claim bot config, and which bots have
-  // room. A bot's config game is the label the container actually farms, so it
-  // is bucketed the same way every sale is.
+  // Accounts per game in a no-claim bot that can FARM, and which of those bots
+  // have room. A bot's config game is the label the container actually farms,
+  // so it is bucketed the same way every sale is. A personal bot, one the
+  // operator stopped and one with no container are not supply: counting them
+  // made the fleet look bigger than what farms, and a game whose only bots are
+  // like that (CoD bot 10, parked by the owner 2026-09-20) is parked — never
+  // grown, which would mean building it a new container.
   const assigned = new Map();
+  const botsByGame = new Map(); // key -> { all, usable }
   const roomBots = new Map();
   if (fleetState) {
     for (const b of fleetState.bots) {
       const key = farmDemand.bucketFor(b.game);
       if (!key) continue;
-      assigned.set(key, (assigned.get(key) || 0) + b.accounts);
+      const tally = botsByGame.get(key) || botsByGame.set(key, { all: 0, usable: 0 }).get(key);
+      tally.all++;
       // A bot that cannot farm what it is given never gets a top-up.
       if (fleetState.unusable && fleetState.unusable.has(String(b.id))) continue;
+      tally.usable++;
+      assigned.set(key, (assigned.get(key) || 0) + b.accounts);
       const room = Math.max(0, fleet.MAX_PER_BOT - b.accounts);
       if (room > 0) {
         (roomBots.get(key) || roomBots.set(key, []).get(key)).push({
@@ -134,17 +142,39 @@ async function plan({ days = 30, withFleet = true } = {}) {
   const games = rows.map((r) => {
     const have = fleetKnown ? assigned.get(r.key) || 0 : r.onHand + r.stock.inFlight;
     const hasCampaign = !!(campaignGames && campaignGames.has(r.key));
-    const fleetNeed = fleetKnown && hasCampaign ? Math.max(0, r.target - have) : 0;
+    const tally = botsByGame.get(r.key) || { all: 0, usable: 0 };
+    const parked = fleetKnown && tally.all > 0 && tally.usable === 0;
+    const fleetNeed = fleetKnown && hasCampaign && !parked ? Math.max(0, r.target - have) : 0;
 
     // The shelf. `unclaimedGameCaps` limits how many of a game's farmed accounts
-    // may sit on auto-listings; over the cap they are held for hand sales. When
-    // the cap is below the coverage target it is the binding constraint, and no
-    // amount of farming will put more stock in front of a buyer.
+    // may sit on auto-listings (Gameflip/GGSel); over the cap they stay free for
+    // Eldorado and hand sales. The shelf is sized by what the SHELF sells: the
+    // old rule compared the cap with the whole game's target, so a game selling
+    // on Eldorado was told to commit more accounts to its slowest markets.
     const shelfCap = settings.gameCapFor(r.label) || settings.gameCapFor(r.key) || 0;
     const effectiveCap = shelfCap > 0 ? shelfCap : UNCLAIMED_DEFAULT_CAP;
-    const shelfNeed = Math.max(0, r.target - effectiveCap);
+    const shelfPerWeek = (r.sales && r.sales.shelfPerWeek) || 0;
+    const shelfTarget =
+      shelfPerWeek > 0
+        ? Math.ceil((shelfPerWeek * cfg.coverageDaysFor(r.key)) / 7) + cfg.safetyStockFor(r.key)
+        : 0;
+    const shelfNeed = Math.max(0, shelfTarget - effectiveCap);
 
     const notes = [];
+    const parts = r.targetParts;
+    if (parts && r.target > 0)
+      notes.push(
+        `target ${r.target} = ${parts.shelf} on the Gameflip/GGSel shelf (sells ` +
+          `${shelfPerWeek}/wk) + ${parts.other} for ${(r.sales && r.sales.otherPerWeek) || 0}/wk ` +
+          `elsewhere over ${r.policy.coverageDays}d + ${parts.safety} safety` +
+          (parts.shelf + parts.other + parts.safety !== r.target ? ` (held to ${r.target} by the per-game limit)` : ""),
+      );
+    if (r.sales && r.sales.undated > 0)
+      notes.push(
+        `${r.sales.undated} older sale(s) have no sale date (swept or ticked sold by hand) — not counted`,
+      );
+    if (parked)
+      notes.push(`every ${r.label} bot is stopped by you or has no container — not grown`);
     if (fleetKnown && !hasCampaign)
       notes.push(
         campaignGames
@@ -159,7 +189,7 @@ async function plan({ days = 30, withFleet = true } = {}) {
     if (r.sales.count === 0) notes.push("no recorded sales in the window — target is the floor");
     if (shelfNeed > 0)
       notes.push(
-        `shelf cap ${effectiveCap} is below the ${r.target} the sell rate justifies — ` +
+        `shelf cap ${effectiveCap} is below the ${shelfTarget} its own sales justify — ` +
           "raising the cap puts existing stock on sale and costs no accounts",
       );
     if (fleetKnown && have > r.target * 2 && r.target > 0)
@@ -185,8 +215,10 @@ async function plan({ days = 30, withFleet = true } = {}) {
         assigned: have,
         bots: fleetKnown ? (roomBots.get(r.key) || []).length : null,
         roomBots: roomBots.get(r.key) || [],
+        parked,
+        botGame: botGameFor(r.key, fleetState && fleetState.bots, campaignGames, r.label),
       },
-      shelf: { cap: effectiveCap, explicit: shelfCap > 0, need: shelfNeed, suggested: Math.max(effectiveCap, r.target) },
+      shelf: { cap: effectiveCap, explicit: shelfCap > 0, need: shelfNeed, suggested: Math.max(effectiveCap, shelfTarget) },
       fleetNeed,
       notes,
     };
@@ -256,19 +288,39 @@ async function unusableBots(bots) {
 }
 
 // Normalised games (farmDemand buckets) with a drop campaign running now — the
-// catalog query the auto-power watcher uses.
+// catalog query the auto-power watcher uses — mapped to that campaign's own game
+// label ("Rainbow Six Siege"), which is what a new bot must watch.
 async function activeCampaignBuckets(now = new Date()) {
   const TwitchCampaign = require("../models/TwitchCampaign");
   const rows = await TwitchCampaign.find(
     { active: true, status: "ACTIVE", $or: [{ endAt: null }, { endAt: { $gt: now } }] },
     { game: 1 },
   ).lean();
-  const out = new Set();
+  const out = new Map();
   for (const c of rows) {
     const k = farmDemand.bucketFor(c && c.game);
-    if (k) out.add(k);
+    if (k && !out.has(k)) out.set(k, String(c.game || "").trim());
   }
   return out;
+}
+
+// The exact game string a NEW bot for bucket `key` must farm. The bucket label
+// is a keyword ("Rainbow Six") and a bot whose FavouriteGames does not name the
+// real Twitch game watches nothing, so take the label the game's existing bots
+// already farm, else the live campaign's own game name, else the keyword.
+function botGameFor(key, bots, campaignGames, fallback) {
+  const counts = new Map();
+  for (const b of bots || []) {
+    if (farmDemand.bucketFor(b.game) !== key || !String(b.game || "").trim()) continue;
+    counts.set(b.game, (counts.get(b.game) || 0) + 1);
+  }
+  let best = "";
+  for (const [label, n] of counts) {
+    if (!best || n > counts.get(best)) best = label;
+  }
+  if (best) return best;
+  const live = campaignGames && typeof campaignGames.get === "function" ? campaignGames.get(key) : "";
+  return live || fallback;
 }
 
 // The unclaimed engine's own default when no per-game cap is configured
@@ -397,7 +449,7 @@ async function apply(input = {}) {
       if (left > 0 && created === 0) {
         try {
           const out = await fleet.createBot({
-            game: g.label,
+            game: (g.fleet && g.fleet.botGame) || g.label,
             count: Math.min(left, fleet.MAX_PER_BOT),
             actor,
           });
@@ -504,11 +556,19 @@ async function runOnce({ force = false } = {}) {
     // process. `status().lastRun` only helps a caller inside the same process.
     // A system whose health cannot be read is the same failure as the
     // Telegram "0 accounts" line that sent us looking here in the first place.
+    // Per game: accounts farming / target, the grant this pass, parked games.
     console.log(
       "unclaimedAllocator: " +
         (cfg.autoSize ? "auto" : "advisory") +
         " pass — " +
-        p.games.map((g) => `${g.label} ${g.onHand}/${g.target}`).join(", ") +
+        p.games
+          .map(
+            (g) =>
+              `${g.label} ${g.fleet.assigned}/${g.target}` +
+              (g.grant > 0 ? ` +${g.grant}` : "") +
+              (g.fleet.parked ? " (parked)" : ""),
+          )
+          .join(", ") +
         (p.fleetKnown ? "" : " (fleet unknown: " + (p.fleetError || "?") + ")") +
         " | short by " +
         p.totals.fleetNeed +
@@ -588,6 +648,7 @@ function status() {
 
 module.exports = {
   UNCLAIMED_DEFAULT_CAP,
+  botGameFor,
   plan,
   apply,
   runOnce,
