@@ -20,9 +20,11 @@
 //     so 600 is readable to them. The MANAGED bots are the opposite — they run
 //     as a non-root uid and a 600 config makes them exit 139 — so never copy a
 //     chmod between the two systems.
-//   * Configs are written by `cat > tmp && mv`, never by string concatenation.
-//     A bad concat once left a duplicated JSON tail on config_04, which .NET
-//     read as "Extra data", and 90 accounts sat idle for five days.
+//   * Configs are written by a GUARDED `cat > tmp && mv` (botHosts.
+//     guardedWriteScript: the temp file is installed only when it holds every
+//     byte sent), never by string concatenation. A bad concat once left a
+//     duplicated JSON tail on config_04, which .NET read as "Extra data", and
+//     90 accounts sat idle for five days.
 
 const hosts = require("./botHosts");
 const settings = require("./settings");
@@ -322,9 +324,13 @@ function containerRunArgs(id, image = IMAGE) {
 async function createBotFromAccounts(id, accounts, game) {
   assertNoClaimGame(game);
   const config = buildConfig(accounts, game);
+  // Guarded write (utils/botHosts.guardedWriteScript): a cut-off transfer is
+  // never installed as the bot's config, and the file is 600 from the start.
   await sh(
-    `mkdir -p ${hosts.shq(botDir(id) + "/Configuration")} ${hosts.shq(botDir(id) + "/logs")} && ` +
-      `cat > ${hosts.shq(configPath(id))} && chmod 600 ${hosts.shq(configPath(id))}`,
+    hosts.guardedWriteScript(configPath(id), hosts.byteLength(config), {
+      mode: "600",
+      mkdirs: [botDir(id) + "/Configuration", botDir(id) + "/logs"],
+    }),
     { timeout: 20000, input: config },
   );
 
@@ -441,10 +447,11 @@ async function topUpBot(id, accounts, game, { restart = true } = {}) {
     }
     if (!added) return { added: 0, total: users.length };
 
-    await sh(
-      `cat > ${hosts.shq(file + ".tmp")} && mv ${hosts.shq(file + ".tmp")} ${hosts.shq(file)} && chmod 600 ${hosts.shq(file)}`,
-      { timeout: 20000, input: JSON.stringify(cfg, null, 2) },
-    );
+    const text = JSON.stringify(cfg, null, 2);
+    await sh(hosts.guardedWriteScript(file, hosts.byteLength(text), { mode: "600" }), {
+      timeout: 20000,
+      input: text,
+    });
     // Bots read their config at STARTUP only, so a restart is what makes the new
     // accounts farm. `docker restart` on a stopped container starts it — which
     // would fight the auto-power watcher's park — so only restart one that is

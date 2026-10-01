@@ -1097,10 +1097,12 @@ async function removeFromBotConfig(botId, secrets) {
     const removed = users.filter(isOut).map((u) => String(u.ClientSecret));
     if (!removed.length) return { removed: [], left: users.length, restarted: false, parked: false };
     ts.TwitchUsers = users.filter((u) => !isOut(u));
-    await sh(
-      `cat > ${hosts.shq(file + ".tmp")} && mv ${hosts.shq(file + ".tmp")} ${hosts.shq(file)} && chmod 600 ${hosts.shq(file)}`,
-      { timeout: 20000, input: JSON.stringify(cfg, null, 2) },
-    );
+    // Guarded write: a cut-off transfer is never installed (botHosts.guardedWriteScript).
+    const text = JSON.stringify(cfg, null, 2);
+    await sh(hosts.guardedWriteScript(file, hosts.byteLength(text), { mode: "600" }), {
+      timeout: 20000,
+      input: text,
+    });
     const back = parse(await readConfigRaw(id), "re-read");
     const still = ((back.TwitchSettings && back.TwitchSettings.TwitchUsers) || []).filter(isOut);
     if (still.length) {

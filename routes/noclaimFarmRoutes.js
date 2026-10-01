@@ -1368,10 +1368,13 @@ router.post("/api/noclaim-farm/spent/remove", requireSuperadmin, async (req, res
     // here would be the wrong direction — see the migration notes).
     cfg.TwitchSettings.TwitchUsers = kept;
     const newRaw = JSON.stringify(cfg, null, 2);
-    await sh(
-      `cat > ${hosts.shq(configPath(id))} && chmod 600 ${hosts.shq(configPath(id))}`,
-      { timeout: 20000, input: newRaw },
-    );
+    // Guarded tmp + mv, never `cat` straight onto the live config: a cut-off
+    // transfer left a torn config the bot could not parse (and the bot itself
+    // writes this file back). See botHosts.guardedWriteScript.
+    await sh(hosts.guardedWriteScript(configPath(id), hosts.byteLength(newRaw), { mode: "600" }), {
+      timeout: 20000,
+      input: newRaw,
+    });
 
     // Restart so the container drops the removed accounts' watch threads; if the
     // bot is now empty, stop it (a 0-account config just tight-loops).

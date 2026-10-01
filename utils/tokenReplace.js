@@ -17,7 +17,7 @@
 //   * it passes the integrity gate the bots' own drops query sits behind, and
 //     actually sees campaigns (a restricted token sees none).
 // Then, for that account only: every bot config it appears in (regular hosts
-// via writeFileAtomic, no-claim bots via the fleet's own `cat > tmp && mv`,
+// via writeFileAtomic, no-claim bots via the fleet's own guarded tmp + mv,
 // each under the same per-file lock every other config writer takes), its pool
 // row (re-queued for the normal pool check), its bot-archive, renter and
 // supplier rows. A RUNNING bot whose config changed is restarted — a bot reads
@@ -230,10 +230,12 @@ async function writeNoClaimConfig(home, login, entry, deps) {
     const cfg = JSON.parse(await fleet.sh(`cat ${shq(path)}`, { timeout: 20000 }));
     const n = applyToConfig(cfg, login, entry);
     if (!n) return 0;
-    await fleet.sh(
-      `cat > ${shq(path + ".tmp")} && mv ${shq(path + ".tmp")} ${shq(path)} && chmod 600 ${shq(path)}`,
-      { timeout: 20000, input: JSON.stringify(cfg, null, 2) },
-    );
+    // Guarded write: a cut-off transfer is never installed (botHosts.guardedWriteScript).
+    const text = JSON.stringify(cfg, null, 2);
+    await fleet.sh(deps.hosts.guardedWriteScript(path, deps.hosts.byteLength(text), { mode: "600" }), {
+      timeout: 20000,
+      input: text,
+    });
     const back = JSON.parse(await fleet.sh(`cat ${shq(path)}`, { timeout: 20000 }));
     if (!usersOf(back).some((u) => lc(u.Login) === lc(login) && u.ClientSecret === entry.token)) {
       throw new Error("no-claim bot " + home.id + ": the new token is not in its config after the write");
