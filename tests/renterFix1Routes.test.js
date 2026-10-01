@@ -27,13 +27,25 @@ const world = {
   restarted: [],
   ps: { twitchbotx3: { state: "running" }, twitchbotx5: { state: "running" }, twitchbotx54: { state: "running" }, twitchbotx22: { state: "exited" } },
   files: {},
+  readdirBudgets: [],
+  slowListMs: 0,
 };
 
 const fakeHosts = (real) => ({
   ...real,
   resolveHost: (v) => ({ id: v || "local", label: v || "local" }),
   dockerPs: async () => JSON.parse(JSON.stringify(world.ps)),
-  readdir: async () => Object.keys(world.files),
+  // world.slowListMs: the host answers `ls` only after this long. A caller's
+  // budget below it is a kill (the real readdir enforces it by killing ssh).
+  readdir: async (h, opts) => {
+    world.readdirBudgets.push(opts && opts.timeout != null ? opts.timeout : "default");
+    if (world.slowListMs && opts && opts.timeout != null && opts.timeout < world.slowListMs) {
+      const e = new Error("ssh: command killed after " + opts.timeout + " ms");
+      e.unreachable = true;
+      throw e;
+    }
+    return Object.keys(world.files);
+  },
   readFile: async (h, f) => {
     if (world.readFails) {
       const e = new Error("ssh: connect to host contabo port 22: Connection timed out");
@@ -125,7 +137,7 @@ test.after(async () => {
 });
 
 async function reset() {
-  Object.assign(world, { started: [], stopped: [], restarted: [], configCount: 5, files: {}, startResult: null, readFails: false });
+  Object.assign(world, { started: [], stopped: [], restarted: [], configCount: 5, files: {}, startResult: null, readFails: false, readdirBudgets: [], slowListMs: 0 });
   require("../utils/renterAccountBusy")._reset();
   await Promise.all([Renter.deleteMany({}), RenterAccount.deleteMany({}), RenterBotStack.deleteMany({})]);
 }
@@ -297,6 +309,36 @@ test("stack pickers keep buyers and direct renters apart; a stopped renter keeps
   const forRenter = await renterAdminRoutes.availableRentalStack();
   assert.ok(forRenter, "a stack is offered");
   assert.ok(!["config_54.json", "config_03.json"].includes(forRenter.file), JSON.stringify(forRenter));
+});
+
+test("REGRESSION 2026-10-01: a slow host is offline to the picker PAGE only — not to the alarm or a paid order", async () => {
+  // Contabo answered `ls` in ~0.2 s, but sometimes in 8 s; the 8 s picker budget
+  // was applied to every caller, so the capacity alarm dropped all eleven of
+  // its stacks and paged "capacity is GONE" with 283 slots free.
+  await reset();
+  await mk("operator-selffarm", { botFile: "config_54.json", maxAccounts: 2000 });
+  await RenterBotStack.create({ host: "contabo", file: "config_54.json", capacity: 50 });
+  world.files = { "config_54.json": cfgWith(19) };
+  world.ps = { twitchbotx54: { state: "running" } };
+  world.slowListMs = 9000;
+
+  const bg = await renterAdminRoutes.rentalStackOptions();
+  assert.deepEqual(bg.offlineHosts, [], "the background read gave up on a slow host");
+  assert.equal(bg.bots.length, 1);
+  assert.equal(bg.bots[0].remaining, 31);
+  assert.deepEqual(world.readdirBudgets, ["default"], "background read must take the patient default");
+
+  // The paid-order path goes through the same background read.
+  const holderStack = await renterAdminRoutes.availableRentalStack({ forHolder: true });
+  assert.equal(holderStack && holderStack.file, "config_54.json");
+
+  // The page keeps its short budget, and says the host is offline.
+  world.readdirBudgets = [];
+  const res = await call("GET", "/renters/bots");
+  const page = await res.json();
+  assert.equal(res.status, 200);
+  assert.deepEqual(world.readdirBudgets, [8000]);
+  assert.deepEqual(page.offlineHosts.map((h) => h.id), ["contabo"]);
 });
 
 // ---------------------------------------------------------------------------

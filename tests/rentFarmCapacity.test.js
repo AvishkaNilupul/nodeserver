@@ -8,7 +8,7 @@ const test = require("node:test");
 const assert = require("node:assert");
 const Module = require("node:module");
 
-function load({ bots, offlineHosts = [] }) {
+function load({ bots, offlineHosts = [], quota = null }) {
   const sent = [];
   const realLoad = Module._load;
   Module._load = function (request, parent, isMain) {
@@ -26,7 +26,7 @@ function load({ bots, offlineHosts = [] }) {
     // which is what these tests are about. (Unstubbed, the read waited on a
     // database that is not there and every test timed out at 10s.)
     if (from && request === "./operatorFarm") {
-      return { holderQuota: async () => null };
+      return { holderQuota: async () => quota };
     }
     return realLoad.call(this, request, parent, isMain);
   };
@@ -121,11 +121,94 @@ test("recovery closes the loop", async () => {
 test("an offline host is excluded from the count and named", async () => {
   // Counting an unreadable host as capacity would hide a real shortage; counting
   // it as full would cry wolf. It is simply not counted, and it is reported.
-  const { mod, sent, restore } = load({ bots: FULL, offlineHosts: [{ id: "pi2", label: "Pi 2" }] });
+  const { mod, restore } = load({ bots: FULL, offlineHosts: [{ id: "pi2", label: "Pi 2" }] });
+  try {
+    const s = await mod.snapshot();
+    assert.deepStrictEqual(s.offlineHosts, ["Pi 2"]);
+    assert.strictEqual(s.totalFree, 0);
+    assert.match(mod.describe(s), /offline and NOT counted: Pi 2/);
+  } finally { restore(); }
+});
+
+test("REGRESSION 2026-10-01: an unread host is not 'capacity GONE'", async () => {
+  // Every holder stack was on Contabo; one slow read marked it offline, so the
+  // readable stacks held 0 free and the owner was paged "capacity is GONE"
+  // twice while 283 slots were free. Unread hosts can only ADD slots: a bad
+  // verdict off a partial read is unknown, not a page.
+  const { mod, sent, restore } = load({ bots: [], offlineHosts: [{ id: "contabo", label: "Contabo VPS" }] });
   try {
     const s = await mod.checkOnce({});
-    assert.deepStrictEqual(s.offlineHosts, ["Pi 2"]);
-    assert.match(sent[0], /offline and NOT counted: Pi 2/);
+    assert.strictEqual(s.level, "unknown");
+    assert.strictEqual(s.withheld, true);
+    assert.strictEqual(s.alerted, false);
+    assert.strictEqual(sent.length, 0, "paged: " + sent.join(" / "));
+  } finally { restore(); }
+});
+
+test("a withheld tick leaves the latch alone: no 'recovered', no re-page", async () => {
+  const offline = [{ id: "contabo", label: "Contabo VPS" }];
+  // ok -> blip -> ok: silent throughout.
+  let opts = { bots: HEALTHY, offlineHosts: [] };
+  const { mod, sent, restore } = load({ bots: [] });
+  try {
+    await mod.checkOnce({ options: opts });
+    await mod.checkOnce({ options: { bots: [], offlineHosts: offline } });
+    await mod.checkOnce({ options: opts });
+    assert.strictEqual(sent.length, 0, "a blip chattered: " + sent.join(" / "));
+    // empty (paged once) -> blip -> still empty: not paged again.
+    opts = { bots: FULL, offlineHosts: [] };
+    await mod.checkOnce({ options: opts });
+    assert.strictEqual(sent.length, 1);
+    await mod.checkOnce({ options: { bots: FULL, offlineHosts: offline } });
+    await mod.checkOnce({ options: opts });
+    assert.strictEqual(sent.length, 1, "re-paged after a blip: " + sent.join(" / "));
+  } finally { restore(); }
+});
+
+test("a good verdict stands with a host unread — unread hosts only add room", async () => {
+  const { mod, sent, restore } = load({ bots: HEALTHY, offlineHosts: [{ id: "contabo", label: "Contabo VPS" }] });
+  try {
+    const s = await mod.checkOnce({});
+    assert.strictEqual(s.level, "ok");
+    assert.ok(!s.withheld);
+    assert.strictEqual(sent.length, 0);
+  } finally { restore(); }
+});
+
+test("a holder-limit verdict stands with a host unread — no host lifts the limit", async () => {
+  const { mod, sent, restore } = load({
+    bots: HEALTHY,
+    offlineHosts: [{ id: "contabo", label: "Contabo VPS" }],
+    quota: { max: 400, used: 400, remaining: 0 },
+  });
+  try {
+    const s = await mod.checkOnce({});
+    assert.strictEqual(s.level, "empty");
+    assert.strictEqual(s.limitedBy, "holder-limit");
+    assert.strictEqual(sent.length, 1);
+    assert.match(sent[0], /account limit/);
+  } finally { restore(); }
+});
+
+test("a read that keeps failing is said once, as a read failure, then closed", async () => {
+  const offline = { bots: [], offlineHosts: [{ id: "contabo", label: "Contabo VPS" }] };
+  const { mod, sent, restore } = load({ bots: [] });
+  try {
+    for (let i = 1; i < mod.WITHHELD_PAGE_TICKS; i++) await mod.checkOnce({ options: offline });
+    assert.strictEqual(sent.length, 0, "paged before the read had failed for long");
+    const s = await mod.checkOnce({ options: offline });
+    assert.strictEqual(s.alerted, true);
+    assert.strictEqual(sent.length, 1);
+    assert.match(sent[0], /not been checkable/);
+    assert.match(sent[0], /Contabo VPS/);
+    assert.match(sent[0], /READ failure, not a full farm/);
+    assert.doesNotMatch(sent[0], /GONE/);
+    await mod.checkOnce({ options: offline });
+    await mod.checkOnce({ options: offline });
+    assert.strictEqual(sent.length, 1, "re-paged while still unread");
+    await mod.checkOnce({ options: { bots: HEALTHY, offlineHosts: [] } });
+    assert.strictEqual(sent.length, 2);
+    assert.match(sent[1], /can be read again — 101 slot\(s\) free/);
   } finally { restore(); }
 });
 

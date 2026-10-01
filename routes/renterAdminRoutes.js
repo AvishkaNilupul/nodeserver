@@ -321,9 +321,17 @@ router.get("/renters/options", requireSuperadmin, async (req, res) => {
 // A host that misses it is reported as offline rather than silently dropped —
 // the page says so, instead of showing a short list as if those bots no longer
 // existed.
+//
+// That short budget is for the PAGE only (`{ picker: true }`). Everything else
+// — the capacity alarm, the holder's stack choice on a paid order, the Gameflip
+// buffer's reserve floor — has no one waiting on it and takes the module's
+// patient read. With the picker budget there, one slow `ls` on Contabo (8.0 s,
+// against ~0.2 s normally; measured on prod 2026-10-01) read as "Contabo VPS
+// offline", dropped all eleven of its stacks, and paged "Rent-farm capacity is
+// GONE" while 283 slots were free.
 const PICKER_READ_TIMEOUT_MS = 8000;
 
-async function rentalStackOptions() {
+async function rentalStackOptions({ picker = false } = {}) {
   const stacks = await listStacks();
   const byHost = new Map();
   for (const stack of stacks) {
@@ -340,10 +348,10 @@ async function rentalStackOptions() {
       if (!host) return { meta, rows: [], online: false };
       try {
         const existing = new Set(
-          await hosts.readdir(host, {
-            timeout: PICKER_READ_TIMEOUT_MS,
-            retries: 0,
-          })
+          await hosts.readdir(
+            host,
+            picker ? { timeout: PICKER_READ_TIMEOUT_MS, retries: 0 } : undefined,
+          )
         );
         const files = hostStacks
           .map((stack) => stack.file)
@@ -490,7 +498,7 @@ async function availableRentalStack({ forHolder = false } = {}) {
 
 router.get("/renters/bots", requireSuperadmin, async (req, res) => {
   try {
-    res.json({ success: true, ...(await rentalStackOptions()) });
+    res.json({ success: true, ...(await rentalStackOptions({ picker: true })) });
   } catch (err) {
     console.error("renters bots error:", err.message);
     res.status(500).json({ success: false, message: "Server error" });
