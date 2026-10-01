@@ -116,6 +116,7 @@
   .ilist { margin-top:7px; border:1px solid var(--line); border-radius:10px; background:var(--surface-2); overflow:hidden; }
   .ilist .it { padding:6px 11px; font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:11.5px; border-bottom:1px solid var(--line); word-break:break-word; }
   .ilist .it:last-child { border-bottom:none; }
+  .ilist .it .why { margin-top:3px; font-family:inherit; color:var(--muted); white-space:normal; }
   .ilist .imore { padding:6px 11px; font-size:11.5px; color:var(--muted); }
 
   .empty { background:var(--surface); border:1px solid var(--line); border-radius:14px; padding:38px 24px; text-align:center; color:var(--muted); font-size:13.5px; line-height:1.6; }
@@ -339,9 +340,11 @@
         var v = it[keys[i]];
         if (typeof v === "string" || typeof v === "number") { used = keys[i]; head = String(v); break; }
       }
+      // `why` gets its own line (renderItems) and a URL is noise as text, so
+      // neither spends one of the four field slots.
       var rest = [];
       Object.keys(it).forEach(function (k) {
-        if (k === used || rest.length >= 3) return;
+        if (k === used || k === "why" || k === "url" || rest.length >= 4) return;
         var v = it[k];
         if (v == null || typeof v === "object") return;
         rest.push(k + "=" + v);
@@ -493,7 +496,14 @@
       var body = "";
       if (open) {
         body = '<div class="ilist">' +
-          shown.map(function (it) { return '<div class="it">' + esc(itemText(it)) + "</div>"; }).join("") +
+          shown.map(function (it) {
+            // A row's `why` is the check telling the owner what to do about it —
+            // the one field that must never be truncated away.
+            var why = it && typeof it === "object" && typeof it.why === "string" && it.why
+              ? '<div class="why">' + esc(it.why) + "</div>"
+              : "";
+            return '<div class="it">' + esc(itemText(it)) + why + "</div>";
+          }).join("") +
           (c.items.length > ITEM_CAP ? '<div class="imore">+' + (c.items.length - ITEM_CAP) + " more not shown</div>" : "") +
           "</div>";
       }
