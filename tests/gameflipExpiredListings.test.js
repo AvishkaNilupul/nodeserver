@@ -21,7 +21,7 @@ const { MongoMemoryServer } = require("mongodb-memory-server");
 process.env.SESSION_SECRET ||= "gf-expired-listings-test";
 process.env.CRED_SECRET ||= "gf-expired-listings-cred";
 
-const world = { onsale: new Set(), state: {}, ended: [], stateReads: [], endFails: new Set() };
+const world = { onsale: new Set(), state: {}, ended: [], stateReads: [], endFails: new Set(), af: {} };
 
 const fakeMp = {
   keyStatus: () => ({ gameflip: { configured: true } }),
@@ -60,6 +60,9 @@ Module._load = function (request, parent, isMain) {
     if (request === "./gameflipFarmService") {
       return { renewsOnExpiry: () => false, onBufferedSale: async () => ({}) };
     }
+    if (request === "./settings") {
+      return { getAutoFarm: () => world.af, getAccountListingSettings: () => ({}) };
+    }
   }
   return realLoad.call(this, request, parent, isMain);
 };
@@ -83,6 +86,7 @@ test.beforeEach(async () => {
   world.ended = [];
   world.stateReads = [];
   world.endFails = new Set();
+  world.af = {};
 });
 
 const PAST = "2026-08-25T17:06:48.066Z";
@@ -165,4 +169,108 @@ test("the backlog is bounded: individual reads and ends per pass are capped and 
     await MarketplaceListing.countDocuments({ status: "removed" }),
     10,
   );
+});
+
+/* ------------------------------------------------------------------------ *
+ * Renewal (the owner's choice, 2026-10-01): an auto-delivery listing that
+ * expired unsold keeps its unit — a fresh listing replaces it.
+ * ------------------------------------------------------------------------ */
+
+function fakePublisher(impl) {
+  const calls = [];
+  return {
+    calls,
+    opts: {
+      relistSourceFn: async () => ({ set: { _id: "set-1" }, offer: null, imagePath: "" }),
+      publishFn: async (args) => {
+        calls.push(args);
+        return impl ? impl(args, calls.length) : { externalId: "gf-new-" + calls.length };
+      },
+    },
+  };
+}
+
+async function chain(id, over = {}) {
+  await row(id, { autoDeliver: true, qtyRemaining: 5, origin: "auto", price: 2.7, description: "the same text", ...over });
+  world.state[id] = { status: "onsale", expiration: PAST, expired: true };
+}
+
+test("REGRESSION 2026-10-01: an expired chain is renewed for the SAME unit — qtyRemaining carries over", async () => {
+  await chain("gf-chain");
+  const pub = fakePublisher();
+  const r = await gf.syncOnce(pub.opts);
+  assert.deepStrictEqual(world.ended.map((e) => e.id), ["gf-chain"], "ended on Gameflip first");
+  assert.strictEqual(pub.calls.length, 1);
+  const a = pub.calls[0];
+  assert.strictEqual(a.qtyRemaining, 5, "nothing sold, so the debt is unchanged");
+  assert.strictEqual(a.priceUsd, 2.7);
+  assert.strictEqual(a.origin, "auto");
+  assert.strictEqual(a.description, "the same text");
+  const after = await MarketplaceListing.findOne({ externalId: "gf-chain" }).lean();
+  assert.strictEqual(after.status, "removed");
+  assert.strictEqual(after.qtyRemaining, 0, "the debt moved to the new row");
+  assert.match(after.lastError, /renewed as gf-new-1/);
+  assert.strictEqual(r.renewed, 1);
+});
+
+test("a renewal that hits Gameflip's limiter backs off and stays pending — never double-published", async () => {
+  await chain("gf-busy");
+  const pub = fakePublisher(() => {
+    throw new Error('Gameflip create: {"message":"Too many attempts - Retry later","code":429}');
+  });
+  await gf.syncOnce(pub.opts);
+  let after = await MarketplaceListing.findOne({ externalId: "gf-busy" }).lean();
+  assert.strictEqual(after.status, "removed");
+  assert.match(after.lastError, /renewal pending \(attempt 1 failed/);
+  assert.strictEqual(after.relistAttempts, 1);
+  assert.ok(after.relistRetryAt > new Date(), "backoff pushed into the future");
+  assert.strictEqual(after.qtyRemaining, 5, "the debt is kept for the retry");
+  await gf.syncOnce(pub.opts);
+  assert.strictEqual(pub.calls.length, 1, "inside the backoff nothing is retried");
+});
+
+test("out of stock ends the chain and says so — it is not retried forever", async () => {
+  await chain("gf-dry");
+  const pub = fakePublisher(() => {
+    throw new Error("Out of stock — no unsold account holds this whole bundle, so there is nothing to auto-deliver");
+  });
+  await gf.syncOnce(pub.opts);
+  const after = await MarketplaceListing.findOne({ externalId: "gf-dry" }).lean();
+  assert.match(after.lastError, /^expired on Gameflip — not renewed: Out of stock/);
+  await MarketplaceListing.updateOne({ externalId: "gf-dry" }, { $set: { relistRetryAt: null } });
+  await gf.syncOnce(pub.opts);
+  assert.strictEqual(pub.calls.length, 1, "a chain nothing can fill is not picked up again");
+});
+
+test("one renewal per pass, and a hand-made listing is never republished", async () => {
+  await chain("gf-c1");
+  await chain("gf-c2");
+  await row("gf-handmade", { autoDeliver: false, qtyRemaining: 0 });
+  world.state["gf-handmade"] = { status: "onsale", expiration: PAST, expired: true };
+  const pub = fakePublisher();
+  await gf.syncOnce(pub.opts);
+  assert.strictEqual(world.ended.length, 3, "all three are taken off Gameflip");
+  assert.strictEqual(pub.calls.length, 1, "but only one publish a pass");
+  await gf.syncOnce(pub.opts);
+  assert.strictEqual(pub.calls.length, 2);
+  const hand = await MarketplaceListing.findOne({ externalId: "gf-handmade" }).lean();
+  assert.strictEqual(hand.status, "removed");
+  assert.doesNotMatch(hand.lastError, /renew/);
+  assert.ok(pub.calls.every((c) => !/gf-handmade/.test(c.title)), "the owner's own listing is theirs to republish");
+});
+
+test("autoFarm.gameflipRenewExpired = false parks renewals; switching it back on resumes them", async () => {
+  await chain("gf-parked");
+  world.af = { gameflipRenewExpired: false };
+  const pub = fakePublisher();
+  await gf.syncOnce(pub.opts);
+  let after = await MarketplaceListing.findOne({ externalId: "gf-parked" }).lean();
+  assert.strictEqual(after.status, "removed");
+  assert.match(after.lastError, /^expired on Gameflip — renewal pending/);
+  assert.strictEqual(pub.calls.length, 0);
+  world.af = {};
+  await gf.syncOnce(pub.opts);
+  assert.strictEqual(pub.calls.length, 1);
+  after = await MarketplaceListing.findOne({ externalId: "gf-parked" }).lean();
+  assert.match(after.lastError, /renewed as/);
 });
