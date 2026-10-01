@@ -197,7 +197,9 @@ const listing = (over = {}) => ({
 // and LOW_WATER are the REAL ones on purpose: the check's whole design claim is
 // that the page and the Telegram alert cannot disagree because they share one
 // function, and a fake threshold here would quietly retire that claim.
-function fakeCapacity({ stacks = [], offlineHosts = [] } = {}) {
+// `quota` is the holder renter's { max, used, remaining }; it caps totalFree
+// exactly as rentFarmCapacity.snapshot() does.
+function fakeCapacity({ stacks = [], offlineHosts = [], quota = null } = {}) {
   const rows = stacks.map((s) => ({
     host: s.host || "pi",
     file: s.file || "config_31.json",
@@ -209,10 +211,15 @@ function fakeCapacity({ stacks = [], offlineHosts = [] } = {}) {
     LOW_WATER: rentFarm.LOW_WATER,
     levelFor: rentFarm.levelFor,
     async snapshot() {
+      const stackFree = rows.reduce((n, s) => n + s.remaining, 0);
+      const binds = !!quota && quota.remaining < stackFree;
       return {
         stacks: rows,
         offlineHosts,
-        totalFree: rows.reduce((n, s) => n + s.remaining, 0),
+        totalFree: binds ? quota.remaining : stackFree,
+        stackFree,
+        quota,
+        limitedBy: binds ? "holder-limit" : "stacks",
         totalCapacity: rows.reduce((n, s) => n + s.capacity, 0),
         readable: rows.length,
       };
@@ -331,6 +338,16 @@ function healthyDeps(over = {}) {
     gatherPoolEligibility: async () => ({
       eligible: Array.from({ length: 364 }, (_, i) => ({ username: "p" + i })),
     }),
+    fleetIntegrity: {
+      oneAccountOneBot: async () => ({ at: now, configs: 40, accounts: 1800, collisions: [], unreadable: [] }),
+    },
+    backup: {
+      status: async () => ({
+        lastSuccess: { at: new Date(NOW.getTime() - 3600e3).toISOString(), id: "b1", problems: [] },
+        offsiteHosts: ["pi", "contabo"],
+        offsite: { pi: { id: "b1", ok: true }, contabo: { id: "b1", ok: true } },
+      }),
+    },
     ...over,
   };
 }
@@ -526,6 +543,41 @@ test("an offline host does not spoil a HEALTHY verdict", async () => {
   );
   assert.strictEqual(check.status, "ok");
   assert.strictEqual(check.measured, 137);
+});
+
+test("REGRESSION 2026-09-28: a holder at its account limit fails despite free slots", async () => {
+  // Seven hours, four paid Eldorado orders refused "at its account limit
+  // (250)", and this check read green off 117 free stack slots.
+  const check = await runCheck(
+    "rentfarm.capacity",
+    healthyDeps({
+      rentFarmCapacity: fakeCapacity({
+        stacks: [{ host: "contabo", capacity: 50, used: 5 }],
+        quota: { max: 250, used: 250, remaining: 0 },
+      }),
+    }),
+  );
+  assert.strictEqual(check.status, "fail");
+  assert.strictEqual(check.measured, 0, "the page shows what an order can USE");
+  assert.match(check.summary, /account limit \(250\/250 used\)/);
+  assert.match(check.summary, /stacks have 45 free/, "and still shows the stack room");
+  assert.match(check.detail, /operator-selffarm/, "say which limit to raise");
+});
+
+test("an offline host does not withhold a holder-limit verdict", async () => {
+  // Unread hosts can only add stack slots; they cannot lift the holder's limit,
+  // so the partial-read downgrade to `unknown` must not apply here.
+  const check = await runCheck(
+    "rentfarm.capacity",
+    healthyDeps({
+      rentFarmCapacity: fakeCapacity({
+        stacks: [{ host: "contabo", capacity: 50, used: 5 }],
+        offlineHosts: ["Pi"],
+        quota: { max: 250, used: 250, remaining: 0 },
+      }),
+    }),
+  );
+  assert.strictEqual(check.status, "fail");
 });
 
 test("no readable stack at all is unknown with no number claimed", async () => {
@@ -1205,4 +1257,151 @@ test("an unreadable offer list is unknown, never ok", async () => {
   assert.strictEqual(out.status, "unknown");
   assert.ok(out.threshold && out.threshold.length, "even an unknown states its threshold");
   assert.match(out.detail, /failure to measure/);
+});
+
+/* ========================================================================== *
+ * One account, one bot
+ * ========================================================================== */
+
+test("listings.byGame: an active by-game offer warns and is named; set rows and delisted rows are not", async () => {
+  const rows = [
+    listing({ marketplace: "playerauctions", externalId: "295798998", unclaimedGame: "Overwatch", autoPaused: true, title: "OW 6 items" }),
+    // A set offer that still carries the old flag sells from its set.
+    listing({ marketplace: "eldorado", externalId: "eld-set", unclaimedGame: "Overwatch", noclaimStock: true }),
+    listing({ marketplace: "eldorado", externalId: "eld-old", unclaimedGame: "Overwatch", status: "delisted" }),
+    listing({ marketplace: "eldorado", externalId: "eld-plain", unclaimedGame: "" }),
+  ];
+  const row = await runCheck("listings.byGame", healthyDeps({ MarketplaceListing: fakeModel(rows) }));
+  assert.strictEqual(row.status, "warn");
+  assert.strictEqual(row.measured, 1);
+  assert.deepStrictEqual(row.items, [
+    { market: "playerauctions", offer: "295798998", game: "Overwatch", hidden: "yes", title: "OW 6 items" },
+  ]);
+  const ok = await runCheck("listings.byGame", healthyDeps({ MarketplaceListing: fakeModel(rows.slice(1)) }));
+  assert.strictEqual(ok.status, "ok");
+  assert.strictEqual(ok.measured, 0);
+});
+
+test("fleet.oneHome: an account enabled in two bots fails the check and names both", async () => {
+  const row = await runCheck(
+    "fleet.oneHome",
+    healthyDeps({
+      fleetIntegrity: {
+        oneAccountOneBot: async () => ({
+          at: now,
+          configs: 41,
+          accounts: 1800,
+          collisions: [{ login: "twice", secretTail: "…abcd", homes: ["contabo/config_42.json", "no-claim bot 14"] }],
+          unreadable: [],
+        }),
+      },
+    }),
+  );
+  assert.strictEqual(row.status, "fail");
+  assert.strictEqual(row.measured, 1);
+  assert.deepStrictEqual(row.items, [{ login: "twice", secret: "…abcd", bots: "contabo/config_42.json, no-claim bot 14" }]);
+});
+
+test("fleet.oneHome: clean but with an unreadable config is a warning, not an all-clear", async () => {
+  const row = await runCheck(
+    "fleet.oneHome",
+    healthyDeps({
+      fleetIntegrity: {
+        oneAccountOneBot: async () => ({ at: now, configs: 30, accounts: 900, collisions: [], unreadable: ["pi: unreachable"] }),
+      },
+    }),
+  );
+  assert.strictEqual(row.status, "warn");
+  assert.match(row.summary, /could not be read/);
+  const ok = await runCheck("fleet.oneHome", healthyDeps());
+  assert.strictEqual(ok.status, "ok");
+});
+
+/* ========================================================================== *
+ * eldorado.offers — a listing taken off sale that is on sale again
+ * ========================================================================== */
+
+// On 2026-09-28 offer 00ec3522 came back on sale while its row had said
+// "delisted" since 09-07, and this check called it "sellable bundle offer with
+// no listing row" — true of no row, and it sent the reader hunting for a row
+// that was there. The offer list is Eldorado's OWN, read once per run.
+function eldoradoDeps({ offers, rows, hold = null, listingModel = null }) {
+  return healthyDeps({
+    MarketplaceListing: listingModel || fakeModel(rows),
+    marketplaces: {
+      async eldoradoMyListings() {
+        return { results: offers, totalPages: 1 };
+      },
+    },
+    eldoradoFarmService: {
+      async parseFarmOrder() {
+        return { game: "Rainbow Six Siege", days: 180 };
+      },
+    },
+    settings: { getAutoFarm: () => (hold ? { eldoradoOfflineHold: hold } : {}) },
+  });
+}
+const eldOffer = (id, over = {}) => ({ id, offerState: "Active", offerTitle: "Offer " + id, ...over });
+const eldRow = (id, over = {}) =>
+  listing({ marketplace: "eldorado", externalId: id, title: "Offer " + id, origin: "manual", ...over });
+
+test("eldorado.offers: a live offer behind a delisted or sold row is named as back on sale", async () => {
+  const row = await runCheck(
+    "eldorado.offers",
+    eldoradoDeps({
+      rows: [eldRow("eld-ok"), eldRow("eld-back", { status: "delisted" }), eldRow("eld-sold", { status: "sold" })],
+      offers: [
+        eldOffer("eld-ok"),
+        eldOffer("eld-back"),
+        eldOffer("eld-sold"),
+        eldOffer("eld-orphan"),
+        eldOffer("eld-paused", { offerState: "Paused" }),
+      ],
+    }),
+  );
+  assert.strictEqual(row.status, "fail");
+  assert.strictEqual(row.measured, 3);
+  const byOffer = new Map(row.items.map((it) => [it.offer, it]));
+  assert.strictEqual(byOffer.get("eld-back").kind, "live on Eldorado but our row says delisted");
+  assert.match(byOffer.get("eld-back").why, /took off sale is on sale again/);
+  assert.strictEqual(byOffer.get("eld-sold").kind, "live on Eldorado but our row says sold");
+  // A live offer with no row at all is still the untracked-offer finding.
+  assert.strictEqual(byOffer.get("eld-orphan").kind, "sellable bundle offer with no listing row");
+  assert.strictEqual(byOffer.get("eld-orphan").why, undefined);
+  assert.ok(!byOffer.has("eld-ok"), "an active row's live offer is tracked");
+  assert.ok(!byOffer.has("eld-paused"), "only live offers are judged");
+  assert.match(row.summary, /our row says delisted/);
+  assert.match(row.summary, /no listing row/);
+});
+
+test("eldorado.offers: the offline hold still wins, and a failed status read keeps the old label", async () => {
+  // An offer on the offline hold is a manual line whatever its row says.
+  const held = await runCheck(
+    "eldorado.offers",
+    eldoradoDeps({
+      rows: [eldRow("eld-held", { status: "delisted" })],
+      offers: [eldOffer("eld-held")],
+      hold: { message: "away until 02:30 UTC", offers: ["eld-held"] },
+    }),
+  );
+  assert.strictEqual(held.status, "ok");
+  assert.match(held.detail, /offline-hold offer/);
+
+  // The status read is extra detail on a finding that stands without it: if it
+  // fails, the offer is still flagged, under the old label.
+  const base = fakeModel([eldRow("eld-back", { status: "delisted" })]);
+  const flaky = {
+    ...base,
+    find(query) {
+      if (query && query.externalId && query.externalId.$in) throw new Error("socket closed");
+      return base.find(query);
+    },
+  };
+  const row = await runCheck(
+    "eldorado.offers",
+    eldoradoDeps({ listingModel: flaky, offers: [eldOffer("eld-back")] }),
+  );
+  assert.strictEqual(row.status, "fail");
+  assert.strictEqual(row.measured, 1);
+  assert.strictEqual(row.items[0].kind, "sellable bundle offer with no listing row");
 });
