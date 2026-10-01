@@ -2237,13 +2237,20 @@ async function ggselResolveCategoryId(game) {
     const rows = (kids.data && kids.data.data) || [];
     const twitch = rows.find((k) => /twitch/i.test(String(k.title || "")));
     if (twitch) return ggselLeafCategory(twitch, keys);
-    // 3) The game's accounts section — the seller's own fallback pattern.
+    // 3) The game's accounts section — the seller's own fallback pattern —
+    //    but only when it IS the category (a leaf). An Accounts section split
+    //    by platform ("Accounts > PlayStation > Standard Edition", "Accounts >
+    //    Steam") sells that platform's game accounts: a Twitch-drops account
+    //    filed there is mis-described, and the leaf walk used to take the first
+    //    platform blindly (Rematch, RuneScape: Dragonwilds and Madden NFL 27
+    //    landed there on 2026-10-01). No Twitch section and no plain Accounts
+    //    leaf means no GGSel category for the game.
     const acc = rows.find((k) =>
       /^(accounts|\u0430\u043a\u043a\u0430\u0443\u043d\u0442\u044b)$/i.test(
         String(k.title || "").trim(),
       ),
     );
-    if (acc) return ggselLeafCategory(acc, keys);
+    if (acc && !acc.has_children) return String(acc.id);
   } catch {
     /* nothing */
   }
