@@ -294,6 +294,17 @@
           superOnly: true,
         },
         {
+          href: "/price-tracker.html",
+          label: "Price tracker",
+          // Right under the console: the console says what a market sold and
+          // made, this says what each market really pays for the same items and
+          // what a listing should cost. Read-only.
+          icon:
+            '<path d="M3 17l6-6 4 4 8-8"></path>' +
+            '<path d="M14 7h7v7"></path>',
+          superOnly: true,
+        },
+        {
           href: "/activity.html",
           label: "Activity log",
           icon: '<path d="M3 12h4l3 8 4-16 3 8h4"></path>',

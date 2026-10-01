@@ -111,6 +111,7 @@ const {
 const activityRoutes = require("./routes/activityRoutes");
 const systemHealthRoutes = require("./routes/systemHealthRoutes");
 const marketplaceConsoleRoutes = require("./routes/marketplaceConsoleRoutes");
+const priceTrackerRoutes = require("./routes/priceTrackerRoutes");
 const fleetSnapshot = require("./utils/fleetSnapshot");
 const auditRequest = require("./middleware/auditRequest");
 
@@ -630,6 +631,13 @@ app.get("/ai-proposals.html", requireSuperadmin, enforce2fa, (req, res) => {
   res.sendFile(path.join(__dirname, "public", "ai-proposals.html"));
 });
 
+// Price tracker page — superadmin-only, gated before static like /activity.html
+// (its API is gated per route inside routes/priceTrackerRoutes.js). Read-only.
+app.get("/price-tracker.html", requireSuperadmin, enforce2fa, (req, res) => {
+  res.set("Cache-Control", "no-store");
+  res.sendFile(path.join(__dirname, "public", "price-tracker.html"));
+});
+
 app.use(express.static(path.join(__dirname, "public")));
 
 // =========================
@@ -691,6 +699,10 @@ app.use(enforce2fa, activityRoutes);
 // has to re-check each marketplace by hand. Same admin cascade as /activity.
 app.use(enforce2fa, systemHealthRoutes);
 app.use(enforce2fa, marketplaceConsoleRoutes);
+// Price tracker (docs/PRICE-TRACKER-PLAN.md): what each market pays for the same
+// items, whether lower prices sell more, and what a listing should cost. READ-ONLY
+// — it never writes and never calls a marketplace. Every route is superadmin + 2FA.
+app.use(enforce2fa, priceTrackerRoutes.real());
 app.use(enforce2fa, marketplaceRoutes);
 // Account listings (docs/ACCOUNT-LISTINGS-CONTRACT.md): owner-supplied account
 // stock. Mounted after marketplaceRoutes because it shares that tab's publish

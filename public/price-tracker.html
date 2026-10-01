@@ -1,0 +1,489 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+<script>(function(){try{if(localStorage.getItem('theme')==='dark')document.documentElement.setAttribute('data-theme','dark');}catch(e){}})();</script>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<title>Price tracker | RedeemHub</title>
+<style>
+  :root{--bg:#f6f7fb;--surface:#ffffff;--surface-2:#f8fafc;--line:#e7eaf0;--ink:#0f172a;--muted:#6b7280;--accent:#4f46e5;--accent2:#6366f1;--green:#059669;--red:#dc2626;--yellow:#b45309;}
+  html[data-theme="dark"]{--bg:#0e1014;--surface:#161a22;--surface-2:#1e232e;--line:#2a3140;--ink:#e8ebf2;--muted:#9aa3b4;--green:#34d399;--red:#f87171;--yellow:#fbbf24;color-scheme:dark;}
+  html[data-theme="dark"] .nav .links a.active{background:rgba(99,102,241,0.20);}
+  html[data-theme="dark"] .pill.s-ok{background:rgba(52,211,153,.14);}
+  html[data-theme="dark"] .pill.s-warn{background:rgba(251,191,36,.14);}
+  html[data-theme="dark"] .pill.s-fail{background:rgba(248,113,113,.14);}
+  html[data-theme="dark"] .pill.s-unknown{background:rgba(154,163,180,.12);}
+  html[data-theme="dark"] .tab.on{background:rgba(99,102,241,.20);}
+  * { margin:0; padding:0; box-sizing:border-box; }
+  body { font-family:"Inter","Segoe UI",Tahoma,sans-serif; background:var(--bg); color:var(--ink); height:100vh; display:flex; overflow:hidden; }
+
+  .nav { width:236px; background:var(--surface); border-right:1px solid var(--line); display:flex; flex-direction:column; flex-shrink:0; }
+  .nav .brand { display:flex; align-items:center; gap:10px; padding:18px 20px; border-bottom:1px solid var(--line); }
+  .nav .brand .mark { width:34px; height:34px; border-radius:10px; background:linear-gradient(135deg,var(--accent2),var(--accent)); display:grid; place-items:center; box-shadow:0 6px 14px rgba(79,70,229,0.32); }
+  .nav .brand b { font-size:15px; font-weight:700; line-height:1.15; }
+  .nav .brand b span { display:block; font-size:10.5px; color:var(--muted); font-weight:500; }
+  .nav .links { padding:12px; flex:1; display:flex; flex-direction:column; gap:4px; overflow-y:auto; }
+  .nav .links a { display:flex; align-items:center; gap:11px; padding:11px 13px; border-radius:10px; color:var(--muted); text-decoration:none; font-size:14px; font-weight:500; }
+  .nav .links a:hover { background:var(--surface-2); }
+  .nav .links a.active { background:#eef2ff; color:var(--accent); font-weight:600; }
+  .nav .me { border-top:1px solid var(--line); padding:14px; display:flex; align-items:center; gap:10px; }
+  .nav .me .av { width:36px; height:36px; border-radius:10px; background:linear-gradient(135deg,#34d399,#10b981); display:grid; place-items:center; color:#fff; font-weight:700; font-size:13px; flex-shrink:0; }
+  .nav .me .who { line-height:1.2; min-width:0; }
+  .nav .me .who b { font-size:13.5px; display:block; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; max-width:84px; }
+  .nav .me .who span { display:block; font-size:11px; color:var(--muted); }
+  .nav .me .actions { margin-left:auto; display:flex; gap:6px; }
+  .nav .me .logout { width:32px; height:32px; border-radius:9px; border:1px solid var(--line); background:var(--surface); color:var(--muted); display:grid; place-items:center; cursor:pointer; }
+
+  .page { flex:1; overflow-y:auto; padding:26px 30px 64px; min-width:0; -webkit-overflow-scrolling:touch; }
+  h1 { font-size:22px; font-weight:800; }
+  .sub { color:var(--muted); font-size:13.5px; margin-top:4px; line-height:1.45; }
+  .head { display:flex; align-items:flex-start; gap:18px; flex-wrap:wrap; margin:0 0 18px; }
+  .head-actions { margin-left:auto; display:flex; gap:8px; align-items:center; }
+
+  button { border:1px solid var(--line); border-radius:9px; background:var(--surface); color:var(--ink); padding:9px 14px; cursor:pointer; font:inherit; font-size:13.5px; }
+  button:hover { border-color:var(--accent); }
+  button.primary { color:#fff; border-color:var(--accent); background:var(--accent); }
+  button:disabled { opacity:.5; cursor:not-allowed; }
+  a.plain { color:var(--accent); text-decoration:none; }
+
+  .pill { display:inline-flex; align-items:center; gap:5px; border-radius:999px; padding:3px 9px; font-size:11px; font-weight:700; border:1px solid transparent; white-space:nowrap; }
+  .pill.s-ok { color:var(--green); background:#ecfdf5; }
+  .pill.s-warn { color:var(--yellow); background:#fffbeb; }
+  .pill.s-fail { color:var(--red); background:#fef2f2; }
+  .pill.s-unknown { color:var(--muted); background:#f3f4f6; border-style:dashed; border-color:var(--line); }
+
+  /* ---------------------------- market cards ---------------------------- */
+  .grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(268px,1fr)); gap:14px; }
+  .mcard { background:var(--surface); border:1px solid var(--line); border-radius:14px; padding:15px 16px; cursor:pointer; display:flex; flex-direction:column; gap:11px; text-align:left; width:100%; }
+  .mcard:hover { border-color:var(--accent); }
+  .mcard .top { display:flex; align-items:center; gap:9px; }
+  .mcard .nm { font-size:15.5px; font-weight:750; text-transform:capitalize; }
+  .mcard .chev { margin-left:auto; color:var(--muted); flex-shrink:0; }
+  .mcard .money { font-size:24px; font-weight:800; letter-spacing:-.4px; line-height:1; }
+  .mcard .money small { font-size:12px; font-weight:600; color:var(--muted); margin-left:5px; letter-spacing:0; }
+  .mcard .stats { display:grid; grid-template-columns:repeat(3,1fr); gap:8px; }
+  .mcard .stat { background:var(--surface-2); border-radius:9px; padding:7px 9px; }
+  .mcard .stat b { display:block; font-size:15px; font-weight:750; line-height:1.2; }
+  .mcard .stat span { font-size:10.5px; color:var(--muted); }
+  .mcard .basis { font-size:11px; color:var(--muted); line-height:1.4; }
+
+  /* ------------------------------ detail -------------------------------- */
+  .back { display:inline-flex; align-items:center; gap:7px; color:var(--muted); background:none; border:none; padding:8px 0; font-size:13.5px; cursor:pointer; }
+  .back:hover { color:var(--accent); }
+  .kpis { display:grid; grid-template-columns:repeat(auto-fit,minmax(120px,1fr)); gap:10px; margin:14px 0 16px; }
+  .kpi { background:var(--surface); border:1px solid var(--line); border-radius:12px; padding:12px 13px; }
+  .kpi b { display:block; font-size:19px; font-weight:800; line-height:1.2; }
+  .kpi span { font-size:11.5px; color:var(--muted); }
+
+  .tabs { display:flex; gap:6px; overflow-x:auto; padding-bottom:8px; margin-bottom:12px; scrollbar-width:none; -webkit-overflow-scrolling:touch; }
+  .tabs::-webkit-scrollbar { display:none; }
+  .tab { flex:0 0 auto; border:1px solid var(--line); background:var(--surface); border-radius:999px; padding:8px 15px; font-size:13px; font-weight:600; color:var(--muted); cursor:pointer; white-space:nowrap; }
+  .tab.on { background:#eef2ff; color:var(--accent); border-color:var(--accent); }
+
+  .basisbar { font-size:12px; color:var(--muted); background:var(--surface-2); border:1px dashed var(--line); border-radius:10px; padding:9px 12px; margin-bottom:12px; line-height:1.45; }
+
+  .rows { display:flex; flex-direction:column; gap:8px; }
+  .row { background:var(--surface); border:1px solid var(--line); border-radius:12px; padding:12px 14px; }
+  .row .r1 { display:flex; align-items:baseline; gap:9px; flex-wrap:wrap; }
+  .row .r1 .t { font-weight:650; font-size:14px; line-height:1.35; word-break:break-word; }
+  .row .r1 .amt { margin-left:auto; font-weight:750; font-size:14px; white-space:nowrap; }
+  .row .r2 { margin-top:5px; font-size:12px; color:var(--muted); display:flex; gap:10px; flex-wrap:wrap; align-items:center; }
+  .row .err { margin-top:7px; font-size:12px; color:var(--red); background:rgba(220,38,38,.06); border-radius:8px; padding:7px 9px; line-height:1.45; word-break:break-word; }
+  /* A reason, not a fault. "Missing because the reserve floor was reached" is
+     the buffer working as designed, and painting it red like .err would teach
+     the operator to ignore the rows that ARE faults. */
+  .row .why { margin-top:7px; font-size:12px; color:var(--muted); background:var(--surface-2); border:1px dashed var(--line); border-radius:8px; padding:7px 9px; line-height:1.45; word-break:break-word; }
+  .row .kpis { margin:10px 0 2px; }
+  .mono { font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:11.5px; }
+  .oid { color:var(--accent); cursor:pointer; text-decoration:underline; text-underline-offset:2px; word-break:break-all; }
+  .empty { text-align:center; color:var(--muted); font-size:13.5px; padding:34px 16px; background:var(--surface); border:1px dashed var(--line); border-radius:12px; line-height:1.5; }
+  .more { width:100%; margin-top:10px; padding:12px; }
+  .sentinel { height:1px; }
+
+  /* --------------------------- order trail ------------------------------ */
+  .sheet { position:fixed; inset:0; background:rgba(15,23,42,.55); display:none; z-index:80; align-items:flex-end; justify-content:center; }
+  .sheet.on { display:flex; }
+  .sheet .inner { background:var(--surface); width:100%; max-width:620px; max-height:86vh; border-radius:16px 16px 0 0; display:flex; flex-direction:column; }
+  .sheet .sh { padding:15px 17px; border-bottom:1px solid var(--line); display:flex; align-items:center; gap:10px; }
+  .sheet .sh b { font-size:15px; font-weight:750; }
+  .sheet .sb { padding:15px 17px calc(24px + env(safe-area-inset-bottom)); overflow-y:auto; }
+  .tl { position:relative; padding-left:20px; }
+  .tl::before { content:""; position:absolute; left:5px; top:5px; bottom:5px; width:2px; background:var(--line); }
+  .tl .ev { position:relative; padding-bottom:15px; }
+  .tl .ev::before { content:""; position:absolute; left:-19px; top:4px; width:10px; height:10px; border-radius:50%; background:var(--accent); border:2px solid var(--surface); }
+  .tl .ev.bad::before { background:var(--red); }
+  .tl .ev .k { font-weight:700; font-size:13px; }
+  .tl .ev .w { font-size:11.5px; color:var(--muted); }
+  .tl .ev .d { font-size:12.5px; margin-top:3px; line-height:1.45; word-break:break-word; }
+
+  @media (max-width:768px) {
+    .page { padding:14px 14px calc(72px + env(safe-area-inset-bottom)); }
+    h1 { font-size:19px; }
+    .sub { font-size:12.5px; }
+    .grid { grid-template-columns:1fr; gap:11px; }
+    .kpis { grid-template-columns:repeat(2,1fr); }
+    /* Tap targets, not mouse targets. */
+    .tab { padding:10px 16px; font-size:13.5px; }
+    .mcard { padding:14px; }
+    .row { padding:13px 14px; }
+    .head-actions { width:100%; }
+    .head-actions button { flex:1; padding:11px 14px; }
+  }
+
+  /* ------------------------------ price tracker ------------------------------ */
+  .insights { display:flex; flex-direction:column; gap:8px; margin:0 0 18px; }
+  .insight { background:var(--surface); border:1px solid var(--line); border-left:4px solid var(--line); border-radius:12px; padding:11px 14px; }
+  .insight.warn { border-left-color:var(--yellow); }
+  .insight.opportunity { border-left-color:var(--green); }
+  .insight.info { border-left-color:var(--accent2); }
+  .insight b { font-size:13.5px; display:block; margin-bottom:3px; }
+  .insight span { font-size:12.5px; color:var(--muted); line-height:1.5; display:block; }
+  .vgrid { display:grid; grid-template-columns:repeat(auto-fill,minmax(300px,1fr)); gap:14px; }
+  .vcard { background:var(--surface); border:1px solid var(--line); border-radius:14px; padding:14px 16px; display:flex; flex-direction:column; gap:10px; }
+  .vcard .top { display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
+  .vcard .nm { font-size:15.5px; font-weight:750; }
+  .vcard .big { font-size:23px; font-weight:800; letter-spacing:-.4px; line-height:1; }
+  .vcard .big small { font-size:11.5px; font-weight:600; color:var(--muted); margin-left:5px; letter-spacing:0; }
+  .vcard .mini { display:grid; grid-template-columns:repeat(3,1fr); gap:7px; }
+  .vcard .mini div { background:var(--surface-2); border-radius:9px; padding:6px 9px; }
+  .vcard .mini b { display:block; font-size:14px; font-weight:750; }
+  .vcard .mini span { font-size:10.5px; color:var(--muted); }
+  .vcard .note { font-size:11.5px; color:var(--muted); line-height:1.45; }
+  .pill.s-info { color:var(--accent); background:#eef2ff; }
+  html[data-theme="dark"] .pill.s-info { background:rgba(99,102,241,.18); }
+  .ctl { display:flex; gap:8px; flex-wrap:wrap; align-items:center; margin:0 0 12px; }
+  .ctl select, .ctl input { border:1px solid var(--line); background:var(--surface); color:var(--ink); border-radius:9px; padding:9px 11px; font:inherit; font-size:13.5px; min-width:0; }
+  .ctl input[type=search] { flex:1 1 180px; }
+  table.curve { width:100%; border-collapse:collapse; font-size:12.5px; background:var(--surface); border:1px solid var(--line); border-radius:12px; overflow:hidden; }
+  table.curve th { text-align:right; font-weight:650; color:var(--muted); font-size:11px; padding:8px 9px; background:var(--surface-2); white-space:nowrap; }
+  table.curve td { text-align:right; padding:8px 9px; border-top:1px solid var(--line); white-space:nowrap; }
+  table.curve th:first-child, table.curve td:first-child { text-align:left; }
+  table.curve tr.best td { background:rgba(5,150,105,.09); font-weight:650; }
+  table.curve tr.thin td { opacity:.55; }
+  .scroll { overflow-x:auto; -webkit-overflow-scrolling:touch; }
+  .bar { display:inline-block; height:7px; border-radius:4px; background:var(--accent2); vertical-align:middle; }
+  .bar.range { background:rgba(99,102,241,.25); }
+  .chips { display:flex; flex-wrap:wrap; gap:6px; margin-top:7px; }
+  .chip { font-size:11.5px; border:1px solid var(--line); background:var(--surface-2); border-radius:8px; padding:4px 8px; line-height:1.3; }
+  .chip b { font-weight:700; }
+  .chip.sold { border-color:var(--green); }
+  .arrow { color:var(--muted); }
+  .good { color:var(--green); } .bad { color:var(--red); }
+  .row.clickable { cursor:pointer; } .row.clickable:hover { border-color:var(--accent); }
+
+</style>
+</head>
+
+<body>
+  <aside class="nav">
+    <div class="brand">
+      <span class="mark"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polygon points="12 2 2 8.5 12 15 22 8.5 12 2"></polygon></svg></span>
+      <b>RedeemHub<span>Admin console</span></b>
+    </div>
+    <nav class="links"></nav>
+    <div class="me">
+      <div class="av" id="meAvatar">--</div>
+      <div class="who"><b id="meName">Admin</b><span id="meRole">...</span></div>
+      <div class="actions">
+        <button class="logout" data-theme-toggle onclick="toggleTheme()" title="Toggle dark mode" aria-pressed="false">☾</button>
+        <button class="logout" id="logoutBtn" title="Log out">⎋</button>
+      </div>
+    </div>
+  </aside>
+
+  <main class="page" id="page"></main>
+
+  <div class="sheet" id="sheet"><div class="inner">
+    <div class="sh"><b id="sheetTitle">Set</b><button style="margin-left:auto" id="sheetClose">Close</button></div>
+    <div class="sb" id="sheetBody"></div>
+  </div></div>
+
+  <script src="/theme.js"></script>
+  <script src="/admin-nav.js"></script>
+  <script>
+  (function () {
+    "use strict";
+    // Everything rendered here is marketplace-supplied text (offer titles, order
+    // ids). One unescaped value is an XSS hole on a superadmin page.
+    function esc(v) {
+      return String(v == null ? "" : v)
+        .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;").replace(/'/g, "&#39;");
+    }
+    function money(n) { return "$" + (Number(n) || 0).toFixed(2); }
+    function pct(n) { return Math.round((Number(n) || 0) * 100) + "%"; }
+    function ago(d) {
+      if (!d) return "never";
+      var s = Math.max(0, (Date.now() - new Date(d).getTime()) / 1000);
+      if (s < 3600) return Math.max(1, Math.round(s / 60)) + " min ago";
+      if (s < 86400) return Math.round(s / 3600) + "h ago";
+      return Math.round(s / 86400) + "d ago";
+    }
+    function day(d) { return d ? String(d).slice(0, 10) : "—"; }
+    async function api(path) {
+      var r = await fetch(path, { credentials: "same-origin", headers: { Accept: "application/json" } });
+      if (r.status === 401 || r.status === 403) throw new Error("Not signed in as a superadmin with 2FA.");
+      var j = await r.json().catch(function () { return null; });
+      if (!r.ok || !j || j.success === false) throw new Error((j && j.message) || "HTTP " + r.status);
+      return j;
+    }
+
+    var page = document.getElementById("page");
+    var TABS = [["overview", "Overview"], ["curve", "Price curve"], ["sets", "Same items"], ["advice", "Advice"], ["sales", "Sales ledger"], ["suggest", "Suggest"]];
+    var MARKETS = ["gameflip", "ggsel", "eldorado", "g2g", "playerauctions", "zeusx", "digiseller"];
+    var state = { tab: (location.hash || "#overview").slice(1), overview: null };
+    if (!TABS.some(function (t) { return t[0] === state.tab; })) state.tab = "overview";
+
+    // Every shell() starts a new render. A response that arrives after the user
+    // has moved to another tab (or changed a filter) must not write into the new
+    // DOM: it checks its generation and drops out instead.
+    function shell(inner) {
+      state.gen = (state.gen || 0) + 1;
+      var gen = state.gen;
+      page.innerHTML =
+        '<div class="head"><div><h1>Price tracker</h1>' +
+        '<div class="sub">What each market really pays for the same items, whether lower prices really sell more, and what each listing should cost. ' +
+        'Read-only — nothing here lists, delists or reprices, and it never calls a marketplace.</div></div>' +
+        '<div class="head-actions"><button id="refreshBtn">Refresh</button></div></div>' +
+        '<div class="tabs">' + TABS.map(function (t) {
+          return '<button class="tab' + (t[0] === state.tab ? " on" : "") + '" data-tab="' + t[0] + '">' + t[1] + "</button>";
+        }).join("") + "</div>" + inner;
+      page.querySelector("#refreshBtn").onclick = function () { state.overview = null; render(true); };
+      Array.prototype.forEach.call(page.querySelectorAll(".tab"), function (b) {
+        b.onclick = function () { state.tab = b.getAttribute("data-tab"); location.hash = state.tab; render(); };
+      });
+      return gen;
+    }
+    function stale(g) { return g !== state.gen; }
+    function fail(e) { shell('<div class="empty">' + esc(e.message) + "</div>"); }
+    function marketOptions(sel, any) {
+      return (any ? '<option value="">All markets</option>' : "") + MARKETS.map(function (m) {
+        return '<option value="' + m + '"' + (m === sel ? " selected" : "") + ">" + m + "</option>";
+      }).join("");
+    }
+
+    /* ----------------------------- overview ----------------------------- */
+    async function getOverview(force) {
+      if (!state.overview || force) state.overview = await api("/api/price-tracker/overview" + (force ? "?force=1" : ""));
+      return state.overview;
+    }
+    function venueCard(v, fees) {
+      var f = fees[v.market] || {};
+      var gap = v.askVsRealisedPct;
+      return '<div class="vcard"><div class="top"><span class="nm">' + esc(v.label) + "</span>" +
+        (v.blocked ? '<span class="pill s-fail">blocked</span>' : "") +
+        '<span class="pill ' + (f.verified ? "s-ok" : "s-unknown") + '" title="' + esc(f.source) + '">' + esc(f.feePct) + "% fee" + (f.verified ? "" : " · assumed") + "</span></div>" +
+        (v.realised.n
+          ? '<div class="big">' + money(v.realised.median) + "<small>median realised · " + v.realised.n + " sales</small></div>"
+          : '<div class="big">—<small>no priced sales recorded</small></div>') +
+        '<div class="mini"><div><b>' + money(v.realised.p75) + "</b><span>p75 paid</span></div>" +
+        "<div><b>" + money(v.grossUsd) + "</b><span>gross</span></div>" +
+        "<div><b>" + money(v.netUsd) + "</b><span>net of fee</span></div>" +
+        "<div><b>" + (v.live.n ? money(v.live.askMedian) : "—") + "</b><span>live ask median (" + v.live.n + ")</span></div>" +
+        "<div><b>" + (gap == null ? "—" : (gap > 0 ? "+" : "") + Math.round(gap) + "%") + "</b><span>ask vs paid</span></div>" +
+        "<div><b>" + pct(v.atFloorShare) + "</b><span>sold at floor " + money(v.floorUsd) + "</span></div></div>" +
+        '<div class="note">Sales: ' + v.sales.d7 + " in 7d · " + v.sales.d30 + " in 30d · " + v.sales.prev30 + " the 30d before. " +
+        (v.approxShare >= 0.5 ? "Prices are the listing price now, not the price at sale. " : "") +
+        esc(f.repriceMode || "") + "</div></div>";
+    }
+    async function renderOverview(force) {
+      var want = state.tab;
+      var o = await getOverview(force);
+      if (state.tab !== want) return;
+      var ins = o.insights.map(function (i) {
+        return '<div class="insight ' + esc(i.level) + '"><b>' + esc(i.title) + "</b><span>" + esc(i.detail) + "</span></div>";
+      }).join("");
+      var q = o.quality;
+      shell(
+        '<div class="basisbar">Evidence: ' + q.total + " sales in the ledger (" + q.priced + " priced) — " +
+        Object.keys(q.bySource).map(function (k) { return q.bySource[k] + " " + k; }).join(", ") +
+        ". Set aside: " + o.suspect.total + " mass-close signals, " + o.excluded.farm + " rent-farm, " + o.excluded.bulk + " bulk, " + o.excluded.duplicate +
+        " duplicates. " + o.counts.sets + " item sets, " + o.counts.crossMarketSets + " sold on 2+ markets. Built " + esc(ago(o.at)) + ".</div>" +
+        '<div class="insights">' + ins + "</div>" +
+        '<div class="vgrid">' + o.venues.map(function (v) { return venueCard(v, o.fees); }).join("") + "</div>"
+      );
+    }
+
+    /* ---------------------------- price curve --------------------------- */
+    async function renderCurve() {
+      var market = state.curveMarket || "gameflip", origin = state.curveOrigin || "auto";
+      var g = shell('<div class="ctl"><select id="cm">' + marketOptions(market) + '</select><select id="co">' +
+        ["auto", "all", "manual"].map(function (x) { return '<option value="' + x + '"' + (x === origin ? " selected" : "") + ">" + x + " listings</option>"; }).join("") +
+        '</select></div><div id="cv"><div class="empty">Loading…</div></div>');
+      page.querySelector("#cm").onchange = function (e) { state.curveMarket = e.target.value; renderCurve(); };
+      page.querySelector("#co").onchange = function (e) { state.curveOrigin = e.target.value; renderCurve(); };
+      var j = await api("/api/price-tracker/curve/" + encodeURIComponent(market) + "?origin=" + encodeURIComponent(origin));
+      if (stale(g)) return;
+      var c = j.curve, single = c.saleModel === "single-unit";
+      var maxV = Math.max.apply(null, c.bins.map(function (b) { return single ? (b.expectedRevenuePerListing || 0) : b.revenuePerListingDay; }).concat([0.0001]));
+      var rows = c.bins.map(function (b) {
+        var v = single ? b.expectedRevenuePerListing : b.revenuePerListingDay;
+        return '<tr class="' + (b.label === c.best ? "best " : "") + (b.thin ? "thin" : "") + '"><td>' + esc(b.label) + (b.label === c.best ? " ★" : "") + (b.thin ? " · thin" : "") + "</td>" +
+          "<td>" + b.listings + "</td><td>" + (single ? b.resolved : "—") + "</td><td>" + b.soldUnits + "</td>" +
+          "<td>" + (b.conversion ? pct(b.conversion.p) + ' <span class="arrow">(' + pct(b.conversion.lo) + "–" + pct(b.conversion.hi) + ")</span>" : "—") + "</td>" +
+          "<td>" + (b.medianDaysToSale == null ? "—" : b.medianDaysToSale.toFixed(1) + "d") + "</td>" +
+          "<td>" + (b.fastShare24h == null ? "—" : pct(b.fastShare24h)) + "</td>" +
+          "<td>" + (single ? money(b.expectedRevenuePerListing) : money(b.revenuePerListingDay)) + ' <span class="bar" style="width:' + Math.round((v / maxV) * 60) + 'px"></span></td></tr>';
+      }).join("");
+      page.querySelector("#cv").innerHTML =
+        '<div class="basisbar"><b>' + esc(market) + "</b> · " + esc(origin) + " listings · metric: " + esc(c.metric) + ". " + esc(c.caveat) + "</div>" +
+        (c.bins.length ? '<div class="scroll"><table class="curve"><tr><th>price</th><th>listings</th><th>resolved</th><th>sold</th><th>conversion (80% range)</th><th>median days to sale</th><th>sold &lt;24h</th><th>' + (single ? "expected $ per listing" : "$ per listing-day") + "</th></tr>" + rows + "</table></div>" : '<div class="empty">No listings for this market.</div>');
+    }
+
+    /* ------------------------------ same items -------------------------- */
+    function marketChips(markets) {
+      return Object.keys(markets).map(function (m) {
+        var c = markets[m];
+        var txt = (c.sold ? "<b>" + c.sold + " sold @ " + money(c.soldMedian) + "</b>" : "no sale") + (c.liveN ? " · " + c.liveN + " live " + (c.askMin === c.askMax ? money(c.askMin) : money(c.askMin) + "–" + money(c.askMax)) : "");
+        return '<span class="chip' + (c.sold ? " sold" : "") + '">' + esc(m) + ": " + txt + "</span>";
+      }).join("");
+    }
+    async function renderSets() {
+      var f = state.sets || (state.sets = { market: "", q: "", evidence: "cross", offset: 0 });
+      var g = shell('<div class="ctl"><select id="sev"><option value="cross">sold on 2+ markets</option><option value="sold">sold anywhere</option><option value="live">live now</option><option value="all">everything</option></select>' +
+        '<select id="sm">' + marketOptions(f.market, true) + '</select><input id="sq" type="search" placeholder="Search game or title" value="' + esc(f.q) + '"></div><div id="sl"><div class="empty">Loading…</div></div>');
+      var ev = page.querySelector("#sev"); ev.value = f.evidence;
+      ev.onchange = function () { f.evidence = ev.value; f.offset = 0; renderSets(); };
+      page.querySelector("#sm").onchange = function (e) { f.market = e.target.value; f.offset = 0; renderSets(); };
+      var sq = page.querySelector("#sq"), t;
+      sq.oninput = function () { clearTimeout(t); t = setTimeout(function () { f.q = sq.value; f.offset = 0; renderSets(); }, 350); };
+      var j = await api("/api/price-tracker/sets?evidence=" + f.evidence + "&market=" + encodeURIComponent(f.market) + "&q=" + encodeURIComponent(f.q) + "&limit=25&offset=" + f.offset);
+      if (stale(g)) return;
+      var list = j.rows.map(function (s) {
+        return '<div class="row clickable" data-key="' + esc(s.key) + '"><div class="r1"><span class="t">' + esc(s.title || s.game) + "</span>" +
+          '<span class="amt">' + (s.spread ? "×" + s.spread.toFixed(2) + " spread" : s.soldTotal + " sold") + "</span></div>" +
+          '<div class="r2"><span class="pill ' + (s.tier === "exact" ? "s-ok" : "s-unknown") + '">' + (s.tier === "exact" ? "exact items" : "game + size band") + "</span>" +
+          "<span>" + esc(s.game) + (s.itemCount ? " · " + s.itemCount + " items" : "") + "</span>" + (s.bestVenue ? "<span>best after fees: " + esc(s.bestVenue) + "</span>" : "") + "</div>" +
+          '<div class="chips">' + marketChips(s.markets) + "</div></div>";
+      }).join("");
+      page.querySelector("#sl").innerHTML =
+        '<div class="basisbar">' + j.total + " sets. “Exact items” means the same items in the same amounts (content, not title or set id). A set that sold on two markets is the only like-for-like price comparison there is.</div>" +
+        (list ? '<div class="rows">' + list + "</div>" : '<div class="empty">Nothing matches.</div>') +
+        '<div class="ctl" style="margin-top:12px">' + (f.offset > 0 ? '<button id="pv">← Previous</button>' : "") + (f.offset + 25 < j.total ? '<button id="nx">Next →</button>' : "") + "</div>";
+      var nx = page.querySelector("#nx"), pv = page.querySelector("#pv");
+      if (nx) nx.onclick = function () { f.offset += 25; renderSets(); };
+      if (pv) pv.onclick = function () { f.offset = Math.max(0, f.offset - 25); renderSets(); };
+      Array.prototype.forEach.call(page.querySelectorAll(".row.clickable"), function (r) { r.onclick = function () { openSet(r.getAttribute("data-key")); }; });
+    }
+    function openSheet(title, html) {
+      document.getElementById("sheetTitle").textContent = title;
+      document.getElementById("sheetBody").innerHTML = html;
+      document.getElementById("sheet").classList.add("on");
+    }
+    document.getElementById("sheetClose").onclick = function () { document.getElementById("sheet").classList.remove("on"); };
+    async function openSet(key) {
+      openSheet("Loading…", '<div class="empty">Loading…</div>');
+      try {
+        var j = await api("/api/price-tracker/set/" + encodeURIComponent(key));
+        var s = j.set;
+        var live = Object.keys(s.markets).map(function (m) {
+          return s.markets[m].live.map(function (l) {
+            return '<div class="row"><div class="r1"><span class="t">' + esc(m) + '</span><span class="amt">' + money(l.price) + "</span></div>" +
+              '<div class="r2"><span class="pill s-unknown">' + esc(l.origin) + "</span><span class=\"mono\">" + esc(l.externalId) + "</span><span>live " + l.ageDays.toFixed(1) + "d</span></div></div>";
+          }).join("");
+        }).join("");
+        var sales = j.sales.map(function (x) {
+          return '<div class="row"><div class="r1"><span class="t">' + esc(x.market) + " · " + esc(x.source) + '</span><span class="amt">' + (x.priced ? money(x.priceUsd) : "no price") + "</span></div>" +
+            '<div class="r2"><span>' + esc(day(x.at)) + "</span>" + (x.orderId ? '<span class="mono">order ' + esc(x.orderId) + "</span>" : "") + '<span class="mono">' + esc(x.externalId) + "</span><span>" +
+            (x.priceBasis === "listing-now" ? "price = listing now" : "price at sale") + "</span></div></div>";
+        }).join("");
+        var adv = j.advice.map(adviceRow).join("");
+        openSheet(s.title || s.game,
+          '<div class="basisbar">' + (s.tier === "exact" ? "Exact items." : "Grouped by game + size band (exact content unknown).") + "</div>" +
+          "<b>Live listings</b><div class=\"rows\" style=\"margin:8px 0 16px\">" + (live || '<div class="empty">None live.</div>') + "</div>" +
+          "<b>Advice</b><div class=\"rows\" style=\"margin:8px 0 16px\">" + (adv || '<div class="empty">No live listings to advise.</div>') + "</div>" +
+          "<b>Sales (newest first)</b><div class=\"rows\" style=\"margin:8px 0\">" + (sales || '<div class="empty">No sales.</div>') + "</div>");
+      } catch (e) { openSheet("Error", '<div class="empty">' + esc(e.message) + "</div>"); }
+    }
+
+    /* -------------------------------- advice ---------------------------- */
+    function adviceRow(a) {
+      var up = a.delta > 0;
+      return '<div class="row"><div class="r1"><span class="t">' + esc(a.title) + '</span><span class="amt">' + money(a.current) +
+        ' <span class="arrow">→</span> <span class="' + (up ? "good" : a.delta < 0 ? "bad" : "") + '">' + (a.price ? money(a.price) : "—") + "</span></span></div>" +
+        '<div class="r2"><span class="pill s-info">' + esc(a.market) + '</span><span class="pill ' + (a.action === "raise" ? "s-ok" : a.action === "lower" ? "s-warn" : "s-unknown") + '">' + esc(a.action) + "</span>" +
+        '<span class="pill ' + (a.confidence === "high" ? "s-ok" : a.confidence === "medium" ? "s-warn" : "s-unknown") + '">' + esc(a.confidence) + " confidence</span>" +
+        (a.applicable ? '<span class="pill s-ok">auto row — adjustable</span>' : '<span class="pill s-unknown">advisory · ' + esc(a.advisoryReason || "") + "</span>") +
+        "<span>live " + (a.ageDays || 0).toFixed(1) + "d</span><span class=\"mono\">" + esc(a.externalId) + "</span></div>" +
+        '<div class="why">' + esc(a.basis) + ". " + esc((a.reasons || []).join(" ")) + (a.clamped ? " Clamped by the " + esc(a.clamped) + " (" + money(a.floor) + "–" + money(a.cap) + ")." : "") +
+        (a.test ? "<br><b>Test:</b> " + money(a.test.price) + " — " + esc(a.test.why) : "") + "</div></div>";
+    }
+    async function renderAdvice() {
+      var f = state.advice || (state.advice = { market: "", action: "", conf: "", q: "", offset: 0, applicable: "" });
+      var g = shell('<div class="ctl"><select id="am">' + marketOptions(f.market, true) + '</select><select id="aa"><option value="">raise + lower</option><option value="raise">raise only</option><option value="lower">lower only</option><option value="ladder">deliberate ladders</option><option value="hold">hold</option></select>' +
+        '<select id="ac"><option value="">any confidence</option><option value="medium">medium +</option><option value="high">high only</option></select>' +
+        '<select id="ap"><option value="">all rows</option><option value="1">adjustable only</option></select><input id="aq" type="search" placeholder="Search" value="' + esc(f.q) + '"></div><div id="al"><div class="empty">Loading…</div></div>');
+      [["aa", "action"], ["ac", "conf"], ["ap", "applicable"]].forEach(function (p) { var el = page.querySelector("#" + p[0]); el.value = f[p[1]]; el.onchange = function () { f[p[1]] = el.value; f.offset = 0; renderAdvice(); }; });
+      page.querySelector("#am").onchange = function (e) { f.market = e.target.value; f.offset = 0; renderAdvice(); };
+      var aq = page.querySelector("#aq"), t; aq.oninput = function () { clearTimeout(t); t = setTimeout(function () { f.q = aq.value; f.offset = 0; renderAdvice(); }, 350); };
+      var j = await api("/api/price-tracker/advice?market=" + encodeURIComponent(f.market) + "&action=" + encodeURIComponent(f.action) + "&conf=" + encodeURIComponent(f.conf) + "&applicable=" + encodeURIComponent(f.applicable) + "&q=" + encodeURIComponent(f.q) + "&limit=25&offset=" + f.offset);
+      if (stale(g)) return;
+      page.querySelector("#al").innerHTML =
+        '<div class="basisbar">' + j.total + " listings. Advice only — only origin “auto” rows on an open market are ever eligible, and applying it is a separate step. Manual, no-claim and blocked-market rows are shown for information and keep the owner’s price.</div>" +
+        (j.rows.length ? '<div class="rows">' + j.rows.map(adviceRow).join("") + "</div>" : '<div class="empty">Nothing matches.</div>') +
+        '<div class="ctl" style="margin-top:12px">' + (f.offset > 0 ? '<button id="pv">← Previous</button>' : "") + (f.offset + 25 < j.total ? '<button id="nx">Next →</button>' : "") + "</div>";
+      var nx = page.querySelector("#nx"), pv = page.querySelector("#pv");
+      if (nx) nx.onclick = function () { f.offset += 25; renderAdvice(); };
+      if (pv) pv.onclick = function () { f.offset = Math.max(0, f.offset - 25); renderAdvice(); };
+    }
+
+    /* ------------------------------ sales ledger ------------------------ */
+    async function renderSales() {
+      var f = state.sales || (state.sales = { market: "", source: "", q: "", offset: 0, suspect: "" });
+      var g = shell('<div class="ctl"><select id="sm">' + marketOptions(f.market, true) + '</select><select id="ss"><option value="">all sources</option><option value="signal">signal (reported)</option><option value="unit">unit (order id)</option><option value="row">sold row</option><option value="hand">hand</option></select>' +
+        '<select id="sx"><option value="">real sales</option><option value="1">set aside (mass-close)</option></select><input id="sq" type="search" placeholder="Order id, listing id or title" value="' + esc(f.q) + '"></div><div id="sv"><div class="empty">Loading…</div></div>');
+      [["ss", "source"], ["sx", "suspect"]].forEach(function (p) { var el = page.querySelector("#" + p[0]); el.value = f[p[1]]; el.onchange = function () { f[p[1]] = el.value; f.offset = 0; renderSales(); }; });
+      page.querySelector("#sm").onchange = function (e) { f.market = e.target.value; f.offset = 0; renderSales(); };
+      var sq = page.querySelector("#sq"), t; sq.oninput = function () { clearTimeout(t); t = setTimeout(function () { f.q = sq.value; f.offset = 0; renderSales(); }, 350); };
+      var j = await api("/api/price-tracker/sales?market=" + encodeURIComponent(f.market) + "&source=" + encodeURIComponent(f.source) + "&suspect=" + encodeURIComponent(f.suspect) + "&q=" + encodeURIComponent(f.q) + "&limit=30&offset=" + f.offset);
+      if (stale(g)) return;
+      var rows = j.rows.map(function (x) {
+        if (j.suspect) return '<div class="row"><div class="r1"><span class="t">' + esc(x.market) + " · mass-close signal</span><span class=\"amt\">" + money(x.priceUsd) + "</span></div><div class=\"r2\"><span>" + esc(day(x.at)) + "</span><span class=\"mono\">" + esc(x.listingId) + "</span></div></div>";
+        return '<div class="row"><div class="r1"><span class="t">' + esc(x.title || x.game) + '</span><span class="amt">' + (x.priced ? money(x.priceUsd) : "no price") + "</span></div>" +
+          '<div class="r2"><span class="pill s-info">' + esc(x.market) + '</span><span class="pill s-unknown">' + esc(x.source) + "</span><span>" + esc(day(x.at)) + "</span>" +
+          (x.orderId ? '<span class="mono">order ' + esc(x.orderId) + "</span>" : "") + (x.externalId ? '<span class="mono">' + esc(x.externalId) + "</span>" : "") +
+          "<span>" + (x.priceBasis === "listing-now" ? "price = listing now" : x.priceBasis === "reported" ? "price at sale" : esc(x.priceBasis)) + "</span>" +
+          (x.titleMismatch ? '<span class="pill s-warn">title ≠ set</span>' : "") + "</div></div>";
+      }).join("");
+      page.querySelector("#sv").innerHTML =
+        '<div class="basisbar">' + j.total + (j.suspect ? " set-aside signals: written within seconds of their listing being delisted, in bursts. They are not counted as sales." : " sales, newest first. Each is tied to its exact listing and, where the marketplace gives one, its order id.") + "</div>" +
+        (rows ? '<div class="rows">' + rows + "</div>" : '<div class="empty">Nothing matches.</div>') +
+        '<div class="ctl" style="margin-top:12px">' + (f.offset > 0 ? '<button id="pv">← Previous</button>' : "") + (f.offset + 30 < j.total ? '<button id="nx">Next →</button>' : "") + "</div>";
+      var nx = page.querySelector("#nx"), pv = page.querySelector("#pv");
+      if (nx) nx.onclick = function () { f.offset += 30; renderSales(); };
+      if (pv) pv.onclick = function () { f.offset = Math.max(0, f.offset - 30); renderSales(); };
+    }
+
+    /* ------------------------------- suggest --------------------------- */
+    async function renderSuggest() {
+      var f = state.sug || (state.sug = { market: "gameflip", game: "", items: "" });
+      var g = shell('<div class="basisbar">What the auto-farm would be told for a NEW listing. Not wired into publishing yet — this is how to check the advice before it is.</div>' +
+        '<div class="ctl"><select id="gm">' + marketOptions(f.market) + '</select><input id="gg" type="search" placeholder="Game, e.g. Albion Online" value="' + esc(f.game) + '"><input id="gi" type="number" min="1" max="200" placeholder="items" style="max-width:90px" value="' + esc(f.items) + '"><button class="primary" id="go">Suggest</button></div><div id="gr"></div>');
+      page.querySelector("#go").onclick = async function () {
+        f.market = page.querySelector("#gm").value; f.game = page.querySelector("#gg").value; f.items = page.querySelector("#gi").value;
+        try {
+          var j = await api("/api/price-tracker/suggest?market=" + encodeURIComponent(f.market) + "&game=" + encodeURIComponent(f.game) + "&items=" + encodeURIComponent(f.items));
+          if (stale(g)) return;
+          var s = j.suggestion;
+          page.querySelector("#gr").innerHTML = '<div class="row"><div class="r1"><span class="t">' + esc(f.market) + '</span><span class="amt">' + (s.price ? money(s.price) : "no suggestion") + '</span></div><div class="r2"><span class="pill ' + (s.confidence === "high" ? "s-ok" : s.confidence === "medium" ? "s-warn" : "s-unknown") + '">' + esc(s.confidence || "none") + " confidence</span><span>" + esc(s.basis || "") + '</span></div><div class="why">' + esc((s.reasons || []).join(" ")) + (s.test ? "<br><b>Test:</b> " + money(s.test.price) + " — " + esc(s.test.why) : "") + "</div></div>";
+        } catch (e) { page.querySelector("#gr").innerHTML = '<div class="empty">' + esc(e.message) + "</div>"; }
+      };
+    }
+
+    async function render(force) {
+      try {
+        if (state.tab === "overview") await renderOverview(force);
+        else if (state.tab === "curve") await renderCurve();
+        else if (state.tab === "sets") await renderSets();
+        else if (state.tab === "advice") await renderAdvice();
+        else if (state.tab === "sales") await renderSales();
+        else await renderSuggest();
+      } catch (e) { fail(e); }
+    }
+    window.addEventListener("hashchange", function () { var h = (location.hash || "#overview").slice(1); if (h !== state.tab && TABS.some(function (t) { return t[0] === h; })) { state.tab = h; render(); } });
+    render();
+  })();
+  </script>
+</body>
+</html>
