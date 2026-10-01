@@ -148,6 +148,15 @@ const AUTO_FARM_DEFAULTS = {
   // Cap on how many bad-token accounts are re-probed per tick (0 = all). A first
   // sweep faces thousands of rows; a cap spreads them over several ticks.
   suspendCheckLimit: 0,
+  // Take SOLD accounts whose Twitch token died out of their bot configs each
+  // tick (utils/deadTokenRetire.js). A token that dies after the sale is the
+  // buyer securing the account, so re-auth is impossible; the entry only makes
+  // its bot retry a dead login. Rows, drops and sales are kept; unsold dead
+  // accounts are left in place for re-auth. Ships OFF.
+  retireSoldDeadTokens: false,
+  // How long the token must have been dead, and re-confirmed by a later scan,
+  // before a sold account is retired (clamped 24..720).
+  deadTokenRetireHours: 48,
   // Multi-market auto-listing categories.
   // Plati (Digiseller) cataloguer placement for Twitch-drop accounts:
   //   Digital Goods and Access > Services and social networks > Twitch,

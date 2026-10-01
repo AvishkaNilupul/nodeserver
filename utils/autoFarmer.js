@@ -26,6 +26,7 @@ const settings = require("./settings");
 const farmSizing = require("./farmSizing");
 const { sendTelegram } = require("./telegram");
 const suspendedAccounts = require("./suspendedAccounts");
+const deadTokenRetire = require("./deadTokenRetire");
 const { recordPoolUsage } = require("./poolUsageLog");
 const { recordAutoFarmEvent } = require("./autoFarmEventLog");
 const { normGame } = require("./gameLabel");
@@ -4009,6 +4010,20 @@ async function runOnce() {
         });
       } catch (e) {
         progress("Suspension sweep failed: " + e.message, "warn");
+      }
+    }
+    // Sold accounts whose token died — the buyer secured the account, so no
+    // re-auth will ever revive it — leave the bot config they still occupy.
+    // Opt-in (af.retireSoldDeadTokens); unsold dead accounts stay for re-auth.
+    // See utils/deadTokenRetire.js.
+    if (!af.dryRun && af.retireSoldDeadTokens === true) {
+      try {
+        await deadTokenRetire.retireSoldDeadTokens({
+          hours: af.deadTokenRetireHours,
+          onProgress: (m) => progress(m),
+        });
+      } catch (e) {
+        progress("Dead-token retire failed: " + e.message, "warn");
       }
     }
     // Reap dead-token accounts out of task assignments, so the freed slots are
