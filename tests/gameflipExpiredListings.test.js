@@ -434,3 +434,20 @@ test("gameflipIsExpired: a draft is never expired; onsale/ready past expiry are;
   assert.strictEqual(real.gameflipIsExpired({ status: "expired" }, now), true);
   assert.strictEqual(real.gameflipIsExpired({ status: "sold", expiration: "2026-08-01T00:00:00Z" }, now), false);
 });
+
+test("a stale 'ending' stamp is cleared once the listing is live again — a later 404 is not ours to renew", async () => {
+  // The end failed after the stamp, then the owner renewed the listing on
+  // Gameflip by hand. If they later delete it, that 404 must take the plain
+  // branch, not republish what they removed.
+  const stamp = "expired on Gameflip — ending (2026-08-25)";
+  await row("gf-revived", { autoDeliver: true, origin: "auto", qtyRemaining: 2, lastError: stamp });
+  await row("gf-revived2", { autoDeliver: true, origin: "auto", qtyRemaining: 2, lastError: stamp });
+  world.state["gf-revived"] = { status: "onsale", expiration: FUTURE, expired: false };
+  world.onsale.add("gf-revived2");
+  await gf.syncOnce(fakePublisher().opts);
+  for (const id of ["gf-revived", "gf-revived2"]) {
+    const r = await MarketplaceListing.findOne({ externalId: id }).lean();
+    assert.strictEqual(r.status, "active");
+    assert.strictEqual(r.lastError, "", id + " keeps a stale stamp");
+  }
+});

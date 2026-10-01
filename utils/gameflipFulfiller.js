@@ -962,6 +962,16 @@ const LAPSED_ENDING_RE = /^expired on Gameflip — ending \(([^)]*)\)/;
 // readUnplacedStatus's answer for a row it has fully settled itself.
 const LAPSED_DONE = "\u0000lapsed-settled";
 
+// Drop an "ending" stamp from a row whose listing is live again. Conditional on
+// the stamp still being there, so it can never clear anything else.
+async function clearStaleEndingStamp(row) {
+  if (!LAPSED_ENDING_RE.test(String((row && row.lastError) || ""))) return;
+  await MarketplaceListing.updateOne(
+    { _id: row._id, status: "active", lastError: LAPSED_ENDING_RE },
+    { $set: { lastError: "" } },
+  ).catch(() => {});
+}
+
 function renewsLapsedListings() {
   try {
     return require("./settings").getAutoFarm().gameflipRenewExpired !== false;
@@ -1247,7 +1257,13 @@ async function syncOnce({
       }
       throw e;
     }
-    if (!st.expired || st.status === "expired") return st.status || "";
+    if (!st.expired || st.status === "expired") {
+      // A stamp left by an end that failed, on a listing that is live again
+      // (renewed by hand on Gameflip): clear it, or a later 404 — the owner
+      // deleting it — would be read as ours to renew.
+      if (!st.expired) await clearStaleEndingStamp(row);
+      return st.status || "";
+    }
     if (!bulkSwept || lapsedEnded >= LAPSED_END_LIMIT) return "";
     if (lapsedEnded > 0) {
       await new Promise((r) => setTimeout(r, LAPSED_END_GAP_MS));
@@ -1270,6 +1286,7 @@ async function syncOnce({
   let renewed = 0;
   for (const row of due) {
     if (unplacedSkip && unplacedSkip.has(String(row._id))) continue;
+    if (liveIds && liveIds.has(row.externalId)) await clearStaleEndingStamp(row);
     let status;
     try {
       // A row in neither sweep is unaccounted for (deleted, expired, still a
