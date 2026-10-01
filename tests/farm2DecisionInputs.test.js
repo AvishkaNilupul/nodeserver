@@ -166,7 +166,7 @@ test("AutoFarmTask keeps the sub-document — Mongoose strict mode would silentl
         decidedAt: new Date(),
       },
     },
-    { upsert: true, new: true, setDefaultsOnInsert: true },
+    { upsert: true, returnDocument: "after", setDefaultsOnInsert: true },
   );
   const row = await AutoFarmTask.findOne({ game, campaignId: "m1" }).lean();
   assert.ok(row.decisionInputs, "the sub-document survived the $set");

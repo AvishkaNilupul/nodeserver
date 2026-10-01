@@ -1181,7 +1181,7 @@ router.post("/renters/:id/unsuspend", requireSuperadmin, async (req, res) => {
     const r = await Renter.findByIdAndUpdate(
       req.params.id,
       { $set: { status: "active" } },
-      { new: true },
+      { returnDocument: "after" },
     );
     if (!r) return res.status(404).json({ success: false, message: "Not found" });
     let farmingRepaired = null;
@@ -2176,7 +2176,7 @@ router.post("/renter-accounts/:id/farm", requireSuperadmin, async (req, res) => 
     const updated = await RenterAccount.findByIdAndUpdate(
       acc._id,
       { $set: set, ...(placement ? { $unset: { expiryOwedFiles: "" } } : {}) },
-      { new: true },
+      { returnDocument: "after" },
     ).lean();
 
     // The order's copy of the window, so the console and any later delivery

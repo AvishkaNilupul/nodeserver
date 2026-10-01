@@ -3928,7 +3928,7 @@ async function ledgerAccount(cand, set, market, row, sellable, game, price, note
       },
       ...(repointMarket ? {} : { $setOnInsert: { market } }),
     },
-    { upsert: !existing, new: true },
+    { upsert: !existing, returnDocument: "after" },
   );
   if (!created) {
     return refuse("ledger changed while this pass was publishing");

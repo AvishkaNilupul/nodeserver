@@ -111,7 +111,7 @@ async function setProposalStatus(id, status, actor) {
   const doc = await CoworkerProposal.findByIdAndUpdate(
     id,
     { $set: { status } },
-    { new: true },
+    { returnDocument: "after" },
   ).lean();
   if (!doc) return { error: "not found" };
   await logRun({

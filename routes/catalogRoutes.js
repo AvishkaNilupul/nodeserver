@@ -1794,7 +1794,7 @@ router.put(
       const inquiry = await CatalogInquiry.findByIdAndUpdate(
         req.params.id,
         { status },
-        { new: true },
+        { returnDocument: "after" },
       );
       if (!inquiry)
         return res

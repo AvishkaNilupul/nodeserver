@@ -193,7 +193,7 @@ async function claimForGame(game, count, { actor = "noclaim" } = {}) {
     const doc = await AvailableAccount.findOneAndUpdate(
       readyPoolQuery(game),
       { $set: { status: "claimed", claimedAt: new Date(), claimedNote: note } },
-      { new: true, sort: { lastCheckAt: -1 } },
+      { returnDocument: "after", sort: { lastCheckAt: -1 } },
     );
     if (!doc) break;
     claimed.push(doc);

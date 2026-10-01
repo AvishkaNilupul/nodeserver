@@ -576,7 +576,7 @@ async function setSuspended(req, res, suspended) {
     const reseller = await Reseller.findByIdAndUpdate(
       req.params.id,
       { $set: { status: suspended ? "suspended" : "active" } },
-      { new: true },
+      { returnDocument: "after" },
     );
     if (!reseller)
       return res

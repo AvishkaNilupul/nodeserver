@@ -790,7 +790,7 @@ router.post(
       const acc = await BotAccount.findByIdAndUpdate(
         req.params.id,
         { $inc: { copiedCount: 1 }, $set: { lastCopiedAt: new Date() } },
-        { new: true },
+        { returnDocument: "after" },
       ).lean();
       if (!acc) {
         return res

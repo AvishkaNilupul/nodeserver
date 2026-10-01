@@ -881,7 +881,7 @@ async function claimForListing(listing, want, opts = {}) {
           listing: listingIdOf(listing),
         },
       },
-      { new: true },
+      { returnDocument: "after" },
     ).lean();
     if (!taken) continue;
     out.push(toAccount(taken));

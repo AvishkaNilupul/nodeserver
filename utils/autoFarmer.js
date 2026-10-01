@@ -952,7 +952,7 @@ async function claimPoolAccounts(
             claimedNote: note,
           },
         },
-        { new: true, sort: { lastCheckAt: -1 } }, // freshest-verified first
+        { returnDocument: "after", sort: { lastCheckAt: -1 } }, // freshest-verified first
       );
       if (!doc) break;
       claimed.push(doc);
@@ -1764,7 +1764,7 @@ async function processCampaign(c, ctx) {
           decidedAt: new Date(),
         },
       },
-      { upsert: true, new: true, setDefaultsOnInsert: true },
+      { upsert: true, returnDocument: "after", setDefaultsOnInsert: true },
     );
   }
 

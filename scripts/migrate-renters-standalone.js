@@ -79,7 +79,7 @@ async function migrateRenter(renter) {
           dropCount: b.dropCount || 0,
         },
       },
-      { upsert: true, new: true },
+      { upsert: true, returnDocument: "after" },
     );
 
     // 2. Copy the drops across, re-pointed at the RenterAccount.

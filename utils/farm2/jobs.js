@@ -79,7 +79,7 @@ async function enqueue({
     return await FarmJob.findOneAndUpdate(
       identity,
       { $setOnInsert: onInsert },
-      { upsert: true, new: true, setDefaultsOnInsert: true },
+      { upsert: true, returnDocument: "after", setDefaultsOnInsert: true },
     );
   } catch (err) {
     // Two writers upserting at the same instant: one wins, the other gets a
@@ -106,7 +106,7 @@ async function claimNext(filter = {}) {
       $set: { status: "running", startedAt: new Date() },
       $inc: { attempts: 1 },
     },
-    { new: true, sort: { nextAttemptAt: 1 } },
+    { returnDocument: "after", sort: { nextAttemptAt: 1 } },
   );
 }
 

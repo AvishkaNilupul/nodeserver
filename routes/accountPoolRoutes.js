@@ -734,7 +734,7 @@ router.post("/account-pool/:id/claim", requireSuperadmin, async (req, res) => {
     const acc = await AvailableAccount.findByIdAndUpdate(
       req.params.id,
       { $set: { status: "claimed", claimedAt: new Date(), claimedNote: note } },
-      { new: true },
+      { returnDocument: "after" },
     ).lean();
     if (!acc) {
       return res.status(404).json({ success: false, message: "Not found" });
@@ -752,7 +752,7 @@ router.post("/account-pool/:id/unclaim", requireSuperadmin, async (req, res) => 
     const acc = await AvailableAccount.findByIdAndUpdate(
       req.params.id,
       { $set: { status: "available", claimedAt: null, claimedNote: "" } },
-      { new: true },
+      { returnDocument: "after" },
     ).lean();
     if (!acc) {
       return res.status(404).json({ success: false, message: "Not found" });

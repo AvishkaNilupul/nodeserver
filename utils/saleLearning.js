@@ -62,7 +62,7 @@ async function recordListingSale({
   const bumped = await MarketplaceListing.findOneAndUpdate(
     { _id: listing._id },
     { $inc: { unitsSold: n } },
-    { new: true, projection: { unitsSold: 1 } },
+    { returnDocument: "after", projection: { unitsSold: 1 } },
   ).catch(() => null);
   // No row (deleted mid-pass) means no stable sequence to number units with,
   // so there is no safe dedupeKey — skip rather than risk double counting.

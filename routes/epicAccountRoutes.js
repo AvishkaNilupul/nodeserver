@@ -97,7 +97,7 @@ router.post("/api/epic/accounts", requireSuperadmin, async (req, res) => {
           ...(label ? { label } : {}),
         },
       },
-      { upsert: true, new: true },
+      { upsert: true, returnDocument: "after" },
     );
     // Populate the library right away so the row isn't empty.
     epicClaimer.runOnce({ notify: false }).catch(() => {});
@@ -117,7 +117,7 @@ router.patch("/api/epic/accounts/:id", requireSuperadmin, async (req, res) => {
     const acc = await EpicAccount.findByIdAndUpdate(
       req.params.id,
       { $set: upd },
-      { new: true },
+      { returnDocument: "after" },
     );
     if (!acc) {
       return res.status(404).json({ success: false, message: "Not found" });

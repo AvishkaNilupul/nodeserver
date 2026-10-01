@@ -193,7 +193,7 @@ async function setPassword(id, password) {
     id,
     // The epoch bump ends every session opened with the old password.
     { $set: { passwordHash, passwordEnc: encrypt(password) }, $inc: { sessionEpoch: 1 } },
-    { new: true },
+    { returnDocument: "after" },
   );
   if (!renter) throw new Error("Renter not found");
   return renter;

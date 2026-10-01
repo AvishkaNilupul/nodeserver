@@ -133,7 +133,7 @@ async function incJobCounters(jobId, incFields, setFields) {
   const update = { $inc: incFields };
   if (setFields && Object.keys(setFields).length) update.$set = setFields;
   return TwitchFollowJob.findByIdAndUpdate(jobId, update, {
-    new: true,
+    returnDocument: "after",
     lean: true,
   });
 }
@@ -152,7 +152,7 @@ async function markTerminalAtomic(jobId, status, message) {
         ...(message ? { lastMessage: message } : {}),
       },
     },
-    { new: true, lean: true },
+    { returnDocument: "after", lean: true },
   );
 }
 

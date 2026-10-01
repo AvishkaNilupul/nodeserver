@@ -77,7 +77,7 @@ async function upsertTask(verdict, { dryRun = false } = {}) {
         ...(verdict.decisionInputs ? { decisionInputs: verdict.decisionInputs } : {}),
       },
     },
-    { upsert: true, new: true, setDefaultsOnInsert: true },
+    { upsert: true, returnDocument: "after", setDefaultsOnInsert: true },
   );
 }
 
@@ -283,7 +283,7 @@ async function writeEmptyReuseSkip({ verdict, reusable, recorded }) {
         ...recorded(false),
       },
     },
-    { upsert: true, new: true, setDefaultsOnInsert: true },
+    { upsert: true, returnDocument: "after", setDefaultsOnInsert: true },
   );
 }
 
@@ -565,7 +565,7 @@ async function executeReuse({ verdict, dryRun, af, host = null, granted = 0 }) {
           ...recorded(false),
         },
       },
-      { upsert: true, new: true, setDefaultsOnInsert: true },
+      { upsert: true, returnDocument: "after", setDefaultsOnInsert: true },
     );
   } else {
     task = await writeEmptyReuseSkip({ verdict, reusable, mine, recorded });
