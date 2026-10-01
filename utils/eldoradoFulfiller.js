@@ -733,6 +733,36 @@ async function deliverOrder(order, { dryRun }) {
     .eldoradoSetQuantity(offerId, advertisedFor(listing, undeliveredUnits(listing).length))
     .catch((e) => console.error("eldorado post-delivery quantity:", e.message));
 
+  // The last unit of a reserved-units row is the end of that row. Eldorado
+  // CLOSES an offer when its quantity reaches 0, and nothing restocks a units
+  // row (refillMarkets never tops an Eldorado share up), so the row can never
+  // sell again — yet it stayed "active": counted as live stock everywhere, and
+  // the eldorado.offers health check flagged every one as "we say active,
+  // Eldorado does not" until somebody reconciled it by hand. The auto-lister
+  // already retired such rows the same way (eldoradoShareMissing), but only for
+  // a task still running and only on its next sweep; a hand-made row or one
+  // whose task had ended stayed active forever. Retired here, the moment it
+  // happens, with the same status the auto-lister uses, so its replacement
+  // logic ("a sold row still referenced by the task means a replacement is
+  // owed") is unchanged. A bulk pack row is left to its bulk loop, which owns
+  // that state. Bookkeeping after a delivered order: a failure is logged and
+  // never turns a sale the buyer already has into a failed one.
+  if (!listing.bulkOfferId && undeliveredUnits(listing).length === 0) {
+    await MarketplaceListing.updateOne(
+      { _id: listing._id, status: "active" },
+      {
+        $set: {
+          status: "sold",
+          lastError:
+            "sold out — every unit delivered (last: order " + orderId +
+            "); Eldorado closes the offer at quantity 0",
+        },
+      },
+    ).catch((e) =>
+      console.error("eldorado sold-out retire " + orderId + ":", e.message),
+    );
+  }
+
   return { orderId, delivered: need };
 }
 
