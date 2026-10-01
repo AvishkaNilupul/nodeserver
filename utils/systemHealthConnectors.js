@@ -60,6 +60,13 @@ const GAP_MS = 1500;
 // never be able to hold the whole hourly run open.
 const CALL_BUDGET_MS = 30000;
 
+// Pause before the ONE retry a throttled probe gets. A 429 here is nearly
+// always our own traffic of the last few seconds — this run's listings.ghost
+// reads, or the sale watcher — not the marketplace refusing us, so a short
+// wait usually turns "not measured" into a real answer. Gameflip's probe went
+// unknown on 16 of 72 runs between 09-28 and 10-01 that way.
+const RATELIMIT_RETRY_MS = 8000;
+
 const MAX_DETAIL_CHARS = 400;
 
 // Transport-level failures: the request never got an answer, so the credentials
@@ -114,8 +121,29 @@ function num(v, fallback) {
   return Number.isFinite(n) && n >= 0 ? n : fallback;
 }
 
+// An error that carries a whole HTML page (a Cloudflare challenge, a gateway
+// error page) is reduced to the page's title. On 2026-10-01 the PlayerAuctions
+// row showed 400 characters of `<!DOCTYPE html> <html lang="en-US"> <head>
+// <title>Just a moment...` — markup where the reader needed one line saying
+// what answered. A "Just a moment..." title IS Cloudflare's challenge page.
+function describeHtml(text) {
+  const s = String(text == null ? "" : text);
+  const at = s.search(/<!doctype html|<html[\s>]/i);
+  if (at < 0) return s;
+  const m = s.slice(at).match(/<title[^>]*>([\s\S]*?)<\/title>/i);
+  const title = m ? m[1].replace(/\s+/g, " ").trim() : "";
+  const challenge = /just a moment|attention required|cloudflare/i.test(title);
+  return (
+    s.slice(0, at).trimEnd() +
+    " [an HTML page" +
+    (title ? ' titled "' + title + '"' : "") +
+    (challenge ? " — Cloudflare's challenge page, not the marketplace's API" : "") +
+    "]"
+  );
+}
+
 function trim(text) {
-  return String(text == null ? "" : text)
+  return describeHtml(text)
     .replace(/\s+/g, " ")
     .trim()
     .slice(0, MAX_DETAIL_CHARS);
@@ -429,6 +457,31 @@ function describeOutcome({ market, outcome, err, detail, elapsedMs, live, budget
   });
 }
 
+// One live probe of one market: `{ result, err, elapsedMs }`, never a throw.
+// `elapsedMs` is the wall time of the probe itself; the deliberate gaps around
+// it are our own politeness, not the market's latency, so they are excluded.
+async function probeOnce(mp, market, budgetMs, now) {
+  const startedAt = now();
+  let result = null;
+  let err = null;
+  try {
+    const fn = mp[market.test];
+    if (typeof fn !== "function") {
+      throw new Error(market.test + " is not available on the marketplaces module");
+    }
+    result = await callWithBudget(() => fn(), budgetMs);
+    // The two cookie-auth connectors resolve with `{ ok: false }` instead of
+    // throwing, so a bare `await` reads as success on a dead session.
+    if (!result || result.ok === false) {
+      err = errorFromResult(result);
+      result = null;
+    }
+  } catch (e) {
+    err = e instanceof Error ? e : new Error(String(e));
+  }
+  return { result, err, elapsedMs: Math.max(0, now() - startedAt) };
+}
+
 /**
  * One check per marketplace: gameflip, digiseller, ggsel, zeusx, eldorado,
  * playerauctions and g2g. Always resolves, always returns one result per
@@ -442,6 +495,7 @@ function describeOutcome({ market, outcome, err, detail, elapsedMs, live, budget
  *   ctx.sleep             async (ms) => void   (the inter-call gap)
  *   ctx.now               () => epoch ms
  *   ctx.gapMs             gap between live probes
+ *   ctx.retryMs           pause before the one retry a throttled probe gets
  *   ctx.timeoutMs         per-probe watchdog budget
  *   ctx.markets           subset of market ids, for a targeted re-check
  */
@@ -450,6 +504,7 @@ async function connectorChecks(ctx = {}) {
   const sleep = typeof ctx.sleep === "function" ? ctx.sleep : defaultSleep;
   const now = typeof ctx.now === "function" ? ctx.now : () => Date.now();
   const gapMs = num(ctx.gapMs, GAP_MS);
+  const retryMs = num(ctx.retryMs, RATELIMIT_RETRY_MS);
   const budgetMs = num(ctx.timeoutMs, CALL_BUDGET_MS) || CALL_BUDGET_MS;
 
   const wanted = Array.isArray(ctx.markets) && ctx.markets.length
@@ -495,28 +550,17 @@ async function connectorChecks(ctx = {}) {
     }
     probes += 1;
 
-    const startedAt = now();
-    let result = null;
-    let err = null;
-    try {
-      const fn = mp[market.test];
-      if (typeof fn !== "function") {
-        throw new Error(market.test + " is not available on the marketplaces module");
+    let { result, err, elapsedMs } = await probeOnce(mp, market, budgetMs, now);
+    // A throttled probe gets ONE more try after a pause (RATELIMIT_RETRY_MS).
+    // Rule 2 still holds: throttled twice is `unknown`, never `fail`.
+    if (err && classify(err).kind === "ratelimit") {
+      try {
+        await sleep(retryMs);
+      } catch {
+        /* an injected sleep failing must not stop the sweep */
       }
-      result = await callWithBudget(() => fn(), budgetMs);
-      // The two cookie-auth connectors resolve with `{ ok: false }` instead of
-      // throwing, so a bare `await` reads as success on a dead session.
-      if (!result || result.ok === false) {
-        err = errorFromResult(result);
-        result = null;
-      }
-    } catch (e) {
-      err = e instanceof Error ? e : new Error(String(e));
+      ({ result, err, elapsedMs } = await probeOnce(mp, market, budgetMs, now));
     }
-
-    // Wall time of the probe itself. The deliberate gap above is our own
-    // politeness, not the market's latency, so it is excluded.
-    const elapsedMs = Math.max(0, now() - startedAt);
 
     try {
       out.push(
@@ -552,4 +596,4 @@ async function connectorChecks(ctx = {}) {
   return out;
 }
 
-module.exports = { connectorChecks };
+module.exports = { connectorChecks, describeHtml, RATELIMIT_RETRY_MS };
