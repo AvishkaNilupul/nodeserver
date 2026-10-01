@@ -199,6 +199,19 @@ this work changes. `docs/` and `tests/` are not deployed.
   (0 unstable). The guarded command was first tried on the real Contabo and Pi
   in /tmp (whole write lands 600; a short one is refused, the file untouched).
   GitHub: `origin/fix/remote-write-size-check`.
+- **2026-10-01 05:40:17 UTC** — G2G marks orders delivered itself:
+  `utils/marketplaces.js` 16ab8147→169eb21f (merged onto the 05:19Z
+  system-health deploy's bytes; only `g2gSetDeliveredQty` changed). G2G's own
+  seller page sends `PUT /order/item/<id>/delivered_qty` with body `{ qty }` and
+  `seller_id` in the query (www.g2g.com `seller-order-item` chunk,
+  `ORDER.UPDATE_DELIVERED_QTY`); we sent `{ seller_id, delivery_qty }` and got
+  HTTP 500 since September. `qty` is an increment, so the item is read first and
+  only the undelivered remainder is sent. Verified live: order
+  `1790817293060OS4Y-1` (Halo Infinite, 2 units, credentials sent 01:19Z) went
+  to delivered 2/2, awaiting buyer confirmation, at 05:41:48Z on the server's own
+  tick; both units stamped delivered. Backup
+  `_deploy_backup_20261001053810_g2g-delivered-qty`; pm2 restart 12. GitHub:
+  `origin/fix/g2g-delivered-qty`.
 
 ## Rollback
 On prod, from the app root, with `BK` = the backup dir named below:
