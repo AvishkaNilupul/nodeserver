@@ -107,8 +107,12 @@ test("end to end: the probe the health page runs reads the dead session as a 401
   storeCookie({ accessExp: past, refreshExp: past });
   const r = await mp.playerauctionsTest();
   assert.strictEqual(r.ok, false);
+  // The 401 is what the health connector reads as a FAIL. Its wording is
+  // "session expired ..." — unless another process stamped a refresh in the
+  // last 15s (paRefreshOnce's cooldown, a file shared with the other PA test
+  // file when the suite runs in parallel), in which case the plain 401 of the
+  // status call comes back. Either way: a 401, and no refresh was spent.
   assert.match(r.detail, /HTTP 401/);
-  assert.match(r.detail, /session expired/);
   assert.ok(calls.length >= 1 && calls.every((c) => !/RefreshToken/.test(c)), calls.join(" | "));
 });
 
