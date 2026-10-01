@@ -445,6 +445,90 @@ async function gameflipListingStatus(listingId) {
   }
 }
 
+// A listing whose 30-day expiry has passed is gone for every buyer, whatever
+// its `status` still says. Every listing here is created with expire_in_days:
+// 30, and Gameflip keeps answering `status: "onsale"` (or "ready") for one long
+// after its `expiration` — it just drops out of search, so nobody can find it,
+// let alone buy it. On 2026-10-01 that was 98 of our 396 "active" rows, the
+// oldest expired since 08-25; the sale watcher believed every one of them and
+// polled all 98 individually every minute, which is what kept Gameflip
+// answering 429. The grace absorbs clock skew between us and Gameflip.
+const GF_EXPIRY_GRACE_MS = 10 * 60 * 1000;
+const GF_EXPIRABLE_STATUSES = new Set(["onsale", "ready", "draft"]);
+
+function gameflipIsExpired(data, now = Date.now()) {
+  const status = String((data && data.status) || "");
+  if (status === "expired") return true;
+  if (!GF_EXPIRABLE_STATUSES.has(status)) return false;
+  const exp = Date.parse(String((data && data.expiration) || ""));
+  return Number.isFinite(exp) && exp + GF_EXPIRY_GRACE_MS <= now;
+}
+
+// gameflipListingStatus with the expiry verdict attached: the same single GET,
+// keeping the fields the bare status throws away. Errors are thrown exactly as
+// gameflipListingStatus throws them (`err.status` 404 for a listing that is gone),
+// so a caller can swap one for the other without changing its error handling.
+async function gameflipListingState(listingId) {
+  const keys = requireKeys("gameflip");
+  try {
+    const r = await axios.get(GF_API + "/listing/" + listingId, {
+      headers: gfHeaders(keys),
+      timeout: 20000,
+    });
+    const d = (r.data && r.data.data) || {};
+    return {
+      status: d.status || "",
+      expiration: d.expiration || null,
+      expired: gameflipIsExpired(d),
+    };
+  } catch (e) {
+    throw apiError("Gameflip listing status", e);
+  }
+}
+
+// Take a listing off Gameflip for good, from any state a buyer can no longer
+// reach — used for a listing whose expiry passed while Gameflip still calls it
+// onsale/ready/draft. Off sale FIRST (the same draft patch gameflipDelist uses),
+// then delete, so the auto-delivery code it carries can never be handed out and
+// stops blocking the account: Gameflip refuses a new listing carrying a code an
+// old one still holds ("code for digital goods already exists"). A 404 on the
+// delete means it is already gone, which is the goal. `status` is the state the
+// caller just read, so a listing already off sale is not patched again.
+async function gameflipEndListing(listingId, { status = "onsale" } = {}) {
+  const keys = requireKeys("gameflip");
+  const st = String(status || "");
+  if (st === "sold" || st === "sale_pending") {
+    throw new Error("Gameflip listing " + listingId + " is " + st + " — not ended");
+  }
+  if (st === "onsale") {
+    try {
+      await axios.patch(
+        GF_API + "/listing/" + listingId,
+        [{ op: "replace", path: "/status", value: "draft" }],
+        {
+          headers: {
+            ...gfHeaders(keys),
+            "Content-Type": "application/json-patch+json",
+          },
+          timeout: 20000,
+        },
+      );
+    } catch (e) {
+      throw apiError("Gameflip end listing (off sale)", e);
+    }
+  }
+  try {
+    await axios.delete(GF_API + "/listing/" + listingId, {
+      headers: gfHeaders(keys),
+      timeout: 20000,
+    });
+  } catch (e) {
+    if (e && e.response && e.response.status === 404) return { deleted: false };
+    throw apiError("Gameflip end listing (delete)", e);
+  }
+  return { deleted: true };
+}
+
 // Every listing id of ours currently in a given status, in ONE paged query.
 // The watcher used to GET each listing separately; at ~150 live listings that
 // burns Gameflip's rate limit on every tick, and the 429s it earns look exactly
@@ -5521,8 +5605,50 @@ function playerauctionsTokenExpiry() {
 //
 // Rule: exactly ONE host owns a given cookie, and only its session refresher
 // ever calls this. Never "test" it from a second machine.
+//
+// And never with a refresh token that has already lapsed. The refresh token
+// keeps the expiry it was minted with at sign-in (the hard ~24h ceiling), so
+// once that is past no refresh can succeed — PlayerAuctions answered the first
+// such attempt 401 on 2026-09-30 14:29Z. Nothing stopped the next ones: every
+// 60s fulfiller tick, the session refresher, the session watch and the hourly
+// health probe each spent another POST on a dead token, and within minutes
+// PlayerAuctions' Cloudflare edge was answering 429 "Just a moment..." pages.
+// For 14 hours the health page therefore read "rate-limited — not measured"
+// instead of "the session is dead, paste a fresh cookie", and every one of
+// those calls taught Cloudflare to distrust this server's IP — the one a fresh
+// cookie has to work from. The expiry is read locally out of the stored JWT, so
+// this costs no call at all; an unreadable token falls through to the network
+// exactly as before, and the grace absorbs clock skew.
+const PA_REFRESH_EXPIRED_GRACE_MS = 5 * 60 * 1000;
+
+// The refresh token's expiry when it has lapsed (past the grace), else null —
+// also null when the stored jar carries no readable expiry. `exp` is injectable
+// for tests; production always reads the stored jar.
+function paRefreshTokenLapsed(now = Date.now(), exp = playerauctionsTokenExpiry().refresh) {
+  if (!(exp instanceof Date) || !Number.isFinite(exp.getTime())) return null;
+  return exp.getTime() + PA_REFRESH_EXPIRED_GRACE_MS < now ? exp : null;
+}
+
 async function playerauctionsRefreshSession() {
   const keys = requireKeys("playerauctions");
+  const lapsed = paRefreshTokenLapsed();
+  if (lapsed) {
+    // Shaped like paError's 401 so every caller (paRequest, the fulfiller, the
+    // session watch, the health connector) reads it as the credential refusal
+    // it is: HTTP 401 in the text and on `err.status`, never retryable.
+    const err = new Error(
+      "PlayerAuctions session refresh failed (HTTP 401): session expired " +
+        lapsed.toISOString() +
+        " — its refresh token reached the 24h PlayerAuctions limit, so no " +
+        "refresh can renew it; paste a fresh PlayerAuctions cookie header from " +
+        "a signed-in seller session",
+    );
+    err.__pa = true;
+    err.status = 401;
+    err.retryable = false;
+    err.paSessionExpired = true;
+    throw err;
+  }
   const before = paJarHeader(paCookieJar(keys.cookie));
   try {
     await paRequest("POST", PA_ACCOUNT_API, "/SignIn/RefreshToken", { data: {} });
@@ -6380,6 +6506,9 @@ module.exports = {
   gameflipOwnerId,
   gameflipPublish,
   gameflipListingStatus,
+  gameflipListingState,
+  gameflipIsExpired,
+  gameflipEndListing,
   gameflipDelist,
   gameflipReprice,
   gameflipReplaceCover,
@@ -6509,6 +6638,8 @@ module.exports = {
   playerauctionsSellerLevel,
   playerauctionsRefreshSession,
   playerauctionsTokenExpiry,
+  paRefreshTokenLapsed,
+  PA_REFRESH_EXPIRED_GRACE_MS,
   paRefreshOnce,
   paStoredAccessToken,
   PA_COOLDOWN_MS,
