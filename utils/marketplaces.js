@@ -452,9 +452,11 @@ async function gameflipListingStatus(listingId) {
 // let alone buy it. On 2026-10-01 that was 98 of our 396 "active" rows, the
 // oldest expired since 08-25; the sale watcher believed every one of them and
 // polled all 98 individually every minute, which is what kept Gameflip
-// answering 429. The grace absorbs clock skew between us and Gameflip.
+// answering 429. The grace absorbs clock skew between us and Gameflip. A DRAFT
+// is never called expired: a listing is parked in draft on purpose (by hand,
+// or mid-edit by gameflipReprice) and going back on sale restarts its window.
 const GF_EXPIRY_GRACE_MS = 10 * 60 * 1000;
-const GF_EXPIRABLE_STATUSES = new Set(["onsale", "ready", "draft"]);
+const GF_EXPIRABLE_STATUSES = new Set(["onsale", "ready"]);
 
 function gameflipIsExpired(data, now = Date.now()) {
   const status = String((data && data.status) || "");
@@ -488,12 +490,18 @@ async function gameflipListingState(listingId) {
 
 // Take a listing off Gameflip for good, from any state a buyer can no longer
 // reach — used for a listing whose expiry passed while Gameflip still calls it
-// onsale/ready/draft. Off sale FIRST (the same draft patch gameflipDelist uses),
-// then delete, so the auto-delivery code it carries can never be handed out and
+// onsale/ready. Off sale FIRST (the same draft patch gameflipDelist uses), then
+// delete, so the auto-delivery code it carries can never be handed out and
 // stops blocking the account: Gameflip refuses a new listing carrying a code an
 // old one still holds ("code for digital goods already exists"). A 404 on the
 // delete means it is already gone, which is the goal. `status` is the state the
 // caller just read, so a listing already off sale is not patched again.
+//
+// Success is only reported once a read-back answers 404. Under its limiter
+// Gameflip answers 200 to writes it never applies (gfTakeOffSale above exists
+// for that), and the caller hands the listing's account back on success — a
+// swallowed delete would leave that account behind a listing that still holds
+// its code.
 async function gameflipEndListing(listingId, { status = "onsale" } = {}) {
   const keys = requireKeys("gameflip");
   const st = String(status || "");
@@ -526,7 +534,19 @@ async function gameflipEndListing(listingId, { status = "onsale" } = {}) {
     if (e && e.response && e.response.status === 404) return { deleted: false };
     throw apiError("Gameflip end listing (delete)", e);
   }
-  return { deleted: true };
+  let still = "";
+  try {
+    still = (await gameflipListingStatus(listingId)) || "?";
+  } catch (e) {
+    if (e && e.status === 404) return { deleted: true };
+    throw apiError("Gameflip end listing (confirm)", e);
+  }
+  const err = new Error(
+    "Gameflip end listing: " + listingId + ' still exists after the delete (status "' +
+      still + '") — left as it is for the next pass',
+  );
+  err.status = 409;
+  throw err;
 }
 
 // Every listing id of ours currently in a given status, in ONE paged query.

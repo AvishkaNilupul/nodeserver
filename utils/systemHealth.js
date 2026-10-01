@@ -247,19 +247,45 @@ function hasDeliverableStock(listing) {
 //   - every unit is delivered: the row sold out and was never retired.
 // "Paused" is a hand pause on Eldorado; the stock sync's own pauses carry
 // `autoPaused` and never reach here.
-function whyNotActive(offer, row) {
+//
+// It only says what it measured. An offer missing from a list that was read
+// only in part is "unverified", not gone. "Its last unit sold" is claimed only
+// for a Closed offer at quantity 0 that had not simply reached its expireDate:
+// an offer Eldorado closed on expiry, or one still holding stock, says so, and
+// telling the reader to stamp units as delivered there would mark unsold
+// accounts sold.
+function whyNotActive(offer, row, { complete = true, now = new Date() } = {}) {
   const undelivered = ((row && row.units) || []).filter(
     (u) => u && !u.deliveredAt,
   ).length;
-  if (!offer) return "Eldorado no longer lists this offer at all — retire the row";
+  if (!offer) {
+    return complete
+      ? "Eldorado no longer lists this offer at all — retire the row"
+      : "not among the offers read from Eldorado (its list was read only in " +
+          "part) — unverified";
+  }
   const state = String(offer.offerState || "");
   if (state === "Closed") {
+    const qty = Number(offer.quantity) || 0;
+    const exp = Date.parse(String(offer.expireDate || ""));
+    const at = now instanceof Date ? now.getTime() : Date.now();
+    if (Number.isFinite(exp) && exp <= at) {
+      return (
+        "Eldorado closed it when it expired (" + String(offer.expireDate).slice(0, 10) +
+        ") — renew it on Eldorado if it should sell, otherwise take the row off sale"
+      );
+    }
+    if (qty > 0) {
+      return (
+        "Eldorado shows it Closed with " + qty + " still listed — check the offer " +
+        "on Eldorado before changing the row"
+      );
+    }
     return undelivered > 0
-      ? "Eldorado closed it at quantity " + (Number(offer.quantity) || 0) +
-          " (its last unit sold), but our row still holds " + undelivered +
-          " undelivered unit(s) — a sale whose delivery was never recorded. Find " +
-          "the order, stamp the unit and retire the row; never push stock to this " +
-          "offer, it would sell the same account twice"
+      ? "Eldorado closed it at quantity 0 (its last unit sold), but our row still " +
+          "holds " + undelivered + " undelivered unit(s) — a sale whose delivery was " +
+          "never recorded. Find the order, stamp the unit and retire the row; never " +
+          "push stock to this offer, it would sell the same account twice"
       : "sold out — every unit was delivered and Eldorado closed the offer, but " +
           "the row was never retired; mark it sold";
   }
@@ -380,6 +406,29 @@ const AUTOLIST_STALE_TICKS = 6;
 // Shared evidence: what drop bundles have actually sold for
 // ---------------------------------------------------------------------------
 
+// A ceiling is the highest price at least CEILING_HITS realised sales reached —
+// a price LEVEL. A plain maximum let one outlier set it for everything below:
+// an operator-typed hand sale (free-text price, no marketplace), one premium
+// whole-account sale, or a typo would turn every system-priced listing under
+// it green for 180 days.
+const CEILING_HITS = 3;
+function ceilingOf(prices, hits = CEILING_HITS) {
+  const p = (prices || [])
+    .map(Number)
+    .filter((n) => Number.isFinite(n) && n > 0)
+    .sort((a, b) => b - a);
+  return p.length >= hits ? p[hits - 1] : 0;
+}
+
+// The top few prices, for a detail line that shows what the ceiling stands on.
+function topPrices(prices, n = 5) {
+  return (prices || [])
+    .map(Number)
+    .filter((x) => Number.isFinite(x) && x > 0)
+    .sort((a, b) => b - a)
+    .slice(0, n);
+}
+
 // Largest of a list without spreading it into Math.max — a 20,000-row argument
 // list is how a check dies of "Maximum call stack size exceeded".
 function maxOf(list) {
@@ -470,16 +519,20 @@ async function realisedSales(ctx) {
         add(r.marketplace, r.price);
       }
 
+      // updatedAt bounds the read: a row whose unit was delivered inside the
+      // window was saved inside it. Newest first, so the cap can only ever
+      // drop the OLDEST rows, never this month's sales.
       const ledgerRows = await MarketplaceListing.find(
         {
           marketplace: { $in: UNIT_LEDGER_MARKETS },
           price: { $gt: 0 },
           bulkOfferId: null,
           rentFarm: { $ne: true },
+          updatedAt: { $gte: since },
         },
         { marketplace: 1, price: 1, title: 1, "units.deliveredAt": 1, "units.orderId": 1 },
       )
-        .sort({ _id: 1 })
+        .sort({ _id: -1 })
         .limit(5000)
         .lean();
       const sinceMs = since.getTime();
@@ -493,7 +546,7 @@ async function realisedSales(ctx) {
         }
       }
 
-      return { byVenue, overall: maxOf(all), count: all.length };
+      return { byVenue, overall: ceilingOf(all), top: topPrices(all), count: all.length };
     })();
   }
   return ctx.__realisedSales;
@@ -546,15 +599,20 @@ const CHECKS = [
       const farm = ctx.dep("eldoradoFarmService");
 
       // Page the account's own offers. Bounded: a runaway page count would turn
-      // an hourly check into a crawl of the marketplace.
+      // an hourly check into a crawl of the marketplace. The list carries
+      // closed and expired history too (328 offers for 251 live on 2026-10-01),
+      // so the cap is 20 pages — the keep-alive's own listOwnOffers bound — and
+      // the run remembers whether it read them all.
       const offers = [];
       let page = 1;
       let pages = 1;
+      let totalPages = 1;
       try {
         do {
           const r = await mp.eldoradoMyListings(page, 50);
           if (!r) break;
-          pages = Math.min(Number(r.totalPages) || 1, 10);
+          totalPages = Number(r.totalPages) || 1;
+          pages = Math.min(totalPages, 20);
           for (const o of r.results || []) offers.push(o);
           page += 1;
         } while (page <= pages);
@@ -580,6 +638,7 @@ const CHECKS = [
         };
       }
 
+      const listComplete = page > totalPages;
       const live = offers.filter((o) => String(o.offerState || "") === "Active");
       const liveIds = new Set(live.map((o) => String(o.id)));
       // Every offer the list returned, whatever its state, so a mismatch can say
@@ -638,9 +697,13 @@ const CHECKS = [
             kind: "we say active, Eldorado does not",
             offer: r.externalId,
             title: String(r.title || "").slice(0, 70),
-            eldoradoState: o ? String(o.offerState || "?") : "not in Eldorado's list",
+            eldoradoState: o
+              ? String(o.offerState || "?")
+              : listComplete
+                ? "not in Eldorado's list"
+                : "not in the part of Eldorado's list that was read",
             eldoradoQty: o && Number.isFinite(Number(o.quantity)) ? Number(o.quantity) : null,
-            why: whyNotActive(o, r),
+            why: whyNotActive(o, r, { complete: listComplete, now: ctx.now() }),
           });
         }
       }
@@ -1281,9 +1344,11 @@ const CHECKS = [
         if (realised.count >= MIN_CEILING_SALES && realised.overall > 0) {
           ceiling = realised.overall;
           basis =
-            "$" + ceiling.toFixed(2) + " is the highest price any of " +
-            realised.count + " drop-bundle sale(s) in the last 180 days fetched " +
-            "(rent-farm windows and bulk packs not counted). ";
+            "$" + ceiling.toFixed(2) + " is the highest price at least " + CEILING_HITS +
+            " of " + realised.count + " drop-bundle sale(s) in the last 180 days " +
+            "reached (top sales: " +
+            (realised.top || []).map((x) => "$" + x.toFixed(2)).join(", ") +
+            "; rent-farm windows and bulk packs not counted). ";
         } else {
           basis =
             "Only " + realised.count + " priced drop-bundle sale(s) in the last 180 " +
@@ -1431,7 +1496,7 @@ const CHECKS = [
       for (const [venue, prices] of snap.platform.entries()) {
         const p = (prices || []).map(Number).filter((n) => n > 0);
         if (p.length < MIN_VENUE_SALES) continue;
-        ceilings.set(String(venue).toLowerCase(), maxOf(p));
+        ceilings.set(String(venue).toLowerCase(), ceilingOf(p));
       }
       if (!ceilings.size) {
         return {
@@ -1498,8 +1563,8 @@ const CHECKS = [
             ")"
           : "Every active listing sits within what its own marketplace has actually paid",
         detail:
-          "Ceilings, one per venue, from that venue's realised drop-bundle sales " +
-          "in the last 180 days (" +
+          "Ceilings, one per venue: the highest price at least " + CEILING_HITS +
+          " of that venue's realised drop-bundle sales in the last 180 days reached (" +
           [...ceilings.entries()]
             .sort()
             .map(([m, c]) => m + " $" + c.toFixed(2))
@@ -2614,6 +2679,8 @@ module.exports = {
   hasDeliverableStock,
   whyNotActive,
   maxOf,
+  ceilingOf,
+  CEILING_HITS,
   makeCtx,
   STATUSES,
   STATUS_RANK,

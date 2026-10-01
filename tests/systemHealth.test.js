@@ -332,9 +332,9 @@ function healthyDeps(over = {}) {
       [
         ["gameflip", 0.75],
         ["gameflip", 1.25],
-        ["gameflip", 1.25],
-        ["gameflip", 1.5],
         ["gameflip", 2.0],
+        ["gameflip", 4.5],
+        ["gameflip", 4.5],
         ["gameflip", 4.5],
         ["ggsel", 0.75],
         ["ggsel", 0.75],
@@ -1478,8 +1478,10 @@ test("REGRESSION 2026-10-01: a Closed offer whose row still holds a unit is name
   assert.ok(!by.has("eld-live"));
 });
 
-test("whyNotActive: no offer, an unknown state, and units already delivered", () => {
+test("whyNotActive says only what it measured", () => {
   assert.match(health.whyNotActive(null, {}), /no longer lists/);
+  // A list read only in part proves nothing about an offer missing from it.
+  assert.match(health.whyNotActive(null, {}, { complete: false }), /unverified/);
   assert.match(health.whyNotActive({ offerState: "UnderReview" }, {}), /UnderReview/);
   assert.match(
     health.whyNotActive(
@@ -1488,6 +1490,43 @@ test("whyNotActive: no offer, an unknown state, and units already delivered", ()
     ),
     /sold out/,
   );
+  // Closed by EXPIRY is not "its last unit sold": stamping units there would
+  // mark unsold accounts delivered.
+  const unsold = { units: [{ deliveredAt: null }] };
+  const why = health.whyNotActive(
+    { offerState: "Closed", quantity: 0, expireDate: "2026-09-20T18:00:00" },
+    unsold,
+    { now: new Date("2026-10-01T00:00:00Z") },
+  );
+  assert.match(why, /closed it when it expired \(2026-09-20\)/);
+  assert.doesNotMatch(why, /never recorded/);
+  assert.match(
+    health.whyNotActive({ offerState: "Closed", quantity: 3 }, unsold),
+    /Closed with 3 still listed/,
+  );
+  assert.match(
+    health.whyNotActive(
+      { offerState: "Closed", quantity: 0, expireDate: "2026-10-20T18:00:00" },
+      unsold,
+      { now: new Date("2026-10-01T00:00:00Z") },
+    ),
+    /never recorded/,
+  );
+});
+
+test("eldorado.offers: a list read only in part never tells the reader an offer is gone", async () => {
+  const deps = eldoradoDeps({ rows: [eldRow("eld-beyond")], offers: [eldOffer("eld-other")] });
+  deps.marketplaces = {
+    async eldoradoMyListings(page) {
+      // 25 pages exist; the check stops at its cap.
+      return { totalPages: 25, results: page === 1 ? [eldOffer("eld-other")] : [] };
+    },
+  };
+  const row = await runCheck("eldorado.offers", deps);
+  const it = row.items.find((i) => i.offer === "eld-beyond");
+  assert.ok(it);
+  assert.match(it.eldoradoState, /part of Eldorado's list/);
+  assert.match(it.why, /unverified/);
 });
 
 // realisedSales() fixtures: SaleSignal rows and the listing rows the three
@@ -1500,8 +1539,9 @@ const sig = (marketplace, priceUsd, over = {}) => ({
   at: ago(48 * HOUR),
   ...over,
 });
+// Five sales whose ceiling — the highest price at least 3 of them reached — is `top`.
 const fiveSales = (marketplace, top) =>
-  [1, 1.25, 1.5, 2, top].map((p) => sig(marketplace, p));
+  [1, 1.25, top, top, top].map((p) => sig(marketplace, p));
 
 test("REGRESSION 2026-10-01: the overpriced ceiling is measured, not the 09-09 constant", async () => {
   // A $5.00 bundle had sold, and the check still claimed "$4.50 is the highest
@@ -1519,7 +1559,24 @@ test("REGRESSION 2026-10-01: the overpriced ceiling is measured, not the 09-09 c
   assert.strictEqual(check.measured, 1);
   assert.deepStrictEqual(check.items.map((i) => i.externalId), ["gf-over"]);
   assert.match(check.threshold, /\$5\.00 realised ceiling/);
-  assert.match(check.detail, /highest price any of 5 drop-bundle sale/);
+  assert.match(check.detail, /highest price at least 3 of 5 drop-bundle sale/);
+  assert.match(check.detail, /top sales: \$5\.00, \$5\.00, \$5\.00, \$1\.25, \$1\.00/);
+});
+
+test("one outlier sale — a typo, a single premium account — cannot set the ceiling", async () => {
+  // A hand-recorded sale is an operator-typed price; one $20 entry must not turn
+  // every system-priced listing under $20 green for 180 days.
+  const check = await runCheck(
+    "listings.overpriced",
+    healthyDeps({
+      SaleSignal: fakeModel([...fiveSales("gameflip", 4.5), sig("", 20, { name: "manual sale" })]),
+      MarketplaceListing: fakeModel([listing({ externalId: "gf-ten", price: 10 })]),
+    }),
+  );
+  assert.match(check.threshold, /\$4\.50 realised ceiling/);
+  assert.deepStrictEqual(check.items.map((i) => i.externalId), ["gf-ten"]);
+  assert.strictEqual(health.ceilingOf([20, 5, 5, 5, 1]), 5);
+  assert.strictEqual(health.ceilingOf([20, 5]), 0, "fewer than 3 sales is no level at all");
 });
 
 test("rent-farm windows and bulk packs never raise a bundle ceiling", async () => {
@@ -1601,6 +1658,7 @@ test("REGRESSION 2026-10-01: Eldorado's delivered units are its realised sales",
       marketplace: "eldorado",
       externalId: "eld-hist-" + price + "-" + n,
       price,
+      updatedAt: ago(24 * HOUR),
       units: Array.from({ length: n }, (_, i) => ({
         accountId: "a" + i,
         login: "l" + i,
@@ -1614,13 +1672,13 @@ test("REGRESSION 2026-10-01: Eldorado's delivered units are its realised sales",
     healthyDeps({
       MarketplaceListing: fakeModel([
         delivered(4, 1),
-        delivered(2, 3.56),
+        delivered(3, 3.56),
         // Never evidence: a farm window, a bulk pack, an undelivered unit, and a
         // delivery older than the window.
         delivered(3, 7, { title: "Overwatch Twitch Drops Automatic Farming 180 Days" }),
         delivered(3, 9, { bulkOfferId: "b1" }),
         listing({ marketplace: "eldorado", externalId: "eld-undelivered", price: 8, units: [{ accountId: "u", deliveredAt: null, orderId: "" }] }),
-        listing({ marketplace: "eldorado", externalId: "eld-ancient", price: 8, units: [{ accountId: "v", deliveredAt: ago(400 * 24 * HOUR), orderId: "old" }] }),
+        listing({ marketplace: "eldorado", externalId: "eld-ancient", price: 8, updatedAt: ago(24 * HOUR), units: [{ accountId: "v", deliveredAt: ago(400 * 24 * HOUR), orderId: "old" }] }),
         // Live asks being judged.
         listing({ marketplace: "eldorado", externalId: "eld-ok", price: 2.99 }),
         listing({ marketplace: "eldorado", externalId: "eld-high", price: 4 }),

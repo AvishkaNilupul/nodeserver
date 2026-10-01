@@ -953,6 +953,14 @@ const LAPSED_END_GAP_MS = 2000;
 const LAPSED_RENEW_PER_PASS = 1;
 const RENEWAL_PENDING = "expired on Gameflip — renewal pending";
 const RENEWAL_PENDING_RE = /^expired on Gameflip — renewal pending/;
+// Written onto the row BEFORE its listing is ended, so a pass that dies (or an
+// overlapping manual /marketplaces/sync) between Gameflip applying the delete
+// and the retirement being recorded still knows, on the 404 that follows, that
+// this was a lapsed listing to settle and renew — not a stray 404 to retire.
+const LAPSED_ENDING = "expired on Gameflip — ending (";
+const LAPSED_ENDING_RE = /^expired on Gameflip — ending \(([^)]*)\)/;
+// readUnplacedStatus's answer for a row it has fully settled itself.
+const LAPSED_DONE = "\u0000lapsed-settled";
 
 function renewsLapsedListings() {
   try {
@@ -962,19 +970,141 @@ function renewsLapsedListings() {
   }
 }
 
+// Renewal is for this fulfiller's OWN chains only. Never for the unclaimed
+// engine's units or lots: they say so themselves ("the engine relists; the
+// fulfiller must never (archive stock differs)", unclaimedAutoList; "one lot,
+// one buyer", unclaimedLots) and the engine's repairGameflipChains publishes
+// their successor — a second one from here would come out of the CLAIMED
+// archive at the engine's price.
 function renewable(row) {
-  return !!(row && row.autoDeliver && !row.rentFarm && !row.bulkOfferId);
+  return !!(
+    row &&
+    row.autoDeliver &&
+    !row.rentFarm &&
+    !row.bulkOfferId &&
+    row.origin !== "unclaimed" &&
+    !(Number(row.lotSize) > 0) &&
+    !row.lotId
+  );
 }
 
-// The lastError a retired row carries: the renewal-pending marker the renewal
-// lane matches on, or the plain retirement (with the rent-farm buffer's
-// same-account note when its account is kept for a renewal).
-function retireReason(status, { renew = false, renewWhy = "" } = {}) {
-  if (renewWhy) return renewWhy;
-  return (
-    'gameflip reports "' + status + '" — retired by the watcher' +
-    (renew ? "; account kept for a same-account renewal" : "")
+// An auto-lister HEAD row (autoLister.listActivatedTask) records no accountId:
+// its code belongs to the one account reserveOneForDelivery took for this set
+// under the "gameflip" tag. While the head is unsold no other Gameflip listing
+// can hold that set's reservation, so exactly one account carries it — that
+// one is handed back. Anything else (none, several, or one the row does not
+// name) is left reserved and logged: a sold unit's reservation is its sale
+// record, and releasing it would sell the account twice.
+async function releaseHeadAccount(row) {
+  if (!row || !row.set) return false;
+  const ids = await DropLog.distinct("account", {
+    soldSetId: String(row.set),
+    soldToUsername: GF_CLAIM_TAG,
+    soldAt: { $ne: null },
+  });
+  const named = String(row.accountLogin || "")
+    .split(",")
+    .map((x) => x.trim().toLowerCase())
+    .filter(Boolean);
+  if (ids.length !== 1) {
+    if (ids.length) {
+      console.error(
+        "gameflip head row " + row.externalId + ": " + ids.length +
+          " accounts hold this set's gameflip reservation — none released",
+      );
+    }
+    return false;
+  }
+  // The login comes off the reserved drop itself: the account may be a
+  // BotAccount or a pool AvailableAccount (DropLog.accountModel).
+  const drop = await DropLog.findOne(
+    { account: ids[0], soldSetId: String(row.set), soldToUsername: GF_CLAIM_TAG },
+    { login: 1 },
+  ).lean();
+  if (!drop || !named.includes(String(drop.login || "").toLowerCase())) {
+    console.error(
+      "gameflip head row " + row.externalId + ": the reserved account is not " +
+        "one the row names — left reserved",
+    );
+    return false;
+  }
+  const headId = String(ids[0]);
+  await releaseAccount(headId, row.set);
+  return true;
+}
+
+// Settle a listing that expired while Gameflip still called it onsale/ready,
+// once it has been ended on Gameflip: retire the row, hand its stock back with
+// the same release calls as every other retirement (retire FIRST, release
+// second), clear the now-stale account linkage, and — for one of this
+// fulfiller's own chains — queue it for the renewal lane.
+//
+// Clearing the linkage matters because the Listings page offers Delist on any
+// row that is not sold, and that route releases `row.accountId` for the row's
+// set whatever its status: after a renewal re-claims the same account for the
+// same set, a Delist click on the old row would free the reservation the NEW
+// listing is selling. The old row keeps the login in its lastError instead.
+async function settleLapsed(row, { expiration } = {}) {
+  const date = String(expiration || "").slice(0, 10) || "?";
+  const renewIt = renewable(row);
+  let keep = false; // a rent-farm offer keeps its account for the buffer's renewal
+  if (row.rentFarm) {
+    try {
+      keep = !!row.rentFarmPoolId && gfFarm.renewsOnExpiry();
+    } catch {
+      keep = false;
+    }
+  }
+  // The old account goes into `note`, which later status writes leave alone,
+  // because the linkage itself is cleared below.
+  const was = String(row.accountLogin || "").slice(0, 120);
+  const note =
+    (row.note ? String(row.note) + " " : "") +
+    "— expired on Gameflip " + date + (was ? "; account " + was + " handed back" : "");
+  const retired = await MarketplaceListing.findOneAndUpdate(
+    { _id: row._id, status: "active" },
+    {
+      $set: {
+        status: "removed",
+        relistAttempts: 0,
+        relistRetryAt: null,
+        note,
+        lastError: renewIt
+          ? RENEWAL_PENDING + " (expired " + date + ")"
+          : "expired on Gameflip " + date + " — ended there and retired by the watcher" +
+            (keep ? "; account kept for a same-account renewal" : ""),
+        ...(keep ? { rentFarmExpiredAt: new Date() } : {}),
+      },
+    },
+  ).catch(() => null);
+  if (!retired) return false;
+  const why = "listing expired on Gameflip " + date;
+  if (row.rentFarm) {
+    if (!keep) await releaseBufferedRow(row, why);
+  } else if (row.accountId) {
+    await releaseAccount(row.accountId, row.set).catch(() => {});
+  } else if (row.accountOffer) {
+    await releaseSuppliedUnits(row, why);
+  } else if (row.autoDeliver && !row.noclaimStock) {
+    await releaseHeadAccount(row).catch((e) =>
+      console.error("gameflip head row " + row.externalId + " release:", e.message),
+    );
+  }
+  if (row.noclaimStock) await retireNoclaimUnit(row, why);
+  if (!row.rentFarm) {
+    await MarketplaceListing.updateOne(
+      { _id: row._id },
+      { $set: { accountId: "", units: [] } },
+    ).catch(() => {});
+  }
+  console.error(
+    "gameflip listing " + row.externalId + " expired " + date +
+      " — ended on Gameflip; " +
+      (renewIt
+        ? "queued for renewal (" + (Number(row.qtyRemaining) || 0) + " more unit(s) owed after it)"
+        : "retired"),
   );
+  return true;
 }
 
 // One watcher pass: mark sold listings sold and relist the next unit of any
@@ -1085,45 +1215,57 @@ async function syncOnce({
       );
     }
   }
-  // A row Gameflip still calls onsale/ready/draft whose 30-day expiry has
-  // passed (mp.gameflipIsExpired): out of search, so no buyer can reach it, yet
-  // a bare status read says "onsale" and the row stayed active forever — its
-  // account reserved, its owed units never relisted, one GET into the limiter
-  // every tick. It is ended on Gameflip FIRST (off sale, then deleted) and only
-  // then reported "expired", so the expired branch below hands its account back
-  // only once nothing can sell it. Releasing an account behind a listing a buyer
-  // could still pay for is the double sale this file exists to prevent, so an
-  // end that throws leaves the row exactly as it was (a 404 means it is already
-  // gone and takes the 404 branch), and a row past this pass's budget answers
-  // "" and waits for the next pass.
-  //
-  // A listing Gameflip itself reports "expired" is ended the same way (a lone
-  // delete): an expired listing still holds its auto-delivery code, and
-  // Gameflip refuses a new listing carrying a code an old one holds — which
-  // would fail exactly the renewal below, and a rent-farm offer's same-account
-  // renewal through the buffer.
+  // A row Gameflip still calls onsale/ready whose 30-day expiry has passed
+  // (mp.gameflipIsExpired): out of search, so no buyer can reach it, yet a bare
+  // status read says "onsale" and the row stayed active forever — its account
+  // reserved, its owed units never relisted, one GET into the limiter every
+  // tick. It is stamped, then ended on Gameflip (off sale, delete, delete
+  // confirmed), and only then settled by settleLapsed — so its stock goes back
+  // only once nothing can sell it. Releasing an account behind a listing a
+  // buyer could still pay for is the double sale this file exists to prevent:
+  // an end that throws leaves the row active (stamped) for the next pass, and a
+  // row past this pass's budget answers "" and waits. A listing Gameflip itself
+  // reports "expired" keeps the branch it always had below. Nothing is ended
+  // while the bulk sweep is down: that is the moment Gameflip is throttling us.
   let lapsedEnded = 0;
-  const lapsedOn = new Map(); // row id -> the expiration Gameflip recorded
+  const bulkSwept = !!(soldIds && liveIds);
   async function readUnplacedStatus(row) {
     if (typeof mp.gameflipListingState !== "function") {
       return mp.gameflipListingStatus(row.externalId);
     }
-    const st = (await mp.gameflipListingState(row.externalId)) || {};
-    if (!st.expired) return st.status || "";
-    if (lapsedEnded >= LAPSED_END_LIMIT) return "";
+    let st;
+    try {
+      st = (await mp.gameflipListingState(row.externalId)) || {};
+    } catch (e) {
+      // A 404 on a row this watcher had stamped as ending: the delete went
+      // through but its settlement was never recorded. Finish it here instead
+      // of letting the plain 404 branch end the chain.
+      const m = LAPSED_ENDING_RE.exec(String(row.lastError || ""));
+      if (e && e.status === 404 && m) {
+        await settleLapsed(row, { expiration: m[1] });
+        return LAPSED_DONE;
+      }
+      throw e;
+    }
+    if (!st.expired || st.status === "expired") return st.status || "";
+    if (!bulkSwept || lapsedEnded >= LAPSED_END_LIMIT) return "";
     if (lapsedEnded > 0) {
       await new Promise((r) => setTimeout(r, LAPSED_END_GAP_MS));
     }
     lapsedEnded += 1;
-    await mp.gameflipEndListing(row.externalId, { status: st.status });
-    lapsedOn.set(String(row._id), String(st.expiration || "").slice(0, 10));
-    console.error(
-      "gameflip listing " + row.externalId + " expired " +
-        String(st.expiration || "?").slice(0, 10) + ' (Gameflip said "' +
-        st.status + '") — ended on Gameflip; ' +
-        (renewable(row) ? "renewal queued" : "retiring it"),
-    );
-    return "expired";
+    const date = String(st.expiration || "").slice(0, 10) || "?";
+    await MarketplaceListing.updateOne(
+      { _id: row._id, status: "active" },
+      { $set: { lastError: LAPSED_ENDING + date + ")" } },
+    ).catch(() => {});
+    try {
+      await mp.gameflipEndListing(row.externalId, { status: st.status });
+    } catch (e) {
+      // Gone between the read and the end: the same outcome as ending it.
+      if (!(e && e.status === 404)) throw e;
+    }
+    await settleLapsed(row, { expiration: st.expiration });
+    return LAPSED_DONE;
   }
   let renewed = 0;
   for (const row of due) {
@@ -1141,6 +1283,7 @@ async function syncOnce({
               ? "onsale"
               : await readUnplacedStatus(row)
           : await readUnplacedStatus(row);
+      if (status === LAPSED_DONE) continue;
     } catch (e) {
       // A 404 means the listing is gone from Gameflip for good. Plain `continue`
       // leaves the row active forever: the watcher re-reads it every tick, the
@@ -1205,17 +1348,6 @@ async function syncOnce({
     // utils/autoLister.js already treats "expired" as gone (`if (status &&
     // status !== "expired")`); this watcher simply never learned it.
     //
-    // An auto-delivery listing that expired unsold, and that THIS pass ended
-    // on Gameflip (so no old listing still holds its code), is queued for the
-    // renewal lane at the end of the pass instead of ending its chain. Its
-    // stock is handed back by the very same release calls as any retirement,
-    // so the renewal picks an account exactly as a sale's relist does.
-    const renewChain =
-      status === "expired" && renewable(row) && lapsedOn.has(String(row._id));
-    const renewWhy = renewChain
-      ? RENEWAL_PENDING + " (expired " + lapsedOn.get(String(row._id)) + ")"
-      : "";
-    const renewSet = renewChain ? { relistAttempts: 0, relistRetryAt: null } : {};
     // A buffered rent-farm offer that simply EXPIRED unsold keeps its account
     // for a renewal: the next buffer pass relists that same account instead of
     // returning it and burning a fresh pristine one on the replacement (after a
@@ -1237,9 +1369,10 @@ async function syncOnce({
         {
           $set: {
             status: "removed",
-            lastError: retireReason(status, { renew, renewWhy }),
+            lastError:
+              "gameflip reports \"" + status + "\" — retired by the watcher" +
+              (renew ? "; account kept for a same-account renewal" : ""),
             ...(renew ? { rentFarmExpiredAt: new Date() } : {}),
-            ...renewSet,
           },
         },
       ).catch(() => null);
@@ -1260,12 +1393,8 @@ async function syncOnce({
       }
       if (retired) {
         console.error(
-          "gameflip listing " + row.externalId + " is " + status +
-            (renewChain
-              ? " — queued for renewal (" + (Number(row.qtyRemaining) || 0) +
-                " more unit(s) owed after it)"
-              : " — retired, " + (Number(row.qtyRemaining) || 0) +
-                " unit(s) were still owed"),
+          "gameflip listing " + row.externalId + " is " + status + " — retired, " +
+            (Number(row.qtyRemaining) || 0) + " unit(s) were still owed",
         );
       }
       continue;
@@ -1577,15 +1706,18 @@ async function syncOnce({
     }
   }
 
-  // THE RENEWAL LANE (see LAPSED_RENEW_PER_PASS). A row the expired branch
-  // queued gets a fresh listing for its unit; qtyRemaining carries over
-  // unchanged because nothing sold. Claimed first by pushing relistRetryAt into
-  // the future — the same lease the stalled lane uses, so an overlapping pass
-  // can never publish the same unit twice. A transient failure (Gameflip's
-  // 429, a timeout) backs off on the stalled lane's schedule; "out of stock"
-  // means no unsold account holds the bundle any more, so the chain ends there
-  // and says so, as the owner was told it would.
-  if (renewsLapsedListings()) {
+  // THE RENEWAL LANE (see LAPSED_RENEW_PER_PASS). A row settleLapsed queued
+  // gets a fresh listing for its unit; qtyRemaining carries over unchanged
+  // because nothing sold. Claimed first by pushing relistRetryAt into the
+  // future — the same lease the stalled lane uses, so an overlapping pass can
+  // never publish the same unit twice. Every failure backs off on the stalled
+  // lane's schedule (5 min doubling, 12 h cap) and the row stays pending:
+  // "out of stock" is often a dip — accounts on other listings, a token-scan
+  // flap — and ending a 520-unit chain on one is a loss nothing would undo, so
+  // like the stalled lane it is retried and the owner is told once, at the
+  // RELIST_ALERT_AT_ATTEMPT-th miss. Not while the bulk sweep is down: that is
+  // when Gameflip is throttling us, and a publish there only makes it worse.
+  if (bulkSwept && renewsLapsedListings()) {
     const pending = await MarketplaceListing.find({
       marketplace: "gameflip",
       status: "removed",
@@ -1655,27 +1787,28 @@ async function syncOnce({
       } catch (e) {
         const msg = String((e && e.message) || e).slice(0, 200);
         const attempts = (Number(row.relistAttempts) || 0) + 1;
-        const ended = isOutOfStockError(msg);
+        const dry = isOutOfStockError(msg);
         await MarketplaceListing.updateOne(
           { _id: row._id },
           {
-            $set: ended
-              ? {
-                  relistAttempts: attempts,
-                  relistRetryAt: null,
-                  lastError: "expired on Gameflip — not renewed: " + msg,
-                }
-              : {
-                  relistAttempts: attempts,
-                  relistRetryAt: new Date(Date.now() + relistRetryDelayMs(attempts)),
-                  lastError:
-                    RENEWAL_PENDING + " (attempt " + attempts + " failed: " + msg + ")",
-                },
+            $set: {
+              relistAttempts: attempts,
+              relistRetryAt: new Date(Date.now() + relistRetryDelayMs(attempts)),
+              lastError:
+                RENEWAL_PENDING + " (attempt " + attempts + " failed: " + msg + ")",
+            },
           },
         ).catch(() => {});
-        console.error(
-          "gameflip renewal " + row.externalId + (ended ? " ended: " : " failed: ") + msg,
-        );
+        console.error("gameflip renewal " + row.externalId + " failed: " + msg);
+        if (dry && attempts === RELIST_ALERT_AT_ATTEMPT) {
+          sendTelegram(
+            "⚠️ Gameflip renewal is OUT OF STOCK\n\n" +
+              (row.title || "(untitled listing)") +
+              "\n" + (Number(row.qtyRemaining) || 0) + " more unit(s) owed after this one." +
+              "\nIts listing expired on Gameflip; no unsold account holds the whole " +
+              "bundle right now. Retrying every few hours (up to 12 h apart).",
+          ).catch((err) => console.error("gameflip renewal alert:", err.message));
+        }
       } finally {
         if (img) await fsp.unlink(img).catch(() => {});
       }

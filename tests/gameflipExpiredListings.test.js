@@ -21,11 +21,21 @@ const { MongoMemoryServer } = require("mongodb-memory-server");
 process.env.SESSION_SECRET ||= "gf-expired-listings-test";
 process.env.CRED_SECRET ||= "gf-expired-listings-cred";
 
-const world = { onsale: new Set(), state: {}, ended: [], stateReads: [], endFails: new Set(), af: {} };
+const world = {
+  onsale: new Set(),
+  state: {},
+  ended: [],
+  stateReads: [],
+  endFails: new Set(),
+  af: {},
+  telegrams: [],
+  sweepFails: false,
+};
 
 const fakeMp = {
   keyStatus: () => ({ gameflip: { configured: true } }),
   async gameflipListingIdsByStatus(status) {
+    if (world.sweepFails) throw new Error("Request failed with status code 429");
     return status === "onsale" ? new Set(world.onsale) : new Set();
   },
   async gameflipListingState(id) {
@@ -56,7 +66,9 @@ const realLoad = Module._load;
 Module._load = function (request, parent, isMain) {
   if (parent && /utils[\\/]gameflipFulfiller\.js$/.test(parent.filename || "")) {
     if (request === "./marketplaces") return fakeMp;
-    if (request === "./telegram") return { sendTelegram: async () => {} };
+    if (request === "./telegram") {
+      return { sendTelegram: async (m) => { world.telegrams.push(m); } };
+    }
     if (request === "./gameflipFarmService") {
       return { renewsOnExpiry: () => false, onBufferedSale: async () => ({}) };
     }
@@ -68,6 +80,7 @@ Module._load = function (request, parent, isMain) {
 };
 
 const MarketplaceListing = require("../models/MarketplaceListing");
+const DropLog = require("../models/DropLog");
 const gf = require("../utils/gameflipFulfiller");
 
 let mongod;
@@ -81,6 +94,9 @@ test.after(async () => {
 });
 test.beforeEach(async () => {
   await MarketplaceListing.deleteMany({});
+  await DropLog.deleteMany({});
+  world.telegrams = [];
+  world.sweepFails = false;
   world.onsale = new Set();
   world.state = {};
   world.ended = [];
@@ -116,14 +132,16 @@ test("REGRESSION 2026-10-01: an 'onsale' listing past its expiry is ended on Gam
   assert.match(after.lastError, /expired/);
 });
 
-test("the account is never released while the listing could still sell: a failed end leaves the row alone", async () => {
-  await row("gf-stuck");
+test("the account is never released while the listing could still sell: a failed end leaves the row active", async () => {
+  await row("gf-stuck", { accountId: "a".repeat(24) });
   world.state["gf-stuck"] = { status: "onsale", expiration: PAST, expired: true };
   world.endFails.add("gf-stuck");
   await gf.syncOnce();
   const after = await MarketplaceListing.findOne({ externalId: "gf-stuck" }).lean();
   assert.strictEqual(after.status, "active", "a 429 on the end must not retire the row");
-  assert.strictEqual(after.lastError || "", "");
+  assert.strictEqual(after.accountId, "a".repeat(24), "its account stays with it");
+  // Stamped BEFORE the end, so a 404 later is read as "we ended it" — see below.
+  assert.match(after.lastError, /^expired on Gameflip — ending \(2026-08-25\)/);
 });
 
 test("a listing inside its 30 days, and one in the onsale sweep, are left exactly as they were", async () => {
@@ -234,17 +252,24 @@ test("a renewal that hits Gameflip's limiter backs off and stays pending — nev
   assert.strictEqual(pub.calls.length, 1, "inside the backoff nothing is retried");
 });
 
-test("out of stock ends the chain and says so — it is not retried forever", async () => {
+test("out of stock is a dip, not an end: the chain backs off, keeps its debt, and the owner hears once", async () => {
+  // Ending a 520-unit chain on one empty read would lose it for good; the
+  // stalled lane retries out-of-stock with backoff and alerts at the 3rd miss.
   await chain("gf-dry");
   const pub = fakePublisher(() => {
     throw new Error("Out of stock — no unsold account holds this whole bundle, so there is nothing to auto-deliver");
   });
-  await gf.syncOnce(pub.opts);
+  for (let pass = 1; pass <= 4; pass++) {
+    await gf.syncOnce(pub.opts);
+    // Expire the backoff so the next pass may retry.
+    await MarketplaceListing.updateOne({ externalId: "gf-dry" }, { $set: { relistRetryAt: new Date(Date.now() - 1000) } });
+  }
   const after = await MarketplaceListing.findOne({ externalId: "gf-dry" }).lean();
-  assert.match(after.lastError, /^expired on Gameflip — not renewed: Out of stock/);
-  await MarketplaceListing.updateOne({ externalId: "gf-dry" }, { $set: { relistRetryAt: null } });
-  await gf.syncOnce(pub.opts);
-  assert.strictEqual(pub.calls.length, 1, "a chain nothing can fill is not picked up again");
+  assert.strictEqual(pub.calls.length, 4);
+  assert.match(after.lastError, /^expired on Gameflip — renewal pending \(attempt 4 failed: Out of stock/);
+  assert.strictEqual(after.qtyRemaining, 5, "the debt waits for stock");
+  const alerts = world.telegrams.filter((m) => /OUT OF STOCK/.test(m));
+  assert.strictEqual(alerts.length, 1, "told once, at the 3rd miss — not every pass");
 });
 
 test("one renewal per pass, and a hand-made listing is never republished", async () => {
@@ -278,4 +303,134 @@ test("autoFarm.gameflipRenewExpired = false parks renewals; switching it back on
   assert.strictEqual(pub.calls.length, 1);
   after = await MarketplaceListing.findOne({ externalId: "gf-parked" }).lean();
   assert.match(after.lastError, /renewed as/);
+});
+
+/* ------------------------------------------------------------------------ *
+ * Round two (independent review, 2026-10-01)
+ * ------------------------------------------------------------------------ */
+
+test("the unclaimed engine's units and lots are never renewed here — the engine relists them", async () => {
+  await row("gf-unclaimed", { autoDeliver: true, origin: "unclaimed", accountId: "b".repeat(24), qtyRemaining: 0 });
+  await row("gf-lot", { autoDeliver: true, origin: "unclaimed", lotSize: 4, lotId: "lot-1", qtyRemaining: 0 });
+  for (const id of ["gf-unclaimed", "gf-lot"]) {
+    world.state[id] = { status: "onsale", expiration: PAST, expired: true };
+  }
+  const pub = fakePublisher();
+  await gf.syncOnce(pub.opts);
+  await gf.syncOnce(pub.opts);
+  assert.strictEqual(pub.calls.length, 0, "a second successor from the claimed archive is a double listing");
+  for (const id of ["gf-unclaimed", "gf-lot"]) {
+    const r = await MarketplaceListing.findOne({ externalId: id }).lean();
+    assert.strictEqual(r.status, "removed");
+    assert.doesNotMatch(r.lastError, /renewal/);
+  }
+});
+
+test("a retired row loses its account link, so a later Delist on it can free nothing", async () => {
+  await row("gf-linked", { autoDeliver: true, origin: "auto", accountId: "c".repeat(24), accountLogin: "acct-c", qtyRemaining: 2 });
+  world.state["gf-linked"] = { status: "onsale", expiration: PAST, expired: true };
+  await gf.syncOnce(fakePublisher().opts);
+  const after = await MarketplaceListing.findOne({ externalId: "gf-linked" }).lean();
+  assert.strictEqual(after.accountId, "", "Delist releases row.accountId for the row's set, whatever its status");
+  assert.deepStrictEqual(after.units, []);
+  assert.match(after.note, /expired on Gameflip 2026-08-25; account acct-c handed back/, "the login is kept in the record");
+});
+
+async function reserve(login, setId, accountId = new mongoose.Types.ObjectId()) {
+  await DropLog.create({
+    account: accountId,
+    login,
+    benefitId: "b-" + login + "-" + Math.random(),
+    itemKey: "k1",
+    soldAt: new Date(),
+    soldToUsername: "gameflip",
+    soldSetId: String(setId),
+  });
+  return accountId;
+}
+
+test("an auto-lister head row hands back the one account its code belongs to", async () => {
+  // listActivatedTask never records accountId on its head row, so an expiry
+  // left that account reserved for the set forever.
+  const set = new mongoose.Types.ObjectId();
+  await row("gf-head", { set, autoDeliver: true, origin: "auto", accountLogin: "headacct, spare1, spare2", qtyRemaining: 2 });
+  world.state["gf-head"] = { status: "onsale", expiration: PAST, expired: true };
+  const acct = await reserve("headacct", set);
+  await gf.syncOnce(fakePublisher().opts);
+  const left = await DropLog.countDocuments({ account: acct, soldAt: { $ne: null } });
+  assert.strictEqual(left, 0, "its reservation for the set is released");
+});
+
+test("a head row's reservation is left alone when it is not unambiguous", async () => {
+  const set = new mongoose.Types.ObjectId();
+  await row("gf-head2", { set, autoDeliver: true, origin: "auto", accountLogin: "one, two", qtyRemaining: 1 });
+  world.state["gf-head2"] = { status: "onsale", expiration: PAST, expired: true };
+  await reserve("one", set);
+  await reserve("two", set);
+  const set3 = new mongoose.Types.ObjectId();
+  await row("gf-head3", { set: set3, autoDeliver: true, origin: "auto", accountLogin: "mine", qtyRemaining: 1 });
+  world.state["gf-head3"] = { status: "onsale", expiration: PAST, expired: true };
+  await reserve("someone-else", set3);
+  await gf.syncOnce(fakePublisher().opts);
+  assert.strictEqual(await DropLog.countDocuments({ soldAt: { $ne: null } }), 3, "nothing released on doubt");
+});
+
+test("a 404 on a row the watcher had stamped as ending finishes the job — renewal included", async () => {
+  // The delete went through, but the pass died (or a manual sync overlapped)
+  // before the retirement was recorded. The plain 404 branch would end the chain.
+  await row("gf-halfway", {
+    autoDeliver: true,
+    origin: "auto",
+    qtyRemaining: 7,
+    lastError: "expired on Gameflip — ending (2026-09-10)",
+  });
+  const pub = fakePublisher();
+  await gf.syncOnce(pub.opts);
+  const after = await MarketplaceListing.findOne({ externalId: "gf-halfway" }).lean();
+  assert.strictEqual(after.status, "removed");
+  assert.match(after.lastError, /renewed as gf-new-1/);
+  assert.strictEqual(pub.calls[0].qtyRemaining, 7);
+});
+
+test("an unstamped 404 keeps the 404 branch it always had", async () => {
+  await row("gf-gone", { autoDeliver: true, origin: "auto", qtyRemaining: 3 });
+  const pub = fakePublisher();
+  await gf.syncOnce(pub.opts);
+  const after = await MarketplaceListing.findOne({ externalId: "gf-gone" }).lean();
+  assert.match(after.lastError, /gone from Gameflip \(404\)/);
+  assert.strictEqual(pub.calls.length, 0);
+});
+
+test("nothing is ended or renewed while the bulk sweep is down — Gameflip is throttling us", async () => {
+  await chain("gf-throttled");
+  await row("gf-q", { autoDeliver: true, origin: "auto", status: "removed", qtyRemaining: 2, lastError: "expired on Gameflip — renewal pending (expired 2026-09-01)" });
+  world.sweepFails = true;
+  const pub = fakePublisher();
+  await gf.syncOnce(pub.opts);
+  assert.deepStrictEqual(world.ended, []);
+  assert.strictEqual(pub.calls.length, 0);
+  assert.strictEqual((await MarketplaceListing.findOne({ externalId: "gf-throttled" }).lean()).status, "active");
+});
+
+test("a listing Gameflip itself reports 'expired' keeps its old branch: retired, not deleted, not renewed", async () => {
+  await chain("gf-gfexpired");
+  world.state["gf-gfexpired"] = { status: "expired", expiration: PAST, expired: true };
+  const pub = fakePublisher();
+  await gf.syncOnce(pub.opts);
+  const after = await MarketplaceListing.findOne({ externalId: "gf-gfexpired" }).lean();
+  assert.match(after.lastError, /gameflip reports "expired" — retired by the watcher/);
+  assert.deepStrictEqual(world.ended, []);
+  assert.strictEqual(pub.calls.length, 0);
+});
+
+test("gameflipIsExpired: a draft is never expired; onsale/ready past expiry are; status expired is", () => {
+  const real = require("../utils/marketplaces");
+  const now = Date.parse("2026-10-01T05:00:00Z");
+  assert.strictEqual(real.gameflipIsExpired({ status: "draft", expiration: "2026-08-01T00:00:00Z" }, now), false);
+  assert.strictEqual(real.gameflipIsExpired({ status: "ready", expiration: "2026-08-01T00:00:00Z" }, now), true);
+  assert.strictEqual(real.gameflipIsExpired({ status: "onsale", expiration: "2026-08-01T00:00:00Z" }, now), true);
+  assert.strictEqual(real.gameflipIsExpired({ status: "onsale", expiration: "2026-10-01T04:55:00Z" }, now), false, "inside the grace");
+  assert.strictEqual(real.gameflipIsExpired({ status: "onsale" }, now), false, "no expiration, no verdict");
+  assert.strictEqual(real.gameflipIsExpired({ status: "expired" }, now), true);
+  assert.strictEqual(real.gameflipIsExpired({ status: "sold", expiration: "2026-08-01T00:00:00Z" }, now), false);
 });

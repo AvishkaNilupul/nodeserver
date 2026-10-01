@@ -729,9 +729,13 @@ async function deliverOrder(order, { dryRun }) {
 
   // Whole packs on a bulk pack row (a partial pack can never sell), the free
   // account count on every other row.
+  let quantityPushed = true;
   await mp
     .eldoradoSetQuantity(offerId, advertisedFor(listing, undeliveredUnits(listing).length))
-    .catch((e) => console.error("eldorado post-delivery quantity:", e.message));
+    .catch((e) => {
+      quantityPushed = false;
+      console.error("eldorado post-delivery quantity:", e.message);
+    });
 
   // The last unit of a reserved-units row is the end of that row. Eldorado
   // CLOSES an offer when its quantity reaches 0, and nothing restocks a units
@@ -748,6 +752,14 @@ async function deliverOrder(order, { dryRun }) {
   // that state. Bookkeeping after a delivered order: a failure is logged and
   // never turns a sale the buyer already has into a failed one.
   if (!listing.bulkOfferId && undeliveredUnits(listing).length === 0) {
+    // The quantity push is what closes the offer. If it failed, the offer may
+    // still be Active at its old quantity, so pause it first — the same pause
+    // eldoradoShareMissing makes before it retires a sold-out share.
+    if (!quantityPushed) {
+      await mp
+        .eldoradoDelist(offerId)
+        .catch((e) => console.error("eldorado sold-out pause " + orderId + ":", e.message));
+    }
     await MarketplaceListing.updateOne(
       { _id: listing._id, status: "active" },
       {
