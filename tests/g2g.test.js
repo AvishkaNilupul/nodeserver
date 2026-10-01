@@ -569,6 +569,63 @@ test("the delivered count sends only what is still undelivered, and nothing when
   assert.ok(!t.calls.some((c) => c.method === "put"), "nothing sent");
 });
 
+// 2026-10-01: G2G holds an order's income until a delivery proof is uploaded
+// (require_delivery_proof_to_credit_income). The upload is the seller page's
+// own three steps: upload_url -> multipart POST to the pre-signed form ->
+// POST delivery_proof { upload_list, seller_id }.
+test("a delivery proof is uploaded the way G2G's seller page does it", async () => {
+  const { mp, calls } = loadG2G({
+    respond: (c) => {
+      if (c.method === "get" && /\/order\/upload_url$/.test(c.url)) {
+        return okBody({ url: "https://bucket.example/upload", fields: { key: "proofs/abc.png", policy: "p", "x-amz-signature": "s" } });
+      }
+      if (c.method === "post" && /\/delivery_proof$/.test(c.url)) return okBody({ results: ["proofs/abc.png"] });
+      return okBody({});
+    },
+  });
+  const realFetch = global.fetch;
+  const posted = [];
+  global.fetch = async (url, init) => {
+    posted.push({ url, init });
+    return { ok: true, status: 204, text: async () => "" };
+  };
+  try {
+    const r = await mp.g2gUploadDeliveryProof("1790817293060OS4Y-1", Buffer.from("PNGDATA"));
+    assert.strictEqual(r.key, "proofs/abc.png");
+  } finally {
+    global.fetch = realFetch;
+  }
+  const u = calls.find((c) => /\/order\/upload_url$/.test(c.url));
+  assert.deepStrictEqual(u.params, { name: "delivery-proof-1790817293060OS4Y-1.png", upload_type: "delivery_proof" });
+  assert.strictEqual(posted.length, 1);
+  assert.strictEqual(posted[0].url, "https://bucket.example/upload");
+  assert.strictEqual(posted[0].init.method, "POST");
+  const form = posted[0].init.body;
+  assert.strictEqual(form.get("key"), "proofs/abc.png", "every storage field goes up first");
+  assert.strictEqual(form.get("x-amz-signature"), "s");
+  assert.ok(form.get("file"), "then the image as 'file'");
+  assert.ok(!posted[0].init.headers || !posted[0].init.headers.authorization, "no G2G token sent to the storage url");
+  const d = calls.find((c) => /\/delivery_proof$/.test(c.url));
+  assert.strictEqual(d.url, "https://sls.g2g.com/order/item/1790817293060OS4Y-1/delivery_proof");
+  assert.deepStrictEqual(d.body, { upload_list: ["proofs/abc.png"], seller_id: SELLER });
+});
+
+test("a delivery proof the storage refuses, or G2G does not accept, is an error", async () => {
+  const respond = (accepted) => (c) => {
+    if (c.method === "get") return okBody({ url: "https://bucket.example/upload", fields: { key: "k1" } });
+    return okBody({ results: accepted });
+  };
+  const realFetch = global.fetch;
+  try {
+    global.fetch = async () => ({ ok: false, status: 403, text: async () => "AccessDenied" });
+    await assert.rejects(loadG2G({ respond: respond(["k1"]) }).mp.g2gUploadDeliveryProof("A-1", Buffer.from("x")), /HTTP 403/);
+    global.fetch = async () => ({ ok: true, status: 204, text: async () => "" });
+    await assert.rejects(loadG2G({ respond: respond([]) }).mp.g2gUploadDeliveryProof("A-1", Buffer.from("x")), /not accepted/);
+  } finally {
+    global.fetch = realFetch;
+  }
+});
+
 /* ------------------- 8. required vs optional credentials ---------------- */
 
 test("g2g asks for the refresh trio and NOT a short-lived access token", () => {
