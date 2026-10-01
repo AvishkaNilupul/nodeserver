@@ -24,6 +24,11 @@
 // read and the config read is not a defect), then reminds daily; one line says
 // when everything is clear again. Read-only: it never edits anything.
 const DAY_MS = 24 * 60 * 60 * 1000;
+// How often an unchanged finding is paged again. A dead token does not change
+// from one day to the next and only the owner can act on it (both on 2026-09-30
+// died within 1-2 days of delivery: the buyer changed the password), so it is
+// repeated weekly; everything else is a placement problem and repeats daily.
+const REPAGE_MS = { deadToken: 7 * DAY_MS };
 const MIN_INTERVAL_MS = 55 * 60 * 1000;
 const LIST_MAX = 15;
 
@@ -282,7 +287,7 @@ async function checkOnce({ notify = true, force = false } = {}) {
   for (const f of findings) {
     const s = seen.get(f.id) || { seen: 0, pagedAt: 0 };
     s.seen += 1;
-    if (s.seen >= 2 && (!s.pagedAt || now - s.pagedAt >= DAY_MS)) {
+    if (s.seen >= 2 && (!s.pagedAt || now - s.pagedAt >= (REPAGE_MS[f.kind] || DAY_MS))) {
       toPage.push(f);
       if (notify) s.pagedAt = now;
     }

@@ -37,13 +37,13 @@ test("a chat is 'ready' only once Eldorado has minted the conversation id", () =
   // talkJsConversationId=null until the chat is first opened. The fulfillers gate
   // on this so a chat-less order is HELD, not failed, and never has a pool
   // account burned before it can be handed over (the 2026-09-20 page).
-  assert.strictEqual(mp.eldoradoOrderChatReady(null), false);
-  assert.strictEqual(mp.eldoradoOrderChatReady({ sellerId: "s" }), false);
-  assert.strictEqual(mp.eldoradoOrderChatReady({ talkJsConversationId: null, sellerId: "s" }), false);
-  assert.strictEqual(mp.eldoradoOrderChatReady({ talkJsConversationId: "", sellerId: "s" }), false);
-  assert.strictEqual(mp.eldoradoOrderChatReady({ talkJsConversationId: "c-1" }), false);
+  assert.strictEqual(farm.orderChatReady(null), false);
+  assert.strictEqual(farm.orderChatReady({ sellerId: "s" }), false);
+  assert.strictEqual(farm.orderChatReady({ talkJsConversationId: null, sellerId: "s" }), false);
+  assert.strictEqual(farm.orderChatReady({ talkJsConversationId: "", sellerId: "s" }), false);
+  assert.strictEqual(farm.orderChatReady({ talkJsConversationId: "c-1" }), false);
   assert.strictEqual(
-    mp.eldoradoOrderChatReady({ talkJsConversationId: "43a2c023-9dd3", sellerId: "c806ac96" }),
+    farm.orderChatReady({ talkJsConversationId: "43a2c023-9dd3", sellerId: "c806ac96" }),
     true,
   );
 });
@@ -134,6 +134,10 @@ test("the hand-over message carries the credential, the term and the rules", () 
   assert.match(msg, /KEEP THIS ACCOUNT LINKED/);
   assert.match(msg, /do not change the account's password/i);
   // the term must be restated in the body, not just the title
-  assert.match(msg, /whole 1 year/);
+  assert.match(msg, /during your 1 year/);
   assert.match(msg, /for Overwatch/);
+  // drops come with the game's campaigns — never "new items will keep
+  // appearing", which is untrue while a game runs no campaign (2026-10-01)
+  assert.match(msg, /Items appear whenever Overwatch runs a Twitch Drops campaign/);
+  assert.doesNotMatch(msg, /keep appearing/);
 });

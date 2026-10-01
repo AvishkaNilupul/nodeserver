@@ -567,7 +567,15 @@ async function writeFileRaw(host, file, text) {
   const tmp = dest + ".tmp-" + process.pid;
   const bak = dest + ".bak";
   // Single remote shell: back up existing file (best effort), then read stdin
-  // into a temp file and atomically move it into place.
+  // into a temp file and atomically move it into place — ONLY when the temp
+  // file holds every byte we sent. `cat` exits 0 on any EOF, and a cut-off
+  // transfer is an EOF too: a timed-out or killed ssh client behind the shared
+  // ControlMaster closes the channel cleanly, so `cat && mv` installed half a
+  // bot config as if it were whole, and the bot lost every account past the
+  // cut (2026-10-01). A short temp file is removed and the write FAILS.
+  const bytes = Buffer.isBuffer(text)
+    ? text.length
+    : Buffer.byteLength(String(text), "utf8");
   const cmd =
     "[ -f " +
     shq(dest) +
@@ -578,10 +586,19 @@ async function writeFileRaw(host, file, text) {
     "; " +
     "cat > " +
     shq(tmp) +
-    " && mv -f " +
+    " && [ $(wc -c < " +
+    shq(tmp) +
+    ") -eq " +
+    bytes +
+    " ] && mv -f " +
     shq(tmp) +
     " " +
-    shq(dest);
+    shq(dest) +
+    " || { rm -f " +
+    shq(tmp) +
+    "; echo 'short or failed write: " +
+    bytes +
+    " bytes expected' >&2; exit 1; }";
   await sshRun(host, cmd, { input: text });
 }
 

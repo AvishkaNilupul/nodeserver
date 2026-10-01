@@ -747,3 +747,102 @@ test("REGRESSION: a (game, term) whose publish failed waits before it is tried a
   assert.equal(out2.published, 0);
   assert.equal(world.fresh.length, claimsAfter1, "the failing key was NOT retried at once (no account claimed, no restarts)");
 });
+
+// B10 (2026-10-01): a game with no Twitch Drops campaign in DARK_GAME_DAYS gets
+// no new offer and no renewal; its live offers stay up. Unknown campaign
+// history (empty / unreadable) treats nothing as dark.
+const TwitchCampaign = require("../models/TwitchCampaign");
+const dayMs = 86400000;
+async function campaign(game, endAt, extra = {}) {
+  await TwitchCampaign.create({
+    campaignId: "c-" + game + "-" + Math.random().toString(36).slice(2),
+    game,
+    endAt,
+    ...extra,
+  });
+}
+
+test("B10: a game with no Twitch campaign in 45 days is dark — its expired offer goes back to the pool and nothing new is published for it", async () => {
+  await reset();
+  await TwitchCampaign.deleteMany({});
+  try {
+    world.af.gfRentFarmGames = ["Rust", "Escape from Tarkov"];
+    await campaign("Rust", new Date(Date.now() - 10 * dayMs));
+    await campaign("Escape from Tarkov", new Date(Date.now() - 60 * dayMs));
+
+    const cat = await svc.desiredCatalogue();
+    assert.deepEqual(cat.dark, ["Escape from Tarkov"]);
+    assert.equal(cat.campaignsUnknown, false);
+    assert.deepEqual([...cat.games].sort(), ["Escape from Tarkov", "Rust"], "the catalogue still names it (the tracker shows it)");
+    assert.ok(cat.wanted.every((w) => w.game === "Rust"), "no wanted slot for the dark game");
+    assert.equal(cat.wanted.length, 3);
+
+    // Its expired offer is not renewed; Rust's missing slots are published.
+    const { pool } = await parked({
+      login: "eft1",
+      days: 180,
+      row: { rentFarmGame: "Escape from Tarkov", title: "Escape from Tarkov Twitch Drops Automatic Farming 180 Days" },
+    });
+    let n = 0;
+    world.freshImpl = async () => {
+      n += 1;
+      const login = "fresh" + n;
+      const p = await AvailableAccount.create({
+        username: login, usernameLower: login, clientSecret: "cs-" + login, password: encrypt("pw-" + login),
+        hasPassword: true, status: "claimed", claimedNote: "rented to operator-selffarm",
+      });
+      await RenterAccount.create({ renter: holder._id, clientSecret: "cs-" + login, login, host: "contabo", configFile: "config_54.json", enabled: true });
+      return { added: [{ login, poolId: String(p._id) }], farmUntil: new Date(Date.now() + 365 * dayMs) };
+    };
+    const out = await svc.topUpBuffer({ dryRun: false });
+    assert.equal(out.renewed, 0);
+    assert.equal(out.reclaimed, 1);
+    assert.equal((await AvailableAccount.findById(pool._id).lean()).status, "available");
+    assert.ok(
+      world.events.some((e) => /eft1 returned to the pool — .*Escape from Tarkov has had no Twitch Drops campaign in 45 days/.test(e.detail || "")),
+      "the release says why",
+    );
+    assert.ok(world.published.length > 0, "Rust's slots still publish");
+    assert.ok(world.published.every((p) => !/Tarkov/.test(p.title || "")), "nothing published for the dark game");
+
+    const st = await svc.bufferState();
+    assert.deepEqual(st.dark, ["Escape from Tarkov"]);
+    assert.ok(st.notes.some((x) => /no Twitch Drops campaign in 45 days/.test(x) && /Escape from Tarkov/.test(x)));
+    assert.ok(st.missing.every((m) => m.game === "Rust"), "a dark game is not reported as missing");
+  } finally {
+    await TwitchCampaign.deleteMany({});
+  }
+});
+
+test("B10: a running campaign, one that ended inside the window, or a null-endAt one seen lately keeps a game in; an empty history darkens nothing", async () => {
+  await reset();
+  await TwitchCampaign.deleteMany({});
+  try {
+    world.af.gfRentFarmGames = ["Rust", "Overwatch", "Warframe", "Halo Infinite"];
+    // Empty history: unknown, nothing dark.
+    let cat = await svc.desiredCatalogue();
+    assert.deepEqual(cat.dark, []);
+    assert.equal(cat.campaignsUnknown, true);
+    assert.equal(cat.wanted.length, 12);
+
+    await campaign("rust", new Date(Date.now() + 5 * dayMs)); // running, other case
+    await campaign("Overwatch", new Date(Date.now() - 44 * dayMs)); // ended inside the window
+    await campaign("Warframe", null, { lastSeenAt: new Date(Date.now() - 2 * dayMs) }); // no end date, seen lately
+    await campaign("Halo Infinite", new Date(Date.now() - 46 * dayMs)); // ended just outside
+    cat = await svc.desiredCatalogue();
+    assert.deepEqual(cat.dark, ["Halo Infinite"]);
+    assert.equal(cat.wanted.length, 9);
+  } finally {
+    await TwitchCampaign.deleteMany({});
+  }
+});
+
+test("B10: buyer-facing copy no longer promises drops every day — it says drops come with the game's campaigns", () => {
+  const term = svc.TERMS.find((t) => t.days === 180);
+  const desc = svc.offerDescription("Rust", term);
+  assert.doesNotMatch(desc, /every day/);
+  assert.match(desc, /farms every Twitch Drops campaign Rust runs during your 180 days/);
+  const code = svc.bufferedDeliveryCode("u1", "p1", 180, "Rust");
+  assert.doesNotMatch(code, /keep appearing/);
+  assert.match(code, /Items appear whenever Rust runs a Twitch Drops campaign during your 180 days/);
+});

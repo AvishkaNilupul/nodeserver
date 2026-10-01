@@ -148,6 +148,20 @@ async function knownFarmGames() {
   return list;
 }
 
+// Is an order's chat ready to receive the credential? Eldorado mints the TalkJS
+// conversation LAZILY — a freshly-paid order carries `talkJsConversationId:
+// null` until the order chat is first opened (by the buyer, or by the operator
+// opening the order page), at which point the id appears on the order rows and
+// stays. The internal id we post to is `sha1(talkJsConversationId)`, so with no
+// GUID there is nothing to post to and nothing we can invent. A missing id is
+// "not deliverable YET", not an error. Confirmed live 2026-09-20: two rent-farm
+// orders paged "no talkJsConversationId", then self-delivered minutes later.
+// Kept HERE rather than in marketplaces.js on purpose: that file is edited and
+// deployed by other work streams, and this check must not vanish with one.
+function orderChatReady(order) {
+  return !!(order && order.talkJsConversationId && order.sellerId);
+}
+
 // Is this order one of ours, and what did the buyer actually buy?
 // Returns null for anything that is not a rent-farm offer.
 async function parseFarmOrder(order) {
@@ -182,8 +196,9 @@ function farmDeliveryMessage(accounts, days, game, { until = null } = {}) {
     "KEEP THIS ACCOUNT LINKED to your game account. Our farm watches every " +
     "drop event" + forGame + " and claims the items automatically the moment " +
     "they unlock — you do not have to watch any streams or do anything at " +
-    "all. New items will keep appearing on the account for the whole " + term +
-    ", so just check back and claim them whenever you like.\n\n" +
+    "all. Items appear whenever " + (game || "the game") + " runs a Twitch " +
+    "Drops campaign during your " + term + ", so just check back and claim " +
+    "them whenever you like.\n\n" +
     "Please do not change the account's password or email — the automatic " +
     "farming stops if you do, and that is not covered by a refund.\n\n" +
     "If our bot ever misses an item you can also claim it by hand at " +
@@ -386,7 +401,7 @@ async function deliverFarmOrder(order, { dryRun } = {}) {
   // started before the buyer can receive the login), and deliver the moment the
   // conversation appears. It pages only if the wait drags on (~10 min), when
   // opening the order page (which starts the chat) or a nudge to the buyer helps.
-  if (!mp.eldoradoOrderChatReady(order)) {
+  if (!orderChatReady(order)) {
     // State first: shouldAlert's throttle keys off it (a fresh "claimed" row
     // would read as a first failure and page on tick one).
     row.state = "waiting_chat";
@@ -557,6 +572,7 @@ async function deliverFarmOrder(order, { dryRun } = {}) {
 }
 
 module.exports = {
+  orderChatReady,
   FARM_TITLE,
   termToDays,
   canonicalGame,

@@ -126,6 +126,9 @@ const ORDER = {
   offerId: "offer-1",
   purchaseQuantity: 1,
   buyerUsername: "JumpyPage",
+  // The buyer's chat exists (eldoradoFarmService.orderChatReady).
+  talkJsConversationId: "conv-handover-1",
+  sellerId: "seller-1",
   orderOfferDetails: { offerTitle: "Overwatch Twitch Drops Automatic Farming 30 Days" },
 };
 
@@ -141,7 +144,6 @@ test("REGRESSION: a hand-over that happens hours after provisioning re-stamps th
   await withStubs(
     [
       [operatorFarm, "farmFreshAccounts", provisioned],
-      [mp, "eldoradoOrderChatReady", () => true],
       [mp, "eldoradoSendOrderMessage", async (o, m) => { if (sendFails) throw new Error("chat 503"); sent.push(m); }],
       [mp, "eldoradoMarkDelivered", async () => ({})],
     ],
@@ -176,7 +178,6 @@ test("REGRESSION: when only confirming the delivery fails, the row stays 'sent' 
         await RenterAccount.create({ renter: holder._id, clientSecret: "cs1", login: "buyer1", host: "contabo", configFile: "config_54.json", farmUntil });
         return { added: [{ login: "buyer1", poolId: String(pool._id) }], farmUntil };
       }],
-      [mp, "eldoradoOrderChatReady", () => true],
       [mp, "eldoradoSendOrderMessage", async (o, m) => { sent.push(m); }],
       [mp, "eldoradoMarkDelivered", async () => { if (markFails) throw new Error("HTTP 502 from Eldorado"); return {}; }],
     ],

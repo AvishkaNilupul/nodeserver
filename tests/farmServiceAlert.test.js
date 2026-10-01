@@ -105,7 +105,7 @@ test("waiting_chat is a soft hold: quiet at first, then reminds like a failure",
 
 test("the Eldorado farm service holds a chat-less order BEFORE provisioning anything", () => {
   const src = require("node:fs").readFileSync(require("node:path").join(__dirname, "..", "utils", "eldoradoFarmService.js"), "utf8");
-  const hold = src.indexOf("if (!mp.eldoradoOrderChatReady(order)) {");
+  const hold = src.indexOf("if (!orderChatReady(order)) {");
   const provision = src.indexOf("// 1. Provision, unless a previous attempt already did.");
   assert.ok(hold > 0 && provision > hold, "the hold must come before provisioning");
   assert.match(src.slice(hold, provision), /row\.state = "waiting_chat";[\s\S]*farmAlert\.shouldAlert\(row\)/);

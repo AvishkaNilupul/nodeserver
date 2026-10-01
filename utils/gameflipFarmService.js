@@ -111,6 +111,17 @@ const DENY_GAME =
 // well.
 const CATALOGUE_DAYS_BACK = 90;
 
+// A game with no Twitch Drops campaign running at any point in this many days
+// is "dark": the buffer publishes no NEW offer for it and does not renew its
+// expired ones (their accounts go back to the pool the usual way). Offers
+// already live stay up until they sell or expire — nothing is delisted. The
+// offers sell 120-365 day windows, so a game merely between campaigns (Rocket
+// League, Warframe: a dozen campaigns a month, none at this minute) must stay;
+// a game silent for six weeks is selling farming with nothing to farm.
+// Measured 2026-10-01: all 29 catalogue games had a campaign end within the
+// last 33 days, so this removed nothing on the day it shipped.
+const DARK_GAME_DAYS = 45;
+
 // Ceiling on the buffered rows one pass will read back. Bounded because this
 // runs on a bytes-bound Atlas shared tier; sorted because an unsorted `.limit()`
 // is the bug that hid 35 Gameflip listings from the watcher for months (see
@@ -212,11 +223,41 @@ async function catalogueGames() {
 // where two thirds of the games are missing their 1-year offer. `truncated`
 // travels with it so the tracker can say the cap was reached instead of
 // implying the catalogue is simply that size.
+// Lower-cased names of every game that had a campaign running at some point in
+// the last DARK_GAME_DAYS. `distinct` for the same bytes reason as above.
+// null = UNKNOWN — a failed read, or nothing at all came back (a broken campaign
+// watcher is not evidence that every game went dark) — and the caller then
+// treats no game as dark.
+async function gamesWithRecentCampaigns() {
+  const TwitchCampaign = require("../models/TwitchCampaign");
+  const since = new Date(Date.now() - DARK_GAME_DAYS * 86400000);
+  try {
+    const names = await TwitchCampaign.distinct("game", {
+      $or: [
+        { endAt: { $gte: since } },
+        { endAt: null, lastSeenAt: { $gte: since } },
+      ],
+    });
+    const set = new Set(
+      (names || []).map((g) => String(g || "").trim().toLowerCase()).filter(Boolean),
+    );
+    return set.size ? set : null;
+  } catch {
+    return null;
+  }
+}
+
 async function desiredCatalogue() {
   const cfg = config();
   const games = await catalogueGames();
+  const recent = await gamesWithRecentCampaigns();
+  const dark = recent
+    ? games.filter((g) => !recent.has(String(g).trim().toLowerCase()))
+    : [];
+  const darkSet = new Set(dark);
   const all = [];
   for (const game of games) {
+    if (darkSet.has(game)) continue;
     for (const t of TERMS) {
       all.push({
         game,
@@ -229,6 +270,8 @@ async function desiredCatalogue() {
   }
   return {
     games,
+    dark,
+    campaignsUnknown: !recent,
     terms: TERMS,
     target: cfg.target,
     total: all.length,
@@ -252,7 +295,8 @@ function offerDescription(game, term) {
   return (
     "Automatic Farm on our Twitch for the game " + game + "\n\n" +
     "Activation & Timing: After purchasing, link the received account to your " +
-    "own and start receiving new Drops every day. Farming begins the moment " +
+    "own — our bot then farms every Twitch Drops campaign " + game + " runs " +
+    "during your " + term.days + " days. Farming begins the moment " +
     "you purchase — the " + term.days + " days are counted from your purchase, " +
     "not from when this offer was listed.\n\n" +
     "Manual Pickup: If our program does not activate any of the items, you can " +
@@ -287,9 +331,10 @@ function bufferedDeliveryCode(login, password, days, game) {
     "Your " + term + " of automatic farming starts now.\n\n" +
     "KEEP THIS ACCOUNT LINKED to your game account. Our farm watches every " +
     "drop event for " + game + " and claims the items automatically the moment " +
-    "they unlock — you do not have to watch any streams. New items will keep " +
-    "appearing on the account for the whole " + term + ", so check back and " +
-    "claim them whenever you like at https://www.twitch.tv/drops/inventory\n\n" +
+    "they unlock — you do not have to watch any streams. Items appear whenever " +
+    game + " runs a Twitch Drops campaign during your " + term + ", so check " +
+    "back and claim them whenever you like at " +
+    "https://www.twitch.tv/drops/inventory\n\n" +
     "Please do not change the account's password or email — the automatic " +
     "farming stops if you do, and that is not covered by a refund.\n\n" +
     "Any problem at all, message me here on Gameflip first and I will sort it " +
@@ -1036,7 +1081,10 @@ async function settleStranded(cat, haveKey, cfg, out, { canRenew = true, parked 
         haveKey.add(key); // cannot tell — keep it parked for now
         continue;
       }
-      why = "expired unsold and no longer in the catalogue — returning the account";
+      why = (cat.dark || []).some((g) => slotKey(g, row.rentFarmDays) === key)
+        ? "expired unsold and " + row.rentFarmGame + " has had no Twitch Drops " +
+          "campaign in " + DARK_GAME_DAYS + " days — returning the account"
+        : "expired unsold and no longer in the catalogue — returning the account";
     } else if (haveKey.has(key)) {
       why = "expired unsold and its slot is live again — returning the account";
     } else if (failures >= RENEW_MAX_FAILURES) {
@@ -2188,6 +2236,9 @@ async function bufferState() {
     windowDays: BUFFER_WINDOW_DAYS,
     terms: TERMS,
     games: [],
+    // Catalogue games with no Twitch campaign in DARK_GAME_DAYS: no new or
+    // renewed offers for them (their live ones stay up).
+    dark: [],
     catalogue: { total: 0, truncated: false },
     live: [],
     sold: [],
@@ -2274,7 +2325,21 @@ async function bufferState() {
     }),
   ]);
   state.games = cat.games;
+  state.dark = cat.dark || [];
   state.catalogue = { total: cat.total, truncated: !!cat.truncated };
+  if (state.dark.length) {
+    state.notes.push(
+      state.dark.length + " catalogue game(s) have had no Twitch Drops campaign " +
+        "in " + DARK_GAME_DAYS + " days, so they get no new or renewed offers " +
+        "(live ones stay up until they sell or expire): " + state.dark.join(", ") + ".",
+    );
+  }
+  if (cat.campaignsUnknown && (cat.games || []).length) {
+    state.notes.push(
+      "Twitch campaign history could not be read — no game is treated as dark " +
+        "this pass.",
+    );
+  }
   if (cat.truncated) {
     state.notes.push(
       cat.total + " (game, term) offers are wanted but the target caps the " +
@@ -2590,6 +2655,8 @@ module.exports = {
   // the catalogue
   catalogueGames,
   desiredCatalogue,
+  gamesWithRecentCampaigns,
+  DARK_GAME_DAYS,
   offerTitle,
   offerDescription,
   bufferedDeliveryCode,

@@ -92,7 +92,7 @@ test("a window that already lapsed is renterExpiry's business, not a finding", (
   assert.deepEqual(f, []);
 });
 
-test("checkOnce pages a finding only when seen twice, then daily, then says all clear", async () => {
+test("checkOnce pages a finding only when seen twice, then (a dead token) weekly, then says all clear", async () => {
   ri._reset();
   const sent = [];
   let clock = NOW;
@@ -129,7 +129,10 @@ test("checkOnce pages a finding only when seen twice, then daily, then says all 
   assert.equal(sent.length, 1, "not every hour");
   clock += 24 * 60 * 60000;
   await ri.checkOnce();
-  assert.equal(sent.length, 2, "daily reminder");
+  assert.equal(sent.length, 1, "a dead token is not repeated daily");
+  clock += 6 * 24 * 60 * 60000;
+  await ri.checkOnce();
+  assert.equal(sent.length, 2, "weekly reminder");
   live = [row("H", "dead", { configFile: "config_03.json" })]; // token fixed
   clock += 60 * 60000;
   await ri.checkOnce();
@@ -223,4 +226,29 @@ test("REGRESSION: the same orphan token twice (two stacks) is ONE finding — th
     known: new Set(), stackKeys: new Set(["contabo/config_03.json", "contabo/config_05.json"]),
   });
   assert.equal(f.filter((x) => x.kind === "orphan").length, 1);
+});
+
+test("a dead token is paged again weekly, not daily; other findings still repeat daily", async () => {
+  const sent = [];
+  const deadRows = [row("H", "dead", { lastScanStatus: "token_invalid", configFile: "config_03.json" })];
+  const h = harness({ live: () => deadRows, known: () => ["dead"], sent });
+  await h.tick();
+  await h.tick();
+  assert.equal(sent.length, 1, "paged on the second sighting");
+  for (let i = 0; i < 48; i++) await h.tick();
+  assert.equal(sent.length, 1, "not again a day or two later");
+  for (let i = 0; i < 7 * 24; i++) await h.tick();
+  assert.equal(sent.length, 2, "again after a week");
+  assert.match(sent[1], /dead token: dead/);
+
+  const sent2 = [];
+  const goneRows = [row("H", "gone", { configFile: "config_03.json" })];
+  const h2 = harness({ live: () => goneRows, known: () => ["dead", "gone"], sent: sent2 });
+  await h2.tick();
+  await h2.tick();
+  assert.equal(sent2.length, 1);
+  for (let i = 0; i < 24; i++) await h2.tick();
+  assert.equal(sent2.length, 2, "a paid account on no bot is repeated daily");
+  assert.match(sent2[1], /not in any bot: gone/);
+  ri._reset();
 });
