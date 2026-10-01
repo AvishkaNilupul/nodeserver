@@ -964,6 +964,17 @@ function renewable(row) {
   return !!(row && row.autoDeliver && !row.rentFarm && !row.bulkOfferId);
 }
 
+// The lastError a retired row carries: the renewal-pending marker the renewal
+// lane matches on, or the plain retirement (with the rent-farm buffer's
+// same-account note when its account is kept for a renewal).
+function retireReason(status, { renew = false, renewWhy = "" } = {}) {
+  if (renewWhy) return renewWhy;
+  return (
+    'gameflip reports "' + status + '" — retired by the watcher' +
+    (renew ? "; account kept for a same-account renewal" : "")
+  );
+}
+
 // One watcher pass: mark sold listings sold and relist the next unit of any
 // chain that still has quantity left. `publishFn` / `relistSourceFn` exist only
 // so the renewal lane can be tested without a real publish; production always
@@ -1192,6 +1203,17 @@ async function syncOnce({
     // utils/autoLister.js already treats "expired" as gone (`if (status &&
     // status !== "expired")`); this watcher simply never learned it.
     //
+    // An auto-delivery listing that expired unsold, and that THIS pass ended
+    // on Gameflip (so no old listing still holds its code), is queued for the
+    // renewal lane at the end of the pass instead of ending its chain. Its
+    // stock is handed back by the very same release calls as any retirement,
+    // so the renewal picks an account exactly as a sale's relist does.
+    const renewChain =
+      status === "expired" && renewable(row) && lapsedOn.has(String(row._id));
+    const renewWhy = renewChain
+      ? RENEWAL_PENDING + " (expired " + lapsedOn.get(String(row._id)) + ")"
+      : "";
+    const renewSet = renewChain ? { relistAttempts: 0, relistRetryAt: null } : {};
     // A buffered rent-farm offer that simply EXPIRED unsold keeps its account
     // for a renewal: the next buffer pass relists that same account instead of
     // returning it and burning a fresh pristine one on the replacement (after a
@@ -1207,26 +1229,15 @@ async function syncOnce({
     } catch {
       renew = false; // a settings read failing must not stop the sale watcher
     }
-    // An auto-delivery listing that expired unsold, and that THIS pass ended
-    // on Gameflip (so no old listing still holds its code), is queued for the
-    // renewal lane below instead of ending its chain. Its stock is handed back
-    // by the very same release calls as any retirement, so the renewal picks an
-    // account exactly as a sale's relist does.
-    const renewChain =
-      status === "expired" && renewable(row) && lapsedOn.has(String(row._id));
-    const retiredWhy = renewChain
-      ? RENEWAL_PENDING + " (expired " + lapsedOn.get(String(row._id)) + ")"
-      : "gameflip reports \"" + status + "\" — retired by the watcher" +
-        (renew ? "; account kept for a same-account renewal" : "");
     if (status === "expired" || status === "cancelled") {
       const retired = await MarketplaceListing.findOneAndUpdate(
         { _id: row._id, status: "active" },
         {
           $set: {
             status: "removed",
-            lastError: retiredWhy,
+            lastError: retireReason(status, { renew, renewWhy }),
             ...(renew ? { rentFarmExpiredAt: new Date() } : {}),
-            ...(renewChain ? { relistAttempts: 0, relistRetryAt: null } : {}),
+            ...renewSet,
           },
         },
       ).catch(() => null);
