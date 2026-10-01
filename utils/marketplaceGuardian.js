@@ -932,7 +932,312 @@ async function recordSuppliedFeed(row, claimed, contentIds) {
     .catch((e) => console.error("guardian markFed error:", e.message));
 }
 
-async function feedListing(row, seenKeys, refusals) {
+// ------------------------------------------------------------------
+// The mass stock-drop guard
+// ------------------------------------------------------------------
+//
+// Plati and GGSel never announce a sale: the pile of codes is simply smaller than we
+// left it, and feedListing reads that as "units sold". But codes also vanish for reasons
+// that are not purchases: the owner's cleanup scripts archive them, a delist empties the
+// vault, a blocked or broken seller account can read as an empty pile. On 2026-09-28 the
+// owner's "free Plati + GGSel" cleanup drained 3,290 GGSel codes while a pass was
+// running, and the guardian recorded 236 units as SOLD in one hour: 77 listings / 233
+// units in a single 5-minute pass, against a normal one listing and a few units. Those
+// fake sales then sat in the farm engine's 45-day demand window and in the price evidence.
+//
+// So the sales a pass INFERS are no longer recorded one by one as they are read. They are
+// collected, and recorded once the whole pass has been read (flushPendingSales):
+//   1. a listing that is no longer active by then (delisted / removed while the pass was
+//      still reading) cannot have sold the codes that vanished: not recorded, and not
+//      counted toward the check below either;
+//   2. if ONE marketplace shows inferred sales on `rows` or more listings, or `units` or
+//      more units, in a single pass, or on `windowRows` / `windowUnits` across the last
+//      hour (a cleanup that outlasts one pass, a slow drain), that is a closeout or an
+//      outage, not demand: nothing from that marketplace is recorded this pass, and a high
+//      finding, a Telegram alert, a log line and an audit event say so. The baseline
+//      (`lastStock`) was already advanced when the drop was read, so the same drop is never
+//      read as a sale again next pass.
+// The hour's memory counts every drop that was inferred, recorded or not, so a drain that
+// outlasts a pass stays suppressed instead of leaking through a few listings at a time. It
+// lives in memory: a restart forgets it.
+// The bias is the one this module already chose ("under-reporting, never inventing sales
+// that did not happen"): at this shop's volume (GGSel 1-3 units a day, Digiseller up to 8)
+// a real pass, or a real hour, never comes near the thresholds.
+//
+// Settings `autoFarm.saleOutageGuard` = { enabled, rows, units, windowRows, windowUnits }
+// override the defaults; enabled:false (or 0 / "off" / "false") restores the old
+// record-as-you-read behaviour exactly. It is re-read every pass, so no restart is needed.
+const MASS_DROP_DEFAULTS = Object.freeze({
+  enabled: true,
+  rows: 5,
+  units: 12,
+  windowRows: 8,
+  windowUnits: 20,
+});
+const MASS_DROP_WINDOW_MS = 60 * 60 * 1000;
+
+// marketplace -> [{ at, id, units }]: the stock drops inferred there in the last hour.
+const recentDrops = new Map();
+// finding dedupe key -> when it was alerted. Only consulted when the findings store itself
+// is failing, so an outage there cannot turn one alert into one alert per pass.
+const alertedKeys = new Map();
+
+// A switch typed by hand into settings.json: false / 0 / "off" / "false" / "no" all mean off.
+function isOffValue(v) {
+  if (v === false || v === 0) return true;
+  return (
+    typeof v === "string" &&
+    ["false", "0", "off", "no", "disabled"].includes(v.trim().toLowerCase())
+  );
+}
+
+function massDropConfig() {
+  let raw = null;
+  try {
+    raw = require("./settings").getAutoFarm().saleOutageGuard;
+  } catch {
+    raw = null;
+  }
+  const r = raw && typeof raw === "object" ? raw : {};
+  // A threshold below 2 would drop an ordinary single sale, so it is never honoured.
+  const num = (v, fallback) => {
+    const n = Math.floor(Number(v));
+    return Number.isFinite(n) && n >= 2 ? n : fallback;
+  };
+  const rows = num(r.rows, MASS_DROP_DEFAULTS.rows);
+  const units = num(r.units, MASS_DROP_DEFAULTS.units);
+  return {
+    enabled: !(isOffValue(raw) || isOffValue(r.enabled)),
+    rows,
+    units,
+    // The hour contains the pass, so an hourly limit below the pass limit would only make
+    // the pass limit meaningless.
+    windowRows: Math.max(num(r.windowRows, MASS_DROP_DEFAULTS.windowRows), rows),
+    windowUnits: Math.max(num(r.windowUnits, MASS_DROP_DEFAULTS.windowUnits), units),
+  };
+}
+
+// Pure: does this marketplace's batch of inferred sales look like a closeout or an outage?
+// `recent` is what the same marketplace already showed in the last hour ({ id, units }).
+function evaluateMassDrop(items, cfg = MASS_DROP_DEFAULTS, recent = []) {
+  const rows = items.length;
+  const units = items.reduce((n, p) => n + (Number(p.units) || 0), 0);
+  if (!cfg.enabled) return { tripped: false, scope: "", rows, units };
+  if (rows >= cfg.rows || units >= cfg.units) {
+    return { tripped: true, scope: "pass", rows, units };
+  }
+  const ids = new Set((recent || []).map((r) => String(r.id)));
+  let windowUnits = (recent || []).reduce((n, r) => n + (Number(r.units) || 0), 0);
+  for (const p of items) {
+    ids.add(String(p.row && p.row._id));
+    windowUnits += Number(p.units) || 0;
+  }
+  if (ids.size >= cfg.windowRows || windowUnits >= cfg.windowUnits) {
+    return { tripped: true, scope: "window", rows: ids.size, units: windowUnits };
+  }
+  return { tripped: false, scope: "", rows, units };
+}
+
+function recentFor(marketplace, now) {
+  const kept = (recentDrops.get(marketplace) || []).filter(
+    (r) => now - r.at < MASS_DROP_WINDOW_MS,
+  );
+  if (kept.length) recentDrops.set(marketplace, kept);
+  else recentDrops.delete(marketplace);
+  return kept;
+}
+
+// Learn one inferred sale (the sale-learning write and the log line a pass has always made).
+async function recordInferredSale({ row, supplied, units }) {
+  // Sale learning is keyed on the DropSet, and an offer-backed row has none —
+  // its stock is the owner's own list — so there is nothing to learn against
+  // and DropSet.findById(null) would be a pointless round trip. The sale is
+  // still worth saying out loud, hence the log below covering both.
+  const soldSet = supplied ? null : await DropSet.findById(row.set).lean();
+  if (soldSet) {
+    await recordListingSale({
+      listing: row,
+      set: soldSet,
+      units,
+      priceUsd: Number(row.price) || 0,
+    });
+  }
+  if (soldSet || supplied) {
+    console.log(
+      "guardian: " +
+        row.marketplace +
+        " listing " +
+        row.externalId +
+        " sold " +
+        units +
+        " unit(s) since the last pass",
+    );
+  }
+}
+
+// Tell the owner. Every step is independent: a failing findings store, Telegram or audit
+// log must never cost the others, and none of them may be able to hold up the pass.
+async function reportMassDrop(marketplace, items, verdict, now = Date.now()) {
+  const sample = items
+    .slice(0, 4)
+    .map((p) => String(p.row.title || p.row.externalId || "").slice(0, 45))
+    .join("; ");
+  const message =
+    marketplace +
+    ": " +
+    verdict.rows +
+    " listing(s) lost " +
+    verdict.units +
+    " unit(s) of stock " +
+    (verdict.scope === "window" ? "within the last hour" : "in ONE guardian pass") +
+    " (a normal pass is one listing and a few units). " +
+    "Treated as a closeout or an outage: this pass's stock drops are NOT recorded as sales, so the farm engine's demand count is not inflated " +
+    "(a 'RESTOCKED … those units sold' message from the same pass is the same stock drop, not sales). " +
+    "If these really were purchases, raise autoFarm.saleOutageGuard rows/units (windowRows/windowUnits for the one-hour check) or set enabled:false. e.g. " +
+    sample;
+  console.error("guardian: " + message);
+
+  // One finding per marketplace per hour. Its type is not a "condition" type, so nothing
+  // auto-resolves it: it stays until a human closes it.
+  const key = "mass-stock-drop:" + marketplace + ":" + new Date(now).toISOString().slice(0, 13);
+  let isNew;
+  try {
+    isNew = await upsertFinding({
+      type: "mass-stock-drop",
+      severity: "high",
+      marketplace,
+      dedupeKey: key,
+      message,
+    });
+  } catch (e) {
+    console.error("guardian mass-drop finding error:", e.message);
+    isNew = !alertedKeys.has(key);
+  }
+  alertedKeys.set(key, now);
+  for (const [k, at] of alertedKeys) {
+    if (now - at > 2 * MASS_DROP_WINDOW_MS) alertedKeys.delete(k);
+  }
+
+  if (isNew) {
+    // In a real closeout every drained listing ALSO raises its own restock finding, so this
+    // one would sit at the bottom of the pass's digest under "...and 73 more": it gets its
+    // own message. Never awaited: telegram.js sets no request timeout, and a hung
+    // connection must not be able to freeze the guardian pass.
+    Promise.resolve()
+      .then(() => sendTelegram("🚨 GUARDIAN — " + message))
+      .catch((e) => console.error("guardian mass-drop notify error:", e && e.message));
+  }
+
+  try {
+    const logged = require("./systemLog").logEvent({
+      category: "guardian",
+      action: "mass_stock_drop_ignored",
+      actor: "guardian",
+      severity: "warn",
+      subject: marketplace,
+      count: verdict.units,
+      detail: message,
+      meta: {
+        scope: verdict.scope,
+        rows: verdict.rows,
+        units: verdict.units,
+        listingIds: items.slice(0, 50).map((p) => String(p.row._id)),
+      },
+    });
+    if (logged && typeof logged.catch === "function") logged.catch(() => {});
+  } catch {
+    /* an audit line must never be able to fail a pass */
+  }
+}
+
+// The ids (as strings) of the listings that are still active NOW, not as the pass loaded
+// them: a pass can run for minutes and the owner's scripts mark rows delisted while it is
+// still reading. One retry; if the status still cannot be read this returns null and every
+// row counts as active — the breaker is the guard that matters, this check only spares rows
+// that were delisted mid-pass.
+async function readActiveIds(ids) {
+  for (let attempt = 1; attempt <= 2; attempt++) {
+    try {
+      const fresh = await MarketplaceListing.find({ _id: { $in: ids } }, { status: 1 }).lean();
+      return new Set(
+        (fresh || []).filter((f) => f && f.status === "active").map((f) => String(f._id)),
+      );
+    } catch (e) {
+      console.error("guardian sale status check error:", e.message);
+    }
+  }
+  return null;
+}
+
+// Record (or refuse to record) every sale a pass inferred. Never throws for one bad row:
+// the guardian must finish its pass whatever happens here.
+async function flushPendingSales(pending, cfg = massDropConfig(), now = Date.now()) {
+  const out = { recorded: 0, droppedInactive: 0, droppedMass: 0, failed: 0, tripped: [] };
+  if (!pending || !pending.length) return out;
+
+  const activeNow = await readActiveIds(pending.map((p) => p.row._id));
+
+  // Inactive rows are set aside BEFORE a marketplace is judged: a handful of delisted rows
+  // must neither sink a real sale nor, by their number, make an ordinary pass look like a
+  // closeout.
+  const byMarket = new Map();
+  for (const p of pending) {
+    if (activeNow && !activeNow.has(String(p.row._id))) {
+      out.droppedInactive++;
+      console.log(
+        "guardian: " +
+          p.row.marketplace +
+          " listing " +
+          p.row.externalId +
+          " is no longer active — its " +
+          p.units +
+          " vanished unit(s) are not a sale",
+      );
+      continue;
+    }
+    const m = p.row.marketplace;
+    if (!byMarket.has(m)) byMarket.set(m, []);
+    byMarket.get(m).push(p);
+  }
+
+  for (const [marketplace, items] of byMarket) {
+    const recent = recentFor(marketplace, now);
+    const verdict = evaluateMassDrop(items, cfg, recent);
+    recentDrops.set(
+      marketplace,
+      recent.concat(
+        items.map((p) => ({ at: now, id: String(p.row._id), units: Number(p.units) || 0 })),
+      ),
+    );
+    if (verdict.tripped) {
+      out.droppedMass += items.length;
+      out.tripped.push({
+        marketplace,
+        scope: verdict.scope,
+        rows: verdict.rows,
+        units: verdict.units,
+      });
+      try {
+        await reportMassDrop(marketplace, items, verdict, now);
+      } catch (e) {
+        console.error("guardian mass-drop report error:", e.message);
+      }
+      continue;
+    }
+    for (const p of items) {
+      try {
+        await recordInferredSale(p);
+        out.recorded++;
+      } catch (e) {
+        out.failed++;
+        console.error("guardian sale record error:", e.message);
+      }
+    }
+  }
+  return out;
+}
+
+async function feedListing(row, seenKeys, refusals, pendingSales = null) {
   const target = Number(row.qtyTarget) || 0;
   if (!target) return 0;
   // Account listings: this row's stock is an explicit list of accounts the
@@ -985,29 +1290,13 @@ async function feedListing(row, seenKeys, refusals) {
   // qtyTarget was lowered still reports its sales.
   const soldUnits = unitsSoldSince(row.lastStock, remaining);
   if (soldUnits > 0) {
-    // Sale learning is keyed on the DropSet, and an offer-backed row has none —
-    // its stock is the owner's own list — so there is nothing to learn against
-    // and DropSet.findById(null) would be a pointless round trip. The sale is
-    // still worth saying out loud, hence the log below covering both.
-    const soldSet = supplied ? null : await DropSet.findById(row.set).lean();
-    if (soldSet) {
-      await recordListingSale({
-        listing: row,
-        set: soldSet,
-        units: soldUnits,
-        priceUsd: Number(row.price) || 0,
-      });
-    }
-    if (soldSet || supplied) {
-      console.log(
-        "guardian: " +
-          row.marketplace +
-          " listing " +
-          row.externalId +
-          " sold " +
-          soldUnits +
-          " unit(s) since the last pass",
-      );
+    if (pendingSales) {
+      // Collected, not recorded yet: runOnce records them after the WHOLE pass has been
+      // read, once flushPendingSales has checked they are not a closeout or an outage.
+      pendingSales.push({ row, supplied, units: soldUnits });
+    } else {
+      // feedOne (a single retried listing) and the kill switch: recorded as it is read.
+      await recordInferredSale({ row, supplied, units: soldUnits });
     }
   }
   // Baseline for the next pass. Set before any feed so that a feed which fails
@@ -1534,12 +1823,25 @@ async function runOnce() {
     }).lean();
     const seenKeys = new Set();
     const refusals = new Map();
+    // Sales inferred from stock drops are collected here and recorded after the whole
+    // pass has been read (flushPendingSales); null = the guard is switched off and each
+    // sale is recorded as it is read, exactly as before.
+    const guardCfg = massDropConfig();
+    const pendingSales = guardCfg.enabled ? [] : null;
     let fed = 0;
     for (const row of rows) {
       try {
-        fed += await feedListing(row, seenKeys, refusals);
+        fed += await feedListing(row, seenKeys, refusals, pendingSales);
       } catch (e) {
         console.error("guardian feed error:", e.message);
+      }
+    }
+    let salesFlush = null;
+    if (pendingSales) {
+      try {
+        salesFlush = await flushPendingSales(pendingSales, guardCfg);
+      } catch (e) {
+        console.error("guardian sale flush error:", e.message);
       }
     }
     await reportRefusals(refusals, seenKeys);
@@ -1564,6 +1866,7 @@ async function runOnce() {
       at: startedAt,
       tookMs: Date.now() - startedAt.getTime(),
       listingsChecked: rows.length,
+      sales: salesFlush,
       accountsFed: fed,
       issuesDetected: found,
       openFindings: open,
@@ -1631,6 +1934,12 @@ module.exports = {
   start,
   feedOne,
   classifyUnit,
+  evaluateMassDrop,
+  massDropConfig,
+  flushPendingSales,
+  recordInferredSale,
+  MASS_DROP_DEFAULTS,
+  MASS_DROP_WINDOW_MS,
   summarizeDrops,
   nothingToFeedReason,
   platformRefusedRead,
