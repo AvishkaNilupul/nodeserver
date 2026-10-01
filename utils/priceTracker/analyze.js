@@ -437,8 +437,8 @@ function snap(p) {
   return Math.round(p * 20) / 20; // $0.05
 }
 
-function evidenceFromLedger(sales, now, { market, gameKey }) {
-  const priced = perOrder(windowed(sales, now, WINDOW_DAYS)).filter((s) => !isBlocked(s.market) || s.market === market);
+function evidenceFromLedger(sales, now, { market, gameKey }, pricedAll = null) {
+  const priced = (pricedAll || perOrder(windowed(sales, now, WINDOW_DAYS))).filter((s) => !isBlocked(s.market) || s.market === market);
   const plat = priced.filter((s) => s.market === market).map((s) => s.priceUsd);
   const game = priced.filter((s) => gameKey && s.gameKey === gameKey).map((s) => s.priceUsd);
   const platGame = priced.filter((s) => gameKey && s.gameKey === gameKey && s.market === market).map((s) => s.priceUsd);
@@ -446,6 +446,27 @@ function evidenceFromLedger(sales, now, { market, gameKey }) {
 }
 
 const CONF_RANK = { high: 3, medium: 2, low: 1, none: 0 };
+
+// The order-level priced sales inside the window, and the per-venue / global p75 that
+// cap a price, are the same for every listing and every game in one build. They were
+// recomputed per call (O(sales) each, thousands of calls), which was most of the
+// report's ~1 s of event-loop time. Computed once on the ctx and reused.
+function pricedOf(ctx) {
+  if (!ctx._priced) ctx._priced = perOrder(windowed(ctx.sales, ctx.now, WINDOW_DAYS));
+  return ctx._priced;
+}
+function venueP75Of(ctx, market) {
+  if (!ctx._venueP75) ctx._venueP75 = new Map();
+  if (!ctx._venueP75.has(market)) {
+    const v = pricedOf(ctx).filter((s) => s.market === market).map((s) => s.priceUsd);
+    ctx._venueP75.set(market, { n: v.length, p75: band(v).p75 });
+  }
+  return ctx._venueP75.get(market);
+}
+function globalP75Of(ctx) {
+  if (ctx._globalP75 == null) ctx._globalP75 = band(pricedOf(ctx).map((s) => s.priceUsd)).p75;
+  return ctx._globalP75;
+}
 
 /**
  * What should this exact offer cost on this market?
@@ -459,7 +480,7 @@ function recommend(ctx, q) {
   const market = q.market;
   const id = q.id;
   const reasons = [];
-  const priced = perOrder(windowed(sales, now, WINDOW_DAYS));
+  const priced = pricedOf(ctx);
   const sameSet = id.exact && id.contentKey ? priced.filter((s) => s.exact && s.contentKey === id.contentKey) : [];
   const bandSales = id.bandKey && !id.bandKey.endsWith("|?") ? priced.filter((s) => s.bandKey === id.bandKey && s.exact) : [];
 
@@ -532,7 +553,7 @@ function recommend(ctx, q) {
     // Last resort: the existing engine, fed from THIS ledger so there is one
     // source of evidence, not two.
     try {
-      const ev = evidenceFromLedger(sales, now, { market, gameKey: id.gameKey });
+      const ev = evidenceFromLedger(sales, now, { market, gameKey: id.gameKey }, pricedOf(ctx));
       const r = pricing.priceListing({ evidence: ev, itemCount: id.countForBand || 1, marketplace: market });
       if (r && r.price > 0) {
         anchor = r.price;
@@ -554,10 +575,8 @@ function recommend(ctx, q) {
   // GGSel suggestion reach $2.65 on a venue whose p75 is $1.00. The cap exists so
   // translated or engine evidence can never claim a price the venue has only seen
   // in its top tail; exact own-venue evidence is exempt (a buyer really paid it).
-  const venuePrices = priced.filter((s) => s.market === market).map((s) => s.priceUsd);
-  const venueP75 = band(venuePrices).p75;
-  const globalP75 = band(priced.map((s) => s.priceUsd)).p75;
-  const ref = venuePrices.length >= 10 && venueP75 > 0 ? venueP75 : globalP75 || 25;
+  const vs = venueP75Of(ctx, market);
+  const ref = vs.n >= 10 && vs.p75 > 0 ? vs.p75 : globalP75Of(ctx) || 25;
   const cap = Math.max(floor, Math.min(25, ref * 1.5));
   let price = id.exact && basis === "exact set sold on this market" ? round2(anchor) : snap(anchor);
   let clamped = "";
@@ -691,6 +710,7 @@ function advise({ sales, prepared, now, fees }) {
       origin: r.l.origin || "manual",
       title: r.l.title,
       game: r.id.game,
+      gameKey: r.id.gameKey,
       itemCount: r.id.countForBand,
       exact: r.id.exact,
       contentKey: r.id.contentKey,
@@ -709,6 +729,12 @@ function advise({ sales, prepared, now, fees }) {
 }
 
 module.exports = {
+  pricedOf,
+  venueP75Of,
+  globalP75Of,
+  perOrder,
+  isBlocked,
+  snap,
   WINDOW_DAYS,
   BIN_LABELS,
   prepare,

@@ -5,13 +5,15 @@
 // nothing calls a marketplace. Applying advice is a separate, owner-approved act
 // (and, for the auto-farm, a later, deliberate wiring — see suggestForNew).
 const { buildLedger } = require("./ledger");
-const { identify } = require("./setIdentity");
+const { identify, normGame } = require("./setIdentity");
 const A = require("./analyze");
+const G = require("./games");
 const { MARKETS, VENUES } = require("./venues");
 const { median, DAY } = require("./stats");
 
 const CACHE_MS = 5 * 60 * 1000;
 const READ_CAP = 20000;
+const CONNECTED_CAP = 60000;
 let cache = { at: 0, report: null };
 let inflight = null;
 
@@ -29,7 +31,8 @@ async function loadFromDb({ now = Date.now() } = {}) {
     {
       marketplace: 1, externalId: 1, origin: 1, title: 1, price: 1, status: 1, set: 1,
       unclaimedGame: 1, rentFarm: 1, bulkOfferId: 1, unitsSold: 1, createdAt: 1,
-      updatedAt: 1, venueMinPriceUsd: 1, "units.deliveredAt": 1, "units.orderId": 1,
+      updatedAt: 1, venueMinPriceUsd: 1, lastStock: 1, qtyTarget: 1,
+      "units.deliveredAt": 1, "units.orderId": 1, "units.login": 1,
     },
   )
     .sort({ _id: -1 })
@@ -37,11 +40,47 @@ async function loadFromDb({ now = Date.now() } = {}) {
     .lean();
   const signals = await SaleSignal.find(
     { source: "listing_sold", at: { $gte: since } },
-    { marketplace: 1, game: 1, gameKey: 1, name: 1, priceUsd: 1, bulk: 1, dedupeKey: 1, at: 1 },
+    { marketplace: 1, game: 1, gameKey: 1, name: 1, priceUsd: 1, bulk: 1, dedupeKey: 1, at: 1, account: 1, login: 1, source: 1 },
   )
     .sort({ at: -1 })
     .limit(READ_CAP)
     .lean();
+  // Buyer connection flips, 45 days: the farm engine's other demand source.
+  const connected = await SaleSignal.find(
+    { source: "connected", at: { $gte: new Date(now - 45 * DAY) } },
+    { game: 1, gameKey: 1, account: 1, login: 1, at: 1, dedupeKey: 1 },
+  )
+    .sort({ at: -1 })
+    .limit(CONNECTED_CAP)
+    .lean();
+  // Other sellers + market-wide demand, one scanned row per game (read, never
+  // scanned from here — the scanners run on their own schedule).
+  const MarketResearch = require("../../models/MarketResearch");
+  const research = await MarketResearch.find(
+    {},
+    {
+      game: 1, markets: 1, sellers: 1, offers: 1, salesPerWeek: 1, demandScore: 1, competitionScore: 1,
+      opportunityScore: 1, recommendation: 1, scannedAt: 1, demandTrend: 1, campaign: 1, noClaim: 1,
+    },
+  )
+    .limit(2000)
+    .lean();
+  // The farm engine's recent decisions. Only a COUNT of assigned accounts leaves
+  // the database — never the logins.
+  const AutoFarmTask = require("../../models/AutoFarmTask");
+  const tasks = await AutoFarmTask.aggregate([
+    // decidedAt is indexed (createdAt is not); every task from the last 30 days has one.
+    { $match: { decidedAt: { $gte: new Date(now - 30 * DAY) } } },
+    { $sort: { decidedAt: -1 } },
+    { $limit: 4000 },
+    {
+      $project: {
+        game: 1, campaignName: 1, campaignEndAt: 1, decision: 1, reason: 1, internalSales: 1,
+        coverage: 1, plannedAccounts: 1, targetAccounts: 1, decidedAt: 1, createdAt: 1, completedAt: 1,
+        assignedN: { $size: { $ifNull: ["$assignedAccounts", []] } },
+      },
+    },
+  ]);
   const ids = [...new Set(listings.map((l) => l.set && String(l.set)).filter(Boolean))];
   const sets = [];
   // Chunked $in: one giant id list is a large request body on a shared tier.
@@ -53,26 +92,47 @@ async function loadFromDb({ now = Date.now() } = {}) {
     sets.push(...part);
   }
   // A read that hits its cap silently drops the OLDEST rows; say so, on the page.
-  const truncated = listings.length >= READ_CAP || signals.length >= READ_CAP;
-  return { listings, signals, sets, at: new Date(now), truncated };
+  const truncated = listings.length >= READ_CAP || signals.length >= READ_CAP || connected.length >= CONNECTED_CAP;
+  return { listings, signals, sets, connected, research, tasks, at: new Date(now), truncated };
 }
 
 function loadFromSnapshot(file) {
   const d = JSON.parse(require("fs").readFileSync(file, "utf8"));
-  return { listings: d.listings, signals: d.signals, sets: d.sets, at: new Date(d.at) };
+  return {
+    listings: d.listings, signals: d.signals, sets: d.sets, at: new Date(d.at),
+    connected: d.connected || [], research: d.research || [], tasks: d.tasks || [],
+  };
 }
 
 /* ---------------------------------- report --------------------------------- */
 
-function buildReport(input, { now = null, fees = {} } = {}) {
+// ONE code path, two drivers. The report is CPU-bound (~1 s on the dev machine) and
+// the live server shares its event loop with delivery and the guardians, so the
+// server drives it in phases that yield between steps (buildReportAsync) and tests and
+// the preview drive it straight through (buildReport).
+function* reportSteps(input, { now = null, fees = {}, sizing = {}, gameCaps = {}, noClaimGames = [], shelfCaps = {}, reuseOnlyGames = [] } = {}) {
   const t = now || (input.at ? new Date(input.at).getTime() : Date.now());
   const ledger = buildLedger(input);
+  yield;
   const prepared = A.prepare({ listings: input.listings, sets: input.sets, sales: ledger.sales });
   const venues = A.venueSummary({ sales: ledger.sales, prepared, now: t, fees });
+  yield;
   const advice = A.advise({ sales: ledger.sales, prepared, now: t, fees });
+  yield;
   const board = A.setBoard({ sales: ledger.sales, prepared, now: t, fees });
+  yield;
   const curves = advice.curves;
+  const ctx = { sales: ledger.sales, now: t, tr: advice.tr, fees, curves };
+  const games = G.gameBoard({
+    ledger, prepared, research: input.research || [], tasks: input.tasks || [],
+    signals: input.signals || [], connected: input.connected || [], now: t, fees, ctx, sizing, gameCaps,
+    noClaimGames, shelfCaps, reuseOnlyGames,
+  });
+  yield;
+  const taskHistory = G.taskHistory(input.tasks || []);
   const report = {
+    games,
+    taskHistory,
     truncated: !!input.truncated,
     at: new Date(t),
     markets: MARKETS,
@@ -82,11 +142,28 @@ function buildReport(input, { now = null, fees = {} } = {}) {
     advice: advice.rows,
     board,
     curves,
-    ctx: { sales: ledger.sales, now: t, tr: advice.tr, fees, curves },
+    ctx,
     fees,
   };
   report.insights = insightsFor(report);
   return report;
+}
+
+function buildReport(input, opts = {}) {
+  const it = reportSteps(input, opts);
+  let r = it.next();
+  while (!r.done) r = it.next();
+  return r.value;
+}
+
+async function buildReportAsync(input, opts = {}) {
+  const it = reportSteps(input, opts);
+  let r = it.next();
+  while (!r.done) {
+    await new Promise((resolve) => setImmediate(resolve));
+    r = it.next();
+  }
+  return r.value;
 }
 
 // The headline findings, each with the evidence it stands on. Plain statements a
@@ -166,6 +243,37 @@ function insightsFor(r) {
       });
     }
   }
+  // Per game: where the farm engine's demand picture and the clean one disagree,
+  // and where the market buys what we do not sell.
+  const own = (r.games || []).filter((g) => g.own);
+  const engineSum = own.reduce((a, g) => a + g.demand.engine.count45, 0);
+  const unionSum = own.reduce((a, g) => a + g.demand.units45, 0);
+  if (own.length && engineSum !== unionSum) {
+    const over = own.filter((g) => g.demand.engine.count45 >= g.demand.units45 + 5);
+    out.push({
+      id: "engine-vs-clean",
+      level: engineSum > unionSum ? "warn" : "info",
+      title: "The farm engine's sales count is not the real count",
+      detail:
+        "Over its 45-day window the engine counts " + engineSum + " sales across our games; each sold account counted once, from every source, it is " + unionSum +
+        ". The engine counts duplicate-login twin accounts twice and mass-delist signals as sales, and cannot see delivered Eldorado/G2G/PlayerAuctions units. " +
+        over.length + " games are over-counted by 5 or more (" + over.slice(0, 5).map((g) => g.game + " " + g.demand.engine.count45 + " vs " + g.demand.units45).join(", ") + (over.length > 5 ? ", …" : "") +
+        "). Open the Games tab for each.",
+    });
+  }
+  const missed = (r.games || [])
+    .filter((g) => !g.own && g.demand.market && g.demand.market.perWeek >= 30)
+    .sort((a, b) => b.demand.market.perWeek - a.demand.market.perWeek)
+    .slice(0, 5);
+  if (missed.length) {
+    out.push({
+      id: "market-we-miss",
+      level: "opportunity",
+      title: missed.length + " games move 30+ units a week on GGSel + Plati and we sell none",
+      detail: missed.map((g) => g.game + " ~" + Math.round(g.demand.market.perWeek) + "/wk").join(", ") + ". Whether we can farm them is the farm engine's call; the demand is real.",
+    });
+  }
+
   const multi = r.board.filter((b) => b.marketsWithSales >= 2 && b.spread);
   if (multi.length) {
     out.push({
@@ -196,7 +304,42 @@ function binIndex(price) {
 
 /* ----------------------------------- cache --------------------------------- */
 
-async function getReport({ force = false, loader = loadFromDb, fees = {} } = {}) {
+/**
+ * The settings the report depends on, read fresh (utils/settings re-reads its file):
+ * fees, the farm-sizing policy (cover days, safety stock, ceiling, your per-game caps),
+ * the no-claim games and their shelf caps, and the reuse-only games. Every field is
+ * optional; a missing or unreadable setting leaves the tracker on its documented
+ * defaults. This is the DEFAULT source for every rebuild, wherever it was triggered
+ * from — a publisher's background refresh must not rebuild the page's report with
+ * default settings (found by review: it dropped fees, caps and no-claim games).
+ */
+function settingsInputs() {
+  const out = {};
+  try {
+    const settings = require("../settings");
+    const s = settings.loadSettings();
+    out.fees = (s && s.priceTracker && s.priceTracker.fees) || {};
+    const af = settings.getAutoFarm() || {};
+    const sz = settings.getFarmSizing(af);
+    out.sizing = { coverageDays: sz.coverageDays, safetyStock: sz.safetyStock, maxAccounts: sz.maxPerGame };
+    out.gameCaps = sz.gameCaps || {};
+    out.noClaimGames = Array.isArray(af.noClaimGames) ? af.noClaimGames : [];
+    out.shelfCaps = af.unclaimedGameCaps && typeof af.unclaimedGameCaps === "object" ? af.unclaimedGameCaps : {};
+    out.reuseOnlyGames = Array.isArray(af.reuseOnlyGames) ? af.reuseOnlyGames : [];
+  } catch {
+    /* defaults */
+  }
+  return out;
+}
+
+// Where rebuilds get their settings. Tests and the preview swap it; production uses
+// settingsInputs() (utils/settings, re-read from disk each time).
+let settingsProvider = settingsInputs;
+function setSettingsProvider(fn) {
+  settingsProvider = typeof fn === "function" ? fn : settingsInputs;
+}
+
+async function getReport({ force = false, loader = loadFromDb, ...opts } = {}) {
   if (!force && cache.report && Date.now() - cache.at < CACHE_MS) return cache.report;
   // One load at a time: concurrent requests on a stale cache share it instead of
   // each reading Mongo (a bytes-bound shared tier).
@@ -204,7 +347,14 @@ async function getReport({ force = false, loader = loadFromDb, fees = {} } = {})
   inflight = (async () => {
     try {
       const input = await loader();
-      const report = buildReport(input, { fees });
+      // Explicit options win; everything else comes from settings.
+      let fromSettings = {};
+      try {
+        fromSettings = settingsProvider() || {};
+      } catch {
+        fromSettings = {};
+      }
+      const report = await buildReportAsync(input, { ...fromSettings, ...opts });
       cache = { at: Date.now(), report };
       return report;
     } finally {
@@ -218,7 +368,47 @@ function invalidate() {
   cache = { at: 0, report: null };
 }
 
+/**
+ * For callers on a publish path: never wait on the database if a report exists.
+ * A stale report is served at once and refreshed in the background; with no report
+ * at all it waits up to `timeoutMs` and then gives up (null), so a slow load can
+ * delay a listing by at most that long and never fail it.
+ */
+async function getReportSWR({ timeoutMs = 2500, ...opts } = {}) {
+  if (cache.report) {
+    if (Date.now() - cache.at >= CACHE_MS && !inflight) getReport({ force: true, ...opts }).catch(() => {});
+    return cache.report;
+  }
+  let timer;
+  try {
+    return await Promise.race([
+      getReport(opts),
+      new Promise((resolve) => {
+        timer = setTimeout(() => resolve(null), timeoutMs);
+      }),
+    ]);
+  } catch {
+    return null;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 /* ------------------------------ for the auto-farm -------------------------- */
+
+/**
+ * The farm advice for one game, in the shape an engine can read:
+ * { target, listed, inFlight, need, spare, direction, perWeek, valuePerAccount, weeklyRevenueUsd, managed }.
+ * `direction` is "more" | "hold" | "less" | "none" | "managed" (no-claim games are
+ * sized by their own allocator and get no instruction). Null when the game is unknown.
+ * NOT consumed by utils/autoFarmer.js yet; see docs/PRICE-TRACKER-PLAN.md.
+ */
+function farmFor(report, game) {
+  const row = (report.games || []).find((g) => g.key === normGame(game));
+  if (!row) return null;
+  const f = row.farm;
+  return { game: row.game, target: f.target, listed: f.listed, inFlight: f.inFlight, need: f.need, spare: f.spare, direction: f.direction, perWeek: f.perWeek, valuePerAccount: f.valuePerAccount, weeklyRevenueUsd: f.weeklyRevenueUsd, managed: f.managed, reasons: f.reasons };
+}
 
 /**
  * What should a NEW listing cost on one market? The seam the auto-farm links to.
@@ -249,12 +439,44 @@ function suggestForNew(report, q) {
     venueMinUsd: Number(q.venueMinPriceUsd) || 0,
     ageDays: 0,
   });
-  return { ...rec, market, contentKey: id.contentKey, exact: id.exact };
+  // The game-level price knows other sellers and the whole game's sales on every
+  // market; the set-level price knows these exact items. Take the better-evidenced
+  // one, and prefer the game-level one on a tie because it has seen the rivals.
+  const rank = { high: 3, medium: 2, low: 1, none: 0 };
+  const gkey = id.gameKey || normGame(q.game);
+  const row = (report.games || []).find((g) => g.key === gkey);
+  const gp = row && row.price.markets[market] ? row.price.markets[market].suggested : null;
+  let best = { ...rec, source: "set" };
+  if (gp && gp.price > 0 && (rank[gp.confidence] || 0) >= (rank[rec.confidence] || 0) && !(rec.basis === "exact set sold on this market")) {
+    best = {
+      ...rec,
+      price: gp.price,
+      anchor: gp.anchor,
+      basis: gp.basis,
+      confidence: gp.confidence,
+      evidenceN: gp.evidenceN,
+      reasons: gp.reasons,
+      floor: gp.floor,
+      cap: gp.cap,
+      clamped: gp.clamped,
+      test: gp.test,
+      position: gp.position,
+      source: "game",
+      action: "new",
+    };
+  }
+  return { ...best, market, contentKey: id.contentKey, exact: id.exact, game: row ? row.game : q.game || "" };
 }
 
 module.exports = {
   buildReport,
+  buildReportAsync,
+  settingsInputs,
+  setSettingsProvider,
+  _reportSteps: reportSteps,
   getReport,
+  getReportSWR,
+  farmFor,
   invalidate,
   loadFromDb,
   loadFromSnapshot,

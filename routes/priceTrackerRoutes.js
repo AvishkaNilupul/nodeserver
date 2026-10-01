@@ -10,6 +10,7 @@
 // not use the keyset cursors the console needs for its Mongo-backed tabs.
 const express = require("express");
 const T = require("../utils/priceTracker");
+const G = require("../utils/priceTracker/games");
 const { VENUES, MARKETS, feeFor } = require("../utils/priceTracker/venues");
 
 const FORCE_COOLDOWN_MS = 60 * 1000;
@@ -29,7 +30,22 @@ function page(rows, q, def = 50) {
 
 const CONF_W = { high: 3, medium: 2, low: 1, none: 0 };
 
-function createRouter({ getReport = T.getReport, guards = [], settingsFees = () => ({}) } = {}) {
+// What a sale looks like on the wire. The ledger carries identity fields (login,
+// logins, account, dedupeKey) that the analysis needs; the page does not, and a
+// listing's `logins` is its whole delivery pool, which can include unsold stock.
+// Whitelist instead of deleting, so a field added to the ledger later is private by
+// default.
+const SALE_FIELDS = [
+  "key", "market", "listingId", "externalId", "orderId", "source", "confidence", "at", "priceUsd",
+  "priceBasis", "priced", "title", "game", "gameKey", "itemCount", "exact", "titleMismatch", "origin",
+];
+function publicSale(s) {
+  const o = {};
+  for (const k of SALE_FIELDS) if (s[k] !== undefined) o[k] = s[k];
+  return o;
+}
+
+function createRouter({ getReport = T.getReport, guards = [], settingsInputs = () => ({}) } = {}) {
   const router = express.Router();
   const wrap = (fn) => async (req, res) => {
     try {
@@ -38,7 +54,7 @@ function createRouter({ getReport = T.getReport, guards = [], settingsFees = () 
         lastForce = Date.now();
         force = true;
       }
-      const report = await getReport({ force, fees: settingsFees() });
+      const report = await getReport({ force, ...settingsInputs() });
       await fn(req, res, report);
     } catch (e) {
       res.status(500).json({ success: false, message: e.message });
@@ -62,6 +78,7 @@ function createRouter({ getReport = T.getReport, guards = [], settingsFees = () 
       },
       fees: Object.fromEntries(MARKETS.map((m) => [m, { ...feeFor(m, r.fees), label: VENUES[m].label, note: VENUES[m].note, repriceMode: VENUES[m].repriceMode }])),
       counts: {
+        games: (r.games || []).filter((g) => g.own).length,
         sets: r.board.length,
         crossMarketSets: r.board.filter((b) => b.marketsWithSales >= 2).length,
         liveAdvised: r.advice.length,
@@ -114,7 +131,8 @@ function createRouter({ getReport = T.getReport, guards = [], settingsFees = () 
     const sales = r.ledger.sales
       .filter((s) => (s.exact ? s.contentKey : s.bandKey) === key)
       .sort((a, b) => b.at - a.at)
-      .slice(0, 200);
+      .slice(0, 200)
+      .map(publicSale);
     const advice = r.advice.filter((a) => (a.exact ? a.contentKey : "") === key);
     res.json({ success: true, set: g, sales, advice });
   });
@@ -143,13 +161,75 @@ function createRouter({ getReport = T.getReport, guards = [], settingsFees = () 
     if (market) rows = rows.filter((s) => s.market === market);
     if (source) rows = rows.filter((s) => s.source === source);
     if (q) rows = rows.filter((s) => (s.title + " " + s.orderId + " " + s.externalId).toLowerCase().includes(q));
-    rows = [...rows].sort((a, b) => b.at - a.at);
+    rows = [...rows].sort((a, b) => b.at - a.at).map(publicSale);
     const suspect = req.query.suspect === "1";
     if (suspect) {
       const sus = (r.ledger.suspect || []).filter((s) => !market || s.market === market).sort((a, b) => b.at - a.at);
       return res.json({ success: true, suspect: true, ...page(sus, req.query, 50) });
     }
     res.json({ success: true, ...page(rows, req.query, 50) });
+  });
+
+  get("/api/price-tracker/games", (req, res, r) => {
+    const scope = String(req.query.scope || "own");
+    const q = String(req.query.q || "").toLowerCase().trim();
+    const direction = String(req.query.direction || "");
+    const flag = String(req.query.flag || "");
+    const sort = String(req.query.sort || "revenue");
+    let rows = r.games || [];
+    if (scope === "own") rows = rows.filter((g) => g.own);
+    else if (scope === "market") rows = rows.filter((g) => !g.own && g.demand.market);
+    if (q) rows = rows.filter((g) => g.game.toLowerCase().includes(q));
+    if (direction) rows = rows.filter((g) => g.farm.direction === direction);
+    if (flag) rows = rows.filter((g) => g.flags.some((f) => f.id === flag));
+    const summary = {
+      games: rows.length,
+      weeklyRevenueUsd: Math.round(rows.reduce((a, g) => a + g.farm.weeklyRevenueUsd, 0) * 100) / 100,
+      unitsPerWeek: Math.round(rows.reduce((a, g) => a + g.demand.perWeek, 0) * 10) / 10,
+      byDirection: rows.reduce((m, g) => ((m[g.farm.direction] = (m[g.farm.direction] || 0) + 1), m), {}),
+      inflated: rows.filter((g) => g.flags.some((f) => f.id === "inflated-demand")).length,
+      sizing: rows.length ? rows[0].farm.sizing : null,
+    };
+    // A game the no-claim allocator or the reuse-only rule manages gets no farm
+    // instruction, so it must not lead a shortfall / over-stock ranking either.
+    const instructed = (g) => (g.farm.managed ? 0 : 1);
+    const SORTS = {
+      revenue: (g) => g.farm.weeklyRevenueUsd,
+      demand: (g) => g.demand.units45,
+      need: (g) => g.farm.need * instructed(g),
+      spare: (g) => g.farm.spare * instructed(g),
+      opportunity: (g) => (g.demand.market ? g.demand.market.opportunityScore : 0),
+      market: (g) => (g.demand.market && g.demand.market.perWeek) || 0,
+      gap: (g) => g.demand.engine.count45 - g.demand.units45,
+      // Least stock cover first; a game with no sales (cover unknown) goes last.
+      cover: (g) => (g.farm.daysCover == null ? -1e9 : -g.farm.daysCover),
+    };
+    const keyOf = Object.prototype.hasOwnProperty.call(SORTS, sort) ? SORTS[sort] : SORTS.revenue;
+    rows = [...rows].sort((a, b) => keyOf(b) - keyOf(a));
+    res.json({ success: true, summary, ...page(rows.map(G.lightRow), req.query, 30) });
+  });
+
+  get("/api/price-tracker/game/:key", (req, res, r) => {
+    const key = String(req.params.key || "");
+    const g = (r.games || []).find((x) => x.key === key);
+    if (!g) return res.status(404).json({ success: false, message: "no such game" });
+    const sets = r.advice
+      .filter((a) => a.gameKey === key)
+      .sort((a, b) => Math.abs(b.delta) - Math.abs(a.delta))
+      .slice(0, 15);
+    const sales = r.ledger.sales
+      .filter((s) => s.gameKey === key)
+      .sort((a, b) => b.at - a.at)
+      .slice(0, 15)
+      .map(publicSale);
+    res.json({ success: true, game: g, sets, sales, history: (r.taskHistory && r.taskHistory.get(key)) || [] });
+  });
+
+  // The auto-farm link: the current mode (from settings) and what the tracker has
+  // said next to what the publishers actually used, since the last restart.
+  get("/api/price-tracker/link", (req, res) => {
+    const attach = require("../utils/priceTracker/attach");
+    res.json({ success: true, config: attach.readConfig(), ...attach.shadowSnapshot() });
   });
 
   get("/api/price-tracker/suggest", (req, res, r) => {
@@ -171,15 +251,8 @@ module.exports.createRouter = createRouter;
 // stack (the preview harness and the tests run without it).
 module.exports.real = () => {
   const { requireSuperadmin, enforce2fa } = require("../middleware/auth");
-  return createRouter({
-    guards: [requireSuperadmin, enforce2fa],
-    settingsFees: () => {
-      try {
-        const s = require("../utils/settings").loadSettings();
-        return (s && s.priceTracker && s.priceTracker.fees) || {};
-      } catch {
-        return {};
-      }
-    },
-  });
+  // Settings (fees, farm sizing, per-game caps, no-claim and reuse-only games) are read
+  // by utils/priceTracker itself on every rebuild, so a rebuild triggered anywhere —
+  // this page or a publisher — sees the same ones.
+  return createRouter({ guards: [requireSuperadmin, enforce2fa] });
 };

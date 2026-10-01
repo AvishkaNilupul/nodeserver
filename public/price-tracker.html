@@ -171,6 +171,18 @@
   .arrow { color:var(--muted); }
   .good { color:var(--green); } .bad { color:var(--red); }
   .row.clickable { cursor:pointer; } .row.clickable:hover { border-color:var(--accent); }
+  .gsum { display:grid; grid-template-columns:repeat(auto-fit,minmax(110px,1fr)); gap:8px; margin:0 0 12px; }
+  .gsum div { background:var(--surface); border:1px solid var(--line); border-radius:10px; padding:8px 11px; }
+  .gsum b { display:block; font-size:16px; font-weight:800; } .gsum span { font-size:11px; color:var(--muted); }
+  .pill.s-more { color:var(--green); background:#ecfdf5; } .pill.s-less { color:var(--yellow); background:#fffbeb; }
+  html[data-theme="dark"] .pill.s-more { background:rgba(52,211,153,.14); } html[data-theme="dark"] .pill.s-less { background:rgba(251,191,36,.14); }
+  .kv { display:grid; grid-template-columns:repeat(auto-fit,minmax(140px,1fr)); gap:8px; margin:8px 0 12px; }
+  .kv div { background:var(--surface-2); border-radius:9px; padding:7px 10px; } .kv b { display:block; font-size:14px; } .kv span { font-size:11px; color:var(--muted); }
+  .flagbox { font-size:12px; line-height:1.45; border-left:3px solid var(--line); background:var(--surface-2); border-radius:6px; padding:7px 10px; margin:6px 0; }
+  .flagbox.warn { border-left-color:var(--yellow); } .flagbox.opportunity { border-left-color:var(--green); } .flagbox.info { border-left-color:var(--accent2); }
+  table.pm { width:100%; border-collapse:collapse; font-size:12px; } table.pm th { text-align:left; color:var(--muted); font-weight:650; font-size:10.5px; padding:6px 7px; background:var(--surface-2); white-space:nowrap; }
+  table.pm td { padding:7px; border-top:1px solid var(--line); vertical-align:top; } table.pm td small { color:var(--muted); display:block; font-size:10.5px; line-height:1.35; }
+  h4.sec { font-size:13px; margin:16px 0 6px; }
 
 </style>
 </head>
@@ -222,6 +234,11 @@
     }
     function day(d) { return d ? String(d).slice(0, 10) : "—"; }
     async function api(path) {
+      // The Refresh button asks for a rebuild once, on whichever tab is showing.
+      if (state.forceNext && path.indexOf("/api/price-tracker/") === 0) {
+        path += (path.indexOf("?") < 0 ? "?" : "&") + "force=1";
+        state.forceNext = false;
+      }
       var r = await fetch(path, { credentials: "same-origin", headers: { Accept: "application/json" } });
       if (r.status === 401 || r.status === 403) throw new Error("Not signed in as a superadmin with 2FA.");
       var j = await r.json().catch(function () { return null; });
@@ -230,10 +247,10 @@
     }
 
     var page = document.getElementById("page");
-    var TABS = [["overview", "Overview"], ["curve", "Price curve"], ["sets", "Same items"], ["advice", "Advice"], ["sales", "Sales ledger"], ["suggest", "Suggest"]];
+    var TABS = [["games", "Games"], ["overview", "Overview"], ["curve", "Price curve"], ["sets", "Same items"], ["advice", "Advice"], ["sales", "Sales ledger"], ["suggest", "Suggest"]];
     var MARKETS = ["gameflip", "ggsel", "eldorado", "g2g", "playerauctions", "zeusx", "digiseller"];
-    var state = { tab: (location.hash || "#overview").slice(1), overview: null };
-    if (!TABS.some(function (t) { return t[0] === state.tab; })) state.tab = "overview";
+    var state = { tab: (location.hash || "#games").slice(1), overview: null };
+    if (!TABS.some(function (t) { return t[0] === state.tab; })) state.tab = "games";
 
     // Every shell() starts a new render. A response that arrives after the user
     // has moved to another tab (or changed a filter) must not write into the new
@@ -249,7 +266,7 @@
         '<div class="tabs">' + TABS.map(function (t) {
           return '<button class="tab' + (t[0] === state.tab ? " on" : "") + '" data-tab="' + t[0] + '">' + t[1] + "</button>";
         }).join("") + "</div>" + inner;
-      page.querySelector("#refreshBtn").onclick = function () { state.overview = null; render(true); };
+      page.querySelector("#refreshBtn").onclick = function () { state.overview = null; state.forceNext = true; render(true); };
       Array.prototype.forEach.call(page.querySelectorAll(".tab"), function (b) {
         b.onclick = function () { state.tab = b.getAttribute("data-tab"); location.hash = state.tab; render(); };
       });
@@ -265,7 +282,7 @@
 
     /* ----------------------------- overview ----------------------------- */
     async function getOverview(force) {
-      if (!state.overview || force) state.overview = await api("/api/price-tracker/overview" + (force ? "?force=1" : ""));
+      if (!state.overview || force) state.overview = await api("/api/price-tracker/overview");
       return state.overview;
     }
     function venueCard(v, fees) {
@@ -303,6 +320,134 @@
         '<div class="insights">' + ins + "</div>" +
         '<div class="vgrid">' + o.venues.map(function (v) { return venueCard(v, o.fees); }).join("") + "</div>"
       );
+    }
+
+    /* -------------------------------- games --------------------------------- */
+    function dirPill(g) {
+      var d = g.direction;
+      if (d === "more") return '<span class="pill s-more">farm +' + g.need + " (target " + g.target + ")</span>";
+      if (d === "wait") return '<span class="pill s-warn">short ' + g.need + " — no campaign to farm</span>";
+      if (d === "less") return '<span class="pill s-less">over by ' + g.spare + " (target " + g.target + ")</span>";
+      if (d === "hold") return '<span class="pill s-ok">on target (' + g.target + ")</span>";
+      if (d === "managed") return '<span class="pill s-info">' + esc(g.managedBy || "managed elsewhere") + "</span>";
+      return '<span class="pill s-unknown">no sales in 45d</span>';
+    }
+    function engineChip(g) {
+      var c = g.engineCounts14d;
+      if (!c) return "";
+      var parts = Object.keys(c).map(function (k) { return k.replace(/^skip_/, "skip ") + " ×" + c[k]; });
+      return '<span class="chip">engine 14d: ' + esc(parts.join(", ")) + "</span>";
+    }
+    function priceChips(prices) {
+      return Object.keys(prices).map(function (m) {
+        var p = prices[m];
+        var parts = ["<b>" + esc(m) + "</b>"];
+        if (p.autoRows > 0) parts.push("auto ask " + money(p.askAuto));
+        else if (p.listings > 0) parts.push("hand-priced " + money(p.ask));
+        if (p.suggested > 0) parts.push((p.autoRows > 0 ? "→ " : "new listings ") + "<b>" + money(p.suggested) + "</b> " + esc(p.confidence));
+        else if (p.sold > 0) parts.push("sold " + p.sold + " @ " + money(p.soldMedian) + (p.blocked ? " (blocked)" : ""));
+        if (p.suggested > 0 && p.position && p.position !== "no rivals") parts.push(esc(p.position));
+        return '<span class="chip' + (p.sold > 0 ? " sold" : "") + '">' + parts.join(" · ") + "</span>";
+      }).join("");
+    }
+    async function renderGames() {
+      var f = state.games || (state.games = { scope: "own", q: "", sort: "revenue", direction: "", flag: "", offset: 0 });
+      var g = shell('<div class="ctl"><select id="gs"><option value="own">Our games</option><option value="market">Market only (we sell none)</option><option value="all">All researched games</option></select>' +
+        '<select id="go"><option value="revenue">Sort: weekly revenue</option><option value="demand">Sort: sales (45d)</option><option value="need">Sort: farm shortfall</option><option value="spare">Sort: over-stock</option><option value="cover">Sort: least stock cover</option><option value="gap">Sort: engine over-count</option><option value="market">Sort: market demand</option><option value="opportunity">Sort: opportunity score</option></select>' +
+        '<select id="gd"><option value="">Any farm advice</option><option value="more">Farm more (campaign running)</option><option value="wait">Short, no campaign running</option><option value="hold">On target</option><option value="less">Over-stocked</option><option value="managed">Managed elsewhere (no-claim / reuse-only)</option><option value="none">No sales</option></select>' +
+        '<select id="gf"><option value="">Any flag</option><option value="inflated-demand">Engine over-counts</option><option value="understated-demand">Engine under-counts</option><option value="stockout-risk">Stock-out risk</option><option value="overstocked">Over-stocked</option><option value="low-share">Low market share</option></select>' +
+        '<input id="gq" type="search" placeholder="Search a game" value="' + esc(f.q) + '"></div><div id="gl"><div class="empty">Loading…</div></div>');
+      [["gs", "scope"], ["go", "sort"], ["gd", "direction"], ["gf", "flag"]].forEach(function (p) {
+        var el = page.querySelector("#" + p[0]); el.value = f[p[1]]; el.onchange = function () { f[p[1]] = el.value; f.offset = 0; renderGames(); };
+      });
+      var gq = page.querySelector("#gq"), t; gq.oninput = function () { clearTimeout(t); t = setTimeout(function () { f.q = gq.value; f.offset = 0; renderGames(); }, 350); };
+      var j = await api("/api/price-tracker/games?scope=" + encodeURIComponent(f.scope) + "&sort=" + encodeURIComponent(f.sort) + "&direction=" + encodeURIComponent(f.direction) + "&flag=" + encodeURIComponent(f.flag) + "&q=" + encodeURIComponent(f.q) + "&limit=20&offset=" + f.offset);
+      if (stale(g)) return;
+      var s = j.summary, bd = s.byDirection || {};
+      var rows = j.rows.map(function (x) {
+        var inflated = x.engineCount45 > x.units45 + 2;
+        var flags = x.flags.map(function (fl) {
+          return '<span class="pill ' + (fl.level === "warn" ? "s-warn" : fl.level === "opportunity" ? "s-more" : "s-unknown") + '">' + esc(fl.id.replace(/-/g, " ")) + "</span>";
+        }).join(" ");
+        return '<div class="row clickable" data-key="' + esc(x.key) + '"><div class="r1"><span class="t">' + esc(x.game) + '</span><span class="amt">' + (x.weeklyRevenueUsd > 0 ? money(x.weeklyRevenueUsd) + "/wk" : "—") + "</span></div>" +
+          '<div class="r2"><span><b>' + x.units45 + "</b> sold in 45d (" + x.perWeek + "/wk)</span>" +
+          "<span>engine counts <b" + (inflated ? ' class="bad"' : "") + ">" + x.engineCount45 + "</b></span>" +
+          (x.valuePerAccount > 0 ? "<span>" + money(x.valuePerAccount) + " per account</span>" : "") +
+          (x.marketPerWeek != null ? "<span>market ~" + Math.round(x.marketPerWeek) + "/wk" + (x.share != null ? " (we have " + pct(x.share) + ")" : "") + "</span>" : "") +
+          "</div>" +
+          '<div class="r2">' + dirPill(x) + '<span class="chip">on hand ' + x.onHand + " (listed " + x.listedUnits + ")" + (x.inFlight ? " + " + x.inFlight + " farming" : "") + (x.daysCover != null ? " · " + x.daysCover + " d cover" : "") + "</span>" + engineChip(x) + " " + flags + "</div>" +
+          (Object.keys(x.prices).length ? '<div class="chips">' + priceChips(x.prices) + "</div>" : "") + "</div>";
+      }).join("");
+      page.querySelector("#gl").innerHTML =
+        '<div class="gsum"><div><b>' + s.games + "</b><span>games</span></div><div><b>" + money(s.weeklyRevenueUsd) + "</b><span>per week (clean evidence)</span></div><div><b>" + s.unitsPerWeek + "</b><span>accounts sold / week</span></div>" +
+        "<div><b>" + (bd.more || 0) + "</b><span>farm more now</span></div><div><b>" + (bd.wait || 0) + "</b><span>short, no campaign</span></div><div><b>" + (bd.less || 0) + "</b><span>over-stocked</span></div><div><b>" + (bd.managed || 0) + "</b><span>managed elsewhere</span></div><div><b>" + s.inflated + "</b><span>engine over-counts</span></div></div>" +
+        '<div class="basisbar">Each game: what we sold (each sold account counted once, from every source, with delist bursts removed), what it earns, how other sellers price it, and how many accounts it is worth farming using the farm engine&rsquo;s own stock-cover formula' +
+        (s.sizing ? " (" + s.sizing.coverageDays + " days of cover + " + s.sizing.safetyStock + " safety)" : "") + ". &ldquo;Farm more&rdquo; needs a campaign running, a real shortfall and at least 2 sales a week; the safety stock alone would make every small game look short. Advice only: it changes nothing. <b>Engine counts</b> is the farm engine&rsquo;s own 45-day sales figure, shown for comparison.</div>" +
+        (rows ? '<div class="rows">' + rows + "</div>" : '<div class="empty">Nothing matches.</div>') +
+        '<div class="ctl" style="margin-top:12px">' + (f.offset > 0 ? '<button id="pv">← Previous</button>' : "") + (f.offset + 20 < j.total ? '<button id="nx">Next →</button>' : "") + "<span class=\"sub\">" + j.total + " games</span></div>";
+      var nx = page.querySelector("#nx"), pv = page.querySelector("#pv");
+      if (nx) nx.onclick = function () { f.offset += 20; renderGames(); };
+      if (pv) pv.onclick = function () { f.offset = Math.max(0, f.offset - 20); renderGames(); };
+      Array.prototype.forEach.call(page.querySelectorAll(".row.clickable"), function (r) { r.onclick = function () { openGame(r.getAttribute("data-key")); }; });
+    }
+    function confPill(c) {
+      return '<span class="pill ' + (c === "high" ? "s-ok" : c === "medium" ? "s-warn" : "s-unknown") + '">' + esc(c) + "</span>";
+    }
+    function sugCell(sg) {
+      if (!(sg.price > 0)) return "<small>no suggestion</small>";
+      return "<b>" + money(sg.price) + "</b> " + confPill(sg.confidence) +
+        "<small>" + esc(sg.basis) + (sg.position && sg.position !== "no rivals" ? " · " + esc(sg.position) : "") + "</small>" +
+        (sg.test ? "<small><b>test " + money(sg.test.price) + "</b> — " + esc(sg.test.why) + "</small>" : "") +
+        "<small>" + esc((sg.reasons || []).join(" ")) + "</small>";
+    }
+    function rivalCell(r) {
+      if (!r) return "<small>no scan for this market</small>";
+      return "page median " + money(r.median) + (r.lowestOther > 0 ? "<small>cheapest other seller " + money(r.lowestOther) + "</small>" : "") +
+        "<small>" + r.sellers + " sellers · " + r.offers + " offers" + (r.pageWide ? " · includes our own rows" : "") + "</small>";
+    }
+    async function openGame(key) {
+      var tok = (state.sheetTok = (state.sheetTok || 0) + 1);
+      openSheet("Loading…", '<div class="empty">Loading…</div>');
+      try {
+        var j = await api("/api/price-tracker/game/" + encodeURIComponent(key));
+        if (tok !== state.sheetTok) return;
+        var g = j.game, fm = g.farm, d = g.demand;
+        var flags = g.flags.map(function (f) { return '<div class="flagbox ' + esc(f.level) + '">' + esc(f.text) + "</div>"; }).join("");
+        var src = Object.keys(d.bySource).map(function (k) { return d.bySource[k] + " " + k; }).join(" · ");
+        var kv = '<div class="kv"><div><b>' + d.units45 + "</b><span>accounts sold, 45d (clean)</span></div><div><b>" + d.engine.count45 + "</b><span>the farm engine counts</span></div><div><b>" + d.engineClean.count45 + "</b><span>engine count without delist bursts</span></div>" +
+          "<div><b>" + d.perWeek + "</b><span>per week</span></div><div><b>" + d.d7 + " / " + d.d14 + " / " + d.d30 + "</b><span>last 7 / 14 / 30 days</span></div><div><b>" + money(fm.valuePerAccount) + "</b><span>net per account sold</span></div>" +
+          "<div><b>" + money(fm.weeklyRevenueUsd) + "</b><span>per week</span></div>" +
+          (d.market ? "<div><b>" + (d.market.perWeek == null ? "—" : "~" + Math.round(d.market.perWeek)) + "</b><span>market units/wk (GGSel+Plati)</span></div><div><b>" + d.market.sellers + " / " + d.market.offers + "</b><span>rival sellers / offers</span></div>" : "") + "</div>";
+        var farm = '<div class="kv"><div><b>' + fm.target + "</b><span>accounts justified</span></div><div><b>" + fm.onHand + "</b><span>on hand (" + fm.listed + " listed, " + fm.archiveHolders + " held unsold)</span></div><div><b>" + fm.inFlight + "</b><span>being farmed (engine)</span></div>" +
+          "<div><b>" + (fm.daysCover == null ? "—" : fm.daysCover + " d") + "</b><span>stock on hand lasts</span></div><div><b>" + (fm.farmable ? "yes" : "no") + "</b><span>campaign running to farm</span></div>" + (fm.gameCap ? "<div><b>" + fm.gameCap + "</b><span>your cap for this game</span></div>" : "") + "</div>" +
+          fm.reasons.map(function (r) { return "<div class=\"flagbox info\">" + esc(r) + "</div>"; }).join("") + fm.notes.map(function (r) { return "<div class=\"flagbox warn\">" + esc(r) + "</div>"; }).join("");
+        var eng = fm.engine ? '<div class="flagbox info"><b>Farm engine, latest:</b> ' + esc(fm.engine.decision) + (fm.engine.campaign ? " — " + esc(fm.engine.campaign) : "") + " · target " + fm.engine.target + ", assigned " + fm.engine.assigned + (fm.engine.archiveHolders ? ", already held " + fm.engine.archiveHolders : "") + "<br>" + esc(fm.engine.reason) + "</div>" : '<div class="flagbox info">No farm decision for this game in the last 30 days.</div>';
+        var mk = Object.keys(g.price.markets).map(function (m) {
+          var v = g.price.markets[m];
+          if (!(v.suggested.price > 0 || v.sold.orders || v.live.listings)) return "";
+          var sg = v.suggested;
+          return "<tr><td><b>" + esc(m) + "</b>" + (v.blocked ? "<small>blocked by owner</small>" : "") + "</td>" +
+            "<td>" + (v.sold.orders ? v.sold.orders + " sold @ " + money(v.sold.median) + "<small>" + money(v.sold.p25) + "–" + money(v.sold.p75) + (v.sold.last ? " · last " + esc(day(v.sold.last)) : "") + "</small>" : "<small>no sale</small>") + "</td>" +
+            "<td>" + (v.live.listings ? v.live.listings + " live @ " + money(v.live.askMedian) + "<small>" + v.live.autoRows + " auto-priced" + (v.live.autoRows ? " @ " + money(v.live.autoAskMedian) : "") + " · " + money(v.live.askMin) + "–" + money(v.live.askMax) + " · " + v.live.units + " units" + (v.askVsSoldPct != null ? " · ask " + (v.askVsSoldPct > 0 ? "+" : "") + v.askVsSoldPct + "% vs sold" : "") + "</small>" : "<small>not listed</small>") + "</td>" +
+            "<td>" + rivalCell(v.rival) + "</td>" +
+            "<td>" + sugCell(sg) + "</td></tr>";
+        }).join("");
+        var sets = j.sets.map(adviceRow).join("");
+        var sales = j.sales.map(function (x) {
+          return '<div class="row"><div class="r1"><span class="t">' + esc(x.market) + " · " + esc(x.source) + '</span><span class="amt">' + (x.priced ? money(x.priceUsd) : "no price") + "</span></div>" +
+            '<div class="r2"><span>' + esc(day(x.at)) + "</span>" + (x.orderId ? '<span class="mono">order ' + esc(x.orderId) + "</span>" : "") + '<span class="mono">' + esc(x.externalId) + "</span><span>" + esc(String(x.title || "").slice(0, 80)) + "</span></div></div>";
+        }).join("");
+        var hist = j.history.map(function (t) {
+          return '<div class="row"><div class="r1"><span class="t">' + esc(t.decision) + (t.campaign ? " — " + esc(t.campaign) : "") + '</span><span class="amt">' + esc(day(t.decidedAt)) + "</span></div><div class=\"r2\"><span>target " + t.target + " · planned " + t.planned + " · assigned " + t.assigned + "</span></div><div class=\"r2\">" + esc(t.reason) + "</div></div>";
+        }).join("");
+        openSheet(g.game,
+          flags + "<h4 class=\"sec\">Demand</h4>" + kv + '<div class="basisbar">Sold accounts by source: ' + esc(src || "none") + ". One account counts once however many places saw it (login identity).</div>" +
+          "<h4 class=\"sec\">How many to farm</h4>" + farm + eng +
+          "<h4 class=\"sec\">Price by market, and other sellers</h4><div class=\"scroll\"><table class=\"pm\"><tr><th>market</th><th>we sold</th><th>our live asks</th><th>other sellers</th><th>suggested</th></tr>" + mk + "</table></div>" +
+          "<h4 class=\"sec\">Item sets of this game (advice)</h4><div class=\"rows\">" + (sets || '<div class="empty">No live listings.</div>') + "</div>" +
+          "<h4 class=\"sec\">Recent sales</h4><div class=\"rows\">" + (sales || '<div class="empty">None.</div>') + "</div>" +
+          "<h4 class=\"sec\">Farm engine decisions</h4><div class=\"rows\">" + (hist || '<div class="empty">None in 30 days.</div>') + "</div>");
+      } catch (e) { openSheet("Error", '<div class="empty">' + esc(e.message) + "</div>"); }
     }
 
     /* ---------------------------- price curve --------------------------- */
@@ -373,9 +518,11 @@
     }
     document.getElementById("sheetClose").onclick = function () { document.getElementById("sheet").classList.remove("on"); };
     async function openSet(key) {
+      var tok = (state.sheetTok = (state.sheetTok || 0) + 1);
       openSheet("Loading…", '<div class="empty">Loading…</div>');
       try {
         var j = await api("/api/price-tracker/set/" + encodeURIComponent(key));
+        if (tok !== state.sheetTok) return;
         var s = j.set;
         var live = Object.keys(s.markets).map(function (m) {
           return s.markets[m].live.map(function (l) {
@@ -458,22 +605,44 @@
     /* ------------------------------- suggest --------------------------- */
     async function renderSuggest() {
       var f = state.sug || (state.sug = { market: "gameflip", game: "", items: "" });
-      var g = shell('<div class="basisbar">What the auto-farm would be told for a NEW listing. Not wired into publishing yet — this is how to check the advice before it is.</div>' +
-        '<div class="ctl"><select id="gm">' + marketOptions(f.market) + '</select><input id="gg" type="search" placeholder="Game, e.g. Albion Online" value="' + esc(f.game) + '"><input id="gi" type="number" min="1" max="200" placeholder="items" style="max-width:90px" value="' + esc(f.items) + '"><button class="primary" id="go">Suggest</button></div><div id="gr"></div>');
+      var g = shell('<div class="basisbar">What the auto-farm would be told for a NEW listing: the better-evidenced of this exact set\'s sales and the whole game\'s sales (which also know other sellers\' prices).</div>' +
+        '<div class="ctl"><select id="gm">' + marketOptions(f.market) + '</select><input id="gg" type="search" placeholder="Game, e.g. Albion Online" value="' + esc(f.game) + '"><input id="gi" type="number" min="1" max="200" placeholder="items" style="max-width:90px" value="' + esc(f.items) + '"><button class="primary" id="go">Suggest</button></div><div id="gr"></div>' +
+        '<h4 class="sec">Auto-farm link</h4><div id="lk"><div class="empty">Loading…</div></div>');
       page.querySelector("#go").onclick = async function () {
         f.market = page.querySelector("#gm").value; f.game = page.querySelector("#gg").value; f.items = page.querySelector("#gi").value;
         try {
           var j = await api("/api/price-tracker/suggest?market=" + encodeURIComponent(f.market) + "&game=" + encodeURIComponent(f.game) + "&items=" + encodeURIComponent(f.items));
           if (stale(g)) return;
           var s = j.suggestion;
-          page.querySelector("#gr").innerHTML = '<div class="row"><div class="r1"><span class="t">' + esc(f.market) + '</span><span class="amt">' + (s.price ? money(s.price) : "no suggestion") + '</span></div><div class="r2"><span class="pill ' + (s.confidence === "high" ? "s-ok" : s.confidence === "medium" ? "s-warn" : "s-unknown") + '">' + esc(s.confidence || "none") + " confidence</span><span>" + esc(s.basis || "") + '</span></div><div class="why">' + esc((s.reasons || []).join(" ")) + (s.test ? "<br><b>Test:</b> " + money(s.test.price) + " — " + esc(s.test.why) : "") + "</div></div>";
+          page.querySelector("#gr").innerHTML = '<div class="row"><div class="r1"><span class="t">' + esc(f.market) + (s.game ? " · " + esc(s.game) : "") + '</span><span class="amt">' + (s.price ? money(s.price) : "no suggestion") + '</span></div><div class="r2">' + confPill(s.confidence || "none") + "<span>" + esc(s.basis || "") + "</span>" + (s.source ? '<span class="pill s-unknown">' + esc(s.source) + "-level</span>" : "") + (s.position && s.position !== "no rivals" ? "<span>" + esc(s.position) + "</span>" : "") + '</div><div class="why">' + esc((s.reasons || []).join(" ")) + (s.test ? "<br><b>Test:</b> " + money(s.test.price) + " — " + esc(s.test.why) : "") + "</div></div>";
         } catch (e) { page.querySelector("#gr").innerHTML = '<div class="empty">' + esc(e.message) + "</div>"; }
       };
+      try {
+        var L = await api("/api/price-tracker/link");
+        if (stale(g)) return;
+        var c = L.config, st = L.stats;
+        var mk = Object.keys(st.byMarket).map(function (m) {
+          var v = st.byMarket[m];
+          return "<tr><td><b>" + esc(m) + "</b></td><td>" + v.n + "</td><td>" + v.applied + "</td><td>" + v.higher + " / " + v.same + " / " + v.lower + "</td><td>" + (v.avgDeltaPct == null ? "—" : (v.avgDeltaPct > 0 ? "+" : "") + v.avgDeltaPct + "%") + "</td></tr>";
+        }).join("");
+        var rec = L.recent.slice(0, 25).map(function (x) {
+          return '<div class="row"><div class="r1"><span class="t">' + esc(x.market) + " · " + esc(x.game) + '</span><span class="amt">base ' + money(x.base) + (x.tracker > 0 ? ' <span class="arrow">→</span> ' + money(x.tracker) : "") + "</span></div>" +
+            '<div class="r2"><span class="pill s-unknown">' + esc(x.mode) + "</span>" + (x.applied ? '<span class="pill s-ok">applied ' + money(x.used) + "</span>" : '<span class="pill s-info">base kept</span>') + confPill(x.confidence || "none") + "<span>" + esc(day(x.at)) + "</span></div>" +
+            (x.basis ? '<div class="why">' + esc(x.basis) + (x.why ? " — " + esc(x.why) : "") + "</div>" : "") + "</div>";
+        }).join("");
+        page.querySelector("#lk").innerHTML =
+          '<div class="kv"><div><b>' + esc(c.mode) + "</b><span>mode (settings autoFarm.priceTracker)</span></div><div><b>" + (c.markets.length ? esc(c.markets.join(", ")) : "none") + "</b><span>markets it may change</span></div><div><b>" + esc(c.minConfidence) + " · ±" + c.maxDeviationPct + "%</b><span>min confidence · max move</span></div></div>" +
+          '<div class="basisbar">' + (c.mode === "off" ? "Off: publishers use their own prices and the tracker is never asked. " : c.mode === "shadow" ? "Shadow: the tracker is asked on every new listing and its price is logged beside the one that was used; nothing changes. " : "Apply: allowlisted markets get the tracker\'s price, within the guards. ") +
+          "Since the last restart: " + st.total + " comparisons, " + st.applied + " applied.</div>" +
+          (mk ? '<div class="scroll"><table class="pm"><tr><th>market</th><th>asked</th><th>applied</th><th>tracker higher / same / lower</th><th>avg difference</th></tr>' + mk + "</table></div>" : "") +
+          (rec ? '<div class="rows" style="margin-top:10px">' + rec + "</div>" : '<div class="empty">No comparisons yet. They appear here as the auto-farm publishes new listings in shadow or apply mode.</div>');
+      } catch (e) { if (!stale(g)) page.querySelector("#lk").innerHTML = '<div class="empty">' + esc(e.message) + "</div>"; }
     }
 
     async function render(force) {
       try {
-        if (state.tab === "overview") await renderOverview(force);
+        if (state.tab === "games") await renderGames();
+        else if (state.tab === "overview") await renderOverview(force);
         else if (state.tab === "curve") await renderCurve();
         else if (state.tab === "sets") await renderSets();
         else if (state.tab === "advice") await renderAdvice();
@@ -481,7 +650,7 @@
         else await renderSuggest();
       } catch (e) { fail(e); }
     }
-    window.addEventListener("hashchange", function () { var h = (location.hash || "#overview").slice(1); if (h !== state.tab && TABS.some(function (t) { return t[0] === h; })) { state.tab = h; render(); } });
+    window.addEventListener("hashchange", function () { var h = (location.hash || "#games").slice(1); if (h !== state.tab && TABS.some(function (t) { return t[0] === h; })) { state.tab = h; render(); } });
     render();
   })();
   </script>

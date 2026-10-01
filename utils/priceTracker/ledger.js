@@ -44,7 +44,7 @@
 //     single sale on a listing that is delisted soon after must still count.
 //     They are returned in `suspect`, never silently dropped, and they never
 //     enter a price.
-const { identify } = require("./setIdentity");
+const { identify, normGame } = require("./setIdentity");
 
 // Marketplaces whose sales exist only as delivered units on the listing row.
 const UNIT_LEDGER_MARKETS = ["eldorado", "playerauctions", "g2g"];
@@ -56,6 +56,16 @@ function ts(d) {
 
 function idStr(x) {
   return x == null ? "" : String(x).toLowerCase();
+}
+
+// `login` on a signal is NOT one account: for a quantity listing it is the whole
+// delivery pool attached to the listing ("a, b, c"), copied onto every unit sold
+// from it (utils/saleLearning.js). Only a single login identifies an account.
+function loginList(v) {
+  return String(v || "")
+    .split(/[\s,;]+/)
+    .map((x) => x.trim().toLowerCase())
+    .filter(Boolean);
 }
 
 function round2(n) {
@@ -80,6 +90,10 @@ function buildLedger({ listings = [], signals = [], sets = [] } = {}) {
   };
 
   const sales = [];
+  // Bulk-pack deliveries are never PRICE evidence (a pack is priced for N accounts at
+  // a discount) but each unit is still an account the shelf lost, so they count as
+  // DEMAND. Kept apart from `sales` so nothing that prices can ever read them.
+  const demandOnly = [];
   const excluded = { farm: 0, bulk: 0, noListing: 0, unpricedSignal: 0, duplicate: 0, massClose: 0 };
   const suspect = [];
 
@@ -127,6 +141,25 @@ function buildLedger({ listings = [], signals = [], sets = [] } = {}) {
     const ident = identOf(l);
     if (ident.kind !== "drops") {
       excluded[ident.kind === "bulk" ? "bulk" : "farm"] += delivered.length;
+      if (ident.kind === "bulk") {
+        delivered.forEach((u, i) =>
+          demandOnly.push({
+            ...base(l, ident),
+            key: "bulkunit:" + idStr(l._id) + ":" + String(u.orderId) + ":" + i,
+            saleGroup: "bulkunit:" + idStr(l._id) + ":" + String(u.orderId) + ":" + i,
+            login: loginList(u.login).length === 1 ? loginList(u.login)[0] : "",
+            logins: loginList(u.login),
+            account: "",
+            source: "bulk",
+            confidence: "exact",
+            orderId: String(u.orderId),
+            at: new Date(u.deliveredAt),
+            priceUsd: 0,
+            priceBasis: "none",
+            priced: false,
+          }),
+        );
+      }
       continue;
     }
     const price = Number(l.price) || 0;
@@ -139,6 +172,7 @@ function buildLedger({ listings = [], signals = [], sets = [] } = {}) {
         // its own account and its own revenue), so the key carries the unit
         // index; `saleGroup` names the ORDER, which is what counts as one piece
         // of price evidence.
+        login: loginList(u.login).length === 1 ? loginList(u.login)[0] : "",
         key: "unit:" + idStr(l._id) + ":" + String(u.orderId) + ":" + unitIdx++,
         saleGroup: String(l.marketplace || "").toLowerCase() + ":order:" + String(u.orderId),
         source: "unit",
@@ -184,12 +218,29 @@ function buildLedger({ listings = [], signals = [], sets = [] } = {}) {
       const nb = nearDelist.get(dk);
       if (nb && hourCount.get(nb) >= 8) {
         excluded.massClose += 1;
-        suspect.push({ key, market: nb.split("|")[0], at: new Date(s.at), priceUsd: price, listingId: lid, reason: "mass-close" });
+        suspect.push({ key, market: nb.split("|")[0], at: new Date(s.at), priceUsd: price, listingId: lid, seq: Number(unit[2]), reason: "mass-close" });
         continue;
       }
       const ident = identOf(l);
       if (s.bulk || ident.kind === "bulk") {
         excluded.bulk += 1;
+        demandOnly.push({
+          ...base(l, ident),
+          key,
+          saleGroup: key,
+          login: loginList(s.login).length === 1 ? loginList(s.login)[0] : "",
+          logins: loginList(s.login),
+          account: idStr(s.account),
+          dedupeKey: dk,
+          source: "bulk",
+          confidence: "exact",
+          orderId: "",
+          seq: Number(unit[2]),
+          at: new Date(s.at),
+          priceUsd: 0,
+          priceBasis: "none",
+          priced: false,
+        });
         continue;
       }
       if (ident.kind === "farm") {
@@ -204,6 +255,10 @@ function buildLedger({ listings = [], signals = [], sets = [] } = {}) {
         market: String(s.marketplace || l.marketplace || "").toLowerCase(),
         key,
         saleGroup: key,
+        login: loginList(s.login).length === 1 ? loginList(s.login)[0] : "",
+        logins: loginList(s.login),
+        account: idStr(s.account),
+        dedupeKey: dk,
         source: "signal",
         confidence: "exact",
         orderId: "",
@@ -219,16 +274,22 @@ function buildLedger({ listings = [], signals = [], sets = [] } = {}) {
     if (hand || (shop && price > 0 && s.marketplace !== "bulk" && !s.bulk)) {
       // The GAME is part of the key: one account sold in two games is two sales
       // of two things (the 39 "duplicates" first measured were all this).
-      const key = (hand ? "hand:" : "shop:") + (hand || shop)[1].toLowerCase() + ":" + String(s.gameKey || "").toLowerCase();
+      const key = (hand ? "hand:" : "shop:") + (hand || shop)[1].toLowerCase() + ":" + normGame(s.game || s.gameKey);
       if (seen.has(key)) {
         excluded.duplicate += 1;
         continue;
       }
       seen.add(key);
-      const gk = String(s.gameKey || "").toLowerCase();
+      // Same normalisation as set identity, so one game is one key everywhere
+      // (SaleSignal.gameKey is only lower-cased: "pubg: battlegrounds").
+      const gk = normGame(s.game || s.gameKey);
       sales.push({
         key,
         saleGroup: key,
+        login: loginList(s.login).length === 1 ? loginList(s.login)[0] : "",
+        logins: loginList(s.login),
+        account: idStr(s.account),
+        dedupeKey: dk,
         source: hand ? "hand" : "shop",
         confidence: "hand",
         market: String(s.marketplace || "").toLowerCase() || "unknown",
@@ -266,6 +327,23 @@ function buildLedger({ listings = [], signals = [], sets = [] } = {}) {
     const ident = identOf(l);
     if (ident.kind !== "drops") {
       excluded[ident.kind === "bulk" ? "bulk" : "farm"] += 1;
+      if (ident.kind === "bulk") {
+        demandOnly.push({
+          ...base(l, ident),
+          key: "bulkrow:" + id,
+          saleGroup: "bulkrow:" + id,
+          login: "",
+          logins: [],
+          account: "",
+          source: "bulk",
+          confidence: "exact",
+          orderId: "",
+          at: new Date(l.updatedAt || l.createdAt || 0),
+          priceUsd: 0,
+          priceBasis: "none",
+          priced: false,
+        });
+      }
       continue;
     }
     const price = Number(l.price) || 0;
@@ -314,7 +392,7 @@ function buildLedger({ listings = [], signals = [], sets = [] } = {}) {
     }
     if (flagged.size) {
       for (const x of flagged) {
-        suspect.push({ key: x.key, market: x.market, at: x.at, priceUsd: x.priceUsd, listingId: x.listingId, reason: "burst" });
+        suspect.push({ key: x.key, market: x.market, at: x.at, priceUsd: x.priceUsd, listingId: x.listingId, seq: x.seq, reason: "burst" });
         excluded.massClose += 1;
       }
       for (let i = sales.length - 1; i >= 0; i -= 1) if (flagged.has(sales[i])) sales.splice(i, 1);
@@ -351,7 +429,15 @@ function buildLedger({ listings = [], signals = [], sets = [] } = {}) {
     suspectMassClose: suspect.length,
   };
 
-  return { sales, excluded, quality, suspect };
+  // "<listingId>:<seq>" of every sale set aside. A suspect sale was written as one
+  // signal PER GAME; anything replaying the engine's own count must drop all of
+  // those rows, which share this pair in their dedupeKey.
+  const suspectSaleKeys = new Set(
+    suspect.filter((x) => x.listingId && Number.isFinite(x.seq)).map((x) => x.listingId + ":" + x.seq),
+  );
+
+  quality.bulkDemandOnly = demandOnly.length;
+  return { sales, demandOnly, excluded, quality, suspect, suspectSaleKeys };
 }
 
 module.exports = { UNIT_LEDGER_MARKETS, buildLedger, round2 };

@@ -31,7 +31,18 @@ app.get("/whoami", (_req, res) => res.json({ username: "preview", role: "superad
 app.use(
   createRouter({
     // The preview is read-only too: the loader returns the same snapshot every time.
-    getReport: ({ fees } = {}) => Promise.resolve(T.buildReport(snapshot, { fees })),
+    // The settings the live router reads (cover days, per-game caps, no-claim games,
+    // shelf caps) are fixed here to production's values at the time of writing.
+    getReport: (opts = {}) =>
+      Promise.resolve(
+        T.buildReport(snapshot, {
+          noClaimGames: ["overwatch", "rainbow six", "call of duty"],
+          shelfCaps: { overwatch: 50, "rainbow six": 50 },
+          reuseOnlyGames: ["world of tanks", "ufl"],
+          sizing: { coverageDays: 28, safetyStock: 6, maxAccounts: 250 },
+          ...opts,
+        }),
+      ),
   }),
 );
 app.use(express.static(path.join(__dirname, "..", "public")));
