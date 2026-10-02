@@ -45,7 +45,7 @@ function publicSale(s) {
   return o;
 }
 
-function createRouter({ getReport = T.getReport, guards = [], settingsInputs = () => ({}) } = {}) {
+function createRouter({ getReport = T.getReport, guards = [], settingsInputs = () => ({}), getMarketReport = null, marketStatus = null } = {}) {
   const router = express.Router();
   const wrap = (fn) => async (req, res) => {
     try {
@@ -242,7 +242,209 @@ function createRouter({ getReport = T.getReport, guards = [], settingsInputs = (
     res.json({ success: true, suggestion: out });
   });
 
+  mountMarketRadar(router, { guards, getMarketReport, marketStatus });
   return router;
+}
+
+// --------------------------------------------------------------------------------------------
+// Market radar (utils/marketData, docs/MARKET-RADAR-PLAN.md): what OTHER sellers' buyers pay,
+// who the rivals are, and which of our live listings have a cheaper comparable rival. Its own
+// report and cache, the same guards, read-only like everything else in this file.
+// --------------------------------------------------------------------------------------------
+const MARKET_SORTS = {
+  units: (g) => g.units,
+  perWeek: (g) => g.perWeek,
+  price: (g) => (g.realised && g.realised.median) || 0,
+  // fastest first; a game with no time-to-sell goes last
+  fast: (g) => (g.medianTtsHours == null ? -1e9 : -g.medianTtsHours),
+  rivals: (g) => g.rivalsLive,
+  undercut: (g) => g.undercut,
+};
+
+function lightMarketGame(g) {
+  const byMarket = {};
+  for (const [m, v] of Object.entries(g.byMarket || {})) {
+    if (!(v.units || v.live || v.oursLive || v.oursSold)) continue;
+    byMarket[m] = {
+      units: v.units,
+      perWeek: v.perWeek,
+      soldMedian: v.sold && v.sold.n ? v.sold.median : null,
+      soldN: (v.sold && v.sold.n) || 0,
+      medianTtsHours: v.medianTtsHours,
+      live: v.live,
+      liveSellers: v.liveSellers,
+      farmLive: v.farmLive || 0,
+      askMedian: v.asking && v.asking.n ? v.asking.median : null,
+      oursLive: v.oursLive,
+      oursSold: v.oursSold,
+    };
+  }
+  return {
+    key: g.key,
+    game: g.game,
+    units: g.units,
+    orders: g.orders,
+    perWeek: g.perWeek,
+    ratePartial: g.ratePartial,
+    realised: g.realised,
+    medianTtsHours: g.medianTtsHours,
+    rivalsLive: g.rivalsLive,
+    rivalSellers: g.rivalSellers,
+    oursLive: g.oursLive,
+    oursListed: g.oursListed,
+    oursSold: g.oursSold,
+    gameflipShare: g.gameflipShare,
+    undercut: g.undercut,
+    researchScannedAt: g.researchScannedAt || null,
+    flags: g.flags,
+    bands: g.bands,
+    byMarket,
+  };
+}
+
+function mountMarketRadar(router, { guards = [], getMarketReport, marketStatus } = {}) {
+  const report = getMarketReport || ((o) => require("../utils/marketData/report").getReport(o));
+  const radarStatus =
+    marketStatus ||
+    (() => {
+      const radar = require("../utils/marketData");
+      return { config: radar.readConfig(), status: radar.status() };
+    });
+  let lastForceM = 0;
+  const wrapM = (fn) => async (req, res) => {
+    try {
+      let force = false;
+      if (req.query.force === "1" && Date.now() - lastForceM > FORCE_COOLDOWN_MS) {
+        lastForceM = Date.now();
+        force = true;
+      }
+      const r = await report({ force, days: req.query.days });
+      await fn(req, res, r);
+    } catch (e) {
+      res.status(500).json({ success: false, message: e.message });
+    }
+  };
+  // Every market route is registered through one of these two helpers, both of which spread the
+  // guards, so no route can be added without them (tests/priceTracker.test.js scans for it).
+  const getM = (path, fn) => router.get(path, ...guards, wrapM(fn));
+  const getPlain = (path, fn) =>
+    router.get(path, ...guards, (req, res) => {
+      try {
+        fn(req, res);
+      } catch (e) {
+        res.status(500).json({ success: false, message: e.message });
+      }
+    });
+  const q = (v) => String(v == null ? "" : v).toLowerCase().trim();
+
+  getPlain("/api/price-tracker/market/status", (req, res) => {
+    res.json({ success: true, ...radarStatus() });
+  });
+
+  getM("/api/price-tracker/market/overview", (req, res, r) => {
+    res.json({
+      success: true,
+      generatedAt: r.generatedAt,
+      windowDays: r.windowDays,
+      coverage: r.coverage,
+      truncated: r.truncated || {},
+      markets: r.markets,
+      radar: radarStatus(),
+      topGames: r.games.slice(0, 8).map(lightMarketGame),
+      topUndercuts: r.undercuts.slice(0, 5),
+      topSellers: r.sellers.slice(0, 8),
+      recentMoves: r.priceMoves.slice(0, 8),
+      counts: { games: r.games.length, undercuts: r.undercuts.length, sellers: r.sellers.length, sales: r.feed.length, moves: r.priceMoves.length },
+    });
+  });
+
+  getM("/api/price-tracker/market/games", (req, res, r) => {
+    let rows = r.games;
+    const s = q(req.query.q);
+    const flag = String(req.query.flag || "");
+    if (s) rows = rows.filter((g) => String(g.game).toLowerCase().includes(s));
+    if (flag) rows = rows.filter((g) => g.flags.some((f) => f.id === flag));
+    const key = Object.prototype.hasOwnProperty.call(MARKET_SORTS, req.query.sort) ? MARKET_SORTS[req.query.sort] : MARKET_SORTS.units;
+    rows = [...rows].sort((a, b) => key(b) - key(a) || String(a.game).localeCompare(String(b.game)));
+    res.json({ success: true, windowDays: r.windowDays, ...page(rows.map(lightMarketGame), req.query, 30) });
+  });
+
+  getM("/api/price-tracker/market/game/:key", (req, res, r) => {
+    const key = String(req.params.key || "");
+    const g = r.games.find((x) => x.key === key);
+    if (!g) return res.status(404).json({ success: false, message: "no market data for this game" });
+    const live = ((r.liveByGame && r.liveByGame.get(key)) || []).slice(0, 150);
+    const allSales = r.feed.filter((x) => x.gameKey === key);
+    const sales = allSales.slice(0, 40);
+    // The rivals in THIS game: sales in the window and live listings, by market + seller.
+    const by = new Map();
+    const agg = (market, seller) => {
+      const k = market + ":" + seller;
+      if (!by.has(k)) by.set(k, { market, seller, units: 0, prices: [], live: 0 });
+      return by.get(k);
+    };
+    // Every sale in the window counts toward a rival's units, not only the 40 shown.
+    for (const x of allSales) if (!x.ours && x.kind !== "farm") {
+      const a = agg(x.market, x.seller);
+      a.units += x.units;
+      a.prices.push(x.priceUsd);
+    }
+    for (const l of live) if (!l.ours && l.kind !== "farm") agg(l.market, l.seller).live++;
+    const med = (a) => {
+      const s2 = [...a].sort((x, y) => x - y);
+      if (!s2.length) return null;
+      const m = s2.length >> 1;
+      return Math.round((s2.length % 2 ? s2[m] : (s2[m - 1] + s2[m]) / 2) * 100) / 100;
+    };
+    const sellers = [...by.values()]
+      .map((a) => ({ market: a.market, seller: a.seller, units: a.units, medianPrice: med(a.prices), live: a.live }))
+      .sort((a, b) => b.units - a.units || b.live - a.live)
+      .slice(0, 20);
+    res.json({
+      success: true,
+      windowDays: r.windowDays,
+      game: g,
+      live,
+      sales,
+      sellers,
+      moves: r.priceMoves.filter((p) => p.gameKey === key).slice(0, 20),
+      undercuts: r.undercuts.filter((u) => u.gameKey === key).slice(0, 50),
+    });
+  });
+
+  getM("/api/price-tracker/market/rivals", (req, res, r) => {
+    let rows = r.sellers;
+    const market = String(req.query.market || "");
+    const s = q(req.query.q);
+    if (market) rows = rows.filter((x) => x.market === market);
+    if (s) rows = rows.filter((x) => String(x.label).toLowerCase().includes(s));
+    res.json({ success: true, windowDays: r.windowDays, ...page(rows, req.query, 50) });
+  });
+
+  getM("/api/price-tracker/market/sales", (req, res, r) => {
+    let rows = r.feed;
+    const market = String(req.query.market || "");
+    const game = String(req.query.game || "");
+    const s = q(req.query.q);
+    if (market) rows = rows.filter((x) => x.market === market);
+    if (game) rows = rows.filter((x) => x.gameKey === game);
+    if (req.query.ours === "1") rows = rows.filter((x) => x.ours);
+    else if (req.query.ours === "0") rows = rows.filter((x) => !x.ours);
+    if (req.query.kind) rows = rows.filter((x) => x.kind === String(req.query.kind));
+    if (s) rows = rows.filter((x) => (String(x.title) + " " + x.game + " " + x.seller).toLowerCase().includes(s));
+    res.json({ success: true, windowDays: r.windowDays, ...page(rows, req.query, 50) });
+  });
+
+  getM("/api/price-tracker/market/undercuts", (req, res, r) => {
+    let rows = r.undercuts;
+    const market = String(req.query.market || "");
+    const origin = String(req.query.origin || "");
+    const s = q(req.query.q);
+    if (market) rows = rows.filter((x) => x.market === market);
+    if (origin) rows = rows.filter((x) => x.origin === origin);
+    if (s) rows = rows.filter((x) => (String(x.title) + " " + x.game).toLowerCase().includes(s));
+    res.json({ success: true, windowDays: r.windowDays, ...page(rows, req.query, 50) });
+  });
 }
 
 module.exports = createRouter;

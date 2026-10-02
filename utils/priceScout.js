@@ -43,6 +43,14 @@ function round2(n) {
   return Math.round(n * 100) / 100;
 }
 
+// A number, or null when the field is absent/blank/not numeric (Number(null) is 0, which
+// would turn "unknown" into a real zero).
+function numOrNull(v) {
+  if (v === null || v === undefined || v === "") return null;
+  const n = Number(v);
+  return Number.isFinite(n) ? n : null;
+}
+
 // Stats + recommendation over one marketplace's listings. Prices far away
 // from the median (giant bundles, junk $0.01 listings) are not credible
 // competitors, so they are ignored for the recommendation.
@@ -77,7 +85,7 @@ async function gameflipSearch(term, status, limit) {
     },
   );
   const rows = (r.data && r.data.data) || [];
-  return rows
+  const out = rows
     .filter((x) => x && x.name && Number(x.price) > 0)
     .map((x) => ({
       title: String(x.name),
@@ -89,7 +97,24 @@ async function gameflipSearch(term, status, limit) {
       seller: String(x.owner || ""),
       sellerName: "",
       sold: undefined,
+      // Extra fields for the market radar (utils/marketData). Additive: every existing
+      // consumer reads title/price/url/seller/sold/updated and ignores the rest.
+      id: String(x.id || ""),
+      created: x.created || null,
+      onsale: x.onsale || null,
+      platform: x.platform ? String(x.platform) : "",
+      sellerScore: numOrNull(x.seller_score),
+      sellerRating: numOrNull(x.seller_rating_score),
+      sellerRatings: numOrNull(x.seller_ratings),
     }));
+  // Did this page hold EVERYTHING the search has? Only then can a rival that is missing from
+  // it be counted as gone. Only a real result (an array of rows) under the page limit says so: a
+  // failed fetch (callers turn it into []) never carries the flag, and neither does an error body
+  // relayed through the Pi (curl without --fail), which parses as JSON with no `data` array.
+  // Non-enumerable, so nothing that serialises the rows sees it.
+  const real = !!(r && r.data && Array.isArray(r.data.data));
+  Object.defineProperty(out, "complete", { value: real && rows.length < (limit || MAX_ROWS), enumerable: false });
+  return out;
 }
 
 function gameflipScout(term) {
@@ -116,6 +141,17 @@ async function platiScout(term) {
       seller: String(x.seller_id || ""),
       sellerName: String(x.seller_name || ""),
       sold: Number(x.numsold) || 0,
+      // Extra fields for the market radar (additive). `soldRaw` is null when the page had no
+      // counter (`sold` turns that into 0); `priceRub` is the price the seller set.
+      id: String(x.id || ""),
+      soldRaw: numOrNull(x.numsold),
+      priceRub: numOrNull(x.price_rur),
+      rating: numOrNull(x.seller_rating),
+      soldHidden: numOrNull(x.numsold_hidden),
+      positive: numOrNull(x.count_positiveresponses),
+      negative: numOrNull(x.count_negativeresponses),
+      returns: numOrNull(x.count_returns),
+      ticks: numOrNull(x.TicksLastChange),
     }));
 }
 
@@ -180,6 +216,13 @@ async function ggselScout(term) {
       seller: String(o.id_seller || ""),
       sellerName: String(o.seller_name || ""),
       sold: Number(o.cnt_sell) || 0,
+      // Extra fields for the market radar (additive). `id` is the same id our own offers
+      // carry as `externalId`, which is how our rows are told from rivals'.
+      id: String(o.id_goods),
+      soldRaw: numOrNull(o.cnt_sell),
+      priceRub: numOrNull(o.price_wmr),
+      rating: numOrNull(o.rating),
+      autoselling: !!o.autoselling,
     });
     if (rows.length >= MAX_ROWS) break;
   }

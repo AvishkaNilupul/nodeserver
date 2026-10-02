@@ -247,7 +247,7 @@
     }
 
     var page = document.getElementById("page");
-    var TABS = [["games", "Games"], ["overview", "Overview"], ["curve", "Price curve"], ["sets", "Same items"], ["advice", "Advice"], ["sales", "Sales ledger"], ["suggest", "Suggest"]];
+    var TABS = [["games", "Games"], ["market", "Market radar"], ["overview", "Overview"], ["curve", "Price curve"], ["sets", "Same items"], ["advice", "Advice"], ["sales", "Sales ledger"], ["suggest", "Suggest"]];
     var MARKETS = ["gameflip", "ggsel", "eldorado", "g2g", "playerauctions", "zeusx", "digiseller"];
     var state = { tab: (location.hash || "#games").slice(1), overview: null };
     if (!TABS.some(function (t) { return t[0] === state.tab; })) state.tab = "games";
@@ -639,9 +639,188 @@
       } catch (e) { if (!stale(g)) page.querySelector("#lk").innerHTML = '<div class="empty">' + esc(e.message) + "</div>"; }
     }
 
+
+    /* ------------------------------ market radar ------------------------------ */
+    // What OTHER sellers' buyers pay (Gameflip sold feed, GGSel / Plati counter rises), who the
+    // rivals are, and which of our live listings have a cheaper comparable rival. Read-only.
+    var MK_VIEWS = [["overview", "Overview"], ["games", "Games"], ["rivals", "Rival sellers"], ["sales", "Market sales"], ["undercuts", "Undercut listings"]];
+    var MK_MARKETS = ["gameflip", "ggsel", "plati"];
+    function hrs(h) { return h == null ? "—" : h < 48 ? Math.round(h) + " h" : (h / 24).toFixed(1) + " d"; }
+    // A weekly rate needs two days of watching; before that it is unknown, not zero.
+    function wk(x) { return x.perWeek == null ? "rate after 2 days of watching" : x.perWeek + "/wk" + (x.ratePartial ? ", newest market not rated yet" : ""); }
+    function mkOpts(sel, any) {
+      return (any ? '<option value="">All markets</option>' : "") + MK_MARKETS.map(function (m) { return '<option value="' + m + '"' + (m === sel ? " selected" : "") + ">" + m + "</option>"; }).join("");
+    }
+    function stats(st) { return st && st.n ? money(st.median) + " <small>(" + st.n + ", " + money(st.p25) + "–" + money(st.p75) + ")</small>" : "—"; }
+    function mkFlagPills(flags) {
+      var cls = { "collector-niche": "s-more", fast: "s-ok", slow: "s-warn", crowded: "s-warn", alone: "s-ok", "not-selling": "s-more", undercut: "s-warn", "price-war": "s-fail", "stale-scan": "s-unknown" };
+      return (flags || []).map(function (f) { return '<span class="pill ' + (cls[f.id] || "s-unknown") + '" title="' + esc(f.text) + '">' + esc(f.id.replace(/-/g, " ")) + "</span>"; }).join(" ");
+    }
+    // A seller's price move; on GGSel / Plati shown in the roubles the seller set (the USD figure drifts with the rate).
+    function moveRow(p) {
+      var rub = p.fromNative != null && p.toNative != null ? " <small>(₽" + esc(p.fromNative) + " → ₽" + esc(p.toNative) + ")</small>" : "";
+      return '<div class="row"><div class="r1"><span class="t">' + esc(p.game) + " · " + esc(String(p.title).slice(0, 70)) + '</span><span class="amt">' + money(p.from) + ' <span class="arrow">→</span> <span class="' + (p.cut ? "bad" : "good") + '">' + money(p.to) + "</span>" + rub + "</span></div>" +
+        '<div class="r2"><span class="pill s-info">' + esc(p.market) + "</span><span>" + esc(p.seller) + "</span><span>" + esc(ago(p.at)) + "</span></div></div>";
+    }
+    function mkLink(url) { return url ? ' <a class="plain" href="' + esc(url) + '" target="_blank" rel="noopener noreferrer">open ↗</a>' : ""; }
+    function radarLine(rd) {
+      if (!rd) return "";
+      var c = rd.config || {}, s = rd.status || {};
+      var head = c.enabled ? '<span class="pill s-ok">recording ON</span>' : '<span class="pill s-unknown">recording OFF</span>';
+      if (s.paused) head += ' <span class="pill s-fail">paused (database errors) for ' + Math.ceil((s.pausedForMs || 0) / 60000) + " min</span>";
+      var t = s.totals || {};
+      return '<div class="basisbar">' + head + " Since the last restart: " + (s.jobsDone || 0) + " scans recorded, " + (t.salesInserted || 0) + " new sales, " + (t.rivalsInserted || 0) + " new rival listings" +
+        (s.jobsFailed ? ", " + s.jobsFailed + " failed" : "") + (s.lastJobAt ? " · last " + esc(ago(s.lastJobAt)) : "") + (s.lastError ? ' · last error: <span class="bad">' + esc(s.lastError) + "</span>" : "") +
+        (c.enabled ? "" : '. Switch on with settings <span class="mono">autoFarm.marketData.enabled = true</span> (no restart).') + "</div>";
+    }
+    function mkGameRow(x) {
+      var per = Object.keys(x.byMarket || {}).map(function (m) {
+        var v = x.byMarket[m];
+        return '<span class="chip' + (v.units ? " sold" : "") + '"><b>' + esc(m) + "</b> " + (v.units ? v.units + " sold" + (v.soldMedian != null ? " @ " + money(v.soldMedian) : "") : "no sale") + (v.live ? " · " + v.live + " live" + (v.askMedian != null ? " ask " + money(v.askMedian) : "") : "") + (v.oursLive ? " · ours " + v.oursLive : "") + "</span>";
+      }).join("");
+      var bands = (x.bands || []).filter(function (b) { return b.n >= 2; }).slice(0, 4).map(function (b) { return '<span class="chip">' + esc(b.band) + " items: <b>" + money(b.median) + "</b> (" + b.n + ")" + (b.medianTtsHours != null ? " · sells in " + hrs(b.medianTtsHours) : "") + "</span>"; }).join("");
+      return '<div class="row clickable" data-mkey="' + esc(x.key) + '"><div class="r1"><span class="t">' + esc(x.game) + '</span><span class="amt">' + (x.realised && x.realised.n ? money(x.realised.median) + ' <small class="sub">median paid, all sizes</small>' : "—") + "</span></div>" +
+        '<div class="r2"><span><b>' + x.units + "</b> sold by rivals (" + wk(x) + ")</span><span>sold listings took " + hrs(x.medianTtsHours) + "</span><span>" + x.rivalsLive + " live rival listings · " + x.rivalSellers + " sellers</span>" + (x.researchScannedAt ? "<span>market read " + esc(ago(x.researchScannedAt)) + "</span>" : "") +
+        (x.oursListed || x.oursLive || x.oursSold ? "<span>ours: " + (x.oursListed || 0) + " listed, " + x.oursSold + " sold seen" + (x.gameflipShare != null ? " (" + x.gameflipShare + "% of Gameflip)" : "") + "</span>" : "") + " " + mkFlagPills(x.flags) + "</div>" +
+        (per ? '<div class="chips">' + per + "</div>" : "") + (bands ? '<div class="chips">' + bands + "</div>" : "") + "</div>";
+    }
+    function undercutRow(u) {
+      return '<div class="row"><div class="r1"><span class="t">' + esc(u.title) + '</span><span class="amt">' + money(u.ourPrice) + ' <span class="arrow">vs</span> <span class="bad">' + money(u.cheapest.price) + "</span></span></div>" +
+        (u.ourPriceBasis ? '<div class="r2"><span>our price: ' + esc(u.ourPriceBasis) + "</span></div>" : "") +
+        '<div class="r2"><span class="pill s-info">' + esc(u.market) + '</span><span class="pill ' + (u.origin === "auto" ? "s-ok" : "s-unknown") + '">' + esc(u.origin || "?") + (u.origin === "auto" ? "" : " — never repriced automatically") + "</span>" +
+        "<span>" + u.cheaper + " of " + u.comparable + " comparable rivals are cheaper (cheapest −" + u.gapPct + "%)</span><span>rival median " + money(u.rivalMedian) + "</span>" +
+        "<span>" + (u.soldMedian != null ? "rivals' buyers paid " + money(u.soldMedian) + " (" + u.soldN + ")" : "not enough rival sales of this size") + '</span><span class="mono">' + esc(u.externalId) + "</span></div>" +
+        '<div class="why">Cheapest: ' + esc(u.cheapest.title) + " — " + esc(u.cheapest.seller) + "</div></div>";
+    }
+    async function renderMarket() {
+      var f = state.mk || (state.mk = { view: "overview", days: "30", q: "", flag: "", sort: "units", market: "", origin: "", ours: "0", kind: "drops", offset: 0 });
+      var views = '<select id="mv">' + MK_VIEWS.map(function (v) { return '<option value="' + v[0] + '"' + (v[0] === f.view ? " selected" : "") + ">" + v[1] + "</option>"; }).join("") + "</select>" +
+        '<select id="md">' + ["7", "30", "90"].map(function (d) { return '<option value="' + d + '"' + (d === f.days ? " selected" : "") + ">last " + d + " days</option>"; }).join("") + "</select>";
+      var extra = "";
+      if (f.view === "games") extra = '<select id="mso"><option value="units">Sort: units sold</option><option value="perWeek">Sort: units / week</option><option value="price">Sort: median paid (all sizes)</option><option value="fast">Sort: fastest selling</option><option value="rivals">Sort: live rivals</option><option value="undercut">Sort: our undercut listings</option></select>' +
+        '<select id="mfl"><option value="">Any flag</option><option value="collector-niche">Big collections sell high</option><option value="not-selling">Rivals sell, we do not list</option><option value="undercut">Our listings undercut</option><option value="price-war">Price war</option><option value="fast">Sells fast</option><option value="slow">Sells slowly</option><option value="crowded">Crowded</option><option value="alone">No rivals</option><option value="stale-scan">Market not re-read lately</option></select>';
+      if (f.view === "rivals" || f.view === "sales" || f.view === "undercuts") extra += '<select id="mmk">' + mkOpts(f.market, true) + "</select>";
+      if (f.view === "sales") extra += '<select id="mou"><option value="0">rivals only</option><option value="">rivals + ours</option><option value="1">ours only</option></select><select id="mki"><option value="drops">drop bundles</option><option value="farm">rent-farm windows</option><option value="">both</option></select>';
+      if (f.view === "undercuts") extra += '<select id="mor"><option value="">auto + manual</option><option value="auto">auto rows</option><option value="manual">manual rows</option></select>';
+      if (f.view !== "overview") extra += '<input id="mq" type="search" placeholder="Search" value="' + esc(f.q) + '">';
+      var g = shell('<div class="ctl">' + views + extra + '</div><div id="mk"><div class="empty">Loading…</div></div>');
+      var bind = function (id, key) { var el = page.querySelector("#" + id); if (!el) return; el.value = f[key]; el.onchange = function () { f[key] = el.value; f.offset = 0; renderMarket(); }; };
+      bind("mv", "view"); bind("md", "days"); bind("mso", "sort"); bind("mfl", "flag"); bind("mmk", "market"); bind("mou", "ours"); bind("mki", "kind"); bind("mor", "origin");
+      var mq = page.querySelector("#mq"), t; if (mq) mq.oninput = function () { clearTimeout(t); t = setTimeout(function () { f.q = mq.value; f.offset = 0; renderMarket(); }, 350); };
+      var box = function () { return page.querySelector("#mk"); };
+      var pager = function (j, size) {
+        return '<div class="ctl" style="margin-top:12px">' + (f.offset > 0 ? '<button id="pv">← Previous</button>' : "") + (f.offset + size < j.total ? '<button id="nx">Next →</button>' : "") + '<span class="sub">' + j.total + "</span></div>";
+      };
+      var wirePager = function (size) {
+        var nx = page.querySelector("#nx"), pv = page.querySelector("#pv");
+        if (nx) nx.onclick = function () { f.offset += size; renderMarket(); };
+        if (pv) pv.onclick = function () { f.offset = Math.max(0, f.offset - size); renderMarket(); };
+      };
+      var days = "days=" + encodeURIComponent(f.days);
+      if (f.view === "overview") {
+        var o = await api("/api/price-tracker/market/overview?" + days);
+        if (stale(g)) return;
+        var c = o.coverage;
+        var tr = o.truncated || {};
+        var cards = MK_MARKETS.map(function (m) {
+          var v = o.markets[m] || {};
+          return '<div class="vcard"><div class="top"><span class="nm">' + esc(m) + "</span>" + (m === "gameflip" ? '<span class="pill s-ok">dated sales</span>' : '<span class="pill s-unknown">counter rises</span>') + "</div>" +
+            (v.sold && v.sold.n ? '<div class="big">' + money(v.sold.median) + "<small>median paid to rivals · " + v.sold.n + " sales</small></div>" : '<div class="big">—<small>no rival sale recorded yet</small></div>') +
+            '<div class="mini"><div><b>' + (v.units || 0) + "</b><span>units sold by rivals</span></div><div><b>" + hrs(v.medianTtsHours) + "</b><span>time to sell</span></div><div><b>" + (v.liveRivals || 0) + "</b><span>live rival listings</span></div>" +
+            "<div><b>" + (v.liveSellers || 0) + "</b><span>rival sellers</span></div><div><b>" + (v.oursLive || 0) + "</b><span>our listings seen</span></div><div><b>" + (v.oursSold || 0) + "</b><span>our sales seen</span></div></div></div>";
+        }).join("");
+        var tg = o.topGames.map(mkGameRow).join("");
+        var tu = o.topUndercuts.map(undercutRow).join("");
+        var ts = o.topSellers.map(function (s) { return '<div class="row"><div class="r1"><span class="t">' + esc(s.label) + '</span><span class="amt">' + s.units + " sold</span></div><div class=\"r2\"><span class=\"pill s-info\">" + esc(s.market) + "</span><span>median " + (s.medianPrice != null ? money(s.medianPrice) : "—") + "</span><span>" + money(s.revenueUsd) + " turnover</span><span>" + s.games + " games · " + s.live + " live</span>" + (s.ratings != null ? "<span>" + s.ratings + " ratings</span>" : "") + "</div></div>"; }).join("");
+        var mv = o.recentMoves.map(moveRow).join("");
+        box().innerHTML = radarLine(o.radar) +
+          '<div class="basisbar">What OTHER sellers\' buyers actually paid on the three public markets, who the rivals are, and where our live listings stand. ' + c.gamesWithData + " games with data · " + c.salesStored + " sales and " + c.rivalsStored + " rival listings stored · research covers " + c.researchGames + " games (" + c.researchFresh24h + " scanned in the last 24 h)" +
+          (c.firstRecordAt ? " · recording since " + esc(day(c.firstRecordAt)) : "") + (tr.sales || tr.rivals ? ' · <span class="bad">the read was truncated: older data is not shown</span>' : "") + ". Built " + esc(ago(o.generatedAt)) + ". Read-only: nothing here changes a price.</div>" +
+          (c.gamesWithData ? '<div class="vgrid">' + cards + "</div>" : '<div class="empty">No market data yet. Once recording is on, every research scan (about 400 a day) adds what it saw; Gameflip\'s sold feed reaches about three weeks back on the first scan.</div>') +
+          (tg ? '<h4 class="sec">Busiest games (' + o.counts.games + " in total)</h4><div class=\"rows\">" + tg + "</div>" : "") +
+          (tu ? '<h4 class="sec">Our listings with a cheaper comparable rival (' + o.counts.undercuts + ")</h4><div class=\"rows\">" + tu + "</div>" : "") +
+          (ts ? '<h4 class="sec">Top rival sellers</h4><div class="rows">' + ts + "</div>" : "") +
+          (mv ? '<h4 class="sec">Rival price moves this week</h4><div class="rows">' + mv + "</div>" : "");
+        Array.prototype.forEach.call(page.querySelectorAll("[data-mkey]"), function (r) { r.onclick = function () { openMarketGame(r.getAttribute("data-mkey")); }; });
+        return;
+      }
+      if (f.view === "games") {
+        var j = await api("/api/price-tracker/market/games?" + days + "&sort=" + encodeURIComponent(f.sort) + "&flag=" + encodeURIComponent(f.flag) + "&q=" + encodeURIComponent(f.q) + "&limit=20&offset=" + f.offset);
+        if (stale(g)) return;
+        box().innerHTML = '<div class="basisbar">Per game, across Gameflip, GGSel and Plati: units rivals sold, what their buyers paid by size, how fast Gameflip listings sold, and how crowded it is. Rates use only the days each market was actually watched.</div>' +
+          (j.rows.length ? '<div class="rows">' + j.rows.map(mkGameRow).join("") + "</div>" : '<div class="empty">Nothing matches.</div>') + pager(j, 20);
+        wirePager(20);
+        Array.prototype.forEach.call(page.querySelectorAll("[data-mkey]"), function (r) { r.onclick = function () { openMarketGame(r.getAttribute("data-mkey")); }; });
+        return;
+      }
+      if (f.view === "rivals") {
+        var jr = await api("/api/price-tracker/market/rivals?" + days + "&market=" + encodeURIComponent(f.market) + "&q=" + encodeURIComponent(f.q) + "&limit=40&offset=" + f.offset);
+        if (stale(g)) return;
+        box().innerHTML = '<div class="basisbar">Every seller with a sale in the window or a live listing, ranked by units sold. Reputation is on each market\'s own scale.</div>' +
+          (jr.rows.length ? '<div class="scroll"><table class="pm"><tr><th>seller</th><th>market</th><th>units</th><th>median price</th><th>turnover</th><th>games</th><th>live</th><th>reputation</th></tr>' + jr.rows.map(function (s) {
+            return "<tr><td><b>" + esc(s.label) + "</b></td><td>" + esc(s.market) + "</td><td>" + s.units + "</td><td>" + (s.medianPrice != null ? money(s.medianPrice) : "—") + "</td><td>" + money(s.revenueUsd) + "</td><td>" + s.games + "</td><td>" + s.live + "</td><td>" + (s.score != null ? esc(Math.round(s.score * 100) / 100) : "—") + (s.ratings != null ? "<small>" + s.ratings + " ratings</small>" : "") + "</td></tr>";
+          }).join("") + "</table></div>" : '<div class="empty">Nothing matches.</div>') + pager(jr, 40);
+        wirePager(40);
+        return;
+      }
+      if (f.view === "sales") {
+        var js = await api("/api/price-tracker/market/sales?" + days + "&market=" + encodeURIComponent(f.market) + "&ours=" + encodeURIComponent(f.ours) + "&kind=" + encodeURIComponent(f.kind) + "&q=" + encodeURIComponent(f.q) + "&limit=40&offset=" + f.offset);
+        if (stale(g)) return;
+        box().innerHTML = '<div class="basisbar">Newest first. Gameflip rows are individual sold listings with the time they took to sell; GGSel / Plati rows are rises of a product\'s sold counter between two scans (units in that window, at the price seen).</div>' +
+          (js.rows.length ? '<div class="rows">' + js.rows.map(function (x) {
+            return '<div class="row"><div class="r1"><span class="t">' + esc(x.title) + '</span><span class="amt">' + money(x.priceUsd) + (x.units > 1 ? " × " + x.units : "") + "</span></div>" +
+              '<div class="r2"><span class="pill s-info">' + esc(x.market) + "</span>" + (x.ours ? '<span class="pill s-ok">ours</span>' : "") + (x.kind === "farm" ? '<span class="pill s-unknown">rent-farm</span>' : "") +
+              "<span>" + esc(x.game) + "</span><span>" + esc(day(x.soldAt)) + "</span><span>" + (x.itemCount ? x.itemCount + " items" : "size not stated") + "</span>" + (x.ttsHours != null ? "<span>sold after " + hrs(x.ttsHours) + "</span>" : "") + "<span>" + esc(x.seller) + "</span></div></div>";
+          }).join("") + "</div>" : '<div class="empty">Nothing matches.</div>') + pager(js, 40);
+        wirePager(40);
+        return;
+      }
+      var ju = await api("/api/price-tracker/market/undercuts?" + days + "&market=" + encodeURIComponent(f.market) + "&origin=" + encodeURIComponent(f.origin) + "&q=" + encodeURIComponent(f.q) + "&limit=30&offset=" + f.offset);
+      if (stale(g)) return;
+      box().innerHTML = '<div class="basisbar">Our LIVE listings that have a cheaper rival for the same kind and size of product on the same market, as the radar last saw it (Gameflip rivals within 3 days, GGSel within 7). Bulk packs and rent-farm windows are left out (different products). Cheaper is not automatically better: compare with what rivals\' buyers actually paid. Advice only — manual listings are never repriced automatically.</div>' +
+        (ju.rows.length ? '<div class="rows">' + ju.rows.map(undercutRow).join("") + "</div>" : '<div class="empty">No undercut listings.</div>') + pager(ju, 30);
+      wirePager(30);
+    }
+    async function openMarketGame(key) {
+      var tok = (state.sheetTok = (state.sheetTok || 0) + 1);
+      openSheet("Loading…", '<div class="empty">Loading…</div>');
+      try {
+        var j = await api("/api/price-tracker/market/game/" + encodeURIComponent(key) + "?days=" + encodeURIComponent((state.mk && state.mk.days) || "30"));
+        if (tok !== state.sheetTok) return;
+        var g = j.game;
+        var flags = (g.flags || []).map(function (fl) { return '<div class="flagbox ' + (fl.id === "price-war" || fl.id === "undercut" || fl.id === "slow" || fl.id === "crowded" ? "warn" : "opportunity") + '">' + esc(fl.text) + "</div>"; }).join("");
+        var kv = '<div class="kv"><div><b>' + g.units + "</b><span>units sold by rivals (" + j.windowDays + " d)</span></div><div><b>" + (g.perWeek == null ? "—" : g.perWeek) + "</b><span>per week" + (g.perWeek == null ? " (after 2 days of watching)" : g.ratePartial ? " (newest market not rated yet)" : "") + "</span></div><div><b>" + (g.realised.n ? money(g.realised.median) : "—") + "</b><span>median paid, all sizes (see By size)</span></div>" +
+          "<div><b>" + hrs(g.medianTtsHours) + "</b><span>sold listings took (Gameflip)</span></div><div><b>" + g.rivalsLive + " / " + g.rivalSellers + "</b><span>live rival listings / sellers</span></div><div><b>" + g.oursLive + " / " + g.oursSold + "</b><span>ours seen live / sold</span></div><div><b>" + (g.oursListed || 0) + "</b><span>our live listings (Gameflip + GGSel)</span></div></div>";
+        var mrows = Object.keys(g.byMarket).map(function (m) {
+          var v = g.byMarket[m];
+          if (!(v.units || v.live || v.oursLive || v.oursSold)) return "";
+          return "<tr><td><b>" + esc(m) + "</b></td><td>" + v.units + (v.perWeek != null ? "<small>" + v.perWeek + "/wk over " + v.observedDays + " d</small>" : v.observedDays != null ? "<small>watched " + v.observedDays + " d — no rate yet</small>" : "") + "</td><td>" + stats(v.sold) + "</td><td>" + hrs(v.medianTtsHours) + "</td><td>" + v.live + " (" + v.liveSellers + " sellers)<small>ask " + stats(v.asking) + (v.farmLive ? " · + " + v.farmLive + " rent-farm" : "") + "</small></td><td>" + v.oursLive + " live · " + v.oursSold + " sold</td></tr>";
+        }).join("");
+        var brows = (g.bands || []).map(function (b) { return "<tr><td>" + esc(b.band) + "</td><td>" + b.n + "</td><td>" + money(b.median) + "<small>" + money(b.p25) + "–" + money(b.p75) + "</small></td><td>" + b.units + "</td><td>" + hrs(b.medianTtsHours) + "</td></tr>"; }).join("");
+        var srows = j.sellers.map(function (s) { return "<tr><td><b>" + esc(s.seller) + "</b></td><td>" + esc(s.market) + "</td><td>" + s.units + "</td><td>" + (s.medianPrice != null ? money(s.medianPrice) : "—") + "</td><td>" + s.live + "</td></tr>"; }).join("");
+        var live = j.live.slice(0, 60).map(function (l) {
+          return '<div class="row"><div class="r1"><span class="t">' + esc(l.title) + '</span><span class="amt">' + money(l.priceUsd) + "</span></div>" +
+            '<div class="r2"><span class="pill s-info">' + esc(l.market) + "</span>" + (l.ours ? '<span class="pill s-ok">ours</span>' : "") + (l.kind === "farm" ? '<span class="pill s-unknown">rent-farm</span>' : "") + "<span>" + (l.itemCount ? l.itemCount + " items" : "size not stated") + "</span><span>" + esc(l.seller) + "</span>" + (l.counter != null ? "<span>" + l.counter + " sold (lifetime)</span>" : "") + "<span>seen " + esc(ago(l.lastSeenAt)) + "</span>" + mkLink(l.url) + "</div></div>";
+        }).join("");
+        var sales = j.sales.map(function (x) {
+          return '<div class="row"><div class="r1"><span class="t">' + esc(x.title) + '</span><span class="amt">' + money(x.priceUsd) + (x.units > 1 ? " × " + x.units : "") + "</span></div><div class=\"r2\"><span class=\"pill s-info\">" + esc(x.market) + "</span>" + (x.ours ? '<span class="pill s-ok">ours</span>' : "") + "<span>" + esc(day(x.soldAt)) + "</span>" + (x.ttsHours != null ? "<span>sold after " + hrs(x.ttsHours) + "</span>" : "") + "<span>" + esc(x.seller) + "</span></div></div>";
+        }).join("");
+        var moves = j.moves.map(moveRow).join("");
+        openSheet(g.game, flags + kv +
+          '<h4 class="sec">By market</h4><div class="scroll"><table class="pm"><tr><th>market</th><th>units</th><th>paid (n, p25–p75)</th><th>time to sell</th><th>live rivals</th><th>ours</th></tr>' + (mrows || '<tr><td colspan="6">No data.</td></tr>') + "</table></div>" +
+          (brows ? '<h4 class="sec">By size</h4><div class="scroll"><table class="pm"><tr><th>items</th><th>sales</th><th>paid</th><th>units</th><th>time to sell</th></tr>' + brows + "</table></div>" : "") +
+          (srows ? '<h4 class="sec">Rivals in this game</h4><div class="scroll"><table class="pm"><tr><th>seller</th><th>market</th><th>units</th><th>median</th><th>live</th></tr>' + srows + "</table></div>" : "") +
+          (j.undercuts.length ? '<h4 class="sec">Our listings with a cheaper rival</h4><div class="rows">' + j.undercuts.map(undercutRow).join("") + "</div>" : "") +
+          '<h4 class="sec">Live listings (cheapest first)</h4><div class="rows">' + (live || '<div class="empty">None seen recently.</div>') + "</div>" +
+          '<h4 class="sec">Recent sales</h4><div class="rows">' + (sales || '<div class="empty">None in the window.</div>') + "</div>" +
+          (moves ? '<h4 class="sec">Price moves this week</h4><div class="rows">' + moves + "</div>" : ""));
+      } catch (e) { openSheet("Error", '<div class="empty">' + esc(e.message) + "</div>"); }
+    }
+
     async function render(force) {
       try {
         if (state.tab === "games") await renderGames();
+        else if (state.tab === "market") await renderMarket();
         else if (state.tab === "overview") await renderOverview(force);
         else if (state.tab === "curve") await renderCurve();
         else if (state.tab === "sets") await renderSets();
