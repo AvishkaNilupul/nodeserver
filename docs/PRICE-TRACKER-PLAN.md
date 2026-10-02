@@ -118,7 +118,15 @@ The old systems are not deleted: that is the risky part, and it is a separate, v
 
 ---
 
-# Part 2 — the per-game board and the auto-farm link (built 2026-10-01, NOT yet deployed)
+# Part 2 — the per-game board and the auto-farm link (built 2026-10-01, LIVE since 2026-10-02 00:40Z)
+
+Deployed read-only on 2026-10-02 (owner: "yes"): `utils/priceTracker/{games,attach}.js` new, `analyze/ledger/index.js`,
+`routes/priceTrackerRoutes.js`, `public/price-tracker.html` replaced (they were the Part 1 files, unchanged since).
+Verified on the production box BEFORE the swap with the staged files against the real database, every Mongo
+write blocked and counted (0 data writes; the only blocked calls were Mongoose's own index builds), every route
+401 without a session, no login fields in any response. Backup `_deploy_backup_20261002003938_price-tracker-part2`
+(the two new files did not exist before). The auto-farm link ships OFF (`autoFarm.priceTracker.mode`), and the
+autoLister hook is still not applied.
 
 The owner asked for "for each game: the pricing, how much we should farm, and a better system to
 attach to the auto-farm for future listings, with pricing against other sellers". This is it, built
@@ -291,7 +299,10 @@ not change it either). If that engine grows, give it the same breaker.
    advice. Unused.
 3. Persist row-level rivals in `marketResearch.scanGame` (it already holds the rows when it computes the
    aggregates): like-for-like rival prices by item count, using `marketPricing.comparableRivals`. Additive but
-   touches a live scanner (prod-ahead file), and fills in only as games are re-scanned (weekly). Not done.
+   touches a live scanner (prod-ahead file). **Done as the Market Radar (docs/MARKET-RADAR-PLAN.md).** (Correction:
+   the scanner is not weekly. It wakes hourly and rescans a game by freshness tier — 3 h when a campaign ends within
+   48 h, 6 h while one runs, 12 h when announced, 24 h for sellers, 72 h otherwise — about 418 game-scans a day on
+   production; a game with no campaign and no farming drops out of rescans, so a quarter of research is 14+ days old.)
 
 ## Known limits of the Games board (stated, not hidden)
 
