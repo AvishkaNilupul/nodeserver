@@ -80,7 +80,7 @@ Module._load = function (request, parent, isMain) {
     if (request === "./botHosts") return fakeHosts;
     if (request === "../routes/botConfigRoutes") return fakeCfg;
     if (request === "./rentFarmCapacity") {
-      return { snapshot: async () => ({ totalFree: world.free, totalCapacity: 620, readable: 14, offlineHosts: [] }) };
+      return { snapshot: async () => ({ totalFree: world.free, totalCapacity: 620, readable: 14, offlineHosts: world.offline || [] }) };
     }
     if (request === "./operatorFarm") {
       return {
@@ -135,6 +135,7 @@ async function reset() {
   Object.assign(world, {
     af: { gameflipRentFarm: true, gfBufferDryRun: false, gfRentFarmGames: ["Rust"], gfRentSlotReserve: 40 },
     free: 300,
+    offline: [],
     published: [],
     delisted: [],
     publishFails: null,
@@ -331,6 +332,47 @@ test("below the reserve floor an expired offer gives its slot back instead of re
   assert.equal(out.renewed, 0);
   assert.equal(out.reclaimed, 1);
   assert.equal((await AvailableAccount.findById(pool._id).lean()).status, "available");
+});
+
+test("REGRESSION 2026-10-02: a capacity read that missed a host never hands a renewing account back", async () => {
+  // Every rental stack is on Contabo. A read that could not see it counts its
+  // slots as 0 — the misread that paged "capacity GONE" with 283 free — and
+  // that is not evidence of a low floor: a renewal takes no NEW slot.
+  await reset();
+  await othersLive(180);
+  world.free = 12;
+  world.offline = ["Contabo VPS"];
+  const { pool } = await parked();
+
+  const out = await svc.topUpBuffer({ dryRun: false });
+
+  assert.equal(out.reclaimed, 0, "nothing handed back on a partial read");
+  assert.equal(out.renewed, 1, "renewed with its own account");
+  assert.equal((await AvailableAccount.findById(pool._id).lean()).status, "claimed");
+  assert.equal(world.fresh.length, 0);
+});
+
+test("REGRESSION 2026-10-02: a Gameflip rate limit is not a renewal strike — the account is never handed back for it", async () => {
+  await reset();
+  await othersLive(180);
+  const { pool, listing } = await parked();
+  world.publishFails = 'Gameflip create: {"message":"Too many attempts - Retry later","code":429}';
+
+  for (let pass = 0; pass < svc.RENEW_MAX_FAILURES + 1; pass++) {
+    const out = await svc.topUpBuffer({ dryRun: false });
+    assert.match(out.stopped, /renewal hit a Gameflip limit/);
+    assert.equal(out.reclaimed, 0, "pass " + pass + " handed the account back");
+  }
+  const row = await MarketplaceListing.findById(listing._id).lean();
+  assert.equal(row.rentFarmRenewFailures || 0, 0, "rate limits are not counted");
+  assert.equal(row.rentFarmRenewingAt, null, "each attempt still ends its lease");
+  assert.match(row.lastError, /renewal failed: .*Too many attempts/);
+  assert.equal((await AvailableAccount.findById(pool._id).lean()).status, "claimed");
+
+  world.publishFails = null; // the limiter clears
+  const out = await svc.topUpBuffer({ dryRun: false });
+  assert.equal(out.renewed, 1, "renewed with its own account once Gameflip answers");
+  assert.equal(world.fresh.length, 0);
 });
 
 test("REGRESSION: a full buffer no longer skips returning an account stuck on a delisted offer", async () => {
