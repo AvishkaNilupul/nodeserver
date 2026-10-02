@@ -5,8 +5,9 @@
 // connected/redeemed), farming that game again is wasted effort and could
 // even interfere with the buyer. The account's TwitchDropsBot config entry
 // is edited in place — the game is removed from that account's
-// FavouriteGames — and only that account's container is restarted. The bot
-// script itself is never modified, so nothing needs to be re-deployed to the
+// FavouriteGames — and only that account's container is restarted, and only
+// if it is running (a parked bot is never started by this). The bot script
+// itself is never modified, so nothing needs to be re-deployed to the
 // Raspberry Pi or the server.
 
 const hosts = require("./botHosts");
@@ -42,9 +43,24 @@ function norm(s) {
     .toLowerCase();
 }
 
+// Reload a bot's config by restarting its container — but ONLY while it runs.
+// `docker restart` STARTS a stopped container, and a stopped bot is parked
+// (utils/botWaker.js) or was stopped on purpose; starting it wakes it with no
+// wake trigger and nothing recorded, and the next tick just parks it again. A
+// bot reads its config at startup, so a stopped one picks the edit up whenever
+// it is next started. Returns { restarted, state }.
+async function restartIfRunning(host, container) {
+  const states = await hosts.dockerPs(host);
+  const st = states && states[container];
+  const state = (st && st.state) || "missing";
+  if (state !== "running") return { restarted: false, state };
+  await hosts.dockerContainer(host, "restart", container);
+  return { restarted: true, state };
+}
+
 // Remove `game` from `acc`'s FavouriteGames inside its bot config and restart
-// just that container. Returns { changed, reason }. Best-effort by design:
-// callers log failures but never let them break a scan.
+// just that container (when it is running). Returns { changed, reason }.
+// Best-effort by design: callers log failures but never let them break a scan.
 async function stopFarmingGame(acc, game) {
   const g = String(game || "").trim();
   if (!g) return { changed: false, reason: "no game name" };
@@ -75,6 +91,19 @@ async function stopFarmingGame(acc, game) {
     handled.add(memoKey);
     return { changed: false, reason: "account not in config" };
   }
+  // A disabled account farms nothing, so there is nothing to stop. This must
+  // be checked FIRST: disabling (below) leaves the account's own list EMPTY,
+  // which reads as "inherit the config-level games", so re-deriving the
+  // effective list on the next scan "removed" the same game again, rewrote an
+  // identical config and restarted the container — after every server restart
+  // cleared `handled`, i.e. about daily per sold account. Measured 2026-09-29:
+  // 770 such restarts in 8 days across 16 bots, and each one STARTED a parked
+  // bot (`docker restart` starts a stopped container) that the next tick
+  // parked again — the contabo twitchbotx8/x19/x11 wake/park flap.
+  if (me.Enabled === false) {
+    handled.add(memoKey);
+    return { changed: false, reason: "account already disabled" };
+  }
 
   // Accounts usually have no FavouriteGames of their own and inherit the
   // config-level list; a per-account list overrides it. So the effective list
@@ -104,11 +133,19 @@ async function stopFarmingGame(acc, game) {
   // The rest of the fleet keeps running untouched.
   const container = String(acc.container || "").trim();
   let restartNote = container ? "" : " (no container known — not restarted)";
+  let restarted = false;
   if (container) {
     try {
-      await hosts.dockerContainer(host, "restart", container);
+      const r = await restartIfRunning(host, container);
+      restarted = r.restarted;
+      if (!restarted) {
+        restartNote =
+          " — " + container + " is " + r.state +
+          ", left stopped (it reads the edit when it next starts)";
+      }
     } catch (e) {
-      restartNote = " — container restart FAILED: " + (e.message || String(e));
+      restartNote =
+        " — " + container + " restart FAILED: " + (e.message || String(e));
     }
   }
   await logStop(
@@ -126,7 +163,7 @@ async function stopFarmingGame(acc, game) {
       file +
       " on " +
       hostId +
-      (container ? ", restarted " + container : "") +
+      (restarted ? ", restarted " + container : "") +
       restartNote +
       ".",
   );
@@ -136,4 +173,4 @@ async function stopFarmingGame(acc, game) {
   return { changed: true, reason: "" };
 }
 
-module.exports = { stopFarmingGame };
+module.exports = { stopFarmingGame, restartIfRunning };

@@ -205,34 +205,190 @@ function wakeTrigger(games, parkedAt, campaigns, graceMs = 0) {
   return wakeCandidates(games, parkedAt, campaigns, graceMs)[0] || null;
 }
 
-async function readRegistry() {
+// `strict` is for writers: a registry file that exists but does not parse
+// throws instead of reading as empty. A park recorded on top of "empty" writes
+// a registry holding only itself, and every bot parked before it is never
+// woken again — throwing makes the parker leave its bot running instead (fail
+// toward farming) and keeps the file for a human. Missing or empty = empty.
+async function readRegistry({ strict = false } = {}) {
+  let raw;
   try {
-    const raw = await hosts.readMeta(REGISTRY);
-    const obj = raw ? JSON.parse(raw) : {};
-    return obj && typeof obj === "object" ? obj : {};
-  } catch {
+    raw = await hosts.readMeta(REGISTRY);
+  } catch (e) {
+    if (strict) throw e;
     return {};
   }
+  if (!raw || !String(raw).trim()) return {};
+  let obj;
+  try {
+    obj = JSON.parse(raw);
+  } catch (e) {
+    if (strict) throw new Error(REGISTRY + " is unreadable, not overwriting it: " + e.message);
+    return {};
+  }
+  if (obj && typeof obj === "object" && !Array.isArray(obj)) return obj;
+  if (strict) throw new Error(REGISTRY + " holds no object, not overwriting it");
+  return {};
 }
 
 async function writeRegistry(reg) {
   await hosts.writeMeta(REGISTRY, JSON.stringify(reg, null, 2));
 }
 
+// Every read-modify-write of the registry runs here, one at a time, on a fresh
+// read (2026-10-03). Parks (the auto-farm tick) and wake passes (the tick, and
+// streamScout's nudge, which runs whenever a gated stream goes live) used to
+// interleave freely: a wake pass read the registry, spent seconds to minutes
+// on SSH, then wrote its start-time copy back — which erases any park
+// recorded meanwhile, and a bot parked with no entry is never woken again. A
+// failed step never wedges the queue.
+let registryQueue = Promise.resolve();
+function withRegistry(fn) {
+  const run = registryQueue.then(fn);
+  registryQueue = run.catch(() => {});
+  return run;
+}
+
 const keyOf = (hostId, container) => hostId + "|" + container;
 
 // Record that we parked a bot (exported so a hand-stopped bot can be adopted
-// into the wake cycle rather than being stranded off forever).
+// into the wake cycle rather than being stranded off forever). `recordedAt` is
+// when the entry was written — parkedAt can be backdated (nothing_left parks).
 async function recordParked(hostId, container, info = {}) {
-  const reg = await readRegistry();
-  reg[keyOf(hostId, container)] = {
-    parkedAt: info.parkedAt || new Date().toISOString(),
-    games: info.games || [],
-    accounts: info.accounts || 0,
-    reason: info.reason || "all accounts finished their assigned games",
-  };
-  await writeRegistry(reg);
-  return reg[keyOf(hostId, container)];
+  return withRegistry(async () => {
+    const reg = await readRegistry({ strict: true });
+    const entry = {
+      parkedAt: info.parkedAt || new Date().toISOString(),
+      recordedAt: new Date().toISOString(),
+      games: info.games || [],
+      accounts: info.accounts || 0,
+      reason: info.reason || "all accounts finished their assigned games",
+    };
+    reg[keyOf(hostId, container)] = entry;
+    await writeRegistry(reg);
+    return entry;
+  });
+}
+
+// Remove the entries a wake pass is done with (woken, gone, or found running)
+// from the registry as it is NOW — and each only while it is still the entry
+// the pass read: if the bot was parked again in the meantime, the new entry
+// stays. Returns how many were removed.
+async function dropEntries(seen) {
+  if (!seen.size) return 0;
+  return withRegistry(async () => {
+    const reg = await readRegistry({ strict: true });
+    let n = 0;
+    for (const [k, entry] of seen) {
+      if (reg[k] && JSON.stringify(reg[k]) === JSON.stringify(entry)) {
+        delete reg[k];
+        n++;
+      }
+    }
+    if (n) await writeRegistry(reg);
+    return n;
+  });
+}
+
+// Parks write their registry entry BEFORE the stop (so a stopped bot can never
+// be unregistered), so for a moment a freshly parked bot is still running. A
+// wake pass running concurrently (streamScout's nudge) must not read that as
+// "started by someone else" and drop the entry — the stop then lands and the
+// bot is parked with no entry, never to be woken.
+const PARK_SETTLE_MS = 3 * 60 * 1000;
+
+function parkInFlight(entry, now = Date.now()) {
+  const t = new Date((entry && (entry.recordedAt || entry.parkedAt)) || 0).getTime();
+  return Number.isFinite(t) && now - t < PARK_SETTLE_MS;
+}
+
+// How long a running container has CERTAINLY been up, in ms, read from `docker
+// ps`'s status ("Up 3 days", "Up About an hour (healthy)"); null when the text
+// is not docker's. Docker rounds ("2 hours" is 1.5 h or more), so this is the
+// lower bound of what the text can mean.
+function upForMs(status) {
+  const m =
+    /^Up (Less than a second|About a minute|About an hour|(\d+) (second|minute|hour|day|week|month|year)s?)\b/i.exec(
+      String(status || "").trim(),
+    );
+  if (!m) return null;
+  const MIN = 60e3;
+  const HOUR = 60 * MIN;
+  const DAY = 24 * HOUR;
+  if (!m[2]) {
+    const w = m[1].toLowerCase();
+    return w === "about a minute" ? MIN : w === "about an hour" ? HOUR : 0;
+  }
+  const n = Number(m[2]);
+  const per = { second: 1000, minute: MIN, hour: HOUR, day: DAY, week: 7 * DAY, month: 30 * DAY, year: 365 * DAY };
+  const unit = m[3].toLowerCase();
+  // Hours and longer are rounded to the nearest hour before being shown.
+  return unit === "second" || unit === "minute" || unit === "year"
+    ? n * per[unit]
+    : Math.max(0, n * per[unit] - HOUR / 2);
+}
+
+// A parked bot that is running and has been up since BEFORE its park was
+// recorded was never stopped: the park's `docker stop` failed (the parker
+// logged "Could not stop" and restored its restart policy). Nothing started
+// it, so it must not be recorded as a start.
+function neverStopped(entry, state, now = Date.now()) {
+  const since = new Date((entry && (entry.recordedAt || entry.parkedAt)) || 0).getTime();
+  const up = upForMs(state && state.status);
+  return Number.isFinite(since) && since > 0 && up != null && now - up < since;
+}
+
+// Who last started (or restarted, or compose-up'd) each container through
+// utils/botHosts, and from which code path — so a parked bot found running can
+// be pinned on whatever woke it. Process-local and bounded: a start from a
+// shell, a script, or before this server's last restart shows as unknown.
+const LAST_START_MAX = 500;
+const lastStartBy = new Map();
+
+function noteContainerStart({ hostId, action, container, caller } = {}) {
+  const k = keyOf(hostId, container);
+  lastStartBy.delete(k); // re-insert so Map order tracks recency
+  lastStartBy.set(k, { action, caller: caller || "", at: Date.now() });
+  while (lastStartBy.size > LAST_START_MAX) {
+    lastStartBy.delete(lastStartBy.keys().next().value);
+  }
+}
+// Guarded so a botWaker deployed ahead of its botHosts still loads.
+if (typeof hosts.onContainerStart === "function") {
+  hosts.onContainerStart(noteContainerStart);
+}
+
+// A container we parked is running, and the waker did not start it. Record
+// who did (when the start went through utils/botHosts) instead of silently
+// dropping the registry entry: for weeks the drop scanner restarted parked
+// bots about daily and the tick parked them straight back, with no record of
+// what kept starting them.
+async function recordParkedBotStarted(hostId, container, entry, state) {
+  const seen = lastStartBy.get(keyOf(hostId, container));
+  const since = new Date(entry.recordedAt || entry.parkedAt || 0).getTime();
+  const by = seen && !(seen.at < since) ? seen : null;
+  const games = Array.isArray(entry.games) ? entry.games : [];
+  await recordAutoFarmEvent({
+    type: "started",
+    game: games.join(", "),
+    host: hostId,
+    container,
+    count: Number(entry.accounts) || 0,
+    reason:
+      "parked bot found running — not started by the waker; " +
+      (by
+        ? "docker " + by.action + " from " + (by.caller || "an unknown code path")
+        : "no start through this server since the park (a shell, a script, " +
+          "or before the last server restart)") +
+      ". Parked " +
+      (entry.parkedAt || "?") +
+      " (" +
+      (entry.reason || "?") +
+      "); docker: " +
+      ((state && (state.status || state.state)) || "running"),
+    actor: by ? by.caller || "unknown" : "external",
+  });
+  return { container, by: by ? by.caller || "unknown" : "external" };
 }
 
 async function liveCampaigns() {
@@ -247,18 +403,32 @@ async function liveCampaigns() {
   ).lean();
 }
 
+// One wake pass per host at a time (2026-10-03). The auto-farm tick and
+// streamScout's nudge both run passes; two at once could both start the same
+// bot (two "woken" events), or the later one could find it running and record
+// the waker's own start as a stranger's. A later pass waits for the one
+// running.
+const wakeQueues = new Map();
+
 // Start any bot we parked whose game has a campaign that began afterwards.
 async function wakeFinishedBots(hostId, opts = {}) {
-  const log = typeof opts.progress === "function" ? opts.progress : () => {};
   const host = hosts.resolveHost(hostId);
-  if (!host) return { woken: [], checked: 0 };
+  if (!host) return { woken: [], external: [], checked: 0 };
+  const run = (wakeQueues.get(host.id) || Promise.resolve()).then(() =>
+    wakePass(host, opts),
+  );
+  wakeQueues.set(host.id, run.catch(() => {}));
+  return run;
+}
 
+async function wakePass(host, opts) {
+  const log = typeof opts.progress === "function" ? opts.progress : () => {};
   const reg = await readRegistry();
   const mine = Object.keys(reg).filter((k) => k.startsWith(host.id + "|"));
-  if (!mine.length) return { woken: [], checked: 0 };
+  if (!mine.length) return { woken: [], external: [], checked: 0 };
 
   const states = await hosts.dockerPs(host).catch(() => null);
-  if (!states) return { woken: [], checked: 0 };
+  if (!states) return { woken: [], external: [], checked: 0 };
 
   // Old-system bots re-wake on their games' campaigns INCLUDING no-claim
   // (Overwatch/Rainbow Six). Owner's decision 2026-08-24: the SERVER runs no
@@ -274,18 +444,57 @@ async function wakeFinishedBots(hostId, opts = {}) {
   // Scout isn't running or nothing is gated — in which case every gate helper
   // below fails toward farming and wake behaves exactly as before.
   const liveMap = await liveStateByCampaign();
+  // What parkIdleNoCampaignBots counts, built on first use (only
+  // idle_no_campaign parks need it). If CampaignDrops cannot be read, fail
+  // toward waking — every non-no-claim live campaign counts — just as
+  // campaignFarmability treats a campaign with no manifest as farmable.
+  let idleSet = null;
+  const idleCampaigns = async () => {
+    if (!idleSet) {
+      idleSet = await idleNoCampaignSet(campaigns).catch(() =>
+        campaigns.filter((c) => !settings.isNoClaimGame(c.game)),
+      );
+    }
+    return idleSet;
+  };
   const woken = [];
-  let dirty = false;
+  const external = [];
+  // Entries this pass is done with, as read — removed at the end by
+  // dropEntries, never by writing this pass's copy of the registry back.
+  const done = new Map();
 
   for (const k of mine) {
     const container = k.slice(host.id.length + 1);
     const entry = reg[k];
     const state = states[container];
-    // Gone, or already running (someone started it by hand) — drop the entry
-    // so the registry cannot accumulate stale keys.
-    if (!state || state.state === "running") {
-      delete reg[k];
-      dirty = true;
+    // Gone — drop the entry so the registry cannot accumulate stale keys.
+    if (!state) {
+      done.set(k, entry);
+      continue;
+    }
+    if (state.state === "running") {
+      // Parked moments ago and its stop has not landed yet — leave it be.
+      if (parkInFlight(entry)) continue;
+      // Up since before the park: its stop failed and the parker said so. Not
+      // parked, and not started by anyone — just drop the entry.
+      if (neverStopped(entry, state)) {
+        log(
+          container +
+            " is still up from before its park (docker: " +
+            state.status +
+            ") — the stop never landed; no longer listed as parked.",
+        );
+        done.set(k, entry);
+        continue;
+      }
+      // Running, but we did not wake it: something else started it. Record
+      // that, then drop the entry (it is no longer parked).
+      try {
+        external.push(await recordParkedBotStarted(host.id, container, entry, state));
+      } catch {
+        /* diagnostic only — never block the cleanup */
+      }
+      done.set(k, entry);
       continue;
     }
     let games;
@@ -302,29 +511,42 @@ async function wakeFinishedBots(hostId, opts = {}) {
     // leave it parked straight through a resumed broadcast (the §4 trap). It
     // must wake on a LIVENESS transition instead.
     let trigger;
+    let why = "new campaign started: ";
     if (/idle_no_stream/i.test(entry.reason || "")) {
       trigger = liveWakeTrigger(games, entry.parkedAt, campaigns, liveMap);
     } else {
-      // Auto parks are protected at park time (stopFinishedBots refuses to park
-      // into a campaign newer than the scan its verdict rests on), so a strict
-      // "started after the park" comparison is safe for them. A MANUAL park —
-      // and an idle_no_campaign park (parked precisely because NOTHING was
-      // active) — has no such protection, so a campaign already running at park
-      // time would never wake it. Those entries get the broadcast grace so a
-      // just-appeared campaign still wakes them.
-      const graceMs = /manual|idle_no_campaign/i.test(entry.reason || "")
-        ? PARK_CAMPAIGN_GRACE_MS
-        : 0;
+      let candidates;
+      if (
+        /idle_no_campaign/i.test(entry.reason || "") &&
+        ![...games].some((g) => settings.isNoClaimGame(g))
+      ) {
+        // Wake by the PARKER's own rule (campaignsForGames over
+        // idleNoCampaignSet): any campaign it counts for these games. No
+        // startAt test — at park time that set held nothing for them, so
+        // anything in it now (new, found late by the catalog, or newly proven
+        // farmable) is work the parker keeps the bot up for. A wake here is
+        // therefore never parked straight back. (A bot whose games now include
+        // a no-claim game is outside the parker's rule and falls through to
+        // the grace test below, as before.)
+        candidates = campaignsForGames(games, await idleCampaigns());
+        why = "campaign to farm: ";
+      } else {
+        // Auto parks are protected at park time (stopFinishedBots refuses to
+        // park into a campaign newer than the scan its verdict rests on), so a
+        // strict "started after the park" comparison is safe for them. A
+        // MANUAL park has no such protection, so a campaign already running at
+        // park time would never wake it. Those entries get the broadcast grace
+        // so a just-appeared campaign still wakes them.
+        const graceMs = /manual|idle_no_campaign/i.test(entry.reason || "")
+          ? PARK_CAMPAIGN_GRACE_MS
+          : 0;
+        candidates = wakeCandidates(games, entry.parkedAt, campaigns, graceMs);
+      }
       // Try every candidate, not just the first: a confidently-dark gated
       // campaign must not suppress a wake that one of the bot's OTHER games
       // justifies (a mixed bot would otherwise miss the ungated game's drops
       // until the gated channel came back).
-      for (const cand of wakeCandidates(
-        games,
-        entry.parkedAt,
-        campaigns,
-        graceMs,
-      )) {
+      for (const cand of candidates) {
         if (gatedDark(cand, liveMap)) continue;
         trigger = cand;
         break;
@@ -335,8 +557,7 @@ async function wakeFinishedBots(hostId, opts = {}) {
     await hosts.restoreRestartPolicy(host, container).catch(() => {});
     try {
       await hosts.dockerContainer(host, "start", container);
-      delete reg[k];
-      dirty = true;
+      done.set(k, entry);
       woken.push({ container, game: trigger.game, campaign: trigger.name });
       await recordAutoFarmEvent({
         type: "woken",
@@ -345,9 +566,7 @@ async function wakeFinishedBots(hostId, opts = {}) {
         host: host.id,
         container,
         count: Number(entry.accounts) || 0,
-        reason:
-          "new campaign started: " +
-          (trigger.name || trigger.campaignId || trigger.game),
+        reason: why + (trigger.name || trigger.campaignId || trigger.game),
         actor: "wakeFinishedBots",
       });
       log(
@@ -363,8 +582,8 @@ async function wakeFinishedBots(hostId, opts = {}) {
       log("Could not start " + container + ": " + (e.message || e), "warn");
     }
   }
-  if (dirty) await writeRegistry(reg).catch(() => {});
-  return { woken, checked: mine.length };
+  await dropEntries(done).catch(() => {});
+  return { woken, external, checked: mine.length };
 }
 
 // How fresh the scan evidence must be before a container may be parked.
@@ -788,6 +1007,30 @@ function gameMatchesCampaign(botGame, campaignGame) {
   return a === b || a.includes(b) || b.includes(a);
 }
 
+const IDLE_NO_CAMPAIGN_REASON =
+  "idle_no_campaign — no active campaign for its games";
+
+// The campaigns parkIdleNoCampaignBots counts as work for a bot: live, not a
+// no-claim game (the no-claim system owns those, and wakes none of this), and
+// earnable by watching — a campaign whose every drop is subscription-only is
+// nothing to farm (the bot itself logs "No campaign found" for it,
+// utils/campaignFarmability.js).
+async function idleNoCampaignSet(campaigns) {
+  return farmableCampaigns(
+    (campaigns || []).filter((c) => !settings.isNoClaimGame(c.game)),
+  );
+}
+
+// Every campaign in `campaigns` for one of the bot's games (inclusive match).
+// This ONE predicate over idleNoCampaignSet is both halves of the
+// idle_no_campaign cycle: the parker parks when it is empty, the waker wakes
+// when it is not. Before, the waker tested "any live campaign that started in
+// the 48h before the park" instead — so a sub-only campaign the parker ignores
+// woke the bot, and the next tick parked it straight back.
+function campaignsForGames(games, campaigns) {
+  return (campaigns || []).filter((c) => anyGameMatches(games, c.game));
+}
+
 // Park a RUNNING bot whose assigned games have NO active drop campaign at all —
 // it has literally nothing to farm, so it is pure idle RAM. This is the case
 // stopFinishedBots deliberately will not touch (a never-started bot is "not
@@ -818,13 +1061,10 @@ async function parkIdleNoCampaignBots(hostId, opts = {}) {
   );
   if (!running.length) return { parked: [] };
 
-  // The campaign set a parked bot could be woken by — wakeFinishedBots filters
-  // no-claim, so match against the same filtered set to keep park/wake symmetric.
-  // A campaign whose every drop is subscription-only is nothing to farm: the
-  // bot itself logs "No campaign found" for it (utils/campaignFarmability.js).
-  const campaigns = await farmableCampaigns(
-    (await liveCampaigns()).filter((c) => !settings.isNoClaimGame(c.game)),
-  );
+  // The same campaign set wakeFinishedBots wakes an idle_no_campaign park by
+  // (idleNoCampaignSet + campaignsForGames), so a bot parked here is woken
+  // exactly when this would keep it up — never for a campaign it ignores.
+  const campaigns = await idleNoCampaignSet(await liveCampaigns());
   const parked = [];
 
   for (const container of running) {
@@ -842,10 +1082,7 @@ async function parkIdleNoCampaignBots(hostId, opts = {}) {
     if ([...games].some((g) => settings.isNoClaimGame(g))) continue;
     // Does ANY assigned game have an active campaign (inclusive match)? If so,
     // there is work or imminent work — keep it up.
-    const hasCampaign = [...games].some((g) =>
-      campaigns.some((c) => gameMatchesCampaign(g, c.game)),
-    );
-    if (hasCampaign) continue;
+    if (campaignsForGames(games, campaigns).length) continue;
 
     // No campaign for any assigned game. Confirm it isn't mid-farm on a fresh
     // verdict before parking (guards against a stale campaign catalog).
@@ -864,7 +1101,7 @@ async function parkIdleNoCampaignBots(hostId, opts = {}) {
       await recordParked(host.id, container, {
         games: gameList,
         accounts: verdict.total,
-        reason: "idle_no_campaign — no active campaign for its games",
+        reason: IDLE_NO_CAMPAIGN_REASON,
       });
     } catch (e) {
       log(
@@ -885,7 +1122,7 @@ async function parkIdleNoCampaignBots(hostId, opts = {}) {
         host: host.id,
         container,
         count: verdict.total,
-        reason: "idle_no_campaign — no active campaign for its games",
+        reason: IDLE_NO_CAMPAIGN_REASON,
         actor: "parkIdleNoCampaignBots",
       });
       parked.push({ container, accounts: verdict.total, games: gameList });
@@ -906,6 +1143,7 @@ async function parkIdleNoCampaignBots(hostId, opts = {}) {
 
 module.exports = {
   NOTHING_LEFT_REASON,
+  IDLE_NO_CAMPAIGN_REASON,
   wakeFinishedBots,
   stopFinishedBots,
   parkIdleBots,
@@ -919,6 +1157,11 @@ module.exports = {
   gatedDark,
   isGateableGame,
   gameMatchesCampaign,
+  idleNoCampaignSet,
+  campaignsForGames,
+  parkInFlight,
+  upForMs,
+  noteContainerStart,
   liveIsFresh,
   fileForContainer,
   gamesOf,

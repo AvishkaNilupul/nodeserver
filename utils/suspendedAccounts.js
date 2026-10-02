@@ -308,6 +308,7 @@ async function evictSuspendedFromConfigs({ onProgress } = {}) {
   const {
     removeAccountFromConfig,
     restartConfigContainer,
+    containerForFile,
   } = require("../routes/botConfigRoutes");
   const rows = await BotAccount.find(
     { lastScanStatus: "suspended", configFile: { $gt: "" } },
@@ -337,8 +338,19 @@ async function evictSuspendedFromConfigs({ onProgress } = {}) {
       );
     }
   }
+  // A touched bot reloads its config only on a restart, but restart it only
+  // while it RUNS: restartConfigContainer is `docker restart` plus a restart-
+  // policy restore, which would also start a parked bot (utils/botWaker.js) and
+  // undo its park — the wake/park flap class (2026-09-29). A stopped bot reads
+  // the edited config whenever it is next started. Same rule as
+  // utils/deadTokenRetire.js. One `docker ps` per host per sweep.
+  const psByHost = new Map();
   for (const b of touched.values()) {
     try {
+      if (!psByHost.has(b.host.id)) psByHost.set(b.host.id, await hosts.dockerPs(b.host));
+      const ps = psByHost.get(b.host.id) || {};
+      const container = containerForFile(b.file);
+      if (!container || !ps[container] || ps[container].state !== "running") continue;
       await restartConfigContainer(b.host, b.file);
     } catch (e) {
       console.error(
