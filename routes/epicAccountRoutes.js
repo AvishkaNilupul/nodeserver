@@ -5,6 +5,8 @@ const EpicAccount = require("../models/EpicAccount");
 const EpicFreebie = require("../models/EpicFreebie");
 const epic = require("../utils/epicClient");
 const epicClaimer = require("../utils/epicClaimer");
+const epicAutoClaim = require("../utils/epicAutoClaim");
+const settings = require("../utils/settings");
 const { encrypt, decrypt } = require("../utils/secretBox");
 
 const router = express.Router();
@@ -50,6 +52,7 @@ router.get("/api/epic/accounts", requireSuperadmin, async (req, res) => {
       accounts: accounts.map((a) => publicAccount(a, liveFreebies)),
       redirectUrl: epic.REDIRECT_URL,
       status: epicClaimer.status(),
+      autoClaim: epicAutoClaim.getStatus(),
     });
   } catch (err) {
     console.error("epic accounts list error:", err.message);
@@ -94,7 +97,7 @@ router.post("/api/epic/accounts", requireSuperadmin, async (req, res) => {
           ...(label ? { label } : {}),
         },
       },
-      { upsert: true, new: true },
+      { upsert: true, returnDocument: "after" },
     );
     // Populate the library right away so the row isn't empty.
     epicClaimer.runOnce({ notify: false }).catch(() => {});
@@ -114,7 +117,7 @@ router.patch("/api/epic/accounts/:id", requireSuperadmin, async (req, res) => {
     const acc = await EpicAccount.findByIdAndUpdate(
       req.params.id,
       { $set: upd },
-      { new: true },
+      { returnDocument: "after" },
     );
     if (!acc) {
       return res.status(404).json({ success: false, message: "Not found" });
@@ -185,6 +188,129 @@ router.post(
       res.status(500).json({
         success: false,
         message: err.message || "Could not create claim link",
+      });
+    }
+  },
+);
+
+// ---- Auto-claim controls -------------------------------------------------
+
+// Read the current epicAutoClaim settings + a short recent-outcomes trail.
+router.get(
+  "/api/epic/auto-claim/settings",
+  requireSuperadmin,
+  (req, res) => {
+    const cfg = settings.getEpicAutoClaim();
+    res.json({
+      success: true,
+      settings: {
+        enabled: !!cfg.enabled,
+        captchaProvider: cfg.captchaProvider || "",
+        captchaKeyConfigured: !!cfg.captchaKey,
+        perAccountCooldownH: cfg.perAccountCooldownH,
+        dailyCap: cfg.dailyCap,
+      },
+      status: epicAutoClaim.getStatus(),
+    });
+  },
+);
+
+// Update the epicAutoClaim block. captchaKey is encrypted at rest; pass "" to
+// clear it, omit the field to leave the current key in place.
+router.post(
+  "/api/epic/auto-claim/settings",
+  requireSuperadmin,
+  async (req, res) => {
+    try {
+      const patch = {};
+      const b = req.body || {};
+      if (typeof b.enabled === "boolean") patch.enabled = b.enabled;
+      if (typeof b.captchaProvider === "string") {
+        const p = b.captchaProvider.trim().toLowerCase();
+        if (p && p !== "2captcha" && p !== "capsolver") {
+          return res.status(400).json({
+            success: false,
+            message: "captchaProvider must be '2captcha' or 'capsolver'",
+          });
+        }
+        patch.captchaProvider = p;
+      }
+      if (typeof b.captchaKey === "string") patch.captchaKey = b.captchaKey;
+      if (b.perAccountCooldownH != null)
+        patch.perAccountCooldownH = Number(b.perAccountCooldownH);
+      if (b.dailyCap != null) patch.dailyCap = Number(b.dailyCap);
+      const next = await settings.setEpicAutoClaim(patch, {
+        actor: (req.session && req.session.username) || "admin",
+      });
+      res.json({
+        success: true,
+        settings: {
+          enabled: !!next.enabled,
+          captchaProvider: next.captchaProvider || "",
+          captchaKeyConfigured: !!next.captchaKey,
+          perAccountCooldownH: next.perAccountCooldownH,
+          dailyCap: next.dailyCap,
+        },
+      });
+    } catch (err) {
+      res
+        .status(500)
+        .json({ success: false, message: err.message || "Save failed" });
+    }
+  },
+);
+
+// Manual one-off: try the direct-API auto-claim RIGHT NOW for one
+// (account, offer). Bypasses the enabled flag — this is the operator-driven
+// path from the Epic tab's "Auto-claim" button — but still respects the fact
+// that a solver key is required if Talon shows up.
+router.post(
+  "/api/epic/accounts/:id/auto-claim",
+  requireSuperadmin,
+  async (req, res) => {
+    try {
+      const acc = await EpicAccount.findById(req.params.id);
+      if (!acc) {
+        return res.status(404).json({ success: false, message: "Not found" });
+      }
+      const freebie = await EpicFreebie.findOne({
+        offerId: String((req.body && req.body.offerId) || ""),
+      }).lean();
+      if (!freebie) {
+        return res
+          .status(404)
+          .json({ success: false, message: "Unknown offer" });
+      }
+      const tok = await epic.refresh(decrypt(acc.refreshToken));
+      acc.refreshToken = encrypt(tok.refresh_token);
+      acc.refreshExpiresAt = tok.refresh_expires_at
+        ? new Date(tok.refresh_expires_at)
+        : null;
+      acc.status = "ok";
+      await acc.save();
+      const cfg = settings.getEpicAutoClaim();
+      const solverKey = cfg.captchaKey ? decrypt(cfg.captchaKey) : "";
+      const captchaSolver = require("../utils/captchaSolver");
+      const result = await epic.autoClaimFreebie(
+        tok.access_token,
+        freebie.namespace,
+        freebie.offerId,
+        {
+          solveCaptcha: solverKey
+            ? () =>
+                captchaSolver.solveHCaptcha({
+                  provider: cfg.captchaProvider || "",
+                  apiKey: solverKey,
+                })
+            : null,
+        },
+      );
+      res.json({ success: true, result });
+    } catch (err) {
+      console.error("epic auto-claim error:", err.message);
+      res.status(500).json({
+        success: false,
+        message: err.message || "Auto-claim failed",
       });
     }
   },

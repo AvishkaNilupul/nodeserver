@@ -30,7 +30,7 @@ function getNextItem(category) {
       used: false,
     },
     { $set: { used: true, usedAt: new Date() } },
-    { new: true, sort: { createdAt: 1 } }
+    { returnDocument: "after", sort: { createdAt: 1 } }
   ).lean();
 }
 

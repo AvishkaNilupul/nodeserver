@@ -13,7 +13,13 @@ const {
   markDeployedPoolAccountsClaimed,
 } = require("./poolPasswords");
 
-const DEFAULT_IMAGE = "avishkarex/twitchbot:latest";
+// Farm bots (rent-farm + auto-farm) run the LOCAL-ONLY image the Bots-page
+// rollout (utils/botUpdater.js) builds and maintains. Never a Docker Hub name:
+// "avishkarex/twitchbot" on Docker Hub is a stale pre-July build that watches
+// without being credited, and a missing local tag would silently pull it.
+// Inheriting only this image family means a service left on another tag can
+// never be copied into a new bot.
+const DEFAULT_IMAGE = "twitchbot-farm:latest";
 const FILE_RE = /^config(_\d{1,3})?\.json$/;
 
 // config.json -> twitchbot ; config_02.json -> twitchbotx2
@@ -32,7 +38,11 @@ function findNextSlot(files) {
       if (max < 1) max = 1;
       continue;
     }
-    const m = f.match(/^config_0*(\d+)\.json$/);
+    // Archived and backup copies count too (config_59.json.deleted-<ts>,
+    // config_59.json.bak): a slot number is never handed out twice, so a
+    // ledger row, an owed reload or a stack registration that still names an
+    // old number can never land on a new bot.
+    const m = f.match(/^config_0*(\d+)\.json(?:$|\.)/);
     if (m) {
       const n = parseInt(m[1], 10);
       if (n > max) max = n;
@@ -63,7 +73,7 @@ function addServiceToComposeText(raw, container, file) {
   let image = DEFAULT_IMAGE;
   for (const key of Object.keys(doc.services)) {
     const svc = doc.services[key];
-    if (svc && typeof svc.image === "string" && svc.image) {
+    if (svc && typeof svc.image === "string" && /^twitchbot-farm(:|$)/.test(svc.image)) {
       image = svc.image;
       break;
     }
@@ -72,12 +82,14 @@ function addServiceToComposeText(raw, container, file) {
   doc.services[container] = {
     image,
     container_name: container,
+    environment: ["INSIDE_DOCKER=true"],
+    user: "0:0",
     restart: "always",
     logging: {
       driver: "json-file",
       options: { "max-size": "10m", "max-file": "3" },
     },
-    volumes: ["./" + file + ":/app/config.json", "./logs:/app/logs"],
+    volumes: ["./" + file + ":/app/Configuration/config.json", "./logs:/app/logs"],
   };
 
   return {

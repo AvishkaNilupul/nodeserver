@@ -15,10 +15,7 @@ const MARKETPLACE_LABELS = Object.freeze({
   ggsel: "GGSel",
   digiseller: "Plati",
   zeusx: "ZeusX",
-  funpay: "FunPay",
-  epicnpc: "EpicNPC",
   g2g: "G2G",
-  z2u: "Z2U",
 });
 
 // Keys that must never appear anywhere in a public payload (§2 privacy rule).

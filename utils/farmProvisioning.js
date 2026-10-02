@@ -88,4 +88,30 @@ function mergeProvisioned(held, added, farmUntil) {
   return out;
 }
 
-module.exports = { heldAccounts, stillNeeded, mergeProvisioned };
+// An order's account count, game and term are FROZEN once any account has been
+// provisioned against it (2026-10-01). Every tick re-reads the order — the pack
+// size from its bulk offer, the unit count from the price, the game from the
+// title — and an offer edited or closed since the sale must not change how many
+// accounts the order tops up to, nor refuse to hand over the ones it already
+// holds. Until something is held, the fresh reading is used and recorded.
+// Returns { qty, game, days, frozen }.
+function freezeOrder(row, reading) {
+  const held = heldAccounts(row).length;
+  if (held && Number(row.quantity) > 0) {
+    return {
+      qty: Number(row.quantity),
+      game: row.game || reading.game,
+      days: Number(row.days) || reading.days,
+      frozen: true,
+    };
+  }
+  // Record the whole reading, not just the count: once something is provisioned
+  // the frozen game and term are read back from the row, so they must be the
+  // ones this tick provisions for, not whatever the order's first tick read.
+  if (Number(reading.qty) > 0 && Number(row.quantity) !== Number(reading.qty)) row.quantity = Number(reading.qty);
+  if (reading.game && row.game !== reading.game) row.game = reading.game;
+  if (Number(reading.days) > 0 && Number(row.days) !== Number(reading.days)) row.days = Number(reading.days);
+  return { qty: reading.qty, game: reading.game, days: reading.days, frozen: false };
+}
+
+module.exports = { heldAccounts, stillNeeded, mergeProvisioned, freezeOrder };

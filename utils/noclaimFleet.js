@@ -20,9 +20,11 @@
 //     so 600 is readable to them. The MANAGED bots are the opposite — they run
 //     as a non-root uid and a 600 config makes them exit 139 — so never copy a
 //     chmod between the two systems.
-//   * Configs are written by `cat > tmp && mv`, never by string concatenation.
-//     A bad concat once left a duplicated JSON tail on config_04, which .NET
-//     read as "Extra data", and 90 accounts sat idle for five days.
+//   * Configs are written by a GUARDED `cat > tmp && mv` (botHosts.
+//     guardedWriteScript: the temp file is installed only when it holds every
+//     byte sent), never by string concatenation. A bad concat once left a
+//     duplicated JSON tail on config_04, which .NET read as "Extra data", and
+//     90 accounts sat idle for five days.
 
 const hosts = require("./botHosts");
 const settings = require("./settings");
@@ -31,8 +33,8 @@ const { recordPoolUsage } = require("./poolUsageLog");
 const { withFileLock } = require("./fileLock");
 
 // --- Sandbox constants (all on the Pi, separate from the managed bot dir) ----
-const HOST_ID = "pi";
-const BASE = "/home/avishka/twitchbot-noclaim";
+const HOST_ID = "contabo";
+const BASE = "/home/ubuntu/twitchbot-noclaim";
 const SRC_DIR = BASE + "/src";
 const BOTS_DIR = BASE + "/bots"; // bots/<id>/Configuration/config.json + logs
 const IMAGE = "twitchbot-noclaim:latest";
@@ -78,6 +80,11 @@ const configPath = (id) => botDir(id) + "/Configuration/config.json";
 // clear BOTH so manual control always wins.
 const markerPath = (id) => botDir(id) + "/.autostopped";
 const operatorMarkerPath = (id) => botDir(id) + "/.operatoroff";
+// `.personal` = the operator's OWN bot. Purely a label the console reads to show
+// it in the "My own" section (and the add-by-username path fences its account
+// from the auto-lister with manualSold). The watcher and containers ignore it,
+// and it is independent of the two auto-power markers above.
+const personalMarkerPath = (id) => botDir(id) + "/.personal";
 
 // One TwitchUsers entry from a pool account doc. `Id` MUST be the real numeric
 // Twitch user id — WatchRequest.GetPayload does Int32.Parse on it, so a
@@ -186,7 +193,7 @@ async function claimForGame(game, count, { actor = "noclaim" } = {}) {
     const doc = await AvailableAccount.findOneAndUpdate(
       readyPoolQuery(game),
       { $set: { status: "claimed", claimedAt: new Date(), claimedNote: note } },
-      { new: true, sort: { lastCheckAt: -1 } },
+      { returnDocument: "after", sort: { lastCheckAt: -1 } },
     );
     if (!doc) break;
     claimed.push(doc);
@@ -295,6 +302,19 @@ async function nextBotId() {
   return String((used.length ? Math.max(...used) : 0) + 1);
 }
 
+// The one container shape every no-claim bot runs with — shared by create and
+// the image rollout, so a recreated bot is indistinguishable from a new one.
+// Root (the bot writes its mounted config back), INSIDE_DOCKER + the
+// /app/Configuration mount (they must agree or the bot spins on "no users
+// found"), capped json-file logs (a 186 GB runaway log once filled the host).
+function containerRunArgs(id, image = IMAGE) {
+  return (
+    `--name ${hosts.shq(containerFor(id))} --restart unless-stopped --log-opt max-size=10m --log-opt max-file=3 --user 0:0 ` +
+    `-e INSIDE_DOCKER=true -v ${hosts.shq(botDir(id) + "/Configuration")}:/app/Configuration ` +
+    `-v ${hosts.shq(botDir(id) + "/logs")}:/app/logs ${hosts.shq(image)}`
+  );
+}
+
 // Create a bot from already-claimed accounts: write its config, then detach the
 // clone/build/run script behind the provisioning lock.
 //
@@ -304,9 +324,13 @@ async function nextBotId() {
 async function createBotFromAccounts(id, accounts, game) {
   assertNoClaimGame(game);
   const config = buildConfig(accounts, game);
+  // Guarded write (utils/botHosts.guardedWriteScript): a cut-off transfer is
+  // never installed as the bot's config, and the file is 600 from the start.
   await sh(
-    `mkdir -p ${hosts.shq(botDir(id) + "/Configuration")} ${hosts.shq(botDir(id) + "/logs")} && ` +
-      `cat > ${hosts.shq(configPath(id))} && chmod 600 ${hosts.shq(configPath(id))}`,
+    hosts.guardedWriteScript(configPath(id), hosts.byteLength(config), {
+      mode: "600",
+      mkdirs: [botDir(id) + "/Configuration", botDir(id) + "/logs"],
+    }),
     { timeout: 20000, input: config },
   );
 
@@ -321,9 +345,7 @@ async function createBotFromAccounts(id, accounts, game) {
     `if [ -d ${hosts.shq(SRC_DIR + "/.git")} ]; then cd ${hosts.shq(SRC_DIR)} && git fetch --depth 1 origin ${BRANCH} && git checkout -f ${BRANCH} && git reset --hard origin/${BRANCH}; else rm -rf ${hosts.shq(SRC_DIR)} && git clone --depth 1 -b ${BRANCH} ${hosts.shq(REPO)} ${hosts.shq(SRC_DIR)}; fi`,
     `if ! docker image inspect ${hosts.shq(IMAGE)} >/dev/null 2>&1; then cd ${hosts.shq(SRC_DIR)} && docker build -f TwitchDropsBot.Console/Dockerfile -t ${hosts.shq(IMAGE)} .; fi`,
     `docker rm -f ${hosts.shq(containerFor(id))} >/dev/null 2>&1 || true`,
-    `docker run -d --name ${hosts.shq(containerFor(id))} --restart unless-stopped --user 0:0 ` +
-      `-e INSIDE_DOCKER=true -v ${hosts.shq(botDir(id) + "/Configuration")}:/app/Configuration ` +
-      `-v ${hosts.shq(botDir(id) + "/logs")}:/app/logs ${hosts.shq(IMAGE)}`,
+    `docker run -d ${containerRunArgs(id, IMAGE)}`,
     `echo "[$(date -u +%FT%TZ)] bot ${id} started"`,
   ].join(" && ");
   const wrapped = `( { ${provision} ; } > ${hosts.shq(BASE + "/provision.log")} 2>&1; rm -f ${hosts.shq(BASE + "/.provisioning")} )`;
@@ -425,10 +447,11 @@ async function topUpBot(id, accounts, game, { restart = true } = {}) {
     }
     if (!added) return { added: 0, total: users.length };
 
-    await sh(
-      `cat > ${hosts.shq(file + ".tmp")} && mv ${hosts.shq(file + ".tmp")} ${hosts.shq(file)} && chmod 600 ${hosts.shq(file)}`,
-      { timeout: 20000, input: JSON.stringify(cfg, null, 2) },
-    );
+    const text = JSON.stringify(cfg, null, 2);
+    await sh(hosts.guardedWriteScript(file, hosts.byteLength(text), { mode: "600" }), {
+      timeout: 20000,
+      input: text,
+    });
     // Bots read their config at STARTUP only, so a restart is what makes the new
     // accounts farm. `docker restart` on a stopped container starts it — which
     // would fight the auto-power watcher's park — so only restart one that is
@@ -442,6 +465,262 @@ async function topUpBot(id, accounts, game, { restart = true } = {}) {
     }
     return { added, total: users.length };
   });
+}
+
+// --- Personal ("my own") bots ----------------------------------------------
+
+// Flag / unflag a bot as the operator's personal one (a `.personal` marker file,
+// the same mechanism as the auto-power markers). The console lists personal bots
+// in their own section; nothing in the farming path depends on it.
+async function setPersonal(id, on) {
+  const p = personalMarkerPath(id);
+  if (on)
+    await sh(`mkdir -p ${hosts.shq(botDir(id))} && touch ${hosts.shq(p)}`, {
+      timeout: 15000,
+    });
+  else await sh(`rm -f ${hosts.shq(p)}`, { timeout: 15000 });
+  return !!on;
+}
+
+// Which no-claim bot config(s), if any, already hold this ClientSecret. The same
+// token in two configs makes the login fight itself for the Twitch session (a
+// dupeGuard violation), so the add-by-username path checks this before writing a
+// new config. Best-effort: a config that will not parse is skipped, exactly like
+// the dupe scan in scripts/noclaim-readd-sold-batch.js.
+async function findSecretInConfigs(secret) {
+  const s = String(secret || "");
+  if (!s) return [];
+  const { bots } = await readFleet();
+  const ids = bots.map((b) => b.id).filter(Boolean);
+  if (!ids.length) return [];
+  const script = ids
+    .map(
+      (id) =>
+        `echo "__CFG__${id}__"; cat ${hosts.shq(configPath(id))} 2>/dev/null || true`,
+    )
+    .join("; ");
+  const out = await sh(script, { timeout: 45000 });
+  const found = [];
+  for (const chunk of out.split("__CFG__")) {
+    const m = chunk.match(/^([0-9]+)__/);
+    if (!m) continue;
+    let cfg;
+    try {
+      cfg = JSON.parse(chunk.slice(m[0].length).trim());
+    } catch {
+      continue;
+    }
+    for (const u of (cfg.TwitchSettings && cfg.TwitchSettings.TwitchUsers) || [])
+      if (u && String(u.ClientSecret) === s) {
+        found.push(m[1]);
+        break;
+      }
+  }
+  return found;
+}
+
+// ---------------------------------------------------------------------------
+// Rolling a new bot build out to the whole no-claim fleet
+// ---------------------------------------------------------------------------
+// createBotFromAccounts only builds the image when it is MISSING, and the Bots
+// page rollout (utils/botUpdater.js) only ever touches twitchbot-farm — so a
+// fix pushed to the fork never reached a no-claim bot that already existed.
+// 2026-09-29 is the case in point: the GQL shape break that stopped a whole
+// auto-farm task was latent in every no-claim bot too. This is that path:
+//   1. fetch `ref` of the fork into SRC_DIR, build twitchbot-noclaim:<ref>;
+//   2. sanity-test it on a COPY of a stopped bot's config (never a second
+//      login of a running account) and require the no-claim guard's own log
+//      line — an image that would CLAIM must never reach this fleet: it would
+//      spend the drops every listing sells as unclaimed;
+//   3. keep the current :latest as twitchbot-noclaim:pre-<stamp>, promote;
+//   4. recreate every noclaim-bot-* with containerRunArgs — stopped bots with
+//      `docker create` (they stay stopped: the .autostopped/.operatoroff/
+//      .finished markers are files and survive, a never-run container exits 0,
+//      which hostWatchdog leaves alone), then running bots one at a time with a
+//      health check; the first failure puts :latest back on that bot and stops.
+// Holds the .provisioning lock throughout, so no create/top-up interleaves.
+const NOCLAIM_GUARD_LINE = "ClaimDrops is disabled";
+const ROLLOUT_GOOD =
+  /\[TwitchUser - [^\]]+\] (?:Checking "|Current drop campaign|Waiting \d+ seconds|No campaign found|No broadcaster|Campaign ")/;
+const ROLLOUT_BAD = /no users? found|unhandled exception|fatal error|failed to start|Progress: \d+\/\d+ minutes/i;
+const ROLLOUT_TEST_CONTAINER = "noclaim-rollout-test";
+const ROLLOUT_BUILD_TIMEOUT_MS = 25 * 60 * 1000;
+const ROLLOUT_TEST_WINDOW_MS = 120 * 1000;
+const ROLLOUT_TEST_POLL_MS = 10 * 1000;
+const ROLLOUT_SETTLE_POLLS = 12;
+const ROLLOUT_SETTLE_POLL_MS = 5 * 1000;
+
+function validRolloutRef(ref) {
+  return /^[A-Za-z0-9._/-]{1,200}$/.test(String(ref || "")) && !String(ref).includes("..");
+}
+
+function rolloutImageTag(ref) {
+  return "twitchbot-noclaim:" + String(ref).replace(/[^A-Za-z0-9._-]/g, "-").slice(0, 100);
+}
+
+// What a healthy, still-no-claim bot has logged since it started.
+function rolloutLogVerdict(logText) {
+  const text = String(logText || "");
+  if (ROLLOUT_BAD.test(text)) return "bad";
+  if (ROLLOUT_GOOD.test(text) && text.includes(NOCLAIM_GUARD_LINE)) return "ok";
+  return "pending";
+}
+
+function httpError(status, message) {
+  const e = new Error(message);
+  e.status = status;
+  return e;
+}
+
+async function rolloutImage({ ref = BRANCH, dryRun = false, log = () => {}, timing = {} } = {}) {
+  const t = {
+    testWindowMs: ROLLOUT_TEST_WINDOW_MS,
+    testPollMs: ROLLOUT_TEST_POLL_MS,
+    settlePolls: ROLLOUT_SETTLE_POLLS,
+    settlePollMs: ROLLOUT_SETTLE_POLL_MS,
+    ...timing,
+  };
+  if (!validRolloutRef(ref)) throw httpError(400, "ref must be a branch, tag or commit name");
+  if (await provisionBusy()) {
+    throw httpError(409, "A no-claim build/provision is already running — try again when it finishes.");
+  }
+  const shq = hosts.shq;
+  const newImage = rolloutImageTag(ref);
+  const stamp = new Date().toISOString().replace(/[-:]/g, "").slice(0, 13).toLowerCase();
+  const backup = "twitchbot-noclaim:pre-" + stamp;
+  const lock = shq(BASE + "/.provisioning");
+  const testDir = BASE + "/.rollout-test";
+  const result = { ref, image: newImage, backup: null, testedOn: null, recreated: [], created: [], skipped: [] };
+  await sh(`mkdir -p ${shq(BASE)} && touch ${lock}`, { timeout: 15000 });
+  try {
+    // 1. Source + build. Same checkout the create path uses.
+    log(`fetching ${REPO} @ ${ref} and building ${newImage}`);
+    result.imageId = await sh(
+      `if [ -d ${shq(SRC_DIR + "/.git")} ]; then cd ${shq(SRC_DIR)} && git remote set-url origin ${shq(REPO)}; ` +
+        `else rm -rf ${shq(SRC_DIR)} && git init -q ${shq(SRC_DIR)} && cd ${shq(SRC_DIR)} && git remote add origin ${shq(REPO)}; fi && ` +
+        `git fetch -q --force origin ${shq(ref)} && git checkout -q --force FETCH_HEAD && git reset -q --hard FETCH_HEAD && ` +
+        `docker build -q -f TwitchDropsBot.Console/Dockerfile -t ${shq(newImage)} . >/dev/null && ` +
+        `docker image inspect -f '{{.Id}}' ${shq(newImage)}`,
+      { timeout: ROLLOUT_BUILD_TIMEOUT_MS },
+    );
+    log(`built ${newImage} = ${result.imageId.slice(7, 19)}`);
+
+    // 2. Sanity test on a COPY of a stopped bot's config (no double login). With
+    // every bot running, fall back to one account of a running bot's config.
+    const picked = await sh(
+      `for c in $(docker ps -a --filter name=^/${CONTAINER_PREFIX} --format '{{.Names}}|{{.State}}' | sort -t'|' -k2,2 | cut -d'|' -f1); do ` +
+        `id=\${c#${CONTAINER_PREFIX}}; f=${shq(BOTS_DIR)}/"$id"/Configuration/config.json; ` +
+        `st=$(docker inspect -f '{{.State.Status}}' "$c"); ` +
+        `[ -f "$f" ] && python3 -c ${shq(
+          "import json,sys\nd=json.load(open(sys.argv[1]))\nt=d.get('TwitchSettings') or {}\n" +
+            "u=[x for x in t.get('TwitchUsers') or [] if isinstance(x,dict) and x.get('Enabled',True) is not False]\n" +
+            "sys.exit(0 if u and t.get('ClaimDrops') is False else 1)",
+        )} "$f" && { echo "$id|$st"; break; }; done`,
+      { timeout: 60000 },
+    );
+    const [testId, testState] = picked.split("|");
+    if (!testId) throw new Error("no no-claim bot config with accounts and ClaimDrops:false to test against");
+    const trimToOne = testState === "running";
+    result.testedOn = CONTAINER_PREFIX + testId + (trimToOne ? " (1 account — every bot was running)" : "");
+    log(`sanity-testing on a copy of bot ${testId}'s config${trimToOne ? " (one account)" : ""}`);
+    await sh(
+      `docker rm -f ${ROLLOUT_TEST_CONTAINER} >/dev/null 2>&1; rm -rf ${shq(testDir)} && mkdir -p ${shq(testDir + "/Configuration")} && ` +
+        `cp ${shq(configPath(testId))} ${shq(testDir + "/Configuration/config.json")} && chmod 600 ${shq(testDir + "/Configuration/config.json")}` +
+        (trimToOne
+          ? ` && python3 -c ${shq(
+              "import json,sys\np=sys.argv[1]\nd=json.load(open(p))\nt=d['TwitchSettings']\n" +
+                "u=[x for x in t['TwitchUsers'] if isinstance(x,dict) and x.get('Enabled',True) is not False][:1]\n" +
+                "t['TwitchUsers']=u\njson.dump(d,open(p,'w'))",
+            )} ${shq(testDir + "/Configuration/config.json")}`
+          : "") +
+        ` && docker run -d --name ${ROLLOUT_TEST_CONTAINER} --user 0:0 -e INSIDE_DOCKER=true --log-opt max-size=10m --log-opt max-file=1 ` +
+        `-v ${shq(testDir + "/Configuration")}:/app/Configuration ${shq(newImage)} >/dev/null`,
+      { timeout: 60000 },
+    );
+    let verdict = "pending";
+    let testLogs = "";
+    const deadline = Date.now() + t.testWindowMs;
+    while (Date.now() < deadline && verdict === "pending") {
+      await new Promise((r) => setTimeout(r, t.testPollMs));
+      testLogs = await sh(`docker logs ${ROLLOUT_TEST_CONTAINER} 2>&1 | tail -n 400`, { timeout: 20000 }).catch(() => "");
+      verdict = rolloutLogVerdict(testLogs);
+    }
+    await sh(`docker rm -f ${ROLLOUT_TEST_CONTAINER} >/dev/null 2>&1; rm -rf ${shq(testDir)}`, { timeout: 30000 }).catch(() => {});
+    if (verdict !== "ok") {
+      throw new Error(
+        `sanity test failed (${verdict === "bad" ? "logged a known failure" : "no per-account loop and no-claim guard line within " + t.testWindowMs / 1000 + "s"}) — nothing live was touched. Last logs: ` +
+          testLogs.slice(-400),
+      );
+    }
+    log("sanity test passed: per-account loop running and the no-claim guard is active");
+    if (dryRun) return { ...result, dryRun: true };
+
+    // 3. Promote, keeping the current build for rollback.
+    result.backup = await sh(
+      `docker image inspect ${shq(IMAGE)} >/dev/null 2>&1 && docker tag ${shq(IMAGE)} ${shq(backup)} && echo ${shq(backup)} || true; ` +
+        `docker tag ${shq(newImage)} ${shq(IMAGE)}`,
+      { timeout: 30000 },
+    ) || null;
+    log(`promoted ${newImage} to ${IMAGE}` + (result.backup ? ` (previous kept as ${result.backup})` : ""));
+
+    // 4. Recreate: stopped first (no live impact), then running one at a time.
+    const rows = (await sh(`docker ps -a --filter name=^/${CONTAINER_PREFIX} --format '{{.Names}}|{{.State}}'`, { timeout: 30000 }))
+      .split("\n")
+      .map((l) => l.trim().split("|"))
+      .filter(([name]) => new RegExp("^" + CONTAINER_PREFIX + "\\d+$").test(name || ""))
+      .map(([name, state]) => ({ name, id: name.slice(CONTAINER_PREFIX.length), running: state === "running" }))
+      .sort((a, b) => Number(a.running) - Number(b.running) || Number(a.id) - Number(b.id));
+    for (const b of rows) {
+      const hasDir = (await sh(`[ -f ${shq(configPath(b.id))} ] && echo yes || echo no`, { timeout: 15000 })) === "yes";
+      if (!hasDir) {
+        result.skipped.push(b.name + " (no config dir)");
+        log(`skipped ${b.name}: no config at ${configPath(b.id)}`);
+        continue;
+      }
+      if (!b.running) {
+        await sh(`docker rm -f ${shq(b.name)} >/dev/null 2>&1; docker create ${containerRunArgs(b.id, IMAGE)} >/dev/null`, { timeout: 60000 });
+        result.created.push(b.name);
+        log(`${b.name} (stopped) rebuilt on the new image, still stopped`);
+        continue;
+      }
+      const t0 = new Date().toISOString();
+      await sh(
+        `docker stop -t 20 ${shq(b.name)} >/dev/null 2>&1; docker rm -f ${shq(b.name)} >/dev/null 2>&1; docker run -d ${containerRunArgs(b.id, IMAGE)} >/dev/null`,
+        { timeout: 90000 },
+      );
+      let v = "pending";
+      let logs = "";
+      for (let i = 0; i < t.settlePolls && v === "pending"; i++) {
+        await new Promise((r) => setTimeout(r, t.settlePollMs));
+        const out = await sh(
+          `echo "RUNNING=$(docker inspect -f '{{.State.Running}}' ${shq(b.name)} 2>/dev/null)"; docker logs --since ${shq(t0)} ${shq(b.name)} 2>&1 | tail -n 400`,
+          { timeout: 20000 },
+        ).catch(() => "");
+        logs = out;
+        v = /RUNNING=true/.test(out) ? rolloutLogVerdict(out) : /RUNNING=false/.test(out) ? "bad" : "pending";
+      }
+      if (v !== "ok") {
+        log(`${b.name} failed its check on the new image (${v}) — rolling it back and stopping`);
+        if (result.backup) {
+          await sh(
+            `docker tag ${shq(result.backup)} ${shq(IMAGE)} && docker rm -f ${shq(b.name)} >/dev/null 2>&1; docker run -d ${containerRunArgs(b.id, IMAGE)} >/dev/null`,
+            { timeout: 90000 },
+          ).catch(() => {});
+        }
+        throw new Error(
+          `${b.name} failed its post-update check (${v})` +
+            (result.backup ? `; ${IMAGE} put back to ${result.backup} and ${b.name} recreated on it` : "") +
+            `. Recreated before it: ${result.recreated.join(", ") || "none"}. Last logs: ` +
+            logs.slice(-400),
+        );
+      }
+      result.recreated.push(b.name);
+      log(`${b.name} healthy on the new image (no-claim guard active)`);
+    }
+    return result;
+  } finally {
+    await sh(`rm -f ${lock}`, { timeout: 15000 }).catch(() => {});
+  }
 }
 
 module.exports = {
@@ -463,6 +742,7 @@ module.exports = {
   configPath,
   markerPath,
   operatorMarkerPath,
+  personalMarkerPath,
   buildConfig,
   soldGameExclusion,
   readyPoolQuery,
@@ -475,4 +755,12 @@ module.exports = {
   createBotFromAccounts,
   createBot,
   topUpBot,
+  setPersonal,
+  findSecretInConfigs,
+  containerRunArgs,
+  rolloutImage,
+  rolloutImageTag,
+  rolloutLogVerdict,
+  validRolloutRef,
+  NOCLAIM_GUARD_LINE,
 };

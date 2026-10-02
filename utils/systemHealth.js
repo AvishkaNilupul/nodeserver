@@ -58,16 +58,19 @@ const REAL_DEPS = {
   FleetSnapshot: () => require("../models/FleetSnapshot"),
   AutoFarmSnapshot: () => require("../models/AutoFarmSnapshot"),
   BotAccount: () => require("../models/BotAccount"),
+  SaleSignal: () => require("../models/SaleSignal"),
   rentFarmCapacity: () => require("./rentFarmCapacity"),
   unclaimedCoverage: () => require("./unclaimedCoverage"),
   unclaimedListingAudit: () => require("./unclaimedListingAudit"),
   unclaimedAutoList: () => require("./unclaimedAutoList"),
+  fleetIntegrity: () => require("./fleetIntegrity"),
   marketplaces: () => require("./marketplaces"),
   connectors: () => require("./systemHealthConnectors"),
   eldoradoFarmService: () => require("./eldoradoFarmService"),
   gameflipFarmService: () => require("./gameflipFarmService"),
   settings: () => require("./settings"),
   pricingEvidence: () => require("./pricingEvidence"),
+  backup: () => require("./backup"),
   // routes/renterAdminRoutes requires half the app, so like utils/operatorFarm
   // this is pulled in only at call time — a module-level require here would be
   // a load-order cycle.
@@ -232,6 +235,84 @@ function hasDeliverableStock(listing) {
   return false;
 }
 
+// Why an Eldorado offer behind an ACTIVE row is not Active, in words that say
+// what to do about it. Eldorado CLOSES an offer when its quantity reaches 0 —
+// that is, once its last unit sells — so "Closed" splits on our own ledger:
+//   - the row still holds undelivered units: a sale went out but its stamp
+//     never saved. Brawlhalla offer 24596a46, 2026-09-29: the account was sent
+//     and the order marked delivered during the Atlas write block, then the row
+//     write failed, so for two days the row claimed 1 unit in stock. The
+//     dangerous shape — pushing stock to that offer re-opens it and sells the
+//     same account a second time;
+//   - every unit is delivered: the row sold out and was never retired.
+// "Paused" is a hand pause on Eldorado; the stock sync's own pauses carry
+// `autoPaused` and never reach here.
+//
+// It only says what it measured. An offer missing from a list that was read
+// only in part is "unverified", not gone. "Its last unit sold" is claimed only
+// for a Closed offer at quantity 0 that had not simply reached its expireDate:
+// an offer Eldorado closed on expiry, or one still holding stock, says so, and
+// telling the reader to stamp units as delivered there would mark unsold
+// accounts sold.
+function whyNotActive(offer, row, { complete = true, now = new Date() } = {}) {
+  const undelivered = ((row && row.units) || []).filter(
+    (u) => u && !u.deliveredAt,
+  ).length;
+  if (!offer) {
+    return complete
+      ? "Eldorado no longer lists this offer at all — retire the row"
+      : "not among the offers read from Eldorado (its list was read only in " +
+          "part) — unverified";
+  }
+  const state = String(offer.offerState || "");
+  if (state === "Closed") {
+    const qty = Number(offer.quantity) || 0;
+    const exp = Date.parse(String(offer.expireDate || ""));
+    const at = now instanceof Date ? now.getTime() : Date.now();
+    const expired = Number.isFinite(exp) && exp <= at;
+    const expDay = String(offer.expireDate || "").slice(0, 10);
+    // Quantity 0 with units still on our row is the double-sale shape, and its
+    // warning outlives the expireDate: an offer that closed on expiry looks the
+    // same from here, so both readings are named and the order book decides.
+    if (qty === 0 && undelivered > 0) {
+      return (
+        "Eldorado closed it at quantity 0 but our row still holds " + undelivered +
+        " undelivered unit(s) — " +
+        (expired
+          ? "either its last unit sold (a sale whose delivery was never recorded) " +
+            "or it reached its expireDate (" + expDay + "): check Eldorado's orders " +
+            "for this offer before stamping anything. "
+          : "its last unit sold, so this is a sale whose delivery was never " +
+            "recorded: find the order, stamp the unit and retire the row. ") +
+        "Never push stock to this offer — it would sell the same account twice"
+      );
+    }
+    if (expired) {
+      return (
+        "Eldorado closed it when it expired (" + expDay + ") — renew it on " +
+        "Eldorado if it should sell, otherwise take the row off sale"
+      );
+    }
+    if (qty > 0) {
+      return (
+        "Eldorado shows it Closed with " + qty + " still listed — check the offer " +
+        "on Eldorado before changing the row"
+      );
+    }
+    return (
+      "sold out — every unit was delivered and Eldorado closed the offer, but " +
+      "the row was never retired; mark it sold"
+    );
+  }
+  if (state === "Paused") {
+    return (
+      "paused on Eldorado by hand, not by our stock sync — resume it there if it " +
+      "should sell, otherwise take the row off sale"
+    );
+  }
+  return "Eldorado reports the offer as " + (state || "unknown");
+}
+
 // ---------------------------------------------------------------------------
 // Measured constants — every number here was observed, not guessed
 // ---------------------------------------------------------------------------
@@ -251,10 +332,31 @@ const FARM_SERVICE_MARKETS = new Set(["eldorado", "playerauctions", "g2g"]);
 // window and the owner found out by looking.
 const ORDER_GRACE_MS = 20 * 60 * 1000;
 
-// The all-time realised ceiling: the highest price any of 217 recorded sales
-// actually fetched. Anything above it is priced at a number that has never once
-// converted.
+// The realised ceiling as MEASURED on 2026-09-09: the highest price any of 217
+// recorded sales actually fetched. It is now only the fallback. A constant went
+// stale the day the shop sold anything dearer — by 2026-10-01 a $5.00 bundle
+// had sold and the check still said "$4.50 is the most anything ever fetched",
+// which was simply false. listings.overpriced asks realisedSales() below and
+// uses this number only when that evidence is unreadable or too thin to trust.
 const REALISED_CEILING_USD = 4.5;
+
+// How far back a realised sale still counts as evidence of what a venue pays.
+// The same 180 days utils/pricingEvidence uses, so the page and the pricer look
+// at the same stretch of history.
+const REALISED_WINDOW_MS = 180 * 24 * 60 * 60 * 1000;
+
+// Below this many priced sales a ceiling is an anecdote, not a price level —
+// the same bar listings.venuePrice already applied per venue.
+const MIN_CEILING_SALES = 5;
+
+// Marketplaces whose fulfillers write no "listing_sold" SaleSignal at all
+// (utils/farmDemand.js lists the gap: "Eldorado / PlayerAuctions / G2G write no
+// signal at all"). Their sales are on the books only as delivered units on the
+// listing row — a unit carrying an orderId and a deliveredAt. Before this was
+// read, Eldorado's whole realised history was the 5 rows ever marked "sold",
+// all at $1.00, so 45 live Eldorado listings were reported as asking more than
+// Eldorado had ever paid while 101 units had sold there at up to $3.56.
+const UNIT_LEDGER_MARKETS = ["eldorado", "playerauctions", "g2g"];
 
 // PlayerAuctions' platform floor. A row sitting at exactly $5.00 there is not
 // overpricing, it is the lowest price the platform permits, and flagging it
@@ -316,6 +418,181 @@ const LOOP_BUDGETS = {
 const AUTOLIST_STALE_TICKS = 6;
 
 // ---------------------------------------------------------------------------
+// Shared evidence: what drop bundles have actually sold for
+// ---------------------------------------------------------------------------
+
+// A ceiling is the highest price at least CEILING_HITS realised sales reached —
+// a price LEVEL. A plain maximum let one outlier set it for everything below:
+// an operator-typed hand sale (free-text price, no marketplace), one premium
+// whole-account sale, or a typo would turn every system-priced listing under
+// it green for 180 days.
+const CEILING_HITS = 3;
+function ceilingOf(prices, hits = CEILING_HITS) {
+  const p = (prices || [])
+    .map(Number)
+    .filter((n) => Number.isFinite(n) && n > 0)
+    .sort((a, b) => b - a);
+  return p.length >= hits ? p[hits - 1] : 0;
+}
+
+// The top few prices, for a detail line that shows what the ceiling stands on.
+function topPrices(prices, n = 5) {
+  return (prices || [])
+    .map(Number)
+    .filter((x) => Number.isFinite(x) && x > 0)
+    .sort((a, b) => b - a)
+    .slice(0, n);
+}
+
+// Largest of a list without spreading it into Math.max — a 20,000-row argument
+// list is how a check dies of "Maximum call stack size exceeded".
+function maxOf(list) {
+  let best = 0;
+  for (const v of list || []) {
+    const n = Number(v);
+    if (Number.isFinite(n) && n > best) best = n;
+  }
+  return best;
+}
+
+// The realised price of every drop-bundle sale in the window, per venue and in
+// total. Both pricing checks read it, so it is built once per run (cached on the
+// run's ctx) — three indexed reads, no marketplace call.
+//
+// It used to be utils/pricingEvidence.snapshot(), and that was wrong in two ways
+// for a question about DROP BUNDLES:
+//   - its "sold rows" source has no product filter, so rent-farm WINDOWS sold
+//     at $8.00 ("Fortnite Twitch Drops Automatic Farming 1 Year", three of them
+//     in September) became Gameflip's bundle ceiling — while listings.venuePrice
+//     itself, two lines below, refuses to judge a farm offer by bundle money;
+//   - Eldorado / PlayerAuctions / G2G record no SaleSignal, so their sales were
+//     invisible (see UNIT_LEDGER_MARKETS).
+// The pricer keeps its own evidence; this is the page's, and it only answers
+// "what have bundles really sold for".
+//
+// Three sources, each excluding farm windows and bulk packs (a pack is priced
+// for N accounts, so its price says nothing about one bundle):
+//   1. SaleSignal "listing_sold" with a price — Gameflip, GGSel, Digiseller, and
+//      hand-recorded sales (those carry no marketplace, so they count toward the
+//      business-wide ceiling only);
+//   2. rows marked "sold", outside the unit-ledger markets (their sales are
+//      counted per unit in 3, never twice);
+//   3. delivered units on unit-ledger market rows, at the row's price — the only
+//      record those markets keep. A row repriced since the sale is a small
+//      error in a ceiling; leaving the market out was a 100% error.
+async function realisedSales(ctx) {
+  if (!ctx.__realisedSales) {
+    ctx.__realisedSales = (async () => {
+      const since = new Date(ctx.now().getTime() - REALISED_WINDOW_MS);
+      const SaleSignal = ctx.dep("SaleSignal");
+      const MarketplaceListing = ctx.dep("MarketplaceListing");
+      const byVenue = new Map();
+      const all = [];
+      const add = (venue, price) => {
+        const p = Number(price);
+        if (!Number.isFinite(p) || p <= 0) return;
+        all.push(p);
+        const v = String(venue || "").toLowerCase();
+        if (!v) return;
+        if (!byVenue.has(v)) byVenue.set(v, []);
+        byVenue.get(v).push(p);
+      };
+
+      const signals = await SaleSignal.find(
+        {
+          source: "listing_sold",
+          priceUsd: { $gt: 0 },
+          at: { $gte: since },
+          bulk: { $ne: true },
+        },
+        { marketplace: 1, priceUsd: 1, name: 1, dedupeKey: 1 },
+      )
+        .sort({ at: -1 })
+        .limit(20000)
+        .lean();
+      // ONE entry per SALE. recordListingSale writes one signal per (game,
+      // unit) at the full price — dedupeKey "sold:<listingId>:<gameKey>:<seq>"
+      // — so a 2-game bundle sold once is two signals, and the same sale's row
+      // is marked "sold" as well. Counted per entry, a single $7.99 sale of a
+      // multi-game bundle would by itself satisfy the 3-sale ceiling rule.
+      const seenSale = new Set();
+      const signalListings = new Set();
+      signals.forEach((sg, i) => {
+        if (isRentFarmTitle(sg.name)) return;
+        const dk = String(sg.dedupeKey || "");
+        const m = /^sold:([0-9a-f]{24}):.*:(\d+)$/i.exec(dk);
+        // A hand-recorded sale writes one signal per (account, game) at the
+        // price typed — "manual-sold:<accountId>:<game>" — so one account
+        // sold by hand is one sale, however many games it carried.
+        const hand = /^manual-sold:([0-9a-f]{24}):/i.exec(dk);
+        if (m) signalListings.add(m[1].toLowerCase());
+        const key = m
+          ? "unit:" + m[1].toLowerCase() + ":" + m[2]
+          : hand
+            ? "hand:" + hand[1].toLowerCase()
+            : sg._id
+              ? "sig:" + String(sg._id)
+              : "row:" + i;
+        if (seenSale.has(key)) return;
+        seenSale.add(key);
+        add(sg.marketplace, sg.priceUsd);
+      });
+
+      const sold = await MarketplaceListing.find(
+        {
+          status: "sold",
+          price: { $gt: 0 },
+          updatedAt: { $gte: since },
+          bulkOfferId: null,
+          rentFarm: { $ne: true },
+          marketplace: { $nin: UNIT_LEDGER_MARKETS },
+        },
+        { marketplace: 1, price: 1, title: 1 },
+      )
+        .sort({ updatedAt: -1 })
+        .limit(20000)
+        .lean();
+      for (const r of sold) {
+        if (isRentFarmTitle(r.title)) continue;
+        // Its sale is already counted from its own signals.
+        if (r._id && signalListings.has(String(r._id).toLowerCase())) continue;
+        add(r.marketplace, r.price);
+      }
+
+      // updatedAt bounds the read: a row whose unit was delivered inside the
+      // window was saved inside it. Newest first, so the cap can only ever
+      // drop the OLDEST rows, never this month's sales.
+      const ledgerRows = await MarketplaceListing.find(
+        {
+          marketplace: { $in: UNIT_LEDGER_MARKETS },
+          price: { $gt: 0 },
+          bulkOfferId: null,
+          rentFarm: { $ne: true },
+          updatedAt: { $gte: since },
+        },
+        { marketplace: 1, price: 1, title: 1, "units.deliveredAt": 1, "units.orderId": 1 },
+      )
+        .sort({ _id: -1 })
+        .limit(5000)
+        .lean();
+      const sinceMs = since.getTime();
+      for (const r of ledgerRows) {
+        if (isRentFarmTitle(r.title)) continue;
+        for (const u of r.units || []) {
+          if (!u || !u.orderId || !u.deliveredAt) continue;
+          const at = new Date(u.deliveredAt).getTime();
+          if (!(at >= sinceMs)) continue;
+          add(r.marketplace, r.price);
+        }
+      }
+
+      return { byVenue, overall: ceilingOf(all), top: topPrices(all), count: all.length };
+    })();
+  }
+  return ctx.__realisedSales;
+}
+
+// ---------------------------------------------------------------------------
 // The checks
 // ---------------------------------------------------------------------------
 
@@ -350,21 +627,32 @@ const CHECKS = [
     //     today, across 29 games — but publishing one for a game the farm does
     //     not know creates an offer that takes money and can never be filled,
     //     and nothing else would notice until a buyer paid.
+    //
+    // A fourth came later. BACK ON SALE: an offer whose row we took off sale
+    // (delisted, sold, removed) can go Active again. On 2026-09-28 the stock
+    // sync re-opened 00ec3522, delisted since 09-07, by pushing its quantity,
+    // and this check called it "no listing row" — which sent the reader
+    // looking for a row that was there all along. It is named for what it is.
     async run(ctx) {
       const mp = ctx.dep("marketplaces");
       const MarketplaceListing = ctx.dep("MarketplaceListing");
       const farm = ctx.dep("eldoradoFarmService");
 
       // Page the account's own offers. Bounded: a runaway page count would turn
-      // an hourly check into a crawl of the marketplace.
+      // an hourly check into a crawl of the marketplace. The list carries
+      // closed and expired history too (328 offers for 251 live on 2026-10-01),
+      // so the cap is 20 pages — the keep-alive's own listOwnOffers bound — and
+      // the run remembers whether it read them all.
       const offers = [];
       let page = 1;
       let pages = 1;
+      let totalPages = 1;
       try {
         do {
           const r = await mp.eldoradoMyListings(page, 50);
           if (!r) break;
-          pages = Math.min(Number(r.totalPages) || 1, 10);
+          totalPages = Number(r.totalPages) || 1;
+          pages = Math.min(totalPages, 20);
           for (const o of r.results || []) offers.push(o);
           page += 1;
         } while (page <= pages);
@@ -390,28 +678,84 @@ const CHECKS = [
         };
       }
 
+      const listComplete = page > totalPages;
       const live = offers.filter((o) => String(o.offerState || "") === "Active");
       const liveIds = new Set(live.map((o) => String(o.id)));
+      // Every offer the list returned, whatever its state, so a mismatch can say
+      // WHAT Eldorado thinks the offer is instead of only that it is not Active.
+      const offerById = new Map(offers.map((o) => [String(o.id), o]));
       const rows = await MarketplaceListing.find(
         { marketplace: "eldorado", status: "active" },
-        { externalId: 1, title: 1, price: 1 },
+        {
+          externalId: 1,
+          title: 1,
+          price: 1,
+          autoPaused: 1,
+          bulkOfferId: 1,
+          "units.deliveredAt": 1,
+          "units.orderId": 1,
+        },
       )
         .limit(2000)
         .lean();
+      // Every active row — auto-paused ones too — still owns its offer, so an
+      // Active offer behind one is tracked, not "no listing row".
       const rowIds = new Set(rows.map((r) => String(r.externalId)));
 
+      // Offers on the offline hold (autoFarm.eldoradoOfflineHold) are a manual
+      // line on purpose: the fulfiller sends the canned reply and the operator
+      // hands the goods over, so "no listing row" is their designed state.
+      // Parsed the way eldoradoFulfiller.eldoradoOfflineHold does — a hold with
+      // no message is off.
+      let holdOffers = new Set();
+      try {
+        const hold = (ctx.dep("settings").getAutoFarm() || {}).eldoradoOfflineHold;
+        if (hold && String(hold.message || "").trim() && Array.isArray(hold.offers)) {
+          holdOffers = new Set(hold.offers.map((o) => String(o)));
+        }
+      } catch {
+        /* settings unreadable — judge every offer, as before */
+      }
+      const manualLine = [];
+
       const problems = [];
+      let unverified = 0;
 
       for (const r of rows) {
+        // An auto-paused row is one the stock sync paused itself ("paused: no
+        // claimable stock") and resumes on its own when stock returns; it keeps
+        // status "active" by design, so Eldorado not showing it Active is the
+        // intended state, not drift. Counting it made the board fail on two such
+        // R6 offers on 2026-09-27.
+        if (r.autoPaused) continue;
+        // A bulk pack row (docs/bulk-packs/FIXES-1.md R3-8) stays "active" while
+        // its bulk loop pauses the offer (sold out, owner pause); the loop owns
+        // that state, so it is not drift. It still counts as tracked below.
+        if (r.bulkOfferId) continue;
         if (!liveIds.has(String(r.externalId))) {
+          const o = offerById.get(String(r.externalId)) || null;
+          // Not found in a list read only in part proves nothing: counted as
+          // unverified, never as a mismatch.
+          if (!o && !listComplete) {
+            unverified += 1;
+            continue;
+          }
           problems.push({
             kind: "we say active, Eldorado does not",
             offer: r.externalId,
             title: String(r.title || "").slice(0, 70),
+            eldoradoState: o
+              ? String(o.offerState || "?")
+              : listComplete
+                ? "not in Eldorado's list"
+                : "not in the part of Eldorado's list that was read",
+            eldoradoQty: o && Number.isFinite(Number(o.quantity)) ? Number(o.quantity) : null,
+            why: whyNotActive(o, r, { complete: listComplete, now: ctx.now() }),
           });
         }
       }
 
+      const untracked = [];
       for (const o of live) {
         const title = String(o.offerTitle || "");
         const isFarm = /\bAutomatic\s+Farming\b/i.test(title);
@@ -435,17 +779,76 @@ const CHECKS = [
           continue;
         }
         if (!rowIds.has(String(o.id))) {
-          problems.push({
-            kind: "sellable bundle offer with no listing row",
-            offer: String(o.id),
-            title: title.slice(0, 70),
-          });
+          if (holdOffers.has(String(o.id))) {
+            manualLine.push(title.slice(0, 70));
+            continue;
+          }
+          untracked.push({ offer: String(o.id), title: title.slice(0, 70) });
         }
       }
 
+      // A live offer with no ACTIVE row may still have a row: one we took off
+      // sale. One read names the status of every such row. A failed read keeps
+      // the old label, so the offer is flagged either way; an active row found
+      // here (a row past the limit above) means the offer is tracked after all.
+      let rowStatuses = new Map();
+      if (untracked.length) {
+        try {
+          const others = await MarketplaceListing.find(
+            { marketplace: "eldorado", externalId: { $in: untracked.map((u) => u.offer) } },
+            { externalId: 1, status: 1 },
+          )
+            .limit(2000)
+            .lean();
+          for (const r of others) {
+            const id = String(r.externalId);
+            if (!rowStatuses.has(id)) rowStatuses.set(id, new Set());
+            rowStatuses.get(id).add(String(r.status || "?"));
+          }
+        } catch {
+          rowStatuses = new Map();
+        }
+      }
+      for (const u of untracked) {
+        const statuses = rowStatuses.get(u.offer);
+        if (statuses && statuses.has("active")) continue;
+        if (statuses && statuses.size) {
+          problems.push({
+            kind: "live on Eldorado but our row says " + [...statuses].join("/"),
+            offer: u.offer,
+            title: u.title,
+            why:
+              "a listing we took off sale is on sale again — pause it on Eldorado, " +
+              "or relist its row if it should sell",
+          });
+          continue;
+        }
+        problems.push({
+          kind: "sellable bundle offer with no listing row",
+          offer: u.offer,
+          title: u.title,
+        });
+      }
+
       const n = problems.length;
+      // A list read only in part cannot clear the offers it never saw: an
+      // untracked bundle offer on an unread page is a paid order nobody can
+      // deliver. Problems found are still real; "all fine" is never claimed.
+      const partial = listComplete
+        ? ""
+        : " Eldorado's offer list was read only in part (" + Math.min(page - 1, totalPages) +
+          " of " + totalPages + " page(s)) — offers on the unread pages were not checked" +
+          (unverified
+            ? ", and " + unverified + " active row(s) whose offer was not among the " +
+              "pages read are unverified, not counted"
+            : "") +
+          ".";
+      const manualNote = manualLine.length
+        ? " " + manualLine.length + " offline-hold offer(s) with no listing row " +
+          "are a manual line and not counted: " + manualLine.join("; ").slice(0, 160) + "."
+        : "";
       return {
-        status: n ? "fail" : "ok",
+        status: n ? "fail" : listComplete ? "ok" : "unknown",
         measured: n,
         threshold:
           "0 mismatches between Eldorado's " + live.length +
@@ -453,11 +856,21 @@ const CHECKS = [
         summary: n
           ? n + " Eldorado offer(s) do not line up with our stock: " +
             [...new Set(problems.map((p) => p.kind))].join("; ")
-          : "All " + live.length + " live Eldorado offers are tracked and fillable",
+          : listComplete
+            ? "All " + live.length + " live Eldorado offers are tracked and fillable"
+            : "No mismatch among the " + live.length + " live offer(s) read, but " +
+              "Eldorado's list was read only in part",
         detail:
           "Read from Eldorado's own offer list. A rent-farm offer is matched by " +
           "TITLE rather than by a listing row, so it is checked against the real " +
-          "resolver instead of being counted as untracked.",
+          "resolver instead of being counted as untracked. Auto-paused rows " +
+          "(paused by the stock sync, resumed by it) are not drift. A live offer " +
+          "whose row is delisted, sold or removed is named by that status: a " +
+          "listing taken off sale that is on sale again. A row Eldorado does not " +
+          "show as Active carries Eldorado's own state and quantity: Closed with " +
+          "units still on our row is a delivered sale that was never recorded." +
+          partial +
+          manualNote,
         items: capItems(problems),
       };
     },
@@ -550,8 +963,11 @@ const CHECKS = [
       // be sitting there free. Reporting "0 free" off a partial read is exactly
       // the Pi-hiccup-as-marketplace-fault mistake, so a bad verdict built on an
       // incomplete read is downgraded to `unknown`. A GOOD verdict survives —
-      // hosts we could not read can only add slots, never remove them.
-      if (snap.offlineHosts.length && status !== "ok") {
+      // hosts we could not read can only add slots, never remove them. Nor can
+      // they lift the holder's account limit: when THAT is what binds, the bad
+      // verdict stands whatever the unread hosts hold.
+      const holderLimited = snap.limitedBy === "holder-limit" && !!snap.quota;
+      if (snap.offlineHosts.length && status !== "ok" && !holderLimited) {
         status = "unknown";
         note =
           "verdict withheld: " +
@@ -564,17 +980,30 @@ const CHECKS = [
         status,
         measured: snap.totalFree,
         threshold,
-        summary:
-          snap.totalFree +
-          " free slot(s) across " +
-          snap.readable +
-          " readable stack(s) of " +
-          snap.totalCapacity +
-          " total",
+        summary: holderLimited
+          ? snap.totalFree +
+            " usable slot(s) — capped by the rent-farm holder's account limit (" +
+            snap.quota.used +
+            "/" +
+            snap.quota.max +
+            " used); the stacks have " +
+            snap.stackFree +
+            " free of " +
+            snap.totalCapacity
+          : snap.totalFree +
+            " free slot(s) across " +
+            snap.readable +
+            " readable stack(s) of " +
+            snap.totalCapacity +
+            " total",
         detail:
           note ||
-          "One order holds one slot until its window lapses (180-day and " +
-            "1-year windows are sold), so slots free far slower than they fill.",
+          (holderLimited
+            ? "Raise the Account limit of the holder renter operator-selffarm " +
+              "(Renters page): every rent-farm order is refused at that limit, " +
+              "however many stack slots are free."
+            : "One order holds one slot until its window lapses (180-day and " +
+              "1-year windows are sold), so slots free far slower than they fill."),
         items: capItems(
           snap.stacks
             .slice()
@@ -697,6 +1126,7 @@ const CHECKS = [
           unclaimedGame: 1,
           set: 1,
           origin: 1,
+          accountLogin: 1,
         },
       ).sort({ _id: 1 })
           .lean();
@@ -767,7 +1197,7 @@ const CHECKS = [
               status: { $in: audit.SELLABLE_STATUSES },
               soldAt: null,
             };
-        const candidates = await UnclaimedAccount.find(query, {
+        const fields = {
           login: 1,
           game: 1,
           drops: 1,
@@ -776,9 +1206,33 @@ const CHECKS = [
           // to null, every verdict degrades to the DB union, and this check
           // silently becomes the very thing it is meant to replace.
           poolAccountId: 1,
-        })
-          .limit(STALE_CANDIDATE_POOL)
-          .lean();
+        };
+        // A Gameflip live unit carries ONE account's credentials and Gameflip
+        // hands exactly that account to the buyer, so it is the only candidate
+        // that matters. Its ledger row is `listed` — never one of the spare
+        // SELLABLE_STATUSES the query above matches — so every live unit read
+        // "no sellable ledger row for this game/set" (6 false fails on
+        // 2026-09-27, each backed by an account the unclaimed engine re-reads
+        // every pass). Judge the attached row; no spare can stand in for it.
+        const attached =
+          listing.marketplace === "gameflip" && listing.accountLogin
+            ? await UnclaimedAccount.find(
+                {
+                  source: "noclaim",
+                  status: "listed",
+                  soldAt: null,
+                  listingExternalIds: String(listing.externalId),
+                },
+                fields,
+              )
+                .limit(3)
+                .lean()
+            : [];
+        const candidates = attached.length
+          ? attached
+          : await UnclaimedAccount.find(query, fields)
+              .limit(STALE_CANDIDATE_POOL)
+              .lean();
 
         // The ledger-only pass is an ordering hint, never a verdict: ledger
         // `drops[]` is whatever the last no-claim scan wrote (3-6 items on rows
@@ -827,7 +1281,7 @@ const CHECKS = [
           marketplace: listing.marketplace,
           externalId: listing.externalId,
           title: String(listing.title || "").slice(0, 120),
-          game: listing.unclaimedGame || "",
+          game: listing.unclaimedGame || (candidates[0] && candidates[0].game) || "",
           advertised: (listing.requiredDrops || []).length,
           candidates: candidates.length,
           missing: candidates.length
@@ -871,17 +1325,113 @@ const CHECKS = [
   },
 
   {
+    id: "listings.rebundle",
+    title: "Bundles smaller than the stock behind them",
+    group: "listings",
+    severity: "warn",
+    // A no-claim account keeps farming after it goes on sale, so an event's
+    // later waves land on accounts already listed under the earlier, smaller
+    // bundle. The auto-lister's scan only re-groups RELEASED accounts, so a
+    // LISTED one never grows into the fuller listing on its own — nothing
+    // noticed until now. Read-only: the operator relists with the audit CLI.
+    // DB-only — it reads the ledger drops[] expirySalePass refreshes each tick,
+    // so it makes no marketplace or Pi call.
+    async run(ctx) {
+      const audit = ctx.dep("unclaimedListingAudit");
+      let rows = [];
+      try {
+        rows = await audit.listingDriftReport();
+      } catch (e) {
+        return {
+          status: "unknown",
+          measured: null,
+          threshold: "0 live bundles smaller than their stock",
+          summary: "drift report failed: " + e.message,
+        };
+      }
+      const grown = rows.filter((r) => r.verdict === "rebundle");
+      return {
+        status: grown.length ? "warn" : "ok",
+        measured: grown.length,
+        threshold: "0 live bundles smaller than their stock",
+        summary: grown.length
+          ? grown.length +
+            " live bundle(s) advertise fewer items than their accounts now hold"
+          : "Every live auto-lister bundle matches the stock behind it",
+        detail:
+          "The accounts kept farming after listing and gained items; relist to " +
+          "sell the fuller bundle (scripts/unclaimed-listing-audit.js --listing " +
+          "<id> --retitle --apply). Read-only.",
+        items: capItems(
+          grown.map((r) => ({
+            marketplace: r.marketplace,
+            externalId: r.externalId,
+            title: String(r.title || "").slice(0, 120),
+            advertised: (r.advertised || []).length,
+            added: (r.added || []).map((a) => a.name).join(", "),
+            url: r.url,
+          })),
+        ),
+      };
+    },
+  },
+
+  {
     id: "listings.overpriced",
     title: "Listings above the realised ceiling",
     group: "listings",
     severity: "warn",
+    // Two corrections, both found on the 2026-10-01 board:
+    //
+    // 1. THE CEILING IS MEASURED, NOT REMEMBERED. It was the constant $4.50 from
+    //    2026-09-09, and the detail line went on claiming "the highest price any
+    //    of 217 recorded sales fetched" after a $5.00 bundle had sold. It is now
+    //    the highest drop-bundle sale in realisedSales() (rent-farm windows and
+    //    bulk packs out), falling back to the 09-09 figure only when that read
+    //    fails or holds fewer than MIN_CEILING_SALES sales.
+    //
+    // 2. WHO SET THE PRICE DECIDES THE COLOUR. A system-priced row (auto-lister,
+    //    no-claim engine) above every realised sale is the pricer getting it
+    //    wrong: fail, as the contract froze. A hand-made row (`origin: "manual"`)
+    //    is the owner's stock at the owner's price, which nothing in the system
+    //    may reprice (feedback_manual_listings_never_repriced) — above the
+    //    ceiling it is a commercial call to look at, not a fault, so it warns.
+    //    On 10-01 the whole board read "Something is broken" because of three
+    //    310-item whole-account bundles deliberately priced at $7.99.
     async run(ctx) {
       const MarketplaceListing = ctx.dep("MarketplaceListing");
+      let ceiling = REALISED_CEILING_USD;
+      let basis = "";
+      try {
+        const realised = await realisedSales(ctx);
+        if (realised.count >= MIN_CEILING_SALES && realised.overall > 0) {
+          ceiling = realised.overall;
+          basis =
+            "$" + ceiling.toFixed(2) + " is the highest price at least " + CEILING_HITS +
+            " of " + realised.count + " drop-bundle sale(s) in the last 180 days " +
+            "reached (top sales: " +
+            (realised.top || []).map((x) => "$" + x.toFixed(2)).join(", ") +
+            "; rent-farm windows and bulk packs not counted). ";
+        } else {
+          basis =
+            "Only " + realised.count + " priced drop-bundle sale(s) in the last 180 " +
+            "days, too few to set a ceiling, so the $" + REALISED_CEILING_USD.toFixed(2) +
+            " measured on 2026-09-09 stands in. ";
+        }
+      } catch (e) {
+        basis =
+          "The realised-sale evidence could not be read (" +
+          String((e && e.message) || e).slice(0, 80) + "), so the $" +
+          REALISED_CEILING_USD.toFixed(2) + " measured on 2026-09-09 stands in. ";
+      }
       const rows = await MarketplaceListing.find(
         {
           status: "active",
           autoPaused: { $ne: true },
-          price: { $gt: REALISED_CEILING_USD },
+          price: { $gt: ceiling },
+          // A bulk pack row (docs/bulk-packs/FIXES-1.md R3-8): a Gameflip pack
+          // is priced for N accounts, so the one-account ceiling says nothing.
+          bulkOfferId: null,
         },
         {
           title: 1,
@@ -911,25 +1461,37 @@ const CHECKS = [
         (max, r) => Math.max(max, Number(r.price) || 0),
         0,
       );
+      // Anything but an explicit "manual" counts as system-priced: an unmarked
+      // row is the case to be loud about, not the one to excuse.
+      const systemPriced = offenders.filter(
+        (r) => String(r.origin || "") !== "manual",
+      ).length;
+      const ownerPriced = offenders.length - systemPriced;
       return {
-        status: offenders.length ? "fail" : "ok",
+        status: systemPriced ? "fail" : offenders.length ? "warn" : "ok",
         measured: offenders.length,
-        threshold: "$" + REALISED_CEILING_USD.toFixed(2) + " realised ceiling",
+        threshold:
+          "$" + ceiling.toFixed(2) + " realised ceiling; fail on a system-priced " +
+          "listing above it, warn on an owner-priced one",
         summary: offenders.length
           ? offenders.length +
             " active listing(s) priced above $" +
-            REALISED_CEILING_USD.toFixed(2) +
+            ceiling.toFixed(2) +
             " (highest $" +
             highest.toFixed(2) +
-            ")"
+            ") — " +
+            (systemPriced
+              ? systemPriced + " priced by the system" +
+                (ownerPriced ? ", " + ownerPriced + " by hand" : "")
+              : "all owner-priced by hand")
           : "No active listing is priced above what has ever sold",
         detail:
-          "$" +
-          REALISED_CEILING_USD.toFixed(2) +
-          " is the highest price any of 217 recorded sales actually fetched. " +
+          basis +
           "PlayerAuctions rows at exactly $" +
           PA_PLATFORM_FLOOR_USD.toFixed(2) +
-          " (platform floor) and rent-farm offers are excluded.",
+          " (platform floor) and rent-farm offers are excluded. A hand-made " +
+          "(manual) listing above the ceiling is the owner's price and only warns; " +
+          "a system-priced one fails.",
         items: capItems(
           offenders
             .slice()
@@ -964,14 +1526,20 @@ const CHECKS = [
     // measures its own rows against it. A venue with fewer than MIN_VENUE_SALES
     // priced sales has no opinion worth acting on and is skipped rather than
     // guessed at — being unmeasured must not read as being wrong.
+    //
+    // The sales come from realisedSales(), not utils/pricingEvidence: on
+    // 2026-10-01 the pricer's snapshot gave Gameflip an $8.00 ceiling built from
+    // rent-farm WINDOWS and Eldorado a $1.00 one built from its only 5 rows ever
+    // marked sold, so 45 Eldorado bundles were "asking more than Eldorado has
+    // ever paid" while it had paid up to $3.56 for 101 units.
     async run(ctx) {
       const MarketplaceListing = ctx.dep("MarketplaceListing");
-      const pricingEvidence = ctx.dep("pricingEvidence");
-      const MIN_VENUE_SALES = 5;
+      const MIN_VENUE_SALES = MIN_CEILING_SALES;
 
       let snap = null;
       try {
-        snap = await pricingEvidence.snapshot();
+        const realised = await realisedSales(ctx);
+        snap = { platform: realised.byVenue };
       } catch (e) {
         // The join failed. That is not evidence that prices are fine, and it
         // must never render as ok — the whole point of this check is that a
@@ -991,7 +1559,7 @@ const CHECKS = [
       for (const [venue, prices] of snap.platform.entries()) {
         const p = (prices || []).map(Number).filter((n) => n > 0);
         if (p.length < MIN_VENUE_SALES) continue;
-        ceilings.set(String(venue).toLowerCase(), Math.max(...p));
+        ceilings.set(String(venue).toLowerCase(), ceilingOf(p));
       }
       if (!ceilings.size) {
         return {
@@ -1012,6 +1580,8 @@ const CHECKS = [
           status: "active",
           autoPaused: { $ne: true },
           marketplace: { $in: [...ceilings.keys()] },
+          // Bulk pack rows too, as in listings.overpriced (FIXES-1 R3-8).
+          bulkOfferId: null,
         },
         { title: 1, marketplace: 1, externalId: 1, url: 1, price: 1, origin: 1 },
       )
@@ -1056,12 +1626,15 @@ const CHECKS = [
             ")"
           : "Every active listing sits within what its own marketplace has actually paid",
         detail:
-          "Ceilings, one per venue, from that venue's realised sales (" +
+          "Ceilings, one per venue: the highest price at least " + CEILING_HITS +
+          " of that venue's realised drop-bundle sales in the last 180 days reached (" +
           [...ceilings.entries()]
             .sort()
             .map(([m, c]) => m + " $" + c.toFixed(2))
             .join(", ") +
-          "). Venues with fewer than " +
+          "). Rent-farm windows and bulk packs never set a ceiling; Eldorado, " +
+          "PlayerAuctions and G2G are measured from their delivered units, the only " +
+          "sale record they keep. Venues with fewer than " +
           MIN_VENUE_SALES +
           " priced sales are skipped, and rent-farm offers are excluded.",
         items: capItems(
@@ -1178,10 +1751,39 @@ const CHECKS = [
     // of a cap, not of a fleet. Absence from that list is therefore NOT proof of
     // a sale, so nothing is reported until a per-listing status read confirms
     // it, and the run says out loud how many suspects it did not reach.
+    //
+    // AND THE TRAP THAT KEPT IT `unknown` FOR WEEKS: an EXPIRED listing. Every
+    // Gameflip listing is created with expire_in_days: 30, and Gameflip keeps
+    // answering `status: "onsale"` for one long after its `expiration` has
+    // passed — it simply drops out of search, so no buyer can find it. On
+    // 2026-10-01, 98 of 396 active rows were exactly that (the oldest expired
+    // 08-25, a chain still owing 309 units): absent from the onsale list,
+    // "onsale" on a direct read, so the check counted them "confirmed still
+    // live", never reached the rest, and the sale watcher polled all 98 one by
+    // one every minute — the 429 storm behind connector.gameflip going unknown
+    // and relists failing. A suspect whose expiration has passed is a ghost.
     timeoutMs: 3 * 60 * 1000,
     async run(ctx) {
       const MarketplaceListing = ctx.dep("MarketplaceListing");
       const mp = ctx.dep("marketplaces");
+      // `gameflipListingState` carries the expiry verdict; a marketplaces module
+      // without it (an older deploy, a test fake) still gets the status-only
+      // read this check always made.
+      const readState =
+        typeof mp.gameflipListingState === "function"
+          ? async (id) => {
+              const s = (await mp.gameflipListingState(id)) || {};
+              return {
+                status: String(s.status || ""),
+                expired: !!s.expired,
+                expiration: s.expiration || null,
+              };
+            }
+          : async (id) => ({
+              status: String((await mp.gameflipListingStatus(id)) || ""),
+              expired: false,
+              expiration: null,
+            });
       const rows = await MarketplaceListing.find(
         { marketplace: "gameflip", status: "active" },
         { externalId: 1, title: 1, price: 1, url: 1, accountLogin: 1 },
@@ -1212,37 +1814,46 @@ const CHECKS = [
       const ghosts = [];
       let confirmedLive = 0;
       let unreadable = 0;
+      let expiredCount = 0;
       // Sequential on purpose: Gameflip rate-limits, and a 429 reads exactly
       // like "not sold yet" — the failure that let sales go unnoticed in the
       // first place.
       for (const row of window) {
         let state;
         try {
-          state = await mp.gameflipListingStatus(row.externalId);
+          state = await readState(row.externalId);
         } catch {
           unreadable += 1;
           continue;
         }
-        if (state === "onsale") {
+        if (state.status === "onsale" && !state.expired) {
           confirmedLive += 1;
           continue;
         }
-        if (!state) {
+        if (!state.status) {
           unreadable += 1;
           continue;
         }
+        const lapsed = state.expired && state.status !== "expired";
+        if (state.expired) expiredCount += 1;
         ghosts.push({
           externalId: row.externalId,
           title: String(row.title || "").slice(0, 120),
           price: row.price,
           accountLogin: row.accountLogin || "",
-          marketplaceStatus: state,
+          // "expired since <date>" for a listing Gameflip still calls onsale:
+          // the bare "onsale" would read as a contradiction on the page.
+          marketplaceStatus: lapsed
+            ? "expired since " + String(state.expiration || "?").slice(0, 10) +
+              ' (Gameflip still says "' + state.status + '")'
+            : state.status,
           url: row.url,
         });
       }
 
       const unchecked = notReached + unreadable;
       const status = ghosts.length ? "fail" : unchecked ? "unknown" : "ok";
+      const soldOrWithdrawn = ghosts.length - expiredCount;
       return {
         status,
         measured: ghosts.length,
@@ -1250,7 +1861,13 @@ const CHECKS = [
           "0 sold-but-active rows of " + suspects.length + " suspect(s)",
         summary: ghosts.length
           ? ghosts.length +
-            " active row(s) confirmed already sold/withdrawn on Gameflip"
+            " active row(s) Gameflip no longer sells: " +
+            [
+              soldOrWithdrawn ? soldOrWithdrawn + " sold/withdrawn" : "",
+              expiredCount ? expiredCount + " expired (no buyer can find them)" : "",
+            ]
+              .filter(Boolean)
+              .join(", ")
           : suspects.length
             ? "No ghost confirmed among " +
               window.length +
@@ -1270,8 +1887,53 @@ const CHECKS = [
           " suspect(s) confirmed still live" +
           (unreadable ? ", " + unreadable + " unreadable" : "") +
           (notReached ? ", " + notReached + " left for the next run" : "") +
-          ". Absence from the id list is never treated as proof.",
+          ". Absence from the id list is never treated as proof. A listing past " +
+          "its 30-day expiration counts as gone even while Gameflip still calls it " +
+          "onsale: it is out of search, so nobody can buy it.",
         items: capItems(ghosts),
+      };
+    },
+  },
+
+  {
+    id: "listings.byGame",
+    title: "By-game no-claim offers (retired path)",
+    group: "listings",
+    severity: "warn",
+    // Every no-claim offer sells through a no-claim SET since 2026-09-28
+    // (utils/noclaimStock: the whole farm, a live read of the set, fail closed,
+    // the sale stamped). A by-game (`unclaimedGame`) offer can no longer fill an
+    // order: its stock counts 0 and a paid order on it is held and paged. One
+    // still active is a leftover — an old script, or an offer nobody moved —
+    // and must go to a no-claim set or come off the market.
+    async run(ctx) {
+      const MarketplaceListing = ctx.dep("MarketplaceListing");
+      const rows = await MarketplaceListing.find(
+        { status: "active", unclaimedGame: { $nin: ["", null] }, noclaimStock: { $ne: true } },
+        { marketplace: 1, externalId: 1, title: 1, unclaimedGame: 1, autoPaused: 1 },
+      )
+        .sort({ _id: 1 })
+        .lean();
+      const n = rows.length;
+      return {
+        status: n ? "warn" : "ok",
+        measured: n,
+        threshold: "0 active by-game offers",
+        summary: n
+          ? n + " by-game offer(s) still active — they cannot deliver any more"
+          : "No by-game offer is active — every no-claim offer sells from a no-claim set",
+        detail:
+          "A by-game offer is held, never filled: move it to a no-claim set " +
+          "(Listings → Shop listings) or delist it on its market.",
+        items: capItems(
+          rows.map((r) => ({
+            market: r.marketplace,
+            offer: r.externalId,
+            game: r.unclaimedGame,
+            hidden: r.autoPaused ? "yes" : "no",
+            title: String(r.title || "").slice(0, 80),
+          })),
+        ),
       };
     },
   },
@@ -1367,6 +2029,8 @@ const CHECKS = [
       const sold = Array.isArray(state.sold) ? state.sold : [];
       const missing = Array.isArray(state.missing) ? state.missing : [];
       const stranded = Array.isArray(state.stranded) ? state.stranded : [];
+      // Renewals cut off mid-publish: HELD until a human checks Gameflip.
+      const held = Array.isArray(state.held) ? state.held : [];
       const cap = state.capacity || {};
       const target = Number(state.target) || 0;
       const reserve = Number(state.reserve) || 0;
@@ -1434,7 +2098,7 @@ const CHECKS = [
 
       const status = dead.length
         ? "fail"
-        : unstarted.length || floorHit || idleUnexplained || stranded.length
+        : unstarted.length || floorHit || idleUnexplained || stranded.length || held.length
           ? "warn"
           : shortUnexplained
             ? "unknown"
@@ -1455,6 +2119,12 @@ const CHECKS = [
       if (stranded.length)
         parts.push(
           stranded.length + " stranded buffered account(s) with no live offer",
+        );
+      if (held.length)
+        parts.push(
+          held.length + " renewal(s) cut off mid-publish — account HELD until someone checks " +
+            "Gameflip for a live or sold listing carrying: " +
+            held.slice(0, 5).map((h) => h.login || h.poolId).join(", "),
         );
       if (unstarted.length)
         parts.push(
@@ -1524,7 +2194,11 @@ const CHECKS = [
             ? " " +
               stranded.length +
               " account(s) still held by dead offers; the next top-up pass " +
-              "reclaims those."
+              "returns them to the pool (or relists one that expired unsold)."
+            : "") +
+          (Number(state.renewing) > 0
+            ? " " + Number(state.renewing) + " offer(s) expired unsold and are " +
+              "waiting for their same-account renewal (normal 30-day cycle)."
             : ""),
         items: capItems([
           ...dead.map((o) => ({
@@ -1637,6 +2311,41 @@ const CHECKS = [
   },
 
   {
+    id: "fleet.oneHome",
+    title: "One account, one bot",
+    group: "pool",
+    severity: "critical",
+    // Reads every bot config on every host (one batched read per host) plus
+    // every no-claim bot config — the only true record of where an account
+    // farms. dupeGuard keeps an account to one regular config per host and
+    // never sees another host or the no-claim tree, which is how 32 accounts
+    // farmed in two bots at once for 54 hours from 2026-09-25.
+    timeoutMs: 150 * 1000,
+    async run(ctx) {
+      const integrity = ctx.dep("fleetIntegrity");
+      const r = await integrity.oneAccountOneBot();
+      const n = r.collisions.length;
+      const blind = r.unreadable.length;
+      return {
+        status: n ? "fail" : blind ? "warn" : "ok",
+        measured: n,
+        threshold: "0 accounts enabled in two bot configs",
+        summary: n
+          ? n + " account(s) are enabled in two or more bots at once"
+          : "every account farms in one bot (" + r.accounts + " accounts, " + r.configs + " configs)" +
+            (blind ? " — " + blind + " config(s) could not be read" : ""),
+        detail:
+          "Read-only. Decide which bot keeps each account and remove it from the " +
+          "others (a no-claim account that is sold goes to the recycler)." +
+          (blind ? " Unreadable: " + r.unreadable.slice(0, 5).join("; ") : ""),
+        items: capItems(
+          r.collisions.map((c) => ({ login: c.login, secret: c.secretTail, bots: c.homes.join(", ") })),
+        ),
+      };
+    },
+  },
+
+  {
     id: "pool.health",
     title: "Pristine accounts ready to sell",
     group: "pool",
@@ -1718,6 +2427,50 @@ const CHECKS = [
           "An account with no token cannot be dropped into a bot config, so it " +
           "is inert supply that every pool count still reports as stock. One " +
           "with a password can be re-authed; one without is dead weight.",
+      };
+    },
+  },
+
+  {
+    id: "backups.offsite",
+    title: "Daily backup saved and copied off-site",
+    group: "loops",
+    severity: "critical",
+    // Reads utils/backup's status.json + the backup dir only. Before this
+    // existed three of seven nightly runs died unnoticed and every copy lived
+    // on this one server.
+    async run(ctx) {
+      const s = await ctx.dep("backup").status();
+      const now = ctx.now().getTime();
+      const last = s.lastSuccess || null;
+      const ageH = last ? (now - Date.parse(last.at)) / 3600e3 : null;
+      const items = [];
+      if (ageH == null) items.push({ problem: "no successful backup recorded yet" });
+      else if (ageH > 26) items.push({ problem: "newest good backup is " + Math.round(ageH) + "h old" });
+      if (last && Array.isArray(last.problems) && last.problems.length) {
+        items.push({ problem: "newest backup was saved without: " + last.problems.join(", ") });
+      }
+      for (const h of s.offsiteHosts || []) {
+        const o = (s.offsite || {})[h];
+        if (!o) items.push({ host: h, problem: "no off-site copy recorded" });
+        else if (!o.ok) items.push({ host: h, problem: "last copy failed: " + (o.error || "?") });
+        else if (last && o.id !== last.id) items.push({ host: h, problem: "newest backup " + last.id + " not copied yet" });
+      }
+      const stale = ageH == null || ageH > 26;
+      return {
+        status: stale ? "fail" : items.length ? "warn" : "ok",
+        measured: ageH == null ? "none" : Math.round(ageH * 10) / 10 + "h",
+        threshold: "a good backup within 26h, verified on every off-site host",
+        summary: stale
+          ? "No good backup in the last 26 hours"
+          : items.length
+            ? items.length + " backup problem(s)"
+            : "Backed up " + Math.round(ageH) + "h ago, verified on " +
+              ((s.offsiteHosts || []).join(" + ") || "no off-site host"),
+        detail:
+          "utils/backup.js writes status.json after every run and every off-site " +
+          "copy (encrypted, checksum-verified). Retry a copy from /backup.html.",
+        items,
       };
     },
   },
@@ -1987,6 +2740,10 @@ module.exports = {
   rotateWindow,
   isRentFarmTitle,
   hasDeliverableStock,
+  whyNotActive,
+  maxOf,
+  ceilingOf,
+  CEILING_HITS,
   makeCtx,
   STATUSES,
   STATUS_RANK,
@@ -1994,6 +2751,9 @@ module.exports = {
   FARM_SERVICE_MARKETS,
   RENT_FARM_TITLE,
   REALISED_CEILING_USD,
+  REALISED_WINDOW_MS,
+  MIN_CEILING_SALES,
+  UNIT_LEDGER_MARKETS,
   PA_PLATFORM_FLOOR_USD,
   ORDER_GRACE_MS,
   POOL_WARN_BELOW,

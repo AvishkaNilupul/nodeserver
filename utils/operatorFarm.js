@@ -103,7 +103,7 @@ async function ensureOperatorRenter({ actor = "operator-farm" } = {}) {
   // Needs a bot slot to farm on. Reuses the same stack picker the Quick-farm
   // auto-assign uses, so capacity rules are identical.
   if (!renter.botFile) {
-    const stack = await renterAdmin().availableRentalStack();
+    const stack = await renterAdmin().availableRentalStack({ forHolder: true });
     if (!stack) {
       const e = new Error(
         "No rental bot stack has room right now — free a slot or raise a stack's capacity.",
@@ -149,8 +149,13 @@ async function ensureStackWithRoom(renter, needed, actor = "operator-farm") {
   // follows it out of a full one. Only an explicit `false` moves us: `null`
   // (host not reachable this tick) keeps the holder where it is rather than
   // stampeding every buyer onto another host over a blinked SSH read.
+  //
+  // Nor is a stack a direct renter has since been given: buyers and direct
+  // renters never share a stack (renterAdminRoutes.usableForHolder), so the
+  // holder moves on instead of filling someone's own bot with paid buyers.
   if (
     current &&
+    renterAdmin().usableForHolder(current) &&
     Number(current.remaining) >= want &&
     (current.running !== false || !Number(current.accounts))
   ) {
@@ -201,6 +206,43 @@ async function ensureStackWithRoom(renter, needed, actor = "operator-farm") {
   return { renter, stack: target, moved: true };
 }
 
+// Read-only: how much of the holder's own account limit (Renter.maxAccounts) is
+// left — the SAME count farmFreshAccounts refuses on ("The operator holder is at
+// its account limit"). null when the holder does not exist yet.
+//
+// This is the third ceiling beside pool supply and stack slots, and on
+// 2026-09-28 it was the one that bit: the holder sat at 250/250 for seven hours
+// and four paid Eldorado orders failed every tick, while 340 pristine pool
+// accounts and 117 free stack slots made every capacity dial read fine. The
+// capacity watcher (utils/rentFarmCapacity) reads this so it can never again be
+// the limit nobody is watching.
+async function holderQuota() {
+  const renter = await Renter.findOne({ usernameLower: OPERATOR_USERNAME })
+    .select("maxAccounts")
+    .lean();
+  if (!renter) return null;
+  // LIVE windows only. A window that lapsed keeps its row (renterExpiry stamps
+  // farmEndedAt and leaves it for the roster), and counting those made the
+  // limit a lifetime-sales counter: 2000 would have been hit ~March 2027 and
+  // every rent-farm order refused again, exactly as on 09-28.
+  const used = await RenterAccount.countDocuments({ renter: renter._id, farmEndedAt: null });
+  const max = Number(renter.maxAccounts) || 0;
+  return { max, used, remaining: Math.max(0, max - used) };
+}
+
+// A stack's room as the provisioning path counts it. `running === false` zeroes
+// it only when the stack already HOLDS accounts: stopped and occupied is broken
+// (2026-09-20, buyers in a config nobody read). Stopped and EMPTY is a stack
+// provisionEmptyConfig made and nothing has started yet — chooseAvailableStack
+// picks it and farmFreshAccounts starts its container right after the first
+// write — so its room is real. Same rule as ensureStackWithRoom above and
+// utils/renterBotStacks.chooseAvailableStack; the preview must not disagree.
+function usableRoom(stack) {
+  if (!stack) return 0;
+  if (stack.running === false && Number(stack.accounts) > 0) return 0;
+  return Math.max(0, Number(stack.remaining) || 0);
+}
+
 // Read-only: what WOULD happen, without touching anything. Lets the coworker
 // (or the UI) check availability before committing.
 async function previewFreshAccounts({ count = 1 } = {}) {
@@ -221,23 +263,22 @@ async function previewFreshAccounts({ count = 1 } = {}) {
       : null;
     const best = renterAdmin().chooseStackWithRoom(opts.bots || [], 1);
     // Same rule as ensureStackWithRoom: the holder's own stack only counts if
-    // it has room AND is running, otherwise the preview promises a slot on a
-    // container that will never read it.
-    stack =
-      cur && Number(cur.remaining) > 0 && cur.running !== false
-        ? cur
-        : best || cur;
-    stackRoom =
-      stack && stack.running === false
-        ? 0
-        : Math.max(0, Number(stack && stack.remaining) || 0);
+    // it has room AND something will read it — running, or empty and about to
+    // be started by its first delivery. A stopped stack that already holds
+    // accounts counts for nothing: the preview must not promise a slot on a
+    // container that will never read it. Until 2026-09-30 an empty stopped
+    // stack counted for nothing too, so every dry run said "stack-stopped" the
+    // moment the holder's stack filled and the next one was brand new.
+    const curUsable = cur && renterAdmin().usableForHolder(cur) ? cur : null;
+    stack = usableRoom(curUsable) > 0 ? curUsable : best || curUsable;
+    stackRoom = usableRoom(stack);
   } catch (e) {
     stack = null;
     stackRoom = 0;
     offlineHosts = ["(stack read failed: " + e.message + ")"];
   }
   const used = renter
-    ? await RenterAccount.countDocuments({ renter: renter._id })
+    ? await RenterAccount.countDocuments({ renter: renter._id, farmEndedAt: null })
     : 0;
   const quotaRemaining = renter
     ? Math.max(0, (Number(renter.maxAccounts) || 0) - used)
@@ -261,10 +302,12 @@ async function previewFreshAccounts({ count = 1 } = {}) {
     stackRoom,
     offlineHosts,
     stackRunning: stack ? (stack.running === undefined ? null : stack.running) : null,
+    // Empty and not started yet: its container starts on the first delivery.
+    stackNotStarted: !!stack && stack.running === false && !Number(stack.accounts),
     blockedBy:
       willAdd > 0
         ? null
-        : stack && stack.running === false
+        : stack && stack.running === false && Number(stack.accounts) > 0
           ? "stack-stopped"
           : stackRoom <= 0
             ? "stack-full"
@@ -307,7 +350,8 @@ async function farmFreshAccounts({
   const host = hosts.resolveHost(renter.botHost);
   if (!host) throw badRequest("The holder renter's host is unknown.");
 
-  const used = await RenterAccount.countDocuments({ renter: renter._id });
+  // Live windows only — see holderQuota.
+  const used = await RenterAccount.countDocuments({ renter: renter._id, farmEndedAt: null });
   const quotaRemaining = Math.max(0, (Number(renter.maxAccounts) || 0) - used);
   if (quotaRemaining <= 0) {
     throw conflict(
@@ -470,6 +514,7 @@ module.exports = {
   OPERATOR_MAX_ACCOUNTS,
   ensureOperatorRenter,
   ensureStackWithRoom,
+  holderQuota,
   previewFreshAccounts,
   farmFreshAccounts,
 };

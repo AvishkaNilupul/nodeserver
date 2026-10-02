@@ -28,11 +28,35 @@ router.get("/backups", requireSuperadmin, async (req, res) => {
   }
 });
 
-// CREATE a backup now. Returns its manifest so the UI can show what was saved.
+// Health of the whole chain: last run, last success, off-site copies.
+router.get("/backups/status", requireSuperadmin, async (req, res) => {
+  try {
+    res.json({ success: true, ...(await backup.status()) });
+  } catch (e) {
+    res.status(500).json({ success: false, message: e.message });
+  }
+});
+
+// CREATE a backup now. Returns its manifest so the UI can show what was saved;
+// the encrypted off-site copies follow in the background (status shows them).
 router.post("/backups/run", requireSuperadmin, async (req, res) => {
   try {
     const r = await backup.createBackup({ reason: "manual" });
+    backup.replicateOffsite(r.id).catch(() => {});
     res.json({ success: true, id: r.id, size: r.size, manifest: r.manifest });
+  } catch (e) {
+    res.status(500).json({ success: false, message: e.message });
+  }
+});
+
+// Copy an existing backup off-site again (e.g. after a host was offline).
+router.post("/backups/:id/replicate", requireSuperadmin, async (req, res) => {
+  if (!backup.backupPath(req.params.id)) {
+    return res.status(400).json({ success: false, message: "Invalid backup id" });
+  }
+  try {
+    const results = await backup.replicateOffsite(req.params.id);
+    res.json({ success: true, results });
   } catch (e) {
     res.status(500).json({ success: false, message: e.message });
   }

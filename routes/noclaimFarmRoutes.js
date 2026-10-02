@@ -33,11 +33,13 @@ const { buildSetGridImage } = require("../utils/setImage");
 const AvailableAccount = require("../models/AvailableAccount");
 const BotAccount = require("../models/BotAccount");
 const NoclaimSpentAccount = require("../models/NoclaimSpentAccount");
+const UnclaimedAccount = require("../models/UnclaimedAccount");
 const { decrypt } = require("../utils/secretBox");
 const { recordPoolUsage } = require("../utils/poolUsageLog");
 const { logEvent, actorFromReq } = require("../utils/systemLog");
 const noclaimWatcher = require("../utils/noclaimWatcher");
 const unclaimedAutoList = require("../utils/unclaimedAutoList");
+const { lookupAccountByUsername } = require("../utils/accountLookup");
 
 const router = express.Router();
 
@@ -208,7 +210,10 @@ router.get("/api/noclaim-farm/state", requireSuperadmin, async (req, res) => {
       `id=$(basename $(dirname $(dirname "$d"))); ` +
       `game=$(tr -d '\\n' < "$d" | sed -n 's/.*"FavouriteGames"[^[]*\\[[^"]*"\\([^"]*\\)".*/\\1/p'); ` +
       `n=$(grep -c '"ClientSecret"' "$d"); ` +
-      `echo "$id|$game|$n"; done; echo "BOTS_END"`;
+      `per=no; [ -f "$(dirname $(dirname "$d"))/.personal" ] && per=yes; ` +
+      `off=no; [ -f "$(dirname $(dirname "$d"))/.operatoroff" ] && off=yes; ` +
+      `auto=no; [ -f "$(dirname $(dirname "$d"))/.autostopped" ] && auto=yes; ` +
+      `echo "$id|$game|$n|$per|$off|$auto"; done; echo "BOTS_END"`;
     const out = await sh(script, { timeout: 25000 });
 
     const lines = out.split("\n");
@@ -229,8 +234,18 @@ router.get("/api/noclaim-farm/state", requireSuperadmin, async (req, res) => {
         const id = name.replace(CONTAINER_PREFIX, "");
         psMap[id] = { state, status };
       } else if (section === "bots" && line) {
-        const [id, game, n] = line.split("|");
-        bots.push({ id, game: game || "", accounts: parseInt(n, 10) || 0 });
+        const [id, game, n, per, off, auto] = line.split("|");
+        bots.push({
+          id,
+          game: game || "",
+          accounts: parseInt(n, 10) || 0,
+          personal: per === "yes",
+          // Why a bot that is not running is down: stopped by the operator
+          // (.operatoroff) or parked by auto power on a dark game (.autostopped).
+          // Neither marker and not running = it died on its own.
+          operatorOff: off === "yes",
+          autoStopped: auto === "yes",
+        });
       }
     }
     for (const b of bots) {
@@ -289,6 +304,162 @@ router.post("/api/noclaim-farm/bots", requireSuperadmin, async (req, res) => {
 });
 
 // ---------------------------------------------------------------------------
+// Personal ("my own") bot — add ONE account by username.
+//
+// Resolves that login's Twitch token + numeric id from wherever it lives (pool
+// / bot / unclaimed, via accountLookup), live-checks the token, fences its pool
+// row from the auto-lister (manualSold — a personal account is never auto-sold),
+// then builds a dedicated no-claim bot for it and marks it personal. This is the
+// by-hand scripts/noclaim-readd-sold-batch.js path turned into a one-field form.
+// ---------------------------------------------------------------------------
+router.post(
+  "/api/noclaim-farm/personal-bots",
+  requireSuperadmin,
+  async (req, res) => {
+    try {
+      const username = String(req.body.username || "").trim();
+      const game = String(req.body.game || "").trim() || "Overwatch";
+      if (!username)
+        return res
+          .status(400)
+          .json({ success: false, message: "Enter a username." });
+      try {
+        fleet.assertNoClaimGame(game);
+      } catch (e) {
+        return res
+          .status(e.status || 400)
+          .json({ success: false, message: e.message });
+      }
+
+      const look = await lookupAccountByUsername(username);
+      if (!look.found)
+        return res
+          .status(404)
+          .json({ success: false, message: `No account found for "${username}".` });
+
+      // Need a client token AND a numeric Twitch id (WatchRequest.GetPayload
+      // does Int32.Parse on the id). Prefer a single source carrying both.
+      const usable = (look.sources || []).find(
+        (s) => s.clientToken && /^[0-9]+$/.test(String(s.twitchId || "")),
+      );
+      const clientSecret = (usable && usable.clientToken) || "";
+      const twitchId = usable ? String(usable.twitchId) : "";
+      if (!clientSecret || !/^[0-9]+$/.test(twitchId)) {
+        const where =
+          look.primarySource ||
+          (look.sources || []).map((s) => s.source).join(", ");
+        return res.status(422).json({
+          success: false,
+          message: `"${username}" was found (${where}) but has no usable Twitch token + numeric id — it needs a token refresh before it can farm.`,
+        });
+      }
+
+      // Same token already in a no-claim config would fight itself. Refuse.
+      const inBots = await fleet.findSecretInConfigs(clientSecret);
+      if (inBots.length)
+        return res.status(409).json({
+          success: false,
+          message: `Already farming in no-claim bot(s) ${inBots.join(", ")} — remove it there first.`,
+        });
+
+      if (await fleet.provisionBusy())
+        return res.status(409).json({
+          success: false,
+          message: "A build/provision is already running. Try again shortly.",
+        });
+
+      // Live token check — never build a bot that would farm nothing.
+      try {
+        await twitchInventory.fetchInventory(clientSecret, { host: pi() });
+      } catch (e) {
+        return res.status(422).json({
+          success: false,
+          message: `Live token check failed (${
+            e && e.code === "token_invalid"
+              ? "token invalid"
+              : (e && e.message) || "error"
+          }) — refresh the token first.`,
+        });
+      }
+
+      // Personal = never auto-sold. If it has a pool row, fence it: manualSold
+      // is the flag scanAndListPass skips. Set-only (no $push → no enum risk).
+      const poolSrc = (look.sources || []).find((s) => s.source === "pool");
+      let fenced = false;
+      if (poolSrc && poolSrc.id) {
+        await AvailableAccount.updateOne(
+          { _id: poolSrc.id },
+          { $set: { manualSold: true } },
+        );
+        fenced = true;
+      }
+
+      const id = await fleet.nextBotId();
+      await fleet.createBotFromAccounts(
+        id,
+        [
+          {
+            username: (usable && usable.login) || username,
+            twitchId,
+            clientSecret,
+          },
+        ],
+        game,
+      );
+      await fleet.setPersonal(id, true);
+
+      logEvent({
+        category: "noclaim",
+        action: "personal_bot_created",
+        actor: actorFromReq(req),
+        subject: containerFor(id),
+        game,
+        detail: "personal no-claim bot " + id + " for " + username,
+      });
+      res.json({
+        success: true,
+        id,
+        container: containerFor(id),
+        game,
+        account: username,
+        fenced,
+        message: `Personal bot ${id} created for ${username} — farming ${game}, building on the host.`,
+      });
+    } catch (err) {
+      res
+        .status(err.status || 500)
+        .json({ success: false, message: err.message || "Create failed" });
+    }
+  },
+);
+
+// ---------------------------------------------------------------------------
+// Mark / unmark an existing bot as personal ("my own"). Flips the `.personal`
+// marker so the bot moves between the shared fleet list and the My-own section.
+// ---------------------------------------------------------------------------
+router.post(
+  "/api/noclaim-farm/bots/:id/personal",
+  requireSuperadmin,
+  async (req, res) => {
+    try {
+      const id = String(req.params.id).replace(/[^0-9]/g, "");
+      if (!id) return res.status(400).json({ success: false, message: "bad id" });
+      const on = !!req.body.personal;
+      await fleet.setPersonal(id, on);
+      logEvent({
+        category: "noclaim",
+        action: on ? "marked_personal" : "unmarked_personal",
+        actor: actorFromReq(req),
+        subject: containerFor(id),
+      });
+      res.json({ success: true, personal: on });
+    } catch (err) {
+      res.status(err.status || 500).json({ success: false, message: err.message });
+    }
+  },
+);
+
+// ---------------------------------------------------------------------------
 // Per-bot accounts (lazy — reads that bot's config from the Pi).
 // ---------------------------------------------------------------------------
 router.get(
@@ -313,11 +484,25 @@ router.get(
       const pwMap = new Map();
       const soldMap = new Map();
       const listedMap = new Map();
+      const notForSale = new Map(); // clientSecret -> why it must not go to a buyer
       if (secrets.length) {
         const rows = await AvailableAccount.find(
           { clientSecret: { $in: secrets } },
-          { clientSecret: 1, password: 1, manualSold: 1, listed: 1 },
+          { clientSecret: 1, password: 1, manualSold: 1, listed: 1, claimedNote: 1 },
         ).lean();
+        // The two ticks above are not the only record of a sale. A sale through
+        // a marketplace offer flips the auto-lister's LEDGER to "sold" and
+        // touches neither tick, so a sold account read as unsold here and "Copy
+        // unsold" could hand it to a second buyer. A "listed"/"manual" ledger is
+        // an account on a listing right now.
+        const ledgers = await UnclaimedAccount.find(
+          {
+            poolAccountId: { $in: rows.map((r) => String(r._id)) },
+            status: { $in: ["sold", "listed", "manual"] },
+          },
+          { poolAccountId: 1, status: 1, market: 1, soldMarket: 1 },
+        ).lean();
+        const ledgerByPool = new Map(ledgers.map((l) => [String(l.poolAccountId), l]));
         for (const r of rows) {
           let pw = "";
           try {
@@ -328,6 +513,13 @@ router.get(
           pwMap.set(r.clientSecret, pw);
           soldMap.set(r.clientSecret, !!r.manualSold);
           listedMap.set(r.clientSecret, !!r.listed);
+          const l = ledgerByPool.get(String(r._id));
+          let why = "";
+          if (l && l.status === "sold") why = "sold on " + (l.soldMarket || l.market || "a marketplace");
+          else if (l && l.status === "manual") why = "on your no-claim listing";
+          else if (l) why = "on an auto-listing" + (l.market ? " (" + l.market + ")" : "");
+          else if (/^(spent|sold)/i.test(String(r.claimedNote || "").trim())) why = "spent";
+          if (why) notForSale.set(r.clientSecret, why);
         }
       }
       // Surface the credentials so the operator can list manually — this whole
@@ -339,7 +531,18 @@ router.get(
         clientSecret: u.ClientSecret || "",
         manualSold: !!soldMap.get(u.ClientSecret),
         listed: !!listedMap.get(u.ClientSecret),
+        notForSale: notForSale.get(u.ClientSecret) || "",
       }));
+      // A record of who opened these credentials (owner, 2026-09-28): the
+      // drawer holds up to 70 passwords and tokens, and nothing said who looked.
+      logEvent({
+        category: "noclaim",
+        action: "credentials_viewed",
+        actor: actorFromReq(req),
+        subject: containerFor(id),
+        count: accounts.length,
+        detail: "opened the logins of no-claim bot " + id + " (" + accounts.length + " account(s))",
+      });
       res.json({
         success: true,
         game: (cfg.FavouriteGames || [])[0] || "",
@@ -353,12 +556,15 @@ router.get(
 
 // ---------------------------------------------------------------------------
 // Manual "sold" tick — the operator handed this account to a buyer BY HAND.
-// The account keeps farming, but the tick is NOT memory-only: an account that
-// went to a buyer must come off every listing that still offers it, or the
-// platform can hand the same login to a second buyer. So ticking sold also
-// runs the unclaimed engine's manual-sold removal right here (delist from
-// every active row, park the ledger "removed", clear the listed tick) instead
-// of waiting up to a full auto-list pass for the same sweep to notice.
+// The tick is NOT memory-only: an account that went to a buyer must come off
+// every listing that still offers it, or the platform can hand the same login
+// to a second buyer. So ticking sold also runs the unclaimed engine's
+// manual-sold removal right here (delist from every active row, park the ledger
+// "removed", clear the listed tick) instead of waiting up to a full auto-list
+// pass for the same sweep to notice. The account itself leaves its bot on the
+// next auto-list pass and goes to the recycler (unclaimedAutoList
+// .retireSoldFromBots) — a sold account no longer keeps farming. Accounts in a
+// bot marked "my own" are never taken out.
 // ---------------------------------------------------------------------------
 router.post(
   "/api/noclaim-farm/accounts/:secret/manual-sold",
@@ -407,6 +613,88 @@ router.post(
         delisted: removal ? removal.removed : 0,
         delistErrors: removal ? removal.errors : [],
       });
+    } catch (err) {
+      res.status(500).json({ success: false, message: err.message });
+    }
+  },
+);
+
+// Bulk HAND SALE from one bot (owner, 2026-09-28): "Copy unsold" hands out
+// logins but reserves nothing, so the Eldorado shop offer or the auto-lister
+// could sell the same accounts minutes later (19 went to two buyers on
+// 2026-09-18). This picks `count` free accounts of the bot and MARKS THEM SOLD
+// before answering with their logins (unclaimedAutoList.handSellAccounts); the
+// next auto-list run takes them out of the bot to the recycler.
+// Body: { count (1-70), format: "lp" (default) | "lpc" (with the client token) }.
+router.post(
+  "/api/noclaim-farm/bots/:id/hand-sell",
+  requireSuperadmin,
+  async (req, res) => {
+    try {
+      const id = String(req.params.id).replace(/[^0-9]/g, "");
+      if (!id) return res.status(400).json({ success: false, message: "bad id" });
+      const count = parseInt((req.body || {}).count, 10);
+      if (!(count >= 1 && count <= MAX_PER_BOT)) {
+        return res.status(400).json({
+          success: false,
+          message: "count required: how many accounts you are selling (1-" + MAX_PER_BOT + ")",
+        });
+      }
+      const withSecret = (req.body || {}).format === "lpc";
+      const raw = await sh(
+        `[ -f ${hosts.shq(configPath(id))} ] && cat ${hosts.shq(configPath(id))} || echo ''`,
+        { timeout: 15000 },
+      );
+      if (!raw) return res.status(404).json({ success: false, message: "No such bot." });
+      const cfg = JSON.parse(raw);
+      const game = (cfg.FavouriteGames || [])[0] || "";
+      const gameNorm = settings.normGameName(game);
+      const users = ((cfg.TwitchSettings && cfg.TwitchSettings.TwitchUsers) || []).filter(
+        (u) => u && u.ClientSecret && u.Login,
+      );
+      const pools = await AvailableAccount.find(
+        { clientSecret: { $in: users.map((u) => u.ClientSecret) } },
+        { clientSecret: 1, status: 1, manualSold: 1, listed: 1, claimedNote: 1, soldGames: 1, password: 1 },
+      ).lean();
+      const poolBySecret = new Map(pools.map((p) => [p.clientSecret, p]));
+      const out = [];
+      const skipped = { notFree: 0, noPassword: 0, taken: 0 };
+      for (const u of users) {
+        if (out.length >= count) break;
+        const p = poolBySecret.get(u.ClientSecret);
+        if (
+          !p ||
+          p.status !== "claimed" ||
+          p.manualSold === true ||
+          p.listed === true ||
+          /^(sold|spent|rented)/i.test(String(p.claimedNote || "").trim()) ||
+          (p.soldGames || []).some((g) => settings.normGameName(g) === gameNorm)
+        ) {
+          skipped.notFree++;
+          continue;
+        }
+        let pw = "";
+        try {
+          pw = p.password ? decrypt(p.password) || "" : "";
+        } catch {
+          pw = "";
+        }
+        if (!pw) {
+          skipped.noPassword++;
+          continue;
+        }
+        const [r] = await unclaimedAutoList.handSellAccounts(
+          [{ login: u.Login, poolAccountId: String(p._id), game, botId: id, container: containerFor(id), twitchId: String(u.Id || "") }],
+          { game, actor: actorFromReq(req) || "operator", reason: "hand sale from no-claim bot " + id },
+        );
+        if (!r || !r.sold) {
+          if (r && /listing|ledger|taken|pool row/.test(r.why)) skipped.taken++;
+          else skipped.notFree++;
+          continue;
+        }
+        out.push(u.Login + ":" + pw + (withSecret ? ":" + u.ClientSecret : ""));
+      }
+      res.json({ success: true, game, sold: out.length, asked: count, skipped, lines: out });
     } catch (err) {
       res.status(500).json({ success: false, message: err.message });
     }
@@ -719,6 +1007,7 @@ router.post(
         { timeout: 15000 },
       );
       let released = 0;
+      let left = 0;
       if (raw) {
         const cfg = JSON.parse(raw);
         const secrets = (
@@ -728,17 +1017,39 @@ router.post(
           .map((u) => u.ClientSecret)
           .filter(Boolean);
         if (secrets.length) {
-          const r = await AvailableAccount.updateMany(
-            { clientSecret: { $in: secrets } },
-            {
-              $set: { status: "available", claimedAt: null, claimedNote: "" },
-            },
-          );
-          released = r.modifiedCount || 0;
-          if (released) {
-            const rows = await AvailableAccount.find({ clientSecret: { $in: secrets } }, { _id: 1 }).lean();
-            await recordPoolUsage(rows.map((row) => row._id), { event: "released", actor: "noclaim" });
+          // Only accounts that are the no-claim farm's own and free go back to
+          // the pool (owner, 2026-09-28). This used to set EVERY account in the
+          // config "available" — ones on sale, sold ones and ones another system
+          // had claimed — and every other system trusts the pool.
+          const personal =
+            String(
+              await sh(`[ -f ${hosts.shq(botDir(id) + "/.personal")} ] && echo yes || echo no`, { timeout: 10000 }),
+            ).trim() === "yes";
+          const plan = await releasePlan(secrets, { personal });
+          const blockers = Object.entries(plan.blocked).filter(([, n]) => n > 0);
+          if (blockers.length) {
+            return res.status(409).json({
+              success: false,
+              blocked: plan.blocked,
+              message:
+                "Bot #" + id + " still holds " +
+                blockers.map(([why, n]) => n + " " + why).join(", ") +
+                " — nothing was released. Sold accounts leave on the next auto-list run; delist or sell the ones on sale first.",
+            });
           }
+          if (plan.release.length) {
+            const r = await AvailableAccount.updateMany(
+              { _id: { $in: plan.release }, status: "claimed" },
+              {
+                $set: { status: "available", claimedAt: null, claimedNote: "", manualSold: false, listed: false },
+              },
+            );
+            released = r.modifiedCount || 0;
+            if (released) {
+              await recordPoolUsage(plan.release, { event: "released", actor: "noclaim" });
+            }
+          }
+          left = plan.left;
         }
       }
       await sh(
@@ -751,14 +1062,65 @@ router.post(
         actor: actorFromReq(req),
         subject: containerFor(id),
         count: released,
-        detail: "released " + released + " account(s) back to the pool",
+        detail:
+          "released " + released + " account(s) back to the pool" +
+          (left ? "; " + left + " left as they were (owned by another system)" : ""),
       });
-      res.json({ success: true, released });
+      res.json({ success: true, released, left });
     } catch (err) {
       res.status(500).json({ success: false, message: err.message });
     }
   },
 );
+
+// Which accounts of a bot being released may go back to the pool, and what
+// blocks the release (owner, 2026-09-28). Blocked — nothing is released — by an
+// account on a listing (ledger listed/manual, or the Listed tick), a sale not
+// yet taken out of the bot (a sold ledger that is not history from before the
+// account was re-deployed, a spent/sold note, or the Sold tick outside a
+// personal bot), or a rental. Released: claimed rows the no-claim farm itself
+// claimed ("noclaim-farm:…"), and a personal bot's fenced accounts. Anything
+// else — a row another system owns, or one already back in the pool — is left
+// exactly as it is.
+async function releasePlan(secrets, { personal = false } = {}) {
+  const rows = await AvailableAccount.find(
+    { clientSecret: { $in: secrets } },
+    { status: 1, claimedNote: 1, claimedAt: 1, manualSold: 1, listed: 1 },
+  ).lean();
+  const ledgers = await UnclaimedAccount.find(
+    { poolAccountId: { $in: rows.map((r) => String(r._id)) }, status: { $in: ["listed", "manual", "sold"] } },
+    { poolAccountId: 1, status: 1, soldAt: 1 },
+  ).lean();
+  const ledgerByPool = new Map(ledgers.map((l) => [String(l.poolAccountId), l]));
+  const blocked = { "on sale": 0, "sold, not yet taken out": 0, rented: 0 };
+  const release = [];
+  let left = 0;
+  for (const r of rows) {
+    const note = String(r.claimedNote || "").trim();
+    const l = ledgerByPool.get(String(r._id));
+    const history =
+      l && l.status === "sold" && l.soldAt && r.claimedAt &&
+      new Date(r.claimedAt).getTime() > new Date(l.soldAt).getTime();
+    if ((l && (l.status === "listed" || l.status === "manual")) || (r.listed === true && !personal)) {
+      blocked["on sale"]++;
+      continue;
+    }
+    if ((l && l.status === "sold" && !history) || /^(spent|sold)/i.test(note) || (r.manualSold === true && !personal)) {
+      blocked["sold, not yet taken out"]++;
+      continue;
+    }
+    if (/^rented to/i.test(note)) {
+      blocked.rented++;
+      continue;
+    }
+    if (r.status === "claimed" && (/^noclaim-farm:/i.test(note) || (personal && r.manualSold === true))) {
+      release.push(r._id);
+    } else {
+      left++;
+    }
+  }
+  return { release, blocked, left };
+}
 
 // ===========================================================================
 // SPENT accounts (sold / connected) — scan, remove, and view.
@@ -848,6 +1210,15 @@ async function soldMapForSecrets(secrets) {
       { clientSecret: 1, soldGames: 1, claimedNote: 1 },
     ).lean(),
   ]);
+  // A marketplace sale of a no-claim account is recorded on the auto-lister's
+  // ledger (status "sold") and nowhere this scan used to look — an Eldorado
+  // sale read as unsold. (manualSold is NOT used: it also fences the
+  // operator's own personal-bot accounts, which were never sold.)
+  const soldLedgers = await UnclaimedAccount.find(
+    { poolAccountId: { $in: pool.map((p) => String(p._id)) }, status: "sold" },
+    { poolAccountId: 1, market: 1, soldMarket: 1 },
+  ).lean();
+  const soldByPool = new Map(soldLedgers.map((l) => [String(l.poolAccountId), l]));
   for (const b of bots) {
     let why = "";
     if (b.soldAt) why = "shop sale";
@@ -857,6 +1228,11 @@ async function soldMapForSecrets(secrets) {
   }
   for (const p of pool) {
     if (map.has(p.clientSecret)) continue; // BotAccount signal already wins
+    const l = soldByPool.get(String(p._id));
+    if (l) {
+      map.set(p.clientSecret, { sold: true, why: "sold on " + (l.soldMarket || l.market || "a marketplace") });
+      continue;
+    }
     if (Array.isArray(p.soldGames) && p.soldGames.length) {
       // NOT proof of a sale: a previous spent sweep stamps soldGames for a
       // CONNECTED account too. Say "spent", not "sold", so the operator is not
@@ -992,10 +1368,13 @@ router.post("/api/noclaim-farm/spent/remove", requireSuperadmin, async (req, res
     // here would be the wrong direction — see the migration notes).
     cfg.TwitchSettings.TwitchUsers = kept;
     const newRaw = JSON.stringify(cfg, null, 2);
-    await sh(
-      `cat > ${hosts.shq(configPath(id))} && chmod 600 ${hosts.shq(configPath(id))}`,
-      { timeout: 20000, input: newRaw },
-    );
+    // Guarded tmp + mv, never `cat` straight onto the live config: a cut-off
+    // transfer left a torn config the bot could not parse (and the bot itself
+    // writes this file back). See botHosts.guardedWriteScript.
+    await sh(hosts.guardedWriteScript(configPath(id), hosts.byteLength(newRaw), { mode: "600" }), {
+      timeout: 20000,
+      input: newRaw,
+    });
 
     // Restart so the container drops the removed accounts' watch threads; if the
     // bot is now empty, stop it (a 0-account config just tight-loops).

@@ -14,7 +14,12 @@ const DropSet = require("../models/DropSet");
 const MarketplaceListing = require("../models/MarketplaceListing");
 const { loginsOnActiveListings } = require("./listedLogins");
 const MarketResearch = require("../models/MarketResearch");
-const { gameflipDeliveryCode, GF_CLAIM_TAG } = require("./gameflipFulfiller");
+const {
+  gameflipDeliveryCode,
+  GF_CLAIM_TAG,
+  gameflipCodeHeldLogins,
+  noteIfCodeRefused,
+} = require("./gameflipFulfiller");
 const {
   digisellerDeliveryCode,
   DS_CLAIM_TAG,
@@ -57,6 +62,29 @@ const { itemKeyFor } = require("./twitchInventory");
 const accountState = require("./twitchAccountState");
 
 const fsp = require("fs/promises");
+
+// Plati (Digiseller) takes new stock — a new product, or more delivery codes
+// on one — only while the owner's switch is on (autoFarm.platiEnabled) and
+// the seller account is not blocked (mp.digisellerTakesNewStock). A blocked
+// seller's products cannot be bought: every account split onto Plati then is
+// stock taken off the markets that do sell.
+function platiTakesNewStock(af) {
+  if (!af.platiCategoryId || af.platiEnabled === false) return false;
+  return typeof mp.digisellerTakesNewStock === "function" ? mp.digisellerTakesNewStock() : true;
+}
+
+// GGSel takes new stock — a new offer, or more products on one — only while
+// the owner's switch is on (autoFarm.ggselEnabled).
+function ggselTakesNewStock(af) {
+  return !!af && af.ggselEnabled !== false;
+}
+
+// Why a listing got no Plati share, for its plati.error.
+function platiOffReason(af) {
+  if (!af.platiCategoryId) return "no Plati category id in auto-farm settings";
+  if (af.platiEnabled === false) return "Plati is switched off in auto-farm settings";
+  return "Plati seller account is blocked — nothing is listed there";
+}
 
 /* --------------------------- campaign details --------------------------- */
 
@@ -615,10 +643,23 @@ async function pickDeliveryAccounts(task, max, items) {
   // committed sales; this also guards the window before a concurrent listing
   // commits its reservation.
   const used = await loginsOnActiveListings();
+  // An account in a renter's bot stack is the renter's — never a delivery
+  // account (utils/rentedAccounts.js), whatever its old task still says.
+  const rented = await require("./rentedAccounts").rentedAccountIds(
+    verified.map((a) => a.accountId),
+  );
+  // One Twitch account can have two BotAccount records (utils/accountTwins.js):
+  // pick it once, and not at all when its other record's copy of these drops
+  // is already reserved, sold or claimed.
+  const twins = require("./accountTwins");
+  const keys = [...new Set((items || []).map((i) => i && i.itemKey).filter(Boolean))];
+  const gone = await twins.goneKeysFor(verified.map((a) => a.login), keys);
   const out = [];
-  for (const acc of verified) {
+  for (const acc of twins.onePerLogin(verified)) {
     if (out.length >= max) break;
     if (used.has(String(acc.login).toLowerCase())) continue;
+    if (rented.has(String(acc.accountId))) continue;
+    if (twins.hitsAny(gone.get(twins.loginKey(acc.login)), keys)) continue;
     out.push(acc);
   }
   return out;
@@ -639,6 +680,33 @@ async function reserveAccountsForPublish(accounts, set, tag) {
     if (ok) out.push(a);
   }
   return out;
+}
+
+// Deal the sellable accounts across `marketOrder` round-robin into `shares`.
+// A Gameflip slot takes the next account Gameflip will ACCEPT. One whose code a
+// listing of ours already holds — sold on Gameflip before, its other games
+// still in stock — is refused with "code for digital goods already exists"
+// (gameflipFulfiller.gameflipCodeHeldLogins), and Gameflip anchors this
+// listing: its publish failing deletes the set and lists the bundle on NO
+// market. Such an account goes to the next market's slot instead, where its
+// old Gameflip code means nothing. With nothing held this is exactly the old
+// round-robin; with only Gameflip in the order, held accounts stay unlisted.
+function dealShares(accounts, marketOrder, shares, gfHeld) {
+  const queue = (accounts || []).slice();
+  const takes = (a) => !(gfHeld && gfHeld.has(String((a && a.login) || "").toLowerCase()));
+  for (let i = 0; queue.length; i++) {
+    const market = marketOrder[i % marketOrder.length];
+    let at = 0;
+    if (market === "gameflip") {
+      at = queue.findIndex(takes);
+      if (at === -1) {
+        if (marketOrder.length === 1) break;
+        continue;
+      }
+    }
+    shares[market].push(queue.splice(at, 1)[0]);
+  }
+  return shares;
 }
 
 // Same idea, for Gameflip's single immediately-shipped unit: try candidates
@@ -816,6 +884,10 @@ async function publishGgselShare({
         accounts.length +
         " account(s)",
       autoDeliver: true,
+      // Both fields, like the Drop Archive publish route writes them: the
+      // guardian's per-account checks read accountId, and a share recorded by
+      // login alone stayed invisible to them until its first refill.
+      accountId: accounts.map((a) => String(a.accountId || "")).filter(Boolean).join(","),
       accountLogin: accounts.map((a) => a.login).join(", "),
       qtyTarget: accounts.length,
     });
@@ -842,7 +914,7 @@ function zeusxGameMapped(af, game) {
 //
 //  • ON: native ZeusX "Automatic" delivery — ZeusX carries the credential and
 //    hands it to the buyer the instant they pay (no chat, no manual step, like
-//    the Gameflip/FunPay auto-delivery here). ZeusX only accepts ONE credential
+//    the Gameflip auto-delivery here). ZeusX only accepts ONE credential
 //    per offer (game_account is a single object — verified live), so each
 //    reserved account becomes its own single-stock listing.
 async function publishZeusxShare({
@@ -1185,6 +1257,50 @@ async function playerauctionsGameEnabled(game) {
   }
 }
 
+// Eldorado refuses a create with HTTP 400 once a category holds 100 active
+// offers ("Maximum of 100 active offers is allowed.") or once the day's
+// creation quota is spent ("Offer creation limits exceeded."). Neither clears
+// for hours, and the secondaries retry runs every few minutes per task, so
+// after one of those answers the retry leaves Eldorado alone for a while
+// instead of spending a create on every task every run.
+const ELD_LIMIT_RE = /maximum of \d+ active offers|offer creation limits exceeded/i;
+const ELD_LIMIT_COOLDOWN_MS = 6 * 60 * 60 * 1000;
+let eldoradoLimitUntil = 0;
+
+// Does this task need a (new) Eldorado share? Eldorado's share was only ever
+// taken in the round-robin of the FIRST publish, behind Gameflip, Digiseller,
+// GGSel and ZeusX — and an early-bird publish rarely has more than the four
+// finished accounts ahead of it. So most games never reached Eldorado: 6 of the
+// 19 listings in the two weeks to 2026-09-23 (both of that day's) recorded "no
+// spare account for this market yet", and nothing ever asked again.
+//
+// A share that SOLD OUT is missing too. Eldorado closes an offer when its last
+// unit sells, and refillMarkets never tops an Eldorado share up, so a game that
+// sold its few accounts there stayed off Eldorado for the rest of the campaign
+// while more finished accounts sat free. Its row is retired as "sold" (and the
+// offer paused, in case it is somehow still live) so the new share gets a row
+// of its own; a "sold" row still referenced by the task means a replacement is
+// owed. A share the owner delisted, or one that was removed, is NOT missing —
+// republishing it would overrule a decision made on purpose.
+async function eldoradoShareMissing(L) {
+  const id = L && L.eldorado && L.eldorado.externalId;
+  if (!id) return true;
+  const row = await MarketplaceListing.findOne({
+    marketplace: "eldorado",
+    externalId: String(id),
+  });
+  if (!row) return false;
+  if (row.status === "sold") return true;
+  if (row.status !== "active") return false;
+  const units = row.units || [];
+  if (!units.length || units.some((u) => !u.deliveredAt)) return false;
+  await mp.eldoradoDelist(String(id)).catch(() => {});
+  row.status = "sold";
+  row.lastError = "sold out — every unit delivered; a fresh share replaces it";
+  await row.save();
+  return true;
+}
+
 // A transient failure (e.g. a Digiseller login timeout) must not permanently
 // cost a market. On every sweep tick where the Gameflip listing is alive,
 // try to publish any secondary market that has no externalId yet, using
@@ -1192,8 +1308,14 @@ async function playerauctionsGameEnabled(game) {
 // from the stored Gameflip listing row so all markets stay identical.
 async function retryMissingSecondaries(task) {
   const L = task.listing || {};
-  const platiMissing = !(L.plati && L.plati.externalId);
-  const ggselMissing = !(L.ggsel && L.ggsel.externalId);
+  // A Plati share is only "missing" while Plati can take new stock: switched
+  // off or blocked, every task would otherwise look incomplete and retry it
+  // on each sweep.
+  const platiMissing =
+    !(L.plati && L.plati.externalId) && platiTakesNewStock(settings.getAutoFarm());
+  // Same for GGSel: switched off, a task without a GGSel offer is complete.
+  const ggselMissing =
+    !(L.ggsel && L.ggsel.externalId) && ggselTakesNewStock(settings.getAutoFarm());
   // ZeusX was added after this retry existed, so it was only ever attempted in
   // the same second as the initial publish: a task listed before ZeusX was
   // switched on, or whose ZeusX publish failed once, never got an offer there
@@ -1204,7 +1326,22 @@ async function retryMissingSecondaries(task) {
   // expired at publish time, or a flag switched on mid-campaign, would
   // otherwise cost the market for the whole campaign.
   const g2gMissing = !(L.g2g && L.g2g.externalId);
-  if (!platiMissing && !ggselMissing && !zeusxMissing && !g2gMissing) {
+  // Eldorado too — see eldoradoShareMissing. No-claim games never take an
+  // auto-farm share there (publishEldoradoShare refuses them), so they are not
+  // asked at all rather than recording that refusal on every run.
+  const afNow = settings.getAutoFarm();
+  const eldoradoMissing =
+    !!afNow.eldoradoAuto &&
+    !isNoClaimGame(task.game) &&
+    Date.now() >= eldoradoLimitUntil &&
+    (await eldoradoShareMissing(L));
+  if (
+    !platiMissing &&
+    !ggselMissing &&
+    !zeusxMissing &&
+    !g2gMissing &&
+    !eldoradoMissing
+  ) {
     return null;
   }
 
@@ -1240,6 +1377,7 @@ async function retryMissingSecondaries(task) {
     if (mapped) targets.push("zeusx");
   }
   if (g2gMissing && af.g2gAuto && brandForGame(task.game)) targets.push("g2g");
+  if (eldoradoMissing) targets.push("eldorado");
   if (!targets.length) return null;
 
   const shares = {};
@@ -1317,10 +1455,54 @@ async function retryMissingSecondaries(task) {
             error: err.message,
           };
         }
+      } else if (t === "eldorado") {
+        try {
+          const r = await publishEldoradoShare({
+            ...base,
+            // The Gameflip row's copy tells the buyer to message the seller
+            // "on Gameflip"; Eldorado gets its own support line, exactly as the
+            // first publish builds it.
+            description: buildDescription({
+              game: task.game,
+              items: (set.items || []).map((i) =>
+                i && typeof i.toObject === "function" ? i.toObject() : i,
+              ),
+              campaignName: task.campaignName,
+              postEvent: !!L.postEvent,
+              marketplace: "eldorado",
+            }),
+            accounts,
+            game: task.game,
+          });
+          task.listing.eldorado = { ...r, error: "" };
+          retried.push("eldorado");
+        } catch (err) {
+          if (ELD_LIMIT_RE.test(String((err && err.message) || ""))) {
+            eldoradoLimitUntil = Date.now() + ELD_LIMIT_COOLDOWN_MS;
+          }
+          task.listing.eldorado = {
+            externalId: "",
+            url: "",
+            qty: 0,
+            error: err.message,
+          };
+        }
       } else {
         try {
           const r = await publishGgselShare({
             ...base,
+            // Same reason as Eldorado above: the Gameflip row's copy tells a
+            // GGSel buyer to message the seller "on Gameflip". GGSel gets its
+            // own support line, exactly as the first publish builds it.
+            description: buildDescription({
+              game: task.game,
+              items: (set.items || []).map((i) =>
+                i && typeof i.toObject === "function" ? i.toObject() : i,
+              ),
+              campaignName: task.campaignName,
+              postEvent: !!L.postEvent,
+              marketplace: "ggsel",
+            }),
             accounts,
             categoryId: t.slice("ggsel:".length),
           });
@@ -1486,9 +1668,11 @@ async function refillMarkets(task, { perMarketStock = 3 } = {}) {
   }
 
   // --- Plati (Digiseller): live stock read, then add codes to the product.
+  // Never while Plati is switched off or its seller account is blocked.
   if (
     L.plati &&
     L.plati.externalId &&
+    platiTakesNewStock(settings.getAutoFarm()) &&
     (await listingIsLive("digiseller", L.plati.externalId))
   ) {
     try {
@@ -1522,9 +1706,11 @@ async function refillMarkets(task, { perMarketStock = 3 } = {}) {
   }
 
   // --- GGSel: live stock read, add products, resync sellable quantity.
+  // Never while GGSel is switched off.
   if (
     L.ggsel &&
     L.ggsel.externalId &&
+    ggselTakesNewStock(settings.getAutoFarm()) &&
     (await listingIsLive("ggsel", L.ggsel.externalId))
   ) {
     try {
@@ -1729,7 +1915,7 @@ async function listActivatedTask(taskId, { dryRun = false } = {}) {
   // is only ever attached to one market, so a sale on one platform can never
   // hand out an account a buyer on another platform already received.
   const af = settings.getAutoFarm();
-  const platiEnabled = !!af.platiCategoryId;
+  const platiEnabled = platiTakesNewStock(af);
   // Per-game category: own-history match first, then catalog search for the
   // game's "Twitch Drops" section, then its Accounts section. The settings
   // value is only a manual override / last resort.
@@ -1764,7 +1950,7 @@ async function listActivatedTask(taskId, { dryRun = false } = {}) {
   const g2gEnabled = !!af.g2gAuto && !!brandForGame(task.game);
   const marketOrder = ["gameflip"];
   if (platiEnabled) marketOrder.push("plati");
-  if (ggselCategoryId) marketOrder.push("ggsel");
+  if (ggselCategoryId && ggselTakesNewStock(af)) marketOrder.push("ggsel");
   if (zeusxEnabled) marketOrder.push("zeusx");
   if (eldoradoEnabled) marketOrder.push("eldorado");
   if (paEnabled) marketOrder.push("playerauctions");
@@ -1778,9 +1964,7 @@ async function listActivatedTask(taskId, { dryRun = false } = {}) {
     playerauctions: [],
     g2g: [],
   };
-  accounts.forEach((acc, i) => {
-    shares[marketOrder[i % marketOrder.length]].push(acc);
-  });
+  dealShares(accounts, marketOrder, shares, await gameflipCodeHeldLogins());
 
   // The DropSet makes the listing part of the normal machinery: the relist
   // chain, the Shop and the drop archive all understand sets.
@@ -1820,7 +2004,10 @@ async function listActivatedTask(taskId, { dryRun = false } = {}) {
     throw new Error(
       "Auto-list " +
         task.game +
-        ": no account still held the full bundle unclaimed at publish time",
+        (gfAccounts.length
+          ? ": no account still held the full bundle unclaimed at publish time"
+          : ": every account holding the full bundle was already sold on " +
+            "Gameflip, which refuses the same login twice — nothing to anchor the listing"),
     );
   }
   let published;
@@ -1838,16 +2025,22 @@ async function listActivatedTask(taskId, { dryRun = false } = {}) {
       gfDeliver,
       set,
       () =>
-        mp.gameflipPublish({
-          title,
-          description,
-          priceUsd: price,
-          imagePath: img,
-          autoDeliverCode: gameflipDeliveryCode(
-            gfDeliver.login,
-            gfDeliver.password,
-          ),
-        }),
+        mp
+          .gameflipPublish({
+            title,
+            description,
+            priceUsd: price,
+            imagePath: img,
+            autoDeliverCode: gameflipDeliveryCode(
+              gfDeliver.login,
+              gfDeliver.password,
+            ),
+          })
+          .catch((e) => {
+            // A holder the DB cannot name: the next deal skips this account.
+            noteIfCodeRefused(gfDeliver.login, e);
+            throw e;
+          }),
       {
         release: async (acct, s) => {
           await releaseReservedForSet(acct, s);
@@ -1878,7 +2071,7 @@ async function listActivatedTask(taskId, { dryRun = false } = {}) {
         plati.error = err.message;
       }
     } else if (!platiEnabled) {
-      plati.error = "no Plati category id in auto-farm settings";
+      plati.error = platiOffReason(af);
     } else {
       plati.error = "no spare account for this market yet";
     }
@@ -1903,6 +2096,8 @@ async function listActivatedTask(taskId, { dryRun = false } = {}) {
       } catch (err) {
         ggsel.error = err.message;
       }
+    } else if (!ggselTakesNewStock(af)) {
+      ggsel.error = "GGSel is switched off in auto-farm settings";
     } else if (!ggselCategoryId) {
       ggsel.error =
         "no GGSel category found for " +
@@ -2097,7 +2292,7 @@ async function publishStackedListing({
   const description = descriptions.gameflip;
   // Same market split as the solo flow: Gameflip first, then Plati, then GGSel.
   const af = settings.getAutoFarm();
-  const platiEnabled = !!af.platiCategoryId;
+  const platiEnabled = platiTakesNewStock(af);
   let ggselCategoryId = "";
   try {
     ggselCategoryId = await mp.ggselResolveCategoryId(task.game);
@@ -2107,11 +2302,9 @@ async function publishStackedListing({
   if (!ggselCategoryId) ggselCategoryId = String(af.ggselCategoryId || "");
   const marketOrder = ["gameflip"];
   if (platiEnabled) marketOrder.push("plati");
-  if (ggselCategoryId) marketOrder.push("ggsel");
+  if (ggselCategoryId && ggselTakesNewStock(af)) marketOrder.push("ggsel");
   const shares = { gameflip: [], plati: [], ggsel: [] };
-  accounts.forEach((acc, i) => {
-    shares[marketOrder[i % marketOrder.length]].push(acc);
-  });
+  dealShares(accounts, marketOrder, shares, await gameflipCodeHeldLogins());
 
   let img = "";
   try {
@@ -2126,7 +2319,9 @@ async function publishStackedListing({
     await DropSet.deleteOne({ _id: set._id }).catch(() => {});
     if (img) await fsp.unlink(img).catch(() => {});
     return {
-      skipped: "stack holder lost the race at publish time",
+      skipped: gfAccounts.length
+        ? "stack holder lost the race at publish time"
+        : "every stack holder was already sold on Gameflip, which refuses the same login twice",
       waiting: true,
     };
   }
@@ -2138,16 +2333,22 @@ async function publishStackedListing({
       gfDeliver,
       set,
       () =>
-        mp.gameflipPublish({
-          title,
-          description,
-          priceUsd: price,
-          imagePath: img,
-          autoDeliverCode: gameflipDeliveryCode(
-            gfDeliver.login,
-            gfDeliver.password,
-          ),
-        }),
+        mp
+          .gameflipPublish({
+            title,
+            description,
+            priceUsd: price,
+            imagePath: img,
+            autoDeliverCode: gameflipDeliveryCode(
+              gfDeliver.login,
+              gfDeliver.password,
+            ),
+          })
+          .catch((e) => {
+            // A holder the DB cannot name: the next deal skips this account.
+            noteIfCodeRefused(gfDeliver.login, e);
+            throw e;
+          }),
       {
         release: async (acct, s) => {
           await releaseReservedForSet(acct, s);
@@ -2174,7 +2375,7 @@ async function publishStackedListing({
         plati.error = err.message;
       }
     } else if (!platiEnabled) {
-      plati.error = "no Plati category id in auto-farm settings";
+      plati.error = platiOffReason(af);
     } else {
       plati.error = "no spare account for this market yet";
     }
@@ -2196,6 +2397,8 @@ async function publishStackedListing({
       } catch (err) {
         ggsel.error = err.message;
       }
+    } else if (!ggselTakesNewStock(af)) {
+      ggsel.error = "GGSel is switched off in auto-farm settings";
     } else if (!ggselCategoryId) {
       ggsel.error =
         "no GGSel category found for " +
@@ -3212,8 +3415,13 @@ module.exports = {
   onCampaignEnded,
   refillMarkets,
   retryMissingSecondaries,
+  eldoradoShareMissing,
   isAutoOwned,
   // exported for tests
+  dealShares,
+  platiTakesNewStock,
+  ggselTakesNewStock,
+  platiOffReason,
   listingIsLive,
   buildTitle,
   buildDescription,

@@ -25,6 +25,7 @@
 const hosts = require("./botHosts");
 const BotAccount = require("../models/BotAccount");
 const settings = require("./settings");
+const { isWatchableDrop, manifestFarmable } = require("./campaignFarmability");
 
 // Stale scans are worthless for this decision — a verdict from before the
 // current campaign started would happily stop a bot that is mid-drop.
@@ -136,6 +137,14 @@ function classifyBotCompletion(data, rows, opts = {}) {
   const requireEarned = !!opts.requireEarned && heldByLogin != null;
   const expectedByGame =
     opts.expectedByGame instanceof Map ? opts.expectedByGame : null;
+  // Assigned games that have an active campaign a bot can actually earn from
+  // (utils/campaignFarmability.js). When supplied, the "holds a drop for every
+  // assigned game" rule skips games with nothing farmable right now — a game
+  // with no campaign, or only a subscription-only one, can never produce that
+  // drop, so requiring it kept finished bots up forever. Absent → every
+  // assigned game is required, exactly as before.
+  const farmableGames =
+    opts.farmableGames instanceof Set ? opts.farmableGames : null;
   const configLevel = Array.isArray(data && data.FavouriteGames)
     ? data.FavouriteGames
     : [];
@@ -190,7 +199,11 @@ function classifyBotCompletion(data, rows, opts = {}) {
       // Per-game evidence: finished only when the account holds a drop for
       // every game it was assigned (INCLUSIVE label match — "overwatch" must
       // match a "Overwatch 2" DropLog row). Missing any → it hasn't farmed it.
-      const missing = mine.filter((g) => !heldGamesMatch(held.games, g));
+      const missing = mine.filter(
+        (g) =>
+          (!farmableGames || farmableGames.has(g)) &&
+          !heldGamesMatch(held.games, g),
+      );
       if (missing.length) {
         out.notStarted.push(label);
       } else if (missingExpectedDrops(held, mine, expectedByGame)) {
@@ -283,6 +296,7 @@ async function botCompletion(hostId, file, opts = {}) {
   // queries are skipped for the default global-dropCount verdict).
   let heldByLogin = null;
   let expectedByGame = null;
+  let farmableGames = null;
   if (opts.requireEarned) {
     const logins = rows.map((r) => r.login).filter(Boolean);
     heldByLogin = new Map();
@@ -306,13 +320,18 @@ async function botCompletion(hostId, file, opts = {}) {
         if (d.itemKey) h.itemKeys.add(String(d.itemKey));
       }
     }
-    expectedByGame = await buildExpectedByGame(data);
+    ({ expectedByGame, farmableGames } = await buildExpectedByGame(data));
   }
 
   return {
     host: host.id,
     file,
-    ...classifyBotCompletion(data, rows, { ...opts, heldByLogin, expectedByGame }),
+    ...classifyBotCompletion(data, rows, {
+      ...opts,
+      heldByLogin,
+      expectedByGame,
+      farmableGames,
+    }),
   };
 }
 
@@ -320,6 +339,10 @@ async function botCompletion(hostId, file, opts = {}) {
 // ACTIVE campaign whose game matches the config label inclusively. Keyed by
 // the same normalised label classifyBotCompletion uses for `mine`, so a config
 // "naraka" and a campaign "NARAKA: BLADEPOINT" land on the same key.
+// Subscription-only drops are left out (no watching earns them), and
+// `farmableGames` names the assigned games with at least one campaign a bot
+// can earn from — a campaign with no manifest yet counts, so missing evidence
+// keeps a bot up.
 async function buildExpectedByGame(data) {
   const configLevel = Array.isArray(data && data.FavouriteGames)
     ? data.FavouriteGames
@@ -329,7 +352,7 @@ async function buildExpectedByGame(data) {
     if (!u || u.Enabled === false) continue;
     for (const g of gamesForUser(u, configLevel)) assigned.add(g);
   }
-  if (!assigned.size) return new Map();
+  if (!assigned.size) return { expectedByGame: new Map(), farmableGames: new Set() };
   const now = new Date();
   const TwitchCampaign = require("../models/TwitchCampaign");
   const CampaignDrops = require("../models/CampaignDrops");
@@ -346,14 +369,17 @@ async function buildExpectedByGame(data) {
   }).lean();
   const byCampaign = new Map(manis.map((m) => [m.campaignId, m]));
   const out = new Map();
+  const farmableGames = new Set();
   for (const g of assigned) {
     const expected = [];
     const seen = new Set();
     for (const c of camps) {
       if (!gameMatches(g, c.game)) continue;
       const m = byCampaign.get(c.campaignId);
+      if (manifestFarmable(m)) farmableGames.add(g);
       if (!m || !Array.isArray(m.drops)) continue;
       for (const d of m.drops) {
+        if (!isWatchableDrop(d)) continue;
         const key = String(d.benefitId || "") + "|" + String(d.itemKey || "");
         if (seen.has(key)) continue;
         seen.add(key);
@@ -362,7 +388,7 @@ async function buildExpectedByGame(data) {
     }
     if (expected.length) out.set(g, expected);
   }
-  return out;
+  return { expectedByGame: out, farmableGames };
 }
 
 module.exports = {

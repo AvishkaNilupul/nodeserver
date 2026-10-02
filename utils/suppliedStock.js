@@ -58,12 +58,10 @@ const MARKETS = [
   "gameflip",
   "digiseller",
   "ggsel",
-  "funpay",
   "zeusx",
   "eldorado",
   "playerauctions",
   "g2g",
-  "z2u",
 ];
 
 // The ledger's own status enum (models/SuppliedAccount). offerStats reports one
@@ -79,6 +77,16 @@ const NOTIFY_TIMEOUT_MS = 5000;
 // every stock sync. Read in a stable _id order so the same rows are taken —
 // and so the same row keeps the same rank — on every pass.
 const SHARER_SCAN_MAX = 100;
+
+// Live listings that never draw on the shelf again once they are up, so they
+// must not take a share of it. A ZeusX account-listing offer holds exactly the
+// one account it was published with (automatic delivery carries a single
+// credential, and there is no relist). A hand-delivered post is
+// forum thread with nothing claimed at all. Counted as sharers they would only
+// shrink what every market that DOES claim from the shelf may advertise — one
+// ZeusX offer per account, so ten of them would cut an Eldorado offer's share to
+// a fraction of the accounts actually left.
+const NON_SHARING_MARKETS = ["zeusx"];
 
 // How many anchored case-insensitive RegExps go into one $in when sweeping
 // BotAccount for a case-different login (F1b). Such a regex can only SCAN the
@@ -359,7 +367,7 @@ function logSafely(deps, fields) {
 //
 // This THROWS on a DB error rather than reporting 0. Five stock counters feed
 // the marketplace stock syncs and 0 takes a live offer off sale (eldorado
-// pause, PA hide, G2G delist, Z2U off_line) — a fabricated 0 would unlist a
+// pause, PA hide, G2G delist) — a fabricated 0 would unlist a
 // healthy offer, so the caller decides what a failed read means.
 async function shelfFor(listingOrOfferId, opts = {}) {
   const deps = opts.deps || {};
@@ -380,11 +388,16 @@ async function shelfFor(listingOrOfferId, opts = {}) {
 // describes — the only guard that existed counted ACTIVE PlayerAuctions rows
 // alone (utils/playerauctionsFulfiller.js's old sharersOfAccountOffer, now
 // deleted in favour of this), so four markets still advertised the full shelf.
+// The one exception is NON_SHARING_MARKETS, which never draw on it again.
 async function sharerIds(offer, opts = {}) {
   const deps = opts.deps || {};
   const MarketplaceListing = dep("MarketplaceListing", deps);
   const rows = await MarketplaceListing.find(
-    { accountOffer: offer, status: "active" },
+    {
+      accountOffer: offer,
+      status: "active",
+      marketplace: { $nin: NON_SHARING_MARKETS },
+    },
     { _id: 1 },
   )
     .sort({ _id: 1 })
@@ -428,7 +441,7 @@ function shareOfShelf(free, selfId, ids) {
 //
 // Every claim-at-sale counter pushes the number it gets from here straight onto
 // its own live offer, and they all used to get the whole shelf. Publish one
-// 50-account offer to Eldorado, PlayerAuctions, G2G and Z2U and the world saw
+// 50-account offer to Eldorado, PlayerAuctions and G2G and the world saw
 // 200 for sale: the first 50 sales were honoured and every sale after that
 // found an empty shelf with the buyer already paid. Dividing HERE means no
 // counter can forget to — a per-fulfiller guard is a copy, and copies drift
@@ -782,7 +795,7 @@ async function claimForListing(listing, want, opts = {}) {
   // dryRun is exempt on purpose: the Accounts panel and the marketplace stock
   // syncs read the shelf through a dry claim, and reporting 0 while delivery is
   // merely PAUSED would take a healthy offer off sale (eldorado pause, PA hide,
-  // G2G delist, Z2U off_line) — a pause would look like an empty shelf.
+  // G2G delist) — a pause would look like an empty shelf.
   //
   // Ahead of the resume block deliberately: while delivery is off, a retry must
   // hand back nothing at all. The rows a previous attempt already claimed stay
@@ -868,7 +881,7 @@ async function claimForListing(listing, want, opts = {}) {
           listing: listingIdOf(listing),
         },
       },
-      { new: true },
+      { returnDocument: "after" },
     ).lean();
     if (!taken) continue;
     out.push(toAccount(taken));
@@ -1077,6 +1090,7 @@ module.exports = {
   MARKETS,
   STATUSES,
   SHARER_SCAN_MAX,
+  NON_SHARING_MARKETS,
   REAL_DEPS,
   parseSuppliedAccounts,
   deliveryText,

@@ -25,7 +25,9 @@ const { decrypt } = require("./secretBox");
 const mp = require("./marketplaces");
 const operatorFarm = require("./operatorFarm");
 const farmAlert = require("./farmServiceAlert");
+const farmHandover = require("./farmHandover");
 const provisioning = require("./farmProvisioning");
+const { accountsForUnits, titlePackSize } = require("./bulkPacks/packMath");
 
 // Which marketplace this service speaks for, used in failure alerts.
 const MARKET = "g2g";
@@ -94,14 +96,16 @@ async function credentialsFor(added) {
   return out;
 }
 
-function farmMessage(creds, { game, days }) {
+// `until` is the window's end, counted from this hand-over (utils/farmHandover).
+function farmMessage(creds, { game, days }, { until = null } = {}) {
   // Lazy require: g2gFulfiller requires this module, so pulling it in at load
   // time would be a cycle and the export would be undefined here.
   const { g2gDeliveryCode } = require("./g2gFulfiller");
   const lines = creds.map((c) => g2gDeliveryCode(c.login, c.password));
   return (
     "Your " + game + " Twitch Drops automatic farming is now running for " +
-    days + " days.\n\n" +
+    farmHandover.termWords(days) +
+    (until ? ", until " + farmHandover.dayText(until) + " (UTC)" : "") + ".\n\n" +
     lines.join("\n") +
     "\n\nThe account above is already connected and farming for you. Sign in " +
     "to Twitch with it any time to see the drops as they arrive, and keep it " +
@@ -188,6 +192,29 @@ async function deliverFarmOrder(order, { dryRun } = {}) {
   const key = farmOrderKey(orderId);
   const qty = Math.max(1, parseInt(order && order.purchasedQty, 10) || 1);
 
+  // Bulk packs v2 (docs/bulk-packs/PACKS-2.md §2): on a bulk pack farming
+  // offer each unit bought is a pack of N accounts. `qty` stays in G2G's units
+  // — it is what G2G is told (delivered_qty), a pack being ONE — and `accounts`
+  // is what is provisioned, recorded as the row's quantity, alerted on and
+  // handed over. Every other farming offer: accounts === qty, as before. The
+  // lookup is shared with the Eldorado service (one copy), asked before
+  // anything else, dry run included; an unreadable answer waits for the next
+  // tick with nothing provisioned, never a guess.
+  let bulk = null;
+  try {
+    bulk = await require("./eldoradoFarmService").bulkFarmPack(order && order.offerId, MARKET);
+  } catch (e) {
+    return {
+      orderId,
+      farm: true,
+      error:
+        "could not read the bulk offer behind farming offer " +
+        String((order && order.offerId) || "") + " (" + (e && e.message) + ") — " +
+        "nothing provisioned, the next tick retries",
+    };
+  }
+  let accounts = bulk ? accountsForUnits(bulk.pack, qty) : qty;
+
   // A title we cannot read is still a PAID order.
   //
   // These two checks used to return here, ABOVE the FarmServiceOrder claim — so
@@ -198,22 +225,33 @@ async function deliverFarmOrder(order, { dryRun } = {}) {
   //
   // (The alias hint also named playerauctionsFarmService — a copy-paste that
   // would have sent whoever hit this to the wrong file.)
-  const unreadable = !parsed.days
+  // A pack title with no matching bulk offer must never provision x1 (see
+  // utils/eldoradoFarmService): refused on the row like any unreadable order.
+  const titleN = titlePackSize(parsed.title);
+  const packMismatch =
+    titleN && (!bulk || bulk.size !== titleN)
+      ? "the title promises PACK OF " + titleN + " ACCOUNTS but " +
+        (bulk
+          ? "its bulk offer is a pack of " + bulk.size
+          : "no bulk offer matches offer " + String((order && order.offerId) || "")) +
+        " — nothing provisioned; deliver it by hand"
+      : "";
+  const unreadable = packMismatch || (!parsed.days
     ? 'could not read a farming term from "' + parsed.title + '"'
     : !parsed.game
       ? 'the farm does not know a game called "' + parsed.rawGame + '" — ' +
         "add an alias in utils/g2gFarmService before this can auto-deliver"
-      : "";
+      : "");
 
   if (dryRun) {
     if (unreadable) return { orderId, farm: true, dryRun: true, error: unreadable };
-    const avail = await operatorFarm.previewFreshAccounts({ count: qty });
+    const avail = await operatorFarm.previewFreshAccounts({ count: accounts });
     return {
       orderId,
       farm: true,
       dryRun: true,
       wouldSend:
-        qty + "x " + parsed.game + " for " + parsed.days + " days " +
+        accounts + "x " + parsed.game + " for " + parsed.days + " days " +
         "(pool eligible: " + avail.eligibleTotal + ", would add: " + avail.willAdd + ")",
     };
   }
@@ -221,8 +259,10 @@ async function deliverFarmOrder(order, { dryRun } = {}) {
   // Claim the order. The unique index is what stops two ticks provisioning the
   // same order twice.
   let row = await FarmServiceOrder.findOne({ orderId: key });
-  if (row && row.state === "delivered") {
-    return { orderId, farm: true, skipped: "already delivered" };
+  // A CANCELLED row is closed (the buyer walked away / was refunded) — it must
+  // never provision, even while the platform still lists the order as paid.
+  if (row && (row.state === "delivered" || row.state === "cancelled")) {
+    return { orderId, farm: true, skipped: "already " + row.state };
   }
   if (!row) {
     try {
@@ -234,18 +274,38 @@ async function deliverFarmOrder(order, { dryRun } = {}) {
         buyerUsername: String((order && order.buyerId) || ""),
         game: parsed.game,
         days: parsed.days,
-        quantity: qty,
+        quantity: accounts,
       });
     } catch (e) {
       if (e && e.code === 11000)
         return { orderId, farm: true, skipped: "claimed by another tick" };
       throw e;
     }
+    // A pack order's units and pack size (PACKS-2 §2). FarmServiceOrder
+    // declares no `note` path, so it is written schema-less; the next save
+    // below persists it.
+    if (bulk) {
+      row.set(
+        "note",
+        require("./eldoradoFarmService").packNote(bulk, qty, accounts),
+        { strict: false },
+      );
+    }
   }
   row.attempts += 1;
 
+  // Once anything is provisioned, the account count / game / term it was
+  // provisioned for stand (utils/farmProvisioning.freezeOrder). `qty` — G2G's
+  // own unit count, what delivered_qty is told — is the order's and unchanged.
+  const fz = provisioning.freezeOrder(row, { qty: accounts, game: parsed.game, days: parsed.days });
+  accounts = fz.qty;
+  if (fz.frozen) {
+    parsed.game = fz.game;
+    parsed.days = fz.days;
+  }
+
   // The unreadable-title refusal, now that there is a row to hang it on.
-  if (unreadable) {
+  if (unreadable && !fz.frozen) {
     const alert = farmAlert.shouldAlert(row);
     row.state = "failed";
     row.lastError = unreadable;
@@ -258,7 +318,7 @@ async function deliverFarmOrder(order, { dryRun } = {}) {
           offerTitle: row.offerTitle || parsed.title || "",
           game: parsed.game || parsed.rawGame || "",
           days: parsed.days || 0,
-          qty,
+          qty: accounts,
           buyerUsername: row.buyerUsername || "",
           reason: unreadable,
         })
@@ -274,7 +334,7 @@ async function deliverFarmOrder(order, { dryRun } = {}) {
       // Asking for `qty` again and overwriting row.accounts is what stranded the
       // accounts a previous attempt had already pinned to a bot — see
       // utils/farmProvisioning for the whole failure.
-      const need = provisioning.stillNeeded(row, qty);
+      const need = provisioning.stillNeeded(row, accounts);
       const res = need
         ? await operatorFarm.farmFreshAccounts({
             game: parsed.game,
@@ -289,7 +349,7 @@ async function deliverFarmOrder(order, { dryRun } = {}) {
         added,
         res && res.farmUntil,
       );
-      if (row.accounts.length < qty) {
+      if (row.accounts.length < accounts) {
         // Keep WHY. farmFreshAccounts hands back skipped:[{username, reason}]
         // with the real error behind each rejected account; recording only the
         // count is what made order 4b20765f undiagnosable.
@@ -297,7 +357,7 @@ async function deliverFarmOrder(order, { dryRun } = {}) {
         row.state = "failed";
         row.lastError = farmAlert.shortfallMessage(
           { added: row.accounts, skipped: (res && res.skipped) || [] },
-          qty,
+          accounts,
         );
         await row.save();
         if (alert) {
@@ -307,9 +367,10 @@ async function deliverFarmOrder(order, { dryRun } = {}) {
             offerTitle: row.offerTitle || parsed.title || "",
             game: parsed.game,
             days: parsed.days,
-            qty,
+            qty: accounts,
             buyerUsername: row.buyerUsername || "",
             reason: row.lastError,
+            logins: farmHandover.loginsOf(row),
           });
         }
         return { orderId, farm: true, error: row.lastError };
@@ -337,9 +398,10 @@ async function deliverFarmOrder(order, { dryRun } = {}) {
             offerTitle: row.offerTitle || parsed.title || "",
             game: parsed.game,
             days: parsed.days,
-            qty,
+            qty: accounts,
             buyerUsername: row.buyerUsername || "",
             reason: row.lastError,
+            logins: farmHandover.loginsOf(row),
           });
         }
         return { orderId, farm: true, error: row.lastError };
@@ -348,7 +410,10 @@ async function deliverFarmOrder(order, { dryRun } = {}) {
       // transitions are idempotent enough to re-run.
       await mp.g2gStartDeliver(orderId).catch(() => {});
       await mp.g2gMarkDelivering(orderId).catch(() => {});
-      const message = farmMessage(creds, parsed);
+      // The window counts from this hand-over; the date in the text is pinned
+      // at the first attempt so a retry sends the same body (utils/farmHandover).
+      const until = await farmHandover.pinUntil(row, parsed.days);
+      const message = farmMessage(creds, parsed, { until });
       try {
         await chat.sendToBuyer(order.buyerId, message);
       } catch (e) {
@@ -377,6 +442,11 @@ async function deliverFarmOrder(order, { dryRun } = {}) {
         const WAITING = "waiting for the operator to paste the credential";
         const attempts = Number(row.attempts) || 0;
         const firstAsk = row.lastError !== WAITING;
+        // The text the operator pastes names `until`: the ledger must end no
+        // earlier than that, whenever the paste happens (never moved earlier).
+        await farmHandover
+          .stampFromHandover(row, until)
+          .catch((err) => console.error("g2g farm " + orderId + ": window re-stamp failed:", err.message));
         if (firstAsk || (attempts > 0 && attempts % farmAlert.REALERT_EVERY === 0)) {
           await require("./telegram").sendTelegram(
             "G2G rent-farm order " + orderId + " is provisioned and FARMING, " +
@@ -401,10 +471,14 @@ async function deliverFarmOrder(order, { dryRun } = {}) {
       }
       row.messageSentAt = new Date();
       row.state = "sent";
+      await farmHandover
+        .stampFromHandover(row, farmHandover.handoverStamp(until, parsed.days))
+        .catch((e) => console.error("g2g farm " + orderId + ": window re-stamp failed:", e.message));
       await row.save();
     }
 
-    // 3. Only now is the order delivered — if G2G will take the count.
+    // 3. Only now is the order delivered — if G2G will take the count. The
+    // count is `qty`, in G2G's units: a pack delivered is ONE (PACKS-2 §2).
     const confirm = await confirmFarmOnG2g(row, orderId, qty);
     if (!confirm.confirmed) {
       return {
@@ -428,8 +502,15 @@ async function deliverFarmOrder(order, { dryRun } = {}) {
     };
   } catch (e) {
     const alertErr = farmAlert.shouldAlert(row);
-    row.state = "failed";
-    row.lastError = String(e.message || e).slice(0, 400);
+    // After the login reached the buyer only the confirmation can have failed:
+    // the row stays "sent" and the page says so (utils/farmHandover).
+    const sent = !!row.messageSentAt;
+    if (sent) {
+      farmHandover.sentButUnconfirmed(row, MARKET, e);
+    } else {
+      row.state = "failed";
+      row.lastError = String(e.message || e).slice(0, 400);
+    }
     await row.save().catch(() => {});
     if (alertErr) {
       await farmAlert.alertFarmFailure({
@@ -438,12 +519,14 @@ async function deliverFarmOrder(order, { dryRun } = {}) {
         offerTitle: row.offerTitle || (parsed && parsed.title) || "",
         game: (parsed && parsed.game) || row.game || "",
         days: (parsed && parsed.days) || row.days || 0,
-        qty,
+        qty: accounts,
         buyerUsername: row.buyerUsername || "",
         reason: row.lastError,
+        logins: farmHandover.loginsOf(row),
+        sent,
       });
     }
-    return { orderId, farm: true, error: row.lastError };
+    return { orderId, farm: true, error: row.lastError, ...(sent ? { sent: true } : {}) };
   }
 }
 

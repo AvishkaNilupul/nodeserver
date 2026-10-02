@@ -53,9 +53,24 @@ const renterSchema = new mongoose.Schema(
 
     // Bookkeeping.
     lastLoginAt: { type: Date, default: null },
+    // Bumped by a password reset and by a suspend: every portal session
+    // carries the epoch it logged in under and dies when they differ, so a
+    // reset really locks out whoever held the old password (or a stolen
+    // cookie), and an unsuspend does not revive sessions from before.
+    sessionEpoch: { type: Number, default: 0 },
     // Stamped when a suspend/expiry sweep has already stopped their bot, so the
     // sweep doesn't keep issuing stop calls every tick.
     botStoppedAt: { type: Date, default: null },
+    // WHY the renter's farming is stopped, while botStoppedAt is set:
+    // "lease" (the expiry sweep), "suspend", "operator" (Stop on /renters.html)
+    // or "renter" (their own Stop button). A lease extension resumes farming
+    // only when the lease end was the reason — a stop someone chose stays a stop.
+    botStopReason: { type: String, default: "" },
+    // "host/file" configs a FAILED stop pulled this renter's accounts from (or
+    // could not): the next attempt re-checks them even though the accounts are
+    // no longer found there — a bot whose reload failed still has them loaded,
+    // so the stop is not reported done until each has reloaded.
+    stopOwedFiles: { type: [String], default: undefined },
     // Stamped when the "lease expiring soon" heads-up was sent for the CURRENT
     // accessEnd, so the sweep warns once per lease, not once per tick. A lease
     // extension moves accessEnd, which re-arms the warning (see renterExpiry).

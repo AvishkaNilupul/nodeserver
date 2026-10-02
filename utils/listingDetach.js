@@ -9,7 +9,7 @@
 //
 // Each marketplace needs different handling because "the account is on this
 // listing" means different things:
-//   funpay      — a login:password line in the offer's auto-delivery pool.
+//   (qty)       — a delivery unit on a Digiseller / GGSel product.
 //   gameflip    — the account's credentials are baked into the live auto-
 //                 delivery code, so the whole offer must come down (and can be
 //                 republished with a fresh account to keep the sale slot).
@@ -150,6 +150,41 @@ async function removeSuppliedUnits(row, accId, login) {
 // the caller to surface. Never throws for expected marketplace failures; those
 // become warnings so a partial detach still reports what it could do.
 async function detachAccountFromListing(row, acc, opts = {}) {
+  // A no-claim listing (docs/NOCLAIM-SHOP-LISTINGS-CONTRACT.md §6) holds
+  // no-claim farm accounts whose units utils/noclaimListings owns. Every branch
+  // below is archive surgery — a republish would rebuild the product from the
+  // set's DropLog stock — so none of it may run on one.
+  if (row && row.noclaimStock) {
+    return {
+      detached: [],
+      warnings: [
+        "no-claim listing — units are managed by utils/noclaimListings",
+      ],
+    };
+  }
+  // A bulk pack row (docs/bulk-packs/CONTRACT.md) is sold whole and owned by
+  // utils/bulkPacks: pulling one account out here, or republishing, would sell
+  // a different product. The bulk system takes the account out of the pack and
+  // KEEPS its reservation (the owner spent it elsewhere).
+  if (row && row.bulkOfferId) {
+    try {
+      return await require("./bulkPacks/loop").takeAccountOut({
+        row,
+        accountId: acc && acc._id ? String(acc._id) : "",
+        login: (acc && acc.login) || "",
+        reason: opts.reason || "removed",
+      });
+    } catch (e) {
+      return {
+        detached: [],
+        warnings: [
+          "bulk pack listing — could not take the account out automatically (" +
+            ((e && e.message) || e) +
+            "); withdraw the pack on the Bulk packs page",
+        ],
+      };
+    }
+  }
   const reason = opts.reason || "removed";
   const republish = opts.republish !== false;
   const detached = [];
@@ -164,7 +199,7 @@ async function detachAccountFromListing(row, acc, opts = {}) {
     // is the same everywhere, and the only one that stops the account being
     // sold a second time. The platform side still runs below: delisting a
     // Gameflip/ZeusX offer whose code carries these credentials, or pulling a
-    // FunPay pool line, is right for a supplied account too.
+    // pool line, is right for a supplied account too.
     if (row.accountOffer) {
       try {
         const res = await removeSuppliedUnits(row, accId, login);
@@ -196,56 +231,7 @@ async function detachAccountFromListing(row, acc, opts = {}) {
         );
       }
     }
-    if (row.marketplace === "funpay") {
-      // Pull only this account's line out of the undelivered pool. FunPay has no
-      // update API, so this reloads the editor and re-saves every field with the
-      // account's line dropped; an emptied pool is saved off sale.
-      const keptIds = splitCsv(row.accountId).filter((x) => !accId || x !== accId);
-      const keptLogins = splitCsv(row.accountLogin).filter(
-        (x) => !login || x.toLowerCase() !== login.toLowerCase(),
-      );
-      let upd = null;
-      try {
-        upd = await mp.funpayUpdateSecrets(row.externalId, row.externalNode, {
-          removeLogins: login ? [login] : [],
-          activate: null, // keep current state; goes off sale if pool empties
-        });
-      } catch (e) {
-        // Leave the row referencing the account: our tracking must keep
-        // matching the still-live offer so it isn't silently double-sold.
-        warnings.push(
-          label +
-            ": could not pull the FunPay delivery line (" +
-            (e.message || e) +
-            ") — remove it on FunPay manually.",
-        );
-        return { detached, warnings };
-      }
-      const emptied = upd.pool === 0;
-      const set = {
-        accountId: keptIds.join(","),
-        accountLogin: keptLogins.join(", "),
-      };
-      if (emptied) {
-        set.status = "delisted";
-        set.note = "account " + reason + " — FunPay pool emptied, off sale";
-      }
-      await MarketplaceListing.updateOne({ _id: row._id }, { $set: set });
-      if (!upd.removed) {
-        warnings.push(
-          label +
-            ": " +
-            (login || "the account") +
-            "'s delivery line was already handed to a buyer — it may already be sold there.",
-        );
-      }
-      detached.push(
-        label +
-          (emptied
-            ? " (delisted — pool emptied)"
-            : " (line pulled, pool now " + upd.pool + ")"),
-      );
-    } else if (row.marketplace === "gameflip" && row.autoDeliver) {
+    if (row.marketplace === "gameflip" && row.autoDeliver) {
       // The live Gameflip listing carries this account's credentials in its
       // delivery code — it must come down, then the chain optionally continues
       // with a fresh account if one exists.
@@ -459,7 +445,7 @@ async function detachAccountFromListing(row, acc, opts = {}) {
       }
     } else if (!row.accountOffer) {
       // Not for an account listing on a claim-at-sale market (Eldorado,
-      // PlayerAuctions, G2G, Z2U): the offer there is a bare quantity, the
+      // PlayerAuctions, G2G): the offer there is a bare quantity, the
       // credentials never left our side, and the ledger row is "removed" by
       // now, so no delivery can pick it. This warning would send the owner
       // hunting on the platform for something that is not there.

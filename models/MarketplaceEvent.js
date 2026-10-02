@@ -49,7 +49,7 @@ const cap = (max) => (v) => {
 const marketplaceEventSchema = new mongoose.Schema({
   at: { type: Date, default: Date.now },
   // gameflip | digiseller | ggsel | zeusx | eldorado | playerauctions | g2g |
-  // funpay. Z2U is excluded by the console contract — no capture, no tab.
+  // Markets outside the console contract get no capture and no tab.
   //
   // Deliberately a plain String and not an enum: an enum rejects the save, and
   // this logger swallows its own failures, so the first event from a market

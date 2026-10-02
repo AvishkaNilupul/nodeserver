@@ -223,7 +223,7 @@ router.put("/api/prime/keys/:id", requireSuperadmin, async (req, res) => {
       }
     }
     const key = await PrimeKey.findByIdAndUpdate(req.params.id, update, {
-      new: true,
+      returnDocument: "after",
     }).lean();
     if (!key) {
       return res.status(404).json({ success: false, message: "Not found" });
@@ -336,7 +336,7 @@ router.put(
       const account = await GogAccount.findByIdAndUpdate(
         req.params.id,
         update,
-        { new: true },
+        { returnDocument: "after" },
       ).lean();
       if (!account) {
         return res.status(404).json({ success: false, message: "Not found" });

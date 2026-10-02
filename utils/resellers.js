@@ -153,7 +153,7 @@ async function setPassword(id, password) {
   const reseller = await Reseller.findByIdAndUpdate(
     id,
     { $set: { passwordHash, passwordEnc: encrypt(password) } },
-    { new: true },
+    { returnDocument: "after" },
   );
   if (!reseller) throw new Error("Reseller not found");
   return reseller;

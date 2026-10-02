@@ -77,7 +77,7 @@ router.get("/renter/me", requireRenter, async (req, res) => {
     const host = hosts.resolveHost(r.botHost);
     // Quota "used" comes from the renter's OWN inventory, so it's correct even
     // when the bot host is offline.
-    const used = await RenterAccount.countDocuments({ renter: r._id });
+    const used = await RenterAccount.countDocuments({ renter: r._id, farmEndedAt: null });
     let running = null; // null = unknown (host offline / not assigned)
     let games = [];
     if (r.botFile && host) {
@@ -89,9 +89,13 @@ router.get("/renter/me", requireRenter, async (req, res) => {
       try {
         const states = await hosts.dockerPs(host);
         const st = states[containerForFile(r.botFile)];
-        running = !!(st && /^running/i.test(st.state || ""));
+        // THEIR farming, not the container's: on a shared bot the container
+        // keeps running for everyone else after this renter's Stop (their
+        // accounts are pulled out), and showing "Running" there hid the Start
+        // button they need to get farming back.
+        running = r.botStoppedAt ? false : !!(st && /^running/i.test(st.state || ""));
       } catch {
-        running = null;
+        running = r.botStoppedAt ? false : null;
       }
     }
     const pending = await pendingAccountCount(r._id);
@@ -133,6 +137,8 @@ router.get("/renter/accounts", requireRenter, async (req, res) => {
       lastScanStatus: 1,
       dropCount: 1,
       lastScanAt: 1,
+      farmUntil: 1,
+      farmEndedAt: 1,
     })
       .sort({ login: 1 })
       .lean();
@@ -141,9 +147,12 @@ router.get("/renter/accounts", requireRenter, async (req, res) => {
       accounts: accs.map((a) => ({
         id: String(a._id),
         login: a.login || "",
-        status: botStatus(a.lastScanStatus),
+        // A window that ended is off the bot: "ended", not "active" — the
+        // last scan of an account nothing farms any more was still "ok".
+        status: a.farmEndedAt ? "ended" : botStatus(a.lastScanStatus),
         dropCount: a.dropCount || 0,
         lastScanAt: a.lastScanAt || null,
+        farmUntil: a.farmUntil || null,
       })),
     });
   } catch (err) {
@@ -350,8 +359,9 @@ async function botControl(action, req, res) {
     // Shared-bot aware: when other renters share this config, start/stop only
     // moves THIS renter's accounts in or out of it — never the container the
     // others are farming on.
+    let out = null;
     if (action === "start") {
-      await startRenterFarming(req.renter, bot.host);
+      out = await startRenterFarming(req.renter, bot.host);
     } else {
       await stopRenterFarming(req.renter, bot.host);
     }
@@ -362,10 +372,24 @@ async function botControl(action, req, res) {
     // routes in renterAdminRoutes. Best-effort: bookkeeping must not fail the
     // action itself.
     req.renter.botStoppedAt = action === "start" ? null : new Date();
+    req.renter.botStopReason = action === "start" ? "" : "renter";
     await req.renter
       .save()
       .catch((e) => console.error("renter botStoppedAt:", e.message));
-    res.json({ success: true, running: action === "start" });
+    // A start puts back only what fits: tell the renter when some of their
+    // accounts are still off the bot instead of a plain "running".
+    const skipped = out && Array.isArray(out.skipped) ? out.skipped.length : 0;
+    const nothing = !!(out && out.nothingToPlace);
+    res.json({
+      success: true,
+      running: action === "start" && !nothing,
+      skipped,
+      ...(nothing
+        ? { message: "You have no accounts on the bot yet — ask the operator to add them." }
+        : skipped
+          ? { message: skipped + " of your account(s) could not be put back — the bot is full. Ask the operator." }
+          : {}),
+    });
   } catch (e) {
     if (e.code === "disabled") {
       return res
@@ -376,6 +400,12 @@ async function botControl(action, req, res) {
       return res.status(400).json({
         success: false,
         message: "Your bot has no accounts yet — ask the operator to add them.",
+      });
+    }
+    if (e.code === "rental_stack_full") {
+      return res.status(409).json({
+        success: false,
+        message: "Your bot has no free slot to put your accounts back — ask the operator.",
       });
     }
     if (e.unreachable) {
@@ -471,7 +501,7 @@ router.post("/renter/submit", renterSubmitLimiter, requireRenter, async (req, re
     }
     // Quota: accounts already in their inventory + already-pending + this batch
     // must fit. Counted from RenterAccount (their own inventory), not the config.
-    const used = await RenterAccount.countDocuments({ renter: r._id });
+    const used = await RenterAccount.countDocuments({ renter: r._id, farmEndedAt: null });
     const pending = await pendingAccountCount(r._id);
     const max = Number(r.maxAccounts) || 0;
     const remaining = max - used - pending;

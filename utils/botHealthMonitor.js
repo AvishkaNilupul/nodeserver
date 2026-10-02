@@ -20,6 +20,10 @@
 //  - Thread decay: the container keeps logging, but for a shrinking pool of
 //    accounts — per-account watch threads die (401 waves) and never respawn.
 //    Neither trigger above catches this; see the dedicated section below.
+//  - Stale build: the container logs every minute, never crashes and keeps
+//    every account "active" — yet runs an image too old to be credited. None
+//    of the three triggers above can see it; see "Stale-build + disk" below.
+//  - Full disk on a bot host, which silently stops every container on it.
 //
 // State is in-memory only and resets on server restart (same tradeoff
 // dropScanner.js makes for its session counters) — acceptable here since a
@@ -76,7 +80,18 @@ const DECAY_MIN_GAP = Number(process.env.BOT_DECAY_MIN_GAP) || 10; // ignore tin
 const DECAY_MIN_UPTIME_MS =
   Number(process.env.BOT_DECAY_MIN_UPTIME_MS) || 60 * 60 * 1000; // settle before judging
 const DECAY_ACTION = (process.env.BOT_DECAY_ACTION || "alert").toLowerCase(); // "alert" | "restart"
-const DECAY_LOG_CAP = 2000; // max log lines pulled per container per scan
+// Only the native (botctl) path still pulls a capped tail; docker hosts count
+// distinct accounts ON the host over the whole window (see LOG_SCAN_AWK).
+const DECAY_LOG_CAP = 2000;
+// A decay verdict also needs the log to reach back this far: rotation under a
+// log flood can leave only minutes of history, too little to see every
+// account's 5-minute cycle.
+const DECAY_MIN_COVERAGE_MS =
+  Number(process.env.BOT_DECAY_MIN_COVERAGE_MS) || 30 * 60 * 1000;
+// Twitch GQL parse errors a bot may log since it (re)started before we say
+// Twitch changed something it cannot read.
+const PARSE_ERR_MIN = Number(process.env.BOT_PARSE_ERR_MIN) || 20;
+const LOG_SCAN_TIMEOUT_MS = 180 * 1000;
 
 // No bare exception-type patterns here (e.g. /System\.Exception/): the bot
 // logs its own caught-and-retried GraphQL failures as "[ERR] ... (attempt
@@ -91,17 +106,55 @@ const CRASH_PATTERNS = [
   /out of memory/i,
 ];
 
+// ---------------------------------------------------------------------------
+// Stale-build + disk detection
+// ---------------------------------------------------------------------------
+// 2026-09-23: every rent-farm and auto-farm bot on contabo had been running a
+// June 2026 image — pulled from Docker Hub as "avishkarex/twitchbot:latest" —
+// that predates Twitch dropping `completedRewardCampaigns`. The bots logged
+// every minute, never crashed and kept every account's thread alive, so the
+// silence, crash and decay checks all read healthy while not one account was
+// credited a minute for days. Buyers noticed first.
+//
+// Two tells, either one is enough:
+//  - the container's image is not the host's current FARM_IMAGE (the
+//    local-only tag utils/botUpdater.js builds). Parked bots count: they are
+//    woken with a plain `docker start`, which reuses the image they were
+//    created with, so a stale parked bot wakes broken.
+//  - its logs carry the old build's progress line "Progress: X/Y minutes";
+//    current sources print "Waiting N seconds... X/Y minutes watched." instead.
+// No-claim bots (noclaim-bot-*) run their own image and are not compared.
+//
+// Same day, an emptied no-claim bot spun on its login prompt and wrote a 186GB
+// log; at 100% disk every container on the host stopped being able to write.
+// Nothing alerted, so the disk is checked too.
+const BUILD_ENABLED = process.env.BOT_BUILD_CHECK_DISABLED !== "1";
+const BUILD_INTERVAL_MS =
+  Number(process.env.BOT_BUILD_INTERVAL_MS) || 60 * 60 * 1000; // hourly
+const FARM_IMAGE = process.env.BOT_FARM_IMAGE || "twitchbot-farm:latest";
+const DISK_ALERT_PCT = Number(process.env.BOT_DISK_ALERT_PCT) || 85;
+const OLD_BUILD_PATTERN = /\bProgress: \d+\/\d+ minutes\b/;
+
 const state = {
   enabled: process.env.BOT_HEALTH_DISABLED !== "1",
   lastTickAt: null,
   lastError: "",
   lastDecayAt: 0, // epoch ms of the last decay scan (0 => run on first tick)
+  lastBuildScanAt: 0, // epoch ms of the last stale-build/disk scan
 };
 
 // `${hostId}:${container}` -> tracking entry
 const tracked = new Map();
 // `${hostId}:${container}` -> decay tracking entry (last counts + cooldown)
 const decayTracked = new Map();
+// `${hostId}:${container}` -> GQL parse-error tracking entry
+const parseTracked = new Map();
+// hostId -> Set of "response shape changed" texts already reported
+const shapeSeen = new Map();
+// hostId -> { signature, lastAlertAt, stale, missingImage, expectedId }
+const buildTracked = new Map();
+// hostId -> { pct, alerting, lastAlertAt }
+const diskTracked = new Map();
 let timer = null;
 let started = false;
 
@@ -134,20 +187,51 @@ async function checkContainer(host, container, now) {
 
   const hash = tailHash(logs);
   const isCrashing = CRASH_PATTERNS.some((re) => re.test(logs));
+  const oldBuild = isOldBuildLog(logs);
   let entry = tracked.get(k);
+  const firstSighting = !entry;
   if (!entry) {
     entry = {
       hash,
       sameSince: now,
       stuckSince: null,
       crashing: isCrashing,
+      oldBuild,
       lastCheckedAt: now,
       lastStuckAlertAt: 0,
       lastCrashAlertAt: 0,
+      lastOldBuildAlertAt: 0,
     };
     tracked.set(k, entry);
-    return; // first sighting — nothing to compare against yet
   }
+  // Visible from the very first tail, unlike silence — so no baseline needed.
+  entry.oldBuild = oldBuild;
+  if (oldBuild && now - (entry.lastOldBuildAlertAt || 0) > REMINDER_MS) {
+    entry.lastOldBuildAlertAt = now;
+    logEvent({
+      category: "bots",
+      action: "stale_build",
+      actor: "healthMonitor",
+      severity: "error",
+      host: host.id,
+      container,
+      detail: "logs show the pre-July build's 'Progress: X/Y minutes' line",
+    });
+    await sendTelegram(
+      "🧱 " +
+        host.label +
+        "/" +
+        container +
+        " is running an OLD bot build: its logs show \"Progress: X/Y minutes\" " +
+        "(current builds print \"... minutes watched\"). That build watches " +
+        "streams without ever being credited. Recreate it on " +
+        FARM_IMAGE +
+        " (Bots page rollout, or docker compose up -d --force-recreate " +
+        container +
+        ").",
+    ).catch(() => {});
+  }
+  if (firstSighting) return; // nothing to compare against yet for silence
 
   entry.crashing = isCrashing;
   entry.lastCheckedAt = now;
@@ -305,9 +389,180 @@ function parseUptimeMs(status) {
   return mult ? parseInt(num[1], 10) * mult : null;
 }
 
+// --- per-bot log scan (one host round trip) --------------------------------
+//
+// The decay check used to pull `docker logs --since 6h --tail 2000` and count
+// the distinct accounts in that. On 2026-09-29 contabo/twitchbotx44 wrote
+// ~45,000 lines an hour (a GQL parse error's stack trace, ~1,100 times an
+// hour), so 2,000 lines were the last 21 SECONDS: 23 of 132 accounts happened
+// to print in them, the bot read as "decayed" and was restarted — while all
+// 132 had logged in every one of the previous six hours. The count now runs ON
+// the host over the whole window (one short summary per bot crosses the link),
+// and a verdict needs the log to reach back DECAY_MIN_COVERAGE_MS.
+//
+// The same pass reports what such a flood is: TwitchDropsBot's GQL parse
+// failures ("JsonException ... Path: $.data...") since the bot started — the
+// Plants on Fire campaign went unfarmed for hours behind exactly that — and
+// the "Twitch response shape changed" warnings a tolerant build logs when it
+// absorbs a new shape.
+//
+// Input: `docker logs -t` (docker's RFC3339 time on every line). `st` = the
+// container's StartedAt (19 chars): parse errors from before a restart are
+// history, not a current fault. POSIX awk only (mawk / gawk / BWK).
+const LOG_SCAN_AWK = [
+  "NR == 1 { first = substr($1, 1, 19) }",
+  "{",
+  "  if (match($0, /TwitchUser - [A-Za-z0-9_]+/)) u[substr($0, RSTART + 13, RLENGTH - 13)] = 1",
+  "  if (substr($1, 1, 19) >= st) {",
+  '    if (index($0, "JsonException")) {',
+  "      j++",
+  '      if (match($0, /Path: [^ |]+/)) { p = substr($0, RSTART + 6, RLENGTH - 6); gsub(/\\[[0-9]+\\]/, "[N]", p); jp[p]++ }',
+  "    }",
+  '    if (index($0, "Twitch response shape changed")) {',
+  '      t = $0; sub(/^.*Twitch response shape changed/, "", t); gsub(/\\|/, "/", t)',
+  "      if (!(t in sc) && ns < 10) { sc[t] = 1; ns++ }",
+  "    }",
+  "  }",
+  "}",
+  "END {",
+  "  n = 0; for (k in u) n++",
+  '  print "FIRST|" first; print "USERS|" n; print "JSON|" (j + 0)',
+  '  for (k in jp) print "JPATH|" jp[k] "|" k',
+  '  for (k in sc) print "SHAPE|" k',
+  "}",
+].join("\n");
+
+function logScanScript(containers, window = DECAY_WINDOW) {
+  const shq = hosts.shq;
+  return containers
+    .filter((c) => /^[A-Za-z0-9_.-]+$/.test(c))
+    .map(
+      (c) =>
+        "c=" + shq(c) + "; " +
+        "st=$(docker inspect -f '{{.State.StartedAt}}' \"$c\" 2>/dev/null | cut -c1-19); " +
+        "echo \"SCAN|$c|$st\"; " +
+        "docker logs -t --since " + shq(window) + " \"$c\" 2>&1 | awk -v st=\"$st\" " + shq(LOG_SCAN_AWK) + "; " +
+        "echo \"END|$c\"",
+    )
+    .join("; ");
+}
+
+// Pure parser for logScanScript's output (unit-tested).
+function parseLogScan(stdout) {
+  const out = {};
+  let cur = null;
+  for (const raw of String(stdout || "").split("\n")) {
+    const line = raw.trim();
+    if (line.startsWith("SCAN|")) {
+      const [, c, st] = line.split("|");
+      cur = out[c] = { startedAt: st || "", first: "", active: 0, jsonErrors: 0, jsonPaths: [], shapes: [] };
+      continue;
+    }
+    if (line.startsWith("END|")) {
+      cur = null;
+      continue;
+    }
+    if (!cur) continue;
+    const [kind, a, ...rest] = line.split("|");
+    if (kind === "FIRST") cur.first = a || "";
+    else if (kind === "USERS") cur.active = Number(a) || 0;
+    else if (kind === "JSON") cur.jsonErrors = Number(a) || 0;
+    else if (kind === "JPATH") cur.jsonPaths.push({ count: Number(a) || 0, path: rest.join("|") });
+    else if (kind === "SHAPE") cur.shapes.push([a, ...rest].join("|").trim());
+  }
+  for (const c of Object.values(out)) c.jsonPaths.sort((x, y) => y.count - x.count);
+  return out;
+}
+
+// How far back the scanned log reaches, or null when it had no lines.
+function logCoverageMs(scan, now) {
+  const t = scan && scan.first ? Date.parse(scan.first + "Z") : NaN;
+  return Number.isFinite(t) ? now - t : null;
+}
+
+// --- GQL parse errors + absorbed shape changes -----------------------------
+
+async function checkParseErrors(host, container, scan, now) {
+  const k = key(host.id, container);
+  let entry = parseTracked.get(k);
+  if (!entry) {
+    entry = { lastAlertAt: 0, alerting: false };
+    parseTracked.set(k, entry);
+  }
+  entry.jsonErrors = scan.jsonErrors;
+  entry.topPath = (scan.jsonPaths[0] || {}).path || "";
+  const head = host.label + "/" + container;
+  if (scan.jsonErrors < PARSE_ERR_MIN) {
+    if (entry.alerting) {
+      entry.alerting = false;
+      await sendTelegram("✅ " + head + " no longer logs Twitch GQL parse errors.").catch(() => {});
+    }
+    return;
+  }
+  entry.alerting = true;
+  if (now - entry.lastAlertAt < REMINDER_MS) return;
+  entry.lastAlertAt = now;
+  const paths = scan.jsonPaths
+    .slice(0, 2)
+    .map((p) => p.path + " ×" + p.count)
+    .join("; ");
+  logEvent({
+    category: "bots",
+    action: "gql_parse_errors",
+    actor: "healthMonitor",
+    severity: "error",
+    host: host.id,
+    container,
+    count: scan.jsonErrors,
+    detail: (paths || "no path in the error").slice(0, 300),
+  });
+  await sendTelegram(
+    "🧩 " + head + ": " + scan.jsonErrors + " Twitch GQL parse errors since it started" +
+      (paths ? " (" + paths + ")" : "") +
+      ". The bot cannot read part of Twitch's response, so whatever sits behind it — a campaign, " +
+      "an inventory — is skipped, not farmed (how Plants on Fire went unfarmed on 2026-09-29). " +
+      "Fix: roll out a bot build that tolerates the new shape (Bots page).",
+  ).catch(() => {});
+}
+
+async function alertNewShapes(host, items) {
+  let seen = shapeSeen.get(host.id);
+  if (!seen) {
+    seen = new Set();
+    shapeSeen.set(host.id, seen);
+  }
+  const fresh = [];
+  for (const it of items) {
+    if (!it.text || seen.has(it.text)) continue;
+    seen.add(it.text);
+    fresh.push(it);
+  }
+  if (!fresh.length) return;
+  for (const it of fresh) {
+    logEvent({
+      category: "bots",
+      action: "gql_shape_changed",
+      actor: "healthMonitor",
+      severity: "warn",
+      host: host.id,
+      container: it.container,
+      detail: it.text.slice(0, 300),
+    });
+  }
+  await sendTelegram(
+    "🧩 " + host.label + ": Twitch changed a GQL response shape and the bot absorbed it — nothing is " +
+      "broken yet: " +
+      fresh
+        .slice(0, 5)
+        .map((it) => it.text + " [" + it.container + "]")
+        .join("; ") +
+      ". Worth a look before a change like this lands on a field the bot needs.",
+  ).catch(() => {});
+}
+
 // --- thread-decay scan ----------------------------------------------------
 
-async function checkDecay(host, container, psState, now) {
+async function checkDecay(host, container, psState, now, { scan, configText } = {}) {
   const k = key(host.id, container);
 
   // Settle guard: skip freshly (re)started containers. Their logs don't yet
@@ -321,7 +576,7 @@ async function checkDecay(host, container, psState, now) {
   try {
     const file = fileForContainer(container);
     if (!file) return;
-    enabled = countEnabled(await hosts.readFile(host, file));
+    enabled = countEnabled(configText != null ? configText : await hosts.readFile(host, file));
   } catch {
     return; // missing / unreadable / unparseable config — no decay signal
   }
@@ -329,23 +584,39 @@ async function checkDecay(host, container, psState, now) {
 
   // Distinct accounts active in the recent window.
   let active;
-  try {
-    const logs = await hosts.dockerLogs(host, container, {
-      tail: DECAY_LOG_CAP,
-      since: DECAY_WINDOW,
-    });
-    active = countActiveUsernames(logs);
-  } catch {
-    return; // log pull failed — skip this scan, not a decay signal
+  let coverageMs = null;
+  if (scan) {
+    active = scan.active;
+    coverageMs = logCoverageMs(scan, now);
+    if (coverageMs == null || coverageMs < DECAY_MIN_COVERAGE_MS) {
+      // Too little history to judge either way — never a restart.
+      const e = decayTracked.get(k) || { lastAlertAt: 0, lastActionAt: 0 };
+      Object.assign(e, { enabled, active, coverageMs, inconclusive: true });
+      decayTracked.set(k, e);
+      return;
+    }
+  } else {
+    // Native hosts (botctl) have no time filter: capped tail only.
+    try {
+      const logs = await hosts.dockerLogs(host, container, {
+        tail: DECAY_LOG_CAP,
+        since: DECAY_WINDOW,
+      });
+      active = countActiveUsernames(logs);
+    } catch {
+      return; // log pull failed — skip this scan, not a decay signal
+    }
   }
 
   let entry = decayTracked.get(k);
   if (!entry) {
-    entry = { lastAlertAt: 0, lastActionAt: 0, enabled, active };
+    entry = { lastAlertAt: 0, lastActionAt: 0 };
     decayTracked.set(k, entry);
   }
   entry.enabled = enabled;
   entry.active = active;
+  entry.coverageMs = coverageMs;
+  entry.inconclusive = false;
 
   if (!isDecayed({ enabled, active })) return;
   if (now - entry.lastAlertAt < REMINDER_MS) return; // cooldown
@@ -425,18 +696,350 @@ async function decayScanHost(host, now) {
     return; // host unreachable — not a decay signal
   }
   const running = Object.keys(states).filter(
-    (name) =>
-      (name === "twitchbot" || /^twitchbotx\d+$/.test(name)) &&
-      states[name].state === "running",
+    (name) => isFarmBot(name) && states[name].state === "running",
   );
-  for (const container of running) {
-    await checkDecay(host, container, states[container], now).catch(() => {});
-  }
-  // Forget containers that are no longer running so their cooldown resets.
+  // Forget containers that are no longer running so their cooldowns reset.
   const seen = new Set(running.map((c) => key(host.id, c)));
-  for (const k of Array.from(decayTracked.keys())) {
-    if (k.startsWith(host.id + ":") && !seen.has(k)) decayTracked.delete(k);
+  for (const m of [decayTracked, parseTracked]) {
+    for (const k of Array.from(m.keys())) {
+      if (k.startsWith(host.id + ":") && !seen.has(k)) m.delete(k);
+    }
   }
+  if (!running.length) return;
+  if (host.runtime === "native") {
+    for (const container of running) {
+      await checkDecay(host, container, states[container], now).catch(() => {});
+    }
+    return;
+  }
+  // One round trip for every config, one for every bot's log summary.
+  let configs = {};
+  try {
+    configs = await hosts.readFiles(host, running.map(fileForContainer).filter(Boolean));
+  } catch {
+    configs = {};
+  }
+  let scans;
+  try {
+    const { stdout } = await hosts.runShell(host, logScanScript(running, DECAY_WINDOW), {
+      timeout: LOG_SCAN_TIMEOUT_MS,
+    });
+    scans = parseLogScan(stdout);
+  } catch {
+    return; // log scan failed — not a decay or parse signal
+  }
+  const shapes = [];
+  for (const container of running) {
+    const scan = scans[container];
+    if (!scan) continue;
+    await checkParseErrors(host, container, scan, now).catch(() => {});
+    for (const text of scan.shapes) shapes.push({ container, text });
+    const f = configs[fileForContainer(container)];
+    await checkDecay(host, container, states[container], now, {
+      scan,
+      configText: f && f.ok ? f.text : null,
+    }).catch(() => {});
+  }
+  if (shapes.length) await alertNewShapes(host, shapes).catch(() => {});
+}
+
+// --- stale-build + disk helpers (pure; exported for unit tests) -----------
+
+function isOldBuildLog(logText) {
+  return OLD_BUILD_PATTERN.test(logText || "");
+}
+
+// Farm bots are the compose-managed "twitchbot" / "twitchbotx<N>" containers.
+// No-claim bots and one-off containers (the updater's testrun) are not.
+function isFarmBot(name) {
+  return name === "twitchbot" || /^twitchbotx\d+$/.test(name);
+}
+
+// Parse `docker inspect -f '{{.Name}}|{{.Image}}|{{.State.Status}}'` output.
+function parseBotImages(stdout) {
+  const rows = [];
+  for (const line of String(stdout || "").split("\n")) {
+    const parts = line.trim().split("|");
+    if (parts.length < 3 || !parts[0]) continue;
+    rows.push({
+      name: parts[0].replace(/^\//, ""),
+      imageId: parts[1],
+      status: parts[2],
+    });
+  }
+  return rows;
+}
+
+// Farm bots whose image is not the host's current farm image (by id, so a
+// retag or rollout is compared on content, not on the name it was created
+// with). Returns [] when the expected id is unknown — that case is reported
+// separately as a missing image, never as "every bot is stale".
+function staleBuilds(rows, expectedId) {
+  if (!expectedId) return [];
+  return rows
+    .filter((r) => isFarmBot(r.name) && r.imageId && r.imageId !== expectedId)
+    .map((r) => ({ name: r.name, running: r.status === "running" }))
+    .sort((a, b) =>
+      a.name.localeCompare(b.name, undefined, { numeric: true }),
+    );
+}
+
+// The one image id every farm bot on the host runs, or "" when they differ or
+// there are none. When the farm tag goes missing, this is the build the bots
+// are still on — and the id to put the tag back on, if it is a farm build.
+function sharedImageId(rows) {
+  const ids = new Set(
+    rows.filter((r) => isFarmBot(r.name) && r.imageId).map((r) => r.imageId),
+  );
+  return ids.size === 1 ? Array.from(ids)[0] : "";
+}
+
+// Docker's 12-character short form of "sha256:<hex>", accepted by docker tag.
+function shortImageId(id) {
+  return String(id || "").replace(/^sha256:/, "").slice(0, 12);
+}
+
+function diskPct(stats) {
+  if (!stats || !stats.diskTotal || stats.diskUsed == null) return null;
+  return Math.round((stats.diskUsed / stats.diskTotal) * 1000) / 10;
+}
+
+// One read per host (never a per-container SSH loop): the expected image id
+// plus every farm-bot container's image id and state.
+// Why this image id may carry the farm tag: the id the tag pointed at on this
+// host before it vanished, or another host's live farm tag. "" = no proof — a
+// stale Docker Hub pull looks exactly like a farm build from the outside.
+function farmBuildProof(hostId, id, prev) {
+  if (!id) return "";
+  if (prev && prev.lastFarmId === id) {
+    return "the build " + FARM_IMAGE + " pointed at before it disappeared";
+  }
+  for (const [otherId, e] of buildTracked) {
+    if (otherId !== hostId && e.expectedId === id) {
+      return "the same build as " + FARM_IMAGE + " on " + e.label;
+    }
+  }
+  return "";
+}
+
+const FULL_IMAGE_ID = /^sha256:[0-9a-f]{64}$/;
+// One Telegram per host per day about automatic restores; every restore is
+// still logged as a SystemEvent.
+const RESTORE_TELL_MS = 24 * 60 * 60 * 1000;
+const restoreToldAt = new Map();
+
+// `docker tag <id> twitchbot-farm:latest`, then read the tag back. True only
+// when it now resolves to exactly `id`.
+async function restoreFarmTag(host, id) {
+  if (!FULL_IMAGE_ID.test(String(id || ""))) return false;
+  try {
+    const r = await hosts.runShell(
+      host,
+      "docker tag " + hosts.shq(id) + " " + hosts.shq(FARM_IMAGE) +
+        " && docker image inspect -f '{{.Id}}' " + hosts.shq(FARM_IMAGE),
+      { timeout: 30000 },
+    );
+    return String((r && r.stdout) || "").trim() === id;
+  } catch {
+    return false;
+  }
+}
+
+async function buildScanHost(host, now) {
+  if (host.runtime === "native") return; // no docker images to compare
+  const script =
+    "echo \"EXPECTED $(docker image inspect -f '{{.Id}}' " +
+    hosts.shq(FARM_IMAGE) +
+    ' 2>/dev/null)"; ' +
+    "ids=$(docker ps -aq --filter name=twitchbot); " +
+    '[ -n "$ids" ] && docker inspect -f ' +
+    "'{{.Name}}|{{.Image}}|{{.State.Status}}' $ids; true";
+  let out;
+  try {
+    out = (await hosts.runShell(host, script, { timeout: 60000 })).stdout || "";
+  } catch {
+    return; // host unreachable — not a build signal
+  }
+  const lines = out.split("\n");
+  const expLine = lines.find((l) => l.startsWith("EXPECTED")) || "";
+  let expectedId = expLine.replace(/^EXPECTED\s*/, "").trim();
+  const rows = parseBotImages(
+    lines.filter((l) => !l.startsWith("EXPECTED")).join("\n"),
+  );
+  const prev = buildTracked.get(host.id) || { signature: "", lastAlertAt: 0 };
+  let missingImage = !expectedId && rows.some((r) => isFarmBot(r.name));
+  // Put a vanished tag back when it is PROVEN to be the farm build. On the
+  // main server the tag keeps disappearing on its own: 2026-09-27 05:28:56
+  // UTC docker logged `untag twitchbot-farm:latest` two seconds after the
+  // hosting provider's agent.service restarted (it restarts ~daily), and the
+  // 09-23 loss sits next to another agent restart. Nothing of ours removes it.
+  // The re-tag is the exact one-liner the alert below would ask a human for,
+  // under the same proof, and it restarts nothing.
+  let restoredFrom = "";
+  if (missingImage && process.env.BOT_FARM_TAG_AUTORESTORE !== "0") {
+    const id = sharedImageId(rows);
+    const proof = farmBuildProof(host.id, id, prev);
+    if (proof && (await restoreFarmTag(host, id))) {
+      expectedId = id;
+      missingImage = false;
+      restoredFrom = proof;
+    }
+  }
+  const stale = staleBuilds(rows, expectedId);
+  const signature =
+    (missingImage ? "MISSING;" : "") +
+    stale.map((s) => s.name + (s.running ? "*" : "")).join(",");
+
+  const entry = {
+    signature,
+    lastAlertAt: prev.lastAlertAt,
+    stale,
+    missingImage,
+    expectedId,
+    // Last id the farm tag was seen on here; outlives the tag being removed.
+    lastFarmId: expectedId || prev.lastFarmId || "",
+    label: host.label,
+    checkedAt: now,
+  };
+  buildTracked.set(host.id, entry);
+
+  if (restoredFrom) {
+    logEvent({
+      category: "bots",
+      action: "farm_tag_restored",
+      actor: "healthMonitor",
+      severity: "warn",
+      host: host.id,
+      detail:
+        FARM_IMAGE + " was missing; put back on " + shortImageId(expectedId) +
+        " (" + restoredFrom + "). Nothing was restarted.",
+    });
+    const told = restoreToldAt.get(host.id) || 0;
+    if (now - told >= RESTORE_TELL_MS) {
+      restoreToldAt.set(host.id, now);
+      await sendTelegram(
+        "🧱 " + host.label + ": the " + FARM_IMAGE + " tag had gone from the host " +
+          "again (it vanishes right after the hosting agent restarts) — put it back " +
+          "automatically on " + shortImageId(expectedId) + ", the build every farm " +
+          "bot here already runs. Nothing was restarted.",
+      ).catch(() => {});
+    }
+  }
+
+  if (!signature) {
+    if (prev.signature) {
+      await sendTelegram(
+        "✅ " + host.label + ": every farm bot is on the current " + FARM_IMAGE + " build again.",
+      ).catch(() => {});
+    }
+    return;
+  }
+  // Re-alert when the set of stale bots changes, else only as a reminder.
+  if (signature === prev.signature && now - prev.lastAlertAt < REMINDER_MS) return;
+  entry.lastAlertAt = now;
+
+  const running = stale.filter((s) => s.running).map((s) => s.name);
+  const parked = stale.filter((s) => !s.running).map((s) => s.name);
+  const parts = [];
+  let fix =
+    "Fix: the Bots page rollout recreates running AND parked bots; for one " +
+    "bot, docker compose up -d --force-recreate <bot>.";
+  if (missingImage) {
+    // 2026-09-23: a hand-run `docker rmi` took the tag off the server while
+    // its 16 bots kept running the image under another name. Recreating a bot
+    // cannot fix that (compose would try to pull the tag from Docker Hub), and
+    // a rollout is a rebuild; putting the tag back is one command. Advise it
+    // only with proof the bots' image IS a farm build — the tag's own id here
+    // before it vanished, or another host's farm tag — never a stale pull.
+    const id = sharedImageId(rows);
+    const proof = farmBuildProof(host.id, id, prev);
+    if (proof) {
+      const n = rows.filter((r) => isFarmBot(r.name)).length;
+      parts.push(
+        "the " +
+          FARM_IMAGE +
+          " tag is gone, but all " +
+          n +
+          " farm bots here still run " +
+          shortImageId(id) +
+          " (" +
+          proof +
+          "), so nothing is down — only a farm bot created or recreated here " +
+          "would fail to start",
+      );
+      fix = "Fix, no restart needed: docker tag " + shortImageId(id) + " " + FARM_IMAGE;
+    } else {
+      parts.push(
+        "no local " +
+          FARM_IMAGE +
+          " image — any farm bot created or recreated here will fail to start",
+      );
+      fix = "Fix: build it with the Bots page rollout, which recreates running AND parked bots.";
+    }
+  }
+  if (running.length) {
+    parts.push(running.length + " RUNNING on an older build: " + running.join(", "));
+  }
+  if (parked.length) {
+    parts.push(
+      parked.length + " parked on an older build (they wake broken): " + parked.join(", "),
+    );
+  }
+  logEvent({
+    category: "bots",
+    action: "stale_build",
+    actor: "healthMonitor",
+    severity: running.length || missingImage ? "error" : "warn",
+    host: host.id,
+    detail: parts.join("; "),
+  });
+  await sendTelegram("🧱 " + host.label + ": " + parts.join(". ") + ". " + fix).catch(() => {});
+}
+
+async function diskCheckHost(host, now) {
+  let stats;
+  try {
+    stats = await hosts.hostStats(host);
+  } catch {
+    return; // host unreachable — not a disk signal
+  }
+  const pct = diskPct(stats);
+  if (pct == null) return;
+  const prev = diskTracked.get(host.id) || { alerting: false, lastAlertAt: 0 };
+  const entry = {
+    pct,
+    alerting: pct >= DISK_ALERT_PCT,
+    lastAlertAt: prev.lastAlertAt,
+    checkedAt: now,
+  };
+  diskTracked.set(host.id, entry);
+  if (!entry.alerting) {
+    if (prev.alerting) {
+      await sendTelegram("✅ " + host.label + " disk is back to " + pct + "% used.").catch(() => {});
+    }
+    return;
+  }
+  if (prev.alerting && now - prev.lastAlertAt < REMINDER_MS) return;
+  entry.lastAlertAt = now;
+  logEvent({
+    category: "bots",
+    action: "disk_full",
+    actor: "healthMonitor",
+    severity: pct >= 95 ? "error" : "warn",
+    host: host.id,
+    detail: pct + "% used (" + host.dir + ")",
+  });
+  await sendTelegram(
+    "💾 " +
+      host.label +
+      " disk is " +
+      pct +
+      "% full (" +
+      host.dir +
+      "). At 100% every bot on this host loses the ability to write and " +
+      "farming stops. Usual cause is a runaway container log; find it with: " +
+      "sudo du -ah /var/lib/docker/containers | sort -rh | head",
+  ).catch(() => {});
 }
 
 async function tick() {
@@ -462,6 +1065,22 @@ async function tick() {
         }
       } catch (e) {
         state.lastError = e.message || String(e);
+      }
+    }
+    // Stale-build + disk pass: hourly, one cheap read per host. These catch
+    // the two silent failures that stopped rent/auto farming for days in
+    // 2026-09 (an old image that no longer accrues progress, and a host disk
+    // at 100%) — both look like "bot is up, just not farming" otherwise.
+    if (BUILD_ENABLED && now - state.lastBuildScanAt >= BUILD_INTERVAL_MS) {
+      state.lastBuildScanAt = now;
+      for (const h of hosts.listHosts()) {
+        const host = hosts.resolveHost(h.id);
+        try {
+          await buildScanHost(host, now);
+          await diskCheckHost(host, now);
+        } catch (e) {
+          state.lastError = e.message || String(e);
+        }
       }
     }
   }
@@ -517,6 +1136,39 @@ function status() {
         lastActionAt: v.lastActionAt
           ? new Date(v.lastActionAt).toISOString()
           : null,
+        coverageMin: v.coverageMs == null ? null : Math.round(v.coverageMs / 60000),
+        inconclusive: !!v.inconclusive,
+      })),
+      minCoverageMs: DECAY_MIN_COVERAGE_MS,
+    },
+    parse: {
+      minErrors: PARSE_ERR_MIN,
+      containers: Array.from(parseTracked.entries()).map(([k, v]) => ({
+        key: k,
+        jsonErrors: v.jsonErrors || 0,
+        topPath: v.topPath || "",
+        alerting: !!v.alerting,
+      })),
+    },
+    build: {
+      enabled: BUILD_ENABLED,
+      image: FARM_IMAGE,
+      intervalMs: BUILD_INTERVAL_MS,
+      lastScanAt: state.lastBuildScanAt
+        ? new Date(state.lastBuildScanAt).toISOString()
+        : null,
+      hosts: Array.from(buildTracked.entries()).map(([id, v]) => ({
+        host: id,
+        missingImage: !!v.missingImage,
+        stale: v.stale || [],
+      })),
+    },
+    disk: {
+      alertPct: DISK_ALERT_PCT,
+      hosts: Array.from(diskTracked.entries()).map(([id, v]) => ({
+        host: id,
+        pct: v.pct,
+        alerting: !!v.alerting,
       })),
     },
   };
@@ -531,7 +1183,20 @@ module.exports = {
   countActiveUsernames,
   isDecayed,
   parseUptimeMs,
-  // Orchestration entrypoint exposed for integration tests (drives one decay
+  isOldBuildLog,
+  isFarmBot,
+  parseBotImages,
+  staleBuilds,
+  sharedImageId,
+  shortImageId,
+  diskPct,
+  LOG_SCAN_AWK,
+  logScanScript,
+  parseLogScan,
+  logCoverageMs,
+  // Orchestration entrypoints exposed for integration tests (each drives one
   // scan of a host against an injectable `hosts` layer).
   decayScanHost,
+  buildScanHost,
+  diskCheckHost,
 };

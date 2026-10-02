@@ -20,6 +20,8 @@
 // their missing game attribution does not matter.
 const SaleSignal = require("../models/SaleSignal");
 const MarketplaceListing = require("../models/MarketplaceListing");
+// The one rent-farm classifier the repricers use (pure, no requires).
+const { classifyKind } = require("./marketPricing");
 
 // How far back a realised sale still counts as evidence of today's price.
 // Long, because priced sales are scarce: only ~120 rows carry a price at all.
@@ -29,6 +31,43 @@ const WINDOW_MS = 180 * 86400000;
 const CACHE_MS = 10 * 60 * 1000;
 // Hard cap on rows pulled, newest first. A safety valve on bytes returned.
 const MAX_ROWS = 20000;
+
+// Marketplaces whose fulfillers write no "listing_sold" SaleSignal at all
+// (utils/farmDemand.js lists the gap). Their sales are on the books only as
+// delivered units on the listing row — a unit with an orderId and a
+// deliveredAt. Until 2026-10-01 they were invisible here: Eldorado's whole
+// platform bucket was the 5 rows ever marked "sold", every one at $1.00, while
+// more than a hundred units had sold there at up to ~$2.25 — so its venueFactor
+// (and the no-claim repricer's Eldorado price) was built on five rows.
+const UNIT_LEDGER_MARKETS = ["eldorado", "playerauctions", "g2g"];
+
+// A rent-farm WINDOW is a different product from a drop bundle ($5–$8 for a
+// farming term vs ~$1.25 for an account), and the owner prices it by hand. The
+// "sold rows" source had no product filter, so three "… Automatic Farming 1
+// Year" windows at $8.00 became Gameflip's bundle maximum — doubling the
+// priceBand ceiling — and every farm sale leaned on the medians.
+function isFarmSale(title) {
+  return classifyKind(title) === "farm";
+}
+
+// One key per SALE for the venue-level buckets. Every writer of a priced
+// "listing_sold" signal writes one per GAME the sale carried, at the full price:
+//   recordListingSale (marketplaces)  "sold:<listingId>:<gameKey>:<seq>"
+//   reserveSetOnAccount (Shop, bulk)  "reserved:<accountId>:<setId>:<game>"
+//   a hand-recorded sale              "manual-sold:<accountId>:<game>"
+// The per-game buckets want one entry per game (each game's own price);
+// `platform` and `global` want one per sale, or a multi-game bundle counts once
+// per game it carries.
+function saleKeyOf(row, i) {
+  const dk = String((row && row.dedupeKey) || "");
+  const unit = /^sold:([0-9a-f]{24}):.*:(\d+)$/i.exec(dk);
+  if (unit) return { key: "unit:" + unit[1].toLowerCase() + ":" + unit[2], listingId: unit[1].toLowerCase() };
+  const shop = /^reserved:([0-9a-f]{24}):([0-9a-f]{24})?:/i.exec(dk);
+  if (shop) return { key: "res:" + shop[1].toLowerCase() + ":" + String(shop[2] || "").toLowerCase(), listingId: "" };
+  const hand = /^manual-sold:([0-9a-f]{24}):/i.exec(dk);
+  if (hand) return { key: "hand:" + hand[1].toLowerCase(), listingId: "" };
+  return { key: row && row._id ? "sig:" + String(row._id) : "row:" + i, listingId: "" };
+}
 
 let cache = { at: 0, snapshot: null };
 
@@ -46,48 +85,132 @@ function push(map, key, price) {
 /**
  * Build the realised-price snapshot. Four buckets, matching pricing.js's
  * anchor ladder: platform+game, game, platform, global.
+ *
+ * Drop-bundle sales only. Three sources, each without rent-farm windows and
+ * bulk packs (a pack is priced for N accounts):
+ *   1. delivered units on Eldorado / PlayerAuctions / G2G rows, at the row's
+ *      price — `platform`/`global` only. A row repriced since the sale is a
+ *      small error in a level; leaving those markets out was the whole level;
+ *   2. SaleSignal "listing_sold" with a price — the per-game buckets one entry
+ *      per (game, unit); `platform`/`global` one per sale, unless the sale is a
+ *      unit already counted in 1 (the Listings delist route records a signal
+ *      for a row it closes as sold, on any market);
+ *   3. rows marked "sold" — `platform`/`global` only (their game needs a
+ *      DropSet join, deliberately skipped), never a row whose sale 1 or 2
+ *      already counted.
  */
 async function buildSnapshot() {
   const since = new Date(Date.now() - WINDOW_MS);
+  const sinceMs = since.getTime();
   const platformGame = new Map();
   const game = new Map();
   const platform = new Map();
   const global = [];
+  let farmSkipped = 0;
 
+  // 1. The unit-ledger markets: one entry per delivered unit. updatedAt bounds
+  // the read (a row whose unit was delivered inside the window was saved
+  // inside it), newest first so the cap can only drop the oldest rows.
+  const ledgerRows = await MarketplaceListing.find(
+    {
+      marketplace: { $in: UNIT_LEDGER_MARKETS },
+      price: { $gt: 0 },
+      bulkOfferId: null,
+      rentFarm: { $ne: true },
+      updatedAt: { $gte: since },
+    },
+    { marketplace: 1, price: 1, title: 1, "units.deliveredAt": 1, "units.orderId": 1 },
+  )
+    .sort({ _id: -1 })
+    .limit(MAX_ROWS)
+    .lean();
+
+  const unitLedgerRows = new Set();
+  let deliveredUnits = 0;
+  for (const row of ledgerRows) {
+    if (isFarmSale(row.title)) {
+      farmSkipped++;
+      continue;
+    }
+    const mkt = String(row.marketplace || "").toLowerCase();
+    const price = Number(row.price) || 0;
+    if (price <= 0 || !mkt) continue;
+    for (const u of row.units || []) {
+      if (!u || !u.orderId || !u.deliveredAt) continue;
+      // This row's sales are its units, whichever side of the window they fall.
+      unitLedgerRows.add(String(row._id).toLowerCase());
+      if (!(new Date(u.deliveredAt).getTime() >= sinceMs)) continue;
+      deliveredUnits++;
+      global.push(price);
+      push(platform, mkt, price);
+    }
+  }
+
+  // 2. Priced sale signals.
   const signals = await SaleSignal.find(
-    { source: "listing_sold", priceUsd: { $gt: 0 }, at: { $gte: since } },
-    { marketplace: 1, gameKey: 1, priceUsd: 1 },
+    // bulk: discounted pack units never anchor single prices (docs/bulk-packs/CONTRACT.md)
+    { source: "listing_sold", priceUsd: { $gt: 0 }, at: { $gte: since }, bulk: { $ne: true } },
+    { marketplace: 1, gameKey: 1, priceUsd: 1, name: 1, dedupeKey: 1 },
   )
     .sort({ at: -1 })
     .limit(MAX_ROWS)
     .lean();
 
-  for (const row of signals) {
+  const seenSale = new Set();
+  const signalListings = new Set();
+  signals.forEach((row, i) => {
+    if (isFarmSale(row.name)) {
+      farmSkipped++;
+      return;
+    }
     const mkt = String(row.marketplace || "").toLowerCase();
     const gk = String(row.gameKey || "").toLowerCase();
     const price = Number(row.priceUsd) || 0;
-    if (price <= 0) continue;
-    global.push(price);
+    if (price <= 0) return;
     if (gk) push(game, gk, price);
-    if (mkt) push(platform, mkt, price);
     if (mkt && gk) push(platformGame, keyOf(mkt, gk), price);
-  }
+    const { key, listingId } = saleKeyOf(row, i);
+    if (listingId) {
+      signalListings.add(listingId);
+      if (unitLedgerRows.has(listingId)) return;
+    }
+    if (seenSale.has(key)) return;
+    seenSale.add(key);
+    global.push(price);
+    if (mkt) push(platform, mkt, price);
+  });
 
-  // Sold listings carry a real transaction price and a marketplace, but their
-  // game needs a DropSet join we deliberately skip. They therefore feed only
-  // the two buckets that do not need a game.
+  // 3. Sold listings carry a real transaction price and a marketplace, but
+  // their game needs a DropSet join we deliberately skip. They therefore feed
+  // only the two buckets that do not need a game.
   const sold = await MarketplaceListing.find(
-    { status: "sold", price: { $gt: 0 }, updatedAt: { $gte: since } },
-    { marketplace: 1, price: 1 },
+    // bulkOfferId: bulk prices never anchor single listings (docs/bulk-packs/CONTRACT.md H10)
+    {
+      status: "sold",
+      price: { $gt: 0 },
+      updatedAt: { $gte: since },
+      bulkOfferId: null,
+      rentFarm: { $ne: true },
+    },
+    { marketplace: 1, price: 1, title: 1 },
   )
     .sort({ updatedAt: -1 })
     .limit(MAX_ROWS)
     .lean();
 
+  let soldCounted = 0;
   for (const row of sold) {
+    if (isFarmSale(row.title)) {
+      farmSkipped++;
+      continue;
+    }
+    const id = String(row._id || "").toLowerCase();
+    // Its sale is already in, from its delivered units or its own signals.
+    if (id && (unitLedgerRows.has(id) || signalListings.has(id))) continue;
     const mkt = String(row.marketplace || "").toLowerCase();
     const price = Number(row.price) || 0;
     if (price <= 0) continue;
+    soldCounted++;
     global.push(price);
     if (mkt) push(platform, mkt, price);
   }
@@ -100,7 +223,9 @@ async function buildSnapshot() {
     global,
     counts: {
       signals: signals.length,
-      soldListings: sold.length,
+      soldListings: soldCounted,
+      deliveredUnits,
+      farmSkipped,
       games: game.size,
       platforms: platform.size,
     },
@@ -185,6 +310,7 @@ async function evidenceFor({ game = "", marketplace = "", research = null } = {}
 module.exports = {
   CACHE_MS,
   WINDOW_MS,
+  UNIT_LEDGER_MARKETS,
   buildSnapshot,
   evidenceFor,
   invalidate,

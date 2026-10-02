@@ -14,14 +14,19 @@ const MarketResearch = require("../models/MarketResearch");
 const dsFulfiller = require("../utils/digisellerFulfiller");
 const gfFulfiller = require("../utils/gameflipFulfiller");
 const ggFulfiller = require("../utils/ggselFulfiller");
-const fpFulfiller = require("../utils/funpayFulfiller");
 const guardian = require("../utils/marketplaceGuardian");
 const guardianFixes = require("../utils/guardianFixes");
 const marketResearch = require("../utils/marketResearch");
 const mp = require("../utils/marketplaces");
-const epicnpc = require("../utils/epicnpcCatalog");
 const paCopy = require("../utils/playerauctionsCopy");
 const suppliedStock = require("../utils/suppliedStock");
+// No-claim Shop listings (docs/NOCLAIM-SHOP-LISTINGS-CONTRACT.md §7): a set
+// whose stock is the no-claim farm publishes and delists through its own layer.
+// Required lazily: those modules pull in the auto-lister and the fulfillers,
+// and a load failure there must never take this whole router — every archive
+// publish and delist — down with it. Only no-claim rows ever reach them.
+const noclaimListings = () => require("../utils/noclaimListings");
+const ncs = () => require("../utils/noclaimStock");
 const { isNoClaimGame } = require("../utils/settings");
 const { listingGame } = require("../utils/listingGame");
 const { logEvent } = require("../utils/systemLog");
@@ -124,10 +129,8 @@ router.post("/marketplaces/test/:name", requireSuperadmin, async (req, res) => {
     else if (name === "g2g") r = await mp.g2gTest();
     else if (name === "ggsel") r = await mp.ggselTest();
     else if (name === "zeusx") r = await mp.zeusxTest();
-    else if (name === "funpay") r = await mp.funpayTest();
     else if (name === "eldorado") r = await mp.eldoradoTest();
     else if (name === "playerauctions") r = await mp.playerauctionsTest();
-    else if (name === "z2u") r = await mp.z2uTest();
     else {
       return res
         .status(400)
@@ -397,60 +400,6 @@ function buildDescription(set) {
   return lines.join("\n").trim();
 }
 
-// EpicNPC listings follow a house style (verified against the seller's own
-// live listings): a "<Game> Twitch Drops Account | N+ Unclaimed Rewards" title
-// and a body with Featured/Full reward lists, an Information checklist and a
-// Payment section. Built as HTML because the bridge drops it straight into the
-// XenForo (Froala) editor, which converts it to BBCode on submit. Returns
-// { title, descHtml }.
-function buildEpicListing(set, game) {
-  const escHtml = (s) =>
-    String(s == null ? "" : s)
-      .replace(/&/g, "&amp;")
-      .replace(/</g, "&lt;")
-      .replace(/>/g, "&gt;");
-  const items = (set.items || []).filter((i) => i && i.name);
-  const count = items.length;
-  const label = (i) => ((i.qty || 1) > 1 ? i.qty + "× " : "") + i.name;
-  const li = (arr) =>
-    "<ul>" + arr.map((t) => "<li>" + escHtml(t) + "</li>").join("") + "</ul>";
-
-  const gameLabel = game || set.name || "Twitch Drops";
-  const title =
-    gameLabel + " Twitch Drops Account | " + count + "+ Unclaimed Rewards";
-
-  const parts = [];
-  if (set.note) parts.push("<p>" + escHtml(set.note) + "</p>");
-  // A short "Featured" teaser (first items) only when the full list is long
-  // enough to warrant it, mirroring the seller's own listings.
-  if (count > 10) {
-    parts.push("<b>Featured Rewards</b>");
-    parts.push(li(items.slice(0, 8).map(label)));
-  }
-  parts.push("<b>Full Reward List (" + count + ")</b>");
-  parts.push(li(items.map(label)));
-  parts.push("<b>Information</b>");
-  parts.push(
-    li([
-      "✔ Instant delivery",
-      "✔ Original Twitch account included",
-      "✔ Rewards are unclaimed — simply connect your own linked account",
-      "✔ Change the account details after purchase if you wish",
-      "✔ Safe and easy redemption",
-    ]),
-  );
-  parts.push("<b>Payment</b>");
-  parts.push(
-    "<p>PayPal Friends &amp; Family / Crypto (USDT, LTC, etc.)<br>" +
-      "Middleman accepted (buyer covers MM fees if requested)</p>",
-  );
-  parts.push(
-    "<p>Feel free to message me if you have any questions or would like " +
-      "screenshots before purchasing.</p>",
-  );
-  return { title, descHtml: parts.join("") };
-}
-
 // Render a promo cover for the custom-listing form and return it inline as a
 // data URL. Nothing is persisted; the temp file is removed after encoding.
 router.post(
@@ -640,6 +589,262 @@ async function suppliedClaimRefusal(offer, want, market) {
   );
 }
 
+// Account listings on ZeusX. ZeusX's native "Automatic" delivery carries exactly
+// ONE credential per offer (game_account validates as a single object — the
+// auto-farm sells farmed accounts the same way, autoLister.publishZeusxShare),
+// so a quantity of N is N single-stock offers holding one account each. The
+// accounts leave the shelf here, at publish, like every market that holds the
+// credential itself: ZeusX hands one over the moment a buyer pays, with nothing
+// on our side in the loop.
+//
+// Before this an account listing went out as a plain "Coordinated" ZeusX offer
+// — nothing claimed, nothing delivered — so a ZeusX sale had to be handed over
+// by hand while the very same accounts stayed on sale everywhere else.
+//
+// One rule decides every failure: an account must never be on sale twice.
+//  - Stopped BEFORE the create call (no such ZeusX game, no price, no keys):
+//    nothing was sent, so every untried account goes back on the shelf.
+//  - Refused BY the create call (a 4xx, or ZeusX's own isSuccess:false): no
+//    offer was made, so the same.
+//  - Anything else from the create call (a 5xx, a timeout, no offer id):
+//    create-offer is known to answer 500 and STILL create the offer, so the
+//    credential may be live on ZeusX. That one account is held out of stock
+//    ("fed") and named, for the owner to check on ZeusX.
+// And the first failure of any kind stops the run: whatever broke one publish
+// (a rate limit, a revoked session) breaks the next, and each further attempt
+// risks another held account.
+function zeusxCreateMayHaveHappened(err) {
+  const msg = String((err && err.message) || "");
+  if (!/^ZeusX create/i.test(msg)) return false; // failed before the create
+  if (err && err.__zeusx) return false; // isSuccess:false — a clean refusal
+  const status = Number(err && err.status) || 0;
+  return !(status >= 400 && status < 500);
+}
+
+async function publishSuppliedZeusx({
+  offer,
+  zx,
+  title,
+  description,
+  priceUsd,
+  game,
+  cover,
+}) {
+  const qtyWanted = Math.max(1, parseInt(zx.quantity, 10) || 1);
+  const claimed = await suppliedStock.claimForListing(
+    String(offer._id),
+    qtyWanted,
+    { market: "zeusx" },
+  );
+  if (!claimed.length) {
+    return {
+      success: false,
+      message: await suppliedClaimRefusal(offer, qtyWanted, "zeusx"),
+    };
+  }
+  const listed = [];
+  const held = [];
+  let stopped = "";
+  for (const acc of claimed) {
+    if (stopped) break;
+    let r;
+    try {
+      r = await mp.zeusxPublish({
+        title,
+        description,
+        priceUsd,
+        game,
+        serviceCategoryId: zx.serviceCategoryId,
+        serviceCategoryBaseId: zx.serviceCategoryBaseId,
+        attributes: zx.attributes,
+        tags: zx.tags,
+        coverImagePath: cover,
+        deliveryDays: zx.deliveryDays,
+        deliveryHours: zx.deliveryHours,
+        // Email left empty exactly as the auto-farm's ZeusX share sends it:
+        // the pasted address is the account's recovery mail, which the
+        // default delivery text never hands a buyer either.
+        autoDeliverAccounts: [
+          { login: acc.login, password: acc.password, email: "" },
+        ],
+      });
+    } catch (err) {
+      stopped = err.message;
+      // Otherwise nothing reached ZeusX for this one, and it goes back on the
+      // shelf with the untried ones below.
+      if (zeusxCreateMayHaveHappened(err)) held.push(acc);
+      console.error(
+        "zeusx supplied publish failed for " + acc.login + ":",
+        err.message,
+      );
+      continue;
+    }
+    let doc = null;
+    try {
+      doc = await MarketplaceListing.create({
+        marketplace: "zeusx",
+        externalId: r.externalId,
+        url: r.url || "",
+        title,
+        description,
+        price: priceUsd,
+        status: "active",
+        note:
+          (r.note ? r.note + " " : "") +
+          "account listing: automatic delivery — " +
+          acc.login,
+        autoDeliver: true,
+        qtyTarget: 1,
+        ...offerRowFields(offer, [acc]),
+      });
+    } catch (e) {
+      // The ZeusX offer is live with this credential; only our row is
+      // missing. Handing the account back would put it on sale twice.
+      console.error("zeusx supplied row create failed:", e.message);
+    }
+    try {
+      await suppliedStock.markFed([acc.ledgerId], {
+        listing: doc ? doc._id : null,
+        market: "zeusx",
+      });
+    } catch (e) {
+      console.error("supplied markFed (zeusx):", e.message);
+    }
+    listed.push({ acc, r, doc });
+  }
+  // Held accounts are fed with no listing: out of stock, never handed back.
+  if (held.length) {
+    await suppliedStock
+      .markFed(
+        held.map((a) => a.ledgerId),
+        { market: "zeusx" },
+      )
+      .catch((e) => console.error("supplied markFed (zeusx held):", e.message));
+  }
+  // Every account the loop never sent (or that provably did not reach ZeusX)
+  // goes back on the shelf.
+  const sentIds = new Set(
+    listed.map((l) => String(l.acc.ledgerId)).concat(
+      held.map((a) => String(a.ledgerId)),
+    ),
+  );
+  const back = claimed
+    .map((c) => String(c.ledgerId))
+    .filter((id) => !sentIds.has(id));
+  if (back.length) {
+    await suppliedStock
+      .releaseClaim(back)
+      .catch((e) => console.error("supplied release (zeusx):", e.message));
+  }
+  const heldNote = held.length
+    ? " Held out of stock until you check ZeusX (the create answered an " +
+      "error but may have gone through): " +
+      held.map((a) => a.login).join(", ") +
+      "."
+    : "";
+  if (!listed.length) {
+    return {
+      success: false,
+      message: (stopped || "ZeusX listed nothing") + "." + heldNote,
+    };
+  }
+  const first = listed.find((l) => l.doc) || listed[0];
+  return {
+    success: true,
+    id: first.doc ? String(first.doc._id) : "",
+    externalId: first.r.externalId,
+    url: first.r.url || "",
+    note:
+      listed.length +
+      " automatic ZeusX offer(s), one account each" +
+      (stopped
+        ? " — stopped at " +
+          listed.length +
+          " of " +
+          claimed.length +
+          ": " +
+          stopped
+        : "") +
+      heldNote,
+  };
+}
+
+// Did a ZeusX account-listing offer's one unit reach a buyer? We run no sale
+// poller for ZeusX (it delivers an automatic offer on its own), so this is asked
+// once, at delist, before the account could be handed back to the shelf.
+//   "unsold"  only on positive evidence: the unit is still listed (quantity
+//             >= 1), no purchase is recorded when ZeusX sends that list, and
+//             the status is not a sale state;
+//   "sold"    on positive evidence the other way: quantity 0, or a purchase;
+//   "unknown" for anything else — a failed read included.
+// Measured on prod 2026-09-11: a live, unsold automatic offer reads
+// offer_status "CREATED", quantity 1 and, on the list endpoint,
+// offer_purchases [].
+async function zeusxUnitVerdict(offerId) {
+  let o = null;
+  try {
+    o = await mp.zeusxOffer(offerId);
+  } catch {
+    return "unknown";
+  }
+  if (!o || typeof o !== "object") return "unknown";
+  const qty =
+    o.quantity == null || o.quantity === "" ? NaN : Number(o.quantity);
+  const p = o.offer_purchases;
+  const bought = Array.isArray(p) ? p.length > 0 : Number(p) > 0;
+  if (bought || (Number.isFinite(qty) && qty <= 0)) return "sold";
+  const status = String(o.offer_status || "").toUpperCase();
+  const saleState =
+    /SOLD|COMPLET|DELIVER|PURCHAS|ORDER|CANCEL|CLOS|EXPIR|DELET|REMOV/.test(
+      status,
+    );
+  if (Number.isFinite(qty) && qty >= 1 && !saleState) return "unsold";
+  return "unknown";
+}
+
+// A ZeusX account-listing unit that reached a buyer: settle its ledger row as
+// sold, so it can never come back to the shelf and the panel counts it sold
+// instead of parked. Best-effort — the row's own status already says sold.
+async function markZeusxUnitsDelivered(row) {
+  const ids = (row.units || [])
+    .filter((u) => u && u.contentId)
+    .map((u) => String(u.contentId));
+  if (!ids.length) return 0;
+  try {
+    return await suppliedStock.markDelivered(ids, { market: "zeusx" });
+  } catch (e) {
+    console.error("supplied markDelivered (zeusx):", e.message);
+    return 0;
+  }
+}
+
+// A no-claim row's half of a delist (contract §7), answered as
+// `{ released, sold }`. The offer is already off the marketplace when this
+// runs, so — like the supplied-stock release — a failure must not become a 500
+// the owner retries against an offer that no longer exists. It answers zeros
+// plus the error, and logs it: those units stay committed to a dead listing.
+async function noclaimAfterDelist(row, outcome) {
+  try {
+    const r = (await noclaimListings().afterDelist(row, { outcome })) || {};
+    return { released: Number(r.released) || 0, sold: Number(r.sold) || 0 };
+  } catch (err) {
+    console.error("noclaim afterDelist:", err.message);
+    logEvent({
+      category: "noclaim_shop",
+      action: "delist-release-failed",
+      severity: "warn",
+      subject: String(row._id),
+      detail:
+        row.marketplace +
+        " no-claim listing is off sale (" +
+        outcome +
+        ") but its units could not be settled: " +
+        err.message,
+    });
+    return { released: 0, sold: 0, error: err.message };
+  }
+}
+
 // G1: render the hand-over text BEFORE anything goes live, and refuse the
 // publish when any unit renders empty.
 //
@@ -679,7 +884,6 @@ function bodyCategoryGiven(name, body) {
     const cats = (body.digiseller || {}).categories;
     return Array.isArray(cats) && cats.length > 0;
   }
-  if (name === "funpay") return !!(body.funpay && body.funpay.nodeId);
   if (name === "g2g") return !!(body.g2g && body.g2g.brandId);
   return true;
 }
@@ -747,6 +951,22 @@ router.get(
   },
 );
 
+// Plati and GGSel are BLOCKED by the owner (2026-09-28: both seller accounts
+// are blocked; "put a block on those two, we will use them later when they are
+// fixed"). While a market's switch is off (autoFarm.platiEnabled /
+// ggselEnabled), no account is spent on it — not by the automatic listers and
+// not by hand from here either. Turning the switch back on in Superadmin →
+// Auto-farm settings lifts the block.
+function marketBlockedReason(name) {
+  if (name === "digiseller" && typeof mp.digisellerTakesNewStock === "function" && !mp.digisellerTakesNewStock()) {
+    return "Plati is blocked — switched off in Auto-farm settings (the Plati seller account is blocked). Nothing is listed there until it is switched back on.";
+  }
+  if (name === "ggsel" && typeof mp.ggselTakesNewStock === "function" && !mp.ggselTakesNewStock()) {
+    return "GGSel is blocked — switched off in Auto-farm settings (the GGSel seller account is blocked). Nothing is listed there until it is switched back on.";
+  }
+  return "";
+}
+
 router.post("/marketplaces/publish", requireSuperadmin, async (req, res) => {
   try {
     const body = req.body || {};
@@ -770,6 +990,10 @@ router.post("/marketplaces/publish", requireSuperadmin, async (req, res) => {
     if (!set) {
       return res.status(404).json({ success: false, message: "Set not found" });
     }
+    // A no-claim set sells no-claim farm accounts, never Drop Archive stock
+    // (the archive holds only CLAIMED drops, worthless to a no-claim buyer), so
+    // none of the per-market archive branches below may run for it.
+    const noclaimSet = !offer && !!set && set.stockSource === "noclaim";
     const targets = Array.isArray(body.marketplaces) ? body.marketplaces : [];
     if (!targets.length) {
       return res
@@ -848,6 +1072,22 @@ router.post("/marketplaces/publish", requireSuperadmin, async (req, res) => {
     const results = {};
     for (const name of targets) {
       try {
+        // A blocked market (see marketBlockedReason) takes nothing, by hand
+        // either — refused before any account is claimed or reserved.
+        const blocked = marketBlockedReason(name);
+        if (blocked) {
+          results[name] = { success: false, message: blocked };
+          continue;
+        }
+        // Refused before category resolution: a market the no-claim layer
+        // cannot deliver on must not cost a live category lookup first.
+        if (noclaimSet && !ncs().SUPPORTED_MARKETS.includes(name)) {
+          results[name] = {
+            success: false,
+            message: ncs().unsupportedMessage(name),
+          };
+          continue;
+        }
         // Feature A's load-bearing half: when the body omits this market's
         // category, resolve one server-side instead of refusing the publish.
         // A failure is scoped to this market — the loop is per-market and the
@@ -868,6 +1108,22 @@ router.post("/marketplaces/publish", requireSuperadmin, async (req, res) => {
           }
         }
         const cat = (auto && auto.value) || {};
+        if (noclaimSet) {
+          // The whole publish (stock claim, vault feed, row) is the no-claim
+          // layer's; its answer is this market's result as-is.
+          results[name] = await noclaimListings().publishNoclaim(name, {
+            set,
+            body,
+            title,
+            description,
+            priceUsd,
+            gridImage,
+            coverPath: coverImagePath(set),
+            cat,
+            pubGame,
+          });
+          continue;
+        }
         let r;
         if (name === "gameflip") {
           const gfOpts = body.gameflip || {};
@@ -1147,8 +1403,10 @@ router.post("/marketplaces/publish", requireSuperadmin, async (req, res) => {
                   claimed.map((c) => c.ledgerId),
                 );
               } else {
+                // This set only — never the account's other GGSel sets.
                 await ggFulfiller.releaseAccounts(
                   claimed.map((c) => c.accountId),
+                  set._id,
                 );
               }
               throw err;
@@ -1204,135 +1462,22 @@ router.post("/marketplaces/publish", requireSuperadmin, async (req, res) => {
             instructions: gg.instructions,
             coverImagePath: ggCover,
           });
-        } else if (name === "funpay") {
-          const fp = body.funpay || {};
-          // FunPay's picker is a bare numeric box typed from memory, so the
-          // resolved node from the settings map is usually the better answer;
-          // a typed one still wins.
-          const fpNode = fp.nodeId || cat.node || cat.nodeId || "";
-          if (!fpNode) {
-            results[name] = {
-              success: false,
-              message: "Pick a FunPay category (node id) first",
-            };
-            continue;
-          }
-          if (fp.delivery === "auto") {
-            // Real auto-delivery: reserve up to `amount` farmed accounts that
-            // hold the whole bundle, attach each as one FunPay secret line
-            // (login:password), and let FunPay hand one to each buyer. The
-            // connect guide is sent as the offer's after-payment message.
-            const qtyWanted = Math.max(1, parseInt(fp.amount, 10) || 1);
-            const claimed = offer
-              ? await suppliedStock.claimForListing(
-                  String(offer._id),
-                  qtyWanted,
-                  { market: "funpay" },
-                )
-              : await fpFulfiller.claimAccountsForSet(set, qtyWanted);
-            if (!claimed.length) {
-              results[name] = {
-                success: false,
-                message: offer
-                  ? await suppliedClaimRefusal(offer, qtyWanted, "funpay")
-                  : "Out of stock — no unsold account holds this whole " +
-                    "bundle, so there is nothing to auto-deliver",
-              };
-              continue;
-            }
-            // No G1 guard here on purpose: FunPay is fed funpayDeliveryLine(),
-            // not the offer's template (a multi-line render would be split into
-            // several bogus secrets), and that line always carries the login.
-            try {
-              r = await mp.funpayPublish({
-                nodeId: fpNode,
-                title,
-                description,
-                priceUsd,
-                currency: fp.currency,
-                priceOverride: fp.priceOverride,
-                amount: claimed.length,
-                active: fp.active !== false,
-                autoDelivery: true,
-                // FunPay joins its secrets with "\n" and hands ONE LINE to
-                // each buyer (utils/marketplaces.js:3786), so a supplied
-                // account is fed as the same login:password line the archive
-                // path uses — the offer's multi-line delivery template would
-                // be split into several bogus secrets.
-                secrets: offer
-                  ? claimed.map((c) =>
-                      fpFulfiller.funpayDeliveryLine(c.login, c.password),
-                    )
-                  : claimed.map((c) => c.line),
-                paymentMsg: fpFulfiller.funpayPaymentGuide(),
-              });
-            } catch (err) {
-              if (offer) {
-                await suppliedStock.releaseClaim(
-                  claimed.map((c) => c.ledgerId),
-                );
-              } else {
-                await fpFulfiller.releaseAccounts(
-                  claimed.map((c) => c.accountId),
-                );
-              }
-              throw err;
-            }
-            const doc = await MarketplaceListing.create({
-              set: set._id,
-              marketplace: "funpay",
-              externalId: r.externalId,
-              externalNode: r.externalNode || "",
-              url: r.url || "",
-              title,
-              description,
-              price: priceUsd,
-              status: "active",
-              note:
-                (r.note ? r.note + " " : "") +
-                "auto-delivery: " +
-                claimed.length +
-                " account(s)",
-              autoDeliver: true,
-              accountId: claimed.map((c) => c.accountId).join(","),
-              accountLogin: claimed.map((c) => c.login).join(", "),
-              ...(offer ? offerRowFields(offer, claimed) : {}),
-            });
-            if (offer) {
-              // The lines are inside FunPay's secret pool now — see the
-              // Digiseller note above.
-              try {
-                await suppliedStock.markFed(
-                  claimed.map((c) => c.ledgerId),
-                  { listing: doc._id, market: "funpay" },
-                );
-              } catch (e) {
-                console.error("supplied markFed (funpay):", e.message);
-              }
-            }
-            results[name] = {
-              success: true,
-              id: String(doc._id),
-              externalId: r.externalId,
-              url: r.url || "",
-              note: doc.note,
-            };
-            continue;
-          }
-          r = await mp.funpayPublish({
-            nodeId: fpNode,
-            title,
-            description,
-            priceUsd,
-            currency: fp.currency,
-            priceOverride: fp.priceOverride,
-            amount: fp.amount,
-            active: fp.active !== false,
-            autoDelivery: false,
-            paymentMsg: fp.paymentMsg,
-          });
         } else if (name === "zeusx") {
           const zx = body.zeusx || {};
+          if (offer) {
+            // An account listing: one automatic offer per pasted account,
+            // taken off the shelf now (publishSuppliedZeusx above).
+            results[name] = await publishSuppliedZeusx({
+              offer,
+              zx,
+              title,
+              description,
+              priceUsd,
+              game: zx.game || pubGame,
+              cover: gridImage || coverImagePath(set),
+            });
+            continue;
+          }
           r = await mp.zeusxPublish({
             title,
             description,
@@ -1465,28 +1610,6 @@ router.post("/marketplaces/publish", requireSuperadmin, async (req, res) => {
             note: r.note || "",
           };
           continue;
-        } else if (name === "z2u") {
-          // z2uBulkPublish answers { reply, rows, gameName } with NO offer id,
-          // and externalId is what every later sale poll, stock sync and
-          // delist joins on. A row with an empty externalId is worse than no
-          // row: it can never be reconciled and can never be delisted, so it
-          // would sit "active" forever over stock nothing is holding.
-          results[name] = {
-            success: false,
-            message:
-              "Z2U publishing has no offer id to record — use the Z2U shelf " +
-              "keeper",
-          };
-          logEvent({
-            category: "marketplace",
-            action: "z2u-publish-refused",
-            severity: "warn",
-            subject: title,
-            detail:
-              "manual publish to Z2U refused: z2uBulkPublish returns no " +
-              "offer id to store as externalId",
-          });
-          continue;
         } else {
           results[name] = { success: false, message: "Unknown marketplace" };
           continue;
@@ -1504,7 +1627,7 @@ router.post("/marketplaces/publish", requireSuperadmin, async (req, res) => {
           note: r.note || "",
           // An offer-backed row carries no set, so without this the schema's
           // widened `set` requirement would refuse it. The claim-at-sale
-          // markets (Eldorado, PlayerAuctions, G2G, Z2U) take their supplied
+          // markets (Eldorado, PlayerAuctions, G2G) take their supplied
           // account when the order arrives, so units[] is empty here.
           ...(offer ? offerRowFields(offer, []) : {}),
         });
@@ -1527,126 +1650,6 @@ router.post("/marketplaces/publish", requireSuperadmin, async (req, res) => {
     res.status(500).json({ success: false, message: "Server error" });
   }
 });
-
-// EpicNPC Filler browser extension download. The extension packages the same
-// fill logic as the bookmarklet but runs automatically when a compose tab
-// opened from "Sell on EpicNPC" loads — no bookmark click needed. Served as a
-// stored zip built from the checked-in extension/ sources so it can never
-// drift from the repo.
-router.get(
-  "/marketplaces/epicnpc/extension.zip",
-  requireSuperadmin,
-  async (req, res) => {
-    try {
-      const { buildStoredZip } = require("../utils/storedZip");
-      const dir = path.join(__dirname, "..", "extension", "epicnpc-filler");
-      const files = [];
-      for (const name of await fsp.readdir(dir)) {
-        files.push({
-          name: "epicnpc-filler/" + name,
-          data: await fsp.readFile(path.join(dir, name)),
-        });
-      }
-      const zip = buildStoredZip(files);
-      res.setHeader("Content-Type", "application/zip");
-      res.setHeader(
-        "Content-Disposition",
-        'attachment; filename="epicnpc-filler.zip"',
-      );
-      res.send(zip);
-    } catch (err) {
-      console.error("epicnpc extension zip error:", err.message);
-      res.status(500).json({ success: false, message: "Server error" });
-    }
-  },
-);
-
-// EpicNPC bridge: EpicNPC has no seller API and is bot-protected, so the server
-// can't post the listing. Instead it resolves the game's forum node and builds
-// the compose deep-link with the listing payload in the URL hash; the frontend
-// opens it in a new tab and the one-time bookmarklet fills the form in the
-// seller's own logged-in EpicNPC session. Optionally records the listing so it
-// shows in the "published on marketplaces" list.
-router.post(
-  "/marketplaces/epicnpc/prepare",
-  requireSuperadmin,
-  async (req, res) => {
-    try {
-      const body = req.body || {};
-      const set = await DropSet.findById(body.setId).lean();
-      if (!set) {
-        return res
-          .status(404)
-          .json({ success: false, message: "Set not found" });
-      }
-      const game = String(body.game || set.game || "").trim();
-      const hit = epicnpc.nodeForGame(game);
-      if (!hit) {
-        return res.status(422).json({
-          success: false,
-          message: game
-            ? '"' +
-              game +
-              '" has no EpicNPC forum — pick another game or skip EpicNPC for this listing.'
-            : "No game given for this listing, so EpicNPC has nowhere to post it.",
-        });
-      }
-      const priceUsd = Number(body.price != null ? body.price : set.price) || 0;
-      const service = body.service === "mm" ? "mm" : "free"; // default TG Free
-      // EpicNPC gets its own house-style title + rich (HTML) body rather than
-      // the generic set title/description.
-      const epic = buildEpicListing(set, game);
-      const title = epic.title;
-      const payload = {
-        title,
-        priceUsd,
-        descHtml: epic.descHtml,
-        description: buildDescription(set), // plain-text fallback
-        tier: String(body.tier || "account"),
-        tags: String(body.tags || game).slice(0, 200),
-        service,
-        owner: "Yes",
-      };
-      const url = epicnpc.buildComposeUrl(hit.node, payload);
-
-      let listingId = "";
-      if (body.record) {
-        // Bridge posts are manual, so there's no real external id yet; record a
-        // placeholder so the row is trackable and dedupable by set+game+node.
-        const doc = await MarketplaceListing.create({
-          set: set._id,
-          marketplace: "epicnpc",
-          externalId: "epicnpc:" + hit.node + ":" + Date.now(),
-          externalNode: String(hit.node),
-          url: "https://www.epicnpc.com/forums/x." + hit.node + "/",
-          title,
-          description: payload.description,
-          price: priceUsd,
-          status: "active",
-          note:
-            "bridge post to " +
-            hit.name +
-            " (node " +
-            hit.node +
-            ") — posted manually via bookmarklet",
-        });
-        listingId = String(doc._id);
-      }
-
-      res.json({
-        success: true,
-        node: hit.node,
-        epicName: hit.name,
-        game,
-        url,
-        listingId,
-      });
-    } catch (err) {
-      console.error("epicnpc prepare error:", err.message);
-      res.status(500).json({ success: false, message: "Server error" });
-    }
-  },
-);
 
 // External listings, optionally for one set.
 router.get("/marketplaces/listings", requireSuperadmin, async (req, res) => {
@@ -1682,6 +1685,9 @@ router.get("/marketplaces/listings", requireSuperadmin, async (req, res) => {
         // the post-event markup is allowed to reprice — anything not marked
         // "auto" keeps whatever price it was given.
         origin: r.origin === "auto" ? "auto" : "manual",
+        // Stocked from the no-claim farm, not the Drop Archive — its `setId`
+        // is a no-claim set, so the page must not treat it as an archive row.
+        noclaimStock: !!r.noclaimStock,
         createdAt: r.createdAt,
       })),
     });
@@ -1703,6 +1709,28 @@ router.delete(
           .status(404)
           .json({ success: false, message: "Listing not found" });
       }
+      // No-claim row (contract §7): what its layer did around this delist, and
+      // the verdict it is told — "delisted", or what delistOutcome read below.
+      let noclaim = null;
+      let noclaimOutcome = "delisted";
+      if (row.noclaimStock) {
+        // Units the platform's own vault already sold are settled FIRST:
+        // afterDelist hands every undelivered unit back to the farm, and a sale
+        // not yet seen would go back on the shelf and sell twice. A failed
+        // settle refuses the delist while nothing has moved yet.
+        try {
+          await noclaimListings().beforeDelist(row);
+        } catch (err) {
+          console.error("noclaim beforeDelist:", err.message);
+          return res.json({
+            success: false,
+            message:
+              "Not delisted — this no-claim listing's sales could not be " +
+              "settled first: " +
+              err.message,
+          });
+        }
+      }
       try {
         if (row.marketplace === "gameflip") {
           await mp.gameflipDelist(row.externalId);
@@ -1712,8 +1740,6 @@ router.delete(
           await mp.g2gDelist(row.externalId);
         } else if (row.marketplace === "ggsel") {
           await mp.ggselDelist(row.externalId);
-        } else if (row.marketplace === "funpay") {
-          await mp.funpayDelist(row.externalId, row.externalNode);
         } else if (row.marketplace === "zeusx") {
           await mp.zeusxDelist(row.externalId);
         } else if (row.marketplace === "eldorado") {
@@ -1722,17 +1748,23 @@ router.delete(
           // Hide, not Cancel: hiding keeps the offer so it can be relisted,
           // while Cancel is permanent.
           await mp.playerauctionsDelist(row.externalId);
-        } else if (row.marketplace === "z2u") {
-          // off_line, not delete: Z2U keeps a deactivated offer (and its stock)
-          // so the shelf keeper can put it back when stock returns, while a
-          // delete is permanent and loses the offer id the row is joined on.
-          await mp.z2uDelist(row.externalId);
         }
       } catch (err) {
         // Already gone or already sold is not a failed delist: the listing is off
         // sale, which is what was asked. Resolving the row here is what keeps it
         // from sitting active with an error forever, holding an account reserved.
-        const outcome = mp.delistOutcome(err.message);
+        let outcome = mp.delistOutcome(err.message);
+        // A ZeusX account-listing offer that already sold may refuse to be
+        // hidden in words delistOutcome does not know. ZeusX's own reading of
+        // the offer is the better witness there: if it shows the sale, the
+        // delist is answered, and the row must not sit active forever holding
+        // up the offer's archive.
+        const zxSupplied = row.marketplace === "zeusx" && !!row.accountOffer;
+        if (!outcome && zxSupplied) {
+          if ((await zeusxUnitVerdict(row.externalId)) === "sold") {
+            outcome = "sold";
+          }
+        }
         if (!outcome) {
           row.lastError = err.message.slice(0, 400);
           await row.save();
@@ -1744,6 +1776,14 @@ router.delete(
           row.qtyRemaining = 0;
           row.lastError = "";
           await row.save();
+          // The ledger learns it too, so the panel counts the account sold
+          // rather than parked in ZeusX's vault.
+          if (zxSupplied) await markZeusxUnitsDelivered(row);
+          // A no-claim row's unit is the buyer's now: its layer marks it sold
+          // rather than releasing it.
+          if (row.noclaimStock) {
+            noclaim = await noclaimAfterDelist(row, outcome);
+          }
           // Finding out this way is still finding out it sold — the auto-farmer
           // should learn from it exactly as it would from the sale poller.
           try {
@@ -1762,22 +1802,74 @@ router.delete(
           return res.json({
             success: true,
             message: "Already sold on the marketplace — marked sold here",
+            ...(noclaim ? { noclaim } : {}),
           });
         }
+        noclaimOutcome = outcome;
         row.note =
           (row.note ? row.note + " " : "") + "gone from the marketplace";
       }
       row.status = "delisted";
       row.lastError = "";
       await row.save();
+      // GGSel: pausing leaves every code in the offer's vault, and a paused
+      // offer that is ever re-activated sells them all again — including
+      // accounts handed back below and sold elsewhere since. Take the codes
+      // out now (the row is already delisted, so no stock reader counts the
+      // vanishing codes as sales), and hand back ONLY the accounts GGSel then
+      // proves never sold, for THIS row's set. Account-listing and no-claim
+      // shop rows keep their own layers' hand-back below.
+      let ggVault = null;
+      if (
+        row.marketplace === "ggsel" &&
+        !row.accountOffer &&
+        !row.noclaimStock &&
+        typeof mp.ggselEmptyVault === "function"
+      ) {
+        try {
+          ggVault = await mp.ggselEmptyVault(row.externalId);
+          const archiveRow = !!row.set && row.origin !== "unclaimed";
+          const rel = archiveRow
+            ? await ggFulfiller.releaseProvenUnsold(row, ggVault)
+            : null;
+          ggVault.summary =
+            "vault emptied: " +
+            ggVault.archived.length +
+            " code(s) archived, " +
+            ggVault.sold.length +
+            " sold" +
+            (ggVault.left.length
+              ? ", " + ggVault.left.length + " still in stock (kept reserved)"
+              : "") +
+            (rel
+              ? "; " +
+                rel.released.length +
+                " account(s) back in stock" +
+                (rel.keptSold.length
+                  ? ", " + rel.keptSold.length + " kept (sold)"
+                  : "")
+              : "");
+        } catch (err) {
+          // Nothing is known about the codes, so nothing is handed back.
+          ggVault = {
+            error: err.message,
+            summary:
+              "codes could not be read (" +
+              String(err.message || "error").slice(0, 120) +
+              ") — accounts kept reserved",
+          };
+        }
+        row.note = (row.note ? row.note + " " : "") + "— GGSel " + ggVault.summary;
+        await row.save();
+      }
       // A delisted auto-delivery listing frees its reserved account(s).
       if (row.autoDeliver && row.accountId) {
         if (row.marketplace === "ggsel") {
-          await ggFulfiller.releaseAccounts(row.accountId.split(","));
+          // Handled above from GGSel's own product states: an account whose
+          // code SOLD is the buyer's, and the old tag-wide release here also
+          // freed every other set the account had sold on GGSel.
         } else if (row.marketplace === "digiseller") {
           await dsFulfiller.releaseAccounts(row.accountId.split(","));
-        } else if (row.marketplace === "funpay") {
-          await fpFulfiller.releaseAccounts(row.accountId.split(","));
         } else {
           // Scoped to THIS row's set: a tag-wide Gameflip release frees every
           // "gameflip"-reserved drop on the account, including a different
@@ -1788,7 +1880,7 @@ router.delete(
       // S1 (docs/ACCOUNT-LISTINGS-FIXES-3.md): the release above can never
       // reach owner-supplied stock. An account-listing row leaves `accountId`
       // empty on purpose (contract B5), so that gate is unreachable for it, and
-      // the accounts fed to a GGSel/Plati/FunPay vault at publish time stay
+      // the accounts fed to a GGSel/Plati vault at publish time stay
       // "fed" forever: excluded from stockFor, with no UI control to bring them
       // back and no other path that ever would. Twenty accounts published to
       // GGSel and then delisted were silently destroyed.
@@ -1799,6 +1891,8 @@ router.delete(
       // skipped here too: those belong to a PAID order still mid-delivery, and
       // the fulfillers' resume path claims them back by that id.
       let returned = 0;
+      // ZeusX account listings only: why an account did NOT come back.
+      let zxVerdict = "";
       if (row.accountOffer) {
         const ledgerIds = [];
         for (const u of row.units || []) {
@@ -1812,19 +1906,39 @@ router.delete(
           if (!u || !u.contentId || u.deliveredAt) continue;
           ledgerIds.push(String(u.contentId));
         }
-        try {
-          // "fed" only: a credential parked in a marketplace vault dies with
-          // the offer and comes home. One committed to a buyer's order does
-          // NOT — delisting an offer does not cancel a sale someone paid for.
-          returned = await suppliedStock.releaseClaim(ledgerIds, {
-            statuses: ["fed"],
-          });
-        } catch (err) {
-          // The listing IS delisted by now; a failed hand-back must not turn
-          // that into a 500 the owner retries against a marketplace that no
-          // longer has the offer. The count then answers 0, which is the
-          // honest number, and the log line below records the miss.
-          console.error("supplied releaseClaim (delist):", err.message);
+        // ZeusX hands an automatic offer's credential over by itself and no
+        // poller of ours watches for it, so on ZeusX "fed" cannot tell a parked
+        // account from one a buyer already holds — handing it back blind would
+        // sell it a second time. Ask ZeusX first. The hide above has already
+        // run, so no purchase can land between that answer and this decision.
+        if (row.marketplace === "zeusx" && ledgerIds.length) {
+          zxVerdict = await zeusxUnitVerdict(row.externalId);
+        }
+        if (zxVerdict === "sold") {
+          row.status = "sold";
+          row.note = (row.note ? row.note + " " : "") + "— sold on ZeusX";
+          await row.save();
+          await markZeusxUnitsDelivered(row);
+        } else if (zxVerdict === "unknown") {
+          row.note =
+            (row.note ? row.note + " " : "") +
+            "— account kept out of stock: ZeusX could not confirm it unsold";
+          await row.save();
+        } else {
+          try {
+            // "fed" only: a credential parked in a marketplace vault dies with
+            // the offer and comes home. One committed to a buyer's order does
+            // NOT — delisting an offer does not cancel a sale someone paid for.
+            returned = await suppliedStock.releaseClaim(ledgerIds, {
+              statuses: ["fed"],
+            });
+          } catch (err) {
+            // The listing IS delisted by now; a failed hand-back must not turn
+            // that into a 500 the owner retries against a marketplace that no
+            // longer has the offer. The count then answers 0, which is the
+            // honest number, and the log line below records the miss.
+            console.error("supplied releaseClaim (delist):", err.message);
+          }
         }
         logEvent({
           category: "account-listings",
@@ -1834,8 +1948,18 @@ router.delete(
           detail:
             returned +
             " supplied account(s) returned to the shelf after delisting " +
-            row.marketplace,
+            row.marketplace +
+            (zxVerdict === "sold"
+              ? " (ZeusX shows it sold — kept with its buyer)"
+              : zxVerdict === "unknown"
+                ? " (ZeusX could not confirm it unsold — kept out of stock)"
+                : ""),
         });
+      }
+      // A no-claim row keeps accountId "" and has no accountOffer, so neither
+      // release above reaches it; its own layer hands the undelivered units back.
+      if (row.noclaimStock) {
+        noclaim = await noclaimAfterDelist(row, noclaimOutcome);
       }
       res.json({
         success: true,
@@ -1844,9 +1968,17 @@ router.delete(
         ...(row.accountOffer
           ? {
               returned,
-              message: returned + " account(s) returned to this shelf",
+              message:
+                zxVerdict === "sold"
+                  ? "Already sold on ZeusX — the account stays with its buyer"
+                  : zxVerdict === "unknown"
+                    ? "Delisted — the account was kept out of stock because " +
+                      "ZeusX could not confirm it unsold"
+                    : returned + " account(s) returned to this shelf",
             }
           : {}),
+        ...(noclaim ? { noclaim } : {}),
+        ...(ggVault ? { ggsel: ggVault.summary } : {}),
       });
     } catch (err) {
       console.error("marketplace delist error:", err.message);
@@ -1887,6 +2019,10 @@ router.post(
           success: false,
           message: "Content upload is only for Digiseller products",
         });
+      }
+      const blocked = marketBlockedReason("digiseller");
+      if (blocked) {
+        return res.status(409).json({ success: false, message: blocked });
       }
       const body = req.body || {};
       let lines;

@@ -102,45 +102,55 @@ async function propagateSuspensionToPool(logins) {
 async function classifyBotAccounts({ limit = 0, onProgress } = {}) {
   const q = BotAccount.find(
     { lastScanStatus: { $in: PROBE_SCAN_STATUSES }, login: { $gt: "" } },
-    { login: 1, _id: 1 },
+    { login: 1, _id: 1, suspendedAt: 1 },
   ).lean();
   if (limit > 0) q.limit(limit);
   const rows = await q;
   if (!rows.length) return { probed: 0, suspended: 0, alive: 0, unknown: 0 };
   const verdicts = await accountState.probeAccounts(rows.map((r) => r.login));
   const gone = [];
+  const goneAgain = [];
   const goneLogins = [];
   let alive = 0;
   let unknown = 0;
   for (const r of rows) {
     const v = verdicts.get(r.login);
     if (v === accountState.GONE) {
-      gone.push(r._id);
+      // A row that already carries suspendedAt was confirmed gone before and has
+      // only flapped back to token_invalid since (the drop scanner re-reads dead
+      // accounts, and an inconclusive probe there used to demote them). It is
+      // not a new ban: stamping it "now" moved its ban date forward every day
+      // and re-announced it in Telegram every day (velvet36phoenix409249, daily
+      // since at least 2026-08-26).
+      if (r.suspendedAt) goneAgain.push(r._id);
+      else gone.push(r._id);
       goneLogins.push(r.login);
     } else if (v === accountState.EXISTS) alive++;
     else unknown++;
   }
+  const verdict = {
+    lastScanStatus: "suspended",
+    lastScanError: "Account no longer exists on Twitch (suspended or deleted)",
+  };
   if (gone.length) {
     await BotAccount.updateMany(
       { _id: { $in: gone } },
-      {
-        $set: {
-          lastScanStatus: "suspended",
-          suspendedAt: new Date(),
-          lastScanError:
-            "Account no longer exists on Twitch (suspended or deleted)",
-        },
-      },
+      { $set: { ...verdict, suspendedAt: new Date() } },
     );
-    await propagateSuspensionToPool(goneLogins);
   }
+  if (goneAgain.length) {
+    await BotAccount.updateMany({ _id: { $in: goneAgain } }, { $set: verdict });
+  }
+  if (goneLogins.length) await propagateSuspensionToPool(goneLogins);
   if (onProgress) {
     onProgress(
       "Suspension check: " +
         rows.length +
         " bad-token account(s) probed — " +
         gone.length +
-        " gone, " +
+        " newly gone" +
+        (goneAgain.length ? " (+" + goneAgain.length + " already known)" : "") +
+        ", " +
         alive +
         " still exist (re-auth those), " +
         unknown +
@@ -168,13 +178,19 @@ async function classifyPoolAccounts({ limit = 0, onProgress } = {}) {
   const stale = new Date(Date.now() - PROBE_TTL_MS);
   const rows = await AvailableAccount.find(
     {
+      // A row already confirmed gone is never re-probed: a ban does not un-ban
+      // (the pool checker's sweep excludes these for the same reason). Without
+      // this the daily re-probe found the same ~72 dead rows "gone" again every
+      // day, re-stamped suspendedAt to now — so every one of them looked banned
+      // "this week", forever — and re-announced all of them in Telegram daily.
+      lastCheckStatus: { $ne: "suspended" },
       $or: [
         { lastCheckStatus: { $in: PROBE_CHECK_STATUSES } },
         { existsProbeAt: null },
         { existsProbeAt: { $lt: stale } },
       ],
     },
-    { usernameLower: 1 },
+    { usernameLower: 1, suspendedAt: 1 },
   )
     .sort({ existsProbeAt: 1 })
     .limit(limit > 0 ? limit : POOL_PROBE_CAP)
@@ -184,26 +200,31 @@ async function classifyPoolAccounts({ limit = 0, onProgress } = {}) {
     rows.map((r) => r.usernameLower),
   );
   const gone = [];
+  const goneAgain = [];
   let alive = 0;
   let unknown = 0;
   for (const r of rows) {
     const v = verdicts.get(r.usernameLower);
-    if (v === accountState.GONE) gone.push(r._id);
+    if (v === accountState.GONE) (r.suspendedAt ? goneAgain : gone).push(r._id);
     else if (v === accountState.EXISTS) alive++;
     else unknown++;
   }
   const now = new Date();
+  const verdict = {
+    lastCheckStatus: "suspended",
+    lastCheckError: "Account no longer exists on Twitch (suspended or deleted)",
+  };
   if (gone.length) {
     await AvailableAccount.updateMany(
       { _id: { $in: gone } },
-      {
-        $set: {
-          lastCheckStatus: "suspended",
-          suspendedAt: now,
-          lastCheckError:
-            "Account no longer exists on Twitch (suspended or deleted)",
-        },
-      },
+      { $set: { ...verdict, suspendedAt: now } },
+    );
+  }
+  // Confirmed gone before (it keeps its original ban date and is not news).
+  if (goneAgain.length) {
+    await AvailableAccount.updateMany(
+      { _id: { $in: goneAgain } },
+      { $set: verdict },
     );
   }
   // Stamped for every row we got a definite answer about, gone or not, so the
@@ -341,7 +362,7 @@ async function evictSuspendedFromConfigs({ onProgress } = {}) {
 /* ------------------------- 2b. retire from listings ----------------------- */
 
 // Does this listing row still sell `id`/`login`? Both the top-level pair (a
-// Gameflip auto-delivery offer, a FunPay pool line) and `units` (Digiseller /
+// Gameflip auto-delivery offer) and `units` (Digiseller /
 // GGSel per-unit bookkeeping) count. Pure so the matching is testable.
 function listingRefsAccount(row, id, login) {
   const wantId = String(id || "");
@@ -393,8 +414,15 @@ async function retireFromLiveListings({ onProgress } = {}) {
   }
 
   const live = await MarketplaceListing.find(
-    { status: "active" },
-    { accountId: 1, accountLogin: 1, units: 1, accountOffer: 1 },
+    // bulkOfferId: the bulk loop retires its own suspended members (docs/bulk-packs/CONTRACT.md H7)
+    { status: "active", bulkOfferId: null },
+    {
+      accountId: 1,
+      accountLogin: 1,
+      units: 1,
+      accountOffer: 1,
+      noclaimStock: 1,
+    },
   ).lean();
 
   for (const candidate of live) {
@@ -440,6 +468,23 @@ async function retireFromLiveListings({ onProgress } = {}) {
         " from its own supplied stock, and the same login is suspended in the " +
         "Drop Archive — check it in the Account listings tab. Left untouched: " +
         "the archive repair path does not apply to supplied stock.";
+      progress("warning — " + msg);
+      report.warnings.push(msg);
+      continue;
+    }
+    // A NO-CLAIM listing (docs/NOCLAIM-SHOP-LISTINGS-CONTRACT.md §6) is the
+    // same story: its units[].login are no-claim farm accounts owned by
+    // utils/noclaimListings, which re-reads each one live before it is
+    // delivered. The archive detach path would rebuild the product from its
+    // set's DropLog stock, so report it and leave it alone.
+    if (candidate.noclaimStock) {
+      const msg =
+        "no-claim listing " +
+        candidate._id +
+        " carries " +
+        unique.map((a) => a.login).join(", ") +
+        ", suspended in the Drop Archive — the no-claim lifecycle re-checks " +
+        "it live; left untouched";
       progress("warning — " + msg);
       report.warnings.push(msg);
       continue;

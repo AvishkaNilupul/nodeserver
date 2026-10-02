@@ -1,5 +1,5 @@
 // Minimal stored (uncompressed) ZIP builder — enough to package the tiny
-// EpicNPC Filler extension for download without adding a zip dependency.
+// a checked-in extension for download without adding a zip dependency.
 // Implements the classic local-file-header + central-directory layout with
 // CRC-32; every mainstream unzipper (and Chrome's load-unpacked flow after
 // extraction) accepts stored entries.

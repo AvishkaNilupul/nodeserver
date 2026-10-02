@@ -8,6 +8,7 @@ const settings = require("../utils/settings");
 const hosts = require("../utils/botHosts");
 const botFactory = require("../utils/botFactory");
 const suspendedAccounts = require("../utils/suspendedAccounts");
+const deadTokenRetire = require("../utils/deadTokenRetire");
 const AutoFarmSnapshot = require("../models/AutoFarmSnapshot");
 const AutoFarmEvent = require("../models/AutoFarmEvent");
 const BotAccount = require("../models/BotAccount");
@@ -537,12 +538,21 @@ router.post("/auto-farm/settings", requireSuperadmin, async (req, res) => {
     if ("purgeSuspended" in b) patch.purgeSuspended = !!b.purgeSuspended;
     if ("suspendCheckLimit" in b)
       patch.suspendCheckLimit = clamp(b.suspendCheckLimit, 0, 100000);
+    // Retire sold accounts whose token died (utils/deadTokenRetire.js). Opt-in.
+    if ("retireSoldDeadTokens" in b)
+      patch.retireSoldDeadTokens = !!b.retireSoldDeadTokens;
+    if ("deadTokenRetireHours" in b)
+      patch.deadTokenRetireHours = clamp(b.deadTokenRetireHours, 24, 720);
     // Multi-market category ids: numeric strings, empty = unset/auto.
     if ("platiCategoryId" in b)
       patch.platiCategoryId = String(b.platiCategoryId || "").replace(
         /[^0-9]/g,
         "",
       );
+    // Plati / GGSel on/off for every automatic lister (utils/settings.js
+    // platiEnabled, ggselEnabled).
+    if ("platiEnabled" in b) patch.platiEnabled = !!b.platiEnabled;
+    if ("ggselEnabled" in b) patch.ggselEnabled = !!b.ggselEnabled;
     if ("ggselCategoryId" in b)
       patch.ggselCategoryId = String(b.ggselCategoryId || "").replace(
         /[^0-9]/g,
@@ -845,6 +855,25 @@ router.post("/auto-farm/rescan", requireSuperadmin, async (req, res) => {
     res.status(500).json({ error: err.message });
   }
 });
+
+// READ-ONLY: which sold dead-token accounts a retirement pass would take out of
+// their bots right now, which unsold ones it leaves for re-auth, and why the
+// rest are skipped (utils/deadTokenRetire.js). Changes nothing, switch or not.
+router.get(
+  "/auto-farm/dead-token-retire/plan",
+  requireSuperadmin,
+  async (req, res) => {
+    try {
+      const af = settings.getAutoFarm();
+      const report = await deadTokenRetire.plan({
+        hours: Number(req.query.hours) || af.deadTokenRetireHours,
+      });
+      res.json({ ok: true, enabled: af.retireSoldDeadTokens === true, ...report });
+    } catch (err) {
+      res.status(500).json({ error: err.message });
+    }
+  },
+);
 
 // Run the suspended-account sweep on demand, without waiting for a tick.
 // `dryRun` reports what a purge WOULD delete and touches nothing; `purge` is the

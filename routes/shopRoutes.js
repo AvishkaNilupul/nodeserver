@@ -167,10 +167,16 @@ async function sellableAccountMap(ids) {
   if (!ids.length) return new Map();
   const accs = await BotAccount.find(
     { _id: { $in: ids } },
-    { login: 1, credPassword: 1, hasPassword: 1, lastScanStatus: 1 },
+    { login: 1, credPassword: 1, hasPassword: 1, lastScanStatus: 1, clientSecret: 1 },
   ).lean();
+  // An account in a renter's bot stack belongs to that renter (rented out, a
+  // rent-farm window, or theirs) — never sellable, even when its old operator
+  // record kept a password and unreserved drops (utils/rentedAccounts.js).
+  const renters = require("../utils/rentedAccounts");
+  const rented = await renters.rentedIndex();
   const map = new Map();
   for (const a of accs) {
+    if (renters.isRented(rented, a)) continue;
     // Accounts without a stored password can't be delivered, so they're
     // excluded from the sellable pool. Same for a dead Twitch token: the
     // credentials likely changed, so the delivered login may not work — and a
@@ -190,6 +196,10 @@ async function sellableAccountMap(ids) {
 // such account is one sellable unit (the buyer receives the whole account).
 // Sorted so the account that can deliver the most copies comes first.
 async function availableAccountsForSet(set) {
+  // A no-claim set (docs/NOCLAIM-SHOP-LISTINGS-CONTRACT.md §6) is stocked by
+  // the no-claim farm's UNCLAIMED drops; an archive account only holds claimed
+  // copies, which are worthless to its buyer — so none can deliver it.
+  if (set && set.stockSource === "noclaim") return [];
   const keys = (set.items || []).map((i) => i.itemKey).filter(Boolean);
   if (!keys.length) return [];
   // Each item can promise an exact copy count (item.qty); only accounts that
@@ -238,10 +248,19 @@ async function availableAccountsForSet(set) {
       a.minCount - b.minCount ||
       String(a.login || "").localeCompare(String(b.login || "")),
   );
-  return out;
+  // One Twitch account can have two BotAccount records (utils/accountTwins.js).
+  // Offer it once — the best-ranked record — and not at all when its other
+  // record's copy of these drops is already reserved, sold or claimed.
+  const twins = require("../utils/accountTwins");
+  const gone = await twins.goneKeysFor(out.map((o) => o.login), keys);
+  return twins
+    .onePerLogin(out)
+    .filter((o) => !twins.hitsAny(gone.get(twins.loginKey(o.login)), keys));
 }
 
 function stockForSetFromHoldings(set, holdings) {
+  // No-claim sets never count archive holdings as stock (see above).
+  if (set && set.stockSource === "noclaim") return { stock: 0, topItems: [] };
   const keys = (set.items || []).map((i) => i.itemKey).filter(Boolean);
   if (!keys.length) return { stock: 0, topItems: [] };
   const needByKey = new Map(
@@ -254,6 +273,10 @@ function stockForSetFromHoldings(set, holdings) {
   let stock = 0;
   let bestMin = -1;
   let bestMap = null;
+  // One Twitch account counts once, however many records it has, and a twin
+  // whose drops are gone on its other record does not count at all
+  // (utils/accountTwins.js; stockForSets attaches `goneKeys`).
+  const counted = new Set();
   for (const row of holdings) {
     if (scopeIds.size && !scopeIds.has(String(row.accountId || ""))) {
       continue;
@@ -269,6 +292,11 @@ function stockForSetFromHoldings(set, holdings) {
     ) {
       continue;
     }
+    const login = String(row.login || "")
+      .trim()
+      .toLowerCase();
+    if (login && counted.has(login)) continue;
+    if (row.goneKeys && keys.some((key) => row.goneKeys.has(key))) continue;
     const counts = row.counts;
     let ok = true;
     let min = Infinity;
@@ -281,6 +309,7 @@ function stockForSetFromHoldings(set, holdings) {
       if (count < min) min = count;
     }
     if (!ok) continue;
+    if (login) counted.add(login);
     stock += 1;
     if (min > bestMin) {
       bestMin = min;
@@ -343,6 +372,13 @@ async function stockForSets(sets) {
       login: account.login || "",
       counts: m,
     });
+  }
+  // Twins whose drops are gone on their other record (utils/accountTwins.js).
+  const twins = require("../utils/accountTwins");
+  const gone = await twins.goneKeysFor(holdings.map((h) => h.login), allKeys);
+  for (const h of holdings) {
+    const g = gone.get(twins.loginKey(h.login));
+    if (g) h.goneKeys = g;
   }
   // For each set, count sellable accounts that hold all its keys and remember
   // the one with the most spare copies for the ×N preview.
@@ -441,7 +477,12 @@ router.get("/shop/listings", requireAdmin, async (req, res) => {
     if (listingsCache.data && Date.now() - listingsCache.at < LISTINGS_TTL_MS) {
       return res.json({ success: true, listings: listingsCache.data });
     }
-    const sets = await DropSet.find({ listed: true, price: { $gt: 0 } })
+    const sets = await DropSet.find({
+      listed: true,
+      price: { $gt: 0 },
+      // No-claim sets sell on marketplaces only, never in this balance Shop.
+      stockSource: { $ne: "noclaim" },
+    })
       .sort({ updatedAt: -1 })
       .lean();
     // One DropLog aggregation + one botaccounts query for ALL bundles, instead
@@ -463,7 +504,8 @@ router.get("/shop/listings", requireAdmin, async (req, res) => {
 router.get("/shop/listings/:id", requireAdmin, async (req, res) => {
   try {
     const set = await DropSet.findById(req.params.id).lean();
-    if (!set || !set.listed) {
+    // A no-claim set is never a Shop listing, whatever its `listed` flag says.
+    if (!set || !set.listed || set.stockSource === "noclaim") {
       return res
         .status(404)
         .json({ success: false, message: "Listing not found" });
@@ -487,7 +529,8 @@ router.post("/shop/listings/:id/buy", requireAdmin, async (req, res) => {
   const buyerUsername = req.session.admin.username;
   try {
     const set = await DropSet.findById(req.params.id).lean();
-    if (!set || !set.listed) {
+    // Same as the detail route: a no-claim set cannot be bought here.
+    if (!set || !set.listed || set.stockSource === "noclaim") {
       return res
         .status(404)
         .json({ success: false, message: "Listing not found" });

@@ -32,12 +32,14 @@ const botUpdateRoutes = require("./routes/botUpdateRoutes");
 const botHealthRoutes = require("./routes/botHealthRoutes");
 const noclaimFarmRoutes = require("./routes/noclaimFarmRoutes");
 const unclaimedAutoRoutes = require("./routes/unclaimedAutoRoutes");
+const noclaimStockRoutes = require("./routes/noclaimStockRoutes");
 const farmSizingRoutes = require("./routes/farmSizingRoutes");
 const unclaimedAutoList = require("./utils/unclaimedAutoList");
 const unclaimedAllocator = require("./utils/unclaimedAllocator");
 const botHealthMonitor = require("./utils/botHealthMonitor");
 const accountPoolChecker = require("./utils/accountPoolChecker");
 const dropArchiveRoutes = require("./routes/dropArchiveRoutes");
+const accountApiRoutes = require("./routes/accountApiRoutes");
 const accountPoolRoutes = require("./routes/accountPoolRoutes");
 const spentAccountsRoutes = require("./routes/spentAccountsRoutes");
 const autoFarmRoutes = require("./routes/autoFarmRoutes");
@@ -49,6 +51,7 @@ const backupRoutes = require("./routes/backupRoutes");
 const shopRoutes = require("./routes/shopRoutes");
 const catalogRoutes = require("./routes/catalogRoutes");
 const bulkOrderRoutes = require("./routes/bulkOrderRoutes");
+const bulkPackRoutes = require("./routes/bulkPackRoutes");
 const renterAuthRoutes = require("./routes/renterAuthRoutes");
 const renterRoutes = require("./routes/renterRoutes");
 const renterAdminRoutes = require("./routes/renterAdminRoutes");
@@ -79,11 +82,14 @@ const eldoradoSessionRefresher = require("./utils/eldoradoSessionRefresher");
 const eldoradoFulfiller = require("./utils/eldoradoFulfiller");
 const playerauctionsSessionRefresher = require("./utils/playerauctionsSessionRefresher");
 const playerauctionsFulfiller = require("./utils/playerauctionsFulfiller");
-const z2uFulfiller = require("./utils/z2uFulfiller");
 const g2gSessionRefresher = require("./utils/g2gSessionRefresher");
 const g2gFulfiller = require("./utils/g2gFulfiller");
 const playerauctionsSessionWatch = require("./utils/playerauctionsSessionWatch");
 const playerauctionsRoutes = require("./routes/playerauctionsRoutes");
+// Token-gated (NOT session/2fa gated) one-click cookie hand-off — mounted early,
+// before the admin auth cascade, because the browser extension that calls it has
+// no admin session. See routes/paSessionInstallRoutes.js.
+const paSessionInstallRoutes = require("./routes/paSessionInstallRoutes");
 const marketplaceGuardian = require("./utils/marketplaceGuardian");
 const primeWatcher = require("./utils/primeWatcher");
 const campaignWatcher = require("./utils/campaignWatcher");
@@ -379,6 +385,12 @@ app.use(twoFactorRoutes);
 // Per-admin self-service settings (e.g. linking a personal Telegram chat).
 // Each route guards with requireAdmin; kept out of the 2FA enforcement gate so
 // it stays reachable like the security page.
+// One-click PlayerAuctions cookie hand-off. Gated by its own shared secret, not
+// the admin session, so it is mounted here — ahead of the enforce2fa cascade —
+// where the browser extension (which carries no admin session) can reach it.
+// Off entirely until a secret is set (404 otherwise).
+app.use(paSessionInstallRoutes);
+
 app.use(settingsRoutes);
 app.use(enforce2fa, adminManageRoutes);
 
@@ -529,6 +541,13 @@ app.get("/bulk-orders.html", requireSuperadmin, enforce2fa, (req, res) => {
   res.sendFile(path.join(__dirname, "public", "bulk-orders.html"));
 });
 
+// Bulk packs (superadmin only) — proposes tiered bulk offers, publishes one only
+// when the owner clicks Send, then looks after the live ones
+// (docs/bulk-packs/CONTRACT.md). Gated here, before the static mount.
+app.get("/bulk-packs.html", requireSuperadmin, enforce2fa, (req, res) => {
+  res.sendFile(path.join(__dirname, "public", "bulk-packs.html"));
+});
+
 // Renters manager (superadmin only) — create renters, assign a bot slot, set
 // quota + access period, suspend, and approve their account submissions.
 app.get("/renters.html", requireSuperadmin, enforce2fa, (req, res) => {
@@ -673,6 +692,12 @@ app.use(enforce2fa, renterAdminRoutes);
 app.use(resellerAuthRoutes);
 app.use(resellerRoutes);
 app.use(enforce2fa, resellerAdminRoutes);
+// External account API (docs/ACCOUNT-API.md): a machine-to-machine
+// bearer-token realm that resolves a username to its client token across every
+// account source. Mounted BEFORE the blanket requireAdmin cascade — it presents
+// a static token, not a session, so the session guard would otherwise 401 it.
+// Every route inside self-guards with requireApiToken.
+app.use(accountApiRoutes);
 app.use(requireAdmin, enforce2fa, itemRoutes);
 app.use(requireAdmin, enforce2fa, inventoryRoutes);
 app.use(requireAdmin, enforce2fa, orderRoutes);
@@ -685,6 +710,9 @@ app.use(enforce2fa, noclaimFarmRoutes);
 // id and kills the server's copy, which is the one thing that stops delivery.
 app.use(enforce2fa, playerauctionsRoutes);
 app.use(enforce2fa, unclaimedAutoRoutes);
+// No-claim Shop listings (docs/NOCLAIM-SHOP-LISTINGS-CONTRACT.md): the Listings
+// page's No-claim picker, sets and stock. Every route inside is superadmin-only.
+app.use(enforce2fa, noclaimStockRoutes);
 // Fleet sizing: how many accounts each game should farm, and how many of them
 // should be on sale. Reads are always available; the one endpoint that spends
 // accounts dry-runs unless explicitly told to apply.
@@ -708,6 +736,10 @@ app.use(enforce2fa, marketplaceRoutes);
 // stock. Mounted after marketplaceRoutes because it shares that tab's publish
 // modal, and every route inside is superadmin-only.
 app.use(enforce2fa, accountListingRoutes);
+// Bulk packs API (routes/bulkPackRoutes.js). No public routes, so it mounts
+// after the requireAdmin blanket; every route inside also self-guards with
+// requireSuperadmin.
+app.use(enforce2fa, bulkPackRoutes);
 app.use(enforce2fa, backupRoutes);
 app.use(enforce2fa, shopRoutes);
 app.use(enforce2fa, primeRoutes);
@@ -842,14 +874,6 @@ mongoose
     // server's copy — unpreventable, and silent until a buyer is left waiting.
     // This checks every 5 minutes and Telegrams once when it breaks.
     playerauctionsSessionWatch.start();
-    // Z2U shelf keeper + auto-delivery. A Z2U offer carries a DURATION and the
-    // site silently takes it off sale when that runs out, which is why 34 of the
-    // account's 47 offers were dark on 2026-09-08 while only 2 were really empty.
-    // This extends what is about to lapse, relists what lapsed, pulls down
-    // anything we can no longer back with claimable stock, and hands over the
-    // credential on a waiting order. Self-guards on autoFarm.z2uAuto /
-    // z2uAutoDeliver, and both halves ship in dry-run.
-    z2uFulfiller.start();
     // G2G. Every Twitch-Drops offer we sell there sits in Game Items, a
     // MANUAL-delivery category with no code vault, so this drives G2G's own
     // view-details -> delivering -> delivered-quantity state machine and hands
@@ -882,6 +906,22 @@ mongoose
     // on expiry and returns all-expired accounts to the pool. Self-guards on
     // autoFarm.unclaimedAutoList + the pause flag.
     unclaimedAutoList.start();
+    // No-claim Shop listings: lifecycle pass + holdings sweep, self-guarded by
+    // settings.noclaimShop. Guarded here because this callback's catch is the
+    // "MongoDB connection error" exit — a broken optional module must never
+    // crash-loop the whole server.
+    try {
+      require("./utils/noclaimListings").start();
+    } catch (err) {
+      console.error("noclaimListings failed to start:", err.message);
+    }
+    // Bulk packs maintenance (maintains live offers; publishing needs autoFarm.bulkPacksEnabled)
+    // Guarded like noclaimListings above, for the same crash-loop reason.
+    try {
+      require("./utils/bulkPacks/loop").start();
+    } catch (err) {
+      console.error("bulkPacks loop failed to start:", err.message);
+    }
     // No-claim fleet allocator: sizes each no-claim game's farming fleet and its
     // auto-list shelf from what the game actually sells. It MEASURES every pass
     // (so the panel and the history exist either way) but only ACTS when

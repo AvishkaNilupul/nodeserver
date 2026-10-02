@@ -20,22 +20,41 @@ const { decrypt } = require("./secretBox");
 const {
   reserveSetOnAccount,
   releaseAccountsForTag,
+  releaseSetForAccounts,
 } = require("./dropReservation");
 const { getAutoFarm, getAccountListingSettings } = require("./settings");
 const mp = require("./marketplaces");
 const UnclaimedAccount = require("../models/UnclaimedAccount");
 const farmService = require("./eldoradoFarmService");
-const coverage = require("./unclaimedCoverage");
+const { packSizeOf, accountsForUnits, packsFor, packMismatch } = require("./bulkPacks/packMath");
 
 // Distinct from the Shop / Gameflip / GGSel / Digiseller tags so the same
 // account can never be handed out twice across platforms.
 const ELD_CLAIM_TAG = "eldorado";
 
-function eldoradoDeliveryCode(login, password) {
+// Bulk packs v2 (docs/bulk-packs/PACKS-2.md §1-§2). A bulk pack row is ONE
+// item priced as a whole pack: Eldorado counts PACKS (the offer's quantity,
+// the order's purchaseQuantity), and we hand over and reserve ACCOUNTS. The
+// conversion goes through utils/bulkPacks/packMath and nowhere else. Every
+// other row is not a pack, and both helpers hand its own count back untouched,
+// so an ordinary listing takes exactly the path it took before packs existed.
+//
+// Accounts one order of `qty` units takes off this row.
+function accountsForOrder(listing, qty) {
+  return packSizeOf(listing) > 1 ? accountsForUnits(listing, qty) : qty;
+}
+
+// What this row may advertise with `freeAccounts` accounts left on it: whole
+// packs on a bulk pack row — a partial pack can never sell — else the count.
+function advertisedFor(listing, freeAccounts) {
+  const n = packSizeOf(listing);
+  return n > 1 ? packsFor(freeAccounts, n) : freeAccounts;
+}
+
+// The one-time claim guide, factored out so a multi-account order can send it
+// ONCE instead of once per account (see eldoradoAccountsMessage).
+function eldoradoClaimGuide() {
   return (
-    "TWITCH DROP ACCOUNT\n\n" +
-    "Username: " + login + "\n" +
-    "Password: " + password + "\n\n" +
     "HOW TO CLAIM\n" +
     "1. Log in to this Twitch account and open " +
     "https://www.twitch.tv/drops/inventory\n" +
@@ -56,12 +75,47 @@ function eldoradoDeliveryCode(login, password) {
   );
 }
 
+function eldoradoDeliveryCode(login, password) {
+  return (
+    "TWITCH DROP ACCOUNT\n\n" +
+    "Username: " + login + "\n" +
+    "Password: " + password + "\n\n" +
+    eldoradoClaimGuide()
+  );
+}
+
+// Assemble the buyer-facing delivery message.
+//
+// A SINGLE-account order gets the full card above, byte-for-byte unchanged. A
+// MULTI-account order lists the credentials and then appends the ~1 KB claim
+// guide EXACTLY ONCE, instead of repeating the whole card per account. Repeating
+// it is what broke order 5e668ef3 on 2026-09-15: 15 accounts x the full guide was
+// a ~15 KB message, and Eldorado's TalkJS chat rejects a body that size with HTTP
+// 400 — so the send threw every 60-second tick and the paid order never delivered
+// until it was sent by hand. `creds` is [{login, password}]; only those two
+// fields are read, so callers pass their richer row objects directly.
+function eldoradoAccountsMessage(creds, qty) {
+  const list = Array.isArray(creds) ? creds : [];
+  if (!list.length) return "";
+  if (list.length === 1) {
+    return eldoradoDeliveryCode(list[0].login, list[0].password);
+  }
+  const total = list.length;
+  const blocks = list.map(
+    (c, i) =>
+      "=== ACCOUNT " + (i + 1) + " of " + total + " ===\n" +
+      "Username: " + c.login + "\n" +
+      "Password: " + c.password,
+  );
+  return blocks.join("\n\n") + "\n\n" + eldoradoClaimGuide();
+}
+
 // Atomically reserve up to `max` unsold accounts that each hold the whole
 // bundle. Mirrors the Digiseller claimer, including the cross-marketplace
 // exclusion: the buyer receives the whole account, so an account already
 // attached to any other live listing would ship that listing's drops too.
 // `claimTag` is which shop the reservation belongs to. It is a parameter and
-// not a constant because the Z2U fulfiller reuses this exact claim path: a
+// not a constant because other fulfillers reuse this exact claim path: a
 // second copy would drift, and a drifted copy of THIS function oversells an
 // account. The tag must be one of utils/marketClaimTags, or the drop archive
 // reads a merely-reserved account as really sold.
@@ -72,8 +126,14 @@ async function claimAccountsForSet(set, max, { claimTag = ELD_CLAIM_TAG } = {}) 
     await loginsOnActiveListings(),
   );
   const claimed = [];
+  // One Twitch account once per claim, however many BotAccount records it has
+  // (utils/accountTwins.js): order c8650c3c was sent marolw93x7w twice.
+  // availableAccountsForSet already offers one record per login; this is the
+  // last check, on the login actually read back for delivery.
+  const loginsTaken = new Set();
   for (const c of candidates) {
     if (claimed.length >= want) break;
+    if (loginsTaken.has(String(c.login || "").trim().toLowerCase())) continue;
     const ok = await reserveSetOnAccount(c.accountId, set, {
       soldToUsername: claimTag,
       soldSetId: String(set._id),
@@ -86,12 +146,18 @@ async function claimAccountsForSet(set, max, { claimTag = ELD_CLAIM_TAG } = {}) 
     }).lean();
     const login = account ? account.login || account.credUsername || "" : "";
     const password = account ? decrypt(account.credPassword) : "";
+    const key = String(login).trim().toLowerCase();
     // A unit with no readable password is not deliverable, so never let it
-    // stand behind the offer's quantity.
-    if (!login || !password) {
-      await releaseAccounts([c.accountId], claimTag);
+    // stand behind the offer's quantity — and a login already in this claim
+    // would hand the same account over twice.
+    if (!login || !password || loginsTaken.has(key)) {
+      // Scoped to THIS set (docs/bulk-packs/CONTRACT.md I1): a tag-wide release
+      // would also free the account's other drops reserved — or already SOLD —
+      // under the same marketplace tag for a different set.
+      await releaseSetForAccounts([c.accountId], String(set._id), claimTag);
       continue;
     }
+    loginsTaken.add(key);
     claimed.push({ accountId: String(c.accountId), login, password });
   }
   return claimed;
@@ -102,26 +168,22 @@ async function releaseAccounts(accountIds, claimTag = ELD_CLAIM_TAG) {
 }
 
 
-// --- Stock source 2: the unclaimed / no-claim farm ------------------------
-// Some Eldorado offers are not backed by the auto-farm pool at all — their
-// stock is the no-claim farm's own accounts (models/UnclaimedAccount, fed by
-// the noclaim-bot-* containers). Those rows carry the unclaimed drops and a
-// pointer to the credential owner, so they can be handed to a buyer directly.
-// A listing opts into this by setting `unclaimedGame`.
+// --- Stock source 2: the no-claim farm BY GAME (retired) -----------------
+// A row with `unclaimedGame` used to pick "an Overwatch account" out of the
+// no-claim ledger when an order landed. That path saw only LEDGERED accounts
+// (most of the farm has no ledger row, so its offers sat hidden), never booked
+// what a sale was worth, and needed a coverage gate of its own that once
+// shipped on stale data. Every no-claim offer now sells through a no-claim SET
+// instead — the `noclaimStock` branch of deliverOrder, through
+// utils/noclaimStock: the whole farm, a live read of the set, fail closed, the
+// sale stamped (owner, 2026-09-28: "move every offer to that path").
 //
-// Only "released" and "skipped" rows are sellable: "listed" means the account is
-// already a stock unit on ANOTHER marketplace and selling it here would ship
-// that listing's drops too; "sold"/"expired"/"removed" are spent or gone.
-const ELD_SELLABLE_STATUSES = ["released", "skipped"];
-
-// Ceiling on the stock an unclaimed-backed offer may advertise. The count comes
-// from a dry-run claim, which resolves a credential per candidate, so it is
-// bounded rather than "however many the farm holds".
-const UNCLAIMED_STOCK_MAX = 25;
-
-// Most live inventory reads one call to claimUnclaimedForGame may make. Bounds
-// the Twitch fan-out of both delivery and the periodic stock sync.
-const LIVE_CHECK_MAX = 40;
+// What is left of this path only FINISHES an order a previous attempt already
+// took accounts for. It never claims a new account, and a by-game row counts 0
+// stock, so every market's stock sync keeps such an offer off sale.
+const BY_GAME_RETIRED =
+  "by-game offers are retired — move this offer to a no-claim set " +
+  "(Listings → Shop listings) to sell it";
 
 function unclaimedGameFilter(game) {
   // The ledger holds both "Overwatch" and "overwatch" (and callers may pass
@@ -130,48 +192,31 @@ function unclaimedGameFilter(game) {
   return new RegExp("^" + base.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i");
 }
 
-// Pick (and optionally claim) sellable no-claim accounts for a game.
-// `dryRun` selects without mutating anything.
-//
-// `requiredDrops` is the listing's advertised item list. When it is set, an
-// account only qualifies if it holds EVERY entry (counts included) and none of
-// them is already claimed — picking by game alone is what shipped a 7-item
-// account against a 10-item CAH listing on order 99d443eb. `shortfall` is filled
-// in with why the stock fell short, so the caller can say it out loud.
+// The accounts a previous attempt already took for this order, and nothing
+// more. `shortfall.detail` says why the rest cannot come from here.
 async function claimUnclaimedForGame(
   game,
   want,
-  { orderId, offerId, dryRun, requiredDrops, shortfall, market = "eldorado" },
+  { orderId, dryRun, shortfall, market = "eldorado" },
 ) {
-  const {
-    credentialForLedger,
-    manualSoldOwnerKeys,
-    filterManualSoldLedgers,
-    activeListingsForLogin,
-  } = require("./unclaimedAutoList");
-
   const n = Math.max(1, parseInt(want, 10) || 1);
 
   // RESUME WHATEVER A PREVIOUS ATTEMPT ALREADY TOOK FOR THIS ORDER.
   //
-  // The claim further down is atomic and PERMANENT: it flips the ledger row to
-  // status "sold" and stamps this order's id into `note`. But the record that
+  // The old claim was atomic and PERMANENT: it flipped the ledger row to
+  // status "sold" and stamped this order's id into `note`. But the record that
   // links those accounts back to the order lives in MarketplaceListing.units,
   // and that is written only AFTER the credential has been sent. So a send that
-  // throws — a TalkJS 5xx, a timeout, an order row with no conversation id —
+  // threw — a TalkJS 5xx, a timeout, an order row with no conversation id —
   // left the accounts sold, no unit row, and nothing at all tying the two
-  // together. The caller's "already handled" guard asks
-  // `listing.units.some(u => u.orderId === orderId)`, finds nothing, and the
-  // next 60-second tick claims a BRAND NEW set. Eldorado order e69b19d3 retried
-  // 25 times; every failing attempt spent more of the no-claim ledger and
-  // orphaned what it spent, because nothing can find a sold row whose order was
-  // never recorded anywhere else.
+  // together. Eldorado order e69b19d3 retried 25 times, and every failing
+  // attempt spent more of the no-claim ledger.
   //
-  // The note was always the anchor — it simply was never read back. Reading it
-  // makes the claim idempotent per order, so a retry re-sends to the same buyer
-  // with the SAME accounts instead of burning the ledger again.
+  // The note is the anchor. Reading it back re-sends the SAME accounts to the
+  // same buyer — the one thing a retired path still owes an order it started.
   const resumed = [];
   if (orderId && !dryRun) {
+    const { credentialForLedger } = require("./unclaimedAutoList");
     const prior = await UnclaimedAccount.find({
       status: "sold",
       market,
@@ -182,9 +227,8 @@ async function claimUnclaimedForGame(
     for (const row of prior) {
       const cred = await credentialForLedger(row);
       // An account we cannot read a password for is no use to the buyer, but it
-      // is still spent — leaving it out here would make the top-up below claim a
-      // replacement, which is the very double-spend this block exists to stop.
-      // Report the shortfall instead.
+      // is still spent — it drops out and the order is held, never topped up
+      // with a replacement.
       if (!cred.login || !cred.password) continue;
       resumed.push({
         ledgerId: String(row._id),
@@ -192,113 +236,9 @@ async function claimUnclaimedForGame(
         password: cred.password,
       });
     }
-    if (resumed.length >= n) return resumed.slice(0, n);
   }
-
-  const required = coverage.requiredCounts(requiredDrops);
-  // With a coverage gate most candidates are rejected on their drops alone, so
-  // read a deeper slice of the ledger — otherwise a listing whose stock is rare
-  // reads as out of stock while covering accounts sit just past the cut.
-  const scan = required.size ? Math.max(n * 6, 200) : n * 6;
-  const candidates = await UnclaimedAccount.find({
-    source: "noclaim",
-    game: unclaimedGameFilter(game),
-    status: { $in: ELD_SELLABLE_STATUSES },
-    soldAt: null,
-  })
-    .sort({ lastCheckedAt: -1 })
-    .limit(scan)
-    .lean();
-
-  // Try the accounts the ledger already vouches for first; the rest stay in the
-  // queue because the ledger is only a partial snapshot and DropLog may still
-  // prove them out. This is ordering, not filtering.
-  const { covering, short } = coverage.partitionByCoverage(candidates, required);
-  const ordered = covering.concat(short);
-
-  // An owner the operator has already hand-sold is off limits even though the
-  // ledger row still looks free.
-  const usable = filterManualSoldLedgers(
-    ordered,
-    await manualSoldOwnerKeys(ordered),
-  );
-  const rejected = [];
-  // Live verification is one Twitch call per candidate, and this same function
-  // is what the 15-minute stock sync uses to count stock — so on a big ledger an
-  // unbounded walk would fan out hundreds of GQL reads per sync. Cap the live
-  // checks; the ledger-covering candidates are walked first, so the cap costs
-  // nothing until stock is genuinely scarce, and under-counting stock is the
-  // safe direction to be wrong.
-  let liveChecks = 0;
-
-  // Seeded with anything a previous attempt already claimed for this order, so
-  // the walk below only ever tops up the difference.
-  const out = resumed.slice();
-  for (const row of usable) {
-    if (out.length >= n) break;
-    // Never ship an account that is live on another marketplace's listing.
-    const live = await activeListingsForLogin(row.login).catch(() => []);
-    if (live && live.length) continue;
-
-    // The gate: hold every advertised item, and hold them UNCLAIMED. A claimed
-    // drop has already been connected to whoever the farm account was linked
-    // to, so shipping it sells the buyer nothing.
-    if (required.size) {
-      if (liveChecks >= LIVE_CHECK_MAX) break;
-      liveChecks += 1;
-      // Live Twitch inventory, not the ledger: an expired wave silently drops
-      // out of what the buyer can claim, and only Twitch knows that.
-      const verdict = await coverage.liveCoverage(row, required);
-      if (!verdict.ok) {
-        rejected.push({ row, verdict });
-        continue;
-      }
-    }
-
-    const cred = await credentialForLedger(row);
-    if (!cred.login || !cred.password) continue;
-
-    if (dryRun) {
-      out.push({ ledgerId: String(row._id), login: cred.login, password: cred.password });
-      continue;
-    }
-    // Atomic: the status guard is what stops two ticks (or two orders) taking
-    // the same account.
-    const now = new Date();
-    const taken = await UnclaimedAccount.findOneAndUpdate(
-      { _id: row._id, status: { $in: ELD_SELLABLE_STATUSES }, soldAt: null },
-      {
-        $set: {
-          status: "sold",
-          soldAt: now,
-          // Which shop actually took this unit. Defaulted rather than hardcoded
-          // so the Z2U fulfiller can reuse this claim path verbatim — a copy of
-          // it would drift, and the drift would be an oversold account.
-          market,
-          note: market + " order " + (orderId || ""),
-          lastCheckedAt: now,
-        },
-        $addToSet: { listingExternalIds: String(offerId || "") },
-      },
-      { new: true },
-    );
-    if (!taken) continue;
-    out.push({ ledgerId: String(row._id), login: cred.login, password: cred.password });
-  }
-  // Say WHY the stock fell short, in terms of the advertised items — "no
-  // Overwatch accounts" would be wrong and unactionable when what is actually
-  // missing is the second wave's loot box.
-  if (shortfall && out.length < n && rejected.length) {
-    shortfall.detail = coverage.summarizeMissing(
-      rejected.map((r) => r.verdict.missing),
-    );
-    const claimed = rejected.filter((r) => r.verdict.claimed.length);
-    if (claimed.length) {
-      shortfall.claimed =
-        claimed.length + " account(s) already had an advertised drop CLAIMED";
-    }
-  }
-  return out;
+  if (resumed.length < n && shortfall) shortfall.detail = BY_GAME_RETIRED;
+  return resumed.slice(0, n);
 }
 
 function undeliveredUnits(listing) {
@@ -344,6 +284,18 @@ async function deliverOrder(order, { dryRun }) {
   // Already handled: some unit carries this order id.
   if ((listing.units || []).some((u) => u.orderId === orderId)) {
     return { orderId, skipped: "already delivered" };
+  }
+
+  // A bulk pack row must know its pack size (docs/bulk-packs/PACKS-2.md §1):
+  // without it this order would be read as single accounts and a pack buyer
+  // short-changed. Refuse and page ("bulk pack short") — deliver it by hand.
+  const packProblem = packMismatch(listing);
+  if (packProblem) {
+    return {
+      orderId,
+      error:
+        "bulk pack short: " + packProblem + " — nothing was sent; deliver it by hand",
+    };
   }
 
   // ACCOUNT LISTINGS (docs/ACCOUNT-LISTINGS-CONTRACT.md B5). The stock is the
@@ -468,39 +420,122 @@ async function deliverOrder(order, { dryRun }) {
     return { orderId, delivered: qty, source: "offer:" + offer.title };
   }
 
-  // Unclaimed-farm-backed offers resolve their stock at delivery time out of the
-  // no-claim ledger rather than from pre-reserved units.
+  // NO-CLAIM SHOP LISTINGS (docs/NOCLAIM-SHOP-LISTINGS-CONTRACT.md §8b). The
+  // owner's hand-made listing over a no-claim DropSet: the accounts are claimed
+  // out of the no-claim farm when the order lands, through utils/noclaimStock —
+  // the ONE claim layer, which also refuses any account on another listing.
+  // Everything after the claim is the unclaimedGame branch below, send for send.
+  //
+  // It sits ABOVE the unclaimedGame branch and far above the autoClaimSet one on
+  // purpose: the row carries `set` (the no-claim set), and the set path ships
+  // CLAIMED Drop Archive accounts, which are worthless to a no-claim buyer.
+  // Required lazily so a row without the flag never loads the no-claim layer.
+  if (listing.noclaimStock) {
+    const ncs = require("./noclaimStock");
+    if (!ncs.deliveryEnabled()) {
+      return { orderId, skipped: "no-claim listing auto-delivery is off" };
+    }
+    const DropSet = require("../models/DropSet");
+    const set = await DropSet.findById(listing.set).lean();
+    // A bulk pack row sells whole packs: `qty` packs are qty × N accounts
+    // (docs/bulk-packs/PACKS-2.md §2). Every other row: `qty` itself.
+    const want = accountsForOrder(listing, qty);
+    // mode "sold" + this order's id is the resume anchor: a retry after a send
+    // that threw gets back the SAME accounts this order already took, never a
+    // fresh set (the e69b19d3 lesson). `dryRun` must reach the claim, or a dry
+    // run would sell the ledger for an order it never sends.
+    const picked = set
+      ? await ncs.claimForSet(set, want, {
+          market: "eldorado",
+          listingId: String(listing._id),
+          orderId,
+          mode: "sold",
+          dryRun,
+        })
+      : [];
+    if (picked.length < want) {
+      // Hold the order rather than ship a short account, and release nothing:
+      // what was taken stays sold to THIS order and the next tick resumes it.
+      // A bulk pack short of a whole pack is the same paid-and-stuck order,
+      // named so it pages as one (FIXES-1 L5).
+      const advertised =
+        (listing.requiredDrops || []).length || ((set && set.items) || []).length;
+      return {
+        orderId,
+        error:
+          (listing.bulkOfferId ? "bulk pack short: " : "") +
+          "only " + picked.length + " of " + want + " account(s) could be claimed" +
+          " — no free no-claim account holds all " + advertised +
+          " advertised item(s)" +
+          (set ? "" : " (the listing's no-claim set is missing)"),
+      };
+    }
+    const message = eldoradoAccountsMessage(picked, want);
+    if (dryRun) {
+      return {
+        orderId,
+        dryRun: true,
+        source: "noclaim-set:" + String(listing.set),
+        wouldSend:
+          want + " account(s) [" + picked.map((p) => p.login).join(", ") + "], " +
+          message.length + " chars",
+        preview: message,
+      };
+    }
+    await mp.eldoradoSendOrderMessage(order, message);
+    await mp.eldoradoMarkDelivered(orderId);
+    listing.units = (listing.units || []).concat(
+      picked.map((p) => ({
+        contentId: p.ledgerId,
+        accountId: "",
+        login: p.login,
+        addedAt: new Date(),
+        deliveredAt: new Date(),
+        orderId,
+      })),
+    );
+    listing.markModified("units");
+    await listing.save();
+    // The sale stamp, only once the buyer has the account. The ledger has been
+    // "sold" to this order since the claim; this records the price. It is
+    // bookkeeping, not delivery, so a failure is logged and never turns an
+    // order the buyer already has into a failed one.
+    try {
+      await ncs.markSold(
+        picked.map((p) => p.ledgerId),
+        {
+          market: "eldorado",
+          priceUsd: noclaimAccountPriceUsd(order, qty, listing),
+          orderId,
+          reason: "eldorado order " + orderId,
+        },
+      );
+    } catch (e) {
+      console.error("eldorado no-claim markSold " + orderId + ":", e.message);
+    }
+    return { orderId, delivered: want, source: "noclaim-set:" + String(listing.set) };
+  }
+
+  // A by-game offer (retired — see claimUnclaimedForGame). Only an order a
+  // previous attempt already took accounts for is finished here; anything else
+  // is held for a hand-over, and the operator is paged ("no sellable").
   if (listing.unclaimedGame) {
     const shortfall = {};
     const picked = await claimUnclaimedForGame(listing.unclaimedGame, qty, {
       orderId,
-      offerId,
       dryRun,
-      requiredDrops: listing.requiredDrops,
       shortfall,
     });
     if (picked.length < qty) {
-      // Hold the order rather than ship a short account: the buyer waiting is
-      // recoverable, an account missing half the advertised items is a dispute.
       return {
         orderId,
         error:
-          "only " + picked.length + " of " + qty + " sellable " +
-          listing.unclaimedGame + " account(s) free in the no-claim farm" +
-          ((listing.requiredDrops || []).length
-            ? " holding all " + (listing.requiredDrops || []).length +
-              " advertised item(s)" +
-              (shortfall.detail ? " — short of: " + shortfall.detail : "")
-            : ""),
+          "no sellable stock on this by-game " + listing.unclaimedGame + " offer" +
+          (picked.length ? " (" + picked.length + " of " + qty + " account(s) already taken for this order)" : "") +
+          " — " + (shortfall.detail || BY_GAME_RETIRED),
       };
     }
-    const blocks = picked.map((p) => eldoradoDeliveryCode(p.login, p.password));
-    const message =
-      qty > 1
-        ? blocks
-            .map((b, i) => "=== ACCOUNT " + (i + 1) + " of " + qty + " ===\n\n" + b)
-            .join("\n\n")
-        : blocks[0];
+    const message = eldoradoAccountsMessage(picked, qty);
     if (dryRun) {
       return {
         orderId,
@@ -526,6 +561,17 @@ async function deliverOrder(order, { dryRun }) {
     );
     listing.markModified("units");
     await listing.save();
+    // What each account sold for — the by-game claim stamped the sale with no
+    // money, so the ledger's revenue for these offers was mostly $0 (owner,
+    // 2026-09-28). Bookkeeping only: a failure never fails a delivered order.
+    try {
+      await UnclaimedAccount.updateMany(
+        { _id: { $in: picked.map((p) => p.ledgerId) }, status: "sold", soldPriceUsd: { $in: [0, null] } },
+        { $set: { soldPriceUsd: eldoradoUnitPriceUsd(order, qty, listing.price), soldMarket: "eldorado" } },
+      );
+    } catch (e) {
+      console.error("eldorado by-game sale price " + orderId + ":", e.message);
+    }
     return { orderId, delivered: qty, source: "unclaimed:" + listing.unclaimedGame };
   }
 
@@ -533,7 +579,10 @@ async function deliverOrder(order, { dryRun }) {
   // auto-delivery listing at all — it is a service (e.g. "Automatic farming,
   // 120 days") or an offer the operator fulfils by hand. Skip it quietly rather
   // than erroring every tick for an order the bot was never meant to deliver.
-  if (!listing.autoClaimSet && !(listing.units || []).length) {
+  // A bulk pack row (docs/bulk-packs/FIXES-1.md L5) is never that: with every
+  // unit pulled it is a paid order short of stock, so it falls to the units
+  // tail below, which pages.
+  if (!listing.autoClaimSet && !(listing.units || []).length && !listing.bulkOfferId) {
     return {
       orderId,
       skipped: "manual-delivery listing (no unclaimedGame and no reserved units)",
@@ -578,7 +627,12 @@ async function deliverOrder(order, { dryRun }) {
 
     const claimed = await unclaimedOnly(await claimAccountsForSet(set, qty));
     if (claimed.length < qty) {
-      await releaseAccounts(claimed.map((c) => c.accountId)).catch(() => {});
+      // Scoped to this set, never tag-wide (see claimAccountsForSet).
+      await releaseSetForAccounts(
+        claimed.map((c) => c.accountId),
+        String(set._id),
+        ELD_CLAIM_TAG,
+      ).catch(() => {});
       return {
         orderId,
         error:
@@ -586,13 +640,7 @@ async function deliverOrder(order, { dryRun }) {
           " accounts still held the full set UNCLAIMED at delivery time",
       };
     }
-    const blocks = claimed.map((c) => eldoradoDeliveryCode(c.login, c.password));
-    const message =
-      qty > 1
-        ? blocks
-            .map((b, i) => "=== ACCOUNT " + (i + 1) + " of " + qty + " ===\n\n" + b)
-            .join("\n\n")
-        : blocks[0];
+    const message = eldoradoAccountsMessage(claimed, qty);
     await mp.eldoradoSendOrderMessage(order, message);
     await mp.eldoradoMarkDelivered(orderId);
     listing.units = (listing.units || []).concat(
@@ -610,24 +658,30 @@ async function deliverOrder(order, { dryRun }) {
     return { orderId, delivered: qty, source: "dropset:" + set.name };
   }
 
+  // A bulk pack row hands over whole packs: `qty` packs are qty × N accounts
+  // (docs/bulk-packs/PACKS-2.md §2). Every other row: `qty` itself.
+  const need = accountsForOrder(listing, qty);
   const free = undeliveredUnits(listing);
-  if (free.length < qty) {
+  if (free.length < need) {
     return {
       orderId,
       error:
+        // A bulk pack row short of free units is a PAID order that cannot ship
+        // (docs/bulk-packs/FIXES-1.md L5): the prefix is in ALERT_REASONS.
+        (listing.bulkOfferId ? "bulk pack short: " : "") +
         "not enough reserved stock (" +
         free.length +
         " of " +
-        qty +
+        need +
         ") — " +
         "restock the offer, then this order will deliver on the next tick",
     };
   }
-  const use = free.slice(0, qty);
+  const use = free.slice(0, need);
 
   // Re-read each account's password at delivery time rather than trusting a
   // cached copy, so a rotated credential is never shipped stale.
-  const blocks = [];
+  const creds = [];
   for (const u of use) {
     const acct = await BotAccount.findById(u.accountId, {
       login: 1,
@@ -642,22 +696,15 @@ async function deliverOrder(order, { dryRun }) {
         error: "unit " + u.accountId + " has no readable credential",
       };
     }
-    blocks.push(eldoradoDeliveryCode(login, password));
+    creds.push({ login, password });
   }
-  const message =
-    qty > 1
-      ? blocks
-          .map(
-            (b, i) => "=== ACCOUNT " + (i + 1) + " of " + qty + " ===\n\n" + b,
-          )
-          .join("\n\n")
-      : blocks[0];
+  const message = eldoradoAccountsMessage(creds, need);
 
   if (dryRun) {
     return {
       orderId,
       dryRun: true,
-      wouldSend: qty + " account(s), " + message.length + " chars",
+      wouldSend: need + " account(s), " + message.length + " chars",
     };
   }
 
@@ -680,11 +727,89 @@ async function deliverOrder(order, { dryRun }) {
   listing.markModified("units");
   await listing.save();
 
+  // Whole packs on a bulk pack row (a partial pack can never sell), the free
+  // account count on every other row.
+  let quantityPushed = true;
   await mp
-    .eldoradoSetQuantity(offerId, undeliveredUnits(listing).length)
-    .catch((e) => console.error("eldorado post-delivery quantity:", e.message));
+    .eldoradoSetQuantity(offerId, advertisedFor(listing, undeliveredUnits(listing).length))
+    .catch((e) => {
+      quantityPushed = false;
+      console.error("eldorado post-delivery quantity:", e.message);
+    });
 
-  return { orderId, delivered: qty };
+  // The last unit of a reserved-units row is the end of that row. Eldorado
+  // CLOSES an offer when its quantity reaches 0, and nothing restocks a units
+  // row (refillMarkets never tops an Eldorado share up), so the row can never
+  // sell again — yet it stayed "active": counted as live stock everywhere, and
+  // the eldorado.offers health check flagged every one as "we say active,
+  // Eldorado does not" until somebody reconciled it by hand. The auto-lister
+  // already retired such rows the same way (eldoradoShareMissing), but only for
+  // a task still running and only on its next sweep; a hand-made row or one
+  // whose task had ended stayed active forever. Retired here, the moment it
+  // happens, with the same status the auto-lister uses, so its replacement
+  // logic ("a sold row still referenced by the task means a replacement is
+  // owed") is unchanged. A bulk pack row is left to its bulk loop, which owns
+  // that state. Bookkeeping after a delivered order: a failure is logged and
+  // never turns a sale the buyer already has into a failed one.
+  if (!listing.bulkOfferId && undeliveredUnits(listing).length === 0) {
+    // The quantity push is what closes the offer. If it failed, the offer may
+    // still be Active at its old quantity, so pause it first — the same pause
+    // eldoradoShareMissing makes before it retires a sold-out share.
+    if (!quantityPushed) {
+      await mp
+        .eldoradoDelist(offerId)
+        .catch((e) => console.error("eldorado sold-out pause " + orderId + ":", e.message));
+    }
+    await MarketplaceListing.updateOne(
+      { _id: listing._id, status: "active" },
+      {
+        $set: {
+          status: "sold",
+          lastError:
+            "sold out — every unit delivered (last: order " + orderId +
+            "); Eldorado closes the offer at quantity 0",
+        },
+      },
+    ).catch((e) =>
+      console.error("eldorado sold-out retire " + orderId + ":", e.message),
+    );
+  }
+
+  return { orderId, delivered: need };
+}
+
+// What ONE unit of an order sold for, for the no-claim sale ledger
+// (docs/NOCLAIM-SHOP-LISTINGS-CONTRACT.md §8b): the order's own total over the
+// units it bought, else the listing's price. Nothing here read `totalPrice`
+// before (docs/ELDORADO-INTEGRATION-PLAN.md lists it on the order row), so its
+// shape is not pinned: a bare number and an {amount, currency} object are both
+// accepted, and anything else — or a currency that is not USD — falls back to
+// the listing price rather than record a guess.
+function eldoradoUnitPriceUsd(order, qty, listingPrice) {
+  const tp = order && order.totalPrice;
+  let paid = NaN;
+  if (typeof tp === "number" || typeof tp === "string") paid = Number(tp);
+  else if (tp && typeof tp === "object" && (!tp.currency || /^usd$/i.test(tp.currency))) {
+    paid = Number(tp.amount);
+  }
+  const n = Math.max(1, parseInt(qty, 10) || 1);
+  if (Number.isFinite(paid) && paid > 0) return Math.round((paid / n) * 100) / 100;
+  const own = Number(listingPrice);
+  return Number.isFinite(own) && own > 0 ? own : 0;
+}
+
+// What each ACCOUNT of a no-claim order sold for — the ledger holds one row per
+// account. An ordinary row is eldoradoUnitPriceUsd exactly as before. On a bulk
+// pack row (docs/bulk-packs/PACKS-2.md) one unit is a pack of N accounts: the
+// order's total is spread over all of its accounts, and the fallback — the
+// row's price, which is one PACK's price — over the pack's N, so a pack sale
+// never books N times its money.
+function noclaimAccountPriceUsd(order, qty, listing) {
+  const n = packSizeOf(listing);
+  if (n < 2) return eldoradoUnitPriceUsd(order, qty, listing.price);
+  const pack = Number(listing.price);
+  const each = Number.isFinite(pack) && pack > 0 ? Math.round((pack / n) * 100) / 100 : 0;
+  return eldoradoUnitPriceUsd(order, accountsForUnits(listing, qty), each);
 }
 
 
@@ -705,22 +830,49 @@ async function syncBundleStock({ dryRun = false } = {}) {
   // Archive; `unclaimedGame` rows are backed by the no-claim ledger and were
   // not covered here at all, so their advertised quantity was whatever they
   // were published with, for as long as they stayed up.
+  //
+  // Every clause pins status "active": a delisted, sold or removed row is not
+  // ours to put stock behind. The autoClaimSet clause once had no status, and
+  // both halves of this loop then brought delisted offers back on sale. A
+  // quantity push re-opens an offer Eldorado CLOSED when its last unit sold:
+  // offer 00ec3522, delisted since 2026-09-07, went back Active on 2026-09-28
+  // on "0 -> 1". The resume branch re-opened 48a19c2e, a row delisted while
+  // this sync had it paused, whenever its set gained an account. A pause of
+  // our own keeps status "active" (autoPaused), so it still resumes here.
   const rows = await MarketplaceListing.find({
     marketplace: "eldorado",
     $or: [
-      { autoClaimSet: true },
+      { autoClaimSet: true, status: "active" },
       { unclaimedGame: { $nin: ["", null] }, status: "active" },
       // Account listings. Without this clause an offer-backed row is invisible
       // here, so its advertised quantity would stay at whatever it was
       // published with while the owner's list drained underneath it — and the
       // "pause when dry" half of the feature would simply never happen.
       { accountOffer: { $ne: null }, status: "active" },
+      // No-claim Shop listings (contract §8b): claimed at sale out of the
+      // no-claim farm, whose stock moves with no order placed here.
+      { noclaimStock: true, status: "active" },
     ],
   });
   const changes = [];
   for (const row of rows) {
     let real;
-    if (row.accountOffer) {
+    if (row.noclaimStock) {
+      // Asked FIRST: a no-claim row carries `set` too, and the set branch below
+      // would count CLAIMED Drop Archive stock for it. noclaimStock already
+      // splits the shelf across every claim-at-sale row of the set, and THROWS
+      // on a failed read — which is not an empty shelf, so skip the row this
+      // pass rather than pause a live offer on a Mongo hiccup.
+      let n = null;
+      try {
+        n = await require("./noclaimStock").stockForListing(row);
+      } catch (e) {
+        console.error("eldorado no-claim stock count:", e.message);
+        continue;
+      }
+      if (typeof n !== "number" || !Number.isFinite(n)) continue;
+      real = n;
+    } else if (row.accountOffer) {
       // Ask the ledger exactly what the delivery path will ask it. A read that
       // FAILS must not answer 0: zero is what pauses a live offer, and a Mongo
       // hiccup is not an empty shelf. Skip the row and re-count next pass.
@@ -734,14 +886,8 @@ async function syncBundleStock({ dryRun = false } = {}) {
       if (typeof n !== "number" || !Number.isFinite(n)) continue;
       real = n;
     } else if (row.unclaimedGame) {
-      // Ask the ledger exactly what the delivery path would ask it.
-      real = (
-        await claimUnclaimedForGame(row.unclaimedGame, UNCLAIMED_STOCK_MAX, {
-          dryRun: true,
-          offerId: row.externalId,
-          requiredDrops: row.requiredDrops,
-        }).catch(() => [])
-      ).length;
+      // A by-game offer has nothing it may sell (retired): 0 takes it off sale.
+      real = 0;
     } else {
       const set = await DropSet.findById(row.set).lean();
       if (!set) continue;
@@ -749,6 +895,33 @@ async function syncBundleStock({ dryRun = false } = {}) {
         await availableAccountsForSet(set).catch(() => []),
         listedElsewhere,
       ).length;
+    }
+    // A bulk pack row (docs/bulk-packs/FIXES-1.md R3-3, R3-4): below its
+    // offer's minimum order nothing can be bought, so it counts as empty and is
+    // paused like one; and a bulk offer that is not "live" (owner pause, closed,
+    // held) is never resumed from here. A failed read changes nothing this pass.
+    //
+    // A v2 pack row (bulkPackSize >= 2, docs/bulk-packs/PACKS-2.md §2) is sold
+    // one PACK per unit: it advertises the whole packs its accounts fill, and
+    // 0 packs pauses it exactly like an empty shelf. That replaces the minimum
+    // rule above for such a row.
+    let bulkLive = true;
+    if (row.bulkOfferId) {
+      let bulk = null;
+      try {
+        bulk = await require("../models/BulkOffer")
+          .findById(row.bulkOfferId, { minQty: 1, state: 1 })
+          .lean();
+      } catch (e) {
+        console.error("eldorado bulk offer read:", e.message);
+        continue;
+      }
+      // A pack title the row cannot honour — or a bulk row with no pack size —
+      // is never on sale (packMath.packMismatch; delivery refuses it too).
+      if (packMismatch(row)) real = 0;
+      else if (packSizeOf(row) > 1) real = advertisedFor(row, real);
+      else if (bulk && real < (Number(bulk.minQty) || 0)) real = 0;
+      if (bulk && bulk.state !== "live") bulkLive = false;
     }
     let offer = null;
     try {
@@ -769,7 +942,7 @@ async function syncBundleStock({ dryRun = false } = {}) {
       continue;
     }
     // Only resume what WE paused — never override a deliberate pause.
-    if (real > 0 && offer.offerState === "Paused" && row.autoPaused) {
+    if (real > 0 && offer.offerState === "Paused" && row.autoPaused && bulkLive) {
       changes.push({ title: row.title, action: "resume (" + real + " back in stock)" });
       if (!dryRun) {
         await mp.eldoradoRelist(row.externalId).catch(() => {});
@@ -812,11 +985,19 @@ async function syncBundleStock({ dryRun = false } = {}) {
 // line, no SystemEvent, no lastError on the row. A PAID order parked by a
 // switch is not a routine skip. Matched on the wording the two reasons share
 // (deliverOrder:364 and :372) rather than listed one by one.
+//
+// "no free no-claim account" is the no-claim Shop listing's shortfall (contract
+// §8b) — the same paid-and-stuck state as "free in the no-claim farm", and the
+// same page. The no-claim kill switch ("no-claim listing auto-delivery is off")
+// is already covered by SWITCHED_OFF_SKIPS.
+//
+// "bulk pack short" is a bulk pack row without enough free units for a paid
+// order (docs/bulk-packs/FIXES-1.md L5) — the same stuck-and-paid state.
 const SWITCHED_OFF_SKIPS = /auto-delivery is off/i;
 const ALERT_REASONS = new RegExp(
   "out of stock|no listing row|no unsold account|ambiguous|cannot be " +
     "identified|no sellable|free in the no-claim farm|AccountOffer is " +
-    "missing|rendered empty|" +
+    "missing|rendered empty|no free no-claim account|bulk pack short|" +
     SWITCHED_OFF_SKIPS.source,
   "i",
 );
@@ -851,7 +1032,13 @@ async function alertUnfulfillable(order, why) {
         // The accounts are on the shelf and one toggle ships them, so the
         // standing postscript would send the owner hunting for stock that is
         // not missing. The guarantee is running either way.
-        (SWITCHED_OFF_SKIPS.test(String(why || ""))
+        // A no-claim listing's switch is a different toggle from the account
+        // listings' one; naming the wrong one sends the owner to the wrong page.
+        (/no-claim/i.test(String(why || "")) && SWITCHED_OFF_SKIPS.test(String(why || ""))
+          ? "The no-claim stock is there. Turn no-claim listing delivery back on " +
+            "(settings: noclaimShop.autoDeliver) and the next tick ships it — the " +
+            "delivery guarantee is running."
+          : SWITCHED_OFF_SKIPS.test(String(why || ""))
           ? "The accounts are on the shelf. Turn account-listing delivery back " +
             "on (Settings, or this offer's own toggle) and the next tick ships " +
             "it — the delivery guarantee is running."
@@ -861,6 +1048,28 @@ async function alertUnfulfillable(order, why) {
   return true;
 }
 
+// PER-OFFER OFFLINE HOLD (operator away). Some offers must NOT auto-deliver for
+// a while: the operator is offline and wants the buyer TOLD so, then hands the
+// credential over by hand later. For an offer on this list the fulfiller posts
+// ONE canned message into the order chat and NEVER marks the order delivered —
+// no account is claimed, no rent-farm pool account is provisioned, no stock is
+// touched. The order stays Paid for manual fulfilment. Driven entirely by
+// settings (autoFarm.eldoradoOfflineHold = { message, offers: [offerId, …] })
+// so it can be turned off without a deploy, and it is a complete no-op for
+// every other offer and whenever the setting is empty. Dedupe is in-memory,
+// like alertedOrders: one reply per order per process. A restart may re-send
+// the reassurance, but eldoradoSendOrderMessage's idempotencyKey (order id +
+// message text) makes TalkJS dedupe it, so the buyer sees it at most once.
+function eldoradoOfflineHold(af) {
+  const cfg = (af && af.eldoradoOfflineHold) || null;
+  const offers = Array.isArray(cfg && cfg.offers) ? cfg.offers : [];
+  const message = String((cfg && cfg.message) || "").trim();
+  if (!offers.length || !message) return null;
+  return { offers: new Set(offers.map((o) => String(o))), message };
+}
+
+const offlineHoldSent = new Set();
+
 async function deliverPaidOrders() {
   const af = getAutoFarm() || {};
   if (!af.eldoradoAutoDeliver) return { skipped: "eldoradoAutoDeliver off" };
@@ -868,6 +1077,7 @@ async function deliverPaidOrders() {
     return { skipped: "eldorado not configured" };
   }
   const dryRun = af.eldoradoDeliverDryRun !== false;
+  const offlineHold = eldoradoOfflineHold(af);
 
   let orders;
   try {
@@ -875,8 +1085,12 @@ async function deliverPaidOrders() {
     orders = await mp.eldoradoPaidOrders();
   } catch (e) {
     console.error("eldorado fulfiller: could not read orders:", e.message);
+    // Paged once it keeps failing — a paid order that is never READ creates no
+    // row, so nothing else could ever notice it (utils/intakeWatch).
+    await intakeWatch("failed", "Eldorado", e);
     return { error: e.message };
   }
+  await intakeWatch("ok", "Eldorado");
   if (!orders.length) return { orders: 0 };
 
   // The pool is the hard limit on rent-farm sales, and it is small. Surface it
@@ -899,6 +1113,44 @@ async function deliverPaidOrders() {
   const results = [];
   for (const order of orders) {
     try {
+      // PER-OFFER OFFLINE HOLD. Post the canned "away" reply once and leave the
+      // order Paid — never provision, claim, or mark delivered. This sits ABOVE
+      // the farm/bundle routing on purpose, so a rent-farm offer on the list
+      // cannot provision a pool account either. Scoped strictly to the offer
+      // ids in the setting; every other order falls through unchanged below.
+      if (offlineHold && offlineHold.offers.has(String(order.offerId || ""))) {
+        const orderId = String(order.id || "");
+        if (dryRun) {
+          results.push({
+            orderId,
+            dryRun: true,
+            wouldSend:
+              "offline-hold reply (" + offlineHold.message.length +
+              " chars), NOT delivered",
+          });
+          console.log(
+            "eldorado deliver (DRY RUN) " + orderId +
+              ": offline hold, would reply only",
+          );
+        } else if (offlineHoldSent.has(orderId)) {
+          results.push({ orderId, skipped: "offline hold: reply already sent" });
+        } else {
+          // Send first, record only on success: a throw is caught below and the
+          // reply is retried next tick rather than being silently swallowed.
+          await mp.eldoradoSendOrderMessage(order, offlineHold.message);
+          offlineHoldSent.add(orderId);
+          results.push({
+            orderId,
+            skipped: "offline hold: auto-reply sent, left undelivered for manual handling",
+          });
+          console.log(
+            "eldorado offline hold " + orderId +
+              ": auto-reply sent, NOT delivered",
+          );
+        }
+        continue;
+      }
+
       // Two products share this queue. A rent-farm order provisions a pool
       // account into the farm for a window; a bundle order hands over a farmed
       // account. deliverFarmOrder returns null when the order is not a rent-farm
@@ -942,6 +1194,354 @@ async function deliverPaidOrders() {
   return { orders: orders.length, results };
 }
 
+// ---------------------------------------------------------------------------
+// Offer keep-alive
+// ---------------------------------------------------------------------------
+// Every Eldorado offer dies 21 days after it was last ACTIVATED (created or
+// resumed), at 18:00 that day. There is no renew endpoint, and expireDate sent
+// through the edit DTO is silently ignored (verified 2026-09-07). What DOES
+// restart the clock is a pause followed by a resume — verified live 2026-09-23
+// on offer d5283fa2, which went from 2026-09-27T18:00 to 2026-10-14T18:00 and
+// kept its id, price, quantity, title and order history. Re-creating offers
+// instead would spend a day of Eldorado's creation quota every three weeks,
+// mint new ids every listing row would have to follow, and throw each offer's
+// sales history away. 123 offers — all 87 rent-farm windows among them — were
+// due to expire together on 2026-09-27 when this was written.
+//
+// Only ACTIVE offers are renewed. A paused offer was paused by the owner or by
+// the stock sync, and a resume would put it back on sale; when the stock sync
+// resumes one of its own pauses, that resume restarts the clock anyway.
+// And only offers that are still ours to sell: see renewalBlockedByRow.
+// Kill switch: autoFarm.eldoradoKeepAlive = false.
+const KEEPALIVE_MS = 6 * 60 * 60 * 1000;
+const KEEPALIVE_WINDOW_MS = 5 * 24 * 60 * 60 * 1000;
+const KEEPALIVE_MAX_PER_PASS = 150;
+const KEEPALIVE_GAP_MS = 1500;
+
+function keepAliveSleep(ms) {
+  return new Promise((r) => setTimeout(r, ms));
+}
+
+// Eldorado sends expireDate with no zone ("2026-09-27T18:00:00"); read it as
+// UTC. A few hours either way is nothing against a five-day window.
+function eldoradoExpiryMs(expireDate) {
+  const s = String(expireDate || "").trim();
+  if (!s) return NaN;
+  return new Date(/(z|[+-]\d\d:?\d\d)$/i.test(s) ? s : s + "Z").getTime();
+}
+
+// The offers one pass renews: ACTIVE and expiring inside the window, soonest
+// first. Pure, so the rule is testable without Eldorado.
+function offersDueForRenewal(offers, now = Date.now(), windowMs = KEEPALIVE_WINDOW_MS) {
+  return (Array.isArray(offers) ? offers : [])
+    .map((o) => ({ o, at: eldoradoExpiryMs(o && o.expireDate) }))
+    .filter(
+      ({ o, at }) =>
+        !!o &&
+        !!o.id &&
+        o.offerState === "Active" &&
+        Number.isFinite(at) &&
+        at - now <= windowMs,
+    )
+    .sort((a, b) => a.at - b.at)
+    .map(({ o }) => o);
+}
+
+async function listOwnOffers() {
+  const out = [];
+  for (let page = 1; page <= 20; page++) {
+    const r = await mp.eldoradoMyListings(page, 50);
+    const results = (r && r.results) || [];
+    for (const x of results) {
+      const o = x && (x.offer || x);
+      if (o && o.id) out.push(o);
+    }
+    if (!results.length || page >= ((r && r.totalPages) || 1)) break;
+  }
+  return out;
+}
+
+// The bulk pack behind an Eldorado offer id (docs/bulk-packs/FIXES-1.md R3-4),
+// found by the BulkOffer's own externalId and by the listing row's
+// bulkOfferId: null when there is none, else { notLive } — the first state
+// that is not "live", or "". A failed read is null, the way autoPausedNow
+// reads a failed lookup as "not paused", so every other offer renews exactly
+// as before.
+async function bulkOfferFor(offerId) {
+  try {
+    const BulkOffer = require("../models/BulkOffer");
+    const id = String(offerId || "");
+    if (!id) return null;
+    const states = (
+      await BulkOffer.find({ market: "eldorado", externalId: id }, { state: 1 })
+        .limit(5)
+        .lean()
+    ).map((b) => b.state);
+    const row = await MarketplaceListing.findOne(
+      { marketplace: "eldorado", externalId: id, bulkOfferId: { $ne: null } },
+      { bulkOfferId: 1 },
+    ).lean();
+    if (row) {
+      const b = await BulkOffer.findById(row.bulkOfferId, { state: 1 }).lean();
+      if (b) states.push(b.state);
+    }
+    if (!states.length && !row) return null;
+    return { notLive: states.find((s) => s !== "live") || "" };
+  } catch {
+    return null;
+  }
+}
+
+// The skip result for an offer that must NOT be renewed, or null when it may.
+// An offer with no listing row at all is a rent-farm window or a hand-made
+// offer, and keeping those alive is what the keep-alive is for. An offer whose
+// every row is delisted, sold or removed was taken off sale here. Renewing it
+// keeps it on sale against our own records for another 21 days, every 21 days:
+// that is how 00ec3522, delisted since 2026-09-07, was given until 10-19 after
+// it came back on 2026-09-28. It is left to lapse, not paused: the row, not
+// this loop, decides what is on sale. A failed lookup skips this pass too — a
+// Mongo hiccup is not a verdict, and the offer is due again in six hours.
+async function renewalBlockedByRow(offerId) {
+  let rows;
+  try {
+    rows = await MarketplaceListing.find(
+      { marketplace: "eldorado", externalId: String(offerId) },
+      { status: 1 },
+    ).lean();
+  } catch (e) {
+    return {
+      offerId,
+      skipped: "listing row lookup failed (" + e.message + "), retried next pass",
+    };
+  }
+  if (!rows || !rows.length) return null;
+  if (rows.some((r) => r.status === "active")) return null;
+  const rowStatus = [...new Set(rows.map((r) => r.status || "?"))].join("/");
+  return {
+    offerId,
+    rowStatus,
+    skipped: "our listing row is " + rowStatus + " — not renewed, left to expire",
+  };
+}
+
+// Pause + resume one offer and read it back. `ok` only when it is Active again
+// with a later expiry. Skipped when its listing row was taken off sale (see
+// renewalBlockedByRow), when it is no longer Active, or when the stock sync
+// paused it on purpose while this ran (its row turned autoPaused) — that pause
+// means there is nothing to sell, so it stays.
+//
+// A bulk offer that is not "live" (paused by its owner or its loop, sold out,
+// withdrawn, held after an unknown publish) is never resumed by this
+// (FIXES-1 R3-4): it is skipped untouched, and one that stops being live
+// while this runs is left paused. It can still stop being live just before
+// the relist lands — its owner's or its loop's pause is a no-op on an offer
+// this already paused — so after a relist the bulk state is read once more,
+// and a bulk offer no longer live is paused again at once (FIXES-2 V3).
+async function renewOffer(offerId) {
+  const blocked = await renewalBlockedByRow(offerId);
+  if (blocked) return blocked;
+  const before = await mp.eldoradoOffer(offerId);
+  if (!before || before.offerState !== "Active") {
+    return { offerId, skipped: "not active" };
+  }
+  const bulk = await bulkOfferFor(offerId);
+  if (bulk && bulk.notLive) {
+    return {
+      offerId,
+      title: before.offerTitle,
+      skipped: "bulk offer is " + bulk.notLive + " — the keep-alive never resumes it",
+    };
+  }
+  const autoPausedNow = async () => {
+    const row = await MarketplaceListing.findOne(
+      { marketplace: "eldorado", externalId: String(offerId) },
+      { autoPaused: 1 },
+    )
+      .lean()
+      .catch(() => null);
+    return !!(row && row.autoPaused);
+  };
+  // FIXES-2 V3 (bulk offers only): a relist of ours may have put back on sale
+  // a bulk offer that stopped being live meanwhile — take it off again now.
+  const pauseAgain = async (notLive) => {
+    let error = "";
+    try {
+      await mp.eldoradoDelist(offerId);
+    } catch (e) {
+      error = (e && e.message) || String(e);
+    }
+    const what =
+      "bulk offer " + offerId + " (" + (before.offerTitle || "untitled") +
+      ") turned " + notLive + " while the keep-alive renewed it";
+    if (!error) {
+      console.log("eldorado keep-alive: " + what + " — paused it again");
+    } else {
+      console.error("eldorado keep-alive: " + what + " — could NOT pause it again: " + error);
+      try {
+        require("./telegram")
+          .sendTelegram(
+            "⚠️ Eldorado keep-alive: " + what + " and could NOT pause it again — " +
+              "it may be on sale on Eldorado. Pause it there by hand.\n\n" + error,
+          )
+          .catch(() => {});
+      } catch {
+        /* the page is best-effort; the log line above stands */
+      }
+    }
+    return {
+      offerId,
+      title: before.offerTitle,
+      skipped:
+        "bulk offer turned " + notLive + " while it was renewed — " +
+        (error ? "could NOT pause it again (" + error + ")" : "paused it again"),
+      ...(error ? { error } : {}),
+    };
+  };
+  const flaggedBefore = await autoPausedNow();
+  let pauseError = "";
+  try {
+    await mp.eldoradoDelist(offerId);
+  } catch (e) {
+    pauseError = e.message;
+  }
+  let after = null;
+  let relisted = false;
+  for (let i = 0; i < 3; i++) {
+    if (!flaggedBefore && (await autoPausedNow())) {
+      return {
+        offerId,
+        title: before.offerTitle,
+        skipped: "paused by the stock sync meanwhile",
+      };
+    }
+    const bulkNow = bulk ? await bulkOfferFor(offerId) : null;
+    if (bulkNow && bulkNow.notLive) {
+      // An earlier relist of this renewal may yet have landed.
+      if (relisted) return pauseAgain(bulkNow.notLive);
+      return {
+        offerId,
+        title: before.offerTitle,
+        skipped: "bulk offer turned " + bulkNow.notLive + " meanwhile — left paused",
+      };
+    }
+    // A no-op on an offer that is still Active (e.g. the pause failed).
+    await mp.eldoradoRelist(offerId).catch(() => {});
+    relisted = true;
+    after = await mp.eldoradoOffer(offerId).catch(() => null);
+    if (after && after.offerState === "Active") break;
+    await keepAliveSleep(2000);
+  }
+  // FIXES-2 V3: once more, after the relist.
+  const bulkAfter = bulk ? await bulkOfferFor(offerId) : null;
+  if (bulkAfter && bulkAfter.notLive) return pauseAgain(bulkAfter.notLive);
+  return {
+    offerId,
+    title: before.offerTitle,
+    from: before.expireDate,
+    to: after ? after.expireDate : null,
+    state: after ? after.offerState : "unknown",
+    error: pauseError,
+    ok:
+      !!after &&
+      after.offerState === "Active" &&
+      eldoradoExpiryMs(after.expireDate) > eldoradoExpiryMs(before.expireDate),
+  };
+}
+
+async function renewExpiringOffers({ dryRun = false, now = Date.now() } = {}) {
+  const offers = await listOwnOffers();
+  const due = offersDueForRenewal(offers, now).slice(0, KEEPALIVE_MAX_PER_PASS);
+  const out = {
+    scanned: offers.length,
+    due: due.length,
+    renewed: [],
+    skipped: [],
+    failed: [],
+  };
+  if (dryRun) {
+    // The same row gate as a real pass, so a preview never lists an offer the
+    // pass would refuse.
+    out.wouldRenew = [];
+    for (const o of due) {
+      const blocked = await renewalBlockedByRow(o.id);
+      if (blocked) out.skipped.push({ title: o.offerTitle, ...blocked });
+      else out.wouldRenew.push({ offerId: o.id, title: o.offerTitle, expire: o.expireDate });
+    }
+    return out;
+  }
+  for (const o of due) {
+    try {
+      const r = await renewOffer(o.id);
+      if (r.skipped) out.skipped.push({ title: o.offerTitle, ...r });
+      else if (r.ok) out.renewed.push(r);
+      else out.failed.push(r);
+    } catch (e) {
+      out.failed.push({ offerId: o.id, title: o.offerTitle, error: e.message });
+    }
+    await keepAliveSleep(KEEPALIVE_GAP_MS);
+  }
+  return out;
+}
+
+// One log line, one SystemEvent and — only when something failed — one
+// Telegram per pass. An offer left PAUSED is the urgent case: it is off sale
+// until someone resumes it by hand.
+async function reportKeepAlive(r) {
+  console.log(
+    "eldorado keep-alive: renewed " + r.renewed.length + " of " + r.due +
+      " expiring offer(s)" +
+      (r.skipped.length ? ", skipped " + r.skipped.length : "") +
+      (r.failed.length ? ", FAILED " + r.failed.length : ""),
+  );
+  for (const f of r.failed) {
+    console.error(
+      "eldorado keep-alive failed:", f.offerId, f.title || "",
+      "state=" + (f.state || "?"), f.error || "",
+    );
+  }
+  // Live on Eldorado while our row says it is off sale: name it, so a human can
+  // pause it now or relist the row if it is meant to be selling.
+  for (const s of r.skipped) {
+    if (!s.rowStatus) continue;
+    console.log(
+      "eldorado keep-alive: not renewing " + s.offerId + " " + (s.title || "") +
+        " — " + s.skipped,
+    );
+  }
+  try {
+    await require("./systemLog").logEvent({
+      category: "listings",
+      action: "eldorado_keepalive",
+      actor: "system",
+      severity: r.failed.length ? "warn" : "info",
+      count: r.renewed.length,
+      detail:
+        "renewed " + r.renewed.length + "/" + r.due + " Eldorado offer(s) near expiry" +
+        (r.skipped.length ? "; skipped " + r.skipped.length : "") +
+        (r.failed.length ? "; failed " + r.failed.length : ""),
+      meta: {
+        failed: r.failed.slice(0, 20),
+        skipped: r.skipped.slice(0, 20).map((s) => ({ offerId: s.offerId, why: s.skipped })),
+      },
+    });
+  } catch {
+    /* diagnostic only */
+  }
+  if (!r.failed.length) return;
+  const stuck = r.failed.filter((f) => f.state && f.state !== "Active");
+  const lines = r.failed
+    .slice(0, 10)
+    .map((f) => "• " + (f.title || f.offerId) + " — " + (f.state || "?"));
+  await require("./telegram")
+    .sendTelegram(
+      (stuck.length
+        ? "⚠️ Eldorado keep-alive left " + stuck.length + " offer(s) PAUSED — resume them on Eldorado:\n"
+        : "Eldorado keep-alive could not renew " + r.failed.length +
+          " offer(s) (still live, expiry unchanged):\n") + lines.join("\n"),
+    )
+    .catch(() => {});
+}
+
 // Delivery is only worth polling often — a buyer waiting on credentials is the
 // whole product. 60s keeps us well inside the "20 min" promise on the offers
 // while staying nowhere near Eldorado's rate limits.
@@ -979,6 +1579,7 @@ function start() {
         for (const c of changes) {
           console.log("eldorado stock sync: " + c.action + " — " + c.title);
         }
+        await rotateNoclaimOffers();
       }
     } catch (e) {
       console.error("eldorado stock sync error:", e.message);
@@ -988,12 +1589,56 @@ function start() {
   };
   const t2 = setTimeout(stockTick, 90 * 1000);
   if (t2.unref) t2.unref();
+
+  // Renews offers near their expiry; see renewExpiringOffers. Independent of
+  // eldoradoAutoDeliver — rent-farm windows and hand-made offers expire too.
+  const keepAliveTick = async () => {
+    try {
+      const af = getAutoFarm() || {};
+      if (af.eldoradoKeepAlive !== false && (mp.keyStatus().eldorado || {}).configured) {
+        const r = await renewExpiringOffers();
+        if (r.due) await reportKeepAlive(r);
+      }
+    } catch (e) {
+      console.error("eldorado keep-alive error:", e.message);
+    }
+    const t3 = setTimeout(keepAliveTick, KEEPALIVE_MS);
+    if (t3.unref) t3.unref();
+  };
+  const t3 = setTimeout(keepAliveTick, 5 * 60 * 1000);
+  if (t3.unref) t3.unref();
+}
+
+// A no-claim offer the sync paused because its bundle expired off every account
+// is switched to the bundle the farm holds now — same offer, same price
+// (utils/noclaimOfferRotation, owner rule 2026-10-02). It has its own kill
+// switch; a missing module or a failed pass never breaks the stock tick.
+async function rotateNoclaimOffers() {
+  try {
+    const r = await require("./noclaimOfferRotation").rotationPass();
+    for (const line of (r && r.log) || []) console.log("noclaim offer rotation: " + line);
+  } catch (e) {
+    console.error("noclaim offer rotation error:", e.message);
+  }
+}
+
+// The intake-failure watch (utils/intakeWatch) must never break a delivery
+// tick: not by rejecting, and not by failing to load (a require that throws
+// happens before any .catch could apply).
+function intakeWatch(fn, ...args) {
+  try {
+    return Promise.resolve(require("./intakeWatch")[fn](...args)).catch(() => {});
+  } catch {
+    return Promise.resolve();
+  }
 }
 
 module.exports = {
   ELD_CLAIM_TAG,
   start,
   eldoradoDeliveryCode,
+  eldoradoClaimGuide,
+  eldoradoAccountsMessage,
   claimAccountsForSet,
   claimUnclaimedForGame,
   unclaimedGameFilter,
@@ -1003,6 +1648,11 @@ module.exports = {
   deliverOrder,
   deliverPaidOrders,
   syncBundleStock,
+  renewExpiringOffers,
+  renewOffer,
+  reportKeepAlive,
+  offersDueForRenewal,
+  eldoradoExpiryMs,
   // Exported for the S3 regression: the predicate is what decides whether a
   // PAID order parked by a kill switch is ever heard about, and a reworded
   // reason falling out of it would be indistinguishable from no problem.

@@ -39,6 +39,9 @@ const saleSignalSchema = new mongoose.Schema(
     // What the buyer paid, USD, when the platform tells us (0 = unknown).
     // Demand is worth more when it is worth more money.
     priceUsd: { type: Number, default: 0 },
+    // One unit of a bulk pack (docs/bulk-packs/CONTRACT.md): a real sale and
+    // real demand, but at a discounted bulk price — price anchors skip it.
+    bulk: { type: Boolean, default: false },
     // Dedupe key so one drop can't generate the same signal twice
     // (e.g. connected stays true across every future scan).
     dedupeKey: { type: String, required: true, unique: true },

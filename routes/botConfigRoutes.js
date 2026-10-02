@@ -12,7 +12,7 @@ const {
   markDeployedPoolAccountsClaimed,
 } = require("../utils/poolPasswords");
 const { withFileLock } = require("../utils/fileLock");
-const { setUsersGamesBySecret } = require("../utils/renterBotOps");
+const { setUsersGamesBySecret, reservedSlots } = require("../utils/renterBotOps");
 const {
   dedicatedConfigSet,
   registerStack,
@@ -21,6 +21,37 @@ const {
 } = require("../utils/renterBotStacks");
 
 const router = express.Router();
+
+// A rental stack is never deleted or moved by the operator's bot tools: its
+// accounts are renters' and paid rent-farm buyers', its ledger (RenterAccount)
+// points at it, and neither tool re-points the ledger — the accounts would sit
+// on no bot while every record said they farm. scripts/move-renter-stack.js
+// moves one with its ledger. Returns the refusal text, or "" when the file is
+// not a rental stack (fails CLOSED: an unreadable registry refuses).
+async function rentalStackRefusal(hostId, file) {
+  try {
+    const RenterBotStack = require("../models/RenterBotStack");
+    const hid = String(hostId || "local");
+    const [stack, live] = await Promise.all([
+      RenterBotStack.findOne({ host: hid, file, enabled: true }, { _id: 1 }).lean(),
+      RenterAccount.countDocuments({
+        configFile: file,
+        enabled: true,
+        farmEndedAt: null,
+        host: hid === "local" ? { $in: ["local", "", null] } : hid,
+      }),
+    ]);
+    if (!stack && !live) return "";
+    return (
+      file + " on " + hid + " is a rental stack" +
+      (live ? " holding " + live + " renter / rent-farm account(s)" : "") +
+      " — the Bots page cannot delete or move it (its ledger would point at nothing). " +
+      "Move it with scripts/move-renter-stack.js, or empty and unregister it first."
+    );
+  } catch (e) {
+    return "Could not check whether " + file + " is a rental stack (" + e.message + ") — refusing.";
+  }
+}
 
 // Config files that are rented out to a renter (managed in the Renting section,
 // not on the operator's Bots page). Returned as a Set of "<hostId>|<file>" so
@@ -45,8 +76,13 @@ async function getRentedConfigSet() {
   }
 }
 
-// Default image used when a new bot can't inherit one from an existing service.
-const DEFAULT_IMAGE = "avishkarex/twitchbot:latest";
+// Farm bots (rent-farm + auto-farm) run the LOCAL-ONLY image the Bots-page
+// rollout (utils/botUpdater.js) builds and maintains. Never a Docker Hub name:
+// "avishkarex/twitchbot" on Docker Hub is a stale pre-July build that watches
+// without being credited, and a missing local tag would silently pull it.
+// Inheriting only this image family means a service left on another tag can
+// never be copied into a new bot.
+const DEFAULT_IMAGE = "twitchbot-farm:latest";
 // Hard cap on accounts accepted in one paste, as a sanity/DoS guard.
 const MAX_BULK_ACCOUNTS = 2000;
 
@@ -352,7 +388,11 @@ function findNextSlot(files) {
       if (max < 1) max = 1;
       continue;
     }
-    const m = f.match(/^config_0*(\d+)\.json$/);
+    // Archived and backup copies count too (config_59.json.deleted-<ts>,
+    // config_59.json.bak): a slot number is never handed out twice, so a
+    // ledger row, an owed reload or a stack registration that still names an
+    // old number can never land on a new bot.
+    const m = f.match(/^config_0*(\d+)\.json(?:$|\.)/);
     if (m) {
       const n = parseInt(m[1], 10);
       if (n > max) max = n;
@@ -374,6 +414,29 @@ function pickDefaultTemplate(files) {
   return cfgs[0] || null;
 }
 
+// Turn a cloned template into an EMPTY stack: no Twitch or Kick users, and no
+// config-level farming games. The template is normally `config.json`, a WORKING
+// operator bot, and its root FavouriteGames are that bot's own games (on contabo
+// 2026-09-30: Warframe / Summer Game Fest / Assassin's Creed Black Flag, the
+// games its 99 accounts farm). Every new stack is a rental one: rent-farm
+// accounts are pinned per account to the game the buyer paid for, and a renter
+// alone on a bot gets the root list from setConfigGames. Inherited operator
+// favourites would only pull those accounts onto games nobody bought — the live
+// rental stacks (config_06, config_54) all carry an empty root list. Every other
+// setting, OnlyFavouriteGames included, stays exactly as the template has it.
+function emptyStackConfig(template) {
+  const data = template && typeof template === "object" ? template : {};
+  if (!data.TwitchSettings || typeof data.TwitchSettings !== "object") {
+    data.TwitchSettings = {};
+  }
+  data.TwitchSettings.TwitchUsers = [];
+  if (data.KickSettings && typeof data.KickSettings === "object") {
+    data.KickSettings.KickUsers = [];
+  }
+  data.FavouriteGames = [];
+  return data;
+}
+
 // Add a new service (mirroring the existing twitchbotxN ones) to a compose
 // document given its raw YAML text. Uses js-yaml to parse + re-emit so
 // hand-written indentation can't be corrupted. Returns the new text plus
@@ -387,7 +450,7 @@ function addServiceToComposeText(raw, container, file) {
   let image = DEFAULT_IMAGE;
   for (const key of Object.keys(doc.services)) {
     const svc = doc.services[key];
-    if (svc && typeof svc.image === "string" && svc.image) {
+    if (svc && typeof svc.image === "string" && /^twitchbot-farm(:|$)/.test(svc.image)) {
       image = svc.image;
       break;
     }
@@ -396,6 +459,8 @@ function addServiceToComposeText(raw, container, file) {
   doc.services[container] = {
     image,
     container_name: container,
+    environment: ["INSIDE_DOCKER=true"],
+    user: "0:0",
     restart: "always",
     // Caps each container's own stdout/stderr log (separate from the app's
     // internal log files under ./logs) so a bot stuck retrying in a tight
@@ -408,7 +473,7 @@ function addServiceToComposeText(raw, container, file) {
       driver: "json-file",
       options: { "max-size": "10m", "max-file": "3" },
     },
-    volumes: ["./" + file + ":/app/config.json", "./logs:/app/logs"],
+    volumes: ["./" + file + ":/app/Configuration/config.json", "./logs:/app/logs"],
   };
 
   const text = yaml.dump(doc, { lineWidth: -1, noRefs: true });
@@ -1256,6 +1321,8 @@ router.post("/bot-configs/move", requireSuperadmin, async (req, res) => {
   if (!validFile(file)) {
     return res.status(400).json({ success: false, message: "Invalid file" });
   }
+  const refusal = await rentalStackRefusal(fromHost.id, file);
+  if (refusal) return res.status(409).json({ success: false, message: refusal });
   const start = body.start !== false; // default true
   if (!ALLOW_RESTART && start) {
     return res.status(403).json({
@@ -1594,6 +1661,8 @@ router.delete(
     if (!container) {
       return res.status(400).json({ success: false, message: "Invalid file" });
     }
+    const refusal = await rentalStackRefusal(host.id, file);
+    if (refusal) return res.status(409).json({ success: false, message: refusal });
     try {
       if (!(await hosts.exists(host, file))) {
         return res
@@ -1703,8 +1772,29 @@ async function addAccountsToConfig(host, file, accounts) {
 // config — never touching BotAccount, so renter tokens stay out of the
 // operator's cross-host index and the Drops Archive. Stamped with the owning
 // renter so the inventory is scoped to them.
-async function upsertRenterAccounts(accounts, host, file, renterId) {
+async function upsertRenterAccounts(accounts, host, file, renterId, opts = {}) {
   if (!accounts.length) return;
+  // A row being (re)placed starts a FRESH window when it had ENDED (its term
+  // was pulled; left ended it farmed invisibly to the lapse sweep, every quota
+  // and the scanner) or changes renter (the old renter's — or buyer's — term is
+  // not the new one's). A live row of the same renter keeps its window: that
+  // is a stack move (scripts/move-renter-*.js), never an extension.
+  // `opts.keepWindow` (the stack-move scripts): a move is never a new window —
+  // ended stays ended, a lapsed window stays lapsed (the sweep pulls it), and
+  // nothing becomes open-ended.
+  const secrets = accounts.map((u) => u.ClientSecret);
+  const before = opts && opts.keepWindow
+    ? []
+    : await RenterAccount.find(
+        { clientSecret: { $in: secrets } },
+        { clientSecret: 1, renter: 1, farmEndedAt: 1 },
+      )
+        .lean()
+        .catch(() => []);
+  const fresh = before
+    .filter((r) => r.farmEndedAt || String(r.renter) !== String(renterId))
+    .map((r) => r._id);
+  const hasWindow = Object.prototype.hasOwnProperty.call(opts || {}, "farmUntil");
   const ops = accounts.map((u) => ({
     updateOne: {
       filter: { clientSecret: u.ClientSecret },
@@ -1718,19 +1808,38 @@ async function upsertRenterAccounts(accounts, host, file, renterId) {
           container: containerForFile(file),
           host: host.id,
           enabled: u.Enabled !== false,
+          ...(hasWindow ? { farmUntil: opts.farmUntil || null, farmEndedAt: null } : {}),
         },
       },
       upsert: true,
     },
   }));
   await RenterAccount.bulkWrite(ops, { ordered: false }).catch(() => {});
+  if (fresh.length) {
+    await RenterAccount.updateMany(
+      { _id: { $in: fresh } },
+      {
+        $set: {
+          farmEndedAt: null,
+          ...(hasWindow ? {} : { farmUntil: null }),
+          expiryAttempts: 0,
+          expiryLastError: "",
+          expiryAlertedAt: null,
+        },
+        $unset: { expiryOwedFiles: "" },
+      },
+    ).catch((e) => console.error("renter ledger: fresh-window reset failed:", e.message));
+  }
 }
 
 // Renter counterpart of addAccountsToConfig: append already-parsed TwitchUsers
 // entries to a renter's bot config (same read → push → atomic write path the
 // operator uses) but sync the RenterAccount inventory instead of BotAccount.
 // Callers should dedupe first (dedupeAccounts, which cross-checks both indexes).
-async function addRenterAccountsToConfig(host, file, accounts, renterId) {
+// `opts.farmUntil` (a Date, or null for open-ended) stamps the window in the
+// same write that records the placement, so a crash between the two cannot
+// leave a placed account with the wrong window.
+async function addRenterAccountsToConfig(host, file, accounts, renterId, opts = {}) {
   if (!validFile(file)) throw new Error("Invalid config file");
   if (!Array.isArray(accounts) || !accounts.length) return { added: 0, total: 0 };
   return withFileLock(host, file, async () => {
@@ -1750,8 +1859,14 @@ async function addRenterAccountsToConfig(host, file, accounts, renterId) {
       ).map((u) => u.ClientSecret),
     );
     const fresh = accounts.filter((a) => a && !present.has(a.ClientSecret));
+    // Slots held for another renter's stopped accounts count as used — the
+    // same rule the stack pickers apply — so an add cannot fill them and make
+    // that renter's next Start fail "stack full". Fail-open (0) on a read error.
+    const reserved = fresh.length
+      ? await reservedSlots(host.id, file, present, { except: renterId })
+      : 0;
     assertCapacity(
-      data.TwitchSettings.TwitchUsers.length,
+      data.TwitchSettings.TwitchUsers.length + reserved,
       fresh.length,
       stack.capacity,
     );
@@ -1769,7 +1884,7 @@ async function addRenterAccountsToConfig(host, file, accounts, renterId) {
     }
     const total = data.TwitchSettings.TwitchUsers.length;
     await hosts.writeFileAtomic(host, file, JSON.stringify(data, null, 2));
-    await upsertRenterAccounts(accounts, host, file, renterId);
+    await upsertRenterAccounts(accounts, host, file, renterId, opts);
     return { added: fresh.length, total };
   });
 }
@@ -2027,13 +2142,7 @@ async function provisionEmptyConfig(host) {
     } catch {
       throw new Error("Template config is not valid JSON");
     }
-    if (!data.TwitchSettings || typeof data.TwitchSettings !== "object") {
-      data.TwitchSettings = {};
-    }
-    data.TwitchSettings.TwitchUsers = [];
-    if (data.KickSettings && typeof data.KickSettings === "object") {
-      data.KickSettings.KickUsers = [];
-    }
+    data = emptyStackConfig(data);
     await hosts.writeFileAtomic(host, slot.file, JSON.stringify(data, null, 2));
     try {
       if (composeFile) {
@@ -2067,10 +2176,13 @@ module.exports.parseGamesList = parseGamesList;
 module.exports.dedupeAccounts = dedupeAccounts;
 module.exports.validFile = validFile;
 module.exports.containerForFile = containerForFile;
+module.exports.addServiceToComposeText = addServiceToComposeText;
 module.exports.addAccountsToConfig = addAccountsToConfig;
 module.exports.addRenterAccountsToConfig = addRenterAccountsToConfig;
 module.exports.provisionEmptyConfig = provisionEmptyConfig;
+module.exports.emptyStackConfig = emptyStackConfig;
 module.exports.countConfigAccounts = countConfigAccounts;
+module.exports.rentalStackRefusal = rentalStackRefusal;
 module.exports.getConfigGames = getConfigGames;
 module.exports.setConfigGames = setConfigGames;
 module.exports.getAccountGames = getAccountGames;

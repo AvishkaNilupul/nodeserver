@@ -50,6 +50,7 @@
 //     ~1800 rows and units[] is the big field.
 // ---------------------------------------------------------------------------
 const express = require("express");
+const { packSizeOf } = require("../utils/bulkPacks/packMath");
 
 const { requireSuperadmin, enforce2fa } = require("../middleware/auth");
 const MarketplaceListing = require("../models/MarketplaceListing");
@@ -60,7 +61,7 @@ const SystemHealthRun = require("../models/SystemHealthRun");
 
 const router = express.Router();
 
-// Z2U is deliberately excluded everywhere: no capture, no card, no category.
+// Markets with no console surface are simply absent from MARKETS below.
 const MARKETS = [
   "gameflip",
   "digiseller",
@@ -69,7 +70,6 @@ const MARKETS = [
   "eldorado",
   "playerauctions",
   "g2g",
-  "funpay",
 ];
 const MARKET_SET = new Set(MARKETS);
 
@@ -190,6 +190,15 @@ const ROLLUP_TTL_MS = 60 * 1000;
 // a truncated total that looks complete is worse than no total.
 const ROLLUP_ROW_CAP = 5000;
 
+// The stock guardian parks a listing it cannot deliver from by writing
+// "paused: ..." or "hidden: ..." into lastError while the row stays `active`.
+// That is a deliberate holding state with a stated reason, not a failure — on
+// 2026-10-01 all 12 of Eldorado's and PlayerAuctions' "live errors" were these,
+// and the page told the operator something was broken when nothing was.
+function isHeldNote(lastError) {
+  return /^\s*(paused|hidden)\s*:/i.test(String(lastError || ""));
+}
+
 async function rollup() {
   if (rollupCache.data && Date.now() - rollupCache.at < ROLLUP_TTL_MS) {
     return { ...rollupCache.data, cached: true };
@@ -210,6 +219,8 @@ async function rollup() {
       lastError: 1,
       updatedAt: 1,
       "units.deliveredAt": 1,
+      bulkOfferId: 1,
+      bulkPackSize: 1,
     },
   )
     // Sorted, and the cap is reported. An UNSORTED .limit() drops rows in
@@ -231,6 +242,7 @@ async function rollup() {
       listings: 0,
       active: 0,
       errors: 0,
+      held: 0,
       errorsHistorical: 0,
       deliveredUnits: 0,
       deliveredRevenueUsd: 0,
@@ -258,10 +270,15 @@ async function rollup() {
     // removed rows, including the reconciliation notes this console's own
     // tooling writes. A number that sends the operator hunting a problem that
     // does not exist is worse than no number.
-    if (r.lastError && r.status === "active") p.errors += 1;
+    if (r.lastError && r.status === "active") {
+      if (isHeldNote(r.lastError)) p.held += 1;
+      else p.errors += 1;
+    }
     if (r.lastError) p.errorsHistorical += 1;
     p.unitsSold += Number(r.unitsSold) || 0;
-    const price = Number(r.price) || 0;
+    // A bulk pack row's price is for the whole pack of N accounts; each
+    // delivered account carries 1/N of it (docs/bulk-packs/PACKS-2.md).
+    const price = (Number(r.price) || 0) / packSizeOf(r);
     for (const u of r.units || []) {
       if (!u.deliveredAt) continue;
       const at = new Date(u.deliveredAt);
@@ -271,8 +288,9 @@ async function rollup() {
       if (at >= week) p.delivered7d += 1;
       if (!p.lastActivityAt || at > p.lastActivityAt) p.lastActivityAt = at;
     }
-    const up = r.updatedAt ? new Date(r.updatedAt) : null;
-    if (up && (!p.lastActivityAt || up > p.lastActivityAt)) p.lastActivityAt = up;
+    // lastActivityAt is real evidence only (a delivery or a sale signal). A
+    // listing's updatedAt moves every time stock sync or a reprice touches the
+    // row, which made "2h ago" on Eldorado when its last delivery was a day old.
   }
 
   // Sales signals carry the price the platform actually reported, which is the
@@ -433,6 +451,9 @@ function bufferRows(state) {
       kind: "summary",
       headline: state.summary || "",
       enabled: !!state.enabled,
+      // Carried through so the console can say DRY RUN instead of a green
+      // "buffer on" over a buffer that publishes nothing.
+      dryRun: !!state.dryRun,
       configured: !!state.configured,
       target,
       reserve: Number(state.reserve) || 0,
@@ -538,11 +559,6 @@ router.get(
     try {
       const market = String(req.params.market || "").toLowerCase();
       const category = String(req.params.category || "").toLowerCase();
-      if (market === "z2u") {
-        return res
-          .status(400)
-          .json({ success: false, message: "z2u is deliberately excluded from the console" });
-      }
       if (!MARKET_SET.has(market)) {
         return res.status(400).json({ success: false, message: "unknown marketplace" });
       }
@@ -672,6 +688,50 @@ router.get(
           .sort({ createdAt: -1, _id: -1 })
           .limit(limit + 1)
           .lean();
+        // Each account's LIVE window from the rent-farm ledger (the order row
+        // only records what was handed over): when it ends, whether it ended,
+        // and whether it is on a bot — what an operator needs before closing
+        // or extending an order. Best-effort: a failed read shows no chips.
+        try {
+          const Renter = require("../models/Renter");
+          const RenterAccount = require("../models/RenterAccount");
+          const holder = await Renter.findOne({ usernameLower: "operator-selffarm" }, { _id: 1 }).lean();
+          const logins = [...new Set(rows.flatMap((o) => (o.accounts || []).map((a) => String(a.login || "").toLowerCase())).filter(Boolean))];
+          if (holder && logins.length) {
+            const esc = (x) => x.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+            const ledger = await RenterAccount.find(
+              { renter: holder._id, login: { $in: logins.map((l) => new RegExp("^" + esc(l) + "$", "i")) } },
+              { login: 1, farmUntil: 1, farmEndedAt: 1, configFile: 1, enabled: 1 },
+            ).lean();
+            // One row per login: the LIVE one, latest window first — an old
+            // ended row or a duplicate-login twin must not stand in for it.
+            const byLogin = new Map();
+            for (const a of ledger) {
+              const k = String(a.login || "").toLowerCase();
+              const cur = byLogin.get(k);
+              const better =
+                !cur ||
+                (!!cur.farmEndedAt && !a.farmEndedAt) ||
+                (!!cur.farmEndedAt === !!a.farmEndedAt &&
+                  new Date(a.farmUntil || 0).getTime() > new Date(cur.farmUntil || 0).getTime());
+              if (better) byLogin.set(k, a);
+            }
+            for (const o of rows) {
+              o.live = (o.accounts || []).map((a) => {
+                const l = byLogin.get(String(a.login || "").toLowerCase());
+                return {
+                  login: a.login || "",
+                  farmUntil: (l && l.farmUntil) || a.farmUntil || null,
+                  ended: !!(l && l.farmEndedAt),
+                  onBot: !!(l && l.configFile && l.enabled !== false),
+                  known: !!l,
+                };
+              });
+            }
+          }
+        } catch (e) {
+          console.error("market console orders ledger join:", e.message);
+        }
         return res.json({
           success: true,
           ...paginate(rows, limit, "createdAt"),
@@ -684,17 +744,19 @@ router.get(
         // exactly what explains why it was delisted — but each row carries its
         // status so a dead one cannot be mistaken for a live problem. The CARD
         // count above deliberately counts only active rows.
-        const rows = await MarketplaceListing.find(
-          {
-            marketplace: market,
-            lastError: { $ne: "" },
-            ...olderThan("updatedAt", cur),
-          },
-          { title: 1, externalId: 1, lastError: 1, status: 1, updatedAt: 1, price: 1 },
-        )
-          .sort({ updatedAt: -1, _id: -1 })
-          .limit(limit + 1)
-          .lean();
+        const rows = (
+          await MarketplaceListing.find(
+            {
+              marketplace: market,
+              lastError: { $ne: "" },
+              ...olderThan("updatedAt", cur),
+            },
+            { title: 1, externalId: 1, lastError: 1, status: 1, updatedAt: 1, price: 1 },
+          )
+            .sort({ updatedAt: -1, _id: -1 })
+            .limit(limit + 1)
+            .lean()
+        ).map((r) => ({ ...r, held: isHeldNote(r.lastError) }));
         return res.json({
           success: true,
           ...paginate(rows, limit, "updatedAt"),

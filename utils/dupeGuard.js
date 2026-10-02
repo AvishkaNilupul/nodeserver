@@ -17,8 +17,10 @@
 const CONFIG_RE = /^config(_[A-Za-z0-9-]+)?\.json$/;
 
 // writeFileAtomic is re-entered while we heal sibling configs; without this
-// the first heal would trigger its own sweep, and so on.
-let healing = false;
+// the first heal would trigger its own sweep, and so on. Keyed per
+// host|file (2026-10-01): one module-wide flag also made every OTHER write
+// that happened to run during a heal skip the guard, silently.
+const healingWrites = new Set();
 
 function usersOf(data) {
   return data &&
@@ -31,7 +33,8 @@ const secretOf = (u) => String((u && u.ClientSecret) || "").trim();
 
 // Returns the sibling configs it healed: [{ file, removed: [login] }].
 async function enforceSingleHome(hosts, host, file, text) {
-  if (healing || !CONFIG_RE.test(String(file || ""))) return [];
+  if (!CONFIG_RE.test(String(file || ""))) return [];
+  if (healingWrites.has(String(host && host.id) + "|" + file)) return [];
   let mine;
   try {
     mine = JSON.parse(text);
@@ -46,7 +49,6 @@ async function enforceSingleHome(hosts, host, file, text) {
   );
   if (!claimed.size) return [];
 
-  healing = true;
   const healed = [];
   try {
     const files = (await hosts.readdir(host))
@@ -63,19 +65,56 @@ async function enforceSingleHome(hosts, host, file, text) {
       } catch {
         continue;
       }
-      const users = usersOf(data);
-      if (!users.length) continue;
-      const removed = [];
-      const kept = users.filter((u) => {
-        const s = secretOf(u);
-        if (!s || !claimed.has(s) || u.Enabled === false) return true;
-        removed.push(u.Login || s.slice(0, 6));
-        return false;
-      });
+      const strip = (d) => {
+        const removed = [];
+        const kept = usersOf(d).filter((u) => {
+          const s = secretOf(u);
+          if (!s || !claimed.has(s) || u.Enabled === false) return true;
+          removed.push(u.Login || s.slice(0, 6));
+          return false;
+        });
+        return { removed, kept };
+      };
+      if (!usersOf(data).length || !strip(data).removed.length) continue;
+      // Re-read right before writing: another writer may have changed the
+      // sibling since the batched read (this runs outside that file's lock —
+      // taking it here, inside a write that may hold another file's lock,
+      // could deadlock). The strip is applied to what is there NOW: skipping
+      // a changed sibling left the token enabled in two configs.
+      let current = null;
+      try {
+        current = await hosts.readFile(host, f);
+      } catch {
+        current = null;
+      }
+      if (current === null) continue;
+      if (current !== entry.text) {
+        try {
+          data = JSON.parse(current);
+        } catch {
+          console.warn("[dupeGuard] " + host.id + "/" + f + " changed meanwhile and no longer parses — left alone");
+          continue;
+        }
+      }
+      const { removed, kept } = strip(data);
       if (!removed.length) continue;
       data.TwitchSettings.TwitchUsers = kept;
-      await hosts.writeFileAtomic(host, f, JSON.stringify(data, null, 2));
+      const key = String(host && host.id) + "|" + f;
+      healingWrites.add(key);
+      try {
+        await hosts.writeFileAtomic(host, f, JSON.stringify(data, null, 2));
+      } finally {
+        healingWrites.delete(key);
+      }
       healed.push({ file: f, removed });
+      // Out of the config is not out of the BOT: a running container keeps
+      // its config from startup. Recorded as owing a reload — the renter
+      // owed-reload sweeper reloads it if it runs (utils/renterBotOps).
+      try {
+        await require("./renterBotOps").markReloadOwed(host, f, "dupe guard: accounts moved to " + file);
+      } catch (e) {
+        console.error("[dupeGuard] could not record the reload owed by " + f + ": " + e.message);
+      }
       console.warn(
         "[dupeGuard] " + removed.length + " account(s) moved to " + file +
           " were still enabled in " + f + " on " + host.id +
@@ -84,8 +123,6 @@ async function enforceSingleHome(hosts, host, file, text) {
     }
   } catch (e) {
     console.error("[dupeGuard] sweep failed for " + file + ": " + e.message);
-  } finally {
-    healing = false;
   }
   return healed;
 }

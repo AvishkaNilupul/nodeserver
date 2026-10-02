@@ -13,7 +13,12 @@ const rx = (s) =>
 
 // Compact block of the coworker's most relevant memories, injected into the
 // system prompt each session: all pinned, plus the most recently updated.
-async function loadPromptMemories(limit = 40) {
+// The cap is 60 so the whole curated domain corpus (scripts/seed-coworker-memory
+// .js, ~43 facts) always loads in full and deterministically, leaving headroom
+// for memories the coworker saves itself. Below the corpus size, entries would
+// be dropped in arbitrary order — which is how it ends up "knowing" a fact one
+// session and not the next.
+async function loadPromptMemories(limit = 60) {
   const rows = await CoworkerMemory.find({})
     .sort({ pinned: -1, updatedAt: -1 })
     .limit(limit)
@@ -106,7 +111,7 @@ async function setProposalStatus(id, status, actor) {
   const doc = await CoworkerProposal.findByIdAndUpdate(
     id,
     { $set: { status } },
-    { new: true },
+    { returnDocument: "after" },
   ).lean();
   if (!doc) return { error: "not found" };
   await logRun({

@@ -19,7 +19,7 @@ function setUsed(id, used) {
   return Inventory.findByIdAndUpdate(
     id,
     { $set: { used, usedAt: used ? new Date() : null } },
-    { new: true }
+    { returnDocument: "after" }
   );
 }
 

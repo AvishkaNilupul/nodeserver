@@ -34,6 +34,7 @@ const path = require("path");
 const os = require("os");
 const zlib = require("zlib");
 const { execFile } = require("child_process");
+const crypto = require("crypto");
 
 // Reuse a single SSH connection across the many short-lived commands the Bots
 // page fires per refresh (list, status, file reads, stats). Without this each
@@ -564,10 +565,10 @@ async function writeFileRaw(host, file, text) {
     return;
   }
   const dest = remotePath(host, file);
-  const tmp = dest + ".tmp-" + process.pid;
   const bak = dest + ".bak";
-  // Single remote shell: back up existing file (best effort), then read stdin
-  // into a temp file and atomically move it into place.
+  // Single remote shell: back up the existing file (best effort), then the
+  // guarded write (see guardedWriteScript): the temp file is moved into place
+  // only when it holds every byte sent.
   const cmd =
     "[ -f " +
     shq(dest) +
@@ -576,13 +577,56 @@ async function writeFileRaw(host, file, text) {
     " " +
     shq(bak) +
     "; " +
-    "cat > " +
-    shq(tmp) +
-    " && mv -f " +
-    shq(tmp) +
-    " " +
-    shq(dest);
+    guardedWriteScript(dest, byteLength(text), { tmp: dest + ".tmp-" + process.pid });
   await sshRun(host, cmd, { input: text });
+}
+
+// Bytes `text` is on the wire: what ssh's stdin carries and what `wc -c`
+// counts on the far side (UTF-8 for a string).
+function byteLength(text) {
+  return Buffer.isBuffer(text) ? text.length : Buffer.byteLength(String(text), "utf8");
+}
+
+// THE GUARDED WRITE, as one /bin/sh command for `input: text` (2026-10-01).
+// stdin goes to a temp file beside `dest`, which is moved into place ONLY when
+// it holds exactly `bytes` bytes. `cat` exits 0 on any EOF, and a cut-off
+// transfer is an EOF too — a timed-out or killed ssh client behind the shared
+// ControlMaster closes the channel cleanly — so `cat > tmp && mv` installed
+// half a bot config as if it were whole, and the bot lost every account past
+// the cut. A short (or otherwise failed) write removes the temp file and fails
+// the command (exit 1), leaving the old file untouched.
+//   mode   — e.g. "600": applied to the temp file BEFORE the rename, so the live
+//            file never exists with any other permissions;
+//   mkdirs — directories created first (mkdir -p);
+//   tmp    — the temp name (default: unique per write).
+// For writers that run their own command on a host — the no-claim fleet's
+// configs live at absolute paths outside any host's bot dir and must not set
+// off dupeGuard — and for writeFileRaw above.
+function guardedWriteScript(dest, bytes, { mode = "", mkdirs = [], tmp = "" } = {}) {
+  const n = Number(bytes);
+  if (!Number.isInteger(n) || n < 0) throw new Error("guardedWriteScript: bad byte count " + bytes);
+  if (mode && !/^[0-7]{3,4}$/.test(String(mode))) throw new Error("guardedWriteScript: bad mode " + mode);
+  const t = tmp || dest + ".tmp-" + process.pid + "-" + crypto.randomBytes(3).toString("hex");
+  return (
+    (mkdirs.length ? "mkdir -p " + mkdirs.map(shq).join(" ") + " && " : "") +
+    "cat > " +
+    shq(t) +
+    " && [ $(wc -c < " +
+    shq(t) +
+    ") -eq " +
+    n +
+    " ]" +
+    (mode ? " && chmod " + mode + " " + shq(t) : "") +
+    " && mv -f " +
+    shq(t) +
+    " " +
+    shq(dest) +
+    " || { rm -f " +
+    shq(t) +
+    "; echo 'short or failed write: " +
+    n +
+    " bytes expected' >&2; exit 1; }"
+  );
 }
 
 async function rename(host, from, to) {
@@ -1013,6 +1057,8 @@ module.exports = {
   readFiles,
   exists,
   writeFileAtomic,
+  guardedWriteScript,
+  byteLength,
   rename,
   composeName,
   composeRead,

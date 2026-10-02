@@ -24,10 +24,46 @@ const { decrypt } = require("./secretBox");
 const operatorFarm = require("./operatorFarm");
 const mp = require("./marketplaces");
 const farmAlert = require("./farmServiceAlert");
+const farmHandover = require("./farmHandover");
 const provisioning = require("./farmProvisioning");
+const { packSizeOf, accountsForUnits, titlePackSize } = require("./bulkPacks/packMath");
 
 // Which marketplace this service speaks for, used in failure alerts.
 const MARKET = "eldorado";
+
+// Bulk packs v2 (docs/bulk-packs/PACKS-2.md §2). A bulk FARMING offer is one
+// item priced as a pack: one unit bought is N fresh accounts farming for the
+// term. A farm offer has no listing row, so its N is the BulkOffer's minQty,
+// found by the marketplace offer id the order was placed on. Returns
+// { pack, id, size, state } — `pack` is the row-shaped input
+// utils/bulkPacks/packMath (the ONE multiplier) takes — or null for every other
+// farming offer, which provisions exactly as before. Any state counts: an order
+// placed while the offer was live is owed its packs after a pause or withdraw.
+// A failed read THROWS: reading it as "not a pack" would provision one account
+// for a paid pack of N. Required lazily so an ordinary order loads nothing new.
+// Shared with utils/g2gFarmService (one copy, as with the title parse).
+async function bulkFarmPack(offerId, market = MARKET) {
+  const id = String(offerId || "");
+  if (!id) return null;
+  const b = await require("../models/BulkOffer")
+    .findOne({ externalId: id, kind: "farming", market }, { minQty: 1, state: 1 })
+    .lean();
+  if (!b) return null;
+  const pack = { bulkOfferId: b._id, bulkPackSize: b.minQty };
+  const size = packSizeOf(pack);
+  if (size < 2) return null;
+  return { pack, id: String(b._id), size, state: String(b.state || "") };
+}
+
+// What the FarmServiceOrder row records about a pack order: its quantity is
+// the ACCOUNTS provisioned (what every reader of that field counts), so the
+// units bought and the pack size are written here.
+function packNote(bulk, units, accounts) {
+  return (
+    "bulk pack order: " + units + " pack(s) of " + bulk.size + " accounts = " +
+    accounts + " accounts (bulk offer " + bulk.id + ")"
+  );
+}
 
 // Our own naming convention, so this parse is a contract with ourselves:
 //   "<Game> Twitch Drops Automatic Farming 120 Days"
@@ -72,8 +108,28 @@ async function canonicalGame(raw, knownGames) {
   return hit || "";
 }
 
+// Games announced on Twitch whose first campaign the drop scanner has not
+// recorded yet. A rent-farm window is sold for a GAME, not a campaign: the
+// account is pinned to the game and farms each campaign as it goes live, the
+// same way it waits between events for any other game. Without this a
+// launch-week game cannot be sold at all — parseFarmOrder refuses a game no
+// campaign has named, and the order sits failed until the scanner catches up
+// while the buyer waits out the 20-minute delivery guarantee.
+//
+// Spell each one exactly as Twitch's category name: it becomes the account's
+// game pin, which the bot matches against campaign game names. An entry is
+// harmless once the scanner has seen the game (it is then known anyway).
+//   AION 2 — global early access 2026-09-30, launch 2026-10-05; NC's
+//   "War for Atreia" event brings drops for Global servers only.
+const ANNOUNCED_FARM_GAMES = ["AION 2"];
+
+function withAnnounced(games) {
+  const have = new Set(games.map(normGame));
+  return games.concat(ANNOUNCED_FARM_GAMES.filter((g) => !have.has(normGame(g))));
+}
+
 // Games the farm has actually seen campaigns for, which is what a bot config's
-// game pin has to match.
+// game pin has to match, plus the announced ones above.
 let gamesCache = { at: 0, list: [] };
 async function knownFarmGames() {
   if (gamesCache.list.length && Date.now() - gamesCache.at < 30 * 60e3) {
@@ -83,9 +139,27 @@ async function knownFarmGames() {
   const CampaignDrops = require("../models/CampaignDrops");
   const a = await AutoFarmTask.distinct("game").catch(() => []);
   const b = await CampaignDrops.distinct("game").catch(() => []);
-  const list = [...new Set([...(a || []), ...(b || [])].filter(Boolean))];
-  if (list.length) gamesCache = { at: Date.now(), list };
+  const seen = [...new Set([...(a || []), ...(b || [])].filter(Boolean))];
+  // Cached only when the scanner's own games came back: an empty read is a
+  // failed read, and caching the announced names alone would refuse every
+  // other game for half an hour.
+  const list = withAnnounced(seen);
+  if (seen.length) gamesCache = { at: Date.now(), list };
   return list;
+}
+
+// Is an order's chat ready to receive the credential? Eldorado mints the TalkJS
+// conversation LAZILY — a freshly-paid order carries `talkJsConversationId:
+// null` until the order chat is first opened (by the buyer, or by the operator
+// opening the order page), at which point the id appears on the order rows and
+// stays. The internal id we post to is `sha1(talkJsConversationId)`, so with no
+// GUID there is nothing to post to and nothing we can invent. A missing id is
+// "not deliverable YET", not an error. Confirmed live 2026-09-20: two rent-farm
+// orders paged "no talkJsConversationId", then self-delivered minutes later.
+// Kept HERE rather than in marketplaces.js on purpose: that file is edited and
+// deployed by other work streams, and this check must not vanish with one.
+function orderChatReady(order) {
+  return !!(order && order.talkJsConversationId && order.sellerId);
 }
 
 // Is this order one of ours, and what did the buyer actually buy?
@@ -103,9 +177,10 @@ async function parseFarmOrder(order) {
 
 // The buyer-facing hand-over. Mirrors the copy the operator sends by hand: the
 // credential, then the two things that actually matter (keep it linked, don't
-// change it), then the feedback ask.
-function farmDeliveryMessage(accounts, days, game) {
-  const term = days === 365 ? "1 year" : days + " days";
+// change it), then the feedback ask. `until` (the window's end, counted from
+// this hand-over — utils/farmHandover) is stated as a date.
+function farmDeliveryMessage(accounts, days, game, { until = null } = {}) {
+  const term = farmHandover.termWords(days);
   const forGame = game ? " for " + game : "";
   const blocks = accounts.map(
     (a, i) =>
@@ -116,12 +191,14 @@ function farmDeliveryMessage(accounts, days, game) {
   );
   return (
     blocks.join("\n\n") +
-    "\n\nYour " + term + " of automatic farming starts now.\n\n" +
+    "\n\nYour " + term + " of automatic farming starts now" +
+    (until ? " and runs until " + farmHandover.dayText(until) + " (UTC)" : "") + ".\n\n" +
     "KEEP THIS ACCOUNT LINKED to your game account. Our farm watches every " +
     "drop event" + forGame + " and claims the items automatically the moment " +
     "they unlock — you do not have to watch any streams or do anything at " +
-    "all. New items will keep appearing on the account for the whole " + term +
-    ", so just check back and claim them whenever you like.\n\n" +
+    "all. Items appear whenever " + (game || "the game") + " runs a Twitch " +
+    "Drops campaign during your " + term + ", so just check back and claim " +
+    "them whenever you like.\n\n" +
     "Please do not change the account's password or email — the automatic " +
     "farming stops if you do, and that is not covered by a refund.\n\n" +
     "If our bot ever misses an item you can also claim it by hand at " +
@@ -168,7 +245,29 @@ async function deliverFarmOrder(order, { dryRun } = {}) {
   if (!parsed) return null;
 
   const orderId = String(order.id || "");
-  const qty = Math.max(1, parseInt(order.purchaseQuantity, 10) || 1);
+  const units = Math.max(1, parseInt(order.purchaseQuantity, 10) || 1);
+
+  // What the buyer bought, in accounts: `units` on every farming offer, as
+  // before — and on a bulk pack farming offer each unit is a pack of N
+  // (docs/bulk-packs/PACKS-2.md §2). Asked before anything else, dry run
+  // included; an unreadable answer waits for the next tick with nothing
+  // provisioned, never a guess.
+  let bulk = null;
+  try {
+    bulk = await bulkFarmPack(order.offerId);
+  } catch (e) {
+    return {
+      orderId,
+      farm: true,
+      error:
+        "could not read the bulk offer behind farming offer " +
+        String(order.offerId || "") + " (" + (e && e.message) + ") — " +
+        "nothing provisioned, the next tick retries",
+    };
+  }
+  // `qty` below is ALWAYS accounts: what is provisioned, recorded as the
+  // row's quantity, alerted on and handed over.
+  let qty = bulk ? accountsForUnits(bulk.pack, units) : units;
 
   // A title we cannot read is still a PAID order.
   //
@@ -182,12 +281,24 @@ async function deliverFarmOrder(order, { dryRun } = {}) {
   // makes it visible, alertable and de-duplicated by the same `attempts` counter
   // every other failure uses. The refusal itself is unchanged: guessing a game
   // or a term would provision the wrong thing.
-  const unreadable = !parsed.days
+  // A pack title with no matching bulk offer (a publish whose outcome was
+  // unknown, so no offer id was recorded) must never provision x1: the buyer
+  // paid for N accounts per unit. Refused on the row like any unreadable order.
+  const titleN = titlePackSize(parsed.title);
+  const packMismatch =
+    titleN && (!bulk || bulk.size !== titleN)
+      ? "the title promises PACK OF " + titleN + " ACCOUNTS but " +
+        (bulk
+          ? "its bulk offer is a pack of " + bulk.size
+          : "no bulk offer matches offer " + String(order.offerId || "")) +
+        " — nothing provisioned; deliver it by hand"
+      : "";
+  const unreadable = packMismatch || (!parsed.days
     ? 'could not read a farming term from "' + parsed.title + '"'
     : !parsed.game
       ? 'the farm does not know a game called "' + parsed.rawGame + '" — ' +
         "add an alias in utils/eldoradoFarmService before this can auto-deliver"
-      : "";
+      : "");
 
   if (dryRun) {
     if (unreadable) return { orderId, farm: true, dryRun: true, error: unreadable };
@@ -214,8 +325,10 @@ async function deliverFarmOrder(order, { dryRun } = {}) {
   // Claim the order. The unique index is what stops two ticks provisioning the
   // same order twice.
   let row = await FarmServiceOrder.findOne({ orderId });
-  if (row && row.state === "delivered") {
-    return { orderId, farm: true, skipped: "already delivered" };
+  // A CANCELLED row is closed (the buyer walked away / was refunded) — it must
+  // never provision, even while the platform still lists the order as paid.
+  if (row && (row.state === "delivered" || row.state === "cancelled")) {
+    return { orderId, farm: true, skipped: "already " + row.state };
   }
   if (!row) {
     try {
@@ -242,11 +355,24 @@ async function deliverFarmOrder(order, { dryRun } = {}) {
         return { orderId, farm: true, skipped: "claimed by another tick" };
       throw e;
     }
+    // A pack order's units and pack size (PACKS-2 §2). FarmServiceOrder
+    // declares no `note` path, so it is written schema-less; the next save
+    // below persists it.
+    if (bulk) row.set("note", packNote(bulk, units, qty), { strict: false });
   }
   row.attempts += 1;
 
+  // Once anything is provisioned, the count / game / term it was provisioned
+  // for stand (utils/farmProvisioning.freezeOrder) — and so does the order.
+  const fz = provisioning.freezeOrder(row, { qty, game: parsed.game, days: parsed.days });
+  qty = fz.qty;
+  if (fz.frozen) {
+    parsed.game = fz.game;
+    parsed.days = fz.days;
+  }
+
   // The unreadable-title refusal, now that there is a row to hang it on.
-  if (unreadable) {
+  if (unreadable && !fz.frozen) {
     const alert = farmAlert.shouldAlert(row);
     row.state = "failed";
     row.lastError = unreadable;
@@ -266,6 +392,42 @@ async function deliverFarmOrder(order, { dryRun } = {}) {
         .catch(() => {});
     }
     return { orderId, farm: true, error: unreadable };
+  }
+
+  // The buyer's order chat is created LAZILY by Eldorado — a freshly-paid order
+  // has no talkJsConversationId yet, and the credential can only be posted into
+  // a conversation that exists. Not a failure: hold the order in "waiting_chat",
+  // provision NOTHING (no scarce pristine account burned, and no farming window
+  // started before the buyer can receive the login), and deliver the moment the
+  // conversation appears. It pages only if the wait drags on (~10 min), when
+  // opening the order page (which starts the chat) or a nudge to the buyer helps.
+  if (!orderChatReady(order)) {
+    // State first: shouldAlert's throttle keys off it (a fresh "claimed" row
+    // would read as a first failure and page on tick one).
+    row.state = "waiting_chat";
+    row.lastError =
+      "buyer's order chat is not open yet (Eldorado has not created the " +
+      "conversation) — holding to auto-deliver the moment it does";
+    const alert = farmAlert.shouldAlert(row);
+    await row.save();
+    if (alert) {
+      await farmAlert
+        .alertFarmFailure({
+          market: MARKET,
+          orderId,
+          offerTitle: row.offerTitle || parsed.title || "",
+          game: parsed.game,
+          days: parsed.days,
+          qty,
+          buyerUsername: row.buyerUsername || "",
+          reason:
+            "the buyer has not opened the order chat, so there is no conversation to " +
+            "post the login into. It auto-delivers the moment they open it; to deliver " +
+            "now, open the order page on Eldorado (that starts the chat).",
+        })
+        .catch(() => {});
+    }
+    return { orderId, farm: true, waiting: "chat-not-open" };
   }
 
   try {
@@ -311,6 +473,7 @@ async function deliverFarmOrder(order, { dryRun } = {}) {
             qty,
             buyerUsername: row.buyerUsername || "",
             reason: row.lastError,
+            logins: farmHandover.loginsOf(row),
           });
         }
         return { orderId, farm: true, error: row.lastError };
@@ -342,16 +505,23 @@ async function deliverFarmOrder(order, { dryRun } = {}) {
             qty,
             buyerUsername: row.buyerUsername || "",
             reason: row.lastError,
+            logins: farmHandover.loginsOf(row),
           });
         }
         return { orderId, farm: true, error: row.lastError };
       }
+      // The window counts from this hand-over; the date in the text is pinned
+      // at the first attempt so a retry sends the same body (utils/farmHandover).
+      const until = await farmHandover.pinUntil(row, parsed.days);
       await mp.eldoradoSendOrderMessage(
         order,
-        farmDeliveryMessage(creds, parsed.days, parsed.game),
+        farmDeliveryMessage(creds, parsed.days, parsed.game, { until }),
       );
       row.messageSentAt = new Date();
       row.state = "sent";
+      await farmHandover
+        .stampFromHandover(row, farmHandover.handoverStamp(until, parsed.days))
+        .catch((e) => console.error("eldorado farm " + orderId + ": window re-stamp failed:", e.message));
       await row.save();
     }
 
@@ -374,8 +544,15 @@ async function deliverFarmOrder(order, { dryRun } = {}) {
     };
   } catch (e) {
     const alertErr = farmAlert.shouldAlert(row);
-    row.state = "failed";
-    row.lastError = String(e.message || e).slice(0, 400);
+    // After the login reached the buyer only the confirmation can have failed:
+    // the row stays "sent" (the next tick only confirms) and the page says so.
+    const sent = !!row.messageSentAt;
+    if (sent) {
+      farmHandover.sentButUnconfirmed(row, MARKET, e);
+    } else {
+      row.state = "failed";
+      row.lastError = String(e.message || e).slice(0, 400);
+    }
     await row.save().catch(() => {});
     if (alertErr) {
       await farmAlert.alertFarmFailure({
@@ -387,18 +564,24 @@ async function deliverFarmOrder(order, { dryRun } = {}) {
         qty,
         buyerUsername: row.buyerUsername || "",
         reason: row.lastError,
+        logins: farmHandover.loginsOf(row),
+        sent,
       });
     }
-    return { orderId, farm: true, error: row.lastError };
+    return { orderId, farm: true, error: row.lastError, ...(sent ? { sent: true } : {}) };
   }
 }
 
 module.exports = {
+  orderChatReady,
   FARM_TITLE,
   termToDays,
   canonicalGame,
   knownFarmGames,
+  ANNOUNCED_FARM_GAMES,
   parseFarmOrder,
   farmDeliveryMessage,
   deliverFarmOrder,
+  bulkFarmPack,
+  packNote,
 };

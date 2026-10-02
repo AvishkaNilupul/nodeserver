@@ -77,7 +77,7 @@ async function upsertTask(verdict, { dryRun = false } = {}) {
         ...(verdict.decisionInputs ? { decisionInputs: verdict.decisionInputs } : {}),
       },
     },
-    { upsert: true, new: true, setDefaultsOnInsert: true },
+    { upsert: true, returnDocument: "after", setDefaultsOnInsert: true },
   );
 }
 
@@ -283,7 +283,7 @@ async function writeEmptyReuseSkip({ verdict, reusable, recorded }) {
         ...recorded(false),
       },
     },
-    { upsert: true, new: true, setDefaultsOnInsert: true },
+    { upsert: true, returnDocument: "after", setDefaultsOnInsert: true },
   );
 }
 
@@ -333,7 +333,22 @@ async function executeReuse({ verdict, dryRun, af, host = null, granted = 0 }) {
     : await b.reusableTaskForGame(verdict.game);
   if (!reusable) throw new Error("reuse target task no longer exists");
 
-  const bots = (reusable.bots || []).filter((x) => x.container);
+  // Only the bots decide found alive. decide.reuseCandidate drops retired bots
+  // (container deleted from the Bots page, config renamed .done-*) and hands
+  // the survivors over as verdict.reuseBots, but this step re-read the task and
+  // used every bot it ever listed: the retired one was restarted (and failed)
+  // and then recorded on the new row, so it rode along into every later reuse
+  // of the game — contabo twitchbotx34, deleted 2026-09-21, was still being
+  // copied onto new Marvel Rivals rows on 09-26, where the Auto-farm tab flagged
+  // it "expected container is missing". A verdict without the list (a row
+  // decided before it existed) keeps every bot, exactly as before.
+  const decidedLive =
+    Array.isArray(verdict.reuseBots) && verdict.reuseBots.length
+      ? new Set(verdict.reuseBots.map((c) => String(c)))
+      : null;
+  const bots = (reusable.bots || []).filter(
+    (x) => x.container && (!decidedLive || decidedLive.has(String(x.container))),
+  );
   if (!bots.length) throw new Error("reuse target has no bots left");
 
   // Recompute the deliverable account set at EXECUTION time — the decide-time
@@ -471,16 +486,41 @@ async function executeReuse({ verdict, dryRun, af, host = null, granted = 0 }) {
     // running container) is far milder than never farming.
   }
 
+  // Give the reused accounts this game back before the bots start. When the
+  // previous campaign ended, completeEndedTasks took the game off them and
+  // disabled the ones left with none, so a plain restart farmed nothing (45 of
+  // 54 reuse tasks earned 0 drops in 8 days). utils/reuseRearm decides which
+  // accounts are safe to re-enable and never throws; on any failure it re-arms
+  // nothing and the reuse proceeds exactly as before.
+  const rearm = await require("../../reuseRearm").rearmReusedAccounts({
+    bots,
+    logins: mine,
+    game: verdict.game,
+  });
+  const rearmedBots = new Set(
+    (rearm.changedBots || []).map((c) => c.host + "|" + c.container),
+  );
+  if (rearm.error) console.error("farm2/executeReuse: re-arm skipped — " + rearm.error);
+
   const started = [];
   const failed = [];
   const skippedParked = [];
   for (const bot of bots) {
     if (parked.has(bot.host + "|" + bot.container)) {
+      // botWaker owns waking a parked bot; the config it will read on start
+      // already carries the re-armed accounts.
       skippedParked.push(bot.container);
       continue;
     }
     try {
-      await botFactory.startContainer(hosts.resolveHost(bot.host), bot.container);
+      const h = hosts.resolveHost(bot.host);
+      // A running container reads its config only at startup, and `docker
+      // start` is a no-op on one — restart the bots whose config changed.
+      if (rearmedBots.has(bot.host + "|" + bot.container)) {
+        await hosts.dockerContainer(h, "restart", bot.container);
+      } else {
+        await botFactory.startContainer(h, bot.container);
+      }
       started.push(bot.container);
     } catch (e) {
       failed.push(bot.container + ": " + e.message);
@@ -525,7 +565,7 @@ async function executeReuse({ verdict, dryRun, af, host = null, granted = 0 }) {
           ...recorded(false),
         },
       },
-      { upsert: true, new: true, setDefaultsOnInsert: true },
+      { upsert: true, returnDocument: "after", setDefaultsOnInsert: true },
     );
   } else {
     task = await writeEmptyReuseSkip({ verdict, reusable, mine, recorded });
@@ -554,7 +594,11 @@ async function executeReuse({ verdict, dryRun, af, host = null, granted = 0 }) {
       taskId: task._id,
       host: host && host.id,
       count: mine.length,
-      reason: verdict.reason || "",
+      reason:
+        (verdict.reason || "") +
+        (rearm.rearmed
+          ? " — re-armed " + rearm.rearmed + " account(s) for " + verdict.game
+          : ""),
       actor: "farm2/executeReuse",
     });
   }

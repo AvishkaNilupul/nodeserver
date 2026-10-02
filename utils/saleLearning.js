@@ -83,6 +83,14 @@ async function recordListingSale({
   units = 1,
   at = new Date(),
   priceUsd = 0,
+  // Bulk packs (docs/bulk-packs/CONTRACT.md): `bulk` flags every unit so price
+  // anchors skip the discounted price; `logins` names the account behind each
+  // unit, so demand (deduped by login) counts N accounts, not one.
+  // `accountIds` is the same per unit for the account (FIXES-1 R3-1), so a pack
+  // unit the buyer later connects is ONE sale in internalSalesForGame, not two.
+  bulk = false,
+  logins = null,
+  accountIds = null,
 } = {}) {
   const n = Math.max(0, Math.floor(Number(units) || 0));
   if (!listing || !listing._id || !n) return 0;
@@ -92,7 +100,7 @@ async function recordListingSale({
   const bumped = await MarketplaceListing.findOneAndUpdate(
     { _id: listing._id },
     { $inc: { unitsSold: n } },
-    { new: true, projection: { unitsSold: 1 } },
+    { returnDocument: "after", projection: { unitsSold: 1 } },
   ).catch(() => null);
   // No row (deleted mid-pass) means no stable sequence to number units with,
   // so there is no safe dedupeKey — skip rather than risk double counting.
@@ -116,11 +124,18 @@ async function recordListingSale({
               gameKey,
               itemKey: "",
               name: listing.title || "",
-              login: listing.accountLogin || "",
-              account: singleAccountId(listing.accountId),
+              login:
+                (Array.isArray(logins) && logins[seq - start]) ||
+                (Array.isArray(logins) && logins.length ? "" : listing.accountLogin || ""),
+              account:
+                (Array.isArray(accountIds) &&
+                  /^[a-f0-9]{24}$/i.test(String(accountIds[seq - start] || "")) &&
+                  String(accountIds[seq - start])) ||
+                (Array.isArray(accountIds) && accountIds.length ? null : singleAccountId(listing.accountId)),
               source: "listing_sold",
               marketplace: listing.marketplace || "",
               priceUsd: Number(priceUsd) || Number(listing.price) || 0,
+              bulk: !!bulk,
               at,
             },
           },

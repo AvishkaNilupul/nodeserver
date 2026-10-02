@@ -71,6 +71,24 @@ const renterAccountSchema = new mongoose.Schema(
     // from lastScanAt, which also moves on a FAILED scan — a stale snapshot
     // must never be read as a fresh zero.
     farmingSnapshotAt: { type: Date, default: null, index: true },
+    // The account's own FavouriteGames as they were in the config when a stop
+    // pulled it out (utils/renterBotOps.stopRenterFarming), so the next start
+    // puts it back farming exactly what it farmed before. Unset = never stopped
+    // by that path; a start then falls back to the renter's farmGames.
+    favouriteGames: { type: [String], default: undefined },
+    // A lapsed window that could not be pulled off its bot yet (host offline,
+    // container state unreadable, unknown host). utils/renterExpiry retries it
+    // every tick and pages once it has been stuck for a while — the row is only
+    // stamped farmEndedAt once the account is really off every config on its
+    // host and the bot has reloaded.
+    expiryAttempts: { type: Number, default: 0 },
+    expiryLastError: { type: String, default: "" },
+    expiryAlertedAt: { type: Date, default: null },
+    // Config files this lapsed account was pulled from (or could not be) on a
+    // failed attempt: the next attempt re-checks them even though the account
+    // is no longer found there — a bot whose reload failed still has it
+    // loaded, so the row is not "ended" until each of these has reloaded.
+    expiryOwedFiles: { type: [String], default: undefined },
   },
   { timestamps: true },
 );

@@ -44,7 +44,7 @@ router.post("/validate", validateLimiter, async (req, res) => {
     let found = await Code.findOneAndUpdate(
       { code, deviceToken: null },
       { $set: { deviceToken, redeemedAt: new Date() } },
-      { new: true },
+      { returnDocument: "after" },
     );
     if (!found) {
       // Either the code doesn't exist or it's already locked to a device.

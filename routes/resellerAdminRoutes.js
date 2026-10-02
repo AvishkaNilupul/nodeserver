@@ -16,6 +16,7 @@ const {
   parseAccessDate,
 } = require("../utils/resellers");
 const { decrypt } = require("../utils/secretBox");
+const { rentedIndex, isRented } = require("../utils/rentedAccounts");
 
 const router = express.Router();
 const MAX_LIST = 500;
@@ -205,6 +206,18 @@ async function eligibility(login, reseller, planned = new Set()) {
     return { login: original, ok: false, reason: "reserved for bulk order" };
   }
   if (bot.soldAt) return { login: original, ok: false, reason: "already sold" };
+  // Rented to a renter — or a paid rent-farm window, whose buyer holds this
+  // very login. The reseller would reveal and resell it. Fail CLOSED: an
+  // unreadable renter ledger is not evidence the account is free.
+  let rented;
+  try {
+    rented = isRented(await rentedIndex(), bot);
+  } catch {
+    return { login: original, ok: false, reason: "renter ledger unreadable — try again" };
+  }
+  if (rented) {
+    return { login: original, ok: false, reason: "rented to a renter / a paid rent-farm window" };
+  }
   if (await DropLog.exists({ account: bot._id, soldAt: { $ne: null } })) {
     return { login: original, ok: false, reason: "has sold or reserved drops" };
   }
@@ -345,13 +358,23 @@ async function reclaimRow(row, reseller, req) {
     mismatch.code = "reservation_mismatch";
     throw mismatch;
   }
+  // The reseller SOLD it: their buyer holds the login. Taking the row back
+  // must not put the account back into sellable stock (it would be sold twice).
+  // Keep the sale on the account and its drops, labelled so it stays
+  // traceable; only the reseller's hold on it goes.
+  const soldByReseller = row.resellerStatus === "sold";
+  const soldLabel = "reseller-sold:" + (reseller.username || resellerId);
   await DropLog.updateMany(
     { account: row.botAccount, soldResellerId: resellerId },
-    { $set: { soldAt: null, soldToUsername: "", soldResellerId: "" } },
+    soldByReseller
+      ? { $set: { soldToUsername: soldLabel, soldResellerId: "" } }
+      : { $set: { soldAt: null, soldToUsername: "", soldResellerId: "" } },
   );
   const released = await BotAccount.updateOne(
     { _id: row.botAccount, resellerId },
-    { $set: { soldAt: null, soldToUsername: "", resellerId: "" } },
+    soldByReseller
+      ? { $set: { soldToUsername: soldLabel, resellerId: "" } }
+      : { $set: { soldAt: null, soldToUsername: "", resellerId: "" } },
   );
   if (bot && released.matchedCount !== 1) {
     const mismatch = new Error("account reservation owner mismatch");
@@ -361,7 +384,7 @@ async function reclaimRow(row, reseller, req) {
   await ResellerAccount.deleteOne({ _id: row._id, reseller: reseller._id });
   await audit({
     reseller: reseller._id,
-    action: "reclaim",
+    action: soldByReseller ? "reclaim_sold_kept" : "reclaim",
     accountLogin: row.login,
     ip: req.ip || req.socket?.remoteAddress,
   });
@@ -553,7 +576,7 @@ async function setSuspended(req, res, suspended) {
     const reseller = await Reseller.findByIdAndUpdate(
       req.params.id,
       { $set: { status: suspended ? "suspended" : "active" } },
-      { new: true },
+      { returnDocument: "after" },
     );
     if (!reseller)
       return res

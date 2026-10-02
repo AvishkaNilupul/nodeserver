@@ -44,6 +44,9 @@ const farmServiceOrderSchema = new mongoose.Schema(
     // Never mark delivered before the credential has actually reached the buyer.
     provisionedAt: { type: Date, default: null },
     messageSentAt: { type: Date, default: null },
+    // The end date the hand-over message names, pinned at the first send
+    // attempt so every retry sends the same text (utils/farmHandover.pinUntil).
+    handoverUntil: { type: Date, default: null },
     deliveredAt: { type: Date, default: null },
 
     state: {
@@ -54,7 +57,12 @@ const farmServiceOrderSchema = new mongoose.Schema(
       // forever over an order nobody is waiting for. Eldorado order e69b19d3
       // (Black Desert, 1 Year) was the first: it failed 25 times on a full
       // rental stack and the buyer cancelled before the fix landed.
-      enum: ["claimed", "provisioned", "sent", "delivered", "failed", "cancelled"],
+      // "waiting_chat" is a SOFT, self-healing hold, distinct from "failed": the
+      // order is fine, but its marketplace chat does not exist yet (Eldorado
+      // mints it lazily — eldoradoFarmService.orderChatReady), so the
+      // credential cannot be posted. It provisions nothing and burns no pool
+      // account; the next tick delivers the moment the conversation appears.
+      enum: ["claimed", "provisioned", "sent", "delivered", "failed", "cancelled", "waiting_chat"],
       default: "claimed",
       index: true,
     },

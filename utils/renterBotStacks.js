@@ -88,7 +88,7 @@ async function registerStack(host, file, capacity = DEFAULT_CAPACITY) {
         enabled: true,
       },
     },
-    { new: true, upsert: true },
+    { returnDocument: "after", upsert: true },
   );
   return row;
 }
@@ -155,7 +155,7 @@ async function setStackCapacity(host, file, capacity) {
   return RenterBotStack.findOneAndUpdate(
     { host: hostId(host), file: String(file || ""), enabled: true },
     { $set: { capacity: cap } },
-    { new: true },
+    { returnDocument: "after" },
   ).lean();
 }
 

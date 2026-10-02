@@ -470,7 +470,7 @@ async function fetchDropCampaigns(token, arg) {
 const CAMPAIGN_DETAILS_QUERY =
   "query($dropID: ID!) { currentUser { dropCampaign(id: $dropID) { id name " +
   "allow { isEnabled channels { id name displayName } } " +
-  "game { displayName } timeBasedDrops { id name requiredMinutesWatched " +
+  "game { displayName } timeBasedDrops { id name requiredMinutesWatched requiredSubs " +
   "benefitEdges { benefit { id name imageAssetURL game { displayName name } } } } } } }";
 
 async function fetchCampaignDetails(token, dropID, arg) {

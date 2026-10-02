@@ -26,7 +26,6 @@ const DropSet = require("../models/DropSet");
 const MarketplaceListing = require("../models/MarketplaceListing");
 const dsFulfiller = require("./digisellerFulfiller");
 const ggFulfiller = require("./ggselFulfiller");
-const fpFulfiller = require("./funpayFulfiller");
 const mp = require("./marketplaces");
 const { sendTelegram } = require("./telegram");
 const accountState = require("./twitchAccountState");
@@ -36,7 +35,6 @@ const CLAIM_TAGS = {
   ggsel: ggFulfiller.GG_CLAIM_TAG,
   digiseller: dsFulfiller.DS_CLAIM_TAG,
   gameflip: "gameflip",
-  funpay: fpFulfiller.FP_CLAIM_TAG,
 };
 
 // Last pass summary for the UI ("checking… found N").
@@ -314,7 +312,21 @@ async function runChecks(allRows, seenKeys) {
   // drops that do not exist on accounts that were never in the archive.
   // Skipping at the door rather than inside each check means a check added
   // later cannot start flagging them by accident.
-  const rows = allRows.filter((r) => !r.accountOffer);
+  //
+  // No-claim rows (docs/NOCLAIM-SHOP-LISTINGS-CONTRACT.md §6) are skipped for
+  // the same reason: their units are no-claim farm accounts committed through
+  // utils/noclaimStock's ledger, with no DropLog reservation behind them.
+  //
+  // Gameflip rent-farm buffer rows (docs/GAMEFLIP-RENT-FARM-CONTRACT.md) sell a
+  // rental window, not stock: no set, no accountId, just the pool account's
+  // login, held through utils/gameflipFarmService's rentFarmPoolId. Their set
+  // used to reach the DropSet lookup below as the string "undefined", and the
+  // CastError it threw killed every pass from that line on — claim-mismatch,
+  // redeemed-drops, orphaned reservations, autoResolveStale and auto-heal were
+  // all skipped fleet-wide, with one log line to show for it.
+  const rows = allRows.filter(
+    (r) => !r.accountOffer && !r.noclaimStock && !r.rentFarm,
+  );
   let found = 0;
   const flag = async (f) => {
     seenKeys.add(f.dedupeKey);
@@ -440,7 +452,11 @@ async function runChecks(allRows, seenKeys) {
 
   // 3. Redeemed drops: for each listing's set, accounts whose drops for the
   // set's items are already connected can no longer deliver those rewards.
-  const setIds = [...new Set(rows.map((r) => String(r.set)))];
+  // Only rows that HAVE a set: String() of a missing one is "undefined", which
+  // Mongoose refuses to cast and which fails the whole lookup, not just its row.
+  const setIds = [
+    ...new Set(rows.filter((r) => r.set).map((r) => String(r.set))),
+  ];
   const sets = setIds.length
     ? await DropSet.find({ _id: { $in: setIds } }, { items: 1, name: 1 }).lean()
     : [];
@@ -650,6 +666,19 @@ const REACTIVATE_LOOP_THRESHOLD = 3;
 // ------------------------------------------------------------------
 // Auto-feed (Plati / GGSel quantity listings)
 // ------------------------------------------------------------------
+
+// May the auto-feed add accounts to this marketplace? Plati and GGSel each
+// have an owner's on/off switch (and Plati also stops while its seller is
+// blocked); every other market is always open here.
+function marketTakesNewStock(marketplace) {
+  if (marketplace === "digiseller") {
+    return typeof mp.digisellerTakesNewStock !== "function" || mp.digisellerTakesNewStock();
+  }
+  if (marketplace === "ggsel") {
+    return typeof mp.ggselTakesNewStock !== "function" || mp.ggselTakesNewStock();
+  }
+  return true;
+}
 
 // Did the marketplace refuse the stock read outright, rather than merely
 // answer with something we couldn't parse? A refusal is account-wide (the
@@ -896,7 +925,7 @@ async function claimSupplied(row, need, target, seenKeys) {
 // bookkeeping failure must not undo a feed the platform has already accepted.
 //
 // The unit's `contentId` carries the SuppliedAccount id, matching what every
-// other ledger-backed fulfiller writes there (eldorado, g2g and z2u all put
+// other ledger-backed fulfiller writes there (eldorado and g2g both put
 // their `ledgerId` in this field). The platform's own content id goes onto the
 // ledger row instead, which is the only place a supplied unit is looked up
 // from. `accountId` stays empty because it is one of the two fields runChecks
@@ -1238,6 +1267,10 @@ async function flushPendingSales(pending, cfg = massDropConfig(), now = Date.now
 }
 
 async function feedListing(row, seenKeys, refusals, pendingSales = null) {
+  // A no-claim row is stocked by its own lifecycle (utils/noclaimListings.js)
+  // from the no-claim farm; feeding it archive accounts would sell claimed
+  // drops under a no-claim product (docs/NOCLAIM-SHOP-LISTINGS-CONTRACT.md §6).
+  if (row.noclaimStock) return 0;
   const target = Number(row.qtyTarget) || 0;
   if (!target) return 0;
   // Account listings: this row's stock is an explicit list of accounts the
@@ -1399,6 +1432,9 @@ async function feedListing(row, seenKeys, refusals, pendingSales = null) {
     }
     return 0;
   }
+  // Plati or GGSel switched off (or the Plati seller blocked): the read and the
+  // sale bookkeeping above still run, but no new account is fed onto the offer.
+  if (!marketTakesNewStock(row.marketplace)) return 0;
   let claimed;
   let fulfiller = null;
   if (supplied) {
@@ -1511,7 +1547,13 @@ async function feedListing(row, seenKeys, refusals, pendingSales = null) {
             console.error("guardian supplied release error:", e.message),
           );
       } else {
-        await fulfiller.releaseAccounts(claimed.map((c) => c.accountId));
+        // Scoped to this listing's set: the GGSel release is set-scoped and
+        // takes it (a tag-wide one freed every other set the account had
+        // already sold on GGSel). Digiseller's release ignores the argument.
+        await fulfiller.releaseAccounts(
+          claimed.map((c) => c.accountId),
+          row.set,
+        );
       }
     }
     // An offer archived on the platform's side can never accept products
@@ -1820,6 +1862,7 @@ async function runOnce() {
     const rows = await MarketplaceListing.find({
       status: "active",
       autoDeliver: true,
+      bulkOfferId: null, // bulk-pack rows are the bulk loop's (docs/bulk-packs/CONTRACT.md H5)
     }).lean();
     const seenKeys = new Set();
     const refusals = new Map();
@@ -1902,6 +1945,7 @@ async function feedOne(listingId) {
     _id: listingId,
     status: "active",
     autoDeliver: true,
+    bulkOfferId: null, // never feed a bulk-pack row (docs/bulk-packs/CONTRACT.md H5)
   }).lean();
   if (!row) {
     throw new Error("Listing is not an active auto-delivery listing");
