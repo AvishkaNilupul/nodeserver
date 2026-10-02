@@ -497,6 +497,192 @@ test("loadedModule hands back the instance already loaded, and never loads one",
 });
 
 /* ========================================================================== *
+ * Review fixes: a pass that fails is not a pass; a loop switched on late
+ * ========================================================================== */
+
+test("REGRESSION (review): a loop that ticks but fails every pass goes red when its hook says when it last finished cleanly", async () => {
+  // The farm2 supervisor stamps lastRun in its catch and the legacy tick in
+  // `finally`, so a supervisor throwing every cycle read "last pass: 0s ago",
+  // green. lastOkAt is the last pass that finished without error.
+  const check = await runCheck(
+    "loops.farm",
+    deps(
+      hooks({
+        farm2: {
+          lastRun: ago(1 * MIN),
+          lastOkAt: ago(2 * HOUR),
+          lastError: "FarmJob collection unreadable",
+          intervalMin: 3,
+          enabled: true,
+        },
+      }),
+    ),
+  );
+  const farm2 = row(check, "farm2");
+  assert.equal(farm2.status, "fail");
+  assert.equal(farm2.error, "FarmJob collection unreadable");
+  assert.equal(farm2.lastGood, "2h 0m ago");
+  assert.equal(farm2.last, undefined, "named for what it times: the last GOOD pass");
+  assert.equal(farm2.lastAt.getTime(), ago(1 * MIN).getTime(), "the newest pass is still on the row");
+  assert.equal(farm2.lastOkAt.getTime(), ago(2 * HOUR).getTime());
+  assert.equal(check.status, "fail");
+  assert.match(
+    check.summary,
+    /^Farm2 lane supervisor \(last good pass: 2h 0m ago; failing: FarmJob collection unreadable\) has done no good pass inside 6 intervals/,
+  );
+});
+
+test("a hook whose lastOkAt is null has not finished one pass cleanly since the restart", async () => {
+  const check = await runCheck(
+    "loops.farm",
+    deps({
+      uptimeMs: () => 3 * HOUR,
+      ...hooks({
+        autoFarm: {
+          lastTickAt: ago(2 * MIN),
+          lastOkAt: null,
+          lastError: "SSH to contabo\n timed out",
+          intervalMin: 10,
+          enabled: true,
+        },
+      }),
+    }),
+  );
+  const tick = row(check, "autoFarmer");
+  assert.equal(tick.status, "fail", "3 h without one clean pass is past 6 x 10 min");
+  assert.equal(tick.lastGood, "none since the server started 3h 0m ago");
+  assert.equal(tick.error, "SSH to contabo timed out", "one line, whatever the engine stored");
+});
+
+test("failing now but inside the budget: still ok, with the error on the row and in the summary", async () => {
+  const check = await runCheck(
+    "loops.farm",
+    deps(
+      hooks({
+        farm2: { lastRun: ago(1 * MIN), lastOkAt: ago(4 * MIN), lastError: "boom", intervalMin: 3, enabled: true },
+      }),
+    ),
+  );
+  const farm2 = row(check, "farm2");
+  assert.equal(farm2.status, "ok", "4 min since the last clean pass is inside 2.5 x 3 min");
+  assert.equal(farm2.error, "boom");
+  assert.equal(check.status, "ok");
+  assert.match(check.summary, /farm2 lane supervisor's newest pass failed: boom/);
+});
+
+test("an error older than the last clean pass is history and is not shown", async () => {
+  for (const lastRun of [ago(1 * MIN), new Date(ago(1 * MIN).getTime() + 2000)]) {
+    // The newest pass is the clean one — stamped together, or lastRun a moment
+    // after lastOkAt in a `finally`.
+    const check = await runCheck(
+      "loops.farm",
+      deps(
+        hooks({
+          farm2: { lastRun, lastOkAt: ago(1 * MIN), lastError: "yesterday's error", intervalMin: 3, enabled: true },
+        }),
+      ),
+    );
+    assert.equal(row(check, "farm2").status, "ok");
+    assert.equal(row(check, "farm2").error, null);
+    assert.doesNotMatch(check.summary, /yesterday/);
+  }
+});
+
+test("an older hook without lastOkAt is judged on its plain stamp, exactly as before", async () => {
+  const check = await runCheck("loops.farm", deps());
+  for (const i of check.items) {
+    assert.equal(i.lastGood, undefined, i.loop);
+    assert.match(i.last, / ago$/, i.loop);
+    assert.equal(i.error, null, i.loop);
+  }
+  assert.equal(check.status, "ok");
+});
+
+test("REGRESSION (review): the brain switched on in a long-running server is timed from the switch, not the boot", async () => {
+  // It re-reads its switch every 10 min and a pass may take 10 more, so the
+  // first pass lands up to ~20 min after the switch. Timed from a boot 7 h
+  // earlier it read red on the next hourly run.
+  const justOn = health.judgeLoop({
+    lastAt: null,
+    intervalMin: 60,
+    enabled: true,
+    now: NOW,
+    uptimeMs: 7 * HOUR,
+    since: ago(3 * MIN),
+  });
+  assert.equal(justOn.status, "pending");
+  assert.equal(justOn.fromSince, true);
+  assert.equal(justOn.inGrace, true);
+  // Switched back on after a day off: its last pass is from before the switch.
+  const backOn = health.judgeLoop({
+    lastAt: ago(26 * HOUR),
+    intervalMin: 60,
+    enabled: true,
+    now: NOW,
+    uptimeMs: 30 * HOUR,
+    since: ago(2 * MIN),
+  });
+  assert.equal(backOn.status, "pending");
+  assert.equal(backOn.ranSinceStart, false);
+});
+
+test("`since` moves the clock, it does not stop it", () => {
+  // A 3-min loop switched on 20 min ago with no pass is past 6 intervals.
+  assert.equal(
+    health.judgeLoop({ lastAt: null, intervalMin: 3, now: NOW, uptimeMs: 7 * HOUR, since: ago(20 * MIN) }).status,
+    "fail",
+  );
+  // A pass after the switch is judged on its own age.
+  assert.equal(
+    health.judgeLoop({ lastAt: ago(2 * MIN), intervalMin: 60, now: NOW, uptimeMs: 7 * HOUR, since: ago(30 * MIN) }).status,
+    "ok",
+  );
+  // A `since` from before the boot (carried over) changes nothing: max(boot, since).
+  const old = health.judgeLoop({ lastAt: null, intervalMin: 3, now: NOW, uptimeMs: 10 * MIN, since: ago(3 * HOUR) });
+  assert.equal(old.fromSince, false);
+  assert.equal(old.status, "pending");
+  assert.equal(old.startedAt, ago(10 * MIN).getTime());
+  // Junk is no `since`.
+  assert.equal(
+    health.judgeLoop({ lastAt: null, intervalMin: 60, now: NOW, uptimeMs: 7 * HOUR, since: "soon" }).status,
+    "fail",
+  );
+});
+
+test("on the board, a brain switched on minutes ago is pending, and says since when", async () => {
+  const check = await runCheck(
+    "loops.farm",
+    deps({
+      uptimeMs: () => 7 * HOUR,
+      ...hooks({ brain: { lastRunAt: null, intervalMin: 60, enabled: true, since: ago(3 * MIN) } }),
+    }),
+  );
+  const brain = row(check, "demandBrain");
+  assert.equal(brain.status, "pending");
+  assert.equal(brain.last, "none since it was switched on 3m ago");
+  assert.match(brain.note, /grace after it was switched on/);
+  assert.equal(check.status, "ok");
+  assert.match(check.summary, /farm brain \(test log\) not run since it was switched on 3m ago — not due yet/);
+});
+
+test("loops not run yet are grouped by where their clock started", async () => {
+  const check = await runCheck(
+    "loops.farm",
+    deps({
+      uptimeMs: () => 5 * MIN,
+      ...hooks({
+        allocator: { lastRun: null, intervalMin: 60 },
+        brain: { lastRunAt: null, intervalMin: 60, enabled: true, since: ago(2 * MIN) },
+      }),
+    }),
+  );
+  assert.match(
+    check.summary,
+    /no-claim fleet allocator not run since the server started 5m ago; farm brain \(test log\) not run since it was switched on 2m ago — not due yet, so not proved either/,
+  );
+});
+
+/* ========================================================================== *
  * hosts.ram
  * ========================================================================== */
 
@@ -523,7 +709,11 @@ test("REGRESSION (defect 16): a host under the gate fails and says what it stops
   assert.equal(check.status, "fail");
   assert.equal(check.group, "capacity");
   assert.equal(check.measured, 900);
-  assert.equal(check.threshold, "warn under 2250 MB, fail under 1500 MB available (autoFarm.hostMinFreeMb, the new-container gate)");
+  assert.equal(
+    check.threshold,
+    "warn under 2250 MB or while the gate cannot read the host, fail under 1500 MB available " +
+      "(autoFarm.hostMinFreeMb, the new-container gate)",
+  );
   assert.match(check.summary, /^contabo has 900 MB available — under the 1500 MB gate, so the farms start no new bot there$/);
   // Both farms build on contabo in production: one row, naming both.
   assert.equal(check.items.length, 1);
@@ -568,7 +758,7 @@ test("an old reading is shown, never judged — it can neither cry wolf nor stay
   );
   assert.equal(low.status, "unknown");
   assert.equal(low.items[0].availableMb, 600, "the figure is still shown");
-  assert.match(low.items[0].note, /reading is 3h 0m old — shown, not judged/);
+  assert.match(low.items[0].note, /reading is 3h 0m old — no farm has asked since, so it is shown, not judged/);
   const high = await runCheck(
     "hosts.ram",
     deps({ hostCapacity: ramGate({ contabo: { availableMb: 9000, at: ago(3 * HOUR) } }) }),
@@ -739,6 +929,28 @@ test("on the page every row shows its status, its evidence, and the reason when 
   assert.match(itemText(ram.items[0]), /^contabo · status=unknown · read=never · note=no reading/);
   const ok = await runCheck("hosts.ram", deps());
   assert.equal(itemText(ok.items[0]), "contabo · status=ok · availableMb=4800 · read=3m ago");
+});
+
+test("on the page a failing loop leads with its error and its last GOOD pass", async () => {
+  const itemText = pageItemText();
+  const check = await runCheck(
+    "loops.farm",
+    deps(
+      hooks({
+        farm2: {
+          lastRun: ago(1 * MIN),
+          lastOkAt: ago(2 * HOUR),
+          lastError: "FarmJob collection unreadable",
+          intervalMin: 3,
+          enabled: true,
+        },
+      }),
+    ),
+  );
+  assert.equal(
+    itemText(row(check, "farm2")),
+    "farm2 lane supervisor · status=fail · error=FarmJob collection unreadable · lastGood=2h 0m ago",
+  );
 });
 
 test("both checks are registered once and answer the page's contract", async () => {

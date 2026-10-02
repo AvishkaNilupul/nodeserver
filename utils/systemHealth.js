@@ -458,6 +458,11 @@ const LOOP_WARN_INTERVALS = 6;
 // start staggered (the allocator 3 min after boot, the brain 6 min), so for the
 // first 15 minutes a loop that has not run yet is not late.
 const LOOP_BOOT_GRACE_MS = 15 * 60 * 1000;
+// How far a pass's last-run stamp may trail its own clean-finish stamp and
+// still be the same pass (an engine may stamp lastRun in `finally`, just after
+// lastOkAt). Far below the 3-min tick of the fastest loop, so a pass that
+// failed after a clean one is never mistaken for it.
+const LOOP_PASS_SLACK_MS = 60 * 1000;
 
 // The four farm loops nothing proved alive (defect 7 of
 // docs/FARM-DISTRIBUTION-MAP.md — the allocator's heartbeat was a console line),
@@ -725,28 +730,47 @@ function stampMs(v) {
 // than the start (it can only have been carried over): a restart can hide a
 // dead loop for no longer than the loop's own budget. "pending" is that loop
 // inside its budget with no pass yet — not proof of life, and not late either.
+//
+// `since` is when the loop itself last started or was switched on in this
+// process, for a hook that says so (demandBrain.loopStatus). Its clock and its
+// grace start at the later of that and the boot: a brain switched on in a
+// server up seven hours has had minutes, not seven hours, to make its first
+// pass (it re-reads its switch every 10 min, and a pass may take 10 more).
 function judgeLoop({
   lastAt,
   intervalMin,
   enabled = true,
   now,
   uptimeMs,
+  since,
   graceMs = LOOP_BOOT_GRACE_MS,
 } = {}) {
   const nowMs = now instanceof Date ? now.getTime() : Date.now();
   const intervalMs = Number(intervalMin) * 60 * 1000;
   const okMs = intervalMs * LOOP_OK_INTERVALS;
   const warnMs = intervalMs * LOOP_WARN_INTERVALS;
-  const out = { status: "unknown", ageMs: null, okMs, warnMs, ranSinceStart: false, inGrace: false };
+  const out = {
+    status: "unknown",
+    ageMs: null,
+    okMs,
+    warnMs,
+    ranSinceStart: false,
+    inGrace: false,
+    startedAt: null,
+    fromSince: false,
+  };
   if (enabled === false) return { ...out, status: "off" };
   if (!Number.isFinite(intervalMs) || intervalMs <= 0) return out;
   const up = Number(uptimeMs);
-  const startedAt =
+  const bootAt =
     uptimeMs != null && Number.isFinite(up) && up >= 0 ? nowMs - up : null;
+  const sinceMs = stampMs(since);
+  const fromSince = sinceMs != null && (bootAt == null || sinceMs > bootAt);
+  const startedAt = fromSince ? sinceMs : bootAt;
   const last = stampMs(lastAt);
   const ranSinceStart = last != null && (startedAt == null || last >= startedAt);
   const from = ranSinceStart ? last : startedAt;
-  // No pass on record and no idea when the process started: nothing to time.
+  // No pass on record and no idea when the loop started: nothing to time.
   if (from == null) return out;
   const ageMs = Math.max(0, nowMs - from);
   const inGrace = startedAt != null && nowMs - startedAt < graceMs;
@@ -754,7 +778,24 @@ function judgeLoop({
   if (inGrace || ageMs <= okMs) status = ranSinceStart ? "ok" : "pending";
   else if (ageMs <= warnMs) status = "warn";
   else status = "fail";
-  return { ...out, status, ageMs, ranSinceStart, inGrace };
+  return { ...out, status, ageMs, ranSinceStart, inGrace, startedAt, fromSince };
+}
+
+// An error a hook or the gate reports, as one short line: a string, or an
+// Error's message.
+function hookError(v) {
+  const s =
+    typeof v === "string"
+      ? v
+      : v && typeof v.message === "string"
+        ? v.message
+        : "";
+  return s.replace(/\s+/g, " ").trim().slice(0, 160);
+}
+
+// A wall-clock time for a summary line, to the minute, UTC.
+function fmtClock(ms) {
+  return new Date(ms).toISOString().slice(0, 16).replace("T", " ") + "Z";
 }
 
 // One loop's hook, read defensively. A module this process has not loaded, a
@@ -2854,15 +2895,20 @@ const CHECKS = [
 
       // Row keys are ordered for the page, which prints `label` and then the
       // first three plain, non-null fields: status, last pass and budget for a
-      // judged loop; for an off or unreadable one the empty fields drop out and
-      // `note` — the reason — takes their place.
+      // judged loop — with the newest pass's error first when it failed; for an
+      // off or unreadable one the empty fields drop out and `note` — the
+      // reason — takes their place.
       const items = [];
+      // Per row, for the summary: whether it was judged on a clean pass, and
+      // where its "not run yet" clock started.
+      const meta = new Map();
       for (const def of FARM_LOOPS) {
         const read = await readLoopHook(ctx, def);
         if (read.error) {
           items.push({
             label: def.label,
             status: "unknown",
+            error: null,
             last: null,
             okWithin: null,
             note: read.error,
@@ -2882,25 +2928,51 @@ const CHECKS = [
             offWhy = "idle by design: the master auto-farm switch (autoFarm.enabled) is off";
           }
         }
-        const lastMs = stampMs(st[def.lastKey]);
+        // The farm2 supervisor and the legacy tick stamp their last-run time
+        // even on a pass that threw, so that stamp alone kept a loop failing
+        // every pass green. When the hook also says when a pass last FINISHED
+        // WITHOUT ERROR (lastOkAt), that is the stamp judged, and a hook that
+        // carries it as null has not finished one cleanly yet. An older hook
+        // without it is judged on its plain stamp, as before.
+        const byOk = Object.prototype.hasOwnProperty.call(st, "lastOkAt");
+        const runMs = stampMs(st[def.lastKey]);
+        const okMs = byOk ? stampMs(st.lastOkAt) : null;
+        const judgedMs = byOk ? okMs : runMs;
+        // The error is shown when the newest pass is the one that failed: newer
+        // than the last clean pass by more than one pass's own bookkeeping
+        // (an engine may stamp lastRun a moment after lastOkAt on a good pass).
+        // An error older than the last clean pass is history.
+        const err = hookError(st.lastError);
+        const failing =
+          !!err &&
+          (!byOk || okMs == null || runMs == null || runMs - okMs > LOOP_PASS_SLACK_MS);
         const v = judgeLoop({
-          lastAt: lastMs,
+          lastAt: judgedMs,
           intervalMin,
           enabled: !offWhy,
           now,
           uptimeMs,
+          since: st.since,
         });
+        const start =
+          v.startedAt == null
+            ? ""
+            : (v.fromSince ? "it was switched on " : "the server started ") +
+              fmtAge(now.getTime() - v.startedAt) + " ago";
         let last;
         if (v.ranSinceStart) last = fmtAge(v.ageMs) + " ago";
-        else if (v.status === "off" || uptimeMs == null) {
-          last = lastMs == null ? "never" : fmtAge(now.getTime() - lastMs) + " ago";
+        else if (v.status === "off" || !start) {
+          last = judgedMs == null ? "never" : fmtAge(now.getTime() - judgedMs) + " ago";
         } else {
-          last = "none since the server started " + fmtAge(uptimeMs) + " ago";
+          last = "none since " + start;
         }
-        items.push({
+        const row = {
           label: def.label,
           status: v.status,
-          last,
+          error: failing ? err : null,
+          // Named for what it times, so a row reads "lastGood=2h ago" beside
+          // a loop that is ticking every 3 minutes and failing each time.
+          ...(byOk ? { lastGood: last } : { last }),
           okWithin: v.status === "off" ? null : fmtAge(v.okMs),
           note: [
             offWhy,
@@ -2909,15 +2981,19 @@ const CHECKS = [
               : "the hook gave no intervalMin — judged on production's " +
                 def.fallbackMin + " min",
             v.inGrace && v.status !== "off"
-              ? "inside the " + fmtAge(LOOP_BOOT_GRACE_MS) + " grace after a restart"
+              ? "inside the " + fmtAge(LOOP_BOOT_GRACE_MS) + " grace after " +
+                (v.fromSince ? "it was switched on" : "a restart")
               : "",
           ]
             .filter(Boolean)
             .join("; ") || null,
           loop: def.id,
           intervalMin,
-          lastAt: lastMs == null ? null : new Date(lastMs),
-        });
+          lastAt: runMs == null ? null : new Date(runMs),
+          ...(byOk ? { lastOkAt: okMs == null ? null : new Date(okMs) } : {}),
+        };
+        items.push(row);
+        meta.set(row, { byOk, start, last });
       }
 
       const by = (s) => items.filter((i) => i.status === s);
@@ -2940,18 +3016,23 @@ const CHECKS = [
           : "ok";
       const enabled = items.length - off.length;
 
+      const info = (i) => meta.get(i) || {};
+      const lastPass = (i) =>
+        (info(i).byOk ? "last good pass: " : "last pass: ") + info(i).last;
+      const failNote = (i) => (i.error ? "; failing: " + i.error : "");
       const parts = [];
       if (dead.length) {
         parts.push(
-          dead.map((i) => i.label + " (last pass: " + i.last + ")").join(", ") +
+          dead.map((i) => i.label + " (" + lastPass(i) + failNote(i) + ")").join(", ") +
             (dead.length === 1 ? " has" : " have") +
-            " done no pass inside " + LOOP_WARN_INTERVALS + " intervals",
+            " done no " + (dead.every((i) => info(i).byOk) ? "good " : "") +
+            "pass inside " + LOOP_WARN_INTERVALS + " intervals",
         );
       }
       if (late.length) {
         parts.push(
           late
-            .map((i) => i.label + " (last pass: " + i.last + ", ok within " + i.okWithin + ")")
+            .map((i) => i.label + " (" + lastPass(i) + ", ok within " + i.okWithin + failNote(i) + ")")
             .join(", ") + " running late",
         );
       }
@@ -2959,10 +3040,27 @@ const CHECKS = [
         parts.push(fresh.length + " of " + enabled + " enabled farm loop(s) proved a recent pass");
       }
       if (waiting.length) {
+        // Grouped by where each clock started: the restart, or the moment a
+        // loop was switched on.
+        const byStart = new Map();
+        for (const i of waiting) {
+          const k = info(i).start;
+          if (!byStart.has(k)) byStart.set(k, []);
+          byStart.get(k).push(i.label);
+        }
         parts.push(
-          names(waiting) + " not run since the server started " + fmtAge(uptimeMs) +
-            " ago — not due yet, so not proved either",
+          [...byStart]
+            .map(([start, labels]) => labels.join(", ") + " not run since " + start)
+            .join("; ") + " — not due yet, so not proved either",
         );
+      }
+      // Inside its budget, but its newest pass failed: not late yet, and the
+      // reader should not have to open the row to learn it is failing now.
+      const failingNow = items.filter(
+        (i) => i.error && (i.status === "ok" || i.status === "pending"),
+      );
+      if (failingNow.length) {
+        parts.push(failingNow.map((i) => i.label + "'s newest pass failed: " + i.error).join("; "));
       }
       if (blind.length) parts.push(names(blind) + " could not be read");
       if (off.length) {
@@ -2986,13 +3084,17 @@ const CHECKS = [
           "Evidence is each loop's own in-memory stamp of its last pass, read " +
           "through the hook its owner exports (autoFarmer.loopStatus, " +
           "farm2/supervisor.loopStatus, unclaimedAllocator.status, " +
-          "demandBrain.loopStatus) — no DB read and no SSH. The stamps empty at " +
-          "every restart, so a loop with no pass since the server started is " +
-          "timed from the start: a restart cannot hide a dead loop for longer " +
-          "than its own budget. A stamp proves a pass ran, not what it did. A " +
-          "loop switched off in settings is off, not failing — farm2 is idle while " +
-          "the master auto-farm switch is off, and the brain is judged only when " +
-          "it is switched on.",
+          "demandBrain.loopStatus) — no DB read and no SSH. Where a loop reports " +
+          "when a pass last finished without error (lastOkAt), that is the stamp " +
+          "judged, so a loop that ticks but fails every pass goes amber and then " +
+          "red, and the newest pass's error is shown on its row; otherwise the " +
+          "plain stamp proves a pass ran, not what it did. The stamps empty at " +
+          "every restart, so a loop with no pass since the server started — or " +
+          "since it was switched on, where it reports that (since) — is timed " +
+          "from that moment: a restart cannot hide a dead loop for longer than " +
+          "its own budget. A loop switched off in settings is off, not failing — " +
+          "farm2 is idle while the master auto-farm switch is off, and the brain " +
+          "is judged only when it is switched on.",
         items: capItems(items),
       };
     },
@@ -3021,7 +3123,8 @@ const CHECKS = [
       const warnBelow = minFreeMb * HOST_RAM_WARN_FACTOR;
       const threshold = gateOff
         ? "the new-container RAM gate is off (autoFarm.hostMinFreeMb 0) — readings shown, not judged"
-        : "warn under " + Math.round(warnBelow) + " MB, fail under " + minFreeMb +
+        : "warn under " + Math.round(warnBelow) + " MB or while the gate cannot read the " +
+          "host, fail under " + minFreeMb +
           " MB available (autoFarm.hostMinFreeMb, the new-container gate)";
 
       // Every host a farm builds NEW containers on. On production both farms
@@ -3063,31 +3166,60 @@ const CHECKS = [
         const mb = raw != null && raw !== "" && Number.isFinite(Number(raw)) ? Number(raw) : null;
         const at = reading ? stampMs(reading.at) : null;
         const age = at == null ? null : Math.max(0, nowMs - at);
-        // Every path but a fresh figure is `unknown`, each with its reason. A
-        // module not loaded means nothing in this process has asked the gate
-        // yet; either way there is no figure to judge.
+        // The newest attempt FAILED when its failure is newer than the last
+        // success, or nothing has succeeded at all. The gate then answers "RAM
+        // unknown" and fails open: every new container goes ahead unweighed,
+        // which judging the last good figure would hide.
+        const errAt = reading ? stampMs(reading.lastErrorAt) : null;
+        const failingOpen = errAt != null && (at == null || errAt > at);
+        const newest = failingOpen ? errAt : at;
+        const newestAge = newest == null ? null : Math.max(0, nowMs - newest);
+        let read = at != null ? fmtAge(age) + " ago" : reading ? "time unknown" : "never";
+        let error = null;
+        if (failingOpen) {
+          error = hookError(reading.lastError) || "read failed";
+          read =
+            "failed " + fmtAge(nowMs - errAt) + " ago; last good " +
+            (at != null ? fmtAge(age) + " ago (" + mb + " MB)" : "never");
+        }
+        // Every path but a fresh figure or a failing gate is `unknown`, each
+        // with its reason. A module not loaded means nothing in this process
+        // has asked the gate yet; either way there is no figure to judge.
         let status = "unknown";
         if (!note && !reading) {
           note =
             "no reading — no farm has asked the new-container gate about this " +
             "host since the server started";
+        } else if (!note && newestAge != null && newestAge > HOST_RAM_STALE_MS) {
+          note =
+            (failingOpen ? "the newest read failed " : "reading is ") +
+            fmtAge(newestAge) + (failingOpen ? " ago" : " old") +
+            " — no farm has asked since, so it is shown, not judged";
+        } else if (!note && failingOpen && gateOff) {
+          note = "the newest read failed, but the gate is off, so no create waits on it";
+        } else if (!note && failingOpen) {
+          status = "warn";
+          note =
+            "RAM unknown since " + (at != null ? fmtClock(at) : "the server started") +
+            " (" + error + ") — the gate is letting containers be created without a reading";
         } else if (!note && mb == null) {
           note = "the gate's last read of this host failed";
-        } else if (!note && age != null && age > HOST_RAM_STALE_MS) {
-          note = "reading is " + fmtAge(age) + " old — shown, not judged";
         } else if (!note) {
           status = gateOff
             ? "ok"
             : statusForLow(mb, { warnBelow, failBelow: minFreeMb });
           if (age == null) note = "the reading carries no time";
         }
-        // Ordered for the page like loops.farm's rows: with no figure,
-        // availableMb drops out and the reason is shown in its place.
+        // Ordered for the page like loops.farm's rows: a failing read leads
+        // with its error; with no figure, availableMb drops out and the
+        // reason is shown in its place.
         items.push({
           label: hostId,
           status,
-          availableMb: mb,
-          read: at != null ? fmtAge(age) + " ago" : reading ? "time unknown" : "never",
+          error,
+          // A failing gate has no current figure: the last good one is in `read`.
+          availableMb: failingOpen ? null : mb,
+          read,
           note: note || null,
           farms: farms.join(" + "),
         });
@@ -3097,7 +3229,9 @@ const CHECKS = [
         .filter((i) => i.status !== "unknown" && i.availableMb != null)
         .map((i) => i.availableMb);
       const lowest = judgedMb.length ? Math.min(...judgedMb) : null;
+      const gateBlind = items.some((i) => i.status === "warn" && i.error);
       const line = (i) => {
+        if (i.status === "warn" && i.error) return i.label + ": " + i.note;
         if (i.status === "fail") {
           return i.label + " has " + i.availableMb + " MB available — under the " +
             minFreeMb + " MB gate, so the farms start no new bot there";
@@ -3114,7 +3248,9 @@ const CHECKS = [
       };
       return {
         status: worstStatus(items),
-        measured: lowest,
+        // The lowest current figure; with none, a failing gate is itself the
+        // measurement, never a made-up number.
+        measured: lowest != null ? lowest : gateBlind ? "RAM unknown" : null,
         threshold,
         summary: items
           .slice()
@@ -3125,11 +3261,14 @@ const CHECKS = [
           "Evidence is utils/hostCapacity.lastReading(): the MemAvailable figure " +
           "(/proc/meminfo) the new-container gate last read for each host a farm " +
           "builds bots on — the auto-farm's host and the no-claim farm's (" +
-          NOCLAIM_HOST_ID + "). This run reads that cache only and never opens SSH, " +
-          "so a figure is as fresh as the last time a farm asked: none since the " +
-          "server started is unknown, and one older than " + fmtAge(HOST_RAM_STALE_MS) +
-          " is shown but not judged. Under the gate the farms start no new " +
-          "container on that host; bots already running keep their seats.",
+          NOCLAIM_HOST_ID + ") — and its newest failed attempt. This run reads that " +
+          "cache only and never opens SSH, so a figure is as fresh as the last time " +
+          "a farm asked: none since the server started is unknown, and one older " +
+          "than " + fmtAge(HOST_RAM_STALE_MS) + " is shown but not judged. A read " +
+          "that failed after the last good one warns: the gate is failing open, " +
+          "letting every new container through unweighed, until a read succeeds " +
+          "again. Under the gate the farms start no new container on that host; " +
+          "bots already running keep their seats.",
         items: capItems(items),
       };
     },
@@ -3317,12 +3456,15 @@ module.exports = {
   // Farm loops + host RAM (docs/LIVE-FIXES-1003.md §A6).
   judgeLoop,
   stampMs,
+  hookError,
+  fmtClock,
   loadedModule,
   hostMinFreeMbOf,
   FARM_LOOPS,
   LOOP_OK_INTERVALS,
   LOOP_WARN_INTERVALS,
   LOOP_BOOT_GRACE_MS,
+  LOOP_PASS_SLACK_MS,
   NOCLAIM_HOST_ID,
   HOST_MIN_FREE_MB_DEFAULT,
   HOST_RAM_WARN_FACTOR,

@@ -32,6 +32,10 @@ const MEMINFO_SCRIPT = "awk '/^MemAvailable:/ {print int($2/1024)}' /proc/meminf
 
 const cache = new Map(); // host key -> { availableMb: number|null, at: ms }
 const lastGood = new Map(); // host key -> { availableMb: number, at: Date }
+// The newest FAILED attempt per host. Without it the health page could only
+// ever see the last success, so a gate that had been failing open for an hour
+// still read as an hour-old healthy figure.
+const lastFail = new Map(); // host key -> { at: Date, error: string }
 const pending = new Map(); // host key -> Promise<number|null>
 
 // A resolved host object is taken for its id: passed whole, it would key the
@@ -46,15 +50,28 @@ function hostKey(hostId) {
   return id === undefined || id === null || id === "" ? "local" : String(id);
 }
 
+// One line, short enough for a health row: SSH errors can carry multi-line
+// stderr.
+function oneLine(text) {
+  return String(text || "").replace(/\s+/g, " ").trim().slice(0, 160);
+}
+
+// { mb, error }: the figure, or null and the reason in plain words.
 async function readMeminfo(hostId) {
   try {
     const h = hosts.resolveHost(normId(hostId));
-    if (!h) return null;
+    if (!h) return { mb: null, error: "unknown host " + hostKey(hostId) };
     const { stdout } = await hosts.runShell(h, MEMINFO_SCRIPT, { timeout: READ_TIMEOUT_MS });
-    const mb = parseInt(String(stdout || "").trim(), 10);
-    return Number.isFinite(mb) && mb >= 0 ? mb : null;
+    const text = String(stdout || "").trim();
+    const mb = parseInt(text, 10);
+    if (Number.isFinite(mb) && mb >= 0) return { mb, error: null };
+    return {
+      mb: null,
+      error: "no MemAvailable figure in the host's /proc/meminfo output" +
+        (text ? ' ("' + oneLine(text).slice(0, 40) + '")' : ""),
+    };
   } catch (err) {
-    return null;
+    return { mb: null, error: oneLine((err && err.message) || err) || "read failed" };
   }
 }
 
@@ -66,10 +83,11 @@ async function memAvailableMb(hostId) {
   if (hit && Date.now() - hit.at < CACHE_MS) return hit.availableMb;
   if (pending.has(key)) return pending.get(key);
   const p = readMeminfo(hostId)
-    .then((mb) => {
+    .then(({ mb, error }) => {
       const at = Date.now();
       cache.set(key, { availableMb: mb, at });
       if (mb !== null) lastGood.set(key, { availableMb: mb, at: new Date(at) });
+      else lastFail.set(key, { at: new Date(at), error: error || "read failed" });
       return mb;
     })
     .finally(() => pending.delete(key));
@@ -115,17 +133,29 @@ async function newContainerAllowed(hostId) {
   };
 }
 
-// The last SUCCESSFUL reading and when it was taken — cached value only, never
-// SSH (for the health page, which judges its age from `at`). null until a read
-// has succeeded.
+// What the gate last saw, from memory only — never SSH (for the health page):
+//   { availableMb, at }        the last SUCCESSFUL read (null before one);
+//   { lastErrorAt, lastError } the newest FAILED attempt (null before one).
+// A failure newer than the success means the gate is failing open right now:
+// every create since then went ahead with "RAM unknown". null until a read has
+// been attempted at all.
 function lastReading(hostId) {
-  const r = lastGood.get(hostKey(hostId));
-  return r ? { availableMb: r.availableMb, at: r.at } : null;
+  const key = hostKey(hostId);
+  const good = lastGood.get(key);
+  const bad = lastFail.get(key);
+  if (!good && !bad) return null;
+  return {
+    availableMb: good ? good.availableMb : null,
+    at: good ? good.at : null,
+    lastErrorAt: bad ? bad.at : null,
+    lastError: bad ? bad.error : null,
+  };
 }
 
 function _resetForTests() {
   cache.clear();
   lastGood.clear();
+  lastFail.clear();
   pending.clear();
 }
 
