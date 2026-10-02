@@ -14,9 +14,9 @@
 //     probeGate (two task reads), researchForGame + internalSalesForGame (database reads),
 //     demandAllocation and marketStockFloor (pure). Never freshResearchForGame: that re-scans a
 //     marketplace;
-//   * the auto-farm's failed probes (model v2's cold-start rule): one projected, indexed find of
-//     the AutoFarmTask rows its probe gate counts as a cooldown, for the live games only and only
-//     while its probeColdStart is on;
+//   * the auto-farm's probe tasks (model v2's cold-start rule), two projected, indexed finds: the
+//     rows its probe gate counts as a cooldown (live games only, only while probeColdStart is on),
+//     and the probes in flight its probe budget counts (when any game is live);
 //   * the no-claim feeder's demand snapshot — twice, once per burst-guard setting, so v2 and v2g
 //     come from the same evidence — and its sale evidence (utils/farmDemand, database reads).
 //     Never unclaimedAllocator.plan(): it reads the Pi and overwrites the allocator's plan.
@@ -159,15 +159,16 @@ const noclaimKeysOf = (af, normGame) => [...new Set((af.noClaimGames || []).map(
 
 /**
  * Live drop campaigns, as the lane engine sees them (active, status ACTIVE, not ended).
- * @returns {{ claim: Map<key,{label,labels,n,endAt,hoursLeft}>, noclaim: Set<string>, read: number }} —
+ * @returns {{ claim: Map<key,{label,labels,n,endAt,hoursLeft,startAt}>, noclaim: Set<string>, read: number }} —
  *          `labels` holds every raw label the game's live campaigns carry (the engine keys its
- *          tasks by the raw label); `noclaim` the raw labels of live no-claim campaigns (bucketed
- *          by the caller).
+ *          tasks by the raw label); `startAt` the oldest live campaign's start (the cold-probe
+ *          budget's queue order); `noclaim` the raw labels of live no-claim campaigns (bucketed by
+ *          the caller).
  */
 async function liveCampaigns(d, now, rules) {
   const rows = await d.TwitchCampaign.find(
     { active: true, status: "ACTIVE", $or: [{ endAt: null }, { endAt: { $gt: new Date(now) } }] },
-    { game: 1, endAt: 1 },
+    { game: 1, endAt: 1, startAt: 1 },
   )
     .limit(5000)
     .lean();
@@ -182,13 +183,15 @@ async function liveCampaigns(d, now, rules) {
     const key = d.normGame(c.game);
     if (!key) continue;
     const end = c.endAt ? new Date(c.endAt).getTime() : null;
+    const start = c.startAt ? new Date(c.startAt).getTime() : NaN;
     const cur = claim.get(key);
-    if (!cur) claim.set(key, { label: c.game, labels: [c.game], n: 1, endAt: end });
+    if (!cur) claim.set(key, { label: c.game, labels: [c.game], n: 1, endAt: end, startAt: Number.isFinite(start) ? start : null });
     else {
       cur.n++;
       if (!cur.labels.includes(c.game)) cur.labels.push(c.game);
       // The campaign that runs longest is the one a farm decision is about.
       if (end == null || (cur.endAt != null && end > cur.endAt)) cur.endAt = end;
+      if (Number.isFinite(start) && (cur.startAt == null || start < cur.startAt)) cur.startAt = start;
     }
   }
   for (const v of claim.values()) v.hoursLeft = v.endAt == null ? null : (v.endAt - now) / 3600000;
@@ -220,6 +223,25 @@ async function expiredProbes(d, labels, now, cooldownDays) {
     if (!(duds.get(key) >= at)) duds.set(key, at);
   }
   return { duds, truncated: rows.length >= PROBE_HISTORY_CAP };
+}
+
+/**
+ * The auto-farm's probes in flight, as its probe budget counts them (decide.probeGate's second
+ * query: decision "probe", status active or planned — a planned task holds its slot too): one
+ * projected read on the { decision, decidedAt } index. `byKey` is per game key, for the brain's
+ * budget pass (a game's own probe never counts against it).
+ * @returns {Promise<{ total: number, byKey: Map<string, number>, truncated: boolean }>}
+ */
+async function inFlightProbes(d) {
+  const rows = await d.AutoFarmTask.find({ decision: "probe", status: { $in: ["active", "planned"] } }, { game: 1 })
+    .limit(PROBE_HISTORY_CAP)
+    .lean();
+  const byKey = new Map();
+  for (const r of rows) {
+    const key = d.normGame(r.game);
+    if (key) byKey.set(key, (byKey.get(key) || 0) + 1);
+  }
+  return { total: rows.length, byKey, truncated: rows.length >= PROBE_HISTORY_CAP };
 }
 
 /**
@@ -429,6 +451,20 @@ async function load({ now = Date.now(), deps = null } = {}) {
       notes.push("The auto-farm's probe history was unreadable this run (" + (e && e.message ? e.message : e) + "): no cold probes, new drops stay 'unknown'.");
     }
   }
+  // The engine's probes in flight, for the brain's probe budget (model v2, 2026-10-03): read when a
+  // game is live. Unreadable = the budget is unknown, and every new cold probe is held.
+  let probing = null;
+  if (claimGames.some((g) => g.campaign)) {
+    try {
+      if (!d.AutoFarmTask || typeof d.AutoFarmTask.find !== "function") throw new Error("no task model");
+      probing = await inFlightProbes(d);
+      if (probing.truncated) notes.push("The in-flight probe read hit its cap of " + PROBE_HISTORY_CAP + " rows: the probe budget reads as full.");
+    } catch (e) {
+      probing = null;
+      notes.push("The auto-farm's probe tasks were unreadable this run (" + (e && e.message ? e.message : e) + "): the probe budget is unknown, so no new cold probe.");
+    }
+  }
+  engine.probes = probing ? probing.total : null;
 
   const claim = claimGames.map(({ key, label, campaign, game, radarRow }) => {
     let value = game && game.price ? num(game.price.valuePerAccount) : 0;
@@ -462,6 +498,9 @@ async function load({ now = Date.now(), deps = null } = {}) {
       // false = checked, no failed probe; { at, days } = a known dud; null = not checked (not live,
       // probeColdStart off, or the read failed)
       dud: !campaign || !duds ? null : duds.has(key) ? { at: duds.get(key), days: probeCooldownDays } : false,
+      // the engine's probe tasks on this game, and its oldest live campaign's start (budget queue)
+      probing: probing ? probing.byKey.get(key) || 0 : 0,
+      campaignStartAt: campaign ? campaign.startAt : null,
       old: old.get(key) || { error: "no verdict" },
     };
   });
@@ -564,6 +603,7 @@ module.exports = {
   saleLogFrom,
   liveCampaigns,
   expiredProbes,
+  inFlightProbes,
   oldVerdicts,
   noclaimInputs,
   noclaimEvidence,

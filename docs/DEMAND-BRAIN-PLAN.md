@@ -17,7 +17,7 @@ after the week, decided on the evidence this produces.
   Changes `utils/demandBrain/{model,inputs,index}.js` and three labels on the page: the intermittent-demand
   estimators `sba` and `tsb` (§2.2), the no-claim feeder's burst-guarded rule `v2g` (§2.2, §2.5), cold probes for
   new drops (§2.4), one admission rule for both scorers (§3), the heartbeat's `cold probes N (old asks M)` clause
-  and the health hook `loopStatus()` (§4). No model, route or setting changes; two new reads (§4). Defaults
+  and the health hook `loopStatus()` (§4). No model, route or setting changes; three new reads (§4). Defaults
   unchanged (`avg45` / `v2`): the test week decides. Needs `utils/farmDemand.js` from the same release (§A4:
   `demandRates`/`unclaimedDemandSnapshot` take `burstGuard`, units carry `pack`) — against an older farmDemand,
   `v2g` silently equals `v2` and packs are not flagged.
@@ -25,6 +25,11 @@ after the week, decided on the evidence this produces.
   SBA rose with silence; the backtest hid sba/tsb false alarms; listings stopped cold probes (an engine probe
   listed 2 days ago read as a skip); v2 and v2g came from different evidence; the cold size ignored the engine's
   floor; the probe-history read had no cap note; a misleading `v2g` label; the feeder's guard could raise a rate.
+- Staging on production data (HEAD 0c5d830, 2026-10-03) then read "cold probes 54 (old asks 150)", 324 accounts,
+  brain-farm on 44 of 94 live games: a cold probe for every live game without a sale of ours — more than the old
+  engine, against a probe history of 28 probes, 441 accounts and 6 sales. The brain's cold probe now has the
+  engine's own two gates, an untested market and the probe budget (§2.4). The same run reshaped as a fixture reads
+  "cold probes 4 (old asks 60), held: 44 tested market, 4 market unknown, 2 budget full, 0 duds".
 - Deployed dark 05:53:34Z (commit b22b950; backup `_deploy_backup_20261002055257_farm-brain`): new
   `utils/demandBrain/{model,inputs,index}.js` ff349ac4 / 73b95694 / 7f64d980, `models/DemandBrainRun.js`
   78f3f9d8, `models/DemandBrainRow.js` 81374dcf; `routes/priceTrackerRoutes.js` 3318b47a → 9facf4c7,
@@ -116,12 +121,18 @@ own      = estimator(estimatorClaim)
 forecast = max(own, marketPotential); basis = own | market | none
 value    = our net per account (price tracker), else rivals' sold median × 0.85, else unknown
 new drop  (v2) = forecast 0 + a live campaign + NO OWN SALE in 135 d (listings and rated markets do not count)
-probe (cold, v2): a new drop, not dud-like → target = coldProbeSize (6), basis "cold", shown as "new drop: small test batch"
+probe (cold, v2): a new drop, not dud-like, in an UNTESTED market (rival sellers ≤ probeMaxSellers, 1), inside
+                  the PROBE BUDGET (probeMaxGames, 8, the engine's own probes in flight included; oldest
+                  campaign first) → target = coldProbeSize (6), basis "cold", shown as "new drop: small test batch"
 skip (dud, v2)  : a new drop listed longer than probeMaxDays (30) and never sold     → row flag br.dud "listed"
                   or, while the engine's probeColdStart is on, a probe of this game ended with 0 sales
                   inside its re-probe cooldown (probeCooldownDays, 90)            → row flag br.dud "probe"
+skip (held, v2) : a new drop whose market rivals list (more sellers than probeMaxSellers) and no proof:
+                  "rivals list it but it does not sell"                           → row flag br.held "tested"
+                  or one the budget has no slot for: "probe budget full (N active)" → br.held "budget"
 unknown  : forecast 0, no live campaign, and no sale, listing or rated market in 135 d (v1); or a new drop
-           whose probe history was unreadable while probeColdStart is on; or coldProbeSize 0 (v1's answer)
+           whose probe history was unreadable while probeColdStart is on; or coldProbeSize 0 (v1's answer);
+           or a new drop no one counted rivals for (no engine research, no radar row) → br.held "unknown"
 skip     : forecast < minRate, or value known and forecast × value < minWeeklyUsd; or forecast 0 with a sale of
            ours in 135 d (the estimator says 0 now); or, with no live campaign, a listing or a rated market (v1)
 probe    : basis market and own = 0  → target = min(af.probeSize, cover(forecast))
@@ -151,9 +162,27 @@ per-game cap and `maxPerGame` bound a cold probe; the shelf floor never applies 
 the engine's own predicate (`decide.probeGate`'s first query) once for all live games' campaign labels (§4); if
 that read fails while `probeColdStart` is on, the brain abstains (`unknown`) rather than probe a game it could not
 check. A game that sold in 135 days but forecasts 0 now is not a new drop: the claim estimator's 0 decides (skip).
+
+**The engine's two cold-start gates** (2026-10-03, after staging read 54 cold probes on production data — the
+old engine cold-probes only an untested market and runs a probe budget, so the brain does too):
+- *Untested market.* A cold probe only where at most `probeMaxSellers` (production 1) rivals list the game,
+  counted as the engine's own gate counts them (`demandAllocation`: `research.sellers`), from the research its
+  verdict already read (`inputs.oldVerdicts`; research with no scan time is none, as there) — else the radar's
+  live rival sellers for the game; neither known → `unknown`, no probe. More sellers and no proof: a skip,
+  "rivals list it but it does not sell". Rival proof is not this gate's business: it still makes the market-led probe.
+- *Probe budget.* At most `probeMaxGames` (production 8) probes at once, counting the engine's own probe tasks
+  in flight — its gate's own count, decision "probe", status active or planned (a planned task holds its slot
+  too) — plus the brain's cold probes. A cold probe on a game the engine is already probing IS that probe and
+  takes no new slot (the engine never counts a game's own probe against it). The rest queue oldest campaign
+  first (a lane held by the budget retries every cycle, so the longest-waiting campaign takes a freed slot) and
+  log as a skip, "probe budget full (N active)". An unreadable task count holds every new cold probe.
+- Both gates apply whatever `probeColdStart` says (they only ever hold a probe back); the known-dud cooldown
+  alone follows the switch, as in the engine's gate.
+
 Cold probes are compared with today's verdict like any other (a cold 6 against today's probe 15 is `brain-less`;
 against a probe held by the budget, `brain-farm`), and counted apart: summary `coldProbes`, `coldTarget`,
-`oldTargetCold`, `coldDuds`; heartbeat `cold probes N (old asks M)`.
+`oldTargetCold`, and what held the rest — `coldHeldTested`, `coldHeldUnknown`, `coldHeldBudget`, `coldDuds`;
+heartbeat `cold probes N (old asks M), held: A tested market, B market unknown, C budget full, D duds`.
 
 ### 2.5 No-claim verdict (per bucket)
 `farmSizing.shelfAwareTarget` with the bucket's live policy (`row.policy`), shelf held = listed. With the
@@ -218,11 +247,14 @@ Market context for the shelf markets is advisory. Buckets match by the LONGEST k
   `internalSalesForGame` (DB reads; never `freshResearchForGame`, which re-scans a marketplace),
   `marketStockFloor` / `demandAllocation` (pure), `farmDemand` evidence (DB reads), its snapshot (DB reads) —
   twice per run in model v2, once per burst-guard setting (`burstGuard` passed explicitly, so the feeder never
-  reads its settings for it) — and its pure `demandRates` (same), and (model v2) one `AutoFarmTask` find for the
-  cold-start rule, only while the engine's `probeColdStart` is on — `{game: {$in: live campaign labels},
-  probeOutcome: "expired", completedAt ≥ now − probeCooldownDays}`, projected to `{game, completedAt}`, limit
-  5,000 (a run that hits it says so in its notes), on the indexed `game` field, skipped when no game is live. No
-  SSH, no host read, no marketplace call, no settings write. Every
+  reads its settings for it) — and its pure `demandRates` (same), and (model v2) two `AutoFarmTask` finds for
+  the cold-start rule: the known duds, only while the engine's `probeColdStart` is on — `{game: {$in: live
+  campaign labels}, probeOutcome: "expired", completedAt ≥ now − probeCooldownDays}`, projected to `{game,
+  completedAt}`, on the indexed `game` field — and the probes in flight its budget counts — `{decision: "probe",
+  status: {$in: ["active", "planned"]}}`, projected to `{game}`, on the `{decision, decidedAt}` index — each limit
+  5,000 (a run that hits it says so in its notes) and skipped when no game is live. `TwitchCampaign`'s projection
+  gains `startAt` (the budget's queue order); the untested-market gate reads no new data (the engine's research
+  from its own verdict, the radar's row). No SSH, no host read, no marketplace call, no settings write. Every
   module it loads was scanned on production for load-time side effects (timers, connects, listeners): none in
   139 + 134 modules (`models/AutoFarmTask`, new to the loader in v2, is a plain schema with no hooks that
   `utils/autoFarmer.js`, already loaded by the brain, requires at load — no new module enters the process).
@@ -245,8 +277,8 @@ Market context for the shelf markets is advisory. Buckets match by the LONGEST k
   failed no-claim read only drops the no-claim rows.
 - Engine calls run 3 games at a time with yields; the report builds yield to the event loop. Measured on
   the production box: inputs 4.1 s cold (0.9 s with warm caches), model 32 ms, scoring 45 ms.
-- Heartbeat: one log line per run (`demandBrain: run N (model v2, avg45) — … | cold probes N (old asks M) | … | Ns`),
-  and one at boot when off.
+- Heartbeat: one log line per run (`demandBrain: run N (model v2, avg45) — … | cold probes N (old asks M), held:
+  A tested market, B market unknown, C budget full, D duds | … | Ns`), and one at boot when off.
 - Health hook (model v2, `docs/LIVE-FIXES-1003.md` §3): `loopStatus()` → `{ lastRunAt, intervalMin, enabled,
   since }`, synchronous, never throws. `lastRunAt` moves only when a run computed (a failed or timed-out load
   leaves it, so a stuck brain shows as late); `enabled` is the live switch (unreadable settings read as off);
@@ -262,10 +294,12 @@ $1 skipped proven small sellers such as NBA 2K27 at 0.7 a week in the preview) �
 0 = no cold probes; unset = half the engine's `marketStockFloor`, 6 once §A3 counts only open markets).
 Read, never written, from the auto-farm's own settings: `probeSize`, `maxPerGame`, `probeColdStart` (whether the
 known-dud cooldown applies, as in the engine's probe gate), `probeMaxDays` (the dud-like listing window, default
-30, as its stop-loss reads it), `probeCooldownDays` (the dud window) and `noclaimBurstGuard` (which rule the
-feeder's live snapshot is); the shelf floor through the engine's own `marketStockFloor(af)`. The run document logs
-the cold-probe size it used, `probeColdStart`, `probeMaxDays`, `probeCooldownDays` and `noclaimBurstGuard` with
-the rest of its settings.
+30, as its stop-loss reads it), `probeCooldownDays` (the dud window), `probeMaxSellers` (the untested-market
+limit, production 1) and `probeMaxGames` (the probe budget, production 8) — each read as the engine reads it,
+`Number(x || 0)` — and `noclaimBurstGuard` (which rule the feeder's live snapshot is); the shelf floor through the
+engine's own `marketStockFloor(af)`. The run document logs the cold-probe size it used, `probeColdStart`,
+`probeMaxDays`, `probeCooldownDays`, `probeMaxSellers`, `probeMaxGames`, `noclaimBurstGuard` and, in `engine`,
+the probe tasks in flight it counted, with the rest of its settings.
 
 ## 6. API + page
 `/api/price-tracker/brain/{status, latest, game/:key, accuracy}` — superadmin + 2FA, read-only, every
@@ -287,10 +321,15 @@ evidence" only counts games the brain could not check.
   the `pack` flag, a failed pack lookup) — 98 brain tests. One v1 expectation changed: `v2`'s call now pins
   `burstGuard: false`. 27 of the 28 new tests fail on the v1 bytes (the 28th checks that no read happens when no
   game is live).
-- Review fixes (2026-10-03): `tests/demandBrainV2.test.js` 33 and the loader file 31 — 115 brain tests. Every
+- Review fixes (2026-10-03): `tests/demandBrainV2.test.js` 33 and the loader file 30 — 115 brain tests. Every
   test named "review N" fails on the bytes before that fix; the reviewer's proof scripts were re-run after it
   (sba 0.43 → 5.55 over 12 silent weeks is now 0.43 flat; the dead game's sba is scored on 6 of 6 weeks; the
   in-flight probe is a cold 6; v2g − v2 is 0 with nothing to guard; the guard's case A reads 15.6 → 15.4, not 23.5).
+- Cold-start gates (2026-10-03, after staging): `tests/demandBrainV2.test.js` 37 and the loader file 32 — 121
+  brain tests; the six "gate" tests fail on the bytes before the gates. A fixture shaped like the staging run (94
+  live games; 54 without a sale of ours: 6 untested, the engine probing 2 of them, 44 tested, 4 uncounted; 6
+  engine probes in flight) reads, before → after: cold probes 54 (old asks 150) → 4 (old asks 60); cold
+  accounts 324 → 24; brain-farm 44 → 0; held 0 → 44 tested market, 4 market unknown, 2 budget full.
 - Mutation pass: 39 deliberate breakages (every review fix among them), 39 caught.
 - Independent review (2026-10-02): 1 high, 4 medium, 12 low findings, all fixed or documented — see §9.
 - Staged on the production box (real database, every write blocked, real settings): the only writes
@@ -334,13 +373,17 @@ parked bots, duplicate logins, Plati block).
 - **`v2` / `v2g` pinned.** `v2` is the unguarded rule and `v2g` the guarded one whatever the owner's switch says;
   both are the feeder's own snapshots (§2.5), the live one logged under the name of the rule it ran.
 - **One admission rule, same rows, no ranking without full history** (§3).
-- **Cold probe scope.** Eligibility is "no sale of ours in 135 days" with a live campaign — listings and an unproven
-  rival market do not disqualify; a listing older than the engine's probe window with no sale is dud-like; the
-  engine's re-probe cooldown counts only while its `probeColdStart` is on; rival proof outranks the cooldown
-  (market-led probe, with the failed probe named in the reasons). The size follows the engine's own floor (its
-  market count knows the switches and the keys; the brain cannot call the marketplace module). Reuse-only, time
-  left, the probe budget and capacity are execution gates the brain does not model (§4.2 of
-  `docs/FARM-DISTRIBUTION-MAP.md`), so a cold probe is a demand verdict, not a spend.
-- **Fail-safe direction.** An unreadable probe history abstains (`unknown`), never probes; an unreadable floor means
+- **Cold probe scope.** Eligibility is "no sale of ours in 135 days" with a live campaign — listings do not
+  disqualify; a listing older than the engine's probe window with no sale is dud-like; the engine's re-probe
+  cooldown counts only while its `probeColdStart` is on; rival proof outranks the cooldown (market-led probe, with
+  the failed probe named in the reasons). Then the engine's own two gates (§2.4, after staging): an untested
+  market (rival sellers ≤ `probeMaxSellers`) and the probe budget (`probeMaxGames`, its in-flight probes
+  included, oldest campaign first). The budget counts the engine's tasks with its own gate's predicate (active
+  AND planned), and both gates apply whatever `probeColdStart` says — they only ever hold a probe back. The size
+  follows the engine's own floor (its market count knows the switches and the keys; the brain cannot call the
+  marketplace module). Reuse-only, time left and capacity remain execution gates the brain does not model (§4.2
+  of `docs/FARM-DISTRIBUTION-MAP.md`), so a cold probe is a demand verdict, not a spend.
+- **Fail-safe direction.** An unreadable probe history abstains (`unknown`), never probes; a game nobody counted
+  rivals for abstains too; an unreadable probe-task count holds every new cold probe; an unreadable floor means
   no cold probes; an unreadable pack lookup withholds the no-claim evidence, and a guarded snapshot that withholds
   itself logs `v2g` as null — never an inflated `v2g`.

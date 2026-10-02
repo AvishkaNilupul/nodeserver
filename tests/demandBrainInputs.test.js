@@ -134,8 +134,17 @@ function world(over = {}) {
       if (game === over.probeHeldFor) return { probeAllowed: false, probeBudgetBlocked: true };
       return { probeAllowed: true, probeBudgetBlocked: false };
     },
-    // model v2: the failed probes the cold-start rule reads (none unless a test says so)
-    AutoFarmTask: over.AutoFarmTask !== undefined ? over.AutoFarmTask : { find: query(over.expiredProbes || [], calls, "probes") },
+    // model v2: the failed probes the cold-start rule reads ("probes") and the probes in flight its
+    // budget counts ("inflight") — none unless a test says so
+    AutoFarmTask:
+      over.AutoFarmTask !== undefined
+        ? over.AutoFarmTask
+        : {
+            find: (filter, projection) =>
+              filter && filter.decision === "probe"
+                ? query(over.inFlight || [], calls, "inflight")(filter, projection)
+                : query(over.expiredProbes || [], calls, "probes")(filter, projection),
+          },
     autoFarmer: {
       researchForGame: async (g) => {
         engine.research.push(g);
@@ -260,7 +269,7 @@ test("the engine's own functions, called exactly as its decide step calls them �
   assert.deepEqual(c.old.gate, { probeAllowed: false, budgetBlocked: true });
   assert.ok(engine.maxInFlight <= I.ENGINE_CONCURRENCY, "at most " + I.ENGINE_CONCURRENCY + " lookups at once, saw " + engine.maxInFlight);
   assert.deepEqual(c.old.alloc, { cap: 30, target: 15, effective: 18 });
-  assert.deepEqual(p.engine, { floor: 18, maxPerGame: 30 });
+  assert.deepEqual(p.engine, { floor: 18, maxPerGame: 30, probes: 0 }, "probes: the engine's probe tasks in flight (none here)");
 });
 
 test("the shelf floor degrades to 0 with a note when it cannot be read", async () => {
@@ -347,7 +356,7 @@ test("the campaign read is the lane engine's filter, projected and limited", asy
   assert.equal(c.filter.status, "ACTIVE");
   assert.deepEqual(c.filter.$or[0], { endAt: null });
   assert.ok(c.filter.$or[1].endAt.$gt instanceof Date);
-  assert.deepEqual(c.projection, { game: 1, endAt: 1 });
+  assert.deepEqual(c.projection, { game: 1, endAt: 1, startAt: 1 }, "startAt: the cold-probe budget queues oldest campaign first");
   assert.ok(c.limit > 0);
 });
 
@@ -430,13 +439,19 @@ test("v2 every raw label of a game's live campaigns is asked (the engine keys ta
 });
 
 test("v2 cold probe end to end: a live campaign with no sale of ours, sized from the engine's own floor", async () => {
-  const af = { probeColdStart: true, probeCooldownDays: 90 };
+  // this world's research reads 2 rival sellers for every game: untested only under a limit of 2
+  const af = { probeColdStart: true, probeCooldownDays: 90, probeMaxSellers: 2, probeMaxGames: 8 };
   const p = await I.load({ now: NOW, deps: world({ af }).deps });
   assert.equal(p.engine.floor, 18, "this world's marketStockFloor");
   const run = M.buildRun({ now: NOW, cfg: M.readConfig(af), sizing: p.sizing, probeSize: p.probeSize, engine: p.engine, claim: p.claim, noclaim: p.noclaim, demandRates: p.demandRates });
   const wot = run.rows.find((r) => r.k === "world of tanks");
   assert.deepEqual([wot.br.c, wot.br.t, wot.br.b], ["probe", 9, "cold"], "half the floor of 18");
   assert.equal(run.rows.find((r) => r.k === "game c").br.b !== "cold", true, "sold (connection flips): not a new drop");
+  // gate 1 through the real path: the engine's own research says 2 sellers, over production's limit of 1
+  const strict = M.buildRun({ now: NOW, cfg: M.readConfig({ ...af, probeMaxSellers: 1 }), sizing: p.sizing, probeSize: p.probeSize, engine: p.engine, claim: p.claim, noclaim: [] });
+  const held = strict.rows.find((r) => r.k === "world of tanks");
+  assert.deepEqual([held.br.c, held.br.held], ["skip", "tested"]);
+  assert.match(held.why.join(" "), /rivals list it but it does not sell: 2 rival sellers \(the engine's market research\)/);
   // the same game, probed and failed 30 days ago: a known dud
   const p2 = await I.load({ now: NOW, deps: world({ af, expiredProbes: [{ game: "World of Tanks", completedAt: new Date(NOW - 30 * DAY) }] }).deps });
   const run2 = M.buildRun({ now: NOW, cfg: M.readConfig(af), sizing: p2.sizing, probeSize: p2.probeSize, engine: p2.engine, claim: p2.claim, noclaim: [] });
@@ -457,7 +472,7 @@ test("v2 an unreadable probe history: no cold probe anywhere, said in a note —
 });
 
 test("review 3 — with the engine's probeColdStart off there is no cooldown: no probe-history read, and new drops are probed", async () => {
-  const { deps, calls } = world({ af: { probeColdStart: false }, expiredProbes: [{ game: "World of Tanks", completedAt: new Date(NOW - DAY) }] });
+  const { deps, calls } = world({ af: { probeColdStart: false, probeMaxSellers: 2, probeMaxGames: 8 }, expiredProbes: [{ game: "World of Tanks", completedAt: new Date(NOW - DAY) }] });
   const p = await I.load({ now: NOW, deps });
   assert.equal(calls.filter((c) => c.name === "probes").length, 0, "the engine's gate ignores the cooldown, so the brain does not read it");
   assert.ok(p.claim.every((g) => g.dud === null));
@@ -472,6 +487,51 @@ test("review 6 — a probe-history read that hits its cap says so", async () => 
   assert.ok(p.notes.some((n) => n.includes("hit its cap of " + I.PROBE_HISTORY_CAP)), p.notes.join(" | "));
   const under = await I.load({ now: NOW, deps: world({ af: { probeColdStart: true }, expiredProbes: many.slice(1) }).deps });
   assert.ok(!under.notes.some((n) => /hit its cap/.test(n)));
+});
+
+test("gate 2 — the engine's probes in flight: one indexed read with its own budget predicate, per game, and each game's oldest campaign", async () => {
+  const { deps, calls } = world({
+    inFlight: [{ game: "Game C" }, { game: "Game C" }, { game: "Some Other Game" }],
+    campaigns: [
+      { game: "Game C", startAt: new Date(NOW - 5 * DAY), endAt: null },
+      { game: "Game C", startAt: new Date(NOW - 9 * DAY), endAt: null },
+      { game: "Game A", endAt: null },
+    ],
+  });
+  const p = await I.load({ now: NOW, deps });
+  const reads = calls.filter((c) => c.name === "inflight");
+  assert.equal(reads.length, 1, "one read per run");
+  assert.deepEqual(reads[0].filter, { decision: "probe", status: { $in: ["active", "planned"] } }, "decide.probeGate's own count");
+  assert.deepEqual(reads[0].projection, { game: 1 });
+  assert.equal(reads[0].limit, I.PROBE_HISTORY_CAP);
+  assert.equal(p.engine.probes, 3, "every task the engine's budget counts, other games' too");
+  const c = p.claim.find((g) => g.key === "game c");
+  assert.equal(c.probing, 2);
+  assert.equal(c.campaignStartAt, NOW - 9 * DAY, "the game's oldest live campaign");
+  const a = p.claim.find((g) => g.key === "game a");
+  assert.deepEqual([a.probing, a.campaignStartAt], [0, null]);
+  assert.equal(p.claim.find((g) => g.key === "game b").campaignStartAt, null, "not live");
+});
+
+test("gate 2 — unreadable probe tasks: the budget is unknown, so every new cold probe is held, and the note says so", async () => {
+  const af = { probeMaxSellers: 2, probeMaxGames: 8 };
+  const AutoFarmTask = {
+    find: (filter) => {
+      if (filter.decision === "probe") throw new Error("tasks down");
+      return { limit: () => ({ lean: async () => [] }) };
+    },
+  };
+  const p = await I.load({ now: NOW, deps: world({ af, AutoFarmTask }).deps });
+  assert.equal(p.engine.probes, null);
+  assert.ok(p.notes.some((n) => /probe tasks were unreadable this run \(tasks down\): the probe budget is unknown/.test(n)), p.notes.join(" | "));
+  const run = M.buildRun({ now: NOW, cfg: M.readConfig(af), sizing: p.sizing, probeSize: p.probeSize, engine: p.engine, claim: p.claim, noclaim: [] });
+  const wot = run.rows.find((r) => r.k === "world of tanks");
+  assert.deepEqual([wot.br.c, wot.br.held], ["skip", "budget"]);
+  assert.match(wot.why[0], /Probe budget unknown/);
+  // and no live game means no read at all
+  const { deps, calls } = world({ campaigns: [] });
+  await I.load({ now: NOW, deps });
+  assert.equal(calls.filter((x) => x.name === "inflight").length, 0);
 });
 
 test("review 4 — the feeder is asked for both rules on the same evidence; with the guard live the snapshot IS v2g", async () => {

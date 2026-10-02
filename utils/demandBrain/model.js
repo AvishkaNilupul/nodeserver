@@ -126,7 +126,26 @@ function readConfig(af) {
     // the stop-loss would have expired has been listed probeMaxDays (expireStaleProbes).
     probeColdStart: !!(af && af.probeColdStart),
     probeMaxDays: Math.max(1, Number(af && af.probeMaxDays) || 30),
+    // The engine's two cold-start gates (2026-10-03, after staging read 54 cold probes on production
+    // data): a market is UNTESTED with at most probeMaxSellers rival sellers (demandAllocation), and
+    // at most probeMaxGames probes run at once (decide.probeGate's budget).
+    probeMaxSellers: Math.max(0, num(af && af.probeMaxSellers, 0)),
+    probeMaxGames: Math.max(0, Math.floor(num(af && af.probeMaxGames, 0))),
   };
+}
+
+/**
+ * How many rivals list a game, counted as the engine's cold-start gate counts them: the market
+ * research its own verdict read (`sellers`, distinct sellers on the Gameflip/GGSel/Plati pages —
+ * research with no scan time is no research to demandAllocation), else the radar's live rival
+ * sellers (also distinct sellers); null when neither is known.
+ * @param {object|null} research inputs.oldVerdicts' { ds, sellers, at }
+ */
+function rivalSellersOf(research, radarRow) {
+  if (research && research.at != null) return { n: Math.max(0, num(research.sellers)), from: "research" };
+  const r = radarRow && radarRow.rivalSellers;
+  if (r != null && r !== "" && Number.isFinite(Number(r))) return { n: Math.max(0, Number(r)), from: "radar" };
+  return null;
 }
 
 /* ------------------------------ listing history ------------------------------ */
@@ -442,12 +461,15 @@ const dayText = (t) => (Number.isFinite(t) ? new Date(t).toISOString().slice(0, 
  * went up two days ago has listings and no sale yet). `dud` is what inputs.expiredProbes found:
  * false = checked, no failed probe; { at, days } = a probe of this game ended with 0 sales inside
  * the auto-farm's re-probe cooldown; null = not checked. Both only count while the engine's own
- * probeColdStart is on, as in its probe gate.
+ * probeColdStart is on, as in its probe gate. `rivals` (rivalSellersOf) is the engine's
+ * untested-market gate: a cold probe only for a market at most probeMaxSellers rivals list. The
+ * probe budget spans games, so buildRun applies it (applyProbeBudget).
  * @returns {{ c:"farm"|"probe"|"skip"|"unknown", t:number, w:number, b:"own"|"market"|"cold"|"none",
  *             own:number, mp:number, mt:number|null, sh:number|null, proof:boolean, v:number,
- *             vb:string, u:number|null, dud:null|"probe"|"listed", why:string[] }}
+ *             vb:string, u:number|null, dud:null|"probe"|"listed", held:null|"tested"|"unknown",
+ *             why:string[] }}
  */
-function claimVerdict({ own = 0, market = null, value = 0, valueBasis = "", cfg, sizing, gameCap = 0, probeSize = 15, floor = 0, evidence = {}, live = false, dud = null }) {
+function claimVerdict({ own = 0, market = null, value = 0, valueBasis = "", cfg, sizing, gameCap = 0, probeSize = 15, floor = 0, evidence = {}, live = false, dud = null, rivals = null }) {
   const why = [];
   const ownW = Math.max(0, num(own));
   let mp = 0;
@@ -472,6 +494,8 @@ function claimVerdict({ own = 0, market = null, value = 0, valueBasis = "", cfg,
     "A probe of this game ended with 0 sales on " + dayText(dudAt) +
     (dudKnown && num(dud.days) > 0 ? ", inside the auto-farm's " + num(dud.days) + "-day re-probe cooldown" : "") + ".";
   let isDud = null;
+  // which cold-start gate held a new drop back: "tested" (rivals list it) or "unknown" (no count)
+  let held = null;
 
   if (ownW > 0) why.push("We sell about " + round2(ownW) + " a week (every market, each account once).");
   if (rated) {
@@ -527,13 +551,30 @@ function claimVerdict({ own = 0, market = null, value = 0, valueBasis = "", cfg,
       } else if (cfg.probeColdStart && dud !== false) {
         c = "unknown";
         why.push(none + "; the auto-farm's probe history was not readable, so a possible dud is not probed.");
+      } else if (!rivals) {
+        // The engine's untested-market gate needs a seller count, and none was read.
+        c = "unknown";
+        held = "unknown";
+        why.push(none + "; how many rivals list it is unknown (no market research and no radar row), so it is not probed.");
+      } else if (num(rivals.n) > num(cfg.probeMaxSellers)) {
+        // A TESTED market: the engine skips these too (demandAllocation) — the market has spoken.
+        c = "skip";
+        held = "tested";
+        why.push(
+          none + "; rivals list it but it does not sell: " + num(rivals.n) + " rival seller" + (num(rivals.n) === 1 ? "" : "s") +
+            " (" + (rivals.from === "research" ? "the engine's market research" : "the market radar") + "), over the untested-market limit of " +
+            num(cfg.probeMaxSellers) + ".",
+        );
       } else {
         c = "probe";
         basis = "cold";
         t = coldSize;
         const max = Math.floor(num(sizing && sizing.maxPerGame));
         if (max > 0 && t > max) t = max;
-        why.push(none + ": a new drop → cold probe of " + t + (listedDays != null ? " (" + since + ", inside the probe window)" : "") + ".");
+        why.push(
+          none + ": a new drop in an untested market (" + num(rivals.n) + " rival seller" + (num(rivals.n) === 1 ? "" : "s") + ") → cold probe of " + t +
+            (listedDays != null ? " (" + since + ", inside the probe window)" : "") + ".",
+        );
         capToGame();
       }
     }
@@ -573,7 +614,42 @@ function claimVerdict({ own = 0, market = null, value = 0, valueBasis = "", cfg,
     capToGame();
     if (u != null) why.push("About $" + u + " a week at $" + v + " an account (" + (valueBasis || "our sales") + ").");
   }
-  return { c, t, td, w: forecast, b: basis, own: round2(ownW), mp, mt, sh, proof, v, vb: valueBasis, u, dud: isDud, why };
+  return { c, t, td, w: forecast, b: basis, own: round2(ownW), mp, mt, sh, proof, v, vb: valueBasis, u, dud: isDud, held, why };
+}
+
+// A cold-probe candidate's place in the budget queue: its oldest live campaign's start, unknown last.
+const campaignStartOf = (v) => {
+  const t = num(v.g.campaignStartAt, NaN);
+  return Number.isFinite(t) ? t : Infinity;
+};
+
+/**
+ * The engine's probe budget (decide.probeGate), across games: at most `max` probes at once, its own
+ * in-flight probe tasks included (`engineProbes`, the tasks its gate counts). A cold probe on a game
+ * the engine is already probing IS that probe and takes no new slot — the engine never counts a
+ * game's own probe against it. The rest queue oldest campaign first: a lane held by the budget
+ * retries every cycle, so the longest-waiting campaign takes a freed slot first. An unreadable task
+ * count (null) holds every new probe. Mutates the held verdicts into skips.
+ * @param {Array} verdicts [{ g, br }] — g.probing: the engine's probe tasks on the game;
+ *                         g.campaignStartAt: when its oldest live campaign started (epoch ms)
+ */
+function applyProbeBudget(verdicts, { max, engineProbes }) {
+  const queue = verdicts
+    .filter((v) => v.br.c === "probe" && v.br.b === "cold" && !(num(v.g.probing) > 0))
+    .sort((a, b) => campaignStartOf(a) - campaignStartOf(b) || String(a.g.key).localeCompare(String(b.g.key)));
+  const cap = Math.max(0, Math.floor(num(max)));
+  let active = engineProbes == null ? null : Math.max(0, num(engineProbes));
+  for (const v of queue) {
+    if (active != null && active < cap) {
+      active++;
+      continue;
+    }
+    const reason =
+      active == null
+        ? "Probe budget unknown: the auto-farm's probe tasks could not be read, so no new probe."
+        : "Probe budget full (" + active + " active): at most " + cap + " probes at once, oldest campaigns first — this new drop waits for a slot.";
+    v.br = { ...v.br, c: "skip", t: 0, b: "none", held: "budget", why: [reason].concat(v.br.why) };
+  }
 }
 
 /** The first moment a game had a live listing (epoch ms), or null — from listingSpans' spans. */
@@ -727,19 +803,22 @@ const shortWhy = (list) => (list || []).slice(0, 4).map((s) => String(s).slice(0
  * @param {object} p.sizing         { coverageDays, safetyStock, maxPerGame, gameCaps }
  * @param {number} p.probeSize      autoFarm.probeSize
  * @param {Array}  p.claim          [{ key, label, live, hoursLeft, reuseOnly, entries, spans,
- *                                     radar, value, valueBasis, gameCap, stock, act, dud, old:{alloc,sales,error} }]
+ *                                     radar, value, valueBasis, gameCap, stock, act, dud, probing,
+ *                                     campaignStartAt, old:{alloc,sales,research,error} }]
  * @param {Array}  p.noclaim        [{ snapRow, altRow, entries, spans, radarRows, keywords, live }] —
  *                                   snapRow the feeder's live rule, altRow the same snapshot under the
  *                                   other burst-guard setting
  * Cold probes are sized by coldProbeSizeFor(cfg, engine.floor).
- * @param {object} [p.engine]       { floor, maxPerGame } — the auto-farm's shelf floor and base cap
+ * @param {object} [p.engine]       { floor, maxPerGame, probes } — the auto-farm's shelf floor, base
+ *                                   cap and probe tasks in flight (its budget's count; null unread)
  * @param {Function} [p.demandRates]
  * @param {boolean} [p.burstGuardLive] autoFarm.noclaimBurstGuard: the feeder's snapshot is v2g, not v2
  */
 function buildRun({ now, cfg, sizing, probeSize = 15, claim = [], noclaim = [], engine = {}, demandRates = null, burstGuardLive = false }) {
   const rows = [];
   const floor = Math.max(0, Math.floor(num(engine.floor)));
-  for (const g of claim) {
+  // 1. every game's own verdict
+  const verdicts = claim.map((g) => {
     const entries = g.entries || [];
     const ctx = { spans: g.spans || null, demandRates };
     const est = allEstimates(entries, now, ctx);
@@ -754,7 +833,14 @@ function buildRun({ now, cfg, sizing, probeSize = 15, claim = [], noclaim = [], 
     };
     // A pack without `dud` was not checked: null (only matters while probeColdStart is on).
     const dud = g.dud === undefined ? null : g.dud;
-    const br = claimVerdict({ own, market, value: g.value, valueBasis: g.valueBasis, cfg, sizing, gameCap: g.gameCap, probeSize, floor, evidence, live: !!g.live, dud });
+    const rivals = rivalSellersOf(g.old && g.old.research, g.radar || null);
+    const br = claimVerdict({ own, market, value: g.value, valueBasis: g.valueBasis, cfg, sizing, gameCap: g.gameCap, probeSize, floor, evidence, live: !!g.live, dud, rivals });
+    return { g, est, market, br };
+  });
+  // 2. the probe budget, which spans games
+  applyProbeBudget(verdicts, { max: cfg.probeMaxGames, engineProbes: engine.probes });
+  // 3. the rows, beside today's verdict
+  for (const { g, est, market, br } of verdicts) {
     const old = oldClaim(g.old && g.old.alloc, g.old && g.old.sales, {
       floor,
       maxPerGame: engine.maxPerGame,
@@ -773,7 +859,21 @@ function buildRun({ now, cfg, sizing, probeSize = 15, claim = [], noclaim = [], 
       hl: g.hoursLeft == null ? null : round1(g.hoursLeft),
       ro: !!g.reuseOnly,
       old,
-      br: { c: br.c, t: br.t, td: br.td, w: br.w, b: br.b, own: br.own, mp: br.mp, mt: br.mt, sh: br.sh, v: br.v, u: br.u, ...(br.dud ? { dud: br.dud } : {}) },
+      br: {
+        c: br.c,
+        t: br.t,
+        td: br.td,
+        w: br.w,
+        b: br.b,
+        own: br.own,
+        mp: br.mp,
+        mt: br.mt,
+        sh: br.sh,
+        v: br.v,
+        u: br.u,
+        ...(br.dud ? { dud: br.dud } : {}),
+        ...(br.held ? { held: br.held } : {}),
+      },
       mk: market ? { rw: market.rivalPerWeek, ru: market.rivalUnits, rs: market.rivalSellers, ow: market.ourWatched, pm: market.realisedMedian, tts: market.medianTtsHours } : null,
       est,
       stk: g.stock ? { on: num(g.stock.onHand), fl: num(g.stock.inFlight) } : null,
@@ -810,7 +910,9 @@ function summarize(rows) {
   // Account totals compare like with like: only live games where BOTH sides have a verdict. A game
   // the brain has no evidence for is not a "0" — today's logic decides it alone, counted apart.
   // Cold probes (new drops, model v2) are verdicts and are compared; they are also counted apart,
-  // with what today's logic asks for the same games, for the heartbeat's "cold probes N (old asks M)".
+  // with what today's logic asks for the same games, for the heartbeat's "cold probes N (old asks M)",
+  // and so is every new drop a gate held back: a dud, a tested market (rivals list it, it does not
+  // sell), a market nobody counted, a full probe budget.
   const s = {
     claim: {
       games: 0,
@@ -827,6 +929,9 @@ function summarize(rows) {
       coldTarget: 0,
       oldTargetCold: 0,
       coldDuds: 0,
+      coldHeldTested: 0,
+      coldHeldUnknown: 0,
+      coldHeldBudget: 0,
     },
     noclaim: { buckets: 0, byDiff: blank(), oldTarget: 0, brainTarget: 0 },
   };
@@ -852,6 +957,12 @@ function summarize(rows) {
           s.claim.oldTargetCold += acts(r.old.c) ? num(r.old.t) : 0;
         } else if (r.br.dud) {
           s.claim.coldDuds++;
+        } else if (r.br.held === "tested") {
+          s.claim.coldHeldTested++;
+        } else if (r.br.held === "unknown") {
+          s.claim.coldHeldUnknown++;
+        } else if (r.br.held === "budget") {
+          s.claim.coldHeldBudget++;
         }
       }
     } else {
@@ -1097,6 +1208,8 @@ module.exports = {
   isOn,
   readConfig,
   coldProbeSizeFor,
+  rivalSellersOf,
+  applyProbeBudget,
   probeCooldownDaysOf,
   listingSpans,
   coveredDays,

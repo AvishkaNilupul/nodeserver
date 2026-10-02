@@ -33,7 +33,7 @@ function weeksOf(counts, market = "gameflip") {
 
 // Production's auto-farm settings for what the brain reads (2026-10-02): cold-start probing on (its
 // budget held 109 of 117 games that day), 30-day probe window, 90-day re-probe cooldown.
-const AF = { probeColdStart: true, probeMaxDays: 30, probeCooldownDays: 90, demandBrain: { enabled: true } };
+const AF = { probeColdStart: true, probeMaxDays: 30, probeCooldownDays: 90, probeMaxSellers: 1, probeMaxGames: 8, demandBrain: { enabled: true } };
 const CFG = M.readConfig(AF);
 // The engine's shelf floor once §A3 counts only open markets (Gameflip + GGSel): 2 × 3 × 2.
 const FLOOR = 12;
@@ -418,12 +418,12 @@ test("review 5 — cold probe size: half the engine's own shelf floor, owner-set
   assert.deepEqual([CFG.probeColdStart, CFG.probeMaxDays], [true, 30]);
   assert.deepEqual([M.readConfig({}).probeColdStart, M.readConfig({}).probeMaxDays], [false, 30], "the engine's own defaults");
   // end to end: a run sizes its cold probes from the floor it was handed
-  const run = M.buildRun({ now: NOW, cfg: CFG, sizing: SIZING, engine: { floor: 18, maxPerGame: 30 }, claim: [newDrop("n")] });
+  const run = M.buildRun({ now: NOW, cfg: CFG, sizing: SIZING, engine: { floor: 18, maxPerGame: 30, probes: 0 }, claim: [newDrop("n")] });
   assert.equal(run.rows[0].br.t, 9);
 });
 
 // A live game with no sale of ours, checked against the probe history.
-const fresh = (o = {}) => M.claimVerdict({ own: 0, market: null, value: 0, cfg: CFG, sizing: SIZING, probeSize: 15, floor: FLOOR, evidence: {}, live: true, dud: false, ...o });
+const fresh = (o = {}) => M.claimVerdict({ own: 0, market: null, value: 0, cfg: CFG, sizing: SIZING, probeSize: 15, floor: FLOOR, evidence: {}, live: true, dud: false, rivals: { n: 0, from: "research" }, ...o });
 const listedFor = (days) => ({ listed135: true, firstListedAt: NOW - days * DAY, listedDays: days });
 
 test("v2 cold probe: a live campaign, no sale of ours, not a dud → probe of 6 (was 'unknown')", () => {
@@ -434,7 +434,7 @@ test("v2 cold probe: a live campaign, no sale of ours, not a dud → probe of 6 
   assert.equal(v.td, 0, "no demand number behind it");
   assert.equal(v.w, 0);
   assert.equal(v.dud, null);
-  assert.match(v.why.join(" "), /a new drop → cold probe of 6/);
+  assert.match(v.why.join(" "), /a new drop in an untested market \(0 rival sellers\) → cold probe of 6/);
   assert.equal(fresh({ gameCap: 4 }).t, 4, "the owner's per-game cap still wins");
   assert.match(fresh({ gameCap: 4 }).why.join(" "), /your cap/);
   assert.equal(fresh({ cfg: M.readConfig({ ...AF, demandBrain: { coldProbeSize: 9 } }) }).t, 9);
@@ -515,6 +515,9 @@ test("v2 cold probe never fires without a live campaign or a size", () => {
 
 /* ------------------------------ run + summary ------------------------------ */
 
+// The engine's research for a market nobody sells yet (its untested-market gate passes).
+const UNTESTED = { ds: 0, sellers: 0, at: new Date(NOW - DAY) };
+
 function newDrop(key, o = {}) {
   return {
     key,
@@ -531,21 +534,24 @@ function newDrop(key, o = {}) {
     stock: null,
     act: null,
     dud: false,
-    old: { alloc: { cap: 30, target: 15, probe: true, effective: 0 }, sales: { count: 0 } },
+    probing: 0,
+    campaignStartAt: null,
+    // the engine's own research: an untested market (no rival seller)
+    old: { alloc: { cap: 30, target: 15, probe: true, effective: 0 }, sales: { count: 0 }, research: UNTESTED },
     ...o,
   };
 }
 
 const PACK_CLAIM = [
   newDrop("new a"), // today probes 15
-  newDrop("new b", { old: { alloc: { skip: true, probeBlocked: true, effective: 0 }, sales: { count: 0 } } }), // today: probe held by the budget
+  newDrop("new b", { old: { alloc: { skip: true, probeBlocked: true, effective: 0 }, sales: { count: 0 }, research: UNTESTED } }), // today: probe held by the budget
   newDrop("dud c", { dud: { at: NOW - 10 * DAY, days: 90 } }),
   newDrop("unread d", { dud: null }),
   newDrop("closed e", { live: false, dud: null }),
 ];
 
 test("v2 run: cold probes are logged against today's verdict and counted apart", () => {
-  const run = M.buildRun({ now: NOW, cfg: CFG, sizing: SIZING, probeSize: 15, engine: { floor: FLOOR, maxPerGame: 30 }, claim: PACK_CLAIM });
+  const run = M.buildRun({ now: NOW, cfg: CFG, sizing: SIZING, probeSize: 15, engine: { floor: FLOOR, maxPerGame: 30, probes: 0 }, claim: PACK_CLAIM });
   const by = Object.fromEntries(run.rows.map((r) => [r.k, r]));
   assert.deepEqual([by["new a"].br.c, by["new a"].br.t, by["new a"].br.b], ["probe", 6, "cold"]);
   assert.equal(by["new a"].d, "brain-less", "today probes 15, the brain 6");
@@ -569,8 +575,9 @@ test("v2 run: cold probes are logged against today's verdict and counted apart",
 
 test("review 3 — the reviewer's three new-drop cases, end to end", () => {
   const recurring = newDrop("recurring", { entries: [50, 52, 55, 58, 60].map((d) => ({ t: NOW - d * DAY, m: "gameflip" })), spans: [[NOW - 65 * DAY, NOW - 48 * DAY]] });
-  const inFlight = newDrop("in flight", { spans: [[NOW - 2 * DAY, NOW]] });
-  const run = M.buildRun({ now: NOW, cfg: CFG, sizing: SIZING, probeSize: 15, engine: { floor: FLOOR, maxPerGame: 30 }, claim: [newDrop("brand new"), recurring, inFlight] });
+  // the engine's own probe of it is in flight
+  const inFlight = newDrop("in flight", { spans: [[NOW - 2 * DAY, NOW]], probing: 1 });
+  const run = M.buildRun({ now: NOW, cfg: CFG, sizing: SIZING, probeSize: 15, engine: { floor: FLOOR, maxPerGame: 30, probes: 1 }, claim: [newDrop("brand new"), recurring, inFlight] });
   const by = Object.fromEntries(run.rows.map((r) => [r.k, r.br]));
   assert.deepEqual([by["brand new"].c, by["brand new"].t], ["probe", 6]);
   assert.deepEqual([by["in flight"].c, by["in flight"].t, by["in flight"].b], ["probe", 6, "cold"], "was a skip");
@@ -605,7 +612,7 @@ function pack(now) {
     sizing: SIZING,
     probeSize: 15,
     probeCooldownDays: 90,
-    engine: { floor: FLOOR, maxPerGame: 30 },
+    engine: { floor: FLOOR, maxPerGame: 30, probes: 0 },
     claim: PACK_CLAIM,
     noclaim: [],
     demandRates: null,
@@ -631,7 +638,7 @@ test("v2 runner: model v2 logged, the heartbeat says 'cold probes N (old asks M)
   const hb = lines.find((l) => /^demandBrain: run 1 /.test(l));
   assert.ok(hb, lines.join("\n"));
   assert.match(hb, /\(model v2, avg45\)/);
-  assert.match(hb, / \| cold probes 2 \(old asks 15\) \| /);
+  assert.match(hb, / \| cold probes 2 \(old asks 15\), held: 0 tested market, 0 market unknown, 0 budget full, 1 duds \| /);
   const a = m.rows.find((x) => x.k === "new a");
   assert.equal(a.br.b, "cold", "the row keeps what made it a cold probe");
   assert.equal(m.rows.find((x) => x.k === "dud c").br.dud, "probe");
@@ -692,6 +699,118 @@ test("loopStatus `since`: when the loop last began waiting to run — its start,
   assert.ok(B.loopStatus().lastRunAt.getTime() >= offTick.getTime(), "the run came after it");
   B.stop();
   assert.equal(B.loopStatus().since, null, "stopped");
+});
+
+/* ------------------ the engine's two cold-start gates (staging, 2026-10-03) ------------------ */
+
+test("gate 1 — rival sellers are counted as the engine counts them: its research, else the radar, else unknown", () => {
+  const at = new Date(NOW - DAY);
+  assert.deepEqual(M.rivalSellersOf({ ds: 2, sellers: 3, at }, { rivalSellers: 0 }), { n: 3, from: "research" }, "the engine's own read wins");
+  assert.deepEqual(M.rivalSellersOf({ ds: 0, sellers: 0, at: null }, { rivalSellers: 1 }), { n: 1, from: "radar" }, "research with no scan is no research (demandAllocation)");
+  assert.deepEqual(M.rivalSellersOf(null, { rivalSellers: 4 }), { n: 4, from: "radar" });
+  assert.equal(M.rivalSellersOf(null, { perWeek: 2 }), null, "a radar row without a seller count");
+  assert.equal(M.rivalSellersOf(null, { rivalSellers: "" }), null);
+  assert.equal(M.rivalSellersOf(null, null), null);
+  assert.deepEqual([CFG.probeMaxSellers, CFG.probeMaxGames], [1, 8], "production's settings");
+  assert.deepEqual([M.readConfig({}).probeMaxSellers, M.readConfig({}).probeMaxGames], [0, 0], "the engine's own fallbacks (Number(x || 0))");
+});
+
+test("gate 1 — a cold probe only for an UNTESTED market; rivals listing it without proof is a skip; no count is unknown", () => {
+  assert.equal(fresh({ rivals: { n: 0, from: "research" } }).c, "probe");
+  const one = fresh({ rivals: { n: 1, from: "radar" } });
+  assert.deepEqual([one.c, one.b], ["probe", "cold"], "at the limit is still untested");
+  assert.match(one.why.join(" "), /untested market \(1 rival seller\) → cold probe of 6/);
+  const tested = fresh({ rivals: { n: 2, from: "research" } });
+  assert.deepEqual([tested.c, tested.t, tested.held], ["skip", 0, "tested"]);
+  assert.match(tested.why.join(" "), /rivals list it but it does not sell: 2 rival sellers \(the engine's market research\), over the untested-market limit of 1/);
+  assert.match(fresh({ rivals: { n: 7, from: "radar" } }).why.join(" "), /7 rival sellers \(the market radar\)/);
+  // a watched market below proof, with sellers: a skip, never a cold probe
+  const watched = fresh({ market: M.marketView(radar({ perWeek: 0.5, units: 2, rivalSellers: 6 }), [], NOW), rivals: M.rivalSellersOf(null, radar({ rivalSellers: 6 })) });
+  assert.deepEqual([watched.c, watched.held], ["skip", "tested"]);
+  const nobody = fresh({ rivals: null });
+  assert.deepEqual([nobody.c, nobody.held], ["unknown", "unknown"]);
+  assert.match(nobody.why.join(" "), /how many rivals list it is unknown/);
+  // rival PROOF is not this gate's business: it still upgrades to the market-led probe
+  assert.equal(fresh({ market: M.marketView(radar({ perWeek: 40, units: 60 }), [], NOW), rivals: { n: 9, from: "radar" } }).b, "market");
+});
+
+test("gate 2 — the probe budget: probeMaxGames at once, the engine's own probes included, oldest campaign first", () => {
+  // ten untested new drops, d1 the newest campaign and d10 the oldest; the engine runs five probes,
+  // two of them on d3 and d7 (those ARE the brain's probes there: no new slot)
+  const claim = [];
+  for (let i = 1; i <= 10; i++) claim.push(newDrop("d" + i, { campaignStartAt: NOW - i * DAY, probing: i === 3 || i === 7 ? 1 : 0 }));
+  const run = M.buildRun({ now: NOW, cfg: CFG, sizing: SIZING, probeSize: 15, engine: { floor: FLOOR, maxPerGame: 30, probes: 5 }, claim });
+  const cold = run.rows.filter((r) => r.br.b === "cold").map((r) => r.k).sort();
+  assert.deepEqual(cold, ["d10", "d3", "d7", "d8", "d9"], "the two in flight, then the three oldest campaigns (8 − 5 = 3 slots)");
+  const held = run.rows.filter((r) => r.br.held === "budget");
+  assert.deepEqual(held.map((r) => r.k).sort(), ["d1", "d2", "d4", "d5", "d6"]);
+  for (const r of held) {
+    assert.deepEqual([r.br.c, r.br.t, r.br.b], ["skip", 0, "none"]);
+    assert.match(r.why[0], /^Probe budget full \(8 active\): at most 8 probes at once, oldest campaigns first/);
+  }
+  assert.deepEqual([run.summary.claim.coldProbes, run.summary.claim.coldHeldBudget], [5, 5]);
+  // an unknown start waits behind every known one
+  const order = M.buildRun({
+    now: NOW,
+    cfg: CFG,
+    sizing: SIZING,
+    engine: { floor: FLOOR, maxPerGame: 30, probes: 7 },
+    claim: [newDrop("no start", { campaignStartAt: null }), newDrop("newest", { campaignStartAt: NOW - DAY })],
+  });
+  assert.deepEqual(order.rows.map((r) => [r.k, r.br.c]), [["no start", "skip"], ["newest", "probe"]]);
+  // an unreadable task count holds every NEW probe; one already in flight stays
+  const blind = M.buildRun({ now: NOW, cfg: CFG, sizing: SIZING, engine: { floor: FLOOR, maxPerGame: 30, probes: null }, claim: [newDrop("in flight", { probing: 1 }), newDrop("new")] });
+  assert.deepEqual(blind.rows.map((r) => [r.k, r.br.c, r.br.held || null]), [["in flight", "probe", null], ["new", "skip", "budget"]]);
+  assert.match(blind.rows[1].why[0], /Probe budget unknown/);
+});
+
+// The 2026-10-03 staging run on production data, reshaped as a fixture: 94 live games, 40 of them
+// sold in the last 45 days; of the 54 with no sale of ours, 6 untested markets (the engine probing 2
+// of them), 44 markets rivals list (2–12 sellers, no proof) and 4 nobody counted. The engine has 6
+// probes in flight (4 more on games that have sold). Today's logic probes the 10 untested/uncounted
+// games (15 each = 150) and skips the 44. On the bytes before the two gates this read "cold probes 54
+// (old asks 150)", coldTarget 324, brain-farm 44 — the staging summary.
+function stagingShapedRun() {
+  const research = (sellers, ds = 1) => ({ ds, sellers, at: new Date(NOW - DAY) });
+  const started = (i) => NOW - (10 + i) * DAY;
+  const games = [];
+  for (let i = 0; i < 40; i++) {
+    games.push(
+      newDrop("sold " + i, {
+        entries: [3, 9, 15, 21].map((d) => ({ t: NOW - (d + (i % 5)) * DAY, m: "gameflip" })),
+        campaignStartAt: started(i),
+        probing: i < 4 ? 1 : 0,
+        old: { alloc: { cap: 30, target: 30, effective: 40 }, sales: { count: 4 }, research: research(9, 40) },
+      }),
+    );
+  }
+  for (let i = 0; i < 6; i++) {
+    games.push(newDrop("untested " + i, { campaignStartAt: started(40 + i), probing: i < 2 ? 1 : 0, old: { alloc: { cap: 30, target: 15, probe: true, effective: 0 }, sales: { count: 0 }, research: research(i % 2) } }));
+  }
+  for (let i = 0; i < 44; i++) {
+    games.push(newDrop("tested " + i, { campaignStartAt: started(46 + i), old: { alloc: { skip: true, demand: 3, effective: 3 }, sales: { count: 0 }, research: research(2 + (i % 11), 3) } }));
+  }
+  for (let i = 0; i < 4; i++) {
+    games.push(newDrop("uncounted " + i, { campaignStartAt: started(90 + i), old: { alloc: { cap: 30, target: 15, probe: true, effective: 0 }, sales: { count: 0 } } }));
+  }
+  return M.buildRun({ now: NOW, cfg: CFG, sizing: SIZING, probeSize: 15, engine: { floor: FLOOR, maxPerGame: 30, probes: 6 }, claim: games });
+}
+
+test("gates 1 + 2 on a run shaped like the staging run: 4 cold probes (old asks 60), not 54 (old asks 150)", () => {
+  const run = stagingShapedRun();
+  const s = run.summary.claim;
+  assert.equal(s.live, 94);
+  assert.deepEqual(
+    { coldProbes: s.coldProbes, oldTargetCold: s.oldTargetCold, coldTarget: s.coldTarget, tested: s.coldHeldTested, unknown: s.coldHeldUnknown, budget: s.coldHeldBudget, duds: s.coldDuds },
+    { coldProbes: 4, oldTargetCold: 60, coldTarget: 24, tested: 44, unknown: 4, budget: 2, duds: 0 },
+  );
+  // which four: the two the engine is already probing, then the two oldest campaigns
+  assert.deepEqual(run.rows.filter((r) => r.br.b === "cold").map((r) => r.k).sort(), ["untested 0", "untested 1", "untested 4", "untested 5"]);
+  assert.equal(s.byDiffLive["brain-farm"], 0, "it was 44: every tested market");
+  assert.equal(s.byDiffLive["agree-skip"], 44);
+  const blank = Object.fromEntries(M.DIFFS.map((d) => [d, 0]));
+  const hb = B.heartbeat({ v: 2, ms: 1000, cfg: { estimatorClaim: "avg45" }, summary: { ...run.summary, claim: { ...s, byDiffLive: { ...blank, ...s.byDiffLive } } } }, run.rows, true);
+  assert.match(hb, / \| cold probes 4 \(old asks 60\), held: 44 tested market, 4 market unknown, 2 budget full, 0 duds \| /);
 });
 
 /* ------------------------------ review 7: labels ------------------------------ */

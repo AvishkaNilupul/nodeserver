@@ -122,8 +122,11 @@ function heartbeat(doc, rows, persisted) {
     "demandBrain: run " + state.runs + " (model v" + doc.v + ", " + doc.cfg.estimatorClaim + ") — claim " + s.claim.games + " games, " + s.claim.live + " live: " +
     parts.join(", ") + " | live targets old " + s.claim.oldTargetLive + " → brain " + s.claim.brainTargetLive + " over " + s.claim.comparedLive + " games" +
     (s.claim.unknownLive ? " (+" + s.claim.unknownLive + " without brain evidence, old asks " + s.claim.oldTargetUnknownLive + ")" : "") +
-    // New drops (model v2): live games with no evidence of ours, and what today's logic asks there.
+    // New drops (model v2): live games with no sale of ours, what today's logic asks there, and how
+    // many each gate held back (the engine's own: untested market, probe budget; and known duds).
     " | cold probes " + (s.claim.coldProbes || 0) + " (old asks " + (s.claim.oldTargetCold || 0) + ")" +
+    ", held: " + (s.claim.coldHeldTested || 0) + " tested market, " + (s.claim.coldHeldUnknown || 0) + " market unknown, " +
+    (s.claim.coldHeldBudget || 0) + " budget full, " + (s.claim.coldDuds || 0) + " duds" +
     (nc ? " | no-claim " + nc : "") + " | " + (doc.ms / 1000).toFixed(1) + "s" + (persisted ? "" : " | NOT LOGGED (write failed)")
   );
 }
