@@ -17,6 +17,8 @@ const AvailableAccount = require("../models/AvailableAccount");
 const PoolUsageEvent = require("../models/PoolUsageEvent");
 const BotAccount = require("../models/BotAccount");
 const DropLog = require("../models/DropLog");
+const RenterAccount = require("../models/RenterAccount");
+const AutoFarmTask = require("../models/AutoFarmTask");
 const accountPoolChecker = require("../utils/accountPoolChecker");
 const dropScanner = require("../utils/dropScanner");
 const { parseAccountList } = require("../utils/parseAccountList");
@@ -726,18 +728,91 @@ router.post("/account-pool/:id/check", requireSuperadmin, async (req, res) => {
   }
 });
 
+// The pool row's claimedNote is the only record of which system owns a login,
+// and both buttons below used to write it unconditionally. Claim re-labelled a
+// row another system had just claimed, so every guard keyed off the owner's
+// note stopped seeing the owner. Unclaim flipped ANY row back to available, so
+// one click handed the next farm claim a login a renter or rent-farm buyer
+// still farms, a no-claim bot's account, or held unclaimed stock — one login,
+// two homes. Since 2026-10-03 claim takes only an available row, and unclaim
+// refuses while a live owner holds the row.
+const RENTED_NOTE = /^rented to/i;
+const NOCLAIM_NOTE = /^noclaim-farm:/i;
+const AUTO_FARM_NOTE = /^auto-farm/i;
+const CHANGED_MESSAGE = "It changed a moment ago — refresh and try again.";
+
+function exactLogin(login) {
+  return new RegExp("^" + String(login).replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + "$", "i");
+}
+
+// Why a claimed row must not be released now, in words the page can toast —
+// or "" when no live owner holds it.
+async function liveOwnerHold(row) {
+  if (!row || row.status !== "claimed") return "";
+  const note = String(row.claimedNote || "").trim();
+  const login = String(row.usernameLower || row.username || "").trim().toLowerCase();
+  if (RENTED_NOTE.test(note)) {
+    // Only while a renter's bot still holds it: a lapsed window (farmEndedAt
+    // stamped) has already been pulled off every renter config.
+    const or = [];
+    if (row.clientSecret) or.push({ clientSecret: row.clientSecret });
+    if (login) or.push({ login: exactLogin(login) });
+    const live = or.length
+      ? await RenterAccount.findOne({ farmEndedAt: null, $or: or }, { _id: 1 }).lean()
+      : null;
+    return live
+      ? "It is " + note + " and still on a renter's bot — take it off the renter first (Renters page)."
+      : "";
+  }
+  if (NOCLAIM_NOTE.test(note)) {
+    return (
+      "The No-claim farm holds it (" + note + ") — release it from the No-claim farm page " +
+      "so it leaves its bot first."
+    );
+  }
+  if (poolStock.isStockNote(note)) {
+    return (
+      "It is held as stock: it carries farmed drops nobody has claimed yet. The pool check " +
+      "puts it back by itself once that stock is sold or expires."
+    );
+  }
+  if (AUTO_FARM_NOTE.test(note) && login) {
+    const task = await AutoFarmTask.findOne(
+      { status: "active", assignedAccounts: exactLogin(login) },
+      { game: 1 },
+    ).lean();
+    if (task) {
+      return (
+        "The auto-farm is farming it" + (task.game ? " for " + task.game : "") +
+        " — it comes back to the pool by itself when that task ends."
+      );
+    }
+  }
+  return "";
+}
+
 // Mark an account claimed (you're using it for a new bot) so it drops out
 // of the "available" list. Doesn't delete it — reversible via /unclaim.
 router.post("/account-pool/:id/claim", requireSuperadmin, async (req, res) => {
   try {
     const note = req.body && req.body.note ? String(req.body.note).slice(0, 200) : "";
-    const acc = await AvailableAccount.findByIdAndUpdate(
-      req.params.id,
+    const acc = await AvailableAccount.findOneAndUpdate(
+      { _id: req.params.id, status: "available" },
       { $set: { status: "claimed", claimedAt: new Date(), claimedNote: note } },
       { returnDocument: "after" },
     ).lean();
     if (!acc) {
-      return res.status(404).json({ success: false, message: "Not found" });
+      const cur = await AvailableAccount.findById(req.params.id, { status: 1, claimedNote: 1 }).lean();
+      if (!cur) {
+        return res.status(404).json({ success: false, message: "Not found" });
+      }
+      return res.status(409).json({
+        success: false,
+        message:
+          cur.status === "claimed"
+            ? "Already claimed (" + (String(cur.claimedNote || "").trim() || "no note") + ")"
+            : CHANGED_MESSAGE,
+      });
     }
     await recordPoolUsage(acc._id, { event: "claimed", actor: "manual", note });
     res.json({ success: true, account: publicAccount(acc) });
@@ -749,13 +824,35 @@ router.post("/account-pool/:id/claim", requireSuperadmin, async (req, res) => {
 
 router.post("/account-pool/:id/unclaim", requireSuperadmin, async (req, res) => {
   try {
-    const acc = await AvailableAccount.findByIdAndUpdate(
-      req.params.id,
+    const cur = await AvailableAccount.findById(req.params.id, {
+      username: 1,
+      usernameLower: 1,
+      clientSecret: 1,
+      status: 1,
+      claimedNote: 1,
+    }).lean();
+    if (!cur) {
+      return res.status(404).json({ success: false, message: "Not found" });
+    }
+    const hold = await liveOwnerHold(cur);
+    if (hold) {
+      return res.status(409).json({ success: false, message: hold });
+    }
+    // Conditional on the row as it was just judged: a claim that changed hands
+    // in between (a renter add re-labelling it, say) is not released on the
+    // strength of the old note.
+    const unchanged = {
+      _id: cur._id,
+      claimedNote: cur.claimedNote ? cur.claimedNote : { $in: [null, ""] },
+    };
+    if (cur.status) unchanged.status = cur.status;
+    const acc = await AvailableAccount.findOneAndUpdate(
+      unchanged,
       { $set: { status: "available", claimedAt: null, claimedNote: "" } },
       { returnDocument: "after" },
     ).lean();
     if (!acc) {
-      return res.status(404).json({ success: false, message: "Not found" });
+      return res.status(409).json({ success: false, message: CHANGED_MESSAGE });
     }
     await recordPoolUsage(acc._id, { event: "released", actor: "manual" });
     res.json({ success: true, account: publicAccount(acc) });

@@ -2565,6 +2565,27 @@ router.post(
             : "Username is required",
         });
       }
+      // The pool note is the one record of which system owns a login, and this
+      // route ends with an unconditional pool write re-labelling the row "rented
+      // to <renter>". A login another system holds — a no-claim bot's account,
+      // held unclaimed stock, an auto-farm or bot-deploy claim — was taken from
+      // that owner without telling it: a claiming renter bot empties no-claim
+      // stock, and the owner's guards lose sight of the login. Refused here,
+      // before anything is written (2026-10-03). A login already rented to
+      // someone goes on to the renter-to-renter move below.
+      const poolOwner = await AvailableAccount.findOne(
+        { usernameLower: username.toLowerCase() },
+        { status: 1, claimedNote: 1 },
+      ).lean();
+      const poolOwnerNote = String((poolOwner && poolOwner.claimedNote) || "").trim();
+      if (poolOwner && poolOwner.status === "claimed" && !/^rented to/i.test(poolOwnerNote)) {
+        return res.status(409).json({
+          success: false,
+          message:
+            "The account pool says " + username + " belongs to another system (" +
+            (poolOwnerNote || "claimed, no note") + ") — release it there first. Nothing was changed.",
+        });
+      }
       const renter = await Renter.findById(req.params.id);
       if (!renter)
         return res.status(404).json({ success: false, message: "Not found" });
