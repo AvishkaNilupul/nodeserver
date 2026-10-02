@@ -374,26 +374,38 @@ async function seatCapacityFor({ host, af, cycle, hostCache }) {
   const b = brain();
   const perBot = Math.max(1, Number(af.accountsPerBot) || 1);
   let slotsFree;
+  // The RAM gate, as the cycle budget or the legacy helper read it: while it
+  // is shut no NEW container is created, and no seat in a PARKED one counts
+  // either (filling it restarts it) — running bots' free seats stay usable.
+  let ram = { blocked: false, reason: "", requested: 0 };
   if (cycle && Number.isFinite(cycle.totalContainers)) {
     // Already 0 while the farm host is short of RAM (budget.js).
     slotsFree = Math.max(0, cycle.totalContainers);
+    ram = {
+      blocked: !!cycle.ramBlocked,
+      reason: cycle.ramReason || "",
+      requested: cycle.ramBlocked ? Number(cycle.ramDenied) || 0 : slotsFree,
+    };
   } else {
     const active =
       typeof b.activeAutoBotCount === "function" ? await b.activeAutoBotCount({}) : 0;
     slotsFree = Math.max(0, (Number(af.maxAutoBots) || 0) - active);
-    // The same RAM gate as the cycle budget and the legacy engine: no NEW
-    // container on a host short of memory; free seats below stay usable.
-    if (slotsFree >= 1 && typeof b.containerSlots === "function") {
-      slotsFree = (await b.containerSlots(host, slotsFree)).slots;
+    if (typeof b.containerSlots === "function") {
+      const gate = await b.containerSlots(host, slotsFree);
+      ram = { blocked: !!gate.blocked, reason: gate.reason || "", requested: slotsFree };
+      slotsFree = gate.slots;
     }
   }
-  if (slotsFree >= 1) return { seatCapacity: slotsFree * perBot, slotsFree, freeSeats: null };
+  if (slotsFree >= 1) {
+    return { seatCapacity: slotsFree * perBot, slotsFree, freeSeats: null, ram };
+  }
+  const runningOnly = ram.blocked;
   const freeSeats = await memo(
     hostCache,
-    "__farm2:freeSeats|" + (host ? host.id : "-"),
+    "__farm2:freeSeats|" + (host ? host.id : "-") + (runningOnly ? "|running" : ""),
     async () => {
       if (!host || typeof b.autoSeatCapacity !== "function") return 0;
-      const read = () => b.autoSeatCapacity(host, af, {});
+      const read = () => b.autoSeatCapacity(host, af, {}, { runningOnly });
       try {
         return Number(cycle ? await cycle.withHost(read) : await read()) || 0;
       } catch {
@@ -401,7 +413,7 @@ async function seatCapacityFor({ host, af, cycle, hostCache }) {
       }
     },
   );
-  return { seatCapacity: slotsFree * perBot + freeSeats, slotsFree, freeSeats };
+  return { seatCapacity: slotsFree * perBot + freeSeats, slotsFree, freeSeats, ram };
 }
 
 // Reuse-only games (World of Tanks / UFL) never draw a fresh pool account. The
@@ -422,8 +434,14 @@ async function recycledPoolCount(game) {
     typeof b.readyPoolQuery === "function" ? b.readyPoolQuery() : { status: "available" };
   // claimPoolAccounts ANDs the pristine-reserve filter into this pass
   // (2026-10-03), so the count does too — or a lane would plan a reuse-only
-  // farm on recycled accounts the claim is not allowed to take.
-  const pristineGuard = await require("../../pristineReserve").farmClaimFilter();
+  // farm on recycled accounts the claim is not allowed to take. A filter that
+  // cannot be read makes the claim take nothing, so it counts nothing here.
+  let pristineGuard;
+  try {
+    pristineGuard = await require("../../pristineReserve").farmClaimFilter();
+  } catch {
+    return 0;
+  }
   return AvailableAccount.countDocuments({
     $and: [
       {
@@ -687,11 +705,15 @@ async function decideCampaign({ campaign, lane, cycle, af, shadow, hostCache, ct
   const budget = cycle ? cycle.remainingAccounts(lane.gameKey) : uncovered;
   const target = Math.min(uncovered, budget);
   if (!Number.isFinite(target) || target < 1) {
+    // The legacy row's words, naming the pristine reserve when it is what
+    // holds the pool (autoFarmer.poolShortReason).
     return skip(
       "skip_no_accounts",
-      "Pool has no spendable accounts (reserve floor " +
-        af2.poolReserve +
-        " protects manual work) — will retry when the pool refills.",
+      typeof b.poolShortReason === "function"
+        ? b.poolShortReason(af2.poolReserve, cycle ? cycle.pristineHeld : 0)
+        : "Pool has no spendable accounts (reserve floor " +
+            af2.poolReserve +
+            " protects manual work) — will retry when the pool refills.",
       { targetAccounts: wanted, coverage },
     );
   }
@@ -703,12 +725,16 @@ async function decideCampaign({ campaign, lane, cycle, af, shadow, hostCache, ct
   if (cap.seatCapacity < 1) {
     return skip(
       "skip_no_capacity",
-      "All " +
-        af2.maxAutoBots +
-        " auto-bot slots on " +
-        (hostState.host ? hostState.host.label || hostState.host.id : "?") +
-        " are busy and no running bot has a free seat — queued; retries when a " +
-        "campaign ends and frees capacity.",
+      // The legacy row's words: a shut RAM gate is named with its host and
+      // MB, not reported as "all slots busy" (autoFarmer.capacityShortReason).
+      typeof b.capacityShortReason === "function"
+        ? b.capacityShortReason(af2, hostState.host, cap.ram)
+        : "All " +
+            af2.maxAutoBots +
+            " auto-bot slots on " +
+            (hostState.host ? hostState.host.label || hostState.host.id : "?") +
+            " are busy and no running bot has a free seat — queued; retries when a " +
+            "campaign ends and frees capacity.",
       // The legacy row keeps the intended plan on a capacity skip.
       { plannedAccounts: target, targetAccounts: wanted, coverage },
     );

@@ -27,11 +27,39 @@ const settings = require("../settings");
 // mode flip in the UI is picked up long before the next decision is made.
 const TTL_MS = 30 * 1000;
 
+// How long a lane-table read may take. A find over a dead connection can hang
+// without ever erroring, and the legacy tick awaits this read before it decides
+// (ensureFresh): an unbounded wait froze the whole tick, and every later tick
+// read "already running" (2026-10-03). maxTimeMS caps the query on the server;
+// the race caps the wait on this side, where a dead socket is. A read that
+// times out counts as unreadable — cold.
+const LANE_READ_MAX_MS = 10 * 1000;
+const REFRESH_TIMEOUT_MS = 15 * 1000;
+let refreshTimeoutMs = REFRESH_TIMEOUT_MS;
+
 const cache = {
+  // Games a LIVE, not-paused lane owns.
   keys: new Set(),
+  // EVERY lane, by gameKey -> { mode, state }: which games have a lane at all
+  // and why it does not own (off / shadow / paused). legacyMayDecide reads it.
+  lanes: new Map(),
   at: 0,
   loading: null,
 };
+
+// The timer is deliberately NOT unref'd: something is awaiting it, and an
+// unref'd timer let a process with nothing else pending exit mid-await. It is
+// always cleared when the read settles, so it never outlives the read.
+function withTimeout(promise, ms) {
+  let timer = null;
+  const timeout = new Promise((resolve, reject) => {
+    timer = setTimeout(
+      () => reject(new Error("lane table read timed out after " + ms + " ms")),
+      ms,
+    );
+  });
+  return Promise.race([Promise.resolve(promise), timeout]).finally(() => clearTimeout(timer));
+}
 
 // Set by utils/farm2/index.js start()/stop(). While false, farm2 is not running
 // its loop at all, so it cannot own anything — this is what makes "engine not
@@ -96,15 +124,26 @@ async function refresh() {
     await null;
     try {
       const FarmLane = require("../../models/FarmLane");
-      // A PAUSED live lane owns nothing. Pausing means the lane failed
-      // PAUSE_AFTER_FAILURES cycles in a row and stopped retrying; if it kept
-      // ownership, its game would be farmed by nobody — the exact "owned by
-      // nobody" outage this module exists to prevent. Releasing it lets the
-      // legacy engine cover the game until an operator re-arms the lane.
-      const rows = await FarmLane.find({ mode: "live", state: { $ne: "paused" } })
-        .select("gameKey")
-        .lean();
-      cache.keys = new Set(rows.map((r) => r.gameKey).filter(Boolean));
+      // EVERY lane is read (one row per game, a few dozen): legacyMayDecide
+      // needs to know a game has no lane at all, not only that none owns it.
+      let query = FarmLane.find({}).select("gameKey mode state");
+      if (typeof query.maxTimeMS === "function") query = query.maxTimeMS(LANE_READ_MAX_MS);
+      const rows = await withTimeout(query.lean(), refreshTimeoutMs);
+      const lanes = new Map();
+      const owned = new Set();
+      for (const r of rows || []) {
+        if (!r || !r.gameKey) continue;
+        lanes.set(r.gameKey, { mode: r.mode, state: r.state });
+        // Only mode "live" confers ownership, and a PAUSED live lane owns
+        // nothing. Pausing means the lane failed PAUSE_AFTER_FAILURES cycles
+        // in a row and stopped retrying; if it kept ownership, its game would
+        // be farmed by nobody — the exact "owned by nobody" outage this module
+        // exists to prevent. Releasing it lets the legacy engine cover the
+        // game until an operator re-arms the lane.
+        if (r.mode === "live" && r.state !== "paused") owned.add(r.gameKey);
+      }
+      cache.keys = owned;
+      cache.lanes = lanes;
       cache.at = Date.now();
     } catch {
       // Fail safe: an unreadable lane table means "farm2 owns nothing", so the
@@ -113,7 +152,9 @@ async function refresh() {
       // TTL — and so isCold() can tell "the table could not be read" from "the
       // table was read and no lane is live" (2026-10-03: before, a failed read
       // after an earlier good one kept the old timestamp, so it looked warm).
+      // A read that timed out lands here too.
       cache.keys = new Set();
+      cache.lanes = new Map();
       cache.at = 0;
     } finally {
       cache.loading = null;
@@ -174,13 +215,60 @@ function invalidate() {
 // all of them — 20 legacy decisions since main mode went on (2026-09-06), every
 // one right after a restart or a lane auto-create (10-02 00:01: The Quinfall,
 // +19 accounts). The legacy tick awaits this once before its loop instead.
+//
+// Bounded: the tick waits about REFRESH_TIMEOUT_MS here at most, whatever the
+// read does, and a read that does not answer in time leaves the cache cold (in
+// main mode the tick then defers its decisions and still runs its sweeps). The
+// read's own timeout, inside refresh(), fires first: it also frees the
+// in-flight slot, so the next refresh starts a NEW read instead of re-awaiting
+// the dead one. The race here, a second later, is only the backstop.
+const ENSURE_FRESH_MARGIN_MS = 1000;
 async function ensureFresh() {
   try {
     if (!engineRunning) return;
     if (!killSwitchOn()) return;
-    if (Date.now() - cache.at > TTL_MS) await refresh();
+    if (Date.now() - cache.at > TTL_MS) {
+      await withTimeout(refresh(), refreshTimeoutMs + ENSURE_FRESH_MARGIN_MS);
+    }
   } catch {
-    /* refresh() is already fail-safe; this guard only keeps the promise */
+    // Only the race above can land here (refresh() never rejects): the read
+    // is still out, so ownership is unknown.
+    cache.at = 0;
+  }
+}
+
+// May the LEGACY engine decide this game's campaigns? Synchronous, never
+// throws; the legacy candidate loop asks it after ensureFresh().
+//
+// Outside main mode (or with the lane engine not running) this is the old
+// rule: legacy decides every game no live lane owns. In MAIN mode the lane
+// engine is THE engine, so legacy decides only what the lanes will never take:
+//   - a game whose normalised key is empty (the supervisor cannot key a lane
+//     for it, e.g. an all-non-Latin name),
+//   - a game whose lane is off or shadow (the operator kept it on legacy),
+//   - a game whose lane is paused (released until an operator re-arms it).
+// A game with NO lane yet is deferred: the supervisor creates its lane at the
+// start of its next cycle (3 min). Deciding it here raced that lane — the lane
+// read legacy's still-executing "planned" row as stranded and ran a second
+// executeTask on it (2026-10-03, The Quinfall shape).
+// An unreadable lane table (cold) answers false in main mode as well; the
+// legacy tick reports that case as "decisions deferred: lane ownership unknown".
+function legacyMayDecide(game) {
+  try {
+    if (!engineRunning) return true;
+    // One settings read for both switches: this runs once per live campaign.
+    const af = settings.getAutoFarm();
+    if (af.farm2Enabled !== true) return true;
+    if (af.farm2Main !== true) return !isOwned(game);
+    const key = normKey(game);
+    if (!key) return true;
+    if (Date.now() - cache.at > TTL_MS) refresh().catch(() => {});
+    if (!cache.at) return false;
+    if (cache.keys.has(key)) return false;
+    return cache.lanes.has(key);
+  } catch {
+    // A bug here must not leave a game to nobody: the old answer.
+    return true;
   }
 }
 
@@ -194,6 +282,11 @@ function isCold() {
   return engineRunning && killSwitchOn() && !cache.at;
 }
 
+// Tests only: shorten the read timeout so a hung read can be exercised.
+function _setRefreshTimeoutForTests(ms) {
+  refreshTimeoutMs = Number(ms) > 0 ? Number(ms) : REFRESH_TIMEOUT_MS;
+}
+
 module.exports = {
   isOwned,
   isOwnedAsync,
@@ -202,6 +295,8 @@ module.exports = {
   refresh,
   ensureFresh,
   isCold,
+  legacyMayDecide,
+  _setRefreshTimeoutForTests,
   setEngineRunning,
   killSwitchOn,
   isMain,

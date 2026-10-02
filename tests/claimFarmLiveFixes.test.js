@@ -30,7 +30,12 @@ const realLoad = Module._load;
 Module._load = function (request, parent, isMain) {
   if (parent && parent.filename && /^\.\.?\//.test(request)) {
     const abs = path.resolve(path.dirname(parent.filename), request).replace(/\.js$/, "");
-    if (STUBS.has(abs)) return STUBS.get(abs);
+    if (STUBS.has(abs)) {
+      const s = STUBS.get(abs);
+      // An Error stub is a module that fails to load (a partial deploy).
+      if (s instanceof Error) throw s;
+      return s;
+    }
   }
   return realLoad.call(this, request, parent, isMain);
 };
@@ -107,6 +112,8 @@ function resetCalls() {
     lanesRead: 0,
     requeue: 0,
     counted: [],
+    telegram: [],
+    events: [],
   };
 }
 resetCalls();
@@ -142,6 +149,8 @@ const farmControl = stub("farmControl", {});
 
 const HOST = { id: "contabo", label: "Contabo", transport: "ssh" };
 const hosts = stub("botHosts", {});
+// Container states `docker ps` reports on the farm host (name -> state).
+let DOCKER = {};
 function resetHosts() {
   for (const k of Object.keys(hosts)) delete hosts[k];
   Object.assign(hosts, {
@@ -153,7 +162,10 @@ function resetHosts() {
     },
     readFiles: async () => ({}),
     exists: async () => false,
-    dockerPs: async () => ({}),
+    dockerPs: async () =>
+      Object.fromEntries(
+        Object.entries(DOCKER).map(([name, st]) => [name, { state: st, status: st }]),
+      ),
     dockerContainer: async (h, action, container) => {
       calls.docker.push({ action, container });
     },
@@ -191,7 +203,11 @@ stub("botWaker", {
 });
 stub("marketplaces", { keyStatus: () => ({ ggsel: { configured: true } }) });
 stub("marketResearch", { refreshGame: async () => null });
-stub("telegram", { sendTelegram: async () => {} });
+stub("telegram", {
+  sendTelegram: async (text) => {
+    calls.telegram.push(text);
+  },
+});
 stub("suspendedAccounts", { sweep: async () => ({}), suspendedLoginSet: async () => new Set() });
 stub("deadTokenRetire", { retireSoldDeadTokens: async () => ({}) });
 stub("poolUsageLog", {
@@ -215,7 +231,11 @@ stub("autoLister", {
   listActivatedTask: async () => ({}),
   listStackedBundle: async () => ({}),
 });
-stub("systemLog", { logEvent: () => {} });
+stub("systemLog", {
+  logEvent: (e) => {
+    calls.events.push(e);
+  },
+});
 stub("farm2/jobs", {
   requeueStale: async () => {
     calls.requeue += 1;
@@ -271,6 +291,7 @@ function q(value) {
     sort: () => chain,
     select: () => chain,
     limit: () => chain,
+    maxTimeMS: () => chain,
     then: (ok, bad) => settle().then(ok, bad),
     catch: (bad) => settle().catch(bad),
   };
@@ -286,6 +307,10 @@ let CAMPAIGNS;
 let SALES;
 let READY;
 let LANES;
+// The (game, campaignId) rows the legacy candidate loop finds for live campaigns.
+let EXISTING;
+const RESERVE_STUB = STUBS.get(path.join(UTILS, "pristineReserve"));
+const lane = (gameKey, mode = "live", state = "idle") => ({ gameKey, mode, state });
 
 function isActiveTaskQuery(filter) {
   return (
@@ -315,10 +340,18 @@ test.beforeEach(() => {
   SALES = [];
   READY = 100;
   LANES = () => [];
+  EXISTING = [];
+  DOCKER = {};
+  STUBS.set(path.join(UTILS, "pristineReserve"), RESERVE_STUB);
+  if (typeof ownership._setRefreshTimeoutForTests === "function") {
+    ownership._setRefreshTimeoutForTests(0); // back to the shipped 15 s
+  }
   ownership.setEngineRunning(false);
 
   AutoFarmTask.find = (filter = {}) =>
     q(() => {
+      // The legacy candidate loop's (game, campaignId) lookup.
+      if (filter.$or && filter.$or.every((x) => x.game && x.campaignId)) return EXISTING;
       if (!isActiveTaskQuery(filter)) return [];
       const not = filter._id && filter._id.$ne;
       return ACTIVE_TASKS.filter((t) => not === undefined || String(t._id) !== String(not));
@@ -363,10 +396,16 @@ test.beforeEach(() => {
   SaleSignal.aggregate = (pipeline) => Promise.resolve(runPipeline(SALES, pipeline));
   DropLog.aggregate = async () => [];
   DropLog.distinct = () => q([]);
-  FarmLane.find = () => {
+  // Honours the query, as Mongo would (the evaluator below), so a code path
+  // that filters in the query and one that filters in JS read the same rows.
+  FarmLane.find = (filter = {}) => {
     calls.lanesRead += 1;
-    return q(() => LANES());
+    return q(() => {
+      const rows = LANES();
+      return rows instanceof Error ? rows : rows.filter((r) => matches(filter, r));
+    });
   };
+  FarmLane.create = async (doc) => doc;
   BotAccount.find = () => q([]);
   MarketplaceListing.find = () => q([]);
   RenterAccount.find = () => q([]);
@@ -409,6 +448,24 @@ function expr(e, doc) {
       const v = expr(a, doc);
       return v == null ? "" : String(v).toLowerCase();
     }
+    if (op === "$trim") {
+      const v = expr(a.input, doc);
+      if (v == null) return null;
+      const chars = a.chars == null ? " \t\n\r" : String(expr(a.chars, doc));
+      let s = String(v);
+      while (s && chars.includes(s[0])) s = s.slice(1);
+      while (s && chars.includes(s[s.length - 1])) s = s.slice(0, -1);
+      return s;
+    }
+    if (op === "$in") {
+      const [x, arr] = expr(a, doc);
+      return (arr || []).some((y) => same(x, y));
+    }
+    if (op === "$literal") return a;
+    if (op === "$eq") {
+      const [x, y] = expr(a, doc);
+      return same(x, y);
+    }
     throw new Error("evaluator: unsupported expression " + op);
   }
   return e;
@@ -421,6 +478,8 @@ function valueMatches(cond, v) {
     if (op === "$in") return arg.some((x) => valueMatches(x, v));
     if (op === "$gte") return v != null && cmp(v, arg) >= 0;
     if (op === "$gt") return v != null && typeof v === typeof arg && cmp(v, arg) > 0;
+    if (op === "$lte") return v != null && cmp(v, arg) <= 0;
+    if (op === "$lt") return v != null && cmp(v, arg) < 0;
     if (op === "$ne") return !same(arg, v);
     if (op === "$not") return !valueMatches(arg, v);
     throw new Error("evaluator: unsupported query operator " + op);
@@ -432,6 +491,7 @@ function matches(query, doc) {
     if (k === "$and") return cond.every((c) => matches(c, doc));
     if (k === "$or") return cond.some((c) => matches(c, doc));
     if (k === "$nor") return !cond.some((c) => matches(c, doc));
+    if (k === "$expr") return !!expr(cond, doc);
     return valueMatches(cond, getPath(doc, k));
   });
 }
@@ -563,7 +623,7 @@ function progressLines() {
 
 test("ensureFresh reads a stale lane table before the hot loop asks", async () => {
   mainMode();
-  LANES = () => [{ gameKey: "albion online" }];
+  LANES = () => [lane("albion online")];
   ownership.setEngineRunning(true);
   assert.equal(ownership.isCold(), true, "fixture: a fresh start is cold");
   await ownership.ensureFresh();
@@ -597,7 +657,7 @@ test("a lane read that throws synchronously does not wedge every later refresh (
   await ownership.refresh();
   FarmLane.find = () => {
     calls.lanesRead += 1;
-    return q([{ gameKey: "albion online" }]);
+    return q([lane("albion online")]);
   };
   await ownership.refresh();
   assert.equal(calls.lanesRead, 1, "the second refresh really read the table");
@@ -606,7 +666,7 @@ test("a lane read that throws synchronously does not wedge every later refresh (
 
 test("a failed read after a good one is cold, not a warm empty set", async () => {
   mainMode();
-  LANES = () => [{ gameKey: "albion online" }];
+  LANES = () => [lane("albion online")];
   ownership.setEngineRunning(true);
   await ownership.refresh();
   assert.equal(ownership.isCold(), false);
@@ -628,6 +688,41 @@ test("ensureFresh reads nothing while the lane engine is stopped or switched off
   assert.equal(calls.lanesRead, 0);
 });
 
+test("legacyMayDecide in main mode: only the games no lane will take (old bytes: no such rule)", async () => {
+  mainMode();
+  LANES = () => [
+    lane("game a"),
+    lane("game b", "shadow"),
+    lane("game c", "off"),
+    lane("game d", "live", "paused"),
+    lane("game e", "live", "error"),
+  ];
+  ownership.setEngineRunning(true);
+  await ownership.refresh();
+  assert.equal(ownership.legacyMayDecide("Game A"), false, "a live lane decides it");
+  assert.equal(ownership.legacyMayDecide("Game B"), true, "shadow: the legacy engine still farms it");
+  assert.equal(ownership.legacyMayDecide("Game C"), true, "off");
+  assert.equal(ownership.legacyMayDecide("Game D"), true, "paused: released to legacy");
+  assert.equal(ownership.legacyMayDecide("Game E"), false, "an erroring live lane still owns its game");
+  assert.equal(ownership.legacyMayDecide("The Quinfall"), false, "no lane yet: the supervisor creates one");
+  assert.equal(ownership.legacyMayDecide("原神"), true, "no key: no lane can ever take it");
+  LANES = () => new Error("db down");
+  await ownership.refresh();
+  assert.equal(ownership.legacyMayDecide("Game B"), false, "unknown ownership defers in main mode");
+});
+
+test("legacyMayDecide outside main mode, or with the lane engine stopped, is the old rule", async () => {
+  AF = { ...AF, farm2Enabled: true, farm2Main: false };
+  LANES = () => [lane("game a")];
+  ownership.setEngineRunning(true);
+  await ownership.refresh();
+  assert.equal(ownership.legacyMayDecide("Game A"), false, "owned by its live lane");
+  assert.equal(ownership.legacyMayDecide("The Quinfall"), true, "trial mode: no lane, legacy decides");
+  mainMode();
+  ownership.setEngineRunning(false);
+  assert.equal(ownership.legacyMayDecide("The Quinfall"), true, "nobody would create its lane");
+});
+
 test("main mode, lane table unreadable: the legacy tick defers every decision (old bytes decided them all)", async () => {
   mainMode();
   LIVE = [campaign("Game A", "a1"), campaign("Game B", "b1")];
@@ -647,7 +742,7 @@ test("main mode right after a boot or lane auto-create: the lane table is read f
   // readable, and the legacy tick still decided the lane's game.
   mainMode();
   LIVE = [campaign("Game A", "a1"), campaign("Game B", "b1")];
-  LANES = () => [{ gameKey: "game a" }];
+  LANES = () => [lane("game a"), lane("game b", "shadow")];
   ownership.setEngineRunning(true); // cold, exactly as at boot
   await autoFarmer.runOnce();
   assert.deepEqual(
@@ -656,10 +751,10 @@ test("main mode right after a boot or lane auto-create: the lane table is read f
   );
 });
 
-test("main mode with a warm cache decides exactly as before (lane games skipped, the rest decided)", async () => {
+test("main mode with a warm cache: a live lane's game is skipped, a shadow lane's still decided by legacy", async () => {
   mainMode();
   LIVE = [campaign("Game A", "a1"), campaign("Game B", "b1")];
-  LANES = () => [{ gameKey: "game a" }];
+  LANES = () => [lane("game a"), lane("game b", "shadow")];
   ownership.setEngineRunning(true);
   await ownership.refresh();
   await autoFarmer.runOnce();
@@ -668,6 +763,23 @@ test("main mode with a warm cache decides exactly as before (lane games skipped,
     ["Game B"],
   );
   assert.equal(calls.records[0].decision, "skip_host_offline", "fixture: no farm host, so the gate records host-offline");
+});
+
+test("main mode: a brand-new game with no lane yet is left to the supervisor (old bytes: legacy farmed it, 30 claimed)", async () => {
+  // Review proof p1: the campaign watcher has just upserted The Quinfall's
+  // first campaign; its lane comes at the supervisor's next cycle start.
+  mainMode();
+  AF = { ...AF, dryRun: false, hostId: "contabo" };
+  LANES = () => [lane("albion online")];
+  LIVE = [campaign("Albion Online", "a1"), campaign("The Quinfall", "q1")];
+  MarketResearch.findOne = () => q({ game: "x", demandScore: 45, scannedAt: new Date(), sellers: 9 });
+  ownership.setEngineRunning(true);
+  await ownership.refresh();
+  const summary = await autoFarmer.runOnce();
+  assert.deepEqual(calls.records, []);
+  assert.equal(calls.claimed, 0);
+  assert.deepEqual(summary.awaitingLane, ["The Quinfall"]);
+  assert.ok(progressLines().some((m) => /no lane yet/.test(m) && /The Quinfall/.test(m)));
 });
 
 test("outside main mode an unreadable lane table keeps the old fail-safe: the legacy engine decides", async () => {
@@ -685,6 +797,130 @@ test("main mode but the lane engine is not running: the legacy engine decides", 
   ownership.setEngineRunning(false);
   await autoFarmer.runOnce();
   assert.deepEqual(calls.records.map((r) => r.game), ["Game A"]);
+});
+
+/* ============ a planned row is not stranded while it may execute ============ */
+
+test("isStranded dates a plan: one touched in the last 15 min may still be executing (old bytes: stranded at once)", () => {
+  const now = Date.now();
+  const min = 60000;
+  assert.equal(autoFarmer.isStranded({ status: "planned", decidedAt: new Date(now - min) }), false);
+  assert.equal(autoFarmer.isStranded({ status: "planned", decidedAt: new Date(now - 16 * min) }), true);
+  assert.equal(
+    autoFarmer.isStranded({ status: "planned", decidedAt: new Date(now - 20 * min), updatedAt: new Date(now - min) }),
+    false,
+    "touched a minute ago",
+  );
+  assert.equal(autoFarmer.isStranded({ status: "planned" }), true, "an undated plan keeps the old answer");
+  assert.equal(autoFarmer.isStranded({ status: "failed", bots: [] }), true);
+  assert.equal(autoFarmer.isStranded({ status: "failed", bots: [{ container: "x" }] }), false);
+});
+
+test("a lane does not re-decide a planned row another engine may still be executing (old bytes: 'stranded')", () => {
+  // Review proof p1b: legacy's executeTask was mid-claim on The Quinfall when
+  // the new lane read the row as stranded and queued a second executeTask.
+  const realLane = require(path.join(UTILS, "farm2", "lane.js"));
+  const fresh = realLane.decisionDue({
+    existing: { status: "planned", decision: "farm", bots: [], decidedAt: new Date() },
+    shadow: false,
+    af: { dryRun: false },
+  });
+  assert.deepEqual(fresh, { due: false, why: "settled" });
+  const old = realLane.decisionDue({
+    existing: { status: "planned", decision: "farm", bots: [], decidedAt: hoursAgo(1) },
+    shadow: false,
+    af: { dryRun: false },
+  });
+  assert.deepEqual(old, { due: true, why: "stranded" });
+});
+
+test("the legacy tick leaves a fresh planned row alone and re-decides a stale one", async () => {
+  AF = { ...AF, dryRun: false };
+  LIVE = [campaign("Game A", "a1"), campaign("Game B", "b1")];
+  EXISTING = [
+    { game: "Game A", campaignId: "a1", status: "planned", decision: "farm", bots: [], decidedAt: new Date() },
+    { game: "Game B", campaignId: "b1", status: "planned", decision: "farm", bots: [], decidedAt: hoursAgo(1) },
+  ];
+  await autoFarmer.runOnce();
+  assert.deepEqual(calls.records.map((r) => r.game), ["Game B"]);
+});
+
+/* ============== a long stall is said out loud, and loops report ok ============== */
+
+test("three deferred ticks in a row raise one alarm; a readable tick re-arms it (old bytes: silent)", async () => {
+  await autoFarmer.runOnce(); // a readable tick first: the count starts at 0
+  mainMode();
+  LIVE = [campaign("Game A", "a1")];
+  LANES = () => new Error("db down");
+  ownership.setEngineRunning(true);
+  const alarms = () =>
+    calls.telegram.filter((t) => /legacy decisions deferred \d+ ticks: lane ownership unreadable/.test(t));
+  await autoFarmer.runOnce();
+  await autoFarmer.runOnce();
+  assert.equal(alarms().length, 0, "two ticks are a blip");
+  await autoFarmer.runOnce();
+  assert.equal(alarms().length, 1);
+  assert.ok(calls.events.some((e) => e.action === "decisions_deferred" && e.count === 3));
+  await autoFarmer.runOnce();
+  assert.equal(alarms().length, 1, "one alarm per stall");
+  LANES = () => [lane("game a")];
+  await autoFarmer.runOnce();
+  LANES = () => new Error("db down");
+  for (let i = 0; i < 3; i++) {
+    ownership.invalidate(); // ten minutes pass between ticks: the 30 s cache is stale
+    await autoFarmer.runOnce();
+  }
+  assert.equal(alarms().length, 2, "a new stall alarms again");
+});
+
+test("autoFarmer.loopStatus: lastOkAt is the last tick that decided; a deferred tick is not ok (old bytes: no lastOkAt)", async () => {
+  await autoFarmer.runOnce();
+  const ok1 = autoFarmer.loopStatus();
+  assert.ok(ok1.lastOkAt instanceof Date);
+  assert.equal(ok1.lastError, "");
+  await new Promise((r) => setTimeout(r, 5));
+  mainMode();
+  LANES = () => new Error("db down");
+  ownership.setEngineRunning(true);
+  await autoFarmer.runOnce();
+  const s = autoFarmer.loopStatus();
+  assert.equal(s.lastOkAt.getTime(), ok1.lastOkAt.getTime(), "a deferred tick is not ok");
+  assert.match(s.lastError, /^decisions deferred: lane ownership unknown/);
+  assert.ok(s.lastTickAt.getTime() > ok1.lastOkAt.getTime(), "lastTickAt is stamped as before");
+});
+
+test("supervisor.loopStatus: a cycle whose FarmLane read failed is not ok (old bytes: no lastOkAt)", async () => {
+  AF = { ...AF, enabled: true, farm2Enabled: true, farm2Main: false };
+  await supervisor.runCycle();
+  const ok1 = supervisor.loopStatus();
+  assert.ok(ok1.lastOkAt instanceof Date);
+  assert.equal(ok1.lastError, "");
+  await new Promise((r) => setTimeout(r, 5));
+  FarmLane.find = () => q(new Error("FarmLane read failed"));
+  const r = await supervisor.runCycle();
+  assert.equal(r.error, "FarmLane read failed");
+  const s = supervisor.loopStatus();
+  assert.equal(s.lastOkAt.getTime(), ok1.lastOkAt.getTime());
+  assert.equal(s.lastError, "FarmLane read failed");
+  assert.ok(s.lastRun.getTime() > ok1.lastOkAt.getTime());
+});
+
+test("a failed lane auto-create makes the cycle not ok, and one bad game does not block the rest (old bytes: stopped at it)", async () => {
+  AF = { ...AF, enabled: true, farm2Enabled: true, farm2Main: true };
+  LIVE = [campaign("Good Game", "g1"), campaign("Bad Game", "x1"), campaign("Other Game", "o1")];
+  const created = [];
+  FarmLane.create = async (doc) => {
+    if (doc.game === "Bad Game") throw new Error("validation failed");
+    created.push(doc.game);
+    return doc;
+  };
+  const before = supervisor.loopStatus().lastOkAt;
+  const r = await supervisor.runCycle();
+  assert.deepEqual(created.sort(), ["Good Game", "Other Game"]);
+  assert.deepEqual(r.autoCreated.sort(), ["Good Game", "Other Game"]);
+  const s = supervisor.loopStatus();
+  assert.match(s.lastError, /^auto-lanes: could not create lane\(s\): Bad Game: validation failed/);
+  assert.equal(s.lastOkAt === before || (s.lastOkAt && before && s.lastOkAt.getTime() === before.getTime()), true);
 });
 
 /* ======================= defect 9: the market floor ======================= */
@@ -908,6 +1144,49 @@ test("pairQuantityUnits: the earliest qualifying connection wins and is used onc
   assert.deepEqual(taken, { count: 1, revenue: 1, priced: 1, paired: 1 }, "c is the named sale's (via its account)");
 });
 
+test("a failed pairing read keeps the game's sales: every unit counts once (review p3b; old bytes: 0 for the whole game)", async () => {
+  SALES = [
+    connected("bravo", "acc-bravo", hoursAgo(20)),
+    signal({ source: "listing_sold", login: "gf_user", account: "acc-gf", priceUsd: 3, marketplace: "gameflip", at: hoursAgo(10) }),
+    quantityUnit("alpha, bravo", hoursAgo(30), 2),
+    quantityUnit("alpha, bravo", hoursAgo(29), 2),
+  ];
+  let reads = 0;
+  SaleSignal.aggregate = (pipeline) => {
+    reads += 1;
+    if (reads > 1) return Promise.reject(new Error("BSONObjectTooLarge"));
+    return Promise.resolve(runPipeline(SALES, pipeline));
+  };
+  const s = await autoFarmer.internalSalesForGame("World of Tanks");
+  assert.equal(reads, 2);
+  assert.equal(s.count, 4, "2 account-grouped sales + 2 units, each its own sale");
+  assert.equal(s.revenue, 7);
+});
+
+test("the pairing read returns only rows that can pair with the pools, however much the game sells (old bytes: every named row)", async () => {
+  SALES = [quantityUnit("alpha, bravo", hoursAgo(30), 2), connected("bravo", "acc-bravo", hoursAgo(20))];
+  for (let i = 0; i < 50; i++) {
+    SALES.push(signal({ source: "listing_sold", login: "seller_" + i, account: "acc-s" + i, priceUsd: 1, at: hoursAgo(5) }));
+  }
+  // A login-less named sale on bravo's account: through the connection it
+  // names bravo, so the unit cannot be bravo's sale.
+  SALES.push(signal({ source: "listing_sold", login: "", account: "acc-bravo", priceUsd: 1, at: hoursAgo(4) }));
+  const outs = [];
+  SaleSignal.aggregate = (pipeline) => {
+    const out = runPipeline(SALES, pipeline);
+    outs.push(out);
+    return Promise.resolve(out);
+  };
+  const s = await autoFarmer.internalSalesForGame("World of Tanks");
+  assert.equal(outs.length, 2);
+  const second = outs[1][0];
+  const rows = Object.values(second).reduce((n, arr) => n + arr.length, 0);
+  assert.ok(rows <= 2, "bravo's connection and one login-less account: " + JSON.stringify(second));
+  // 51 account groups (bravo's, the 50 sellers'), plus the unit unpaired.
+  assert.equal(s.count, 52);
+  assert.equal(s.revenue, 53);
+});
+
 /* ================== defect 13: the pristine reserve ================== */
 
 function albionTask(over = {}) {
@@ -965,45 +1244,58 @@ test("a pristine filter that fails mid-claim stops claiming but hands back what 
   }
 });
 
-test("executeTask leaves the pristine reserve alone (old bytes: claimed 30)", async () => {
-  GUARD.protect = 75; // 100 ready - 20 reserve - 75 protected = 5 spendable
+test("executeTask leaves the pristine reserve alone: ready - max(poolReserve, hold) (old bytes: claimed 5)", async () => {
+  // 100 ready, reserve floor 20, the pristine reserve holding 75: the held
+  // accounts ARE ready accounts and stand as the floor too, so 25 are
+  // spendable — the sum (100 - 20 - 75 = 5) counted the overlap twice.
+  GUARD.protect = 75;
   const r = await autoFarmer.executeTask(albionTask(), { af: { ...AF, dryRun: false }, host: HOST });
-  assert.equal(r.accounts, 5);
-  assert.equal(calls.claimed, 5);
+  assert.equal(r.accounts, 25);
+  assert.equal(calls.claimed, 25);
+});
+
+test("with the hold under the floor, the floor alone binds (the old arithmetic)", async () => {
+  GUARD.protect = 10; // max(20, 10) = 20 -> 80 spendable, capped by the plan's 30
+  const r = await autoFarmer.executeTask(albionTask(), { af: { ...AF, dryRun: false }, host: HOST });
+  assert.equal(r.accounts, 30);
 });
 
 test("executeTask's shortage message names the pristine reserve", async () => {
-  GUARD.protect = 80;
+  GUARD.protect = 100;
   await assert.rejects(
     autoFarmer.executeTask(albionTask(), { af: { ...AF, dryRun: false }, host: HOST }),
-    /reserve 20 \+ 80 pristine kept for rent-farm orders/,
+    /reserve 20; the pristine reserve is holding 100 for rent-farm orders/,
   );
   assert.equal(calls.claimed, 0);
 });
 
-test("the legacy tick's fair share leaves the pristine reserve alone (old bytes: planned a farm)", async () => {
+test("the legacy tick's fair share leaves the pristine reserve alone, and the row names it", async () => {
   AF = { ...AF, hostId: "contabo" };
   LIVE = [campaign("Fresh Game", "f1")];
-  GUARD.protect = 80;
+  GUARD.protect = 100;
   const summary = await autoFarmer.runOnce();
   assert.equal(summary.poolSpendable, 0);
   assert.equal(calls.records.length, 1);
   assert.equal(calls.records[0].decision, "skip_no_accounts");
-  assert.match(calls.records[0].reason, /80 pristine account\(s\) are kept for rent-farm orders/);
+  assert.match(
+    calls.records[0].reason,
+    /the pristine reserve is holding 100 account\(s\) for rent-farm orders/,
+  );
 });
 
-test("backfill leaves the pristine reserve alone (old bytes: claimed 18)", async () => {
-  GUARD.protect = 70; // 100 - 20 - 70 = 10 spendable
+test("backfill leaves the pristine reserve alone (old bytes: claimed none)", async () => {
+  GUARD.protect = 90; // 100 - max(20, 90) = 10 spendable
   liveTickWith(huntTask());
   await autoFarmer.runOnce();
   assert.equal(calls.claimed, 10);
 });
 
-test("the farm2 cycle budget leaves the pristine reserve alone (old bytes: 80)", async () => {
+test("the farm2 cycle budget leaves the pristine reserve alone: ready - max(floor, hold) (old bytes: 50)", async () => {
   GUARD.protect = 30;
   const cycle = await budget.computeCycleBudget({ ...AF, hostId: "contabo" });
-  assert.equal(cycle.totalAccounts, 50);
+  assert.equal(cycle.totalAccounts, 70);
   assert.equal(cycle.totalContainers, 20);
+  assert.equal(cycle.pristineHeld, 30);
 });
 
 test("a lane's reuse-only count applies the same pristine filter as the claim", async () => {
@@ -1039,16 +1331,38 @@ function laneCtx() {
   };
 }
 
+// A running bot (twitchbotx5) and/or a parked one (twitchbotx6), each with 3
+// of 10 seats used, on one active task.
+function seatFixture({ running = true, parked = false } = {}) {
+  const bots = [];
+  if (running) bots.push({ host: "contabo", file: "config_5.json", container: "twitchbotx5" });
+  if (parked) bots.push({ host: "contabo", file: "config_6.json", container: "twitchbotx6" });
+  ACTIVE_TASKS = [{ _id: "shared", status: "active", bots, assignedAccounts: [] }];
+  DOCKER = {};
+  if (running) DOCKER.twitchbotx5 = "running";
+  if (parked) DOCKER.twitchbotx6 = "exited";
+  hosts.readFile = async () =>
+    JSON.stringify({
+      TwitchSettings: {
+        TwitchUsers: [1, 2, 3].map((i) => ({ Login: "u" + i, ClientSecret: "s" + i, Enabled: true })),
+      },
+    });
+}
+
 test("farm2 budget: no NEW container while the host is short of RAM; accounts untouched (old bytes: 20 containers)", async () => {
   RAM.ok = false;
   const cycle = await budget.computeCycleBudget({ ...AF, hostId: "contabo" });
   assert.equal(cycle.totalContainers, 0);
   assert.equal(cycle.totalSeats, 0);
   assert.equal(cycle.totalAccounts, 80);
-  assert.match(cycle.reason, /no new container: farm host Contabo is short of RAM \(900 MB available, minimum 1500 MB\)/);
+  assert.equal(cycle.ramBlocked, true);
+  assert.match(
+    cycle.reason,
+    /no new container: the RAM gate is shut on Contabo \(900 MB available, minimum 1500 MB\)/,
+  );
 });
 
-test("farm2 budget: at the container cap the RAM gate is not even read", async () => {
+test("farm2 budget: at the container cap the RAM gate is still read, so parked seats can be ruled out", async () => {
   ACTIVE_TASKS = [
     {
       _id: "full",
@@ -1056,9 +1370,12 @@ test("farm2 budget: at the container cap the RAM gate is not even read", async (
       bots: Array.from({ length: 20 }, (_, i) => ({ host: "contabo", container: "twitchbotx" + i })),
     },
   ];
+  RAM.ok = false;
   const cycle = await budget.computeCycleBudget({ ...AF, hostId: "contabo" });
   assert.equal(cycle.totalContainers, 0);
-  assert.deepEqual(calls.ram, []);
+  assert.deepEqual(calls.ram, ["contabo"]);
+  assert.equal(cycle.ramBlocked, true);
+  assert.equal(cycle.ramDenied, 0, "the cap, not RAM, took the slots");
 });
 
 test("a lane deciding without a cycle creates no container on a host short of RAM (old bytes: planned a probe)", async () => {
@@ -1082,36 +1399,22 @@ test("a lane deciding without a cycle creates no container on a host short of RA
   assert.equal(ok.decision, "probe");
 });
 
-test("the legacy decision records skip_no_capacity, naming RAM, when no container may be created and no seat is free", async () => {
+test("the legacy decision records skip_no_capacity, naming the RAM gate, when no container may be created and no seat is free", async () => {
   AF = { ...AF, hostId: "contabo" };
   LIVE = [campaign("Fresh Game", "f1")];
   RAM.ok = false;
   await autoFarmer.runOnce();
   assert.equal(calls.records.length, 1);
   assert.equal(calls.records[0].decision, "skip_no_capacity");
-  assert.match(calls.records[0].reason, /No new bot container: farm host Contabo is short of RAM/);
+  assert.match(
+    calls.records[0].reason,
+    /No new bot container: the RAM gate is shut on Contabo \(900 MB available, minimum 1500 MB\)/,
+  );
 });
 
 test("executeTask fills free seats in running bots but creates no container while RAM is short (old bytes: created bots)", async () => {
   AF = { ...AF, consolidate: true };
-  ACTIVE_TASKS = [
-    {
-      _id: "shared",
-      status: "active",
-      bots: [{ host: "contabo", file: "config_5.json", container: "twitchbotx5" }],
-      assignedAccounts: [],
-    },
-  ];
-  hosts.readFile = async () =>
-    JSON.stringify({
-      TwitchSettings: {
-        TwitchUsers: [
-          { Login: "u1", ClientSecret: "s1", Enabled: true },
-          { Login: "u2", ClientSecret: "s2", Enabled: true },
-          { Login: "u3", ClientSecret: "s3", Enabled: true },
-        ],
-      },
-    });
+  seatFixture({ running: true });
   RAM.ok = false;
   const r = await autoFarmer.executeTask(albionTask(), {
     af: { ...AF, dryRun: false, consolidate: true },
@@ -1122,11 +1425,67 @@ test("executeTask fills free seats in running bots but creates no container whil
   assert.deepEqual(calls.addToBot, [{ file: "config_5.json", n: 7 }]);
 });
 
+test("RAM gate shut: a running bot's seats are filled, a parked bot is neither counted nor restarted (old bytes: restarted it)", async () => {
+  AF = { ...AF, consolidate: true };
+  seatFixture({ running: true, parked: true });
+  RAM.ok = false;
+  const r = await autoFarmer.executeTask(albionTask(), {
+    af: { ...AF, dryRun: false, consolidate: true },
+    host: HOST,
+  });
+  assert.equal(r.accounts, 7, "only the running bot's 7 seats");
+  assert.deepEqual(calls.addToBot, [{ file: "config_5.json", n: 7 }]);
+  assert.deepEqual(
+    calls.docker,
+    [{ action: "restart", container: "twitchbotx5" }],
+    "the running bot reloads; the parked one stays stopped",
+  );
+  assert.deepEqual(calls.createBot, []);
+});
+
+test("RAM gate shut, the task's only bot parked: backfill claims nothing and starts nothing (review p2; old bytes: 7 claimed, restarted)", async () => {
+  const bot = { host: "contabo", file: "config_5.json", container: "twitchbotx5" };
+  liveTickWith(huntTask({ assignedAccounts: ["u1", "u2", "u3"], bots: [bot] }));
+  AF = { ...AF, consolidate: true };
+  DOCKER = { twitchbotx5: "exited" };
+  hosts.readFile = async () =>
+    JSON.stringify({
+      TwitchSettings: {
+        TwitchUsers: [1, 2, 3].map((i) => ({ Login: "u" + i, ClientSecret: "s" + i, Enabled: true })),
+      },
+    });
+  RAM.ok = false;
+  await autoFarmer.runOnce();
+  assert.equal(calls.claimed, 0);
+  assert.deepEqual(calls.addToBot, []);
+  assert.deepEqual(calls.docker.filter((d) => d.action === "restart"), []);
+});
+
+test("at the container cap with the RAM gate shut, a parked bot's seats do not count either (old bytes: packed and restarted it)", async () => {
+  AF = { ...AF, consolidate: true, maxAutoBots: 1 };
+  seatFixture({ running: false, parked: true });
+  RAM.ok = false;
+  await assert.rejects(
+    autoFarmer.executeTask(albionTask(), { af: { ...AF, dryRun: false }, host: HOST }),
+    /all 1 auto-bot slots are in use and no running bot has a free seat/,
+  );
+  assert.equal(calls.claimed, 0);
+  assert.deepEqual(calls.docker, []);
+});
+
+test("with the RAM gate open a parked bot's seats are used as before (it is woken to farm them)", async () => {
+  AF = { ...AF, consolidate: true, maxAutoBots: 1 };
+  seatFixture({ running: false, parked: true });
+  const r = await autoFarmer.executeTask(albionTask(), { af: { ...AF, dryRun: false }, host: HOST });
+  assert.equal(r.accounts, 7);
+  assert.deepEqual(calls.docker, [{ action: "restart", container: "twitchbotx6" }]);
+});
+
 test("executeTask with no free seat and RAM short throws without claiming, and says why", async () => {
   RAM.ok = false;
   await assert.rejects(
     autoFarmer.executeTask(albionTask(), { af: { ...AF, dryRun: false }, host: HOST }),
-    /no new container \(farm host Contabo is short of RAM/,
+    /no new container \(the RAM gate is shut on Contabo/,
   );
   assert.equal(calls.claimed, 0);
 });
@@ -1137,7 +1496,7 @@ test("backfill stops at the RAM gate when no running bot has a seat (old bytes: 
   await autoFarmer.runOnce();
   assert.equal(calls.claimed, 0);
   assert.deepEqual(calls.createBot, []);
-  assert.ok(progressLines().some((m) => /^Backfill: no new container \(farm host Contabo is short of RAM/.test(m)));
+  assert.ok(progressLines().some((m) => /^Backfill: no new container \(the RAM gate is shut on Contabo/.test(m)));
 });
 
 test("with RAM available nothing changes: backfill creates its containers as before", async () => {
@@ -1148,6 +1507,90 @@ test("with RAM available nothing changes: backfill creates its containers as bef
     calls.createBot.map((c) => c.n),
     [10, 8],
   );
+});
+
+/* ========= farm2 skip rows name the real constraint (review p4) ========= */
+
+const goodResearch = () => q({ game: "x", demandScore: 45, scannedAt: new Date(), sellers: 9 });
+
+test("a lane's capacity skip names the RAM gate with its host and MB (old bytes: 'all 20 slots busy')", async () => {
+  AF = { ...AF, hostId: "contabo" };
+  MarketResearch.findOne = goodResearch;
+  RAM.ok = false;
+  const cycle = await budget.computeCycleBudget({ ...AF });
+  const v = await decide.decideCampaign({
+    campaign: campaign("Fresh Game", "f1"),
+    lane: { gameKey: "fresh game", mode: "live" },
+    cycle,
+    af: { ...AF },
+    shadow: false,
+    ctx: laneCtx(),
+  });
+  assert.equal(v.decision, "skip_no_capacity");
+  assert.match(v.reason, /^No new bot container: the RAM gate is shut on Contabo \(900 MB available, minimum 1500 MB\)/);
+});
+
+test("a lane's pool skip names the pristine reserve holding N accounts (old bytes: only the reserve floor)", async () => {
+  AF = { ...AF, hostId: "contabo" };
+  MarketResearch.findOne = goodResearch;
+  GUARD.protect = 100; // 100 ready - max(20, 100) = 0 spendable
+  const cycle = await budget.computeCycleBudget({ ...AF });
+  assert.equal(cycle.totalAccounts, 0);
+  const v = await decide.decideCampaign({
+    campaign: campaign("Fresh Game", "f2"),
+    lane: { gameKey: "fresh game", mode: "live" },
+    cycle,
+    af: { ...AF },
+    shadow: false,
+    ctx: laneCtx(),
+  });
+  assert.equal(v.decision, "skip_no_accounts");
+  assert.match(v.reason, /reserve floor 20 protects manual work; the pristine reserve is holding 100 account\(s\) for rent-farm orders/);
+});
+
+/* ============ cross-file calls survive a partial deploy (review p6) ============ */
+
+test("the farm2 cycle budget works with an autoFarmer that lacks the new exports (old bytes: every cycle threw)", async () => {
+  const savedProtect = autoFarmer.pristineProtect;
+  const savedSlots = autoFarmer.containerSlots;
+  delete autoFarmer.pristineProtect;
+  delete autoFarmer.containerSlots;
+  try {
+    RAM.ok = false;
+    GUARD.protect = 50;
+    const cycle = await budget.computeCycleBudget({ ...AF, hostId: "contabo" });
+    assert.equal(cycle.totalAccounts, 80, "no hold without the helper");
+    assert.equal(cycle.totalContainers, 20, "no RAM gate without the helper");
+  } finally {
+    autoFarmer.pristineProtect = savedProtect;
+    autoFarmer.containerSlots = savedSlots;
+  }
+});
+
+test("a pristine-reserve module that fails to load stops the claim, it does not throw out of it (old bytes: the load error escaped)", async () => {
+  READY = 500; // spendable even with pristineProtect's fail-safe hold of 150
+  STUBS.set(path.join(UTILS, "pristineReserve"), new Error("Cannot find module './pristineReserve'"));
+  await assert.rejects(
+    autoFarmer.executeTask(albionTask({ plannedAccounts: 4 }), {
+      af: { ...AF, dryRun: false },
+      host: HOST,
+    }),
+    /Could not claim any pool accounts/,
+  );
+  assert.equal(calls.claimed, 0);
+});
+
+test("a lane's reuse-only count is 0 when the pristine module cannot load (old bytes: the decision threw)", async () => {
+  REUSE_ONLY.add("World of Tanks");
+  STUBS.set(path.join(UTILS, "pristineReserve"), new Error("Cannot find module './pristineReserve'"));
+  const v = await decide.decideCampaign({
+    campaign: campaign("World of Tanks", "w1"),
+    lane: { gameKey: "world of tanks", mode: "shadow" },
+    af: { ...AF },
+    shadow: true,
+    ctx: laneCtx(),
+  });
+  assert.equal(v.decision, "skip_reuse_only");
 });
 
 /* ============ the engine never restarts a parked (stopped) bot ============ */
@@ -1205,4 +1648,64 @@ test("without farmControl.restartIfRunning (a partial deploy) the old restart is
   delete farmControl.restartIfRunning;
   await autoFarmer.completeEndedTasks();
   assert.deepEqual(calls.docker, [{ action: "restart", container: "twitchbotx7" }]);
+});
+
+/* ============ a hung lane read never freezes the tick (review p5b) ============ */
+// Last in the file on purpose: on bytes without the timeout these leave a
+// read pending for ever, which must not reach any other test.
+
+// A FarmLane query that never answers (a dead connection: no error, no rows).
+const hungLaneQuery = () => {
+  const hung = {
+    select: () => hung,
+    maxTimeMS: () => hung,
+    lean: () => new Promise(() => {}),
+  };
+  return hung;
+};
+const within = (p, ms) =>
+  Promise.race([p, new Promise((resolve) => setTimeout(() => resolve("still waiting"), ms))]);
+
+test("ensureFresh gives up on a lane read that never answers; the cache is cold, not wedged (old bytes: waited for ever)", async () => {
+  mainMode();
+  if (typeof ownership._setRefreshTimeoutForTests === "function") {
+    ownership._setRefreshTimeoutForTests(40);
+  }
+  FarmLane.find = () => {
+    calls.lanesRead += 1;
+    return hungLaneQuery();
+  };
+  ownership.setEngineRunning(true);
+  const r = await within(ownership.ensureFresh().then(() => "returned"), 1000);
+  assert.equal(r, "returned");
+  assert.equal(ownership.isCold(), true);
+  // The next read is a new read, and a good table warms the cache again.
+  FarmLane.find = () => {
+    calls.lanesRead += 1;
+    return q([lane("albion online")]);
+  };
+  await within(ownership.ensureFresh(), 1000);
+  assert.equal(calls.lanesRead, 2);
+  assert.equal(ownership.isCold(), false);
+  assert.equal(ownership.isOwned("Albion Online"), true);
+});
+
+test("main mode with a hung lane read: the tick finishes, deferring its decisions and running its sweeps (old bytes: hung, then 'already running')", async () => {
+  mainMode();
+  if (typeof ownership._setRefreshTimeoutForTests === "function") {
+    ownership._setRefreshTimeoutForTests(40);
+  }
+  FarmLane.find = () => hungLaneQuery();
+  LIVE = [campaign("Game A", "a1")];
+  ownership.setEngineRunning(true);
+  // The previous tick's listing sweep had already started the hung read.
+  ownership.isOwned("Game A");
+  const r = await within(autoFarmer.runOnce(), 2000);
+  assert.notEqual(r, "still waiting");
+  assert.equal(r.candidates, 0);
+  assert.equal(r.decisionsDeferred, true);
+  assert.deepEqual(calls.records, []);
+  const next = await within(autoFarmer.runOnce(), 2000);
+  assert.notEqual(next, "still waiting");
+  assert.notDeepEqual(next, { skipped: "already running" });
 });

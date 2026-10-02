@@ -51,6 +51,12 @@ function retryableSet() {
   }
   return RETRYABLE_FALLBACK;
 }
+// A `planned` row counts as stranded only once it is STRANDED_PLAN_MS old
+// (autoFarmer.isStranded): until then its executeTask may still be running —
+// the other engine's, or this lane's own from a moment ago — and re-deciding
+// it ran a second executeTask on the same row (2026-10-03). The fallback
+// below keeps that rule for a checkout whose autoFarmer predates the export.
+const STRANDED_PLAN_MS_FALLBACK = 15 * 60 * 1000;
 function isStranded(task) {
   try {
     const b = require("../autoFarmer");
@@ -59,7 +65,13 @@ function isStranded(task) {
     /* fall through */
   }
   if (!task) return false;
-  if (task.status === "planned") return true;
+  if (task.status === "planned") {
+    const at = Math.max(
+      task.decidedAt ? new Date(task.decidedAt).getTime() || 0 : 0,
+      task.updatedAt ? new Date(task.updatedAt).getTime() || 0 : 0,
+    );
+    return !at || Date.now() - at >= STRANDED_PLAN_MS_FALLBACK;
+  }
   return task.status === "failed" && !(task.bots || []).length;
 }
 
@@ -103,8 +115,10 @@ async function candidatesFor(lane) {
 //   no row yet                       — a new campaign
 //   skipped with a RETRYABLE reason  — conditions may have changed on their own
 //   rescanRequested                  — the operator asked for a fresh look
-//   stranded (live mode only)        — a plan that never executed, or a failure
-//                                      that owns nothing; re-deciding is free
+//   stranded (live mode only)        — a plan that never executed (and has sat
+//                                      untouched for 15 min — before that its
+//                                      execution may still be running), or a
+//                                      failure that owns nothing
 //
 // plus ONE shadow-only trigger, because a shadow lane exists to be compared:
 //
@@ -144,7 +158,8 @@ async function existingRowsFor(lane, campaigns) {
       game: lane.game,
       campaignId: { $in: campaigns.map((c) => c.campaignId) },
     },
-    { campaignId: 1, status: 1, decision: 1, rescanRequested: 1, bots: 1, decidedAt: 1 },
+    // decidedAt and updatedAt date a `planned` row for isStranded.
+    { campaignId: 1, status: 1, decision: 1, rescanRequested: 1, bots: 1, decidedAt: 1, updatedAt: 1 },
   ).lean();
   return new Map(rows.map((r) => [String(r.campaignId), r]));
 }
