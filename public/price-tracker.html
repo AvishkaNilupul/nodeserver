@@ -247,7 +247,7 @@
     }
 
     var page = document.getElementById("page");
-    var TABS = [["games", "Games"], ["market", "Market radar"], ["overview", "Overview"], ["curve", "Price curve"], ["sets", "Same items"], ["advice", "Advice"], ["sales", "Sales ledger"], ["suggest", "Suggest"]];
+    var TABS = [["games", "Games"], ["market", "Market radar"], ["brain", "Farm brain (test)"], ["overview", "Overview"], ["curve", "Price curve"], ["sets", "Same items"], ["advice", "Advice"], ["sales", "Sales ledger"], ["suggest", "Suggest"]];
     var MARKETS = ["gameflip", "ggsel", "eldorado", "g2g", "playerauctions", "zeusx", "digiseller"];
     var state = { tab: (location.hash || "#games").slice(1), overview: null };
     if (!TABS.some(function (t) { return t[0] === state.tab; })) state.tab = "games";
@@ -817,10 +817,171 @@
       } catch (e) { openSheet("Error", '<div class="empty">' + esc(e.message) + "</div>"); }
     }
 
+    /* --------------------------- farm brain (test mode) --------------------------- */
+    // One demand model for both farms, in TEST MODE: what it would tell each farm per game, beside
+    // what each farm's own logic says at the same moment, and how well each one forecasts. It
+    // changes nothing: no farm decision, setting, listing or account.
+    var BR_VIEWS = [["overview", "Overview"], ["games", "Games"], ["accuracy", "Accuracy"]];
+    var DIFF_LABEL = { agree: "same answer", "agree-skip": "both skip", "brain-more": "brain: more", "brain-less": "brain: fewer", "brain-farm": "brain: farm (today: skip)", "brain-skip": "brain: skip (today: farm)", "brain-unknown": "brain: no evidence", "old-error": "today's logic: error", mirror: "brain could not compute (shows today's)" };
+    var DIFF_CLS = { agree: "s-ok", "agree-skip": "s-ok", "brain-more": "s-more", "brain-less": "s-less", "brain-farm": "s-more", "brain-skip": "s-warn", "brain-unknown": "s-unknown", "old-error": "s-fail", mirror: "s-unknown" };
+    var EST_LABEL = { engine: "today's auto-farm count (45 d)", avg45: "45-day average", avg30: "30-day average", max30_14: "larger of 30 / 14 days", v2: "no-claim feeder rule", listed: "only days we had stock" };
+    function diffPill(d) { return '<span class="pill ' + (DIFF_CLS[d] || "s-unknown") + '">' + esc(DIFF_LABEL[d] || d) + "</span>"; }
+    function verdictTxt(v) {
+      if (!v) return "—";
+      if (v.c === "farm" || v.c === "fleet") return "farm " + esc(v.t);
+      if (v.c === "probe") return "probe " + esc(v.t);
+      if (v.c === "skip") return "skip";
+      if (v.c === "unknown") return "no evidence";
+      if (v.c === "error") return "error";
+      return esc(v.c);
+    }
+    function brainLine(st) {
+      if (!st) return "";
+      var c = st.config || {};
+      var head = c.enabled ? '<span class="pill s-ok">test log ON</span>' : '<span class="pill s-unknown">test log OFF</span>';
+      return '<div class="basisbar">' + head + " Runs since the last restart: " + (st.runs || 0) + (st.lastRunAt ? " · last " + esc(ago(st.lastRunAt)) + (st.lastMs != null ? " (" + (st.lastMs / 1000).toFixed(1) + " s)" : "") : "") +
+        (st.nextRunAt ? " · next in " + Math.max(0, Math.round((new Date(st.nextRunAt).getTime() - Date.now()) / 60000)) + " min" : "") +
+        (st.lastError ? ' · last error: <span class="bad">' + esc(st.lastError) + "</span>" : "") +
+        (c.enabled ? " · every " + esc(c.intervalMin) + " min" : '. Switch on with settings <span class="mono">autoFarm.demandBrain.enabled = true</span> (no restart).') +
+        " Test mode: it writes down what it would decide and changes nothing.</div>";
+    }
+    function brRow(r) {
+      var b = r.br || {}, o = r.old || {};
+      var mk = r.f === "noclaim"
+        ? (r.mk ? "rivals on Gameflip/GGSel/Plati: " + (r.mk.rw == null ? "not rated yet" : r.mk.rw + "/wk") : "no radar data")
+        : !r.mk ? "no radar data for this game" : r.mk.rw == null ? "market not rated yet (needs 2 days)" : "rivals " + r.mk.rw + "/wk" + (b.sh != null ? " · our share " + pct(b.sh) : "");
+      return '<div class="row clickable" data-bkey="' + esc(r.k) + '" data-bfarm="' + esc(r.f) + '"><div class="r1"><span class="t">' + esc(r.g) +
+        (r.live ? ' <span class="pill s-ok">campaign live' + (r.hl != null ? " · " + esc(hrs(r.hl)) + " left" : "") + "</span>" : "") +
+        (r.ro ? ' <span class="pill s-unknown">reuse-only</span>' : "") + (r.f === "noclaim" ? ' <span class="pill s-info">no-claim farm</span>' : "") +
+        '</span><span class="amt">today ' + verdictTxt(o) + ' <span class="arrow">→</span> brain <b>' + verdictTxt(b) + "</b></span></div>" +
+        '<div class="r2">' + diffPill(r.d) + "<span>brain: sells " + esc(b.w) + "/wk" + (b.b ? " (" + esc(b.b === "own" ? "our sales" : b.b === "market" ? "market share" : b.b) + ")" : "") + "</span>" +
+        (o.w != null ? "<span>today reads " + esc(o.w) + "/wk" + (o.n != null ? " (" + esc(o.n) + " sales in 45 d)" : "") + "</span>" : "") +
+        "<span>" + esc(mk) + "</span>" + (b.u != null ? "<span>≈ " + money(b.u) + "/wk</span>" : "") +
+        (r.stk ? "<span>stock " + esc(r.stk.on) + (r.stk.fl ? " + " + esc(r.stk.fl) + " farming" : "") + "</span>" : "") +
+        (r.act && r.act.d ? "<span>farm's last decision: " + esc(String(r.act.d).replace(/_/g, " ")) + "</span>" : "") + "</div>" +
+        (r.why && r.why.length ? '<div class="why">' + r.why.map(esc).join(" ") + "</div>" : "") + "</div>";
+    }
+    function scoreTable(scores, best) {
+      var farms = Object.keys(scores || {});
+      if (!farms.length) return '<div class="empty">Nothing to score yet.</div>';
+      return farms.map(function (farm) {
+        var m = scores[farm];
+        var ids = Object.keys(m).sort(function (a, b) { return (m[a].rmse == null ? 1e9 : m[a].rmse) - (m[b].rmse == null ? 1e9 : m[b].rmse); });
+        return '<h4 class="sec">' + (farm === "noclaim" ? "No-claim farm" : "Auto-farm (claim farm)") + "</h4>" +
+          '<div class="scroll"><table class="pm"><tr><th>way of estimating weekly sales</th><th>typical miss (RMSE)</th><th>average miss</th><th>bias</th><th>forecast vs sold</th><th>game-weeks</th></tr>' +
+          ids.map(function (id) {
+            var s = m[id], isBest = best && best[farm] && best[farm].id === id;
+            return "<tr><td>" + (isBest ? "<b>" : "") + esc(EST_LABEL[id] || id) + (isBest ? " ✓ best</b>" : "") + ' <small class="mono">' + esc(id) + "</small></td><td>" + (s.rmse == null ? "—" : esc(s.rmse)) + "</td><td>" + (s.mae == null ? "—" : esc(s.mae)) + "</td><td>" + (s.bias == null ? "—" : (s.bias > 0 ? "+" : "") + esc(s.bias)) + "</td><td>" + esc(s.forecast) + " vs " + esc(s.actual) + "</td><td>" + esc(s.n) + "</td></tr>";
+          }).join("") + "</table></div>";
+      }).join("");
+    }
+    async function renderBrain() {
+      var f = state.br || (state.br = { view: "overview", farm: "", d: "", live: "", q: "", sort: "gap", offset: 0 });
+      var views = '<select id="bv">' + BR_VIEWS.map(function (v) { return '<option value="' + v[0] + '"' + (v[0] === f.view ? " selected" : "") + ">" + v[1] + "</option>"; }).join("") + "</select>";
+      var extra = "";
+      if (f.view === "games") {
+        extra = '<select id="bf"><option value="">Both farms</option><option value="claim">Auto-farm (claim)</option><option value="noclaim">No-claim farm</option></select>' +
+          '<select id="bd"><option value="">Any comparison</option>' + Object.keys(DIFF_LABEL).map(function (k) { return '<option value="' + k + '">' + esc(DIFF_LABEL[k]) + "</option>"; }).join("") + "</select>" +
+          '<select id="bl"><option value="">Live campaign or not</option><option value="1">Campaign live now</option></select>' +
+          '<select id="bs"><option value="gap">Sort: biggest disagreement</option><option value="brain">Sort: brain target</option><option value="old">Sort: today\'s target</option><option value="rate">Sort: weekly sales</option><option value="market">Sort: market size</option><option value="value">Sort: weekly value</option></select>' +
+          '<input id="bq" type="search" placeholder="Search" value="' + esc(f.q) + '">';
+      }
+      var g = shell('<div class="ctl">' + views + extra + '</div><div id="br"><div class="empty">Loading…</div></div>');
+      var bind = function (id, key) { var el = page.querySelector("#" + id); if (!el) return; el.value = f[key]; el.onchange = function () { f[key] = el.value; f.offset = 0; renderBrain(); }; };
+      bind("bv", "view"); bind("bf", "farm"); bind("bd", "d"); bind("bl", "live"); bind("bs", "sort");
+      var bq = page.querySelector("#bq"), t; if (bq) bq.oninput = function () { clearTimeout(t); t = setTimeout(function () { f.q = bq.value; f.offset = 0; renderBrain(); }, 350); };
+      var box = function () { return page.querySelector("#br"); };
+      var wireRows = function () { Array.prototype.forEach.call(page.querySelectorAll("[data-bkey]"), function (r) { r.onclick = function () { openBrainGame(r.getAttribute("data-bkey"), r.getAttribute("data-bfarm")); }; }); };
+      if (f.view === "overview") {
+        var j = await api("/api/price-tracker/brain/latest?farm=claim&live=1&limit=8");
+        var jn = j.empty ? null : await api("/api/price-tracker/brain/latest?farm=noclaim&limit=50");
+        if (stale(g)) return;
+        if (j.empty) { box().innerHTML = brainLine(j.status) + '<div class="empty">No run logged yet. When the test log is on, the first run comes about 6 minutes after a restart, then every hour.</div>'; return; }
+        var s = j.summary, L = s.claim.byDiffLive, A = s.claim.byDiff, cfg = j.cfg || {}, sz = cfg.sizing || {};
+        var card = function (title, sub, cells) { return '<div class="vcard"><div class="top"><span class="nm">' + esc(title) + "</span></div>" + (sub ? '<div class="note">' + sub + "</div>" : "") + '<div class="mini">' + cells.map(function (c) { return "<div><b>" + esc(c[0]) + "</b><span>" + esc(c[1]) + "</span></div>"; }).join("") + "</div></div>"; };
+        var nc = (jn && jn.rows) || [];
+        // the route sorts disagreements first, so the first live rows that differ are the biggest
+        var top = j.rows.filter(function (r) { return r.d !== "agree" && r.d !== "agree-skip"; });
+        box().innerHTML = brainLine(j.status) +
+          '<div class="basisbar">Run ' + esc(ago(j.at)) + (j.persisted ? "" : ' · <span class="bad">this run could not be written to the log</span>') + ". Both sides are worked out at the same moment: <b>today</b> = each farm's own logic (the auto-farm's demand check, the no-claim feeder's target); <b>brain</b> = one counting rule for every game (each sold account once, every market incl. Eldorado / PlayerAuctions / G2G) plus the market radar. Targets are accounts a game deserves before stock on hand is subtracted.</div>" +
+          '<div class="vgrid">' +
+          card("Auto-farm — campaigns live now", s.claim.live + " games with a live campaign", [[L.agree + L["agree-skip"], "same answer"], [L["brain-more"], "brain: more"], [L["brain-less"], "brain: fewer"], [L["brain-farm"], "brain farms, today skips"], [L["brain-skip"], "brain skips, today farms"], [L["brain-unknown"], "brain: no evidence"]]) +
+          card("Accounts asked for (live games)", "the " + esc(s.claim.comparedLive) + " live games both sides have a verdict on" + (s.claim.unknownLive ? "; on the other " + esc(s.claim.unknownLive) + " the brain has no evidence and today's logic asks for " + esc(s.claim.oldTargetUnknownLive) : ""), [[s.claim.oldTargetLive, "today"], [s.claim.brainTargetLive, "brain"], [s.claim.games, "games compared in total"], [A["brain-farm"], "all games: brain farms, today skips"], [A["brain-skip"], "all games: brain skips, today farms"], [A["old-error"] || 0, "today's logic errored"]]) +
+          card("No-claim farm", "fleet target per game (the brain uses the feeder's own rule until the scores say otherwise)", nc.map(function (r) { return [r.old.t + " → " + r.br.t + (r.d === "mirror" ? " (mirror)" : ""), r.g]; }).concat([[s.noclaim.oldTarget + " → " + s.noclaim.brainTarget, "total"]])) +
+          "</div>" +
+          (top.length ? '<h4 class="sec">Biggest disagreements on live campaigns</h4><div class="rows">' + top.map(brRow).join("") + "</div>" : "") +
+          '<h4 class="sec">Settings in use</h4><div class="basisbar">Weekly sales: <b>' + esc(EST_LABEL[cfg.estimatorClaim] || cfg.estimatorClaim) + "</b> (auto-farm), <b>" + esc(EST_LABEL[cfg.estimatorNoclaim] || cfg.estimatorNoclaim) + "</b> (no-claim). Market share assumed when a market is proven: " + pct(cfg.captureShare) +
+          " (rivals ≥ " + esc(cfg.minMarketRate) + "/wk and ≥ " + esc(cfg.minMarketUnits) + " units). Skip under " + esc(cfg.minRate) + " sales/wk or $" + esc(cfg.minWeeklyUsd) + "/wk. Cover " + esc(sz.coverageDays) + " days + " + esc(sz.safetyStock) + " safety, at most " + esc(sz.maxPerGame) + "; probes " + esc(cfg.probeSize) +
+          (cfg.engine && cfg.engine.floor ? "; both sides keep the auto-farm's shelf floor of " + esc(cfg.engine.floor) + " accounts" : "") + ". All adjustable live under <span class=\"mono\">autoFarm.demandBrain</span>.</div>" +
+          ((j.notes || []).length ? '<h4 class="sec">Notes from this run</h4>' + j.notes.map(function (n) { return '<div class="flagbox info">' + esc(n) + "</div>"; }).join("") : "");
+        wireRows();
+        return;
+      }
+      if (f.view === "games") {
+        var jg = await api("/api/price-tracker/brain/latest?farm=" + encodeURIComponent(f.farm) + "&d=" + encodeURIComponent(f.d) + "&live=" + encodeURIComponent(f.live) + "&sort=" + encodeURIComponent(f.sort) + "&q=" + encodeURIComponent(f.q) + "&limit=30&offset=" + f.offset);
+        if (stale(g)) return;
+        if (jg.empty) { box().innerHTML = brainLine(jg.status) + '<div class="empty">No run logged yet.</div>'; return; }
+        box().innerHTML = brainLine(jg.status) + '<div class="basisbar">Run ' + esc(ago(jg.at)) + ". Live campaigns first. Open a game for its reasons and its history.</div>" +
+          (jg.rows.length ? '<div class="rows">' + jg.rows.map(brRow).join("") + "</div>" : '<div class="empty">Nothing matches.</div>') +
+          '<div class="ctl" style="margin-top:12px">' + (f.offset > 0 ? '<button id="pv">← Previous</button>' : "") + (f.offset + 30 < jg.total ? '<button id="nx">Next →</button>' : "") + '<span class="sub">' + jg.total + "</span></div>";
+        var nx = page.querySelector("#nx"), pv = page.querySelector("#pv");
+        if (nx) nx.onclick = function () { f.offset += 30; renderBrain(); };
+        if (pv) pv.onclick = function () { f.offset = Math.max(0, f.offset - 30); renderBrain(); };
+        wireRows();
+        return;
+      }
+      var a = await api("/api/price-tracker/brain/accuracy");
+      if (stale(g)) return;
+      var bt = a.backtest || {}, fw = a.forward || {};
+      var weeks = (bt.weeks || []).map(function (w) { return "<tr><td>" + esc(day(w.from)) + " → " + esc(day(w.to)) + "</td><td>" + esc(w.games) + "</td><td>" + esc(w.inStock || 0) + "</td><td>" + esc(w.actual) + "</td></tr>"; }).join("");
+      var hasStocked = function (x) { return x && x.scoresInStock && Object.keys(x.scoresInStock).length > 0; };
+      var stockNote = '<div class="basisbar">Sales are capped by stock: a week with nothing listed sells nothing whatever the demand, so the estimators that try to see through stock-outs (<span class="mono">listed</span>, <span class="mono">v2</span>) always look too high against such weeks. The table below scores only weeks the game was listed on at least ' + esc(6) + " of its 7 days — the fairer comparison. (Auto-farm only: the no-claim Eldorado offers stay listed even when they cover no account.)</div>";
+      var review = (a.review || []).map(function (x) {
+        return '<div class="row"><div class="r1"><span class="t">' + esc(x.game) + '</span><span class="amt">today ' + verdictTxt(x.old) + ' <span class="arrow">→</span> brain ' + verdictTxt(x.brain) + "</span></div>" +
+          '<div class="r2">' + diffPill(x.d) + "<span>" + esc(day(x.at)) + "</span><span>the 7 days after: we sold " + esc(x.ourSales7) + "</span><span>rivals sold " + (x.rivalUnits7 == null ? "—" : esc(x.rivalUnits7)) + "</span></div></div>";
+      }).join("");
+      box().innerHTML = '<div class="basisbar">How good is each way of estimating a game\'s weekly sales? <b>Average miss</b> = how far the forecast for the next 7 days was from what really sold, per game (lower is better). <b>Bias</b> above 0 = it expects more than sells. Evidence built ' + esc(ago(a.evidenceAt)) + ".</div>" +
+        '<h4 class="sec">Backtest — the last ' + (bt.weeks || []).length + " weeks, replayed from our own sales (works from day one)</h4>" + scoreTable(bt.scores, bt.best) +
+        (hasStocked(bt) ? stockNote + '<h4 class="sec">Backtest — only weeks the game was listed all week</h4>' + scoreTable(bt.scoresInStock, bt.bestInStock) : "") +
+        (weeks ? '<div class="scroll"><table class="pm"><tr><th>week</th><th>games with sales</th><th>of them listed all week</th><th>accounts sold</th></tr>' + weeks + "</table></div>" : "") +
+        '<div class="basisbar">The backtest replays the brain\'s own counting (every sold account once, 135 days of evidence). It cannot replay today\'s auto-farm count, which reads raw signal rows as they were at decision time, or the market radar, which started on 2026-10-02. Both are scored below, live, once a logged run is a week old.</div>' +
+        '<h4 class="sec">Live test — logged runs scored after their week</h4><div class="basisbar">' + esc(fw.runsScored || 0) + " day(s) scored, " + esc(fw.runsWaiting || 0) + " still inside their week (one run per day is scored).</div>" +
+        (fw.runsScored ? scoreTable(fw.scores, fw.best) + (hasStocked(fw) ? '<h4 class="sec">Live test — only weeks the game was listed all week</h4>' + scoreTable(fw.scoresInStock, fw.bestInStock) : "") : '<div class="empty">The first scores appear 7 days after the first logged run.</div>') +
+        '<h4 class="sec">Where they disagreed, and what happened next</h4>' + (review || '<div class="empty">Appears once a run with a disagreement on a live campaign is a week old.</div>');
+    }
+    async function openBrainGame(key, farm) {
+      var tok = (state.sheetTok = (state.sheetTok || 0) + 1);
+      openSheet("Loading…", '<div class="empty">Loading…</div>');
+      try {
+        var j = await api("/api/price-tracker/brain/game/" + encodeURIComponent(key) + "?farm=" + encodeURIComponent(farm || "claim"));
+        if (tok !== state.sheetTok) return;
+        var r = j.row || (j.history && j.history[0]) || {};
+        var b = r.br || {}, o = r.old || {};
+        var est = r.est ? Object.keys(r.est).map(function (id) { return "<tr><td>" + esc(EST_LABEL[id] || id) + ' <small class="mono">' + esc(id) + "</small></td><td>" + esc(r.est[id]) + "/wk</td></tr>"; }).join("") : "";
+        var hist = (j.history || []).map(function (h) {
+          return "<tr><td>" + esc(new Date(h.at).toISOString().slice(5, 16).replace("T", " ")) + "</td><td>" + verdictTxt(h.old) + "</td><td>" + verdictTxt(h.br) + "</td><td>" + diffPill(h.d) + "</td><td>" + esc(h.br && h.br.w) + "</td><td>" + (h.old && h.old.w != null ? esc(h.old.w) : "—") + "</td><td>" + (h.live ? "live" : "") + "</td></tr>";
+        }).join("");
+        openSheet((r.g || key) + (farm === "noclaim" ? " — no-claim farm" : ""),
+          '<div class="kv"><div><b>' + verdictTxt(o) + "</b><span>today's logic</span></div><div><b>" + verdictTxt(b) + "</b><span>brain</span></div><div><b>" + esc(b.w) + "/wk</b><span>brain's weekly sales</span></div>" +
+          "<div><b>" + (o.w != null ? esc(o.w) + "/wk" : "—") + "</b><span>what today's logic reads</span></div>" +
+          (r.mk ? "<div><b>" + (r.mk.rw == null ? "—" : esc(r.mk.rw) + "/wk") + "</b><span>rivals on Gameflip/GGSel/Plati</span></div>" : "") +
+          (b.u != null ? "<div><b>" + money(b.u) + "</b><span>weekly value at " + money(b.v) + "/account</span></div>" : "") + "</div>" +
+          (r.d ? '<div style="margin:8px 0">' + diffPill(r.d) + (o.ds != null ? ' <span class="chip">today\'s demand score ' + esc(o.ds) + "</span>" : "") +
+            (o.ra != null ? ' <span class="chip">its market research is ' + esc(o.ra) + " days old</span>" : "") +
+            (o.pb ? ' <span class="chip">today: probe held (budget full or cooling down)</span>' : "") +
+            (b.td != null && b.t > b.td && (b.c === "farm") ? ' <span class="chip">brain: ' + esc(b.td) + " from demand, raised to " + esc(b.t) + " by the shelf floor</span>" : "") +
+            (o.e ? ' <span class="pill s-fail">' + esc(o.e) + "</span>" : "") + "</div>" : "") +
+          (r.why && r.why.length ? r.why.map(function (w) { return '<div class="flagbox info">' + esc(w) + "</div>"; }).join("") : '<div class="note">Reasons are kept for the newest run only.</div>') +
+          (est ? '<h4 class="sec">Every estimator for this game, now</h4><div class="scroll"><table class="pm"><tr><th>estimator</th><th>weekly sales</th></tr>' + est + "</table></div>" : "") +
+          '<h4 class="sec">History (newest first)</h4><div class="scroll"><table class="pm"><tr><th>time (UTC)</th><th>today</th><th>brain</th><th>comparison</th><th>brain /wk</th><th>today /wk</th><th></th></tr>' + (hist || '<tr><td colspan="7">Not logged yet.</td></tr>') + "</table></div>");
+      } catch (e) { openSheet("Error", '<div class="empty">' + esc(e.message) + "</div>"); }
+    }
+
     async function render(force) {
       try {
         if (state.tab === "games") await renderGames();
         else if (state.tab === "market") await renderMarket();
+        else if (state.tab === "brain") await renderBrain();
         else if (state.tab === "overview") await renderOverview(force);
         else if (state.tab === "curve") await renderCurve();
         else if (state.tab === "sets") await renderSets();

@@ -45,7 +45,7 @@ function publicSale(s) {
   return o;
 }
 
-function createRouter({ getReport = T.getReport, guards = [], settingsInputs = () => ({}), getMarketReport = null, marketStatus = null } = {}) {
+function createRouter({ getReport = T.getReport, guards = [], settingsInputs = () => ({}), getMarketReport = null, marketStatus = null, brain = null } = {}) {
   const router = express.Router();
   const wrap = (fn) => async (req, res) => {
     try {
@@ -243,7 +243,88 @@ function createRouter({ getReport = T.getReport, guards = [], settingsInputs = (
   });
 
   mountMarketRadar(router, { guards, getMarketReport, marketStatus });
+  mountBrain(router, { guards, brain });
   return router;
+}
+
+// --------------------------------------------------------------------------------------------
+// Farm brain (utils/demandBrain, docs/DEMAND-BRAIN-PLAN.md) — TEST MODE: what one demand model
+// would tell each farm, beside what each farm's own logic says, and how well each forecasts.
+// Read-only like everything else in this file; its runner's only write is its own run log.
+// --------------------------------------------------------------------------------------------
+const BRAIN_SORTS = {
+  // disagreements first, then the size of the gap
+  gap: (r) => (r.d === "agree" || r.d === "agree-skip" ? 0 : 1e6) + Math.abs((Number(r.br.t) || 0) - (Number(r.old.t) || 0)),
+  brain: (r) => Number(r.br.t) || 0,
+  old: (r) => Number(r.old.t) || 0,
+  rate: (r) => Number(r.br.w) || 0,
+  market: (r) => (r.mk && Number(r.mk.rw)) || 0,
+  value: (r) => Number(r.br.u) || 0,
+};
+
+function mountBrain(router, { guards = [], brain = null } = {}) {
+  const B = () => brain || require("../utils/demandBrain");
+  let lastForceB = 0;
+  // Every brain route goes through here, which spreads the guards.
+  const getB = (path, fn) =>
+    router.get(path, ...guards, async (req, res) => {
+      try {
+        await fn(req, res, B());
+      } catch (e) {
+        res.status(500).json({ success: false, message: e.message });
+      }
+    });
+
+  getB("/api/price-tracker/brain/status", (req, res, b) => {
+    res.json({ success: true, ...b.status() });
+  });
+
+  getB("/api/price-tracker/brain/latest", async (req, res, b) => {
+    const run = await b.latest();
+    if (!run) return res.json({ success: true, empty: true, status: b.status() });
+    let rows = run.rows || [];
+    const farm = String(req.query.farm || "");
+    const d = String(req.query.d || "");
+    const s = String(req.query.q || "").toLowerCase().trim();
+    if (farm === "claim" || farm === "noclaim") rows = rows.filter((r) => r.f === farm);
+    if (d) rows = rows.filter((r) => r.d === d);
+    if (req.query.live === "1") rows = rows.filter((r) => r.live);
+    if (s) rows = rows.filter((r) => String(r.g).toLowerCase().includes(s));
+    const key = Object.prototype.hasOwnProperty.call(BRAIN_SORTS, req.query.sort) ? BRAIN_SORTS[req.query.sort] : BRAIN_SORTS.gap;
+    rows = [...rows].sort((a, c) => (c.live ? 1 : 0) - (a.live ? 1 : 0) || key(c) - key(a) || String(a.g).localeCompare(String(c.g)));
+    res.json({
+      success: true,
+      at: run.at,
+      v: run.v,
+      ms: run.ms,
+      cfg: run.cfg,
+      summary: run.summary,
+      counts: run.counts,
+      notes: run.notes || [],
+      persisted: run.persisted !== false,
+      status: b.status(),
+      ...page(rows, req.query, 50),
+    });
+  });
+
+  getB("/api/price-tracker/brain/game/:key", async (req, res, b) => {
+    const key = String(req.params.key || "");
+    const farm = req.query.farm === "noclaim" ? "noclaim" : "claim";
+    const run = await b.latest();
+    const row = run && Array.isArray(run.rows) ? run.rows.find((r) => r.k === key && r.f === farm) || null : null;
+    const history = await b.gameHistory(key, farm, clamp(req.query.limit, 1, 288, 72));
+    if (!row && !history.length) return res.status(404).json({ success: false, message: "the brain has not logged this game" });
+    res.json({ success: true, key, farm, at: run ? run.at : null, row, history });
+  });
+
+  getB("/api/price-tracker/brain/accuracy", async (req, res, b) => {
+    let force = false;
+    if (req.query.force === "1" && Date.now() - lastForceB > FORCE_COOLDOWN_MS) {
+      lastForceB = Date.now();
+      force = true;
+    }
+    res.json({ success: true, ...(await b.accuracy({ force })) });
+  });
 }
 
 // --------------------------------------------------------------------------------------------
@@ -453,6 +534,15 @@ module.exports.createRouter = createRouter;
 // stack (the preview harness and the tests run without it).
 module.exports.real = () => {
   const { requireSuperadmin, enforce2fa } = require("../middleware/auth");
+  // The farm brain's hourly test log starts here: server.js calls real() once, at boot, in the
+  // live server only (tests and the preview build routers with createRouter). It computes and
+  // logs nothing until autoFarm.demandBrain.enabled is set, and a failure to start never stops
+  // the page from mounting.
+  try {
+    require("../utils/demandBrain").start();
+  } catch (e) {
+    console.error("demandBrain: could not start —", e && e.message ? e.message : e);
+  }
   // Settings (fees, farm sizing, per-game caps, no-claim and reuse-only games) are read
   // by utils/priceTracker itself on every rebuild, so a rebuild triggered anywhere —
   // this page or a publisher — sees the same ones.
