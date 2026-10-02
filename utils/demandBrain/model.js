@@ -87,30 +87,27 @@ function clampNum(v, d, lo, hi) {
   return Math.min(hi, Math.max(lo, n));
 }
 
-// The shelf markets that take new stock, counted as the engine's shelf floor counts them: Gameflip
-// always, GGSel and Plati (Digiseller) each while the owner's switch is on — the listers' own test,
-// on unless explicitly false. Plati has been blocked since 2026-09-28, so production counts 2.
-function openShelfMarkets(af) {
-  const a = af || {};
-  return 1 + (a.ggselEnabled !== false ? 1 : 0) + (a.platiEnabled !== false ? 1 : 0);
-}
-
-// A cold probe's default size: enough for every open shelf market to hold its perMarketStock
-// (3 × 2 = 6 on production) — the engine's shelf floor without its post-event doubling.
-function defaultColdProbeSize(af) {
-  const per = Math.max(1, num(af && af.perMarketStock, 0) || 3);
-  return Math.min(250, Math.floor(per * openShelfMarkets(af)));
-}
-
 /** The auto-farm's re-probe cooldown in days, read exactly as its probe gate reads it. */
 function probeCooldownDaysOf(af) {
   return Math.max(0, Number(af && af.probeCooldownDays) || 0);
+}
+
+/**
+ * A new drop's cold-probe size: the owner's demandBrain.coldProbeSize when set, else half the
+ * engine's own shelf floor (marketStockFloor = open shelf markets × perMarketStock × 2, so this is
+ * the floor without its post-event doubling — 6 with Plati blocked). The floor already knows which
+ * markets are switched on AND have keys; a floor that could not be read (0) means no cold probes.
+ */
+function coldProbeSizeFor(cfg, floor) {
+  if (cfg && cfg.coldProbeSize != null) return Math.max(0, Math.floor(num(cfg.coldProbeSize)));
+  return Math.floor(Math.max(0, num(floor)) / 2);
 }
 
 /** The brain's settings (autoFarm.demandBrain), every field validated and defaulted. */
 function readConfig(af) {
   const raw = af && af.demandBrain && typeof af.demandBrain === "object" ? af.demandBrain : {};
   const est = (v, d) => (ESTIMATORS.includes(String(v)) ? String(v) : d);
+  const coldSize = num(raw.coldProbeSize, NaN);
   return {
     enabled: isOn(raw.enabled),
     intervalMin: Math.round(clampNum(raw.intervalMin, DEFAULTS.intervalMin, MIN_INTERVAL_MIN, 24 * 60)),
@@ -122,8 +119,13 @@ function readConfig(af) {
     minRate: clampNum(raw.minRate, DEFAULTS.minRate, 0, 1e6),
     minWeeklyUsd: clampNum(raw.minWeeklyUsd, DEFAULTS.minWeeklyUsd, 0, 1e9),
     // Accounts a new drop's cold probe asks for; 0 turns cold probes off (such games read "unknown"
-    // again, as in model v1). Unset: perMarketStock × open shelf markets.
-    coldProbeSize: Math.floor(clampNum(raw.coldProbeSize, defaultColdProbeSize(af), 0, 250)),
+    // again, as in model v1). Unset (null): half the engine's shelf floor, per run (coldProbeSizeFor).
+    coldProbeSize: Number.isFinite(coldSize) ? Math.floor(Math.min(250, Math.max(0, coldSize))) : null,
+    // The auto-farm's cold-start switches, read as its engine reads them: the known-dud cooldown
+    // applies only while probeColdStart is on (utils/farm2/steps/decide.js probeGate), and a probe
+    // the stop-loss would have expired has been listed probeMaxDays (expireStaleProbes).
+    probeColdStart: !!(af && af.probeColdStart),
+    probeMaxDays: Math.max(1, Number(af && af.probeMaxDays) || 30),
   };
 }
 
@@ -198,9 +200,14 @@ const weekly = (n, days) => (n * 7) / days;
 // INTERMITTENT_WEEKS weeks, oldest first:
 //   sba — Croston's method with the Syntetos–Boylan correction (2005). Exponential smoothing (α) of
 //         the size of each selling week and of the number of weeks between selling weeks, updated
-//         only in a week with a sale and started from the first size and the first interval
-//         (counted from the window's first week); forecast (1 − α/2) × size / interval. It never
-//         decays while a game is silent: the known Croston blind spot TSB was built to fix.
+//         only in a week with a sale; forecast (1 − α/2) × size / interval. It never decays while a
+//         game is silent: the known Croston blind spot TSB was built to fix.
+//         The window's first week is NEVER an interval's start (review, 2026-10-03): the window
+//         slides, so "weeks since the window opened" shrinks every week a lone old sale sits in it,
+//         and the forecast grew with silence (0.43 → 5.55 a week over 12 silent weeks). The recursion
+//         starts from the first size and the first GAP between two selling weeks; a window with a
+//         single selling week reads it as one sale in the whole window (size / 13 weeks). So while no
+//         sale enters or leaves the window, sliding it changes nothing.
 //   tsb — Teunter–Syntetos–Babai (2011). The chance that a week sells is smoothed EVERY week (β), the
 //         size of a selling week only in weeks with a sale (α); forecast chance × size, so a game
 //         that stops selling fades out. Started from the window's own averages (the share of weeks
@@ -228,22 +235,25 @@ function weeklyCounts(entries, now, weeks = INTERMITTENT_WEEKS) {
 
 /** Croston with the Syntetos–Boylan correction: a weekly rate from weekly counts (oldest first). */
 function sbaRate(y, alpha = SBA_ALPHA) {
-  let size = null;
-  let interval = null;
-  let gap = 0;
-  for (const v of y || []) {
-    gap++;
-    if (!(v > 0)) continue;
-    if (size === null) {
-      size = v;
-      interval = gap;
-    } else {
-      size += alpha * (v - size);
-      interval += alpha * (gap - interval);
-    }
-    gap = 0;
+  const list = y || [];
+  // the selling weeks, as [index, size]
+  const sold = [];
+  list.forEach((v, i) => {
+    if (v > 0) sold.push([i, v]);
+  });
+  if (!sold.length) return 0;
+  const c = 1 - alpha / 2;
+  // One selling week: its gap to the sale before it is unknown (outside the window), not "since the
+  // window opened" — read it as one sale in the whole window.
+  if (sold.length === 1) return (c * sold[0][1]) / list.length;
+  // Start from the first size and the first gap, then update at every later selling week.
+  let size = sold[0][1];
+  let interval = sold[1][0] - sold[0][0];
+  for (let k = 1; k < sold.length; k++) {
+    size += alpha * (sold[k][1] - size);
+    interval += alpha * (sold[k][0] - sold[k - 1][0] - interval);
   }
-  return size === null ? 0 : ((1 - alpha / 2) * size) / interval;
+  return (c * size) / interval;
 }
 
 /** Teunter–Syntetos–Babai: a weekly rate from weekly counts (oldest first). */
@@ -294,13 +304,16 @@ function rateOf(id, entries, now, ctx) {
 // at their raw rate, every other market at its in-stock rate by selling days, each the larger of
 // the 30-day and 14-day figure. `burstGuard` is that rule's dark switch (docs/LIVE-FIXES-1003.md §A4,
 // autoFarm.noclaimBurstGuard): burst sales (isBurstSale — a hand sale or a bulk-pack unit) count
-// at their raw rate in each window and only the rest go through the in-stock correction, so a
-// one-day lump of 40 reads as 20 a week, not 40. The brain always passes it EXPLICITLY — false for
-// v2, true for v2g — so the owner's switch never changes what an estimator means and the feeder
-// never reads its settings for a default. Each unit carries what the guard reads: its date, its
-// market and the `pack` flag (an entry's `pack`, inputs.noclaimEvidence). When production's
-// farmDemand exports demandRates it is called directly (a true mirror); this copy is the fallback,
-// held equal to it on random histories in tests/demandBrainV2.test.js.
+// at their raw rate in each window; the rest keep the in-stock correction over the selling days of
+// ALL other-market sales (a burst's day included), and each window's guarded figure is clamped to
+// its unguarded one — the guard can only remove inflation (A4's fix of 2026-10-03: dropping the
+// burst-only days from the denominator had RAISED some rates). A one-day lump of 40 alone reads 20 a
+// week, not 40. The brain always passes the switch EXPLICITLY — false for v2, true for v2g — so the
+// owner's switch never changes what an estimator means and the feeder never reads its settings for
+// a default. Each unit carries what the guard reads: its date, its market and the `pack` flag (an
+// entry's `pack`, inputs.noclaimEvidence). When production's farmDemand exports demandRates it is
+// called directly (a true mirror); this copy is the fallback, held equal to it on random histories
+// in tests/demandBrainV2.test.js.
 const isBurstSale = (u) => !!u && (u.pack === true || BURST_MARKETS.has(lower(u.market)));
 
 function v2Rates(entries, now, demandRates, { burstGuard = false } = {}) {
@@ -331,8 +344,6 @@ function v2Rates(entries, now, demandRates, { burstGuard = false } = {}) {
   let burstShort = 0;
   let steady = 0;
   let steadyShort = 0;
-  const steadyDays = new Set();
-  const steadyDaysShort = new Set();
   for (const u of units) {
     const t = u.firstAt.getTime();
     const recent = t >= shortSince;
@@ -351,25 +362,21 @@ function v2Rates(entries, now, demandRates, { burstGuard = false } = {}) {
         if (recent) burstShort++;
       } else {
         steady++;
-        steadyDays.add(dayOf(t));
-        if (recent) {
-          steadyShort++;
-          steadyDaysShort.add(dayOf(t));
-        }
+        if (recent) steadyShort++;
       }
     }
   }
   const s = round1(Math.max(farmSizing.salesPerWeek(shelf, 30), farmSizing.salesPerWeek(shelfShort, 14)));
+  // each window's unguarded figure, and the guarded one never above it
+  const plain = farmSizing.inStockRate({ count: other, sellingDays: otherDays.size, windowDays: 30 });
+  const plainShort = farmSizing.inStockRate({ count: otherShort, sellingDays: otherDaysShort.size, windowDays: 14 });
   const o = round1(
     burstGuard && burst > 0
       ? Math.max(
-          farmSizing.inStockRate({ count: steady, sellingDays: steadyDays.size, windowDays: 30 }) + farmSizing.salesPerWeek(burst, 30),
-          farmSizing.inStockRate({ count: steadyShort, sellingDays: steadyDaysShort.size, windowDays: 14 }) + farmSizing.salesPerWeek(burstShort, 14),
+          Math.min(plain, farmSizing.inStockRate({ count: steady, sellingDays: otherDays.size, windowDays: 30 }) + farmSizing.salesPerWeek(burst, 30)),
+          Math.min(plainShort, farmSizing.inStockRate({ count: steadyShort, sellingDays: otherDaysShort.size, windowDays: 14 }) + farmSizing.salesPerWeek(burstShort, 14)),
         )
-      : Math.max(
-          farmSizing.inStockRate({ count: other, sellingDays: otherDays.size, windowDays: 30 }),
-          farmSizing.inStockRate({ count: otherShort, sellingDays: otherDaysShort.size, windowDays: 14 }),
-        ),
+      : Math.max(plain, plainShort),
   );
   return { shelf: s, other: o, total: round1(s + o), source: "brain" };
 }
@@ -430,13 +437,15 @@ const dayText = (t) => (Number.isFinite(t) ? new Date(t).toISOString().slice(0, 
 
 /**
  * The brain's call for one claim-farm game.
- * `live` and `dud` drive the cold-start rule (model v2): a game with a live campaign and no evidence
- * of ours at all is a new drop. `dud` is what inputs.expiredProbes found for it: false = checked, no
- * failed probe; { at, days } = a probe of this game ended with 0 sales inside the auto-farm's
- * re-probe cooldown; null = not checked (the brain abstains rather than probe a possible dud).
+ * `live`, `dud` and `evidence.listedDays` drive the cold-start rule (model v2): a game with a live
+ * campaign and no SALE of ours in HISTORY_DAYS is a new drop, listed or not (an engine probe that
+ * went up two days ago has listings and no sale yet). `dud` is what inputs.expiredProbes found:
+ * false = checked, no failed probe; { at, days } = a probe of this game ended with 0 sales inside
+ * the auto-farm's re-probe cooldown; null = not checked. Both only count while the engine's own
+ * probeColdStart is on, as in its probe gate.
  * @returns {{ c:"farm"|"probe"|"skip"|"unknown", t:number, w:number, b:"own"|"market"|"cold"|"none",
  *             own:number, mp:number, mt:number|null, sh:number|null, proof:boolean, v:number,
- *             vb:string, u:number|null, dud:boolean, why:string[] }}
+ *             vb:string, u:number|null, dud:null|"probe"|"listed", why:string[] }}
  */
 function claimVerdict({ own = 0, market = null, value = 0, valueBasis = "", cfg, sizing, gameCap = 0, probeSize = 15, floor = 0, evidence = {}, live = false, dud = null }) {
   const why = [];
@@ -456,12 +465,13 @@ function claimVerdict({ own = 0, market = null, value = 0, valueBasis = "", cfg,
   let basis = forecast <= 0 ? "none" : ownW >= mp ? "own" : "market";
   const v = Math.max(0, round2(value));
   const u = v > 0 ? round2(forecast * v) : null;
-  const dudKnown = !!dud && typeof dud === "object";
+  // The engine's re-probe cooldown counts only while its cold-start probing is on (decide.probeGate).
+  const dudKnown = !!cfg.probeColdStart && !!dud && typeof dud === "object";
   const dudAt = dudKnown ? new Date(dud.at).getTime() : NaN;
   const dudLine = () =>
     "A probe of this game ended with 0 sales on " + dayText(dudAt) +
     (dudKnown && num(dud.days) > 0 ? ", inside the auto-farm's " + num(dud.days) + "-day re-probe cooldown" : "") + ".";
-  let isDud = false;
+  let isDud = null;
 
   if (ownW > 0) why.push("We sell about " + round2(ownW) + " a week (every market, each account once).");
   if (rated) {
@@ -484,40 +494,48 @@ function claimVerdict({ own = 0, market = null, value = 0, valueBasis = "", cfg,
     }
   };
   if (forecast <= 0) {
-    const noEvidence = !evidence.sold135 && !evidence.listed135 && !rated;
-    const none = "No sale or listing of ours in " + HISTORY_DAYS + " days and no rated market";
-    const coldSize = Math.max(0, Math.floor(num(cfg.coldProbeSize)));
-    if (!noEvidence) {
-      c = "skip";
-      why.push("No recent sale of ours and no proven market.");
-    } else if (!live) {
-      c = "unknown";
-      why.push(none + ": no evidence either way.");
-    } else if (!(coldSize > 0)) {
-      c = "unknown";
-      why.push(none + "; cold probes are off (coldProbeSize 0).");
-    } else if (dudKnown) {
-      // NEW DROPS, model v2. The engine's own cooldown fact: this game was already probed and sold
-      // nothing (17 of 20 finished probes ended that way by 2026-10-02) — no second probe yet.
-      c = "skip";
-      isDud = true;
-      why.push(none + "; a campaign is live.");
-      why.push(dudLine() + " A known dud: no probe.");
-    } else if (dud === false) {
-      // NEW DROPS, model v2: a live campaign and no evidence either way. Model v1 abstained here
-      // while the engine probes 15 accounts; the brain asks only enough for each open shelf market
-      // to hold its stock (coldProbeSize). A proven rival market never reaches this branch: it
-      // upgrades the game to the market-led probe below.
-      c = "probe";
-      basis = "cold";
-      t = coldSize;
-      const max = Math.floor(num(sizing && sizing.maxPerGame));
-      if (max > 0 && t > max) t = max;
-      why.push(none + ", but a campaign is live: a new drop → cold probe of " + t + ".");
-      capToGame();
+    const coldSize = coldProbeSizeFor(cfg, floor);
+    if (evidence.sold135 || !live || !(coldSize > 0)) {
+      // Model v1's rule: a game that sold but has no forecast now, a game no live campaign is
+      // deciding, or every game while cold probes are off.
+      const noEvidence = !evidence.sold135 && !evidence.listed135 && !rated;
+      c = noEvidence ? "unknown" : "skip";
+      why.push(noEvidence ? "No sale or listing of ours in " + HISTORY_DAYS + " days and no rated market: no evidence either way." : "No recent sale of ours and no proven market.");
+      if (live && !evidence.sold135) {
+        why.push(cfg.coldProbeSize === 0 ? "Cold probes are off (coldProbeSize 0)." : "No cold-probe size: the auto-farm's shelf floor could not be read.");
+      }
     } else {
-      c = "unknown";
-      why.push(none + "; the auto-farm's probe history was not readable, so a possible dud is not probed.");
+      // NEW DROPS, model v2: a live campaign and no sale of ours in HISTORY_DAYS. Model v1 abstained
+      // while the engine probes 15 accounts (17 of its 20 finished probes ended with 0 sales by
+      // 2026-10-02); the brain asks only enough for each shelf market to hold its stock. A proven
+      // rival market never reaches this branch: it upgrades the game to the market-led probe below.
+      const none = "No sale of ours in " + HISTORY_DAYS + " days and a campaign is live";
+      const listedDays = evidence.listedDays == null ? null : num(evidence.listedDays, null);
+      const since = "listed since " + dayText(num(evidence.firstListedAt, NaN)) + " (" + Math.floor(num(listedDays)) + " days)";
+      if (listedDays != null && listedDays > num(cfg.probeMaxDays, 30)) {
+        // Listed longer than the engine's own probe window and never sold: what its stop-loss
+        // calls a failed probe, whether or not one was ever stamped.
+        c = "skip";
+        isDud = "listed";
+        why.push(none + "; " + since + ", longer than the " + num(cfg.probeMaxDays, 30) + "-day probe window, and never sold: dud-like, no probe.");
+      } else if (dudKnown) {
+        // The engine's own cooldown fact: this game was already probed and sold nothing.
+        c = "skip";
+        isDud = "probe";
+        why.push(none + ".");
+        why.push(dudLine() + " A known dud: no probe.");
+      } else if (cfg.probeColdStart && dud !== false) {
+        c = "unknown";
+        why.push(none + "; the auto-farm's probe history was not readable, so a possible dud is not probed.");
+      } else {
+        c = "probe";
+        basis = "cold";
+        t = coldSize;
+        const max = Math.floor(num(sizing && sizing.maxPerGame));
+        if (max > 0 && t > max) t = max;
+        why.push(none + ": a new drop → cold probe of " + t + (listedDays != null ? " (" + since + ", inside the probe window)" : "") + ".");
+        capToGame();
+      }
     }
   } else if (forecast < cfg.minRate) {
     c = "skip";
@@ -556,6 +574,16 @@ function claimVerdict({ own = 0, market = null, value = 0, valueBasis = "", cfg,
     if (u != null) why.push("About $" + u + " a week at $" + v + " an account (" + (valueBasis || "our sales") + ").");
   }
   return { c, t, td, w: forecast, b: basis, own: round2(ownW), mp, mt, sh, proof, v, vb: valueBasis, u, dud: isDud, why };
+}
+
+/** The first moment a game had a live listing (epoch ms), or null — from listingSpans' spans. */
+function firstListedAt(spans) {
+  let first = null;
+  for (const s of spans || []) {
+    const a = s && num(s[0], NaN);
+    if (Number.isFinite(a) && (first === null || a < first)) first = a;
+  }
+  return first;
 }
 
 /**
@@ -640,28 +668,36 @@ function bucketMarket(radarRows, bucket, keywords = [bucket]) {
 }
 
 /**
- * The brain's no-claim verdict. With the feeder's own rule the rates ARE the feeder's snapshot
- * rates — its evidence window, its dating — so the brain's target equals the feeder's by
- * construction; re-deriving them from the brain's longer evidence read could drift (a sale whose
- * oldest evidence falls between the two look-backs dates differently). The snapshot is the feeder's
- * LIVE rule: `v2` while autoFarm.noclaimBurstGuard is off (`guardLive` false, the default), `v2g`
- * once the owner turns the guard on — so the live one is always logged and mirrored under its own
- * name, and the other is re-derived from the evidence like every other estimator. `est` logs every
- * estimator for scoring. "mirror" = the configured estimator could not be computed this run.
+ * The brain's no-claim verdict. The feeder's own rule IS its snapshot — its evidence window, its
+ * dating — so with it the brain's target equals the feeder's by construction; re-deriving the rule
+ * from the brain's longer evidence read would date some sales differently (review finding M3). The
+ * feeder is asked twice per run, on the same evidence and window, once per burst-guard setting
+ * (inputs.noclaimInputs): `snapRow` is the rule it runs LIVE — `v2` while autoFarm.noclaimBurstGuard
+ * is off (`guardLive` false, the default), `v2g` once the owner turns it on — and `altRow` the other
+ * one, so v2g − v2 is the guard alone (review, 2026-10-03: v2g re-derived from the longer read
+ * differed from v2 with nothing to guard). Every other estimator runs on the feeder's dated
+ * evidence. `est` logs every estimator for scoring; a rule whose snapshot is missing logs null.
+ * "mirror" = the configured estimator could not be computed this run.
  */
-function noclaimVerdict({ snapRow, entries = null, now, cfg, demandRates = null, spans = null, guardLive = false }) {
+function noclaimVerdict({ snapRow, altRow = null, entries = null, now, cfg, demandRates = null, spans = null, guardLive = false }) {
   const sales = snapRow.sales || {};
   const stock = snapRow.stock || {};
   const pol = snapRow.policy || {};
   const old = { c: "fleet", t: Math.max(0, Math.round(num(snapRow.target))), w: round1(sales.perWeek), sh: round1(sales.shelfPerWeek), ot: round1(sales.otherPerWeek) };
   const snapRates = { shelf: round1(sales.shelfPerWeek), other: round1(sales.otherPerWeek), total: round1(sales.perWeek) };
+  const alt = altRow && altRow.sales ? { shelf: round1(altRow.sales.shelfPerWeek), other: round1(altRow.sales.otherPerWeek), total: round1(altRow.sales.perWeek) } : null;
   const liveId = guardLive ? "v2g" : "v2";
-  const est = entries ? { ...allEstimates(entries, now, { demandRates, spans }), [liveId]: snapRates.total } : null;
-  const feeder = cfg.estimatorNoclaim === liveId;
-  let r;
-  if (feeder) r = snapRates;
-  else if (entries) r = estimate(cfg.estimatorNoclaim, entries, now, { demandRates, spans });
-  else return { old, br: { ...old, b: "mirror", why: ["The feeder's sale evidence was unreadable this run: the brain shows the feeder's own number."] }, est: null };
+  const byRule = guardLive ? { v2: alt, v2g: snapRates } : { v2: snapRates, v2g: alt };
+  const est = entries ? { ...allEstimates(entries, now, { demandRates, spans }), v2: byRule.v2 ? byRule.v2.total : null, v2g: byRule.v2g ? byRule.v2g.total : null } : null;
+  const id = cfg.estimatorNoclaim;
+  const feeder = id === liveId;
+  let r = null;
+  if (id === "v2" || id === "v2g") r = byRule[id];
+  else if (entries) r = estimate(id, entries, now, { demandRates, spans });
+  if (!r) {
+    const why = entries ? "The feeder's " + id + " snapshot was unreadable this run" : "The feeder's sale evidence was unreadable this run";
+    return { old, br: { ...old, b: "mirror", why: [why + ": the brain shows the feeder's own number."] }, est };
+  }
   const { target, parts } = farmSizing.shelfAwareTarget({
     shelfHeld: num(stock.listed),
     shelfPerWeek: r.shelf,
@@ -671,8 +707,9 @@ function noclaimVerdict({ snapRow, entries = null, now, cfg, demandRates = null,
     min: num(pol.min, 0),
     max: num(pol.max, farmSizing.HARD_MAX_ACCOUNTS),
   });
+  const basisText = feeder ? "the feeder's own rates" : id === "v2" || id === "v2g" ? "the feeder's own rule, burst guard " + (id === "v2g" ? "on" : "off") : id;
   const why = [
-    "Shelf (Gameflip/GGSel/Plati) " + r.shelf + "/wk, elsewhere " + r.other + "/wk (" + (feeder ? "the feeder's own rates" : cfg.estimatorNoclaim) + ").",
+    "Shelf (Gameflip/GGSel/Plati) " + r.shelf + "/wk, elsewhere " + r.other + "/wk (" + basisText + ").",
     "Target " + target + " = " + parts.shelf + " shelf + " + parts.other + " other + " + parts.safety + " safety.",
   ];
   return { old, br: { c: "fleet", t: target, w: r.total, sh: r.shelf, ot: r.other, b: feeder ? "feeder" : "own", why }, est };
@@ -691,7 +728,10 @@ const shortWhy = (list) => (list || []).slice(0, 4).map((s) => String(s).slice(0
  * @param {number} p.probeSize      autoFarm.probeSize
  * @param {Array}  p.claim          [{ key, label, live, hoursLeft, reuseOnly, entries, spans,
  *                                     radar, value, valueBasis, gameCap, stock, act, dud, old:{alloc,sales,error} }]
- * @param {Array}  p.noclaim        [{ snapRow, entries, spans, radarRows, keywords, live }]
+ * @param {Array}  p.noclaim        [{ snapRow, altRow, entries, spans, radarRows, keywords, live }] —
+ *                                   snapRow the feeder's live rule, altRow the same snapshot under the
+ *                                   other burst-guard setting
+ * Cold probes are sized by coldProbeSizeFor(cfg, engine.floor).
  * @param {object} [p.engine]       { floor, maxPerGame } — the auto-farm's shelf floor and base cap
  * @param {Function} [p.demandRates]
  * @param {boolean} [p.burstGuardLive] autoFarm.noclaimBurstGuard: the feeder's snapshot is v2g, not v2
@@ -705,11 +745,14 @@ function buildRun({ now, cfg, sizing, probeSize = 15, claim = [], noclaim = [], 
     const est = allEstimates(entries, now, ctx);
     const own = est[cfg.estimatorClaim] || 0;
     const market = marketView(g.radar || null, entries, now);
+    const first = firstListedAt(g.spans);
     const evidence = {
       sold135: entries.some((e) => e.t > now - HISTORY_DAYS * DAY && e.t <= now),
       listed135: coveredDays(g.spans || [], now - HISTORY_DAYS * DAY, now) > 0,
+      firstListedAt: first,
+      listedDays: first == null ? null : Math.max(0, (now - first) / DAY),
     };
-    // A pack without `dud` (the probe history was not read) can never cold-probe: null = unknown.
+    // A pack without `dud` was not checked: null (only matters while probeColdStart is on).
     const dud = g.dud === undefined ? null : g.dud;
     const br = claimVerdict({ own, market, value: g.value, valueBasis: g.valueBasis, cfg, sizing, gameCap: g.gameCap, probeSize, floor, evidence, live: !!g.live, dud });
     const old = oldClaim(g.old && g.old.alloc, g.old && g.old.sales, {
@@ -730,7 +773,7 @@ function buildRun({ now, cfg, sizing, probeSize = 15, claim = [], noclaim = [], 
       hl: g.hoursLeft == null ? null : round1(g.hoursLeft),
       ro: !!g.reuseOnly,
       old,
-      br: { c: br.c, t: br.t, td: br.td, w: br.w, b: br.b, own: br.own, mp: br.mp, mt: br.mt, sh: br.sh, v: br.v, u: br.u, ...(br.dud ? { dud: true } : {}) },
+      br: { c: br.c, t: br.t, td: br.td, w: br.w, b: br.b, own: br.own, mp: br.mp, mt: br.mt, sh: br.sh, v: br.v, u: br.u, ...(br.dud ? { dud: br.dud } : {}) },
       mk: market ? { rw: market.rivalPerWeek, ru: market.rivalUnits, rs: market.rivalSellers, ow: market.ourWatched, pm: market.realisedMedian, tts: market.medianTtsHours } : null,
       est,
       stk: g.stock ? { on: num(g.stock.onHand), fl: num(g.stock.inFlight) } : null,
@@ -740,7 +783,7 @@ function buildRun({ now, cfg, sizing, probeSize = 15, claim = [], noclaim = [], 
     });
   }
   for (const n of noclaim) {
-    const v = noclaimVerdict({ snapRow: n.snapRow, entries: n.entries, now, cfg, demandRates, spans: n.spans, guardLive: !!burstGuardLive });
+    const v = noclaimVerdict({ snapRow: n.snapRow, altRow: n.altRow || null, entries: n.entries, now, cfg, demandRates, spans: n.spans, guardLive: !!burstGuardLive });
     const m = bucketMarket(n.radarRows, n.snapRow.key, n.keywords || [n.snapRow.key]);
     rows.push({
       k: n.snapRow.key,
@@ -865,33 +908,61 @@ function finishScore(s) {
 // (Not applied to the no-claim farm: its Eldorado set offers stay listed while covering 0 accounts.)
 const IN_STOCK_DAYS = 6;
 
-function finishAll(by) {
-  const out = {};
-  for (const [farm, m] of Object.entries(by)) out[farm] = Object.fromEntries(Object.entries(m).map(([id, s]) => [id, finishScore(s)]));
-  return out;
+// ONE admission rule for the backtest and the forward test (review, 2026-10-03): a game-week is
+// scored when it sold, or when ANY estimator forecast a sale for it. All-zero game-weeks are right for
+// every estimator and would only dilute the error, but a week one estimator forecast sales for and
+// none came is exactly the miss that must count: the backtest used to admit a week only when the game
+// had sold in the 45 days before it — avg45's own horizon — which hid every sba/tsb false alarm 46–91
+// days after a game's last sale. Every estimator is scored on every admitted row, a missing forecast
+// as 0, so all are compared on the same rows. An estimator a logged row does not carry at all (it was
+// logged before the estimator existed) is flagged `partial` — "not enough history yet" — and is never
+// ranked (bestOf).
+//
+// The longest look-back of any estimator (sba/tsb's 13 weeks): a game with no sale inside it before
+// a week, and none during it, forecasts 0 everywhere, so the backtest skips it without computing.
+const LOOKBACK_DAYS = Math.max(45, INTERMITTENT_WEEKS * 7);
+
+// The estimators scored for a farm: every current one, plus today's own reading (`engine`, claim
+// farm) where it was logged — it cannot be replayed, so the backtest has no `engine`.
+const scoredIds = (farm, withEngine) => (withEngine && farm === "claim" ? ESTIMATORS.concat("engine") : ESTIMATORS);
+
+const forecastsSale = (forecasts) => Object.values(forecasts).some((v) => num(v) > 0);
+
+function admitRow(by, farm, forecasts, actual, ids) {
+  const f = by[farm] || (by[farm] = { rows: 0, ids, s: {} });
+  f.rows++;
+  for (const id of ids) {
+    // not in this row at all: logged before the estimator existed — no history, not a forecast of 0
+    if (!Object.prototype.hasOwnProperty.call(forecasts, id)) continue;
+    if (!f.s[id]) f.s[id] = newScore();
+    addScore(f.s[id], num(forecasts[id], 0), actual);
+  }
 }
 
-function addAll(by, farm, forecasts, actual) {
-  if (!by[farm]) by[farm] = {};
-  for (const [id, f] of Object.entries(forecasts)) {
-    if (f == null) continue;
-    if (!by[farm][id]) by[farm][id] = newScore();
-    addScore(by[farm][id], num(f), actual);
+function finishAll(by) {
+  const out = {};
+  for (const [farm, f] of Object.entries(by)) {
+    out[farm] = {};
+    for (const id of f.ids) {
+      const s = finishScore(f.s[id] || newScore());
+      if (s.n < f.rows) s.partial = true;
+      out[farm][id] = s;
+    }
   }
+  return out;
 }
 
 const stockedWeek = (farm, spans, from, to) => farm === "claim" && !!spans && spans.length > 0 && coveredDays(spans, from, to) >= IN_STOCK_DAYS;
 
 /**
  * Replay the last `weeks` weeks: at each week's start every estimator forecasts the next 7 days
- * from the sales dated before it; truth is the sales dated inside it. A game counts in a week only
- * when it sold something in the 45 days before or the 7 days of it (all-zero games are trivially
- * right for every estimator and would only dilute the error).
+ * from the sales dated before it; truth is the sales dated inside it. A game-week is scored when it
+ * sold or any estimator forecast a sale (admitRow).
  * @param {Array} games [{ key, farm, entries, spans }]
  * @returns {{ weeks, scores, best, scoresInStock, bestInStock }}
  */
 function backtest({ games = [], now, weeks = 6, demandRates = null }) {
-  const by = {}; // farm -> estimator -> score
+  const by = {}; // farm -> rows + estimator -> score
   const byStocked = {};
   const perWeek = [];
   for (let k = weeks; k >= 1; k--) {
@@ -901,16 +972,16 @@ function backtest({ games = [], now, weeks = 6, demandRates = null }) {
     for (const g of games) {
       const entries = g.entries || [];
       const actual = actualIn(entries, T, end);
-      const before = actualIn(entries, T - 45 * DAY, T);
-      if (!actual && !before) continue;
+      if (!actual && !entries.some((e) => e.t > T - LOOKBACK_DAYS * DAY && e.t <= T)) continue;
+      const est = allEstimates(entries, T, { spans: g.spans || null, demandRates });
+      if (!actual && !forecastsSale(est)) continue;
       wk.games++;
       wk.actual += actual;
-      const est = allEstimates(entries, T, { spans: g.spans || null, demandRates });
       const farm = g.farm || "claim";
-      addAll(by, farm, est, actual);
+      admitRow(by, farm, est, actual, scoredIds(farm, false));
       if (stockedWeek(farm, g.spans, T, end)) {
         wk.inStock++;
-        addAll(byStocked, farm, est, actual);
+        admitRow(byStocked, farm, est, actual, scoredIds(farm, false));
       }
     }
     perWeek.push(wk);
@@ -921,7 +992,9 @@ function backtest({ games = [], now, weeks = 6, demandRates = null }) {
 }
 
 /**
- * Score logged forecasts once their week is over.
+ * Score logged forecasts once their week is over, admitted and compared exactly as the backtest
+ * (admitRow). Today's engine reading is scored beside the estimators on the claim farm; an errored
+ * verdict forecast nothing (0).
  * @param {Array} samples [{ at, rows }] — one logged run per day
  * @param {Function} entriesFor (farm, key) -> entries, the evidence as known NOW
  * @param {Function} [spansFor] (farm, key) -> listing spans, for the in-stock split
@@ -940,14 +1013,16 @@ function forwardScores({ samples = [], entriesFor, spansFor = () => null, now })
     }
     scored++;
     for (const r of run.rows || []) {
+      // a no-claim row logged without estimates (its evidence was unreadable) has nothing to score
+      if (!r.est || typeof r.est !== "object") continue;
       const entries = entriesFor(r.f, r.k);
       if (!entries) continue;
       const actual = actualIn(entries, T, T + 7 * DAY);
-      const forecasts = { ...(r.est || {}) };
-      if (r.f === "claim" && r.old && r.old.w != null && r.old.c !== "error") forecasts.engine = num(r.old.w);
-      if (!actual && !Object.values(forecasts).some((v) => num(v) > 0)) continue;
-      addAll(by, r.f, forecasts, actual);
-      if (stockedWeek(r.f, spansFor(r.f, r.k), T, T + 7 * DAY)) addAll(byStocked, r.f, forecasts, actual);
+      const forecasts = { ...r.est };
+      if (r.f === "claim") forecasts.engine = r.old && r.old.c !== "error" ? num(r.old.w, 0) : 0;
+      if (!actual && !forecastsSale(forecasts)) continue;
+      admitRow(by, r.f, forecasts, actual, scoredIds(r.f, true));
+      if (stockedWeek(r.f, spansFor(r.f, r.k), T, T + 7 * DAY)) admitRow(byStocked, r.f, forecasts, actual, scoredIds(r.f, true));
     }
   }
   const scores = finishAll(by);
@@ -955,13 +1030,15 @@ function forwardScores({ samples = [], entriesFor, spansFor = () => null, now })
   return { runsScored: scored, runsWaiting: waiting, scores, best: bestOf(scores), scoresInStock, bestInStock: bestOf(scoresInStock) };
 }
 
-// The estimator with the lowest RMSE per farm (ties: the smaller |bias|). See newScore for why not MAE.
+// The estimator with the lowest RMSE per farm (ties: the smaller |bias|), among those scored on
+// every admitted row — a `partial` one (not enough history yet) is never ranked. See newScore for
+// why not MAE.
 function bestOf(scores) {
   const best = {};
   for (const [farm, m] of Object.entries(scores || {})) {
     let pick = null;
     for (const [id, s] of Object.entries(m)) {
-      if (!s.n || s.rmse == null) continue;
+      if (!s.n || s.rmse == null || s.partial) continue;
       if (!pick || s.rmse < pick.rmse || (s.rmse === pick.rmse && Math.abs(s.bias) < Math.abs(pick.bias))) pick = { id, rmse: s.rmse, mae: s.mae, bias: s.bias };
     }
     if (pick) best[farm] = pick;
@@ -1016,13 +1093,14 @@ module.exports = {
   TSB_ALPHA,
   TSB_BETA,
   DAY,
+  LOOKBACK_DAYS,
   isOn,
   readConfig,
-  openShelfMarkets,
-  defaultColdProbeSize,
+  coldProbeSizeFor,
   probeCooldownDaysOf,
   listingSpans,
   coveredDays,
+  firstListedAt,
   countIn,
   weeklyCounts,
   sbaRate,

@@ -30,6 +30,8 @@ const MAX_ROWS_PER_RUN = 1000;
 
 const blankState = () => ({
   started: false,
+  // when the loop last began waiting to run (loopStatus)
+  since: null,
   timer: null,
   nextRunAt: null,
   running: false,
@@ -174,6 +176,8 @@ async function runOnce({ force = false } = {}) {
       ms,
       cfg: {
         ...cfg,
+        // the size this run's cold probes asked for (unset in settings = half the engine's shelf floor)
+        coldProbeSize: model.coldProbeSizeFor(cfg, (pack.engine || {}).floor),
         sizing: pack.sizing,
         probeSize: pack.probeSize,
         probeCooldownDays: pack.probeCooldownDays,
@@ -241,9 +245,13 @@ async function tick() {
     } catch {
       /* runOnce never throws; belt and braces for the loop */
     }
-  } else if (!state.offLogged) {
-    state.offLogged = true;
-    hooks.log("demandBrain: off — autoFarm.demandBrain.enabled is not set; nothing is computed or logged");
+  } else {
+    // Switched off: a run is not due, so the wait for the next one starts again from here.
+    state.since = new Date();
+    if (!state.offLogged) {
+      state.offLogged = true;
+      hooks.log("demandBrain: off — autoFarm.demandBrain.enabled is not set; nothing is computed or logged");
+    }
   }
   arm(cfg.enabled ? cfg.intervalMin * 60000 : OFF_RECHECK_MS);
 }
@@ -252,12 +260,14 @@ async function tick() {
 function start() {
   if (state.started) return false;
   state.started = true;
+  state.since = new Date();
   arm(BOOT_DELAY_MS);
   return true;
 }
 
 function stop() {
   state.started = false;
+  state.since = null;
   if (state.timer) clearTimeout(state.timer);
   state.timer = null;
   state.nextRunAt = null;
@@ -283,13 +293,18 @@ function status() {
  * The health page's view of this loop (docs/LIVE-FIXES-1003.md §3): synchronous, never throws.
  * `lastRunAt` is the last run that computed (a run whose inputs failed or timed out leaves it
  * alone, so a stuck brain shows as late); `enabled` is the live switch, read like every tick reads it.
+ * `since` is when the loop last began waiting to run — start(), or its latest tick that found the
+ * switch off — or null when it is not started: a brain switched on hours after boot is due one tick
+ * (≤ 10 min) after `since`, not since the process started, while a dead scheduler's `since` stops
+ * moving and it ages into "late" like any other loop.
  */
 function loopStatus() {
+  const since = state.since || null;
   try {
     const cfg = readConfig();
-    return { lastRunAt: state.lastRunAt || null, intervalMin: cfg.intervalMin, enabled: cfg.enabled };
+    return { lastRunAt: state.lastRunAt || null, intervalMin: cfg.intervalMin, enabled: cfg.enabled, since };
   } catch {
-    return { lastRunAt: state.lastRunAt || null, intervalMin: model.DEFAULTS.intervalMin, enabled: false };
+    return { lastRunAt: state.lastRunAt || null, intervalMin: model.DEFAULTS.intervalMin, enabled: false, since };
   }
 }
 

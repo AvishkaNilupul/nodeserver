@@ -15,8 +15,10 @@
 //     demandAllocation and marketStockFloor (pure). Never freshResearchForGame: that re-scans a
 //     marketplace;
 //   * the auto-farm's failed probes (model v2's cold-start rule): one projected, indexed find of
-//     the AutoFarmTask rows its probe gate counts as a cooldown, for the live games only;
-//   * the no-claim feeder's demand snapshot and sale evidence (utils/farmDemand, database reads).
+//     the AutoFarmTask rows its probe gate counts as a cooldown, for the live games only and only
+//     while its probeColdStart is on;
+//   * the no-claim feeder's demand snapshot — twice, once per burst-guard setting, so v2 and v2g
+//     come from the same evidence — and its sale evidence (utils/farmDemand, database reads).
 //     Never unclaimedAllocator.plan(): it reads the Pi and overwrites the allocator's plan.
 // Nothing here writes, calls a marketplace, opens SSH or touches a setting.
 const model = require("./model");
@@ -199,11 +201,12 @@ async function liveCampaigns(d, now, rules) {
  * inside the re-probe cooldown. The predicate is the engine's own probe gate (decide.probeGate:
  * game, probeOutcome, completedAt ≥ now − probeCooldownDays), asked once for every label of the
  * live games instead of once per game: one projected read on the indexed `game` field.
- * @returns {Promise<Map<string, number>>} game key -> the newest such completedAt (epoch ms)
+ * @returns {Promise<{ duds: Map<string, number>, truncated: boolean }>} game key -> the newest such
+ *          completedAt (epoch ms); `truncated` when the read hit PROBE_HISTORY_CAP
  */
 async function expiredProbes(d, labels, now, cooldownDays) {
-  const out = new Map();
-  if (!labels.length) return out;
+  const duds = new Map();
+  if (!labels.length) return { duds, truncated: false };
   const rows = await d.AutoFarmTask.find(
     { game: { $in: labels }, probeOutcome: "expired", completedAt: { $gte: new Date(now - cooldownDays * DAY) } },
     { game: 1, completedAt: 1 },
@@ -214,9 +217,9 @@ async function expiredProbes(d, labels, now, cooldownDays) {
     const key = d.normGame(r.game);
     const at = r.completedAt ? new Date(r.completedAt).getTime() : NaN;
     if (!key || !Number.isFinite(at)) continue;
-    if (!(out.get(key) >= at)) out.set(key, at);
+    if (!(duds.get(key) >= at)) duds.set(key, at);
   }
-  return out;
+  return { duds, truncated: rows.length >= PROBE_HISTORY_CAP };
 }
 
 /**
@@ -282,18 +285,30 @@ async function noclaimEvidence(FD) {
  * The no-claim feeder's snapshot (its own target and rates) and its dated sale evidence. A failure
  * here is the no-claim half's failure only: the run carries on with a note.
  */
-async function noclaimInputs(d) {
+async function noclaimInputs(d, { guardLive = false } = {}) {
   const FD = d.farmDemand;
-  const out = { snap: [], evidence: null, demandRates: null, notes: [] };
+  const out = { snap: [], alt: null, evidence: null, demandRates: null, notes: [] };
   if (!FD || typeof FD.unclaimedDemandSnapshot !== "function") {
     out.notes.push("The no-claim feeder's demand snapshot is unavailable.");
     return out;
   }
+  // The feeder's own snapshot under the rule it runs live (the owner's burst-guard switch, as this
+  // run read it), then the same snapshot — same evidence, same window — under the other setting, so
+  // v2 and v2g differ by the guard alone (review, 2026-10-03). Both are database reads.
   try {
-    out.snap = (await FD.unclaimedDemandSnapshot({ days: 30 })) || [];
+    out.snap = (await FD.unclaimedDemandSnapshot({ days: 30, burstGuard: guardLive })) || [];
   } catch (e) {
     out.notes.push("The no-claim feeder's snapshot failed this run (" + (e && e.message ? e.message : e) + "): no-claim rows skipped.");
     return out;
+  }
+  try {
+    out.alt = (await FD.unclaimedDemandSnapshot({ days: 30, burstGuard: !guardLive })) || [];
+  } catch (e) {
+    out.alt = null;
+    out.notes.push(
+      "The no-claim feeder's snapshot with the burst guard " + (guardLive ? "off" : "on") + " failed this run (" + (e && e.message ? e.message : e) + "): " +
+        (guardLive ? "v2" : "v2g") + " is not logged.",
+    );
   }
   if (typeof FD.demandRates === "function") out.demandRates = FD.demandRates;
   try {
@@ -397,17 +412,22 @@ async function load({ now = Date.now(), deps = null } = {}) {
   const old = await oldVerdicts(d, claimGames.map((g) => ({ key: g.key, label: g.label })), af);
 
   // Known duds for the cold-start rule (model v2), read for the live games only — the rule needs a
-  // live campaign. Unreadable = no game is cleared for a cold probe (each stays "unknown"): the
-  // brain never suggests probing a game it could not check.
+  // live campaign — and only while the engine's own probeColdStart is on: its probe gate ignores the
+  // cooldown otherwise, and so does the brain. Unreadable = no game is cleared for a cold probe
+  // (each stays "unknown"): the brain never suggests probing a game it could not check.
   const probeCooldownDays = model.probeCooldownDaysOf(af);
   let duds = null;
-  try {
-    if (!d.AutoFarmTask || typeof d.AutoFarmTask.find !== "function") throw new Error("no task model");
-    const labels = [...new Set(claimGames.filter((g) => g.campaign).flatMap((g) => g.campaign.labels || [g.label]))];
-    duds = await expiredProbes(d, labels, now, probeCooldownDays);
-  } catch (e) {
-    duds = null;
-    notes.push("The auto-farm's probe history was unreadable this run (" + (e && e.message ? e.message : e) + "): no cold probes, new drops stay 'unknown'.");
+  if (af.probeColdStart) {
+    try {
+      if (!d.AutoFarmTask || typeof d.AutoFarmTask.find !== "function") throw new Error("no task model");
+      const labels = [...new Set(claimGames.filter((g) => g.campaign).flatMap((g) => g.campaign.labels || [g.label]))];
+      const read = await expiredProbes(d, labels, now, probeCooldownDays);
+      duds = read.duds;
+      if (read.truncated) notes.push("The probe-history read hit its cap of " + PROBE_HISTORY_CAP + " rows: a failed probe may be missing, so a known dud could read as a new drop.");
+    } catch (e) {
+      duds = null;
+      notes.push("The auto-farm's probe history was unreadable this run (" + (e && e.message ? e.message : e) + "): no cold probes, new drops stay 'unknown'.");
+    }
   }
 
   const claim = claimGames.map(({ key, label, campaign, game, radarRow }) => {
@@ -439,14 +459,17 @@ async function load({ now = Date.now(), deps = null } = {}) {
       gameCap,
       stock: game && game.farm ? { onHand: game.farm.onHand, inFlight: game.farm.inFlight } : null,
       act: stance ? { d: stance.decision, at: stance.decidedAt || null, t: num(stance.target) } : null,
-      // false = checked, no failed probe; { at, days } = a known dud; null = not checked
+      // false = checked, no failed probe; { at, days } = a known dud; null = not checked (not live,
+      // probeColdStart off, or the read failed)
       dud: !campaign || !duds ? null : duds.has(key) ? { at: duds.get(key), days: probeCooldownDays } : false,
       old: old.get(key) || { error: "no verdict" },
     };
   });
 
-  const nc = await noclaimInputs(d);
+  const burstGuardLive = af.noclaimBurstGuard === true;
+  const nc = await noclaimInputs(d, { guardLive: burstGuardLive });
   notes.push(...nc.notes);
+  const altByKey = new Map((nc.alt || []).filter((r) => r && r.key).map((r) => [r.key, r]));
   const liveBuckets = new Set();
   for (const label of camps.noclaim) {
     const b = model.bucketOfKey(d.normGame(label), ncKeys);
@@ -461,6 +484,7 @@ async function load({ now = Date.now(), deps = null } = {}) {
   }
   const noclaim = nc.snap.map((row) => ({
     snapRow: row,
+    altRow: altByKey.get(row.key) || null,
     entries: nc.evidence ? nc.evidence.get(row.key) || [] : null,
     spans: bucketSpans.get(row.key) || [],
     radarRows,
@@ -478,8 +502,8 @@ async function load({ now = Date.now(), deps = null } = {}) {
     noclaim,
     demandRates: nc.demandRates,
     // The owner's switch for the feeder's burst guard (docs/LIVE-FIXES-1003.md §1, dark): while on,
-    // the feeder's snapshot is the guarded rule v2g, not v2.
-    burstGuardLive: af.noclaimBurstGuard === true,
+    // the feeder's live snapshot is the guarded rule v2g, not v2.
+    burstGuardLive,
     notes,
     // What the scorer needs later, without another load.
     evidence: {

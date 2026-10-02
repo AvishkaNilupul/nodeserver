@@ -164,9 +164,11 @@ function world(over = {}) {
       },
     },
     farmDemand: over.farmDemand || {
-      unclaimedDemandSnapshot: async ({ days }) => {
-        calls.push({ name: "snapshot", days });
-        return [{ key: "overwatch", label: "Overwatch", target: 250, onHand: 60, sales: { perWeek: 60 }, stock: { listed: 50, inFlight: 0 }, policy: {} }];
+      unclaimedDemandSnapshot: async ({ days, burstGuard }) => {
+        calls.push({ name: "snapshot", days, burstGuard });
+        // the guarded snapshot reads a lower other-market rate (model v2 asks for both)
+        const perWeek = burstGuard ? 45 : 60;
+        return [{ key: "overwatch", label: "Overwatch", target: burstGuard ? 190 : 250, onHand: 60, sales: { perWeek }, stock: { listed: 50, inFlight: 0 }, policy: {} }];
       },
       saleEvidenceByBucket: async ({ days }) => {
         calls.push({ name: "evidence", days });
@@ -303,7 +305,9 @@ test("no-claim: the feeder's snapshot and evidence, live bucket detection, never
   assert.equal(n.spans.length, 1, "the bucket's listing spans");
   assert.deepEqual(n.keywords, ["overwatch", "rainbow six"]);
   assert.equal(typeof p.demandRates, "function");
-  assert.deepEqual(calls.filter((c) => c.name === "snapshot").map((c) => c.days), [30]);
+  // model v2: the live rule, then the same snapshot under the other burst-guard setting (review 4)
+  assert.deepEqual(calls.filter((c) => c.name === "snapshot").map((c) => [c.days, c.burstGuard]), [[30, false], [30, true]]);
+  assert.equal(n.altRow.target, 190);
   assert.deepEqual(calls.filter((c) => c.name === "evidence").map((c) => c.days), [M.HISTORY_DAYS]);
 });
 
@@ -394,7 +398,7 @@ test("game rules mirror settings.isNoClaimGame (substring) and isReuseOnlyGame (
 
 test("v2 probe history: one indexed read of the live games' labels, the engine's own cooldown predicate", async () => {
   const { deps, calls } = world({
-    af: { probeCooldownDays: 90 },
+    af: { probeCooldownDays: 90, probeColdStart: true },
     expiredProbes: [
       { game: "Game C", completedAt: new Date(NOW - 20 * DAY) },
       { game: "Game C", completedAt: new Date(NOW - 5 * DAY) },
@@ -420,34 +424,77 @@ test("v2 probe history: one indexed read of the live games' labels, the engine's
 });
 
 test("v2 every raw label of a game's live campaigns is asked (the engine keys tasks by the raw label)", async () => {
-  const { deps, calls } = world({ campaigns: [{ game: "Game Q", endAt: null }, { game: "GAME Q", endAt: null }] });
+  const { deps, calls } = world({ af: { probeColdStart: true }, campaigns: [{ game: "Game Q", endAt: null }, { game: "GAME Q", endAt: null }] });
   await I.load({ now: NOW, deps });
   assert.deepEqual([...calls.find((c) => c.name === "probes").filter.game.$in].sort(), ["GAME Q", "Game Q"]);
 });
 
-test("v2 cold probe end to end: a live campaign with no sale, listing or rated market of ours", async () => {
-  const af = { perMarketStock: 3, platiEnabled: false, ggselEnabled: true, probeCooldownDays: 90 };
+test("v2 cold probe end to end: a live campaign with no sale of ours, sized from the engine's own floor", async () => {
+  const af = { probeColdStart: true, probeCooldownDays: 90 };
   const p = await I.load({ now: NOW, deps: world({ af }).deps });
+  assert.equal(p.engine.floor, 18, "this world's marketStockFloor");
   const run = M.buildRun({ now: NOW, cfg: M.readConfig(af), sizing: p.sizing, probeSize: p.probeSize, engine: p.engine, claim: p.claim, noclaim: p.noclaim, demandRates: p.demandRates });
   const wot = run.rows.find((r) => r.k === "world of tanks");
-  assert.deepEqual([wot.br.c, wot.br.t, wot.br.b], ["probe", 6, "cold"]);
+  assert.deepEqual([wot.br.c, wot.br.t, wot.br.b], ["probe", 9, "cold"], "half the floor of 18");
   assert.equal(run.rows.find((r) => r.k === "game c").br.b !== "cold", true, "sold (connection flips): not a new drop");
   // the same game, probed and failed 30 days ago: a known dud
   const p2 = await I.load({ now: NOW, deps: world({ af, expiredProbes: [{ game: "World of Tanks", completedAt: new Date(NOW - 30 * DAY) }] }).deps });
   const run2 = M.buildRun({ now: NOW, cfg: M.readConfig(af), sizing: p2.sizing, probeSize: p2.probeSize, engine: p2.engine, claim: p2.claim, noclaim: [] });
   const dud = run2.rows.find((r) => r.k === "world of tanks");
-  assert.deepEqual([dud.br.c, dud.br.dud], ["skip", true]);
+  assert.deepEqual([dud.br.c, dud.br.dud], ["skip", "probe"]);
 });
 
 test("v2 an unreadable probe history: no cold probe anywhere, said in a note — never a crash", async () => {
+  const af = { probeColdStart: true };
   for (const AutoFarmTask of [null, { find: () => { throw new Error("tasks unreadable"); } }]) {
-    const { deps } = world({ AutoFarmTask });
+    const { deps } = world({ af, AutoFarmTask });
     const p = await I.load({ now: NOW, deps });
     assert.ok(p.claim.every((g) => g.dud === null));
     assert.ok(p.notes.some((n) => /probe history was unreadable/.test(n)), p.notes.join(" | "));
-    const run = M.buildRun({ now: NOW, cfg: M.readConfig({ demandBrain: {} }), sizing: p.sizing, probeSize: p.probeSize, engine: p.engine, claim: p.claim, noclaim: [] });
+    const run = M.buildRun({ now: NOW, cfg: M.readConfig(af), sizing: p.sizing, probeSize: p.probeSize, engine: p.engine, claim: p.claim, noclaim: [] });
     assert.equal(run.rows.find((r) => r.k === "world of tanks").br.c, "unknown");
   }
+});
+
+test("review 3 — with the engine's probeColdStart off there is no cooldown: no probe-history read, and new drops are probed", async () => {
+  const { deps, calls } = world({ af: { probeColdStart: false }, expiredProbes: [{ game: "World of Tanks", completedAt: new Date(NOW - DAY) }] });
+  const p = await I.load({ now: NOW, deps });
+  assert.equal(calls.filter((c) => c.name === "probes").length, 0, "the engine's gate ignores the cooldown, so the brain does not read it");
+  assert.ok(p.claim.every((g) => g.dud === null));
+  assert.ok(!p.notes.some((n) => /probe history/.test(n)));
+  const run = M.buildRun({ now: NOW, cfg: M.readConfig(deps.settings.getAutoFarm()), sizing: p.sizing, probeSize: p.probeSize, engine: p.engine, claim: p.claim, noclaim: [] });
+  assert.equal(run.rows.find((r) => r.k === "world of tanks").br.b, "cold");
+});
+
+test("review 6 — a probe-history read that hits its cap says so", async () => {
+  const many = Array.from({ length: I.PROBE_HISTORY_CAP }, (_, i) => ({ game: "Game C", completedAt: new Date(NOW - (i % 80) * DAY) }));
+  const p = await I.load({ now: NOW, deps: world({ af: { probeColdStart: true }, expiredProbes: many }).deps });
+  assert.ok(p.notes.some((n) => n.includes("hit its cap of " + I.PROBE_HISTORY_CAP)), p.notes.join(" | "));
+  const under = await I.load({ now: NOW, deps: world({ af: { probeColdStart: true }, expiredProbes: many.slice(1) }).deps });
+  assert.ok(!under.notes.some((n) => /hit its cap/.test(n)));
+});
+
+test("review 4 — the feeder is asked for both rules on the same evidence; with the guard live the snapshot IS v2g", async () => {
+  const { deps, calls } = world({ af: { noclaimBurstGuard: true } });
+  const p = await I.load({ now: NOW, deps });
+  assert.deepEqual(calls.filter((c) => c.name === "snapshot").map((c) => c.burstGuard), [true, false], "live rule first, then the other");
+  const n = p.noclaim[0];
+  assert.deepEqual([n.snapRow.target, n.altRow.target], [190, 250]);
+  const run = M.buildRun({ now: NOW, cfg: M.readConfig({}), sizing: p.sizing, noclaim: p.noclaim, burstGuardLive: p.burstGuardLive, demandRates: p.demandRates });
+  assert.deepEqual([run.rows[0].est.v2, run.rows[0].est.v2g], [60, 45]);
+});
+
+test("review 4 — the other rule's snapshot failing costs only that rule: a note, and the live rows still come", async () => {
+  const farmDemand = {
+    unclaimedDemandSnapshot: async ({ burstGuard }) => {
+      if (burstGuard) throw new Error("no-claim demand withheld: the bulk-pack lookup failed");
+      return [{ key: "overwatch", label: "Overwatch", target: 250, sales: { perWeek: 60 }, stock: { listed: 50 }, policy: {} }];
+    },
+  };
+  const p = await I.load({ now: NOW, deps: world({ farmDemand }).deps });
+  assert.equal(p.noclaim.length, 1);
+  assert.equal(p.noclaim[0].altRow, null);
+  assert.ok(p.notes.some((x) => /burst guard on failed this run \(no-claim demand withheld.*\): v2g is not logged/.test(x)), p.notes.join(" | "));
 });
 
 test("v2 no live game: no probe-history read at all", async () => {

@@ -14,12 +14,17 @@ after the week, decided on the evidence this produces.
 ## Status: LIVE in test mode since 2026-10-02 05:54:53Z (log only — no farm reads it)
 
 - **Model v2 built 2026-10-03, NOT deployed yet** (`docs/LIVE-FIXES-1003.md` §A8, worktree `live-fixes-1003`).
-  Changes only `utils/demandBrain/{model,inputs,index}.js`: the intermittent-demand estimators `sba` and `tsb`
-  (§2.2), the no-claim feeder's burst-guarded rule `v2g` (§2.2, §2.5), cold probes for new drops (§2.4), the
-  heartbeat's `cold probes N (old asks M)` clause and the health hook `loopStatus()` (§4). No model, route,
-  page or setting changes; one new read (§4). Defaults unchanged (`avg45` / `v2`): the test week decides.
-  Needs `utils/farmDemand.js` from the same release (§A4: `demandRates(..., {burstGuard})`, units' `pack`
-  flag) — against an older farmDemand, `v2g` silently equals `v2` and packs are not flagged.
+  Changes `utils/demandBrain/{model,inputs,index}.js` and three labels on the page: the intermittent-demand
+  estimators `sba` and `tsb` (§2.2), the no-claim feeder's burst-guarded rule `v2g` (§2.2, §2.5), cold probes for
+  new drops (§2.4), one admission rule for both scorers (§3), the heartbeat's `cold probes N (old asks M)` clause
+  and the health hook `loopStatus()` (§4). No model, route or setting changes; two new reads (§4). Defaults
+  unchanged (`avg45` / `v2`): the test week decides. Needs `utils/farmDemand.js` from the same release (§A4:
+  `demandRates`/`unclaimedDemandSnapshot` take `burstGuard`, units carry `pack`) — against an older farmDemand,
+  `v2g` silently equals `v2` and packs are not flagged.
+- Independent review of v2 (2026-10-03), all fixed the same day, each with a test that fails before it (§10):
+  SBA rose with silence; the backtest hid sba/tsb false alarms; listings stopped cold probes (an engine probe
+  listed 2 days ago read as a skip); v2 and v2g came from different evidence; the cold size ignored the engine's
+  floor; the probe-history read had no cap note; a misleading `v2g` label; the feeder's guard could raise a rate.
 - Deployed dark 05:53:34Z (commit b22b950; backup `_deploy_backup_20261002055257_farm-brain`): new
   `utils/demandBrain/{model,inputs,index}.js` ff349ac4 / 73b95694 / 7f64d980, `models/DemandBrainRun.js`
   78f3f9d8, `models/DemandBrainRow.js` 81374dcf; `routes/priceTrackerRoutes.js` 3318b47a → 9facf4c7,
@@ -73,9 +78,9 @@ Weekly rate from dated sales, `n(X)` = sales in the last X days:
 | `avg30` | n(30)×7/30 | |
 | `max30_14` | max(n(30)×7/30, n(14)×7/14) | reacts to a rise in two weeks |
 | `v2` | shelf (gameflip/ggsel/digiseller) max30_14 + other markets' in-stock rate by selling days (`farmSizing.inStockRate`), each max(30, 14) | exactly `farmDemand.demandRates(units, {burstGuard: false})` (used directly when present; the copy is checked identical on real evidence) |
-| `v2g` (v2) | `v2` with the feeder's burst guard on: burst sales (a hand sale, market `manual`, or a bulk-pack unit, `pack: true`) count raw in each window, only the rest through the in-stock correction: other = max(inStock30(rest) + n30(burst)×7/30, inStock14(rest) + n14(burst)×7/14) | exactly `farmDemand.demandRates(units, {burstGuard: true})` (§A4, dark); a one-day lump of 40 reads 20/wk, not 40 |
+| `v2g` (v2) | "no-claim feeder rule, hand/pack sales at raw rate": `v2` with the feeder's burst guard on. Burst sales (a hand sale, market `manual`, or a bulk-pack unit, `pack: true`) count raw in each window; the rest keep the in-stock correction over the selling days of ALL other-market sales; each window is clamped to its unguarded figure: other = max(min(plain30, inStock30(rest, all days) + n30(burst)×7/30), min(plain14, inStock14(rest, all days) + n14(burst)×7/14)) | exactly `farmDemand.demandRates(units, {burstGuard: true})` (§A4, dark): it can only lower a rate. A one-day lump of 40 reads 20/wk, not 40; nothing is de-duplicated |
 | `listed` | max(n(30)×7/max(L30, 15), n(14)×7/max(L14, 7)), L = days the game had a live listing | stock-out correction from listing history, capped at 2× |
-| `sba` (v2) | Croston with the Syntetos–Boylan correction on the weekly counts y₁…y₁₃ (last 13 weeks, oldest first): SES (α = 0.15) of each selling week's size z and of the weeks between selling weeks p, updated only in selling weeks, started from the first size and the first interval (counted from the window's first week); forecast (1 − α/2)·z/p | never decays while a game is silent (Croston's blind spot) |
+| `sba` (v2) | Croston with the Syntetos–Boylan correction on the weekly counts y₁…y₁₃ (last 13 weeks, oldest first): SES (α = 0.15) of each selling week's size z and of the weeks between selling weeks p, updated only in selling weeks; with two or more selling weeks it starts from the first size and the first GAP between selling weeks, with one it reads one sale in the whole window (p = 13) — the window's first week is never an interval's start; forecast (1 − α/2)·z/p | never decays while a game is silent (Croston's blind spot); sliding the window changes it only when a sale enters or leaves |
 | `tsb` (v2) | Teunter–Syntetos–Babai on the same weekly counts: the chance a week sells π is smoothed every week (β = 0.15), the selling-week size z only in selling weeks (α = 0.15); started from the window's own averages (share of weeks that sold, average selling week); forecast π·z | fades a game that stopped selling |
 
 Defaults: claim farm **`avg45`**, no-claim **`v2`**. Switchable live (`estimatorClaim`, `estimatorNoclaim`) to any id above.
@@ -85,9 +90,10 @@ Defaults: claim farm **`avg45`**, no-claim **`v2`**. Switchable live (`estimator
   under the oldest backtest week (6 × 7 + 91 = 133). `v2` and `v2g` always pass `burstGuard` explicitly, so the
   owner's switch (`autoFarm.noclaimBurstGuard`) never changes what an estimator means and the feeder never reads
   its settings for a default (the backtest calls it once per game-week). The brain's fallback copy of the feeder's
-  rule is held equal to production's `demandRates` on 400 random histories (hand sales, packs, guard on and off).
-- Forward scores of `sba`, `tsb` and `v2g` start with the first v2 run: v1 rows do not carry them, so for the first
-  week their game-week counts (`n`, shown per estimator) are smaller than the older estimators'.
+  rule is held equal to production's `demandRates` on 400 random histories (hand sales, packs, guard on and off),
+  and guarded ≤ unguarded is checked on 2,000 more, against both.
+- Forward scores of `sba`, `tsb` and `v2g` start with the first v2 run: v1 rows do not carry them, so until the
+  last v1 sample leaves the 21-day log they are shown as "not enough history yet" and never ranked (§3).
 - `avg45` was picked on production's own backtest (2026-10-02, 263 game-weeks, 135 days of evidence),
   ranked by RMSE: `avg45` 2.27 (bias +0.32), `avg30` 2.85 (+0.41), `max30_14` 3.59 (+0.76), `listed` 3.61
   (+0.82), `v2` 6.16 (+2.05). Same order on the 243 game-weeks the game was listed all week, so it is not a
@@ -109,13 +115,15 @@ Market **proof** = rivals sell ≥ `minMarketRate` a week AND ≥ `minMarketUnit
 own      = estimator(estimatorClaim)
 forecast = max(own, marketPotential); basis = own | market | none
 value    = our net per account (price tracker), else rivals' sold median × 0.85, else unknown
-no evidence = no own sale in 135 d, never listed in 135 d, and no rated market
-probe (cold, v2): no evidence + a live campaign + not a known dud → target = coldProbeSize (6), basis "cold"
-skip (dud, v2)  : no evidence + a live campaign + a probe of this game ended with 0 sales inside the
-                  engine's re-probe cooldown (probeCooldownDays, 90)                      → row flag br.dud
-unknown  : no evidence and no live campaign; or the probe history was unreadable; or coldProbeSize 0
-skip     : forecast < minRate, or value known and forecast × value < minWeeklyUsd; or evidence but no
-           forecast (listed and never sold, sold long ago, a watched market below proof)
+new drop  (v2) = forecast 0 + a live campaign + NO OWN SALE in 135 d (listings and rated markets do not count)
+probe (cold, v2): a new drop, not dud-like → target = coldProbeSize (6), basis "cold", shown as "new drop: small test batch"
+skip (dud, v2)  : a new drop listed longer than probeMaxDays (30) and never sold     → row flag br.dud "listed"
+                  or, while the engine's probeColdStart is on, a probe of this game ended with 0 sales
+                  inside its re-probe cooldown (probeCooldownDays, 90)            → row flag br.dud "probe"
+unknown  : forecast 0, no live campaign, and no sale, listing or rated market in 135 d (v1); or a new drop
+           whose probe history was unreadable while probeColdStart is on; or coldProbeSize 0 (v1's answer)
+skip     : forecast < minRate, or value known and forecast × value < minWeeklyUsd; or forecast 0 with a sale of
+           ours in 135 d (the estimator says 0 now); or, with no live campaign, a listing or a rated market (v1)
 probe    : basis market and own = 0  → target = min(af.probeSize, cover(forecast))
 farm     : target = max(cover(forecast), shelf floor), ≤ maxPerGame, then ≤ the owner's per-game cap
            (settings gameAccountCaps) when one is set; cover = ceil(forecast × coverageDays/7) + safetyStock
@@ -127,28 +135,39 @@ keep it and are compared on demand alone. The row keeps `td`, the demand-only ta
 
 **New drops (cold start, model v2).** In v1 a live campaign with no evidence of ours was `unknown` — the brain
 abstained — while the engine probes 15 accounts; of the engine's 20 finished probes, 17 ended with 0 sales. v2
-gives such a game a small **cold probe**: `coldProbeSize`, by default `perMarketStock × open shelf markets`
-(3 × Gameflip + GGSel = 6 with Plati blocked) — enough for each market that takes stock to hold its share, the
-engine's shelf floor without its post-event doubling. A **known dud** — a probe of this game the engine stamped
-`probeOutcome: "expired"` (0 sales) and completed inside `probeCooldownDays` — is a skip. Rival proof still
-upgrades a game to the existing market-led probe (at least 7 at today's settings), even over a dud (the reasons
-say so). A rated market that sells below proof keeps v1's skip: that is evidence, and it is weak. The per-game cap
-and `maxPerGame` bound a cold probe; the shelf floor never applies to a probe. The dud check reads the engine's
-own predicate (`decide.probeGate`'s first query) once for all live games' campaign labels (§4); if that read fails
-the brain abstains (`unknown`) rather than probe a game it could not check. Cold probes are compared with today's
-verdict like any other (a cold 6 against today's probe 15 is `brain-less`; against a probe held by the budget,
-`brain-farm`), and counted apart: summary `coldProbes`, `coldTarget`, `oldTargetCold`, `coldDuds`; heartbeat
-`cold probes N (old asks M)`.
+gives such a game a small **cold probe**, shown on the page as "new drop: small test batch". Eligible: a live
+campaign and **no sale of ours in 135 days** — listings do not disqualify (the engine's own probe, listed 2 days
+ago and unsold, is exactly a new drop; the review found v1's evidence rule turned it into a brain-skip), and
+neither does a rated rival market below proof. The size is `coldProbeSize`, by default **half the engine's own
+shelf floor** (`marketStockFloor` = open shelf markets × `perMarketStock` × 2, which already knows the Plati and
+GGSel switches and keys: 12 → 6 with Plati blocked) — enough for each market that takes stock to hold its share,
+the floor without its post-event doubling; an unreadable floor (0) means no cold probes. Two exceptions skip:
+**dud-like** — listed longer than the engine's probe window (`probeMaxDays`, 30) and never sold, what its
+stop-loss calls a failed probe whether or not one was stamped; and, only while the engine's `probeColdStart` is
+on (its probe gate ignores the cooldown otherwise), a **known dud** — a probe of this game the engine stamped
+`probeOutcome: "expired"` (0 sales) and completed inside `probeCooldownDays`. Rival proof still upgrades a game to
+the existing market-led probe (at least 7 at today's settings), even over a dud (the reasons say so). The
+per-game cap and `maxPerGame` bound a cold probe; the shelf floor never applies to a probe. The dud check reads
+the engine's own predicate (`decide.probeGate`'s first query) once for all live games' campaign labels (§4); if
+that read fails while `probeColdStart` is on, the brain abstains (`unknown`) rather than probe a game it could not
+check. A game that sold in 135 days but forecasts 0 now is not a new drop: the claim estimator's 0 decides (skip).
+Cold probes are compared with today's verdict like any other (a cold 6 against today's probe 15 is `brain-less`;
+against a probe held by the budget, `brain-farm`), and counted apart: summary `coldProbes`, `coldTarget`,
+`oldTargetCold`, `coldDuds`; heartbeat `cold probes N (old asks M)`.
 
 ### 2.5 No-claim verdict (per bucket)
 `farmSizing.shelfAwareTarget` with the bucket's live policy (`row.policy`), shelf held = listed. With the
 feeder's live rule the rates are the snapshot row's own (`sales.shelfPerWeek` / `sales.otherPerWeek`): the
 brain's evidence read looks back further than the feeder's, so re-deriving them could date a sale differently
-and drift (review finding M3). The snapshot IS the live rule — `v2` while `autoFarm.noclaimBurstGuard` is off
-(today), `v2g` once the owner turns the guard on (model v2) — so it is logged and mirrored under the right
-name, and the other one is re-derived from the evidence. Any other estimator runs on the feeder's evidence
-(each unit dated by its first evidence, with the feeder's `pack` flag carried on the entry so `v2g` sees bulk
-packs); when that evidence is unreadable the row is a `mirror` (its own class, never counted as agreement).
+and drift (review finding M3). Model v2 asks the feeder for its snapshot twice per run, on the same evidence and
+window, once per burst-guard setting (`unclaimedDemandSnapshot({days: 30, burstGuard})`): the live rule — `v2`
+while `autoFarm.noclaimBurstGuard` is off (today), `v2g` once the owner turns it on — is the row's "today" and is
+mirrored under its own name; the other is the same snapshot with the guard flipped, so `v2g − v2` is the guard
+alone (the review found v2g re-derived from the brain's longer read differed from v2 with nothing to guard). If
+the other snapshot fails (the guarded one withholds itself when the bulk-pack lookup fails), that rule logs null
+for the run, with a note. Every other estimator runs on the feeder's evidence (each unit dated by its first
+evidence, with the feeder's `pack` flag carried on the entry so a replayed `v2g` sees bulk packs); when that
+evidence is unreadable the row is a `mirror` (its own class, never counted as agreement).
 Market context for the shelf markets is advisory. Buckets match by the LONGEST keyword, `farmDemand.bucketFor`'s rule.
 
 ### 2.6 Old vs brain, same moment
@@ -180,6 +199,13 @@ Market context for the shelf markets is advisory. Buckets match by the LONGEST k
   rows as they were at decision time and cannot be replayed, so `avg45` stands in for its averaging.
 - **Forward, from day 7:** the first logged run of each UTC day is scored once 7 days have passed:
   every estimator including `engine`, against the same truth (same in-stock split).
+- **One admission rule for both** (model v2, review 2026-10-03): a game-week is scored when it sold, or when ANY
+  estimator forecast a sale for it, and every estimator is scored on every admitted row (a missing forecast — a
+  null, or `engine` on an errored verdict — counts as 0), so all are compared on the same rows. The v1 backtest
+  admitted a week only when the game had sold in the 45 days before it (avg45's horizon), which hid every sba/tsb
+  false alarm 46–91 days after a game's last sale (a dead game's sba scored on 4 of its 6 weeks; now 6). An
+  estimator a logged row does not carry at all (a v1 row has no sba/tsb/v2g) is marked "not enough history yet"
+  (`partial`) and is never ranked: `best` and the page's "✓ best" compare only estimators scored on every row.
 - **Decision review:** last week's disagreements on live campaigns with what happened next (our sales;
   rivals' units, or "—" when the radar does not watch the game).
 - What shadow mode CANNOT test: whether farming more of a "market" game would have sold. That needs a
@@ -190,11 +216,13 @@ Market context for the shelf markets is advisory. Buckets match by the LONGEST k
   aggregation (connection flips, 135 days, bounded, no allowDiskUse), the radar report (cached),
   `TwitchCampaign` (one projected find), the engine's `probeGate` / `researchForGame` /
   `internalSalesForGame` (DB reads; never `freshResearchForGame`, which re-scans a marketplace),
-  `marketStockFloor` / `demandAllocation` (pure), `farmDemand` snapshot + evidence (DB reads) and its pure
-  `demandRates` (called with `burstGuard` always explicit, so it never reads settings), and (model v2) one
-  `AutoFarmTask` find for the cold-start rule — `{game: {$in: live campaign labels}, probeOutcome: "expired",
-  completedAt ≥ now − probeCooldownDays}`, projected to `{game, completedAt}`, limit 5,000, on the indexed `game`
-  field, skipped when no game is live. No SSH, no host read, no marketplace call, no settings write. Every
+  `marketStockFloor` / `demandAllocation` (pure), `farmDemand` evidence (DB reads), its snapshot (DB reads) —
+  twice per run in model v2, once per burst-guard setting (`burstGuard` passed explicitly, so the feeder never
+  reads its settings for it) — and its pure `demandRates` (same), and (model v2) one `AutoFarmTask` find for the
+  cold-start rule, only while the engine's `probeColdStart` is on — `{game: {$in: live campaign labels},
+  probeOutcome: "expired", completedAt ≥ now − probeCooldownDays}`, projected to `{game, completedAt}`, limit
+  5,000 (a run that hits it says so in its notes), on the indexed `game` field, skipped when no game is live. No
+  SSH, no host read, no marketplace call, no settings write. Every
   module it loads was scanned on production for load-time side effects (timers, connects, listeners): none in
   139 + 134 modules (`models/AutoFarmTask`, new to the loader in v2, is a plain schema with no hooks that
   `utils/autoFarmer.js`, already loaded by the brain, requires at load — no new module enters the process).
@@ -219,27 +247,35 @@ Market context for the shelf markets is advisory. Buckets match by the LONGEST k
   the production box: inputs 4.1 s cold (0.9 s with warm caches), model 32 ms, scoring 45 ms.
 - Heartbeat: one log line per run (`demandBrain: run N (model v2, avg45) — … | cold probes N (old asks M) | … | Ns`),
   and one at boot when off.
-- Health hook (model v2, `docs/LIVE-FIXES-1003.md` §3): `loopStatus()` → `{ lastRunAt, intervalMin, enabled }`,
-  synchronous, never throws. `lastRunAt` moves only when a run computed (a failed or timed-out load leaves it, so a
-  stuck brain shows as late); `enabled` is the live switch (unreadable settings read as off).
+- Health hook (model v2, `docs/LIVE-FIXES-1003.md` §3): `loopStatus()` → `{ lastRunAt, intervalMin, enabled,
+  since }`, synchronous, never throws. `lastRunAt` moves only when a run computed (a failed or timed-out load
+  leaves it, so a stuck brain shows as late); `enabled` is the live switch (unreadable settings read as off);
+  `since` is when the loop last began waiting to run — `start()`, or its latest tick that found the switch off —
+  and null when not started. A brain switched on hours after boot is due one tick (≤ 10 min) after `since`, not
+  since the process started; a dead scheduler's `since` stops moving, so it still ages into "late".
 
 ## 5. Settings (`autoFarm.demandBrain`, all optional)
 `enabled` false · `intervalMin` 60 · `estimatorClaim` "avg45" · `estimatorNoclaim` "v2" ·
 `captureShare` 0.2 · `minMarketRate` 1 · `minMarketUnits` 3 · `minRate` 0.25 · `minWeeklyUsd` 0.25 (accounts
 are not the scarce input — the auto-farm is demand-bound — so this only screens out near-worthless accounts;
 $1 skipped proven small sellers such as NBA 2K27 at 0.7 a week in the preview) · `coldProbeSize` (v2; 0–250,
-0 = no cold probes; unset = `perMarketStock` × open shelf markets, 6 today).
-Read, never written, from the auto-farm's own settings: `probeSize`, `maxPerGame`, `perMarketStock`,
-`ggselEnabled` / `platiEnabled` (a shelf market is open unless its switch is explicitly false — the listers' test),
-`probeCooldownDays` (the dud window) and `noclaimBurstGuard` (which rule the feeder's snapshot is). The run
-document logs `coldProbeSize`, `probeCooldownDays` and `noclaimBurstGuard` with the rest of its settings.
+0 = no cold probes; unset = half the engine's `marketStockFloor`, 6 once §A3 counts only open markets).
+Read, never written, from the auto-farm's own settings: `probeSize`, `maxPerGame`, `probeColdStart` (whether the
+known-dud cooldown applies, as in the engine's probe gate), `probeMaxDays` (the dud-like listing window, default
+30, as its stop-loss reads it), `probeCooldownDays` (the dud window) and `noclaimBurstGuard` (which rule the
+feeder's live snapshot is); the shelf floor through the engine's own `marketStockFloor(af)`. The run document logs
+the cold-probe size it used, `probeColdStart`, `probeMaxDays`, `probeCooldownDays` and `noclaimBurstGuard` with
+the rest of its settings.
 
 ## 6. API + page
 `/api/price-tracker/brain/{status, latest, game/:key, accuracy}` — superadmin + 2FA, read-only, every
 route through the guarded helper. Page: Price tracker → "Farm brain (test)" (Overview, Games, Accuracy).
-Model v2 changes neither: the page lists `sba`, `tsb` and `v2g` under their ids (it has no label for them
-yet) and shows a cold probe as "probe 6" with basis "(cold)"; the overview's account totals now include cold
-probes (they are verdicts), so "brain: no evidence" only counts games whose probe history was unreadable.
+Model v2 changes no route, and only labels on the page: `sba` "irregular-sales forecast (SBA)", `tsb`
+"irregular-sales forecast, fades dying games (TSB)", `v2g` "no-claim feeder rule, hand/pack sales at raw rate"
+(nothing is de-duplicated — an earlier label said "bulk sales counted once"); a cold probe reads "probe 6" with
+basis "new drop: small test batch"; an estimator without full history reads "not enough history yet" and never
+gets "✓ best". The overview's account totals now include cold probes (they are verdicts), so "brain: no
+evidence" only counts games the brain could not check.
 
 ## 7. Verification
 - Unit tests: model 33, loader 18, runner 12 (incl. a real in-memory Mongo for the indexes and log
@@ -251,6 +287,10 @@ probes (they are verdicts), so "brain: no evidence" only counts games whose prob
   the `pack` flag, a failed pack lookup) — 98 brain tests. One v1 expectation changed: `v2`'s call now pins
   `burstGuard: false`. 27 of the 28 new tests fail on the v1 bytes (the 28th checks that no read happens when no
   game is live).
+- Review fixes (2026-10-03): `tests/demandBrainV2.test.js` 33 and the loader file 31 — 115 brain tests. Every
+  test named "review N" fails on the bytes before that fix; the reviewer's proof scripts were re-run after it
+  (sba 0.43 → 5.55 over 12 silent weeks is now 0.43 flat; the dead game's sba is scored on 6 of 6 weeks; the
+  in-flight probe is a cold 6; v2g − v2 is 0 with nothing to guard; the guard's case A reads 15.6 → 15.4, not 23.5).
 - Mutation pass: 39 deliberate breakages (every review fix among them), 39 caught.
 - Independent review (2026-10-02): 1 high, 4 medium, 12 low findings, all fixed or documented — see §9.
 - Staged on the production box (real database, every write blocked, real settings): the only writes
@@ -281,16 +321,26 @@ parked bots, duplicate logins, Plati block).
   one synchronous backtest (45 ms on production data).
 
 ## 10. Model v2 decisions (2026-10-03, `docs/LIVE-FIXES-1003.md` §A8)
-- **SBA / TSB starting values.** Croston/SBA starts from the first selling week and the first interval (the
-  usual "naive" start); TSB starts from the window's averages, because a first-week start puts the chance at
-  exactly 0 or 1. α = β = 0.15 as the contract set. Both forecast a weekly rate directly (the period is a week).
+- **SBA / TSB starting values.** Croston/SBA starts from the first size and the first GAP between two selling weeks;
+  one selling week in the window is one sale in 13 weeks. The window's first week is never an interval's start:
+  the "naive" start (first interval counted from the series start, R tsintermittent's `crost`) is right for a fixed
+  series but wrong on a sliding window, where that interval shrinks every week a lone old sale sits in it and the
+  forecast grew with silence (review, 2026-10-03: 0.43 → 5.55 a week over 12 silent weeks). So sba no longer
+  matches `crost(init="naive")` on purpose; tsb still matches `tsb(init="mean")`. TSB starts from the window's
+  averages, because a first-week start puts the chance at exactly 0 or 1. α = β = 0.15 as the contract set. Both
+  forecast a weekly rate directly (the period is a week).
 - **13-week window, fixed.** Same length live and in every replayed week, so the backtest scores the estimator the
   live run uses; longer would reach past the evidence under the oldest backtest week.
 - **`v2` / `v2g` pinned.** `v2` is the unguarded rule and `v2g` the guarded one whatever the owner's switch says;
-  only the no-claim snapshot follows the switch, and it is logged under the name of the rule it ran.
-- **Cold probe scope.** Only the v1 "unknown" case (no evidence at all) becomes a cold probe; a rated market below
-  proof stays a skip; rival proof outranks the dud cooldown (market-led probe, with the failed probe named in the
-  reasons). Reuse-only, time left, the probe budget and capacity are execution gates the brain does not model
-  (§4.2 of `docs/FARM-DISTRIBUTION-MAP.md`), so a cold probe is a demand verdict, not a spend.
-- **Fail-safe direction.** An unreadable probe history abstains (`unknown`), never probes; an unreadable pack lookup
-  withholds the no-claim evidence, never logs an inflated `v2g`.
+  both are the feeder's own snapshots (§2.5), the live one logged under the name of the rule it ran.
+- **One admission rule, same rows, no ranking without full history** (§3).
+- **Cold probe scope.** Eligibility is "no sale of ours in 135 days" with a live campaign — listings and an unproven
+  rival market do not disqualify; a listing older than the engine's probe window with no sale is dud-like; the
+  engine's re-probe cooldown counts only while its `probeColdStart` is on; rival proof outranks the cooldown
+  (market-led probe, with the failed probe named in the reasons). The size follows the engine's own floor (its
+  market count knows the switches and the keys; the brain cannot call the marketplace module). Reuse-only, time
+  left, the probe budget and capacity are execution gates the brain does not model (§4.2 of
+  `docs/FARM-DISTRIBUTION-MAP.md`), so a cold probe is a demand verdict, not a spend.
+- **Fail-safe direction.** An unreadable probe history abstains (`unknown`), never probes; an unreadable floor means
+  no cold probes; an unreadable pack lookup withholds the no-claim evidence, and a guarded snapshot that withholds
+  itself logs `v2g` as null — never an inflated `v2g`.
