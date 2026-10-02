@@ -11,7 +11,7 @@ const BotAccount = require("../models/BotAccount");
 const MarketplaceListing = require("../models/MarketplaceListing");
 const campaignWatcher = require("../utils/campaignWatcher");
 const epicWatcher = require("../utils/epicWatcher");
-const { buildRadarEvents } = require("../utils/radarEvents");
+const { buildRadarEvents, eventId } = require("../utils/radarEvents");
 const { campaignItems } = require("../utils/autoLister");
 const {
   eventListingNote,
@@ -96,6 +96,10 @@ async function dropStatsForCampaigns(campaigns) {
 const RECENT_FARMED_GRACE_HOURS = 48;
 const RECENT_FARMED_GRACE_MS = RECENT_FARMED_GRACE_HOURS * 60 * 60 * 1000;
 
+// How many campaigns the radar lists. eventContext rebuilds one event from the same 500, so
+// both read this one number.
+const LISTED_CAMPAIGNS = 500;
+
 async function loadRadarData(
   showEnded,
   includeEpic = true,
@@ -107,7 +111,7 @@ async function loadRadarData(
         ? { active: -1, startAt: -1, endAt: -1 }
         : { active: -1, status: 1, endAt: 1 },
     )
-    .limit(500)
+    .limit(LISTED_CAMPAIGNS)
     .lean();
   const taskQuery = showEnded
     ? AutoFarmTask.find({}, TASK_FIELDS).lean()
@@ -358,10 +362,154 @@ async function resolveEventPreview(event, tasks) {
   };
 }
 
+// ONE event's context for its listing preview / listing create, read for that event only.
+//
+// This used to build the whole "show ended" radar to find one event: EVERY AutoFarmTask with
+// its assignedAccounts and bots (unbounded, and growing with every decision), every campaign a
+// task names (unprojected), the 500 newest campaigns (unprojected) — then threw all of it away
+// but one event (independent review, 2026-10-02). The event id names its game, so the reads
+// below cover that game only, project only what the preview uses, and rebuild the event from
+// exactly the campaigns the full radar would have given it:
+//   * the game's campaigns among the 500 the radar lists (same query, same order),
+//   * the game's campaigns some task names (the radar adds those, in campaignId order),
+//   * a task whose campaignId has no campaign row at all becomes a synthetic campaign under
+//     the task's own game (every task holding such an id is read, in insertion order, so the
+//     first one claims the wave exactly as before).
+// Same output: the preview never reads drop stats, bots or task reasons, so those are not read.
+const PREVIEW_TASK_FIELDS = {
+  game: 1,
+  campaignId: 1,
+  campaignName: 1,
+  campaignEndAt: 1,
+  status: 1,
+  decision: 1,
+  assignedAccounts: 1,
+  "listing.setId": 1,
+  createdAt: 1,
+};
+const PREVIEW_CAMPAIGN_FIELDS = { campaignId: 1, game: 1, name: 1, startAt: 1 };
+
+function keyOf(value) {
+  return String(value || "")
+    .trim()
+    .toLowerCase();
+}
+
+// radarEvents.eventKey's game half, from a campaign row or a synthetic campaign's game.
+function gameKeyOf(game) {
+  return keyOf(String(game || "").trim() || "Unknown game");
+}
+
+function escapeRegex(s) {
+  return String(s).replace(/[.*+?^$(){}|[\]\\]/g, "\\$&");
+}
+
+// A query on `game` that holds every row whose event key is `gameKey` (the rows are checked
+// again with gameKeyOf, so the query only has to be wide enough).
+function gameQuery(gameKey) {
+  const or = [{ game: new RegExp("^\\s*" + escapeRegex(gameKey) + "\\s*$", "i") }];
+  if (gameKey === "unknown game") or.push({ game: { $in: ["", null] } }, { game: /^\s*$/ });
+  return or.length === 1 ? or[0] : { $or: or };
+}
+
+// The game half of an event id, or "" when the id is not one radarEvents.eventId can produce.
+function gameKeyOfEventId(id) {
+  const raw = String(id || "");
+  if (!raw) return "";
+  let key;
+  try {
+    key = Buffer.from(raw, "base64url").toString("utf8");
+  } catch {
+    return "";
+  }
+  const cut = key.indexOf("\u0000");
+  if (cut <= 0) return "";
+  if (eventId(key.slice(0, cut), key.slice(cut + 1)) !== raw) return "";
+  return key.slice(0, cut);
+}
+
+// ObjectId hex sorts in creation order: the order a full collection read returns rows in.
+function byObjectId(a, b) {
+  const x = String(a._id);
+  const y = String(b._id);
+  return x < y ? -1 : x > y ? 1 : 0;
+}
+
 async function eventContext(eventIdValue) {
-  const data = await loadRadarData(true, false, false);
-  const event = data.events.find((candidate) => candidate.id === eventIdValue);
-  return event ? { event, tasks: data.tasks } : null;
+  const gameKey = gameKeyOfEventId(eventIdValue);
+  if (!gameKey) return null;
+  const [listed, gameRows] = await Promise.all([
+    TwitchCampaign.find({}, { campaignId: 1, game: 1 })
+      .sort({ active: -1, startAt: -1, endAt: -1 })
+      .limit(LISTED_CAMPAIGNS)
+      .lean(),
+    TwitchCampaign.find(gameQuery(gameKey), PREVIEW_CAMPAIGN_FIELDS).lean(),
+  ]);
+  const gameCampaigns = new Map();
+  for (const c of gameRows) {
+    const id = String(c.campaignId || "");
+    if (id && gameKeyOf(c.game) === gameKey && !gameCampaigns.has(id)) gameCampaigns.set(id, c);
+  }
+  const gameIds = [...gameCampaigns.keys()];
+  const [gameTasks, ownTaskRows] = await Promise.all([
+    gameIds.length
+      ? AutoFarmTask.find({ campaignId: { $in: gameIds } }, PREVIEW_TASK_FIELDS).lean()
+      : [],
+    AutoFarmTask.find(gameQuery(gameKey), { campaignId: 1, game: 1 }).lean(),
+  ]);
+
+  // The game's campaigns in the order the radar holds them.
+  const named = new Set(gameTasks.map((task) => String(task.campaignId || "")));
+  const campaigns = [];
+  const taken = new Set();
+  for (const row of listed) {
+    const id = String(row.campaignId || "");
+    if (!id || taken.has(id) || !gameCampaigns.has(id)) continue;
+    taken.add(id);
+    campaigns.push(gameCampaigns.get(id));
+  }
+  for (const id of [...named].sort()) {
+    if (!id || taken.has(id) || !gameCampaigns.has(id)) continue;
+    taken.add(id);
+    campaigns.push(gameCampaigns.get(id));
+  }
+
+  // Synthetic campaigns: this game's tasks whose campaignId has no campaign row anywhere.
+  const candidates = [
+    ...new Set(
+      ownTaskRows
+        .filter((task) => gameKeyOf(task.game) === gameKey)
+        .map((task) => String(task.campaignId || ""))
+        .filter((id) => id && !gameCampaigns.has(id)),
+    ),
+  ];
+  let orphanTasks = [];
+  if (candidates.length) {
+    const exists = new Set(
+      (
+        await TwitchCampaign.find(
+          { campaignId: { $in: candidates } },
+          { campaignId: 1 },
+        ).lean()
+      ).map((c) => String(c.campaignId)),
+    );
+    const orphans = candidates.filter((id) => !exists.has(id));
+    if (orphans.length) {
+      orphanTasks = await AutoFarmTask.find(
+        { campaignId: { $in: orphans } },
+        PREVIEW_TASK_FIELDS,
+      ).lean();
+    }
+  }
+  orphanTasks.sort(byObjectId);
+  campaigns.push(...orphanTasks.map(syntheticCampaign));
+
+  // Task order is the collection's insertion order, as the full read returned it.
+  const tasks = [...gameTasks, ...orphanTasks].sort(byObjectId);
+  const event = buildRadarEvents(campaigns, tasks, []).find(
+    (candidate) => candidate.id === eventIdValue,
+  );
+  return event ? { event, tasks } : null;
 }
 
 // Twitch campaigns + Epic giveaways for the Radar tab.

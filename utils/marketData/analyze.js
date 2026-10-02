@@ -56,6 +56,21 @@ function isFresh(r, now) {
   return ms(r.lastSeenAt) >= now - win;
 }
 
+// A counter rise is only known to have happened somewhere in [prevObservedAt, soldAt]: the
+// rescan that saw it is not when the units sold. A listing that dropped out of the scans for 40
+// days and came back 40 higher sold about one a day, not 40 yesterday — counted whole, it read
+// as 40 a week on the 7-day view (independent review, 2026-10-02). So a window counts only the
+// share of the rise whose span lies inside it, pro rata by time. The watched days agree: a span
+// that starts before the window makes the market watched for the whole window (see
+// `firstObserved`), and only the window's share of its units is counted over it. A rise with no
+// prevObservedAt, and every Gameflip sold-feed sale, is dated at soldAt as before.
+// `at` is soldAt, already known to be >= since.
+function unitsInWindow(s, units, at, since) {
+  const prev = ms(s.prevObservedAt);
+  if (!Number.isFinite(prev) || !(prev < at) || prev >= since) return units;
+  return (units * (at - since)) / (at - prev);
+}
+
 // What the page shows for a seller. GGSel / Plati publish shop names; Gameflip only an opaque
 // owner id, shown shortened. Never more than the public page itself shows.
 function sellerLabel(market, seller, sellerName) {
@@ -146,7 +161,9 @@ function buildMarketReport(input, { now = Date.now(), windowDays = 30 } = {}) {
     let start = Number.isFinite(ms(s.prevObservedAt)) ? ms(s.prevObservedAt) : at;
     if (s.market === "gameflip" && Number.isFinite(fs)) start = Math.min(start, fs - GAMEFLIP_FEED_REACH_DAYS * DAY);
     if (start < m.firstObserved) m.firstObserved = start;
-    const units = Math.max(1, Number(s.units) || 1);
+    const unitsSeen = Math.max(1, Number(s.units) || 1);
+    // Every count below uses the window's share; the feed row also says what the counter rose by.
+    const units = unitsInWindow(s, unitsSeen, at, since);
     const kind = s.kind || classifyKind(s.title);
     feed.push({
       market: s.market,
@@ -154,7 +171,11 @@ function buildMarketReport(input, { now = Date.now(), windowDays = 30 } = {}) {
       gameKey: s.gameKey,
       title: s.title,
       priceUsd: s.priceUsd,
-      units,
+      // The units this window counts (what the brain and the per-game seller table add up),
+      // and the whole rise the scan saw over [prevObservedAt, soldAt].
+      units: round1(units),
+      unitsSeen,
+      prevObservedAt: s.prevObservedAt || null,
       itemCount: s.itemCount == null ? null : s.itemCount,
       band: radarBand(s.itemCount),
       kind,
@@ -342,7 +363,8 @@ function buildMarketReport(input, { now = Date.now(), windowDays = 30 } = {}) {
       const tts = m.events.map((e) => e.ttsHours).filter((h) => h != null);
       const asking = m.live.map((r) => r.priceUsd);
       byMarket[mk] = {
-        units: m.units,
+        // A pro-rated counter rise makes units fractional; whole numbers are unchanged.
+        units: round1(m.units),
         orders: m.events.length,
         perWeek: pw == null ? null : round1(pw),
         observedDays: observedDays == null ? null : round1(observedDays),
@@ -353,7 +375,7 @@ function buildMarketReport(input, { now = Date.now(), windowDays = 30 } = {}) {
         farmLive: m.farmLive,
         asking: priceStats(asking),
         oursLive: m.ourLive,
-        oursSold: m.oursUnits,
+        oursSold: round1(m.oursUnits),
       };
     }
     const tts = allEvents.map((e) => e.ttsHours).filter((h) => h != null);
@@ -363,7 +385,7 @@ function buildMarketReport(input, { now = Date.now(), windowDays = 30 } = {}) {
       const ev = allEvents.filter((e) => radarBand(e.itemCount) === b);
       if (!ev.length) continue;
       const bt = ev.map((e) => e.ttsHours).filter((h) => h != null);
-      bands.push({ band: b, ...priceStats(ev.map((e) => e.priceUsd)), units: ev.reduce((a, e) => a + e.units, 0), medianTtsHours: bt.length ? round1(median(bt)) : null });
+      bands.push({ band: b, ...priceStats(ev.map((e) => e.priceUsd)), units: round1(ev.reduce((a, e) => a + e.units, 0)), medianTtsHours: bt.length ? round1(median(bt)) : null });
     }
     const gf = g.markets.gameflip;
     const gfAll = gf.units + gf.oursUnits;
@@ -389,7 +411,7 @@ function buildMarketReport(input, { now = Date.now(), windowDays = 30 } = {}) {
     const rivalLive = MARKETS.reduce((a, mk) => a + g.markets[mk].live.length, 0);
     if (ourLive > 0 && rivalLive === 0) flags.push({ id: "alone", text: "No live rival listing seen" });
     const oursListed = ownByGame.get(g.key) || 0;
-    if (oursListed === 0 && units >= 5) flags.push({ id: "not-selling", text: units + " units sold by rivals in " + windowDays + " days; we have no live listing on Gameflip or GGSel" });
+    if (oursListed === 0 && units >= 5) flags.push({ id: "not-selling", text: round1(units) + " units sold by rivals in " + windowDays + " days; we have no live listing on Gameflip or GGSel" });
     const uc = undercutByGame.get(g.key) || 0;
     if (uc) flags.push({ id: "undercut", text: uc + " of our listing(s) have a cheaper comparable rival" });
     const cuts = priceMoves.filter((p) => p.gameKey === g.key && p.cut).length;
@@ -400,7 +422,7 @@ function buildMarketReport(input, { now = Date.now(), windowDays = 30 } = {}) {
     rows.push({
       key: g.key,
       game: g.game,
-      units,
+      units: round1(units),
       orders,
       // null while every market with sales is still too new to rate; ratePartial = a market with
       // sales was left out because it has not been watched for MIN_RATE_DAYS yet
@@ -414,7 +436,7 @@ function buildMarketReport(input, { now = Date.now(), windowDays = 30 } = {}) {
       rivalSellers: liveSellers.size,
       oursLive: ourLive,
       oursListed,
-      oursSold,
+      oursSold: round1(oursSold),
       gameflipShare: gfAll > 0 ? round1((gf.oursUnits / gfAll) * 100) : null,
       undercut: uc,
       farmSales: g.farmEvents,
@@ -429,7 +451,7 @@ function buildMarketReport(input, { now = Date.now(), windowDays = 30 } = {}) {
     .map((s) => ({
       market: s.market,
       label: s.label,
-      units: s.units,
+      units: round1(s.units),
       orders: s.orders,
       revenueUsd: round2(s.revenue),
       medianPrice: s.prices.length ? round2(median(s.prices)) : null,
@@ -465,14 +487,14 @@ function buildMarketReport(input, { now = Date.now(), windowDays = 30 } = {}) {
       for (const s of m.liveSellers) sellersM.add(s);
     }
     markets[mk] = {
-      units: unitsM,
+      units: round1(unitsM),
       orders: ordersM,
       sold: priceStats(prices),
       medianTtsHours: tts.length ? round1(median(tts)) : null,
       liveRivals: liveM,
       liveSellers: sellersM.size,
       oursLive: oursLiveM,
-      oursSold: oursUnitsM,
+      oursSold: round1(oursUnitsM),
     };
   }
   let fresh24 = 0;

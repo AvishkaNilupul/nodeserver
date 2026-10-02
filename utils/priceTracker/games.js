@@ -55,15 +55,102 @@ const gk = (g) => normGame(g);
 
 /* ------------------------------ engine replay ------------------------------ */
 
+// QUANTITY UNITS, as the engine counts them since 2026-10-03 (utils/autoFarmer.js
+// QUANTITY_POOL_RE / pairQuantityUnits — a PORT, pinned to the engine's own function by
+// tests/priceTrackerReviewFixes.test.js; requiring the engine here would load all of it
+// and its models into this pure module). A GGSel / Digiseller listing_sold row cannot
+// name the account: its `login` is the listing's whole delivery pool ("a, b, c"), and it
+// is ONE anonymous unit. It is the sale behind the first connection, from a login of its
+// pool, seen at or after it (a day of slack), that no named sale and no earlier unit
+// already took — then the pair is one sale; otherwise the unit is its own sale. This is
+// soldUnion's rule 3 below, so the engine and this board count one sale the same way.
+const QUANTITY_POOL_RE = /[^\s,;][\s,;]+[^\s,;]/;
+const QUANTITY_CONNECT_SLACK_MS = DAY;
+
+function loginPool(login) {
+  return String(login || "")
+    .split(/[\s,;]+/)
+    .map((x) => x.trim().toLowerCase())
+    .filter(Boolean);
+}
+
+// `units`: pool rows {login, at, priceUsd, dedupeKey}; `connected`: one row per
+// connected login {_id: login, at: earliest, accounts}; `named`: the other listing_sold
+// rows {login, account}. Returns what the units ADD to the account-grouped count: a
+// paired unit adds no sale (its connection is one already) but brings its price.
+function pairQuantityUnits(units, connected, named) {
+  const connAt = new Map(); // login -> earliest connection (ms)
+  const acctLogin = new Map(); // account id -> login
+  for (const c of connected || []) {
+    const login = String((c && c._id) || "").trim().toLowerCase();
+    if (!login) continue;
+    const at = new Date(c.at).getTime();
+    if (Number.isFinite(at) && (!connAt.has(login) || at < connAt.get(login))) {
+      connAt.set(login, at);
+    }
+    for (const a of c.accounts || []) {
+      if (a) acctLogin.set(String(a).toLowerCase(), login);
+    }
+  }
+  for (const s of named || []) {
+    const ls = loginPool(s && s.login);
+    if (s && s.account && ls.length === 1) {
+      acctLogin.set(String(s.account).toLowerCase(), ls[0]);
+    }
+  }
+  const taken = new Set();
+  for (const s of named || []) {
+    const ls = loginPool(s && s.login);
+    const login =
+      ls.length === 1
+        ? ls[0]
+        : s && s.account
+          ? acctLogin.get(String(s.account).toLowerCase()) || ""
+          : "";
+    if (login) taken.add(login);
+  }
+  const out = { count: 0, revenue: 0, priced: 0, paired: 0 };
+  const sorted = (units || []).slice().sort(
+    (a, b) =>
+      new Date(a.at) - new Date(b.at) ||
+      String(a.dedupeKey || "").localeCompare(String(b.dedupeKey || "")),
+  );
+  for (const u of sorted) {
+    const t = new Date(u.at).getTime();
+    let best = null;
+    for (const l of loginPool(u.login)) {
+      const ct = connAt.get(l);
+      if (ct == null || taken.has(l)) continue;
+      if (ct < t - QUANTITY_CONNECT_SLACK_MS) continue; // connected before it sold
+      if (!best || ct < best.at) best = { login: l, at: ct };
+    }
+    if (best) {
+      taken.add(best.login);
+      out.paired += 1;
+    } else {
+      out.count += 1;
+    }
+    const price = Math.max(0, Number(u.priceUsd) || 0);
+    out.revenue += price;
+    if (price > 0) out.priced += 1;
+  }
+  return out;
+}
+
 // utils/autoFarmer.js `internalSalesForGame`, run for every game at once:
-//   rows with source in {connected, listing_sold}, `at` in the last 45 days,
-//   grouped by `account` (or the dedupeKey when a unit has no account) so one sold
-//   account is one sale, price = the best any row of that sale carries.
+//   rows with source in {connected, listing_sold}, `at` in the last 45 days, per
+//   lower-cased gameKey (the engine's own query key). A listing_sold row carrying a
+//   login POOL is a quantity unit (above); every other row is grouped by `account`
+//   (or the dedupeKey when it has none) so one sold account is one sale, price = the
+//   best any row of that sale carries. The units are then paired with that game's
+//   connections (connected rows with a login, by login: earliest time, their accounts)
+//   and its named sales (the other listing_sold rows), and add what pairing says.
 // `dropKeys` removes the rows of sales the ledger set aside; passing it gives the
 // count the engine WOULD see if it ignored mass-close and burst signals.
 function engineCounts({ signals = [], connected = [], now, dropSaleKeys = null }) {
   const cutoff = now - ENGINE_WINDOW_DAYS * DAY;
-  const per = new Map(); // rawGameKey -> Map(group -> maxPrice)
+  // rawGameKey -> { groups: Map(group -> maxPrice), units, named, conns: Map(login -> {at, accounts}) }
+  const per = new Map();
   const add = (row, isSold) => {
     const at = ts(row.at);
     if (at == null || at < cutoff) return;
@@ -73,23 +160,42 @@ function engineCounts({ signals = [], connected = [], now, dropSaleKeys = null }
       const m = /^sold:([0-9a-f]{24}):.*:(\d+)$/i.exec(String(row.dedupeKey || ""));
       if (m && dropSaleKeys.has(m[1].toLowerCase() + ":" + m[2])) return;
     }
+    if (!per.has(g)) per.set(g, { groups: new Map(), units: [], named: [], conns: new Map() });
+    const b = per.get(g);
+    if (isSold && typeof row.login === "string" && QUANTITY_POOL_RE.test(row.login)) {
+      b.units.push({ login: row.login, at: row.at, priceUsd: row.priceUsd, dedupeKey: row.dedupeKey });
+      return;
+    }
+    if (isSold) b.named.push({ login: row.login, account: row.account });
+    else if (typeof row.login === "string" && row.login > "") {
+      const login = row.login.toLowerCase();
+      const c = b.conns.get(login) || { at, accounts: [] };
+      if (at < c.at) c.at = at;
+      if (!c.accounts.some((a) => String(a) === String(row.account))) c.accounts.push(row.account);
+      b.conns.set(login, c);
+    }
     const group = row.account ? "a:" + idStr(row.account) : "d:" + String(row.dedupeKey || "");
-    if (!per.has(g)) per.set(g, new Map());
-    const m = per.get(g);
     const price = Number(row.priceUsd) || 0;
-    m.set(group, Math.max(m.get(group) || 0, price));
+    b.groups.set(group, Math.max(b.groups.get(group) || 0, price));
   };
   for (const s of signals) if (!s.source || s.source === "listing_sold") add(s, true);
   for (const s of connected) add(s, false);
   const out = new Map();
-  for (const [raw, groups] of per) {
+  for (const [raw, b] of per) {
     let count = 0;
     let revenue = 0;
     let priced = 0;
-    for (const p of groups.values()) {
+    for (const p of b.groups.values()) {
       count += 1;
       revenue += p;
       if (p > 0) priced += 1;
+    }
+    if (b.units.length) {
+      const conns = [...b.conns].map(([login, c]) => ({ _id: login, at: new Date(c.at), accounts: c.accounts }));
+      const q = pairQuantityUnits(b.units, conns, b.named);
+      count += q.count;
+      revenue += q.revenue;
+      priced += q.priced;
     }
     const key = gk(raw);
     const prev = out.get(key) || { count: 0, revenue: 0, priced: 0 };
@@ -939,6 +1045,9 @@ module.exports = {
   ENGINE_WINDOW_DAYS,
   DEFAULT_SIZING,
   engineCounts,
+  // the engine's quantity-unit pairing, ported (pinned to autoFarmer.pairQuantityUnits by a test)
+  pairQuantityUnits,
+  QUANTITY_POOL_RE,
   soldUnion,
   windowCounts,
   listedUnits,

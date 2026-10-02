@@ -44,6 +44,18 @@
 //     single sale on a listing that is delisted soon after must still count.
 //     They are returned in `suspect`, never silently dropped, and they never
 //     enter a price.
+//
+// DEMAND IS WIDER THAN PRICE (independent review, 2026-10-02). `demandOnly` holds
+// sales that prove a buyer took an account but must never set a price. The farm
+// brain reads `sales` + `demandOnly` through games.soldUnion, so each rule below
+// changes what it sees as demand — on purpose:
+//   * a Shop or bulk-order purchase ("reserved:" signal with no price, or market
+//     "bulk") is a paying buyer, not a missing price (42 such signals in 135 days
+//     were dropped before);
+//   * a burst that has the shape of ONE real guardian pass is demand, though never
+//     price evidence; only a burst bigger than a real pass is a closeout;
+//   * a Gameflip bulk pack of N is N sales: its sold row is not one more;
+//   * units one GGSel / Digiseller detection wrote are one ORDER of price evidence.
 const { identify, normGame } = require("./setIdentity");
 
 // Marketplaces whose sales exist only as delivered units on the listing row.
@@ -72,6 +84,28 @@ function round2(n) {
   return Math.round(n * 100) / 100;
 }
 
+// ONE DETECTION IS ONE ORDER. GGSel and Digiseller never say who bought: the guardian
+// sees a stock pile shrink and records every unit it inferred in one
+// saleLearning.recordListingSale call, which stamps all of them with the same `at`
+// (the Listings delist route does the same for the units it finds sold). Three units
+// from one detection are three accounts sold — demand counts each, by its own key —
+// but ONE observation of a price, like several units of one Eldorado order. Measured
+// 2026-10-02: one 3-unit detection read as three sales and lifted a GGSel suggestion
+// to "medium" on its own.
+function detectionGroup(listingId, at, fallback) {
+  const t = ts(at);
+  return t == null ? fallback : "det:" + listingId + ":" + t;
+}
+
+// The guardian's own line between a real pass and a closeout
+// (utils/marketplaceGuardian.js MASS_DROP_DEFAULTS: a pass that infers sales on 5 or
+// more listings, or 12 or more units, of one marketplace is not recorded). So up to 11
+// units on 4 or fewer listings is the shape of one REAL pass, and a burst of that shape
+// is demand. The ledger is pure and mirrors the defaults; settings can raise the
+// guardian's thresholds (autoFarm.saleOutageGuard), never the ledger's.
+const REAL_PASS_MAX_LISTINGS = 4;
+const REAL_PASS_MAX_UNITS = 11;
+
 /**
  * @param {object} input
  * @param {Array}  input.listings MarketplaceListing rows (lean, projected)
@@ -94,7 +128,11 @@ function buildLedger({ listings = [], signals = [], sets = [] } = {}) {
   // a discount) but each unit is still an account the shelf lost, so they count as
   // DEMAND. Kept apart from `sales` so nothing that prices can ever read them.
   const demandOnly = [];
-  const excluded = { farm: 0, bulk: 0, noListing: 0, unpricedSignal: 0, duplicate: 0, massClose: 0 };
+  // Every count is a reason a record is NOT price evidence. `bulk` covers bulk packs
+  // and bulk orders, `unpricedSignal` every sale signal that carried no price (in
+  // `sales`, or a Shop sale in `demandOnly`), `burst` a burst kept as demand because
+  // it has the shape of one real guardian pass, `massClose` everything in `suspect`.
+  const excluded = { farm: 0, bulk: 0, noListing: 0, unpricedSignal: 0, duplicate: 0, massClose: 0, burst: 0 };
   const suspect = [];
 
   // Pre-pass: which sold:<listing> signals look like a delist closing out stock?
@@ -254,7 +292,8 @@ function buildLedger({ listings = [], signals = [], sets = [] } = {}) {
         // platform reported at the time.
         market: String(s.marketplace || l.marketplace || "").toLowerCase(),
         key,
-        saleGroup: key,
+        // Units of one listing written at one instant are one detection: one order.
+        saleGroup: detectionGroup(lid, s.at, key),
         login: loginList(s.login).length === 1 ? loginList(s.login)[0] : "",
         logins: loginList(s.login),
         account: idStr(s.account),
@@ -313,12 +352,79 @@ function buildLedger({ listings = [], signals = [], sets = [] } = {}) {
         priceBasis: price > 0 ? "reported" : "none",
         priced: price > 0,
       });
+      continue;
+    }
+
+    // SHOP AND BULK-ORDER SALES ARE BUYERS. reserveSetOnAccount writes a "reserved:"
+    // listing_sold signal only for a paying buyer (utils/dropReservation.js opts.realSale:
+    // the Shop's buy route, marketplace "shop", and bulk orders, marketplace "bulk" —
+    // routes/shopRoutes.js, utils/bulkOrderHealth.js). Neither passes a price, and rows
+    // promoted from "drop_reserved" on 2026-08-14 (scripts/migrate-sale-signal-sources.js)
+    // carry no marketplace at all. They used to fall through every branch above and
+    // vanish: 42 such signals in 135 days, last 2026-08-15. They are demand, never a
+    // price (a bulk order is priced per order, at a discount). Keyed like the priced Shop
+    // sale above, so one account sold in one game is one sale whichever form it took.
+    if (shop) {
+      const mk = String(s.marketplace || "").toLowerCase();
+      const bulkOrder = mk === "bulk" || !!s.bulk;
+      // A shape no writer produces (a priced or unpriced reserved signal of some other
+      // market) stays out, as before: unknown evidence must not grow farming. So does a
+      // "drop_reserved" row if one is ever fed in: that is stock claimed for a shelf
+      // (project_phantom_demand_fix), never a buyer.
+      if (s.source && s.source !== "listing_sold") continue;
+      if (!bulkOrder && !(price <= 0 && (mk === "shop" || mk === ""))) continue;
+      const gk = normGame(s.game || s.gameKey);
+      const key = "shop:" + shop[1].toLowerCase() + ":" + gk;
+      if (seen.has(key)) {
+        excluded.duplicate += 1;
+        continue;
+      }
+      seen.add(key);
+      excluded[bulkOrder ? "bulk" : "unpricedSignal"] += 1;
+      demandOnly.push({
+        key,
+        saleGroup: key,
+        login: loginList(s.login).length === 1 ? loginList(s.login)[0] : "",
+        logins: loginList(s.login),
+        account: idStr(s.account),
+        dedupeKey: dk,
+        source: bulkOrder ? "bulk-order" : "shop",
+        confidence: "hand",
+        market: mk || "unknown",
+        listingId: "",
+        externalId: "",
+        origin: "manual",
+        title: String(s.name || ""),
+        listedPrice: 0,
+        listedAt: null,
+        game: String(s.game || ""),
+        gameKey: gk,
+        contentKey: null,
+        bandKey: gk + "|?",
+        itemCount: null,
+        exact: false,
+        titleMismatch: false,
+        identBasis: "none",
+        orderId: "",
+        at: new Date(s.at),
+        priceUsd: 0,
+        priceBasis: "none",
+        priced: false,
+      });
     }
   }
 
   // 3. rows marked sold that nothing above explains -------------------------
+  // A listing whose sale its SIGNALS already tell — priced ones in `sales`, or the
+  // bulk-pack units in `demandOnly` — is not told again by its sold row. Reading only
+  // `sales` here made a Gameflip pack of N count N + 1: its N bulk signals went to
+  // demandOnly and the row, flipped to "sold" by the poller, added one more.
+  const fromSignal = (x) => !!x.listingId && String(x.key || "").startsWith("sig:");
   const signalListings = new Set(
-    sales.filter((x) => x.source === "signal").map((x) => x.listingId),
+    sales
+      .filter((x) => x.source === "signal")
+      .concat(demandOnly.filter(fromSignal))
+      .map((x) => x.listingId),
   );
   for (const l of listings) {
     if (l.status !== "sold") continue;
@@ -372,6 +478,15 @@ function buildLedger({ listings = [], signals = [], sets = [] } = {}) {
   // sells on, and a burst proves the DETECTION happened at once, not the sales —
   // so for PRICE evidence it is set aside. (Delivered units carry real order ids
   // and are exempt.)
+  //
+  // For DEMAND a burst is only a closeout when it is bigger than one real guardian
+  // pass (REAL_PASS_MAX_*). A pass flushes every sale it inferred within seconds, so a
+  // real pass that found 8-11 units on a few listings is a burst by the rule above —
+  // and was dropped from demand with the closeouts until 2026-10-03. Flagged records
+  // are grouped into bursts (per market, split where two are more than BURST_MS apart:
+  // guardian passes are at least 5 minutes apart). A burst of real-pass shape moves to
+  // `demandOnly` (still never a price, not in `suspect`); a bigger one is set aside
+  // from both, as before.
   {
     const BURST_N = 8;
     const BURST_MS = 5 * 60 * 1000;
@@ -391,7 +506,29 @@ function buildLedger({ listings = [], signals = [], sets = [] } = {}) {
       }
     }
     if (flagged.size) {
+      const realPass = new Set();
+      for (const arr of byMarket.values()) {
+        let burst = [];
+        const close = () => {
+          const onListings = new Set(burst.map((x) => x.listingId)).size;
+          if (burst.length && onListings <= REAL_PASS_MAX_LISTINGS && burst.length <= REAL_PASS_MAX_UNITS) {
+            for (const x of burst) realPass.add(x);
+          }
+          burst = [];
+        };
+        for (const x of arr) {
+          if (!flagged.has(x)) continue;
+          if (burst.length && x.at - burst[burst.length - 1].at > BURST_MS) close();
+          burst.push(x);
+        }
+        close();
+      }
       for (const x of flagged) {
+        if (realPass.has(x)) {
+          excluded.burst += 1;
+          demandOnly.push({ ...x, priceUsd: 0, priceBasis: "none", priced: false, burst: true });
+          continue;
+        }
         suspect.push({ key: x.key, market: x.market, at: x.at, priceUsd: x.priceUsd, listingId: x.listingId, seq: x.seq, reason: "burst" });
         excluded.massClose += 1;
       }
@@ -409,6 +546,9 @@ function buildLedger({ listings = [], signals = [], sets = [] } = {}) {
   // Mass-close signals are set aside, but the listing's unitsSold counter still
   // includes them — they are accounted for, not "unattributed".
   for (const x of suspect) signalCount.set(x.listingId, (signalCount.get(x.listingId) || 0) + 1);
+  // So are the units whose signal went to demandOnly (a bulk pack's N units, a
+  // real-pass burst): a pack of N is not also "N units with no record".
+  for (const x of demandOnly) if (fromSignal(x)) signalCount.set(x.listingId, (signalCount.get(x.listingId) || 0) + 1);
   let unattributedUnits = 0;
   for (const [id, n] of unitsSoldByListing) {
     const have = signalCount.get(id) || 0;
@@ -436,8 +576,12 @@ function buildLedger({ listings = [], signals = [], sets = [] } = {}) {
     suspect.filter((x) => x.listingId && Number.isFinite(x.seq)).map((x) => x.listingId + ":" + x.seq),
   );
 
-  quality.bulkDemandOnly = demandOnly.length;
+  // `bulkDemandOnly` keeps its meaning (bulk-pack units); the other demand-only
+  // records (Shop and bulk-order sales, real-pass bursts) are in the total and by source.
+  quality.bulkDemandOnly = demandOnly.filter((x) => x.source === "bulk").length;
+  quality.demandOnly = demandOnly.length;
+  quality.demandOnlyBySource = demandOnly.reduce((m, x) => ((m[x.source] = (m[x.source] || 0) + 1), m), {});
   return { sales, demandOnly, excluded, quality, suspect, suspectSaleKeys };
 }
 
-module.exports = { UNIT_LEDGER_MARKETS, buildLedger, round2 };
+module.exports = { UNIT_LEDGER_MARKETS, REAL_PASS_MAX_LISTINGS, REAL_PASS_MAX_UNITS, buildLedger, round2 };
