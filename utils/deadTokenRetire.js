@@ -38,8 +38,10 @@
 // inside the server — the farmer tick calls it), then the row leaves its bot
 // (enabled false, configFile/container "") and active tasks release the login.
 // Rows, drops and sales are kept. A touched config's container is restarted once,
-// and only if it is RUNNING: restartConfigContainer is `docker restart`, which
-// would also start a parked bot.
+// and only if it is RUNNING (`docker restart` would also start a parked bot) —
+// checked and restarted in ONE shell command under the container's lock
+// (farmControl.restartIfRunning, 2026-10-03). A config the retirement empties
+// is stopped instead (botHosts.stopIfNoAccounts).
 const MarketplaceListing = require("../models/MarketplaceListing");
 const { isRealSale } = require("./marketClaimTags");
 
@@ -116,6 +118,7 @@ function defaultDeps() {
       const r = require("../routes/botConfigRoutes");
       return { removeAccountFromConfig: r.removeAccountFromConfig, restartConfigContainer: r.restartConfigContainer };
     },
+    restartIfRunning: (...a) => require("./farmControl").restartIfRunning(...a),
   };
 }
 
@@ -222,17 +225,18 @@ async function retireSoldDeadTokens({ hours = DEFAULT_HOURS, dryRun = false, now
   const d = deps || defaultDeps();
   const progress = typeof onProgress === "function" ? onProgress : () => {};
   const p = await plan({ hours, now, deps: d });
-  const report = { ...p, dryRun: !!dryRun, retired: [], errors: [], configs: 0, restarted: [] };
+  const report = { ...p, dryRun: !!dryRun, retired: [], errors: [], configs: 0, restarted: [], stopped: [] };
   if (dryRun || !p.retire.length) return report;
 
-  const { removeAccountFromConfig, restartConfigContainer } = d.configOps();
+  const { removeAccountFromConfig } = d.configOps();
+  const restartIfRunning = d.restartIfRunning || require("./farmControl").restartIfRunning;
+  const allowRestart = process.env.TWITCHBOT_ALLOW_RESTART !== "0";
   const groups = new Map();
   for (const e of p.retire) {
     const key = e.host + "|" + e.configFile;
     if (!groups.has(key)) groups.set(key, []);
     groups.get(key).push(e);
   }
-  const psByHost = new Map();
   for (const list of groups.values()) {
     const { host: hostId, configFile: file } = list[0];
     const host = d.hosts.resolveHost(hostId);
@@ -280,14 +284,26 @@ async function retireSoldDeadTokens({ hours = DEFAULT_HOURS, dryRun = false, now
     }
     if (!touched) continue;
     report.configs++;
+    // The bot drops the retired logins on a restart, made only while it RUNS:
+    // the check and the restart are ONE shell command under the container's
+    // lock (2026-10-03) — a `docker ps` followed by a separate restart let a
+    // park that landed in between be undone. restorePolicy keeps what
+    // restartConfigContainer did; TWITCHBOT_ALLOW_RESTART=0 still turns the
+    // restart off. A config left with no accounts is stopped instead: a bot
+    // with none spins in a login-retry loop (botHosts.stopIfNoAccounts).
+    const container = list[0].container;
+    if (!container) continue;
     try {
-      if (!psByHost.has(hostId)) psByHost.set(hostId, await d.hosts.dockerPs(host));
-      const ps = psByHost.get(hostId) || {};
-      const container = list[0].container;
-      if (container && ps[container] && ps[container].state === "running") {
-        await restartConfigContainer(host, file);
-        report.restarted.push(container);
+      if (
+        typeof d.hosts.stopIfNoAccounts === "function" &&
+        (await d.hosts.stopIfNoAccounts(host, file, container)).stopped
+      ) {
+        report.stopped.push(container);
+        continue;
       }
+      if (!allowRestart) continue;
+      const r = await restartIfRunning(host, container, { restorePolicy: true });
+      if (r && r.restarted) report.restarted.push(container);
     } catch (err) {
       report.errors.push(hostId + "/" + file + " restart: " + err.message);
     }
@@ -296,6 +312,7 @@ async function retireSoldDeadTokens({ hours = DEFAULT_HOURS, dryRun = false, now
     progress(
       "Dead-token retire: took " + report.retired.length + " sold account(s) out of " + report.configs +
         " bot config(s)" + (report.restarted.length ? "; restarted " + report.restarted.join(", ") : "") +
+        (report.stopped.length ? "; stopped " + report.stopped.join(", ") + " (no accounts left)" : "") +
         (report.surface.length ? "; " + report.surface.length + " unsold dead-token account(s) left for re-auth" : "") + ".",
     );
     await d
