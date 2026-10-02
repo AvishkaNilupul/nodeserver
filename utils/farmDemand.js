@@ -567,12 +567,21 @@ function burstGuardDefault() {
 //
 // `burstGuard` (2026-10-03, LIVE-FIXES-1003 §A4; dark): when on, the other-market
 // sales isBurstSale names are counted RAW over each window (n×7/W, the shelf
-// rule) and only the rest go through the in-stock correction, so a one-day lump
-// of N reads as N/2 a week for 14 days instead of N; their days are not
-// selling days either. true/false decides; omitted (null) follows the switch
-// (burstGuardDefault), which is false today. Off — or on with no burst in the
-// units — every figure is the old one to the byte. On with a burst, the result
-// also carries `burstSales` (how many sales were counted raw).
+// rule); the rest keep the in-stock correction over the selling days of ALL
+// other-market sales, a burst's day included. A one-day lump of N alone reads
+// N/2 a week for 14 days instead of N.
+//   The guard may only ever REMOVE inflation, never add any. Dropping the
+//   burst-only days from the steady sales' denominator did add some (review,
+//   2026-10-03): fewer selling days raise the steady rate, and the burst then
+//   came on top — 48 Eldorado sales on 16 days plus 10 single hand sales on 10
+//   other days read 15.6 -> 23.5 a week. Keeping every day, each window's
+//   guarded figure is at most the unguarded one (W is never below the in-stock
+//   denominator), and it is clamped to it as well, so float rounding cannot
+//   tip it over either.
+// true/false decides; omitted (null) follows the switch (burstGuardDefault),
+// which is false today. Off — or on with no burst in the units — every figure is
+// the old one to the byte. On with a burst, the result also carries
+// `burstSales` (how many sales were counted raw).
 function demandRates(
   units,
   { days = 30, shortDays = SHORT_WINDOW_DAYS, now = Date.now(), burstGuard = null } = {},
@@ -592,8 +601,6 @@ function demandRates(
   let burstShort = 0;
   let steady = 0;
   let steadyShort = 0;
-  const steadyDays = new Set();
-  const steadyDaysShort = new Set();
   for (const u of units || []) {
     const t = u && u.firstAt ? new Date(u.firstAt).getTime() : NaN;
     if (!Number.isFinite(t)) continue;
@@ -613,11 +620,7 @@ function demandRates(
         if (recent) burstShort++;
       } else {
         steady++;
-        steadyDays.add(dayOf(t));
-        if (recent) {
-          steadyShort++;
-          steadyDaysShort.add(dayOf(t));
-        }
+        if (recent) steadyShort++;
       }
     }
   }
@@ -625,22 +628,32 @@ function demandRates(
     sizing.salesPerWeek(shelf, days),
     sizing.salesPerWeek(shelfShort, shortW),
   );
+  // Production's figure for each window, and the max of the two.
+  const plain = sizing.inStockRate({ count: other, sellingDays: otherDays.size, windowDays: days });
+  const plainShort = sizing.inStockRate({
+    count: otherShort,
+    sellingDays: otherDaysShort.size,
+    windowDays: shortW,
+  });
   const guarded = burst > 0 && (burstGuard == null ? burstGuardDefault() : burstGuard === true);
   const otherPerWeek = guarded
     ? Math.max(
-        sizing.inStockRate({ count: steady, sellingDays: steadyDays.size, windowDays: days }) +
-          sizing.salesPerWeek(burst, days),
-        sizing.inStockRate({ count: steadyShort, sellingDays: steadyDaysShort.size, windowDays: shortW }) +
-          sizing.salesPerWeek(burstShort, shortW),
+        Math.min(
+          plain,
+          sizing.inStockRate({ count: steady, sellingDays: otherDays.size, windowDays: days }) +
+            sizing.salesPerWeek(burst, days),
+        ),
+        Math.min(
+          plainShort,
+          sizing.inStockRate({ count: steadyShort, sellingDays: otherDaysShort.size, windowDays: shortW }) +
+            sizing.salesPerWeek(burstShort, shortW),
+        ),
       )
-    : Math.max(
-        sizing.inStockRate({ count: other, sellingDays: otherDays.size, windowDays: days }),
-        sizing.inStockRate({ count: otherShort, sellingDays: otherDaysShort.size, windowDays: shortW }),
-      );
+    : Math.max(plain, plainShort);
   const out = {
     shelfPerWeek: round1(shelfPerWeek),
     otherPerWeek: round1(otherPerWeek),
-    sellingDays: guarded ? steadyDays.size : otherDays.size,
+    sellingDays: otherDays.size,
     shelfSales: shelf,
     otherSales: other,
   };

@@ -619,7 +619,7 @@ test("guard on: a 40-account one-day hand sale no longer reads as 40 a week", ()
   const on = fd.demandRates(burst, { now: NOW, burstGuard: true });
   assert.equal(on.otherPerWeek, 20, "raw over the 14-day window, the shelf rule: 40 × 7 / 14");
   assert.equal(on.burstSales, 40);
-  assert.equal(on.sellingDays, 0, "a hand-sale day says nothing about stock-outs");
+  assert.equal(on.sellingDays, off.sellingDays, "the guard never drops a selling day");
   // At the feeder's 28-day cover: +86 accounts instead of +166.
   const target = (r) =>
     farmSizing.shelfAwareTarget({ shelfHeld: 0, shelfPerWeek: 0, otherPerWeek: r.otherPerWeek, coverageDays: 28, safetyStock: 6 }).target;
@@ -629,8 +629,9 @@ test("guard on: a 40-account one-day hand sale no longer reads as 40 a week", ()
   const pack = burst.map((u) => ({ ...u, market: "eldorado", pack: true }));
   assert.equal(fd.demandRates(pack, { now: NOW, burstGuard: false }).otherPerWeek, 40);
   assert.equal(fd.demandRates(pack, { now: NOW, burstGuard: true }).otherPerWeek, 20);
-  // The steady sales beside a burst keep their in-stock rate: 6 Eldorado sales
-  // over 3 days read 6 a week, plus the burst's 20 — not (6 + 40) over 4 days.
+  // The steady sales beside a burst keep their in-stock rate over the game's 4
+  // selling days (the burst's included; the 7-day floor either way): 6 a week,
+  // plus the burst's 20 — not (6 + 40) over those days.
   const steady = [3, 3, 5, 5, 9, 9].map((d) => ({ firstAt: ago(d), market: "eldorado" }));
   assert.equal(fd.demandRates(steady.concat(burst), { now: NOW, burstGuard: false }).otherPerWeek, 46);
   assert.equal(fd.demandRates(steady.concat(burst), { now: NOW, burstGuard: true }).otherPerWeek, 26);
@@ -681,7 +682,6 @@ test("guard on: hand sales and packs count raw, every other sale keeps its in-st
   // the last 14 days over the 7-day floor (4 a week): 9, not 14.
   assert.equal(r6.sales.otherPerWeek, 9);
   assert.equal(r6.sales.burstSales, 10);
-  assert.equal(r6.sales.sellingDays, 5);
   assert.equal(r6.target, 46, "production: 66");
   const ow = rowOf(on, "overwatch");
   assert.equal(ow.sales.otherPerWeek, 2.5);
@@ -692,10 +692,11 @@ test("guard on: hand sales and packs count raw, every other sale keeps its in-st
   const cod = rowOf(on, "call of duty");
   assert.equal(cod.sales.otherPerWeek, 1);
   assert.equal(cod.target, 10);
-  // Shelf rates, stock and evidence are not the guard's business.
+  // Shelf rates, selling days, stock and evidence are not the guard's business.
   for (const g of GOLDEN.snapshot) {
     const r = rowOf(on, g.key);
     assert.equal(r.sales.shelfPerWeek, g.sales.shelfPerWeek);
+    assert.equal(r.sales.sellingDays, g.sales.sellingDays, g.key + ": the guard never drops a selling day");
     assert.equal(r.sales.count, g.sales.count);
     sameBytes(r.sales.byMarket, g.sales.byMarket);
     sameBytes(r.stock, g.stock);
@@ -704,6 +705,147 @@ test("guard on: hand sales and packs count raw, every other sale keeps its in-st
   const w = baseWorld();
   w.af = { noclaimBurstGuard: true };
   sameBytes(await snapshotOf(w), on);
+});
+
+// The review's cases (2026-10-03). The first cut of the guard dropped a
+// burst-only day from the steady sales' selling days — fewer days, a higher
+// in-stock rate — and then added the burst on top, so the guard RAISED demand.
+// otherPerWeek / target at 28 days' cover (no shelf, safety 6):
+//                                                 production   first cut    now
+//   A  48 Eldorado sales on 16 days + 10 single
+//      hand sales on 10 other days                15.6 / 69    23.5 / 100   15.4 / 68
+//   B  the same 48 + four 5-account packs on 4
+//      quiet days                                 24.8 / 106   28.5 / 120   22.8 / 98
+//   C  2 Eldorado sales + a one-day hand sale
+//      of 40 (the contract's case)                42 / 174     22 / 94      22 / 94
+//   D  a busy game (sales on 25 of 30 days) + one
+//      20-account hand batch on its quiet day     36 / 150     38 / 158     36 / 150
+test("the review's cases: the guard never raises a game's demand", () => {
+  const { fd } = loadFarmDemand(baseWorld());
+  // Every sale at 11:00 UTC, d whole days back, k minutes apart: one UTC date per d.
+  const day = (d, k = 0) => new Date(NOW - d * DAY - 3600000 - k * 60000);
+  const eld = (days, perDay) =>
+    days.flatMap((d) => Array.from({ length: perDay }, (_, k) => ({ firstAt: day(d, k), market: "eldorado" })));
+  const lump = (d, n, unit) => Array.from({ length: n }, (_, k) => ({ firstAt: day(d, k), ...unit }));
+  const steadyDays = [1, 3, 5, 7, 9, 10, 12, 13, 16, 18, 20, 22, 24, 26, 27, 29];
+  const busyDays = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 13, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26];
+  const cases = {
+    A: {
+      units: eld(steadyDays, 3).concat([2, 4, 6, 8, 11, 15, 17, 19, 21, 23].map((d) => ({ firstAt: day(d), market: "manual" }))),
+      production: [15.6, 69],
+      guarded: [15.4, 68],
+    },
+    B: {
+      units: eld(steadyDays, 3).concat([2, 6, 11, 17].flatMap((d) => lump(d, 5, { market: "eldorado", pack: true }))),
+      production: [24.8, 106],
+      guarded: [22.8, 98],
+    },
+    C: { units: eld([4, 10], 1).concat(lump(6, 40, { market: "manual" })), production: [42, 174], guarded: [22, 94] },
+    D: { units: eld(busyDays, 4).concat(lump(12, 20, { market: "manual" })), production: [36, 150], guarded: [36, 150] },
+  };
+  const target = (r) =>
+    farmSizing.shelfAwareTarget({ shelfHeld: 0, shelfPerWeek: r.shelfPerWeek, otherPerWeek: r.otherPerWeek, coverageDays: 28, safetyStock: 6, min: 0, max: 250 }).target;
+  for (const [name, c] of Object.entries(cases)) {
+    const off = fd.demandRates(c.units, { days: 30, now: NOW, burstGuard: false });
+    const on = fd.demandRates(c.units, { days: 30, now: NOW, burstGuard: true });
+    assert.deepEqual([off.otherPerWeek, target(off)], c.production, name + ": production");
+    assert.deepEqual([on.otherPerWeek, target(on)], c.guarded, name + ": guarded");
+  }
+});
+
+// Random sale histories shaped like the review's cases: steady claim-at-sale
+// sales on some days, hand sales and packs on others (quiet days included),
+// shelf sales mixed in, 35 days of history.
+function randomHistory(r) {
+  const units = [];
+  const pSteady = 0.15 + r() * 0.8;
+  const pBurst = r() * 0.45;
+  const pick = (list) => list[Math.floor(r() * list.length)];
+  for (let d = 0; d < 35; d++) {
+    const hour = Math.floor(r() * 24);
+    const at = (k) => new Date(NOW - d * DAY - hour * 3600000 - k * 60000);
+    if (r() < pSteady) {
+      for (let k = 1 + Math.floor(r() * 4); k > 0; k--) {
+        units.push({ firstAt: at(k), market: pick(["eldorado", "g2g", "playerauctions", "", "unknown"]) });
+      }
+    }
+    if (r() < pBurst) {
+      const unit = r() < 0.4 ? { market: "eldorado", pack: true } : { market: "manual" };
+      for (let k = 1 + Math.floor(r() * (r() < 0.5 ? 3 : 40)); k > 0; k--) units.push({ firstAt: at(k), ...unit });
+    }
+    if (r() < 0.25) units.push({ firstAt: at(0), market: pick(["gameflip", "ggsel", "digiseller"]) });
+  }
+  return units;
+}
+
+test("property: on 400 random histories, guarded ≤ unguarded in every window", () => {
+  const { fd } = loadFarmDemand(baseWorld());
+  // [days, shortDays]. Equal pairs read ONE window (shortW = days), so each of
+  // those is a single window's figure; the rest are mixed pairs, the
+  // feeder's own [30, 14] first.
+  const WINDOWS = [[30, 14], [45, 7], [60, 21], [30, 1]].concat(
+    [1, 2, 7, 10, 14, 15, 20, 21, 28, 30, 31, 45, 60, 90].map((w) => [w, w]),
+  );
+  let raised = 0;
+  let lowered = 0;
+  for (let c = 0; c < 400; c++) {
+    const units = randomHistory(rng(5000 + c));
+    for (const [days, shortDays] of WINDOWS) {
+      const opts = { days, shortDays, now: NOW };
+      const off = fd.demandRates(units, { ...opts, burstGuard: false });
+      const on = fd.demandRates(units, { ...opts, burstGuard: true });
+      const where = "history " + c + ", window [" + days + ", " + shortDays + "]";
+      if (on.otherPerWeek > off.otherPerWeek) raised++;
+      if (on.otherPerWeek < off.otherPerWeek) lowered++;
+      assert.ok(on.otherPerWeek <= off.otherPerWeek, where + ": " + off.otherPerWeek + " -> " + on.otherPerWeek);
+      assert.equal(on.shelfPerWeek, off.shelfPerWeek, where);
+      assert.equal(on.sellingDays, off.sellingDays, where);
+      assert.equal(on.otherSales, off.otherSales, where);
+    }
+  }
+  assert.equal(raised, 0);
+  assert.ok(lowered > 1000, "the histories really exercise the guard (" + lowered + " lowered)");
+});
+
+test("property: on 60 random worlds, no bucket's rate or target goes up with the guard on", async () => {
+  for (let c = 0; c < 60; c++) {
+    const r = rng(9000 + c);
+    const w = baseWorld();
+    w.ledgers = [];
+    w.signals = [];
+    let n = 0;
+    for (const game of [R6, OW, COD]) {
+      for (const u of randomHistory(r)) {
+        const login = "acct" + ++n;
+        if (u.market === "" || u.market === "unknown") {
+          w.signals.push(signal(game.toLowerCase(), login, "connected", "", (NOW - u.firstAt) / DAY, 0, "c:" + login));
+          continue;
+        }
+        w.ledgers.push(
+          ledger(login, game, "sold", {
+            soldAt: u.firstAt,
+            soldMarket: u.market,
+            market: u.market === "manual" ? "" : u.market,
+            soldPriceUsd: 1 + (n % 5),
+            manualListing: u.pack ? L_PACK : "",
+          }),
+        );
+      }
+      for (let i = Math.floor(r() * 8); i > 0; i--) w.ledgers.push(ledger("stock" + ++n, game, "listed"));
+    }
+    const off = await snapshotOf(w, { burstGuard: false });
+    const on = await snapshotOf(w, { burstGuard: true });
+    for (const o of off) {
+      const g = rowOf(on, o.key);
+      const where = "world " + c + ", " + o.key;
+      assert.ok(g.sales.otherPerWeek <= o.sales.otherPerWeek, where + " otherPerWeek " + o.sales.otherPerWeek + " -> " + g.sales.otherPerWeek);
+      assert.ok(g.sales.perWeek <= o.sales.perWeek, where + " perWeek");
+      assert.ok(g.target <= o.target, where + " target " + o.target + " -> " + g.target);
+      assert.ok(g.need <= o.need, where + " need");
+      assert.equal(g.sales.shelfPerWeek, o.sales.shelfPerWeek, where);
+      assert.equal(g.sales.sellingDays, o.sales.sellingDays, where);
+    }
+  }
 });
 
 test("a failed pack lookup: guard off sizes exactly as before; guard on sizes nothing", async () => {
