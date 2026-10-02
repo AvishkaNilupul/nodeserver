@@ -56,6 +56,8 @@ const REAL_SALE_SOURCES = ["connected", "listing_sold"];
 
 const lower = (s) => String(s || "").trim().toLowerCase();
 
+const OBJECT_ID_RE = /^[a-f0-9]{24}$/i;
+
 // ---------------------------------------------------------------------------
 // Game buckets
 // ---------------------------------------------------------------------------
@@ -119,27 +121,62 @@ function bucketLabel(key) {
 const DATING_SOURCES = new Set(["ledger", "listing_sold", "connected"]);
 const PRIOR_DAYS = 90;
 
+// A `listing_sold` signal names the account the buyer got only when the listing
+// sells ONE account. A GGSel/Digiseller quantity row hands out "whichever unit
+// the platform picks", so saleLearning.recordListingSale falls back to the
+// row's `accountLogin` — which the auto-lister writes as the row's whole
+// delivery POOL, `units.map((u) => u.login).join(", ")`. Keyed by that string
+// the sale never met its own ledger row: the expiry pass spends a victim out of
+// the same pool under the victim's own login (spendAccount), so every no-claim
+// quantity sale counted twice, and two units sold in one read three times —
+// straight into shelfPerWeek, live again since GGSel re-opened on 2026-10-01.
+// Every such sale already has that victim ledger row, so a pooled
+// `listing_sold` is dropped (2026-10-03, LIVE-FIXES-1003 §A4) and only counted
+// in `pooled`. The pool test is utils/priceTracker's (ledger.js loginList: more
+// than one name, split on spaces, commas or semicolons).
+function isLoginPool(login) {
+  return String(login || "").split(/[\s,;]+/).filter(Boolean).length > 1;
+}
+
 // The union as a pure accumulator, so the dating rules are testable without a
 // database: `add(game, login, source, extra)` one piece of evidence at a time,
 // then `split(since)`. Accounts are keyed by lowercased login; anonymous
 // quantity-listing units get a synthetic key, so a hundred unit sales never
-// collapse into one. `split` returns
-//   { units: Map(bucket -> Map(id -> unit)), undated: Map(bucket -> n) }
+// collapse into one. A `listing_sold` naming a login POOL is not a unit at all
+// (isLoginPool). `split` returns
+//   { units: Map(bucket -> Map(id -> unit)), undated: Map(bucket -> n),
+//     pooled: Map(bucket -> n) }
 // where `units` holds only the sales whose FIRST dated evidence is inside the
-// window, each { sources:Set, priceUsd, market, at, firstAt }: `market` is the
-// market of the earliest dated evidence, `at` the latest evidence of any kind.
+// window, each { sources:Set, priceUsd, market, at, firstAt } plus `pack: true`
+// when any evidence says the account went out in a bulk pack (`extra.pack`):
+// `market` is the market of the earliest dated evidence, `at` the latest
+// evidence of any kind. `pooled` counts the dropped pool sales first seen inside
+// the window — exactly the units the union counted twice before 2026-10-03.
 function saleAccumulator(keys = noClaimKeys()) {
   const all = new Map(); // bucket -> Map(loginKey -> unit)
+  const pools = new Map(); // bucket -> Map(pool string -> first sighting)
 
   const add = (game, login, source, extra = {}) => {
     const bucket = bucketFor(game, keys);
     if (!bucket) return;
+    if (source === "listing_sold" && isLoginPool(login)) {
+      // Dated the way a unit would have been, so `pooled` says how many units
+      // the old union really added, not how many signal rows there were.
+      const at = extra.at ? new Date(extra.at) : null;
+      const first = extra.firstAt ? new Date(extra.firstAt) : at;
+      const seen = pools.get(bucket) || pools.set(bucket, new Map()).get(bucket);
+      const id = lower(login);
+      if (first && (!seen.get(id) || first < seen.get(id))) seen.set(id, first);
+      return;
+    }
     const inner = all.get(bucket) || all.set(bucket, new Map()).get(bucket);
     const id = lower(login) || `anon:${source}:${extra.dedupe || inner.size}`;
     const cur =
       inner.get(id) ||
       { sources: new Set(), priceUsd: 0, market: "", at: null, firstAt: null, confirmedAt: null };
     cur.sources.add(source);
+    // Set only when true, so every other unit keeps its exact old shape.
+    if (extra.pack === true) cur.pack = true;
     // Keep the best price any source names — a connection flip proves the sale
     // but carries no price, so taking the max is how a sale keeps its money when
     // only one of its two witnesses saw it.
@@ -176,7 +213,13 @@ function saleAccumulator(keys = noClaimKeys()) {
       units.set(bucket, keep);
       undated.set(bucket, n);
     }
-    return { units, undated };
+    const pooled = new Map();
+    for (const [bucket, seen] of pools) {
+      let n = 0;
+      for (const first of seen.values()) if (first >= since) n++;
+      pooled.set(bucket, n);
+    }
+    return { units, undated, pooled };
   };
 
   return { add, split };
@@ -184,7 +227,9 @@ function saleAccumulator(keys = noClaimKeys()) {
 
 // Every no-claim sale with evidence, read from the four sources over the window
 // plus PRIOR_DAYS of history and dated by saleAccumulator's rules. Returns
-//   { since, units: Map(bucket -> Map(id -> unit)), undated: Map(bucket -> n) }.
+//   { since, units: Map(bucket -> Map(id -> unit)), undated: Map(bucket -> n),
+//     pooled: Map(bucket -> n) }
+// plus `packError` (a message) when the bulk-pack lookup below failed.
 async function saleEvidenceByBucket({ days = 30, priorDays = PRIOR_DAYS } = {}) {
   const keys = noClaimKeys();
   const since = new Date(Date.now() - Math.max(1, days) * DAY_MS);
@@ -196,7 +241,16 @@ async function saleEvidenceByBucket({ days = 30, priorDays = PRIOR_DAYS } = {}) 
   //    (Eldorado, PlayerAuctions, G2G) that write no SaleSignal.
   const ledgers = await UnclaimedAccount.find(
     { status: "sold", soldAt: { $gte: lookSince } },
-    { login: 1, game: 1, market: 1, soldAt: 1, set: 1, soldPriceUsd: 1, soldMarket: 1 },
+    {
+      login: 1,
+      game: 1,
+      market: 1,
+      soldAt: 1,
+      set: 1,
+      soldPriceUsd: 1,
+      soldMarket: 1,
+      manualListing: 1,
+    },
   ).lean();
   // Rows sold since `soldPriceUsd` shipped carry the price they ACTUALLY sold
   // at. Older rows carry nothing, so their price is reconstructed from the set's
@@ -224,6 +278,33 @@ async function saleEvidenceByBucket({ days = 30, priorDays = PRIOR_DAYS } = {}) 
       if (p > (priceBySet.get(k) || 0)) priceBySet.set(k, p);
     }
   }
+  // Which sales went out in a bulk pack (isBurstSale). A no-claim pack sells
+  // through the ordinary claim-at-sale path (noclaimStock.claimForSet ->
+  // commitLedger), so its ledger rows carry the market ("eldorado", "g2g")
+  // exactly like a single sale; only the listing they were claimed for says
+  // "pack" — `manualListing` names it and a pack row has `bulkOfferId`. One
+  // indexed read over the few listings these ledgers name. It feeds nothing
+  // but the burst guard, which is dark by default, so a failure must not take
+  // the live snapshot down with it: caught, reported as `packError`, and
+  // unclaimedDemandSnapshot refuses to size with the guard ON while it is set.
+  const packListings = new Set();
+  let packError = "";
+  const listingIds = [
+    ...new Set(
+      ledgers.map((l) => String(l.manualListing || "")).filter((id) => OBJECT_ID_RE.test(id)),
+    ),
+  ];
+  if (listingIds.length) {
+    try {
+      const packs = await MarketplaceListing.find(
+        { _id: { $in: listingIds }, bulkOfferId: { $ne: null } },
+        { _id: 1 },
+      ).lean();
+      for (const p of packs) packListings.add(String(p._id));
+    } catch (e) {
+      packError = (e && e.message) || String(e) || "unknown error";
+    }
+  }
   for (const l of ledgers) {
     const recorded = Math.max(0, Number(l.soldPriceUsd) || 0);
     add(l.game, l.login, "ledger", {
@@ -231,6 +312,7 @@ async function saleEvidenceByBucket({ days = 30, priorDays = PRIOR_DAYS } = {}) 
       market: l.soldMarket || l.market || "",
       at: l.soldAt,
       dedupe: String(l._id),
+      pack: packListings.has(String(l.manualListing || "")),
     });
   }
 
@@ -293,6 +375,9 @@ async function saleEvidenceByBucket({ days = 30, priorDays = PRIOR_DAYS } = {}) 
         },
       },
     ]);
+    // A row grouped under a delivery POOL ("a, b, c") is dropped by the
+    // accumulator (isLoginPool); an anonymous key is passed as "" so the spaces
+    // a gameKey puts into its dedupeKey never read as a pool.
     for (const row of grouped) {
       const login = String(row._id.who || "");
       for (const source of row.sources || []) {
@@ -335,7 +420,7 @@ async function saleEvidenceByBucket({ days = 30, priorDays = PRIOR_DAYS } = {}) 
     }
   }
 
-  return { since, ...acc.split(since) };
+  return { since, ...acc.split(since), ...(packError ? { packError } : {}) };
 }
 
 // The accounts sold in the window, per bucket — Map(bucket -> Map(id -> unit)).
@@ -449,13 +534,49 @@ const SHELF_MARKETS = new Set(["gameflip", "ggsel", "digiseller"]);
 // weeks while a dip never shrinks the rate faster than the full window.
 const SHORT_WINDOW_DAYS = 14;
 
+// BURSTS. The in-stock correction reads a day with no sale as a stock-out, which
+// is right for a trickle of buyers and wrong for a lump: a hand sale of 40
+// accounts, or a bulk pack, lands on ONE day, and divided by the half-window
+// floor it reads as 40 a week for 14 days — at 28 days' cover, +160 accounts
+// for the feeder to claim (research H2: R6 152 -> 246 on one burst). These are
+// the sales that arrive that way by construction:
+//   "manual"  — a hand sale (unclaimedAutoList.handSellAccounts is the only
+//               writer of soldMarket "manual")
+//   pack      — a bulk pack (`unit.pack`, set by saleEvidenceByBucket from the
+//               ledger's listing; a pack's market is the claim-at-sale market
+//               of any single sale, so the market alone cannot say "pack")
+const BURST_MARKETS = new Set(["manual"]);
+function isBurstSale(u) {
+  return !!u && (u.pack === true || BURST_MARKETS.has(lower(u.market)));
+}
+
+// The live switch, autoFarm.noclaimBurstGuard — off unless it is exactly true.
+// Read only when a caller did not choose and there IS a burst to guard: every
+// getAutoFarm() re-reads settings.json from disk, and the farm brain calls
+// demandRates once per game per backtest week.
+function burstGuardDefault() {
+  return (settings.getAutoFarm() || {}).noclaimBurstGuard === true;
+}
+
 // Per-week demand from a game's in-window units, split by where it sold.
 //   shelfPerWeek — RAW rate of shelf-market sales (a shelf is never out of stock)
 //   otherPerWeek — IN-STOCK rate of every other sale (see sizing.inStockRate):
 //                  a claim-at-sale offer with no matching accounts sells nothing,
 //                  and those days are a stock-out, not missing buyers
 // each the larger of the full-window and the 14-day rate. Pure; `now` pinnable.
-function demandRates(units, { days = 30, shortDays = SHORT_WINDOW_DAYS, now = Date.now() } = {}) {
+//
+// `burstGuard` (2026-10-03, LIVE-FIXES-1003 §A4; dark): when on, the other-market
+// sales isBurstSale names are counted RAW over each window (n×7/W, the shelf
+// rule) and only the rest go through the in-stock correction, so a one-day lump
+// of N reads as N/2 a week for 14 days instead of N; their days are not
+// selling days either. true/false decides; omitted (null) follows the switch
+// (burstGuardDefault), which is false today. Off — or on with no burst in the
+// units — every figure is the old one to the byte. On with a burst, the result
+// also carries `burstSales` (how many sales were counted raw).
+function demandRates(
+  units,
+  { days = 30, shortDays = SHORT_WINDOW_DAYS, now = Date.now(), burstGuard = null } = {},
+) {
   const shortW = Math.max(1, Math.min(shortDays, days));
   const shortSince = now - shortW * DAY_MS;
   const dayOf = (t) => new Date(t).toISOString().slice(0, 10);
@@ -465,6 +586,14 @@ function demandRates(units, { days = 30, shortDays = SHORT_WINDOW_DAYS, now = Da
   let otherShort = 0;
   const otherDays = new Set();
   const otherDaysShort = new Set();
+  // The same other-market sales split into bursts and the steady rest, in the
+  // same single pass (`units` may be an iterator), for the guarded rate.
+  let burst = 0;
+  let burstShort = 0;
+  let steady = 0;
+  let steadyShort = 0;
+  const steadyDays = new Set();
+  const steadyDaysShort = new Set();
   for (const u of units || []) {
     const t = u && u.firstAt ? new Date(u.firstAt).getTime() : NaN;
     if (!Number.isFinite(t)) continue;
@@ -479,23 +608,44 @@ function demandRates(units, { days = 30, shortDays = SHORT_WINDOW_DAYS, now = Da
         otherShort++;
         otherDaysShort.add(dayOf(t));
       }
+      if (isBurstSale(u)) {
+        burst++;
+        if (recent) burstShort++;
+      } else {
+        steady++;
+        steadyDays.add(dayOf(t));
+        if (recent) {
+          steadyShort++;
+          steadyDaysShort.add(dayOf(t));
+        }
+      }
     }
   }
   const shelfPerWeek = Math.max(
     sizing.salesPerWeek(shelf, days),
     sizing.salesPerWeek(shelfShort, shortW),
   );
-  const otherPerWeek = Math.max(
-    sizing.inStockRate({ count: other, sellingDays: otherDays.size, windowDays: days }),
-    sizing.inStockRate({ count: otherShort, sellingDays: otherDaysShort.size, windowDays: shortW }),
-  );
-  return {
+  const guarded = burst > 0 && (burstGuard == null ? burstGuardDefault() : burstGuard === true);
+  const otherPerWeek = guarded
+    ? Math.max(
+        sizing.inStockRate({ count: steady, sellingDays: steadyDays.size, windowDays: days }) +
+          sizing.salesPerWeek(burst, days),
+        sizing.inStockRate({ count: steadyShort, sellingDays: steadyDaysShort.size, windowDays: shortW }) +
+          sizing.salesPerWeek(burstShort, shortW),
+      )
+    : Math.max(
+        sizing.inStockRate({ count: other, sellingDays: otherDays.size, windowDays: days }),
+        sizing.inStockRate({ count: otherShort, sellingDays: otherDaysShort.size, windowDays: shortW }),
+      );
+  const out = {
     shelfPerWeek: round1(shelfPerWeek),
     otherPerWeek: round1(otherPerWeek),
-    sellingDays: otherDays.size,
+    sellingDays: guarded ? steadyDays.size : otherDays.size,
     shelfSales: shelf,
     otherSales: other,
   };
+  if (guarded) out.burstSales = burst;
+  return out;
 }
 
 const round1 = (n) => Math.round((Number(n) || 0) * 10) / 10;
@@ -504,12 +654,29 @@ const round1 = (n) => Math.round((Number(n) || 0) * 10) / 10;
 // and what the sizing model says it should hold. Deliberately returns the
 // EVIDENCE alongside the number — an operator has to be able to see why a game
 // is being told to grow before they let anything act on it.
-async function unclaimedDemandSnapshot({ days = 30, ttsDays = 90 } = {}) {
+//
+// `burstGuard` goes to demandRates for every row (true/false; omitted = the
+// autoFarm.noclaimBurstGuard switch, read once here). A row it changed carries
+// `sales.burstSales`.
+async function unclaimedDemandSnapshot({ days = 30, ttsDays = 90, burstGuard = null } = {}) {
   const [evidence, stock, tts] = await Promise.all([
     saleEvidenceByBucket({ days }),
     stockByBucket(),
     timeToSaleByBucket({ days: ttsDays }),
   ]);
+  const guard = burstGuard == null ? burstGuardDefault() : burstGuard === true;
+  // FAIL SAFE. With the guard on, a pack the lookup could not recognise would be
+  // counted through the in-stock correction again — the inflation the guard is
+  // there to remove — and the allocator would claim pool accounts on it. No
+  // snapshot means no growth this pass (the allocator applies nothing when its
+  // plan throws), which spends nothing. Guard off, the lookup is unused.
+  if (guard && evidence.packError) {
+    throw new Error(
+      "no-claim demand withheld: the burst guard is on and the bulk-pack lookup failed (" +
+        evidence.packError +
+        ")",
+    );
+  }
   const sold = evidence.units;
   const cfg = settings.getNoclaimSizing ? settings.getNoclaimSizing() : {};
   const keys = noClaimKeys();
@@ -534,7 +701,7 @@ async function unclaimedDemandSnapshot({ days = 30, ttsDays = 90 } = {}) {
     }
     const count = units.size;
     const avgPrice = priced ? Math.round((revenue / priced) * 100) / 100 : 0;
-    const rates = demandRates(units.values(), { days });
+    const rates = demandRates(units.values(), { days, burstGuard: guard });
     const perWeek = round1(rates.shelfPerWeek + rates.otherPerWeek);
 
     const coverageDays = numOr(cfg.coverageDaysFor && cfg.coverageDaysFor(key), cfg.coverageDays);
@@ -574,6 +741,8 @@ async function unclaimedDemandSnapshot({ days = 30, ttsDays = 90 } = {}) {
         priced,
         bySource,
         byMarket,
+        // Only when the guard changed this row, so a guard-off row is the old row.
+        ...(rates.burstSales != null ? { burstSales: rates.burstSales } : {}),
       },
       stock: st,
       onHand,
@@ -642,6 +811,9 @@ module.exports = {
   bucketLabel,
   DATING_SOURCES,
   SHELF_MARKETS,
+  BURST_MARKETS,
+  isLoginPool,
+  isBurstSale,
   saleAccumulator,
   demandRates,
   saleEvidenceByBucket,
