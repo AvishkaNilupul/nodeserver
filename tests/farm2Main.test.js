@@ -73,11 +73,11 @@ test("the supervisor auto-creates lanes only when farm2Main is on", async () => 
   await FarmLane.deleteMany({});
   await TwitchCampaign.deleteMany({});
   await campaign("Main Game C", "mc-1");
-  settings.getAutoFarm = () => ({ ...origGet.call(settings), farm2Enabled: true, farm2Main: false, hostId: "" });
+  settings.getAutoFarm = () => ({ ...origGet.call(settings), enabled: true, farm2Enabled: true, farm2Main: false, hostId: "" });
   let s = await supervisor.runCycle({ force: true });
   assert.equal(s.lanes, 0);
   assert.equal(await FarmLane.countDocuments({}), 0, "trial mode: no lane appears by itself");
-  settings.getAutoFarm = () => ({ ...origGet.call(settings), farm2Enabled: true, farm2Main: true, hostId: "" });
+  settings.getAutoFarm = () => ({ ...origGet.call(settings), enabled: true, farm2Enabled: true, farm2Main: true, hostId: "" });
   s = await supervisor.runCycle({ force: true });
   assert.deepEqual(s.autoCreated, ["Main Game C"]);
   assert.equal(s.main, true);
@@ -110,7 +110,7 @@ test("the pause transition is reported once by the lane and alerted by the super
   const TC = require("../models/TwitchCampaign");
   const origFind = TC.find;
   TC.find = () => { throw new Error("db down"); };
-  settings.getAutoFarm = () => ({ ...origGet.call(settings), farm2Enabled: true, farm2Main: false, hostId: "" });
+  settings.getAutoFarm = () => ({ ...origGet.call(settings), enabled: true, farm2Enabled: true, farm2Main: false, hostId: "" });
   sent.length = 0;
   try {
     const s = await supervisor.runCycle({ force: true });

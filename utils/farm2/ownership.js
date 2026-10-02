@@ -87,6 +87,13 @@ function normKey(game) {
 async function refresh() {
   if (cache.loading) return cache.loading;
   cache.loading = (async () => {
+    // Yield before anything can throw. Without it, a synchronous throw (the
+    // model failing to load) ran the `finally` below BEFORE this promise was
+    // assigned to cache.loading, so a settled promise stayed there for good
+    // and every later refresh() returned it without reading — ownership
+    // stuck cold until a restart (found 2026-10-03; with the legacy engine
+    // deferring to a cold cache in main mode, that would defer for ever).
+    await null;
     try {
       const FarmLane = require("../../models/FarmLane");
       // A PAUSED live lane owns nothing. Pausing means the lane failed
@@ -101,10 +108,13 @@ async function refresh() {
       cache.at = Date.now();
     } catch {
       // Fail safe: an unreadable lane table means "farm2 owns nothing", so the
-      // legacy engine continues to cover every game. Deliberately does NOT
-      // update cache.at, so the next call retries instead of caching the empty
-      // set for a full TTL.
+      // legacy engine continues to cover every game. cache.at goes back to 0,
+      // so the next call retries instead of caching the empty set for a full
+      // TTL — and so isCold() can tell "the table could not be read" from "the
+      // table was read and no lane is live" (2026-10-03: before, a failed read
+      // after an earlier good one kept the old timestamp, so it looked warm).
       cache.keys = new Set();
+      cache.at = 0;
     } finally {
       cache.loading = null;
     }
@@ -116,8 +126,9 @@ async function refresh() {
 //
 // Synchronous by design: making autoFarmer await a DB call inside its campaign
 // loop would add a round trip per candidate. A cold or stale cache answers
-// "not owned" (the safe direction) and kicks off a background refresh, so the
-// very first legacy tick after a boot behaves exactly as it does today.
+// "not owned" (the safe direction) and kicks off a background refresh. The
+// legacy tick awaits ensureFresh() ONCE before its loop, so the loop itself
+// reads a current cache (see ensureFresh and isCold below).
 function isOwned(game) {
   if (!engineRunning) return false;
   if (!killSwitchOn()) return false;
@@ -154,12 +165,43 @@ function invalidate() {
   cache.at = 0;
 }
 
+// Make the hot loop's answers current before it asks them. Never throws.
+//
+// isOwned() answers "not owned" from a cold cache, and the cache is cold at
+// boot and after every invalidate() (a lane auto-created or paused, every lane
+// route). The legacy candidate loop has no await between its isOwned() calls,
+// so in that tick every game read "not owned" and the legacy engine decided
+// all of them — 20 legacy decisions since main mode went on (2026-09-06), every
+// one right after a restart or a lane auto-create (10-02 00:01: The Quinfall,
+// +19 accounts). The legacy tick awaits this once before its loop instead.
+async function ensureFresh() {
+  try {
+    if (!engineRunning) return;
+    if (!killSwitchOn()) return;
+    if (Date.now() - cache.at > TTL_MS) await refresh();
+  } catch {
+    /* refresh() is already fail-safe; this guard only keeps the promise */
+  }
+}
+
+// Is ownership UNKNOWN right now? True while the engine runs with its switch
+// on but the lane table has not been read: before the first refresh lands,
+// after invalidate(), and after a failed read. In that state isOwned() says
+// "not owned" for every game — the safe answer for a fallback engine, and the
+// wrong one when the lane engine is the MAIN engine (autoFarmer reads this to
+// defer its decisions instead of taking every game).
+function isCold() {
+  return engineRunning && killSwitchOn() && !cache.at;
+}
+
 module.exports = {
   isOwned,
   isOwnedAsync,
   ownedKeys,
   invalidate,
   refresh,
+  ensureFresh,
+  isCold,
   setEngineRunning,
   killSwitchOn,
   isMain,

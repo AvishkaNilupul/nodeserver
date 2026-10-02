@@ -136,6 +136,16 @@ async function runCycle({ force = false } = {}) {
       state.lastRun = new Date();
       return state.lastSummary;
     }
+    // The AUTO-FARM master switch stops this engine too (2026-10-03). The
+    // legacy tick returns early when it is off, but lanes kept deciding,
+    // claiming and creating bots — "off" switched off only the half of the
+    // farm that also does the clean-up. Nothing is handed to the legacy
+    // engine here: it is off as well, which is what the switch means.
+    if (af.enabled === false) {
+      state.lastSummary = { enabled: false, masterSwitch: false, lanes: 0 };
+      state.lastRun = new Date();
+      return state.lastSummary;
+    }
 
     // Re-drive anything a restart left stranded, then trim old history.
     const requeued = await jobs.requeueStale().catch(() => 0);
@@ -306,10 +316,29 @@ function status() {
   };
 }
 
+// Liveness for the health page (utils/systemHealth.js). Synchronous and never
+// throws. `lastRun` is stamped at the end of every cycle, idle ones included,
+// so an old value means the loop itself has stopped, not that it had nothing
+// to do.
+function loopStatus() {
+  let enabled = false;
+  try {
+    enabled = settings.getAutoFarm().farm2Enabled === true;
+  } catch {
+    enabled = false;
+  }
+  return {
+    lastRun: state.lastRun || null,
+    intervalMin: TICK_MS / 60000,
+    enabled,
+  };
+}
+
 module.exports = {
   start,
   stop,
   status,
+  loopStatus,
   runCycle,
   ensureLanesForLiveGames,
   mapWithConcurrency,

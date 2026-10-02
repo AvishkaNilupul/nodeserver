@@ -259,8 +259,19 @@ async function computeCycleBudget(af, opts = {}) {
     reasons.push("pool count failed: " + e.message);
   }
   const reserve = Math.max(0, Number(af.poolReserve) || 0);
-  const spendable = Math.max(0, ready - reserve);
-  if (spendable === 0) reasons.push(`pool at/below reserve (${ready}/${reserve})`);
+  // The pristine reserve (utils/pristineReserve.js via autoFarmer): ready
+  // accounts no farm may take, because paid rent-farm orders can only use
+  // never-farmed ones and nothing ever returns those to the pool (2026-10-03).
+  // Same helper, same number as the legacy engine's spend checks.
+  const protect = await autoFarmer.pristineProtect(af);
+  const spendable = Math.max(0, ready - reserve - protect);
+  if (spendable === 0) {
+    reasons.push(
+      `pool at/below reserve (${ready}/${reserve}` +
+        (protect ? ` + ${protect} pristine kept for rent-farm orders` : "") +
+        ")",
+    );
+  }
 
   // NOT capped by marketStockFloor. An earlier version did
   // `spendable = min(spendable, marketStockFloor(af))`, reading the floor as a
@@ -291,9 +302,20 @@ async function computeCycleBudget(af, opts = {}) {
     activeContainers = maxAutoBots;
     reasons.push("container count failed: " + e.message);
   }
-  const containersFree = Math.max(0, maxAutoBots - activeContainers);
-  if (containersFree === 0)
+  let containersFree = Math.max(0, maxAutoBots - activeContainers);
+  if (containersFree === 0) {
     reasons.push(`container cap reached (${activeContainers}/${maxAutoBots})`);
+  } else {
+    // No NEW container while the farm host is short of RAM (2026-10-03,
+    // af.hostMinFreeMb). Only the containers term goes to 0: running bots'
+    // free seats stay usable, and the decide step reads them exactly as it
+    // does when the container cap is reached.
+    const gate = await autoFarmer.containerSlots(autoFarmer.resolveFarmHost(af), containersFree);
+    if (gate.blocked) {
+      containersFree = 0;
+      reasons.push("no new container: " + gate.reason);
+    }
+  }
 
   // Seats available for NEW accounts: what free containers could hold. Free
   // seats inside EXISTING containers are deliberately excluded here — counting

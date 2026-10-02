@@ -375,11 +375,17 @@ async function seatCapacityFor({ host, af, cycle, hostCache }) {
   const perBot = Math.max(1, Number(af.accountsPerBot) || 1);
   let slotsFree;
   if (cycle && Number.isFinite(cycle.totalContainers)) {
+    // Already 0 while the farm host is short of RAM (budget.js).
     slotsFree = Math.max(0, cycle.totalContainers);
   } else {
     const active =
       typeof b.activeAutoBotCount === "function" ? await b.activeAutoBotCount({}) : 0;
     slotsFree = Math.max(0, (Number(af.maxAutoBots) || 0) - active);
+    // The same RAM gate as the cycle budget and the legacy engine: no NEW
+    // container on a host short of memory; free seats below stay usable.
+    if (slotsFree >= 1 && typeof b.containerSlots === "function") {
+      slotsFree = (await b.containerSlots(host, slotsFree)).slots;
+    }
   }
   if (slotsFree >= 1) return { seatCapacity: slotsFree * perBot, slotsFree, freeSeats: null };
   const freeSeats = await memo(
@@ -414,10 +420,19 @@ async function recycledPoolCount(game) {
   const AvailableAccount = require("../../../models/AvailableAccount");
   const ready =
     typeof b.readyPoolQuery === "function" ? b.readyPoolQuery() : { status: "available" };
+  // claimPoolAccounts ANDs the pristine-reserve filter into this pass
+  // (2026-10-03), so the count does too — or a lane would plan a reuse-only
+  // farm on recycled accounts the claim is not allowed to take.
+  const pristineGuard = await require("../../pristineReserve").farmClaimFilter();
   return AvailableAccount.countDocuments({
-    ...ready,
-    claimedNote: new RegExp("^recycled after " + escapeRe(game) + "$", "i"),
-    soldGames: { $ne: normGame(game) },
+    $and: [
+      {
+        ...ready,
+        claimedNote: new RegExp("^recycled after " + escapeRe(game) + "$", "i"),
+        soldGames: { $ne: normGame(game) },
+      },
+      pristineGuard,
+    ],
   });
 }
 

@@ -369,6 +369,12 @@ async function freshResearchForGame(game) {
 // never sold a single unit could hold itself at maximum allocation forever.
 async function internalSalesForGame(game) {
   const cutoff = new Date(Date.now() - SALES_WINDOW_MS);
+  const gameKey = String(game).toLowerCase();
+  const salesWindow = {
+    gameKey,
+    at: { $gte: cutoff },
+    source: { $in: ["connected", "listing_sold"] },
+  };
   try {
     // One SALE, not one drop row. The two real sources need different
     // collapsing, so the grouping key is per-source:
@@ -382,47 +388,191 @@ async function internalSalesForGame(game) {
     //     they fall back to their dedupeKey, which is unique per unit.
     // A Gameflip sale that the buyer then connects lands on the same account
     // under both sources and is correctly counted once.
-    const rows = await SaleSignal.aggregate([
+    //
+    // Quantity units (a login POOL in `login`, see QUANTITY_POOL_RE) are set
+    // aside by the facet and counted by quantityUnitSales below instead.
+    const [out] = await SaleSignal.aggregate([
+      { $match: salesWindow },
       {
-        $match: {
-          gameKey: String(game).toLowerCase(),
-          at: { $gte: cutoff },
-          source: { $in: ["connected", "listing_sold"] },
-        },
-      },
-      {
-        $group: {
-          _id: { $ifNull: ["$account", "$dedupeKey"] },
-          // One sale can produce several rows (a Gameflip sale the buyer then
-          // connects). Take the best price any of them carries rather than
-          // summing, or the same money would be counted twice.
-          priceUsd: { $max: { $ifNull: ["$priceUsd", 0] } },
-        },
-      },
-      {
-        $group: {
-          _id: null,
-          count: { $sum: 1 },
-          revenue: { $sum: "$priceUsd" },
-          // How many of those sales we actually know a price for. A connection
-          // flip proves a sale but names no price, and dividing revenue by
-          // every sale would report a game as half-price purely because some
-          // of its evidence is priceless rather than free.
-          priced: { $sum: { $cond: [{ $gt: ["$priceUsd", 0] }, 1, 0] } },
+        $facet: {
+          sales: [
+            { $match: { $nor: [QUANTITY_UNIT_MATCH] } },
+            {
+              $group: {
+                _id: { $ifNull: ["$account", "$dedupeKey"] },
+                // One sale can produce several rows (a Gameflip sale the buyer
+                // then connects). Take the best price any of them carries
+                // rather than summing, or the same money would be counted
+                // twice.
+                priceUsd: { $max: { $ifNull: ["$priceUsd", 0] } },
+              },
+            },
+            {
+              $group: {
+                _id: null,
+                count: { $sum: 1 },
+                revenue: { $sum: "$priceUsd" },
+                // How many of those sales we actually know a price for. A
+                // connection flip proves a sale but names no price, and
+                // dividing revenue by every sale would report a game as
+                // half-price purely because some of its evidence is priceless
+                // rather than free.
+                priced: { $sum: { $cond: [{ $gt: ["$priceUsd", 0] }, 1, 0] } },
+              },
+            },
+          ],
+          units: [
+            { $match: QUANTITY_UNIT_MATCH },
+            { $project: { _id: 0, login: 1, at: 1, priceUsd: 1, dedupeKey: 1 } },
+          ],
         },
       },
     ]);
-    const r = rows[0] || { count: 0, revenue: 0, priced: 0 };
-    const count = r.count || 0;
-    const revenue = Math.round((r.revenue || 0) * 100) / 100;
+    const r = (out && out.sales && out.sales[0]) || {
+      count: 0,
+      revenue: 0,
+      priced: 0,
+    };
+    const units = (out && out.units) || [];
+    const q = units.length
+      ? await quantityUnitSales(salesWindow, units)
+      : { count: 0, revenue: 0, priced: 0 };
+    const count = (r.count || 0) + q.count;
+    const revenue = Math.round(((r.revenue || 0) + q.revenue) * 100) / 100;
+    const priced = (r.priced || 0) + q.priced;
     return {
       count,
       revenue,
-      avgPrice: r.priced ? Math.round((revenue / r.priced) * 100) / 100 : 0,
+      avgPrice: priced ? Math.round((revenue / priced) * 100) / 100 : 0,
     };
   } catch {
     return { count: 0, revenue: 0, avgPrice: 0 };
   }
+}
+
+// QUANTITY UNITS (2026-10-03). A GGSel / Digiseller offer sells "whichever unit
+// the platform picks", so its listing_sold row cannot name the account: its
+// `login` is the listing's whole delivery pool ("a, b, c"), written once per
+// unit. When that buyer later connects the account, the drop scanner writes a
+// `connected` row under the account's own id — and the two rows used to be
+// counted as two sales (measured over 60 days: 54 such World of Tanks signals,
+// 20 Albion). A pool row whose `account` happened to be set was the opposite
+// error: every unit of the listing collapsed onto that one account.
+//
+// The rule is utils/priceTracker/games.js soldUnion's rule 3, so the engine and
+// the price tracker count one sale the same way: each pool row is ONE
+// anonymous unit; it is the sale behind the first connection, from a login in
+// its pool, seen at or after it (a day of slack: the stock-drop inference
+// stamps the sale when it notices it), that no named sale and no earlier unit
+// already took — then the pair is one sale. Otherwise the unit is its own sale.
+// A pool is two or more logins split the way the ledger splits them
+// (priceTracker/ledger.js loginList).
+const QUANTITY_POOL_RE = /[^\s,;][\s,;]+[^\s,;]/;
+const QUANTITY_UNIT_MATCH = { source: "listing_sold", login: QUANTITY_POOL_RE };
+const QUANTITY_CONNECT_SLACK_MS = 86400000;
+
+function loginPool(login) {
+  return String(login || "")
+    .split(/[\s,;]+/)
+    .map((x) => x.trim().toLowerCase())
+    .filter(Boolean);
+}
+
+// What the units add to the count: what pairing needs is read only when a game
+// has units at all (most have none). One facet: the earliest connection per
+// login, and the logins the named (single-login) sales already account for.
+async function quantityUnitSales(salesWindow, units) {
+  const [p] = await SaleSignal.aggregate([
+    { $match: salesWindow },
+    {
+      $facet: {
+        connected: [
+          { $match: { source: "connected", login: { $gt: "" } } },
+          {
+            $group: {
+              _id: { $toLower: "$login" },
+              at: { $min: "$at" },
+              accounts: { $addToSet: "$account" },
+            },
+          },
+        ],
+        named: [
+          {
+            $match: {
+              source: "listing_sold",
+              $nor: [{ login: QUANTITY_POOL_RE }],
+            },
+          },
+          { $project: { _id: 0, login: 1, account: 1 } },
+        ],
+      },
+    },
+  ]);
+  return pairQuantityUnits(units, (p && p.connected) || [], (p && p.named) || []);
+}
+
+// Pure. `units`: pool rows {login, at, priceUsd, dedupeKey}; `connected`: one
+// row per connected login {_id: login, at: earliest, accounts}; `named`: the
+// other listing_sold rows {login, account}. Returns what the units ADD to the
+// account-grouped count: a paired unit adds no sale (its connection is one
+// already) but brings its price, so that sale becomes a priced one.
+function pairQuantityUnits(units, connected, named) {
+  const connAt = new Map(); // login -> earliest connection (ms)
+  const acctLogin = new Map(); // account id -> login
+  for (const c of connected || []) {
+    const login = String((c && c._id) || "").trim().toLowerCase();
+    if (!login) continue;
+    const at = new Date(c.at).getTime();
+    if (Number.isFinite(at) && (!connAt.has(login) || at < connAt.get(login))) {
+      connAt.set(login, at);
+    }
+    for (const a of c.accounts || []) {
+      if (a) acctLogin.set(String(a).toLowerCase(), login);
+    }
+  }
+  for (const s of named || []) {
+    const ls = loginPool(s && s.login);
+    if (s && s.account && ls.length === 1) {
+      acctLogin.set(String(s.account).toLowerCase(), ls[0]);
+    }
+  }
+  const taken = new Set();
+  for (const s of named || []) {
+    const ls = loginPool(s && s.login);
+    const login =
+      ls.length === 1
+        ? ls[0]
+        : s && s.account
+          ? acctLogin.get(String(s.account).toLowerCase()) || ""
+          : "";
+    if (login) taken.add(login);
+  }
+  const out = { count: 0, revenue: 0, priced: 0, paired: 0 };
+  const sorted = (units || []).slice().sort(
+    (a, b) =>
+      new Date(a.at) - new Date(b.at) ||
+      String(a.dedupeKey || "").localeCompare(String(b.dedupeKey || "")),
+  );
+  for (const u of sorted) {
+    const t = new Date(u.at).getTime();
+    let best = null;
+    for (const l of loginPool(u.login)) {
+      const ct = connAt.get(l);
+      if (ct == null || taken.has(l)) continue;
+      if (ct < t - QUANTITY_CONNECT_SLACK_MS) continue; // connected before it sold
+      if (!best || ct < best.at) best = { login: l, at: ct };
+    }
+    if (best) {
+      taken.add(best.login);
+      out.paired += 1;
+    } else {
+      out.count += 1;
+    }
+    const price = Math.max(0, Number(u.priceUsd) || 0);
+    out.revenue += price;
+    if (price > 0) out.priced += 1;
+  }
+  return out;
 }
 
 // ---- Existing coverage: who is ALREADY farming/holding a game? ----
@@ -654,11 +804,18 @@ function marketStockFloor(af) {
   // Same enablement signals the auto-lister uses to decide which markets get
   // a share: plati needs platiCategoryId, ggsel rides along when its key is
   // configured (category can come from the drop or ggselCategoryId).
+  //
+  // ...and only while the market is SWITCHED ON (2026-10-03), the same switch
+  // test as autoLister.platiTakesNewStock / ggselTakesNewStock. A switched-off
+  // market gets no share of the stock, so counting its shelf made every new
+  // campaign farm 18 accounts for 12 shelves while Plati was blocked (09-28).
   let markets = 1; // gameflip is the primary and always listed
-  if (af.platiCategoryId) markets++;
+  if (af.platiCategoryId && af.platiEnabled !== false) markets++;
   try {
     const ks = mp.keyStatus();
-    if (ks && ks.ggsel && ks.ggsel.configured) markets++;
+    if (ks && ks.ggsel && ks.ggsel.configured && af.ggselEnabled !== false) {
+      markets++;
+    }
   } catch {
     /* marketplaces module unavailable — floor covers fewer markets */
   }
@@ -926,8 +1083,11 @@ async function claimPoolAccounts(
   { preferGame = "", recycledOnly = false } = {},
 ) {
   const claimed = [];
+  // Backfill's note ("auto-farm backfill: <game> (<campaignId>)") names the
+  // same two things; it did not match here, so its usage events carried no
+  // game and a caller that passed no preferGame got no soldGames exclusion.
   const noteMatch = String(note || "").match(
-    /^auto-farm:\s*(.*?)\s*\(([^)]+)\)\s*$/i,
+    /^auto-farm(?: backfill)?:\s*(.*?)\s*\(([^)]+)\)\s*$/i,
   );
   const targetGame = normGame(preferGame || (noteMatch && noteMatch[1]) || "");
   const passes = [];
@@ -938,13 +1098,34 @@ async function claimPoolAccounts(
     });
   }
   if (!recycledOnly) passes.push({});
+  // The pristine reserve (2026-10-03): never-farmed accounts are what paid
+  // rent-farm orders need, and a farm claim spends them for good. While the
+  // pristine count is above the reserve the filter is {} (no change); at the
+  // reserve it excludes pristine rows. Re-read before EVERY claim — it is
+  // cached, and noteClaimed() lowers the cached count — so one call cannot
+  // dig below the reserve between two refreshes.
+  const pristineReserve = require("./pristineReserve");
   for (const extra of passes) {
     while (claimed.length < n) {
+      let pristineGuard;
+      try {
+        pristineGuard = await pristineReserve.farmClaimFilter();
+      } catch {
+        // Cannot tell whether one more claim digs into the reserve: claim no
+        // more, but hand back what already landed so the caller deploys or
+        // releases it (throwing here would strand those accounts claimed).
+        return claimed;
+      }
       const doc = await AvailableAccount.findOneAndUpdate(
         {
-          ...readyPoolQuery(),
-          ...extra,
-          ...(targetGame ? { soldGames: { $ne: targetGame } } : {}),
+          $and: [
+            {
+              ...readyPoolQuery(),
+              ...extra,
+              ...(targetGame ? { soldGames: { $ne: targetGame } } : {}),
+            },
+            pristineGuard,
+          ],
         },
         {
           $set: {
@@ -957,6 +1138,11 @@ async function claimPoolAccounts(
       );
       if (!doc) break;
       claimed.push(doc);
+      try {
+        pristineReserve.noteClaimed(doc);
+      } catch {
+        /* bookkeeping only — the claim itself has landed and is returned */
+      }
       await recordPoolUsage(doc._id, {
         event: "claimed",
         actor: "auto-farm",
@@ -996,6 +1182,64 @@ async function activeAutoBotCount(ctx) {
     for (const b of t.bots || []) seen.add(b.host + "|" + b.container);
   }
   return seen.size;
+}
+
+// Ready accounts a FARM must leave in the pool for the pristine reserve
+// (utils/pristineReserve.js, af.pristineReserve; 2026-10-03). Subtracted with
+// poolReserve wherever ready-minus-reserve becomes a farm's spend budget —
+// executeTask, backfill, the tick's fair share and the farm2 cycle budget — so
+// a budget never counts accounts the claim filter will refuse. Display counts
+// do not subtract it. The helper fails safe on its own count errors (it reports
+// the whole reserve as protected); if the module itself cannot be used, this
+// does the same.
+async function pristineProtect(af) {
+  try {
+    const g = await require("./pristineReserve").farmGuard();
+    const p = Number(g && g.protect);
+    return Number.isFinite(p) && p > 0 ? Math.floor(p) : 0;
+  } catch {
+    return Math.max(0, Math.floor(Number(af && af.pristineReserve) || 0));
+  }
+}
+
+// How many NEW containers a farm may create on `host`, given `slots` free under
+// maxAutoBots: none while the host is short of RAM (utils/hostCapacity.js,
+// af.hostMinFreeMb; 2026-10-03 — three farms share one VPS and nothing
+// arbitrated its memory). Only the containers term is gated: free seats inside
+// running containers cost no new RAM and stay usable. Fails OPEN, as the
+// helper itself does on an unreadable host — the create needs the same SSH and
+// fails loudly on its own. Never throws. { slots, blocked, reason }.
+async function containerSlots(host, slots) {
+  const n = Math.max(0, Number(slots) || 0);
+  if (n < 1 || !host) return { slots: n, blocked: false, reason: "" };
+  try {
+    const gate = await require("./hostCapacity").newContainerAllowed(host.id);
+    if (gate && gate.ok === false) {
+      const known =
+        typeof gate.availableMb === "number" &&
+        Number.isFinite(gate.availableMb);
+      return {
+        slots: 0,
+        blocked: true,
+        reason:
+          "farm host " +
+          (host.label || host.id) +
+          " is short of RAM" +
+          (known
+            ? " (" +
+              gate.availableMb +
+              " MB available, minimum " +
+              gate.minFreeMb +
+              " MB)"
+            : gate.reason
+              ? " (" + gate.reason + ")"
+              : ""),
+      };
+    }
+  } catch {
+    /* fail open — see above */
+  }
+  return { slots: n, blocked: false, reason: "" };
 }
 
 // Logins that must NEVER go back into the pool, out of the given list.
@@ -2237,7 +2481,13 @@ async function processCampaign(c, ctx) {
       reason:
         "Pool has no spendable accounts (reserve floor " +
         af.poolReserve +
-        " protects manual work) — will retry when the pool refills.",
+        " protects manual work" +
+        (ctx.pristineProtect > 0
+          ? "; " +
+            ctx.pristineProtect +
+            " pristine account(s) are kept for rent-farm orders"
+          : "") +
+        ") — will retry when the pool refills.",
       demandScore,
       hadResearch: !!research,
       internalSales,
@@ -2249,8 +2499,13 @@ async function processCampaign(c, ctx) {
 
   // 6) Capacity gate: free SEATS, not just container slots — running bots
   // with spare TwitchUsers slots can absorb accounts without new containers.
+  // No new container while the farm host is short of RAM (containerSlots).
   const activeBots = await activeAutoBotCount(ctx);
-  const slotsFree = Math.max(0, af.maxAutoBots - activeBots);
+  const containers = await containerSlots(
+    host,
+    Math.max(0, af.maxAutoBots - activeBots),
+  );
+  const slotsFree = containers.slots;
   const freeSeats = await autoSeatCapacity(host, af, ctx).catch(() => 0);
   const seatCapacity = slotsFree * af.accountsPerBot + freeSeats;
   if (seatCapacity < 1) {
@@ -2258,12 +2513,17 @@ async function processCampaign(c, ctx) {
       decision: "skip_no_capacity",
       status: "skipped",
       reason:
-        "All " +
-        af.maxAutoBots +
-        " auto-bot slots on " +
-        host.label +
-        " are busy and no running bot has a free seat — queued; retries " +
-        "when a campaign ends and frees capacity.",
+        (containers.blocked
+          ? "No new bot container: " +
+            containers.reason +
+            ", and no running bot has a free seat — queued; retries when " +
+            "memory frees up or a seat opens."
+          : "All " +
+            af.maxAutoBots +
+            " auto-bot slots on " +
+            host.label +
+            " are busy and no running bot has a free seat — queued; retries " +
+            "when a campaign ends and frees capacity."),
       demandScore,
       hadResearch: !!research,
       internalSales,
@@ -2382,26 +2642,35 @@ async function executeTask(task, ctx, { append = false } = {}) {
   if (want < 1) throw new Error("Task has no planned accounts");
 
   // Re-check the reserve floor at execution time (things may have changed
-  // since the plan was made).
+  // since the plan was made). The pristine reserve comes off too: the claim
+  // below cannot take those accounts.
   const ready = await countReadyPool();
-  const spendable = Math.max(0, ready - af.poolReserve);
+  const protect = await pristineProtect(af);
+  const spendable = Math.max(0, ready - af.poolReserve - protect);
   // Re-check CONTAINER capacity here too, not just in processCampaign. The
   // decision gate runs when the plan is made; this runs when it is spent, and
   // in between other campaigns in the same tick (or a stale `planned` task
   // approved by hand days later) can have consumed every slot. Without this
   // term nothing bounded the createBot loop below at all — which is how 31
   // containers came to exist on the Pi under a maxAutoBots of 6.
+  // No NEW container while the host is short of RAM (containerSlots).
   const activeBots = await activeAutoBotCount(ctx);
-  const slotsFree = Math.max(0, af.maxAutoBots - activeBots);
+  const containers = await containerSlots(
+    host,
+    Math.max(0, af.maxAutoBots - activeBots),
+  );
+  const slotsFree = containers.slots;
   const freeSeats = await autoSeatCapacity(host, af, ctx).catch(() => 0);
   const capacity = slotsFree * af.accountsPerBot + freeSeats;
   if (capacity < 1) {
     throw new Error(
       "No capacity on " +
         (host.label || host.id) +
-        ": all " +
-        af.maxAutoBots +
-        " auto-bot slots are in use and no running bot has a free seat",
+        ": " +
+        (containers.blocked
+          ? "no new container (" + containers.reason + ")"
+          : "all " + af.maxAutoBots + " auto-bot slots are in use") +
+        " and no running bot has a free seat",
     );
   }
   const n = Math.min(want, spendable, capacity);
@@ -2418,6 +2687,7 @@ async function executeTask(task, ctx, { append = false } = {}) {
         ready +
         " ready, reserve " +
         af.poolReserve +
+        (protect ? " + " + protect + " pristine kept for rent-farm orders" : "") +
         ")",
     );
   }
@@ -2513,9 +2783,10 @@ async function executeTask(task, ctx, { append = false } = {}) {
       const spare = rest.slice(i);
       await releasePoolAccounts(spare);
       progress(
-        "Container budget reached (" +
-          af.maxAutoBots +
-          " max) — released " +
+        (containers.blocked
+          ? "No new container (" + containers.reason + ")"
+          : "Container budget reached (" + af.maxAutoBots + " max)") +
+          " — released " +
           spare.length +
           " unplaced account(s) back to the pool.",
         "warn",
@@ -2902,6 +3173,20 @@ async function repackAutoBots(af, host, progress) {
   return r;
 }
 
+// Restart `container` only if it is running (utils/farmControl.js, 2026-10-03):
+// a parked container stays parked. Should a deploy ever ship this file without
+// that helper, the old unconditional restart is kept rather than none — a
+// running container that never reloads keeps farming accounts this engine has
+// just returned to the pool.
+async function restartIfRunning(host, container) {
+  const fc = require("./farmControl");
+  if (typeof fc.restartIfRunning === "function") {
+    return fc.restartIfRunning(host, container);
+  }
+  await hosts.dockerContainer(host, "restart", container);
+  return { restarted: true, state: "unknown" };
+}
+
 // Apply one task's post-event markup, recording the outcome on the task so a
 // failure is visible instead of living only in the process log.
 async function repriceTask(t, notify) {
@@ -3101,9 +3386,11 @@ async function completeEndedTasks() {
               b.file,
               JSON.stringify(data, null, 2),
             );
-            await hosts
-              .dockerContainer(h, "restart", b.container)
-              .catch(() => {});
+            // Reload the config only in a container that is RUNNING. A plain
+            // `docker restart` starts a stopped one, so this woke a shared bot
+            // botWaker had parked (the wake/park flap class, 2026-09-29); a
+            // stopped container reads the trimmed config when it next starts.
+            await restartIfRunning(h, b.container).catch(() => {});
             trimmed.push(b.container + " (" + changed + " acct)");
           }
         } catch {
@@ -3683,6 +3970,18 @@ async function runOnce() {
     const existingByKey = new Map(
       existingRows.map((row) => [row.game + "|" + row.campaignId, row]),
     );
+    // The loop below asks the lane engine's ownership cache once per campaign,
+    // synchronously. Bring the cache up to date first — the ONE await before
+    // the loop; the loop itself stays synchronous. A cold cache (boot, a lane
+    // auto-create, a failed read) answers "not owned" for every game, and this
+    // engine then decided campaigns the lane engine owns (2026-10-03).
+    await farm2Ownership.ensureFresh();
+    // Lane engine is the MAIN engine but its lane table still could not be
+    // read: which games it owns is unknown, so this tick decides nothing
+    // (below). Outside main mode the old fail-safe stands — this engine
+    // decides, because a lane engine that is only on trial owns nothing it
+    // is not running.
+    const ownershipUnknown = farm2Ownership.isMain() && farm2Ownership.isCold();
     let noClaimSkipped = 0;
     let farm2Skipped = 0;
     for (const c of live) {
@@ -3705,6 +4004,7 @@ async function runOnce() {
       // uncertainty (engine stopped, master switch off, lane table unreadable,
       // cache cold) resolves to NOT owned so this engine keeps covering the
       // game. See the fail-safe note at the top of utils/farm2/ownership.js.
+      // (In main mode an unreadable table defers instead: ownershipUnknown.)
       if (farm2Ownership.isOwned(c.game)) {
         farm2Skipped++;
         continue;
@@ -3744,6 +4044,19 @@ async function runOnce() {
           farm2Ownership.ownedKeys().join(", ") +
           ").",
       );
+    if (ownershipUnknown) {
+      // Not a fallback to this engine: in main mode the lanes decide, and the
+      // next tick (10 min) re-reads the table. Maintenance sweeps still run.
+      progress(
+        "decisions deferred: lane ownership unknown — the lane engine is the " +
+          "main engine but its lane table could not be read; " +
+          candidates.length +
+          " campaign(s) left undecided this tick. Maintenance sweeps still run.",
+        "warn",
+      );
+      candidates.length = 0;
+      priorTasks.clear();
+    }
     progress(candidates.length + " campaign(s) to decide this tick.");
 
     // The tick-level twin of reusableTaskForGame, and it must apply the SAME
@@ -3905,8 +4218,10 @@ async function runOnce() {
 
     // Fair-share budget across everything competing in this tick. Weights use
     // the blended demand (market + own sales) so proven sellers win supply.
+    // The pristine reserve is not this engine's to spend (pristineProtect).
     const ready = await countReadyPool();
-    const spendable = Math.max(0, ready - af.poolReserve);
+    const pristineHeld = await pristineProtect(af);
+    const spendable = Math.max(0, ready - af.poolReserve - pristineHeld);
     const requests = [];
     for (const c of candidates) {
       const info = infoMap.get(c.campaignId);
@@ -3951,6 +4266,7 @@ async function runOnce() {
           host,
           hostOnline,
           budgetMap,
+          pristineProtect: pristineHeld,
           infoMap,
           farmMap,
           archiveHolders,
@@ -4385,6 +4701,11 @@ async function runOnce() {
               ready +
               " ready but the reserve floor is " +
               af.poolReserve +
+              (pristineHeld
+                ? " and " +
+                  pristineHeld +
+                  " pristine account(s) are kept for rent-farm orders"
+                : "") +
               ", so 0 are spendable.\n" +
               "Nothing can be farmed or topped up until the pool refills or the " +
               "reserve is lowered. " +
@@ -4408,6 +4729,7 @@ async function runOnce() {
       hostOnline,
       poolReady: ready,
       poolSpendable: spendable,
+      pristineHeld,
       candidates: candidates.length,
       completed,
       catalogChanges,
@@ -4592,10 +4914,13 @@ async function backfillActiveTasks(af, host, progress) {
   }
   // Never let one game absorb an entire refill: cap this tick's backfill at
   // half of what is spendable so a fresh campaign can still be started.
+  // Spendable leaves the pristine reserve alone, as everywhere a farm spends.
   const readyNow = await countReadyPool();
   const backfillCap = Math.max(
     1,
-    Math.floor(Math.max(0, readyNow - af.poolReserve) / 2),
+    Math.floor(
+      Math.max(0, readyNow - af.poolReserve - (await pristineProtect(af))) / 2,
+    ),
   );
   let added = 0;
   // Per-pass memo for capForGame's sales input (see the ceiling below).
@@ -4651,12 +4976,16 @@ async function backfillActiveTasks(af, host, progress) {
     // account ever held a full bundle to list while 1,471 healthy accounts sat
     // idle in the pool. A row that failed to save, or one classified after the
     // release phase, must not be able to reproduce that.
+    // Accounts SOLD from this task stay in assignedAccounts and count here
+    // (defect 10b, 2026-10-03: left as is on purpose — counting policy for the
+    // farm brain's wiring; not counting them now would grow farming).
     const have = usableAssignedCount(task, suspendedLogins);
     const missing = target - have;
     if (missing < 1) continue;
 
     const ready = await countReadyPool();
-    const spendable = Math.max(0, ready - af.poolReserve);
+    const protect = await pristineProtect(af);
+    const spendable = Math.max(0, ready - af.poolReserve - protect);
     if (spendable < 1) {
       // Pool exhausted — later tasks can't get any either. Say so: this used to
       // break silently, so a fleet sitting far under target looked healthy
@@ -4666,6 +4995,7 @@ async function backfillActiveTasks(af, host, progress) {
           ready +
           " ready, reserve " +
           af.poolReserve +
+          (protect ? " + " + protect + " pristine kept for rent-farm orders" : "") +
           ") — " +
           (worthTopping.length - worthTopping.indexOf(task)) +
           " task(s) left under target this tick.",
@@ -4674,10 +5004,26 @@ async function backfillActiveTasks(af, host, progress) {
       break;
     }
 
+    // No new container while the farm host is short of RAM; free seats in
+    // running bots are still filled.
     const activeBots = await activeAutoBotCount();
-    const slotsFree = Math.max(0, af.maxAutoBots - activeBots);
+    const containers = await containerSlots(
+      host,
+      Math.max(0, af.maxAutoBots - activeBots),
+    );
+    const slotsFree = containers.slots;
     const freeSeats = await autoSeatCapacity(host, af).catch(() => 0);
-    if (slotsFree < 1 && freeSeats < 1) break;
+    if (slotsFree < 1 && freeSeats < 1) {
+      if (containers.blocked) {
+        progress(
+          "Backfill: no new container (" +
+            containers.reason +
+            ") and no running bot has a free seat — the rest waits.",
+          "warn",
+        );
+      }
+      break;
+    }
 
     const n = Math.min(
       missing,
@@ -4697,13 +5043,18 @@ async function backfillActiveTasks(af, host, progress) {
         ")\u2026",
     );
     // Reuse-only games (World of Tanks / UFL) top up ONLY from their own
-    // "recycled after <game>" accounts — never a fresh pool account. Every
-    // other game keeps the original unscoped claim, so nothing else changes.
+    // "recycled after <game>" accounts — never a fresh pool account.
+    //
+    // The game is passed for EVERY task (2026-10-03). The other games used to
+    // claim unscoped, so neither pass applied the soldGames exclusion: a
+    // recycled account the buyer already holds for this very game could be
+    // put back on it. Passing it also tries the game's own recycled accounts
+    // first, exactly as executeTask's claim does.
     const reuseOnly = settings.isReuseOnlyGame(task.game);
     const claimed = await claimPoolAccounts(
       n,
       "auto-farm backfill: " + task.game + " (" + task.campaignId + ")",
-      reuseOnly ? { preferGame: task.game, recycledOnly: true } : {},
+      { preferGame: task.game, recycledOnly: reuseOnly },
     );
     if (!claimed.length) continue;
 
@@ -4744,9 +5095,10 @@ async function backfillActiveTasks(af, host, progress) {
         const spare = rest.slice(i);
         await releasePoolAccounts(spare);
         progress(
-          "Backfill hit the container budget (" +
-            af.maxAutoBots +
-            " max) — released " +
+          (containers.blocked
+            ? "Backfill: no new container (" + containers.reason + ")"
+            : "Backfill hit the container budget (" + af.maxAutoBots + " max)") +
+            " — released " +
             spare.length +
             " unplaced account(s) back to the pool.",
           "warn",
@@ -4864,6 +5216,24 @@ function status() {
   };
 }
 
+// Liveness for the health page (utils/systemHealth.js). Synchronous and never
+// throws. `lastTickAt` is when the last tick FINISHED — a disabled tick still
+// finishes, so an old value means the loop has stopped, not that the master
+// switch is off; `enabled` says that.
+function loopStatus() {
+  let enabled = false;
+  try {
+    enabled = cfg().enabled === true;
+  } catch {
+    enabled = !!(state.lastSummary && state.lastSummary.enabled);
+  }
+  return {
+    lastTickAt: state.lastRun || null,
+    intervalMin: TICK_MS / 60000,
+    enabled,
+  };
+}
+
 function start() {
   if (state.started) return;
   state.started = true;
@@ -4896,6 +5266,8 @@ module.exports = {
   runOnce,
   rescanAll,
   status,
+  // Liveness hook for the health page (utils/systemHealth.js).
+  loopStatus,
   executeTask,
   completeEndedTasks,
   reapRetiredBots,
@@ -4953,4 +5325,12 @@ module.exports = {
   // 177 times); it now re-decides on exactly this engine's triggers, from this
   // engine's own set, so the two cannot drift.
   RETRYABLE,
+  // Additive exports for the lane engine (utils/farm2/budget.js and
+  // steps/decide.js), so both engines take the pristine reserve and the host
+  // RAM gate off their budgets with ONE implementation (2026-10-03).
+  pristineProtect,
+  containerSlots,
+  // Pure: how quantity-listing units pair with buyer connections (exported
+  // for tests; internalSalesForGame is the caller).
+  pairQuantityUnits,
 };
