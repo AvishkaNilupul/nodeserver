@@ -14,7 +14,12 @@ const DropSet = require("../models/DropSet");
 const MarketplaceListing = require("../models/MarketplaceListing");
 const { loginsOnActiveListings } = require("./listedLogins");
 const MarketResearch = require("../models/MarketResearch");
-const { gameflipDeliveryCode, GF_CLAIM_TAG } = require("./gameflipFulfiller");
+const {
+  gameflipDeliveryCode,
+  GF_CLAIM_TAG,
+  gameflipCodeHeldLogins,
+  noteIfCodeRefused,
+} = require("./gameflipFulfiller");
 const {
   digisellerDeliveryCode,
   DS_CLAIM_TAG,
@@ -675,6 +680,33 @@ async function reserveAccountsForPublish(accounts, set, tag) {
     if (ok) out.push(a);
   }
   return out;
+}
+
+// Deal the sellable accounts across `marketOrder` round-robin into `shares`.
+// A Gameflip slot takes the next account Gameflip will ACCEPT. One whose code a
+// listing of ours already holds — sold on Gameflip before, its other games
+// still in stock — is refused with "code for digital goods already exists"
+// (gameflipFulfiller.gameflipCodeHeldLogins), and Gameflip anchors this
+// listing: its publish failing deletes the set and lists the bundle on NO
+// market. Such an account goes to the next market's slot instead, where its
+// old Gameflip code means nothing. With nothing held this is exactly the old
+// round-robin; with only Gameflip in the order, held accounts stay unlisted.
+function dealShares(accounts, marketOrder, shares, gfHeld) {
+  const queue = (accounts || []).slice();
+  const takes = (a) => !(gfHeld && gfHeld.has(String((a && a.login) || "").toLowerCase()));
+  for (let i = 0; queue.length; i++) {
+    const market = marketOrder[i % marketOrder.length];
+    let at = 0;
+    if (market === "gameflip") {
+      at = queue.findIndex(takes);
+      if (at === -1) {
+        if (marketOrder.length === 1) break;
+        continue;
+      }
+    }
+    shares[market].push(queue.splice(at, 1)[0]);
+  }
+  return shares;
 }
 
 // Same idea, for Gameflip's single immediately-shipped unit: try candidates
@@ -1932,9 +1964,7 @@ async function listActivatedTask(taskId, { dryRun = false } = {}) {
     playerauctions: [],
     g2g: [],
   };
-  accounts.forEach((acc, i) => {
-    shares[marketOrder[i % marketOrder.length]].push(acc);
-  });
+  dealShares(accounts, marketOrder, shares, await gameflipCodeHeldLogins());
 
   // The DropSet makes the listing part of the normal machinery: the relist
   // chain, the Shop and the drop archive all understand sets.
@@ -1974,7 +2004,10 @@ async function listActivatedTask(taskId, { dryRun = false } = {}) {
     throw new Error(
       "Auto-list " +
         task.game +
-        ": no account still held the full bundle unclaimed at publish time",
+        (gfAccounts.length
+          ? ": no account still held the full bundle unclaimed at publish time"
+          : ": every account holding the full bundle was already sold on " +
+            "Gameflip, which refuses the same login twice — nothing to anchor the listing"),
     );
   }
   let published;
@@ -1992,16 +2025,22 @@ async function listActivatedTask(taskId, { dryRun = false } = {}) {
       gfDeliver,
       set,
       () =>
-        mp.gameflipPublish({
-          title,
-          description,
-          priceUsd: price,
-          imagePath: img,
-          autoDeliverCode: gameflipDeliveryCode(
-            gfDeliver.login,
-            gfDeliver.password,
-          ),
-        }),
+        mp
+          .gameflipPublish({
+            title,
+            description,
+            priceUsd: price,
+            imagePath: img,
+            autoDeliverCode: gameflipDeliveryCode(
+              gfDeliver.login,
+              gfDeliver.password,
+            ),
+          })
+          .catch((e) => {
+            // A holder the DB cannot name: the next deal skips this account.
+            noteIfCodeRefused(gfDeliver.login, e);
+            throw e;
+          }),
       {
         release: async (acct, s) => {
           await releaseReservedForSet(acct, s);
@@ -2265,9 +2304,7 @@ async function publishStackedListing({
   if (platiEnabled) marketOrder.push("plati");
   if (ggselCategoryId && ggselTakesNewStock(af)) marketOrder.push("ggsel");
   const shares = { gameflip: [], plati: [], ggsel: [] };
-  accounts.forEach((acc, i) => {
-    shares[marketOrder[i % marketOrder.length]].push(acc);
-  });
+  dealShares(accounts, marketOrder, shares, await gameflipCodeHeldLogins());
 
   let img = "";
   try {
@@ -2282,7 +2319,9 @@ async function publishStackedListing({
     await DropSet.deleteOne({ _id: set._id }).catch(() => {});
     if (img) await fsp.unlink(img).catch(() => {});
     return {
-      skipped: "stack holder lost the race at publish time",
+      skipped: gfAccounts.length
+        ? "stack holder lost the race at publish time"
+        : "every stack holder was already sold on Gameflip, which refuses the same login twice",
       waiting: true,
     };
   }
@@ -2294,16 +2333,22 @@ async function publishStackedListing({
       gfDeliver,
       set,
       () =>
-        mp.gameflipPublish({
-          title,
-          description,
-          priceUsd: price,
-          imagePath: img,
-          autoDeliverCode: gameflipDeliveryCode(
-            gfDeliver.login,
-            gfDeliver.password,
-          ),
-        }),
+        mp
+          .gameflipPublish({
+            title,
+            description,
+            priceUsd: price,
+            imagePath: img,
+            autoDeliverCode: gameflipDeliveryCode(
+              gfDeliver.login,
+              gfDeliver.password,
+            ),
+          })
+          .catch((e) => {
+            // A holder the DB cannot name: the next deal skips this account.
+            noteIfCodeRefused(gfDeliver.login, e);
+            throw e;
+          }),
       {
         release: async (acct, s) => {
           await releaseReservedForSet(acct, s);
@@ -3373,6 +3418,7 @@ module.exports = {
   eldoradoShareMissing,
   isAutoOwned,
   // exported for tests
+  dealShares,
   platiTakesNewStock,
   ggselTakesNewStock,
   platiOffReason,

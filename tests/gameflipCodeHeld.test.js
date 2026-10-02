@@ -23,6 +23,7 @@ const world = {
   released: [],
   published: [], // the login inside each code Gameflip was asked to attach
   refuse: new Set(), // logins whose code Gameflip says already exists
+  telegrams: [],
 };
 
 const fakeMp = {
@@ -58,7 +59,9 @@ Module._load = function (request, parent, isMain) {
         releaseAccountsForTag: async () => {},
       };
     }
-    if (request === "./telegram") return { sendTelegram: async () => {} };
+    if (request === "./telegram") {
+      return { sendTelegram: async (m) => { world.telegrams.push(m); } };
+    }
     if (request === "./gameflipFarmService") {
       return { renewsOnExpiry: () => false, onBufferedSale: async () => ({}) };
     }
@@ -71,6 +74,7 @@ Module._load = function (request, parent, isMain) {
 };
 
 const BotAccount = require("../models/BotAccount");
+const DropLog = require("../models/DropLog");
 const MarketplaceListing = require("../models/MarketplaceListing");
 const { encrypt } = require("../utils/secretBox");
 const gf = require("../utils/gameflipFulfiller");
@@ -87,13 +91,16 @@ test.after(async () => {
 });
 test.beforeEach(async () => {
   await BotAccount.deleteMany({});
+  await DropLog.deleteMany({});
   await MarketplaceListing.deleteMany({});
   world.candidates = [];
   world.reserved = [];
   world.released = [];
   world.published = [];
   world.refuse = new Set();
+  world.telegrams = [];
   gf.resetCodeRefused();
+  gf.resetRenewalAlert();
 });
 
 const SET = { _id: new mongoose.Types.ObjectId(), name: "Hunt: Showdown 1896 Twitch Drops Bundle", items: [] };
@@ -208,4 +215,116 @@ test("a Gameflip failure of any other kind teaches nothing — the account stays
   await assert.rejects(publish(), /Too many attempts/);
   const row = await publish();
   assert.strictEqual(row.accountLogin, "busy");
+});
+
+/* ------------------------------------------------------------------------ *
+ * An auto-lister head row names its WHOLE Gameflip share, but only the one
+ * account it reserved for the set had its code on it (2026-10-02: reading
+ * every name fenced 47 accounts off Gameflip for nothing).
+ * ------------------------------------------------------------------------ */
+
+async function reserveOnSet(login, setId) {
+  const a = await BotAccount.findOne({ login }).lean();
+  await DropLog.create({
+    account: a._id,
+    benefitId: "b-" + login + "-" + setId,
+    itemKey: "k1",
+    soldToUsername: "gameflip",
+    soldSetId: String(setId),
+    soldAt: new Date(),
+  });
+}
+
+test("a sold head row naming its whole share holds only the account whose code went out on it", async () => {
+  await holders("share-b", "head-acct", "share-c");
+  const headSet = new mongoose.Types.ObjectId();
+  await listing("head-acct, share-b, share-c", { set: headSet, externalId: "gf-head" });
+  await reserveOnSet("head-acct", headSet);
+  const held = await gf.gameflipCodeHeldLogins();
+  assert.ok(held.has("head-acct"), "the reserved account's code is on the sold row");
+  assert.ok(!held.has("share-b") && !held.has("share-c"), "the rest of the share never went out on it");
+  const row = await publish();
+  assert.strictEqual(row.accountLogin, "share-b", "the first share account is listable after all");
+});
+
+test("with no reservation to go on, a shared row holds its first name only", async () => {
+  await holders("first", "second");
+  await listing("first, second", { externalId: "gf-head-2" });
+  const held = await gf.gameflipCodeHeldLogins();
+  assert.deepStrictEqual([...held].sort(), ["first"]);
+});
+
+test("noteIfCodeRefused learns only from Gameflip's code refusal", async () => {
+  gf.noteIfCodeRefused("Refused-One", new Error('{"error":{"message":"code for digital goods already exists"}}'));
+  gf.noteIfCodeRefused("busy-one", new Error("Too many attempts - Retry later"));
+  const held = await gf.gameflipCodeHeldLogins();
+  assert.ok(held.has("refused-one"));
+  assert.ok(!held.has("busy-one"));
+});
+
+/* ------------------------------------------------------------------------ *
+ * The relist after a SALE paged out-of-stock only: on 2026-09-28 nine sold
+ * chains failed to relist on "code for digital goods already exists", one
+ * (Metin2, 21 owed) for four days and 14 attempts, and nobody was told.
+ * ------------------------------------------------------------------------ */
+
+function stalled(externalId, attempts, error, over = {}) {
+  return MarketplaceListing.create({
+    set: new mongoose.Types.ObjectId(),
+    marketplace: "gameflip",
+    externalId,
+    title: "Metin2 Twitch Drops (7 Items) " + externalId,
+    price: 1,
+    status: "sold",
+    autoDeliver: true,
+    accountLogin: "sold-" + externalId,
+    qtyRemaining: 21,
+    relistAttempts: attempts,
+    lastError: "auto-relist failed: " + error,
+    ...over,
+  });
+}
+
+const EXISTS = 'Gameflip could not attach the delivery content (draft d-1 discarded): {"error":{"message":"code for digital goods already exists"}}';
+
+test("REGRESSION 2026-09-28: a sold chain that keeps failing to relist for a non-stock reason is told once", async () => {
+  await stalled("gf-other-stuck", 9, "Gameflip create: socket hang up");
+  await stalled("gf-other-dry", 9, "Out of stock — no unsold account holds this whole bundle");
+  const row = await stalled("gf-metin2", gf.STUCK_ALERT_AT_ATTEMPT - 2, EXISTS);
+  const errs = [];
+  const realErr = console.error;
+  console.error = (...a) => errs.push(a.join(" "));
+  try {
+    await gf.noteRelistFailure(row.toObject(), new Error(EXISTS));
+    assert.strictEqual(world.telegrams.length, 0, "the 4th miss is still inside a storm's reach");
+    let r = await MarketplaceListing.findById(row._id).lean();
+    await gf.noteRelistFailure(r, new Error(EXISTS));
+    r = await MarketplaceListing.findById(row._id).lean();
+    await gf.noteRelistFailure(r, new Error(EXISTS));
+  } finally {
+    console.error = realErr;
+  }
+  const pages = world.telegrams.filter((m) => /relists keep FAILING/.test(m));
+  assert.strictEqual(pages.length, 1, "told once, at the 5th miss — not every pass");
+  assert.match(pages[0], /\n\n2 sold chain\(s\) have failed to relist/, "both stuck chains, not the dry one");
+  assert.match(pages[0], /code for digital goods already exists/);
+  assert.match(pages[0], /21 unit\(s\) owed/);
+  assert.ok(errs.some((l) => /gameflip relist failed for gf-metin2 \(attempt 5/.test(l)), "the log names the chain");
+});
+
+test("an out-of-stock relist keeps its own page at the 3rd miss, and never the stuck one", async () => {
+  const dry = "Out of stock — no unsold account holds this whole bundle, so there is nothing to auto-deliver";
+  const row = await stalled("gf-dry-chain", 0, dry);
+  const realErr = console.error;
+  console.error = () => {};
+  try {
+    for (let i = 0; i < gf.STUCK_ALERT_AT_ATTEMPT + 1; i++) {
+      const r = await MarketplaceListing.findById(row._id).lean();
+      await gf.noteRelistFailure(r, new Error(dry));
+    }
+  } finally {
+    console.error = realErr;
+  }
+  assert.strictEqual(world.telegrams.filter((m) => /chain out of stock/.test(m)).length, 1);
+  assert.strictEqual(world.telegrams.filter((m) => /keep FAILING/.test(m)).length, 0);
 });

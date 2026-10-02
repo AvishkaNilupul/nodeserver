@@ -294,10 +294,10 @@ test("REGRESSION 2026-10-01: a renewal that keeps failing for a non-stock reason
       'Gameflip could not attach the delivery content (draft d-1 discarded): {"error":{"message":"code for digital goods already exists"}}',
     );
   });
-  const passes = gf.RENEWAL_STUCK_ALERT_AT_ATTEMPT + 2;
+  const passes = gf.STUCK_ALERT_AT_ATTEMPT + 2;
   for (let pass = 1; pass <= passes; pass++) {
     await gf.syncOnce(pub.opts);
-    if (pass === gf.RENEWAL_STUCK_ALERT_AT_ATTEMPT - 1) {
+    if (pass === gf.STUCK_ALERT_AT_ATTEMPT - 1) {
       assert.strictEqual(world.telegrams.length, 0, "a short limiter storm is not paged");
     }
     await MarketplaceListing.updateOne(
