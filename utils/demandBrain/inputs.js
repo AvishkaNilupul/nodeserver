@@ -14,6 +14,8 @@
 //     probeGate (two task reads), researchForGame + internalSalesForGame (database reads),
 //     demandAllocation and marketStockFloor (pure). Never freshResearchForGame: that re-scans a
 //     marketplace;
+//   * the auto-farm's failed probes (model v2's cold-start rule): one projected, indexed find of
+//     the AutoFarmTask rows its probe gate counts as a cooldown, for the live games only;
 //   * the no-claim feeder's demand snapshot and sale evidence (utils/farmDemand, database reads).
 //     Never unclaimedAllocator.plan(): it reads the Pi and overwrites the allocator's plan.
 // Nothing here writes, calls a marketplace, opens SSH or touches a setting.
@@ -26,6 +28,8 @@ const ENGINE_CONCURRENCY = 3;
 const MAX_CLAIM_GAMES = 250;
 // Grouped connection rows (one per sold account per game): ~1,100 over 135 days on 2026-10-02.
 const CONNECTED_GROUP_CAP = 50000;
+// Failed probes read per run (17 of 20 finished probes had failed by 2026-10-02): a runaway bound.
+const PROBE_HISTORY_CAP = 5000;
 
 function realDeps() {
   return {
@@ -38,6 +42,7 @@ function realDeps() {
     farmDemand: require("../farmDemand"),
     TwitchCampaign: require("../../models/TwitchCampaign"),
     SaleSignal: require("../../models/SaleSignal"),
+    AutoFarmTask: require("../../models/AutoFarmTask"),
     normGame: require("../priceTracker/setIdentity").normGame,
   };
 }
@@ -152,8 +157,10 @@ const noclaimKeysOf = (af, normGame) => [...new Set((af.noClaimGames || []).map(
 
 /**
  * Live drop campaigns, as the lane engine sees them (active, status ACTIVE, not ended).
- * @returns {{ claim: Map<key,{label,n,endAt,hoursLeft}>, noclaim: Set<string>, read: number }} —
- *          `noclaim` holds the raw labels of live no-claim campaigns (bucketed by the caller).
+ * @returns {{ claim: Map<key,{label,labels,n,endAt,hoursLeft}>, noclaim: Set<string>, read: number }} —
+ *          `labels` holds every raw label the game's live campaigns carry (the engine keys its
+ *          tasks by the raw label); `noclaim` the raw labels of live no-claim campaigns (bucketed
+ *          by the caller).
  */
 async function liveCampaigns(d, now, rules) {
   const rows = await d.TwitchCampaign.find(
@@ -174,15 +181,42 @@ async function liveCampaigns(d, now, rules) {
     if (!key) continue;
     const end = c.endAt ? new Date(c.endAt).getTime() : null;
     const cur = claim.get(key);
-    if (!cur) claim.set(key, { label: c.game, n: 1, endAt: end });
+    if (!cur) claim.set(key, { label: c.game, labels: [c.game], n: 1, endAt: end });
     else {
       cur.n++;
+      if (!cur.labels.includes(c.game)) cur.labels.push(c.game);
       // The campaign that runs longest is the one a farm decision is about.
       if (end == null || (cur.endAt != null && end > cur.endAt)) cur.endAt = end;
     }
   }
   for (const v of claim.values()) v.hoursLeft = v.endAt == null ? null : (v.endAt - now) / 3600000;
   return { claim, noclaim, read: rows.length };
+}
+
+/**
+ * Games the auto-farm already probed and gave up on (model v2's cold-start rule): a task stamped
+ * probeOutcome "expired" — its campaign ended, or the stop-loss fired, with 0 sales — and completed
+ * inside the re-probe cooldown. The predicate is the engine's own probe gate (decide.probeGate:
+ * game, probeOutcome, completedAt ≥ now − probeCooldownDays), asked once for every label of the
+ * live games instead of once per game: one projected read on the indexed `game` field.
+ * @returns {Promise<Map<string, number>>} game key -> the newest such completedAt (epoch ms)
+ */
+async function expiredProbes(d, labels, now, cooldownDays) {
+  const out = new Map();
+  if (!labels.length) return out;
+  const rows = await d.AutoFarmTask.find(
+    { game: { $in: labels }, probeOutcome: "expired", completedAt: { $gte: new Date(now - cooldownDays * DAY) } },
+    { game: 1, completedAt: 1 },
+  )
+    .limit(PROBE_HISTORY_CAP)
+    .lean();
+  for (const r of rows) {
+    const key = d.normGame(r.game);
+    const at = r.completedAt ? new Date(r.completedAt).getTime() : NaN;
+    if (!key || !Number.isFinite(at)) continue;
+    if (!(out.get(key) >= at)) out.set(key, at);
+  }
+  return out;
 }
 
 /**
@@ -219,16 +253,24 @@ async function oldVerdicts(d, games, af) {
 }
 
 // The no-claim feeder's sale evidence (every source, first-evidence dated) as entries per bucket,
-// or null when this build of utils/farmDemand does not export it.
+// or null when this build of utils/farmDemand does not export it. An entry is { t, m, p }, plus
+// `pack: true` for a unit the feeder marks as sold in a bulk pack: the burst guard (v2g) counts it
+// raw, and its market alone cannot say so. A failed bulk-pack lookup (`packError`) would let packs
+// read as ordinary sales and inflate v2g, so the evidence is unreadable for that run — the feeder
+// withholds its own guarded snapshot on the same error.
 async function noclaimEvidence(FD) {
   if (!FD || typeof FD.saleEvidenceByBucket !== "function") return null;
   const ev = await FD.saleEvidenceByBucket({ days: model.HISTORY_DAYS });
+  if (ev && ev.packError) throw new Error("its bulk-pack lookup failed: " + ev.packError);
   const map = new Map();
   for (const [bucket, units] of (ev && ev.units) || new Map()) {
     const arr = [];
     for (const u of units.values()) {
       const t = u && u.firstAt ? new Date(u.firstAt).getTime() : NaN;
-      if (Number.isFinite(t)) arr.push({ t, m: lower(u.market) || "unknown", p: num(u.priceUsd) });
+      if (!Number.isFinite(t)) continue;
+      const entry = { t, m: lower(u.market) || "unknown", p: num(u.priceUsd) };
+      if (u.pack === true) entry.pack = true;
+      arr.push(entry);
     }
     arr.sort((a, b) => a.t - b.t);
     map.set(bucket, arr);
@@ -354,6 +396,20 @@ async function load({ now = Date.now(), deps = null } = {}) {
   }
   const old = await oldVerdicts(d, claimGames.map((g) => ({ key: g.key, label: g.label })), af);
 
+  // Known duds for the cold-start rule (model v2), read for the live games only — the rule needs a
+  // live campaign. Unreadable = no game is cleared for a cold probe (each stays "unknown"): the
+  // brain never suggests probing a game it could not check.
+  const probeCooldownDays = model.probeCooldownDaysOf(af);
+  let duds = null;
+  try {
+    if (!d.AutoFarmTask || typeof d.AutoFarmTask.find !== "function") throw new Error("no task model");
+    const labels = [...new Set(claimGames.filter((g) => g.campaign).flatMap((g) => g.campaign.labels || [g.label]))];
+    duds = await expiredProbes(d, labels, now, probeCooldownDays);
+  } catch (e) {
+    duds = null;
+    notes.push("The auto-farm's probe history was unreadable this run (" + (e && e.message ? e.message : e) + "): no cold probes, new drops stay 'unknown'.");
+  }
+
   const claim = claimGames.map(({ key, label, campaign, game, radarRow }) => {
     let value = game && game.price ? num(game.price.valuePerAccount) : 0;
     let valueBasis = value > 0 ? "our sales" : "";
@@ -383,6 +439,8 @@ async function load({ now = Date.now(), deps = null } = {}) {
       gameCap,
       stock: game && game.farm ? { onHand: game.farm.onHand, inFlight: game.farm.inFlight } : null,
       act: stance ? { d: stance.decision, at: stance.decidedAt || null, t: num(stance.target) } : null,
+      // false = checked, no failed probe; { at, days } = a known dud; null = not checked
+      dud: !campaign || !duds ? null : duds.has(key) ? { at: duds.get(key), days: probeCooldownDays } : false,
       old: old.get(key) || { error: "no verdict" },
     };
   });
@@ -414,10 +472,14 @@ async function load({ now = Date.now(), deps = null } = {}) {
     now,
     sizing,
     probeSize,
+    probeCooldownDays,
     engine,
     claim,
     noclaim,
     demandRates: nc.demandRates,
+    // The owner's switch for the feeder's burst guard (docs/LIVE-FIXES-1003.md §1, dark): while on,
+    // the feeder's snapshot is the guarded rule v2g, not v2.
+    burstGuardLive: af.noclaimBurstGuard === true,
     notes,
     // What the scorer needs later, without another load.
     evidence: {
@@ -477,6 +539,7 @@ module.exports = {
   connectedHistory,
   saleLogFrom,
   liveCampaigns,
+  expiredProbes,
   oldVerdicts,
   noclaimInputs,
   noclaimEvidence,
@@ -488,4 +551,5 @@ module.exports = {
   ENGINE_CONCURRENCY,
   MAX_CLAIM_GAMES,
   CONNECTED_GROUP_CAP,
+  PROBE_HISTORY_CAP,
 };

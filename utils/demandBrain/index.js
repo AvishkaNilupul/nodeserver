@@ -120,6 +120,8 @@ function heartbeat(doc, rows, persisted) {
     "demandBrain: run " + state.runs + " (model v" + doc.v + ", " + doc.cfg.estimatorClaim + ") — claim " + s.claim.games + " games, " + s.claim.live + " live: " +
     parts.join(", ") + " | live targets old " + s.claim.oldTargetLive + " → brain " + s.claim.brainTargetLive + " over " + s.claim.comparedLive + " games" +
     (s.claim.unknownLive ? " (+" + s.claim.unknownLive + " without brain evidence, old asks " + s.claim.oldTargetUnknownLive + ")" : "") +
+    // New drops (model v2): live games with no evidence of ours, and what today's logic asks there.
+    " | cold probes " + (s.claim.coldProbes || 0) + " (old asks " + (s.claim.oldTargetCold || 0) + ")" +
     (nc ? " | no-claim " + nc : "") + " | " + (doc.ms / 1000).toFixed(1) + "s" + (persisted ? "" : " | NOT LOGGED (write failed)")
   );
 }
@@ -153,14 +155,32 @@ async function runOnce({ force = false } = {}) {
     });
     const limitMs = hooks.runTimeoutMs || RUN_TIMEOUT_MS;
     const pack = await withTimeout(load, limitMs, "inputs took longer than " + Math.round(limitMs / 1000) + " s");
-    const run = model.buildRun({ now, cfg, sizing: pack.sizing, probeSize: pack.probeSize, engine: pack.engine || {}, claim: pack.claim, noclaim: pack.noclaim, demandRates: pack.demandRates });
+    const run = model.buildRun({
+      now,
+      cfg,
+      sizing: pack.sizing,
+      probeSize: pack.probeSize,
+      engine: pack.engine || {},
+      claim: pack.claim,
+      noclaim: pack.noclaim,
+      demandRates: pack.demandRates,
+      burstGuardLive: !!pack.burstGuardLive,
+    });
     const rows = run.rows.slice(0, MAX_ROWS_PER_RUN);
     const ms = Date.now() - t0;
     const doc = {
       at: new Date(now),
       v: model.MODEL_VERSION,
       ms,
-      cfg: { ...cfg, sizing: pack.sizing, probeSize: pack.probeSize, engine: pack.engine || {}, v2: pack.demandRates ? "farmDemand" : "brain" },
+      cfg: {
+        ...cfg,
+        sizing: pack.sizing,
+        probeSize: pack.probeSize,
+        probeCooldownDays: pack.probeCooldownDays,
+        engine: pack.engine || {},
+        v2: pack.demandRates ? "farmDemand" : "brain",
+        noclaimBurstGuard: !!pack.burstGuardLive,
+      },
       summary: run.summary,
       counts: pack.counts || {},
       notes: (pack.notes || []).slice(0, 20).map((n) => String(n).slice(0, 300)),
@@ -257,6 +277,20 @@ function status() {
     nextRunAt: state.nextRunAt,
     summary: state.lastSummary,
   };
+}
+
+/**
+ * The health page's view of this loop (docs/LIVE-FIXES-1003.md §3): synchronous, never throws.
+ * `lastRunAt` is the last run that computed (a run whose inputs failed or timed out leaves it
+ * alone, so a stuck brain shows as late); `enabled` is the live switch, read like every tick reads it.
+ */
+function loopStatus() {
+  try {
+    const cfg = readConfig();
+    return { lastRunAt: state.lastRunAt || null, intervalMin: cfg.intervalMin, enabled: cfg.enabled };
+  } catch {
+    return { lastRunAt: state.lastRunAt || null, intervalMin: model.DEFAULTS.intervalMin, enabled: false };
+  }
 }
 
 /* ---------------------------------- reading ---------------------------------- */
@@ -387,6 +421,7 @@ module.exports = {
   start,
   stop,
   status,
+  loopStatus,
   runOnce,
   latest,
   gameHistory,

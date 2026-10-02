@@ -824,7 +824,7 @@
     var BR_VIEWS = [["overview", "Overview"], ["games", "Games"], ["accuracy", "Accuracy"]];
     var DIFF_LABEL = { agree: "same answer", "agree-skip": "both skip", "brain-more": "brain: more", "brain-less": "brain: fewer", "brain-farm": "brain: farm (today: skip)", "brain-skip": "brain: skip (today: farm)", "brain-unknown": "brain: no evidence", "old-error": "today's logic: error", mirror: "brain could not compute (shows today's)" };
     var DIFF_CLS = { agree: "s-ok", "agree-skip": "s-ok", "brain-more": "s-more", "brain-less": "s-less", "brain-farm": "s-more", "brain-skip": "s-warn", "brain-unknown": "s-unknown", "old-error": "s-fail", mirror: "s-unknown" };
-    var EST_LABEL = { engine: "today's auto-farm count (45 d)", avg45: "45-day average", avg30: "30-day average", max30_14: "larger of 30 / 14 days", v2: "no-claim feeder rule", listed: "only days we had stock" };
+    var EST_LABEL = { engine: "today's auto-farm count (45 d)", avg45: "45-day average", avg30: "30-day average", max30_14: "larger of 30 / 14 days", v2: "no-claim feeder rule", v2g: "no-claim feeder rule, bulk sales counted once", sba: "irregular-sales forecast (SBA)", tsb: "irregular-sales forecast, fades dying games (TSB)", listed: "only days we had stock" };
     function diffPill(d) { return '<span class="pill ' + (DIFF_CLS[d] || "s-unknown") + '">' + esc(DIFF_LABEL[d] || d) + "</span>"; }
     function verdictTxt(v) {
       if (!v) return "—";
@@ -854,7 +854,7 @@
         (r.live ? ' <span class="pill s-ok">campaign live' + (r.hl != null ? " · " + esc(hrs(r.hl)) + " left" : "") + "</span>" : "") +
         (r.ro ? ' <span class="pill s-unknown">reuse-only</span>' : "") + (r.f === "noclaim" ? ' <span class="pill s-info">no-claim farm</span>' : "") +
         '</span><span class="amt">today ' + verdictTxt(o) + ' <span class="arrow">→</span> brain <b>' + verdictTxt(b) + "</b></span></div>" +
-        '<div class="r2">' + diffPill(r.d) + "<span>brain: sells " + esc(b.w) + "/wk" + (b.b ? " (" + esc(b.b === "own" ? "our sales" : b.b === "market" ? "market share" : b.b) + ")" : "") + "</span>" +
+        '<div class="r2">' + diffPill(r.d) + "<span>brain: sells " + esc(b.w) + "/wk" + (b.b ? " (" + esc(b.b === "own" ? "our sales" : b.b === "market" ? "market share" : b.b === "cold" ? "new game: small test batch" : b.b) + ")" : "") + "</span>" +
         (o.w != null ? "<span>today reads " + esc(o.w) + "/wk" + (o.n != null ? " (" + esc(o.n) + " sales in 45 d)" : "") + "</span>" : "") +
         "<span>" + esc(mk) + "</span>" + (b.u != null ? "<span>≈ " + money(b.u) + "/wk</span>" : "") +
         (r.stk ? "<span>stock " + esc(r.stk.on) + (r.stk.fl ? " + " + esc(r.stk.fl) + " farming" : "") + "</span>" : "") +

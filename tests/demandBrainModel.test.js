@@ -161,7 +161,9 @@ test("v2: production's own demandRates is called when it is handed in", () => {
   assert.equal(calls.length, 1);
   assert.equal(calls[0].units.length, 1, "only the 30-day window is handed over");
   assert.ok(calls[0].units[0].firstAt instanceof Date);
-  assert.deepEqual(calls[0].opts, { days: 30, shortDays: 14, now: NOW });
+  // burstGuard pinned (model v2): the owner's switch never turns v2 into v2g, and the feeder never
+  // re-reads its settings for the default on each call (tests/demandBrainV2.test.js has v2g).
+  assert.deepEqual(calls[0].opts, { days: 30, shortDays: 14, now: NOW, burstGuard: false });
   assert.deepEqual(r, { shelf: 1.2, other: 3.4, total: 4.6, source: "farmDemand" });
 });
 

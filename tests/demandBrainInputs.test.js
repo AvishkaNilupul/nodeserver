@@ -134,6 +134,8 @@ function world(over = {}) {
       if (game === over.probeHeldFor) return { probeAllowed: false, probeBudgetBlocked: true };
       return { probeAllowed: true, probeBudgetBlocked: false };
     },
+    // model v2: the failed probes the cold-start rule reads (none unless a test says so)
+    AutoFarmTask: over.AutoFarmTask !== undefined ? over.AutoFarmTask : { find: query(over.expiredProbes || [], calls, "probes") },
     autoFarmer: {
       researchForGame: async (g) => {
         engine.research.push(g);
@@ -386,6 +388,118 @@ test("game rules mirror settings.isNoClaimGame (substring) and isReuseOnlyGame (
   assert.equal(r.isReuseOnly("UFL"), true);
   assert.equal(r.isReuseOnly("UFL 2"), false, "exact, so a short label cannot match by substring");
   assert.equal(r.isReuseOnly("world of tanks"), true);
+});
+
+/* ------------------------- model v2: cold-start inputs ------------------------- */
+
+test("v2 probe history: one indexed read of the live games' labels, the engine's own cooldown predicate", async () => {
+  const { deps, calls } = world({
+    af: { probeCooldownDays: 90 },
+    expiredProbes: [
+      { game: "Game C", completedAt: new Date(NOW - 20 * DAY) },
+      { game: "Game C", completedAt: new Date(NOW - 5 * DAY) },
+      { game: "Gone Game", completedAt: new Date(NOW - 3 * DAY) },
+      { game: "Game A", completedAt: null },
+    ],
+  });
+  const p = await I.load({ now: NOW, deps });
+  const reads = calls.filter((c) => c.name === "probes");
+  assert.equal(reads.length, 1, "one read per run, not one per game");
+  const q = reads[0];
+  assert.deepEqual([...q.filter.game.$in].sort(), ["Game A", "Game C", "World of Tanks"], "live claim campaigns only (no Overwatch)");
+  assert.equal(q.filter.probeOutcome, "expired");
+  assert.equal(q.filter.completedAt.$gte.getTime(), NOW - 90 * DAY);
+  assert.deepEqual(q.projection, { game: 1, completedAt: 1 });
+  assert.equal(q.limit, I.PROBE_HISTORY_CAP);
+  assert.deepEqual(p.claim.find((g) => g.key === "game c").dud, { at: NOW - 5 * DAY, days: 90 }, "the newest failed probe");
+  assert.equal(p.claim.find((g) => g.key === "game a").dud, false, "live and checked; an undated row proves nothing");
+  assert.equal(p.claim.find((g) => g.key === "world of tanks").dud, false);
+  assert.equal(p.claim.find((g) => g.key === "game b").dud, null, "no live campaign: never checked");
+  assert.equal(p.probeCooldownDays, 90);
+  assert.ok(!p.notes.some((n) => /probe history/.test(n)));
+});
+
+test("v2 every raw label of a game's live campaigns is asked (the engine keys tasks by the raw label)", async () => {
+  const { deps, calls } = world({ campaigns: [{ game: "Game Q", endAt: null }, { game: "GAME Q", endAt: null }] });
+  await I.load({ now: NOW, deps });
+  assert.deepEqual([...calls.find((c) => c.name === "probes").filter.game.$in].sort(), ["GAME Q", "Game Q"]);
+});
+
+test("v2 cold probe end to end: a live campaign with no sale, listing or rated market of ours", async () => {
+  const af = { perMarketStock: 3, platiEnabled: false, ggselEnabled: true, probeCooldownDays: 90 };
+  const p = await I.load({ now: NOW, deps: world({ af }).deps });
+  const run = M.buildRun({ now: NOW, cfg: M.readConfig(af), sizing: p.sizing, probeSize: p.probeSize, engine: p.engine, claim: p.claim, noclaim: p.noclaim, demandRates: p.demandRates });
+  const wot = run.rows.find((r) => r.k === "world of tanks");
+  assert.deepEqual([wot.br.c, wot.br.t, wot.br.b], ["probe", 6, "cold"]);
+  assert.equal(run.rows.find((r) => r.k === "game c").br.b !== "cold", true, "sold (connection flips): not a new drop");
+  // the same game, probed and failed 30 days ago: a known dud
+  const p2 = await I.load({ now: NOW, deps: world({ af, expiredProbes: [{ game: "World of Tanks", completedAt: new Date(NOW - 30 * DAY) }] }).deps });
+  const run2 = M.buildRun({ now: NOW, cfg: M.readConfig(af), sizing: p2.sizing, probeSize: p2.probeSize, engine: p2.engine, claim: p2.claim, noclaim: [] });
+  const dud = run2.rows.find((r) => r.k === "world of tanks");
+  assert.deepEqual([dud.br.c, dud.br.dud], ["skip", true]);
+});
+
+test("v2 an unreadable probe history: no cold probe anywhere, said in a note — never a crash", async () => {
+  for (const AutoFarmTask of [null, { find: () => { throw new Error("tasks unreadable"); } }]) {
+    const { deps } = world({ AutoFarmTask });
+    const p = await I.load({ now: NOW, deps });
+    assert.ok(p.claim.every((g) => g.dud === null));
+    assert.ok(p.notes.some((n) => /probe history was unreadable/.test(n)), p.notes.join(" | "));
+    const run = M.buildRun({ now: NOW, cfg: M.readConfig({ demandBrain: {} }), sizing: p.sizing, probeSize: p.probeSize, engine: p.engine, claim: p.claim, noclaim: [] });
+    assert.equal(run.rows.find((r) => r.k === "world of tanks").br.c, "unknown");
+  }
+});
+
+test("v2 no live game: no probe-history read at all", async () => {
+  const { deps, calls } = world({ campaigns: [] });
+  await I.load({ now: NOW, deps });
+  assert.equal(calls.filter((c) => c.name === "probes").length, 0);
+});
+
+test("v2 the pack carries the owner's burst-guard switch (dark: off unless explicitly true)", async () => {
+  assert.equal((await I.load({ now: NOW, deps: world().deps })).burstGuardLive, false);
+  assert.equal((await I.load({ now: NOW, deps: world({ af: { noclaimBurstGuard: "true" } }).deps })).burstGuardLive, false);
+  assert.equal((await I.load({ now: NOW, deps: world({ af: { noclaimBurstGuard: true } }).deps })).burstGuardLive, true);
+});
+
+// A farmDemand whose evidence holds `units` for Overwatch, recording what its demandRates is handed.
+function feederWith(units, extra = {}) {
+  const seen = [];
+  return {
+    seen,
+    farmDemand: {
+      unclaimedDemandSnapshot: async () => [{ key: "overwatch", label: "Overwatch", target: 9, sales: { perWeek: 1, shelfPerWeek: 0, otherPerWeek: 1 }, stock: { listed: 0 }, policy: {} }],
+      saleEvidenceByBucket: async () => ({ units: new Map([["overwatch", new Map(units.map((u, i) => ["u" + i, u]))]]), ...extra }),
+      demandRates: (list, opts) => {
+        seen.push({ units: [...list], opts });
+        return { shelfPerWeek: 0, otherPerWeek: 1 };
+      },
+    },
+  };
+}
+
+test("v2 no-claim entries carry the feeder's bulk-pack flag through to its burst guard", async () => {
+  const { seen, farmDemand } = feederWith([
+    { firstAt: new Date(NOW - DAY), market: "Eldorado", priceUsd: 3, sources: new Set(["ledger"]), pack: true },
+    { firstAt: new Date(NOW - 2 * DAY), market: "Eldorado", priceUsd: 3, sources: new Set(["ledger"]) },
+  ]);
+  const p = await I.load({ now: NOW, deps: world({ farmDemand }).deps });
+  assert.deepEqual(p.noclaim[0].entries, [
+    { t: NOW - 2 * DAY, m: "eldorado", p: 3 },
+    { t: NOW - DAY, m: "eldorado", p: 3, pack: true },
+  ]);
+  M.estimate("v2g", p.noclaim[0].entries, NOW, { demandRates: p.demandRates });
+  assert.deepEqual(seen[0].units, [{ firstAt: new Date(NOW - 2 * DAY), market: "eldorado" }, { firstAt: new Date(NOW - DAY), market: "eldorado", pack: true }]);
+  assert.equal(seen[0].opts.burstGuard, true);
+});
+
+test("v2 a failed bulk-pack lookup makes the no-claim evidence unreadable for the run (a note), never a wrong v2g", async () => {
+  const { farmDemand } = feederWith([{ firstAt: new Date(NOW - DAY), market: "Eldorado" }], { packError: "listings read failed" });
+  const p = await I.load({ now: NOW, deps: world({ farmDemand }).deps });
+  assert.equal(p.noclaim[0].entries, null);
+  assert.ok(p.notes.some((n) => /sale evidence failed this run \(its bulk-pack lookup failed: listings read failed\)/.test(n)), p.notes.join(" | "));
+  const ev = await I.loadEvidence({ now: NOW, deps: world({ farmDemand }).deps });
+  assert.equal(ev.noclaim, null, "and the scorer skips it too");
 });
 
 /* ------------------------------- source rules ------------------------------- */
