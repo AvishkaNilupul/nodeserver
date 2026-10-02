@@ -72,6 +72,20 @@ const LEDGER_FREE_STATUSES = ["skipped", "released", "expired"];
 // the real default; this mirror only stops an old file reading as "no cap".
 const NOCLAIM_MAX_BOTS_DEFAULT = 40;
 
+// A ledger's poolAccountId is a free-form string; only a real ObjectId may go
+// into an `_id: { $nin }` list (anything else is a CastError for the whole
+// claim query).
+const OBJECT_ID_RE = /^[0-9a-f]{24}$/i;
+
+// Pool rows claimed this process whose stored password no seller can decrypt
+// (a key rotation, a corrupt field). Each is put straight back and never
+// claimed again by this process, so one bad row costs one claim, not one per
+// pass. A restart forgets them — the moment to have fixed their passwords.
+const unreadablePasswordIds = new Set();
+// At most this many such rows are put back per claimForGame call: a key that
+// no longer decrypts ANY password must not churn the whole pool in one pass.
+const MAX_UNREADABLE_PER_CALL = 10;
+
 function pi() {
   const host = hosts.resolveHost(HOST_ID);
   if (!host) {
@@ -174,9 +188,10 @@ function passwordPresent() {
 // refuses an account without a password, and none ever sells a login again once
 // it holds a committed no-claim ledger — so either one was a pool account spent
 // on stock nobody could sell, counted as supply all the while. The password
-// rule is here; the ledger rule needs a database read, so the caller passes the
-// logins committedLedgerLogins() found as `excludeLogins`.
-function readyPoolQuery(game, { excludeLogins = null } = {}) {
+// rule is here; the ledger rule needs a database read, so the caller passes
+// what claimExclusions() found: the committed logins as `excludeLogins`, their
+// pool row ids (plus rows whose password does not decrypt) as `excludeIds`.
+function readyPoolQuery(game, { excludeLogins = null, excludeIds = null } = {}) {
   const q = {
     status: "available",
     clientSecret: { $gt: "" },
@@ -191,25 +206,75 @@ function readyPoolQuery(game, { excludeLogins = null } = {}) {
   if (Array.isArray(excludeLogins) && excludeLogins.length) {
     q.usernameLower = { $nin: excludeLogins };
   }
+  if (Array.isArray(excludeIds) && excludeIds.length) {
+    q._id = { $nin: excludeIds };
+  }
   return q;
 }
 
-// Logins (lower-cased) whose no-claim ledger is committed — on a listing, sold,
-// removed, or held by an owner's manual listing. Per LOGIN, whatever game the
-// ledger is for, because that is how both sellers key it: the scan's skip set
-// is source + login, and freeReason takes the login's strongest ledger. The
-// recycler never resets a ledger, so a recycled account keeps its old one.
-async function committedLedgerLogins() {
-  const rows = await UnclaimedAccount.distinct("loginLower", {
-    source: "noclaim",
-    status: { $nin: LEDGER_FREE_STATUSES },
-  });
-  const out = new Set();
-  for (const l of rows || []) {
+// The no-claim ledgers that are committed — on a listing, sold, removed, or held
+// by an owner's manual listing: { logins (lower-cased), poolIds }. Per LOGIN,
+// whatever game the ledger is for, because that is how both sellers key it: the
+// scan's skip set is source + login, and freeReason takes the login's strongest
+// ledger. The recycler never resets a ledger, so a recycled account keeps its
+// old one.
+//
+// And per POOL ROW (2026-10-03 review): the scan writes a ledger under the LIVE
+// Twitch login, so a renamed account's ledger never matches its pool row's
+// usernameLower — but it carries the row's id as poolAccountId, and freeReason
+// looks the ledger up by both names. Excluding by both closes the rename gap.
+async function committedLedgers() {
+  const q = { source: "noclaim", status: { $nin: LEDGER_FREE_STATUSES } };
+  const [loginRows, idRows] = await Promise.all([
+    UnclaimedAccount.distinct("loginLower", q),
+    UnclaimedAccount.distinct("poolAccountId", q),
+  ]);
+  const logins = new Set();
+  for (const l of loginRows || []) {
     const k = String(l || "").trim().toLowerCase();
-    if (k) out.add(k);
+    if (k) logins.add(k);
   }
-  return [...out];
+  const poolIds = new Set();
+  for (const p of idRows || []) {
+    const k = String(p || "").trim();
+    if (OBJECT_ID_RE.test(k)) poolIds.add(k);
+  }
+  return { logins: [...logins], poolIds: [...poolIds] };
+}
+
+async function committedLedgerLogins() {
+  return (await committedLedgers()).logins;
+}
+
+// Everything a no-claim claim must skip besides the query's own field rules:
+// committed-ledger logins and pool rows, and the rows this process already
+// found with a password no seller can decrypt.
+async function claimExclusions() {
+  const { logins, poolIds } = await committedLedgers();
+  return { excludeLogins: logins, excludeIds: [...poolIds, ...unreadablePasswordIds] };
+}
+
+// Would a seller be able to hand this row's password to a buyer? The sellers'
+// own resolution (unclaimedAutoList.poolPassword — the lister's scan and
+// noclaimHoldings call it) decrypts `password`, then `credPasswordEnc`; a value
+// that no longer decrypts reads as "" and the account is never sold. Required
+// lazily: the lister is a large module, already loaded in the server. Without
+// that export only the field-level rule remains, as in noclaimHoldings.
+function sellablePassword(row) {
+  let engine = null;
+  try {
+    engine = require("./unclaimedAutoList");
+  } catch (e) {
+    engine = null;
+  }
+  if (!engine || typeof engine.poolPassword !== "function") {
+    return !!(row && (row.password || row.credPasswordEnc));
+  }
+  try {
+    return !!engine.poolPassword(row);
+  } catch {
+    return false;
+  }
 }
 
 // The pristine-reserve clause for one claim: {} while the pool holds more
@@ -259,12 +324,12 @@ function assertNoClaimGame(game) {
 // the guard's `protect`) is not supply.
 async function spendable(game) {
   const reserve = Math.max(0, Number(settings.getAutoFarm().poolReserve) || 0);
-  const excludeLogins = await committedLedgerLogins();
+  const exclude = await claimExclusions();
   const guard = pristineReserve();
   const held = await guard.farmGuard();
   const clause = await pristineClause(guard);
   const rows = await AvailableAccount.countDocuments({
-    $and: [readyPoolQuery(game, { excludeLogins }), clause],
+    $and: [readyPoolQuery(game, exclude), clause],
   });
   const open = Object.keys(clause).length === 0;
   const pristineHeld = open ? Math.max(0, Math.floor(Number(held && held.protect) || 0)) : 0;
@@ -286,22 +351,39 @@ async function spendable(game) {
 // for EVERY claim, because noteClaimed() lowers the reserve's cached count and
 // a 70-account batch must stop taking pristine rows the moment the reserve is
 // reached, not at the guard's next refresh.
+//
+// Each claimed row's password is then resolved the way the sellers resolve it
+// (sellablePassword). One that does not decrypt goes straight back, is skipped
+// by this process from then on, and does not count toward `count`; the
+// returned array carries how many were put back as `unreadablePasswords`.
+// Rows come back lean: a hydrated document hides fields the schema does not
+// declare, and `credPasswordEnc` is one of them.
 async function claimForGame(game, count, { actor = "noclaim" } = {}) {
   const note = `${CLAIM_NOTE_PREFIX}:${game}`;
   const claimed = [];
+  claimed.unreadablePasswords = 0;
   const want = Math.floor(Number(count) || 0);
   if (want <= 0) return claimed;
-  const excludeLogins = await committedLedgerLogins();
+  const exclude = await claimExclusions();
   const guard = pristineReserve();
+  const unreadable = [];
   try {
-    for (let i = 0; i < want; i++) {
+    while (claimed.length < want && unreadable.length < MAX_UNREADABLE_PER_CALL) {
       const clause = await pristineClause(guard);
       const doc = await AvailableAccount.findOneAndUpdate(
-        { $and: [readyPoolQuery(game, { excludeLogins }), clause] },
+        { $and: [readyPoolQuery(game, exclude), clause] },
         { $set: { status: "claimed", claimedAt: new Date(), claimedNote: note } },
-        { returnDocument: "after", sort: { lastCheckAt: -1 } },
+        { returnDocument: "after", sort: { lastCheckAt: -1 }, lean: true },
       );
       if (!doc) break;
+      if (!sellablePassword(doc)) {
+        unreadablePasswordIds.add(String(doc._id));
+        exclude.excludeIds.push(String(doc._id));
+        unreadable.push(doc);
+        await recordPoolUsage(doc._id, { event: "claimed", actor, game, note });
+        await release([doc], { actor });
+        continue;
+      }
       claimed.push(doc);
       try {
         guard.noteClaimed(doc);
@@ -313,6 +395,22 @@ async function claimForGame(game, count, { actor = "noclaim" } = {}) {
   } catch (err) {
     await release(claimed, { actor }).catch(() => {});
     throw err;
+  }
+  claimed.unreadablePasswords = unreadable.length;
+  if (unreadable.length) {
+    const logins = unreadable.map((d) => d.username).filter(Boolean);
+    logEvent({
+      category: "noclaim",
+      action: "password_unreadable",
+      severity: "warn",
+      actor,
+      game,
+      count: unreadable.length,
+      detail:
+        `${unreadable.length} pool account(s) claimed for ${game} have a stored password no seller ` +
+        `can decrypt — put back, and skipped until the next restart: ${logins.join(", ")}`,
+      meta: { logins },
+    });
   }
   return claimed;
 }
@@ -362,20 +460,27 @@ async function release(docs, { actor = "noclaim" } = {}) {
 // any state (what the container cap counts), and `psOk`. A `docker ps` that
 // fails prints nothing, which reads as "no bot has a container" — so a caller
 // that acts on container states must check psOk (null containers when false).
+// `provisioningAgeSec` says how long the .provisioning lock has been held (a
+// lock a crash left behind never clears), and each bot's `configMtime` (epoch
+// seconds) tells one bot from a later bot that reused its id.
 async function readFleet({ timeout = 25000 } = {}) {
+  const lock = hosts.shq(BASE + "/.provisioning");
   const script =
-    `prov=no; [ -f ${hosts.shq(BASE + "/.provisioning")} ] && prov=yes; echo "prov=$prov"; ` +
+    `prov=no; provAge=; if [ -f ${lock} ]; then prov=yes; ` +
+    `provAge=$(( $(date +%s) - $(stat -c %Y ${lock} 2>/dev/null || date +%s) )); fi; ` +
+    `echo "prov=$prov"; echo "provAge=$provAge"; ` +
     `img=no; docker image inspect ${hosts.shq(IMAGE)} >/dev/null 2>&1 && img=yes; echo "img=$img"; ` +
     `echo "PS_START"; docker ps -a --filter name=^/${CONTAINER_PREFIX} --format '{{.Names}}|{{.State}}|{{.Status}}' 2>/dev/null; echo "PS_RC=$?"; echo "PS_END"; ` +
     `echo "BOTS_START"; for d in ${hosts.shq(BOTS_DIR)}/*/Configuration/config.json; do [ -f "$d" ] || continue; ` +
     `id=$(basename $(dirname $(dirname "$d"))); ` +
     `game=$(tr -d '\\n' < "$d" | sed -n 's/.*"FavouriteGames"[^[]*\\[[^"]*"\\([^"]*\\)".*/\\1/p'); ` +
-    `n=$(grep -c '"ClientSecret"' "$d"); ` +
-    `echo "$id|$game|$n"; done; echo "BOTS_END"`;
+    `n=$(grep -c '"ClientSecret"' "$d"); m=$(stat -c %Y "$d" 2>/dev/null || echo 0); ` +
+    `echo "$id|$game|$n|$m"; done; echo "BOTS_END"`;
   const out = await sh(script, { timeout });
 
   let section = "";
   let provisioning = false;
+  let provisioningAgeSec = null;
   let imageBuilt = false;
   let psOk = false;
   const psMap = {};
@@ -387,14 +492,24 @@ async function readFleet({ timeout = 25000 } = {}) {
     if (line === "BOTS_START") { section = "bots"; continue; }
     if (line === "BOTS_END") { section = ""; continue; }
     if (line.startsWith("prov=")) { provisioning = line.slice(5) === "yes"; continue; }
+    if (line.startsWith("provAge=")) {
+      const age = parseInt(line.slice(8), 10);
+      provisioningAgeSec = Number.isFinite(age) ? Math.max(0, age) : null;
+      continue;
+    }
     if (line.startsWith("img=")) { imageBuilt = line.slice(4) === "yes"; continue; }
     if (line.startsWith("PS_RC=")) { psOk = line.slice(6) === "0"; continue; }
     if (section === "ps" && line) {
       const [name, state, status] = line.split("|");
       psMap[name.replace(CONTAINER_PREFIX, "")] = { state, status };
     } else if (section === "bots" && line) {
-      const [id, game, n] = line.split("|");
-      bots.push({ id, game: game || "", accounts: parseInt(n, 10) || 0 });
+      const [id, game, n, mtime] = line.split("|");
+      bots.push({
+        id,
+        game: game || "",
+        accounts: parseInt(n, 10) || 0,
+        configMtime: parseInt(mtime, 10) || 0,
+      });
     }
   }
   for (const b of bots) {
@@ -406,6 +521,7 @@ async function readFleet({ timeout = 25000 } = {}) {
   bots.sort((a, b) => parseInt(a.id, 10) - parseInt(b.id, 10));
   return {
     provisioning,
+    provisioningAgeSec: provisioning ? provisioningAgeSec : null,
     imageBuilt,
     bots,
     containers: psOk ? Object.keys(psMap).length : null,
@@ -551,6 +667,13 @@ async function writeBotConfig(id, accounts, game) {
 // failure and ran `docker run` anyway. The rm is braced now, so the chain means
 // what it says — with no image and no fork, it stops before `docker run` and
 // the bot is left config-only, which the allocator reports as stuck.
+//
+// A `docker run` that creates the container and then fails to START it leaves
+// it behind in state "created" — which reads as a usable, stopped bot, so it
+// would be topped up every pass and never reported. The container is removed
+// on that failure, leaving the bot config-only (stuck) as well. "created" is
+// NOT treated as stuck: the image rollout leaves stopped bots in exactly that
+// state, and they are parked, not broken.
 function provisionSteps(id, count, game) {
   const shq = hosts.shq;
   const fetchAndBuild =
@@ -567,7 +690,7 @@ function provisionSteps(id, count, game) {
     `echo ${shq(`[bot ${id}] ${count} account(s), game=${game}`)}`,
     `if ! docker image inspect ${shq(IMAGE)} >/dev/null 2>&1; then ${fetchAndBuild}; fi`,
     `{ docker rm -f ${shq(containerFor(id))} >/dev/null 2>&1 || true; }`,
-    `docker run -d ${containerRunArgs(id, IMAGE)}`,
+    `{ docker run -d ${containerRunArgs(id, IMAGE)} || { docker rm -f ${shq(containerFor(id))} >/dev/null 2>&1; false; }; }`,
     `echo "[$(date -u +%FT%TZ)] bot ${id} started"`,
   ].join(" && ");
 }
@@ -690,9 +813,11 @@ async function createBot({ game, count, actor = "noclaim" } = {}) {
 
   // claimForGame puts back whatever it claimed if it fails part-way.
   const claimed = await claimForGame(g, want, { actor });
+  const passwordUnreadable = claimed.unreadablePasswords || 0;
   if (!claimed.length) {
     const e = new Error("No ready pool accounts to claim.");
     e.status = 409;
+    e.passwordUnreadable = passwordUnreadable;
     throw e;
   }
 
@@ -738,17 +863,45 @@ async function createBot({ game, count, actor = "noclaim" } = {}) {
   try {
     await launchProvision(id, inConfig.length, g);
   } catch (err) {
-    return { id, claimed: inConfig.length, game: g, provisionError: err.message || String(err) };
+    return {
+      id,
+      claimed: inConfig.length,
+      game: g,
+      passwordUnreadable,
+      provisionError: err.message || String(err),
+    };
   }
-  return { id, claimed: inConfig.length, game: g };
+  return { id, claimed: inConfig.length, game: g, passwordUnreadable };
 }
 
 // A write whose outcome could not be read back (2026-10-03). The accounts stay
 // claimed — a claimed row in no bot is an orphan an operator can find by its
 // note; an available row in a bot is a double-home nobody can see — and this
-// event names them so the orphans can be checked and released by hand.
+// event says how to find every one of them.
+//
+// The LOCATOR comes first: systemLog keeps 500 characters of `detail`, at most
+// 50 meta entries, and drops a meta over 2,000 characters whole, so a 70-login
+// list cannot carry it. The claim note plus the claimedAt window finds every
+// stranded row whatever got cut. In meta the note is split (prefix, game):
+// systemLog masks a whitespace-free "a:b" string as a credential line.
+const STATE_UNKNOWN_META_LOGIN_CHARS = 1200;
 function logStateUnknown({ actor, id, game, docs, why }) {
-  const logins = (docs || []).map((d) => d && d.username).filter(Boolean);
+  const rows = (docs || []).filter(Boolean);
+  const logins = rows.map((d) => d.username).filter(Boolean);
+  const notes = [...new Set(rows.map((d) => String(d.claimedNote || "")).filter(Boolean))];
+  const times = rows
+    .map((d) => new Date(d.claimedAt).getTime())
+    .filter((t) => Number.isFinite(t));
+  const from = times.length ? new Date(Math.min(...times)).toISOString() : "";
+  const to = times.length ? new Date(Math.max(...times)).toISOString() : "";
+  const noteText = notes.length ? notes.map((n) => `"${n}"`).join(" or ") : "(none recorded)";
+  const metaLogins = [];
+  let used = 0;
+  for (const l of logins) {
+    if (metaLogins.length >= 50 || used + l.length + 3 > STATE_UNKNOWN_META_LOGIN_CHARS) break;
+    metaLogins.push(l);
+    used += l.length + 3;
+  }
   logEvent({
     category: "noclaim",
     action: "topup_state_unknown",
@@ -756,11 +909,21 @@ function logStateUnknown({ actor, id, game, docs, why }) {
     actor,
     subject: containerFor(id),
     game: game || "",
-    count: logins.length,
+    count: rows.length,
     detail:
-      `bot ${id}: ${why} — ${logins.length} account(s) left claimed, none released. ` +
-      `Check the config, then release any it does not hold: ${logins.join(", ")}`,
-    meta: { botId: String(id), logins },
+      `bot ${id}: ${rows.length} account(s) left claimed, none released — find them by ` +
+      `status "claimed", claimedNote ${noteText}, claimedAt ${from || "?"} to ${to || "?"}, ` +
+      `and release any its config does not hold. Cause: ${why}. Logins: ${logins.join(", ")}`,
+    meta: {
+      botId: String(id),
+      notePrefix: CLAIM_NOTE_PREFIX,
+      noteGames: notes.map((n) => n.replace(CLAIM_NOTE_RE, "")),
+      claimedFrom: from,
+      claimedTo: to,
+      count: rows.length,
+      logins: metaLogins,
+      loginsOmitted: logins.length - metaLogins.length,
+    },
   });
 }
 
@@ -1170,10 +1333,12 @@ module.exports = {
   buildConfig,
   soldGameExclusion,
   readyPoolQuery,
+  committedLedgers,
   committedLedgerLogins,
   spendable,
   claimForGame,
   release,
+  logStateUnknown,
   readFleet,
   containerCount,
   maxBots,
@@ -1195,4 +1360,5 @@ module.exports = {
   rolloutLogVerdict,
   validRolloutRef,
   NOCLAIM_GUARD_LINE,
+  _resetForTests: () => unreadablePasswordIds.clear(),
 };

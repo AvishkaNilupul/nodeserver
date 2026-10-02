@@ -14,6 +14,12 @@
 //   * defect 16 — nothing capped no-claim containers or checked host RAM;
 //   * defect 13 — the farms ignored the pristine reserve rent-farm orders need.
 //
+// The last section pins the gaps the 2026-10-03 review found in that work:
+// renamed logins, passwords that no longer decrypt, a container that failed
+// to start, a create whose outcome is unknown, the RAM gate in the budget
+// split, an event that loses its rows to truncation, and a stale lock that hid
+// a stuck bot (the two route gaps: tests/noclaimFarmRoutesGate.test.js).
+//
 // Everything is stubbed at Module._load (tests/operatorFarmStackRoom.test.js
 // does the same): the pool and the ledger are in-memory rows behind a small
 // Mongo matcher, and the bot host is a fake shell holding config files.
@@ -144,7 +150,7 @@ function botConfig(secrets, game = "Overwatch") {
 
 function poolModel(rows) {
   const docs = rows.map((r) => ({ ...r }));
-  const calls = { claim: [], count: [], update: [] };
+  const calls = { claim: [], claimOpts: [], count: [], update: [] };
   return {
     docs,
     calls,
@@ -155,6 +161,7 @@ function poolModel(rows) {
     },
     async findOneAndUpdate(q, u, opts) {
       calls.claim.push(q);
+      calls.claimOpts.push(opts || {});
       const hits = docs.filter((d) => matches(d, q));
       if (opts && opts.sort && opts.sort.lastCheckAt === -1) hits.sort((a, b) => +b.lastCheckAt - +a.lastCheckAt);
       if (!hits.length) return null;
@@ -325,20 +332,50 @@ function fresh(file) {
   return mod;
 }
 
-function fleetEnv({ pool = [], ledgers = [], host = {}, af = {}, pristine = {}, ram = null } = {}) {
-  const env = { events: [], usage: [], telegrams: [], ramCalls: [] };
+// The sellers' password resolution (unclaimedAutoList.poolPassword): `password`
+// first, then `credPasswordEnc`; a value starting "broken" does not decrypt.
+const sellersEngine = () => {
+  const pw = (v) => (v && !/^broken/.test(String(v)) ? String(v) : "");
+  return { poolPassword: (r) => pw(r && r.password) || pw(r && r.credPasswordEnc) };
+};
+
+// utils/systemLog.js itself, with only the model under it stubbed — so a test
+// sees an event exactly as it is stored (detail cut at 500 characters, meta
+// capped at 50 entries / 2,000 characters, credential-shaped lines masked).
+function realSystemLog(saved) {
+  const file = require.resolve("../utils/systemLog");
+  const restore = install([["/utils/systemLog.js", { "../models/SystemEvent": { create: async (d) => saved.push(d) } }]]);
+  try {
+    return fresh(file);
+  } finally {
+    restore();
+  }
+}
+
+function fleetEnv({
+  pool = [],
+  ledgers = [],
+  host = {},
+  hosts = null, // a whole botHosts stand-in, instead of the fake shell
+  af = {},
+  pristine = {},
+  ram = null,
+  realLog = false,
+} = {}) {
+  const env = { events: [], saved: [], usage: [], telegrams: [], ramCalls: [] };
   env.pool = poolModel(pool);
   env.host = fakeHost(host);
   env.pristine = pristineFake(pristine);
   env.settings = fakeSettings(af);
   env.ram = ram || { ok: true, availableMb: 4000, minFreeMb: 1500, reason: "" };
   env.stubs = {
-    "./botHosts": env.host.hosts,
+    "./botHosts": hosts || env.host.hosts,
     "./settings": env.settings,
     "../models/AvailableAccount": env.pool,
     "../models/UnclaimedAccount": ledgerModel(ledgers),
     "./poolUsageLog": { recordPoolUsage: async (ids, e) => env.usage.push([ids, e]) },
-    "./systemLog": { logEvent: (e) => env.events.push(e) },
+    "./systemLog": realLog ? realSystemLog(env.saved) : { logEvent: (e) => env.events.push(e) },
+    "./unclaimedAutoList": sellersEngine(),
     "./pristineReserve": env.pristine,
     "./hostCapacity": {
       newContainerAllowed: async (id) => {
@@ -445,7 +482,7 @@ const planOf = (games, over = {}) => ({
 
 // A fake fleet for the allocator's decision tests.
 function fleetFake(over = {}) {
-  const calls = { claim: [], topUp: [], release: [], create: [], gate: [] };
+  const calls = { claim: [], topUp: [], release: [], create: [], gate: [], unknown: [] };
   let n = 0;
   return {
     calls,
@@ -456,10 +493,14 @@ function fleetFake(over = {}) {
     readFleet: async () => ({ provisioning: false, imageBuilt: true, bots: [], containers: 0, psOk: true }),
     sh: async () => "",
     spendable: async () => ({ ready: 500, reserve: 0, spendable: 500 }),
+    // The real gate's cap half (noclaimFleet.newContainerGate), RAM always fine.
     newContainerGate: async (o) => {
       calls.gate.push(o);
+      if (o && Number.isFinite(o.containers) && o.containers >= 40)
+        return { ok: false, reason: `the no-claim farm already has ${o.containers} container(s) and its cap is 40` };
       return { ok: true, reason: "" };
     },
+    logStateUnknown: (o) => calls.unknown.push(o),
     claimForGame: async (game, count) => {
       calls.claim.push([game, count]);
       return Array.from({ length: count }, () => {
@@ -873,11 +914,13 @@ test("readFleet reports docker's exit status and the container count", async () 
   });
 });
 
-test("the provision chain skips git when the image is there, and stops before docker run when it cannot build", async () => {
-  // The real launch: createBotFromAccounts' detached script is captured from
-  // the fake host and run here by /bin/sh (minus setsid/&), with fake
-  // `docker`/`git` on PATH that log their calls and the host's BASE swapped
-  // for a temp dir.
+// The real launch: createBotFromAccounts' detached script is captured from the
+// fake host and run here by /bin/sh (minus setsid/&), with fake `docker`/`git`
+// on PATH that log their calls and the host's BASE swapped for a temp dir.
+// `docker image inspect` answers from IMAGE_PRESENT, `git fetch` fails when
+// GIT_FAIL is set, and `docker run` fails at start when RUN_FAIL is set.
+// fn(run): run(env) runs the script once and returns the call log.
+async function withProvisionScript(fn) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "noclaim-prov-"));
   try {
     const bin = path.join(dir, "bin");
@@ -885,12 +928,11 @@ test("the provision chain skips git when the image is there, and stops before do
     fs.mkdirSync(bin);
     fs.mkdirSync(path.join(base, "src", ".git"), { recursive: true });
     const logFile = path.join(dir, "calls.log");
-    // `docker image inspect` answers from IMAGE_PRESENT; `git fetch` fails
-    // when GIT_FAIL is set.
     fs.writeFileSync(
       path.join(bin, "docker"),
       `#!/bin/sh\necho "docker $*" >> "${logFile}"\n` +
-        `if [ "$1 $2" = "image inspect" ]; then [ -n "$IMAGE_PRESENT" ] && exit 0; exit 1; fi\nexit 0\n`,
+        `if [ "$1 $2" = "image inspect" ]; then [ -n "$IMAGE_PRESENT" ] && exit 0; exit 1; fi\n` +
+        `if [ "$1" = run ] && [ -n "$RUN_FAIL" ]; then exit 125; fi\nexit 0\n`,
       { mode: 0o755 },
     );
     fs.writeFileSync(
@@ -915,7 +957,14 @@ test("the provision chain skips git when the image is there, and stops before do
       assert.equal(fs.existsSync(path.join(base, ".provisioning")), false, "the lock is always removed");
       return fs.readFileSync(logFile, "utf8");
     };
+    await fn(run);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+}
 
+test("the provision chain skips git when the image is there, and stops before docker run when it cannot build", async () => {
+  await withProvisionScript(async (run) => {
     const present = run({ IMAGE_PRESENT: "1", GIT_FAIL: "1" });
     assert.doesNotMatch(present, /^git /m, "no git at all when the image exists");
     assert.match(present, /^docker run -d --name noclaim-bot-7 /m);
@@ -927,9 +976,39 @@ test("the provision chain skips git when the image is there, and stops before do
     const build = run({});
     assert.match(build, /^docker build/m);
     assert.match(build, /^docker run -d/m);
-  } finally {
-    fs.rmSync(dir, { recursive: true, force: true });
-  }
+  });
+});
+
+test("a container that fails to START is removed, so the bot reads as stuck rather than as a stopped bot", async () => {
+  // `docker run` = create + start; a start failure leaves the container in
+  // state "created", which reads exactly like a parked bot and is fed every pass.
+  await withProvisionScript(async (run) => {
+    const log = run({ IMAGE_PRESENT: "1", RUN_FAIL: "1" }).trim().split("\n");
+    const at = log.findIndex((l) => /^docker run -d /.test(l));
+    assert.ok(at >= 0, "docker run was attempted");
+    assert.ok(log.slice(at + 1).includes("docker rm -f noclaim-bot-7"), log.join(" | "));
+    assert.ok(!log.some((l) => /started/.test(l)));
+    // ...and a start that works removes nothing afterwards.
+    const ok = run({ IMAGE_PRESENT: "1" }).trim().split("\n");
+    const runAt = ok.findIndex((l) => /^docker run -d /.test(l));
+    assert.deepEqual(ok.slice(runAt + 1), []);
+  });
+});
+
+test("a container in state \"created\" (the rollout's stopped bots) is parked, never stuck", async () => {
+  const fleet = fleetFake({
+    readFleet: async () => ({
+      provisioning: false,
+      psOk: true,
+      containers: 1,
+      bots: [{ id: "22", game: "Rainbow Six Siege", accounts: 10, containerState: "created", running: false }],
+    }),
+  });
+  await withAllocator({ fleet, rows: R6, campaigns: R6_LIVE }, async (env) => {
+    const p = await env.alloc.plan();
+    assert.deepEqual(p.games[0].stuck, []);
+    assert.deepEqual(p.games[0].fleet.roomBots.map((b) => b.id), ["22"]);
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -1039,7 +1118,7 @@ test("plan() marks the container cap, and a capped game asks only for the room i
     const p = await env.alloc.plan();
     const g = p.games[0];
     assert.deepEqual(p.containers, { count: 40, max: 40 });
-    assert.match(g.createBlocked, /container cap reached/);
+    assert.match(g.createBlocked, /cap is 40/);
     assert.equal(g.fleetNeed, 90);
     assert.equal(g.grant, 10, "only bot 3's 10 free seats can be filled");
   });
@@ -1080,5 +1159,234 @@ test("status() always carries lastRun and intervalMin, and never throws", async 
     assert.equal(s.lastRun, null);
   } finally {
     restore();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// The 2026-10-03 review's gaps
+// ---------------------------------------------------------------------------
+
+test("a renamed login's committed ledger still keeps its pool row out, by poolAccountId", async () => {
+  // The scan writes a ledger under the LIVE Twitch login, so a renamed
+  // account's ledger never matches its pool row's usernameLower — but it
+  // carries the row's id, and the sellers look it up by both names.
+  const OLD = "64b000000000000000000001";
+  const pool = [acct(OLD, 10, { username: "OldName", usernameLower: "oldname" }), acct("fine", 9)];
+  const ledgers = [
+    { source: "noclaim", loginLower: "newname", poolAccountId: OLD, status: "sold", game: "Overwatch" },
+    // Free-form ids must not reach the query: one non-ObjectId is a CastError.
+    { source: "noclaim", loginLower: "someone", poolAccountId: "not-an-id", status: "sold", game: "Overwatch" },
+  ];
+  await withFleet({ pool, ledgers }, async (env) => {
+    assert.equal((await env.fleet.spendable("Overwatch")).ready, 1);
+    const claimed = await env.fleet.claimForGame("Overwatch", 5);
+    assert.deepEqual(claimed.map((d) => d._id), ["fine"]);
+    assert.equal(env.pool.get(OLD).status, "available");
+    assert.deepEqual(env.pool.calls.claim[0].$and[0]._id, { $nin: [OLD] });
+  });
+});
+
+test("a password no seller can decrypt is put back, skipped for the rest of the process, and counted", async () => {
+  const pool = [
+    acct("bad", 10, { password: "broken:v1:zz" }),
+    acct("credonly", 9, { password: "", credPasswordEnc: "enc:fine" }),
+    acct("good", 8),
+  ];
+  await withFleet({ pool }, async (env) => {
+    const first = await env.fleet.claimForGame("Overwatch", 2);
+    assert.deepEqual(first.map((d) => d._id), ["credonly", "good"]);
+    assert.equal(first.unreadablePasswords, 1);
+    assert.equal(env.pool.get("bad").status, "available", "put straight back");
+    // Claimed lean: a hydrated document hides credPasswordEnc (not a schema
+    // path), which would make "credonly" read as password-less.
+    assert.ok(env.pool.calls.claimOpts.every((o) => o.lean === true));
+    const ev = env.events.find((e) => e.action === "password_unreadable");
+    assert.ok(ev);
+    assert.deepEqual(ev.meta.logins, ["bad"]);
+
+    await env.fleet.release(first);
+    assert.equal((await env.fleet.spendable("")).ready, 2, "no longer counted as supply");
+    env.pool.calls.claim.length = 0;
+    const second = await env.fleet.claimForGame("Overwatch", 3);
+    assert.deepEqual(second.map((d) => d._id).sort(), ["credonly", "good"]);
+    assert.equal(second.unreadablePasswords, 0, "never claimed again by this process");
+    for (const q of env.pool.calls.claim) assert.ok(q.$and[0]._id.$nin.includes("bad"));
+  });
+});
+
+test("the allocator counts the rows it put back for an unreadable password", async () => {
+  const pool = [acct("bad", 10, { password: "broken:v1:zz" }), acct("a", 9), acct("b", 8)];
+  await withBoth({ pool, host: { configs: { 5: botConfig(["x"]) } } }, async (env) => {
+    const out = await env.alloc.apply({ plan: topUpPlan(2, [{ id: "5", game: "Overwatch", room: 10 }]) });
+    assert.equal(out.toppedUp, 2);
+    assert.equal(out.results[0].passwordUnreadable, 1);
+    assert.equal(out.passwordUnreadable, 1);
+    assert.deepEqual(secretsIn(env, "5"), ["x", "sec-a", "sec-b"]);
+  });
+});
+
+test("a create whose outcome is unknown is the pass's one create: no second create on that host", async () => {
+  const fleet = fleetFake({
+    createBot: async (o) => {
+      fleet.calls.create.push(o);
+      const e = new Error("Raspberry Pi is unreachable over SSH.");
+      e.unknownState = true;
+      throw e;
+    },
+  });
+  await withAllocator({ fleet }, async ({ alloc }) => {
+    const out = await alloc.apply({
+      plan: planOf([
+        planGame({ key: "rainbow six", label: "Rainbow Six", grant: 40, fleetNeed: 40 }),
+        planGame({ grant: 20, fleetNeed: 20 }),
+      ]),
+    });
+    assert.equal(fleet.calls.create.length, 1);
+    assert.equal(out.results[0].createUnknown, true);
+    assert.equal(out.results[1].createdBot, null);
+  });
+});
+
+test("plan() asks the RAM gate as well: a game that cannot get a container asks only for its bots' room", async () => {
+  // The review's case: Rainbow Six out-earns Overwatch 9:1, has 5 free seats
+  // and no RAM for a new bot; Overwatch has 40 free seats.
+  const fleet = fleetFake({
+    readFleet: async () => ({
+      provisioning: false,
+      psOk: true,
+      containers: 2,
+      bots: [
+        { id: "17", game: "Rainbow Six Siege", accounts: 65, containerState: "exited", running: false },
+        { id: "3", game: "Overwatch 2", accounts: 30, containerState: "running", running: true },
+      ],
+    }),
+    newContainerGate: async (o) => {
+      fleet.calls.gate.push(o);
+      return { ok: false, reason: "host contabo has 900 MB of RAM free, under the 1500 MB a new container needs" };
+    },
+  });
+  const rows = [
+    { ...demandRow("rainbow six", "Rainbow Six", 100), weight: 9 },
+    { ...demandRow("overwatch", "Overwatch", 100), weight: 1 },
+  ];
+  const campaigns = [{ game: "Rainbow Six Siege" }, { game: "Overwatch 2" }];
+  await withAllocator({ fleet, rows, campaigns }, async (env) => {
+    const p = await env.alloc.plan();
+    const r6 = p.games.find((g) => g.key === "rainbow six");
+    const ow = p.games.find((g) => g.key === "overwatch");
+    assert.match(r6.createBlocked, /900 MB/);
+    assert.equal(r6.grant, 5, "only its 5 free seats");
+    assert.equal(ow.grant, 40, "the rest of the budget goes where it can be used");
+    assert.deepEqual(fleet.calls.gate, [{ containers: 2 }], "one gate read per plan");
+  });
+});
+
+test("a stranded create can be found from its stored event even when the login list is cut", async () => {
+  const pool = Array.from({ length: 70 }, (_, i) => acct("farmacct_" + String(i).padStart(4, "0"), 100 - i));
+  await withFleet(
+    { pool, realLog: true, host: { ids: ["50"], failWrite: () => "after", failReread: () => true } },
+    async (env) => {
+      await assert.rejects(env.fleet.createBot({ game: "Overwatch", count: 70 }), (e) => e.unknownState === true);
+      const ev = env.saved.find((e) => e.action === "topup_state_unknown");
+      assert.ok(ev, "stored through the real systemLog");
+      assert.ok(ev.detail.length <= 501, "systemLog cut the detail");
+      const m = ev.detail.match(/claimedNote "([^"]+)", claimedAt (\S+) to (\S+),/);
+      assert.ok(m, ev.detail.slice(0, 300));
+      const [, note, from, to] = m;
+      const found = env.pool.docs.filter(
+        (d) =>
+          d.status === "claimed" &&
+          d.claimedNote === note &&
+          +d.claimedAt >= +new Date(from) &&
+          +d.claimedAt <= +new Date(to),
+      );
+      assert.equal(found.length, 70, "the locator finds every stranded row");
+      assert.equal(ev.meta.claimedFrom, from, "meta was not dropped as oversize");
+      assert.equal(ev.meta.claimedTo, to);
+      assert.equal(ev.meta.notePrefix, "noclaim-farm");
+      assert.deepEqual(ev.meta.noteGames, ["Overwatch"]);
+      assert.equal(ev.meta.logins.length + ev.meta.loginsOmitted, 70);
+    },
+  );
+});
+
+test("a stale .provisioning lock no longer hides a stuck bot, and a reused bot id is reported again", async () => {
+  let fleetRead = null;
+  const fleet = fleetFake({ readFleet: async () => fleetRead });
+  const read = (mtime, lockAgeSec) => ({
+    provisioning: lockAgeSec != null,
+    provisioningAgeSec: lockAgeSec,
+    psOk: true,
+    containers: 1,
+    bots: [
+      { id: "3", game: "Rainbow Six Siege", accounts: 70, containerState: "running", running: true, configMtime: 100 },
+      { id: "12", game: "Rainbow Six Siege", accounts: 60, containerState: "none", running: false, configMtime: mtime },
+    ],
+  });
+  await withAllocator({ fleet, rows: R6, campaigns: R6_LIVE }, async (env) => {
+    const pass = async () => env.alloc.apply({ plan: await env.alloc.plan() });
+    fleetRead = read(1000, 5 * 60); // a provision really in flight: hold back
+    await pass();
+    assert.equal(env.telegrams.length, 0);
+    fleetRead = read(1000, 45 * 60); // a lock nobody removed
+    await pass();
+    assert.equal(env.telegrams.length, 1);
+    assert.match(env.telegrams[0], /45 min and looks stale/);
+    fleetRead = read(1000, null);
+    await pass();
+    assert.equal(env.telegrams.length, 1, "the same bot is reported once");
+    fleetRead = read(2000, null); // bot 12 was released and the id reused
+    await pass();
+    assert.equal(env.telegrams.length, 2, "a new bot under an old id is reported again");
+    assert.equal(env.events.filter((e) => e.action === "provision_stuck").length, 2);
+  });
+});
+
+test("readFleet's script reads the lock's age and each config's mtime on a real shell", async () => {
+  // The fleet script itself, run by /bin/sh over a temp copy of the layout:
+  // fake `docker` on PATH, and `stat -c %Y` answered through `date -r`, which
+  // GNU and BSD date both have (macOS stat has no -c).
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "noclaim-fleet-"));
+  try {
+    const bin = path.join(dir, "bin");
+    const base = path.join(dir, "base");
+    fs.mkdirSync(bin);
+    fs.mkdirSync(path.join(base, "bots", "12", "Configuration"), { recursive: true });
+    fs.writeFileSync(path.join(bin, "docker"), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+    fs.writeFileSync(
+      path.join(bin, "stat"),
+      '#!/bin/sh\nif [ "$1" = -c ] && [ "$2" = %Y ]; then exec date -r "$3" +%s; fi\nexit 1\n',
+      { mode: 0o755 },
+    );
+    const cfgFile = path.join(base, "bots", "12", "Configuration", "config.json");
+    fs.writeFileSync(cfgFile, JSON.stringify(botConfig(["s1", "s2"], "Rainbow Six Siege"), null, 2));
+    const mtime = 1759450000;
+    fs.utimesSync(cfgFile, mtime, mtime);
+    const lock = path.join(base, ".provisioning");
+    fs.writeFileSync(lock, "");
+    const lockAt = Math.floor(Date.now() / 1000) - 45 * 60;
+    fs.utimesSync(lock, lockAt, lockAt);
+    const hosts = {
+      ...fakeHost().hosts,
+      runShell: async (h, script) => ({
+        stdout: execFileSync("sh", ["-c", script.split(BASE).join(base)], {
+          env: { ...process.env, PATH: bin + ":" + process.env.PATH },
+        }).toString(),
+      }),
+    };
+    await withFleet({ hosts }, async ({ fleet }) => {
+      const f = await fleet.readFleet();
+      assert.equal(f.provisioning, true);
+      assert.ok(Math.abs(f.provisioningAgeSec - 45 * 60) <= 5, String(f.provisioningAgeSec));
+      assert.equal(f.psOk, true);
+      assert.equal(f.bots.length, 1);
+      assert.deepEqual(
+        { id: f.bots[0].id, game: f.bots[0].game, accounts: f.bots[0].accounts, configMtime: f.bots[0].configMtime },
+        { id: "12", game: "Rainbow Six Siege", accounts: 2, configMtime: mtime },
+      );
+      assert.equal(f.bots[0].containerState, "none");
+    });
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
   }
 });
