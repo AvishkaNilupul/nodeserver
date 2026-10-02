@@ -76,7 +76,39 @@ const REAL_DEPS = {
   // a load-order cycle.
   gatherPoolEligibility: () =>
     require("../routes/renterAdminRoutes").gatherPoolEligibility,
+  // The farm loops' own hooks and the RAM gate's cache (docs/LIVE-FIXES-1003.md
+  // §3, §2). Their evidence lives in memory, in the module instance that runs
+  // the loop, so these hand back the copy this process already holds and never
+  // load a fresh one — see loadedModule().
+  autoFarmer: () => loadedModule("./autoFarmer"),
+  farm2Supervisor: () => loadedModule("./farm2/supervisor"),
+  unclaimedAllocator: () => loadedModule("./unclaimedAllocator"),
+  demandBrain: () => loadedModule("./demandBrain"),
+  hostCapacity: () => loadedModule("./hostCapacity"),
+  // How long this process has been up. Those in-memory stamps start empty at
+  // every restart, so the restart is where a loop's clock starts.
+  uptimeMs: () => () => process.uptime() * 1000,
 };
+
+// The module if THIS process has already loaded it, else null — never a fresh
+// load. A freshly loaded copy (a CLI run of this file, a test) holds no stamp
+// at all and would read as a loop that never ran, which is a verdict invented
+// by the act of looking. null says "not running in this process" and the
+// checks report it as unknown. In the server every one of these is loaded at
+// boot: server.js requires autoFarmer, unclaimedAllocator and utils/farm2
+// (which requires its supervisor), and routes/priceTrackerRoutes.real() starts
+// the brain. utils/hostCapacity is loaded by whichever farm first asks it, and
+// until one has asked it holds no reading anyway.
+function loadedModule(request) {
+  try {
+    const cached = require.cache[require.resolve(request)];
+    return cached && cached.loaded ? cached.exports : null;
+  } catch {
+    // Not on disk at all (a sibling module not deployed yet): as absent as
+    // not loaded.
+    return null;
+  }
+}
 
 function makeCtx({ deps = {}, now } = {}) {
   const cache = new Map();
@@ -417,6 +449,83 @@ const LOOP_BUDGETS = {
 // the ledger rows it touches, so six missed ticks is an hour of silence.
 const AUTOLIST_STALE_TICKS = 6;
 
+// Farm-loop freshness (docs/LIVE-FIXES-1003.md §A6). Unlike LOOP_BUDGETS these
+// scale with each loop's own interval: ok within 2.5 intervals (a slow pass
+// plus a missed tick), warn up to 6, fail beyond.
+const LOOP_OK_INTERVALS = 2.5;
+const LOOP_WARN_INTERVALS = 6;
+// The loops' stamps are in memory and empty after every restart, and the loops
+// start staggered (the allocator 3 min after boot, the brain 6 min), so for the
+// first 15 minutes a loop that has not run yet is not late.
+const LOOP_BOOT_GRACE_MS = 15 * 60 * 1000;
+
+// The four farm loops nothing proved alive (defect 7 of
+// docs/FARM-DISTRIBUTION-MAP.md — the allocator's heartbeat was a console line),
+// each read through the one synchronous hook its owner exports for this page
+// (docs/LIVE-FIXES-1003.md §3). `fallbackMin` is the cadence production runs
+// (FARM-DISTRIBUTION-MAP §3.4), used only when a hook leaves out intervalMin,
+// and the row says so.
+const FARM_LOOPS = [
+  {
+    id: "autoFarmer",
+    label: "auto-farm tick (legacy engine)",
+    dep: "autoFarmer",
+    hook: "loopStatus",
+    lastKey: "lastTickAt",
+    fallbackMin: 10,
+    offNote: "switched off in settings",
+  },
+  {
+    id: "farm2",
+    label: "farm2 lane supervisor",
+    dep: "farm2Supervisor",
+    hook: "loopStatus",
+    lastKey: "lastRun",
+    fallbackMin: 3,
+    offNote: "switched off (autoFarm.farm2Enabled)",
+    // A cycle does nothing while the master auto-farm switch is off, whatever
+    // farm2's own switch says, so a quiet supervisor then is the design.
+    followsMaster: true,
+  },
+  {
+    id: "unclaimedAllocator",
+    label: "no-claim fleet allocator",
+    dep: "unclaimedAllocator",
+    hook: "status",
+    lastKey: "lastRun",
+    fallbackMin: 60,
+    // It MEASURES every pass and only ACTS when autoFarm.noclaimAutoSize is on,
+    // so its loop has no off state: a silent allocator is always a finding.
+    alwaysOn: true,
+  },
+  {
+    id: "demandBrain",
+    label: "farm brain (test log)",
+    dep: "demandBrain",
+    hook: "loopStatus",
+    lastKey: "lastRunAt",
+    fallbackMin: 60,
+    offNote: "switched off (autoFarm.demandBrain.enabled)",
+    // It logs nothing until it is switched on, so it is judged only then.
+    onlyWhenEnabled: true,
+  },
+];
+
+// The no-claim feeder builds every bot on Contabo (docs/LIVE-FIXES-1003.md §A2
+// names the host; utils/noclaimWatcher and utils/unclaimedAutoList carry the
+// same constant).
+const NOCLAIM_HOST_ID = "contabo";
+// utils/settings' shipped default for autoFarm.hostMinFreeMb (§1), used only
+// when the setting is missing or not a number.
+const HOST_MIN_FREE_MB_DEFAULT = 1500;
+// The contract's early warning: a host under 1.5x the gate is close to the
+// line where the farms stop creating containers on it.
+const HOST_RAM_WARN_FACTOR = 1.5;
+// A reading is only as fresh as the last time a farm asked the gate. Older than
+// two hourly health runs it is history, not the host's memory now — shown,
+// never judged, so an old figure can neither cry wolf nor stay green.
+const HOST_RAM_STALE_MS = 2 * 60 * 60 * 1000;
+
 // ---------------------------------------------------------------------------
 // Shared evidence: what drop bundles have actually sold for
 // ---------------------------------------------------------------------------
@@ -590,6 +699,127 @@ async function realisedSales(ctx) {
     })();
   }
   return ctx.__realisedSales;
+}
+
+// ---------------------------------------------------------------------------
+// Farm loops and host RAM: evidence held in this process
+// ---------------------------------------------------------------------------
+
+// A stamp as epoch ms. The hooks hand back Dates; an ISO string or an epoch
+// number reads the same, and anything else is no stamp at all.
+function stampMs(v) {
+  if (v == null || v === "") return null;
+  if (v instanceof Date) return Number.isFinite(v.getTime()) ? v.getTime() : null;
+  if (typeof v === "number") return Number.isFinite(v) ? v : null;
+  const n = Date.parse(String(v));
+  return Number.isFinite(n) ? n : null;
+}
+
+// The verdict on one in-process loop. Pure: the clock and the process age are
+// arguments, so a test pins both.
+//
+// A loop's stamp lives in memory and is empty after every restart — the trap
+// loops.alive was built around (an in-process counter said "fine" for seven
+// days while the pool checker checked nothing). So a loop that has not run
+// since this process started is timed FROM the start, and so is a stamp older
+// than the start (it can only have been carried over): a restart can hide a
+// dead loop for no longer than the loop's own budget. "pending" is that loop
+// inside its budget with no pass yet — not proof of life, and not late either.
+function judgeLoop({
+  lastAt,
+  intervalMin,
+  enabled = true,
+  now,
+  uptimeMs,
+  graceMs = LOOP_BOOT_GRACE_MS,
+} = {}) {
+  const nowMs = now instanceof Date ? now.getTime() : Date.now();
+  const intervalMs = Number(intervalMin) * 60 * 1000;
+  const okMs = intervalMs * LOOP_OK_INTERVALS;
+  const warnMs = intervalMs * LOOP_WARN_INTERVALS;
+  const out = { status: "unknown", ageMs: null, okMs, warnMs, ranSinceStart: false, inGrace: false };
+  if (enabled === false) return { ...out, status: "off" };
+  if (!Number.isFinite(intervalMs) || intervalMs <= 0) return out;
+  const up = Number(uptimeMs);
+  const startedAt =
+    uptimeMs != null && Number.isFinite(up) && up >= 0 ? nowMs - up : null;
+  const last = stampMs(lastAt);
+  const ranSinceStart = last != null && (startedAt == null || last >= startedAt);
+  const from = ranSinceStart ? last : startedAt;
+  // No pass on record and no idea when the process started: nothing to time.
+  if (from == null) return out;
+  const ageMs = Math.max(0, nowMs - from);
+  const inGrace = startedAt != null && nowMs - startedAt < graceMs;
+  let status;
+  if (inGrace || ageMs <= okMs) status = ranSinceStart ? "ok" : "pending";
+  else if (ageMs <= warnMs) status = "warn";
+  else status = "fail";
+  return { ...out, status, ageMs, ranSinceStart, inGrace };
+}
+
+// One loop's hook, read defensively. A module this process has not loaded, a
+// hook its owner has not exported, one that throws or one that answers nothing
+// is that loop's `unknown` — never the whole check's crash. Awaited although
+// the contract makes every hook synchronous: a hook that turned async must
+// still be read, not mistaken for a loop with no stamp.
+async function readLoopHook(ctx, def) {
+  const why = (e) => String((e && e.message) || e).slice(0, 120);
+  let mod;
+  try {
+    mod = ctx.dep(def.dep);
+  } catch (e) {
+    return { error: "could not be loaded: " + why(e) };
+  }
+  if (!mod) {
+    return {
+      error:
+        "not loaded in this process — this run is not inside the server that " +
+        "runs the loop, so its stamp cannot be seen from here",
+    };
+  }
+  if (typeof mod[def.hook] !== "function") {
+    return { error: def.dep + "." + def.hook + "() is not exported" };
+  }
+  try {
+    const status = await mod[def.hook]();
+    if (!status || typeof status !== "object") {
+      return { error: def.dep + "." + def.hook + "() returned no status" };
+    }
+    return { status };
+  } catch (e) {
+    return { error: def.dep + "." + def.hook + "() threw: " + why(e) };
+  }
+}
+
+// autoFarm.hostMinFreeMb as §1 defines it: a positive number is the line, 0
+// (or less) switches the gate off, and a missing or non-numeric value is the
+// shipped default — so a half-written setting never makes this check laxer
+// than the gate.
+function hostMinFreeMbOf(af) {
+  const raw = af ? af.hostMinFreeMb : undefined;
+  if (raw == null || raw === "") return HOST_MIN_FREE_MB_DEFAULT;
+  const n = Number(raw);
+  if (!Number.isFinite(n)) return HOST_MIN_FREE_MB_DEFAULT;
+  return Math.max(0, n);
+}
+
+// The host the auto-farm creates its containers on: autoFarm.hostId, or, when
+// that is blank, whatever the engine itself picks (autoFarmer.resolveFarmHost —
+// "the first ssh host"), so this watches the machine the gate is asked about
+// rather than a second guess at it. Production sets hostId "contabo".
+function farmHostIdOf(ctx, af) {
+  const set = String((af && af.hostId) || "").trim();
+  if (set) return set;
+  try {
+    const engine = ctx.dep("autoFarmer");
+    const host =
+      engine && typeof engine.resolveFarmHost === "function"
+        ? engine.resolveFarmHost(af)
+        : null;
+    return host && host.id ? String(host.id) : "";
+  } catch {
+    return "";
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -2585,6 +2815,325 @@ const CHECKS = [
       };
     },
   },
+
+  {
+    id: "loops.farm",
+    title: "Farm loops ticking",
+    group: "loops",
+    severity: "warn",
+    // Defect 7 of docs/FARM-DISTRIBUTION-MAP.md: nothing proved the no-claim
+    // allocator alive — its heartbeat was a console line — and the auto-farm
+    // tick, the farm2 supervisor and the farm brain were in the same state.
+    //
+    // loops.alive above proves its loops from timestamps persisted to the DB.
+    // This one, by its contract (docs/LIVE-FIXES-1003.md §A6), reads only the
+    // one synchronous hook each owner exports — no DB read, no SSH — so its
+    // evidence is each loop's in-memory stamp of its last pass. judgeLoop()
+    // carries the price of that: a loop with no pass since the restart is timed
+    // from the restart. And the hooks are read from the module instance the
+    // server runs, never a fresh copy (loadedModule), so a run outside the
+    // server says unknown instead of "never ran".
+    async run(ctx) {
+      const now = ctx.now();
+      let uptimeMs = null;
+      try {
+        const up = ctx.dep("uptimeMs");
+        const v = Number(typeof up === "function" ? up() : up);
+        uptimeMs = Number.isFinite(v) && v >= 0 ? v : null;
+      } catch {
+        uptimeMs = null;
+      }
+      // Only `false` turns farm2 off: an unreadable setting must not excuse a
+      // supervisor that has stopped.
+      let masterOff = false;
+      try {
+        masterOff = (ctx.dep("settings").getAutoFarm() || {}).enabled === false;
+      } catch {
+        masterOff = false;
+      }
+
+      // Row keys are ordered for the page, which prints `label` and then the
+      // first three plain, non-null fields: status, last pass and budget for a
+      // judged loop; for an off or unreadable one the empty fields drop out and
+      // `note` — the reason — takes their place.
+      const items = [];
+      for (const def of FARM_LOOPS) {
+        const read = await readLoopHook(ctx, def);
+        if (read.error) {
+          items.push({
+            label: def.label,
+            status: "unknown",
+            last: null,
+            okWithin: null,
+            note: read.error,
+            loop: def.id,
+          });
+          continue;
+        }
+        const st = read.status;
+        const hookMin = Number(st.intervalMin);
+        const fromHook = Number.isFinite(hookMin) && hookMin > 0;
+        const intervalMin = fromHook ? hookMin : def.fallbackMin;
+        let offWhy = "";
+        if (!def.alwaysOn) {
+          if (def.onlyWhenEnabled ? st.enabled !== true : st.enabled === false) {
+            offWhy = def.offNote;
+          } else if (def.followsMaster && masterOff) {
+            offWhy = "idle by design: the master auto-farm switch (autoFarm.enabled) is off";
+          }
+        }
+        const lastMs = stampMs(st[def.lastKey]);
+        const v = judgeLoop({
+          lastAt: lastMs,
+          intervalMin,
+          enabled: !offWhy,
+          now,
+          uptimeMs,
+        });
+        let last;
+        if (v.ranSinceStart) last = fmtAge(v.ageMs) + " ago";
+        else if (v.status === "off" || uptimeMs == null) {
+          last = lastMs == null ? "never" : fmtAge(now.getTime() - lastMs) + " ago";
+        } else {
+          last = "none since the server started " + fmtAge(uptimeMs) + " ago";
+        }
+        items.push({
+          label: def.label,
+          status: v.status,
+          last,
+          okWithin: v.status === "off" ? null : fmtAge(v.okMs),
+          note: [
+            offWhy,
+            fromHook
+              ? ""
+              : "the hook gave no intervalMin — judged on production's " +
+                def.fallbackMin + " min",
+            v.inGrace && v.status !== "off"
+              ? "inside the " + fmtAge(LOOP_BOOT_GRACE_MS) + " grace after a restart"
+              : "",
+          ]
+            .filter(Boolean)
+            .join("; ") || null,
+          loop: def.id,
+          intervalMin,
+          lastAt: lastMs == null ? null : new Date(lastMs),
+        });
+      }
+
+      const by = (s) => items.filter((i) => i.status === s);
+      const names = (list) => list.map((i) => i.label).join(", ");
+      const dead = by("fail");
+      const late = by("warn");
+      const blind = by("unknown");
+      const waiting = by("pending");
+      const off = by("off");
+      const fresh = by("ok");
+      // "off" and "pending" are known states, not verdicts: neither may colour
+      // the card. With nothing judged at all, nothing was proved — unknown,
+      // the file's rule for a check with no evidence — unless every loop is
+      // switched off, which is a state the owner chose.
+      const judged = items.filter((i) => STATUSES.includes(i.status));
+      const status = judged.length
+        ? worstStatus(judged)
+        : waiting.length
+          ? "unknown"
+          : "ok";
+      const enabled = items.length - off.length;
+
+      const parts = [];
+      if (dead.length) {
+        parts.push(
+          dead.map((i) => i.label + " (last pass: " + i.last + ")").join(", ") +
+            (dead.length === 1 ? " has" : " have") +
+            " done no pass inside " + LOOP_WARN_INTERVALS + " intervals",
+        );
+      }
+      if (late.length) {
+        parts.push(
+          late
+            .map((i) => i.label + " (last pass: " + i.last + ", ok within " + i.okWithin + ")")
+            .join(", ") + " running late",
+        );
+      }
+      if (!dead.length && !late.length && fresh.length) {
+        parts.push(fresh.length + " of " + enabled + " enabled farm loop(s) proved a recent pass");
+      }
+      if (waiting.length) {
+        parts.push(
+          names(waiting) + " not run since the server started " + fmtAge(uptimeMs) +
+            " ago — not due yet, so not proved either",
+        );
+      }
+      if (blind.length) parts.push(names(blind) + " could not be read");
+      if (off.length) {
+        parts.push(
+          off.length === items.length
+            ? "every farm loop is switched off in settings"
+            : names(off) + " off",
+        );
+      }
+
+      const summary = parts.join("; ");
+      return {
+        status,
+        measured: fresh.length,
+        summary: summary.charAt(0).toUpperCase() + summary.slice(1),
+        threshold:
+          enabled + " enabled loop(s), each with a pass within " +
+          LOOP_OK_INTERVALS + "× its interval (warn to " + LOOP_WARN_INTERVALS +
+          "×, fail beyond; " + fmtAge(LOOP_BOOT_GRACE_MS) + " grace after a restart)",
+        detail:
+          "Evidence is each loop's own in-memory stamp of its last pass, read " +
+          "through the hook its owner exports (autoFarmer.loopStatus, " +
+          "farm2/supervisor.loopStatus, unclaimedAllocator.status, " +
+          "demandBrain.loopStatus) — no DB read and no SSH. The stamps empty at " +
+          "every restart, so a loop with no pass since the server started is " +
+          "timed from the start: a restart cannot hide a dead loop for longer " +
+          "than its own budget. A stamp proves a pass ran, not what it did. A " +
+          "loop switched off in settings is off, not failing — farm2 is idle while " +
+          "the master auto-farm switch is off, and the brain is judged only when " +
+          "it is switched on.",
+        items: capItems(items),
+      };
+    },
+  },
+
+  {
+    id: "hosts.ram",
+    title: "Farm host has RAM for a new bot",
+    group: "capacity",
+    severity: "warn",
+    // Defect 16: nothing limited bot containers by memory, and all three farms
+    // share one Contabo machine. utils/hostCapacity now refuses a NEW container
+    // on a host under autoFarm.hostMinFreeMb; this says how close each farm
+    // host is to that line, from the gate's own cached reading
+    // (hostCapacity.lastReading) — the health run never opens an SSH session of
+    // its own, so a figure is only as fresh as the last time a farm asked.
+    async run(ctx) {
+      let af = {};
+      try {
+        af = ctx.dep("settings").getAutoFarm() || {};
+      } catch {
+        af = {};
+      }
+      const minFreeMb = hostMinFreeMbOf(af);
+      const gateOff = !(minFreeMb > 0);
+      const warnBelow = minFreeMb * HOST_RAM_WARN_FACTOR;
+      const threshold = gateOff
+        ? "the new-container RAM gate is off (autoFarm.hostMinFreeMb 0) — readings shown, not judged"
+        : "warn under " + Math.round(warnBelow) + " MB, fail under " + minFreeMb +
+          " MB available (autoFarm.hostMinFreeMb, the new-container gate)";
+
+      // Every host a farm builds NEW containers on. On production both farms
+      // resolve to contabo, so this is one row.
+      const hosts = new Map();
+      const addHost = (id, farm) => {
+        const key = String(id || "").trim();
+        if (!key) return;
+        if (!hosts.has(key)) hosts.set(key, []);
+        hosts.get(key).push(farm);
+      };
+      addHost(farmHostIdOf(ctx, af), "auto-farm");
+      addHost(NOCLAIM_HOST_ID, "no-claim");
+
+      let cap = null;
+      let capError = "";
+      try {
+        cap = ctx.dep("hostCapacity");
+        if (cap && typeof cap.lastReading !== "function") {
+          capError = "hostCapacity.lastReading() is not exported";
+        }
+      } catch (e) {
+        capError = "utils/hostCapacity could not be loaded: " + String((e && e.message) || e).slice(0, 120);
+      }
+
+      const nowMs = ctx.now().getTime();
+      const items = [];
+      for (const [hostId, farms] of hosts) {
+        let reading = null;
+        let note = capError;
+        if (!note && cap) {
+          try {
+            reading = cap.lastReading(hostId);
+          } catch (e) {
+            note = "lastReading() threw: " + String((e && e.message) || e).slice(0, 120);
+          }
+        }
+        const raw = reading ? reading.availableMb : null;
+        const mb = raw != null && raw !== "" && Number.isFinite(Number(raw)) ? Number(raw) : null;
+        const at = reading ? stampMs(reading.at) : null;
+        const age = at == null ? null : Math.max(0, nowMs - at);
+        // Every path but a fresh figure is `unknown`, each with its reason. A
+        // module not loaded means nothing in this process has asked the gate
+        // yet; either way there is no figure to judge.
+        let status = "unknown";
+        if (!note && !reading) {
+          note =
+            "no reading — no farm has asked the new-container gate about this " +
+            "host since the server started";
+        } else if (!note && mb == null) {
+          note = "the gate's last read of this host failed";
+        } else if (!note && age != null && age > HOST_RAM_STALE_MS) {
+          note = "reading is " + fmtAge(age) + " old — shown, not judged";
+        } else if (!note) {
+          status = gateOff
+            ? "ok"
+            : statusForLow(mb, { warnBelow, failBelow: minFreeMb });
+          if (age == null) note = "the reading carries no time";
+        }
+        // Ordered for the page like loops.farm's rows: with no figure,
+        // availableMb drops out and the reason is shown in its place.
+        items.push({
+          label: hostId,
+          status,
+          availableMb: mb,
+          read: at != null ? fmtAge(age) + " ago" : reading ? "time unknown" : "never",
+          note: note || null,
+          farms: farms.join(" + "),
+        });
+      }
+
+      const judgedMb = items
+        .filter((i) => i.status !== "unknown" && i.availableMb != null)
+        .map((i) => i.availableMb);
+      const lowest = judgedMb.length ? Math.min(...judgedMb) : null;
+      const line = (i) => {
+        if (i.status === "fail") {
+          return i.label + " has " + i.availableMb + " MB available — under the " +
+            minFreeMb + " MB gate, so the farms start no new bot there";
+        }
+        if (i.status === "warn") {
+          return i.label + " has " + i.availableMb + " MB available — within " +
+            HOST_RAM_WARN_FACTOR + "× of the " + minFreeMb + " MB gate";
+        }
+        if (i.status === "ok") {
+          return i.label + " has " + i.availableMb + " MB available (read " + i.read +
+            (gateOff ? "; gate off" : "") + ")";
+        }
+        return i.label + ": " + i.note;
+      };
+      return {
+        status: worstStatus(items),
+        measured: lowest,
+        threshold,
+        summary: items
+          .slice()
+          .sort((a, b) => STATUS_RANK[b.status] - STATUS_RANK[a.status])
+          .map(line)
+          .join("; "),
+        detail:
+          "Evidence is utils/hostCapacity.lastReading(): the MemAvailable figure " +
+          "(/proc/meminfo) the new-container gate last read for each host a farm " +
+          "builds bots on — the auto-farm's host and the no-claim farm's (" +
+          NOCLAIM_HOST_ID + "). This run reads that cache only and never opens SSH, " +
+          "so a figure is as fresh as the last time a farm asked: none since the " +
+          "server started is unknown, and one older than " + fmtAge(HOST_RAM_STALE_MS) +
+          " is shown but not judged. Under the gate the farms start no new " +
+          "container on that host; bots already running keep their seats.",
+        items: capItems(items),
+      };
+    },
+  },
 ];
 
 // ---------------------------------------------------------------------------
@@ -2765,4 +3314,17 @@ module.exports = {
   GHOST_CONFIRM_CAP,
   STALE_LISTING_CAP,
   CHECK_TIMEOUT_MS,
+  // Farm loops + host RAM (docs/LIVE-FIXES-1003.md §A6).
+  judgeLoop,
+  stampMs,
+  loadedModule,
+  hostMinFreeMbOf,
+  FARM_LOOPS,
+  LOOP_OK_INTERVALS,
+  LOOP_WARN_INTERVALS,
+  LOOP_BOOT_GRACE_MS,
+  NOCLAIM_HOST_ID,
+  HOST_MIN_FREE_MB_DEFAULT,
+  HOST_RAM_WARN_FACTOR,
+  HOST_RAM_STALE_MS,
 };
