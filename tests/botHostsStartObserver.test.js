@@ -98,6 +98,42 @@ test("callerFrames skips botHosts and node internals, keeps two app frames", () 
   assert.equal(hosts.callerFrames(undefined), "");
 });
 
+test("notifyContainerStart reaches the observers like a docker start", () => {
+  hosts.notifyContainerStart(HOST, "restart", "twitchbotx9", "restartIfRunning (utils/farmControl.js:1)");
+  assert.deepEqual(seen, [
+    { hostId: "t1", action: "restart", container: "twitchbotx9", caller: "restartIfRunning (utils/farmControl.js:1)" },
+  ]);
+});
+
+// The park/restart lock (2026-10-03): one "should this container run?" change
+// at a time per container, in order; another container never waits; a failed
+// step never wedges the next.
+test("withContainerLock serialises one container's steps and never wedges", async () => {
+  const order = [];
+  let release;
+  const gate = new Promise((r) => (release = r));
+  const a = hosts.withContainerLock(HOST, "twitchbotx9", async () => {
+    order.push("a start");
+    await gate;
+    order.push("a end");
+  });
+  const b = hosts.withContainerLock(HOST, "twitchbotx9", async () => {
+    order.push("b");
+    throw new Error("b failed");
+  });
+  const c = hosts.withContainerLock(HOST, "twitchbotx9", async () => {
+    order.push("c");
+    return "c ok";
+  });
+  await hosts.withContainerLock(HOST, "twitchbotx10", async () => order.push("other"));
+  assert.deepEqual(order, ["a start", "other"], "b and c wait for a; x10 does not");
+  release();
+  await a;
+  await assert.rejects(b, /b failed/);
+  assert.equal(await c, "c ok");
+  assert.deepEqual(order, ["a start", "other", "a end", "b", "c"]);
+});
+
 // writeMeta holds botWaker's park registry (parked-bots.json). A plain
 // writeFile truncated it in place, so a reader in between saw "" or half the
 // JSON — "nothing is parked" to farm2's execute step and to the next park

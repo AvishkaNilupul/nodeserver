@@ -770,6 +770,34 @@ function notifyStart(host, action, container, caller) {
   }
 }
 
+// For a start made outside dockerContainer/composeUp — farmControl's
+// restartIfRunning runs its check-and-restart as one shell command — so the
+// observers still hear of it. `caller` is what callerFrames returned.
+function notifyContainerStart(host, action, container, caller) {
+  notifyStart(host, action, container, caller || "");
+}
+
+// One "should this container run?" change at a time per container, within this
+// process (2026-10-03). A park holds it from its restart-policy change to the
+// end of its stop (botWaker, stopIfNoAccounts); farmControl.restartIfRunning
+// holds it across its check-and-restart. Without it a restart decided while a
+// park's stop was still in flight (the container still reads "running" until
+// it exits) started the bot again the moment the stop landed — `docker
+// restart` STARTS a stopped container. Callers wait in order; a failed step
+// never wedges the next.
+const containerLocks = new Map();
+
+function withContainerLock(host, container, fn) {
+  const key = String((host && host.id) || "") + "|" + String(container || "");
+  const run = (containerLocks.get(key) || Promise.resolve()).then(() => fn());
+  const tail = run.catch(() => {});
+  containerLocks.set(key, tail);
+  tail.then(() => {
+    if (containerLocks.get(key) === tail) containerLocks.delete(key);
+  });
+  return run;
+}
+
 // Run a single-container docker verb (restart/start/stop/rm -f).
 async function dockerContainer(host, action, container) {
   const starts = action === "start" || action === "restart";
@@ -1125,8 +1153,12 @@ async function stopIfNoAccounts(host, file, container) {
   const running = states[container] && states[container].state === "running";
   if (!running) return { stopped: false };
 
-  await setRestartPolicy(host, container, "no").catch(() => {});
-  await dockerContainer(host, "stop", container).catch(() => {});
+  // Under the container's lock, like a park (see withContainerLock): a
+  // restart-if-running that arrives mid-stop must not start an empty bot.
+  await withContainerLock(host, container, async () => {
+    await setRestartPolicy(host, container, "no").catch(() => {});
+    await dockerContainer(host, "stop", container).catch(() => {});
+  });
   return { stopped: true };
 }
 
@@ -1155,6 +1187,8 @@ module.exports = {
   dockerPs,
   dockerContainer,
   onContainerStart,
+  notifyContainerStart,
+  withContainerLock,
   callerFrames,
   dockerLogs,
   dockerStats,

@@ -457,6 +457,67 @@ test("a park whose stop never landed is dropped quietly, not recorded as a start
   assert.equal(W.registry["contabo|twitchbotx50"], undefined, "it is not parked, so the entry goes");
 });
 
+test("a restart-if-running that arrives mid-park waits for the stop and leaves the bot parked", async () => {
+  // The drop scanner (farmControl.restartIfRunning) and the auto-farm tick's
+  // parker run in one process. docker as it behaves: `docker stop` takes a
+  // while and the container reads "running" until it exits; a `docker restart`
+  // that arrives meanwhile joins the stop and then STARTS the container.
+  const farmControl = require("../utils/farmControl");
+  world({
+    states: { twitchbotx19: { state: "running", status: "Up 3 hours" } },
+    configs: { "config_19.json": sotConfig() },
+    campaigns: [],
+  });
+  let stopping = false;
+  let startAfterStop = false;
+  let stopBegun;
+  const begun = new Promise((r) => (stopBegun = r));
+  let finishStop;
+  const stopGate = new Promise((r) => (finishStop = r));
+  const dc = hosts.dockerContainer;
+  const rs = hosts.runShell;
+  hosts.dockerContainer = async (_h, action, container) => {
+    W.docker.push(action + " " + container);
+    if (action === "stop") {
+      stopping = true;
+      stopBegun();
+      await stopGate;
+      stopping = false;
+      W.states[container] = startAfterStop
+        ? { state: "running", status: "Up 1 second" }
+        : { state: "exited", status: "Exited (143) 1 second ago" };
+    } else if (action === "restart") {
+      if (stopping) startAfterStop = true;
+      else W.states[container] = { state: "running", status: "Up 1 second" };
+    }
+    return "";
+  };
+  hosts.runShell = async (_h, script) => {
+    const c = /docker restart '([^']+)'/.exec(script)[1];
+    const st = W.states[c];
+    if (!st || st.state !== "running") return { stdout: "STATE " + (st ? st.state : "missing") + "\n" };
+    W.docker.push("restart " + c);
+    if (stopping) startAfterStop = true;
+    return { stdout: "RESTARTED\n" };
+  };
+  try {
+    const parking = botWaker.parkIdleNoCampaignBots("contabo");
+    await begun; // the park's `docker stop` is in flight
+    const restart = farmControl.restartIfRunning(HOST, "twitchbotx19");
+    await new Promise((r) => setImmediate(r));
+    finishStop();
+    const p = await parking;
+    const r = await restart;
+    assert.deepEqual(p.parked.map((x) => x.container), ["twitchbotx19"]);
+    assert.deepEqual(r, { restarted: false, state: "exited" });
+    assert.equal(W.states.twitchbotx19.state, "exited", "the bot stays parked");
+    assert.deepEqual(W.docker, ["stop twitchbotx19"]);
+  } finally {
+    hosts.dockerContainer = dc;
+    hosts.runShell = rs;
+  }
+});
+
 test("upForMs reads docker's uptime as a lower bound", () => {
   const MIN = 60e3;
   const HOUR = 60 * MIN;

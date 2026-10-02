@@ -48,14 +48,60 @@ function norm(s) {
 // (utils/botWaker.js) or was stopped on purpose; starting it wakes it with no
 // wake trigger and nothing recorded, and the next tick just parks it again. A
 // bot reads its config at startup, so a stopped one picks the edit up whenever
-// it is next started. Returns { restarted, state }.
-async function restartIfRunning(host, container) {
-  const states = await hosts.dockerPs(host);
-  const st = states && states[container];
-  const state = (st && st.state) || "missing";
-  if (state !== "running") return { restarted: false, state };
-  await hosts.dockerContainer(host, "restart", container);
-  return { restarted: true, state };
+// it is next started.
+//
+// The check and the restart are ONE shell command on the host (2026-10-03).
+// Reading `docker ps` and then sending `docker restart` in a second SSH call
+// left a round trip between them, and a park whose stop landed in it was
+// undone. And the step holds the container's lock (botHosts.withContainerLock),
+// which a park holds from its restart-policy change to the end of its stop: a
+// park still in flight reads "running" until the bot exits, so it is waited
+// out rather than restarted over. The check is docker's State.Status, the
+// value `docker ps` shows (State.Running is also true while paused/restarting).
+//   opts.restorePolicy — after a REAL restart, set the restart policy back to
+//     "always" (what restartConfigContainer does), inside the same lock.
+// Returns { restarted, state }; state is docker's status or "missing".
+function restartIfRunningScript(container) {
+  const c = hosts.shq(container);
+  return (
+    "s=$(docker inspect -f '{{.State.Status}}' " + c + " 2>/dev/null) || s=missing; " +
+    'if [ "$s" = running ]; then docker restart ' + c + " >/dev/null && echo RESTARTED; " +
+    'else echo "STATE ${s:-missing}"; fi'
+  );
+}
+
+const unlocked = (_host, _container, fn) => fn();
+
+async function restartIfRunning(host, container, { restorePolicy = false } = {}) {
+  // Taken before the first await, while the caller is still on the stack.
+  const caller =
+    typeof hosts.callerFrames === "function" ? hosts.callerFrames(new Error().stack) : "";
+  const lock =
+    typeof hosts.withContainerLock === "function" ? hosts.withContainerLock : unlocked;
+  return lock(host, container, async () => {
+    if (host && host.runtime === "native") {
+      // botctl hosts (none since 2026-08-11) have no `docker inspect`: the
+      // old two steps, still inside the lock. dockerContainer reports the start.
+      const st = ((await hosts.dockerPs(host)) || {})[container];
+      const state = (st && st.state) || "missing";
+      if (state !== "running") return { restarted: false, state };
+      await hosts.dockerContainer(host, "restart", container);
+    } else {
+      const { stdout } = await hosts.runShell(host, restartIfRunningScript(container), {
+        timeout: 60000,
+      });
+      const last = String(stdout || "").trim().split("\n").pop().trim();
+      if (last !== "RESTARTED") {
+        const state = last.startsWith("STATE ") ? last.slice(6).trim() || "missing" : "unknown";
+        return { restarted: false, state };
+      }
+      if (typeof hosts.notifyContainerStart === "function") {
+        hosts.notifyContainerStart(host, "restart", container, caller);
+      }
+    }
+    if (restorePolicy) await hosts.restoreRestartPolicy(host, container);
+    return { restarted: true, state: "running" };
+  });
 }
 
 // Remove `game` from `acc`'s FavouriteGames inside its bot config and restart
@@ -173,4 +219,4 @@ async function stopFarmingGame(acc, game) {
   return { changed: true, reason: "" };
 }
 
-module.exports = { stopFarmingGame, restartIfRunning };
+module.exports = { stopFarmingGame, restartIfRunning, restartIfRunningScript };

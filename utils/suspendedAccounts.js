@@ -307,9 +307,9 @@ async function evictSuspendedFromConfigs({ onProgress } = {}) {
   // this module is loaded by utils/autoFarmer at require time.
   const {
     removeAccountFromConfig,
-    restartConfigContainer,
     containerForFile,
   } = require("../routes/botConfigRoutes");
+  const { restartIfRunning } = require("./farmControl");
   const rows = await BotAccount.find(
     { lastScanStatus: "suspended", configFile: { $gt: "" } },
     { login: 1, clientSecret: 1, configFile: 1, host: 1 },
@@ -339,19 +339,24 @@ async function evictSuspendedFromConfigs({ onProgress } = {}) {
     }
   }
   // A touched bot reloads its config only on a restart, but restart it only
-  // while it RUNS: restartConfigContainer is `docker restart` plus a restart-
-  // policy restore, which would also start a parked bot (utils/botWaker.js) and
-  // undo its park — the wake/park flap class (2026-09-29). A stopped bot reads
-  // the edited config whenever it is next started. Same rule as
-  // utils/deadTokenRetire.js. One `docker ps` per host per sweep.
-  const psByHost = new Map();
+  // while it RUNS: `docker restart` would also start a parked bot
+  // (utils/botWaker.js) and undo its park — the wake/park flap class
+  // (2026-09-29). A stopped bot reads the edited config when it next starts.
+  // farmControl.restartIfRunning checks and restarts in ONE shell command on
+  // the host, under the container's lock (2026-10-03): a `docker ps` followed
+  // by a separate restart left a round trip in which a park could land and be
+  // undone. restorePolicy keeps what restartConfigContainer did after a real
+  // restart, and TWITCHBOT_ALLOW_RESTART=0 still turns these restarts off.
+  // An eviction can empty a config, and a bot with no accounts spins in a login
+  // loop (botHosts.stopIfNoAccounts): such a bot is stopped, never restarted.
+  const allowRestart = process.env.TWITCHBOT_ALLOW_RESTART !== "0";
   for (const b of touched.values()) {
+    const container = containerForFile(b.file);
+    if (!container) continue;
     try {
-      if (!psByHost.has(b.host.id)) psByHost.set(b.host.id, await hosts.dockerPs(b.host));
-      const ps = psByHost.get(b.host.id) || {};
-      const container = containerForFile(b.file);
-      if (!container || !ps[container] || ps[container].state !== "running") continue;
-      await restartConfigContainer(b.host, b.file);
+      if ((await hosts.stopIfNoAccounts(b.host, b.file, container)).stopped) continue;
+      if (!allowRestart) continue;
+      await restartIfRunning(b.host, container, { restorePolicy: true });
     } catch (e) {
       console.error(
         "[suspendedAccounts] could not restart " + b.file + ":",

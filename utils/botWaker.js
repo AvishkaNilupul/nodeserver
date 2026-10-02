@@ -586,6 +586,24 @@ async function wakePass(host, opts) {
   return { woken, external, checked: mine.length };
 }
 
+// The stop half of every park: restart policy "no" first (a docker daemon
+// restart would otherwise undo the stop), then the stop — both under the
+// container's lock (botHosts.withContainerLock, 2026-10-03), so a
+// farmControl.restartIfRunning arriving mid-park (the drop scanner, the
+// suspended-account sweep) waits for the stop and then leaves the bot stopped,
+// instead of reading it as still running and restarting it as the stop lands.
+// Throws when the stop fails; the caller restores the policy.
+const noLock = (_host, _container, fn) => fn();
+
+async function stopForPark(host, container) {
+  const lock =
+    typeof hosts.withContainerLock === "function" ? hosts.withContainerLock : noLock;
+  return lock(host, container, async () => {
+    await hosts.setRestartPolicy(host, container, "no").catch(() => {});
+    await hosts.dockerContainer(host, "stop", container);
+  });
+}
+
 // How fresh the scan evidence must be before a container may be parked.
 //
 // Measured on prod 2026-07-29 across the 2239 enabled accounts with a good last
@@ -707,9 +725,8 @@ async function stopFinishedBots(hostId, opts = {}) {
       );
       continue;
     }
-    await hosts.setRestartPolicy(host, container, "no").catch(() => {});
     try {
-      await hosts.dockerContainer(host, "stop", container);
+      await stopForPark(host, container);
       await recordAutoFarmEvent({
         type: "parked",
         game: empty ? "" : (verdict.assignedGames || []).join(", "),
@@ -834,9 +851,8 @@ async function parkNothingLeft(host, candidates, campaigns, log) {
       log("Could not record park for " + c.container + " — leaving it running: " + (e.message || e), "warn");
       continue;
     }
-    await hosts.setRestartPolicy(host, c.container, "no").catch(() => {});
     try {
-      await hosts.dockerContainer(host, "stop", c.container);
+      await stopForPark(host, c.container);
     } catch (e) {
       await hosts.restoreRestartPolicy(host, c.container).catch(() => {});
       log("Could not stop " + c.container + ": " + (e.message || e), "warn");
@@ -964,9 +980,8 @@ async function parkIdleBots(hostId, opts = {}) {
       );
       continue;
     }
-    await hosts.setRestartPolicy(host, container, "no").catch(() => {});
     try {
-      await hosts.dockerContainer(host, "stop", container);
+      await stopForPark(host, container);
       await recordAutoFarmEvent({
         type: "parked",
         game: gameList.join(", "),
@@ -1113,9 +1128,8 @@ async function parkIdleNoCampaignBots(hostId, opts = {}) {
       );
       continue;
     }
-    await hosts.setRestartPolicy(host, container, "no").catch(() => {});
     try {
-      await hosts.dockerContainer(host, "stop", container);
+      await stopForPark(host, container);
       await recordAutoFarmEvent({
         type: "parked",
         game: gameList.join(", "),
