@@ -521,23 +521,46 @@ const DEFAULTS = {
 // back: every marketplace credential gone and every switch at its default.
 //
 // Since 2026-10-03:
-//   - saves run one at a time, in call order (one promise chain); a failed
-//     save rejects its own caller and never blocks the next one;
+//   - saves run one at a time: in call order inside a process (one promise
+//     chain), and across processes — the server and an ops script — under
+//     settings.json.lock. A failed save rejects its own caller only;
 //   - saveSettings(s) re-reads the CURRENT file and applies only what its
 //     caller changed since the loadSettings() that produced `s` (a three-way
 //     merge), so writers that loaded the same file all land; the setters in
-//     this file edit the current file directly, inside the chain;
-//   - every write goes to its own temp file (pid + counter + random), is
-//     fsync'd and renamed over the target; on any error the temp is removed;
-//   - the last text that parsed is kept in memory and every save refreshes
-//     settings.json.bak. An unreadable file is served from the memory copy,
-//     then the .bak, and only then from DEFAULTS (logged). A save never writes
-//     over an unreadable file without one of those good copies to build on
-//     (SETTINGS_CORRUPT), and before it does, the unreadable bytes are kept as
-//     settings.json.bak-corrupt-<time>: they may be a hand edit with a typo.
-const backupFile = settingsFile + ".bak";
+//     this file edit the current file directly, under the lock;
+//   - every write goes to its own temp file (pid + counter + random) and is
+//     renamed over the target, settings.json fsync'd first. The temp is
+//     removed on any error; one a killed process left behind is swept on the
+//     first load once it is 10 minutes old;
+//   - the last text that parsed is kept in memory, and every save also writes
+//     settings.json.lastgood — NOT settings.json.bak, the operator's own hand
+//     backup, which is never read or written here. An unreadable or missing
+//     settings.json is served from the NEWER of the memory copy and .lastgood
+//     (another process may have saved since this one looked), and only then
+//     from DEFAULTS, logged. A save never writes over it without one of those
+//     good copies to build on (SETTINGS_CORRUPT). Unreadable bytes are kept
+//     once, as settings.json.corrupt-<time> (they may be a hand edit with a
+//     typo) or settings.json.lastgood-corrupt-<time>;
+//   - a missing settings.json is a fresh install only when there is no
+//     .lastgood either. One that exists but cannot be read means the settings
+//     existed and are damaged: DEFAULTS are served loudly and saves refuse.
+const lastGoodFile = settingsFile + ".lastgood";
+const lockFile = settingsFile + ".lock";
+const LOCK_RETRY_MS = 5;
+const LOCK_WAIT_MS = 3000;
+// No save holds the lock for more than milliseconds, so a lock this old is a
+// crash leftover whoever owns it. One whose owner process has exited is broken
+// sooner (its owner wrote its pid the moment it took the lock).
+const LOCK_STALE_MS = 10 * 1000;
+const LOCK_DEAD_OWNER_MS = 500;
+// File times come from the kernel's coarse clock (a few ms behind Date.now()),
+// so a .lastgood written just after this process read settings.json can carry
+// an mtime slightly EARLIER than that read. Within this slack .lastgood wins.
+const MTIME_SLACK_MS = 25;
+const TEMP_MAX_AGE_MS = 10 * 60 * 1000;
 const hasOwn = (o, k) => Object.prototype.hasOwnProperty.call(o, k);
 const noop = () => {};
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 function isPlainObject(v) {
   return v !== null && typeof v === "object" && !Array.isArray(v);
@@ -588,7 +611,10 @@ function parseSettingsText(text) {
 // FROM_DEFAULTS when it was built from DEFAULTS alone: its next save's base.
 const bases = new WeakMap();
 const FROM_DEFAULTS = Symbol("settings:defaults");
-let lastGoodText = null; // the last settings text that parsed, read or written here
+// The memory half of the good copy: the last settings text that parsed, read
+// or written here, and when (compared with .lastgood's mtime).
+let lastGoodText = null;
+let lastGoodAt = 0;
 let saveChain = Promise.resolve();
 let tmpSeq = 0;
 
@@ -620,7 +646,7 @@ function report(kind, message, meta) {
     const p = require("./systemLog").logEvent({
       category: "settings",
       action: "settings_corrupt",
-      severity: meta.served === "last-good" || meta.served === "bak" ? "warn" : "error",
+      severity: meta.served === "memory" || meta.served === "lastgood" ? "warn" : "error",
       subject: path.basename(settingsFile),
       detail: message,
       meta,
@@ -631,110 +657,183 @@ function report(kind, message, meta) {
   }
 }
 
-function reportUnreadable(served, err) {
-  const head = `settings.json is unreadable (${why(err)})`;
-  const tail = {
-    "last-good": ": serving the last good copy held in memory; the next save rewrites the file from it",
-    bak: ": serving settings.json.bak; the next save rewrites the file from it",
-    defaults:
-      " and there is no good copy (none in memory, no readable settings.json.bak): " +
-      "serving DEFAULTS, and every save is refused until the file is restored by hand",
-  };
-  report(served, head + tail[served], { served, error: why(err) });
-}
-
-function readBackupSync() {
+// Keep unreadable bytes before anything can replace them, once per content —
+// also across restarts: a copy already on disk with the same bytes counts.
+// `suffix` is ".corrupt-" (settings.json) or ".lastgood-corrupt-" (.lastgood).
+const keptCopies = new Set();
+function keepBytesOnce(suffix, bytes) {
+  if (!bytes) return;
+  const key = suffix + crypto.createHash("sha1").update(bytes).digest("hex");
+  if (keptCopies.has(key)) return;
+  keptCopies.add(key);
+  const dir = path.dirname(settingsFile);
+  const prefix = path.basename(settingsFile) + suffix;
   try {
-    const text = fs.readFileSync(backupFile, "utf8");
-    return { text, obj: parseSettingsText(text) };
+    for (const name of fs.readdirSync(dir)) {
+      if (!name.startsWith(prefix)) continue;
+      const p = path.join(dir, name);
+      if (fs.statSync(p).size === Buffer.byteLength(bytes) && fs.readFileSync(p, "utf8") === bytes)
+        return;
+    }
   } catch {
-    return null;
+    /* fall through and keep another copy */
+  }
+  const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+  const file = path.join(dir, prefix + stamp);
+  try {
+    fs.writeFileSync(file, bytes, { flag: "wx" });
+    console.error(`[settings] kept the unreadable bytes as ${file}`);
+  } catch (e) {
+    console.error(`[settings] could not keep the unreadable bytes as ${file} (${why(e)})`);
   }
 }
 
-async function readBackup() {
+// Temp files of OURS ("<name>.tmp-<pid>-<n>-<hex>", for settings.json and
+// .lastgood) that a process killed mid-write left behind: swept once, on the
+// first read, when older than 10 minutes — no write is still using one that
+// old. Never the operator's .bak files, and never the legacy
+// "settings.json.tmp-<pid>" leftovers of the old code (those are moved by hand).
+let tempsSwept = false;
+function sweepStaleTemps() {
+  if (tempsSwept) return;
+  tempsSwept = true;
   try {
-    const text = await fsp.readFile(backupFile, "utf8");
-    return { text, obj: parseSettingsText(text) };
+    const dir = path.dirname(settingsFile);
+    const name = path.basename(settingsFile).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const ours = new RegExp(`^${name}(\\.lastgood)?\\.tmp-\\d+-\\d+-[0-9a-f]{8}$`);
+    const now = Date.now();
+    for (const f of fs.readdirSync(dir)) {
+      if (!ours.test(f)) continue;
+      const p = path.join(dir, f);
+      try {
+        if (now - fs.statSync(p).mtimeMs > TEMP_MAX_AGE_MS) fs.unlinkSync(p);
+      } catch {
+        /* gone already */
+      }
+    }
   } catch {
-    return null;
+    /* housekeeping never breaks a read */
+  }
+}
+
+// The good copy that stands in for an unreadable or missing settings.json:
+// the NEWER of the memory copy and settings.json.lastgood. Memory is never
+// preferred blindly — another process may have saved (and written .lastgood)
+// since this one last read the file. `lastgoodExists` reports a .lastgood that
+// is there even when it cannot be used.
+function goodCopy() {
+  const out = { copy: null, lastgoodExists: false };
+  let st = null;
+  try {
+    st = fs.statSync(lastGoodFile);
+    out.lastgoodExists = true;
+  } catch (e) {
+    if (e.code !== "ENOENT") out.lastgoodExists = true;
+  }
+  if (st && (lastGoodText === null || st.mtimeMs + MTIME_SLACK_MS >= lastGoodAt)) {
+    let text = null;
+    try {
+      text = fs.readFileSync(lastGoodFile, "utf8");
+      out.copy = { source: "lastgood", text, obj: parseSettingsText(text) };
+      return out;
+    } catch {
+      keepBytesOnce(".lastgood-corrupt-", text);
+    }
+  }
+  if (lastGoodText !== null)
+    out.copy = { source: "memory", text: lastGoodText, obj: parseSettingsText(lastGoodText) };
+  return out;
+}
+
+// One look at the files — the same decision for loadSettings and for a save:
+//   served "file"      settings.json parsed (the normal case)
+//          "fresh"     no settings.json and no .lastgood: a fresh install
+//          "memory" /  settings.json unreadable or missing: the newer good
+//          "lastgood"  copy stands in
+//          "defaults"  damaged, and no good copy anywhere: saves refuse
+// `base` is what remember() ties the object to; `unreadable` holds the bytes
+// of a settings.json that exists but does not parse.
+function readState() {
+  sweepStaleTemps();
+  let text = null;
+  let failure = null;
+  try {
+    text = fs.readFileSync(settingsFile, "utf8");
+    const obj = parseSettingsText(text);
+    lastGoodText = text;
+    lastGoodAt = Date.now();
+    return { served: "file", obj, base: text };
+  } catch (e) {
+    failure = e;
+  }
+  const missing = failure.code === "ENOENT";
+  const unreadable = missing ? null : text;
+  const { copy, lastgoodExists } = goodCopy();
+  if (copy)
+    return { served: copy.source, obj: copy.obj, base: copy.text, missing, failure, unreadable };
+  if (missing && !lastgoodExists) return { served: "fresh", obj: {}, base: FROM_DEFAULTS };
+  return { served: "defaults", obj: {}, base: FROM_DEFAULTS, missing, failure, unreadable };
+}
+
+function damage(st) {
+  return st.missing ? "settings.json is missing" : `settings.json is unreadable (${why(st.failure)})`;
+}
+
+function reportState(st) {
+  if (st.served === "memory" || st.served === "lastgood") {
+    const from = st.served === "memory" ? "the last good copy held in memory" : "settings.json.lastgood";
+    report(st.served, `${damage(st)}: serving ${from}; the next save rewrites settings.json from it`, {
+      served: st.served,
+      missing: !!st.missing,
+      error: why(st.failure),
+    });
+  } else if (st.served === "defaults") {
+    const msg = st.missing
+      ? "settings.json is missing and settings.json.lastgood cannot be read — this is NOT a fresh " +
+        "install: serving DEFAULTS, and every save is refused until settings.json is restored by hand"
+      : `${damage(st)} and there is no good copy (none in memory, no readable settings.json.lastgood): ` +
+        "serving DEFAULTS, and every save is refused until the file is restored by hand";
+    report("defaults", msg, { served: "defaults", missing: !!st.missing, error: why(st.failure) });
   }
 }
 
 function loadSettings() {
-  let failure;
-  try {
-    const text = fs.readFileSync(settingsFile, "utf8");
-    const obj = parseSettingsText(text);
-    lastGoodText = text;
-    return remember(materialize(obj), text);
-  } catch (e) {
-    failure = e;
-  }
-  if (lastGoodText !== null) {
-    reportUnreadable("last-good", failure);
-    return remember(materialize(parseSettingsText(lastGoodText)), lastGoodText);
-  }
-  const bak = readBackupSync();
-  if (bak) {
-    reportUnreadable("bak", failure);
-    return remember(materialize(bak.obj), bak.text);
-  }
-  // No good copy anywhere. A MISSING file is a fresh install (silent); any
-  // other failure is a corrupt file, and saveSettings refuses to replace it.
-  if (!failure || failure.code !== "ENOENT") reportUnreadable("defaults", failure);
-  return remember(materialize({}), FROM_DEFAULTS);
+  const st = readState();
+  reportState(st);
+  return remember(materialize(st.obj), st.base);
 }
 
-// The CURRENT settings a save builds on, materialized, read inside the chain.
-// `unreadable` = the bytes of a file that exists but does not parse; commit()
-// keeps them before it writes over them.
-async function readCurrent() {
-  let failure;
-  let text = null;
-  try {
-    text = await fsp.readFile(settingsFile, "utf8");
-    const obj = parseSettingsText(text);
-    lastGoodText = text;
-    return { current: materialize(obj), unreadable: null };
-  } catch (e) {
-    failure = e;
+// The CURRENT settings a save builds on (called under the lock). Damaged with
+// no good copy: throws SETTINGS_CORRUPT — writing now would replace the file
+// with DEFAULTS, the credential wipe this section exists to stop.
+function readCurrent() {
+  const st = readState();
+  reportState(st);
+  if (st.served === "defaults") {
+    const msg = st.missing
+      ? "settings.json is missing and settings.json.lastgood cannot be read, so nothing was saved " +
+        "(this is not a fresh install; saving would start the settings over from defaults). " +
+        "Restore utils/settings.json from a backup or fix it by hand."
+      : `${damage(st)} and there is no good copy to rebuild it from, so nothing was saved ` +
+        "(saving would replace it with defaults). Restore utils/settings.json from a backup " +
+        "or fix it by hand.";
+    report("refused", "save refused: " + msg, {
+      served: "none",
+      refusedSave: true,
+      missing: !!st.missing,
+      error: why(st.failure),
+    });
+    const err = new Error(msg);
+    err.code = "SETTINGS_CORRUPT";
+    throw err;
   }
-  if (lastGoodText !== null) {
-    reportUnreadable("last-good", failure);
-    return {
-      current: materialize(parseSettingsText(lastGoodText)),
-      unreadable: text,
-    };
-  }
-  const bak = await readBackup();
-  if (bak) {
-    reportUnreadable("bak", failure);
-    return { current: materialize(bak.obj), unreadable: text };
-  }
-  if (failure && failure.code === "ENOENT")
-    return { current: materialize({}), unreadable: null }; // fresh install
-  // The file is there but unreadable, and nothing good is left to rebuild it
-  // from: writing now would replace it with DEFAULTS — the credential wipe this
-  // section exists to stop.
-  const msg =
-    `settings.json is unreadable (${why(failure)}) and there is no good copy ` +
-    "to rebuild it from, so nothing was saved (saving would replace it with " +
-    "defaults). Restore utils/settings.json from a backup or fix it by hand.";
-  report("refused", "save refused: " + msg, {
-    served: "none",
-    refusedSave: true,
-    error: why(failure),
-  });
-  const err = new Error(msg);
-  err.code = "SETTINGS_CORRUPT";
-  throw err;
+  return { current: materialize(st.obj), unreadable: st.unreadable || null };
 }
 
 // Write `text` to `file` atomically: a temp file of our own (pid + counter +
-// random, created exclusively), fsync'd, then renamed over the target. On any
-// error the temp file is removed and the target is left as it was.
-async function writeAtomic(file, text) {
+// random, created exclusively), optionally fsync'd, then renamed over the
+// target. On any error the temp file is removed and the target is left as is.
+async function writeAtomic(file, text, sync) {
   const rand = crypto.randomBytes(4).toString("hex");
   const tmp = `${file}.tmp-${process.pid}-${++tmpSeq}-${rand}`;
   let fh = null;
@@ -743,7 +842,7 @@ async function writeAtomic(file, text) {
     fh = await fsp.open(tmp, "wx");
     created = true;
     await fh.writeFile(text, "utf8");
-    await fh.sync();
+    if (sync) await fh.sync();
     const h = fh;
     fh = null;
     await h.close();
@@ -755,36 +854,116 @@ async function writeAtomic(file, text) {
   }
 }
 
-// Once per distinct unreadable content: a save that keeps failing after this
-// (a full disk) must not leave a new copy behind on every retry.
-let keptText = null;
-async function keepUnreadable(text) {
-  if (!text || text === keptText) return;
-  const stamp = new Date().toISOString().replace(/[:.]/g, "-");
-  const file = `${settingsFile}.bak-corrupt-${stamp}`;
+// Write a whole settings object (DEFAULTS filled in, as before), then refresh
+// the memory copy and settings.json.lastgood. .lastgood is not fsync'd: after
+// a power cut it may be lost or torn, which only costs the spare — the file
+// itself was synced. A .lastgood that cannot be written is logged, never
+// thrown: the save itself landed.
+async function commit(next, unreadable) {
+  const text = JSON.stringify(materialize(next), null, 2);
+  keepBytesOnce(".corrupt-", unreadable);
+  await writeAtomic(settingsFile, text, true);
+  lastGoodText = text;
+  lastGoodAt = Date.now();
   try {
-    await fsp.writeFile(file, text, { flag: "wx" });
-    keptText = text;
-    console.error(`[settings] kept the unreadable settings.json as ${file}`);
+    await writeAtomic(lastGoodFile, text, false);
   } catch (e) {
-    console.error(
-      `[settings] could not keep the unreadable settings.json (${why(e)}); rebuilding it anyway`,
-    );
+    report("lastgood-write", `could not refresh settings.json.lastgood (${why(e)}); the save itself landed`);
   }
 }
 
-// Write a whole settings object (DEFAULTS filled in, as before), then refresh
-// the in-memory good copy and settings.json.bak. A .bak that cannot be written
-// is logged, never thrown: the save itself landed.
-async function commit(next, unreadable) {
-  const text = JSON.stringify(materialize(next), null, 2);
-  await keepUnreadable(unreadable);
-  await writeAtomic(settingsFile, text);
-  lastGoodText = text;
+function pidAlive(pid) {
   try {
-    await writeAtomic(backupFile, text);
+    process.kill(pid, 0);
+    return true;
   } catch (e) {
-    report("bak-write", `could not refresh settings.json.bak (${why(e)}); the save itself landed`);
+    return e.code === "EPERM";
+  }
+}
+
+// Remove settings.json.lock when it is a crash leftover: older than 10 s, or
+// older than 0.5 s with an owner pid that has exited. Re-checked to be the
+// SAME file just before removal, so a lock taken in between is never lost.
+// true = try to take the lock again now.
+async function breakStaleLock() {
+  let st;
+  try {
+    st = await fsp.stat(lockFile);
+  } catch (e) {
+    return e.code === "ENOENT";
+  }
+  const age = Date.now() - st.mtimeMs;
+  let reason = "";
+  if (age > LOCK_STALE_MS) reason = `${Math.round(age / 1000)} s old`;
+  else if (age > LOCK_DEAD_OWNER_MS) {
+    const owner = parseInt(await fsp.readFile(lockFile, "utf8").catch(() => ""), 10);
+    if (owner > 0 && owner !== process.pid && !pidAlive(owner)) reason = `its owner, pid ${owner}, has exited`;
+  }
+  if (!reason) return false;
+  try {
+    const again = await fsp.stat(lockFile);
+    if (again.ino !== st.ino || again.mtimeMs !== st.mtimeMs) return true;
+    await fsp.unlink(lockFile);
+    report("lock-broken", `removed a stale settings.json.lock (${reason})`);
+  } catch {
+    /* gone already */
+  }
+  return true;
+}
+
+// Take settings.json.lock, created exclusively and holding "<pid> <random>".
+// Another process holds it for the milliseconds of one save: retry every 5 ms
+// for up to 3 s, then fail this save (its caller handles a failed save).
+async function acquireLock() {
+  const token = `${process.pid} ${crypto.randomBytes(8).toString("hex")}`;
+  const deadline = Date.now() + LOCK_WAIT_MS;
+  for (;;) {
+    let fh = null;
+    try {
+      fh = await fsp.open(lockFile, "wx");
+    } catch (e) {
+      if (e.code !== "EEXIST") throw e;
+    }
+    if (fh) {
+      try {
+        await fh.writeFile(token, "utf8");
+      } catch (e) {
+        await fh.close().catch(noop);
+        await fsp.unlink(lockFile).catch(noop);
+        throw e;
+      }
+      await fh.close().catch(noop);
+      return token;
+    }
+    if (await breakStaleLock()) continue;
+    if (Date.now() >= deadline) {
+      const err = new Error(
+        "settings.json is being saved by another process (settings.json.lock held " +
+          `for over ${LOCK_WAIT_MS / 1000} s), so nothing was saved; try again`,
+      );
+      err.code = "SETTINGS_LOCKED";
+      throw err;
+    }
+    await sleep(LOCK_RETRY_MS);
+  }
+}
+
+// Remove the lock only while it is still ours: a lock broken as stale and
+// retaken by another process must not be removed under it.
+async function releaseLock(token) {
+  try {
+    if ((await fsp.readFile(lockFile, "utf8")) === token) await fsp.unlink(lockFile);
+  } catch {
+    /* gone already */
+  }
+}
+
+async function withLock(fn) {
+  const token = await acquireLock();
+  try {
+    return await fn();
+  } finally {
+    await releaseLock(token);
   }
 }
 
@@ -858,27 +1037,31 @@ async function saveSettings(settings) {
   // object never carried is "the default", not a deletion that would reset
   // another writer's change to it.
   const ours = materialize(parsed);
-  return enqueue(async () => {
-    const { current, unreadable } = await readCurrent();
-    // An object loadSettings did not hand out has no known base, so it is
-    // written whole, as before.
-    const base = bases.get(settings);
-    const next = base === undefined ? ours : merge3(baseObject(base), ours, current);
-    await commit(next, unreadable);
-    // The caller's object now descends from what it just saved: saving it
-    // again applies only its newer edits, never re-asserting these.
-    bases.set(settings, oursText);
-  });
+  return enqueue(() =>
+    withLock(async () => {
+      const { current, unreadable } = readCurrent();
+      // An object loadSettings did not hand out has no known base, so it is
+      // written whole, as before.
+      const base = bases.get(settings);
+      const next = base === undefined ? ours : merge3(baseObject(base), ours, current);
+      await commit(next, unreadable);
+      // The caller's object now descends from what it just saved: saving it
+      // again applies only its newer edits, never re-asserting these.
+      bases.set(settings, oursText);
+    }),
+  );
 }
 
 // Exact read-modify-write for this file's own setters: `mutate` edits the
-// CURRENT settings inside the save chain, so no merge is needed.
+// CURRENT settings under the lock, so no merge is needed.
 function updateSettings(mutate) {
-  return enqueue(async () => {
-    const { current, unreadable } = await readCurrent();
-    mutate(current);
-    await commit(current, unreadable);
-  });
+  return enqueue(() =>
+    withLock(async () => {
+      const { current, unreadable } = readCurrent();
+      mutate(current);
+      await commit(current, unreadable);
+    }),
+  );
 }
 
 // A setter's patch as it is NOW (the old setters applied it synchronously),

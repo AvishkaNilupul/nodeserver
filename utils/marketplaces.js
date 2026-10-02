@@ -1638,9 +1638,11 @@ function digisellerBlockState(now = Date.now()) {
 // Plati are not touched by this; it only gates what is added.
 function digisellerTakesNewStock() {
   if (dsBlocked) return false;
-  const s = loadSettings() || {};
-  const af = s.autoFarm && typeof s.autoFarm === "object" ? s.autoFarm : {};
-  return af.platiEnabled !== false;
+  // The MERGED block (getAutoFarm puts AUTO_FARM_DEFAULTS under the stored
+  // values). The raw block read a key it did not carry as "on", so a settings
+  // file written before platiEnabled existed never saw its default — off since
+  // 2026-10-03.
+  return require("./settings").getAutoFarm().platiEnabled !== false;
 }
 
 // Returns { stock, reason }: `stock` is the unit count, or null when it could
@@ -2660,9 +2662,9 @@ async function ggselFinalizeStock(offerId) {
 // products on one? Only while the owner's switch is on (settings
 // autoFarm.ggselEnabled). Offers already on GGSel are not touched by this.
 function ggselTakesNewStock() {
-  const s = loadSettings() || {};
-  const af = s.autoFarm && typeof s.autoFarm === "object" ? s.autoFarm : {};
-  return af.ggselEnabled !== false;
+  // The merged block, as digisellerTakesNewStock: a missing key reads as its
+  // default (on, for GGSel), never as whatever a raw read makes of undefined.
+  return require("./settings").getAutoFarm().ggselEnabled !== false;
 }
 
 async function ggselDelist(offerId) {

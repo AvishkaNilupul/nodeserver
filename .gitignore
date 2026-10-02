@@ -58,6 +58,13 @@ public/noclaim-social/
 config/botHosts.json
 config/botHosts.json.bak*
 utils/settings.json
+# utils/settings.js runtime files: write temps, the last-good spare (and kept
+# copies of an unreadable one), the cross-process save lock, and kept copies
+# of an unreadable settings.json.
+utils/settings.json.tmp-*
+utils/settings.json.lastgood*
+utils/settings.json.lock
+utils/settings.json.corrupt-*
 .env.bak*
 
 # Ad-hoc watch/diagnostic scratch scripts written straight onto the server
