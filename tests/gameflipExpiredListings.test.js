@@ -273,6 +273,50 @@ test("out of stock is a dip, not an end: the chain backs off, keeps its debt, an
   assert.strictEqual(alerts.length, 1, "told once, at the 3rd miss — not every pass");
 });
 
+test("REGRESSION 2026-10-01: a renewal that keeps failing for a non-stock reason is told once — not left silent", async () => {
+  // The Hunt: Showdown chain (187 owed) failed eight times on "code for
+  // digital goods already exists" with no live listing anywhere, and only the
+  // log knew: the lane paged for out-of-stock alone.
+  await chain("gf-stuck-renewal");
+  // Already waiting, not due this pass: one more stuck for a non-stock reason
+  // (counted in the summary) and one out of stock (the other page's business).
+  const later = new Date(Date.now() + 3600000);
+  await row("gf-stuck-older", {
+    status: "removed", autoDeliver: true, relistAttempts: 7, relistRetryAt: later,
+    lastError: "expired on Gameflip — renewal pending (attempt 7 failed: Gameflip create: socket hang up)",
+  });
+  await row("gf-dry-older", {
+    status: "removed", autoDeliver: true, relistAttempts: 7, relistRetryAt: later,
+    lastError: "expired on Gameflip — renewal pending (attempt 7 failed: Out of stock — no unsold account holds this whole bundle)",
+  });
+  const pub = fakePublisher(() => {
+    throw new Error(
+      'Gameflip could not attach the delivery content (draft d-1 discarded): {"error":{"message":"code for digital goods already exists"}}',
+    );
+  });
+  const passes = gf.RENEWAL_STUCK_ALERT_AT_ATTEMPT + 2;
+  for (let pass = 1; pass <= passes; pass++) {
+    await gf.syncOnce(pub.opts);
+    if (pass === gf.RENEWAL_STUCK_ALERT_AT_ATTEMPT - 1) {
+      assert.strictEqual(world.telegrams.length, 0, "a short limiter storm is not paged");
+    }
+    await MarketplaceListing.updateOne(
+      { externalId: "gf-stuck-renewal" },
+      { $set: { relistRetryAt: new Date(Date.now() - 1000) } },
+    );
+  }
+  assert.strictEqual(pub.calls.length, passes);
+  const alerts = world.telegrams.filter((m) => /renewals keep FAILING/.test(m));
+  assert.strictEqual(alerts.length, 1, "told once, at the 5th miss — not every pass");
+  assert.match(alerts[0], /\n\n2 expired listing\(s\) have failed renewal/, "one summary: both stuck rows, not the dry one");
+  assert.match(alerts[0], /code for digital goods already exists/, "the page carries the reason");
+  assert.match(alerts[0], /5 more unit\(s\) owed/);
+  assert.ok(!world.telegrams.some((m) => /OUT OF STOCK/.test(m)), "and it is not called out of stock");
+  const after = await MarketplaceListing.findOne({ externalId: "gf-stuck-renewal" }).lean();
+  assert.strictEqual(after.qtyRemaining, 5, "the chain keeps its debt and keeps retrying");
+  assert.match(after.lastError, /^expired on Gameflip — renewal pending/);
+});
+
 test("one renewal per pass, and a hand-made listing is never republished", async () => {
   await chain("gf-c1");
   await chain("gf-c2");
