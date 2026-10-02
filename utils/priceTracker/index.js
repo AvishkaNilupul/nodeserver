@@ -19,12 +19,63 @@ let inflight = null;
 
 /* ----------------------------------- load ---------------------------------- */
 
+// reserved:<accountId>:<setId>:<game> — a Shop or bulk-order sale (ledger.js).
+const RESERVED_RE = /^reserved:([0-9a-f]{24}):([^:]*):/i;
+const ID_CHUNK = 500;
+
+/**
+ * Shop and bulk-order sales are written when the drops are RESERVED, before the buyer
+ * is charged, and stay when that is rolled back (refund, failed payment, cancelled
+ * order): only the reservation tells a sale from a rollback. One grouped DropLog read
+ * returns which (account, set) pairs of these signals still hold a reserved drop, and
+ * one BotAccount read names their accounts (the signals carry no login). Both bounded
+ * by the signals' own ids, chunked, projected to the pair / the login.
+ *
+ * On any failure: `reservations` null, so the ledger counts NONE of these sales (a
+ * phantom sale would grow farming), and `note` says why on the page.
+ * @returns {Promise<{ reservations: Set<string>|null, accountLogins: Map<string,string>, note: string }>}
+ */
+async function reservationEvidence(signals, models = null) {
+  const pairs = [];
+  for (const s of signals || []) {
+    const m = RESERVED_RE.exec(String((s && s.dedupeKey) || ""));
+    if (m && m[2]) pairs.push({ account: m[1].toLowerCase(), set: m[2] });
+  }
+  if (!pairs.length) return { reservations: new Set(), accountLogins: new Map(), note: "" };
+  try {
+    const M = models || { DropLog: require("../../models/DropLog"), BotAccount: require("../../models/BotAccount") };
+    const { Types } = require("mongoose");
+    const accounts = [...new Set(pairs.map((p) => p.account))];
+    const sets = [...new Set(pairs.map((p) => p.set))];
+    const reservations = new Set();
+    const accountLogins = new Map();
+    for (let i = 0; i < accounts.length; i += ID_CHUNK) {
+      const ids = accounts.slice(i, i + ID_CHUNK);
+      // aggregate() does not cast: the account ids must be ObjectIds to match.
+      const held = await M.DropLog.aggregate([
+        { $match: { account: { $in: ids.map((id) => new Types.ObjectId(id)) }, soldSetId: { $in: sets }, soldAt: { $ne: null } } },
+        { $group: { _id: { account: "$account", set: "$soldSetId" } } },
+        { $limit: ids.length * sets.length }, // every (account, set) pair at most once
+      ]);
+      for (const r of held) reservations.add(String(r._id.account).toLowerCase() + "|" + String(r._id.set));
+      const named = await M.BotAccount.find({ _id: { $in: ids } }, { login: 1 }).limit(ids.length).lean();
+      for (const a of named) {
+        const login = String(a.login || "").trim().toLowerCase();
+        if (login) accountLogins.set(String(a._id).toLowerCase(), login);
+      }
+    }
+    return { reservations, accountLogins, note: "" };
+  } catch (e) {
+    return { reservations: null, accountLogins: new Map(), note: "the reservation read failed: " + (e && e.message ? e.message : String(e)) };
+  }
+}
+
 // Bounded, projected reads (Atlas shared tier: the cost is bytes returned).
 // Models are required lazily so tests and the snapshot preview never need Mongo.
-async function loadFromDb({ now = Date.now() } = {}) {
-  const MarketplaceListing = require("../../models/MarketplaceListing");
-  const SaleSignal = require("../../models/SaleSignal");
-  const DropSet = require("../../models/DropSet");
+async function loadFromDb({ now = Date.now(), models = null } = {}) {
+  const MarketplaceListing = (models && models.MarketplaceListing) || require("../../models/MarketplaceListing");
+  const SaleSignal = (models && models.SaleSignal) || require("../../models/SaleSignal");
+  const DropSet = (models && models.DropSet) || require("../../models/DropSet");
   const since = new Date(now - 365 * DAY);
   const listings = await MarketplaceListing.find(
     { marketplace: { $in: MARKETS } },
@@ -55,7 +106,7 @@ async function loadFromDb({ now = Date.now() } = {}) {
     .lean();
   // Other sellers + market-wide demand, one scanned row per game (read, never
   // scanned from here — the scanners run on their own schedule).
-  const MarketResearch = require("../../models/MarketResearch");
+  const MarketResearch = (models && models.MarketResearch) || require("../../models/MarketResearch");
   const research = await MarketResearch.find(
     {},
     {
@@ -67,7 +118,7 @@ async function loadFromDb({ now = Date.now() } = {}) {
     .lean();
   // The farm engine's recent decisions. Only a COUNT of assigned accounts leaves
   // the database — never the logins.
-  const AutoFarmTask = require("../../models/AutoFarmTask");
+  const AutoFarmTask = (models && models.AutoFarmTask) || require("../../models/AutoFarmTask");
   const tasks = await AutoFarmTask.aggregate([
     // decidedAt is indexed (createdAt is not); every task from the last 30 days has one.
     { $match: { decidedAt: { $gte: new Date(now - 30 * DAY) } } },
@@ -93,14 +144,24 @@ async function loadFromDb({ now = Date.now() } = {}) {
   }
   // A read that hits its cap silently drops the OLDEST rows; say so, on the page.
   const truncated = listings.length >= READ_CAP || signals.length >= READ_CAP || connected.length >= CONNECTED_CAP;
-  return { listings, signals, sets, connected, research, tasks, at: new Date(now), truncated };
+  // Which Shop / bulk-order sales still hold their reservation, and their logins.
+  const resv = await reservationEvidence(signals, models && models.DropLog && models.BotAccount ? models : null);
+  return {
+    listings, signals, sets, connected, research, tasks, at: new Date(now), truncated,
+    reservations: resv.reservations, accountLogins: resv.accountLogins, reservationNote: resv.note,
+  };
 }
 
+// A snapshot may carry the reservation evidence ("<account>|<set>" pairs, account -> login);
+// without it no Shop / bulk-order sale is counted, exactly as when the read fails.
 function loadFromSnapshot(file) {
   const d = JSON.parse(require("fs").readFileSync(file, "utf8"));
   return {
     listings: d.listings, signals: d.signals, sets: d.sets, at: new Date(d.at),
     connected: d.connected || [], research: d.research || [], tasks: d.tasks || [],
+    reservations: Array.isArray(d.reservations) ? new Set(d.reservations) : null,
+    accountLogins: d.accountLogins && typeof d.accountLogins === "object" ? new Map(Object.entries(d.accountLogins)) : null,
+    reservationNote: Array.isArray(d.reservations) ? "" : "the snapshot holds no reservations",
   };
 }
 
@@ -293,6 +354,27 @@ function insightsFor(r) {
       detail: "Listings count these as sold (unitsSold) but no priced sale signal backs them, so their price is unknown and they are excluded from every average.",
     });
   }
+  // Shop and bulk-order sales count only while their reservation holds (ledger.js).
+  const ex = r.ledger.excluded || {};
+  if (ex.reservationUnchecked) {
+    const why = r.ledger.quality.reservationNote;
+    out.push({
+      id: "reservations-unchecked",
+      level: "warn",
+      title: ex.reservationUnchecked + " Shop / bulk-order sales could not be confirmed",
+      detail:
+        "Their reservations could not be read this run" + (why ? " (" + why + ")" : "") +
+        ", so none of them counts as demand: a refunded or cancelled order would otherwise read as a sale.",
+    });
+  }
+  if (ex.reservationReleased) {
+    out.push({
+      id: "reservations-released",
+      level: "info",
+      title: ex.reservationReleased + " Shop / bulk-order sales were rolled back",
+      detail: "Their reservations were given back (a failed payment, a refund, a cancelled or deleted bulk order), so they are not counted as sales.",
+    });
+  }
   return out;
 }
 
@@ -480,6 +562,7 @@ module.exports = {
   invalidate,
   loadFromDb,
   loadFromSnapshot,
+  reservationEvidence,
   suggestForNew,
   insightsFor,
   CACHE_MS,

@@ -47,16 +47,20 @@ function unitSig(n, seq, at, o = {}) {
 // reserveSetOnAccount's real-sale signal: one per game of the set, no price.
 function reserved(acct, game, o = {}) {
   return {
-    dedupeKey: "reserved:" + hex(acct) + ":" + hex(800) + ":" + game.toLowerCase(), source: "listing_sold",
+    dedupeKey: "reserved:" + hex(acct) + ":" + hex(o.set || 800) + ":" + game.toLowerCase(), source: "listing_sold",
     game, gameKey: game.toLowerCase(), account: hex(acct), login: "", priceUsd: 0, name: "Bundle", at: ago(2), ...o,
   };
 }
+// The loader's DropLog answer: the (account, set) reservations that still hold.
+const held = (...pairs) => new Set(pairs.map(([acct, set = 800]) => hex(acct) + "|" + hex(set)));
+const NO_RELEASE = { reservationReleased: 0, reservationUnchecked: 0 };
 
 test("1. Shop and bulk-order purchases are demand, never price evidence, and every counter says why", () => {
   const promoted = reserved(3, "Albion Online"); // relabelled on 2026-08-14: no marketplace at all
   const L = buildLedger({
     listings: [], sets: [],
     signals: [reserved(1, "Albion Online", { marketplace: "shop" }), reserved(2, "Albion Online", { marketplace: "bulk" }), promoted],
+    reservations: held([1], [2], [3]),
   });
   assert.equal(L.demandOnly.length, 3, "three buyers");
   assert.equal(L.sales.length, 0, "no price evidence");
@@ -70,6 +74,7 @@ test("1. Shop and bulk-order purchases are demand, never price evidence, and eve
   assert.equal(L.excluded.duplicate, 0);
   assert.equal(L.quality.demandOnly, 3);
   assert.equal(L.quality.bulkDemandOnly, 0, "bulkDemandOnly still means bulk-pack units");
+  assert.equal(L.quality.reservationCheck, "ok");
   assert.equal(union(L).get("albion online").size, 3, "the brain's union sees three sold accounts");
 });
 
@@ -78,11 +83,12 @@ test("1. one account sold in one game is one sale whichever form it took; a thre
     listings: [], sets: [],
     signals: [
       reserved(5, "Albion Online", { marketplace: "shop", priceUsd: 2, at: ago(3) }), // a priced Shop sale: price evidence, as before
-      reserved(5, "Albion Online", { marketplace: "shop", dedupeKey: "reserved:" + hex(5) + ":" + hex(801) + ":albion online" }),
+      reserved(5, "Albion Online", { marketplace: "shop", set: 801 }),
       reserved(6, "Albion Online", { marketplace: "shop" }),
       reserved(6, "Rust", { marketplace: "shop" }),
       reserved(6, "Fortnite", { marketplace: "shop" }),
     ],
+    reservations: held([5, 801], [6]),
   });
   assert.equal(L.sales.length, 1, "the priced Shop sale is still a sale");
   assert.equal(L.sales[0].source, "shop");
@@ -103,17 +109,171 @@ test("1. a reserved signal of a shape no writer produces, or a stock claim, stay
       // A fulfiller or the auto-lister claiming stock for a shelf is never a buyer.
       reserved(8, "Albion Online", { source: "drop_reserved", marketplace: "" }),
     ],
+    reservations: held([7], [8]),
   });
   assert.equal(L.sales.length + L.demandOnly.length, 0);
-  assert.deepEqual(L.excluded, { farm: 0, bulk: 0, noListing: 0, unpricedSignal: 0, duplicate: 0, massClose: 0, burst: 0 });
+  assert.deepEqual(L.excluded, { farm: 0, bulk: 0, noListing: 0, unpricedSignal: 0, duplicate: 0, massClose: 0, burst: 0, ...NO_RELEASE });
 });
 
 test("1. the board counts a Shop sale as demand for its game", () => {
-  const r = T.buildReport({ listings: [], signals: [reserved(1, "Albion Online", { marketplace: "shop" })], sets: [], connected: [], research: [], tasks: [], at: new Date(NOW) });
+  const r = T.buildReport({ listings: [], signals: [reserved(1, "Albion Online", { marketplace: "shop" })], sets: [], connected: [], research: [], tasks: [], at: new Date(NOW), reservations: held([1]) });
   const g = r.games.find((x) => x.key === "albion online");
   assert.ok(g, "the game is on the board");
   assert.equal(g.demand.units45, 1);
   assert.equal(g.price.realised.n, 0, "and has no realised price from it");
+});
+
+// The review's p1: every rollback releases the reservation and leaves the signal.
+test("1b. a Shop or bulk-order sale whose reservation was given back is not a sale", () => {
+  const signals = [
+    // a 20-unit bulk order, then cancelled (bulkOrderRoutes DELETE releases its drops)
+    ...Array.from({ length: 20 }, (_, i) => reserved(100 + i, "Marvel Rivals", { marketplace: "bulk", set: 900, at: ago(3) })),
+    reserved(200, "Rust", { marketplace: "shop", set: 901 }), // the buyer's debit failed
+    reserved(201, "Rust", { marketplace: "shop", set: 901, at: ago(1) }), // a sale that stands
+  ];
+  const L = buildLedger({ listings: [], sets: [], signals, reservations: held([201, 901]) });
+  assert.deepEqual([...union(L)].map(([g, m]) => [g, m.size]), [["rust", 1]], "one account was really sold (it read 22)");
+  assert.equal(L.excluded.reservationReleased, 21);
+  assert.equal(L.excluded.reservationUnchecked, 0);
+  assert.equal(L.demandOnly.length, 1);
+  // A released sale does not take its account+game key: the same account sold again counts.
+  const again = buildLedger({
+    listings: [], sets: [],
+    signals: [reserved(7, "Rust", { marketplace: "shop", set: 901, at: ago(5) }), reserved(7, "Rust", { marketplace: "shop", set: 902, at: ago(2) })],
+    reservations: held([7, 902]),
+  });
+  assert.equal(again.demandOnly.length, 1);
+  assert.equal(again.excluded.reservationReleased, 1);
+  assert.equal(again.excluded.duplicate, 0);
+  // The Games board's clean view no longer takes the cancelled bulk order as 20 sales.
+  const r = T.buildReport({ listings: [], signals, sets: [], connected: [], research: [], tasks: [], at: new Date(NOW), reservations: held([201, 901]) });
+  const mr = r.games.find((x) => x.key === "marvel rivals");
+  assert.equal(mr ? mr.demand.units45 : 0, 0);
+  assert.ok(r.insights.some((i) => i.id === "reservations-released" && /21 Shop \/ bulk-order sales/.test(i.title)));
+});
+
+test("1b. without the reservation read no Shop or bulk-order sale counts, and the page says why", () => {
+  const signals = [reserved(1, "Rust", { marketplace: "shop" }), reserved(2, "Rust", { marketplace: "bulk" })];
+  const L = buildLedger({ listings: [], sets: [], signals });
+  assert.equal(L.demandOnly.length, 0, "never a phantom sale");
+  assert.equal(L.excluded.reservationUnchecked, 2);
+  assert.equal(L.quality.reservationCheck, "unavailable");
+  const r = T.buildReport({ listings: [], signals, sets: [], connected: [], research: [], tasks: [], at: new Date(NOW), reservations: null, reservationNote: "the reservation read failed: boom" });
+  const ins = r.insights.find((i) => i.id === "reservations-unchecked");
+  assert.ok(ins, "the page says so");
+  assert.match(ins.detail, /boom/);
+});
+
+/* ---- 1c. the loader: one grouped DropLog read and one BotAccount read, bounded ---- */
+
+function fakeModels({ dropLogRows = [], accounts = [], dropLogError = null } = {}) {
+  const calls = { aggregate: [], botFind: [] };
+  const chain = (rows) => {
+    const q = { sort: () => q, limit: (n) => ((q.limitN = n), q), lean: () => Promise.resolve(rows), then: (a, b) => Promise.resolve(rows).then(a, b) };
+    return q;
+  };
+  return {
+    calls,
+    DropLog: {
+      aggregate: async (pipeline) => {
+        calls.aggregate.push(pipeline);
+        if (dropLogError) throw dropLogError;
+        return dropLogRows;
+      },
+    },
+    BotAccount: {
+      find: (filter, proj) => {
+        const q = chain(accounts.filter((a) => filter._id.$in.includes(String(a._id))));
+        calls.botFind.push({ filter, proj, q });
+        return q;
+      },
+    },
+  };
+}
+
+test("1c. reservationEvidence: one grouped DropLog read (ObjectIds, held only) and one projected BotAccount read", async () => {
+  const { Types } = require("mongoose");
+  const signals = [
+    reserved(1, "Rust", { marketplace: "shop" }),
+    reserved(1, "Fortnite", { marketplace: "shop" }), // same reservation, another game
+    reserved(2, "Rust", { marketplace: "bulk", set: 801 }),
+    unitSig(9, 0, ago(1)), // not a reserved signal: never looked up
+  ];
+  const m = fakeModels({
+    dropLogRows: [{ _id: { account: new Types.ObjectId(hex(1)), set: hex(800) } }],
+    accounts: [{ _id: hex(1), login: "BuyerOne" }, { _id: hex(2), login: "" }],
+  });
+  const ev = await T.reservationEvidence(signals, m);
+  assert.deepEqual([...ev.reservations], [hex(1) + "|" + hex(800)]);
+  assert.deepEqual([...ev.accountLogins], [[hex(1), "buyerone"]]);
+  assert.equal(ev.note, "");
+  assert.equal(m.calls.aggregate.length, 1, "one batched read");
+  const [match, group, limit] = m.calls.aggregate[0];
+  assert.ok(match.$match.account.$in.every((id) => id instanceof Types.ObjectId), "aggregate() does not cast: ObjectIds");
+  assert.deepEqual(match.$match.account.$in.map(String).sort(), [hex(1), hex(2)]);
+  assert.deepEqual(match.$match.soldSetId.$in.sort(), [hex(800), hex(801)]);
+  assert.deepEqual(match.$match.soldAt, { $ne: null }, "only a reservation that still holds");
+  assert.deepEqual(group, { $group: { _id: { account: "$account", set: "$soldSetId" } } });
+  assert.ok(limit.$limit > 0);
+  assert.equal(m.calls.botFind.length, 1);
+  assert.deepEqual(m.calls.botFind[0].proj, { login: 1 }, "only the login");
+  assert.equal(m.calls.botFind[0].q.limitN, 2);
+  // Nothing to look up: no read at all.
+  const none = fakeModels();
+  const ev0 = await T.reservationEvidence([unitSig(9, 0, ago(1))], none);
+  assert.equal(none.calls.aggregate.length + none.calls.botFind.length, 0);
+  assert.equal(ev0.reservations.size, 0);
+});
+
+test("1c. a failed reservation read counts none of them and says why", async () => {
+  const m = fakeModels({ dropLogError: new Error("connection reset") });
+  const ev = await T.reservationEvidence([reserved(1, "Rust", { marketplace: "shop" })], m);
+  assert.equal(ev.reservations, null);
+  assert.match(ev.note, /reservation read failed: connection reset/);
+  const L = buildLedger({ listings: [], sets: [], signals: [reserved(1, "Rust", { marketplace: "shop" })], ...ev, reservationNote: ev.note });
+  assert.equal(L.demandOnly.length, 0);
+  assert.equal(L.excluded.reservationUnchecked, 1);
+});
+
+test("1c. loadFromDb hands the reservation evidence to the ledger", async () => {
+  const { Types } = require("mongoose");
+  const q = (rows) => {
+    const c = { sort: () => c, limit: () => c, lean: () => Promise.resolve(rows) };
+    return c;
+  };
+  const signals = [reserved(1, "Rust", { marketplace: "shop" }), reserved(2, "Rust", { marketplace: "shop" })];
+  const m = fakeModels({ dropLogRows: [{ _id: { account: new Types.ObjectId(hex(1)), set: hex(800) } }], accounts: [{ _id: hex(1), login: "buyerone" }] });
+  const models = {
+    ...m,
+    MarketplaceListing: { find: () => q([]) },
+    SaleSignal: { find: (f) => q(f.source === "listing_sold" ? signals : []) },
+    DropSet: { find: () => q([]) },
+    MarketResearch: { find: () => q([]) },
+    AutoFarmTask: { aggregate: async () => [] },
+  };
+  const input = await T.loadFromDb({ now: NOW, models });
+  assert.ok(input.reservations instanceof Set);
+  assert.equal(input.accountLogins.get(hex(1)), "buyerone");
+  const r = T.buildReport(input);
+  const g = r.games.find((x) => x.key === "rust");
+  assert.equal(g.demand.units45, 1, "account 1's sale holds; account 2's was rolled back");
+  assert.equal(r.ledger.excluded.reservationReleased, 1);
+  assert.equal(signals[0].login, "", "the raw signals are not rewritten (the engine replay reads them as the engine does)");
+});
+
+/* --------- 1d. a Shop sale is named by its login: a twin record is the same buyer --------- */
+
+test("1d. a Shop sale's buyer redeeming on a re-minted twin record of the login is one sale (it read two)", () => {
+  // The same Twitch login imported twice is two BotAccount records; the drop scanner sees the
+  // buyer's redeem on the other one.
+  const signals = [reserved(1, "Rust", { marketplace: "shop", at: ago(5) })];
+  const connected = [{ game: "Rust", gameKey: "rust", account: hex(2), login: "buyerlogin", at: ago(4), dedupeKey: "c2" }];
+  const L = buildLedger({ listings: [], sets: [], signals, reservations: held([1]), accountLogins: new Map([[hex(1), "BuyerLogin"]]) });
+  assert.equal(L.demandOnly[0].login, "buyerlogin");
+  assert.equal(union(L, connected).get("rust").size, 1);
+  // Without a known login it is still the account's own sale, and only that.
+  const L2 = buildLedger({ listings: [], sets: [], signals, reservations: held([1]) });
+  assert.equal(union(L2, [{ ...connected[0], account: hex(1) }]).get("rust").size, 1);
 });
 
 /* ------------------- 2. radar counter rises spanning a gap -------------------- */
@@ -281,6 +441,64 @@ test("5. two real passes more than five minutes apart are two passes, not one cl
   assert.equal(L2.demandOnly.length, 0);
 });
 
+// The review's p2: Digiseller Black Desert listings, recorded the way the guardian writes them.
+const bdoSet = { _id: hex(901), items: [{ itemKey: "b1", game: "Black Desert", qty: 1 }] };
+const bdo = (n, o = {}) => listing(n, { marketplace: "digiseller", title: "Black Desert Twitch Drops", price: 1.75, set: hex(901), status: "delisted", createdAt: ago(60), updatedAt: ago(1), ...o });
+const bdoUnit = (n, seq, at) => ({ dedupeKey: "sold:" + hex(n) + ":black desert:" + seq, source: "listing_sold", marketplace: "digiseller", game: "Black Desert", gameKey: "black desert", login: "", account: null, priceUsd: 1.75, at });
+
+test("5b. a WIPE: a burst that emptied listings later taken down is set aside, whatever its size (it read 10 sales)", () => {
+  // 2026-08-14 11:29 on the 10-01 snapshot: 7 + 2 + 1 units of listings holding 7 / 2 / 2,
+  // all delisted weeks later (their rows written again since, so the 90-second rule missed them).
+  const t = ago(20).getTime();
+  const listings = [bdo(1, { qtyTarget: 7, unitsSold: 7 }), bdo(2, { qtyTarget: 2, unitsSold: 2 }), bdo(3, { qtyTarget: 2, unitsSold: 1 })];
+  const signals = [...[0, 1, 2, 3, 4, 5, 6].map((s) => bdoUnit(1, s, new Date(t + 40000))), ...[0, 1].map((s) => bdoUnit(2, s, new Date(t))), bdoUnit(3, 0, new Date(t + 1000))];
+  const L = buildLedger({ listings, signals, sets: [bdoSet] });
+  assert.equal(L.demandOnly.length, 0);
+  assert.equal(L.suspect.length, 10);
+  assert.equal(L.excluded.burst, 0);
+  assert.equal(L.excluded.massClose, 10);
+  assert.equal(union(L).size, 0);
+});
+
+test("5c. the remnant of a closeout is measured with the delist rule's mass-close records of the same minutes (it read 9 sales)", () => {
+  // 20 listings of 3 closed out over 10 minutes; 17 are caught by the 90-second delist rule, 3
+  // slipped it (their rows were written again a day later) and alone look like a 9-unit pass.
+  const t0 = ago(10).getTime();
+  const listings = [];
+  const signals = [];
+  for (let i = 0; i < 20; i += 1) {
+    const at = t0 + i * 30000;
+    const slipped = i >= 8 && i < 11;
+    // Leave stock on them (qtyTarget 4), so only the mass-close records can expose the closeout.
+    listings.push(bdo(100 + i, { qtyTarget: 4, unitsSold: 3, updatedAt: new Date(slipped ? at + DAY : at + 5000) }));
+    for (let s = 0; s < 3; s += 1) signals.push(bdoUnit(100 + i, s, new Date(at)));
+  }
+  const L = buildLedger({ listings, signals, sets: [bdoSet] });
+  assert.equal(L.suspect.filter((x) => x.reason === "mass-close").length, 51);
+  assert.equal(L.demandOnly.filter((x) => x.burst).length, 0);
+  assert.equal(L.suspect.length, 60);
+});
+
+test("5d. a real pass that leaves stock on its listings stays demand, whatever happened to them later", () => {
+  const t = ago(15).getTime();
+  // 3 listings keeping 10 each, 3 units sold from each, all delisted much later.
+  const listings = [bdo(201, { qtyTarget: 10 }), bdo(202, { qtyTarget: 10 }), bdo(203, { qtyTarget: 10 })];
+  const signals = [];
+  for (const n of [201, 202, 203]) for (let s = 0; s < 3; s += 1) signals.push(bdoUnit(n, s, new Date(t + (n - 201) * 1000)));
+  const L = buildLedger({ listings, signals, sets: [bdoSet] });
+  assert.equal(L.demandOnly.filter((x) => x.burst).length, 9);
+  assert.equal(L.suspect.length, 0);
+  // Buyers emptying a listing that is still on sale (refilled) is not a wipe either.
+  const live = [bdo(301, { qtyTarget: 3, status: "active" }), bdo(302, { qtyTarget: 10, status: "active" })];
+  const sg = [...[0, 1, 2].map((s) => bdoUnit(301, s, new Date(t))), ...[0, 1, 2, 3, 4].map((s) => bdoUnit(302, s, new Date(t + 2000)))];
+  const L2 = buildLedger({ listings: live, signals: sg, sets: [bdoSet] });
+  assert.equal(L2.demandOnly.filter((x) => x.burst).length, 8);
+  // ... but the same pass on a listing emptied and later delisted is a wipe.
+  const L3 = buildLedger({ listings: [bdo(301, { qtyTarget: 3 }), bdo(302, { qtyTarget: 10, status: "active" })], signals: sg, sets: [bdoSet] });
+  assert.equal(L3.demandOnly.length, 0);
+  assert.equal(L3.suspect.length, 8);
+});
+
 test("5. the real-pass shape is the guardian's own rule (MASS_DROP_DEFAULTS)", () => {
   const guardian = require("../utils/marketplaceGuardian");
   const cfg = guardian.MASS_DROP_DEFAULTS;
@@ -352,11 +570,14 @@ function randomRows(seed, games = ["world of tanks", "albion online", "rust"]) {
         if (pool.length < 2) pool.push(pool[0] === "a" ? "b" : "a");
         rows.push({ source: "listing_sold", gameKey: game, dedupeKey: "sold:" + hex(7000 + n) + ":" + game + ":" + i, login: pool.join(pick([", ", ",", " ; "])), account: r() < 0.3 ? acct(pool[0]) : null, priceUsd: pick([0, 0.75, 1.5, 2.25]), at });
       } else if (kind < 0.6) {
-        const l = r() < 0.8 ? pick(logins) : "";
-        rows.push({ source: "listing_sold", gameKey: game, dedupeKey: "sold:" + hex(8000 + n) + ":" + game + ":0", login: l, account: l && r() < 0.7 ? acct(l) : null, priceUsd: pick([0, 1, 1.25]), at });
+        // A named sale: a login (sometimes padded with separators), or none with or without an account.
+        const l = r() < 0.75 ? pick(logins) : "";
+        const shown = l ? pick([l, l, l.toUpperCase(), " " + l + " ", l + ";"]) : pick(["", "", " , "]);
+        rows.push({ source: "listing_sold", gameKey: game, dedupeKey: "sold:" + hex(8000 + n) + ":" + game + ":0", login: shown, account: r() < 0.6 ? acct(l || pick(logins)) : null, priceUsd: pick([0, 1, 1.25]), at });
       } else {
+        // A buyer connection: the login as the scanner wrote it, padded, or one in no pool at all.
         const l = pick(logins);
-        rows.push({ source: "connected", gameKey: game, dedupeKey: "conn:" + n, login: r() < 0.2 ? l.toUpperCase() : r() < 0.1 ? "" : l, account: acct(l), priceUsd: 0, at });
+        rows.push({ source: "connected", gameKey: game, dedupeKey: "conn:" + n, login: pick([l, l, l.toUpperCase(), l + ",", " " + l, "", "x" + l]), account: acct(l), priceUsd: 0, at });
       }
       n += 1;
     }
@@ -384,111 +605,38 @@ test("+ the board's port of pairQuantityUnits returns exactly what the engine's 
   }
 });
 
-/* A small evaluator of the aggregation stages internalSalesForGame uses, so the SAME rows go
- * through the engine's real function and through the board's replica. */
-const getPath = (d, p) => p.split(".").reduce((o, k) => (o == null ? undefined : o[k]), d);
-const isOp = (o) => !!o && typeof o === "object" && !Array.isArray(o) && !(o instanceof Date) && !(o instanceof RegExp) && Object.keys(o).length > 0 && Object.keys(o).every((k) => k.startsWith("$"));
-const num = (v) => (v instanceof Date ? v.getTime() : v);
-function expr(e, d) {
-  if (typeof e === "string") return e.startsWith("$") ? getPath(d, e.slice(1)) : e;
-  if (Array.isArray(e)) return e.map((x) => expr(x, d));
-  if (isOp(e)) {
-    const [op] = Object.keys(e);
-    const a = e[op];
-    if (op === "$ifNull") {
-      const v = expr(a[0], d);
-      return v == null ? expr(a[1], d) : v;
-    }
-    if (op === "$cond") return expr(a[0], d) ? expr(a[1], d) : expr(a[2], d);
-    if (op === "$gt") {
-      const [x, y] = expr(a, d);
-      return x != null && num(x) > num(y);
-    }
-    if (op === "$toLower") {
-      const v = expr(a, d);
-      return v == null ? "" : String(v).toLowerCase();
-    }
-    throw new Error("evaluator: unsupported expression " + op);
+test("+ a connection written 'B,' or ' b' is the pool login b to the engine, so it pairs (the engine trims and lowercases)", () => {
+  const t = ago(5);
+  const unit = { source: "listing_sold", gameKey: "world of tanks", dedupeKey: "sold:" + hex(1) + ":world of tanks:0", login: "a, b", account: null, priceUsd: 1, at: t };
+  for (const login of ["B,", " b", "b;"]) {
+    const e = G.engineCounts({ signals: [unit], connected: [{ gameKey: "world of tanks", account: hex(2), login, at: new Date(t.getTime() + 3600000), dedupeKey: "c" }], now: NOW });
+    assert.equal(e.get("world of tanks").count, 1, JSON.stringify(login));
   }
-  return e;
-}
-function valueMatches(cond, v) {
-  if (cond instanceof RegExp) return typeof v === "string" && cond.test(v);
-  if (!isOp(cond)) return (cond == null && v == null) || num(cond) === num(v);
-  return Object.entries(cond).every(([op, arg]) => {
-    if (op === "$in") return arg.some((x) => valueMatches(x, v));
-    if (op === "$gte") return v != null && num(v) >= num(arg);
-    if (op === "$gt") return v != null && typeof v === typeof arg && num(v) > num(arg);
-    throw new Error("evaluator: unsupported operator " + op);
-  });
-}
-function matchDoc(q, d) {
-  return Object.entries(q).every(([k, c]) => {
-    if (k === "$nor") return !c.some((x) => matchDoc(x, d));
-    if (k === "$and") return c.every((x) => matchDoc(x, d));
-    if (k === "$or") return c.some((x) => matchDoc(x, d));
-    return valueMatches(c, getPath(d, k));
-  });
-}
-function runPipeline(rows, pipeline) {
-  let docs = rows.map((r) => ({ ...r }));
-  for (const stage of pipeline) {
-    const [name] = Object.keys(stage);
-    const arg = stage[name];
-    if (name === "$match") docs = docs.filter((d) => matchDoc(arg, d));
-    else if (name === "$facet") docs = [Object.fromEntries(Object.entries(arg).map(([k, sub]) => [k, runPipeline(docs, sub)]))];
-    else if (name === "$project") {
-      docs = docs.map((d) => {
-        const o = {};
-        if (arg._id !== 0 && d._id !== undefined) o._id = d._id;
-        for (const [k, on] of Object.entries(arg)) if (k !== "_id" && on && d[k] !== undefined) o[k] = d[k];
-        return o;
-      });
-    } else if (name === "$group") {
-      const groups = new Map();
-      for (const d of docs) {
-        const id = expr(arg._id, d);
-        const key = JSON.stringify(id == null ? null : num(id));
-        if (!groups.has(key)) groups.set(key, { id: id == null ? null : id, docs: [] });
-        groups.get(key).docs.push(d);
-      }
-      docs = [...groups.values()].map(({ id, docs: ds }) => {
-        const out = { _id: id };
-        for (const [f, acc] of Object.entries(arg)) {
-          if (f === "_id") continue;
-          const [op] = Object.keys(acc);
-          const vals = ds.map((d) => expr(acc[op], d));
-          const present = vals.filter((v) => v != null);
-          if (op === "$sum") out[f] = vals.reduce((s, v) => s + (typeof v === "number" ? v : 0), 0);
-          else if (op === "$max") out[f] = present.reduce((m, v) => (m == null || num(v) > num(m) ? v : m), null);
-          else if (op === "$min") out[f] = present.reduce((m, v) => (m == null || num(v) < num(m) ? v : m), null);
-          else if (op === "$addToSet") out[f] = [...new Map(present.map((v) => [JSON.stringify(num(v)), v])).values()];
-          else throw new Error("evaluator: unsupported accumulator " + op);
-        }
-        return out;
-      });
-    } else throw new Error("evaluator: unsupported stage " + name);
-  }
-  return docs;
-}
+  // A named sale of a pool login (written " B ") takes that login first: the unit cannot pair.
+  const named = { source: "listing_sold", gameKey: "world of tanks", dedupeKey: "sold:" + hex(3) + ":world of tanks:0", login: " B ", account: null, priceUsd: 2, at: ago(6) };
+  const e2 = G.engineCounts({ signals: [unit, named], connected: [{ gameKey: "world of tanks", account: hex(2), login: "b", at: new Date(t.getTime() + 3600000), dedupeKey: "c" }], now: NOW });
+  assert.equal(e2.get("world of tanks").count, 3, "the named sale, its buyer's connection and the unpaired unit");
+});
 
-test("+ engineCounts equals the engine's own internalSalesForGame on the same rows", async () => {
+// The same rows through the engine's REAL internalSalesForGame on a real (local, in-memory)
+// mongod, and through the board's replica: the engine's pairing read uses $trim / $expr, so a
+// hand-written evaluator would be one more thing to trust. The mongod binary is the one the
+// repo's other database tests use (mongodb-memory-server's cache); no network.
+test("+ engineCounts equals the engine's own internalSalesForGame, run on a real mongod", async () => {
+  const { MongoMemoryServer } = require("mongodb-memory-server");
+  const mongoose = require("mongoose");
   const engine = require("../utils/autoFarmer");
   const SaleSignal = require("../models/SaleSignal");
-  const realAggregate = SaleSignal.aggregate;
-  const errors = [];
-  let rows = [];
-  SaleSignal.aggregate = (pipeline) => {
-    try {
-      return Promise.resolve(runPipeline(rows, pipeline));
-    } catch (e) {
-      errors.push(e.message);
-      return Promise.reject(e);
-    }
+  const mem = await MongoMemoryServer.create();
+  const realError = console.error;
+  const pairingFailures = [];
+  console.error = (...a) => {
+    if (/pairing read failed/.test(a.join(" "))) pairingFailures.push(a.join(" "));
+    else realError(...a);
   };
-  // The rule before 2026-10-03 (every row grouped by account, else dedupeKey), to show the
-  // rows really exercise the new one.
-  const oldCount = (game, now) => {
+  // The count before 2026-10-03 (every row grouped by account, else dedupeKey), to show the
+  // rows really exercise the quantity-unit rule.
+  const oldCount = (rows, game, now) => {
     const groups = new Set();
     for (const x of rows) {
       if (x.gameKey !== game || x.at.getTime() < now - 45 * DAY) continue;
@@ -499,23 +647,28 @@ test("+ engineCounts equals the engine's own internalSalesForGame on the same ro
   let total = 0;
   let differs = 0;
   try {
+    await mongoose.connect(mem.getUri("pricetrackerenginepin"));
     for (let seed = 1; seed <= 60; seed += 1) {
       // Rows dated against the real clock: internalSalesForGame reads Date.now().
       const now = Date.now();
-      rows = randomRows(seed).map((x) => ({ ...x, at: new Date(x.at.getTime() - NOW + now) }));
+      const rows = randomRows(seed).map((x) => ({ ...x, at: new Date(x.at.getTime() - NOW + now) }));
+      await SaleSignal.deleteMany({});
+      await SaleSignal.insertMany(rows.map((x) => ({ ...x, game: x.gameKey })));
       const board = G.engineCounts({ signals: rows.filter((x) => x.source === "listing_sold"), connected: rows.filter((x) => x.source === "connected"), now });
       for (const game of ["world of tanks", "albion online", "rust"]) {
         const e = await engine.internalSalesForGame(game);
         const b = board.get(game) || { count: 0, revenue: 0, avgPrice: 0 };
         assert.deepEqual({ count: b.count, revenue: b.revenue, avgPrice: b.avgPrice }, e, "seed " + seed + " " + game);
         total += e.count;
-        if (oldCount(game, now) !== e.count) differs += 1;
+        if (oldCount(rows, game, now) !== e.count) differs += 1;
       }
     }
   } finally {
-    SaleSignal.aggregate = realAggregate;
+    console.error = realError;
+    await mongoose.disconnect();
+    await mem.stop();
   }
-  assert.deepEqual(errors, [], "the evaluator understood every stage the engine ran");
+  assert.deepEqual(pairingFailures, [], "the engine's pairing read ran (no fallback)");
   assert.ok(total > 300, "the engine really counted (" + total + ")");
   assert.ok(differs >= 20, "the rows exercise the quantity-unit rule (" + differs + " games differ from the old count)");
 });

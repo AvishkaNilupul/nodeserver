@@ -51,9 +51,12 @@
 // changes what it sees as demand — on purpose:
 //   * a Shop or bulk-order purchase ("reserved:" signal with no price, or market
 //     "bulk") is a paying buyer, not a missing price (42 such signals in 135 days
-//     were dropped before);
+//     were dropped before) — but only while its reservation still holds: a refund,
+//     a failed payment or a cancelled order releases it and leaves the signal;
 //   * a burst that has the shape of ONE real guardian pass is demand, though never
-//     price evidence; only a burst bigger than a real pass is a closeout;
+//     price evidence; a burst bigger than a real pass (counting the delist rule's
+//     mass-close records of the same minutes), or one that emptied a listing which
+//     was later closed, is a closeout or a wipe;
 //   * a Gameflip bulk pack of N is N sales: its sold row is not one more;
 //   * units one GGSel / Digiseller detection wrote are one ORDER of price evidence.
 const { identify, normGame } = require("./setIdentity");
@@ -105,15 +108,27 @@ function detectionGroup(listingId, at, fallback) {
 // guardian's thresholds (autoFarm.saleOutageGuard), never the ledger's.
 const REAL_PASS_MAX_LISTINGS = 4;
 const REAL_PASS_MAX_UNITS = 11;
+// A listing in one of these states was taken down for good.
+const CLOSED_STATUSES = new Set(["delisted", "removed"]);
+
+// reserved:<accountId>:<setId>:<game> — dropReservation.reserveSetOnAccount's key.
+const RESERVED_RE = /^reserved:([0-9a-f]{24}):([^:]*):/i;
 
 /**
  * @param {object} input
  * @param {Array}  input.listings MarketplaceListing rows (lean, projected)
  * @param {Array}  input.signals  SaleSignal rows with source "listing_sold"
  * @param {Array}  input.sets     DropSet rows referenced by the listings
+ * @param {Set}    [input.reservations] "<accountId>|<setId>" of every Shop / bulk-order
+ *                 reservation that still holds (the loader's DropLog read). Absent or
+ *                 null = not known: no Shop / bulk-order signal counts.
+ * @param {Map}    [input.accountLogins] accountId -> Twitch login, for those signals
+ * @param {string} [input.reservationNote] why the reservations could not be read
  * @returns {{ sales: object[], excluded: object, quality: object }}
  */
-function buildLedger({ listings = [], signals = [], sets = [] } = {}) {
+function buildLedger({ listings = [], signals = [], sets = [], reservations = null, accountLogins = null, reservationNote = "" } = {}) {
+  const held = reservations && typeof reservations.has === "function" ? reservations : null;
+  const loginOf = (acct) => (accountLogins && typeof accountLogins.get === "function" && accountLogins.get(acct)) || "";
   const setById = new Map(sets.map((s) => [idStr(s._id), s]));
   const listingById = new Map(listings.map((l) => [idStr(l._id), l]));
   const identCache = new Map();
@@ -132,7 +147,13 @@ function buildLedger({ listings = [], signals = [], sets = [] } = {}) {
   // and bulk orders, `unpricedSignal` every sale signal that carried no price (in
   // `sales`, or a Shop sale in `demandOnly`), `burst` a burst kept as demand because
   // it has the shape of one real guardian pass, `massClose` everything in `suspect`.
-  const excluded = { farm: 0, bulk: 0, noListing: 0, unpricedSignal: 0, duplicate: 0, massClose: 0, burst: 0 };
+  // Two more are not sales at all: `reservationReleased`, a Shop / bulk-order signal
+  // whose reservation was given back (refund, failed payment, cancelled order), and
+  // `reservationUnchecked`, one whose reservation could not be looked up.
+  const excluded = {
+    farm: 0, bulk: 0, noListing: 0, unpricedSignal: 0, duplicate: 0, massClose: 0, burst: 0,
+    reservationReleased: 0, reservationUnchecked: 0,
+  };
   const suspect = [];
 
   // Pre-pass: which sold:<listing> signals look like a delist closing out stock?
@@ -373,19 +394,42 @@ function buildLedger({ listings = [], signals = [], sets = [] } = {}) {
       // (project_phantom_demand_fix), never a buyer.
       if (s.source && s.source !== "listing_sold") continue;
       if (!bulkOrder && !(price <= 0 && (mk === "shop" || mk === ""))) continue;
+      // A SALE ONLY WHILE ITS RESERVATION HOLDS. The signal is written the moment the
+      // drops are reserved — before the Shop debits the buyer, before the bulk order is
+      // saved — and nothing removes it when that is rolled back: a failed debit, a failed
+      // Purchase write, a refund, a cancelled or deleted bulk order each release the
+      // drops (dropReservation release*: soldAt null, soldSetId "") and leave the signal.
+      // So it counts only while a DropLog row of that account still holds that set. A
+      // released one must not take the account+game key either (the next real sale of
+      // it would read as a duplicate), so this comes before the duplicate check.
+      const acct = shop[1].toLowerCase();
+      const setId = (RESERVED_RE.exec(dk) || [])[2] || "";
+      if (!held || !setId) {
+        excluded.reservationUnchecked += 1;
+        continue;
+      }
+      if (!held.has(acct + "|" + setId)) {
+        excluded.reservationReleased += 1;
+        continue;
+      }
       const gk = normGame(s.game || s.gameKey);
-      const key = "shop:" + shop[1].toLowerCase() + ":" + gk;
+      const key = "shop:" + acct + ":" + gk;
       if (seen.has(key)) {
         excluded.duplicate += 1;
         continue;
       }
       seen.add(key);
       excluded[bulkOrder ? "bulk" : "unpricedSignal"] += 1;
+      // The signal carries no login (reserveSetOnAccount writes ""), only the account
+      // record. A re-minted token is a second record of the same login, and the buyer's
+      // redeem may be seen on either: without the login, soldUnion counted that buyer's
+      // connection as a second sale. The loader names the account (accountLogins).
+      const login = loginList(s.login).length === 1 ? loginList(s.login)[0] : String(loginOf(acct)).trim().toLowerCase();
       demandOnly.push({
         key,
         saleGroup: key,
-        login: loginList(s.login).length === 1 ? loginList(s.login)[0] : "",
-        logins: loginList(s.login),
+        login,
+        logins: login ? [login] : loginList(s.login),
         account: idStr(s.account),
         dedupeKey: dk,
         source: bulkOrder ? "bulk-order" : "shop",
@@ -487,6 +531,21 @@ function buildLedger({ listings = [], signals = [], sets = [] } = {}) {
   // guardian passes are at least 5 minutes apart). A burst of real-pass shape moves to
   // `demandOnly` (still never a price, not in `suspect`); a bigger one is set aside
   // from both, as before.
+  //
+  // Two things make a small burst a closeout all the same (review of 2026-10-03):
+  //   * it is measured WITH the mass-close records the delist rule set aside for the
+  //     same market within BURST_MS of it: the listings that slipped the 90-second rule
+  //     (their rows were written again later) are the remnant of a big closeout, not a
+  //     pass of their own;
+  //   * a WIPE: a listing lost its whole stock at once (every unit the guardian kept on
+  //     it, `qtyTarget`) and is closed now (delisted / removed). Buyers emptying a
+  //     listing leave it on sale and it is refilled; a cleanup empties it and it is taken
+  //     down. On the 2026-10-01 snapshot the one burst kept as demand otherwise was
+  //     Digiseller Black Desert, 2026-08-14 11:29: 10 units on 3 listings, two of them
+  //     emptied (7 of 7, 2 of 2), all delisted later.
+  // Either way the burst is set aside, as before. A pass that leaves stock on its
+  // listings stays demand. (`qtyTarget` is read as it is now: a target lowered since
+  // reads as a wipe — the direction that never invents a sale.)
   {
     const BURST_N = 8;
     const BURST_MS = 5 * 60 * 1000;
@@ -507,11 +566,24 @@ function buildLedger({ listings = [], signals = [], sets = [] } = {}) {
     }
     if (flagged.size) {
       const realPass = new Set();
-      for (const arr of byMarket.values()) {
+      const massClose = suspect.filter((x) => x.reason === "mass-close");
+      // Units per listing of a burst's shape; a listing it emptied that is closed now = a wipe.
+      const wiped = (perListing) =>
+        [...perListing].some(([id, n]) => {
+          const l = listingById.get(id);
+          const kept = l ? Number(l.qtyTarget) || 0 : 0;
+          return kept > 0 && n >= kept && CLOSED_STATUSES.has(String(l.status || ""));
+        });
+      for (const [market, arr] of byMarket) {
         let burst = [];
         const close = () => {
-          const onListings = new Set(burst.map((x) => x.listingId)).size;
-          if (burst.length && onListings <= REAL_PASS_MAX_LISTINGS && burst.length <= REAL_PASS_MAX_UNITS) {
+          if (!burst.length) return;
+          const from = burst[0].at.getTime() - BURST_MS;
+          const to = burst[burst.length - 1].at.getTime() + BURST_MS;
+          const shape = burst.concat(massClose.filter((x) => x.market === market && x.at.getTime() >= from && x.at.getTime() <= to));
+          const perListing = new Map();
+          for (const x of shape) perListing.set(x.listingId, (perListing.get(x.listingId) || 0) + 1);
+          if (perListing.size <= REAL_PASS_MAX_LISTINGS && shape.length <= REAL_PASS_MAX_UNITS && !wiped(perListing)) {
             for (const x of burst) realPass.add(x);
           }
           burst = [];
@@ -581,6 +653,9 @@ function buildLedger({ listings = [], signals = [], sets = [] } = {}) {
   quality.bulkDemandOnly = demandOnly.filter((x) => x.source === "bulk").length;
   quality.demandOnly = demandOnly.length;
   quality.demandOnlyBySource = demandOnly.reduce((m, x) => ((m[x.source] = (m[x.source] || 0) + 1), m), {});
+  // Whether Shop / bulk-order sales could be checked against their reservations.
+  quality.reservationCheck = held ? "ok" : "unavailable";
+  quality.reservationNote = held ? "" : String(reservationNote || "");
   return { sales, demandOnly, excluded, quality, suspect, suspectSaleKeys };
 }
 

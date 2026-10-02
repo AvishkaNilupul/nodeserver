@@ -56,9 +56,10 @@ const gk = (g) => normGame(g);
 /* ------------------------------ engine replay ------------------------------ */
 
 // QUANTITY UNITS, as the engine counts them since 2026-10-03 (utils/autoFarmer.js
-// QUANTITY_POOL_RE / pairQuantityUnits — a PORT, pinned to the engine's own function by
-// tests/priceTrackerReviewFixes.test.js; requiring the engine here would load all of it
-// and its models into this pure module). A GGSel / Digiseller listing_sold row cannot
+// QUANTITY_POOL_RE / quantityUnitSales / pairQuantityUnits — a PORT; requiring the engine
+// here would load all of it and its models into this pure module).
+// tests/priceTrackerReviewFixes.test.js pins it to the engine's own pairQuantityUnits and to
+// internalSalesForGame run on a real mongod. A GGSel / Digiseller listing_sold row cannot
 // name the account: its `login` is the listing's whole delivery pool ("a, b, c"), and it
 // is ONE anonymous unit. It is the sale behind the first connection, from a login of its
 // pool, seen at or after it (a day of slack), that no named sale and no earlier unit
@@ -72,6 +73,18 @@ function loginPool(login) {
     .split(/[\s,;]+/)
     .map((x) => x.trim().toLowerCase())
     .filter(Boolean);
+}
+
+// The engine's own key for a row's login in its pairing read (quantityUnitSales):
+// { $trim: { input: { $toLower: { $ifNull: ["$login", ""] } }, chars: " ,;\t\n\r" } }.
+const ENGINE_TRIM = " ,;\t\n\r";
+function engineLogin(v) {
+  const s = (v == null ? "" : String(v)).toLowerCase();
+  let a = 0;
+  let b = s.length;
+  while (a < b && ENGINE_TRIM.includes(s[a])) a += 1;
+  while (b > a && ENGINE_TRIM.includes(s[b - 1])) b -= 1;
+  return s.slice(a, b);
 }
 
 // `units`: pool rows {login, at, priceUsd, dedupeKey}; `connected`: one row per
@@ -137,19 +150,51 @@ function pairQuantityUnits(units, connected, named) {
   return out;
 }
 
+// What the engine's pairing read (autoFarmer.js quantityUnitSales) returns for one game,
+// from that game's in-window rows. It reads only rows that can pair with the units' pool
+// logins, each keyed by engineLogin():
+//   connected      connected rows whose login is a pool login: by login, earliest `at`,
+//                  their accounts;
+//   namedLogins    the other listing_sold rows whose login is a pool login: the logins;
+//   namedAccounts  listing_sold rows with an account and an empty login: the accounts (one
+//                  may map to a pool login through a connection).
+function pairingRead(units, sold, conns) {
+  const poolLogins = new Set(units.flatMap((u) => loginPool(u.login)));
+  const connected = new Map();
+  for (const c of conns) {
+    const login = engineLogin(c.login);
+    if (!poolLogins.has(login)) continue;
+    const at = ts(c.at);
+    const cur = connected.get(login) || { _id: login, at, accounts: [] };
+    if (at < cur.at) cur.at = at;
+    if (c.account != null && !cur.accounts.some((a) => String(a) === String(c.account))) cur.accounts.push(c.account);
+    connected.set(login, cur);
+  }
+  const namedLogins = new Set();
+  const namedAccounts = new Map();
+  for (const s of sold) {
+    const login = engineLogin(s.login);
+    if (poolLogins.has(login)) namedLogins.add(login);
+    else if (!login && s.account != null) namedAccounts.set(String(s.account), s.account);
+  }
+  return {
+    connected: [...connected.values()].map((c) => ({ ...c, at: new Date(c.at) })),
+    named: [...namedLogins].map((login) => ({ login })).concat([...namedAccounts.values()].map((account) => ({ login: "", account }))),
+  };
+}
+
 // utils/autoFarmer.js `internalSalesForGame`, run for every game at once:
 //   rows with source in {connected, listing_sold}, `at` in the last 45 days, per
 //   lower-cased gameKey (the engine's own query key). A listing_sold row carrying a
 //   login POOL is a quantity unit (above); every other row is grouped by `account`
 //   (or the dedupeKey when it has none) so one sold account is one sale, price = the
-//   best any row of that sale carries. The units are then paired with that game's
-//   connections (connected rows with a login, by login: earliest time, their accounts)
-//   and its named sales (the other listing_sold rows), and add what pairing says.
+//   best any row of that sale carries. The units then add what pairing says, paired
+//   against exactly the rows the engine's pairing read returns (pairingRead).
 // `dropKeys` removes the rows of sales the ledger set aside; passing it gives the
 // count the engine WOULD see if it ignored mass-close and burst signals.
 function engineCounts({ signals = [], connected = [], now, dropSaleKeys = null }) {
   const cutoff = now - ENGINE_WINDOW_DAYS * DAY;
-  // rawGameKey -> { groups: Map(group -> maxPrice), units, named, conns: Map(login -> {at, accounts}) }
+  // rawGameKey -> { groups: Map(group -> maxPrice), units, sold (other listing_sold rows), conns }
   const per = new Map();
   const add = (row, isSold) => {
     const at = ts(row.at);
@@ -160,20 +205,13 @@ function engineCounts({ signals = [], connected = [], now, dropSaleKeys = null }
       const m = /^sold:([0-9a-f]{24}):.*:(\d+)$/i.exec(String(row.dedupeKey || ""));
       if (m && dropSaleKeys.has(m[1].toLowerCase() + ":" + m[2])) return;
     }
-    if (!per.has(g)) per.set(g, { groups: new Map(), units: [], named: [], conns: new Map() });
+    if (!per.has(g)) per.set(g, { groups: new Map(), units: [], sold: [], conns: [] });
     const b = per.get(g);
     if (isSold && typeof row.login === "string" && QUANTITY_POOL_RE.test(row.login)) {
       b.units.push({ login: row.login, at: row.at, priceUsd: row.priceUsd, dedupeKey: row.dedupeKey });
       return;
     }
-    if (isSold) b.named.push({ login: row.login, account: row.account });
-    else if (typeof row.login === "string" && row.login > "") {
-      const login = row.login.toLowerCase();
-      const c = b.conns.get(login) || { at, accounts: [] };
-      if (at < c.at) c.at = at;
-      if (!c.accounts.some((a) => String(a) === String(row.account))) c.accounts.push(row.account);
-      b.conns.set(login, c);
-    }
+    (isSold ? b.sold : b.conns).push(row);
     const group = row.account ? "a:" + idStr(row.account) : "d:" + String(row.dedupeKey || "");
     const price = Number(row.priceUsd) || 0;
     b.groups.set(group, Math.max(b.groups.get(group) || 0, price));
@@ -191,8 +229,8 @@ function engineCounts({ signals = [], connected = [], now, dropSaleKeys = null }
       if (p > 0) priced += 1;
     }
     if (b.units.length) {
-      const conns = [...b.conns].map(([login, c]) => ({ _id: login, at: new Date(c.at), accounts: c.accounts }));
-      const q = pairQuantityUnits(b.units, conns, b.named);
+      const read = pairingRead(b.units, b.sold, b.conns);
+      const q = pairQuantityUnits(b.units, read.connected, read.named);
       count += q.count;
       revenue += q.revenue;
       priced += q.priced;
