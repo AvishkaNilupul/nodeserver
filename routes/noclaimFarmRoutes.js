@@ -288,8 +288,23 @@ router.post("/api/noclaim-farm/bots", requireSuperadmin, async (req, res) => {
       game: game || "",
       count: out.claimed,
       detail:
-        "no-claim bot " + out.id + " created with " + out.claimed + " account(s)",
+        "no-claim bot " + out.id + " created with " + out.claimed + " account(s)" +
+        (out.provisionError ? " — its container did not start: " + out.provisionError : ""),
     });
+    // The config write landed but the container launch failed: the accounts are
+    // in that bot's config and stay claimed (releasing them would double-home
+    // them), so say so instead of reporting a clean create.
+    if (out.provisionError) {
+      return res.json({
+        success: true,
+        id: out.id,
+        claimed: out.claimed,
+        provisionError: out.provisionError,
+        message:
+          `Bot ${out.id} got ${out.claimed} account(s), but its container did not start (${out.provisionError}). ` +
+          `The accounts stay with bot ${out.id}; the feeder builds no other bot for this game until it runs — check provision.log on the bot host.`,
+      });
+    }
     res.json({
       success: true,
       id: out.id,

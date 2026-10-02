@@ -44,6 +44,14 @@ const { sendTelegram } = require("./telegram");
 
 const MIN_TICK_MS = 5 * 60000;
 
+// unusableBots()' reason for a bot with a config and no container, and neither
+// operator marker: a provision that never finished — STUCK, not parked.
+const NO_CONTAINER = "no container";
+
+// Bot ids whose missing container has been reported in this process: one
+// SystemEvent and one Telegram per bot, not one per hourly pass.
+const stuckReported = new Set();
+
 const state = {
   timer: null,
   stopped: true,
@@ -81,6 +89,10 @@ async function plan({ days = 30, withFleet = true } = {}) {
   if (withFleet) {
     try {
       fleetState = await fleet.readFleet();
+      // A `docker ps` that failed lists no containers, so every bot would read
+      // as stuck. Its container states are unknown, and so is the fleet.
+      if (fleetState && fleetState.psOk === false)
+        throw new Error("docker ps failed on the fleet host — container states unknown");
       fleetState.unusable = await unusableBots(fleetState.bots);
     } catch (e) {
       fleetState = null;
@@ -103,22 +115,36 @@ async function plan({ days = 30, withFleet = true } = {}) {
 
   // Accounts per game in a no-claim bot that can FARM, and which of those bots
   // have room. A bot's config game is the label the container actually farms,
-  // so it is bucketed the same way every sale is. A personal bot, one the
-  // operator stopped and one with no container are not supply: counting them
-  // made the fleet look bigger than what farms, and a game whose only bots are
-  // like that (CoD bot 10, parked by the owner 2026-09-20) is parked — never
-  // grown, which would mean building it a new container.
+  // so it is bucketed the same way every sale is. A personal bot and one the
+  // operator stopped are not supply: counting them made the fleet look bigger
+  // than what farms, and a game whose only bots are like that (CoD bot 10,
+  // parked by the owner 2026-09-20) is parked — never grown, which would mean
+  // building it a new container.
+  //
+  // A bot with a config and no container (and neither marker) is STUCK
+  // (2026-10-03, defect 6): a provision that never finished. Its accounts ARE
+  // counted — they are claimed, and farm the moment it gets a container — so
+  // the game's need does not grow; it is never topped up, and the game gets no
+  // second container until it is fixed. Leaving it out of `have` is what made a
+  // provision that kept failing build a new 60-account bot every pass.
   const assigned = new Map();
-  const botsByGame = new Map(); // key -> { all, usable }
+  const botsByGame = new Map(); // key -> { all, usable, stuck: [ids] }
   const roomBots = new Map();
   if (fleetState) {
     for (const b of fleetState.bots) {
       const key = farmDemand.bucketFor(b.game);
       if (!key) continue;
-      const tally = botsByGame.get(key) || botsByGame.set(key, { all: 0, usable: 0 }).get(key);
+      const tally =
+        botsByGame.get(key) || botsByGame.set(key, { all: 0, usable: 0, stuck: [] }).get(key);
       tally.all++;
+      const why = fleetState.unusable ? fleetState.unusable.get(String(b.id)) : "";
+      if (why === NO_CONTAINER) {
+        tally.stuck.push(String(b.id));
+        assigned.set(key, (assigned.get(key) || 0) + b.accounts);
+        continue;
+      }
       // A bot that cannot farm what it is given never gets a top-up.
-      if (fleetState.unusable && fleetState.unusable.has(String(b.id))) continue;
+      if (why) continue;
       tally.usable++;
       assigned.set(key, (assigned.get(key) || 0) + b.accounts);
       const room = Math.max(0, fleet.MAX_PER_BOT - b.accounts);
@@ -139,12 +165,29 @@ async function plan({ days = 30, withFleet = true } = {}) {
 
   const supply = await fleet.spendable("").catch(() => ({ ready: 0, reserve: 0, spendable: 0 }));
 
+  // The container cap, from the count this fleet read already holds
+  // (noclaimFleet.newContainerGate applies the same rule, fresh, at create).
+  const maxBots = fleet.maxBots();
+  const containers =
+    fleetState && Number.isFinite(fleetState.containers) ? fleetState.containers : null;
+  const capReached = maxBots > 0 && containers != null && containers >= maxBots;
+
   const games = rows.map((r) => {
     const have = fleetKnown ? assigned.get(r.key) || 0 : r.onHand + r.stock.inFlight;
     const hasCampaign = !!(campaignGames && campaignGames.has(r.key));
-    const tally = botsByGame.get(r.key) || { all: 0, usable: 0 };
-    const parked = fleetKnown && tally.all > 0 && tally.usable === 0;
+    const tally = botsByGame.get(r.key) || { all: 0, usable: 0, stuck: [] };
+    const stuck = tally.stuck.slice();
+    // Parked = every bot is the operator's own or stopped by them. A game with
+    // a stuck bot is not parked — its need is real — but gets no new container
+    // either (createBlocked below).
+    const parked = fleetKnown && tally.all > 0 && tally.usable === 0 && stuck.length === 0;
     const fleetNeed = fleetKnown && hasCampaign && !parked ? Math.max(0, r.target - have) : 0;
+    const room = (roomBots.get(r.key) || []).reduce((s, b) => s + b.room, 0);
+    const createBlocked = stuck.length
+      ? `bot ${stuck.join(", ")} has no container — not creating another`
+      : capReached
+        ? `container cap reached (${containers}/${maxBots}, autoFarm.noclaimMaxBots)`
+        : "";
 
     // The shelf. `unclaimedGameCaps` limits how many of a game's farmed accounts
     // may sit on auto-listings (Gameflip/GGSel); over the cap they stay free for
@@ -174,7 +217,18 @@ async function plan({ days = 30, withFleet = true } = {}) {
         `${r.sales.undated} older sale(s) have no sale date (swept or ticked sold by hand) — not counted`,
       );
     if (parked)
-      notes.push(`every ${r.label} bot is stopped by you or has no container — not grown`);
+      notes.push(`every ${r.label} bot is stopped by you or is your own — not grown`);
+    if (stuck.length)
+      notes.push(
+        `bot ${stuck.join(", ")} has a config but no container (a provision that never ` +
+          "finished) — its accounts are counted and never topped up, and no new bot is " +
+          "built for this game until it is fixed or released",
+      );
+    if (capReached && !stuck.length && fleetNeed > room)
+      notes.push(
+        `the no-claim farm is at its container cap (${containers}/${maxBots}) — only bots ` +
+          "with room are topped up",
+      );
     if (fleetKnown && !hasCampaign)
       notes.push(
         campaignGames
@@ -215,11 +269,14 @@ async function plan({ days = 30, withFleet = true } = {}) {
         assigned: have,
         bots: fleetKnown ? (roomBots.get(r.key) || []).length : null,
         roomBots: roomBots.get(r.key) || [],
+        room,
         parked,
         botGame: botGameFor(r.key, fleetState && fleetState.bots, campaignGames, r.label),
       },
       shelf: { cap: effectiveCap, explicit: shelfCap > 0, need: shelfNeed, suggested: Math.max(effectiveCap, shelfTarget) },
       fleetNeed,
+      stuck,
+      createBlocked,
       notes,
     };
   });
@@ -227,10 +284,16 @@ async function plan({ days = 30, withFleet = true } = {}) {
   // Share what the pool can spare between the games that want it, weighted by
   // the money each shortfall represents rather than by how many accounts it
   // asked for — a game selling at $4 outranks one selling at $0.75 that wants
-  // twice as many.
+  // twice as many. A game that cannot get a new container can only use the room
+  // its bots have, so that is all it asks for: a grant it cannot spend would
+  // only be taken from a game that can.
   const budget = Math.min(supply.spendable, cfg.maxPerRun);
   const grants = farmSizing.weightedSplit(
-    games.map((g) => ({ key: g.key, need: g.fleetNeed, weight: g.weight })),
+    games.map((g) => ({
+      key: g.key,
+      need: g.createBlocked ? Math.min(g.fleetNeed, g.fleet.room) : g.fleetNeed,
+      weight: g.weight,
+    })),
     budget,
   );
   for (const g of games) g.grant = grants.get(g.key) || 0;
@@ -240,6 +303,10 @@ async function plan({ days = 30, withFleet = true } = {}) {
     windowDays: days,
     fleetKnown,
     fleetError,
+    // Container count against the cap, and whether a provision was in flight
+    // when the fleet was read (a bot it is building has no container yet).
+    containers: { count: containers, max: maxBots },
+    provisioning: fleetState ? !!fleetState.provisioning : null,
     supply,
     budget,
     policy: {
@@ -268,11 +335,12 @@ async function plan({ days = 30, withFleet = true } = {}) {
 // it off), and a personal "my own" bot. On 2026-09-27 seven fresh pool accounts
 // went into CoD bot 10: no container, stopped, and no CoD campaign. Throws when
 // the markers cannot be read, so the caller withholds growth.
+//
+// The markers win over the container state (2026-10-03): the operator's own or
+// stopped bot is parked whatever its container, while a container-less bot with
+// neither marker is NO_CONTAINER, which plan() counts as stuck.
 async function unusableBots(bots) {
   const out = new Map();
-  for (const b of bots || []) {
-    if (b.containerState === "none") out.set(String(b.id), "no container");
-  }
   const hosts = require("./botHosts");
   const raw = await fleet.sh(
     `for d in ${hosts.shq(fleet.BOTS_DIR)}/*/; do id=$(basename "$d"); ` +
@@ -283,6 +351,10 @@ async function unusableBots(bots) {
     const [id, what] = line.trim().split(/\s+/);
     if (!id || !what) continue;
     if (!out.has(id)) out.set(id, what === "off" ? "stopped by the operator" : "personal bot");
+  }
+  for (const b of bots || []) {
+    const id = String(b.id);
+    if (b.containerState === "none" && !out.has(id)) out.set(id, NO_CONTAINER);
   }
   return out;
 }
@@ -323,6 +395,47 @@ function botGameFor(key, bots, campaignGames, fallback) {
   return live || fallback;
 }
 
+// Why a new container must not be created for game row `g` right now, or "".
+// A stuck bot first; then the two checks noclaimFleet.createBot enforces (the
+// container cap, the host's RAM), asked BEFORE trying so a refusal is recorded
+// as a reason rather than an error. A check that throws blocks the create.
+async function createBlockReason(g, p) {
+  if (Array.isArray(g.stuck) && g.stuck.length)
+    return `bot ${g.stuck.join(", ")} has no container — not creating another`;
+  try {
+    const gate = await fleet.newContainerGate({
+      containers: p && p.containers ? p.containers.count : null,
+    });
+    return gate && gate.ok === false ? gate.reason || "a new container is refused right now" : "";
+  } catch (e) {
+    return `could not check whether a new container is allowed (${e.message || e})`;
+  }
+}
+
+// One SystemEvent + one Telegram per stuck bot per process.
+function reportStuck(g, actor) {
+  for (const raw of g.stuck) {
+    const id = String(raw);
+    if (stuckReported.has(id)) continue;
+    stuckReported.add(id);
+    logEvent({
+      category: "noclaim",
+      action: "provision_stuck",
+      severity: "warn",
+      actor,
+      subject: fleet.containerFor(id),
+      game: g.label,
+      detail:
+        `no-claim bot ${id} (${g.label}) has a config but no container — not creating ` +
+        "another. Its accounts stay claimed and counted until it is fixed or released.",
+    });
+    sendTelegram(
+      `⚠️ No-claim bot ${id} (${g.label}) has no container — not creating another. ` +
+        "Fix or release it on the No-claim farm page.",
+    );
+  }
+}
+
 // The unclaimed engine's own default when no per-game cap is configured
 // (utils/unclaimedAutoList.js GAME_CAP). Mirrored rather than imported: pulling
 // in that 4,000-line engine to read one constant would make this module load the
@@ -348,6 +461,16 @@ const round1 = (n) => Math.round(num(n) * 10) / 10;
 // At most ONE bot is created per pass, because provisioning takes a global lock
 // on the Pi (BASE/.provisioning) and a second create would simply 409. The next
 // pass creates the next one.
+//
+// No bot is created for a game with a stuck bot (one with no container), at the
+// container cap, or while the host is short of RAM (2026-10-03): each is
+// recorded as the result's `createBlocked`, not as an error.
+//
+// A row is put back in the pool ONLY when it is known not to be in a config
+// (2026-10-03, defect 1). topUpBot says which rows the config holds; a write
+// whose outcome cannot be read back releases nothing and is reported as
+// topup_state_unknown — a claimed row in no bot is an orphan an operator can
+// find by its note, an available row in a bot is a double-home nobody sees.
 async function apply(input = {}) {
   const { actor = "allocator", dryRun = false, games: only = null } = input;
   const p = input.plan || (await plan({ days: input.days || 30 }));
@@ -367,6 +490,12 @@ async function apply(input = {}) {
     if (only && !only.includes(g.key)) continue;
     const want = Math.max(0, Math.min(g.grant, g.fleetNeed));
     const r = { key: g.key, label: g.label, want, toppedUp: 0, createdBot: null, shelf: null, errors: [] };
+
+    // A bot with a config and no container is a provision that never finished.
+    // Say so once per bot per process — but not while a provision is running,
+    // when a bot it is still building has no container yet.
+    if (!dryRun && !p.provisioning && Array.isArray(g.stuck) && g.stuck.length)
+      reportStuck(g, actor);
 
     // --- The shelf. Free, instant, and usually the actual bottleneck. --------
     //
@@ -413,60 +542,122 @@ async function apply(input = {}) {
     // --- The fleet. -------------------------------------------------------
     let left = want;
     if (left > 0 && !dryRun) {
+      // A write on this game's host just failed: no more writes for this game
+      // this pass (a create would be one), on to the next game.
+      let hostTrouble = false;
       // Top up existing bots first.
       for (const bot of g.fleet.roomBots) {
         if (left <= 0) break;
         const take = Math.min(bot.room, left);
-        let claimed = [];
+        let claimed;
         try {
+          // claimForGame puts back whatever it claimed if it fails part-way.
           claimed = await fleet.claimForGame(bot.game, take, { actor });
-          if (!claimed.length) break; // pool ran dry mid-pass
-          const res = await fleet.topUpBot(bot.id, claimed, bot.game);
-          r.toppedUp += res.added;
-          left -= res.added;
-          // Anything the config rejected as a duplicate was claimed and never
-          // used — put it straight back rather than leaving it stranded.
-          if (res.added < claimed.length) {
-            await fleet.release(claimed.slice(res.added), { actor }).catch(() => {});
-          }
-          logEvent({
-            category: "noclaim",
-            action: "bot_topped_up",
-            actor,
-            subject: fleet.containerFor(bot.id),
-            game: bot.game,
-            count: res.added,
-            detail: `topped bot ${bot.id} up to ${res.total} account(s) for ${bot.game}`,
-          });
         } catch (e) {
+          r.errors.push(`top-up bot ${bot.id}: ${e.message}`);
+          break;
+        }
+        if (!claimed.length) break; // pool ran dry mid-pass
+        let res;
+        try {
+          res = await fleet.topUpBot(bot.id, claimed, bot.game);
+        } catch (e) {
+          if (e && e.unknownState) {
+            // The write may have landed: release nothing.
+            hostTrouble = true;
+            const logins = claimed.map((d) => d && d.username).filter(Boolean);
+            r.errors.push(
+              `top-up bot ${bot.id}: ${e.message} — ${claimed.length} account(s) left claimed`,
+            );
+            logEvent({
+              category: "noclaim",
+              action: "topup_state_unknown",
+              severity: "error",
+              actor,
+              subject: fleet.containerFor(bot.id),
+              game: bot.game,
+              count: claimed.length,
+              detail:
+                `top-up of bot ${bot.id}: ${e.message} — ${claimed.length} account(s) left ` +
+                `claimed, none released. Check the config, then release any it does not hold: ` +
+                logins.join(", "),
+              meta: { botId: String(bot.id), logins },
+            });
+            break;
+          }
+          // Thrown before any write: none of these reached the config through
+          // this call, so all of them go back.
           await fleet.release(claimed, { actor }).catch(() => {});
           r.errors.push(`top-up bot ${bot.id}: ${e.message}`);
           break;
         }
+        r.toppedUp += res.added;
+        left -= res.added;
+        // Only what the config does NOT hold goes back. A duplicate it already
+        // had is in the bot and stays claimed; the old `claimed.slice(added)`
+        // released the wrong rows after a skipped duplicate.
+        const absent = new Set((Array.isArray(res.absentIds) ? res.absentIds : []).map(String));
+        const back = claimed.filter((d) => absent.has(String(d._id)));
+        if (back.length) await fleet.release(back, { actor }).catch(() => {});
+        if (res.writeError) {
+          hostTrouble = true;
+          r.errors.push(
+            `top-up bot ${bot.id}: the write failed (${res.writeError}); a re-read found ` +
+              `${res.added} of the new account(s) in its config`,
+          );
+        }
+        if (res.restartError)
+          r.errors.push(
+            `top-up bot ${bot.id}: accounts written, restart failed (${res.restartError}) — ` +
+              "they farm from the bot's next start",
+          );
+        logEvent({
+          category: "noclaim",
+          action: "bot_topped_up",
+          actor,
+          subject: fleet.containerFor(bot.id),
+          game: bot.game,
+          count: res.added,
+          detail: `topped bot ${bot.id} up to ${res.total} account(s) for ${bot.game}`,
+        });
+        if (hostTrouble) break;
       }
 
       // Still short and no room left: one new container, once per pass.
-      if (left > 0 && created === 0) {
-        try {
-          const out = await fleet.createBot({
-            game: (g.fleet && g.fleet.botGame) || g.label,
-            count: Math.min(left, fleet.MAX_PER_BOT),
-            actor,
-          });
-          r.createdBot = out;
-          created++;
-          left -= out.claimed;
-          logEvent({
-            category: "noclaim",
-            action: "bot_created",
-            actor,
-            subject: fleet.containerFor(out.id),
-            game: out.game,
-            count: out.claimed,
-            detail: `allocator created no-claim bot ${out.id} with ${out.claimed} account(s)`,
-          });
-        } catch (e) {
-          r.errors.push("create: " + e.message);
+      if (left > 0 && created === 0 && !hostTrouble) {
+        const blocked = await createBlockReason(g, p);
+        if (blocked) {
+          r.createBlocked = blocked;
+        } else {
+          try {
+            const out = await fleet.createBot({
+              game: (g.fleet && g.fleet.botGame) || g.label,
+              count: Math.min(left, fleet.MAX_PER_BOT),
+              actor,
+            });
+            r.createdBot = out;
+            created++;
+            left -= out.claimed;
+            logEvent({
+              category: "noclaim",
+              action: "bot_created",
+              actor,
+              subject: fleet.containerFor(out.id),
+              game: out.game,
+              count: out.claimed,
+              detail:
+                `allocator created no-claim bot ${out.id} with ${out.claimed} account(s)` +
+                (out.provisionError ? ` — its container did not launch (${out.provisionError})` : ""),
+            });
+            // The config landed, so its accounts stay claimed; the bot shows up
+            // as stuck on the next pass if it never gets a container.
+            if (out.provisionError)
+              r.errors.push(
+                `create: bot ${out.id} written but its container did not launch (${out.provisionError})`,
+              );
+          } catch (e) {
+            r.errors.push("create: " + e.message);
+          }
         }
       }
     } else if (left > 0 && dryRun) {
@@ -479,7 +670,11 @@ async function apply(input = {}) {
         r.plannedTopUps.push({ id: bot.id, add: take });
         sim -= take;
       }
-      if (sim > 0) r.plannedCreate = Math.min(sim, fleet.MAX_PER_BOT);
+      if (sim > 0) {
+        const blocked = await createBlockReason(g, p);
+        if (blocked) r.createBlocked = blocked;
+        else r.plannedCreate = Math.min(sim, fleet.MAX_PER_BOT);
+      }
     }
 
     r.shortfall = Math.max(0, left);
@@ -493,6 +688,9 @@ async function apply(input = {}) {
     toppedUp: results.reduce((s, r) => s + r.toppedUp, 0),
     created: results.filter((r) => r.createdBot).length,
     shelvesRaised: results.filter((r) => r.shelf && r.shelf.applied).length,
+    createsBlocked: results
+      .filter((r) => r.createBlocked)
+      .map((r) => ({ game: r.label, why: r.createBlocked })),
     errors: results.flatMap((r) => r.errors),
     results,
   };
@@ -566,7 +764,8 @@ async function runOnce({ force = false } = {}) {
             (g) =>
               `${g.label} ${g.fleet.assigned}/${g.target}` +
               (g.grant > 0 ? ` +${g.grant}` : "") +
-              (g.fleet.parked ? " (parked)" : ""),
+              (g.fleet.parked ? " (parked)" : "") +
+              (g.stuck && g.stuck.length ? ` (stuck bot ${g.stuck.join(",")})` : ""),
           )
           .join(", ") +
         (p.fleetKnown ? "" : " (fleet unknown: " + (p.fleetError || "?") + ")") +
@@ -587,7 +786,11 @@ async function runOnce({ force = false } = {}) {
           " bot(s), " +
           applied.shelvesRaised +
           " shelf cap(s)" +
-          (applied.errors.length ? ", " + applied.errors.length + " error(s)" : ""),
+          (applied.errors.length ? ", " + applied.errors.length + " error(s)" : "") +
+          (applied.createsBlocked && applied.createsBlocked.length
+            ? "; new bot withheld: " +
+              applied.createsBlocked.map((b) => `${b.game} (${b.why})`).join("; ")
+            : ""),
       );
     } else if (applied && applied.skipped) {
       console.log("unclaimedAllocator: apply skipped — " + applied.skipped);
@@ -614,9 +817,9 @@ function start() {
     if (state.stopped) return;
     // Interval is re-read from settings EVERY pass, so an operator changing
     // noclaimSizeIntervalMin takes effect on the next tick with no restart —
-    // the same live-edit contract as maxAutoBots.
-    const cfg = settings.getFarmSizing();
-    const delay = Math.max(MIN_TICK_MS, cfg.intervalMin * 60000);
+    // the same live-edit contract as maxAutoBots. An unreadable value falls
+    // back to the hour: a throw here would end the loop for good, silently.
+    const delay = Math.max(MIN_TICK_MS, intervalMin() * 60000);
     state.timer = setTimeout(loop, delay);
     if (state.timer.unref) state.timer.unref();
   };
@@ -632,11 +835,29 @@ function stop() {
   state.timer = null;
 }
 
+// The pass interval in minutes, as the loop applies it.
+function intervalMin() {
+  let v = NaN;
+  try {
+    v = Number(settings.getFarmSizing().intervalMin);
+  } catch {
+    v = NaN;
+  }
+  return Math.max(MIN_TICK_MS / 60000, Number.isFinite(v) ? v : 60);
+}
+
+// Synchronous and never throws — the health page reads `lastRun` against
+// `intervalMin` to tell a live loop from a dead one (docs/LIVE-FIXES-1003.md §3).
 function status() {
-  const cfg = settings.getFarmSizing();
+  let cfg = {};
+  try {
+    cfg = settings.getFarmSizing() || {};
+  } catch {
+    cfg = {};
+  }
   return {
-    autoSize: cfg.autoSize,
-    intervalMin: cfg.intervalMin,
+    autoSize: !!cfg.autoSize,
+    intervalMin: intervalMin(),
     maxPerRun: cfg.maxPerRun,
     running: state.running,
     lastRun: state.lastRun,

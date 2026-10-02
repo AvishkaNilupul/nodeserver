@@ -29,8 +29,17 @@
 const hosts = require("./botHosts");
 const settings = require("./settings");
 const AvailableAccount = require("../models/AvailableAccount");
+const UnclaimedAccount = require("../models/UnclaimedAccount");
 const { recordPoolUsage } = require("./poolUsageLog");
 const { withFileLock } = require("./fileLock");
+const { logEvent } = require("./systemLog");
+
+// The two shared guards of 2026-10-03 (docs/LIVE-FIXES-1003.md §2): the pristine
+// reserve rent-farm orders draw on, and the host-RAM check on a new container.
+// Required lazily, so a missing or broken helper fails the claim or the create
+// that needed it — nothing spent — instead of the server's boot.
+const pristineReserve = () => require("./pristineReserve");
+const hostCapacity = () => require("./hostCapacity");
 
 // --- Sandbox constants (all on the Pi, separate from the managed bot dir) ----
 const HOST_ID = "contabo";
@@ -46,6 +55,22 @@ const CLAIM_NOTE_PREFIX = "noclaim-farm";
 // The create form's own clamp, kept here so the allocator and the route cannot
 // disagree about how big one bot may get.
 const MAX_PER_BOT = 70;
+
+// What "claimed by this feeder" looks like on a pool row — the same test every
+// other no-claim reader applies (unclaimedAutoList NOCLAIM_OWNER_NOTE,
+// farmDemand's inFlight count, the Release route).
+const CLAIM_NOTE_RE = new RegExp("^" + CLAIM_NOTE_PREFIX + ":", "i");
+
+// Ledger statuses that leave a login sellable again — noclaimHoldings'
+// FREE_STATUSES, mirrored. Any other status (listed, sold, removed, manual —
+// and an unknown one, which freeReason also treats as committed) is a login no
+// no-claim seller will ever sell again; the lister's scan skips exactly
+// listed/sold/removed/manual, which is the same set under the ledger's enum.
+const LEDGER_FREE_STATUSES = ["skipped", "released", "expired"];
+
+// autoFarm.noclaimMaxBots when settings.json predates the key. settings.js owns
+// the real default; this mirror only stops an old file reading as "no cap".
+const NOCLAIM_MAX_BOTS_DEFAULT = 40;
 
 function pi() {
   const host = hosts.resolveHost(HOST_ID);
@@ -132,10 +157,26 @@ function soldGameExclusion(game) {
   return { soldGames: { $not: { $regex: esc } } };
 }
 
+// A sellable password, by the sellers' own fields: noclaimStock.poolBlockReason
+// refuses `!pool.password && !pool.credPasswordEnc`, and the lister's scan and
+// noclaimHoldings resolve the same two fields. Both are stored as ciphertext
+// strings ("" when there is none), so non-empty is the same test.
+function passwordPresent() {
+  return [{ password: { $gt: "" } }, { credPasswordEnc: { $gt: "" } }];
+}
+
 // Ready pool query — mirrors the auto-farmer's definition so the two systems
 // agree on what "ready" means (verified token, available, not suspended). When
 // a game is given, accounts already spent for that game are excluded.
-function readyPoolQuery(game) {
+//
+// Since 2026-10-03 (docs/LIVE-FIXES-1003.md A2, defect 2) the feeder only
+// claims an account its own sellers would accept. Every no-claim sale path
+// refuses an account without a password, and none ever sells a login again once
+// it holds a committed no-claim ledger — so either one was a pool account spent
+// on stock nobody could sell, counted as supply all the while. The password
+// rule is here; the ledger rule needs a database read, so the caller passes the
+// logins committedLedgerLogins() found as `excludeLogins`.
+function readyPoolQuery(game, { excludeLogins = null } = {}) {
   const q = {
     status: "available",
     clientSecret: { $gt: "" },
@@ -144,9 +185,46 @@ function readyPoolQuery(game) {
     // never be claimed into a new bot, farmed again and re-listed, or the same
     // login goes out twice.
     manualSold: { $ne: true },
+    $or: passwordPresent(),
   };
   Object.assign(q, soldGameExclusion(game));
+  if (Array.isArray(excludeLogins) && excludeLogins.length) {
+    q.usernameLower = { $nin: excludeLogins };
+  }
   return q;
+}
+
+// Logins (lower-cased) whose no-claim ledger is committed — on a listing, sold,
+// removed, or held by an owner's manual listing. Per LOGIN, whatever game the
+// ledger is for, because that is how both sellers key it: the scan's skip set
+// is source + login, and freeReason takes the login's strongest ledger. The
+// recycler never resets a ledger, so a recycled account keeps its old one.
+async function committedLedgerLogins() {
+  const rows = await UnclaimedAccount.distinct("loginLower", {
+    source: "noclaim",
+    status: { $nin: LEDGER_FREE_STATUSES },
+  });
+  const out = new Set();
+  for (const l of rows || []) {
+    const k = String(l || "").trim().toLowerCase();
+    if (k) out.add(k);
+  }
+  return [...out];
+}
+
+// The pristine-reserve clause for one claim: {} while the pool holds more
+// never-farmed accounts than the reserve rent-farm orders need, else a clause
+// that skips them (utils/pristineReserve.js). A guard that throws reads as "at
+// the reserve" — skip pristine rows — which spends nothing it was keeping.
+async function pristineClause(guard) {
+  try {
+    const f = await guard.farmClaimFilter();
+    if (f && typeof f === "object") return f;
+  } catch (e) {
+    console.error("noclaimFleet: pristine reserve unreadable, skipping pristine rows:", e.message || e);
+  }
+  if (!guard.PRISTINE_CONDITIONS) throw new Error("pristine reserve unavailable — not claiming");
+  return { $nor: [guard.PRISTINE_CONDITIONS] };
 }
 
 // A no-claim bot may only ever be built for a game on `noClaimGames`. Nothing
@@ -171,48 +249,93 @@ function assertNoClaimGame(game) {
 }
 
 // How many accounts this system may claim right now without drawing the shared
-// pool below the auto-farm's reserve. Returns { ready, reserve, spendable }.
+// pool below the auto-farm's reserve. Returns { ready, reserve, spendable,
+// pristineHeld }.
+//
+// `ready` counts only rows claimForGame could actually take (2026-10-03): the
+// same password, ledger and pristine-reserve rules. While the reserve still has
+// headroom its clause lets pristine rows through, but claimForGame closes it the
+// moment the reserve is reached — so the reserve's own share (`pristineHeld`,
+// the guard's `protect`) is not supply.
 async function spendable(game) {
   const reserve = Math.max(0, Number(settings.getAutoFarm().poolReserve) || 0);
-  const ready = await AvailableAccount.countDocuments(readyPoolQuery(game));
-  return { ready, reserve, spendable: Math.max(0, ready - reserve) };
+  const excludeLogins = await committedLedgerLogins();
+  const guard = pristineReserve();
+  const held = await guard.farmGuard();
+  const clause = await pristineClause(guard);
+  const rows = await AvailableAccount.countDocuments({
+    $and: [readyPoolQuery(game, { excludeLogins }), clause],
+  });
+  const open = Object.keys(clause).length === 0;
+  const pristineHeld = open ? Math.max(0, Math.floor(Number(held && held.protect) || 0)) : 0;
+  const ready = Math.max(0, rows - pristineHeld);
+  return { ready, reserve, spendable: Math.max(0, ready - reserve), pristineHeld };
 }
 
 // Claim up to `count` ready pool accounts for `game`, one atomic
 // findOneAndUpdate each so two callers can never be handed the same row. Returns
 // the claimed docs — possibly fewer than asked for, possibly none.
 //
-// The caller owns the rollback: a partial claim that then fails to reach a bot
-// config would strand accounts out of the pool forever, so every caller here
-// wraps this in a try/catch that releases what it claimed. `release()` below is
-// that path.
+// The caller owns the rollback once it has the docs: a claim that then fails to
+// reach a bot config would strand accounts out of the pool, so every caller
+// releases what did NOT reach a config (`release()` below). If the claim itself
+// fails part-way, the batch is put back here — nothing in it has reached a
+// config yet, and the caller never got to see it.
+//
+// The ledger exclusion is read once per call; the pristine clause is re-read
+// for EVERY claim, because noteClaimed() lowers the reserve's cached count and
+// a 70-account batch must stop taking pristine rows the moment the reserve is
+// reached, not at the guard's next refresh.
 async function claimForGame(game, count, { actor = "noclaim" } = {}) {
   const note = `${CLAIM_NOTE_PREFIX}:${game}`;
   const claimed = [];
-  for (let i = 0; i < count; i++) {
-    const doc = await AvailableAccount.findOneAndUpdate(
-      readyPoolQuery(game),
-      { $set: { status: "claimed", claimedAt: new Date(), claimedNote: note } },
-      { returnDocument: "after", sort: { lastCheckAt: -1 } },
-    );
-    if (!doc) break;
-    claimed.push(doc);
-    await recordPoolUsage(doc._id, { event: "claimed", actor, game, note });
+  const want = Math.floor(Number(count) || 0);
+  if (want <= 0) return claimed;
+  const excludeLogins = await committedLedgerLogins();
+  const guard = pristineReserve();
+  try {
+    for (let i = 0; i < want; i++) {
+      const clause = await pristineClause(guard);
+      const doc = await AvailableAccount.findOneAndUpdate(
+        { $and: [readyPoolQuery(game, { excludeLogins }), clause] },
+        { $set: { status: "claimed", claimedAt: new Date(), claimedNote: note } },
+        { returnDocument: "after", sort: { lastCheckAt: -1 } },
+      );
+      if (!doc) break;
+      claimed.push(doc);
+      try {
+        guard.noteClaimed(doc);
+      } catch (e) {
+        console.error("noclaimFleet: pristine reserve bookkeeping failed:", e.message || e);
+      }
+      await recordPoolUsage(doc._id, { event: "claimed", actor, game, note });
+    }
+  } catch (err) {
+    await release(claimed, { actor }).catch(() => {});
+    throw err;
   }
   return claimed;
 }
 
 // Put claimed rows back. Only rows STILL in "claimed" are logged as released, so
 // a row another worker has already moved on is not double-counted.
+//
+// And only rows this feeder still HOLDS (2026-10-03, defect 1): "claimed" with
+// a "noclaim-farm:" note. A row another system claimed in between — a renter's
+// "rented to …", the auto-farm, an operator — belongs to that system and to its
+// bot; flipping it to available would put an account that sits in a live config
+// back in the pool, the 09-25 double-home.
 async function release(docs, { actor = "noclaim" } = {}) {
   const ids = (docs || []).map((d) => d && d._id).filter(Boolean);
   if (!ids.length) return 0;
+  const mine = { status: "claimed", claimedNote: CLAIM_NOTE_RE };
   const still = await AvailableAccount.find(
-    { _id: { $in: ids }, status: "claimed" },
+    { _id: { $in: ids }, ...mine },
     { _id: 1 },
   ).lean();
+  if (!still.length) return 0;
   const r = await AvailableAccount.updateMany(
-    { _id: { $in: ids } },
+    { _id: { $in: still.map((d) => d._id) }, ...mine },
     { $set: { status: "available", claimedAt: null, claimedNote: "" } },
   ).catch(() => null);
   if (r && (r.modifiedCount || r.nModified)) {
@@ -234,11 +357,16 @@ async function release(docs, { actor = "noclaim" } = {}) {
 // so the `[` and the `"Overwatch"` sit on different lines and a single-line sed
 // never matches — which is exactly the bug that made every bot show a blank game
 // label until 2026-08-25.
+//
+// Also returned (2026-10-03): `containers`, every noclaim-bot-* container in
+// any state (what the container cap counts), and `psOk`. A `docker ps` that
+// fails prints nothing, which reads as "no bot has a container" — so a caller
+// that acts on container states must check psOk (null containers when false).
 async function readFleet({ timeout = 25000 } = {}) {
   const script =
     `prov=no; [ -f ${hosts.shq(BASE + "/.provisioning")} ] && prov=yes; echo "prov=$prov"; ` +
     `img=no; docker image inspect ${hosts.shq(IMAGE)} >/dev/null 2>&1 && img=yes; echo "img=$img"; ` +
-    `echo "PS_START"; docker ps -a --filter name=^/${CONTAINER_PREFIX} --format '{{.Names}}|{{.State}}|{{.Status}}' 2>/dev/null; echo "PS_END"; ` +
+    `echo "PS_START"; docker ps -a --filter name=^/${CONTAINER_PREFIX} --format '{{.Names}}|{{.State}}|{{.Status}}' 2>/dev/null; echo "PS_RC=$?"; echo "PS_END"; ` +
     `echo "BOTS_START"; for d in ${hosts.shq(BOTS_DIR)}/*/Configuration/config.json; do [ -f "$d" ] || continue; ` +
     `id=$(basename $(dirname $(dirname "$d"))); ` +
     `game=$(tr -d '\\n' < "$d" | sed -n 's/.*"FavouriteGames"[^[]*\\[[^"]*"\\([^"]*\\)".*/\\1/p'); ` +
@@ -249,6 +377,7 @@ async function readFleet({ timeout = 25000 } = {}) {
   let section = "";
   let provisioning = false;
   let imageBuilt = false;
+  let psOk = false;
   const psMap = {};
   const bots = [];
   for (const raw of out.split("\n")) {
@@ -259,6 +388,7 @@ async function readFleet({ timeout = 25000 } = {}) {
     if (line === "BOTS_END") { section = ""; continue; }
     if (line.startsWith("prov=")) { provisioning = line.slice(5) === "yes"; continue; }
     if (line.startsWith("img=")) { imageBuilt = line.slice(4) === "yes"; continue; }
+    if (line.startsWith("PS_RC=")) { psOk = line.slice(6) === "0"; continue; }
     if (section === "ps" && line) {
       const [name, state, status] = line.split("|");
       psMap[name.replace(CONTAINER_PREFIX, "")] = { state, status };
@@ -274,7 +404,87 @@ async function readFleet({ timeout = 25000 } = {}) {
     b.running = ps ? ps.state === "running" : false;
   }
   bots.sort((a, b) => parseInt(a.id, 10) - parseInt(b.id, 10));
-  return { provisioning, imageBuilt, bots };
+  return {
+    provisioning,
+    imageBuilt,
+    bots,
+    containers: psOk ? Object.keys(psMap).length : null,
+    psOk,
+  };
+}
+
+// How many no-claim containers exist right now, in any state — the container
+// cap's count when no fresh fleet read is at hand. Throws when docker cannot be
+// asked: a count that silently read 0 would wave every create through.
+async function containerCount() {
+  const out = await sh(
+    `names=$(docker ps -a --filter name=^/${CONTAINER_PREFIX} --format '{{.Names}}' 2>/dev/null); ` +
+      `echo "RC=$?"; printf '%s\\n' "$names"`,
+    { timeout: 15000 },
+  );
+  const lines = String(out || "").split("\n").map((l) => l.trim());
+  if (!lines.includes("RC=0")) throw new Error("could not list the no-claim containers (docker ps failed)");
+  return lines.filter((l) => l.startsWith(CONTAINER_PREFIX)).length;
+}
+
+// The cap on no-claim containers (autoFarm.noclaimMaxBots; 0 = off). A value
+// that is not a number reads as the default, never as "off": a typo must not
+// switch the cap off.
+function maxBots() {
+  let raw;
+  try {
+    raw = settings.getAutoFarm().noclaimMaxBots;
+  } catch {
+    raw = undefined;
+  }
+  if (raw == null || raw === "") return NOCLAIM_MAX_BOTS_DEFAULT;
+  const n = Math.floor(Number(raw));
+  return Number.isFinite(n) && n >= 0 ? n : NOCLAIM_MAX_BOTS_DEFAULT;
+}
+
+// May a NEW no-claim container be created right now? (2026-10-03, defect 16.)
+// Every container is a .NET process holding host RAM, and the farm used to
+// find the host's ceiling only by running into it. Two checks, in order:
+//   1. the container cap — counted from `containers` (a fleet read the caller
+//      already holds) or one fresh `docker ps -a`;
+//   2. the host's free RAM (utils/hostCapacity.js, cached 60 s). It fails OPEN
+//      on an unreadable host — the create needs the same SSH and fails loudly
+//      on its own. A check that THROWS is not an answer, so it throws here and
+//      the create does not happen.
+// Returns { ok, reason, containers, max, availableMb, minFreeMb }.
+async function newContainerGate({ containers = null } = {}) {
+  const max = maxBots();
+  let count = Number.isFinite(containers) ? containers : null;
+  if (max > 0) {
+    if (count == null) count = await containerCount();
+    if (count >= max) {
+      return {
+        ok: false,
+        reason:
+          `the no-claim farm already has ${count} container(s) and its cap is ${max} ` +
+          "(autoFarm.noclaimMaxBots) — remove a bot or raise the cap first",
+        containers: count,
+        max,
+        availableMb: null,
+        minFreeMb: null,
+      };
+    }
+  }
+  const ram = (await hostCapacity().newContainerAllowed(HOST_ID)) || {};
+  const mb = (v) => (Number.isFinite(v) ? v : null);
+  const out = { containers: count, max, availableMb: mb(ram.availableMb), minFreeMb: mb(ram.minFreeMb) };
+  if (ram.ok === false) {
+    return {
+      ok: false,
+      reason:
+        out.availableMb != null && out.minFreeMb != null
+          ? `host ${HOST_ID} has ${out.availableMb} MB of RAM free, under the ${out.minFreeMb} MB ` +
+            "a new container needs (autoFarm.hostMinFreeMb)"
+          : `host ${HOST_ID} refused a new container (${ram.reason || "low RAM"})`,
+      ...out,
+    };
+  }
+  return { ok: true, reason: "", ...out };
 }
 
 // --- Writes -----------------------------------------------------------------
@@ -315,17 +525,12 @@ function containerRunArgs(id, image = IMAGE) {
   );
 }
 
-// Create a bot from already-claimed accounts: write its config, then detach the
-// clone/build/run script behind the provisioning lock.
-//
-// Claiming is NOT done here. The caller claims first and owns the rollback,
-// because a create that fails after claiming must return the accounts and only
-// the caller knows which ones it claimed.
-async function createBotFromAccounts(id, accounts, game) {
+// Write a new bot's config. Guarded write (utils/botHosts.guardedWriteScript):
+// a cut-off transfer is never installed as the bot's config, and the file is
+// 600 from the start.
+async function writeBotConfig(id, accounts, game) {
   assertNoClaimGame(game);
   const config = buildConfig(accounts, game);
-  // Guarded write (utils/botHosts.guardedWriteScript): a cut-off transfer is
-  // never installed as the bot's config, and the file is 600 from the start.
   await sh(
     hosts.guardedWriteScript(configPath(id), hosts.byteLength(config), {
       mode: "600",
@@ -333,22 +538,45 @@ async function createBotFromAccounts(id, accounts, game) {
     }),
     { timeout: 20000, input: config },
   );
+}
 
-  const provision = [
+// The provision chain for bot `id`, one && list that launchProvision runs
+// detached behind the provisioning lock.
+//
+// The fork is fetched and built ONLY when the image is missing (2026-10-03,
+// defect 6). The image is all a container needs, and a fork that cannot be
+// fetched (branch gone, GitHub down) must not stop a container whose image is
+// already on the host. The old chain fetched on every create and only got away
+// with a failed fetch by accident: its unbraced `docker rm … || true` caught the
+// failure and ran `docker run` anyway. The rm is braced now, so the chain means
+// what it says — with no image and no fork, it stops before `docker run` and
+// the bot is left config-only, which the allocator reports as stuck.
+function provisionSteps(id, count, game) {
+  const shq = hosts.shq;
+  const fetchAndBuild =
+    `if [ -d ${shq(SRC_DIR + "/.git")} ]; then cd ${shq(SRC_DIR)} && git fetch --depth 1 origin ${BRANCH} && git checkout -f ${BRANCH} && git reset --hard origin/${BRANCH}; ` +
+    `else rm -rf ${shq(SRC_DIR)} && git clone --depth 1 -b ${BRANCH} ${shq(REPO)} ${shq(SRC_DIR)}; fi && ` +
+    `cd ${shq(SRC_DIR)} && docker build -f TwitchDropsBot.Console/Dockerfile -t ${shq(IMAGE)} .`;
+  return [
     "set -e",
-    `touch ${hosts.shq(BASE + "/.provisioning")}`,
+    `touch ${shq(BASE + "/.provisioning")}`,
     // `game` reaches here from a request body on the route path, so it is shell
     // QUOTED, not interpolated. The original inline version wrote it raw into a
     // double-quoted echo that is then embedded in a nested `sh -c`, where a
     // backtick or $( ) in a game name would execute on the Pi as root.
-    `echo ${hosts.shq(`[bot ${id}] ${accounts.length} account(s), game=${game}`)}`,
-    `if [ -d ${hosts.shq(SRC_DIR + "/.git")} ]; then cd ${hosts.shq(SRC_DIR)} && git fetch --depth 1 origin ${BRANCH} && git checkout -f ${BRANCH} && git reset --hard origin/${BRANCH}; else rm -rf ${hosts.shq(SRC_DIR)} && git clone --depth 1 -b ${BRANCH} ${hosts.shq(REPO)} ${hosts.shq(SRC_DIR)}; fi`,
-    `if ! docker image inspect ${hosts.shq(IMAGE)} >/dev/null 2>&1; then cd ${hosts.shq(SRC_DIR)} && docker build -f TwitchDropsBot.Console/Dockerfile -t ${hosts.shq(IMAGE)} .; fi`,
-    `docker rm -f ${hosts.shq(containerFor(id))} >/dev/null 2>&1 || true`,
+    `echo ${shq(`[bot ${id}] ${count} account(s), game=${game}`)}`,
+    `if ! docker image inspect ${shq(IMAGE)} >/dev/null 2>&1; then ${fetchAndBuild}; fi`,
+    `{ docker rm -f ${shq(containerFor(id))} >/dev/null 2>&1 || true; }`,
     `docker run -d ${containerRunArgs(id, IMAGE)}`,
     `echo "[$(date -u +%FT%TZ)] bot ${id} started"`,
   ].join(" && ");
-  const wrapped = `( { ${provision} ; } > ${hosts.shq(BASE + "/provision.log")} 2>&1; rm -f ${hosts.shq(BASE + "/.provisioning")} )`;
+}
+
+// Detach the provision chain. Returns once it is launched — its outcome lands
+// in BASE/provision.log, and a bot it never gave a container shows up in the
+// next fleet read as config-only.
+async function launchProvision(id, count, game) {
+  const wrapped = `( { ${provisionSteps(id, count, game)} ; } > ${hosts.shq(BASE + "/provision.log")} 2>&1; rm -f ${hosts.shq(BASE + "/.provisioning")} )`;
   await sh(
     `mkdir -p ${hosts.shq(BASE)}; setsid sh -c ${hosts.shq(wrapped)} >/dev/null 2>&1 < /dev/null &`,
     { timeout: 20000 },
@@ -356,17 +584,96 @@ async function createBotFromAccounts(id, accounts, game) {
   return id;
 }
 
-// Create one no-claim bot end to end: validate, guard the pool reserve and the
-// provisioning lock, claim, write the config, start the container.
+// Create a bot from already-claimed accounts: write its config, then detach the
+// clone/build/run script behind the provisioning lock.
+//
+// Claiming is NOT done here. The caller claims first and owns the rollback,
+// because a create that fails after claiming must return the accounts and only
+// the caller knows which ones it claimed. (createBot runs the two steps itself,
+// so it can tell a config that landed from one that did not.)
+async function createBotFromAccounts(id, accounts, game) {
+  await writeBotConfig(id, accounts, game);
+  await launchProvision(id, (accounts || []).length, game);
+  return id;
+}
+
+// What bot `id`'s config holds RIGHT NOW: { exists, secrets, total }. The
+// re-read a failed write falls back on (topUpBot, createBot). Throws — state
+// unknown — when the host cannot be read, the config does not parse, or a
+// guarded write to it may still be in flight (its temp file is there): an SSH
+// timeout can fire after the bytes went over and before the `mv`, so a config
+// that does not hold the accounts YET is no proof that it never will.
+async function readConfigSecrets(id) {
+  const file = hosts.shq(configPath(id));
+  const out = await sh(
+    `for t in ${file}.tmp-*; do [ -e "$t" ] && echo __INFLIGHT__ && break; done; ` +
+      `if [ -f ${file} ]; then echo __CFG__; cat ${file}; else echo __NOCFG__; fi`,
+    { timeout: 20000 },
+  );
+  const text = String(out || "");
+  const at = text.indexOf("__CFG__");
+  const head = at >= 0 ? text.slice(0, at) : text;
+  if (head.includes("__INFLIGHT__")) {
+    throw new Error(`a write to bot ${id}'s config may still be in flight`);
+  }
+  if (at < 0) {
+    if (head.includes("__NOCFG__")) return { exists: false, secrets: new Set(), total: 0 };
+    throw new Error(`bot ${id}'s config could not be read`);
+  }
+  let cfg;
+  try {
+    cfg = JSON.parse(text.slice(at + "__CFG__".length));
+  } catch (e) {
+    throw new Error(`bot ${id}'s config is not valid JSON (${e.message})`);
+  }
+  const ts = (cfg && cfg.TwitchSettings) || {};
+  const users = Array.isArray(ts.TwitchUsers) ? ts.TwitchUsers : [];
+  return {
+    exists: true,
+    secrets: new Set(users.map((u) => String((u && u.ClientSecret) || "")).filter(Boolean)),
+    total: users.length,
+  };
+}
+
+// Which of `docs` a config holds, by ClientSecret — an account's identity in a
+// config. Two pool rows sharing one token are one account to the bot, so the
+// twin of a row in the config is in the config too.
+function splitBySecret(docs, secrets) {
+  const presentIds = [];
+  const absentIds = [];
+  for (const d of docs || []) {
+    if (!d || d._id == null) continue;
+    const s = String(d.clientSecret || "");
+    (s && secrets.has(s) ? presentIds : absentIds).push(d._id);
+  }
+  return { presentIds, absentIds };
+}
+
+// Create one no-claim bot end to end: validate, guard the container cap, the
+// host's RAM, the pool reserve and the provisioning lock, claim, write the
+// config, start the container.
 //
 // The rollback is the whole reason this is one function. A create that claims 50
 // accounts and then fails to reach the Pi would strand all 50 out of the pool
-// with no owner and no way to find them but their note — so every exit after the
-// claim returns them.
+// with no owner and no way to find them but their note — so an exit BEFORE the
+// config write returns them. An exit AFTER it never does (2026-10-03, defect 1):
+// the config holds them, and an account in a config marked available is the
+// 09-25 double-home. So:
+//   * the write throws → re-read the config; release only what it does not
+//     hold; if it cannot be read, release nothing (topup_state_unknown);
+//   * the launch fails after the write landed → return { …, provisionError }.
+//     The bot is config-only, which the allocator reports as stuck.
 async function createBot({ game, count, actor = "noclaim" } = {}) {
   const g = assertNoClaimGame(game);
   const want = Math.max(1, Math.min(MAX_PER_BOT, Math.floor(Number(count) || 0)));
 
+  const gate = await newContainerGate();
+  if (!gate.ok) {
+    const e = new Error(`Not creating a no-claim bot: ${gate.reason}.`);
+    e.status = 409;
+    e.gate = gate;
+    throw e;
+  }
   const supply = await spendable(g);
   if (supply.ready - want < supply.reserve) {
     const e = new Error(
@@ -381,21 +688,80 @@ async function createBot({ game, count, actor = "noclaim" } = {}) {
     throw e;
   }
 
-  let claimed = [];
+  // claimForGame puts back whatever it claimed if it fails part-way.
+  const claimed = await claimForGame(g, want, { actor });
+  if (!claimed.length) {
+    const e = new Error("No ready pool accounts to claim.");
+    e.status = 409;
+    throw e;
+  }
+
+  let id;
   try {
-    claimed = await claimForGame(g, want, { actor });
-    if (!claimed.length) {
-      const e = new Error("No ready pool accounts to claim.");
-      e.status = 409;
-      throw e;
-    }
-    const id = await nextBotId();
-    await createBotFromAccounts(id, claimed, g);
-    return { id, claimed: claimed.length, game: g };
+    id = await nextBotId();
   } catch (err) {
-    await release(claimed, { actor }).catch(() => {});
+    await release(claimed, { actor }).catch(() => {}); // nothing written yet
     throw err;
   }
+
+  let inConfig = claimed;
+  try {
+    await writeBotConfig(id, claimed, g);
+  } catch (err) {
+    let now = null;
+    let why = "";
+    try {
+      now = await readConfigSecrets(id);
+    } catch (probeErr) {
+      why = probeErr.message || String(probeErr);
+    }
+    if (!now) {
+      logStateUnknown({
+        actor,
+        id,
+        game: g,
+        docs: claimed,
+        why: `config write failed (${err.message || err}) and the re-read failed too (${why})`,
+      });
+      err.unknownState = true;
+      throw err;
+    }
+    const { presentIds } = splitBySecret(claimed, now.secrets);
+    const present = new Set(presentIds.map(String));
+    const back = claimed.filter((d) => !present.has(String(d._id)));
+    if (back.length) await release(back, { actor }).catch(() => {});
+    if (!present.size) throw err;
+    // The write landed although the call failed: go on with what it holds.
+    inConfig = claimed.filter((d) => present.has(String(d._id)));
+  }
+
+  try {
+    await launchProvision(id, inConfig.length, g);
+  } catch (err) {
+    return { id, claimed: inConfig.length, game: g, provisionError: err.message || String(err) };
+  }
+  return { id, claimed: inConfig.length, game: g };
+}
+
+// A write whose outcome could not be read back (2026-10-03). The accounts stay
+// claimed — a claimed row in no bot is an orphan an operator can find by its
+// note; an available row in a bot is a double-home nobody can see — and this
+// event names them so the orphans can be checked and released by hand.
+function logStateUnknown({ actor, id, game, docs, why }) {
+  const logins = (docs || []).map((d) => d && d.username).filter(Boolean);
+  logEvent({
+    category: "noclaim",
+    action: "topup_state_unknown",
+    severity: "error",
+    actor,
+    subject: containerFor(id),
+    game: game || "",
+    count: logins.length,
+    detail:
+      `bot ${id}: ${why} — ${logins.length} account(s) left claimed, none released. ` +
+      `Check the config, then release any it does not hold: ${logins.join(", ")}`,
+    meta: { botId: String(id), logins },
+  });
 }
 
 // Add already-claimed accounts to an EXISTING bot's config.
@@ -411,9 +777,25 @@ async function createBot({ game, count, actor = "noclaim" } = {}) {
 // Accounts already present (by ClientSecret) are skipped rather than duplicated:
 // the same login twice in one config is a dupeGuard violation that makes the bot
 // fight itself for the session.
+//
+// What it returns tells the caller what it may put back (2026-10-03, defect 1):
+//   { added, total, presentIds, absentIds[, writeError][, restartError] }
+// presentIds = the given docs whose ClientSecret is in the config after the
+// call — newly added OR already there (an account already in this bot IS in
+// this bot, and stays claimed); absentIds = the rest, the only ones a caller may
+// release. The old caller released `claimed.slice(added)`, which after a skipped
+// duplicate was the wrong rows: in-config accounts marked available.
+//   * A restart that fails after the write is not an error: the accounts are in
+//     the config and farm from the bot's next start (restartError says so).
+//   * A write that throws is re-read once. Readable → the split is what is
+//     really there (writeError says why). Unreadable → it throws with
+//     `err.unknownState = true`, and the caller must release NOTHING.
+//   * Any other throw happens before the write: nothing reached the config
+//     through this call.
 async function topUpBot(id, accounts, game, { restart = true } = {}) {
   const host = pi();
   const file = configPath(id);
+  const docs = (accounts || []).filter(Boolean);
   return withFileLock(host, file, async () => {
     const raw = await sh(`cat ${hosts.shq(file)}`, { timeout: 20000 });
     let cfg;
@@ -437,34 +819,74 @@ async function topUpBot(id, accounts, game, { restart = true } = {}) {
       : game
         ? [game]
         : [];
-    let added = 0;
-    for (const a of accounts) {
+    const fresh = [];
+    for (const a of docs) {
       const secret = String(a.clientSecret || "");
       if (!secret || have.has(secret)) continue;
       users.push(userEntry(a, games));
       have.add(secret);
-      added++;
+      fresh.push(secret);
     }
-    if (!added) return { added: 0, total: users.length };
+    if (!fresh.length) return { added: 0, total: users.length, ...splitBySecret(docs, have) };
 
     const text = JSON.stringify(cfg, null, 2);
-    await sh(hosts.guardedWriteScript(file, hosts.byteLength(text), { mode: "600" }), {
-      timeout: 20000,
-      input: text,
-    });
-    // Bots read their config at STARTUP only, so a restart is what makes the new
-    // accounts farm. `docker restart` on a stopped container starts it — which
-    // would fight the auto-power watcher's park — so only restart one that is
-    // already running and let the watcher wake a parked bot on its own schedule.
-    if (restart) {
-      await sh(
-        `if [ "$(docker inspect -f '{{.State.Running}}' ${hosts.shq(containerFor(id))} 2>/dev/null)" = "true" ]; ` +
-          `then docker restart ${hosts.shq(containerFor(id))} >/dev/null 2>&1 || true; fi`,
-        { timeout: 60000 },
-      );
+    try {
+      await sh(hosts.guardedWriteScript(file, hosts.byteLength(text), { mode: "600" }), {
+        timeout: 20000,
+        input: text,
+      });
+    } catch (writeErr) {
+      let now;
+      try {
+        now = await readConfigSecrets(id);
+      } catch (readErr) {
+        const e = new Error(
+          `bot ${id} config write failed (${writeErr.message || writeErr}) and the re-read failed ` +
+            `too (${readErr.message || readErr}) — which accounts it holds is unknown`,
+        );
+        e.status = writeErr.status || 503;
+        e.unknownState = true;
+        throw e;
+      }
+      const landed = fresh.filter((s) => now.secrets.has(s)).length;
+      const out = {
+        added: landed,
+        total: now.total,
+        ...splitBySecret(docs, now.secrets),
+        writeError: writeErr.message || String(writeErr),
+      };
+      if (landed && restart) {
+        const why = await restartBotIfRunning(id);
+        if (why) out.restartError = why;
+      }
+      return out;
     }
-    return { added, total: users.length };
+    const out = { added: fresh.length, total: users.length, ...splitBySecret(docs, have) };
+    if (restart) {
+      const why = await restartBotIfRunning(id);
+      if (why) out.restartError = why;
+    }
+    return out;
   });
+}
+
+// Bots read their config at STARTUP only, so a restart is what makes new
+// accounts farm. `docker restart` on a stopped container starts it — which
+// would fight the auto-power watcher's park — so only a running one is
+// restarted, and the watcher wakes a parked bot on its own schedule. Returns ""
+// or why it failed, and never throws: the write before it has landed, and a
+// throw here used to read as "nothing written" and release in-config accounts.
+async function restartBotIfRunning(id) {
+  try {
+    await sh(
+      `if [ "$(docker inspect -f '{{.State.Running}}' ${hosts.shq(containerFor(id))} 2>/dev/null)" = "true" ]; ` +
+        `then docker restart ${hosts.shq(containerFor(id))} >/dev/null 2>&1 || true; fi`,
+      { timeout: 60000 },
+    );
+    return "";
+  } catch (e) {
+    return (e && e.message) || String(e);
+  }
 }
 
 // --- Personal ("my own") bots ----------------------------------------------
@@ -733,6 +1155,8 @@ module.exports = {
   REPO,
   BRANCH,
   CLAIM_NOTE_PREFIX,
+  CLAIM_NOTE_RE,
+  LEDGER_FREE_STATUSES,
   MAX_PER_BOT,
   pi,
   sh,
@@ -746,13 +1170,21 @@ module.exports = {
   buildConfig,
   soldGameExclusion,
   readyPoolQuery,
+  committedLedgerLogins,
   spendable,
   claimForGame,
   release,
   readFleet,
+  containerCount,
+  maxBots,
+  newContainerGate,
   provisionBusy,
   nextBotId,
+  writeBotConfig,
+  provisionSteps,
+  launchProvision,
   createBotFromAccounts,
+  readConfigSecrets,
   createBot,
   topUpBot,
   setPersonal,
