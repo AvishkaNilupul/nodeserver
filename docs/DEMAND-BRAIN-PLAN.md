@@ -11,6 +11,27 @@ same moment**, and scores both against what actually sells. It changes nothing: 
 decision, no setting, no listing, no account. Wiring it into the farms is a separate step
 after the week, decided on the evidence this produces.
 
+## Status: LIVE in test mode since 2026-10-02 05:54:53Z (log only — no farm reads it)
+
+- Deployed dark 05:53:34Z (commit b22b950; backup `_deploy_backup_20261002055257_farm-brain`): new
+  `utils/demandBrain/{model,inputs,index}.js` ff349ac4 / 73b95694 / 7f64d980, `models/DemandBrainRun.js`
+  78f3f9d8, `models/DemandBrainRow.js` 81374dcf; `routes/priceTrackerRoutes.js` 3318b47a → 9facf4c7,
+  `public/price-tracker.html` 4ac6cdd5 → fb98e717. Load check: brain OFF, not started, engine functions
+  present. After the restart: online, 0 unstable, every brain route 401 without a session, no errors.
+- Switched on 05:54:53Z with `setAutoFarm({demandBrain:{enabled:true}})` (audited; settings backup
+  `/root/_rehome_work/settings_before_demandBrain_20261002055452.json`). Nothing else in settings changed.
+- First run 05:59:35Z, 3.5 s: 117 claim games (89 live), 3 no-claim buckets, 120 rows (~500 B each); live:
+  2 agree, 40 both skip, 9 brain fewer, 18 brain skips, 20 brain has no evidence; live targets today 910 →
+  brain 205 over 69 games. No-claim identical (250 / 158 / 10). Indexes: runs `at` TTL 21 d; rows
+  `{k,f,at}`, `run`, `at` TTL 21 d. Memory 226 MB after boot → 383 MB after the first run (both reports
+  cached), app limit none, host 2.2 GB free.
+- Staging note: the harness blocked every write and index build but not `createCollection`, so it left
+  the two collections behind, empty; harmless (the brain creates them on first use) and the harness now
+  blocks collection creation too.
+- Off switch (no restart): `node -e 'require("./utils/settings").setAutoFarm({demandBrain:{enabled:false}},{actor:"owner"})'`
+  in `/var/www/redeemer/nodeserver`. Full rollback: restore the two changed files from the backup, remove
+  the five new ones, `pm2 restart redeemer`; the collections expire by TTL or can be dropped.
+
 ## 1. What exists today (the "old" side, measured 2026-10-02)
 
 | | Auto-farm (claim farm) | No-claim feeder |
