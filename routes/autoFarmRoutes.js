@@ -483,6 +483,10 @@ router.post("/auto-farm/settings", requireSuperadmin, async (req, res) => {
   try {
     const b = req.body || {};
     const patch = {};
+    // Declared first: recycleCooldownDays below uses it, and a `const` read
+    // before its line throws (every POST carrying that key answered 500).
+    const clamp = (v, lo, hi) =>
+      Math.max(lo, Math.min(hi, Math.floor(Number(v))));
     if ("enabled" in b) patch.enabled = !!b.enabled;
     if ("dryRun" in b) patch.dryRun = !!b.dryRun;
     if ("consolidate" in b) patch.consolidate = !!b.consolidate;
@@ -503,8 +507,6 @@ router.post("/auto-farm/settings", requireSuperadmin, async (req, res) => {
       }
       patch.hostId = id;
     }
-    const clamp = (v, lo, hi) =>
-      Math.max(lo, Math.min(hi, Math.floor(Number(v))));
     if ("maxPerGame" in b) patch.maxPerGame = clamp(b.maxPerGame, 1, 30);
     // Accounts per container. The ceiling is high on purpose: a container costs
     // a fixed ~130 MB of .NET baseline and only ~1.2 MB per account, so packing
