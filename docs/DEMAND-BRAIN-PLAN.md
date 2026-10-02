@@ -162,7 +162,9 @@ is advisory. Buckets match by the LONGEST keyword, `farmDemand.bucketFor`'s rule
   Interval `intervalMin` (default 60, min 15). First tick 6 min after boot; while off, re-read every 10.
 - One run at a time (module guard; redeemer is one fork-mode process). A load that outlives its 10-minute
   timeout blocks new runs until it settles, and every skipped tick says so in the log. Every failure is
-  caught and logged; a failed run writes nothing; a failed no-claim read only drops the no-claim rows.
+  caught and logged. A run whose inputs fail writes nothing; if the rows insert fails after the run document
+  was written, the heartbeat says NOT LOGGED and only the brain's own collections hold the partial record. A
+  failed no-claim read only drops the no-claim rows.
 - Engine calls run 3 games at a time with yields; the report builds yield to the event loop. Measured on
   the production box: inputs 4.1 s cold (0.9 s with warm caches), model 32 ms, scoring 45 ms.
 - Heartbeat: one log line per run (`demandBrain: run N (model v1, avg45) — … | Ns`), and one at boot when off.
