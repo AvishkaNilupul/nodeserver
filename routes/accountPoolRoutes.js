@@ -19,6 +19,7 @@ const BotAccount = require("../models/BotAccount");
 const DropLog = require("../models/DropLog");
 const RenterAccount = require("../models/RenterAccount");
 const AutoFarmTask = require("../models/AutoFarmTask");
+const UnclaimedAccount = require("../models/UnclaimedAccount");
 const accountPoolChecker = require("../utils/accountPoolChecker");
 const dropScanner = require("../utils/dropScanner");
 const { parseAccountList } = require("../utils/parseAccountList");
@@ -27,6 +28,7 @@ const { fetchInventory, fetchDropCampaigns } = require("../utils/twitchInventory
 const { recordPoolUsage } = require("../utils/poolUsageLog");
 const { usageSince, summarizeUsageRows } = require("../utils/poolUsageWatcher");
 const poolStock = require("../utils/poolStock");
+const listedLogins = require("../utils/listedLogins");
 const tokenReplace = require("../utils/tokenReplace");
 const { actorFromReq } = require("../utils/systemLog");
 
@@ -735,40 +737,166 @@ router.post("/account-pool/:id/check", requireSuperadmin, async (req, res) => {
 // one click handed the next farm claim a login a renter or rent-farm buyer
 // still farms, a no-claim bot's account, or held unclaimed stock — one login,
 // two homes. Since 2026-10-03 claim takes only an available row, and unclaim
-// refuses while a live owner holds the row.
+// refuses while an owner still holds the row.
 const RENTED_NOTE = /^rented to/i;
 const NOCLAIM_NOTE = /^noclaim-farm:/i;
 const AUTO_FARM_NOTE = /^auto-farm/i;
+// Written once an account went to a buyer: "spent — …" (the no-claim sellers),
+// "sold — token reclaimed by buyer" (the spent and sold-out recyclers),
+// "burned — …" (the Gameflip buffer: credentials seen by a refunded buyer).
+const SOLD_NOTE = /^(spent|sold|burned)\b/i;
+// Ledger statuses that leave a login free again; every other one is committed
+// to a sale (noclaimFleet LEDGER_FREE_STATUSES / noclaimHoldings FREE_STATUSES).
+const LEDGER_FREE_STATUSES = ["skipped", "released", "expired"];
 const CHANGED_MESSAGE = "It changed a moment ago — refresh and try again.";
+const LISTED_MESSAGE =
+  "It is on a live marketplace listing a buyer can still buy — take it off that listing first.";
+
+// A buyer holds this login. The Spent accounts page's Recycle is the one way
+// such an account goes back: it re-checks the token and keeps the games it was
+// sold for (soldGames), which a bare unclaim would not.
+function soldRefusal(why) {
+  return (
+    "It was sold to a buyer (" + why + ") — a manual unclaim would put the buyer's login back " +
+    "into the farms' pool. Use Recycle on the Spent accounts page instead: it keeps the games it " +
+    "was sold for, so it is never farmed for them again."
+  );
+}
+
+// One grep over every no-claim bot config is one SSH command; it must not hold
+// the operator's click for long.
+const NOCLAIM_CHECK_TIMEOUT_MS = 20000;
 
 function exactLogin(login) {
   return new RegExp("^" + String(login).replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + "$", "i");
 }
 
+// A no-claim row goes back only where the No-claim page's own Release would let
+// it (routes/noclaimFarmRoutes.js releasePlan, for one non-personal row): not
+// while it is on sale (a listed/manual ledger, the Listed tick — and, as every
+// claimer checks, a live listing), not while a sale holds it (a sold ledger
+// newer than the row's claim — an older one is history from before the account
+// was re-deployed — or the Sold tick), and not while any other committed ledger
+// holds it ("removed" = sold by hand, kept farming). "" = Release would allow it.
+async function noclaimReleaseBlock(row, login) {
+  const or = [{ poolAccountId: String(row._id) }];
+  if (login) or.push({ loginLower: login });
+  const ledgers = await UnclaimedAccount.find(
+    { $or: or, status: { $nin: LEDGER_FREE_STATUSES } },
+    { status: 1, soldAt: 1 },
+  ).lean();
+  const onSale = ledgers.find((l) => l.status === "listed" || l.status === "manual");
+  if (onSale || row.listed === true) {
+    return (
+      "It is on sale through the no-claim farm (" +
+      (onSale ? "its ledger says " + onSale.status : "ticked Listed") +
+      ") — delist or sell it on the No-claim page first; nothing changed."
+    );
+  }
+  if (login && (await listedLogins.loginsOnActiveListings()).has(login)) return LISTED_MESSAGE;
+  const claimedAt = row.claimedAt ? new Date(row.claimedAt).getTime() : 0;
+  const sold = ledgers.find(
+    (l) => l.status === "sold" && !(l.soldAt && claimedAt > new Date(l.soldAt).getTime()),
+  );
+  if (sold) return soldRefusal("its no-claim ledger says sold");
+  if (row.manualSold === true) return soldRefusal("ticked Sold on the No-claim page");
+  const committed = ledgers.find((l) => l.status !== "sold");
+  if (committed && committed.status === "removed") {
+    return soldRefusal("its no-claim ledger says removed — sold by hand");
+  }
+  if (committed) {
+    return (
+      "Its no-claim ledger says " + committed.status + ", which the no-claim sellers treat as " +
+      "taken — nothing changed."
+    );
+  }
+  return "";
+}
+
+// "noclaim-farm:" says the feeder claimed the row, not that a bot still has it:
+// a claim whose config write failed, or a bot whose account was pulled by hand,
+// leaves an orphan that refusing on the note alone could never release. A no-
+// claim bot holds the login exactly while its config carries the token, so the
+// configs are asked — every bot in ONE grep (an enabled or a disabled entry
+// both count). "" = no bot holds it. A check that cannot answer refuses:
+// releasing a login a bot still farms makes it claimable twice.
+async function noclaimBotHold(row, note) {
+  const failed = (why) => "Could not check the no-claim bots, nothing changed (" + why + ").";
+  const secret = String(row.clientSecret || "");
+  // Searched for as plain text, so only a plain token is certain to appear in a
+  // config byte for byte: JSON writers escape quotes and backslashes (the bot's
+  // own .NET serializer several more), and an empty pattern matches every file.
+  if (!secret) return failed("this row has no token to look for");
+  if (!/^[A-Za-z0-9_.~-]+$/.test(secret)) return failed("this row's token is not a plain Twitch token");
+  let out;
+  let dir;
+  try {
+    const fleet = require("../utils/noclaimFleet");
+    const { shq } = require("../utils/botHosts");
+    dir = String(fleet.BOTS_DIR || "");
+    if (!dir) return failed("the no-claim bot directory is unknown");
+    // Always exits 0 and reports grep's own status (0 found, 1 none, 2 an
+    // unreadable file), so "no bot has it" never depends on how a non-zero
+    // exit travels back over SSH. A missing bot directory is a failed check;
+    // a directory with no bot configs at all is "none".
+    const script =
+      "d=" + shq(dir) + '; [ -d "$d" ] || { echo __RC__=nodir; exit 0; }; ' +
+      'set -- "$d"/*/Configuration/config.json; [ -e "$1" ] || { echo __RC__=1; exit 0; }; ' +
+      'grep -lF -- ' + shq(secret) + ' "$@"; echo __RC__=$?';
+    out = await fleet.sh(script, { timeout: NOCLAIM_CHECK_TIMEOUT_MS });
+  } catch (e) {
+    return failed(String((e && e.message) || e).slice(0, 120));
+  }
+  const lines = String(out || "").split("\n").map((l) => l.trim()).filter(Boolean);
+  const rcLine = lines.find((l) => l.startsWith("__RC__="));
+  const rc = rcLine ? rcLine.slice("__RC__=".length) : "";
+  const prefix = dir.replace(/\/+$/, "") + "/";
+  const ids = lines
+    .filter((l) => l.startsWith(prefix))
+    .map((l) => l.slice(prefix.length).replace(/^\/+/, "").split("/")[0])
+    .filter(Boolean);
+  if (ids.length) {
+    const bots = (ids.length === 1 ? "bot " : "bots ") + ids.join(", ");
+    return (
+      "No-claim " + bots + " still " + (ids.length === 1 ? "has" : "have") + " it (" + note +
+      ") — release it from " + bots + " on the No-claim page first."
+    );
+  }
+  if (rc === "1") return "";
+  return failed(rc === "nodir" ? "the no-claim bot directory is missing" : rc ? "grep exit " + rc : "no answer");
+}
+
 // Why a claimed row must not be released now, in words the page can toast —
-// or "" when no live owner holds it.
+// or "" when no owner holds it.
 async function liveOwnerHold(row) {
   if (!row || row.status !== "claimed") return "";
   const note = String(row.claimedNote || "").trim();
   const login = String(row.usernameLower || row.username || "").trim().toLowerCase();
+  if (SOLD_NOTE.test(note)) return soldRefusal(note);
   if (RENTED_NOTE.test(note)) {
-    // Only while a renter's bot still holds it: a lapsed window (farmEndedAt
-    // stamped) has already been pulled off every renter config.
+    // ANY renter row, not only a live one: when a rent-farm window ends the row
+    // is kept (farmEndedAt stamped) and the account stays the buyer's — back in
+    // the pool it would be farmed and sold a second time.
     const or = [];
     if (row.clientSecret) or.push({ clientSecret: row.clientSecret });
     if (login) or.push({ login: exactLogin(login) });
-    const live = or.length
-      ? await RenterAccount.findOne({ farmEndedAt: null, $or: or }, { _id: 1 }).lean()
-      : null;
-    return live
-      ? "It is " + note + " and still on a renter's bot — take it off the renter first (Renters page)."
-      : "";
+    const held = or.length
+      ? await RenterAccount.find({ $or: or }, { _id: 1, farmEndedAt: 1 }).limit(10).lean()
+      : [];
+    if (held.some((r) => !r.farmEndedAt)) {
+      return "It is " + note + " and still on a renter's bot — take it off the renter first (Renters page).";
+    }
+    if (held.length) {
+      return (
+        "It is " + note + ". That farming window has ended, but the renter or rent-farm buyer still " +
+        "owns the account — remove it from the renter (Renters page) only if it is yours to reuse."
+      );
+    }
+    return "";
   }
   if (NOCLAIM_NOTE.test(note)) {
-    return (
-      "The No-claim farm holds it (" + note + ") — release it from the No-claim farm page " +
-      "so it leaves its bot first."
-    );
+    // The database first: a refusal there costs no SSH round trip.
+    return (await noclaimReleaseBlock(row, login)) || noclaimBotHold(row, note);
   }
   if (poolStock.isStockNote(note)) {
     return (
@@ -777,6 +905,9 @@ async function liveOwnerHold(row) {
     );
   }
   if (AUTO_FARM_NOTE.test(note) && login) {
+    // The one listed-logins reader every claimer and picker uses (accountLogin
+    // tokens and units[], case-insensitive).
+    if ((await listedLogins.loginsOnActiveListings()).has(login)) return LISTED_MESSAGE;
     const task = await AutoFarmTask.findOne(
       { status: "active", assignedAccounts: exactLogin(login) },
       { game: 1 },
@@ -784,7 +915,7 @@ async function liveOwnerHold(row) {
     if (task) {
       return (
         "The auto-farm is farming it" + (task.game ? " for " + task.game : "") +
-        " — it comes back to the pool by itself when that task ends."
+        " right now — it stays claimed while that task is active."
       );
     }
   }
@@ -830,6 +961,9 @@ router.post("/account-pool/:id/unclaim", requireSuperadmin, async (req, res) => 
       clientSecret: 1,
       status: 1,
       claimedNote: 1,
+      claimedAt: 1,
+      listed: 1,
+      manualSold: 1,
     }).lean();
     if (!cur) {
       return res.status(404).json({ success: false, message: "Not found" });

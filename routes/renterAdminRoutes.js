@@ -2509,6 +2509,23 @@ router.delete(
   },
 );
 
+// Pool owners the manual add below must not take an account from (2026-10-03).
+// Every other claim it hands over by design — off an operator bot, out of
+// auto-farm tasks, off another renter's bot. These three it cannot:
+//   * a no-claim bot ("noclaim-farm:…"): no no-claim config is touched here,
+//     so the login would farm in both, and a claiming renter bot empties the
+//     farmed-but-unclaimed stock the no-claim bot exists to keep;
+//   * held unclaimed stock (utils/poolStock): the same stock, in no bot yet;
+//   * an account already sold to a buyer — "spent — …" (the no-claim sellers:
+//     unclaimedAutoList, noclaimFarmRoutes), "sold — token reclaimed by buyer"
+//     (the spent and sold-out recyclers), "burned — …" (the Gameflip buffer,
+//     credentials seen by a refunded buyer). The buyer holds that login.
+const NOCLAIM_OWNER_NOTE = /^noclaim-farm:/i;
+const SOLD_OWNER_NOTE = /^(spent|sold|burned)\b/i;
+function ownerRefusesHandover(note) {
+  return NOCLAIM_OWNER_NOTE.test(note) || poolStock.isStockNote(note) || SOLD_OWNER_NOTE.test(note);
+}
+
 // MANUAL ADD — operator types one account (username + password + client token)
 // straight into a renter's bot. If that Twitch account is already farming
 // anywhere on the server — an operator bot config or another renter's bot — it
@@ -2566,19 +2583,17 @@ router.post(
         });
       }
       // The pool note is the one record of which system owns a login, and this
-      // route ends with an unconditional pool write re-labelling the row "rented
-      // to <renter>". A login another system holds — a no-claim bot's account,
-      // held unclaimed stock, an auto-farm or bot-deploy claim — was taken from
-      // that owner without telling it: a claiming renter bot empties no-claim
-      // stock, and the owner's guards lose sight of the login. Refused here,
-      // before anything is written (2026-10-03). A login already rented to
-      // someone goes on to the renter-to-renter move below.
+      // route ends by re-labelling the row "rented to <renter>". A login whose
+      // owner it cannot hand over (ownerRefusesHandover, above) is refused here,
+      // before anything is written (2026-10-03); every other owner goes on to
+      // the moves below. What was read is also what the final pool write is
+      // conditional on.
       const poolOwner = await AvailableAccount.findOne(
         { usernameLower: username.toLowerCase() },
         { status: 1, claimedNote: 1 },
       ).lean();
       const poolOwnerNote = String((poolOwner && poolOwner.claimedNote) || "").trim();
-      if (poolOwner && poolOwner.status === "claimed" && !/^rented to/i.test(poolOwnerNote)) {
+      if (poolOwner && poolOwner.status === "claimed" && ownerRefusesHandover(poolOwnerNote)) {
         return res.status(409).json({
           success: false,
           message:
@@ -3045,11 +3060,77 @@ router.post(
         poolSet.password = encrypt(password);
         poolSet.hasPassword = true;
       }
-      const poolResult = await AvailableAccount.updateOne(
-        { usernameLower: lower },
-        { $set: poolSet, $setOnInsert: { usernameLower: lower } },
-        { upsert: true },
-      ).catch(() => {});
+      // Only while the row is still what the guard at the top approved: absent,
+      // available, rented to someone, or exactly the status and note read then.
+      // The config write and the moves above take seconds of SSH, and a farm
+      // claim landing in between (the no-claim feeder taking a row that was
+      // still available, say) used to be re-labelled here, so its owner lost
+      // sight of a login it still farms. Such a row is left as it is, and the
+      // operator is told (2026-10-03).
+      const approved = [{ status: "available" }, { claimedNote: /^rented to/i }];
+      if (poolOwner && poolOwner.status) {
+        approved.push({
+          status: poolOwner.status,
+          claimedNote: poolOwner.claimedNote ? poolOwner.claimedNote : { $in: [null, ""] },
+        });
+      }
+      let poolResult = null;
+      let poolConflict = null;
+      try {
+        poolResult = await AvailableAccount.updateOne(
+          { usernameLower: lower, $or: approved },
+          { $set: poolSet },
+        );
+        if (!(poolResult && (poolResult.matchedCount || poolResult.n))) {
+          // No such row: create it. $setOnInsert only, so a row that appeared
+          // meanwhile is a changed row like any other — never overwritten.
+          poolResult = await AvailableAccount.updateOne(
+            { usernameLower: lower },
+            { $setOnInsert: { ...poolSet, usernameLower: lower } },
+            { upsert: true },
+          );
+          if (!(poolResult && poolResult.upsertedCount)) {
+            poolResult = null;
+            poolConflict =
+              (await AvailableAccount.findOne({ usernameLower: lower }, { status: 1, claimedNote: 1 }).lean()) || {};
+          }
+        }
+      } catch (e) {
+        poolResult = null;
+        partial = true;
+        notes.push(
+          "⚠ Added, but the account pool row could not be marked rented (" + (e.message || e) +
+            ") — mark it on the Account pool page, or a farm may claim it.",
+        );
+      }
+      if (poolConflict) {
+        partial = true;
+        const nowNote = String(poolConflict.claimedNote || "").trim();
+        notes.push(
+          "⚠ The account pool row changed while this ran — it now says " + (nowNote || "claimed, no note") +
+            ". It was left as it is, so that owner may still hold " + username + " too: take it off one of them.",
+        );
+        logEvent({
+          category: "renter",
+          action: "renter_add_conflict",
+          severity: "warn",
+          actor: (req.session && req.session.admin && req.session.admin.username) || "superadmin",
+          subject: username,
+          host: host.id,
+          detail:
+            "manual add put " + username + " on " + renter.username + "'s bot " + renter.botFile +
+            ", but its pool row changed meanwhile (read " +
+            (poolOwner ? (poolOwner.status || "?") + (poolOwnerNote ? ' "' + poolOwnerNote + '"' : "") : "no row") +
+            ", now " + (poolConflict.status || "?") + (nowNote ? ' "' + nowNote + '"' : "") +
+            ") — left as it is; resolve by hand",
+          meta: {
+            renter: renter.username,
+            file: renter.botFile,
+            before: poolOwner ? { status: poolOwner.status || "", note: poolOwnerNote } : null,
+            now: { status: poolConflict.status || "", note: nowNote },
+          },
+        });
+      }
       const rentedPool = poolResult
         ? await AvailableAccount.findOne({ usernameLower: lower }, { _id: 1 }).lean().catch(() => null)
         : null;

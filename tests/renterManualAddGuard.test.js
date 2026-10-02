@@ -1,25 +1,36 @@
 /* global fetch */
 // Renter MANUAL ADD / Quick farm (POST /renters/:id/accounts/manual,
-// routes/renterAdminRoutes.js) must not take a login another system holds.
+// routes/renterAdminRoutes.js) and the account pool row it re-labels.
 //
-// The route ends with an unconditional pool write re-labelling the login's row
-// "rented to <renter>". A login whose pool row said another system owned it —
-// a no-claim bot's account, held unclaimed stock, an auto-farm claim — was
-// placed in the renter's (claiming) bot and silently taken from that owner: the
-// no-claim stock gets claimed away, and the owner's guards lose sight of the
-// login. Since 2026-10-03 (docs/LIVE-FIXES-1003.md §A5.3) the route reads the
-// pool row first and refuses with 409 — before the renter is even looked up, so
-// no stack is assigned and no config or pool row is written. A login already
-// rented to someone still moves renter-to-renter, with that path's own checks.
+// The route moves an account onto a renter's bot from wherever it farms — off
+// an operator bot, out of auto-farm tasks, off another renter's bot — and ends
+// by writing the login's pool row "rented to <renter>". Two things went wrong
+// with that pool write (2026-10-03, docs/LIVE-FIXES-1003.md §A5.3 and the
+// review that followed):
+//   1. three owners cannot be handed over at all: a no-claim bot (nothing here
+//      touches its config, so the login would farm in both, and a claiming
+//      renter bot empties the no-claim stock), held unclaimed stock, and an
+//      account already sold to a buyer ("spent — …", "sold — …", "burned — …").
+//      Those are refused before anything is written; every other owner goes on
+//      to the route's designed moves, exactly as before.
+//   2. the write was an unconditional upsert by login, seconds of SSH after the
+//      pool row was read. A farm claim landing in between was re-labelled
+//      "rented to …" — its owner lost sight of a login it still farms. The
+//      write is now conditional on the row still being what the guard approved
+//      (absent, available, rented to someone, or exactly as read); otherwise
+//      the row is left alone, the response carries a ⚠ note naming the new
+//      owner, and a renter_add_conflict event is logged.
 //
 // No database, no hosts: the router is mounted in a bare express app with a
 // stub superadmin session; models, host I/O and config writers are fakes that
-// record every write. They carry the pre-fix route all the way to its writes,
-// so these tests fail on the old bytes for what it WROTE, not for a missing fake.
+// record every write. They carry the old route all the way to its writes, so
+// these tests fail on old bytes for what it WROTE, not for a missing fake.
 const test = require("node:test");
 const assert = require("node:assert/strict");
 const Module = require("node:module");
 const express = require("express");
+// The real stock-note rule (utils/poolStock is pure for isStockNote).
+const poolStock = require("../utils/poolStock");
 
 function query(value) {
   const p = Promise.resolve(value);
@@ -47,6 +58,17 @@ function strict(name, impl = {}) {
         throw new Error("unexpected call: " + name + "." + String(prop));
       };
     },
+  });
+}
+
+// Mongo-ish filter evaluation, enough for the route's pool queries.
+function matches(row, filter) {
+  return Object.entries(filter).every(([k, want]) => {
+    if (k === "$or") return want.some((clause) => matches(row, clause));
+    const have = row[k] === undefined ? null : row[k];
+    if (want instanceof RegExp) return want.test(String(row[k] || ""));
+    if (want && typeof want === "object" && Array.isArray(want.$in)) return want.$in.includes(have);
+    return have === want;
   });
 }
 
@@ -80,7 +102,12 @@ function world({ pool = [], renters = [], renterAccounts = [] } = {}) {
     renterRowDeletes: [],
     taskPulls: [],
     usage: [],
+    events: [],
   };
+  // onConfigWrite: what another system does to the pool while the config write
+  // runs. failPoolWrite: the pool write itself errors.
+  const hooks = { onConfigWrite: null, failPoolWrite: false };
+  let inserted = 0;
   const renterById = new Map(
     renters.map((r) => {
       const doc = {
@@ -101,12 +128,22 @@ function world({ pool = [], renters = [], renterAccounts = [] } = {}) {
   const stubs = new Map([
     ["../models/AvailableAccount", strict("AvailableAccount", {
       findOne(q) {
-        const row = pool.find((r) => r.usernameLower === q.usernameLower) || null;
-        return query(row);
+        return query(pool.find((r) => matches(r, q)) || null);
       },
-      updateOne(filter, update, opts) {
+      updateOne(filter, update, opts = {}) {
         calls.poolWrites.push({ filter, update, opts });
-        return Promise.resolve({ matchedCount: 1, modifiedCount: 1, upsertedCount: 0 });
+        if (hooks.failPoolWrite) return Promise.reject(new Error("write concern timed out"));
+        const hit = pool.find((r) => matches(r, filter));
+        if (hit) {
+          if (update.$set) Object.assign(hit, update.$set);
+          return Promise.resolve({ matchedCount: 1, modifiedCount: update.$set ? 1 : 0, upsertedCount: 0 });
+        }
+        if (opts.upsert) {
+          const doc = { _id: "pool-new-" + ++inserted, usernameLower: filter.usernameLower, ...update.$set, ...update.$setOnInsert };
+          pool.push(doc);
+          return Promise.resolve({ matchedCount: 0, modifiedCount: 0, upsertedCount: 1, upsertedId: doc._id });
+        }
+        return Promise.resolve({ matchedCount: 0, modifiedCount: 0, upsertedCount: 0 });
       },
     })],
     ["../models/Renter", strict("Renter", {
@@ -166,13 +203,14 @@ function world({ pool = [], renters = [], renterAccounts = [] } = {}) {
         calls.stackReads += 1;
         return [];
       },
-      // Quick farm's auto-assign: the picker always has a stack for the old bytes.
+      // Quick farm's auto-assign: the picker always has a stack.
       chooseAvailableStack: () => ({ host: "local", file: "config_09.json" }),
       stackKey: (h, f) => h + "|" + f,
     })],
     ["./botConfigRoutes", strict("botConfigRoutes", {
       addRenterAccountsToConfig: async (host, file, accts, renterId, opts) => {
         calls.configWrites.push({ host: host.id, file, logins: accts.map((a) => a.Login), renter: String(renterId), opts });
+        if (hooks.onConfigWrite) await hooks.onConfigWrite();
       },
       containerForFile: (file) => "twitchbot-" + file,
       restartConfigContainer: async () => {},
@@ -190,10 +228,11 @@ function world({ pool = [], renters = [], renterAccounts = [] } = {}) {
     ["../utils/poolUsageLog", strict("poolUsageLog", {
       recordPoolUsage: async (id, ev) => calls.usage.push({ id: String(id), ...ev }),
     })],
+    ["../utils/poolStock", poolStock],
     ["../utils/secretBox", strict("secretBox", { encrypt: (s) => "enc:" + s, decrypt: (s) => s })],
-    ["../utils/systemLog", strict("systemLog", { logEvent: () => {} })],
+    ["../utils/systemLog", strict("systemLog", { logEvent: (e) => calls.events.push(e) })],
   ]);
-  return { calls, stubs, renterById };
+  return { calls, hooks, stubs, pool, renterById };
 }
 
 async function serve(w) {
@@ -239,6 +278,15 @@ async function serve(w) {
   };
 }
 
+async function withServer(w, fn) {
+  const s = await serve(w);
+  try {
+    await fn(s);
+  } finally {
+    await s.close();
+  }
+}
+
 function poolRow(login, extra = {}) {
   return { _id: "pool-" + login, username: login, usernameLower: login.toLowerCase(), status: "available", claimedNote: "", ...extra };
 }
@@ -255,13 +303,16 @@ function assertNothingWritten(w) {
   assert.deepEqual(w.calls.usage, [], "no pool usage recorded");
 }
 
+// ---------------------------------------------------------------------------
+// 1. The owners this route cannot hand over
+// ---------------------------------------------------------------------------
+
 test("a no-claim bot's account is refused 409, naming its owner, with nothing written", async () => {
   const w = world({
     pool: [poolRow("NoClaim1", { status: "claimed", claimedNote: "noclaim-farm:Rainbow Six Siege" })],
     renters: [renterDoc("bob")],
   });
-  const s = await serve(w);
-  try {
+  await withServer(w, async (s) => {
     const r = await s.add("bob", { username: "NoClaim1", token: "tok-nc1", games: ["Rust"] });
     assert.equal(r.status, 409);
     assert.deepEqual(r.body, {
@@ -271,18 +322,58 @@ test("a no-claim bot's account is refused 409, naming its owner, with nothing wr
         "release it there first. Nothing was changed.",
     });
     assertNothingWritten(w);
-  } finally {
-    await s.close();
-  }
+  });
 });
 
-test("Quick farm on an auto-farm login is refused before a rental stack is assigned", async () => {
+test("held stock and accounts already sold to a buyer are refused too, with nothing written", async () => {
+  const notes = [
+    "unclaimed stock — 2 drop(s) (Overwatch 2) held out of the pool until sold",
+    "spent — unclaimed auto-listed (sold on ggsel)",
+    "spent — no-claim removed Overwatch 2",
+    "sold — token reclaimed by buyer",
+    "burned — credentials seen by a Gameflip buyer whose purchase was cancelled; never resell (x)",
+  ];
+  const w = world({
+    pool: notes.map((n, i) => poolRow("deny" + i, { status: "claimed", claimedNote: n })),
+    renters: [renterDoc("bob")],
+  });
+  await withServer(w, async (s) => {
+    for (const [i, n] of notes.entries()) {
+      const r = await s.add("bob", { username: "deny" + i, token: "tok-d" + i, games: ["Rust"] });
+      assert.equal(r.status, 409, n);
+      assert.equal(
+        r.body.message,
+        "The account pool says deny" + i + " belongs to another system (" + n + ") — release it there first. " +
+          "Nothing was changed.",
+      );
+    }
+    assertNothingWritten(w);
+  });
+});
+
+test("Quick farm on a sold account is refused before a rental stack is assigned", async () => {
+  const w = world({
+    pool: [poolRow("sold1", { status: "claimed", claimedNote: "spent — no-claim removed Overwatch 2" })],
+    renters: [renterDoc("carol", { botHost: "", botFile: "" })],
+  });
+  await withServer(w, async (s) => {
+    const r = await s.add("carol", { username: "sold1", token: "tok-s1", quick: true, autoAssign: true, games: ["Rust"], farmDays: 7 });
+    assert.equal(r.status, 409);
+    assertNothingWritten(w);
+    assert.equal(w.renterById.get("carol").botFile, "", "carol keeps no stack");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Every other owner goes on to the route's designed moves
+// ---------------------------------------------------------------------------
+
+test("Quick farm on an auto-farm account proceeds: stack assigned, task detached, row rented", async () => {
   const w = world({
     pool: [poolRow("farmed7", { status: "claimed", claimedNote: "auto-farm: Rust (camp-3)" })],
     renters: [renterDoc("carol", { botHost: "", botFile: "" })],
   });
-  const s = await serve(w);
-  try {
+  await withServer(w, async (s) => {
     const r = await s.add("carol", {
       username: "farmed7",
       token: "tok-f7",
@@ -291,35 +382,42 @@ test("Quick farm on an auto-farm login is refused before a rental stack is assig
       games: ["Rust"],
       farmDays: 7,
     });
-    assert.equal(r.status, 409);
-    assert.match(r.body.message, /^The account pool says farmed7 belongs to another system \(auto-farm: Rust \(camp-3\)\)/);
-    assertNothingWritten(w);
-    assert.equal(w.renterById.get("carol").botFile, "", "carol keeps no stack");
-  } finally {
-    await s.close();
-  }
+    assert.equal(r.status, 200);
+    assert.equal(r.body.success, true);
+    assert.deepEqual(r.body.assignedStack, { host: "local", file: "config_09.json" });
+    assert.equal(w.calls.renterSaves.length, 1, "the stack was assigned");
+    assert.deepEqual(w.calls.configWrites.map((c) => [c.file, c.logins[0]]), [["config_09.json", "farmed7"]]);
+    assert.equal(w.calls.taskPulls.length, 1, "pulled out of the auto-farm tasks");
+    assert.equal(w.pool[0].status, "claimed");
+    assert.equal(w.pool[0].claimedNote, "rented to carol");
+    assert.equal(r.body.partial, false);
+    assert.doesNotMatch(r.body.note, /⚠/);
+  });
 });
 
-test("held stock and an unexplained claim are refused too", async () => {
+test("operator-bot, deploy, recycled, hand and note-less claims all proceed as before", async () => {
+  const notes = [
+    "deployed to twitchbotx5 [pi]",
+    "auto-farm: deployed to twitchbot12 (contabo)",
+    "in use by a bot (auto-marked)",
+    "auto-farm backfill: Rust (camp-9)",
+    "recycled after Rust",
+    "assigned to a bot",
+    "",
+  ];
   const w = world({
-    pool: [
-      poolRow("stocky", { status: "claimed", claimedNote: "unclaimed stock — 2 drop(s) (Overwatch 2) held out of the pool until sold" }),
-      poolRow("bare", { status: "claimed", claimedNote: "" }),
-    ],
+    pool: notes.map((n, i) => poolRow("ok" + i, { status: "claimed", claimedNote: n })),
     renters: [renterDoc("bob")],
   });
-  const s = await serve(w);
-  try {
-    const a = await s.add("bob", { username: "stocky", token: "tok-s", games: ["Rust"] });
-    assert.equal(a.status, 409);
-    assert.match(a.body.message, /\(unclaimed stock — 2 drop\(s\)/);
-    const b = await s.add("bob", { username: "bare", token: "tok-b", games: ["Rust"] });
-    assert.equal(b.status, 409);
-    assert.match(b.body.message, /belongs to another system \(claimed, no note\)/);
-    assertNothingWritten(w);
-  } finally {
-    await s.close();
-  }
+  await withServer(w, async (s) => {
+    for (const [i, n] of notes.entries()) {
+      const r = await s.add("bob", { username: "ok" + i, token: "tok-o" + i, games: ["Rust"] });
+      assert.equal(r.status, 200, JSON.stringify(n) + ": " + JSON.stringify(r.body));
+      assert.equal(w.pool[i].claimedNote, "rented to bob", JSON.stringify(n));
+    }
+    assert.equal(w.calls.configWrites.length, notes.length);
+    assert.equal(w.calls.events.length, 0, "no conflict");
+  });
 });
 
 test("renter-to-renter: a login rented to someone else still moves (with that path's own confirm)", async () => {
@@ -330,8 +428,7 @@ test("renter-to-renter: a login rented to someone else still moves (with that pa
       { _id: "ra-9", renter: "alice", clientSecret: "tok-9", login: "shared9", configFile: "", host: "local", farmEndedAt: null, farmUntil: null },
     ],
   });
-  const s = await serve(w);
-  try {
+  await withServer(w, async (s) => {
     // Alice's lease is live, so the move asks first — the existing confirm.
     const ask = await s.add("bob", { username: "shared9", token: "tok-9", games: ["Rust"] });
     assert.equal(ask.status, 409);
@@ -347,11 +444,8 @@ test("renter-to-renter: a login rented to someone else still moves (with that pa
       { host: "local", file: "config_07.json", logins: ["shared9"], renter: "bob", opts: {} },
     ]);
     assert.deepEqual(w.calls.renterRowDeletes, [{ _id: "ra-9", renter: "alice" }]);
-    assert.equal(w.calls.poolWrites.length, 1);
-    assert.equal(w.calls.poolWrites[0].update.$set.claimedNote, "rented to bob");
-  } finally {
-    await s.close();
-  }
+    assert.equal(w.pool[0].claimedNote, "rented to bob");
+  });
 });
 
 test("a 'Rented to' note in any case counts as a rental", async () => {
@@ -359,37 +453,127 @@ test("a 'Rented to' note in any case counts as a rental", async () => {
     pool: [poolRow("caps1", { status: "claimed", claimedNote: "Rented to Bob until 2026-10-20" })],
     renters: [renterDoc("bob")],
   });
-  const s = await serve(w);
-  try {
+  await withServer(w, async (s) => {
     const r = await s.add("bob", { username: "caps1", token: "tok-c1", games: ["Rust"] });
     assert.equal(r.status, 200);
     assert.equal(w.calls.configWrites.length, 1);
-  } finally {
-    await s.close();
-  }
+    assert.equal(w.pool[0].claimedNote, "rented to bob");
+  });
 });
 
-test("an available pool row, or none at all, is added exactly as before", async () => {
-  const w = world({
-    pool: [poolRow("fresh1")],
-    renters: [renterDoc("bob")],
-  });
-  const s = await serve(w);
-  try {
+test("an available pool row, or none at all, ends rented to the renter as before", async () => {
+  const w = world({ pool: [poolRow("fresh1")], renters: [renterDoc("bob")] });
+  await withServer(w, async (s) => {
     const a = await s.add("bob", { username: "fresh1", token: "tok-f1", password: "pw", games: ["Rust"] });
     assert.equal(a.status, 200);
     assert.equal(a.body.success, true);
     const b = await s.add("bob", { username: "notInPool", token: "tok-n", games: ["Rust"] });
     assert.equal(b.status, 200);
     assert.deepEqual(w.calls.configWrites.map((c) => c.logins[0]), ["fresh1", "notInPool"]);
-    assert.deepEqual(
-      w.calls.poolWrites.map((p) => [p.filter.usernameLower, p.update.$set.claimedNote, p.opts.upsert]),
-      [
-        ["fresh1", "rented to bob", true],
-        ["notinpool", "rented to bob", true],
-      ],
+    const byLogin = Object.fromEntries(w.pool.map((p) => [p.usernameLower, p]));
+    assert.equal(byLogin.fresh1.status, "claimed");
+    assert.equal(byLogin.fresh1.claimedNote, "rented to bob");
+    assert.equal(byLogin.fresh1.password, "enc:pw");
+    assert.equal(byLogin.notinpool.status, "claimed", "created by the upsert");
+    assert.equal(byLogin.notinpool.claimedNote, "rented to bob");
+    assert.equal(byLogin.notinpool.clientSecret, "tok-n");
+    assert.deepEqual(w.calls.usage.map((u) => u.event), ["rented", "rented"]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 2. The final pool write is conditional on what the guard approved
+// ---------------------------------------------------------------------------
+
+test("a farm claim that lands during the config write is NOT re-labelled — ⚠ note + conflict event", async () => {
+  const w = world({ pool: [poolRow("fresh9", { clientSecret: "tok-fresh9" })], renters: [renterDoc("bob")] });
+  // While the route writes the renter's bot config over SSH, the no-claim
+  // feeder takes the (still available) row.
+  w.hooks.onConfigWrite = async () => {
+    Object.assign(w.pool[0], { status: "claimed", claimedNote: "noclaim-farm:Overwatch 2 (bot 14)" });
+  };
+  await withServer(w, async (s) => {
+    const r = await s.add("bob", { username: "fresh9", token: "tok-fresh9", games: ["Rust"] });
+    assert.equal(r.status, 200, "the account is on bob's bot — the add itself stands");
+    assert.equal(r.body.partial, true);
+    assert.match(
+      r.body.note,
+      /⚠ The account pool row changed while this ran — it now says noclaim-farm:Overwatch 2 \(bot 14\)\. It was left as it is, so that owner may still hold fresh9 too: take it off one of them\./,
     );
-  } finally {
-    await s.close();
-  }
+    assert.equal(w.pool[0].status, "claimed");
+    assert.equal(w.pool[0].claimedNote, "noclaim-farm:Overwatch 2 (bot 14)", "the new owner's note is kept");
+    assert.equal(w.calls.usage.length, 0, "no 'rented' usage for a row it did not take");
+    assert.equal(w.calls.events.length, 1);
+    const e = w.calls.events[0];
+    assert.equal(e.category, "renter");
+    assert.equal(e.action, "renter_add_conflict");
+    assert.equal(e.severity, "warn");
+    assert.equal(e.subject, "fresh9", "named by login, never by token");
+    assert.match(e.detail, /read available, now claimed "noclaim-farm:Overwatch 2 \(bot 14\)"/);
+    assert.deepEqual(e.meta.now, { status: "claimed", note: "noclaim-farm:Overwatch 2 (bot 14)" });
+    assert.doesNotMatch(JSON.stringify(e), /tok-fresh9/);
+  });
+});
+
+test("a row the guard read as an auto-farm claim is not overwritten once it became held stock", async () => {
+  const stock = "unclaimed stock — 1 drop(s) (Rust) held out of the pool until sold";
+  const w = world({
+    pool: [poolRow("moved3", { status: "claimed", claimedNote: "auto-farm: Rust (camp-3)" })],
+    renters: [renterDoc("bob")],
+  });
+  w.hooks.onConfigWrite = async () => {
+    w.pool[0].claimedNote = stock;
+  };
+  await withServer(w, async (s) => {
+    const r = await s.add("bob", { username: "moved3", token: "tok-m3", games: ["Rust"] });
+    assert.equal(r.status, 200);
+    assert.equal(w.pool[0].claimedNote, stock);
+    assert.match(r.body.note, /⚠ The account pool row changed while this ran — it now says unclaimed stock — 1 drop/);
+    assert.equal(w.calls.events[0].action, "renter_add_conflict");
+  });
+});
+
+test("a row another system CREATED meanwhile is not overwritten either", async () => {
+  const w = world({ renters: [renterDoc("bob")] });
+  w.hooks.onConfigWrite = async () => {
+    w.pool.push(poolRow("late1", { status: "claimed", claimedNote: "noclaim-farm:Rust" }));
+  };
+  await withServer(w, async (s) => {
+    const r = await s.add("bob", { username: "late1", token: "tok-l1", games: ["Rust"] });
+    assert.equal(r.status, 200);
+    assert.equal(w.pool.length, 1);
+    assert.equal(w.pool[0].claimedNote, "noclaim-farm:Rust");
+    assert.equal(w.calls.events.length, 1);
+    assert.match(w.calls.events[0].detail, /read no row, now claimed "noclaim-farm:Rust"/);
+  });
+});
+
+test("a row deleted meanwhile is simply created rented — absent is approved", async () => {
+  const w = world({ pool: [poolRow("gone2", { status: "claimed", claimedNote: "assigned to a bot" })], renters: [renterDoc("bob")] });
+  w.hooks.onConfigWrite = async () => {
+    w.pool.splice(0, 1);
+  };
+  await withServer(w, async (s) => {
+    const r = await s.add("bob", { username: "gone2", token: "tok-g2", games: ["Rust"] });
+    assert.equal(r.status, 200);
+    assert.equal(w.pool.length, 1);
+    assert.equal(w.pool[0].claimedNote, "rented to bob");
+    assert.equal(w.calls.events.length, 0);
+    assert.doesNotMatch(r.body.note, /⚠/);
+  });
+});
+
+test("a pool write that fails is reported, not swallowed", async () => {
+  const w = world({ pool: [poolRow("err1")], renters: [renterDoc("bob")] });
+  w.hooks.failPoolWrite = true;
+  await withServer(w, async (s) => {
+    const r = await s.add("bob", { username: "err1", token: "tok-e1", games: ["Rust"] });
+    assert.equal(r.status, 200, "the account is placed; only its pool row is behind");
+    assert.equal(r.body.partial, true);
+    assert.match(
+      r.body.note,
+      /⚠ Added, but the account pool row could not be marked rented \(write concern timed out\) — mark it on the Account pool page, or a farm may claim it\./,
+    );
+    assert.equal(w.pool[0].status, "available");
+  });
 });
