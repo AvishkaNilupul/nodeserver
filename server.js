@@ -19,6 +19,7 @@ const {
   requireSuperadmin,
   enforce2fa,
 } = require("./middleware/auth");
+const { canonicalPath } = require("./middleware/canonicalPath");
 const adminAuthRoutes = require("./routes/adminAuthRoutes");
 const adminManageRoutes = require("./routes/adminManageRoutes");
 const redeemRoutes = require("./routes/redeemRoutes");
@@ -225,6 +226,12 @@ io.engine.use(sessionMiddleware);
 // requests and shouldn't hit this ceiling. Anonymous IPs are still capped, and
 // Socket.IO is skipped so live chat isn't throttled.
 app.use(globalLimiter);
+
+// Route every request for a public/ file by that file's real name, BEFORE any
+// route: express.static decodes and normalises the URL, so without this a
+// re-spelt URL (/bulk%2Dorders.html, //bulk-orders.html) missed the guarded
+// page routes below and got the page from the static mount, signed out.
+app.use(canonicalPath(path.join(__dirname, "public")));
 
 // Audit every MUTATING request (who did what, where) into the unified activity
 // log. Mounted after the session middleware (so it can read the actor) and after
