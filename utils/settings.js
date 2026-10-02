@@ -1,11 +1,16 @@
 // Tiny JSON-backed settings store for small site-wide flags (currently just the
 // "require two-factor for all admins" switch). Kept separate from admins.json so
 // toggling a setting never rewrites credential data.
+const crypto = require("crypto");
 const fs = require("fs");
 const fsp = require("fs/promises");
 const path = require("path");
 
-const settingsFile = path.join(__dirname, "settings.json");
+// SETTINGS_FILE is for tests only (tests/settingsSafeWrite.test.js runs the
+// store against a temp dir); production never sets it.
+const settingsFile = process.env.SETTINGS_FILE
+  ? path.resolve(process.env.SETTINGS_FILE)
+  : path.join(__dirname, "settings.json");
 
 const AUTO_FARM_DEFAULTS = {
   enabled: false, // master switch — ships OFF
@@ -14,6 +19,7 @@ const AUTO_FARM_DEFAULTS = {
   maxPerGame: 30, // hard cap of accounts spent on one game (user requirement)
   accountsPerBot: 10, // accounts per container
   poolReserve: 20, // never draw the pool below this many ready accounts
+  pristineReserve: 150, // pristine pool accounts farms must leave for rent-farm orders (0 = off)
   probeSize: 5, // batch size for unknown games (market test)
   // Cold-start probing (utils/autoFarmer.js). Ships OFF. When on, a game that
   // research scores below the demand floor is still farmed as a small probe
@@ -29,6 +35,7 @@ const AUTO_FARM_DEFAULTS = {
   probeCooldownDays: 90, // after a probe expires for a game, don't re-probe it for N days
   maxAutoBots: 20, // max auto containers on the host at once (total supply is
   // gated by the pool + reserve, NOT by this — raise it if the Pi can handle more)
+  hostMinFreeMb: 1500, // new containers only while the host has this much MemAvailable (0 = off)
   minHoursLeft: 12, // skip campaigns ending sooner than this
   // Games that CANNOT be sold via the normal click-claim-then-sell flow
   // (Overwatch, Rainbow Six, Call of Duty): the auto-farmer must NOT farm OR
@@ -123,6 +130,8 @@ const AUTO_FARM_DEFAULTS = {
   // The most accounts one allocator pass may claim, across all games. A rate
   // limit, so a mis-measured game cannot empty the pool in one cycle.
   noclaimSizeMaxPerRun: 60,
+  noclaimMaxBots: 40, // most no-claim containers (any state) the allocator may own (0 = off)
+  noclaimBurstGuard: false, // dark: one-day hand/bulk sale bursts stop reading as weekly demand
   // Per-game overrides on the no-claim target, keyed like noClaimGames:
   //   { "overwatch": { coverageDays: 21, safetyStock: 10, min: 40, max: 300 } }
   // Any field may be omitted and falls back to the global value above.
@@ -178,8 +187,10 @@ const AUTO_FARM_DEFAULTS = {
   // the switch. Set false on prod 2026-09-28 while the seller account is
   // blocked ("продавец товара заблокирован"): nothing listed there can sell.
   // A blocked seller also stops new listings on its own (marketplaces.js
-  // digisellerTakesNewStock), whatever this says.
-  platiEnabled: true,
+  // digisellerTakesNewStock), whatever this says. The DEFAULT is off since
+  // 2026-10-03: a settings file that loses the key (or a fresh install) must
+  // not quietly start feeding a blocked market again.
+  platiEnabled: false,
   ggselCategoryId: "",
   // GGSel on/off for every AUTOMATIC lister — same reach and meaning as
   // platiEnabled above: OFF = no new offer and no new product goes to GGSel;
@@ -498,20 +509,389 @@ const DEFAULTS = {
   epicAutoClaim: EPIC_AUTO_CLAIM_DEFAULTS,
 };
 
-function loadSettings() {
+// ---------------------------------------------------------------------------
+// The settings file: saves that cannot tear or wipe (docs/LIVE-FIXES-1003.md A1)
+// ---------------------------------------------------------------------------
+// Until 2026-10-03 every save wrote "settings.json.tmp-<pid>" and renamed it,
+// rewriting the WHOLE file from the caller's copy. Two saves in one process —
+// a G2G/ZeusX/Eldorado token refresh landing during an operator's toggle, the
+// allocator's shelf caps — shared that one temp file and could install a torn
+// settings.json, or the later save silently undid the earlier one. loadSettings
+// answered a parse error with DEFAULTS, and the next save wrote those defaults
+// back: every marketplace credential gone and every switch at its default.
+//
+// Since 2026-10-03:
+//   - saves run one at a time, in call order (one promise chain); a failed
+//     save rejects its own caller and never blocks the next one;
+//   - saveSettings(s) re-reads the CURRENT file and applies only what its
+//     caller changed since the loadSettings() that produced `s` (a three-way
+//     merge), so writers that loaded the same file all land; the setters in
+//     this file edit the current file directly, inside the chain;
+//   - every write goes to its own temp file (pid + counter + random), is
+//     fsync'd and renamed over the target; on any error the temp is removed;
+//   - the last text that parsed is kept in memory and every save refreshes
+//     settings.json.bak. An unreadable file is served from the memory copy,
+//     then the .bak, and only then from DEFAULTS (logged). A save never writes
+//     over an unreadable file without one of those good copies to build on
+//     (SETTINGS_CORRUPT), and before it does, the unreadable bytes are kept as
+//     settings.json.bak-corrupt-<time>: they may be a hand edit with a typo.
+const backupFile = settingsFile + ".bak";
+const hasOwn = (o, k) => Object.prototype.hasOwnProperty.call(o, k);
+const noop = () => {};
+
+function isPlainObject(v) {
+  return v !== null && typeof v === "object" && !Array.isArray(v);
+}
+
+// Set a key without ever running the __proto__ setter: JSON.parse makes
+// "__proto__" an ordinary own key, and a merge must carry it as one.
+function put(o, k, v) {
+  if (k === "__proto__")
+    Object.defineProperty(o, k, {
+      value: v,
+      enumerable: true,
+      writable: true,
+      configurable: true,
+    });
+  else o[k] = v;
+}
+
+// Each DEFAULTS block as JSON, taken once. Every object handed out gets its
+// own copy, so a caller editing s.autoFarm in place can never change the
+// defaults for the rest of the process, and a merge base rebuilt from text at
+// save time is exactly the object loadSettings handed out.
+const DEFAULT_KEYS = Object.keys(DEFAULTS);
+const DEFAULT_TEXT = {};
+for (const k of DEFAULT_KEYS) DEFAULT_TEXT[k] = JSON.stringify(DEFAULTS[k]);
+function freshDefault(k) {
+  return JSON.parse(DEFAULT_TEXT[k]);
+}
+
+// What a parsed file stands for: { ...DEFAULTS, ...file }, in that key order.
+function materialize(obj) {
+  const out = {};
+  for (const k of DEFAULT_KEYS)
+    out[k] = hasOwn(obj, k) ? obj[k] : freshDefault(k);
+  for (const k of Object.keys(obj)) if (!hasOwn(out, k)) put(out, k, obj[k]);
+  return out;
+}
+
+// Throws unless the text is a JSON object. A leading BOM (an editor's hand
+// edit) is not corruption; an empty or truncated file is.
+function parseSettingsText(text) {
+  const obj = JSON.parse(text.charCodeAt(0) === 0xfeff ? text.slice(1) : text);
+  if (!isPlainObject(obj)) throw new SyntaxError("not a JSON object");
+  return obj;
+}
+
+// Object loadSettings handed out -> the text it was parsed from, or
+// FROM_DEFAULTS when it was built from DEFAULTS alone: its next save's base.
+const bases = new WeakMap();
+const FROM_DEFAULTS = Symbol("settings:defaults");
+let lastGoodText = null; // the last settings text that parsed, read or written here
+let saveChain = Promise.resolve();
+let tmpSeq = 0;
+
+function remember(obj, base) {
+  bases.set(obj, base);
+  return obj;
+}
+
+function why(err) {
+  return String((err && (err.code || err.message)) || "unknown error").slice(0, 200);
+}
+
+// One console line per kind per minute, plus a SystemEvent when `meta` is
+// given: loadSettings runs on every settings read, so an unreadable file would
+// otherwise flood both. systemLog is required lazily and best-effort —
+// settings.js loads before everything, and a log must never break a read.
+const reportedAt = new Map();
+function report(kind, message, meta) {
+  const now = Date.now();
+  if (now - (reportedAt.get(kind) || 0) < 60 * 1000) return;
+  reportedAt.set(kind, now);
   try {
-    const obj = JSON.parse(fs.readFileSync(settingsFile, "utf8"));
-    return { ...DEFAULTS, ...(obj && typeof obj === "object" ? obj : {}) };
+    console.error("[settings] " + message);
   } catch {
-    return { ...DEFAULTS };
+    /* ignore */
+  }
+  if (!meta) return;
+  try {
+    const p = require("./systemLog").logEvent({
+      category: "settings",
+      action: "settings_corrupt",
+      severity: meta.served === "last-good" || meta.served === "bak" ? "warn" : "error",
+      subject: path.basename(settingsFile),
+      detail: message,
+      meta,
+    });
+    if (p && typeof p.catch === "function") p.catch(noop);
+  } catch {
+    /* ignore */
   }
 }
 
+function reportUnreadable(served, err) {
+  const head = `settings.json is unreadable (${why(err)})`;
+  const tail = {
+    "last-good": ": serving the last good copy held in memory; the next save rewrites the file from it",
+    bak: ": serving settings.json.bak; the next save rewrites the file from it",
+    defaults:
+      " and there is no good copy (none in memory, no readable settings.json.bak): " +
+      "serving DEFAULTS, and every save is refused until the file is restored by hand",
+  };
+  report(served, head + tail[served], { served, error: why(err) });
+}
+
+function readBackupSync() {
+  try {
+    const text = fs.readFileSync(backupFile, "utf8");
+    return { text, obj: parseSettingsText(text) };
+  } catch {
+    return null;
+  }
+}
+
+async function readBackup() {
+  try {
+    const text = await fsp.readFile(backupFile, "utf8");
+    return { text, obj: parseSettingsText(text) };
+  } catch {
+    return null;
+  }
+}
+
+function loadSettings() {
+  let failure;
+  try {
+    const text = fs.readFileSync(settingsFile, "utf8");
+    const obj = parseSettingsText(text);
+    lastGoodText = text;
+    return remember(materialize(obj), text);
+  } catch (e) {
+    failure = e;
+  }
+  if (lastGoodText !== null) {
+    reportUnreadable("last-good", failure);
+    return remember(materialize(parseSettingsText(lastGoodText)), lastGoodText);
+  }
+  const bak = readBackupSync();
+  if (bak) {
+    reportUnreadable("bak", failure);
+    return remember(materialize(bak.obj), bak.text);
+  }
+  // No good copy anywhere. A MISSING file is a fresh install (silent); any
+  // other failure is a corrupt file, and saveSettings refuses to replace it.
+  if (!failure || failure.code !== "ENOENT") reportUnreadable("defaults", failure);
+  return remember(materialize({}), FROM_DEFAULTS);
+}
+
+// The CURRENT settings a save builds on, materialized, read inside the chain.
+// `unreadable` = the bytes of a file that exists but does not parse; commit()
+// keeps them before it writes over them.
+async function readCurrent() {
+  let failure;
+  let text = null;
+  try {
+    text = await fsp.readFile(settingsFile, "utf8");
+    const obj = parseSettingsText(text);
+    lastGoodText = text;
+    return { current: materialize(obj), unreadable: null };
+  } catch (e) {
+    failure = e;
+  }
+  if (lastGoodText !== null) {
+    reportUnreadable("last-good", failure);
+    return {
+      current: materialize(parseSettingsText(lastGoodText)),
+      unreadable: text,
+    };
+  }
+  const bak = await readBackup();
+  if (bak) {
+    reportUnreadable("bak", failure);
+    return { current: materialize(bak.obj), unreadable: text };
+  }
+  if (failure && failure.code === "ENOENT")
+    return { current: materialize({}), unreadable: null }; // fresh install
+  // The file is there but unreadable, and nothing good is left to rebuild it
+  // from: writing now would replace it with DEFAULTS — the credential wipe this
+  // section exists to stop.
+  const msg =
+    `settings.json is unreadable (${why(failure)}) and there is no good copy ` +
+    "to rebuild it from, so nothing was saved (saving would replace it with " +
+    "defaults). Restore utils/settings.json from a backup or fix it by hand.";
+  report("refused", "save refused: " + msg, {
+    served: "none",
+    refusedSave: true,
+    error: why(failure),
+  });
+  const err = new Error(msg);
+  err.code = "SETTINGS_CORRUPT";
+  throw err;
+}
+
+// Write `text` to `file` atomically: a temp file of our own (pid + counter +
+// random, created exclusively), fsync'd, then renamed over the target. On any
+// error the temp file is removed and the target is left as it was.
+async function writeAtomic(file, text) {
+  const rand = crypto.randomBytes(4).toString("hex");
+  const tmp = `${file}.tmp-${process.pid}-${++tmpSeq}-${rand}`;
+  let fh = null;
+  let created = false;
+  try {
+    fh = await fsp.open(tmp, "wx");
+    created = true;
+    await fh.writeFile(text, "utf8");
+    await fh.sync();
+    const h = fh;
+    fh = null;
+    await h.close();
+    await fsp.rename(tmp, file);
+  } catch (err) {
+    if (fh) await fh.close().catch(noop);
+    if (created) await fsp.unlink(tmp).catch(noop);
+    throw err;
+  }
+}
+
+// Once per distinct unreadable content: a save that keeps failing after this
+// (a full disk) must not leave a new copy behind on every retry.
+let keptText = null;
+async function keepUnreadable(text) {
+  if (!text || text === keptText) return;
+  const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+  const file = `${settingsFile}.bak-corrupt-${stamp}`;
+  try {
+    await fsp.writeFile(file, text, { flag: "wx" });
+    keptText = text;
+    console.error(`[settings] kept the unreadable settings.json as ${file}`);
+  } catch (e) {
+    console.error(
+      `[settings] could not keep the unreadable settings.json (${why(e)}); rebuilding it anyway`,
+    );
+  }
+}
+
+// Write a whole settings object (DEFAULTS filled in, as before), then refresh
+// the in-memory good copy and settings.json.bak. A .bak that cannot be written
+// is logged, never thrown: the save itself landed.
+async function commit(next, unreadable) {
+  const text = JSON.stringify(materialize(next), null, 2);
+  await keepUnreadable(unreadable);
+  await writeAtomic(settingsFile, text);
+  lastGoodText = text;
+  try {
+    await writeAtomic(backupFile, text);
+  } catch (e) {
+    report("bak-write", `could not refresh settings.json.bak (${why(e)}); the save itself landed`);
+  }
+}
+
+// Deep equality of two JSON values; object key order is ignored.
+function jsonEqual(a, b) {
+  if (a === b) return true;
+  if (a === null || b === null || typeof a !== "object" || typeof b !== "object")
+    return false;
+  if (Array.isArray(a) || Array.isArray(b)) {
+    if (!Array.isArray(a) || !Array.isArray(b) || a.length !== b.length) return false;
+    for (let i = 0; i < a.length; i++) if (!jsonEqual(a[i], b[i])) return false;
+    return true;
+  }
+  const keys = Object.keys(a);
+  if (keys.length !== Object.keys(b).length) return false;
+  for (const k of keys) if (!hasOwn(b, k) || !jsonEqual(a[k], b[k])) return false;
+  return true;
+}
+
+// Three-way merge of JSON values: apply OUR edits (ours − base) onto THEIRS
+// (the file as it is now). Plain objects merge key by key, recursively; an
+// array or a scalar is one leaf, and if ours differs from base, ours replaces
+// it whole. A key in base that ours lacks is our deletion. `base` undefined =
+// the key did not exist when we loaded it, so two writers that both added it
+// (two credentials saved into a fresh `marketplaces`) keep both sides' keys.
+function merge3(base, ours, theirs) {
+  if (base !== undefined && jsonEqual(ours, base)) return theirs; // untouched
+  if (
+    !isPlainObject(ours) ||
+    !isPlainObject(theirs) ||
+    (base !== undefined && !isPlainObject(base))
+  )
+    return ours;
+  const b = base === undefined ? {} : base;
+  const out = { ...theirs };
+  for (const k of Object.keys(b)) if (!hasOwn(ours, k)) delete out[k];
+  for (const k of Object.keys(ours)) {
+    const inBase = hasOwn(b, k);
+    if (hasOwn(theirs, k)) put(out, k, merge3(inBase ? b[k] : undefined, ours[k], theirs[k]));
+    // Gone from the file since we loaded it: it stays gone unless we changed it.
+    else if (!inBase || !jsonEqual(ours[k], b[k])) put(out, k, ours[k]);
+  }
+  return out;
+}
+
+function baseObject(ref) {
+  return ref === FROM_DEFAULTS ? materialize({}) : materialize(parseSettingsText(ref));
+}
+
+// Saves run one at a time, in call order. The chain never rejects, so a
+// failed save rejects only its own caller.
+function enqueue(job) {
+  const run = saveChain.then(job);
+  saveChain = run.then(noop, noop);
+  return run;
+}
+
 async function saveSettings(settings) {
-  const text = JSON.stringify({ ...DEFAULTS, ...settings }, null, 2);
-  const tmp = settingsFile + ".tmp-" + process.pid;
-  await fsp.writeFile(tmp, text, "utf8");
-  await fsp.rename(tmp, settingsFile);
+  // The old `{ ...DEFAULTS, ...settings }` turned a null or undefined into a
+  // file of pure defaults — a wipe. Refuse anything that is not an object.
+  const oursText = isPlainObject(settings) ? JSON.stringify(settings) : undefined;
+  // Snapshot NOW, as the old synchronous stringify did: whatever the caller
+  // does to its object after this call cannot change what this save writes.
+  const parsed = oursText === undefined ? null : JSON.parse(oursText);
+  if (!isPlainObject(parsed))
+    throw new TypeError(
+      "saveSettings needs a settings object, got " +
+        (settings === null ? "null" : Array.isArray(settings) ? "an array" : typeof settings),
+    );
+  // DEFAULTS filled in, exactly as it will be written: a DEFAULTS block the
+  // object never carried is "the default", not a deletion that would reset
+  // another writer's change to it.
+  const ours = materialize(parsed);
+  return enqueue(async () => {
+    const { current, unreadable } = await readCurrent();
+    // An object loadSettings did not hand out has no known base, so it is
+    // written whole, as before.
+    const base = bases.get(settings);
+    const next = base === undefined ? ours : merge3(baseObject(base), ours, current);
+    await commit(next, unreadable);
+    // The caller's object now descends from what it just saved: saving it
+    // again applies only its newer edits, never re-asserting these.
+    bases.set(settings, oursText);
+  });
+}
+
+// Exact read-modify-write for this file's own setters: `mutate` edits the
+// CURRENT settings inside the save chain, so no merge is needed.
+function updateSettings(mutate) {
+  return enqueue(async () => {
+    const { current, unreadable } = await readCurrent();
+    mutate(current);
+    await commit(current, unreadable);
+  });
+}
+
+// A setter's patch as it is NOW (the old setters applied it synchronously),
+// each value copied the way JSON writes it. A value JSON cannot hold
+// (undefined, a function) stays undefined, which — as before — drops the key.
+function snapshotPatch(patch) {
+  const out = {};
+  if (!patch || typeof patch !== "object") return out;
+  for (const k of Object.keys(patch)) {
+    const t = JSON.stringify(patch[k]);
+    put(out, k, t === undefined ? undefined : JSON.parse(t));
+  }
+  return out;
 }
 
 function getRequire2fa() {
@@ -519,10 +899,11 @@ function getRequire2fa() {
 }
 
 async function setRequire2fa(value) {
-  const s = loadSettings();
-  s.require2fa = !!value;
-  await saveSettings(s);
-  return s.require2fa;
+  const on = !!value;
+  await updateSettings((s) => {
+    s.require2fa = on;
+  });
+  return on;
 }
 
 // autoFarm block accessors. Deep-merged over defaults so a settings.json
@@ -539,18 +920,23 @@ function getAutoFarm() {
 }
 
 async function setAutoFarm(patch, opts = {}) {
-  const s = loadSettings();
-  const cur = s.autoFarm && typeof s.autoFarm === "object" ? s.autoFarm : {};
-  const next = { ...AUTO_FARM_DEFAULTS, ...cur, ...(patch || {}) };
-  s.autoFarm = next;
-  await saveSettings(s);
+  const p = snapshotPatch(patch);
+  // Applied to the CURRENT autoFarm block inside the save chain, so two
+  // setAutoFarm calls (or one racing a credential write) both land.
+  let cur = {};
+  let next = null;
+  await updateSettings((s) => {
+    cur = s.autoFarm && typeof s.autoFarm === "object" ? s.autoFarm : {};
+    next = { ...freshDefault("autoFarm"), ...cur, ...p };
+    s.autoFarm = next;
+  });
   // Audit which settings actually changed (before→after) — this is the record
   // that was missing when purgeSuspended was found flipped with no trace of who.
   // Best-effort and lazily-required so it can never break a settings write or
   // fight module load order (settings.js is required very early).
   try {
     const changed = {};
-    for (const k of Object.keys(patch || {})) {
+    for (const k of Object.keys(p)) {
       if (JSON.stringify(cur[k]) !== JSON.stringify(next[k]))
         changed[k] = { from: cur[k], to: next[k] };
     }
@@ -567,7 +953,7 @@ async function setAutoFarm(patch, opts = {}) {
   } catch (e) {
     /* never block a settings write on its audit */
   }
-  return s.autoFarm;
+  return next;
 }
 
 // Normalise a game label for tolerant comparison ("Rainbow Six Siege",
@@ -1098,25 +1484,31 @@ function getEpicAutoClaim() {
 
 async function setEpicAutoClaim(patch, opts = {}) {
   const secretBox = require("./secretBox");
-  const s = loadSettings();
-  const cur = s.epicAutoClaim && typeof s.epicAutoClaim === "object"
-    ? s.epicAutoClaim
-    : {};
-  const next = { ...EPIC_AUTO_CLAIM_DEFAULTS, ...cur, ...(patch || {}) };
-  if (Object.prototype.hasOwnProperty.call(patch || {}, "captchaKey")) {
-    const k = String(patch.captchaKey || "").trim();
-    next.captchaKey = k ? secretBox.encrypt(k) : "";
-  }
-  next.perAccountCooldownH = Math.max(
-    0,
-    Math.floor(Number(next.perAccountCooldownH) || 0),
-  );
-  next.dailyCap = Math.max(0, Math.floor(Number(next.dailyCap) || 0));
-  s.epicAutoClaim = next;
-  await saveSettings(s);
+  const p = snapshotPatch(patch);
+  // Encrypt before queueing: a missing CRED_SECRET throws here, with nothing
+  // written, exactly as before.
+  const setsKey = hasOwn(p, "captchaKey");
+  const key = setsKey ? String(patch.captchaKey || "").trim() : "";
+  const encryptedKey = key ? secretBox.encrypt(key) : "";
+  // Applied to the CURRENT block inside the save chain (see setAutoFarm).
+  let cur = {};
+  let next = null;
+  await updateSettings((s) => {
+    cur = s.epicAutoClaim && typeof s.epicAutoClaim === "object"
+      ? s.epicAutoClaim
+      : {};
+    next = { ...freshDefault("epicAutoClaim"), ...cur, ...p };
+    if (setsKey) next.captchaKey = encryptedKey;
+    next.perAccountCooldownH = Math.max(
+      0,
+      Math.floor(Number(next.perAccountCooldownH) || 0),
+    );
+    next.dailyCap = Math.max(0, Math.floor(Number(next.dailyCap) || 0));
+    s.epicAutoClaim = next;
+  });
   try {
     const changed = {};
-    for (const k of Object.keys(patch || {})) {
+    for (const k of Object.keys(p)) {
       const before = k === "captchaKey" ? (cur[k] ? "***" : "") : cur[k];
       const after = k === "captchaKey" ? (next[k] ? "***" : "") : next[k];
       if (JSON.stringify(before) !== JSON.stringify(after)) {
@@ -1135,7 +1527,7 @@ async function setEpicAutoClaim(patch, opts = {}) {
   } catch {
     /* never block a settings write on its audit */
   }
-  return s.epicAutoClaim;
+  return next;
 }
 
 module.exports = {

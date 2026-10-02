@@ -78,6 +78,10 @@ test.before(async () => {
     return { contentIds: lines.map((_l, i) => "c" + i) };
   };
   mp.digisellerDelist = async () => ({});
+  // These tests exercise Digiseller's own refusal rules, so Plati must read as
+  // open. Its default is OFF since 2026-10-03 (the seller account is blocked),
+  // and this suite runs without a settings.json.
+  mp.digisellerTakesNewStock = () => true;
   mp.funpayPublish = async (args) => {
     calls.funpay.push(args);
     return { externalId: "fp-1", externalNode: "1234", url: "", note: "" };
