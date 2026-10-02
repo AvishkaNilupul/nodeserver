@@ -95,6 +95,59 @@ function coverageTarget({
   return clamp(cover + safety, lo, hi);
 }
 
+// Sales per week while the game was actually IN STOCK. A day with no sale for a
+// game that sells every day is a stock-out, not a day without buyers — on prod
+// R6 sold 3–9 a day whenever its Eldorado offer had matching accounts and 0 on
+// the days it did not, and averaging those zeros in under-sizes the very game
+// that ran out. Dividing by the days that DID sell corrects it; the half-window
+// floor caps the correction at 2x, so a game that genuinely sells every few
+// days is not read as a daily seller.
+function inStockRate({ count = 0, sellingDays = 0, windowDays = 30 } = {}) {
+  const n = Math.max(0, num(count));
+  const w = Math.max(1, num(windowDays, 30));
+  if (n <= 0) return 0;
+  const days = Math.max(Math.max(0, num(sellingDays)), w / 2);
+  return (n * 7) / Math.min(days, w);
+}
+
+// The no-claim target when part of the stock is committed up front to a shelf.
+//
+// The unclaimed auto-lister keeps up to `unclaimedGameCaps` accounts listed on
+// Gameflip/GGSel (the shelf) whatever those markets sell, and the rest of the
+// demand — Eldorado, PlayerAuctions, G2G, hand sales — is served from what is
+// NOT on the shelf. Measured 2026-10-01: R6 held 50 accounts on a shelf selling
+// ~4 a week while ~23 a week sold elsewhere, so `rate x cover` counted 50 parked
+// accounts as cover for demand they could never serve.
+//
+//   target = max(shelfHeld, ceil(shelfRate * D/7))   — what the shelf ties up
+//          + ceil(otherRate * D/7)                    — cover for everything else
+//          + safetyStock
+//
+// clamped to [min, max]. A game with no sales at all gets the floor only — the
+// same rule coverageTarget keeps.
+function shelfAwareTarget({
+  shelfHeld = 0,
+  shelfPerWeek = 0,
+  otherPerWeek = 0,
+  coverageDays = DEFAULT_COVERAGE_DAYS,
+  safetyStock = DEFAULT_SAFETY_STOCK,
+  min = 0,
+  max = HARD_MAX_ACCOUNTS,
+} = {}) {
+  const lo = Math.max(0, num(min));
+  const hi = Math.min(Math.max(lo, num(max, HARD_MAX_ACCOUNTS)), HARD_MAX_ACCOUNTS);
+  const shelfRate = Math.max(0, num(shelfPerWeek));
+  const otherRate = Math.max(0, num(otherPerWeek));
+  const days = Math.max(0, num(coverageDays, DEFAULT_COVERAGE_DAYS));
+  const safety = Math.max(0, num(safetyStock, DEFAULT_SAFETY_STOCK));
+  if (shelfRate + otherRate <= 0) {
+    return { target: clamp(0, lo, hi), parts: { shelf: 0, other: 0, safety: 0 } };
+  }
+  const shelf = Math.max(Math.max(0, Math.floor(num(shelfHeld))), Math.ceil((shelfRate * days) / 7));
+  const other = Math.ceil((otherRate * days) / 7);
+  return { target: clamp(shelf + other + safety, lo, hi), parts: { shelf, other, safety } };
+}
+
 // The gap between what a game should hold and what it holds now, split into the
 // two numbers a caller acts on:
 //
@@ -185,6 +238,8 @@ module.exports = {
   HARD_MAX_ACCOUNTS,
   salesPerWeek,
   coverageTarget,
+  inStockRate,
+  shelfAwareTarget,
   stockGap,
   daysOfCover,
   weightedSplit,
