@@ -1,7 +1,14 @@
 # Market Radar — contract, data model, safety rules, rollout
 
-Status: **being built 2026-10-02**. Ships DARK (`autoFarm.marketData.enabled` false). Read-only toward every
-marketplace: it adds NO request to any market and changes NO listing, price or farm decision.
+Status: **LIVE on production since 2026-10-02.** Deployed DARK at 01:55Z (commit 7c95a74; backup
+`_deploy_backup_20261002015420_market-radar`; production's own `priceScout.js` 940ae351 -> 6d79a771 and
+`marketResearch.js` 8a2da749 -> 9645575e, patched in place by the hook script) and verified with the switch off;
+recording switched ON at 02:01Z (`setAutoFarm`, audited; settings backup
+`/root/_rehome_work/settings_before_marketData_20261002020116.json`). First recording tick (02:56Z): 183 rival listings
+in 12 games (Gameflip 112, GGSel 37, Plati 34; 83 of them correctly flagged ours), 5 Gameflip sales (3 ours), our
+Gameflip owner id remembered and our GGSel seller id learned; the scanner saved its research as before (13
+snapshots), no radar or research errors, memory and CPU normal. Read-only toward every marketplace: it adds NO
+request to any market and changes NO listing, price or farm decision.
 
 ## Why
 
