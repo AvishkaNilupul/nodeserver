@@ -225,7 +225,16 @@ async function retireSoldDeadTokens({ hours = DEFAULT_HOURS, dryRun = false, now
   const d = deps || defaultDeps();
   const progress = typeof onProgress === "function" ? onProgress : () => {};
   const p = await plan({ hours, now, deps: d });
-  const report = { ...p, dryRun: !!dryRun, retired: [], errors: [], configs: 0, restarted: [], stopped: [] };
+  const report = {
+    ...p,
+    dryRun: !!dryRun,
+    retired: [],
+    errors: [],
+    configs: 0,
+    restarted: [],
+    stopped: [],
+    notRestarted: [],
+  };
   if (dryRun || !p.retire.length) return report;
 
   const { removeAccountFromConfig } = d.configOps();
@@ -290,15 +299,29 @@ async function retireSoldDeadTokens({ hours = DEFAULT_HOURS, dryRun = false, now
     // park that landed in between be undone. restorePolicy keeps what
     // restartConfigContainer did; TWITCHBOT_ALLOW_RESTART=0 still turns the
     // restart off. A config left with no accounts is stopped instead: a bot
-    // with none spins in a login-retry loop (botHosts.stopIfNoAccounts).
+    // with none spins in a login-retry loop (botHosts.stopIfNoAccounts). One
+    // with no ENABLED account left, or whose config cannot be read, is never
+    // restarted — noted in report.notRestarted (round-2 review: a failed
+    // `docker ps` once read as "not running" let an emptied bot be restarted).
     const container = list[0].container;
     if (!container) continue;
     try {
-      if (
-        typeof d.hosts.stopIfNoAccounts === "function" &&
-        (await d.hosts.stopIfNoAccounts(host, file, container)).stopped
-      ) {
+      const s =
+        typeof d.hosts.stopIfNoAccounts === "function"
+          ? await d.hosts.stopIfNoAccounts(host, file, container)
+          : { stopped: false, empty: null, state: null };
+      if (s.stopped) {
         report.stopped.push(container);
+        continue;
+      }
+      if (s.empty !== false) {
+        report.notRestarted.push(
+          container + " (" +
+            (s.empty === null
+              ? "config unreadable"
+              : "no enabled account" + (s.state === "unknown" ? "; docker ps failed" : "")) +
+            ")",
+        );
         continue;
       }
       if (!allowRestart) continue;
@@ -313,6 +336,7 @@ async function retireSoldDeadTokens({ hours = DEFAULT_HOURS, dryRun = false, now
       "Dead-token retire: took " + report.retired.length + " sold account(s) out of " + report.configs +
         " bot config(s)" + (report.restarted.length ? "; restarted " + report.restarted.join(", ") : "") +
         (report.stopped.length ? "; stopped " + report.stopped.join(", ") + " (no accounts left)" : "") +
+        (report.notRestarted.length ? "; not restarted: " + report.notRestarted.join(", ") : "") +
         (report.surface.length ? "; " + report.surface.length + " unsold dead-token account(s) left for re-auth" : "") + ".",
     );
     await d

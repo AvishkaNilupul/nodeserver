@@ -238,8 +238,11 @@ test("a parked bot started by another code path is recorded with that path", asy
     states: { twitchbotx8: { state: "running", status: "Up 4 minutes" } },
     configs: { "config_08.json": sotConfig("The Outlast Trials") },
   });
-  const caller = "restartIfRunning (utils/farmControl.js:57) < stopFarmingGame (utils/farmControl.js:138)";
-  botWaker.noteContainerStart({ hostId: "contabo", action: "restart", container: "twitchbotx8", caller });
+  // The Bots page's start button (routes/botConfigRoutes.js dockerSimpleAction)
+  // — a real start of a stopped bot. (restartIfRunning never reports one: it
+  // only ever restarts a running container.)
+  const caller = "dockerSimpleAction (routes/botConfigRoutes.js:1604) < (routes/botConfigRoutes.js:1630)";
+  botWaker.noteContainerStart({ hostId: "contabo", action: "start", container: "twitchbotx8", caller });
 
   const r = await botWaker.wakeFinishedBots("contabo");
   assert.deepEqual(r.woken, []);
@@ -252,7 +255,7 @@ test("a parked bot started by another code path is recorded with that path", asy
   assert.equal(ev.host, "contabo");
   assert.equal(ev.container, "twitchbotx8");
   assert.equal(ev.game, "the outlast trials");
-  assert.match(ev.reason, /not started by the waker; docker restart from restartIfRunning/);
+  assert.match(ev.reason, /not started by the waker; docker start from dockerSimpleAction/);
   assert.match(ev.reason, /idle_no_campaign/);
   assert.match(ev.reason, /docker: Up 4 minutes$/);
   // Mirrored into the unified audit log (SystemEvent autofarm/started).
@@ -542,4 +545,66 @@ test("upForMs reads docker's uptime as a lower bound", () => {
   for (const [status, want] of cases) {
     assert.equal(botWaker.upForMs(status), want, String(status));
   }
+});
+
+// ---------------------------------------------------------------------------
+// Round-2 review (2026-10-03).
+// ---------------------------------------------------------------------------
+
+test("a park waiting for the container's lock is recorded only once it holds it (no lost entry)", async () => {
+  // Recorded first and then left waiting behind a slow restart-if-running, the
+  // entry outlived the 3-min in-flight grace: a Scout nudge pass dropped it as
+  // "never stopped", the stop landed, and the bot was parked with no entry —
+  // never to be woken.
+  world({
+    states: { twitchbotx19: { state: "running", status: "Up 3 days" } },
+    configs: { "config_19.json": sotConfig() },
+    campaigns: [],
+  });
+  let release;
+  const gate = new Promise((r) => (release = r));
+  const holder = hosts.withContainerLock(HOST, "twitchbotx19", () => gate);
+  const parking = botWaker.parkIdleNoCampaignBots("contabo");
+  await new Promise((r) => setTimeout(r, 20));
+  assert.equal(W.registry["contabo|twitchbotx19"], undefined, "not recorded while it waits for the lock");
+  // 3.5 minutes later — the holder still on its SSH timeouts — a nudge pass.
+  const realNow = Date.now;
+  Date.now = () => realNow() + 210e3;
+  try {
+    await botWaker.wakeFinishedBots("contabo");
+  } finally {
+    Date.now = realNow;
+  }
+  release();
+  await holder;
+  const p = await parking;
+  assert.deepEqual(p.parked.map((x) => x.container), ["twitchbotx19"]);
+  assert.equal(W.states.twitchbotx19.state, "exited");
+  assert.ok(W.registry["contabo|twitchbotx19"], "the parked bot is registered, so it can be woken");
+});
+
+test("a reload by restartIfRunning does not hide who really started a parked bot", async () => {
+  // The operator starts a parked bot from the Bots page; the drop scanner then
+  // reloads it (restartIfRunning only ever restarts a RUNNING container). The
+  // wake pass must name the operator's start, not the reload.
+  const farmControl = require("../utils/farmControl");
+  const parkedAt = new Date(now - HOUR).toISOString();
+  world({
+    registry: {
+      "contabo|twitchbotx8": { parkedAt, recordedAt: parkedAt, games: ["the outlast trials"], accounts: 31, reason: botWaker.IDLE_NO_CAMPAIGN_REASON },
+    },
+    states: { twitchbotx8: { state: "running", status: "Up 9 minutes" } },
+    configs: { "config_08.json": sotConfig("The Outlast Trials") },
+  });
+  const operator = "dockerSimpleAction (routes/botConfigRoutes.js:1604) < (routes/botConfigRoutes.js:1630)";
+  botWaker.noteContainerStart({ hostId: "contabo", action: "start", container: "twitchbotx8", caller: operator });
+  const rs = hosts.runShell;
+  hosts.runShell = async () => ({ stdout: "RESTARTED\n", stderr: "" });
+  try {
+    assert.deepEqual(await farmControl.restartIfRunning(HOST, "twitchbotx8"), { restarted: true, state: "running" });
+  } finally {
+    hosts.runShell = rs;
+  }
+  const r = await botWaker.wakeFinishedBots("contabo");
+  assert.deepEqual(r.external, [{ container: "twitchbotx8", by: operator }]);
 });

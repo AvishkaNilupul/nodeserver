@@ -770,13 +770,6 @@ function notifyStart(host, action, container, caller) {
   }
 }
 
-// For a start made outside dockerContainer/composeUp — farmControl's
-// restartIfRunning runs its check-and-restart as one shell command — so the
-// observers still hear of it. `caller` is what callerFrames returned.
-function notifyContainerStart(host, action, container, caller) {
-  notifyStart(host, action, container, caller || "");
-}
-
 // One "should this container run?" change at a time per container, within this
 // process (2026-10-03). A park holds it from its restart-policy change to the
 // end of its stop (botWaker, stopIfNoAccounts); farmControl.restartIfRunning
@@ -799,8 +792,11 @@ function withContainerLock(host, container, fn) {
 }
 
 // Run a single-container docker verb (restart/start/stop/rm -f).
-async function dockerContainer(host, action, container) {
-  const starts = action === "start" || action === "restart";
+// opts.notAStart — a restart of a container the caller has just seen RUNNING
+// (a config reload) starts nothing, so it is not reported to the observers.
+async function dockerContainer(host, action, container, opts = {}) {
+  const starts =
+    (action === "start" || action === "restart") && !(opts && opts.notAStart);
   // Captured before the first await, while the caller is still on the stack.
   const caller =
     starts && startObservers.length ? callerFrames(new Error().stack) : "";
@@ -1139,19 +1135,36 @@ async function setRestartPolicy(host, container, policy) {
 // call site. If the container is currently running, stops it and clears its
 // restart policy so it can't come back — including across a host reboot —
 // until accounts are added again (see restoreRestartPolicy).
+//
+// Returns { stopped, empty, state } (2026-10-03), so a caller about to restart
+// the bot can refuse: a bot must never be restarted when its config is empty
+// or when that cannot be told.
+//   empty — the config holds no ENABLED account; null when it cannot be read.
+//   state — the container's docker state as found, read only for a config
+//           with no accounts at all (to decide the stop): "missing" when there
+//           is no such container, "unknown" when `docker ps` failed; null when
+//           it was not read. A failed `docker ps` is never "not running".
+// It stops only a running bot whose config has no accounts at all (as before).
 async function stopIfNoAccounts(host, file, container) {
   let data;
   try {
     data = JSON.parse(await readFile(host, file));
   } catch {
-    return { stopped: false };
+    return { stopped: false, empty: null, state: null };
   }
-  const users = (data.TwitchSettings && data.TwitchSettings.TwitchUsers) || [];
-  if (users.length > 0) return { stopped: false };
+  const list = data && data.TwitchSettings && data.TwitchSettings.TwitchUsers;
+  const users = Array.isArray(list) ? list : [];
+  const enabled = users.filter((u) => u && u.Enabled !== false).length;
+  if (users.length > 0) return { stopped: false, empty: enabled === 0, state: null };
 
-  const states = await dockerPs(host).catch(() => ({}));
-  const running = states[container] && states[container].state === "running";
-  if (!running) return { stopped: false };
+  let states;
+  try {
+    states = await dockerPs(host);
+  } catch {
+    return { stopped: false, empty: true, state: "unknown" };
+  }
+  const state = (states[container] && states[container].state) || "missing";
+  if (state !== "running") return { stopped: false, empty: true, state };
 
   // Under the container's lock, like a park (see withContainerLock): a
   // restart-if-running that arrives mid-stop must not start an empty bot.
@@ -1159,7 +1172,7 @@ async function stopIfNoAccounts(host, file, container) {
     await setRestartPolicy(host, container, "no").catch(() => {});
     await dockerContainer(host, "stop", container).catch(() => {});
   });
-  return { stopped: true };
+  return { stopped: true, empty: true, state };
 }
 
 // Re-enable normal crash/reboot auto-restart once a bot has accounts again —
@@ -1187,7 +1200,6 @@ module.exports = {
   dockerPs,
   dockerContainer,
   onContainerStart,
-  notifyContainerStart,
   withContainerLock,
   callerFrames,
   dockerLogs,

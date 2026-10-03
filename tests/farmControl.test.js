@@ -98,6 +98,9 @@ function fakeHost({ config, state = "exited", psError = null, parkAfterFirstTrip
     setState: (s) => {
       st = s;
     },
+    setPsError: (e) => {
+      psError = e;
+    },
     restore() {
       for (const k of Object.keys(orig)) hosts[k] = orig[k];
     },
@@ -111,20 +114,29 @@ function freshFarmControl() {
 }
 
 const findings = [];
+const findingUpdates = [];
 const starts = []; // what botHosts' start observers hear
 hosts.onContainerStart((info) => starts.push(info));
 const origCreate = AuditFinding.create;
+const origUpdateOne = AuditFinding.updateOne;
 test.before(() => {
   AuditFinding.create = async (doc) => {
-    findings.push(doc);
-    return doc;
+    const d = { _id: "finding-" + findings.length, ...doc };
+    findings.push(d);
+    return d;
+  };
+  AuditFinding.updateOne = async (filter, update) => {
+    findingUpdates.push({ filter, update });
+    return { modifiedCount: 1 };
   };
 });
 test.after(() => {
   AuditFinding.create = origCreate;
+  AuditFinding.updateOne = origUpdateOne;
 });
 test.beforeEach(() => {
   findings.length = 0;
+  findingUpdates.length = 0;
   starts.length = 0;
 });
 
@@ -329,25 +341,20 @@ test("a park still in flight holds the container's lock: restartIfRunning waits 
   }
 });
 
-test("a real restart is reported to the start observers with its caller; a skipped one is not", async () => {
+test("restartIfRunning never reports a start: it only ever restarts a RUNNING container", async () => {
+  // Round-2 review: reporting its reload as a start made botWaker blame the
+  // drop scanner for a parked bot the operator had started by hand.
   for (const state of ["running", "exited"]) {
     starts.length = 0;
     const h = fakeHost({ config: config19({ Enabled: true }), state });
     try {
       const { restartIfRunning } = freshFarmControl();
-      await restartIfRunning(HOST, "twitchbotx19");
+      const r = await restartIfRunning(HOST, "twitchbotx19");
+      assert.equal(r.restarted, state === "running");
     } finally {
       h.restore();
     }
-    if (state === "exited") {
-      assert.deepEqual(starts, []);
-      continue;
-    }
-    assert.equal(starts.length, 1);
-    assert.equal(starts[0].hostId, "contabo");
-    assert.equal(starts[0].action, "restart");
-    assert.equal(starts[0].container, "twitchbotx19");
-    assert.match(starts[0].caller, /^restartIfRunning \(utils\/farmControl\.js:\d+\)/);
+    assert.deepEqual(starts, [], state);
   }
 });
 
@@ -390,9 +397,12 @@ test("the real shell command restarts only a running container, quoting the name
     [
       "#!/bin/sh",
       'echo "$*" >> "$FAKE_DOCKER_LOG"',
-      'case "$1" in',
-      '  inspect) [ -n "$FAKE_DOCKER_STATE" ] || exit 1; echo "$FAKE_DOCKER_STATE";;',
-      '  restart) [ "$FAKE_DOCKER_FAIL" = 1 ] && { echo "Error response from daemon: boom" >&2; exit 1; }; echo "$2";;',
+      'case "$1:$FAKE_DOCKER_STATE" in',
+      '  inspect:) echo "Error: No such object: $4" >&2; exit 1;;',
+      '  inspect:DAEMON) echo "Cannot connect to the Docker daemon at unix:///var/run/docker.sock. Is the docker daemon running?" >&2; exit 1;;',
+      '  inspect:PERM) echo "permission denied while trying to connect to the Docker daemon socket" >&2; exit 1;;',
+      '  inspect:*) echo "$FAKE_DOCKER_STATE";;',
+      '  restart:*) [ "$FAKE_DOCKER_FAIL" = 1 ] && { echo "Error response from daemon: boom" >&2; exit 1; }; echo "$2";;',
       "esac",
       "",
     ].join("\n"),
@@ -427,13 +437,143 @@ test("the real shell command restarts only a running container, quoting the name
       "inspect -f {{.State.Status}} x'; echo pwned >&2 #",
       "restart x'; echo pwned >&2 #",
     ]);
+    // Only "No such object" is a missing container. A daemon that is down or a
+    // denied socket is an error the caller sees — never "missing", which
+    // stopFarmingGame took as a reload not needed (round-2 review).
+    for (const [mode, re] of [["DAEMON", /Cannot connect to the Docker daemon/], ["PERM", /permission denied/]]) {
+      fs.writeFileSync(log, "");
+      process.env.FAKE_DOCKER_STATE = mode;
+      await assert.rejects(restartIfRunning(LOCAL, "twitchbotx19"), re, mode);
+      assert.ok(!fs.readFileSync(log, "utf8").includes("restart twitchbotx19"), mode + ": nothing restarted");
+    }
     // A failed restart is an error for the caller, not "not running".
+    process.env.FAKE_DOCKER_STATE = "running";
     process.env.FAKE_DOCKER_FAIL = "1";
     await assert.rejects(restartIfRunning(LOCAL, "twitchbotx19"), /boom/);
   } finally {
     for (const k of env) {
       if (saved[k] === undefined) delete process.env[k];
       else process.env[k] = saved[k];
+    }
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Round-2 review (2026-10-03).
+// ---------------------------------------------------------------------------
+
+test("a failed reload is not recorded as done: the next visit retries just the reload", async () => {
+  const h = fakeHost({
+    config: config19({ Enabled: true, FavouriteGames: [] }),
+    state: "running",
+    psError: new Error("Cannot connect to the Docker daemon"),
+  });
+  try {
+    const fc = freshFarmControl();
+    const first = await fc.stopFarmingGame(ACC, "Sea of Thieves");
+    assert.equal(first.changed, true, "the edit itself landed");
+    assert.match(first.reason, /twitchbotx19 restart FAILED: Cannot connect to the Docker daemon/);
+    assert.equal(findings[0].status, "open", "a failed reload is not a resolved stop");
+    assert.match(findings[0].message, /retried on the account's next scan/);
+
+    // The daemon is back; the scanner visits the account again (same process).
+    h.setPsError(null);
+    const again = await fc.stopFarmingGame(ACC, "Sea of Thieves");
+    assert.match(again.reason, /^reload retried: restarted twitchbotx19$/);
+    assert.deepEqual(h.calls.docker, ["restart twitchbotx19"], "the bot reloads now");
+    assert.deepEqual(h.calls.writes, ["config_19.json"], "no second edit");
+    assert.deepEqual(findingUpdates.map((u) => [u.filter._id, u.update.$set.status]), [["finding-0", "resolved"]]);
+
+    const third = await fc.stopFarmingGame(ACC, "Sea of Thieves");
+    assert.equal(third.reason, "already done");
+  } finally {
+    h.restore();
+  }
+});
+
+test("two stops on one config at once both land (the config's file lock)", async () => {
+  const cfg = {
+    FavouriteGames: ["Rust", "Sea of Thieves"],
+    TwitchSettings: {
+      TwitchUsers: [
+        { Login: "a", ClientSecret: "sa", Enabled: true },
+        { Login: "b", ClientSecret: "sb", Enabled: true },
+      ],
+    },
+  };
+  const h = fakeHost({ config: cfg, state: "exited" });
+  try {
+    const fc = freshFarmControl();
+    const acc = (login) => ({ _id: login, login, clientSecret: "s" + login, host: "contabo", configFile: "config_19.json", container: "twitchbotx19" });
+    // Two drop-scanner lanes, two sold accounts of one bot, the same moment.
+    const [ra, rb] = await Promise.all([fc.stopFarmingGame(acc("a"), "Rust"), fc.stopFarmingGame(acc("b"), "Rust")]);
+    assert.equal(ra.changed, true);
+    assert.equal(rb.changed, true);
+    const users = h.config().TwitchSettings.TwitchUsers;
+    assert.deepEqual(users.map((u) => [u.Login, u.FavouriteGames]), [
+      ["a", ["Sea of Thieves"]],
+      ["b", ["Sea of Thieves"]],
+    ]);
+  } finally {
+    h.restore();
+  }
+});
+
+test("the remote check-and-restart is cut off inside the SSH budget: no restart after the lock is gone", async () => {
+  // An SSH client that gives up leaves its remote command running (no pty).
+  // The fake ssh does exactly that; the fake docker answers `inspect` after 3 s
+  // with the state it read BEFORE the wait (a slow daemon).
+  const fs = require("fs");
+  const os = require("os");
+  const path = require("path");
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "farmcontrol-orphan-"));
+  const stateFile = path.join(dir, "state");
+  fs.writeFileSync(stateFile, "running");
+  fs.writeFileSync(
+    path.join(dir, "ssh"),
+    '#!/bin/sh\nfor last; do :; done\nout=$(mktemp)\n/bin/sh -c "$last" > "$out" 2>&1 < /dev/null &\nwait $!\nrc=$?\ncat "$out"; rm -f "$out"\nexit $rc\n',
+    { mode: 0o755 },
+  );
+  fs.writeFileSync(
+    path.join(dir, "docker"),
+    [
+      "#!/bin/sh",
+      'case "$1" in',
+      '  inspect) s=$(cat "$FAKE_STATE_FILE"); sleep 3 >/dev/null 2>&1; echo "$s";;',
+      '  restart) echo running > "$FAKE_STATE_FILE"; echo "$2";;',
+      "esac",
+      "",
+    ].join("\n"),
+    { mode: 0o755 },
+  );
+  const saved = { PATH: process.env.PATH, FAKE_STATE_FILE: process.env.FAKE_STATE_FILE };
+  process.env.PATH = dir + path.delimiter + process.env.PATH;
+  process.env.FAKE_STATE_FILE = stateFile;
+  const REMOTE = { id: "pi-test", transport: "ssh", runtime: "docker", dir: "/x", ssh: { target: "fake", identityFile: null, port: null, options: [] } };
+  // The client's patience, shortened for the test (as a congested link ends it).
+  const realRunShell = hosts.runShell;
+  hosts.runShell = (h, s, o) => realRunShell(h, s, { ...o, timeout: Math.min((o && o.timeout) || 60000, 2500) });
+  try {
+    const { restartIfRunning } = freshFarmControl();
+    const scanner = restartIfRunning(REMOTE, "twitchbotx19", { budget: { inspectS: 1, restartS: 2, settleS: 1 } }).then(
+      () => "resolved",
+      () => "rejected",
+    );
+    await new Promise((r) => setTimeout(r, 100));
+    // The tick's park, queued behind the scanner on the container's lock.
+    const park = hosts.withContainerLock(REMOTE, "twitchbotx19", async () => {
+      fs.writeFileSync(stateFile, "exited");
+    });
+    assert.equal(await scanner, "rejected", "the slow check fails; it is never read as an answer");
+    await park;
+    await new Promise((r) => setTimeout(r, 3500)); // past the slow inspect
+    assert.equal(fs.readFileSync(stateFile, "utf8").trim(), "exited", "the park holds: no orphaned restart");
+  } finally {
+    hosts.runShell = realRunShell;
+    for (const [k, v] of Object.entries(saved)) {
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
     }
     fs.rmSync(dir, { recursive: true, force: true });
   }

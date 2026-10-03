@@ -16,6 +16,15 @@ const path = require("path");
 
 const ROUTES = path.resolve(__dirname, "../routes/botConfigRoutes.js");
 const containerForFile = (file) => "twitchbot" + String(file).replace(/\D/g, "");
+// The real host functions, before setup() fakes them (for the end-to-end test).
+const hostsMod = require("../utils/botHosts");
+const realHosts = {
+  resolveHost: hostsMod.resolveHost,
+  dockerPs: hostsMod.dockerPs,
+  runShell: hostsMod.runShell,
+  restoreRestartPolicy: hostsMod.restoreRestartPolicy,
+  stopIfNoAccounts: hostsMod.stopIfNoAccounts,
+};
 
 // A fake docker host shared by every path the sweep could take: `docker ps` +
 // restartConfigContainer (the two-call version) and runShell running the
@@ -80,15 +89,18 @@ function setup({ states, accounts = {}, parkAfterFirstTrip = null, shellError = 
   hosts.restoreRestartPolicy = async (_h, c) => {
     log.push("policy always " + c);
   };
+  // Same answer shape as botHosts.stopIfNoAccounts: { stopped, empty, state }.
   hosts.stopIfNoAccounts = async (_h, file, c) => {
+    const empty = (accounts[file] ?? 1) === 0;
+    const state = empty ? states[c] || "missing" : null;
     let stopped = false;
-    if ((accounts[file] ?? 1) === 0 && states[c] === "running") {
+    if (empty && states[c] === "running") {
       states[c] = "exited";
       log.push("stop " + c + " (no accounts)");
       stopped = true;
     }
     trip();
-    return { stopped };
+    return { stopped, empty, state };
   };
   const BotAccount = require("../models/BotAccount");
   const rows = [
@@ -184,5 +196,78 @@ test("TWITCHBOT_ALLOW_RESTART=0 still turns the restarts off", async () => {
   } finally {
     if (saved === undefined) delete process.env.TWITCHBOT_ALLOW_RESTART;
     else process.env.TWITCHBOT_ALLOW_RESTART = saved;
+  }
+});
+
+test("an emptied config is never restarted when docker ps fails (real host functions)", async () => {
+  // Round-2 review (2026-10-03): the eviction empties config_19.json, `docker
+  // ps` fails (a daemon hiccup) while `docker inspect` says running.
+  // stopIfNoAccounts read the failure as "not running", and the sweep then
+  // restarted a 0-account bot and set its policy back to always. The real
+  // stopIfNoAccounts + restartIfRunning on a local host, a fake `docker` on PATH.
+  const fs = require("fs");
+  const os = require("os");
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "evict-empty-"));
+  const log = path.join(dir, "docker.log");
+  fs.writeFileSync(
+    path.join(dir, "docker"),
+    [
+      "#!/bin/sh",
+      'echo "$*" >> "$FAKE_DOCKER_LOG"',
+      'case "$1" in',
+      '  ps) echo "Cannot connect to the Docker daemon (transient)" >&2; exit 1;;',
+      "  inspect) echo running;;",
+      '  restart|stop) echo "$2";;',
+      '  update) echo "$3";;',
+      "esac",
+      "",
+    ].join("\n"),
+    { mode: 0o755 },
+  );
+  fs.writeFileSync(
+    path.join(dir, "config_19.json"),
+    JSON.stringify({ TwitchSettings: { TwitchUsers: [{ Login: "susp1", ClientSecret: "s1", Enabled: true }] } }),
+  );
+  fs.writeFileSync(log, "");
+  const LOCAL = { id: "localtest", transport: "local", runtime: "docker", dir };
+  const saved = { PATH: process.env.PATH, FAKE_DOCKER_LOG: process.env.FAKE_DOCKER_LOG };
+  process.env.PATH = dir + path.delimiter + process.env.PATH;
+  process.env.FAKE_DOCKER_LOG = log;
+  Object.assign(hostsMod, realHosts, { resolveHost: () => LOCAL });
+  require.cache[ROUTES] = {
+    id: ROUTES,
+    filename: ROUTES,
+    loaded: true,
+    exports: {
+      containerForFile: (f) => "twitchbotx" + Number(String(f).replace(/\D/g, "")),
+      // As the real one does: the account leaves the config file.
+      removeAccountFromConfig: async (host, file, { clientSecret }) => {
+        const p = path.join(host.dir, file);
+        const d = JSON.parse(fs.readFileSync(p, "utf8"));
+        const before = d.TwitchSettings.TwitchUsers.length;
+        d.TwitchSettings.TwitchUsers = d.TwitchSettings.TwitchUsers.filter((u) => u.ClientSecret !== clientSecret);
+        fs.writeFileSync(p, JSON.stringify(d));
+        return before - d.TwitchSettings.TwitchUsers.length;
+      },
+    },
+  };
+  const BotAccount = require("../models/BotAccount");
+  BotAccount.find = () => ({
+    lean: async () => [{ _id: "a1", login: "susp1", clientSecret: "s1", configFile: "config_19.json", host: "localtest" }],
+  });
+  BotAccount.updateOne = async () => ({});
+  try {
+    const { evictSuspendedFromConfigs } = require("../utils/suspendedAccounts");
+    const out = await evictSuspendedFromConfigs({});
+    assert.equal(out.evicted, 1);
+    const calls = fs.readFileSync(log, "utf8").trim().split("\n").filter(Boolean);
+    assert.ok(!calls.some((l) => l.startsWith("restart")), "an emptied bot was restarted: " + calls.join(" | "));
+    assert.ok(!calls.some((l) => l.startsWith("update --restart=always")), "its policy was set back to always");
+  } finally {
+    for (const [k, v] of Object.entries(saved)) {
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
+    }
+    fs.rmSync(dir, { recursive: true, force: true });
   }
 });

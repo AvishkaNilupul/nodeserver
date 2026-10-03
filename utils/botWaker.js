@@ -586,21 +586,43 @@ async function wakePass(host, opts) {
   return { woken, external, checked: mine.length };
 }
 
-// The stop half of every park: restart policy "no" first (a docker daemon
-// restart would otherwise undo the stop), then the stop — both under the
-// container's lock (botHosts.withContainerLock, 2026-10-03), so a
+// Every park, under the container's lock (botHosts.withContainerLock,
+// 2026-10-03): record it, set restart policy "no" (a docker daemon restart
+// would otherwise undo the stop), then stop. Under the lock, a
 // farmControl.restartIfRunning arriving mid-park (the drop scanner, the
-// suspended-account sweep) waits for the stop and then leaves the bot stopped,
-// instead of reading it as still running and restarting it as the stop lands.
-// Throws when the stop fails; the caller restores the policy.
+// suspended-account and dead-token sweeps) waits for the stop and then leaves
+// the bot stopped, instead of reading it as still running and restarting it as
+// the stop lands. The entry is recorded INSIDE the lock, right before the stop
+// (round-2 review): recorded first and then left waiting for the lock — up to
+// ~2 min behind a restart on a slow host — it outlived the wake pass's 3-min
+// in-flight grace, a pass dropped it as "never stopped", the stop then landed,
+// and the bot was parked with no entry, never to be woken. Still recorded
+// before the stop: a stopped bot is never unregistered.
+// Throws with e.parkStage "record" (nothing was changed — the bot keeps
+// running) or "stop" (the caller restores the policy; the entry self-heals).
 const noLock = (_host, _container, fn) => fn();
 
-async function stopForPark(host, container) {
+function parkFailure(e, stage) {
+  const err = e instanceof Error ? e : new Error(String(e));
+  err.parkStage = stage;
+  return err;
+}
+
+async function parkUnderLock(host, container, info) {
   const lock =
     typeof hosts.withContainerLock === "function" ? hosts.withContainerLock : noLock;
   return lock(host, container, async () => {
+    try {
+      await recordParked(host.id, container, info);
+    } catch (e) {
+      throw parkFailure(e, "record");
+    }
     await hosts.setRestartPolicy(host, container, "no").catch(() => {});
-    await hosts.dockerContainer(host, "stop", container);
+    try {
+      await hosts.dockerContainer(host, "stop", container);
+    } catch (e) {
+      throw parkFailure(e, "stop");
+    }
   });
 }
 
@@ -698,15 +720,15 @@ async function stopFinishedBots(hostId, opts = {}) {
         continue;
       }
     }
-    // Record FIRST: if the stop below succeeds, an unrecorded park is a bot
-    // that can never be woken again. If the stop FAILS, the registry entry is
-    // harmless — wakeFinishedBots deletes entries whose container is running,
-    // so the next tick self-heals it.
+    // Record FIRST (parkUnderLock, right before the stop): if the stop
+    // succeeds, an unrecorded park is a bot that can never be woken again. If
+    // the stop FAILS, the registry entry is harmless — wakeFinishedBots drops
+    // entries whose container is running, so the next tick self-heals it.
     const parkReason = empty
       ? "no enabled accounts left in the config"
       : "all accounts finished their assigned games";
     try {
-      await recordParked(host.id, container, {
+      await parkUnderLock(host, container, {
         // An empty container records no games: there is nothing in it for a new
         // campaign to farm, so it must not be woken by one. (wakeFinishedBots
         // re-reads the config anyway and would reach the same conclusion — this
@@ -715,18 +737,6 @@ async function stopFinishedBots(hostId, opts = {}) {
         accounts: verdict.total,
         reason: parkReason,
       });
-    } catch (e) {
-      log(
-        "Could not record park for " +
-          container +
-          " — leaving it running: " +
-          (e.message || e),
-        "warn",
-      );
-      continue;
-    }
-    try {
-      await stopForPark(host, container);
       await recordAutoFarmEvent({
         type: "parked",
         game: empty ? "" : (verdict.assignedGames || []).join(", "),
@@ -749,6 +759,10 @@ async function stopFinishedBots(hostId, opts = {}) {
               "].",
       );
     } catch (e) {
+      if (e && e.parkStage === "record") {
+        log("Could not record park for " + container + " — leaving it running: " + (e.message || e), "warn");
+        continue;
+      }
       // Stop failed — undo the restart-policy change so a docker daemon
       // restart can't strand a still-running bot. The registry entry self-heals
       // next tick (wakeFinishedBots drops entries whose container is running).
@@ -841,19 +855,17 @@ async function parkNothingLeft(host, candidates, campaigns, log) {
       continue;
     }
     try {
-      await recordParked(host.id, c.container, {
+      await parkUnderLock(host, c.container, {
         parkedAt: parkedAt.toISOString(),
         games,
         accounts: c.verdict.total,
         reason: NOTHING_LEFT_REASON,
       });
     } catch (e) {
-      log("Could not record park for " + c.container + " — leaving it running: " + (e.message || e), "warn");
-      continue;
-    }
-    try {
-      await stopForPark(host, c.container);
-    } catch (e) {
+      if (e && e.parkStage === "record") {
+        log("Could not record park for " + c.container + " — leaving it running: " + (e.message || e), "warn");
+        continue;
+      }
       await hosts.restoreRestartPolicy(host, c.container).catch(() => {});
       log("Could not stop " + c.container + ": " + (e.message || e), "warn");
       continue;
@@ -961,27 +973,16 @@ async function parkIdleBots(hostId, opts = {}) {
     }
     if (verdict.working > 0) continue;
 
-    // Record FIRST — an unrecorded park is a bot that can never be woken
-    // again; a failed stop self-heals via the running-container cleanup.
+    // Record FIRST (parkUnderLock, right before the stop) — an unrecorded park
+    // is a bot that can never be woken again; a failed stop self-heals via the
+    // running-container cleanup.
     const gameList = [...games];
     try {
-      await recordParked(host.id, container, {
+      await parkUnderLock(host, container, {
         games: gameList,
         accounts: verdict.total,
         reason: "idle_no_stream — no assigned broadcast is live",
       });
-    } catch (e) {
-      log(
-        "Could not record park for " +
-          container +
-          " — leaving it running: " +
-          (e.message || e),
-        "warn",
-      );
-      continue;
-    }
-    try {
-      await stopForPark(host, container);
       await recordAutoFarmEvent({
         type: "parked",
         game: gameList.join(", "),
@@ -1000,6 +1001,10 @@ async function parkIdleBots(hostId, opts = {}) {
           "].",
       );
     } catch (e) {
+      if (e && e.parkStage === "record") {
+        log("Could not record park for " + container + " — leaving it running: " + (e.message || e), "warn");
+        continue;
+      }
       await hosts.restoreRestartPolicy(host, container).catch(() => {});
       log("Could not stop " + container + ": " + (e.message || e), "warn");
     }
@@ -1109,27 +1114,16 @@ async function parkIdleNoCampaignBots(hostId, opts = {}) {
     }
     if (verdict.working > 0 || verdict.unknown > 0) continue;
 
-    // Record FIRST — an unrecorded park is a bot that can never be woken
-    // again; a failed stop self-heals via the running-container cleanup.
+    // Record FIRST (parkUnderLock, right before the stop) — an unrecorded park
+    // is a bot that can never be woken again; a failed stop self-heals via the
+    // running-container cleanup.
     const gameList = [...games];
     try {
-      await recordParked(host.id, container, {
+      await parkUnderLock(host, container, {
         games: gameList,
         accounts: verdict.total,
         reason: IDLE_NO_CAMPAIGN_REASON,
       });
-    } catch (e) {
-      log(
-        "Could not record park for " +
-          container +
-          " — leaving it running: " +
-          (e.message || e),
-        "warn",
-      );
-      continue;
-    }
-    try {
-      await stopForPark(host, container);
       await recordAutoFarmEvent({
         type: "parked",
         game: gameList.join(", "),
@@ -1148,6 +1142,10 @@ async function parkIdleNoCampaignBots(hostId, opts = {}) {
           "]; wakes when one starts.",
       );
     } catch (e) {
+      if (e && e.parkStage === "record") {
+        log("Could not record park for " + container + " — leaving it running: " + (e.message || e), "warn");
+        continue;
+      }
       await hosts.restoreRestartPolicy(host, container).catch(() => {});
       log("Could not stop " + container + ": " + (e.message || e), "warn");
     }

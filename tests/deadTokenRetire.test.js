@@ -173,7 +173,7 @@ async function seed() {
 // auto-farm tick's park on that container right after the first docker round
 // trip — between a `docker ps` and a separate restart. `emptied` = configs the
 // retirement leaves with no accounts; `shellError` fails the check.
-function fakes({ parkAfterFirstTrip = null, emptied = [], shellError = null } = {}) {
+function fakes({ parkAfterFirstTrip = null, emptied = [], shellError = null, psUnknown = false } = {}) {
   const calls = { removed: [], restarted: [], events: [], telegrams: [], policy: [], restartedStopped: 0 };
   const docker = { twitchbotx44: "running", twitchbotx42: "exited" };
   const containerOf = (file) => "twitchbotx" + Number(String(file).replace(/\D/g, ""));
@@ -212,14 +212,22 @@ function fakes({ parkAfterFirstTrip = null, emptied = [], shellError = null } = 
         trip();
         return snap;
       },
+      // Same answer shape as botHosts.stopIfNoAccounts: { stopped, empty, state }.
+      // psUnknown: `docker ps` fails for an emptied config (state "unknown").
       stopIfNoAccounts: async (_h, file, c) => {
+        const empty = emptied.includes(file);
+        if (empty && psUnknown) {
+          trip();
+          return { stopped: false, empty: true, state: "unknown" };
+        }
+        const state = empty ? docker[c] || "missing" : null;
         let stopped = false;
-        if (emptied.includes(file) && docker[c] === "running") {
+        if (empty && docker[c] === "running") {
           docker[c] = "exited";
           stopped = true;
         }
         trip();
-        return { stopped };
+        return { stopped, empty, state };
       },
     },
     restartIfRunning: farmControl.restartIfRunning,
@@ -398,4 +406,19 @@ test("TWITCHBOT_ALLOW_RESTART=0 still turns the restart off", async () => {
     if (saved === undefined) delete process.env.TWITCHBOT_ALLOW_RESTART;
     else process.env.TWITCHBOT_ALLOW_RESTART = saved;
   }
+});
+
+test("an emptied config whose bot state cannot be read is never restarted", async () => {
+  // Round-2 review (2026-10-03): `docker ps` failed for the emptied config_44,
+  // stopIfNoAccounts answered "not stopped", and the pass restarted a bot left
+  // with no accounts. Now it is left alone and named in report.notRestarted.
+  await seed();
+  const { deps, calls, docker } = fakes({ emptied: ["config_44.json"], psUnknown: true });
+  const r = await retire.retireSoldDeadTokens({ hours: 48, now: NOW, deps });
+  assert.equal(r.retired.length, 4);
+  assert.deepEqual(r.restarted, []);
+  assert.deepEqual(calls.restarted, []);
+  assert.deepEqual(calls.policy, []);
+  assert.deepEqual(r.notRestarted, ["twitchbotx44 (no enabled account; docker ps failed)"]);
+  assert.equal(docker.twitchbotx44, "running", "left as found — never restarted");
 });

@@ -98,11 +98,11 @@ test("callerFrames skips botHosts and node internals, keeps two app frames", () 
   assert.equal(hosts.callerFrames(undefined), "");
 });
 
-test("notifyContainerStart reaches the observers like a docker start", () => {
-  hosts.notifyContainerStart(HOST, "restart", "twitchbotx9", "restartIfRunning (utils/farmControl.js:1)");
-  assert.deepEqual(seen, [
-    { hostId: "t1", action: "restart", container: "twitchbotx9", caller: "restartIfRunning (utils/farmControl.js:1)" },
-  ]);
+test("a restart flagged notAStart (a reload of a running container) is not reported", async () => {
+  await hosts.dockerContainer(HOST, "restart", "twitchbotx9", { notAStart: true });
+  assert.deepEqual(seen, []);
+  await hosts.dockerContainer(HOST, "restart", "twitchbotx9");
+  assert.equal(seen.length, 1, "an ordinary restart still is");
 });
 
 // The park/restart lock (2026-10-03): one "should this container run?" change
@@ -186,4 +186,62 @@ test("concurrent writeMeta calls each land whole (no shared temp file)", async (
   const final = fs.readFileSync(path.join(metaDir, "moves.json"), "utf8");
   assert.ok(bodies.includes(final), "the file is exactly one of the writes");
   assert.deepEqual(tmpLeft(), []);
+});
+
+// stopIfNoAccounts reports what it found (round-2 review, 2026-10-03): a
+// failed `docker ps` read as "not running" let the suspended-account and
+// dead-token sweeps restart an emptied bot. Real function, local host, a fake
+// `docker` on PATH.
+test("stopIfNoAccounts reports { stopped, empty, state }; a failed docker ps is never 'not running'", async () => {
+  const sdir = fs.mkdtempSync(path.join(os.tmpdir(), "bothosts-empty-"));
+  const log = path.join(sdir, "docker.log");
+  fs.writeFileSync(
+    path.join(sdir, "docker"),
+    [
+      "#!/bin/sh",
+      'echo "$*" >> "$FAKE_DOCKER_LOG"',
+      'case "$1:$FAKE_PS" in',
+      '  ps:fail) echo "Cannot connect to the Docker daemon" >&2; exit 1;;',
+      '  ps:*) printf "twitchbotx19\\t%s\\tUp 1 hour\\n" "$FAKE_PS";;',
+      "esac",
+      "",
+    ].join("\n"),
+    { mode: 0o755 },
+  );
+  const cfg = (users) => JSON.stringify({ TwitchSettings: { TwitchUsers: users } });
+  fs.writeFileSync(path.join(sdir, "config_19.json"), cfg([]));
+  fs.writeFileSync(path.join(sdir, "config_20.json"), cfg([{ Login: "a", Enabled: false }]));
+  fs.writeFileSync(path.join(sdir, "config_21.json"), cfg([{ Login: "a", Enabled: false }, { Login: "b" }]));
+  const DH = { id: "t-empty", transport: "local", runtime: "docker", dir: sdir };
+  const saved = { PATH: process.env.PATH, FAKE_DOCKER_LOG: process.env.FAKE_DOCKER_LOG, FAKE_PS: process.env.FAKE_PS };
+  process.env.PATH = sdir + path.delimiter + process.env.PATH;
+  process.env.FAKE_DOCKER_LOG = log;
+  const run = async (file, ps) => {
+    fs.writeFileSync(log, "");
+    process.env.FAKE_PS = ps;
+    const r = await hosts.stopIfNoAccounts(DH, file, "twitchbotx19");
+    return { r, calls: fs.readFileSync(log, "utf8").trim().split("\n").filter(Boolean).map((l) => l.split(" ")[0]) };
+  };
+  try {
+    let x = await run("config_19.json", "fail");
+    assert.deepEqual(x.r, { stopped: false, empty: true, state: "unknown" }, "no accounts, docker ps failed");
+    x = await run("config_19.json", "exited");
+    assert.deepEqual(x.r, { stopped: false, empty: true, state: "exited" });
+    x = await run("config_19.json", "running");
+    assert.deepEqual(x.r, { stopped: true, empty: true, state: "running" });
+    assert.deepEqual(x.calls, ["ps", "update", "stop"], "policy no, then the stop");
+    x = await run("config_20.json", "running");
+    assert.deepEqual(x.r, { stopped: false, empty: true, state: null }, "only disabled accounts: empty, not stopped");
+    assert.deepEqual(x.calls, [], "no docker call for a config with accounts");
+    x = await run("config_21.json", "running");
+    assert.deepEqual(x.r, { stopped: false, empty: false, state: null });
+    x = await run("config_99.json", "running");
+    assert.deepEqual(x.r, { stopped: false, empty: null, state: null }, "unreadable config: emptiness unknown");
+  } finally {
+    for (const [k, v] of Object.entries(saved)) {
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
+    }
+    fs.rmSync(sdir, { recursive: true, force: true });
+  }
 });

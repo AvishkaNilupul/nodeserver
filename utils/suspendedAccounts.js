@@ -349,12 +349,26 @@ async function evictSuspendedFromConfigs({ onProgress } = {}) {
   // restart, and TWITCHBOT_ALLOW_RESTART=0 still turns these restarts off.
   // An eviction can empty a config, and a bot with no accounts spins in a login
   // loop (botHosts.stopIfNoAccounts): such a bot is stopped, never restarted.
+  // Nor is one whose config holds no ENABLED account, or cannot be read: a
+  // failed `docker ps` once read as "not running" let an emptied bot be
+  // restarted (round-2 review, 2026-10-03).
   const allowRestart = process.env.TWITCHBOT_ALLOW_RESTART !== "0";
   for (const b of touched.values()) {
     const container = containerForFile(b.file);
     if (!container) continue;
     try {
-      if ((await hosts.stopIfNoAccounts(b.host, b.file, container)).stopped) continue;
+      const s = await hosts.stopIfNoAccounts(b.host, b.file, container);
+      if (s.stopped) continue;
+      if (s.empty !== false) {
+        console.warn(
+          "[suspendedAccounts] not restarting " + container + " (" + b.file + "): " +
+            (s.empty === null
+              ? "its config could not be read"
+              : "it holds no enabled account" +
+                (s.state === "unknown" ? "; docker ps failed" : s.state ? " (" + s.state + ")" : "")),
+        );
+        continue;
+      }
       if (!allowRestart) continue;
       await restartIfRunning(b.host, container, { restorePolicy: true });
     } catch (e) {
