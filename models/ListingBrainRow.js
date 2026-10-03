@@ -22,6 +22,10 @@ const listingBrainRowSchema = new mongoose.Schema(
     sc: { type: String, default: "" },
     old: { type: mongoose.Schema.Types.Mixed, default: {} },
     br: { type: mongoose.Schema.Types.Mixed, default: {} },
+    // the four price policies and the four placement forecasts (plan §4.6): the forward score ranks
+    // them from these logged rows — undeclared, strict mode would drop them on insert
+    pol: { type: mongoose.Schema.Types.Mixed, default: {} },
+    pf: { type: mongoose.Schema.Types.Mixed, default: {} },
     ev: { type: mongoose.Schema.Types.Mixed, default: null },
     fl: { type: [String], default: [] },
   },
