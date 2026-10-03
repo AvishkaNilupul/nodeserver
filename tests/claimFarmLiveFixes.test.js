@@ -114,6 +114,8 @@ function resetCalls() {
     counted: [],
     telegram: [],
     events: [],
+    listed: [],
+    relisted: [],
   };
 }
 resetCalls();
@@ -227,8 +229,14 @@ stub("autoLister", {
   campaignItems: () => [],
   derivePrice: () => 0,
   refillMarkets: async () => null,
-  retryMissingSecondaries: async () => null,
-  listActivatedTask: async () => ({}),
+  retryMissingSecondaries: async (t) => {
+    calls.relisted.push(t.game);
+    return null;
+  },
+  listActivatedTask: async (id) => {
+    calls.listed.push(String(id));
+    return {};
+  },
   listStackedBundle: async () => ({}),
 });
 stub("systemLog", {
@@ -309,6 +317,10 @@ let READY;
 let LANES;
 // The (game, campaignId) rows the legacy candidate loop finds for live campaigns.
 let EXISTING;
+// Active tasks the two listing sweeps see: UNLISTED (no Gameflip listing yet)
+// and LISTED (secondaries retried in live mode).
+let UNLISTED;
+let LISTED;
 const RESERVE_STUB = STUBS.get(path.join(UTILS, "pristineReserve"));
 const lane = (gameKey, mode = "live", state = "idle") => ({ gameKey, mode, state });
 
@@ -341,6 +353,8 @@ test.beforeEach(() => {
   READY = 100;
   LANES = () => [];
   EXISTING = [];
+  UNLISTED = [];
+  LISTED = [];
   DOCKER = {};
   STUBS.set(path.join(UTILS, "pristineReserve"), RESERVE_STUB);
   if (typeof ownership._setRefreshTimeoutForTests === "function") {
@@ -352,11 +366,18 @@ test.beforeEach(() => {
     q(() => {
       // The legacy candidate loop's (game, campaignId) lookup.
       if (filter.$or && filter.$or.every((x) => x.game && x.campaignId)) return EXISTING;
+      // The listing sweeps: no Gameflip listing yet / a listing to re-check.
+      const listingKey = (x) => Object.prototype.hasOwnProperty.call(x, "listing.externalId");
+      if (filter.status === "active" && filter.$or && filter.$or.some(listingKey)) {
+        return filter["listing.externalId"] ? [] : UNLISTED;
+      }
+      if (filter.status === "active" && listingKey(filter) && !filter.$or) return LISTED;
       if (!isActiveTaskQuery(filter)) return [];
       const not = filter._id && filter._id.$ne;
       return ACTIVE_TASKS.filter((t) => not === undefined || String(t._id) !== String(not));
     });
   AutoFarmTask.findOne = () => q(null);
+  AutoFarmTask.findById = () => q(null);
   AutoFarmTask.findOneAndUpdate = (f, u) => {
     calls.records.push(u.$set);
     return q({ _id: "row-" + calls.records.length, ...u.$set });
@@ -1648,6 +1669,243 @@ test("without farmControl.restartIfRunning (a partial deploy) the old restart is
   delete farmControl.restartIfRunning;
   await autoFarmer.completeEndedTasks();
   assert.deepEqual(calls.docker, [{ action: "restart", container: "twitchbotx7" }]);
+});
+
+/* ======== an execute job that runs twice changes nothing (review 2, H8) ======== */
+
+// One AutoFarmTask row, modelled: the lane's upsertTask, executeTask's final
+// write and every read see the same object, as they would the same document.
+function oneTaskRow() {
+  const ROW = {};
+  const view = () => (ROW._id ? { ...ROW, toObject: () => ({ ...ROW }) } : null);
+  AutoFarmTask.findOneAndUpdate = (f, u) =>
+    q(() => {
+      if (!ROW._id) Object.assign(ROW, { _id: "row-1", game: f.game, campaignId: f.campaignId });
+      Object.assign(ROW, u.$set);
+      return view();
+    });
+  AutoFarmTask.updateOne = (f, u) =>
+    q(() => {
+      Object.assign(ROW, u.$set || {});
+      return { modifiedCount: 1 };
+    });
+  AutoFarmTask.findOne = () => q(() => view());
+  AutoFarmTask.findById = () => q(() => view());
+  return ROW;
+}
+
+const quinfallVerdict = () => ({
+  game: "The Quinfall",
+  campaignId: "q1",
+  decision: "farm",
+  plannedAccounts: 10,
+  targetAccounts: 10,
+  wouldFarm: true,
+  reason: "demand",
+});
+const quinfallLane = { game: "The Quinfall", gameKey: "the quinfall", mode: "live" };
+
+test("an execute job that runs again finishes as a no-op: no second claim, the row keeps its first set (old bytes: 20 claimed, first set dropped)", async () => {
+  AF = { ...AF, dryRun: false, hostId: "contabo" };
+  const ROW = oneTaskRow();
+  const exec = require(path.join(UTILS, "farm2", "steps", "execute.js"));
+  const r1 = await exec.executeDecision({ verdict: quinfallVerdict(), lane: quinfallLane, af: { ...AF }, shadow: false });
+  assert.equal(r1.accounts, 10);
+  const first = { status: ROW.status, accounts: ROW.assignedAccounts.slice(), bots: ROW.bots.slice() };
+  assert.equal(first.status, "active");
+  const r2 = await exec.executeDecision({ verdict: quinfallVerdict(), lane: quinfallLane, af: { ...AF }, shadow: false });
+  assert.equal(r2.alreadyExecuted, true);
+  assert.equal(calls.claimed, 10, "nothing claimed the second time");
+  assert.equal(ROW.status, "active", "never flipped back to planned");
+  assert.deepEqual(ROW.assignedAccounts, first.accounts);
+  assert.deepEqual(ROW.bots, first.bots);
+});
+
+test("executeTask refuses a row that already holds work, before claiming anything (old bytes: overwrote it)", async () => {
+  AF = { ...AF, dryRun: false };
+  AutoFarmTask.findById = () =>
+    q({ _id: "t-albion", status: "stopped", executedAt: hoursAgo(5), assignedAccounts: ["kept1", "kept2"], bots: [{ container: "twitchbotx4" }] });
+  await assert.rejects(
+    autoFarmer.executeTask(albionTask(), { af: { ...AF }, host: HOST }),
+    (e) => e.alreadyExecuted === true && /already holds 2 account\(s\) on 1 bot\(s\) \(stopped\)/.test(e.message),
+  );
+  assert.equal(calls.claimed, 0);
+  assert.deepEqual(calls.createBot, []);
+});
+
+test("taskHoldsWork: executed rows with accounts or bots hold work; a dry-run plan's bots do not", () => {
+  const h = autoFarmer.taskHoldsWork;
+  assert.equal(h(null), false);
+  assert.equal(h({ status: "active" }), true);
+  assert.equal(h({ status: "stopped", executedAt: new Date(), assignedAccounts: ["a"] }), true);
+  assert.equal(h({ status: "failed", executedAt: new Date(), bots: [{ container: "x" }] }), true);
+  assert.equal(h({ status: "planned", bots: [{ container: "x" }], executedAt: null }), false, "a dry-run reuse plan");
+  assert.equal(h({ status: "skipped", executedAt: new Date(), bots: [], assignedAccounts: [] }), false);
+  assert.equal(h({ status: "planned" }), false);
+});
+
+test("the legacy tick does not re-plan a rescanned task that still holds its accounts (old bytes: planned and executed over it)", async () => {
+  AF = { ...AF, dryRun: false, hostId: "contabo" };
+  LIVE = [campaign("Game A", "a1")];
+  const stopped = {
+    _id: "row-a1",
+    game: "Game A",
+    campaignId: "a1",
+    status: "stopped",
+    decision: "farm",
+    rescanRequested: true,
+    executedAt: hoursAgo(30),
+    bots: [{ host: "contabo", file: "config_3.json", container: "twitchbotx3" }],
+    assignedAccounts: ["inv1", "inv2", "inv3"],
+  };
+  EXISTING = [stopped];
+  AutoFarmTask.findOne = () => q(stopped);
+  AutoFarmTask.findById = () => q(stopped);
+  const summary = await autoFarmer.runOnce();
+  assert.deepEqual(calls.records, [], "no plan written over it");
+  assert.equal(calls.claimed, 0);
+  assert.equal(summary.results[0].decision, "already_executed");
+});
+
+test("unrecyclableLogins is exported for the pool's Unclaim route (old bytes: not exported)", () => {
+  assert.equal(typeof autoFarmer.unrecyclableLogins, "function");
+});
+
+/* ====== a deferred tick defers its listings too (review 2, H1) ====== */
+
+const unlistedTask = (game, id) => ({ _id: "task-" + id, game, campaignId: id, status: "active", listing: { externalId: "" } });
+
+test("main mode, lane table unreadable: the listing sweep leaves a lane's task alone (old bytes: listed it)", async () => {
+  mainMode();
+  LIVE = [campaign("Albion Online", "a1")];
+  UNLISTED = [unlistedTask("Albion Online", "a0")];
+  LANES = () => new Error("db down");
+  ownership.setEngineRunning(true);
+  const s = await autoFarmer.runOnce();
+  assert.equal(s.decisionsDeferred, true);
+  assert.deepEqual(calls.listed, []);
+});
+
+test("main mode, lane table unreadable: the secondaries retry leaves a lane's task alone too (old bytes: retried it)", async () => {
+  mainMode();
+  AF = { ...AF, dryRun: false };
+  LISTED = [{ _id: "task-a0", game: "Albion Online", campaignId: "a0", status: "active", listing: { externalId: "gf-1" } }];
+  LANES = () => new Error("db down");
+  ownership.setEngineRunning(true);
+  await autoFarmer.runOnce();
+  assert.deepEqual(calls.relisted, []);
+});
+
+test("main mode, right after an invalidate(): a live lane's task is not listed by legacy (old bytes: listed it)", async () => {
+  mainMode();
+  UNLISTED = [unlistedTask("Albion Online", "a0")];
+  LANES = () => [lane("albion online")];
+  ownership.setEngineRunning(true);
+  await ownership.refresh();
+  // The lane engine invalidates the cache (a lane auto-created or paused)
+  // between the tick's decisions and its listing sweep.
+  const lister = STUBS.get(path.join(UTILS, "autoLister"));
+  const realRefill = lister.refillMarkets;
+  AF = { ...AF, dryRun: false };
+  LISTED = [{ _id: "task-b0", game: "Black Desert", campaignId: "b0", status: "active", listing: { externalId: "gf-2" } }];
+  lister.refillMarkets = async () => {
+    ownership.invalidate();
+    return null;
+  };
+  try {
+    await autoFarmer.runOnce();
+  } finally {
+    lister.refillMarkets = realRefill;
+  }
+  assert.deepEqual(calls.listed, []);
+});
+
+test("main mode, warm: legacy lists what it may decide — shadow lanes, no-key games, old no-claim tasks — and not a lane's", async () => {
+  mainMode();
+  LANES = () => [lane("albion online"), lane("game b", "shadow")];
+  UNLISTED = [
+    unlistedTask("Albion Online", "a0"),
+    unlistedTask("Game B", "b0"),
+    unlistedTask("原神", "y0"),
+    unlistedTask("No Claim Game", "n0"),
+  ];
+  const settingsStub = STUBS.get(path.join(UTILS, "settings"));
+  const realNoClaim = settingsStub.isNoClaimGame;
+  settingsStub.isNoClaimGame = (g) => g === "No Claim Game";
+  try {
+    ownership.setEngineRunning(true);
+    await ownership.refresh();
+    await autoFarmer.runOnce();
+  } finally {
+    settingsStub.isNoClaimGame = realNoClaim;
+  }
+  assert.deepEqual(calls.listed.sort(), ["task-b0", "task-n0", "task-y0"]);
+});
+
+test("outside main mode a cold cache keeps the old rule: legacy lists", async () => {
+  AF = { ...AF, farm2Enabled: true, farm2Main: false };
+  UNLISTED = [unlistedTask("Albion Online", "a0")];
+  LANES = () => new Error("db down");
+  ownership.setEngineRunning(true);
+  await autoFarmer.runOnce();
+  assert.deepEqual(calls.listed, ["task-a0"]);
+});
+
+/* ====== a game whose lane never comes is not farmed by nobody (review 2, H3) ====== */
+
+test("a game with no lane for 3 ticks is decided by legacy, with one alert; its lane appearing re-arms it (old bytes: deferred for ever, silent)", async () => {
+  // Start from a clean count: one tick with the lane engine stopped.
+  await autoFarmer.runOnce();
+  mainMode();
+  AF = { ...AF, dryRun: true };
+  LIVE = [campaign("Albion Online", "a1"), campaign("The Quinfall", "q1")];
+  LANES = () => [lane("albion online")]; // The Quinfall's lane is never created
+  ownership.setEngineRunning(true);
+  const alerts = () => calls.telegram.filter((t) => /The Quinfall has had no farm2 lane for 3 ticks/.test(t));
+  const tick = async () => {
+    ownership.invalidate(); // ten minutes between ticks
+    calls.records = [];
+    return autoFarmer.runOnce();
+  };
+  for (const n of [1, 2]) {
+    const s = await tick();
+    assert.deepEqual(s.awaitingLane, ["The Quinfall"], "tick " + n + " waits for the lane");
+    assert.deepEqual(calls.records, []);
+  }
+  let s = await tick();
+  assert.deepEqual(s.laneFallback, ["The Quinfall"]);
+  assert.deepEqual(calls.records.map((r) => r.game), ["The Quinfall"], "tick 3: legacy decides it");
+  assert.equal(alerts().length, 1);
+  assert.ok(calls.events.some((e) => e.action === "lane_missing_fallback" && e.game === "The Quinfall"));
+  s = await tick();
+  assert.deepEqual(s.laneFallback, ["The Quinfall"]);
+  assert.equal(alerts().length, 1, "one alert per streak");
+  // The lane appears: the lane engine owns the game again, the count resets.
+  LANES = () => [lane("albion online"), lane("the quinfall")];
+  s = await tick();
+  assert.deepEqual(calls.records, []);
+  assert.deepEqual(s.laneFallback, []);
+  // ...and if it goes missing again, the alert is re-armed.
+  LANES = () => [lane("albion online")];
+  for (let i = 0; i < 3; i++) s = await tick();
+  assert.equal(alerts().length, 2);
+});
+
+test("a game legacy took over for want of a lane is also listed by legacy", async () => {
+  await autoFarmer.runOnce();
+  mainMode();
+  LIVE = [campaign("The Quinfall", "q1")];
+  UNLISTED = [unlistedTask("The Quinfall", "q0")];
+  LANES = () => [];
+  ownership.setEngineRunning(true);
+  for (let i = 0; i < 2; i++) {
+    ownership.invalidate();
+    await autoFarmer.runOnce();
+  }
+  assert.deepEqual(calls.listed, [], "waiting for its lane: the lane will list it");
+  ownership.invalidate();
+  await autoFarmer.runOnce();
+  assert.deepEqual(calls.listed, ["task-q0"], "taken over on tick 3: legacy lists it");
 });
 
 /* ============ a hung lane read never freezes the tick (review p5b) ============ */

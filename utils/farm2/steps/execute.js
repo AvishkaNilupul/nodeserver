@@ -707,6 +707,41 @@ async function executeDecision({ verdict, lane, cycle, af, shadow, granted = 0 }
   const b = brain();
   const af2 = af || settings.getAutoFarm();
 
+  // IDEMPOTENT (2026-10-03 review H8). An execute job can run twice: a restart
+  // mid-execute (jobs.requeueStale), a jobs.finish that failed after the work
+  // was done (retried), a stale queued job drained after a paused lane is
+  // re-armed. The second run used to upsert the row back to "planned", claim a
+  // SECOND set and let executeTask overwrite bots/assignedAccounts — the first
+  // set and its containers stranded, claimed, outside maxAutoBots. So the row
+  // is read first, and a campaign that already executed (autoFarmer
+  // taskHoldsWork: active, or executed and holding accounts or bots) finishes
+  // this job as a no-op. Nothing is written: not even its status changes. A
+  // failed read throws, so the job is retried rather than run blind.
+  const AutoFarmTask = require("../../../models/AutoFarmTask");
+  const current = await AutoFarmTask.findOne({
+    game: verdict.game,
+    campaignId: verdict.campaignId,
+  })
+    .select("status decision bots assignedAccounts executedAt")
+    .lean();
+  const holdsWork =
+    typeof b.taskHoldsWork === "function"
+      ? b.taskHoldsWork(current)
+      : !!current &&
+        (current.status === "active" ||
+          (!!current.executedAt &&
+            ((current.assignedAccounts || []).length > 0 || (current.bots || []).length > 0)));
+  if (holdsWork) {
+    return {
+      taskId: current._id,
+      decision: current.decision || verdict.decision,
+      alreadyExecuted: true,
+      status: current.status,
+      accounts: 0,
+      bots: [],
+    };
+  }
+
   // The engine's own dry-run flag still applies: an operator may run the whole
   // system in dry-run, and a live lane must honour that exactly as the legacy
   // engine does.

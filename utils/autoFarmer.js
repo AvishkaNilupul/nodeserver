@@ -205,6 +205,9 @@ const state = {
   // Consecutive ticks that deferred every decision (noteDeferredTick).
   deferredTicks: 0,
   deferredAlerted: false,
+  // Main mode: lane key -> consecutive ticks its game was left waiting for a
+  // lane that did not appear (noteAwaitingLane).
+  awaitingLaneTicks: new Map(),
 };
 
 // Live progress log for the UI: every scan appends human-readable steps here
@@ -2764,6 +2767,26 @@ async function processCampaign(c, ctx) {
     covNote +
     ".";
 
+  // A fresh plan is never written over a row that already holds work (a
+  // rescanned stopped or completed task keeps its accounts as inventory):
+  // flipping it to "planned" would only lead executeTask to refuse it, tick
+  // after tick (taskHoldsWork). Left exactly as it is.
+  const current = await AutoFarmTask.findOne({ game, campaignId: c.campaignId })
+    .select("status bots assignedAccounts executedAt")
+    .lean();
+  if (taskHoldsWork(current)) {
+    progress(
+      game +
+        ": this campaign's task already holds " +
+        (current.assignedAccounts || []).length +
+        " account(s) (" +
+        current.status +
+        ") — not planned again.",
+      "warn",
+    );
+    return { decision: "already_executed" };
+  }
+
   // 7) Dry-run: record the plan, alert, touch nothing.
   if (af.dryRun) {
     await record({
@@ -2807,6 +2830,21 @@ async function processCampaign(c, ctx) {
   return executeTask(task, ctx);
 }
 
+// Does this task row already own work that a fresh execution would overwrite?
+// executeTask (non-append) writes `bots` and `assignedAccounts` wholesale, so
+// running it on a row that already holds them dropped the first set — still
+// claimed in the pool, still in its containers, outside maxAutoBots, owned by
+// nothing (2026-10-03 review H8: an execute job that ran twice). "Holds" means
+// active, or really executed (executedAt) and still listing accounts or bots;
+// a dry-run plan's bots (planned, never executed) are only its intent.
+function taskHoldsWork(row) {
+  if (!row) return false;
+  if (row.status === "active") return true;
+  const holds =
+    (row.assignedAccounts || []).length > 0 || (row.bots || []).length > 0;
+  return holds && !!row.executedAt;
+}
+
 // Execute a planned task for real: claim pool accounts, create bot(s) on the
 // farm host, mark active. Used by live-mode ticks AND the one-click
 // "approve" button on dry-run plans.
@@ -2815,6 +2853,30 @@ async function executeTask(task, ctx, { append = false } = {}) {
   const host = ctx && ctx.host ? ctx.host : resolveFarmHost(af);
   if (!host) throw new Error("No farm host configured");
   const game = task.game;
+
+  // Never over a row that already holds work (taskHoldsWork): the write at the
+  // end replaces bots and assignedAccounts, so a second run would claim a
+  // second set and drop the first. Read fresh — the object handed in may be
+  // stale. Refused before anything is claimed; append mode (the reuse top-up)
+  // adds to the row's work on purpose and merges it below.
+  if (!append && task._id) {
+    const current = await AutoFarmTask.findById(task._id)
+      .select("status bots assignedAccounts executedAt")
+      .lean();
+    if (taskHoldsWork(current)) {
+      const err = new Error(
+        "Task already holds " +
+          (current.assignedAccounts || []).length +
+          " account(s) on " +
+          (current.bots || []).length +
+          " bot(s) (" +
+          current.status +
+          ") — not executed again, which would replace them",
+      );
+      err.alreadyExecuted = true;
+      throw err;
+    }
+  }
 
   // Ceiling is the game's OWN cap, re-read at execution time. plannedAccounts
   // was already capped by capForGame when the plan was made, so this is a
@@ -3890,6 +3952,58 @@ async function expireStaleProbes(af, progress) {
 
 /* -------------------------------- tick --------------------------------- */
 
+// Main mode leaves a game with no lane to the supervisor, which creates one at
+// the start of its next cycle (ownership.legacyMayDecide). A lane that cannot
+// be created — a write that keeps failing, a name the model rejects — would
+// leave that game to NOBODY, silently, while every tick still counted as ok
+// (2026-10-03 review H3). So after LANE_FALLBACK_TICKS ticks in a row (~30 min)
+// the legacy engine decides and lists the game itself — the fail-safe
+// direction for a game nobody owns — and says so once. The count drops the
+// moment the game stops waiting (its lane appeared, or its campaign ended),
+// which re-arms the alert.
+const LANE_FALLBACK_TICKS = 3;
+
+async function noteAwaitingLane(awaitingNow) {
+  const next = new Map();
+  const reached = [];
+  for (const [key, game] of awaitingNow) {
+    const ticks = (state.awaitingLaneTicks.get(key) || 0) + 1;
+    next.set(key, ticks);
+    if (ticks === LANE_FALLBACK_TICKS) reached.push(game);
+  }
+  state.awaitingLaneTicks = next;
+  for (const game of reached) {
+    try {
+      require("./systemLog").logEvent({
+        category: "autofarm",
+        action: "lane_missing_fallback",
+        actor: "autoFarmer",
+        severity: "warn",
+        subject: game,
+        game,
+        count: LANE_FALLBACK_TICKS,
+        detail:
+          game +
+          " has waited " +
+          LANE_FALLBACK_TICKS +
+          " ticks for a farm2 lane that was never created; the legacy engine " +
+          "decides and lists it until one exists.",
+      });
+    } catch {
+      /* auditing must never break a tick */
+    }
+    await tg(
+      "⚠️ Auto-farm — " +
+        game +
+        " has had no farm2 lane for " +
+        LANE_FALLBACK_TICKS +
+        " ticks (~30 min): the lane engine is the main engine but its lane " +
+        "was never created (see the supervisor's last error). The legacy " +
+        "engine now decides and lists this game itself until the lane exists.",
+    );
+  }
+}
+
 // A main-mode tick that cannot read the lane table decides nothing (runOnce,
 // ownershipUnknown) — and the lane supervisor, reading the same table, is then
 // usually down too, so NO engine decides while both loops keep ticking. Say so
@@ -4231,8 +4345,11 @@ async function runOnce() {
     const ownershipUnknown = farm2Ownership.isMain() && farm2Ownership.isCold();
     let noClaimSkipped = 0;
     let farm2Skipped = 0;
-    // Main mode: games with no lane at all yet, left to the supervisor.
+    // Main mode: games with no lane at all yet, left to the supervisor —
+    // and those that have waited LANE_FALLBACK_TICKS ticks, decided here.
     const awaitingLane = new Set();
+    const awaitingNow = new Map(); // lane key -> game, this tick
+    const laneFallback = new Set();
     for (const c of live) {
       if (!c.game) continue;
       // No-claim games (Overwatch, Rainbow Six) are handled by the standalone
@@ -4261,9 +4378,16 @@ async function runOnce() {
       // Main mode: a game with no lane yet is the lane engine's too — the
       // supervisor creates its lane within a cycle (farm2/ownership.js
       // legacyMayDecide). Outside main mode this is the isOwned test above.
+      // A game still waiting after LANE_FALLBACK_TICKS ticks is decided here
+      // after all (noteAwaitingLane): nobody else is going to.
       if (!ownershipUnknown && !farm2Ownership.legacyMayDecide(c.game)) {
-        awaitingLane.add(c.game);
-        continue;
+        const laneKey = farm2Ownership.normKey(c.game);
+        awaitingNow.set(laneKey, c.game);
+        if ((state.awaitingLaneTicks.get(laneKey) || 0) + 1 < LANE_FALLBACK_TICKS) {
+          awaitingLane.add(c.game);
+          continue;
+        }
+        laneFallback.add(c.game);
       }
       const existing = existingByKey.get(c.game + "|" + c.campaignId);
       if (!existing) {
@@ -4310,6 +4434,22 @@ async function runOnce() {
           ".",
       );
     }
+    if (laneFallback.size) {
+      progress(
+        "Deciding " +
+          laneFallback.size +
+          " game(s) here although the lane engine is the main engine: no lane " +
+          "for " +
+          LANE_FALLBACK_TICKS +
+          "+ ticks — " +
+          [...laneFallback].join(", ") +
+          ".",
+        "warn",
+      );
+    }
+    // An unreadable table says nothing about which games have lanes, so the
+    // per-game waiting counts are only advanced by a tick that could read it.
+    if (!ownershipUnknown) await noteAwaitingLane(awaitingNow);
     if (ownershipUnknown) {
       // Not a fallback to this engine: in main mode the lanes decide, and the
       // next tick (10 min) re-reads the table. Maintenance sweeps still run.
@@ -4667,6 +4807,26 @@ async function runOnce() {
       }
     }
 
+    // Who lists a task in the two listing sweeps below: the SAME rule as who
+    // decides (2026-10-03 review H1). Asking isOwned() alone read "not owned"
+    // for every game while the cache was cold — in a deferred tick, or right
+    // after an invalidate() — so this engine listed tasks a live lane owns, a
+    // second Gameflip create racing the lane's own publish job. In main mode:
+    // not while ownership is unknown, not for a game a lane owns or is about
+    // to own; yes for what legacyMayDecide gives this engine, for a game it
+    // took over after waiting for a lane (noteAwaitingLane), and — as before —
+    // for the old tasks of no-claim games, which no lane ever takes. Outside
+    // main mode this is exactly the old isOwned() test.
+    const laneFallbackKeys = new Set(
+      [...state.awaitingLaneTicks]
+        .filter(([, ticks]) => ticks >= LANE_FALLBACK_TICKS)
+        .map(([key]) => key),
+    );
+    const legacyLists = (game) =>
+      settings.isNoClaimGame(game) ||
+      farm2Ownership.legacyMayDecide(game) ||
+      (!ownershipUnknown && laneFallbackKeys.has(farm2Ownership.normKey(game)));
+
     // Refill sweep: every LISTED active task gets its markets topped up —
     // sold-out (or shorted) gameflip/plati/ggsel stock is refilled from
     // spare accounts, then the post-event holdback, no delist/relist.
@@ -4715,12 +4875,13 @@ async function runOnce() {
         // Games owned by a LIVE lane (utils/farm2/*) re-list through the lane's
         // own publish/secondaries job, which calls this same helper on its own
         // retry clock. Two callers on one task would race two Plati/GGSel
-        // creates. isOwned() fails safe to false (engine off/stopped, cache
-        // cold), so this engine keeps re-listing every game until a lane is
-        // really live. Refill above is deliberately NOT gated: it tops up stock
-        // on an existing product and the lane has no equivalent.
+        // creates. Who re-lists here is legacyLists (above): the decision rule,
+        // so with the lane engine off or stopped this engine re-lists every
+        // game, and in main mode it never does while ownership is unknown.
+        // Refill above is deliberately NOT gated: it tops up stock on an
+        // existing product and the lane has no equivalent.
         try {
-          const retried = farm2Ownership.isOwned(t.game)
+          const retried = !legacyLists(t.game)
             ? null
             : await autoListerR.retryMissingSecondaries(t);
           if (retried) {
@@ -4765,9 +4926,9 @@ async function runOnce() {
       // Games owned by a LIVE lane (utils/farm2/*) are listed by the lane's
       // own publish/primary job — same listActivatedTask, own retry clock,
       // gated on a fresh holdings check. Listing here as well would race two
-      // Gameflip creates on one task. Same fail-safe as the decision skip
-      // above: any uncertainty reads as NOT owned and this sweep lists it.
-      if (farm2Ownership.isOwned(t.game)) {
+      // Gameflip creates on one task. The rule is legacyLists above — the
+      // decision rule, so a deferred tick defers its listings too.
+      if (!legacyLists(t.game)) {
         farm2ListSkipped++;
         continue;
       }
@@ -5010,6 +5171,7 @@ async function runOnce() {
       candidates: candidates.length,
       decisionsDeferred: ownershipUnknown,
       awaitingLane: [...awaitingLane],
+      laneFallback: [...laneFallback],
       completed,
       catalogChanges,
       results,
@@ -5568,6 +5730,10 @@ module.exports = {
   reapDeadTokenAssignments,
   expireStalePlans,
   repackAutoBots,
+  // For the pool's Unclaim route (routes/accountPoolRoutes.js), which refuses
+  // to hand back an auto-farm account a buyer holds or a listing sells — the
+  // same sold / connected / listed / leased check every recycle path uses.
+  unrecyclableLogins,
   // exported for tests
   fairShare,
   demandAllocation,
@@ -5623,6 +5789,7 @@ module.exports = {
   // steps/decide.js), so both engines take the pristine reserve and the host
   // RAM gate off their budgets with ONE implementation (2026-10-03).
   pristineProtect,
+  taskHoldsWork,
   containerSlots,
   farmSpendable,
   poolShortReason,
