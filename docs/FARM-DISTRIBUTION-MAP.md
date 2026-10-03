@@ -312,3 +312,34 @@ budget, explicit shelf caps, and all of the fleet's claim/top-up/create machiner
 | 15 | pool | The renter manual add and the pool claim/unclaim routes overwrite any claim unconditionally | code | medium (operator action) |
 | 16 | capacity | No RAM/host limit; the no-claim farm has no container cap | code | medium |
 | 17 | containers | The wake/park fix is not deployed (parked bots restarted daily) | production blob hashes | known, undeployed |
+
+## 7. What was done about §6 (2026-10-03, branch `fix/live-defects-1003`)
+
+Built on a byte copy of production (`40d1fd0`), each fix tested (tests fail on the old bytes), reviewed by
+independent reviewers in up to four rounds, staged on production data with every write blocked, then deployed
+in one batch. Contract: `docs/LIVE-FIXES-1003.md`.
+
+| # | Fixed how | Live by default? |
+|---|---|---|
+| 1 | Rollback releases only rows the bot config does not hold; an unreadable outcome releases nothing and logs `topup_state_unknown`; `release()` touches only no-claim claims | yes |
+| 2 | Claims exclude logins (and pool ids) with a committed no-claim ledger; the 6 existing accounts are left (OW holds 633 vs 250 needed) | yes |
+| 3 | Claims require a password the sellers can decrypt | yes |
+| 4 | Burst guard `noclaimBurstGuard` (hand/pack sales counted raw, can only lower a rate) — dark; the brain scores it (`v2g`) | no (owner's switch) |
+| 5 | A quantity-pool `listing_sold` counts once (no-claim: dropped beside its ledger row; claim farm: one unit, paired with the buyer's connection) | yes |
+| 6 | A bot with a config and no container counts as stock, blocks another build, alerts once; Restart rebuilds it; failed starts leave no container | yes |
+| 7 | Health board: every farm loop (legacy, lanes, allocator, brain) judged on its last clean pass; host RAM row | yes |
+| 8 | Legacy decides only games handed back to it; cold/unknown ownership defers; a game without a lane falls back after 30 min with an alert; an execute that runs twice is a no-op | yes |
+| 9 | Shelf floor counts only switched-on markets (18 → 12) | yes |
+| 10a | farm2 obeys `autoFarm.enabled` (true today) | yes |
+| 10b | Not changed: counting policy for the brain wiring (changing it now would grow farming) | — |
+| 11 | No code change (OS security setting, the owner's call); #8 makes restarts harmless to decisions | — |
+| 12 | settings.json: serialized, merged, atomic writes, cross-process lock, `.lastgood`, never defaults over an unreadable file; `platiEnabled` default false | yes |
+| 13 | Pristine reserve 150: no farm takes the last 150 clean accounts (rent-farm orders need them) | yes |
+| 14 | Backfill passes the game, so `soldGames` applies | yes |
+| 15 | Pool claim/unclaim and the renter add refuse to overwrite or free an owned/sold/in-config account | yes |
+| 16 | No-claim container cap 40 and a RAM gate (1,500 MB free) on every new container | yes |
+| 17 | The 09-29 wake/park fix, plus serialized/atomic registry, one-command restarts under a per-container lock, emptied bots stopped not restarted | yes |
+
+Also fixed on the way: the price tracker's evidence (Shop/bulk orders, bursts, packs, radar gaps), a
+settings-route crash, page-guard bypass (re-spelt admin URLs), suspended-account and dead-token restarts of
+parked bots, and the brain's new-drop rule (6-account cold probes, untested markets only, within the probe budget).
