@@ -260,7 +260,8 @@ function scanWrites(file, src) {
   return bad;
 }
 
-const PURE_OK = new Set(["priceTracker/stats", "priceTracker/venues", "priceTracker/analyze", "priceTracker/setIdentity", "farmSizing", "marketPricing"]);
+// bulkPacks/pricing: the pack prices a single price anchors (tierQuote) — pure, its ./config dependency-free at load.
+const PURE_OK = new Set(["priceTracker/stats", "priceTracker/venues", "priceTracker/analyze", "priceTracker/setIdentity", "farmSizing", "marketPricing", "bulkPacks/pricing"]);
 
 /** The pure model: only pure helpers, no clock, no randomness, no environment, no timer. */
 function scanPure(file, src) {
@@ -279,6 +280,8 @@ function scanPure(file, src) {
       add(r.idx, "requires " + r.spec);
       continue;
     }
+    // node:perf_hooks only for util.js's time-budget yielder (its performance.now is checked below)
+    if (r.spec === "node:perf_hooks" && path.basename(file) === "util.js" && path.dirname(file) === modelDir) continue;
     const m = /^(?:\.\.\/){1,2}(.+)$/.exec(r.spec);
     if (!m || !PURE_OK.has(m[1].replace(/\.js$/, ""))) add(r.idx, "requires " + r.spec);
   }
@@ -288,11 +291,16 @@ function scanPure(file, src) {
     [/\bMath\s*\.\s*random\s*\(/g, "Math.random("],
     [/\bprocess\s*\.\s*env\b/g, "process.env"],
     [/\bprocess\s*\.\s*hrtime\b/g, "process.hrtime"],
-    [/\bperformance\s*\.\s*now\b/g, "performance.now"],
     [/\bsetTimeout\b/g, "setTimeout"],
     [/\bsetInterval\b/g, "setInterval"],
   ])
     for (const m of src.matchAll(re)) add(m.index, what);
+  // The ONE clock a pure file may read: util.js's time-budget yielder (it decides when the async wrappers
+  // yield, never what is computed). Anywhere else — or in util.js outside makeYielder — it is a finding.
+  const yielderBody = path.basename(file) === "util.js" ? functionBody(src, "makeYielder") : null;
+  for (const m of src.matchAll(/\bperformance\s*\.\s*now\b/g)) {
+    if (!(yielderBody && m.index > yielderBody[0] && m.index < yielderBody[1])) add(m.index, "performance.now");
+  }
   for (const m of src.matchAll(/\bsetImmediate\b/g)) {
     const line = src.split("\n")[lineOf(src, m.index) - 1];
     if (!(path.basename(file) === "util.js" && /\bconst\s+yieldNow\s*=/.test(line))) add(m.index, "setImmediate outside util.yieldNow");
@@ -400,6 +408,13 @@ test("the scanner catches every forbidden pattern and ignores comments", () => {
   assert.equal(scanPure(pure, strip('require("../inputs")')).length, 1);
   assert.equal(scanPure(pure, strip('require("../model")')).length, 0, "the model's own façade is pure");
   assert.equal(scanPure(pure, strip("const d = new Date(t);")).length, 0);
+  // the one clock: util.js's makeYielder, and nowhere else
+  const util = path.join(BRAIN, "model", "util.js");
+  assert.equal(scanPure(util, strip('const { performance } = require("node:perf_hooks");\nfunction makeYielder(ms) { let last = performance.now(); return () => performance.now() - last > ms; }')).length, 0);
+  assert.equal(scanPure(util, strip("function other() { return performance.now(); }")).length, 1, "util.js outside makeYielder");
+  assert.equal(scanPure(pure, strip("function makeYielder() { return performance.now(); }")).length, 1, "another pure file");
+  assert.equal(scanPure(pure, strip('require("node:perf_hooks");')).length, 1, "perf_hooks outside util.js");
+  assert.equal(scanPure(pure, strip('require("../../bulkPacks/pricing");')).length, 0, "the pure pack maths");
   assert.equal(scanPure(F("model/util.js"), strip("const yieldNow = () => new Promise((r) => setImmediate(r));")).length, 0);
   // reads
   const ok = 'await d.M.find({ a: 1 }, { ...P }).sort({ _id: -1 }).limit(5).lean(); await hooks.Run().findOne({}, { fc: 0 }).lean(); rows.find((r) => r.a); args.find(same);';
@@ -495,7 +510,7 @@ test("requiring the runner loads only the model and the loader shell: no model, 
   const loaded = out.added.map(rel);
   const allowed = (f) =>
     f.startsWith("utils/listingBrain/") ||
-    ["utils/priceTracker/stats.js", "utils/priceTracker/venues.js", "utils/priceTracker/analyze.js", "utils/priceTracker/setIdentity.js", "utils/farmSizing.js", "utils/marketPricing.js", "utils/pricing.js"].includes(f);
+    ["utils/priceTracker/stats.js", "utils/priceTracker/venues.js", "utils/priceTracker/analyze.js", "utils/priceTracker/setIdentity.js", "utils/farmSizing.js", "utils/marketPricing.js", "utils/pricing.js", "utils/bulkPacks/pricing.js", "utils/bulkPacks/config.js"].includes(f);
   const extra = loaded.filter((f) => !allowed(f));
   assert.deepEqual(extra, [], "loaded on require: " + extra.join(", "));
   for (const f of loaded) {

@@ -147,13 +147,15 @@ function marketShares(ev, g, f, markets) {
   const raw = {};
   let sum = 0;
   for (const m of markets) {
-    rate[m] = D[m] + K > 0 ? (S[m] + K * pooled) / (D[m] + K) : 0;
     // sales with no recorded shelf time (a claim-at-sale market): over the whole window
     raw[m] = D[m] > 0 ? S[m] / D[m] : S[m] > 0 ? S[m] / 30 : 0;
+    // no shrinkage (K = 0) is the raw in-stock rate itself, not "nothing to say" (M12)
+    rate[m] = K > 0 ? (D[m] + K > 0 ? (S[m] + K * pooled) / (D[m] + K) : 0) : raw[m];
     sum += rate[m];
   }
+  // No sale anywhere in 30 days is no split at all — never an equal split passed off as evidence (M12).
   const shares = {};
-  for (const m of markets) shares[m] = sum > 0 ? rate[m] / sum : markets.length ? 1 / markets.length : 0;
+  for (const m of markets) shares[m] = sum > 0 ? rate[m] / sum : 0;
   return { shares, rate, raw, S, D, pooled };
 }
 
@@ -264,6 +266,31 @@ function poolPriceOf(ev, g, poolMs, prices, nets) {
   return pick(shelf, "shelf") || { price: null, net: null, from: "none" };
 }
 
+/** Does anything take units out of the no-claim pool: a live claim-at-sale offer, bulk, or hand sales? */
+function poolOutlet(ev, g, poolMs) {
+  for (const m of poolMs) for (const r of ev.rowsByCell.get(g + "|noclaim|" + m) || []) if (r.cas && r.activeAtCut) return "claim-at-sale";
+  if ((ev.bulk.weekly.get(g) || 0) > 0) return "bulk";
+  if ((ev.hand.weekly.get(g + "|noclaim") || 0) > 0) return "hand";
+  return null;
+}
+
+// Policies' weekly demand split per market: a number on every market (0 where it splits nothing), or
+// null when the policy has no split for the game at all — what the scorer compares with units sold
+// (H1: the demand split, uncapped by any shelf).
+function splitOf(lam, total) {
+  if (!(total > 0)) {
+    const zero = {};
+    for (const m of MARKETS) zero[m] = 0;
+    return zero;
+  }
+  let sum = 0;
+  for (const m of MARKETS) sum += num(lam[m], 0);
+  if (!(sum > 0)) return null;
+  const out = {};
+  for (const m of MARKETS) out[m] = U.round3(num(lam[m], 0));
+  return out;
+}
+
 /**
  * The shelf for one game × farm.
  * @param {object} ctx { ev, hz, ... }
@@ -316,16 +343,29 @@ function placeGame(ctx, q) {
     res.unknown = true;
     res.reserve = stock;
     res.why.push(gs.why);
-    for (const p of U.PLACE_POLICIES) res.policies[p] = { shelf: p === "flat" ? oldShelf : null, fc: null };
+    for (const p of U.PLACE_POLICIES) res.policies[p] = { shelf: p === "flat" ? oldShelf : null, fc: null, lambda: null };
     return res;
   }
   const W = Math.max(0, num(gs.w, 0));
-  // 1. bulk first: what the bulk channel is expected to take over the horizon, its own line (on the
-  //    no-claim side bulk sells from the free pool, so that is where it is set aside)
+  // The farm brain's forecast counts every unit the game sells — bulk packs and the owner's hand sales
+  // too. Those never come off a single shelf, so the single shelves split only what is left (H6: bulk
+  // was counted twice, once set aside and once inside the split).
   const bw = ev.bulk.weekly.get(g) || 0;
-  res.bulkTake = Math.min(stock, Math.round((bw * cfg.shelfHorizonDays) / 7));
-  if (res.bulkTake > 0) {
-    res.why.push("Bulk takes about " + res.bulkTake + " in " + cfg.shelfHorizonDays + " days (" + U.round2(bw) + "/wk): set aside" + (f === "noclaim" ? " in the pool" : "") + " first.");
+  const hw = ev.hand.weekly.get(g + "|" + f) || 0;
+  const Ws = Math.max(0, W - bw - hw);
+  res.Ws = U.round3(Ws);
+  if (bw > 0 || hw > 0) res.why.push("Single shelves split " + U.round2(Ws) + " of the " + U.round2(W) + "/wk forecast: bulk " + U.round2(bw) + "/wk and hand sales " + U.round2(hw) + "/wk come off no shelf.");
+  // 1. bulk first: what the bulk channel is expected to take over the horizon, its own line (on the
+  //    no-claim side bulk sells from the free pool, so that is where it is set aside). The owner's
+  //    reserveSingles is the other half of that split: single shelves keep at least that many (C19a).
+  const reserveSingles = Math.max(0, Math.floor(num(ev.bundle.bulk && ev.bundle.bulk.reserveSingles, 0)));
+  const want = Math.round((bw * cfg.shelfHorizonDays) / 7);
+  res.bulkTake = Math.min(stock, want, Math.max(0, stock - reserveSingles));
+  if (want > 0) {
+    res.why.push(
+      "Bulk takes about " + res.bulkTake + " in " + cfg.shelfHorizonDays + " days (" + U.round2(bw) + "/wk): set aside" + (f === "noclaim" ? " in the pool" : "") + " first" +
+        (res.bulkTake < Math.min(stock, want) ? "; " + reserveSingles + " kept for single shelves (your reserveSingles)." : "."),
+    );
   }
   const avail = stock - res.bulkTake;
 
@@ -334,12 +374,14 @@ function placeGame(ctx, q) {
   const open = MARKETS.filter((m) => cls[m] === "open");
   const demandM = MARKETS.filter((m) => (cls[m] === "open" || cls[m] === "managed") && elig[m].proven);
   const sh = marketShares(ev, g, f, demandM);
+  let splitAny = false;
   for (const m of demandM) {
     res.shares[m] = U.round3(sh.shares[m]);
-    res.lambda[m] = W * sh.shares[m];
+    res.lambda[m] = Ws * sh.shares[m];
+    if (sh.shares[m] > 0) splitAny = true;
   }
-  // (no market proven at all; on the claim farm demandM is exactly the open markets with a sale)
-  if (!demandM.length && W > 0 && open.length) {
+  // (no market proven at all — or none sold in 30 days: nothing to split the forecast by)
+  if (!splitAny && Ws > 0 && open.length) {
     // Nothing of ours sold anywhere open. The radar's rival sales are evidence of where buyers are; with
     // none, the plan's answer stands — no shelf on evidence, one exploration unit (never a guessed split).
     const radar = ev.radar.byGame.get(g);
@@ -348,7 +390,7 @@ function placeGame(ctx, q) {
     if (rm.length) {
       const tot = rm.reduce((a, m) => a + num(bm[m].perWeek), 0);
       for (const m of rm) {
-        res.lambda[m] = (W * num(bm[m].perWeek)) / tot;
+        res.lambda[m] = (Ws * num(bm[m].perWeek)) / tot;
         res.shares[m] = U.round3(num(bm[m].perWeek) / tot);
       }
       res.flags.push("radar-split");
@@ -386,18 +428,47 @@ function placeGame(ctx, q) {
   const fillMarkets = f === "noclaim" ? open.concat(POOL) : open;
   if (f === "noclaim") {
     const poolMs = MARKETS.filter((m) => cls[m] === "managed");
-    const pp = poolPriceOf(ev, g, poolMs, q.prices || {}, nets);
-    let lam = bw;
+    const outlet = poolOutlet(ev, g, poolMs);
+    // with no outlet (no live claim-at-sale offer, no bulk, no hand sales) the pool sells nothing: no
+    // borrowed price for it (M9)
+    const pp = outlet ? poolPriceOf(ev, g, poolMs, q.prices || {}, nets) : { price: null, net: null, from: "none" };
+    let lam = bw + hw;
     for (const m of poolMs) lam += num(res.lambda[m], 0);
+    if (!outlet) lam = 0;
     let h = cfg.shelfHorizonDays;
     if (gs.perishDays !== null) h = Math.max(P.MIN_HORIZON_DAYS, Math.min(h, gs.perishDays));
-    pool = { markets: poolMs, lambda: U.round3(lam), horizon: U.round3(h), price: pp.price, net: pp.net, from: pp.from, units: 0, marginal: null };
+    pool = { markets: poolMs, outlet, lambda: U.round3(lam), horizon: U.round3(h), price: pp.price, net: pp.net, from: pp.from, units: 0, marginal: null };
     mu[POOL] = (lam * h) / 7;
     fill = greedyFill({ markets: fillMarkets, mu, nets: Object.assign({}, nets, { [POOL]: num(pp.net, 0) }), avail, minMarginal: 0, caps, offsets: { [POOL]: res.bulkTake } });
-    res.reserve = fill.shelf[POOL] + fill.left;
-    pool.marginal = fill.marginal[POOL] === undefined ? null : fill.marginal[POOL];
-    delete fill.shelf[POOL];
     delete fill.marginal[POOL];
+    pool.marginal = null;
+    let left = fill.shelf[POOL] + fill.left;
+    delete fill.shelf[POOL];
+    if (!outlet && left > 0) {
+      // Nothing takes from the pool: every unit the shelves can still sell goes on them, up to the cap
+      // in force — perishable stock held "for later" just expires (M9).
+      const room = Math.max(0, res.cap - open.reduce((a, m) => a + fill.shelf[m], 0));
+      const sellable = open.filter((m) => num(nets[m]) > 0 && !(caps[m] !== undefined && fill.shelf[m] >= caps[m]));
+      sellable.sort((a, b) => num(res.lambda[b], 0) - num(res.lambda[a], 0) || MARKETS.indexOf(a) - MARKETS.indexOf(b));
+      let put = Math.min(left, room);
+      const before = put;
+      // round-robin, dropping a market the moment it reaches a platform cap
+      let i = 0;
+      while (put > 0 && sellable.length) {
+        const m = sellable[i];
+        if (caps[m] !== undefined && fill.shelf[m] >= caps[m]) {
+          sellable.splice(i, 1);
+          if (i >= sellable.length) i = 0;
+          continue;
+        }
+        fill.shelf[m]++;
+        put--;
+        i = (i + 1) % sellable.length;
+      }
+      left -= before - put;
+      if (before - put > 0) res.why.push("Nothing takes from the pool (no claim-at-sale offer, bulk or hand sale): " + (before - put) + " more on the shelves, up to the cap " + res.cap + ".");
+    }
+    res.reserve = left;
   } else {
     fill = greedyFill({ markets: open, mu, nets, avail, minMarginal: cfg.minMarginalUsd, caps });
     res.reserve = fill.left;
@@ -435,33 +506,39 @@ function placeGame(ctx, q) {
   if (stock > 0 && cls.gameflip === "open" && !(res.shelf.gameflip > 0)) res.flags.push("anchor");
   if (open.includes("ggsel") && num(cur.ggsel, 0) > num(res.shelf.ggsel, 0)) res.flags.push("noRemove");
   if (open.some((m) => !ev.markets[m].feeVerified)) res.flags.push("fee-assumed");
-  // 8. the same placement with every fee equal (a fee never changes a price, but it ranks markets)
-  const gross = {};
-  for (const m of open) gross[m] = num((q.prices || {})[m], 0);
+  // 8. the same placement with every fee equal (a fee never changes a price, but it ranks markets): each
+  //    market's gross price at the open markets' mean fee — so the $ threshold still compares NETS (H18)
+  let feeSum = 0;
+  for (const m of open) feeSum += num(ev.markets[m].feePct, 0);
+  const feeEq = open.length ? feeSum / open.length / 100 : 0;
+  const eqNet = (p) => U.round2(num(p, 0) * (1 - feeEq));
+  const eqNets = {};
+  for (const m of open) eqNets[m] = eqNet((q.prices || {})[m]);
   if (pool) {
-    gross[POOL] = num(pool.price, 0);
-    res.shEq = greedyFill({ markets: fillMarkets, mu, nets: gross, avail, minMarginal: 0, caps, offsets: { [POOL]: res.bulkTake } }).shelf;
+    eqNets[POOL] = eqNet(pool.price);
+    res.shEq = greedyFill({ markets: fillMarkets, mu, nets: eqNets, avail, minMarginal: 0, caps, offsets: { [POOL]: res.bulkTake } }).shelf;
     delete res.shEq[POOL];
   } else {
-    res.shEq = greedyFill({ markets: open, mu, nets: gross, avail, minMarginal: cfg.minMarginalUsd, caps }).shelf;
+    res.shEq = greedyFill({ markets: open, mu, nets: eqNets, avail, minMarginal: cfg.minMarginalUsd, caps }).shelf;
   }
-  // 9. the policies, each with its forecast for the next 7 days
+  // 9. the policies, each with its weekly demand split (λ, uncapped; the scorer's H1 number) and its
+  //    forecast for the next 7 days at its shelf. Every split is of the same single-shelf demand Ws.
   const flatM = MARKETS.filter((m) => cls[m] === "open" || cls[m] === "unknown");
   const lamFlat = {};
-  for (const m of flatM) lamFlat[m] = W / flatM.length;
-  res.policies.flat = { shelf: oldShelf, fc: forecastOf(lamFlat, oldShelf) };
+  for (const m of flatM) lamFlat[m] = Ws / flatM.length;
+  res.policies.flat = { shelf: oldShelf, fc: forecastOf(lamFlat, oldShelf), lambda: splitOf(lamFlat, Ws) };
   const all30 = marketShares(ev, g, f, MARKETS);
   const s30tot = MARKETS.reduce((a, m) => a + all30.S[m], 0);
   const lam30 = {};
-  for (const m of MARKETS) lam30[m] = s30tot > 0 ? (W * all30.S[m]) / s30tot : 0;
+  for (const m of MARKETS) lam30[m] = s30tot > 0 ? (Ws * all30.S[m]) / s30tot : 0;
   const shelf30 = proportional(avail, all30.S, open);
-  res.policies.share30 = { shelf: shelf30, fc: forecastOf(lam30, shelf30) };
+  res.policies.share30 = { shelf: shelf30, fc: forecastOf(lam30, shelf30), lambda: splitOf(lam30, Ws) };
   const rawTot = MARKETS.reduce((a, m) => a + all30.raw[m], 0);
   const lamIn = {};
-  for (const m of MARKETS) lamIn[m] = rawTot > 0 ? (W * all30.raw[m]) / rawTot : 0;
+  for (const m of MARKETS) lamIn[m] = rawTot > 0 ? (Ws * all30.raw[m]) / rawTot : 0;
   const shelfIn = proportional(avail, all30.raw, open);
-  res.policies.instock = { shelf: shelfIn, fc: forecastOf(lamIn, shelfIn) };
-  res.policies.newsvendor = { shelf: res.shelf, fc: forecastOf(res.lambda, res.shelf) };
+  res.policies.instock = { shelf: shelfIn, fc: forecastOf(lamIn, shelfIn), lambda: splitOf(lamIn, Ws) };
+  res.policies.newsvendor = { shelf: res.shelf, fc: forecastOf(res.lambda, res.shelf), lambda: splitOf(res.lambda, Ws) };
   for (const m of Object.keys(res.lambda)) res.lambda[m] = U.round3(res.lambda[m]);
   return res;
 }
@@ -471,6 +548,8 @@ module.exports = {
   TRANSLATE_MAX,
   POOL,
   poolPriceOf,
+  poolOutlet,
+  splitOf,
   provenOn,
   hadAuto,
   eldoradoActive,

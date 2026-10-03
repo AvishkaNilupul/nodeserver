@@ -138,23 +138,30 @@ calls Twitch, Gameflip and the GGSel/ZeusX/PlayerAuctions category lookups), `re
 ## 2. What the brain reads (and nothing else)
 
 All reads happen in `utils/listingBrain/inputs.js`, once per run, before any computation. Every read is projected
-and limited; no `skip()`, no `allowDiskUse`, no unbounded `$group`. Nothing is written, no marketplace is called.
+and limited and carries `maxTimeMS` (30 s, a find option); `$in` lists go in chunks of 500 ids; no `skip()`, no
+`allowDiskUse`, no unbounded `$group`. Nothing is written, no marketplace is called. Every long pass over the rows
+read (normalisation, sales, units, demand rows, the old side) breathes (`setImmediate`) at least every 50 ms, and a
+listing id is hashed once per load (memoised): at production volume on Node 20 no synchronous stretch of the load
+is over 200 ms (the longest left is the pure `buildEventCatalog` over 5,000 campaigns, 60–120 ms, or one tracker
+call, ≤ ~150 ms).
 
 | Read | How | Bound |
 |---|---|---|
 | Price-tracker report | `priceTracker.getReportSWR({timeoutMs: 120000})` — shared cache; a `null` report fails the load (nothing logged) | cached, 5 min |
 | Radar report | `marketData/report.getReport({days: 30})` — the same cache entry the farm brain uses; seller fields dropped at once | cached, 10 min |
-| Farm-brain rows | `DemandBrainRow.find({at ≥ now − (max(maxDemandAgeH, 6) + 1) h}, {k,f,at,live,hl,br.c,br.w,br.t,stk,est.avg30,est.avg45}).sort({at: -1}).limit(5000)`; newest per `(k, f)` kept. `maxDemandAgeH` is the model's own `readConfig` of `autoFarm.listingBrain` (a fixed 72 h read returned ~8,600 rows and hit the cap every run). A no-claim row's `k` is `settings.normGameName(keyword)` (a–z0–9); it joins the loader's keyword bucket by that rule | 5,000 |
-| The extra listing read | `MarketplaceListing.find({marketplace ∈ 7 keys, $or: [{status: "active"}, {updatedAt ≥ now − saleDays}]}, {_id, marketplace, origin, status, price, title, createdAt, updatedAt, set, noclaimStock, autoClaimSet, unclaimedGame, accountOffer, rentFarm, bulkOfferId, bulkPackSize, lotSize, qtyRemaining, qtyTarget, lastStock, rebundledAt, venueMinPriceUsd, "units.addedAt", "units.deliveredAt"}).sort({_id: -1}).limit(20000)` — the flags and exposure dates the tracker does not project; joined to the tracker's rows by id. `saleDays` = max(refDays, fit window) + 42 (222 d by default): as far back as sales are kept, so a no-claim sale finds its row. `title` is read **in memory only**: a row the tracker skipped is kind `farm` only when its flag or its fresh title says so (`classifyKind`) | 20,000 |
-| No-claim units | `UnclaimedAccount.find({listedAt ≥ now − fitDays − 42 d − 60 d}, P).limit(50000)` and `UnclaimedAccount.find({status: "sold", soldAt ≥ now − saleDays}, P).limit(50000)`, P = `{game, market, status, listedAt, soldAt, soldPriceUsd, soldMarket, expiredAt, listingIds, bundleKey, manualListing, note, updatedAt, "drops.campaign"}` — two indexed reads, merged; no login, no account id. `manualListing` (a listing id) and `note` (free text) are read **in memory only** and never copied (§1.3 #3) | 2 × 50,000 |
-| Wave ends | `TwitchCampaign.find({$or: [{endAt ≥ now − 120 d}, {endAt: null}]}, {campaignId, name, game, startAt, endAt}).sort({endAt: -1}).limit(5000)` (open-ended campaigns too, as `loadCatalog` reads them; Mongo sorts null below every date, so the cap can only drop open-ended ones) + `CampaignDrops.find({campaignId ∈ …}, {campaignId, name, game, "drops.itemKey", "drops.name"}).limit(5000)` → the pure `unclaimedBundles.buildEventCatalog` (never `loadCatalog`, which reads unbounded) | 5,000 each |
+| Farm-brain rows | `DemandBrainRow.find({at ≥ now − (max(maxDemandAgeH, 6) + 1) h}, {k,f,at,live,hl,br.c,br.w,br.t,stk,est.avg30,est.avg45}).sort({at: -1}).limit(5000)`; newest per `(k, f)` kept. `maxDemandAgeH` is the model's own `readConfig` of `autoFarm.listingBrain` (a fixed 72 h read returned ~8,600 rows and hit the cap every run). A no-claim row's `k` is `settings.normGameName(keyword)` (a–z0–9); it joins the loader's keyword bucket by that rule, and is split over the bucket's games by their 30-day no-claim sales — when none sold, its games get no row (unknown), never an equal split | 5,000 |
+| The extra listing read | `MarketplaceListing.find({marketplace ∈ 7 keys}, {_id, marketplace, origin, status, price, title, createdAt, updatedAt, set, noclaimStock, autoClaimSet, unclaimedGame, accountOffer, rentFarm, bulkOfferId, bulkPackSize, lotSize, qtyRemaining, qtyTarget, lastStock, rebundledAt, venueMinPriceUsd, "units.addedAt", "units.deliveredAt"}).sort({_id: -1}).limit(20000)` — the tracker's own query shape (the `{marketplace, _id}` index; an `$or` on the unindexed `updatedAt` would scan the collection) — the flags and exposure dates the tracker does not project; joined to the tracker's rows by id. The window is applied in memory: active rows and rows written in the last `saleDays` = max(refDays, fit window) + 42 (222 d by default) — as far back as sales are kept, so a no-claim sale finds its row. `title` is read **in memory only**: a row the tracker skipped is kind `farm` only when its flag or its fresh title says so (`classifyKind`) | 20,000 |
+| No-claim units | `UnclaimedAccount.find({listedAt ≥ now − fitDays − 42 d − 60 d}, P).limit(50000)` and `UnclaimedAccount.find({status: "sold", soldAt ≥ now − saleDays, $or: [{listedAt < the listed read's start}, {listedAt: null}]}, P).limit(50000)` (no unit twice; never-listed hand sales included), P = `{game, market, status, listedAt, soldAt, soldPriceUsd, soldMarket, expiredAt, listingIds, bundleKey, manualListing, note, updatedAt, "drops.campaign"}` — two indexed reads, merged; no login, no account id. `manualListing` (a listing id) and `note` (free text) are read **in memory only** and never copied (§1.3 #3) | 2 × 50,000 |
+| Wave ends | `TwitchCampaign.find({$or: [{endAt ≥ now − 120 d}, {endAt: null}]}, {campaignId, name, game, startAt, endAt}).sort({endAt: -1}).limit(5000)` (open-ended campaigns too, as `loadCatalog` reads them; Mongo sorts null below every date, so the cap can only drop open-ended ones) + `CampaignDrops.find({campaignId ∈ 500 ids}, {campaignId, name, game, "drops.itemKey", "drops.name"}).limit(500)` per chunk → the pure `unclaimedBundles.buildEventCatalog` (never `loadCatalog`, which reads unbounded). The waves of EVERY game in the window are kept (the claim farm's "campaign ended" reads them) | 5,000 each |
+| Event-bundle sets | `DropSet.find({_id ∈ 500 set ids, sourceType: "autofarm-bundle"}, {_id, sourceType, sourceEventKey}).limit(500)` per chunk, over the set ids of the listing read's claim auto rows — which of them are today's event bundles (the tracker's set read has no `sourceType`). `sourceEventKey` is used in memory only (the event's 30-day sold floor). Unreadable → those offers keep rule 1, with a note | the listing read's set ids |
 | Market research | `MarketResearch.find({}, {game, "markets.gameflip", "markets.ggsel", "markets.plati", scannedAt}).limit(2000)` — what `derivePrice` and `bundlePrice` read | 2,000 |
 | Settings | `getAutoFarm()` once, `getFarmSizing(af)`, `getUnclaimedPricing()` once, `getBulkPacks(af)`, top-level `priceTracker.fees` | — |
-| Old side | `derivePrice`, `computeSplit`, `dealShares`, `postEventPrice`, `ggselTakesNewStock` (pure); `platiTakesNewStock(af)` (reads settings and an in-memory flag); `venuePrice("ggsel", …)` (cached DB snapshot), one call per game, 3 at a time with yields; `unclaimedBundles.bundlePrice`/`classifyHoldings` (pure, `pricing` passed); `priceTracker.suggestForNew(report, q)` (pure on the report); `g2gGames.brandForGame` (static table) | — |
+| Old side | `derivePrice`, `computeSplit` (stock on hand clamped to 10,000), `dealShares`, `postEventPrice`, `ggselTakesNewStock` (pure); rule 4's top-up restated (`refillMarkets` is impure and never called): Gameflip, Plati and GGSel, in today's order, back up to `perMarketStock` while the total stays within the stock on hand; `platiTakesNewStock(af)` (reads settings and an in-memory flag); `pricingEvidence.snapshot()` warmed ONCE (timeout) — `venuePrice` swallows an evidence error and answers the base, so only the warm-up can tell: on failure every GGSel and event-bundle price is null with one note; then `venuePrice("ggsel", …)` per game, 3 at a time; `autoFarmBundles.priceBundle({plan: {game, items, totalQty, full: false}, marketplace: "gameflip", research, soldFloorUsd})` for a claim event-bundle offer on Gameflip/Plati (that one number, floor-lifted) and GGSel (through `venuePrice`), as `publishEventBundleFor`/`publishStackedListing` do — whether the set is the complete event is not stored, so it is priced as not complete (a note says so); `unclaimedBundles.bundlePrice`/`classifyHoldings` (pure, `pricing` passed); `priceTracker.suggestForNew(report, q)` (pure on the report, 17–150 ms a call on Node 20) asked only for each cell's main offer, ≤ 400 (cells with live system-made rows first; a note when capped), with a yield before every call; `g2gGames.brandForGame` (static table); `priceTracker/games.listedUnits` and `bulkPacks/packMath.packSizeOf` (the tracker's and bulkPacks' own counting rules, no copies) | — |
 
 `realDeps()` loads these lazily; `require("utils/listingBrain")` loads only the model and the loader shell — no
 model, no settings, no marketplace module, no timer. `autoLister` (63 modules cold; already loaded at boot by
-`server.js`) is required only inside `realDeps()`.
+`server.js`), `autoFarmBundles`, `pricingEvidence` (a cached read), `priceTracker/games`, `bulkPacks/packMath` and
+the `DropSet` model are required only inside `realDeps()`.
 
 A farm-brain row older than `maxDemandAgeH` (6 h; the farm brain runs hourly), or missing, makes the game
 `unknown` for this run.
@@ -182,17 +189,17 @@ stripped of anything identifying. The same object is what `scripts/listing-brain
 
 | Record | Fields (short keys) |
 |---|---|
-| `L` listing | `id` (sha1 of the listing id, 12 hex — stable across runs, not the database id), `g` gameKey, `gl` game label, `m` market, `o` origin, `f` farm, `kind` (`single`, `cas`, `bulk`, `lot`, `account`, `manual`), `script`, `ck` contentKey, `bk` bandKey, `ex` exact, `n` item count, `p` stored price USD, `vmin` venueMinPriceUsd, `smin` DropSet.minPriceUsd, `st` status, `c` createdAt, `u` updatedAt, `units` [{a, d}] (≤ 200), `qty` listed units (`games.listedUnits`), `qr` qtyRemaining, `rb` rebundledAt, `pack` bulkPackSize |
+| `L` listing | `id` (sha1 of the listing id, 12 hex — stable across runs, not the database id), `g` gameKey, `gl` game label, `m` market, `o` origin, `f` farm, `kind` (`single`, `cas`, `bulk`, `lot`, `account`, `farm`), `script`, `ck` contentKey, `bk` bandKey, `ex` exact, `n` item count, `p` stored price USD, `vmin` venueMinPriceUsd, `smin` DropSet.minPriceUsd, `st` status, `c` createdAt, `u` updatedAt, `units` [{a, d}] (≤ 200), `qty` listed units (the tracker's `games.listedUnits`, through deps; null without it), `qr` qtyRemaining, `rb` rebundledAt, `pack` accounts per pack (`bulkPacks/packMath.packSizeOf`: a row without `bulkOfferId` is no pack, whatever its `bulkPackSize`; 0 = none), `lot` a Gameflip lot's size (0 = none) |
 | `S` sale (one per unit) | `lid` listing id hash or "", `g`, `m`, `o`, `f`, `ck`, `bk`, `ex`, `n`, `p` priceUsd (0 = unpriced), `t`, `grp` order key (hashed), `basis` (`reported`/`listing-now`/`row`/`paid`), `src` (`unit`/`signal`/`row`/`hand`/`shop`/`unclaimed`) |
 | `D` demand-only | `g`, `m`, `f`, `t`, `src` (`bulk`, `bulk-order`, `shop`, `burst`, `hand`) |
 | `B` bulk price | `g`, `m`, `t`, `pa` per-account USD, `size` |
 | `RG` radar game | `key`, `perWeek`, `rivalSellers`, `medianTtsHours`, `byMarket: {gameflip, ggsel, digiseller: {perWeek, liveSellers, sold: {n,p25,median,p75}, medianTtsHours}}` |
 | `RF` radar sale | `g`, `m` (tracker key), `p`, `u` units, `n` item count, `t`, `tts` — rivals only, rent-farm out, no seller field |
-| `DR` farm-brain row | `k`, `f`, `at`, `live`, `hl`, `c` class, `w` weekly forecast, `t` target, `on` stock on hand, `fl` in flight, `a30`, `a45` |
+| `DR` farm-brain row | `k`, `f`, `at`, `live`, `hl`, `c` class, `w` weekly forecast, `t` target, `on` stock on hand, `fl` in flight, `a30`, `a45`, `bu` the no-claim bucket it was split from, `sh` the game's share (30-day no-claim sales; a bucket with none is not split: no row) |
 | `U` no-claim unit | `g`, `m`, `st` ledger status, `l` listedAt, `s` soldAt, `p` soldPriceUsd, `sm` soldMarket, `x` expiredAt of the current life (null when older than `l`), `u` updatedAt (ms; the approximate moment a unit went off sale), `lids` listing id hashes, `bk` bundleKey, `camps` [raw campaign name]. The model reads a unit with `st` neither `listed` nor `sold` and no `x` (skipped, removed, manual, a released one never expired) as **off** sale — at a backtest cut before its `u` it was still on sale; with no `u`, off at every cut. With an `x`, its dates decide (it was on sale until its expiry) |
-| `W` wave | `g` gameKey, `ev` event name, `wave` (the parsed wave label, else the raw name), `name` the raw campaign name (what a unit's `camps` hold; `waveEndFor` matches it as well as the label forms), `startAt`, `endAt` (null for an open-ended campaign) |
-| `OG` old, per claim game | `base` derivePrice, `ggsel` venuePrice, `post` postEventPrice(base), `split` {listNow, holdBack}, `flat` {market: units} (dealShares over today's order), `order` [market] |
-| `OO` old, per offer | `np` today's new-listing price (bundlePrice for a no-claim offer), `tracker` {m: {price, basis, confidence}} |
+| `W` wave (every game's, claim and no-claim) | `g` gameKey, `ev` event name, `wave` (the parsed wave label, else the raw name), `name` the raw campaign name (what a unit's `camps` hold; `waveEndFor` matches it as well as the label forms), `startAt`, `endAt` (null for an open-ended campaign) |
+| `OG` old, per claim game | `base` derivePrice, `ggsel` venuePrice (null when the evidence snapshot is unreadable), `post` postEventPrice(base), `split` {listNow, holdBack}, `flat` {market: units} (dealShares over today's order, then rule 4's top-up to `perMarketStock` on the refillable markets while stock lasts), `order` [market], `rm` how the research row matched |
+| `OO` old, per offer (`market|contentKey`, else `market|bandKey`) | `np` today's new-listing price (bundlePrice for a no-claim offer; priceBundle for a claim event bundle), `tracker` {price, basis, confidence} (null unless the offer is a cell's main one inside the cap), `eb` true on an event-bundle offer |
 
 - `af.listingBrain` holds only the keys the model knows (its `DEFAULTS`), each a primitive or an array of numbers,
   raw — the model's `readConfig` validates them on read. Anything else typed into the owner's block never travels.
@@ -204,8 +211,9 @@ stripped of anything identifying. The same object is what `scripts/listing-brain
   says it carries a person, an account, a credential or free text (`login`, `account`, `seller`, `buyer`, `username`,
   `token`, `secret`, `password`, `email`, `twitch`, `note`, … — except the bundle's own `notes`, `digiseller`,
   `rivalSellers`, `liveSellers`, `l_account`; a game-keyed map's keys are checked as values), and any string that holds
-  an email, a link, an IPv4/IPv6 address, a 24-hex database id or a credential word. A game or campaign name with
-  such a word in it (e.g. "Secret …") makes the export refuse, by design: the scan errs towards not writing.
+  an email, a link, an IPv4/IPv6 address, a 24-hex database id or a credential in its shape (`token=…`,
+  `api_key: …`, `access-key=…`, `password: …`, `Bearer <8+ chars>`). A bare word is not one: a game named
+  "Secret Agent Saga" or a "Golden Token Week" campaign passes.
 
 ---
 
@@ -236,43 +244,60 @@ stripped of anything identifying. The same object is what `scripts/listing-brain
 ## 4. The model (pure — `utils/listingBrain/model.js` and `model/*.js`)
 
 No database, no network, no settings, no clock but the injected `now`. Every number below is a function of the
-bundle and the validated config (§8).
+bundle and the validated config (§8). One clock read changes no output: the async run (`buildRunAsync`, and the
+evidence and the fit inside it) gives the event loop back on a 40 ms budget measured with `performance.now()`
+(`util.makeYielder`, the only clock in the model's files), checked every 1,024 items, and always right before the
+tracker's translator — one synchronous call of 70–120 ms on Node 20 at production volume. Measured there, no synchronous
+stretch of the run is over ~115 ms (P20-4); the sync `buildRun` gives the same answer.
 
 ### 4.1 Evidence
 
 - **Priced orders**: sales with `p > 0`, source not `hand`, market known, `p ≤ $25` (the tracker's junk bound),
-  inside `refDays` (180), one per order (`perOrder`). A blocked market's orders teach only that market.
+  inside `refDays` (180), one per order (`perOrder`). A blocked market's orders teach only that market, and each
+  farm's orders teach only that farm: a no-claim order never moves a claim offer's reference, nor the reverse (H5).
 - **Exposure** of a system-made row (plus hand-made rows of the very same `contentKey` on that market, and ladder
   rungs):
   - start: `createdAt`; on quantity/order-unit markets the earliest `units[].addedAt` when the row has units and is
-    not claim-at-sale;
+    not claim-at-sale, never before `createdAt` (a unit moved from an older row keeps its old `addedAt` — H17);
   - end: the row's first sale (the joined sale date — never `updatedAt`) on single-unit markets; else `now` for an
     active row; else `updatedAt` (approximate — flagged `endApprox`);
-  - Gameflip exposure is capped at `createdAt + 30 d` (expiry), Eldorado at 21 days after `createdAt` with no sale;
+  - Gameflip exposure is capped at `createdAt + 30 d` (expiry), Eldorado at 21 days after `createdAt` with no sale
+    — and such an Eldorado offer is no longer live from then on, whatever its status says (H9);
   - a row with `rebundledAt` is split there: the part before belongs to contents nobody recorded and is **dropped**
-    from offer-level evidence (kept for the game's demand).
-- **Units sold** on a row inside its exposure: single-unit markets 1 (sold) or 0; other markets the number of sale
-  records joined to the row (each a unit). In-stock days on quantity markets are the exposure days (the stock
-  history is not recorded — a known limit, §10).
+    from offer-level evidence (kept for the game's demand). A row rebundled after the cut (a backtest) holds today's
+    contents, not the cut's: no offer evidence and no advice at that cut (H14).
+- **Units sold** on a row inside its exposure: single-unit markets 1 (sold) or 0; other markets the number of
+  **orders** joined to the row (distinct order keys: a 3-unit order is one buyer arriving, and the scorer's truth
+  counts buyers too — H12). In-stock days on quantity markets are the exposure days (the stock history is not
+  recorded — a known limit, §10).
+- **Demand off the shelves**: per game × farm, the weekly rate of the owner's hand sales (demand-only `hand` plus
+  sales recorded as `hand`, last 30 days) beside bulk's (H6); and per market the sets with a live pack listing or a
+  recorded pack price (C8).
 - **Window**: exposure is clipped to `[now − fitDays, now]` (`fitDaysClaim` 90, `fitDaysNoclaim` 30).
 - ZeusX records no sale for an auto row: its cells are `unmeasured` and never enter a fit.
 
 ### 4.2 Reference price `ref` (per offer, market, farm)
 
-The first step that gives a price wins; each carries a confidence by the tracker's rules.
+The first step that gives a price wins; each carries a confidence by the tracker's rules. Every step reads only
+the farm's own orders (H5).
 
 | # | Basis | Price | Confidence |
 |---|---|---|---|
 | 1 | `exact-here` — this exact offer, this market, ≥ 3 orders | median | `high`; `medium` on Eldorado/G2G/PlayerAuctions (price = listing price now) |
 | 2 | `band-here` — same game and size band, this market, ≥ 3 orders | median | `medium` with ≥ 8 orders, else `low` |
-| 3 | `translated` — the exact offer's orders on other non-blocked markets, each market's median through `analyze.buildTranslator(...).translate`; else the band's (≥ 2 orders per market) | median of the translated prices | `medium` when the exact offer sold on ≥ 2 other markets, else `low` |
+| 3 | `translated` — the exact offer's orders on other non-blocked markets, each market's median through `analyze.buildTranslator(...).translate`; else the band's (≥ 2 orders per market). Either needs ≥ 3 source orders in total: one order on one market is no estimate (C10) | median of the translated prices | `medium` when the exact offer sold on ≥ 2 other markets, else `low` |
 | 4 | `rivals` — rivals' sold median for the game, this market (radar feed, Gameflip/GGSel only), this size band (radar bands), ≥ 3 sale events | median | `low` |
 | 5 | `venue` — this market's median over every order | median | `none` |
 
 - The `p25` that goes with `ref` ("the lower quartile buyers demonstrably pay") is the 25th percentile of the
-  orders behind step 1 or 2, else of the band's orders on this market, else the floor.
+  orders behind step 1 or 2, else of the band's orders on this market when ≥ 3; from 1–2 orders it is never above
+  `ref` (`min(p25, ref)`: two dear orders cannot set the floor of an overstock pick); with none, the floor (H15).
 - **Ceiling** of the price grid: this market's observed maximum order price (≤ $25). A `translated`, `rivals` or
-  `venue` anchor never exceeds the market's p75 (orders here when ≥ 10, else all markets' p75).
+  `venue` anchor — a price nobody paid here for these items — is capped by what buyers paid for **this game** here
+  (H11): the p75 of the game's size-band orders on this market (≥ 3), else of all its orders here (≥ 3), else
+  1.5 × the median the anchor came from (before translation); this market's p75 (the farm's orders here when ≥ 10,
+  else every non-blocked market's) only as the last fallback. A market-wide p75 let a cheap game borrow a dear
+  game's level.
 - **Floor**: `max(floorFor(m), row.venueMinPriceUsd)` for a live row; for a new GGSel listing also the highest
   `venueMinPriceUsd` seen on the game's GGSel rows (the hidden category minimum). Applied **last**.
 
@@ -281,23 +306,41 @@ The first step that gives a price wins; each carries a confidence by the tracker
 For every exposure, `x = ask ÷ ref` where `ask = max(row price, floor)` (a sold row: the sale's price) and `ref` is
 4.2 for that row's offer on that market. Buckets (`BUCKETS`): `≤0.80, ≤1.00, ≤1.20, ≤1.50, ≤2.00, >2.00`.
 
-- **Hazard, not "resolved rows"**: `h = units sold ÷ listing-days exposed`, live rows' exposure included. On
-  single-unit markets one row is one unit; on quantity and order-unit markets `h` is units per in-stock day of an
-  offer (the cell's weekly units at a price are `7 × h`).
+- **What is exposed is an offer, not a row (H3).** On a single-unit market (Gameflip) several rows of one offer
+  are up at once and a buyer takes the cheapest: a dear row's slow sale is its rank on our own shelf, not the
+  buyers' answer to its price. So an offer is in stock while any of its rows is live; between two moments where a
+  row starts, sells or ends, its state is its **lowest** live ask (`x = x_min`), those days go to x_min's bucket,
+  and a sale of any of its rows counts at the state just before it. On quantity and order-unit markets one row
+  already is one offer.
+- **Hazard, not "resolved rows"**: `h = sales ÷ days exposed`, live exposure included — offer-days on single-unit
+  markets; on quantity and order-unit markets **orders** per in-stock day of an offer (H12; the cell's weekly
+  orders at a price are `7 × h`). `minSales` counts the same sales.
 - **Demand tier** of a game: the farm brain's weekly rate `w` (in a backtest: our own 45-day average at the cut,
   the farm brain's default estimator) in three tiers by `tierEdges` [1, 5] units a week.
-- **Shrinkage**, per farm (the two farms are fitted apart), with `K = shrinkK` listing-days (30):
+- **Shrinkage**, per farm (the two farms are fitted apart), with `K = shrinkK` listing-days (30) — the same K, but
+  its `K·h_m` pseudo-sales are each farm's own market rate, so it pulls the two farms toward different levels:
   - market: `h_m = S_m ÷ D_m` — with fewer than `minSales` (3) sales the market has **no estimate** at all;
   - market × bucket: `h_mb = (S_mb + K·h_m) ÷ (D_mb + K)`, then made **non-increasing in x** by pooling adjacent
     violators (weights `D_mb + K`);
   - market × bucket × tier: `h_mbt = (S_mbt + K·h_mb) ÷ (D_mbt + K)`, pooled again within each tier.
 - A bucket is **evidenced** when its market × bucket holds ≥ `minSales` sales or ≥ `minBucketDays` (60)
-  listing-days; otherwise it is **thin**: logged, never picked as a price (§4.4).
-- **Between buckets** the log-hazard is interpolated linearly in `x` between bucket centres (0.70, 0.90, 1.10,
-  1.35, 1.75, 2.50), flat beyond the ends — still non-increasing.
+  listing-days; otherwise it is **thin** and has **no hazard at all** (H4): it enters neither the pooling (null,
+  which PAVA passes through) nor the curve. Shrunk to the market mean, a thin top bucket used to lift the top of the
+  curve and push every price to the top of the evidenced range.
+- **The curve** runs through the evidenced buckets' nodes, each at its exposure-weighted **mean x** (where its
+  exposure actually sat; the open top bucket's "2.5" centre was nobody's price — H13), log-linear between nodes,
+  flat beyond the ends — still non-increasing. A node's hazard is floored at `10⁻³ × h_m` before the log, so a
+  never-sold bucket with `shrinkK = 0` does not send the curve to −∞ (H18). No price above the highest evidenced
+  node is ever a candidate (§4.4).
 - **`pH(x) = 1 − exp(−H · h(x))`**: the chance a unit sells within the farm's horizon `H` (`horizonDaysClaim` 7,
   `horizonDaysNoclaim` 2 — no-claim stock sells in hours to days, so a 7-day window says nothing). Logged as `p7`
   for both farms (the name of the brief); the horizon is in the run's `cfg`.
+- **A live row's chance** (H3, H9): on a single-unit market buyers of the offer arrive at `h(x_min)` a day and take
+  the cheapest row, so a row ranked k-th needs k buyers: `P(Poisson(h(x_min) · d) ≥ rank)`, `rank = 1 + rows
+  strictly cheaper + ⌊other rows at the same price ÷ 2⌋` (ties share the buyers); elsewhere `1 − exp(−d · h(x_ask))`.
+  `d = min(H, the row's remaining life)` — a Gameflip listing ends 30 days after creation, an unsold Eldorado offer
+  21. Each logged forecast carries `pb`, the market's base rate `1 − exp(−d · h_m)` over the same days at the
+  moment it was made (H8: the scorer's baseline).
 - **No-claim time left**: a no-claim unit's horizon is `min(H, days until its stock expires)`, where expiry is the
   wave's end plus the claim window learned from the ledger (median `expiredAt − wave end` over expired units of the
   game, else over all games, else 0) — §4.7.
@@ -306,7 +349,7 @@ For every exposure, `x = ask ÷ ref` where `ask = max(row price, floor)` (a sold
 
 For each offer in a cell, candidate prices are `ref × {0.6, 0.7, 0.8, 0.9, 1.0, 1.1, 1.2, 1.35, 1.5, 1.75, 2.0}`
 plus the floor, the `p25` and (live) the current ask, kept inside `[floor, ceiling]`, snapped to $0.05, and only
-in evidenced buckets. Each scores
+up to the highest evidenced node's x (no extrapolation above the evidence — H4). Each scores
 
 `value(p) = pH(p ÷ ref) × net(p)`, `net` = `venues.netOf(p, m, fees)` (after the market's fee).
 
@@ -318,7 +361,10 @@ cover `T = coverageDays ÷ 7`:
 | `scarce` | `cover < scarceCover × T` (0.5), or (claim) the campaign has ended and the radar shows ≤ `rivalsGoneMax` (1) live rival sellers | the highest evidenced price with `pH ≥ minP7Scarce` (0.5); none → `balanced` |
 | `balanced` | otherwise | the highest `value(p)` (ties → the higher price) |
 | `overstock` | `cover > overstockCover × T` (2), or the farm brain's class is `skip`, or the game is fading (`avg30 < fadeRatio × avg45`, 0.5), or (no-claim) the stock expires within `perishHours` (48) | among prices ≥ `max(p25, floor)`, the highest `pH` (ties → higher price) |
-| `unknown` | no fresh farm-brain row | logs nothing but the reason; action `hold` |
+| `unknown` | no fresh farm-brain row, or one missing its stock or its forecast (never read as 0 — M10a) | logs nothing but the reason; action `hold` |
+
+In a backtest the demand row is our own 45-day average at the cut and has no stock: cover is unknown and the regime
+comes from skip, fading or perishing only (H7).
 
 A campaign ending is evidence for `scarce` only through the data above; no-claim stock is never held back for a
 later price (scarce on the no-claim side only means "the price can go up", never "list fewer").
@@ -331,18 +377,38 @@ later price (scarce on the no-claim side only means "the price can go up", never
    ≥ `stockoutShare` (30 %) of the last 30 days while the game sold elsewhere). Otherwise it is cut to the highest
    evidenced price above the base, or the base. Never on the `venue` basis or a rival's ask.
 3. **Step limit**: at most `maxStepPct` (35 %) away from the base in one move (a larger gap is taken in steps).
-4. **GGSel raise-only**: on GGSel the price never goes below the base.
-5. **Floor last**.
+4. **No-claim ceiling** (`getUnclaimedPricing`, as `bundlePrice` applies it): never over it — before the floors, so
+   only the sold floor may lift a price past it.
+5. **GGSel raise-only**: on GGSel the price never goes below the base.
+6. **No-claim bundle order** (containment: a bigger bundle of the game is never cheaper than one it contains): a
+   lift only from contained offers the brain is confident about (≥ `medium`), and a lift is a raise like any other —
+   never past the ceiling nor one step from the base; what it cannot reach is flagged `containment-held` and waits
+   for the next move (M3).
+7. **No-claim 30-day sold floor** — the owner's rule, and its own evidence (buyers paid it on Gameflip within 30
+   days), so it needs no orders here. Decision (M13b): a new listing takes it in full, as `bundlePrice` does; a live
+   row is moved to it within the step limit, flagged `sold-floor-steps`.
+8. **Floor last**.
+
+Every other policy's price that is logged or answered goes through the same chain (M2, §4.6).
 
 **A live system-made row** gets an action: `hold`, `lower`, `raise` or `test`:
 - `|gated − ask| ≤ max($0.10, 8 %)` → `hold`;
-- **stale**: age > `staleFactor` (3) × the expected days to sale at its ask (`1 ÷ h(x_ask)`) and the gated price is
-  not lower → `lower` one rung (the next candidate below the ask) — rule 5's missing half;
-- a raise the raise rule cut back, with `value` ≥ 15 % above holding → `test` (one unit, not the row's whole stock);
+- **stale** — rule 5's missing half: age > `staleFactor` (3) × the expected days to a sale at its ask, read only
+  where the curve is evidenced (`1 ÷ h(x)`; on a single-unit market at the offer's x_min, × the row's rank — H3),
+  and only when the gated price is within the agree tolerance of the ask: the stale rule never overrides a raise or
+  a lower the curve gives (H2). On quantity and order-unit markets the age runs from the row's last sale, not its
+  creation (H2: a steadily selling 60-day Eldorado offer is not stale). The move is one rung down **inside the
+  gates** (M1): the highest candidate below the ask and at or above `max(every floor, the no-claim sold floor, the
+  bundle-order lift, ask × (1 − maxStepPct))`; none → `hold`; a stale GGSel row holds;
+- a raise the raise rule cut back, with `value` ≥ 15 % above holding → `test` (one unit, not the row's whole stock)
+  at `max(the ask moved one step toward the wanted price, every floor)`, only when that is above both the gated
+  price and the ask (M1);
 - cool-down: a row that was advised a different non-`hold` action less than `cooldownH` (72) ago is `hold`
   ("cool-down").
-- A deliberate **ladder** (an exact offer live at ≥ 2 prices on one market with any hand-made row) is `ladder`,
-  never corrected; its rungs are read as evidence.
+- A deliberate **ladder** (an exact offer live at ≥ 2 prices on one market with any owner row — hand-made or
+  claim-at-sale; two system-made rows at two prices are drift, and advised — C4) is `ladder`, never corrected; its
+  rungs are read as evidence. Decision (M13a): a ladder offer gets **no brain price at all** (`p` null, no raw on
+  the page; "a deliberate test, left alone") — a number beside it would only invite a correction.
 
 ### 4.5 Placement (the shelf)
 
@@ -357,13 +423,23 @@ Per game × farm with unsold stock.
 | `open` | switch on and mapped: Gameflip, Digiseller and Eldorado need no per-game mapping; GGSel with `af.ggselCategoryId`; G2G when `brandForGame` knows the game; any market where we have, or have had, an auto listing of this game |
 | `unknown` | switch on, mapping unproven (today's lister would ask the marketplace; the brain may not) — logged, shelf 0 |
 
-- **Bulk first**: `bulkTake = bulk weekly units × shelfHorizonDays ÷ 7` (the game's demand-only bulk series) is set
-  aside before any single shelf, its own line. A hand-set shelf cap and `getBulkPacks().reserveSingles` are read,
-  never changed.
-- **Market rate** `λ_m` = the farm brain's weekly forecast × `share_m`, `share_m ∝` the game's shrunk in-stock rate
-  on m (sales ÷ in-stock days over 30 days, shrunk toward the game's pooled rate with `shareShrinkDays` (14) days)
+- **Bulk first**: `bulkTake = min(stock, round(bulk weekly units × shelfHorizonDays ÷ 7), stock − reserveSingles)`
+  (the game's demand-only bulk series) is set aside before any single shelf, its own line; the owner's
+  `getBulkPacks().reserveSingles` is the other half of that split — single shelves keep at least that many (C19a).
+  A hand-set shelf cap and `reserveSingles` are read, never changed.
+- **Packs**: a single listing's price anchors the next pack of the same **set** (`bulkPacks/pricing.pickAnchor`):
+  an offer whose set has a live pack or a recorded pack price on a bulk market is flagged `bulk-anchor` (a cell
+  shows the flag when any of its offers has it) and carries `packs` = `bulkPacks/pricing.tierQuote({anchor: its
+  brain price, market, tiers})` — the pack maths itself, no copy; tiers are `{minQty, discountPct}`, an older
+  `{size}` read as `minQty` (C8).
+- **Single-shelf demand** `W_s = max(0, W − bulk weekly − hand weekly)`: the farm brain's forecast `W` counts every
+  unit the game sells, bulk packs and the owner's hand sales too, and those never come off a single shelf (H6:
+  bulk was counted twice, set aside and inside the split).
+- **Market rate** `λ_m = W_s × share_m`, `share_m ∝` the game's shrunk in-stock rate on m (sales ÷ in-stock days
+  over 30 days, shrunk toward the game's pooled rate with `shareShrinkDays` (14) days; with 0 the raw in-stock rate)
   over the **proven** open markets (a sale of the game there in the fit window) — a market that was out of stock is
-  not read as one that does not sell.
+  not read as one that does not sell. No sale anywhere in 30 days is **no split**, never an equal split passed off
+  as evidence (M12).
 - **Horizon**: `shelfHorizonDays` (14) where today's flow refills (Gameflip, Digiseller, GGSel);
   `nonRefillHorizonDays` (28) elsewhere (ZeusX, PlayerAuctions, G2G; Eldorado only by a whole new share).
 - **Value of the k-th unit** on m: `P(D_m ≥ k) × net_m`, `D_m ~ Poisson(λ_m × horizon_m ÷ 7)`, `net_m` the net of the
@@ -380,10 +456,14 @@ Per game × farm with unsold stock.
 - A brain shelf of 0 on Gameflip is flagged `anchor` (today's path cannot do it).
 - **Fees**: five fees are assumptions (`VENUES[m].verified === false`, unless overridden in settings). A fee never
   changes the best price inside one market but ranks markets: every cell whose fee is assumed is flagged
-  `fee-assumed`, and the run logs the placement with all fees equal (`shEq`).
+  `fee-assumed`, and the run logs the placement with all fees equal (`shEq`): each market's price netted at the open
+  markets' mean fee, so the `minMarginalUsd` threshold still compares nets (H18).
 - **No-claim**: placement is only the capped shelf on Gameflip, Digiseller and GGSel; the brain's total shelf for
   the game is logged beside the cap in force (`managed` when the cap is explicit, §1.3 #12). Its Eldorado,
-  PlayerAuctions and G2G offers are claim-at-sale: `managed`.
+  PlayerAuctions and G2G offers are claim-at-sale: `managed`. The rest of the stock is the free pool, which sells
+  only through an **outlet**: a live claim-at-sale offer, bulk or hand sales. With none, the pool sells nothing (λ 0,
+  no price borrowed for it) and every unit an open shelf can sell goes on the shelves, up to the cap in force —
+  perishable stock held "for later" just expires (M9).
 
 ### 4.6 Policies, logged side by side
 
@@ -392,15 +472,23 @@ Every run logs all of them; the score picks; the default changes only on evidenc
 - **Price**: `old` (a live cell: the median live ask of its system-made rows; a new listing: rules 1–2 for a claim
   cell, `bundlePrice` for a no-claim cell), `tracker` (`suggestForNew` as it is), `curve` (§4.4, the default),
   `clear` (rivals' sold median for the size band, translated from Gameflip to the cell's market).
+- Every price a policy logs (`pol.*`) or answers passes through §4.4's gates with the run's floor (M2): `clear` as
+  a rival's price (it never raises), `tracker` by its own basis (an engine fallback reads "none"), `old` against
+  today's limits.
 - **Placement**: `flat` (rules 3–4 via `computeSplit` + `dealShares` over today's order, or the no-claim cap in
   force), `share30` (last 30 days' sales share), `instock` (raw in-stock rate share), `newsvendor` (§4.5, the
-  default). Each policy's weekly forecast per market is `E[min(Poisson(λ^policy_m), shelf^policy_m)]` over 7 days.
+  default). Each splits the same single-shelf demand `W_s` (H6). Each policy's weekly **demand split** `λ^policy_m`
+  (uncapped by any shelf; 0 where it splits nothing, null when it has no split for the game) is logged per cell as
+  `pd` — what the scorer compares with units sold (H1) — and its weekly forecast `E[min(Poisson(λ^policy_m),
+  shelf^policy_m)]` over 7 days as `pf`.
 
 ### 4.7 Old versus brain, same moment
 
 Per cell: today's median live ask of the system-made rows (as `max(price, floor)`), units listed, the price today's
-rule gives a new listing now, today's shelf (flat share, or the no-claim cap) — beside the brain's price, shelf,
-regime, confidence and reasons.
+rule gives a new listing now, today's shelf (flat share, or the no-claim cap) — beside the brain's price (the
+median over the same live rows of the brain's price for each, or its ask where the brain leaves it — like with
+like, M11), shelf, regime, confidence and reasons. The claim game's `all` line also logs rule 3's old side: the
+post-event price and the split's list-now / hold-back units (`old.post`, `old.now`, `old.hold` — C7).
 
 - Price classes: `agree` (within `max($0.10, 8 %)`), `brain-lower`, `brain-higher`, `no-evidence`, `managed`, `ladder`.
 - Placement classes: `agree` (within one unit), `brain-more`, `brain-fewer`, `brain-add` (today 0), `brain-drop`
@@ -409,13 +497,21 @@ regime, confidence and reasons.
 
 ### 4.8 Three outputs for the next round (exported; wired to nothing)
 
-- `priceFor({ marketplace, basePriceUsd, title, game, itemCount, items })` → `{ price, confidence, basis, regime,
-  reasons }` — the question `priceTracker/attach.priceForNew` asks. Answered from the newest run's fitted model; no
-  run, an unknown game or a blocked market → the base price with confidence `none`.
-- `shelfFor({ game, farm, stock })` → `{ shelf: {market: units}, reserve, bulkTake, explore }` — what `computeSplit`
-  and `dealShares` decide today.
-- `valueFor(gameKey)` → `{ value, shares, nets, basis }`: expected net per account under the brain's placement and
-  prices, `Σ share_m × net_m` — for the farm brain's "value per account" later.
+- `priceFor({ marketplace, basePriceUsd, title, game, itemCount, items }, { now })` → `{ price, confidence, basis,
+  regime, reasons }` — the question `priceTracker/attach.priceForNew` asks. Answered from the newest run's fitted
+  model; no run, a run older than `max(2 × intervalMin, maxDemandAgeH)` at `now` (M7), an unknown game, a blocked
+  market, a no-claim offer on a claim-at-sale market (`managed`, M6), the `old`/`tracker` policy or a price below
+  `medium` confidence → today's price with confidence `none`, clamped to today's limits (the floor, the learned
+  GGSel minimum, the no-claim floor and ceiling — M8). An invalid base (not a positive number, or over $25) gets no
+  answer at all: `{price: 0, confidence: "none", basis: "invalid base"}` — never a brain price without a base.
+- `shelfFor({ game, farm, stock }, { now })` → `{ shelf: {market: units}, reserve, bulkTake, explore }` — what
+  `computeSplit` and `dealShares` decide today. A stale run, an unknown game, or a no-claim game under a cap the
+  owner set by hand (`managed`, M5) → no shelf advice: every unit in `reserve`.
+- `valueFor(gameKey, { farm, now })` → `{ value, shares, nets, basis }`: expected net per account under the brain's
+  placement and prices, each market weighted by the units it is expected to **sell** there, `E[min(D_m, shelf_m)]`
+  (H18), not by the units placed — for the farm brain's "value per account" later. A stale run → null.
+- Callers' answers are memoised on the run in a bounded cache (1,000 entries, oldest dropped — P20-14): a caller
+  can never grow the run's own memory.
 
 ---
 
@@ -423,21 +519,26 @@ regime, confidence and reasons.
 
 | Score | What it tests |
 |---|---|
-| **Sell-through calibration** | Every live system-made listing of either farm gets `pH` at its current ask. After the horizon: Brier score and a reliability table (10 bins of `pH`), per farm, against the baseline "every listing on this market sells at the market's base rate" (`1 − exp(−H·h_m)`). Skill = 1 − Brier ÷ baseline Brier. The model must beat the baseline before anything it says is trusted |
-| **Discrimination** | Realised sell rate within the horizon of rows the brain called `lower`, `hold`, `raise`, `test` |
-| **Placement forecast** | Units sold per game × market next week: RMSE and bias per placement policy. A cell-week is scored when it sold or any policy forecast a sale; a policy with no number on an admitted row is missing, never 0, and is ranked only on the same rows |
+| **Sell-through calibration** | Every live system-made listing of either farm gets `pH` at its current ask. After the horizon: Brier score and a reliability table (10 bins of `pH`), per farm, against the baseline "every listing on this market sells at the market's base rate" (`1 − exp(−H·h_m)`, logged with each forecast as `pb` — the base rate at forecast time; a forecast logged before `pb` existed is judged against a fit made at its own sample's moment, never at another sample's). Skill = 1 − Brier ÷ baseline Brier. The model must beat the baseline before anything it says is trusted |
+| **Discrimination** | Realised sell rate within the horizon of rows the brain called `lower`, `hold`, `raise`, `test` (an unknown game's hold is an abstention and a ladder is never corrected: both counted apart; ZeusX records no sale and is left out) |
+| **Placement** | Each placement policy's weekly **demand split** for a market (`pd`: its forecast rate there, not capped by any shelf) against the units system-made rows sold there that week: RMSE, MAE and bias per policy. A cell-week is scored only when the market was **in stock ≥ 6 of its 7 days** (the farm brain's in-stock rule — the union of the cell's system-made rows' exposure spans, by §4.1's rules): a week out of stock says nothing about demand. Of those, it is scored when it sold or any policy expected a sale; a policy with no number on an admitted week is missing, never 0, and is ranked only on the same weeks. The shelf forecasts (`pf`, E[min(D, shelf)]) stay in the log as context only: the sales came from the shelf that was really listed, so scoring a policy's shelf against them would reward whichever policy resembles today's shelf |
 | **Agreement analysis** | Realised net per listing-day for rows priced within 10 % of each price policy versus rows further away, by market. **Correlation, labelled so** |
-| **Sold or expired** (no-claim) | For no-claim units live at the forecast: the share the brain expected to sell before expiry against the share that did; Brier per unit |
-| **Decision review** | Last week's largest price and shelf disagreements, with what sold next |
+| **Sold or expired** (no-claim) | For no-claim units live at the forecast: the share the brain expected to sell before expiry against the share that did; Brier per unit. Units of one wave on one market are one queue (a Gameflip chain shows one unit at a time, a pool sells oldest first): of k units with d days to expiry, E[min(Poisson(Σ h_row · d), k)] are expected to sell, each live row's hazard read back from its logged forecast (`h = −ln(1 − pH) ÷ H`) |
+| **Decision review** | Last week's largest price and shelf disagreements (dollars at stake: price gap × units listed + shelf gap × the unit price), with what sold next |
 
-- **Backtest from day one**: for each of the last 6 weeks, fit on what came before the cut (exposure truncated at
-  the cut, sales before it, reference prices from orders before it), forecast the week, score it.
-- **Forward**: the first run of each UTC day logs its per-listing forecasts (capped, `fcCap`); each is scored once
-  its horizon has passed (claim 7 days, no-claim 2). Ranked on the same rows only; a policy missing on any admitted
-  row reads "not enough history yet".
-- **What test mode cannot show**: whether a *different* price would have sold. Every comparison above is between
-  what the brain would have said and what happened at the price that was actually asked. That needs live price
-  experiments — a later round.
+- **Backtest from day one**: for each of the last 6 weeks, the model's own run on the bundle as it stood at the cut
+  (exposure truncated at the cut, sales before it, reference prices from orders before it, demand synthesised from
+  our own 45-day average), scored against the bundle's later sales. A replay cannot know the farm brain's stock at
+  the cut (a replayed regime comes from skip, fading or perishing, never from cover), and still reads some fields as
+  of today: a listing's price, ask, learned floor and quantity counters, the radar's game rows, a no-claim unit's
+  bundle key and listing ids; today's old-side numbers stand in for the old side. The output lists these limits.
+- **Forward**: the first run of each UTC day logs its per-listing forecasts (capped, `fcCap`) with their base rates;
+  each is scored once its horizon has passed (claim 7 days, no-claim 2). Ranked on the same rows only; a policy
+  missing on any admitted row reads "not enough history yet". The scorer runs asynchronously (`forwardScoresAsync`,
+  `backtestAsync`), yielding on a time budget: no synchronous stretch over 200 ms on Node 20 at production volume.
+- **What test mode cannot show**: whether a *different* price would have sold, or whether a *different shelf* would
+  have sold more. Every comparison above is between what the brain would have said and what happened at the price
+  that was actually asked, from the shelf that was actually listed. That needs live experiments — a later round.
 
 ---
 

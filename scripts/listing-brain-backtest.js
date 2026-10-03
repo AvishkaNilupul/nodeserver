@@ -29,7 +29,7 @@ const HEADERS = {
   calibration: "SELL-THROUGH CALIBRATION",
   reliability: "RELIABILITY",
   discrimination: "DISCRIMINATION",
-  placement: "PLACEMENT FORECAST",
+  placement: "PLACEMENT FORECAST (each policy's weekly demand split, in-stock weeks)",
   agreement: "AGREEMENT ANALYSIS (correlation, not cause)",
   soldOrExpired: "SOLD OR EXPIRED (no-claim)",
   notes: "NOTES",
@@ -142,7 +142,8 @@ function formatWeeks(bt) {
   const c = bt.counts || {};
   out.push(
     "forecasts " + int(c.forecasts) + ": scored " + int(c.scored) + ", horizon not over " + int(c.waiting) + ", listing missing from the bundle " + int(c.missing) +
-      ", on ZeusX (records no sale) " + int(c.unmeasured) + "; without a sell chance (market never fitted) " + int(c.noP),
+      ", on ZeusX (records no sale) " + int(c.unmeasured) + "; without a sell chance (market never fitted) " + int(c.noP) +
+      (c.basePerSample ? "; " + int(c.basePerSample) + " judged against a fit at their own moment (logged without their base rate)" : ""),
   );
   return out.join("\n");
 }
@@ -186,12 +187,13 @@ function formatDiscrimination(dis) {
   return out.join("\n");
 }
 
-function formatPlacement(pl) {
+function formatPlacement(pl, note) {
   const out = [section(HEADERS.placement)];
-  out.push("Units sold per game × market in the next 7 days by system-made rows, against each placement policy's forecast. A cell-week is scored when it sold or any policy forecast a sale; a policy with no number on a scored cell-week is missing there (never 0) and is not ranked; the best is picked by RMSE among policies scored on the very same cell-weeks.");
+  out.push(note || model.PLACEMENT_NOTE);
+  out.push("A cell-week is scored when it sold or any policy expected a sale; a policy with no number on a scored cell-week is missing there (never 0) and is not ranked; the best is picked by RMSE among policies scored on the very same cell-weeks.");
   for (const f of FARMS) {
     const x = (pl && pl[f]) || {};
-    out.push("\n" + FARM_LABEL[f] + ": " + int(x.rows) + " cell-weeks scored, " + int(x.units) + " units sold there");
+    out.push("\n" + FARM_LABEL[f] + ": " + int(x.rows) + " in-stock cell-weeks scored, " + int(x.units) + " units sold there");
     const partial = new Set(x.partial || []);
     out.push(
       table(
@@ -204,7 +206,8 @@ function formatPlacement(pl) {
       ),
     );
     const notes = [];
-    if (x.unforecast && x.unforecast.units) notes.push(int(x.unforecast.units) + " units on " + int(x.unforecast.cells) + " cells no policy forecast (an abstention or a managed cell)");
+    if (x.outOfStock && x.outOfStock.cells) notes.push(int(x.outOfStock.cells) + " cell-weeks out of stock more than a day (" + int(x.outOfStock.units) + " units)");
+    if (x.unforecast && x.unforecast.units) notes.push(int(x.unforecast.units) + " units on " + int(x.unforecast.cells) + " cells no policy split demand for (an abstention or a managed cell)");
     if (x.unmeasured && x.unmeasured.cells) notes.push(int(x.unmeasured.cells) + " ZeusX cell-weeks not scored (ZeusX records no sale for an auto row)");
     if (x.outside) notes.push(int(x.outside) + " units on cells first listed after the forecast");
     if (notes.length) out.push("not scored: " + notes.join("; ") + ".");
@@ -259,7 +262,7 @@ function formatNotes(bt) {
 
 /** Every score table of one backtest (or forward) result. */
 function formatBacktest(bt) {
-  return [formatWeeks(bt), formatCalibration(bt.calibration), formatDiscrimination(bt.discrimination), formatPlacement(bt.placement), formatAgreement(bt.agreement, bt.agreementNote), formatSoldOrExpired(bt.soldOrExpired), formatNotes(bt)].join("\n");
+  return [formatWeeks(bt), formatCalibration(bt.calibration), formatDiscrimination(bt.discrimination), formatPlacement(bt.placement, bt.placementNote), formatAgreement(bt.agreement, bt.agreementNote), formatSoldOrExpired(bt.soldOrExpired), formatNotes(bt)].join("\n");
 }
 
 /** The whole report. */

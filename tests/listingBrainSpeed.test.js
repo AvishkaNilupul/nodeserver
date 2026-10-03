@@ -18,7 +18,11 @@ const M = require("../utils/listingBrain/model");
 const FX = require("../scripts/listing-brain-fixture");
 
 const MB = 1e6;
-const TTL_DAYS = 21;
+// Production volume, measured by the review's synthetic production world (scratchpad review/prodgen.js through
+// the real loader: 20,000 listings, 32,318 sales, 100,000 no-claim units): one run logs ~1,462 cell rows and its
+// daily document carries the fcCap (5,000) forecasts. The log is projected to that scale from the bytes a row
+// and a forecast take here (P20-12); the assertion is on the large fixture's own scale.
+const PROD_ROWS_PER_RUN = 1462;
 
 let cache = null;
 function large() {
@@ -84,7 +88,7 @@ test("speed: buildRunAsync never holds the event loop for 200 ms", async (t) => 
   assert.ok(worst < 200, "longest synchronous stretch " + worst.toFixed(0) + " ms");
 });
 
-test("log size: one run, the daily forecasts at fcCap, and the steady state under the TTLs stay under 60 MB", (t) => {
+test("log size: one run, the daily forecasts at fcCap, and the steady state under the TTLs stay under 60 MB (intraday rows 3 days)", (t) => {
   // bson ships with the mongodb driver (a production dependency); the log models cast exactly as on insert
   const { calculateObjectSize } = require("bson");
   const mongoose = require("mongoose");
@@ -95,7 +99,7 @@ test("log size: one run, the daily forecasts at fcCap, and the steady state unde
   const KEEP_DAILY = runner.ROW_KEEP_DAYS_DAILY;
   const KEEP_OTHER = runner.ROW_KEEP_DAYS_OTHER;
   const RUN_DAYS = Run.TTL_DAYS;
-  assert.deepEqual([KEEP_DAILY, KEEP_OTHER, RUN_DAYS], [21, 7, 21], "daily rows 21 d, other runs' rows 7 d, run documents 21 d");
+  assert.deepEqual([KEEP_DAILY, KEEP_OTHER, RUN_DAYS], [21, 3, 21], "daily rows 21 d, other runs' rows 3 d (P20-12), run documents 21 d");
   const { bundle } = large();
   const run = M.buildRun(bundle);
   const cfg = run.ctx.cfg;
@@ -144,6 +148,17 @@ test("log size: one run, the daily forecasts at fcCap, and the steady state unde
   say(t, `listing-brain log: ${run.rows.length} rows per run, ${kb(otherRows)} (${(otherRows / run.rows.length).toFixed(0)} B a row compacted; ${(fullRows / run.rows.length).toFixed(0)} B uncompacted) + run document ${kb(runBytes)} = ${kb(otherRows + runBytes)} per run`);
   say(t, `listing-brain log: daily document with fcCap ${cap} forecasts ${kb(dailyBytes)} (${((dailyBytes - runBytes) / Math.max(1, fc.length)).toFixed(0)} B a forecast; this fixture's ${run.fc.length} forecasts: ${kb(fixtureDaily)})`);
   say(t, `listing-brain log: steady state at ${runsPerDay} runs/day (every ${cfg.intervalMin} min): daily rows ${KEEP_DAILY} d ${mb(parts.dailyRows)} + other runs' rows ${KEEP_OTHER} d ${mb(parts.otherRows)} + run documents ${RUN_DAYS} d ${mb(parts.runDocs)} + daily forecasts ${RUN_DAYS} d ${mb(parts.forecasts)} = ${mb(total)} (limit 60 MB; indexes not counted)`);
+  // the same arithmetic at production volume: its row count, this fixture's bytes per row and per forecast
+  const perRow = (s0) => s0 / run.rows.length;
+  const prod = {
+    dailyRows: KEEP_DAILY * PROD_ROWS_PER_RUN * perRow(dailyRows),
+    otherRows: KEEP_OTHER * (runsPerDay - 1) * PROD_ROWS_PER_RUN * perRow(otherRows),
+    runDocs: parts.runDocs,
+    forecasts: parts.forecasts,
+  };
+  const prodTotal = prod.dailyRows + prod.otherRows + prod.runDocs + prod.forecasts;
+  const prod7 = prodTotal - prod.otherRows + (7 / KEEP_OTHER) * prod.otherRows;
+  say(t, `listing-brain log at production volume (${PROD_ROWS_PER_RUN} rows a run, projected): daily rows ${mb(prod.dailyRows)} + other runs' rows ${KEEP_OTHER} d ${mb(prod.otherRows)} + run documents ${mb(prod.runDocs)} + daily forecasts ${mb(prod.forecasts)} = ${mb(prodTotal)} (with intraday rows kept 7 days it was ${mb(prod7)})`);
   assert.equal(runsPerDay, 8, "the default interval is 180 minutes");
   assert.ok(fc.length === cap, "the daily document is measured full");
   assert.ok(dailyBytes < 16 * 1024 * 1024, "the daily document fits MongoDB's 16 MB document limit");

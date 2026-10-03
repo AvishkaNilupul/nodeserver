@@ -2,6 +2,7 @@
 // timeout, the log (one run document and its rows — nothing else), failure isolation, the daily
 // per-listing forecasts, the cool-down memory, the heartbeat, the scheduler and the three answers.
 // Everything is injected (loader, models, settings, clock): no Mongo, no network.
+/* global setInterval, clearInterval */
 const test = require("node:test");
 const assert = require("node:assert/strict");
 
@@ -21,6 +22,10 @@ function afWith(brain) {
 function fakeModels({ failRows = false, failRun = false, seenDay = null } = {}) {
   const runs = [];
   const rows = [];
+  // every write and every findOne filter, in order (the write order and the day query are rules)
+  const writes = [];
+  const filters = [];
+  let ids = 0;
   const chain = (value) => {
     const q = {
       sort: () => q,
@@ -32,16 +37,27 @@ function fakeModels({ failRows = false, failRun = false, seenDay = null } = {}) 
   return {
     runs,
     rows,
+    writes,
+    filters,
+    newId: () => "run" + ++ids,
     Run: () => ({
       create: async (doc) => {
+        writes.push({ what: "run", _id: doc._id });
         if (failRun) throw new Error("run write refused");
-        const saved = { ...JSON.parse(JSON.stringify(doc)), _id: "run" + (runs.length + 1) };
+        const saved = { ...JSON.parse(JSON.stringify(doc)), _id: doc._id || "run" + (runs.length + 1) };
         runs.push(saved);
         return saved;
       },
       findOne: (filter) =>
         chain(() => {
-          if (filter && filter.day) return seenDay === filter.day ? { _id: "old" } : runs.find((r) => r.day === filter.day && r.fcN > 0) || null;
+          filters.push(filter);
+          // firstOfDay: the day's time range on `at` (an index), never the unindexed `day` field
+          if (filter && filter.at && filter.at.$lt) {
+            const from = new Date(filter.at.$gte).getTime();
+            const to = new Date(filter.at.$lt).getTime();
+            if (seenDay && Date.parse(seenDay + "T00:00:00Z") === from) return { _id: "old" };
+            return runs.find((r) => new Date(r.at).getTime() >= from && new Date(r.at).getTime() < to && r.fcN > 0) || null;
+          }
           if (filter && filter._id) return runs.find((r) => r._id === filter._id) || null;
           const withFc = runs.filter((r) => r.fcN > 0);
           return withFc.length ? withFc[withFc.length - 1] : runs[runs.length - 1] || null;
@@ -49,7 +65,8 @@ function fakeModels({ failRows = false, failRun = false, seenDay = null } = {}) 
       find: () => chain(() => runs.filter((r) => r.fcN > 0).map((r) => ({ _id: r._id, at: r.at, day: r.day }))),
     }),
     Row: () => ({
-      insertMany: async (list) => {
+      insertMany: async (list, opts) => {
+        writes.push({ what: "rows", n: list.length, opts });
         if (failRows) throw new Error("rows write refused");
         rows.push(...list);
         return list;
@@ -69,6 +86,7 @@ function setup({ enabled = true, models = fakeModels(), load = null, now = NOW, 
     load: load || (async () => generate({ seed: 1, now: t })),
     Run: models.Run,
     Row: models.Row,
+    newId: models.newId,
     log: (...a) => logs.push(a.join(" ")),
     logErr: (...a) => errs.push(a.join(" ")),
     now: () => t,
@@ -180,13 +198,201 @@ test("a failed row insert is reported as NOT LOGGED, never thrown; the run is st
   assert.ok(mem.rows.length > 0);
 });
 
-test("a failed run-document write is reported the same way", async () => {
+test("a failed run-document write is reported the same way (its rows, written first, expire with their TTL)", async () => {
   const models = fakeModels({ failRun: true });
   setup({ models });
   const r = await B.runOnce();
   assert.equal(r.ok, true);
   assert.equal(r.persisted, false);
-  assert.equal(models.rows.length, 0);
+  assert.equal(models.runs.length, 0, "no run document: the day does not count as sampled");
+  assert.ok(models.rows.length > 0 && models.rows.every((row) => row.exp instanceof Date));
+  assert.match(B.status().lastError, /log write failed/);
+});
+
+/* ------------------------- review batch 2: the runner's fixes ------------------------- */
+
+test("P20-13 rows first, then the run document under the id they point to; a failed row insert leaves no run document", async () => {
+  const { models } = setup();
+  await B.runOnce();
+  assert.deepEqual(
+    models.writes.map((w) => w.what),
+    ["rows", "run"],
+    "the run document — what marks a day as sampled — is written last",
+  );
+  assert.equal(models.runs[0]._id, "run1", "the id was made before any write");
+  assert.ok(models.rows.every((row) => row.run === "run1"));
+  // a failed row insert: no run document at all, so firstOfDay and dailySamples never see a half-written sample
+  const failing = fakeModels({ failRows: true });
+  setup({ models: failing });
+  const r = await B.runOnce();
+  assert.equal(r.persisted, false);
+  assert.deepEqual(
+    failing.writes.map((w) => w.what),
+    ["rows"],
+  );
+  assert.equal(failing.runs.length, 0);
+  assert.notEqual(B._state.fcDay, new Date(NOW).toISOString().slice(0, 10), "the day is not marked as sampled");
+});
+
+test("P20-14 rows are inserted lean and unordered (already typed: no per-document casting)", async () => {
+  const { models } = setup();
+  await B.runOnce();
+  const w = models.writes.find((x) => x.what === "rows");
+  assert.deepEqual(w.opts, { ordered: false, lean: true });
+  for (const row of models.rows) {
+    assert.ok(row.at instanceof Date && row.exp instanceof Date, "dates are Dates, not strings to cast");
+    assert.equal(typeof row.run, "string", "the pre-made id (an ObjectId in production)");
+  }
+});
+
+test("P20-14 the default id is a real ObjectId, made lazily (a lean insert casts nothing; requiring the runner loads no mongoose)", () => {
+  const src = require("fs").readFileSync(require("path").join(__dirname, "..", "utils", "listingBrain", "index.js"), "utf8");
+  assert.match(src, /newId: \(\) => new \(require\("mongoose"\)\.Types\.ObjectId\)\(\)/, "the default hook");
+  const mongoose = require("mongoose");
+  assert.ok(mongoose.isValidObjectId(new mongoose.Types.ObjectId()));
+});
+
+test("P20-11 the restart check reads the day's runs by their `at` range (indexed), never by the unindexed `day`", async () => {
+  const day = new Date(NOW).toISOString().slice(0, 10);
+  const models = fakeModels({ seenDay: day });
+  setup({ models });
+  await B.runOnce();
+  assert.equal(models.runs[0].fcN, 0, "a sample already logged today: no second one");
+  const f = models.filters.find((x) => x && x.at && x.at.$lt);
+  assert.ok(f, "the day's range was queried");
+  assert.equal(f.day, undefined);
+  assert.equal(new Date(f.at.$gte).getTime(), Date.parse(day + "T00:00:00Z"));
+  assert.equal(new Date(f.at.$lt).getTime(), Date.parse(day + "T00:00:00Z") + DAY);
+  assert.deepEqual(f.fcN, { $gt: 0 });
+  // a run logged earlier the same UTC day (a restart without the in-memory flag) is found by its `at`
+  const again = fakeModels();
+  setup({ models: again });
+  await B.runOnce();
+  B._state.fcDay = "";
+  B._setHooks({ now: () => NOW + 2 * 3600000 });
+  await B.runOnce();
+  assert.ok(again.runs[0].fcN > 0);
+  assert.equal(again.runs[1].fcN, 0, "found by its at, so no second daily sample");
+});
+
+test("M7 a tick that reads the switch off drops the newest run and its evidence: the three answers abstain", async () => {
+  const { logs } = setup();
+  await B.runOnce();
+  assert.ok(B._state.run && B._state.bundle);
+  const q = { marketplace: "gameflip", basePriceUsd: 1.25, game: "Alpha Quest" };
+  B._setHooks({ settings: () => afWith({ enabled: false }) });
+  await B._tick();
+  B.stop();
+  assert.equal(B._state.run, null);
+  assert.equal(B._state.bundle, null);
+  assert.ok(B._state.latest, "the page still shows the newest run, with its age");
+  const p = B.priceFor(q);
+  assert.equal(p.confidence, "none");
+  assert.equal(p.price, 1.25);
+  assert.deepEqual(B.shelfFor({ game: "alpha quest", farm: "claim", stock: 4 }).shelf, {});
+  assert.equal(B.valueFor("alpha quest").value, null);
+  assert.ok(logs.some((l) => /off —/.test(l)));
+});
+
+test("M7 the three answers are asked with the runner's clock (`now`), so the model can abstain from a stale run", () => {
+  B._reset();
+  const seen = [];
+  const keep = { p: M.priceForRun, s: M.shelfForRun, v: M.valueForRun };
+  M.priceForRun = (run, q, o) => (seen.push(["price", o]), { price: 1, confidence: "none" });
+  M.shelfForRun = (run, q, o) => (seen.push(["shelf", o]), { shelf: {} });
+  M.valueForRun = (run, g, o) => (seen.push(["value", o]), { value: null });
+  try {
+    B._setHooks({ now: () => NOW + 5 * DAY });
+    B.priceFor({ marketplace: "gameflip", basePriceUsd: 1 });
+    B.shelfFor({ game: "g", stock: 1 });
+    B.valueFor("g");
+  } finally {
+    Object.assign(M, { priceForRun: keep.p, shelfForRun: keep.s, valueForRun: keep.v });
+  }
+  assert.deepEqual(
+    seen.map(([w, o]) => [w, o && o.now]),
+    [
+      ["price", NOW + 5 * DAY],
+      ["shelf", NOW + 5 * DAY],
+      ["value", NOW + 5 * DAY],
+    ],
+  );
+});
+
+test("C5 accuracy with the brain off and no evidence reads nothing: 'no run yet'", async () => {
+  const models = fakeModels();
+  let loads = 0;
+  let reads = 0;
+  B._reset();
+  B._setHooks({
+    settings: () => afWith({ enabled: false }),
+    load: async () => (loads++, generate({ seed: 1, now: NOW })),
+    Run: () => ({ ...models.Run(), find: (...a) => (reads++, models.Run().find(...a)), findOne: (...a) => (reads++, models.Run().findOne(...a)) }),
+    Row: models.Row,
+    log: () => {},
+    logErr: () => {},
+    now: () => NOW,
+  });
+  const a = await B.accuracy({ force: true });
+  assert.equal(a.empty, true);
+  assert.match(a.reason, /No run yet/);
+  assert.equal(loads, 0, "no load");
+  assert.equal(reads, 0, "no log read");
+  assert.equal(B._state.bundle, null);
+});
+
+test("C5 accuracy never starts a load beside a run's: while a run is loading it answers 'loading'", async () => {
+  let release;
+  const gate = new Promise((r) => (release = r));
+  let loads = 0;
+  setup({ load: async () => (loads++, await gate, generate({ seed: 1, now: NOW })) });
+  const run = B.runOnce();
+  const a = await B.accuracy({ force: true });
+  assert.equal(a.empty, true);
+  assert.match(a.reason, /loading/);
+  assert.equal(loads, 1, "only the run's load");
+  release();
+  assert.equal((await run).ok, true);
+});
+
+test("C5 accuracy's own load goes through the run's guard and timeout: a run waits for it, a hung load cannot wedge it", async () => {
+  // a slow load: while the scorer loads, a run is skipped (one load at a time)
+  let release;
+  const gate = new Promise((r) => (release = r));
+  setup({ load: async () => (await gate, generate({ seed: 1, now: NOW })) });
+  const acc = B.accuracy({ force: true });
+  await new Promise((r) => setImmediate(r));
+  assert.deepEqual(await B.runOnce(), { skipped: "already running" });
+  release();
+  const a = await acc;
+  assert.ok(a.backtest && a.forward, "scored once its load landed");
+  assert.ok(B._state.bundle, "and the bundle is kept for the next call");
+  // a hung load: the answer comes back after the run timeout, with the reason; nothing is left inflight
+  setup({ load: () => new Promise(() => {}) });
+  B._setHooks({ runTimeoutMs: 30 });
+  const keepAlive = setInterval(() => {}, 1000);
+  try {
+    const h = await B.accuracy({ force: true });
+    assert.equal(h.empty, true);
+    assert.match(h.reason, /could not be read: inputs took longer/);
+    assert.equal(B._state.accuracyInflight, null);
+    const again = await B.accuracy({ force: true });
+    assert.match(again.reason, /loading/, "the hung load still holds the guard: no second load is started");
+  } finally {
+    clearInterval(keepAlive);
+  }
+});
+
+test("C5 accuracy reuses the newest run's bundle whatever its age, and says how old it is", async () => {
+  let loads = 0;
+  const { setNow } = setup({ load: async () => (loads++, generate({ seed: 1, now: NOW })) });
+  await B.runOnce({ persist: false });
+  assert.equal(loads, 1);
+  setNow(NOW + 3 * DAY);
+  const a = await B.accuracy({ force: true });
+  assert.equal(loads, 1, "no reload: the bundle in memory is used");
+  assert.equal(new Date(a.evidenceAt).getTime(), NOW);
+  assert.equal(a.evidenceAgeH, 72);
 });
 
 test("persist: false computes and keeps the run in memory but writes nothing", async () => {
@@ -346,7 +552,7 @@ test("rows are written sparse: no reasons, no nulls/false/empties, zero action c
   assert.deepEqual(B.expand({ k: "x", f: "claim", m: "all" }).br, {});
 });
 
-test("rows of the day's first run are kept 21 days; every other run's rows 7 days", async () => {
+test("rows of the day's first run are kept 21 days; every other run's rows 3 days (P20-12)", async () => {
   const { models, setNow } = setup();
   await B.runOnce();
   setNow(NOW + 3 * 3600000);
@@ -356,6 +562,7 @@ test("rows of the day's first run are kept 21 days; every other run's rows 7 day
   assert.ok(first.length && second.length);
   assert.ok(first.every((r) => r.exp.getTime() === NOW + B.ROW_KEEP_DAYS_DAILY * DAY));
   assert.ok(second.every((r) => r.exp.getTime() === NOW + 3 * 3600000 + B.ROW_KEEP_DAYS_OTHER * DAY));
+  assert.deepEqual([B.ROW_KEEP_DAYS_DAILY, B.ROW_KEEP_DAYS_OTHER], [21, 3]);
 });
 
 test("the row schema keeps a sparse row sparse (no defaults filled back in) and keeps every field the runner writes", () => {

@@ -1,7 +1,10 @@
 // The listing brain's shared constants and small pure helpers (docs/LISTING-BRAIN-PLAN.md).
 //
 // PURE: no database, no network, no settings, no clock. The one timer here is yieldNow(), used only
-// by the async wrappers so a run never holds the event loop; nothing in a computation reads it.
+// by the async wrappers so a run never holds the event loop; nothing in a computation reads it. The one
+// clock is makeYielder's performance.now(): it decides only WHEN the async wrappers let the loop
+// breathe, never what is computed (the sync and async runs give identical output).
+const { performance } = require("node:perf_hooks");
 const stats = require("../../priceTracker/stats");
 const venues = require("../../priceTracker/venues");
 
@@ -295,6 +298,26 @@ const feeInfo = (m, fees) => venues.feeFor(m, fees);
 /** A Promise that resolves on the next turn of the event loop (async wrappers only). */
 const yieldNow = () => new Promise((resolve) => setImmediate(resolve));
 
+/**
+ * A time-budget yielder for the async wrappers: `due()` is true once `ms` have passed since the last
+ * yield; `maybe()` yields then (a Promise) and returns null otherwise, so a hot loop pays one clock read
+ * per check and an await only when due. Production runs Node 20, where the same loop can be many times
+ * slower than on a developer's Node 22: a fixed chunk size cannot hold a ~200 ms bound on both. Output
+ * never depends on it.
+ */
+function makeYielder(ms = 40) {
+  let last = performance.now();
+  const y = {
+    due: () => performance.now() - last >= ms,
+    async now() {
+      await yieldNow();
+      last = performance.now();
+    },
+    maybe: () => (performance.now() - last >= ms ? y.now() : null),
+  };
+  return y;
+}
+
 const cellKey = (g, f, m) => g + "|" + f + "|" + m;
 /** "game key|farm|market" → { g, f, m }; the game key itself never holds a "|" (setIdentity.normGame). */
 function parseCellKey(s) {
@@ -370,6 +393,7 @@ module.exports = {
   netOf,
   feeInfo,
   yieldNow,
+  makeYielder,
   cellKey,
   parseCellKey,
   shortWhy,

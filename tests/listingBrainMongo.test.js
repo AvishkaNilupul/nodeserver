@@ -56,7 +56,7 @@ test("indexes: a cell's history, a run's rows, and both TTLs", async () => {
   const ttl = rowIdx.find((i) => JSON.stringify(i.key) === JSON.stringify({ at: 1 }));
   assert.equal(ttl.expireAfterSeconds, 21 * 86400);
   const exp = rowIdx.find((i) => JSON.stringify(i.key) === JSON.stringify({ exp: 1 }));
-  assert.equal(exp.expireAfterSeconds, 0, "per-row expiry: 21 days for daily samples, 7 for the rest");
+  assert.equal(exp.expireAfterSeconds, 0, "per-row expiry: 21 days for daily samples, 3 for the rest");
   const runIdx = await ListingBrainRun.collection.indexes();
   const runTtl = runIdx.find((i) => JSON.stringify(i.key) === JSON.stringify({ at: 1 }));
   assert.equal(runTtl.expireAfterSeconds, 21 * 86400);
@@ -70,6 +70,11 @@ test("one run writes one run document and one row per cell; a restart reads it b
   const run = await ListingBrainRun.findOne({}).lean();
   assert.equal(await ListingBrainRow.countDocuments({ run: run._id }), run.rowsN);
   assert.ok(run.fcN > 0, "the first run of the day carries its forecasts");
+  // rows go in lean (uncast): their run id, at and exp must already be real ObjectId and Date values
+  const one = await ListingBrainRow.findOne({ run: run._id }).lean();
+  assert.ok(one.run instanceof mongoose.Types.ObjectId, "run is an ObjectId");
+  assert.ok(one.at instanceof Date && one.exp instanceof Date);
+  assert.ok(one.pd === undefined || typeof one.pd === "object", "the policies' demand split is kept");
   // A restart: memory is gone, the log is not.
   B._reset();
   B._setHooks({ settings: () => ({ getAutoFarm: () => ({}) }) });
@@ -91,6 +96,21 @@ test("cellHistory is an indexed read of one cell, newest first", async () => {
   assert.ok(new Date(hist[0].at) > new Date(hist[1].at));
   const plan = await ListingBrainRow.find({ k: row.k, f: row.f, m: row.m }).sort({ at: -1 }).limit(10).explain("queryPlanner");
   assert.match(JSON.stringify(plan), /IXSCAN/);
+});
+
+test("the restart check finds the day's sample by an indexed range on at (P20-11)", async () => {
+  arm(NOW);
+  await B.runOnce();
+  const start = new Date(Date.UTC(2026, 9, 3));
+  const plan = await ListingBrainRun.find({ at: { $gte: start, $lt: new Date(start.getTime() + DAY) }, fcN: { $gt: 0 } }, { _id: 1 })
+    .limit(1)
+    .explain("queryPlanner");
+  assert.match(JSON.stringify(plan), /IXSCAN/);
+  // a restart the same day writes no second daily sample
+  B._reset();
+  arm(NOW + 3600000);
+  await B.runOnce();
+  assert.equal(await ListingBrainRun.countDocuments({ fcN: { $gt: 0 } }), 1);
 });
 
 test("dailySamples returns the first run of each UTC day that carries forecasts", async () => {

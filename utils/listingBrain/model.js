@@ -15,6 +15,7 @@
 // live-row actions), place (eligibility, shares, greedy shelf, policies). This file runs them in
 // phases — evidence → fit → cells → placement → summary — and lays out the log rows.
 const { identify, normGame, sizeBand } = require("../priceTracker/setIdentity");
+const packPricing = require("../bulkPacks/pricing");
 const U = require("./model/util");
 const E = require("./model/evidence");
 const RF = require("./model/ref");
@@ -27,8 +28,12 @@ const { MARKETS, CONF_RANK, num, round2, round3, lower } = U;
 const MODEL_VERSION = 1;
 // A run's cells are capped (150 games × 2 farms × 7 markets is 2,100); past this the run says so.
 const MAX_CELLS = 4000;
-// Game × farm groups priced between two yields in buildRunAsync (each group is well under 1 ms).
-const CHUNK = 40;
+// Milliseconds of work between two yields of buildRunAsync (P20-4: a fixed number of games per chunk
+// held ~200 ms on Node 22 and ~350 ms on Node 20; a time budget holds on both).
+const YIELD_MS = 40;
+// What priceFor / shelfFor may add to a run's memo for callers' own questions (P20-14): least recently
+// used first out, the run's own entries never touched.
+const CALLER_MEMO_MAX = 1000;
 const DEFAULTS = U.DEFAULTS;
 const PRICE_CLASSES = ["agree", "brain-lower", "brain-higher", "no-evidence", "managed", "ladder"];
 const SHELF_CLASSES = ["agree", "brain-more", "brain-fewer", "brain-add", "brain-drop", "closed", "unknown", "unmeasured", "managed"];
@@ -86,20 +91,32 @@ function newBase(bundle, g, f, m, id) {
   return null;
 }
 
-/** The tracker's suggestForNew price for the offer (either shape the loader may hand over). */
-function trackerPrice(bundle, m, id) {
+/**
+ * The tracker's suggestForNew answer for the offer (either shape the loader may hand over):
+ * { price, basis, conf } — its engine fallback reads basis "none" (it never raises a price).
+ */
+function trackerOf(bundle, m, id) {
   const offers = (bundle.old && bundle.old.offers) || {};
   const oo = (id && id.rawCk && offers[m + "|" + id.rawCk]) || (id && id.bk && offers[m + "|" + id.bk]) || null;
   const t = oo && oo.tracker;
   if (!t) return null;
-  const p = t.price !== undefined ? t.price : t[m] && t[m].price;
-  return num(p) > 0 ? round2(p) : null;
+  const x = t.price !== undefined ? t : t[m] || {};
+  if (!(num(x.price) > 0)) return null;
+  const b = String(x.basis || "");
+  const conf = ["high", "medium", "low", "none"].includes(x.confidence) ? x.confidence : "none";
+  return { price: round2(x.price), basis: !b || /^engine/i.test(b) ? "none" : "tracker", conf };
 }
 
-/** Pack prices per account a single price would produce: the tier discounts of getBulkPacks(). */
-function packPrices(bundle, p) {
-  const tiers = (bundle.bulk && Array.isArray(bundle.bulk.tiers) ? bundle.bulk.tiers : []).filter((t) => t && num(t.size) > 1);
-  return tiers.map((t) => ({ size: num(t.size), pa: round2(p * (1 - U.clamp(num(t.discountPct, 0), 0, 100) / 100)) }));
+/**
+ * The pack prices a single price would anchor (brief §3a c): bulkPacks/pricing.tierQuote — the pack
+ * maths itself (per-listing market floor, Gameflip's quarter grid, the 60 % discount cap), never a
+ * copy (C8). Tiers are getBulkPacks()' {minQty, discountPct} (an older {size} reads as minQty).
+ */
+function packPrices(bundle, m, p) {
+  const tiers = (bundle.bulk && Array.isArray(bundle.bulk.tiers) ? bundle.bulk.tiers : [])
+    .filter((t) => t && typeof t === "object")
+    .map((t) => ({ minQty: t.minQty !== undefined && t.minQty !== null ? t.minQty : t.size, discountPct: t.discountPct }));
+  return packPricing.tierQuote({ anchor: p, market: m, tiers }).filter((q) => q.packPrice > 0);
 }
 
 /** Identities of a game × farm's offers and the game's main one (most live system rows). */
@@ -172,16 +189,28 @@ function phaseEvidence(st) {
   st.ev = E.buildEvidence(st.bundle, { cfg: st.cfg, cut: num(st.bundle.now, 0) });
   st.notes.push(...st.ev.notes);
 }
-async function phaseEvidenceAsync(st) {
-  st.ev = await E.buildEvidenceAsync(st.bundle, { cfg: st.cfg, cut: num(st.bundle.now, 0) });
+async function phaseEvidenceAsync(st, y) {
+  st.ev = await E.buildEvidenceAsync(st.bundle, { cfg: st.cfg, cut: num(st.bundle.now, 0), yielder: y });
   st.notes.push(...st.ev.notes);
 }
 
 function phaseFit(st) {
+  fitDone(st, { claim: H.fitHazard(st.ev, "claim"), noclaim: H.fitHazard(st.ev, "noclaim") });
+}
+
+/** The same fit, yielding inside each farm's row loop on the run's budget (P20-4). */
+async function phaseFitAsync(st, y) {
+  const claim = await H.fitHazardAsync(st.ev, "claim", { yielder: y });
+  if (y.due()) await y.now();
+  const noclaim = await H.fitHazardAsync(st.ev, "noclaim", { yielder: y });
+  fitDone(st, { claim, noclaim });
+}
+
+function fitDone(st, hz) {
   const ev = st.ev;
-  st.hz = { claim: H.fitHazard(ev, "claim"), noclaim: H.fitHazard(ev, "noclaim") };
+  st.hz = hz;
   st.ctx = { ev, hz: st.hz, prior: st.prior, gameStates: ev._gs, placements: new Map(), cfg: st.cfg };
-  st.groups = ev.gameFarms.map((gf) => ({ ...gf }));
+  st.groups = ev.gameFarms.map((gf) => ({ g: gf.g, f: gf.f, gl: gf.gl }));
 }
 
 /** Price every offer of one game × farm on every market that may show a cell. */
@@ -262,7 +291,7 @@ const slimOffer = (v) => ({
   ck: v.ck,
   bk: v.bk,
   n: v.n,
-  live: v.live.map((r) => ({ id: r.id, ask: r.ask, ageDays: r.ageDays, a: r.a, p: r.p, p7a: r.p7a === null ? null : round3(r.p7a) })),
+  live: v.live.map((r) => ({ id: r.id, ask: r.ask, ageDays: r.ageDays, a: r.a, p: r.p, p7a: r.p7a === null ? null : round3(r.p7a), stale: !!r.stale })),
   p: v.p,
   raw: v.raw,
   ref: v.ref,
@@ -309,6 +338,7 @@ function placeGroup(st, grp) {
   }
   const og = bundle.old && bundle.old.games && bundle.old.games[g];
   const oldShelf = f === "claim" ? (og && og.flat ? Object.assign({}, og.flat) : null) : Object.assign({}, cur);
+  const bulkMarkets = ((bundle.bulk && bundle.bulk.markets) || []).map(lower);
   const pl = PL.placeGame(ctx, { g, f, stock: gs.on, nets, prices, elig: grp.elig, refByM: grp.refByM, cur, oldShelf });
   ctx.placements.set(g + "|" + f, pl);
 
@@ -339,7 +369,10 @@ function placeGroup(st, grp) {
     for (const v of cell.verdicts) for (const r of v.live) liveActs.push(r);
     const oldA = median(cell.liveSys.map((r) => r.ask));
     const np = main ? (main.np !== undefined ? main.np : main.base) : pr ? newBase(bundle, g, f, m, pr) : null;
-    const brP = cell.liveSys.length ? median(liveActs.map((r) => r.p)) : main ? main.p : null;
+    // The cell's brain price, like with like against today's median ask (M11): every live row counts,
+    // a row the brain leaves where it is at its own ask. A deliberate ladder gets no brain price (M13a).
+    const advised = liveActs.filter((r) => r.a !== "ladder");
+    const brP = cell.liveSys.length ? (advised.length ? median(advised.map((r) => (r.p !== null && r.p !== undefined ? r.p : r.ask))) : null) : main ? main.p : null;
     const oldP = cell.liveSys.length ? oldA : np;
     const unknown = gs.unknown;
     const pc = priceClass(oldP, unknown ? null : brP, { managed, ladder, cfg });
@@ -366,9 +399,9 @@ function placeGroup(st, grp) {
     else if (mk.off) fl.push("off");
     if (scr) fl.push("script");
     if (cell.verdicts.some((v) => v.flags.includes("setmin"))) fl.push("setmin");
-    const bulkMarkets = ((bundle.bulk && bundle.bulk.markets) || []).map(lower);
-    const bulkAnchor = bulkMarkets.includes(m) && ev.bulk.live.has(g + "|" + m);
-    if (bulkAnchor) fl.push("bulk-anchor");
+    // bulk-anchor per SET (C8): a single row's price anchors the next pack of the same set here
+    const anchorOf = (v) => bulkMarkets.includes(m) && !!v.ck && ev.bulk.liveCk.has(m + "|" + v.ck);
+    if (cell.verdicts.some(anchorOf)) fl.push("bulk-anchor");
     if (m === "gameflip" && pl.flags.includes("anchor")) fl.push("anchor");
     if (m === "ggsel" && pl.flags.includes("noRemove")) fl.push("noRemove");
     if (pl.explore === m) fl.push("explore");
@@ -383,10 +416,24 @@ function placeGroup(st, grp) {
       why.push("Live rows: " + moves.join(", ") + ".");
     }
     const pf = {};
+    const pd = {};
     for (const p of PLACE_POLICIES) {
       const pol = pl.policies[p];
       pf[p] = pol && pol.fc && pol.fc[m] !== undefined ? pol.fc[m] : null;
+      // each policy's weekly demand split for this market, uncapped (the scorer's H1 number)
+      pd[p] = pol && pol.lambda ? num(pol.lambda[m], 0) : null;
     }
+    // the other policies' prices are logged only through the same gates (M2); with no verdict there is
+    // no evidence to gate by, so only today's own price is shown, at its floor
+    const tr = main ? trackerOf(bundle, m, main.ident) : null;
+    const gp = (price, o) => (main ? P.gatePolicy(ctx, main, price, Object.assign({ live: cell.liveSys.length > 0 }, o)) : null);
+    const clearRaw = main ? RF.clearPrice(ev, g, main.n, m, cfg.minSales) : null;
+    const pol = {
+      old: oldP === null ? null : main ? gp(oldP, { basis: "old" }) : round2(Math.max(oldP, mk.floor)),
+      tracker: tr ? gp(tr.price, { basis: tr.basis, conf: tr.conf }) : null,
+      curve: unknown ? null : brP,
+      clear: clearRaw === null ? null : gp(clearRaw, { basis: "rivals", conf: "low" }),
+    };
     const tierP = main ? main.tier : gs.tier;
     const row = {
       k: g,
@@ -414,13 +461,9 @@ function placeGroup(st, grp) {
         t: tierP,
         a: acts,
       },
-      pol: {
-        old: oldP,
-        tracker: main ? trackerPrice(bundle, m, main.ident) : null,
-        curve: unknown ? null : brP,
-        clear: main ? RF.clearPrice(ev, g, main.n, m, cfg.minSales) : null,
-      },
+      pol,
       pf,
+      pd,
       ev: { o: orders, s, d: round2(d), thin: !!(main && main.thin), el: el.cls, fee: mk.feeVerified ? "verified" : "assumed", blind: !U.RADAR_MARKETS[m] },
       fl,
       why: U.shortWhy(why),
@@ -430,13 +473,29 @@ function placeGroup(st, grp) {
     for (const v of cell.verdicts) {
       const so = slimOffer(v);
       // a single listing's price anchors the next pack's (bulkPacks/pricing.pickAnchor): show the packs
-      if (bulkAnchor && so.p !== null) so.packs = packPrices(bundle, so.p);
+      if (anchorOf(v)) {
+        so.fl = so.fl.concat("bulk-anchor");
+        if (so.p !== null) so.packs = packPrices(bundle, m, so.p);
+      }
       out.offers.push(so);
       for (const r of v.live) {
         const R = ev.byId.get(r.id);
         if (!R || !R.advisable) continue;
         const x = v.ref > 0 ? R.ask / v.ref : null;
-        out.fc.push({ l: r.id, k: g, f, m, x: x === null ? null : round3(x), b: x === null ? null : U.bucketOf(x), p: r.p7a === null ? null : round3(r.p7a), a: r.a, ask: R.ask, h: round3(v.H) });
+        // pb: the market's base rate over the same days — the scorer's baseline, logged at forecast time (H8)
+        out.fc.push({
+          l: r.id,
+          k: g,
+          f,
+          m,
+          x: x === null ? null : round3(x),
+          b: x === null ? null : U.bucketOf(x),
+          p: r.p7a === null ? null : round3(r.p7a),
+          pb: r.pb === null || r.pb === undefined ? null : round3(r.pb),
+          a: r.a,
+          ask: R.ask,
+          h: round3(r.h !== undefined ? r.h : v.H),
+        });
       }
     }
   }
@@ -474,6 +533,12 @@ function placeGroup(st, grp) {
   if (f === "noclaim") {
     all.old.cap = pl.cap;
     all.old.capExplicit = pl.managed;
+  }
+  // rule 3's old side (C7): half now, half later at the post-event price — today's numbers beside the brain's
+  if (f === "claim" && og) {
+    all.old.post = num(og.post) > 0 ? round2(og.post) : null;
+    all.old.now = og.split && Number.isFinite(Number(og.split.listNow)) ? Number(og.split.listNow) : null;
+    all.old.hold = og.split && Number.isFinite(Number(og.split.holdBack)) ? Number(og.split.holdBack) : null;
   }
   return { rows: rowsOut, all, offers: out.offers, fc: out.fc };
 }
@@ -516,23 +581,30 @@ function buildRun(bundle, opts = {}) {
   return phaseSummary(st);
 }
 
-/** The same run, yielding the event loop between phases (and between chunks of games). */
+/**
+ * The same run, letting the event loop breathe on a time budget: between phases (evidence → fit →
+ * cells → placement → summary), inside the evidence, and between games whenever YIELD_MS has passed
+ * (P20-4). The output is identical to buildRun's.
+ */
 async function buildRunAsync(bundle, opts = {}) {
   const st = startRun(bundle, opts);
-  await U.yieldNow();
-  await phaseEvidenceAsync(st);
-  await U.yieldNow();
-  phaseFit(st);
-  for (let i = 0; i < st.groups.length; i += CHUNK) {
-    await U.yieldNow();
-    phaseCells(st, i, i + CHUNK);
+  const y = U.makeYielder(YIELD_MS);
+  await y.now();
+  await phaseEvidenceAsync(st, y);
+  await y.now();
+  await phaseFitAsync(st, y);
+  await y.now();
+  for (let i = 0; i < st.groups.length; i++) {
+    phaseCells(st, i, i + 1);
+    if (y.due()) await y.now();
   }
-  for (let i = 0; i < st.groups.length; i += CHUNK) {
-    await U.yieldNow();
-    phasePlacement(st, i, i + CHUNK);
+  await y.now();
+  for (let i = 0; i < st.groups.length; i++) {
+    phasePlacement(st, i, i + 1);
+    if (y.due()) await y.now();
   }
   if (!st.out) st.out = { rows: [], offers: [], fc: [], cut: false };
-  await U.yieldNow();
+  await y.now();
   return phaseSummary(st);
 }
 
@@ -610,85 +682,182 @@ function summarize(rows, { fc = 0 } = {}) {
 const reasons = (list) => U.shortWhy(list);
 
 /**
- * The brain's price for a new listing (plan §4.8): the question priceTracker/attach.priceForNew asks.
- * Fail-safe: no run, an unknown game or market, a blocked market, no evidence → the base price with
- * confidence "none". Below medium confidence the brain's own rule is hold: today's price is kept.
- * @param {object} q { marketplace, basePriceUsd, title, game, itemCount, items, farm? }
+ * A Map over the run's own memo whose additions are the caller's (P20-14): reads fall through to the
+ * run's entries; what a caller's question adds is kept here, least recently used first out, so
+ * thousands of priceFor calls never grow the newest run's memory.
  */
-function priceForRun(run, q = {}) {
-  const base = num(q && q.basePriceUsd, 0) > 0 ? round2(q.basePriceUsd) : null;
-  const fail = (why, extra = {}) => Object.assign({ price: base, confidence: "none", basis: "none", regime: "unknown", reasons: reasons([why]) }, extra);
+class CallerMemo {
+  constructor(base, cap) {
+    this.base = base;
+    this.own = new Map();
+    this.cap = cap;
+  }
+  has(k) {
+    return this.own.has(k) || this.base.has(k);
+  }
+  get(k) {
+    if (this.own.has(k)) {
+      const v = this.own.get(k);
+      this.own.delete(k);
+      this.own.set(k, v);
+      return v;
+    }
+    return this.base.get(k);
+  }
+  set(k, v) {
+    this.own.delete(k);
+    this.own.set(k, v);
+    if (this.own.size > this.cap) this.own.delete(this.own.keys().next().value);
+    return this;
+  }
+  get size() {
+    return this.base.size + this.own.size;
+  }
+}
+
+/** The run's context for callers' questions: the run's evidence and fit, with a bounded memo of its own. */
+function callerCtx(run) {
+  const ctx = run.ctx;
+  if (!ctx._caller) {
+    // a shallow copy (once per run): the same rows, indexes and fit, the memo maps wrapped
+    const ev = Object.assign({}, ctx.ev, {
+      _ref: new CallerMemo(ctx.ev._ref, CALLER_MEMO_MAX),
+      _memo: new CallerMemo(ctx.ev._memo, CALLER_MEMO_MAX),
+      _gs: new CallerMemo(ctx.ev._gs, CALLER_MEMO_MAX),
+    });
+    ctx._caller = Object.assign({}, ctx, { ev });
+  }
+  return ctx._caller;
+}
+
+/**
+ * How old the run is at `now`, and whether it is too old to answer from (M7): older than twice the
+ * interval between runs, or than the farm-brain rows it read may be. No `now`: not checked.
+ */
+function staleRun(run, now) {
+  const t = finite(now);
+  if (t === null || !run || !run.ctx || !run.ctx.ev) return null;
+  const cfg = run.ctx.cfg || DEFAULTS;
+  const age = t - num(run.ctx.ev.cut, t);
+  const limit = Math.max(2 * num(cfg.intervalMin, DEFAULTS.intervalMin) * 60000, num(cfg.maxDemandAgeH, DEFAULTS.maxDemandAgeH) * U.HOUR);
+  return age > limit ? "The newest run is " + Math.round(age / U.HOUR) + " h old: no advice from it." : null;
+}
+
+/** A finite number or null (a string, NaN, Infinity is no number). */
+function finite(v) {
+  return typeof v === "number" && Number.isFinite(v) ? v : null;
+}
+
+/**
+ * Every answer that passes today's price through still obeys today's limits (M8): never under the floor
+ * (the platform's, the game's learned GGSel minimum, the owner's no-claim floors), never over the
+ * no-claim ceiling.
+ */
+function clampToLimits(run, price, m, f, g) {
+  if (price === null) return null;
+  let lo = MARKETS.includes(m) ? U.floorFor(m) : 0;
+  let hi = Infinity;
+  const ev = run && run.ctx && run.ctx.ev;
+  if (ev && g) {
+    if (m === "ggsel" && ev.ggselVmin && ev.ggselVmin.has(g)) lo = Math.max(lo, ev.ggselVmin.get(g));
+    if (f === "noclaim") {
+      const lim = P.noclaimLimits(ev, g);
+      lo = Math.max(lo, lim.floor);
+      hi = lim.ceiling;
+    }
+  }
+  return round2(Math.max(lo, Math.min(hi, price)));
+}
+
+/**
+ * The brain's price for a new listing (plan §4.8): the question priceTracker/attach.priceForNew asks.
+ * Fail-safe: no run, a run too old, an unknown game or market, a blocked market, a no-claim offer the
+ * owner runs (claim-at-sale markets), no evidence → today's price with confidence "none". Below medium
+ * confidence the brain's own rule is hold: today's price is kept. Today's price always within today's
+ * limits (floors, no-claim ceiling). An invalid base answers price 0, confidence "none": the brain
+ * never invents a price without one (M8).
+ * @param {object} q { marketplace, basePriceUsd, title, game, itemCount, items, farm? }
+ * @param {object} [o] { now } — the moment asked at; a run older than allowed abstains (M7)
+ */
+function priceForRun(run, q = {}, { now } = {}) {
+  const b0 = finite(q && q.basePriceUsd);
+  const m = lower(q && q.marketplace);
+  const f = q && q.farm === "noclaim" ? "noclaim" : "claim";
+  if (b0 === null || !(b0 > 0) || b0 > U.MAX_REAL_PRICE) {
+    return { price: 0, confidence: "none", basis: "invalid base", regime: "unknown", reasons: reasons(["No valid base price was given (a positive number up to $" + U.MAX_REAL_PRICE + "): no price."]) };
+  }
+  const base = round2(b0);
+  let g = "";
+  const pass = (why, extra = {}) => Object.assign({ price: clampToLimits(run, base, m, f, g), confidence: "none", basis: "none", regime: "unknown", reasons: reasons([why]) }, extra);
   try {
-    if (!run || !run.ctx || !run.ctx.ev) return fail("No listing-brain run in memory: today's price.");
-    const ctx = run.ctx;
+    if (!run || !run.ctx || !run.ctx.ev) return pass("No listing-brain run in memory: today's price.");
+    const stale = staleRun(run, now);
+    if (stale) return pass(stale);
+    const ctx = callerCtx(run);
     const ev = ctx.ev;
-    const m = lower(q.marketplace);
-    if (!MARKETS.includes(m)) return fail("Unknown market: today's price.");
-    if (ev.markets[m].blocked) return fail("Market blocked by the owner: no brain price.");
-    if (ev.markets[m].off) return fail("The owner's switch for this market is off: no brain price.");
-    const f = q.farm === "noclaim" ? "noclaim" : "claim";
+    if (!MARKETS.includes(m)) return pass("Unknown market: today's price.");
     const items = Array.isArray(q.items) ? q.items.filter((i) => i && i.itemKey) : [];
     const title = q.title || String(q.game || "") + " Twitch Drops" + (q.itemCount ? " (" + q.itemCount + " Items)" : "");
     const id = identify({ title }, items.length ? { items } : null);
-    const g = id.gameKey || normGame(q.game);
-    if (!g) return fail("No game named: today's price.");
+    g = id.gameKey || normGame(q.game);
+    if (ev.markets[m].blocked) return pass("Market blocked by the owner: no brain price.");
+    if (ev.markets[m].off) return pass("The owner's switch for this market is off: no brain price.");
+    // no-claim offers on Eldorado / PlayerAuctions / G2G are claim-at-sale: the owner's (M6)
+    if (f === "noclaim" && !U.NOCLAIM_SHELF.has(m)) return pass("No-claim offers on " + m + " are claim-at-sale, the owner's: no brain price.", { basis: "managed" });
+    if (!g) return pass("No game named: today's price.");
     const gs = P.gameState(ev, g, f);
-    if (gs.unknown) return fail(gs.why);
+    if (gs.unknown) return pass(gs.why);
     const ck = id.exact ? id.contentKey : null;
     // Priced afresh against THIS base (the run's offers are gated against their live asks: reusing one
     // could answer under the caller's base on GGSel). The fitted curve, the regime and the references
-    // are the run's.
+    // are the run's. (A query carries items, not a no-claim bundle key: the bundle order has nothing to
+    // compare it to.)
     const band = String(id.bandKey).slice(String(id.bandKey).lastIndexOf("|") + 1);
     const n = id.countForBand;
-    // (A query carries items, not a no-claim bundle key: the bundle order has nothing to compare it to.)
     const v = P.priceOffer(ctx, { g, f, m, ck, bk: id.bandKey, ex: !!ck, n, band, live: null, base, np: base, ladder: false });
     const policy = ctx.cfg.policyPrice;
+    if (policy === "old" || policy === "tracker") return pass("The " + policy + " policy answers today's price.", { basis: policy, regime: v.regime });
     let price = v.p;
+    let conf = v.conf;
     let basis = v.basis;
-    if (policy === "old") {
-      price = base;
-      basis = "old";
-    } else if (policy === "clear") {
-      price = RF.clearPrice(ev, g, id.countForBand, m, ctx.cfg.minSales);
+    if (policy === "clear") {
+      // a rival's sold price through the same gates: it never raises (M2)
+      price = P.gatePolicy(ctx, v, RF.clearPrice(ev, g, n, m, ctx.cfg.minSales), { basis: "rivals", conf: "low" });
+      conf = "low";
       basis = "clear";
-    } else if (policy === "tracker") {
-      // the tracker's own answer is not part of the run for an arbitrary offer: today's price
-      price = base;
-      basis = "tracker";
     }
-    if (price === null || price === undefined || !(price > 0)) return fail("No evidenced price for this offer here: today's price.", { regime: v.regime });
-    if (policy === "curve" && CONF_RANK[v.conf] < CONF_RANK.medium) {
-      return {
-        price: base,
-        confidence: v.conf,
-        basis: v.basis,
-        regime: v.regime,
-        reasons: reasons(["The brain would ask " + U.usd(price) + " on " + v.conf + " confidence; below medium it keeps today's price."].concat(v.why || [])),
-      };
+    if (price === null || price === undefined || !(price > 0)) return pass("No evidenced price for this offer here: today's price.", { regime: v.regime });
+    if (CONF_RANK[conf] < CONF_RANK.medium) {
+      return pass("The brain would ask " + U.usd(price) + " on " + conf + " confidence; below medium it keeps today's price.", { confidence: conf, basis, regime: v.regime, reasons: reasons(["The brain would ask " + U.usd(price) + " on " + conf + " confidence; below medium it keeps today's price."].concat(v.why || [])) });
     }
-    return { price: round2(price), confidence: v.conf, basis, regime: v.regime, reasons: reasons(v.why || []) };
+    return { price: round2(price), confidence: conf, basis, regime: v.regime, reasons: reasons(v.why || []) };
   } catch (e) {
-    return fail("Listing brain error: " + String((e && e.message) || e).slice(0, 120));
+    return pass("Listing brain error: " + String((e && e.message) || e).slice(0, 120));
   }
 }
 
 /**
  * The brain's shelf for a game's stock (plan §4.8): what computeSplit + dealShares decide today.
- * Fail-safe (no run, an unknown game): no shelf advice — `shelf` is empty and every unit stays in
- * `reserve`, so a caller keeps today's split.
+ * Fail-safe (no run, a run too old, an unknown game, a no-claim game under a cap the owner set): no
+ * shelf advice — `shelf` is empty and every unit stays in `reserve`, so a caller keeps today's split.
  * @param {object} q { game, farm, stock }
+ * @param {object} [o] { now }
  */
-function shelfForRun(run, q = {}) {
+function shelfForRun(run, q = {}, { now } = {}) {
   const stock = Math.max(0, Math.floor(num(q && q.stock, 0)));
-  const fail = (why) => ({ shelf: {}, reserve: stock, bulkTake: 0, explore: null, basis: "none", reasons: reasons([why]) });
+  const fail = (why, basis = "none") => ({ shelf: {}, reserve: stock, bulkTake: 0, explore: null, basis, reasons: reasons([why]) });
   try {
     if (!run || !run.ctx || !run.ctx.placements) return fail("No listing-brain run in memory: no shelf advice.");
+    const stale = staleRun(run, now);
+    if (stale) return fail(stale);
     const f = q.farm === "noclaim" ? "noclaim" : "claim";
     const g = normGame(q.game);
     let pl = run.ctx.placements.get(g + "|" + f);
     if (!pl) return fail("This game is not in the newest run: no shelf advice.");
     if (pl.unknown) return fail(pl.why[0] || "No fresh farm-brain row: no shelf advice.");
-    if (q.stock !== undefined && q.stock !== null && stock !== pl.stock) pl = PL.placeGame(run.ctx, Object.assign({}, pl.input, { stock }));
+    // the owner set this game's no-claim cap by hand: the shelf is the owner's lever (M5)
+    if (pl.managed) return fail("You set this game's no-claim cap by hand: its shelf is yours, no advice.", "managed");
+    if (q.stock !== undefined && q.stock !== null && stock !== pl.stock) pl = PL.placeGame(callerCtx(run), Object.assign({}, pl.input, { stock }));
     const policy = run.ctx.cfg.policyPlace;
     const pol = pl.policies[policy];
     const shelf = Object.assign({}, policy === "newsvendor" || !pol || !pol.shelf ? pl.shelf : pol.shelf);
@@ -708,34 +877,40 @@ function shelfForRun(run, q = {}) {
 }
 
 /**
- * Expected net per account under the brain's placement and prices, Σ share_m × net_m (plan §4.8) —
- * for the farm brain's "value per account" later. Claim farm first, else the no-claim farm.
+ * Expected net per account under the brain's placement and prices (plan §4.8) — for the farm brain's
+ * "value per account" later. Each market weighs by the units it is expected to SELL there in a week,
+ * E[min(D, shelf)], not by the units it holds (H18: a deep shelf on a slow market is not where accounts
+ * turn into money). Claim farm first, else the no-claim farm.
+ * @param {object} [o] { farm, now }
  */
-function valueForRun(run, gameKey, { farm } = {}) {
+function valueForRun(run, gameKey, { farm, now } = {}) {
   const fail = (why) => ({ value: null, shares: {}, nets: {}, basis: "none", reasons: reasons([why]) });
   try {
     if (!run || !run.ctx || !run.ctx.placements) return fail("No listing-brain run in memory.");
+    const stale = staleRun(run, now);
+    if (stale) return fail(stale);
     const g = normGame(gameKey);
     const pl = (farm ? [farm] : ["claim", "noclaim"]).map((f) => run.ctx.placements.get(g + "|" + f)).find(Boolean);
     if (!pl) return fail("This game is not in the newest run.");
     if (pl.unknown) return fail("No fresh farm-brain row for this game.");
-    const shelf = {};
+    const w = {};
     let total = 0;
     for (const m of MARKETS) {
       const n = num(pl.shelf[m], 0);
-      if (n > 0 && num(pl.input.nets[m]) > 0) {
-        shelf[m] = n;
-        total += n;
-      }
+      if (!(n > 0) || !(num(pl.input.nets[m]) > 0)) continue;
+      const sells = U.expectedSold(num(pl.lambda[m], 0), n);
+      if (!(sells > 0)) continue;
+      w[m] = sells;
+      total += sells;
     }
-    if (!total) return fail("The brain places none of this game's stock: no value per account.");
+    if (!(total > 0)) return fail("The brain expects none of this game's shelved stock to sell: no value per account.");
     const shares = {};
     const nets = {};
     let value = 0;
-    for (const m of Object.keys(shelf)) {
-      shares[m] = round3(shelf[m] / total);
+    for (const m of Object.keys(w)) {
+      shares[m] = round3(w[m] / total);
       nets[m] = round2(pl.input.nets[m]);
-      value += (shelf[m] / total) * pl.input.nets[m];
+      value += (w[m] / total) * pl.input.nets[m];
     }
     return { value: round2(value), shares, nets, basis: "newsvendor", reasons: [] };
   } catch (e) {
@@ -789,6 +964,10 @@ module.exports = {
   shelfClass,
   identities,
   newBase,
+  trackerOf,
+  packPrices,
+  staleRun,
+  CALLER_MEMO_MAX,
   buildRun,
   buildRunAsync,
   summarize,
@@ -822,6 +1001,8 @@ module.exports = {
   // evidence
   buildEvidence: E.buildEvidence,
   buildEvidenceAsync: E.buildEvidenceAsync,
+  makeWaveEndOf: E.makeWaveEndOf,
+  daysLeftOf: E.daysLeftOf,
   rowKindOf: E.rowKindOf,
   isAdvisable: E.isAdvisable,
   exposureOf: E.exposureOf,
@@ -835,11 +1016,15 @@ module.exports = {
   clearPrice: RF.clearPrice,
   // hazard
   fitHazard: H.fitHazard,
+  fitHazardAsync: H.fitHazardAsync,
   hazardAt: H.hazardAt,
   pH: H.pH,
   baseP: H.baseP,
   evidenced: H.evidenced,
   expectedDaysToSale: H.expectedDaysToSale,
+  rowPH: H.rowPH,
+  rankOf: H.rankOf,
+  maxEvidencedX: H.maxEvidencedX,
   // price
   gameState: P.gameState,
   candidates: P.candidates,
@@ -847,6 +1032,8 @@ module.exports = {
   finishOffer: P.finishOffer,
   liveAction: P.liveAction,
   gateChain: P.gateChain,
+  gatePolicy: P.gatePolicy,
+  rowChance: P.rowChance,
   applyContainment: P.applyContainment,
   soldFloorOf: P.soldFloorOf,
   // place

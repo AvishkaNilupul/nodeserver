@@ -22,8 +22,6 @@ const OFF_RECHECK_MS = 10 * 60000;
 // A run that cannot gather its inputs in this long is abandoned (it logs nothing).
 const RUN_TIMEOUT_MS = 10 * 60000;
 const ACCURACY_TTL_MS = 10 * 60000;
-// The scorer reuses the last run's bundle while it is this fresh.
-const EVIDENCE_TTL_MS = 2 * 3600000;
 const HISTORY_LIMIT = 72;
 const SAMPLE_DAYS = 21;
 const BACKTEST_WEEKS = 6;
@@ -69,6 +67,8 @@ const defaultHooks = () => ({
   load: (o) => inputs.load(o),
   Run: () => require("../../models/ListingBrainRun"),
   Row: () => require("../../models/ListingBrainRow"),
+  // The run's id, made before anything is written: its rows go in first, then the run document
+  newId: () => new (require("mongoose").Types.ObjectId)(),
   settings: () => require("../settings"),
   log: (...a) => console.log(...a),
   logErr: (...a) => console.error(...a),
@@ -112,10 +112,11 @@ function withTimeout(promise, ms, what) {
 }
 
 // Rows of the first run of each UTC day (the daily sample the forward score reads) are kept as long
-// as runs; every other run's rows only a week — a cell's intraday history is a convenience, and at
-// the 150-game scale keeping them all 21 days would cost ~105 MB (docs/LISTING-BRAIN-PLAN.md §6).
+// as runs; every other run's rows only 3 days — a cell's intraday history is a convenience, and at
+// production volume (~1,460 cells a run, 8 runs a day) a week of them alone cost ~45 MB of the 60 MB
+// target (tests/listingBrainSpeed.test.js measures both scales; docs/LISTING-BRAIN-PLAN.md §6).
 const ROW_KEEP_DAYS_DAILY = 21;
-const ROW_KEEP_DAYS_OTHER = 7;
+const ROW_KEEP_DAYS_OTHER = 3;
 
 const isPlainObject = (v) => v !== null && typeof v === "object" && !Array.isArray(v) && !(v instanceof Date);
 
@@ -169,7 +170,7 @@ const ACTION_KEYS = ["hold", "lower", "raise", "test", "ladder"];
 function expand(row) {
   if (!row || typeof row !== "object") return row;
   const out = { ...row };
-  for (const k of ["old", "br", "pol", "pf", "ev"]) out[k] = isPlainObject(out[k]) ? { ...out[k] } : {};
+  for (const k of ["old", "br", "pol", "pf", "pd", "ev"]) out[k] = isPlainObject(out[k]) ? { ...out[k] } : {};
   if (out.m !== "all") {
     const a = isPlainObject(out.br.a) ? out.br.a : {};
     out.br.a = Object.fromEntries(ACTION_KEYS.map((x) => [x, Number(a[x]) || 0]));
@@ -233,13 +234,19 @@ function rememberActions(fc, now, cooldownH) {
 
 /**
  * Whether this run carries its UTC day's per-listing forecasts: the first run of each day does. A
- * process restart in the middle of a day checks the log (one indexed read) so a second sample of the
- * same day is never written.
+ * process restart in the middle of a day checks the log so a second sample of the same day is never
+ * written — by the day's time range on the run collection's `at` index (`day` has no index: a filter on
+ * it alone would scan every run document).
  */
-async function firstOfDay(day) {
+async function firstOfDay(day, now) {
   if (state.fcDay === day) return false;
   try {
-    const seen = await hooks.Run().findOne({ day, fcN: { $gt: 0 } }, { _id: 1 }).lean();
+    const from = Date.parse(day + "T00:00:00Z");
+    const start = Number.isFinite(from) ? from : now - (now % DAY);
+    const seen = await hooks
+      .Run()
+      .findOne({ at: { $gte: new Date(start), $lt: new Date(start + DAY) }, fcN: { $gt: 0 } }, { _id: 1 })
+      .lean();
     if (seen) {
       state.fcDay = day;
       return false;
@@ -256,6 +263,30 @@ async function firstOfDay(day) {
  * @param {boolean} [o.force]   run even while switched off (the staging check; never the scheduler)
  * @param {boolean} [o.persist] write the log (default true); false = compute and keep in memory only
  */
+/**
+ * The one way the brain reads its inputs — a run's, or the scorer's when it has no bundle yet. A load
+ * that outlives its timeout keeps running (it cannot be cancelled); until it settles no other load
+ * starts (runOnce and accuracy both check `pendingLoad`), so two loads never overlap.
+ */
+async function guardedLoad(now) {
+  const load = Promise.resolve().then(() => hooks.load({ now }));
+  state.pendingLoad = load;
+  state.pendingSince = new Date(now);
+  load.then(
+    () => {},
+    () => {},
+  ).then(() => {
+    if (state.pendingLoad === load) {
+      state.pendingLoad = null;
+      state.pendingSince = null;
+    }
+  });
+  const limitMs = hooks.runTimeoutMs || RUN_TIMEOUT_MS;
+  const bundle = await withTimeout(load, limitMs, "inputs took longer than " + Math.round(limitMs / 1000) + " s");
+  if (!bundle || bundle.kind !== "listing-brain-bundle") throw new Error("the loader returned no bundle");
+  return bundle;
+}
+
 async function runOnce({ force = false, persist = true } = {}) {
   if (state.running || state.pendingLoad) return { skipped: "already running" };
   const cfg = readConfig();
@@ -264,23 +295,7 @@ async function runOnce({ force = false, persist = true } = {}) {
   const t0 = clock();
   try {
     const now = clock();
-    // A load that outlives its timeout keeps running (it cannot be cancelled); until it settles no
-    // new run starts, so two loads never overlap.
-    const load = Promise.resolve().then(() => hooks.load({ now }));
-    state.pendingLoad = load;
-    state.pendingSince = new Date(now);
-    load.then(
-      () => {},
-      () => {},
-    ).then(() => {
-      if (state.pendingLoad === load) {
-        state.pendingLoad = null;
-        state.pendingSince = null;
-      }
-    });
-    const limitMs = hooks.runTimeoutMs || RUN_TIMEOUT_MS;
-    const bundle = await withTimeout(load, limitMs, "inputs took longer than " + Math.round(limitMs / 1000) + " s");
-    if (!bundle || bundle.kind !== "listing-brain-bundle") throw new Error("the loader returned no bundle");
+    const bundle = await guardedLoad(now);
     const notes = (bundle.notes || []).slice();
     if (persist) await loadPrior(now, notes);
     const run = await model.buildRunAsync(bundle, { cfg, prior: state.prior });
@@ -291,7 +306,7 @@ async function runOnce({ force = false, persist = true } = {}) {
       rows = rows.slice(0, MAX_ROWS_PER_RUN);
     }
     const day = dayOf(now);
-    const daily = persist ? await firstOfDay(day) : false;
+    const daily = persist ? await firstOfDay(day, now) : false;
     const fc = daily ? (run.fc || []).slice(0, cfg.fcCap) : null;
     if (daily && (run.fc || []).length > cfg.fcCap) notes.push("Per-listing forecasts capped at " + cfg.fcCap + " of " + run.fc.length + ".");
     const ms = clock() - t0;
@@ -313,10 +328,16 @@ async function runOnce({ force = false, persist = true } = {}) {
     if (persist) {
       persisted = true;
       try {
-        const created = await hooks.Run().create(doc);
-        runId = created && created._id;
+        // Rows first, then the run document. The run document is what marks a run as logged — latest()
+        // after a restart, and above all the day's sample (firstOfDay, dailySamples) — so it is written only
+        // once every row is in: a failed row insert leaves no run document, never a "sampled" day with half
+        // its rows. Rows that did land (ordered: false) expire with their TTL; only a cell's history shows them.
+        runId = hooks.newId();
         const exp = new Date(now + (fc && fc.length ? ROW_KEEP_DAYS_DAILY : ROW_KEEP_DAYS_OTHER) * DAY);
-        if (rows.length) await hooks.Row().insertMany(rows.map((r) => ({ ...compact(r), run: runId, at: doc.at, exp })), { ordered: false });
+        // lean: the rows are already plain and typed (run an ObjectId, at and exp Dates), so Mongoose's
+        // per-document casting — ~200 ms of CPU for ~1,500 rows on Node 20 — is skipped
+        if (rows.length) await hooks.Row().insertMany(rows.map((r) => ({ ...compact(r), run: runId, at: doc.at, exp })), { ordered: false, lean: true });
+        await hooks.Run().create(Object.assign({ _id: runId }, doc));
         if (fc && fc.length) state.fcDay = day;
       } catch (e) {
         persisted = false;
@@ -369,13 +390,19 @@ async function tick() {
       const r = await runOnce();
       // A load that never settles would otherwise stop the log silently, one skipped tick at a time.
       if (r && r.skipped === "already running" && state.pendingSince) {
-        hooks.log("listingBrain: skipped — the previous run's data load has been pending for " + Math.round((Date.now() - state.pendingSince.getTime()) / 60000) + " min");
+        hooks.log("listingBrain: skipped — a data load (a run's, or the scorer's) has been pending for " + Math.round((Date.now() - state.pendingSince.getTime()) / 60000) + " min");
       }
     } catch {
       /* runOnce never throws; belt and braces for the loop */
     }
   } else {
-    // Switched off: a run is not due, so the wait for the next one starts again from here.
+    // Switched off: a run is not due, so the wait for the next one starts again from here. The newest
+    // run and its evidence are dropped: the three answers abstain (no run in memory) instead of answering
+    // from a run that keeps getting older, and the memory (~150 MB at production volume) is given back.
+    // The newest run's page view (state.latest) stays — it says how old it is.
+    state.run = null;
+    state.bundle = null;
+    state.bundleAt = 0;
     state.since = new Date();
     if (!state.offLogged) {
       state.offLogged = true;
@@ -478,7 +505,7 @@ async function dailySamples(now) {
     const doc = await hooks.Run().findOne({ _id: head._id }, { at: 1, fc: 1 }).lean();
     const rows = await hooks
       .Row()
-      .find({ run: head._id }, { k: 1, g: 1, f: 1, m: 1, live: 1, pc: 1, sc: 1, old: 1, br: 1, pol: 1, pf: 1 })
+      .find({ run: head._id }, { k: 1, g: 1, f: 1, m: 1, live: 1, pc: 1, sc: 1, old: 1, br: 1, pol: 1, pf: 1, pd: 1 })
       .limit(MAX_ROWS_PER_RUN)
       .lean();
     out.push({ at: new Date(head.at).getTime(), fc: (doc && doc.fc) || [], rows: rows.map(expand) });
@@ -487,22 +514,36 @@ async function dailySamples(now) {
   return out;
 }
 
+const NO_RUN_OFF = "No run yet: the brain is switched off and holds no evidence — switch it on, or run it once.";
+const LOADING = "A run is loading its evidence: the scores follow once it has finished.";
+
 async function computeAccuracy(now) {
   const gen = state.gen;
+  // The newest run's bundle whatever its age (the answer says how old: evidenceAt). Without one, the
+  // scorer reads nothing while the brain is off, waits for a run that is loading, and otherwise loads
+  // through the run's own guard and timeout — one GET can never start a second load beside a run's.
   let bundle = state.bundle;
-  if (!bundle || now - state.bundleAt > EVIDENCE_TTL_MS) {
-    bundle = await hooks.load({ now });
+  if (!bundle) {
+    const cfg = readConfig();
+    if (!cfg.enabled) return { empty: true, reason: NO_RUN_OFF };
+    if (state.running || state.pendingLoad) return { empty: true, reason: LOADING };
+    try {
+      bundle = await guardedLoad(now);
+    } catch (e) {
+      return { empty: true, reason: "The evidence could not be read: " + msg(e) };
+    }
     state.bundle = bundle;
     state.bundleAt = now;
   }
   const cfg = readConfig();
   const backtest = await model.backtestAsync(bundle, { cfg, weeks: BACKTEST_WEEKS });
   const samples = await dailySamples(now);
-  const forward = model.forwardScores({ samples, bundle, cfg, now });
+  const forward = await model.forwardScoresAsync({ samples, bundle, cfg, now });
   const review = model.decisionReview({ samples, bundle, now });
   const value = {
     at: new Date(now),
     evidenceAt: new Date(bundle.now),
+    evidenceAgeH: Math.round(((now - Number(bundle.now)) / 3600000) * 10) / 10,
     model: model.MODEL_VERSION,
     samples: samples.length,
     backtest,
@@ -540,9 +581,10 @@ async function accuracy({ force = false } = {}) {
 // no run in memory, or anything the brain cannot answer, the answer is today's (the base price, an
 // empty shelf, an unknown value) with confidence "none" and the reason.
 
+// Each answer is given `now`: the model abstains from a run older than its freshness limit (plan §4.8).
 function priceFor(q = {}) {
   try {
-    return model.priceForRun(state.run, q);
+    return model.priceForRun(state.run, q, { now: clock() });
   } catch (e) {
     const base = Number(q && q.basePriceUsd) || 0;
     return { price: base, confidence: "none", basis: "error", regime: null, reasons: ["listing brain error: " + msg(e)] };
@@ -551,7 +593,7 @@ function priceFor(q = {}) {
 
 function shelfFor(q = {}) {
   try {
-    return model.shelfForRun(state.run, q);
+    return model.shelfForRun(state.run, q, { now: clock() });
   } catch (e) {
     return { shelf: {}, reserve: Math.max(0, Math.floor(Number(q && q.stock) || 0)), bulkTake: 0, explore: null, basis: "error", reasons: ["listing brain error: " + msg(e)] };
   }
@@ -559,7 +601,7 @@ function shelfFor(q = {}) {
 
 function valueFor(gameKey) {
   try {
-    return model.valueForRun(state.run, gameKey);
+    return model.valueForRun(state.run, gameKey, { now: clock() });
   } catch (e) {
     return { value: null, shares: {}, nets: {}, basis: "error", reasons: ["listing brain error: " + msg(e)] };
   }
@@ -580,6 +622,7 @@ module.exports = {
   readConfig,
   heartbeat,
   dailySamples,
+  guardedLoad,
   compact,
   expand,
   ROW_KEEP_DAYS_DAILY,

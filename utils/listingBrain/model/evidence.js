@@ -94,7 +94,9 @@ function exposureOf(L, sales, cut, fitDays, opts = {}) {
       const t = finite(u && u.a);
       if (t !== null && t < a) a = t;
     }
-    if (Number.isFinite(a)) start = a;
+    // a unit added before the row existed (a re-pointed unit keeps its old addedAt) is no exposure of
+    // this row: the row starts no earlier than its own creation (H17)
+    if (Number.isFinite(a)) start = Math.max(c, a);
   }
   const rb = finite(L.rb);
   if (!opts.keepRebundle && rb !== null && rb < cut) start = Math.max(start, rb);
@@ -126,7 +128,14 @@ function exposureOf(L, sales, cut, fitDays, opts = {}) {
   out.days = t1 > t0 ? (t1 - t0) / DAY : 0;
   if (out.days > 0) {
     if (single) out.units = soldT !== null && soldT >= t0 && soldT <= t1 ? 1 : 0;
-    else for (const s of list) if (s.t >= t0 && s.t <= t1) out.units++;
+    else {
+      // quantity / order-unit markets: ORDERS, not units — a 5-unit order is one buyer arriving, and
+      // the scorer's truth ("sold ≥ 1 order within the horizon") counts buyers too (H12)
+      const seen = new Set();
+      let anon = 0;
+      for (const s of list) if (s.t >= t0 && s.t <= t1) seen.add(s.grp ? "g:" + s.grp : "a:" + anon++);
+      out.units = seen.size;
+    }
   }
   return out;
 }
@@ -142,6 +151,9 @@ function activeAt(L, salesBefore, cut) {
   if (L.m === "gameflip" && cut > c + U.GAMEFLIP_EXPIRY_DAYS * DAY) return false;
   const single = SINGLE.has(L.m);
   const sold = (salesBefore || []).length > 0;
+  // Eldorado kills an offer 21 days after its last activation with no sale (H9): the same cut its
+  // exposure gets, so a dead offer is never advised as live
+  if (L.m === "eldorado" && !sold && cut > c + U.ELDORADO_OFFER_LIFE_DAYS * DAY) return false;
   if (single && sold) return false;
   const st = lower(L.st);
   const u = finite(L.u);
@@ -157,6 +169,19 @@ function shelfUnits(R) {
   if (SINGLE.has(R.m)) return 1;
   const q = finite(R.qty);
   return q === null ? 1 : Math.max(0, Math.floor(q));
+}
+
+/**
+ * Days a live row has left on sale at `cut` (H9): a Gameflip listing expires 30 days after createdAt;
+ * an Eldorado offer with no sale dies 21 days after it; everything else has no known end (Infinity).
+ * A row's sell chance is judged over min(horizon, this).
+ */
+function daysLeftOf(R, cut) {
+  const c = finite(R && R.c);
+  if (c === null) return Infinity;
+  if (R.m === "gameflip") return Math.max(0, (c + U.GAMEFLIP_EXPIRY_DAYS * DAY - cut) / DAY);
+  if (R.m === "eldorado" && !(R.sales && R.sales.length)) return Math.max(0, (c + U.ELDORADO_OFFER_LIFE_DAYS * DAY - cut) / DAY);
+  return Infinity;
 }
 
 const bandOf = (bk, n) => {
@@ -211,16 +236,30 @@ function buildEvidence(bundle, opts = {}) {
   return r.value;
 }
 
-/** The same, yielding the event loop between its sections (rows, orders, translator, the rest). */
+/**
+ * The same, letting the event loop breathe on a time budget (P20-4): the generator below marks a
+ * possible yield every few thousand items, and the loop is given back only when the budget is spent.
+ * `o.yielder` (util.makeYielder) shares one budget with the caller's own phases.
+ */
 async function buildEvidenceAsync(bundle, opts = {}) {
+  const y = opts.yielder || U.makeYielder(YIELD_MS);
   const it = evidenceSteps(bundle, opts);
   let r = it.next();
   while (!r.done) {
-    await U.yieldNow();
+    if (r.value === FRESH || y.due()) await y.now();
     r = it.next();
   }
   return r.value;
 }
+
+// A yield that always gives the loop back: put before a long synchronous call that cannot yield
+// inside (the tracker's translator), so the stretch is that call alone.
+const FRESH = Symbol("fresh");
+// Milliseconds of work between two yields of the async run (Node 20 at production volume: well under
+// the ~200 ms the server's live orders allow).
+const YIELD_MS = 40;
+// Items a loop handles between two possible yields (each check costs one clock read in the async run).
+const EVERY = 1024;
 
 // The body, as a generator: each `yield` marks a point where the async run may let the loop breathe.
 function* evidenceSteps(bundle, { cfg, cut, synthDemand = false } = {}) {
@@ -229,18 +268,28 @@ function* evidenceSteps(bundle, { cfg, cut, synthDemand = false } = {}) {
   const T = Number.isFinite(Number(cut)) ? Number(cut) : num(b.now, 0);
   const markets = marketInfo(b);
   const notes = [];
+  let tick = 0;
 
   // What kind of row each sale was made on: a rent-farm window's sales are a different product and
   // count as nothing; a pack's or a lot's are demand only (their price is the bulk series, never a
   // single-unit price).
   const kindById = new Map();
-  for (const L of b.listings || []) if (L && L.id) kindById.set(String(L.id), rowKindOf(L));
+  for (const L of b.listings || []) {
+    if (L && L.id) kindById.set(String(L.id), rowKindOf(L));
+    if ((++tick & (EVERY - 1)) === 0) yield;
+  }
   const kindOfSale = (s) => (s && s.lid ? kindById.get(String(s.lid)) || "" : "");
 
   // 1. unit sales before the cut, in time order (ties by listing, then price: the order is part of
   //    what perOrder keeps, so it must not depend on how the bundle happened to be sorted)
-  const allSales = (b.sales || []).filter((s) => s && Number.isFinite(Number(s.t)) && kindOfSale(s) !== "farm");
-  const sorted = allSales.slice().sort((x, y) => x.t - y.t || U.cmp(x.lid, y.lid) || num(x.p) - num(y.p) || U.cmp(x.grp, y.grp));
+  const allSales = [];
+  for (const s of b.sales || []) {
+    if (s && Number.isFinite(Number(s.t)) && kindOfSale(s) !== "farm") allSales.push(s);
+    if ((++tick & (EVERY - 1)) === 0) yield;
+  }
+  yield;
+  const sorted = allSales.sort((x, y) => x.t - y.t || U.cmp(x.lid, y.lid) || num(x.p) - num(y.p) || U.cmp(x.grp, y.grp));
+  yield;
   const salesBefore = [];
   const salesByListing = new Map();
   const saleAfterCut = new Set();
@@ -249,6 +298,7 @@ function* evidenceSteps(bundle, { cfg, cut, synthDemand = false } = {}) {
       salesBefore.push(s);
       if (s.lid) pushTo(salesByListing, s.lid, s);
     } else if (s.lid) saleAfterCut.add(s.lid);
+    if ((++tick & (EVERY - 1)) === 0) yield;
   }
 
   // 2. rows: every listing visible at the cut except rent-farm windows (a different product)
@@ -256,8 +306,9 @@ function* evidenceSteps(bundle, { cfg, cut, synthDemand = false } = {}) {
   const byId = new Map();
   const rbById = new Map();
   for (const L of b.listings || []) {
+    if ((++tick & 511) === 0) yield;
     if (!L || !L.id) continue;
-    const rk = rowKindOf(L);
+    const rk = kindById.get(String(L.id)) || rowKindOf(L);
     if (rk === "farm") continue;
     const c = finite(L.c);
     if (c === null || c >= T) continue;
@@ -273,6 +324,7 @@ function* evidenceSteps(bundle, { cfg, cut, synthDemand = false } = {}) {
     const vmin = finite(L.vmin);
     const floor = Math.max(mk ? mk.floor : U.floorFor(m), vmin || 0);
     const ex = !!L.ex && !!L.ck;
+    const rb = finite(L.rb);
     const R = {
       id: String(L.id),
       g: String(L.g || ""),
@@ -289,6 +341,10 @@ function* evidenceSteps(bundle, { cfg, cut, synthDemand = false } = {}) {
       blocked: !mk || mk.blocked,
       off: !!(mk && mk.off),
       advisable: false,
+      // A row rebundled AFTER the cut holds today's contents, not the ones it held then (a backtest
+      // sees the row's present ck/bk/n): no offer-level evidence and no advice from it — it still
+      // counts for the game's demand (H14). In a live run rebundledAt is always before `now`.
+      offerEv: !(rb !== null && rb >= T),
       ck: L.ck || null,
       bk: L.bk || "",
       ex,
@@ -309,14 +365,15 @@ function* evidenceSteps(bundle, { cfg, cut, synthDemand = false } = {}) {
       ageDays: U.round2((T - c) / DAY),
       qty: finite(L.qty),
       qr: finite(L.qr),
-      rb: finite(L.rb),
+      rb,
       pack: finite(L.pack),
       units: Array.isArray(L.units) ? L.units : [],
       sales,
       firstSaleT: sales.length ? sales[0].t : null,
+      lastSaleT: sales.length ? sales[sales.length - 1].t : null,
       expo,
     };
-    R.advisable = isAdvisable(R);
+    R.advisable = isAdvisable(R) && R.offerEv;
     rows.push(R);
     byId.set(R.id, R);
     if (R.rb !== null) rbById.set(R.id, R.rb);
@@ -326,18 +383,22 @@ function* evidenceSteps(bundle, { cfg, cut, synthDemand = false } = {}) {
 
   // 3. priced orders inside the reference window, one per buyer order
   const refLo = T - C.refDays * DAY;
-  const pricedUnits = salesBefore.filter((s) => {
+  const pricedUnits = [];
+  for (const s of salesBefore) {
     const p = num(s.p, 0);
-    const k = kindOfSale(s);
-    return p > 0 && p <= U.MAX_REAL_PRICE && !NO_PRICE_SRC.has(lower(s.src)) && k !== "bulk" && k !== "lot" && MARKETS.includes(lower(s.m)) && s.t >= refLo;
-  });
-  const orders = perOrder(pricedUnits).map((s) => {
+    if (p > 0 && p <= U.MAX_REAL_PRICE && !NO_PRICE_SRC.has(lower(s.src)) && MARKETS.includes(lower(s.m)) && s.t >= refLo) {
+      const k = kindOfSale(s);
+      if (k !== "bulk" && k !== "lot") pricedUnits.push(s);
+    }
+    if ((++tick & (EVERY - 1)) === 0) yield;
+  }
+  const orders = [];
+  for (const s of perOrder(pricedUnits)) {
     const rb = s.lid ? rbById.get(s.lid) : undefined;
-    const m = lower(s.m);
-    return {
+    orders.push({
       g: String(s.g || ""),
       f: s.f === "noclaim" ? "noclaim" : "claim",
-      m,
+      m: lower(s.m),
       ck: s.ex && s.ck ? s.ck : null,
       bk: s.bk || "",
       ex: !!s.ex,
@@ -351,20 +412,25 @@ function* evidenceSteps(bundle, { cfg, cut, synthDemand = false } = {}) {
       // sold before its row was rebundled: the contents then were not recorded, so it is no evidence
       // for the offer the row holds now (kept for the venue and the game's demand)
       pre: rb !== undefined && rb !== null && s.t < rb,
-    };
-  });
+    });
+    if ((++tick & (EVERY - 1)) === 0) yield;
+  }
+  // Every price index is per FARM (H5): the two farms sell different things (an account with its drops
+  // claimed vs one whose drops vanish when the wave's claim window ends), so one farm's orders never
+  // price the other's offers — not even through the venue median. byGFM was already per farm.
   const idx = { byM: new Map(), byMCk: new Map(), byMBk: new Map(), byCk: new Map(), byBk: new Map(), byGFM: new Map() };
   for (const o of orders) {
-    pushTo(idx.byM, o.m, o);
+    pushTo(idx.byM, o.f + "|" + o.m, o);
     pushTo(idx.byGFM, o.g + "|" + o.f + "|" + o.m, o);
+    if ((++tick & (EVERY - 1)) === 0) yield;
     if (o.pre) continue;
     if (o.ck) {
-      pushTo(idx.byMCk, o.m + "|" + o.ck, o);
-      pushTo(idx.byCk, o.ck, o);
+      pushTo(idx.byMCk, o.f + "|" + o.m + "|" + o.ck, o);
+      pushTo(idx.byCk, o.f + "|" + o.ck, o);
     }
     if (o.bk && !o.bk.endsWith("|?")) {
-      pushTo(idx.byMBk, o.m + "|" + o.bk, o);
-      pushTo(idx.byBk, o.bk, o);
+      pushTo(idx.byMBk, o.f + "|" + o.m + "|" + o.bk, o);
+      pushTo(idx.byBk, o.f + "|" + o.bk, o);
     }
   }
 
@@ -373,10 +439,12 @@ function* evidenceSteps(bundle, { cfg, cut, synthDemand = false } = {}) {
   // 4. the tracker's translator, fed the same sales in its own format. A history-only market's
   //    sales are left out entirely (the translator itself refuses Digiseller; the owner's GGSel switch
   //    must refuse the same way). Junk and demand-only prices read as unpriced. It keeps only priced,
-  //    non-hand sales inside its window (analyze.windowed), so only those are converted.
+  //    non-hand sales inside its window (analyze.windowed), so only those are converted. Translation
+  //    is a market-to-market ratio of the SAME items, so both farms' sales teach it.
   const adapted = [];
   let anon = 0;
   for (const s of salesBefore) {
+    if ((++tick & (EVERY - 1)) === 0) yield;
     // "other" (a hand sale's free-text market, plan §2.1) and anything else off the seven keys is
     // "unknown" to the translator, which never reads an unknown market's price
     const m = MARKETS.includes(lower(s.m)) ? lower(s.m) : "unknown";
@@ -401,6 +469,9 @@ function* evidenceSteps(bundle, { cfg, cut, synthDemand = false } = {}) {
       gameKey: s.g || "",
     });
   }
+  // the tracker's translator is one synchronous call (~70–100 ms on Node 20 at production volume):
+  // the async run starts it on a fresh budget, so nothing before it adds to that stretch
+  yield FRESH;
   const tr = analyze.buildTranslator(adapted, T, C.refDays);
   // translate()'s fallback filters every order on each call; the ratio depends only on the two
   // markets, so it is asked once per pair (thousands of offers, 7 × 6 pairs).
@@ -413,8 +484,15 @@ function* evidenceSteps(bundle, { cfg, cut, synthDemand = false } = {}) {
     }
     return ratios.get(k);
   };
-
-  yield;
+  // every pair asked now, while the async run can still yield between them
+  yield FRESH;
+  for (const from of MARKETS) {
+    for (const to of MARKETS) {
+      if (from === to) continue;
+      ratio(from, to);
+      yield;
+    }
+  }
 
   // 5. the farm brain's newest row per game × farm, fresh enough; or, in a backtest, our own
   //    45-day average at the cut (the farm brain's default estimator)
@@ -430,31 +508,54 @@ function* evidenceSteps(bundle, { cfg, cut, synthDemand = false } = {}) {
       if (!prev || at > prev.at) demand.set(k, Object.assign({}, d, { at }));
     }
   }
+  yield;
 
   // 6. radar: the game rows and the rivals' sale feed, by game × market
   const radar = { byGame: new Map(), feed: new Map() };
   const rg = (b.radar && b.radar.games) || [];
   for (const r of rg) if (r && r.key) radar.byGame.set(r.key, r);
   for (const e of (b.radar && b.radar.feed) || []) {
+    if ((++tick & (EVERY - 1)) === 0) yield;
     if (!e || !(num(e.t, NaN) < T)) continue;
     pushTo(radar.feed, e.g + "|" + lower(e.m), e);
   }
 
-  // 7. the bulk channel: weekly units (demand only) and its per-account price series
+  // 7. the bulk channel: weekly units (demand only) and its per-account price series; and the owner's
+  //    hand sales, which take stock no shelf offered (H6: neither is single-shelf demand)
   const bulk = { weekly: new Map(), perAccount: new Map(), live: new Set() };
+  const hand = { weekly: new Map() };
   const bulkLo = T - 30 * DAY;
+  const handKey = (g, f) => g + "|" + (f === "noclaim" ? "noclaim" : "claim");
   for (const d of b.demandOnly || []) {
-    if (!d || !BULK_SRC.has(lower(d.src)) || !(d.t >= bulkLo && d.t < T)) continue;
-    bulk.weekly.set(d.g, (bulk.weekly.get(d.g) || 0) + 7 / 30);
+    if ((++tick & (EVERY - 1)) === 0) yield;
+    if (!d || !(d.t >= bulkLo && d.t < T)) continue;
+    const src = lower(d.src);
+    if (BULK_SRC.has(src)) bulk.weekly.set(d.g, (bulk.weekly.get(d.g) || 0) + 7 / 30);
+    else if (src === "hand") hand.weekly.set(handKey(d.g, d.f), (hand.weekly.get(handKey(d.g, d.f)) || 0) + 7 / 30);
   }
+  for (const s of salesBefore) {
+    if ((++tick & (EVERY - 1)) === 0) yield;
+    if (s.t >= bulkLo && lower(s.src) === "hand") hand.weekly.set(handKey(s.g, s.f), (hand.weekly.get(handKey(s.g, s.f)) || 0) + 7 / 30);
+  }
+  // live packs of the game on a market, and of each SET (the pack's own content key): a single row's
+  // price anchors the next pack of the same set (bulkPacks/pricing.pickAnchor). A pack sent in the window
+  // names its set only when the loader carries it (`ck`): without one it is the game's, never a set's.
+  bulk.liveCk = new Set();
   for (const x of b.bulkPrices || []) {
     if (!x || !(x.t < T)) continue;
     pushTo(bulk.perAccount, x.g, num(x.pa));
-    if (x.t >= bulkLo) bulk.live.add(x.g + "|" + lower(x.m));
+    if (x.t >= bulkLo) {
+      bulk.live.add(x.g + "|" + lower(x.m));
+      if (x.ck) bulk.liveCk.add(lower(x.m) + "|" + x.ck);
+    }
   }
   for (const L of b.listings || []) {
-    const rk = L ? rowKindOf(L) : "";
-    if ((rk === "bulk" || rk === "lot") && lower(L.st) === LIVE_STATUS && finite(L.c) !== null && L.c < T) bulk.live.add(L.g + "|" + lower(L.m));
+    if ((++tick & (EVERY - 1)) === 0) yield;
+    const rk = L ? kindById.get(String(L.id)) || rowKindOf(L) : "";
+    if ((rk === "bulk" || rk === "lot") && lower(L.st) === LIVE_STATUS && finite(L.c) !== null && L.c < T) {
+      bulk.live.add(L.g + "|" + lower(L.m));
+      if (L.ck) bulk.liveCk.add(lower(L.m) + "|" + L.ck);
+    }
   }
 
   // 8. no-claim units and wave ends: how long stock lasts once its wave is over
@@ -469,13 +570,16 @@ function* evidenceSteps(bundle, { cfg, cut, synthDemand = false } = {}) {
     const ends = list.map((w) => finite(w.endAt)).filter((t) => t !== null);
     waveEnds.set(g, ends);
   }
+  yield;
   // A unit's state at the cut. Sold and expired come from their dates (an expired or released unit
   // was on sale until its expiry). A unit whose ledger status is neither listed nor sold and that has
   // no expiry was taken off sale with no date of its own: its last write (U.u) is the approximate
   // moment, so a backtest cut before it still sees the unit on sale, and one after it (or any cut,
-  // when no write time is known) sees it "off" — never live stock.
+  // when no write time is known) sees it "off" — never live stock. Copied field by field (a fixed shape:
+  // Object.assign on 100k records is the slowest line of a run on Node 20), the bundle never mutated.
   const units = [];
   for (const u of (b.noclaim && b.noclaim.units) || []) {
+    if ((++tick & (EVERY - 1)) === 0) yield;
     if (!u || !(num(u.l, Infinity) < T)) continue;
     const s = finite(u.s);
     const x = finite(u.x);
@@ -483,12 +587,13 @@ function* evidenceSteps(bundle, { cfg, cut, synthDemand = false } = {}) {
     const offAt = finite(u.u);
     const off = !!st && !UNIT_ON_SALE.has(st) && x === null && (offAt === null || offAt <= T);
     const stc = s !== null && s < T ? "sold" : x !== null && x < T ? "expired" : off ? "off" : "listed";
-    units.push(Object.assign({}, u, { stc }));
+    units.push({ g: u.g, m: u.m, st: u.st, l: u.l, s: u.s, p: u.p, sm: u.sm, x: u.x, u: u.u, lids: u.lids, bk: u.bk, camps: u.camps, stc });
   }
-  const waveEndOf = (u) => waveEndFor(waves.get(u.g) || [], u);
+  const waveEndOf = makeWaveEndOf(waves);
   const winAll = [];
   const winBy = new Map();
   for (const u of units) {
+    if ((++tick & (EVERY - 1)) === 0) yield;
     if (u.stc !== "expired") continue;
     const end = waveEndOf(u);
     if (end === null || !(u.x >= end)) continue;
@@ -496,22 +601,39 @@ function* evidenceSteps(bundle, { cfg, cut, synthDemand = false } = {}) {
     winAll.push(d);
     pushTo(winBy, u.g, d);
   }
+  yield;
   const claimWindowDays = winAll.length ? quantileAny(winAll, 0.5) : 0;
   const claimWindowByGame = new Map();
   for (const [g, list] of winBy) claimWindowByGame.set(g, quantileAny(list, 0.5));
+  yield;
+  // listing id → the bundle key its no-claim units were attached under ("" when they disagree): the
+  // bundle order reads it per offer. Built here, where the async run can yield inside it — at 100,000
+  // units it is ~50–70 ms on Node 20 in one piece (P20-4).
+  const bkByLid = new Map();
+  for (const u of units) {
+    if ((++tick & (EVERY - 1)) === 0) yield;
+    const bk = lower(u.bk);
+    if (!bk) continue;
+    for (const lid of u.lids || []) {
+      if (!bkByLid.has(lid)) bkByLid.set(lid, bk);
+      else if (bkByLid.get(lid) !== bk) bkByLid.set(lid, "");
+    }
+  }
+  yield;
 
   // 9. deliberate ladders: an exact offer live at two or more prices on one market with any row the
-  //    owner made (origin manual or unclaimed) among them — an experiment, never "corrected"
+  //    OWNER made among them — hand-made (origin manual) or claim-at-sale (owner rows of any origin).
+  //    Two system-made rows (auto or unclaimed) at two prices are drift, worth advice, not a test (C4).
   const rungs = new Map();
   const owned = new Set();
   const sysCk = new Set();
   for (const R of rows) {
-    if (R.system && R.ex) sysCk.add(R.m + "|" + R.ck);
-    if (!R.activeAtCut || !R.ex || !(R.rk === "system" || R.rk === "hand" || R.rk === "cas")) continue;
+    if (R.system && R.ex && R.offerEv) sysCk.add(R.m + "|" + R.ck);
+    if (!R.activeAtCut || !R.ex || !R.offerEv || !(R.rk === "system" || R.rk === "hand" || R.rk === "cas")) continue;
     const k = R.m + "|" + R.ck;
     if (!rungs.has(k)) rungs.set(k, new Set());
     rungs.get(k).add(U.round2(R.p));
-    if (R.o !== "auto") owned.add(k);
+    if (R.hand || R.cas) owned.add(k);
   }
   const ladders = new Set();
   for (const [k, set] of rungs) if (set.size >= 2 && owned.has(k)) ladders.add(k);
@@ -522,13 +644,17 @@ function* evidenceSteps(bundle, { cfg, cut, synthDemand = false } = {}) {
   const ggselVmin = new Map();
   const gameLabel = new Map();
   for (const R of rows) {
+    if ((++tick & (EVERY - 1)) === 0) yield;
     pushTo(rowsByCell, R.g + "|" + R.f + "|" + R.m, R);
     pushTo(rowsByGF, R.g + "|" + R.f, R);
     if (R.m === "ggsel" && R.vmin !== null) ggselVmin.set(R.g, Math.max(ggselVmin.get(R.g) || 0, R.vmin));
     if (R.g && R.gl && !gameLabel.has(R.g)) gameLabel.set(R.g, R.gl);
   }
   const salesByGFM = new Map();
-  for (const s of salesBefore) pushTo(salesByGFM, s.g + "|" + (s.f === "noclaim" ? "noclaim" : "claim") + "|" + lower(s.m), s);
+  for (const s of salesBefore) {
+    if ((++tick & (EVERY - 1)) === 0) yield;
+    pushTo(salesByGFM, s.g + "|" + (s.f === "noclaim" ? "noclaim" : "claim") + "|" + lower(s.m), s);
+  }
 
   const ev = {
     cut: T,
@@ -546,7 +672,8 @@ function* evidenceSteps(bundle, { cfg, cut, synthDemand = false } = {}) {
     demand,
     radar,
     bulk,
-    noclaim: { units, waves, waveEnds, claimWindowDays, claimWindowByGame, waveEndOf },
+    hand,
+    noclaim: { units, waves, waveEnds, claimWindowDays, claimWindowByGame, waveEndOf, bkByLid },
     ladders,
     sysCk,
     rowsByCell,
@@ -559,9 +686,70 @@ function* evidenceSteps(bundle, { cfg, cut, synthDemand = false } = {}) {
     _gs: new Map(),
     _memo: new Map(),
   };
-  if (synthDemand) synthesiseDemand(ev);
+  yield;
+  if (synthDemand) yield* synthesiseDemand(ev);
   ev.gameFarms = gameFarmsOf(ev);
   return ev;
+}
+
+/**
+ * A memoised `waveEndOf(u)` over one bundle's waves (P20-1, P20-4): each wave's names are
+ * lower-cased once, and each unit's answer is kept (a WeakMap on the unit record), so the scorer's daily
+ * samples and the claim-window pass never re-read a wave list per unit. Exported for score.js.
+ * @param {Map<string, Array>} waves game key → its waves (sorted by end)
+ */
+function makeWaveEndOf(waves) {
+  const prepared = new Map();
+  const prep = (g) => {
+    let p = prepared.get(g);
+    if (!p) {
+      p = (waves.get(g) || []).map((w) => ({
+        end: finite(w.endAt),
+        start: finite(w.startAt),
+        names: new Set([lower(w.name), lower(w.wave), lower(w.ev), lower((w.ev || "") + " " + (w.wave || ""))].filter(Boolean)),
+      }));
+      prepared.set(g, p);
+    }
+    return p;
+  };
+  const cache = new WeakMap();
+  return (u) => {
+    if (!u || typeof u !== "object") return null;
+    if (cache.has(u)) return cache.get(u);
+    const v = waveEndForPrepared(prep(u.g), u);
+    cache.set(u, v);
+    return v;
+  };
+}
+
+function waveEndForPrepared(list, u) {
+  if (!list.length) return null;
+  let best = null;
+  const camps = u.camps || [];
+  if (camps.length) {
+    for (const w of list) {
+      if (w.end === null) continue;
+      let hit = false;
+      for (const c of camps) {
+        if (w.names.has(lower(c))) {
+          hit = true;
+          break;
+        }
+      }
+      if (hit) best = best === null ? w.end : Math.max(best, w.end);
+    }
+    if (best !== null) return best;
+  }
+  const l = finite(u.l);
+  let startBest = -Infinity;
+  for (const w of list) {
+    if (w.end === null || w.start === null || l === null || w.start > l) continue;
+    if (w.start > startBest || (w.start === startBest && w.end > best)) {
+      startBest = w.start;
+      best = w.end;
+    }
+  }
+  return best;
 }
 
 // Nearest-rank median that keeps zeros (stats.quantile drops values ≤ 0, and a claim window of
@@ -577,57 +765,41 @@ function quantileAny(list, f) {
  * (latest end), else the wave of its game that was live when it was listed (latest start before
  * listedAt), else null. Only the end matters: the drops vanish a claim window after it. A unit's
  * drops carry the RAW campaign name ("Omega Season 18 - Week 1"), which the wave's `name` holds; the
- * label forms (wave, event, "event wave") match a wave written without it.
+ * label forms (wave, event, "event wave") match a wave written without it. (One call; a run uses the
+ * memoised makeWaveEndOf.)
  */
 function waveEndFor(list, u) {
-  if (!list.length) return null;
-  const camps = (u.camps || []).map(lower).filter(Boolean);
-  let best = null;
-  if (camps.length) {
-    for (const w of list) {
-      const end = finite(w.endAt);
-      if (end === null) continue;
-      const names = [lower(w.name), lower(w.wave), lower(w.ev), lower((w.ev || "") + " " + (w.wave || ""))].filter(Boolean);
-      if (camps.some((c) => names.includes(c))) best = best === null ? end : Math.max(best, end);
-    }
-    if (best !== null) return best;
-  }
-  const l = finite(u.l);
-  let startBest = -Infinity;
-  for (const w of list) {
-    const s = finite(w.startAt);
-    const end = finite(w.endAt);
-    if (end === null || s === null || l === null || s > l) continue;
-    if (s > startBest || (s === startBest && end > best)) {
-      startBest = s;
-      best = end;
-    }
-  }
-  return best;
+  return makeWaveEndOf(new Map([[u && u.g, list || []]]))(u);
 }
 
-/** Backtest demand: our own 45-day rate at the cut per game × farm, stock = units listed at the cut. */
-function synthesiseDemand(ev) {
+/**
+ * Backtest demand: our own 45-day rate at the cut per game × farm. Stock on hand is NOT known at a past
+ * cut (units listed is a different number — H7: reading it as stock made 57 cells "scarce" where 3
+ * were), so `on` is null: no cover, and the regime comes from skip / fading / perishing only.
+ */
+function* synthesiseDemand(ev) {
   const T = ev.cut;
   const per = new Map();
   const get = (g, f) => {
     const k = g + "|" + f;
-    if (!per.has(k)) per.set(k, { k: g, f, n45: 0, n30: 0, on: 0 });
+    if (!per.has(k)) per.set(k, { k: g, f, n45: 0, n30: 0 });
     return per.get(k);
   };
+  let tick = 0;
   for (const s of ev.salesBefore) {
+    if ((++tick & (EVERY - 1)) === 0) yield;
     if (!s.g || !(s.t > T - 45 * DAY)) continue;
     const e = get(s.g, s.f === "noclaim" ? "noclaim" : "claim");
     e.n45++;
     if (s.t > T - 30 * DAY) e.n30++;
   }
   for (const d of ev.bundle.demandOnly || []) {
+    if ((++tick & (EVERY - 1)) === 0) yield;
     if (!d || !d.g || !(d.t > T - 45 * DAY && d.t < T)) continue;
     const e = get(d.g, d.f === "noclaim" ? "noclaim" : "claim");
     e.n45++;
     if (d.t > T - 30 * DAY) e.n30++;
   }
-  for (const R of ev.rows) if (R.system && R.activeAtCut) get(R.g, R.f).on += shelfUnits(R);
   for (const e of per.values()) {
     const wl = liveWave(ev, e.k, T);
     const w = U.round2((e.n45 * 7) / 45);
@@ -640,7 +812,7 @@ function synthesiseDemand(ev) {
       c: null,
       w,
       t: null,
-      on: e.on,
+      on: null,
       fl: 0,
       a30: U.round2((e.n30 * 7) / 30),
       a45: w,
@@ -725,6 +897,9 @@ module.exports = {
   exposureOf,
   activeAt,
   shelfUnits,
+  daysLeftOf,
+  makeWaveEndOf,
+  YIELD_MS,
   buildEvidence,
   buildEvidenceAsync,
   waveEndFor,

@@ -62,27 +62,49 @@ function ordersByCk(b, m) {
 // clipped to the 90-day window; bucket hazards S / D, log-linear between bucket centres (plan §4.3).
 const EDGES = [0.8, 1.0, 1.2, 1.5, 2.0, Infinity];
 const CENTRES = [0.7, 0.9, 1.1, 1.35, 1.75, 2.5];
+// The law as the DATA shows it, measured independently of the model: law A sells by OFFER (H3) — one buyer
+// stream at h(x_min), x_min the offer's lowest live ask / ref, each buyer taking the cheapest row. So each offer's
+// in-stock time inside the 90-day window is cut where its live set changes; each span's days go to the bucket of
+// its x_min, each sale to the state just before it.
 function gameflipHazard(b) {
   const now = b.now;
+  const lo = now - 90 * DAY;
   const ords = ordersByCk(b, "gameflip");
   const fs1 = firstSaleByLid(b);
   const S = [0, 0, 0, 0, 0, 0];
   const D = [0, 0, 0, 0, 0, 0];
   const xs = [];
+  const byOffer = new Map();
   for (const L of b.listings) {
     if (L.m !== "gameflip" || L.o !== "auto" || L.kind !== "single" || L.f !== "claim") continue;
     const o = ords.get(L.ck);
     if (!o || o.length < 3) continue;
     const x = Math.max(L.p, 0.75) / median(o);
     const sold = fs1.get(L.id);
-    const end = Math.min(sold != null ? sold : L.st === "active" ? now : L.u, L.c + 30 * DAY);
-    const a = Math.max(L.c, now - 90 * DAY);
-    const z = Math.min(end, now);
-    if (z <= a) continue;
+    const end = Math.min(sold != null ? sold : L.st === "active" ? now : L.u, L.c + 30 * DAY, now);
+    const a = Math.max(L.c, lo);
+    if (end <= a) continue;
     xs.push(x);
-    const bi = EDGES.findIndex((e) => x <= e);
-    D[bi] += (z - a) / DAY;
-    if (sold != null && sold >= a && sold <= z) S[bi]++;
+    if (!byOffer.has(L.ck)) byOffer.set(L.ck, []);
+    byOffer.get(L.ck).push({ a, z: end, x, sold: sold != null && sold >= a && sold <= end });
+  }
+  const bucket = (x) => EDGES.findIndex((e) => x <= e);
+  for (const rows of byOffer.values()) {
+    const ev = [];
+    for (const r of rows) ev.push({ t: r.a, open: true, r }, { t: r.z, open: false, r });
+    ev.sort((p, q) => p.t - q.t || (p.open === q.open ? 0 : p.open ? 1 : -1));
+    const live = new Set();
+    let last = null;
+    const xmin = () => Math.min(...[...live].map((r) => r.x));
+    for (const e of ev) {
+      if (last !== null && live.size && e.t > last) D[bucket(xmin())] += (e.t - last) / DAY;
+      if (e.open) live.add(e.r);
+      else {
+        if (e.r.sold && live.size) S[bucket(xmin())]++;
+        live.delete(e.r);
+      }
+      last = e.t;
+    }
   }
   const h = S.map((s, i) => s / D[i]);
   const at = (x) => {
@@ -265,8 +287,8 @@ function checkShape(b) {
   assert.deepEqual(b.bulk, {
     markets: ["eldorado", "g2g"],
     tiers: [
-      { size: 5, discountPct: 10 },
-      { size: 10, discountPct: 20 },
+      { minQty: 5, discountPct: 10 },
+      { minQty: 10, discountPct: 20 },
     ],
     reserveSingles: 2,
   });
@@ -528,8 +550,10 @@ test("A: Gameflip claim rows recover the planted elasticity h(x) = h0 exp(-beta 
     const h1 = hz.at(1);
     assert.ok(Math.abs(h1 / P.A.h0 - 1) <= P.A.h0TolPct / 100, `h(1) = ${h1.toFixed(4)}`);
     assert.ok(Math.min(...hz.xs) <= 0.65 && Math.max(...hz.xs) >= 2.1, "asks spread over 0.6-2.2");
+    // every bucket is an offer's state with sales; the dearest (x > 2) is one only while every cheaper row of
+    // the offer is gone, so it holds the fewest (H3: one buyer stream per offer takes the cheapest row)
     assert.ok(
-      hz.S.every((s) => s >= 5),
+      hz.S.every((s) => s >= 3) && hz.S.slice(0, 5).every((s) => s >= 5),
       "every bucket has sales: " + hz.S.join(","),
     );
   }

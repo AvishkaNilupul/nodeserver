@@ -466,7 +466,10 @@ function pushSingleRow(ctx, game, entry, m, price, c, sim, extra = {}) {
   return L;
 }
 
-// PLANTED.A: the Gameflip claim rows of one offer, asks spread over 0.6-2.2 x R and sales drawn from the law. Then
+// PLANTED.A: the Gameflip claim rows of one offer, asks spread over 0.6-2.2 x R, sold the way buyers really
+// buy (H3): ONE buyer stream per offer at h(x_min) a day, x_min = the offer's lowest live ask / R, each buyer
+// taking our cheapest live row (ties: the oldest). A dear row sells only once every cheaper row is gone — its
+// slow sale is its rank on our own shelf, which the model must not read as the buyers' price response. Then
 // older "anchor" rows at exactly R (created 96-125 days ago and ended before the 90-day fit window opens, inside
 // the 180-day reference window) until R is strictly the median of the offer's Gameflip orders — so the model's
 // `ref` (the realised median of that exact offer, plan §4.2 step 1) IS the R the law was written in.
@@ -476,7 +479,36 @@ function lawRows(ctx, rng, game, entry, { rows, fromDays = 88, toDays = 0.3, liv
   const law = LAWS.claim.gameflip;
   const floor = floorFor("gameflip");
   const xs = designXs(rng, rows);
-  const made = [];
+  const plan = [];
+  for (let i = 0; i < rows; i++) {
+    // A quarter of each bucket's rows are recent (most of them still live), the rest old enough to have had their
+    // whole 30-day life inside the fit window: the live rows the brain must advise on, without letting censoring at
+    // `now` blur the law.
+    const { f } = strataFor(ctx, xs[i]);
+    const c =
+      f < RECENT_SHARE
+        ? now - RECENT_DAYS * DAY + (f / RECENT_SHARE) * (RECENT_DAYS - toDays) * DAY
+        : now - fromDays * DAY + ((f - RECENT_SHARE) / (1 - RECENT_SHARE)) * (fromDays - GF_EXPIRY_DAYS) * DAY;
+    const ask = Math.max(floor, snap05(xs[i] * R));
+    // a take-down chosen in advance, independent of any sale: censoring, so the law still holds
+    const delistT = rng.chance(0.1) ? c + rng.range(2, 28) * DAY : Infinity;
+    plan.push({ c: Math.round(c), ask, delistT, idx: i });
+  }
+  // A game short of stock keeps only its newest live rows; the rest were taken down unsold a little before now.
+  // Taking a row down changes who the cheapest is, so the stream is replayed (same buyer draws) until it holds.
+  const seedLabel = "buyers:" + game.key + "|" + entry.offer.ck;
+  let out = simulateOfferStream(ctx, plan, law, R, seedLabel);
+  for (let pass = 0; pass < 3 && Number.isFinite(liveCap); pass++) {
+    const live = out.filter((o) => o.st === "active").sort((a, b) => b.c - a.c);
+    const extra = live.slice(liveCap);
+    if (!extra.length) break;
+    for (const o of extra) {
+      const p = plan[o.idx];
+      p.delistT = Math.round(Math.max(p.c + HOUR, now - rng.range(0.4, 3) * DAY));
+      if (p.delistT >= now) p.delistT = now - MIN;
+    }
+    out = simulateOfferStream(ctx, plan, law, R, seedLabel);
+  }
   let below = 0;
   let above = 0;
   let at = 0;
@@ -485,29 +517,11 @@ function lawRows(ctx, rng, game, entry, { rows, fromDays = 88, toDays = 0.3, liv
     else if (p > R + 1e-9) above++;
     else at++;
   };
-  for (let i = 0; i < rows; i++) {
-    // A quarter of each bucket's rows are recent (most of them still live), the rest old enough to have had their
-    // whole 30-day life inside the fit window: the live rows the brain must advise on, without letting censoring at
-    // `now` blur the law.
-    const { u, f } = strataFor(ctx, xs[i]);
-    const c =
-      f < RECENT_SHARE
-        ? now - RECENT_DAYS * DAY + (f / RECENT_SHARE) * (RECENT_DAYS - toDays) * DAY
-        : now - fromDays * DAY + ((f - RECENT_SHARE) / (1 - RECENT_SHARE)) * (fromDays - GF_EXPIRY_DAYS) * DAY;
-    const ask = Math.max(floor, snap05(xs[i] * R));
-    const sim = simulateSingle(ctx, rng, c, hazard(law, ask / R), { u, delistP: 0.1 });
-    const L = pushSingleRow(ctx, game, entry, "gameflip", ask, c, sim, { smin });
-    if (sim.st === "sold") tally(ask);
+  const made = [];
+  for (const o of out) {
+    const L = pushSingleRow(ctx, game, entry, "gameflip", o.ask, o.c, o, { smin });
+    if (o.st === "sold") tally(o.ask);
     made.push(L);
-  }
-  // A game short of stock keeps only its newest live rows; the rest were taken down unsold. A delist chosen while
-  // a row is unsold is independent censoring, so the law still holds.
-  const live = made.filter((L) => L.st === "active").sort((a, b) => b.c - a.c);
-  for (const L of live.slice(Number.isFinite(liveCap) ? liveCap : live.length)) {
-    L.st = "delisted";
-    L.qty = 0;
-    L.u = Math.round(Math.max(L.c + HOUR, now - rng.range(0.4, 3) * DAY));
-    if (L.u >= now) L.u = now - MIN;
   }
   const need = Math.max(Math.abs(below - above) + 1 - at, 3 - (below + above + at), 0);
   // Anchors are taken down unsold before the fit window opens: the loop stops on a sale, so an anchor's outcome is
@@ -524,6 +538,67 @@ function lawRows(ctx, rng, game, entry, { rows, fromDays = 88, toDays = 0.3, liv
   }
   entry.prices.gameflip = R;
   return made;
+}
+
+/**
+ * One offer's Gameflip rows under one buyer stream (law A, H3). Rows open at `c` and close at their planned
+ * take-down, their 30-day expiry or `now`; while any is live, buyers arrive at h(x_min) a day (memoryless, so
+ * the wait is drawn afresh at every change of the live set) and each takes the cheapest live row, the oldest
+ * first on a tie. The buyer draws come from their own seeded stream, so a replay with one take-down moved
+ * changes nothing before it. Returns each row's fate in plan order.
+ */
+function simulateOfferStream(ctx, plan, law, R, seedLabel) {
+  const now = ctx.now;
+  const rng = makeRng(ctx.seed, seedLabel);
+  const fate = plan.map((p) => ({ idx: p.idx, c: p.c, ask: p.ask, end: Math.min(p.delistT, p.c + GF_EXPIRY_DAYS * DAY, now), st: null, t: null, u: null }));
+  const order = fate.slice().sort((a, b) => a.c - b.c || a.idx - b.idx);
+  const live = [];
+  let next = 0;
+  let t = order.length ? order[0].c : now;
+  for (;;) {
+    while (next < order.length && order[next].c <= t) live.push(order[next++]);
+    let tEnd = Infinity;
+    for (const r of live) tEnd = Math.min(tEnd, r.end);
+    const tE = Math.min(next < order.length ? order[next].c : Infinity, tEnd, now);
+    if (live.length) {
+      let best = live[0];
+      for (const r of live) if (r.ask < best.ask - 1e-9 || (Math.abs(r.ask - best.ask) <= 1e-9 && (r.c < best.c || (r.c === best.c && r.idx < best.idx)))) best = r;
+      const tb = t + rng.exp(hazard(law, best.ask / R)) * DAY;
+      if (tb < tE) {
+        t = tb;
+        best.st = "sold";
+        best.t = Math.round(tb);
+        live.splice(live.indexOf(best), 1);
+        continue;
+      }
+    }
+    if (tE >= now && next >= order.length) break;
+    t = tE;
+    for (let i = live.length - 1; i >= 0; i--) if (live[i].end <= t && live[i].end < now) live.splice(i, 1);
+    if (t >= now && next >= order.length) break;
+  }
+  // every row's record, the way simulateSingle writes it
+  const pick = makeRng(ctx.seed, seedLabel + ":records");
+  for (const r of fate) {
+    if (r.st === "sold") {
+      r.u = Math.min(now, r.t + pick.range(1, 30) * MIN);
+      continue;
+    }
+    const expiryT = r.c + GF_EXPIRY_DAYS * DAY;
+    if (r.end >= now) {
+      r.st = "active";
+      r.u = Math.min(now - MIN, r.c + pick.range(0.1, 6) * HOUR);
+    } else if (r.end < expiryT) {
+      r.st = "delisted";
+      r.u = r.end;
+    } else {
+      // Expired: rows stayed `active` past their expiry until the cleanup pass, so `updatedAt` overstates
+      // exposure — the model must cap Gameflip exposure at createdAt + 30 d (plan §1.3 #10).
+      r.st = "delisted";
+      r.u = expiryT < ctx.cleanupAt ? ctx.cleanupAt + pick.range(0, 30) * MIN : Math.min(now - MIN, expiryT + HOUR);
+    }
+  }
+  return fate;
 }
 
 // Rows of one offer on a quantity / order-unit market (or ZeusX), priced around the market's level with a small
@@ -1927,8 +2002,8 @@ function generate({ seed = 1, large = false, now = DEFAULT_NOW } = {}) {
     bulk: {
       markets: ["eldorado", "g2g"],
       tiers: [
-        { size: 5, discountPct: 10 },
-        { size: 10, discountPct: 20 },
+        { minQty: 5, discountPct: 10 },
+        { minQty: 10, discountPct: 20 },
       ],
       reserveSingles: 2,
     },
@@ -2008,9 +2083,11 @@ const PLANTED = {
   laws: LAWS,
   A: {
     what:
-      "Gameflip claim auto rows of EVERY claim game are listed at ask/ref spread over 0.6-2.2 and sell with daily hazard " +
-      "h(x) = h0 * exp(-beta * (x - 1)), censored at a delist time, the 30-day expiry or now. Older rows at x = 1 make " +
-      "the reference price exactly the realised median of the offer's Gameflip orders (exact-here, >= 3 orders)",
+      "Gameflip claim auto rows of EVERY claim game are listed at ask/ref spread over 0.6-2.2; each OFFER has one buyer " +
+      "stream at h(x_min) = h0 * exp(-beta * (x_min - 1)) a day, x_min its lowest live ask / ref, each buyer taking the " +
+      "cheapest live row (H3: buyers take our cheapest row, so a dear row's rank is not a price response). Rows are " +
+      "censored at a take-down, the 30-day expiry or now. Older rows at x = 1 make the reference price exactly the " +
+      "realised median of the offer's Gameflip orders (exact-here, >= 3 orders)",
     market: "gameflip",
     farm: "claim",
     games: ["alpha quest", "beta arena", "gamma rush"],

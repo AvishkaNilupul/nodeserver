@@ -10,8 +10,11 @@
 //   unknown    no fresh farm-brain row: nothing but the reason, action hold
 // Then the GATES, in this order: confidence (below medium → hold, the price is still logged) → raise
 // rule (a raise needs orders here at or above it, or repeated stock-outs; never on a venue median or
-// a rival's price) → step limit → [no-claim: ceiling] → GGSel raise-only → [no-claim: bundle order, sold floor]
-// → floor LAST (the no-claim floors with the platform's).
+// a rival's price) → step limit → [no-claim: ceiling] → GGSel raise-only → [no-claim: bundle order —
+// from confident offers only, held to the ceiling and the step limit; sold floor — in steps on a live
+// row, in full on a new listing] → floor LAST (the no-claim floors with the platform's). Every price
+// the brain logs or answers goes through this chain: the curve's, a stale row's rung, a test unit's,
+// and the other policies' (M1, M2).
 //
 // PURE. A live row's advice is hold / lower / raise / test, a deliberate ladder is "ladder" (never
 // corrected), a new listing is "new" (or hold below medium confidence), no evidence is "none".
@@ -142,14 +145,25 @@ function gameState(ev, g, f) {
     ev._gs.set(key, gs);
     return gs;
   }
+  // A row without its forecast or its stock is not a row of zeros (M10a: a missing `on` read as 0 made
+  // "scarce: stock covers 0 weeks"). A backtest's synthesised row has no stock by design (H7): its cover
+  // stays unknown and the regime comes from the other signals.
+  const missing = (v) => v === null || v === undefined || v === "" || !Number.isFinite(Number(v));
+  if (missing(d.w) || (missing(d.on) && !d.synth)) {
+    gs.unknown = true;
+    gs.why = "The farm-brain row has no " + (missing(d.w) ? "weekly forecast" : "stock on hand") + ": no advice.";
+    gs.regimeWhy = [gs.why];
+    ev._gs.set(key, gs);
+    return gs;
+  }
   gs.w = num(d.w, 0);
-  gs.on = Math.max(0, num(d.on, 0));
+  gs.on = missing(d.on) ? null : Math.max(0, num(d.on, 0));
   gs.fl = Math.max(0, num(d.fl, 0));
   gs.live = !!d.live;
   gs.hl = d.hl === null || d.hl === undefined ? null : num(d.hl);
   gs.c = d.c || null;
   gs.tier = U.tierOf(gs.w, cfg.tierEdges);
-  gs.cover = gs.w > 0 ? gs.on / gs.w : gs.on > 0 ? Infinity : null;
+  gs.cover = gs.on === null ? null : gs.w > 0 ? gs.on / gs.w : gs.on > 0 ? Infinity : null;
   const a30 = num(d.a30, NaN);
   const a45 = num(d.a45, NaN);
   gs.fading = Number.isFinite(a30) && Number.isFinite(a45) && a45 > 0 && a30 < cfg.fadeRatio * a45;
@@ -279,7 +293,7 @@ function soldFloorOf(ev, ck) {
   return E.memo(ev, "soldFloor|" + ck, () => {
     const lo = ev.cut - 30 * DAY;
     let best = 0;
-    for (const o of ev.idx.byMCk.get("gameflip|" + ck) || []) if (o.t >= lo && o.p > best) best = o.p;
+    for (const o of ev.idx.byMCk.get("noclaim|gameflip|" + ck) || []) if (o.t >= lo && o.p > best) best = o.p;
     return best;
   });
 }
@@ -299,7 +313,8 @@ function stockoutsOf(ev, g, f, m) {
     for (const s of ev.salesByGFM.get(g + "|" + f + "|" + m) || []) if (s.t >= lo) here++;
     let elsewhere = 0;
     for (const mk of U.MARKETS) {
-      if (mk === m) continue;
+      // a history-only market's sales prove nothing about demand anywhere else (M4a)
+      if (mk === m || ev.markets[mk].blocked) continue;
       for (const s of ev.salesByGFM.get(g + "|" + f + "|" + mk) || []) if (s.t >= lo) elsewhere++;
     }
     const ok = rows.length > 0 && here >= ev.cfg.raiseMinSales && empty >= ev.cfg.stockoutShare && elsewhere > 0;
@@ -307,11 +322,48 @@ function stockoutsOf(ev, g, f, m) {
   });
 }
 
-function pAt(ctx, v, p) {
+function pAt(ctx, v, p, days = v.H) {
   if (!(v.ref > 0) || !(p > 0)) return null;
   const hz = ctx.hz && ctx.hz[v.f];
   if (!hz) return null;
-  return H.pH(hz, v.m, v.tier, p / v.ref, v.H);
+  return H.pH(hz, v.m, v.tier, p / v.ref, days);
+}
+
+/**
+ * The live rows of the same offer on the same market that a buyer chooses between (any origin our
+ * shelf shows — system, hand-made, claim-at-sale), as their asks: the competition that sets a row's
+ * rank on a single-unit market (H3).
+ */
+function offerAsks(ev, v, R) {
+  const key = R.ex && R.ck ? "c:" + R.ck : "b:" + R.bk;
+  const out = [];
+  for (const r of ev.rowsByCell.get(R.g + "|" + R.f + "|" + R.m) || []) {
+    if (!r.activeAtCut || r.offerEv === false || !(r.system || r.hand || r.cas)) continue;
+    if ((r.ex && r.ck ? "c:" + r.ck : "b:" + r.bk) === key) out.push(r.ask);
+  }
+  if (!out.length) out.push(R.ask);
+  return out;
+}
+
+/**
+ * One live row's chance to sell within the horizon, judged over its remaining life (H9: a Gameflip
+ * listing 30 days from creation, an unsold Eldorado offer 21) and, on a single-unit market, from its
+ * rank behind the offer's cheaper rows (H3). Also the market's base rate over the same days (H8: the
+ * scorer's baseline is logged with the forecast).
+ * @returns {{ p: number|null, pb: number|null, days: number, rank: number }}
+ */
+function rowChance(ctx, v, R) {
+  const ev = ctx.ev;
+  const hz = ctx.hz && ctx.hz[v.f];
+  const days = Math.max(0, Math.min(v.H, E.daysLeftOf(R, ev.cut)));
+  const out = { p: null, pb: hz ? H.baseP(hz, v.m, days) : null, days, rank: 1 };
+  if (!hz || !(v.ref > 0)) return out;
+  if (U.SINGLE.has(v.m)) {
+    const asks = offerAsks(ev, v, R);
+    out.rank = H.rankOf(R.ask, asks);
+    out.p = H.rowPH(hz, v.m, v.tier, Math.min(...asks) / v.ref, out.rank, days);
+  } else out.p = H.pH(hz, v.m, v.tier, R.ask / v.ref, days);
+  return out;
 }
 function valueAt(ctx, v, p) {
   const ph = pAt(ctx, v, p);
@@ -323,10 +375,11 @@ function valueAt(ctx, v, p) {
 
 /**
  * The gate chain from a regime pick `raw`, relative to `base` (the live ask; for a new listing,
- * today's price), down to `floor`. `minP` is the no-claim bundle order (containment) lift.
+ * today's price), down to `floor`. `minP` is the no-claim bundle order (containment) lift; `live` says
+ * whether `base` is a live row's ask (the sold floor is then reached in steps, M13b).
  * @returns {{ p, gates, why, raiseCut, wanted }}
  */
-function gateChain(ctx, v, { raw, base, floor, minP = null }) {
+function gateChain(ctx, v, { raw, base, floor, minP = null, live = false }) {
   const ev = ctx.ev;
   const cfg = ev.cfg;
   const gates = [];
@@ -334,9 +387,12 @@ function gateChain(ctx, v, { raw, base, floor, minP = null }) {
   let p = raw;
   let raiseCut = false;
   let wanted = null;
-  if (p === null || p === undefined) return { p: null, gates, why, raiseCut, wanted };
+  if (p === null || p === undefined || !Number.isFinite(Number(p))) return { p: null, gates, why, raiseCut, wanted };
   if (CONF_RANK[v.conf] < CONF_RANK.medium) gates.push("confidence");
   const b = num(base, 0) > 0 ? num(base) : null;
+  const s = cfg.maxStepPct / 100;
+  // the highest a single move may reach from the base
+  const stepUp = b === null ? Infinity : Math.max(b, U.floor05(b * (1 + s)));
   // 2. raise rule
   if (b !== null && p > b + EPS) {
     if (v.basis === "venue" || v.basis === "rivals" || v.basis === "none") {
@@ -349,10 +405,10 @@ function gateChain(ctx, v, { raw, base, floor, minP = null }) {
       const so = stockoutsOf(ev, v.k, v.f, v.m);
       if (!so.ok) {
         let best = null;
-        for (let i = v.cands.length - 1; i >= 0; i--) {
+        for (let i = (v.cands || []).length - 1; i >= 0; i--) {
           const c = v.cands[i];
           if (c.p > p + 1e-9 || c.p <= b + EPS || !c.evid) continue;
-          if (RF.ordersAtOrAbove(ev, v.m, v.bk, c.p) >= cfg.raiseMinSales) {
+          if (RF.ordersAtOrAbove(ev, v.m, v.bk, c.p, v.f) >= cfg.raiseMinSales) {
             best = c.p;
             break;
           }
@@ -371,9 +427,8 @@ function gateChain(ctx, v, { raw, base, floor, minP = null }) {
   }
   // 3. step limit
   if (b !== null) {
-    const s = cfg.maxStepPct / 100;
     if (p > b * (1 + s) + 1e-9) {
-      p = Math.max(b, U.floor05(b * (1 + s)));
+      p = stepUp;
       gates.push("step");
     } else if (p < b * (1 - s) - 1e-9) {
       p = Math.min(b, U.ceil05(b * (1 - s)));
@@ -384,32 +439,47 @@ function gateChain(ctx, v, { raw, base, floor, minP = null }) {
   // no-claim: the owner's ceiling (getUnclaimedPricing), as bundlePrice applies it — before the floors,
   // so only the sold floor may lift a price over it. Before GGSel raise-only: a GGSel row already over
   // the ceiling is held, never advised down. A cut-back raise's test price obeys it too.
-  if (v.f === "noclaim") {
-    const cap = noclaimLimits(ev, v.k).ceiling;
-    if (p > cap + 1e-9) {
-      p = cap;
-      gates.push("ceiling");
-      why.push("Not over the no-claim ceiling " + usd(cap) + ".");
-    }
-    if (wanted !== null && wanted > cap) wanted = cap;
+  const cap = v.f === "noclaim" ? noclaimLimits(ev, v.k).ceiling : Infinity;
+  if (p > cap + 1e-9) {
+    p = cap;
+    gates.push("ceiling");
+    why.push("Not over the no-claim ceiling " + usd(cap) + ".");
   }
+  if (wanted !== null && wanted > cap) wanted = cap;
   // 4. GGSel enforces an unpublished per-category minimum: never below the base there
   if (v.m === "ggsel" && b !== null && p < b - 1e-9) {
     p = b;
     gates.push("ggsel-raise-only");
     why.push("GGSel can only be raised (its hidden category minimum).");
   }
-  // no-claim: the bundle order and the sold floor (both lift only)
+  // no-claim: the bundle order (lift only) — never past the ceiling or one step from the base: a lift
+  // is a raise like any other (M3); what it cannot reach in one move is flagged and waits for the next
   if (minP !== null && minP !== undefined && p < minP - 1e-9) {
-    p = minP;
-    gates.push("containment");
-    why.push("Lifted to " + usd(minP) + ": a bigger bundle of this game is never cheaper than a smaller one.");
+    const lift = Math.min(minP, cap, stepUp);
+    if (lift > p + 1e-9) {
+      p = lift;
+      gates.push("containment");
+      why.push("Lifted to " + usd(lift) + ": a bigger bundle of this game is never cheaper than one it contains.");
+    }
+    if (lift < minP - 1e-9) {
+      gates.push("containment-held");
+      why.push("The bundle order asks " + usd(minP) + "; held to " + usd(lift) + " by the " + (lift >= cap - 1e-9 ? "ceiling" : "step limit") + ".");
+    }
   }
+  // the 30-day sold floor: the owner's rule for the bundle's price, and its own evidence (buyers paid it
+  // on Gameflip within 30 days), so it needs no orders here. A new listing takes it in full, as
+  // bundlePrice does; a live row is moved to it within the step limit (M13b).
   const sf = v.f === "noclaim" ? soldFloorOf(ev, v.ck) : 0;
   if (sf > 0 && p < sf - 1e-9) {
-    p = sf;
-    gates.push("sold-floor");
-    why.push("Not under its 30-day sold floor " + usd(sf) + ".");
+    if (live && b !== null && sf > stepUp + 1e-9) {
+      p = Math.max(p, stepUp);
+      gates.push("sold-floor-steps");
+      why.push("Its 30-day sold floor is " + usd(sf) + ": reached in steps (" + usd(p) + " now).");
+    } else {
+      p = sf;
+      gates.push("sold-floor");
+      why.push("Not under its 30-day sold floor " + usd(sf) + ".");
+    }
   }
   // 5. the floor, last
   if (p < floor - 1e-9) {
@@ -417,6 +487,18 @@ function gateChain(ctx, v, { raw, base, floor, minP = null }) {
     gates.push("floor");
   }
   return { p: round2(p), gates, why, raiseCut, wanted };
+}
+
+/**
+ * Another policy's price for this offer, logged or answered only through the same gates (M2): the
+ * `clear` price is a rival's price (basis "rivals": it never raises), the tracker's is its own basis
+ * (an engine fallback reads "none"), today's price is checked against today's limits. Returns null
+ * when there is no price.
+ */
+function gatePolicy(ctx, v, price, { basis, conf, base = v.base, floor = v.floor, live = false } = {}) {
+  if (!(num(price, 0) > 0)) return null;
+  const pv = Object.assign({}, v, { basis: basis || v.basis, conf: conf || v.conf });
+  return gateChain(ctx, pv, { raw: num(price), base, floor, live }).p;
 }
 
 /* ---------------------------------- an offer -------------------------------- */
@@ -501,6 +583,12 @@ function priceOffer(ctx, o) {
     v.gates.push("unknown");
     return finish(ctx, v, o);
   }
+  if (v.ladder) {
+    // a deliberate test: no brain price is logged beside it — a number there only invites a correction
+    // (M13a). Its rungs are read as evidence by the curve.
+    v.why.unshift("A deliberate test (this offer is live at several prices with an owner's rung): left alone, no brain price.");
+    return finish(ctx, v, o);
+  }
   v.why.push(gs.regimeWhy[0]);
 
   const hz = ctx.hz && ctx.hz[f];
@@ -566,15 +654,17 @@ function priceOffer(ctx, o) {
 function finishOffer(ctx, v, { minP = null } = {}) {
   const cfg = ctx.ev.cfg;
   if (v.raw !== null && v.raw !== undefined) {
-    const c = gateChain(ctx, v, { raw: v.raw, base: v.base, floor: v.floor, minP });
+    const c = gateChain(ctx, v, { raw: v.raw, base: v.base, floor: v.floor, minP, live: v.liveRows.length > 0 });
     v.p = c.p;
+    v.minP = minP;
     for (const g of c.gates) if (!v.gates.includes(g)) v.gates.push(g);
     v.why.push(...c.why);
     if (c.raiseCut && c.wanted) {
-      const testP = stepCapped(cfg, v.base, c.wanted);
+      const testP = round2(Math.max(stepCapped(cfg, v.base, c.wanted), v.floor));
       const vt = valueAt(ctx, v, testP);
       const vb = valueAt(ctx, v, v.ask !== null ? v.ask : v.base);
-      if (vt !== null && vb !== null && vb > 0 && vt >= TEST_VALUE_GAIN * vb) v.test = round2(Math.max(testP, v.floor));
+      // a test is a step above the gated price, never at or under it (M1: a test under the gated floor)
+      if (testP > c.p + EPS && vt !== null && vb !== null && vb > 0 && vt >= TEST_VALUE_GAIN * vb) v.test = testP;
     }
   }
   v.pH = v.p !== null ? pAt(ctx, v, v.p) : null;
@@ -619,23 +709,27 @@ const stepCapped = (cfg, base, p) => {
 /**
  * What one live system-made row should do (plan §4.4): hold inside the agreement band; a stale row
  * comes down one rung; a raise the raise rule cut back may be tested on one unit; a different move
- * advised within cooldownH is held. A ladder is never corrected.
- * @returns {{ id, ask, ageDays, a, p, p7a, stale, gates, flags, why }}
+ * advised within cooldownH is held. A ladder is never corrected. Every price it names went through the
+ * gates (M1): the stale rung never goes further than one step, under the sold floor or a bundle it
+ * contains, or under any floor; GGSel never comes down.
+ * @returns {{ id, ask, ageDays, a, p, p7a, pb, h, rank, stale, gates, flags, why }}
  */
 function liveAction(ctx, v, R, { minP = null } = {}) {
   const ev = ctx.ev;
   const cfg = ev.cfg;
-  const out = { id: R.id, ask: R.ask, ageDays: R.ageDays, a: "hold", p: null, p7a: pAt(ctx, v, R.ask), stale: false, gates: [], flags: [], why: [] };
+  const ch = rowChance(ctx, v, R);
+  const out = { id: R.id, ask: R.ask, ageDays: R.ageDays, a: "hold", p: null, p7a: ch.p, pb: ch.pb, h: ch.days, rank: ch.rank, stale: false, gates: [], flags: [], why: [] };
   if (v.ladder) {
     out.a = "ladder";
-    out.why.push("This exact offer is live at several prices with a hand-made rung: a deliberate test, not corrected.");
+    out.why.push("This exact offer is live at several prices with an owner's rung: a deliberate test, left alone.");
     return out;
   }
   if (v.raw === null || v.raw === undefined || !R.advisable) {
     if (!R.advisable) out.why.push("Not a row the brain advises on.");
     return out;
   }
-  const c = gateChain(ctx, v, { raw: v.raw, base: R.ask, floor: Math.max(v.floor, R.floor), minP });
+  const floor = Math.max(v.floor, R.floor);
+  const c = gateChain(ctx, v, { raw: v.raw, base: R.ask, floor, minP, live: true });
   out.p = c.p;
   out.gates.push(...c.gates.filter((g) => g !== "confidence"));
   if (CONF_RANK[v.conf] < CONF_RANK.medium) {
@@ -645,37 +739,49 @@ function liveAction(ctx, v, R, { minP = null } = {}) {
   }
   const tol = Math.max(cfg.agreeAbsUsd, (cfg.agreeRelPct / 100) * R.ask);
   const hz = ctx.hz && ctx.hz[v.f];
-  const xAsk = v.ref > 0 ? R.ask / v.ref : null;
-  // Expected days to a sale at the ask — only from an evidenced bucket: a thin one is the market's
-  // average rate shrunk in, which says nothing about THIS price (a row asking a third of its reference
-  // would read "stale" after a day and be cut further).
-  const eds = hz && xAsk !== null && H.evidenced(hz, v.m, xAsk) ? H.expectedDaysToSale(hz, v.m, v.tier, xAsk) : Infinity;
+  // Expected days to a sale at the ask — from the evidence only (a thin price says nothing about THIS
+  // price); on a single-unit market a row ranked k-th waits for k buyers of the offer (H3).
+  let eds = Infinity;
+  if (hz && v.ref > 0) {
+    const single = U.SINGLE.has(v.m);
+    const x = single ? Math.min(...offerAsks(ev, v, R)) / v.ref : R.ask / v.ref;
+    if (H.evidenced(hz, v.m, x)) eds = H.expectedDaysToSale(hz, v.m, v.tier, x) * (single ? ch.rank : 1);
+  }
+  // A quantity / order-unit offer keeps selling all its life: its age for the stale rule runs from its
+  // last sale, not its creation (H2: a steadily selling 60-day Eldorado offer is not stale).
+  const age = U.SINGLE.has(v.m) || R.lastSaleT === null || R.lastSaleT === undefined ? R.ageDays : Math.min(R.ageDays, (ev.cut - R.lastSaleT) / DAY);
   let a = "hold";
   let p = c.p;
-  if (Number.isFinite(eds) && R.ageDays > cfg.staleFactor * eds && c.p >= R.ask - tol) {
-    // Rule 5's missing half: listed far longer than its price implies, and the curve does not
-    // already say lower — one rung down.
+  // The stale rule speaks only where the curve says hold: it never overrides a raise or a lower the
+  // curve already gives (H2).
+  if (Number.isFinite(eds) && age > cfg.staleFactor * eds && Math.abs(c.p - R.ask) <= tol + 1e-9) {
+    // Rule 5's missing half: listed far longer than its price implies — one rung down, inside the
+    // gates: the step limit from the ask, every floor (platform, the row's own, the no-claim floors),
+    // the no-claim sold floor and a bundle it contains; never on GGSel.
     out.stale = true;
+    const sf = v.f === "noclaim" ? soldFloorOf(ev, v.ck) : 0;
+    const lo = Math.max(floor, sf, num(minP, 0), U.ceil05(R.ask * (1 - cfg.maxStepPct / 100)));
     let rung = null;
-    for (const cand of v.cands) if (cand.p < R.ask - EPS && cand.p >= R.floor - 1e-9) rung = cand.p;
+    for (const cand of v.cands) if (cand.p < R.ask - EPS && cand.p >= lo - 1e-9) rung = cand.p;
     if (v.m === "ggsel") {
       out.gates.push("ggsel-raise-only");
-      out.why.push("Stale (" + Math.round(R.ageDays) + " d, about " + Math.round(eds) + " d expected) but GGSel can only be raised.");
+      out.why.push("Stale (" + Math.round(age) + " d, about " + Math.round(eds) + " d expected) but GGSel can only be raised.");
     } else if (rung === null) {
-      out.why.push("Stale, but no lower rung above the floor.");
+      out.why.push("Stale, but no lower rung inside the step limit and above every floor.");
     } else {
       a = "lower";
       p = rung;
       out.gates.push("stale");
-      out.why.push("Stale: " + Math.round(R.ageDays) + " days listed, about " + Math.round(eds) + " expected at this price → one rung down to " + usd(rung) + ".");
+      out.why.push("Stale: " + Math.round(age) + " days without a sale, about " + Math.round(eds) + " expected at this price → one rung down to " + usd(rung) + ".");
     }
   } else if (c.raiseCut && c.wanted) {
-    const testP = Math.max(stepCapped(cfg, R.ask, c.wanted), R.floor);
+    // one test unit a step above: through the same limits (step, floors) and only above the gated price
+    const testP = round2(Math.max(stepCapped(cfg, R.ask, c.wanted), floor));
     const vt = valueAt(ctx, v, testP);
     const vh = valueAt(ctx, v, R.ask);
-    if (vt !== null && vh !== null && vh > 0 && vt >= TEST_VALUE_GAIN * vh && testP > R.ask + EPS) {
+    if (testP > c.p + EPS && testP > R.ask + EPS && vt !== null && vh !== null && vh > 0 && vt >= TEST_VALUE_GAIN * vh) {
       a = "test";
-      p = round2(testP);
+      p = testP;
       out.why.push("Worth testing " + usd(p) + " on one unit: " + Math.round((vt / vh - 1) * 100) + "% more value than holding, too few sales to raise.");
     }
   }
@@ -703,8 +809,12 @@ function agrees(cfg, a, b) {
   return Math.abs(num(a) - num(b)) <= tol + 1e-9;
 }
 
-/** listing id → the bundleKey its no-claim units were attached under (U.lids); "" when they disagree. */
+/**
+ * listing id → the bundleKey its no-claim units were attached under (U.lids); "" when they disagree.
+ * The evidence builds it (where the async run yields); an evidence object made some other way gets it here.
+ */
 function bundleKeyByLid(ev) {
+  if (ev.noclaim && ev.noclaim.bkByLid instanceof Map) return ev.noclaim.bkByLid;
   return E.memo(ev, "bkByLid", () => {
     const map = new Map();
     for (const u of ev.noclaim.units) {
@@ -791,7 +901,9 @@ function applyContainment(ctx, verdicts) {
     if (!it.b) {
       if (verdicts.length > 1) it.v.why.push("No bundle key recorded on its units: the bundle order is not applied to it.");
     } else {
-      for (const d of done) if (d.v.p !== null && bundleContains(it.b, it.v.n, d.b, d.v.n) && (minP === null || d.v.p > minP)) minP = d.v.p;
+      // only an offer the brain is confident about may lift another (M3): a thin bundle's starting price
+      // is today's bundlePrice, not evidence
+      for (const d of done) if (d.v.p !== null && CONF_RANK[d.v.conf] >= CONF_RANK.medium && bundleContains(it.b, it.v.n, d.b, d.v.n) && (minP === null || d.v.p > minP)) minP = d.v.p;
     }
     it.v.bundle = it.b ? it.b.key : null;
     finishOffer(ctx, it.v, { minP });
@@ -816,6 +928,9 @@ module.exports = {
   NOCLAIM_CEILING_USD,
   stockoutsOf,
   gateChain,
+  gatePolicy,
+  rowChance,
+  offerAsks,
   priceOffer,
   finishOffer,
   liveAction,

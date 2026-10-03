@@ -82,6 +82,7 @@ function offer(k, f, m, o = {}) {
     gates: ["step"],
     thin: false,
     stale: true,
+    packs: [{ minQty: 5, discountPct: 10, unitPrice: 1.35, packPrice: 6.75 }],
     why: ["offer reason"],
     live: [{ id: "LEAK-LIVE-ID", ask: 2, ageDays: 12.5, a: "lower", p7a: 0.4, account: "LEAK-ACC" }],
     ...o,

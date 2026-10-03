@@ -25,7 +25,7 @@ const near = (a, b, tol, what) => assert.ok(Math.abs(a - b) <= tol, `${what}: ${
 const BT = S.backtest(small, { cfg });
 
 // What the runner logs per daily sample: the run's forecasts and its rows' scoring fields.
-const slim = (r) => ({ k: r.k, g: r.g, f: r.f, m: r.m, live: r.live, pc: r.pc, sc: r.sc, old: r.old, br: r.br, pol: r.pol, pf: r.pf });
+const slim = (r) => ({ k: r.k, g: r.g, f: r.f, m: r.m, live: r.live, pc: r.pc, sc: r.sc, old: r.old, br: r.br, pol: r.pol, pf: r.pf, pd: r.pd });
 function sampleAt(bundle, at) {
   const ev = M.buildEvidence(bundle, { cfg, cut: at, synthDemand: true });
   const run = M.buildRun(S.viewAt(bundle, at, ev), { cfg });
@@ -186,34 +186,88 @@ test("bestOf: only among policies scored on the very same rows (fewer rows = not
   assert.deepEqual(S.bestOf({}), {});
 });
 
-test("placement forecasts: an empty shelf forecasts exactly 0; no shelf number, or an abstention, is missing", () => {
-  const row = (o) => Object.assign({ k: "g", f: "claim", m: "g2g", pf: { flat: null, share30: null, instock: null, newsvendor: null }, old: { sh: 0 }, br: { sh: 0, rg: "balanced" } }, o);
-  // a market the brain's policies do not shelve (closed / unknown): its logged shelf is 0 → E[min(D, 0)] = 0
-  for (const p of M.PLACE_POLICIES) assert.equal(S.forecastFor(row({}), p), 0, p);
-  assert.equal(S.forecastFor(row({ pf: { flat: 0.42 } }), "flat"), 0.42, "a logged number is used as is");
-  assert.equal(S.forecastFor(row({ br: { sh: null, rg: "balanced" } }), "newsvendor"), null, "a managed cell: no shelf number");
-  assert.equal(S.forecastFor(row({ old: { sh: null } }), "flat"), null, "no old-side split for the game");
-  for (const p of M.PLACE_POLICIES) assert.equal(S.forecastFor(row({ br: { sh: 0, rg: "unknown" } }), p), null, "abstained: " + p);
+test("H1 placement scores each policy's DEMAND SPLIT (pd), uncapped; a policy with no split is missing; an abstention has none", () => {
+  const row = (o) => Object.assign({ k: "g", f: "claim", m: "g2g", pf: { flat: 0.2, share30: 0.2, instock: 0.2, newsvendor: 0.2 }, pd: { flat: 1.5, share30: 0, instock: 2, newsvendor: 3.25 }, old: { sh: 0 }, br: { sh: 0, rg: "balanced" } }, o);
+  assert.equal(S.demandFor(row({}), "newsvendor"), 3.25, "the weekly split, not the shelf-capped forecast (pf)");
+  assert.equal(S.demandFor(row({}), "share30"), 0, "a split of 0 is a number");
+  assert.equal(S.demandFor(row({ pd: { flat: 1 } }), "instock"), null, "no number: missing, never 0");
+  assert.equal(S.demandFor(row({ pd: undefined }), "flat"), null, "a row logged before the split was: missing");
+  for (const p of M.PLACE_POLICIES) assert.equal(S.demandFor(row({ br: { sh: 0, rg: "unknown" } }), p), null, "abstained: " + p);
 });
 
-test("placement on the fixture: every policy scored on the same cell-weeks; ZeusX cells never scored", () => {
+// A hand-made week: cell A (alpha) had a live row all 7 days and sold 3; cell B (beta) was listed only on
+// its last 3 days and sold 2 — a stock-out week, which says nothing about demand.
+function stockWeek() {
+  const T = 80 * DAY;
+  const L = (id, g, c, o = {}) => Object.assign({ id, g, gl: g, f: "claim", m: "gameflip", o: "auto", kind: "single", st: "active", c, u: c + 3600000, p: 2 }, o);
+  const S1 = (lid, g, t) => ({ lid, g, f: "claim", m: "gameflip", t, p: 2, grp: lid + t });
+  // single-unit rows: each sale ends its row, and the next unit is relisted at once
+  const listings = [
+    L("a1", "alpha", 70 * DAY, { st: "sold", u: 81 * DAY }),
+    L("a2", "alpha", 81 * DAY, { st: "sold", u: 83 * DAY }),
+    L("a3", "alpha", 83 * DAY, { st: "sold", u: 85 * DAY }),
+    L("a4", "alpha", 85 * DAY),
+    L("b1", "beta", 84 * DAY, { st: "sold", u: 85 * DAY }),
+    L("b2", "beta", 85 * DAY, { st: "sold", u: 86 * DAY }),
+    L("b3", "beta", 86 * DAY),
+  ];
+  const sales = [S1("a1", "alpha", 81 * DAY), S1("a2", "alpha", 83 * DAY), S1("a3", "alpha", 85 * DAY), S1("b1", "beta", 85 * DAY), S1("b2", "beta", 86 * DAY)];
+  const bundle = { kind: "listing-brain-bundle", v: 1, now: 100 * DAY, af: {}, fees: {}, listings, sales, noclaim: { units: [], waves: [] } };
+  const row = (k, pd) => ({ k, g: k, f: "claim", m: "gameflip", pc: "agree", sc: "agree", old: { sh: 1 }, br: { sh: 1, rg: "balanced" }, pol: {}, pf: {}, pd });
+  return { T, bundle, row };
+}
+
+test("H1 in stock: a cell-week counts only when the market had a live system-made row ≥ 6 of its 7 days (evidence.coveredDays)", () => {
+  const { T, bundle } = stockWeek();
+  const ix = S.indexBundle(bundle);
+  near(S.inStockDays(ix, "alpha", "claim", "gameflip", T, T + 7 * DAY), 7, 1e-9, "alpha: relisted on each sale, never empty");
+  near(S.inStockDays(ix, "beta", "claim", "gameflip", T, T + 7 * DAY), 3, 1e-9, "beta: listed on day 84");
+  assert.equal(S.inStockDays(ix, "gamma", "claim", "gameflip", T, T + 7 * DAY), 0);
+  assert.equal(S.IN_STOCK_DAYS, 6, "the farm brain's in-stock rule");
+});
+
+test("H1 placement on hand-made weeks: demand splits vs units sold, in-stock cell-weeks only, same rows, missing never 0", () => {
+  const { T, bundle, row } = stockWeek();
+  const rows = [row("alpha", { flat: 1, share30: 3, instock: 2.5, newsvendor: 3 }), row("beta", { flat: 1, share30: 2, instock: 2, newsvendor: 2 })];
+  const fw = S.forwardScores({ samples: [{ at: T, fc: [], rows }], bundle, now: bundle.now });
+  const pl = fw.placement.claim;
+  assert.equal(pl.basis, "demand split");
+  assert.equal(pl.rows, 1, "only alpha's week: beta was out of stock 4 of 7 days");
+  assert.deepEqual(pl.outOfStock, { cells: 1, units: 2 });
+  assert.equal(pl.units, 3);
+  assert.equal(pl.flat.bias, -2, "flat said 1 a week, 3 sold");
+  assert.equal(pl.share30.rmse, 0);
+  assert.equal(pl.newsvendor.rmse, 0);
+  assert.equal(pl.best, "share30", "a tie on RMSE and bias goes to the policy order");
+  assert.equal(pl.unitsAll, 5, "every system-made unit sold that week is accounted for");
+  assert.equal(pl.units + pl.outOfStock.units + pl.unforecast.units + pl.unmeasured.units + pl.outside, pl.unitsAll);
+  // a policy missing on the one admitted week is partial and never ranked, even when it would win
+  const fw2 = S.forwardScores({ samples: [{ at: T, fc: [], rows: [row("alpha", { flat: 1, share30: 2, instock: 3, newsvendor: null })] }], bundle, now: bundle.now });
+  assert.deepEqual(fw2.placement.claim.partial, ["newsvendor"]);
+  assert.equal(fw2.placement.claim.best, "instock");
+  // rows logged without any split (before the field existed) are outside the score, their units counted
+  const fw3 = S.forwardScores({ samples: [{ at: T, fc: [], rows: [row("alpha", undefined)] }], bundle, now: bundle.now });
+  assert.equal(fw3.placement.claim.rows, 0);
+  assert.deepEqual(fw3.placement.claim.unforecast, { cells: 1, units: 3 });
+  assert.match(fw.placementNote, /different shelf/);
+  assert.match(fw.cannotShow, /different shelf would have sold more/);
+});
+
+test("placement on the fixture: every policy scored on the same in-stock cell-weeks; ZeusX cells never scored", () => {
   for (const f of ["claim", "noclaim"]) {
     const p = BT.placement[f];
-    assert.ok(p.rows > 0, f + " rows");
+    assert.equal(p.basis, "demand split");
     for (const id of M.PLACE_POLICIES) assert.ok(p[id].n <= p.rows, f + " " + id);
-    if (!p.partial.length) assert.ok(M.PLACE_POLICIES.includes(p.best), f + " best " + p.best);
+    if (p.rows && !p.partial.length) assert.ok(M.PLACE_POLICIES.includes(p.best), f + " best " + p.best);
     for (const id of p.partial) assert.notEqual(p.best, id);
+    // the admitted units plus the ones not admitted account for every system-made unit sold in the weeks
+    assert.equal(p.units + p.outOfStock.units + p.unforecast.units + p.unmeasured.units + p.outside, p.unitsAll, f + " units accounted for");
   }
+  assert.ok(BT.placement.claim.rows > 0, "claim cell-weeks scored (the model logs each policy's demand split)");
+  assert.ok(BT.placement.claim.outOfStock.cells > 0, "and stock-out weeks are left out, counted");
   assert.ok(BT.placement.claim.unmeasured.cells > 0, "ZeusX cell-weeks counted apart");
   assert.equal(BT.placement.claim.unmeasured.units, 0, "ZeusX records no sale for an auto row");
-  // the admitted units plus the ones not admitted account for every system-made unit sold in the weeks
-  for (const f of ["claim", "noclaim"]) {
-    const p = BT.placement[f];
-    assert.equal(p.units + p.unforecast.units + p.unmeasured.units + p.outside, p.unitsAll, f + " units accounted for");
-  }
 });
-
-/* ------------------------------------------------------------- agreement */
 
 test("agreement: near = within 10 % of the policy's price; net per listing-day = Σ net ÷ Σ days; labelled correlation", () => {
   const a = S.agreement([
@@ -264,24 +318,26 @@ test("truth: a listing's sale inside the window; a sold single-unit row without 
 
 /* --------------------------------------------------------------- forward */
 
-test("forward: a forecast is scored only once its horizon has passed (no-claim 2 days, claim 7)", () => {
+test("forward: a forecast is scored only once its OWN horizon has passed (no-claim 2 days, claim 7 or the listing's remaining life)", () => {
   const T = small.now - 3 * DAY;
   const s = sampleAt(small, T);
-  const claim = s.fc.filter((x) => x.f === "claim").length;
-  const nc = s.fc.filter((x) => x.f === "noclaim" && x.h <= 3).length;
-  assert.ok(claim > 0 && nc > 0, `${claim} claim, ${nc} no-claim forecasts`);
+  const due = s.fc.filter((x) => T + x.h * DAY <= small.now);
+  const claimWaiting = s.fc.filter((x) => x.f === "claim" && T + x.h * DAY > small.now).length;
+  assert.ok(claimWaiting > 0 && due.some((x) => x.f === "noclaim"), `${claimWaiting} claim forecasts waiting, ${due.length} due`);
   const fw = S.forwardScores({ samples: [s], bundle: small, cfg, now: small.now });
-  assert.equal(fw.counts.waiting, s.fc.length - nc, "every claim forecast still waits");
-  assert.equal(fw.counts.scored + fw.counts.missing, nc);
-  assert.equal(fw.calibration.claim.n, 0);
+  assert.equal(fw.counts.waiting, s.fc.length - due.length, "every forecast whose horizon is still ahead waits");
+  assert.equal(fw.counts.scored + fw.counts.missing, due.length);
+  assert.equal(fw.calibration.claim.n, due.filter((x) => x.f === "claim" && x.m !== "zeusx" && x.p !== null && x.pb !== null).length);
   assert.equal(fw.placement.claim.rows, 0, "the week is not over: no placement scored");
   // a week later everything is due
   const later = S.forwardScores({ samples: [s], bundle: small, cfg, now: T + 7 * DAY });
   assert.equal(later.counts.waiting, 0);
   assert.ok(later.calibration.claim.n > 0);
   assert.ok(later.placement.claim.rows > 0);
-  // a sample whose earliest horizon is still ahead is "waiting"
-  const fresh = S.forwardScores({ samples: [sampleAt(small, small.now - 0.5 * DAY)], bundle: small, cfg, now: small.now });
+  // a sample whose every horizon is still ahead is "waiting" (a listing hours from its Gameflip expiry has an
+  // hours-long horizon, so the sample keeps only forecasts of a day or more)
+  const s0 = sampleAt(small, small.now - 0.5 * DAY);
+  const fresh = S.forwardScores({ samples: [Object.assign({}, s0, { fc: s0.fc.filter((x) => x.h >= 1), rows: [] })], bundle: Object.assign({}, small, { noclaim: { units: [], waves: [] } }), cfg, now: small.now });
   assert.equal(fresh.runsWaiting, 1);
   assert.equal(fresh.runsScored, 0);
   assert.equal(fresh.calibration.claim.n, 0);
@@ -315,47 +371,101 @@ test("discrimination: a live row of a game the brain abstained on (regime unknow
   assert.equal(unknown.calibration.claim.n, 1, "its sell chance is still scored: the curve does not depend on the regime");
 });
 
-test("forward over daily samples: the same tables as the backtest, one sample per UTC day, baseline fitted before any of them", () => {
+test("forward over daily samples: the same tables as the backtest, one sample per UTC day", () => {
   const samples = [];
   for (let d = 12; d >= 1; d--) samples.push(sampleAt(small, small.now - d * DAY));
   samples.push(Object.assign({}, samples[0], { at: samples[0].at + 3600000 })); // a second sample the same day
   const fw = S.forwardScores({ samples, bundle: small, cfg, now: small.now });
   assert.equal(fw.samples, 12, "the duplicate day is ignored");
   assert.equal(fw.runsScored + fw.runsWaiting, 12);
-  assert.equal(fw.baselineAt, samples[0].at, "the baseline's market rates come from the oldest scored sample's moment");
+  assert.equal(fw.expiryRulesAt, samples[0].at, "no-claim expiry rules as learned before the oldest forecast they judge");
   for (const k of ["calibration", "discrimination", "placement", "agreement", "soldOrExpired"]) assert.ok(fw[k], k);
-  assert.ok(fw.calibration.claim.n > 0 && fw.placement.claim.rows > 0);
+  assert.ok(fw.calibration.claim.n > 0);
   const none = S.forwardScores({ samples: [], bundle: small, cfg, now: small.now });
   assert.equal(none.runsScored, 0);
   assert.equal(none.calibration.claim.n, 0);
   assert.equal(none.calibration.claim.brier, null);
   assert.equal(none.placement.claim.best, null);
+  assert.equal(S.forwardScores({ samples }).runsScored, 0, "no bundle: nothing scored, nothing thrown");
 });
 
-/* -------------------------------------------------------- sold or expired */
+test("H8 each forecast is judged against the base rate logged WITH it (pb); a sample logged without one gets a fit at its OWN moment", () => {
+  const ix = S.indexBundle(small);
+  const T1 = small.now - 20 * DAY;
+  const T2 = small.now - 10 * DAY;
+  const live = (T) => small.listings.find((x) => x.m === "gameflip" && x.f === "claim" && x.o === "auto" && x.c < T - DAY && S.truthSold(ix, x.id, T, T + 7 * DAY) === 1);
+  const L1 = live(T1);
+  const L2 = live(T2);
+  assert.ok(L1 && L2);
+  const fc = (L, o) => Object.assign({ l: L.id, k: L.g, f: "claim", m: "gameflip", x: 1, b: 1, p: 0.8, a: "hold", ask: 2, h: 7 }, o);
+  // with pb: exactly that number is the baseline, and nothing is refitted
+  const a = S.forwardScores({ samples: [{ at: T1, fc: [fc(L1, { pb: 0.2 })], rows: [] }], bundle: small, cfg, now: small.now });
+  assert.equal(a.calibration.claim.n, 1);
+  near(a.calibration.claim.brierBase, 0.64, 1e-9, "(0.2 − 1)²");
+  assert.equal(a.fits, 0);
+  assert.equal(a.counts.basePerSample, 0);
+  // without pb (logged before the field existed): each sample is fitted at its own moment — never one
+  // fit at the oldest sample judging later forecasts with a rate that may have moved since
+  const b = S.forwardScores({ samples: [{ at: T1, fc: [fc(L1)], rows: [] }, { at: T2, fc: [fc(L2)], rows: [] }], bundle: small, cfg, now: small.now });
+  assert.equal(b.fits, 2, "one fit per legacy sample");
+  assert.equal(b.counts.basePerSample, 2);
+  const pbAt = (T) => M.baseP(M.fitHazard(M.buildEvidence(small, { cfg, cut: T, synthDemand: true }), "claim"), "gameflip", 7);
+  const expected = ((pbAt(T1) - 1) ** 2 + (pbAt(T2) - 1) ** 2) / 2;
+  near(b.calibration.claim.brierBase, expected, 1e-4, "each baseline from its own sample's fit");
+});
 
-test("sold or expired, by hand: k units of one wave share a queue — E[min(Poisson(h·rows·d), k)] ÷ k each", () => {
-  const flat = (h) => ({ h, buckets: Array.from({ length: 6 }, () => ({ h, evid: true, tiers: [{ h }, { h }, { h }] })) });
-  const hz = { horizon: 2, markets: { gameflip: flat(0.5) } };
+test("P20-1 forwardScoresAsync gives the sync answer, yielding between samples and inside them", async () => {
+  const samples = [];
+  for (let d = 9; d >= 1; d--) samples.push(sampleAt(small, small.now - d * DAY));
+  const sync = S.forwardScores({ samples, bundle: small, cfg, now: small.now });
+  let turns = 0;
+  let on = true;
+  const ping = () => {
+    turns++;
+    if (on) setImmediate(ping);
+  };
+  setImmediate(ping);
+  const async1 = await S.forwardScoresAsync({ samples, bundle: small, cfg, now: small.now });
+  on = false;
+  assert.equal(JSON.stringify(async1), JSON.stringify(sync));
+  assert.ok(turns >= samples.length, `${turns} turns of the loop while it ran`);
+});
+
+test("sold or expired, by hand: k units of one wave share a queue — E[min(Poisson(Σ h_row · d), k)] ÷ k each, h read back from the logged forecast", () => {
+  // a live row whose logged forecast says pH = 1 − e^(−0.5 × 2) over its 2-day horizon: h = 0.5 a day
+  const pOf = (h, H) => 1 - Math.exp(-h * H);
+  near(S.hazardOfForecast({ p: pOf(0.5, 2), h: 2, f: "noclaim" }, cfg), 0.5, 1e-9, "h = −ln(1 − pH) ÷ H");
+  assert.equal(S.hazardOfForecast({ p: null, h: 2 }, cfg), null);
+  assert.ok(Number.isFinite(S.hazardOfForecast({ p: 1, h: 2 }, cfg)), "a rounded pH of 1 is not an infinite hazard");
   const T = 10 * DAY;
   const exp = T + 2 * DAY;
   const u = (o) => Object.assign({ g: "w", m: "gameflip", bk: "w|ev|1", lids: [], l: T - DAY, s: null, x: exp + 3600000 }, o);
   const units = [u({ lids: ["row1"], s: T + DAY, x: null }), u({}), u({}), u({}), u({ g: "v", x: null }), u({ g: "past" }), u({ g: "open" }), u({ g: "undated" })];
   const expiryOf = (x) => (x.g === "past" ? T - DAY : x.g === "open" ? 30 * DAY : x.g === "undated" ? null : exp);
+  const row = (l, h) => ({ l, k: "w", f: "noclaim", m: "gameflip", x: 1, p: pOf(h, 2), h: 2 });
   const t = S.newTables();
-  S.scoreUnits(t, { units, expiryOf, fc: [{ l: "row1", k: "w", f: "noclaim", m: "gameflip", x: 1 }], hz, tierOf: () => 0, T, now: 20 * DAY });
+  S.scoreUnits(t, { units, expiryOf, fc: [row("row1", 0.5)], cfg, T, now: 20 * DAY });
   const r = S.soldOrExpired(t.soe, t.soeSkip);
-  // mu = 0.5/day × 1 row × 2 days = 1; E[min(D, 4)] = 4 − e^−1 (1 + 2 + 2.5 + 8/3)
+  // mu = 0.5/day × 2 days = 1; E[min(D, 4)] = 4 − e^−1 (1 + 2 + 2.5 + 8/3)
   const e4 = 4 - Math.exp(-1) * (1 + 2 + 2.5 + 8 / 3);
   assert.equal(r.n, 4);
   near(r.expected, e4 / 4, 1e-3, "expected share");
   assert.equal(r.actual, 0.25);
   near(r.brier, ((e4 / 4 - 1) ** 2 + 3 * (e4 / 4) ** 2) / 4, 1e-3, "Brier per unit");
   assert.deepEqual(t.soeSkip, { undated: 1, past: 1, open: 1, unresolved: 1, noEstimate: 0 });
-  // two live rows of the same offer sell twice as fast
+  // two live rows of the same offer sell at the sum of their hazards
   const t2 = S.newTables();
-  S.scoreUnits(t2, { units: units.slice(0, 4).map((x, i) => (i === 1 ? Object.assign({}, x, { lids: ["row2"] }) : x)), expiryOf, fc: [{ l: "row1", f: "noclaim", m: "gameflip", x: 1 }, { l: "row2", f: "noclaim", m: "gameflip", x: 1 }], hz, tierOf: () => 0, T, now: 20 * DAY });
-  near(S.soldOrExpired(t2.soe).expected, M.util.expectedSold(2, 4) / 4, 1e-3, "rate × 2 rows");
+  const two = units.slice(0, 4).map((x, i) => (i === 1 ? Object.assign({}, x, { lids: ["row2"] }) : x));
+  S.scoreUnits(t2, { units: two, expiryOf, fc: [row("row1", 0.5), row("row2", 0.25)], cfg, T, now: 20 * DAY });
+  near(S.soldOrExpired(t2.soe).expected, M.util.expectedSold(0.75 * 2, 4) / 4, 1e-3, "rate 0.5 + 0.25");
+  // a queue with no live row of its own takes its cell's median; with none at all it is not scored
+  const t3 = S.newTables();
+  S.scoreUnits(t3, { units: units.slice(1, 4), expiryOf, fc: [row("other", 0.5)], cfg, T, now: 20 * DAY });
+  near(S.soldOrExpired(t3.soe).expected, M.util.expectedSold(1, 3) / 3, 1e-3, "the cell's rate");
+  const t4 = S.newTables();
+  S.scoreUnits(t4, { units: units.slice(1, 4), expiryOf, fc: [], cfg, T, now: 20 * DAY });
+  assert.equal(t4.soe.length, 0);
+  assert.equal(t4.soeSkip.noEstimate, 3);
 });
 
 test("sold or expired sees the planted ending wave coming (omega saga, Ember League Week 4: 16 units, most expire)", () => {
@@ -422,6 +532,14 @@ test("decision review: samples a week old only, one entry per cell from its newe
 });
 
 /* ----------------------------------------------------------- the tables */
+
+test("H7 / H14 the backtest states what a replay cannot know: the farm brain's stock, and every field still read as of today", () => {
+  const lim = BT.limits.join(" ");
+  assert.match(lim, /stock at the cut is not known/);
+  assert.match(lim, /never from cover/);
+  assert.match(lim, /rebundled after the cut is left out/);
+  for (const w of ["price, ask and learned floor", "qty, qr", "radar's game rows", "bundle key and listing ids"]) assert.ok(lim.includes(w), w);
+});
 
 test("every table carries n; nothing scored reads null, never 0", () => {
   for (const f of ["claim", "noclaim"]) {
@@ -510,10 +628,8 @@ test("determinism: the same bundle gives the same scores (sync and async alike)"
   assert.equal(JSON.stringify(S.decisionReview({ samples, bundle: small, now: small.now })), JSON.stringify(S.decisionReview({ samples, bundle: small, now: small.now })));
 });
 
-test("speed: the 6-week backtest of the LARGE fixture in under 15 s, never holding the event loop > 500 ms", async (t) => {
-  const large = F.generate({ seed: 1, large: true });
-  // Measured in the build sandbox: ~1.9 s for 6 weeks (each week = one evidence read to synthesise demand +
-  // one full model run at the cut), longest synchronous stretch ~36 ms between yields.
+// The longest stretch between two turns of a setImmediate probe while `fn` runs, and its total time.
+async function stretch(fn) {
   let last = Date.now();
   let max = 0;
   let ticks = 0;
@@ -527,18 +643,40 @@ test("speed: the 6-week backtest of the LARGE fixture in under 15 s, never holdi
   };
   setImmediate(ping);
   const t0 = Date.now();
-  const bt = await S.backtestAsync(large, {});
+  const value = await fn();
   const ms = Date.now() - t0;
   on = false;
-  t.diagnostic(`large backtest ${ms} ms, longest synchronous stretch ${max} ms over ${ticks} yields`);
-  assert.equal(bt.weeks.length, 6);
-  assert.ok(bt.calibration.claim.n > 1000, `${bt.calibration.claim.n} claim forecasts scored`);
-  assert.ok(ms < 15000, `${ms} ms`);
-  assert.ok(max < 500, `longest synchronous stretch ${max} ms`);
-  assert.ok(ticks > 6 * 3, "it yields inside each week, not only between weeks");
-});
+  return { value, ms, max: Math.max(max, Date.now() - last), ticks };
+}
 
-/* ------------------------------------------------------------ the runner */
+test("speed: the 6-week backtest of the LARGE fixture in under 15 s, never holding the event loop 200 ms (C19b)", async (t) => {
+  const large = F.generate({ seed: 1, large: true });
+  // Measured in the build sandbox: ~2 s for 6 weeks (each week = one evidence read to synthesise demand + one
+  // full model run at the cut), longest synchronous stretch well under 100 ms on Node 22 and Node 20.
+  const r = await stretch(() => S.backtestAsync(large, {}));
+  t.diagnostic(`large backtest ${r.ms} ms, longest synchronous stretch ${r.max} ms over ${r.ticks} yields`);
+  assert.equal(r.value.weeks.length, 6);
+  assert.ok(r.value.calibration.claim.n > 1000, `${r.value.calibration.claim.n} claim forecasts scored`);
+  assert.ok(r.ms < 15000, `${r.ms} ms`);
+  assert.ok(r.max < 200, `longest synchronous stretch ${r.max} ms`);
+  assert.ok(r.ticks > 6 * 3, "it yields inside each week, not only between weeks");
+  // P20-1: 21 daily samples at fcCap forecasts each, as the runner reads them, scored without holding the loop
+  const run = M.buildRun(large, { cfg: M.readConfig({}) });
+  const fc = [];
+  for (let i = 0; i < 5000 && run.fc.length; i++) fc.push(run.fc[i % run.fc.length]);
+  const rows = run.rows.map(slim);
+  const samples = [];
+  for (let d = 21; d >= 1; d--) samples.push({ at: large.now - d * DAY, fc, rows });
+  const f = await stretch(() => S.forwardScoresAsync({ samples, bundle: large, now: large.now }));
+  t.diagnostic(`large forward (21 samples × ${fc.length} forecasts × ${rows.length} rows) ${f.ms} ms, longest synchronous stretch ${f.max} ms`);
+  assert.ok(f.value.runsScored >= 20);
+  assert.ok(f.max < 200, `forward: longest synchronous stretch ${f.max} ms`);
+  const t0 = Date.now();
+  S.decisionReview({ samples, bundle: large, now: large.now });
+  const rv = Date.now() - t0;
+  t.diagnostic(`large decision review ${rv} ms (synchronous; the bundle index is shared with the forward score)`);
+  assert.ok(rv < 200, `decision review ${rv} ms`);
+});
 
 test("runner: accuracy() scores the backtest, the logged daily samples and the review end to end", async () => {
   const B = require("../utils/listingBrain");
@@ -558,7 +696,8 @@ test("runner: accuracy() scores the backtest, the logged daily samples and the r
   B._setHooks({
     load: async () => small,
     now: () => small.now,
-    settings: () => ({ getAutoFarm: () => ({ listingBrain: {} }) }),
+    // switched on: with no bundle in memory the scorer loads through the run's own guard (C5)
+    settings: () => ({ getAutoFarm: () => ({ listingBrain: { enabled: true } }) }),
     log: () => {},
     logErr: () => {},
     Run: () => ({

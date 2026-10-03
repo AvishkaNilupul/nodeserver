@@ -40,7 +40,7 @@ function page(rows, q, def = 50) {
 // One cell (game × farm × market, or the game × farm "all" placement row), plan §6.
 const ROW_FIELDS = Object.freeze(["k", "g", "f", "m", "live", "hl", "pc", "sc", "old", "br", "pol", "pf", "ev", "fl", "why"]);
 // One offer (exact items on one market) in the newest in-memory run. No content key, no listing id.
-const OFFER_FIELDS = Object.freeze(["k", "f", "m", "n", "ref", "conf", "basis", "regime", "p", "raw", "pH", "pHask", "value", "action", "gates", "thin", "stale", "why", "live"]);
+const OFFER_FIELDS = Object.freeze(["k", "f", "m", "n", "ref", "conf", "basis", "regime", "p", "raw", "pH", "pHask", "value", "action", "gates", "thin", "stale", "packs", "why", "live"]);
 // One live listing under an offer: its ask, age and verdict — never which listing it is.
 const OFFER_LIVE_FIELDS = Object.freeze(["ask", "ageDays", "a", "p7a"]);
 

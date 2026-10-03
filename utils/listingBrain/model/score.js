@@ -2,11 +2,13 @@
 //
 // Six scores, each against what really sold at the price that was really asked:
 //   calibration      every live system-made listing's chance to sell within its horizon (pH at its ask)
-//                    against the baseline "every listing on this market sells at the market's base rate";
-//                    Brier, reliability (10 bins), skill = 1 − Brier ÷ baseline Brier, per farm
+//                    against the baseline "every listing on this market sells at the market's base rate"
+//                    (the base rate the run logged WITH the forecast); Brier, reliability (10 bins),
+//                    skill = 1 − Brier ÷ baseline Brier, per farm
 //   discrimination   realised sell rates of the rows the brain told to hold / lower / raise / test
-//   placement        units sold per game × market the next 7 days against each placement policy's forecast
-//                    (the farm brain's admission rule and its "missing is not zero" rule)
+//   placement        each placement policy's weekly DEMAND SPLIT for a market against the units sold
+//                    there, on cell-weeks the market was in stock (the farm brain's in-stock rule, its
+//                    admission rule and its "missing is not zero" rule)
 //   agreement        realised net per listing-day near each price policy's price against further away —
 //                    correlation, never cause
 //   sold or expired  no-claim units live at the forecast: the share expected to sell before their stock
@@ -17,12 +19,13 @@
 // forecasts, each scored once its horizon has passed.
 //
 // PURE: no database, no network, no settings, no clock but the bundle's `now` and the caller's `now`.
-// The model façade (../model) is required lazily, inside the functions: model.js requires this file at
-// the end of its own load, so a top-level require here would read a half-built module.
+// The heavy work is written as generators that `yield` at work checkpoints: the synchronous entry points
+// run them straight through, the async ones (backtestAsync, forwardScoresAsync) let the event loop breathe
+// there — the same answer either way. The model façade (../model) is required lazily, inside the
+// functions: model.js requires this file at the end of its own load.
 const U = require("./util");
 const E = require("./evidence");
 const H = require("./hazard");
-const P = require("./price");
 
 const { DAY, num, round2, round3, lower } = U;
 const facade = () => require("../model");
@@ -31,25 +34,41 @@ const facade = () => require("../model");
 const RELIABILITY_BINS = 10;
 // The agreement analysis' "near": a listing whose ask is within this % of a policy's price.
 const NEAR_PCT = 10;
-// Placement forecasts are weekly (place.js forecastOf: 7 days); the decision review looks 7 days on.
+// Placement is weekly; the decision review looks 7 days on.
 const PLACE_DAYS = 7;
 const REVIEW_DAYS = 7;
 const REVIEW_LIMIT = 40;
 const BACKTEST_WEEKS = 6;
+// The farm brain's in-stock rule (demandBrain/model.js IN_STOCK_DAYS): a market whose shelf stood empty
+// more than a day of the week censored its sales, so that week says nothing about its demand.
+const IN_STOCK_DAYS = 6;
 // The four live-row actions the discrimination table reports (a ladder is never corrected; an unknown
 // game's "hold" is an abstention, not advice — both counted apart).
 const SCORED_ACTIONS = ["hold", "lower", "raise", "test"];
 const PRICE_DISAGREE = new Set(["brain-lower", "brain-higher"]);
 const SHELF_DISAGREE = new Set(["brain-more", "brain-fewer", "brain-add", "brain-drop"]);
+// Units of work between two checkpoints of a scoring generator (an item is a forecast, a unit, a cell or
+// a listing's exposure): small enough that one stretch stays a few milliseconds on Node 20.
+const CHECK = 256;
+// The async drivers' time slice when util offers a time-budget yielder; without one they yield at every
+// checkpoint (the same answer, a few more turns of the loop).
+const SLICE_MS = 40;
+// A logged sell chance of 1 (rounded) would read as an infinite hazard.
+const P_MAX = 0.9995;
 
 const NOTE =
   "The brain's chance to sell is scored against a baseline that gives every listing on a market that market's base rate. " +
   "The model must beat the baseline (skill above 0) before anything it says is trusted.";
 const CANNOT_SHOW =
-  "What test mode cannot show: whether a different price would have sold. Every score here compares what the brain would " +
-  "have said with what happened at the price that was actually asked; that needs live price experiments, a later round.";
+  "What test mode cannot show: whether a different price would have sold, or whether a different shelf would have sold more. " +
+  "Every score here compares what the brain would have said with what happened at the price that was actually asked, from the " +
+  "shelf that was actually listed; that needs live experiments, a later round.";
 const AGREEMENT_NOTE =
   "Correlation, not cause: listings that happened to sit near a policy's price are no proof that the price made them sell.";
+const PLACEMENT_NOTE =
+  "Each placement policy's weekly demand split for a market (its forecast rate there, not capped by any shelf) against the units " +
+  "system-made rows sold there that week — scored only on cell-weeks the market was in stock at least " + IN_STOCK_DAYS + " of the 7 " +
+  "days, because a week out of stock says nothing about demand. A different shelf's sales cannot be seen in test mode.";
 
 const finite = (v) => (v === null || v === undefined || v === "" || typeof v === "boolean" ? null : Number.isFinite(Number(v)) ? Number(v) : null);
 const round4 = (n) => Math.round(num(n) * 10000) / 10000;
@@ -62,22 +81,71 @@ const pushTo = (map, k, v) => {
   a.push(v);
 };
 
+/* ---------------------------------- the drivers ---------------------------------- */
+
+// A shared work counter: true every CHECK items, where a generator yields.
+const tick = (w) => (++w.n & (CHECK - 1)) === 0;
+
+/** Run a step generator straight through. */
+function runSync(it) {
+  let r = it.next();
+  while (!r.done) r = it.next();
+  return r.value;
+}
+
+/**
+ * A time-budget yielder (util.makeYielder: { due(), now() }), shared by one async call's own steps and the
+ * model calls it makes; without one in util, every checkpoint yields (the same answer, more turns).
+ */
+function yielder() {
+  if (typeof U.makeYielder === "function") return U.makeYielder(SLICE_MS);
+  return { due: () => true, now: U.yieldNow };
+}
+
+/** Run a step generator, letting the event loop breathe at its checkpoints once the time slice is spent. */
+async function runAsync(it, y = yielder()) {
+  let r = it.next();
+  while (!r.done) {
+    if (y.due()) await y.now();
+    r = it.next();
+  }
+  return r.value;
+}
+
 /* ------------------------------- the bundle's truth ------------------------------ */
+
+// One index per bundle object (a bundle is never mutated): the backtest, the forward score and the review
+// of one accuracy call share it.
+const INDEX = new WeakMap();
 
 /**
  * What really happened, from the bundle (every time, not only before a cut): listings by id, each
- * listing's unit sales in time order, and the unit sales of SYSTEM-MADE rows per cell (the placement
- * truth — the owner's rows, claim-at-sale and bulk are not a policy's shelf).
+ * listing's unit sales in time order, the SYSTEM-MADE listings per cell and their unit sales (the
+ * placement truth — the owner's rows, claim-at-sale and bulk are not a policy's shelf).
  */
 function indexBundle(bundle) {
   const b = bundle || {};
+  if (bundle && typeof bundle === "object" && INDEX.has(bundle)) return INDEX.get(bundle);
+  return runSync(indexSteps(b));
+}
+
+function* indexSteps(b) {
+  if (b && typeof b === "object" && INDEX.has(b)) return INDEX.get(b);
+  const w = { n: 0 };
   const fees = b.fees || {};
   const byId = new Map();
-  for (const L of b.listings || []) if (L && L.id) byId.set(String(L.id), L);
+  const sysRowsByCell = new Map();
+  for (const L of b.listings || []) {
+    if (!L || !L.id) continue;
+    byId.set(String(L.id), L);
+    if (E.rowKindOf(L) === "system") pushTo(sysRowsByCell, U.cellKey(L.g, farmOf(L.f), lower(L.m)), L);
+    if (tick(w)) yield;
+  }
   const salesByLid = new Map();
   const sysByCell = new Map();
   const sysByFarm = new Map();
   for (const s of b.sales || []) {
+    if (tick(w)) yield;
     const t = s ? finite(s.t) : null;
     if (t === null) continue;
     const lid = s.lid ? String(s.lid) : "";
@@ -91,11 +159,17 @@ function indexBundle(bundle) {
     pushTo(sysByCell, U.cellKey(L.g, f, m), rec);
     pushTo(sysByFarm, f, rec);
   }
+  yield;
   const byT = (x, y) => x.t - y.t;
-  for (const list of salesByLid.values()) list.sort((x, y) => x.t - y.t || U.cmp(x.grp, y.grp) || num(x.p) - num(y.p));
+  for (const list of salesByLid.values()) {
+    list.sort((x, y) => x.t - y.t || U.cmp(x.grp, y.grp) || num(x.p) - num(y.p));
+    if (tick(w)) yield;
+  }
   for (const list of sysByCell.values()) list.sort(byT);
   for (const list of sysByFarm.values()) list.sort(byT);
-  return { now: num(b.now, 0), fees, byId, salesByLid, sysByCell, sysByFarm, units: (b.noclaim && b.noclaim.units) || [] };
+  const ix = { now: num(b.now, 0), fees, byId, salesByLid, sysRowsByCell, sysByCell, sysByFarm, units: (b.noclaim && b.noclaim.units) || [], views: new Map() };
+  if (b && typeof b === "object") INDEX.set(b, ix);
+  return ix;
 }
 
 // What a buyer paid for a unit: the sale's price, else (an unpriced record) the listing's ask — the
@@ -136,6 +210,31 @@ function placementTruth(ix, g, f, m, from, to) {
 }
 
 /**
+ * Listing L as the evidence would read it at `to`: its unit sales before then, whether one comes after,
+ * and whether it was still on sale. A small fixed-shape record holding the fields evidence.exposureOf /
+ * activeAt / coveredDays read (c, m, u, st, units, rb, sales, rk, activeAtCut, _saleAfterCut), never a
+ * spread of the whole bundle record (Node 20 copies objects slowly); the record itself is never mutated.
+ */
+function viewOf(ix, L, to) {
+  const id = String(L.id);
+  const key = id + "@" + to;
+  if (ix.views.has(key)) return ix.views.get(key);
+  const sales = ix.salesByLid.get(id) || [];
+  const before = [];
+  let after = false;
+  for (const s of sales) {
+    if (s.t < to) before.push(s);
+    else after = true;
+  }
+  const R = { id, g: L.g, f: L.f, m: lower(L.m), o: L.o, kind: L.kind, c: L.c, u: L.u, st: L.st, units: L.units, rb: L.rb, sales: before, rk: E.rowKindOf(L), activeAtCut: false, _saleAfterCut: after };
+  R.activeAtCut = E.activeAt(R, before, to);
+  // one week's views are reused by the forecasts and the in-stock days of that week; older weeks go
+  if (ix.views.size > 20000) ix.views.clear();
+  ix.views.set(key, R);
+  return R;
+}
+
+/**
  * A listing's exposure and realised net inside [from, to] — the evidence's own exposure rule
  * (evidence.exposureOf: first sale ends a single-unit row, the Gameflip 30-day expiry, a delist ends at
  * the last write), read as of `to`.
@@ -143,18 +242,34 @@ function placementTruth(ix, g, f, m, from, to) {
 function listingWindow(ix, id, from, to) {
   const L = ix.byId.get(String(id));
   if (!L) return null;
-  const m = lower(L.m);
-  const sales = ix.salesByLid.get(String(id)) || [];
-  const before = sales.filter((s) => s.t < to);
-  const Lx = Object.assign({}, L, { m }, sales.some((s) => s.t >= to) ? { _saleAfterCut: true } : null);
-  const kind = E.rowKindOf(L);
-  const e = E.exposureOf(Lx, before, to, (to - from) / DAY, { kind, activeAtCut: E.activeAt(Lx, before, to) });
+  const R = viewOf(ix, L, to);
+  const e = E.exposureOf(R, R.sales, to, (to - from) / DAY, { kind: R.rk, activeAtCut: R.activeAtCut });
   let net = 0;
   if (e.days > 0 && e.units > 0) {
-    const inside = before.filter((s) => s.t >= e.t0 && s.t <= e.t1);
-    for (const s of U.SINGLE.has(m) ? inside.slice(0, 1) : inside) net += U.netOf(salePrice(L, s), m, ix.fees);
+    const inside = R.sales.filter((s) => s.t >= e.t0 && s.t <= e.t1);
+    for (const s of U.SINGLE.has(R.m) ? inside.slice(0, 1) : inside) net += U.netOf(salePrice(L, s), R.m, ix.fees);
   }
   return { days: e.days, units: e.units, net };
+}
+
+/**
+ * Days of [from, to] the cell g × f × m had a system-made listing on sale: the union of their exposure
+ * spans, by the evidence's own rules (evidence.coveredDays over the rows as they stood at `to`).
+ */
+function inStockDays(ix, g, f, m, from, to) {
+  const rows = [];
+  for (const L of ix.sysRowsByCell.get(U.cellKey(g, farmOf(f), lower(m))) || []) {
+    const c = finite(L.c);
+    // created after the window, or plainly over before it (a cheap pre-check; coveredDays decides)
+    if (c === null || c >= to) continue;
+    const u = finite(L.u);
+    if (lower(L.st) !== "active" && u !== null && u < from) {
+      const sales = ix.salesByLid.get(String(L.id)) || [];
+      if (!sales.some((s) => s.t >= from)) continue;
+    }
+    rows.push(viewOf(ix, L, to));
+  }
+  return rows.length ? E.coveredDays({ cut: to }, rows, from, to) : 0;
 }
 
 /* ---------------------------------- calibration ---------------------------------- */
@@ -207,21 +322,27 @@ function calibration(pairs) {
 }
 
 /** calibration() per farm, with a per-market breakdown (no reliability table there). */
-function calibrationByFarm(records) {
+function* calibrationByFarmSteps(records) {
+  const byF = { claim: [], noclaim: [] };
+  const byFM = new Map();
+  for (const r of records) {
+    byF[r.f === "noclaim" ? "noclaim" : "claim"].push(r);
+    pushTo(byFM, r.f + "|" + r.m, r);
+  }
+  yield;
   const out = {};
   for (const f of ["claim", "noclaim"]) {
-    const mine = records.filter((r) => r.f === f);
-    const c = calibration(mine);
-    const byM = new Map();
-    for (const r of mine) pushTo(byM, r.m, r);
+    const c = calibration(byF[f]);
     c.byMarket = {};
     for (const m of U.MARKETS) {
-      if (!byM.has(m)) continue;
-      const x = calibration(byM.get(m));
+      const list = byFM.get(f + "|" + m);
+      if (!list) continue;
+      const x = calibration(list);
       delete x.reliability;
       c.byMarket[m] = x;
     }
     out[f] = c;
+    yield;
   }
   return out;
 }
@@ -256,7 +377,7 @@ function discrimination(records) {
 
 // Three numbers per policy, as the farm brain's scorer: MAE (easy to read), RMSE (the ranking — it is
 // minimised by the mean, the number a shelf needs; MAE is minimised by the median, which for a cell
-// selling under one a week is ZERO and would reward an empty shelf) and the bias.
+// selling under one a week is ZERO and would reward forecasting no demand) and the bias.
 function newScore() {
   return { n: 0, absErr: 0, sqErr: 0, err: 0, forecast: 0, actual: 0 };
 }
@@ -280,21 +401,14 @@ function finishScore(s) {
 }
 
 /**
- * A placement policy's 7-day forecast for one logged cell row, or null when it has none.
- * A null in the log is MISSING — except where the model's own row says the policy's shelf on this cell is
- * zero: the expected units sold from an empty shelf is E[min(D, 0)] = 0 whatever the demand, so that is a
- * forecast of 0, not a missing one. place.js logs a forecast only for markets in a policy's shelf: the
- * brain's three policies (newsvendor, share30, instock) shelve only open markets, so a closed, unknown or
- * unmeasured cell — logged with the brain's shelf `br.sh` = 0 — is 0 for all three; today's flat split
- * leaves out the markets it deals nothing to, logged with `old.sh` = 0. A game the brain abstained on (no
- * fresh demand row: regime "unknown") has no forecast at all.
+ * A placement policy's weekly demand split for one logged cell row (`pd`: its forecast rate on this
+ * market, uncapped), or null when it has none — MISSING, never 0. A game the brain abstained on (no fresh
+ * demand row: regime "unknown") has no split at all. (The shelf forecasts `pf` stay in the log as
+ * context: test mode sees only the shelf that was really listed, so they cannot be scored.)
  */
-function forecastFor(row, policy) {
-  const v = row && row.pf ? finite(row.pf[policy]) : null;
-  if (v !== null) return v;
+function demandFor(row, policy) {
   if (!row || !row.br || row.br.rg === "unknown") return null;
-  const sh = policy === "flat" ? row.old && row.old.sh : row.br.sh;
-  return sh === 0 ? 0 : null;
+  return row.pd ? finite(row.pd[policy]) : null;
 }
 
 /**
@@ -377,27 +491,35 @@ function bestOf(scores) {
  * @returns {{ [m]: { [policy]: { near: { n, net, days, netPerDay }, far: {...} } } }}
  */
 function agreement(records) {
-  const policies = U.PRICE_POLICIES;
   const acc = new Map();
-  for (const r of records || []) {
-    const ask = finite(r && r.ask);
-    if (ask === null || !r.pol) continue;
-    for (const pol of policies) {
-      const price = finite(r.pol[pol]);
-      if (price === null || !(price > 0)) continue;
-      const side = Math.abs(ask - price) <= (NEAR_PCT / 100) * price + 1e-9 ? "near" : "far";
-      const k = r.m + "|" + pol;
-      if (!acc.has(k)) acc.set(k, { near: { n: 0, net: 0, days: 0 }, far: { n: 0, net: 0, days: 0 } });
-      const a = acc.get(k)[side];
-      a.n++;
-      a.net += num(r.net);
-      a.days += num(r.days);
-    }
+  for (const r of records || []) agreementAdd(acc, r);
+  return agreementTable(acc);
+}
+
+/** One listing into the agreement accumulator (Map market → policy → near / far sums). */
+function agreementAdd(acc, r) {
+  const ask = finite(r && r.ask);
+  if (ask === null || !r.pol) return;
+  let byPol = acc.get(r.m);
+  if (!byPol) acc.set(r.m, (byPol = {}));
+  for (const pol of U.PRICE_POLICIES) {
+    const price = finite(r.pol[pol]);
+    if (price === null || !(price > 0)) continue;
+    const side = Math.abs(ask - price) <= (NEAR_PCT / 100) * price + 1e-9 ? "near" : "far";
+    const e = byPol[pol] || (byPol[pol] = { near: { n: 0, net: 0, days: 0 }, far: { n: 0, net: 0, days: 0 } });
+    const a = e[side];
+    a.n++;
+    a.net += num(r.net);
+    a.days += num(r.days);
   }
+}
+
+function agreementTable(acc) {
+  const policies = U.PRICE_POLICIES;
   const out = {};
   for (const m of U.MARKETS) {
     for (const pol of policies) {
-      const a = acc.get(m + "|" + pol);
+      const a = acc.has(m) ? acc.get(m)[pol] : undefined;
       if (!a) continue;
       if (!out[m]) out[m] = {};
       const fin = (x) => ({ n: x.n, net: round2(x.net), days: round2(x.days), netPerDay: x.days > 0 ? round3(x.net / x.days) : null });
@@ -419,6 +541,29 @@ function unitExpiry(ev, u) {
   if (end === null || end === undefined) return null;
   const win = ev.noclaim.claimWindowByGame && ev.noclaim.claimWindowByGame.has(u.g) ? ev.noclaim.claimWindowByGame.get(u.g) : num(ev.noclaim.claimWindowDays, 0);
   return end + win * DAY;
+}
+
+/** unitExpiry, once per unit for one evidence (the same unit is asked about at every sample). */
+function expiryMemo(ev) {
+  const memo = new Map();
+  return (u) => {
+    if (memo.has(u)) return memo.get(u);
+    const v = unitExpiry(ev, u);
+    memo.set(u, v);
+    return v;
+  };
+}
+
+/**
+ * The hazard (units a day) a logged forecast implies for its row: pH = 1 − exp(−h·H) at the row's ask over
+ * its horizon H, so h = −ln(1 − pH) ÷ H — the model's own curve at forecast time, read back from what it
+ * logged, without refitting anything. Null without a forecast.
+ */
+function hazardOfForecast(x, cfg) {
+  const p = finite(x && x.p);
+  if (p === null) return null;
+  const Hd = num(x.h, 0) > 0 ? num(x.h) : farmOf(x.f) === "noclaim" ? cfg.horizonDaysNoclaim : cfg.horizonDaysClaim;
+  return -Math.log(1 - U.clamp(p, 0, P_MAX)) / Hd;
 }
 
 /**
@@ -468,25 +613,26 @@ function soldOrExpired(records, skipped = null) {
 /**
  * Score the no-claim units live at T (records pushed to `t.soe`). Units of one wave on one market share
  * one queue: a Gameflip chain shows one unit at a time, a GGSel / Plati pool sells oldest first — either
- * way the offer sells at the hazard h(x) per listing-day of each live row while stock lasts, so of k units
- * with d days to their expiry E[min(Poisson(h·rows·d), k)] are expected to sell (the expected-units rule
- * the placement uses) — each unit's chance is that ÷ k. A unit counts only when its expiry is dated and
- * after T (the model ignores an estimate a unit has already outlived), its expiry has passed by `now`, and
- * the ledger says how it ended (sold, or expired).
- * @param {object} o { units (live at T), expiryOf(u), fc (the forecasts logged at T), hz (no-claim fit),
- *                     tierOf(g), T, now }
+ * way the offer sells at the hazard of each live row while stock lasts, so of k units with d days to their
+ * expiry E[min(Poisson(Σ h_row · d), k)] are expected to sell (the expected-units rule the placement uses)
+ * — each unit's chance is that ÷ k. A row's hazard is read back from its logged forecast (hazardOfForecast);
+ * a queue with no live row of its own takes the median hazard of its cell's other live rows. A unit counts
+ * only when its expiry is dated and after T (the model ignores an estimate a unit has already outlived),
+ * its expiry has passed by `now`, and the ledger says how it ended (sold, or expired).
+ * @param {object} o { units (live at T), expiryOf(u), fc (the forecasts made at T), cfg, T, now }
  */
-function scoreUnits(t, { units, expiryOf, fc, hz, tierOf, T, now }) {
+function* scoreUnitsSteps(t, { units, expiryOf, fc, cfg, T, now }, w = { n: 0 }) {
   const live = new Map();
-  const cellX = new Map();
+  const cellH = new Map();
   for (const x of fc || []) {
     if (!x || farmOf(x.f) !== "noclaim") continue;
-    live.set(String(x.l), x);
-    const v = finite(x.x);
-    if (v !== null) pushTo(cellX, x.k + "|" + lower(x.m), v);
+    const h = hazardOfForecast(x, cfg);
+    live.set(String(x.l), { m: lower(x.m), h });
+    if (h !== null) pushTo(cellH, x.k + "|" + lower(x.m), h);
   }
   const groups = new Map();
   for (const u of units || []) {
+    if (tick(w)) yield;
     if (!u) continue;
     const exp = expiryOf(u);
     if (exp === null) {
@@ -514,33 +660,35 @@ function scoreUnits(t, { units, expiryOf, fc, hz, tierOf, T, now }) {
     groups.get(k).units.push({ u, y: sold ? 1 : 0 });
   }
   for (const k of [...groups.keys()].sort(U.cmp)) {
+    if (tick(w)) yield;
     const gr = groups.get(k);
     const rows = new Map();
     for (const { u } of gr.units) {
       for (const lid of u.lids || []) {
         const x = live.get(String(lid));
-        if (x && lower(x.m) === gr.m) rows.set(String(lid), x);
+        if (x && x.m === gr.m && x.h !== null) rows.set(String(lid), x.h);
       }
     }
-    const xs = [...rows.values()].map((x) => finite(x.x)).filter((v) => v !== null);
-    const cx = cellX.get(gr.g + "|" + gr.m) || [];
-    // the offer's own live rows at T, else the cell's other live rows, else an offer at its reference
-    const x = xs.length ? U.median(xs) : cx.length ? U.median(cx) : 1;
-    const h = H.hazardAt(hz, gr.m, tierOf(gr.g), x);
-    if (h === null) {
-      t.soeSkip.noEstimate += gr.units.length;
-      continue;
+    let rate = 0;
+    for (const h of rows.values()) rate += h;
+    if (!rows.size) {
+      const ch = cellH.get(gr.g + "|" + gr.m) || [];
+      if (!ch.length) {
+        t.soeSkip.noEstimate += gr.units.length;
+        continue;
+      }
+      rate = ch.slice().sort((a, b) => a - b)[ch.length >> 1];
     }
     const kk = gr.units.length;
-    const mu = h * Math.max(1, rows.size) * ((gr.exp - T) / DAY);
-    const p = U.expectedSold(mu, kk) / kk;
+    const p = U.expectedSold(rate * ((gr.exp - T) / DAY), kk) / kk;
     for (const { y } of gr.units) t.soe.push({ g: gr.g, m: gr.m, p: round4(p), y });
   }
 }
+const scoreUnits = (t, o) => runSync(scoreUnitsSteps(t, o));
 
 /* --------------------------------- one forecast set -------------------------------- */
 
-const newExtra = () => ({ unitsAll: 0, unforecast: { cells: 0, units: 0 }, unmeasured: { cells: 0, units: 0 }, outside: 0 });
+const newExtra = () => ({ unitsAll: 0, outOfStock: { cells: 0, units: 0 }, unforecast: { cells: 0, units: 0 }, unmeasured: { cells: 0, units: 0 }, outside: 0 });
 
 function newTables() {
   return {
@@ -549,26 +697,26 @@ function newTables() {
     place: {},
     // per farm: every unit system-made rows sold in the scored weeks, and where the ones not admitted went
     placeExtra: { claim: newExtra(), noclaim: newExtra() },
-    agree: [],
+    agree: new Map(),
     soe: [],
     soeSkip: { undated: 0, past: 0, open: 0, unresolved: 0, noEstimate: 0 },
     soeSeen: false,
-    counts: { forecasts: 0, scored: 0, waiting: 0, missing: 0, unmeasured: 0, noP: 0, noBase: 0 },
+    counts: { forecasts: 0, scored: 0, waiting: 0, missing: 0, unmeasured: 0, noP: 0, noBase: 0, basePerSample: 0 },
   };
 }
 
 /**
  * Score one set of per-listing forecasts made at T (a backtest cut's run.fc, or a logged daily sample):
  * calibration, discrimination and agreement. A forecast is scored once T + its horizon ≤ now; a listing
- * absent from the bundle is skipped and counted `missing` (never "unsold").
- * @param {object} o { fc, rowsByKey: Map(cell → row at T), ix, T, now, hzBase: { claim, noclaim } (the
- *                     fit the baseline's market rates come from), cfg }
+ * absent from the bundle is skipped and counted `missing` (never "unsold"). The baseline is the market's
+ * base rate the run logged with the forecast (`pb`); a forecast logged before that field existed takes the
+ * base rate of `hzBase`, a fit made at T (counted `basePerSample`).
+ * @param {object} o { fc, rowsByKey: Map(cell → row at T), ix, T, now, hzBase: { claim, noclaim } | null, cfg }
  * @returns {{ scored, sold }}
  */
-function scoreForecasts(t, { fc, rowsByKey, ix, T, now, hzBase, cfg }) {
-  let scored = 0;
-  let sold = 0;
+function* scoreForecastsSteps(t, { fc, rowsByKey, ix, T, now, hzBase, cfg }, w = { n: 0 }, out = { scored: 0, sold: 0 }) {
   for (const x of fc || []) {
+    if (tick(w)) yield;
     if (!x || !x.l) continue;
     t.counts.forecasts++;
     const f = farmOf(x.f);
@@ -585,8 +733,8 @@ function scoreForecasts(t, { fc, rowsByKey, ix, T, now, hzBase, cfg }) {
       continue;
     }
     t.counts.scored++;
-    scored++;
-    sold += y;
+    out.scored++;
+    out.sold += y;
     // ZeusX records no sale for an auto row: "never sold" there is a blind spot, not an outcome — it
     // would read as a row the brain judged badly in every table but the calibration (where its chance
     // is already null: the market is never fitted)
@@ -595,7 +743,11 @@ function scoreForecasts(t, { fc, rowsByKey, ix, T, now, hzBase, cfg }) {
       continue;
     }
     const p = finite(x.p);
-    const pb = hzBase && hzBase[f] ? H.baseP(hzBase[f], m, h) : null;
+    let pb = finite(x.pb);
+    if (x.pb === undefined && hzBase && hzBase[f]) {
+      pb = H.baseP(hzBase[f], m, h);
+      if (pb !== null) t.counts.basePerSample++;
+    }
     if (p === null) t.counts.noP++;
     else if (pb === null) t.counts.noBase++;
     else t.cal.push({ f, m, p, y, pb });
@@ -603,27 +755,28 @@ function scoreForecasts(t, { fc, rowsByKey, ix, T, now, hzBase, cfg }) {
     const abstained = !!(row && row.br && row.br.rg === "unknown");
     t.disc.push({ f, a: abstained ? "abstained" : x.a, y });
     if (row && row.pol) {
-      const w = listingWindow(ix, x.l, T, to);
-      if (w) t.agree.push({ m, ask: finite(x.ask), pol: row.pol, net: w.net, days: w.days });
+      const wdw = listingWindow(ix, x.l, T, to);
+      if (wdw) agreementAdd(t.agree, { m, ask: finite(x.ask), pol: row.pol, net: wdw.net, days: wdw.days });
     }
   }
-  return { scored, sold };
+  return out;
 }
+const scoreForecasts = (t, o) => runSync(scoreForecastsSteps(t, o));
 
 /**
- * Score one set of cell rows made at T against the units system-made rows sold in [T, T + 7 d).
- * ZeusX records no sale for an auto row: its cells can never be scored (counted `unmeasured`). A row no
- * policy has a number for is outside the placement (an abstention, a managed cell) — its units are counted
- * `unforecast`, never admitted.
+ * Score one set of cell rows made at T: each placement policy's weekly demand split (`pd`) against the
+ * units system-made rows sold in [T, T + 7 d), on cell-weeks the market was in stock ≥ IN_STOCK_DAYS days
+ * (the rest counted `outOfStock`). ZeusX records no sale for an auto row: its cells can never be scored
+ * (`unmeasured`). A row no policy has a split for (an abstention, a managed cell, a row logged before the
+ * split was) is outside the score — its units are counted `unforecast`, never admitted.
  * @returns {{ cells, units }} admitted rows and their units
  */
-function scorePlacement(t, { rows, ix, T }) {
+function* scorePlacementSteps(t, { rows, ix, T }, w = { n: 0 }, out = { cells: 0, units: 0 }) {
   const to = T + PLACE_DAYS * DAY;
   const policies = U.PLACE_POLICIES;
-  let cells = 0;
-  let units = 0;
   for (const f of ["claim", "noclaim"]) for (const s of ix.sysByFarm.get(f) || []) if (s.t >= T && s.t < to) t.placeExtra[f].unitsAll++;
   for (const r of rows || []) {
+    if (tick(w)) yield;
     if (!r || r.m === "all") continue;
     const f = farmOf(r.f);
     const m = lower(r.m);
@@ -635,9 +788,13 @@ function scorePlacement(t, { rows, ix, T }) {
     }
     const fcs = {};
     let any = false;
+    let anySale = false;
     for (const p of policies) {
-      fcs[p] = forecastFor(r, p);
-      if (fcs[p] !== null) any = true;
+      fcs[p] = demandFor(r, p);
+      if (fcs[p] !== null) {
+        any = true;
+        if (round2(fcs[p]) > 0) anySale = true;
+      }
     }
     if (!any) {
       if (actual) {
@@ -646,33 +803,52 @@ function scorePlacement(t, { rows, ix, T }) {
       }
       continue;
     }
+    // the admission rule first (cheap), the in-stock days only for a cell-week it would admit
+    if (!actual && !anySale) continue;
+    if (inStockDays(ix, r.k, f, m, T, to) < IN_STOCK_DAYS - 1e-9) {
+      t.placeExtra[f].outOfStock.cells++;
+      t.placeExtra[f].outOfStock.units += actual;
+      continue;
+    }
     if (admitRow(t.place, f, fcs, actual)) {
-      cells++;
-      units += actual;
+      out.cells++;
+      out.units += actual;
     }
   }
-  return { cells, units };
+  return out;
 }
+const scorePlacement = (t, o) => runSync(scorePlacementSteps(t, o));
 
-/** The tables, finished. */
-function finishTables(t) {
+/** The tables, finished (as steps: at production volume the forward score holds ~100k forecasts). */
+function* finishSteps(t) {
   const extra = {};
   for (const f of ["claim", "noclaim"]) {
     const x = t.placeExtra[f];
     const admitted = (t.place[f] && t.place[f].units) || 0;
     // units sold on cells the forecast had no row for (a game or market first listed after it)
-    extra[f] = Object.assign({}, x, { outside: Math.max(0, x.unitsAll - admitted - x.unforecast.units - x.unmeasured.units) });
+    extra[f] = Object.assign({}, x, {
+      outside: Math.max(0, x.unitsAll - admitted - x.outOfStock.units - x.unforecast.units - x.unmeasured.units),
+      basis: "demand split",
+      inStockDays: IN_STOCK_DAYS,
+    });
   }
+  const calib = yield* calibrationByFarmSteps(t.cal);
+  const disc = discrimination(t.disc);
+  yield;
+  const soe = t.soeSeen ? soldOrExpired(t.soe, t.soeSkip) : null;
+  yield;
   return {
-    calibration: calibrationByFarm(t.cal),
-    discrimination: discrimination(t.disc),
+    calibration: calib,
+    discrimination: disc,
     placement: finishPlacement(t.place, extra),
-    agreement: agreement(t.agree),
+    placementNote: PLACEMENT_NOTE,
+    agreement: agreementTable(t.agree),
     agreementNote: AGREEMENT_NOTE,
-    soldOrExpired: t.soeSeen ? soldOrExpired(t.soe, t.soeSkip) : null,
+    soldOrExpired: soe,
     counts: Object.assign({}, t.counts),
   };
 }
+const finishTables = (t) => runSync(finishSteps(t));
 
 const rowsIndex = (rows) => {
   const map = new Map();
@@ -686,8 +862,9 @@ const cfgOf = (bundle, cfg) => Object.assign({}, U.readConfig((bundle && bundle.
 
 // What a replayed week cannot know, said beside its numbers.
 const BACKTEST_LIMITS = [
-  "Each week is replayed from the bundle as it stood at the cut: listings created, sales made and orders priced before it only.",
-  "The farm brain's demand at a cut is our own 45-day average then (its default estimator); no cool-down history is replayed.",
+  "Each week is replayed from the bundle as it stood at the cut: listings created, sales made and orders priced before it only; a row rebundled after the cut is left out of offer-level evidence (what it held at the cut was not recorded).",
+  "The farm brain's demand at a cut is our own 45-day average then (its default estimator). Its stock at the cut is not known (only the units listed are), so a replayed regime comes from the farm brain's skip, fading demand or perishing stock, never from cover; no cool-down history is replayed.",
+  "Still read as of today, not as of the cut: each listing's price, ask and learned floor (vmin), its quantity counters (qty, qr), the radar's game rows (no time filter), and each no-claim unit's bundle key and listing ids.",
   "Today's old-side numbers (new-listing prices, the flat split, the tracker's suggestion) stand in for the old side at each cut: the bundle holds only today's.",
   "Weekly cuts see a no-claim expiry at most a week ahead; the daily forward samples see its last days.",
 ];
@@ -712,21 +889,24 @@ function startBacktest(bundle, { cfg, weeks = BACKTEST_WEEKS, cuts: at = null } 
     for (const c of at) if (finite(c) !== null && Number(c) < now) cuts.push(Number(c));
     cuts.sort((a, b) => a - b);
   } else for (let w = W; w >= 1; w--) cuts.push(now - w * 7 * DAY);
-  return { bundle, cfg: C, now, cuts, ix: indexBundle(bundle), t: newTables(), weeks: [] };
+  return { bundle, cfg: C, now, cuts, ix: null, t: newTables(), weeks: [], w: { n: 0 } };
 }
 
-/** Score the run the model made at one cut. */
-function scoreRun(st, run, cut) {
+/** Score the run the model made at one cut (forecasts, cells, units), as steps. */
+function* scoreRunSteps(st, run, cut) {
   const ev = run.ctx.ev;
   const hz = run.ctx.hz;
   const t = st.t;
-  const fc = scoreForecasts(t, { fc: run.fc, rowsByKey: rowsIndex(run.rows), ix: st.ix, T: cut, now: st.now, hzBase: hz, cfg: st.cfg });
-  const pl = cut + PLACE_DAYS * DAY <= st.now ? scorePlacement(t, { rows: run.rows, ix: st.ix, T: cut }) : { cells: 0, units: 0 };
+  const fc = yield* scoreForecastsSteps(t, { fc: run.fc, rowsByKey: rowsIndex(run.rows), ix: st.ix, T: cut, now: st.now, hzBase: hz, cfg: st.cfg }, st.w);
+  yield;
+  let pl = { cells: 0, units: 0 };
+  if (cut + PLACE_DAYS * DAY <= st.now) pl = yield* scorePlacementSteps(t, { rows: run.rows, ix: st.ix, T: cut }, st.w);
+  yield;
   const before = t.soe.length;
   const live = ev.noclaim.units.filter((u) => u.stc === "listed");
   if (live.length) t.soeSeen = true;
-  scoreUnits(t, { units: live, expiryOf: (u) => unitExpiry(ev, u), fc: run.fc, hz: hz.noclaim, tierOf: (g) => P.gameState(ev, g, "noclaim").tier, T: cut, now: st.now });
-  return {
+  yield* scoreUnitsSteps(t, { units: live, expiryOf: expiryMemo(ev), fc: run.fc, cfg: st.cfg, T: cut, now: st.now }, st.w);
+  st.weeks.push({
     cut,
     day: dayText(cut),
     listings: (run.fc || []).length,
@@ -735,11 +915,10 @@ function scoreRun(st, run, cut) {
     cells: pl.cells,
     units: pl.units,
     noclaimUnits: t.soe.length - before,
-  };
+  });
 }
 
-function finishBacktest(st) {
-  const out = finishTables(st.t);
+function finishBacktest(st, out = finishTables(st.t)) {
   return Object.assign(
     {
       weeks: st.weeks,
@@ -763,27 +942,31 @@ function finishBacktest(st) {
 function backtest(bundle, opts = {}) {
   const st = startBacktest(bundle, opts);
   const M = facade();
+  st.ix = indexBundle(bundle);
   for (const cut of st.cuts) {
     const ev = E.buildEvidence(bundle, { cfg: st.cfg, cut, synthDemand: true });
     const run = M.buildRun(viewAt(bundle, cut, ev), { cfg: st.cfg });
-    st.weeks.push(scoreRun(st, run, cut));
+    runSync(scoreRunSteps(st, run, cut));
   }
   return finishBacktest(st);
 }
 
-/** The same replay, yielding the event loop between weeks and inside each (the async evidence and run). */
+/** The same replay, yielding the event loop between weeks and inside each (the async evidence, run and scoring). */
 async function backtestAsync(bundle, opts = {}) {
   const st = startBacktest(bundle, opts);
   const M = facade();
+  // one time budget for the whole replay: the scorer's steps and the model's async calls share it
+  const y = yielder();
+  st.ix = await runAsync(indexSteps(bundle), y);
   for (const cut of st.cuts) {
-    await U.yieldNow();
-    const ev = await E.buildEvidenceAsync(bundle, { cfg: st.cfg, cut, synthDemand: true });
-    await U.yieldNow();
-    const run = await M.buildRunAsync(viewAt(bundle, cut, ev), { cfg: st.cfg });
-    await U.yieldNow();
-    st.weeks.push(scoreRun(st, run, cut));
+    await y.now();
+    const ev = await E.buildEvidenceAsync(bundle, { cfg: st.cfg, cut, synthDemand: true, yielder: y });
+    await y.now();
+    const run = await M.buildRunAsync(viewAt(bundle, cut, ev), { cfg: st.cfg, yielder: y });
+    await y.now();
+    await runAsync(scoreRunSteps(st, run, cut), y);
   }
-  return finishBacktest(st);
+  return finishBacktest(st, await runAsync(finishSteps(st.t), y));
 }
 
 /* -------------------------------------- forward ------------------------------------- */
@@ -805,55 +988,122 @@ function dailyFirst(samples) {
 }
 
 /**
+ * The forward score's plan: the daily samples, which ones have something due, and which moments need a
+ * fit — a sample whose forecasts were logged without their base rate (`pb`) is scored against a fit made at
+ * its own moment (never at another sample's); the expiry rules of the no-claim units come from the evidence
+ * as of the oldest due sample (wave ends and claim windows learned before any forecast they judge).
+ */
+function startForward({ samples = [], bundle, cfg, now } = {}) {
+  const st = {
+    list: dailyFirst(samples),
+    bundle: bundle && typeof bundle === "object" ? bundle : null,
+    t: newTables(),
+    w: { n: 0 },
+    fits: new Map(),
+    // fits: samples scored against a fit at their own moment (logged without `pb`); expiryRulesAt: the
+    // moment the no-claim expiry rules were read
+    out: { runsScored: 0, runsWaiting: 0, missing: 0, samples: 0, fits: 0, expiryRulesAt: null },
+  };
+  st.out.samples = st.list.length;
+  if (!st.bundle) return st;
+  st.C = cfgOf(bundle, cfg);
+  st.N = finite(now) !== null ? Number(now) : num(bundle.now, 0);
+  const C = st.C;
+  const minH = Math.min(C.horizonDaysClaim, C.horizonDaysNoclaim);
+  const hasUnits = !!(bundle.noclaim && Array.isArray(bundle.noclaim.units) && bundle.noclaim.units.length);
+  st.hasUnits = hasUnits;
+  st.due = (s) => (s.fc || []).some((x) => x && s.at + num(x.h, minH) * DAY <= st.N) || s.at + PLACE_DAYS * DAY <= st.N || (hasUnits && s.at + minH * DAY <= st.N);
+  st.fitAt = new Set();
+  const due = st.list.filter(st.due);
+  // a forecast logged before `pb` existed has no such field; `pb: null` is an answer (the market had no
+  // base rate then) and needs no fit
+  for (const s of due) if ((s.fc || []).some((x) => x && x.l && x.pb === undefined)) st.fitAt.add(s.at);
+  st.evAt = due.length && hasUnits ? due[0].at : null;
+  st.out.expiryRulesAt = st.evAt;
+  return st;
+}
+
+function fitFrom(ev) {
+  return { ev, hz: { claim: H.fitHazard(ev, "claim"), noclaim: H.fitHazard(ev, "noclaim") } };
+}
+
+/** One daily sample, as steps. */
+function* forwardSampleSteps(st, s) {
+  if (!st.due(s)) {
+    st.out.runsWaiting++;
+    return;
+  }
+  st.out.runsScored++;
+  const T = s.at;
+  const fit = st.fits.get(T);
+  yield* scoreForecastsSteps(st.t, { fc: s.fc, rowsByKey: rowsIndex(s.rows), ix: st.ix, T, now: st.N, hzBase: fit ? fit.hz : null, cfg: st.C }, st.w);
+  if (T + PLACE_DAYS * DAY <= st.N) yield* scorePlacementSteps(st.t, { rows: s.rows, ix: st.ix, T }, st.w);
+  if (st.hasUnits && st.expiryOf) {
+    const live = [];
+    for (const u of st.ix.units) {
+      if (tick(st.w)) yield;
+      const l = finite(u && u.l);
+      if (l === null || !(l < T)) continue;
+      const so = finite(u.s);
+      const x = finite(u.x);
+      if ((so !== null && so < T) || (x !== null && x < T)) continue;
+      live.push(u);
+    }
+    if (live.length) st.t.soeSeen = true;
+    yield* scoreUnitsSteps(st.t, { units: live, expiryOf: st.expiryOf, fc: s.fc, cfg: st.C, T, now: st.N }, st.w);
+  }
+}
+
+function finishForward(st, tables = finishTables(st.t)) {
+  st.out.missing = st.t.counts.missing;
+  st.out.fits = st.fits.size;
+  return Object.assign(st.out, tables, { note: NOTE, cannotShow: CANNOT_SHOW });
+}
+
+/**
  * Score the logged daily forecasts once their horizon has passed (forward). Same tables as the backtest.
  * Truth comes from the bundle's sales by listing id; a listing absent from the bundle is skipped and
- * counted `missing`. The baseline's market rates come from one fit on the evidence as of the OLDEST scored
- * sample — never from anything after a forecast it judges. No-claim units live at each sample are scored
+ * counted `missing`. Each forecast is judged against the base rate logged with it (`pb`); samples logged
+ * before that field existed get a fit at their own moment. No-claim units live at each sample are scored
  * for sold-or-expired when the bundle carries the unit ledger.
  * @param {object} o { samples: [{ at, fc: [FC], rows: [Row slim] }], bundle, cfg, now }
  */
-function forwardScores({ samples = [], bundle, cfg, now } = {}) {
-  const t = newTables();
-  const out = { runsScored: 0, runsWaiting: 0, missing: 0, samples: 0, baselineAt: null };
-  const list = dailyFirst(samples);
-  out.samples = list.length;
-  if (!bundle || typeof bundle !== "object") return Object.assign(out, finishTables(t), { note: NOTE, cannotShow: CANNOT_SHOW });
-  const C = cfgOf(bundle, cfg);
-  const N = finite(now) !== null ? Number(now) : num(bundle.now, 0);
-  const ix = indexBundle(bundle);
-  const minH = Math.min(C.horizonDaysClaim, C.horizonDaysNoclaim);
-  const due = (s) => (s.fc || []).some((x) => x && s.at + num(x.h, minH) * DAY <= N) || s.at + PLACE_DAYS * DAY <= N || (ix.units.length && s.at + minH * DAY <= N);
-  const scorable = list.filter(due);
-  let ev0 = null;
-  let hz0 = null;
-  if (scorable.length) {
-    out.baselineAt = scorable[0].at;
-    ev0 = E.buildEvidence(bundle, { cfg: C, cut: scorable[0].at, synthDemand: true });
-    hz0 = { claim: H.fitHazard(ev0, "claim"), noclaim: H.fitHazard(ev0, "noclaim") };
+function forwardScores(o = {}) {
+  const st = startForward(o);
+  if (!st.bundle) return finishForward(st);
+  st.ix = indexBundle(st.bundle);
+  for (const at of st.fitAt) st.fits.set(at, fitFrom(E.buildEvidence(st.bundle, { cfg: st.C, cut: at, synthDemand: true })));
+  if (st.evAt !== null) {
+    const ev = st.fits.has(st.evAt) ? st.fits.get(st.evAt).ev : E.buildEvidence(st.bundle, { cfg: st.C, cut: st.evAt, synthDemand: true });
+    st.expiryOf = expiryMemo(ev);
   }
-  for (const s of list) {
-    if (!due(s)) {
-      out.runsWaiting++;
-      continue;
-    }
-    out.runsScored++;
-    const T = s.at;
-    const rowsByKey = rowsIndex(s.rows);
-    scoreForecasts(t, { fc: s.fc, rowsByKey, ix, T, now: N, hzBase: hz0, cfg: C });
-    if (T + PLACE_DAYS * DAY <= N) scorePlacement(t, { rows: s.rows, ix, T });
-    if (ix.units.length) {
-      const live = ix.units.filter((u) => {
-        const l = finite(u && u.l);
-        const so = finite(u && u.s);
-        const x = finite(u && u.x);
-        return l !== null && l < T && !(so !== null && so < T) && !(x !== null && x < T);
-      });
-      if (live.length) t.soeSeen = true;
-      scoreUnits(t, { units: live, expiryOf: (u) => unitExpiry(ev0, u), fc: s.fc, hz: hz0.noclaim, tierOf: (g) => P.gameState(ev0, g, "noclaim").tier, T, now: N });
-    }
+  for (const s of st.list) runSync(forwardSampleSteps(st, s));
+  return finishForward(st);
+}
+
+/** The same score, yielding the event loop between samples and inside each (the runner awaits this one). */
+async function forwardScoresAsync(o = {}) {
+  const st = startForward(o);
+  if (!st.bundle) return finishForward(st);
+  const y = yielder();
+  st.ix = await runAsync(indexSteps(st.bundle), y);
+  for (const at of st.fitAt) {
+    await y.now();
+    const ev = await E.buildEvidenceAsync(st.bundle, { cfg: st.C, cut: at, synthDemand: true, yielder: y });
+    await y.now();
+    st.fits.set(at, fitFrom(ev));
   }
-  out.missing = t.counts.missing;
-  return Object.assign(out, finishTables(t), { note: NOTE, cannotShow: CANNOT_SHOW });
+  if (st.evAt !== null) {
+    await y.now();
+    const ev = st.fits.has(st.evAt) ? st.fits.get(st.evAt).ev : await E.buildEvidenceAsync(st.bundle, { cfg: st.C, cut: st.evAt, synthDemand: true, yielder: y });
+    st.expiryOf = expiryMemo(ev);
+  }
+  for (const s of st.list) {
+    await y.now();
+    await runAsync(forwardSampleSteps(st, s), y);
+  }
+  await y.now();
+  return finishForward(st, await runAsync(finishSteps(st.t), y));
 }
 
 /* ---------------------------------- decision review --------------------------------- */
@@ -946,26 +1196,30 @@ module.exports = {
   PLACE_DAYS,
   REVIEW_DAYS,
   REVIEW_LIMIT,
+  IN_STOCK_DAYS,
   SCORED_ACTIONS,
   SCORE_NOTE: NOTE,
   CANNOT_SHOW,
   AGREEMENT_NOTE,
+  PLACEMENT_NOTE,
   BACKTEST_LIMITS,
   indexBundle,
   truthSold,
   placementTruth,
   listingWindow,
+  inStockDays,
   calibration,
   discrimination,
   newScore,
   addScore,
   finishScore,
-  forecastFor,
+  demandFor,
   admitRow,
   finishPlacement,
   bestOf,
   agreement,
   unitExpiry,
+  hazardOfForecast,
   soldOrExpired,
   scoreUnits,
   newTables,
@@ -976,6 +1230,7 @@ module.exports = {
   backtest,
   backtestAsync,
   forwardScores,
+  forwardScoresAsync,
   decisionReview,
   disagreementOf,
   topDisagreements,
