@@ -110,6 +110,10 @@ const REAL_PASS_MAX_LISTINGS = 4;
 const REAL_PASS_MAX_UNITS = 11;
 // A listing in one of these states was taken down for good.
 const CLOSED_STATUSES = new Set(["delisted", "removed"]);
+// A burst that emptied a listing is a wipe only when the listing was closed within this
+// long after it: a cleanup is followed by its delist, a real sell-out by a refill. The
+// guardian's own memory of a drain is the same hour (MASS_DROP_WINDOW_MS).
+const WIPE_CLOSE_WINDOW_MS = 60 * 60 * 1000;
 
 // reserved:<accountId>:<setId>:<game> — dropReservation.reserveSetOnAccount's key.
 const RESERVED_RE = /^reserved:([0-9a-f]{24}):([^:]*):/i;
@@ -120,8 +124,9 @@ const RESERVED_RE = /^reserved:([0-9a-f]{24}):([^:]*):/i;
  * @param {Array}  input.signals  SaleSignal rows with source "listing_sold"
  * @param {Array}  input.sets     DropSet rows referenced by the listings
  * @param {Set}    [input.reservations] "<accountId>|<setId>" of every Shop / bulk-order
- *                 reservation that still holds (the loader's DropLog read). Absent or
- *                 null = not known: no Shop / bulk-order signal counts.
+ *                 reservation a BUYER still holds (the loader's DropLog read; a shelf
+ *                 claim of the same set is not one). Absent or null = not known: no
+ *                 Shop / bulk-order signal counts.
  * @param {Map}    [input.accountLogins] accountId -> Twitch login, for those signals
  * @param {string} [input.reservationNote] why the reservations could not be read
  * @returns {{ sales: object[], excluded: object, quality: object }}
@@ -155,6 +160,8 @@ function buildLedger({ listings = [], signals = [], sets = [], reservations = nu
     reservationReleased: 0, reservationUnchecked: 0,
   };
   const suspect = [];
+  // Emptied, closed listings in a burst whose row has no time it closed (see BURSTS).
+  const wipeCloseUnknown = new Set();
 
   // Pre-pass: which sold:<listing> signals look like a delist closing out stock?
   const nearDelist = new Map(); // dedupeKey -> hourBucket "market|ISOhour"
@@ -538,14 +545,20 @@ function buildLedger({ listings = [], signals = [], sets = [], reservations = nu
   //     (their rows were written again later) are the remnant of a big closeout, not a
   //     pass of their own;
   //   * a WIPE: a listing lost its whole stock at once (every unit the guardian kept on
-  //     it, `qtyTarget`) and is closed now (delisted / removed). Buyers emptying a
-  //     listing leave it on sale and it is refilled; a cleanup empties it and it is taken
-  //     down. On the 2026-10-01 snapshot the one burst kept as demand otherwise was
-  //     Digiseller Black Desert, 2026-08-14 11:29: 10 units on 3 listings, two of them
-  //     emptied (7 of 7, 2 of 2), all delisted later.
+  //     it, `qtyTarget`) and was taken down (delisted / removed) within
+  //     WIPE_CLOSE_WINDOW_MS of the burst. Buyers emptying a listing leave it on sale and
+  //     it is refilled; a cleanup empties it and it is taken down. It is judged by what
+  //     happened AT the burst, never by the listing's state now: every pre-10-01 GGSel
+  //     offer is delisted today, and reading "closed now" turned their real passes into
+  //     wipes after the fact (review of 2026-10-03, round 2). The listing has no delist
+  //     timestamp of its own; a delist is a write, so a closed row's `updatedAt` is when
+  //     it closed, as far as the row can tell (the delist rule above reads it the same
+  //     way). A closed row with no `updatedAt` is judged as before — closed means a wipe —
+  //     and counted (`quality.wipeCloseUnknown`).
   // Either way the burst is set aside, as before. A pass that leaves stock on its
-  // listings stays demand. (`qtyTarget` is read as it is now: a target lowered since
-  // reads as a wipe — the direction that never invents a sale.)
+  // listings, or whose emptied listing stayed on sale past the window, stays demand.
+  // (`qtyTarget` is read as it is now: a target lowered since reads as emptied — the
+  // direction that never invents a sale.)
   {
     const BURST_N = 8;
     const BURST_MS = 5 * 60 * 1000;
@@ -567,13 +580,22 @@ function buildLedger({ listings = [], signals = [], sets = [], reservations = nu
     if (flagged.size) {
       const realPass = new Set();
       const massClose = suspect.filter((x) => x.reason === "mass-close");
-      // Units per listing of a burst's shape; a listing it emptied that is closed now = a wipe.
-      const wiped = (perListing) =>
-        [...perListing].some(([id, n]) => {
+      // Units per listing of a burst's shape; a listing it emptied that was closed by
+      // `closeBy` (the burst's end + the window) = a wipe.
+      const wiped = (perListing, closeBy) => {
+        let wipe = false;
+        for (const [id, n] of perListing) {
           const l = listingById.get(id);
           const kept = l ? Number(l.qtyTarget) || 0 : 0;
-          return kept > 0 && n >= kept && CLOSED_STATUSES.has(String(l.status || ""));
-        });
+          if (!(kept > 0 && n >= kept && CLOSED_STATUSES.has(String(l.status || "")))) continue;
+          const closedAt = ts(l.updatedAt);
+          if (closedAt == null) {
+            wipeCloseUnknown.add(id);
+            wipe = true;
+          } else if (closedAt <= closeBy) wipe = true;
+        }
+        return wipe;
+      };
       for (const [market, arr] of byMarket) {
         let burst = [];
         const close = () => {
@@ -583,7 +605,8 @@ function buildLedger({ listings = [], signals = [], sets = [], reservations = nu
           const shape = burst.concat(massClose.filter((x) => x.market === market && x.at.getTime() >= from && x.at.getTime() <= to));
           const perListing = new Map();
           for (const x of shape) perListing.set(x.listingId, (perListing.get(x.listingId) || 0) + 1);
-          if (perListing.size <= REAL_PASS_MAX_LISTINGS && shape.length <= REAL_PASS_MAX_UNITS && !wiped(perListing)) {
+          const closeBy = burst[burst.length - 1].at.getTime() + WIPE_CLOSE_WINDOW_MS;
+          if (perListing.size <= REAL_PASS_MAX_LISTINGS && shape.length <= REAL_PASS_MAX_UNITS && !wiped(perListing, closeBy)) {
             for (const x of burst) realPass.add(x);
           }
           burst = [];
@@ -656,6 +679,8 @@ function buildLedger({ listings = [], signals = [], sets = [], reservations = nu
   // Whether Shop / bulk-order sales could be checked against their reservations.
   quality.reservationCheck = held ? "ok" : "unavailable";
   quality.reservationNote = held ? "" : String(reservationNote || "");
+  // Listings judged a wipe by "closed now" because their row carries no close time.
+  quality.wipeCloseUnknown = wipeCloseUnknown.size;
   return { sales, demandOnly, excluded, quality, suspect, suspectSaleKeys };
 }
 

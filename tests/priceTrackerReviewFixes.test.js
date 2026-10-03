@@ -200,7 +200,7 @@ test("1c. reservationEvidence: one grouped DropLog read (ObjectIds, held only) a
     unitSig(9, 0, ago(1)), // not a reserved signal: never looked up
   ];
   const m = fakeModels({
-    dropLogRows: [{ _id: { account: new Types.ObjectId(hex(1)), set: hex(800) } }],
+    dropLogRows: [{ _id: { account: new Types.ObjectId(hex(1)), set: hex(800) }, holders: ["buyer1"] }],
     accounts: [{ _id: hex(1), login: "BuyerOne" }, { _id: hex(2), login: "" }],
   });
   const ev = await T.reservationEvidence(signals, m);
@@ -213,7 +213,7 @@ test("1c. reservationEvidence: one grouped DropLog read (ObjectIds, held only) a
   assert.deepEqual(match.$match.account.$in.map(String).sort(), [hex(1), hex(2)]);
   assert.deepEqual(match.$match.soldSetId.$in.sort(), [hex(800), hex(801)]);
   assert.deepEqual(match.$match.soldAt, { $ne: null }, "only a reservation that still holds");
-  assert.deepEqual(group, { $group: { _id: { account: "$account", set: "$soldSetId" } } });
+  assert.deepEqual(group, { $group: { _id: { account: "$account", set: "$soldSetId" }, holders: { $addToSet: { $ifNull: ["$soldToUsername", ""] } } } }, "who holds it, in the same read");
   assert.ok(limit.$limit > 0);
   assert.equal(m.calls.botFind.length, 1);
   assert.deepEqual(m.calls.botFind[0].proj, { login: 1 }, "only the login");
@@ -223,6 +223,72 @@ test("1c. reservationEvidence: one grouped DropLog read (ObjectIds, held only) a
   const ev0 = await T.reservationEvidence([unitSig(9, 0, ago(1))], none);
   assert.equal(none.calls.aggregate.length + none.calls.botFind.length, 0);
   assert.equal(ev0.reservations.size, 0);
+});
+
+// The round-2 review's e1: after a refund the account is stock again, and a fulfiller or the
+// auto-lister may reserve the SAME set on it for a shelf. A shelf claim is not a buyer.
+test("1c. a reservation held by a marketplace shelf claim, not a buyer, is not a sale (a refunded sale counted again)", async () => {
+  const { Types } = require("mongoose");
+  const { MARKET_CLAIM_TAGS } = require("../utils/marketClaimTags");
+  const pair = (n, holders) => ({ _id: { account: new Types.ObjectId(hex(n)), set: hex(800) }, holders });
+  const m = fakeModels({
+    dropLogRows: [
+      pair(1, ["ggsel"]), // refunded, then claimed for a GGSel listing of the same set
+      pair(2, ["Eldorado "]), // the tag as some writer spelled it
+      pair(3, ["buyer3"]), // a Shop buyer
+      pair(4, ["bulk:BO-17"]), // a bulk order
+      pair(5, ["gameflip", "buyer5"]), // a buyer still holds part of it
+    ],
+  });
+  const signals = [1, 2, 3, 4, 5].map((n) => reserved(n, "Rust", { marketplace: n === 4 ? "bulk" : "shop" }));
+  const ev = await T.reservationEvidence(signals, m);
+  assert.deepEqual([...ev.reservations].sort(), [3, 4, 5].map((n) => hex(n) + "|" + hex(800)));
+  const L = buildLedger({ listings: [], sets: [], signals, ...ev });
+  assert.equal(L.demandOnly.length, 3);
+  assert.equal(L.excluded.reservationReleased, 2);
+  // Every marketplace claim tag is a shelf, never a buyer.
+  const all = fakeModels({ dropLogRows: MARKET_CLAIM_TAGS.map((tag, i) => ({ _id: { account: new Types.ObjectId(hex(100 + i)), set: hex(800) }, holders: [tag] })) });
+  const ev2 = await T.reservationEvidence(MARKET_CLAIM_TAGS.map((_, i) => reserved(100 + i, "Rust", { marketplace: "shop" })), all);
+  assert.equal(ev2.reservations.size, 0);
+});
+
+test("1c. on a real mongod with the real writers: Shop sale, refund, then a GGSel claim of the same set", async () => {
+  const { MongoMemoryServer } = require("mongodb-memory-server");
+  const mongoose = require("mongoose");
+  const BotAccount = require("../models/BotAccount");
+  const DropLog = require("../models/DropLog");
+  const DropSet = require("../models/DropSet");
+  const SaleSignal = require("../models/SaleSignal");
+  const R = require("../utils/dropReservation");
+  const mem = await MongoMemoryServer.create();
+  try {
+    await mongoose.connect(mem.getUri("pricetrackerreservations"));
+    const acct = await BotAccount.create({ clientSecret: "cs-a", login: "Acct_A" });
+    const set = (await DropSet.create({ name: "Rust bundle", items: [{ itemKey: "rust:skin", game: "Rust", name: "Skin" }] })).toObject();
+    await DropLog.create({ account: acct._id, benefitId: "b1", itemKey: "rust:skin", game: "Rust", login: "Acct_A" });
+    const count = async () => {
+      const signals = await SaleSignal.find({ source: "listing_sold" }).lean();
+      const ev = await T.reservationEvidence(signals);
+      const L = buildLedger({ listings: [], sets: [], signals, ...ev });
+      return { sales: (union(L).get("rust") || new Map()).size, released: L.excluded.reservationReleased, login: L.demandOnly.map((x) => x.login) };
+    };
+    // routes/shopRoutes.js: the buy route reserves with realSale.
+    await R.reserveSetOnAccount(acct._id, set, { soldToAdminId: "u1", soldToUsername: "buyer1", soldSetId: String(set._id), realSale: true, marketplace: "shop" });
+    assert.deepEqual(await count(), { sales: 1, released: 0, login: ["acct_a"] });
+    // The refund route releases the set.
+    await R.releaseSetForAccounts([String(acct._id)], String(set._id));
+    assert.deepEqual(await count(), { sales: 0, released: 1, login: [] });
+    // The account is stock again: utils/ggselFulfiller.js claims it for a listing of the same set.
+    await R.reserveSetOnAccount(acct._id, set, { soldToUsername: "ggsel", soldSetId: String(set._id) });
+    assert.deepEqual(await count(), { sales: 0, released: 1, login: [] }, "a shelf claim is not the refunded sale back");
+    // A second buyer of the same set: one sale again.
+    await R.releaseSetForAccounts([String(acct._id)], String(set._id), "ggsel");
+    await R.reserveSetOnAccount(acct._id, set, { soldToUsername: "buyer2", soldSetId: String(set._id), realSale: true, marketplace: "shop" });
+    assert.deepEqual(await count(), { sales: 1, released: 0, login: ["acct_a"] });
+  } finally {
+    await mongoose.disconnect();
+    await mem.stop();
+  }
 });
 
 test("1c. a failed reservation read counts none of them and says why", async () => {
@@ -242,7 +308,7 @@ test("1c. loadFromDb hands the reservation evidence to the ledger", async () => 
     return c;
   };
   const signals = [reserved(1, "Rust", { marketplace: "shop" }), reserved(2, "Rust", { marketplace: "shop" })];
-  const m = fakeModels({ dropLogRows: [{ _id: { account: new Types.ObjectId(hex(1)), set: hex(800) } }], accounts: [{ _id: hex(1), login: "buyerone" }] });
+  const m = fakeModels({ dropLogRows: [{ _id: { account: new Types.ObjectId(hex(1)), set: hex(800) }, holders: ["buyer1"] }], accounts: [{ _id: hex(1), login: "buyerone" }] });
   const models = {
     ...m,
     MarketplaceListing: { find: () => q([]) },
@@ -446,18 +512,51 @@ const bdoSet = { _id: hex(901), items: [{ itemKey: "b1", game: "Black Desert", q
 const bdo = (n, o = {}) => listing(n, { marketplace: "digiseller", title: "Black Desert Twitch Drops", price: 1.75, set: hex(901), status: "delisted", createdAt: ago(60), updatedAt: ago(1), ...o });
 const bdoUnit = (n, seq, at) => ({ dedupeKey: "sold:" + hex(n) + ":black desert:" + seq, source: "listing_sold", marketplace: "digiseller", game: "Black Desert", gameKey: "black desert", login: "", account: null, priceUsd: 1.75, at });
 
-test("5b. a WIPE: a burst that emptied listings later taken down is set aside, whatever its size (it read 10 sales)", () => {
-  // 2026-08-14 11:29 on the 10-01 snapshot: 7 + 2 + 1 units of listings holding 7 / 2 / 2,
-  // all delisted weeks later (their rows written again since, so the 90-second rule missed them).
+// The shape of 2026-08-14 11:29 on the 10-01 snapshot: 7 + 2 + 1 units of listings holding
+// 7 / 2 / 2, two of them emptied; `closedAt` is when the rows were last written (delisted).
+const wipeShape = (closedAt) => {
   const t = ago(20).getTime();
-  const listings = [bdo(1, { qtyTarget: 7, unitsSold: 7 }), bdo(2, { qtyTarget: 2, unitsSold: 2 }), bdo(3, { qtyTarget: 2, unitsSold: 1 })];
-  const signals = [...[0, 1, 2, 3, 4, 5, 6].map((s) => bdoUnit(1, s, new Date(t + 40000))), ...[0, 1].map((s) => bdoUnit(2, s, new Date(t))), bdoUnit(3, 0, new Date(t + 1000))];
-  const L = buildLedger({ listings, signals, sets: [bdoSet] });
+  return {
+    t,
+    listings: [1, 2, 3].map((n, i) => bdo(n, { qtyTarget: [7, 2, 2][i], unitsSold: [7, 2, 1][i], updatedAt: closedAt(t) })),
+    signals: [...[0, 1, 2, 3, 4, 5, 6].map((s) => bdoUnit(1, s, new Date(t + 40000))), ...[0, 1].map((s) => bdoUnit(2, s, new Date(t))), bdoUnit(3, 0, new Date(t + 1000))],
+  };
+};
+
+test("5b. a WIPE: a burst that emptied listings taken down right after it is set aside", () => {
+  // Delisted 20 minutes after the burst (the cleanup's delist), outside the 90-second rule.
+  const w = wipeShape((t) => new Date(t + 20 * 60000));
+  const L = buildLedger({ listings: w.listings, signals: w.signals, sets: [bdoSet] });
   assert.equal(L.demandOnly.length, 0);
   assert.equal(L.suspect.length, 10);
   assert.equal(L.excluded.burst, 0);
   assert.equal(L.excluded.massClose, 10);
   assert.equal(union(L).size, 0);
+  assert.equal(L.quality.wipeCloseUnknown, 0);
+});
+
+// The round-2 review's e2: judged by what happened AT the burst, never by the state now.
+test("5b. a pass whose emptied listings stayed on sale past the hour is demand for good, even once they are delisted (it read 0)", () => {
+  // The same rows, delisted 10 days after the burst (every old GGSel offer is delisted now).
+  const w = wipeShape((t) => new Date(t + 10 * DAY));
+  const L = buildLedger({ listings: w.listings, signals: w.signals, sets: [bdoSet] });
+  assert.equal(L.demandOnly.filter((x) => x.burst).length, 10);
+  assert.equal(L.suspect.length, 0);
+  assert.equal(union(L).get("black desert").size, 10);
+  // And while they are still on sale, of course.
+  const live = buildLedger({ listings: w.listings.map((l) => ({ ...l, status: "active" })), signals: w.signals, sets: [bdoSet] });
+  assert.equal(live.demandOnly.filter((x) => x.burst).length, 10);
+});
+
+test("5b. an emptied listing whose row does not say when it closed is judged as before (set aside) and counted in a note", () => {
+  const w = wipeShape(() => undefined);
+  for (const l of w.listings) delete l.updatedAt;
+  const L = buildLedger({ listings: w.listings, signals: w.signals, sets: [bdoSet] });
+  assert.equal(L.suspect.length, 10);
+  assert.equal(L.demandOnly.length, 0);
+  assert.equal(L.quality.wipeCloseUnknown, 2, "the two emptied, closed listings (7 of 7, 2 of 2)");
+  const r = T.buildReport({ listings: w.listings, signals: w.signals, sets: [bdoSet], connected: [], research: [], tasks: [], at: new Date(NOW), reservations: new Set() });
+  assert.ok(r.insights.some((i) => i.id === "wipe-close-unknown"));
 });
 
 test("5c. the remnant of a closeout is measured with the delist rule's mass-close records of the same minutes (it read 9 sales)", () => {
@@ -493,10 +592,13 @@ test("5d. a real pass that leaves stock on its listings stays demand, whatever h
   const sg = [...[0, 1, 2].map((s) => bdoUnit(301, s, new Date(t))), ...[0, 1, 2, 3, 4].map((s) => bdoUnit(302, s, new Date(t + 2000)))];
   const L2 = buildLedger({ listings: live, signals: sg, sets: [bdoSet] });
   assert.equal(L2.demandOnly.filter((x) => x.burst).length, 8);
-  // ... but the same pass on a listing emptied and later delisted is a wipe.
-  const L3 = buildLedger({ listings: [bdo(301, { qtyTarget: 3 }), bdo(302, { qtyTarget: 10, status: "active" })], signals: sg, sets: [bdoSet] });
+  // ... but the same pass on a listing emptied and delisted within the hour is a wipe,
+  const L3 = buildLedger({ listings: [bdo(301, { qtyTarget: 3, updatedAt: new Date(t + 30 * 60000) }), bdo(302, { qtyTarget: 10, status: "active" })], signals: sg, sets: [bdoSet] });
   assert.equal(L3.demandOnly.length, 0);
   assert.equal(L3.suspect.length, 8);
+  // ... and one delisted two hours later is not.
+  const L4 = buildLedger({ listings: [bdo(301, { qtyTarget: 3, updatedAt: new Date(t + 2 * 3600000) }), bdo(302, { qtyTarget: 10, status: "active" })], signals: sg, sets: [bdoSet] });
+  assert.equal(L4.demandOnly.filter((x) => x.burst).length, 8);
 });
 
 test("5. the real-pass shape is the guardian's own rule (MASS_DROP_DEFAULTS)", () => {

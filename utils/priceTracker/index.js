@@ -6,6 +6,7 @@
 // (and, for the auto-farm, a later, deliberate wiring — see suggestForNew).
 const { buildLedger } = require("./ledger");
 const { identify, normGame } = require("./setIdentity");
+const { isMarketClaimTag } = require("../marketClaimTags");
 const A = require("./analyze");
 const G = require("./games");
 const { MARKETS, VENUES } = require("./venues");
@@ -27,9 +28,15 @@ const ID_CHUNK = 500;
  * Shop and bulk-order sales are written when the drops are RESERVED, before the buyer
  * is charged, and stay when that is rolled back (refund, failed payment, cancelled
  * order): only the reservation tells a sale from a rollback. One grouped DropLog read
- * returns which (account, set) pairs of these signals still hold a reserved drop, and
+ * returns, per (account, set) pair of these signals, WHO holds its reserved drops, and
  * one BotAccount read names their accounts (the signals carry no login). Both bounded
- * by the signals' own ids, chunked, projected to the pair / the login.
+ * by the signals' own ids, chunked, projected to the pair + holders / the login.
+ *
+ * A pair counts only while a BUYER holds it. After a refund the account is stock again,
+ * and a fulfiller or the auto-lister may reserve the same set on it for a shelf: that
+ * holder is a marketplace claim tag (utils/marketClaimTags.js, the one list
+ * routes/spentAccountsRoutes.js reads too) — a listing, not a sale. Every other holder
+ * is a buyer, by the same rule the rest of the system uses (isRealSale).
  *
  * On any failure: `reservations` null, so the ledger counts NONE of these sales (a
  * phantom sale would grow farming), and `note` says why on the page.
@@ -54,10 +61,14 @@ async function reservationEvidence(signals, models = null) {
       // aggregate() does not cast: the account ids must be ObjectIds to match.
       const held = await M.DropLog.aggregate([
         { $match: { account: { $in: ids.map((id) => new Types.ObjectId(id)) }, soldSetId: { $in: sets }, soldAt: { $ne: null } } },
-        { $group: { _id: { account: "$account", set: "$soldSetId" } } },
+        { $group: { _id: { account: "$account", set: "$soldSetId" }, holders: { $addToSet: { $ifNull: ["$soldToUsername", ""] } } } },
         { $limit: ids.length * sets.length }, // every (account, set) pair at most once
       ]);
-      for (const r of held) reservations.add(String(r._id.account).toLowerCase() + "|" + String(r._id.set));
+      for (const r of held) {
+        // The shared rule (isRealSale / the spent view): any holder but a claim tag is a buyer.
+        const buyer = (r.holders || []).some((h) => !isMarketClaimTag(h));
+        if (buyer) reservations.add(String(r._id.account).toLowerCase() + "|" + String(r._id.set));
+      }
       const named = await M.BotAccount.find({ _id: { $in: ids } }, { login: 1 }).limit(ids.length).lean();
       for (const a of named) {
         const login = String(a.login || "").trim().toLowerCase();
@@ -372,7 +383,17 @@ function insightsFor(r) {
       id: "reservations-released",
       level: "info",
       title: ex.reservationReleased + " Shop / bulk-order sales were rolled back",
-      detail: "Their reservations were given back (a failed payment, a refund, a cancelled or deleted bulk order), so they are not counted as sales.",
+      detail:
+        "Their reservations were given back (a failed payment, a refund, a cancelled or deleted bulk order) or are now held by a marketplace listing, not a buyer, so they are not counted as sales.",
+    });
+  }
+  if (r.ledger.quality.wipeCloseUnknown) {
+    out.push({
+      id: "wipe-close-unknown",
+      level: "info",
+      title: r.ledger.quality.wipeCloseUnknown + " emptied listings have no time they were closed",
+      detail:
+        "A burst emptied them and they are delisted now, but their rows do not say when they closed, so the burst was set aside as a wipe. With a close time it would count as sales if they stayed on sale for an hour after it.",
     });
   }
   return out;
