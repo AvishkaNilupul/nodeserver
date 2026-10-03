@@ -552,12 +552,12 @@ const lockFile = settingsFile + ".lock";
 const LOCK_RETRY_MS = 5;
 const LOCK_WAIT_MS = 3000;
 // A lock is broken only when its owner process has exited (on this host:
-// process.kill(pid, 0) answers ESRCH), or when it is older than this — never a
-// live owner's younger lock, however slow its save (a stalled fsync runs under
-// the lock). A lock with no owner written yet is its creator dying between
-// creating and writing it, once it is LOCK_EMPTY_MS away from now.
+// process.kill(pid, 0) answers ESRCH), when it names this process but none of
+// its saves holds it, or when it is older than this — never another live
+// owner's younger lock, however slow its save (a stalled fsync runs under the
+// lock). A lock is never seen without its owner (see createLock), so one that
+// names none is judged by its age alone.
 const LOCK_STALE_MS = 120 * 1000;
-const LOCK_EMPTY_MS = 2 * 1000;
 // Breaks tried per save before it simply waits out its deadline: a lock that
 // keeps coming back is someone's, and a save never spins on it.
 const LOCK_MAX_BREAKS = 3;
@@ -937,20 +937,24 @@ function pidAlive(pid) {
   }
 }
 
-// The owner pid in a lock acquireLock wrote ("<pid> <random>"); null when none
-// is written (yet).
+// The owner pid in a lock ("<pid> <random>"); null when it names none.
 function lockOwner(content) {
   const m = /^(\d{1,10})(?:\s|$)/.exec(content);
   const pid = m ? Number(m[1]) : 0;
   return pid > 0 && pid <= 0x7fffffff ? pid : null;
 }
 
-// Locks this process took but could not remove: other processes wait for them
-// to turn 120 s old; this process breaks them on its next save.
-const leakedTokens = new Set();
+// Tokens of the locks THIS PROCESS holds right now, shared by every copy of
+// this module loaded in it (tests load several on one file to stand for
+// several processes). A token is in here from before its lock can exist until
+// its save ends — released, lost, or left behind by a release that failed —
+// so a lock naming this process's pid with a token not in here belongs to a
+// save that is over (or to an earlier process that had our pid): it is stale,
+// whoever put it back.
+const LIVE_TOKENS = Symbol.for("utils/settings.js: live lock tokens");
+const liveTokens = globalThis[LIVE_TOKENS] || (globalThis[LIVE_TOKENS] = new Set());
 
-function leakLock(token, message) {
-  leakedTokens.add(token);
+function leakLock(message) {
   report(
     "lock-release",
     `${message}; other processes wait for it to turn ${LOCK_STALE_MS / 1000} s old, this one breaks it on its next save`,
@@ -983,10 +987,10 @@ async function lockHeld(token) {
 }
 
 // Who holds settings.json.lock, and may it be broken? Read afresh each time.
-// Breakable: an owner that has exited, this process's own leaked lock, no
-// owner written and LOCK_EMPTY_MS away from now, or a live owner's lock older
-// than LOCK_STALE_MS. An mtime in the future (the clock stepped back) is no
-// age at all: such a lock is judged by its owner alone.
+// Breakable: a lock naming this process that none of its saves holds, one
+// whose owner has exited, and any lock older than LOCK_STALE_MS. An mtime in
+// the future (the clock stepped back) is no age at all: such a lock is judged
+// by its owner alone — and one naming no owner by how far its time is off.
 async function inspectLock() {
   let st;
   let content;
@@ -1001,16 +1005,19 @@ async function inspectLock() {
   const age = Date.now() - st.mtimeMs;
   const pid = lockOwner(content);
   if (pid === null) {
-    if (Math.abs(age) > LOCK_EMPTY_MS) return { ...look, breakable: true, reason: "it names no owner" };
-    return { holder: "being taken right now" };
+    if (Math.abs(age) > LOCK_STALE_MS)
+      return { ...look, breakable: true, reason: `it names no owner and is ${Math.round(Math.abs(age) / 1000)} s off` };
+    return { holder: "held by an owner it does not name" };
   }
-  if (pid === process.pid && leakedTokens.has(content))
-    return { ...look, breakable: true, reason: "this process's own, left by a release that failed" };
-  if (pid !== process.pid && !pidAlive(pid))
-    return { ...look, breakable: true, reason: `its owner, pid ${pid}, has exited` };
+  if (pid === process.pid ? !liveTokens.has(content) : !pidAlive(pid))
+    return {
+      ...look,
+      breakable: true,
+      reason: pid === process.pid ? "it names this process, and none of its saves holds it" : `its owner, pid ${pid}, has exited`,
+    };
   if (age > LOCK_STALE_MS)
     return { ...look, breakable: true, reason: `held by pid ${pid} for ${Math.round(age / 1000)} s` };
-  return { holder: `held by pid ${pid}` };
+  return { holder: pid === process.pid ? "held by another save of this process" : `held by pid ${pid}` };
 }
 
 // Break the lock `look` judged breakable, as atomically as a file lock allows:
@@ -1019,9 +1026,10 @@ async function inspectLock() {
 // lock judged — same inode, same content. A lock taken in between (a faster
 // breaker re-took it) is put straight back with link(), which fails rather
 // than replace a newer one; and should even that cost a holder its lock, that
-// holder's save stops at its pre-rename check instead of writing. A lock that
-// cannot be moved at all (a read-only directory) fails this save: it would
-// never come free.
+// holder's save stops at its pre-rename check instead of writing. (A lock put
+// back after its owner had already finished names a save that is over; its
+// owner breaks it on its next save.) A lock that cannot be moved at all (a
+// read-only directory) fails this save: it would never come free.
 async function breakLock(look) {
   const aside = `${settingsFile}.tmp-${process.pid}-${++tmpSeq}-${crypto.randomBytes(4).toString("hex")}`;
   try {
@@ -1042,7 +1050,6 @@ async function breakLock(look) {
     await fsp.unlink(aside).catch(noop);
     return;
   }
-  leakedTokens.delete(look.content);
   await fsp.unlink(aside).catch((e) =>
     report("lock-aside", `could not delete a stale settings.json.lock moved aside as ${aside} (${why(e)})`),
   );
@@ -1053,64 +1060,103 @@ async function breakLock(look) {
   });
 }
 
-// Take settings.json.lock, created exclusively and holding "<pid> <random>".
-// Another process holds it for the milliseconds of one save: retry every 5 ms
-// until the 3 s deadline — honoured on every path, breaks included — then fail
-// this save with SETTINGS_LOCKED (its caller handles a failed save).
+// Create settings.json.lock already holding `token`: the token is written to a
+// temp file of ours and that file is hard-linked into place, so no process
+// ever sees a lock without its owner. (A lock created empty and written a step
+// later lost its LIVE owner whenever that write waited on a busy libuv pool
+// and another process judged the empty lock a crash leftover.) false = held;
+// link() fails EEXIST rather than replace it. A filesystem without hard links
+// gets an exclusive create and a write instead — its moment without an owner
+// is safe, because a lock naming no owner is only ever broken by age.
+const NO_HARD_LINKS = new Set(["EPERM", "ENOTSUP", "EOPNOTSUPP", "ENOSYS"]);
+async function createLock(token) {
+  const tmp = `${settingsFile}.tmp-${process.pid}-${++tmpSeq}-${crypto.randomBytes(4).toString("hex")}`;
+  try {
+    await fsp.writeFile(tmp, token, { flag: "wx" });
+  } catch (e) {
+    if (e.code !== "EEXIST") await fsp.unlink(tmp).catch(noop);
+    throw e;
+  }
+  try {
+    await fsp.link(tmp, lockFile);
+    return true;
+  } catch (e) {
+    if (e.code === "EEXIST") return false;
+    if (!NO_HARD_LINKS.has(e.code)) throw e;
+  } finally {
+    await fsp.unlink(tmp).catch(noop);
+  }
+  let fh;
+  try {
+    fh = await fsp.open(lockFile, "wx");
+  } catch (e) {
+    if (e.code === "EEXIST") return false;
+    throw e;
+  }
+  try {
+    await fh.writeFile(token, "utf8");
+  } catch (e) {
+    await fh.close().catch(noop);
+    await fsp
+      .unlink(lockFile)
+      .catch((u) => leakLock(`could not remove the settings.json.lock it had just created (${why(u)})`));
+    throw e;
+  }
+  await fh.close().catch(noop);
+  return true;
+}
+
+// Take settings.json.lock, holding "<pid> <random>". Another process holds it
+// for the milliseconds of one save: retry every 5 ms until the 3 s deadline —
+// honoured on every path, breaks included — then fail this save with
+// SETTINGS_LOCKED (its caller handles a failed save).
 async function acquireLock() {
   const token = `${process.pid} ${crypto.randomBytes(8).toString("hex")}`;
   const deadline = Date.now() + LOCK_WAIT_MS;
   let breaks = 0;
   let holder = "held by another process";
-  for (let first = true; ; first = false) {
-    if (!first && Date.now() >= deadline)
-      throw lockedError(`${holder} for over ${LOCK_WAIT_MS / 1000} s`);
-    let fh = null;
-    try {
-      fh = await fsp.open(lockFile, "wx");
-    } catch (e) {
-      if (e.code !== "EEXIST") throw e;
-    }
-    if (fh) {
-      try {
-        await fh.writeFile(token, "utf8");
-      } catch (e) {
-        await fh.close().catch(noop);
-        await fsp.unlink(lockFile).catch((u) =>
-          leakLock(token, `could not remove the settings.json.lock it had just created (${why(u)})`),
-        );
-        throw e;
+  liveTokens.add(token); // before the lock can exist: see liveTokens
+  try {
+    for (let first = true; ; first = false) {
+      if (!first && Date.now() >= deadline)
+        throw lockedError(`${holder} for over ${LOCK_WAIT_MS / 1000} s`);
+      if (await createLock(token)) return token;
+      const look = await inspectLock();
+      if (look.holder) holder = look.holder;
+      if (look.breakable && breaks < LOCK_MAX_BREAKS) {
+        breaks++;
+        await breakLock(look);
+        continue;
       }
-      await fh.close().catch(noop);
-      return token;
+      await sleep(LOCK_RETRY_MS);
     }
-    const look = await inspectLock();
-    if (look.holder) holder = look.holder;
-    if (look.breakable && breaks < LOCK_MAX_BREAKS) {
-      breaks++;
-      await breakLock(look);
-      continue;
-    }
-    await sleep(LOCK_RETRY_MS);
+  } catch (e) {
+    liveTokens.delete(token);
+    throw e;
   }
 }
 
 // Remove the lock while it is still ours: a lock broken as stale and retaken
 // must not be removed under its new holder. One of ours that cannot be
-// removed is reported, never left silently.
+// removed is reported, never left silently — and its token leaves the live
+// set either way, so this process breaks the leftover on its next save.
 async function releaseLock(token) {
-  let held;
   try {
-    held = await fsp.readFile(lockFile, "utf8");
-  } catch (e) {
-    if (e.code !== "ENOENT") leakLock(token, `could not read settings.json.lock to release it (${why(e)})`);
-    return;
-  }
-  if (held !== token) return;
-  try {
-    await fsp.unlink(lockFile);
-  } catch (e) {
-    leakLock(token, `could not remove its own settings.json.lock (${why(e)})`);
+    let held;
+    try {
+      held = await fsp.readFile(lockFile, "utf8");
+    } catch (e) {
+      if (e.code !== "ENOENT") leakLock(`could not read settings.json.lock to release it (${why(e)})`);
+      return;
+    }
+    if (held !== token) return;
+    try {
+      await fsp.unlink(lockFile);
+    } catch (e) {
+      leakLock(`could not remove its own settings.json.lock (${why(e)})`);
+    }
+  } finally {
+    liveTokens.delete(token);
   }
 }
 
