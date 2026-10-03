@@ -32,10 +32,14 @@ const express = require("express");
 // The real stock-note rule (utils/poolStock is pure for isStockNote).
 const poolStock = require("../utils/poolStock");
 
+// .lean() hands back copies, as Mongo does — never the store's own objects.
 function query(value) {
   const p = Promise.resolve(value);
   return {
-    lean: () => Promise.resolve(value && typeof value === "object" && !Array.isArray(value) ? plain(value) : value),
+    lean: () =>
+      Promise.resolve(
+        Array.isArray(value) ? value.map(plain) : value && typeof value === "object" ? plain(value) : value,
+      ),
     then: (a, b) => p.then(a, b),
     catch: (f) => p.catch(f),
   };
@@ -91,7 +95,12 @@ function renterDoc(id, extra = {}) {
   };
 }
 
-function world({ pool = [], renters = [], renterAccounts = [] } = {}) {
+// The route's loginMatcher() hands Mongo { $regex, $options }.
+function regexOf(want) {
+  return want instanceof RegExp ? want : new RegExp(want.$regex, want.$options || "");
+}
+
+function world({ pool = [], renters = [], renterAccounts = [], orders = [] } = {}) {
   const calls = {
     renterLookups: [],
     renterSaves: [],
@@ -103,6 +112,7 @@ function world({ pool = [], renters = [], renterAccounts = [] } = {}) {
     taskPulls: [],
     usage: [],
     events: [],
+    orderLookups: [],
   };
   // onConfigWrite: what another system does to the pool while the config write
   // runs. failPoolWrite: the pool write itself errors.
@@ -127,6 +137,9 @@ function world({ pool = [], renters = [], renterAccounts = [] } = {}) {
 
   const stubs = new Map([
     ["../models/AvailableAccount", strict("AvailableAccount", {
+      find(q) {
+        return query(pool.filter((r) => matches(r, q)));
+      },
       findOne(q) {
         return query(pool.find((r) => matches(r, q)) || null);
       },
@@ -168,7 +181,20 @@ function world({ pool = [], renters = [], renterAccounts = [] } = {}) {
       find: () => query([]),
       findOne: () => query(null),
     })],
-    ["../models/FarmServiceOrder", strict("FarmServiceOrder", { findOne: () => query(null) })],
+    ["../models/FarmServiceOrder", strict("FarmServiceOrder", {
+      findOne(q) {
+        calls.orderLookups.push(q);
+        const clauses = q.$or || [q];
+        const hit = orders.find((o) =>
+          clauses.some((c) =>
+            "accounts.poolId" in c
+              ? (o.accounts || []).some((a) => c["accounts.poolId"].$in.includes(a.poolId))
+              : (o.accounts || []).some((a) => regexOf(c["accounts.login"]).test(a.login || "")),
+          ),
+        );
+        return query(hit ? { orderId: hit.orderId, market: hit.market, buyerUsername: hit.buyerUsername } : null);
+      },
+    })],
     ["../models/AutoFarmTask", strict("AutoFarmTask", {
       updateMany: (q, u) => {
         calls.taskPulls.push({ q, u });
@@ -361,6 +387,79 @@ test("Quick farm on a sold account is refused before a rental stack is assigned"
     assert.equal(r.status, 409);
     assertNothingWritten(w);
     assert.equal(w.renterById.get("carol").botFile, "", "carol keeps no stack");
+  });
+});
+
+test("the same token under another login is the same account — refused, naming that row", async () => {
+  const w = world({
+    pool: [poolRow("oldlogin", { status: "claimed", claimedNote: "noclaim-farm:Overwatch", clientSecret: "tok-same" })],
+    renters: [renterDoc("bob")],
+  });
+  await withServer(w, async (s) => {
+    const r = await s.add("bob", { username: "newlogin", token: "tok-same", games: ["Rust"] });
+    assert.equal(r.status, 409);
+    assert.equal(
+      r.body.message,
+      "The account pool says newlogin (same token as oldlogin) belongs to another system " +
+        "(noclaim-farm:Overwatch) — release it there first. Nothing was changed.",
+    );
+    assertNothingWritten(w);
+  });
+});
+
+test("'unclaimed stock was claimed — probably sold by hand' is refused like any sale", async () => {
+  const note = "unclaimed stock was claimed — probably sold by hand; check before reusing";
+  const w = world({ pool: [poolRow("handsold1", { status: "claimed", claimedNote: note })], renters: [renterDoc("bob")] });
+  await withServer(w, async (s) => {
+    const r = await s.add("bob", { username: "handsold1", token: "tok-h1", games: ["Rust"] });
+    assert.equal(r.status, 409);
+    assert.equal(
+      r.body.message,
+      "The account pool says handsold1 belongs to another system (" + note + ") — release it there first. " +
+        "Nothing was changed.",
+    );
+    assertNothingWritten(w);
+  });
+});
+
+test("a rent-farm buyer's account asks for confirmation even with no renter row left", async () => {
+  // The Renters page Remove deleted the holder's row; the order still names the buyer.
+  const w = world({
+    pool: [poolRow("buyerlogin1", { status: "claimed", claimedNote: "rented to operator-selffarm until 2026-09-20" })],
+    renters: [renterDoc("bob")],
+    orders: [{ orderId: "e328ee9d-test", market: "eldorado", buyerUsername: "buyerX", accounts: [{ login: "BuyerLogin1", poolId: "pool-buyerlogin1" }] }],
+  });
+  await withServer(w, async (s) => {
+    const ask = await s.add("bob", { username: "buyerlogin1", token: "tok-b1", games: ["Rust"] });
+    assert.equal(ask.status, 409);
+    assert.equal(ask.body.needsForce, true);
+    assert.equal(
+      ask.body.message,
+      "This account belongs to a rent-farm buyer — confirm to add it here anyway: it was sold as a " +
+        "rent-farm order (eldorado e328ee9d, buyer buyerX).",
+    );
+    assert.deepEqual(w.calls.configWrites, [], "nothing placed before the confirmation");
+    assert.deepEqual(w.calls.poolWrites, []);
+
+    const r = await s.add("bob", { username: "buyerlogin1", token: "tok-b1", games: ["Rust"], force: true });
+    assert.equal(r.status, 200, "the confirmed add goes through");
+    assert.equal(w.calls.configWrites.length, 1);
+    assert.equal(w.pool[0].claimedNote, "rented to bob");
+  });
+});
+
+test("the buyer's order is found by pool id too (the login was renamed)", async () => {
+  const w = world({
+    pool: [poolRow("oldname", { status: "claimed", claimedNote: "rented to operator-selffarm", clientSecret: "tok-r2" })],
+    renters: [renterDoc("bob")],
+    orders: [{ orderId: "pa:16458589", market: "playerauctions", accounts: [{ login: "oldname", poolId: "pool-oldname" }] }],
+  });
+  await withServer(w, async (s) => {
+    const r = await s.add("bob", { username: "newname", token: "tok-r2", games: ["Rust"] });
+    assert.equal(r.status, 409);
+    assert.equal(r.body.needsForce, true);
+    assert.match(r.body.message, /: it was sold as a rent-farm order \(playerauctions pa:16458\)\.$/);
+    assert.deepEqual(w.calls.configWrites, []);
   });
 });
 

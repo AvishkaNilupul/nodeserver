@@ -56,15 +56,26 @@ function matchField(rowValue, want) {
 }
 
 // A no-claim bot directory: { "12": ["tok-a", …], … } -> BOTS_DIR on disk.
+// `inflight` adds a guarded write still in its temp file: { "4": ["tok-z"] }.
 let botsDirs = 0;
-function noclaimBots(byBot) {
+function noclaimBots(byBot, { inflight = {} } = {}) {
   const dir = path.join(TMP, "bots-" + ++botsDirs);
   fs.mkdirSync(dir, { recursive: true });
+  const cfg = (secrets, id) =>
+    JSON.stringify(
+      { TwitchSettings: { TwitchUsers: secrets.map((s, i) => ({ Login: "u" + id + "_" + i, ClientSecret: s, Enabled: i % 2 === 0 })) } },
+      null,
+      2,
+    );
   for (const [id, secrets] of Object.entries(byBot)) {
     const cfgDir = path.join(dir, id, "Configuration");
     fs.mkdirSync(cfgDir, { recursive: true });
-    const users = secrets.map((s, i) => ({ Login: "u" + id + "_" + i, ClientSecret: s, Enabled: i % 2 === 0 }));
-    fs.writeFileSync(path.join(cfgDir, "config.json"), JSON.stringify({ TwitchSettings: { TwitchUsers: users } }, null, 2));
+    fs.writeFileSync(path.join(cfgDir, "config.json"), cfg(secrets, id));
+  }
+  for (const [id, secrets] of Object.entries(inflight)) {
+    const cfgDir = path.join(dir, id, "Configuration");
+    fs.mkdirSync(cfgDir, { recursive: true });
+    fs.writeFileSync(path.join(cfgDir, "config.json.tmp-4242-a1b2c3"), cfg(secrets, id));
   }
   return dir;
 }
@@ -76,10 +87,25 @@ function world({
   tasks = [],
   listed = [],
   ledgers = [],
+  botAccounts = [],
+  orders = [],
+  // Logins autoFarmer.unrecyclableLogins reports (sold, connected, listed,
+  // leased); null = the engine does not export it.
+  unrecyclable = [],
   botsDir = noclaimBots({}),
   shError = null,
 } = {}) {
-  const calls = { claimWrites: [], usage: [], renterLookups: [], taskLookups: [], ledgerLookups: [], sh: [] };
+  const calls = {
+    claimWrites: [],
+    usage: [],
+    renterLookups: [],
+    taskLookups: [],
+    ledgerLookups: [],
+    botLookups: [],
+    orderLookups: [],
+    unrecyclableAsked: [],
+    sh: [],
+  };
   const hooks = { afterRead: null };
   const AvailableAccount = {
     findOneAndUpdate(filter, update) {
@@ -151,6 +177,42 @@ function world({
       );
     },
   };
+  // The operator bot index: a row placed in a config has a configFile.
+  const BotAccount = {
+    findOne(q) {
+      calls.botLookups.push(q);
+      const hit = botAccounts.find(
+        (b) =>
+          b.configFile &&
+          (q.$or || []).some((c) => ("clientSecret" in c ? c.clientSecret === b.clientSecret : c.login.test(b.login || ""))),
+      );
+      return query(hit ? { configFile: hit.configFile, container: hit.container || "", host: hit.host || "" } : null);
+    },
+  };
+  // Rent-farm orders: accounts[] carry the buyer's logins and pool ids.
+  const FarmServiceOrder = {
+    findOne(q) {
+      calls.orderLookups.push(q);
+      const hit = orders.find((o) =>
+        (q.$or || []).some((c) =>
+          "accounts.poolId" in c
+            ? (o.accounts || []).some((a) => a.poolId === c["accounts.poolId"])
+            : (o.accounts || []).some((a) => c["accounts.login"].test(a.login || "")),
+        ),
+      );
+      return query(hit ? { orderId: hit.orderId, market: hit.market, buyerUsername: hit.buyerUsername } : null);
+    },
+  };
+  const autoFarmer =
+    unrecyclable === null
+      ? {}
+      : {
+          async unrecyclableLogins(logins) {
+            calls.unrecyclableAsked.push(logins);
+            const keep = new Set(unrecyclable.map((l) => l.toLowerCase()));
+            return new Set(logins.map((l) => String(l).toLowerCase()).filter((l) => keep.has(l)));
+          },
+        };
   // utils/noclaimFleet.sh: trimmed stdout, rejects on a non-zero exit.
   const fleet = {
     BOTS_DIR: botsDir,
@@ -169,8 +231,10 @@ function world({
     ["../models/RenterAccount", RenterAccount],
     ["../models/AutoFarmTask", AutoFarmTask],
     ["../models/UnclaimedAccount", UnclaimedAccount],
+    ["../models/FarmServiceOrder", FarmServiceOrder],
     ["../models/PoolUsageEvent", {}],
-    ["../models/BotAccount", {}],
+    ["../models/BotAccount", BotAccount],
+    ["../utils/autoFarmer", autoFarmer],
     ["../models/DropLog", {}],
     ["../utils/accountPoolChecker", {}],
     ["../utils/dropScanner", {}],
@@ -682,6 +746,173 @@ test("unclaim: an auto-farm row whose task is over and which is on no listing is
   });
 });
 
+test("unclaim: a completed task's auto-farm account the engine counts as sold stays claimed", async () => {
+  const w = world({
+    pool: [row("e4", { status: "claimed", claimedNote: "auto-farm: deployed to twitchbot-farm-3 [pi]" })],
+    tasks: [{ _id: "t4", status: "completed", game: "Rust", assignedAccounts: ["User_e4"] }],
+    unrecyclable: ["user_e4"],
+  });
+  await withServer(w, async (s) => {
+    const r = await s.post("/account-pool/e4/unclaim");
+    assert.equal(r.status, 409);
+    assert.equal(
+      r.body.message,
+      "The auto-farm's own recycler keeps it (sold, connected to a buyer, on sale or leased) — it stays " +
+        "claimed. A sold account goes back only through Recycle on the Spent accounts page.",
+    );
+    assert.equal(w.pool[0].status, "claimed");
+    // The engine's queries match logins exactly: both spellings are asked.
+    assert.deepEqual(w.calls.unrecyclableAsked, [["User_e4", "user_e4"]]);
+  });
+});
+
+test("unclaim: without the engine's unrecyclableLogins export an auto-farm row stays claimed", async () => {
+  const w = world({
+    pool: [row("e5", { status: "claimed", claimedNote: "auto-farm: Rust (camp-1)" })],
+    unrecyclable: null,
+  });
+  await withServer(w, async (s) => {
+    const r = await s.post("/account-pool/e5/unclaim");
+    assert.equal(r.status, 409);
+    assert.equal(
+      r.body.message,
+      "Could not check the auto-farm's sale records, nothing changed (utils/autoFarmer does not export " +
+        "unrecyclableLogins).",
+    );
+    assert.equal(w.pool[0].status, "claimed");
+  });
+});
+
+test("unclaim: 'unclaimed stock was claimed — probably sold by hand' is a sale, not free", async () => {
+  const note = "unclaimed stock was claimed — probably sold by hand; check before reusing";
+  const w = world({ pool: [row("k1", { status: "claimed", claimedNote: note })] });
+  await withServer(w, async (s) => {
+    const r = await s.post("/account-pool/k1/unclaim");
+    assert.equal(r.status, 409);
+    assert.equal(
+      r.body.message,
+      "It was sold to a buyer (" + note + ") — a manual unclaim would put the buyer's login back into " +
+        "the farms' pool. Use Recycle on the Spent accounts page instead: it keeps the games it was sold " +
+        "for, so it is never farmed for them again.",
+    );
+    assert.equal(w.pool[0].status, "claimed");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Whatever the note says: a buyer's order, an operator bot, a no-claim bot
+// ---------------------------------------------------------------------------
+
+test("unclaim: a rent-farm buyer's account stays claimed after its renter row was removed", async () => {
+  // The Renters page Remove deleted the RenterAccount row; the order remains.
+  const w = world({
+    pool: [row("m1", { status: "claimed", claimedNote: "rented to operator-selffarm until 2026-09-20" })],
+    orders: [{ orderId: "e328ee9d-test", market: "eldorado", buyerUsername: "buyerX", accounts: [{ login: "USER_M1", poolId: "m1" }] }],
+  });
+  await withServer(w, async (s) => {
+    const r = await s.post("/account-pool/m1/unclaim");
+    assert.equal(r.status, 409);
+    assert.equal(
+      r.body.message,
+      "It was sold to a rent-farm buyer (eldorado order e328ee9d, buyer buyerX) — the buyer owns the " +
+        "account, so it stays claimed.",
+    );
+    assert.equal(w.pool[0].status, "claimed");
+    assert.equal(w.calls.sh.length, 0, "no SSH once the database has answered");
+  });
+});
+
+test("unclaim: an order holds the row by pool id too, and for any note", async () => {
+  const w = world({
+    pool: [row("m2", { status: "claimed", claimedNote: "assigned to a bot" })],
+    orders: [{ orderId: "pa:16458589", market: "playerauctions", accounts: [{ login: "renamed_login", poolId: "m2" }] }],
+  });
+  await withServer(w, async (s) => {
+    const r = await s.post("/account-pool/m2/unclaim");
+    assert.equal(r.status, 409);
+    assert.match(r.body.message, /^It was sold to a rent-farm buyer \(playerauctions order pa:16458\)/);
+  });
+});
+
+test("unclaim: a row still in an operator bot's config stays claimed, by token or login", async () => {
+  const w = world({
+    pool: [
+      row("n1", { status: "claimed", claimedNote: "deployed to twitchbot-12 [pi]" }),
+      row("n2", { status: "claimed", claimedNote: "in use by a bot (auto-marked)" }),
+      row("n3", { status: "claimed", claimedNote: "assigned to a bot" }),
+    ],
+    botAccounts: [
+      { login: "user_n1", clientSecret: "tok-n1", configFile: "config_12.json", container: "twitchbot-12", host: "pi" },
+      // Same login, another token (re-minted): still the same account.
+      { login: "USER_N2", clientSecret: "tok-other", configFile: "config_05.json", container: "twitchbotx5", host: "local" },
+      // Pulled out of its bot: configFile cleared — no longer holds it.
+      { login: "user_n3", clientSecret: "tok-n3", configFile: "", container: "twitchbot-9", host: "pi" },
+    ],
+  });
+  await withServer(w, async (s) => {
+    const a = await s.post("/account-pool/n1/unclaim");
+    assert.equal(a.status, 409);
+    assert.equal(
+      a.body.message,
+      "It is still in operator bot config config_12.json (twitchbot-12 on pi) — take it out of that bot on " +
+        "the Bots page first.",
+    );
+    const b = await s.post("/account-pool/n2/unclaim");
+    assert.equal(b.status, 409);
+    assert.match(b.body.message, /^It is still in operator bot config config_05\.json \(twitchbotx5 on local\)/);
+    const c = await s.post("/account-pool/n3/unclaim");
+    assert.equal(c.status, 200);
+    assert.deepEqual(w.pool.map((r) => r.status), ["claimed", "claimed", "available"]);
+  });
+});
+
+test("unclaim: a hand-migrated no-claim account (any note) is found in the bot configs", async () => {
+  const botsDir = noclaimBots({ 3: ["tok-p1", "tok-feeder"] });
+  const w = world({ pool: [row("p1", { status: "claimed", claimedNote: "in use by a bot (auto-marked)" })], botsDir });
+  await withServer(w, async (s) => {
+    const r = await s.post("/account-pool/p1/unclaim");
+    assert.equal(r.status, 409);
+    assert.equal(
+      r.body.message,
+      "No-claim bot 3 still has it (in use by a bot (auto-marked)) — release it from bot 3 on the No-claim " +
+        "page first.",
+    );
+    assert.equal(w.pool[0].status, "claimed");
+  });
+});
+
+test("unclaim: a guarded write still in its temp file holds the token too (named once)", async () => {
+  // Bot 4: config.json does not have it yet; config.json.tmp-* (the bytes on
+  // their way, renamed onto config.json a moment later) does.
+  const botsDir = noclaimBots({ 4: ["tok-other"] }, { inflight: { 4: ["tok-other", "tok-p2"] } });
+  const w = world({ pool: [row("p2", { status: "claimed", claimedNote: "noclaim-farm:Overwatch" })], botsDir });
+  await withServer(w, async (s) => {
+    const r = await s.post("/account-pool/p2/unclaim");
+    assert.equal(r.status, 409);
+    assert.equal(
+      r.body.message,
+      "No-claim bot 4 still has it (noclaim-farm:Overwatch) — release it from bot 4 on the No-claim page first.",
+    );
+    assert.match(w.calls.sh[0].script, /\/\*\/Configuration\/config\.json\*; /);
+  });
+  // A bot with BOTH files holding it is still one bot.
+  const both = noclaimBots({ 7: ["tok-p3"] }, { inflight: { 7: ["tok-p3"] } });
+  const w2 = world({ pool: [row("p3", { status: "claimed", claimedNote: "noclaim-farm:Rust" })], botsDir: both });
+  await withServer(w2, async (s) => {
+    const r = await s.post("/account-pool/p3/unclaim");
+    assert.match(r.body.message, /^No-claim bot 7 still has it/);
+  });
+});
+
+test("unclaim: a hand claim with no token at all is in no config — no grep, released", async () => {
+  const w = world({ pool: [row("q1", { status: "claimed", claimedNote: "assigned to a bot", clientSecret: "" })] });
+  await withServer(w, async (s) => {
+    const r = await s.post("/account-pool/q1/unclaim");
+    assert.equal(r.status, 200);
+    assert.equal(w.calls.sh.length, 0);
+  });
+});
+
 // ---------------------------------------------------------------------------
 // Unclaim as before
 // ---------------------------------------------------------------------------
@@ -699,7 +930,9 @@ test("unclaim: a hand claim (or no note) is released as before", async () => {
     assert.deepEqual(w.pool.map((r) => r.status), ["available", "available"]);
     assert.equal(w.calls.usage.length, 2);
     assert.equal((await s.post("/account-pool/nope/unclaim")).status, 404);
-    assert.equal(w.calls.sh.length, 0, "no no-claim check for other notes");
+    assert.equal(w.calls.sh.length, 2, "every unclaim asks the no-claim configs, whatever its note");
+    assert.equal(w.calls.botLookups.length, 2, "and the operator bot index");
+    assert.equal(w.calls.orderLookups.length, 2, "and the rent-farm orders");
   });
 });
 

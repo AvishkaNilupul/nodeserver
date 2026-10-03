@@ -20,6 +20,7 @@ const DropLog = require("../models/DropLog");
 const RenterAccount = require("../models/RenterAccount");
 const AutoFarmTask = require("../models/AutoFarmTask");
 const UnclaimedAccount = require("../models/UnclaimedAccount");
+const FarmServiceOrder = require("../models/FarmServiceOrder");
 const accountPoolChecker = require("../utils/accountPoolChecker");
 const dropScanner = require("../utils/dropScanner");
 const { parseAccountList } = require("../utils/parseAccountList");
@@ -745,6 +746,9 @@ const AUTO_FARM_NOTE = /^auto-farm/i;
 // "sold — token reclaimed by buyer" (the spent and sold-out recyclers),
 // "burned — …" (the Gameflip buffer: credentials seen by a refunded buyer).
 const SOLD_NOTE = /^(spent|sold|burned)\b/i;
+// utils/poolStock: "unclaimed stock — …" is held stock; "unclaimed stock was
+// claimed — probably sold by hand" is a sale. Neither is free.
+const STOCK_NOTE = /^unclaimed stock/i;
 // Ledger statuses that leave a login free again; every other one is committed
 // to a sale (noclaimFleet LEDGER_FREE_STATUSES / noclaimHoldings FREE_STATUSES).
 const LEDGER_FREE_STATUSES = ["skipped", "released", "expired"];
@@ -813,20 +817,23 @@ async function noclaimReleaseBlock(row, login) {
   return "";
 }
 
-// "noclaim-farm:" says the feeder claimed the row, not that a bot still has it:
-// a claim whose config write failed, or a bot whose account was pulled by hand,
-// leaves an orphan that refusing on the note alone could never release. A no-
-// claim bot holds the login exactly while its config carries the token, so the
-// configs are asked — every bot in ONE grep (an enabled or a disabled entry
-// both count). "" = no bot holds it. A check that cannot answer refuses:
-// releasing a login a bot still farms makes it claimable twice.
-async function noclaimBotHold(row, note) {
+// A no-claim bot holds a login exactly while its config carries the token — the
+// pool note says who CLAIMED the row, not where it sits now: a feeder claim
+// whose config write failed leaves an orphan, and an account moved into a no-
+// claim bot by hand keeps its old note ("in use by a bot …"). So the configs
+// themselves are asked — every bot in ONE grep (an enabled or a disabled entry
+// both count), including a guarded write still in its temp file
+// (config.json.tmp-*, renamed onto config.json a moment later). "" = no bot
+// holds it. A check that cannot answer refuses: releasing a login a bot still
+// farms makes it claimable twice. A row with no token at all can be in no
+// config — except a "noclaim-farm:" row, which must have had one (`strict`).
+async function noclaimBotHold(row, note, { strict = false } = {}) {
   const failed = (why) => "Could not check the no-claim bots, nothing changed (" + why + ").";
   const secret = String(row.clientSecret || "");
   // Searched for as plain text, so only a plain token is certain to appear in a
   // config byte for byte: JSON writers escape quotes and backslashes (the bot's
   // own .NET serializer several more), and an empty pattern matches every file.
-  if (!secret) return failed("this row has no token to look for");
+  if (!secret) return strict ? failed("this row has no token to look for") : "";
   if (!/^[A-Za-z0-9_.~-]+$/.test(secret)) return failed("this row's token is not a plain Twitch token");
   let out;
   let dir;
@@ -841,7 +848,7 @@ async function noclaimBotHold(row, note) {
     // a directory with no bot configs at all is "none".
     const script =
       "d=" + shq(dir) + '; [ -d "$d" ] || { echo __RC__=nodir; exit 0; }; ' +
-      'set -- "$d"/*/Configuration/config.json; [ -e "$1" ] || { echo __RC__=1; exit 0; }; ' +
+      'set -- "$d"/*/Configuration/config.json*; [ -e "$1" ] || { echo __RC__=1; exit 0; }; ' +
       'grep -lF -- ' + shq(secret) + ' "$@"; echo __RC__=$?';
     out = await fleet.sh(script, { timeout: NOCLAIM_CHECK_TIMEOUT_MS });
   } catch (e) {
@@ -851,28 +858,103 @@ async function noclaimBotHold(row, note) {
   const rcLine = lines.find((l) => l.startsWith("__RC__="));
   const rc = rcLine ? rcLine.slice("__RC__=".length) : "";
   const prefix = dir.replace(/\/+$/, "") + "/";
-  const ids = lines
-    .filter((l) => l.startsWith(prefix))
-    .map((l) => l.slice(prefix.length).replace(/^\/+/, "").split("/")[0])
-    .filter(Boolean);
+  // A bot with a write in flight lists twice (config.json and its temp file).
+  const ids = [
+    ...new Set(
+      lines
+        .filter((l) => l.startsWith(prefix))
+        .map((l) => l.slice(prefix.length).replace(/^\/+/, "").split("/")[0])
+        .filter(Boolean),
+    ),
+  ];
   if (ids.length) {
     const bots = (ids.length === 1 ? "bot " : "bots ") + ids.join(", ");
     return (
-      "No-claim " + bots + " still " + (ids.length === 1 ? "has" : "have") + " it (" + note +
-      ") — release it from " + bots + " on the No-claim page first."
+      "No-claim " + bots + " still " + (ids.length === 1 ? "has" : "have") + " it" +
+      (note ? " (" + note + ")" : "") + " — release it from " + bots + " on the No-claim page first."
     );
   }
   if (rc === "1") return "";
   return failed(rc === "nodir" ? "the no-claim bot directory is missing" : rc ? "grep exit " + rc : "no answer");
 }
 
+// The auto-farm's own do-not-recycle rule (sold, connected to a buyer, listed,
+// leased), required from the engine rather than copied. Missing → the check
+// cannot be made, and the row stays claimed.
+async function autoFarmKeeps(row, login) {
+  const engine = require("../utils/autoFarmer");
+  if (typeof engine.unrecyclableLogins !== "function") {
+    return (
+      "Could not check the auto-farm's sale records, nothing changed (utils/autoFarmer does not " +
+      "export unrecyclableLogins)."
+    );
+  }
+  // Its queries match logins exactly, so both spellings are asked.
+  const keep = await engine.unrecyclableLogins([...new Set([String(row.username || ""), login].filter(Boolean))]);
+  return keep && keep.has(login)
+    ? "The auto-farm's own recycler keeps it (sold, connected to a buyer, on sale or leased) — it " +
+        "stays claimed. A sold account goes back only through Recycle on the Spent accounts page."
+    : "";
+}
+
 // Why a claimed row must not be released now, in words the page can toast —
-// or "" when no owner holds it.
+// or "" when no owner holds it. The owner its note names is asked first; then,
+// whatever the note says, every claimed row is asked three more things
+// (2026-10-03, second review): is it a rent-farm buyer's (an order lists it —
+// a Remove on the Renters page deletes the renter row, never the order), is it
+// in an operator bot's config (BotAccount), is it in a no-claim bot's config
+// (one grep). "deployed to …" and "in use by a bot …" rows are exactly those.
 async function liveOwnerHold(row) {
   if (!row || row.status !== "claimed") return "";
   const note = String(row.claimedNote || "").trim();
   const login = String(row.usernameLower || row.username || "").trim().toLowerCase();
+  const byNote = await noteOwnerHold(row, note, login);
+  if (byNote) return byNote;
+
+  const orderOr = [{ "accounts.poolId": String(row._id) }];
+  if (login) orderOr.push({ "accounts.login": exactLogin(login) });
+  const order = await FarmServiceOrder.findOne(
+    { $or: orderOr },
+    { orderId: 1, market: 1, buyerUsername: 1 },
+  ).lean();
+  if (order) {
+    return (
+      "It was sold to a rent-farm buyer (" + (order.market || "?") + " order " +
+      String(order.orderId || "").slice(0, 8) + (order.buyerUsername ? ", buyer " + order.buyerUsername : "") +
+      ") — the buyer owns the account, so it stays claimed."
+    );
+  }
+
+  const botOr = [];
+  if (row.clientSecret) botOr.push({ clientSecret: row.clientSecret });
+  if (login) botOr.push({ login: exactLogin(login) });
+  const bot = botOr.length
+    ? await BotAccount.findOne(
+        { configFile: { $nin: ["", null] }, $or: botOr },
+        { configFile: 1, container: 1, host: 1 },
+      ).lean()
+    : null;
+  if (bot) {
+    return (
+      "It is still in operator bot config " + bot.configFile +
+      (bot.container ? " (" + bot.container + (bot.host ? " on " + bot.host : "") + ")" : "") +
+      " — take it out of that bot on the Bots page first."
+    );
+  }
+
+  return noclaimBotHold(row, note, { strict: NOCLAIM_NOTE.test(note) });
+}
+
+// The owner a row's note names, in words — "" when that owner lets it go.
+async function noteOwnerHold(row, note, login) {
   if (SOLD_NOTE.test(note)) return soldRefusal(note);
+  if (STOCK_NOTE.test(note)) {
+    if (!poolStock.isStockNote(note)) return soldRefusal(note);
+    return (
+      "It is held as stock: it carries farmed drops nobody has claimed yet. The pool check " +
+      "puts it back by itself once that stock is sold or expires."
+    );
+  }
   if (RENTED_NOTE.test(note)) {
     // ANY renter row, not only a live one: when a rent-farm window ends the row
     // is kept (farmEndedAt stamped) and the account stays the buyer's — back in
@@ -894,16 +976,9 @@ async function liveOwnerHold(row) {
     }
     return "";
   }
-  if (NOCLAIM_NOTE.test(note)) {
-    // The database first: a refusal there costs no SSH round trip.
-    return (await noclaimReleaseBlock(row, login)) || noclaimBotHold(row, note);
-  }
-  if (poolStock.isStockNote(note)) {
-    return (
-      "It is held as stock: it carries farmed drops nobody has claimed yet. The pool check " +
-      "puts it back by itself once that stock is sold or expires."
-    );
-  }
+  // The database here, the bot configs after (liveOwnerHold): a refusal the
+  // ledgers already give costs no SSH round trip.
+  if (NOCLAIM_NOTE.test(note)) return noclaimReleaseBlock(row, login);
   if (AUTO_FARM_NOTE.test(note) && login) {
     // The one listed-logins reader every claimer and picker uses (accountLogin
     // tokens and units[], case-insensitive).
@@ -918,6 +993,9 @@ async function liveOwnerHold(row) {
         " right now — it stays claimed while that task is active."
       );
     }
+    // A completed task's accounts stay claimed as its inventory; a sold one
+    // must never go back to the farms.
+    return autoFarmKeeps(row, login);
   }
   return "";
 }

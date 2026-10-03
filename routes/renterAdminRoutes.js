@@ -2515,15 +2515,18 @@ router.delete(
 //   * a no-claim bot ("noclaim-farm:…"): no no-claim config is touched here,
 //     so the login would farm in both, and a claiming renter bot empties the
 //     farmed-but-unclaimed stock the no-claim bot exists to keep;
-//   * held unclaimed stock (utils/poolStock): the same stock, in no bot yet;
+//   * unclaimed stock (utils/poolStock): "unclaimed stock — …" is held stock,
+//     the same stock in no bot yet; "unclaimed stock was claimed — probably
+//     sold by hand" is a sale. Every note starting "unclaimed stock" is one;
 //   * an account already sold to a buyer — "spent — …" (the no-claim sellers:
 //     unclaimedAutoList, noclaimFarmRoutes), "sold — token reclaimed by buyer"
 //     (the spent and sold-out recyclers), "burned — …" (the Gameflip buffer,
 //     credentials seen by a refunded buyer). The buyer holds that login.
 const NOCLAIM_OWNER_NOTE = /^noclaim-farm:/i;
+const STOCK_OWNER_NOTE = /^unclaimed stock/i;
 const SOLD_OWNER_NOTE = /^(spent|sold|burned)\b/i;
 function ownerRefusesHandover(note) {
-  return NOCLAIM_OWNER_NOTE.test(note) || poolStock.isStockNote(note) || SOLD_OWNER_NOTE.test(note);
+  return NOCLAIM_OWNER_NOTE.test(note) || STOCK_OWNER_NOTE.test(note) || SOLD_OWNER_NOTE.test(note);
 }
 
 // MANUAL ADD — operator types one account (username + password + client token)
@@ -2586,19 +2589,27 @@ router.post(
       // route ends by re-labelling the row "rented to <renter>". A login whose
       // owner it cannot hand over (ownerRefusesHandover, above) is refused here,
       // before anything is written (2026-10-03); every other owner goes on to
-      // the moves below. What was read is also what the final pool write is
-      // conditional on.
-      const poolOwner = await AvailableAccount.findOne(
-        { usernameLower: username.toLowerCase() },
-        { status: 1, claimedNote: 1 },
+      // the moves below. The pool is asked by login AND by the token in hand:
+      // the same account under an older login is the same account. What was
+      // read for this login is also what the final pool write is conditional on.
+      const poolRows = await AvailableAccount.find(
+        { $or: [{ usernameLower: username.toLowerCase() }, { clientSecret: token }] },
+        { username: 1, usernameLower: 1, status: 1, claimedNote: 1 },
       ).lean();
+      const poolOwner = poolRows.find((r) => r.usernameLower === username.toLowerCase()) || null;
       const poolOwnerNote = String((poolOwner && poolOwner.claimedNote) || "").trim();
-      if (poolOwner && poolOwner.status === "claimed" && ownerRefusesHandover(poolOwnerNote)) {
+      const heldRow = poolRows.find(
+        (r) => r.status === "claimed" && ownerRefusesHandover(String(r.claimedNote || "").trim()),
+      );
+      if (heldRow) {
+        const heldNote = String(heldRow.claimedNote || "").trim();
         return res.status(409).json({
           success: false,
           message:
-            "The account pool says " + username + " belongs to another system (" +
-            (poolOwnerNote || "claimed, no note") + ") — release it there first. Nothing was changed.",
+            "The account pool says " + username +
+            (heldRow.usernameLower !== username.toLowerCase() ? " (same token as " + heldRow.username + ")" : "") +
+            " belongs to another system (" + (heldNote || "claimed, no note") +
+            ") — release it there first. Nothing was changed.",
         });
       }
       const renter = await Renter.findById(req.params.id);
@@ -2702,6 +2713,7 @@ router.post(
       // happen by accident to a renter with a live lease or to a paying
       // rent-farm buyer (their window and order would vanish silently). Ask
       // first (409 needsForce → the page confirms and resends with force).
+      const moveReasons = [];
       if (otherRenterAcc && String(otherRenterAcc.renter) !== String(renter._id)) {
         const owner = await Renter.findById(otherRenterAcc.renter, {
           username: 1, usernameLower: 1, status: 1, accessEnd: 1,
@@ -2732,33 +2744,43 @@ router.post(
           }
         }
         if (body.force !== true) {
-          const reasons = [];
           if (owner && !holderOwned && !isBlocked(owner)) {
-            reasons.push("it farms for renter " + owner.username + ", whose lease is active");
+            moveReasons.push("it farms for renter " + owner.username + ", whose lease is active");
           }
           if (!otherRenterAcc.farmEndedAt && otherRenterAcc.farmUntil && new Date(otherRenterAcc.farmUntil) > new Date()) {
-            reasons.push("its paid farming window runs until " + new Date(otherRenterAcc.farmUntil).toISOString().slice(0, 10));
+            moveReasons.push("its paid farming window runs until " + new Date(otherRenterAcc.farmUntil).toISOString().slice(0, 10));
           }
-          if (holderOwned) {
-            const order = await FarmServiceOrder.findOne(
-              { "accounts.login": loginMatcher(otherRenterAcc.login || username) },
-              { orderId: 1, market: 1, buyerUsername: 1 },
-            ).lean();
-            if (order) {
-              reasons.push(
-                "it was sold as a rent-farm order (" + (order.market || "?") + " " +
-                  String(order.orderId || "").slice(0, 8) +
-                  (order.buyerUsername ? ", buyer " + order.buyerUsername : "") + ")",
-              );
-            }
-          }
-          if (reasons.length) {
-            return res.status(409).json({
-              success: false,
-              needsForce: true,
-              message: "Moving this account here ends its farming elsewhere: " + reasons.join("; ") + ".",
-            });
-          }
+        }
+      }
+      // A login sold as a rent-farm order is its buyer's wherever it sits now.
+      // That was asked only while the holder's renter row still existed — after
+      // a Remove on the Renters page (or the renter's delete) the buyer's
+      // account moved with no prompt at all. Asked every time now, by login or
+      // by the pool rows read above (2026-10-03).
+      if (body.force !== true) {
+        const orderOr = [{ "accounts.login": loginMatcher((otherRenterAcc && otherRenterAcc.login) || username) }];
+        if (poolRows.length) orderOr.push({ "accounts.poolId": { $in: poolRows.map((r) => String(r._id)) } });
+        const order = await FarmServiceOrder.findOne(
+          { $or: orderOr },
+          { orderId: 1, market: 1, buyerUsername: 1 },
+        ).lean();
+        if (order) {
+          moveReasons.push(
+            "it was sold as a rent-farm order (" + (order.market || "?") + " " +
+              String(order.orderId || "").slice(0, 8) +
+              (order.buyerUsername ? ", buyer " + order.buyerUsername : "") + ")",
+          );
+        }
+        if (moveReasons.length) {
+          return res.status(409).json({
+            success: false,
+            needsForce: true,
+            message:
+              (otherRenterAcc
+                ? "Moving this account here ends its farming elsewhere: "
+                : "This account belongs to a rent-farm buyer — confirm to add it here anyway: ") +
+              moveReasons.join("; ") + ".",
+          });
         }
       }
       if (!renter.botFile && quick && body.autoAssign === true) {
