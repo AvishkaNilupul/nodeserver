@@ -1,5 +1,7 @@
 # Farm brain — one demand model for both farms (TEST MODE: log only)
 
+> **Model v2 live since 2026-10-03 06:54Z** (deploy `_deploy_backup_20261003064819_live-fixes-1003`, commit 3181b93): cold/returning probes gated like the engine (untested market, probe budget), SBA/TSB/v2g scored not used, one feeder read per run. Forward scores compare runs of the same model version.
+
 Owner ask, 2026-10-02: "I want this new system to replace the account distribution of the
 auto farm and the no-claim farm … for now it's logging data only: first we build it like a
 test environment, then wait a week before implementing; inside that week we test how good

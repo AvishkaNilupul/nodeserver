@@ -321,3 +321,23 @@ Repro scripts from the review: `scratchpad/verify.js`, `scratchpad/verify2.js` (
    preview uses and read only the tasks/campaigns for the ids in question; same output.
 7. Tests (`tests/priceTrackerReviewFixes.test.js`, `tests/radarEventContextBound.test.js`): each item fails
    on old bytes; the existing `priceTracker*`, `marketRadar*` and `radar*` tests keep passing.
+
+## Deploy record (2026-10-03)
+
+- **Deployed 06:48:35Z**, one batch of 36 files (35 runtime + `scripts/repair-unclaimed-cap.js`), commit `3181b93`
+  on `fix/live-defects-1003`. Every production file matched the base it was built on (`40d1fd0`) at install time.
+  Backup `_deploy_backup_20261003064819_live-fixes-1003` (the three 08-31 `settings.json.tmp-<pid>` leftovers moved
+  into its `utils/legacy-settings-tmp/`). Load check passed (14 checks: Plati off, new keys at defaults); one pm2 restart,
+  0 unstable.
+- **Before deploy:** full suite 2,634 tests — only the 72 failures production's own code already had (plus a
+  test-runner IPC flake in `farm2Gates`, 21/21 alone); four review rounds; staging on production data with every
+  database and bot-host write blocked (no wakes on deploy, legacy decides 0 of 93 live games, floor 18 → 12, no-claim
+  plan unchanged, 12 of 95 games' sales counts corrected, page guard 41/41 on production's pages).
+- **After deploy (to 09:28Z):** 0 legacy decisions after the restart; no `topup_state_unknown`, `provision_stuck`,
+  `decisions_deferred`, `lane_missing_fallback` or settings events; re-spelt admin URLs answer 401; `settings.json`
+  intact (24,813 bytes, all 7 marketplace blocks) with an identical `settings.json.lastgood`; allocator hourly
+  (+0, nothing short); farm brain model v2 hourly (~3.8 s); a rent-farm order provisioned normally.
+- **Simplified before deploy:** the round-2/3 execute-idempotency machinery was replaced by one guard (a re-run of
+  an execute job over an ACTIVE row is a no-op) after round 4 found it could double-list accounts; every other
+  execute path is production's. Known residuals (pre-existing): a failed lane reuse retries only within its
+  job's 5 attempts, then waits for a rescan; owed bot reloads are in memory (a restart forgets them).
