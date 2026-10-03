@@ -462,7 +462,7 @@ not scored: 0 units past their estimated expiry at the forecast (the model ignor
   no-claim: 26 → 430 (+174 in the pool, 28 set aside for bulk). Weekly value of the live stock, claim: $582.83 at
   today's asks → $634.89 at the brain's prices (246 cells).
 - 3,846 forecasts scored over the six weekly cuts (84 on ZeusX left out).
-- Calibration skill, claim **+0.175** (Brier 0.1428 vs baseline 0.1731, 3,669 listings): Gameflip +0.311, GGSel
+- Calibration skill, claim **+0.175** (Brier 0.1429 vs baseline 0.1732, 3,669 listings): Gameflip +0.311, GGSel
   +0.009, Eldorado 0.000, PlayerAuctions +0.012, G2G −0.072. No-claim +0.021 (0.2200 vs 0.2248, 93 listings).
 - Discrimination, claim, sold within 7 days: hold 44.1 % (1,396), lower 10.5 % (2,052), raise 54.5 % (211), test
   37.5 % (8). No-claim: hold 71.2 %, raise 63.0 %.
