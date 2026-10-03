@@ -523,7 +523,10 @@ const DEFAULTS = {
 // Since 2026-10-03:
 //   - saves run one at a time: in call order inside a process (one promise
 //     chain), and across processes — the server and an ops script — under
-//     settings.json.lock. A failed save rejects its own caller only;
+//     settings.json.lock. A failed save rejects its own caller only. A lock is
+//     taken from another process only when its owner has exited or it is over
+//     120 s old, and a save whose lock was taken from it is dropped, not
+//     renamed over the newer file (see acquireLock);
 //   - saveSettings(s) re-reads the CURRENT file and applies only what its
 //     caller changed since the loadSettings() that produced `s` (a three-way
 //     merge), so writers that loaded the same file all land; the setters in
@@ -548,11 +551,16 @@ const lastGoodFile = settingsFile + ".lastgood";
 const lockFile = settingsFile + ".lock";
 const LOCK_RETRY_MS = 5;
 const LOCK_WAIT_MS = 3000;
-// No save holds the lock for more than milliseconds, so a lock this old is a
-// crash leftover whoever owns it. One whose owner process has exited is broken
-// sooner (its owner wrote its pid the moment it took the lock).
-const LOCK_STALE_MS = 10 * 1000;
-const LOCK_DEAD_OWNER_MS = 500;
+// A lock is broken only when its owner process has exited (on this host:
+// process.kill(pid, 0) answers ESRCH), or when it is older than this — never a
+// live owner's younger lock, however slow its save (a stalled fsync runs under
+// the lock). A lock with no owner written yet is its creator dying between
+// creating and writing it, once it is LOCK_EMPTY_MS away from now.
+const LOCK_STALE_MS = 120 * 1000;
+const LOCK_EMPTY_MS = 2 * 1000;
+// Breaks tried per save before it simply waits out its deadline: a lock that
+// keeps coming back is someone's, and a save never spins on it.
+const LOCK_MAX_BREAKS = 3;
 // File times come from the kernel's coarse clock (a few ms behind Date.now()),
 // so a .lastgood written just after this process read settings.json can carry
 // an mtime slightly EARLIER than that read. Within this slack .lastgood wins.
@@ -627,12 +635,13 @@ function why(err) {
   return String((err && (err.code || err.message)) || "unknown error").slice(0, 200);
 }
 
-// One console line per kind per minute, plus a SystemEvent when `meta` is
-// given: loadSettings runs on every settings read, so an unreadable file would
+// One console line per kind per minute, plus a SystemEvent when `event`
+// ({ action = settings_corrupt, severity = error, meta }) is given:
+// loadSettings runs on every settings read, so an unreadable file would
 // otherwise flood both. systemLog is required lazily and best-effort —
 // settings.js loads before everything, and a log must never break a read.
 const reportedAt = new Map();
-function report(kind, message, meta) {
+function report(kind, message, event) {
   const now = Date.now();
   if (now - (reportedAt.get(kind) || 0) < 60 * 1000) return;
   reportedAt.set(kind, now);
@@ -641,15 +650,15 @@ function report(kind, message, meta) {
   } catch {
     /* ignore */
   }
-  if (!meta) return;
+  if (!event) return;
   try {
     const p = require("./systemLog").logEvent({
       category: "settings",
-      action: "settings_corrupt",
-      severity: meta.served === "memory" || meta.served === "lastgood" ? "warn" : "error",
+      action: event.action || "settings_corrupt",
+      severity: event.severity || "error",
       subject: path.basename(settingsFile),
       detail: message,
-      meta,
+      meta: event.meta,
     });
     if (p && typeof p.catch === "function") p.catch(noop);
   } catch {
@@ -660,20 +669,24 @@ function report(kind, message, meta) {
 // Keep unreadable bytes before anything can replace them, once per content —
 // also across restarts: a copy already on disk with the same bytes counts.
 // `suffix` is ".corrupt-" (settings.json) or ".lastgood-corrupt-" (.lastgood).
+// true = the bytes are safe in a copy. A content counts as kept only once its
+// copy is fully written: a copy that failed (a full disk) is removed and tried
+// again by the next save, which must not overwrite the bytes meanwhile.
 const keptCopies = new Set();
 function keepBytesOnce(suffix, bytes) {
-  if (!bytes) return;
+  if (!bytes) return true;
   const key = suffix + crypto.createHash("sha1").update(bytes).digest("hex");
-  if (keptCopies.has(key)) return;
-  keptCopies.add(key);
+  if (keptCopies.has(key)) return true;
   const dir = path.dirname(settingsFile);
   const prefix = path.basename(settingsFile) + suffix;
   try {
     for (const name of fs.readdirSync(dir)) {
       if (!name.startsWith(prefix)) continue;
       const p = path.join(dir, name);
-      if (fs.statSync(p).size === Buffer.byteLength(bytes) && fs.readFileSync(p, "utf8") === bytes)
-        return;
+      if (fs.statSync(p).size === Buffer.byteLength(bytes) && fs.readFileSync(p, "utf8") === bytes) {
+        keptCopies.add(key);
+        return true;
+      }
     }
   } catch {
     /* fall through and keep another copy */
@@ -682,10 +695,21 @@ function keepBytesOnce(suffix, bytes) {
   const file = path.join(dir, prefix + stamp);
   try {
     fs.writeFileSync(file, bytes, { flag: "wx" });
-    console.error(`[settings] kept the unreadable bytes as ${file}`);
   } catch (e) {
-    console.error(`[settings] could not keep the unreadable bytes as ${file} (${why(e)})`);
+    // A half-written copy is not a copy (EEXIST: the name was never ours).
+    if (e.code !== "EEXIST") {
+      try {
+        fs.unlinkSync(file);
+      } catch {
+        /* never created */
+      }
+    }
+    report("keep-failed" + suffix, `could not keep the unreadable bytes as ${file} (${why(e)}); not overwriting them`);
+    return false;
   }
+  keptCopies.add(key);
+  console.error(`[settings] kept the unreadable bytes as ${file}`);
+  return true;
 }
 
 // Temp files of OURS ("<name>.tmp-<pid>-<n>-<hex>", for settings.json and
@@ -721,6 +745,9 @@ function sweepStaleTemps() {
 // preferred blindly — another process may have saved (and written .lastgood)
 // since this one last read the file. `lastgoodExists` reports a .lastgood that
 // is there even when it cannot be used.
+// Bytes of an unreadable .lastgood whose copy could not be written yet: commit
+// leaves .lastgood alone until they are kept.
+let unkeptLastgood = null;
 function goodCopy() {
   const out = { copy: null, lastgoodExists: false };
   let st = null;
@@ -735,9 +762,10 @@ function goodCopy() {
     try {
       text = fs.readFileSync(lastGoodFile, "utf8");
       out.copy = { source: "lastgood", text, obj: parseSettingsText(text) };
+      unkeptLastgood = null;
       return out;
     } catch {
-      keepBytesOnce(".lastgood-corrupt-", text);
+      unkeptLastgood = keepBytesOnce(".lastgood-corrupt-", text) ? null : text;
     }
   }
   if (lastGoodText !== null)
@@ -783,9 +811,8 @@ function reportState(st) {
   if (st.served === "memory" || st.served === "lastgood") {
     const from = st.served === "memory" ? "the last good copy held in memory" : "settings.json.lastgood";
     report(st.served, `${damage(st)}: serving ${from}; the next save rewrites settings.json from it`, {
-      served: st.served,
-      missing: !!st.missing,
-      error: why(st.failure),
+      severity: "warn",
+      meta: { served: st.served, missing: !!st.missing, error: why(st.failure) },
     });
   } else if (st.served === "defaults") {
     const msg = st.missing
@@ -793,7 +820,9 @@ function reportState(st) {
         "install: serving DEFAULTS, and every save is refused until settings.json is restored by hand"
       : `${damage(st)} and there is no good copy (none in memory, no readable settings.json.lastgood): ` +
         "serving DEFAULTS, and every save is refused until the file is restored by hand";
-    report("defaults", msg, { served: "defaults", missing: !!st.missing, error: why(st.failure) });
+    report("defaults", msg, {
+      meta: { served: "defaults", missing: !!st.missing, error: why(st.failure) },
+    });
   }
 }
 
@@ -818,10 +847,7 @@ function readCurrent() {
         "(saving would replace it with defaults). Restore utils/settings.json from a backup " +
         "or fix it by hand.";
     report("refused", "save refused: " + msg, {
-      served: "none",
-      refusedSave: true,
-      missing: !!st.missing,
-      error: why(st.failure),
+      meta: { served: "none", refusedSave: true, missing: !!st.missing, error: why(st.failure) },
     });
     const err = new Error(msg);
     err.code = "SETTINGS_CORRUPT";
@@ -832,8 +858,9 @@ function readCurrent() {
 
 // Write `text` to `file` atomically: a temp file of our own (pid + counter +
 // random, created exclusively), optionally fsync'd, then renamed over the
-// target. On any error the temp file is removed and the target is left as is.
-async function writeAtomic(file, text, sync) {
+// target once `beforeRename` (if given) has agreed. On any error the temp file
+// is removed and the target is left as is.
+async function writeAtomic(file, text, sync, beforeRename) {
   const rand = crypto.randomBytes(4).toString("hex");
   const tmp = `${file}.tmp-${process.pid}-${++tmpSeq}-${rand}`;
   let fh = null;
@@ -846,6 +873,7 @@ async function writeAtomic(file, text, sync) {
     const h = fh;
     fh = null;
     await h.close();
+    if (beforeRename) await beforeRename();
     await fsp.rename(tmp, file);
   } catch (err) {
     if (fh) await fh.close().catch(noop);
@@ -855,69 +883,188 @@ async function writeAtomic(file, text, sync) {
 }
 
 // Write a whole settings object (DEFAULTS filled in, as before), then refresh
-// the memory copy and settings.json.lastgood. .lastgood is not fsync'd: after
-// a power cut it may be lost or torn, which only costs the spare — the file
-// itself was synced. A .lastgood that cannot be written is logged, never
-// thrown: the save itself landed.
-async function commit(next, unreadable) {
+// the memory copy and settings.json.lastgood.
+//   - Unreadable bytes are kept first; a save whose copy cannot be written
+//     stops before it would overwrite them.
+//   - Each rename happens only while `token` still holds settings.json.lock: a
+//     save whose lock another process took (judging it stale) is dropped —
+//     SETTINGS_LOCK_LOST — and never renamed over a file saved since.
+//   - .lastgood is not fsync'd: after a power cut it may be lost or torn, which
+//     only costs the spare (the file itself was synced). A .lastgood that
+//     cannot be written is logged, never thrown: the save itself landed.
+async function commit(next, unreadable, token) {
   const text = JSON.stringify(materialize(next), null, 2);
-  keepBytesOnce(".corrupt-", unreadable);
-  await writeAtomic(settingsFile, text, true);
+  if (!keepBytesOnce(".corrupt-", unreadable)) {
+    const err = new Error(
+      "settings.json is unreadable and a copy of it could not be written, so it was not " +
+        "overwritten and nothing was saved; free some disk space and try again",
+    );
+    err.code = "SETTINGS_CORRUPT";
+    throw err;
+  }
+  await writeAtomic(settingsFile, text, true, async () => {
+    if (!(await lockHeld(token))) throw lockLost();
+  });
   lastGoodText = text;
   lastGoodAt = Date.now();
+  if (unkeptLastgood !== null) {
+    if (!keepBytesOnce(".lastgood-corrupt-", unkeptLastgood)) {
+      report(
+        "lastgood-unkept",
+        "left the unreadable settings.json.lastgood as it is until a copy of it can be written; the save itself landed",
+      );
+      return;
+    }
+    unkeptLastgood = null;
+  }
   try {
-    await writeAtomic(lastGoodFile, text, false);
+    await writeAtomic(lastGoodFile, text, false, async () => {
+      if (!(await lockHeld(token))) throw new Error("the lock was taken by another process");
+    });
   } catch (e) {
     report("lastgood-write", `could not refresh settings.json.lastgood (${why(e)}); the save itself landed`);
   }
 }
 
+// Is `pid` a live process on this host? Only ESRCH says no: EPERM is someone
+// else's live process, and anything unexpected counts as alive (the safe side).
 function pidAlive(pid) {
   try {
     process.kill(pid, 0);
     return true;
   } catch (e) {
-    return e.code === "EPERM";
+    return e.code !== "ESRCH";
   }
 }
 
-// Remove settings.json.lock when it is a crash leftover: older than 10 s, or
-// older than 0.5 s with an owner pid that has exited. Re-checked to be the
-// SAME file just before removal, so a lock taken in between is never lost.
-// true = try to take the lock again now.
-async function breakStaleLock() {
+// The owner pid in a lock acquireLock wrote ("<pid> <random>"); null when none
+// is written (yet).
+function lockOwner(content) {
+  const m = /^(\d{1,10})(?:\s|$)/.exec(content);
+  const pid = m ? Number(m[1]) : 0;
+  return pid > 0 && pid <= 0x7fffffff ? pid : null;
+}
+
+// Locks this process took but could not remove: other processes wait for them
+// to turn 120 s old; this process breaks them on its next save.
+const leakedTokens = new Set();
+
+function leakLock(token, message) {
+  leakedTokens.add(token);
+  report(
+    "lock-release",
+    `${message}; other processes wait for it to turn ${LOCK_STALE_MS / 1000} s old, this one breaks it on its next save`,
+    { action: "settings_lock", meta: { pid: process.pid } },
+  );
+}
+
+function lockedError(detail) {
+  const err = new Error(`settings.json is locked (${detail}), so nothing was saved; try again`);
+  err.code = "SETTINGS_LOCKED";
+  return err;
+}
+
+function lockLost() {
+  const err = new Error(
+    "settings.json.lock was taken from this save by another process (it judged the lock stale), " +
+      "so this save was dropped rather than written over a newer file; try again",
+  );
+  err.code = "SETTINGS_LOCK_LOST";
+  report("lock-lost", err.message, { action: "settings_lock", meta: { pid: process.pid } });
+  return err;
+}
+
+async function lockHeld(token) {
+  try {
+    return (await fsp.readFile(lockFile, "utf8")) === token;
+  } catch {
+    return false;
+  }
+}
+
+// Who holds settings.json.lock, and may it be broken? Read afresh each time.
+// Breakable: an owner that has exited, this process's own leaked lock, no
+// owner written and LOCK_EMPTY_MS away from now, or a live owner's lock older
+// than LOCK_STALE_MS. An mtime in the future (the clock stepped back) is no
+// age at all: such a lock is judged by its owner alone.
+async function inspectLock() {
   let st;
+  let content;
   try {
     st = await fsp.stat(lockFile);
+    content = await fsp.readFile(lockFile, "utf8");
   } catch (e) {
-    return e.code === "ENOENT";
+    if (e.code === "ENOENT") return { gone: true };
+    return { holder: `held, and unreadable (${why(e)})` };
   }
+  const look = { content, ino: st.ino };
   const age = Date.now() - st.mtimeMs;
-  let reason = "";
-  if (age > LOCK_STALE_MS) reason = `${Math.round(age / 1000)} s old`;
-  else if (age > LOCK_DEAD_OWNER_MS) {
-    const owner = parseInt(await fsp.readFile(lockFile, "utf8").catch(() => ""), 10);
-    if (owner > 0 && owner !== process.pid && !pidAlive(owner)) reason = `its owner, pid ${owner}, has exited`;
+  const pid = lockOwner(content);
+  if (pid === null) {
+    if (Math.abs(age) > LOCK_EMPTY_MS) return { ...look, breakable: true, reason: "it names no owner" };
+    return { holder: "being taken right now" };
   }
-  if (!reason) return false;
+  if (pid === process.pid && leakedTokens.has(content))
+    return { ...look, breakable: true, reason: "this process's own, left by a release that failed" };
+  if (pid !== process.pid && !pidAlive(pid))
+    return { ...look, breakable: true, reason: `its owner, pid ${pid}, has exited` };
+  if (age > LOCK_STALE_MS)
+    return { ...look, breakable: true, reason: `held by pid ${pid} for ${Math.round(age / 1000)} s` };
+  return { holder: `held by pid ${pid}` };
+}
+
+// Break the lock `look` judged breakable, as atomically as a file lock allows:
+// move it aside under a temp name of ours (one breaker's rename takes a given
+// lock; the other's finds it gone), then confirm the moved file is the very
+// lock judged — same inode, same content. A lock taken in between (a faster
+// breaker re-took it) is put straight back with link(), which fails rather
+// than replace a newer one; and should even that cost a holder its lock, that
+// holder's save stops at its pre-rename check instead of writing. A lock that
+// cannot be moved at all (a read-only directory) fails this save: it would
+// never come free.
+async function breakLock(look) {
+  const aside = `${settingsFile}.tmp-${process.pid}-${++tmpSeq}-${crypto.randomBytes(4).toString("hex")}`;
   try {
-    const again = await fsp.stat(lockFile);
-    if (again.ino !== st.ino || again.mtimeMs !== st.mtimeMs) return true;
-    await fsp.unlink(lockFile);
-    report("lock-broken", `removed a stale settings.json.lock (${reason})`);
-  } catch {
-    /* gone already */
+    await fsp.rename(lockFile, aside);
+  } catch (e) {
+    if (e.code === "ENOENT") return; // released, or broken by someone else first
+    throw lockedError(`a stale lock (${look.reason}) cannot be removed: ${why(e)}`);
   }
-  return true;
+  let same = false;
+  try {
+    const st = await fsp.stat(aside);
+    same = st.ino === look.ino && (await fsp.readFile(aside, "utf8")) === look.content;
+  } catch {
+    /* unreadable: not provably the lock judged */
+  }
+  if (!same) {
+    await fsp.link(aside, lockFile).catch(noop);
+    await fsp.unlink(aside).catch(noop);
+    return;
+  }
+  leakedTokens.delete(look.content);
+  await fsp.unlink(aside).catch((e) =>
+    report("lock-aside", `could not delete a stale settings.json.lock moved aside as ${aside} (${why(e)})`),
+  );
+  report("lock-broken", `removed a stale settings.json.lock (${look.reason})`, {
+    action: "settings_lock",
+    severity: "warn",
+    meta: { reason: look.reason },
+  });
 }
 
 // Take settings.json.lock, created exclusively and holding "<pid> <random>".
 // Another process holds it for the milliseconds of one save: retry every 5 ms
-// for up to 3 s, then fail this save (its caller handles a failed save).
+// until the 3 s deadline — honoured on every path, breaks included — then fail
+// this save with SETTINGS_LOCKED (its caller handles a failed save).
 async function acquireLock() {
   const token = `${process.pid} ${crypto.randomBytes(8).toString("hex")}`;
   const deadline = Date.now() + LOCK_WAIT_MS;
-  for (;;) {
+  let breaks = 0;
+  let holder = "held by another process";
+  for (let first = true; ; first = false) {
+    if (!first && Date.now() >= deadline)
+      throw lockedError(`${holder} for over ${LOCK_WAIT_MS / 1000} s`);
     let fh = null;
     try {
       fh = await fsp.open(lockFile, "wx");
@@ -929,39 +1076,48 @@ async function acquireLock() {
         await fh.writeFile(token, "utf8");
       } catch (e) {
         await fh.close().catch(noop);
-        await fsp.unlink(lockFile).catch(noop);
+        await fsp.unlink(lockFile).catch((u) =>
+          leakLock(token, `could not remove the settings.json.lock it had just created (${why(u)})`),
+        );
         throw e;
       }
       await fh.close().catch(noop);
       return token;
     }
-    if (await breakStaleLock()) continue;
-    if (Date.now() >= deadline) {
-      const err = new Error(
-        "settings.json is being saved by another process (settings.json.lock held " +
-          `for over ${LOCK_WAIT_MS / 1000} s), so nothing was saved; try again`,
-      );
-      err.code = "SETTINGS_LOCKED";
-      throw err;
+    const look = await inspectLock();
+    if (look.holder) holder = look.holder;
+    if (look.breakable && breaks < LOCK_MAX_BREAKS) {
+      breaks++;
+      await breakLock(look);
+      continue;
     }
     await sleep(LOCK_RETRY_MS);
   }
 }
 
-// Remove the lock only while it is still ours: a lock broken as stale and
-// retaken by another process must not be removed under it.
+// Remove the lock while it is still ours: a lock broken as stale and retaken
+// must not be removed under its new holder. One of ours that cannot be
+// removed is reported, never left silently.
 async function releaseLock(token) {
+  let held;
   try {
-    if ((await fsp.readFile(lockFile, "utf8")) === token) await fsp.unlink(lockFile);
-  } catch {
-    /* gone already */
+    held = await fsp.readFile(lockFile, "utf8");
+  } catch (e) {
+    if (e.code !== "ENOENT") leakLock(token, `could not read settings.json.lock to release it (${why(e)})`);
+    return;
+  }
+  if (held !== token) return;
+  try {
+    await fsp.unlink(lockFile);
+  } catch (e) {
+    leakLock(token, `could not remove its own settings.json.lock (${why(e)})`);
   }
 }
 
 async function withLock(fn) {
   const token = await acquireLock();
   try {
-    return await fn();
+    return await fn(token);
   } finally {
     await releaseLock(token);
   }
@@ -1038,13 +1194,13 @@ async function saveSettings(settings) {
   // another writer's change to it.
   const ours = materialize(parsed);
   return enqueue(() =>
-    withLock(async () => {
+    withLock(async (token) => {
       const { current, unreadable } = readCurrent();
       // An object loadSettings did not hand out has no known base, so it is
       // written whole, as before.
       const base = bases.get(settings);
       const next = base === undefined ? ours : merge3(baseObject(base), ours, current);
-      await commit(next, unreadable);
+      await commit(next, unreadable, token);
       // The caller's object now descends from what it just saved: saving it
       // again applies only its newer edits, never re-asserting these.
       bases.set(settings, oursText);
@@ -1056,10 +1212,10 @@ async function saveSettings(settings) {
 // CURRENT settings under the lock, so no merge is needed.
 function updateSettings(mutate) {
   return enqueue(() =>
-    withLock(async () => {
+    withLock(async (token) => {
       const { current, unreadable } = readCurrent();
       mutate(current);
-      await commit(current, unreadable);
+      await commit(current, unreadable, token);
     }),
   );
 }

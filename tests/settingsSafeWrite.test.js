@@ -138,6 +138,27 @@ async function setKeys(settings, marketplace, values) {
 const keptCopies = (ls, suffix = ".corrupt-") =>
   ls().filter((n) => n.startsWith("settings.json" + suffix));
 const ago = (ms) => new Date(Date.now() - ms);
+const isRoot = typeof process.getuid === "function" && process.getuid() === 0; // chmod does not stop root
+// The pid of a process that has already exited.
+const deadPid = () => spawnSync(process.execPath, ["-e", ""]).pid;
+// A promise's outcome within `ms` — { value } / { error } / { pending: true } —
+// so a save that never settles fails its test instead of hanging it.
+function settle(p, ms) {
+  let timer;
+  return Promise.race([
+    p.then((value) => ({ value }), (error) => ({ error })),
+    new Promise((r) => {
+      timer = setTimeout(() => r({ pending: true }), ms);
+    }),
+  ]).finally(() => clearTimeout(timer));
+}
+async function waitFor(cond, ms = 10000) {
+  const t0 = Date.now();
+  while (!cond()) {
+    if (Date.now() - t0 > ms) throw new Error("timed out waiting");
+    await new Promise((r) => setTimeout(r, 5));
+  }
+}
 
 test("two setAutoFarm calls in flight together both land", async () => {
   const { settings, disk } = fresh({ "settings.json": PROD });
@@ -618,13 +639,14 @@ test("two real child processes saving into one file lose nothing", async () => {
   assert.deepEqual(ls(), ["settings.json", "settings.json.lastgood"]);
 });
 
-test("a save waits on a live lock, then fails with SETTINGS_LOCKED and writes nothing; a dead owner's lock is broken", async () => {
+test("a live owner's lock is never broken under 120 s, however old: the save fails with SETTINGS_LOCKED and writes nothing", async () => {
   const { settings, file, disk, ls } = fresh({ "settings.json": PROD });
   const lock = file + ".lock";
   const holder = spawn(process.execPath, ["-e", "setTimeout(() => {}, 60000)"], { stdio: "ignore" });
   try {
     const token = `${holder.pid} live-holder`;
     fs.writeFileSync(lock, token);
+    fs.utimesSync(lock, ago(60 * 1000), ago(60 * 1000)); // a slow save: a minute in, still alive
     const before = fs.readFileSync(file, "utf8");
     const t0 = Date.now();
     await assert.rejects(settings.setAutoFarm({ hostMinFreeMb: 1 }), { code: "SETTINGS_LOCKED" });
@@ -637,7 +659,7 @@ test("a save waits on a live lock, then fails with SETTINGS_LOCKED and writes no
     holder.kill("SIGKILL");
   }
   await new Promise((r) => holder.on("exit", r));
-  // Its owner is gone and the lock is over half a second old: broken at once.
+  // Its owner is gone: broken at once.
   const t1 = Date.now();
   await settings.setAutoFarm({ hostMinFreeMb: 2 });
   assert.ok(Date.now() - t1 < 1000);
@@ -645,25 +667,260 @@ test("a save waits on a live lock, then fails with SETTINGS_LOCKED and writes no
   assert.deepEqual(ls(), ["settings.json", "settings.json.lastgood"]);
 });
 
-test("a lock older than 10 s is broken whoever owns it; a fresh one with a gone owner is too", async () => {
-  {
+test("a lock over 120 s old is broken whoever owns it; a dead owner's at any age, a future mtime included", async () => {
+  for (const [owner, mtime] of [
+    [String(process.pid), ago(121 * 1000)], // a live pid: only age clears it
+    [String(deadPid()), ago(-120 * 1000)], // the clock was stepped back after the crash
+    [String(deadPid()), ago(0)],
+  ]) {
     const { settings, file, disk, ls } = fresh({ "settings.json": PROD });
-    fs.writeFileSync(file + ".lock", `${process.pid} stuck`); // a live pid: only age can clear it
-    fs.utimesSync(file + ".lock", ago(11 * 1000), ago(11 * 1000));
+    fs.writeFileSync(file + ".lock", `${owner} left-behind`);
+    fs.utimesSync(file + ".lock", mtime, mtime);
     const t0 = Date.now();
     await settings.setAutoFarm({ hostMinFreeMb: 3 });
-    assert.ok(Date.now() - t0 < 1000);
+    assert.ok(Date.now() - t0 < 1000, `${owner} ${mtime.toISOString()}`);
     assert.equal(disk().autoFarm.hostMinFreeMb, 3);
     assert.deepEqual(ls(), ["settings.json", "settings.json.lastgood"]);
   }
-  {
+  // A live owner whose lock has a FUTURE mtime is judged by its owner, not age.
+  const { settings, file } = fresh({ "settings.json": PROD });
+  fs.writeFileSync(file + ".lock", `${process.pid} clock-stepped-back`);
+  fs.utimesSync(file + ".lock", ago(-300 * 1000), ago(-300 * 1000));
+  await assert.rejects(settings.setRequire2fa(false), { code: "SETTINGS_LOCKED" });
+  assert.equal(fs.readFileSync(file + ".lock", "utf8"), `${process.pid} clock-stepped-back`);
+});
+
+test("a lock with no owner written is broken once it is 2 s away from now, and not before", async () => {
+  for (const mtime of [ago(3000), ago(-60 * 1000)]) {
     const { settings, file, disk } = fresh({ "settings.json": PROD });
-    const gone = spawnSync(process.execPath, ["-e", ""]).pid; // exited already
-    fs.writeFileSync(file + ".lock", `${gone} crashed-mid-save`);
-    fs.utimesSync(file + ".lock", ago(1000), ago(1000));
+    fs.writeFileSync(file + ".lock", "");
+    fs.utimesSync(file + ".lock", mtime, mtime);
+    const t0 = Date.now();
     await settings.setAutoFarm({ hostMinFreeMb: 4 });
+    assert.ok(Date.now() - t0 < 1000);
     assert.equal(disk().autoFarm.hostMinFreeMb, 4);
-    assert.equal(fs.existsSync(file + ".lock"), false);
+  }
+  // Half a second old: its creator may be writing its pid right now — wait.
+  const { settings, file, disk } = fresh({ "settings.json": PROD });
+  fs.writeFileSync(file + ".lock", "");
+  fs.utimesSync(file + ".lock", ago(500), ago(500));
+  const t0 = Date.now();
+  await settings.setAutoFarm({ hostMinFreeMb: 5 });
+  const waited = Date.now() - t0;
+  assert.ok(waited >= 1000 && waited < 3000, `waited ${waited} ms`);
+  assert.equal(disk().autoFarm.hostMinFreeMb, 5);
+});
+
+test("a stale lock that cannot be removed fails the save at once instead of spinning", { skip: isRoot }, async () => {
+  const { settings, file, dir, disk } = fresh({ "settings.json": PROD });
+  fs.writeFileSync(file + ".lock", `${deadPid()} crashed-mid-save`);
+  fs.utimesSync(file + ".lock", ago(60 * 1000), ago(60 * 1000));
+  fs.chmodSync(dir, 0o555); // a read-only directory (an errors=remount-ro moment)
+  try {
+    for (const save of [() => settings.setAutoFarm({ hostMinFreeMb: 1 }), () => settings.setRequire2fa(false)]) {
+      const t0 = Date.now();
+      const r = await settle(save(), 6000);
+      assert.ok(!r.pending, "the save is still spinning after 6 s");
+      assert.equal(r.error && r.error.code, "SETTINGS_LOCKED");
+      assert.match(r.error.message, /cannot be removed/);
+      assert.ok(Date.now() - t0 < 1000);
+    }
+  } finally {
+    fs.chmodSync(dir, 0o755);
+  }
+  // Writable again: the next save breaks the crashed lock and lands.
+  await settings.setAutoFarm({ hostMinFreeMb: 2 });
+  assert.equal(disk().autoFarm.hostMinFreeMb, 2);
+});
+
+test("a lock this process cannot remove is reported, and its own next save breaks it", { skip: isRoot }, async () => {
+  const { settings, file, dir, disk } = fresh({ "settings.json": PROD });
+  const lock = file + ".lock";
+  const realOpen = fsp.open;
+  let armed = true;
+  fsp.open = async function (p, flags, ...rest) {
+    const fh = await realOpen.call(this, p, flags, ...rest);
+    if (armed && p === lock && flags === "wx") {
+      armed = false;
+      fs.chmodSync(dir, 0o555); // the directory turns read-only while we hold the lock
+    }
+    return fh;
+  };
+  try {
+    await assert.rejects(settings.setAutoFarm({ hostMinFreeMb: 1 }), { code: "EACCES" });
+  } finally {
+    fsp.open = realOpen;
+    fs.chmodSync(dir, 0o755);
+  }
+  assert.ok(fs.existsSync(lock)); // our lock could not be removed...
+  assert.ok(
+    events.some((e) => e.action === "settings_lock" && /could not remove its own settings\.json\.lock/.test(e.detail)),
+  ); // ...and that was said out loud
+  const t0 = Date.now();
+  await settings.setAutoFarm({ hostMinFreeMb: 2 }); // no 3 s wait on our own leftover
+  assert.ok(Date.now() - t0 < 1000);
+  assert.equal(disk().autoFarm.hostMinFreeMb, 2);
+  assert.equal(fs.existsSync(lock), false);
+});
+
+test("a save whose lock was taken from it mid-save is dropped, never renamed over the newer file", async () => {
+  const { settings, file, disk } = fresh({ "settings.json": PROD });
+  const lock = file + ".lock";
+  const realOpen = fsp.open;
+  let taken = false;
+  fsp.open = async function (p, flags, ...rest) {
+    const fh = await realOpen.call(this, p, flags, ...rest);
+    if (!taken && /settings\.json\.tmp-/.test(String(p))) {
+      taken = true;
+      // Another process judged our lock stale, broke it, saved, and holds a new one.
+      fs.writeFileSync(file, JSON.stringify({ ...PROD, marker: "newer" }, null, 2));
+      fs.unlinkSync(lock);
+      fs.writeFileSync(lock, "4242 someone-else");
+    }
+    return fh;
+  };
+  try {
+    await assert.rejects(settings.setAutoFarm({ hostMinFreeMb: 1 }), { code: "SETTINGS_LOCK_LOST" });
+  } finally {
+    fsp.open = realOpen;
+  }
+  assert.equal(disk().marker, "newer"); // the newer save stands
+  assert.equal(disk().autoFarm.hostMinFreeMb, undefined);
+  assert.equal(fs.readFileSync(lock, "utf8"), "4242 someone-else"); // their lock is left alone
+  assert.ok(events.some((e) => e.action === "settings_lock" && /dropped/.test(e.detail)));
+  fs.unlinkSync(lock); // they finish
+  await settings.setAutoFarm({ hostMinFreeMb: 2 });
+  assert.equal(disk().marker, "newer");
+  assert.equal(disk().autoFarm.hostMinFreeMb, 2);
+});
+
+test("two processes breaking one crashed lock never both get in: the loser waits, nothing is lost", async () => {
+  const { file, dir, disk } = fresh({ "settings.json": PROD });
+  const lock = file + ".lock";
+  fs.writeFileSync(lock, `${deadPid()} crashed-mid-save`);
+  fs.utimesSync(lock, ago(60 * 1000), ago(60 * 1000));
+  // B parks its first removal of the lock (its break) until told to go; C's
+  // settings.json fsync takes 600 ms, so C still holds the lock when B moves.
+  const child = `
+    const Module = require("module");
+    const fs = require("fs"), fsp = require("fs/promises"), path = require("path");
+    const SP = process.env.SETTINGS_MODULE, file = process.env.SETTINGS_FILE;
+    const dir = path.dirname(file), lock = file + ".lock";
+    const realLoad = Module._load;
+    Module._load = function (request, parent) {
+      if (request === "./systemLog" && parent && parent.filename === SP) return { logEvent: async () => {} };
+      return realLoad.apply(this, arguments);
+    };
+    const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+    if (process.env.ROLE === "B") {
+      let first = true;
+      const park = (real) => async function (p, ...rest) {
+        if (first && p === lock) {
+          first = false;
+          fs.writeFileSync(path.join(dir, "B-parked"), "1");
+          while (!fs.existsSync(path.join(dir, "go"))) await sleep(5);
+        }
+        return real.call(this, p, ...rest);
+      };
+      fsp.rename = park(fsp.rename);
+      fsp.unlink = park(fsp.unlink);
+    } else {
+      const realOpen = fsp.open;
+      fsp.open = async function (p, flags, ...rest) {
+        const fh = await realOpen.call(this, p, flags, ...rest);
+        if (String(p).startsWith(file + ".tmp-")) {
+          const realSync = fh.sync.bind(fh);
+          fh.sync = async () => { await sleep(600); return realSync(); };
+        }
+        return fh;
+      };
+    }
+    const settings = require(SP);
+    (async () => {
+      if (process.env.ROLE === "B") {
+        const s = settings.loadSettings();
+        s.marketplaces.g2g.refreshToken = "enc:v1:ROTATED";
+        await settings.saveSettings(s);
+      } else await settings.setAutoFarm({ maxAutoBots: 1 });
+    })().then(() => process.exit(0), (e) => { console.error(e && (e.code || e.message)); process.exit(1); });`;
+  const run = (role) => {
+    const p = spawn(process.execPath, ["-e", child], {
+      env: { ...process.env, SETTINGS_FILE: file, SETTINGS_MODULE: SETTINGS_PATH, ROLE: role },
+      stdio: ["ignore", "ignore", "pipe"],
+    });
+    let stderr = "";
+    p.stderr.on("data", (c) => (stderr += c));
+    return { pid: p.pid, done: new Promise((resolve) => p.on("exit", (code) => resolve({ code, stderr }))) };
+  };
+  const b = run("B");
+  await waitFor(() => fs.existsSync(path.join(dir, "B-parked")));
+  const c = run("C");
+  await waitFor(() => {
+    try {
+      return fs.readFileSync(lock, "utf8").startsWith(c.pid + " ");
+    } catch {
+      return false;
+    }
+  }); // C broke the crashed lock and holds its own
+  fs.writeFileSync(path.join(dir, "go"), "1"); // B now breaks "the stale lock" — C's
+  const [rb, rc] = await Promise.all([b.done, c.done]);
+  assert.equal(rc.code, 0, rc.stderr);
+  assert.equal(rb.code, 0, rb.stderr);
+  const d = disk();
+  assert.equal(d.autoFarm.maxAutoBots, 1);
+  assert.equal(d.marketplaces.g2g.refreshToken, "enc:v1:ROTATED");
+  assert.equal(fs.existsSync(lock), false);
+});
+
+test("unreadable bytes count as kept only once their copy is written: a failed copy blocks the overwrite", async () => {
+  // A hand edit with a typo: a new cookie pasted, a comma lost.
+  const handEdit = JSON.stringify(PROD, null, 2).replace('"enc:v1:eld-cookie"', '"HAND-PASTED-COOKIE" "x"');
+  const fullDisk = (alsoTheSave) => {
+    const realWrite = fs.writeFileSync;
+    const realOpen = fsp.open;
+    fs.writeFileSync = function (p, data, opts) {
+      if (String(p).includes(".corrupt-")) {
+        realWrite.call(fs, p, "", opts); // created, nothing written
+        const e = new Error("ENOSPC: injected disk full");
+        e.code = "ENOSPC";
+        throw e;
+      }
+      return realWrite.apply(fs, arguments);
+    };
+    if (alsoTheSave)
+      fsp.open = async function (p, flags, ...rest) {
+        const fh = await realOpen.call(this, p, flags, ...rest);
+        if (/settings\.json\.tmp-/.test(String(p)))
+          fh.writeFile = async () => {
+            const e = new Error("ENOSPC: injected disk full");
+            e.code = "ENOSPC";
+            throw e;
+          };
+        return fh;
+      };
+    return () => {
+      fs.writeFileSync = realWrite;
+      fsp.open = realOpen;
+    };
+  };
+  for (const alsoTheSave of [true, false]) {
+    const { settings, file, dir, disk, ls } = fresh({
+      "settings.json": handEdit,
+      "settings.json.lastgood": PROD,
+    });
+    const restore = fullDisk(alsoTheSave);
+    try {
+      await assert.rejects(settings.setRequire2fa(false));
+    } finally {
+      restore();
+    }
+    assert.equal(fs.readFileSync(file, "utf8"), handEdit); // not overwritten without its copy
+    assert.deepEqual(keptCopies(ls), []); // and no empty "copy" left behind
+    await settings.setRequire2fa(false); // space freed
+    const kept = keptCopies(ls);
+    assert.equal(kept.length, 1);
+    assert.equal(fs.readFileSync(path.join(dir, kept[0]), "utf8"), handEdit);
+    assert.equal(disk().require2fa, false);
   }
 });
 
