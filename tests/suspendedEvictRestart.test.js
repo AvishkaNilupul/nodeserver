@@ -32,8 +32,9 @@ const realHosts = {
 // key = no container). `parkAfterFirstTrip` lands the auto-farm tick's park
 // (`docker stop`) on that container right after the first round trip to the
 // host — between a `docker ps` and a separate restart. `accounts` maps a
-// config to how many accounts it still holds after the eviction.
-function setup({ states, accounts = {}, parkAfterFirstTrip = null, shellError = null }) {
+// config to how many accounts it still holds after the eviction; `unreadable`
+// holds configs whose read fails at the restart decision.
+function setup({ states, accounts = {}, parkAfterFirstTrip = null, shellError = null, unreadable = new Set() }) {
   const log = [];
   let trips = 0;
   let psCalls = 0;
@@ -91,6 +92,10 @@ function setup({ states, accounts = {}, parkAfterFirstTrip = null, shellError = 
   };
   // Same answer shape as botHosts.stopIfNoAccounts: { stopped, empty, state }.
   hosts.stopIfNoAccounts = async (_h, file, c) => {
+    if (unreadable.has(file)) {
+      trip();
+      return { stopped: false, empty: null, state: null };
+    }
     const empty = (accounts[file] ?? 1) === 0;
     const state = empty ? states[c] || "missing" : null;
     let stopped = false;
@@ -103,7 +108,7 @@ function setup({ states, accounts = {}, parkAfterFirstTrip = null, shellError = 
     return { stopped, empty, state };
   };
   const BotAccount = require("../models/BotAccount");
-  const rows = [
+  let rows = [
     { _id: "a1", login: "one", clientSecret: "s1", configFile: "config_7.json", host: "contabo" },
     { _id: "a2", login: "two", clientSecret: "s2", configFile: "config_8.json", host: "contabo" },
     { _id: "a3", login: "three", clientSecret: "s3", configFile: "config_9.json", host: "contabo" },
@@ -115,6 +120,11 @@ function setup({ states, accounts = {}, parkAfterFirstTrip = null, shellError = 
     evictSuspendedFromConfigs,
     log,
     states,
+    unreadable,
+    // The next sweep's suspended rows (an evicted row's configFile is cleared).
+    setRows: (r) => {
+      rows = r;
+    },
     psCalls: () => psCalls,
     shellCalls: () => shellCalls,
   };
@@ -122,6 +132,8 @@ function setup({ states, accounts = {}, parkAfterFirstTrip = null, shellError = 
 
 test.beforeEach(() => {
   setup.only = null;
+  const fc = require("../utils/farmControl");
+  if (fc._resetForTests) fc._resetForTests(); // no owed reload leaks between tests
 });
 
 test("only a RUNNING bot is restarted after an eviction; parked and missing ones stay down", async () => {
@@ -270,4 +282,23 @@ test("an emptied config is never restarted when docker ps fails (real host funct
     }
     fs.rmSync(dir, { recursive: true, force: true });
   }
+});
+
+test("a reload the sweep could not decide is retried on the next sweep", async () => {
+  // Round-3 review (2026-10-03): config_7 could not be read at the restart
+  // decision, so its bot was "not restarted" — and the evicted rows' configFile
+  // is cleared in that same tick, so no later sweep came back to it: the bot
+  // kept trying the deleted account.
+  setup.only = ["config_7.json"];
+  const t = setup({ states: { twitchbot7: "running" }, unreadable: new Set(["config_7.json"]) });
+  await t.evictSuspendedFromConfigs({});
+  assert.deepEqual(t.log, [], "nothing restarted while it cannot tell");
+  // Next tick: no new suspended rows; the config reads fine again.
+  t.unreadable.clear();
+  t.setRows([]);
+  await t.evictSuspendedFromConfigs({});
+  assert.deepEqual(t.log, ["restart twitchbot7 (was running)", "policy always twitchbot7"]);
+  // And it is done: a third sweep does nothing.
+  await t.evictSuspendedFromConfigs({});
+  assert.equal(t.log.length, 2);
 });

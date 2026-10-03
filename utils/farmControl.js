@@ -39,13 +39,8 @@ async function logStop(acc, game, detail, { failed = false } = {}) {
 
 // (hostId|configFile|clientSecret|game) combos already handled this process,
 // so a scan of the same sold account doesn't re-read the config every pass. A
-// combo is handled once its edit landed AND its bot reloaded (or needed no
-// reload). One whose reload failed waits in pendingReload instead, and its
-// next visit retries just the reload: the edit is already in the file, so
-// re-deriving it would read "nothing to do" while the bot kept farming the
-// game on its old config (2026-10-03).
+// handled edit whose reload failed is still owed — see pendingReloads below.
 const handled = new Set();
-const pendingReload = new Map(); // memoKey -> { container, findingId }
 
 function norm(s) {
   return String(s || "")
@@ -139,21 +134,169 @@ async function restartIfRunning(host, container, { restorePolicy = false, budget
   });
 }
 
-// Reload `container` after a config edit: { ok, restarted, note }. ok is false
-// only when the reload itself failed — the edit is in the file either way.
-async function reloadBot(host, container) {
-  if (!container) return { ok: true, restarted: false, note: " (no container known — not restarted)" };
+// ---------------------------------------------------------------------------
+// Making a bot pick up an edit to its config — the ONE rule every config editor
+// here uses (stopFarmingGame; the suspended-account and dead-token sweeps):
+//   * no ENABLED account left → stop it if it runs (botHosts.stopIfNoAccounts),
+//     never restart it: a bot with none spins in a login-retry loop. (Round-3
+//     review, 2026-10-03: a sold account that was its config's last enabled
+//     one used to be followed by a restart.)
+//   * accounts left → restart it if it runs (restartIfRunning);
+//   * cannot tell (config unreadable, `docker ps` failed) or the restart failed
+//     → nothing now; the config is OWED a reload (pendingReloads) and it is
+//     retried by the next sweep (retryPendingReloads) and by the next
+//     stopFarmingGame visit to that config — first, before anything else.
+// decideReload answers { done, outcome, note, why?, error? }; outcome is
+// "restarted" | "stopped" | "left" (not running, or restarts turned off: it
+// reads the edit when it next starts) | "unknown" | "failed".
+// opts: restorePolicy (after a real restart, as restartConfigContainer);
+// allowRestart (false = TWITCHBOT_ALLOW_RESTART=0); ops (stopIfNoAccounts /
+// restartIfRunning stand-ins — utils/deadTokenRetire.js passes its deps).
+// ---------------------------------------------------------------------------
+async function decideReload(host, file, container, { restorePolicy = false, allowRestart = true, ops } = {}) {
+  const o = ops || {};
+  const stopIfEmpty = o.stopIfNoAccounts || hosts.stopIfNoAccounts;
+  const restart = o.restartIfRunning || restartIfRunning;
+  let s;
   try {
-    const r = await restartIfRunning(host, container);
-    if (r.restarted) return { ok: true, restarted: true, note: "" };
+    s = (await stopIfEmpty(host, file, container, { noneEnabled: true })) || {};
+  } catch (e) {
+    const error = e.message || String(e);
+    return { done: false, outcome: "failed", error, note: container + " not checked: " + error };
+  }
+  if (s.stopped) {
+    return { done: true, outcome: "stopped", note: container + " stopped: no enabled account left in " + file };
+  }
+  if (s.empty === true && s.state && s.state !== "unknown") {
+    return { done: true, outcome: "left", note: container + " is " + s.state + " with no enabled account left — left stopped" };
+  }
+  if (s.empty !== false) {
+    const why = s.empty === null ? "config unreadable" : "no enabled account; docker ps failed";
+    return { done: false, outcome: "unknown", why, note: container + " not restarted (" + why + ")" };
+  }
+  if (!allowRestart) {
+    return { done: true, outcome: "left", note: container + " not restarted: restarts are turned off" };
+  }
+  try {
+    const r = await restart(host, container, { restorePolicy });
+    if (r && r.restarted) return { done: true, outcome: "restarted", note: "restarted " + container };
     return {
-      ok: true,
-      restarted: false,
-      note: " — " + container + " is " + r.state + ", left stopped (it reads the edit when it next starts)",
+      done: true,
+      outcome: "left",
+      note: container + " is " + ((r && r.state) || "?") + ", left stopped (it reads the edit when it next starts)",
     };
   } catch (e) {
-    return { ok: false, restarted: false, note: " — " + container + " restart FAILED: " + (e.message || String(e)) };
+    const error = e.message || String(e);
+    return { done: false, outcome: "failed", error, note: container + " restart FAILED: " + error };
   }
+}
+
+// hostId|file -> { host, file, container, opts, findings: [{ id, gen }], gen,
+// retrying }. In memory: a server restart forgets it (the next restart of the
+// bot, for any reason, then picks the edit up). `gen` orders failures against
+// reloads: a reload that STARTED after a failure covers it; one that started
+// before may have read the config before that failure's edit.
+const pendingReloads = new Map();
+const settledUpTo = new Map(); // hostId|file -> newest gen a reload has covered
+let genSeq = 0;
+
+const reloadKey = (host, file) => String((host && host.id) || "") + "|" + String(file || "");
+
+function owe(key, host, file, container, opts) {
+  let e = pendingReloads.get(key);
+  if (!e) {
+    e = { host, file, container, opts: {}, findings: [], gen: 0, retrying: null };
+    pendingReloads.set(key, e);
+  }
+  e.container = container || e.container;
+  e.opts = {
+    restorePolicy: !!(e.opts.restorePolicy || (opts && opts.restorePolicy)),
+    allowRestart: !(opts && opts.allowRestart === false),
+    ops: (opts && opts.ops) || e.opts.ops,
+  };
+  e.gen = ++genSeq;
+  return e.gen;
+}
+
+async function resolveFindings(ids) {
+  for (const id of ids) {
+    try {
+      await AuditFinding.updateOne(
+        { _id: id },
+        { $set: { status: "resolved", resolution: "auto", resolvedAt: new Date() } },
+      );
+    } catch (e) {
+      console.error("farmControl: failed to resolve stop finding:", e.message);
+    }
+  }
+}
+
+// A reload that started at `gen` has landed: every failure owed up to then is
+// covered — its findings resolve, and the entry goes unless a newer failure
+// arrived meanwhile.
+async function settle(key, gen) {
+  settledUpTo.set(key, Math.max(settledUpTo.get(key) || 0, gen));
+  const e = pendingReloads.get(key);
+  if (!e) return;
+  const covered = e.findings.filter((f) => f.gen <= gen).map((f) => f.id);
+  e.findings = e.findings.filter((f) => f.gen > gen);
+  if (e.gen <= gen) pendingReloads.delete(key);
+  await resolveFindings(covered);
+}
+
+// The stop finding of a failure owed at `gen`: resolved now if a later reload
+// already covered it, else resolved when one does.
+async function attachFinding(key, id, gen) {
+  if (!id) return;
+  if ((settledUpTo.get(key) || 0) >= gen) return resolveFindings([id]);
+  const e = pendingReloads.get(key);
+  if (e) e.findings.push({ id, gen });
+}
+
+// Reload a config's bot now; owed (and retried later) when it cannot be done.
+async function reloadConfig(host, file, container, opts = {}) {
+  const key = reloadKey(host, file);
+  const start = genSeq;
+  const r = await decideReload(host, file, container, opts);
+  if (r.done) {
+    await settle(key, start);
+    return r;
+  }
+  return { ...r, gen: owe(key, host, file, container, opts) };
+}
+
+// Retry one config's owed reload. Two retries of one config share the attempt.
+function retryPending(key) {
+  const e = pendingReloads.get(key);
+  if (!e) return Promise.resolve(null);
+  if (!e.retrying) {
+    const start = genSeq;
+    e.retrying = decideReload(e.host, e.file, e.container, e.opts)
+      .then(async (r) => {
+        if (r.done) await settle(key, start);
+        return r;
+      })
+      .finally(() => {
+        e.retrying = null;
+      });
+  }
+  return e.retrying;
+}
+
+// Retry every owed reload (the sweeps call this each tick). A host that cannot
+// be read costs one attempt per call, not one per config on it.
+async function retryPendingReloads() {
+  const out = [];
+  const skipHosts = new Set();
+  for (const [key, e] of [...pendingReloads]) {
+    const hostId = String((e.host && e.host.id) || "");
+    if (skipHosts.has(hostId)) continue;
+    const r = await retryPending(key);
+    if (!r) continue;
+    out.push({ host: hostId, file: e.file, container: e.container, ...r });
+    if (!r.done) skipHosts.add(hostId);
+  }
+  return out;
 }
 
 // Remove `game` from `acc`'s FavouriteGames inside its bot config and restart
@@ -166,13 +309,21 @@ async function stopFarmingGame(acc, game) {
   if (!file) return { changed: false, reason: "account has no config file" };
   const hostId = String(acc.host || "local");
   const memoKey = hostId + "|" + file + "|" + acc.clientSecret + "|" + norm(g);
-  if (handled.has(memoKey)) return { changed: false, reason: "already done" };
 
   const host = hosts.resolveHost(hostId);
   if (!host) return { changed: false, reason: "unknown host " + hostId };
 
-  const pending = pendingReload.get(memoKey);
-  if (pending) return retryReload(host, memoKey, pending);
+  // A reload this config still owes goes FIRST — even when this account's edit
+  // is already done (round-3 review): a second visit while the first reload was
+  // still in flight read the edit as "nothing to do" and marked it done, and the
+  // first visit's failed reload then waited where nothing looked.
+  const key = reloadKey(host, file);
+  let owed = "";
+  if (pendingReloads.has(key)) {
+    const r = await retryPending(key);
+    if (r) owed = "; owed reload " + (r.done ? "done: " : "still owed: ") + r.note;
+  }
+  if (handled.has(memoKey)) return { changed: false, reason: "already done" + owed };
 
   // The read-modify-write holds the config's file lock (utils/fileLock), like
   // every other config writer (2026-10-03): two scanner lanes stopping two sold
@@ -180,13 +331,15 @@ async function stopFarmingGame(acc, game) {
   // the old file, the later write dropped the other's edit, and both were
   // memoised as done. The reload runs after, outside the lock.
   const edit = await withFileLock(host, file, () => editConfig(acc, g, host, hostId, file, memoKey));
-  if (edit.result) return edit.result;
+  if (edit.result) return owed ? { ...edit.result, reason: edit.result.reason + owed } : edit.result;
   const { next, disabled } = edit;
+  handled.add(memoKey);
 
-  // Restart only this account's container so the bot reloads its config.
-  // The rest of the fleet keeps running untouched.
+  // Reload only this account's container; the rest of the fleet is untouched.
   const container = String(acc.container || "").trim();
-  const reload = await reloadBot(host, container);
+  const reload = container
+    ? await reloadConfig(host, file, container)
+    : { done: true, outcome: "none", note: "(no container known — not restarted)" };
   const finding = await logStop(
     acc,
     g,
@@ -202,37 +355,21 @@ async function stopFarmingGame(acc, game) {
       file +
       " on " +
       hostId +
-      (reload.restarted ? ", restarted " + container : "") +
-      reload.note +
-      (reload.ok ? "." : ". The bot still runs its old config; the restart is retried on the account's next scan."),
-    { failed: !reload.ok },
+      (reload.outcome === "restarted" ? ", restarted " + container : " — " + reload.note) +
+      (reload.done
+        ? "."
+        : ". The bot still runs its old config; the reload is retried by the next sweep or scan."),
+    { failed: !reload.done },
   );
-  if (reload.ok) handled.add(memoKey);
-  else pendingReload.set(memoKey, { container, findingId: finding && finding._id });
-  return { changed: true, reason: reload.note.trim() };
+  if (!reload.done) await attachFinding(key, finding && finding._id, reload.gen);
+  return { changed: true, reason: reload.outcome === "restarted" ? "" : "— " + reload.note };
 }
 
-// A reload that failed after its edit landed: retry just the reload. Resolves
-// the stop's open finding once it lands.
-async function retryReload(host, memoKey, pending) {
-  const reload = await reloadBot(host, pending.container);
-  if (!reload.ok) return { changed: false, reason: "reload still failing" + reload.note };
-  pendingReload.delete(memoKey);
-  handled.add(memoKey);
-  if (pending.findingId) {
-    try {
-      await AuditFinding.updateOne(
-        { _id: pending.findingId },
-        { $set: { status: "resolved", resolution: "auto", resolvedAt: new Date() } },
-      );
-    } catch (e) {
-      console.error("farmControl: failed to resolve stop finding:", e.message);
-    }
-  }
-  return {
-    changed: false,
-    reason: "reload retried" + (reload.restarted ? ": restarted " + pending.container : reload.note),
-  };
+// For tests: forget every owed reload and handled combo.
+function _resetForTests() {
+  handled.clear();
+  pendingReloads.clear();
+  settledUpTo.clear();
 }
 
 // The config edit of stopFarmingGame, run under the file lock. Returns
@@ -296,4 +433,12 @@ async function editConfig(acc, g, host, hostId, file, memoKey) {
   return { next, disabled };
 }
 
-module.exports = { stopFarmingGame, restartIfRunning, restartIfRunningScript, REMOTE_BUDGET };
+module.exports = {
+  stopFarmingGame,
+  restartIfRunning,
+  restartIfRunningScript,
+  reloadConfig,
+  retryPendingReloads,
+  REMOTE_BUDGET,
+  _resetForTests,
+};

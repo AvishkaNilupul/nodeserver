@@ -233,6 +233,12 @@ test("stopIfNoAccounts reports { stopped, empty, state }; a failed docker ps is 
     x = await run("config_20.json", "running");
     assert.deepEqual(x.r, { stopped: false, empty: true, state: null }, "only disabled accounts: empty, not stopped");
     assert.deepEqual(x.calls, [], "no docker call for a config with accounts");
+    // A config editor's reload asks for that stop too (round-3 review).
+    fs.writeFileSync(log, "");
+    process.env.FAKE_PS = "running";
+    const ne = await hosts.stopIfNoAccounts(DH, "config_20.json", "twitchbotx19", { noneEnabled: true });
+    assert.deepEqual(ne, { stopped: true, empty: true, state: "running" }, "noneEnabled: all disabled is stopped");
+    assert.deepEqual(fs.readFileSync(log, "utf8").trim().split("\n").map((l) => l.split(" ")[0]), ["ps", "update", "stop"]);
     x = await run("config_21.json", "running");
     assert.deepEqual(x.r, { stopped: false, empty: false, state: null });
     x = await run("config_99.json", "running");

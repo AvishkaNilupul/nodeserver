@@ -25,6 +25,9 @@ const hostsMod = require("../utils/botHosts");
 const farmControl = require("../utils/farmControl");
 const realHostFns = { runShell: hostsMod.runShell, restoreRestartPolicy: hostsMod.restoreRestartPolicy };
 test.after(() => Object.assign(hostsMod, realHostFns));
+test.beforeEach(() => {
+  if (farmControl._resetForTests) farmControl._resetForTests(); // no owed reload leaks between tests
+});
 
 const H = 3600000;
 const NOW = Date.parse("2026-10-01T08:00:00Z");
@@ -173,7 +176,7 @@ async function seed() {
 // auto-farm tick's park on that container right after the first docker round
 // trip — between a `docker ps` and a separate restart. `emptied` = configs the
 // retirement leaves with no accounts; `shellError` fails the check.
-function fakes({ parkAfterFirstTrip = null, emptied = [], shellError = null, psUnknown = false } = {}) {
+function fakes({ parkAfterFirstTrip = null, emptied = [], shellError = null, psUnknown = false, unreadable = new Set() } = {}) {
   const calls = { removed: [], restarted: [], events: [], telegrams: [], policy: [], restartedStopped: 0 };
   const docker = { twitchbotx44: "running", twitchbotx42: "exited" };
   const containerOf = (file) => "twitchbotx" + Number(String(file).replace(/\D/g, ""));
@@ -215,6 +218,10 @@ function fakes({ parkAfterFirstTrip = null, emptied = [], shellError = null, psU
       // Same answer shape as botHosts.stopIfNoAccounts: { stopped, empty, state }.
       // psUnknown: `docker ps` fails for an emptied config (state "unknown").
       stopIfNoAccounts: async (_h, file, c) => {
+        if (unreadable.has(file)) {
+          trip();
+          return { stopped: false, empty: null, state: null };
+        }
         const empty = emptied.includes(file);
         if (empty && psUnknown) {
           trip();
@@ -421,4 +428,27 @@ test("an emptied config whose bot state cannot be read is never restarted", asyn
   assert.deepEqual(calls.policy, []);
   assert.deepEqual(r.notRestarted, ["twitchbotx44 (no enabled account; docker ps failed)"]);
   assert.equal(docker.twitchbotx44, "running", "left as found — never restarted");
+});
+
+test("a reload the pass could not decide is retried on the next pass", async () => {
+  // Round-3 review (2026-10-03): config_44 could not be read at the restart
+  // decision, so its bot was "not restarted" — and the retired rows' configFile
+  // is cleared in that same pass, so no later pass planned it again: the bot
+  // kept retrying the dead login.
+  await seed();
+  const unreadable = new Set(["config_44.json"]);
+  const { deps, calls } = fakes({ unreadable });
+  const r1 = await retire.retireSoldDeadTokens({ hours: 48, now: NOW, deps });
+  assert.equal(r1.retired.length, 4);
+  assert.deepEqual(r1.notRestarted, ["twitchbotx44 (config unreadable)"]);
+  assert.deepEqual(calls.restarted, []);
+
+  unreadable.clear(); // readable again by the next tick
+  const r2 = await retire.retireSoldDeadTokens({ hours: 48, now: NOW + 600000, deps });
+  assert.equal(r2.retire.length, 0, "nothing new to retire");
+  assert.deepEqual(calls.restarted, ["contabo/config_44.json"], "the owed reload ran");
+  assert.deepEqual(r2.owedReloads, ["restarted twitchbotx44"]);
+
+  const r3 = await retire.retireSoldDeadTokens({ hours: 48, now: NOW + 1200000, deps });
+  assert.deepEqual(r3.owedReloads, [], "and it is no longer owed");
 });

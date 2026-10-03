@@ -1144,8 +1144,11 @@ async function setRestartPolicy(host, container, policy) {
 //           with no accounts at all (to decide the stop): "missing" when there
 //           is no such container, "unknown" when `docker ps` failed; null when
 //           it was not read. A failed `docker ps` is never "not running".
-// It stops only a running bot whose config has no accounts at all (as before).
-async function stopIfNoAccounts(host, file, container) {
+// It stops only a running bot whose config has no accounts at all (as before)
+// — or, with opts.noneEnabled, one whose accounts are all disabled: what a
+// config editor wants after its edit (farmControl.reloadConfig), since such a
+// bot must not be restarted either.
+async function stopIfNoAccounts(host, file, container, { noneEnabled = false } = {}) {
   let data;
   try {
     data = JSON.parse(await readFile(host, file));
@@ -1154,8 +1157,8 @@ async function stopIfNoAccounts(host, file, container) {
   }
   const list = data && data.TwitchSettings && data.TwitchSettings.TwitchUsers;
   const users = Array.isArray(list) ? list : [];
-  const enabled = users.filter((u) => u && u.Enabled !== false).length;
-  if (users.length > 0) return { stopped: false, empty: enabled === 0, state: null };
+  const empty = users.filter((u) => u && u.Enabled !== false).length === 0;
+  if (users.length > 0 && !(noneEnabled && empty)) return { stopped: false, empty, state: null };
 
   let states;
   try {

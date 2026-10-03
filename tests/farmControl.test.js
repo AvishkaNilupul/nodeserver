@@ -23,7 +23,7 @@ const HOST = { id: "contabo", transport: "ssh", dir: "/home/ubuntu/twitchbot" };
 // check-and-restart atomically — with every call recorded. `parkAfterFirstTrip`
 // lands the auto-farm tick's park (`docker stop`) right after the first docker
 // round trip, i.e. between a `docker ps` and a separate `docker restart`.
-function fakeHost({ config, state = "exited", psError = null, parkAfterFirstTrip = false }) {
+function fakeHost({ config, state = "exited", psError = null, parkAfterFirstTrip = false, readError = false }) {
   const calls = { writes: [], docker: [], ps: 0, shell: 0, policy: [], timeline: [], restartedStopped: 0 };
   let text = JSON.stringify(config, null, 2);
   let st = state; // "missing" = no such container
@@ -86,6 +86,21 @@ function fakeHost({ config, state = "exited", psError = null, parkAfterFirstTrip
       calls.policy.push(c);
       calls.timeline.push("policy");
     },
+    // botHosts.stopIfNoAccounts over the same config and docker state.
+    stopIfNoAccounts: async (_h, _file, c, opts = {}) => {
+      if (readError) return { stopped: false, empty: null, state: null };
+      const cfg = JSON.parse(text);
+      const users = (cfg.TwitchSettings && cfg.TwitchSettings.TwitchUsers) || [];
+      const empty = users.filter((u) => u && u.Enabled !== false).length === 0;
+      if (users.length > 0 && !(opts.noneEnabled && empty)) return { stopped: false, empty, state: null };
+      if (psError) return { stopped: false, empty: true, state: "unknown" };
+      const cur = c === "twitchbotx19" ? st : "missing";
+      if (cur !== "running") return { stopped: false, empty: true, state: cur };
+      st = "exited";
+      calls.docker.push("stop " + c);
+      calls.timeline.push("stop");
+      return { stopped: true, empty: true, state: cur };
+    },
   };
   for (const k of Object.keys(stub)) {
     orig[k] = hosts[k];
@@ -100,6 +115,9 @@ function fakeHost({ config, state = "exited", psError = null, parkAfterFirstTrip
     },
     setPsError: (e) => {
       psError = e;
+    },
+    setReadError: (v) => {
+      readError = v;
     },
     restore() {
       for (const k of Object.keys(orig)) hosts[k] = orig[k];
@@ -475,12 +493,12 @@ test("a failed reload is not recorded as done: the next visit retries just the r
     assert.equal(first.changed, true, "the edit itself landed");
     assert.match(first.reason, /twitchbotx19 restart FAILED: Cannot connect to the Docker daemon/);
     assert.equal(findings[0].status, "open", "a failed reload is not a resolved stop");
-    assert.match(findings[0].message, /retried on the account's next scan/);
+    assert.match(findings[0].message, /retried by the next sweep or scan/);
 
     // The daemon is back; the scanner visits the account again (same process).
     h.setPsError(null);
     const again = await fc.stopFarmingGame(ACC, "Sea of Thieves");
-    assert.match(again.reason, /^reload retried: restarted twitchbotx19$/);
+    assert.match(again.reason, /^already done; owed reload done: restarted twitchbotx19$/);
     assert.deepEqual(h.calls.docker, ["restart twitchbotx19"], "the bot reloads now");
     assert.deepEqual(h.calls.writes, ["config_19.json"], "no second edit");
     assert.deepEqual(findingUpdates.map((u) => [u.filter._id, u.update.$set.status]), [["finding-0", "resolved"]]);
@@ -576,5 +594,106 @@ test("the remote check-and-restart is cut off inside the SSH budget: no restart 
       else process.env[k] = v;
     }
     fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Round-3 review (2026-10-03): the reload rule every config editor uses.
+// ---------------------------------------------------------------------------
+
+test("the config's last enabled account: its bot is stopped, never restarted", async () => {
+  // Disabling a config's last enabled account and then restarting the running
+  // bot left a bot with no enabled account — it spins in a login-retry loop.
+  const lastOne = () => ({
+    FavouriteGames: ["Rust"],
+    TwitchSettings: {
+      TwitchUsers: [
+        { Login: ACC.login, ClientSecret: ACC.clientSecret, Enabled: true },
+        { Login: "old2", ClientSecret: "s2", Enabled: false },
+      ],
+    },
+  });
+  let h = fakeHost({ config: lastOne(), state: "running" });
+  try {
+    const fc = freshFarmControl();
+    const r = await fc.stopFarmingGame(ACC, "Rust");
+    assert.equal(r.changed, true);
+    assert.match(r.reason, /twitchbotx19 stopped: no enabled account left in config_19\.json/);
+    assert.deepEqual(h.calls.docker, ["stop twitchbotx19"], "stopped, never restarted");
+    assert.equal(h.state(), "exited");
+    assert.equal(findings[0].status, "resolved");
+  } finally {
+    h.restore();
+  }
+  // Already stopped (parked): left stopped, nothing started.
+  h = fakeHost({ config: lastOne(), state: "exited" });
+  try {
+    const fc = freshFarmControl();
+    const r = await fc.stopFarmingGame(ACC, "Rust");
+    assert.match(r.reason, /twitchbotx19 is exited with no enabled account left — left stopped/);
+    assert.deepEqual(h.calls.docker, []);
+  } finally {
+    h.restore();
+  }
+});
+
+test("a reload still owed is retried first, even after a racing visit read the edit as done", async () => {
+  // The drop scanner abandons a scan at its deadline and re-claims the account
+  // while the first visit's reload is still in flight; that second visit read
+  // the edit as "nothing to do" and marked it done, and the first visit's
+  // failed reload then waited where nothing looked.
+  const h = fakeHost({ config: config19({ Enabled: true, FavouriteGames: ["Sea of Thieves", "Rust"] }), state: "running" });
+  const fakeRun = hosts.runShell;
+  let calls = 0;
+  let reached;
+  const inFlight = new Promise((r) => (reached = r));
+  let release;
+  const gate = new Promise((r) => (release = r));
+  hosts.runShell = async (...a) => {
+    calls++;
+    if (calls === 1) {
+      reached();
+      await gate; // a stalled link...
+      throw new Error("ssh: Connection timed out during banner exchange");
+    }
+    return fakeRun(...a);
+  };
+  try {
+    const fc = freshFarmControl();
+    const first = fc.stopFarmingGame(ACC, "Sea of Thieves");
+    await inFlight; // the edit landed; its reload hangs
+    const second = await fc.stopFarmingGame(ACC, "Sea of Thieves");
+    assert.equal(second.changed, false, "the racing visit has nothing to edit");
+    release();
+    const r1 = await first;
+    assert.match(r1.reason, /restart FAILED: ssh: Connection timed out/);
+    assert.equal(findings[0].status, "open");
+
+    const third = await fc.stopFarmingGame(ACC, "Sea of Thieves");
+    assert.match(third.reason, /owed reload done: restarted twitchbotx19/);
+    assert.deepEqual(h.calls.docker, ["restart twitchbotx19"]);
+    assert.deepEqual(findingUpdates.map((u) => [u.filter._id, u.update.$set.status]), [["finding-0", "resolved"]]);
+  } finally {
+    h.restore();
+  }
+});
+
+test("a reload that cannot be decided (config unreadable) is owed, then retried", async () => {
+  const h = fakeHost({ config: config19({ Enabled: true, FavouriteGames: [] }), state: "running", readError: true });
+  try {
+    const fc = freshFarmControl();
+    const r = await fc.stopFarmingGame(ACC, "Sea of Thieves");
+    assert.match(r.reason, /twitchbotx19 not restarted \(config unreadable\)/);
+    assert.deepEqual(h.calls.docker, [], "never restarted blind");
+    assert.equal(findings[0].status, "open");
+
+    h.setReadError(false); // readable again; a sweep retries everything owed
+    const owed = await fc.retryPendingReloads();
+    assert.deepEqual(owed.map((o) => [o.container, o.outcome]), [["twitchbotx19", "restarted"]]);
+    assert.deepEqual(h.calls.docker, ["restart twitchbotx19"]);
+    assert.deepEqual(findingUpdates.map((u) => u.update.$set.status), ["resolved"]);
+    assert.deepEqual(await fc.retryPendingReloads(), [], "nothing owed any more");
+  } finally {
+    h.restore();
   }
 });

@@ -309,7 +309,14 @@ async function evictSuspendedFromConfigs({ onProgress } = {}) {
     removeAccountFromConfig,
     containerForFile,
   } = require("../routes/botConfigRoutes");
-  const { restartIfRunning } = require("./farmControl");
+  const { reloadConfig, retryPendingReloads } = require("./farmControl");
+  // Reloads an earlier sweep could not decide (config unreadable, `docker ps`
+  // failed) come first: the evicted rows' configFile is cleared in the same
+  // tick, so nothing else would ever bring them back (round-3 review).
+  const owed = await retryPendingReloads().catch(() => []);
+  for (const r of owed) {
+    if (!r.done) console.warn("[suspendedAccounts] owed reload still pending: " + r.note);
+  }
   const rows = await BotAccount.find(
     { lastScanStatus: "suspended", configFile: { $gt: "" } },
     { login: 1, clientSecret: 1, configFile: 1, host: 1 },
@@ -347,36 +354,16 @@ async function evictSuspendedFromConfigs({ onProgress } = {}) {
   // by a separate restart left a round trip in which a park could land and be
   // undone. restorePolicy keeps what restartConfigContainer did after a real
   // restart, and TWITCHBOT_ALLOW_RESTART=0 still turns these restarts off.
-  // An eviction can empty a config, and a bot with no accounts spins in a login
-  // loop (botHosts.stopIfNoAccounts): such a bot is stopped, never restarted.
-  // Nor is one whose config holds no ENABLED account, or cannot be read: a
-  // failed `docker ps` once read as "not running" let an emptied bot be
-  // restarted (round-2 review, 2026-10-03).
+  // An eviction can empty a config, and a bot with no ENABLED account spins in
+  // a login loop: such a bot is stopped, never restarted; one whose config or
+  // state cannot be read is not restarted now but owed, and retried on the
+  // next sweep (farmControl.reloadConfig — the rule every config editor uses).
   const allowRestart = process.env.TWITCHBOT_ALLOW_RESTART !== "0";
   for (const b of touched.values()) {
     const container = containerForFile(b.file);
     if (!container) continue;
-    try {
-      const s = await hosts.stopIfNoAccounts(b.host, b.file, container);
-      if (s.stopped) continue;
-      if (s.empty !== false) {
-        console.warn(
-          "[suspendedAccounts] not restarting " + container + " (" + b.file + "): " +
-            (s.empty === null
-              ? "its config could not be read"
-              : "it holds no enabled account" +
-                (s.state === "unknown" ? "; docker ps failed" : s.state ? " (" + s.state + ")" : "")),
-        );
-        continue;
-      }
-      if (!allowRestart) continue;
-      await restartIfRunning(b.host, container, { restorePolicy: true });
-    } catch (e) {
-      console.error(
-        "[suspendedAccounts] could not restart " + b.file + ":",
-        e.message,
-      );
-    }
+    const r = await reloadConfig(b.host, b.file, container, { restorePolicy: true, allowRestart });
+    if (!r.done) console.warn("[suspendedAccounts] " + r.note + " — retried next sweep");
   }
   if (evicted && onProgress) {
     onProgress(

@@ -119,6 +119,8 @@ function defaultDeps() {
       return { removeAccountFromConfig: r.removeAccountFromConfig, restartConfigContainer: r.restartConfigContainer };
     },
     restartIfRunning: (...a) => require("./farmControl").restartIfRunning(...a),
+    reloadConfig: (...a) => require("./farmControl").reloadConfig(...a),
+    retryPendingReloads: (...a) => require("./farmControl").retryPendingReloads(...a),
   };
 }
 
@@ -234,11 +236,25 @@ async function retireSoldDeadTokens({ hours = DEFAULT_HOURS, dryRun = false, now
     restarted: [],
     stopped: [],
     notRestarted: [],
+    owedReloads: [],
   };
+  const fc = () => require("./farmControl");
+  const reloadConfig = d.reloadConfig || ((...a) => fc().reloadConfig(...a));
+  const retryOwed = d.retryPendingReloads || ((...a) => fc().retryPendingReloads(...a));
+  // Reloads an earlier pass could not decide (config unreadable, `docker ps`
+  // failed) are retried first, every pass — the retired rows' configFile is
+  // cleared in the same pass, so they are never planned again (round-3 review,
+  // 2026-10-03).
+  if (!dryRun) {
+    for (const r of await retryOwed().catch(() => [])) {
+      report.owedReloads.push(r.note + (r.done ? "" : " — still owed"));
+    }
+    if (report.owedReloads.length) progress("Dead-token retire: owed reload(s): " + report.owedReloads.join("; ") + ".");
+  }
   if (dryRun || !p.retire.length) return report;
 
   const { removeAccountFromConfig } = d.configOps();
-  const restartIfRunning = d.restartIfRunning || require("./farmControl").restartIfRunning;
+  const restartIfRunning = d.restartIfRunning || fc().restartIfRunning;
   const allowRestart = process.env.TWITCHBOT_ALLOW_RESTART !== "0";
   const groups = new Map();
   for (const e of p.retire) {
@@ -293,43 +309,26 @@ async function retireSoldDeadTokens({ hours = DEFAULT_HOURS, dryRun = false, now
     }
     if (!touched) continue;
     report.configs++;
-    // The bot drops the retired logins on a restart, made only while it RUNS:
-    // the check and the restart are ONE shell command under the container's
-    // lock (2026-10-03) — a `docker ps` followed by a separate restart let a
-    // park that landed in between be undone. restorePolicy keeps what
+    // The bot drops the retired logins on a reload (farmControl.reloadConfig,
+    // the rule every config editor uses): restarted only while it RUNS — the
+    // check and the restart one shell command under the container's lock — and
+    // only while its config still holds an enabled account; a bot left with
+    // none is stopped (it would spin in a login-retry loop). One whose config
+    // or state cannot be read is not restarted now (report.notRestarted) but
+    // owed, and retried on the next pass. restorePolicy keeps what
     // restartConfigContainer did; TWITCHBOT_ALLOW_RESTART=0 still turns the
-    // restart off. A config left with no accounts is stopped instead: a bot
-    // with none spins in a login-retry loop (botHosts.stopIfNoAccounts). One
-    // with no ENABLED account left, or whose config cannot be read, is never
-    // restarted — noted in report.notRestarted (round-2 review: a failed
-    // `docker ps` once read as "not running" let an emptied bot be restarted).
+    // restart off.
     const container = list[0].container;
     if (!container) continue;
-    try {
-      const s =
-        typeof d.hosts.stopIfNoAccounts === "function"
-          ? await d.hosts.stopIfNoAccounts(host, file, container)
-          : { stopped: false, empty: null, state: null };
-      if (s.stopped) {
-        report.stopped.push(container);
-        continue;
-      }
-      if (s.empty !== false) {
-        report.notRestarted.push(
-          container + " (" +
-            (s.empty === null
-              ? "config unreadable"
-              : "no enabled account" + (s.state === "unknown" ? "; docker ps failed" : "")) +
-            ")",
-        );
-        continue;
-      }
-      if (!allowRestart) continue;
-      const r = await restartIfRunning(host, container, { restorePolicy: true });
-      if (r && r.restarted) report.restarted.push(container);
-    } catch (err) {
-      report.errors.push(hostId + "/" + file + " restart: " + err.message);
-    }
+    const r = await reloadConfig(host, file, container, {
+      restorePolicy: true,
+      allowRestart,
+      ops: { stopIfNoAccounts: d.hosts.stopIfNoAccounts, restartIfRunning },
+    });
+    if (r.outcome === "restarted") report.restarted.push(container);
+    else if (r.outcome === "stopped") report.stopped.push(container);
+    else if (r.outcome === "unknown") report.notRestarted.push(container + " (" + r.why + ")");
+    else if (r.outcome === "failed") report.errors.push(hostId + "/" + file + " restart: " + r.error);
   }
   if (report.retired.length) {
     progress(
