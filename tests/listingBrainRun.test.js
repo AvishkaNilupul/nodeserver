@@ -365,3 +365,53 @@ test("the row schema keeps a sparse row sparse (no defaults filled back in) and 
   for (const k of Object.keys(row)) assert.deepEqual(doc[k], row[k], k);
   for (const k of ["live", "hl"]) assert.equal(doc[k], undefined, k + " stays absent");
 });
+
+/* ------------------------- review findings: error text (P4) ------------------------- */
+
+test("P4 the runner's lastError, its notes and its console lines carry cleaned error text", async () => {
+  const HOSTY = /myshop|mongo-primary-7|\/var\/www|jdoefarm01/;
+  // a load that fails with infrastructure in its message
+  const a = setup({
+    load: async () => {
+      throw new Error("getaddrinfo ENOTFOUND db01.prod.myshop.lk at /var/www/app/utils/x.js");
+    },
+  });
+  const r = await B.runOnce();
+  assert.match(r.error, /ENOTFOUND/, "the error's code word stays");
+  assert.ok(!HOSTY.test(r.error), r.error);
+  assert.ok(!HOSTY.test(B.status().lastError), B.status().lastError);
+  assert.ok(!a.errs.some((e) => HOSTY.test(e)), a.errs.join("\n"));
+  // a failed log write and an unreadable cool-down history
+  const base = fakeModels();
+  const models = {
+    ...base,
+    Run: () => ({
+      ...base.Run(),
+      findOne: (filter) => {
+        const fail = async () => {
+          throw new Error("connection 5 to db.myshop.lk:27017 closed; getaddrinfo ENOTFOUND mongo-primary-7");
+        };
+        return { sort: () => ({ lean: fail }), lean: filter && filter.day ? async () => null : fail };
+      },
+    }),
+    Row: () => ({
+      ...base.Row(),
+      insertMany: async () => {
+        throw new Error('E11000 duplicate key error dup key: { login: "jdoefarm01" } host mongo-primary-7 /var/www/nodeserver');
+      },
+    }),
+  };
+  const b = setup({ models });
+  const r2 = await B.runOnce();
+  assert.equal(r2.ok, true);
+  assert.equal(r2.persisted, false);
+  const st = B.status();
+  assert.match(st.lastError, /log write failed: E11000 duplicate key/);
+  assert.ok(!HOSTY.test(st.lastError), st.lastError);
+  const mem = await B.latest();
+  const note = mem.notes.find((n) => /cool-down history/.test(n));
+  assert.ok(note, mem.notes.join(" | "));
+  assert.match(note, /ENOTFOUND/);
+  assert.ok(!HOSTY.test(note), note);
+  assert.ok(!b.errs.some((e) => HOSTY.test(e)), b.errs.join("\n"));
+});

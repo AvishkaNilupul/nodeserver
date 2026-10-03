@@ -7,11 +7,18 @@
 // Mounted by createRouter with the tracker's guards (superadmin + 2FA in the live server). Every
 // route goes through getLB, which spreads them, so no route can be added without them.
 //
-// Responses are WHITELISTED, field by field, like the tracker's SALE_FIELDS: a field the model adds
-// later stays private until it is named here. On top of that every nested value is scrubbed of the
-// identifying keys the loader strips (listing ids, logins, sellers, order keys) and of the run's
-// in-memory internals (bundle, ctx, the per-listing forecasts), so a slip in the model cannot leak
-// through a nested object either.
+// What leaves, and how:
+// - Cells, offers and an offer's live listings are WHITELISTED, field by field (ROW_FIELDS,
+//   OFFER_FIELDS, OFFER_LIVE_FIELDS), like the tracker's SALE_FIELDS: a field the model adds later
+//   stays private until it is named here.
+// - The status, a run's cfg / summary / counts / notes and the accuracy report are NOT whitelisted:
+//   they are scrubbed by a BLOCKLIST (FORBIDDEN_KEYS, at any depth) — the identifying keys the loader
+//   strips (listing ids, logins, sellers, order keys), free-text keys (note, title, url, description,
+//   name, lastError) and the run's in-memory internals (bundle, ctx, the per-listing forecasts). A new
+//   key there is shown unless it is on that list.
+// - Whitelisted values are scrubbed the same way, so a slip in the model cannot leak through a nested
+//   object either. The status's lastError is the one free text shown, cleaned like the loader's notes
+//   (inputs.cleanMsg); a route error is a 500 with a cleaned message.
 
 const FORCE_COOLDOWN_MS = 60 * 1000;
 const HISTORY_DEFAULT = 72;
@@ -44,9 +51,18 @@ const FORBIDDEN_KEYS = new Set([
   "id", "_id", "run", "l", "lid", "lids", "listingId", "listingIds", "externalId", "orderId", "dedupeKey", "grp",
   "login", "logins", "loginLower", "account", "accountId", "accountLogin", "seller", "sellerName", "sellerScore",
   "sellerRatings", "contentId", "twitchId", "poolAccountId", "botId", "container", "email", "password", "token",
+  // free text a listing or a ledger carries (a note names a login; a title, a link or a description
+  // can say anything); lastError is put back cleaned by publicStatus
+  "note", "title", "url", "description", "name", "lastError",
   "bundle", "ctx", "fc",
 ]);
 const MAX_DEPTH = 12;
+// The scorer's fixed explanation of a score block, put back by publicAccuracy, is at most this long.
+const MAX_NOTE_CHARS = 600;
+
+// The loader's cleaner (inputs.js requires only crypto and fs), loaded on first use: building the
+// router loads nothing.
+const cleanMsg = (e) => require("../utils/listingBrain/inputs").cleanMsg(e);
 
 // A score table names its winner ("✓ best"). Whatever shape the scorer uses for it — a name, or an
 // object carrying one — the page gets the name, so the `id` scrub cannot silently drop the winner.
@@ -100,6 +116,25 @@ function pick(obj, fields) {
 
 function publicRow(r) {
   return pick(r, ROW_FIELDS);
+}
+
+// The runner's status, scrubbed; its last error (the page shows it) put back cleaned.
+function publicStatus(st) {
+  const o = scrub(st || {});
+  const err = st && st.lastError ? cleanMsg(st.lastError) : "";
+  return Object.assign(o, { lastError: err });
+}
+
+// The scorer's report, scrubbed. Its own fixed explanation of each score block (score.js NOTE, which
+// the page shows under it) is put back at exactly those two places; anything else named note stays
+// dropped.
+function publicAccuracy(a) {
+  const o = scrub(a || {});
+  for (const k of ["backtest", "forward"]) {
+    const src = a && a[k];
+    if (o[k] && src && typeof src.note === "string") o[k].note = src.note.slice(0, MAX_NOTE_CHARS);
+  }
+  return o;
 }
 
 function publicOffer(v) {
@@ -165,17 +200,23 @@ function mount(router, { guards = [], brain = null } = {}) {
       try {
         await fn(req, res, B());
       } catch (e) {
-        res.status(500).json({ success: false, message: e && e.message ? e.message : String(e) });
+        let message = "listing brain error";
+        try {
+          message = cleanMsg(e);
+        } catch {
+          // the cleaner itself failed: the fixed text above, never the raw one
+        }
+        res.status(500).json({ success: false, message });
       }
     });
 
   getLB("/api/price-tracker/listing-brain/status", (req, res, b) => {
-    res.json({ ...scrub(b.status() || {}), success: true });
+    res.json({ ...publicStatus(b.status()), success: true });
   });
 
   getLB("/api/price-tracker/listing-brain/latest", async (req, res, b) => {
     const run = await b.latest();
-    if (!run) return res.json({ success: true, empty: true, status: scrub(b.status() || {}) });
+    if (!run) return res.json({ success: true, empty: true, status: publicStatus(b.status()) });
     let rows = Array.isArray(run.rows) ? run.rows : [];
     const q = req.query;
     const farm = String(q.farm || "");
@@ -208,7 +249,7 @@ function mount(router, { guards = [], brain = null } = {}) {
       logged: run.logged !== false,
       // how many per-listing forecasts this run logged for the live test (a count, never the list)
       fcN: Number.isFinite(run.fcN) ? run.fcN : typeof sum.fc === "number" ? sum.fc : null,
-      status: scrub(b.status() || {}),
+      status: publicStatus(b.status()),
       total: pg.total,
       offset: pg.offset,
       limit: pg.limit,
@@ -248,7 +289,7 @@ function mount(router, { guards = [], brain = null } = {}) {
     }
     const a = await b.accuracy({ force });
     if (!a) return res.json({ success: true, empty: true });
-    res.json({ ...scrub(a), success: true });
+    res.json({ ...publicAccuracy(a), success: true });
   });
 }
 

@@ -13,6 +13,8 @@ const setIdentity = require("../utils/priceTracker/setIdentity");
 const venues = require("../utils/priceTracker/venues");
 const unclaimedBundles = require("../utils/unclaimedBundles");
 const G = require("../utils/priceTracker/games");
+const MU = require("../utils/listingBrain/model/util");
+const E = require("../utils/listingBrain/model/evidence");
 const EXPORT = require("../scripts/listing-brain-export");
 
 const DAY = 86400000;
@@ -63,6 +65,7 @@ const SETS = {
 // One listing: the extra read's document (`x`, with identifying fields the DB holds, so the
 // whitelisting is tested) and, when the tracker prepared it, its prepared row.
 function listing(n, o) {
+  const title = o.title || (o.game ? o.game + " Twitch Drops" : "");
   const x = {
     _id: ID(n),
     marketplace: o.m,
@@ -86,13 +89,14 @@ function listing(n, o) {
     rebundledAt: o.rebundledAt ? new Date(o.rebundledAt) : null,
     venueMinPriceUsd: o.vmin || 0,
     units: o.units || [],
+    // read for classifyKind in memory only (plan §3 rent-farm by title); never copied
+    title,
     // never projected by the loader; a careless spread would leak them
     accountLogin: "secret_login_" + n,
     note: "auto-farm: automatic delivery — secret_login_" + n,
     externalId: "EXT-" + n,
   };
-  const title = o.title || (o.game ? o.game + " Twitch Drops" : "");
-  const l = { ...x, title, units: (o.units || []).map((u) => ({ deliveredAt: u.deliveredAt || null, orderId: u.orderId || "", login: "secret_unit_login" })) };
+  const l = { ...x, units: (o.units || []).map((u) => ({ deliveredAt: u.deliveredAt || null, orderId: u.orderId || "", login: "secret_unit_login" })) };
   const prepared = o.prepared === false ? null : { l, id: setIdentity.identify(l, o.set || null), market: o.m, listingId: ID(n) };
   return { x, prepared, n };
 }
@@ -114,7 +118,7 @@ const LISTINGS = [
   listing(9, { m: "gameflip", origin: "unclaimed", price: 2, set: SETS.G1, game: "Gamma Rush" }),
   listing(10, { m: "ggsel", origin: "unclaimed", price: 2, set: SETS.G1, game: "Gamma Rush", lastStock: 3, units: units(3) }),
   // not prepared, no flag, older than the report, price fine: a rent-farm TITLE
-  listing(11, { m: "gameflip", origin: "manual", price: 3, created: NOW - 20 * DAY, prepared: false }),
+  listing(11, { m: "gameflip", origin: "manual", price: 3, created: NOW - 20 * DAY, prepared: false, title: "Rental auto farm 7 days" }),
   // not prepared: junk price
   listing(12, { m: "gameflip", origin: "manual", price: 30, set: SETS.A1, prepared: false }),
   listing(13, {
@@ -427,6 +431,8 @@ function world(over = {}) {
     CampaignDrops: { find: query(MANIFESTS, calls, "manifests") },
     MarketResearch: { find: query(over.researchFail ? new Error("research down") : RESEARCH, calls, "research") },
     DemandBrainRow: { find: query(over.demandRows || (over.demandFail ? new Error("rows down") : DEMAND_ROWS), calls, "demand") },
+    // the model's own config reader (pure): which keys the bundle keeps, how far back demand rows are read
+    listingModel: { readConfig: MU.readConfig, DEFAULTS: MU.DEFAULTS },
   };
   return { deps, calls, seen, af };
 }
@@ -454,10 +460,13 @@ test("every read is projected, limited, lean and never skipped — exactly plan 
   const get = (n) => calls.find((c) => c.name === n);
   const L = get("listings");
   assert.deepEqual(L.projection, { ...I.LISTING_PROJECTION });
-  assert.ok(!("units.login" in L.projection) && !("accountLogin" in L.projection) && !("title" in L.projection) && !("note" in L.projection));
+  // the title is read for classifyKind in memory (L13); no bundle ever holds it (the plain-JSON test)
+  assert.ok(!("units.login" in L.projection) && !("accountLogin" in L.projection) && !("note" in L.projection));
   assert.deepEqual(L.filter.marketplace.$in, I.MARKETS);
   assert.deepEqual(L.filter.$or[0], { status: "active" });
-  assert.equal(L.filter.$or[1].updatedAt.$gte.getTime(), NOW - (60 + I.BACKTEST_PAD_DAYS) * DAY);
+  // non-active rows as far back as sales are kept: max(refDays 180, fit 60) + the backtest's 42 days
+  assert.equal(W.saleDays, 222);
+  assert.equal(L.filter.$or[1].updatedAt.$gte.getTime(), NOW - W.saleDays * DAY);
   assert.deepEqual(L.sort, { _id: -1 });
   assert.equal(L.limit, I.LISTING_CAP);
   const UL = get("unitsListed");
@@ -467,12 +476,13 @@ test("every read is projected, limited, lean and never skipped — exactly plan 
   assert.equal(UL.filter.listedAt.$gte.getTime(), NOW - (60 + I.BACKTEST_PAD_DAYS + I.UNIT_LISTED_PAD_DAYS) * DAY);
   assert.deepEqual(Object.keys(US.filter).sort(), ["soldAt", "status"]);
   assert.equal(US.filter.status, "sold");
-  assert.equal(US.filter.soldAt.$gte.getTime(), NOW - (60 + I.BACKTEST_PAD_DAYS) * DAY);
+  assert.equal(US.filter.soldAt.$gte.getTime(), NOW - W.saleDays * DAY);
   assert.equal(UL.limit, I.UNIT_CAP);
   assert.equal(US.limit, I.UNIT_CAP);
   const C = get("campaigns");
   assert.deepEqual(C.projection, { campaignId: 1, name: 1, game: 1, startAt: 1, endAt: 1 });
-  assert.equal(C.filter.endAt.$gte.getTime(), NOW - I.CAMPAIGN_WINDOW_DAYS * DAY);
+  assert.equal(C.filter.$or[0].endAt.$gte.getTime(), NOW - I.CAMPAIGN_WINDOW_DAYS * DAY);
+  assert.deepEqual(C.filter.$or[1], { endAt: null });
   assert.equal(C.limit, I.CAMPAIGN_CAP);
   const M = get("manifests");
   assert.deepEqual(M.filter, { campaignId: { $in: ["cmp1", "cmp2", "cmp3"] } });
@@ -483,7 +493,7 @@ test("every read is projected, limited, lean and never skipped — exactly plan 
   assert.deepEqual(R.projection, { game: 1, "markets.gameflip": 1, "markets.ggsel": 1, "markets.plati": 1, scannedAt: 1 });
   assert.equal(R.limit, I.RESEARCH_CAP);
   const D = get("demand");
-  assert.equal(D.filter.at.$gte.getTime(), NOW - 72 * HOUR);
+  assert.equal(D.filter.at.$gte.getTime(), NOW - 7 * HOUR, "the model's maxDemandAgeH (6 h) + 1 h");
   assert.deepEqual(D.sort, { at: -1 });
   assert.equal(D.limit, I.DEMAND_ROW_CAP);
   assert.deepEqual(D.projection, { ...I.DEMAND_PROJECTION });
@@ -637,11 +647,14 @@ test("rows only in the extra read: a rent-farm title, a junk price, a row newer 
   const n16 = ids.get(H(16));
   assert.deepEqual([n16.kind, n16.o, n16.f, n16.g, n16.ck], ["single", "auto", "claim", "", null], "newer than the report, its set unknown");
   assert.deepEqual([b.counts.l_farmByTitle, b.counts.l_junkPrice, b.counts.l_newer, b.counts.l_unexplained], [1, 1, 1, 0]);
-  // a truncated tracker read cannot prove the title: classified by flags, and said
-  const t = await loadWith({ truncated: true });
-  assert.equal(byId(t.b).get(H(11)).kind, "single");
+  // a truncated tracker read: the fresh title still proves a rent-farm row; a row with no reason the
+  // loader can see is classified by its flags, and said
+  const plain = listing(17, { m: "gameflip", origin: "manual", price: 3, created: NOW - 20 * DAY, prepared: false, title: "Alpha Quest Twitch Drops" });
+  const t = await loadWith({ truncated: true, listingRows: LISTINGS.map((r) => r.x).concat([plain.x]) });
+  assert.equal(byId(t.b).get(H(11)).kind, "farm");
+  assert.equal(byId(t.b).get(H(17)).kind, "single");
   assert.equal(t.b.counts.l_unexplained, 1);
-  assert.ok(t.b.notes.some((x) => /classified by their flags alone/.test(x)));
+  assert.ok(t.b.notes.some((x) => /classified by their flags alone/.test(x) && /hit its cap/.test(x)), t.b.notes.join(" | "));
   assert.ok(t.b.notes.some((x) => /tracker's read hit its row cap/.test(x)));
 });
 
@@ -662,7 +675,7 @@ test("the no-claim lister's sales come from UnclaimedAccount, never from the led
   // the units themselves, de-duplicated across the two reads and whitelisted
   assert.equal(b.noclaim.units.length, Object.keys(UNITS).length);
   const u1 = b.noclaim.units.find((u) => u.p === 2.25);
-  assert.deepEqual(Object.keys(u1).sort(), ["bk", "camps", "g", "l", "lids", "m", "p", "s", "sm", "st", "x"]);
+  assert.deepEqual(Object.keys(u1).sort(), ["bk", "camps", "g", "l", "lids", "m", "p", "s", "sm", "st", "u", "x"]);
   assert.deepEqual(u1.lids, [H(9)]);
   assert.deepEqual(u1.camps, ["Gamma Rush Cup Week 1"]);
   assert.equal(b.noclaim.units.find((u) => u.p === 2 && u.st === "sold").sm, "digiseller", "soldMarket plati → digiseller");
@@ -697,13 +710,20 @@ test("packs, lots and hand sales are demand only, with the per-account bulk pric
 });
 
 test("a pack unit the ledger already holds is not counted twice", () => {
-  const rows = new Map([[ID(6), { raw: ID(6), L: { id: H(6), g: "gamma rush", m: "eldorado", o: "manual", kind: "bulk", pack: 5, lot: 0, p: 10 } }], [ID(9), { raw: ID(9), L: { id: H(9), g: "gamma rush", m: "gameflip", o: "unclaimed", kind: "single", pack: 0, lot: 0, p: 2 } }]]);
+  const pack = { id: H(6), g: "gamma rush", m: "eldorado", o: "manual", kind: "bulk", pack: 5, lot: 0, p: 10, c: NOW - 20 * DAY };
+  const single = { id: H(9), g: "gamma rush", m: "gameflip", o: "unclaimed", kind: "single", pack: 0, lot: 0, p: 2, c: NOW - 20 * DAY };
+  const rows = new Map([[ID(6), { raw: ID(6), L: pack }], [ID(9), { raw: ID(9), L: single }]]);
   const docs = [unit(21, { status: "sold", soldAt: NOW - DAY, soldMarket: "eldorado", rows: [9, 6] }), unit(22, { status: "sold", soldAt: NOW - DAY, soldMarket: "eldorado", rows: [9, 6] })];
+  // an owner's v2 pack (origin manual): its sales are the ledger's bulk records, never the units'
   const out = I.noclaimUnits({ d: { setIdentity }, docs, byId: rows, since: NOW - 30 * DAY, ledgerBulk: new Map([[ID(6), 1]]) });
-  assert.equal(out.demandOnly.length, 1, "one of the two pack units is already a ledger bulk record");
-  assert.equal(out.counts.packInLedger, 1);
-  assert.deepEqual(out.bulkPrices.map((x) => x.pa), [2]);
-  assert.equal(out.sales.length, 0);
+  assert.deepEqual([out.demandOnly.length, out.sales.length, out.counts.elsewhere], [0, 0, 2]);
+  // a no-claim pack row the ledger already counted is not added again
+  const nc = new Map([[ID(6), { raw: ID(6), L: { ...pack, o: "unclaimed" } }], [ID(9), { raw: ID(9), L: single }]]);
+  const out2 = I.noclaimUnits({ d: { setIdentity }, docs, byId: nc, since: NOW - 30 * DAY, ledgerBulk: new Map([[ID(6), 1]]) });
+  assert.equal(out2.demandOnly.length, 1, "one of the two pack units is already a ledger bulk record");
+  assert.equal(out2.counts.packInLedger, 1);
+  assert.deepEqual(out2.bulkPrices.map((x) => x.pa), [2]);
+  assert.equal(out2.sales.length, 0);
 });
 
 test("plati is digiseller everywhere: radar, feed, ledger, fees, the auto-lister's order", async () => {
@@ -754,8 +774,8 @@ test("demand: the newest farm-brain row per game × farm; the no-claim bucket ro
 test("waves: the no-claim games' waves from the pure event catalog", async () => {
   const { b, deps } = await loadWith();
   assert.deepEqual(b.noclaim.waves, [
-    { g: "gamma rush", ev: "Gamma Rush Cup", wave: "Week 1", startAt: NOW - 10 * DAY, endAt: NOW - 2 * DAY },
-    { g: "gamma rush", ev: "Gamma Rush Cup", wave: "Week 2", startAt: NOW - DAY, endAt: NOW + 3 * DAY },
+    { g: "gamma rush", ev: "Gamma Rush Cup", wave: "Week 1", name: "Gamma Rush Cup Week 1", startAt: NOW - 10 * DAY, endAt: NOW - 2 * DAY },
+    { g: "gamma rush", ev: "Gamma Rush Cup", wave: "Week 2", name: "Gamma Rush Cup Week 2", startAt: NOW - DAY, endAt: NOW + 3 * DAY },
   ]);
   assert.equal(typeof deps.unclaimedBundles.loadCatalog, "function", "present, and never called (it would throw)");
 });
@@ -918,7 +938,7 @@ test("the export script refuses to write a bundle that fails privacyScan or vali
   await assert.rejects(EXPORT.exportBundle({ inputs: fakeInputs(b), now: NOW, out: out3, log: () => {} }), /EEXIST/, "never over an existing file");
   assert.equal(EXPORT.argValue(["--out", "x.json"], "--out"), "x.json");
   assert.equal(EXPORT.argValue(["--out=y.json"], "--out"), "y.json");
-  assert.match(EXPORT.defaultOut(NOW), /^listing-brain-bundle-20261010-120000\.json$/);
+  assert.match(path.basename(EXPORT.defaultOut(NOW)), /^listing-brain-bundle-20261010-120000\.json$/);
 });
 
 /* --------------------------------- pure pieces --------------------------------- */
@@ -1053,6 +1073,7 @@ test("source: nothing but crypto and fs is required outside realDeps(), and real
     "../priceTracker/venues",
     "../settings",
     "../unclaimedBundles",
+    "./model/util",
   ]);
   for (const bad of [/marketplaces/, /Fulfiller/i, /unclaimedAutoList/, /unclaimedListingAudit/, /noclaimOfferRotation/, /pricingEvidence/]) assert.ok(!bad.test(body), "realDeps requires " + bad);
 });
@@ -1076,4 +1097,394 @@ test("the export script is read-only and says who runs it", () => {
   for (const bad of [/\.save\(/, /\.create\(/, /updateOne|updateMany|findOneAndUpdate/, /insertMany|deleteOne|deleteMany|bulkWrite|dropDatabase|\.drop\(/, /require\([^)]*marketplaces[^)]*\)/, /axios|fetch\(/, /setAutoFarm|saveSettings/]) {
     assert.ok(!bad.test(code), "the export script matches " + bad);
   }
+});
+
+/* ------------------------- review findings: the loader (L1–L13) ------------------------- */
+
+// A no-claim row the loader knows (a byId entry, the shape normaliseListings builds).
+function ncRow(n, o = {}) {
+  const L = {
+    id: H(n),
+    g: "gamma rush",
+    gl: "Gamma Rush",
+    m: o.m || "gameflip",
+    o: o.o || "unclaimed",
+    f: "noclaim",
+    kind: o.kind || "single",
+    ck: "s:gr",
+    bk: "gamma rush|2",
+    ex: true,
+    n: 2,
+    p: o.p === undefined ? 2 : o.p,
+    c: o.c === undefined ? NOW - 10 * DAY : o.c,
+    pack: o.pack || 0,
+    lot: o.lot || 0,
+  };
+  return [ID(n), { raw: ID(n), L }];
+}
+const ncUnits = (rows, docs, extra = {}) => I.noclaimUnits({ d: { setIdentity }, docs, byId: new Map(rows), since: NOW - 222 * DAY, ...extra });
+
+test("L1 a re-listed unit's stale expiredAt (older than its listedAt) is not carried into U.x", () => {
+  const relisted = unit(31, { status: "listed", listedAt: new Date(NOW - 5 * DAY), expiredAt: NOW - 40 * DAY, rows: [9] });
+  const expired = unit(32, { status: "expired", listedAt: new Date(NOW - 50 * DAY), expiredAt: NOW - 40 * DAY, rows: [9] });
+  const out = ncUnits([ncRow(9)], [relisted, expired]);
+  assert.equal(out.units[0].x, null, "expireAccount's stamp from the unit's previous life");
+  assert.equal(out.units[1].x, NOW - 40 * DAY, "a real expiry stays");
+  const ev = E.buildEvidence({ now: NOW, noclaim: { units: out.units, waves: [] } }, { cfg: MU.readConfig({}) });
+  assert.deepEqual(
+    ev.noclaim.units.map((u) => u.stc),
+    ["listed", "expired"],
+    "the unit on sale now reads live",
+  );
+});
+
+test("L2 a unit's sale is booked on the newest named no-claim row of its sold market created before the sale", () => {
+  // a GGSel set rebuilt twice: v1 (30 d), v2 (10 d), v3 (1 d, after the sale) — every id $addToSet on the unit
+  const rows = [ncRow(41, { m: "ggsel", c: NOW - 30 * DAY }), ncRow(42, { m: "ggsel", c: NOW - 10 * DAY }), ncRow(43, { m: "ggsel", c: NOW - DAY })];
+  const u = unit(41, { status: "sold", market: "ggsel", soldMarket: "ggsel", soldAt: NOW - 3 * DAY, paid: 1.5, rows: [41, 42, 43] });
+  assert.deepEqual(
+    ncUnits(rows, [u]).sales.map((s) => s.lid),
+    [H(42)],
+    "v2: the newest row that existed when it sold",
+  );
+  const flipped = { ...u, listingIds: [ID(43), ID(42), ID(41)] };
+  assert.deepEqual(
+    ncUnits(rows, [flipped]).sales.map((s) => s.lid),
+    [H(42)],
+    "the order of listingIds does not matter",
+  );
+});
+
+test("L3 a unit sold through an owner listing (manualListing) is left to the tracker ledger, never booked on a dead auto row", () => {
+  assert.equal(I.UNIT_PROJECTION.manualListing, 1);
+  // commitLedger reused an expired ledger for an owner vault row: listingIds still names the old auto row
+  const rows = [ncRow(61, { c: NOW - 60 * DAY })];
+  const owner = { ...unit(61, { status: "sold", soldAt: NOW - 4 * DAY, paid: 1.75, soldMarket: "gameflip", rows: [61] }), manualListing: ID(62) };
+  const out = ncUnits(rows, [owner]);
+  assert.deepEqual(out.sales, []);
+  assert.deepEqual(out.demandOnly, []);
+  assert.equal(out.counts.ownerRow, 1);
+  assert.ok(!("manualListing" in out.units[0]) && !JSON.stringify(out.units).includes(ID(62)), "the owner row's id is used in memory only");
+  // a released ledger (manualListing cleared) sold by the auto-lister counts as before
+  assert.equal(ncUnits(rows, [{ ...owner, manualListing: "" }]).sales.length, 1);
+});
+
+test("L4 U carries the ledger's last write (u), the approximate moment a unit went off sale", async () => {
+  assert.equal(I.UNIT_PROJECTION.updatedAt, 1);
+  const off = { ...unit(35, { status: "skipped", rows: [9] }), updatedAt: new Date(NOW - 2 * DAY) };
+  const out = ncUnits([ncRow(9)], [off]);
+  assert.equal(out.units[0].u, NOW - 2 * DAY);
+  assert.equal(out.units[0].st, "skipped");
+});
+
+test("L5 every hand sale (soldMarket manual) is a demand-only hand record, whether or not it names a row", () => {
+  const rows = [ncRow(71)];
+  const never = unit(71, { status: "sold", soldAt: NOW - 2 * DAY, soldMarket: "manual", listedAt: null, rows: [] });
+  const outside = unit(72, { status: "sold", soldAt: NOW - 2 * DAY, soldMarket: "manual", rows: [99] });
+  const named = unit(73, { status: "sold", soldAt: NOW - 2 * DAY, soldMarket: "manual", rows: [71] });
+  const out = ncUnits(rows, [never, outside, named]);
+  assert.equal(out.counts.hand, 3, "a never-listed account, one whose old row is out of the window, one naming a live row");
+  assert.deepEqual(
+    out.demandOnly.map((x) => [x.g, x.m, x.f, x.t, x.src]),
+    [0, 1, 2].map(() => ["gamma rush", "unknown", "noclaim", NOW - 2 * DAY, "hand"]),
+  );
+  assert.deepEqual(out.sales, []);
+});
+
+test("L6 a broken lot's member sold later as a single is a single sale: the pack test runs on the chosen row only", () => {
+  const rows = [ncRow(51, { kind: "lot", lot: 3, p: 3.75, c: NOW - 20 * DAY }), ncRow(52, { c: NOW - 8 * DAY, p: 1.5 })];
+  const single = unit(51, { status: "sold", soldAt: NOW - 2 * DAY, paid: 1.5, soldMarket: "gameflip", rows: [51, 52] });
+  const out = ncUnits(rows, [single]);
+  assert.deepEqual(
+    out.sales.map((s) => [s.lid, s.p, s.basis]),
+    [[H(52), 1.5, "paid"]],
+  );
+  assert.deepEqual(out.demandOnly, []);
+  assert.deepEqual(out.bulkPrices, []);
+  // sold while the lot was its newest row: a lot sale (demand only, per-account price)
+  const inLot = unit(53, { status: "sold", soldAt: NOW - 15 * DAY, paid: 3.75, soldMarket: "gameflip", rows: [51, 52] });
+  const out2 = ncUnits(rows, [inLot]);
+  assert.equal(out2.sales.length, 0);
+  assert.deepEqual(
+    out2.demandOnly.map((x) => x.src),
+    ["bulk"],
+  );
+  assert.deepEqual(
+    out2.bulkPrices.map((x) => [x.pa, x.size]),
+    [[1.25, 3]],
+  );
+});
+
+test("L7 the listing read and the sold-unit read reach back as far as sales are kept (saleDays)", async () => {
+  const W = I.readWindows({});
+  assert.equal(W.saleDays, 222);
+  assert.equal(W.listingDays, W.saleDays);
+  assert.equal(W.unitSoldDays, W.saleDays);
+  const { calls } = await loadWith();
+  const WL = I.readWindows({ listingBrain: { fitDaysClaim: 60 } });
+  const get = (n) => calls.find((c) => c.name === n);
+  assert.equal(get("listings").filter.$or[1].updatedAt.$gte.getTime(), NOW - WL.saleDays * DAY);
+  assert.equal(get("unitsSold").filter.soldAt.$gte.getTime(), NOW - WL.saleDays * DAY);
+  assert.equal(get("listings").limit, I.LISTING_CAP);
+  assert.equal(get("unitsSold").limit, I.UNIT_CAP);
+});
+
+test("L8 every wave record keeps its raw campaign name (W.name)", async () => {
+  const { b } = await loadWith();
+  assert.deepEqual(
+    b.noclaim.waves.map((w) => [w.wave, w.name]),
+    [
+      ["Week 1", "Gamma Rush Cup Week 1"],
+      ["Week 2", "Gamma Rush Cup Week 2"],
+    ],
+  );
+});
+
+test("L9 open-ended campaigns (endAt null) are read too; dated ones sort first so the cap never drops them", async () => {
+  const { calls } = await loadWith();
+  const C = calls.find((c) => c.name === "campaigns");
+  assert.deepEqual(C.filter, { $or: [{ endAt: { $gte: new Date(NOW - I.CAMPAIGN_WINDOW_DAYS * DAY) } }, { endAt: null }] });
+  assert.deepEqual(C.sort, { endAt: -1 }, "descending: Mongo sorts null below every date, so nulls come last");
+  assert.equal(C.limit, I.CAMPAIGN_CAP);
+});
+
+test("L10 a no-claim farm-brain row keyed by normGameName (a–z0–9) joins the loader's Unicode keyword bucket", () => {
+  const kw = I.noclaimKeywords({ noClaimGames: ["Pokémon UNITE"] }, setIdentity.normGame);
+  const g = setIdentity.normGame("Pokémon UNITE");
+  // farmDemand.noClaimKeys → settings.normGameName("Pokémon UNITE") = "pok mon unite"
+  const docs = [{ k: "pok mon unite", f: "noclaim", at: new Date(NOW - HOUR), live: true, br: { c: "fleet", w: 14, t: 30 }, stk: { on: 20, fl: 0 }, est: { avg30: 12, avg45: 11 } }];
+  const out = I.demandRows({ docs, keywords: kw, listings: [{ g, f: "noclaim", kind: "single" }], now: NOW });
+  assert.deepEqual(
+    out.map((r) => [r.k, r.w, r.sh]),
+    [[g, 14, 1]],
+    "expanded to the bucket's game, the key the model looks up",
+  );
+});
+
+test("L11 an operator's 'manual mark sold' is a hand sale (demand only); the note never reaches the bundle", async () => {
+  assert.equal(I.UNIT_PROJECTION.note, 1);
+  const rows = [ncRow(81, { c: NOW - 9 * DAY, p: 1.5 })];
+  // POST /api/unclaimed-auto/sell/:id → spendAccount(ledger, "manual mark sold"): market and shelf price stamped
+  const u = { ...unit(81, { status: "sold", soldAt: NOW - DAY, paid: 1.5, soldMarket: "gameflip", rows: [81] }), note: "manual mark sold" };
+  const out = ncUnits(rows, [u]);
+  assert.deepEqual(out.sales, []);
+  assert.deepEqual(
+    out.demandOnly.map((x) => [x.src, x.m, x.f]),
+    [["hand", "unknown", "noclaim"]],
+  );
+  assert.equal(out.counts.hand, 1);
+  assert.ok(!JSON.stringify(out).toLowerCase().includes("mark sold"));
+  const noted = { ...unit(82, { status: "sold", soldAt: NOW - DAY, paid: 2, soldMarket: "gameflip", rows: [9] }), note: "Manual mark sold — secret_operator" };
+  const { b } = await loadWith({ units: [noted] });
+  assert.deepEqual(
+    b.sales.filter((s) => s.lid === H(9)),
+    [],
+  );
+  assert.equal(b.demandOnly.filter((x) => x.src === "hand").length, 1);
+  const text = JSON.stringify(b);
+  assert.ok(!/mark sold|secret_operator/i.test(text));
+  assert.deepEqual(I.privacyScan(b), []);
+});
+
+test("L12 the farm-brain row read looks back max(maxDemandAgeH, 6) h + 1 h, never 72 h", async () => {
+  const from = async (lb) => {
+    const { calls } = await loadWith({ af: { listingBrain: lb } });
+    return calls.find((c) => c.name === "demand").filter.at.$gte.getTime();
+  };
+  assert.equal(await from({ enabled: true }), NOW - 7 * HOUR);
+  assert.equal(await from({ maxDemandAgeH: 12 }), NOW - 13 * HOUR);
+  assert.equal(await from({ maxDemandAgeH: 2 }), NOW - 7 * HOUR);
+  assert.equal(await from({ maxDemandAgeH: 500 }), NOW - 73 * HOUR, "the model's clamp: 72 h at most");
+  assert.equal(await from({ maxDemandAgeH: "x" }), NOW - 7 * HOUR, "a typo reads as the model's default");
+});
+
+test("L13 kind farm is inferred only from the flag or a fresh rent-farm title; any other gap keeps the row's kind by its flags", () => {
+  assert.equal(I.LISTING_PROJECTION.title, 1, "read for classifyKind in memory");
+  const report = { at: new Date(REPORT_AT), truncated: false, prepared: { rows: [], setById: new Map() } };
+  const mk = (n, o) => ({
+    _id: ID(n),
+    marketplace: "gameflip",
+    origin: "auto",
+    status: "active",
+    price: 2,
+    createdAt: new Date(NOW - 20 * DAY),
+    updatedAt: new Date(NOW - DAY),
+    title: o.title,
+    rentFarm: !!o.rentFarm,
+    units: [],
+  });
+  const rows = [mk(91, { title: "Alpha Quest Twitch Drops (2 Items) secret_title_word" }), mk(92, { title: "Alpha Quest auto farm 7 days" }), mk(93, { title: "", rentFarm: true })];
+  const nl = I.normaliseListings({ d: { setIdentity }, report, rows, keywords: [] });
+  const kind = (n) => nl.byId.get(ID(n)).L.kind;
+  assert.equal(kind(91), "single", "missing for a reason the loader cannot see (repriced since the report, …): kind by its flags");
+  assert.equal(kind(92), "farm", "a rent-farm title");
+  assert.equal(kind(93), "farm", "the rent-farm flag");
+  assert.equal(nl.counts.unexplained, 1);
+  assert.equal(nl.counts.farmByTitle, 1);
+  assert.ok(!/secret_title_word|auto farm/.test(JSON.stringify(nl.listings)), "the title never reaches the bundle");
+});
+
+/* ------------------------- review findings: privacy (P1–P8) ------------------------- */
+
+test("P1 the export writes to the OS temp dir by default and refuses an --out inside the repository", async () => {
+  const def = EXPORT.defaultOut(NOW);
+  assert.equal(path.dirname(def), os.tmpdir());
+  assert.match(path.basename(def), /^listing-brain-bundle-20261010-120000\.json$/);
+  const root = path.join(__dirname, "..");
+  assert.equal(EXPORT.insideRepo(path.join(root, "x.json")), true);
+  assert.equal(EXPORT.insideRepo(path.join(root, "docs", "deeper", "x.json")), true);
+  assert.equal(EXPORT.insideRepo(def), false);
+  let loaded = 0;
+  // validateBundle always refuses, so no code version can ever write this file into the repo
+  const inputs = {
+    load: async () => {
+      loaded++;
+      return {};
+    },
+    privacyScan: () => [],
+    validateBundle: () => ["never written"],
+  };
+  const out = path.join(root, "listing-brain-bundle-p1-test.json");
+  const lines = [];
+  const r = await EXPORT.exportBundle({ inputs, now: NOW, out, log: (s) => lines.push(s) });
+  assert.equal(r.written, false);
+  assert.equal(loaded, 0, "refused before anything is read");
+  assert.ok(!fs.existsSync(out));
+  assert.ok(
+    lines.some((s) => /inside the repository/.test(s) && /public/.test(s)),
+    lines.join("\n"),
+  );
+  const src = fs.readFileSync(path.join(root, "scripts", "listing-brain-export.js"), "utf8");
+  assert.match(src, /\.gitignore[^\n]*listing-brain-bundle-\*\.json/, "the header proposes the ignore line to the owner");
+});
+
+test("P2a only the brain's own config keys (the model's DEFAULTS) reach the bundle, with plain values", async () => {
+  const lb = {
+    enabled: true,
+    fitDaysClaim: 60,
+    tierEdges: [2, 6],
+    policyPrice: "curve",
+    explore: false,
+    refDays: ["a", "b"],
+    maxStepPct: { x: 1 },
+    comment: "owner text secret_comment",
+    owner: "someone@example.invalid",
+    webhook: "https://example.invalid/hook",
+    apiKey: "k-123",
+    nested: { a: 1 },
+  };
+  const { b } = await loadWith({ af: { listingBrain: lb } });
+  assert.deepEqual(b.af.listingBrain, { enabled: true, fitDaysClaim: 60, tierEdges: [2, 6], policyPrice: "curve", explore: false });
+  for (const k of Object.keys(b.af.listingBrain)) assert.ok(k in MU.DEFAULTS, k);
+});
+
+test("P2b every market string in the bundle is a known key or 'other'; validateBundle enforces the set", async () => {
+  const rep = trackerReport();
+  const hand = ledgerSale(null, { at: NOW - 4 * DAY, market: "Discord buyer secret_handle", gameKey: "gamma rush", source: "hand", origin: "manual" });
+  const shop = ledgerSale(null, { at: NOW - 4 * DAY, market: "shop counter 2", gameKey: "alpha quest", source: "shop" });
+  rep.ledger = { ...rep.ledger, sales: rep.ledger.sales.concat([hand]), demandOnly: rep.ledger.demandOnly.concat([shop]) };
+  const odd = unit(40, { status: "sold", soldAt: NOW - DAY, soldMarket: "Telegram secret_handle", rows: [] });
+  const { b } = await loadWith({ report: rep, units: Object.values(UNITS).concat([odd]) });
+  const KNOWN = I.MARKETS.concat(["unknown", "manual", "shop", "bulk", "other"]);
+  for (const s of b.sales) assert.ok(KNOWN.includes(s.m), "sales m " + s.m);
+  for (const x of b.demandOnly) assert.ok(KNOWN.includes(x.m), "demandOnly m " + x.m);
+  for (const u of b.noclaim.units) (assert.ok(u.m === "" || KNOWN.includes(u.m), "unit m " + u.m), assert.ok(u.sm === "" || KNOWN.includes(u.sm), "unit sm " + u.sm));
+  assert.equal(b.sales.filter((s) => s.m === "other").length, 1);
+  assert.equal(b.demandOnly.filter((x) => x.m === "other").length, 1);
+  assert.equal(b.noclaim.units.filter((u) => u.sm === "other").length, 1);
+  assert.ok(!JSON.stringify(b).includes("secret_handle"));
+  assert.deepEqual(I.validateBundle(b), []);
+  const bad = JSON.parse(JSON.stringify(b));
+  bad.sales[0].m = "discord";
+  bad.demandOnly[0].m = "telegram";
+  bad.noclaim.units[0].sm = "zelle";
+  const p = I.validateBundle(bad);
+  for (const re of [/sales\[0\]\.m/, /demandOnly\[0\]\.m/, /noclaim\.units\[0\]\.sm/])
+    assert.ok(
+      p.some((x) => re.test(x)),
+      re + " in " + p.join(" | "),
+    );
+});
+
+test("P2-scan privacyScan flags identifying key names (any case) and identifying values; the fixtures and the loader's bundle are clean", async () => {
+  const dirty = {
+    a: { buyerLogin: "x", soldTo: "y", username: "z", seller_name: "w", Title: "t", TwitchName: "q", accountRef: "r" },
+    notes: [
+      "mail someone@example.invalid",
+      "see https://example.invalid/x",
+      "host 10.1.2.3 down",
+      "v6 2001:db8::5 down",
+      "doc " + "a".repeat(23) + "1 gone",
+      "my api_key leaked",
+      "Bearer abc",
+      "password reset",
+    ],
+  };
+  const found = I.privacyScan(dirty);
+  for (const p of ["a.buyerLogin", "a.soldTo", "a.username", "a.seller_name", "a.Title", "a.TwitchName", "a.accountRef"])
+    assert.ok(
+      found.some((x) => x.startsWith(p)),
+      p + " in " + found.join(" | "),
+    );
+  for (let i = 0; i < dirty.notes.length; i++)
+    assert.ok(
+      found.some((x) => x.startsWith("notes[" + i + "]")),
+      "notes[" + i + "] in " + found.join(" | "),
+    );
+  // the bundle's own keys pass; a game-keyed map's keys are data (checked as values, not as field names)
+  assert.deepEqual(I.privacyScan({ notes: ["The price tracker report is 4 min old"], af: { mapped: { "account quest": { gameflip: true } }, caps: { "seller simulator": 3 } } }), []);
+  assert.equal(I.privacyScan({ af: { mapped: { "x@example.invalid": {} } } }).length, 1);
+  // nothing in the synthetic fixtures or the loader's own bundle
+  const { generate } = require("../scripts/listing-brain-fixture");
+  assert.deepEqual(I.privacyScan(generate({ large: true })), []);
+  assert.deepEqual(I.privacyScan(JSON.parse(fs.readFileSync(path.join(__dirname, "fixtures", "listingBrain", "small.json"), "utf8"))), []);
+  const { b } = await loadWith({ platiTakes: true });
+  assert.deepEqual(I.privacyScan(b), []);
+});
+
+test("P3 cleanMsg masks bare hosts, [ipv6]:port, key=/token= values, Windows and POSIX paths, object echoes and quoted values — and keeps the error words", () => {
+  const cases = [
+    ["getaddrinfo ENOTFOUND mongo-primary-7", ["mongo-primary-7"], ["getaddrinfo", "ENOTFOUND"]],
+    ["getaddrinfo EAI_AGAIN db.myshop.lk", ["myshop"], ["EAI_AGAIN"]],
+    ["getaddrinfo ENOTFOUND myshop.ovh", ["myshop"], ["ENOTFOUND"]],
+    ["querySrv ENOTFOUND _mongodb._tcp.cluster0.ab1cd.mongodb.net", ["cluster0", "ab1cd", "mongodb.net"], ["querySrv", "ENOTFOUND"]],
+    ["connect ECONNREFUSED [2001:db8::5]:27017", ["2001", "db8"], ["connect", "ECONNREFUSED"]],
+    ["connect ETIMEDOUT 2001:db8::1:27017", ["2001:db8", "7"], ["ETIMEDOUT"]],
+    ["reply from fe80::1 dropped", ["fe80"], ["reply from", "dropped"]],
+    ["pool for db01.prod.myshop.store cleared", ["myshop"], ["pool", "cleared"]],
+    ["HTTP 403 from ggsel api key=AbCdEf0123456789 seller_id=998877", ["AbCdEf0123456789", "998877"], ["HTTP 403"]],
+    ["GET /api/v2/offers?token=tok_9f8e7d6c5b4a&seller=jdoe 401", ["tok_9f8e7d6c5b4a", "jdoe", "/api/v2"], ["401"]],
+    ["EACCES: permission denied, open 'C:\\Users\\owner\\app\\settings.json'", ["owner", "Users"], ["EACCES", "permission denied"]],
+    ["EACCES: permission denied, open C:\\Users\\owner\\app\\settings.json", ["owner", "Users"], ["EACCES"]],
+    ["ENOENT: no such file or directory, open '/settings.json'", ["/settings.json"], ["ENOENT"]],
+    ['E11000 duplicate key error collection: farm.accounts index: loginLower_1 dup key: { loginLower: "jdoefarm01" }', ["jdoefarm01"], ["E11000", "duplicate key"]],
+    ['not authorized on farm to execute command { find: "x", filter: { login: "jdoefarm01" } }', ["jdoefarm01", "find:", "filter"], ["not authorized", "execute command <obj>"]],
+    ['Cast to ObjectId failed for value "jdoefarm01" (type string) at path "_id"', ["jdoefarm01"], ["Cast to ObjectId failed"]],
+    ["Error: secret token=ghp_abcdefghijklmnopqrstuvwxyz0123456789 leaked", ["ghp_", "abcdefghij"], ["leaked"]],
+    ["Bearer eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0In0.abc", ["eyJ"], ["Bearer"]],
+    ["Username contains unescaped characters ad/min", ["ad/min"], ["unescaped characters"]],
+    ["\\\\fileserver\\share\\bundle.json is locked", ["fileserver"], ["is locked"]],
+    ["E11000 dup key host mongo-primary-7 rejected", ["mongo-primary-7"], ["E11000", "host"]],
+    ["failed to connect to db-2 after 3 tries", ["db-2"], ["failed to connect to"]],
+    ["the host is unreachable", [], ["the host is unreachable"]],
+  ];
+  for (const [raw, gone, kept] of cases) {
+    const m = I.cleanMsg(new Error(raw));
+    for (const g of gone) assert.ok(!m.includes(g), JSON.stringify(g) + " survives in " + JSON.stringify(m));
+    for (const k of kept) assert.ok(m.includes(k), JSON.stringify(k) + " lost from " + JSON.stringify(m));
+  }
+  assert.equal(I.cleanMsg(new Error("d.MarketResearch.find is not a function")), "d.MarketResearch.find is not a function");
+  assert.equal(I.cleanMsg(new Error("Authentication failed.")), "Authentication failed.");
+  assert.equal(I.cleanMsg("venuePrice took longer than 15 s"), "venuePrice took longer than 15 s");
+  assert.equal(I.cleanMsg(new Error("the loader can't read the report")), "the loader can't read the report");
+});
+
+test("P7 a failed connect prints a generic line and the error's class, never its text", () => {
+  const e = new Error("getaddrinfo ENOTFOUND db01.prod.myshop.lk (user admin)");
+  e.name = "MongoServerSelectionError";
+  assert.equal(EXPORT.connectFailure(e), "could not connect (check MONGO_URI): MongoServerSelectionError");
+  assert.equal(EXPORT.connectFailure("x"), "could not connect (check MONGO_URI): Error");
+  const code = fs.readFileSync(path.join(__dirname, "..", "scripts", "listing-brain-export.js"), "utf8").replace(/\/\/.*$/gm, "");
+  assert.ok(!/e\.message/.test(code), "the export never prints a raw error message");
+  assert.match(code, /connectFailure\(e\)/);
 });

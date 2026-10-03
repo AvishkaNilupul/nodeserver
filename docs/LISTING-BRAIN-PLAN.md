@@ -69,9 +69,27 @@ calls Twitch, Gameflip and the GGSel/ZeusX/PlayerAuctions category lookups), `re
    `accountOffer`, `rebundledAt`, `requiredDrops`, `lotSize`, `bulkPackSize`, `note`. The brain makes the one extra
    projected, limited `MarketplaceListing` read the brief allows (§2).
 3. **The ledger carries no farm and no claim-at-sale flag**: the brain joins each sale to its listing row by
-   `listingId`. No-claim auto-lister sales on GGSel/Plati write **no** sale signal and are invisible to the ledger;
-   on Gameflip they appear only as a `row` sale dated by `updatedAt`. For `origin: "unclaimed"` rows the brain
-   therefore takes sales from `UnclaimedAccount` (sold units whose `listingIds` name the row), not the ledger.
+   `listingId`. The no-claim auto-lister's sales do reach the ledger — the GGSel/Plati check pass writes a
+   `listing_sold` signal on the row whose stock dropped (`unclaimedAutoList` `recordListingSale`, one per drop, at
+   the row's price), and a Gameflip unit appears as a `row` sale dated by the row's `updatedAt` — but the brain
+   takes every sale of an `origin: "unclaimed"` row from `UnclaimedAccount` instead, and drops the ledger's records
+   of those rows (sales and demand-only alike), so no sale is counted from both sources. What the unit ledger gives
+   that the ledger does not:
+   - **one record per unit, at its own moment**: `soldAt` is stamped at detection for each account
+     (`spendAccount`), where a Gameflip `row` sale is dated by the row's last write;
+   - **the price at the sale**: `soldPriceUsd` is the realised total when the caller knows it, else the row's price
+     captured before any repricer moves it (basis `paid`); 0 falls back to the row's price (basis `row`);
+   - **the hand / pack split**: `soldMarket: "manual"` (hand sales of free stock, which write no signal) and an
+     operator's "manual mark sold" (`note`, read in memory only) are demand only; a unit sold off a lot or pack row
+     is demand only with the per-account price in the bulk series.
+   The sale belongs to the **newest** named `origin: "unclaimed"` row on the market it sold on that existed when it
+   sold (`createdAt ≤ soldAt`): `listingIds` only grow (a GGSel set rebuilt into a new offer, a Gameflip successor,
+   a lot the unit once sat in), so the oldest named row is usually a dead one. The pack/lot test runs on that row
+   only. A unit sold on a market none of its named rows is on, and a unit with `manualListing` set (sold through an
+   owner's vault or claim-at-sale listing; a reused ledger can still name a dead auto row), are left to the ledger,
+   which holds that row's sale by its listing id — the paid price such owner-row units carry is not used (the
+   ledger's record of the owner row is the one counted). `expiredAt` older than `listedAt` is a previous life's
+   (nothing clears it on a re-list) and reads null.
 4. **Claim-at-sale is wider than the brief says.** `noclaimStock` (no-claim pool), `autoClaimSet` (the claim farm's
    Drop Archive) and the retired `unclaimedGame` rows are all claim-at-sale. The G2G operator-script rows are
    `origin: "auto"` **and** `autoClaimSet: true`: auto-owned by `isAutoOwned`, but claim-at-sale. The brain checks
@@ -126,10 +144,10 @@ and limited; no `skip()`, no `allowDiskUse`, no unbounded `$group`. Nothing is w
 |---|---|---|
 | Price-tracker report | `priceTracker.getReportSWR({timeoutMs: 120000})` — shared cache; a `null` report fails the load (nothing logged) | cached, 5 min |
 | Radar report | `marketData/report.getReport({days: 30})` — the same cache entry the farm brain uses; seller fields dropped at once | cached, 10 min |
-| Farm-brain rows | `DemandBrainRow.find({at ≥ now − maxDemandAgeH}, {k,f,at,live,hl,br.c,br.w,br.t,stk,est.avg30,est.avg45}).sort({at: -1}).limit(5000)`; newest per `(k, f)` kept | 5,000 |
-| The extra listing read | `MarketplaceListing.find({marketplace ∈ 7 keys, $or: [{status: "active"}, {updatedAt ≥ now − fitDays}]}, {_id, marketplace, origin, status, price, createdAt, updatedAt, set, noclaimStock, autoClaimSet, unclaimedGame, accountOffer, rentFarm, bulkOfferId, bulkPackSize, lotSize, qtyRemaining, qtyTarget, lastStock, rebundledAt, venueMinPriceUsd, "units.addedAt", "units.deliveredAt"}).sort({_id: -1}).limit(20000)` — the flags and exposure dates the tracker does not project; joined to the tracker's rows by id | 20,000 |
-| No-claim units | `UnclaimedAccount.find({listedAt ≥ now − fitDays − 60 d}, P).limit(50000)` and `UnclaimedAccount.find({status: "sold", soldAt ≥ now − fitDays}, P).limit(50000)`, P = `{game, market, status, listedAt, soldAt, soldPriceUsd, soldMarket, expiredAt, listingIds, bundleKey, "drops.campaign"}` — two indexed reads, merged; no login, no account id | 2 × 50,000 |
-| Wave ends | `TwitchCampaign.find({endAt ≥ now − 120 d}, {campaignId, name, game, startAt, endAt}).limit(5000)` + `CampaignDrops.find({campaignId ∈ …}, {campaignId, name, game, "drops.itemKey", "drops.name"}).limit(5000)` → the pure `unclaimedBundles.buildEventCatalog` (never `loadCatalog`, which reads unbounded) | 5,000 each |
+| Farm-brain rows | `DemandBrainRow.find({at ≥ now − (max(maxDemandAgeH, 6) + 1) h}, {k,f,at,live,hl,br.c,br.w,br.t,stk,est.avg30,est.avg45}).sort({at: -1}).limit(5000)`; newest per `(k, f)` kept. `maxDemandAgeH` is the model's own `readConfig` of `autoFarm.listingBrain` (a fixed 72 h read returned ~8,600 rows and hit the cap every run). A no-claim row's `k` is `settings.normGameName(keyword)` (a–z0–9); it joins the loader's keyword bucket by that rule | 5,000 |
+| The extra listing read | `MarketplaceListing.find({marketplace ∈ 7 keys, $or: [{status: "active"}, {updatedAt ≥ now − saleDays}]}, {_id, marketplace, origin, status, price, title, createdAt, updatedAt, set, noclaimStock, autoClaimSet, unclaimedGame, accountOffer, rentFarm, bulkOfferId, bulkPackSize, lotSize, qtyRemaining, qtyTarget, lastStock, rebundledAt, venueMinPriceUsd, "units.addedAt", "units.deliveredAt"}).sort({_id: -1}).limit(20000)` — the flags and exposure dates the tracker does not project; joined to the tracker's rows by id. `saleDays` = max(refDays, fit window) + 42 (222 d by default): as far back as sales are kept, so a no-claim sale finds its row. `title` is read **in memory only**: a row the tracker skipped is kind `farm` only when its flag or its fresh title says so (`classifyKind`) | 20,000 |
+| No-claim units | `UnclaimedAccount.find({listedAt ≥ now − fitDays − 42 d − 60 d}, P).limit(50000)` and `UnclaimedAccount.find({status: "sold", soldAt ≥ now − saleDays}, P).limit(50000)`, P = `{game, market, status, listedAt, soldAt, soldPriceUsd, soldMarket, expiredAt, listingIds, bundleKey, manualListing, note, updatedAt, "drops.campaign"}` — two indexed reads, merged; no login, no account id. `manualListing` (a listing id) and `note` (free text) are read **in memory only** and never copied (§1.3 #3) | 2 × 50,000 |
+| Wave ends | `TwitchCampaign.find({$or: [{endAt ≥ now − 120 d}, {endAt: null}]}, {campaignId, name, game, startAt, endAt}).sort({endAt: -1}).limit(5000)` (open-ended campaigns too, as `loadCatalog` reads them; Mongo sorts null below every date, so the cap can only drop open-ended ones) + `CampaignDrops.find({campaignId ∈ …}, {campaignId, name, game, "drops.itemKey", "drops.name"}).limit(5000)` → the pure `unclaimedBundles.buildEventCatalog` (never `loadCatalog`, which reads unbounded) | 5,000 each |
 | Market research | `MarketResearch.find({}, {game, "markets.gameflip", "markets.ggsel", "markets.plati", scannedAt}).limit(2000)` — what `derivePrice` and `bundlePrice` read | 2,000 |
 | Settings | `getAutoFarm()` once, `getFarmSizing(af)`, `getUnclaimedPricing()` once, `getBulkPacks(af)`, top-level `priceTracker.fees` | — |
 | Old side | `derivePrice`, `computeSplit`, `dealShares`, `postEventPrice`, `ggselTakesNewStock` (pure); `platiTakesNewStock(af)` (reads settings and an in-memory flag); `venuePrice("ggsel", …)` (cached DB snapshot), one call per game, 3 at a time with yields; `unclaimedBundles.bundlePrice`/`classifyHoldings` (pure, `pricing` passed); `priceTracker.suggestForNew(report, q)` (pure on the report); `g2gGames.brandForGame` (static table) | — |
@@ -149,7 +167,7 @@ stripped of anything identifying. The same object is what `scripts/listing-brain
 
 ```
 { kind: "listing-brain-bundle", v: 1, now,
-  af:      { listingBrain: {...raw block}, perMarketStock, takes: {market: bool}, mapped: {gameKey: {market: bool}},
+  af:      { listingBrain: {...known keys}, perMarketStock, takes: {market: bool}, mapped: {gameKey: {market: bool}},
              noClaimGames: [keyword], noclaimAutoSize, capDefault: 70, caps: {gameKey: n} },
   sizing:  { coverageDays, safetyStock, maxPerGame },
   fees:    { market: pct },                       // settings priceTracker.fees (overrides)
@@ -166,15 +184,28 @@ stripped of anything identifying. The same object is what `scripts/listing-brain
 |---|---|
 | `L` listing | `id` (sha1 of the listing id, 12 hex — stable across runs, not the database id), `g` gameKey, `gl` game label, `m` market, `o` origin, `f` farm, `kind` (`single`, `cas`, `bulk`, `lot`, `account`, `manual`), `script`, `ck` contentKey, `bk` bandKey, `ex` exact, `n` item count, `p` stored price USD, `vmin` venueMinPriceUsd, `smin` DropSet.minPriceUsd, `st` status, `c` createdAt, `u` updatedAt, `units` [{a, d}] (≤ 200), `qty` listed units (`games.listedUnits`), `qr` qtyRemaining, `rb` rebundledAt, `pack` bulkPackSize |
 | `S` sale (one per unit) | `lid` listing id hash or "", `g`, `m`, `o`, `f`, `ck`, `bk`, `ex`, `n`, `p` priceUsd (0 = unpriced), `t`, `grp` order key (hashed), `basis` (`reported`/`listing-now`/`row`/`paid`), `src` (`unit`/`signal`/`row`/`hand`/`shop`/`unclaimed`) |
-| `D` demand-only | `g`, `m`, `f`, `t`, `src` (`bulk`, `bulk-order`, `shop`, `burst`) |
+| `D` demand-only | `g`, `m`, `f`, `t`, `src` (`bulk`, `bulk-order`, `shop`, `burst`, `hand`) |
 | `B` bulk price | `g`, `m`, `t`, `pa` per-account USD, `size` |
 | `RG` radar game | `key`, `perWeek`, `rivalSellers`, `medianTtsHours`, `byMarket: {gameflip, ggsel, digiseller: {perWeek, liveSellers, sold: {n,p25,median,p75}, medianTtsHours}}` |
 | `RF` radar sale | `g`, `m` (tracker key), `p`, `u` units, `n` item count, `t`, `tts` — rivals only, rent-farm out, no seller field |
 | `DR` farm-brain row | `k`, `f`, `at`, `live`, `hl`, `c` class, `w` weekly forecast, `t` target, `on` stock on hand, `fl` in flight, `a30`, `a45` |
-| `U` no-claim unit | `g`, `m`, `st`, `l` listedAt, `s` soldAt, `p` soldPriceUsd, `sm` soldMarket, `x` expiredAt, `lids` listing id hashes, `bk` bundleKey, `camps` [campaign name] |
-| `W` wave | `g` gameKey, `ev` event name, `wave`, `startAt`, `endAt` |
+| `U` no-claim unit | `g`, `m`, `st` ledger status, `l` listedAt, `s` soldAt, `p` soldPriceUsd, `sm` soldMarket, `x` expiredAt of the current life (null when older than `l`), `u` updatedAt (ms; the approximate moment a unit went off sale), `lids` listing id hashes, `bk` bundleKey, `camps` [raw campaign name]. The model reads a unit with `st` neither `listed` nor `sold` and no `x` (skipped, removed, manual, a released one never expired) as **off** sale — at a backtest cut before its `u` it was still on sale; with no `u`, off at every cut. With an `x`, its dates decide (it was on sale until its expiry) |
+| `W` wave | `g` gameKey, `ev` event name, `wave` (the parsed wave label, else the raw name), `name` the raw campaign name (what a unit's `camps` hold; `waveEndFor` matches it as well as the label forms), `startAt`, `endAt` (null for an open-ended campaign) |
 | `OG` old, per claim game | `base` derivePrice, `ggsel` venuePrice, `post` postEventPrice(base), `split` {listNow, holdBack}, `flat` {market: units} (dealShares over today's order), `order` [market] |
 | `OO` old, per offer | `np` today's new-listing price (bundlePrice for a no-claim offer), `tracker` {m: {price, basis, confidence}} |
+
+- `af.listingBrain` holds only the keys the model knows (its `DEFAULTS`), each a primitive or an array of numbers,
+  raw — the model's `readConfig` validates them on read. Anything else typed into the owner's block never travels.
+- Every market string on `S`, `D` and `U` (`m`, `sm`) is one of the seven keys or `unknown`, `manual`, `shop`,
+  `bulk` — anything else (a hand sale's free-text market: a chat, a buyer's handle) is `other`, which the model reads
+  like `unknown` (demand, never a price). A unit's `m`/`sm` may also be `""` (not attached / not sold).
+  `validateBundle` enforces the set.
+- `privacyScan` (run by the export before any file is written) flags forbidden keys in any case, any key whose name
+  says it carries a person, an account, a credential or free text (`login`, `account`, `seller`, `buyer`, `username`,
+  `token`, `secret`, `password`, `email`, `twitch`, `note`, … — except the bundle's own `notes`, `digiseller`,
+  `rivalSellers`, `liveSellers`, `l_account`; a game-keyed map's keys are checked as values), and any string that holds
+  an email, a link, an IPv4/IPv6 address, a 24-hex database id or a credential word. A game or campaign name with
+  such a word in it (e.g. "Secret …") makes the export refuse, by design: the scan errs towards not writing.
 
 ---
 
@@ -187,7 +218,7 @@ stripped of anything identifying. The same object is what `scripts/listing-brain
 
 | Kind | Test | Advised? | Its sales count as |
 |---|---|---|---|
-| rent-farm | `rentFarm` or `classifyKind(title) === "farm"` | never | nothing (not even loaded: the tracker drops them) |
+| rent-farm | `rentFarm` or `classifyKind(title) === "farm"` | never | nothing (the tracker drops them; the loader reads a skipped row's fresh title in memory only to tell a rent-farm window from a row repriced since the report) |
 | bulk / lot | `bulkOfferId`, `bulkPackSize > 1`, `lotSize > 1` | never | demand only; per-account price into the bulk series |
 | account listing | `accountOffer` | never | as the ledger treats them |
 | claim-at-sale | `noclaimStock`, `autoClaimSet` or `unclaimedGame` | never; quantity never summed | price evidence and demand |
@@ -526,7 +557,10 @@ Off switch (no restart): `node -e 'require("./utils/settings").setAutoFarm({list
 - Rotation (`noclaimOfferRotation`) rewrites an Eldorado row's set without a timestamp: its earlier sales are
   attributed to the new contents.
 - `UnclaimedAccount` keeps one document per account: an earlier listing cycle's exposure is lost when the account
-  is re-listed.
+  is re-listed (and a previous life's `expiredAt` is ignored, not used).
+- A no-claim unit taken off sale with no date of its own (skipped, removed, manual) is dated by the ledger's last
+  write (`updatedAt`), which any later write (a check pass's `lastCheckedAt`) moves: a backtest cut between the real
+  moment and that write still reads the unit as on sale.
 - The radar watches Gameflip, GGSel and Plati only; Eldorado, PlayerAuctions, G2G and ZeusX cells say "blind".
   Rival counts have no history, so "rivals disappearing" is "few rivals now".
 - Five fees are assumed until the owner sets them.

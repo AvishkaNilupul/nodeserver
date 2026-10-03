@@ -19,6 +19,11 @@ const NO_PRICE_SRC = new Set(["hand", "shop"]);
 const BULK_SRC = new Set(["bulk", "bulk-order"]);
 // Statuses that mean a row is still on sale.
 const LIVE_STATUS = "active";
+// A no-claim unit's ledger statuses the price model may read as on sale (or sold) by its dates alone.
+// Every other one (skipped: shrunk, stranded or GGSel switched off; removed: the manual-sold tick;
+// manual: committed to an owner's listing; released / expired) is off sale from its expiry when it has
+// one, else from its last write (U.u), else at every cut — never live stock.
+const UNIT_ON_SALE = new Set(["listed", "sold"]);
 
 /**
  * Kind of a listing, in the plan §3 order (the first match wins): rent-farm, bulk/lot, account,
@@ -372,7 +377,9 @@ function* evidenceSteps(bundle, { cfg, cut, synthDemand = false } = {}) {
   const adapted = [];
   let anon = 0;
   for (const s of salesBefore) {
-    const m = lower(s.m);
+    // "other" (a hand sale's free-text market, plan §2.1) and anything else off the seven keys is
+    // "unknown" to the translator, which never reads an unknown market's price
+    const m = MARKETS.includes(lower(s.m)) ? lower(s.m) : "unknown";
     if (markets[m] && markets[m].blocked && !VENUES[m].blocked) continue;
     const p = num(s.p, 0);
     if (!(p > 0 && p <= U.MAX_REAL_PRICE) || NO_PRICE_SRC.has(lower(s.src)) || !(s.t >= refLo)) continue;
@@ -381,7 +388,7 @@ function* evidenceSteps(bundle, { cfg, cut, synthDemand = false } = {}) {
     const grp = s.grp ? String(s.grp) : "anon:" + anon++;
     const k = kindOfSale(s);
     adapted.push({
-      market: m || "unknown",
+      market: m,
       priceUsd: p,
       at: new Date(s.t),
       priced: p > 0 && p <= U.MAX_REAL_PRICE && k !== "bulk" && k !== "lot",
@@ -462,13 +469,21 @@ function* evidenceSteps(bundle, { cfg, cut, synthDemand = false } = {}) {
     const ends = list.map((w) => finite(w.endAt)).filter((t) => t !== null);
     waveEnds.set(g, ends);
   }
+  // A unit's state at the cut. Sold and expired come from their dates (an expired or released unit
+  // was on sale until its expiry). A unit whose ledger status is neither listed nor sold and that has
+  // no expiry was taken off sale with no date of its own: its last write (U.u) is the approximate
+  // moment, so a backtest cut before it still sees the unit on sale, and one after it (or any cut,
+  // when no write time is known) sees it "off" — never live stock.
   const units = [];
   for (const u of (b.noclaim && b.noclaim.units) || []) {
     if (!u || !(num(u.l, Infinity) < T)) continue;
     const s = finite(u.s);
     const x = finite(u.x);
-    const st = s !== null && s < T ? "sold" : x !== null && x < T ? "expired" : "listed";
-    units.push(Object.assign({}, u, { stc: st }));
+    const st = lower(u.st);
+    const offAt = finite(u.u);
+    const off = !!st && !UNIT_ON_SALE.has(st) && x === null && (offAt === null || offAt <= T);
+    const stc = s !== null && s < T ? "sold" : x !== null && x < T ? "expired" : off ? "off" : "listed";
+    units.push(Object.assign({}, u, { stc }));
   }
   const waveEndOf = (u) => waveEndFor(waves.get(u.g) || [], u);
   const winAll = [];
@@ -560,7 +575,9 @@ function quantileAny(list, f) {
 /**
  * The wave a no-claim unit's drops belong to, as an end time: the waves its campaign names match
  * (latest end), else the wave of its game that was live when it was listed (latest start before
- * listedAt), else null. Only the end matters: the drops vanish a claim window after it.
+ * listedAt), else null. Only the end matters: the drops vanish a claim window after it. A unit's
+ * drops carry the RAW campaign name ("Omega Season 18 - Week 1"), which the wave's `name` holds; the
+ * label forms (wave, event, "event wave") match a wave written without it.
  */
 function waveEndFor(list, u) {
   if (!list.length) return null;
@@ -570,7 +587,7 @@ function waveEndFor(list, u) {
     for (const w of list) {
       const end = finite(w.endAt);
       if (end === null) continue;
-      const names = [lower(w.wave), lower(w.ev), lower((w.ev || "") + " " + (w.wave || ""))].filter(Boolean);
+      const names = [lower(w.name), lower(w.wave), lower(w.ev), lower((w.ev || "") + " " + (w.wave || ""))].filter(Boolean);
       if (camps.some((c) => names.includes(c))) best = best === null ? end : Math.max(best, end);
     }
     if (best !== null) return best;

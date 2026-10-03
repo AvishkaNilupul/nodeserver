@@ -37,6 +37,13 @@ const DEMAND_SOURCES = ["bulk", "bulk-order", "shop", "burst", "hand"];
 const SALE_BASES = ["reported", "listing-now", "row", "paid", "none"];
 // The radar watches three markets and names Digiseller "plati".
 const RADAR_MARKETS = { gameflip: "gameflip", ggsel: "ggsel", plati: "digiseller" };
+// The only other market strings a sale, a demand record or a unit may carry: the ledger's "unknown" (no
+// market), a hand sale's "manual", a shop order's "shop", a bulk record's "bulk" — and "other" for
+// anything else. A hand sale's market is free text an operator typed (SaleSignal.marketplace, a chat
+// name, a buyer's handle), so it is never copied: it becomes "other", which the model treats exactly
+// like "unknown" (no price, demand only).
+const OTHER_MARKETS = ["unknown", "manual", "shop", "bulk", "other"];
+const BUNDLE_MARKETS = MARKETS.concat(OTHER_MARKETS);
 
 // Read caps, plan §2. A read that returns its cap says so in a note.
 const LISTING_CAP = 20000;
@@ -55,8 +62,11 @@ const STALE_REPORT_MS = 30 * MINUTE;
 const VENUE_TIMEOUT_MS = 15000;
 // Old-side lookups run this many games at a time (like the farm brain's engine calls).
 const OLD_CONCURRENCY = 3;
-// The farm brain's rows are read back this far; the model applies maxDemandAgeH (≤ 72 h by its clamp).
-const DEMAND_LOOKBACK_H = 72;
+// The farm brain's rows are read back max(maxDemandAgeH, this) hours plus a margin: the model ignores
+// anything older than maxDemandAgeH (default 6 h, clamp ≤ 72 h), and the farm brain writes ~120 rows
+// an hour — a fixed 72 h read returned ~8,600 rows and hit its 5,000 cap on every run.
+const DEMAND_LOOKBACK_MIN_H = 6;
+const DEMAND_LOOKBACK_MARGIN_H = 1;
 // A no-claim unit listed this long before the fit window can still be live inside it.
 const UNIT_LISTED_PAD_DAYS = 60;
 // The backtest (plan §5) cuts 6 weeks back and fits on the window before each cut: every windowed
@@ -118,6 +128,9 @@ const LISTING_PROJECTION = Object.freeze({
   origin: 1,
   status: 1,
   price: 1,
+  // IN MEMORY ONLY: a row the tracker skipped is a rent-farm window only when its title says so
+  // (classifyKind). Never copied into a record.
+  title: 1,
   createdAt: 1,
   updatedAt: 1,
   set: 1,
@@ -138,7 +151,9 @@ const LISTING_PROJECTION = Object.freeze({
   "units.deliveredAt": 1,
 });
 // No login, no account id: the unit's own _id (returned by default) is used only to merge the two
-// reads in memory and is never written anywhere.
+// reads in memory and is never written anywhere. manualListing and note are read IN MEMORY ONLY (one
+// says the unit sold through an owner's listing, the other that an operator marked it sold by hand)
+// and are never copied into a record: the first is a listing id, the second free text.
 const UNIT_PROJECTION = Object.freeze({
   game: 1,
   market: 1,
@@ -150,6 +165,10 @@ const UNIT_PROJECTION = Object.freeze({
   expiredAt: 1,
   listingIds: 1,
   bundleKey: 1,
+  manualListing: 1,
+  note: 1,
+  // the ledger's last write: the approximate moment a unit the lister took off sale went off (U.u)
+  updatedAt: 1,
   "drops.campaign": 1,
 });
 const CAMPAIGN_PROJECTION = Object.freeze({ campaignId: 1, name: 1, game: 1, startAt: 1, endAt: 1 });
@@ -210,6 +229,12 @@ function realDeps() {
     CampaignDrops: require("../../models/CampaignDrops"),
     MarketResearch: require("../../models/MarketResearch"),
     DemandBrainRow: require("../../models/DemandBrainRow"),
+    // The model's own config reader (pure): which keys of autoFarm.listingBrain the bundle keeps, and
+    // how old a farm-brain row the model still reads.
+    listingModel: (() => {
+      const MU = require("./model/util");
+      return { readConfig: MU.readConfig, DEFAULTS: MU.DEFAULTS };
+    })(),
   };
 }
 
@@ -240,16 +265,21 @@ function clampNum(v, d, lo, hi) {
   return Math.min(hi, Math.max(lo, num(v, d)));
 }
 
-/** The first element passing `fn` (a loop, so no array method shares a name with a query call). */
-function firstWhere(list, fn) {
-  for (const x of list || []) if (fn(x)) return x;
-  return null;
-}
-
 /** The tracker's market key: lower-case, and the radar's / research's "plati" is Digiseller. */
 function trackerMarket(m) {
   const k = lower(m);
   return k === "plati" ? "digiseller" : k;
+}
+
+/**
+ * A market string as the bundle may hold it: one of the seven keys or OTHER_MARKETS, anything else
+ * "other" (plan §2.1). `empty` is what an absent market reads as ("unknown" on a sale; "" on a unit,
+ * where it means "not sold yet" / "not attached yet").
+ */
+function marketKey(m, empty = "unknown") {
+  const k = trackerMarket(m);
+  if (!k) return empty;
+  return BUNDLE_MARKETS.includes(k) ? k : "other";
 }
 
 /** sha1 of the id, first 12 hex: stable across runs, never the database id. */
@@ -259,22 +289,61 @@ function hashId(id) {
 // Listing ids are compared lower-cased everywhere (the ledger's listingId is idStr = lower-case).
 const hashRaw = (id) => hashId(lower(id));
 
+// A network error names its peer right after its code word ("getaddrinfo ENOTFOUND mongo-primary"),
+// often a bare name with no dot or port that no other rule would recognise.
+const NET_CODE_RE = /\b(ENOTFOUND|EAI_AGAIN|ECONNREFUSED|ECONNRESET|ETIMEDOUT|EHOSTUNREACH|ENETUNREACH|EADDRNOTAVAIL|EPIPE|querySrv(?:\s+E[A-Z_]+)?)(\s+)(?!<)[^\s,;)]+/g;
+// "host mongo-primary-7", "connect to db-2", "connection 5 to node-1": the peer after a network word,
+// when it looks like a name (a digit, a dot or a dash in it — "the host is down" stays readable).
+const NET_WORD_RE = /\b(host(?:name)?|connect(?:ion)?(?:\s+\d+)?\s+to(?:\s+host)?)(\s+)(?!<)(?=[^\s,;)]*[\d.-])[^\s,;)]+/gi;
+// key=value / key: value pairs whose key names a credential or a person.
+const SECRET_PAIR_RE = /\b([\w-]*(?:api[_-]?key|key|token|secret|passw(?:or)?d|pwd|login|user(?:name)?|email|seller|buyer|account)[\w-]*)(\s*[=:]\s*)(?!<)("[^"]*"|'[^']*'|[^\s&,;)]+)/gi;
+// IPv6: a whole token of hex digits and colons that holds "::" (2001:db8::5, fe80::1, ::1, a trailing
+// :port included) or the full eight groups. Whole-token, so no digit of the address is left behind.
+const IPV6_RE = /(?<![\w:])(?:(?=[0-9a-f:]*::)[0-9a-f:]{3,}|(?:[0-9a-f]{1,4}:){7}[0-9a-f]{1,4})(?![\w:])/gi;
+const HOST_TLDS = "com|net|org|io|dev|local|internal|cloud|app|co|uk|de|ru|xyz|info|biz|me|tech|lan|host|lk|gg|ovh|store|shop|site|online|top|us|eu|in|cc|tv|ai|invalid|example|localdomain";
+
 /**
- * An error's message with infrastructure detail removed: notes travel inside the bundle, and a
- * driver error can name a host, an address, a file path or a document id.
+ * An error's message with infrastructure and personal detail removed: notes, lastError and route
+ * errors travel inside the bundle, the run log and the API, and a driver error can name a host, an
+ * address, a file path, a document id, a query filter with a login in it, or a credential. What
+ * stays is the error's class and code words ("getaddrinfo ENOTFOUND <host>", "E11000 duplicate key
+ * error … dup key: <obj>") and the code-like names that say what failed ("d.MarketResearch.find is
+ * not a function").
  */
 function cleanMsg(e) {
-  let s = String((e && e.message) || e || "error");
-  s = s.replace(/[a-z][a-z0-9+.-]*:\/\/\S+/gi, "<url>");
+  // bounded: every rule below is linear, but a megabyte of message is never worth scanning
+  let s = String((e && e.message) || e || "error").slice(0, 2000);
+  // links first: a URI carries user:password@host
+  s = s.replace(/\b[a-z][a-z0-9+.-]*:\/\/\S+/gi, "<url>");
+  s = s.replace(/\bbearer\s+\S+/gi, "Bearer <secret>");
+  // object echoes (a dup key { loginLower: "…" }, a query filter) and quoted values carry data
+  // (innermost first; the placeholder has no braces, so the next pass collapses the enclosing one)
+  for (let i = 0; i < 6 && /\{[^{}]*\}/.test(s); i++) s = s.replace(/\{[^{}]*\}/g, "<obj>");
+  s = s.replace(/"[^"]*"/g, '"<value>"');
+  // a quote that opens after a letter is an apostrophe ("can't"), not a quoted value
+  s = s.replace(/(^|[^\w])'[^']*'(?!\w)/g, "$1'<value>'");
+  s = s.replace(SECRET_PAIR_RE, "$1$2<value>");
+  s = s.replace(/\b(unescaped characters)\s+\S+/gi, "$1 <value>");
+  // network peers
+  s = s.replace(/\[[0-9a-f:.]+\](?::\d+)?/gi, "<host>");
+  s = s.replace(/\b\d{1,3}(?:\.\d{1,3}){3}(?::\d+)?\b/g, "<ip>");
+  s = s.replace(IPV6_RE, "<ip>");
+  s = s.replace(NET_CODE_RE, "$1$2<host>");
+  s = s.replace(NET_WORD_RE, "$1$2<host>");
   s = s.replace(/\S+@\S+/g, "<address>");
-  s = s.replace(/\b\d{1,3}(\.\d{1,3}){3}(:\d+)?\b/g, "<ip>");
-  s = s.replace(/(\/[\w.-]+){2,}/g, "<path>");
-  s = s.replace(/\b[0-9a-f]{24}\b/gi, "<id>");
-  // a name with a port ("localhost:27017", "db.internal:27017"), then a dotted name ending in a
-  // network suffix ("cluster0.abc.example.net"); code-like dotted names stay readable
-  // ("d.MarketResearch.find is not a function" is the message that matters)
+  // file paths: Windows (C:\…, \\server\share) and POSIX (one segment or more)
+  s = s.replace(/\b[a-z]:\\[^\s'"]*/gi, "<path>");
+  s = s.replace(/\\\\[^\s'"]+/g, "<path>");
+  s = s.replace(/(^|[\s'"(=,])(?:~|\.{1,2})?\/[\w.~@%+-]+(?:\/[\w.~@%+-]*)*/g, "$1<path>");
+  s = s.replace(/[0-9a-f]{24}/gi, "<id>");
+  // a name with a port ("localhost:27017"), a lower-case name of three or more labels
+  // ("db01.prod.myshop.lk"), a two-label name ending in a network suffix ("myshop.ovh"); code-like
+  // dotted names keep their capitals and stay readable ("d.MarketResearch.find is not a function")
   s = s.replace(/\b[\w-]+(\.[\w-]+)*:\d{2,5}\b/g, "<host>");
-  s = s.replace(/\b[a-z0-9-]+(\.[a-z0-9-]+)*\.(com|net|org|io|dev|local|internal|cloud|app|co|uk|de|ru|xyz|info|biz|me|tech|lan|host)\b/gi, "<host>");
+  s = s.replace(/\b[a-z0-9-]+(?:\.[a-z0-9-]+){2,}\b/g, "<host>");
+  s = s.replace(new RegExp("\\b[a-z0-9-]+(\\.[a-z0-9-]+)*\\.(" + HOST_TLDS + ")\\b", "gi"), "<host>");
+  // a long random-looking token (letters and digits, 20+) is a credential whatever its key
+  s = s.replace(/\b(?=[\w-]*\d)(?=[\w-]*[a-z])[\w-]{20,}\b/gi, "<secret>");
   return s.slice(0, 200);
 }
 
@@ -308,6 +377,13 @@ function withTimeout(promise, ms, label) {
  * The windows every read uses, from the brain's own config block (plan §8 defaults and clamps,
  * repeated so the loader needs no model): the widest fit window, the reference window, and the
  * backtest's six weeks on top.
+ *
+ * The listing read and the sold-unit read reach back as far as sales are kept (saleDays, 222 d by
+ * default): a no-claim lister's sale is booked only when its row is in the listing read and its unit
+ * in the unit read, so a shorter window cut the no-claim reference history at ~132 d while the claim
+ * farm's ledger history ran to 222 d. The cost: the non-active part of the listing read covers ~90
+ * more days of rows (the same projection, newest first, still capped at LISTING_CAP), and the
+ * sold-unit read ~90 more days of sold units (indexed {status, soldAt}, still capped at UNIT_CAP).
  */
 function readWindows(af) {
   const lb = af && isObj(af.listingBrain) ? af.listingBrain : {};
@@ -315,14 +391,30 @@ function readWindows(af) {
   const fitNoclaim = clampNum(lb.fitDaysNoclaim, 30, 7, 120);
   const refDays = clampNum(lb.refDays, 180, 30, 365);
   const fitDays = Math.max(fitClaim, fitNoclaim);
+  const saleDays = Math.max(refDays, fitDays) + BACKTEST_PAD_DAYS;
   return {
     fitDays,
     refDays,
-    listingDays: fitDays + BACKTEST_PAD_DAYS,
+    listingDays: saleDays,
     unitListedDays: fitDays + BACKTEST_PAD_DAYS + UNIT_LISTED_PAD_DAYS,
-    unitSoldDays: fitDays + BACKTEST_PAD_DAYS,
-    saleDays: Math.max(refDays, fitDays) + BACKTEST_PAD_DAYS,
+    unitSoldDays: saleDays,
+    saleDays,
   };
+}
+
+/**
+ * How far back the farm brain's rows are read: max(the model's maxDemandAgeH, 6) hours plus a
+ * margin. The model's own readConfig decides maxDemandAgeH (its default, clamp and typo rule), so the
+ * read can never be shorter than what the model accepts; without it, the model's default (6 h).
+ */
+function demandLookbackH(af, listingModel) {
+  let h = DEMAND_LOOKBACK_MIN_H;
+  try {
+    if (listingModel && typeof listingModel.readConfig === "function") h = num(listingModel.readConfig(af || {}).maxDemandAgeH, h);
+  } catch {
+    h = DEMAND_LOOKBACK_MIN_H;
+  }
+  return Math.max(h, DEMAND_LOOKBACK_MIN_H) + DEMAND_LOOKBACK_MARGIN_H;
 }
 
 /** The no-claim keyword buckets, normalised like the farm brain does (setIdentity.normGame). */
@@ -396,15 +488,21 @@ function zeusxMapped(af, game) {
 // The auto-lister's market order uses "plati"; the bundle uses the tracker's key.
 const orderMarket = (m) => (m === "plati" ? "digiseller" : m);
 
-/** A plain copy of a config block: primitives and arrays of primitives only, no forbidden key. */
-function plainBlock(obj) {
+/**
+ * The brain's own config block as the bundle keeps it: only the keys the model knows (its DEFAULTS),
+ * each a primitive or an array of numbers, raw (the model's readConfig validates them when it reads
+ * the bundle). Anything else the owner typed into autoFarm.listingBrain — a comment, a link, a key —
+ * never travels in a bundle. With no list of known keys, nothing is copied.
+ */
+function configBlock(obj, keys) {
   const out = {};
-  if (!isObj(obj)) return out;
+  if (!isObj(obj) || !Array.isArray(keys)) return out;
   const prim = (v) => v === null || typeof v === "string" || typeof v === "boolean" || (typeof v === "number" && Number.isFinite(v));
-  for (const [k, v] of Object.entries(obj)) {
-    if (FORBIDDEN_KEYS.has(k)) continue;
+  for (const k of keys) {
+    if (!Object.prototype.hasOwnProperty.call(obj, k)) continue;
+    const v = obj[k];
     if (prim(v)) out[k] = v;
-    else if (Array.isArray(v) && v.every(prim)) out[k] = v.slice();
+    else if (Array.isArray(v) && v.every((x) => typeof x === "number" && Number.isFinite(x))) out[k] = v.slice();
   }
   return out;
 }
@@ -454,7 +552,8 @@ function settingsBlock(d) {
 
 /**
  * The one extra listing read (plan §1.3 #2): the flags and exposure dates the tracker does not
- * project. Every market, active rows and rows written inside the window; newest first, capped.
+ * project. Every market, active rows and rows written inside the window (saleDays: see readWindows
+ * for why, and its cost); newest first, capped.
  */
 async function readListings(d, now, W) {
   const filter = {
@@ -493,11 +592,14 @@ async function readUnits(d, now, W) {
 
 /**
  * Wave ends: the campaigns of the catalog window and their drop manifests, both bounded, for the
- * pure buildEventCatalog (never loadCatalog, which reads without a limit).
+ * pure buildEventCatalog (never loadCatalog, which reads without a limit). Open-ended campaigns
+ * (endAt null: campaignWatcher stores null when Twitch gives no end) are read too, as loadCatalog
+ * does. Sorted by endAt descending: Mongo orders null below every date, so the dated campaigns come
+ * first, newest first, and the cap can only ever drop open-ended ones.
  */
 async function readCampaigns(d, now) {
   const campaigns =
-    (await d.TwitchCampaign.find({ endAt: { $gte: new Date(now - CAMPAIGN_WINDOW_DAYS * DAY) } }, { ...CAMPAIGN_PROJECTION })
+    (await d.TwitchCampaign.find({ $or: [{ endAt: { $gte: new Date(now - CAMPAIGN_WINDOW_DAYS * DAY) } }, { endAt: null }] }, { ...CAMPAIGN_PROJECTION })
       .sort({ endAt: -1 })
       .limit(CAMPAIGN_CAP)
       .lean()) || [];
@@ -513,10 +615,10 @@ async function readResearch(d) {
   return { rows, truncated: rows.length >= RESEARCH_CAP };
 }
 
-/** The farm brain's rows of the last 72 h, newest first (the {at} index). */
-async function readDemandRows(d, now) {
+/** The farm brain's rows of the last `lookbackH` hours (demandLookbackH), newest first (the {at} index). */
+async function readDemandRows(d, now, lookbackH = DEMAND_LOOKBACK_MIN_H + DEMAND_LOOKBACK_MARGIN_H) {
   const rows =
-    (await d.DemandBrainRow.find({ at: { $gte: new Date(now - DEMAND_LOOKBACK_H * HOUR) } }, { ...DEMAND_PROJECTION })
+    (await d.DemandBrainRow.find({ at: { $gte: new Date(now - lookbackH * HOUR) } }, { ...DEMAND_PROJECTION })
       .sort({ at: -1 })
       .limit(DEMAND_ROW_CAP)
       .lean()) || [];
@@ -524,6 +626,20 @@ async function readDemandRows(d, now) {
 }
 
 /* --------------------------------- listings --------------------------------- */
+
+/**
+ * Does this title name a rent-farm window (marketPricing.classifyKind, through identify)? The title
+ * is the extra read's, fresh; it is read here and nowhere else, and never copied.
+ */
+function farmTitle(d, x) {
+  const title = typeof x.title === "string" ? x.title : "";
+  if (!title) return false;
+  try {
+    return d.setIdentity.identify({ title, rentFarm: false, bulkOfferId: null }, null).kind === "farm";
+  } catch {
+    return false;
+  }
+}
 
 /** Identity of a row the tracker did not prepare: from its set (if the report holds it) or its game. */
 function identityOf(d, x, set) {
@@ -540,9 +656,11 @@ function identityOf(d, x, set) {
  * row gives identity, price, status and dates (the same snapshot its ledger was built from); the
  * extra read gives the flags, the unit dates and the quantities. A row only in the extra read is still
  * classified so counts are right: the tracker skips rent-farm, bulk and junk-priced rows, and a row
- * newer than its report. When the tracker read everything (not truncated) and the row predates the
- * report, no flag explains the skip and its price is not junk, the only reason left is a rent-farm
- * TITLE (identify's classifyKind) — such a row is kind "farm" and the model ignores it.
+ * newer than its report. A row is kind "farm" (ignored by the model) only when its flag says so or
+ * its FRESH title is a rent-farm title (classifyKind). Any other gap — the tracker's read was capped,
+ * or the row was repriced since the report (the tracker skipped it by its cached price, the fresh
+ * price is fine) — leaves the row its kind by its flags, counted as `unexplained` with a note: a
+ * repriced row must not be misfiled as a rent-farm window and vanish from the evidence.
  * @returns {{ listings: object[], byId: Map<string, {L: object, set: object|null, raw: string}>, counts: object }}
  */
 function normaliseListings({ d, report, rows, keywords }) {
@@ -553,7 +671,24 @@ function normaliseListings({ d, report, rows, keywords }) {
   const trackerComplete = !(report && report.truncated);
   const listings = [];
   const byId = new Map();
-  const c = { read: 0, inReport: 0, notInReport: 0, newer: 0, farmByTitle: 0, junkPrice: 0, unexplained: 0, unitsCut: 0, farm: 0, cas: 0, script: 0, bulk: 0, lot: 0, account: 0, single: 0 };
+  const c = {
+    read: 0,
+    inReport: 0,
+    notInReport: 0,
+    newer: 0,
+    farmByTitle: 0,
+    junkPrice: 0,
+    unexplained: 0,
+    unexplainedComplete: 0,
+    unitsCut: 0,
+    farm: 0,
+    cas: 0,
+    script: 0,
+    bulk: 0,
+    lot: 0,
+    account: 0,
+    single: 0,
+  };
   for (const x of rows || []) {
     if (!x || x._id === undefined || x._id === null) continue;
     const raw = lower(x._id);
@@ -574,13 +709,16 @@ function normaliseListings({ d, report, rows, keywords }) {
       id = identityOf(d, x, set);
       trackerKind = id.kind || "drops";
       const created = msOf(x.createdAt);
-      if (num(x.price) > JUNK_PRICE) c.junkPrice++;
+      if (trackerKind === "drops" && !x.rentFarm && farmTitle(d, x)) {
+        trackerKind = "farm";
+        c.farmByTitle++;
+      } else if (num(x.price) > JUNK_PRICE) c.junkPrice++;
       else if (trackerKind === "drops" && !x.bulkOfferId && !x.rentFarm) {
         if (reportAt !== null && created !== null && created >= reportAt) c.newer++;
-        else if (reportAt !== null && created !== null && trackerComplete) {
-          trackerKind = "farm";
-          c.farmByTitle++;
-        } else c.unexplained++;
+        else {
+          c.unexplained++;
+          if (trackerComplete) c.unexplainedComplete++;
+        }
       }
     }
     const kind = kindOf(x, trackerKind);
@@ -665,7 +803,7 @@ function saleRecords({ report, byId, keywords, since }) {
     const raw = lower(s.listingId);
     const e = raw ? byId.get(raw) || null : null;
     const g = String(s.gameKey || (e && e.L.g) || "");
-    const m = trackerMarket(s.market) || "unknown";
+    const m = marketKey(s.market);
     const f = e ? e.L.f : farmOf({ origin }, g, keywords);
     // A row the loader knows to be a pack (bulkPackSize without the tracker's bulkOfferId test) is
     // demand only, never a single-unit price.
@@ -712,7 +850,7 @@ function saleRecords({ report, byId, keywords, since }) {
     const raw = lower(x.listingId);
     const e = raw ? byId.get(raw) || null : null;
     const g = String(x.gameKey || (e && e.L.g) || "");
-    const m = trackerMarket(x.market) || "unknown";
+    const m = marketKey(x.market);
     const f = e ? e.L.f : farmOf({ origin }, g, keywords);
     demandOnly.push({ g, m, f, t, src });
     c.demandOnly++;
@@ -724,20 +862,58 @@ function saleRecords({ report, byId, keywords, since }) {
   return { sales, demandOnly, bulkPrices, ledgerBulk, counts: c };
 }
 
+// spendAccount's reason from the operator's "Mark an account sold by hand" route
+// (POST /api/unclaimed-auto/sell/:id): the ledger then carries the shelf market and price as if the
+// platform had sold it, and only this note says otherwise.
+const MARK_SOLD_RE = /^manual mark sold/i;
+
 /**
- * No-claim units (U), and the no-claim lister's sales taken from them (plan §1.3 #3): a sold unit whose
- * listingIds name an origin "unclaimed" row is that row's sale — at its PAID price when the ledger
- * stamped one, else the row's price ("row"). A hand sale (soldMarket "manual") is demand only; so is a
- * unit sold in a pack or a lot (per-account price into the bulk series). A unit sold on a market none
- * of its named unclaimed rows is on was re-listed elsewhere (a claim-at-sale order): the tracker ledger
- * holds that sale, so it is not counted here.
+ * The row a sold unit's sale belongs to: among its named origin-"unclaimed" rows on the market it sold
+ * on that existed when it sold (createdAt ≤ soldAt), the NEWEST. listingIds only grow — a GGSel set
+ * rebuilt into a new offer ($addToSet), a Gameflip successor row, a lot the unit once sat in — so the
+ * oldest named row is usually not the one that sold. With no sold market stamped (old ledgers), the
+ * newest such row on the unit's own market, else on any market.
+ */
+function saleRowOf(ours, t, sm, unitMarket) {
+  const newest = (list) => {
+    let best = null;
+    for (const x of list) {
+      const c = x.e.L.c;
+      if (c !== null && c !== undefined && c > t) continue;
+      const k = c === null || c === undefined ? -Infinity : c;
+      if (!best || k > best.k) best = { x, k };
+    }
+    return best ? best.x : null;
+  };
+  if (sm) return newest(ours.filter((x) => x.e.L.m === sm));
+  const own = unitMarket ? newest(ours.filter((x) => x.e.L.m === unitMarket)) : null;
+  return own || newest(ours);
+}
+
+/**
+ * No-claim units (U), and the no-claim lister's sales taken from them (plan §1.3 #3), in this order:
+ * - a unit with `manualListing` sold through an owner's listing (a vault row or a claim-at-sale order):
+ *   the tracker ledger holds that row's sale by its listing id, so nothing is booked here (its
+ *   listingIds may still name a dead auto row from a reused ledger);
+ * - a hand sale — soldMarket "manual" (handSellAccounts) or an operator's "manual mark sold" (the
+ *   note; read in memory, never copied) — is demand only, whatever rows it names;
+ * - else the sale belongs to the newest named origin-"unclaimed" row on its sold market created at or
+ *   before the sale (saleRowOf). On a pack or lot row it is demand only with the per-account price
+ *   into the bulk series; otherwise a unit sale at its PAID price when the ledger stamped one, else the
+ *   row's price ("row");
+ * - a unit sold on a market none of its named unclaimed rows is on was re-listed elsewhere: the tracker
+ *   ledger holds that sale, so it is not counted here.
+ * Every ledger record of an origin-"unclaimed" row is dropped in saleRecords, so no sale is counted
+ * from both sources.
+ * U.x is the expiry of the unit's CURRENT life: expireAccount stamps expiredAt and nothing clears it on
+ * a re-list, so an expiredAt older than listedAt belongs to a previous life and reads null.
  */
 function noclaimUnits({ d, docs, byId, since, ledgerBulk = new Map() }) {
   const units = [];
   const sales = [];
   const demandOnly = [];
   const bulkPrices = [];
-  const c = { units: 0, sold: 0, sales: 0, paid: 0, rowPriced: 0, hand: 0, pack: 0, packInLedger: 0, elsewhere: 0, otherRows: 0 };
+  const c = { units: 0, sold: 0, sales: 0, paid: 0, rowPriced: 0, hand: 0, markSold: 0, ownerRow: 0, pack: 0, packInLedger: 0, elsewhere: 0, otherRows: 0, staleExpiry: 0 };
   const left = new Map(ledgerBulk);
   for (const u of docs || []) {
     if (!u) continue;
@@ -749,15 +925,23 @@ function noclaimUnits({ d, docs, byId, since, ledgerBulk = new Map() }) {
       if (name && !camps.includes(name)) camps.push(name);
     }
     const st = lower(u.status);
+    const l = msOf(u.listedAt);
+    let x = msOf(u.expiredAt);
+    if (x !== null && l !== null && x < l) {
+      x = null;
+      c.staleExpiry++;
+    }
+    const sm = marketKey(u.soldMarket, "");
     units.push({
       g,
-      m: trackerMarket(u.market),
+      m: marketKey(u.market, ""),
       st,
-      l: msOf(u.listedAt),
+      l,
       s: msOf(u.soldAt),
       p: round2(u.soldPriceUsd),
-      sm: trackerMarket(u.soldMarket),
-      x: msOf(u.expiredAt),
+      sm,
+      x,
+      u: msOf(u.updatedAt),
       lids: raws.map(hashId),
       bk: String(u.bundleKey || ""),
       camps,
@@ -767,43 +951,46 @@ function noclaimUnits({ d, docs, byId, since, ledgerBulk = new Map() }) {
     const t = msOf(u.soldAt);
     if (t === null || t < since) continue;
     c.sold++;
-    const named = [];
-    for (const r of raws) if (byId.has(r)) named.push({ raw: r, e: byId.get(r) });
-    const ours = named.filter((x) => x.e.L.o === "unclaimed");
+    if (String(u.manualListing || "")) {
+      c.ownerRow++;
+      continue;
+    }
+    const markSold = MARK_SOLD_RE.test(String(u.note || "").trim());
+    if (sm === "manual" || markSold) {
+      demandOnly.push({ g, m: "unknown", f: "noclaim", t, src: "hand" });
+      c.hand++;
+      if (markSold) c.markSold++;
+      continue;
+    }
+    const ours = [];
+    for (const r of raws) {
+      const e = byId.get(r);
+      if (e && e.L.o === "unclaimed") ours.push({ raw: r, e });
+    }
     if (!ours.length) {
       // a pool unit sold through an owner row: the ledger records that row's sale or demand
       c.otherRows++;
       continue;
     }
-    const sm = trackerMarket(u.soldMarket);
-    if (sm === "manual") {
-      demandOnly.push({ g, m: "unknown", f: "noclaim", t, src: "hand" });
-      c.hand++;
-      continue;
-    }
-    const pack = firstWhere(named, (x) => x.e.L.kind === "bulk" || x.e.L.kind === "lot");
-    if (pack) {
-      c.pack++;
-      const k = left.get(pack.raw) || 0;
-      if (k > 0) {
-        left.set(pack.raw, k - 1);
-        c.packInLedger++;
-        continue;
-      }
-      const L = pack.e.L;
-      const size = L.pack >= 2 ? L.pack : L.lot;
-      demandOnly.push({ g: L.g || g, m: L.m, f: "noclaim", t, src: "bulk" });
-      if (size >= 2 && L.p > 0) bulkPrices.push({ g: L.g || g, m: L.m, t, pa: round2(L.p / size), size });
-      continue;
-    }
-    const want = sm || trackerMarket(u.market);
-    let row = want ? firstWhere(ours, (x) => x.e.L.m === want) : null;
-    if (!row && !sm) row = ours[ours.length - 1];
+    const row = saleRowOf(ours, t, sm, trackerMarket(u.market));
     if (!row) {
       c.elsewhere++;
       continue;
     }
     const L = row.e.L;
+    if (L.kind === "bulk" || L.kind === "lot") {
+      c.pack++;
+      const k = left.get(row.raw) || 0;
+      if (k > 0) {
+        left.set(row.raw, k - 1);
+        c.packInLedger++;
+        continue;
+      }
+      const size = L.pack >= 2 ? L.pack : L.lot;
+      demandOnly.push({ g: L.g || g, m: L.m, f: "noclaim", t, src: "bulk" });
+      if (size >= 2 && L.p > 0) bulkPrices.push({ g: L.g || g, m: L.m, t, pa: round2(L.p / size), size });
+      continue;
+    }
     const paid = round2(u.soldPriceUsd);
     const p = paid > 0 ? paid : L.p > 0 ? L.p : 0;
     if (paid > 0) c.paid++;
@@ -833,7 +1020,11 @@ function noclaimUnits({ d, docs, byId, since, ledgerBulk = new Map() }) {
 
 /* ------------------------------- waves, radar, demand ------------------------------- */
 
-/** Wave records (W) of the no-claim games, from the event catalog. */
+/**
+ * Wave records (W) of the no-claim games, from the event catalog. `name` is the raw campaign name: a
+ * unit's drops carry it (drops[].campaign), and when parseWave finds a wave label ("Week 2", "Wave 1")
+ * neither the label nor the event name equals it, so without it a unit could not find its own wave.
+ */
 function waves({ d, catalog, keywords }) {
   const out = [];
   if (!catalog || typeof catalog.values !== "function") return out;
@@ -843,7 +1034,7 @@ function waves({ d, catalog, keywords }) {
     if (!g || !bucketOfKey(g, keywords)) continue;
     for (const w of Array.isArray(ev.waves) ? ev.waves : []) {
       if (!w) continue;
-      out.push({ g, ev: String(ev.name || ""), wave: String(w.waveLabel || w.name || ""), startAt: msOf(w.startAt), endAt: msOf(w.endAt) });
+      out.push({ g, ev: String(ev.name || ""), wave: String(w.waveLabel || w.name || ""), name: String(w.name || ""), startAt: msOf(w.startAt), endAt: msOf(w.endAt) });
     }
   }
   out.sort((a, b) => a.g.localeCompare(b.g) || num(a.endAt, Infinity) - num(b.endAt, Infinity) || a.ev.localeCompare(b.ev) || a.wave.localeCompare(b.wave));
@@ -887,6 +1078,18 @@ function radarSlim(radar) {
 }
 
 /**
+ * settings.normGameName's rule, repeated (this file requires no settings): a–z and 0–9 only. The farm
+ * brain keys a no-claim row by normGameName(keyword) (farmDemand.noClaimKeys), while the loader's
+ * keywords and game keys use setIdentity.normGame (Unicode letters kept): "Pokémon UNITE" is
+ * "pok mon unite" there and "pokémon unite" here.
+ */
+const asciiKey = (s) =>
+  String(s || "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, " ")
+    .trim();
+
+/**
  * The farm brain's newest row per (k, f) (DR). A no-claim row is per keyword BUCKET; it is expanded to
  * the bucket's games (SPEC §2): each game's weekly forecast, target and in-flight are the bucket's ×
  * its share of the bucket's no-claim unit sales in the last 30 days (equal split when none sold);
@@ -921,6 +1124,14 @@ function demandRows({ docs, keywords, listings = [], units = [], sales = [], dem
   }
   const listed = new Map();
   for (const u of units) if (u && u.st === "listed") listed.set(u.g, (listed.get(u.g) || 0) + 1);
+  // the farm brain's bucket key (normGameName of a keyword) → the loader's keyword(s) it stands for
+  const byAscii = new Map();
+  for (const w of keywords || []) {
+    const a = asciiKey(w);
+    if (!a) continue;
+    if (!byAscii.has(a)) byAscii.set(a, []);
+    byAscii.get(a).push(w);
+  }
 
   const out = [];
   for (const { r, f, at } of newest.values()) {
@@ -944,7 +1155,9 @@ function demandRows({ docs, keywords, listings = [], units = [], sales = [], dem
       continue;
     }
     const bucket = String(r.k);
-    const games = [...(bucketGames.get(bucket) || [])].sort();
+    const gameSet = new Set(bucketGames.get(bucket) || []);
+    for (const w of byAscii.get(asciiKey(bucket)) || []) for (const g of bucketGames.get(w) || []) gameSet.add(g);
+    const games = [...gameSet].sort();
     if (!games.length) {
       out.push({ k: bucket, f, ...base, bu: bucket, sh: 1 });
       continue;
@@ -1003,6 +1216,7 @@ function gameLabels({ listings = [], report, keys = [] }) {
  * buckets and the explicit no-claim caps (every entry reads as the owner's — plan §1.3 #12).
  */
 function afBlock({ d, af, keywords, labels, platiTakes, ggselTakes }) {
+  const known = d.listingModel && isObj(d.listingModel.DEFAULTS) ? Object.keys(d.listingModel.DEFAULTS) : null;
   const V = (d.venues && d.venues.VENUES) || {};
   const blocked = !!(V.digiseller && V.digiseller.blocked);
   const takes = {
@@ -1050,7 +1264,7 @@ function afBlock({ d, af, keywords, labels, platiTakes, ggselTakes }) {
     }
   }
   return {
-    listingBrain: plainBlock(af.listingBrain),
+    listingBrain: configBlock(af.listingBrain, known),
     perMarketStock: num(af.perMarketStock, 3),
     takes,
     mapped,
@@ -1420,7 +1634,7 @@ async function load({ now: nowIn, deps = null, venueTimeoutMs = VENUE_TIMEOUT_MS
   // 8. the farm brain's rows: degrade (every game reads unknown, so the model holds)
   let demandDocs = [];
   try {
-    const dr = await readDemandRows(d, now);
+    const dr = await readDemandRows(d, now, demandLookbackH(af, d.listingModel));
     demandDocs = dr.rows;
     if (dr.truncated) notes.push("The farm-brain row read hit its cap of " + DEMAND_ROW_CAP + " rows: some games may read unknown.");
   } catch (e) {
@@ -1430,7 +1644,14 @@ async function load({ now: nowIn, deps = null, venueTimeoutMs = VENUE_TIMEOUT_MS
 
   // build
   const nl = normaliseListings({ d, report, rows: lr.rows, keywords });
-  if (nl.counts.unexplained) notes.push(nl.counts.unexplained + " listing rows are missing from the tracker's capped read: classified by their flags alone.");
+  if (nl.counts.unexplained) {
+    notes.push(
+      nl.counts.unexplained +
+        " listing rows are missing from the tracker's report for a reason the loader cannot see (" +
+        (nl.counts.unexplainedComplete ? "repriced since the report, or another" : "its read hit its cap") +
+        "): classified by their flags alone.",
+    );
+  }
   await yieldNow();
   const since = now - W.saleDays * DAY;
   const sr = saleRecords({ report, byId: nl.byId, keywords, since });
@@ -1513,17 +1734,56 @@ function loadEvidence(o) {
 
 /* ------------------------------ bundle file checks ------------------------------ */
 
+// Key names that say a field carries a person, an account, a credential or free text (any case, any
+// spelling: buyerLogin, seller_name, soldTo, username, Title …). FORBIDDEN_KEYS is the exact list the
+// loader strips; this is the wider net.
+const KEY_RE = /login|account|seller|buyer|username|token|secret|password|api[_-]?key|email|twitch|dedupe|orderid|externalid|note|contentid|soldto/i;
+// The bundle's own keys that the wider net would catch (plan §2.1): the run's notes (cleaned text), the
+// Digiseller market key ("digi-SELLER"), the radar's rival-seller COUNTS and the count of account
+// listings among the rows read (counts.l_account).
+const KEY_ALLOW = new Set(["notes", "digiseller", "rivalSellers", "liveSellers", "l_account"]);
+// Containers whose KEYS are data (game keys, offer keys), not field names: their keys are checked
+// like string values, so a game called "Account Quest" never blocks an export.
+const DATA_KEYED = new Set(["af.mapped", "af.caps", "pricing.gameFloors", "old.games", "old.offers"]);
+// What an identifying string looks like: an email, a link, an IPv4 / IPv6 address, a raw database id
+// anywhere in it, or a credential word.
+const VALUE_RES = [
+  [/[^\s@]+@[^\s@]+\.[a-z]{2,}/i, "email address"],
+  [/\b[a-z][a-z0-9+.-]*:\/\//i, "link"],
+  [/\b\d{1,3}(?:\.\d{1,3}){3}\b/, "IPv4 address"],
+  [/(?:\b(?:[0-9a-f]{1,4}:){7}[0-9a-f]{1,4}\b|\b[0-9a-f]{1,4}(?::[0-9a-f]{1,4}){0,6}::|(?<![\w:])::[0-9a-f]{1,4}\b)/i, "IPv6 address"],
+  [/[0-9a-f]{24}/i, "raw database id"],
+  [/(token|secret|password|api[_-]?key|bearer)/i, "credential word"],
+];
+const valueProblem = (v) => {
+  for (const [re, what] of VALUE_RES) if (re.test(v)) return what;
+  return null;
+};
+
 /**
- * Paths of every forbidden key in `obj`, and of every string that looks like a raw database id
- * (24 hex): an unhashed listing id is as identifying as a login.
+ * Paths of everything that would make a bundle unsafe to share: a forbidden key (FORBIDDEN_KEYS, in
+ * any case), a key whose name says it carries a person, an account, a credential or free text
+ * (KEY_RE, except the bundle's own KEY_ALLOW), and every string — value, or key of a data-keyed map —
+ * that looks like an email, a link, an IP address, a raw database id or a credential. An unhashed
+ * listing id is as identifying as a login. Run by the export before any file is written; it must
+ * find nothing on the synthetic fixtures and on the loader's own bundles.
  */
 function privacyScan(obj) {
   const out = [];
   const seen = new Set();
+  const forbiddenLower = new Set([...FORBIDDEN_KEYS].map((k) => k.toLowerCase()));
+  const badKey = (k) => forbiddenLower.has(k.toLowerCase()) || (!KEY_ALLOW.has(k) && KEY_RE.test(k));
+  const checkKey = (k, p, dataKeyed) => {
+    if (dataKeyed) {
+      const why = valueProblem(k);
+      if (why) out.push(p + " (key: " + why + ")");
+    } else if (badKey(k)) out.push(p);
+  };
   const walk = (v, path, depth) => {
     if (depth > 64 || out.length >= 1000) return;
     if (typeof v === "string") {
-      if (/^[0-9a-f]{24}$/i.test(v)) out.push(path + " (raw database id)");
+      const why = valueProblem(v);
+      if (why) out.push(path + " (" + why + ")");
       return;
     }
     if (!v || typeof v !== "object") return;
@@ -1533,16 +1793,17 @@ function privacyScan(obj) {
       v.forEach((x, i) => walk(x, path + "[" + i + "]", depth + 1));
       return;
     }
+    const dataKeyed = DATA_KEYED.has(path);
     if (v instanceof Map) {
       for (const [k, x] of v) {
-        if (FORBIDDEN_KEYS.has(String(k))) out.push(path + "<" + k + ">");
+        checkKey(String(k), path + "<" + k + ">", dataKeyed);
         walk(x, path + "<" + k + ">", depth + 1);
       }
       return;
     }
     for (const k of Object.keys(v)) {
       const p = path ? path + "." + k : k;
-      if (FORBIDDEN_KEYS.has(k)) out.push(p);
+      checkKey(k, p, dataKeyed);
       walk(v[k], p, depth + 1);
     }
   };
@@ -1555,7 +1816,8 @@ const HEX12 = /^[0-9a-f]{12}$/;
 /**
  * Problems that would make a bundle unsafe to model or to share: wrong kind or version, missing
  * sections, anything that is not plain JSON (a Date, a Map, undefined, NaN), an unknown market or
- * enum value, a "plati" left untranslated. Lenient on optional fields; [] when sound.
+ * enum value, a "plati" left untranslated, a market string outside the seven keys and OTHER_MARKETS
+ * (free text). Lenient on optional fields; [] when sound.
  */
 function validateBundle(b) {
   const problems = [];
@@ -1605,7 +1867,10 @@ function validateBundle(b) {
       else fn(x, name + "[" + i + "]");
     }
   };
-  const market = (m) => typeof m === "string" && m !== "plati";
+  // a sale's or a demand record's market: one of the seven keys or OTHER_MARKETS (free text never)
+  const market = (m) => BUNDLE_MARKETS.includes(m);
+  // a unit's market and sold market may also be "" (not attached / not sold yet)
+  const unitMarket = (m) => m === "" || BUNDLE_MARKETS.includes(m);
   each(b.listings, "listings", (L, p) => {
     if (typeof L.id !== "string" || !HEX12.test(L.id)) add(p + ".id is not a 12-hex hash");
     if (!MARKETS.includes(L.m)) add(p + ".m is not a market key: " + JSON.stringify(L.m));
@@ -1627,13 +1892,13 @@ function validateBundle(b) {
     if (s.grp !== undefined && !(typeof s.grp === "string" && HEX12.test(s.grp))) add(p + ".grp is not a 12-hex hash");
   });
   each(b.demandOnly, "demandOnly", (x, p) => {
-    if (!market(x.m)) add(p + ".m is not a market key");
+    if (!market(x.m)) add(p + ".m is not a market key: " + JSON.stringify(x.m));
     if (!isT(x.t)) add(p + ".t is not a time");
     if (!FARMS.includes(x.f)) add(p + ".f is unknown");
     if (!DEMAND_SOURCES.includes(x.src)) add(p + ".src is unknown: " + JSON.stringify(x.src));
   });
   each(b.bulkPrices, "bulkPrices", (x, p) => {
-    if (!market(x.m)) add(p + ".m is not a market key");
+    if (!market(x.m)) add(p + ".m is not a market key: " + JSON.stringify(x.m));
     if (!isT(x.t)) add(p + ".t is not a time");
     if (!(isT(x.pa) && x.pa >= 0)) add(p + ".pa is not a price");
   });
@@ -1650,8 +1915,8 @@ function validateBundle(b) {
     if (!isT(x.at)) add(p + ".at is not a time");
   });
   each(noclaim.units, "noclaim.units", (x, p) => {
-    if (x.m !== undefined && !market(x.m)) add(p + ".m is not a market key");
-    if (x.sm !== undefined && !market(x.sm)) add(p + ".sm is not a market key");
+    if (x.m !== undefined && !unitMarket(x.m)) add(p + ".m is not a market key: " + JSON.stringify(x.m));
+    if (x.sm !== undefined && !unitMarket(x.sm)) add(p + ".sm is not a market key: " + JSON.stringify(x.sm));
   });
   each(noclaim.waves, "noclaim.waves", (x, p) => {
     if (typeof x.g !== "string") add(p + ".g is not a game key");
@@ -1737,13 +2002,18 @@ module.exports = {
   bucketOfKey,
   noclaimKeywords,
   trackerMarket,
+  marketKey,
   zeusxMapped,
   cleanMsg,
   msOf,
+  configBlock,
+  demandLookbackH,
   // constants
   BUNDLE_KIND,
   BUNDLE_V,
   MARKETS,
+  OTHER_MARKETS,
+  BUNDLE_MARKETS,
   KINDS,
   ORIGINS,
   FARMS,
@@ -1766,7 +2036,8 @@ module.exports = {
   REPORT_TIMEOUT_MS,
   VENUE_TIMEOUT_MS,
   OLD_CONCURRENCY,
-  DEMAND_LOOKBACK_H,
+  DEMAND_LOOKBACK_MIN_H,
+  DEMAND_LOOKBACK_MARGIN_H,
   BACKTEST_PAD_DAYS,
   UNIT_LISTED_PAD_DAYS,
   CAMPAIGN_WINDOW_DAYS,

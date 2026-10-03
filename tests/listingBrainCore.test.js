@@ -1245,3 +1245,42 @@ test("performance: a 150-game bundle runs well inside a second and yields betwee
   done = true;
   assert.ok(maxGap < 400, "longest synchronous stretch " + maxGap + " ms");
 });
+
+/* ------------------------- review findings: the model's side (L4, L8, P2b) ------------------------- */
+
+test("L4 a unit the lister took off sale (st not listed/sold) reads off; a backtest cut before its last write reads it as it was", () => {
+  const mk = (st, o = {}) => Object.assign({ g: "beta", m: "gameflip", st, l: NOW - 9 * DAY, s: null, p: 0, sm: "", x: null, lids: [], bk: "", camps: [], u: NOW - 2 * DAY }, o);
+  // skipped (shrunk, stranded, GGSel switched off), removed (manual-sold tick), manual (an owner listing),
+  // released with no last write known, a sold one
+  // released with no last write known, a sold one, and an expired one (on sale until its expiry)
+  const units = [mk("listed"), mk("skipped"), mk("removed"), mk("manual"), mk("released", { u: null }), mk("sold", { s: NOW - DAY }), mk("expired", { x: NOW - 3 * DAY, u: null })];
+  const at = (cut) => E.buildEvidence(bundle({ noclaim: { units, waves: [] } }), { cfg: CFG(), cut }).noclaim.units.map((u) => u.stc);
+  assert.deepEqual(at(NOW), ["listed", "off", "off", "off", "off", "sold", "expired"]);
+  assert.deepEqual(at(NOW - 5 * DAY), ["listed", "listed", "listed", "listed", "off", "listed", "listed"], "before its last write (or its expiry) the unit was still on sale");
+  // the price model's live stock and perish estimate count the listed unit only
+  const ev = E.buildEvidence(bundle({ noclaim: { units, waves: [] } }), { cfg: CFG(), cut: NOW });
+  assert.equal(P.perishOf(ev, "beta").listed, 1);
+});
+
+test("L8 waveEndFor matches a unit's raw campaign name to its own wave (W.name), not the wave live when it was listed", () => {
+  const waves = [
+    { g: "omega", ev: "Omega Season 18", wave: "Week 1", name: "Omega Season 18 - Week 1", startAt: NOW - 30 * DAY, endAt: NOW - 23 * DAY },
+    { g: "omega", ev: "Omega Season 18", wave: "Week 2", name: "Omega Season 18 - Week 2", startAt: NOW - 23 * DAY, endAt: NOW - 16 * DAY },
+    { g: "omega", ev: "R6 S2 2026", wave: "Wave 1", name: "R6 S2 2026 1", startAt: NOW - 40 * DAY, endAt: NOW - 26 * DAY },
+  ];
+  // listed after week 2 started: its week-1 drops are still claimable
+  assert.equal(E.waveEndFor(waves, { g: "omega", camps: ["Omega Season 18 - Week 1"], l: NOW - 20 * DAY }), NOW - 23 * DAY);
+  assert.equal(E.waveEndFor(waves, { g: "omega", camps: ["r6 s2 2026 1"], l: NOW - 20 * DAY }), NOW - 26 * DAY, "case-insensitive");
+  // the label forms still match a wave without a raw name
+  assert.equal(E.waveEndFor([{ ev: "Omega Season 18", wave: "Week 1", startAt: NOW - 30 * DAY, endAt: NOW - 23 * DAY }], { camps: ["Omega Season 18 Week 1"], l: NOW }), NOW - 23 * DAY);
+});
+
+test("P2b a sale on market 'other' is never a price and never reaches the translator, like 'unknown'", () => {
+  const sales = [S({ m: "other", p: 2 }), S({ m: "unknown", p: 2 }), S({ m: "gameflip", p: 1.5 })];
+  const ev = E.buildEvidence(bundle({ sales }), { cfg: CFG(), cut: NOW });
+  assert.deepEqual(
+    ev.orders.map((o) => o.m),
+    ["gameflip"],
+  );
+  for (const per of ev.tr.bySet.values()) for (const m of per.keys()) assert.ok(U.MARKETS.includes(m), "translator market " + m);
+});

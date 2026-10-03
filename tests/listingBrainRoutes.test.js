@@ -471,10 +471,12 @@ test("the route file is read-only, guarded on every route and loads the runner l
   for (const bad of [/\.save\(/, /\.create\(/, /updateOne|updateMany|findOneAndUpdate|findByIdAndUpdate/, /insertMany|deleteOne|deleteMany|bulkWrite/, /require\([^)]*marketplaces[^)]*\)/, /axios/, /saveSettings/, /\.start\(\)/, /\.find\(\{/]) {
     assert.ok(!bad.test(code), "listingBrainRoutes.js matches " + bad);
   }
-  // the runner is required only inside the lazy accessor
+  // the runner is required only inside the lazy accessor; the loader's cleaner (crypto and fs only)
+  // only inside its own lazy accessor, for error text
   const reqs = code.match(/require\([^)]*\)/g) || [];
-  assert.deepEqual(reqs, ['require("../utils/listingBrain")']);
+  assert.deepEqual(reqs, ['require("../utils/listingBrain/inputs")', 'require("../utils/listingBrain")']);
   assert.match(code, /const B = \(\) => brain \|\| require\("\.\.\/utils\/listingBrain"\);/);
+  assert.match(code, /const cleanMsg = \(e\) => require\("\.\.\/utils\/listingBrain\/inputs"\)\.cleanMsg\(e\);/);
 });
 
 test("the tracker router mounts the listing-brain routes, guarded, without loading the runner", async () => {
@@ -741,4 +743,64 @@ test("the tab says so plainly before the first run", async () => {
   } finally {
     s.close();
   }
+});
+
+/* ------------------------- review findings: error text and scrubbing (P4, P8) ------------------------- */
+
+test("P4 a route error is a 500 with a cleaned message", async () => {
+  const b = fakeBrain(makeRun(), {
+    status: () => {
+      throw new Error("connect ECONNREFUSED 10.9.8.7:27017 db01.prod.myshop.lk");
+    },
+    latest: async () => {
+      throw new Error("pool for db01.prod.myshop.lk:27017 cleared; getaddrinfo ENOTFOUND mongo-primary-7 at /var/www/app/x.js");
+    },
+  });
+  const s = await serve(b);
+  try {
+    const st = await fetch(s.base + BASE + "/status");
+    assert.equal(st.status, 500);
+    const m1 = (await st.json()).message;
+    assert.match(m1, /ECONNREFUSED/);
+    assert.ok(!/10\.9\.8\.7|myshop/.test(m1), m1);
+    const lt = await fetch(s.base + BASE + "/latest");
+    assert.equal(lt.status, 500);
+    const m2 = (await lt.json()).message;
+    assert.match(m2, /ENOTFOUND/);
+    assert.ok(!/myshop|mongo-primary-7|\/var\/www/.test(m2), m2);
+  } finally {
+    s.close();
+  }
+});
+
+test("P8 status, summary, counts, cfg, notes and accuracy drop free-text keys at any depth; rows keep their game label; lastError is shown cleaned", async () => {
+  const run = makeRun({
+    summary: { ...SUMMARY, note: "LEAK-NOTE", deep: { title: "LEAK-TITLE", url: "LEAK-URL" } },
+    counts: { listings: 30, description: "LEAK-DESC" },
+    cfg: { enabled: true, intervalMin: 180, name: "LEAK-NAME" },
+  });
+  const acc = { ...ACCURACY, forward: { runsScored: 0, runsWaiting: 2, x: { lastError: "LEAK-LASTERR" } }, backtest: { ...ACCURACY.backtest, extra: { description: "LEAK-D2", note: "LEAK-NOTE2" } } };
+  const b = fakeBrain(run, {
+    status: () => ({ config: { enabled: true, note: "LEAK-STATUS-NOTE" }, runs: 1, lastError: "log write failed: getaddrinfo ENOTFOUND mongo-primary-7", summary: { title: "LEAK-ST-TITLE" } }),
+    accuracy: async () => acc,
+  });
+  const s = await serve(b);
+  try {
+    const st = (await getJson(s.base, BASE + "/status")).body;
+    const lt = (await getJson(s.base, BASE + "/latest")).body;
+    const ac = (await getJson(s.base, BASE + "/accuracy")).body;
+    const text = JSON.stringify([st, lt, ac]);
+    for (const leak of ["LEAK-NOTE", "LEAK-TITLE", "LEAK-URL", "LEAK-DESC", "LEAK-NAME", "LEAK-LASTERR", "LEAK-D2", "LEAK-NOTE2", "LEAK-STATUS-NOTE", "LEAK-ST-TITLE", "mongo-primary-7"]) {
+      assert.ok(!text.includes(leak), leak + " leaked");
+    }
+    assert.match(st.lastError, /log write failed: getaddrinfo ENOTFOUND/, "the page still shows the last error, cleaned");
+    assert.match(lt.status.lastError, /log write failed/);
+    assert.equal(lt.rows.find((r) => r.k === "alpha" && r.m === "gameflip").g, "ALPHA", "a row's game label stays");
+    assert.equal(ac.backtest.note, "synthetic", "the scorer's own explanation at its known place stays");
+  } finally {
+    s.close();
+  }
+  const src = fs.readFileSync(path.join(ROOT, "routes", "listingBrainRoutes.js"), "utf8");
+  assert.ok(!/Responses are WHITELISTED, field by field/.test(src), "the header no longer claims every response is whitelisted");
+  assert.match(src, /scrubbed/i);
 });

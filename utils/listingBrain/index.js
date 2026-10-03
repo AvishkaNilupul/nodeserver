@@ -86,7 +86,10 @@ function _reset() {
 }
 
 const clock = () => (typeof hooks.now === "function" ? hooks.now() : Date.now());
-const msg = (e) => (e && e.message ? e.message : String(e));
+// Every error text the runner keeps — lastError (the status API, the page), a note in the run log, a
+// reason, a console line — is cleaned the loader's way: a driver error can name a host, an address,
+// a path, a login in a dup-key echo, or a credential.
+const msg = (e) => inputs.cleanMsg(e);
 const dayOf = (t) => new Date(t).toISOString().slice(0, 10);
 
 function readConfig() {

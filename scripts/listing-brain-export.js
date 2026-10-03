@@ -5,8 +5,12 @@
 // object a live run of the listing brain reads, written to one JSON file so every number the brain
 // logs can be reproduced offline (`loadFromBundle`, the preview, the backtest).
 //
-//   node scripts/listing-brain-export.js                    # writes ./listing-brain-bundle-<UTC stamp>.json
-//   node scripts/listing-brain-export.js --out bundle.json
+//   node scripts/listing-brain-export.js                    # writes <OS temp dir>/listing-brain-bundle-<UTC stamp>.json
+//   node scripts/listing-brain-export.js --out /somewhere/outside/the/repo/bundle.json
+//
+// The repository is public: a bundle holds real games, prices and sale times, so the file is written
+// OUTSIDE the repo (the OS temp dir by default) and an --out inside the repo is refused.
+// Proposed to the owner for .gitignore (this script does not edit it): the line `listing-brain-bundle-*.json`.
 //
 // What it does, and nothing else:
 //   * connects with the repo's normal Mongo settings (MONGO_URI from .env), with index building and
@@ -17,7 +21,10 @@
 //   * writes the file (never over an existing one), prints the counts and notes, disconnects.
 // It writes nothing to the database, changes no setting and calls no marketplace.
 const fs = require("fs");
+const os = require("os");
 const path = require("path");
+
+const REPO_ROOT = path.resolve(__dirname, "..");
 
 function argValue(args, name) {
   const i = args.indexOf(name);
@@ -28,7 +35,18 @@ function argValue(args, name) {
 
 function defaultOut(now) {
   const stamp = new Date(now).toISOString().replace(/[-:]/g, "").replace(/\..*$/, "").replace("T", "-");
-  return "listing-brain-bundle-" + stamp + ".json";
+  return path.join(os.tmpdir(), "listing-brain-bundle-" + stamp + ".json");
+}
+
+/** True when `file` resolves to a path inside the repository (where a stray `git add` would publish it). */
+function insideRepo(file, root = REPO_ROOT) {
+  const rel = path.relative(path.resolve(root), path.resolve(String(file || "")));
+  return rel === "" || (!rel.startsWith("..") && !path.isAbsolute(rel));
+}
+
+/** The one line a failed connect prints: the error's class only — its text can name the host or the user. */
+function connectFailure(e) {
+  return "could not connect (check MONGO_URI): " + (e && typeof e === "object" && e.name ? String(e.name) : "Error");
 }
 
 /**
@@ -41,6 +59,10 @@ function defaultOut(now) {
  * @returns {Promise<{ written: boolean, file: string, leaks: string[], problems: string[], bytes: number }>}
  */
 async function exportBundle({ inputs, now, out, log = console.log }) {
+  if (insideRepo(out)) {
+    log("REFUSED: " + out + " is inside the repository, which is public — a bundle holds real games, prices and sale times. Pass an --out outside it (the default is the OS temp dir).");
+    return { written: false, file: out, leaks: [], problems: ["inside the repository"], bytes: 0 };
+  }
   const bundle = await inputs.load({ now });
   const leaks = inputs.privacyScan(bundle);
   const problems = inputs.validateBundle(bundle);
@@ -71,6 +93,11 @@ async function main() {
   const args = process.argv.slice(2);
   const now = Date.now();
   const out = path.resolve(argValue(args, "--out") || defaultOut(now));
+  if (insideRepo(out)) {
+    console.error("Refusing to write " + out + ": it is inside the repository, which is public. Pass an --out outside it (the default is the OS temp dir).");
+    process.exitCode = 2;
+    return;
+  }
   if (fs.existsSync(out)) {
     console.error("Refusing to overwrite " + out + ": pass another --out.");
     process.exitCode = 2;
@@ -85,7 +112,14 @@ async function main() {
   // Read-only connection: no index builds and no collection creation on first use of a model.
   mongoose.set("autoIndex", false);
   mongoose.set("autoCreate", false);
-  await mongoose.connect(uri, { autoIndex: false, autoCreate: false });
+  try {
+    await mongoose.connect(uri, { autoIndex: false, autoCreate: false });
+  } catch (e) {
+    // a driver's connect error names the host and sometimes the user: print its class only
+    console.error(connectFailure(e));
+    process.exitCode = 1;
+    return;
+  }
   try {
     const inputs = require("../utils/listingBrain/inputs");
     const r = await exportBundle({ inputs, now, out });
@@ -98,11 +132,12 @@ async function main() {
 if (require.main === module) {
   main()
     .catch((e) => {
-      console.error("listing-brain-export failed:", e && e.message ? e.message : e);
+      // the loader's own errors are already cleaned; anything else is cleaned here
+      console.error("listing-brain-export failed:", require("../utils/listingBrain/inputs").cleanMsg(e));
       process.exitCode = 1;
     })
     // A cached report's background refresh may still hold a timer; nothing is left to wait for.
     .finally(() => process.exit(process.exitCode || 0));
 }
 
-module.exports = { exportBundle, argValue, defaultOut };
+module.exports = { exportBundle, argValue, defaultOut, insideRepo, connectFailure };
