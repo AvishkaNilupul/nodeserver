@@ -1,0 +1,1122 @@
+// The listing brain's pure model core (utils/listingBrain/model.js + model/*.js,
+// docs/LISTING-BRAIN-PLAN.md §3–§4.8). Small hand-built bundles, synthetic names only.
+const test = require("node:test");
+const assert = require("node:assert/strict");
+const fs = require("node:fs");
+const path = require("node:path");
+const M = require("../utils/listingBrain/model");
+const U = require("../utils/listingBrain/model/util");
+const E = require("../utils/listingBrain/model/evidence");
+const RF = require("../utils/listingBrain/model/ref");
+const H = require("../utils/listingBrain/model/hazard");
+const P = require("../utils/listingBrain/model/price");
+const PL = require("../utils/listingBrain/model/place");
+
+const DAY = 86400000;
+const HOUR = 3600000;
+const NOW = Date.UTC(2026, 9, 3, 12, 0, 0);
+const G = "alpha quest";
+const CK = "s:aaa111";
+const BK = G + "|1";
+
+let seq = 0;
+const nid = (p) => p + String(++seq).padStart(6, "0");
+
+/** A bundle listing (plan §2.1 L), a system-made claim Gameflip row unless told otherwise. */
+function L(o = {}) {
+  return Object.assign(
+    { id: nid("l"), g: G, gl: "Alpha Quest", m: "gameflip", o: "auto", f: "claim", kind: "single", script: false, ck: CK, bk: BK, ex: true, n: 1, p: 1.5, vmin: null, smin: null, st: "active", c: NOW - 5 * DAY, u: NOW - DAY, units: [], qty: 1, qr: 0, rb: null, pack: null },
+    o,
+  );
+}
+/** A unit sale (plan §2.1 S). */
+function S(o = {}) {
+  return Object.assign({ lid: "", g: G, m: "gameflip", o: "auto", f: "claim", ck: CK, bk: BK, ex: true, n: 1, p: 1.5, t: NOW - 3 * DAY, grp: nid("o"), basis: "reported", src: "unit" }, o);
+}
+/** A fresh farm-brain row. */
+function DR(o = {}) {
+  return Object.assign({ k: G, f: "claim", at: NOW - HOUR, live: true, hl: 48, c: "farm", w: 3, t: 20, on: 12, fl: 0, a30: 3, a45: 3 }, o);
+}
+function bundle(o = {}) {
+  const b = {
+    kind: "listing-brain-bundle",
+    v: 1,
+    now: NOW,
+    af: {
+      listingBrain: {},
+      perMarketStock: 3,
+      takes: { gameflip: true, digiseller: false, ggsel: true, zeusx: true, eldorado: true, playerauctions: true, g2g: true },
+      mapped: {},
+      noClaimGames: [],
+      noclaimAutoSize: false,
+      capDefault: 70,
+      caps: {},
+    },
+    sizing: { coverageDays: 28, safetyStock: 6, maxPerGame: 250 },
+    fees: {},
+    pricing: { floorUsd: 0.75, ceilingUsd: 4.5, gameFloors: {}, itemStepPct: 15, itemCapMult: 2.5, fullEventBonusPct: 25 },
+    bulk: { markets: [], tiers: [], reserveSingles: 0 },
+    listings: [],
+    sales: [],
+    demandOnly: [],
+    bulkPrices: [],
+    radar: { at: NOW, games: [], feed: [] },
+    demand: [],
+    noclaim: { units: [], waves: [] },
+    old: { games: {}, offers: {} },
+    notes: [],
+    counts: {},
+  };
+  for (const [k, v] of Object.entries(o)) {
+    if (k === "af") b.af = Object.assign(b.af, v);
+    else b[k] = v;
+  }
+  return b;
+}
+const CFG = (over = {}) => Object.assign(U.readConfig({}), over);
+
+/**
+ * A market with a measured curve: `nSold` rows of the exact offer that sold after `sellDays` at
+ * `soldP` (and so set ref ≈ soldP, exact-here), plus `nLive` live rows asking `liveP` for `liveAge` days.
+ */
+function curve({ m = "gameflip", g = G, ck = CK, bk = BK, f = "claim", o = "auto", nSold = 10, soldP = 1.5, sellDays = 2, nLive = 5, liveP = 2.5, liveAge = 20 } = {}) {
+  const listings = [];
+  const sales = [];
+  for (let i = 0; i < nSold; i++) {
+    const c = NOW - (30 + i) * DAY;
+    // a quantity row that sold out and was closed: its last write is when it ended
+    const single = m === "gameflip" || m === "zeusx";
+    const row = L({ m, g, ck, bk, f, o, p: soldP, st: single ? "sold" : "delisted", c, u: single ? NOW - DAY : c + sellDays * DAY });
+    listings.push(row);
+    sales.push(S({ lid: row.id, m, g, ck, bk, f, o, p: soldP, t: c + sellDays * DAY }));
+  }
+  for (let i = 0; i < nLive; i++) listings.push(L({ m, g, ck, bk, f, o, p: liveP, st: "active", c: NOW - liveAge * DAY }));
+  return { listings, sales };
+}
+function ctxOf(b, cfg = CFG(), prior = new Map()) {
+  const ev = E.buildEvidence(b, { cfg, cut: b.now });
+  const hz = { claim: H.fitHazard(ev, "claim"), noclaim: H.fitHazard(ev, "noclaim") };
+  return { ev, hz, prior };
+}
+
+/* ----------------------------------- util ----------------------------------- */
+
+test("pava gives the closest non-increasing fit, weighted, and keeps nulls", () => {
+  assert.deepEqual(U.pava([1, 3, 2, 0.5], [1, 1, 1, 1]), [2, 2, 2, 0.5]);
+  const w = U.pava([1, 3], [3, 1]);
+  assert.ok(Math.abs(w[0] - 1.5) < 1e-12 && Math.abs(w[1] - 1.5) < 1e-12);
+  const n = U.pava([2, null, 3, 1], [1, 1, 1, 1]);
+  assert.equal(n[1], null);
+  assert.equal(n[0], 2.5);
+  assert.equal(n[2], 2.5);
+  assert.equal(n[3], 1);
+  const already = [5, 4, 4, 1];
+  assert.deepEqual(U.pava(already, [1, 1, 1, 1]), already);
+});
+
+test("poissonTail: P(D ≥ k) values, edges, and the incremental tailer agree", () => {
+  assert.equal(U.poissonTail(2, 0), 1);
+  assert.equal(U.poissonTail(0, 1), 0);
+  assert.ok(Math.abs(U.poissonTail(1, 1) - (1 - Math.exp(-1))) < 1e-12);
+  assert.ok(Math.abs(U.poissonTail(2, 3) - (1 - Math.exp(-2) * (1 + 2 + 2))) < 1e-12);
+  // a mean far past e^−745 underflow still gives the right middle of the distribution
+  const big = U.poissonTail(900, 900);
+  assert.ok(big > 0.45 && big < 0.56, String(big));
+  const t = U.poissonTailer(3.7);
+  for (let k = 1; k <= 12; k++) assert.ok(Math.abs(t.next() - U.poissonTail(3.7, k)) < 1e-9);
+  // E[min(D, 2)] for mu = 1: P(D≥1) + P(D≥2)
+  assert.ok(Math.abs(U.expectedSold(1, 2) - (1 - Math.exp(-1) + 1 - 2 * Math.exp(-1))) < 1e-12);
+});
+
+test("buckets, tiers and the $0.05 grid", () => {
+  assert.equal(U.bucketOf(0.8), 0);
+  assert.equal(U.bucketOf(0.81), 1);
+  assert.equal(U.bucketOf(1.0), 1);
+  assert.equal(U.bucketOf(1.2), 2);
+  assert.equal(U.bucketOf(1.5), 3);
+  assert.equal(U.bucketOf(2.0), 4);
+  assert.equal(U.bucketOf(2.01), 5);
+  assert.equal(U.tierOf(0.5, [1, 5]), 0);
+  assert.equal(U.tierOf(1, [1, 5]), 1);
+  assert.equal(U.tierOf(4.99, [1, 5]), 1);
+  assert.equal(U.tierOf(5, [1, 5]), 2);
+  assert.equal(U.snap05(1.23), 1.25);
+  assert.equal(U.snap05(0.01), 0.05);
+  assert.equal(U.snap05(0), 0);
+  assert.deepEqual(U.parseCellKey(U.cellKey("alpha quest", "claim", "ggsel")), { g: "alpha quest", f: "claim", m: "ggsel" });
+});
+
+test("readConfig: defaults, clamps, typos read as the default, only an explicit on turns it on", () => {
+  const d = M.readConfig({});
+  assert.equal(d.enabled, false);
+  assert.equal(d.horizonDaysNoclaim, 2);
+  assert.equal(d.cooldownH, 72);
+  assert.equal(d.fcCap, 5000);
+  assert.equal(d.intervalMin, 180);
+  assert.deepEqual(d.tierEdges, [1, 5]);
+  assert.equal(d.explore, true);
+  const c = M.readConfig({ listingBrain: { enabled: "yes", intervalMin: 5, maxStepPct: 500, shrinkK: "abc", tierEdges: [5, 1], explore: "off", policyPrice: "nonsense", minP7Scarce: 2 } });
+  assert.equal(c.enabled, true);
+  assert.equal(c.intervalMin, 30);
+  assert.equal(c.maxStepPct, 100);
+  assert.equal(c.shrinkK, 30);
+  assert.deepEqual(c.tierEdges, [1, 5]);
+  assert.equal(c.explore, false);
+  assert.equal(c.policyPrice, "curve");
+  assert.equal(c.minP7Scarce, 0.99);
+  assert.equal(M.readConfig({ listingBrain: { enabled: "true " } }).enabled, true);
+  assert.equal(M.readConfig({ listingBrain: { enabled: "on please" } }).enabled, false);
+  assert.ok(Object.isFrozen(M.DEFAULTS));
+});
+
+/* --------------------------------- evidence --------------------------------- */
+
+test("kind of row: plan §3 order — claim-at-sale is checked before origin", () => {
+  assert.equal(E.rowKindOf({ kind: "farm", o: "auto" }), "farm");
+  assert.equal(E.rowKindOf({ kind: "single", o: "auto", pack: 5 }), "bulk");
+  assert.equal(E.rowKindOf({ kind: "lot", o: "auto" }), "lot");
+  assert.equal(E.rowKindOf({ kind: "account", o: "auto" }), "account");
+  assert.equal(E.rowKindOf({ kind: "cas", o: "auto", script: true }), "cas");
+  assert.equal(E.rowKindOf({ kind: "single", o: "auto" }), "system");
+  assert.equal(E.rowKindOf({ kind: "single", o: "unclaimed" }), "system");
+  assert.equal(E.rowKindOf({ kind: "single", o: "manual" }), "hand");
+  assert.equal(E.rowKindOf({ kind: "single" }), "hand", "an unmarked row fails closed");
+  assert.equal(E.rowKindOf({ kind: "something-new", o: "auto" }), "hand");
+  const ev = E.buildEvidence(bundle({ listings: [L({ kind: "farm" }), L({ kind: "cas", o: "auto", script: true, m: "g2g" }), L({ o: "manual" }), L()] }), { cfg: CFG(), cut: NOW });
+  assert.equal(ev.rows.length, 3, "rent-farm rows are not even loaded");
+  assert.deepEqual(
+    ev.rows.map((r) => r.advisable),
+    [false, false, true],
+  );
+});
+
+test("exposure: Gameflip is capped 30 days after createdAt and an expired row is not live", () => {
+  const row = L({ c: NOW - 40 * DAY, u: NOW - DAY, st: "active" });
+  const ev = E.buildEvidence(bundle({ listings: [row] }), { cfg: CFG(), cut: NOW });
+  const R = ev.byId.get(row.id);
+  assert.equal(R.activeAtCut, false);
+  assert.ok(Math.abs(R.expo.days - 30) < 1e-9, String(R.expo.days));
+  assert.equal(R.expo.units, 0);
+});
+
+test("exposure: a sold row ends at its sale, never at updatedAt", () => {
+  const row = L({ c: NOW - 10 * DAY, u: NOW - DAY, st: "sold" });
+  const sale = S({ lid: row.id, t: NOW - 8 * DAY });
+  const ev = E.buildEvidence(bundle({ listings: [row], sales: [sale] }), { cfg: CFG(), cut: NOW });
+  const R = ev.byId.get(row.id);
+  assert.ok(Math.abs(R.expo.days - 2) < 1e-9);
+  assert.equal(R.expo.units, 1);
+  assert.equal(R.activeAtCut, false);
+});
+
+test("exposure: live rows count their exposure; a rebundle splits it; Eldorado dies at 21 days unsold", () => {
+  const live = L({ m: "ggsel", c: NOW - 5 * DAY, qty: 3 });
+  const rb = L({ m: "ggsel", c: NOW - 20 * DAY, rb: NOW - 10 * DAY, qty: 3 });
+  const eld = L({ m: "eldorado", c: NOW - 50 * DAY, st: "delisted", u: NOW - 2 * DAY });
+  const sales = [S({ lid: rb.id, m: "ggsel", t: NOW - 15 * DAY }), S({ lid: rb.id, m: "ggsel", t: NOW - 5 * DAY })];
+  const ev = E.buildEvidence(bundle({ listings: [live, rb, eld], sales }), { cfg: CFG(), cut: NOW });
+  const a = ev.byId.get(live.id);
+  assert.equal(a.activeAtCut, true);
+  assert.ok(Math.abs(a.expo.days - 5) < 1e-9);
+  const b = ev.byId.get(rb.id);
+  assert.ok(Math.abs(b.expo.days - 10) < 1e-9, "the part before rebundledAt is dropped");
+  assert.equal(b.expo.units, 1, "only the sale after the rebundle counts for the offer");
+  const c = ev.byId.get(eld.id);
+  assert.ok(Math.abs(c.expo.days - 21) < 1e-9, String(c.expo.days));
+  assert.equal(c.expo.endApprox, true);
+  // the sale before the rebundle is no evidence for the new contents, but still an order on the market
+  assert.equal((ev.idx.byMCk.get("ggsel|" + CK) || []).length, 1);
+  assert.equal((ev.idx.byM.get("ggsel") || []).length, 2);
+});
+
+test("orders: one per buyer order, never a hand/shop sale, never above $25", () => {
+  const sales = [
+    S({ grp: "A", p: 1.2, t: NOW - 3 * DAY }),
+    S({ grp: "A", p: 1.2, t: NOW - 3 * DAY + 1000 }),
+    S({ grp: "B", p: 1.4, src: "hand" }),
+    S({ grp: "C", p: 1.4, src: "shop" }),
+    S({ grp: "D", p: 99 }),
+    S({ grp: "E", p: 0 }),
+    S({ grp: "F", p: 1.6, t: NOW - 400 * DAY }),
+    S({ grp: "G", p: 1.8 }),
+  ];
+  const ev = E.buildEvidence(bundle({ sales }), { cfg: CFG(), cut: NOW });
+  assert.deepEqual(ev.orders.map((o) => o.p).sort(), [1.2, 1.8]);
+  assert.equal(ev.salesBefore.length, sales.length, "every unit is still demand");
+});
+
+test("orders: a rent-farm row's sales count as nothing; a pack's sales are demand, never a price", () => {
+  const farm = L({ kind: "farm", o: "manual", p: 12 });
+  const pack = L({ kind: "bulk", pack: 5, m: "eldorado", p: 6 });
+  const sales = [S({ lid: farm.id, p: 12 }), S({ lid: farm.id, p: 12 }), S({ lid: pack.id, m: "eldorado", p: 6 }), S({ p: 1.5 })];
+  const ev = E.buildEvidence(bundle({ listings: [farm, pack], sales }), { cfg: CFG(), cut: NOW });
+  assert.deepEqual(ev.orders.map((o) => o.p), [1.5]);
+  assert.equal(ev.salesBefore.length, 2, "the pack unit is still demand; the rent-farm windows are not");
+  assert.ok(!ev.rows.some((r) => r.id === farm.id));
+});
+
+test("ladders: an exact offer at two prices with a hand-made rung — not when all rows are auto", () => {
+  const b1 = bundle({ listings: [L({ m: "eldorado", p: 1 }), L({ m: "eldorado", p: 2, o: "manual" })] });
+  assert.ok(E.buildEvidence(b1, { cfg: CFG(), cut: NOW }).ladders.has("eldorado|" + CK));
+  const b2 = bundle({ listings: [L({ m: "eldorado", p: 1 }), L({ m: "eldorado", p: 2 })] });
+  assert.equal(E.buildEvidence(b2, { cfg: CFG(), cut: NOW }).ladders.size, 0);
+});
+
+/* ----------------------------------- ref ------------------------------------ */
+
+test("ref cascade: exact here is high; on a listing-now market medium at best", () => {
+  const sales = [];
+  for (let i = 0; i < 4; i++) sales.push(S({ p: 1 + i * 0.1 }), S({ m: "eldorado", p: 2 }));
+  const { ev } = ctxOf(bundle({ sales }));
+  const gf = RF.refFor(ev, { g: G, m: "gameflip", ck: CK, bk: BK, ex: true, n: 1 });
+  assert.equal(gf.basis, "exact-here");
+  assert.equal(gf.conf, "high");
+  assert.equal(gf.ref, 1.15);
+  assert.equal(gf.n, 4);
+  const el = RF.refFor(ev, { g: G, m: "eldorado", ck: CK, bk: BK, ex: true, n: 1 });
+  assert.equal(el.basis, "exact-here");
+  assert.equal(el.conf, "medium");
+  assert.equal(RF.refFor(ev, { g: G, m: "gameflip", ck: CK, bk: BK, ex: true, n: 1 }), gf, "memoised per offer");
+});
+
+test("ref cascade: band here is low under 8 orders, medium from 8", () => {
+  const mk = (n) => Array.from({ length: n }, () => S({ ck: "s:other", p: 1.3 }));
+  const low = RF.refFor(ctxOf(bundle({ sales: mk(3) })).ev, { g: G, m: "gameflip", ck: CK, bk: BK, ex: true, n: 1 });
+  assert.equal(low.basis, "band-here");
+  assert.equal(low.conf, "low");
+  const med = RF.refFor(ctxOf(bundle({ sales: mk(8) })).ev, { g: G, m: "gameflip", ck: CK, bk: BK, ex: true, n: 1 });
+  assert.equal(med.conf, "medium");
+});
+
+test("ref cascade: translated is medium from two markets, low from one, never from a blocked one", () => {
+  // the translator's venue-median fallback needs ≥ 10 orders a side
+  const filler = [];
+  for (const m of ["gameflip", "ggsel", "eldorado", "digiseller"]) for (let i = 0; i < 12; i++) filler.push(S({ m, g: "beta", ck: "s:b" + i, bk: "beta|1", p: 1.5 }));
+  const two = bundle({ sales: filler.concat([S({ m: "ggsel", p: 1.4 }), S({ m: "eldorado", p: 1.6 })]) });
+  const r2 = RF.refFor(ctxOf(two).ev, { g: G, m: "gameflip", ck: CK, bk: BK, ex: true, n: 1 });
+  assert.equal(r2.basis, "translated");
+  assert.equal(r2.conf, "medium");
+  const one = bundle({ sales: filler.concat([S({ m: "ggsel", p: 1.4 })]) });
+  const r1 = RF.refFor(ctxOf(one).ev, { g: G, m: "gameflip", ck: CK, bk: BK, ex: true, n: 1 });
+  assert.equal(r1.basis, "translated");
+  assert.equal(r1.conf, "low");
+  // Digiseller is history only: its sale of these exact items never prices Gameflip
+  const blocked = bundle({ sales: filler.concat([S({ m: "digiseller", p: 1.4 }), S({ m: "digiseller", p: 1.4, grp: "x2" })]) });
+  const rb = RF.refFor(ctxOf(blocked).ev, { g: G, m: "gameflip", ck: CK, bk: BK, ex: true, n: 1 });
+  assert.notEqual(rb.basis, "translated");
+});
+
+test("ref cascade: rivals (Gameflip/GGSel only, same radar band) then venue; both capped at the market p75", () => {
+  const feed = [1, 1.2, 1.4, 9].map((p, i) => ({ g: G, m: "gameflip", p, u: 1, n: 1, t: NOW - (i + 1) * DAY }));
+  const venue = [];
+  for (let i = 0; i < 12; i++) venue.push(S({ g: "beta", ck: "s:v" + i, bk: "beta|1", p: 1 + i * 0.1 }));
+  const b = bundle({ sales: venue, radar: { at: NOW, games: [], feed } });
+  const { ev } = ctxOf(b);
+  const r = RF.refFor(ev, { g: G, m: "gameflip", ck: CK, bk: BK, ex: true, n: 1 });
+  assert.equal(r.basis, "rivals");
+  assert.equal(r.conf, "low");
+  assert.equal(r.ref, 1.3);
+  const big = RF.refFor(ev, { g: G, m: "gameflip", ck: "s:big", bk: G + "|31+", ex: true, n: 40 });
+  assert.equal(big.basis, "venue", "a 40-item offer never borrows the 1-item rivals' median");
+  assert.equal(big.conf, "none");
+  // a venue anchor above the p75 is cut to it
+  const hi = [];
+  for (let i = 0; i < 12; i++) hi.push(S({ g: "beta", ck: "s:h" + i, bk: "beta|1", m: "ggsel", p: i < 9 ? 1 : 10 }));
+  const r2 = RF.refFor(ctxOf(bundle({ sales: hi })).ev, { g: "gamma", m: "ggsel", ck: null, bk: "gamma|1", ex: false, n: 1 });
+  assert.equal(r2.basis, "venue");
+  assert.ok(r2.ref <= RF.marketP75(ctxOf(bundle({ sales: hi })).ev, "ggsel"));
+  // the ceiling is the market's highest order
+  assert.equal(r.ceiling, 2.1);
+});
+
+test("ref: the p75 cap binds a translated anchor and says so", () => {
+  const sales = [];
+  for (let i = 0; i < 12; i++) sales.push(S({ g: "beta", ck: "s:c" + i, bk: "beta|1", m: "gameflip", p: 1 }), S({ g: "beta", ck: "s:d" + i, bk: "beta|1", m: "eldorado", p: 1 }));
+  sales.push(S({ m: "eldorado", p: 4 }), S({ m: "ggsel", p: 4 }));
+  const r = RF.refFor(ctxOf(bundle({ sales })).ev, { g: G, m: "gameflip", ck: CK, bk: BK, ex: true, n: 1 });
+  assert.equal(r.basis, "translated");
+  assert.equal(r.capped, true);
+  assert.equal(r.ref, 1);
+});
+
+/* ---------------------------------- hazard ---------------------------------- */
+
+test("hazard: under minSales a market has no estimate at all; every bucket is unpickable", () => {
+  // a reference price from five orders with no row, and only two sold rows behind the curve
+  const c = curve({ nSold: 2, nLive: 3 });
+  const refOrders = Array.from({ length: 5 }, () => S({ p: 1.5, t: NOW - 60 * DAY }));
+  const { hz } = ctxOf(bundle({ listings: c.listings, sales: c.sales.concat(refOrders) }));
+  assert.equal(hz.claim.markets.gameflip.S, 2);
+  assert.ok(hz.claim.markets.gameflip.D > 0);
+  assert.equal(hz.claim.markets.gameflip.h, null);
+  assert.equal(H.hazardAt(hz.claim, "gameflip", 0, 1), null);
+  assert.equal(H.evidenced(hz.claim, "gameflip", 1), false);
+});
+
+test("hazard: shrunk, non-increasing in price, interpolated log-linearly and flat beyond the ends", () => {
+  // cheap rows that sold slowly, dear rows that sold fast: raw hazard RISES with price — PAVA pools it
+  const listings = [];
+  const sales = [];
+  for (let i = 0; i < 6; i++) {
+    const r = L({ p: 1.0, st: "sold", c: NOW - 40 * DAY });
+    listings.push(r);
+    sales.push(S({ lid: r.id, p: 1.0, t: NOW - 20 * DAY }));
+  }
+  for (let i = 0; i < 6; i++) {
+    const r = L({ p: 1.0 * 1.4, st: "sold", c: NOW - 40 * DAY });
+    listings.push(r);
+    sales.push(S({ lid: r.id, p: 1.4, t: NOW - 39 * DAY }));
+  }
+  const { hz } = ctxOf(bundle({ listings, sales }));
+  const mk = hz.claim.markets.gameflip;
+  assert.equal(mk.S, 12);
+  const raws = mk.buckets.map((b) => b.hRaw);
+  assert.ok(raws[3] > raws[1], "the raw curve violates monotonicity in this data");
+  for (let i = 1; i < 6; i++) assert.ok(mk.buckets[i].h <= mk.buckets[i - 1].h + 1e-12, "pooled curve is non-increasing");
+  for (let t = 0; t < 3; t++) for (let i = 1; i < 6; i++) assert.ok(mk.buckets[i].tiers[t].h <= mk.buckets[i - 1].tiers[t].h + 1e-12);
+  // shrinkage: an empty bucket sits at the market's own rate (K listing-days of it)
+  assert.ok(Math.abs(mk.buckets[0].hRaw - mk.h) < 1e-12);
+  // interpolation between centres is between its neighbours; flat beyond the ends
+  const a = H.hazardAt(hz.claim, "gameflip", null, 0.9);
+  const b = H.hazardAt(hz.claim, "gameflip", null, 1.1);
+  const mid = H.hazardAt(hz.claim, "gameflip", null, 1.0);
+  assert.ok(mid <= a + 1e-12 && mid >= b - 1e-12);
+  assert.equal(H.hazardAt(hz.claim, "gameflip", null, 0.1), H.hazardAt(hz.claim, "gameflip", null, 0.7));
+  assert.equal(H.hazardAt(hz.claim, "gameflip", null, 9), H.hazardAt(hz.claim, "gameflip", null, 2.5));
+  const h = H.hazardAt(hz.claim, "gameflip", 0, 1);
+  assert.ok(Math.abs(H.pH(hz.claim, "gameflip", 0, 1, 7) - (1 - Math.exp(-7 * h))) < 1e-12);
+});
+
+test("hazard: ZeusX never enters a fit; hand-made rows only when they are the same items as a system row", () => {
+  const z = curve({ m: "zeusx" });
+  const hand = curve({ o: "manual", ck: "s:handonly", bk: G + "|2-3" });
+  const { hz } = ctxOf(bundle({ listings: z.listings.concat(hand.listings), sales: z.sales.concat(hand.sales) }));
+  assert.equal(hz.claim.markets.zeusx, undefined);
+  assert.equal(hz.claim.markets.gameflip, undefined, "hand-made rows of items no system row sells stay out of the curve");
+});
+
+/* ---------------------------------- price ----------------------------------- */
+
+function regimeOf(dr, extra = {}) {
+  const b = bundle(Object.assign({ demand: [DR(dr)] }, extra));
+  const ev = E.buildEvidence(b, { cfg: CFG(), cut: NOW });
+  return P.gameState(ev, G, dr.f || "claim");
+}
+
+test("regime table: scarce, balanced, overstock (cover, skip, fading), unknown (missing or stale)", () => {
+  assert.equal(regimeOf({ w: 4, on: 2 }).regime, "scarce");
+  assert.equal(regimeOf({ w: 4, on: 12 }).regime, "balanced");
+  assert.equal(regimeOf({ w: 1, on: 12 }).regime, "overstock");
+  assert.equal(regimeOf({ w: 4, on: 12, c: "skip" }).regime, "overstock");
+  assert.equal(regimeOf({ w: 4, on: 12, a30: 1, a45: 4 }).regime, "overstock");
+  assert.equal(regimeOf({ w: 0, on: 5 }).regime, "overstock");
+  assert.equal(regimeOf({ w: 4, on: 12, at: NOW - 7 * HOUR }).regime, "unknown", "older than maxDemandAgeH");
+  const ev = E.buildEvidence(bundle(), { cfg: CFG(), cut: NOW });
+  const gs = P.gameState(ev, G, "claim");
+  assert.equal(gs.unknown, true);
+  assert.match(gs.why, /farm-brain/);
+  // an ended campaign with the rivals gone reads scarce (claim)
+  const waves = [{ g: G, ev: "Ev", wave: "Week 1", startAt: NOW - 20 * DAY, endAt: NOW - 2 * DAY }];
+  const games = [{ key: G, rivalSellers: 1 }];
+  assert.equal(regimeOf({ w: 4, on: 12, live: false }, { noclaim: { units: [], waves }, radar: { at: NOW, games, feed: [] } }).regime, "scarce");
+  games[0].rivalSellers = 3;
+  assert.equal(regimeOf({ w: 4, on: 12, live: false }, { noclaim: { units: [], waves }, radar: { at: NOW, games, feed: [] } }).regime, "balanced");
+});
+
+test("regime precedence: an ended campaign with the rivals gone outranks fading; perishing stock outranks all", () => {
+  const waves = [{ g: G, ev: "Ev", wave: "Week 1", startAt: NOW - 20 * DAY, endAt: NOW - 2 * DAY }];
+  const games = [{ key: G, rivalSellers: 0 }];
+  const gs = regimeOf({ w: 4, on: 12, live: false, a30: 0.5, a45: 2 }, { noclaim: { units: [], waves }, radar: { at: NOW, games, feed: [] } });
+  assert.equal(gs.regime, "scarce");
+  assert.ok(gs.regimeWhy.some((w) => /Outranked: Fading/.test(w)));
+  // cover far over target still wins over an ended campaign
+  assert.equal(regimeOf({ w: 1, on: 40, live: false }, { noclaim: { units: [], waves }, radar: { at: NOW, games, feed: [] } }).regime, "overstock");
+  // no-claim: a thin shelf of perishing stock is overstock, not scarce
+  const live = [{ g: G, ev: "Ev", wave: "Week 2", startAt: NOW - 5 * DAY, endAt: NOW + 10 * HOUR }];
+  assert.equal(regimeOf({ f: "noclaim", w: 9, on: 1 }, { noclaim: { units: [], waves: live } }).regime, "overstock");
+});
+
+test("no-claim: stock close to expiry is overstock and its horizon is cut to the time left", () => {
+  const waves = [{ g: G, ev: "Ev", wave: "Week 1", startAt: NOW - 10 * DAY, endAt: NOW + 20 * HOUR }];
+  const units = [{ g: G, m: "gameflip", st: "listed", l: NOW - 2 * DAY, s: null, p: 0, sm: null, x: null, lids: [], bk: "", camps: ["Ev Week 1"] }];
+  const gs = regimeOf({ f: "noclaim", w: 4, on: 2 }, { noclaim: { units, waves } });
+  assert.equal(gs.regime, "overstock", "sells now or expires (beats a thin shelf)");
+  assert.ok(gs.perishDays < 1 && gs.perishDays > 0.8);
+  const ev = E.buildEvidence(bundle({ demand: [DR({ f: "noclaim" })], noclaim: { units, waves } }), { cfg: CFG(), cut: NOW });
+  assert.ok(Math.abs(P.horizonFor(ev, "noclaim", P.gameState(ev, G, "noclaim")) - 20 / 24) < 1e-9);
+  // the claim window is learned from expired units: expiredAt − wave end
+  const old = [{ g: G, ev: "Old", wave: "Week 1", startAt: NOW - 60 * DAY, endAt: NOW - 40 * DAY }];
+  const exp = [3, 5, 7].map((d) => ({ g: G, m: "gameflip", st: "expired", l: NOW - 50 * DAY, s: null, p: 0, x: NOW - (40 - d) * DAY, lids: [], camps: ["Old Week 1"] }));
+  const ev2 = E.buildEvidence(bundle({ noclaim: { units: exp, waves: old } }), { cfg: CFG(), cut: NOW });
+  assert.equal(ev2.noclaim.claimWindowByGame.get(G), 5);
+});
+
+test("candidates: ref grid, floor, p25 and ask; snapped, inside [floor, ceiling]", () => {
+  const c = P.candidates({ ref: 1.5, ceiling: 2.5, p25: 1.12 }, 0.75, [1.12, 1.83]);
+  assert.ok(c.every((p) => p >= 0.75 && p <= 2.5));
+  assert.ok(c.includes(0.75) && c.includes(1.5) && c.includes(1.1) && c.includes(1.85));
+  assert.ok(!c.includes(3), "2.0 × ref is above the ceiling");
+  assert.deepEqual(c, c.slice().sort((a, b) => a - b));
+  assert.deepEqual(P.candidates({ ref: null }, 0.75), []);
+  // a floor off the grid stays the floor (Digiseller's $1.28), nothing under it
+  assert.ok(P.candidates({ ref: 1.3, ceiling: 3 }, 1.28).every((p) => p >= 1.28));
+});
+
+/** One live claim Gameflip row priced against a curve; returns its offer verdict. */
+function verdictFor({ curveOpts = {}, live = {}, dr = {}, cfg = CFG(), prior = new Map(), extraSales = [], extraListings = [], m = "gameflip", base } = {}) {
+  const c = curve(Object.assign({ m }, curveOpts));
+  const row = L(Object.assign({ m, p: 1.5, c: NOW - 2 * DAY }, live));
+  const b = bundle({ listings: c.listings.concat([row], extraListings), sales: c.sales.concat(extraSales), demand: [DR(dr)] });
+  const ctx = ctxOf(b, cfg, prior);
+  const R = ctx.ev.byId.get(row.id);
+  const v = P.priceOffer(ctx, { g: G, f: "claim", m, ck: CK, bk: BK, ex: true, n: 1, band: "1", live: [R], base, ladder: ctx.ev.ladders.has(m + "|" + CK) });
+  return { v, ctx, R, row };
+}
+
+test("price: the gate order is confidence → raise rule → step → GGSel raise-only → floor last", () => {
+  // a raise past every gate: no orders at the higher price (raise rule), then the step limit
+  const { v } = verdictFor({ curveOpts: { soldP: 3, liveP: 3, nLive: 0, sellDays: 0.2 }, live: { p: 1.0 }, dr: { w: 4, on: 12 } });
+  assert.equal(v.conf, "high");
+  assert.ok(v.raw > 1.35, String(v.raw));
+  const order = ["confidence", "raise-rule", "step", "ggsel-raise-only", "floor"];
+  const seen = v.gates.filter((g) => order.includes(g));
+  assert.deepEqual(seen, seen.slice().sort((a, b) => order.indexOf(a) - order.indexOf(b)));
+  // the ten $3 orders are evidence at the raise, so the raise rule passes and the step limit binds
+  assert.ok(v.gates.includes("step"), v.gates.join(","));
+  assert.equal(v.p, U.floor05(1.0 * 1.35));
+  assert.equal(v.live[0].a, "raise");
+});
+
+test("price: a raise needs orders here at or above it — else it is cut back to the base, with a test unit", () => {
+  // ref 1.50 from ten fast sales; five dearer rows (x = 1.5) also sold fast, but UNPRICED: the curve
+  // says the higher price sells, yet no buyer order stands at or above it on this market
+  const build = (pricedDear) => {
+    const listings = [];
+    const sales = [];
+    for (let i = 0; i < 10; i++) {
+      const r = L({ p: 1.5, st: "sold", c: NOW - (30 + i) * DAY });
+      listings.push(r);
+      sales.push(S({ lid: r.id, p: 1.5, t: r.c + DAY }));
+    }
+    for (let i = 0; i < 5; i++) {
+      const r = L({ p: 2.25, st: "sold", c: NOW - (20 + i) * DAY });
+      listings.push(r);
+      sales.push(S({ lid: r.id, p: i < pricedDear ? 2.25 : 0, t: r.c + DAY }));
+    }
+    // another game's $3 order lifts the market's ceiling (its highest order) without being evidence
+    // for this game's band
+    sales.push(S({ g: "other", ck: "s:other", bk: "other|1", p: 3 }));
+    const row = L({ p: 1.5, c: NOW - 0.5 * DAY });
+    listings.push(row);
+    const ctx = ctxOf(bundle({ listings, sales, demand: [DR({ w: 4, on: 12 })] }));
+    const R = ctx.ev.byId.get(row.id);
+    return P.priceOffer(ctx, { g: G, f: "claim", m: "gameflip", ck: CK, bk: BK, ex: true, n: 1, band: "1", live: [R] });
+  };
+  const cut = build(0);
+  assert.equal(cut.conf, "high");
+  assert.ok(cut.raw > 1.5, "the curve wants more than the ask");
+  assert.ok(cut.gates.includes("raise-rule"));
+  assert.equal(cut.p, 1.5, "cut back to the base");
+  assert.equal(cut.live[0].a, "test", "worth one test unit, not the row's whole stock");
+  assert.ok(cut.live[0].p > 1.5 && cut.live[0].p <= U.floor05(1.5 * 1.35));
+  // two priced orders at the dearer price are the evidence a raise needs; the step limit still binds
+  const ok = build(2);
+  assert.ok(!ok.gates.includes("raise-rule"), ok.gates.join(","));
+  assert.ok(ok.gates.includes("step"));
+  assert.equal(ok.p, U.floor05(1.5 * 1.35));
+  assert.equal(ok.live[0].a, "raise");
+});
+
+/** A curve with evidence at x ≈ 1.0 (fast) and x ≈ 1.5 (slower, priced), ceiling lifted to $3. */
+function slopeCtx(dr, { dear = 4, dearDays = 3 } = {}) {
+  const listings = [];
+  const sales = [];
+  for (let i = 0; i < 10; i++) {
+    const r = L({ p: 1.5, st: "sold", c: NOW - (30 + i) * DAY });
+    listings.push(r);
+    sales.push(S({ lid: r.id, p: 1.5, t: r.c + DAY }));
+  }
+  for (let i = 0; i < dear; i++) {
+    const r = L({ p: 2.25, st: "sold", c: NOW - (20 + i) * DAY });
+    listings.push(r);
+    sales.push(S({ lid: r.id, p: 2.25, t: r.c + dearDays * DAY }));
+  }
+  sales.push(S({ g: "other", ck: "s:other", bk: "other|1", p: 3 }));
+  return ctxOf(bundle({ listings, sales, demand: [DR(dr)] }));
+}
+
+test("price: a thin bucket is never picked, however well it scores", () => {
+  const ctx = slopeCtx({ w: 4, on: 12 }, { dear: 0 });
+  const v = P.priceOffer(ctx, { g: G, f: "claim", m: "gameflip", ck: CK, bk: BK, ex: true, n: 1, band: "1", live: null, base: null });
+  const best = v.cands.reduce((a, c) => (c.value !== null && (!a || c.value > a.value) ? c : a), null);
+  assert.equal(best.evid, false, "the best-scoring candidate sits in a thin bucket");
+  assert.ok(best.p > v.raw);
+  assert.ok(v.cands.find((c) => c.p === v.raw).evid);
+});
+
+test("price: each regime picks by its own rule (balanced max value, overstock fastest ≥ p25, scarce highest with pH ≥ min)", () => {
+  const pick = (dr) => {
+    const ctx = slopeCtx(dr);
+    return P.priceOffer(ctx, { g: G, f: "claim", m: "gameflip", ck: CK, bk: BK, ex: true, n: 1, band: "1", live: null, base: null });
+  };
+  const bal = pick({ w: 4, on: 12 });
+  assert.equal(bal.regime, "balanced");
+  const ev = bal.cands.filter((c) => c.evid);
+  assert.ok(ev.length >= 2);
+  const maxV = Math.max(...ev.map((c) => c.value));
+  assert.equal(bal.raw, Math.max(...ev.filter((c) => c.value === maxV).map((c) => c.p)));
+  const over = pick({ w: 1, on: 12 });
+  assert.equal(over.regime, "overstock");
+  const lb = 1.5; // the p25 of the orders behind exact-here
+  const okO = over.cands.filter((c) => c.evid && c.p >= lb - 1e-9);
+  const maxPH = Math.max(...okO.map((c) => c.pH));
+  assert.equal(over.raw, Math.max(...okO.filter((c) => c.pH === maxPH).map((c) => c.p)));
+  assert.ok(over.raw < bal.raw, "overstock sells faster than balanced here");
+  const sc = pick({ w: 4, on: 1 });
+  assert.equal(sc.regime, "scarce");
+  const okS = sc.cands.filter((c) => c.evid && c.pH >= CFG().minP7Scarce);
+  assert.equal(sc.raw, Math.max(...okS.map((c) => c.p)));
+});
+
+test("price: the venue median never raises a price", () => {
+  const venue = [];
+  for (let i = 0; i < 12; i++) venue.push(S({ g: "beta", ck: "s:v" + i, bk: "beta|1", p: 3 }));
+  const ev = E.buildEvidence(bundle({ sales: venue, demand: [DR({ g: "gamma", k: "gamma" })] }), { cfg: CFG(), cut: NOW });
+  const v = { k: "gamma", f: "claim", m: "gameflip", ck: null, bk: "gamma|1", conf: "medium", basis: "venue", cands: [], ref: 3 };
+  const c = P.gateChain({ ev, hz: {} }, v, { raw: 3, base: 1, floor: 0.75 });
+  assert.equal(c.p, 1);
+  assert.ok(c.gates.includes("raise-rule"));
+});
+
+test("price: GGSel is raise-only, and the floor (with the row's own minimum) is applied last", () => {
+  const ev = E.buildEvidence(bundle(), { cfg: CFG(), cut: NOW });
+  const v = { k: G, f: "claim", m: "ggsel", ck: CK, bk: BK, conf: "high", basis: "exact-here", cands: [], ref: 1 };
+  const c = P.gateChain({ ev, hz: {} }, v, { raw: 0.6, base: 1.2, floor: 0.75 });
+  assert.equal(c.p, 1.2);
+  assert.deepEqual(c.gates, ["step", "ggsel-raise-only"], "in the plan's order");
+  const c1 = P.gateChain({ ev, hz: {} }, v, { raw: 1.0, base: 1.2, floor: 0.75 });
+  assert.deepEqual([c1.p, c1.gates], [1.2, ["ggsel-raise-only"]]);
+  const v2 = Object.assign({}, v, { m: "gameflip" });
+  const c2 = P.gateChain({ ev, hz: {} }, v2, { raw: 0.6, base: 0.9, floor: 0.95 });
+  assert.equal(c2.p, 0.95);
+  assert.equal(c2.gates[c2.gates.length - 1], "floor");
+  // step limit down: 35 % below 2.00 is 1.30
+  const c3 = P.gateChain({ ev, hz: {} }, v2, { raw: 0.8, base: 2, floor: 0.75 });
+  assert.equal(c3.p, 1.3);
+  assert.ok(c3.gates.includes("step"));
+});
+
+test("price: below medium confidence the price is logged but every action is hold", () => {
+  // our offer: three orders of its band here (band-here, low); the curve comes from another band
+  const sales = Array.from({ length: 3 }, () => S({ ck: "s:other", p: 1 }));
+  const c = curve({ ck: "s:other2", bk: G + "|2-3", soldP: 1 });
+  const row = L({ p: 3, c: NOW - 2 * DAY });
+  const b = bundle({ listings: c.listings.concat([row]), sales: c.sales.concat(sales), demand: [DR()] });
+  const ctx = ctxOf(b);
+  const R = ctx.ev.byId.get(row.id);
+  const v = P.priceOffer(ctx, { g: G, f: "claim", m: "gameflip", ck: CK, bk: BK, ex: true, n: 1, band: "1", live: [R] });
+  assert.equal(CONF_OK(v.conf), false, v.conf);
+  if (v.p !== null) assert.ok(v.p > 0, "the price is still logged");
+  assert.equal(v.live[0].a, "hold");
+  assert.ok(v.gates.includes("confidence"));
+});
+const CONF_OK = (c) => U.CONF_RANK[c] >= U.CONF_RANK.medium;
+
+test("live action: a stale row comes down one rung (rule 5's missing half); on GGSel it holds", () => {
+  // fast sales at ref → expected days to sale ≈ 1; a row asking ref, listed 20 days, is stale
+  const { v } = verdictFor({ curveOpts: { soldP: 1.5, sellDays: 0.5, nLive: 0 }, live: { p: 1.5, c: NOW - 20 * DAY } });
+  assert.equal(v.live[0].stale, true);
+  assert.equal(v.live[0].a, "lower");
+  assert.ok(v.live[0].p < 1.5);
+  assert.ok(v.gates.includes("stale"));
+  const g = verdictFor({ m: "ggsel", curveOpts: { soldP: 1.5, sellDays: 0.5, nLive: 0 }, live: { p: 1.5, c: NOW - 20 * DAY, qty: 2 } });
+  assert.equal(g.v.live[0].stale, true);
+  assert.equal(g.v.live[0].a, "hold");
+  assert.ok(g.v.live[0].gates.includes("ggsel-raise-only"));
+});
+
+test("live action: cool-down holds a different move advised within cooldownH; the same move repeats", () => {
+  const opts = { curveOpts: { soldP: 1.5, sellDays: 0.5, nLive: 0 }, live: { p: 1.5, c: NOW - 20 * DAY } };
+  const first = verdictFor(opts);
+  assert.equal(first.v.live[0].a, "lower");
+  const id = first.row.id;
+  seq -= 0; // ids differ per call: rebuild with a prior keyed on the new row
+  const again = (prior) => {
+    const out = verdictFor(Object.assign({}, opts, { prior: new Map() }));
+    out.ctx.prior = prior(out.row.id);
+    return P.finishOffer(out.ctx, P.priceOffer(out.ctx, { g: G, f: "claim", m: "gameflip", ck: CK, bk: BK, ex: true, n: 1, band: "1", live: [out.R], defer: true }));
+  };
+  const flipped = again((rid) => new Map([[rid, { a: "raise", at: NOW - 10 * HOUR }]]));
+  assert.equal(flipped.live[0].a, "hold");
+  assert.ok(flipped.live[0].gates.includes("cool-down"));
+  const same = again((rid) => new Map([[rid, { a: "lower", at: NOW - 10 * HOUR }]]));
+  assert.equal(same.live[0].a, "lower");
+  const past = again((rid) => new Map([[rid, { a: "raise", at: NOW - 100 * HOUR }]]));
+  assert.equal(past.live[0].a, "lower");
+  assert.ok(id);
+});
+
+test("live action: a deliberate ladder is reported, never corrected", () => {
+  const { v } = verdictFor({ curveOpts: { soldP: 1.5, sellDays: 0.5, nLive: 0 }, live: { p: 1.5, c: NOW - 20 * DAY }, extraListings: [L({ p: 4, o: "manual", c: NOW - 3 * DAY })] });
+  assert.equal(v.ladder, true);
+  assert.equal(v.live[0].a, "ladder");
+});
+
+/* --------------------------------- the run ---------------------------------- */
+
+/** A small two-farm world: a measured claim game, a no-claim game, owner rows, a blocked market. */
+function world(over = {}) {
+  const c = curve({ soldP: 1.5, sellDays: 1, nLive: 3, liveP: 1.5, liveAge: 3 });
+  const gg = curve({ m: "ggsel", soldP: 1.4, sellDays: 2, nLive: 1, liveP: 1.4, liveAge: 3 });
+  const listings = c.listings.concat(gg.listings, [
+    // owner rows: hand-made, claim-at-sale (with a big quantity), a pack, a blocked-market row
+    L({ o: "manual", m: "eldorado", ck: "s:hand", p: 2 }),
+    L({ kind: "cas", o: "manual", m: "g2g", ck: "s:cas", qty: 50, p: 2 }),
+    L({ kind: "cas", o: "auto", script: true, m: "g2g", ck: "s:script", p: 2 }),
+    L({ kind: "bulk", pack: 5, m: "eldorado", p: 6 }),
+    L({ m: "digiseller", p: 1.3 }),
+    // the no-claim game
+    L({ g: "beta", gl: "Beta", f: "noclaim", o: "unclaimed", ck: "s:b1", bk: "beta|1", n: 1, p: 1.25 }),
+    L({ g: "beta", gl: "Beta", f: "noclaim", o: "unclaimed", ck: "s:b3", bk: "beta|2-3", n: 3, p: 1.0 }),
+  ]);
+  const sales = c.sales.concat(gg.sales, [S({ m: "digiseller", p: 1.3 })]);
+  const b = bundle(
+    Object.assign(
+      {
+        listings,
+        sales,
+        demand: [DR({ w: 4, on: 14 }), DR({ k: "beta", f: "noclaim", w: 5, on: 6 })],
+        old: {
+          games: { [G]: { base: 1.25, ggsel: 1.1, post: 1.75, split: { listNow: 7, holdBack: 7 }, flat: { gameflip: 4, ggsel: 3 }, order: ["gameflip", "ggsel"] } },
+          offers: { ["gameflip|" + CK]: { np: 1.25, tracker: { price: 1.35, basis: "x", confidence: "medium" } }, ["gameflip|s:b1"]: { np: 1.25 }, ["gameflip|s:b3"]: { np: 1.75 } },
+        },
+      },
+      over,
+    ),
+  );
+  return b;
+}
+
+test("never advised: hand-made, claim-at-sale (any origin), bulk, blocked-market rows get no forecast and no move", () => {
+  const b = world();
+  const run = M.buildRun(b);
+  const ev = run.ctx.ev;
+  const advisedIds = new Set(run.fc.map((f) => f.l));
+  for (const R of ev.rows) {
+    if (R.hand || R.cas || R.rk === "bulk" || R.blocked) assert.ok(!advisedIds.has(R.id), R.rk + " " + R.m);
+  }
+  for (const o of run.offers) for (const l of o.live) assert.ok(ev.byId.get(l.id).advisable, "only system-made rows are live entries");
+  const dig = run.rows.find((r) => r.k === G && r.f === "claim" && r.m === "digiseller");
+  assert.equal(dig.pc, "managed");
+  assert.equal(dig.sc, "closed");
+  assert.ok(dig.fl.includes("blocked"));
+  assert.equal(dig.br.p, null, "a blocked market gets no price");
+});
+
+test("claim-at-sale quantities are never summed as stock; script rows are counted apart", () => {
+  const run = M.buildRun(world());
+  const g2g = run.rows.find((r) => r.k === G && r.f === "claim" && r.m === "g2g");
+  assert.equal(g2g.old.n, 0);
+  assert.equal(g2g.old.cur, 0);
+  assert.equal(g2g.ev.scr, 1);
+  assert.ok(g2g.fl.includes("script"));
+  const all = run.rows.find((r) => r.k === G && r.f === "claim" && r.m === "all");
+  // only system-made live rows are stock on a shelf: the 50-unit claim-at-sale row adds nothing
+  const ev = run.ctx.ev;
+  const expect = ev.rows.filter((r) => r.k !== null && r.g === G && r.f === "claim" && r.system && r.activeAtCut).reduce((a, r) => a + E.shelfUnits(r), 0);
+  assert.equal(all.old.cur, expect);
+  assert.ok(expect < 50);
+});
+
+test("a blocked market never teaches another: Digiseller orders never move Gameflip's reference", () => {
+  const b = bundle({ sales: [S({ m: "digiseller", p: 9 }), S({ m: "digiseller", p: 9 }), S({ m: "digiseller", p: 9 })], demand: [DR()] });
+  const run = M.buildRun(b);
+  const r = RF.refFor(run.ctx.ev, { g: G, m: "gameflip", ck: CK, bk: BK, ex: true, n: 1 });
+  assert.equal(r.ref, null);
+  const d = RF.refFor(run.ctx.ev, { g: G, m: "digiseller", ck: CK, bk: BK, ex: true, n: 1 });
+  assert.equal(d.basis, "exact-here", "its own history still describes itself");
+});
+
+test("no-claim bundle order: a bigger bundle is lifted to a smaller one's price, never under the sold floor", () => {
+  const b = world();
+  const ctx = ctxOf(b);
+  const ev = ctx.ev;
+  const r1 = ev.rows.find((r) => r.ck === "s:b1");
+  const r3 = ev.rows.find((r) => r.ck === "s:b3");
+  const v1 = P.priceOffer(ctx, { g: "beta", f: "noclaim", m: "gameflip", ck: "s:b1", bk: "beta|1", ex: true, n: 1, band: "1", live: [r1], defer: true });
+  const v3 = P.priceOffer(ctx, { g: "beta", f: "noclaim", m: "gameflip", ck: "s:b3", bk: "beta|2-3", ex: true, n: 3, band: "2-3", live: [r3], defer: true });
+  // thin evidence: both start from today's price (the live ask here)
+  assert.ok(v1.thin && v3.thin);
+  P.applyContainment(ctx, [v3, v1]);
+  assert.ok(v3.p >= v1.p, v3.p + " vs " + v1.p);
+  assert.ok(v3.gates.includes("containment"));
+  // sold floor: a Gameflip sale of these exact 3 items at $2.40 in the last 30 days
+  const b2 = world({ sales: world().sales.concat([S({ g: "beta", f: "noclaim", o: "unclaimed", ck: "s:b3", bk: "beta|2-3", n: 3, p: 2.4, t: NOW - 5 * DAY })]) });
+  const ctx2 = ctxOf(b2);
+  const r3b = ctx2.ev.rows.find((r) => r.ck === "s:b3");
+  const v3b = P.priceOffer(ctx2, { g: "beta", f: "noclaim", m: "gameflip", ck: "s:b3", bk: "beta|2-3", ex: true, n: 3, band: "2-3", live: [r3b] });
+  assert.ok(v3b.p >= 2.4);
+  assert.ok(v3b.gates.includes("sold-floor"));
+});
+
+test("no-claim: a thin bundle starts from today's bundlePrice answer, not from nothing", () => {
+  const ctx = ctxOf(world());
+  const v = P.priceOffer(ctx, { g: "beta", f: "noclaim", m: "ggsel", ck: "s:new", bk: "beta|4-6", ex: true, n: 5, band: "4-6", live: null, base: 2.0 });
+  assert.equal(v.thin, true);
+  assert.equal(v.raw, 2.0);
+  assert.equal(v.p, 2.0);
+  assert.equal(v.action, "hold", "no evidence: logged, not acted on");
+});
+
+/* --------------------------------- placement -------------------------------- */
+
+test("eligibility classes: closed (blocked, switch off, floor above ref), unmeasured, open, unknown, managed", () => {
+  const sales = [S({ m: "playerauctions", p: 1.5 }), S({ m: "playerauctions", p: 1.5 }), S({ m: "playerauctions", p: 1.5 })];
+  const b = bundle({ sales, af: { takes: { gameflip: true, digiseller: false, ggsel: true, zeusx: true, eldorado: false, playerauctions: true, g2g: true }, mapped: { [G]: { g2g: true } } }, demand: [DR()] });
+  const ev = E.buildEvidence(b, { cfg: CFG(), cut: NOW });
+  const refByM = {};
+  for (const m of U.MARKETS) refByM[m] = RF.refFor(ev, { g: G, m, ck: CK, bk: BK, ex: true, n: 1 });
+  const el = PL.eligibility(ev, G, "claim", refByM);
+  assert.equal(el.digiseller.cls, "closed");
+  assert.equal(el.eldorado.cls, "closed", "switch off");
+  assert.equal(el.playerauctions.cls, "closed", "its $5 floor is above the $1.50 the offer sells for");
+  assert.equal(el.zeusx.cls, "unmeasured");
+  assert.equal(el.gameflip.cls, "open");
+  assert.equal(el.g2g.cls, "open", "mapped offline");
+  assert.equal(el.ggsel.cls, "unknown", "no category id, never listed there");
+  const b2 = bundle({ listings: [L({ m: "ggsel" })] });
+  assert.equal(PL.eligibility(E.buildEvidence(b2, { cfg: CFG(), cut: NOW }), G, "claim").ggsel.cls, "open", "a listing of ours proves the mapping");
+  const nc = PL.eligibility(ev, G, "noclaim");
+  assert.equal(nc.eldorado.cls, "managed");
+  assert.equal(nc.g2g.cls, "managed");
+  assert.equal(nc.zeusx.cls, "closed");
+});
+
+test("eligibility: a market with no evidence of its own is closed when its floor beats any translation of the offer's price", () => {
+  // PlayerAuctions rows sit at the $5 floor and never sell; the offer fetches $1.50 on Gameflip
+  const c = curve({ soldP: 1.5, nLive: 0 });
+  const pa = L({ m: "playerauctions", p: 5, c: NOW - 20 * DAY });
+  const ev = E.buildEvidence(bundle({ listings: c.listings.concat([pa]), sales: c.sales, demand: [DR()] }), { cfg: CFG(), cut: NOW });
+  const refByM = {};
+  for (const m of U.MARKETS) refByM[m] = RF.refFor(ev, { g: G, m, ck: CK, bk: BK, ex: true, n: 1 });
+  assert.equal(refByM.playerauctions.ref, null, "no evidence of its own there");
+  const el = PL.eligibility(ev, G, "claim", refByM);
+  assert.equal(el.playerauctions.cls, "closed");
+  assert.match(el.playerauctions.why, /at most 1\.5×/);
+  assert.equal(el.gameflip.cls, "open");
+});
+
+test("placement: bulk is taken first, the greedy shelf follows Poisson marginal value, the rest is reserve", () => {
+  const b = world({ demandOnly: Array.from({ length: 6 }, (_, i) => ({ g: G, m: "eldorado", f: "claim", t: NOW - (i + 1) * 3 * DAY, src: "bulk" })) });
+  const run = M.buildRun(b);
+  const pl = run.ctx.placements.get(G + "|claim");
+  assert.equal(pl.bulkTake, Math.round(((6 * 7) / 30) * 14 / 7));
+  const placed = Object.values(pl.shelf).reduce((a, n) => a + n, 0);
+  assert.equal(placed + pl.reserve + pl.bulkTake, pl.stock);
+  // each placed unit was worth at least minMarginalUsd
+  for (const v of Object.values(pl.marginal)) assert.ok(v >= run.ctx.cfg.minMarginalUsd);
+  // greedy order: the market with the larger λ × net never holds fewer units than one with less
+  const fill = PL.greedyFill({ markets: ["gameflip", "ggsel"], mu: { gameflip: 4, ggsel: 1 }, nets: { gameflip: 1, ggsel: 1 }, avail: 6, minMarginal: 0.1 });
+  assert.ok(fill.shelf.gameflip > fill.shelf.ggsel);
+  assert.equal(fill.shelf.gameflip + fill.shelf.ggsel + fill.left, 6);
+  const stop = PL.greedyFill({ markets: ["gameflip"], mu: { gameflip: 0.5 }, nets: { gameflip: 1 }, avail: 10, minMarginal: 0.1 });
+  assert.ok(stop.left > 0, "units worth under the floor stay in reserve");
+  assert.ok(U.poissonTail(0.5, stop.shelf.gameflip + 1) * 1 < 0.1);
+});
+
+test("placement: at most one exploration unit, on an open market we never sold on, rivals first", () => {
+  const b = world({
+    af: { mapped: { [G]: { g2g: true } } },
+    radar: { at: NOW, games: [{ key: G, perWeek: 3, rivalSellers: 4, byMarket: { gameflip: { perWeek: 3 } } }], feed: [] },
+  });
+  const run = M.buildRun(b);
+  const pl = run.ctx.placements.get(G + "|claim");
+  assert.ok(pl.reserve >= 0);
+  const unproven = U.MARKETS.filter((m) => pl.elig[m] === "open" && !PL.provenOn(run.ctx.ev, G, "claim", m));
+  const explored = unproven.filter((m) => pl.shelf[m] > 0);
+  assert.ok(explored.length <= 1);
+  if (pl.explore) {
+    assert.equal(pl.shelf[pl.explore], 1);
+    assert.ok(!["zeusx"].includes(pl.explore) && pl.elig[pl.explore] === "open");
+  }
+  // never on unmeasured or unknown
+  for (const m of U.MARKETS) if (pl.elig[m] === "unmeasured" || pl.elig[m] === "unknown") assert.ok(!(pl.shelf[m] > 0));
+  const off = M.buildRun(b, { cfg: CFG({ explore: false }) }).ctx.placements.get(G + "|claim");
+  assert.equal(off.explore, null);
+});
+
+test("placement with no market proven by our sales: split by rivals' sales, else exploration only — never a guess", () => {
+  // a game with a forecast, an offer priced on Gameflip (orders of another game set the venue level),
+  // and no sale of its own anywhere
+  const venue = Array.from({ length: 12 }, (_, i) => S({ g: "beta", ck: "s:v" + i, bk: "beta|1", p: 1.5 }));
+  const row = L({ g: "gamma", gl: "Gamma", ck: "s:g1", bk: "gamma|1", c: NOW - 2 * DAY });
+  const base = { listings: [row], sales: venue, demand: [DR({ k: "gamma", w: 6, on: 10 })], old: { games: { gamma: { base: 1.5, ggsel: 1.4, flat: { gameflip: 5 } } }, offers: {} } };
+  const radar = { at: NOW, games: [{ key: "gamma", perWeek: 4, rivalSellers: 3, byMarket: { gameflip: { perWeek: 3 }, ggsel: { perWeek: 1 } } }], feed: [] };
+  const withRadar = M.buildRun(bundle(Object.assign({}, base, { radar, af: { mapped: { gamma: { ggsel: true } } } }))).ctx.placements.get("gamma|claim");
+  assert.ok(withRadar.flags.includes("radar-split"));
+  assert.ok(Math.abs(withRadar.lambda.gameflip - 4.5) < 1e-6 && Math.abs(withRadar.lambda.ggsel - 1.5) < 1e-6);
+  const blind = M.buildRun(bundle(base)).ctx.placements.get("gamma|claim");
+  assert.ok(blind.flags.includes("unproven"));
+  const placed = Object.values(blind.shelf).reduce((a, n) => a + n, 0);
+  assert.ok(placed <= 1, "only the exploration unit");
+});
+
+test("no-claim: a thin live bundle starts from today's bundlePrice answer, not from its own ask", () => {
+  const ctx = ctxOf(world());
+  const r3 = ctx.ev.rows.find((r) => r.ck === "s:b3");
+  const v = P.priceOffer(ctx, { g: "beta", f: "noclaim", m: "gameflip", ck: "s:b3", bk: "beta|2-3", ex: true, n: 3, band: "2-3", live: [r3], np: 1.75 });
+  assert.equal(v.thin, true);
+  assert.equal(v.raw, 1.75);
+  assert.equal(v.live[0].a, "hold", "confidence none: logged, never acted on");
+});
+
+test("placement flags: anchor when Gameflip gets nothing; fee-assumed with the equal-fee shelf logged", () => {
+  const b = world();
+  const run = M.buildRun(b);
+  const pl = run.ctx.placements.get(G + "|claim");
+  assert.ok(pl.flags.includes("fee-assumed"));
+  assert.equal(typeof pl.shEq, "object");
+  const gf = run.rows.find((r) => r.k === G && r.f === "claim" && r.m === "gameflip");
+  assert.ok(gf.fl.includes("fee-assumed"));
+  assert.ok(gf.br.she !== undefined);
+  // Gameflip priced out of the shelf: its net is zero
+  const pl0 = PL.placeGame(run.ctx, Object.assign({}, pl.input, { nets: Object.assign({}, pl.input.nets, { gameflip: 0 }), stock: 10 }));
+  assert.equal(pl0.shelf.gameflip, 0);
+  assert.ok(pl0.flags.includes("anchor"));
+});
+
+test("no-claim placement: only Gameflip/Digiseller/GGSel; an explicit cap is the owner's (managed)", () => {
+  const b = world({ af: { caps: { beta: 20 } } });
+  const run = M.buildRun(b);
+  const pl = run.ctx.placements.get("beta|noclaim");
+  assert.equal(pl.managed, true);
+  assert.equal(pl.cap, 20);
+  for (const m of ["zeusx", "eldorado", "playerauctions", "g2g"]) assert.ok(!(pl.shelf[m] > 0));
+  const all = run.rows.find((r) => r.k === "beta" && r.m === "all");
+  assert.equal(all.old.cap, 20);
+  assert.ok(all.fl.includes("managed"));
+  const gf = run.rows.find((r) => r.k === "beta" && r.f === "noclaim" && r.m === "gameflip");
+  assert.equal(gf.sc, "managed");
+  const def = M.buildRun(world()).rows.find((r) => r.k === "beta" && r.m === "all");
+  assert.equal(def.old.cap, 70);
+  assert.equal(def.old.capExplicit, false);
+});
+
+test("fail-safe: no fresh farm-brain row → regime unknown, every row hold, no shelf advice", () => {
+  const b = world({ demand: [DR({ at: NOW - 30 * HOUR })] });
+  const run = M.buildRun(b);
+  const cells = run.rows.filter((r) => r.k === G && r.f === "claim" && r.m !== "all");
+  assert.ok(cells.length > 0);
+  for (const r of cells) {
+    assert.equal(r.br.rg, "unknown");
+    assert.equal(r.br.p, null);
+    assert.ok(["unknown", "closed", "managed"].includes(r.sc), r.m + " " + r.sc);
+    assert.equal(r.br.a.lower + r.br.a.raise + r.br.a.test, 0);
+  }
+  for (const f of run.fc.filter((x) => x.k === G && x.f === "claim")) assert.equal(f.a, "hold");
+  assert.equal(run.ctx.placements.get(G + "|claim").unknown, true);
+  const s = M.shelfForRun(run, { game: "Alpha Quest", farm: "claim", stock: 9 });
+  assert.deepEqual(s.shelf, {});
+  assert.equal(s.reserve, 9);
+});
+
+/* ------------------------------ classes, summary ---------------------------- */
+
+test("price and shelf classes", () => {
+  const cfg = CFG();
+  assert.equal(M.priceClass(1.5, 1.55, { cfg }), "agree");
+  assert.equal(M.priceClass(1.5, 1.2, { cfg }), "brain-lower");
+  assert.equal(M.priceClass(1.5, 2, { cfg }), "brain-higher");
+  assert.equal(M.priceClass(null, 2, { cfg }), "no-evidence");
+  assert.equal(M.priceClass(1.5, null, { cfg }), "no-evidence");
+  assert.equal(M.priceClass(1.5, 2, { cfg, managed: true }), "managed");
+  assert.equal(M.priceClass(1.5, 2, { cfg, ladder: true }), "ladder");
+  assert.equal(M.shelfClass(3, 4, {}), "agree");
+  assert.equal(M.shelfClass(3, 6, {}), "brain-more");
+  assert.equal(M.shelfClass(6, 3, {}), "brain-fewer");
+  assert.equal(M.shelfClass(0, 3, {}), "brain-add");
+  assert.equal(M.shelfClass(3, 0, {}), "brain-drop");
+  assert.equal(M.shelfClass(3, 0, { elig: "closed" }), "closed");
+  assert.equal(M.shelfClass(3, 0, { elig: "unmeasured" }), "unmeasured");
+  assert.equal(M.shelfClass(3, null, {}), "unknown");
+  assert.equal(M.shelfClass(3, 9, { managed: true }), "managed");
+  assert.deepEqual(M.PRICE_CLASSES, ["agree", "brain-lower", "brain-higher", "no-evidence", "managed", "ladder"]);
+});
+
+test("summary totals compare like with like: unknown cells are counted apart, never as zero", () => {
+  const rows = [
+    { f: "claim", m: "gameflip", pc: "agree", sc: "brain-more", old: { sh: 2, n: 2 }, br: { sh: 5, a: { hold: 2 }, wv: 1, wva: 0.5 }, fl: ["fee-assumed"] },
+    { f: "claim", m: "ggsel", pc: "no-evidence", sc: "unknown", old: { sh: 3, n: 0 }, br: { sh: null, a: {} }, fl: [] },
+    { f: "claim", m: "all", pc: "", sc: "", old: { sh: 5 }, br: { sh: 5, rsv: 4, bt: 1, rg: "balanced" }, fl: [] },
+  ];
+  const s = M.summarize(rows);
+  assert.equal(s.cells, 2);
+  assert.equal(s.games, 1);
+  assert.equal(s.shelf.claim.compared, 1);
+  assert.equal(s.shelf.claim.old, 2);
+  assert.equal(s.shelf.claim.brain, 5);
+  assert.equal(s.shelf.claim.unknownCells, 1);
+  assert.equal(s.shelf.claim.oldUnknown, 3);
+  assert.equal(s.shelf.claim.reserve, 4);
+  assert.equal(s.value.claim.compared, 1);
+  assert.equal(s.value.claim.old, 1);
+  assert.equal(s.value.claim.brain, 2);
+  assert.equal(s.byPrice.claim["no-evidence"], 1);
+  assert.equal(s.flags["fee-assumed"], 1);
+});
+
+/* ------------------------------ outputs, run -------------------------------- */
+
+test("outputs fail safe: no run, unknown market, blocked market, unknown game", () => {
+  assert.deepEqual(
+    { p: M.priceForRun(null, { marketplace: "gameflip", basePriceUsd: 1.25 }).price, c: M.priceForRun(null, { marketplace: "gameflip", basePriceUsd: 1.25 }).confidence },
+    { p: 1.25, c: "none" },
+  );
+  const s = M.shelfForRun(null, { game: "x", stock: 7 });
+  assert.deepEqual(s.shelf, {});
+  assert.equal(s.reserve, 7);
+  assert.equal(M.valueForRun(null, "x").value, null);
+  const run = M.buildRun(world());
+  assert.equal(M.priceForRun(run, { marketplace: "nowhere", basePriceUsd: 1 }).confidence, "none");
+  const d = M.priceForRun(run, { marketplace: "digiseller", basePriceUsd: 1.3, game: "Alpha Quest" });
+  assert.equal(d.price, 1.3);
+  assert.equal(d.confidence, "none");
+  const u = M.priceForRun(run, { marketplace: "gameflip", basePriceUsd: 1.1, game: "Nobody Plays This" });
+  assert.equal(u.price, 1.1);
+  assert.equal(u.confidence, "none");
+  assert.equal(M.shelfForRun(run, { game: "Nobody Plays This", farm: "claim", stock: 4 }).reserve, 4);
+});
+
+test("outputs answer from the run: a measured offer gets the brain's price; shelf and value per account", () => {
+  const run = M.buildRun(world());
+  const p = M.priceForRun(run, { marketplace: "gameflip", basePriceUsd: 1.25, game: "Alpha Quest", title: "Alpha Quest Twitch Drops (1 Items)" });
+  assert.ok(p.price > 0);
+  assert.ok(Array.isArray(p.reasons) && p.reasons.length <= 6);
+  if (U.CONF_RANK[p.confidence] < U.CONF_RANK.medium) assert.equal(p.price, 1.25);
+  const s = M.shelfForRun(run, { game: "Alpha Quest", farm: "claim", stock: 10 });
+  const placed = Object.values(s.shelf).reduce((a, n) => a + n, 0);
+  assert.equal(placed + s.reserve + s.bulkTake, 10);
+  const v = M.valueForRun(run, "alpha quest");
+  if (v.value !== null) {
+    const sum = Object.values(v.shares).reduce((a, n) => a + n, 0);
+    assert.ok(Math.abs(sum - 1) < 0.01);
+    assert.ok(v.value > 0);
+  }
+});
+
+test("priceFor is gated against the caller's base: never under it on GGSel", () => {
+  const run = M.buildRun(world());
+  const p = M.priceForRun(run, { marketplace: "ggsel", basePriceUsd: 2.4, game: "Alpha Quest", title: "Alpha Quest Twitch Drops (1 Items)" });
+  assert.ok(p.price >= 2.4, JSON.stringify(p));
+});
+
+test("a run is deterministic, the async run matches it, and every reason fits the log", async () => {
+  const b = world();
+  const before = JSON.stringify(b);
+  const a = M.buildRun(b);
+  const b2 = M.buildRun(JSON.parse(JSON.stringify(b)));
+  assert.equal(JSON.stringify(a.rows), JSON.stringify(b2.rows));
+  assert.equal(JSON.stringify(a.fc), JSON.stringify(b2.fc));
+  const c = await M.buildRunAsync(b);
+  assert.equal(JSON.stringify(c.rows), JSON.stringify(a.rows));
+  assert.equal(JSON.stringify(c.summary), JSON.stringify(a.summary));
+  for (const r of a.rows) {
+    assert.ok(Array.isArray(r.why) && r.why.length <= 6);
+    for (const w of r.why) assert.ok(w.length <= 160);
+    assert.ok(M.PRICE_CLASSES.includes(r.pc) || r.m === "all");
+    assert.ok(M.SHELF_CLASSES.includes(r.sc) || r.m === "all");
+  }
+  for (const f of a.fc) {
+    assert.equal(typeof f.l, "string");
+    assert.ok(f.p === null || (f.p >= 0 && f.p <= 1));
+    assert.ok(["hold", "lower", "raise", "test", "ladder"].includes(f.a));
+  }
+  assert.equal(JSON.stringify(b), before, "the bundle is never mutated");
+});
+
+test("heartbeat: one line, run number, model version, NOT LOGGED when the write failed", () => {
+  const run = M.buildRun(world());
+  const line = M.heartbeatText({ ms: 1500, v: 1, summary: run.summary }, run, true, { runs: 4 });
+  assert.ok(line.startsWith("listingBrain: run 4 (model v1) — claim "), line);
+  assert.ok(!line.includes("\n"));
+  assert.match(line, /live rows: hold\/lower\/raise\/test \d+\/\d+\/\d+\/\d+ \| 1\.5s$/);
+  const bad = M.heartbeatText({ ms: 10, v: 1, summary: run.summary }, run, false, { runs: 5 });
+  assert.ok(bad.endsWith(" | NOT LOGGED (write failed)"));
+});
+
+test("old side beside the brain: today's ask, new-listing price, flat shelf and tracker policy on the cell", () => {
+  const run = M.buildRun(world());
+  const gf = run.rows.find((r) => r.k === G && r.f === "claim" && r.m === "gameflip");
+  assert.equal(gf.old.a, 1.5);
+  assert.equal(gf.old.np, 1.25);
+  assert.equal(gf.old.sh, 4);
+  assert.equal(gf.pol.tracker, 1.35);
+  assert.equal(gf.pol.old, 1.5);
+  assert.ok(["agree", "brain-lower", "brain-higher", "no-evidence"].includes(gf.pc));
+  for (const p of M.PLACE_POLICIES) assert.ok(p in gf.pf);
+  // a cell with live rows counts them by action
+  const total = Object.values(gf.br.a).reduce((a, n) => a + n, 0);
+  assert.equal(total, 3);
+});
+
+test("purity: no clock, no randomness, no I/O in the model's source", () => {
+  const dir = path.join(__dirname, "..", "utils", "listingBrain");
+  const files = ["model.js"].concat(fs.readdirSync(path.join(dir, "model")).map((f) => path.join("model", f)));
+  const allowed = new Set(["../priceTracker/setIdentity", "../../priceTracker/stats", "../../priceTracker/venues", "../../priceTracker/analyze", "../../priceTracker/setIdentity", "../../farmSizing", "../../marketPricing"]);
+  for (const f of files) {
+    if (!f.endsWith(".js") || /score\.js$/.test(f)) continue;
+    const src = fs.readFileSync(path.join(dir, f), "utf8");
+    assert.ok(!/Date\.now\(|Math\.random\(|new Date\(\)/.test(src), f + " reads the clock or randomness");
+    assert.ok(!/setTimeout|setInterval/.test(src), f + " starts a timer");
+    if (!/util\.js$/.test(f)) assert.ok(!/setImmediate/.test(src), f + " yields outside util.yieldNow");
+    for (const m of src.matchAll(/require\("([^"]+)"\)/g)) {
+      const r = m[1];
+      if (r.startsWith("./")) continue;
+      assert.ok(allowed.has(r), f + " requires " + r);
+    }
+  }
+});
+
+test("performance: a 150-game bundle runs well inside a second and yields between phases", async () => {
+  const games = Array.from({ length: 150 }, (_, i) => "game " + i);
+  const listings = [];
+  const sales = [];
+  const demand = [];
+  let k = 0;
+  for (const g of games) {
+    demand.push(DR({ k: g, w: (k % 9) + 0.5, on: (k % 30) + 2 }), DR({ k: g, f: "noclaim", w: (k % 5) + 1, on: (k % 12) + 1 }));
+    for (let j = 0; j < 20; j++) {
+      const m = U.MARKETS[(k + j) % 7];
+      const f = j % 4 === 0 ? "noclaim" : "claim";
+      const ck = "s:" + g.replace(" ", "") + "x" + (j % 3);
+      const row = L({ g, gl: g, m, f, o: j % 10 === 0 ? "manual" : f === "claim" ? "auto" : "unclaimed", ck, bk: g + "|1", p: 1 + ((k + j) % 7) * 0.25, st: j % 3 === 0 ? (m === "gameflip" ? "sold" : "delisted") : "active", c: NOW - ((j * 4) % 80) * DAY - DAY, u: NOW - DAY, qty: 2 });
+      listings.push(row);
+      for (let s = 0; s < (j % 3 === 0 ? 2 : 1); s++) sales.push(S({ lid: row.id, g, m, f, o: row.o, ck, bk: g + "|1", p: row.p, t: row.c + (s + 1) * 0.5 * DAY }));
+    }
+    k++;
+  }
+  while (sales.length < 5000) {
+    const r = listings[sales.length % listings.length];
+    sales.push(S({ lid: r.id, g: r.g, m: r.m, f: r.f, o: r.o, ck: r.ck, bk: r.bk, p: r.p, t: r.c + 0.25 * DAY }));
+  }
+  const b = bundle({ listings, sales, demand });
+  M.buildRun(b); // warm the JIT
+  const t0 = process.hrtime.bigint();
+  const run = M.buildRun(b);
+  const ms = Number(process.hrtime.bigint() - t0) / 1e6;
+  assert.ok(run.rows.length > 1000);
+  assert.ok(ms < 1500, "buildRun took " + ms.toFixed(0) + " ms");
+  let maxGap = 0;
+  let last = Date.now();
+  let done = false;
+  const tick = () => {
+    const n = Date.now();
+    maxGap = Math.max(maxGap, n - last);
+    last = n;
+    if (!done) setImmediate(tick);
+  };
+  setImmediate(tick);
+  await M.buildRunAsync(b);
+  done = true;
+  assert.ok(maxGap < 400, "longest synchronous stretch " + maxGap + " ms");
+});
