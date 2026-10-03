@@ -114,7 +114,14 @@ async function candidatesFor(lane) {
 //
 //   no row yet                       — a new campaign
 //   skipped with a RETRYABLE reason  — conditions may have changed on their own
-//   rescanRequested                  — the operator asked for a fresh look
+//   rescanRequested                  — the operator asked for a fresh look,
+//                                      unless the row's re-execution is refused
+//                                      (autoFarmer taskRefusesExecution: active,
+//                                      an interrupted execute, a stopped or
+//                                      completed task keeping its accounts) —
+//                                      "refused": a live lane settles it (clears
+//                                      the flag, notes why) instead of deciding
+//                                      it every cycle, as legacy's filter does
 //   stranded (live mode only)        — a plan that never executed (and has sat
 //                                      untouched for 15 min — before that its
 //                                      execution may still be running), or a
@@ -136,7 +143,10 @@ function decisionDue({ existing, shadow, af, lastLaneDecidedAt = null }) {
   if (existing.status === "skipped" && retryableSet().has(existing.decision)) {
     return { due: true, why: "retryable" };
   }
-  if (existing.rescanRequested) return { due: true, why: "rescan" };
+  if (existing.rescanRequested) {
+    if (executeStep.refusesExecution(existing)) return { due: false, why: "refused" };
+    return { due: true, why: "rescan" };
+  }
   if (!(af && af.dryRun) && isStranded(existing)) return { due: true, why: "stranded" };
   if (shadow) {
     const at = existing.decidedAt ? new Date(existing.decidedAt).getTime() : 0;
@@ -158,8 +168,20 @@ async function existingRowsFor(lane, campaigns) {
       game: lane.game,
       campaignId: { $in: campaigns.map((c) => c.campaignId) },
     },
-    // decidedAt and updatedAt date a `planned` row for isStranded.
-    { campaignId: 1, status: 1, decision: 1, rescanRequested: 1, bots: 1, decidedAt: 1, updatedAt: 1 },
+    // decidedAt and updatedAt date a `planned` row for isStranded; executedAt
+    // and one assigned account tell a row whose re-execution is refused (one
+    // is enough to know it lists some).
+    {
+      campaignId: 1,
+      status: 1,
+      decision: 1,
+      rescanRequested: 1,
+      bots: 1,
+      decidedAt: 1,
+      updatedAt: 1,
+      executedAt: 1,
+      assignedAccounts: { $slice: 1 },
+    },
   ).lean();
   return new Map(rows.map((r) => [String(r.campaignId), r]));
 }
@@ -321,6 +343,9 @@ async function runLane(lane, { cycle, af, hostCache }) {
     decisions: [],
     executed: [],
     alreadyExecuted: 0,
+    // Rescanned campaigns whose re-execution is refused (decisionDue
+    // "refused"): settled, never decided, no budget drawn.
+    rescansRefused: 0,
     // Decide-time skips written to AutoFarmTask as legacy rows (live lanes
     // only), and those suppressed because the row already owns something.
     skipsRecorded: 0,
@@ -355,6 +380,12 @@ async function runLane(lane, { cycle, af, hostCache }) {
         lastLaneDecidedAt: lastDecided.get(String(c.campaignId)) || null,
       });
       if (!due.due) {
+        if (due.why === "refused") {
+          summary.rescansRefused += 1;
+          // A live lane owns its rows; a shadow lane writes nothing (legacy,
+          // still farming its game, settles the row itself).
+          if (!shadow && lane.mode === "live") await executeStep.settleRefused(prior);
+        }
         summary.settled += 1;
         continue;
       }
@@ -430,34 +461,41 @@ async function runLane(lane, { cycle, af, hostCache }) {
           // Shadow lanes stop here by contract — nothing below this line may
           // run without the operator having flipped the lane to live.
           //
-          // But only if this campaign has not ALREADY been executed. The
-          // candidate filter above already leaves settled campaigns alone;
-          // this is the belt to that braces, because an execute on an active
-          // campaign restarts containers and fights the RAM saver.
+          // But only if this campaign's row does not refuse execution — the
+          // same rule (autoFarmer taskRefusesExecution) the candidate filter
+          // above, legacy's candidate filter and the execute step apply. The
+          // filter already leaves a refused rescan alone; this is the fresh
+          // read for a row that changed since (executed by the other engine,
+          // say), because an execute on an active campaign restarts containers
+          // and fights the RAM saver. Such a row draws NO budget and queues no
+          // execute: budget reserved for a no-op execute starved the real
+          // lanes of the same cycle (review round 3). A failed row is never
+          // refused; one that still lists accounts is topped up (execute.js),
+          // so it draws only what its plan is still missing.
           const AutoFarmTask = require("../../models/AutoFarmTask");
-          const alreadyDone = await AutoFarmTask.findOne({
+          const row = await AutoFarmTask.findOne({
             game: lane.game,
             campaignId: c.campaignId,
-            status: { $in: ["active", "completed"] },
-            executedAt: { $ne: null },
           })
-            .select("_id")
+            .select("status bots assignedAccounts executedAt rescanRequested")
             .lean();
 
-          if (alreadyDone) {
+          if (executeStep.refusesExecution(row)) {
             summary.alreadyExecuted += 1;
+            await executeStep.settleRefused(row);
           } else {
             // What this campaign draws from the lane's sealed allowance. A
             // fresh farm/probe spends its plan; a reuse spends nothing for the
             // accounts it reuses and draws only the TOP-UP it may add on top
             // (steps/decide.js), so a reused game never eats the budget of a
             // sibling that needs fresh accounts.
+            const listed = executeStep.needsAppend(row) ? (row.assignedAccounts || []).length : 0;
             const wanted =
               verdict.decision === "reuse_existing"
                 ? verdict.topUpAllowed
                   ? Number(verdict.topUpWanted) || 0
                   : 0
-                : Number(verdict.plannedAccounts) || 0;
+                : Math.max(0, (Number(verdict.plannedAccounts) || 0) - listed);
             const take = cycle ? cycle.spendAccounts(lane.gameKey, wanted) : wanted;
             await jobs.enqueue({
               lane: lane.game,

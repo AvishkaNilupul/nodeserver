@@ -205,8 +205,9 @@ const state = {
   // Consecutive ticks that deferred every decision (noteDeferredTick).
   deferredTicks: 0,
   deferredAlerted: false,
-  // Main mode: lane key -> consecutive ticks its game was left waiting for a
-  // lane that did not appear (noteAwaitingLane).
+  // Main mode: lane key -> { ticks, since, alerted } for a game left waiting
+  // for a lane that did not appear: consecutive ticks, when the wait began,
+  // whether its fallback was announced (noteAwaitingLane).
   awaitingLaneTicks: new Map(),
 };
 
@@ -2003,7 +2004,10 @@ async function fillExistingBots(
 //     dry-run mode strand the same way once the switch is flipped to live.
 //   * "failed" with no bots — the execution genuinely failed and released its
 //     accounts. Nothing owns anything, so re-deciding is free and safe. A
-//     failed task that DID create bots is left alone: it holds real state.
+//     failed task that still lists bots (a reuse whose borrowed bots did not
+//     restart) is not re-decided from scratch: its own retry — the lane's
+//     execute job, or an operator rescan — restarts them or tops the row up
+//     (taskNeedsAppend), and a failed row never counts as holding work.
 //
 // Retrying costs nothing when conditions have not changed (the same gates
 // simply skip it again) and fixes it the moment they have.
@@ -2021,6 +2025,9 @@ const STRANDED_PLAN_MS = 15 * 60 * 1000;
 function isStranded(task, now = Date.now()) {
   if (!task) return false;
   if (task.status === "planned") {
+    // A plan that DID execute and was flipped back (taskHoldsWork) is not a
+    // plan that never ran: re-deciding it is exactly what is refused.
+    if (taskHoldsWork(task)) return false;
     const at = Math.max(
       task.decidedAt ? new Date(task.decidedAt).getTime() || 0 : 0,
       task.updatedAt ? new Date(task.updatedAt).getTime() || 0 : 0,
@@ -2219,6 +2226,25 @@ async function processCampaign(c, ctx) {
       { upsert: true, returnDocument: "after", setDefaultsOnInsert: true },
     );
   }
+
+  // Never decide a row whose re-execution is refused (taskRefusesExecution:
+  // running, an interrupted execute, or a stopped or completed task keeping
+  // its accounts) — not as a plan, which executeTask would only refuse tick
+  // after tick, not as a reuse, which would overwrite what it lists, and not
+  // as a skip, which would orphan it. The candidate filter in runOnce already
+  // leaves such rows out; this is the fresh-read backstop for a row that
+  // changed since. A failed row that still lists accounts or bots is retried
+  // as a top-up of itself (taskNeedsAppend) and keeps its status meanwhile.
+  const current = await AutoFarmTask.findOne({ game, campaignId: c.campaignId })
+    .select("status decision reason bots assignedAccounts executedAt rescanRequested")
+    .lean();
+  if (taskRefusesExecution(current)) {
+    await settleRefusedTask(current);
+    progress(game + ": not decided again — " + refusalReason(current) + ".", "warn");
+    return { decision: "already_executed" };
+  }
+  const topUpOfRow = taskNeedsAppend(current);
+  const planStatus = topUpOfRow ? {} : { status: "planned" };
 
   // 1) Sellability gate — fresh market data (Gameflip/GGSel/Plati, re-scanned
   // when stale) blended with our own sales history (SaleSignal training data).
@@ -2767,31 +2793,11 @@ async function processCampaign(c, ctx) {
     covNote +
     ".";
 
-  // A fresh plan is never written over a row that already holds work (a
-  // rescanned stopped or completed task keeps its accounts as inventory):
-  // flipping it to "planned" would only lead executeTask to refuse it, tick
-  // after tick (taskHoldsWork). Left exactly as it is.
-  const current = await AutoFarmTask.findOne({ game, campaignId: c.campaignId })
-    .select("status bots assignedAccounts executedAt")
-    .lean();
-  if (taskHoldsWork(current)) {
-    progress(
-      game +
-        ": this campaign's task already holds " +
-        (current.assignedAccounts || []).length +
-        " account(s) (" +
-        current.status +
-        ") — not planned again.",
-      "warn",
-    );
-    return { decision: "already_executed" };
-  }
-
   // 7) Dry-run: record the plan, alert, touch nothing.
   if (af.dryRun) {
     await record({
       decision,
-      status: "planned",
+      ...planStatus,
       reason,
       demandScore,
       hadResearch: !!research,
@@ -2818,7 +2824,7 @@ async function processCampaign(c, ctx) {
   // 8) Live: claim accounts, create bots, activate.
   const task = await record({
     decision,
-    status: "planned",
+    ...planStatus,
     reason,
     demandScore,
     hadResearch: !!research,
@@ -2827,54 +2833,198 @@ async function processCampaign(c, ctx) {
     plannedAccounts: accounts,
     targetAccounts: wanted,
   });
-  return executeTask(task, ctx);
+  // A row that still lists accounts or bots runs as a top-up of itself:
+  // executeTask reads the row and switches to append on its own.
+  if (!topUpOfRow) return executeTask(task, ctx);
+  try {
+    return await executeTask(task, ctx);
+  } catch (e) {
+    await restoreSkipAfterAbortedTopUp(current, e);
+    throw e;
+  }
 }
 
-// Does this task row already own work that a fresh execution would overwrite?
-// executeTask (non-append) writes `bots` and `assignedAccounts` wholesale, so
-// running it on a row that already holds them dropped the first set — still
-// claimed in the pool, still in its containers, outside maxAutoBots, owned by
-// nothing (2026-10-03 review H8: an execute job that ran twice). "Holds" means
-// active, or really executed (executedAt) and still listing accounts or bots;
-// a dry-run plan's bots (planned, never executed) are only its intent.
+// What a task row's own state says about executing its campaign again — the
+// one set of rules the legacy tick, the lane's decide/execute steps and
+// executeTask itself all apply (2026-10-03, reviews H8 and round 3).
+const listsWork = (row) =>
+  !!row && ((row.assignedAccounts || []).length > 0 || (row.bots || []).length > 0);
+
+// Already running, or an execute that was interrupted: active, or `planned`
+// with executedAt and accounts or bots listed (a row executeTask already
+// wrote and something flipped back). Running executeTask over it would
+// replace bots/assignedAccounts — a second claimed set, the first stranded in
+// its containers outside maxAutoBots (H8: an execute job that ran twice). A
+// dry-run plan's bots (planned, never executed) are only its intent, and a
+// FAILED row never holds work: its retry must run (taskNeedsAppend).
 function taskHoldsWork(row) {
   if (!row) return false;
   if (row.status === "active") return true;
-  const holds =
-    (row.assignedAccounts || []).length > 0 || (row.bots || []).length > 0;
-  return holds && !!row.executedAt;
+  return row.status === "planned" && !!row.executedAt && listsWork(row);
+}
+
+// A stopped or completed campaign row: the Stop button keeps its accounts as
+// inventory, completion keeps the drops they hold for sale. Not executed
+// again — by either engine — even when an operator rescan flags it.
+function taskKeepsInventory(row) {
+  return !!row && (row.status === "stopped" || row.status === "completed");
+}
+
+// Is executing this campaign's row again refused? Such a row is settled with
+// settleRefusedTask, and no budget is drawn for it (lane alreadyDone, legacy
+// candidate filter).
+function taskRefusesExecution(row) {
+  return taskHoldsWork(row) || taskKeepsInventory(row);
+}
+
+// A row that is not running but still lists accounts or bots from an earlier
+// execution: a failed one (a reuse whose bots did not restart lists the ones
+// it borrowed), or a skip recorded over such a row (or, before 2026-10-03,
+// over a stopped or completed one, whose accounts are its inventory). Its
+// retry is a top-up of that same row — executeTask in append mode keeps what
+// the row lists and adds only what the plan is still missing — and the row is
+// not flipped to "planned" while that runs, or it would read as an
+// interrupted execute. (A reuse retry goes through the reuse path instead,
+// which restarts the borrowed bots.) A dry-run plan's bots (never executed)
+// are only its intent, as in taskHoldsWork.
+function taskNeedsAppend(row) {
+  if (!row || !listsWork(row)) return false;
+  return row.status === "failed" || (row.status === "skipped" && !!row.executedAt);
+}
+
+// The top-up of a row that was a SKIP could not even start (no capacity, the
+// pool below its floor, no account claimed: executeTask threw before claiming
+// or writing anything). Put the skip back — the plan record replaced its
+// decision — so a retryable skip is still re-decided when conditions change,
+// instead of a "skipped" row carrying a farm decision no trigger re-decides.
+// `before` is the row as read before the plan was recorded. Best-effort.
+async function restoreSkipAfterAbortedTopUp(before, err) {
+  if (!before || before.status !== "skipped" || !before._id) return false;
+  if (!err || err.autoFarmEventRecorded || err.alreadyExecuted) return false;
+  try {
+    await AutoFarmTask.updateOne(
+      { _id: before._id, status: "skipped" },
+      { $set: { decision: before.decision, reason: before.reason || "" } },
+    );
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+// Settle a refused row so it is decided once, not every cycle: clear the
+// rescan flag (the only trigger that makes a stopped, completed or active row
+// due again) and say why in its `error` note, its earlier error kept beside
+// it. Only a flagged row is written — an unflagged one is not due anyway. The
+// row is read afresh by _id (a caller's copy may be a projection, or stale)
+// and written only if it is still flagged, still refused and still in that
+// status, so a row that changed meanwhile is decided normally next time.
+// Best-effort: never throws.
+async function settleRefusedTask(row) {
+  if (!row || !row._id || !row.rescanRequested) return false;
+  try {
+    const fresh = await AutoFarmTask.findById(row._id)
+      .select("status bots assignedAccounts executedAt rescanRequested error")
+      .lean();
+    if (!fresh || !fresh.rescanRequested || !taskRefusesExecution(fresh)) {
+      return false;
+    }
+    const note =
+      "Not executed again (" +
+      new Date().toISOString().slice(0, 16).replace("T", " ") +
+      "Z): " +
+      refusalReason(fresh);
+    const prev = String(fresh.error || "");
+    const error = (prev && !prev.startsWith("Not executed again")
+      ? note + " | " + prev
+      : note
+    ).slice(0, 500);
+    await AutoFarmTask.updateOne(
+      { _id: fresh._id, status: fresh.status, rescanRequested: true },
+      { $set: { rescanRequested: false, error } },
+    );
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function refusalReason(row) {
+  if (!row) return "";
+  const n = (row.assignedAccounts || []).length;
+  if (taskKeepsInventory(row)) {
+    return (
+      "the task is " +
+      row.status +
+      " and keeps its " +
+      n +
+      " account(s); a rescan does not re-execute it"
+    );
+  }
+  return (
+    "the task already holds " +
+    n +
+    " account(s) on " +
+    (row.bots || []).length +
+    " bot(s) (" +
+    row.status +
+    ")"
+  );
 }
 
 // Execute a planned task for real: claim pool accounts, create bot(s) on the
 // farm host, mark active. Used by live-mode ticks AND the one-click
 // "approve" button on dry-run plans.
-async function executeTask(task, ctx, { append = false } = {}) {
+async function executeTask(task, ctx, opts = {}) {
+  let append = opts.append === true;
   const af = ctx && ctx.af ? ctx.af : cfg();
   const host = ctx && ctx.host ? ctx.host : resolveFarmHost(af);
   if (!host) throw new Error("No farm host configured");
   const game = task.game;
 
-  // Never over a row that already holds work (taskHoldsWork): the write at the
-  // end replaces bots and assignedAccounts, so a second run would claim a
-  // second set and drop the first. Read fresh — the object handed in may be
-  // stale. Refused before anything is claimed; append mode (the reuse top-up)
-  // adds to the row's work on purpose and merges it below.
+  // Never over a row whose re-execution is refused (taskRefusesExecution):
+  // the write at the end replaces bots and assignedAccounts, so a second run
+  // would claim a second set and drop the first, and a stopped or completed
+  // row would lose the inventory it keeps. Read fresh — the object handed in
+  // may be stale. Refused before anything is claimed. A failed (or skipped)
+  // row that still lists accounts or bots from an earlier execution is
+  // retried as a top-up of itself instead (taskNeedsAppend): it keeps what it
+  // lists and adds only what its plan is still missing, so nothing it lists is
+  // dropped and nothing is claimed twice. Append mode (the reuse top-up) adds
+  // on purpose.
+  let topUpOfRow = false;
   if (!append && task._id) {
     const current = await AutoFarmTask.findById(task._id)
       .select("status bots assignedAccounts executedAt")
       .lean();
-    if (taskHoldsWork(current)) {
+    if (taskRefusesExecution(current)) {
       const err = new Error(
-        "Task already holds " +
-          (current.assignedAccounts || []).length +
-          " account(s) on " +
-          (current.bots || []).length +
-          " bot(s) (" +
-          current.status +
-          ") — not executed again, which would replace them",
+        "Not executed again: " + refusalReason(current) + " — it would replace them",
       );
       err.alreadyExecuted = true;
       throw err;
+    }
+    if (taskNeedsAppend(current)) {
+      const listed = (current.assignedAccounts || []).length;
+      const planned = Number(task.plannedAccounts) || 0;
+      if (planned - listed < 1) {
+        throw new Error(
+          "Nothing to add: the " +
+            current.status +
+            " task already lists " +
+            listed +
+            " account(s) for a plan of " +
+            planned,
+        );
+      }
+      append = true;
+      topUpOfRow = true;
+      task = {
+        ...(task.toObject ? task.toObject() : task),
+        bots: current.bots || [],
+        assignedAccounts: current.assignedAccounts || [],
+        plannedAccounts: planned - listed,
+      };
     }
   }
 
@@ -3085,7 +3235,10 @@ async function executeTask(task, ctx, { append = false } = {}) {
       finalAccounts.push(u);
     }
   }
-  const ok = finalBots.length > 0;
+  // A reuse top-up's bots were just restarted, so the merged list farms. A
+  // row's own top-up is only running if THIS run placed accounts: the bots it
+  // already listed are not running for it (a failed one's did not start).
+  const ok = topUpOfRow ? bots.length > 0 : finalBots.length > 0;
   await AutoFarmTask.updateOne(
     { _id: task._id },
     {
@@ -3104,13 +3257,15 @@ async function executeTask(task, ctx, { append = false } = {}) {
       },
     },
   );
-  if (ok && !append) {
+  // A row's own top-up that now farms is this campaign's start, as a fresh
+  // execution's is (the row was not running before).
+  if (ok && (!append || topUpOfRow)) {
     try {
       const autoLister = require("./autoLister");
       const research = await MarketResearch.findOne({ game: task.game }).lean();
       await stampPreorderSet(
         {
-          ...task.toObject(),
+          ...(task.toObject ? task.toObject() : task),
           status: "active",
           assignedAccounts: finalAccounts,
         },
@@ -3126,7 +3281,7 @@ async function executeTask(task, ctx, { append = false } = {}) {
       console.error("catalog preorder stamp failed:", err.message);
     }
   }
-  if (append) {
+  if (append && !topUpOfRow) {
     if (deployed.length) {
       await recordAutoFarmEvent({
         type: "topped_up",
@@ -3150,6 +3305,11 @@ async function executeTask(task, ctx, { append = false } = {}) {
       reason: ok
         ? deployed.length +
           " account(s) deployed" +
+          (topUpOfRow
+            ? " (a top-up of the task, beside the " +
+              (task.assignedAccounts || []).length +
+              " it already listed)"
+            : "") +
           (error ? "; " + error.trim() : "")
         : error.trim() || "Bot creation failed",
       actor: "executeTask",
@@ -3956,23 +4116,46 @@ async function expireStaleProbes(af, progress) {
 // the start of its next cycle (ownership.legacyMayDecide). A lane that cannot
 // be created — a write that keeps failing, a name the model rejects — would
 // leave that game to NOBODY, silently, while every tick still counted as ok
-// (2026-10-03 review H3). So after LANE_FALLBACK_TICKS ticks in a row (~30 min)
-// the legacy engine decides and lists the game itself — the fail-safe
-// direction for a game nobody owns — and says so once. The count drops the
-// moment the game stops waiting (its lane appeared, or its campaign ended),
-// which re-arms the alert.
+// (2026-10-03 review H3). So once a game has waited LANE_FALLBACK_MS (30 min)
+// AND at least LANE_FALLBACK_TICKS ticks, the legacy engine decides and lists
+// it itself — the fail-safe direction for a game nobody owns — and says so
+// once. Both, because ticks alone are not time: "Scan now" pressed three
+// times in a row reached three ticks in seconds and handed a brand-new game
+// to legacy before the supervisor had had one cycle (review round 3). The
+// wait is timed from the first tick that saw the game waiting, and it ends
+// the moment the game stops waiting (its lane appeared, or its campaign
+// ended), which re-arms the alert.
 const LANE_FALLBACK_TICKS = 3;
+const LANE_FALLBACK_MS = 30 * 60 * 1000;
 
-async function noteAwaitingLane(awaitingNow) {
+// `w` is a game's waiting record { ticks, since, alerted }, `ticks` counting
+// the tick being judged.
+function laneFallbackDue(w, now = Date.now()) {
+  return (
+    !!w &&
+    w.ticks >= LANE_FALLBACK_TICKS &&
+    now - (Number(w.since) || now) >= LANE_FALLBACK_MS
+  );
+}
+
+async function noteAwaitingLane(awaitingNow, now = Date.now()) {
   const next = new Map();
   const reached = [];
   for (const [key, game] of awaitingNow) {
-    const ticks = (state.awaitingLaneTicks.get(key) || 0) + 1;
-    next.set(key, ticks);
-    if (ticks === LANE_FALLBACK_TICKS) reached.push(game);
+    const prev = state.awaitingLaneTicks.get(key);
+    const w = {
+      ticks: (prev ? prev.ticks : 0) + 1,
+      since: prev ? prev.since : now,
+      alerted: !!(prev && prev.alerted),
+    };
+    if (!w.alerted && laneFallbackDue(w, now)) {
+      w.alerted = true;
+      reached.push({ game, ticks: w.ticks, minutes: Math.floor((now - w.since) / 60000) });
+    }
+    next.set(key, w);
   }
   state.awaitingLaneTicks = next;
-  for (const game of reached) {
+  for (const { game, ticks, minutes } of reached) {
     try {
       require("./systemLog").logEvent({
         category: "autofarm",
@@ -3981,13 +4164,15 @@ async function noteAwaitingLane(awaitingNow) {
         severity: "warn",
         subject: game,
         game,
-        count: LANE_FALLBACK_TICKS,
+        count: ticks,
         detail:
           game +
           " has waited " +
-          LANE_FALLBACK_TICKS +
-          " ticks for a farm2 lane that was never created; the legacy engine " +
-          "decides and lists it until one exists.",
+          minutes +
+          " min (" +
+          ticks +
+          " ticks) for a farm2 lane that was never created; the legacy " +
+          "engine decides and lists it until one exists.",
       });
     } catch {
       /* auditing must never break a tick */
@@ -3996,8 +4181,10 @@ async function noteAwaitingLane(awaitingNow) {
       "⚠️ Auto-farm — " +
         game +
         " has had no farm2 lane for " +
-        LANE_FALLBACK_TICKS +
-        " ticks (~30 min): the lane engine is the main engine but its lane " +
+        minutes +
+        " min (" +
+        ticks +
+        " ticks): the lane engine is the main engine but its lane " +
         "was never created (see the supervisor's last error). The legacy " +
         "engine now decides and lists this game itself until the lane exists.",
     );
@@ -4325,6 +4512,11 @@ async function runOnce() {
             // isStranded dates a `planned` row by these (STRANDED_PLAN_MS).
             decidedAt: 1,
             updatedAt: 1,
+            // ...and with these the candidate filter can tell a row whose
+            // re-execution is refused (taskRefusesExecution) — one account is
+            // enough to know the row lists some.
+            executedAt: 1,
+            assignedAccounts: { $slice: 1 },
           },
         ).lean()
       : [];
@@ -4345,11 +4537,15 @@ async function runOnce() {
     const ownershipUnknown = farm2Ownership.isMain() && farm2Ownership.isCold();
     let noClaimSkipped = 0;
     let farm2Skipped = 0;
+    // Rows a rescan flagged whose re-execution is refused: settled after the
+    // loop, never candidates — so they take no share of the pool either.
+    const refusedRows = [];
     // Main mode: games with no lane at all yet, left to the supervisor —
-    // and those that have waited LANE_FALLBACK_TICKS ticks, decided here.
+    // and those that have waited long enough (laneFallbackDue), decided here.
     const awaitingLane = new Set();
     const awaitingNow = new Map(); // lane key -> game, this tick
     const laneFallback = new Set();
+    const tickNow = Date.now();
     for (const c of live) {
       if (!c.game) continue;
       // No-claim games (Overwatch, Rainbow Six) are handled by the standalone
@@ -4378,19 +4574,30 @@ async function runOnce() {
       // Main mode: a game with no lane yet is the lane engine's too — the
       // supervisor creates its lane within a cycle (farm2/ownership.js
       // legacyMayDecide). Outside main mode this is the isOwned test above.
-      // A game still waiting after LANE_FALLBACK_TICKS ticks is decided here
-      // after all (noteAwaitingLane): nobody else is going to.
+      // A game that has waited 30 min and 3 ticks is decided here after all
+      // (laneFallbackDue, noteAwaitingLane): nobody else is going to.
       if (!ownershipUnknown && !farm2Ownership.legacyMayDecide(c.game)) {
         const laneKey = farm2Ownership.normKey(c.game);
         awaitingNow.set(laneKey, c.game);
-        if ((state.awaitingLaneTicks.get(laneKey) || 0) + 1 < LANE_FALLBACK_TICKS) {
+        const prev = state.awaitingLaneTicks.get(laneKey);
+        const waiting = {
+          ticks: (prev ? prev.ticks : 0) + 1,
+          since: prev ? prev.since : tickNow,
+        };
+        if (!laneFallbackDue(waiting, tickNow)) {
           awaitingLane.add(c.game);
           continue;
         }
         laneFallback.add(c.game);
       }
       const existing = existingByKey.get(c.game + "|" + c.campaignId);
-      if (!existing) {
+      if (existing && existing.rescanRequested && taskRefusesExecution(existing)) {
+        // A rescan does not re-execute a running, stopped or completed task
+        // (taskRefusesExecution). Left out here, before the fair share, and
+        // its flag cleared below, so it is not re-decided every tick
+        // (2026-10-03 review round 3).
+        refusedRows.push(existing);
+      } else if (!existing) {
         candidates.push(c);
       } else if (
         (existing.status === "skipped" && RETRYABLE.has(existing.decision)) ||
@@ -4440,8 +4647,8 @@ async function runOnce() {
           laneFallback.size +
           " game(s) here although the lane engine is the main engine: no lane " +
           "for " +
-          LANE_FALLBACK_TICKS +
-          "+ ticks — " +
+          LANE_FALLBACK_MS / 60000 +
+          "+ min — " +
           [...laneFallback].join(", ") +
           ".",
         "warn",
@@ -4449,7 +4656,22 @@ async function runOnce() {
     }
     // An unreadable table says nothing about which games have lanes, so the
     // per-game waiting counts are only advanced by a tick that could read it.
-    if (!ownershipUnknown) await noteAwaitingLane(awaitingNow);
+    if (!ownershipUnknown) await noteAwaitingLane(awaitingNow, tickNow);
+    // Rescanned rows whose re-execution is refused: their flag is cleared and
+    // the refusal noted on the row, so they are decided once, not every tick.
+    // Not while ownership is unknown — the row may be a lane's to settle.
+    if (!ownershipUnknown) {
+      for (const row of refusedRows) await settleRefusedTask(row);
+    }
+    if (refusedRows.length) {
+      progress(
+        "Not re-decided after a rescan: " +
+          refusedRows.length +
+          " task(s) running, stopped or completed — " +
+          refusedRows.map((r) => r.game).join(", ") +
+          ".",
+      );
+    }
     if (ownershipUnknown) {
       // Not a fallback to this engine: in main mode the lanes decide, and the
       // next tick (10 min) re-reads the table. Maintenance sweeps still run.
@@ -4819,7 +5041,7 @@ async function runOnce() {
     // main mode this is exactly the old isOwned() test.
     const laneFallbackKeys = new Set(
       [...state.awaitingLaneTicks]
-        .filter(([, ticks]) => ticks >= LANE_FALLBACK_TICKS)
+        .filter(([, w]) => laneFallbackDue(w, tickNow))
         .map(([key]) => key),
     );
     const legacyLists = (game) =>
@@ -5172,6 +5394,8 @@ async function runOnce() {
       decisionsDeferred: ownershipUnknown,
       awaitingLane: [...awaitingLane],
       laneFallback: [...laneFallback],
+      // Rescanned tasks left out because their re-execution is refused.
+      rescansRefused: refusedRows.length,
       completed,
       catalogChanges,
       results,
@@ -5789,7 +6013,20 @@ module.exports = {
   // steps/decide.js), so both engines take the pristine reserve and the host
   // RAM gate off their budgets with ONE implementation (2026-10-03).
   pristineProtect,
+  // What a task row says about executing its campaign again — one set of
+  // rules for this engine, the lane's candidate filter (utils/farm2/lane.js)
+  // and its execute step (steps/execute.js).
   taskHoldsWork,
+  taskKeepsInventory,
+  taskRefusesExecution,
+  taskNeedsAppend,
+  restoreSkipAfterAbortedTopUp,
+  settleRefusedTask,
+  refusalReason,
+  // The lane-missing fallback rule (exported for tests).
+  laneFallbackDue,
+  LANE_FALLBACK_MS,
+  LANE_FALLBACK_TICKS,
   containerSlots,
   farmSpendable,
   poolShortReason,

@@ -124,7 +124,14 @@ test("decisionDue mirrors the legacy candidate filter, trigger by trigger", () =
   for (const status of ["active", "completed", "stopped"]) {
     assert.equal(laneMod.decisionDue({ existing: { status, decision: "farm", bots: [{}] }, ...live }).due, false, status);
   }
-  assert.equal(laneMod.decisionDue({ existing: { status: "active", decision: "farm", rescanRequested: true }, ...live }).why, "rescan");
+  // A rescan re-decides — unless the row's re-execution is refused (running,
+  // stopped or completed): legacy's filter leaves those out and settles them,
+  // and so does the lane (2026-10-03 review round 3).
+  assert.equal(laneMod.decisionDue({ existing: { status: "skipped", decision: "skip_low_demand", rescanRequested: true }, ...live }).why, "rescan");
+  assert.equal(laneMod.decisionDue({ existing: { status: "failed", decision: "farm", rescanRequested: true, bots: [{ container: "x" }] }, ...live }).why, "rescan");
+  for (const status of ["active", "completed", "stopped"]) {
+    assert.deepEqual(laneMod.decisionDue({ existing: { status, decision: "farm", rescanRequested: true }, ...live }), { due: false, why: "refused" }, status);
+  }
   // Stranded: a plan that never executed, or a failure that owns nothing — live mode only.
   assert.equal(laneMod.decisionDue({ existing: { status: "planned", decision: "farm" }, ...live }).why, "stranded");
   assert.equal(laneMod.decisionDue({ existing: { status: "failed", decision: "farm", bots: [] }, ...live }).why, "stranded");
