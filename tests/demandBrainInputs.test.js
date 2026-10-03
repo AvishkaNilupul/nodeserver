@@ -451,7 +451,7 @@ test("v2 cold probe end to end: a live campaign with no sale of ours, sized from
   const strict = M.buildRun({ now: NOW, cfg: M.readConfig({ ...af, probeMaxSellers: 1 }), sizing: p.sizing, probeSize: p.probeSize, engine: p.engine, claim: p.claim, noclaim: [] });
   const held = strict.rows.find((r) => r.k === "world of tanks");
   assert.deepEqual([held.br.c, held.br.held], ["skip", "tested"]);
-  assert.match(held.why.join(" "), /rivals list it but it does not sell: 2 rival sellers \(the engine's market research\)/);
+  assert.match(held.why.join(" "), /Rivals list it but it does not sell: 2 rival sellers \(the engine's market research\)/);
   // the same game, probed and failed 30 days ago: a known dud
   const p2 = await I.load({ now: NOW, deps: world({ af, expiredProbes: [{ game: "World of Tanks", completedAt: new Date(NOW - 30 * DAY) }] }).deps });
   const run2 = M.buildRun({ now: NOW, cfg: M.readConfig(af), sizing: p2.sizing, probeSize: p2.probeSize, engine: p2.engine, claim: p2.claim, noclaim: [] });

@@ -315,16 +315,21 @@ async function noclaimInputs(d, { guardLive = false } = {}) {
     return out;
   }
   // The feeder's own snapshot under the rule it runs live (the owner's burst-guard switch, as this
-  // run read it), then the same snapshot — same evidence, same window — under the other setting, so
-  // v2 and v2g differ by the guard alone (review, 2026-10-03). Both are database reads.
+  // run read it), then the same snapshot under the other setting, so v2 and v2g differ by the guard
+  // alone (review, 2026-10-03). Both are built from ONE read set — the feeder's evidence, stock and
+  // time-to-sale, read once (farmDemand.snapshotInputs) — so a sale written between two reads can
+  // never land in one rule only, and the database is read once, not twice (review 2, e4). A
+  // farmDemand without that option is asked twice, as before.
+  let shared = null;
   try {
-    out.snap = (await FD.unclaimedDemandSnapshot({ days: 30, burstGuard: guardLive })) || [];
+    if (typeof FD.snapshotInputs === "function") shared = await FD.snapshotInputs({ days: 30 });
+    out.snap = (await FD.unclaimedDemandSnapshot({ days: 30, burstGuard: guardLive, ...(shared ? { inputs: shared } : {}) })) || [];
   } catch (e) {
     out.notes.push("The no-claim feeder's snapshot failed this run (" + (e && e.message ? e.message : e) + "): no-claim rows skipped.");
     return out;
   }
   try {
-    out.alt = (await FD.unclaimedDemandSnapshot({ days: 30, burstGuard: !guardLive })) || [];
+    out.alt = (await FD.unclaimedDemandSnapshot({ days: 30, burstGuard: !guardLive, ...(shared ? { inputs: shared } : {}) })) || [];
   } catch (e) {
     out.alt = null;
     out.notes.push(

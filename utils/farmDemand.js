@@ -671,12 +671,20 @@ const round1 = (n) => Math.round((Number(n) || 0) * 10) / 10;
 // `burstGuard` goes to demandRates for every row (true/false; omitted = the
 // autoFarm.noclaimBurstGuard switch, read once here). A row it changed carries
 // `sales.burstSales`.
-async function unclaimedDemandSnapshot({ days = 30, ttsDays = 90, burstGuard = null } = {}) {
-  const [evidence, stock, tts] = await Promise.all([
-    saleEvidenceByBucket({ days }),
-    stockByBucket(),
-    timeToSaleByBucket({ days: ttsDays }),
-  ]);
+//
+// `inputs` (opt-in, 2026-10-03, for the farm brain): the three reads below,
+// already made by snapshotInputs({ days, ttsDays }) — so a caller that builds
+// the snapshot under both guard settings reads the database ONCE and the two
+// rows differ by the guard alone, never by a sale written between two reads.
+// Omitted (every other caller), the snapshot reads as it always has.
+async function unclaimedDemandSnapshot({ days = 30, ttsDays = 90, burstGuard = null, inputs = null } = {}) {
+  const [evidence, stock, tts] = inputs
+    ? [inputs.evidence, inputs.stock, inputs.tts]
+    : await Promise.all([
+        saleEvidenceByBucket({ days }),
+        stockByBucket(),
+        timeToSaleByBucket({ days: ttsDays }),
+      ]);
   const guard = burstGuard == null ? burstGuardDefault() : burstGuard === true;
   // FAIL SAFE. With the guard on, a pack the lookup could not recognise would be
   // counted through the in-stock correction again — the inflation the guard is
@@ -772,6 +780,17 @@ async function unclaimedDemandSnapshot({ days = 30, ttsDays = 90, burstGuard = n
   return rows;
 }
 
+// The three reads one snapshot makes, for unclaimedDemandSnapshot's `inputs`:
+// read once, build as many snapshots from them as needed. Read-only.
+async function snapshotInputs({ days = 30, ttsDays = 90 } = {}) {
+  const [evidence, stock, tts] = await Promise.all([
+    saleEvidenceByBucket({ days }),
+    stockByBucket(),
+    timeToSaleByBucket({ days: ttsDays }),
+  ]);
+  return { evidence, stock, tts };
+}
+
 function numOr(v, dflt) {
   const n = Number(v);
   return Number.isFinite(n) && n >= 0 ? n : Number(dflt) || 0;
@@ -833,6 +852,7 @@ module.exports = {
   soldUnitsByBucket,
   stockByBucket,
   timeToSaleByBucket,
+  snapshotInputs,
   unclaimedDemandSnapshot,
   salesRateForGame,
 };

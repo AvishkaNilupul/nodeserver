@@ -275,6 +275,28 @@ function sbaRate(y, alpha = SBA_ALPHA) {
   return (c * size) / interval;
 }
 
+/**
+ * sba and tsb as estimators: their rate on the weekly counts, held from rising while nothing sells
+ * (review 2, 2026-10-03). On a sliding window a selling week that slides out can lift the forecast
+ * with no sale at all — for sba the next, shorter gap becomes the interval's seed (three sales, then
+ * silence: 0.21 → 0.93 a week after one silent week); for tsb a small old week leaving raises the
+ * window's averages it starts from (1.19 → 1.23). So with no sale since the week of the last one, the
+ * forecast is the LOWEST raw rate at every weekly point from that week to `now` (points on `now`'s own
+ * weekly phase, at most 13): a week later it is the same points plus one more, so it can only stay or
+ * fall until a new sale arrives. In a week with a sale it is the raw rate itself.
+ * @param {Function} rate sbaRate or tsbRate
+ */
+function quietLow(entries, now, rate) {
+  const WEEK = 7 * DAY;
+  let last = -Infinity;
+  for (const e of entries || []) if (e.t <= now && e.t > last) last = e.t;
+  if (!(now - last < INTERMITTENT_WEEKS * WEEK)) return 0; // no sale inside the window
+  const quietWeeks = Math.floor((now - last) / WEEK);
+  let low = Infinity;
+  for (let k = 0; k <= quietWeeks; k++) low = Math.min(low, rate(weeklyCounts(entries, now - k * WEEK)));
+  return low;
+}
+
 /** Teunter–Syntetos–Babai: a weekly rate from weekly counts (oldest first). */
 function tsbRate(y, alpha = TSB_ALPHA, beta = TSB_BETA) {
   const list = y || [];
@@ -311,9 +333,9 @@ function rateOf(id, entries, now, ctx) {
       return Math.max((n30() * 7) / Math.max(l30, 15), (n14() * 7) / Math.max(l14, 7));
     }
     case "sba":
-      return sbaRate(weeklyCounts(entries, now));
+      return quietLow(entries, now, sbaRate);
     case "tsb":
-      return tsbRate(weeklyCounts(entries, now));
+      return quietLow(entries, now, tsbRate);
     default:
       return 0;
   }
@@ -456,15 +478,17 @@ const dayText = (t) => (Number.isFinite(t) ? new Date(t).toISOString().slice(0, 
 
 /**
  * The brain's call for one claim-farm game.
- * `live`, `dud` and `evidence.listedDays` drive the cold-start rule (model v2): a game with a live
- * campaign and no SALE of ours in HISTORY_DAYS is a new drop, listed or not (an engine probe that
- * went up two days ago has listings and no sale yet). `dud` is what inputs.expiredProbes found:
- * false = checked, no failed probe; { at, days } = a probe of this game ended with 0 sales inside
- * the auto-farm's re-probe cooldown; null = not checked. Both only count while the engine's own
- * probeColdStart is on, as in its probe gate. `rivals` (rivalSellersOf) is the engine's
- * untested-market gate: a cold probe only for a market at most probeMaxSellers rivals list. The
- * probe budget spans games, so buildRun applies it (applyProbeBudget).
- * @returns {{ c:"farm"|"probe"|"skip"|"unknown", t:number, w:number, b:"own"|"market"|"cold"|"none",
+ * `live`, `dud` and `evidence` drive the cold-start rules (model v2). `evidence` holds only what lies
+ * inside HISTORY_DAYS: `sales135` (our sales) and `listedDays` (days the game had a live listing). A
+ * game with a live campaign and no SALE of ours there is a new drop, listed or not (an engine probe
+ * that went up two days ago has listings and no sale yet); one with sales there but a forecast under
+ * minRate is RETURNING. `dud` is what inputs.expiredProbes found: false = checked, no failed probe;
+ * { at, days } = a probe of this game ended with 0 sales inside the auto-farm's re-probe cooldown;
+ * null = not checked — it only counts while the engine's own probeColdStart is on, as in its probe
+ * gate. `rivals` (rivalSellersOf) is the engine's untested-market gate: a cold probe only for a market
+ * at most probeMaxSellers rivals list. The probe budget spans games, so buildRun applies it
+ * (applyProbeBudget) to cold and returning probes alike.
+ * @returns {{ c:"farm"|"probe"|"skip"|"unknown", t:number, w:number, b:"own"|"market"|"cold"|"returning"|"none",
  *             own:number, mp:number, mt:number|null, sh:number|null, proof:boolean, v:number,
  *             vb:string, u:number|null, dud:null|"probe"|"listed", held:null|"tested"|"unknown",
  *             why:string[] }}
@@ -517,8 +541,27 @@ function claimVerdict({ own = 0, market = null, value = 0, valueBasis = "", cfg,
       why.push("Held to " + t + " by your cap for this game.");
     }
   };
-  if (forecast <= 0) {
-    const coldSize = coldProbeSizeFor(cfg, floor);
+  const coldSize = coldProbeSizeFor(cfg, floor);
+  // The small batch a cold or returning probe asks for: the cold-probe size, within maxPerGame.
+  const smallBatch = () => {
+    t = coldSize;
+    const max = Math.floor(num(sizing && sizing.maxPerGame));
+    if (max > 0 && t > max) t = max;
+  };
+  if (live && evidence.sold135 && forecast < cfg.minRate && coldSize > 0) {
+    // RETURNING (review 2, 2026-10-03): our own sales inside HISTORY_DAYS, too few lately for a farm
+    // verdict, and a new campaign is live. It used to get 0 while a game we never sold got a cold
+    // probe. The same small batch; its own sales stand in for the untested-market gate (they are
+    // better proof than any rival count), and the probe budget still counts it (applyProbeBudget).
+    c = "probe";
+    basis = "returning";
+    smallBatch();
+    why.push(
+      "Sold " + num(evidence.sales135) + " in the last " + HISTORY_DAYS + " days, quiet for 45 days" + (ownW > 0 ? " (" + round2(ownW) + " a week)" : "") +
+        ", new campaign → small batch of " + t + ".",
+    );
+    capToGame();
+  } else if (forecast <= 0) {
     if (evidence.sold135 || !live || !(coldSize > 0)) {
       // Model v1's rule: a game that sold but has no forecast now, a game no live campaign is
       // deciding, or every game while cold probes are off.
@@ -533,48 +576,46 @@ function claimVerdict({ own = 0, market = null, value = 0, valueBasis = "", cfg,
       // while the engine probes 15 accounts (17 of its 20 finished probes ended with 0 sales by
       // 2026-10-02); the brain asks only enough for each shelf market to hold its stock. A proven
       // rival market never reaches this branch: it upgrades the game to the market-led probe below.
-      const none = "No sale of ours in " + HISTORY_DAYS + " days and a campaign is live";
-      const listedDays = evidence.listedDays == null ? null : num(evidence.listedDays, null);
-      const since = "listed since " + dayText(num(evidence.firstListedAt, NaN)) + " (" + Math.floor(num(listedDays)) + " days)";
-      if (listedDays != null && listedDays > num(cfg.probeMaxDays, 30)) {
+      // Two reasons each (the log keeps 160 characters of a reason): the eligibility, then the call.
+      why.push("No sale of ours in " + HISTORY_DAYS + " days and a campaign is live.");
+      // Days the game actually had a live listing INSIDE the lookback — not the time since its first
+      // listing ever (review 2: two days listed a month ago read as "listed 32 days").
+      const listedDays = Math.max(0, num(evidence.listedDays));
+      const listed = "Listed " + round1(listedDays) + " days of the last " + HISTORY_DAYS;
+      const sellers = rivals ? num(rivals.n) + " rival seller" + (num(rivals.n) === 1 ? "" : "s") : "";
+      if (listedDays > num(cfg.probeMaxDays, 30)) {
         // Listed longer than the engine's own probe window and never sold: what its stop-loss
         // calls a failed probe, whether or not one was ever stamped.
         c = "skip";
         isDud = "listed";
-        why.push(none + "; " + since + ", longer than the " + num(cfg.probeMaxDays, 30) + "-day probe window, and never sold: dud-like, no probe.");
+        why.push(listed + ", longer than the " + num(cfg.probeMaxDays, 30) + "-day probe window, and never sold: dud-like, no probe.");
       } else if (dudKnown) {
         // The engine's own cooldown fact: this game was already probed and sold nothing.
         c = "skip";
         isDud = "probe";
-        why.push(none + ".");
         why.push(dudLine() + " A known dud: no probe.");
       } else if (cfg.probeColdStart && dud !== false) {
         c = "unknown";
-        why.push(none + "; the auto-farm's probe history was not readable, so a possible dud is not probed.");
+        why.push("The auto-farm's probe history was not readable, so a possible dud is not probed.");
       } else if (!rivals) {
         // The engine's untested-market gate needs a seller count, and none was read.
         c = "unknown";
         held = "unknown";
-        why.push(none + "; how many rivals list it is unknown (no market research and no radar row), so it is not probed.");
+        why.push("How many rivals list it is unknown (no market research, no radar row), so it is not probed.");
       } else if (num(rivals.n) > num(cfg.probeMaxSellers)) {
         // A TESTED market: the engine skips these too (demandAllocation) — the market has spoken.
         c = "skip";
         held = "tested";
         why.push(
-          none + "; rivals list it but it does not sell: " + num(rivals.n) + " rival seller" + (num(rivals.n) === 1 ? "" : "s") +
-            " (" + (rivals.from === "research" ? "the engine's market research" : "the market radar") + "), over the untested-market limit of " +
-            num(cfg.probeMaxSellers) + ".",
+          "Rivals list it but it does not sell: " + sellers + " (" + (rivals.from === "research" ? "the engine's market research" : "the market radar") +
+            "), over the untested-market limit of " + num(cfg.probeMaxSellers) + ".",
         );
       } else {
         c = "probe";
         basis = "cold";
-        t = coldSize;
-        const max = Math.floor(num(sizing && sizing.maxPerGame));
-        if (max > 0 && t > max) t = max;
-        why.push(
-          none + ": a new drop in an untested market (" + num(rivals.n) + " rival seller" + (num(rivals.n) === 1 ? "" : "s") + ") → cold probe of " + t +
-            (listedDays != null ? " (" + since + ", inside the probe window)" : "") + ".",
-        );
+        smallBatch();
+        why.push("A new drop in an untested market (" + sellers + ") → cold probe of " + t + ".");
+        if (listedDays > 0) why.push(listed + ": inside the " + num(cfg.probeMaxDays, 30) + "-day probe window.");
         capToGame();
       }
     }
@@ -625,17 +666,17 @@ const campaignStartOf = (v) => {
 
 /**
  * The engine's probe budget (decide.probeGate), across games: at most `max` probes at once, its own
- * in-flight probe tasks included (`engineProbes`, the tasks its gate counts). A cold probe on a game
- * the engine is already probing IS that probe and takes no new slot — the engine never counts a
- * game's own probe against it. The rest queue oldest campaign first: a lane held by the budget
- * retries every cycle, so the longest-waiting campaign takes a freed slot first. An unreadable task
- * count (null) holds every new probe. Mutates the held verdicts into skips.
+ * in-flight probe tasks included (`engineProbes`, the tasks its gate counts), cold and returning
+ * probes alike. A probe on a game the engine is already probing IS that probe and takes no new slot —
+ * the engine never counts a game's own probe against it. The rest queue oldest campaign first: a lane
+ * held by the budget retries every cycle, so the longest-waiting campaign takes a freed slot first.
+ * An unreadable task count (null) holds every new probe. Mutates the held verdicts into skips.
  * @param {Array} verdicts [{ g, br }] — g.probing: the engine's probe tasks on the game;
  *                         g.campaignStartAt: when its oldest live campaign started (epoch ms)
  */
 function applyProbeBudget(verdicts, { max, engineProbes }) {
   const queue = verdicts
-    .filter((v) => v.br.c === "probe" && v.br.b === "cold" && !(num(v.g.probing) > 0))
+    .filter((v) => v.br.c === "probe" && (v.br.b === "cold" || v.br.b === "returning") && !(num(v.g.probing) > 0))
     .sort((a, b) => campaignStartOf(a) - campaignStartOf(b) || String(a.g.key).localeCompare(String(b.g.key)));
   const cap = Math.max(0, Math.floor(num(max)));
   let active = engineProbes == null ? null : Math.max(0, num(engineProbes));
@@ -647,20 +688,11 @@ function applyProbeBudget(verdicts, { max, engineProbes }) {
     const reason =
       active == null
         ? "Probe budget unknown: the auto-farm's probe tasks could not be read, so no new probe."
-        : "Probe budget full (" + active + " active): at most " + cap + " probes at once, oldest campaigns first — this new drop waits for a slot.";
+        : "Probe budget full (" + active + " active): at most " + cap + " probes at once, oldest campaigns first — this one waits for a slot.";
     v.br = { ...v.br, c: "skip", t: 0, b: "none", held: "budget", why: [reason].concat(v.br.why) };
   }
 }
 
-/** The first moment a game had a live listing (epoch ms), or null — from listingSpans' spans. */
-function firstListedAt(spans) {
-  let first = null;
-  for (const s of spans || []) {
-    const a = s && num(s[0], NaN);
-    if (Number.isFinite(a) && (first === null || a < first)) first = a;
-  }
-  return first;
-}
 
 /**
  * The old engine's verdict, from `demandAllocation`'s return value and `internalSalesForGame`,
@@ -793,7 +825,8 @@ function noclaimVerdict({ snapRow, altRow = null, entries = null, now, cfg, dema
 
 /* ---------------------------------- a run ----------------------------------- */
 
-const shortWhy = (list) => (list || []).slice(0, 4).map((s) => String(s).slice(0, 160));
+// The reasons a row keeps (memory only, the newest run): a held cold probe has up to six.
+const shortWhy = (list) => (list || []).slice(0, 6).map((s) => String(s).slice(0, 160));
 
 /**
  * Every row of one run, from inputs utils/demandBrain/inputs.js loaded.
@@ -824,13 +857,10 @@ function buildRun({ now, cfg, sizing, probeSize = 15, claim = [], noclaim = [], 
     const est = allEstimates(entries, now, ctx);
     const own = est[cfg.estimatorClaim] || 0;
     const market = marketView(g.radar || null, entries, now);
-    const first = firstListedAt(g.spans);
-    const evidence = {
-      sold135: entries.some((e) => e.t > now - HISTORY_DAYS * DAY && e.t <= now),
-      listed135: coveredDays(g.spans || [], now - HISTORY_DAYS * DAY, now) > 0,
-      firstListedAt: first,
-      listedDays: first == null ? null : Math.max(0, (now - first) / DAY),
-    };
+    // Our own sales and listings INSIDE the lookback only (review 2): what is older is not evidence here.
+    const sales135 = countIn(entries, now, HISTORY_DAYS);
+    const listedDays = coveredDays(g.spans || [], now - HISTORY_DAYS * DAY, now);
+    const evidence = { sold135: sales135 > 0, sales135, listed135: listedDays > 0, listedDays };
     // A pack without `dud` was not checked: null (only matters while probeColdStart is on).
     const dud = g.dud === undefined ? null : g.dud;
     const rivals = rivalSellersOf(g.old && g.old.research, g.radar || null);
@@ -932,6 +962,9 @@ function summarize(rows) {
       coldHeldTested: 0,
       coldHeldUnknown: 0,
       coldHeldBudget: 0,
+      returningProbes: 0,
+      returningTarget: 0,
+      oldTargetReturning: 0,
     },
     noclaim: { buckets: 0, byDiff: blank(), oldTarget: 0, brainTarget: 0 },
   };
@@ -955,6 +988,10 @@ function summarize(rows) {
           s.claim.coldProbes++;
           s.claim.coldTarget += num(r.br.t);
           s.claim.oldTargetCold += acts(r.old.c) ? num(r.old.t) : 0;
+        } else if (r.br.c === "probe" && r.br.b === "returning") {
+          s.claim.returningProbes++;
+          s.claim.returningTarget += num(r.br.t);
+          s.claim.oldTargetReturning += acts(r.old.c) ? num(r.old.t) : 0;
         } else if (r.br.dud) {
           s.claim.coldDuds++;
         } else if (r.br.held === "tested") {
@@ -1024,10 +1061,12 @@ const IN_STOCK_DAYS = 6;
 // every estimator and would only dilute the error, but a week one estimator forecast sales for and
 // none came is exactly the miss that must count: the backtest used to admit a week only when the game
 // had sold in the 45 days before it — avg45's own horizon — which hid every sba/tsb false alarm 46–91
-// days after a game's last sale. Every estimator is scored on every admitted row, a missing forecast
-// as 0, so all are compared on the same rows. An estimator a logged row does not carry at all (it was
-// logged before the estimator existed) is flagged `partial` — "not enough history yet" — and is never
-// ranked (bestOf).
+// days after a game's last sale. Every estimator is scored on the admitted rows it has a forecast
+// for. A row that carries no number for it — logged before the estimator existed, or null because its
+// input failed that run (a v2g snapshot that withheld itself, an errored engine verdict) — is
+// MISSING, never a forecast of 0 (review 2, 2026-10-03: a failed v2g read as "forecast 0" and was
+// still ranked). An estimator missing on any admitted row is flagged `partial` — "not enough
+// history yet" — and is never ranked (bestOf): only estimators scored on the very same rows compete.
 //
 // The longest look-back of any estimator (sba/tsb's 13 weeks): a game with no sale inside it before
 // a week, and none during it, forecasts 0 everywhere, so the backtest skips it without computing.
@@ -1039,14 +1078,20 @@ const scoredIds = (farm, withEngine) => (withEngine && farm === "claim" ? ESTIMA
 
 const forecastsSale = (forecasts) => Object.values(forecasts).some((v) => num(v) > 0);
 
+// A forecast this row actually carries: a finite number. Anything else is missing.
+const forecastOf = (forecasts, id) => {
+  const v = forecasts[id];
+  return v === null || v === undefined || v === "" || !Number.isFinite(Number(v)) ? null : Number(v);
+};
+
 function admitRow(by, farm, forecasts, actual, ids) {
   const f = by[farm] || (by[farm] = { rows: 0, ids, s: {} });
   f.rows++;
   for (const id of ids) {
-    // not in this row at all: logged before the estimator existed — no history, not a forecast of 0
-    if (!Object.prototype.hasOwnProperty.call(forecasts, id)) continue;
+    const v = forecastOf(forecasts, id);
+    if (v === null) continue; // missing on this row: the estimator becomes partial, never a 0
     if (!f.s[id]) f.s[id] = newScore();
-    addScore(f.s[id], num(forecasts[id], 0), actual);
+    addScore(f.s[id], v, actual);
   }
 }
 
@@ -1105,7 +1150,7 @@ function backtest({ games = [], now, weeks = 6, demandRates = null }) {
 /**
  * Score logged forecasts once their week is over, admitted and compared exactly as the backtest
  * (admitRow). Today's engine reading is scored beside the estimators on the claim farm; an errored
- * verdict forecast nothing (0).
+ * verdict has no reading — missing for that row, like any failed estimate.
  * @param {Array} samples [{ at, rows }] — one logged run per day
  * @param {Function} entriesFor (farm, key) -> entries, the evidence as known NOW
  * @param {Function} [spansFor] (farm, key) -> listing spans, for the in-stock split
@@ -1130,7 +1175,7 @@ function forwardScores({ samples = [], entriesFor, spansFor = () => null, now })
       if (!entries) continue;
       const actual = actualIn(entries, T, T + 7 * DAY);
       const forecasts = { ...r.est };
-      if (r.f === "claim") forecasts.engine = r.old && r.old.c !== "error" ? num(r.old.w, 0) : 0;
+      if (r.f === "claim") forecasts.engine = r.old && r.old.c !== "error" ? r.old.w : null;
       if (!actual && !forecastsSale(forecasts)) continue;
       admitRow(by, r.f, forecasts, actual, scoredIds(r.f, true));
       if (stockedWeek(r.f, spansFor(r.f, r.k), T, T + 7 * DAY)) admitRow(byStocked, r.f, forecasts, actual, scoredIds(r.f, true));
@@ -1213,7 +1258,7 @@ module.exports = {
   probeCooldownDaysOf,
   listingSpans,
   coveredDays,
-  firstListedAt,
+  quietLow,
   countIn,
   weeklyCounts,
   sbaRate,

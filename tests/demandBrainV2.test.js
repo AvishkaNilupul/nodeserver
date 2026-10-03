@@ -223,29 +223,50 @@ test("review 2 — the backtest and the forward test admit and score the same ga
   assert.deepEqual(fw.scores.noclaim, bt.scores.noclaim);
 });
 
-test("review 2 — a missing forecast scores as 0; an estimator a row was logged without is 'not enough history yet', never ranked", () => {
+test("review 2 + round 2 (e9) — a null or absent forecast is MISSING: the estimator is 'not enough history yet', never ranked", () => {
   const T1 = NOW - 20 * DAY;
   const T2 = NOW - 10 * DAY;
   const entries = [{ t: T1 + DAY, m: "eldorado" }, { t: T2 + DAY, m: "eldorado" }];
   const samples = [
-    // a model v1 row: no sba yet, and avg30 logged as null
+    // a model v1 row: no sba yet, and avg30 logged as null (its input failed that run)
     { at: new Date(T1), rows: [{ f: "noclaim", k: "x", old: { c: "fleet" }, est: { avg45: 5, avg30: null, max30_14: 3 } }] },
     // a v2 row: sba logged, and it happens to be exact
     { at: new Date(T2), rows: [{ f: "noclaim", k: "x", old: { c: "fleet" }, est: { avg45: 5, avg30: 2, max30_14: 3, sba: 1 } }] },
   ];
   const fw = M.forwardScores({ samples, entriesFor: () => entries, now: NOW });
   const s = fw.scores.noclaim;
-  assert.equal(s.avg30.n, 2, "null is a forecast of 0, scored on the same rows as the rest");
-  assert.equal(s.avg30.forecast, 2);
-  assert.equal(s.avg30.partial, undefined);
+  assert.equal(s.avg30.n, 1, "null is not a forecast of 0: the row it failed on is not scored for it");
+  assert.equal(s.avg30.partial, true, "and it is not scored on every row");
   assert.equal(s.sba.n, 1);
   assert.equal(s.sba.rmse, 0, "exact on the one row it has…");
   assert.equal(s.sba.partial, true, "…but not scored on every row: not enough history yet");
   assert.equal(s.tsb.n, 0);
   assert.equal(s.tsb.partial, true);
-  // avg30 misses by 1 then 1 (rmse 1), max30_14 by 2 twice, avg45 by 4 twice; sba's 0 does not count
-  assert.equal(fw.best.noclaim.id, "avg30", "ranked only among estimators scored on the same rows");
+  // max30_14 misses by 2 twice (rmse 2), avg45 by 4 twice: only those two have every row
+  assert.equal(fw.best.noclaim.id, "max30_14", "ranked only among estimators scored on the same rows");
   assert.equal(M.bestOf({ claim: { a: { n: 3, rmse: 0.1, bias: 0, partial: true }, b: { n: 3, rmse: 1, bias: 0 } } }).claim.id, "b");
+});
+
+test("round 2 (e9) — the reviewer's case: a no-claim row whose v2g snapshot failed does not score v2g as 0, and v2g is not ranked", () => {
+  const now = NOW;
+  const T = now - 10 * DAY;
+  const est = (v2g) => Object.fromEntries(M.ESTIMATORS.map((id) => [id, id === "v2g" ? v2g : 5]));
+  const entries = Array.from({ length: 5 }, (_, i) => ({ t: T + ((i + 1) * DAY) / 2, m: "eldorado", p: 4 }));
+  const f = M.forwardScores({ samples: [{ at: new Date(T), rows: [{ f: "noclaim", k: "overwatch", est: est(null), old: {}, br: {} }] }], entriesFor: () => entries, now });
+  assert.deepEqual(f.scores.noclaim.v2g, { n: 0, mae: null, rmse: null, bias: null, forecast: 0, actual: 0, partial: true }, "was { n: 1, mae: 5, forecast: 0 }");
+  assert.deepEqual(f.scores.noclaim.v2, { n: 1, mae: 0, rmse: 0, bias: 0, forecast: 5, actual: 5 });
+  assert.notEqual(f.best.noclaim.id, "v2g");
+  // an errored engine verdict has no reading either
+  const claim = M.forwardScores({
+    samples: [
+      { at: new Date(T), rows: [{ f: "claim", k: "a", old: { c: "error", w: 9 }, est: est(5) }] },
+      { at: new Date(T + DAY), rows: [{ f: "claim", k: "a", old: { c: "farm", w: 4 }, est: est(5) }] },
+    ],
+    entriesFor: () => entries,
+    now,
+  });
+  assert.equal(claim.scores.claim.engine.n, 1);
+  assert.equal(claim.scores.claim.engine.partial, true);
 });
 
 /* ----------------------------------- v2g ----------------------------------- */
@@ -424,7 +445,8 @@ test("review 5 — cold probe size: half the engine's own shelf floor, owner-set
 
 // A live game with no sale of ours, checked against the probe history.
 const fresh = (o = {}) => M.claimVerdict({ own: 0, market: null, value: 0, cfg: CFG, sizing: SIZING, probeSize: 15, floor: FLOOR, evidence: {}, live: true, dud: false, rivals: { n: 0, from: "research" }, ...o });
-const listedFor = (days) => ({ listed135: true, firstListedAt: NOW - days * DAY, listedDays: days });
+// Listed `days` days inside the lookback, no sale of ours there.
+const listedFor = (days) => ({ listed135: days > 0, listedDays: days, sales135: 0 });
 
 test("v2 cold probe: a live campaign, no sale of ours, not a dud → probe of 6 (was 'unknown')", () => {
   const v = fresh();
@@ -434,7 +456,7 @@ test("v2 cold probe: a live campaign, no sale of ours, not a dud → probe of 6 
   assert.equal(v.td, 0, "no demand number behind it");
   assert.equal(v.w, 0);
   assert.equal(v.dud, null);
-  assert.match(v.why.join(" "), /a new drop in an untested market \(0 rival sellers\) → cold probe of 6/);
+  assert.match(v.why.join(" "), /A new drop in an untested market \(0 rival sellers\) → cold probe of 6/);
   assert.equal(fresh({ gameCap: 4 }).t, 4, "the owner's per-game cap still wins");
   assert.match(fresh({ gameCap: 4 }).why.join(" "), /your cap/);
   assert.equal(fresh({ cfg: M.readConfig({ ...AF, demandBrain: { coldProbeSize: 9 } }) }).t, 9);
@@ -447,7 +469,7 @@ test("review 3 — listings do not disqualify: the engine's own probe, listed 2 
   const v = fresh({ evidence: listedFor(2) });
   assert.equal(v.c, "probe", "it used to be a brain-skip");
   assert.equal(v.b, "cold");
-  assert.match(v.why.join(" "), /listed since 2026-10-08 \(2 days\), inside the probe window/);
+  assert.match(v.why.join(" "), /Listed 2 days of the last 135: inside the 30-day probe window/);
   // listed for exactly the probe window is still inside it
   assert.equal(fresh({ evidence: listedFor(30) }).c, "probe");
 });
@@ -456,7 +478,7 @@ test("review 3 — listed longer than the engine's probe window and never sold: 
   const v = fresh({ evidence: listedFor(40) });
   assert.equal(v.c, "skip");
   assert.equal(v.dud, "listed");
-  assert.match(v.why.join(" "), /listed since 2026-08-31 \(40 days\), longer than the 30-day probe window, and never sold: dud-like/);
+  assert.match(v.why.join(" "), /Listed 40 days of the last 135, longer than the 30-day probe window, and never sold: dud-like/);
   // the engine's probeMaxDays is the window
   assert.equal(fresh({ evidence: listedFor(40), cfg: M.readConfig({ ...AF, probeMaxDays: 45 }) }).c, "probe");
 });
@@ -492,14 +514,14 @@ test("v2 cold probe: rival evidence still upgrades to the existing market-led pr
   assert.match(d.why.join(" "), /ended with 0 sales/, "said, not hidden");
 });
 
-test("review 3 — eligibility is 'no own sale in 135 days': an unproven rival market does not stop a cold probe; a sale of ours does", () => {
+test("review 3 — eligibility is 'no own sale in 135 days': an unproven rival market does not stop a cold probe; a sale of ours makes it returning", () => {
   assert.equal(fresh({ market: M.marketView(radar({ perWeek: 0, units: 0 }), [], NOW) }).b, "cold", "a watched market with no sales yet");
   assert.equal(fresh({ market: M.marketView(radar({ perWeek: 0.5, units: 2 }), [], NOW) }).b, "cold", "rivals below proof");
   assert.equal(fresh({ market: M.marketView(radar({ perWeek: null, ratePartial: true }), [], NOW) }).b, "cold");
-  // a sale of ours inside 135 days and nothing recent: the estimator's own skip, not a new drop
-  const sold = fresh({ evidence: { sold135: true, ...listedFor(60) } });
-  assert.equal(sold.c, "skip");
-  assert.equal(sold.dud, null);
+  // a sale of ours inside 135 days and nothing recent: not a new drop but a RETURNING game (round 2)
+  const sold = fresh({ evidence: { ...listedFor(60), sold135: true, sales135: 3 } });
+  assert.deepEqual([sold.c, sold.b, sold.t], ["probe", "returning", 6]);
+  assert.equal(sold.dud, null, "never dud-like: it sold");
 });
 
 test("v2 cold probe never fires without a live campaign or a size", () => {
@@ -581,7 +603,7 @@ test("review 3 — the reviewer's three new-drop cases, end to end", () => {
   const by = Object.fromEntries(run.rows.map((r) => [r.k, r.br]));
   assert.deepEqual([by["brand new"].c, by["brand new"].t], ["probe", 6]);
   assert.deepEqual([by["in flight"].c, by["in flight"].t, by["in flight"].b], ["probe", 6, "cold"], "was a skip");
-  assert.equal(by.recurring.c, "skip", "it sold 50–60 days ago: the claim estimator (avg45, 0 a week) decides, not the cold rule");
+  assert.deepEqual([by.recurring.c, by.recurring.t, by.recurring.b], ["probe", 6, "returning"], "it sold 5 50–60 days ago and is quiet now: a small batch, not 0 (round 2)");
 });
 
 function fakeModels() {
@@ -638,7 +660,7 @@ test("v2 runner: model v2 logged, the heartbeat says 'cold probes N (old asks M)
   const hb = lines.find((l) => /^demandBrain: run 1 /.test(l));
   assert.ok(hb, lines.join("\n"));
   assert.match(hb, /\(model v2, avg45\)/);
-  assert.match(hb, / \| cold probes 2 \(old asks 15\), held: 0 tested market, 0 market unknown, 0 budget full, 1 duds \| /);
+  assert.match(hb, / \| cold probes 2 \(old asks 15\), returning probes 0 \(old asks 0\), held: 0 tested market, 0 market unknown, 0 budget full, 1 duds \| /);
   const a = m.rows.find((x) => x.k === "new a");
   assert.equal(a.br.b, "cold", "the row keeps what made it a cold probe");
   assert.equal(m.rows.find((x) => x.k === "dud c").br.dud, "probe");
@@ -722,14 +744,14 @@ test("gate 1 — a cold probe only for an UNTESTED market; rivals listing it wit
   assert.match(one.why.join(" "), /untested market \(1 rival seller\) → cold probe of 6/);
   const tested = fresh({ rivals: { n: 2, from: "research" } });
   assert.deepEqual([tested.c, tested.t, tested.held], ["skip", 0, "tested"]);
-  assert.match(tested.why.join(" "), /rivals list it but it does not sell: 2 rival sellers \(the engine's market research\), over the untested-market limit of 1/);
+  assert.match(tested.why.join(" "), /Rivals list it but it does not sell: 2 rival sellers \(the engine's market research\), over the untested-market limit of 1/);
   assert.match(fresh({ rivals: { n: 7, from: "radar" } }).why.join(" "), /7 rival sellers \(the market radar\)/);
   // a watched market below proof, with sellers: a skip, never a cold probe
   const watched = fresh({ market: M.marketView(radar({ perWeek: 0.5, units: 2, rivalSellers: 6 }), [], NOW), rivals: M.rivalSellersOf(null, radar({ rivalSellers: 6 })) });
   assert.deepEqual([watched.c, watched.held], ["skip", "tested"]);
   const nobody = fresh({ rivals: null });
   assert.deepEqual([nobody.c, nobody.held], ["unknown", "unknown"]);
-  assert.match(nobody.why.join(" "), /how many rivals list it is unknown/);
+  assert.match(nobody.why.join(" "), /How many rivals list it is unknown/);
   // rival PROOF is not this gate's business: it still upgrades to the market-led probe
   assert.equal(fresh({ market: M.marketView(radar({ perWeek: 40, units: 60 }), [], NOW), rivals: { n: 9, from: "radar" } }).b, "market");
 });
@@ -810,7 +832,115 @@ test("gates 1 + 2 on a run shaped like the staging run: 4 cold probes (old asks 
   assert.equal(s.byDiffLive["agree-skip"], 44);
   const blank = Object.fromEntries(M.DIFFS.map((d) => [d, 0]));
   const hb = B.heartbeat({ v: 2, ms: 1000, cfg: { estimatorClaim: "avg45" }, summary: { ...run.summary, claim: { ...s, byDiffLive: { ...blank, ...s.byDiffLive } } } }, run.rows, true);
-  assert.match(hb, / \| cold probes 4 \(old asks 60\), held: 44 tested market, 4 market unknown, 2 budget full, 0 duds \| /);
+  assert.match(hb, / \| cold probes 4 \(old asks 60\), returning probes 0 \(old asks 0\), held: 44 tested market, 4 market unknown, 2 budget full, 0 duds \| /);
+});
+
+/* ------------------------------ review round 2 ------------------------------ */
+
+test("round 2 (e7) — sba never rises while nothing sells, even when the oldest selling week slides out", () => {
+  // The reviewer's case: one sale in each of the weeks 12, 7 and 6 before t0, then nothing.
+  const t0 = Date.parse("2026-10-03T12:00:00Z");
+  const entries = [12, 7, 6].map((w) => ({ t: t0 - w * WEEK - DAY, m: "gameflip", p: 2 }));
+  const series = [];
+  for (let k = 0; k <= 6; k++) series.push(M.estimate("sba", entries, t0 + k * WEEK).total);
+  // The raw rate jumps to 0.93 once week 12 slides out (the 1-week gap becomes the seed): before
+  // this fix the estimator read 0.21, 0.93, 0.93, 0.93, 0.93, 0.93, 0.07.
+  assert.equal(Math.round(M.sbaRate(M.weeklyCounts(entries, t0 + WEEK)) * 100) / 100, 0.93);
+  assert.deepEqual(series, [0.21, 0.21, 0.21, 0.21, 0.21, 0.21, 0.07]);
+  // In a week with a sale it is the raw rate itself.
+  assert.equal(M.estimate("sba", weeksOf(A), NOW).total, Math.round(M.sbaRate(A) * 100) / 100);
+});
+
+test("round 2 (e7) — property: with no new sales, sba and tsb never rise week over week (4,000 random histories)", () => {
+  const rand = rng(207);
+  let steps = 0;
+  for (let c = 0; c < 4000; c++) {
+    const t0 = NOW + Math.floor(rand() * 7 * DAY);
+    const e = [];
+    const weeks = 1 + Math.floor(rand() * 12);
+    for (let i = 0; i < weeks; i++) {
+      const w = Math.floor(rand() * 13);
+      const n = 1 + Math.floor(rand() * 4);
+      for (let j = 0; j < n; j++) e.push({ t: t0 - w * WEEK - rand() * WEEK, m: rand() < 0.5 ? "gameflip" : "eldorado" });
+    }
+    for (const id of ["sba", "tsb"]) {
+      let prev = null;
+      for (let q = 0; q <= 14; q++) {
+        const r = M.estimate(id, e, t0 + q * WEEK);
+        if (prev) for (const part of ["shelf", "other", "total"]) assert.ok(r[part] <= prev[part], id + " " + part + " rose in silence, case " + c + " week " + q + ": " + prev[part] + " → " + r[part]);
+        prev = r;
+        steps++;
+      }
+    }
+  }
+  assert.equal(steps, 4000 * 2 * 15);
+});
+
+test("round 2 — tsb could rise in silence too (a small old week leaving lifts its starting averages); it is held the same way", () => {
+  // weekly counts 1,0,0,0,0,0,0,0,10,0,4,0,0 — a week later the 1 has left the window
+  const e = weeksOf([1, 0, 0, 0, 0, 0, 0, 0, 10, 0, 4, 0, 0]);
+  const rawLater = M.tsbRate(M.weeklyCounts(e, NOW + WEEK));
+  assert.ok(rawLater > M.tsbRate(M.weeklyCounts(e, NOW)), "the raw rate does rise: " + rawLater);
+  assert.equal(M.estimate("tsb", e, NOW).total, 1.19);
+  assert.equal(M.estimate("tsb", e, NOW + WEEK).total, 1.19, "held, not 1.23");
+});
+
+test("round 2 (e3) — dud-like counts only days LISTED inside the lookback; old sales are not evidence; a quiet seller is RETURNING", () => {
+  // The reviewer's four cases, with the engine's research (untested) and a free budget, so the
+  // time-span rules alone decide.
+  const tenSales = (daysAgo) => Array.from({ length: 10 }, (_, i) => ({ t: NOW - daysAgo * DAY + i * 3600000, m: "gameflip", p: 3 }));
+  const run = M.buildRun({
+    now: NOW,
+    cfg: CFG,
+    sizing: SIZING,
+    probeSize: 15,
+    engine: { floor: FLOOR, maxPerGame: 250, probes: 0 },
+    claim: [
+      newDrop("control"),
+      newDrop("listed 2 days, a month ago", { spans: [[NOW - 32 * DAY, NOW - 30 * DAY]] }),
+      newDrop("sold 150 days ago", { spans: [[NOW - 200 * DAY, NOW - 140 * DAY]], entries: tenSales(150) }),
+      newDrop("sold 50 days ago", { spans: [[NOW - 70 * DAY, NOW - 45 * DAY]], entries: tenSales(50) }),
+    ],
+  });
+  const by = Object.fromEntries(run.rows.map((r) => [r.k, r]));
+  // before: "listed since … (32 days)" dud-like, "listed since … (200 days)" dud-like, and skip 0
+  for (const k of ["control", "listed 2 days, a month ago", "sold 150 days ago"]) assert.deepEqual([by[k].br.c, by[k].br.t, by[k].br.b], ["probe", 6, "cold"], k);
+  assert.match(by["listed 2 days, a month ago"].why.join(" "), /Listed 2 days of the last 135: inside the 30-day probe window/);
+  const back = by["sold 50 days ago"];
+  assert.deepEqual([back.br.c, back.br.t, back.br.b], ["probe", 6, "returning"]);
+  assert.equal(back.why.join(" "), "Sold 10 in the last 135 days, quiet for 45 days, new campaign → small batch of 6.");
+  assert.equal(run.summary.claim.returningProbes, 1);
+  // listed longer than the probe window INSIDE the lookback, never sold: still dud-like
+  const long = fresh({ evidence: listedFor(31) });
+  assert.deepEqual([long.c, long.dud], ["skip", "listed"]);
+});
+
+test("round 2 (e3) — a returning game bypasses the untested-market gate but takes a probe-budget slot", () => {
+  // a game we sold 60 days ago, in a market 9 rivals list
+  const quiet = (key, start) =>
+    newDrop(key, { entries: [{ t: NOW - 60 * DAY, m: "gameflip" }], campaignStartAt: start, old: { alloc: { skip: true, effective: 2 }, sales: { count: 1 }, research: { ds: 2, sellers: 9, at: new Date(NOW - DAY) } } });
+  const alone = M.buildRun({ now: NOW, cfg: CFG, sizing: SIZING, engine: { floor: FLOOR, maxPerGame: 30, probes: 0 }, claim: [quiet("r")] });
+  assert.deepEqual([alone.rows[0].br.c, alone.rows[0].br.b], ["probe", "returning"], "9 rival sellers would hold a cold probe back; our own sale outranks them");
+  assert.equal(alone.rows[0].d, "brain-farm", "today skips it");
+  // seven engine probes in flight, budget 8: one slot, and the older campaign takes it
+  const run = M.buildRun({
+    now: NOW,
+    cfg: CFG,
+    sizing: SIZING,
+    engine: { floor: FLOOR, maxPerGame: 30, probes: 7 },
+    claim: [newDrop("cold, newer", { campaignStartAt: NOW - 2 * DAY }), quiet("returning, older", NOW - 9 * DAY)],
+  });
+  const by = Object.fromEntries(run.rows.map((r) => [r.k, r.br]));
+  assert.deepEqual([by["returning, older"].c, by["returning, older"].b], ["probe", "returning"]);
+  assert.deepEqual([by["cold, newer"].c, by["cold, newer"].held], ["skip", "budget"]);
+  // the rule's edges: a forecast under minRate is quiet (the rate shown), at minRate it farms;
+  // no live campaign or cold probes off keep model v1's skip
+  const slow = fresh({ own: 0.2, evidence: { sold135: true, sales135: 2 } });
+  assert.deepEqual([slow.c, slow.b], ["probe", "returning"]);
+  assert.match(slow.why.join(" "), /quiet for 45 days \(0\.2 a week\)/);
+  assert.equal(fresh({ own: 0.25, evidence: { sold135: true, sales135: 2 } }).c, "farm");
+  assert.equal(fresh({ live: false, evidence: { sold135: true, sales135: 2 } }).c, "skip");
+  assert.equal(fresh({ cfg: M.readConfig({ ...AF, demandBrain: { coldProbeSize: 0 } }), evidence: { sold135: true, sales135: 2 } }).c, "skip");
 });
 
 /* ------------------------------ review 7: labels ------------------------------ */
