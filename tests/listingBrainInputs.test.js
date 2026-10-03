@@ -13,6 +13,7 @@ const setIdentity = require("../utils/priceTracker/setIdentity");
 const venues = require("../utils/priceTracker/venues");
 const unclaimedBundles = require("../utils/unclaimedBundles");
 const G = require("../utils/priceTracker/games");
+const PACK = require("../utils/bulkPacks/packMath");
 const MU = require("../utils/listingBrain/model/util");
 const E = require("../utils/listingBrain/model/evidence");
 const EXPORT = require("../scripts/listing-brain-export");
@@ -29,8 +30,8 @@ const H = (n) => I.hashId(ID(n));
 /* ------------------------------- the fake world ------------------------------- */
 
 function query(rows, calls, name) {
-  return (filter, projection) => {
-    const call = { name, filter, projection, sort: null, limit: null, lean: false, skipped: false };
+  return (filter, projection, options) => {
+    const call = { name, filter, projection, options, sort: null, limit: null, lean: false, skipped: false };
     calls.push(call);
     const q = {
       sort(s) {
@@ -373,7 +374,7 @@ function world(over = {}) {
       getReport: async (o) => {
         calls.push({ name: "radar", opts: o });
         if (over.radarFails) throw new Error("radar read failed at 10.1.2.3:27017");
-        return radarReport();
+        return over.radar || radarReport();
       },
     },
     autoLister: {
@@ -419,20 +420,42 @@ function world(over = {}) {
     g2gGames: { brandForGame: (g) => (/beta arena/i.test(String(g)) ? "Beta Brand" : null) },
     MarketplaceListing: { find: query(over.listingRows || (over.listingsFail ? new Error("listings down") : LISTINGS.map((r) => r.x)), calls, "listings") },
     UnclaimedAccount: {
-      find: (filter, projection) => {
-        if (over.unitsFail) return query(new Error("units down"), calls, "units")(filter, projection);
+      find: (filter, projection, options) => {
+        if (over.unitsFail) return query(new Error("units down"), calls, "units")(filter, projection, options);
         const sold = filter.status === "sold";
         // the same document comes back from both reads (u1 is sold and listed in the window)
         const rows = sold ? unitDocs.filter((u) => u.status === "sold") : unitDocs.filter((u) => u.listedAt);
-        return query(rows, calls, sold ? "unitsSold" : "unitsListed")(filter, projection);
+        return query(rows, calls, sold ? "unitsSold" : "unitsListed")(filter, projection, options);
       },
     },
-    TwitchCampaign: { find: query(over.campaignsFail ? new Error("campaigns down") : CAMPAIGNS, calls, "campaigns") },
-    CampaignDrops: { find: query(MANIFESTS, calls, "manifests") },
+    TwitchCampaign: { find: query(over.campaignsFail ? new Error("campaigns down") : over.campaigns || CAMPAIGNS, calls, "campaigns") },
+    CampaignDrops: { find: query(over.manifests || MANIFESTS, calls, "manifests") },
+    // the event-bundle marker of the claim auto rows' sets (C13): {_id, sourceType, sourceEventKey}
+    DropSet: { find: query(over.dropSetsFail ? new Error("sets down") : over.dropSets || [], calls, "dropSets") },
     MarketResearch: { find: query(over.researchFail ? new Error("research down") : RESEARCH, calls, "research") },
     DemandBrainRow: { find: query(over.demandRows || (over.demandFail ? new Error("rows down") : DEMAND_ROWS), calls, "demand") },
     // the model's own config reader (pure): which keys the bundle keeps, how far back demand rows are read
     listingModel: { readConfig: MU.readConfig, DEFAULTS: MU.DEFAULTS },
+    // the tracker's own counting rule and bulkPacks' pack size (both pure)
+    games: over.games === undefined ? { listedUnits: G.listedUnits } : over.games,
+    packMath: { packSizeOf: PACK.packSizeOf },
+    // pricingEvidence's cached snapshot (GGSel's venue factor, the event-bundle pricer): warmed once
+    pricingEvidence: {
+      snapshot: async () => {
+        seen.snapshot = (seen.snapshot || 0) + 1;
+        if (over.snapshotFails) throw new Error("snapshot read failed at db01.example.invalid:27017");
+        if (over.snapshotHangs) return new Promise(() => {});
+        return { ok: true };
+      },
+    },
+    autoFarmBundles: {
+      SOURCE_TYPE: "autofarm-bundle",
+      priceBundle: async (o) => {
+        (seen.priceBundle = seen.priceBundle || []).push(o);
+        if (over.priceBundleNull) return null;
+        return { price: 4.25, basis: "platformGame" };
+      },
+    },
   };
   return { deps, calls, seen, af };
 }
@@ -450,7 +473,8 @@ test("every read is projected, limited, lean and never skipped — exactly plan 
   const W = I.readWindows({ listingBrain: { fitDaysClaim: 60 } });
   assert.equal(W.fitDays, 60);
   const db = calls.filter((c) => c.filter !== undefined);
-  assert.deepEqual(db.map((c) => c.name).sort(), ["campaigns", "demand", "listings", "manifests", "research", "unitsListed", "unitsSold"]);
+  // plus the event-bundle marker of the claim auto rows' sets (C13)
+  assert.deepEqual(db.map((c) => c.name).sort(), ["campaigns", "demand", "dropSets", "listings", "manifests", "research", "unitsListed", "unitsSold"]);
   for (const c of db) {
     assert.ok(c.projection && Object.keys(c.projection).length > 0, c.name + " is projected");
     assert.ok(Number.isInteger(c.limit) && c.limit > 0, c.name + " is limited");
@@ -462,11 +486,9 @@ test("every read is projected, limited, lean and never skipped — exactly plan 
   assert.deepEqual(L.projection, { ...I.LISTING_PROJECTION });
   // the title is read for classifyKind in memory (L13); no bundle ever holds it (the plain-JSON test)
   assert.ok(!("units.login" in L.projection) && !("accountLogin" in L.projection) && !("note" in L.projection));
-  assert.deepEqual(L.filter.marketplace.$in, I.MARKETS);
-  assert.deepEqual(L.filter.$or[0], { status: "active" });
-  // non-active rows as far back as sales are kept: max(refDays 180, fit 60) + the backtest's 42 days
+  // the tracker's own shape (P20-7): the active / saleDays window is applied in memory
+  assert.deepEqual(L.filter, { marketplace: { $in: I.MARKETS } });
   assert.equal(W.saleDays, 222);
-  assert.equal(L.filter.$or[1].updatedAt.$gte.getTime(), NOW - W.saleDays * DAY);
   assert.deepEqual(L.sort, { _id: -1 });
   assert.equal(L.limit, I.LISTING_CAP);
   const UL = get("unitsListed");
@@ -474,7 +496,7 @@ test("every read is projected, limited, lean and never skipped — exactly plan 
   assert.deepEqual(UL.projection, { ...I.UNIT_PROJECTION });
   assert.ok(!("login" in UL.projection) && !("loginLower" in UL.projection) && !("poolAccountId" in UL.projection));
   assert.equal(UL.filter.listedAt.$gte.getTime(), NOW - (60 + I.BACKTEST_PAD_DAYS + I.UNIT_LISTED_PAD_DAYS) * DAY);
-  assert.deepEqual(Object.keys(US.filter).sort(), ["soldAt", "status"]);
+  assert.deepEqual(Object.keys(US.filter).sort(), ["$or", "soldAt", "status"]);
   assert.equal(US.filter.status, "sold");
   assert.equal(US.filter.soldAt.$gte.getTime(), NOW - W.saleDays * DAY);
   assert.equal(UL.limit, I.UNIT_CAP);
@@ -487,7 +509,7 @@ test("every read is projected, limited, lean and never skipped — exactly plan 
   const M = get("manifests");
   assert.deepEqual(M.filter, { campaignId: { $in: ["cmp1", "cmp2", "cmp3"] } });
   assert.deepEqual(M.projection, { campaignId: 1, name: 1, game: 1, "drops.itemKey": 1, "drops.name": 1 });
-  assert.equal(M.limit, I.MANIFEST_CAP);
+  assert.equal(M.limit, I.ID_CHUNK, "chunks of ids, each limited");
   const R = get("research");
   assert.deepEqual(R.filter, {});
   assert.deepEqual(R.projection, { game: 1, "markets.gameflip": 1, "markets.ggsel": 1, "markets.plati": 1, scannedAt: 1 });
@@ -739,7 +761,7 @@ test("plati is digiseller everywhere: radar, feed, ledger, fees, the auto-lister
   );
   assert.deepEqual(Object.keys(b.radar.feed[0]).sort(), ["g", "m", "n", "p", "t", "tts", "u"]);
   assert.deepEqual(b.old.games["alpha quest"].order, ["gameflip", "digiseller", "eldorado"]);
-  assert.equal(b.old.games["alpha quest"].flat.digiseller, 1);
+  assert.equal(b.old.games["alpha quest"].flat.digiseller, 2, "dealt 1, topped up by refillMarkets' rule (C12)");
   assert.equal(b.af.takes.digiseller, false, "Digiseller is blocked in venues whatever the switch says");
 });
 
@@ -766,14 +788,16 @@ test("demand: the newest farm-brain row per game × farm; the no-claim bucket ro
   const listed = (g) => b.noclaim.units.filter((u) => u.st === "listed" && u.g === g).length;
   const free = 20 - listed("gamma rush") - listed("gamma rush origins");
   for (const r of nc) assert.equal(r.on, Math.round((listed(r.k) + free * (sold(r.k) / total)) * 100) / 100);
-  // an equal split when nothing sold
+  // nothing sold in 30 days: no basis to split by, so no row (M10b)
   const eq = I.demandRows({ docs: [{ k: "zed", f: "noclaim", at: new Date(NOW), br: { w: 4 }, stk: { on: 2 } }], keywords: ["zed"], units: [{ g: "zed one", st: "listed" }, { g: "zed two", st: "skipped" }], now: NOW });
-  assert.deepEqual(eq.map((r) => [r.k, r.w, r.sh, r.on]), [["zed one", 2, 0.5, 1.5], ["zed two", 2, 0.5, 0.5]]);
+  assert.deepEqual(eq, []);
 });
 
 test("waves: the no-claim games' waves from the pure event catalog", async () => {
   const { b, deps } = await loadWith();
+  // every game's waves (C3): the claim game Alpha Quest's campaign too
   assert.deepEqual(b.noclaim.waves, [
+    { g: "alpha quest", ev: "Alpha Quest Launch", wave: "Alpha Quest Launch", name: "Alpha Quest Launch", startAt: NOW - 5 * DAY, endAt: NOW + 5 * DAY },
     { g: "gamma rush", ev: "Gamma Rush Cup", wave: "Week 1", name: "Gamma Rush Cup Week 1", startAt: NOW - 10 * DAY, endAt: NOW - 2 * DAY },
     { g: "gamma rush", ev: "Gamma Rush Cup", wave: "Week 2", name: "Gamma Rush Cup Week 2", startAt: NOW - DAY, endAt: NOW + 3 * DAY },
   ]);
@@ -785,9 +809,10 @@ test("waves: the no-claim games' waves from the pure event catalog", async () =>
 test("old side per claim game: derivePrice on the matched research, GGSel venue price, split, flat deal, order", async () => {
   const { b, seen } = await loadWith();
   const aq = b.old.games["alpha quest"];
-  assert.deepEqual(aq, { base: 2, ggsel: 1.6, post: 3, split: { listNow: 3, holdBack: 3 }, flat: { gameflip: 2, eldorado: 1 }, order: ["gameflip", "eldorado"], rm: "exact" });
+  // flat: dealt gameflip 2, eldorado 1, then Gameflip topped back up to perMarketStock 3 (C12)
+  assert.deepEqual(aq, { base: 2, ggsel: 1.6, post: 3, split: { listNow: 3, holdBack: 3 }, flat: { gameflip: 3, eldorado: 1 }, order: ["gameflip", "eldorado"], rm: "exact" });
   const ba = b.old.games["beta arena"];
-  assert.deepEqual(ba, { base: 1, ggsel: 0.8, post: 1.5, split: { listNow: 2, holdBack: 1 }, flat: { gameflip: 1, eldorado: 1, g2g: 0 }, order: ["gameflip", "eldorado", "g2g"], rm: "none" }, "G2G only where the brand table knows the game; no research → derivePrice(null)");
+  assert.deepEqual(ba, { base: 1, ggsel: 0.8, post: 1.5, split: { listNow: 2, holdBack: 1 }, flat: { gameflip: 2, eldorado: 1, g2g: 0 }, order: ["gameflip", "eldorado", "g2g"], rm: "none" }, "G2G only where the brand table knows the game; no research → derivePrice(null); Gameflip topped up while the 3 on hand last");
   assert.ok(seen.derive.includes("Alpha Quest"));
   assert.deepEqual(Object.keys(b.old.games).sort(), ["alpha quest", "beta arena", "delta 1", "delta 2", "delta 3", "delta 4", "delta 5", "delta 6", "delta 7", "delta 8"]);
   assert.ok(!b.old.games["gamma rush"], "a no-claim game has no claim-side old row");
@@ -943,24 +968,10 @@ test("the export script refuses to write a bundle that fails privacyScan or vali
 
 /* --------------------------------- pure pieces --------------------------------- */
 
-test("listedUnits is the tracker's games.listedUnits, verbatim", () => {
-  const rows = [
-    { marketplace: "eldorado", units: [{ deliveredAt: null }, { deliveredAt: new Date() }] },
-    { marketplace: "g2g", units: [] },
-    { marketplace: "playerauctions", units: [{ deliveredAt: new Date() }] },
-    { marketplace: "ggsel", lastStock: 4, units: [] },
-    { marketplace: "ggsel", lastStock: null, units: [{}, {}], qtyTarget: 9 },
-    { marketplace: "digiseller", qtyTarget: 7 },
-    { marketplace: "digiseller" },
-    { marketplace: "gameflip", qtyRemaining: 5 },
-    { marketplace: "zeusx", qtyTarget: 3 },
-  ];
-  for (const r of rows) assert.equal(I.listedUnits(r), G.listedUnits(r), JSON.stringify(r));
-});
-
 test("kindOf / farmOf / bucketOfKey / trackerMarket / cleanMsg", () => {
   assert.equal(I.kindOf({ rentFarm: true, bulkOfferId: "x" }), "farm");
-  assert.equal(I.kindOf({ bulkPackSize: 3 }), "bulk");
+  assert.equal(I.kindOf({ bulkPackSize: 3, bulkOfferId: "x" }), "bulk");
+  assert.equal(I.kindOf({ bulkPackSize: 3 }), "single", "packMath's rule: no bulkOfferId, no pack (C9)");
   assert.equal(I.kindOf({ lotSize: 5, noclaimStock: true }), "lot");
   assert.equal(I.kindOf({ accountOffer: "x", autoClaimSet: true }), "account");
   assert.equal(I.kindOf({ autoClaimSet: true, origin: "auto" }), "cas");
@@ -1045,7 +1056,7 @@ test("source: every .find( is followed by .limit( in the same chain", () => {
     assert.ok(/\.limit\(/.test(chain), "a .find( without .limit(: " + chain.slice(0, 120));
     assert.ok(/\.lean\(\)/.test(chain), "a .find( without .lean(): " + chain.slice(0, 120));
   }
-  assert.equal(n, 7, "the seven reads of plan §2 (units twice)");
+  assert.equal(n, 8, "the eight reads of plan §2 (units twice; the event-bundle marker of the sets)");
 });
 
 test("source: nothing but crypto and fs is required outside realDeps(), and realDeps loads no connector directly", () => {
@@ -1061,21 +1072,27 @@ test("source: nothing but crypto and fs is required outside realDeps(), and real
   assert.deepEqual(inside, [
     "../../models/CampaignDrops",
     "../../models/DemandBrainRow",
+    "../../models/DropSet",
     "../../models/MarketResearch",
     "../../models/MarketplaceListing",
     "../../models/TwitchCampaign",
     "../../models/UnclaimedAccount",
+    "../autoFarmBundles",
     "../autoLister",
+    "../bulkPacks/packMath",
     "../g2gGames",
     "../marketData/report",
     "../priceTracker",
+    "../priceTracker/games",
     "../priceTracker/setIdentity",
     "../priceTracker/venues",
+    "../pricingEvidence",
     "../settings",
     "../unclaimedBundles",
     "./model/util",
   ]);
-  for (const bad of [/marketplaces/, /Fulfiller/i, /unclaimedAutoList/, /unclaimedListingAudit/, /noclaimOfferRotation/, /pricingEvidence/]) assert.ok(!bad.test(body), "realDeps requires " + bad);
+  // pricingEvidence is a cached read (its snapshot is warmed once per run, P20-6): allowed, read-only
+  for (const bad of [/marketplaces/, /Fulfiller/i, /unclaimedAutoList/, /unclaimedListingAudit/, /noclaimOfferRotation/]) assert.ok(!bad.test(body), "realDeps requires " + bad);
 });
 
 test("requiring the loader loads no other module (no model, no settings, no timer)", () => {
@@ -1220,10 +1237,12 @@ test("L7 the listing read and the sold-unit read reach back as far as sales are 
   assert.equal(W.saleDays, 222);
   assert.equal(W.listingDays, W.saleDays);
   assert.equal(W.unitSoldDays, W.saleDays);
-  const { calls } = await loadWith();
+  // a sold row last written 150 days ago is inside the (in-memory, P20-7) listing window
+  const old = listing(21, { m: "gameflip", origin: "unclaimed", price: 2, status: "sold", created: NOW - 155 * DAY, updated: NOW - 150 * DAY, set: SETS.G1, game: "Gamma Rush", prepared: false });
+  const { b, calls } = await loadWith({ listingRows: LISTINGS.map((r) => r.x).concat([old.x]) });
+  assert.ok(byId(b).has(H(21)));
   const WL = I.readWindows({ listingBrain: { fitDaysClaim: 60 } });
   const get = (n) => calls.find((c) => c.name === n);
-  assert.equal(get("listings").filter.$or[1].updatedAt.$gte.getTime(), NOW - WL.saleDays * DAY);
   assert.equal(get("unitsSold").filter.soldAt.$gte.getTime(), NOW - WL.saleDays * DAY);
   assert.equal(get("listings").limit, I.LISTING_CAP);
   assert.equal(get("unitsSold").limit, I.UNIT_CAP);
@@ -1234,6 +1253,7 @@ test("L8 every wave record keeps its raw campaign name (W.name)", async () => {
   assert.deepEqual(
     b.noclaim.waves.map((w) => [w.wave, w.name]),
     [
+      ["Alpha Quest Launch", "Alpha Quest Launch"],
       ["Week 1", "Gamma Rush Cup Week 1"],
       ["Week 2", "Gamma Rush Cup Week 2"],
     ],
@@ -1253,7 +1273,8 @@ test("L10 a no-claim farm-brain row keyed by normGameName (a–z0–9) joins the
   const g = setIdentity.normGame("Pokémon UNITE");
   // farmDemand.noClaimKeys → settings.normGameName("Pokémon UNITE") = "pok mon unite"
   const docs = [{ k: "pok mon unite", f: "noclaim", at: new Date(NOW - HOUR), live: true, br: { c: "fleet", w: 14, t: 30 }, stk: { on: 20, fl: 0 }, est: { avg30: 12, avg45: 11 } }];
-  const out = I.demandRows({ docs, keywords: kw, listings: [{ g, f: "noclaim", kind: "single" }], now: NOW });
+  // one sale in 30 days gives the bucket's split its basis (M10b)
+  const out = I.demandRows({ docs, keywords: kw, listings: [{ g, f: "noclaim", kind: "single" }], sales: [{ g, f: "noclaim", t: NOW - DAY }], now: NOW });
   assert.deepEqual(
     out.map((r) => [r.k, r.w, r.sh]),
     [[g, 14, 1]],
@@ -1415,9 +1436,10 @@ test("P2-scan privacyScan flags identifying key names (any case) and identifying
       "host 10.1.2.3 down",
       "v6 2001:db8::5 down",
       "doc " + "a".repeat(23) + "1 gone",
-      "my api_key leaked",
-      "Bearer abc",
-      "password reset",
+      // credential-SHAPED values (C-extra: a bare word in a game's name is not one)
+      "my api_key=leaked123",
+      "Bearer abcdefgh123",
+      "password: reset123",
     ],
   };
   const found = I.privacyScan(dirty);
@@ -1487,4 +1509,492 @@ test("P7 a failed connect prints a generic line and the error's class, never its
   const code = fs.readFileSync(path.join(__dirname, "..", "scripts", "listing-brain-export.js"), "utf8").replace(/\/\/.*$/gm, "");
   assert.ok(!/e\.message/.test(code), "the export never prints a raw error message");
   assert.match(code, /connectFailure\(e\)/);
+});
+
+/* ------------------------- batch 2: completeness (C), money (M), Node 20 load (P20), privacy (C-extra) ------------------------- */
+
+const P = require("../utils/listingBrain/model/price");
+
+// The longest synchronous stretch while `fn` runs: a setImmediate probe ticking beside it.
+async function longestStretch(fn) {
+  const st = { max: 0, last: Date.now(), done: false };
+  const tick = () => {
+    const n = Date.now();
+    if (n - st.last > st.max) st.max = n - st.last;
+    st.last = n;
+    if (!st.done) setImmediate(tick);
+  };
+  setImmediate(tick);
+  let value;
+  try {
+    value = await fn();
+  } finally {
+    st.done = true;
+    const tail = Date.now() - st.last;
+    if (tail > st.max) st.max = tail;
+  }
+  return { value, max: st.max };
+}
+const busy = (ms) => {
+  const end = Date.now() + ms;
+  while (Date.now() < end);
+};
+const emptyReport = () => ({ at: new Date(REPORT_AT), truncated: false, games: [], prepared: { rows: [], setById: new Map() } });
+const pureDeps = (o = {}) => ({ setIdentity, games: { listedUnits: G.listedUnits }, packMath: { packSizeOf: PACK.packSizeOf }, ...o });
+
+test("C3 every game's waves are kept, so a claim campaign that ended with the rivals gone reads scarce", async () => {
+  const campaigns = CAMPAIGNS.concat([{ _id: ID(703), campaignId: "cmp4", name: "Beta Arena Finals", game: "Beta Arena", startAt: new Date(NOW - 12 * DAY), endAt: new Date(NOW - 2 * DAY) }]);
+  // 6 on hand at 1 a week: 6 weeks of cover, inside the 2–8 week band, so only the ended campaign can say scarce
+  const demandRows = DEMAND_ROWS.map((r) => (r.k === "beta arena" ? { ...r, br: { c: "farm", w: 1, t: 8 }, stk: { on: 6, fl: 0 }, est: { avg30: 1, avg45: 1 } } : r));
+  const radar = radarReport();
+  radar.games.push({ key: "beta arena", game: "Beta Arena", units: 2, perWeek: 1, rivalSellers: 1, medianTtsHours: 20, byMarket: {} });
+  const { b } = await loadWith({ campaigns, demandRows, radar });
+  assert.deepEqual(
+    b.noclaim.waves.filter((w) => w.g === "beta arena").map((w) => w.endAt),
+    [NOW - 2 * DAY],
+    "a claim game's wave",
+  );
+  assert.ok(
+    b.noclaim.waves.some((w) => w.g === "alpha quest"),
+    "every game in the read window",
+  );
+  const ev = E.buildEvidence(b, { cfg: MU.readConfig({}), cut: NOW });
+  const gs = P.gameState(ev, "beta arena", "claim");
+  assert.equal(gs.regime, "scarce", gs.regimeWhy.join(" | "));
+  assert.ok(
+    gs.regimeWhy.some((x) => /campaign has ended/.test(x)),
+    gs.regimeWhy.join(" | "),
+  );
+});
+
+test("C9 a pack's size comes from bulkPacks/packMath: bulkPackSize without bulkOfferId is not a pack", () => {
+  const asked = [];
+  const d = pureDeps({ packMath: { packSizeOf: (row) => (asked.push(row), PACK.packSizeOf(row)) } });
+  const mk = (n, o) => ({ _id: ID(n), marketplace: "eldorado", origin: "manual", status: "active", price: 10, createdAt: new Date(NOW - 5 * DAY), updatedAt: new Date(NOW - DAY), units: [], ...o });
+  const nl = I.normaliseListings({
+    d,
+    report: emptyReport(),
+    rows: [mk(95, { bulkPackSize: 5 }), mk(96, { bulkPackSize: 5, bulkOfferId: ID(901) }), mk(98, { lotSize: 3, origin: "unclaimed", marketplace: "gameflip" })],
+    keywords: [],
+  });
+  const at = (n) => nl.byId.get(ID(n)).L;
+  assert.deepEqual([at(95).kind, at(95).pack], ["single", 0], "no bulkOfferId: not a pack (packMath's rule)");
+  assert.deepEqual([at(96).kind, at(96).pack], ["bulk", 5]);
+  assert.deepEqual([at(98).kind, at(98).lot, at(98).pack], ["lot", 3, 0], "a Gameflip lot is not a bulk pack");
+  assert.ok(asked.length >= 3, "every row's pack size is asked of packMath");
+  assert.equal(I.kindOf({ bulkPackSize: 3 }), "single", "the size alone makes no pack");
+});
+
+test("C11 listed units are the tracker's own count (games.listedUnits through deps); a missing dep reads unknown, never a copy", async () => {
+  const seen = [];
+  const row = { _id: ID(97), marketplace: "ggsel", origin: "unclaimed", status: "active", price: 2, createdAt: new Date(NOW - 5 * DAY), updatedAt: new Date(NOW - DAY), lastStock: 3, units: [] };
+  const nl = I.normaliseListings({ d: pureDeps({ games: { listedUnits: (l) => (seen.push(l), 7) } }), report: emptyReport(), rows: [row], keywords: [] });
+  assert.equal(nl.byId.get(ID(97)).L.qty, 7);
+  assert.equal(seen.length, 1);
+  const none = I.normaliseListings({ d: pureDeps({ games: null }), report: emptyReport(), rows: [row], keywords: [] });
+  assert.equal(none.byId.get(ID(97)).L.qty, null);
+  assert.equal(I.listedUnits, undefined, "no second copy of the tracker's rule");
+  // the fake-deps path (the real module injected) still loads the whole world
+  const { b } = await loadWith();
+  assert.equal(byId(b).get(H(10)).qty, 3, "GGSel: lastStock");
+  assert.equal(byId(b).get(H(13)).qty, 1, "Eldorado: one undelivered unit");
+});
+
+test("C12 today's flat shelf tops the refillable markets back up to perMarketStock while stock lasts (rule 4)", async () => {
+  // alpha quest: 6 on hand → listNow 3 dealt gameflip 2, eldorado 1; refillMarkets tops Gameflip up to 3
+  const { b } = await loadWith();
+  assert.deepEqual(b.old.games["alpha quest"].split, { listNow: 3, holdBack: 3 });
+  assert.deepEqual(b.old.games["alpha quest"].flat, { gameflip: 3, eldorado: 1 });
+  // Plati and GGSel taking stock, perMarketStock 2: each refillable market in order, while Σ ≤ stock
+  const w = await loadWith({ platiTakes: true, af: { ggselCategoryId: "123", perMarketStock: 2 } });
+  assert.deepEqual(w.b.old.games["alpha quest"].flat, { gameflip: 2, digiseller: 2, ggsel: 2, eldorado: 0 });
+  // stock runs out first: 2 on hand → 1 dealt to Gameflip, one more tops it up, nothing left for the rest
+  assert.deepEqual(w.b.old.games["delta 1"].flat, { gameflip: 2, digiseller: 0, ggsel: 0, eldorado: 0 });
+});
+
+test("C13 a claim event bundle's new-listing price is autoFarmBundles.priceBundle's (eb), from one bounded set read", async () => {
+  const dropSets = [{ _id: SETS.A1._id, sourceType: "autofarm-bundle", sourceEventKey: "alpha quest|launch" }];
+  const ck = LISTINGS[0].prepared.id.contentKey;
+  // the event's own bundle sold at $3.50 on Gameflip 5 days ago (its 30-day sold floor), and a GGSel share is live
+  const sold = listing(19, { m: "gameflip", origin: "auto", status: "sold", price: 3.5, set: SETS.A1, game: "Alpha Quest", updated: NOW - 5 * DAY });
+  const gg = listing(20, { m: "ggsel", origin: "auto", price: 3, set: SETS.A1, game: "Alpha Quest" });
+  const listingRows = LISTINGS.map((r) => r.x).concat([sold.x, gg.x]);
+  const report = trackerReport();
+  report.prepared.rows.push(sold.prepared, gg.prepared);
+  const { b, calls, seen } = await loadWith({ dropSets, listingRows, report });
+  const gf = b.old.offers["gameflip|" + ck];
+  assert.deepEqual([gf.np, gf.eb], [4.25, true]);
+  assert.deepEqual([b.old.offers["ggsel|" + ck].np, b.old.offers["ggsel|" + ck].eb], [3.4, true], "GGSel's share: venuePrice of the bundle price");
+  assert.equal(b.old.offers["eldorado|" + ck].np, 2, "not an event-bundle market: rule 1's lifted base");
+  assert.ok(!b.old.offers["eldorado|" + ck].eb);
+  const call = seen.priceBundle[0];
+  assert.deepEqual([call.marketplace, call.game, call.plan.totalQty, call.plan.full, call.soldFloorUsd, call.research.game], ["gameflip", "Alpha Quest", 2, false, 3.5, "Alpha Quest"]);
+  assert.deepEqual(
+    call.plan.items.map((x) => x.itemKey),
+    ["aq-sword", "aq-shield"],
+  );
+  assert.ok(
+    b.notes.some((n) => /event bundle/i.test(n) && /complete/i.test(n)),
+    b.notes.join(" | "),
+  );
+  const ds = calls.filter((c) => c.name === "dropSets");
+  assert.equal(ds.length, 1);
+  assert.deepEqual(ds[0].projection, { _id: 1, sourceType: 1, sourceEventKey: 1 });
+  assert.ok(ds[0].filter._id.$in.length <= 500 && ds[0].limit === 500);
+  assert.ok(!JSON.stringify(b).includes("alpha quest|launch"), "the event key is used in memory only");
+  // the evidence snapshot unreadable: no price (never a guess), one note
+  const failed = await loadWith({ dropSets, snapshotFails: true });
+  assert.equal(failed.b.old.offers["gameflip|" + ck].np, null);
+  assert.equal(failed.seen.priceBundle, undefined);
+  // the marker read failing: rule 1 as before, with a note
+  const down = await loadWith({ dropSets, dropSetsFail: true });
+  assert.equal(down.b.old.offers["gameflip|" + ck].np, 2);
+  assert.ok(
+    down.b.notes.some((n) => /event-bundle/i.test(n)),
+    down.b.notes.join(" | "),
+  );
+});
+
+test("M10b a no-claim bucket row whose games sold nothing in 30 days is not split equally: they read unknown", () => {
+  const doc = { k: "zed", f: "noclaim", at: new Date(NOW), br: { w: 4 }, stk: { on: 2 } };
+  const units = [
+    { g: "zed one", st: "listed" },
+    { g: "zed two", st: "skipped" },
+  ];
+  const stats = {};
+  const none = I.demandRows({ docs: [doc], keywords: ["zed"], units, now: NOW, stats });
+  assert.deepEqual(
+    none.filter((r) => r.k.startsWith("zed ")),
+    [],
+  );
+  assert.equal(stats.unsplit, 1);
+  // one sale gives the split its basis
+  const one = I.demandRows({ docs: [doc], keywords: ["zed"], units, sales: [{ g: "zed one", f: "noclaim", t: NOW - DAY }], now: NOW });
+  assert.deepEqual(
+    one.map((r) => [r.k, r.sh]),
+    [
+      ["zed one", 1],
+      ["zed two", 0],
+    ],
+  );
+});
+
+test("P20-2 the tracker is asked only for the offers the log uses (each cell's main offer), capped with a note, yielding within 50 ms", async () => {
+  const mk = (n, m, o, st, ck) => ({ raw: ID(n), set: null, L: { id: H(n), g: "alpha", gl: "Alpha", m, o, f: "claim", kind: "single", st, ck, bk: "alpha|2", ex: true, n: 2, qty: 1, p: 2 } });
+  // primary offer c1 (live on Gameflip); c2 sold out on Gameflip; the owner's Eldorado c1; a delisted GGSel c1
+  const rows = [mk(1, "gameflip", "auto", "active", "c1"), mk(2, "gameflip", "auto", "sold", "c2"), mk(3, "eldorado", "manual", "active", "c1"), mk(4, "ggsel", "auto", "delisted", "c1")];
+  const byIdMap = new Map(rows.map((e) => [e.raw, e]));
+  const asked = [];
+  const d = {
+    autoLister: { computeSplit: () => ({ listNow: 0, holdBack: 0 }), dealShares: () => {}, derivePrice: () => 2, postEventPrice: (x) => x, venuePrice: async (m, b) => b },
+    g2gGames: { brandForGame: () => null },
+    venues,
+    priceTracker: {
+      suggestForNew: (rep, q) => {
+        asked.push(q.market);
+        busy(30);
+        return { price: 1.6, basis: "x", confidence: "low" };
+      },
+    },
+    unclaimedBundles,
+  };
+  const base = { d, af: {}, report: { games: [] }, byId: byIdMap, demand: [], research: [], catalog: new Map(), pricing: {}, labels: new Map(), platiTakes: false, ggselTakes: true, now: NOW };
+  const notes = [];
+  const out = await I.oldSide({ ...base, notes });
+  assert.deepEqual(asked.sort(), ["eldorado", "gameflip", "ggsel"], "the three cells' main offers; never the sold-out c2");
+  assert.equal(out.offers["gameflip|c2"].tracker, null);
+  assert.ok(out.offers["gameflip|c1"].tracker && out.offers["eldorado|c1"].tracker && out.offers["ggsel|c1"].tracker);
+  assert.ok(out.offers["gameflip|c2"].np !== undefined, "today's new-listing price is still computed for every offer");
+  // capped: the live cells first, said in a note
+  asked.length = 0;
+  const notes2 = [];
+  const capped = await I.oldSide({ ...base, notes: notes2, trackerCap: 1 });
+  assert.deepEqual(asked, ["gameflip"]);
+  assert.ok(capped.counts.trackerCut === 2 && notes2.some((n) => /tracker/i.test(n) && /1 of 3/.test(n)), notes2.join(" | "));
+  // slow answers (30 ms each) never hold the loop past the 50 ms budget plus one call
+  const many = new Map();
+  for (let k = 0; k < 8; k++) {
+    const e = mk(10 + k, "gameflip", "auto", "active", "k" + k);
+    e.L.g = "game " + k;
+    many.set(e.raw, e);
+  }
+  const { max } = await longestStretch(() => I.oldSide({ ...base, byId: many, notes: [] }));
+  assert.ok(max < 120, "longest synchronous stretch " + max + " ms");
+});
+
+test("P20-3 listing ids are hashed once per load: a memoised hasher, the same digest as hashId", () => {
+  const h = I.makeHasher();
+  assert.equal(h(ID(1)), I.hashId(ID(1)));
+  h(ID(1));
+  h(ID(2));
+  assert.equal(h.cache.size, 2);
+});
+
+test("P20-6 the evidence snapshot is warmed once before the venue loop; when it fails every GGSel price is null with one note and venuePrice is never called", async () => {
+  const ok = await loadWith();
+  assert.equal(ok.seen.snapshot, 1);
+  assert.equal(ok.seen.venue.length, 10);
+  // the real venuePrice swallows an evidence error and answers the base: it must not be asked then
+  const bad = await loadWith({ snapshotFails: true });
+  assert.equal(bad.seen.snapshot, 1);
+  assert.equal(bad.seen.venue.length, 0);
+  for (const og of Object.values(bad.b.old.games)) assert.equal(og.ggsel, null);
+  const n = bad.b.notes.filter((x) => /evidence snapshot/i.test(x));
+  assert.equal(n.length, 1, bad.b.notes.join(" | "));
+  assert.ok(!/example\.invalid|27017/.test(n[0]), n[0]);
+  const hang = await loadWith({ snapshotHangs: true }, { venueTimeoutMs: 20 });
+  assert.equal(hang.seen.venue.length, 0);
+  assert.ok(
+    hang.b.notes.some((x) => /evidence snapshot/i.test(x) && /took longer/.test(x)),
+    hang.b.notes.join(" | "),
+  );
+});
+
+test("P20-7 the listing read is the tracker's own shape; the active/updatedAt window is applied in memory", async () => {
+  const old = listing(18, { m: "gameflip", origin: "auto", price: 2, status: "sold", created: NOW - 400 * DAY, updated: NOW - 300 * DAY, set: SETS.A1, prepared: false });
+  const { b, calls } = await loadWith({ listingRows: LISTINGS.map((r) => r.x).concat([old.x]) });
+  const L = calls.find((c) => c.name === "listings");
+  assert.deepEqual(L.filter, { marketplace: { $in: I.MARKETS } });
+  assert.deepEqual(L.sort, { _id: -1 });
+  assert.equal(L.limit, I.LISTING_CAP);
+  assert.ok(!byId(b).has(H(18)), "a row neither active nor written inside the window is dropped in memory");
+  assert.equal(b.counts.listingRows, LISTINGS.length + 1);
+  assert.equal(b.counts.listingOutsideWindow, 1);
+});
+
+test("P20-8 the sold-unit read skips the units the listed read already returns", async () => {
+  const { calls } = await loadWith();
+  const W = I.readWindows({ listingBrain: { fitDaysClaim: 60 } });
+  const US = calls.find((c) => c.name === "unitsSold");
+  assert.equal(US.filter.status, "sold");
+  assert.equal(US.filter.soldAt.$gte.getTime(), NOW - W.saleDays * DAY);
+  assert.deepEqual(US.filter.$or, [{ listedAt: { $lt: new Date(NOW - W.unitListedDays * DAY) } }, { listedAt: null }], "never-listed hand sales included");
+  assert.deepEqual(US.sort, { soldAt: -1 });
+});
+
+test("P20-9 database numbers that drive loops are clamped: on-hand stock ≤ 10,000 accounts, a set item's copies ≤ 100", async () => {
+  const demandRows = DEMAND_ROWS.concat([{ k: "huge game", f: "claim", at: new Date(NOW - HOUR), live: true, br: { c: "farm", w: 1, t: 5 }, stk: { on: 5e6, fl: 0 }, est: {} }]);
+  const w = world({ demandRows });
+  const asked = [];
+  // a split of millions would deal millions of placeholder accounts: answer only what the clamp allows
+  w.deps.autoLister.computeSplit = (n) => (asked.push(n), n <= 10000 ? computeSplit(n) : { listNow: 0, holdBack: 0 });
+  const b = await I.load({ now: NOW, deps: w.deps });
+  assert.ok(Math.max(...asked) <= 10000, "computeSplit asked " + Math.max(...asked));
+  assert.deepEqual(b.old.games["huge game"].split, { listNow: 5000, holdBack: 5000 });
+  assert.equal(I.dropsFromItems(I.setItems({ items: [{ itemKey: "a", name: "A", game: "G", qty: 1e6 }] })).length, 100);
+});
+
+test("P20-10 cleanMsg stays fast on hostile input: bounded identifiers, only the first 500 characters scanned", () => {
+  for (const s of ["key-".repeat(500), "user-1a".repeat(285), "token_".repeat(333), "a.".repeat(1000)]) {
+    const t = process.hrtime.bigint();
+    const m = I.cleanMsg(new Error(s));
+    const ms = Number(process.hrtime.bigint() - t) / 1e6;
+    assert.ok(ms < 50, ms.toFixed(1) + " ms for " + s.slice(0, 12));
+    assert.ok(m.length <= 200);
+  }
+  const late = I.cleanMsg(new Error("x".repeat(600) + " token=SECRETVALUE"));
+  assert.ok(!late.includes("SECRETVALUE"));
+});
+
+test("P20-14 manifests are read in chunks of 500 ids; every database read carries maxTimeMS", async () => {
+  const campaigns = Array.from({ length: 1201 }, (_, i) => ({
+    campaignId: "cmp" + i,
+    name: "Gamma Rush Cup Week " + (i + 1),
+    game: "Gamma Rush",
+    startAt: new Date(NOW - 10 * DAY),
+    endAt: new Date(NOW - DAY),
+  }));
+  const dropSets = [{ _id: SETS.A1._id, sourceType: "autofarm-bundle", sourceEventKey: "e" }];
+  const { calls } = await loadWith({ campaigns, dropSets });
+  const M = calls.filter((c) => c.name === "manifests");
+  assert.deepEqual(
+    M.map((c) => c.filter.campaignId.$in.length),
+    [500, 500, 201],
+  );
+  assert.equal(new Set(M.flatMap((c) => c.filter.campaignId.$in)).size, 1201);
+  const db = calls.filter((c) => c.filter !== undefined);
+  assert.ok(db.length >= 9);
+  for (const c of db) assert.equal(c.options && c.options.maxTimeMS, I.READ_MAX_TIME_MS, c.name);
+});
+
+test("C-extra privacyScan's credential check is shape-based: a game named 'Secret Agent Saga' passes, 'token=abc123' does not", () => {
+  const clean = {
+    listings: [{ gl: "Secret Agent Saga", g: "token tycoon" }],
+    noclaim: { waves: [{ ev: "Golden Token Week", name: "Password Panic Finals", wave: "API Key Cup" }] },
+    notes: ["The bearer of good news"],
+  };
+  assert.deepEqual(I.privacyScan(clean), []);
+  for (const v of ["token=abc123", "api_key: ZZZ999", "access-key=q1w2e3", "Bearer abcdefgh12345", "password: hunter2", "secret = s3cr3t"]) {
+    assert.equal(I.privacyScan({ notes: [v] }).length, 1, v);
+  }
+});
+
+/**
+ * A world at the loader's read caps (synthetic): 20,000 listings, 30,000 ledger sales built the way the
+ * tracker's ledger builds them (object spread — the slow shape on Node 20), 2 × 50,000 no-claim units,
+ * 5,000 campaigns and manifests, 2,000 research rows, 5,000 farm-brain rows. The tracker's answer is a
+ * fast fake: its own cost is P20-2's, measured there.
+ */
+function capWorld() {
+  const NG = 150;
+  const games = Array.from({ length: NG }, (_, i) => "Cap Game " + String.fromCharCode(65 + (i % 26)) + i);
+  const noclaim = games.slice(0, 30);
+  const hex = (p, n) => (p + n.toString(16)).padStart(24, "0").slice(-24);
+  const sets = [];
+  const setsOf = new Map();
+  for (const g of games) {
+    const list = [];
+    for (let j = 0; j < 4; j++) {
+      const s = {
+        _id: hex("5e", sets.length + 1),
+        name: g + " " + j,
+        price: 1.5,
+        minPriceUsd: 1,
+        items: Array.from({ length: j + 1 }, (_, k) => ({ itemKey: g.replace(/\W/g, "") + "-" + j + "-" + k, game: g, qty: 1, name: "Item " + k })),
+      };
+      sets.push(s);
+      list.push(s);
+    }
+    setsOf.set(g, list);
+  }
+  const rows = [];
+  const prepared = [];
+  const sales = [];
+  const unclaimedIds = [];
+  for (let i = 0; i < 20000; i++) {
+    const g = games[i % NG];
+    const nc = i % NG < 30;
+    const m = I.MARKETS[i % 7];
+    const set = setsOf.get(g)[i % 4];
+    const created = NOW - ((i * 7919) % 200) * DAY - HOUR;
+    const status = i % 3 === 0 ? "active" : i % 3 === 1 ? "sold" : "delisted";
+    const x = {
+      _id: hex("a1", i + 1),
+      marketplace: m,
+      origin: i % 10 === 0 ? "manual" : nc ? "unclaimed" : "auto",
+      status,
+      price: 1 + (i % 12) * 0.25,
+      title: g + " Twitch Drops",
+      createdAt: new Date(created),
+      updatedAt: new Date(Math.min(NOW - HOUR, created + 3 * DAY)),
+      set: set._id,
+      noclaimStock: false,
+      autoClaimSet: false,
+      unclaimedGame: "",
+      rentFarm: false,
+      bulkOfferId: null,
+      bulkPackSize: 0,
+      lotSize: 0,
+      qtyRemaining: 1,
+      qtyTarget: 0,
+      lastStock: m === "ggsel" || m === "digiseller" ? 2 : null,
+      rebundledAt: null,
+      venueMinPriceUsd: 0,
+      units: m === "eldorado" || m === "g2g" || m === "playerauctions" ? [{ addedAt: new Date(created), deliveredAt: status === "sold" ? new Date(created + DAY) : null }] : [],
+    };
+    rows.push(x);
+    if (x.origin === "unclaimed") unclaimedIds.push(x._id);
+    const l = { ...x };
+    const id = {
+      kind: "drops",
+      game: g,
+      gameKey: g.toLowerCase(),
+      contentKey: "s:" + set._id.slice(-12),
+      bandKey: g.toLowerCase() + "|" + (set.items.length > 1 ? "2-3" : "1"),
+      countForBand: set.items.length,
+      exact: true,
+    };
+    prepared.push({ l, id, market: m, listingId: x._id });
+  }
+  for (let k = 0; k < 30000; k++) {
+    const r = prepared[(k * 31) % prepared.length];
+    const base = {
+      market: r.market,
+      listingId: r.listingId,
+      externalId: "",
+      origin: r.l.origin,
+      title: "",
+      listedPrice: r.l.price,
+      gameKey: r.id.gameKey,
+      contentKey: r.id.contentKey,
+      bandKey: r.id.bandKey,
+      itemCount: r.id.countForBand,
+      exact: true,
+    };
+    sales.push({ ...base, key: "k" + k, saleGroup: "grp" + k, source: k % 3 ? "signal" : "unit", at: new Date(NOW - (k % 200) * DAY - HOUR), priceUsd: 1.5, priceBasis: "reported", priced: true });
+  }
+  const unit = (n, sold) => ({
+    _id: hex("ff", n),
+    game: noclaim[n % 30],
+    market: "gameflip",
+    status: sold ? "sold" : n % 3 ? "listed" : "expired",
+    listedAt: new Date(NOW - (n % 150) * DAY - DAY),
+    soldAt: sold ? new Date(NOW - (n % 140) * DAY) : null,
+    soldPriceUsd: sold ? 1.5 : 0,
+    soldMarket: sold ? "gameflip" : "",
+    expiredAt: !sold && n % 3 === 0 ? new Date(NOW - (n % 100) * DAY) : null,
+    updatedAt: new Date(NOW - DAY),
+    listingIds: [unclaimedIds[n % unclaimedIds.length], unclaimedIds[(n * 7) % unclaimedIds.length]],
+    bundleKey: "",
+    manualListing: "",
+    note: "",
+    drops: [{ campaign: noclaim[n % 30] + " Cup Week " + (n % 4) }],
+  });
+  const listed = Array.from({ length: 50000 }, (_, n) => unit(n, false));
+  const sold = Array.from({ length: 50000 }, (_, n) => unit(50000 + n, true));
+  const campaigns = Array.from({ length: 5000 }, (_, i) => ({
+    campaignId: "c" + i,
+    name: games[i % NG] + " Cup Week " + (i % 4),
+    game: games[i % NG],
+    startAt: new Date(NOW - ((i % 100) + 7) * DAY),
+    endAt: new Date(NOW - (i % 100) * DAY),
+  }));
+  const manifests = campaigns.map((c) => ({ campaignId: c.campaignId, name: c.name, game: c.game, drops: [{ itemKey: c.campaignId + "-i", name: "Item" }] }));
+  const research = games.map((g) => ({ game: g, markets: { gameflip: { soldRecent: 5, avgSoldPrice: 1.8, lowestOther: 2 } }, scannedAt: new Date(NOW - DAY) }));
+  const demand = Array.from({ length: 5000 }, (_, i) => ({
+    k: (i % NG < 30 ? noclaim[i % 30] : games[i % NG]).toLowerCase(),
+    f: i % NG < 30 ? "noclaim" : "claim",
+    at: new Date(NOW - (i % 6) * HOUR - 60000),
+    live: true,
+    br: { c: "farm", w: 3, t: 10 },
+    stk: { on: 12, fl: 2 },
+    est: { avg30: 3, avg45: 3 },
+  }));
+  const q = (list) => () => {
+    const o = { sort: () => o, limit: () => o, lean: async () => list };
+    return o;
+  };
+  const report = { at: new Date(REPORT_AT), truncated: false, games: [], ledger: { sales, demandOnly: [], suspect: [] }, prepared: { rows: prepared, setById: new Map(sets.map((s) => [s._id, s])) } };
+  const af = { noClaimGames: noclaim.slice(), perMarketStock: 3, eldoradoAuto: true, g2gAuto: true, listingBrain: { enabled: true } };
+  return {
+    settings: { getAutoFarm: () => af, getFarmSizing: () => ({}), loadSettings: () => ({}), getUnclaimedPricing: () => ({}), getBulkPacks: () => ({}) },
+    priceTracker: { getReportSWR: async () => report, suggestForNew: () => ({ price: 1.5, basis: "x", confidence: "low" }) },
+    setIdentity,
+    venues,
+    marketReport: { getReport: async () => ({ generatedAt: new Date(NOW), games: [], feed: [] }) },
+    autoLister: { derivePrice: () => 2, venuePrice: async (m, b) => b, computeSplit, dealShares, postEventPrice, platiTakesNewStock: () => false, ggselTakesNewStock: () => true },
+    unclaimedBundles,
+    g2gGames: { brandForGame: () => null },
+    games: { listedUnits: G.listedUnits },
+    packMath: { packSizeOf: PACK.packSizeOf },
+    pricingEvidence: { snapshot: async () => ({}) },
+    autoFarmBundles: { SOURCE_TYPE: "autofarm-bundle", priceBundle: async () => ({ price: 3 }) },
+    listingModel: { readConfig: MU.readConfig, DEFAULTS: MU.DEFAULTS },
+    MarketplaceListing: { find: q(rows) },
+    UnclaimedAccount: { find: (f) => q(f.status === "sold" ? sold : listed)() },
+    TwitchCampaign: { find: q(campaigns) },
+    CampaignDrops: { find: q(manifests) },
+    MarketResearch: { find: q(research) },
+    DemandBrainRow: { find: q(demand) },
+    DropSet: { find: q([]) },
+  };
+}
+
+test("C14 the loader yields inside its long passes: no synchronous stretch over 200 ms at its read caps", async () => {
+  const deps = capWorld();
+  const { value: b, max } = await longestStretch(() => I.load({ now: NOW, deps }));
+  assert.equal(b.listings.length, 20000);
+  assert.equal(b.noclaim.units.length, 100000);
+  assert.ok(b.sales.length > 20000, b.sales.length + " sales");
+  assert.ok(max < 200, "longest synchronous stretch " + max + " ms");
 });

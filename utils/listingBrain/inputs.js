@@ -80,14 +80,33 @@ const MAX_UNITS_PER_ROW = 200;
 const MAX_OLD_GAMES = 400;
 // Offers priced the old way (live system-made ones first).
 const MAX_OFFERS = 6000;
+// The tracker's suggestForNew filters every order on each call (17–59 ms a call on Node 20 at
+// production volume): it is asked only for the offers a logged row reads — each cell's main offer —
+// and at most this many, the cells with live system-made rows first.
+const MAX_TRACKER_OFFERS = 400;
+// Database numbers that drive a loop are clamped: stock on hand (computeSplit deals that many
+// placeholder accounts, dealShares is quadratic) and a set item's copies (one drop entry per copy).
+const MAX_ON_HAND = 10000;
+const MAX_ITEM_COPIES = 100;
+// Every database read gives up after this long (maxTimeMS, server side): a stuck read fails the load
+// or degrades with a note instead of holding a run open.
+const READ_MAX_TIME_MS = 30000;
+// $in lists are sent in chunks this long (CampaignDrops by campaign id, DropSet by set id).
+const ID_CHUNK = 500;
+// The event-bundle pricer's sold floor: the best price the event's own bundle sold at in this many days.
+const EVENT_SOLD_FLOOR_DAYS = 30;
+// The long passes over database rows pause every STEP_EVERY items and let the event loop breathe once
+// YIELD_BUDGET_MS has passed since the last breath: the server delivers paid orders in this process.
+const STEP_EVERY = 512;
+const YIELD_BUDGET_MS = 50;
+// Error text is cleaned from its first CLEAN_SCAN_CHARS characters only (what is shown is 200).
+const CLEAN_SCAN_CHARS = 500;
 // unclaimedAutoList.GAME_CAP: the no-claim shelf cap when the owner set none.
 const CAP_DEFAULT = 70;
 // The no-claim farm brain row is per keyword bucket; its forecast is split by this many days of sales.
 const SHARE_DAYS = 30;
 // analyze.MAX_REAL_PRICE: the tracker drops listing rows priced above this.
 const JUNK_PRICE = 25;
-// suggestForNew filters every order per call: this many offers between yields.
-const OFFER_CHUNK = 25;
 
 // Keys that must never reach a bundle (SPEC §10), plus fields that may carry free text or links.
 const FORBIDDEN_KEYS = new Set([
@@ -235,6 +254,19 @@ function realDeps() {
       const MU = require("./model/util");
       return { readConfig: MU.readConfig, DEFAULTS: MU.DEFAULTS };
     })(),
+    // The tracker's own count of what a row holds, and bulkPacks' own pack size (both pure): the brain
+    // counts with them, it keeps no copies.
+    games: { listedUnits: require("../priceTracker/games").listedUnits },
+    packMath: { packSizeOf: require("../bulkPacks/packMath").packSizeOf },
+    // The realised-price snapshot venuePrice and priceBundle read (a DB read cached 10 minutes): warmed
+    // ONCE per run, so a database hiccup is seen (venuePrice itself swallows it and answers the base).
+    pricingEvidence: { snapshot: require("../pricingEvidence").snapshot },
+    // Today's fifth pricer: claim event bundles (autoFarmBundles.priceBundle, Gameflip evidence).
+    autoFarmBundles: (() => {
+      const AFB = require("../autoFarmBundles");
+      return { SOURCE_TYPE: AFB.SOURCE_TYPE, priceBundle: AFB.priceBundle };
+    })(),
+    DropSet: require("../../models/DropSet"),
   };
 }
 
@@ -252,6 +284,7 @@ const round2 = (v) => Math.round(num(v) * 100) / 100 || 0;
 const round3 = (v) => Math.round(num(v) * 1000) / 1000 || 0;
 const scaled = (v, share) => (v === null || v === undefined ? null : round2(num(v) * share));
 const isObj = (v) => !!v && typeof v === "object" && !Array.isArray(v);
+const cmp = (a, b) => (a < b ? -1 : a > b ? 1 : 0);
 const yieldNow = () => new Promise((r) => setImmediate(r));
 
 /** Epoch ms of a Date, a number or a date string; null when absent or invalid. */
@@ -286,8 +319,61 @@ function marketKey(m, empty = "unknown") {
 function hashId(id) {
   return crypto.createHash("sha1").update(String(id)).digest("hex").slice(0, 12);
 }
-// Listing ids are compared lower-cased everywhere (the ledger's listingId is idStr = lower-case).
-const hashRaw = (id) => hashId(lower(id));
+// Listing ids are compared lower-cased everywhere (the ledger's listingId is idStr = lower-case), and
+// hashed lower-cased.
+
+/**
+ * hashId, memoised for one load: a listing id is hashed for its row, its sales and every unit naming
+ * it (~200,000 sha1 calls at production volume — 0.7 s on Node 20 — for ~20,000 distinct ids).
+ */
+function makeHasher() {
+  const cache = new Map();
+  const h = (id) => {
+    const k = String(id);
+    let v = cache.get(k);
+    if (v === undefined) {
+      v = hashId(k);
+      cache.set(k, v);
+    }
+    return v;
+  };
+  h.cache = cache;
+  return h;
+}
+
+/**
+ * The event loop's breath: resolves at once until `budgetMs` has passed since the last breath, then
+ * yields (setImmediate). Awaited between steps and inside every long pass, it keeps the loader's
+ * synchronous stretches near the budget whatever the volume or the Node version.
+ */
+function makeBreather(budgetMs = YIELD_BUDGET_MS) {
+  // wall time, only to pace the yields: every date in the bundle comes from `now`
+  let next = Date.now() + budgetMs;
+  return async () => {
+    if (Date.now() < next) return;
+    await yieldNow();
+    next = Date.now() + budgetMs;
+  };
+}
+
+// A long pass is a generator that pauses every STEP_EVERY items: drain() runs it straight through (the
+// synchronous API the tests and scripts use), drainAsync() breathes at each pause.
+function drain(it) {
+  let r = it.next();
+  while (!r.done) r = it.next();
+  return r.value;
+}
+async function drainAsync(it, breathe) {
+  let r = it.next();
+  while (!r.done) {
+    await breathe();
+    r = it.next();
+  }
+  return r.value;
+}
+// Every database read carries the server-side time limit (a find option, so the chain is unchanged).
+const READ_OPTS = Object.freeze({ maxTimeMS: READ_MAX_TIME_MS });
+const readOpts = () => ({ ...READ_OPTS });
 
 // A network error names its peer right after its code word ("getaddrinfo ENOTFOUND mongo-primary"),
 // often a bare name with no dot or port that no other rule would recognise.
@@ -296,7 +382,9 @@ const NET_CODE_RE = /\b(ENOTFOUND|EAI_AGAIN|ECONNREFUSED|ECONNRESET|ETIMEDOUT|EH
 // when it looks like a name (a digit, a dot or a dash in it — "the host is down" stays readable).
 const NET_WORD_RE = /\b(host(?:name)?|connect(?:ion)?(?:\s+\d+)?\s+to(?:\s+host)?)(\s+)(?!<)(?=[^\s,;)]*[\d.-])[^\s,;)]+/gi;
 // key=value / key: value pairs whose key names a credential or a person.
-const SECRET_PAIR_RE = /\b([\w-]*(?:api[_-]?key|key|token|secret|passw(?:or)?d|pwd|login|user(?:name)?|email|seller|buyer|account)[\w-]*)(\s*[=:]\s*)(?!<)("[^"]*"|'[^']*'|[^\s&,;)]+)/gi;
+// Bounded identifiers ({0,40}): an unbounded [\w-]* on both sides backtracked quadratically on
+// "key-key-key-…" (2,000 characters took ~0.9 s).
+const SECRET_PAIR_RE = /\b([\w-]{0,40}(?:api[_-]?key|key|token|secret|passw(?:or)?d|pwd|login|user(?:name)?|email|seller|buyer|account)[\w-]{0,40})(\s*[=:]\s*)(?!<)("[^"]*"|'[^']*'|[^\s&,;)]+)/gi;
 // IPv6: a whole token of hex digits and colons that holds "::" (2001:db8::5, fe80::1, ::1, a trailing
 // :port included) or the full eight groups. Whole-token, so no digit of the address is left behind.
 const IPV6_RE = /(?<![\w:])(?:(?=[0-9a-f:]*::)[0-9a-f:]{3,}|(?:[0-9a-f]{1,4}:){7}[0-9a-f]{1,4})(?![\w:])/gi;
@@ -311,8 +399,9 @@ const HOST_TLDS = "com|net|org|io|dev|local|internal|cloud|app|co|uk|de|ru|xyz|i
  * not a function").
  */
 function cleanMsg(e) {
-  // bounded: every rule below is linear, but a megabyte of message is never worth scanning
-  let s = String((e && e.message) || e || "error").slice(0, 2000);
+  // bounded: only the first CLEAN_SCAN_CHARS characters are scanned (and 200 shown), so no rule can
+  // spend more than a few milliseconds whatever the message holds
+  let s = String((e && e.message) || e || "error").slice(0, CLEAN_SCAN_CHARS);
   // links first: a URI carries user:password@host
   s = s.replace(/\b[a-z][a-z0-9+.-]*:\/\/\S+/gi, "<url>");
   s = s.replace(/\bbearer\s+\S+/gi, "Bearer <secret>");
@@ -343,7 +432,7 @@ function cleanMsg(e) {
   s = s.replace(/\b[a-z0-9-]+(?:\.[a-z0-9-]+){2,}\b/g, "<host>");
   s = s.replace(new RegExp("\\b[a-z0-9-]+(\\.[a-z0-9-]+)*\\.(" + HOST_TLDS + ")\\b", "gi"), "<host>");
   // a long random-looking token (letters and digits, 20+) is a credential whatever its key
-  s = s.replace(/\b(?=[\w-]*\d)(?=[\w-]*[a-z])[\w-]{20,}\b/gi, "<secret>");
+  s = s.replace(/\b(?=[\w-]{0,200}\d)(?=[\w-]{0,200}[a-z])[\w-]{20,}\b/gi, "<secret>");
   return s.slice(0, 200);
 }
 
@@ -432,21 +521,6 @@ function bucketOfKey(key, keywords) {
   return best;
 }
 
-/** priceTracker/games.listedUnits, verbatim: what one row holds now (an estimate; see its notes). */
-function listedUnits(l) {
-  const m = String(l.marketplace || "").toLowerCase();
-  const units = Array.isArray(l.units) ? l.units : [];
-  if (m === "eldorado" || m === "playerauctions" || m === "g2g") {
-    const free = units.filter((u) => u && !u.deliveredAt).length;
-    return free || (units.length ? 0 : 1);
-  }
-  if (m === "ggsel" || m === "digiseller") {
-    if (Number.isFinite(Number(l.lastStock)) && l.lastStock !== null) return Math.max(0, Number(l.lastStock));
-    return units.length || Number(l.qtyTarget) || 1;
-  }
-  return 1;
-}
-
 /**
  * Kind of a row, plan §3 order (the first match wins). Claim-at-sale is decided from the flags, BEFORE
  * origin: the G2G operator-script rows are origin "auto" AND autoClaimSet, and are never advised.
@@ -454,7 +528,8 @@ function listedUnits(l) {
  */
 function kindOf(x, trackerKind = "drops") {
   if ((x && x.rentFarm) || trackerKind === "farm") return "farm";
-  if ((x && x.bulkOfferId) || num(x && x.bulkPackSize) > 1 || trackerKind === "bulk") return "bulk";
+  // a pack is a row with bulkOfferId (bulkPacks/packMath's rule): bulkPackSize alone makes no pack
+  if ((x && x.bulkOfferId) || trackerKind === "bulk") return "bulk";
   if (num(x && x.lotSize) > 1) return "lot";
   if (x && x.accountOffer) return "account";
   if (x && (x.noclaimStock || x.autoClaimSet || x.unclaimedGame)) return "cas";
@@ -552,40 +627,63 @@ function settingsBlock(d) {
 
 /**
  * The one extra listing read (plan §1.3 #2): the flags and exposure dates the tracker does not
- * project. Every market, active rows and rows written inside the window (saleDays: see readWindows
- * for why, and its cost); newest first, capped.
+ * project. The tracker's own query shape — every market, newest first, capped — so it rides the same
+ * index ({marketplace, _id}); an $or on the unindexed updatedAt would be a collection scan. The window
+ * (active rows, and rows written inside saleDays: see readWindows for why) is applied here, in memory.
  */
-async function readListings(d, now, W) {
-  const filter = {
-    marketplace: { $in: MARKETS.slice() },
-    $or: [{ status: "active" }, { updatedAt: { $gte: new Date(now - W.listingDays * DAY) } }],
-  };
-  const rows = (await d.MarketplaceListing.find(filter, { ...LISTING_PROJECTION }).sort({ _id: -1 }).limit(LISTING_CAP).lean()) || [];
-  return { rows, truncated: rows.length >= LISTING_CAP };
+async function readListings(d, now, W, breathe = yieldNow) {
+  const all =
+    (await d.MarketplaceListing.find({ marketplace: { $in: MARKETS.slice() } }, { ...LISTING_PROJECTION }, readOpts())
+      .sort({ _id: -1 })
+      .limit(LISTING_CAP)
+      .lean()) || [];
+  const since = now - W.listingDays * DAY;
+  const rows = [];
+  let outside = 0;
+  for (let i = 0; i < all.length; i++) {
+    const x = all[i];
+    if (!x) continue;
+    const u = msOf(x.updatedAt);
+    if (x.status === "active" || (u !== null && u >= since)) rows.push(x);
+    else outside++;
+    if ((i + 1) % (STEP_EVERY * 4) === 0) await breathe();
+  }
+  return { rows, read: all.length, outside, truncated: all.length >= LISTING_CAP };
 }
 
 /**
  * No-claim units: two indexed reads (listed recently; sold recently), merged by document. Sorted on
- * their indexed date so a capped read loses the oldest, never a random slice.
+ * their indexed date so a capped read loses the oldest, never a random slice. The sold read leaves out
+ * what the listed read already returns (listed inside its window) — it stays on {status, soldAt} and
+ * still takes the never-listed units (listedAt null: a hand sale of free stock).
  */
-async function readUnits(d, now, W) {
+async function readUnits(d, now, W, breathe = yieldNow) {
+  const listedSince = new Date(now - W.unitListedDays * DAY);
   const listed =
-    (await d.UnclaimedAccount.find({ listedAt: { $gte: new Date(now - W.unitListedDays * DAY) } }, { ...UNIT_PROJECTION })
+    (await d.UnclaimedAccount.find({ listedAt: { $gte: listedSince } }, { ...UNIT_PROJECTION }, readOpts())
       .sort({ listedAt: -1 })
       .limit(UNIT_CAP)
       .lean()) || [];
   await yieldNow();
   const sold =
-    (await d.UnclaimedAccount.find({ status: "sold", soldAt: { $gte: new Date(now - W.unitSoldDays * DAY) } }, { ...UNIT_PROJECTION })
+    (await d.UnclaimedAccount.find(
+      { status: "sold", soldAt: { $gte: new Date(now - W.unitSoldDays * DAY) }, $or: [{ listedAt: { $lt: listedSince } }, { listedAt: null }] },
+      { ...UNIT_PROJECTION },
+      readOpts(),
+    )
       .sort({ soldAt: -1 })
       .limit(UNIT_CAP)
       .lean()) || [];
   const byDoc = new Map();
   let anon = 0;
-  for (const u of listed.concat(sold)) {
-    if (!u) continue;
-    const k = u._id !== undefined && u._id !== null ? String(u._id) : "anon:" + anon++;
-    if (!byDoc.has(k)) byDoc.set(k, u);
+  let n = 0;
+  for (const list of [listed, sold]) {
+    for (const u of list) {
+      if (++n % (STEP_EVERY * 4) === 0) await breathe();
+      if (!u) continue;
+      const k = u._id !== undefined && u._id !== null ? String(u._id) : "anon:" + anon++;
+      if (!byDoc.has(k)) byDoc.set(k, u);
+    }
   }
   return { docs: [...byDoc.values()], read: [listed.length, sold.length], truncated: { listed: listed.length >= UNIT_CAP, sold: sold.length >= UNIT_CAP } };
 }
@@ -595,34 +693,68 @@ async function readUnits(d, now, W) {
  * pure buildEventCatalog (never loadCatalog, which reads without a limit). Open-ended campaigns
  * (endAt null: campaignWatcher stores null when Twitch gives no end) are read too, as loadCatalog
  * does. Sorted by endAt descending: Mongo orders null below every date, so the dated campaigns come
- * first, newest first, and the cap can only ever drop open-ended ones.
+ * first, newest first, and the cap can only ever drop open-ended ones. Manifests are asked for in
+ * chunks of ID_CHUNK campaign ids (one $in of 5,000 is one heavy query).
  */
 async function readCampaigns(d, now) {
   const campaigns =
-    (await d.TwitchCampaign.find({ $or: [{ endAt: { $gte: new Date(now - CAMPAIGN_WINDOW_DAYS * DAY) } }, { endAt: null }] }, { ...CAMPAIGN_PROJECTION })
+    (await d.TwitchCampaign.find({ $or: [{ endAt: { $gte: new Date(now - CAMPAIGN_WINDOW_DAYS * DAY) } }, { endAt: null }] }, { ...CAMPAIGN_PROJECTION }, readOpts())
       .sort({ endAt: -1 })
       .limit(CAMPAIGN_CAP)
       .lean()) || [];
   const ids = [...new Set(campaigns.map((c) => (c && c.campaignId ? String(c.campaignId) : "")).filter(Boolean))];
-  await yieldNow();
-  const manifests = ids.length ? (await d.CampaignDrops.find({ campaignId: { $in: ids } }, { ...MANIFEST_PROJECTION }).limit(MANIFEST_CAP).lean()) || [] : [];
+  const manifests = [];
+  for (let i = 0; i < ids.length && manifests.length < MANIFEST_CAP; i += ID_CHUNK) {
+    await yieldNow();
+    const chunk = ids.slice(i, i + ID_CHUNK);
+    const got =
+      (await d.CampaignDrops.find({ campaignId: { $in: chunk } }, { ...MANIFEST_PROJECTION }, readOpts())
+        .limit(ID_CHUNK)
+        .lean()) || [];
+    for (const m of got) manifests.push(m);
+  }
   return { campaigns, manifests, truncated: { campaigns: campaigns.length >= CAMPAIGN_CAP, manifests: manifests.length >= MANIFEST_CAP } };
 }
 
 /** MarketResearch, projected to what derivePrice and bundlePrice read. */
 async function readResearch(d) {
-  const rows = (await d.MarketResearch.find({}, { ...RESEARCH_PROJECTION }).limit(RESEARCH_CAP).lean()) || [];
+  const rows =
+    (await d.MarketResearch.find({}, { ...RESEARCH_PROJECTION }, readOpts())
+      .limit(RESEARCH_CAP)
+      .lean()) || [];
   return { rows, truncated: rows.length >= RESEARCH_CAP };
 }
 
 /** The farm brain's rows of the last `lookbackH` hours (demandLookbackH), newest first (the {at} index). */
 async function readDemandRows(d, now, lookbackH = DEMAND_LOOKBACK_MIN_H + DEMAND_LOOKBACK_MARGIN_H) {
   const rows =
-    (await d.DemandBrainRow.find({ at: { $gte: new Date(now - lookbackH * HOUR) } }, { ...DEMAND_PROJECTION })
+    (await d.DemandBrainRow.find({ at: { $gte: new Date(now - lookbackH * HOUR) } }, { ...DEMAND_PROJECTION }, readOpts())
       .sort({ at: -1 })
       .limit(DEMAND_ROW_CAP)
       .lean()) || [];
   return { rows, truncated: rows.length >= DEMAND_ROW_CAP };
+}
+
+/**
+ * Which of the claim auto rows' sets are event bundles (C13): DropSet.sourceType, which the tracker's
+ * set read does not project. Bounded by the ids asked (the sets of the listing read's claim auto rows),
+ * in chunks of ID_CHUNK, projected to the marker and its event key. The event key is used in memory
+ * only (the event's sold floor), never copied.
+ * @returns {Promise<Map<string, string>>} set id (lower-case) → event key
+ */
+async function readEventSets(d, setIds, sourceType) {
+  const out = new Map();
+  const ids = [...new Set(setIds || [])].filter(Boolean);
+  for (let i = 0; i < ids.length; i += ID_CHUNK) {
+    const chunk = ids.slice(i, i + ID_CHUNK);
+    const got =
+      (await d.DropSet.find({ _id: { $in: chunk }, sourceType }, { _id: 1, sourceType: 1, sourceEventKey: 1 }, readOpts())
+        .limit(ID_CHUNK)
+        .lean()) || [];
+    for (const x of got) if (x && x._id !== undefined && x.sourceType === sourceType) out.set(lower(x._id), String(x.sourceEventKey || ""));
+    await yieldNow();
+  }
+  return out;
 }
 
 /* --------------------------------- listings --------------------------------- */
@@ -661,9 +793,17 @@ function identityOf(d, x, set) {
  * or the row was repriced since the report (the tracker skipped it by its cached price, the fresh
  * price is fine) — leaves the row its kind by its flags, counted as `unexplained` with a note: a
  * repriced row must not be misfiled as a rent-farm window and vanish from the evidence.
- * @returns {{ listings: object[], byId: Map<string, {L: object, set: object|null, raw: string}>, counts: object }}
+ * What a row holds now is the tracker's own count (games.listedUnits, through deps; null without it)
+ * and a pack's size is bulkPacks/packMath's (a row without bulkOfferId is no pack): no copies.
+ * @returns {{ listings: object[], byId: Map<string, {L: object, set: object|null, setId: string, raw: string}>, counts: object }}
  */
-function normaliseListings({ d, report, rows, keywords }) {
+function normaliseListings(o) {
+  return drain(normaliseListingsSteps(o));
+}
+
+function* normaliseListingsSteps({ d, report, rows, keywords, hash = hashId }) {
+  const listedUnitsOf = d.games && typeof d.games.listedUnits === "function" ? (l) => numOrNull(d.games.listedUnits(l)) : () => null;
+  const packSizeOf = d.packMath && typeof d.packMath.packSizeOf === "function" ? (row) => Math.floor(num(d.packMath.packSizeOf(row), 1)) : () => 1;
   const prepared = new Map();
   for (const r of (report && report.prepared && report.prepared.rows) || []) if (r && r.l && r.listingId) prepared.set(lower(r.listingId), r);
   const setById = report && report.prepared && report.prepared.setById instanceof Map ? report.prepared.setById : new Map();
@@ -689,7 +829,9 @@ function normaliseListings({ d, report, rows, keywords }) {
     account: 0,
     single: 0,
   };
+  let step = 0;
   for (const x of rows || []) {
+    if (++step % STEP_EVERY === 0) yield;
     if (!x || x._id === undefined || x._id === null) continue;
     const raw = lower(x._id);
     if (!raw || byId.has(raw)) continue;
@@ -727,10 +869,10 @@ function normaliseListings({ d, report, rows, keywords }) {
     const f = farmOf({ origin: o, noclaimStock: x.noclaimStock, unclaimedGame: x.unclaimedGame, autoClaimSet: x.autoClaimSet }, g, keywords);
     const units = Array.isArray(x.units) ? x.units : [];
     if (units.length > MAX_UNITS_PER_ROW) c.unitsCut++;
-    const packSize = Math.floor(num(x.bulkPackSize));
+    const packSize = packSizeOf({ bulkOfferId: x.bulkOfferId || null, bulkPackSize: x.bulkPackSize });
     const lotSize = Math.floor(num(x.lotSize));
     const L = {
-      id: hashRaw(raw),
+      id: hash(raw),
       g,
       gl: String(id.game || ""),
       m,
@@ -749,7 +891,7 @@ function normaliseListings({ d, report, rows, keywords }) {
       c: msOf(base.createdAt),
       u: msOf(base.updatedAt),
       units: units.slice(0, MAX_UNITS_PER_ROW).map((u) => ({ a: msOf(u && u.addedAt), d: msOf(u && u.deliveredAt) })),
-      qty: listedUnits({ marketplace: m, units, lastStock: x.lastStock, qtyTarget: x.qtyTarget }),
+      qty: listedUnitsOf({ marketplace: m, units, lastStock: x.lastStock, qtyTarget: x.qtyTarget }),
       qr: Math.max(0, Math.floor(num(x.qtyRemaining))),
       rb: msOf(x.rebundledAt),
       // accounts per sold unit: a v2 bulk pack's size, a Gameflip lot's size (0 = a single account)
@@ -759,7 +901,7 @@ function normaliseListings({ d, report, rows, keywords }) {
     c[kind] = (c[kind] || 0) + 1;
     if (L.script) c.script++;
     listings.push(L);
-    byId.set(raw, { L, set, raw });
+    byId.set(raw, { L, set, setId: x.set !== undefined && x.set !== null ? lower(x.set) : "", raw });
   }
   return { listings, byId, counts: c };
 }
@@ -773,7 +915,12 @@ function normaliseListings({ d, report, rows, keywords }) {
  * `ledgerBulk` counts the ledger's bulk records per pack row, so a no-claim pack unit the ledger
  * already holds is not added again.
  */
-function saleRecords({ report, byId, keywords, since }) {
+function saleRecords(o) {
+  return drain(saleRecordsSteps(o));
+}
+
+function* saleRecordsSteps({ report, byId, keywords, since, hash = hashId }) {
+  let step = 0;
   const sales = [];
   const demandOnly = [];
   const bulkPrices = [];
@@ -785,6 +932,7 @@ function saleRecords({ report, byId, keywords, since }) {
     else c.bulkUnpriced++;
   };
   for (const s of Array.isArray(ledger.sales) ? ledger.sales : []) {
+    if (++step % STEP_EVERY === 0) yield;
     if (!s) continue;
     const t = msOf(s.at);
     if (t === null || t < since) {
@@ -815,7 +963,7 @@ function saleRecords({ report, byId, keywords, since }) {
     }
     const priced = s.priced !== false && num(s.priceUsd) > 0;
     sales.push({
-      lid: raw ? hashId(raw) : "",
+      lid: raw ? hash(raw) : "",
       g,
       m,
       o: origin,
@@ -833,6 +981,7 @@ function saleRecords({ report, byId, keywords, since }) {
     c.ledger++;
   }
   for (const x of Array.isArray(ledger.demandOnly) ? ledger.demandOnly : []) {
+    if (++step % STEP_EVERY === 0) yield;
     if (!x) continue;
     const t = msOf(x.at);
     if (t === null || t < since) continue;
@@ -908,7 +1057,22 @@ function saleRowOf(ours, t, sm, unitMarket) {
  * U.x is the expiry of the unit's CURRENT life: expireAccount stamps expiredAt and nothing clears it on
  * a re-list, so an expiredAt older than listedAt belongs to a previous life and reads null.
  */
-function noclaimUnits({ d, docs, byId, since, ledgerBulk = new Map() }) {
+function noclaimUnits(o) {
+  return drain(noclaimUnitsSteps(o));
+}
+
+function* noclaimUnitsSteps({ d, docs, byId, since, ledgerBulk = new Map(), hash = hashId }) {
+  let step = 0;
+  // a few hundred games over 100,000 units: each game name is normalised once
+  const games = new Map();
+  const normGame = (name) => {
+    let g = games.get(name);
+    if (g === undefined) {
+      g = d.setIdentity.normGame(name);
+      games.set(name, g);
+    }
+    return g;
+  };
   const units = [];
   const sales = [];
   const demandOnly = [];
@@ -916,8 +1080,9 @@ function noclaimUnits({ d, docs, byId, since, ledgerBulk = new Map() }) {
   const c = { units: 0, sold: 0, sales: 0, paid: 0, rowPriced: 0, hand: 0, markSold: 0, ownerRow: 0, pack: 0, packInLedger: 0, elsewhere: 0, otherRows: 0, staleExpiry: 0 };
   const left = new Map(ledgerBulk);
   for (const u of docs || []) {
+    if (++step % STEP_EVERY === 0) yield;
     if (!u) continue;
-    const g = d.setIdentity.normGame(String(u.game || ""));
+    const g = normGame(String(u.game || ""));
     const raws = (Array.isArray(u.listingIds) ? u.listingIds : []).map(lower).filter(Boolean);
     const camps = [];
     for (const x of Array.isArray(u.drops) ? u.drops : []) {
@@ -942,7 +1107,7 @@ function noclaimUnits({ d, docs, byId, since, ledgerBulk = new Map() }) {
       sm,
       x,
       u: msOf(u.updatedAt),
-      lids: raws.map(hashId),
+      lids: raws.map(hash),
       bk: String(u.bundleKey || ""),
       camps,
     });
@@ -1021,23 +1186,31 @@ function noclaimUnits({ d, docs, byId, since, ledgerBulk = new Map() }) {
 /* ------------------------------- waves, radar, demand ------------------------------- */
 
 /**
- * Wave records (W) of the no-claim games, from the event catalog. `name` is the raw campaign name: a
- * unit's drops carry it (drops[].campaign), and when parseWave finds a wave label ("Week 2", "Wave 1")
- * neither the label nor the event name equals it, so without it a unit could not find its own wave.
+ * Wave records (W) of EVERY game whose campaigns are in the read window (bounded by the campaign cap),
+ * from the event catalog: the claim farm's "campaign ended and the rivals are gone → scarce" reads its
+ * games' waves (price.campaignEnded), and the backtest's demand reads which games are live from them;
+ * keeping only the no-claim buckets' games left both blind on real data. `name` is the raw campaign
+ * name: a unit's drops carry it (drops[].campaign), and when parseWave finds a wave label ("Week 2",
+ * "Wave 1") neither the label nor the event name equals it, so without it a unit could not find its
+ * own wave. (They stay under bundle.noclaim.waves, where the model reads them.)
  */
-function waves({ d, catalog, keywords }) {
+function waves({ d, catalog }) {
   const out = [];
   if (!catalog || typeof catalog.values !== "function") return out;
+  const games = new Map();
   for (const ev of catalog.values()) {
     if (!ev) continue;
-    const g = d.setIdentity.normGame(String(ev.game || ""));
-    if (!g || !bucketOfKey(g, keywords)) continue;
+    const name = String(ev.game || "");
+    let g = games.get(name);
+    if (g === undefined) games.set(name, (g = d.setIdentity.normGame(name)));
+    if (!g) continue;
     for (const w of Array.isArray(ev.waves) ? ev.waves : []) {
       if (!w) continue;
       out.push({ g, ev: String(ev.name || ""), wave: String(w.waveLabel || w.name || ""), name: String(w.name || ""), startAt: msOf(w.startAt), endAt: msOf(w.endAt) });
     }
   }
-  out.sort((a, b) => a.g.localeCompare(b.g) || num(a.endAt, Infinity) - num(b.endAt, Infinity) || a.ev.localeCompare(b.ev) || a.wave.localeCompare(b.wave));
+  // plain code-unit order: the same on every machine, and cheap over thousands of waves
+  out.sort((a, b) => cmp(a.g, b.g) || num(a.endAt, Infinity) - num(b.endAt, Infinity) || cmp(a.ev, b.ev) || cmp(a.wave, b.wave));
   return out;
 }
 
@@ -1092,11 +1265,18 @@ const asciiKey = (s) =>
 /**
  * The farm brain's newest row per (k, f) (DR). A no-claim row is per keyword BUCKET; it is expanded to
  * the bucket's games (SPEC §2): each game's weekly forecast, target and in-flight are the bucket's ×
- * its share of the bucket's no-claim unit sales in the last 30 days (equal split when none sold);
+ * its share of the bucket's no-claim unit sales in the last 30 days (when none sold there is nothing
+ * to split by: the games get no row and read unknown, counted in stats.unsplit);
  * its stock on hand is its own listed units plus the bucket's remaining stock × the same share (the
  * farm brain's on-hand is listed + held; the held part is not per game anywhere).
  */
-function demandRows({ docs, keywords, listings = [], units = [], sales = [], demandOnly = [], now }) {
+function demandRows(o) {
+  return drain(demandRowsSteps(o));
+}
+
+function* demandRowsSteps({ docs, keywords, listings = [], units = [], sales = [], demandOnly = [], now, stats = {} }) {
+  let step = 0;
+  stats.unsplit = stats.unsplit || 0;
   const newest = new Map();
   for (const r of docs || []) {
     if (!r || !r.k) continue;
@@ -1108,22 +1288,39 @@ function demandRows({ docs, keywords, listings = [], units = [], sales = [], dem
     if (!cur || at > cur.at) newest.set(key, { r, f, at });
   }
   const bucketGames = new Map();
+  // a few hundred game keys over 100,000+ records: each key's bucket is worked out once
+  const bucketMemo = new Map();
+  const bucketOf = (g) => {
+    let b = bucketMemo.get(g);
+    if (b === undefined) bucketMemo.set(g, (b = bucketOfKey(g, keywords)));
+    return b;
+  };
   const addGame = (g) => {
-    const b = g ? bucketOfKey(g, keywords) : "";
+    const b = g ? bucketOf(g) : "";
     if (!b) return;
     if (!bucketGames.has(b)) bucketGames.set(b, new Set());
     bucketGames.get(b).add(g);
   };
-  for (const L of listings) if (L && L.f === "noclaim" && L.kind !== "farm") addGame(L.g);
-  for (const u of units) if (u) addGame(u.g);
-  for (const s of sales) if (s && s.f === "noclaim") addGame(s.g);
-  for (const x of demandOnly) if (x && x.f === "noclaim") addGame(x.g);
+  for (const L of listings) {
+    if (++step % STEP_EVERY === 0) yield;
+    if (L && L.f === "noclaim" && L.kind !== "farm") addGame(L.g);
+  }
   const sold = new Map();
-  for (const s of sales.concat(demandOnly)) {
-    if (s && s.f === "noclaim" && s.t >= now - SHARE_DAYS * DAY && s.t <= now) sold.set(s.g, (sold.get(s.g) || 0) + 1);
+  for (const list of [sales, demandOnly]) {
+    for (const s of list) {
+      if (++step % STEP_EVERY === 0) yield;
+      if (!s || s.f !== "noclaim") continue;
+      addGame(s.g);
+      if (s.t >= now - SHARE_DAYS * DAY && s.t <= now) sold.set(s.g, (sold.get(s.g) || 0) + 1);
+    }
   }
   const listed = new Map();
-  for (const u of units) if (u && u.st === "listed") listed.set(u.g, (listed.get(u.g) || 0) + 1);
+  for (const u of units) {
+    if (++step % STEP_EVERY === 0) yield;
+    if (!u) continue;
+    addGame(u.g);
+    if (u.st === "listed") listed.set(u.g, (listed.get(u.g) || 0) + 1);
+  }
   // the farm brain's bucket key (normGameName of a keyword) → the loader's keyword(s) it stands for
   const byAscii = new Map();
   for (const w of keywords || []) {
@@ -1163,10 +1360,16 @@ function demandRows({ docs, keywords, listings = [], units = [], sales = [], dem
       continue;
     }
     const total = games.reduce((a, g) => a + (sold.get(g) || 0), 0);
+    if (!(total > 0)) {
+      // Nothing to split the bucket's forecast and stock by: an equal split would be a guess presented
+      // as each game's demand. Its games get no row (they read unknown, so the model holds).
+      stats.unsplit++;
+      continue;
+    }
     const listedSum = games.reduce((a, g) => a + (listed.get(g) || 0), 0);
     const free = base.on === null ? null : Math.max(0, base.on - listedSum);
     for (const g of games) {
-      const share = total > 0 ? (sold.get(g) || 0) / total : 1 / games.length;
+      const share = (sold.get(g) || 0) / total;
       out.push({
         k: g,
         f,
@@ -1317,43 +1520,179 @@ function oldOrder({ af, label, platiTakes, ggselTakes, hist, brand }) {
   return order;
 }
 
-/** A DropSet's items, in the shapes bundlePrice / suggestForNew / classifyHoldings take. */
+/** A DropSet's items, in the shapes bundlePrice / suggestForNew / classifyHoldings take (copies ≤ MAX_ITEM_COPIES). */
 function setItems(set) {
   return (set && Array.isArray(set.items) ? set.items : [])
     .filter((i) => i && i.itemKey)
-    .map((i) => ({ itemKey: String(i.itemKey), name: String(i.name || ""), game: String(i.game || ""), qty: Math.max(1, Math.floor(num(i.qty, 1))) }));
+    .map((i) => ({ itemKey: String(i.itemKey), name: String(i.name || ""), game: String(i.game || ""), qty: Math.min(MAX_ITEM_COPIES, Math.max(1, Math.floor(num(i.qty, 1)))) }));
 }
 // unclaimedAutoList.expandSetDrops: one drop entry per copy (classifyHoldings counts copies).
 function dropsFromItems(items) {
   const out = [];
-  for (const i of items) for (let k = 0; k < i.qty; k++) out.push({ name: i.name, game: i.game, campaign: "", itemKey: i.itemKey });
+  for (const i of items) {
+    const n = Math.min(MAX_ITEM_COPIES, Math.max(0, Math.floor(num(i.qty, 1))));
+    for (let k = 0; k < n; k++) out.push({ name: i.name, game: i.game, campaign: "", itemKey: i.itemKey });
+  }
   return out;
+}
+
+// Markets today's lister refills (refillMarkets: Gameflip's queue counter, Plati and GGSel product
+// stock), in the auto-lister's own market keys.
+const REFILL_ORDER = ["gameflip", "plati", "ggsel"];
+// Markets an event bundle is published to (publishStackedListing), with the one Gameflip-priced number;
+// GGSel's share goes through venuePrice (publishGgselShare). Everywhere else rule 1 stands.
+const EVENT_BUNDLE_MARKETS = new Set(["gameflip", "digiseller", "ggsel"]);
+
+/**
+ * Today's flat shelf (rule 4): dealShares' round-robin of split.listNow, then refillMarkets' top-up.
+ * refillMarkets itself is impure (it reads the database and the marketplaces' live stock, and writes)
+ * and is never called; this restates its arithmetic: every refillable market in today's order is
+ * topped back up to perMarketStock from the stock on hand (the held-back half first goes to that),
+ * while the total stays within the stock.
+ * @param {object} dealt  auto-lister market key → units dealt
+ * @returns {object} auto-lister market key → units on the shelf
+ */
+function refillShelf(dealt, order, onHand, perMarketStock) {
+  const per = Math.max(1, Math.floor(num(perMarketStock, 3)) || 3);
+  const out = { ...dealt };
+  let total = Object.values(out).reduce((a, n) => a + num(n), 0);
+  for (const m of REFILL_ORDER) {
+    if (!order.includes(m)) continue;
+    const add = Math.max(0, Math.min(per - num(out[m]), onHand - total));
+    out[m] = num(out[m]) + add;
+    total += add;
+  }
+  return out;
+}
+
+/**
+ * The offers a logged row reads the tracker's answer for (model.trackerPrice on each cell's main
+ * verdict, model.mainVerdict): per game × farm × market, the live system-made offer with the most live
+ * rows (ties: the game × farm's primary offer), else the primary offer's own group on that market. The
+ * primary offer is model.identities' rule: the identity with the most live system rows, then rows
+ * (with no system row, the owner's rows). Ordered for the cap: cells with live system rows first.
+ * @param {Map} groups offer key → group ({ m, g, f, liveSys, sys, owner, ownerLive, ident })
+ * @returns {string[]} offer keys
+ */
+function trackerOffers(groups) {
+  const byGF = new Map();
+  for (const gr of groups.values()) {
+    const k = gr.g + "|" + gr.f;
+    if (!byGF.has(k)) byGF.set(k, []);
+    byGF.get(k).push(gr);
+  }
+  const mains = [];
+  for (const list of byGF.values()) {
+    const ident = new Map();
+    for (const gr of list) {
+      const e = ident.get(gr.ident) || { key: gr.ident, live: 0, rows: 0, ownerLive: 0, owner: 0 };
+      e.live += gr.liveSys;
+      e.rows += gr.sys;
+      e.ownerLive += gr.ownerLive;
+      e.owner += gr.owner;
+      ident.set(gr.ident, e);
+    }
+    const ids = [...ident.values()].sort((a, b) => cmp(a.key, b.key));
+    const anySys = ids.some((e) => e.rows > 0);
+    let primary = null;
+    for (const e of ids) {
+      // system-made rows decide; with none, the owner's rows (model.identities' order)
+      const [l, r] = anySys ? [e.live, e.rows] : [e.ownerLive, e.owner];
+      if (r === 0) continue;
+      if (!primary || l > primary.l || (l === primary.l && r > primary.r)) primary = { key: e.key, l, r };
+    }
+    const byM = new Map();
+    for (const gr of list) {
+      if (!byM.has(gr.m)) byM.set(gr.m, []);
+      byM.get(gr.m).push(gr);
+    }
+    for (const cell of byM.values()) {
+      cell.sort((a, b) => cmp(a.key, b.key));
+      let main = null;
+      for (const gr of cell) {
+        if (!(gr.liveSys > 0)) continue;
+        if (!main || gr.liveSys > main.liveSys || (gr.liveSys === main.liveSys && primary && gr.ident === primary.key && main.ident !== primary.key)) main = gr;
+      }
+      if (!main && primary) {
+        for (const gr of cell) {
+          if (gr.ident !== primary.key) continue;
+          main = gr;
+          break;
+        }
+      }
+      if (main) mains.push(main);
+    }
+  }
+  mains.sort((a, b) => b.liveSys - a.liveSys || cmp(a.key, b.key));
+  return mains.map((gr) => gr.key);
 }
 
 /**
  * Today's rules at this moment (plan §2.1 `old`), computed with today's own exported functions.
  *   games[g] (claim games with live system-made rows or stock): base = derivePrice(research),
- *     ggsel = venuePrice("ggsel", base) (a DB-cached snapshot read: per-call timeout, null + note on
- *     failure), post = postEventPrice(base), split = computeSplit(stock on hand), flat = dealShares of
- *     split.listNow placeholder accounts over today's order, counted per market.
+ *     ggsel = venuePrice("ggsel", base), post = postEventPrice(base), split = computeSplit(stock on hand,
+ *     ≤ MAX_ON_HAND), flat = dealShares of split.listNow placeholder accounts over today's order, topped
+ *     back up to perMarketStock on the refillable markets (refillShelf), counted per market.
  *   offers[m|ck-or-bk]: np = the price today's lister would give a new listing of that offer there
- *     (claim: ggsel → venue price, else max(base, the market floor); no-claim: bundlePrice), and the
- *     tracker's suggestForNew as it is.
+ *     (claim: ggsel → venue price, else max(base, the market floor); a claim EVENT BUNDLE on Gameflip,
+ *     Plati or GGSel: autoFarmBundles.priceBundle on Gameflip's evidence (GGSel: through venuePrice),
+ *     `eb: true`; no-claim: bundlePrice), and the tracker's suggestForNew for the offers a logged row
+ *     reads (trackerOffers, ≤ trackerCap; null for the rest).
+ * The realised-price snapshot venuePrice and priceBundle read is warmed ONCE first (with a timeout):
+ * venuePrice swallows an evidence error and answers the base price, so only the warm-up can tell. If it
+ * fails, every GGSel price and every event-bundle price is null, with one note — never a guess.
+ * @param {Map<string,string>} [eventSets] set id → event key of the claim auto rows' event-bundle sets
  */
-async function oldSide({ d, af, report, byId, demand, research, catalog, pricing, labels, platiTakes, ggselTakes, now, notes, venueTimeoutMs = VENUE_TIMEOUT_MS }) {
+async function oldSide({
+  d,
+  af,
+  report,
+  byId,
+  demand,
+  research,
+  catalog,
+  pricing,
+  labels,
+  platiTakes,
+  ggselTakes,
+  now,
+  notes,
+  venueTimeoutMs = VENUE_TIMEOUT_MS,
+  trackerCap = MAX_TRACKER_OFFERS,
+  eventSets = new Map(),
+}) {
   const games = {};
   const offers = {};
-  const c = { games: 0, gamesCut: 0, venueOk: 0, venueFailed: 0, venueSkipped: 0, offers: 0, offersCut: 0, offerErrors: 0, research: { exact: 0, ci: 0, none: 0, unread: 0 } };
+  const c = {
+    games: 0,
+    gamesCut: 0,
+    venueOk: 0,
+    venueFailed: 0,
+    venueSkipped: 0,
+    offers: 0,
+    offersCut: 0,
+    offerErrors: 0,
+    trackerAsked: 0,
+    trackerCut: 0,
+    eventBundles: 0,
+    eventBundlesUnpriced: 0,
+    clamped: 0,
+    research: { exact: 0, ci: 0, none: 0, unread: 0 },
+  };
+  const breathe = makeBreather();
   const R = Array.isArray(research) ? researchIndex(research) : null;
-  const all = [...byId.values()].map((e) => e.L);
+  const perMarketStock = num(af && af.perMarketStock, 3);
 
   const hist = new Map();
   const live = new Map();
-  for (const L of all) {
+  let step = 0;
+  for (const e of byId.values()) {
+    if (++step % (STEP_EVERY * 4) === 0) await breathe();
+    const L = e.L;
     if (!L.g || L.kind === "farm") continue;
     if (!hist.has(L.g)) hist.set(L.g, new Set());
     hist.get(L.g).add(L.m);
-    if (L.f === "claim" && L.o === "auto" && L.kind === "single" && L.st === "active") live.set(L.g, (live.get(L.g) || 0) + num(L.qty));
+    if (L.f === "claim" && L.o === "auto" && L.kind === "single" && L.st === "active") live.set(L.g, (live.get(L.g) || 0) + num(L.qty, 1));
   }
   const stock = new Map();
   for (const r of demand || []) if (r && r.f === "claim" && num(r.on) > 0) stock.set(r.k, num(r.on));
@@ -1367,17 +1706,19 @@ async function oldSide({ d, af, report, byId, demand, research, catalog, pricing
     notes.push(keys.length + " claim games have stock or live rows; today's rules were computed for the first " + MAX_OLD_GAMES + " (live first).");
     keys = keys.slice(0, MAX_OLD_GAMES);
   }
-  if (!R) notes.push("Market research unreadable this run: today's new-listing prices (derivePrice, bundlePrice) are not computed.");
+  if (!R) notes.push("Market research unreadable this run: today's new-listing prices (derivePrice, bundlePrice, priceBundle) are not computed.");
 
   const A = d.autoLister;
-  let i = 0;
   for (const g of keys) {
     const label = labels.get(g) || g;
     const r = R ? matchResearch(R, label) : null;
     if (r) c.research[r.how]++;
     else c.research.unread++;
-    const onHand = stock.has(g) ? stock.get(g) : trackerOnHand.has(g) ? trackerOnHand.get(g) : live.get(g) || 0;
-    const sp = A.computeSplit(Math.max(0, Math.floor(onHand))) || {};
+    const rawOnHand = Math.max(0, Math.floor(stock.has(g) ? stock.get(g) : trackerOnHand.has(g) ? trackerOnHand.get(g) : live.get(g) || 0));
+    // a database number drives the deal below (one placeholder per account, quadratic in dealShares)
+    const onHand = Math.min(MAX_ON_HAND, rawOnHand);
+    if (onHand < rawOnHand) c.clamped++;
+    const sp = A.computeSplit(onHand) || {};
     const split = { listNow: Math.max(0, Math.floor(num(sp.listNow))), holdBack: Math.max(0, Math.floor(num(sp.holdBack))) };
     let brand = false;
     try {
@@ -1392,8 +1733,11 @@ async function oldSide({ d, af, report, byId, demand, research, catalog, pricing
     // Placeholder accounts: dealShares only deals them round-robin; nothing else ever sees them.
     const accounts = Array.from({ length: split.listNow }, (_, k) => ({ login: "u" + k }));
     A.dealShares(accounts, order, shares, null);
+    const dealt = {};
+    for (const m of order) dealt[m] = shares[m].length;
+    const shelf = refillShelf(dealt, order, onHand, perMarketStock);
     const flat = {};
-    for (const m of order) flat[orderMarket(m)] = shares[m].length;
+    for (const m of order) flat[orderMarket(m)] = shelf[m];
     const base = r ? numOrNull(A.derivePrice(r.doc || null)) : null;
     games[g] = {
       base: base === null ? null : round2(base),
@@ -1406,13 +1750,56 @@ async function oldSide({ d, af, report, byId, demand, research, catalog, pricing
       label,
     };
     c.games++;
-    if (++i % 50 === 0) await yieldNow();
+    await breathe();
+  }
+  if (c.clamped) notes.push(c.clamped + " claim games report more than " + MAX_ON_HAND + " accounts on hand: today's split was computed for " + MAX_ON_HAND + ".");
+
+  // Offers: every distinct (market, exact items or size band) of a plain or claim-at-sale row.
+  const groups = new Map();
+  step = 0;
+  for (const e of byId.values()) {
+    if (++step % (STEP_EVERY * 4) === 0) await breathe();
+    const L = e.L;
+    if (!L.g || (L.kind !== "single" && L.kind !== "cas")) continue;
+    const key = L.m + "|" + (L.ck || L.bk);
+    const sys = L.kind === "single" && (L.o === "auto" || L.o === "unclaimed");
+    const owner = !sys && (L.kind === "cas" || L.o === "manual");
+    let gr = groups.get(key);
+    if (!gr) {
+      gr = { key, m: L.m, g: L.g, gl: L.gl || L.g, f: L.f, n: L.n, set: e.set, setId: "", live: false, sys: 0, liveSys: 0, owner: 0, ownerLive: 0, ident: L.ex && L.ck ? "c:" + L.ck : "b:" + L.bk };
+      groups.set(key, gr);
+    }
+    if (sys && !gr.sys) Object.assign(gr, { f: L.f, g: L.g, gl: L.gl || L.g, n: L.n, set: e.set || gr.set, ident: L.ex && L.ck ? "c:" + L.ck : "b:" + L.bk });
+    if (!gr.set && e.set) gr.set = e.set;
+    if (sys && L.f === "claim" && L.o === "auto" && e.setId && eventSets.has(e.setId)) gr.setId = e.setId;
+    if (sys) gr.sys++;
+    if (owner) gr.owner++;
+    if (L.st === "active") {
+      gr.live = true;
+      if (sys) gr.liveSys++;
+      if (owner) gr.ownerLive++;
+    }
   }
 
-  // GGSel's venue price. The first call runs alone: it fills the shared 10-minute evidence snapshot,
-  // which has no in-flight dedupe, so three cold calls at once would each rebuild it. If that first
-  // call fails, the rest are not tried (they would rebuild it again): null + one note.
+  // The realised-price snapshot, warmed once (see above). Without the reader (an older caller's deps)
+  // the calls below run as before.
+  const ebGroups = [...groups.values()].filter((gr) => gr.setId && gr.f === "claim" && EVENT_BUNDLE_MARKETS.has(gr.m));
   const priced = keys.filter((g) => games[g].base !== null);
+  let evidence = { ok: true, why: "" };
+  if ((priced.length || ebGroups.length) && d.pricingEvidence && typeof d.pricingEvidence.snapshot === "function") {
+    try {
+      await withTimeout(
+        Promise.resolve().then(() => d.pricingEvidence.snapshot()),
+        venueTimeoutMs,
+        "the evidence snapshot",
+      );
+    } catch (e) {
+      evidence = { ok: false, why: cleanMsg(e) };
+    }
+  }
+
+  // GGSel's venue price, from the warm snapshot. The first call still runs alone; if it fails the rest
+  // are not tried: null + one note.
   let lastErr = "";
   const callVenue = async (g) => {
     const og = games[g];
@@ -1434,49 +1821,89 @@ async function oldSide({ d, af, report, byId, demand, research, catalog, pricing
       return false;
     }
   };
-  if (priced.length) {
+  if (!evidence.ok) {
+    c.venueSkipped = priced.length;
+    notes.push(
+      "The pricing evidence snapshot was unreadable (" +
+        evidence.why +
+        "): today's GGSel prices (venuePrice) and event-bundle prices (priceBundle) are not computed for any game — null, never a guess.",
+    );
+  } else if (priced.length) {
     const firstOk = await callVenue(priced[0]);
     await yieldNow();
     if (firstOk) await mapLimit(priced.slice(1), OLD_CONCURRENCY, callVenue);
     else c.venueSkipped = priced.length - 1;
   }
-  if (c.venueFailed || c.venueSkipped) {
+  if (evidence.ok && (c.venueFailed || c.venueSkipped)) {
     notes.push(
       "GGSel venue price unreadable for " + (c.venueFailed + c.venueSkipped) + " of " + priced.length + " games (" + lastErr + ")" + (c.venueSkipped ? "; the rest were not tried after the first failed" : "") + ": their old GGSel price is null.",
     );
   }
   for (const g of keys) delete games[g].label;
 
-  // Offers: every distinct (market, exact items or size band) of a plain or claim-at-sale row.
-  const groups = new Map();
-  for (const e of byId.values()) {
-    const L = e.L;
-    if (!L.g || (L.kind !== "single" && L.kind !== "cas")) continue;
-    const key = L.m + "|" + (L.ck || L.bk);
-    const sys = L.kind === "single" && (L.o === "auto" || L.o === "unclaimed");
-    let gr = groups.get(key);
-    if (!gr) {
-      gr = { key, m: L.m, g: L.g, gl: L.gl || L.g, f: L.f, n: L.n, set: e.set, live: false, sys: false };
-      groups.set(key, gr);
-    }
-    if (sys && !gr.sys) Object.assign(gr, { sys: true, f: L.f, g: L.g, gl: L.gl || L.g, n: L.n, set: e.set || gr.set });
-    if (!gr.set && e.set) gr.set = e.set;
-    if (L.st === "active") gr.live = true;
-  }
   let list = [...groups.values()];
-  const rank = (x) => (x.sys && x.live ? 0 : x.live ? 1 : x.sys ? 2 : 3);
+  const rank = (x) => (x.liveSys ? 0 : x.live ? 1 : x.sys ? 2 : 3);
   list.sort((a, b) => rank(a) - rank(b) || a.key.localeCompare(b.key));
   if (list.length > MAX_OFFERS) {
     c.offersCut = list.length - MAX_OFFERS;
     notes.push(list.length + " offers; today's prices were computed for the first " + MAX_OFFERS + " (live system-made first).");
     list = list.slice(0, MAX_OFFERS);
   }
+  // the tracker is asked only for what a logged row reads
+  const wanted = trackerOffers(new Map(list.map((gr) => [gr.key, gr])));
+  const askTracker = new Set(wanted.slice(0, Math.max(0, trackerCap)));
+  c.trackerCut = Math.max(0, wanted.length - askTracker.size);
+  if (c.trackerCut)
+    notes.push("The tracker's suggestion (suggestForNew) was asked for " + askTracker.size + " of " + wanted.length + " cells' main offers (live system-made first): the rest log no tracker price.");
+
   const floorFor = (m) => (d.venues && typeof d.venues.floorFor === "function" ? num(d.venues.floorFor(m)) : 0);
   const hasCatalog = !!(catalog && typeof catalog.values === "function" && catalog.size);
+  // the event's sold floor (autoFarmBundles.soldFloorForEvent): the best price an auto row of any of
+  // the event's bundle sets sold at in 30 days — from the rows already read
+  const soldFloor = new Map();
+  if (ebGroups.length) {
+    for (const e of byId.values()) {
+      const L = e.L;
+      const ek = e.setId ? eventSets.get(e.setId) : undefined;
+      if (ek === undefined || L.o !== "auto" || L.st !== "sold" || !(num(L.u, -Infinity) >= now - EVENT_SOLD_FLOOR_DAYS * DAY)) continue;
+      soldFloor.set(ek, Math.max(soldFloor.get(ek) || 0, num(L.p)));
+    }
+  }
+  const ebPrices = new Map();
+  const ebPrice = async (gr, items) => {
+    if (ebPrices.has(gr.setId)) return ebPrices.get(gr.setId);
+    const r = R ? matchResearch(R, gr.gl) : null;
+    let p = null;
+    try {
+      const out = await withTimeout(
+        Promise.resolve().then(() =>
+          d.autoFarmBundles.priceBundle({
+            // what publishEventBundleFor hands the pricer; whether the set is the COMPLETE event is not
+            // knowable here (the plan's waves are not stored), so it is priced as not complete
+            plan: { game: gr.gl, items, totalQty: items.reduce((a, x) => a + x.qty, 0), full: false },
+            game: gr.gl,
+            marketplace: "gameflip",
+            research: r ? r.doc : null,
+            soldFloorUsd: soldFloor.get(eventSets.get(gr.setId)) || 0,
+          }),
+        ),
+        venueTimeoutMs,
+        "priceBundle",
+      );
+      const v = numOrNull(out && out.price);
+      p = v !== null && v > 0 ? round2(v) : null;
+    } catch {
+      p = null;
+    }
+    ebPrices.set(gr.setId, p);
+    return p;
+  };
+
   for (let k = 0; k < list.length; k++) {
     const gr = list[k];
     const items = setItems(gr.set);
     let np = null;
+    let eb = false;
     try {
       if (gr.f === "noclaim") {
         const r = R ? matchResearch(R, gr.gl) : null;
@@ -1495,6 +1922,22 @@ async function oldSide({ d, af, report, byId, demand, research, catalog, pricing
           const v = numOrNull(out && out.price);
           np = v === null ? null : round2(v);
         }
+      } else if (gr.setId && EVENT_BUNDLE_MARKETS.has(gr.m) && d.autoFarmBundles && typeof d.autoFarmBundles.priceBundle === "function") {
+        eb = true;
+        c.eventBundles++;
+        const p = evidence.ok ? await ebPrice(gr, items) : null;
+        if (p === null) np = null;
+        else if (gr.m === "ggsel") {
+          const v = numOrNull(
+            await withTimeout(
+              Promise.resolve().then(() => A.venuePrice("ggsel", p, { title: gr.gl + " Twitch Drops" })),
+              venueTimeoutMs,
+              "venuePrice",
+            ),
+          );
+          np = v !== null && v > 0 ? round2(v) : null;
+        } else np = round2(Math.max(p, floorFor(gr.m)));
+        if (np === null) c.eventBundlesUnpriced++;
       } else {
         const og = games[gr.g];
         if (og && og.base !== null) np = gr.m === "ggsel" ? og.ggsel : round2(Math.max(og.base, floorFor(gr.m)));
@@ -1502,25 +1945,42 @@ async function oldSide({ d, af, report, byId, demand, research, catalog, pricing
     } catch {
       np = null;
       c.offerErrors++;
+      if (eb) c.eventBundlesUnpriced++;
     }
     let tracker = null;
-    try {
-      const s = d.priceTracker.suggestForNew(report, { market: gr.m, game: gr.gl, title: "", itemCount: gr.n || 0, items: items.map((x) => ({ itemKey: x.itemKey, game: x.game, qty: x.qty })) });
-      if (s) tracker = { price: round2(s.price), basis: String(s.basis || s.action || ""), confidence: s.confidence ? String(s.confidence) : null };
-    } catch {
-      tracker = null;
-      c.offerErrors++;
+    if (askTracker.has(gr.key)) {
+      c.trackerAsked++;
+      // one tracker call is 17–143 ms on Node 20 at production volume and cannot be split: breathe
+      // before every one, so no stretch holds more than a single call
+      await yieldNow();
+      try {
+        const s = d.priceTracker.suggestForNew(report, { market: gr.m, game: gr.gl, title: "", itemCount: gr.n || 0, items: items.map((x) => ({ itemKey: x.itemKey, game: x.game, qty: x.qty })) });
+        if (s) tracker = { price: round2(s.price), basis: String(s.basis || s.action || ""), confidence: s.confidence ? String(s.confidence) : null };
+      } catch {
+        tracker = null;
+        c.offerErrors++;
+      }
     }
-    offers[gr.key] = { np, tracker };
+    offers[gr.key] = eb ? { np, tracker, eb: true } : { np, tracker };
     c.offers++;
-    if ((k + 1) % OFFER_CHUNK === 0) await yieldNow();
+    await breathe();
+  }
+  if (c.eventBundles) {
+    notes.push(
+      c.eventBundles +
+        " claim offers are event bundles, priced the way today's lister prices them (autoFarmBundles.priceBundle on Gameflip's evidence; GGSel through venuePrice). Whether each is the complete event is not knowable here, so each is priced as not complete (no full-event bonus)" +
+        (c.eventBundlesUnpriced ? "; " + c.eventBundlesUnpriced + " have no price (no evidence or no answer)" : "") +
+        ".",
+    );
   }
   return { games, offers, counts: c };
 }
 
 /* ----------------------------------- load ----------------------------------- */
 
-const byTime = (a, b) => a.t - b.t || String(a.lid || a.g || "").localeCompare(String(b.lid || b.g || ""));
+// Ties (one detection pass books many units at one moment) in plain code-unit order: the same on every
+// machine, and no ICU collation over tens of thousands of comparisons.
+const byTime = (a, b) => a.t - b.t || cmp(String(a.lid || a.g || ""), String(b.lid || b.g || ""));
 
 /**
  * One run's bundle (plan §2.1). Throws — and so logs nothing — when the settings, the tracker report,
@@ -1529,12 +1989,18 @@ const byTime = (a, b) => a.t - b.t || String(a.lid || a.g || "").localeCompare(S
  * @param {object} o
  * @param {number} [o.now]            epoch ms
  * @param {object} [o.deps]           injected modules (tests)
- * @param {number} [o.venueTimeoutMs] per-call cap on venuePrice
+ * @param {number} [o.venueTimeoutMs] per-call cap on venuePrice, priceBundle and the evidence warm-up
+ * @param {number} [o.trackerCap]     how many offers the tracker's suggestForNew is asked about
+ * Every long pass breathes (setImmediate) at least every YIELD_BUDGET_MS, and between steps: at
+ * production volume on Node 20 no synchronous stretch of the load is much over the budget.
  */
-async function load({ now: nowIn, deps = null, venueTimeoutMs = VENUE_TIMEOUT_MS } = {}) {
+async function load({ now: nowIn, deps = null, venueTimeoutMs = VENUE_TIMEOUT_MS, trackerCap = MAX_TRACKER_OFFERS } = {}) {
   const now = msOf(nowIn) === null ? Date.now() : msOf(nowIn);
   const d = deps || realDeps();
   const notes = [];
+  const breathe = makeBreather();
+  // one memo per load: a listing id is hashed once for its row, its sales and every unit naming it
+  const hash = makeHasher();
 
   // 1. settings, before any database read
   const S = settingsBlock(d);
@@ -1585,17 +2051,17 @@ async function load({ now: nowIn, deps = null, venueTimeoutMs = VENUE_TIMEOUT_MS
   // 4. the extra listing read: no run without it
   let lr;
   try {
-    lr = await readListings(d, now, W);
+    lr = await readListings(d, now, W, breathe);
   } catch (e) {
     throw new Error("listing brain: the listing read failed (" + cleanMsg(e) + "): nothing loaded");
   }
-  if (lr.truncated) notes.push("The listing read hit its cap of " + LISTING_CAP + " rows: the oldest rows in the window are missing.");
+  if (lr.truncated) notes.push("The listing read hit its cap of " + LISTING_CAP + " rows (newest first): the oldest rows are missing.");
   await yieldNow();
 
   // 5. no-claim units: no run without them (the no-claim lister's sales live only there)
   let ur;
   try {
-    ur = await readUnits(d, now, W);
+    ur = await readUnits(d, now, W, breathe);
   } catch (e) {
     throw new Error("listing brain: the no-claim unit read failed (" + cleanMsg(e) + "): nothing loaded");
   }
@@ -1643,7 +2109,7 @@ async function load({ now: nowIn, deps = null, venueTimeoutMs = VENUE_TIMEOUT_MS
   await yieldNow();
 
   // build
-  const nl = normaliseListings({ d, report, rows: lr.rows, keywords });
+  const nl = await drainAsync(normaliseListingsSteps({ d, report, rows: lr.rows, keywords, hash }), breathe);
   if (nl.counts.unexplained) {
     notes.push(
       nl.counts.unexplained +
@@ -1653,28 +2119,51 @@ async function load({ now: nowIn, deps = null, venueTimeoutMs = VENUE_TIMEOUT_MS
     );
   }
   await yieldNow();
+
+  // 9. which of the claim auto rows' sets are event bundles (today's fifth pricer): degrade (rule 1)
+  let eventSets = new Map();
+  const sourceType = (d.autoFarmBundles && d.autoFarmBundles.SOURCE_TYPE) || "autofarm-bundle";
+  if (d.DropSet && typeof d.DropSet.find === "function") {
+    const ids = [];
+    for (const e of nl.byId.values()) if (e.setId && e.L.f === "claim" && e.L.o === "auto") ids.push(e.setId);
+    try {
+      eventSets = await readEventSets(d, ids, sourceType);
+    } catch (e) {
+      eventSets = new Map();
+      notes.push("The event-bundle marker of the auto-lister's sets was unreadable (" + cleanMsg(e) + "): event-bundle offers are priced by rule 1 (derivePrice), not by priceBundle.");
+    }
+  }
+
   const since = now - W.saleDays * DAY;
-  const sr = saleRecords({ report, byId: nl.byId, keywords, since });
-  await yieldNow();
-  const nu = noclaimUnits({ d, docs: ur.docs, byId: nl.byId, since, ledgerBulk: sr.ledgerBulk });
+  const sr = await drainAsync(saleRecordsSteps({ report, byId: nl.byId, keywords, since, hash }), breathe);
+  await breathe();
+  const nu = await drainAsync(noclaimUnitsSteps({ d, docs: ur.docs, byId: nl.byId, since, ledgerBulk: sr.ledgerBulk, hash }), breathe);
   await yieldNow();
   const sales = sr.sales.concat(nu.sales).sort(byTime);
+  await breathe();
   const demandOnly = sr.demandOnly.concat(nu.demandOnly).sort(byTime);
   const bulkPrices = sr.bulkPrices.concat(nu.bulkPrices).sort(byTime);
-  const wv = waves({ d, catalog, keywords });
-  const demand = demandRows({ docs: demandDocs, keywords, listings: nl.listings, units: nu.units, sales, demandOnly, now });
+  await breathe();
+  const wv = waves({ d, catalog });
+  await breathe();
+  const dstats = {};
+  const demand = await drainAsync(demandRowsSteps({ docs: demandDocs, keywords, listings: nl.listings, units: nu.units, sales, demandOnly, now, stats: dstats }), breathe);
+  if (dstats.unsplit) notes.push(dstats.unsplit + " no-claim farm-brain rows had no sale in 30 days to split their bucket's forecast by: those games read unknown.");
+  await breathe();
   const keys = [];
   for (const L of nl.listings) if (L.g && L.kind !== "farm") keys.push(L.g);
   for (const r of demand) keys.push(r.k);
   const labels = gameLabels({ listings: nl.listings, report, keys });
+  await breathe();
   const afb = afBlock({ d, af, keywords, labels, platiTakes, ggselTakes });
   await yieldNow();
-  const old = await oldSide({ d, af, report, byId: nl.byId, demand, research, catalog, pricing: S.pricing, labels, platiTakes, ggselTakes, now, notes, venueTimeoutMs });
+  const old = await oldSide({ d, af, report, byId: nl.byId, demand, research, catalog, pricing: S.pricing, labels, platiTakes, ggselTakes, now, notes, venueTimeoutMs, trackerCap, eventSets });
 
   const ledger = report.ledger || {};
   const counts = {
     trackerAgeMin: reportAt === null ? null : round1((now - reportAt) / MINUTE),
-    listingRows: lr.rows.length,
+    listingRows: lr.read,
+    listingOutsideWindow: lr.outside,
     listings: nl.listings.length,
     ...Object.fromEntries(Object.entries(nl.counts).map(([k, v]) => ["l_" + k, v])),
     sales: sales.length,
@@ -1703,6 +2192,11 @@ async function load({ now: nowIn, deps = null, venueTimeoutMs = VENUE_TIMEOUT_MS
     offers: old.counts.offers,
     offersCut: old.counts.offersCut,
     offerErrors: old.counts.offerErrors,
+    trackerAsked: old.counts.trackerAsked,
+    trackerCut: old.counts.trackerCut,
+    eventBundleSets: eventSets.size,
+    eventBundleOffers: old.counts.eventBundles,
+    demandUnsplit: dstats.unsplit || 0,
   };
 
   return {
@@ -1746,14 +2240,18 @@ const KEY_ALLOW = new Set(["notes", "digiseller", "rivalSellers", "liveSellers",
 // like string values, so a game called "Account Quest" never blocks an export.
 const DATA_KEYED = new Set(["af.mapped", "af.caps", "pricing.gameFloors", "old.games", "old.offers"]);
 // What an identifying string looks like: an email, a link, an IPv4 / IPv6 address, a raw database id
-// anywhere in it, or a credential word.
+// anywhere in it, or a credential in its SHAPE — a credential word with a value after "=" or ":", or a
+// bearer token. A bare word is not one: real game and campaign names say "Secret", "Token" or
+// "Password", and flagging them would refuse every export of such a game. A value already masked
+// by cleanMsg ("token=<value>") is not one either.
 const VALUE_RES = [
   [/[^\s@]+@[^\s@]+\.[a-z]{2,}/i, "email address"],
   [/\b[a-z][a-z0-9+.-]*:\/\//i, "link"],
   [/\b\d{1,3}(?:\.\d{1,3}){3}\b/, "IPv4 address"],
   [/(?:\b(?:[0-9a-f]{1,4}:){7}[0-9a-f]{1,4}\b|\b[0-9a-f]{1,4}(?::[0-9a-f]{1,4}){0,6}::|(?<![\w:])::[0-9a-f]{1,4}\b)/i, "IPv6 address"],
   [/[0-9a-f]{24}/i, "raw database id"],
-  [/(token|secret|password|api[_-]?key|bearer)/i, "credential word"],
+  [/\b(token|secret|password|passwd|api[_-]?key|access[_-]?key)\s*[=:]\s*(?!<)\S+/i, "credential"],
+  [/\bbearer\s+(?!<)[A-Za-z0-9._~+/-]{8,}/i, "bearer token"],
 ];
 const valueProblem = (v) => {
   for (const [re, what] of VALUE_RES) if (re.test(v)) return what;
@@ -1987,6 +2485,13 @@ module.exports = {
   normaliseListings,
   saleRecords,
   noclaimUnits,
+  readEventSets,
+  refillShelf,
+  trackerOffers,
+  setItems,
+  dropsFromItems,
+  makeHasher,
+  makeBreather,
   waves,
   radarSlim,
   demandRows,
@@ -1998,7 +2503,6 @@ module.exports = {
   researchIndex,
   kindOf,
   farmOf,
-  listedUnits,
   bucketOfKey,
   noclaimKeywords,
   trackerMarket,
@@ -2044,5 +2548,11 @@ module.exports = {
   MAX_UNITS_PER_ROW,
   MAX_OLD_GAMES,
   MAX_OFFERS,
+  MAX_TRACKER_OFFERS,
+  MAX_ON_HAND,
+  MAX_ITEM_COPIES,
+  READ_MAX_TIME_MS,
+  ID_CHUNK,
+  YIELD_BUDGET_MS,
   CAP_DEFAULT,
 };
