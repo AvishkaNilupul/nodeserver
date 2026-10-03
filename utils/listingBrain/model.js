@@ -76,10 +76,15 @@ function shelfClass(oldSh, brSh, { elig = "open", managed = false } = {}) {
 // An offer's identity inside a game: the exact items when known, else the size band.
 const identKey = (r) => (r.ex && r.ck ? "c:" + r.ck : "b:" + r.bk);
 
+// The loader's old-side record of an offer on m: by its exact items, else its size band.
+function oldOfferOf(bundle, m, id) {
+  const offers = (bundle.old && bundle.old.offers) || {};
+  return (id && id.rawCk && offers[m + "|" + id.rawCk]) || (id && id.bk && offers[m + "|" + id.bk]) || null;
+}
+
 /** Today's price for a NEW listing of this offer on m (plan §4.6 "old"): bundlePrice / rules 1–2. */
 function newBase(bundle, g, f, m, id) {
-  const offers = (bundle.old && bundle.old.offers) || {};
-  const oo = (id && id.rawCk && offers[m + "|" + id.rawCk]) || (id && id.bk && offers[m + "|" + id.bk]) || null;
+  const oo = oldOfferOf(bundle, m, id);
   if (oo && num(oo.np) > 0) return round2(oo.np);
   if (f === "claim") {
     const og = bundle.old && bundle.old.games && bundle.old.games[g];
@@ -96,8 +101,7 @@ function newBase(bundle, g, f, m, id) {
  * { price, basis, conf } — its engine fallback reads basis "none" (it never raises a price).
  */
 function trackerOf(bundle, m, id) {
-  const offers = (bundle.old && bundle.old.offers) || {};
-  const oo = (id && id.rawCk && offers[m + "|" + id.rawCk]) || (id && id.bk && offers[m + "|" + id.bk]) || null;
+  const oo = oldOfferOf(bundle, m, id);
   const t = oo && oo.tracker;
   if (!t) return null;
   const x = t.price !== undefined ? t : t[m] || {};
@@ -253,7 +257,9 @@ function priceGroup(st, grp) {
     const cls = grp.elig[m].cls;
     if (pr && !byId.has(pr.key) && (cls === "open" || cls === "unknown" || cls === "unmeasured")) {
       const base = newBase(bundle, g, f, m, pr);
-      const v = P.priceOffer(ctx, { g, f, m, ck: pr.ck, bk: pr.bk, ex: pr.ex, n: pr.n, band: pr.band, live: null, base, np: base, ladder: false, defer });
+      // an offer the owner runs as a ladder here is left alone as a new listing too (N7)
+      const ladder = !!pr.ck && ev.ladders.has(m + "|" + pr.ck);
+      const v = P.priceOffer(ctx, { g, f, m, ck: pr.ck, bk: pr.bk, ex: pr.ex, n: pr.n, band: pr.band, live: null, base, np: base, ladder, defer });
       v.ident = pr;
       v.np = base;
       v.isNew = true;
@@ -369,10 +375,17 @@ function placeGroup(st, grp) {
     for (const v of cell.verdicts) for (const r of v.live) liveActs.push(r);
     const oldA = median(cell.liveSys.map((r) => r.ask));
     const np = main ? (main.np !== undefined ? main.np : main.base) : pr ? newBase(bundle, g, f, m, pr) : null;
-    // The cell's brain price, like with like against today's median ask (M11): every live row counts,
-    // a row the brain leaves where it is at its own ask. A deliberate ladder gets no brain price (M13a).
-    const advised = liveActs.filter((r) => r.a !== "ladder");
-    const brP = cell.liveSys.length ? (advised.length ? median(advised.map((r) => (r.p !== null && r.p !== undefined ? r.p : r.ask))) : null) : main ? main.p : null;
+    // The cell's brain price, like with like against today's median ask (M11): every advised live row
+    // counts, a row the brain leaves where it is at its own ask — but only when the brain priced at least
+    // one of them: with none, the cell has no brain price (N4; a median of asks alone would read
+    // "agree"). A deliberate ladder gets none (M13a); a blocked or switched-off market none at all.
+    const offMarket = mk.blocked || mk.off;
+    const advised = liveActs.filter((r) => r.a !== "ladder" && ev.byId.get(r.id) && ev.byId.get(r.id).advisable);
+    const priced = advised.some((r) => r.p !== null && r.p !== undefined);
+    let brP;
+    if (offMarket) brP = null;
+    else if (cell.liveSys.length) brP = priced ? median(advised.map((r) => (r.p !== null && r.p !== undefined ? r.p : r.ask))) : null;
+    else brP = main ? main.p : null;
     const oldP = cell.liveSys.length ? oldA : np;
     const unknown = gs.unknown;
     const pc = priceClass(oldP, unknown ? null : brP, { managed, ladder, cfg });
@@ -425,13 +438,16 @@ function placeGroup(st, grp) {
     }
     // the other policies' prices are logged only through the same gates (M2); with no verdict there is
     // no evidence to gate by, so only today's own price is shown, at its floor
-    const tr = main ? trackerOf(bundle, m, main.ident) : null;
+    // (no tracker or rival price on a market the owner blocked or switched off — N8)
+    const tr = main && !offMarket ? trackerOf(bundle, m, main.ident) : null;
     const gp = (price, o) => (main ? P.gatePolicy(ctx, main, price, Object.assign({ live: cell.liveSys.length > 0 }, o)) : null);
-    const clearRaw = main ? RF.clearPrice(ev, g, main.n, m, cfg.minSales) : null;
+    const clearRaw = main && !offMarket ? RF.clearPrice(ev, g, main.n, m, cfg.minSales) : null;
     const pol = {
-      old: oldP === null ? null : main ? gp(oldP, { basis: "old" }) : round2(Math.max(oldP, mk.floor)),
+      // today's price is its own base: only the floors, the no-claim ceiling and the sold floor apply to
+      // it — gated against the main offer's base it moved a whole step, and no longer was today's (N3)
+      old: oldP === null ? null : main ? gp(oldP, { basis: "old", base: oldP }) : round2(Math.max(oldP, mk.floor)),
       tracker: tr ? gp(tr.price, { basis: tr.basis, conf: tr.conf }) : null,
-      curve: unknown ? null : brP,
+      curve: unknown || offMarket ? null : brP,
       clear: clearRaw === null ? null : gp(clearRaw, { basis: "rivals", conf: "low" }),
     };
     const tierP = main ? main.tier : gs.tier;
@@ -472,6 +488,9 @@ function placeGroup(st, grp) {
     rowsOut.push(row);
     for (const v of cell.verdicts) {
       const so = slimOffer(v);
+      // a claim event bundle (the loader's mark): today it is priced by the event-bundle pricer
+      const oo = oldOfferOf(bundle, m, v.ident);
+      if (oo && oo.eb === true) so.eb = true;
       // a single listing's price anchors the next pack's (bulkPacks/pricing.pickAnchor): show the packs
       if (anchorOf(v)) {
         so.fl = so.fl.concat("bulk-anchor");
@@ -749,6 +768,16 @@ function finite(v) {
 }
 
 /**
+ * A caller's base price as a number, the way its caller reads it (attach.priceForNew: Number(base)):
+ * a number, or a numeric string ("2.50") — N9. Anything else (null, a boolean, "", "abc") is none.
+ */
+function baseNumber(v) {
+  if (typeof v === "number") return finite(v);
+  if (typeof v !== "string" || !v.trim()) return null;
+  return finite(Number(v));
+}
+
+/**
  * Every answer that passes today's price through still obeys today's limits (M8): never under the floor
  * (the platform's, the game's learned GGSel minimum, the owner's no-claim floors), never over the
  * no-claim ceiling.
@@ -780,7 +809,7 @@ function clampToLimits(run, price, m, f, g) {
  * @param {object} [o] { now } — the moment asked at; a run older than allowed abstains (M7)
  */
 function priceForRun(run, q = {}, { now } = {}) {
-  const b0 = finite(q && q.basePriceUsd);
+  const b0 = baseNumber(q && q.basePriceUsd);
   const m = lower(q && q.marketplace);
   const f = q && q.farm === "noclaim" ? "noclaim" : "claim";
   if (b0 === null || !(b0 > 0) || b0 > U.MAX_REAL_PRICE) {

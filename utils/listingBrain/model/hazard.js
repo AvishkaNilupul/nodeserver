@@ -22,8 +22,19 @@
 // bucket centres: the open top bucket's "2.5" was nobody's price), log-linear between them, flat below
 // the lowest; no price above the highest is ever a candidate.
 //
+// Two numbers ride along on a single-unit market, both read off the same timelines:
+// - the BASE rate a row sells at, sales ÷ ROW-days (N1): the offer-level rate h_m is per offer-day, and
+//   an offer with three rows up is one offer-day but three row-days — the scorer's "every listing sells
+//   at the market's own rate" baseline must be per row, or it reads ~2× too high and flatters the model;
+// - the QUEUE calibration (N2): a row ranked k-th needs k buyers only if nobody else joins the queue,
+//   but cheaper rows of ours keep arriving and take buyers. Once a day of each offer's timeline, every
+//   live row's chance from the queue model is set beside whether it sold within the horizon; per rank
+//   class (alone, 1st, 2nd, 3rd+) the ratio realised ÷ predicted, shrunk toward 1 with K row-days,
+//   scales the queue model (and a higher rank is never given a better chance than a lower one).
+//
 // PURE.
 const U = require("./util");
+const E = require("./evidence");
 const { refFor } = require("./ref");
 
 const { DAY, BUCKET_CENTRES, BUCKET_EDGES, num } = U;
@@ -97,7 +108,7 @@ const offerKeyOf = (r) => r.g + "|" + r.f + "|" + r.m + "|" + (r.ex && r.ck ? "c
  * @param {object} ev
  * @param {"claim"|"noclaim"} farm
  * @param {object} [o] { tierFor: (g) => 0|1|2 }
- * @returns HZ { farm, horizon, K, minSales, minBucketDays, rows, markets: { [m]: { S, D, h, buckets, nodes } } }
+ * @returns HZ { farm, horizon, K, minSales, minBucketDays, rows, markets: { [m]: { S, D, h, hb, buckets, queue? } } }
  */
 function fitHazard(ev, farm, o = {}) {
   const it = fitSteps(ev, farm, o);
@@ -126,6 +137,7 @@ const YIELD_MS = 40;
 // Rows / offers between two possible yields: each check costs one clock read in the async fit.
 const EVERY_ROWS = 1024;
 const EVERY_OFFERS = 64;
+const EVERY_SAMPLES = 4096;
 
 // The body, as a generator: each `yield` marks a point where the async fit may let the loop breathe.
 function* fitSteps(ev, farm, { tierFor } = {}) {
@@ -152,6 +164,23 @@ function* fitSteps(ev, farm, { tierFor } = {}) {
   };
   let used = 0;
   let tick = 0;
+  // single-unit markets: per market, the rows' own sales and days (the per-row base rate, N1) and the
+  // daily queue samples (N2)
+  const perRow = new Map();
+  const samples = new Map();
+  const sampleTo = (m) => {
+    if (!samples.has(m)) samples.set(m, { x: [], ti: [], c: [], s: [], n: [], d: [], y: [] });
+    const a = samples.get(m);
+    return (x, ti, c, sm, n, d, y) => {
+      a.x.push(x);
+      a.ti.push(ti);
+      a.c.push(c);
+      a.s.push(sm);
+      a.n.push(n);
+      a.d.push(d);
+      a.y.push(y);
+    };
+  };
   // single-unit markets: gather each offer's rows, then sweep its timeline
   const offers = new Map();
   for (const r of ev.rows) {
@@ -163,6 +192,10 @@ function* fitSteps(ev, farm, { tierFor } = {}) {
       const k = offerKeyOf(r);
       if (!offers.has(k)) offers.set(k, []);
       offers.get(k).push(r);
+      const pr = perRow.get(r.m) || { S: 0, D: 0 };
+      pr.S += e.units;
+      pr.D += e.days;
+      perRow.set(r.m, pr);
       used++;
       continue;
     }
@@ -180,14 +213,48 @@ function* fitSteps(ev, farm, { tierFor } = {}) {
     const ri = refFor(ev, offerOf(list[0]));
     if (!(ri.ref > 0)) continue;
     const ti = U.clamp(num(tf(list[0].g), 0), 0, NT - 1);
-    sweepOffer(list, ri.ref, (x, S, D) => addTo(list[0].m, x, ti, S, D));
+    const put = sampleTo(list[0].m);
+    sweepOffer(list, ri.ref, (x, S, D) => addTo(list[0].m, x, ti, S, D), {
+      cut: ev.cut,
+      horizon,
+      sample: (x, c, sm, n, d, y) => put(x, ti, c, sm, n, d, y),
+    });
   }
   yield;
   const markets = {};
   for (const m of U.MARKETS) {
     const a = acc.get(m);
     if (!a) continue;
-    markets[m] = shrink(a, { K, minSales, minBucketDays });
+    const mk = shrink(a, { K, minSales, minBucketDays });
+    // the base rate per ROW (N1): on a single-unit market sales ÷ row-days; elsewhere a row is an offer
+    const pr = perRow.get(m);
+    mk.hb = mk.h === null ? null : U.SINGLE.has(m) && pr && pr.D > 0 ? pr.S / pr.D : mk.h;
+    markets[m] = mk;
+  }
+  // the queue calibration per single-unit market (N2), once the curve is known
+  for (const [m, sm] of [...samples].sort((p, q) => U.cmp(p[0], q[0]))) {
+    const mk = markets[m];
+    if (!mk || mk.h === null || !sm.x.length) continue;
+    const nodes = [0, 1, 2].map((t) => nodesOf(mk, t));
+    const agg = QUEUE_CLASSES.map(() => ({ n: 0, y: 0, p: 0 }));
+    const q = { cheaper: 0, same: 0, n: 0 };
+    for (let i = 0; i < sm.x.length; i++) {
+      if ((i & (EVERY_SAMPLES - 1)) === EVERY_SAMPLES - 1) yield;
+      const h = nodes[sm.ti[i]].length ? interp(nodes[sm.ti[i]], sm.x[i]) : mk.h;
+      q.cheaper = sm.c[i];
+      q.same = sm.s[i];
+      q.n = sm.n[i];
+      const g = agg[classOf(rankOfQueue(q), q.n)];
+      g.n++;
+      g.y += sm.y[i];
+      g.p += queueP(h * sm.d[i], q, null);
+    }
+    mk.queue = agg.map((g, i) => {
+      // K pseudo row-days at the model's own mean chance: realised ÷ predicted, shrunk toward 1
+      const pBar = g.n ? g.p / g.n : 0;
+      const f = g.p + K * pBar > 0 ? (g.y + K * pBar) / (g.p + K * pBar) : 1;
+      return { cls: QUEUE_CLASSES[i], n: g.n, y: g.y, p: U.round3(g.p), f: U.round3(f) };
+    });
   }
   return { farm, horizon, K, minSales, minBucketDays, rows: used, markets };
 }
@@ -197,10 +264,16 @@ function* fitSteps(ev, farm, { tierFor } = {}) {
  * ends, the offer's state is its LOWEST live ask; that span's days go to the bucket of x = min ask ÷
  * ref, and a sale at the end of a span (any row's) to the state just before it. Rows judged at their
  * sale price when they sold (what the buyer actually took).
+ *
+ * With `o.sample`, once a day (at the cut minus whole days) every live row is also a queue sample (N2):
+ * the offer's x_min, the row's place in the queue (rows strictly cheaper, others at its price, live
+ * rows), the days it is judged over (the horizon, cut by its remaining life) and whether it sold within
+ * them — only where those days end by the cut (an outcome not yet known is no sample).
  * @param {Array} rows the offer's fit rows (each with expo.t0/t1 inside the fit window)
  * @param {Function} add (x, sales, days)
+ * @param {object} [o] { cut, horizon, sample: (xMin, cheaper, same, n, days, sold01) }
  */
-function sweepOffer(rows, ref, add) {
+function sweepOffer(rows, ref, add, o = {}) {
   const ev = [];
   for (const r of rows) {
     const e = r.expo;
@@ -217,7 +290,46 @@ function sweepOffer(rows, ref, add) {
     for (const r of live.values()) x = Math.min(x, judgedPrice(r) / ref);
     return x;
   };
+  // the daily sample points, oldest first: cut − j days
+  const sampling = typeof o.sample === "function" && ev.length && Number.isFinite(o.cut) && o.horizon > 0;
+  // (the first at or after the offer's first event)
+  let tau = sampling ? o.cut - Math.floor((o.cut - ev[0].t) / DAY) * DAY : Infinity;
+  // (scratch arrays reused at every sample point: an offer is sampled up to 90 times a fit)
+  const bufR = [];
+  const bufP = [];
+  const sampleAt = (t) => {
+    if (!live.size) return;
+    let n = 0;
+    let pMin = Infinity;
+    for (const r of live.values()) {
+      bufR[n] = r;
+      bufP[n] = judgedPrice(r);
+      if (bufP[n] < pMin) pMin = bufP[n];
+      n++;
+    }
+    const xMin = pMin / ref;
+    for (let i = 0; i < n; i++) {
+      const r = bufR[i];
+      const d = Math.min(o.horizon, E.daysLeftOf(r, t));
+      if (!(d > 0) || t + d * DAY > o.cut) continue;
+      let cheaper = 0;
+      let same = 0;
+      for (let k = 0; k < n; k++) {
+        if (k === i) continue;
+        if (bufP[k] < bufP[i] - 1e-9) cheaper++;
+        else if (Math.abs(bufP[k] - bufP[i]) <= 1e-9) same++;
+      }
+      const e = r.expo;
+      const y = e.units > 0 && e.soldT !== null && e.soldT > t && e.soldT <= t + d * DAY ? 1 : 0;
+      o.sample(xMin, cheaper, same, n, d, y);
+    }
+  };
   for (const e of ev) {
+    // the sample points up to this event see the live set as it stood before it
+    while (sampling && tau < e.t) {
+      sampleAt(tau);
+      tau += DAY;
+    }
     if (last !== null && live.size && e.t > last) add(minX(), 0, (e.t - last) / DAY);
     if (e.open) live.set(e.r.id, e.r);
     else {
@@ -284,19 +396,8 @@ function nodesOf(mk, ti) {
   return out;
 }
 
-/**
- * The hazard (sales a day) at ratio x: log-linear between the evidenced buckets' nodes, flat below the
- * lowest and above the highest — so still non-increasing. With no evidenced bucket, the market's own
- * rate (an estimate of level only: no price is ever picked from it). Null when the market has none.
- */
-function hazardAt(HZ, m, tier, x) {
-  const mk = HZ && HZ.markets && HZ.markets[m];
-  if (!mk || mk.h === null) return null;
-  const v = num(x, NaN);
-  if (!Number.isFinite(v)) return null;
-  const ti = tier === null || tier === undefined ? null : U.clamp(Math.round(num(tier)), 0, NT - 1);
-  const nodes = nodesOf(mk, ti);
-  if (!nodes.length) return mk.h;
+/** Log-linear between nodes, flat beyond the ends (nodes non-empty, in x order). */
+function interp(nodes, v) {
   if (v <= nodes[0].x) return nodes[0].h;
   const last = nodes[nodes.length - 1];
   if (v >= last.x) return last.h;
@@ -311,6 +412,22 @@ function hazardAt(HZ, m, tier, x) {
   return last.h;
 }
 
+/**
+ * The hazard (sales a day) at ratio x: log-linear between the evidenced buckets' nodes, flat below the
+ * lowest and above the highest — so still non-increasing. With no evidenced bucket, the market's own
+ * rate (an estimate of level only: no price is ever picked from it). Null when the market has none.
+ */
+function hazardAt(HZ, m, tier, x) {
+  const mk = HZ && HZ.markets && HZ.markets[m];
+  if (!mk || mk.h === null) return null;
+  const v = num(x, NaN);
+  if (!Number.isFinite(v)) return null;
+  const ti = tier === null || tier === undefined ? null : U.clamp(Math.round(num(tier)), 0, NT - 1);
+  const nodes = nodesOf(mk, ti);
+  if (!nodes.length) return mk.h;
+  return interp(nodes, v);
+}
+
 /** The chance a unit sells within `days` at ratio x: 1 − exp(−days·h). Null without an estimate. */
 function pH(HZ, m, tier, x, days = HZ && HZ.horizon) {
   const h = hazardAt(HZ, m, tier, x);
@@ -318,11 +435,16 @@ function pH(HZ, m, tier, x, days = HZ && HZ.horizon) {
   return 1 - Math.exp(-Math.max(0, num(days)) * h);
 }
 
-/** The market's base rate — the scoring baseline: every listing sells at the market's own rate. */
+/**
+ * The market's base rate — the scoring baseline: every LISTING sells at the market's own rate. On a
+ * single-unit market that is sales ÷ row-days (`hb`, N1), not the offer-level h_m the curve is fitted
+ * in (one offer-day with three rows up is three row-days). A fit made before `hb` existed reads h_m.
+ */
 function baseP(HZ, m, days = HZ && HZ.horizon) {
   const mk = HZ && HZ.markets && HZ.markets[m];
   if (!mk || mk.h === null) return null;
-  return 1 - Math.exp(-Math.max(0, num(days)) * mk.h);
+  const h = mk.hb !== undefined && mk.hb !== null ? mk.hb : mk.h;
+  return 1 - Math.exp(-Math.max(0, num(days)) * h);
 }
 
 /**
@@ -347,28 +469,72 @@ function maxEvidencedX(HZ, m) {
   return nodes.length ? nodes[nodes.length - 1].x : null;
 }
 
-/**
- * A ROW's chance to sell within `days` on a single-unit market (H3): buyers of the offer arrive at
- * h(x_min) a day and take the cheapest row, so a row ranked k-th needs k buyers — P(Poisson(h·days) ≥
- * rank). rank = 1 + rows strictly cheaper + floor(rows at the same price ÷ 2) (ties share the buyers).
- * @param {number} xMin  the offer's lowest live ask ÷ ref
- * @param {number} rank  ≥ 1
- */
-function rowPH(HZ, m, tier, xMin, rank, days = HZ && HZ.horizon) {
-  const h = hazardAt(HZ, m, tier, xMin);
-  if (h === null) return null;
-  return U.poissonTail(h * Math.max(0, num(days)), Math.max(1, Math.floor(num(rank, 1))));
-}
+// The queue classes the calibration is learnt in (N2): a row alone on its offer, and the 1st, 2nd and
+// 3rd-or-later of several.
+const QUEUE_CLASSES = ["alone", "1", "2", "3+"];
+const classOf = (rank, n) => (n === 1 ? 0 : Math.min(3, Math.max(1, rank)));
 
-/** A row's rank among the offer's live rows' asks (ties share): 1 + cheaper + floor(same ÷ 2). */
-function rankOf(ask, asks) {
+/** A row's place in its offer's queue: rows strictly cheaper, OTHER rows at its price, live rows. */
+function queueOf(ask, asks) {
   let cheaper = 0;
   let same = -1; // the row itself is among `asks`
   for (const a of asks) {
     if (a < ask - 1e-9) cheaper++;
     else if (Math.abs(a - ask) <= 1e-9) same++;
   }
-  return 1 + cheaper + Math.floor(Math.max(0, same) / 2);
+  return { cheaper, same: Math.max(0, same), n: asks.length };
+}
+const rankOfQueue = (q) => 1 + q.cheaper + Math.floor(q.same / 2);
+
+/** A row's rank among the offer's live rows' asks (ties share): 1 + cheaper + floor(same ÷ 2). */
+function rankOf(ask, asks) {
+  return rankOfQueue(queueOf(ask, asks));
+}
+
+/**
+ * The queue model's chance for a row (`cal` null) or the calibrated one: a row with c rows strictly
+ * cheaper and s others at its price is one of the ranks c+1 … c+1+s with equal chance (who of a tie is
+ * served first is not ours to know), so its chance is the mean of those ranks' tails P(Poisson(μ) ≥ k)
+ * (N2). Calibrated, each rank's tail is scaled by its class's factor and never exceeds the rank before
+ * it: a higher rank never sells faster.
+ */
+function queueP(mu, q, cal) {
+  const first = q.cheaper + 1;
+  const lastK = q.cheaper + 1 + q.same;
+  const m = num(mu, 0);
+  if (!(m > 0)) return 0;
+  // P(D ≥ k) walked upward: tail_k = tail_{k−1} − pmf(k−1), pmf(j) = pmf(j−1)·μ ÷ j
+  let pmf = Math.exp(-m);
+  let tail = 1;
+  let run = 1;
+  let sum = 0;
+  for (let k = 1; k <= lastK; k++) {
+    tail -= pmf;
+    pmf *= m / k;
+    const raw = tail < 1e-12 ? 0 : tail;
+    const c = cal ? cal[classOf(k, q.n)] : null;
+    run = Math.min(run, (c ? num(c.f, 1) : 1) * raw);
+    if (k >= first) sum += run;
+    // every later rank is 0 too
+    if (run === 0) break;
+  }
+  return U.clamp(sum / (q.same + 1), 0, 1);
+}
+
+/**
+ * A ROW's chance to sell within `days` on a single-unit market (H3): buyers of the offer arrive at
+ * h(x_min) a day and take the cheapest row, so a row ranked k-th needs k buyers — P(Poisson(h·days) ≥
+ * k); a tie is the mean over its ranks, and the market's queue calibration (N2) scales each rank for
+ * the rows that join the queue ahead of it.
+ * @param {number} xMin  the offer's lowest live ask ÷ ref
+ * @param {number|object} q  the row's queue (queueOf) — or a plain rank ≥ 1 (no tie)
+ */
+function rowPH(HZ, m, tier, xMin, q, days = HZ && HZ.horizon) {
+  const h = hazardAt(HZ, m, tier, xMin);
+  if (h === null) return null;
+  const pos = q && typeof q === "object" ? q : { cheaper: Math.max(1, Math.floor(num(q, 1))) - 1, same: 0, n: null };
+  const mk = HZ.markets[m];
+  return queueP(h * Math.max(0, num(days)), pos, Array.isArray(mk.queue) ? mk.queue : null);
 }
 
 /** Expected days to a sale at ratio x: 1 ÷ h (Infinity with no estimate or a zero hazard). */
@@ -387,6 +553,9 @@ module.exports = {
   maxEvidencedX,
   rowPH,
   rankOf,
+  queueOf,
+  queueP,
+  QUEUE_CLASSES,
   fitRow,
   defaultTierFor,
   judgedPrice,

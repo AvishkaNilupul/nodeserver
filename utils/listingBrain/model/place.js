@@ -446,9 +446,11 @@ function placeGame(ctx, q) {
     delete fill.shelf[POOL];
     if (!outlet && left > 0) {
       // Nothing takes from the pool: every unit the shelves can still sell goes on them, up to the cap
-      // in force — perishable stock held "for later" just expires (M9).
+      // in force — perishable stock held "for later" just expires (M9). Only on markets where the game
+      // has demand (λ > 0): a market it never sold on gets at most the one exploration unit below, never
+      // a heap (GGSel cannot even take a unit back — N6).
       const room = Math.max(0, res.cap - open.reduce((a, m) => a + fill.shelf[m], 0));
-      const sellable = open.filter((m) => num(nets[m]) > 0 && !(caps[m] !== undefined && fill.shelf[m] >= caps[m]));
+      const sellable = open.filter((m) => num(nets[m]) > 0 && num(res.lambda[m], 0) > 0 && !(caps[m] !== undefined && fill.shelf[m] >= caps[m]));
       sellable.sort((a, b) => num(res.lambda[b], 0) - num(res.lambda[a], 0) || MARKETS.indexOf(a) - MARKETS.indexOf(b));
       let put = Math.min(left, room);
       const before = put;
@@ -497,7 +499,9 @@ function placeGame(ctx, q) {
     res.pool = pool;
   }
   if (stock > 0 && f === "noclaim") {
-    res.why.push("Shelf " + total + " of " + stock + "; " + pool.units + " to the pool the claim-at-sale offers and bulk sell from.");
+    if (pool.outlet) res.why.push("Shelf " + total + " of " + stock + "; " + pool.units + " to the pool the claim-at-sale offers and bulk sell from.");
+    // with no outlet nothing sells from the pool: say so, and what is left there (N10)
+    else res.why.push("Shelf " + total + " of " + stock + "; no outlet for the pool, so its units go on the shelves" + (pool.units > 0 ? " — " + pool.units + " left over that no shelf with demand can take." : "."));
   } else if (stock > 0) {
     res.why.push("Shelf " + total + " of " + stock + (res.reserve > 0 ? "; " + res.reserve + " in reserve (released as shelves empty)" : "") + ".");
   }

@@ -360,8 +360,9 @@ function rowChance(ctx, v, R) {
   if (!hz || !(v.ref > 0)) return out;
   if (U.SINGLE.has(v.m)) {
     const asks = offerAsks(ev, v, R);
+    const q = H.queueOf(R.ask, asks);
     out.rank = H.rankOf(R.ask, asks);
-    out.p = H.rowPH(hz, v.m, v.tier, Math.min(...asks) / v.ref, out.rank, days);
+    out.p = H.rowPH(hz, v.m, v.tier, Math.min(...asks) / v.ref, q, days);
   } else out.p = H.pH(hz, v.m, v.tier, R.ask / v.ref, days);
   return out;
 }
@@ -750,11 +751,26 @@ function liveAction(ctx, v, R, { minP = null } = {}) {
   // A quantity / order-unit offer keeps selling all its life: its age for the stale rule runs from its
   // last sale, not its creation (H2: a steadily selling 60-day Eldorado offer is not stale).
   const age = U.SINGLE.has(v.m) || R.lastSaleT === null || R.lastSaleT === undefined ? R.ageDays : Math.min(R.ageDays, (ev.cut - R.lastSaleT) / DAY);
+  // A row asking more than the dearest evidenced price (N11): the curve has no hazard up there, so it
+  // says nothing about THIS price — no lower on its word. The row holds unless it is stale, judged at
+  // the top node's hazard (the most that evidence can say for it); then the stale rule's gated rung.
+  // (A floor that lifts the row still lifts it: that is the owner's rule, not the curve.)
+  const top = hz && v.ref > 0 ? H.maxEvidencedX(hz, v.m) : null;
+  const above = top !== null && R.ask / v.ref > top + 1e-9 && !(c.p > R.ask + tol);
+  let staleEds = null;
+  if (above) {
+    const et = H.expectedDaysToSale(hz, v.m, v.tier, top) * (U.SINGLE.has(v.m) ? ch.rank : 1);
+    if (Number.isFinite(et) && age > cfg.staleFactor * et) staleEds = et;
+    out.why.push("Its price is above anything the evidence covers here (" + round2(R.ask / v.ref) + "× the reference, the curve stops at " + round2(top) + "×): the curve says nothing about it.");
+  } else if (Number.isFinite(eds) && age > cfg.staleFactor * eds && Math.abs(c.p - R.ask) <= tol + 1e-9) {
+    // The stale rule speaks only where the curve says hold: it never overrides a raise or a lower the
+    // curve already gives (H2).
+    staleEds = eds;
+  }
   let a = "hold";
   let p = c.p;
-  // The stale rule speaks only where the curve says hold: it never overrides a raise or a lower the
-  // curve already gives (H2).
-  if (Number.isFinite(eds) && age > cfg.staleFactor * eds && Math.abs(c.p - R.ask) <= tol + 1e-9) {
+  if (staleEds !== null) {
+    const eds = staleEds;
     // Rule 5's missing half: listed far longer than its price implies — one rung down, inside the
     // gates: the step limit from the ask, every floor (platform, the row's own, the no-claim floors),
     // the no-claim sold floor and a bundle it contains; never on GGSel.
@@ -762,7 +778,8 @@ function liveAction(ctx, v, R, { minP = null } = {}) {
     const sf = v.f === "noclaim" ? soldFloorOf(ev, v.ck) : 0;
     const lo = Math.max(floor, sf, num(minP, 0), U.ceil05(R.ask * (1 - cfg.maxStepPct / 100)));
     let rung = null;
-    for (const cand of v.cands) if (cand.p < R.ask - EPS && cand.p >= lo - 1e-9) rung = cand.p;
+    // only a price the evidence covers (a row above the curve's top steps down INTO the evidence — N11)
+    for (const cand of v.cands) if (cand.evid && cand.p < R.ask - EPS && cand.p >= lo - 1e-9) rung = cand.p;
     if (v.m === "ggsel") {
       out.gates.push("ggsel-raise-only");
       out.why.push("Stale (" + Math.round(age) + " d, about " + Math.round(eds) + " d expected) but GGSel can only be raised.");
@@ -772,8 +789,12 @@ function liveAction(ctx, v, R, { minP = null } = {}) {
       a = "lower";
       p = rung;
       out.gates.push("stale");
-      out.why.push("Stale: " + Math.round(age) + " days without a sale, about " + Math.round(eds) + " expected at this price → one rung down to " + usd(rung) + ".");
+      out.why.push("Stale: " + Math.round(age) + " days without a sale, about " + Math.round(eds) + " expected " + (above ? "even at the dearest evidenced price" : "at this price") + " → one rung down to " + usd(rung) + ".");
     }
+  } else if (above) {
+    out.gates.length = 0;
+    out.gates.push("above-evidence");
+    out.why.push("Held: no evidence at its price, and not stale (" + Math.round(age) + " d; stale after about " + Math.round(cfg.staleFactor * H.expectedDaysToSale(hz, v.m, v.tier, top) * (U.SINGLE.has(v.m) ? ch.rank : 1)) + " d).");
   } else if (c.raiseCut && c.wanted) {
     // one test unit a step above: through the same limits (step, floors) and only above the gated price
     const testP = round2(Math.max(stepCapped(cfg, R.ask, c.wanted), floor));
@@ -785,7 +806,7 @@ function liveAction(ctx, v, R, { minP = null } = {}) {
       out.why.push("Worth testing " + usd(p) + " on one unit: " + Math.round((vt / vh - 1) * 100) + "% more value than holding, too few sales to raise.");
     }
   }
-  if (a === "hold" && !out.stale) {
+  if (a === "hold" && !out.stale && !above) {
     if (c.p < R.ask - tol) a = "lower";
     else if (c.p > R.ask + tol) a = "raise";
   }
@@ -798,6 +819,9 @@ function liveAction(ctx, v, R, { minP = null } = {}) {
   }
   out.a = a;
   if (a !== "hold") out.p = round2(p);
+  // held above the evidence: the brain has no price for it (a gated number beside "hold" would read as
+  // a correction the curve cannot back)
+  else if (above) out.p = null;
   // DropSet.minPriceUsd is the floor the Gameflip relist chain lifts every relist back to
   if (a === "lower" && R.m === "gameflip" && R.smin !== null && R.smin > out.p + EPS) out.flags.push("setmin");
   return out;

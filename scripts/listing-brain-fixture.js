@@ -27,6 +27,9 @@ const { identify, normGame } = require("../utils/priceTracker/setIdentity");
 const { floorFor } = require("../utils/priceTracker/venues");
 const stats = require("../utils/priceTracker/stats");
 
+// Plain code-unit order: the same bundle on every machine (localeCompare follows the host's locale).
+const cmpStr = (a, b) => (a < b ? -1 : a > b ? 1 : 0);
+
 const DAY = 86400000;
 const HOUR = 3600000;
 const MIN = 60000;
@@ -1953,7 +1956,7 @@ function finish(ctx) {
 /* -------------------------------------------------------------------------------------------------------------- */
 
 const byThenId = (field, dir) => (a, b) =>
-  (a[field] - b[field]) * dir || (a.id || a.grp || "").localeCompare(b.id || b.grp || "");
+  (a[field] - b[field]) * dir || cmpStr(a.id || a.grp || "", b.id || b.grp || "");
 
 function generate({ seed = 1, large = false, now = DEFAULT_NOW } = {}) {
   const s = Number(seed);
@@ -1967,13 +1970,13 @@ function generate({ seed = 1, large = false, now = DEFAULT_NOW } = {}) {
 
   const listings = ctx.listings.slice().sort(byThenId("c", -1)); // newest first, like the loader's _id sort
   const sales = ctx.sales.slice().sort(byThenId("t", 1)); // oldest first, like the ledger
-  const demandOnly = ctx.demandOnly.slice().sort((a, b) => a.t - b.t || a.g.localeCompare(b.g));
+  const demandOnly = ctx.demandOnly.slice().sort((a, b) => a.t - b.t || cmpStr(a.g, b.g));
   const bulkPrices = ctx.bulkPrices.slice().sort((a, b) => a.t - b.t);
-  const feed = ctx.feed.slice().sort((a, b) => b.t - a.t || a.g.localeCompare(b.g)); // newest first, like the radar
-  const units = ctx.units.slice().sort((a, b) => a.l - b.l || a.g.localeCompare(b.g));
-  const waves = ctx.waves.slice().sort((a, b) => a.g.localeCompare(b.g) || a.startAt - b.startAt);
-  const demand = ctx.demand.slice().sort((a, b) => a.k.localeCompare(b.k) || a.f.localeCompare(b.f));
-  const radarGames = ctx.radarGames.slice().sort((a, b) => a.key.localeCompare(b.key));
+  const feed = ctx.feed.slice().sort((a, b) => b.t - a.t || cmpStr(a.g, b.g)); // newest first, like the radar
+  const units = ctx.units.slice().sort((a, b) => a.l - b.l || cmpStr(a.g, b.g));
+  const waves = ctx.waves.slice().sort((a, b) => cmpStr(a.g, b.g) || a.startAt - b.startAt);
+  const demand = ctx.demand.slice().sort((a, b) => cmpStr(a.k, b.k) || cmpStr(a.f, b.f));
+  const radarGames = ctx.radarGames.slice().sort((a, b) => cmpStr(a.key, b.key));
   const countBy = (list, f) => {
     const o = {};
     for (const m of MARKETS) o[m] = 0;

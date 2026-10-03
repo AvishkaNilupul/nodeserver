@@ -800,8 +800,13 @@ test("H3 a row ranked k-th on Gameflip needs k buyers: its sell chance is P(Pois
   const hz = run.ctx.hz.claim;
   const o = run.offers.find((x) => x.m === "gameflip" && x.live.length === 2);
   const h = H.hazardAt(hz, "gameflip", o.tier, 1.5 / o.ref);
-  near(f1.p, U.round3(1 - Math.exp(-h * f1.h)), "the cheapest row: one buyer");
-  near(f2.p, U.round3(U.poissonTail(h * f2.h, 2)), "the dearer row: the second buyer");
+  // the queue model itself: the cheapest row needs one buyer, the dearer one the second
+  near(H.queueP(h * f1.h, { cheaper: 0, same: 0, n: 2 }, null), 1 - Math.exp(-h * f1.h), "one buyer");
+  near(H.queueP(h * f2.h, { cheaper: 1, same: 0, n: 2 }, null), U.poissonTail(h * f2.h, 2), "the second buyer");
+  // what is logged is that model under the market's queue calibration (N2)
+  const cal = hz.markets.gameflip.queue;
+  near(f1.p, U.round3(H.queueP(h * f1.h, { cheaper: 0, same: 0, n: 2 }, cal)), "the cheapest row");
+  near(f2.p, U.round3(H.queueP(h * f2.h, { cheaper: 1, same: 0, n: 2 }, cal)), "the dearer row");
   assert.ok(f2.p < f1.p);
 });
 
@@ -1634,7 +1639,7 @@ test("M7 a run older than allowed answers nothing of its own: today's price, no 
 
 test("M8 priceFor never answers a brain price without a valid base, and today's price always within today's limits", () => {
   const run = M.buildRun(world());
-  for (const b of [0, -1, NaN, Infinity, "1.25", null, undefined, 26]) {
+  for (const b of [0, -1, NaN, Infinity, "", " ", "abc", "26", true, null, undefined, 26]) {
     const r = M.priceForRun(run, { marketplace: "gameflip", basePriceUsd: b, game: "Alpha Quest" });
     assert.equal(r.price, 0, String(b));
     assert.equal(r.basis, "invalid base");
@@ -1944,4 +1949,265 @@ test("P2b a sale on market 'other' is never a price and never reaches the transl
     ["gameflip"],
   );
   for (const per of ev.tr.bySet.values()) for (const m of per.keys()) assert.ok(U.MARKETS.includes(m), "translator market " + m);
+});
+
+/* ------------------------- batch 3: the final regression review ------------------------- */
+
+// The large fixture's six weekly backtest cuts, each forecast set beside what happened (shared by N1 and N2).
+let largeBacktest = null;
+function largeBacktestOnce() {
+  if (largeBacktest) return largeBacktest;
+  const FX = require("../scripts/listing-brain-fixture");
+  const b = FX.generate({ seed: 1, large: true });
+  const cfg = U.readConfig(b.af || {});
+  const salesByLid = new Map();
+  for (const s of b.sales) if (s.lid) (salesByLid.get(s.lid) || salesByLid.set(s.lid, []).get(s.lid)).push(s);
+  const byId = new Map(b.listings.map((x) => [x.id, x]));
+  const sold = (id, from, to) => {
+    const row = byId.get(id);
+    const ss = salesByLid.get(id) || [];
+    if (ss.some((s) => s.t >= from && s.t < to)) return 1;
+    return !ss.length && U.SINGLE.has(row.m) && row.st === "sold" && row.u >= from && row.u < to ? 1 : 0;
+  };
+  const out = [];
+  for (let w = 6; w >= 1; w--) {
+    const cut = b.now - w * 7 * DAY;
+    const ev0 = E.buildEvidence(b, { cfg, cut, synthDemand: true });
+    const run = M.buildRun(Object.assign({}, b, { now: cut, demand: [...ev0.demand.values()] }), { cfg });
+    const ev = run.ctx.ev;
+    for (const x of run.fc) {
+      if (x.p === null || x.m !== "gameflip" || x.f !== "claim" || cut + x.h * DAY > b.now) continue;
+      const R = ev.byId.get(x.l);
+      const q = H.queueOf(R.ask, P.offerAsks(ev, {}, R));
+      out.push({ p: x.p, pb: x.pb, y: sold(x.l, cut, cut + x.h * DAY), q });
+    }
+  }
+  largeBacktest = out;
+  return out;
+}
+const meanOf = (list, f) => list.reduce((a, x) => a + f(x), 0) / list.length;
+
+test("N1 the baseline is per ROW: a single-unit market's base rate is sales ÷ row-days, not the offer-level rate", () => {
+  // ten sold rows of one offer whose lives overlap: fewer offer-days than row-days
+  const c = curve({ soldP: 1.5, sellDays: 2, nLive: 2, liveP: 1.5, liveAge: 3 });
+  const run = M.buildRun(bundle({ listings: c.listings, sales: c.sales, demand: [DR()] }));
+  const ev = run.ctx.ev;
+  const mk = run.ctx.hz.claim.markets.gameflip;
+  let S0 = 0;
+  let D0 = 0;
+  for (const r of ev.rows) if (H.fitRow(ev, r, "claim") && r.m === "gameflip" && r.expo.days > 0) {
+    S0 += r.expo.units;
+    D0 += r.expo.days;
+  }
+  near(mk.hb, S0 / D0, "sales ÷ row-days");
+  assert.ok(mk.hb < mk.h, "the offer-level rate counts an offer-day once, however many rows were up");
+  near(H.baseP(run.ctx.hz.claim, "gameflip", 7), 1 - Math.exp(-7 * mk.hb));
+  for (const f of run.fc) near(f.pb, U.round3(1 - Math.exp(-f.h * mk.hb)), "logged with each forecast", 1e-3);
+});
+
+test("N1 on the large fixture the logged base rate is near what Gameflip rows really sold (it read ~3× too high)", () => {
+  const list = largeBacktestOnce();
+  const pb = meanOf(list, (x) => x.pb);
+  const y = meanOf(list, (x) => x.y);
+  assert.ok(list.length > 1000, String(list.length));
+  assert.ok(Math.abs(pb - y) <= 0.1, "mean pb " + pb.toFixed(3) + " vs sold " + y.toFixed(3));
+});
+
+test("N2 on the large fixture every queue place is calibrated: alone, 1st, 2nd and 3rd+ of an offer's rows", () => {
+  const list = largeBacktestOnce();
+  const cls = (q) => (q.n === 1 ? "alone" : q.cheaper === 0 && q.same === 0 ? "1" : q.cheaper + 1 + Math.floor(q.same / 2) === 2 ? "2" : q.cheaper + 1 + Math.floor(q.same / 2) >= 3 ? "3+" : "tie");
+  const groups = {};
+  for (const x of list) (groups[cls(x.q)] = groups[cls(x.q)] || []).push(x);
+  for (const k of ["alone", "1", "2", "3+"]) {
+    const g = groups[k];
+    assert.ok(g && g.length >= 100, k);
+    const y = meanOf(g, (x) => x.y);
+    const gap = meanOf(g, (x) => x.p) - y;
+    // within two standard errors of the sold share (+0.01). Before: 1st +0.069 (tolerance 0.042), 2nd
+    // +0.087 (0.030), 3rd+ +0.025 (0.017) — new cheaper rows of ours take the buyers a fixed queue expects
+    const tol = 0.01 + 2 * Math.sqrt((y * (1 - y)) / g.length);
+    assert.ok(Math.abs(gap) <= tol, k + ": forecast − sold " + gap.toFixed(3) + " over " + g.length + " (tolerance " + tol.toFixed(3) + ")");
+  }
+  const all = meanOf(list, (x) => x.p) - meanOf(list, (x) => x.y);
+  assert.ok(Math.abs(all) <= 0.03, "all Gameflip rows " + all.toFixed(3));
+});
+
+test("N2 two rows tied at the cheapest ask share the first two buyers: each is the mean of the two ranks' chances", () => {
+  const c = curve({ soldP: 1.5, sellDays: 2, nLive: 0 });
+  const r1 = L({ p: 1.5, c: NOW - 2 * DAY });
+  const r2 = L({ p: 1.5, c: NOW - 2 * DAY });
+  const run = M.buildRun(bundle({ listings: c.listings.concat([r1, r2]), sales: c.sales, demand: [DR()] }));
+  const hz = run.ctx.hz.claim;
+  const o = run.offers.find((x) => x.m === "gameflip" && x.live.length === 2);
+  const h = H.hazardAt(hz, "gameflip", o.tier, 1.5 / o.ref);
+  const f = run.fc.find((x) => x.l === r1.id);
+  const tie = { cheaper: 0, same: 1, n: 2 };
+  near(H.queueP(h * f.h, tie, null), (U.poissonTail(h * f.h, 1) + U.poissonTail(h * f.h, 2)) / 2, "the mean of ranks 1 and 2");
+  near(f.p, U.round3(H.queueP(h * f.h, tie, hz.markets.gameflip.queue)));
+  assert.equal(run.fc.find((x) => x.l === r2.id).p, f.p, "the same chance for both");
+  assert.ok(f.p < U.round3(H.queueP(h * f.h, { cheaper: 0, same: 0, n: 2 }, hz.markets.gameflip.queue)), "under the chance of a lone cheapest row");
+});
+
+test("N2 a higher rank never sells faster, whatever the queue calibration learnt", () => {
+  const cal = [{ f: 1 }, { f: 0.5 }, { f: 1 }, { f: 3 }];
+  let prev = 1;
+  for (let k = 1; k <= 6; k++) {
+    const p = H.queueP(1.2, { cheaper: k - 1, same: 0, n: 6 }, cal);
+    assert.ok(p <= prev + 1e-12, "rank " + k + ": " + p + " over " + prev);
+    assert.ok(p <= U.poissonTail(1.2, 1) * 0.5 + 1e-12, "never above what the 1st place may have");
+    prev = p;
+  }
+  assert.equal(H.queueP(1.2, { cheaper: 0, same: 0, n: 1 }, [{ f: 0.8 }, { f: 1 }, { f: 1 }, { f: 1 }]), U.clamp(0.8 * U.poissonTail(1.2, 1), 0, 1), "a row alone has its own class");
+  const fit = M.buildRun(world()).ctx.hz.claim.markets.gameflip.queue;
+  assert.deepEqual(
+    fit.map((q) => q.cls),
+    ["alone", "1", "2", "3+"],
+  );
+  for (const q of fit) assert.ok(q.f > 0 && Number.isFinite(q.f));
+});
+
+test("N3 the old policy's price is today's price: only the floors, the no-claim ceiling and the sold floor move it", () => {
+  const b = world();
+  // a second offer on Gameflip with three rows at $3: today's median ask is $2.25, the main offer asks $1.50
+  for (let i = 0; i < 3; i++) b.listings.push(L({ ck: "s:other", bk: G + "|2-3", n: 3, p: 3, c: NOW - 3 * DAY }));
+  const row = M.buildRun(b).rows.find((r) => r.k === G && r.f === "claim" && r.m === "gameflip");
+  assert.equal(row.old.a, 2.25);
+  assert.equal(row.pol.old, 2.25, "not gated against the main offer's $1.50 (it was held to $1.50 by the raise rule)");
+});
+
+test("N4 a cell whose live rows got no brain price has no brain price: never 'agree' on asks alone", () => {
+  // two live rows and a reference, but too few sales for any curve: thin, no price
+  const refs = [1, 2, 3].map((i) => S({ p: 1.5, t: NOW - (100 + i) * DAY }));
+  const run = M.buildRun(bundle({ listings: [L({ p: 1.5 }), L({ p: 1.5 })], sales: refs, demand: [DR()] }));
+  const row = run.rows.find((r) => r.m === "gameflip");
+  assert.ok(run.offers.every((o) => o.live.every((x) => x.p === null)));
+  assert.equal(row.br.p, null);
+  assert.equal(row.pol.curve, null);
+  assert.equal(row.pc, "no-evidence");
+});
+
+test("N4 N8 a switched-off or blocked market logs no brain, tracker or rival price", () => {
+  // Gameflip's switch off (its live rows are still ours to read); GGSel switched off is blocked
+  const b = world({ af: { takes: Object.assign({}, TAKES, { gameflip: false, ggsel: false }) } });
+  b.old.offers["ggsel|" + CK] = { np: 1.4, tracker: { price: 1.6, basis: "x", confidence: "medium" } };
+  b.old.offers["digiseller|" + CK] = { np: 1.3, tracker: { price: 1.6, basis: "x", confidence: "medium" } };
+  // rivals' sales of the game on Gameflip: a `clear` price wherever the market is open
+  b.radar.feed = [1, 2, 3, 4].map((i) => ({ g: G, m: "gameflip", p: 1.4, u: 1, n: 1, t: NOW - i * DAY, tts: 5 }));
+  const run = M.buildRun(b);
+  assert.ok(run.rows.find((r) => r.k === G && r.f === "claim" && r.m === "gameflip").old.a > 0, "the switched-off market's rows are read");
+  for (const m of ["gameflip", "ggsel", "digiseller"]) {
+    const row = run.rows.find((r) => r.k === G && r.f === "claim" && r.m === m);
+    assert.equal(row.br.p, null, m);
+    assert.equal(row.pol.curve, null, m);
+    assert.equal(row.pol.tracker, null, m);
+    assert.equal(row.pol.clear, null, m);
+  }
+});
+
+// A no-claim game with Gameflip sales only and a never-sold GGSel row: nothing takes from its pool.
+function noOutletWorld() {
+  const listings = [];
+  const sales = [];
+  for (let i = 0; i < 6; i++) {
+    const c = NOW - (3 + i) * DAY;
+    const r = L({ g: "beta", gl: "Beta", f: "noclaim", o: "unclaimed", ck: "s:b1", bk: "beta|1", p: 1.5, st: "sold", c, u: c + 0.3 * DAY });
+    listings.push(r);
+    sales.push(S({ lid: r.id, g: "beta", f: "noclaim", o: "unclaimed", ck: "s:b1", bk: "beta|1", p: 1.5, t: c + 0.3 * DAY, src: "unclaimed" }));
+  }
+  listings.push(L({ g: "beta", gl: "Beta", f: "noclaim", o: "unclaimed", ck: "s:b1", bk: "beta|1", p: 1.5, c: NOW - DAY }));
+  listings.push(L({ g: "beta", gl: "Beta", f: "noclaim", o: "unclaimed", m: "ggsel", ck: "s:b1", bk: "beta|1", p: 1.5, c: NOW - 20 * DAY, qty: 1 }));
+  return M.buildRun(bundle({ listings, sales, demand: [DR({ k: "beta", f: "noclaim", live: false, hl: null, w: 2, on: 60 })], af: { noClaimGames: ["beta"] } })).ctx.placements.get("beta|noclaim");
+}
+
+test("N6 with no pool outlet the leftover goes only where the game has demand: never a heap on a market it never sold on", () => {
+  const pl = noOutletWorld();
+  assert.equal(pl.pool.outlet, null);
+  assert.ok(!(pl.lambda.ggsel > 0));
+  assert.ok(num(pl.shelf.ggsel, 0) <= 1, "at most the one exploration unit on GGSel, got " + pl.shelf.ggsel);
+  assert.ok(pl.shelf.gameflip > 40);
+});
+
+test("N10 with no pool outlet the reason says so, not that claim-at-sale offers and bulk sell from the pool", () => {
+  const pl = noOutletWorld();
+  assert.ok(!pl.why.some((w) => /claim-at-sale offers and bulk sell from/.test(w)), pl.why.join(" | "));
+  assert.ok(pl.why.some((w) => /no outlet for the pool, so its units go on the shelves/.test(w)));
+});
+
+test("N7 an offer the owner runs as a ladder on a market gets no new-listing price there either", () => {
+  const b = world();
+  // the owner's two rungs of the main offer on Eldorado, where no system row of it is live
+  b.listings.push(L({ m: "eldorado", o: "manual", p: 2 }), L({ m: "eldorado", o: "manual", p: 2.5 }));
+  const run = M.buildRun(b);
+  assert.ok(run.ctx.ev.ladders.has("eldorado|" + CK));
+  const o = run.offers.find((x) => x.k === G && x.f === "claim" && x.m === "eldorado" && x.isNew);
+  assert.equal(o.p, null);
+  assert.ok(o.why.some((w) => /deliberate test/.test(w)));
+  const row = run.rows.find((r) => r.k === G && r.f === "claim" && r.m === "eldorado");
+  assert.equal(row.br.p, null);
+  assert.ok(row.fl.includes("ladder"));
+});
+
+test("N9 a numeric-string base is read the way its caller reads it", () => {
+  const run = M.buildRun(world());
+  const q = { marketplace: "gameflip", game: "Alpha Quest", title: "Alpha Quest Twitch Drops (1 Items)" };
+  const n = M.priceForRun(run, Object.assign({ basePriceUsd: 1.25 }, q));
+  const str = M.priceForRun(run, Object.assign({ basePriceUsd: "1.25" }, q));
+  assert.notEqual(str.basis, "invalid base");
+  assert.deepEqual(str, n);
+});
+
+// One-row Gameflip offers asking 0.9–1.1 × the band's $2 reference that sold in ~3 days: the curve
+// stops near x = 1.1. `row` is a live row of another offer of the band.
+function aboveTopRun(row) {
+  const listings = [];
+  const sales = [];
+  for (let i = 0; i < 30; i++) {
+    const x = 0.9 + (0.2 * i) / 29;
+    const r = L({ ck: "s:o" + i, p: U.snap05(2 * x), c: NOW - (60 - i) * DAY, st: "sold" });
+    listings.push(r);
+    sales.push(S({ lid: r.id, ck: r.ck, p: r.p, t: r.c + 3 * DAY }));
+  }
+  return M.buildRun(bundle({ listings: listings.concat([row]), sales, demand: [DR({ w: 4, on: 14 })] }));
+}
+
+test("N11 a live row asking more than any evidenced price is held, not lowered: the curve says nothing about its price", () => {
+  const row = L({ ck: "s:dear", p: 2.6, c: NOW - 2 * DAY });
+  const run = aboveTopRun(row);
+  const top = H.maxEvidencedX(run.ctx.hz.claim, "gameflip");
+  const o = run.offers.find((x) => x.live.some((l) => l.id === row.id));
+  assert.ok(2.6 / o.ref > top, "the ask is above the top node");
+  const l = o.live.find((x) => x.id === row.id);
+  assert.equal(l.a, "hold");
+  assert.equal(l.p, null, "no brain price beside the hold");
+  assert.ok(o.gates.includes("above-evidence") || o.why.some((w) => /above anything the evidence covers/.test(w)), o.why.join(" | "));
+});
+
+test("N11 a stale row above the evidence is lowered one gated rung, like any stale row", () => {
+  const row = L({ ck: "s:dear", p: 2.6, c: NOW - 25 * DAY });
+  const run = aboveTopRun(row);
+  const o = run.offers.find((x) => x.live.some((l) => l.id === row.id));
+  const l = o.live.find((x) => x.id === row.id);
+  assert.equal(l.a, "lower");
+  assert.equal(l.stale, true);
+  assert.ok(l.p >= U.ceil05(2.6 * 0.65) - 1e-9 && l.p < 2.6, String(l.p));
+  assert.ok(l.p / o.ref <= H.maxEvidencedX(run.ctx.hz.claim, "gameflip") + 1e-9, "to a price the evidence covers");
+});
+
+test("EB an event-bundle offer carries its mark from the loader's old side", () => {
+  const b = world();
+  b.old.offers["gameflip|" + CK].eb = true;
+  const run = M.buildRun(b);
+  const o = run.offers.find((x) => x.k === G && x.f === "claim" && x.m === "gameflip");
+  assert.equal(o.eb, true);
+  assert.ok(run.offers.filter((x) => x !== o).every((x) => x.eb === undefined));
+});
+
+test("LC no model file and no fixture sorts by the host's locale", () => {
+  const fs = require("fs");
+  const path = require("path");
+  const files = ["../utils/listingBrain/model.js", "../scripts/listing-brain-fixture.js"].concat(fs.readdirSync(path.join(__dirname, "../utils/listingBrain/model")).map((f) => "../utils/listingBrain/model/" + f));
+  for (const f of files) {
+    const src = fs.readFileSync(path.join(__dirname, f), "utf8");
+    assert.ok(!/\.localeCompare\(|toLocale\w*\(|\bIntl\./.test(src), f);
+  }
 });

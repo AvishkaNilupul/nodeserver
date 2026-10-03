@@ -336,11 +336,24 @@ For every exposure, `x = ask ÷ ref` where `ask = max(row price, floor)` (a sold
   `horizonDaysNoclaim` 2 — no-claim stock sells in hours to days, so a 7-day window says nothing). Logged as `p7`
   for both farms (the name of the brief); the horizon is in the run's `cfg`.
 - **A live row's chance** (H3, H9): on a single-unit market buyers of the offer arrive at `h(x_min)` a day and take
-  the cheapest row, so a row ranked k-th needs k buyers: `P(Poisson(h(x_min) · d) ≥ rank)`, `rank = 1 + rows
-  strictly cheaper + ⌊other rows at the same price ÷ 2⌋` (ties share the buyers); elsewhere `1 − exp(−d · h(x_ask))`.
-  `d = min(H, the row's remaining life)` — a Gameflip listing ends 30 days after creation, an unsold Eldorado offer
-  21. Each logged forecast carries `pb`, the market's base rate `1 − exp(−d · h_m)` over the same days at the
-  moment it was made (H8: the scorer's baseline).
+  the cheapest row, so a row ranked k-th needs k buyers: `P(Poisson(h(x_min) · d) ≥ k)`. A row tied with s others
+  at its price, behind c cheaper ones, is any of the ranks c+1 … c+1+s with equal chance: its chance is the mean of
+  those ranks' (N2). Elsewhere `1 − exp(−d · h(x_ask))`. `d = min(H, the row's remaining life)` — a Gameflip listing
+  ends 30 days after creation, an unsold Eldorado offer 21. The row's logged `rank` stays `1 + rows strictly
+  cheaper + ⌊other rows at the same price ÷ 2⌋`.
+- **Queue calibration** (N2): the queue is not fixed — cheaper rows of ours keep arriving and take the buyers a
+  k-th row was waiting for (on the large fixture the plain queue model read 0.16 for 2nd rows that sold 0.07). So
+  the fit also samples each offer's timeline once a day: every live row's queue-model chance over the horizon (cut
+  by its remaining life) beside whether it sold within it, where that outcome is already known. Per single-unit
+  market and queue class (alone on its offer, 1st, 2nd, 3rd+ of several) the factor `f = (sold + K·p̄) ÷
+  (predicted + K·p̄)` — realised over predicted, shrunk toward 1 with `K = shrinkK` row-days at the class's mean
+  chance `p̄` — scales the rank's tail, and a rank's chance is never above the rank before it (a higher rank never
+  sells faster). The factors are logged with the fit (`markets[m].queue`).
+- **The baseline** (H8, N1): each logged forecast carries `pb`, the market's base rate over the same days at the
+  moment it was made — every LISTING selling at the market's own rate: `1 − exp(−d · h_b)`, `h_b` = sales ÷
+  row-days of the fit rows. On a single-unit market that is not the curve's `h_m` (per offer-day: an offer with
+  three rows up is one offer-day and three row-days); read per offer, the baseline was ~2× too high on Gameflip and
+  the model's skill over it ~2× inflated.
 - **No-claim time left**: a no-claim unit's horizon is `min(H, days until its stock expires)`, where expiry is the
   wave's end plus the claim window learned from the ledger (median `expiredAt − wave end` over expired units of the
   game, else over all games, else 0) — §4.7.
@@ -349,7 +362,10 @@ For every exposure, `x = ask ÷ ref` where `ask = max(row price, floor)` (a sold
 
 For each offer in a cell, candidate prices are `ref × {0.6, 0.7, 0.8, 0.9, 1.0, 1.1, 1.2, 1.35, 1.5, 1.75, 2.0}`
 plus the floor, the `p25` and (live) the current ask, kept inside `[floor, ceiling]`, snapped to $0.05, and only
-up to the highest evidenced node's x (no extrapolation above the evidence — H4). Each scores
+up to the highest evidenced node's x (no extrapolation above the evidence — H4). **The curve never proposes a price above
+the evidence**: no pick, raise, test unit or stale rung lands above its top node (only the owner's own rules — a
+floor, the no-claim sold floor or bundle order — can lift a price there), so nothing the brain advises creates
+evidence higher up: learning what a dearer price would sell at needs price experiments, a later round. Each scores
 
 `value(p) = pH(p ÷ ref) × net(p)`, `net` = `venues.netOf(p, m, fees)` (after the market's fee).
 
@@ -393,13 +409,18 @@ Every other policy's price that is logged or answered goes through the same chai
 
 **A live system-made row** gets an action: `hold`, `lower`, `raise` or `test`:
 - `|gated − ask| ≤ max($0.10, 8 %)` → `hold`;
+- **above the evidence** (N11): a row asking more than the curve's top node (`ask ÷ ref` above it) is `hold`, with
+  no brain price beside it — the curve has no hazard up there and says nothing about its price, so it is never
+  lowered on the curve's word — unless it is **stale**, judged at the top node's hazard (`staleFactor` × `1 ÷
+  h(top)`, × its rank on a single-unit market, its age by H2's rule): then the stale rung below. A floor that lifts
+  the row still lifts it (the owner's rule, not the curve);
 - **stale** — rule 5's missing half: age > `staleFactor` (3) × the expected days to a sale at its ask, read only
   where the curve is evidenced (`1 ÷ h(x)`; on a single-unit market at the offer's x_min, × the row's rank — H3),
   and only when the gated price is within the agree tolerance of the ask: the stale rule never overrides a raise or
   a lower the curve gives (H2). On quantity and order-unit markets the age runs from the row's last sale, not its
   creation (H2: a steadily selling 60-day Eldorado offer is not stale). The move is one rung down **inside the
   gates** (M1): the highest candidate below the ask and at or above `max(every floor, the no-claim sold floor, the
-  bundle-order lift, ask × (1 − maxStepPct))`; none → `hold`; a stale GGSel row holds;
+  bundle-order lift, ask × (1 − maxStepPct))` that the evidence covers; none → `hold`; a stale GGSel row holds;
 - a raise the raise rule cut back, with `value` ≥ 15 % above holding → `test` (one unit, not the row's whole stock)
   at `max(the ask moved one step toward the wanted price, every floor)`, only when that is above both the gated
   price and the ask (M1);
@@ -408,7 +429,8 @@ Every other policy's price that is logged or answered goes through the same chai
 - A deliberate **ladder** (an exact offer live at ≥ 2 prices on one market with any owner row — hand-made or
   claim-at-sale; two system-made rows at two prices are drift, and advised — C4) is `ladder`, never corrected; its
   rungs are read as evidence. Decision (M13a): a ladder offer gets **no brain price at all** (`p` null, no raw on
-  the page; "a deliberate test, left alone") — a number beside it would only invite a correction.
+  the page; "a deliberate test, left alone") — a number beside it would only invite a correction. That holds for
+  the offer's new-listing verdict on a market where only the owner's rungs are live, too (N7).
 
 ### 4.5 Placement (the shelf)
 
@@ -463,7 +485,9 @@ Per game × farm with unsold stock.
   PlayerAuctions and G2G offers are claim-at-sale: `managed`. The rest of the stock is the free pool, which sells
   only through an **outlet**: a live claim-at-sale offer, bulk or hand sales. With none, the pool sells nothing (λ 0,
   no price borrowed for it) and every unit an open shelf can sell goes on the shelves, up to the cap in force —
-  perishable stock held "for later" just expires (M9).
+  perishable stock held "for later" just expires (M9) — but only on markets where the game has demand (`λ_m > 0`):
+  a market it never sold on gets at most the one exploration unit, never a heap (GGSel cannot take a unit back —
+  N6).
 
 ### 4.6 Policies, logged side by side
 
@@ -473,8 +497,10 @@ Every run logs all of them; the score picks; the default changes only on evidenc
   cell, `bundlePrice` for a no-claim cell), `tracker` (`suggestForNew` as it is), `curve` (§4.4, the default),
   `clear` (rivals' sold median for the size band, translated from Gameflip to the cell's market).
 - Every price a policy logs (`pol.*`) or answers passes through §4.4's gates with the run's floor (M2): `clear` as
-  a rival's price (it never raises), `tracker` by its own basis (an engine fallback reads "none"), `old` against
-  today's limits.
+  a rival's price (it never raises), `tracker` by its own basis (an engine fallback reads "none"), `old` as its own
+  base — today's price moved only by the floors, the no-claim ceiling and the sold floor (N3: gated against the main
+  offer's base it moved a whole step and was no longer today's). On a blocked or switched-off market no `curve`,
+  `tracker` or `clear` price is logged (N8).
 - **Placement**: `flat` (rules 3–4 via `computeSplit` + `dealShares` over today's order, or the no-claim cap in
   force), `share30` (last 30 days' sales share), `instock` (raw in-stock rate share), `newsvendor` (§4.5, the
   default). Each splits the same single-shelf demand `W_s` (H6). Each policy's weekly **demand split** `λ^policy_m`
@@ -487,7 +513,8 @@ Every run logs all of them; the score picks; the default changes only on evidenc
 Per cell: today's median live ask of the system-made rows (as `max(price, floor)`), units listed, the price today's
 rule gives a new listing now, today's shelf (flat share, or the no-claim cap) — beside the brain's price (the
 median over the same live rows of the brain's price for each, or its ask where the brain leaves it — like with
-like, M11), shelf, regime, confidence and reasons. The claim game's `all` line also logs rule 3's old side: the
+like, M11; none when the brain priced none of them, so a cell with no evidence is `no-evidence`, never `agree` on
+asks alone — N4), shelf, regime, confidence and reasons. The claim game's `all` line also logs rule 3's old side: the
 post-event price and the split's list-now / hold-back units (`old.post`, `old.now`, `old.hold` — C7).
 
 - Price classes: `agree` (within `max($0.10, 8 %)`), `brain-lower`, `brain-higher`, `no-evidence`, `managed`, `ladder`.

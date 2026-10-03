@@ -1027,6 +1027,15 @@ function fitFrom(ev) {
   return { ev, hz: { claim: H.fitHazard(ev, "claim"), noclaim: H.fitHazard(ev, "noclaim") } };
 }
 
+// The same two fits on the caller's time budget (identical output): a forecast logged before `pb`
+// existed is judged against a fit made at its own moment, and on Node 20 at production volume two
+// synchronous fits back to back could hold the loop past 200 ms.
+async function fitFromAsync(ev, y) {
+  const claim = await H.fitHazardAsync(ev, "claim", { yielder: y });
+  const noclaim = await H.fitHazardAsync(ev, "noclaim", { yielder: y });
+  return { ev, hz: { claim, noclaim } };
+}
+
 /** One daily sample, as steps. */
 function* forwardSampleSteps(st, s) {
   if (!st.due(s)) {
@@ -1091,7 +1100,7 @@ async function forwardScoresAsync(o = {}) {
     await y.now();
     const ev = await E.buildEvidenceAsync(st.bundle, { cfg: st.C, cut: at, synthDemand: true, yielder: y });
     await y.now();
-    st.fits.set(at, fitFrom(ev));
+    st.fits.set(at, await fitFromAsync(ev, y));
   }
   if (st.evAt !== null) {
     await y.now();
