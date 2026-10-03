@@ -108,11 +108,76 @@ function withTimeout(promise, ms, what) {
   ]).finally(() => clearTimeout(timer));
 }
 
-// The persisted row: everything but the reasons (kept for the newest run, in memory).
+// Rows of the first run of each UTC day (the daily sample the forward score reads) are kept as long
+// as runs; every other run's rows only a week — a cell's intraday history is a convenience, and at
+// the 150-game scale keeping them all 21 days would cost ~105 MB (docs/LISTING-BRAIN-PLAN.md §6).
+const ROW_KEEP_DAYS_DAILY = 21;
+const ROW_KEEP_DAYS_OTHER = 7;
+
+const isPlainObject = (v) => v !== null && typeof v === "object" && !Array.isArray(v) && !(v instanceof Date);
+
+// Sparse copy of a value: nulls, `false`, empty lists and empty objects are dropped at any depth, and
+// so are the zero entries of the action counts (`br.a`). Every OTHER zero is kept: a forecast of 0
+// or a shelf of 0 is a number, and the scorer reads a missing number as missing, never as 0.
+function sparse(v, zeroDrops = false) {
+  if (v === null || v === undefined || v === false) return undefined;
+  if (Array.isArray(v)) return v.length ? v : undefined;
+  if (!isPlainObject(v)) return zeroDrops && v === 0 ? undefined : v;
+  const out = {};
+  for (const [k, x] of Object.entries(v)) {
+    const y = sparse(x, false);
+    if (y !== undefined) out[k] = y;
+  }
+  return Object.keys(out).length ? out : undefined;
+}
+
+/**
+ * The persisted row: everything but the reasons (kept for the newest run, in memory), sparse.
+ * Readers of logged rows treat an absent field as null / false / none.
+ */
 function compact(row) {
-  const rest = { ...row };
-  delete rest.why;
-  return rest;
+  const out = {};
+  for (const [k, v] of Object.entries(row || {})) {
+    if (k === "why") continue;
+    let y;
+    if (k === "br" && isPlainObject(v)) {
+      const br = {};
+      for (const [bk, bv] of Object.entries(v)) {
+        const z = bk === "a" && isPlainObject(bv) ? sparse(Object.fromEntries(Object.entries(bv).filter(([, n]) => n !== 0))) : sparse(bv);
+        if (z !== undefined) br[bk] = z;
+      }
+      y = br;
+    } else {
+      y = sparse(v);
+    }
+    // The identity fields are always written, even when empty.
+    if (y !== undefined || k === "k" || k === "f" || k === "m") out[k] = y === undefined ? v : y;
+  }
+  return out;
+}
+
+const ACTION_KEYS = ["hold", "lower", "raise", "test", "ladder"];
+
+/**
+ * A row read back from the log, in the shape of a row kept in memory (minus its reasons): the
+ * sub-objects and the action counts the sparse write left out are put back, so the page, the routes
+ * and the scorer read logged and in-memory rows the same way. Absent numbers stay absent (null-like).
+ */
+function expand(row) {
+  if (!row || typeof row !== "object") return row;
+  const out = { ...row };
+  for (const k of ["old", "br", "pol", "pf", "ev"]) out[k] = isPlainObject(out[k]) ? { ...out[k] } : {};
+  if (out.m !== "all") {
+    const a = isPlainObject(out.br.a) ? out.br.a : {};
+    out.br.a = Object.fromEntries(ACTION_KEYS.map((x) => [x, Number(a[x]) || 0]));
+  }
+  if (!Array.isArray(out.fl)) out.fl = [];
+  if (out.live === undefined) out.live = false;
+  if (out.hl === undefined) out.hl = null;
+  if (out.pc === undefined) out.pc = "";
+  if (out.sc === undefined) out.sc = "";
+  if (out.g === undefined) out.g = "";
+  return out;
 }
 
 function heartbeat(doc, run, persisted) {
@@ -247,7 +312,8 @@ async function runOnce({ force = false, persist = true } = {}) {
       try {
         const created = await hooks.Run().create(doc);
         runId = created && created._id;
-        if (rows.length) await hooks.Row().insertMany(rows.map((r) => ({ ...compact(r), run: runId, at: doc.at })), { ordered: false });
+        const exp = new Date(now + (fc && fc.length ? ROW_KEEP_DAYS_DAILY : ROW_KEEP_DAYS_OTHER) * DAY);
+        if (rows.length) await hooks.Row().insertMany(rows.map((r) => ({ ...compact(r), run: runId, at: doc.at, exp })), { ordered: false });
         if (fc && fc.length) state.fcDay = day;
       } catch (e) {
         persisted = false;
@@ -373,8 +439,8 @@ async function latest() {
   if (state.latest) return state.latest;
   const run = await hooks.Run().findOne({}, { fc: 0 }).sort({ at: -1 }).lean();
   if (!run) return null;
-  const rows = await hooks.Row().find({ run: run._id }, { run: 0 }).limit(MAX_ROWS_PER_RUN).lean();
-  return { ...run, rows, offers: [], persisted: true, logged: true };
+  const rows = await hooks.Row().find({ run: run._id }, { run: 0, exp: 0 }).limit(MAX_ROWS_PER_RUN).lean();
+  return { ...run, rows: rows.map(expand), offers: [], persisted: true, logged: true };
 }
 
 /** One cell's rows over the last `limit` runs, newest first (an indexed read of small rows). */
@@ -385,7 +451,8 @@ async function cellHistory(key, limit = HISTORY_LIMIT) {
   const f = parts.pop() === "noclaim" ? "noclaim" : "claim";
   const k = parts.join("|");
   const n = Math.max(1, Math.min(HISTORY_LIMIT * 4, Math.floor(Number(limit) || HISTORY_LIMIT)));
-  return hooks.Row().find({ k, f, m }, { run: 0, _id: 0 }).sort({ at: -1 }).limit(n).lean();
+  const rows = await hooks.Row().find({ k, f, m }, { run: 0, _id: 0, exp: 0 }).sort({ at: -1 }).limit(n).lean();
+  return rows.map(expand);
 }
 
 // The first logged run of each UTC day in the last SAMPLE_DAYS that carries forecasts, with its rows'
@@ -411,7 +478,7 @@ async function dailySamples(now) {
       .find({ run: head._id }, { k: 1, g: 1, f: 1, m: 1, live: 1, pc: 1, sc: 1, old: 1, br: 1, pol: 1, pf: 1 })
       .limit(MAX_ROWS_PER_RUN)
       .lean();
-    out.push({ at: new Date(head.at).getTime(), fc: (doc && doc.fc) || [], rows });
+    out.push({ at: new Date(head.at).getTime(), fc: (doc && doc.fc) || [], rows: rows.map(expand) });
     await new Promise((r) => setImmediate(r));
   }
   return out;
@@ -510,6 +577,10 @@ module.exports = {
   readConfig,
   heartbeat,
   dailySamples,
+  compact,
+  expand,
+  ROW_KEEP_DAYS_DAILY,
+  ROW_KEEP_DAYS_OTHER,
   _setHooks,
   _reset,
   _tick: tick,

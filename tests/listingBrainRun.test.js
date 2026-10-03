@@ -313,3 +313,55 @@ test("cellHistory reads one cell by its key, newest first, bounded", async () =>
   assert.ok(hist.every((r) => r.k === any.k && r.f === any.f && r.m === any.m));
   assert.deepEqual(await B.cellHistory("no-pipes"), []);
 });
+
+test("rows are written sparse: no reasons, no nulls/false/empties, zero action counts dropped — every other 0 kept", () => {
+  const row = {
+    k: "alpha quest", g: "Alpha Quest", f: "claim", m: "gameflip", live: false, hl: null, pc: "agree", sc: "",
+    old: { a: null, n: 0, np: 1.5, sh: 0, cur: 0 },
+    br: { p: 1.5, ref: null, sh: 0, a: { hold: 2, lower: 0, raise: 0, test: 0, ladder: 0 } },
+    pol: { old: 1.5, tracker: null, curve: 1.5, clear: null },
+    pf: { flat: 0, share30: 0.4, instock: null, newsvendor: 0 },
+    ev: { thin: false, el: "open" },
+    fl: [],
+    why: ["a reason"],
+  };
+  const c = B.compact(row);
+  assert.equal(c.why, undefined);
+  assert.equal(c.live, undefined);
+  assert.equal(c.hl, undefined);
+  assert.equal(c.fl, undefined);
+  assert.equal(c.sc, "", "strings are kept, even empty ones");
+  assert.deepEqual(c.old, { n: 0, np: 1.5, sh: 0, cur: 0 });
+  assert.deepEqual(c.br.a, { hold: 2 });
+  assert.equal(c.br.sh, 0, "a shelf of 0 is a number, not an absence");
+  assert.deepEqual(c.pf, { flat: 0, share30: 0.4, newsvendor: 0 }, "a forecast of 0 is kept: missing is not zero");
+  assert.deepEqual(c.ev, { el: "open" });
+  // Read back, it has the in-memory shape again (minus its reasons).
+  const e = B.expand(c);
+  assert.deepEqual(e.br.a, { hold: 2, lower: 0, raise: 0, test: 0, ladder: 0 });
+  assert.equal(e.live, false);
+  assert.deepEqual(e.fl, []);
+  assert.equal(e.pf.instock, undefined);
+  assert.equal(e.pol.tracker, undefined);
+  assert.deepEqual(B.expand({ k: "x", f: "claim", m: "all" }).br, {});
+});
+
+test("rows of the day's first run are kept 21 days; every other run's rows 7 days", async () => {
+  const { models, setNow } = setup();
+  await B.runOnce();
+  setNow(NOW + 3 * 3600000);
+  await B.runOnce();
+  const first = models.rows.filter((r) => r.run === "run1");
+  const second = models.rows.filter((r) => r.run === "run2");
+  assert.ok(first.length && second.length);
+  assert.ok(first.every((r) => r.exp.getTime() === NOW + B.ROW_KEEP_DAYS_DAILY * DAY));
+  assert.ok(second.every((r) => r.exp.getTime() === NOW + 3 * 3600000 + B.ROW_KEEP_DAYS_OTHER * DAY));
+});
+
+test("the row schema keeps a sparse row sparse (no defaults filled back in) and keeps every field the runner writes", () => {
+  const Row = require("../models/ListingBrainRow");
+  const row = B.compact({ k: "g", g: "G", f: "noclaim", m: "ggsel", pc: "agree", sc: "managed", old: { n: 0 }, br: { p: 1, a: { hold: 1 } }, pol: { curve: 1 }, pf: { flat: 0 }, ev: { el: "open" }, fl: ["managed"] });
+  const doc = new Row({ ...row, run: "507f1f77bcf86cd799439011", at: new Date(NOW), exp: new Date(NOW) }).toObject();
+  for (const k of Object.keys(row)) assert.deepEqual(doc[k], row[k], k);
+  for (const k of ["live", "hl"]) assert.equal(doc[k], undefined, k + " stays absent");
+});

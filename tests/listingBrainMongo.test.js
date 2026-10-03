@@ -55,6 +55,8 @@ test("indexes: a cell's history, a run's rows, and both TTLs", async () => {
   assert.ok(keys.includes(JSON.stringify({ run: 1 })));
   const ttl = rowIdx.find((i) => JSON.stringify(i.key) === JSON.stringify({ at: 1 }));
   assert.equal(ttl.expireAfterSeconds, 21 * 86400);
+  const exp = rowIdx.find((i) => JSON.stringify(i.key) === JSON.stringify({ exp: 1 }));
+  assert.equal(exp.expireAfterSeconds, 0, "per-row expiry: 21 days for daily samples, 7 for the rest");
   const runIdx = await ListingBrainRun.collection.indexes();
   const runTtl = runIdx.find((i) => JSON.stringify(i.key) === JSON.stringify({ at: 1 }));
   assert.equal(runTtl.expireAfterSeconds, 21 * 86400);

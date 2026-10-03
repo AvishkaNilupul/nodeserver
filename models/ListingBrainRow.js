@@ -3,7 +3,7 @@
 // what the brain says (price, shelf, regime, confidence), the evidence behind it and the two diff
 // classes. The compact row utils/listingBrain/model.buildRun produces, minus its reasons and its
 // per-offer detail (both kept for the newest run, in memory). Written once (with its run), never
-// updated; kept as long as runs (21 days).
+// updated; rows of the first run of each UTC day are kept 21 days, every other run's rows 7 days.
 const mongoose = require("mongoose");
 const { TTL_DAYS } = require("./ListingBrainRun");
 
@@ -12,30 +12,37 @@ const listingBrainRowSchema = new mongoose.Schema(
     run: { type: mongoose.Schema.Types.ObjectId, required: true },
     at: { type: Date, required: true },
     k: { type: String, required: true },
-    g: { type: String, default: "" },
+    g: { type: String },
     f: { type: String, enum: ["claim", "noclaim"], required: true },
     m: { type: String, required: true },
-    live: { type: Boolean, default: false },
-    hl: { type: Number, default: null },
+    live: { type: Boolean },
+    hl: { type: Number },
     // price class and placement (shelf) class, docs/LISTING-BRAIN-PLAN.md §4.6
-    pc: { type: String, default: "" },
-    sc: { type: String, default: "" },
-    old: { type: mongoose.Schema.Types.Mixed, default: {} },
-    br: { type: mongoose.Schema.Types.Mixed, default: {} },
+    pc: { type: String },
+    sc: { type: String },
+    old: { type: mongoose.Schema.Types.Mixed },
+    br: { type: mongoose.Schema.Types.Mixed },
     // the four price policies and the four placement forecasts (plan §4.6): the forward score ranks
     // them from these logged rows — undeclared, strict mode would drop them on insert
-    pol: { type: mongoose.Schema.Types.Mixed, default: {} },
-    pf: { type: mongoose.Schema.Types.Mixed, default: {} },
-    ev: { type: mongoose.Schema.Types.Mixed, default: null },
-    fl: { type: [String], default: [] },
+    pol: { type: mongoose.Schema.Types.Mixed },
+    pf: { type: mongoose.Schema.Types.Mixed },
+    ev: { type: mongoose.Schema.Types.Mixed },
+    fl: { type: [String], default: undefined },
+    // When this row expires: 21 days for the first run of a UTC day (the daily sample the forward
+    // score reads), 7 days for every other run (utils/listingBrain/index.js ROW_KEEP_DAYS_*).
+    exp: { type: Date, default: null },
   },
-  { versionKey: false, minimize: false },
+  // Rows are written sparse (index.compact): absent fields stay absent rather than being filled
+  // with defaults, so readers treat a missing field as null / false / none.
+  { versionKey: false },
 );
 
 // One cell's history, newest first.
 listingBrainRowSchema.index({ k: 1, f: 1, m: 1, at: -1 });
 // A run's rows (the newest run after a restart; the daily samples the scorer reads).
 listingBrainRowSchema.index({ run: 1 });
+// Per-row expiry, and the 21-day backstop for any row written without one.
+listingBrainRowSchema.index({ exp: 1 }, { expireAfterSeconds: 0 });
 listingBrainRowSchema.index({ at: 1 }, { expireAfterSeconds: TTL_DAYS * 86400 });
 
 module.exports = mongoose.model("ListingBrainRow", listingBrainRowSchema);
