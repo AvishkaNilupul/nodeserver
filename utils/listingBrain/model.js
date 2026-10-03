@@ -640,13 +640,8 @@ function priceForRun(run, q = {}) {
     // are the run's.
     const band = String(id.bandKey).slice(String(id.bandKey).lastIndexOf("|") + 1);
     const n = id.countForBand;
-    const v = P.priceOffer(ctx, { g, f, m, ck, bk: id.bandKey, ex: !!ck, n, band, live: null, base, np: base, ladder: false, defer: true });
-    let minP = null;
-    if (f === "noclaim" && n !== null && n !== undefined) {
-      // the bundle order: never under a smaller no-claim bundle of the game on this market
-      for (const o of run.offers || []) if (o.k === g && o.f === f && o.m === m && o.n !== null && o.n < n && o.p !== null && (minP === null || o.p > minP)) minP = o.p;
-    }
-    P.finishOffer(ctx, v, { minP });
+    // (A query carries items, not a no-claim bundle key: the bundle order has nothing to compare it to.)
+    const v = P.priceOffer(ctx, { g, f, m, ck, bk: id.bandKey, ex: !!ck, n, band, live: null, base, np: base, ladder: false });
     const policy = ctx.cfg.policyPrice;
     let price = v.p;
     let basis = v.basis;

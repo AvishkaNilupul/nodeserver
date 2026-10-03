@@ -737,26 +737,103 @@ test("a blocked market never teaches another: Digiseller orders never move Gamef
   assert.equal(d.basis, "exact-here", "its own history still describes itself");
 });
 
-test("no-claim bundle order: a bigger bundle is lifted to a smaller one's price, never under the sold floor", () => {
-  const b = world();
-  const ctx = ctxOf(b);
-  const ev = ctx.ev;
-  const r1 = ev.rows.find((r) => r.ck === "s:b1");
-  const r3 = ev.rows.find((r) => r.ck === "s:b3");
-  const v1 = P.priceOffer(ctx, { g: "beta", f: "noclaim", m: "gameflip", ck: "s:b1", bk: "beta|1", ex: true, n: 1, band: "1", live: [r1], defer: true });
-  const v3 = P.priceOffer(ctx, { g: "beta", f: "noclaim", m: "gameflip", ck: "s:b3", bk: "beta|2-3", ex: true, n: 3, band: "2-3", live: [r3], defer: true });
-  // thin evidence: both start from today's price (the live ask here)
-  assert.ok(v1.thin && v3.thin);
-  P.applyContainment(ctx, [v3, v1]);
-  assert.ok(v3.p >= v1.p, v3.p + " vs " + v1.p);
-  assert.ok(v3.gates.includes("containment"));
-  // sold floor: a Gameflip sale of these exact 3 items at $2.40 in the last 30 days
+/** A no-claim unit of the ledger (plan §2.1 U). */
+function NU(o = {}) {
+  return Object.assign({ g: "beta", m: "gameflip", st: "listed", l: NOW - 2 * DAY, s: null, p: 0, sm: null, x: null, lids: [], bk: "", camps: [] }, o);
+}
+
+test("no-claim bundle order: within one event a bundle is lifted to any bundle it contains (bundleKey, U.lids)", () => {
+  const nc = (o) => L(Object.assign({ g: "beta", gl: "Beta", f: "noclaim", o: "unclaimed", bk: "beta|1", n: 1, c: NOW - 2 * DAY }, o));
+  const a = nc({ ck: "s:a1", n: 1, p: 1.25 });
+  const b = nc({ ck: "s:b3", n: 3, bk: "beta|2-3", p: 1.0 });
+  const c = nc({ ck: "s:c4", n: 4, bk: "beta|4-6", p: 0.9 });
+  const d = nc({ ck: "s:d5", n: 5, bk: "beta|4-6", p: 0.8 });
+  const units = [
+    NU({ lids: [a.id], bk: "beta|spring cup|week 1" }),
+    NU({ lids: [b.id], bk: "beta|spring cup|week 1+week 2" }),
+    // a bigger bundle of ANOTHER event: no relation to the others
+    NU({ lids: [c.id], bk: "beta|autumn cup|week 1+week 2+week 3" }),
+    // d has no unit, so no bundle key
+  ];
+  const ctx = ctxOf(bundle({ listings: [a, b, c, d], noclaim: { units, waves: [] }, demand: [DR({ k: "beta", f: "noclaim", w: 5, on: 4 })] }));
+  const v = (row) => P.priceOffer(ctx, { g: "beta", f: "noclaim", m: "gameflip", ck: row.ck, bk: row.bk, ex: true, n: row.n, band: "1", live: [ctx.ev.byId.get(row.id)], defer: true });
+  const [va, vb, vc, vd] = [a, b, c, d].map(v);
+  assert.ok(va.thin && vb.thin, "thin: each starts from today's price");
+  P.applyContainment(ctx, [vd, vc, vb, va]);
+  assert.equal(va.p, 1.25);
+  assert.equal(vb.p, 1.25, "week 1 + week 2 contains week 1: never under it");
+  assert.ok(vb.gates.includes("containment"));
+  assert.equal(vc.p, 0.9, "another event: never compared, though it holds more items");
+  assert.ok(!vc.gates.includes("containment"));
+  assert.equal(vd.p, 0.8);
+  assert.ok(vd.why.some((w) => /No bundle key/.test(w)));
+  assert.equal(vb.bundle, "beta|spring cup|week 1+week 2");
+  // containment points one way: equal waves count only when the bigger bundle holds more items
+  const k = (x) => P.parseBundleKey(x);
+  assert.equal(P.bundleContains(k("g|ev|w1+w2"), 3, k("g|ev|W1"), 1), true);
+  assert.equal(P.bundleContains(k("g|ev|w1"), 1, k("g|ev|w1+w2"), 3), false);
+  assert.equal(P.bundleContains(k("g|ev|w1"), 3, k("g|ev|w1"), 2), true);
+  assert.equal(P.bundleContains(k("g|ev|w1"), 2, k("g|ev|w1"), 2), false);
+  assert.equal(P.bundleContains(k("g|ev|w1+w2"), 3, k("g|other|w1"), 1), false);
+  assert.equal(P.parseBundleKey(""), null);
+});
+
+test("no-claim: a bundle whose units disagree on their bundleKey (rebundled since) gets no bundle order", () => {
+  const a = L({ g: "beta", f: "noclaim", o: "unclaimed", ck: "s:a1", bk: "beta|1", n: 1, p: 1.25 });
+  const b = L({ g: "beta", f: "noclaim", o: "unclaimed", ck: "s:b3", bk: "beta|2-3", n: 3, p: 1.0 });
+  const units = [NU({ lids: [a.id], bk: "beta|ev|week 1" }), NU({ lids: [b.id], bk: "beta|ev|week 1+week 2" }), NU({ lids: [b.id], bk: "beta|ev|week 3" })];
+  const ctx = ctxOf(bundle({ listings: [a, b], noclaim: { units, waves: [] }, demand: [DR({ k: "beta", f: "noclaim" })] }));
+  const vb = P.priceOffer(ctx, { g: "beta", f: "noclaim", m: "gameflip", ck: "s:b3", bk: "beta|2-3", ex: true, n: 3, band: "2-3", live: [ctx.ev.byId.get(b.id)], defer: true });
+  const va = P.priceOffer(ctx, { g: "beta", f: "noclaim", m: "gameflip", ck: "s:a1", bk: "beta|1", ex: true, n: 1, band: "1", live: [ctx.ev.byId.get(a.id)], defer: true });
+  P.applyContainment(ctx, [vb, va]);
+  assert.equal(vb.p, 1.0);
+  assert.equal(vb.bundle, null);
+});
+
+test("no-claim: the 30-day Gameflip sold floor of the exact offer is never undercut", () => {
   const b2 = world({ sales: world().sales.concat([S({ g: "beta", f: "noclaim", o: "unclaimed", ck: "s:b3", bk: "beta|2-3", n: 3, p: 2.4, t: NOW - 5 * DAY })]) });
   const ctx2 = ctxOf(b2);
   const r3b = ctx2.ev.rows.find((r) => r.ck === "s:b3");
   const v3b = P.priceOffer(ctx2, { g: "beta", f: "noclaim", m: "gameflip", ck: "s:b3", bk: "beta|2-3", ex: true, n: 3, band: "2-3", live: [r3b] });
   assert.ok(v3b.p >= 2.4);
   assert.ok(v3b.gates.includes("sold-floor"));
+});
+
+test("no-claim perish: a unit listed past its estimated expiry is ignored, not read as 0 h; the median stands", () => {
+  const waves = [
+    { g: "beta", ev: "Old", wave: "Week 1", startAt: NOW - 40 * DAY, endAt: NOW - 30 * DAY },
+    { g: "beta", ev: "New", wave: "Week 1", startAt: NOW - 5 * DAY, endAt: NOW + 5 * DAY },
+  ];
+  const units = [NU({ camps: ["Old Week 1"], l: NOW - 35 * DAY })].concat(Array.from({ length: 4 }, () => NU({ camps: ["New Week 1"] })));
+  const b = bundle({ noclaim: { units, waves }, demand: [DR({ k: "beta", f: "noclaim", w: 4, on: 12 })] });
+  const ev = E.buildEvidence(b, { cfg: CFG(), cut: NOW });
+  const pe = P.perishOf(ev, "beta");
+  assert.equal(pe.past, 1);
+  assert.equal(pe.dated, 4);
+  assert.ok(Math.abs(pe.days - 5) < 1e-9, "wave end in 5 days, no claim window learned: " + pe.days);
+  assert.equal(pe.share, 0);
+  const gs = P.gameState(ev, "beta", "noclaim");
+  assert.notEqual(gs.regime, "overstock");
+  assert.equal(gs.perishing, false);
+  assert.ok(gs.regimeWhy.some((w) => /1 unit is still listed past its estimated expiry/.test(w)));
+});
+
+test("no-claim perish is read per stock: overstock (perishing) only when half the listed units expire within perishHours", () => {
+  const waves = [
+    { g: "beta", ev: "A", wave: "Week 1", startAt: NOW - 5 * DAY, endAt: NOW + 20 * HOUR },
+    { g: "beta", ev: "B", wave: "Week 1", startAt: NOW - 5 * DAY, endAt: NOW + 6 * DAY },
+  ];
+  const mk = (soon, late) => Array.from({ length: soon }, () => NU({ camps: ["A Week 1"] })).concat(Array.from({ length: late }, () => NU({ camps: ["B Week 1"] })));
+  const state = (units) => P.gameState(E.buildEvidence(bundle({ noclaim: { units, waves }, demand: [DR({ k: "beta", f: "noclaim", w: 4, on: 12 })] }), { cfg: CFG(), cut: NOW }), "beta", "noclaim");
+  const few = state(mk(1, 3));
+  assert.equal(few.perishShare, 0.25);
+  assert.equal(few.perishing, false, "one soon-to-expire unit no longer decides for the stock");
+  assert.equal(few.regime, "balanced");
+  const most = state(mk(3, 1));
+  assert.equal(most.perishShare, 0.75);
+  assert.equal(most.perishing, true);
+  assert.equal(most.regime, "overstock");
+  assert.match(most.regimeWhy[0], /^Perishing: 75% of its listed stock expires within 48 h/);
 });
 
 test("no-claim: a thin bundle starts from today's bundlePrice answer, not from nothing", () => {
@@ -868,6 +945,54 @@ test("no-claim: a thin live bundle starts from today's bundlePrice answer, not f
   assert.equal(v.thin, true);
   assert.equal(v.raw, 1.75);
   assert.equal(v.live[0].a, "hold", "confidence none: logged, never acted on");
+});
+
+/** A no-claim game selling on Gameflip and through a claim-at-sale Eldorado offer, plus optional bulk. */
+function poolWorld({ bulk = 0, w = 6, on = 20 } = {}) {
+  const listings = [L({ g: "beta", gl: "Beta", f: "noclaim", o: "unclaimed", ck: "s:b1", bk: "beta|1", p: 1.5, c: NOW - 3 * DAY })];
+  const cas = L({ g: "beta", gl: "Beta", f: "noclaim", o: "manual", kind: "cas", m: "eldorado", ck: "s:b1", bk: "beta|1", p: 2, qty: 40, c: NOW - 20 * DAY });
+  listings.push(cas);
+  const sales = [];
+  for (let i = 0; i < 4; i++) {
+    const r = L({ g: "beta", gl: "Beta", f: "noclaim", o: "unclaimed", ck: "s:b1", bk: "beta|1", p: 1.5, st: "sold", c: NOW - (10 + i) * DAY });
+    listings.push(r);
+    sales.push(S({ lid: r.id, g: "beta", f: "noclaim", o: "unclaimed", ck: "s:b1", bk: "beta|1", p: 1.5, t: r.c + DAY }));
+  }
+  for (let i = 0; i < 6; i++) sales.push(S({ lid: cas.id, g: "beta", f: "noclaim", o: "manual", m: "eldorado", ck: "s:b1", bk: "beta|1", p: 2, t: NOW - (2 + i * 3) * DAY }));
+  const demandOnly = Array.from({ length: bulk }, (_, i) => ({ g: "beta", m: "eldorado", f: "noclaim", t: NOW - (1 + i) * DAY, src: "bulk" }));
+  return bundle({ listings, sales, demandOnly, demand: [DR({ k: "beta", f: "noclaim", w, on }), DR({ w: 4, on: 10 })], af: { mapped: {} } });
+}
+
+test("no-claim placement: shelves and the pool share one fill; the reserve IS the pool claim-at-sale and bulk sell from", () => {
+  const run = M.buildRun(poolWorld({ bulk: 6 }));
+  const pl = run.ctx.placements.get("beta|noclaim");
+  assert.ok(pl.pool, "the pool is part of the placement");
+  assert.deepEqual(pl.pool.markets, ["eldorado", "playerauctions", "g2g"]);
+  const bw = (6 * 7) / 30;
+  assert.ok(Math.abs(pl.pool.lambda - (pl.lambda.eldorado + bw)) < 0.01, "claim-at-sale share of the forecast + bulk's rate");
+  assert.equal(pl.pool.net, U.netOf(2, "eldorado", {}), "priced at the claim-at-sale asks");
+  assert.equal(pl.pool.from, "asks");
+  const shelf = Object.values(pl.shelf).reduce((a, n) => a + n, 0);
+  assert.equal(shelf + pl.reserve + pl.bulkTake, pl.stock, "every unit lands somewhere");
+  assert.equal(pl.pool.units, pl.reserve + pl.bulkTake);
+  assert.ok(pl.shelf.gameflip > 0);
+  assert.ok(!(pl.shelf.eldorado > 0), "claim-at-sale markets hold no shelf");
+  const all = run.rows.find((r) => r.k === "beta" && r.f === "noclaim" && r.m === "all");
+  assert.ok(all.why.some((w) => w === "Shelf " + shelf + " of " + pl.stock + "; " + pl.pool.units + " to the pool the claim-at-sale offers and bulk sell from."), all.why.join(" / "));
+});
+
+test("no-claim placement has no value threshold (perishable stock); the claim farm keeps minMarginalUsd", () => {
+  const cfg = CFG({ minMarginalUsd: 5, explore: false });
+  const run = M.buildRun(poolWorld(), { cfg });
+  const nc = run.ctx.placements.get("beta|noclaim");
+  const ncShelf = Object.values(nc.shelf).reduce((a, n) => a + n, 0);
+  assert.ok(ncShelf > 0, "a unit worth under $5 still goes where it can sell");
+  assert.equal(ncShelf + nc.reserve + nc.bulkTake, nc.stock);
+  const w = world();
+  const claim = M.buildRun(w, { cfg }).ctx.placements.get(G + "|claim");
+  assert.equal(Object.values(claim.shelf).reduce((a, n) => a + n, 0), 0, "the claim farm still keeps under-value units back");
+  assert.equal(claim.reserve, claim.stock - claim.bulkTake);
+  assert.equal(claim.pool, undefined);
 });
 
 test("placement flags: anchor when Gameflip gets nothing; fee-assumed with the equal-fee shelf logged", () => {

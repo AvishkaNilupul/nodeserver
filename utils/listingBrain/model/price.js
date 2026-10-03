@@ -20,7 +20,7 @@ const RF = require("./ref");
 const H = require("./hazard");
 const E = require("./evidence");
 
-const { DAY, HOUR, CONF_RANK, num, round2, usd } = U;
+const { DAY, HOUR, CONF_RANK, num, round2, usd, lower } = U;
 // A price this close to another is the same price (stored prices are cents).
 const EPS = 0.005;
 // A raise the raise rule cut back is still worth one test unit when its value beats holding by this.
@@ -45,25 +45,58 @@ function unitsByGame(ev) {
 }
 
 /**
- * Days until a no-claim game's listed stock expires: its soonest unit expiry (the unit's wave end
- * plus the claim window learned from the ledger). Null when nothing dates it. A unit already past its
- * estimated expiry but not yet marked expired reads 0: it is about to vanish.
+ * When a no-claim game's listed stock expires, read per unit (plan §4.3 last bullet, §4.4 "the stock
+ * expires within perishHours"). Each unit listed at the cut expires a claim window after its wave's
+ * end: d_u = (waveEnd_u + window − cut) ÷ DAY.
+ * - A unit still listed AFTER its estimated expiry proves the estimate wrong for it (its drops are
+ *   evidently still there): its expiry is unknown, never 0 — one old straggler used to drag a whole
+ *   game to "expires in 0 h".
+ * - `days`: the median of the positive d_u (stock-weighted is the same thing over units); with none,
+ *   new stock of a live wave lasts until that wave's end plus the window; else null.
+ * - `share`: the share of the game's listed units known to expire within perishHours — units of unknown
+ *   expiry count as stock that is not known to perish. With no unit ledger at all, the live-wave
+ *   estimate stands for the whole stock (1 or 0).
+ * Memoised per game.
+ * @returns {{ days: number|null, share: number|null, listed: number, dated: number, past: number, soon: number }}
  */
+function perishOf(ev, g) {
+  return E.memo(ev, "perish|" + g, () => {
+    const win = ev.noclaim.claimWindowByGame.has(g) ? ev.noclaim.claimWindowByGame.get(g) : ev.noclaim.claimWindowDays;
+    const limit = ev.cfg.perishHours / 24;
+    const list = unitsByGame(ev).get(g) || [];
+    const ds = [];
+    let past = 0;
+    let soon = 0;
+    for (const u of list) {
+      const end = ev.noclaim.waveEndOf(u);
+      if (end === null) continue;
+      const d = (end + win * DAY - ev.cut) / DAY;
+      if (!(d > 0)) {
+        past++;
+        continue;
+      }
+      ds.push(d);
+      if (d <= limit) soon++;
+    }
+    let days = null;
+    let share = null;
+    if (ds.length) {
+      ds.sort((a, b) => a - b);
+      const mid = ds.length >> 1;
+      days = ds.length % 2 ? ds[mid] : (ds[mid - 1] + ds[mid]) / 2;
+    } else {
+      const live = E.liveWave(ev, g, ev.cut);
+      if (live !== null) days = Math.max(0, (live + win * DAY - ev.cut) / DAY);
+    }
+    if (list.length) share = soon / list.length;
+    else if (days !== null) share = days <= limit ? 1 : 0;
+    return { days, share, listed: list.length, dated: ds.length, past, soon };
+  });
+}
+
+/** Days until a no-claim game's listed stock expires (perishOf's median), or null. */
 function perishDaysOf(ev, g) {
-  const win = ev.noclaim.claimWindowByGame.has(g) ? ev.noclaim.claimWindowByGame.get(g) : ev.noclaim.claimWindowDays;
-  let soon = null;
-  for (const u of unitsByGame(ev).get(g) || []) {
-    const end = ev.noclaim.waveEndOf(u);
-    if (end === null) continue;
-    const d = (end + win * DAY - ev.cut) / DAY;
-    soon = soon === null ? d : Math.min(soon, d);
-  }
-  if (soon === null) {
-    // No unit ledger for it: new stock of a live wave lasts until that wave's end plus the window.
-    const live = E.liveWave(ev, g, ev.cut);
-    if (live !== null) soon = (live + win * DAY - ev.cut) / DAY;
-  }
-  return soon === null ? null : Math.max(0, soon);
+  return perishOf(ev, g).days;
 }
 
 /** Has a campaign of this game ended (inside the waves the bundle holds) with none live now? */
@@ -91,11 +124,20 @@ function gameState(ev, g, f) {
   const sizing = (ev.bundle && ev.bundle.sizing) || {};
   const coverageDays = num(sizing.coverageDays, farmSizing.DEFAULT_COVERAGE_DAYS) || farmSizing.DEFAULT_COVERAGE_DAYS;
   const T = coverageDays / 7;
-  const gs = { g, f, unknown: !d, why: "", w: null, on: null, fl: null, live: false, hl: null, c: null, cover: null, T: U.round3(T), tier: 0, fading: false, regime: "unknown", regimeWhy: [], perishDays: null, rivals: null };
+  const gs = { g, f, unknown: !d, why: "", w: null, on: null, fl: null, live: false, hl: null, c: null, cover: null, T: U.round3(T), tier: 0, fading: false, regime: "unknown", regimeWhy: [], perishDays: null, perishShare: null, perishing: false, rivals: null };
+  const pe = f === "noclaim" ? perishOf(ev, g) : null;
+  if (pe) {
+    gs.perishDays = pe.days;
+    gs.perishShare = pe.share === null ? null : U.round3(pe.share);
+  }
+  // a unit listed past its estimated expiry: said once, wherever the game's reasons are shown
+  const pastLine =
+    pe && pe.past > 0
+      ? pe.past + (pe.past === 1 ? " unit is still listed past its estimated expiry: the estimate is ignored for it." : " units are still listed past their estimated expiry: the estimate is ignored for them.")
+      : null;
   if (!d) {
     gs.why = "No fresh farm-brain row for this game (missing, or older than " + cfg.maxDemandAgeH + " h): no advice.";
     gs.regimeWhy = [gs.why];
-    if (f === "noclaim") gs.perishDays = perishDaysOf(ev, g);
     ev._gs.set(key, gs);
     return gs;
   }
@@ -110,7 +152,6 @@ function gameState(ev, g, f) {
   const a30 = num(d.a30, NaN);
   const a45 = num(d.a45, NaN);
   gs.fading = Number.isFinite(a30) && Number.isFinite(a45) && a45 > 0 && a30 < cfg.fadeRatio * a45;
-  if (f === "noclaim") gs.perishDays = perishDaysOf(ev, g);
   const rg = ev.radar.byGame.get(g);
   gs.rivals = rg && rg.rivalSellers !== null && rg.rivalSellers !== undefined && Number.isFinite(Number(rg.rivalSellers)) ? Number(rg.rivalSellers) : null;
 
@@ -122,8 +163,14 @@ function gameState(ev, g, f) {
   //   4. the farm brain's skip, or fading demand → overstock.
   const wk = (v) => (v === Infinity ? "∞" : U.round2(v));
   const sig = [];
-  if (f === "noclaim" && gs.perishDays !== null && gs.perishDays * 24 <= cfg.perishHours) {
-    sig.push(["overstock", "Its stock expires in about " + Math.round(gs.perishDays * 24) + " h: it sells now or it expires."]);
+  // Perishing is read per stock: at least half of what is listed expires within perishHours.
+  if (pe && pe.share !== null && pe.share >= 0.5) {
+    gs.perishing = true;
+    sig.push([
+      "overstock",
+      "Perishing: " + Math.round(pe.share * 100) + "% of its listed stock expires within " + cfg.perishHours + " h" +
+        (gs.perishDays !== null ? " (median " + Math.round(gs.perishDays * 24) + " h)" : "") + ": it sells now or it expires.",
+    ]);
   }
   if (gs.cover !== null && gs.cover > cfg.overstockCover * T) {
     sig.push(["overstock", gs.w > 0 ? "Stock covers " + wk(gs.cover) + " weeks, over " + cfg.overstockCover + "× the " + U.round2(T) + "-week target." : "No forecast sale and " + gs.on + " in stock."]);
@@ -145,6 +192,7 @@ function gameState(ev, g, f) {
     gs.regime = "balanced";
     gs.regimeWhy = ["Stock and demand are in balance" + (gs.cover !== null && gs.cover !== Infinity ? " (" + wk(gs.cover) + " weeks of cover)" : "") + "."];
   }
+  if (pastLine) gs.regimeWhy.push(pastLine);
   ev._gs.set(key, gs);
   return gs;
 }
@@ -601,28 +649,99 @@ function agrees(cfg, a, b) {
   return Math.abs(num(a) - num(b)) <= tol + 1e-9;
 }
 
+/** listing id → the bundleKey its no-claim units were attached under (U.lids); "" when they disagree. */
+function bundleKeyByLid(ev) {
+  return E.memo(ev, "bkByLid", () => {
+    const map = new Map();
+    for (const u of ev.noclaim.units) {
+      const bk = lower(u.bk);
+      if (!bk) continue;
+      for (const lid of u.lids || []) {
+        if (!map.has(lid)) map.set(lid, bk);
+        else if (map.get(lid) !== bk) map.set(lid, "");
+      }
+    }
+    return map;
+  });
+}
+
 /**
- * The no-claim bundle order (plan: "within one event a bundle that contains another is never
- * priced below it"), as the coordinator fixed it: no-claim offers of one game on one market, by item
- * count — a price under any smaller offer's price is lifted to it. Then every row's action is set.
+ * "event key|label+label" (unclaimedBundles.classifyHoldings: event.key + "|" + held wave labels) →
+ * { event, labels: Set }; null when it does not parse.
+ */
+function parseBundleKey(bk) {
+  const k = lower(bk);
+  const i = k.lastIndexOf("|");
+  if (i <= 0) return null;
+  const labels = k
+    .slice(i + 1)
+    .split("+")
+    .map((x) => x.trim())
+    .filter(Boolean);
+  if (!labels.length) return null;
+  return { key: k, event: k.slice(0, i), labels: new Set(labels) };
+}
+
+/**
+ * The bundle an offer is: the bundleKey of the units on its live rows; for a new listing, of the
+ * game's earlier rows of the same items. Null when none is recorded, or its rows disagree (a row
+ * rebundled since): no bundle key, no bundle order — never a guess.
+ */
+function offerBundleOf(ev, v) {
+  const map = bundleKeyByLid(ev);
+  const keysOf = (rows) => {
+    const set = new Set();
+    for (const r of rows) {
+      const k = map.get(r.id);
+      if (k === "") return null;
+      if (k) set.add(k);
+    }
+    return set;
+  };
+  let set = keysOf(v.liveRows);
+  if (set && !set.size) {
+    const same = (ev.rowsByGF.get(v.k + "|" + v.f) || []).filter((r) => (v.ck ? r.ex && r.ck === v.ck : !(r.ex && r.ck) && r.bk === v.bk));
+    set = keysOf(same);
+  }
+  if (!set || set.size !== 1) return null;
+  return parseBundleKey([...set][0]);
+}
+
+/**
+ * Is bundle A inside bundle B? Same event and A's held waves ⊆ B's. Equal wave sets count only when
+ * B holds more items: containment has to point one way, or a smaller bundle would be lifted to a bigger
+ * one's price.
+ */
+function bundleContains(B, nB, A, nA) {
+  if (!A || !B || A.event !== B.event) return false;
+  for (const l of A.labels) if (!B.labels.has(l)) return false;
+  return A.labels.size < B.labels.size || num(nA, 0) < num(nB, 0);
+}
+
+/**
+ * The no-claim bundle order (brief §3a: "within one event, a bundle that contains another is never
+ * priced below it"), for the no-claim offers of one game on one market. Containment comes from the
+ * units' bundleKey (bundleOf): an offer is lifted to the highest price of any offer it contains;
+ * offers of different events, or with no recorded bundle key, are never compared. Then every row's
+ * action is set (finishOffer). The 30-day sold floor applies in the gates as before.
  * @param {Array} verdicts priceOffer results with `defer`, one game × market
  */
 function applyContainment(ctx, verdicts) {
-  const list = verdicts.slice().sort((a, b) => num(a.n, 0) - num(b.n, 0) || U.cmp(a.ck || a.bk, b.ck || b.bk));
-  // the highest gated price among offers with strictly fewer items
-  let maxBelow = null;
-  let i = 0;
-  while (i < list.length) {
-    let j = i;
-    const n = num(list[i].n, 0);
-    while (j < list.length && num(list[j].n, 0) === n) j++;
-    let groupMax = null;
-    for (let k = i; k < j; k++) {
-      finishOffer(ctx, list[k], { minP: maxBelow });
-      if (list[k].p !== null && (groupMax === null || list[k].p > groupMax)) groupMax = list[k].p;
+  const ev = ctx.ev;
+  const items = verdicts.map((v) => ({ v, b: offerBundleOf(ev, v) }));
+  // contained bundles first: fewer held waves, then fewer items (bundleContains points that way)
+  items.sort((x, y) => (x.b ? x.b.labels.size : 0) - (y.b ? y.b.labels.size : 0) || num(x.v.n, 0) - num(y.v.n, 0) || U.cmp(x.v.ck || x.v.bk, y.v.ck || y.v.bk));
+  const done = [];
+  for (const it of items) {
+    let minP = null;
+    if (!it.b) {
+      if (verdicts.length > 1) it.v.why.push("No bundle key recorded on its units: the bundle order is not applied to it.");
+    } else {
+      for (const d of done) if (d.v.p !== null && bundleContains(it.b, it.v.n, d.b, d.v.n) && (minP === null || d.v.p > minP)) minP = d.v.p;
     }
-    if (groupMax !== null && (maxBelow === null || groupMax > maxBelow)) maxBelow = groupMax;
-    i = j;
+    it.v.bundle = it.b ? it.b.key : null;
+    finishOffer(ctx, it.v, { minP });
+    if (it.b) done.push(it);
   }
   return verdicts;
 }
@@ -633,6 +752,7 @@ module.exports = {
   MIN_HORIZON_DAYS,
   ACTIONS,
   gameState,
+  perishOf,
   perishDaysOf,
   campaignEnded,
   candidates,
@@ -644,6 +764,10 @@ module.exports = {
   finishOffer,
   liveAction,
   applyContainment,
+  bundleKeyByLid,
+  parseBundleKey,
+  offerBundleOf,
+  bundleContains,
   agrees,
   pAt,
   valueAt,

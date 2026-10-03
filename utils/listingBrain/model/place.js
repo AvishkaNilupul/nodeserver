@@ -159,10 +159,10 @@ function marketShares(ev, g, f, markets) {
 
 /**
  * Greedy newsvendor fill: each unit to the market with the highest P(D ≥ k) × net, until the stock
- * runs out or the next unit is worth under `minMarginal`. Ties go to the earlier market in MARKETS.
+ * runs out or the next unit is worth under `minMarginal`. Ties go to the earlier market in `markets`.
  * @returns {{ shelf: {m}, marginal: {m}, left }}
  */
-function greedyFill({ markets, mu, nets, avail, minMarginal = 0, caps = {} }) {
+function greedyFill({ markets, mu, nets, avail, minMarginal = 0, caps = {}, offsets = {} }) {
   const shelf = {};
   const marginal = {};
   const tail = {};
@@ -174,6 +174,9 @@ function greedyFill({ markets, mu, nets, avail, minMarginal = 0, caps = {} }) {
       continue;
     }
     tail[m] = U.poissonTailer(mu[m]);
+    // `offsets[m]` units of m's demand are already covered (the no-claim pool's bulk set-aside): its
+    // first unit here is worth P(D ≥ offset + 1)
+    for (let k = Math.max(0, Math.floor(num(offsets[m], 0))); k > 0; k--) tail[m].next();
     next[m] = tail[m].next() * nets[m];
   }
   let left = Math.max(0, Math.floor(num(avail)));
@@ -228,6 +231,37 @@ function capInfo(ev, g) {
   const caps = af.caps || {};
   const explicit = caps[g] !== undefined && caps[g] !== null && Number.isFinite(Number(caps[g]));
   return { cap: explicit ? Number(caps[g]) : num(af.capDefault, 70), managed: explicit };
+}
+
+// The no-claim farm's free pool, as one pseudo-market of the shelf fill (key never a market's).
+const POOL = "pool";
+
+/**
+ * What a unit fetches when it is sold from the no-claim pool: the median, over the game's live
+ * claim-at-sale rows (Eldorado / PlayerAuctions / G2G), of their ask and its net there; with none, of
+ * the game's no-claim orders on those markets; with none, the shelf markets' prices.
+ * @returns {{ price: number|null, net: number|null, from: "asks"|"orders"|"shelf"|"none" }}
+ */
+function poolPriceOf(ev, g, poolMs, prices, nets) {
+  const fees = ev.bundle.fees || {};
+  const pick = (pairs, from) => {
+    if (!pairs.length) return null;
+    const p = pairs.map((x) => x[0]).sort((a, b) => a - b);
+    const n = pairs.map((x) => x[1]).sort((a, b) => a - b);
+    const mid = (a) => (a.length % 2 ? a[a.length >> 1] : (a[(a.length >> 1) - 1] + a[a.length >> 1]) / 2);
+    return { price: U.round2(mid(p)), net: U.round2(mid(n)), from };
+  };
+  const asks = [];
+  for (const m of poolMs) for (const r of ev.rowsByCell.get(g + "|noclaim|" + m) || []) if (r.cas && r.activeAtCut && r.ask > 0) asks.push([r.ask, U.netOf(r.ask, m, fees)]);
+  const a = pick(asks, "asks");
+  if (a) return a;
+  const orders = [];
+  for (const m of poolMs) for (const o of ev.idx.byGFM.get(g + "|noclaim|" + m) || []) orders.push([o.p, U.netOf(o.p, m, fees)]);
+  const o = pick(orders, "orders");
+  if (o) return o;
+  const shelf = [];
+  for (const m of Object.keys(nets)) if (num(nets[m]) > 0 && num(prices[m]) > 0) shelf.push([num(prices[m]), num(nets[m])]);
+  return pick(shelf, "shelf") || { price: null, net: null, from: "none" };
 }
 
 /**
@@ -286,10 +320,13 @@ function placeGame(ctx, q) {
     return res;
   }
   const W = Math.max(0, num(gs.w, 0));
-  // 1. bulk first: what the bulk channel is expected to take over the horizon, its own line
+  // 1. bulk first: what the bulk channel is expected to take over the horizon, its own line (on the
+  //    no-claim side bulk sells from the free pool, so that is where it is set aside)
   const bw = ev.bulk.weekly.get(g) || 0;
   res.bulkTake = Math.min(stock, Math.round((bw * cfg.shelfHorizonDays) / 7));
-  if (res.bulkTake > 0) res.why.push("Bulk takes about " + res.bulkTake + " in " + cfg.shelfHorizonDays + " days (" + U.round2(bw) + "/wk): set aside first.");
+  if (res.bulkTake > 0) {
+    res.why.push("Bulk takes about " + res.bulkTake + " in " + cfg.shelfHorizonDays + " days (" + U.round2(bw) + "/wk): set aside" + (f === "noclaim" ? " in the pool" : "") + " first.");
+  }
   const avail = stock - res.bulkTake;
 
   // 2. the markets: where stock may go, and where demand is counted (no-claim claim-at-sale markets
@@ -301,7 +338,8 @@ function placeGame(ctx, q) {
     res.shares[m] = U.round3(sh.shares[m]);
     res.lambda[m] = W * sh.shares[m];
   }
-  if (!open.some((m) => elig[m].proven) && W > 0 && open.length) {
+  // (no market proven at all; on the claim farm demandM is exactly the open markets with a sale)
+  if (!demandM.length && W > 0 && open.length) {
     // Nothing of ours sold anywhere open. The radar's rival sales are evidence of where buyers are; with
     // none, the plan's answer stands — no shelf on evidence, one exploration unit (never a guessed split).
     const radar = ev.radar.byGame.get(g);
@@ -335,11 +373,37 @@ function placeGame(ctx, q) {
     res.flags.push("eld-limit");
     res.why.push("Eldorado already holds " + PLATFORM_LIMITS.eldoradoMaxActiveOffers + " active offers of this game: no new offer.");
   }
-  // 5. the greedy fill
-  const fill = greedyFill({ markets: open, mu, nets, avail, minMarginal: cfg.minMarginalUsd, caps });
+  // 5. the greedy fill.
+  //    Claim farm: shelves only; a unit worth under minMarginalUsd stays in reserve, released as
+  //    shelves empty.
+  //    No-claim farm: its stock perishes, so nothing is "held for later": the reserve is the free pool
+  //    the claim-at-sale offers and bulk sell from — one more market in the fill, its demand the
+  //    claim-at-sale markets' share of the forecast plus bulk's rate (bulk's set-aside already covers
+  //    the first units of it). No value threshold — any chance of a sale beats a certain expiry, so
+  //    every unit lands somewhere; what reaches no market at all also stays in the pool.
+  let fill;
+  let pool = null;
+  const fillMarkets = f === "noclaim" ? open.concat(POOL) : open;
+  if (f === "noclaim") {
+    const poolMs = MARKETS.filter((m) => cls[m] === "managed");
+    const pp = poolPriceOf(ev, g, poolMs, q.prices || {}, nets);
+    let lam = bw;
+    for (const m of poolMs) lam += num(res.lambda[m], 0);
+    let h = cfg.shelfHorizonDays;
+    if (gs.perishDays !== null) h = Math.max(P.MIN_HORIZON_DAYS, Math.min(h, gs.perishDays));
+    pool = { markets: poolMs, lambda: U.round3(lam), horizon: U.round3(h), price: pp.price, net: pp.net, from: pp.from, units: 0, marginal: null };
+    mu[POOL] = (lam * h) / 7;
+    fill = greedyFill({ markets: fillMarkets, mu, nets: Object.assign({}, nets, { [POOL]: num(pp.net, 0) }), avail, minMarginal: 0, caps, offsets: { [POOL]: res.bulkTake } });
+    res.reserve = fill.shelf[POOL] + fill.left;
+    pool.marginal = fill.marginal[POOL] === undefined ? null : fill.marginal[POOL];
+    delete fill.shelf[POOL];
+    delete fill.marginal[POOL];
+  } else {
+    fill = greedyFill({ markets: open, mu, nets, avail, minMarginal: cfg.minMarginalUsd, caps });
+    res.reserve = fill.left;
+  }
   res.shelf = fill.shelf;
   res.marginal = fill.marginal;
-  res.reserve = fill.left;
   // 6. one exploration unit, on one open market we have never sold the game on
   if (cfg.explore && res.reserve > 0) {
     const radar = ev.radar.byGame.get(g);
@@ -357,10 +421,14 @@ function placeGame(ctx, q) {
     }
   }
   const total = open.reduce((a, m) => a + (res.shelf[m] || 0), 0);
-  if (stock > 0) {
-    res.why.push(
-      "Shelf " + total + " of " + stock + (res.reserve > 0 ? "; " + res.reserve + " in reserve" + (f === "noclaim" ? " (the pool claim-at-sale offers sell from)" : " (released as shelves empty)") : "") + ".",
-    );
+  if (pool) {
+    pool.units = res.reserve + res.bulkTake;
+    res.pool = pool;
+  }
+  if (stock > 0 && f === "noclaim") {
+    res.why.push("Shelf " + total + " of " + stock + "; " + pool.units + " to the pool the claim-at-sale offers and bulk sell from.");
+  } else if (stock > 0) {
+    res.why.push("Shelf " + total + " of " + stock + (res.reserve > 0 ? "; " + res.reserve + " in reserve (released as shelves empty)" : "") + ".");
   }
   if (f === "noclaim") res.why.push("The no-claim shelf cap in force is " + res.cap + (res.managed ? " (set by the owner: managed)." : " (the default)."));
   // 7. flags
@@ -370,7 +438,13 @@ function placeGame(ctx, q) {
   // 8. the same placement with every fee equal (a fee never changes a price, but it ranks markets)
   const gross = {};
   for (const m of open) gross[m] = num((q.prices || {})[m], 0);
-  res.shEq = greedyFill({ markets: open, mu, nets: gross, avail, minMarginal: cfg.minMarginalUsd, caps }).shelf;
+  if (pool) {
+    gross[POOL] = num(pool.price, 0);
+    res.shEq = greedyFill({ markets: fillMarkets, mu, nets: gross, avail, minMarginal: 0, caps, offsets: { [POOL]: res.bulkTake } }).shelf;
+    delete res.shEq[POOL];
+  } else {
+    res.shEq = greedyFill({ markets: open, mu, nets: gross, avail, minMarginal: cfg.minMarginalUsd, caps }).shelf;
+  }
   // 9. the policies, each with its forecast for the next 7 days
   const flatM = MARKETS.filter((m) => cls[m] === "open" || cls[m] === "unknown");
   const lamFlat = {};
@@ -395,6 +469,8 @@ function placeGame(ctx, q) {
 module.exports = {
   PLATFORM_LIMITS,
   TRANSLATE_MAX,
+  POOL,
+  poolPriceOf,
   provenOn,
   hadAuto,
   eldoradoActive,
