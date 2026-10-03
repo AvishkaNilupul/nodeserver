@@ -545,15 +545,26 @@ post-event price and the split's list-now / hold-back units (`old.post`, `old.no
 ## 6. The log
 
 - `ListingBrainRun` (one per run): `at, v, ms, cfg, summary, counts, notes, rowsN, day, fcN, fc` — `fc` (the
-  per-listing forecasts `{l, k, f, m, x, p, a, ask}`) only on the first run of each UTC day, capped at `fcCap`;
-  null otherwise.
-- `ListingBrainRow` (one per cell, plus one `m: "all"` row per game × farm for its placement): `run, at, k, g, f, m,
-  live, hl, pc, sc, old, br, ev, fl` — compact keys, no reasons (kept in memory for the newest run), no per-offer
-  detail.
-- Indexes: rows `{k, f, m, at: −1}`, `{run}`, TTL `{at}` 21 days; runs TTL `{at}` 21 days. Written once, never
-  updated. A cell's history is an indexed read of its rows.
-- **Size** (measured on the large fixture — 150 games × 7 markets, 3,000 listings, 5,000 sales): filled in
-  §11 after the build, target under 60 MB steady state.
+  per-listing forecasts `{l, k, f, m, x, b, p, pb, h, a, ask}`: listing id hash, cell, ask/ref, bucket, sell chance,
+  the market's base rate at that moment, horizon, action, ask) only on the first run of each UTC day, capped at
+  `fcCap`; null otherwise.
+- `ListingBrainRow` (one per cell, plus one `m: "all"` row per game × farm for its placement): `run, at, exp, k, g,
+  f, m, live, hl, pc, sc, old, br, pol, pf, pd, ev, fl` — compact keys, written **sparse** (no reasons — kept in
+  memory for the newest run —, no nulls, `false`s, empty lists or zero action counts; every other 0 is kept, since
+  the scorer reads a missing number as missing, never as 0); rows read back are expanded to the in-memory shape.
+- Write order: the run's id is made first, its rows are inserted, the run document is written **last** — a failed
+  row insert leaves no run document, so a partial day is never read as that day's sample.
+- Retention: runs 21 days (TTL `{at}`); rows expire per row (`exp`, TTL `{exp}`): the first run of each UTC day
+  (the daily sample the forward score reads) 21 days, every other run's rows **3 days** (a cell's intraday history
+  is a convenience). A `{at}` 21-day TTL on rows is the backstop. Indexes: rows `{k, f, m, at: −1}`, `{run}`,
+  `{exp}`, `{at}`; runs `{at}`. Written once, never updated. A cell's history is an indexed read of its rows.
+- **Size**, measured through the real schemas (`tests/listingBrainSpeed.test.js`, Node 20):
+  - large fixture (150 games × 7 markets, 4,742 listings, 5,255 sales): 908 rows a run at 565 B (671 B before
+    the sparse write) = 513 kB + a 3.1 kB run document; the daily forecasts at `fcCap` 5,000 = 747 kB (149 B
+    each); **steady state at 8 runs a day: 10.8 MB daily rows + 10.8 MB intraday rows + 0.5 MB run documents +
+    15.6 MB daily forecasts = 37.7 MB** (target 60 MB; indexes not counted);
+  - production volume (the reviewers' synthetic world: 20,000 listings, 32,000 sales, 100,000 no-claim units,
+    1,462 rows a run): **50.8 MB** (74 MB if intraday rows were kept 7 days).
 
 ---
 
@@ -567,9 +578,24 @@ post-event price and the split's list-now / hold-back units (`old.post`, `old.no
   switch is re-read every 10 minutes. No timer or connection starts on `require`.
 - One run at a time; a load that outlives `RUN_TIMEOUT_MS` (10 min) blocks new runs until it settles, and every
   skipped tick says so. A failed load writes nothing. A failed insert is reported as **NOT LOGGED** in the heartbeat
-  and status. `runOnce` and `loopStatus` never throw.
-- **Never holds the event loop**: the loader yields between reads; the model yields between phases
-  (evidence → fit → cells → placement → summary); no synchronous stretch over ~200 ms on the large fixture.
+  and status. `runOnce` and `loopStatus` never throw. Error text that reaches the log, the status or a route is
+  cleaned of hosts, paths, ids and secrets (`inputs.cleanMsg`).
+- The scorer (`accuracy()`) uses the bundle the newest run left in memory, whatever its age (it says the age).
+  With none: while the brain is off it answers "no run yet" **without any read**; while a run is loading it says so;
+  otherwise it loads through the run's own one-at-a-time guard and timeout.
+- A tick that finds the switch off drops the in-memory run and bundle (~150 MB at production volume); the three
+  answers (`priceFor`, `shelfFor`, `valueFor`) abstain when the newest run is older than its own interval allows.
+- **Never holds the event loop** — measured on **Node 20** (production's version; it is ~15× slower than Node 22 on
+  the spread-built objects of the tracker's ledger, so Node 22 numbers hide the cost): the loader yields between
+  reads and on a 50 ms budget inside every long pass, asks the tracker only for each cell's main offer (≤ 400, a
+  yield per call), and hashes each id once; the model and the scorer yield on a shared time budget
+  (`util.makeYielder`, the only clock the pure model reads — it changes no output). At production volume (20,000
+  listings, 32,000 sales, 100,000 no-claim units) the longest synchronous stretch is ~100–160 ms in the load (the
+  tracker's own `buildTranslator`, 70–120 ms, is the largest single piece and cannot be split without copying it),
+  ~93–134 ms in a run, under 200 ms in the six-week backtest and the forward score. A full load takes ~17.5 s
+  (it took 165 s with 1.3 s stretches before the review); a run ~1.7–1.9 s. The large fixture runs in ~0.3 s
+  with a longest stretch of ~45 ms. Memory at production volume: ~140 MB retained between runs (bundle + run),
+  ~340 MB peak during a run.
 - **Writes only its own log** (`ListingBrainRun`, `ListingBrainRow`). No marketplace call, no setting written, no
   listing, account, reservation or task touched, no SSH. Enforced by a source scan test (§11).
 - **Fail-safe direction**: whatever the brain cannot read, it abstains on (`unknown` / `hold`) and says why. A
@@ -666,6 +692,15 @@ Off switch (no restart): `node -e 'require("./utils/settings").setAutoFarm({list
   Rival counts have no history, so "rivals disappearing" is "few rivals now".
 - Five fees are assumed until the owner sets them.
 - The demand tier of a historical listing in the live fit is the game's tier now.
+- **Money is USD everywhere.** `MarketplaceListing.price` is USD on every market, GGSel included (the rouble price
+  is made by the connector at publish, `usdToRub`); the brain prices, compares and applies GGSel's raise-only rule in
+  USD. A rouble rate move can change what a GGSel buyer sees without any USD price changing.
+- Claim event bundles: `autoFarmBundles.priceBundle` is told `full: false` (whether a bundle completes its event
+  is not recorded on its set), so today's price for a full-event bundle is logged without its full-event bonus.
+- The loader reads at most 20,000 listings, 2 × 50,000 no-claim units, 5,000 campaigns and 5,000 farm-brain rows a
+  run (each read says so in the notes when it hits its cap); a bigger shop would be partly seen.
+- Our own Gameflip offers are fitted at their cheapest live row: what a buyer of a deeper or more expensive row
+  would have done differently is not modelled beyond the rank (the next buyer takes the cheapest row).
 
 ## 11. Verification
 
