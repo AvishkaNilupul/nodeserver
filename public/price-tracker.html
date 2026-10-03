@@ -213,6 +213,7 @@
 
   <script src="/theme.js"></script>
   <script src="/admin-nav.js"></script>
+  <script src="/listing-brain.js"></script>
   <script>
   (function () {
     "use strict";
@@ -247,7 +248,7 @@
     }
 
     var page = document.getElementById("page");
-    var TABS = [["games", "Games"], ["market", "Market radar"], ["brain", "Farm brain (test)"], ["overview", "Overview"], ["curve", "Price curve"], ["sets", "Same items"], ["advice", "Advice"], ["sales", "Sales ledger"], ["suggest", "Suggest"]];
+    var TABS = [["games", "Games"], ["market", "Market radar"], ["brain", "Farm brain (test)"], ["listing", "Listing brain (test)"], ["overview", "Overview"], ["curve", "Price curve"], ["sets", "Same items"], ["advice", "Advice"], ["sales", "Sales ledger"], ["suggest", "Suggest"]];
     var MARKETS = ["gameflip", "ggsel", "eldorado", "g2g", "playerauctions", "zeusx", "digiseller"];
     var state = { tab: (location.hash || "#games").slice(1), overview: null };
     if (!TABS.some(function (t) { return t[0] === state.tab; })) state.tab = "games";
@@ -982,6 +983,7 @@
         if (state.tab === "games") await renderGames();
         else if (state.tab === "market") await renderMarket();
         else if (state.tab === "brain") await renderBrain();
+        else if (state.tab === "listing") { if (!window.ListingBrainTab) throw new Error("The listing brain's page script (/listing-brain.js) did not load."); await window.ListingBrainTab.render({ api: api, shell: shell, stale: stale, esc: esc, money: money, pct: pct, ago: ago, day: day, hrs: hrs, openSheet: openSheet, page: page, state: state }); }
         else if (state.tab === "overview") await renderOverview(force);
         else if (state.tab === "curve") await renderCurve();
         else if (state.tab === "sets") await renderSets();

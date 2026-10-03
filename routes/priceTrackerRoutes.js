@@ -244,6 +244,7 @@ function createRouter({ getReport = T.getReport, guards = [], settingsInputs = (
 
   mountMarketRadar(router, { guards, getMarketReport, marketStatus });
   mountBrain(router, { guards, brain });
+  try { require("./listingBrainRoutes").mount(router, { guards }); } catch (e) { console.error("listingBrain routes: not mounted —", e && e.message ? e.message : e); }
   return router;
 }
 
@@ -543,6 +544,7 @@ module.exports.real = () => {
   } catch (e) {
     console.error("demandBrain: could not start —", e && e.message ? e.message : e);
   }
+  try { require("../utils/listingBrain").start(); } catch (e) { console.error("listingBrain: could not start —", e && e.message ? e.message : e); }
   // Settings (fees, farm sizing, per-game caps, no-claim and reuse-only games) are read
   // by utils/priceTracker itself on every rebuild, so a rebuild triggered anywhere —
   // this page or a publisher — sees the same ones.
