@@ -10,7 +10,8 @@
 //   unknown    no fresh farm-brain row: nothing but the reason, action hold
 // Then the GATES, in this order: confidence (below medium → hold, the price is still logged) → raise
 // rule (a raise needs orders here at or above it, or repeated stock-outs; never on a venue median or
-// a rival's price) → step limit → GGSel raise-only → [no-claim: bundle order, sold floor] → floor LAST.
+// a rival's price) → step limit → [no-claim: ceiling] → GGSel raise-only → [no-claim: bundle order, sold floor]
+// → floor LAST (the no-claim floors with the platform's).
 //
 // PURE. A live row's advice is hold / lower / raise / test, a deliberate ladder is "ladder" (never
 // corrected), a new listing is "new" (or hold below medium confidence), no evidence is "none".
@@ -233,6 +234,45 @@ function horizonFor(ev, f, gs) {
   return Math.max(MIN_HORIZON_DAYS, Math.min(H0, gs.perishDays));
 }
 
+// unclaimedBundles.bundlePrice's ceiling when the owner set none (PRICE_CEILING_USD there).
+const NOCLAIM_CEILING_USD = 4.5;
+// settings.normGameName's rule (not requirable here: settings does I/O).
+const normGameName = (s) =>
+  String(s || "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, " ")
+    .trim();
+const posNum = (v) => {
+  const n = Number(v);
+  return Number.isFinite(n) && n > 0 ? n : 0;
+};
+
+/**
+ * The owner's no-claim limits for a game, from the bundle's `pricing` (settings.getUnclaimedPricing):
+ * the floor is max(floorUsd, the game's own floor — the first gameFloors key contained in the game's
+ * normalised label, settings.gameFloorFor's substring rule); the ceiling is ceilingUsd, 0 or unset
+ * reading bundlePrice's $4.50. Memoised per game.
+ * @returns {{ floor: number, gameFloor: number, ceiling: number }}
+ */
+function noclaimLimits(ev, g) {
+  return E.memo(ev, "ncLimits|" + g, () => {
+    const p = (ev.bundle && ev.bundle.pricing) || {};
+    const floors = p.gameFloors && typeof p.gameFloors === "object" ? p.gameFloors : {};
+    const label = normGameName((ev.gameLabel && ev.gameLabel.get(g)) || g);
+    let gameFloor = 0;
+    if (label) {
+      for (const k of Object.keys(floors)) {
+        const key = normGameName(k);
+        if (key && label.includes(key)) {
+          gameFloor = posNum(floors[k]);
+          break;
+        }
+      }
+    }
+    return { floor: Math.max(posNum(p.floorUsd), gameFloor), gameFloor, ceiling: posNum(p.ceilingUsd) || NOCLAIM_CEILING_USD };
+  });
+}
+
 /** The highest Gameflip sold price of this exact offer in the last 30 days (unclaimedAutoList's sold floor). */
 function soldFloorOf(ev, ck) {
   if (!ck) return 0;
@@ -341,6 +381,18 @@ function gateChain(ctx, v, { raw, base, floor, minP = null }) {
     }
     if (gates[gates.length - 1] === "step") why.push("Step limit: at most " + cfg.maxStepPct + "% from " + usd(b) + " in one move.");
   }
+  // no-claim: the owner's ceiling (getUnclaimedPricing), as bundlePrice applies it — before the floors,
+  // so only the sold floor may lift a price over it. Before GGSel raise-only: a GGSel row already over
+  // the ceiling is held, never advised down. A cut-back raise's test price obeys it too.
+  if (v.f === "noclaim") {
+    const cap = noclaimLimits(ev, v.k).ceiling;
+    if (p > cap + 1e-9) {
+      p = cap;
+      gates.push("ceiling");
+      why.push("Not over the no-claim ceiling " + usd(cap) + ".");
+    }
+    if (wanted !== null && wanted > cap) wanted = cap;
+  }
   // 4. GGSel enforces an unpublished per-category minimum: never below the base there
   if (v.m === "ggsel" && b !== null && p < b - 1e-9) {
     p = b;
@@ -430,6 +482,8 @@ function priceOffer(ctx, o) {
   let floor = mk ? mk.floor : U.floorFor(m);
   for (const r of liveRows) floor = Math.max(floor, r.floor);
   if (!liveRows.length && m === "ggsel" && ev.ggselVmin.has(o.g)) floor = Math.max(floor, ev.ggselVmin.get(o.g));
+  // no-claim: the owner's floor and the game's own floor (getUnclaimedPricing), applied last with the rest
+  if (f === "noclaim") floor = Math.max(floor, noclaimLimits(ev, o.g).floor);
   v.floor = round2(floor);
 
   if (!mk || mk.blocked || mk.off) {
@@ -758,6 +812,8 @@ module.exports = {
   candidates,
   horizonFor,
   soldFloorOf,
+  noclaimLimits,
+  NOCLAIM_CEILING_USD,
   stockoutsOf,
   gateChain,
   priceOffer,
