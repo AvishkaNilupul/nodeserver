@@ -1680,7 +1680,7 @@ test("M10b a no-claim bucket row whose games sold nothing in 30 days is not spli
 });
 
 test("P20-2 the tracker is asked only for the offers the log uses (each cell's main offer), capped with a note, yielding within 50 ms", async () => {
-  const mk = (n, m, o, st, ck) => ({ raw: ID(n), set: null, L: { id: H(n), g: "alpha", gl: "Alpha", m, o, f: "claim", kind: "single", st, ck, bk: "alpha|2", ex: true, n: 2, qty: 1, p: 2 } });
+  const mk = (n, m, o, st, ck) => ({ raw: ID(n), set: null, L: { id: H(n), g: "alpha", gl: "Alpha", m, o, f: "claim", kind: "single", st, ck, bk: "alpha|2", ex: true, n: 2, qty: 1, p: 2, c: NOW - 5 * DAY } });
   // primary offer c1 (live on Gameflip); c2 sold out on Gameflip; the owner's Eldorado c1; a delisted GGSel c1
   const rows = [mk(1, "gameflip", "auto", "active", "c1"), mk(2, "gameflip", "auto", "sold", "c2"), mk(3, "eldorado", "manual", "active", "c1"), mk(4, "ggsel", "auto", "delisted", "c1")];
   const byIdMap = new Map(rows.map((e) => [e.raw, e]));
@@ -1698,7 +1698,8 @@ test("P20-2 the tracker is asked only for the offers the log uses (each cell's m
     },
     unclaimedBundles,
   };
-  const base = { d, af: {}, report: { games: [] }, byId: byIdMap, demand: [], research: [], catalog: new Map(), pricing: {}, labels: new Map(), platiTakes: false, ggselTakes: true, now: NOW };
+  // Eldorado's switch on: the game's main offer would be listed there new (N5: only cells the model prices)
+  const base = { d, af: { eldoradoAuto: true }, report: { games: [] }, byId: byIdMap, demand: [], research: [], catalog: new Map(), pricing: {}, labels: new Map(), platiTakes: false, ggselTakes: true, now: NOW };
   const notes = [];
   const out = await I.oldSide({ ...base, notes });
   assert.deepEqual(asked.sort(), ["eldorado", "gameflip", "ggsel"], "the three cells' main offers; never the sold-out c2");
@@ -1997,4 +1998,131 @@ test("C14 the loader yields inside its long passes: no synchronous stretch over 
   assert.equal(b.noclaim.units.length, 100000);
   assert.ok(b.sales.length > 20000, b.sales.length + " sales");
   assert.ok(max < 200, "longest synchronous stretch " + max + " ms");
+});
+
+/* ------------------------- batch 3: the final review (N5, LC) ------------------------- */
+
+test("N5 the tracker is asked only for cells the model prices: no blocked or switched-off market, each cell's main offer by its advisable live rows", async () => {
+  const mk = (n, m, o, st, ck, ageDays) => ({
+    raw: ID(n),
+    set: null,
+    L: { id: H(n), g: "alpha", gl: "Alpha", m, o, f: "claim", kind: "single", st, ck, bk: "alpha|2", ex: true, n: 2, qty: 1, p: 2, c: NOW - ageDays * DAY },
+  });
+  const rows = [
+    // Gameflip: c1 has 2 live rows; c2 has 3 rows still "active" but past Gameflip's 30-day expiry (not live for the model)
+    mk(1, "gameflip", "auto", "active", "c1", 5),
+    mk(2, "gameflip", "auto", "active", "c1", 6),
+    mk(3, "gameflip", "auto", "active", "c2", 40),
+    mk(4, "gameflip", "auto", "active", "c2", 41),
+    mk(5, "gameflip", "auto", "active", "c2", 42),
+    // Digiseller is blocked in code; GGSel is switched off by the owner (blocked the same way); ZeusX is off
+    mk(6, "digiseller", "auto", "active", "c1", 5),
+    mk(7, "ggsel", "auto", "active", "c1", 5),
+    mk(8, "zeusx", "auto", "delisted", "c1", 9),
+    // Eldorado: no live system row; the game's main offer would be listed new there (switch on)
+    mk(9, "eldorado", "auto", "delisted", "c1", 9),
+  ];
+  const byIdMap = new Map(rows.map((e) => [e.raw, e]));
+  const asked = [];
+  const d = {
+    autoLister: { computeSplit: () => ({ listNow: 0, holdBack: 0 }), dealShares: () => {}, derivePrice: () => 2, postEventPrice: (x) => x, venuePrice: async (m, b) => b },
+    g2gGames: { brandForGame: () => null },
+    venues,
+    priceTracker: {
+      suggestForNew: (rep, q) => {
+        asked.push(q.market + "|" + q.items.length);
+        return { price: 1.6, basis: "x", confidence: "low" };
+      },
+    },
+    unclaimedBundles,
+  };
+  const af = { eldoradoAuto: true, zeusxAuto: false };
+  const base = { d, af, report: { games: [] }, byId: byIdMap, demand: [], research: [], catalog: new Map(), pricing: {}, labels: new Map(), platiTakes: true, ggselTakes: false, now: NOW };
+  const out = await I.oldSide({ ...base, notes: [] });
+  assert.deepEqual(asked.map((x) => x.split("|")[0]).sort(), ["eldorado", "gameflip"]);
+  assert.ok(out.offers["gameflip|c1"].tracker, "the cell's main offer: the one with live rows the model advises");
+  assert.equal(out.offers["gameflip|c2"].tracker, null, "rows past Gameflip's expiry are not live");
+  for (const k of ["digiseller|c1", "ggsel|c1", "zeusx|c1"]) assert.equal(out.offers[k].tracker, null, k);
+  // the cap's note counts only the cells the model prices
+  const notes = [];
+  const capped = await I.oldSide({ ...base, notes, trackerCap: 1 });
+  assert.equal(capped.counts.trackerCut, 1);
+  assert.ok(
+    notes.some((n) => /1 of 2/.test(n)),
+    notes.join(" | "),
+  );
+  // a game × farm with only the owner's rows: its main offer comes from them, priced new on the shelf
+  const owner = [mk(30, "eldorado", "manual", "active", "o1", 3), mk(31, "gameflip", "manual", "delisted", "o1", 9)];
+  for (const e of owner) Object.assign(e.L, { g: "beta", gl: "Beta", f: "noclaim" });
+  asked.length = 0;
+  await I.oldSide({ ...base, byId: new Map(owner.map((e) => [e.raw, e])), notes: [] });
+  assert.deepEqual(
+    asked.map((x) => x.split("|")[0]),
+    ["gameflip"],
+    "the no-claim shelf only; Eldorado is claim-at-sale (managed)",
+  );
+});
+
+test("N5 on the loader's own bundle the tracker is asked exactly for the offers the model reads its answer for", async () => {
+  const M = require("../utils/listingBrain/model");
+  const { b } = await loadWith({ platiTakes: true, af: { ggselCategoryId: "123", zeusxAuto: true } });
+  const asked = new Set(Object.keys(b.old.offers).filter((k) => b.old.offers[k].tracker));
+  // every `.tracker` read the model makes on the bundle's offers
+  const read = new Set();
+  const raw = b.old.offers;
+  const watched = {};
+  for (const [k, v] of Object.entries(raw)) watched[k] = new Proxy(v, { get: (t, p) => (p === "tracker" && read.add(k), t[p]) });
+  M.buildRun({ ...b, old: { ...b.old, offers: watched } });
+  assert.ok(read.size > 0);
+  assert.deepEqual([...asked].sort(), [...read].sort());
+});
+
+test("LC the bundle's order never depends on the host's locale: plain code-unit comparison everywhere in the loader", async () => {
+  // under a locale collation "épée…" sorts before "zeta…" and "alpha" before "Alpha"; in code units both reverse
+  const docs = [
+    { k: "zeta quest", f: "claim", at: new Date(NOW - HOUR), br: { w: 1 }, stk: { on: 1 } },
+    { k: "épée arena", f: "claim", at: new Date(NOW - HOUR), br: { w: 1 }, stk: { on: 1 } },
+  ];
+  assert.deepEqual(
+    I.demandRows({ docs, keywords: [], now: NOW }).map((r) => r.k),
+    ["zeta quest", "épée arena"],
+  );
+  const labels = I.gameLabels({
+    listings: [
+      { g: "alpha", gl: "alpha", kind: "single" },
+      { g: "alpha", gl: "Alpha", kind: "single" },
+    ],
+    report: null,
+    keys: [],
+  });
+  assert.equal(labels.get("alpha"), "Alpha", "a tie between labels goes to the code-unit first");
+  // the old side's game order (equal stock): code units
+  const d = {
+    autoLister: { computeSplit: () => ({ listNow: 0, holdBack: 0 }), dealShares: () => {}, derivePrice: () => 2, postEventPrice: (x) => x, venuePrice: async (m, b) => b },
+    g2gGames: { brandForGame: () => null },
+    venues,
+    priceTracker: { suggestForNew: () => null },
+    unclaimedBundles,
+  };
+  const demand = [
+    { k: "épée arena", f: "claim", on: 2 },
+    { k: "zeta quest", f: "claim", on: 2 },
+  ];
+  const out = await I.oldSide({
+    d,
+    af: {},
+    report: { games: [] },
+    byId: new Map(),
+    demand,
+    research: [],
+    catalog: new Map(),
+    pricing: {},
+    labels: new Map(),
+    platiTakes: false,
+    ggselTakes: false,
+    now: NOW,
+    notes: [],
+  });
+  assert.deepEqual(Object.keys(out.games), ["zeta quest", "épée arena"]);
+  assert.ok(!/localeCompare/.test(SRC), "no locale-dependent comparison in inputs.js");
 });

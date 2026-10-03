@@ -284,6 +284,8 @@ const round2 = (v) => Math.round(num(v) * 100) / 100 || 0;
 const round3 = (v) => Math.round(num(v) * 1000) / 1000 || 0;
 const scaled = (v, share) => (v === null || v === undefined ? null : round2(num(v) * share));
 const isObj = (v) => !!v && typeof v === "object" && !Array.isArray(v);
+// Plain code-unit order (never localeCompare): the bundle's order — and so every cap, tie and log line
+// that follows it — is the same on every host, whatever its locale or ICU build.
 const cmp = (a, b) => (a < b ? -1 : a > b ? 1 : 0);
 const yieldNow = () => new Promise((r) => setImmediate(r));
 
@@ -1388,7 +1390,7 @@ function* demandRowsSteps({ docs, keywords, listings = [], units = [], sales = [
       });
     }
   }
-  out.sort((a, b) => a.k.localeCompare(b.k) || a.f.localeCompare(b.f));
+  out.sort((a, b) => cmp(a.k, b.k) || cmp(a.f, b.f));
   return out;
 }
 
@@ -1403,7 +1405,7 @@ function gameLabels({ listings = [], report, keys = [] }) {
   }
   const labels = new Map();
   for (const [g, t] of tally) {
-    const best = [...t.entries()].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))[0];
+    const best = [...t.entries()].sort((a, b) => b[1] - a[1] || cmp(a[0], b[0]))[0];
     labels.set(g, best[0]);
   }
   const tracker = new Map();
@@ -1418,20 +1420,26 @@ function gameLabels({ listings = [], report, keys = [] }) {
  * fallback category id, G2G by its static brand table, ZeusX by the owner's game map), the no-claim
  * buckets and the explicit no-claim caps (every entry reads as the owner's — plan §1.3 #12).
  */
-function afBlock({ d, af, keywords, labels, platiTakes, ggselTakes }) {
-  const known = d.listingModel && isObj(d.listingModel.DEFAULTS) ? Object.keys(d.listingModel.DEFAULTS) : null;
+/** The switches today's listers read, per market (true = the lister puts new stock there). */
+function takesOf(d, af, platiTakes, ggselTakes) {
   const V = (d.venues && d.venues.VENUES) || {};
   const blocked = !!(V.digiseller && V.digiseller.blocked);
-  const takes = {
+  const a = af || {};
+  return {
     gameflip: true,
     digiseller: !!platiTakes && !blocked,
     ggsel: !!ggselTakes,
     // the lister's own tests: `!!af.<switch>` (getAutoFarm does no typing)
-    zeusx: !!af.zeusxAuto,
-    eldorado: !!af.eldoradoAuto,
-    playerauctions: !!af.playerauctionsAuto,
-    g2g: !!af.g2gAuto,
+    zeusx: !!a.zeusxAuto,
+    eldorado: !!a.eldoradoAuto,
+    playerauctions: !!a.playerauctionsAuto,
+    g2g: !!a.g2gAuto,
   };
+}
+
+function afBlock({ d, af, keywords, labels, platiTakes, ggselTakes }) {
+  const known = d.listingModel && isObj(d.listingModel.DEFAULTS) ? Object.keys(d.listingModel.DEFAULTS) : null;
+  const takes = takesOf(d, af, platiTakes, ggselTakes);
   const ggselMapped = !!String(af.ggselCategoryId || "");
   const brand = (label) => {
     try {
@@ -1565,66 +1573,124 @@ function refillShelf(dealt, order, onHand, perMarketStock) {
   return out;
 }
 
+// A row still marked active is not live for the model (evidence.activeAt) once Gameflip has expired it,
+// 30 days after it was created, or Eldorado has killed it unsold, 21 days after (model/util
+// GAMEFLIP_EXPIRY_DAYS, ELDORADO_OFFER_LIFE_DAYS); a single-unit row (Gameflip, ZeusX) that sold is over.
+const GAMEFLIP_EXPIRY_DAYS = 30;
+const ELDORADO_OFFER_LIFE_DAYS = 21;
+const SINGLE_UNIT = new Set(["gameflip", "zeusx"]);
+// The no-claim farm's own shelves (model/util NOCLAIM_SHELF); elsewhere its offers are the owner's.
+const NOCLAIM_SHELF = new Set(["gameflip", "digiseller", "ggsel"]);
+
 /**
- * The offers a logged row reads the tracker's answer for (model.trackerPrice on each cell's main
- * verdict, model.mainVerdict): per game × farm × market, the live system-made offer with the most live
- * rows (ties: the game × farm's primary offer), else the primary offer's own group on that market. The
- * primary offer is model.identities' rule: the identity with the most live system rows, then rows
- * (with no system row, the owner's rows). Ordered for the cap: cells with live system rows first.
- * @param {Map} groups offer key → group ({ m, g, f, liveSys, sys, owner, ownerLive, ident })
+ * The offers a logged row reads the tracker's answer for — the model's own choice, restated over the
+ * bundle's listings (model.js priceGroup / mainVerdict / identities, evidence.isAdvisable, place.eligibility):
+ * - a cell (game × farm × market) is priced only on a market that is not blocked: Digiseller is blocked
+ *   in code, and the owner's Plati / GGSel switches block the same way (evidence.marketInfo);
+ * - its offers with live rows the brain advises on (system-made plain rows, active, a Gameflip row
+ *   inside its 30-day life) each get a verdict; the main one has the most such rows, ties going to
+ *   the game × farm's primary offer, then to the first in code-unit order;
+ * - with none, the primary offer is priced as a new listing where today's lister could put it (not
+ *   blocked, the owner's switch on, a no-claim offer only on the no-claim shelves);
+ * - the primary offer: the most live system-made rows across markets, then the most rows (with no
+ *   system-made row, the owner's rows decide); the model's last tie-break (orders) is not restated.
+ * The key read is the newest live row's offer key (`market|contentKey`, else `market|bandKey`), as
+ * model.trackerOf looks it up. Ordered for the cap: the cells with the most live advised rows first.
+ * @param {Iterable<object>} listings bundle listings (L)
+ * @param {Set<string>} offerKeys     the keys of the offers being priced
+ * @param {{blocked: Set<string>, off: Set<string>}} markets
+ * @param {number} now
+ * @param {{before: Set<string>, after: Set<string>}} [sold] listing id hashes with a sale before `now`, at or after it
  * @returns {string[]} offer keys
  */
-function trackerOffers(groups) {
-  const byGF = new Map();
-  for (const gr of groups.values()) {
-    const k = gr.g + "|" + gr.f;
-    if (!byGF.has(k)) byGF.set(k, []);
-    byGF.get(k).push(gr);
+function trackerOffers(listings, offerKeys, markets, now, sold = {}) {
+  const soldBefore = sold.before || new Set();
+  const soldAfter = sold.after || new Set();
+  // evidence.activeAt at the cut `now`, clause for clause
+  const isLive = (L) => {
+    const c = numOrNull(L.c);
+    if (c === null || c >= now) return false;
+    if (L.m === "gameflip" && now > c + GAMEFLIP_EXPIRY_DAYS * DAY) return false;
+    const single = SINGLE_UNIT.has(L.m);
+    const sold = soldBefore.has(L.id);
+    if (L.m === "eldorado" && !sold && now > c + ELDORADO_OFFER_LIFE_DAYS * DAY) return false;
+    if (single && sold) return false;
+    if (L.st === "active") return true;
+    const u = numOrNull(L.u);
+    if (single && L.st === "sold" && u !== null && u < now) return false;
+    if (u !== null && u >= now) return true;
+    // a sale stamped at or after the cut: the row was still on sale then
+    return soldAfter.has(L.id);
+  };
+  const keyOf = (L) => L.m + "|" + (L.ck || L.bk);
+  const identOf = (L) => (L.ex && L.ck ? "c:" + L.ck : "b:" + L.bk);
+  const gfs = new Map();
+  const gfOf = (L) => {
+    const k = L.g + "|" + L.f;
+    let x = gfs.get(k);
+    if (!x) gfs.set(k, (x = { f: L.f, sys: new Map(), owner: new Map(), cells: new Map() }));
+    return x;
+  };
+  for (const L of listings) {
+    // the model's rows: visible at the cut, a plain or claim-at-sale listing of a game
+    if (!L || !L.g || (L.kind !== "single" && L.kind !== "cas") || !(numOrNull(L.c) !== null && L.c < now)) continue;
+    const sys = L.kind === "single" && (L.o === "auto" || L.o === "unclaimed");
+    const gf = gfOf(L);
+    const id = identOf(L);
+    const live = isLive(L);
+    const tally = sys ? gf.sys : gf.owner;
+    // rawCk: the first row's content key (model.identities keeps the first row's; bk follows the newest row)
+    const t = tally.get(id) || { live: 0, rows: 0, bk: L.bk, c: -Infinity, rawCk: L.ck || null };
+    t.rows++;
+    if (live) t.live++;
+    if (num(L.c, -Infinity) > t.c) Object.assign(t, { c: num(L.c, -Infinity), bk: L.bk });
+    tally.set(id, t);
+    if (!(sys && live) || markets.blocked.has(L.m)) continue;
+    if (!gf.cells.has(L.m)) gf.cells.set(L.m, new Map());
+    const cell = gf.cells.get(L.m);
+    const v = cell.get(id) || { n: 0, r0: null };
+    v.n++;
+    if (!v.r0 || num(L.c, -Infinity) > num(v.r0.c, -Infinity) || (L.c === v.r0.c && cmp(L.id, v.r0.id) < 0)) v.r0 = L;
+    cell.set(id, v);
   }
   const mains = [];
-  for (const list of byGF.values()) {
-    const ident = new Map();
-    for (const gr of list) {
-      const e = ident.get(gr.ident) || { key: gr.ident, live: 0, rows: 0, ownerLive: 0, owner: 0 };
-      e.live += gr.liveSys;
-      e.rows += gr.sys;
-      e.ownerLive += gr.ownerLive;
-      e.owner += gr.owner;
-      ident.set(gr.ident, e);
-    }
-    const ids = [...ident.values()].sort((a, b) => cmp(a.key, b.key));
-    const anySys = ids.some((e) => e.rows > 0);
+  for (const gf of gfs.values()) {
+    const tally = gf.sys.size ? gf.sys : gf.owner;
     let primary = null;
-    for (const e of ids) {
-      // system-made rows decide; with none, the owner's rows (model.identities' order)
-      const [l, r] = anySys ? [e.live, e.rows] : [e.ownerLive, e.owner];
-      if (r === 0) continue;
-      if (!primary || l > primary.l || (l === primary.l && r > primary.r)) primary = { key: e.key, l, r };
+    for (const id of [...tally.keys()].sort(cmp)) {
+      const t = tally.get(id);
+      if (!primary || t.live > primary.live || (t.live === primary.live && t.rows > primary.rows)) primary = { id, live: t.live, rows: t.rows, bk: t.bk, rawCk: t.rawCk };
     }
-    const byM = new Map();
-    for (const gr of list) {
-      if (!byM.has(gr.m)) byM.set(gr.m, []);
-      byM.get(gr.m).push(gr);
+    const done = new Set();
+    for (const [m, cell] of gf.cells) {
+      let best = null;
+      for (const id of [...cell.keys()].sort(cmp)) {
+        const v = cell.get(id);
+        if (!best || v.n > best.n || (v.n === best.n && primary && id === primary.id && best.id !== primary.id)) best = { id, n: v.n, r0: v.r0 };
+      }
+      const key = keyOf(best.r0);
+      if (offerKeys.has(key)) mains.push({ key, n: best.n });
+      done.add(m);
     }
-    for (const cell of byM.values()) {
-      cell.sort((a, b) => cmp(a.key, b.key));
-      let main = null;
-      for (const gr of cell) {
-        if (!(gr.liveSys > 0)) continue;
-        if (!main || gr.liveSys > main.liveSys || (gr.liveSys === main.liveSys && primary && gr.ident === primary.key && main.ident !== primary.key)) main = gr;
-      }
-      if (!main && primary) {
-        for (const gr of cell) {
-          if (gr.ident !== primary.key) continue;
-          main = gr;
-          break;
-        }
-      }
-      if (main) mains.push(main);
+    if (!primary) continue;
+    // cells with no live advised row: the primary offer, new, where today's lister could list it
+    const rawCk = primary.rawCk;
+    for (const m of MARKETS) {
+      if (done.has(m) || markets.blocked.has(m) || markets.off.has(m)) continue;
+      if (gf.f === "noclaim" && !NOCLAIM_SHELF.has(m)) continue;
+      const key = rawCk && offerKeys.has(m + "|" + rawCk) ? m + "|" + rawCk : offerKeys.has(m + "|" + primary.bk) ? m + "|" + primary.bk : null;
+      if (key) mains.push({ key, n: 0 });
     }
   }
-  mains.sort((a, b) => b.liveSys - a.liveSys || cmp(a.key, b.key));
-  return mains.map((gr) => gr.key);
+  mains.sort((a, b) => b.n - a.n || cmp(a.key, b.key));
+  const out = [];
+  const seen = new Set();
+  for (const x of mains) {
+    if (seen.has(x.key)) continue;
+    seen.add(x.key);
+    out.push(x.key);
+  }
+  return out;
 }
 
 /**
@@ -1660,6 +1726,8 @@ async function oldSide({
   venueTimeoutMs = VENUE_TIMEOUT_MS,
   trackerCap = MAX_TRACKER_OFFERS,
   eventSets = new Map(),
+  takes = null,
+  sold = {},
 }) {
   const games = {};
   const offers = {};
@@ -1700,7 +1768,7 @@ async function oldSide({
   for (const r of report && Array.isArray(report.games) ? report.games : []) if (r && r.key && r.farm && num(r.farm.onHand) > 0) trackerOnHand.set(r.key, num(r.farm.onHand));
 
   let keys = [...new Set([...live.keys(), ...stock.keys()])].filter(Boolean);
-  keys.sort((a, b) => (live.get(b) || 0) - (live.get(a) || 0) || (stock.get(b) || 0) - (stock.get(a) || 0) || a.localeCompare(b));
+  keys.sort((a, b) => (live.get(b) || 0) - (live.get(a) || 0) || (stock.get(b) || 0) - (stock.get(a) || 0) || cmp(a, b));
   if (keys.length > MAX_OLD_GAMES) {
     c.gamesCut = keys.length - MAX_OLD_GAMES;
     notes.push(keys.length + " claim games have stock or live rows; today's rules were computed for the first " + MAX_OLD_GAMES + " (live first).");
@@ -1763,21 +1831,18 @@ async function oldSide({
     if (!L.g || (L.kind !== "single" && L.kind !== "cas")) continue;
     const key = L.m + "|" + (L.ck || L.bk);
     const sys = L.kind === "single" && (L.o === "auto" || L.o === "unclaimed");
-    const owner = !sys && (L.kind === "cas" || L.o === "manual");
     let gr = groups.get(key);
     if (!gr) {
-      gr = { key, m: L.m, g: L.g, gl: L.gl || L.g, f: L.f, n: L.n, set: e.set, setId: "", live: false, sys: 0, liveSys: 0, owner: 0, ownerLive: 0, ident: L.ex && L.ck ? "c:" + L.ck : "b:" + L.bk };
+      gr = { key, m: L.m, g: L.g, gl: L.gl || L.g, f: L.f, n: L.n, set: e.set, setId: "", live: false, sys: 0, liveSys: 0 };
       groups.set(key, gr);
     }
-    if (sys && !gr.sys) Object.assign(gr, { f: L.f, g: L.g, gl: L.gl || L.g, n: L.n, set: e.set || gr.set, ident: L.ex && L.ck ? "c:" + L.ck : "b:" + L.bk });
+    if (sys && !gr.sys) Object.assign(gr, { f: L.f, g: L.g, gl: L.gl || L.g, n: L.n, set: e.set || gr.set });
     if (!gr.set && e.set) gr.set = e.set;
     if (sys && L.f === "claim" && L.o === "auto" && e.setId && eventSets.has(e.setId)) gr.setId = e.setId;
     if (sys) gr.sys++;
-    if (owner) gr.owner++;
     if (L.st === "active") {
       gr.live = true;
       if (sys) gr.liveSys++;
-      if (owner) gr.ownerLive++;
     }
   }
 
@@ -1843,18 +1908,31 @@ async function oldSide({
 
   let list = [...groups.values()];
   const rank = (x) => (x.liveSys ? 0 : x.live ? 1 : x.sys ? 2 : 3);
-  list.sort((a, b) => rank(a) - rank(b) || a.key.localeCompare(b.key));
+  list.sort((a, b) => rank(a) - rank(b) || cmp(a.key, b.key));
   if (list.length > MAX_OFFERS) {
     c.offersCut = list.length - MAX_OFFERS;
     notes.push(list.length + " offers; today's prices were computed for the first " + MAX_OFFERS + " (live system-made first).");
     list = list.slice(0, MAX_OFFERS);
   }
-  // the tracker is asked only for what a logged row reads
-  const wanted = trackerOffers(new Map(list.map((gr) => [gr.key, gr])));
+  // the tracker is asked only for what a logged row reads: the model's main offer of each cell it prices
+  const tk = takes || takesOf(d, af, platiTakes, ggselTakes);
+  const V = (d.venues && d.venues.VENUES) || {};
+  const marketState = { blocked: new Set(), off: new Set() };
+  for (const m of MARKETS) {
+    const off = tk[m] === false;
+    if ((V[m] && V[m].blocked) || (off && (m === "digiseller" || m === "ggsel"))) marketState.blocked.add(m);
+    if (off) marketState.off.add(m);
+  }
+  const listingsOf = function* () {
+    for (const e of byId.values()) yield e.L;
+  };
+  const wanted = trackerOffers(listingsOf(), new Set(list.map((gr) => gr.key)), marketState, now, sold);
   const askTracker = new Set(wanted.slice(0, Math.max(0, trackerCap)));
   c.trackerCut = Math.max(0, wanted.length - askTracker.size);
   if (c.trackerCut)
-    notes.push("The tracker's suggestion (suggestForNew) was asked for " + askTracker.size + " of " + wanted.length + " cells' main offers (live system-made first): the rest log no tracker price.");
+    notes.push(
+      "The tracker's suggestion (suggestForNew) was asked for " + askTracker.size + " of " + wanted.length + " priced cells' main offers (live system-made first): the rest log no tracker price.",
+    );
 
   const floorFor = (m) => (d.venues && typeof d.venues.floorFor === "function" ? num(d.venues.floorFor(m)) : 0);
   const hasCatalog = !!(catalog && typeof catalog.values === "function" && catalog.size);
@@ -2157,7 +2235,30 @@ async function load({ now: nowIn, deps = null, venueTimeoutMs = VENUE_TIMEOUT_MS
   await breathe();
   const afb = afBlock({ d, af, keywords, labels, platiTakes, ggselTakes });
   await yieldNow();
-  const old = await oldSide({ d, af, report, byId: nl.byId, demand, research, catalog, pricing: S.pricing, labels, platiTakes, ggselTakes, now, notes, venueTimeoutMs, trackerCap, eventSets });
+  // the listings with a sale before the cut and at or after it (the model's activeAt: a single-unit row
+  // that sold is over, an Eldorado offer that sold is not killed at 21 days, a later sale keeps a row live)
+  const sold = { before: new Set(), after: new Set() };
+  for (const x of sales) if (x.lid) (x.t < now ? sold.before : sold.after).add(x.lid);
+  const old = await oldSide({
+    d,
+    af,
+    report,
+    byId: nl.byId,
+    demand,
+    research,
+    catalog,
+    pricing: S.pricing,
+    labels,
+    platiTakes,
+    ggselTakes,
+    now,
+    notes,
+    venueTimeoutMs,
+    trackerCap,
+    eventSets,
+    takes: afb.takes,
+    sold,
+  });
 
   const ledger = report.ledger || {};
   const counts = {
@@ -2488,6 +2589,7 @@ module.exports = {
   readEventSets,
   refillShelf,
   trackerOffers,
+  takesOf,
   setItems,
   dropsFromItems,
   makeHasher,
