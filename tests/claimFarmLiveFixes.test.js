@@ -1680,27 +1680,39 @@ test("without farmControl.restartIfRunning (a partial deploy) the old restart is
   assert.deepEqual(calls.docker, [{ action: "restart", container: "twitchbotx7" }]);
 });
 
-/* ======== an execute job that runs twice changes nothing (review 2, H8) ======== */
+/* ===== an execute job over a RUNNING task changes nothing (reviews 2-4) ===== */
+// Review round 4 replaced the earlier refusal/top-up machinery with ONE guard
+// in the lane's executeDecision: an ACTIVE row finishes the job as a no-op and
+// has its rescan flag cleared. Every other status runs exactly as production's
+// code at 40d1fd0 — the tests below for failed and planned rows pin that.
 
 // One AutoFarmTask row, modelled: the lane's upsertTask, executeTask's final
 // write and every read see the same object, as they would the same document.
-function oneTaskRow() {
-  const ROW = {};
+// Every status the row passes through is recorded in `statuses`.
+function oneTaskRow(initial = null) {
+  const ROW = initial ? { ...initial } : {};
+  const statuses = [];
+  const writes = [];
   const view = () => (ROW._id ? { ...ROW, toObject: () => ({ ...ROW }) } : null);
   AutoFarmTask.findOneAndUpdate = (f, u) =>
     q(() => {
+      writes.push({ op: "findOneAndUpdate", f, u });
       if (!ROW._id) Object.assign(ROW, { _id: "row-1", game: f.game, campaignId: f.campaignId });
       Object.assign(ROW, u.$set);
+      statuses.push(ROW.status);
       return view();
     });
   AutoFarmTask.updateOne = (f, u) =>
     q(() => {
+      writes.push({ op: "updateOne", f, u });
+      if (f && f.status && f.status !== ROW.status) return { modifiedCount: 0 };
       Object.assign(ROW, u.$set || {});
+      statuses.push(ROW.status);
       return { modifiedCount: 1 };
     });
   AutoFarmTask.findOne = () => q(() => view());
   AutoFarmTask.findById = () => q(() => view());
-  return ROW;
+  return { ROW, statuses, writes };
 }
 
 const quinfallVerdict = () => ({
@@ -1713,11 +1725,12 @@ const quinfallVerdict = () => ({
   reason: "demand",
 });
 const quinfallLane = { game: "The Quinfall", gameKey: "the quinfall", mode: "live" };
+const execStep = () => require(path.join(UTILS, "farm2", "steps", "execute.js"));
 
 test("an execute job that runs again finishes as a no-op: no second claim, the row keeps its first set (old bytes: 20 claimed, first set dropped)", async () => {
   AF = { ...AF, dryRun: false, hostId: "contabo" };
-  const ROW = oneTaskRow();
-  const exec = require(path.join(UTILS, "farm2", "steps", "execute.js"));
+  const { ROW } = oneTaskRow();
+  const exec = execStep();
   const r1 = await exec.executeDecision({ verdict: quinfallVerdict(), lane: quinfallLane, af: { ...AF }, shadow: false });
   assert.equal(r1.accounts, 10);
   const first = { status: ROW.status, accounts: ROW.assignedAccounts.slice(), bots: ROW.bots.slice() };
@@ -1730,88 +1743,51 @@ test("an execute job that runs again finishes as a no-op: no second claim, the r
   assert.deepEqual(ROW.bots, first.bots);
 });
 
-test("executeTask refuses a stopped row keeping its accounts, before claiming anything (old bytes: overwrote it)", async () => {
-  AF = { ...AF, dryRun: false };
-  AutoFarmTask.findById = () =>
-    q({ _id: "t-albion", status: "stopped", executedAt: hoursAgo(5), assignedAccounts: ["kept1", "kept2"], bots: [{ container: "twitchbotx4" }] });
-  await assert.rejects(
-    autoFarmer.executeTask(albionTask(), { af: { ...AF }, host: HOST }),
-    (e) => e.alreadyExecuted === true && /the task is stopped and keeps its 2 account\(s\)/.test(e.message),
-  );
-  assert.equal(calls.claimed, 0);
-  assert.deepEqual(calls.createBot, []);
-});
-
-test("row rules: running or an interrupted execute holds work, stopped/completed keep inventory, a failed row never holds work (round-2 bytes: a failed row held work)", () => {
-  const { taskHoldsWork: h, taskKeepsInventory: k, taskRefusesExecution: r, taskNeedsAppend: a } = autoFarmer;
-  const t = new Date();
-  assert.equal(h(null), false);
-  assert.equal(h({ status: "active" }), true);
-  assert.equal(h({ status: "planned", executedAt: t, assignedAccounts: ["a"] }), true, "an interrupted execute");
-  assert.equal(h({ status: "planned", bots: [{ container: "x" }], executedAt: null }), false, "a dry-run reuse plan");
-  assert.equal(h({ status: "planned" }), false);
-  assert.equal(h({ status: "skipped", executedAt: t, bots: [], assignedAccounts: [] }), false);
-  // A failed row never holds work: its retry must run, as a top-up of itself.
-  const failedReuse = { status: "failed", executedAt: t, bots: [{ container: "x" }], assignedAccounts: ["a1"] };
-  assert.equal(h(failedReuse), false);
-  assert.equal(r(failedReuse), false);
-  assert.equal(a(failedReuse), true);
-  assert.equal(a({ status: "failed", bots: [], assignedAccounts: [] }), false, "an empty failure is a plain retry");
-  // A skip recorded over an executed row keeps what that row listed: topped up too.
-  assert.equal(a({ status: "skipped", decision: "skip_no_capacity", executedAt: t, assignedAccounts: ["k1"] }), true);
-  assert.equal(a({ status: "skipped", decision: "skip_no_capacity", bots: [{ container: "x" }] }), false, "a dry-run plan's bots, never executed");
-  assert.equal(a({ status: "planned", executedAt: null, bots: [{ container: "x" }] }), false);
-  // Stopped and completed rows keep their accounts and are never executed again.
-  for (const status of ["stopped", "completed"]) {
-    const row = { status, executedAt: t, assignedAccounts: ["inv"] };
-    assert.equal(h(row), false, status);
-    assert.equal(k(row), true, status);
-    assert.equal(r(row), true, status);
-    assert.equal(a(row), false, status);
-  }
-  assert.equal(r({ status: "active" }), true);
-  assert.equal(r({ status: "skipped", decision: "skip_no_accounts" }), false);
-});
-
-test("the legacy tick leaves a rescanned stopped task out and settles it (old bytes: planned over it; round 2: decided every tick)", async () => {
+test("an execute job over an ACTIVE row claims nothing, writes nothing but its rescan flag, under {_id, status: active} (production: re-planned and re-executed it)", async () => {
   AF = { ...AF, dryRun: false, hostId: "contabo" };
-  LIVE = [campaign("Game A", "a1")];
-  const stopped = {
-    _id: "row-a1",
-    game: "Game A",
-    campaignId: "a1",
-    status: "stopped",
+  const running = {
+    _id: "row-a",
+    game: "The Quinfall",
+    campaignId: "q1",
+    status: "active",
     decision: "farm",
     rescanRequested: true,
-    executedAt: hoursAgo(30),
-    bots: [{ host: "contabo", file: "config_3.json", container: "twitchbotx3" }],
-    assignedAccounts: ["inv1", "inv2", "inv3"],
-    error: "twitchbotx3: exited",
+    executedAt: hoursAgo(5),
+    bots: [{ host: "contabo", file: "config_4.json", container: "twitchbotx4" }],
+    assignedAccounts: ["r1", "r2"],
   };
-  // The tick reads one assigned account per row ($slice: 1).
-  EXISTING = [{ ...stopped, assignedAccounts: ["inv1"] }];
-  const writes = [];
-  AutoFarmTask.updateOne = (f, u) => q(() => (writes.push({ f, u }), { modifiedCount: 1 }));
-  AutoFarmTask.findOne = () => q(stopped);
-  AutoFarmTask.findById = () => q(stopped);
-  const summary = await autoFarmer.runOnce();
-  assert.deepEqual(calls.records, [], "no plan written over it");
+  const { ROW, writes } = oneTaskRow(running);
+  const factory = STUBS.get(path.join(UTILS, "botFactory"));
+  const realStart = factory.startContainer;
+  let starts = 0;
+  factory.startContainer = async () => {
+    starts += 1;
+  };
+  try {
+    const exec = execStep();
+    for (const verdict of [quinfallVerdict(), { ...quinfallVerdict(), decision: "reuse_existing", reuseTaskId: "src", topUpAllowed: false }]) {
+      const r = await exec.executeDecision({ verdict, lane: quinfallLane, af: { ...AF }, shadow: false });
+      assert.equal(r.alreadyExecuted, true, verdict.decision);
+      assert.equal(r.taskId, "row-a");
+    }
+  } finally {
+    factory.startContainer = realStart;
+  }
   assert.equal(calls.claimed, 0);
-  assert.equal(summary.candidates, 0, "not a candidate, so it takes no share of the pool");
-  assert.equal(summary.rescansRefused, 1);
-  assert.equal(writes.length, 1);
-  assert.deepEqual(writes[0].f, { _id: "row-a1", status: "stopped", rescanRequested: true }, "only while it is still that row");
-  assert.equal(writes[0].u.$set.rescanRequested, false);
-  assert.match(writes[0].u.$set.error, /^Not executed again \(.*\): the task is stopped and keeps its 3 account\(s\)/, "counted on the full row, not the tick's projection");
-  assert.match(writes[0].u.$set.error, /\| twitchbotx3: exited$/, "its earlier error is kept");
-  assert.deepEqual(Object.keys(writes[0].u.$set).sort(), ["error", "rescanRequested"], "status, bots and accounts untouched");
+  assert.deepEqual(calls.createBot, []);
+  assert.equal(starts, 0, "no bot restarted");
+  assert.deepEqual(writes, [
+    { op: "updateOne", f: { _id: "row-a", status: "active" }, u: { $set: { rescanRequested: false } } },
+  ], "one conditional write: the flag (the second run found it already clear)");
+  assert.equal(ROW.rescanRequested, false);
+  assert.equal(ROW.status, "active");
+  assert.deepEqual(ROW.assignedAccounts, ["r1", "r2"]);
+  assert.deepEqual(ROW.bots, running.bots);
 });
 
 test("unrecyclableLogins is exported for the pool's Unclaim route (old bytes: not exported)", () => {
   assert.equal(typeof autoFarmer.unrecyclableLogins, "function");
 });
-
-/* ===== review 3: a failed row is retried; a refused row is settled, once ===== */
 
 // Two rows: the warm source task (the game's previous campaign) and this
 // campaign's own row, modelled as one object every read and write sees.
@@ -1856,9 +1832,10 @@ const reuseVerdict = () => ({
   reason: "recurring",
 });
 
-test("a lane reuse whose bot did not restart is retried by its job: the retry restarts it and the task goes active (round-2 bytes: a no-op, never farmed)", async () => {
-  // Review round 3, p1: an SSH flap fails the restart, executeReuse writes the
-  // row failed WITH the bots/accounts it borrowed and throws for a retry.
+test("a FAILED reuse is retried by its job as production's code retries it: the bot is restarted and the task goes active", async () => {
+  // Review round 3, p1: the restart fails once (an SSH flap) and the row is
+  // written failed with the bot and accounts it borrowed; the job's retry must
+  // not be swallowed by the guard (it reads "failed", not "active").
   AF = { ...AF, dryRun: false, hostId: "contabo" };
   const { OWN } = reuseWorld();
   const factory = STUBS.get(path.join(UTILS, "botFactory"));
@@ -1868,7 +1845,7 @@ test("a lane reuse whose bot did not restart is retried by its job: the retry re
     starts += 1;
     if (starts === 1) throw new Error("ssh: connect to host contabo port 22: Connection timed out");
   };
-  const exec = require(path.join(UTILS, "farm2", "steps", "execute.js"));
+  const exec = execStep();
   const ql = { game: "The Quinfall", gameKey: "the quinfall", mode: "live" };
   try {
     await assert.rejects(
@@ -1876,11 +1853,10 @@ test("a lane reuse whose bot did not restart is retried by its job: the retry re
       /no bot could be restarted/,
     );
     assert.equal(OWN.status, "failed");
-    assert.equal(OWN.bots.length, 1, "fixture: the failed row lists the bot it borrowed");
     const r2 = await exec.executeDecision({ verdict: reuseVerdict(), lane: ql, af: { ...AF }, shadow: false });
     assert.notEqual(r2.alreadyExecuted, true);
     assert.deepEqual(r2.restarted, ["twitchbotx5"]);
-    assert.equal(starts, 2, "the retry restarted the bot");
+    assert.equal(starts, 2);
     assert.equal(OWN.status, "active");
     assert.deepEqual(OWN.assignedAccounts, ["a1", "a2", "a3"]);
     assert.equal(calls.claimed, 0, "a reuse claims nothing");
@@ -1889,464 +1865,48 @@ test("a lane reuse whose bot did not restart is retried by its job: the retry re
   }
 });
 
-test("an operator rescan revives a failed reuse too, and clears its flag (round-2 bytes: refused, flag left set for ever)", async () => {
+test("a FAILED fresh row is retried as production's: re-planned, then executed with the whole plan", async () => {
   AF = { ...AF, dryRun: false, hostId: "contabo" };
-  const { OWN } = reuseWorld();
-  Object.assign(OWN, {
-    _id: "own-q2",
+  const failed = {
+    _id: "row-f",
     game: "The Quinfall",
-    campaignId: "q2",
+    campaignId: "q1",
     status: "failed",
-    decision: "reuse_existing",
-    bots: [{ host: "contabo", file: "config_5.json", container: "twitchbotx5", reused: true, shared: true }],
-    assignedAccounts: ["a1", "a2", "a3"],
+    decision: "farm",
     executedAt: hoursAgo(1),
-    rescanRequested: true,
-  });
-  const exec = require(path.join(UTILS, "farm2", "steps", "execute.js"));
-  const realLane = require(path.join(UTILS, "farm2", "lane.js"));
-  assert.deepEqual(
-    realLane.decisionDue({ existing: { ...OWN }, shadow: false, af: { dryRun: false } }),
-    { due: true, why: "rescan" },
-    "a failed row's rescan is due: it is not refused",
-  );
-  const r = await exec.executeDecision({
-    verdict: reuseVerdict(),
-    lane: { game: "The Quinfall", gameKey: "the quinfall", mode: "live" },
-    af: { ...AF },
-    shadow: false,
-  });
-  assert.notEqual(r.alreadyExecuted, true);
-  assert.equal(OWN.status, "active");
-  assert.equal(OWN.rescanRequested, false);
-  assert.deepEqual(
-    realLane.decisionDue({ existing: { ...OWN }, shadow: false, af: { dryRun: false } }),
-    { due: false, why: "settled" },
-  );
-});
-
-// A failed reuse row (bots borrowed, accounts listed) that is now decided as a
-// FRESH farm — the reuse source is gone.
-function failedRowWorld() {
-  const ROW = {
-    _id: "row-f1",
-    game: "The Quinfall",
-    campaignId: "q1",
-    status: "failed",
-    decision: "reuse_existing",
-    executedAt: hoursAgo(2),
-    bots: [{ host: "contabo", file: "config_5.json", container: "twitchbotx5", reused: true, shared: true }],
-    assignedAccounts: ["b1", "b2", "b3"],
-    rescanRequested: true,
+    error: "twitchbotx91: compose up failed",
+    bots: [],
+    assignedAccounts: [],
   };
-  const statuses = [];
-  const view = () => ({ ...ROW, toObject: () => ({ ...ROW }) });
-  AutoFarmTask.findOne = (f) => q(() => (f && f["bots.0"] ? null : f && f.campaignId === "q1" ? view() : null));
-  AutoFarmTask.findById = () => q(() => view());
-  AutoFarmTask.findOneAndUpdate = (f, u) =>
-    q(() => {
-      calls.records.push(u.$set);
-      Object.assign(ROW, u.$set);
-      statuses.push(ROW.status);
-      return view();
-    });
-  AutoFarmTask.updateOne = (f, u) =>
-    q(() => {
-      Object.assign(ROW, (u && u.$set) || {});
-      statuses.push(ROW.status);
-      return { modifiedCount: 1 };
-    });
-  return { ROW, statuses };
-}
-
-test("a fresh plan over a failed row that lists accounts tops it up: keeps them, adds only what is missing, never flips it to planned (round-2 bytes: refused)", async () => {
-  AF = { ...AF, dryRun: false, hostId: "contabo" };
-  const { ROW, statuses } = failedRowWorld();
-  const exec = require(path.join(UTILS, "farm2", "steps", "execute.js"));
-  const r = await exec.executeDecision({
-    verdict: quinfallVerdict(), // farm, 10 planned
-    lane: quinfallLane,
-    af: { ...AF },
-    shadow: false,
-  });
+  const { ROW, statuses } = oneTaskRow(failed);
+  const r = await execStep().executeDecision({ verdict: quinfallVerdict(), lane: quinfallLane, af: { ...AF }, shadow: false });
   assert.notEqual(r.alreadyExecuted, true);
-  assert.equal(calls.claimed, 7, "10 planned, 3 already listed");
-  assert.equal(r.accounts, 7);
-  assert.ok(!statuses.includes("planned"), "never read as an interrupted execute: " + statuses.join(","));
-  assert.equal(ROW.status, "active");
-  assert.deepEqual(ROW.assignedAccounts.slice(0, 3), ["b1", "b2", "b3"], "what it listed is kept");
+  assert.deepEqual(statuses, ["planned", "active"]);
+  assert.equal(calls.claimed, 10);
+  assert.equal(r.accounts, 10);
   assert.equal(ROW.assignedAccounts.length, 10);
-  assert.equal(ROW.bots[0].container, "twitchbotx5");
-  assert.equal(ROW.bots.length, 2, "its bot plus the new one");
-  assert.equal(ROW.rescanRequested, false);
 });
 
-test("the legacy tick tops up a failed row the same way (round-2 bytes: 'already_executed', never farmed)", async () => {
+test("a PLANNED row executes as production's: claimed, created, active", async () => {
   AF = { ...AF, dryRun: false, hostId: "contabo" };
-  MarketResearch.findOne = () => q({ game: "x", demandScore: 45, scannedAt: new Date(), sellers: 9 });
-  const { ROW, statuses } = failedRowWorld();
-  LIVE = [campaign("The Quinfall", "q1")];
-  EXISTING = [{ ...ROW, assignedAccounts: ROW.assignedAccounts.slice(0, 1) }];
-  const summary = await autoFarmer.runOnce();
-  assert.equal(summary.candidates, 1, "a rescanned failed row is re-decided");
-  assert.equal(calls.records.length, 1);
-  assert.equal(calls.records[0].decision, "farm");
-  assert.ok(!("status" in calls.records[0]), "the plan keeps the row failed until it runs");
-  assert.ok(!statuses.includes("planned"));
-  const planned = calls.records[0].plannedAccounts;
-  assert.ok(planned > 3, "fixture: a plan larger than what the row lists (" + planned + ")");
-  assert.equal(calls.claimed, planned - 3, "adds only what is missing");
-  assert.equal(ROW.status, "active");
-  assert.deepEqual(ROW.assignedAccounts.slice(0, 3), ["b1", "b2", "b3"]);
-});
-
-test("a failed row's retry that places nothing stays failed — the bots it lists are the ones that did not start", async () => {
-  AF = { ...AF, dryRun: false };
-  const { ROW } = failedRowWorld();
-  const factory = STUBS.get(path.join(UTILS, "botFactory"));
-  const realCreate = factory.createBot;
-  factory.createBot = async () => {
-    throw new Error("compose up failed");
-  };
-  try {
-    await assert.rejects(
-      autoFarmer.executeTask({ ...ROW, plannedAccounts: 5, toObject: () => ({ ...ROW, plannedAccounts: 5 }) }, { af: { ...AF }, host: HOST }),
-      /compose up failed/,
-    );
-  } finally {
-    factory.createBot = realCreate;
-  }
-  assert.equal(ROW.status, "failed");
-  assert.deepEqual(ROW.assignedAccounts, ["b1", "b2", "b3"], "nothing it listed is dropped");
-  assert.equal(calls.claimed, 2, "5 planned, 3 listed");
-});
-
-test("a failed row whose plan it already covers adds nothing and says so", async () => {
-  AF = { ...AF, dryRun: false };
-  const { ROW } = failedRowWorld();
-  await assert.rejects(
-    autoFarmer.executeTask({ ...ROW, plannedAccounts: 3 }, { af: { ...AF }, host: HOST }),
-    /Nothing to add: the failed task already lists 3 account\(s\) for a plan of 3/,
-  );
-  assert.equal(calls.claimed, 0);
-  assert.equal(ROW.status, "failed");
-});
-
-// A retryable skip recorded over a row that still lists accounts from an
-// earlier execution (before 2026-10-03 a rescanned stopped or completed task
-// could be skipped like this: its inventory stays listed on the row).
-function skippedLeftoversWorld() {
-  const ROW = {
-    _id: "row-k1",
+  const plan = {
+    _id: "row-p",
     game: "The Quinfall",
     campaignId: "q1",
-    status: "skipped",
-    decision: "skip_no_capacity",
-    reason: "No capacity on Contabo",
-    executedAt: hoursAgo(40),
-    bots: [{ host: "contabo", file: "config_7.json", container: "twitchbotx7" }],
-    assignedAccounts: ["k1", "k2", "k3"],
+    status: "planned",
+    decision: "farm",
+    decidedAt: hoursAgo(1),
+    plannedAccounts: 10,
+    bots: [],
+    assignedAccounts: [],
   };
-  const statuses = [];
-  const view = () => ({ ...ROW, toObject: () => ({ ...ROW }) });
-  AutoFarmTask.findOne = (f) => q(() => (f && f["bots.0"] ? null : f && f.campaignId === "q1" ? view() : null));
-  AutoFarmTask.findById = () => q(() => view());
-  AutoFarmTask.findOneAndUpdate = (f, u) =>
-    q(() => {
-      calls.records.push(u.$set);
-      Object.assign(ROW, u.$set);
-      statuses.push(ROW.status);
-      return view();
-    });
-  AutoFarmTask.updateOne = (f, u) =>
-    q(() => {
-      if (f.status && f.status !== ROW.status) return { modifiedCount: 0 };
-      Object.assign(ROW, (u && u.$set) || {});
-      statuses.push(ROW.status);
-      return { modifiedCount: 1 };
-    });
-  LIVE = [campaign("The Quinfall", "q1")];
-  EXISTING = [{ ...ROW, assignedAccounts: ["k1"] }];
-  return { ROW, statuses };
-}
-
-test("a retryable skip over a row that lists accounts is re-planned as a top-up: kept, never flipped to planned (before: planned over them, then refused for ever)", async () => {
-  AF = { ...AF, dryRun: false, hostId: "contabo" };
-  MarketResearch.findOne = () => q({ game: "x", demandScore: 45, scannedAt: new Date(), sellers: 9 });
-  const { ROW, statuses } = skippedLeftoversWorld();
-  const summary = await autoFarmer.runOnce();
-  assert.equal(summary.candidates, 1);
-  assert.ok(!statuses.includes("planned"), "never read as an interrupted execute: " + statuses.join(","));
-  const planned = calls.records[0].plannedAccounts;
-  assert.equal(calls.claimed, planned - 3, "adds only what is missing");
-  assert.equal(ROW.status, "active");
-  assert.deepEqual(ROW.assignedAccounts.slice(0, 3), ["k1", "k2", "k3"], "its accounts are kept");
-});
-
-test("that top-up, unable to start (nothing claimable), puts the retryable skip back", async () => {
-  AF = { ...AF, dryRun: false, hostId: "contabo" };
-  MarketResearch.findOne = () => q({ game: "x", demandScore: 45, scannedAt: new Date(), sellers: 9 });
-  const { ROW } = skippedLeftoversWorld();
-  let tried = 0;
-  AvailableAccount.findOneAndUpdate = () => {
-    tried += 1;
-    return q(null); // every claim misses
-  };
-  await autoFarmer.runOnce();
-  assert.ok(tried > 0, "the top-up was tried");
-  assert.equal(ROW.status, "skipped");
-  assert.equal(ROW.decision, "skip_no_capacity", "still a retryable skip, re-decided next tick");
-  assert.equal(ROW.reason, "No capacity on Contabo");
-  assert.deepEqual(ROW.assignedAccounts, ["k1", "k2", "k3"]);
-});
-
-test("the lane's execute step tops up such a row too, and puts the skip back when it cannot start", async () => {
-  AF = { ...AF, dryRun: false, hostId: "contabo" };
-  const exec = require(path.join(UTILS, "farm2", "steps", "execute.js"));
-  let world = skippedLeftoversWorld();
-  const r = await exec.executeDecision({ verdict: quinfallVerdict(), lane: quinfallLane, af: { ...AF }, shadow: false });
+  const { ROW, statuses } = oneTaskRow(plan);
+  const r = await execStep().executeDecision({ verdict: quinfallVerdict(), lane: quinfallLane, af: { ...AF }, shadow: false });
   assert.notEqual(r.alreadyExecuted, true);
-  assert.equal(calls.claimed, 7);
-  assert.equal(world.ROW.status, "active");
-  assert.ok(!world.statuses.includes("planned"));
-  resetCalls();
-  world = skippedLeftoversWorld();
-  AvailableAccount.findOneAndUpdate = () => q(null);
-  await assert.rejects(
-    exec.executeDecision({ verdict: quinfallVerdict(), lane: quinfallLane, af: { ...AF }, shadow: false }),
-    /Could not claim any pool accounts/,
-  );
-  assert.equal(world.ROW.status, "skipped");
-  assert.equal(world.ROW.decision, "skip_no_capacity");
-});
-
-test("a rescanned completed row takes no share of the tick's pool and is decided once (round-2 bytes: halved a fresh campaign's budget, every tick)", async () => {
-  // Review round 3, p2.
-  AF = { ...AF, dryRun: false, hostId: "contabo" };
-  READY = 50; // poolReserve 20 -> 30 spendable this tick
-  MarketResearch.findOne = () => q({ game: "x", demandScore: 45, scannedAt: new Date(), sellers: 9 });
-  LIVE = [campaign("Fresh Game", "f1")];
-  const freshPlan = () => calls.records.filter((r) => r.game === "Fresh Game").map((r) => r.plannedAccounts);
-  await autoFarmer.runOnce();
-  const alone = calls.claimed;
-  assert.ok(alone > 0, "fixture: the fresh campaign farms");
-  const alonePlan = freshPlan();
-  resetCalls();
-  const stuck = {
-    _id: "row-a1",
-    game: "Game A",
-    campaignId: "a1",
-    status: "completed",
-    decision: "farm",
-    rescanRequested: true,
-    executedAt: hoursAgo(30),
-    bots: [{ host: "contabo", file: "config_3.json", container: "twitchbotx3" }],
-    assignedAccounts: ["inv1"],
-  };
-  LIVE = [campaign("Game A", "a1"), campaign("Fresh Game", "f1")];
-  EXISTING = [stuck];
-  AutoFarmTask.findOne = (f) => q(() => (f && f.campaignId === "a1" ? stuck : null));
-  AutoFarmTask.findById = (id) => q(() => (String(id) === "row-a1" ? stuck : null));
-  AutoFarmTask.updateOne = (f, u) =>
-    q(() => {
-      if (f && f._id === "row-a1") Object.assign(stuck, u.$set);
-      return { modifiedCount: 1 };
-    });
-  const s1 = await autoFarmer.runOnce();
-  assert.deepEqual(freshPlan(), alonePlan, "the fresh campaign's plan is not cut by a share for the refused row");
-  assert.equal(calls.claimed, alone, "and it claims what it claimed alone");
-  assert.equal(s1.candidates, 1);
-  assert.equal(stuck.rescanRequested, false, "settled");
-  assert.equal(stuck.status, "completed");
-  assert.deepEqual(stuck.assignedAccounts, ["inv1"]);
-  LIVE = [campaign("Game A", "a1")];
-  const s2 = await autoFarmer.runOnce();
-  assert.equal(s2.candidates, 0, "not decided again");
-  assert.equal(s2.rescansRefused, 0, "and not even refused again: it is no longer due");
-});
-
-test("settleRefusedTask re-reads the row, writes only a flagged refused one, keeps its earlier error, and never throws", async () => {
-  const writes = [];
-  AutoFarmTask.updateOne = (f, u) => q(() => (writes.push({ f, u }), { modifiedCount: 1 }));
-  let row = { _id: "r1", status: "completed", rescanRequested: true, assignedAccounts: ["a", "b"], error: "old" };
-  AutoFarmTask.findById = () => q(() => row);
-  assert.equal(await autoFarmer.settleRefusedTask({ _id: "r1", rescanRequested: true }), true);
-  assert.equal(writes.length, 1);
-  assert.deepEqual(writes[0].f, { _id: "r1", status: "completed", rescanRequested: true });
-  assert.equal(writes[0].u.$set.rescanRequested, false);
-  assert.match(writes[0].u.$set.error, /^Not executed again \(\d{4}-\d\d-\d\d \d\d:\d\dZ\): the task is completed and keeps its 2 account\(s\); a rescan does not re-execute it \| old$/);
-  assert.equal(await autoFarmer.settleRefusedTask({ ...row, rescanRequested: false }), false);
-  assert.equal(writes.length, 1, "an unflagged row is not due anyway");
-  // Changed since the caller read it: failed now, so it is retried, not settled.
-  row = { ...row, status: "failed" };
-  assert.equal(await autoFarmer.settleRefusedTask({ _id: "r1", rescanRequested: true }), false);
-  assert.equal(writes.length, 1);
-  AutoFarmTask.findById = () => q(new Error("db down"));
-  assert.equal(await autoFarmer.settleRefusedTask({ _id: "r1", rescanRequested: true }), false);
-});
-
-test("the lane's candidate filter refuses a rescanned running, stopped, completed or interrupted row, and still decides a failed or skipped one", () => {
-  const realLane = require(path.join(UTILS, "farm2", "lane.js"));
-  const due = (existing) => realLane.decisionDue({ existing, shadow: false, af: { dryRun: false } });
-  const t = hoursAgo(3);
-  for (const status of ["active", "stopped", "completed"]) {
-    assert.deepEqual(due({ status, decision: "farm", rescanRequested: true, executedAt: t, assignedAccounts: ["a"] }), { due: false, why: "refused" }, status);
-  }
-  assert.deepEqual(
-    due({ status: "planned", decision: "farm", rescanRequested: true, executedAt: t, assignedAccounts: ["a"], decidedAt: t }),
-    { due: false, why: "refused" },
-    "an interrupted execute",
-  );
-  assert.deepEqual(due({ status: "failed", decision: "reuse_existing", rescanRequested: true, executedAt: t, bots: [{ container: "x" }] }), { due: true, why: "rescan" });
-  assert.deepEqual(due({ status: "skipped", decision: "skip_low_demand", rescanRequested: true }), { due: true, why: "rescan" });
-});
-
-// The lane's job queue, in memory, behind the farm2/jobs stub.
-function laneJobsQueue() {
-  const JOBS = [];
-  const jobsStub = STUBS.get(path.join(UTILS, "farm2/jobs"));
-  const saved = { ...jobsStub };
-  let n = 0;
-  Object.assign(jobsStub, {
-    enqueue: async (j) => {
-      const row = { _id: "job" + ++n, attempts: 0, status: "queued", market: "", campaignId: "", ...j };
-      JOBS.push(row);
-      return row;
-    },
-    claimNext: async (f = {}) => {
-      const j = JOBS.find((x) => x.status === "queued" && (!f._id || x._id === f._id));
-      if (!j) return null;
-      j.status = "running";
-      return j;
-    },
-    claimDueForLane: async (laneKey, limit, filter) => {
-      const kinds = (filter && filter.kind && filter.kind.$in) || null;
-      const out = JOBS.filter((j) => j.laneKey === laneKey && j.status === "queued" && (!kinds || kinds.includes(j.kind)));
-      for (const j of out) j.status = "running";
-      return out;
-    },
-    finish: async (j, result, { status = "done" } = {}) => {
-      j.status = status;
-      j.result = result;
-    },
-    fail: async (j, e) => {
-      j.status = "failed";
-      j.error = e.message;
-    },
-  });
-  return {
-    JOBS,
-    restore: () => {
-      for (const k of Object.keys(jobsStub)) delete jobsStub[k];
-      Object.assign(jobsStub, saved);
-    },
-  };
-}
-
-function stoppedRescannedRow() {
-  return {
-    _id: "row-g1",
-    game: "Game A",
-    campaignId: "g1",
-    status: "stopped", // the operator pressed Stop: its accounts stay as inventory
-    decision: "farm",
-    rescanRequested: true, // ...then "Rescan all"
-    executedAt: hoursAgo(20),
-    createdAt: hoursAgo(20),
-    bots: [{ host: "contabo", file: "config_3.json", container: "twitchbotx3" }],
-    assignedAccounts: ["inv1", "inv2", "inv3"],
-  };
-}
-
-test("a live lane settles a rescanned stopped task once: no decision, no budget, no execute job (round-2 bytes: all three, every cycle)", async () => {
-  // Review round 3, p2b and p2c.
-  AF = { ...AF, dryRun: false, hostId: "contabo", farm2Enabled: true, farm2Main: true };
-  MarketResearch.findOne = () => q({ game: "x", demandScore: 45, scannedAt: new Date(), sellers: 9 });
-  hosts.exists = async () => true;
-  FarmLane.updateOne = () => q({});
-  const ROW = stoppedRescannedRow();
-  LIVE = [campaign("Game A", "g1")];
-  AutoFarmTask.find = (f = {}) => q(() => (f.game === "Game A" && f.campaignId && f.campaignId.$in ? [ROW] : []));
-  AutoFarmTask.findOne = (f = {}) =>
-    q(() => {
-      if (f["bots.0"]) return null;
-      if (f.status && f.status.$in) return f.status.$in.includes(ROW.status) ? ROW : null;
-      return f.campaignId === "g1" ? ROW : null;
-    });
-  AutoFarmTask.findById = () => q(() => ROW);
-  const writes = [];
-  AutoFarmTask.findOneAndUpdate = (f, u) => q(() => (writes.push(u.$set), Object.assign(ROW, u.$set)));
-  AutoFarmTask.updateOne = (f, u) => q(() => (writes.push(u.$set), Object.assign(ROW, u.$set), { modifiedCount: 1 }));
-  const { JOBS, restore } = laneJobsQueue();
-  const realLane = require(path.join(UTILS, "farm2", "lane.js"));
-  const { BudgetCycle } = require(path.join(UTILS, "farm2", "budget.js"));
-  try {
-    const drawn = [];
-    const refused = [];
-    for (let i = 0; i < 3; i++) {
-      const cycle = new BudgetCycle({ accounts: 40, seats: 40, containers: 4, perGameCap: 60, hostConcurrency: 2, reason: "" });
-      cycle.allocate([]);
-      const before = cycle.unallocated;
-      const summary = await realLane.runLane(
-        { _id: "lane-a", game: "Game A", gameKey: "game a", mode: "live", state: "idle", consecutiveFailures: 0 },
-        { cycle, af: { ...AF }, hostCache: new Map() },
-      );
-      drawn.push(before - cycle.unallocated);
-      refused.push(summary.rescansRefused);
-    }
-    assert.deepEqual(drawn, [0, 0, 0], "no budget drawn");
-    assert.deepEqual(JOBS.filter((j) => j.kind === "decide" || j.kind === "execute"), [], "nothing decided or queued");
-    assert.deepEqual(refused, [1, 0, 0], "refused once, then no longer due");
-    assert.equal(writes.length, 1, "one write: the settle");
-    assert.deepEqual(Object.keys(writes[0]).sort(), ["error", "rescanRequested"]);
-    assert.equal(ROW.status, "stopped");
-    assert.deepEqual(ROW.assignedAccounts, ["inv1", "inv2", "inv3"]);
-  } finally {
-    restore();
-  }
-});
-
-test("a row that turns refused between the lane's filter and its decision draws no budget and queues nothing (round-2 bytes: a stopped row drew the plan)", async () => {
-  AF = { ...AF, dryRun: false, hostId: "contabo", farm2Enabled: true, farm2Main: true };
-  MarketResearch.findOne = () => q({ game: "x", demandScore: 45, scannedAt: new Date(), sellers: 9 });
-  hosts.exists = async () => true;
-  FarmLane.updateOne = () => q({});
-  LIVE = [campaign("Game A", "g1")];
-  // The filter reads a retryable skip; by the time the decision is made the
-  // operator has a stopped task there (rescanned, so it is also settled).
-  const SKIP = { _id: "row-g1", game: "Game A", campaignId: "g1", status: "skipped", decision: "skip_no_accounts" };
-  const NOW = stoppedRescannedRow();
-  AutoFarmTask.find = (f = {}) => q(() => (f.game === "Game A" && f.campaignId && f.campaignId.$in ? [SKIP] : []));
-  AutoFarmTask.findOne = (f = {}) =>
-    q(() => {
-      if (f["bots.0"]) return null;
-      if (f.status && f.status.$in) return f.status.$in.includes(NOW.status) ? NOW : null;
-      return f.campaignId === "g1" ? NOW : null;
-    });
-  AutoFarmTask.findById = () => q(() => NOW);
-  const settled = [];
-  AutoFarmTask.updateOne = (f, u) => q(() => (settled.push(u.$set), { modifiedCount: 1 }));
-  const { JOBS, restore } = laneJobsQueue();
-  const realLane = require(path.join(UTILS, "farm2", "lane.js"));
-  const { BudgetCycle } = require(path.join(UTILS, "farm2", "budget.js"));
-  try {
-    const cycle = new BudgetCycle({ accounts: 40, seats: 40, containers: 4, perGameCap: 60, hostConcurrency: 2, reason: "" });
-    cycle.allocate([]);
-    const before = cycle.unallocated;
-    const summary = await realLane.runLane(
-      { _id: "lane-a", game: "Game A", gameKey: "game a", mode: "live", state: "idle", consecutiveFailures: 0 },
-      { cycle, af: { ...AF }, hostCache: new Map() },
-    );
-    assert.equal(summary.decisions.length, 1, "fixture: the retryable skip was decided");
-    assert.equal(summary.decisions[0].wouldFarm, true, "fixture: and would farm (" + summary.decisions[0].decision + ")");
-    assert.equal(summary.alreadyExecuted, 1);
-    assert.equal(before - cycle.unallocated, 0, "no budget drawn");
-    assert.deepEqual(JOBS.filter((j) => j.kind === "execute"), []);
-    assert.equal(settled.length, 1);
-    assert.equal(settled[0].rescanRequested, false);
-  } finally {
-    restore();
-  }
+  assert.deepEqual(statuses, ["planned", "active"]);
+  assert.equal(calls.claimed, 10);
+  assert.equal(calls.createBot.length, 1);
+  assert.equal(ROW.status, "active");
 });
 
 /* ====== a deferred tick defers its listings too (review 2, H1) ====== */

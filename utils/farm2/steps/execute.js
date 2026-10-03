@@ -39,51 +39,6 @@ function brain() {
   return require("../../autoFarmer");
 }
 
-// The task-row rules live in autoFarmer (taskRefusesExecution,
-// taskNeedsAppend, settleRefusedTask) so both engines apply the same ones.
-// These fallbacks keep the same rules for a checkout whose autoFarmer
-// predates those exports.
-const listsWork = (row) =>
-  !!row && ((row.assignedAccounts || []).length > 0 || (row.bots || []).length > 0);
-function refusesExecutionFallback(row) {
-  if (!row) return false;
-  if (["active", "stopped", "completed"].includes(row.status)) return true;
-  return row.status === "planned" && !!row.executedAt && listsWork(row);
-}
-function needsAppendFallback(row) {
-  if (!row || !listsWork(row)) return false;
-  return row.status === "failed" || (row.status === "skipped" && !!row.executedAt);
-}
-function brainOrNull() {
-  try {
-    return brain();
-  } catch {
-    return null;
-  }
-}
-function rowRule(b, name, fallback) {
-  return b && typeof b[name] === "function" ? b[name] : fallback;
-}
-// Clear a refused row's rescan flag (the trigger that made it due), noting
-// why on the row (autoFarmer settleRefusedTask re-reads it first).
-// Best-effort; never throws.
-async function settleRefused(b, row) {
-  if (!row || !row._id || !row.rescanRequested) return;
-  try {
-    if (b && typeof b.settleRefusedTask === "function") {
-      await b.settleRefusedTask(row);
-      return;
-    }
-    const AutoFarmTask = require("../../../models/AutoFarmTask");
-    await AutoFarmTask.updateOne(
-      { _id: row._id, status: row.status, rescanRequested: true },
-      { $set: { rescanRequested: false } },
-    );
-  } catch {
-    /* the next cycle tries again */
-  }
-}
-
 // Write (or refresh) the AutoFarmTask row for this decision.
 //
 // The lane engine deliberately reuses AutoFarmTask rather than inventing a
@@ -91,12 +46,7 @@ async function settleRefused(b, row) {
 // allocation forecast and the legacy maintenance sweeps all read it. A task
 // created by a lane must be indistinguishable from one created by the legacy
 // engine, or half the system stops seeing it.
-//
-// `keepStatus` leaves the row's status as it is: a failed (or skipped) row
-// that still lists accounts or bots from an earlier execution is retried as a
-// top-up of itself (autoFarmer taskNeedsAppend), and flipped to "planned" it
-// would read as an interrupted execute that executeTask refuses.
-async function upsertTask(verdict, { dryRun = false, keepStatus = false } = {}) {
+async function upsertTask(verdict, { dryRun = false } = {}) {
   const AutoFarmTask = require("../../../models/AutoFarmTask");
   return AutoFarmTask.findOneAndUpdate(
     { game: verdict.game, campaignId: verdict.campaignId },
@@ -113,7 +63,7 @@ async function upsertTask(verdict, { dryRun = false, keepStatus = false } = {}) 
         internalSales: verdict.internalSales || 0,
         plannedAccounts: verdict.plannedAccounts || 0,
         targetAccounts: verdict.targetAccounts || 0,
-        ...(keepStatus ? {} : { status: "planned" }),
+        status: "planned",
         dryRun: !!dryRun,
         decidedAt: new Date(),
         rescanRequested: false,
@@ -757,41 +707,38 @@ async function executeDecision({ verdict, lane, cycle, af, shadow, granted = 0 }
   const b = brain();
   const af2 = af || settings.getAutoFarm();
 
-  // IDEMPOTENT (2026-10-03 reviews H8 and round 3). An execute job can run
-  // twice: a restart mid-execute (jobs.requeueStale), a jobs.finish that
-  // failed after the work was done (retried), a stale queued job drained after
-  // a paused lane is re-armed. The second run used to upsert the row back to
-  // "planned", claim a SECOND set and let executeTask overwrite
-  // bots/assignedAccounts — the first set and its containers stranded,
-  // claimed, outside maxAutoBots. So the row is read first, and a campaign
-  // whose re-execution is refused (autoFarmer taskRefusesExecution: active, an
-  // interrupted execute, or a stopped or completed task keeping its accounts)
-  // finishes this job as a no-op: its status is not touched, only a rescan
-  // flag is cleared, with the refusal noted on the row, so it is not decided
-  // again every cycle. A FAILED row is never refused — its retry is this job's
-  // whole point (a reuse whose bots did not restart is retried by restarting
-  // them; a fresh plan over a failed — or skipped — row that still lists
-  // accounts or bots runs as a top-up of it, autoFarmer taskNeedsAppend). A
-  // failed read throws, so the job is retried, not run blind.
+  // ALREADY RUNNING (2026-10-03). An execute job can run twice — a restart
+  // mid-execute (jobs.requeueStale), a jobs.finish that failed after the work
+  // was done, a stale queued job drained after a paused lane is re-armed — and
+  // over an ACTIVE row the second run upserted it back to "planned", claimed a
+  // second set of accounts and let executeTask overwrite bots/assignedAccounts,
+  // the first set stranded in its containers. So the row is read first, and an
+  // active one finishes the job as a no-op; its rescan flag is cleared (only
+  // while it is still active) so it is not re-decided every cycle. Every other
+  // status runs exactly as before. A failed read throws: the job is retried.
   const AutoFarmTask = require("../../../models/AutoFarmTask");
   const current = await AutoFarmTask.findOne({
     game: verdict.game,
     campaignId: verdict.campaignId,
   })
-    .select("status decision reason bots assignedAccounts executedAt rescanRequested")
+    .select("status decision rescanRequested")
     .lean();
-  if (rowRule(b, "taskRefusesExecution", refusesExecutionFallback)(current)) {
-    await settleRefused(b, current);
+  if (current && current.status === "active") {
+    if (current.rescanRequested) {
+      await AutoFarmTask.updateOne(
+        { _id: current._id, status: "active" },
+        { $set: { rescanRequested: false } },
+      ).catch(() => {});
+    }
     return {
       taskId: current._id,
       decision: current.decision || verdict.decision,
       alreadyExecuted: true,
-      status: current.status,
+      status: "active",
       accounts: 0,
       bots: [],
     };
   }
-  const topUpOfRow = rowRule(b, "taskNeedsAppend", needsAppendFallback)(current);
 
   // The engine's own dry-run flag still applies: an operator may run the whole
   // system in dry-run, and a live lane must honour that exactly as the legacy
@@ -811,7 +758,7 @@ async function executeDecision({ verdict, lane, cycle, af, shadow, granted = 0 }
     return cycle ? await cycle.withHost(run) : await run();
   }
 
-  const task = await upsertTask(verdict, { dryRun, keepStatus: topUpOfRow });
+  const task = await upsertTask(verdict, { dryRun });
 
   if (dryRun) {
     // Mirror the legacy dry-run behaviour: record what WOULD have happened and
@@ -824,9 +771,7 @@ async function executeDecision({ verdict, lane, cycle, af, shadow, granted = 0 }
     return {
       dryRun: true,
       taskId: task._id,
-      wouldSpend: topUpOfRow
-        ? Math.max(0, (verdict.plannedAccounts || 0) - (current.assignedAccounts || []).length)
-        : verdict.plannedAccounts || 0,
+      wouldSpend: verdict.plannedAccounts || 0,
       decision: verdict.decision,
     };
   }
@@ -840,17 +785,7 @@ async function executeDecision({ verdict, lane, cycle, af, shadow, granted = 0 }
   // falls back to its own DB/host reads. Those reads go through the cycle's
   // SSH semaphore when one is available, so parallel lanes cannot storm the Pi.
   const run = () => b.executeTask(task, { af: af2, host });
-  let result;
-  try {
-    result = cycle ? await cycle.withHost(run) : await run();
-  } catch (e) {
-    // A top-up of a skipped row that could not even start puts the skip back
-    // (autoFarmer restoreSkipAfterAbortedTopUp), so it stays retryable.
-    if (topUpOfRow && typeof b.restoreSkipAfterAbortedTopUp === "function") {
-      await b.restoreSkipAfterAbortedTopUp(current, e);
-    }
-    throw e;
-  }
+  const result = cycle ? await cycle.withHost(run) : await run();
 
   return {
     taskId: task._id,
@@ -861,15 +796,4 @@ async function executeDecision({ verdict, lane, cycle, af, shadow, granted = 0 }
   };
 }
 
-module.exports = {
-  executeDecision,
-  executeReuse,
-  upsertTask,
-  recordSkip,
-  legacySkipFields,
-  // For the lane's candidate filter (utils/farm2/lane.js): the same row rules.
-  refusesExecution: (row) =>
-    rowRule(brainOrNull(), "taskRefusesExecution", refusesExecutionFallback)(row),
-  needsAppend: (row) => rowRule(brainOrNull(), "taskNeedsAppend", needsAppendFallback)(row),
-  settleRefused: (row) => settleRefused(brainOrNull(), row),
-};
+module.exports = { executeDecision, executeReuse, upsertTask, recordSkip, legacySkipFields };
