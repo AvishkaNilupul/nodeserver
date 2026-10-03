@@ -47,6 +47,7 @@ function row(k, f, m, o = {}) {
     br: { p: 2, ref: 2, cf: "high", b: "exact-here", rg: "balanced", p7: 0.5, p7a: 0.5, wv: 1, wva: 1, sh: 3, a: { hold: 1 }, login: "LEAK-LOGIN" },
     pol: { old: 2, tracker: 2, curve: 2, clear: 2 },
     pf: { flat: 1, share30: 1, instock: 1, newsvendor: 1 },
+    pd: { flat: 1.2, share30: 0.9, instock: 1.1, newsvendor: 1.4 },
     ev: { o: 5, s: 3, d: 40, thin: false, el: "open", fee: 0.1, blind: false, lids: ["LEAK-LIDS"] },
     fl: [],
     why: ["because"],
@@ -83,6 +84,7 @@ function offer(k, f, m, o = {}) {
     thin: false,
     stale: true,
     packs: [{ minQty: 5, discountPct: 10, unitPrice: 1.35, packPrice: 6.75 }],
+    eb: false,
     why: ["offer reason"],
     live: [{ id: "LEAK-LIVE-ID", ask: 2, ageDays: 12.5, a: "lower", p7a: 0.4, account: "LEAK-ACC" }],
     ...o,
@@ -132,27 +134,53 @@ function makeRun(o = {}) {
   };
 }
 
+// The scorer's report (utils/listingBrain/model/score.js): placement is each policy's weekly DEMAND SPLIT
+// scored on in-stock cell-weeks, with what was left out counted.
 const ACCURACY = {
   at: new Date("2026-10-03T12:00:00Z"),
   evidenceAt: new Date("2026-10-03T11:00:00Z"),
+  evidenceAgeH: 1,
   model: 1,
   samples: 0,
   backtest: {
-    weeks: 6,
+    weeks: [{ cut: Date.parse("2026-09-26T12:00:00Z"), day: "2026-09-26", listings: 40, scored: 38, sold: 15, cells: 12, units: 9, noclaimUnits: 20 }],
+    from: Date.parse("2026-09-26T12:00:00Z"),
+    to: Date.parse("2026-10-03T12:00:00Z"),
+    horizonDays: { claim: 7, noclaim: 2 },
     calibration: {
       claim: { n: 40, brier: 0.18, brierBase: 0.22, skill: 0.18, reliability: [{ lo: 0, hi: 0.1, n: 5, meanP: 0.05, rate: 0 }, { lo: 0.5, hi: 0.6, n: 7, meanP: 0.55, rate: 0.57 }] },
       noclaim: { n: 0, brier: null, brierBase: null, skill: null, reliability: [] },
     },
-    discrimination: { claim: { hold: { n: 10, sold: 4, rate: 0.4 }, lower: { n: 5, sold: 1, rate: 0.2 } } },
+    discrimination: { claim: { n: 15, hold: { n: 10, sold: 4, rate: 0.4 }, lower: { n: 5, sold: 1, rate: 0.2 }, raise: { n: 0, sold: 0, rate: null }, test: { n: 0, sold: 0, rate: null }, ladder: { n: 2, sold: 1, rate: 0.5 }, abstained: { n: 0, sold: 0, rate: null } } },
     placement: {
-      claim: { flat: { n: 12, rmse: 1.2, bias: 0.3, mae: 0.9 }, newsvendor: { n: 12, rmse: 0.8, bias: -0.1, mae: 0.6 }, instock: { n: 3, rmse: 0.2, bias: 0, mae: 0.2 }, best: { id: "newsvendor", rmse: 0.8 }, partial: ["instock"] },
+      claim: {
+        rows: 12,
+        n: 12,
+        units: 9,
+        flat: { n: 12, rmse: 1.2, bias: 0.3, mae: 0.9, forecast: 12.6, actual: 9 },
+        newsvendor: { n: 12, rmse: 0.8, bias: -0.1, mae: 0.6, forecast: 7.8, actual: 9 },
+        instock: { n: 3, rmse: 0.2, bias: 0, mae: 0.2, forecast: 2, actual: 2, partial: true },
+        partial: ["instock"],
+        best: { id: "newsvendor", rmse: 0.8 },
+        unitsAll: 15,
+        outOfStock: { cells: 4, units: 3 },
+        unforecast: { cells: 1, units: 1 },
+        unmeasured: { cells: 2, units: 0 },
+        outside: 2,
+        basis: "demand split",
+        inStockDays: 6,
+      },
     },
+    placementNote: "Each placement policy's weekly demand split for a market, scored on in-stock cell-weeks.",
     agreement: { gameflip: { curve: { near: { n: 5, netPerDay: 0.12 }, far: { n: 9, netPerDay: 0.05 } } } },
-    soldOrExpired: { n: 20, expected: 0.6, actual: 0.55, brier: 0.2 },
+    agreementNote: "Correlation, not cause.",
+    soldOrExpired: { n: 20, expected: 0.6, actual: 0.55, sold: 11, expired: 9, brier: 0.2, byGame: {} },
     note: "synthetic",
+    cannotShow: "What test mode cannot show: whether a different price would have sold, or whether a different shelf would have sold more.",
+    limits: ["Each week is replayed from the bundle as it stood at the cut."],
   },
-  forward: { runsScored: 0, runsWaiting: 2 },
-  review: [{ at: new Date("2026-09-25T12:00:00Z"), k: "alpha", g: "Alpha", f: "claim", m: "gameflip", pc: "brain-lower", sc: "agree", old: { a: 2, sh: 3 }, br: { p: 1.5, sh: 3 }, next: { units: 2, net: 2.6 }, l: "LEAK-REVIEW" }],
+  forward: { runsScored: 0, runsWaiting: 2, missing: 0, samples: 2 },
+  review: [{ at: Date.parse("2026-09-25T12:00:00Z"), day: "2026-09-25", k: "alpha", g: "Alpha", f: "claim", m: "gameflip", pc: "brain-lower", sc: "agree", old: { a: 2, np: null, n: 3, sh: 3 }, br: { p: 1.5, sh: 3 }, next: { units: 2, net: 2.6, days: 7 }, l: "LEAK-REVIEW" }],
 };
 
 function fakeBrain(run, o = {}) {
@@ -655,11 +683,28 @@ test("the tab renders every view and the cell sheet, escaping hostile data", asy
   run.rows[0].fl = ["fee-assumed", "<i>bad</i>"];
   run.notes = ["<svg onload=alert(1)> note"];
   run.cfg.policyPrice = "<u>curve</u>";
+  run.rows[0].fl = run.rows[0].fl.concat(["expired", "radar-split", "unproven", "eld-limit", "explore", "off", "blocked"]);
+  // a placement row's demand split (scored) and shelf forecast (context), one value hostile in each
+  run.rows[0].pd = { flat: 1.2, share30: XSS, instock: 1.1, newsvendor: 1.4 };
+  run.rows[0].pf = { flat: 1, share30: XSS, instock: 1, newsvendor: 1 };
+  run.rows[0].br.she = 4;
+  // a ladder cell: no brain price
+  run.rows[2].pc = "ladder";
+  run.rows[2].br.p = null;
+  // the claim game row: today's rule 3 (half now, half held back, +50 % later on Gameflip)
+  run.rows[5].old = { sh: 6, cur: 6, post: 3, now: 3, hold: 2 };
+  run.rows[5].fl = ["explore", "<i>bad</i>"];
   run.offers[0].why = ["<script>offer</script>"];
-  run.offers[0].gates = ["<b onclick=x>gate</b>"];
+  run.offers[0].gates = ["<b onclick=x>gate</b>", "containment-held", "sold-floor-steps"];
+  run.offers[0].packs = [{ minQty: XSS, discountPct: 10, unitPrice: 1.35, packPrice: 6.75 }, { minQty: 10, discountPct: 20, unitPrice: 1.2, packPrice: 12 }];
+  run.offers[0].eb = true;
+  run.offers.push(offer("alpha", "claim", "gameflip", { n: 4, action: "ladder", p: null, raw: null, pH: null, value: null, gates: [], packs: undefined, why: ["deliberate"], live: [{ ask: 2.5, ageDays: 4, a: "ladder", p7a: 0.3 }] }));
   const acc = JSON.parse(JSON.stringify(ACCURACY));
   acc.review[0].g = XSS + "Rev";
   acc.backtest.note = "<script>note</script>";
+  acc.backtest.cannotShow = "<script>cs</script> whether a different shelf would have sold more";
+  acc.backtest.limits = ["<svg onload=alert(3)> limit"];
+  acc.evidenceAgeH = 30;
   const brain = fakeBrain(run, {
     status: () => ({ config: { enabled: true, intervalMin: 180 }, runs: 3, lastPersisted: false, lastError: "<svg onload=1>err", lastRunAt: new Date() }),
     accuracy: async () => acc,
@@ -698,6 +743,23 @@ test("the tab renders every view and the cell sheet, escaping hostile data", asy
     assert.match(sheet.html, /&lt;script&gt;offer&lt;\/script&gt;/);
     assert.match(sheet.html, /History \(newest first\)/);
     assert.match(sheet.html, /10-03 09:00/);
+    // packs this price would set, an event bundle, a ladder offer with no brain price
+    assert.match(sheet.html, /event bundle/);
+    assert.match(sheet.html, /pack of &lt;img src=x onerror=alert\(1\)&gt;: \$6\.75 \(\$1\.35 each, −10 %\)/);
+    assert.match(sheet.html, /pack of 10: \$12\.00 \(\$1\.20 each, −20 %\)/);
+    assert.match(sheet.html, /<span class="amt"><small>ladder — a deliberate test, left alone<\/small><\/span>/);
+    // gates and flags: a plain label on the chip, the explanation as its title
+    assert.match(sheet.html, /<span class="chip" title="A bigger bundle of this game should never be cheaper[^"]*">bundle order held back<\/span>/);
+    assert.match(sheet.html, /<span class="chip" title="Its 30-day sold floor[^"]*">sold floor, in steps<\/span>/);
+    for (const name of ["expired on Gameflip", "split by rivals&#39; sales", "no market proven yet", "Eldorado offer limit", "one exploration unit", "switched off", "market blocked"]) {
+      assert.match(sheet.html, new RegExp('<span class="chip" title="[^"]+">' + name + "</span>"), name);
+    }
+    assert.match(sheet.html, /<span class="chip">&lt;i&gt;bad&lt;\/i&gt;<\/span>/, "an unknown flag is shown as itself, escaped");
+    // the placement table: demand split (scored) beside the shelf forecast (context)
+    assert.match(sheet.html, /weekly demand this policy expects here/);
+    assert.match(sheet.html, /1\.40\/wk/);
+    assert.match(sheet.html, /context only/);
+    assert.match(sheet.html, /every fee equal/);
 
     // Cells
     ctx.state.lb.view = "cells";
@@ -707,6 +769,16 @@ test("the tab renders every view and the cell sheet, escaping hostile data", asy
     assert.match(out, /<table class="pm">/);
     assert.match(out, /6 cells/);
     assert.ok(out.indexOf("Alpha") < out.indexOf("BRAVO"), "live campaigns first");
+    assert.match(out, /<small>ladder — a deliberate test, left alone<\/small>/, "a ladder cell has no brain price");
+    // the claim game row's sheet: today's rule 3 beside the brain's shelf
+    const gameRow = page.clickables.find((c) => c.getAttribute("data-lbkey") === "alpha|claim|all");
+    assert.ok(gameRow);
+    const n = sheet.n;
+    gameRow.onclick();
+    await waitFor(() => sheet.n > n + 1);
+    hostile(sheet.html);
+    assert.match(sheet.html, /Today: list 3 now, hold 2 back, then \+50% <span class="arrow">→<\/span> \$3\.00/);
+    assert.match(sheet.html, /one exploration unit/);
     ctx.state.lb.pc = "brain-lower";
     await tab.render(ctx);
     assert.match(page.allHtml(), /1 cells/);
@@ -726,6 +798,37 @@ test("the tab renders every view and the cell sheet, escaping hostile data", asy
     assert.match(out, /Sold or expired/);
     assert.match(out, /Not enough history yet: the first live scores appear/);
     assert.match(out, /&lt;img src=x onerror=alert\(1\)&gt;Rev/);
+    // placement: each way's demand split, in-stock weeks only, and what was not scored
+    assert.match(out, /only on weeks the market was in stock at least 6 of the 7 days/);
+    assert.match(out, /Scored on 12 in-stock cell-weeks, 9 units sold\. Not scored: 4 cell-weeks in stock fewer than 6 of the 7 days \(3 units sold there\)/);
+    assert.match(out, /12\.6 vs 9/);
+    assert.ok(!/shelf-capped|units sold per game and market the next week/.test(out), "the old shelf-capped wording is gone");
+    assert.match(out, /&lt;script&gt;cs&lt;\/script&gt; whether a different shelf would have sold more/);
+    assert.match(out, /&lt;svg onload=alert\(3\)&gt; limit/);
+    assert.match(out, /\(<span class="bad">30 h old<\/span>\)/, "the evidence's age, flagged when over a day");
+    assert.match(out, /2026-09-26/);
+    assert.match(out, /ladder — never corrected \(counted apart\)/);
+    assert.match(out, /2026-09-25/);
+  } finally {
+    s.close();
+  }
+});
+
+test("accuracy with nothing to score yet: the brain's reason, escaped", async () => {
+  const reason = "A run is loading its evidence " + XSS;
+  const s = await serve(fakeBrain(makeRun(), { accuracy: async () => ({ empty: true, reason }) }));
+  const page = fakePage();
+  const { ctx } = pageHelpers(s.base, page);
+  try {
+    const body = (await getJson(s.base, BASE + "/accuracy")).body;
+    assert.equal(body.success, true);
+    assert.equal(body.empty, true);
+    assert.equal(body.reason, reason);
+    ctx.state.lb = { view: "accuracy", farm: "", m: "", pc: "", sc: "", live: "", q: "", sort: "gap", offset: 0, cfg: null };
+    await loadTab().render(ctx);
+    const out = page.allHtml();
+    assert.ok(!out.includes("<img src=x"));
+    assert.match(out, /<div class="empty">A run is loading its evidence &lt;img src=x onerror=alert\(1\)&gt;<\/div>/);
   } finally {
     s.close();
   }
