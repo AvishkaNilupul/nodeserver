@@ -118,7 +118,8 @@ function exposureOf(L, sales, cut, fitDays, opts = {}) {
     out.endApprox = true;
   }
   if (m === "gameflip") end = Math.min(end, c + U.GAMEFLIP_EXPIRY_DAYS * DAY);
-  if (m === "eldorado" && !list.length) end = Math.min(end, c + U.ELDORADO_OFFER_LIFE_DAYS * DAY);
+  // an unsold Eldorado offer the keep-alive could not renew died 21 days after it was created (util.eldoradoDead)
+  if (m === "eldorado" && !list.length && U.eldoradoDead(c, end, L.eka !== false)) end = Math.min(end, c + U.ELDORADO_OFFER_LIFE_DAYS * DAY);
   const lo = cut - num(fitDays, 0) * DAY;
   const t0 = Math.max(start, lo);
   const t1 = Math.min(end, cut);
@@ -151,9 +152,9 @@ function activeAt(L, salesBefore, cut) {
   if (L.m === "gameflip" && cut > c + U.GAMEFLIP_EXPIRY_DAYS * DAY) return false;
   const single = SINGLE.has(L.m);
   const sold = (salesBefore || []).length > 0;
-  // Eldorado kills an offer 21 days after its last activation with no sale (H9): the same cut its
-  // exposure gets, so a dead offer is never advised as live
-  if (L.m === "eldorado" && !sold && cut > c + U.ELDORADO_OFFER_LIFE_DAYS * DAY) return false;
+  // Eldorado kills an offer 21 days after its last activation with no sale (H9) — unless the keep-alive
+  // renewed it (util.eldoradoDead): the same cut its exposure gets, so a dead offer is never advised as live
+  if (L.m === "eldorado" && !sold && U.eldoradoDead(c, cut, L.eka !== false)) return false;
   if (single && sold) return false;
   const st = lower(L.st);
   const u = finite(L.u);
@@ -180,7 +181,10 @@ function daysLeftOf(R, cut) {
   const c = finite(R && R.c);
   if (c === null) return Infinity;
   if (R.m === "gameflip") return Math.max(0, (c + U.GAMEFLIP_EXPIRY_DAYS * DAY - cut) / DAY);
-  if (R.m === "eldorado" && !(R.sales && R.sales.length)) return Math.max(0, (c + U.ELDORADO_OFFER_LIFE_DAYS * DAY - cut) / DAY);
+  // the keep-alive renews an active offer before its 21 days run out: its life then has no known end
+  if (R.m === "eldorado" && !(R.sales && R.sales.length) && !(R.eka !== false && c + U.ELDORADO_OFFER_LIFE_DAYS * DAY >= U.ELDORADO_KEEPALIVE_SINCE)) {
+    return Math.max(0, (c + U.ELDORADO_OFFER_LIFE_DAYS * DAY - cut) / DAY);
+  }
   return Infinity;
 }
 
@@ -262,9 +266,14 @@ const YIELD_MS = 40;
 const EVERY = 1024;
 
 // The body, as a generator: each `yield` marks a point where the async run may let the loop breathe.
+const b0Af = (b) => (b && b.af && typeof b.af === "object" ? b.af : null);
+
 function* evidenceSteps(bundle, { cfg, cut, synthDemand = false } = {}) {
   const b = bundle || {};
   const C = cfg || U.readConfig({});
+  // eldoradoFulfiller's keep-alive is on unless the owner set autoFarm.eldoradoKeepAlive to false (a bundle
+  // without the field reads as on, the fulfiller's own default)
+  const eka = !(b0Af(bundle) && b0Af(bundle).eldoradoKeepAlive === false);
   const T = Number.isFinite(Number(cut)) ? Number(cut) : num(b.now, 0);
   const markets = marketInfo(b);
   const notes = [];
@@ -315,7 +324,8 @@ function* evidenceSteps(bundle, { cfg, cut, synthDemand = false } = {}) {
     const m = lower(L.m);
     const mk = markets[m];
     const sales = salesByListing.get(L.id) || [];
-    const Lx = saleAfterCut.has(L.id) ? Object.assign({}, L, { m, _saleAfterCut: true }) : m === L.m ? L : Object.assign({}, L, { m });
+    let Lx = saleAfterCut.has(L.id) ? Object.assign({}, L, { m, _saleAfterCut: true }) : m === L.m ? L : Object.assign({}, L, { m });
+    if (m === "eldorado") Lx = Object.assign({}, Lx, { eka });
     const activeAtCut = MARKETS.includes(m) ? activeAt(Lx, sales, T) : false;
     const f = L.f === "noclaim" ? "noclaim" : "claim";
     const fitDays = f === "noclaim" ? C.fitDaysNoclaim : C.fitDaysClaim;
@@ -359,6 +369,8 @@ function* evidenceSteps(bundle, { cfg, cut, synthDemand = false } = {}) {
       st: lower(L.st),
       activeAtCut,
       c,
+      // the Eldorado keep-alive (daysLeftOf, activeAt for a scorer's later cut)
+      eka: m === "eldorado" ? eka : undefined,
       u: finite(L.u),
       end: expo.t1,
       endApprox: expo.endApprox,

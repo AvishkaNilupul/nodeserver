@@ -607,6 +607,17 @@ test("the bundle is plain JSON: it round-trips identical and passes privacyScan 
   assert.equal(b.af.capDefault, 70);
   assert.deepEqual(b.af.caps, { "gamma rush origins": 25 }, "an explicit cap, matched like settings.gameCapFor");
   assert.deepEqual(b.af.noClaimGames, ["gamma rush"]);
+  assert.equal(b.af.eldoradoKeepAlive, true, "the Eldorado keep-alive is on unless the setting says false");
+});
+
+test("the bundle says when the Eldorado keep-alive is off, and only an explicit false turns it off", async () => {
+  const off = await loadWith({ af: { eldoradoKeepAlive: false } });
+  assert.equal(off.b.af.eldoradoKeepAlive, false);
+  assert.deepEqual(I.validateBundle(off.b), []);
+  for (const v of [true, undefined, null, 0, "false"]) {
+    const { b } = await loadWith({ af: { eldoradoKeepAlive: v } });
+    assert.equal(b.af.eldoradoKeepAlive, true, "eldoradoKeepAlive " + JSON.stringify(v) + " keeps it on, like eldoradoFulfiller");
+  }
 });
 
 test("listing ids are sha1-12 hashes, stable, and the sales point at them", async () => {

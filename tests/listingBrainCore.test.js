@@ -829,10 +829,12 @@ test("H4 no price above the highest evidenced node is ever picked", () => {
   assert.ok(v.cands.every((c) => !c.evid || c.x <= top + 1e-9));
 });
 
-test("H9 an unsold Eldorado offer is dead 21 days after creation, and a row's chance runs only over its remaining life", () => {
+test("H9 an unsold Eldorado offer is dead 21 days after creation when no keep-alive could renew it, and a row's chance runs only over its remaining life", () => {
   const old = L({ m: "eldorado", c: NOW - 25 * DAY, qty: 2 });
-  const ev = E.buildEvidence(bundle({ listings: [old] }), { cfg: CFG(), cut: NOW });
-  assert.equal(ev.byId.get(old.id).activeAtCut, false, "past its 21 days with no sale");
+  const off = bundle({ listings: [old] });
+  off.af.eldoradoKeepAlive = false;
+  const ev = E.buildEvidence(off, { cfg: CFG(), cut: NOW });
+  assert.equal(ev.byId.get(old.id).activeAtCut, false, "past its 21 days with no sale, the keep-alive off");
   // a Gameflip row 29.5 days old has half a day before it expires
   const c = curve({ soldP: 1.5, sellDays: 2, nLive: 0 });
   const r = L({ p: 1.5, c: NOW - 29.5 * DAY });
@@ -840,6 +842,27 @@ test("H9 an unsold Eldorado offer is dead 21 days after creation, and a row's ch
   const f = run.fc.find((x) => x.l === r.id);
   near(f.h, 0.5, "judged over the half day it has left");
   assert.equal(E.daysLeftOf({ m: "ggsel", c: NOW - 99 * DAY }, NOW), Infinity);
+});
+
+test("EKA the Eldorado keep-alive renews an unsold offer's 21 days: still live, no end to its life — unless its 21 days ran out before the keep-alive existed", () => {
+  // created 25 days ago: its 21 days ended 2026-09-29, after the keep-alive went live (2026-09-23)
+  const renewed = L({ m: "eldorado", c: NOW - 25 * DAY, qty: 2 });
+  // created 40 days ago: its 21 days ended 2026-09-14, before the keep-alive existed — it died then
+  const died = L({ m: "eldorado", c: NOW - 40 * DAY, qty: 2, ck: "s:died1" });
+  const b = bundle({ listings: [renewed, died] });
+  const ev = E.buildEvidence(b, { cfg: CFG(), cut: NOW });
+  assert.equal(ev.byId.get(renewed.id).activeAtCut, true, "the keep-alive (on unless set false) renewed it");
+  near(ev.byId.get(renewed.id).expo.days, 25, "its exposure is not cut at 21 days");
+  assert.equal(E.daysLeftOf(ev.byId.get(renewed.id), NOW), Infinity);
+  assert.equal(ev.byId.get(died.id).activeAtCut, false, "died before the keep-alive existed");
+  near(ev.byId.get(died.id).expo.days, 21, "its exposure ends at its 21 days");
+  // a bundle without the field reads as on (the fulfiller's default); explicitly off: both dead
+  const off = bundle({ listings: [renewed, died] });
+  off.af.eldoradoKeepAlive = false;
+  const evOff = E.buildEvidence(off, { cfg: CFG(), cut: NOW });
+  assert.equal(evOff.byId.get(renewed.id).activeAtCut, false);
+  assert.equal(U.eldoradoDead(NOW - 25 * DAY, NOW, true), false);
+  assert.equal(U.eldoradoDead(NOW - 25 * DAY, NOW, false), true);
 });
 
 test("H12 on quantity and order-unit markets the curve counts ORDERS: one 3-unit order is one sale", () => {

@@ -1477,6 +1477,8 @@ function afBlock({ d, af, keywords, labels, platiTakes, ggselTakes }) {
   return {
     listingBrain: configBlock(af.listingBrain, known),
     perMarketStock: num(af.perMarketStock, 3),
+    // eldoradoFulfiller's offer keep-alive (on unless set to false): it renews an unsold offer's 21-day life
+    eldoradoKeepAlive: af.eldoradoKeepAlive !== false,
     takes,
     mapped,
     noClaimGames: keywords.slice(),
@@ -1578,6 +1580,8 @@ function refillShelf(dealt, order, onHand, perMarketStock) {
 // GAMEFLIP_EXPIRY_DAYS, ELDORADO_OFFER_LIFE_DAYS); a single-unit row (Gameflip, ZeusX) that sold is over.
 const GAMEFLIP_EXPIRY_DAYS = 30;
 const ELDORADO_OFFER_LIFE_DAYS = 21;
+// model/util ELDORADO_KEEPALIVE_SINCE: offers whose 21 days ended on or after this were renewed while the keep-alive was on
+const ELDORADO_KEEPALIVE_SINCE = Date.UTC(2026, 8, 23);
 const SINGLE_UNIT = new Set(["gameflip", "zeusx"]);
 // The no-claim farm's own shelves (model/util NOCLAIM_SHELF); elsewhere its offers are the owner's.
 const NOCLAIM_SHELF = new Set(["gameflip", "digiseller", "ggsel"]);
@@ -1613,7 +1617,9 @@ function trackerOffers(listings, offerKeys, markets, now, sold = {}) {
     if (L.m === "gameflip" && now > c + GAMEFLIP_EXPIRY_DAYS * DAY) return false;
     const single = SINGLE_UNIT.has(L.m);
     const sold = soldBefore.has(L.id);
-    if (L.m === "eldorado" && !sold && now > c + ELDORADO_OFFER_LIFE_DAYS * DAY) return false;
+    // model/util eldoradoDead: dead after 21 days unless the keep-alive (on, and already running then) renewed it
+    const eldEnd = c + ELDORADO_OFFER_LIFE_DAYS * DAY;
+    if (L.m === "eldorado" && !sold && now > eldEnd && (markets.eldoradoKeepAlive === false || eldEnd < ELDORADO_KEEPALIVE_SINCE)) return false;
     if (single && sold) return false;
     if (L.st === "active") return true;
     const u = numOrNull(L.u);
@@ -1917,7 +1923,7 @@ async function oldSide({
   // the tracker is asked only for what a logged row reads: the model's main offer of each cell it prices
   const tk = takes || takesOf(d, af, platiTakes, ggselTakes);
   const V = (d.venues && d.venues.VENUES) || {};
-  const marketState = { blocked: new Set(), off: new Set() };
+  const marketState = { blocked: new Set(), off: new Set(), eldoradoKeepAlive: af.eldoradoKeepAlive !== false };
   for (const m of MARKETS) {
     const off = tk[m] === false;
     if ((V[m] && V[m].blocked) || (off && (m === "digiseller" || m === "ggsel"))) marketState.blocked.add(m);

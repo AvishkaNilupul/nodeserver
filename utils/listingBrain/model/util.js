@@ -33,6 +33,22 @@ const BUCKET_CENTRES = [0.7, 0.9, 1.1, 1.35, 1.75, 2.5];
 const GRID = [0.6, 0.7, 0.8, 0.9, 1.0, 1.1, 1.2, 1.35, 1.5, 1.75, 2.0];
 const GAMEFLIP_EXPIRY_DAYS = 30; // utils/marketplaces.js publishes with expire_in_days: 30
 const ELDORADO_OFFER_LIFE_DAYS = 21; // eldoradoFulfiller: an offer dies 21 days after its last activation
+// eldoradoFulfiller's offer keep-alive (on unless autoFarm.eldoradoKeepAlive is false) pauses and resumes an
+// ACTIVE offer within 5 days of its expiry, which restarts the 21 days ("verified live 2026-09-23"). An
+// unsold offer whose 21 days ran out before then really died; one whose life ended on or after it was
+// renewed while the keep-alive was on.
+const ELDORADO_KEEPALIVE_SINCE = Date.UTC(2026, 8, 23);
+
+/**
+ * Has an unsold Eldorado offer created at `c` died by `t`? Only by the 21-day life, and only when the
+ * keep-alive could not have renewed it: switched off (`keepAlive` false), or its life ended before the
+ * keep-alive existed.
+ */
+function eldoradoDead(c, t, keepAlive) {
+  const end = c + ELDORADO_OFFER_LIFE_DAYS * DAY;
+  if (!(t > end)) return false;
+  return !keepAlive || end < ELDORADO_KEEPALIVE_SINCE;
+}
 const ELDORADO_MAX_ACTIVE_OFFERS = 100; // autoLister ELD_LIMIT_RE "maximum of N active offers" (per category)
 const MAX_REAL_PRICE = 25; // analyze.MAX_REAL_PRICE: anything above is a placeholder, never a price point
 const CONF_RANK = { none: 0, low: 1, medium: 2, high: 3 };
@@ -357,6 +373,8 @@ module.exports = {
   GRID,
   GAMEFLIP_EXPIRY_DAYS,
   ELDORADO_OFFER_LIFE_DAYS,
+  ELDORADO_KEEPALIVE_SINCE,
+  eldoradoDead,
   ELDORADO_MAX_ACTIVE_OFFERS,
   MAX_REAL_PRICE,
   CONF_RANK,
