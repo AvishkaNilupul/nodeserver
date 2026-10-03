@@ -224,3 +224,88 @@ test("a personal bot that launches is gated, marked, written and launched in tha
     await s.close();
   }
 });
+
+// ---------------------------------------------------------------------------
+// Restart rebuilds a lost container (round 2)
+//
+// A bot whose container is gone is stuck — the farm builds no other bot for
+// its game — and Release refuses while any of its accounts is on sale, so
+// Restart is the page's one way out. The rebuild itself (gate, lock, launch)
+// is noclaimFleet.rebuildMissingContainer; these pin how the route uses it.
+// ---------------------------------------------------------------------------
+
+const NO_SUCH = "Error response from daemon: No such container: noclaim-bot-9\n__ERR__";
+
+function restartFleet({ restartOut = NO_SUCH, rebuild } = {}) {
+  const fleet = fakeFleet({
+    sh: async () => {
+      fleet.calls.push("sh");
+      return restartOut;
+    },
+    rebuildMissingContainer: async (id) => {
+      fleet.calls.push("rebuildMissingContainer:" + id);
+      return rebuild ? rebuild(id) : { id: String(id), game: "Overwatch 2", accounts: 3 };
+    },
+  });
+  return fleet;
+}
+
+const refuse = (status, message, code) => () => {
+  const e = new Error(message);
+  e.status = status;
+  if (code) e.code = code;
+  throw e;
+};
+
+test("Restart on a bot with no container rebuilds it from its config, and says so", async () => {
+  const fleet = restartFleet();
+  const s = await serve(fleet);
+  try {
+    const r = await s.post("/api/noclaim-farm/bots/9/restart");
+    assert.equal(r.status, 200);
+    assert.equal(r.body.success, true);
+    assert.equal(r.body.rebuilt, true);
+    assert.match(r.body.message, /had no container — rebuilding it from its config \(3 account\(s\)\)/);
+    assert.ok(fleet.calls.includes("rebuildMissingContainer:9"));
+    const ev = s.seen.events.find((e) => e.action === "bot_container_rebuilt");
+    assert.ok(ev, "logged");
+    assert.equal(ev.subject, "noclaim-bot-9");
+  } finally {
+    await s.close();
+  }
+});
+
+test("Restart passes on why a rebuild is refused: no room, a build running, a container after all, no config", async () => {
+  const cases = [
+    [refuse(409, "Not rebuilding bot 9's container: host contabo has 900 MB of RAM free."), 409, /900 MB/],
+    [refuse(409, "A build/provision is already running. Try again shortly."), 409, /already running/],
+    [refuse(409, "Bot 9 has a container; it is not rebuilt.", "container_exists"), 409, /exists but would not restart: Error response from daemon/],
+    [refuse(409, "Bot 9 has no config to rebuild a container from.", "no_config"), 409, /no config to rebuild one from — Release the bot/],
+  ];
+  for (const [rebuild, status, msg] of cases) {
+    const s = await serve(restartFleet({ rebuild }));
+    try {
+      const r = await s.post("/api/noclaim-farm/bots/9/restart");
+      assert.equal(r.status, status);
+      assert.equal(r.body.success, false);
+      assert.match(r.body.message, msg);
+      assert.ok(!s.seen.events.some((e) => e.action === "bot_container_rebuilt"));
+    } finally {
+      await s.close();
+    }
+  }
+});
+
+test("Restart of a bot whose container is there is a plain restart, as before", async () => {
+  const fleet = restartFleet({ restartOut: "noclaim-bot-9" });
+  const s = await serve(fleet);
+  try {
+    const r = await s.post("/api/noclaim-farm/bots/9/restart");
+    assert.equal(r.status, 200);
+    assert.deepEqual(r.body, { success: true });
+    assert.ok(!fleet.calls.some((c) => c.startsWith("rebuildMissingContainer")));
+    assert.ok(s.seen.events.some((e) => e.action === "bot_restarted"));
+  } finally {
+    await s.close();
+  }
+});

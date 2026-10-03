@@ -477,7 +477,7 @@ router.post(
         message: provisionError
           ? `Personal bot ${id} was written for ${username}, but its container did not start ` +
             `(${provisionError}). It is marked as yours, so the farm leaves it alone — check ` +
-            "provision.log on the bot host, then Release it and add the account again."
+            "provision.log on the bot host, then Restart it — Restart rebuilds its container."
           : `Personal bot ${id} created for ${username} — farming ${game}, building on the host.`,
       });
     } catch (err) {
@@ -1015,9 +1015,9 @@ router.post(
     try {
       const id = String(req.params.id).replace(/[^0-9]/g, "");
       if (!id) return res.status(400).json({ success: false, message: "bad id" });
-      // `docker restart` errors if the container doesn't exist; surface that
-      // clearly rather than silently swallowing it, so the UI can tell the
-      // operator to re-create the bot (its container may have been removed).
+      // `docker restart` errors if the container doesn't exist; then the
+      // container is rebuilt from the bot's config (below) rather than the
+      // operator being told to re-create a bot they may not be able to release.
       // Clear both auto-power markers: a manual Restart means the operator is
       // taking control, so the watcher manages this bot fresh from here (neither
       // "parked by me" nor "operator-off" applies once they restart it).
@@ -1026,12 +1026,49 @@ router.post(
           `docker restart ${hosts.shq(containerFor(id))} 2>&1 || echo "__ERR__"`,
         { timeout: 40000 },
       );
-      if (out.includes("__ERR__"))
-        return res.status(409).json({
-          success: false,
-          message:
-            "No container to restart — it may have been removed. Release and re-create the bot.",
-        });
+      if (out.includes("__ERR__")) {
+        // No container to restart: rebuild it from the bot's config
+        // (2026-10-03). A bot whose container is gone is stuck — the farm builds
+        // no other bot for its game — and Release refuses while any of its
+        // accounts is on sale, so this is the one way the page can fix it. The
+        // same launch as a create, under the same cap, RAM gate and lock.
+        try {
+          const rb = await fleet.rebuildMissingContainer(id);
+          logEvent({
+            category: "noclaim",
+            action: "bot_container_rebuilt",
+            actor: actorFromReq(req),
+            subject: containerFor(id),
+            game: rb.game,
+            count: rb.accounts,
+            detail: `rebuilt the missing container of no-claim bot ${id} from its config (${rb.accounts} account(s))`,
+          });
+          return res.json({
+            success: true,
+            rebuilt: true,
+            game: rb.game,
+            accounts: rb.accounts,
+            message:
+              `Bot ${id} had no container — rebuilding it from its config (${rb.accounts} account(s)). ` +
+              "It starts in a minute or two; provision.log on the bot host shows how it went.",
+          });
+        } catch (e) {
+          if (e && e.code === "no_config")
+            return res.status(409).json({
+              success: false,
+              message:
+                "No container to restart, and no config to rebuild one from — Release the bot.",
+            });
+          if (e && e.code === "container_exists")
+            return res.status(409).json({
+              success: false,
+              message:
+                "Its container exists but would not restart: " +
+                String(out).replace("__ERR__", "").trim().slice(0, 300),
+            });
+          return res.status(e.status || 500).json({ success: false, message: e.message });
+        }
+      }
       logEvent({
         category: "noclaim",
         action: "bot_restarted",

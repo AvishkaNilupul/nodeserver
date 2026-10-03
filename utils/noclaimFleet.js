@@ -874,6 +874,67 @@ async function createBot({ game, count, actor = "noclaim" } = {}) {
   return { id, claimed: inConfig.length, game: g, passwordUnreadable };
 }
 
+// Rebuild the container of a bot whose config is there but whose container is
+// gone (2026-10-03 review) — a rollout whose `docker run` failed, a container
+// someone removed. Such a bot is stuck: the allocator counts its accounts and
+// builds no other bot for its game, and nothing on the page could fix it —
+// Restart needed a container, Release refuses while any of its accounts is on
+// sale, and the rollout only recreates containers that exist.
+//
+// It is createBot's own launch (launchProvision: the image if missing, then
+// `docker run`, and a container that fails to start removed again), behind
+// the same container cap + host-RAM gate and the provisioning lock. The
+// config is left exactly as it is. Refuses with a `code` when there is a
+// container after all ("container_exists") or no config ("no_config").
+// Returns { id, game, accounts } once the launch is detached.
+async function rebuildMissingContainer(id) {
+  const c = containerFor(id);
+  const file = hosts.shq(configPath(id));
+  const out = await sh(
+    `names=$(docker ps -a --filter ${hosts.shq("name=^/" + c + "$")} --format '{{.Names}}' 2>/dev/null); ` +
+      `echo "RC=$?"; echo "NAMES=$names"; ` +
+      `if [ -f ${file} ]; then echo __CFG__; cat ${file}; else echo __NOCFG__; fi`,
+    { timeout: 20000 },
+  );
+  const text = String(out || "");
+  const at = text.indexOf("__CFG__");
+  const head = at >= 0 ? text.slice(0, at) : text;
+  if (!/^RC=0$/m.test(head)) throw httpError(503, `Could not ask docker whether bot ${id} has a container.`);
+  const names = ((head.match(/^NAMES=(.*)$/m) || [])[1] || "").split(/\s+/);
+  if (names.includes(c)) {
+    const e = httpError(409, `Bot ${id} has a container; it is not rebuilt.`);
+    e.code = "container_exists";
+    throw e;
+  }
+  if (at < 0) {
+    const e = httpError(409, `Bot ${id} has no config to rebuild a container from.`);
+    e.code = "no_config";
+    throw e;
+  }
+  let cfg;
+  try {
+    cfg = JSON.parse(text.slice(at + "__CFG__".length));
+  } catch (err) {
+    throw httpError(409, `Bot ${id}'s config is not valid JSON (${err.message}) — not rebuilding it.`);
+  }
+  const users = (cfg && cfg.TwitchSettings && Array.isArray(cfg.TwitchSettings.TwitchUsers)
+    ? cfg.TwitchSettings.TwitchUsers
+    : []);
+  const game = String((Array.isArray(cfg && cfg.FavouriteGames) && cfg.FavouriteGames[0]) || "");
+
+  const gate = await newContainerGate();
+  if (!gate.ok) {
+    const e = httpError(409, `Not rebuilding bot ${id}'s container: ${gate.reason}.`);
+    e.gate = gate;
+    throw e;
+  }
+  if (await provisionBusy()) {
+    throw httpError(409, "A build/provision is already running. Try again shortly.");
+  }
+  await launchProvision(id, users.length, game);
+  return { id: String(id), game, accounts: users.length };
+}
+
 // A write whose outcome could not be read back (2026-10-03). The accounts stay
 // claimed — a claimed row in no bot is an orphan an operator can find by its
 // note; an available row in a bot is a double-home nobody can see — and this
@@ -1351,6 +1412,7 @@ module.exports = {
   createBotFromAccounts,
   readConfigSecrets,
   createBot,
+  rebuildMissingContainer,
   topUpBot,
   setPersonal,
   findSecretInConfigs,

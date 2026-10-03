@@ -204,7 +204,7 @@ async function plan({ days = 30, withFleet = true } = {}) {
     const fleetNeed = fleetKnown && hasCampaign && !parked ? Math.max(0, r.target - have) : 0;
     const room = (roomBots.get(r.key) || []).reduce((s, b) => s + b.room, 0);
     const createBlocked = stuck.length
-      ? `bot ${stuck.join(", ")} has no container — not creating another`
+      ? `bot ${stuck.join(", ")} has no container — not creating another (Restart rebuilds its container)`
       : gateBlocked;
 
     // The shelf. `unclaimedGameCaps` limits how many of a game's farmed accounts
@@ -239,8 +239,9 @@ async function plan({ days = 30, withFleet = true } = {}) {
     if (stuck.length)
       notes.push(
         `bot ${stuck.join(", ")} has a config but no container (a provision that never ` +
-          "finished) — its accounts are counted and never topped up, and no new bot is " +
-          "built for this game until it is fixed or released",
+          "finished, or a container that was lost) — its accounts are counted and never " +
+          "topped up, and no new bot is built for this game until it has one: Restart on " +
+          "the No-claim farm page rebuilds its container",
       );
     if (gateBlocked && !stuck.length && fleetNeed > room)
       notes.push(`no new bot this pass: ${gateBlocked} — only bots with room are topped up`);
@@ -423,7 +424,7 @@ function botGameFor(key, bots, campaignGames, fallback) {
 // as a reason rather than an error. A check that throws blocks the create.
 async function createBlockReason(g, p) {
   if (Array.isArray(g.stuck) && g.stuck.length)
-    return `bot ${g.stuck.join(", ")} has no container — not creating another`;
+    return `bot ${g.stuck.join(", ")} has no container — not creating another (Restart rebuilds its container)`;
   try {
     const gate = await fleet.newContainerGate({
       containers: p && p.containers ? p.containers.count : null,
@@ -458,12 +459,13 @@ function reportStuck(g, actor, { staleLockMin = 0 } = {}) {
       game: g.label,
       detail:
         `no-claim bot ${id} (${g.label}) has a config but no container — not creating ` +
-        "another. Its accounts stay claimed and counted until it is fixed or released." +
+        "another. Its accounts stay claimed and counted; Restart on the No-claim farm page " +
+        "rebuilds its container." +
         lock,
     });
     sendTelegram(
       `⚠️ No-claim bot ${id} (${g.label}) has no container — not creating another. ` +
-        "Fix or release it on the No-claim farm page." +
+        "Restart it on the No-claim farm page: Restart rebuilds its container." +
         lock,
     );
   }

@@ -258,6 +258,7 @@ function fakeHost(opts = {}) {
     failReread: () => false,
     failRestart: false,
     launchFails: false,
+    busy: false, // a .provisioning lock is held
     ...opts,
   };
   const files = new Map(Object.entries(o.configs).map(([id, c]) => [cfgPath(id), JSON.stringify(c, null, 2)]));
@@ -290,7 +291,18 @@ function fakeHost(opts = {}) {
         if (o.failRestart) throw new Error("ssh: restart timed out");
         return { stdout: "" };
       }
-      if (script.includes("echo busy")) return { stdout: "free" };
+      if (script.includes('echo "NAMES=')) {
+        // rebuildMissingContainer's probe: does the container exist, and the config?
+        const id = script.match(/name=\^\/noclaim-bot-(\d+)\$/)[1];
+        const has = o.containers.includes("noclaim-bot-" + id);
+        const p = cfgPath(id);
+        return {
+          stdout:
+            `RC=0\nNAMES=${has ? "noclaim-bot-" + id : ""}\n` +
+            (files.has(p) ? "__CFG__\n" + files.get(p) : "__NOCFG__"),
+        };
+      }
+      if (script.includes("echo busy")) return { stdout: o.busy ? "busy" : "free" };
       if (script.startsWith("ls -1")) return { stdout: o.ids.join("\n") };
       if (script.includes('echo "RC=$?"')) return { stdout: "RC=0\n" + o.containers.join("\n") };
       if (script.includes("setsid")) {
@@ -1389,4 +1401,79 @@ test("readFleet's script reads the lock's age and each config's mtime on a real 
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }
+});
+
+// ---------------------------------------------------------------------------
+// Round 2: a stuck bot can be fixed from the page
+// ---------------------------------------------------------------------------
+
+test("rebuildMissingContainer relaunches a lost container from the bot's config, with createBot's launch", async () => {
+  // Bot 9 lost its container (a rollout whose `docker run` failed); its config is fine.
+  await withFleet(
+    { host: { configs: { 9: botConfig(["t1", "t2", "t3"], "Overwatch 2") }, containers: ["noclaim-bot-3"] } },
+    async (env) => {
+      const before = env.host.files.get(cfgPath("9"));
+      const out = await env.fleet.rebuildMissingContainer("9");
+      assert.deepEqual(out, { id: "9", game: "Overwatch 2", accounts: 3 });
+      const launch = env.host.scripts.find((s) => s.includes("setsid"));
+      assert.ok(launch, "launched");
+      const inner = launch.split("'\\''").join("'");
+      assert.match(inner, /docker run -d --name 'noclaim-bot-9' .*\|\| \{ docker rm -f 'noclaim-bot-9'/);
+      assert.match(inner, /\.provisioning/, "under the provisioning lock");
+      assert.deepEqual(env.ramCalls, ["contabo"], "behind the RAM gate");
+      assert.equal(env.host.files.get(cfgPath("9")), before, "the config is left as it is");
+      assert.ok(!env.host.scripts.some((s) => s.startsWith("GUARDED_WRITE")));
+    },
+  );
+});
+
+test("rebuildMissingContainer refuses when there is a container, no config, no room, or a build running", async () => {
+  const cfg = { 9: botConfig(["t1"], "Overwatch 2") };
+  const launched = (env) => env.host.scripts.some((s) => s.includes("setsid"));
+  await withFleet({ host: { configs: cfg, containers: ["noclaim-bot-9"] } }, async (env) => {
+    await assert.rejects(env.fleet.rebuildMissingContainer("9"), (e) => e.code === "container_exists");
+    assert.ok(!launched(env));
+  });
+  await withFleet({ host: { configs: {} } }, async (env) => {
+    await assert.rejects(env.fleet.rebuildMissingContainer("9"), (e) => e.code === "no_config");
+    assert.ok(!launched(env));
+  });
+  await withFleet(
+    { host: { configs: cfg }, ram: { ok: false, availableMb: 900, minFreeMb: 1500, reason: "low" } },
+    async (env) => {
+      await assert.rejects(env.fleet.rebuildMissingContainer("9"), (e) => e.status === 409 && /900 MB/.test(e.message));
+      assert.ok(!launched(env));
+    },
+  );
+  await withFleet({ host: { configs: cfg, containers: ["noclaim-bot-1", "noclaim-bot-2"] }, af: { noclaimMaxBots: 2 } }, async (env) => {
+    await assert.rejects(env.fleet.rebuildMissingContainer("9"), (e) => e.status === 409 && /cap is 2/.test(e.message));
+    assert.ok(!launched(env));
+  });
+  await withFleet({ host: { configs: cfg, busy: true } }, async (env) => {
+    await assert.rejects(env.fleet.rebuildMissingContainer("9"), (e) => e.status === 409 && /already running/.test(e.message));
+    assert.ok(!launched(env));
+  });
+});
+
+test("the stuck-bot plan note and alert say that Restart rebuilds its container", async () => {
+  const fleet = fleetFake({
+    readFleet: async () => ({
+      provisioning: false,
+      psOk: true,
+      containers: 1,
+      bots: [
+        { id: "3", game: "Rainbow Six Siege", accounts: 70, containerState: "running", running: true },
+        { id: "9", game: "Rainbow Six Siege", accounts: 3, containerState: "none", running: false, configMtime: 7 },
+      ],
+    }),
+  });
+  await withAllocator({ fleet, rows: R6, campaigns: R6_LIVE }, async (env) => {
+    const p = await env.alloc.plan();
+    const g = p.games[0];
+    assert.ok(g.notes.some((n) => /Restart on the No-claim farm page rebuilds its container/.test(n)), g.notes.join(" | "));
+    assert.match(g.createBlocked, /Restart rebuilds its container/);
+    await env.alloc.apply({ plan: p });
+    assert.match(env.telegrams[0], /Restart rebuilds its container/);
+    assert.match(env.events.find((e) => e.action === "provision_stuck").detail, /rebuilds its container/);
+  });
 });
