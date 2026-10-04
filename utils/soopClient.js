@@ -9,23 +9,29 @@
 const crypto = require("crypto");
 const https = require("https");
 const WebSocket = require("ws");
-const { SocksProxyAgent } = require("socks-proxy-agent");
 
 const UA =
   "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 " +
   "(KHTML, like Gecko) Chrome/154.0.0.0 Safari/537.36";
 
-// SOOP credits watch time only for traffic it believes is a real viewer, and a
-// datacenter IP is not one of those. SOOP_PROXY_URL points every SOOP HTTP call
-// and the bridge socket at a SOCKS5 egress (an `ssh -D` tunnel to a home Pi),
-// so the farm leaves from a residential address instead of the server's.
+// SOOP only credits watch time to viewers in supported countries (measured
+// 2026-10-04: a Tokyo residential IP credits, the US server and a Sri Lankan
+// residential IP do not). SOOP_PROXY_URL points every SOOP HTTP call and the
+// bridge socket at a SOCKS5 egress — an `ssh -D` tunnel to a host in a
+// supported country — so the farm leaves from an address that can earn.
 const PROXY_URL = process.env.SOOP_PROXY_URL || "";
 let proxyAgent = null;
 if (PROXY_URL) {
   try {
+    // Required lazily: without a proxy configured this optional package must
+    // never be able to stop the app from booting.
+    const { SocksProxyAgent } = require("socks-proxy-agent");
     proxyAgent = new SocksProxyAgent(PROXY_URL);
   } catch (err) {
-    console.error("[soop] ignoring bad SOOP_PROXY_URL:", err.message);
+    console.error(
+      "[soop] SOOP_PROXY_URL is set but no proxy agent could be built:",
+      err.message,
+    );
   }
 }
 
