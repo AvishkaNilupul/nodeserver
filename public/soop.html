@@ -1,0 +1,1412 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <script>
+      (function () {
+        try {
+          if (localStorage.getItem("theme") === "dark")
+            document.documentElement.setAttribute("data-theme", "dark");
+        } catch (e) {}
+      })();
+    </script>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>SOOP farm</title>
+    <style>
+      :root {
+        --bg: #f6f7fb;
+        --surface: #ffffff;
+        --surface-2: #f8fafc;
+        --line: #e7eaf0;
+        --ink: #0f172a;
+        --muted: #6b7280;
+        --accent: #4f46e5;
+        --green: #059669;
+        --amber: #b45309;
+        --red: #dc2626;
+      }
+      html[data-theme="dark"] {
+        --bg: #0e1014;
+        --surface: #161a22;
+        --surface-2: #1e232e;
+        --line: #2a3140;
+        --ink: #e8ebf2;
+        --muted: #9aa3b4;
+        --green: #34d399;
+        --amber: #fbbf24;
+        --red: #f87171;
+        color-scheme: dark;
+      }
+      * {
+        box-sizing: border-box;
+      }
+      body {
+        margin: 0;
+        font-family:
+          -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+        background: var(--bg);
+        color: var(--ink);
+        display: flex;
+        min-height: 100vh;
+      }
+      a {
+        color: inherit;
+        text-decoration: none;
+      }
+      code {
+        font:
+          12px ui-monospace,
+          Menlo,
+          monospace;
+      }
+
+      .nav {
+        width: 248px;
+        flex: none;
+        background: var(--surface);
+        border-right: 1px solid var(--line);
+        display: flex;
+        flex-direction: column;
+      }
+      .nav .brand {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        padding: 18px 20px;
+        border-bottom: 1px solid var(--line);
+      }
+      .nav .brand .mark {
+        width: 34px;
+        height: 34px;
+        border-radius: 10px;
+        background: linear-gradient(135deg, #6366f1, #4f46e5);
+        display: grid;
+        place-items: center;
+      }
+      .nav .brand b {
+        font-size: 15px;
+        font-weight: 700;
+        line-height: 1.15;
+      }
+      .nav .brand b span {
+        display: block;
+        font-size: 10.5px;
+        color: var(--muted);
+        font-weight: 500;
+      }
+      .nav .links {
+        padding: 12px;
+        flex: 1;
+        display: flex;
+        flex-direction: column;
+        gap: 4px;
+      }
+      .nav .links a,
+      .nav .links .nav-group-toggle {
+        display: flex;
+        align-items: center;
+        gap: 11px;
+        padding: 11px 13px;
+        border-radius: 10px;
+        color: var(--muted);
+        font-size: 14px;
+        font-weight: 500;
+        background: none;
+        border: 0;
+        width: 100%;
+        cursor: pointer;
+        text-align: left;
+      }
+      .nav .links a:hover,
+      .nav .links .nav-group-toggle:hover {
+        background: var(--surface-2);
+      }
+      .nav .links a.active {
+        background: rgba(79, 70, 229, 0.12);
+        color: var(--accent);
+        font-weight: 600;
+      }
+      html[data-theme="dark"] .nav .links a.active {
+        background: rgba(99, 102, 241, 0.2);
+      }
+      .nav .me {
+        border-top: 1px solid var(--line);
+        padding: 14px;
+        display: flex;
+        align-items: center;
+        gap: 10px;
+      }
+      .nav .me .av {
+        width: 36px;
+        height: 36px;
+        border-radius: 10px;
+        background: linear-gradient(135deg, #34d399, #10b981);
+        display: grid;
+        place-items: center;
+        color: #fff;
+        font-weight: 700;
+        font-size: 13px;
+      }
+      .nav .me .who {
+        line-height: 1.2;
+        min-width: 0;
+      }
+      .nav .me .who b {
+        font-size: 13.5px;
+        display: block;
+      }
+      .nav .me .who span {
+        display: block;
+        font-size: 11px;
+        color: var(--muted);
+      }
+      .nav .me .logout {
+        margin-left: auto;
+        width: 32px;
+        height: 32px;
+        border-radius: 9px;
+        border: 1px solid var(--line);
+        background: var(--surface);
+        color: var(--muted);
+        display: grid;
+        place-items: center;
+        cursor: pointer;
+      }
+
+      main {
+        flex: 1;
+        padding: 22px 26px;
+        min-width: 0;
+      }
+      h1.page {
+        font-size: 19px;
+        margin: 0 0 4px;
+        font-weight: 700;
+      }
+      p.sub {
+        margin: 0 0 18px;
+        color: var(--muted);
+        font-size: 13px;
+      }
+      .grid {
+        display: grid;
+        gap: 16px;
+        grid-template-columns: 1fr 1fr;
+        align-items: start;
+      }
+      @media (max-width: 1080px) {
+        .grid {
+          grid-template-columns: 1fr;
+        }
+      }
+      .card {
+        background: var(--surface);
+        border: 1px solid var(--line);
+        border-radius: 12px;
+        padding: 15px 17px;
+      }
+      .card h2 {
+        margin: 0 0 11px;
+        font-size: 12px;
+        letter-spacing: 0.05em;
+        text-transform: uppercase;
+        color: var(--muted);
+        font-weight: 700;
+      }
+      textarea {
+        width: 100%;
+        height: 96px;
+        background: var(--bg);
+        color: var(--ink);
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        padding: 9px;
+        font:
+          12px/1.4 ui-monospace,
+          Menlo,
+          monospace;
+        resize: vertical;
+      }
+      button {
+        background: var(--surface);
+        color: var(--ink);
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        padding: 6px 11px;
+        cursor: pointer;
+        font-size: 12.5px;
+      }
+      button:hover {
+        background: var(--surface-2);
+      }
+      button.primary {
+        background: var(--accent);
+        border-color: var(--accent);
+        color: #fff;
+        font-weight: 600;
+      }
+      button.danger:hover {
+        border-color: var(--red);
+        color: var(--red);
+      }
+      table {
+        width: 100%;
+        border-collapse: collapse;
+      }
+      th,
+      td {
+        text-align: left;
+        padding: 7px 8px;
+        border-bottom: 1px solid var(--line);
+        vertical-align: middle;
+      }
+      th {
+        color: var(--muted);
+        font-weight: 600;
+        font-size: 11.5px;
+      }
+      input[type="text"],
+      input[type="number"] {
+        background: var(--bg);
+        color: var(--ink);
+        border: 1px solid var(--line);
+        border-radius: 7px;
+        padding: 5px 7px;
+      }
+      tr.current td {
+        background: rgba(79, 70, 229, 0.06);
+      }
+      tr.current td:first-child {
+        box-shadow: inset 3px 0 0 var(--accent);
+      }
+      .chip {
+        display: inline-block;
+        padding: 1px 8px;
+        border-radius: 999px;
+        font-size: 11px;
+        border: 1px solid var(--line);
+        color: var(--muted);
+        margin-right: 4px;
+      }
+      .chip.ok {
+        color: var(--green);
+        border-color: var(--green);
+      }
+      .chip.bad {
+        color: var(--red);
+        border-color: var(--red);
+      }
+      .chip.warn {
+        color: var(--amber);
+        border-color: var(--amber);
+      }
+      .row {
+        display: flex;
+        gap: 8px;
+        align-items: center;
+        flex-wrap: wrap;
+      }
+      .bar {
+        height: 7px;
+        background: var(--bg);
+        border: 1px solid var(--line);
+        border-radius: 99px;
+        overflow: hidden;
+        margin-top: 6px;
+      }
+      .bar > i {
+        display: block;
+        height: 100%;
+        background: linear-gradient(90deg, #4f46e5, #31c48d);
+        width: 0;
+        transition: width 0.4s;
+      }
+      .muted {
+        color: var(--muted);
+      }
+      .session {
+        border: 1px solid var(--line);
+        border-radius: 10px;
+        padding: 10px 12px;
+        margin-bottom: 8px;
+        background: var(--surface-2);
+      }
+      .log {
+        max-height: 96px;
+        overflow: auto;
+        font:
+          10.5px/1.4 ui-monospace,
+          Menlo,
+          monospace;
+        color: var(--muted);
+        margin-top: 7px;
+        white-space: pre-wrap;
+        word-break: break-all;
+      }
+      .empty {
+        color: var(--muted);
+        padding: 6px 0;
+      }
+      .toast {
+        position: fixed;
+        right: 18px;
+        bottom: 18px;
+        background: var(--surface);
+        border: 1px solid var(--line);
+        border-left: 3px solid var(--accent);
+        border-radius: 9px;
+        padding: 10px 14px;
+        max-width: 460px;
+        display: none;
+        z-index: 50;
+        box-shadow: 0 8px 24px rgba(15, 23, 42, 0.16);
+      }
+      .stats {
+        display: grid;
+        grid-template-columns: repeat(4, 1fr);
+        gap: 9px;
+        margin-bottom: 11px;
+      }
+      .stat {
+        background: var(--bg);
+        border: 1px solid var(--line);
+        border-radius: 9px;
+        padding: 8px 10px;
+      }
+      .stat b {
+        display: block;
+        font-size: 17px;
+        font-weight: 700;
+        letter-spacing: -0.01em;
+      }
+      .stat span {
+        font-size: 11px;
+        color: var(--muted);
+      }
+      .spark {
+        width: 100%;
+        height: 56px;
+        display: block;
+        background: var(--bg);
+        border: 1px solid var(--line);
+        border-radius: 9px;
+      }
+      .legend {
+        display: flex;
+        justify-content: space-between;
+        font-size: 11px;
+        color: var(--muted);
+        margin-top: 4px;
+      }
+      a.link {
+        color: var(--accent);
+      }
+    </style>
+  </head>
+  <body>
+    <aside class="nav">
+      <div class="brand">
+        <span class="mark">
+          <svg
+            width="18"
+            height="18"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="#fff"
+            stroke-width="2.2"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+          >
+            <polygon points="12 2 2 8.5 12 15 22 8.5 12 2"></polygon>
+            <path d="M2 8.5v7L12 22l10-6.5v-7"></path>
+          </svg>
+        </span>
+        <b>RedeemHub<span>Admin console</span></b>
+      </div>
+      <nav class="links">
+        <a href="/admin.html"
+          ><svg
+            width="18"
+            height="18"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2"
+            stroke-linecap="round"
+          >
+            <path
+              d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"
+            ></path>
+          </svg>
+          Inbox</a
+        >
+        <a href="/orders"
+          ><svg
+            width="18"
+            height="18"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2"
+            stroke-linecap="round"
+          >
+            <rect x="3" y="4" width="18" height="16" rx="2"></rect>
+            <path d="M3 9h18M7 14h6"></path>
+          </svg>
+          Orders</a
+        >
+        <a href="/inventory"
+          ><svg
+            width="18"
+            height="18"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2"
+            stroke-linecap="round"
+          >
+            <path d="M20 7H4M16 3H8M6 11h12l-1 10H7z"></path>
+          </svg>
+          Inventory</a
+        >
+      </nav>
+      <div class="me">
+        <span class="av" id="meAvatar">--</span>
+        <div class="who">
+          <b id="meName">Admin</b><span id="meRole">Seller</span>
+        </div>
+        <button
+          class="logout"
+          data-theme-toggle
+          onclick="toggleTheme()"
+          title="Toggle dark mode"
+        >
+          <svg
+            class="t-moon"
+            width="16"
+            height="16"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+          >
+            <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"></path>
+          </svg>
+          <svg
+            class="t-sun"
+            style="display: none"
+            width="16"
+            height="16"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+          >
+            <circle cx="12" cy="12" r="4"></circle>
+            <path
+              d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M6.34 17.66l-1.41 1.41M19.07 4.93l-1.41 1.41"
+            ></path>
+          </svg>
+        </button>
+      </div>
+    </aside>
+
+    <main>
+      <h1 class="page">SOOP drops farm</h1>
+      <p class="sub">
+        Watch time is earned by holding the SOOP viewer socket — no browser
+        needed. Drops are left <b>unclaimed</b> on purpose. Drops are read from
+        the account while it is logged in; codes stay in the account's
+        inventory.
+      </p>
+
+      <div class="grid">
+        <section class="card">
+          <h2>1 · Import cookie</h2>
+          <textarea
+            id="cookieBox"
+            placeholder='Paste the Cookie-Editor JSON export (must contain AuthTicket), or a raw "AuthTicket=..." string.'
+          ></textarea>
+          <div class="row" style="margin-top: 8px">
+            <button class="primary" data-act="import">Import &amp; test</button>
+            <span class="muted"
+              >Needs an <code>AuthTicket</code> cookie. A logged-out export is
+              rejected.</span
+            >
+          </div>
+        </section>
+
+        <section class="card">
+          <h2>2 · Usage meter <span class="muted">(server process)</span></h2>
+          <div class="stats">
+            <div class="stat"><b id="mRss">–</b><span>RSS now</span></div>
+            <div class="stat">
+              <b id="mPerAcct">–</b><span>peak cost / account</span>
+            </div>
+            <div class="stat"><b id="mCpu">–</b><span>CPU</span></div>
+            <div class="stat"><b id="mSockets">–</b><span>sockets</span></div>
+          </div>
+          <svg
+            class="spark"
+            id="spark"
+            viewBox="0 0 300 56"
+            preserveAspectRatio="none"
+          >
+            <polyline
+              points=""
+              fill="none"
+              stroke="#4f46e5"
+              stroke-width="1.6"
+            ></polyline>
+          </svg>
+          <div class="legend">
+            <span id="sparkMin">–</span><span>RAM over the last ~20 min</span
+            ><span id="sparkMax">–</span>
+          </div>
+          <div class="legend">
+            <span id="mBase">–</span><span></span><span id="mPeak">–</span>
+          </div>
+          <div class="legend">
+            <span id="mFree">–</span><span></span><span id="mTotal">–</span>
+          </div>
+        </section>
+
+        <section class="card">
+          <h2>3 · Accounts <span class="muted" id="selCount"></span></h2>
+          <div class="row" style="margin-bottom: 8px">
+            <button class="primary" data-act="farm-sel">Farm selected</button>
+            <button data-act="farm-all">Farm all</button>
+            <button data-act="test-sel">Test selected</button>
+            <label class="muted" style="margin-left: auto"
+              ><input type="checkbox" id="firstOnly" /> first step only (default
+              farms to 100%)</label
+            >
+          </div>
+          <div class="muted" style="margin-bottom: 7px; font-size: 12px">
+            Click a row to make it the <b>current account</b> — campaigns and
+            inventory load for it.
+          </div>
+          <div id="accounts"></div>
+        </section>
+
+        <section class="card">
+          <h2>4 · Live campaigns <span class="muted" id="campAcct"></span></h2>
+          <div class="row" style="margin-bottom: 8px">
+            <label class="muted"
+              >accounts per bot
+              <input
+                type="number"
+                id="slots"
+                value="10"
+                min="1"
+                style="width: 64px"
+            /></label>
+            <span class="muted"
+              >ticked accounts are used first, otherwise the first N</span
+            >
+          </div>
+          <div class="row" style="margin-bottom: 8px">
+            <label class="muted"
+              >pin a campaign by ID
+              <input
+                type="text"
+                id="pinIdx"
+                placeholder="e.g. 13337"
+                style="width: 110px"
+            /></label>
+            <button data-act="pin-bot">Start bot on ID</button>
+            <span class="muted"
+              >works for events SOOP has delisted from the list</span
+            >
+          </div>
+          <div id="campaigns">
+            <div class="empty">
+              No current account yet — click an account row.
+            </div>
+          </div>
+        </section>
+
+        <section class="card">
+          <h2>5 · Inventory <span class="muted" id="invAcct"></span></h2>
+          <div class="row" style="margin-bottom: 8px">
+            <button class="primary" data-act="inv-load">Load inventory</button>
+            <span id="invCounts"></span>
+          </div>
+          <div id="inventory">
+            <div class="empty">
+              No current account yet — click an account row.
+            </div>
+          </div>
+        </section>
+
+        <section class="card">
+          <h2>6 · Bots <span class="muted" id="botCount"></span></h2>
+          <div class="row" style="margin-bottom: 8px">
+            <button class="danger" data-act="bot-stop-all">
+              Stop all bots
+            </button>
+          </div>
+          <div id="bots">
+            <div class="empty">No bots yet — start one from a campaign.</div>
+          </div>
+        </section>
+
+        <section class="card">
+          <h2>7 · Running (loose) <span class="muted" id="runCount"></span></h2>
+          <div class="row" style="margin-bottom: 8px">
+            <button class="danger" data-act="stop-all">Stop all</button>
+          </div>
+          <div id="sessions"><div class="empty">Nothing running.</div></div>
+        </section>
+      </div>
+    </main>
+
+    <div class="toast" id="toast"></div>
+
+    <script src="/theme.js"></script>
+    <script src="/admin-nav.js"></script>
+    <script>
+      var state = { accounts: [], sessions: [], tasks: [], metrics: null };
+      var current = null;
+      var checked = new Set();
+
+      var esc = function (s) {
+        return String(s == null ? "" : s).replace(/[&<>"']/g, function (c) {
+          return {
+            "&": "&amp;",
+            "<": "&lt;",
+            ">": "&gt;",
+            '"': "&quot;",
+            "'": "&#39;",
+          }[c];
+        });
+      };
+      function $(id) {
+        return document.getElementById(id);
+      }
+      function toast(msg, bad) {
+        var t = $("toast");
+        t.textContent = msg;
+        t.style.display = "block";
+        t.style.borderLeftColor = bad ? "var(--red)" : "var(--accent)";
+        clearTimeout(toast._h);
+        toast._h = setTimeout(function () {
+          t.style.display = "none";
+        }, 7000);
+      }
+      async function api(path, body) {
+        var r = await fetch(path, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          credentials: "same-origin",
+          body: JSON.stringify(body || {}),
+        });
+        var j = await r.json().catch(function () {
+          return {};
+        });
+        if (!r.ok || j.success === false)
+          throw new Error(j.error || j.message || "HTTP " + r.status);
+        return j;
+      }
+      function farmTarget() {
+        return $("firstOnly").checked ? "first" : "all";
+      }
+      function setCurrent(id) {
+        current = id;
+        renderAccounts();
+        loadCampaigns();
+        loadInventory();
+      }
+
+      async function doImport() {
+        var cookies = $("cookieBox").value;
+        if (!cookies.trim()) return toast("Paste a cookie export first", true);
+        try {
+          var r = await api("/api/soop/import", { cookies: cookies });
+          $("cookieBox").value = "";
+          checked.add(r.id);
+          toast("Imported " + r.id + " (" + (r.country || "?") + ")");
+          await refresh();
+          setCurrent(r.id);
+        } catch (e) {
+          toast("Import failed: " + e.message, true);
+        }
+      }
+      function accountsForAction() {
+        if (checked.size) return Array.from(checked);
+        if (current) return [current];
+        return state.accounts.map(function (a) {
+          return a.id;
+        });
+      }
+      async function startFarm(ids) {
+        if (!ids.length)
+          return toast("Tick an account or click a row first", true);
+        try {
+          var r = await api("/api/soop/farm/start", {
+            ids: ids,
+            drops: "auto",
+            target: farmTarget(),
+          });
+          var ok = r.results.filter(function (x) {
+            return x.ok;
+          }).length;
+          var bad = r.results
+            .filter(function (x) {
+              return !x.ok;
+            })
+            .map(function (x) {
+              return x.id + ": " + x.error;
+            });
+          toast(
+            "Started " +
+              ok +
+              " instance(s)" +
+              (bad.length ? " · " + bad.join(", ") : ""),
+            !ok,
+          );
+          refresh();
+        } catch (e) {
+          toast(e.message, true);
+        }
+      }
+      async function startBot(dropsIdx, label, steps) {
+        var n = Math.max(1, Number($("slots").value || 10));
+        var ids = checked.size
+          ? Array.from(checked)
+          : state.accounts
+              .map(function (a) {
+                return a.id;
+              })
+              .slice(0, n);
+        if (!ids.length) return toast("No accounts available", true);
+        var list = (steps || [])
+          .map(Number)
+          .filter(Boolean)
+          .sort(function (a, b) {
+            return a - b;
+          });
+        var goal = list.length
+          ? farmTarget() === "first"
+            ? list[0]
+            : list[list.length - 1]
+          : null;
+        try {
+          var r = await api("/api/soop/task/start", {
+            dropsIdx: dropsIdx,
+            ids: ids,
+            target: farmTarget(),
+            label: label,
+            targetMinutes: goal,
+          });
+          toast(
+            "Bot started on " +
+              dropsIdx +
+              " with " +
+              r.accounts.length +
+              " account(s)",
+          );
+          refresh();
+        } catch (e) {
+          toast("Bot failed: " + e.message, true);
+        }
+      }
+      async function testIds(ids) {
+        if (!ids.length) return toast("Nothing to test", true);
+        try {
+          await api("/api/soop/check", { ids: ids });
+          toast("Checked " + ids.length + " account(s)");
+          await refresh();
+          loadCampaigns();
+          loadInventory();
+        } catch (e) {
+          toast(e.message, true);
+        }
+      }
+      async function del(id) {
+        if (!confirm("Delete stored cookies for " + id + "?")) return;
+        try {
+          await api("/api/soop/delete", { id: id });
+        } catch (e) {
+          return toast(e.message, true);
+        }
+        checked.delete(id);
+        if (current === id) current = null;
+        refresh();
+        loadCampaigns();
+        loadInventory();
+      }
+
+      function renderAccounts() {
+        var el = $("accounts");
+        $("selCount").textContent = checked.size
+          ? "· " + checked.size + " ticked"
+          : "";
+        if (!state.accounts.length) {
+          el.innerHTML =
+            '<div class="empty">No accounts yet — import one above.</div>';
+          return;
+        }
+        var running = new Map(
+          state.sessions.map(function (s) {
+            return [s.id, s];
+          }),
+        );
+        el.innerHTML =
+          "<table><tr><th style='width:26px'></th><th>Account</th><th>Cookie</th><th></th></tr>" +
+          state.accounts
+            .map(function (a) {
+              var c = a.check,
+                chip;
+              if (!c) chip = '<span class="chip">untested</span>';
+              else if (!c.loggedIn)
+                chip = '<span class="chip bad">not logged in</span>';
+              else if (c.dropsOk === false)
+                chip =
+                  '<span class="chip bad" title="' +
+                  esc(c.dropsError || "") +
+                  '">drops session rejected</span><br><small class="muted">re-export this cookie on drops.sooplive.com</small>';
+              else
+                chip =
+                  '<span class="chip ok">login ok</span><span class="chip">' +
+                  c.missions +
+                  ' missions</span><span class="chip' +
+                  (c.liveTerm.length ? " warn" : "") +
+                  '">' +
+                  c.liveTerm.length +
+                  " farmable</span>";
+              var s = running.get(a.id);
+              var farmingChip = s
+                ? '<span class="chip ' +
+                  (s.status === "farming" ? "ok" : "warn") +
+                  '">' +
+                  esc(
+                    s.taskId
+                      ? s.status === "farming"
+                        ? "farming (bot)"
+                        : "bot: waiting"
+                      : s.status,
+                  ) +
+                  "</span>"
+                : "";
+              return (
+                '<tr class="' +
+                (current === a.id ? "current" : "") +
+                '">' +
+                '<td><input type="checkbox" data-check="' +
+                esc(a.id) +
+                '" ' +
+                (checked.has(a.id) ? "checked" : "") +
+                "></td>" +
+                "<td><code data-act='current' data-id='" +
+                esc(a.id) +
+                "' style='cursor:pointer'>" +
+                esc(a.id) +
+                "</code>" +
+                (current === a.id
+                  ? ' <span class="chip ok">current</span>'
+                  : "") +
+                '<br><small class="muted">' +
+                esc(a.nick || "") +
+                " " +
+                esc(a.country || "") +
+                "</small></td>" +
+                "<td>" +
+                chip +
+                farmingChip +
+                "</td>" +
+                '<td class="row"><button data-act="test" data-id="' +
+                esc(a.id) +
+                '">Test</button>' +
+                '<button data-act="current" data-id="' +
+                esc(a.id) +
+                '">Inventory</button>' +
+                '<button class="primary" data-act="farm" data-id="' +
+                esc(a.id) +
+                '">Farm</button>' +
+                '<button class="danger" data-act="del" data-id="' +
+                esc(a.id) +
+                '">Delete</button></td></tr>'
+              );
+            })
+            .join("") +
+          "</table>";
+      }
+
+      function renderSessions() {
+        var el = $("sessions");
+        var loose = state.sessions.filter(function (s) {
+          return !s.taskId;
+        });
+        $("runCount").textContent = loose.length ? "· " + loose.length : "";
+        if (!loose.length) {
+          el.innerHTML =
+            '<div class="empty">Nothing running loose. (Bots are listed above.)</div>';
+          return;
+        }
+        el.innerHTML = loose
+          .map(function (s) {
+            var pct = s.targetMinutes
+              ? Math.min(100, Math.round((100 * s.minutes) / s.targetMinutes))
+              : 0;
+            return (
+              '<div class="session"><div class="row" style="justify-content:space-between">' +
+              "<div><code>" +
+              esc(s.id) +
+              "</code> · " +
+              esc(s.title || "picking campaign…") +
+              (s.channel
+                ? ' <span class="muted">via ' + esc(s.channel) + "</span>"
+                : "") +
+              "</div>" +
+              '<div class="row"><span class="muted">' +
+              s.minutes +
+              " / " +
+              (s.targetMinutes == null ? "?" : s.targetMinutes) +
+              "m</span>" +
+              '<button data-act="stop" data-id="' +
+              esc(s.id) +
+              '">Stop</button></div></div>' +
+              '<div class="bar"><i style="width:' +
+              pct +
+              '%"></i></div>' +
+              '<div class="muted" style="margin-top:5px">' +
+              esc(s.status) +
+              (s.errors ? " · " + s.errors + " error(s)" : "") +
+              "</div>" +
+              '<div class="log">' +
+              s.log
+                .slice(-4)
+                .map(function (l) {
+                  return esc(JSON.stringify(l));
+                })
+                .join("\n") +
+              "</div></div>"
+            );
+          })
+          .join("");
+      }
+
+      function renderTasks() {
+        var el = $("bots");
+        var tasks = state.tasks || [];
+        $("botCount").textContent = tasks.length ? "· " + tasks.length : "";
+        if (!tasks.length) {
+          el.innerHTML =
+            '<div class="empty">No bots yet — pick a campaign and start one.</div>';
+          return;
+        }
+        el.innerHTML = tasks
+          .map(function (t) {
+            var farming = t.accounts.filter(function (a) {
+              return a.status === "farming";
+            }).length;
+            var waiting = t.accounts.filter(function (a) {
+              return /waiting|pick/i.test(a.status || "");
+            }).length;
+            return (
+              '<div class="session"><div class="row" style="justify-content:space-between">' +
+              "<div><b>" +
+              esc(t.label) +
+              '</b> <span class="muted">· ' +
+              esc(t.dropsIdx) +
+              " · " +
+              t.accounts.length +
+              " accounts" +
+              (t.targetMinutes ? " · goal " + t.targetMinutes + "m" : "") +
+              "</span></div>" +
+              '<div class="row"><span class="chip ok">' +
+              farming +
+              ' farming</span><span class="chip warn">' +
+              waiting +
+              " waiting</span>" +
+              '<button data-act="bot-stop" data-id="' +
+              esc(t.taskId) +
+              '">Stop bot</button></div></div>' +
+              '<div style="margin-top:6px">' +
+              t.accounts
+                .map(function (a) {
+                  return (
+                    '<div class="row" style="font-size:12px; gap:6px"><code>' +
+                    esc(a.id) +
+                    "</code>" +
+                    '<span class="chip' +
+                    (a.status === "farming"
+                      ? " ok"
+                      : a.status === "finished"
+                        ? ""
+                        : " warn") +
+                    '">' +
+                    esc(a.status) +
+                    "</span>" +
+                    (a.channel
+                      ? '<span class="muted">via ' + esc(a.channel) + "</span>"
+                      : "") +
+                    (a.targetMinutes
+                      ? '<span class="muted">' +
+                        a.minutes +
+                        "/" +
+                        a.targetMinutes +
+                        "m</span>"
+                      : "") +
+                    (a.waitState
+                      ? '<span class="muted">' + esc(a.waitState) + "</span>"
+                      : "") +
+                    "</div>"
+                  );
+                })
+                .join("") +
+              "</div></div>"
+            );
+          })
+          .join("");
+      }
+
+      function renderMeter(m) {
+        if (!m) return;
+        $("mRss").textContent = m.rssMB + " MB";
+        $("mPerAcct").textContent =
+          m.perAccountMB == null ? "–" : m.perAccountMB + " MB";
+        $("mCpu").textContent = m.cpuPct + " %";
+        $("mSockets").textContent = m.sockets;
+        $("mBase").textContent = "idle baseline " + m.baselineMB + " MB";
+        $("mPeak").textContent = "peak " + m.peakMB + " MB";
+        $("mFree").textContent =
+          "system RAM in use " +
+          ((m.totalMemMB - m.freeMemMB) / 1024).toFixed(1) +
+          " GB (" +
+          Math.round((100 * (m.totalMemMB - m.freeMemMB)) / m.totalMemMB) +
+          "%)";
+        $("mTotal").textContent =
+          "of " + (m.totalMemMB / 1024).toFixed(1) + " GB";
+        var s = m.samples || [],
+          line = document.querySelector("#spark polyline");
+        if (s.length < 2) {
+          line.setAttribute("points", "");
+          $("sparkMin").textContent = "";
+          $("sparkMax").textContent = "";
+          return;
+        }
+        var vals = s.map(function (x) {
+          return x.rssMB;
+        });
+        var max = Math.max.apply(null, vals),
+          min = Math.min.apply(null, vals),
+          span = Math.max(max - min, 1);
+        line.setAttribute(
+          "points",
+          vals
+            .map(function (v, i) {
+              return (
+                ((i / (vals.length - 1)) * 300).toFixed(1) +
+                "," +
+                (56 - ((v - min) / span) * 48 - 4).toFixed(1)
+              );
+            })
+            .join(" "),
+        );
+        $("sparkMin").textContent = "min " + min.toFixed(1) + " MB";
+        $("sparkMax").textContent = "max " + max.toFixed(1) + " MB";
+      }
+
+      async function loadCampaigns() {
+        var el = $("campaigns");
+        if (!current) {
+          $("campAcct").textContent = "";
+          el.innerHTML =
+            '<div class="empty">No current account yet — click an account row.</div>';
+          return;
+        }
+        $("campAcct").textContent = "· " + current;
+        el.innerHTML = '<div class="empty">Loading…</div>';
+        try {
+          var r = await api("/api/soop/campaigns", { id: current });
+          if (!r.campaigns.length) {
+            el.innerHTML =
+              '<div class="empty">No campaigns available right now.</div>';
+            return;
+          }
+          el.innerHTML =
+            "<table><tr><th>Campaign</th><th>State</th><th>Steps</th><th>Channel</th><th></th></tr>" +
+            r.campaigns
+              .map(function (c) {
+                var farmable = c.giveCon === "term";
+                var st = c.live
+                  ? '<span class="chip ok">live</span>'
+                  : c.unlisted
+                    ? '<span class="chip">not listed</span>'
+                    : c.filter === "scheduled"
+                      ? '<span class="chip warn">scheduled</span>'
+                      : '<span class="chip">offline</span>';
+                return (
+                  "<tr><td>" +
+                  esc(c.title) +
+                  '<br><small class="muted">' +
+                  esc(c.dropsIdx) +
+                  " · " +
+                  esc(c.cateName || "") +
+                  "</small></td>" +
+                  "<td>" +
+                  st +
+                  '<br><small class="muted">' +
+                  esc(c.giveCon) +
+                  (farmable ? " · farmable" : "") +
+                  (c.unlisted ? " · remembered" : "") +
+                  "</small></td>" +
+                  "<td>" +
+                  c.steps.join("/") +
+                  "m</td>" +
+                  "<td>" +
+                  (c.onAir.length
+                    ? esc(c.onAir.join(", "))
+                    : c.categoryWide
+                      ? '<span class="muted">category-wide</span>'
+                      : '<span class="muted">off air</span>') +
+                  "</td>" +
+                  "<td>" +
+                  (farmable
+                    ? '<button class="primary" data-act="bot-start" data-drops="' +
+                      esc(c.dropsIdx) +
+                      '" data-label="' +
+                      esc(c.title) +
+                      '" data-steps="' +
+                      esc(c.steps.join(",")) +
+                      '">Start bot</button>'
+                    : '<span class="muted">not guaranteed</span>') +
+                  "</td></tr>"
+                );
+              })
+              .join("") +
+            "</table>";
+        } catch (e) {
+          el.innerHTML = '<div class="empty">' + esc(e.message) + "</div>";
+        }
+      }
+
+      var REDEEM = {
+        1: {
+          cls: "ok",
+          label: "code",
+          note: "no account link — redeem the code",
+        },
+        2: { cls: "", label: "form", note: "link / form reward" },
+        4: {
+          cls: "warn",
+          label: "link account",
+          note: "in-game reward — link the game account",
+        },
+      };
+      function redeemCell(it) {
+        var r = REDEEM[Number(it.itemType)] || {
+          cls: "",
+          label: "type " + it.itemType,
+          note: "",
+        };
+        var link = it.linkPath
+          ? ' <a class="link" href="' +
+            esc(it.linkPath) +
+            '" target="_blank" rel="noreferrer">open</a>'
+          : "";
+        var need = it.needsLink
+          ? '<span class="chip warn">link required</span>'
+          : "";
+        return (
+          '<span class="chip ' +
+          r.cls +
+          '">' +
+          esc(r.label) +
+          "</span>" +
+          need +
+          (r.note
+            ? '<br><small class="muted">' + esc(r.note) + link + "</small>"
+            : link)
+        );
+      }
+      async function loadInventory() {
+        var el = $("inventory");
+        if (!current) {
+          $("invAcct").textContent = "";
+          el.innerHTML =
+            '<div class="empty">No current account yet — click an account row.</div>';
+          return;
+        }
+        $("invAcct").textContent = "· " + current;
+        el.innerHTML = '<div class="empty">Loading…</div>';
+        try {
+          var r = await api("/api/soop/inventory", { id: current });
+          var c = r.counts || {};
+          $("invCounts").innerHTML = ["available", "acquired", "expired"]
+            .map(function (k) {
+              return (
+                '<span class="chip' +
+                (k === "available" && c[k] ? " warn" : "") +
+                '">' +
+                k +
+                " " +
+                (c[k] == null ? 0 : c[k]) +
+                "</span>"
+              );
+            })
+            .join("");
+          if (!r.items.length) {
+            el.innerHTML =
+              '<div class="empty">No items in this account\'s inventory yet.</div>';
+            return;
+          }
+          el.innerHTML =
+            "<table><tr><th>Reward</th><th>How to redeem</th><th>State</th><th>Expiry</th><th></th></tr>" +
+            r.items
+              .map(function (it, i) {
+                var code =
+                  Number(it.itemType) === 1 && it.code
+                    ? "<br><code>" + esc(it.code) + "</code>"
+                    : "";
+                var st = [it.division, it.used ? "used" : null].filter(Boolean);
+                return (
+                  "<tr><td><b>" +
+                  esc(it.itemName || "?") +
+                  "</b>" +
+                  code +
+                  (it.typeNm
+                    ? '<br><small class="muted">' + esc(it.typeNm) + "</small>"
+                    : "") +
+                  "</td>" +
+                  "<td>" +
+                  redeemCell(it) +
+                  "</td>" +
+                  "<td>" +
+                  st
+                    .map(function (x) {
+                      return (
+                        '<span class="chip' +
+                        (x === "available" ? " warn" : "") +
+                        '">' +
+                        esc(x) +
+                        "</span>"
+                      );
+                    })
+                    .join("") +
+                  "</td>" +
+                  "<td>" +
+                  esc(it.expiry || "–") +
+                  "</td>" +
+                  '<td><button data-act="json" data-idx="' +
+                  i +
+                  '">JSON</button></td></tr>' +
+                  '<tr id="invraw' +
+                  i +
+                  '" style="display:none"><td colspan="5"><div class="log">' +
+                  esc(JSON.stringify(it.raw, null, 1)) +
+                  "</div></td></tr>"
+                );
+              })
+              .join("") +
+            "</table>";
+        } catch (e) {
+          $("invCounts").textContent = "";
+          el.innerHTML = '<div class="empty">' + esc(e.message) + "</div>";
+        }
+      }
+
+      document.addEventListener("click", function (e) {
+        var t = e.target.closest("[data-act]");
+        if (!t) return;
+        var act = t.dataset.act,
+          id = t.dataset.id;
+        if (act === "import") doImport();
+        else if (act === "current") setCurrent(id);
+        else if (act === "test") testIds([id]);
+        else if (act === "farm") startFarm([id]);
+        else if (act === "bot-start")
+          startBot(
+            t.dataset.drops,
+            t.dataset.label,
+            (t.dataset.steps || "").split(","),
+          );
+        else if (act === "pin-bot") {
+          var idx = ($("pinIdx").value || "").trim();
+          if (!/^[0-9]+$/.test(idx)) toast("Enter a numeric campaign ID", true);
+          else startBot(idx, "campaign " + idx);
+        } else if (act === "bot-stop")
+          api("/api/soop/task/stop", { taskId: id })
+            .then(function () {
+              toast("Stopping bot");
+              refresh();
+            })
+            .catch(function (err) {
+              toast(err.message, true);
+            });
+        else if (act === "bot-stop-all")
+          api("/api/soop/task/stop", { all: true })
+            .then(function () {
+              toast("Stopping all bots");
+              refresh();
+            })
+            .catch(function (err) {
+              toast(err.message, true);
+            });
+        else if (act === "del") del(id);
+        else if (act === "stop")
+          api("/api/soop/farm/stop", { id: id })
+            .then(function () {
+              refresh();
+            })
+            .catch(function (err) {
+              toast(err.message, true);
+            });
+        else if (act === "stop-all")
+          api("/api/soop/farm/stop", { all: true })
+            .then(function () {
+              toast("Stopping everything");
+              refresh();
+            })
+            .catch(function (err) {
+              toast(err.message, true);
+            });
+        else if (act === "farm-sel") startFarm(accountsForAction());
+        else if (act === "farm-all")
+          startFarm(
+            state.accounts.map(function (a) {
+              return a.id;
+            }),
+          );
+        else if (act === "test-sel") testIds(accountsForAction());
+        else if (act === "inv-load") {
+          if (!current && checked.size) {
+            var first = Array.from(checked)[0];
+            setCurrent(first);
+          } else loadInventory();
+        } else if (act === "json") {
+          var r = $("invraw" + t.dataset.idx);
+          if (r) r.style.display = r.style.display === "none" ? "" : "none";
+        }
+      });
+      document.addEventListener("change", function (e) {
+        var c = e.target.closest("[data-check]");
+        if (!c) return;
+        if (c.checked) checked.add(c.dataset.check);
+        else checked.delete(c.dataset.check);
+        renderAccounts();
+      });
+
+      async function refresh() {
+        try {
+          var r = await fetch("/api/soop/state", {
+            credentials: "same-origin",
+          });
+          state = await r.json();
+          renderAccounts();
+          renderSessions();
+          renderTasks();
+          renderMeter(state.metrics);
+        } catch (e) {}
+      }
+      refresh();
+      setInterval(refresh, 2000);
+    </script>
+  </body>
+</html>

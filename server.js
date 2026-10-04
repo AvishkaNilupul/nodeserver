@@ -57,6 +57,9 @@ const twitchFollowRoutes = require("./routes/twitchFollowRoutes");
 const twitchFollowRunner = require("./utils/twitchFollowRunner");
 const twoFactorRoutes = require("./routes/twoFactorRoutes");
 const settingsRoutes = require("./routes/settingsRoutes");
+// SOOP drops farm (docs/SOOP-FARM.md): shared client, farm service and API.
+const soopRoutes = require("./routes/soopRoutes");
+const soopFarm = require("./utils/soopFarm");
 const dropScanner = require("./utils/dropScanner");
 const renterDropScanner = require("./utils/renterDropScanner");
 const backup = require("./utils/backup");
@@ -524,6 +527,13 @@ app.get("/reseller.html", requireReseller, (req, res) => {
   res.sendFile(path.join(__dirname, "public", "reseller.html"));
 });
 
+// SOOP drops farm (docs/SOOP-FARM.md) — superadmin-only. The page holds live
+// SOOP cookies server-side, so it is gated before static and never cached.
+app.get("/soop.html", requireSuperadmin, enforce2fa, (req, res) => {
+  res.set("Cache-Control", "no-store");
+  res.sendFile(path.join(__dirname, "public", "soop.html"));
+});
+
 app.use(express.static(path.join(__dirname, "public")));
 
 // =========================
@@ -578,6 +588,9 @@ app.use(enforce2fa, radarRoutes);
 app.use(enforce2fa, bannedRoutes);
 app.use(enforce2fa, epicAccountRoutes);
 app.use(enforce2fa, twitchFollowRoutes);
+// SOOP drops farm: accounts, campaigns, bots and inventory. Every route inside
+// self-guards with requireSuperadmin; enforce2fa gates it behind 2FA.
+app.use(enforce2fa, soopRoutes);
 // =========================
 // Socket.IO
 // =========================
@@ -665,6 +678,10 @@ mongoose
     // Twitch follow-bot: resumes any pending/running follow job that was
     // in flight when the server last stopped (see utils/twitchFollowRunner).
     twitchFollowRunner.start();
+    // SOOP drops farm (docs/SOOP-FARM.md): resumes any bot that was running
+    // when the process last stopped. Inert until an account is imported and a
+    // bot is started from the SOOP page.
+    soopFarm.start();
   })
   .catch((err) => {
     console.error("MongoDB connection error:", err.message);
