@@ -35,3 +35,42 @@ never commit it). This document describes the in-app port.
   The panel reads inventory; it never presses Claim.
 - Bots are in one Node process alongside the `redeemer` PM2 app, following the
   same pattern as `utils/autoFarmer.js` (`.start()` after the Mongo connection).
+
+## Watch time is only credited from some countries
+
+Measured 2026-10-04 with one account, one campaign and the same 20 s bridge
+protocol, changing only the viewing IP:
+
+| Viewing IP                          | Watch time credited                                        |
+| ----------------------------------- | ---------------------------------------------------------- |
+| Tokyo residential (dev Mac)         | yes — ~1 min per min, the usual rate                        |
+| US datacenter (the redeemer server) | no — 0 minutes across 5 accounts over ~54 min of watching   |
+| Sri Lanka residential (home Pi)     | no — 0 minutes over 9.5 clean solo minutes, plus 13 in a bot |
+
+So this is **not** "datacenter vs residential": the Pi is a residential line and
+still earns nothing. From every IP the login works, `get_drops_event_list.php`
+answers, the campaign lists as `live` with channels on air, and the socket joins
+(`FLASH_LOGIN` → `CERTTICKETEX` → `JOINCH_COMMON`) — only the minute counter stays
+at 0, and `utils/soopWorker.js` correctly gives up and waits rather than burning
+the socket. Working conclusion: **SOOP credits drops only for viewers in
+supported countries**, so the farm has to leave from a supported-country IP.
+
+## Egress proxy: `SOOP_PROXY_URL`
+
+`utils/soopClient.js` sends every SOOP call — the read-only APIs and the bridge
+watch socket alike — through a SOCKS5 proxy when `SOOP_PROXY_URL` is set:
+
+```
+SOOP_PROXY_URL=socks5h://127.0.0.1:1080
+```
+
+`socks5h` resolves the hostname on the far side. The socket is the part that
+matters (it is what earns time) and a `ws` connection needs a SOCKS agent, so
+this is SOCKS rather than an HTTP proxy. `fetch` cannot take a SOCKS agent, so
+the proxied path issues the same request through `https.request` with
+`socks-proxy-agent` — same headers, same 20 s timeout, same JSON-or-throw
+contract; the unproxied path is unchanged `fetch`.
+
+The reference setup on the server is a `soop-socks.service` systemd unit running
+`ssh -N -D 127.0.0.1:1080` to the home host. Point it (and the env var) at
+whichever host has a supported-country residential IP.

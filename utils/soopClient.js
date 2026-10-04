@@ -7,11 +7,27 @@
 // (subprotocol "bridge"): INIT_GW -> CERTTICKETEX -> INIT_BROAD -> KEEPALIVE
 // every 20 s. No browser, video or chat is involved.
 const crypto = require("crypto");
+const https = require("https");
 const WebSocket = require("ws");
+const { SocksProxyAgent } = require("socks-proxy-agent");
 
 const UA =
   "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 " +
   "(KHTML, like Gecko) Chrome/154.0.0.0 Safari/537.36";
+
+// SOOP credits watch time only for traffic it believes is a real viewer, and a
+// datacenter IP is not one of those. SOOP_PROXY_URL points every SOOP HTTP call
+// and the bridge socket at a SOCKS5 egress (an `ssh -D` tunnel to a home Pi),
+// so the farm leaves from a residential address instead of the server's.
+const PROXY_URL = process.env.SOOP_PROXY_URL || "";
+let proxyAgent = null;
+if (PROXY_URL) {
+  try {
+    proxyAgent = new SocksProxyAgent(PROXY_URL);
+  } catch (err) {
+    console.error("[soop] ignoring bad SOOP_PROXY_URL:", err.message);
+  }
+}
 
 // Accepts a Cookie-Editor JSON array, a {name:value} object, or a raw
 // "a=b; c=d" header. Returns [{ name, value }].
@@ -57,7 +73,58 @@ function makeClient(cookies, source) {
     referer: "https://play.sooplive.com",
   };
 
+  // fetch() cannot be given a SOCKS agent, so when an egress proxy is set the
+  // same request goes out over https.request instead (same headers, same
+  // 20 s budget, same JSON-or-throw contract).
+  function proxiedJson(url, opt = {}) {
+    return new Promise((resolve, reject) => {
+      const u = new URL(url);
+      const headers = { ...H, ...(opt.headers || {}) };
+      // fetch() accepts a URLSearchParams body; https.request only writes
+      // strings and Buffers, so flatten it and state its length.
+      let body = null;
+      if (opt.body != null) {
+        body =
+          typeof opt.body === "string" || Buffer.isBuffer(opt.body)
+            ? opt.body
+            : String(opt.body);
+        headers["content-length"] = Buffer.byteLength(body);
+      }
+      const req = https.request(
+        {
+          host: u.hostname,
+          port: u.port || 443,
+          path: u.pathname + u.search,
+          method: opt.method || "GET",
+          headers,
+          agent: proxyAgent,
+        },
+        (res) => {
+          let body = "";
+          res.setEncoding("utf8");
+          res.on("data", (c) => (body += c));
+          res.on("end", () => {
+            try {
+              resolve(JSON.parse(body));
+            } catch {
+              reject(
+                new Error(
+                  `${url} -> HTTP ${res.statusCode}: ${body.slice(0, 160)}`,
+                ),
+              );
+            }
+          });
+        },
+      );
+      req.setTimeout(20000, () => req.destroy(new Error(`${url} -> timeout`)));
+      req.on("error", reject);
+      if (body) req.write(body);
+      req.end();
+    });
+  }
+
   async function api(url, opt = {}) {
+    if (proxyAgent) return proxiedJson(url, opt);
     const r = await fetch(url, {
       ...opt,
       headers: { ...H, ...(opt.headers || {}) },
@@ -249,6 +316,7 @@ function makeClient(cookies, source) {
       ["bridge"],
       {
         headers: { "user-agent": UA, origin: "https://play.sooplive.com" },
+        ...(proxyAgent ? { agent: proxyAgent } : {}),
       },
     );
     const send = (SVC, DATA) => {
