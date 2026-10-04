@@ -286,16 +286,42 @@ function makeClient(cookies, source) {
 
   const kv = (pairs) =>
     pairs.map(([k, v]) => `\u0006&\u0006${k}\u0006=\u0006${v}`).join("");
-  const joinLog = (extra = []) =>
+
+  // What the viewer claims about where they are. SOOP refuses to credit watch
+  // time when that claim disagrees with the IP it sees: measured 2026-10-04,
+  // one Japanese IP earned 0 minutes in 10 while claiming US geo and 9 minutes
+  // in 10 while claiming JP — same account, campaign and minute. Sri Lanka
+  // through the Pi was the same story: 0 minutes claiming JP, 10 minutes in 10
+  // once it claimed LK. So the claim is read back from SOOP itself: the country
+  // it reports for this connection is the country we say we are in.
+  const GEO_RC = process.env.SOOP_GEO_RC || "13";
+  const JOIN_CC = process.env.SOOP_JOIN_CC || "392";
+  let geoClaim = null;
+  async function geoCountry() {
+    if (process.env.SOOP_GEO_CC) return process.env.SOOP_GEO_CC;
+    if (!geoClaim) {
+      let cc = "JP";
+      try {
+        const p = await privateInfo();
+        cc = (p.CHANNEL && p.CHANNEL.COUNTRY_CODE) || cc;
+      } catch {
+        // keep the fallback rather than failing the watch session
+      }
+      geoClaim = cc;
+    }
+    return geoClaim;
+  }
+
+  const joinLog = (cc, extra = []) =>
     `log\u0011${kv([
       ["uuid", ck._au],
-      ["geo_cc", "JP"],
-      ["geo_rc", "13"],
+      ["geo_cc", cc],
+      ["geo_rc", GEO_RC],
       ["acpt_lang", "en_US"],
       ["svc_lang", "en_US"],
       ["is_iframeapi", "false"],
       ["content_lang", "ko_KR"],
-      ["join_cc", "392"],
+      ["join_cc", JOIN_CC],
       ["os", "mac"],
       ["is_streamer", "false"],
       ["is_rejoin", "false"],
@@ -330,8 +356,11 @@ function makeClient(cookies, source) {
         ws.send(JSON.stringify({ SVC, RESULT: 0, DATA }));
     };
     const state = { joined: false, closed: false, stop: null };
-    ws.on("open", () => {
+    // Filled in on open; the INIT_BROAD reply reuses the same claim.
+    let cc = "JP";
+    ws.on("open", async () => {
       hooks.onEvent && hooks.onEvent("open");
+      cc = await geoCountry();
       send("INIT_GW", {
         gate_ip: ch.GWIP,
         gate_port: Number(ch.GWPT),
@@ -345,7 +374,7 @@ function makeClient(cookies, source) {
         guid,
         BJID: bj,
         addinfo: "ad_lang\u0011en\u0012is_auto\u00110\u0012",
-        JOINLOG: joinLog(),
+        JOINLOG: joinLog(cc),
         update_info: 0,
       });
     });
@@ -361,7 +390,7 @@ function makeClient(cookies, source) {
           center_ip: ch.CTIP,
           center_port: Number(ch.CTPT),
           passwd: "",
-          JOINLOG: joinLog([
+          JOINLOG: joinLog(cc, [
             ["path1", "etc"],
             ["is_embed", "false"],
           ]),

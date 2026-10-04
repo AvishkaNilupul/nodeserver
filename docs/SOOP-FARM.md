@@ -36,24 +36,44 @@ never commit it). This document describes the in-app port.
 - Bots are in one Node process alongside the `redeemer` PM2 app, following the
   same pattern as `utils/autoFarmer.js` (`.start()` after the Mongo connection).
 
-## Watch time is only credited from some countries
+## Watch time needs a country claim that matches the egress
 
-Measured 2026-10-04 with one account, one campaign and the same 20 s bridge
-protocol, changing only the viewing IP:
+The bridge handshake sends a `JOINLOG` block that states where the viewer is
+(`geo_cc`, `geo_rc`, `join_cc`). Those were hard-coded to Japan, which is
+correct only while the farm actually egresses from Japan. Measured 2026-10-04,
+one account, one campaign, one client, changing one thing at a time:
 
-| Viewing IP                          | Watch time credited                                        |
-| ----------------------------------- | ---------------------------------------------------------- |
-| Tokyo residential (dev Mac)         | yes — ~1 min per min, the usual rate                        |
-| US datacenter (the redeemer server) | no — 0 minutes across 5 accounts over ~54 min of watching   |
-| Sri Lanka residential (home Pi)     | no — 0 minutes over 9.5 clean solo minutes, plus 13 in a bot |
+| Setup                                 | Claimed  | Result                            |
+| ------------------------------------- | -------- | --------------------------------- |
+| Dev Mac, Tokyo IP                     | JP, match | 0 → 13 min in 13 min              |
+| Dev Mac, Tokyo IP                     | US, wrong | 0 min in 8.5 min                  |
+| Server, US IP                         | JP, wrong | 0 min across 5 accounts, ~54 min  |
+| Server, US IP                         | US, match | 0 min in 9 min — US is not credited |
+| Pi, Sri Lanka IP                      | JP, wrong | 0 min in 9.5 min                  |
+| Pi, Sri Lanka IP                      | LK, match | 0 → 10 min in 10 min              |
 
-So this is **not** "datacenter vs residential": the Pi is a residential line and
-still earns nothing. From every IP the login works, `get_drops_event_list.php`
-answers, the campaign lists as `live` with channels on air, and the socket joins
-(`FLASH_LOGIN` → `CERTTICKETEX` → `JOINCH_COMMON`) — only the minute counter stays
-at 0, and `utils/soopWorker.js` correctly gives up and waits rather than burning
-the socket. Working conclusion: **SOOP credits drops only for viewers in
-supported countries**, so the farm has to leave from a supported-country IP.
+Two conditions, both needed:
+
+1. the country claimed in the handshake has to be the one SOOP sees for the
+   connection, and
+2. that country has to be one SOOP credits drops for — Sri Lanka and Japan are,
+   the United States is not.
+
+So `utils/soopClient.js` asks SOOP where the connection appears to be
+(`get_private_info` → `COUNTRY_CODE`) and claims exactly that, once per client;
+`SOOP_GEO_CC` overrides it if that is ever needed. It is not about datacenters
+vs homes — a mismatching claim fails from either, and a matching one succeeds
+from either.
+
+Two measurement traps worth remembering, because they produce exactly this
+symptom and both bit us:
+
+- A campaign's `viewTime` **resets when the broadcast changes**, so comparing
+  "minutes before" with "minutes after" across runs proves nothing. Compare two
+  runs started at the same time, or watch whether the counter rises during a run.
+- `utils/soopWorker.js` gives up on a socket after two flat polls (~90 s) and
+  rejoins. When credit is flowing that is harmless, but it makes any short
+  window of a genuinely dead egress look identical to a slow one.
 
 ## Egress proxy: `SOOP_PROXY_URL`
 
@@ -73,4 +93,5 @@ contract; the unproxied path is unchanged `fetch`.
 
 The reference setup on the server is a `soop-socks.service` systemd unit running
 `ssh -N -D 127.0.0.1:1080` to the home host. Point it (and the env var) at
-whichever host has a supported-country residential IP.
+whichever host has an IP in a country SOOP credits; the client claims that
+country on its own, so nothing else needs configuring when the host changes.
