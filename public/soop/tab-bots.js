@@ -190,7 +190,7 @@
     c.say.textContent = sentence(bot);
     c.bar.set(m.sum, m.goalSum);
     c.barText.textContent = m.goalSum ? fmt.mins(m.sum) + " of " + fmt.mins(m.goalSum) + " · " + fmt.pct(m.sum, m.goalSum) : "No watch time to count yet";
-    c.n.farming.textContent = fmt.num(k.farming) + " earning"; c.n.waiting.textContent = fmt.num(k.waiting) + " waiting";
+    c.n.farming.textContent = fmt.num(k.farming) + " earning"; c.n.waiting.textContent = fmt.num(k.waiting) + (bot.state === "sleeping" ? " sleeping" : " waiting");
     c.n.done.textContent = fmt.num(k.done) + " done"; c.n.error.textContent = count(k.error, "problem");
     c.n.error.className = k.error ? "s-error s-strong" : "";
     c.listNote.textContent = count(k.total, "account") + (c.open ? "" : " — show what each is doing");
