@@ -1,55 +1,53 @@
-/* global fetch, AbortSignal, setInterval, clearInterval */
-// Shared SOOP (ex-AfreecaTV) client: cookie parsing, the read-only drops APIs,
-// and the bridge watch socket. Ported from the probe in _soop-probe/soop.js,
-// whose protocol was verified live (4 minutes watched => 4 minutes credited).
+/* global setInterval, clearInterval */
+// Shared SOOP (ex-AfreecaTV) client (contract §7): cookie parsing, the
+// read-only drops APIs, and the bridge watch socket. The protocol was verified
+// live by the probe in _soop-probe/ (4 minutes watched => 4 minutes credited).
 //
 // Watch time is credited solely by holding wss://bridge.sooplive.com/Websocket
 // (subprotocol "bridge"): INIT_GW -> CERTTICKETEX -> INIT_BROAD -> KEEPALIVE
 // every 20 s. No browser, video or chat is involved.
+//
+// Nothing here logs. Cookies and the AuthTicket leave this file only inside
+// requests to SOOP; the client object does not expose them.
 const crypto = require("crypto");
-const https = require("https");
-const WebSocket = require("ws");
+const { SoopError, LOGIN_RE } = require("./soop/errors");
+const { getTransport } = require("./soop/http");
+const { createGeoResolver } = require("./soop/geo");
+const { normalizeMission } = require("./soop/normalize");
 
 const UA =
   "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 " +
   "(KHTML, like Gecko) Chrome/154.0.0.0 Safari/537.36";
 
-// SOOP only credits watch time to viewers in supported countries (measured
-// 2026-10-04: a Tokyo residential IP credits, the US server and a Sri Lankan
-// residential IP do not). SOOP_PROXY_URL points every SOOP HTTP call and the
-// bridge socket at a SOCKS5 egress — an `ssh -D` tunnel to a host in a
-// supported country — so the farm leaves from an address that can earn.
-const PROXY_URL = process.env.SOOP_PROXY_URL || "";
-let proxyAgent = null;
-if (PROXY_URL) {
-  try {
-    // Required lazily: without a proxy configured this optional package must
-    // never be able to stop the app from booting.
-    const { SocksProxyAgent } = require("socks-proxy-agent");
-    proxyAgent = new SocksProxyAgent(PROXY_URL);
-  } catch (err) {
-    console.error(
-      "[soop] SOOP_PROXY_URL is set but no proxy agent could be built:",
-      err.message,
-    );
-  }
-}
+const DROPS = "https://drops.sooplive.com";
+const PLAY = "https://play.sooplive.com";
+const BRIDGE_URL = "wss://bridge.sooplive.com/Websocket";
+const CAMPAIGN_PAGE_CAP = 80;
+// 20 rows a page. v1 stopped at 5 pages, which silently truncated a division
+// above 100 items; the loop still ends at SOOP's own totalCount.
+const INVENTORY_PAGE_CAP = 25;
+const KEEPALIVE_MS = 20000;
+const TICKET_RE = /(^|[;\s])AuthTicket\s*=/;
 
 // Accepts a Cookie-Editor JSON array, a {name:value} object, or a raw
 // "a=b; c=d" header. Returns [{ name, value }].
 function parseCookieInput(text) {
   const t = String(text || "").trim();
   if (!t) throw new Error("empty cookie input");
-  if (t.startsWith("[")) {
-    return JSON.parse(t).map((c) => ({ name: c.name, value: c.value }));
-  }
-  if (t.startsWith("{")) {
-    const o = JSON.parse(t);
+  if (t.startsWith("[") || t.startsWith("{")) {
+    let o;
+    try {
+      o = JSON.parse(t);
+    } catch {
+      // JSON.parse quotes a slice of its input in the message; that slice
+      // would be cookie text.
+      throw new Error("cookie input is not valid JSON");
+    }
+    if (Array.isArray(o)) {
+      return o.filter((c) => c && typeof c === "object").map((c) => ({ name: c.name, value: c.value }));
+    }
     if (o.name && o.value) return [{ name: o.name, value: o.value }];
-    return Object.entries(o).map(([name, value]) => ({
-      name,
-      value: String(value),
-    }));
+    return Object.entries(o).map(([name, value]) => ({ name, value: String(value) }));
   }
   return t
     .split(/[;\n]+/)
@@ -57,184 +55,161 @@ function parseCookieInput(text) {
     .filter(Boolean)
     .map((s) => {
       const i = s.indexOf("=");
-      return i < 0
-        ? null
-        : { name: s.slice(0, i).trim(), value: s.slice(i + 1).trim() };
+      return i < 0 ? null : { name: s.slice(0, i).trim(), value: s.slice(i + 1).trim() };
     })
     .filter(Boolean);
 }
 
-function makeClient(cookies, source) {
-  const ck = Object.fromEntries(cookies.map((c) => [c.name, c.value]));
+// Index just past the JSON value opening at `start` (brackets inside strings
+// do not count). An unterminated value runs to the end of the text.
+function jsonEnd(t, start) {
+  let depth = 0;
+  let inStr = false;
+  for (let i = start; i < t.length; i++) {
+    const c = t[i];
+    if (inStr) {
+      if (c === "\\") i++;
+      else if (c === '"') inStr = false;
+    } else if (c === '"') inStr = true;
+    else if (c === "[" || c === "{") depth++;
+    else if ((c === "]" || c === "}") && --depth === 0) return i + 1;
+  }
+  return t.length;
+}
+
+// Text between JSON exports: every line holding an AuthTicket is one account.
+// Other name=value lines belong to the ticket above them (or to the first one).
+function looseExports(text) {
+  const groups = [];
+  const lead = [];
+  for (const line of text.split(/\r?\n/).map((s) => s.trim())) {
+    if (TICKET_RE.test(line)) groups.push([...lead.splice(0), line]);
+    else if (line.includes("=")) (groups[groups.length - 1] || lead).push(line);
+  }
+  return groups.map((g) => g.join("\n"));
+}
+
+// Bulk paste: several Cookie-Editor JSON arrays one after another and/or lines
+// of "AuthTicket=…". One entry per account, in paste order; each entry is fed
+// to parseCookieInput by the caller. A single export comes back as [text].
+function splitCookieExports(text) {
+  const t = String(text == null ? "" : text).trim();
+  if (!t) return [];
+  const out = [];
+  let loose = "";
+  let i = 0;
+  while (i < t.length) {
+    const c = t[i];
+    // A JSON export starts a line (or follows another export); a bracket in
+    // the middle of a cookie header line is just part of a value.
+    const lineSoFar = loose.slice(loose.lastIndexOf("\n") + 1);
+    if ((c === "[" || c === "{") && /^[\s,]*$/.test(lineSoFar)) {
+      const end = jsonEnd(t, i);
+      out.push(...looseExports(loose), t.slice(i, end));
+      loose = "";
+      i = end;
+    } else {
+      loose += c;
+      i++;
+    }
+  }
+  out.push(...looseExports(loose));
+  return out.length ? out : [t];
+}
+
+// One geo resolver per process: the country belongs to the egress, not the account.
+let geoSingleton = null;
+function sharedGeo() {
+  if (!geoSingleton) geoSingleton = createGeoResolver();
+  return geoSingleton;
+}
+
+// Runs fn and swallows a throw: a listener's bug or a dying socket must never
+// surface in the caller (a socket reports itself through "error" / "close").
+// prettier-ignore
+const quiet = (fn) => { try { return fn(); } catch { return undefined; } };
+
+const kv = (pairs) => pairs.map(([k, v]) => `\u0006&\u0006${k}\u0006=\u0006${v}`).join("");
+
+// prettier-ignore
+function makeClient(cookies, {
+  id = null, transport = getTransport(), geo = sharedGeo(), lang = "en-US,en;q=0.9",
+  WebSocketImpl = require("ws"),
+} = {}) {
+  const list = Array.isArray(cookies) ? cookies : [];
+  const ck = Object.fromEntries(list.map((c) => [c.name, c.value]));
   if (!ck.AuthTicket) {
-    throw new Error("no AuthTicket in cookie set (logged-out export?)");
+    throw new SoopError("no AuthTicket in cookie set (logged-out export?)", { code: "AUTH" });
   }
   ck._au = ck._au || crypto.randomBytes(16).toString("hex");
   ck._au3rd = ck._au3rd || ck._au;
-  const cookieHeader = cookies.map((c) => `${c.name}=${c.value}`).join("; ");
-  const H = {
-    cookie: cookieHeader,
-    "user-agent": UA,
-    origin: "https://play.sooplive.com",
-    referer: "https://play.sooplive.com",
-  };
+  const cookieHeader = list.map((c) => `${c.name}=${c.value}`).join("; ");
 
-  // fetch() cannot be given a SOCKS agent, so when an egress proxy is set the
-  // same request goes out over https.request instead (same headers, same
-  // 20 s budget, same JSON-or-throw contract).
-  function proxiedJson(url, opt = {}) {
-    return new Promise((resolve, reject) => {
-      const u = new URL(url);
-      const headers = { ...H, ...(opt.headers || {}) };
-      // fetch() accepts a URLSearchParams body; https.request only writes
-      // strings and Buffers, so flatten it and state its length.
-      let body = null;
-      if (opt.body != null) {
-        body =
-          typeof opt.body === "string" || Buffer.isBuffer(opt.body)
-            ? opt.body
-            : String(opt.body);
-        headers["content-length"] = Buffer.byteLength(body);
-      }
-      const req = https.request(
-        {
-          host: u.hostname,
-          port: u.port || 443,
-          path: u.pathname + u.search,
-          method: opt.method || "GET",
-          headers,
-          agent: proxyAgent,
-        },
-        (res) => {
-          let body = "";
-          res.setEncoding("utf8");
-          res.on("data", (c) => (body += c));
-          res.on("end", () => {
-            try {
-              resolve(JSON.parse(body));
-            } catch {
-              reject(
-                new Error(
-                  `${url} -> HTTP ${res.statusCode}: ${body.slice(0, 160)}`,
-                ),
-              );
-            }
-          });
-        },
-      );
-      req.setTimeout(20000, () => req.destroy(new Error(`${url} -> timeout`)));
-      req.on("error", reject);
-      if (body) req.write(body);
-      req.end();
-    });
-  }
-
-  async function api(url, opt = {}) {
-    if (proxyAgent) return proxiedJson(url, opt);
-    const r = await fetch(url, {
-      ...opt,
-      headers: { ...H, ...(opt.headers || {}) },
-      signal: AbortSignal.timeout(20000),
-    });
-    const t = await r.text();
-    try {
-      return JSON.parse(t);
-    } catch {
-      throw new Error(`${url} -> HTTP ${r.status}: ${t.slice(0, 160)}`);
-    }
-  }
-
-  const privateInfo = () =>
-    api("https://afevent2.sooplive.com/api/get_private_info.php", {
-      referer: "https://www.sooplive.com/",
-    });
-
-  // Inventory (drops.sooplive.com). Counts per division: available/acquired/expired.
-  const inventoryCounts = async () => {
-    const j = await api(
-      "https://drops.sooplive.com/api/get_drops_division.php",
-      {
-        origin: "https://drops.sooplive.com",
-        referer: "https://drops.sooplive.com/inventory",
+  // Every header goes inside `headers`. v1 passed origin / referer beside it,
+  // where they were ignored, so the drops site saw the player's origin.
+  function api(url, { method = "GET", headers = {}, body = null, referer } = {}) {
+    const site = url.startsWith(DROPS + "/") ? DROPS : PLAY;
+    return transport.requestJson(url, {
+      method,
+      // prettier-ignore
+      headers: {
+        cookie: cookieHeader, "user-agent": UA, "accept-language": lang,
+        origin: site, referer: referer || site, ...headers,
       },
-    );
-    if (j.result !== 1) throw new Error(j.message || "inventory unavailable");
-    return j.data || {};
-  };
-
-  async function inventory(division = null, pages = 5) {
-    const out = [];
-    for (let p = 1; p <= pages; p++) {
-      const j = await api("https://drops.sooplive.com/api/get_drops_list.php", {
-        method: "POST",
-        headers: {
-          "content-type": "application/json",
-          origin: "https://drops.sooplive.com",
-        },
-        referer: "https://drops.sooplive.com/inventory",
-        body: JSON.stringify({ pageNo: p, prePageNo: 20, division }),
-      });
-      if (j.result !== 1) throw new Error(j.message || "inventory unavailable");
-      const rows = j.data || [];
-      out.push(...rows);
-      if (!rows.length || out.length >= Number(j.totalCount || 0)) break;
-    }
-    return out;
+      body,
+    });
   }
 
-  // The list endpoint filters by division but does not label each row, so tag them.
-  async function inventoryTagged() {
-    const out = [];
-    for (const d of ["available", "acquired", "expired"]) {
-      for (const row of await inventory(d)) out.push({ ...row, division: d });
-    }
-    return out;
+  const postJson = (path, referer, payload) =>
+    api(DROPS + path, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      referer: DROPS + referer,
+      body: JSON.stringify(payload),
+    });
+
+  // The drops API answers { result: 1, data } or a refusal with a message.
+  function ok(j, what) {
+    if (j && j.result === 1) return j;
+    const message = String((j && j.message) || `${what} unavailable`);
+    const auth = (j && Number(j.result) === -1) || LOGIN_RE.test(message);
+    throw new SoopError(message, { code: auth ? "AUTH" : "API" });
   }
 
-  const missions = async () => {
-    const j = await api(
-      "https://drops.sooplive.com/api/get_drops_mission_list.php",
-      {
-        referer: "https://drops.sooplive.com/mission",
-      },
-    );
-    if (j.result !== 1)
-      throw new Error(j.message || "mission list unavailable");
-    return j.data || [];
-  };
+  // Who SOOP thinks this session is, and the country it sees the request come
+  // from. A logged-out session is an answer here, not an error.
+  async function privateInfo() {
+    const j = await api("https://afevent2.sooplive.com/api/get_private_info.php");
+    const c = (j && j.CHANNEL) || {};
+    return {
+      loggedIn: Number(c.IS_LOGIN) === 1,
+      loginId: String(c.LOGIN_ID || "").trim() || null,
+      nick: c.LOGIN_NICK || null,
+      country: c.COUNTRY_CODE || null,
+    };
+  }
 
+  async function missions() {
+    const j = await api(`${DROPS}/api/get_drops_mission_list.php`, { referer: `${DROPS}/mission` });
+    return (ok(j, "mission list").data || []).map(normalizeMission);
+  }
+
+  // One event per page; the list ends at the first empty page.
   async function campaigns(filter = "progress") {
     const seen = [];
-    for (let p = 1; p <= 30; p++) {
-      const body = JSON.stringify({
-        filter,
-        gameIdx: "all",
-        prePageNo: p,
-        pageNo: p,
-      });
-      const j = await api(
-        "https://drops.sooplive.com/api/get_drops_event_list.php",
-        {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body,
-        },
-      );
-      if (j.result !== 1) {
-        throw new Error(j.message || "campaign list unavailable");
-      }
-      const rows = j.data || [];
+    for (let p = 1; p <= CAMPAIGN_PAGE_CAP; p++) {
+      const body = { filter, gameIdx: "all", prePageNo: p, pageNo: p };
+      const j = await postJson("/api/get_drops_event_list.php", "/", body);
+      const rows = ok(j, "campaign list").data || [];
       if (!rows.length) break;
       seen.push(...rows);
     }
-    return [
-      ...new Map(
-        seen.map((e) => [e.dropsIdx, { ...e, filter: e.filter || filter }]),
-      ).values(),
-    ];
+    const tagged = seen.map((e) => [e.dropsIdx, { ...e, filter: e.filter || filter }]);
+    return [...new Map(tagged).values()];
   }
 
   // progress = running/ended-listing, scheduled = announced but not started.
+  // One list failing does not hide the other; both failing rethrows the first.
   async function campaignsAll() {
     const out = [];
     let firstErr = null;
@@ -250,198 +225,156 @@ function makeClient(cookies, source) {
   }
 
   async function liveInfo(bj, bno = "") {
+    // prettier-ignore
     const body = new URLSearchParams({
-      bid: bj,
-      bno,
-      type: "live",
-      pwd: "",
-      player_type: "html5",
-      stream_type: "common",
-      quality: "HD",
-      mode: "landing",
-      from_api: "0",
-      is_revive: "false",
+      bid: bj, bno, type: "live", pwd: "", player_type: "html5", stream_type: "common",
+      quality: "HD", mode: "landing", from_api: "0", is_revive: "false",
     });
     const j = await api(
       `https://live.sooplive.com/afreeca/player_live_api.php?bjid=${encodeURIComponent(bj)}`,
-      {
-        method: "POST",
-        headers: { "content-type": "application/x-www-form-urlencoded" },
-        referer: `https://play.sooplive.com/${encodeURIComponent(bj)}`,
-        body,
-      },
+      { method: "POST", headers: { "content-type": "application/x-www-form-urlencoded" }, body },
     );
-    return j.CHANNEL;
+    return (j && j.CHANNEL) || null;
   }
 
-  // Top live channel in a category (for category-wide campaigns).
-  async function categoryChannel(cateNo) {
+  // Live channels in a category, most viewers first (for category-wide campaigns).
+  async function categoryChannels(cateNo, limit = 5) {
     const j = await api(
       `https://live.sooplive.com/api/main_broad_list_api.php?selectType=cate&selectValue=${encodeURIComponent(cateNo)}&orderType=view_cnt&pageNo=1`,
-      { referer: "https://www.sooplive.com/" },
     );
-    const b = (j.broad || [])[0];
-    return b ? b.user_id : null;
+    const ids = ((j && j.broad) || []).map((b) => b && b.user_id).filter(Boolean);
+    return [...new Set(ids.map(String))].slice(0, Math.max(0, limit));
   }
 
-  const kv = (pairs) =>
-    pairs.map(([k, v]) => `\u0006&\u0006${k}\u0006=\u0006${v}`).join("");
+  async function inventoryCounts() {
+    const j = await api(`${DROPS}/api/get_drops_division.php`, { referer: `${DROPS}/inventory` });
+    const d = ok(j, "inventory").data || {};
+    const n = (v) => Number(v) || 0;
+    return { available: n(d.available), acquired: n(d.acquired), expired: n(d.expired) };
+  }
+
+  // The list endpoint filters by division but does not label its rows.
+  async function inventory(division = null) {
+    const out = [];
+    for (let p = 1; p <= INVENTORY_PAGE_CAP; p++) {
+      const body = { pageNo: p, prePageNo: 20, division };
+      const j = await postJson("/api/get_drops_list.php", "/inventory", body);
+      const rows = ok(j, "inventory").data || [];
+      out.push(...rows);
+      if (!rows.length || out.length >= Number(j.totalCount || 0)) break;
+    }
+    return out;
+  }
 
   // What the viewer claims about where they are. SOOP refuses to credit watch
-  // time when that claim disagrees with the IP it sees: measured 2026-10-04,
-  // one Japanese IP earned 0 minutes in 10 while claiming US geo and 9 minutes
-  // in 10 while claiming JP — same account, campaign and minute. Sri Lanka
-  // through the Pi was the same story: 0 minutes claiming JP, 10 minutes in 10
-  // once it claimed LK. So the claim is read back from SOOP itself: the country
-  // it reports for this connection is the country we say we are in.
-  const GEO_RC = process.env.SOOP_GEO_RC || "13";
-  const JOIN_CC = process.env.SOOP_JOIN_CC || "392";
-  let geoClaim = null;
-  async function geoCountry() {
-    if (process.env.SOOP_GEO_CC) return process.env.SOOP_GEO_CC;
-    if (!geoClaim) {
-      let cc = "JP";
-      try {
-        const p = await privateInfo();
-        cc = (p.CHANNEL && p.CHANNEL.COUNTRY_CODE) || cc;
-      } catch {
-        // keep the fallback rather than failing the watch session
-      }
-      geoClaim = cc;
-    }
-    return geoClaim;
-  }
-
-  const joinLog = (cc, extra = []) =>
+  // time when the claim disagrees with the IP it sees (measured 2026-10-04:
+  // one Japanese IP earned 0 minutes in 10 claiming US and 9 in 10 claiming
+  // JP), so `claim` is what the geo resolver read back from SOOP itself.
+  // prettier-ignore
+  const joinLog = (claim, extra = []) =>
     `log\u0011${kv([
-      ["uuid", ck._au],
-      ["geo_cc", cc],
-      ["geo_rc", GEO_RC],
-      ["acpt_lang", "en_US"],
-      ["svc_lang", "en_US"],
-      ["is_iframeapi", "false"],
-      ["content_lang", "ko_KR"],
-      ["join_cc", JOIN_CC],
-      ["os", "mac"],
-      ["is_streamer", "false"],
-      ["is_rejoin", "false"],
-      ["is_auto", "false"],
-      ["is_support_adaptive", "true"],
-      ["uuid_3rd", ck._au3rd],
-      ["subscribe", "0"],
-      ["player_mode", "landing"],
-      ["sub_view_type", "non_sub"],
+      ["uuid", ck._au], ["geo_cc", claim.cc], ["geo_rc", claim.geoRc],
+      ["acpt_lang", "en_US"], ["svc_lang", "en_US"], ["is_iframeapi", "false"],
+      ["content_lang", "ko_KR"], ["join_cc", claim.joinCc], ["os", "mac"],
+      ["is_streamer", "false"], ["is_rejoin", "false"], ["is_auto", "false"],
+      ["is_support_adaptive", "true"], ["uuid_3rd", ck._au3rd], ["subscribe", "0"],
+      ["player_mode", "landing"], ["sub_view_type", "non_sub"],
       ...extra,
     ])}` +
     `\u0012liveualog\u0011${kv([
-      ["is_clearmode", "false"],
-      ["lowlatency", "0"],
-      ["is_streamer", "false"],
-      ["os", "mac"],
+      ["is_clearmode", "false"], ["lowlatency", "0"], ["is_streamer", "false"], ["os", "mac"],
     ])}\u0012`;
 
   // Holds the bridge socket, the only thing watch time is credited from.
-  function openBridge(bj, ch, hooks = {}) {
+  // state.error: "egress" no usable egress (no socket was opened) · "geo" the
+  // country could not be read (never joined) · "socket" the socket reported one.
+  function openBridge(bj, channel, { onEvent } = {}) {
+    const ch = channel || {};
+    const state = { joined: false, closed: false, error: null, stop: () => {} };
+    const emit = (ev) => quiet(() => typeof onEvent === "function" && onEvent(ev));
+    let ws;
+    try {
+      ws = new WebSocketImpl(BRIDGE_URL, ["bridge"], {
+        headers: { "user-agent": UA, origin: PLAY },
+        ...transport.wsOptions(),
+      });
+    } catch {
+      // Fail closed: without the egress there is no direct fallback.
+      state.error = "egress";
+      state.closed = true;
+      return state;
+    }
     const guid = crypto.randomBytes(16).toString("hex").toUpperCase();
-    const ws = new WebSocket(
-      "wss://bridge.sooplive.com/Websocket",
-      ["bridge"],
-      {
-        headers: { "user-agent": UA, origin: "https://play.sooplive.com" },
-        ...(proxyAgent ? { agent: proxyAgent } : {}),
-      },
-    );
-    const send = (SVC, DATA) => {
-      if (ws.readyState === 1)
-        ws.send(JSON.stringify({ SVC, RESULT: 0, DATA }));
+    const send = (SVC, DATA) =>
+      quiet(() => ws.readyState === 1 && ws.send(JSON.stringify({ SVC, RESULT: 0, DATA })));
+    let claim = null; // filled in on open; the INIT_BROAD reply reuses it
+    let stopped = false;
+    const iv = setInterval(() => send("KEEPALIVE", {}), KEEPALIVE_MS);
+    if (iv && typeof iv.unref === "function") iv.unref();
+    state.stop = () => {
+      stopped = true;
+      clearInterval(iv);
+      quiet(() => ws.close());
     };
-    const state = { joined: false, closed: false, stop: null };
-    // Filled in on open; the INIT_BROAD reply reuses the same claim.
-    let cc = "JP";
     ws.on("open", async () => {
-      hooks.onEvent && hooks.onEvent("open");
-      cc = await geoCountry();
+      emit("open");
+      try {
+        claim = await geo.get(async () => (await privateInfo()).country);
+      } catch {
+        // Joining with a guessed country earns nothing and looks like farming.
+        state.error = "geo";
+        emit("error:geo");
+        state.stop();
+        return;
+      }
+      if (stopped) return;
+      // prettier-ignore
       send("INIT_GW", {
-        gate_ip: ch.GWIP,
-        gate_port: Number(ch.GWPT),
-        broadno: Number(ch.BNO),
-        category: ch.CATE,
-        fanticket: ch.FTK,
-        cookie: ck.AuthTicket,
-        cli_type: 44,
-        cc_cli_type: 19,
-        QUALITY: "ori",
-        guid,
-        BJID: bj,
+        gate_ip: ch.GWIP, gate_port: Number(ch.GWPT), broadno: Number(ch.BNO),
+        category: ch.CATE, fanticket: ch.FTK, cookie: ck.AuthTicket,
+        cli_type: 44, cc_cli_type: 19, QUALITY: "ori", guid, BJID: bj,
         addinfo: "ad_lang\u0011en\u0012is_auto\u00110\u0012",
-        JOINLOG: joinLog(cc),
+        JOINLOG: joinLog(claim),
         update_info: 0,
       });
     });
     ws.on("message", (m) => {
-      let j;
-      try {
-        j = JSON.parse(m.toString());
-      } catch {
-        return;
-      }
+      const j = quiet(() => JSON.parse(m.toString()));
+      if (!j || typeof j !== "object") return;
       if (j.SVC === "CERTTICKETEX") {
+        if (!claim) return;
+        const data = j.DATA || {};
+        // prettier-ignore
         send("INIT_BROAD", {
-          center_ip: ch.CTIP,
-          center_port: Number(ch.CTPT),
-          passwd: "",
-          JOINLOG: joinLog(cc, [
-            ["path1", "etc"],
-            ["is_embed", "false"],
-          ]),
-          cli_type: 44,
-          cc_cli_type: 19,
-          QUALITY: "ori",
-          guid,
-          gw_ticket: j.DATA.pcTicket,
-          append_data: j.DATA.pcAppendDat,
+          center_ip: ch.CTIP, center_port: Number(ch.CTPT), passwd: "",
+          JOINLOG: joinLog(claim, [["path1", "etc"], ["is_embed", "false"]]),
+          cli_type: 44, cc_cli_type: 19, QUALITY: "ori", guid,
+          gw_ticket: data.pcTicket, append_data: data.pcAppendDat,
         });
       } else if (j.SVC === "JOINCH_COMMON") {
         state.joined = true;
-        hooks.onEvent && hooks.onEvent("joined");
+        emit("joined");
       } else if (j.SVC === "CLOSECH" || j.SVC === "CLOSEBROAD") {
-        hooks.onEvent && hooks.onEvent("server-close:" + j.SVC);
+        emit("server-close:" + j.SVC);
       }
     });
     ws.on("close", () => {
       state.closed = true;
-      hooks.onEvent && hooks.onEvent("closed");
+      clearInterval(iv);
+      emit("closed");
     });
     ws.on("error", (e) => {
-      hooks.onEvent && hooks.onEvent("error:" + e.message);
+      state.error = state.error || "socket";
+      emit("error:" + ((e && e.message) || "socket"));
     });
-    const iv = setInterval(() => send("KEEPALIVE", {}), 20000);
-    state.stop = () => {
-      clearInterval(iv);
-      try {
-        ws.close();
-      } catch {
-        // closing a dead socket must never throw out of the caller
-      }
-    };
     return state;
   }
 
+  // prettier-ignore
   return {
-    source,
-    ck,
-    cookies,
-    privateInfo,
-    missions,
-    campaigns,
-    campaignsAll,
-    liveInfo,
-    categoryChannel,
-    openBridge,
-    inventory,
-    inventoryTagged,
-    inventoryCounts,
+    id, privateInfo, missions, campaigns, campaignsAll, liveInfo, categoryChannels,
+    inventoryCounts, inventory, openBridge,
   };
 }
 
-module.exports = { UA, parseCookieInput, makeClient };
+module.exports = { UA, parseCookieInput, splitCookieExports, makeClient, sharedGeo };
