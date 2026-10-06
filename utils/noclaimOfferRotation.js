@@ -266,7 +266,9 @@ function realDeps() {
         description: ual.listingDescription(game, drops, "eldorado", cls),
       };
     },
-    buildCover: (set) => require("./setImage").buildSetGridImage(set),
+    // showTotal: a bundle with several copies of an item says its real size
+    // on the cover ("11 ITEMS"), not just one numbered tile per distinct item.
+    buildCover: (set) => require("./setImage").buildSetGridImage(set, { showTotal: true }),
     unlink: (p) => {
       try {
         require("fs").unlinkSync(p);

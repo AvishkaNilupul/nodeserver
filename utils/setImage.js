@@ -17,6 +17,7 @@ const TILE = CELL - PAD * 2;
 const IMG = TILE - 40; // image inside the tile
 const MAX_ITEMS = 36;
 const BADGE = "#7c3aed";
+const TOTAL_BAND = 100; // height of the "N ITEMS" band (opts.showTotal)
 
 // Resolve an item's image to a Buffer: local cached file when possible,
 // otherwise a (best-effort) download of the remote URL.
@@ -135,7 +136,13 @@ function nameTspans(name, cx, cyMid) {
 // has no items at all. Items with an image show it; items without one show
 // their name as a text tile, so a hand-entered set still gets a proper cover.
 // Caller may delete the file when done.
-async function buildSetGridImage(set) {
+//
+// opts.showTotal: when some item comes in several copies, the tiles alone
+// under-count the bundle (7 tiles for an "11 Items" offer). The cover then
+// gets an "11 ITEMS" band on top and the tile numbers run over the copies
+// ("7–11" on a ×5 tile), so the picture says what the title says. A set with
+// one copy of everything is drawn exactly as without the option.
+async function buildSetGridImage(set, opts) {
   const rawItems = (set.items || [])
     .slice(0, MAX_ITEMS)
     .filter((it) => it && (it.name || it.image));
@@ -153,7 +160,10 @@ async function buildSetGridImage(set) {
   const cols = Math.ceil(Math.sqrt(n));
   const rows = Math.ceil(n / cols);
   const width = cols * CELL;
-  const height = rows * CELL;
+  const total = cells.reduce((sum, c) => sum + c.qty, 0);
+  const banner = !!(opts && opts.showTotal) && total > n;
+  const top = banner ? TOTAL_BAND : 0;
+  const height = rows * CELL + top;
 
   const open =
     '<svg xmlns="http://www.w3.org/2000/svg" width="' +
@@ -197,10 +207,40 @@ async function buildSetGridImage(set) {
     "," +
     Math.round(height * 0.45) +
     '" fill="rgba(0,0,0,0.10)"/>';
+  if (banner) {
+    const label = total + " ITEMS";
+    // Arial Bold runs ~0.62em per character; keep the line inside the cover.
+    const fs = Math.min(64, Math.floor((width * 0.84) / (label.length * 0.62)));
+    baseSvg +=
+      '<rect x="0" y="0" width="' +
+      width +
+      '" height="' +
+      top +
+      '" fill="rgba(30,10,70,0.55)"/>' +
+      '<text x="' +
+      width / 2 +
+      '" y="' +
+      Math.round(top / 2 + fs * 0.36) +
+      '" font-family="Arial, sans-serif" font-size="' +
+      fs +
+      '" font-weight="bold" fill="#ffffff" text-anchor="middle">' +
+      label +
+      "</text>";
+  }
   let badgeSvgStr = open;
+  let nextNo = 1;
   for (let i = 0; i < n; i++) {
     const x = (i % cols) * CELL + PAD;
-    const y = Math.floor(i / cols) * CELL + PAD;
+    const y = Math.floor(i / cols) * CELL + PAD + top;
+    // With the band, numbers count copies: a ×5 tile after six singles is 7–11.
+    const firstNo = nextNo;
+    nextNo += cells[i].qty;
+    const noLabel = !banner
+      ? String(i + 1)
+      : cells[i].qty > 1
+        ? firstNo + "–" + (nextNo - 1)
+        : String(firstNo);
+    const noW = Math.max(46, 22 + noLabel.length * 12);
     baseSvg +=
       '<rect x="' +
       (x + 3) +
@@ -241,27 +281,31 @@ async function buildSetGridImage(set) {
       (x + 12) +
       '" y="' +
       (y + 12) +
-      '" width="46" height="32" rx="16" fill="' +
+      '" width="' +
+      noW +
+      '" height="32" rx="16" fill="' +
       BADGE +
       '"/>' +
       '<text x="' +
-      (x + 35) +
+      (x + 12 + noW / 2) +
       '" y="' +
       (y + 35) +
       '" font-family="Arial, sans-serif" font-size="20" font-weight="bold" fill="#ffffff" text-anchor="middle">' +
-      (i + 1) +
+      noLabel +
       "</text>";
     // Multi-copy reward (same item at several watch-time tiers): a "×N"
     // badge at the tile's top-right so the cover shows the real copy count.
     if (cells[i].qty > 1) {
+      // Inset with the band so the badge sits inside the card's corner.
+      const qx = x + TILE - 58 - (banner ? 12 : 0);
       badgeSvgStr +=
         '<rect x="' +
-        (x + TILE - 58) +
+        qx +
         '" y="' +
         (y + 12) +
         '" width="58" height="32" rx="16" fill="#16a34a"/>' +
         '<text x="' +
-        (x + TILE - 29) +
+        (qx + 29) +
         '" y="' +
         (y + 35) +
         '" font-family="Arial, sans-serif" font-size="20" font-weight="bold" fill="#ffffff" text-anchor="middle">×' +
@@ -276,7 +320,7 @@ async function buildSetGridImage(set) {
   for (let i = 0; i < n; i++) {
     if (!cells[i].buf) continue; // text tile — nothing to composite
     const cx = (i % cols) * CELL;
-    const cy = Math.floor(i / cols) * CELL;
+    const cy = Math.floor(i / cols) * CELL + top;
     try {
       const resized = await sharp(cells[i].buf)
         .resize(IMG, IMG, {
