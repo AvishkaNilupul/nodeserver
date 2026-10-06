@@ -25,6 +25,10 @@ const soopInventoryItemSchema = new mongoose.Schema(
     raw: { type: mongoose.Schema.Types.Mixed, default: null },
     hasCode: { type: Boolean, default: false },
     codeEnc: { type: String, default: "" },
+    // Set when the reward was claimed through the panel or its details were read
+    // back from SOOP: { kind, message, description, gameTitle, dropsName }. No code in here.
+    claimedAt: { type: Date, default: null },
+    claim: { type: mongoose.Schema.Types.Mixed, default: null },
     syncedAt: { type: Date, default: null },
   },
   { timestamps: true },

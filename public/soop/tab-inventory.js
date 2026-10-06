@@ -209,7 +209,7 @@
     out.push(el("div", { class: "s-row" }, Object.keys(DIV).map((d) => ui.badge(fmt.num(count(d)) + " " + DIV[d].label.toLowerCase(), count(d) ? DIV[d].tone : null)),
       acc && acc.sold ? ui.badge("Account sold", "warn") : null,
       el("span", { class: "s-muted s-small" }, synced ? "Synced " + fmt.ago(synced) : "")));
-    out.push(el("div", { class: "s-note" }, ui.icon("info"), el("span", "Nothing here is claimed for you. Claim a reward by hand in this account's SOOP inventory.")));
+    out.push(el("div", { class: "s-note" }, ui.icon("info"), el("span", "Nothing is claimed automatically. Claim is one click per reward, uses this account's stored login, and cannot be undone.")));
     out.push(el("ul", { class: "s-list" }, items.map((it) => accountItem(it, ctx))));
     return out;
   }
@@ -229,15 +229,58 @@
           el("span", { class: "s-muted s-small" }, (KINDS[it.kind] || KINDS.other) + " · " + gameLabel(it))),
         time, link,
         it.sentAt ? el("span", { class: "s-small s-muted" }, "Earned " + fmt.when(it.sentAt)) : null,
-        it.hasCode ? codeSlot(it, ctx) : null));
+        claimNote(it),
+        canClaim(it) ? claimSlot(it, ctx) : it.division === "acquired" && it.kind !== "ingame" ? codeSlot(it, ctx) : null));
+  }
+  function canClaim(it) {
+    return it.division === "available" && !it.needsLink && !(it.expiresAt && new Date(it.expiresAt).getTime() < Date.now());
+  }
+  // What SOOP said when the reward was claimed (never the code itself).
+  function claimNote(it) {
+    const c = it.claim;
+    if (!c || !c.message) return null;
+    return el("div", { class: "s-stack is-tight" },
+      el("span", { class: "s-small" + (c.kind === "pending" || c.kind === "renewed" ? " s-warn" : " s-muted") }, c.message),
+      c.description ? el("span", { class: "s-small s-muted", style: { whiteSpace: "pre-line" } }, c.description) : null);
+  }
+  // "Claim": one reward, on SOOP, with the account's stored login. Irreversible, so it always confirms.
+  function claimSlot(it, ctx) {
+    const slot = el("div", { class: "s-stack is-tight" });
+    const btn = ui.button("Claim on SOOP", { size: "sm", tone: "primary", icon: "gift", onClick: () =>
+      Soop.confirm({
+        title: "Claim this reward?",
+        body: "This claims \u201c" + (it.name || "this reward") + "\u201d on SOOP for " + who(it.loginId) + ". It cannot be undone, and it is logged.",
+        danger: true, okLabel: "Claim reward",
+      }).then((yes) => {
+        if (!yes) return null;
+        btn.disabled = true;
+        return Soop.api.post("/inventory/claim", { itemId: it.id }).then((j) => {
+          const r = j.result || {};
+          Soop.toast(r.message || "Claimed", r.kind === "pending" || r.kind === "renewed" ? "warn" : "ok");
+          load();
+          if (ctx.closed) return;
+          const row = el("div", { class: "s-row" });
+          fill(slot,
+            el("span", { class: "s-small" + (r.kind === "pending" || r.kind === "renewed" ? " s-warn" : "") }, r.message || "Claimed"),
+            r.description ? el("span", { class: "s-small s-muted", style: { whiteSpace: "pre-line" } }, r.description) : null,
+            row);
+          if (r.code) showCode(row, codeSlot(it, ctx).firstChild, it, ctx, r.code);
+        }, (e) => { btn.disabled = false; Soop.toast(e.message, "error"); });
+      }) });
+    slot.append(btn);
+    return slot;
   }
   // "Reveal code": confirm, ask the server (which logs who asked), show it until hidden or the drawer closes.
   function codeSlot(it, ctx) {
     const slot = el("div", { class: "s-row" });
-    const reveal = ui.button("Reveal code", { size: "sm", icon: "eye", onClick: () =>
+    const reveal = ui.button("Show code", { size: "sm", icon: "eye", onClick: () =>
       Soop.confirm({ title: "Reveal this code?", body: "This shows the code on screen and is logged.", okLabel: "Reveal code" }).then((yes) => {
         if (!yes) return null;
-        return Soop.api.post("/inventory/reveal", { itemId: it.id }).then((j) => { if (!ctx.closed) showCode(slot, reveal, it, ctx, j.code); });
+        return Soop.api.post("/inventory/reveal", { itemId: it.id }).then((j) => {
+          if (ctx.closed) return;
+          if (j.code) showCode(slot, reveal, it, ctx, j.code);
+          else Soop.toast((j.claim && j.claim.message) || "SOOP returned no code for this reward", "warn");
+        }, (e) => Soop.toast(e.message, "error"));
       }) });
     slot.append(reveal);
     return slot;

@@ -246,8 +246,9 @@ route("post", "/inventory/sync", async ({ body }) => {
 route("post", "/inventory/reveal", async ({ body, req, res }) => {
   const itemId = text(body.itemId, "itemId", { required: true });
   if (!OBJECT_ID_RE.test(itemId)) bad("itemId is not an inventory item id");
-  const code = await farm.inventory.revealCode(itemId);
-  if (!code) throw new HttpError(404, "No code is stored for that item");
+  const found = await farm.inventory.reveal(itemId);
+  if (!found || (!found.code && !found.claim)) throw new HttpError(404, "No code is stored for that item");
+  const code = found.code;
   const admin = (req.session && req.session.admin) || {};
   const who = String(admin.username || admin.id || "unknown admin").slice(0, 80);
   // The entry names who and which item — never the code itself.
@@ -257,7 +258,26 @@ route("post", "/inventory/reveal", async ({ body, req, res }) => {
     data: { itemId, admin: who },
   });
   res.set("Cache-Control", "no-store");
-  return { code };
+  return { code, claim: found.claim || null };
+});
+
+// Claims ONE reward on SOOP with the account's stored session. Irreversible, so
+// it is only ever a deliberate click, and it is recorded with who clicked.
+route("post", "/inventory/claim", async ({ body, req, res }) => {
+  const itemId = text(body.itemId, "itemId", { required: true });
+  if (!OBJECT_ID_RE.test(itemId)) bad("itemId is not an inventory item id");
+  const out = await farm.inventory.claim(itemId);
+  if (!out.ok) throw new HttpError(/unknown/i.test(out.error) ? 404 : 400, out.error);
+  const admin = (req.session && req.session.admin) || {};
+  const who = String(admin.username || admin.id || "unknown admin").slice(0, 80);
+  farm.activity.add({
+    kind: "claim",
+    accountId: out.result.loginId,
+    msg: `${who} claimed "${out.result.name}" on ${out.result.loginId}`,
+    data: { itemId, admin: who, kind: out.result.kind },
+  });
+  res.set("Cache-Control", "no-store");
+  return { result: out.result };
 });
 
 route("get", "/inventory/export.csv", async ({ res }) => {

@@ -559,3 +559,16 @@ target reads the params from the `"tab"` event (values arrive as strings):
 **Dev harness** — `node scripts/soop-dev-harness.js <port>` serves the real page
 and API on a fake SOOP with seeded data (time runs 30x). Use your own port; stop
 it when you are done. It cannot reach the real database or sooplive.com.
+
+## 15. Claiming (added 2026-10-06)
+
+- Client: `useInfo(itemCodeIdx) -> data` — SOOP's claim / check-info call. Claims an
+  unclaimed reward (irreversible); only reads a claimed one.
+- Inventory service: `claim(itemId) -> { ok, result: { kind, message, description,
+  code, name, loginId } } | { ok: false, error }` with `kind` one of
+  `code | link | ingame | pending | renewed`; `reveal(itemId) -> { code, claim } | null`,
+  which asks SOOP only for a reward that is already claimed.
+- Route: `POST /api/soop/inventory/claim { itemId }` -> `{ result }`;
+  `POST /api/soop/inventory/reveal` now returns `{ code, claim }`.
+- Items carry `claimedAt` and `claim` (`{ kind, message, description, gameTitle, dropsName }`,
+  never a code). Inventory rows are keyed by SOOP's `itemCodeIdx`.

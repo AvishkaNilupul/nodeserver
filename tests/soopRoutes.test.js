@@ -47,6 +47,7 @@ const TABLE = [
   ["GET", "/api/soop/inventory/account"],
   ["POST", "/api/soop/inventory/sync"],
   ["POST", "/api/soop/inventory/reveal"],
+  ["POST", "/api/soop/inventory/claim"],
   ["GET", "/api/soop/inventory/export.csv"],
   ["GET", "/api/soop/activity"],
 ];
@@ -186,6 +187,8 @@ test("bad input is refused with 400 and a readable message", async () => {
     ["/inventory/sync", { ids: { all: true } }],
     ["/inventory/reveal", {}],
     ["/inventory/reveal", { itemId: "not-an-id" }],
+    ["/inventory/claim", {}],
+    ["/inventory/claim", { itemId: "not-an-id" }],
   ];
   for (const [path, body] of cases) {
     refused(await post(path, body), 400, `POST ${path} ${JSON.stringify(body).slice(0, 60)}`);

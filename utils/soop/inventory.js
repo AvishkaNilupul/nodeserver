@@ -17,7 +17,26 @@ const DIVISIONS = ["available", "acquired", "expired"];
 const CODE_FIELDS = ["itemCode", "code", "pinNo", "couponNo"];
 const SOON_MS = 72 * 3600 * 1000;
 const VIEW_FIELDS =
-  "loginId key division name nameRaw kind gameNo gameName image expiresAt sentAt receivedAt needsLink linkPath used hasCode syncedAt";
+  "loginId key division name nameRaw kind gameNo gameName image expiresAt sentAt receivedAt needsLink linkPath used hasCode syncedAt claimedAt claim";
+// What SOOP puts in `itemCode` when it has run out of codes for a reward.
+const PENDING_CODE = "2차지급예정";
+const CLAIM_MESSAGES = {
+  code: "Claimed — the code is ready.",
+  link: "Claimed — the reward is a link.",
+  ingame: "Claimed — the reward was sent to the linked game account.",
+  pending: "SOOP has run out of codes for this reward and says it will deliver it later. Check again in a few days.",
+  renewed: "SOOP reissued this reward: a new one was added to the inventory. Sync, then claim the new one.",
+};
+const stripHtml = (html) =>
+  String(html || "")
+    .replace(/<br\s*\/?>(\s*)/gi, "\n")
+    .replace(/<[^>]*>/g, "")
+    .replace(/&nbsp;/g, " ")
+    .replace(/&amp;/g, "&")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .trim()
+    .slice(0, 2000);
 const CSV_HEADER = "loginId,game,item,kind,division,expiresAt,hasCode";
 
 // One id at a time with a pause in between, so a "sync everything" click cannot
@@ -117,6 +136,8 @@ function view(doc) {
     used: !!doc.used,
     hasCode: !!doc.hasCode,
     syncedAt: doc.syncedAt || null,
+    claimedAt: doc.claimedAt || null,
+    claim: doc.claim || null,
   };
 }
 
@@ -164,11 +185,12 @@ function createInventoryService({ models, getClient, activity, paceMs = 2500, no
         updateOne: {
           filter: { loginId: id, key },
           update: {
+            // SOOP's list never carries the code (it comes from the claim
+            // call), so a sync must not wipe one that is already stored.
             $set: {
               ...fields,
               raw: safeRaw,
-              hasCode: !!code,
-              codeEnc: code ? encrypt(code) : "",
+              ...(code ? { hasCode: true, codeEnc: encrypt(code) } : {}),
               syncedAt: at,
             },
           },
@@ -272,12 +294,82 @@ function createInventoryService({ models, getClient, activity, paceMs = 2500, no
     };
   }
 
+  // Reads SOOP's reply to the claim / check-info call into what we keep.
+  function readUseInfo(row, data) {
+    const value = String((data && data.itemCode) || "").trim();
+    let kind;
+    if (data && data.renewFlag === "Y") kind = "renewed";
+    else if (value === PENDING_CODE) kind = "pending";
+    else if (row.kind === "ingame") kind = "ingame";
+    else if (String((data && data.itemType) || "") === "2") kind = "link";
+    else kind = value ? "code" : "ingame";
+    const secret = kind === "code" || kind === "link" ? value : "";
+    return {
+      secret,
+      claim: {
+        kind,
+        message: CLAIM_MESSAGES[kind],
+        description: stripHtml(data && data.itemDescription),
+        gameTitle: String((data && data.gameTitle) || "").slice(0, 120),
+        dropsName: String((data && data.dropsName) || "").slice(0, 200),
+      },
+    };
+  }
+
+  async function fetchUseInfo(row) {
+    const idx = row.raw && row.raw.itemCodeIdx;
+    if (!idx) throw Object.assign(new Error("This reward has no SOOP item id, so it cannot be read from here"), { status: 400 });
+    const client = await getClient(row.loginId);
+    if (typeof client.useInfo !== "function") throw new Error("this client cannot claim rewards");
+    const out = readUseInfo(row, await client.useInfo(idx));
+    const set = { claim: out.claim, used: true };
+    if (out.secret) Object.assign(set, { hasCode: true, codeEnc: encrypt(out.secret) });
+    return { out, set };
+  }
+
+  // Claims ONE unclaimed reward on SOOP with the account's stored session. This
+  // cannot be undone, so every refusal below is checked before SOOP is called.
+  // -> { ok: true, result: { kind, message, description, code } } | { ok: false, error }
+  async function claim(itemId) {
+    if (!itemId || !mongoose.isValidObjectId(itemId)) return { ok: false, error: "Unknown inventory item" };
+    const row = await Item().findById(itemId).lean();
+    if (!row) return { ok: false, error: "Unknown inventory item" };
+    if (row.division === "acquired") return { ok: false, error: "This reward is already claimed — use Show code" };
+    if (row.division !== "available") return { ok: false, error: "This reward has expired and can no longer be claimed" };
+    if (row.expiresAt && new Date(row.expiresAt).getTime() < now()) {
+      return { ok: false, error: "This reward has expired and can no longer be claimed" };
+    }
+    if (row.needsLink) return { ok: false, error: "Link the game account on SOOP first — this reward is sent in-game" };
+    if (!(row.raw && row.raw.itemCodeIdx)) return { ok: false, error: "This reward has no SOOP item id — sync the account and try again" };
+
+    const { out, set } = await fetchUseInfo(row);
+    const at = new Date(now());
+    // A reissued reward was not consumed: leave it for the next sync to sort out.
+    if (out.claim.kind !== "renewed") Object.assign(set, { division: "acquired", claimedAt: at, receivedAt: at });
+    await Item().updateOne({ _id: row._id }, { $set: set });
+    note({ kind: "claim", accountId: row.loginId, msg: `Claimed "${row.name}" on ${row.loginId}: ${out.claim.message}` });
+    syncAccount(row.loginId).catch(() => {});
+    return { ok: true, result: { ...out.claim, name: row.name, loginId: row.loginId, code: out.secret || null } };
+  }
+
   // The only place a code is decrypted. The caller decides who may ask.
-  async function revealCode(itemId) {
+  // A reward claimed by hand on SOOP has no stored code yet: it is read back
+  // once with the check-info call — which is only ever sent for a reward that
+  // is ALREADY claimed, because the same call on an unclaimed one claims it.
+  async function reveal(itemId) {
     if (!itemId || !mongoose.isValidObjectId(itemId)) return null;
-    const row = await Item().findById(itemId).select("codeEnc").lean();
-    if (!row || !row.codeEnc) return null;
-    return decrypt(row.codeEnc) || null;
+    const row = await Item().findById(itemId).lean();
+    if (!row) return null;
+    if (row.codeEnc) return { code: decrypt(row.codeEnc) || null, claim: row.claim || null };
+    if (row.division !== "acquired" || !(row.raw && row.raw.itemCodeIdx)) return null;
+    const { out, set } = await fetchUseInfo(row);
+    await Item().updateOne({ _id: row._id }, { $set: set });
+    return { code: out.secret || null, claim: out.claim };
+  }
+
+  async function revealCode(itemId) {
+    const r = await reveal(itemId);
+    return (r && r.code) || null;
   }
 
   async function csv() {
@@ -306,6 +398,8 @@ function createInventoryService({ models, getClient, activity, paceMs = 2500, no
     status: () => batch.status(),
     summary,
     forAccount,
+    claim,
+    reveal,
     revealCode,
     csv,
   };

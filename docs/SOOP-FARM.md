@@ -32,7 +32,8 @@ up to `7eb67df`). What changed and why is in "What v1 got wrong" at the end.
   login that dies mid-farm stops its session and raises an alert.
 - **Activity log** — what each account and bot did, kept 14 days.
 
-Drops are left **unclaimed** by design. Nothing in this system presses Claim.
+Nothing is ever claimed **automatically**. A reward is claimed only when a
+superadmin presses "Claim on SOOP" on that one reward (see "Claiming a reward").
 
 ## Pieces
 
@@ -130,6 +131,29 @@ until someone uses "Fix translation" on the campaign (stored in
 `SoopTranslation`); a game can be renamed the same way (`SoopGame`). The
 original text is always kept and shown on request.
 
+## Claiming a reward
+
+SOOP only issues a reward's code when it is claimed, and the inventory list
+never carries a code. Claim and "check info" are the same call
+(`POST drops.sooplive.com/api/get_drops_use_info.php` with `{ itemCodeIdx }`):
+on an unclaimed reward it claims it — which cannot be undone — and on a claimed
+one it only reads. The reply's `itemCode` is the code (or a URL for link-type
+rewards, or the literal `2차지급예정` when SOOP has run out and will deliver
+later); `renewFlag: "Y"` means SOOP reissued the reward as a new item.
+
+So in the Inventory tab an unclaimed reward has **Claim on SOOP** (confirm, one
+reward, logged with who clicked), and a claimed one has **Show code**. A reward
+claimed by hand on SOOP gets its code read back the first time Show code is
+pressed. The server never sends the call for an unclaimed reward except from the
+claim action, refuses expired rewards and ones that still need a linked game
+account before asking SOOP, and stores codes encrypted. A sync never wipes a
+stored code.
+
+First real claim, 2026-10-06 01:16 UTC: an OWCS "Sun Tea Icon" returned a
+25-character code shaped `XXXX-XXXX-XXXXX-XXXX-XXXX` — the Battle.net code
+format — with no instructions text. Whether it redeems on a non-Korean
+Battle.net account is still to be confirmed by redeeming one.
+
 ## Logins expire
 
 The probe's first account, exported 2026-10-03, was logged out by 2026-10-06 —
@@ -186,6 +210,11 @@ unstable). **00:38 UTC — follow-up**: `utils/soopWorker.js`,
 `_deploy_backup_20261006003843_soop-v2-followup`; pm2 restart 15 at 00:38:57Z
 (0 unstable). Code is on `origin/feat/soop-farm-v2`; fingerprint against that
 branch next time.
+
+**01:15 UTC — claim feature**: `utils/soopClient.js`, `utils/soop/inventory.js`,
+`routes/soopRoutes.js`, `models/SoopInventoryItem.js`, `public/soop/tab-inventory.js`;
+backup `_deploy_backup_20261006011230_soop-claim`; pm2 restart 16 at 01:15:31Z
+(0 unstable).
 
 Seen against real SOOP right after the deploy:
 

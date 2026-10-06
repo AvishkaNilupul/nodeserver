@@ -323,7 +323,7 @@ test("makeClient refuses a cookie set without AuthTicket and never exposes cooki
   assert.equal(c.id, "acc1");
   assert.equal(
     Object.keys(c).sort().join(" "),
-    "campaigns campaignsAll categoryChannels id inventory inventoryCounts liveInfo missions openBridge privateInfo",
+    "campaigns campaignsAll categoryChannels id inventory inventoryCounts liveInfo missions openBridge privateInfo useInfo",
   );
   assert.ok(!JSON.stringify(c).includes(TICKET));
   assert.equal(makeClient(COOKIES, { transport: t, geo: fakeGeo() }).id, null);
@@ -534,4 +534,26 @@ test("the keepalive timer is also cleared when the server closes the socket", (t
   assert.equal(timers[0].cleared, true);
   timers[0].fn(); // a late tick on a closed socket sends nothing
   assert.deepEqual(ws.sent, []);
+});
+
+test("useInfo posts the item id to the drops site and returns SOOP's data, or says why not", async () => {
+  const calls = [];
+  const replies = [
+    { result: 1, data: { itemCode: "ABCD-EFGH", itemType: "1", itemName: "Sun Tea Icon" } },
+    { result: -1, message: "로그인 후 가능 합니다." },
+    { result: 0, message: "Invalid item." },
+  ];
+  const transport = {
+    proxied: false, ready: true, describe: () => "direct", wsOptions: () => ({}), stats: () => ({}),
+    requestJson: async (url, opt) => { calls.push({ url, opt }); return replies.shift(); },
+  };
+  const client = makeClient([{ name: "AuthTicket", value: "t" }], { transport, geo: { get: async () => ({}) } });
+  const data = await client.useInfo("12345");
+  assert.equal(data.itemCode, "ABCD-EFGH");
+  assert.equal(calls[0].url, "https://drops.sooplive.com/api/get_drops_use_info.php");
+  assert.equal(calls[0].opt.method, "POST");
+  assert.deepEqual(JSON.parse(calls[0].opt.body), { itemCodeIdx: "12345" });
+  assert.equal(calls[0].opt.headers.origin, "https://drops.sooplive.com");
+  await assert.rejects(() => client.useInfo("12345"), { code: "AUTH" });
+  await assert.rejects(() => client.useInfo("12345"), { code: "API", message: "Invalid item." });
 });

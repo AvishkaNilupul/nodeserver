@@ -319,7 +319,7 @@ test("inventory returns raw rows per division and counts as numbers", async () =
     [box.itemType, box.useFlag, box.ingameGiveYn, box.acctConn, box.sendDate, box.expDate, box.receiveDate],
     ["1", "N", "N", false, "2026-10-05 12:00:00", "2026-10-20 12:00:00", null],
   );
-  assert.ok(box.idx && box.idx !== available[0].idx, "every row has its own id");
+  assert.ok(box.itemCodeIdx && box.itemCodeIdx !== available[0].itemCodeIdx, "every row has its own id");
   assert.equal(available[0].itemCode, "SECRET-1");
   assert.ok((await client.inventory("acquired"))[0].receiveDate);
   assert.ok((await client.inventory("expired"))[0].expDate < "2026-10-06");
@@ -339,7 +339,7 @@ test("raw rows go through the real normaliser", { skip: !normalize && "utils/soo
   world.addInventory("acc1", { itemName: "Skin", itemType: "4", ingameGiveYn: "Y" }, "acquired");
   const raw = (await client.inventory("available"))[0];
   const item = normalize.normalizeInventoryItem(raw, "available");
-  assert.deepEqual([item.code, item.key, item.raw.itemCode], ["SECRET-1", raw.idx, undefined]);
+  assert.deepEqual([item.code, item.key, item.raw.itemCode], ["SECRET-1", raw.itemCodeIdx, undefined]);
   assert.ok(item.expiresAt > new Date(NOW));
   const skin = normalize.normalizeInventoryItem((await client.inventory("acquired"))[0], "acquired");
   assert.deepEqual([skin.kind, skin.needsLink, skin.receivedAt !== null], ["ingame", true, true]);
@@ -348,7 +348,7 @@ test("raw rows go through the real normaliser", { skip: !normalize && "utils/soo
 test("calls() counts every client method, including the ones that throw", async () => {
   const { world, client } = setup();
   const zero = world.calls();
-  assert.equal(Object.keys(zero).length, 9);
+  assert.equal(Object.keys(zero).length, 10);
   assert.ok(Object.values(zero).every((n) => n === 0));
 
   await client.campaignsAll();

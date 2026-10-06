@@ -301,6 +301,60 @@ test("a waiting account shows the minutes it already has, even with no saved pro
   assert.ok(view.minutes.sum >= 4, "the bot's progress bar counts them too");
 });
 
+test("claiming a reward stores its code encrypted, survives a sync, and is refused when it must be", async () => {
+  await fresh();
+  await addAccount("acc1");
+  const SoopInventoryItem = require("../models/SoopInventoryItem");
+  await SoopInventoryItem.deleteMany({});
+  world.addInventory("acc1", { itemName: "Sun Tea Icon", claimCode: "OW-CODE-12345" });
+  world.addInventory("acc1", { itemName: "Shell Credit", itemType: "4", ingameGiveYn: "Y", acctConn: false });
+  world.addInventory("acc1", { itemName: "Old Spray", claimCode: "OLD-1" }, "expired");
+  world.addInventory("acc1", { itemName: "Claimed By Hand", claimCode: "HAND-777" }, "acquired");
+  await farm.inventory.syncAccount("acc1");
+  const byName = async () => Object.fromEntries((await farm.inventory.forAccount("acc1")).map((i) => [i.name, i]));
+  let items = await byName();
+  assert.equal(items["Sun Tea Icon"].division, "available");
+  assert.equal(items["Sun Tea Icon"].hasCode, false, "an unclaimed reward has no code yet");
+
+  // Looking must never claim: reveal on an unclaimed reward does not call SOOP.
+  assert.equal(await farm.inventory.reveal(items["Sun Tea Icon"].id), null);
+  assert.equal(world.calls().useInfo, 0);
+
+  // Refusals are decided before SOOP is asked.
+  assert.match((await farm.inventory.claim(items["Shell Credit"].id)).error, /link the game account/i);
+  assert.match((await farm.inventory.claim(items["Old Spray"].id)).error, /expired/i);
+  assert.match((await farm.inventory.claim(items["Claimed By Hand"].id)).error, /already claimed/i);
+  assert.match((await farm.inventory.claim("000000000000000000000000")).error, /unknown/i);
+  assert.equal(world.calls().useInfo, 0, "nothing was claimed by a refused request");
+
+  const out = await farm.inventory.claim(items["Sun Tea Icon"].id);
+  assert.equal(out.ok, true, out.error);
+  assert.equal(out.result.kind, "code");
+  assert.equal(out.result.code, "OW-CODE-12345");
+  assert.match(out.result.description, /Redeem at example\.test\nwithin 30 days/, "instructions kept as plain text");
+  assert.equal(world.calls().useInfo, 1);
+
+  await farm.inventory.syncAccount("acc1"); // a later sync must not wipe the code
+  items = await byName();
+  assert.equal(items["Sun Tea Icon"].division, "acquired");
+  assert.equal(items["Sun Tea Icon"].hasCode, true);
+  assert.equal(items["Sun Tea Icon"].claim.kind, "code");
+  const stored = await SoopInventoryItem.findById(items["Sun Tea Icon"].id).lean();
+  assert.match(stored.codeEnc, /^enc:v1:/);
+  const everything = JSON.stringify(await farm.inventory.forAccount("acc1")) + JSON.stringify(stored) + (await farm.inventory.csv());
+  assert.ok(!everything.includes("OW-CODE-12345"), "the code is nowhere in clear text");
+  assert.equal((await farm.inventory.reveal(items["Sun Tea Icon"].id)).code, "OW-CODE-12345");
+  assert.equal(world.calls().useInfo, 1, "a stored code is shown without asking SOOP again");
+
+  // A reward claimed by hand on SOOP: its code is read back once, then kept.
+  assert.equal((await farm.inventory.reveal(items["Claimed By Hand"].id)).code, "HAND-777");
+  assert.equal((await farm.inventory.reveal(items["Claimed By Hand"].id)).code, "HAND-777");
+  assert.equal(world.calls().useInfo, 2);
+  const log = farm.activity.recent({ limit: 50 }).map((e) => e.msg).join(" | ");
+  assert.match(log, /Claimed "Sun Tea Icon" on acc1/);
+  assert.ok(!log.includes("OW-CODE-12345"), "the activity log never holds a code");
+});
+
 test("the panel state never contains a stored cookie", async () => {
   await fresh();
   world.addCampaign({ live: true });

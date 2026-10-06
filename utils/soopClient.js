@@ -266,6 +266,17 @@ function makeClient(cookies, {
     return out;
   }
 
+  // SOOP's "Claim" and "Check info" are the same call: on an unclaimed reward it
+  // CLAIMS it (cannot be undone); on a claimed one it only reads. The reply
+  // carries the code or link in `itemCode` — the inventory list never does.
+  async function useInfo(itemCodeIdx) {
+    const j = await postJson("/api/get_drops_use_info.php", "/inventory", { itemCodeIdx });
+    if (j && j.data) return j.data;
+    const message = String((j && j.message) || "reward info unavailable");
+    const auth = (j && Number(j.result) === -1) || LOGIN_RE.test(message);
+    throw new SoopError(message, { code: auth ? "AUTH" : "API" });
+  }
+
   // What the viewer claims about where they are. SOOP refuses to credit watch
   // time when the claim disagrees with the IP it sees (measured 2026-10-04:
   // one Japanese IP earned 0 minutes in 10 claiming US and 9 in 10 claiming
@@ -373,7 +384,7 @@ function makeClient(cookies, {
   // prettier-ignore
   return {
     id, privateInfo, missions, campaigns, campaignsAll, liveInfo, categoryChannels,
-    inventoryCounts, inventory, openBridge,
+    inventoryCounts, inventory, useInfo, openBridge,
   };
 }
 

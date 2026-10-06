@@ -12,7 +12,7 @@ const { creditStatus } = require("../../utils/soop/geo");
 
 const DIVISIONS = ["available", "acquired", "expired"];
 const METHODS =
-  "privateInfo missions campaigns campaignsAll liveInfo categoryChannels inventoryCounts inventory openBridge".split(" ");
+  "privateInfo missions campaigns campaignsAll liveInfo categoryChannels inventoryCounts inventory useInfo openBridge".split(" ");
 const DAY = 24 * 3600 * 1000;
 const clone = (v) => JSON.parse(JSON.stringify(v));
 const cc = (v) => (v ? String(v).trim().toUpperCase() : null);
@@ -184,7 +184,7 @@ function createFakeSoop({ now = Date.now } = {}) {
       if (!DIVISIONS.includes(division)) throw new Error(`fake SOOP: bad division ${division}`);
       const t = now();
       const row = {
-        idx: String(++seq),
+        itemCodeIdx: String(++seq), // the id SOOP's inventory really uses
         ...{ itemType: "1", itemName: "Fake reward", itemImage: null, gameNo: "12", typeNm: null },
         ...{ ingameGiveYn: "N", acctConn: false, acctLinkPath: null, loginPath: null, useFlag: "N" },
         sendDate: kst(t - DAY),
@@ -345,7 +345,32 @@ function createFakeSoop({ now = Date.now } = {}) {
         async inventory(division) {
           enter("inventory", true);
           const from = DIVISIONS.includes(division) ? [division] : DIVISIONS;
-          return from.flatMap((d) => clone(acct.inventory[d]));
+          return from.flatMap((d) => clone(acct.inventory[d])).map(({ claimCode, ...row }) => row);
+        },
+        // Like SOOP: the first call on an unclaimed reward claims it, later
+        // calls only read. The code lives here, never in the list rows.
+        async useInfo(itemCodeIdx) {
+          enter("useInfo", true);
+          const key = String(itemCodeIdx);
+          const match = (r) => String(r.itemCodeIdx) === key;
+          let row = acct.inventory.acquired.find(match);
+          if (!row) {
+            const i = acct.inventory.available.findIndex(match);
+            if (i < 0) throw new SoopError("No such reward.", { code: "API" });
+            [row] = acct.inventory.available.splice(i, 1);
+            row.useFlag = "Y";
+            row.receiveDate = kst(now());
+            acct.inventory.acquired.push(row);
+          }
+          return {
+            itemCode: row.claimCode || "FAKE-" + key,
+            itemType: row.itemType,
+            itemName: row.itemName,
+            dropsName: "Fake drops event",
+            gameTitle: "Fake game",
+            renewFlag: row.renewFlag || "N",
+            itemDescription: "Redeem at <b>example.test</b><br>within 30 days",
+          };
         },
         openBridge,
       };
