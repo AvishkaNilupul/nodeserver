@@ -19,6 +19,7 @@ const {
   GF_CLAIM_TAG,
   gameflipCodeHeldLogins,
   noteIfCodeRefused,
+  STUCK_ALERT_AT_ATTEMPT,
 } = require("./gameflipFulfiller");
 const {
   digisellerDeliveryCode,
@@ -3132,9 +3133,15 @@ function chooseStackItems(current, stacked, holderCount) {
 // selling for.
 // How long a Gameflip relist may still be "pending" before the post-event markup
 // stops waiting for it. Long enough for a chain to republish (the fulfiller
-// retries on a 60s tick with backoff), short enough that a chain which never
-// relists cannot hold a task in the retry queue indefinitely.
+// retries on a 60s tick with backoff), short enough that a chain which is not
+// being retried at all cannot hold a task in the retry queue indefinitely. A
+// chain that IS being retried and keeps failing is bounded separately, by its
+// attempt count — see the deferral in onCampaignEnded.
 const POST_EVENT_RELIST_GRACE_MS = 24 * 60 * 60 * 1000;
+
+// Hard ceiling on a post-event price — the same model-failure backstop as
+// pricing.js `maxAbsoluteUsd`.
+const POST_EVENT_MAX_USD = 25;
 
 function postEventPrice(basePrice, { markup = POST_EVENT_MARKUP } = {}) {
   const base = Number(basePrice) > 0 ? Number(basePrice) : 1.0;
@@ -3208,6 +3215,20 @@ async function onCampaignEnded(taskId) {
   // the end, so a retry after a partial failure recomputes from the identical
   // base — marking up the live row's (already raised) price would compound.
   const price = postEventPrice(task.listing.price);
+  // Nothing here has ever sold above $4.50. A markup past the pricing engine's
+  // own backstop means the stored base is already wrong; refuse it before it is
+  // saved or pushed to Gameflip rather than publish it.
+  if (price > POST_EVENT_MAX_USD) {
+    throw new Error(
+      "post-event price $" +
+        price +
+        " is over the $" +
+        POST_EVENT_MAX_USD +
+        " ceiling — task price " +
+        task.listing.price +
+        " looks corrupt",
+    );
+  }
   const title = buildTitle({
     game: task.game,
     items,
@@ -3228,24 +3249,6 @@ async function onCampaignEnded(taskId) {
     postEvent: true,
     marketplace: "ggsel",
   });
-
-  // Persist the (possibly grown, possibly unchanged) items + the marked-up
-  // price. When the gate above kept `current`, this is an items no-op plus a
-  // price-only bump — the markup still applies to the already-backed bundle.
-  mySet.items = items;
-  mySet.price = price;
-  await mySet.save();
-
-  // Rebuild the cover from the stacked set so the Gameflip photo shows every
-  // item in the grown bundle, not the pre-stack picture with items missing.
-  // Best-effort: a failed image build falls back to the text/price-only reprice
-  // rather than blocking the markup. Temp file is cleaned up after the reprice.
-  let stackedImg = "";
-  try {
-    stackedImg = await buildSetGridImage(mySet);
-  } catch {
-    stackedImg = "";
-  }
 
   // Find the live Gameflip row by SET rather than by the id recorded on the
   // task: after the first sale the relist chain publishes a successor with a
@@ -3268,6 +3271,76 @@ async function onCampaignEnded(taskId) {
   // a later refactor could widen.
   const row = isAutoOwned(found) ? found : null;
   const heldBack = Math.max(0, Number(task.listing.heldBack) || 0);
+
+  // WAIT — and write NOTHING — while a relist is genuinely about to produce a row.
+  //
+  // "No ACTIVE row at this instant" is not the same as "no row will ever
+  // exist". A Gameflip chain mid-relist has a `sold` row still owing units, and
+  // a fresh listing lands moments later — marking the markup done in that window
+  // loses the whole +50% scarcity price permanently, because the retry queue
+  // will never look at the task again.
+  //
+  // So defer ONLY while a relist is genuinely pending, and only while it is
+  // RECENT and NOT STUCK. Those two bounds are what preserve the drain: a chain
+  // that never relists stops qualifying and the task leaves the queue exactly
+  // as it does today.
+  //
+  // Recency alone is not a bound. Every failed relist re-saves the sold row,
+  // and the fulfiller's backoff tops out at one retry per 12h — so a chain
+  // nothing can fulfil ("out of stock") keeps its updatedAt inside the 24h
+  // window for ever. The fulfiller already says when a chain has stopped being
+  // "about to land": STUCK_ALERT_AT_ATTEMPT consecutive misses, ~75 minutes.
+  //
+  // And the wait must come before every write below. It used to sit at the end
+  // and only withhold the postEvent flag, after the marked-up price had already
+  // been saved on the task and the set — so each retry marked up the price the
+  // previous retry had stored. One MARVEL Contest of Champions task whose chain
+  // was out of stock (19 failed relists) compounded x1.5 a tick, 465 times,
+  // from $1.75 to $1.5e82, and sent a Telegram notice for every one.
+  let relistPending = false;
+  if (!row) {
+    const owed = await MarketplaceListing.findOne(
+      {
+        set: mySet._id,
+        marketplace: "gameflip",
+        origin: "auto",
+        status: "sold",
+        qtyRemaining: { $gt: 0 },
+        updatedAt: {
+          $gte: new Date(Date.now() - POST_EVENT_RELIST_GRACE_MS),
+        },
+        // $not/$gte rather than $lt: a row from before the counter existed has
+        // no relistAttempts at all, and $lt would not match it.
+        relistAttempts: { $not: { $gte: STUCK_ALERT_AT_ATTEMPT } },
+      },
+      { _id: 1 },
+    )
+      .lean()
+      .catch(() => null);
+    relistPending = !!owed;
+  }
+  if (relistPending) {
+    return { skipped: "Gameflip relist pending — markup waits for the new row" };
+  }
+
+  // Persist the (possibly grown, possibly unchanged) items + the marked-up
+  // price. When the gate above kept `current`, this is an items no-op plus a
+  // price-only bump — the markup still applies to the already-backed bundle.
+  mySet.items = items;
+  mySet.price = price;
+  await mySet.save();
+
+  // Rebuild the cover from the stacked set so the Gameflip photo shows every
+  // item in the grown bundle, not the pre-stack picture with items missing.
+  // Best-effort: a failed image build falls back to the text/price-only reprice
+  // rather than blocking the markup. Temp file is cleaned up after the reprice.
+  let stackedImg = "";
+  try {
+    stackedImg = await buildSetGridImage(mySet);
+  } catch {
+    stackedImg = "";
+  }
+
   if (row) {
     try {
       await mp.gameflipReprice(row.externalId, {
@@ -3339,44 +3412,15 @@ async function onCampaignEnded(taskId) {
   task.listing.title = title;
   task.listing.price = price;
   task.listing.repricedAt = new Date();
-  // MARK IT DONE — unless a relist is genuinely about to produce a row.
+  // MARK IT DONE, in the same save as the marked-up price.
   //
   // Setting this even when no live row remains is DELIBERATE and must stay:
   // autoFarmer.repriceEndedTasks filters on exactly this flag, and the comment
   // there ("so this queue always drains rather than spinning on dead listings")
   // is the reason. Removing it would put the queue back to grinding on listings
-  // that will never exist again.
-  //
-  // But "no ACTIVE row at this instant" is not the same as "no row will ever
-  // exist". A Gameflip chain mid-relist has a `sold` row still owing units, and
-  // a fresh listing lands moments later — marking the markup done in that window
-  // loses the whole +50% scarcity price permanently, because the retry queue
-  // will never look at the task again.
-  //
-  // So defer ONLY while a relist is genuinely pending, and only while it is
-  // RECENT. The recency bound is what preserves the drain: a chain that never
-  // relists stops qualifying after POST_EVENT_RELIST_GRACE_MS and the task
-  // leaves the queue exactly as it does today.
-  let relistPending = false;
-  if (!row) {
-    const owed = await MarketplaceListing.findOne(
-      {
-        set: mySet._id,
-        marketplace: "gameflip",
-        origin: "auto",
-        status: "sold",
-        qtyRemaining: { $gt: 0 },
-        updatedAt: {
-          $gte: new Date(Date.now() - POST_EVENT_RELIST_GRACE_MS),
-        },
-      },
-      { _id: 1 },
-    )
-      .lean()
-      .catch(() => null);
-    relistPending = !!owed;
-  }
-  task.listing.postEvent = !relistPending;
+  // that will never exist again. The one case that must NOT be marked done — a
+  // relist still pending — returned above before anything was written.
+  task.listing.postEvent = true;
   if (row && heldBack > 0) {
     task.listing.qty = (Number(task.listing.qty) || 0) + heldBack;
     task.listing.heldBack = 0;

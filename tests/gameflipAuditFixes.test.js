@@ -262,11 +262,18 @@ test("a DRAFT listing is still left alone", () => {
 test("REGRESSION: postEvent waits while a relist is genuinely pending", () => {
   const at = LISTER.indexOf("let relistPending = false;");
   assert.ok(at > 0, "the deferral should exist");
-  const block = LISTER.slice(at, at + 900);
+  const block = LISTER.slice(at, at + 1100);
   assert.match(block, /status: "sold"/);
   assert.match(block, /qtyRemaining: \{ \$gt: 0 \}/, "a chain still owing units");
   assert.match(block, /POST_EVENT_RELIST_GRACE_MS/, "bounded, so the queue still drains");
-  assert.match(LISTER, /task\.listing\.postEvent = !relistPending;/);
+  // The wait returns BEFORE the marked-up price is saved anywhere. Withholding
+  // only the flag let every retry mark up the last retry's price
+  // (tests/postEventRepriceCompounding.test.js).
+  assert.match(block, /if \(relistPending\) \{\s+return \{ skipped: /);
+  assert.ok(
+    at < LISTER.indexOf("mySet.price = price;", LISTER.indexOf("async function onCampaignEnded")),
+    "deferral decided before the set price is written",
+  );
 });
 
 test("the deferral is bounded, so a dead chain cannot hold the queue", () => {
