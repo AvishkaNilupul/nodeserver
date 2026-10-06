@@ -167,6 +167,7 @@ route("post", "/bots/create", async ({ body }) => {
       accountIds: idList(body.accountIds, "accountIds", { required: true }),
       target: text(body.target, "target", { max: 20 }),
       codesOnly: flag(body.codesOnly, "codesOnly"),
+      priorityGameNo: text(body.priorityGameNo, "priorityGameNo", { max: 32 }),
     }),
   );
   return { bot };
@@ -180,6 +181,7 @@ route("post", "/bots/update", async ({ body }) => {
       target: text(body.target, "target", { max: 20 }),
       addIds: idList(body.addIds, "addIds"),
       removeIds: idList(body.removeIds, "removeIds"),
+      priorityGameNo: text(body.priorityGameNo, "priorityGameNo", { max: 32 }),
     }),
   );
   return { bot };

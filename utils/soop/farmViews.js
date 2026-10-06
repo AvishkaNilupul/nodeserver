@@ -105,6 +105,8 @@ function botView(bot, ctx) {
     title: bot.dropsIdx ? ctx.campaignTitle(bot.dropsIdx) : null,
     target: bot.target,
     codesOnly: !!bot.codesOnly,
+    priorityGameNo: bot.priorityGameNo || null,
+    priorityGameName: bot.priorityGameNo ? ctx.gameName(bot.priorityGameNo) : null,
     active: !!bot.active,
     state,
     createdAt: bot.createdAt || bot.startedAt || null,

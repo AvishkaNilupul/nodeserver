@@ -45,7 +45,7 @@
   function open(prefill) {
     if (openNow) return;
     prefill = prefill || {};
-    const w = { step: 1, mode: "game", gameNo: null, dropsIdx: null, how: "all", firstN: 5, picked: new Set(), target: "all", codesOnly: false, name: "", q: "", sync: null, ids: [] };
+    const w = { step: 1, mode: "game", gameNo: null, dropsIdx: null, how: "all", firstN: 5, picked: new Set(), target: "all", codesOnly: false, priorityGameNo: (((Soop.games || []).find((g) => /^overwatch/i.test(g.name || "")) || {}).gameNo) || "", name: "", q: "", sync: null, ids: [] };
     if (prefill.create === "campaign" && prefill.dropsIdx) { w.mode = "campaign"; w.dropsIdx = String(prefill.dropsIdx); w.step = Soop.campaignById(w.dropsIdx) ? 3 : 2; }
     else if (prefill.create === "game" && prefill.gameNo) { w.mode = "game"; w.gameNo = String(prefill.gameNo); w.step = 3; }
 
@@ -162,13 +162,22 @@
           ["Name", w.name.trim() || autoName()]].map((r) => [el("dt", r[0]), el("dd", r[1])]));
       };
       const name = el("input", { class: "s-input", value: w.name, maxlength: "120", placeholder: autoName(), onInput: () => { w.name = name.value; drawSum(); } });
+      // "Everything" bots only: one game that always wins when it goes live.
+      const priorityPicker = () => {
+        const sel = el("select", { class: "s-select", "aria-label": "Priority game", onChange: () => { w.priorityGameNo = sel.value; } },
+          el("option", { value: "" }, "No priority game"),
+          (Soop.games || []).filter((g) => g.gameNo).map((g) => el("option", { value: String(g.gameNo), selected: String(g.gameNo) === String(w.priorityGameNo) }, g.name)));
+        return el("label", { class: "s-field" }, "Priority game", sel,
+          el("span", { class: "s-help" }, "Farmed first. Accounts on any other game switch to it within a minute or two of it going live, then go back."));
+      };
       drawSum();
       return el("div", { class: "s-stack" },
         el("div", { class: "s-stack is-tight" }, el("p", { class: "s-eyebrow" }, "Target"),
           picks(TARGETS.map((o) => ({ value: o.value, node: words(o.title, o.text) })), w.target, (v) => { w.target = v; drawSum(); })),
         w.mode === "campaign" ? (c && c.needsLink ? el("div", { class: "s-note is-warn" }, ui.icon("alert"), el("span", "This campaign's rewards go to a linked game account, not to a code.")) : null)
           : el("div", { class: "s-stack is-tight" }, el("label", { class: "s-check" }, el("input", { type: "checkbox", checked: w.codesOnly, onChange: (e) => { w.codesOnly = e.target.checked; drawSum(); } }), el("b", "Codes only")),
-            el("span", { class: "s-help" }, "Skips campaigns whose rewards need a linked game account, so every drop this bot earns is a code.")),
+            el("span", { class: "s-help" }, "Skips campaigns whose rewards need a linked game account, so every drop this bot earns is a code."),
+            w.mode === "auto" ? priorityPicker() : null),
         el("label", { class: "s-field" }, "Bot name (optional)", name, el("span", { class: "s-help" }, "Left empty, the bot is named after what it farms.")),
         el("div", { class: "s-card" }, el("div", { class: "s-card-bd s-stack is-tight" }, el("p", { class: "s-eyebrow" }, "Summary — check before you create"), sum)));
     }
@@ -185,6 +194,7 @@
     function create() {
       const ids = w.ids;
       const payload = { name: w.name.trim(), mode: w.mode, accountIds: ids, target: w.target, codesOnly: w.mode !== "campaign" && w.codesOnly };
+      if (w.mode === "auto" && w.priorityGameNo) payload.priorityGameNo = String(w.priorityGameNo);
       if (w.mode === "campaign") payload.dropsIdx = w.dropsIdx;
       if (w.mode === "game") payload.gameNo = w.gameNo;
       return Soop.api.post("/bots/create", payload).then((j) => {

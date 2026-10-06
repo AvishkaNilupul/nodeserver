@@ -27,6 +27,7 @@ function fromDoc(d) {
     gameNo: d.gameNo ? String(d.gameNo) : null,
     target: TARGETS.has(d.target) ? d.target : "all",
     codesOnly: !!d.codesOnly,
+    priorityGameNo: d.priorityGameNo ? String(d.priorityGameNo) : null,
     accountIds: (d.accountIds || []).slice(),
     doneIds: (d.doneIds || []).slice(),
     active: !!d.active,
@@ -150,7 +151,8 @@ module.exports = {
     const todo = open.filter((c) => !reached(c));
     if (!todo.length) return { ...ref(open[0]), detail: "Everything is farmed — sleeping until the next campaign" };
     // A campaign that left SOOP's list has no trustworthy live flag: try it.
-    const live = todo.filter((c) => c.live || c.filter === "unlisted");
+    const rank = (c) => (bot.priorityGameNo && String(c.gameNo) === String(bot.priorityGameNo) ? 0 : 1);
+    const live = todo.filter((c) => c.live || c.filter === "unlisted").sort((a, b) => rank(a) - rank(b));
     if (live.length) return { go: true, ...ref(live[0]), detail: "Starting" };
     const first = todo.slice().sort((a, b) => (time(a.startAt) || 0) - (time(b.startAt) || 0))[0];
     const later = time(first.startAt) && time(first.startAt) > now;
@@ -201,7 +203,7 @@ module.exports = {
     this.activity.add({ kind: "bot", botId: bot.id, msg: `Bot "${bot.name}" finished — every account reached its goal` });
   },
 
-  async createBot({ name, mode = "campaign", dropsIdx, gameNo, accountIds, target = "all", codesOnly = false } = {}) {
+  async createBot({ name, mode = "campaign", dropsIdx, gameNo, accountIds, target = "all", codesOnly = false, priorityGameNo } = {}) {
     if (!MODES.has(mode)) return fail("Choose what the bot should farm");
     if (!TARGETS.has(target)) return fail("Unknown target");
     const ids = uniq(accountIds);
@@ -233,6 +235,7 @@ module.exports = {
       gameNo: mode === "game" ? String(gameNo) : "",
       target,
       codesOnly: !!codesOnly,
+      priorityGameNo: mode === "auto" && priorityGameNo ? String(priorityGameNo) : "",
       accountIds: ids,
       doneIds: [],
       active: true,
@@ -245,7 +248,7 @@ module.exports = {
     return { ok: true, bot: await this._viewBot(bot) };
   },
 
-  async updateBot(id, { name, target, addIds, removeIds } = {}) {
+  async updateBot(id, { name, target, addIds, removeIds, priorityGameNo } = {}) {
     const bot = this.bots.get(String(id));
     if (!bot) return fail("Unknown bot");
     const set = {};
@@ -254,6 +257,9 @@ module.exports = {
       if (!TARGETS.has(target)) return fail("Unknown target");
       set.target = target;
     }
+    // "" clears it; undefined leaves it alone. Sessions are restarted so they pick it up.
+    const reprioritise = priorityGameNo != null && bot.mode === "auto" && String(priorityGameNo) !== String(bot.priorityGameNo || "");
+    if (reprioritise) set.priorityGameNo = String(priorityGameNo);
     const add = uniq(addIds).filter((x) => !bot.accountIds.includes(x));
     const remove = new Set(uniq(removeIds));
     if (add.length) {
@@ -267,7 +273,7 @@ module.exports = {
     const retarget = set.target && set.target !== bot.target;
     for (const x of bot.accountIds) {
       const mine = this.sessions.get(x) && this.sessions.get(x).botId === bot.id;
-      if (mine && (remove.has(x) || retarget)) await this._stopSession(x);
+      if (mine && (remove.has(x) || retarget || reprioritise)) await this._stopSession(x);
     }
     // A longer target can un-finish accounts that had reached the first step.
     if (retarget) set.doneIds = [];

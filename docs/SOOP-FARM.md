@@ -162,6 +162,23 @@ The panel shows a sleeping bot and its accounts as "Sleeping", with the reason.
 It also no longer waits on SOOP to open: it shows the remembered campaigns at
 once and refreshes a list older than 5 minutes in the background.
 
+## Priority game
+
+An "everything guaranteed" bot can name one game that always wins
+(`priorityGameNo` on the bot; the wizard preselects Overwatch). Its campaigns
+are picked first, and an account farming anything else leaves for one within a
+minute or two of it going live — provided a channel is really on air, otherwise
+it stays where it is — then goes back when the priority campaign is farmed or
+its broadcast ends. While anything is farming the campaign list is re-read
+about every minute, which is what makes the switch quick.
+
+Since 2026-10-06 02:30 UTC production runs one such bot for all eight accounts:
+everything guaranteed, codes only (so PUBG and Wuthering Waves, which need a
+linked game account, are skipped), Overwatch first. It replaced the bot pinned
+to OWCS campaign 13337; that bot's row was converted in place
+(`_id 6ac1f868cb44c29f94c82f16`: `mode` unset→`auto`, `dropsIdx` `13337`→empty,
+`codesOnly` →true, `priorityGameNo` →`12`).
+
 ## Claiming a reward
 
 SOOP only issues a reward's code when it is claimed, and the inventory list
@@ -251,6 +268,12 @@ backup `_deploy_backup_20261006011230_soop-claim`; pm2 restart 16 at 01:15:31Z
 `utils/soop/farmBots.js`, `utils/soop/farmViews.js` and five files under
 `public/soop/`; backup `_deploy_backup_20261006020150_soop-sleep-wake`; pm2
 restart 17 at 02:02:37Z (0 unstable).
+
+**02:30 UTC — priority game**: `utils/soopWorker.js`, `utils/soopFarm.js`,
+`utils/soop/farmBots.js`, `utils/soop/farmViews.js`, `routes/soopRoutes.js`,
+`models/SoopFarmTask.js`, `public/soop/bots-wizard.js`, `public/soop/tab-bots.js`;
+backup `_deploy_backup_20261006023001_soop-priority-game`; pm2 restart 18 at
+02:30:30Z (0 unstable).
 
 Seen against real SOOP right after the deploy:
 

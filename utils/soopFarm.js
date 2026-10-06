@@ -415,7 +415,7 @@ class SoopFarm {
       out = await runSession({
         id: s.id,
         getClient: () => this.clients.get(s.id),
-        plan: { mode: bot.mode, dropsIdx: bot.dropsIdx, gameNo: bot.gameNo, target: bot.target, codesOnly: bot.codesOnly },
+        plan: { mode: bot.mode, dropsIdx: bot.dropsIdx, gameNo: bot.gameNo, target: bot.target, codesOnly: bot.codesOnly, priorityGameNo: bot.priorityGameNo },
         campaigns: () => this.listCampaigns(),
         resolveCampaign: (d) => this.store.get(d),
         progress: this._progressApi(s.id),
@@ -512,6 +512,8 @@ class SoopFarm {
     } else if (ev.k === "campaign-done") {
       this.activity.add({ ...where, kind: "done", msg: `${s.id} finished ${ev.title} (${ev.minutes}/${ev.goal} min)` });
       this._inventorySoon(s.id);
+    } else if (ev.k === "switch") {
+      this.activity.add({ ...where, kind: "switch", msg: `${s.id} left ${ev.from} for ${ev.title} — the priority game went live` });
     } else if (ev.k === "error") {
       v.state = "error";
       v.detail = ev.msg;

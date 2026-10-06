@@ -76,7 +76,9 @@ async function pickChannel(client, camp, now) {
 
 // opts: { id, getClient, plan, campaigns, resolveCampaign, progress, onEvent,
 //         signal, clock, timings }
-//   plan: { mode: "campaign"|"game"|"auto", dropsIdx, gameNo, target, codesOnly }
+//   plan: { mode: "campaign"|"game"|"auto", dropsIdx, gameNo, target, codesOnly, priorityGameNo }
+//     priorityGameNo: that game's campaigns are picked first, and an account
+//     farming anything else leaves for one the moment it goes live
 //   campaigns(): shared list of listed, normalised campaigns
 //   resolveCampaign(dropsIdx): a campaign that left the list, or null
 //   progress: { get(dropsIdx) -> { max, done } | null, set(dropsIdx, patch) }
@@ -126,6 +128,11 @@ async function runSession(opts) {
   }
   const wanted = (c) =>
     (!plan.codesOnly || !c.needsLink) && (c.steps || []).length > 0;
+  // 0 for the bot's priority game, 1 for everything else.
+  const rank = (c) =>
+    plan.priorityGameNo && String(c.gameNo) === String(plan.priorityGameNo) ? 0 : 1;
+  const matches = (c) =>
+    c.guaranteed && wanted(c) && (plan.mode === "auto" || String(c.gameNo) === String(plan.gameNo));
 
   // -> { camp, channel } | { wait: detail, startAt? } | { finished } | { ended }
   async function choose(client) {
@@ -143,13 +150,7 @@ async function runSession(opts) {
       }
       pool = [hit];
     } else {
-      pool = listed.filter(
-        (c) =>
-          c.guaranteed &&
-          wanted(c) &&
-          (plan.mode === "auto" || String(c.gameNo) === String(plan.gameNo)),
-      );
-      pool = pool.filter((c) => !isDone(c));
+      pool = listed.filter(matches).filter((c) => !isDone(c));
       if (!pool.length) {
         return { wait: "Nothing to farm right now — waiting for the next campaign" };
       }
@@ -160,8 +161,9 @@ async function runSession(opts) {
       .filter((c) => c.live || c.filter === "unlisted")
       .sort(
         (a, b) =>
+          rank(a) - rank(b) ||
           (a.endAt ? new Date(a.endAt).getTime() : Infinity) -
-          (b.endAt ? new Date(b.endAt).getTime() : Infinity),
+            (b.endAt ? new Date(b.endAt).getTime() : Infinity),
       );
     if (!live.length) {
       const next = pool
@@ -183,8 +185,21 @@ async function runSession(opts) {
     return { wait: "Campaign is live but no channel is on air yet", camp: live[0] };
   }
 
+  // While farming something else: has a campaign of the priority game gone
+  // live, with a channel really on air? (Without the channel check an account
+  // would bounce between the two every poll.) -> the campaign, or null
+  async function priorityLive(client, current) {
+    if (!plan.priorityGameNo || plan.mode === "campaign" || rank(current) === 0) return null;
+    const list = await campaigns().catch(() => null);
+    if (!list) return null;
+    for (const c of list.filter((x) => matches(x) && rank(x) === 0 && x.live && !isDone(x))) {
+      if (await pickChannel(client, c, clock.now).catch(() => null)) return c;
+    }
+    return null;
+  }
+
   // Holds the bridge on one channel and watches the counter.
-  // -> { done } | { auth } | { egress } | { notCrediting } | { retry }
+  // -> { done } | { auth } | { egress } | { notCrediting } | { retry } | { switchTo }
   async function farm(client, camp, channel) {
     const goal = goalOf(camp, plan.target);
     const base = { dropsIdx: camp.dropsIdx, title: camp.title, channel, goal };
@@ -276,6 +291,8 @@ async function runSession(opts) {
         if (flat >= T.flatPolls) credited = false;
         emit({ k: "state", state: "farming", detail: "Watching " + channel, ...base, minutes: mins, credited });
         if (done) return { done: true, minutes: mins, goal };
+        const first = await priorityLive(client, camp);
+        if (first) return { switchTo: first };
         if (bridge.closed) return { retry: "the viewer socket closed" };
         if (flat >= T.flatPolls) {
           return { notCrediting: true, minutes: mins, everCredited };
@@ -345,7 +362,16 @@ async function runSession(opts) {
     const out = await farm(client, camp, channel);
     if (stopped()) break;
     if (out.auth) return end("auth", out.auth);
-    if (out.done || out.notCrediting) idle = 0; // it got as far as watching
+    if (out.done || out.notCrediting || out.switchTo) idle = 0; // it got as far as watching
+    if (out.switchTo) {
+      emit({
+        k: "switch",
+        from: camp.title,
+        dropsIdx: out.switchTo.dropsIdx,
+        title: out.switchTo.title,
+      });
+      continue; // straight back to choose(), which puts the priority game first
+    }
     if (out.done) {
       backoff = 0;
       emit({ k: "campaign-done", dropsIdx: camp.dropsIdx, title: camp.title, minutes: out.minutes, goal: out.goal });

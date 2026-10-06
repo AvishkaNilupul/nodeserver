@@ -20,6 +20,9 @@ const soopFarmTaskSchema = new mongoose.Schema(
     targetMinutes: { type: Number, default: null }, // v1 field, kept for old rows
     // Skip campaigns whose rewards need a linked game account.
     codesOnly: { type: Boolean, default: false },
+    // For "auto" bots: this game is farmed first, and accounts on anything else
+    // switch to it as soon as one of its campaigns goes live.
+    priorityGameNo: { type: String, default: "" },
     accountIds: { type: [String], default: [] },
     // Accounts that reached their goal (campaign mode).
     doneIds: { type: [String], default: [] },

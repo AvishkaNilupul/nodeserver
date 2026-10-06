@@ -186,7 +186,7 @@
     c.title.textContent = bot.name; c.title.title = bot.name;
     if (c.state !== bot.state) { fill(c.badge, ui.badge(words[0], words[1])); c.state = bot.state; }
     c.stop.hidden = !bot.active; c.resume.hidden = bot.active;
-    c.what.textContent = farms(bot) + " · " + targetWords(bot.target) + (bot.codesOnly ? " · codes only" : "");
+    c.what.textContent = farms(bot) + " · " + targetWords(bot.target) + (bot.codesOnly ? " · codes only" : "") + (bot.priorityGameName ? " · " + bot.priorityGameName + " first" : "");
     c.say.textContent = sentence(bot);
     c.bar.set(m.sum, m.goalSum);
     c.barText.textContent = m.goalSum ? fmt.mins(m.sum) + " of " + fmt.mins(m.goalSum) + " · " + fmt.pct(m.sum, m.goalSum) : "No watch time to count yet";

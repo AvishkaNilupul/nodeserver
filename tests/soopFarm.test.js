@@ -276,6 +276,38 @@ test("a game bot farms each campaign of its game in turn, then sleeps until the 
   assert.match((await farm.stateView()).accounts[0].session.detail, /everything is farmed/i);
 });
 
+test("an everything bot farms other games but drops them for the priority game the moment it goes live", async () => {
+  await fresh();
+  const er = world.addCampaign({ gameNo: "18", live: true, itemList: [500], broadIdList: ["er1"] });
+  const ow = world.addCampaign({ gameNo: "12", live: false, itemList: [3], broadIdList: ["ow1"] });
+  await addAccount("acc1");
+  await farm.campaignsView({ force: true });
+  const { ok, bot, error } = await farm.createBot({ mode: "auto", priorityGameNo: "12", codesOnly: true, accountIds: ["acc1"] });
+  assert.equal(ok, true, error);
+  assert.equal(bot.priorityGameNo, "12");
+  const on = () => world.bridges().filter((b) => b.id === "acc1").map((b) => b.channel).join(",");
+
+  await until(() => on() === "er1", "farming the other game meanwhile");
+  await watch(() => (farm.progress.get("acc1") || {})[er.dropsIdx]?.minutes >= 2, "earning on it");
+
+  // The priority campaign is listed live but nobody is streaming: stay put.
+  world.setLive(ow.dropsIdx, true);
+  const opened = world.calls().openBridge;
+  for (let i = 0; i < 6; i++) { world.advance(1); await sleep(35); }
+  assert.equal(on(), "er1");
+  assert.equal(world.calls().openBridge, opened, "no reconnect churn while the priority game has no stream");
+
+  require("../utils/soopWorker").channelMemo.clear(); // (the "nobody is live" note lasts 90 s)
+  world.setOnAir("ow1", true); // the Overwatch broadcast starts
+  await watch(() => on() === "ow1", "switched to the priority game");
+  assert.equal(world.bridges().length, 1, "one socket: it left the other game first");
+  assert.match(farm.activity.recent({ limit: 30 }).map((e) => e.msg).join(" | "), /left .* for .* — the priority game went live/);
+
+  await watch(() => (farm.progress.get("acc1") || {})[ow.dropsIdx]?.done, "priority campaign farmed");
+  await watch(() => on() === "er1", "back to the other game afterwards");
+  assert.equal((await botState(bot.id)).priorityGameName, "Overwatch");
+});
+
 test("accounts cannot be double-booked, and sold or logged-out accounts are refused", async () => {
   await fresh();
   const camp = world.addCampaign({ live: true, itemList: [60] });
