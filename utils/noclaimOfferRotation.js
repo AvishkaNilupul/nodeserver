@@ -19,6 +19,9 @@
 //
 //   - Only rows the stock sync paused (autoPaused + its exact error). A pause
 //     the owner made (autoPaused:false) is never touched.
+//   - A live no-claim bulk pack on the set moves with it, keeping its pack
+//     title, pack cover and pack-counted quantity (utils/noclaimOfferPack).
+//     Any other bulk row is left alone.
 //   - Only when no FREE account holds the old bundle any more, and the free
 //     farm holds a different one. Free accounts all sold or reserved is
 //     contention, and a new bundle cannot fix that.
@@ -33,6 +36,7 @@
 //   - Kill switch: autoFarm.noclaimRotateOffers === false.
 
 const settings = require("./settings");
+const pk = require("./noclaimOfferPack");
 
 const PAUSED_ERROR = "paused: no claimable stock";
 const MIN_PAUSED_MS = 30 * 60 * 1000;
@@ -132,7 +136,6 @@ function rowSkipReason(row, now = Date.now()) {
   if (row.status !== "active") return "row is " + (row.status || "?");
   if (row.autoPaused !== true) return "not paused by the stock sync";
   if (str(row.lastError) !== PAUSED_ERROR) return "paused for another reason";
-  if (row.bulkOfferId) return "bulk pack row";
   if (!row.set) return "no set";
   if (now - timeOf(row.updatedAt) < MIN_PAUSED_MS) return "paused under 30 min ago";
   return "";
@@ -393,9 +396,18 @@ async function rotateRow(d, row, ctx) {
     return { error: "the row changed while rotating — left for the next pass" };
   }
 
-  // 3. Back on sale exactly the way syncBundleStock resumes its own pauses.
+  if (ctx.pack) {
+    try {
+      await pk.recordOnOffer(d, ctx.pack, ctx.set, ctx);
+    } catch {
+      /* the bulk dashboard's copy of the text is display only */
+    }
+  }
+
+  // 3. Back on sale exactly the way syncBundleStock resumes its own pauses. A
+  // pack row counts whole packs; under one pack it stays paused for the sync.
   const moved = await d.MarketplaceListing.findById(row._id).lean();
-  const stock = await d.ncs.stockForListing(moved);
+  const stock = pk.quantityFor(d, ctx.pack, await d.ncs.stockForListing(moved));
   if (stock > 0) {
     await d.mp.eldoradoRelist(ext);
     await d.MarketplaceListing.updateOne(
@@ -425,8 +437,19 @@ async function rotationPass(opts = {}) {
       autoPaused: true,
     }).lean();
     const bySet = new Map();
+    const packs = new Map(); // row id -> { offer, n } for live no-claim pack rows
     for (const r of rows || []) {
       if (rowSkipReason(r, now)) continue;
+      if (pk.isPackRow(r)) {
+        let p;
+        try {
+          p = await pk.packFor(d, r);
+        } catch (e) {
+          p = { skip: e.message };
+        }
+        if (p.skip) continue; // not a live no-claim pack: left exactly as it is
+        packs.set(String(r._id), p);
+      }
       const k = String(r.set);
       (bySet.get(k) || bySet.set(k, []).get(k)).push(r);
     }
@@ -560,8 +583,17 @@ async function rotationPass(opts = {}) {
         rowsLeft--;
         const ext = str(row.externalId);
         let r;
+        let rowCtx = ctx;
         try {
-          r = await rotateRow(d, row, ctx);
+          const pack = packs.get(String(row._id));
+          if (pack) {
+            // The pack's own title, description and cover, under its offer's lock.
+            rowCtx = { ...ctx, ...(await pk.packCopy(d, pack, ctx.set, ctx, game)), pack };
+            const locked = await pk.withLock(d, pack, () => rotateRow(d, row, rowCtx));
+            r = locked.ran ? locked.value : { skipped: "the bulk offer is busy — left for the next pass" };
+          } else {
+            r = await rotateRow(d, row, ctx);
+          }
         } catch (e) {
           r = { error: e.message };
         }
@@ -570,7 +602,7 @@ async function rotationPass(opts = {}) {
             externalId: ext,
             price: row.price,
             from: bundleLabel(set.items),
-            to: ctx.title,
+            to: rowCtx.title,
             set: String(ctx.set._id),
             newSet: ctx.created,
             stock: r.stock,
@@ -587,7 +619,7 @@ async function rotationPass(opts = {}) {
               game,
               count: r.stock,
               detail:
-                "Eldorado offer switched to the bundle the farm holds now: " + ctx.title +
+                "Eldorado offer switched to the bundle the farm holds now: " + rowCtx.title +
                 " ($" + row.price + ", " + r.stock + " in stock) — " + bundleLabel(set.items) +
                 " had expired off every account",
               meta: { fromSet: setId, toSet: String(ctx.set._id), newSet: ctx.created },

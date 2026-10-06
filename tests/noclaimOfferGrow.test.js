@@ -168,7 +168,6 @@ test("rowSkipReason: only offers that are on sale", () => {
   const row = { marketplace: "eldorado", noclaimStock: true, status: "active", autoPaused: false, set: "s" };
   assert.strictEqual(grow.rowSkipReason(row), "");
   assert.match(grow.rowSkipReason({ ...row, autoPaused: true }), /paused by the stock sync/);
-  assert.match(grow.rowSkipReason({ ...row, bulkOfferId: "b1" }), /bulk pack/);
   assert.match(grow.rowSkipReason({ ...row, status: "delisted" }), /row is delisted/);
   assert.match(grow.rowSkipReason({ ...row, marketplace: "g2g" }), /not an Eldorado/);
   assert.match(grow.rowSkipReason({ ...row, noclaimStock: false }), /not a no-claim/);
@@ -408,13 +407,120 @@ test("the kill switch stops everything", async () => {
   assert.deepStrictEqual(f.calls, []);
 });
 
-test("an offer the stock sync paused, and a bulk pack row, are not this pass's", async () => {
+test("an offer the stock sync paused, and a bulk row with no pack size, are not this pass's", async () => {
   const f = fakeDeps({
     rows: [liveRow({ autoPaused: true }), liveRow({ _id: "row2", externalId: "d645cdf0-pack", bulkOfferId: "b1" })],
   });
   const out = await grow.growPass({ deps: f.d, now: NOW });
   assert.strictEqual(out.grown.length, 0);
   assert.deepStrictEqual(f.calls, []);
+});
+
+/* ------------------------------ pack rows ------------------------------- */
+
+function packDeps(o = {}) {
+  const offers = new Map([["b1", { _id: "b1", source: "noclaim", state: "live", open: true, minQty: 5, discountPct: 5, market: "eldorado", ...(o.offer || {}) }]]);
+  const calls = [];
+  return {
+    calls,
+    offers,
+    pack: {
+      BulkOffer: {
+        findById: (id) => ({ lean: async () => (offers.get(String(id)) ? { ...offers.get(String(id)) } : null) }),
+        updateOne: async (q, u) => {
+          calls.push(["bulkOffer", q, u]);
+          Object.assign(offers.get(String(q._id)), u.$set);
+          return { modifiedCount: 1 };
+        },
+      },
+      copy: require("../utils/bulkPacks/copy"),
+      packMath: require("../utils/bulkPacks/packMath"),
+      lock: o.busy
+        ? { tryWithOfferLock: async () => ({ ran: false }) }
+        : { tryWithOfferLock: async (_id, fn) => ({ ran: true, value: await fn() }) },
+      buildPackCover: async (_set, opts) => {
+        calls.push(["packCover", opts]);
+        return "/tmp/pack-cover-test.png";
+      },
+    },
+  };
+}
+const packRow = (extra = {}) =>
+  liveRow({
+    _id: "rowP",
+    externalId: "d645cdf0-pack",
+    price: 4.75,
+    bulkOfferId: "b1",
+    bulkPackSize: 5,
+    title: "Overwatch Twitch Drops — OWCS Stage 3 Asia Kickoff COMPLETE BUNDLE (6 Items) — PACK OF 5 ACCOUNTS (-5%)",
+    ...extra,
+  });
+
+test("a live no-claim pack moves with its set: pack title, pack cover, quantity in packs", async () => {
+  const f = fakeDeps({ rows: [liveRow(), packRow()] });
+  const p = packDeps();
+  f.d.pack = p.pack;
+  const out = await grow.growPass({ deps: f.d, now: NOW });
+  assert.strictEqual(out.grown.length, 2, JSON.stringify(out));
+  const row = f.rows.get("rowP");
+  assert.strictEqual(String(row.set), "newset1", "the pack sells the same bigger set");
+  assert.match(row.title, /\(11 Items\) — PACK OF 5 ACCOUNTS \(-5%\)$/);
+  assert.match(row.description, /PACK OF 5 ACCOUNTS — each purchase is a pack of 5/);
+  assert.match(row.description, /5× 100 Comp Points/);
+  assert.strictEqual(row.price, 4.75);
+  assert.deepStrictEqual(p.calls.find((c) => c[0] === "packCover")[1], { packSize: 5, discountPct: 5, showTotal: true });
+  assert.strictEqual(f.calls.filter((c) => c[0] === "upload").length, 2, "the set cover and the pack cover");
+  // 80 advertised is split across the two rows: 40 accounts each = 8 packs of 5.
+  assert.strictEqual(f.offers.get("d645cdf0-pack").quantity, 8);
+  assert.strictEqual(row.qtyTarget, 8);
+  assert.strictEqual(f.offers.get("9cec2c78-main").quantity, 40);
+  const offer = p.offers.get("b1");
+  assert.strictEqual(String(offer.set), "newset1");
+  assert.strictEqual(offer.title, row.title);
+  assert.ok(!/PACK OF/.test(f.rows.get("row1").title), "the single offer keeps the plain title");
+});
+
+test("a pack left behind joins the set its single offers already moved to", async () => {
+  // Prod on 2026-10-06: the four single offers grew at 08:53Z, the pack stayed on the old set.
+  const big = { _id: "bigset", stockSource: "noclaim", coverGame: G, price: 1, name: "grown", items: [...owcsItems(), comp()] };
+  const f = fakeDeps({
+    sets: [big],
+    existingSets: [big],
+    rows: [liveRow({ set: "bigset", rebundledAt: new Date(NOW - HOUR) }), packRow()],
+  });
+  const p = packDeps();
+  f.d.pack = p.pack;
+  const out = await grow.growPass({ deps: f.d, now: NOW });
+  assert.strictEqual(out.grown.length, 1, JSON.stringify(out));
+  assert.strictEqual(out.grown[0].externalId, "d645cdf0-pack");
+  assert.strictEqual(String(f.rows.get("rowP").set), "bigset", "the existing set is reused, not copied");
+  assert.ok(!kinds(f.calls).includes("createSet"));
+  assert.match(f.rows.get("rowP").title, /11 Items.*PACK OF 5 ACCOUNTS/);
+});
+
+test("a pack that is not a live no-claim pack is left exactly as it is", async () => {
+  for (const offer of [{ state: "paused" }, { source: "dropset" }, { open: false }]) {
+    const f = fakeDeps({ rows: [packRow()] });
+    f.d.pack = packDeps({ offer }).pack;
+    const out = await grow.growPass({ deps: f.d, now: NOW });
+    assert.strictEqual(out.grown.length, 0);
+    assert.deepStrictEqual(f.calls, [], JSON.stringify(offer));
+  }
+  // A title and pack size that disagree is the bulk system's to refuse.
+  const f = fakeDeps({ rows: [packRow({ bulkPackSize: 10 })] });
+  f.d.pack = packDeps().pack;
+  await grow.growPass({ deps: f.d, now: NOW });
+  assert.deepStrictEqual(f.calls, []);
+});
+
+test("a busy bulk offer leaves the pack's text for the next pass, on the bigger set", async () => {
+  const f = fakeDeps({ rows: [liveRow(), packRow()] });
+  f.d.pack = packDeps({ busy: true }).pack;
+  const out = await grow.growPass({ deps: f.d, now: NOW });
+  assert.strictEqual(out.grown.length, 1);
+  assert.strictEqual(String(f.rows.get("rowP").set), "newset1");
+  assert.ok(grow.textPending(f.rows.get("rowP")));
+  assert.match(f.rows.get("rowP").title, /6 Items/);
 });
 
 test("a set that grew less than 6 hours ago is left alone", async () => {

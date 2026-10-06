@@ -871,6 +871,82 @@ function intersectCopies(lists) {
   }));
 }
 
+// --- exact mode: a vault listing says what its units hold -------------------
+//
+// Owner rule, 2026-10-06: "when there are more items to sell, why are we still
+// on the wrong min set — and when items expire it should adjust as well."
+//
+// The campaign scope above (rebundleWithinScope) only ever completed the events
+// a listing already named. Measured that day, 16 of the 18 vault listings
+// advertised less than the account a buyer would get: a "(1 Item) — OL'
+// CLANKER" Gameflip listing sold an account holding 12, every Overwatch row
+// said 6 items for accounts holding 11. Two GGSel offers still advertised a
+// Rainbow Six wave that had expired off all of their units.
+//
+// In exact mode the target is simply everything the deliverable unit(s) hold —
+// for a quantity row, what EVERY undelivered unit holds (deliverableHeld) — in
+// either direction:
+//   grow   - they hold all that is advertised and more  -> verdict "rebundle"
+//   shrink - an advertised item is gone or short        -> verdict "relist"
+// Both carry `target`. What is safe to apply automatically differs by market
+// and is decided in rebundleAll, not here.
+//
+// Why the 2026-09-28 worry (a 9× title raised to 12× and left there when the
+// oldest wave expired) no longer holds: since that day the engine's check pass
+// takes a Gameflip unit that is short of its row's promise off sale and relists
+// it under what it holds (unclaimedAutoList.handleShortUnit), and refuses to
+// attach a unit to a quantity row that promises more than it holds.
+// Kill switch: autoFarm.unclaimedRebundleExact === false (back to the scope rule).
+function exactEnabled() {
+  try {
+    return require("./settings").getAutoFarm().unclaimedRebundleExact !== false;
+  } catch {
+    return true;
+  }
+}
+
+// Held copies folded by item name across campaigns, as drops a title can be
+// built from: [{name, game, campaign, itemKey, qty}]. Pure + tested.
+function foldHeldByName(held) {
+  const byName = new Map();
+  for (const d of held || []) {
+    const n = coverage.normName(d && d.name);
+    if (!n) continue;
+    const q = Number(d.qty) > 0 ? Math.floor(Number(d.qty)) : 1;
+    const e = byName.get(n);
+    if (e) e.qty += q;
+    else byName.set(n, { name: d.name, game: d.game, campaign: String(d.campaign || ""), itemKey: d.itemKey || d.name, qty: q });
+  }
+  return [...byName.values()];
+}
+
+// Exact-mode verdict for one listing. Pure + tested.
+function exactVerdict(advertisedItems, held) {
+  const req = coverage.requiredCounts(advertisedItems || []);
+  if (!req.size) return { verdict: "unknown", added: [], missing: [] };
+  if (!(held || []).length) return { verdict: "no-stock", added: [], missing: [] };
+  // What the listing already names keeps its place; what is new follows.
+  const order = [...req.keys()];
+  const rank = (d) => {
+    const i = order.indexOf(coverage.normName(d.name));
+    return i === -1 ? order.length : i;
+  };
+  const target = foldHeldByName(held)
+    .map((d, i) => ({ d, i }))
+    .sort((a, b) => rank(a.d) - rank(b.d) || a.i - b.i)
+    .map((x) => x.d);
+  const heldCounts = new Map();
+  for (const d of target) heldCounts.set(coverage.normName(d.name), d.qty);
+  const missing = coverage.shortOf(heldCounts, req);
+  const added = [];
+  for (const d of target) {
+    const extra = d.qty - (req.get(coverage.normName(d.name)) || 0);
+    if (extra > 0) added.push({ name: d.name, qty: extra });
+  }
+  if (!missing.length && !added.length) return { verdict: "ok", added: [], missing: [] };
+  return { verdict: missing.length ? "relist" : "rebundle", exact: true, target, added, missing };
+}
+
 // Held copies folded by name only, for display ("Esports Pack ×9").
 function heldByNameLabel(held) {
   const counts = new Map();
@@ -890,7 +966,8 @@ function heldByNameLabel(held) {
 //   no-stock - no backing accounts hold anything
 //   unknown  - the listing declares no item list
 //   ok       - advertised already matches what's held
-function driftVerdict(advertisedItems, heldUnique) {
+function driftVerdict(advertisedItems, heldUnique, opts) {
+  if (opts && opts.exact) return exactVerdict(advertisedItems, heldUnique);
   const req = coverage.requiredCounts(advertisedItems || []);
   if (!req.size) return { verdict: "unknown", added: [], missing: [] };
   if (!(heldUnique || []).length) return { verdict: "no-stock", added: [], missing: [] };
@@ -932,7 +1009,8 @@ async function listingDriftReport() {
   for (const listing of listings) {
     const advertised = await advertisedItems(listing);
     const { held, count } = await heldUniqueForListing(listing);
-    const v = driftVerdict(advertised.items, held);
+    const exact = VAULT_MARKETS.includes(listing.marketplace) && exactEnabled();
+    const v = driftVerdict(advertised.items, held, { exact });
     out.push({
       id: String(listing._id),
       marketplace: listing.marketplace,
@@ -948,6 +1026,9 @@ async function listingDriftReport() {
       verdict: v.verdict,
       added: v.added || [],
       missing: v.missing || [],
+      // Exact mode: the verdict carries what the listing should say instead.
+      exact: !!v.exact,
+      to: v.exact ? heldByNameLabel(v.target) : [],
     });
   }
   // Worst first so the operator sees what needs acting on at the top.
@@ -969,6 +1050,30 @@ const REBUNDLE_INPLACE_MARKETS = ["gameflip", "ggsel", "eldorado"];
 // and a retitled GGSel offer keeps its smaller set, so any unit attached later
 // would be sold as the fuller bundle) — the manual button can still ask for it.
 const REBUNDLE_AUTO_MARKETS = ["gameflip", "eldorado"];
+// GGSel is back (owner, 2026-10-01) and in exact mode its title follows what
+// every undelivered unit holds, up and down; the engine no longer attaches a
+// unit that holds less than the row promises. So the automatic pass edits it
+// again while the GGSel switch is on.
+function autoMarkets() {
+  const out = REBUNDLE_AUTO_MARKETS.slice();
+  try {
+    if (exactEnabled() && require("./settings").getAutoFarm().ggselEnabled !== false) out.push("ggsel");
+  } catch {
+    /* settings unreadable: the two defaults */
+  }
+  return out;
+}
+// A listing whose advertised items its units no longer hold is retitled DOWN in
+// place only where the row keeps its units (GGSel). A Gameflip unit short of
+// its row is taken off sale and relisted by the engine itself
+// (unclaimedAutoList.handleShortUnit) — two fixers on one listing would fight.
+const SHRINK_INPLACE_MARKETS = ["ggsel"];
+// A shrink is applied only when two passes at least this far apart agree on it
+// (one partial inventory read must not rewrite a listing).
+const SHRINK_CONFIRM_MS = 9 * 60 * 1000;
+const shrinkSeen = new Map(); // listing id -> { sig, at }
+// Edits per automatic pass: each Gameflip edit is an off-sale/on-sale cycle.
+const AUTO_MAX_PER_PASS = 4;
 // Never re-edit the same listing more than once an hour (flap guard for the
 // automatic pass).
 const REBUNDLE_COOLDOWN_MS = 60 * 60 * 1000;
@@ -981,19 +1086,39 @@ async function rebundlePlan(listing) {
   const ual = require("./unclaimedAutoList");
   const { held, count } = await heldUniqueForListing(listing);
   const advertised = await advertisedItems(listing);
-  const target = rebundleWithinScope(advertised.items, held);
+  const exact = VAULT_MARKETS.includes(listing.marketplace) && exactEnabled();
+  const ev = exact ? exactVerdict(advertised.items, held) : null;
+  const target = exact ? ev.target || null : rebundleWithinScope(advertised.items, held);
   const set = listing.set ? await DropSet.findById(listing.set).lean() : null;
   const game =
     listing.unclaimedGame || setGame(set) || (held[0] && held[0].game) || "";
   const drops = target
     ? ual.uniqueDrops(target.map((d) => ({ ...d, game: d.game || game })))
     : [];
+  // Exact mode names the events the bundle spans, as a fresh listing of the
+  // same items would ("… OWCS Stage 3 + Reign of Talon COMPLETE BUNDLE (11 Items)").
+  let cls = null;
+  if (exact && target) {
+    try {
+      cls = await ual.classificationForSet({
+        coverGame: game,
+        items: drops.map((d) => ({ name: d.name, game: d.game || game, itemKey: d.itemKey, qty: d.qty || 1 })),
+      });
+    } catch {
+      cls = null;
+    }
+  }
   return {
     isRebundle: !!target,
+    exact,
+    // "shrink" = an advertised item is gone; "grow" = everything advertised is
+    // held, and more.
+    kind: exact && ev.verdict === "relist" ? "shrink" : "grow",
+    drops,
     game,
     backing: count,
-    title: target ? ual.listingTitle(game, drops, null) : "",
-    description: target ? ual.listingDescription(game, drops, listing.marketplace, null) : "",
+    title: target ? ual.listingTitle(game, drops, cls) : "",
+    description: target ? ual.listingDescription(game, drops, listing.marketplace, cls) : "",
     requiredDrops: drops.map((d) => ({ name: d.name, qty: d.qty || 1 })),
     advertised: advertised.items,
   };
@@ -1030,6 +1155,15 @@ async function applyRebundle(listing, { dryRun = true } = {}) {
       " has no safe in-place edit (digiseller = delist+republish/irreversible; PA can drop Active) — handled separately";
     return rec;
   }
+  rec.kind = plan.kind;
+  if (plan.kind === "shrink" && !SHRINK_INPLACE_MARKETS.includes(listing.marketplace)) {
+    rec.action = "skip";
+    rec.note =
+      listing.marketplace === "gameflip"
+        ? "an advertised item expired — the engine takes this unit off sale and relists it with what it holds"
+        : "an advertised item expired — no in-place fix on " + listing.marketplace;
+    return rec;
+  }
   rec.action = "retitle-in-place";
   if (dryRun) {
     rec.note = "dry run — would retitle at $" + rec.price + " (unchanged)";
@@ -1048,7 +1182,19 @@ async function applyRebundle(listing, { dryRun = true } = {}) {
   // SAME PRICE: no price field passed, so each primitive leaves price (and
   // eldorado quantity) alone.
   if (listing.marketplace === "gameflip") {
-    await mp.gameflipReprice(listing.externalId, { title: plan.title, description: plan.description });
+    // The cover goes with the text (same off-sale window): a picture of the old
+    // bundle under the new title is the complaint this exists to end. A cover
+    // that cannot be built never blocks the text.
+    const cover = plan.exact ? await coverForPlan(listing, plan) : "";
+    try {
+      await mp.gameflipReprice(listing.externalId, {
+        title: plan.title,
+        description: plan.description,
+        ...(cover ? { imagePath: cover } : {}),
+      });
+    } finally {
+      if (cover) require("fs").promises.unlink(cover).catch(() => {});
+    }
   } else if (listing.marketplace === "ggsel") {
     await mp.ggselUpdateOffer(listing.externalId, { title: plan.title, description: plan.description });
   } else if (listing.marketplace === "eldorado") {
@@ -1087,6 +1233,11 @@ async function confirmLiveUnit(listing, plan) {
   }
   if (!sellable) return { ok: false, why: "unreadable" };
   const drops = ual.pickListingGroup(ledger.game, sellable).drops;
+  if (plan.exact) {
+    // Right now the account must hold exactly what the title is about to say.
+    const v = exactVerdict(plan.requiredDrops, drops);
+    return v.verdict === "ok" ? { ok: true } : { ok: false, why: "live holdings differ from the planned bundle" };
+  }
   const target = rebundleWithinScope(plan.advertised, drops);
   if (!target) return { ok: false, why: "live holdings are not a fuller bundle" };
   const want = coverage.requiredCounts(plan.requiredDrops);
@@ -1094,6 +1245,39 @@ async function confirmLiveUnit(listing, plan) {
   if (want.size !== got.size) return { ok: false, why: "live bundle differs" };
   for (const [k, q] of want) if (got.get(k) !== q) return { ok: false, why: "live bundle differs" };
   return { ok: true };
+}
+
+// The grid cover for a planned bundle; "" when it cannot be built. Ledger drops
+// carry no picture, so each item's comes from the account's own holdings
+// snapshot (NoclaimHolding, the picture Twitch gave for that very drop), then
+// from the listing's set.
+async function coverForPlan(listing, plan) {
+  try {
+    const images = new Map();
+    const take = (name, image) => {
+      const k = coverage.normName(name);
+      if (k && image && !images.has(k)) images.set(k, String(image));
+    };
+    const login = String(listing.accountLogin || "").trim().toLowerCase();
+    if (login) {
+      const h = await require("../models/NoclaimHolding")
+        .findOne({ loginLower: login }, { "items.name": 1, "items.image": 1 })
+        .lean();
+      for (const it of (h && h.items) || []) take(it.name, it.image);
+    }
+    const set = listing.set ? await DropSet.findById(listing.set, { "items.name": 1, "items.image": 1 }).lean() : null;
+    for (const it of (set && set.items) || []) take(it.name, it.image);
+    const items = (plan.drops || []).map((d) => ({
+      name: d.name,
+      game: d.game || plan.game,
+      image: images.get(coverage.normName(d.name)) || "",
+      qty: d.qty || 1,
+    }));
+    if (!items.length) return "";
+    return (await require("./setImage").buildSetGridImage({ items }, { showTotal: true })) || "";
+  } catch {
+    return "";
+  }
 }
 
 // Drive the whole shop's rebundle fixes, serially (Gameflip's edit cycles the
@@ -1104,12 +1288,36 @@ async function rebundleAll({ dryRun = true, markets = null, auto = false, pauseM
     Array.isArray(markets) && markets.length
       ? markets
       : auto
-        ? REBUNDLE_AUTO_MARKETS
+        ? autoMarkets()
         : REBUNDLE_INPLACE_MARKETS;
   const rows = await listingDriftReport();
-  const targets = rows.filter((r) => r.verdict === "rebundle");
+  // Exact mode adds the shrink case; listings that over-advertise go first.
+  const targets = rows.filter((r) => r.verdict === "rebundle" || (r.exact && r.verdict === "relist"));
   const out = [];
+  let appliedCount = 0;
+  const liveIds = new Set(targets.map((t) => t.id));
+  for (const id of [...shrinkSeen.keys()]) if (!liveIds.has(id)) shrinkSeen.delete(id);
   for (const t of targets) {
+    if (auto && !dryRun && appliedCount >= AUTO_MAX_PER_PASS) {
+      out.push({ id: t.id, marketplace: t.marketplace, externalId: t.externalId, action: "skip", applied: false, note: "left for the next pass" });
+      continue;
+    }
+    if (t.verdict === "relist") {
+      if (!SHRINK_INPLACE_MARKETS.includes(t.marketplace)) continue; // the engine's own job
+      if (auto && !dryRun) {
+        const sig = JSON.stringify(t.to);
+        const seen = shrinkSeen.get(t.id);
+        if (!seen || seen.sig !== sig) {
+          shrinkSeen.set(t.id, { sig, at: Date.now() });
+          out.push({ id: t.id, marketplace: t.marketplace, externalId: t.externalId, action: "skip", applied: false, note: "an advertised item is gone — confirming on the next pass" });
+          continue;
+        }
+        if (Date.now() - seen.at < SHRINK_CONFIRM_MS) {
+          out.push({ id: t.id, marketplace: t.marketplace, externalId: t.externalId, action: "skip", applied: false, note: "an advertised item is gone — confirming on the next pass" });
+          continue;
+        }
+      }
+    }
     if (!scope.includes(t.marketplace)) {
       const safe = REBUNDLE_INPLACE_MARKETS.includes(t.marketplace);
       out.push({
@@ -1128,8 +1336,10 @@ async function rebundleAll({ dryRun = true, markets = null, auto = false, pauseM
       continue;
     }
     // Automatic pass: never re-edit a listing we touched in the last hour, so a
-    // noisy read can't put a listing into an off-sale/on-sale loop.
-    if (auto && !dryRun && listing.rebundledAt && Date.now() - new Date(listing.rebundledAt).getTime() < REBUNDLE_COOLDOWN_MS) {
+    // noisy read can't put a listing into an off-sale/on-sale loop. A shrink is
+    // exempt: it has its own two-pass confirmation, and a listing that promises
+    // what its units no longer hold must not wait an hour.
+    if (auto && !dryRun && t.verdict !== "relist" && listing.rebundledAt && Date.now() - new Date(listing.rebundledAt).getTime() < REBUNDLE_COOLDOWN_MS) {
       out.push({ id: t.id, marketplace: t.marketplace, externalId: t.externalId, action: "skip", applied: false, note: "cooldown (rebundled within the hour)" });
       continue;
     }
@@ -1140,6 +1350,10 @@ async function rebundleAll({ dryRun = true, markets = null, auto = false, pauseM
       rec = { id: t.id, marketplace: t.marketplace, externalId: t.externalId, action: "error", applied: false, note: (e && e.message) || String(e) };
     }
     out.push(rec);
+    if (rec.applied) {
+      appliedCount++;
+      shrinkSeen.delete(t.id);
+    }
     // Pace real Gameflip writes: each is an off-sale/patch/on-sale cycle behind
     // a minutes-wide rate limiter.
     if (!dryRun && rec.applied && listing.marketplace === "gameflip") {
@@ -1326,6 +1540,12 @@ module.exports = {
   setItemsToRequired,
   HELD_FRESH_MS,
   REBUNDLE_AUTO_MARKETS,
+  autoMarkets,
+  SHRINK_INPLACE_MARKETS,
+  exactEnabled,
+  foldHeldByName,
+  exactVerdict,
+  coverForPlan,
   listingDriftReport,
   VAULT_MARKETS,
   REBUNDLE_INPLACE_MARKETS,

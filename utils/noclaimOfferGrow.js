@@ -30,13 +30,15 @@
 //   - A text edit that fails leaves a marker on the row and is retried on the
 //     next pass; until then the offer under-advertises, as it did before.
 //   - Only rows that are on sale: an offer the stock sync paused belongs to the
-//     rotation, and bulk-pack rows are left to the bulk system.
+//     rotation. A live no-claim bulk pack on the set moves with it, keeping its
+//     pack title, pack cover and pack-counted quantity (utils/noclaimOfferPack).
 //   - A set never grows into a bundle another live offer of the game already
 //     sells — two deliberately different offers stay different.
 //   - Kill switch: autoFarm.noclaimGrowOffers === false.
 
 const settings = require("./settings");
 const rot = require("./noclaimOfferRotation");
+const pk = require("./noclaimOfferPack");
 
 const {
   MIN_ACCOUNTS,
@@ -98,7 +100,6 @@ function rowSkipReason(row) {
   if (row.noclaimStock !== true) return "not a no-claim row";
   if (row.status !== "active") return "row is " + (row.status || "?");
   if (row.autoPaused === true) return "paused by the stock sync";
-  if (row.bulkOfferId) return "bulk pack row";
   if (!row.set) return "no set";
   return "";
 }
@@ -319,6 +320,13 @@ async function applyText(d, row, live, ctx) {
       },
     },
   );
+  if (ctx.pack) {
+    try {
+      await pk.recordOnOffer(d, ctx.pack, ctx.set, ctx);
+    } catch {
+      /* the bulk dashboard's copy of the text is display only */
+    }
+  }
   // An edit is not meant to take an offer off sale. If it did, put back the
   // state it was read in a moment ago; a failure is reported, never retried.
   if (live.offerState === "Active" && updated.offerState && updated.offerState !== "Active") {
@@ -347,6 +355,30 @@ async function listingCopy(d, set) {
   }
 }
 
+// The text one row gets: the set's copy, or — for a pack row — the pack's own
+// title, description and cover built from it (once per bulk offer and set).
+async function copyForRow(d, row, ctx, packs, game, cache) {
+  const pack = packs.get(String(row._id));
+  if (!pack) return ctx;
+  const key = String(pack.offer._id) + "|" + String(ctx.set._id);
+  if (!cache.has(key)) cache.set(key, await pk.packCopy(d, pack, ctx.set, ctx, game));
+  return { ...ctx, ...cache.get(key), pack };
+}
+
+// applyText for one row; a pack row runs under its bulk offer's lock.
+async function textFor(d, row, live, ctx, packs, game, cache) {
+  let rowCtx;
+  try {
+    rowCtx = await copyForRow(d, row, ctx, packs, game, cache);
+  } catch (e) {
+    return { error: "pack copy: " + e.message };
+  }
+  if (!rowCtx.pack) return { ...(await applyText(d, row, live, rowCtx)), title: rowCtx.title };
+  const r = await pk.withLock(d, rowCtx.pack, () => applyText(d, row, live, rowCtx));
+  if (!r.ran) return { error: "the bulk offer is busy — text retried next pass" };
+  return { ...r.value, title: rowCtx.title };
+}
+
 // Live offers of a group, read one by one. Map<externalId, offer|null>.
 async function readOffers(d, group, out, label) {
   const live = new Map();
@@ -364,10 +396,12 @@ async function readOffers(d, group, out, label) {
 
 // Advertise what the row's (new) set really has. A failure is the next stock
 // sync's to fix, 15 minutes away.
-async function syncQuantity(d, rowId, ext, live) {
+async function syncQuantity(d, rowId, ext, live, pack) {
   try {
     const moved = await d.MarketplaceListing.findById(rowId).lean();
-    const stock = await d.ncs.stockForListing(moved);
+    // A pack row advertises whole packs; fewer accounts than one pack is the
+    // stock sync's to pause, as an empty shelf is.
+    const stock = pk.quantityFor(d, pack, await d.ncs.stockForListing(moved));
     if (stock > 0 && live && live.offerState === "Active") {
       if (Number(live.quantity) !== stock) await d.mp.eldoradoSetQuantity(ext, stock);
       await d.MarketplaceListing.updateOne({ _id: rowId }, { $set: { qtyTarget: stock } });
@@ -398,11 +432,24 @@ async function growPass(opts = {}) {
       status: "active",
     }).lean();
     const bySet = new Map();
+    const packs = new Map(); // row id -> { offer, n } for live no-claim pack rows
     for (const r of rows || []) {
       if (rowSkipReason(r)) continue;
+      if (pk.isPackRow(r)) {
+        let p;
+        try {
+          p = await pk.packFor(d, r);
+        } catch (e) {
+          p = { skip: e.message };
+        }
+        if (p.skip) continue; // not a live no-claim pack: left exactly as it is
+        packs.set(String(r._id), p);
+      }
       const k = String(r.set);
       (bySet.get(k) || bySet.set(k, []).get(k)).push(r);
     }
+    const isPack = (r) => packs.has(String(r._id));
+    const packCopies = new Map();
 
     // Biggest bundle first: when two sets of a game could grow into the same
     // thing, the bigger one takes it and the smaller stays what it is.
@@ -414,7 +461,10 @@ async function growPass(opts = {}) {
     groups.sort((a, b) => totalCopies(b.set && b.set.items) - totalCopies(a.set && a.set.items));
     const selling = new Map(); // setId -> { game, sig } of every on-sale set
     for (const g of groups) {
-      if (g.set) selling.set(g.setId, { game: setGame(g.set), sig: itemsSignature(g.set.items) });
+      // A set only a pack sells is not a competing single offer.
+      if (g.set && g.group.some((r) => !isPack(r))) {
+        selling.set(g.setId, { game: setGame(g.set), sig: itemsSignature(g.set.items) });
+      }
     }
 
     let base = null;
@@ -453,8 +503,8 @@ async function growPass(opts = {}) {
           rowsLeft--;
           const ext = str(row.externalId);
           const ctx = { ...copy, set, now, note: str(row.note).replace(" — " + TEXT_PENDING, "") };
-          const r = await applyText(d, row, live.get(ext), ctx);
-          if (r.done) out.repaired.push({ externalId: ext, to: copy.title, set: setId });
+          const r = await textFor(d, row, live.get(ext), ctx, packs, game, packCopies);
+          if (r.done) out.repaired.push({ externalId: ext, to: r.title, set: setId });
           if (!r.done || r.warn) {
             out.errors.push({ set: setId, label, externalId: ext, error: r.error || r.warn || "unknown" });
           }
@@ -497,7 +547,9 @@ async function growPass(opts = {}) {
       const twin = [...selling.entries()].find(
         ([id, s]) => id !== setId && s.sig === sig && sameGame(s.game, game),
       );
-      if (twin) {
+      // A pack joining the set its single offers already moved to is the point,
+      // not a duplicate: only single offers are kept apart.
+      if (twin && group.some((r) => !isPack(r))) {
         skip("another offer already sells the bigger bundle (" + addedLabel(pick.added) + " more) — left as it is");
         continue;
       }
@@ -519,7 +571,7 @@ async function growPass(opts = {}) {
         out.plan.push({
           set: setId,
           game,
-          offers: group.map((r) => ({ externalId: str(r.externalId), price: r.price, title: r.title })),
+          offers: group.map((r) => ({ externalId: str(r.externalId), price: r.price, title: r.title, pack: isPack(r) })),
           from: bundleLabel(set.items),
           added: addedLabel(pick.added),
           to: title,
@@ -580,7 +632,7 @@ async function growPass(opts = {}) {
           });
         }
       }
-      if (moved.length) selling.set(setId, { game, sig });
+      if (moved.some((r) => !isPack(r))) selling.set(setId, { game, sig });
 
       for (const row of moved) {
         const ext = str(row.externalId);
@@ -589,7 +641,7 @@ async function growPass(opts = {}) {
           out.errors.push({ set: setId, label, externalId: ext, error: "offer unreadable — text retried next pass" });
           continue;
         }
-        const r = await applyText(d, row, offer, ctx);
+        const r = await textFor(d, row, offer, ctx, packs, game, packCopies);
         if (!r.done || r.warn) {
           out.errors.push({ set: setId, label, externalId: ext, error: r.error || r.warn || "unknown" });
         }
@@ -599,7 +651,7 @@ async function growPass(opts = {}) {
           price: row.price,
           from: bundleLabel(set.items),
           added: addedLabel(pick.added),
-          to: ctx.title,
+          to: r.title,
           set: String(ctx.set._id),
           newSet: ctx.created,
           covering: pick.covering,
@@ -610,7 +662,7 @@ async function growPass(opts = {}) {
       // Quantities last: the share of the shelf depends on every row having moved.
       for (const row of moved) {
         const ext = str(row.externalId);
-        const stock = await syncQuantity(d, row._id, ext, live.get(ext));
+        const stock = await syncQuantity(d, row._id, ext, live.get(ext), packs.get(String(row._id)));
         const g = out.grown.find((x) => x.externalId === ext);
         if (!g) continue;
         g.stock = stock;
@@ -624,7 +676,7 @@ async function growPass(opts = {}) {
             game,
             count: stock == null ? 0 : stock,
             detail:
-              "Eldorado offer updated to the bigger bundle the accounts hold now: " + ctx.title +
+              "Eldorado offer updated to the bigger bundle the accounts hold now: " + g.to +
               " ($" + row.price + ") — added " + addedLabel(pick.added),
             meta: { fromSet: setId, toSet: String(ctx.set._id), newSet: ctx.created },
           });

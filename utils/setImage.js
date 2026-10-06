@@ -955,7 +955,9 @@ async function buildBulkCoverImage(set, opts) {
   try {
     const label = packLabel(opts);
     if (!label || !set || typeof set !== "object") return "";
-    gridFile = await buildSetGridImage(set);
+    // opts.showTotal: see buildSetGridImage — the "N ITEMS" band then sits
+    // between the pack band and the tiles.
+    gridFile = await buildSetGridImage(set, { showTotal: !!(opts && opts.showTotal) });
     if (!gridFile) return "";
     let grid = await sharp(gridFile).png().toBuffer();
     const meta = await sharp(grid).metadata();

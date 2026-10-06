@@ -180,7 +180,6 @@ test("rowSkipReason: only what the stock sync paused, and not the instant it pau
   assert.strictEqual(rot.rowSkipReason(pausedRow(), NOW), "");
   assert.match(rot.rowSkipReason(pausedRow({ autoPaused: false }), NOW), /not paused by the stock sync/);
   assert.match(rot.rowSkipReason(pausedRow({ lastError: "paused: bulk offer held" }), NOW), /another reason/);
-  assert.match(rot.rowSkipReason(pausedRow({ bulkOfferId: "b1" }), NOW), /bulk pack/);
   assert.match(rot.rowSkipReason(pausedRow({ status: "delisted" }), NOW), /row is delisted/);
   assert.match(rot.rowSkipReason(pausedRow({ marketplace: "playerauctions" }), NOW), /not an Eldorado/);
   assert.match(rot.rowSkipReason(pausedRow({ updatedAt: new Date(NOW - 10 * 60 * 1000) }), NOW), /under 30 min/);
@@ -479,4 +478,50 @@ test("a skip is logged once, not on every 15-minute pass", async () => {
   const second = await rot.rotationPass({ deps: fakeDeps({ rows }).d, now: NOW + 15 * 60 * 1000 });
   assert.ok(first.log.length >= 1);
   assert.deepStrictEqual(second.log, []);
+});
+
+test("a live no-claim pack on the stale set rotates with it: pack title, quantity in whole packs", async () => {
+  const offers = new Map([["b1", { _id: "b1", source: "noclaim", state: "live", open: true, minQty: 5, discountPct: 5 }]]);
+  const pack = {
+    BulkOffer: {
+      findById: (id) => ({ lean: async () => ({ ...offers.get(String(id)) }) }),
+      updateOne: async (q, u) => Object.assign(offers.get(String(q._id)), u.$set),
+    },
+    copy: require("../utils/bulkPacks/copy"),
+    packMath: require("../utils/bulkPacks/packMath"),
+    lock: { tryWithOfferLock: async (_id, fn) => ({ ran: true, value: await fn() }) },
+    buildPackCover: async () => "/tmp/pack-cover-test.png",
+  };
+  const rows = [
+    pausedRow(),
+    pausedRow({
+      _id: "rowP",
+      externalId: "pack-offer-1",
+      price: 8.5,
+      units: [],
+      bulkOfferId: "b1",
+      bulkPackSize: 5,
+      title: "Rainbow Six Siege Twitch Drops (9 Items) — PACK OF 5 ACCOUNTS (-5%)",
+    }),
+  ];
+  const f = fakeDeps({ rows });
+  f.d.pack = pack;
+  const out = await rot.rotationPass({ deps: f.d, now: NOW });
+  assert.strictEqual(out.rotated.length, 2, JSON.stringify(out));
+  const p = f.rows.get("rowP");
+  assert.strictEqual(String(p.set), String(f.rows.get("row1").set));
+  assert.match(p.title, /8 Items.*— PACK OF 5 ACCOUNTS \(-5%\)$/);
+  assert.strictEqual(p.price, 8.5);
+  assert.strictEqual(p.qtyTarget, 8, "41 free accounts = 8 whole packs of 5");
+  assert.strictEqual(f.offers.get("pack-offer-1").quantity, 8);
+  assert.strictEqual(f.offers.get("pack-offer-1").offerState, "Active");
+  assert.strictEqual(String(offers.get("b1").set), String(p.set));
+  assert.ok(!/PACK OF/.test(f.rows.get("row1").title));
+});
+
+test("a bulk row that is not a live no-claim pack is never rotated", async () => {
+  const f = fakeDeps({ rows: [pausedRow({ bulkOfferId: "b1" })] });
+  const out = await rot.rotationPass({ deps: f.d, now: NOW });
+  assert.strictEqual(out.rotated.length, 0);
+  assert.deepStrictEqual(f.calls, []);
 });
