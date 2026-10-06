@@ -1620,6 +1620,15 @@ async function rotateNoclaimOffers() {
   } catch (e) {
     console.error("noclaim offer rotation error:", e.message);
   }
+  // An offer still on sale whose accounts now hold MORE than it advertises is
+  // updated to the bigger bundle — same offer, same price, never paused
+  // (utils/noclaimOfferGrow, owner rule 2026-10-06). Own kill switch.
+  try {
+    const r = await require("./noclaimOfferGrow").growPass();
+    for (const line of (r && r.log) || []) console.log("noclaim offer grow: " + line);
+  } catch (e) {
+    console.error("noclaim offer grow error:", e.message);
+  }
 }
 
 // The intake-failure watch (utils/intakeWatch) must never break a delivery

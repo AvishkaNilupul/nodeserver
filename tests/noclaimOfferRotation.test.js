@@ -357,13 +357,35 @@ test("a stale selling offer is rewritten while paused, then moved, then resumed 
   assert.ok(out.log.some((l) => /rotated eldorado c847f2c2/.test(l)));
 });
 
-test("contention is not staleness: accounts still covering the bundle leave it alone", async () => {
-  const f = fakeDeps({ stock: () => ({ free: 0, covering: 25 }) });
+test("contention is not staleness: a free account that still holds the bundle leaves it alone", async () => {
+  for (const stock of [{ free: 3, covering: 25 }, { free: 0, stale: 4, covering: 25 }]) {
+    const f = fakeDeps({ stock: () => stock });
+    const out = await rot.rotationPass({ deps: f.d, now: NOW });
+    assert.strictEqual(out.rotated.length, 0);
+    assert.strictEqual(out.stale, 0);
+    assert.deepStrictEqual(marketWrites(f.calls), []);
+    assert.ok(!kinds(f.calls).includes("read"));
+  }
+});
+
+test("contention is not staleness: every account that could sell is taken, so there is no bundle to move to", async () => {
+  const holdings = r6Holdings().map((h) => ({ ...h, free: false }));
+  const f = fakeDeps({ holdings, stock: () => ({ free: 0, covering: 25 }) });
   const out = await rot.rotationPass({ deps: f.d, now: NOW });
   assert.strictEqual(out.rotated.length, 0);
-  assert.strictEqual(out.stale, 0);
   assert.deepStrictEqual(marketWrites(f.calls), []);
-  assert.ok(!kinds(f.calls).includes("read"));
+  assert.match(out.skipped[0].why, /only 0 free account/);
+});
+
+test("a bundle only sold or reserved accounts still hold is stale: the free farm moved on", async () => {
+  // An offer grown to a bigger bundle ends here when the extra drops expire.
+  const f = fakeDeps({
+    stock: (set) => (String(set._id) === "oldset" ? { free: 0, stale: 0, covering: 25 } : { free: 41, covering: 73 }),
+  });
+  const out = await rot.rotationPass({ deps: f.d, now: NOW });
+  assert.strictEqual(out.rotated.length, 1, JSON.stringify(out));
+  assert.strictEqual(out.stale, 1);
+  assert.strictEqual(f.offers.get(f.rows.get("row1").externalId).offerState, "Active");
 });
 
 test("an offer with no sale in 7 days stays paused (R6's two offers dead since 09-22)", async () => {

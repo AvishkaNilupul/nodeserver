@@ -19,9 +19,9 @@
 //
 //   - Only rows the stock sync paused (autoPaused + its exact error). A pause
 //     the owner made (autoPaused:false) is never touched.
-//   - Only when NO account holds the old bundle any more (covering 0). Zero
-//     free stock while accounts still cover it is contention, and a new bundle
-//     cannot fix that.
+//   - Only when no FREE account holds the old bundle any more, and the free
+//     farm holds a different one. Free accounts all sold or reserved is
+//     contention, and a new bundle cannot fix that.
 //   - Only offers that delivered an order in the last 7 days: an offer that has
 //     been dead for a week is not brought back at an old price.
 //   - Never while a paid order waits on the offer.
@@ -303,7 +303,10 @@ function setGameNorms(set) {
 // or another offer's) is reused, so a retried or parallel rotation never mints
 // a second copy; otherwise a new one is made with the fields
 // POST /noclaim-stock/sets writes.
-async function targetSet(d, items, { game, price, fromSet, now }) {
+//
+// `tag` and `note` let the grow pass (utils/noclaimOfferGrow) make its sets
+// through the same door; left out, they read as a rotation's.
+async function targetSet(d, items, { game, price, fromSet, now, tag, note }) {
   const sig = itemsSignature(items);
   const recent = await d.DropSet.find(
     { stockSource: "noclaim", createdAt: { $gte: new Date(now - REUSE_SET_MS) } },
@@ -318,10 +321,11 @@ async function targetSet(d, items, { game, price, fromSet, now }) {
     }
   }
   const doc = await d.DropSet.create({
-    name: (game + " — " + bundleLabel(items) + " · Eldorado (auto-rotated)").slice(0, 200),
+    name: (game + " — " + bundleLabel(items) + " · Eldorado (" + (tag || "auto-rotated") + ")").slice(0, 200),
     note:
+      note ||
       "Made " + new Date(now).toISOString().slice(0, 10) + " by the no-claim offer rotation: set " +
-      String(fromSet._id) + " (" + bundleLabel(fromSet.items) + ") had expired off every account.",
+        String(fromSet._id) + " (" + bundleLabel(fromSet.items) + ") had expired off every account.",
     price: Number(price) > 0 ? Number(price) : 0,
     items: items.map((i) => ({ itemKey: i.itemKey, name: i.name, game: i.game, image: i.image, qty: i.qty })),
     stockSource: "noclaim",
@@ -439,10 +443,17 @@ async function rotationPass(opts = {}) {
         continue;
       }
       const st = await d.ncs.stockForSet(set);
-      if (st.covering > 0) {
-        // Accounts still hold it: the sync resumes it when one frees up.
+      if (st.free > 0 || st.stale > 0) {
+        // A free account still holds it (or did at its last read): the sync
+        // resumes the offer by itself.
         continue;
       }
+      // No free account holds the bundle any more. When accounts that are NOT
+      // free still do (sold, or on another listing), this used to be left as
+      // contention for good — but an offer grown to a bigger bundle
+      // (utils/noclaimOfferGrow) lands exactly here when the extra drops
+      // expire. The picker below settles it: fewer than MIN_ACCOUNTS free
+      // accounts, or the same bundle again, is real contention and is skipped.
       out.stale++;
       const lastSale = Math.max(0, ...group.map(lastDeliveredAt));
       if (now - lastSale > RECENT_SALE_MS) {
@@ -656,4 +667,11 @@ module.exports = {
   rotationPass,
   rotateRow,
   status,
+  // shared with utils/noclaimOfferGrow
+  keyOfItem,
+  copiesOf,
+  setGame,
+  setGameNorms,
+  targetSet,
+  realDeps,
 };
