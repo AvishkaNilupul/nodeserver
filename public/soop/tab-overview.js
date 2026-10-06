@@ -160,7 +160,7 @@
   function render(root) {
     first = ui.empty("No accounts yet", "Import your SOOP account cookies and the farm can start earning drops.",
       { label: "Import accounts", tone: "primary", icon: "upload", onClick: () => Soop.go("accounts", { import: "1" }) });
-    st = { earning: ui.stat("Earning now", "–"), waiting: ui.stat("Waiting", "–"), dead: ui.stat("Logged out", "–"),
+    st = { earning: ui.stat("Earning now", "–"), waiting: ui.stat("Sleeping", "–"), dead: ui.stat("Logged out", "–"),
       bots: ui.stat("Active bots", "–"), egress: ui.stat("SOOP sees us in", "–"), scan: ui.stat("Campaign list", "–") };
 
     alertCount = ui.badge("0");
@@ -203,7 +203,7 @@
     const farming = accounts.filter((a) => a.session && a.session.state === "farming");
     const unsure = farming.filter((a) => a.session.credited !== true).length, usable = t.ok || 0;
     stat(st.earning, fmt.num(farming.length - unsure), "of " + plural(usable, "usable account") + (unsure ? ", " + fmt.num(unsure) + " not confirmed yet" : ""), farming.length - unsure ? "ok" : null);
-    stat(st.waiting, fmt.num(t.waiting || 0), t.idle ? plural(t.idle, "account") + " not in any bot" : "Every usable account is in a bot", null);
+    stat(st.waiting, fmt.num((t.sleeping || 0) + (t.waiting || 0)), t.idle ? plural(t.idle, "account") + " not in any bot" : (t.sleeping ? "Asleep until there is something to farm" : "Every usable account is in a bot"), null);
     stat(st.dead, fmt.num(t.dead || 0), t.dead ? "Re-import the cookie" : "All signed in", t.dead ? "error" : null);
     stat(st.bots, fmt.num(t.botsActive || 0), "of " + plural(t.bots || 0, "bot"), null);
     if (eg.proxied && !eg.ready) stat(st.egress, "Proxy down", "Nothing reaches SOOP", "error");

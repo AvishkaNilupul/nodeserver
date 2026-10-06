@@ -4,6 +4,14 @@
 const SoopAccount = require("../../models/SoopAccount");
 const SoopFarmTask = require("../../models/SoopFarmTask");
 const { canFarm } = require("./farmViews");
+const { goalOf } = require("../soopWorker");
+
+// How often the watcher re-reads the campaign list while bots are asleep.
+const WATCH_SOON_MS = 60000; // a campaign starts within 15 minutes
+const WATCH_ACTIVE_MS = 120000; // a campaign is inside its window, or something is farming
+const WATCH_IDLE_MS = 600000; // nothing can go live soon
+const SOON_MS = 15 * 60000;
+const time = (d) => (d ? new Date(d).getTime() : null);
 
 const MODES = new Set(["campaign", "game", "auto"]);
 const TARGETS = new Set(["all", "first"]);
@@ -62,27 +70,116 @@ module.exports = {
     return out;
   },
 
-  // Starts every account that should be running and is not: after a restart,
-  // a cookie re-import, an un-sold, or a session that ended on a passing error.
-  async _reconcile() {
+  // Sleep / wake, the SOOP version of the Twitch farm's park-when-farmed: an
+  // account only has a session while there is something it can earn. The rest
+  // of the time nothing runs for it and nothing is held in memory; this watcher
+  // re-reads the campaign list on a slow, adaptive schedule and starts exactly
+  // the accounts that have work. Also covers a restart, a cookie re-import, an
+  // un-sold, and a session that ended on a passing error.
+  async _reconcile({ force = false } = {}) {
     const active = [...this.bots.values()].filter((b) => b.active);
-    if (active.length) {
-      const accounts = new Map((await this._accounts({ fresh: true })).map((a) => [a.loginId, a]));
-      for (const bot of active) {
-        const done = new Set(bot.doneIds);
-        for (const id of bot.accountIds) {
-          const a = accounts.get(id);
-          if (a && canFarm(a) && !done.has(id) && !this.sessions.has(id)) {
-            this._startSession(id, bot);
-          }
-        }
-        await this._maybeFinish(bot);
-      }
-    }
+    if (active.length && (force || this.clock.now() >= this.nextWatchAt)) await this._wake(active);
     this.invTotals = await this.inventory
       .summary()
       .then((s) => s.totals)
       .catch(() => this.invTotals);
+  },
+
+  async _wake(active) {
+    const now = this.clock.now();
+    const accounts = new Map((await this._accounts({ fresh: true })).map((a) => [a.loginId, a]));
+    const list = await this.listCampaigns().catch(() => null);
+    let next = WATCH_IDLE_MS;
+    for (const bot of active) {
+      const cands = list ? await this._candidates(bot, list) : null;
+      const done = new Set(bot.doneIds);
+      for (const id of bot.accountIds) {
+        const a = accounts.get(id);
+        if (!a || !canFarm(a) || done.has(id) || this.sessions.has(id)) continue;
+        if (!cands) {
+          this._sleep(id, { detail: "Cannot read the campaign list right now — will try again" });
+          continue;
+        }
+        const v = this._verdict(bot, id, cands, now);
+        const z = this.sleep.get(id);
+        if (v.done) await this._accountDone(bot, id, v.done, v.detail);
+        else if (v.go && !(z && z.coolUntil > now)) this._startSession(id, bot);
+        else this._sleep(id, v);
+      }
+      if (cands) next = Math.min(next, this._cadence(cands, now));
+      await this._maybeFinish(bot);
+    }
+    if (!list) next = WATCH_ACTIVE_MS;
+    if (this.sessions.size) next = Math.min(next, WATCH_ACTIVE_MS);
+    this.nextWatchAt = now + (this.timings.watchMs ?? next);
+  },
+
+  // The campaigns a bot would farm, live or not.
+  async _candidates(bot, list) {
+    if (bot.mode === "campaign") {
+      const key = String(bot.dropsIdx);
+      const hit = list.find((c) => String(c.dropsIdx) === key) || (await this.store.get(key));
+      return hit ? [hit] : [];
+    }
+    return list.filter(
+      (c) =>
+        c.guaranteed &&
+        (c.steps || []).length > 0 &&
+        (!bot.codesOnly || !c.needsLink) &&
+        (bot.mode === "auto" || String(c.gameNo) === String(bot.gameNo)),
+    );
+  },
+
+  // What one account should do now: { go } start farming · { done } it is
+  // finished with this bot · otherwise sleep, with the reason to show.
+  _verdict(bot, id, cands, now) {
+    const prog = this.progress.get(id) || {};
+    const reached = (c) => {
+      const p = prog[String(c.dropsIdx)];
+      const goal = goalOf(c, bot.target);
+      return !!(p && (p.done || (goal != null && (Number(p.max) || 0) >= goal)));
+    };
+    const ref = (c) => ({ dropsIdx: c.dropsIdx, title: c.title, goal: goalOf(c, bot.target) });
+    const open = cands.filter((c) => !(time(c.endAt) && time(c.endAt) < now));
+    if (bot.mode === "campaign") {
+      if (!cands.length) return { detail: `Campaign ${bot.dropsIdx} is not listed by SOOP yet` };
+      if (reached(cands[0])) return { done: "finished" };
+      if (!open.length) return { done: "ended", detail: "The campaign ended before the goal was reached" };
+    }
+    if (!open.length) return { detail: "Nothing to farm right now — sleeping until a campaign appears" };
+    const todo = open.filter((c) => !reached(c));
+    if (!todo.length) return { ...ref(open[0]), detail: "Everything is farmed — sleeping until the next campaign" };
+    // A campaign that left SOOP's list has no trustworthy live flag: try it.
+    const live = todo.filter((c) => c.live || c.filter === "unlisted");
+    if (live.length) return { go: true, ...ref(live[0]), detail: "Starting" };
+    const first = todo.slice().sort((a, b) => (time(a.startAt) || 0) - (time(b.startAt) || 0))[0];
+    const later = time(first.startAt) && time(first.startAt) > now;
+    return {
+      ...ref(first),
+      detail: later ? "Campaign has not started yet" : "Campaign is not live right now — sleeping until the next broadcast",
+    };
+  },
+
+  // Look often only when something can actually go live soon.
+  _cadence(cands, now) {
+    let ms = WATCH_IDLE_MS;
+    for (const c of cands) {
+      const start = time(c.startAt);
+      const end = time(c.endAt);
+      if (end && end < now) continue;
+      if (start && start > now) {
+        if (start - now <= SOON_MS) ms = Math.min(ms, WATCH_SOON_MS);
+      } else {
+        ms = Math.min(ms, WATCH_ACTIVE_MS);
+      }
+    }
+    return ms;
+  },
+
+  _sleep(id, v) {
+    const z = this.sleep.get(id) || { at: new Date(this.clock.now()), coolUntil: 0 };
+    this.sleep.set(id, { ...z, detail: v.detail, dropsIdx: v.dropsIdx || null, title: v.title || null, goal: v.goal ?? null });
+    this._primeOnce(id);
   },
 
   async _accountDone(bot, id, reason, detail) {
@@ -144,7 +241,7 @@ module.exports = {
     const bot = fromDoc(doc.toObject());
     this.bots.set(bot.id, bot);
     this.activity.add({ kind: "bot", botId: bot.id, msg: `Bot "${bot.name}" started with ${ids.length} account(s)` });
-    await this._reconcile();
+    await this._reconcile({ force: true });
     return { ok: true, bot: await this._viewBot(bot) };
   },
 
@@ -175,7 +272,7 @@ module.exports = {
     // A longer target can un-finish accounts that had reached the first step.
     if (retarget) set.doneIds = [];
     if (Object.keys(set).length) await this._saveBot(bot, set);
-    if (bot.active) await this._reconcile();
+    if (bot.active) await this._reconcile({ force: true });
     return { ok: true, bot: await this._viewBot(bot) };
   },
 
@@ -203,7 +300,7 @@ module.exports = {
     }
     await this._saveBot(bot, { active: true, endedAt: null, startedAt: new Date() });
     this.activity.add({ kind: "bot", botId: bot.id, msg: `Bot "${bot.name}" resumed` });
-    await this._reconcile();
+    await this._reconcile({ force: true });
     return { ok: true };
   },
 

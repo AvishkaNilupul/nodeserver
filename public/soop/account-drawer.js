@@ -8,7 +8,7 @@
   const DEAD = "not_logged_in", DAY = 864e5, STALE_MS = 3 * DAY, SOON_MS = 3 * DAY;
   const STATUS = { ok: ["ok", "Ready"], not_logged_in: ["error", "Logged out — re-import its cookie"],
     drops_rejected: ["warn", "Drops site rejected the session"], untested: [null, "Not checked yet"] };
-  const SESSION = { starting: ["info", "Joining"], waiting: [null, "Waiting"], backoff: ["warn", "Not earning"], stopping: [null, "Stopping"], error: ["error", "Error"] };
+  const SESSION = { starting: ["info", "Joining"], waiting: [null, "Waiting"], sleeping: [null, "Sleeping"], backoff: ["warn", "Not earning"], stopping: [null, "Stopping"], error: ["error", "Error"] };
   const GROUPS = [["available", "Available — not claimed yet"], ["acquired", "Claimed"], ["expired", "Expired"]];
   const KIND = { code: "Code", link: "Link", ingame: "In-game item" };
   const LEVEL = { error: "error", warn: "warn" };

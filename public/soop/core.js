@@ -269,8 +269,9 @@
     else if (errs) { tone = "error"; lead = "Needs attention"; }
     else if (warns) { tone = "warn"; lead = "Check alerts"; }
     else if (t.farming > 0) { tone = "ok"; lead = "Farming"; }
-    bits.push(fmt.num(t.farming || 0) + " of " + fmt.num(t.accounts || 0) + " accounts farming" + (t.waiting ? ", " + fmt.num(t.waiting) + " waiting" : ""));
-    bits.push(fmt.num(t.botsActive || 0) + (t.botsActive === 1 ? " bot" : " bots") + " running");
+    else if (t.sleeping > 0) { lead = "Sleeping — nothing to farm right now"; }
+    bits.push(fmt.num(t.farming || 0) + " of " + fmt.num(t.accounts || 0) + " accounts farming" + (t.waiting ? ", " + fmt.num(t.waiting) + " waiting" : "") + (t.sleeping ? ", " + fmt.num(t.sleeping) + " sleeping" : ""));
+    bits.push(fmt.num(t.botsActive || 0) + (t.botsActive === 1 ? " bot" : " bots") + " on");
     if (t.dead) bits.push(fmt.num(t.dead) + " logged out");
     if (eg.country) bits.push("from " + eg.country + (eg.credited === "no" ? " (not credited)" : ""));
     if (errs + warns) bits.push(errs + warns + (errs + warns === 1 ? " alert" : " alerts"));

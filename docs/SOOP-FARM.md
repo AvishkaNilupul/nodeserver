@@ -131,6 +131,37 @@ until someone uses "Fix translation" on the campaign (stored in
 `SoopTranslation`); a game can be renamed the same way (`SoopGame`). The
 original text is always kept and shown on request.
 
+## Sleep and wake
+
+The SOOP version of the Twitch farm's park-when-farmed. An account has a session
+only while there is something it can earn:
+
+- **Sleep** — a session that finds nothing to farm for two looks in a row ends
+  itself. Nothing then runs for that account and nothing is kept in memory for
+  it (no timer, no socket, no client). An account whose bot has nothing live is
+  never started in the first place.
+- **Wake** — one watcher for the whole farm (`_wake` in `utils/soop/farmBots.js`)
+  re-reads the campaign list and starts exactly the accounts that have work:
+  every 2 minutes while a campaign a bot wants is inside its window or anything
+  is farming, every minute in the 15 minutes before a scheduled start, every 10
+  minutes otherwise. v1 and early v2 re-read the list every minute, all day.
+- **Stop when farmed** — an account that has reached its goal on every live
+  campaign is not woken. A pinned-campaign bot finishes; a game or "everything"
+  bot sleeps until the next campaign.
+- **No flapping** — an account that went to sleep on a campaign SOOP still lists
+  as live (no channel on air), or on a delisted one whose state cannot be known,
+  is not retried for 3 minutes.
+- A sleeping account's mission counters are read once per boot, so the panel
+  shows what it already has and finished accounts are not woken for nothing.
+
+A sleeping SOOP account is not a stopped container as on Twitch — a waiting one
+was only ever a timer in the site's process — so the RAM saved is small. What
+sleeping saves is the round-the-clock polling of SOOP through the Pi.
+
+The panel shows a sleeping bot and its accounts as "Sleeping", with the reason.
+It also no longer waits on SOOP to open: it shows the remembered campaigns at
+once and refreshes a list older than 5 minutes in the background.
+
 ## Claiming a reward
 
 SOOP only issues a reward's code when it is claimed, and the inventory list
@@ -215,6 +246,11 @@ branch next time.
 `routes/soopRoutes.js`, `models/SoopInventoryItem.js`, `public/soop/tab-inventory.js`;
 backup `_deploy_backup_20261006011230_soop-claim`; pm2 restart 16 at 01:15:31Z
 (0 unstable).
+
+**02:02 UTC — sleep and wake**: `utils/soopWorker.js`, `utils/soopFarm.js`,
+`utils/soop/farmBots.js`, `utils/soop/farmViews.js` and five files under
+`public/soop/`; backup `_deploy_backup_20261006020150_soop-sleep-wake`; pm2
+restart 17 at 02:02:37Z (0 unstable).
 
 Seen against real SOOP right after the deploy:
 

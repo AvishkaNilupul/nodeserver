@@ -17,7 +17,7 @@ const { createInventoryService } = require("./soop/inventory");
 const { createHealthService } = require("./soop/health");
 const { createMetrics } = require("./soop/metrics");
 const { isAuthError, plainMessage } = require("./soop/errors");
-const { runSession, sleep } = require("./soopWorker");
+const { runSession, sleep, goalOf, channelMemo } = require("./soopWorker");
 const { encrypt, decrypt } = require("./secretBox");
 const views = require("./soop/farmViews");
 
@@ -28,6 +28,15 @@ const IMPORT_PACE_MS = 1500;
 const INVENTORY_AFTER_STEP_MS = 90000;
 const BOOT_SWEEP_MS = 120000;
 const SCAN_FAIL_COOLDOWN_MS = 30000;
+// Sleep / wake (see _wake in ./soop/farmBots.js). A session that finds nothing
+// to farm for this many looks ends itself; the watcher starts it again.
+const PARK_AFTER_IDLE = 2;
+// After sleeping on a campaign SOOP still lists as live (no channel on air, or
+// a delisted one whose state cannot be known), wait this long before retrying.
+const PARK_COOLDOWN_MS = 180000;
+// The panel refreshes the campaign list in the background once it is this old.
+const PAGE_SCAN_MS = 300000;
+const PRIME_PACE_MS = 3000;
 
 class SoopFarm {
   constructor() {
@@ -50,6 +59,10 @@ class SoopFarm {
     this.accountsCache = null;
     this.scanCursor = 0;
     this.scanFailure = null;
+    this.sleep = new Map(); // loginId -> { at, detail, dropsIdx, title, goal, coolUntil }
+    this.primed = new Set(); // accounts whose mission counters were read once this boot
+    this.primeChain = Promise.resolve();
+    this.nextWatchAt = 0;
     this.timers = [];
     this.invTimers = new Map();
     this.store = createCampaignStore(opts.store || {});
@@ -97,7 +110,7 @@ class SoopFarm {
       this.checkAccounts([]).catch((err) => console.error("[soop] boot health sweep failed:", err.message));
     }, BOOT_SWEEP_MS);
     if (this.bootTimer.unref) this.bootTimer.unref();
-    await this._reconcile();
+    await this._reconcile({ force: true });
     const active = [...this.bots.values()].filter((b) => b.active).length;
     console.log(`[soop] farm service ready (${active} active bot(s))`);
   }
@@ -111,6 +124,7 @@ class SoopFarm {
     this.metrics.stop();
     this.health.stop();
     this.activity.stop();
+    channelMemo.clear();
     this._build(opts);
   }
 
@@ -164,7 +178,7 @@ class SoopFarm {
       }
     }
     this.accountsCache = null;
-    await this._reconcile();
+    await this._reconcile({ force: true });
     return results;
   }
 
@@ -220,7 +234,7 @@ class SoopFarm {
       await this._stopSession(id);
       this.activity.add({ kind: "account", accountId: id, msg: `${id} marked sold — farming stopped` });
     } else if (set.sold === false) {
-      await this._reconcile();
+      await this._reconcile({ force: true });
     }
     return true;
   }
@@ -327,8 +341,16 @@ class SoopFarm {
   async campaignsView({ force = false } = {}) {
     // A failed scan is reported through `scan`, next to whatever is remembered;
     // a farm with no account yet simply has nothing to list.
+    // The panel never waits on SOOP when something is already remembered: it
+    // gets that at once, and a stale list is refreshed in the background.
     let failure = null;
-    await this.listCampaigns(force).catch((e) => (failure = e));
+    const last = this.store.lastScan();
+    const age = last && last.at ? this.clock.now() - new Date(last.at).getTime() : Infinity;
+    if (force || !this.store.all().length) {
+      await this.listCampaigns(force).catch((e) => (failure = e));
+    } else if (age > PAGE_SCAN_MS) {
+      this.listCampaigns().catch(() => {});
+    }
     const all = this.store.all();
     const botIds = new Map();
     for (const bot of this.bots.values()) {
@@ -378,6 +400,7 @@ class SoopFarm {
       },
     };
     this.sessions.set(id, s);
+    this.sleep.delete(id);
     s.promise = this._run(s, bot).catch((err) => {
       console.error("[soop] session crashed:", id, err.message);
       if (this.sessions.get(id) === s) this.sessions.delete(id);
@@ -399,7 +422,7 @@ class SoopFarm {
         onEvent: (ev) => this._onEvent(s, ev),
         signal: s.ctrl.signal,
         clock: this.clock,
-        timings: this.timings,
+        timings: { parkAfterIdle: PARK_AFTER_IDLE, ...this.timings },
       });
     } catch (e) {
       out = { reason: "error", detail: e.message };
@@ -407,8 +430,11 @@ class SoopFarm {
     // Only the session that still owns the slot may clear it: a stopped session
     // that finishes late must not remove the one started after it (v1 bug).
     if (this.sessions.get(s.id) === s) this.sessions.delete(s.id);
-    await this._flushProgress().catch(() => {});
     const detail = out.detail || s.endDetail || "";
+    // Recorded before anything is awaited, so a wake that lands right after the
+    // session ends cannot be overwritten by its sleep note.
+    if (out.reason === "idle" && !this.sessions.has(s.id)) this._parked(s, detail);
+    await this._flushProgress().catch(() => {});
     if (out.reason === "auth") {
       await this._markDead(s.id, detail);
     } else if (out.reason === "finished" || out.reason === "ended") {
@@ -416,6 +442,46 @@ class SoopFarm {
     } else if (out.reason === "error") {
       this.activity.add({ level: "error", kind: "session", accountId: s.id, botId: bot.id, msg: `${s.id} stopped on an error: ${detail}` });
     }
+  }
+
+  // Nothing to farm: the session is gone and so is everything held for the
+  // account. The watcher (_wake) starts a new one when something goes live.
+  _parked(s, detail) {
+    const v = s.view;
+    const camp = v.dropsIdx ? this.store.all().find((c) => String(c.dropsIdx) === String(v.dropsIdx)) : null;
+    const hold = camp && (camp.live || camp.filter === "unlisted");
+    const cool = hold ? this.timings.parkCooldownMs ?? PARK_COOLDOWN_MS : 0;
+    this.sleep.set(s.id, {
+      at: new Date(this.clock.now()),
+      detail: detail || "Nothing to farm right now",
+      dropsIdx: v.dropsIdx,
+      title: v.title,
+      goal: v.goal,
+      coolUntil: this.clock.now() + cool,
+    });
+    if (!this.sessions.has(s.id)) this.clients.delete(s.id);
+    this.activity.add({ kind: "session", accountId: s.id, botId: s.botId, dropsIdx: v.dropsIdx, msg: `${s.id} went to sleep: ${detail || "nothing to farm"}` });
+  }
+
+  // One read of a sleeping account's mission counters per boot, so the panel
+  // shows what it already has and finished accounts are not woken for nothing.
+  _primeOnce(id) {
+    if (this.primed.has(id)) return;
+    this.primed.add(id);
+    this.primeChain = this.primeChain.then(async () => {
+      try {
+        const api = this._progressApi(id);
+        for (const m of await (await this.ensureClient(id)).missions()) {
+          const prev = api.get(m.dropsIdx) || {};
+          const minutes = Number(m.minutes) || 0;
+          api.set(m.dropsIdx, { minutes, max: Math.max(Number(prev.max) || 0, minutes) });
+        }
+      } catch (e) {
+        if (isAuthError(e)) this.health.check(id).catch(() => {});
+      }
+      if (!this.sessions.has(id)) this.clients.delete(id);
+      await this.clock.sleep(this.timings.primePaceMs ?? PRIME_PACE_MS);
+    });
   }
 
   _onEvent(s, ev) {
@@ -486,13 +552,16 @@ class SoopFarm {
   // ---- state for the panel ------------------------------------------------
 
   _viewCtx(accounts) {
-    const titles = new Map(this.store.all().map((c) => [String(c.dropsIdx), c.title]));
+    const all = this.store.all();
+    const camps = new Map(all.map((c) => [String(c.dropsIdx), c]));
+    const titles = new Map(all.map((c) => [String(c.dropsIdx), c.title]));
     const games = new Map(this.store.games().map((g) => [String(g.gameNo), g.name]));
     return {
       sessions: this.sessions,
       accountsById: new Map(accounts.map((a) => [a.loginId, a])),
       progress: this.progress,
       campaignTitle: (d) => titles.get(String(d)) || null,
+      campaignGoal: (d, target) => (camps.has(String(d)) ? goalOf(camps.get(String(d)), target) : null),
       gameName: (g) => games.get(String(g)) || "Game #" + g,
     };
   }
@@ -518,10 +587,16 @@ class SoopFarm {
       now: new Date(this.clock.now()).toISOString(),
       started: this.started,
       egress,
-      totals: views.totalsView(accounts, this.sessions, bots),
-      accounts: accounts.map((a) =>
-        views.accountView(a, { session: this.sessions.get(a.loginId), botId: botOf(a.loginId) }),
-      ),
+      totals: views.totalsView(accounts, this.sessions, bots, (id) => !!botOf(id)),
+      accounts: accounts.map((a) => {
+        const z = this.sleep.get(a.loginId);
+        return views.accountView(a, {
+          session: this.sessions.get(a.loginId),
+          botId: botOf(a.loginId),
+          sleep: z || { detail: "Sleeping — checking what there is to farm" },
+          minutes: z ? this._minutesOn(a.loginId, z.dropsIdx) : 0,
+        });
+      }),
       bots,
       alerts: views.alertsView({ egress, accounts, sessions: this.sessions, scan, inventoryTotals: this.invTotals, now: this.clock.now() }),
       scan,

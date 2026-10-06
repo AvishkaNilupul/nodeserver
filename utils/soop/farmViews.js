@@ -23,7 +23,25 @@ function sessionView(s) {
   };
 }
 
-function accountView(a, { session, botId }) {
+// An account in an active bot with no session is asleep: nothing runs for it
+// until the watcher sees something to farm. Shown as a session-shaped row so
+// the panel needs no special case.
+function sleepView(z, minutes) {
+  return {
+    state: "sleeping",
+    detail: z.detail || "Sleeping — nothing to farm right now",
+    dropsIdx: z.dropsIdx || null,
+    title: z.title || null,
+    channel: null,
+    minutes: minutes || 0,
+    goal: z.goal ?? null,
+    since: z.at || null,
+    lastEventAt: null,
+    credited: null,
+  };
+}
+
+function accountView(a, { session, botId, sleep, minutes }) {
   return {
     id: a.loginId,
     nick: a.nickname || null,
@@ -36,7 +54,7 @@ function accountView(a, { session, botId }) {
     cookieAt: a.cookieAt || a.createdAt || null,
     lastCheckedAt: a.lastCheckedAt || null,
     botId: botId || null,
-    session: sessionView(session),
+    session: sessionView(session) || (botId && sleep && canFarm(a) ? sleepView(sleep, minutes) : null),
   };
 }
 
@@ -58,18 +76,24 @@ function botView(bot, ctx) {
       minutes.sum += Math.min(Number(mine.view.minutes) || 0, mine.view.goal);
       minutes.goalSum += mine.view.goal;
     } else if (bot.mode === "campaign" && bot.dropsIdx) {
+      // A sleeping account's progress may have been read without its goal.
       const p = (ctx.progress.get(id) || {})[String(bot.dropsIdx)];
-      if (p && p.goal != null) {
-        minutes.sum += Math.min(Number(p.max) || 0, p.goal);
-        minutes.goalSum += p.goal;
+      const goal = (p && p.goal) ?? (ctx.campaignGoal ? ctx.campaignGoal(bot.dropsIdx, bot.target) : null);
+      if (goal != null) {
+        minutes.sum += Math.min(Number(p && p.max) || 0, goal);
+        minutes.goalSum += goal;
       }
     }
   }
   let state;
   if (!bot.active) {
     state = counts.total > 0 && counts.done >= counts.total ? "finished" : "stopped";
+  } else if (counts.farming > 0) {
+    state = "running";
   } else {
-    state = counts.farming > 0 ? "running" : "waiting";
+    // No session at all for its accounts: the bot is asleep, costing nothing.
+    const awake = bot.accountIds.some((id) => ctx.sessions.has(id) && ctx.sessions.get(id).botId === bot.id);
+    state = awake ? "waiting" : "sleeping";
   }
   return {
     id: bot.id,
@@ -153,15 +177,17 @@ function alertsView({ egress, accounts, sessions, scan, inventoryTotals, now }) 
   return out.sort((a, b) => rank[a.level] - rank[b.level]);
 }
 
-function totalsView(accounts, sessions, bots) {
-  const t = { accounts: accounts.length, ok: 0, dead: 0, sold: 0, farming: 0, waiting: 0, idle: 0, bots: bots.length, botsActive: 0 };
+function totalsView(accounts, sessions, bots, inBot = () => false) {
+  const t = { accounts: accounts.length, ok: 0, dead: 0, sold: 0, farming: 0, waiting: 0, sleeping: 0, idle: 0, bots: bots.length, botsActive: 0 };
   for (const a of accounts) {
     if (a.sold) t.sold++;
     else if (a.status === DEAD) t.dead++;
     else t.ok++;
     const s = sessions.get(a.loginId);
     if (!s) {
-      if (canFarm(a)) t.idle++;
+      if (!canFarm(a)) continue;
+      if (inBot(a.loginId)) t.sleeping++;
+      else t.idle++;
     } else if (s.view.state === "farming") t.farming++;
     else t.waiting++;
   }
@@ -169,4 +195,4 @@ function totalsView(accounts, sessions, bots) {
   return t;
 }
 
-module.exports = { canFarm, sessionView, accountView, botView, egressView, alertsView, totalsView, DEAD };
+module.exports = { canFarm, sessionView, sleepView, accountView, botView, egressView, alertsView, totalsView, DEAD };

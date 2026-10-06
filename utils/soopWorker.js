@@ -15,6 +15,9 @@ const DEFAULT_TIMINGS = {
   flatPolls: 3, // polls with no new minute before "not crediting"
   backoffMs: [120000, 300000, 600000, 900000],
   readFailures: 5, // unreadable counters in a row before rejoining
+  // Idle looks in a row before the session ends with reason "idle" so the farm
+  // can put the account to sleep. Infinity keeps the session waiting instead.
+  parkAfterIdle: Infinity,
 };
 
 // Resolves after `ms`, or immediately once `signal` aborts.
@@ -77,7 +80,9 @@ async function pickChannel(client, camp, now) {
 //   campaigns(): shared list of listed, normalised campaigns
 //   resolveCampaign(dropsIdx): a campaign that left the list, or null
 //   progress: { get(dropsIdx) -> { max, done } | null, set(dropsIdx, patch) }
-// Resolves with { reason: "stopped" | "finished" | "ended" | "auth" | "error" }.
+// Resolves with { reason: "stopped" | "finished" | "ended" | "auth" | "error" | "idle" }.
+// "idle": nothing to farm for `parkAfterIdle` looks in a row — the farm's
+// watcher starts a new session when something goes live.
 async function runSession(opts) {
   const {
     id,
@@ -284,6 +289,8 @@ async function runSession(opts) {
 
   let backoff = 0;
   let primed = false;
+  let idle = 0;
+  const park = () => ++idle >= T.parkAfterIdle;
   while (!stopped()) {
     let client;
     try {
@@ -313,6 +320,7 @@ async function runSession(opts) {
           : "Could not read the campaign list — retrying",
         error: e.message,
       });
+      if (park()) return end("idle", "Could not read the campaign list");
       await wait(T.idleMs);
       continue;
     }
@@ -328,6 +336,7 @@ async function runSession(opts) {
         goal: pick.camp ? goalOf(pick.camp, plan.target) : null,
         startAt: pick.startAt || null,
       });
+      if (park()) return end("idle", pick.wait);
       await wait(T.idleMs);
       continue;
     }
@@ -336,6 +345,7 @@ async function runSession(opts) {
     const out = await farm(client, camp, channel);
     if (stopped()) break;
     if (out.auth) return end("auth", out.auth);
+    if (out.done || out.notCrediting) idle = 0; // it got as far as watching
     if (out.done) {
       backoff = 0;
       emit({ k: "campaign-done", dropsIdx: camp.dropsIdx, title: camp.title, minutes: out.minutes, goal: out.goal });
@@ -361,10 +371,12 @@ async function runSession(opts) {
     }
     if (out.egress) {
       emit({ k: "state", state: "waiting", detail: "Egress problem — " + out.egress, ...ref, error: out.egress });
+      if (park()) return end("idle", "Egress problem — " + out.egress);
       await wait(T.idleMs);
       continue;
     }
     emit({ k: "state", state: "waiting", detail: "Rejoining — " + out.retry, ...ref });
+    if (park()) return end("idle", "The stream went off air");
     await wait(T.retryMs);
   }
   return end("stopped");

@@ -13,8 +13,8 @@
   const post = (path, body, done) => Soop.api.post(path, body).then((j) => { if (done) Soop.toast(done, "ok"); return Soop.refresh().then(() => j); });
 
   // ---------- Words ----------------------------------------------------------
-  const BOT = { running: ["Running", "ok"], waiting: ["Waiting", "info"], stopped: ["Stopped", null], finished: ["Finished", "ok"] };
-  const SESSION = { starting: ["Joining", "info"], waiting: ["Waiting", null], backoff: ["Not earning", "warn"], stopping: ["Stopping", null], error: ["Error", "error"] };
+  const BOT = { running: ["Running", "ok"], waiting: ["Waiting", "info"], sleeping: ["Sleeping", null], stopped: ["Stopped", null], finished: ["Finished", "ok"] };
+  const SESSION = { starting: ["Joining", "info"], waiting: ["Waiting", null], sleeping: ["Sleeping", null], backoff: ["Not earning", "warn"], stopping: ["Stopping", null], error: ["Error", "error"] };
   const targetWords = (t) => (t === "first" ? "first step only" : "all steps");
   function farms(bot) {
     if (bot.mode === "campaign") return "Campaign: " + (bot.title || "#" + bot.dropsIdx);
@@ -34,7 +34,7 @@
         minutes: s.goal != null ? fmt.mins(s.minutes) + " of " + fmt.mins(s.goal) : "", channel: s.channel ? "on " + s.channel : "" };
     }
     if (!bot.active) return { label: "Stopped", tone: null, detail: "Not farming while the bot is stopped" };
-    return { label: "Waiting", tone: null, detail: "Starting shortly" };
+    return { label: "Sleeping", tone: null, detail: "Asleep — wakes when there is something to farm" };
   }
   function sentence(bot) {
     const c = bot.counts, ended = bot.endedAt ? " " + fmt.ago(bot.endedAt) : "";

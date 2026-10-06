@@ -57,7 +57,7 @@
   const DEAD = "not_logged_in", STALE_MS = 3 * 864e5;
   const STATUS = { ok: ["ok", "Ready"], not_logged_in: ["error", "Logged out — re-import its cookie"],
     drops_rejected: ["warn", "Drops site rejected the session"], untested: [null, "Not checked yet"] };
-  const SESSION = { starting: ["info", "Joining"], waiting: [null, "Waiting"], backoff: ["warn", "Not earning"], stopping: [null, "Stopping"], error: ["error", "Error"] };
+  const SESSION = { starting: ["info", "Joining"], waiting: [null, "Waiting"], sleeping: [null, "Sleeping"], backoff: ["warn", "Not earning"], stopping: [null, "Stopping"], error: ["error", "Error"] };
   const FROM_LINK = { ok: "ok", dead: "dead", sold: "sold", idle: "idle" };      // Soop.go("accounts", { status })
   const plural = (n, word) => fmt.num(n) + " " + word + (n === 1 ? "" : "s");
   const statusOf = (a) => (a.sold ? [null, "Sold"] : STATUS[a.status] || [null, "Not checked yet"]);

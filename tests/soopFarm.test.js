@@ -13,7 +13,7 @@ const SoopFarmTask = require("../models/SoopFarmTask");
 const farm = require("../utils/soopFarm");
 const { createFakeSoop } = require("./helpers/soopFake");
 
-const FAST = { pollMs: 20, idleMs: 20, retryMs: 20, joinWaitMs: 300, flatPolls: 3, backoffMs: [40], readFailures: 3 };
+const FAST = { pollMs: 20, idleMs: 20, retryMs: 20, joinWaitMs: 300, flatPolls: 3, backoffMs: [40], readFailures: 3, primePaceMs: 1, parkCooldownMs: 60 };
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 async function until(fn, label, ms = 4000) {
@@ -180,22 +180,67 @@ test("joined but not credited backs off, says so, and frees the socket", async (
   assert.ok(Date.now() - t0 < 1000, "a 30 s back-off is interrupted by stop");
 });
 
-test("idle sessions share one campaign scan instead of each scanning", async () => {
-  await fresh({ ttlMs: 5000 });
-  const camp = world.addCampaign({ live: false, itemList: [60] });
-  for (const id of ["a1", "a2", "a3", "a4", "a5"]) await addAccount(id);
+test("a bot with nothing live sleeps — no sessions, no sockets, no polling — and wakes when its campaign goes live", async () => {
+  await fresh();
+  const camp = world.addCampaign({ live: false, itemList: [60], broadIdList: ["ow1"] });
+  const ids = ["a1", "a2", "a3", "a4", "a5"];
+  for (const id of ids) await addAccount(id);
   await farm.campaignsView({ force: true });
-  const before = world.calls().campaignsAll;
-  await farm.createBot({ mode: "campaign", dropsIdx: camp.dropsIdx, accountIds: ["a1", "a2", "a3", "a4", "a5"] });
-  await sleep(300); // ~15 idle loops per account
-  assert.ok(world.calls().campaignsAll - before <= 1, "at most one scan inside the cache window");
-  assert.equal(farm.sessions.size, 5);
-  const acc = (await farm.stateView()).accounts[0];
-  assert.equal(acc.session.state, "waiting");
-  assert.match(acc.session.detail, /not live/);
+  const { bot } = await farm.createBot({ mode: "campaign", dropsIdx: camp.dropsIdx, accountIds: ids });
+  await sleep(120);
+
+  assert.equal(farm.sessions.size, 0, "nothing runs for a sleeping bot");
+  assert.equal(world.bridges().length, 0);
+  assert.equal(farm.clients.size, 0, "nothing is held in memory for its accounts");
+  let state = await farm.stateView();
+  assert.equal(state.totals.sleeping, 5);
+  assert.equal(state.accounts[0].session.state, "sleeping");
+  assert.match(state.accounts[0].session.detail, /not live/);
+  assert.equal(state.accounts[0].session.goal, 60);
+  assert.equal((await botState(bot.id)).state, "sleeping");
+
+  const before = world.calls();
+  await sleep(300); // v1 would have polled SOOP ~15 times per account in this window
+  const after = world.calls();
+  assert.equal(after.campaignsAll, before.campaignsAll, "a sleeping bot does not poll the campaign list");
+  assert.equal(after.liveInfo, before.liveInfo);
+  assert.equal(after.openBridge, 0);
+
+  world.setLive(camp.dropsIdx, true); // the broadcast starts
+  world.setOnAir("ow1", true);
+  await farm._reconcile({ force: true }); // the watcher's next look
+  await until(() => world.bridges().length === 5, "all five accounts woke and joined");
+  state = await farm.stateView();
+  assert.equal(state.totals.sleeping, 0);
+  await until(async () => (await botState(bot.id)).state === "running", "bot shown as running");
 });
 
-test("a game bot farms each campaign of its game in turn and keeps waiting", async () => {
+test("live but no channel on air: the account sleeps and is not restarted during the cool-down", async () => {
+  await fresh({ timings: { ...FAST, parkCooldownMs: 60000 } });
+  const camp = world.addCampaign({ live: true, itemList: [60], broadIdList: ["quiet"] });
+  world.setOnAir("quiet", false);
+  await addAccount("acc1");
+  await farm.campaignsView({ force: true });
+  await farm.createBot({ mode: "campaign", dropsIdx: camp.dropsIdx, accountIds: ["acc1"] });
+  await until(() => !farm.sessions.has("acc1") && farm.sleep.has("acc1") && farm.sleep.get("acc1").coolUntil > Date.now(), "asleep with a cool-down");
+  const acc = (await farm.stateView()).accounts[0];
+  assert.equal(acc.session.state, "sleeping");
+  assert.match(acc.session.detail, /no channel is on air/);
+
+  const probes = world.calls().liveInfo;
+  for (let i = 0; i < 3; i++) await farm._reconcile({ force: true });
+  await sleep(80);
+  assert.equal(farm.sessions.has("acc1"), false, "not woken again while cooling down");
+  assert.equal(world.calls().liveInfo, probes, "and SOOP is not probed again");
+
+  farm.sleep.get("acc1").coolUntil = 0; // the cool-down passes and a streamer comes online
+  require("../utils/soopWorker").channelMemo.clear(); // (the "nobody is live" note lasts 90 s)
+  world.setOnAir("quiet", true);
+  await farm._reconcile({ force: true });
+  await until(() => bridgesOf("acc1").length === 1, "woken and farming");
+});
+
+test("a game bot farms each campaign of its game in turn, then sleeps until the next one", async () => {
   await fresh();
   const first = world.addCampaign({ gameNo: "12", live: true, itemList: [2], broadIdList: ["ow1"] });
   const second = world.addCampaign({ gameNo: "12", live: false, itemList: [2], broadIdList: ["ow2"] });
@@ -208,8 +253,11 @@ test("a game bot farms each campaign of its game in turn and keeps waiting", asy
   const seen = new Set();
   const note = () => world.bridges().forEach((b) => seen.add(b.channel));
   await watch(() => (note(), (farm.progress.get("acc1") || {})[first.dropsIdx]?.done), "first campaign done");
+  await until(() => !farm.sessions.has("acc1"), "asleep after the first campaign");
   world.setLive(second.dropsIdx, true);
   world.setOnAir("ow2", true);
+  await sleep(30); // let the 15 ms campaign cache of this test expire
+  await farm._reconcile({ force: true });
   await watch(() => (note(), (farm.progress.get("acc1") || {})[second.dropsIdx]?.done), "second campaign done");
   await sleep(100);
 
@@ -217,14 +265,20 @@ test("a game bot farms each campaign of its game in turn and keeps waiting", asy
   assert.ok(!seen.has("er1"), "another game's campaign is never joined");
   const view = await botState(bot.id);
   assert.equal(view.active, true, "a game bot does not finish on its own");
-  assert.equal(view.state, "waiting");
-  assert.ok(farm.sessions.has("acc1"), "still waiting for the next campaign");
+  await until(() => !farm.sessions.has("acc1"), "asleep again once everything is farmed");
+  assert.equal((await botState(bot.id)).state, "sleeping");
   assert.equal(world.bridges().length, 0);
+  const opened = world.calls().openBridge;
+  await farm._reconcile({ force: true }); // both campaigns are still live, but farmed
+  await sleep(100);
+  assert.equal(farm.sessions.has("acc1"), false, "a finished account is not woken for campaigns it has farmed");
+  assert.equal(world.calls().openBridge, opened);
+  assert.match((await farm.stateView()).accounts[0].session.detail, /everything is farmed/i);
 });
 
 test("accounts cannot be double-booked, and sold or logged-out accounts are refused", async () => {
   await fresh();
-  const camp = world.addCampaign({ live: false, itemList: [60] });
+  const camp = world.addCampaign({ live: true, itemList: [60] });
   for (const id of ["acc1", "acc2", "acc3"]) await addAccount(id);
   await farm.campaignsView({ force: true });
   const first = await farm.createBot({ mode: "campaign", dropsIdx: camp.dropsIdx, accountIds: ["acc1"] });
@@ -273,7 +327,7 @@ test("bots and their progress survive a process restart", async () => {
   assert.ok((farm.progress.get("acc1") || {})[camp.dropsIdx].max >= 3, "progress reloaded");
 });
 
-test("a waiting account shows the minutes it already has, even with no saved progress", async () => {
+test("a sleeping account shows the minutes it already has, even with no saved progress", async () => {
   await fresh();
   const camp = world.addCampaign({ live: true, itemList: [50], broadIdList: ["ch1"] });
   await addAccount("acc1");
@@ -288,15 +342,18 @@ test("a waiting account shows the minutes it already has, even with no saved pro
   farm.setClientFactory(world.clientFor);
   farm.timings = FAST;
   farm.autoInventory = false;
+  const readsBefore = world.calls().missions;
   await farm.start();
 
-  const s = await until(() => {
-    const x = farm.sessions.get("acc1");
-    return x && x.view.state === "waiting" && x.view.dropsIdx ? x : null;
-  }, "waiting on the campaign");
-  assert.ok(s.view.minutes >= 4, "minutes read from SOOP at start, got " + s.view.minutes);
-  assert.equal(s.view.goal, 50);
-  assert.equal(world.bridges().length, 0, "no socket while nothing is live");
+  const acc = await until(async () => {
+    const x = (await farm.stateView()).accounts[0];
+    return x.session && x.session.state === "sleeping" && x.session.minutes >= 4 ? x : null;
+  }, "asleep, showing the minutes read from SOOP");
+  assert.equal(acc.session.goal, 50);
+  assert.equal(farm.sessions.size, 0, "no session while nothing is live");
+  assert.equal(world.bridges().length, 0, "and no socket");
+  await sleep(150);
+  assert.ok(world.calls().missions - readsBefore <= 2, "one progress read at start, not a poll");
   const view = await botState(bot.id);
   assert.ok(view.minutes.sum >= 4, "the bot's progress bar counts them too");
 });
