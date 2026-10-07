@@ -89,7 +89,7 @@ module.exports = {
   async _wake(active) {
     const now = this.clock.now();
     const accounts = new Map((await this._accounts({ fresh: true })).map((a) => [a.loginId, a]));
-    const list = await this.listCampaigns().catch(() => null);
+    const list = await this.farmable().catch(() => null);
     let next = WATCH_IDLE_MS;
     for (const bot of active) {
       const cands = list ? await this._candidates(bot, list) : null;
@@ -152,7 +152,9 @@ module.exports = {
     if (!todo.length) return { ...ref(open[0]), detail: "Everything is farmed — sleeping until the next campaign" };
     // A campaign that left SOOP's list has no trustworthy live flag: try it.
     const rank = (c) => (bot.priorityGameNo && String(c.gameNo) === String(bot.priorityGameNo) ? 0 : 1);
-    const live = todo.filter((c) => c.live || c.filter === "unlisted").sort((a, b) => rank(a) - rank(b));
+    // Listed-and-live before delisted (whose state is only a guess), then the priority game.
+    const guess = (c) => (c.filter === "unlisted" ? 1 : 0);
+    const live = todo.filter((c) => c.live || c.filter === "unlisted").sort((a, b) => guess(a) - guess(b) || rank(a) - rank(b));
     if (live.length) return { go: true, ...ref(live[0]), detail: "Starting" };
     const first = todo.slice().sort((a, b) => (time(a.startAt) || 0) - (time(b.startAt) || 0))[0];
     const later = time(first.startAt) && time(first.startAt) > now;

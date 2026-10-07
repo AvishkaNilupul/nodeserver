@@ -72,7 +72,7 @@ const GLOSSARY = [
   ["키캡", "Keycap"], ["키링", "Keyring"], ["메탈 뱃지", "Metal Badge"], ["인형", "Plush"], ["젤펜", "Gel Pen"],
   ["짐색", "Gym Sack"], ["클리커", "Clicker"], ["스마트폰 마이크", "Smartphone Mic"], ["선풍기", "Fan"],
   ["로고 모자", "Logo Cap"], ["티셔츠", "T-shirt"], ["이모티콘", "Emoticon"], ["스킨", "Skin"],
-  ["아이콘", "Icon"], ["챔피언스", "Champions"], ["상하이", "Shanghai"], ["신캐", "New Character"], ["연구소", "Lab"], ["플레이어", "Player"], ["선수", "Player"], ["팀", "Team"], ["스프레이", "Spray"], ["탈 것", "Mount"], ["카드", "Card"], ["티켓", "Ticket"],
+  ["아이콘", "Icon"], ["도깨비의 세계", "Dokkaebi World"], ["런칭", "Launch"], ["가호 주머니", "Blessing Pouch"], ["챔피언스", "Champions"], ["상하이", "Shanghai"], ["신캐", "New Character"], ["연구소", "Lab"], ["플레이어", "Player"], ["선수", "Player"], ["팀", "Team"], ["스프레이", "Spray"], ["탈 것", "Mount"], ["카드", "Card"], ["티켓", "Ticket"],
   ["응모권", "Raffle Ticket"], ["추첨", "Raffle"], ["보물", "Treasure"], ["행운의", "Lucky"],
   ["스타 드롭", "Star Drop"], ["웰치스", "Welch's"], ["온사이드", "Onside"], ["로켓", "Rocket"],
   // in-game reward names (Wuthering Waves, Delta Force, Heroes of the Storm)
@@ -138,6 +138,7 @@ const GLOSSARY = [
 const GAMES = {
   "4": { name: "League of Legends", kind: "game" }, "6": { name: "Teamfight Tactics", kind: "game" },
   "8": { name: "PUBG", kind: "game" }, "10": { name: "StarCraft", kind: "game" },
+  "429": { name: "Dokkaebi World", kind: "game" },
   "12": { name: "Overwatch", kind: "game" }, "14": { name: "VALORANT", kind: "game" },
   "16": { name: "StarCraft II", kind: "game" }, "18": { name: "Eternal Return", kind: "game" },
   "26": { name: "THE FINALS", kind: "game" }, "28": { name: "Variety Games", kind: "game" },

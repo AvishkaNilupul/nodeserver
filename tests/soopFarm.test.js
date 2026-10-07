@@ -308,6 +308,32 @@ test("an everything bot farms other games but drops them for the priority game t
   assert.equal((await botState(bot.id)).priorityGameName, "Overwatch");
 });
 
+test("an everything bot still farms a campaign SOOP dropped from its list, but only inside its window", async () => {
+  await fresh();
+  const kstStr = (ms) => new Date(ms + 9 * 3600e3).toISOString().replace("T", " ").slice(0, 19);
+  const gone = world.addCampaign({ gameNo: "200", live: false, itemList: [2], broadIdList: ["df1"] });
+  const over = world.addCampaign({ gameNo: "200", live: false, itemList: [2], broadIdList: ["old1"], endDate: kstStr(Date.now() - 3600e3) });
+  await addAccount("acc1");
+  await farm.campaignsView({ force: true }); // both are remembered while still listed
+  world.delist(gone.dropsIdx); // SOOP drops them from the list before the broadcast
+  world.delist(over.dropsIdx);
+  await farm.createBot({ mode: "auto", codesOnly: true, accountIds: ["acc1"] });
+  await sleep(150);
+  assert.equal(world.bridges().length, 0, "nothing on air yet");
+
+  world.setLive(gone.dropsIdx, true); // the broadcast starts; the campaign stays delisted
+  world.setOnAir("df1", true);
+  world.setOnAir("old1", true);
+  require("../utils/soopWorker").channelMemo.clear();
+  farm.sleep.forEach((z) => { z.coolUntil = 0; });
+  await sleep(30);
+  await farm._reconcile({ force: true });
+  await watch(() => (farm.progress.get("acc1") || {})[gone.dropsIdx]?.done, "the delisted campaign was farmed");
+  await sleep(120);
+  assert.ok(!world.bridges().some((b) => b.channel === "old1"), "a delisted campaign past its end is never tried");
+  assert.equal(world.calls().openBridge, 1);
+});
+
 test("accounts cannot be double-booked, and sold or logged-out accounts are refused", async () => {
   await fresh();
   const camp = world.addCampaign({ live: true, itemList: [60] });

@@ -162,6 +162,18 @@ The panel shows a sleeping bot and its accounts as "Sleeping", with the reason.
 It also no longer waits on SOOP to open: it shows the remembered campaigns at
 once and refreshes a list older than 5 minutes in the background.
 
+## Delisted campaigns
+
+SOOP drops campaigns from its list before and during broadcasts: on 2026-10-07
+Delta Force Rise Series Day 1 vanished from the list 17 hours before its start.
+Every kind of bot therefore also considers remembered campaigns that SOOP no
+longer lists, **while their window is open** (`farmable()` in `utils/soopFarm.js`,
+from two minutes before the start until the end). A delisted campaign has no
+live flag, so the worker simply tries its channels; listed-and-live campaigns
+are always preferred over one whose state is a guess, and the 3-minute
+cool-down keeps a delisted campaign with nobody on air from being probed
+constantly. Until this fix only a bot pinned to one campaign did this.
+
 ## Priority game
 
 An "everything guaranteed" bot can name one game that always wins
@@ -274,6 +286,11 @@ restart 17 at 02:02:37Z (0 unstable).
 `models/SoopFarmTask.js`, `public/soop/bots-wizard.js`, `public/soop/tab-bots.js`;
 backup `_deploy_backup_20261006023001_soop-priority-game`; pm2 restart 18 at
 02:30:30Z (0 unstable).
+
+**2026-10-07 17:27 UTC — delisted campaigns for every bot**: `utils/soopFarm.js`,
+`utils/soop/farmBots.js`, `utils/soopWorker.js`, `utils/soop/i18n.js`; backup
+`_deploy_backup_20261007172325_soop-delisted-campaigns`; pm2 restart 24 at
+17:27:07Z (0 unstable).
 
 Seen against real SOOP right after the deploy:
 

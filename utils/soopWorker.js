@@ -161,6 +161,8 @@ async function runSession(opts) {
       .filter((c) => c.live || c.filter === "unlisted")
       .sort(
         (a, b) =>
+          // listed-and-live first: a delisted campaign's state is only a guess
+          (a.filter === "unlisted" ? 1 : 0) - (b.filter === "unlisted" ? 1 : 0) ||
           rank(a) - rank(b) ||
           (a.endAt ? new Date(a.endAt).getTime() : Infinity) -
             (b.endAt ? new Date(b.endAt).getTime() : Infinity),

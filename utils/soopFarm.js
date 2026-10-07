@@ -338,6 +338,23 @@ class SoopFarm {
     }
   }
 
+  // What a bot may farm: everything SOOP lists now, plus remembered campaigns
+  // it has dropped from its list while their window is open. SOOP delists
+  // events before and during broadcasts (Delta Force Day 1 vanished from the
+  // list 17 hours before its start on 2026-10-08), and a bot that only read the
+  // current list would sleep through them. A delisted campaign has no live
+  // flag, so the worker simply tries its channels.
+  async farmable() {
+    await this.listCampaigns();
+    const now = this.clock.now();
+    const open = (c) => {
+      const start = c.startAt ? new Date(c.startAt).getTime() : null;
+      const end = c.endAt ? new Date(c.endAt).getTime() : null;
+      return start != null && end != null && start - 120000 <= now && now <= end;
+    };
+    return this.store.all().filter((c) => c.filter !== "unlisted" || open(c));
+  }
+
   async campaignsView({ force = false } = {}) {
     // A failed scan is reported through `scan`, next to whatever is remembered;
     // a farm with no account yet simply has nothing to list.
@@ -416,7 +433,7 @@ class SoopFarm {
         id: s.id,
         getClient: () => this.clients.get(s.id),
         plan: { mode: bot.mode, dropsIdx: bot.dropsIdx, gameNo: bot.gameNo, target: bot.target, codesOnly: bot.codesOnly, priorityGameNo: bot.priorityGameNo },
-        campaigns: () => this.listCampaigns(),
+        campaigns: () => this.farmable(),
         resolveCampaign: (d) => this.store.get(d),
         progress: this._progressApi(s.id),
         onEvent: (ev) => this._onEvent(s, ev),
