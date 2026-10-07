@@ -75,7 +75,7 @@ test("the 6-item Overwatch offer grows to the 11 the accounts hold — prod's 20
   assert.ok(p.items, p.reason);
   assert.strictEqual(p.pool, 366, "every free + fresh account holding Overwatch drops");
   assert.strictEqual(p.current, 274, "the ones that hold the current 6: the offer's stock");
-  assert.strictEqual(p.minCover, 183, "half the free farm, the rotation's own bar");
+  assert.strictEqual(p.minCover, 220, "four in five of the offer's own accounts");
   assert.strictEqual(p.covering, 271);
   assert.deepStrictEqual(p.added, [{ itemKey: CP, name: "100 Comp Points", from: 0, to: 5 }]);
   assert.strictEqual(p.items.reduce((n, i) => n + i.qty, 0), 11);
@@ -100,38 +100,53 @@ test("nothing more on the accounts is no bundle", () => {
   assert.match(p.reason, /nothing more/);
 });
 
-test("an extra item fewer than half of the offer's accounts hold is not added", () => {
+test("an extra item fewer than four in five of the offer's accounts hold is not added", () => {
   const holdings = [];
   for (let i = 0; i < 30; i++) holdings.push(holding([...owcsItems()]));
-  for (let i = 0; i < 14; i++) holdings[i].items.push(comp());
+  for (let i = 0; i < 23; i++) holdings[i].items.push(comp());
   assert.strictEqual(pick(owcsItems(), holdings).items, null);
-  holdings[14].items.push(comp());
+  holdings[23].items.push(comp());
   const p = pick(owcsItems(), holdings);
-  assert.ok(p.items, "15 of 30 is half");
-  assert.strictEqual(p.covering, 15);
+  assert.ok(p.items, "24 of 30 is four in five");
+  assert.strictEqual(p.covering, 24);
 });
 
-test("it stops at what half the free farm holds — the stock never halves pass after pass", () => {
+test("accounts that do not hold the offer's bundle never block it — prod's 2026-10-07 case", () => {
+  // ~270 accounts held 6 OWCS + 5 Comp Points + the new season's 6 drops (17);
+  // ~490 new accounts held the new season's drops only. Under the old bar (half
+  // of the whole free farm) the offers stayed at "12 Items".
+  const s5 = (n) => ["Heroes of Heart Avatar", "Heroes of Heart Spray", "Hollow Hearts Avatar", "Hollow Hearts Spray", "RoT Lootbox", "RoT Epic Lootbox"].slice(0, n).map((x) => item(x, 1, "Reign of Talon S5 Launch"));
+  const live = rot.campaignRecency([...CAMPAIGNS, { name: "Reign of Talon S5 Launch", status: "ACTIVE", active: true, endAt: new Date(NOW + 20 * 24 * HOUR) }], NOW);
+  const holdings = [];
+  for (let i = 0; i < 250; i++) holdings.push(holding([...owcsItems(), comp(), ...s5(6)]));
+  for (let i = 0; i < 20; i++) holdings.push(holding([...owcsItems(), comp(), ...s5(5)]));
+  for (let i = 0; i < 490; i++) holdings.push(holding([...s5(6)]));
+  const current = [...owcsItems(), comp(), ...s5(1)];
+  const p = pick(current, holdings, live);
+  assert.ok(p.items, p.reason);
+  assert.strictEqual(p.pool, 760);
+  assert.strictEqual(p.current, 270);
+  assert.strictEqual(p.items.reduce((n, i) => n + i.qty, 0), 17);
+  assert.strictEqual(p.covering, 250, "the 20 one drop short wait; nobody else was ever this offer's stock");
+});
+
+test("a step keeps at least four fifths of the stock, so it cannot halve pass after pass", () => {
   const live = rot.campaignRecency([{ name: "Reign of Talon S4: Drives", status: "ACTIVE", active: true, endAt: new Date(NOW + 48 * HOUR) }], NOW);
   const holdings = [];
-  for (let i = 0; i < 20; i++) holdings.push(holding([comp(12)]));
-  for (let i = 0; i < 30; i++) holdings.push(holding([comp(11)]));
+  for (let i = 0; i < 50; i++) holdings.push(holding([comp(12)]));
   for (let i = 0; i < 40; i++) holdings.push(holding([comp(6)]));
-  const first = pick([comp(6)], holdings, live);
-  assert.deepStrictEqual(first.items.map((i) => i.qty), [11], "50 of 90 hold 11");
-  assert.strictEqual(first.covering, 50);
-  const second = pick(first.items, holdings, live);
-  assert.strictEqual(second.items, null, "12 is held by 20 of 90: under half, so it stays at 11");
-  // A bundle that is already a minority's is never narrowed further.
-  const third = pick([comp(12)], holdings, live);
-  assert.strictEqual(third.items, null);
-  assert.match(third.reason, /held by 20 of the 90 free accounts/);
+  assert.strictEqual(pick([comp(6)], holdings, live).items, null, "12 is held by 50 of 90: not four in five, so it stays");
+  for (let i = 0; i < 25; i++) holdings[50 + i].items = [comp(9)];
+  const p = pick([comp(6)], holdings, live);
+  assert.deepStrictEqual(p.items.map((i) => i.qty), [9], "75 of 90 hold 9 or more");
+  assert.strictEqual(p.covering, 75);
+  assert.strictEqual(pick(p.items, holdings, live).items, null, "12 is held by 50 of those 75");
 });
 
 test("more copies of an item the offer already sells raise its count", () => {
   const holdings = [];
-  for (let i = 0; i < 24; i++) holdings.push(holding([comp(9)]));
-  for (let i = 0; i < 12; i++) holdings.push(holding([comp(6)]));
+  for (let i = 0; i < 30; i++) holdings.push(holding([comp(9)]));
+  for (let i = 0; i < 6; i++) holdings.push(holding([comp(6)]));
   const live = rot.campaignRecency([{ name: "Reign of Talon S4: Drives", status: "ACTIVE", active: true, endAt: new Date(NOW + 48 * HOUR) }], NOW);
   const p = pick([comp(6)], holdings, live);
   assert.ok(p.items, p.reason);

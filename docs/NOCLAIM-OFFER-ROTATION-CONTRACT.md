@@ -129,11 +129,15 @@ these rows: it reads Eldorado rows by `unclaimedGame`, retired 2026-09-28.
 
 ## The picker (pure)
 
-- Pool = the rotation's pool: free + fresh holdings with any drop of the game.
-  Fewer than 10 → nothing. `minCover = max(10, ceil(pool / 2))`.
-- Holders = pool accounts that hold the whole current bundle. Fewer than
-  `minCover` → nothing (a bundle already held by under half the free farm is
-  never narrowed further — without this the stock would halve on every pass).
+- Holders = free + fresh accounts that hold the whole current bundle — the
+  offer's own stock. Fewer than 10 → nothing.
+  `minCover = max(10, ceil(holders × 0.8))` (`GROW_KEEP`).
+  (Until 2026-10-07 the bar was half of the game's WHOLE free farm. It froze as
+  soon as the farm was two cohorts: ~490 new Overwatch accounts holding only
+  the new season's drops put the ~270 behind the offers under half, and the
+  offers sat at "12 Items" while their accounts held 17. An offer is a promise
+  about its own accounts, so only they are asked; a step can cost at most a
+  fifth of the stock.)
 - Candidates = items the holders carry, "newest" rule and order as the rotation.
 - Greedy over the holders: an item is added, or its count raised, to the
   largest qty that at least `minCover` of the still-covering holders hold.

@@ -53,12 +53,22 @@ const {
   setGameNorms,
 } = rot;
 
-// The bigger bundle must still be held by at least this share of ALL the game's
-// free accounts (and by MIN_ACCOUNTS) — the rotation's own bar, measured on the
-// whole free farm and not on the offer's current stock. Measured on the
-// current stock, every pass would move the offer to what the richer half of
-// what is left holds, and the stock would halve each time.
-const GROW_SHARE = rot.MIN_SHARE;
+// The bigger bundle must still be held by at least this share of the free
+// accounts that hold the CURRENT one (and by MIN_ACCOUNTS): nearly all of the
+// offer's own stock holds more, so the offer says more and keeps its stock.
+//
+// Two bars were tried before this one:
+//   - half of the offer's own stock: every pass moved the offer to what the
+//     richer half of what was left held, and the stock halved each time.
+//   - half of the game's WHOLE free farm (2026-10-06): it froze the moment the
+//     farm stopped being one cohort. On 10-07 ~490 new Overwatch accounts
+//     joined holding only the new season's drops; the ~270 accounts behind the
+//     offers were then under half the farm, and the offers sat at "12 Items"
+//     while those accounts held 17.
+// The offer is a promise about ITS accounts, so they are who is asked. At 0.8 a
+// step can cost at most a fifth of the stock, and only when four in five
+// accounts really do hold more.
+const GROW_KEEP = 0.8;
 // A set that just grew is left alone for a while, so a wave landing account by
 // account is one edit, not one every 15 minutes.
 const GROW_COOLDOWN_MS = 6 * 60 * 60 * 1000;
@@ -122,9 +132,10 @@ function addedLabel(added) {
 //   current   — the set's items
 // Returns { items, added, covering, current, minCover, pool, newestOnly } or
 // { items:null, reason }. `items` always contains `current`.
-//   pool     — free + fresh accounts holding any drop of the game
-//   current  — those of them that hold the whole current bundle
-//   covering — those of them that hold the bigger one
+//   pool     — free + fresh accounts holding any drop of the game (for the log)
+//   current  — those of them that hold the whole current bundle: the offer's
+//              stock, and the only accounts that decide
+//   covering — those of them that hold the bigger one (>= GROW_KEEP of current)
 function pickGrowBundle({ holdings, isFree, isFresh, game, campaigns, current, now = Date.now() } = {}) {
   const required = new Map();
   const order = [];
@@ -187,17 +198,15 @@ function pickGrowBundle({ holdings, isFree, isFresh, game, campaigns, current, n
       reason: "only " + pool + " free account(s) hold " + (game || "this game") + " drops",
     };
   }
-  const minCover = Math.max(MIN_ACCOUNTS, Math.ceil(pool * GROW_SHARE));
-  if (holders.length < minCover) {
+  if (holders.length < MIN_ACCOUNTS) {
     return {
       items: null,
       pool,
       current: holders.length,
-      reason:
-        "the current bundle is held by " + holders.length + " of the " + pool +
-        " free accounts — already under the " + minCover + " a bigger one needs",
+      reason: "only " + holders.length + " free account(s) hold the current bundle",
     };
   }
+  const minCover = Math.max(MIN_ACCOUNTS, Math.ceil(holders.length * GROW_KEEP));
 
   // Same "newest" rule as the rotation, so the two never disagree about what a
   // bundle should hold: items of a live or just-ended campaign when there are
@@ -735,7 +744,7 @@ function status() {
 
 module.exports = {
   // constants
-  GROW_SHARE,
+  GROW_KEEP,
   GROW_COOLDOWN_MS,
   MAX_SETS_PER_PASS,
   MAX_ROWS_PER_PASS,
