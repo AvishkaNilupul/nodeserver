@@ -128,6 +128,9 @@ async function runSession(opts) {
   }
   const wanted = (c) =>
     (!plan.codesOnly || !c.needsLink) && (c.steps || []).length > 0;
+  // SOOP can flag a campaign live hours before its window opens; nothing is
+  // counted until the start, so it is not farmable before then.
+  const started = (c) => !c.startAt || new Date(c.startAt).getTime() - 120000 <= clock.now();
   // 0 for the bot's priority game, 1 for everything else.
   const rank = (c) =>
     plan.priorityGameNo && String(c.gameNo) === String(plan.priorityGameNo) ? 0 : 1;
@@ -158,7 +161,7 @@ async function runSession(opts) {
 
     // A campaign that left SOOP's list has no trustworthy live flag: try it.
     const live = pool
-      .filter((c) => c.live || c.filter === "unlisted")
+      .filter((c) => (c.live || c.filter === "unlisted") && started(c))
       .sort(
         (a, b) =>
           // listed-and-live first: a delisted campaign's state is only a guess
@@ -194,7 +197,7 @@ async function runSession(opts) {
     if (!plan.priorityGameNo || plan.mode === "campaign" || rank(current) === 0) return null;
     const list = await campaigns().catch(() => null);
     if (!list) return null;
-    for (const c of list.filter((x) => matches(x) && rank(x) === 0 && x.live && !isDone(x))) {
+    for (const c of list.filter((x) => matches(x) && rank(x) === 0 && x.live && started(x) && !isDone(x))) {
       if (await pickChannel(client, c, clock.now).catch(() => null)) return c;
     }
     return null;

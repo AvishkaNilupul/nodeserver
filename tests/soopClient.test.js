@@ -557,3 +557,19 @@ test("useInfo posts the item id to the drops site and returns SOOP's data, or sa
   await assert.rejects(() => client.useInfo("12345"), { code: "AUTH" });
   await assert.rejects(() => client.useInfo("12345"), { code: "API", message: "Invalid item." });
 });
+
+test("categoryChannels only returns streams that carry drops, when SOOP says which do", async () => {
+  const replies = [
+    { broad: [{ user_id: "big", is_drops: 0 }, { user_id: "small", is_drops: 1 }, { user_id: "str", is_drops: "1" }] },
+    { broad: [{ user_id: "big", is_drops: 0 }] },
+    { broad: [{ user_id: "legacy1" }, { user_id: "legacy2" }] },
+  ];
+  const transport = {
+    proxied: false, ready: true, describe: () => "direct", wsOptions: () => ({}), stats: () => ({}),
+    requestJson: async () => replies.shift(),
+  };
+  const client = makeClient([{ name: "AuthTicket", value: "t" }], { transport, geo: { get: async () => ({}) } });
+  assert.deepEqual(await client.categoryChannels("00360141"), ["small", "str"], "the biggest stream is skipped when it has no drops");
+  assert.deepEqual(await client.categoryChannels("00360141"), [], "no drops-enabled stream means nothing to join");
+  assert.deepEqual(await client.categoryChannels("00360141"), ["legacy1", "legacy2"], "a reply without the flag is not filtered");
+});

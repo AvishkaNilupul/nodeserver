@@ -174,6 +174,21 @@ are always preferred over one whose state is a guess, and the 3-minute
 cool-down keeps a delisted campaign with nobody on air from being probed
 constantly. Until this fix only a bot pinned to one campaign did this.
 
+## Drops-enabled streams and start times
+
+Two things learned on 2026-10-08 from the first category-wide campaign the farm
+met (Dokkaebi World launch drops, any stream in category `00360141`):
+
+- **Each stream says whether it carries drops.** The category listing
+  (`main_broad_list_api.php`) has `is_drops` per stream. The only stream in the
+  category had `is_drops=0`; eight accounts joined it eleven times and earned
+  nothing. `categoryChannels()` now returns only streams with `is_drops` on, so
+  a category with no drops-enabled stream has nothing to join.
+- **SOOP's `live` flag can be true hours before a campaign's window opens.**
+  That campaign was flagged live from 03:51 KST with a start of 11:00 KST.
+  Nothing is counted before the start, so a campaign is not farmable until two
+  minutes before its `startAt`, whatever the flag says.
+
 ## Priority game
 
 An "everything guaranteed" bot can name one game that always wins
@@ -291,6 +306,11 @@ backup `_deploy_backup_20261006023001_soop-priority-game`; pm2 restart 18 at
 `utils/soop/farmBots.js`, `utils/soopWorker.js`, `utils/soop/i18n.js`; backup
 `_deploy_backup_20261007172325_soop-delisted-campaigns`; pm2 restart 24 at
 17:27:07Z (0 unstable).
+
+**2026-10-07 23:51 UTC — drops-enabled streams only, no farming before the
+start**: `utils/soopClient.js`, `utils/soopWorker.js`, `utils/soop/farmBots.js`;
+backup `_deploy_backup_20261007235117_soop-drops-streams-only`; pm2 restart 25
+at 23:51:19Z (0 unstable).
 
 Seen against real SOOP right after the deploy:
 

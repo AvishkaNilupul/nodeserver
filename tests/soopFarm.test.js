@@ -334,6 +334,22 @@ test("an everything bot still farms a campaign SOOP dropped from its list, but o
   assert.equal(world.calls().openBridge, 1);
 });
 
+test("a campaign SOOP flags live before its start time is not farmed until the window opens", async () => {
+  await fresh();
+  const kstStr = (ms) => new Date(ms + 9 * 3600e3).toISOString().replace("T", " ").slice(0, 19);
+  const early = world.addCampaign({ live: true, itemList: [2], broadIdList: ["soon1"], startDate: kstStr(Date.now() + 3600e3) });
+  await addAccount("acc1");
+  await farm.campaignsView({ force: true });
+  await farm.createBot({ mode: "auto", accountIds: ["acc1"] });
+  await sleep(200);
+  assert.equal(world.calls().openBridge, 0, "never joined before the start");
+  assert.equal(farm.sessions.size, 0);
+  const acc = (await farm.stateView()).accounts[0];
+  assert.equal(acc.session.state, "sleeping");
+  assert.match(acc.session.detail, /not started yet/);
+  assert.equal(String(acc.session.dropsIdx), String(early.dropsIdx));
+});
+
 test("accounts cannot be double-booked, and sold or logged-out accounts are refused", async () => {
   await fresh();
   const camp = world.addCampaign({ live: true, itemList: [60] });

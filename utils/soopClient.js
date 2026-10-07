@@ -242,7 +242,14 @@ function makeClient(cookies, {
     const j = await api(
       `https://live.sooplive.com/api/main_broad_list_api.php?selectType=cate&selectValue=${encodeURIComponent(cateNo)}&orderType=view_cnt&pageNo=1`,
     );
-    const ids = ((j && j.broad) || []).map((b) => b && b.user_id).filter(Boolean);
+    const rows = ((j && j.broad) || []).filter((b) => b && b.user_id);
+    // Each stream says whether it carries drops (`is_drops`). Joining one that
+    // does not earns nothing: on 2026-10-08 the only stream in a category-wide
+    // campaign's category had is_drops=0 and eight accounts sat on it for hours.
+    // Rows without the field at all (an older reply shape) are not filtered.
+    const known = rows.some((b) => b.is_drops !== undefined && b.is_drops !== null);
+    const on = (b) => b.is_drops === true || b.is_drops === "Y" || Number(b.is_drops) === 1;
+    const ids = (known ? rows.filter(on) : rows).map((b) => b.user_id);
     return [...new Set(ids.map(String))].slice(0, Math.max(0, limit));
   }
 
