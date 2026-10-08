@@ -382,6 +382,16 @@ router.post(
           message: `Already farming in no-claim bot(s) ${inBots.join(", ")} — remove it there first.`,
         });
 
+      // Nor may it be enabled in a regular bot: one account, one bot. Asked
+      // here, before the pool row is fenced, so a refusal changes nothing.
+      try {
+        await fleet.assertNotInManagedBot([{ username, clientSecret }]);
+      } catch (e) {
+        return res
+          .status(e.status || 503)
+          .json({ success: false, message: e.message || String(e) });
+      }
+
       // A personal bot is a container like any other: the same cap and host-RAM
       // gate as every create (noclaimFleet.newContainerGate, 2026-10-03).
       let gate;

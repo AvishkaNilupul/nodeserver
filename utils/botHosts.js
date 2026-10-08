@@ -540,7 +540,23 @@ async function exists(host, file) {
 // copy of any previous version — matching the local behaviour the routes relied
 // on before, but for either transport.
 async function writeFileAtomic(host, file, text) {
+  // One account, one bot (utils/fleetIntegrity.js, 2026-10-06): an entry for an
+  // account that sits in a no-claim bot is written switched OFF, whoever asked.
+  // Every bot configured here claims drops, and a claimed drop is no-claim
+  // stock destroyed. The guard never throws and never blocks the write.
+  let integrity = null;
+  try {
+    integrity = require("./fleetIntegrity");
+    text = await integrity.guardManagedWrite(host, file, text);
+  } catch (e) {
+    console.error("[botHosts] one-home guard error: " + e.message);
+  }
   await writeFileRaw(host, file, text);
+  try {
+    if (integrity) integrity.forget("managed");
+  } catch {
+    /* a cache that is not dropped only ages out a minute later */
+  }
   // An account may only be enabled in one config per host — strip stale copies
   // left in sibling configs (utils/dupeGuard.js).
   try {

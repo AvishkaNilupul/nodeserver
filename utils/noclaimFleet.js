@@ -296,6 +296,45 @@ async function pristineClause(guard) {
 // enforced this before: a typo'd or arbitrary game name built a container that
 // farmed a game the auto-farmer ALSO farms, so the two systems would fight over
 // the same campaign — the one thing the no-claim split exists to prevent.
+// Required lazily: fleetIntegrity reads this module's tree, and utils/botHosts
+// reaches it on every regular config write.
+function fleetIntegrity() {
+  return require("./fleetIntegrity");
+}
+
+// Which of `accounts` ({ clientSecret, username }) are enabled in a regular bot
+// config right now: [{ login, where }]. One account, one bot — those must not
+// be written into a no-claim config as well. Throws (503) when that cannot be
+// known.
+async function inManagedBot(accounts) {
+  const fence = await fleetIntegrity().claimFence("noclaim");
+  const blocked = new Set(fence.exclude);
+  const out = [];
+  for (const a of accounts || []) {
+    const secret = String((a && a.clientSecret) || "").trim();
+    if (!secret || !blocked.has(secret)) continue;
+    const t = fence.taken.get(secret);
+    out.push({
+      secret,
+      login: String(a.username || (t && t.login) || ""),
+      where: t ? `${t.host}/${t.file}` : "a bot on a host that could not be read",
+    });
+  }
+  return out;
+}
+
+async function assertNotInManagedBot(accounts) {
+  const hits = await inManagedBot(accounts);
+  if (!hits.length) return;
+  const e = new Error(
+    `One account, one bot: ${hits.map((h) => `${h.login || "an account"} is enabled in ${h.where}`).join("; ")} ` +
+      "— take it out of that bot first.",
+  );
+  e.status = 409;
+  e.inManagedBot = hits.map((h) => ({ login: h.login, where: h.where }));
+  throw e;
+}
+
 function assertNoClaimGame(game) {
   const g = String(game || "").trim();
   if (!g) {
@@ -365,13 +404,26 @@ async function claimForGame(game, count, { actor = "noclaim" } = {}) {
   const want = Math.floor(Number(count) || 0);
   if (want <= 0) return claimed;
   const exclude = await claimExclusions();
+  // One account, one bot (utils/fleetIntegrity.js, 2026-10-06): an account that
+  // is enabled in a regular bot config is never claimed here, whatever its pool
+  // row says — that bot claims drops, so the two homes together destroy the
+  // unclaimed stock this farm sells. Thrown (nothing claimed yet) when the
+  // regular configs on the fleet host cannot be read.
+  const fence = await fleetIntegrity().claimFence("noclaim");
+  await fleetIntegrity().reportFencedRows("noclaim", fence);
+  // The ready query, with the fence folded into its own token rule.
+  const ready = () => {
+    const q = readyPoolQuery(game, exclude);
+    if (fence.exclude.length) q.clientSecret = { ...q.clientSecret, $nin: fence.exclude };
+    return q;
+  };
   const guard = pristineReserve();
   const unreadable = [];
   try {
     while (claimed.length < want && unreadable.length < MAX_UNREADABLE_PER_CALL) {
       const clause = await pristineClause(guard);
       const doc = await AvailableAccount.findOneAndUpdate(
-        { $and: [readyPoolQuery(game, exclude), clause] },
+        { $and: [ready(), clause] },
         { $set: { status: "claimed", claimedAt: new Date(), claimedNote: note } },
         { returnDocument: "after", sort: { lastCheckAt: -1 }, lean: true },
       );
@@ -646,14 +698,22 @@ function containerRunArgs(id, image = IMAGE) {
 // 600 from the start.
 async function writeBotConfig(id, accounts, game) {
   assertNoClaimGame(game);
+  // Nothing is written when one of them already farms in a regular bot.
+  await assertNotInManagedBot(accounts);
   const config = buildConfig(accounts, game);
-  await sh(
-    hosts.guardedWriteScript(configPath(id), hosts.byteLength(config), {
-      mode: "600",
-      mkdirs: [botDir(id) + "/Configuration", botDir(id) + "/logs"],
-    }),
-    { timeout: 20000, input: config },
-  );
+  try {
+    await sh(
+      hosts.guardedWriteScript(configPath(id), hosts.byteLength(config), {
+        mode: "600",
+        mkdirs: [botDir(id) + "/Configuration", botDir(id) + "/logs"],
+      }),
+      { timeout: 20000, input: config },
+    );
+  } finally {
+    // Landed or not, the read made before this write no longer answers
+    // "which accounts sit in a no-claim bot".
+    fleetIntegrity().forget("noclaim");
+  }
 }
 
 // The provision chain for bot `id`, one && list that launchProvision runs
@@ -1021,6 +1081,10 @@ async function topUpBot(id, accounts, game, { restart = true } = {}) {
   const file = configPath(id);
   const docs = (accounts || []).filter(Boolean);
   return withFileLock(host, file, async () => {
+    // One account, one bot: an account enabled in a regular bot config is left
+    // out (it comes back in `absentIds`, like any row the config does not
+    // hold). Thrown before any write when that cannot be known.
+    const elsewhere = new Set((await inManagedBot(docs)).map((h) => h.secret));
     const raw = await sh(`cat ${hosts.shq(file)}`, { timeout: 20000 });
     let cfg;
     try {
@@ -1046,7 +1110,7 @@ async function topUpBot(id, accounts, game, { restart = true } = {}) {
     const fresh = [];
     for (const a of docs) {
       const secret = String(a.clientSecret || "");
-      if (!secret || have.has(secret)) continue;
+      if (!secret || have.has(secret) || elsewhere.has(secret.trim())) continue;
       users.push(userEntry(a, games));
       have.add(secret);
       fresh.push(secret);
@@ -1059,7 +1123,9 @@ async function topUpBot(id, accounts, game, { restart = true } = {}) {
         timeout: 20000,
         input: text,
       });
+      fleetIntegrity().forget("noclaim");
     } catch (writeErr) {
+      fleetIntegrity().forget("noclaim");
       let now;
       try {
         now = await readConfigSecrets(id);
@@ -1385,6 +1451,8 @@ module.exports = {
   pi,
   sh,
   assertNoClaimGame,
+  inManagedBot,
+  assertNotInManagedBot,
   containerFor,
   botDir,
   configPath,

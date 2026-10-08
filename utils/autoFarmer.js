@@ -1184,6 +1184,30 @@ async function claimPoolAccounts(
   // cached, and noteClaimed() lowers the cached count — so one call cannot
   // dig below the reserve between two refreshes.
   let pristineReserve = null;
+  // One account, one bot (utils/fleetIntegrity.js, 2026-10-06): an account that
+  // sits in a no-claim bot is never claimed here, whatever its pool row says —
+  // on 09-21 68 such rows read "available", were claimed for Rocket League and
+  // had their unclaimed Overwatch drops claimed by these bots. When the
+  // no-claim configs cannot be read and never were, claim nothing: the caller
+  // keeps its plan and retries on the next tick.
+  let fence;
+  try {
+    const integrity = require("./fleetIntegrity");
+    fence = await integrity.claimFence("managed");
+    await integrity.reportFencedRows("managed", fence);
+  } catch (e) {
+    progress(
+      "Not claiming pool accounts: the no-claim bot configs could not be read (" +
+        ((e && e.message) || e) +
+        "), so which accounts already farm there is unknown.",
+      "warn",
+    );
+    return claimed;
+  }
+  // Folded into readyPoolQuery's own token rule (clientSecret: { $gt: "" }).
+  const notInNoclaim = fence.exclude.length
+    ? { clientSecret: { $gt: "", $nin: fence.exclude } }
+    : {};
   for (const extra of passes) {
     while (claimed.length < n) {
       let pristineGuard;
@@ -1205,6 +1229,7 @@ async function claimPoolAccounts(
               ...readyPoolQuery(),
               ...extra,
               ...(targetGame ? { soldGames: { $ne: targetGame } } : {}),
+              ...notInNoclaim,
             },
             pristineGuard,
           ],
