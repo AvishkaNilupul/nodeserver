@@ -185,14 +185,23 @@ async function lastDecidedAtFor(lane, campaigns) {
 }
 
 // The Telegram line the legacy engine sends for the terminal skips it
-// announces — and only those. skip_low_demand is announced once (legacy
-// decides it once); skip_already_covered on the TRANSITION into covered, not
-// on every re-confirmation (legacy gates it on isNewDecision for the same
-// reason: it was ~485 identical messages a day). The other skips are silent in
-// legacy and stay silent here.
+// announces — and only those. skip_low_demand and skip_sub_only are announced
+// once (legacy decides each once); skip_already_covered on the TRANSITION into
+// covered, not on every re-confirmation (legacy gates it on isNewDecision for
+// the same reason: it was ~485 identical messages a day). The other skips are
+// silent in legacy and stay silent here.
 function skipAnnouncement(verdict, previousDecision) {
   const d = verdict.decision;
   if (previousDecision === d) return null;
+  if (d === "skip_sub_only") {
+    return (
+      "🤖 Auto-farm SKIP (lane) — " +
+      verdict.game +
+      "\nSubscribers-only drops" +
+      (verdict.campaignName ? " (" + verdict.campaignName + ")" : "") +
+      " — watching cannot earn them. No accounts spent."
+    );
+  }
   if (d === "skip_low_demand") {
     const cooldown = /untested market/i.test(verdict.reason || "");
     return (

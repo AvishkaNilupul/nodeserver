@@ -150,5 +150,11 @@ test("the replay harness's write-map is deliberately NOT widened — old rows st
   // the harness has no way to know which rows predate this commit.
   assert.equal(classes.recordsInternalSales("reuse_existing"), false);
   assert.equal(classes.recordsInternalSales("skip_host_offline"), false);
-  assert.deepEqual([...classes.OMITS_INTERNAL_SALES].sort(), ["reuse_existing", "skip_host_offline"]);
+  // skip_sub_only joined the list as a NEW path that never reads sales at all
+  // (settled before the sellability stage) — the two old entries are unchanged.
+  assert.equal(classes.recordsInternalSales("skip_sub_only"), false);
+  assert.deepEqual(
+    [...classes.OMITS_INTERNAL_SALES].sort(),
+    ["reuse_existing", "skip_host_offline", "skip_sub_only"],
+  );
 });

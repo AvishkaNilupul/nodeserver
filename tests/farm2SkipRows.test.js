@@ -113,7 +113,7 @@ async function research(game, demandScore) {
 
 test("the mapping is the identity on decision, and every lane skip has a legacy equivalent", () => {
   const skips = classes.LEGACY_DECISIONS.filter((d) => classes.actionClass(d) === "skip");
-  assert.equal(skips.length, 8);
+  assert.equal(skips.length, 9);
   for (const d of skips) {
     assert.ok(classes.LANE_DECISIONS.includes(d), `${d} is a lane decision`);
     const f = executeStep.legacySkipFields(skipVerdict("G", "c", d, { coverage }), af());

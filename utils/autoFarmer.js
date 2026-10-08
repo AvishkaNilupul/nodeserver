@@ -44,6 +44,13 @@ const farm2Ownership = require("./farm2/ownership");
 const DropSet = require("../models/DropSet");
 const catalogRoutes = require("../routes/catalogRoutes");
 const { stampPreorderSet } = require("./catalogPreorder");
+// Whether watching can earn a campaign's drops at all (the manifest
+// utils/campaignWatcher.js keeps). Shared with the lane engine's decide step.
+const {
+  campaignSubOnly,
+  guardOn: subOnlyGuardOn,
+  SUB_ONLY_REASON,
+} = require("./campaignFarmability");
 
 const TICK_MS = 10 * 60 * 1000; // scan every 10 minutes
 const FIRST_TICK_DELAY_MS = 90 * 1000; // let the campaign watcher seed first
@@ -2246,6 +2253,34 @@ async function processCampaign(c, ctx) {
     );
   }
 
+  // 0) Farmability gate. A campaign whose every drop needs a paid subscription
+  // cannot be earned by watching — the bots drop it from their own list — so it
+  // is settled before any market read: no probe slot, no pool account, and no
+  // storefront pre-order for an item nobody can deliver. Until 2026-10-08 such
+  // a campaign was decided like any other, and six of the eight probe slots
+  // (90 pool accounts) sat on badge campaigns while real games queued behind
+  // them. Only a PROVEN case stops here; a manifest that is missing, older
+  // than requiredSubs or unreadable changes nothing below. The row gets no
+  // demandScore/hadResearch/internalSales: none was measured. Switched off
+  // with autoFarm.subOnlyGuard: false.
+  if (subOnlyGuardOn(af) && (await campaignSubOnly(c.campaignId))) {
+    await record({
+      decision: "skip_sub_only",
+      status: "skipped",
+      reason: SUB_ONLY_REASON,
+    });
+    if (isNewDecision("skip_sub_only")) {
+      await tg(
+        "🤖 Auto-farm SKIP — " +
+          game +
+          "\nSubscribers-only drops" +
+          (c.name ? " (" + c.name + ")" : "") +
+          " — watching cannot earn them. No accounts spent.",
+      );
+    }
+    return { decision: "skip_sub_only" };
+  }
+
   // 1) Sellability gate — fresh market data (Gameflip/GGSel/Plati, re-scanned
   // when stale) blended with our own sales history (SaleSignal training data).
   const info = (ctx.infoMap && ctx.infoMap.get(key)) || {
@@ -3510,16 +3545,63 @@ async function repriceEndedTasks() {
   return done;
 }
 
+// A cold-start probe that can never earn anything is ended here, with the same
+// teardown as a campaign that ran out, instead of holding its probe slot and
+// its accounts until the campaign's last day.
+//
+// The decision gate (processCampaign step 0, farm2 decide stage 0) keeps a
+// subscriber-only campaign from being probed in the first place; this is for
+// the probe that got through anyway — decided before the campaign's drop
+// manifest existed, or before that gate did. On 2026-10-08 six probes were in
+// that state: 15 accounts each on a badge that needs a subscription, 0 drops
+// earned in up to nine days, and a public pre-order page for each.
+//
+// PROBES ONLY. A reuse task costs nothing and ends with its campaign; a farm
+// task's accounts also farm the game's other campaigns. Inert when
+// autoFarm.subOnlyGuard is false.
+async function subOnlyProbe(t, ended) {
+  if (ended || t.decision !== "probe" || !subOnlyGuardOn(cfg())) return false;
+  return campaignSubOnly(t.campaignId);
+}
+
+// Every farm host one of the task's bots lives on answers right now. An early
+// end has no deadline, so it waits for a tick where its configs can be read
+// and rewritten rather than recycling accounts a bot may still be running.
+// `asked` remembers each host's answer for the pass, so several probes on one
+// unreachable host cost one probe between them.
+async function botHostsReachable(t, asked) {
+  for (const b of t.bots || []) {
+    if (!b) continue;
+    if (!asked.has(b.host)) {
+      const h = hosts.resolveHost(b.host);
+      asked.set(b.host, !!h && (await probeHost(h)));
+    }
+    if (!asked.get(b.host)) return false;
+  }
+  return true;
+}
+
 async function completeEndedTasks() {
   const active = await AutoFarmTask.find({ status: "active" });
   let completed = 0;
+  const hostAnswers = new Map();
   for (const t of active) {
     const c = await TwitchCampaign.findOne({ campaignId: t.campaignId }).lean();
     const ended =
       !c ||
       c.status === "EXPIRED" ||
       (c.endAt && new Date(c.endAt) < new Date());
-    if (!ended) continue;
+    const subOnly = await subOnlyProbe(t, ended);
+    if (!ended && !subOnly) continue;
+    if (subOnly && !(await botHostsReachable(t, hostAnswers))) {
+      progress(
+        "Subscribers-only probe " +
+          t.game +
+          ": its farm host is not answering — ending it on a later tick.",
+        "warn",
+      );
+      continue;
+    }
     const af = cfg();
     // Containers other ACTIVE tasks still use must survive this task ending.
     const others = await AutoFarmTask.find(
@@ -3551,6 +3633,8 @@ async function completeEndedTasks() {
     const stopped = [];
     const removed = [];
     const trimmed = [];
+    // Shared bots whose config could not be read or rewritten this pass.
+    const unedited = [];
     // Logins of THIS task that are still enabled in a container that survives
     // this cleanup. Recycling one of these back to the pool is what created
     // the duplicate-container loop: the account gets re-claimed while it is
@@ -3621,6 +3705,7 @@ async function completeEndedTasks() {
           }
         } catch {
           /* config unreadable — leave the shared bot alone */
+          unedited.push(b.container);
         }
         continue;
       }
@@ -3641,10 +3726,33 @@ async function completeEndedTasks() {
         }
       }
     }
+    // An early end is all or nothing. A shared config that could not be
+    // rewritten still has this probe's accounts enabled in a running bot, and
+    // recycling them now would hand the same account to a second bot. The
+    // task stays active and the whole pass repeats next tick — it is
+    // idempotent: accounts already trimmed are simply found trimmed.
+    if (subOnly && unedited.length) {
+      progress(
+        "Subscribers-only probe " +
+          t.game +
+          ": could not rewrite " +
+          unedited.join(", ") +
+          " — left active, retrying next tick.",
+        "warn",
+      );
+      continue;
+    }
     // Recycle the accounts for the next event: back to the ready pool unless
     // the account itself was sold to a buyer. The farmed drops live on the
     // Twitch account either way, and a later sale still triggers
     // farmControl.stopFarmingGame on whatever it farms next.
+    //
+    // A subscribers-only probe's accounts farmed nothing, so they go back
+    // WITHOUT the "recycled after <game>" note: that note is the game-affinity
+    // key claimPoolAccounts prefers and the only door into a reuse-only game.
+    const recycleNote = subOnly
+      ? "recycled — subscribers-only drops, nothing farmed (" + t.game + ")"
+      : "recycled after " + t.game;
     let recycled = 0;
     if (t.assignedAccounts && t.assignedAccounts.length) {
       try {
@@ -3687,7 +3795,7 @@ async function completeEndedTasks() {
               $set: {
                 status: "available",
                 claimedAt: null,
-                claimedNote: "recycled after " + t.game,
+                claimedNote: recycleNote,
               },
             },
           );
@@ -3699,7 +3807,7 @@ async function completeEndedTasks() {
                 event: "recycled",
                 actor: "auto-farm",
                 game: t.game,
-                note: "recycled after " + t.game,
+                note: recycleNote,
               },
             );
             await recordAutoFarmEvent({
@@ -3708,7 +3816,7 @@ async function completeEndedTasks() {
               campaignId: t.campaignId,
               taskId: t._id,
               count: recycled,
-              reason: "recycled after " + t.game,
+              reason: recycleNote,
               actor: "completeEndedTasks",
             });
           }
@@ -3722,7 +3830,15 @@ async function completeEndedTasks() {
     // straight away (expireStaleProbes reads probeOutcome). A probe that sold at
     // least once leaves no marker: its own sales lift future campaigns over the
     // demand floor and it graduates to a normal farm.
-    if (t.decision === "probe" && salesOf(await internalSalesForGame(t.game)).count === 0) {
+    //
+    // NOT a subscribers-only probe: nothing was ever on sale, so the market
+    // was never tested and the game owes no cooldown — a later campaign of its
+    // with watchable drops is probed like any untested game.
+    if (
+      !subOnly &&
+      t.decision === "probe" &&
+      salesOf(await internalSalesForGame(t.game)).count === 0
+    ) {
       t.probeOutcome = "expired";
     }
     t.status = "completed";
@@ -3735,9 +3851,61 @@ async function completeEndedTasks() {
       campaignId: t.campaignId,
       taskId: t._id,
       count: (t.assignedAccounts || []).length,
-      reason: t.probeOutcome === "expired" ? "probe ended — 0 sales" : "campaign ended",
+      reason: subOnly
+        ? "probe ended early — subscribers-only drops, nothing to farm"
+        : t.probeOutcome === "expired"
+          ? "probe ended — 0 sales"
+          : "campaign ended",
       actor: "completeEndedTasks",
     });
+    if (subOnly) {
+      // The pre-order page stamped when the probe went live promises delivery
+      // "when a farmed account completes the bundle", which cannot happen.
+      // Take it off the storefront now instead of leaving it up as a pre-order
+      // (or, once the task reads completed, as "sold out") until the campaign
+      // closes. No reprice either: the campaign is still running and no
+      // listing of it ever existed.
+      try {
+        const off = await DropSet.updateMany(
+          {
+            sourceType: "autofarm_event",
+            sourceEventKey: "autofarm:" + t.campaignId,
+            catalogState: "preorder",
+          },
+          { $set: { listed: false, catalogState: "soldout" } },
+        );
+        if (off && off.modifiedCount) catalogRoutes.invalidateCatalogCache();
+      } catch (e) {
+        progress(
+          "Subscribers-only probe " + t.game + ": pre-order page not removed: " + e.message,
+          "warn",
+        );
+      }
+      progress(
+        "Ended the " +
+          t.game +
+          " probe early: every drop of “" +
+          (t.campaignName || t.campaignId) +
+          "” needs a subscription. " +
+          recycled +
+          " account(s) back in the pool, probe slot freed.",
+      );
+      await tg(
+        "🤖 Auto-farm PROBE ENDED — " +
+          t.game +
+          "\nEvery drop of “" +
+          (t.campaignName || t.campaignId) +
+          "” needs a paid subscription, so nothing could be farmed." +
+          (trimmed.length ? " Trimmed from shared: " + trimmed.join(", ") + "." : "") +
+          (stopped.length ? " Stopped: " + stopped.join(", ") + "." : "") +
+          " " +
+          recycled +
+          " of " +
+          (t.assignedAccounts || []).length +
+          " account(s) recycled to the pool; the probe slot is free.",
+      );
+      continue;
+    }
     // Event over = supply fixed: apply the post-event scarcity markup and
     // rebuild the listing as a stacked bundle of every campaign this game's
     // accounts have farmed. A failure here is picked up by repriceEndedTasks

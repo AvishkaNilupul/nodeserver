@@ -105,6 +105,12 @@ async function upsertTask(verdict, { dryRun = false } = {}) {
 //   skip_no_accounts                      the above + coverage, plannedAccounts 0
 //   skip_no_capacity                      the above + coverage, plannedAccounts
 //                                          = the target it could not seat
+//   skip_sub_only                         decision, status and reason ONLY.
+//                                          Settled before the sellability stage,
+//                                          so no demandScore, hadResearch or
+//                                          internalSales was measured and none
+//                                          is written — on a re-decided row the
+//                                          earlier values simply stay.
 //   skip_reuse_only                       the one edge. Legacy produces this at
 //                                          CLAIM time by rewriting a farm/probe
 //                                          row, so the row it leaves also has
@@ -154,6 +160,11 @@ function legacySkipFields(verdict, af) {
     decidedAt: new Date(),
     ...(verdict.decisionInputs ? { decisionInputs: verdict.decisionInputs } : {}),
   };
+  if (classes.isPreDemandDecision(d)) {
+    delete fields.demandScore;
+    delete fields.hadResearch;
+    delete fields.internalSales;
+  }
   if (SKIP_WITH_COVERAGE.has(d) && verdict.coverage) fields.coverage = verdict.coverage;
   if (d === "skip_no_accounts") fields.plannedAccounts = 0;
   if (d === "skip_no_capacity") fields.plannedAccounts = Number(verdict.plannedAccounts) || 0;

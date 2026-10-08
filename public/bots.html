@@ -867,6 +867,7 @@
       skip_host_offline: ["SKIP · host offline", "off"],
       skip_already_covered: ["SKIP · already covered", "off"],
       skip_reuse_only: ["SKIP · reuse only", "off"],
+      skip_sub_only: ["SKIP · subscribers only", "off"],
       skip_probe_budget: ["PROBE · queued (budget)", "off"],
     };
     const m = map[t.decision] || [t.decision, ""];
@@ -1232,7 +1233,7 @@
       skip_no_accounts: ["off", "NO POOL"], skip_no_capacity: ["off", "NO SEATS"],
       skip_ends_soon: ["", "ENDS SOON"], skip_host_offline: ["off", "HOST OFF"],
       skip_reuse_only: ["", "REUSE ONLY"], reuse_existing: ["on", "REUSE"], pending: ["", "PENDING"],
-      skip_probe_budget: ["", "PROBE QUEUED"],
+      skip_probe_budget: ["", "PROBE QUEUED"], skip_sub_only: ["off", "SUBS ONLY"],
     };
     const m = map[ev.decision] || ["", String(ev.decision || "?").toUpperCase()];
     return '<span class="chip ' + m[0] + '">' + esc(m[1]) + "</span>";

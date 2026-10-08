@@ -32,6 +32,9 @@ const {
 // The account-count half of the shadow comparison, scored only when both
 // engines counted the same thing (utils/farm2/accountGap.js).
 const { compareAccounts } = require("../accountGap");
+// Whether watching can earn a campaign's drops at all — the same rule and the
+// same words the legacy engine uses (utils/campaignFarmability.js).
+const farmability = require("../../campaignFarmability");
 
 // Load the legacy engine lazily. autoFarmer pulls in a wide dependency graph
 // (and, on prod, the catalog integration) and requires autoLister lazily itself
@@ -465,8 +468,8 @@ async function recycledPoolCount(game) {
 // engines stop at the same gate for the same inputs, so the sequence below is
 // processCampaign's, not a tidier one:
 //
-//   sellability -> host -> reuse-first -> time -> coverage -> pool floor ->
-//   capacity -> reuse-only -> farm/probe
+//   farmability -> sellability -> host -> reuse-first -> time -> coverage ->
+//   pool floor -> capacity -> reuse-only -> farm/probe
 //
 // Until this rewrite the lane implemented only the first and third of those,
 // so on any campaign the legacy engine settled at one of the other six a live
@@ -476,6 +479,40 @@ async function decideCampaign({ campaign, lane, cycle, af, shadow, hostCache, ct
   const game = campaign.game || campaign.name || "?";
   const af2 = af || settings.getAutoFarm();
   const b = brain();
+
+  // --- 0. Farmability ------------------------------------------------------
+  // A campaign whose every drop needs a paid subscription cannot be earned by
+  // watching — the bots drop it from their own list — so it is settled before
+  // any market read: no research, no probe slot, no pool account, and no
+  // storefront pre-order for an item nobody can deliver. Until this gate
+  // existed such a campaign went through the stages below like any other, and
+  // on 2026-10-08 six of the eight probe slots (90 pool accounts) sat on them.
+  //
+  // PROVEN cases only. A manifest that is missing, predates requiredSubs or
+  // cannot be read decides nothing here, and the campaign goes on exactly as
+  // before — a gap in the evidence must never stop a real farm. Switched off
+  // with autoFarm.subOnlyGuard: false.
+  if (farmability.guardOn(af2) && (await farmability.campaignSubOnly(campaign.campaignId))) {
+    const left = campaign.endAt ? (new Date(campaign.endAt) - Date.now()) / 3600000 : Infinity;
+    return {
+      game,
+      campaignId: campaign.campaignId,
+      campaignName: campaign.name || "",
+      campaignEndAt: campaign.endAt || null,
+      // Nothing below was read: this verdict carries no market score, no own
+      // sales and no decisionInputs snapshot, and says so with empty values.
+      demandScore: null,
+      hadResearch: false,
+      internalSales: 0,
+      effectiveDemand: null,
+      hoursLeft: Number.isFinite(left) ? Math.round(left * 10) / 10 : null,
+      decision: "skip_sub_only",
+      wouldFarm: false,
+      plannedAccounts: 0,
+      targetAccounts: 0,
+      reason: farmability.SUB_ONLY_REASON,
+    };
+  }
 
   // --- 1. Sellability ------------------------------------------------------
   // Shadow lanes use the READ-ONLY research lookup. freshResearchForGame can

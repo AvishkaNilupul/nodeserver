@@ -27,6 +27,7 @@ const autoFarmTaskSchema = new mongoose.Schema(
         "skip_host_offline", // the Pi was unreachable at decision time
         "skip_already_covered", // manual bots / archived accounts already cover this game's demand
         "skip_reuse_only", // reuse-only game (WoT/UFL): never spends fresh accounts and none of its own recycled ones are free right now
+        "skip_sub_only", // every drop needs a paid subscription — watching cannot earn it (utils/campaignFarmability.js)
       ],
       required: true,
     },

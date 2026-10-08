@@ -531,6 +531,21 @@ async function replayDecision(task, { af, now = Date.now() } = {}) {
     legacyDemandScore: task.demandScore == null ? null : Number(task.demandScore),
   };
 
+  // Settled before the sellability stage ran (a subscriber-only campaign):
+  // there is no economics on this row to replay, and running the stage anyway
+  // would score it against a decision the stage never made.
+  if (classes.isPreDemandDecision(task.decision)) {
+    return {
+      ...base,
+      verdict: "unreplayable",
+      fidelity: FIDELITY.UNREPLAYABLE,
+      gaps: ["settled_before_demand_stage"],
+      notes: [`"${task.decision}" is decided before any market or sales input is read`],
+      inputsBasis: null,
+      inputsVersion: null,
+    };
+  }
+
   const inputs = await reconstructInputs(task, { af, now });
   if (inputs.fidelity === FIDELITY.UNREPLAYABLE) {
     return {
