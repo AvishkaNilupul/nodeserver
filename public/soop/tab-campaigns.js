@@ -59,8 +59,11 @@
   function channelsLine(c) {
     const names = (list) => list.slice(0, 3).map((ch) => ch.nick || ch.id).join(", ") + (list.length > 3 ? " and " + (list.length - 3) + " more" : "");
     const all = c.channels || [], on = all.filter((ch) => ch.onAir);
-    if (c.categoryWide) return [ui.dot("info", "Any stream"), "Any stream in " + (c.cateName || gameLabel(c)) + " counts"];
-    if (on.length) return [ui.dot("ok", "On air"), "On air now: " + names(on)];
+    if (c.categoryWide) return [ui.dot("info", "Any stream"), "Any stream in " + (c.cateName || gameLabel(c)) + " with drops switched on counts"];
+    // A listed channel streaming is not the same as drops being on: between broadcasts
+    // the channels stream normally and SOOP counts nothing until the campaign is live.
+    if (on.length && !c.live) return [ui.dot("warn", "Drops off"), names(on) + (on.length === 1 ? " is" : " are") + " streaming, but SOOP has drops switched off — nothing to earn until the campaign goes live"];
+    if (on.length) return [ui.dot("ok", "On air"), "On air now, drops on: " + names(on)];
     return [ui.dot(null, "Off air"), all.length ? "Nobody on air right now (" + names(all) + ")" : "No channels listed"];
   }
 
