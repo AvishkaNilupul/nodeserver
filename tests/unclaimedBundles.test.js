@@ -265,6 +265,36 @@ test("buildEventCatalog groups waves per event, orders them, and counts copies",
   assert.deepEqual(ewc.waves[0].items, []);
 });
 
+// `earnable` is additive: how many of an item's copies a viewer gets by
+// watching. A drop with requiredSubs > 0 goes to subscribers only. `qty` is
+// untouched — every copy the manifest lists, as before the field existed.
+test("buildEventCatalog marks how many copies of each item can be earned by watching", () => {
+  const catalog = buildEventCatalog(
+    [{ campaignId: "r6-mix", name: "Community Checkpoint", game: R6, startAt: "2026-08-01T00:00:00Z", endAt: "2026-08-08T00:00:00Z" }],
+    [
+      {
+        campaignId: "r6-mix",
+        name: "Community Checkpoint",
+        game: R6,
+        drops: [
+          { itemKey: ALPHA, name: "Alpha Pack", requiredSubs: 0 },
+          { itemKey: ALPHA, name: "Alpha Pack" }, // recorded before the field existed
+          { itemKey: ALPHA, name: "Alpha Pack", requiredSubs: 1 },
+          { itemKey: BURN, name: "SMELLS LIKE BURNING", requiredSubs: 2 },
+        ],
+      },
+    ],
+  );
+  const items = catalog.get(eventKeyFor(R6, "Community Checkpoint")).waves[0].items;
+  assert.deepEqual(
+    items.map((i) => [i.name, i.qty, i.earnable]),
+    [
+      ["Alpha Pack", 3, 2],
+      ["SMELLS LIKE BURNING", 1, 0],
+    ],
+  );
+});
+
 test("buildEventCatalog sorts by order then startAt and folds a Drops alias", () => {
   const catalog = buildEventCatalog(
     [

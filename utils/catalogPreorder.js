@@ -100,6 +100,13 @@ function computePreorderEta(accounts, campaignName, now = new Date()) {
   return result;
 }
 
+// The code autoLister.campaignItems puts on its error for a campaign whose
+// every drop is subscriber-only. Named here rather than imported: this file
+// takes its collaborators as arguments.
+const SUB_ONLY_CAMPAIGN = "sub_only_campaign";
+
+// Returns null whenever NO card was stamped (no campaign, nothing to promise,
+// or the lookup failed); anything else means the card was written.
 async function stampPreorderSet(
   task,
   { DropSet, campaignItems, derivePrice, research },
@@ -109,7 +116,12 @@ async function stampPreorderSet(
   try {
     items = await campaignItems(task.campaignId, task.game, task.campaignName);
   } catch (err) {
-    console.error("catalog preorder campaign items:", err.message);
+    // Nothing a farmed account can earn means there is no card to make. That
+    // is an answer, not a failure, and it is given again on every sync for as
+    // long as the task is active — so it is not logged.
+    if (!(err && err.code === SUB_ONLY_CAMPAIGN)) {
+      console.error("catalog preorder campaign items:", err.message);
+    }
     return null;
   }
   if (!Array.isArray(items) || !items.length) return null;
@@ -200,16 +212,24 @@ async function runActivePreorders({
   let stamped = 0;
   for (const task of tasks) {
     if (existingKeys.has(`autofarm:${task.campaignId}`)) continue;
-    stamped++;
-    if (!apply) continue;
+    if (!apply) {
+      stamped++;
+      continue;
+    }
     const research = researchForGame ? await researchForGame(task.game) : null;
-    await stampPreorderSet(task, {
+    const written = await stampPreorderSet(task, {
       DropSet,
       campaignItems,
       derivePrice,
       research,
       now,
     });
+    // Count the cards WRITTEN, not the tasks tried. The caller rebuilds the
+    // whole public catalog whenever this is above zero, and a task with no
+    // card to stamp (a campaign of subscriber-only drops, a lookup that keeps
+    // failing) is tried again on every run: counted, it would force that
+    // rebuild every few minutes for as long as the task stays active.
+    if (written !== null) stamped++;
   }
   // Backfill requiredWatchMinutes on recent live preorders that were stamped
   // before the field existed (or whose lookup yielded 0). Bounded per run;

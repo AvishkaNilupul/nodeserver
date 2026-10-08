@@ -115,12 +115,16 @@ returns the matching `unclaimedGameFloors` value (substring match on
 parseWave(name)
 
 // campaigns: TwitchCampaign-like [{campaignId,name,game,startAt,endAt,status,active}]
-// manifests: CampaignDrops-like [{campaignId,name,game,drops:[{itemKey,name,benefitId}]}]
+// manifests: CampaignDrops-like [{campaignId,name,game,drops:[{itemKey,name,benefitId,requiredSubs}]}]
 // → Map<eventKey, { key, game, gameKey, name, waves:[{ campaignId, name, waveLabel,
-//     order, startAt, endAt, items:[{itemKey,name,qty}] }], startAt, endAt }>
+//     order, startAt, endAt, items:[{itemKey,name,qty,earnable}] }], startAt, endAt }>
 // eventKey = normGame + "|" + eventName.toLowerCase(). Waves sorted by order then startAt.
 // A campaign with no manifest still appears as a wave with items:[] (unknown).
 // An event's items qty = count of identical itemKeys in the manifest (4× Alpha Pack).
+// earnable (added 2026-10-08, additive) = how many of those copies a viewer earns by
+// WATCHING; a drop with requiredSubs > 0 is granted to subscribers only and is never on a
+// farmed account. qty is unchanged (every copy the manifest lists); a manifest without
+// requiredSubs counts every copy as earnable. Read by utils/autoFarmBundles.js only.
 buildEventCatalog(campaigns, manifests)
 
 // drops: sellable drops [{name,game,campaign,itemKey}] (may contain duplicates —

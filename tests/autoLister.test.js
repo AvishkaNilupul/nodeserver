@@ -572,6 +572,124 @@ test("resolveCampaignItems falls back to name, then campaign game, then task gam
   assert.strictEqual(byName["No Game"].itemKey, itemKeyFor("No Game", "Campaign Game"));
 });
 
+/* ---------- only earnable drops are items (subscriber-only left out) ---------- */
+
+// A drop with requiredSubs > 0 goes to paying subscribers only. The bots drop it
+// from their own list, so no farmed account ever holds it — and a bundle that
+// asked for it never passed the holdings gate. On prod, 2026-10-08: PAYDAY 3 had
+// 18 accounts holding all three watch drops and no listing, waiting on "Dallas".
+function drop(minutes, subs, ...names) {
+  return {
+    requiredMinutesWatched: minutes,
+    ...(subs === undefined ? {} : { requiredSubs: subs }),
+    benefitEdges: names.map((name) => ({
+      benefit: { name, imageAssetURL: "https://x/" + name + ".png" },
+    })),
+  };
+}
+
+test("resolveCampaignItems leaves a subscriber-only drop out of the bundle", () => {
+  const camp = {
+    game: { displayName: "PAYDAY 3" },
+    timeBasedDrops: [
+      drop(0, 1, "Dallas"),
+      drop(30, 0, "Chains"),
+      drop(60, 0, "Hoxton"),
+      drop(90, 0, "Wolf"),
+    ],
+  };
+  const r = resolveCampaignItems(camp, {
+    game: "PAYDAY 3",
+    campaignName: "PAYDAY 3",
+  });
+  assert.deepStrictEqual(
+    r.items.map((i) => i.name),
+    ["Chains", "Hoxton", "Wolf"],
+  );
+  assert.deepStrictEqual(
+    r.items.map((i) => i.requiredMinutes),
+    [30, 60, 90],
+  );
+  // Counted before filtering: the campaign resolved, with one benefit set
+  // aside because it needs a subscription.
+  assert.strictEqual(r.rawBenefits, 4);
+  assert.strictEqual(r.subOnlyBenefits, 1);
+});
+
+test("resolveCampaignItems: a campaign of only subscriber-only drops resolved, with nothing to list", () => {
+  // "Streamer Stickers" for 1, 2, 3 and 4 gifted subs — every tier counts.
+  const camp = {
+    game: { displayName: "Arena Breakout: Infinite" },
+    timeBasedDrops: [1, 2, 3, 4].map((subs) => drop(0, subs, "Streamer Stickers")),
+  };
+  const r = resolveCampaignItems(camp, {
+    game: "Arena Breakout: Infinite",
+    campaignName: "S7 Support ABI Streamers",
+  });
+  assert.deepStrictEqual(r.items, []);
+  // rawBenefits > 0 still means "the campaign resolved" — not "ask another
+  // token" — and every one of them was subscriber-only.
+  assert.strictEqual(r.rawBenefits, 4);
+  assert.strictEqual(r.subOnlyBenefits, 4);
+});
+
+test("resolveCampaignItems keeps an item a watch drop also gives", () => {
+  const ctx = { game: "Predecessor", campaignName: "Bloodtide Drops" };
+  for (const timeBasedDrops of [
+    [drop(0, 2, "Ion Loot Core"), drop(60, 0, "Ion Loot Core")],
+    [drop(60, 0, "Ion Loot Core"), drop(0, 2, "Ion Loot Core")],
+  ]) {
+    const r = resolveCampaignItems(
+      { game: { displayName: "Predecessor" }, timeBasedDrops },
+      ctx,
+    );
+    assert.deepStrictEqual(
+      r.items.map((i) => [i.name, i.requiredMinutes]),
+      [["Ion Loot Core", 60]],
+    );
+    assert.strictEqual(r.rawBenefits, 2);
+    assert.strictEqual(r.subOnlyBenefits, 1);
+  }
+});
+
+test("resolveCampaignItems treats a drop with no subscription requirement as earnable", () => {
+  const camp = {
+    game: { displayName: "Some Game" },
+    timeBasedDrops: [
+      drop(30, undefined, "No Field"),
+      drop(30, null, "Null Field"),
+      drop(30, 0, "Zero"),
+      drop(30, "0", "Zero String"),
+      drop(30, "1", "One String"),
+    ],
+  };
+  const r = resolveCampaignItems(camp, {
+    game: "Some Game",
+    campaignName: "Launch",
+  });
+  assert.deepStrictEqual(
+    r.items.map((i) => i.name),
+    ["No Field", "Null Field", "Zero", "Zero String"],
+  );
+  assert.strictEqual(r.subOnlyBenefits, 1);
+});
+
+test("resolveCampaignItems still drops a title placeholder beside a subscriber-only drop", () => {
+  const r = resolveCampaignItems(
+    {
+      timeBasedDrops: [
+        drop(0, 1, "Supporter Badge"),
+        { requiredMinutesWatched: 60, benefitEdges: [{ benefit: { name: "Some Game" } }] },
+      ],
+    },
+    { game: "Some Game", campaignName: "Launch" },
+  );
+  assert.deepStrictEqual(r.items, []);
+  // Not "every drop is subscriber-only": one was a placeholder.
+  assert.strictEqual(r.rawBenefits, 2);
+  assert.strictEqual(r.subOnlyBenefits, 1);
+});
+
 /* --------------- holdings gate: only fully-holding accounts -------------- */
 
 const NEED = new Map([

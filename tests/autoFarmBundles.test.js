@@ -549,3 +549,117 @@ test("an 'event' that is only the game's own name makes no event claim", () => {
     "the game's name appears once, not twice",
   );
 });
+
+/* ------------------- subscriber-only drops in a manifest ------------------ */
+
+// A wave that never got its own listing is described by its campaign manifest,
+// and the manifest lists the campaign's subscriber-only drops too. A bundle
+// that promised one would wait for a holder for ever: no farmed account gets a
+// drop that needs a paid subscription (same rule as the solo lister).
+test("a wave planned from its manifest promises only what a viewer can earn by watching", () => {
+  const finals = {
+    campaignId: "c2",
+    name: "CAH Championship Finals",
+    game: GAME,
+    drops: [
+      { name: "Tier Skip", itemKey: "tier skip|overwatch 2", requiredSubs: 0 },
+      { name: "Victory Spray", itemKey: "victory spray|overwatch 2", requiredSubs: 0 },
+      { name: "Supporter Badge", itemKey: "supporter badge|overwatch 2", requiredSubs: 1 },
+      // The spray again for two gifted subs: still ONE copy an account can earn.
+      { name: "Victory Spray", itemKey: "victory spray|overwatch 2", requiredSubs: 2 },
+    ],
+  };
+  const plan = planEventBundles({
+    game: GAME,
+    tasks: [
+      task("t1", "c1", "CAH Championship Week 1"),
+      task("t2", "c2", "CAH Championship Finals"),
+    ],
+    catalog: buildEventCatalog(CAMPAIGNS, [MANIFESTS[0], finals]),
+    now: NOW,
+  })[0];
+  assert.deepEqual(
+    Object.fromEntries(plan.items.map((i) => [i.name, i.qty])),
+    { "Pachimonarch Icon": 1, "Tier Skip": 2, "Victory Spray": 1 },
+  );
+  // Both waves resolve, so the bundle exists — but it is everything an account
+  // can EARN, not everything the event gave, and is never sold as complete.
+  assert.equal(plan.wavesHeld, 2);
+  assert.equal(plan.wavesUnresolved, 0);
+  assert.equal(plan.wavesSubOnly, 1);
+  assert.equal(plan.full, false);
+  assert.ok(!bundleTitleFor(plan).includes("COMPLETE"), bundleTitleFor(plan));
+});
+
+test("a wave sold from its published set still knows its campaign had a subscriber-only drop", () => {
+  // Once the Finals wave has its own listing, its items come from that set —
+  // which lists the earnable items only. The catalog still remembers.
+  const finals = {
+    campaignId: "c2",
+    name: "CAH Championship Finals",
+    game: GAME,
+    drops: [
+      { name: "Tier Skip", itemKey: "tier skip|overwatch 2", requiredSubs: 0 },
+      { name: "Supporter Badge", itemKey: "supporter badge|overwatch 2", requiredSubs: 1 },
+    ],
+  };
+  const setsById = new Map([
+    ["set-finals", { _id: "set-finals", items: [{ itemKey: "tier skip|overwatch 2", name: "Tier Skip", game: GAME, qty: 1 }] }],
+  ]);
+  const plan = planEventBundles({
+    game: GAME,
+    tasks: [
+      task("t1", "c1", "CAH Championship Week 1"),
+      task("t2", "c2", "CAH Championship Finals", { listing: { setId: "set-finals" } }),
+    ],
+    catalog: buildEventCatalog(CAMPAIGNS, [MANIFESTS[0], finals]),
+    setsById,
+    now: NOW,
+  })[0];
+  assert.equal(plan.waves.find((w) => w.campaignId === "c2").source, "listing");
+  assert.equal(plan.wavesSubOnly, 1);
+  assert.equal(plan.full, false);
+});
+
+test("a catalog built before `earnable` existed plans exactly as it always did", () => {
+  // Wave items with no `earnable` at all: every copy counts, nothing is
+  // treated as subscriber-only, and a complete event is still complete.
+  const legacy = buildEventCatalog(CAMPAIGNS, MANIFESTS);
+  for (const event of legacy.values()) {
+    for (const wave of event.waves) for (const item of wave.items) delete item.earnable;
+  }
+  const plan = planEventBundles({
+    game: GAME,
+    tasks: [
+      task("t1", "c1", "CAH Championship Week 1"),
+      task("t2", "c2", "CAH Championship Finals"),
+    ],
+    catalog: legacy,
+    now: NOW,
+  })[0];
+  assert.deepEqual(
+    Object.fromEntries(plan.items.map((i) => [i.name, i.qty])),
+    { "Pachimonarch Icon": 1, "Tier Skip": 2, "Victory Spray": 1 },
+  );
+  assert.equal(plan.wavesSubOnly, 0);
+  assert.equal(plan.full, true);
+});
+
+test("a wave whose manifest is only subscriber-only drops has nothing to bundle", () => {
+  const finals = {
+    campaignId: "c2",
+    name: "CAH Championship Finals",
+    game: GAME,
+    drops: [{ name: "Supporter Badge", itemKey: "supporter badge|overwatch 2", requiredSubs: 1 }],
+  };
+  const plans = planEventBundles({
+    game: GAME,
+    tasks: [
+      task("t1", "c1", "CAH Championship Week 1"),
+      task("t2", "c2", "CAH Championship Finals"),
+    ],
+    catalog: buildEventCatalog(CAMPAIGNS, [MANIFESTS[0], finals]),
+    now: NOW,
+  });
+  assert.deepEqual(plans, [], "one wave with items is the solo listing, not a bundle");
+});

@@ -117,6 +117,67 @@ test("active tasks missing a mirror are backfilled as preorders", async () => {
   assert.equal(writes[0].options.upsert, true);
 });
 
+// A task with no card to stamp is tried again on every run, for as long as it
+// is active. The caller rebuilds the whole public catalog when `stamped` is
+// above zero — so what is counted is cards written, not tasks tried.
+test("a campaign with nothing to stamp is neither counted nor logged, run after run", async () => {
+  // The lister's own code for "every drop is subscriber-only" — not a copy of it.
+  const { SUB_ONLY_CAMPAIGN } = require("../utils/autoLister");
+  const task = {
+    _id: "task-1",
+    game: "Metaphor: ReFantazio",
+    campaignId: "campaign-1",
+    campaignName: "Homo Tenta Badge",
+    assignedAccounts: ["one", "two"],
+  };
+  const writes = [];
+  const logged = [];
+  let failure = Object.assign(new Error("only subscriber-only drops"), {
+    code: SUB_ONLY_CAMPAIGN,
+  });
+  const opts = {
+    AutoFarmTask: { find: () => query([task]) },
+    DropSet: {
+      find: () => query([]),
+      updateOne(filter, update, options) {
+        writes.push({ filter, update, options });
+      },
+    },
+    campaignItems: async () => {
+      throw failure;
+    },
+    derivePrice: () => 1,
+    researchForGame: async () => ({}),
+  };
+  const origError = console.error;
+  console.error = (...args) => logged.push(args.join(" "));
+  try {
+    for (let run = 0; run < 3; run++) {
+      assert.deepEqual(await syncActivePreorders(opts), {
+        candidates: 1,
+        stamped: 0,
+        filled: 0,
+      });
+    }
+    assert.deepEqual(logged, [], "an answer, not a failure");
+
+    // Any other lookup failure is still reported — and still not a stamp.
+    failure = new Error("Campaign details unavailable");
+    assert.equal((await syncActivePreorders(opts)).stamped, 0);
+    assert.equal(logged.length, 1);
+    assert.match(logged[0], /Campaign details unavailable/);
+  } finally {
+    console.error = origError;
+  }
+  assert.equal(writes.length, 0);
+
+  // A dry run still reports how many cards WOULD be stamped.
+  assert.equal(
+    (await syncActivePreorders({ ...opts, apply: false })).stamped,
+    1,
+  );
+});
+
 test("historical marketplace event sets are mirrored without touching source rows", async () => {
   const writes = [];
   const tasks = [

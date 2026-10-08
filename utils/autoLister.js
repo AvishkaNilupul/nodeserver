@@ -60,6 +60,9 @@ const { buildSetGridImage } = require("./setImage");
 // normalised identically and the holdings gate can match them (no circular
 // require — twitchInventory does not require autoLister).
 const { itemKeyFor } = require("./twitchInventory");
+// The one rule for "can a viewer earn this drop by watching" — the same one
+// that decides whether a campaign is worth farming at all.
+const { isWatchableDrop } = require("./campaignFarmability");
 const accountState = require("./twitchAccountState");
 
 const fsp = require("fs/promises");
@@ -132,15 +135,32 @@ function looksLikeTitlePlaceholder(name, { game, campaignName, hasImage = false 
 // BEFORE filtering, so the caller can tell "campaign resolved but every benefit
 // was a placeholder" (don't publish) apart from "campaign didn't resolve at
 // all" (try another token).
+//
+// Only drops a viewer can earn by WATCHING become items. A drop with
+// requiredSubs > 0 goes to paying subscribers alone and the bots drop it from
+// their own list, so no farmed account ever holds it — and a bundle that asks
+// for it is one no account can complete. Every campaign that mixed the two
+// kinds was farmed and never listed: PAYDAY 3 (three watch drops + "Dallas"
+// for a sub) had 18 accounts holding all three earnable items and a listing
+// that waited on the fourth for two weeks. `subOnlyBenefits` counts what was
+// left out for that reason (it is part of rawBenefits), so the caller can say
+// "every drop here needs a subscription" instead of "only a title". An item a
+// watch drop ALSO gives stays: it is earnable through that drop.
 function resolveCampaignItems(camp, { game, campaignName }) {
   const items = [];
   const seen = new Set();
   let rawBenefits = 0;
+  let subOnlyBenefits = 0;
   for (const d of (camp && camp.timeBasedDrops) || []) {
+    const subOnly = !isWatchableDrop(d);
     for (const e of d.benefitEdges || []) {
       const b = e && e.benefit;
       if (!b || !b.name) continue;
       rawBenefits++;
+      if (subOnly) {
+        subOnlyBenefits++;
+        continue;
+      }
       const hasImage = !!String((b && b.imageAssetURL) || "").trim();
       if (looksLikeTitlePlaceholder(b.name, { game, campaignName, hasImage }))
         continue;
@@ -172,13 +192,48 @@ function resolveCampaignItems(camp, { game, campaignName }) {
       });
     }
   }
-  return { items, rawBenefits };
+  return { items, rawBenefits, subOnlyBenefits };
+}
+
+// A campaign whose EVERY drop needs a paid subscription has nothing to list,
+// and that is the campaign's own definition: the same from any token, on any
+// day. So the answer is kept and Twitch is not asked again on each sweep —
+// such a task is swept every tick for as long as it stays active.
+const SUB_ONLY_CAMPAIGN = "sub_only_campaign";
+const SUB_ONLY_TTL_MS = 6 * 60 * 60 * 1000;
+const subOnlyCampaigns = new Map(); // campaignId -> ms
+
+function subOnlyCampaignError(campaignId, game, campaignName) {
+  const e = new Error(
+    "Campaign " +
+      campaignId +
+      " (" +
+      (campaignName || game) +
+      ") has only subscriber-only drops — nothing a farmed account can earn. " +
+      "Not publishing.",
+  );
+  e.code = SUB_ONLY_CAMPAIGN;
+  return e;
 }
 
 // Borrow a healthy bot-account token (same trick campaignWatcher uses) to ask
 // Twitch what items this campaign actually gives, before anything is farmed.
 // Refuses to return a set built only from a title placeholder (the AC bug).
+//
+// The items are the EARNABLE ones (see resolveCampaignItems). A campaign with
+// none — every drop subscriber-only — throws an error coded SUB_ONLY_CAMPAIGN:
+// nothing is listed and no pre-order is stamped for it, and the reason is the
+// error's own text rather than "waiting for an account to hold the full
+// bundle" (the legacy sweep records it as the task's listing error; a lane
+// reports it as the task's verify note).
 async function campaignItems(campaignId, game, campaignName) {
+  const knownSubOnly = subOnlyCampaigns.get(String(campaignId));
+  if (knownSubOnly) {
+    if (Date.now() - knownSubOnly < SUB_ONLY_TTL_MS) {
+      throw subOnlyCampaignError(campaignId, game, campaignName);
+    }
+    subOnlyCampaigns.delete(String(campaignId));
+  }
   const { fetchCampaignDetails } = require("./twitchInventory");
   // fetchCampaignDetails is integrity-gated: a token whose last scan failed
   // integrity will throw "Campaign details unavailable". So prefer known-good
@@ -211,14 +266,20 @@ async function campaignItems(campaignId, game, campaignName) {
   }
   let lastErr = null;
   let sawPlaceholderOnly = false;
+  let subOnly = false;
   for (const acc of ordered) {
     try {
       const camp = await fetchCampaignDetails(acc.clientSecret, campaignId);
-      const { items, rawBenefits } = resolveCampaignItems(camp, {
-        game,
-        campaignName,
-      });
+      const { items, rawBenefits, subOnlyBenefits } = resolveCampaignItems(
+        camp,
+        { game, campaignName },
+      );
       if (items.length) return items;
+      // Every drop needs a subscription. No other token will say otherwise.
+      if (rawBenefits > 0 && subOnlyBenefits === rawBenefits) {
+        subOnly = true;
+        break;
+      }
       // The campaign resolved, but every benefit it returned was a title
       // placeholder (or there were none). There is nothing real to sell here —
       // probing another token won't change that, and publishing would create
@@ -227,6 +288,10 @@ async function campaignItems(campaignId, game, campaignName) {
     } catch (e) {
       lastErr = e;
     }
+  }
+  if (subOnly) {
+    subOnlyCampaigns.set(String(campaignId), Date.now());
+    throw subOnlyCampaignError(campaignId, game, campaignName);
   }
   if (sawPlaceholderOnly) {
     throw new Error(
@@ -3480,6 +3545,10 @@ module.exports = {
   looksLikeTitlePlaceholder,
   resolveCampaignItems,
   campaignItems,
+  // The code on the error campaignItems throws for a campaign whose every drop
+  // is subscriber-only, and the remembered verdicts (tests reset them).
+  SUB_ONLY_CAMPAIGN,
+  _subOnlyCampaigns: subOnlyCampaigns,
   filterVerifiedHolders,
   // Additive export for the lane engine's drop checker
   // (utils/farm2/steps/verify.js). It reuses THIS holdings gate rather than

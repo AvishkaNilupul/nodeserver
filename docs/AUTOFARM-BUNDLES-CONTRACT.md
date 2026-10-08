@@ -58,13 +58,21 @@ For a task's game:
 4. Items per wave come from that wave's task's own published `DropSet` when it
    has one (it carries images and the real qty) and from the campaign manifest
    otherwise. A wave whose items are unknown is left out and the event cannot
-   be `full`.
+   be `full`. From the manifest, only the copies a viewer can earn by
+   **watching** are promised (the catalog's `earnable`, 2026-10-08): a drop
+   with `requiredSubs > 0` goes to subscribers only, no farmed account ever
+   holds it, and a bundle that asked for it never found a holder. A manifest
+   recorded before `requiredSubs` counts every copy, as before.
 5. Merge with `radarEventListings.mergeWaveItems` — qty **sums** across waves,
    so an item granted by Week 1 and by Finals is promised as `2×` and the
    holdings gate demands two copies. This is the same rule the manual radar
    event listing uses.
 6. `full` = every **started** wave of the event is held. Only a full bundle may
    claim `COMPLETE BUNDLE` in its title or take the full-event price bonus.
+   A held wave whose campaign also gave a subscriber-only reward
+   (`wavesSubOnly` on the plan) keeps the event from being `full`, whichever
+   source its items came from: the bundle is everything an account can earn,
+   not everything the event gave.
 
 ### The title
 
