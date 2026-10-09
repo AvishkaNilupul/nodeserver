@@ -420,6 +420,11 @@ const TOKENLESS_FAIL_PCT = 50;
 const STALE_LISTING_CAP = 12;
 const STALE_CANDIDATE_POOL = 60;
 const STALE_CANDIDATE_CAP = 2;
+// The markets that hold a listing's accounts in their own vault and hand a
+// buyer one of exactly those (settings.UNCLAIMED_MARKETS), and how many of a
+// listing's attached ledger rows are fetched to choose which to read live.
+const STALE_VAULT_MARKETS = new Set(["gameflip", "ggsel", "digiseller"]);
+const STALE_ATTACHED_POOL = 12;
 
 // Gameflip suspects confirmed per run, one live GET each, sequentially.
 const GHOST_CONFIRM_CAP = 20;
@@ -1478,28 +1483,35 @@ const CHECKS = [
           // silently becomes the very thing it is meant to replace.
           poolAccountId: 1,
         };
-        // A Gameflip live unit carries ONE account's credentials and Gameflip
-        // hands exactly that account to the buyer, so it is the only candidate
-        // that matters. Its ledger row is `listed` — never one of the spare
-        // SELLABLE_STATUSES the query above matches — so every live unit read
-        // "no sellable ledger row for this game/set" (6 false fails on
-        // 2026-09-27, each backed by an account the unclaimed engine re-reads
-        // every pass). Judge the attached row; no spare can stand in for it.
-        const attached =
-          listing.marketplace === "gameflip" && listing.accountLogin
-            ? await UnclaimedAccount.find(
-                {
-                  source: "noclaim",
-                  status: "listed",
-                  soldAt: null,
-                  listingExternalIds: String(listing.externalId),
-                },
-                fields,
-              )
-                .limit(3)
-                .lean()
-            : [];
-        const candidates = attached.length
+        // A VAULT listing (Gameflip, GGSel, Digiseller) sells the accounts
+        // already fed to the platform, and the platform hands each buyer one of
+        // exactly those. Their ledger rows are `listed` — never one of the spare
+        // SELLABLE_STATUSES the query above matches — so such a listing read "no
+        // sellable ledger row for this game/set" with its own stock sitting
+        // right there. First seen on 2026-09-27 (6 false fails on Gameflip
+        // units, fixed then only for a row carrying accountLogin); then five
+        // Rainbow Six listings failed for two days on 2026-10-07/09 — four
+        // GGSel offers with 2 to 6 listed units each and a Gameflip row with no
+        // accountLogin — while every one advertised exactly what its attached
+        // accounts held. Judge the attached rows; no spare can stand in for
+        // them. A listing with nothing attached is judged as before.
+        const attachedBy = [{ listingExternalIds: String(listing.externalId) }];
+        if (listing._id != null) attachedBy.push({ listingIds: String(listing._id) });
+        const attached = STALE_VAULT_MARKETS.has(listing.marketplace)
+          ? await UnclaimedAccount.find(
+              {
+                source: "noclaim",
+                status: "listed",
+                soldAt: null,
+                $or: attachedBy,
+              },
+              fields,
+            )
+              .limit(STALE_ATTACHED_POOL)
+              .lean()
+          : [];
+        const fromVault = attached.length > 0;
+        const candidates = fromVault
           ? attached
           : await UnclaimedAccount.find(query, fields)
               .limit(STALE_CANDIDATE_POOL)
@@ -1513,8 +1525,17 @@ const CHECKS = [
           candidates,
           required,
         );
-        const walk = covering.concat(short).slice(0, STALE_CANDIDATE_CAP);
+        // Spare stock answers "can ANY account honour this?" — one holder is
+        // enough, so the likely ones are read first. A vault's units each go to
+        // some buyer, so there the question is "does any unit fall short?" and
+        // the unlikely ones are read first: one unit that cannot cover is a
+        // stale listing whatever its neighbours hold.
+        const walk = (fromVault ? short.concat(covering) : covering.concat(short)).slice(
+          0,
+          STALE_CANDIDATE_CAP,
+        );
         let holder = null;
+        let shortUnit = null;
         let degraded = false;
         for (const row of walk) {
           // liveCoverage, NOT accountCoverage. accountCoverage is the DB union
@@ -1535,16 +1556,24 @@ const CHECKS = [
             degraded = true;
             continue;
           }
+          if (fromVault) {
+            if (!verdict.ok) {
+              shortUnit = row;
+              break;
+            }
+            holder = row;
+            continue;
+          }
           if (verdict.ok) {
             holder = row;
             break;
           }
         }
-        if (holder) continue;
+        if (holder && !shortUnit) continue;
         // A DropLog read that failed leaves a ledger-only verdict, which is
         // exactly the verdict known to be wrong. Count it as unmeasured rather
         // than accuse a listing on evidence we already know under-reports.
-        if (degraded) {
+        if (degraded && !shortUnit) {
           unresolved += 1;
           continue;
         }
@@ -1556,7 +1585,7 @@ const CHECKS = [
           advertised: (listing.requiredDrops || []).length,
           candidates: candidates.length,
           missing: candidates.length
-            ? coverage.shortfallSummary(candidates, required)
+            ? coverage.shortfallSummary(shortUnit ? [shortUnit] : candidates, required)
             : "no sellable ledger row for this game/set",
           url: listing.url,
         });
@@ -1583,7 +1612,9 @@ const CHECKS = [
               (notReached ? " (" + notReached + " not reached this run)" : ""),
         detail:
           "Verdict is unclaimedCoverage.liveCoverage — the same gate " +
-          "delivery uses." +
+          "delivery uses. A Gameflip, GGSel or Digiseller listing is judged " +
+          "on the accounts already in its vault (every one read must cover); " +
+          "any other on the spare stock it would draw from." +
           (notJudged
             ? " " + notJudged + " archive-backed row(s) not judged."
             : "") +

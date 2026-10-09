@@ -59,6 +59,11 @@ function cmp(a, b) {
 }
 
 function eq(value, want) {
+  // An array field matches a scalar when it CONTAINS it — how the stale-listing
+  // check finds the ledger rows attached to a listing
+  // (`listingExternalIds: "<id>"`). Without this the fake compared the array to
+  // the string, matched nothing, and that whole path went untested.
+  if (Array.isArray(value) && !Array.isArray(want)) return value.some((v) => eq(v, want));
   if (want instanceof RegExp) return want.test(String(value == null ? "" : value));
   if (value instanceof Date || want instanceof Date) return cmp(value, want) === 0;
   // A missing field and an explicit null are the same thing to Mongo, and the
@@ -1030,6 +1035,163 @@ test("REGRESSION: a degraded coverage verdict never counts as covered", async ()
   const check = await runCheck("listings.stale", deps);
   assert.strictEqual(check.status, "unknown", "a fallback verdict is not evidence of coverage");
   assert.match(String(check.summary), /could not be resolved|not reached/i);
+});
+
+/* ---- listings.stale: a vault listing is judged on its own attached accounts ---- */
+
+// A no-claim listing on a vault market, the two ledger rows fed to it, and a
+// SPARE row of the same set that must never stand in for them.
+function vaultFixture(over = {}) {
+  const row = listing({
+    _id: "row-gg-1",
+    marketplace: "ggsel",
+    externalId: "103323374",
+    title: "Rainbow Six Siege Twitch Drops (14 Items) — 13× Esports Pack 26 Stage 2.1 + OL' CLANKER",
+    origin: "unclaimed",
+    set: "set-r6",
+    requiredDrops: [
+      { name: "Esports Pack 26 Stage 2.1", qty: 13 },
+      { name: "OL' CLANKER", qty: 1 },
+    ],
+    ...(over.row || {}),
+  });
+  const unit = (login, more = {}) => ({
+    source: "noclaim",
+    game: "Rainbow Six Siege",
+    status: "listed",
+    soldAt: null,
+    set: "set-r6",
+    market: row.marketplace,
+    login,
+    listingExternalIds: [row.externalId],
+    listingIds: [String(row._id)],
+    drops: [],
+    ...more,
+  });
+  const ledger = over.ledger || [unit("unit-a"), unit("unit-b")];
+  const read = [];
+  const deps = healthyDeps({
+    MarketplaceListing: fakeModel([row]),
+    UnclaimedAccount: fakeModel(ledger),
+  });
+  deps.unclaimedCoverage = {
+    ...deps.unclaimedCoverage,
+    partitionByCoverage: over.partition || ((rows) => ({ covering: rows, short: [] })),
+    shortfallSummary: (rows) => "short on: " + rows.map((r) => r.login).join(","),
+    liveCoverage: async (r) => {
+      read.push(r.login);
+      return (over.live || (() => ({ ok: true, degraded: false, source: "live" })))(r);
+    },
+  };
+  return { deps, read, unit, row };
+}
+
+test("REGRESSION: a GGSel vault offer is judged on the accounts in its vault, not called stockless", async () => {
+  // Production, 2026-10-07 to 10-09: five Rainbow Six listings failed this check
+  // for two days with "no sellable ledger row for this game/set" — four GGSel
+  // offers holding 2 to 6 listed units each and one Gameflip row — while every
+  // one of them advertised exactly what its attached accounts held. A vault
+  // listing's stock is `listed`, which the spare-stock query can never match.
+  const { deps, read } = vaultFixture();
+  const check = await runCheck("listings.stale", deps);
+  assert.strictEqual(check.status, "ok", check.summary);
+  assert.strictEqual(check.measured, 0);
+  assert.deepStrictEqual(read.sort(), ["unit-a", "unit-b"], "its own units were read live");
+});
+
+test("a Gameflip row with no accountLogin is found through the ledger rows that point at it", async () => {
+  const f = vaultFixture({
+    row: { _id: "row-gf-9", marketplace: "gameflip", externalId: "8fa0da07", accountLogin: "" },
+  });
+  // Attached by the row's own id only — the external-id list is empty here.
+  const ledger = [f.unit("gf-unit", { listingExternalIds: [], listingIds: ["row-gf-9"], market: "gameflip" })];
+  const f2 = vaultFixture({ row: { _id: "row-gf-9", marketplace: "gameflip", externalId: "8fa0da07", accountLogin: "" }, ledger });
+  const check = await runCheck("listings.stale", f2.deps);
+  assert.strictEqual(check.status, "ok", check.summary);
+  assert.deepStrictEqual(f2.read, ["gf-unit"]);
+});
+
+test("one vault unit that cannot cover fails the listing, whatever its neighbours hold", async () => {
+  // Each unit goes to some buyer. The rows the ledger already doubts are read
+  // first, so a short one is found within the cap.
+  const { deps, read } = vaultFixture({
+    partition: (rows) => ({
+      covering: rows.filter((r) => r.login !== "unit-b"),
+      short: rows.filter((r) => r.login === "unit-b"),
+    }),
+    live: (r) => ({ ok: r.login !== "unit-b", degraded: false, source: "live" }),
+  });
+  const check = await runCheck("listings.stale", deps);
+  assert.strictEqual(check.status, "fail");
+  assert.strictEqual(check.measured, 1);
+  assert.strictEqual(read[0], "unit-b", "the doubted unit is read first");
+  assert.strictEqual(check.items[0].externalId, "103323374");
+  assert.strictEqual(check.items[0].candidates, 2);
+  assert.strictEqual(check.items[0].missing, "short on: unit-b", "names the unit that falls short");
+});
+
+test("a spare row of the same set never stands in for a vault's own units", async () => {
+  const f = vaultFixture({ live: (r) => ({ ok: r.login === "spare", degraded: false, source: "live" }) });
+  const ledger = [
+    f.unit("unit-a"),
+    { source: "noclaim", game: "Rainbow Six Siege", status: "released", soldAt: null, set: "set-r6", login: "spare", drops: [] },
+  ];
+  const g = vaultFixture({ ledger, live: (r) => ({ ok: r.login === "spare", degraded: false, source: "live" }) });
+  const check = await runCheck("listings.stale", g.deps);
+  assert.strictEqual(check.status, "fail", "the unit in the vault is short; the spare is not what a buyer gets");
+  assert.deepStrictEqual(g.read, ["unit-a"]);
+});
+
+test("a vault unit whose live read failed is unknown, never a pass and never a fail", async () => {
+  const { deps } = vaultFixture({ live: () => ({ ok: true, degraded: true, source: "db" }) });
+  const check = await runCheck("listings.stale", deps);
+  assert.strictEqual(check.status, "unknown");
+});
+
+test("a vault listing with nothing attached is judged on spare stock, as before", async () => {
+  const none = vaultFixture({ ledger: [] });
+  const empty = await runCheck("listings.stale", none.deps);
+  assert.strictEqual(empty.status, "fail");
+  assert.strictEqual(empty.items[0].missing, "no sellable ledger row for this game/set");
+
+  const spare = vaultFixture({
+    ledger: [{ source: "noclaim", game: "Rainbow Six Siege", status: "released", soldAt: null, set: "set-r6", login: "spare", drops: [] }],
+  });
+  const ok = await runCheck("listings.stale", spare.deps);
+  assert.strictEqual(ok.status, "ok");
+  assert.deepStrictEqual(spare.read, ["spare"]);
+});
+
+test("a claim-at-sale listing still needs only ONE spare account that covers", async () => {
+  // Eldorado picks an account when the order is paid, so one holder is enough —
+  // and rows attached to it (delivery history) are not its stock.
+  const row = listing({
+    _id: "row-eld-1",
+    marketplace: "eldorado",
+    externalId: "eld-ow-1",
+    unclaimedGame: "Overwatch 2",
+    requiredDrops: [{ name: "Esports Loot Box", qty: 1 }],
+  });
+  const spare = (login) => ({ source: "noclaim", game: "Overwatch 2", status: "released", soldAt: null, login, drops: [] });
+  const read = [];
+  const deps = healthyDeps({
+    MarketplaceListing: fakeModel([row]),
+    UnclaimedAccount: fakeModel([
+      spare("ow-short"),
+      spare("ow-full"),
+      { source: "noclaim", game: "Overwatch 2", status: "listed", soldAt: null, login: "ow-delivered", listingExternalIds: ["eld-ow-1"], drops: [] },
+    ]),
+  });
+  deps.unclaimedCoverage = {
+    ...deps.unclaimedCoverage,
+    liveCoverage: async (r) => {
+      read.push(r.login);
+      return { ok: r.login === "ow-full", degraded: false, source: "live" };
+    },
+  };
+  const check = await runCheck("listings.stale", deps);
+  assert.strictEqual(check.status, "ok");
+  assert.deepStrictEqual(read, ["ow-short", "ow-full"], "spares only, stopping at the first that covers");
 });
 
 test("every check returns the number it measured and the threshold it used", async () => {
