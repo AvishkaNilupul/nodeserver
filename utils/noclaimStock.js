@@ -44,6 +44,13 @@ function holdings() {
 function ual() {
   return require("./unclaimedAutoList");
 }
+// AUTO-FARM accounts sold for their unclaimed drops (utils/autofarmStock.js).
+// Required only when a candidate or a ledger says farm "autofarm", so with
+// that feature off this file never loads it.
+function autofarm() {
+  return require("./autofarmStock");
+}
+const AUTOFARM = "autofarm";
 
 // Ledger statuses an account may be taken from, and the ones that mean it is
 // already spoken for.
@@ -89,6 +96,7 @@ const LEDGER_DEFAULTS = {
   poolAccountId: "",
   botId: "",
   container: "",
+  farm: "",
   drops: [],
   set: null,
   market: "",
@@ -420,6 +428,8 @@ function candidateOf(h, led, required) {
     container: str(h.container),
     game: str(h.game),
     twitchId: str(h.twitchId),
+    // "" = a no-claim bot account; "autofarm" = utils/autofarmStock.
+    farm: str(h.farm),
     items,
     readAt: h.readAt || null,
     ledgerStatus: str(led && led.status),
@@ -507,6 +517,9 @@ async function liveCheck(c, pool, required) {
     botId: c.botId,
     container: c.container,
     poolAccountId: c.poolAccountId,
+    // Decides which finished drops count (inventoryForCandidate): on an
+    // auto-farm account, only the ones its claiming bot cannot claim.
+    farm: str(c.farm),
   };
   let inv;
   try {
@@ -580,6 +593,10 @@ async function commitLedger(c, ctx) {
   for (const [k, v] of Object.entries(identity)) {
     if (str(v)) fields[k] = v;
   }
+  // An auto-farm account: its sale is cleaned up by utils/autofarmStock, never
+  // by spendAccount (see spendPending). Written only for those, so a no-claim
+  // claim writes exactly what it always did.
+  if (str(c.farm)) fields.farm = str(c.farm);
 
   // 2. The existing ledger row, compare-and-set on the status it has. Two rows
   // for one login is ambiguous — the other row may be selling this account
@@ -827,12 +844,27 @@ async function claimForSet(set, want, opts = {}) {
     // login slips past every "already listed?" check. Left alone until the
     // config catches up and the sweep files it under one name.
     if (str(c.login).trim().toLowerCase() !== c.loginLower) continue;
+    const isAutofarm = str(c.farm) === AUTOFARM;
+    // An auto-farm account is sold on the claim-at-sale markets only: a vault
+    // unit can be released again, and nothing here hands its claimed drops
+    // back to the archive when that happens.
+    if (isAutofarm && mode !== "sold") continue;
     let commit = null;
+    let pool = null;
     try {
-      const pool = c.poolAccountId
+      pool = c.poolAccountId
         ? await AvailableAccount.findById(c.poolAccountId).lean()
         : null;
       if (poolBlockReason(pool, norms)) continue;
+      if (isAutofarm) {
+        // The auto-farm's own rules, straight from the database: the snapshot
+        // can be 30 s behind a listing, a sale or a connected game.
+        const why = await autofarm().claimBlockReason(c, pool);
+        if (why) {
+          missed[why] = (missed[why] || 0) + 1;
+          continue;
+        }
+      }
       const cred = await ual().credentialForLedger({
         source: "noclaim",
         login: c.login,
@@ -891,6 +923,23 @@ async function claimForSet(set, want, opts = {}) {
         continue;
       }
 
+      // 5. An auto-farm account also has a Drops Archive record. The buyer
+      // gets the whole account, so its claimed drops leave the archive with it
+      // and its bot record is marked sold — now, before the login goes out, or
+      // a claimed-bundle order could be handed the same account. Lost to a
+      // listing or a buyer that got there first: back off.
+      if (isAutofarm) {
+        const lo = await autofarm().reserveLeftovers(pool, { market: m, orderId: oid, setId });
+        if (!lo || !lo.ok) {
+          const undo = commit;
+          commit = null;
+          const why = str(lo && lo.why) || "archive reservation failed";
+          missed[why] = (missed[why] || 0) + 1;
+          await safely("rollback", () => undoCommit(undo, why));
+          continue;
+        }
+      }
+
       const ledgerId = commit.ledgerId;
       commit = null; // handed out — never undone past this point
       out.push(claimedAccount(ledgerId, { ...cred, login: cred.login || c.login }, c.poolAccountId));
@@ -909,6 +958,12 @@ async function claimForSet(set, want, opts = {}) {
       console.error("noclaimStock claim of " + c.login + " failed:", e && e.message);
       if (commit) {
         await safely("rollback", () => undoCommit(commit, "claim error: " + ((e && e.message) || "?")));
+        // Whatever the archive step stamped before it failed goes back too.
+        if (isAutofarm && pool) {
+          await safely("archive release", () =>
+            autofarm().releaseForPool(pool, { market: m, orderId: oid }),
+          );
+        }
       }
     }
   }
@@ -1082,6 +1137,11 @@ async function spendPending({ limit = 10 } = {}) {
     manualListing: { $gt: "" },
     manualDeliveredAt: { $ne: null },
     manualSpentAt: null,
+    // Never an AUTO-FARM account (utils/autofarmStock.retirePending owns
+    // those): spendAccount looks for the account in no-claim bot configs only.
+    // It would find nothing to remove, call that proof, and stamp the pool row
+    // "spent" while the account is still farming in an auto-farm bot.
+    farm: { $ne: AUTOFARM },
   })
     .sort({ soldAt: 1, _id: 1 })
     .limit(max)

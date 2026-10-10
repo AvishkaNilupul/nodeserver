@@ -30,6 +30,15 @@ function ual() {
 function campaignModel() {
   return require("../models/TwitchCampaign");
 }
+// AUTO-FARM accounts whose finished drops their bot cannot claim are stock too
+// (utils/autofarmStock.js, behind autoFarm.autofarmStock). They join this
+// snapshot as rows with farm "autofarm": same reads, same expiry rules, same
+// claim — but their candidate list comes from the database, they have a read
+// quota of their own, and they carry extra free rules (see freeReason).
+function autofarm() {
+  return require("./autofarmStock");
+}
+const AUTOFARM = "autofarm";
 
 // Contract §1e defaults. Used only when settings.getNoclaimShopSettings is
 // missing (the accessor ships in the same change): a settings.js without it
@@ -469,6 +478,16 @@ function freeReason(holding, base, gameNorm) {
   if (soldForGame(pool.soldGames, gameNorm)) return "sold for this game";
   if (SPENT_NOTE_RE.test(String(pool.claimedNote || "").trim())) return "spent";
   if (pool.status !== "claimed") return "pool not claimed";
+  // An auto-farm account answers to its own rules as well (never sold or
+  // linked, on no listing's reservation, not rented, a live token, few claimed
+  // drops left — utils/autofarmStock.blockReason). No facts = not free.
+  if (h.farm === AUTOFARM) {
+    const af = b.autofarm;
+    if (!af || !af.on) return "auto-farm stock is off";
+    const f = af.facts && af.facts.get(String(h.loginLower || "").toLowerCase());
+    if (!f) return "not checked";
+    if (f.reason) return f.reason;
+  }
   const ledger = ledgerFor(h, b);
   if (ledger && !FREE_STATUSES.includes(ledger.status)) {
     if (ledger.status === "listed") return "on auto listing";
@@ -843,6 +862,29 @@ async function sweepInner({ budget, concurrency, game, reason, t0, recheckOnly }
     cands.push({ ...c, loginLower });
   }
 
+  // 1b. Auto-farm accounts that may hold unclaimed stock. A database read, no
+  // SSH; [] while the feature is off. A login that is also in a no-claim bot
+  // stays a no-claim account (it was seen first). `null` = the read FAILED,
+  // which is not the same as "they are no longer candidates": their rows are
+  // then left exactly as they are.
+  let afCands = [];
+  try {
+    afCands = (await autofarm().collectCandidates()) || [];
+  } catch (e) {
+    console.error(
+      "noclaimHoldings sweep (" + reason + "): auto-farm candidates unreadable —",
+      e && e.message,
+    );
+    afCands = null;
+  }
+  for (const c of afCands || []) {
+    if (!c) continue;
+    const loginLower = String(c.login || "").toLowerCase();
+    if (!loginLower || seen.has(loginLower)) continue;
+    seen.add(loginLower);
+    cands.push({ ...c, farm: AUTOFARM, loginLower });
+  }
+
   // 2. Pool row per account, joined by clientSecret. Same join (and the same
   // last-row-wins on a duplicated secret) as the engine's scan, so a holding
   // and the engine's ledger name the same pool row.
@@ -870,6 +912,7 @@ async function sweepInner({ budget, concurrency, game, reason, t0, recheckOnly }
               botId: String(c.botId || ""),
               container: String(c.container || ""),
               game: String(c.game || ""),
+              farm: c.farm === AUTOFARM ? AUTOFARM : "",
               seenAt: now,
               inConfig: true,
             },
@@ -884,10 +927,10 @@ async function sweepInner({ budget, concurrency, game, reason, t0, recheckOnly }
       { ordered: false },
     );
   }
-  await NoclaimHolding.updateMany(
-    { loginLower: { $nin: [...seen] }, inConfig: true },
-    { $set: { inConfig: false } },
-  );
+  const gone = { loginLower: { $nin: [...seen] }, inConfig: true };
+  // The auto-farm list could not be read: only no-claim rows may be flipped.
+  if (afCands === null) gone.farm = { $ne: AUTOFARM };
+  await NoclaimHolding.updateMany(gone, { $set: { inConfig: false } });
 
   // 4. What to read: never-read first, then the oldest read. Rows whose last
   // read FAILED go after every healthy one — a dead token fails forever, and
@@ -942,7 +985,25 @@ async function sweepInner({ budget, concurrency, game, reason, t0, recheckOnly }
       a.readMs - b.readMs ||
       a.cand.loginLower.localeCompare(b.cand.loginLower),
   );
-  const picked = eligible.slice(0, limit);
+  // The background tick reads the two farms on separate quotas: the no-claim
+  // farm keeps every read it had, and the auto-farm rows get their own few
+  // (autoFarm.autofarmStockPerTick). A refresh someone asked for, and a forced
+  // re-read, take whatever is oldest across both.
+  let picked;
+  if (reason === "tick" && !recheckOnly) {
+    let afLimit = 0;
+    try {
+      afLimit = Math.max(0, Math.floor(Number(autofarm().cfg().perTick)) || 0);
+    } catch {
+      afLimit = 0;
+    }
+    picked = eligible
+      .filter((e) => e.cand.farm !== AUTOFARM)
+      .slice(0, limit)
+      .concat(eligible.filter((e) => e.cand.farm === AUTOFARM).slice(0, afLimit));
+  } else {
+    picked = eligible.slice(0, limit);
+  }
 
   // 5. Live reads, a few at a time.
   let read = 0;
@@ -1120,6 +1181,19 @@ async function buildBase() {
     });
   }
   const expiry = expirySettings();
+  // The extra facts an auto-farm row's freeReason needs — read only when the
+  // snapshot holds such rows. A failed read leaves them with no facts, and a
+  // row without facts is never free.
+  let autofarmFacts = null;
+  const afRows = holdings.filter((h) => h && h.farm === AUTOFARM);
+  if (afRows.length) {
+    try {
+      autofarmFacts = await autofarm().baseFacts(afRows);
+    } catch (e) {
+      console.error("noclaimHoldings: auto-farm facts unreadable:", e && e.message);
+      autofarmFacts = { on: false, facts: new Map(), error: (e && e.message) || "unreadable" };
+    }
+  }
   return {
     at,
     maxAgeMs: maxAgeMsOf(cfg),
@@ -1129,6 +1203,7 @@ async function buildBase() {
     poolById,
     expiry,
     campaignEnds: expiry.on ? await campaignEndsFor(holdings) : new Map(),
+    autofarm: autofarmFacts,
   };
 }
 
@@ -1377,6 +1452,12 @@ function noteInterest() {
 
 async function sweepWanted() {
   if (Date.now() - lastInterestAt < INTEREST_WINDOW_MS) return true;
+  // Auto-farm stock on: its drops last seven days, so it is always wanted.
+  try {
+    if (autofarm().cfg().on) return true;
+  } catch {
+    /* a settings hiccup falls through to the listing check */
+  }
   try {
     const MarketplaceListing = require("../models/MarketplaceListing");
     return !!(await MarketplaceListing.exists({ noclaimStock: true, status: "active" }));

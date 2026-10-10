@@ -166,6 +166,24 @@ const AUTO_FARM_DEFAULTS = {
   // How long the token must have been dead, and re-confirmed by a later scan,
   // before a sold account is retired (clamped 24..720).
   deadTokenRetireHours: 48,
+  // AUTO-FARM UNCLAIMED STOCK (utils/autofarmStock.js). Since 2026-10-05 Twitch
+  // refuses a claim from an account that is not linked to the game, so an
+  // auto-farm account ends a campaign with its drops finished and UNCLAIMED.
+  // On = such accounts join the no-claim holdings snapshot and can be sold
+  // whole, one buyer each, through the claim-at-sale markets; a sold account
+  // leaves farming. Off = nothing is read and nothing can be claimed (a sale
+  // already made still gets its clean-up). Ships OFF.
+  autofarmStock: false,
+  // Live inventory reads per 10-minute holdings tick for those accounts, on top
+  // of the no-claim farm's own quota (clamped 0..60).
+  autofarmStockPerTick: 15,
+  // Most unsold CLAIMED drops an account may still carry and be sold whole —
+  // they go to the buyer with it (clamped 0..200).
+  autofarmStockMaxLeftover: 5,
+  // A task that ended this many days ago still supplies candidates (1..30).
+  autofarmStockTaskDays: 8,
+  // Optional allow-list of games for a first rollout; empty = every game.
+  autofarmStockGames: [],
   // Multi-market auto-listing categories.
   // Plati (Digiseller) cataloguer placement for Twitch-drop accounts:
   //   Digital Goods and Access > Services and social networks > Twitch,

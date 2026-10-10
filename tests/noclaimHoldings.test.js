@@ -90,6 +90,9 @@ function loadHoldings({
   shop = { maxAgeHours: 8 }, // null = settings without getNoclaimShopSettings
   poolPassword = (row) => (row && (row.password || row.credPasswordEnc) ? "pw" : ""),
   collect = null,
+  // A stand-in for utils/autofarmStock.js. null = the real module, which the
+  // stubbed settings (no getAutoFarm) leave switched OFF.
+  autofarm = null,
 } = {}) {
   const Holding = fakeModel(holdings);
   const Pool = fakeModel(pool);
@@ -124,6 +127,7 @@ function loadHoldings({
     [path.join(ROOT, "utils", "settings"), settingsStub],
     [path.join(ROOT, "utils", "unclaimedAutoList"), engine],
   ]);
+  if (autofarm) stubs.set(path.join(ROOT, "utils", "autofarmStock"), autofarm);
   delete require.cache[MOD_PATH];
   const h = require("../utils/noclaimHoldings");
   delete require.cache[MOD_PATH];
@@ -678,6 +682,9 @@ test("sweepOnce: upserts every config account, flags the missing, reads oldest-f
     botId: "3",
     container: "noclaim-bot-3",
     game: "Overwatch 2",
+    // A no-claim bot account. Written on every sweep, so a login that once
+    // came in as auto-farm stock and now sits in a no-claim bot reads right.
+    farm: "",
     inConfig: true,
   });
   assert.strictEqual(ops[2].updateOne.update.$set.poolAccountId, ""); // carol: no pool row
@@ -864,4 +871,186 @@ test("sweepWanted: a failed listing probe reads as not wanted (never an extra Pi
     },
   });
   assert.strictEqual(await h.sweepWanted(), false);
+});
+
+// ---------------------------------------------------------------------------
+// Auto-farm rows (utils/autofarmStock.js)
+//
+// Since 2026-10-05 an auto-farm account ends a campaign with finished,
+// unclaimed drops, so it joins this snapshot as a row with farm "autofarm".
+// Its candidate list comes from the database (not a bot config), it is read on
+// a quota of its own, and it is free only when its own facts say so as well.
+// ---------------------------------------------------------------------------
+
+const AF_FREE = { on: true, facts: new Map([["farmer", { reason: "" }]]) };
+const afCand = (login, secret, game = "Brawlhalla") => ({
+  source: "noclaim",
+  farm: "autofarm",
+  login,
+  twitchId: "id-" + login,
+  clientSecret: secret,
+  game,
+  botId: "",
+  container: "",
+});
+
+test("freeReason: an auto-farm row answers to its own facts on top of every other rule", () => {
+  const { h } = loadHoldings();
+  const row = holding("farmer", { farm: "autofarm" });
+  assert.strictEqual(h.freeReason(row, { ...baseWith(), autofarm: AF_FREE }, ""), "");
+  // No facts in the base (the feature is off, or its read failed): never free.
+  assert.strictEqual(h.freeReason(row, baseWith(), ""), "auto-farm stock is off");
+  assert.strictEqual(
+    h.freeReason(row, { ...baseWith(), autofarm: { on: false, facts: AF_FREE.facts } }, ""),
+    "auto-farm stock is off",
+  );
+  assert.strictEqual(h.freeReason(row, { ...baseWith(), autofarm: { on: true, facts: new Map() } }, ""), "not checked");
+  const busy = { on: true, facts: new Map([["farmer", { reason: "a drop is sold or reserved" }]]) };
+  assert.strictEqual(h.freeReason(row, { ...baseWith(), autofarm: busy }, ""), "a drop is sold or reserved");
+  // The rules every account answers to still come first, and still apply.
+  assert.strictEqual(
+    h.freeReason(row, { ...baseWith({ pool: { ...FREE_POOL, manualSold: true } }), autofarm: AF_FREE }, ""),
+    "manual sold",
+  );
+  assert.strictEqual(h.freeReason(row, { ...baseWith({ active: ["farmer"] }), autofarm: AF_FREE }, ""), "on a listing");
+  assert.strictEqual(
+    h.freeReason(row, { ...baseWith({ ledgers: { farmer: { status: "sold" } } }), autofarm: AF_FREE }, ""),
+    "sold",
+  );
+  // A no-claim row never looks at them.
+  assert.strictEqual(h.freeReason(holding("farmer"), baseWith(), ""), "");
+});
+
+test("snapshotBase: auto-farm facts are read only when the snapshot holds such rows", async () => {
+  let asked = 0;
+  const autofarm = {
+    cfg: () => ({ on: true, perTick: 5 }),
+    collectCandidates: async () => [],
+    baseFacts: async (rows) => {
+      asked++;
+      return { on: true, facts: new Map(rows.map((r) => [r.loginLower, { reason: "" }])) };
+    },
+  };
+  const none = loadHoldings({ holdings: [holding("alice")], pool: [poolRow(1)], autofarm });
+  const b0 = await none.h.snapshotBase();
+  assert.strictEqual(asked, 0);
+  assert.strictEqual(b0.autofarm, null);
+
+  const some = loadHoldings({
+    holdings: [holding("alice"), holding("farmer", { farm: "autofarm", poolAccountId: pid(2) })],
+    pool: [poolRow(1), poolRow(2)],
+    autofarm,
+  });
+  const b1 = await some.h.snapshotBase();
+  assert.strictEqual(asked, 1);
+  assert.deepStrictEqual([...b1.autofarm.facts.keys()], ["farmer"], "only the auto-farm rows are asked about");
+  assert.strictEqual(some.h.freeReason(b1.holdings[1], b1, ""), "");
+});
+
+test("snapshotBase: facts that cannot be read leave every auto-farm row not free", async () => {
+  const autofarm = {
+    cfg: () => ({ on: true, perTick: 5 }),
+    collectCandidates: async () => [],
+    baseFacts: async () => {
+      throw new Error("mongo down");
+    },
+  };
+  const { h } = loadHoldings({
+    holdings: [holding("alice"), holding("farmer", { farm: "autofarm", poolAccountId: pid(2) })],
+    pool: [poolRow(1), poolRow(2)],
+    autofarm,
+  });
+  const base = await quiet(() => h.snapshotBase());
+  assert.strictEqual(h.freeReason(base.holdings[1], base, ""), "auto-farm stock is off");
+  assert.strictEqual(h.freeReason(base.holdings[0], base, ""), "", "the no-claim farm is not affected");
+});
+
+test("sweepOnce: auto-farm candidates join the snapshot, on a read quota of their own", async () => {
+  const fx = sweepFixture();
+  const autofarm = {
+    cfg: () => ({ on: true, perTick: 1 }),
+    collectCandidates: async () => [
+      afCand("Farmer1", "s9"),
+      afCand("Farmer2", "s10"),
+      afCand("alice", "s1"), // also in a no-claim bot: it stays a no-claim account
+    ],
+    baseFacts: async () => ({ on: true, facts: new Map() }),
+  };
+  fx.pool.push(poolRow(9, { clientSecret: "s9" }));
+  fx.inventory.farmer1 = { sellable: [], login: "Farmer1" };
+  fx.inventory.farmer2 = { sellable: [], login: "Farmer2" };
+  const { h, Holding, reads } = loadHoldings({ ...fx, autofarm });
+  // The background tick: the no-claim farm keeps its whole budget (3 reads),
+  // and the auto-farm rows get theirs (1) on top.
+  const r = await quiet(() => h.sweepOnce({ budget: 3, reason: "tick" }));
+  assert.strictEqual(r.accounts, 7);
+  assert.strictEqual(r.picked, 4);
+  assert.deepStrictEqual([...reads].sort(), ["Alice", "Farmer1", "bob", "erin"]);
+
+  const ops = new Map(Holding.calls.bulkWrite[0].ops.map((o) => [o.updateOne.filter.loginLower, o.updateOne.update.$set]));
+  assert.strictEqual(ops.get("farmer1").farm, "autofarm");
+  assert.strictEqual(ops.get("farmer1").inConfig, true);
+  assert.strictEqual(ops.get("farmer1").poolAccountId, pid(9));
+  assert.strictEqual(ops.get("farmer1").botId, "");
+  assert.strictEqual(ops.get("alice").farm, "", "seen in a no-claim bot first");
+  assert.strictEqual(ops.get("alice").botId, "3");
+  // Rows no longer in either list are flipped — with no farm condition.
+  assert.deepStrictEqual(Object.keys(Holding.calls.updateMany[0].q).sort(), ["inConfig", "loginLower"]);
+  assert.ok(Holding.calls.updateMany[0].q.loginLower.$nin.includes("farmer2"));
+});
+
+test("sweepOnce: a refresh someone asked for reads the oldest rows across both farms", async () => {
+  const fx = sweepFixture();
+  const autofarm = {
+    cfg: () => ({ on: true, perTick: 0 }),
+    collectCandidates: async () => [afCand("Farmer1", "s9")],
+    baseFacts: async () => ({ on: true, facts: new Map() }),
+  };
+  fx.inventory.farmer1 = { sellable: [], login: "Farmer1" };
+  const { h, reads } = loadHoldings({ ...fx, autofarm });
+  await quiet(() => h.sweepOnce({ budget: 10, reason: "refresh" }));
+  assert.ok(reads.includes("Farmer1"), "one budget, both farms");
+  // And the tick's own quota of 0 reads none of them.
+  const again = loadHoldings({ ...sweepFixture(), autofarm, inventory: { ...fx.inventory } });
+  await quiet(() => again.h.sweepOnce({ budget: 10, reason: "tick" }));
+  assert.ok(!again.reads.includes("Farmer1"));
+});
+
+test("sweepOnce: an auto-farm list that cannot be read flips no auto-farm row", async () => {
+  const fx = sweepFixture();
+  const autofarm = {
+    cfg: () => ({ on: true, perTick: 5 }),
+    collectCandidates: async () => {
+      throw new Error("mongo hiccup");
+    },
+    baseFacts: async () => ({ on: true, facts: new Map() }),
+  };
+  const { h, Holding } = loadHoldings({ ...fx, autofarm });
+  const r = await quiet(() => h.sweepOnce({ budget: 3, reason: "tick" }));
+  assert.strictEqual(r.skipped, undefined, "the no-claim sweep goes on");
+  assert.strictEqual(r.accounts, 5);
+  // A failed read is not "they are no longer candidates".
+  assert.deepStrictEqual(Holding.calls.updateMany[0].q.farm, { $ne: "autofarm" });
+});
+
+test("sweepOnce: with the feature off, auto-farm rows leave the snapshot like any account no longer listed", async () => {
+  const fx = sweepFixture();
+  fx.holdings.push(holding("oldfarmer", { farm: "autofarm" }));
+  const { h, Holding } = loadHoldings(fx); // the real module, switched off
+  await quiet(() => h.sweepOnce({ budget: 0, reason: "tick" }));
+  const q = Holding.calls.updateMany[0].q;
+  assert.strictEqual(q.farm, undefined);
+  assert.ok(q.loginLower.$nin.length === 5 && !q.loginLower.$nin.includes("oldfarmer"));
+  assert.deepStrictEqual(Holding.calls.updateMany[0].u, { $set: { inConfig: false } });
+});
+
+test("sweepWanted: auto-farm stock switched on is always wanted", async () => {
+  const autofarm = { cfg: () => ({ on: true, perTick: 5 }), collectCandidates: async () => [], baseFacts: async () => ({ on: true, facts: new Map() }) };
+  const { h } = loadHoldings({ autofarm });
+  stubs.set(path.join(ROOT, "models", "MarketplaceListing"), {
+    async exists() {
+      return null;
+    },
+  });
+  assert.strictEqual(await h.sweepWanted(), true);
 });

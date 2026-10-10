@@ -487,6 +487,15 @@ function load(o = {}) {
     ["./unclaimedAutoList", ual],
     ["./setImage", { buildSetGridImage: async () => "" }],
     ["./playerauctionsCopy", { bundleInstruction: () => "PA GUIDE" }],
+    // Sold AUTO-FARM accounts are cleaned up by their own module; the pass
+    // only calls it (tests/autofarmStock.test.js covers what it does).
+    [
+      "./autofarmStock",
+      stubFns(
+        { retirePending: () => ({ pending: 0, retired: 0, waiting: 0, removed: 0, reloaded: [], errors: [] }) },
+        o.autofarm,
+      ),
+    ],
   ]);
   delete require.cache[MOD];
   const mod = require(MOD);

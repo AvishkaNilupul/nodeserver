@@ -1894,6 +1894,7 @@ async function runPass({ sweep = false } = {}) {
   const startedAt = Date.now();
   const out = {
     spend: null,
+    autofarm: null,
     settled: 0,
     heldReleased: 0,
     manualSold: { units: 0, ledgers: 0 },
@@ -1916,6 +1917,13 @@ async function runPass({ sweep = false } = {}) {
     // 1. Post-sale bookkeeping (bot removal + pool stamps) for sold accounts.
     await step("spend", async () => {
       out.spend = await ncs.spendPending({ limit: 10 });
+    });
+    // 1b. The same for sold AUTO-FARM accounts (utils/autofarmStock): they sit
+    // in auto-farm bot configs, which the step above cannot see. It reads the
+    // bot hosts only when a sale is waiting.
+    await step("autofarm-retire", async () => {
+      out.autofarm = await require("./autofarmStock").retirePending({ limit: 10 });
+      for (const e of (out.autofarm && out.autofarm.errors) || []) out.errors.push("autofarm " + e);
     });
     // 2. Quantity sales on every live GGSel / Plati row, then any delisted
     // row whose release was held because its stock could not be read.

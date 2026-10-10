@@ -281,6 +281,11 @@ function buildInProgress(inv) {
   const out = [];
   (inv.dropCampaignsInProgress || []).forEach((c) => {
     const connected = !!(c.self && c.self.isAccountConnected);
+    // Whether the campaign needs the account linked to the game before a drop
+    // can be claimed (since 2026-10-05 Twitch refuses the claim otherwise).
+    // "https://twitch.tv/" is Twitch's own placeholder for "no link needed".
+    const accountLinkURL = String(c.accountLinkURL || "");
+    const campaignId = String(c.id || "");
     (c.timeBasedDrops || []).forEach((d) => {
       const self = d.self || {};
       const edge = (d.benefitEdges && d.benefitEdges[0]) || {};
@@ -303,6 +308,8 @@ function buildInProgress(inv) {
             : 0,
         claimed,
         connected,
+        accountLinkURL,
+        campaignId,
       });
     });
   });

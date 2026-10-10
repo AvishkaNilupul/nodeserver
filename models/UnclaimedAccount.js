@@ -38,6 +38,13 @@ const unclaimedAccountSchema = new mongoose.Schema(
     botId: { type: String, default: "" },
     container: { type: String, default: "" },
 
+    // "" = a no-claim farm account. "autofarm" = an AUTO-FARM account sold for
+    // its unclaimed drops through the same claim layer (utils/autofarmStock.js).
+    // `source` stays "noclaim" — it is the lock every seller shares — but the
+    // post-sale clean-up differs: such an account sits in an auto-farm bot
+    // config, which the no-claim clean-up (spendAccount) cannot see.
+    farm: { type: String, default: "", index: true },
+
     // Snapshot of the unclaimed drops that were listed, for the panel.
     drops: {
       type: [

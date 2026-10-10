@@ -22,6 +22,12 @@ const noclaimHoldingSchema = new mongoose.Schema(
     botId: { type: String, default: "" },
     container: { type: String, default: "" },
     game: { type: String, default: "" }, // bot's FavouriteGames[0]
+    // Which farm the account belongs to. "" = a no-claim bot config (every row
+    // before 2026-10-11). "autofarm" = an auto-farm account whose finished
+    // drops Twitch will not let its bot claim (utils/autofarmStock.js): it has
+    // no no-claim bot, its candidate list comes from the database, and for it
+    // `inConfig` reads "still a candidate" rather than "still in a config".
+    farm: { type: String, default: "", index: true },
     // Folded sellable drops (utils/noclaimHoldings.js foldSellable): one entry
     // per itemKey, `qty` = how many copies of it the account holds.
     items: [

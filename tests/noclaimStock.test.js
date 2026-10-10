@@ -220,6 +220,10 @@ function resetState() {
     unlisted: [],
     spent: [],
     spendFail: new Set(),
+    // utils/autofarmStock stand-in: scripted answers and every call made.
+    afCalls: [],
+    afBlock: new Map(), // loginLower -> reason
+    afReserve: new Map(), // usernameLower -> { ok, why } | Error
   });
 }
 resetState();
@@ -313,8 +317,29 @@ const ualStub = {
   },
 };
 
+// The auto-farm stock module (utils/autofarmStock.js). The claim layer only
+// calls it for candidates and ledgers that say farm "autofarm"; what it does
+// behind those calls is tests/autofarmStock.test.js's business.
+const autofarmStub = {
+  async claimBlockReason(c) {
+    state.afCalls.push(["block", c.loginLower]);
+    return state.afBlock.get(c.loginLower) || "";
+  },
+  async reserveLeftovers(pool, opts) {
+    state.afCalls.push(["reserve", pool.usernameLower, { ...opts }]);
+    const r = state.afReserve.get(pool.usernameLower);
+    if (r instanceof Error) throw r;
+    return r || { ok: true, botId: "bot-" + pool.usernameLower, reserved: 0, tag: "t" };
+  },
+  async releaseForPool(pool, opts) {
+    state.afCalls.push(["release", pool.usernameLower, { ...opts }]);
+    return 0;
+  },
+};
+
 const ROOT = path.join(__dirname, "..");
 const STUBS = new Map([
+  [path.join(ROOT, "utils/autofarmStock.js"), autofarmStub],
   [path.join(ROOT, "models/UnclaimedAccount.js"), Unclaimed],
   [path.join(ROOT, "models/AvailableAccount.js"), Pool],
   [path.join(ROOT, "models/MarketplaceListing.js"), Listing],
@@ -438,6 +463,8 @@ function world(accounts, { maxAgeMs = 8 * HOUR } = {}) {
       items: a.items,
       readAt: a.readAt === undefined ? new Date() : a.readAt,
       inConfig: true,
+      // "autofarm" = an auto-farm account sold for its unclaimed drops.
+      ...(a.farm ? { farm: a.farm, botId: "", container: "" } : {}),
     };
     base.holdings.push(holding);
     let ledger = null;
@@ -1334,4 +1361,125 @@ test("ledgerForLogin: case-insensitive, null when unknown", async () => {
   assert.strictEqual(String(got._id), String(l._id));
   assert.strictEqual(await ncs.ledgerForLogin("nobody"), null);
   assert.strictEqual(await ncs.ledgerForLogin(""), null);
+});
+
+// ---------------------------------------------------------------------------
+// Auto-farm accounts (utils/autofarmStock.js)
+//
+// Since 2026-10-05 an auto-farm account ends a campaign with its drops finished
+// and unclaimed, so it can be sold through this layer too. It differs from a
+// no-claim account in three places, all pinned here: its own rules are asked
+// straight from the database before the live read; its claimed drops leave the
+// Drops Archive (and its bot record is marked sold) between the commit and the
+// hand-over; and its post-sale clean-up is never spendAccount's.
+// ---------------------------------------------------------------------------
+
+const AF_ORDER = { market: "eldorado", listingId: LISTING_ID, orderId: "E-1", mode: "sold" };
+
+test("auto-farm: a sold claim checks its rules, then takes its claimed drops out of the archive", async () => {
+  world([{ login: "farmer", items: [ALPHA(2), BETA(1)], farm: "autofarm" }]);
+  const out = await ncs.claimForSet(SET, 1, AF_ORDER);
+  assert.strictEqual(out.length, 1);
+  assert.strictEqual(out[0].login, "farmer");
+  assert.deepStrictEqual(
+    state.afCalls.map((c) => c[0]),
+    ["block", "reserve"],
+    "rules before the live read, archive after the commit",
+  );
+  assert.deepStrictEqual(state.afCalls[1][2], { market: "eldorado", orderId: "E-1", setId: SET_ID });
+  const [l] = ledgerFor("farmer");
+  assert.strictEqual(l.status, "sold");
+  assert.strictEqual(l.farm, "autofarm", "the ledger says whose clean-up it is");
+  assert.strictEqual(l.note, "eldorado order E-1");
+  assert.strictEqual(l.botId, undefined, "an auto-farm account has no no-claim bot");
+});
+
+test("auto-farm: a no-claim account never touches the auto-farm module", async () => {
+  world([{ login: "alpha", items: [ALPHA(2), BETA(1)] }]);
+  const out = await ncs.claimForSet(SET, 1, AF_ORDER);
+  assert.strictEqual(out.length, 1);
+  assert.deepStrictEqual(state.afCalls, []);
+  assert.strictEqual(ledgerFor("alpha")[0].farm, undefined, "a no-claim claim writes what it always did");
+});
+
+test("auto-farm: an account its own rules refuse is passed over before any live read", async () => {
+  // "busy" is the leaner account, so it is the one the claim looks at first.
+  world([
+    { login: "busy", items: [ALPHA(2), BETA(1)], farm: "autofarm" },
+    { login: "clean", items: [ALPHA(2), BETA(1), GAMMA(1)], farm: "autofarm" },
+  ]);
+  state.afBlock.set("busy", "a drop is sold or reserved");
+  const out = await ncs.claimForSet(SET, 1, AF_ORDER);
+  assert.deepStrictEqual(out.map((a) => a.login), ["clean"]);
+  assert.ok(!state.invCalls.includes("busy"), "no Twitch read for an account that is not free");
+  assert.strictEqual(ledgerFor("busy").length, 0);
+  assert.strictEqual(out.missed["a drop is sold or reserved"], 1);
+});
+
+test("auto-farm: losing the archive to a listing rolls the ledger back and moves on", async () => {
+  // "raced" is the leaner account, so it is the one the claim tries first.
+  const w = world([
+    { login: "raced", items: [ALPHA(2), BETA(1)], farm: "autofarm", ledger: { status: "expired", note: "old" } },
+    { login: "next", items: [ALPHA(2), BETA(1), GAMMA(1)], farm: "autofarm" },
+  ]);
+  state.afReserve.set("raced", { ok: false, why: "a drop was reserved or connected meanwhile" });
+  const out = await ncs.claimForSet(SET, 1, AF_ORDER);
+  assert.deepStrictEqual(out.map((a) => a.login), ["next"]);
+  const [l] = ledgerFor("raced");
+  assert.strictEqual(l.status, "expired", "back to exactly the status it had");
+  assert.strictEqual(l.note, "old");
+  assert.strictEqual(l.farm, "", "and no longer marked as an auto-farm sale");
+  assert.strictEqual(String(l._id), String(w.raced.ledger._id));
+  assert.strictEqual(out.missed["a drop was reserved or connected meanwhile"], 1);
+});
+
+test("auto-farm: an archive step that throws undoes the ledger AND whatever it stamped", async () => {
+  world([{ login: "boom", items: [ALPHA(2), BETA(1)], farm: "autofarm" }]);
+  state.afReserve.set("boom", new Error("mongo went away"));
+  const { error } = console;
+  console.error = () => {};
+  let out;
+  try {
+    out = await ncs.claimForSet(SET, 1, AF_ORDER);
+  } finally {
+    console.error = error;
+  }
+  assert.strictEqual(out.length, 0);
+  assert.strictEqual(ledgerFor("boom").length, 0, "the ledger this claim created is gone");
+  const release = state.afCalls.find((c) => c[0] === "release");
+  assert.ok(release, "the archive is released");
+  assert.deepStrictEqual(release[2], { market: "eldorado", orderId: "E-1" });
+});
+
+test("auto-farm: never fed to a vault listing — only a claim-at-sale order takes one", async () => {
+  world([
+    { login: "farmer", items: [ALPHA(2), BETA(1)], farm: "autofarm" },
+    { login: "noclaim", items: [ALPHA(2), BETA(1), GAMMA(1)] },
+  ]);
+  const out = await ncs.claimForSet(SET, 2, { market: "ggsel", listingId: LISTING_ID, mode: "fed" });
+  assert.deepStrictEqual(out.map((a) => a.login), ["noclaim"]);
+  assert.deepStrictEqual(state.afCalls, []);
+  assert.strictEqual(ledgerFor("farmer").length, 0);
+});
+
+test("auto-farm: a retried order resumes its accounts without asking the rules again", async () => {
+  world([{ login: "farmer", items: [ALPHA(2), BETA(1)], farm: "autofarm" }]);
+  await ncs.claimForSet(SET, 1, AF_ORDER);
+  state.afCalls.length = 0;
+  state.invCalls.length = 0;
+  // The switch may be off by now; a sale already made is still handed over.
+  state.afBlock.set("farmer", "auto-farm stock is switched off");
+  const again = await ncs.claimForSet(SET, 1, AF_ORDER);
+  assert.deepStrictEqual(again.map((a) => a.login), ["farmer"]);
+  assert.deepStrictEqual(state.afCalls, []);
+  assert.deepStrictEqual(state.invCalls, []);
+});
+
+test("spendPending never spends an auto-farm ledger — spendAccount cannot see its bot", async () => {
+  const delivered = new Date();
+  const af = ledgerDoc({ login: "farmer", loginLower: "farmer", farm: "autofarm", status: "sold", manualListing: LISTING_ID, soldAt: new Date("2026-10-10T00:00:00Z"), manualDeliveredAt: delivered, manualSpentAt: null });
+  const nc = ledgerDoc({ login: "noclaim", loginLower: "noclaim", status: "sold", manualListing: LISTING_ID, soldAt: new Date("2026-10-11T00:00:00Z"), manualDeliveredAt: delivered, manualSpentAt: null });
+  assert.strictEqual(await ncs.spendPending({ limit: 10 }), 1);
+  assert.deepStrictEqual(state.spent.map((x) => x.id), [String(nc._id)]);
+  assert.strictEqual(af.manualSpentAt, null, "left for autofarmStock.retirePending");
 });
