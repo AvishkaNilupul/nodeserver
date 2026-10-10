@@ -753,7 +753,13 @@ async function publishClaimAtSale(
       game: el.game || pubGame,
       coverImagePath: cover,
       deliveryTime: el.deliveryTime,
-      volumeDiscounts: el.volumeDiscounts,
+      // Eldorado refuses an offer whose quantity-discount tier is above its
+      // quantity ("Invalid discount quantity of: 10 … less or equal to 5"), and
+      // the quantity was just capped to the free stock: only the tiers a buyer
+      // could reach are sent.
+      volumeDiscounts: Array.isArray(el.volumeDiscounts)
+        ? el.volumeDiscounts.filter((t) => t && Number(t.quantity) > 1 && Number(t.quantity) <= quantity)
+        : el.volumeDiscounts,
     });
     externalId = r.externalId;
     price = r.price || priceUsd;

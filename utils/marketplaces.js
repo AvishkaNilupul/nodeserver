@@ -5040,20 +5040,74 @@ async function eldoradoUpdateOffer(offerId, patch = {}) {
   return await eldoradoOffer(offerId);
 }
 
+// Eldorado's refusal of a quantity that sits under one of the offer's own
+// quantity-discount tiers: HTTP 400, "Invalid discount quantity of: 10. It
+// must be greater than 1 and less or equal to 9." (seen live 2026-10-10, on
+// create and on a quantity push alike). Raw axios error or one eldError made.
+function eldDiscountRefusal(e) {
+  const status = (e && e.response && e.response.status) || (e && e.status) || 0;
+  if (status !== 400) return false;
+  const body = e && e.response && e.response.data;
+  let text = "";
+  if (body && typeof body === "object" && Array.isArray(body.messages)) text = body.messages.join("; ");
+  else if (typeof body === "string") text = body;
+  return /Invalid discount quantity/i.test(text + " " + String((e && e.message) || ""));
+}
+
+// The quantity push, with its one known refusal handled. `io` is the four
+// calls it makes ({ put, read, update, fail } — the real ones below, fakes in
+// tests/eldoradoQuantityDiscount.test.js).
+//
+// An offer that sells with quantity discounts ("5 or more: 10 % off") cannot be
+// set BELOW its largest tier — and every caller of this push swallows the
+// error, so the offer simply went on advertising its old, higher quantity:
+// stock the farm no longer had, on sale. A tier nobody can reach any more is
+// worth nothing; the true quantity is worth a paid order. So on that refusal
+// the tiers above the new quantity are dropped and the quantity is set with
+// them, in the one details call that carries both. Anything else fails as it
+// always did. (Quantity 0 is not handled here: the offer is paused instead.)
+async function eldSetQuantityVia(io, offerId, quantity) {
+  const q = Math.max(0, parseInt(quantity, 10) || 0);
+  try {
+    await io.put(offerId, q);
+  } catch (e) {
+    if (!(q >= 1 && eldDiscountRefusal(e))) return io.fail(e);
+    const cur = await io.read(offerId);
+    const tiers = ((cur && cur.volumeDiscounts) || []).filter(
+      (t) => t && Number(t.quantity) > 1 && Number(t.quantity) <= q,
+    );
+    const after = await io.update(offerId, { quantity: q, volumeDiscounts: tiers });
+    if (!after || Number(after.quantity) !== q) {
+      const err = new Error(
+        "Eldorado set quantity failed: " + q + " did not take even with the quantity discounts above it removed",
+      );
+      err.__eld = true;
+      throw err;
+    }
+    console.log(
+      "eldorado offer " + offerId + ": quantity " + q + " is under a quantity-discount tier — kept " +
+        tiers.length + " of " + ((cur && cur.volumeDiscounts) || []).length + " tier(s) so the quantity could be set",
+    );
+  }
+  return q;
+}
+
 // Restock without rewriting the offer. The body is a BARE integer, not an
 // object — this is the lever the farm uses to keep stock in step.
 async function eldoradoSetQuantity(offerId, quantity) {
-  const q = Math.max(0, parseInt(quantity, 10) || 0);
-  try {
-    await eldRequest(
-      "PUT",
-      "/api/v1/item-management/me/offers/" + encodeURIComponent(offerId) + "/quantity",
-      { data: q },
-    );
-  } catch (e) {
-    eldError("Eldorado set quantity", e);
-  }
-  return q;
+  return eldSetQuantityVia(
+    {
+      put: (id, q) =>
+        eldRequest("PUT", "/api/v1/item-management/me/offers/" + encodeURIComponent(id) + "/quantity", {
+          data: q,
+        }),
+      read: (id) => eldoradoOffer(id),
+      update: (id, patch) => eldoradoUpdateOffer(id, patch),
+      fail: (e) => eldError("Eldorado set quantity", e),
+    },
+    offerId,
+    quantity,
+  );
 }
 
 async function eldoradoReprice(offerId, priceUsd) {
@@ -6725,6 +6779,8 @@ module.exports = {
   eldoradoOfferUrl,
   eldoradoUpdateOffer,
   eldoradoSetQuantity,
+  eldSetQuantityVia,
+  eldDiscountRefusal,
   eldoradoReprice,
   eldoradoDelist,
   eldoradoRelist,

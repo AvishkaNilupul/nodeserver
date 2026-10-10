@@ -869,6 +869,22 @@ test("publishNoclaim claim-at-sale: advertises min(requested, free, 25), claims 
   await part.mod.publishNoclaim("eldorado", ctx({ eldorado: { quantity: 5 } }));
   assert.strictEqual(part.called("eldoradoPublish")[0].args[0].quantity, 2);
 
+  // Quantity discounts: Eldorado refuses an offer with a tier above its
+  // quantity, and the quantity was just capped — so only reachable tiers go.
+  const tiers = [{ quantity: 3, percentage: 5 }, { quantity: 5, percentage: 10 }, { quantity: 10, percentage: 15 }];
+  const five = load({ stock: { free: 5 }, share: 5 });
+  await five.mod.publishNoclaim("eldorado", ctx({ eldorado: { quantity: 20, volumeDiscounts: tiers } }));
+  assert.strictEqual(five.called("eldoradoPublish")[0].args[0].quantity, 5);
+  assert.deepStrictEqual(five.called("eldoradoPublish")[0].args[0].volumeDiscounts, tiers.slice(0, 2));
+  const two = load({ stock: { free: 2 }, share: 2 });
+  await two.mod.publishNoclaim("eldorado", ctx({ eldorado: { quantity: 20, volumeDiscounts: tiers } }));
+  assert.deepStrictEqual(two.called("eldoradoPublish")[0].args[0].volumeDiscounts, []);
+  const plenty = load({ stock: { free: 30 }, share: 30 });
+  await plenty.mod.publishNoclaim("eldorado", ctx({ eldorado: { quantity: 20, volumeDiscounts: tiers } }));
+  assert.deepStrictEqual(plenty.called("eldoradoPublish")[0].args[0].volumeDiscounts, tiers);
+  // An offer made without discounts is sent exactly as before.
+  assert.strictEqual(part.called("eldoradoPublish")[0].args[0].volumeDiscounts, undefined);
+
   const none = load({ stock: { free: 0, stale: 5 } });
   const r4 = await none.mod.publishNoclaim("eldorado", ctx({ eldorado: { quantity: 1 } }));
   assert.deepStrictEqual(r4, {
