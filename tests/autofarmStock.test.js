@@ -880,6 +880,8 @@ test("weeklyRate: the demand model's clean count when it is recent, else the eng
   assert.deepStrictEqual(await af.weeklyRate("Brawlhalla", null, { brain: {} }), { rate: 0, basis: "engine" });
 });
 
+const i_of = (name) => Number(String(name).replace(/\D+/g, "")) || 0;
+
 function eraWorld() {
   const pool = [
     poolRow("Clean"),
@@ -951,6 +953,7 @@ test("eraForTask: counts what could be sold, sizes to the window, asks for clean
     windowDays: 18.3,
     added: 0,
     room: 96, // twice the target and a few: the most the top-up may ever add
+    openReuseOnly: true, // it sells: see the reuse-only test below
   });
 });
 
@@ -975,6 +978,48 @@ test("eraForTask: the top-up's own additions are counted, and it stops at twice 
   const other = await af.eraForTask({ ...task, campaignId: "c-other" }, { engineTarget: 44, sales: { count: 0 }, deps: w.deps, brain: {} });
   assert.strictEqual(other.added, 0);
   assert.strictEqual(other.room, 16);
+});
+
+test("eraForTask: what the top-up added BEFORE the era — accounts stacked with claimed drops — is not held against the task", async () => {
+  autoFarm = { unclaimedEra: true };
+  // The top-up wrote the same note before the era existed. A task carrying 29
+  // such accounts read "already given all it may" and never got one sellable
+  // account (seen live on a Predecessor campaign).
+  const note = "auto-farm backfill: Predecessor (c-link)";
+  const old = Array.from({ length: 29 }, (_, i) => "Old" + i);
+  const fresh = ["New0", "New1"];
+  const pool = old.map((n) => poolRow(n, { claimedNote: note, dropCount: 13 + (i_of(n) % 11) })).concat(
+    fresh.map((n) => poolRow(n, { claimedNote: note, dropCount: 2 })),
+  );
+  const bots = pool.map((p) => botRow(p.username));
+  const drops = bots.filter((b) => /^Old/.test(b.login)).flatMap((b) => Array.from({ length: 13 }, () => drop(b)));
+  const w = world({ pool, bots, drops, campaigns: [{ campaignId: "c-link", accountLinkURL: NEEDS_LINK }] });
+  w.deps.TwitchCampaign.findOne = () => ({ lean: async () => w.deps.TwitchCampaign.docs[0] });
+  const task = { game: "Predecessor", campaignId: "c-link", campaignEndAt: new Date(Date.now() + 223 * 3600e3), assignedAccounts: old.concat(fresh) };
+  const era = await af.eraForTask(task, { engineTarget: 32, sales: { count: 1 }, deps: w.deps, brain: {} });
+  assert.strictEqual(era.target, 6);
+  assert.strictEqual(era.sellable, 2);
+  assert.strictEqual(era.added, 2, "only the two that came in clean");
+  assert.strictEqual(era.room, 14);
+});
+
+test("eraForTask: a reuse-only game is opened to clean accounts only when it has sales to show", async () => {
+  const { deps } = eraWorld();
+  const task = { game: "Albion Online", campaignId: "c-link", campaignEndAt: new Date(Date.now() + 160 * 3600e3), assignedAccounts: ["Clean"] };
+  const at = (r) => ({ gameHistory: async () => [{ at: new Date(), est: { avg45: r } }] });
+  autoFarm = { unclaimedEra: true };
+  assert.strictEqual((await af.eraForTask(task, { engineTarget: 8, sales: { count: 0 }, deps, brain: at(1.56) })).openReuseOnly, true);
+  assert.strictEqual((await af.eraForTask(task, { engineTarget: 8, sales: { count: 0 }, deps, brain: at(0.5) })).openReuseOnly, true);
+  assert.strictEqual((await af.eraForTask(task, { engineTarget: 8, sales: { count: 0 }, deps, brain: at(0.47) })).openReuseOnly, false);
+  assert.strictEqual((await af.eraForTask(task, { engineTarget: 8, sales: { count: 0 }, deps, brain: at(0) })).openReuseOnly, false);
+  // No demand model: the engine's own 45-day count decides (4 sales = 0.62 a week).
+  assert.strictEqual((await af.eraForTask(task, { engineTarget: 8, sales: { count: 4 }, deps, brain: {} })).openReuseOnly, true);
+  assert.strictEqual((await af.eraForTask(task, { engineTarget: 8, sales: { count: 2 }, deps, brain: {} })).openReuseOnly, false);
+  // The owner can raise the bar, or close the door: 0 = reuse-only games never do.
+  autoFarm = { unclaimedEra: true, unclaimedEraReuseOnlyMinRate: 2 };
+  assert.strictEqual((await af.eraForTask(task, { engineTarget: 8, sales: { count: 0 }, deps, brain: at(1.56) })).openReuseOnly, false);
+  autoFarm = { unclaimedEra: true, unclaimedEraReuseOnlyMinRate: 0 };
+  assert.strictEqual((await af.eraForTask(task, { engineTarget: 8, sales: { count: 0 }, deps, brain: at(9) })).openReuseOnly, false);
 });
 
 // ---------------------------------------------------------------------------
@@ -1017,6 +1062,10 @@ test("auto-farm hooks: the top-up measures an era task by what can be sold, and 
   assert.match(backfill, /let eraRoom = Infinity;/);
   assert.match(backfill, /const missing = Math\.min\(goal - have, eraRoom\);/);
   assert.match(backfill, /recycledOnly: reuseOnly, cleanMax: eraCleanMax \}/, "reuse-only games stay reuse-only");
+  // …unless the era itself opens one (a reuse-only game that sells), and only then.
+  assert.match(backfill, /let eraOpensReuseOnly = false;/);
+  assert.match(backfill, /eraOpensReuseOnly = era\.openReuseOnly === true;/);
+  assert.match(backfill, /const reuseOnly = settings\.isReuseOnlyGame\(task\.game\) && !eraOpensReuseOnly;/);
   // The ceiling the era may never exceed is still the game's own cap.
   assert.match(backfill, /capForGame\(af, gameSales, task\.game\)/);
 
@@ -1024,6 +1073,9 @@ test("auto-farm hooks: the top-up measures an era task by what can be sold, and 
   assert.match(exec, /eraForTask\(task, \{\s*engineTarget: want,\s*sales: taskSales,\s*\}\)/);
   assert.match(exec, /want = Math\.max\(1, Math\.min\(want, era\.target - era\.sellable\)\);/);
   assert.match(exec, /recycledOnly: reuseOnly, cleanMax: eraCleanMax \}/);
+  assert.match(exec, /let eraOpensReuseOnly = false;/);
+  assert.match(exec, /eraOpensReuseOnly = era\.openReuseOnly === true;/);
+  assert.match(exec, /const reuseOnly = settings\.isReuseOnlyGame\(game\) && !eraOpensReuseOnly;/);
 });
 
 // ---------------------------------------------------------------------------

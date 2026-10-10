@@ -520,6 +520,7 @@ async function runPass({ deps, dryRun = false, now = Date.now() } = {}) {
       } catch (e) {
         const msg = (e && e.message) || String(e);
         out.errors.push(p.game + ": " + msg);
+        console.error("autofarmOffers: " + p.game + " was not listed: " + msg);
         // An offer that went live without a row (noclaimListings'
         // orphanedPublish) is invisible to every rule above: trying again
         // would put a second one next to it. The game waits a day and the

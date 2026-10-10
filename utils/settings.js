@@ -195,6 +195,10 @@ const AUTO_FARM_DEFAULTS = {
   unclaimedEraHeadroom: 2,
   unclaimedEraSafety: 3,
   unclaimedEraMinAccounts: 6,
+  // A reuse-only game selling at least this many accounts a week gets clean
+  // accounts for a campaign that needs a link (an unsold one comes back clean,
+  // so nothing is used up without a sale). 0 = reuse-only games never do.
+  unclaimedEraReuseOnlyMinRate: 0.5,
   // OFFERS FOR THAT STOCK (utils/autofarmOffers.js). On = each no-claim
   // maintenance pass publishes one claim-at-sale Eldorado offer for a bundle of
   // unclaimed drops that at least MinHolders free auto-farm accounts hold, that

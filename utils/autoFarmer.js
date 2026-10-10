@@ -2912,6 +2912,7 @@ async function executeTask(task, ctx, { append = false } = {}) {
   // more than the plan above, and never fewer than one (a plan that reached
   // here is carried out). A check that fails leaves the plan as it was.
   let eraCleanMax = null;
+  let eraOpensReuseOnly = false;
   try {
     const era = await require("./autofarmStock").eraForTask(task, {
       engineTarget: want,
@@ -2919,6 +2920,7 @@ async function executeTask(task, ctx, { append = false } = {}) {
     });
     if (era) {
       eraCleanMax = era.cleanMax;
+      eraOpensReuseOnly = era.openReuseOnly === true;
       want = Math.max(1, Math.min(want, era.target - era.sellable));
     }
   } catch (e) {
@@ -2991,7 +2993,10 @@ async function executeTask(task, ctx, { append = false } = {}) {
   // Reuse-only games (World of Tanks / UFL) never draw a fresh pool account:
   // they may only reuse accounts already farmed on that same game, so the claim
   // is restricted to the game's own "recycled after <game>" pool entries.
-  const reuseOnly = settings.isReuseOnlyGame(game);
+  // The one exception is the unclaimed era's (eraForTask.openReuseOnly): a
+  // campaign that needs a link uses an account up only when it sells, so a
+  // reuse-only game with sales to show takes clean accounts for it.
+  const reuseOnly = settings.isReuseOnlyGame(game) && !eraOpensReuseOnly;
   const claimed = await claimPoolAccounts(
     n,
     "auto-farm: " + game + " (" + task.campaignId + ")",
@@ -5636,6 +5641,7 @@ async function backfillActiveTasks(af, host, progress) {
     let goal = target;
     let eraCleanMax = null;
     let eraRoom = Infinity;
+    let eraOpensReuseOnly = false;
     try {
       const era = await require("./autofarmStock").eraForTask(task, {
         engineTarget: target,
@@ -5646,6 +5652,7 @@ async function backfillActiveTasks(af, host, progress) {
         have = Math.min(have, era.sellable);
         eraCleanMax = era.cleanMax;
         eraRoom = era.room;
+        eraOpensReuseOnly = era.openReuseOnly === true;
       }
     } catch (e) {
       progress(
@@ -5744,7 +5751,8 @@ async function backfillActiveTasks(af, host, progress) {
     // recycled account the buyer already holds for this very game could be
     // put back on it. Passing it also tries the game's own recycled accounts
     // first, exactly as executeTask's claim does.
-    const reuseOnly = settings.isReuseOnlyGame(task.game);
+    // (Unless the unclaimed era opens it: see executeTask's claim.)
+    const reuseOnly = settings.isReuseOnlyGame(task.game) && !eraOpensReuseOnly;
     const claimed = await claimPoolAccounts(
       n,
       "auto-farm backfill: " + task.game + " (" + task.campaignId + ")",

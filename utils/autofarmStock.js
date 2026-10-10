@@ -1025,6 +1025,9 @@ function eraCfg() {
     minAccounts: clampInt(af.unclaimedEraMinAccounts, 6, 1, 30),
     claimWindowDays: clampInt(af.unclaimedEraClaimDays, 7, 0, 14),
     maxWindowDays: clampInt(af.unclaimedEraMaxWindowDays, 28, 7, 60),
+    // A reuse-only game selling at least this many accounts a week is given
+    // clean accounts like any other game (see eraForTask's `openReuseOnly`).
+    reuseOnlyMinRate: clampNum(af.unclaimedEraReuseOnlyMinRate, 0.5, 0, 50),
     // A fresh account may carry at most this many claimed drops (the same
     // ceiling a sale applies): they would go to the buyer with it.
     cleanMax: cfg().maxLeftover,
@@ -1091,19 +1094,22 @@ async function weeklyRate(game, sales, { brain } = {}) {
 // Map(loginLower -> reason). A login that is not in the map counts as sellable
 // — including one with no bot record yet (deployed a moment ago): an unknown
 // must never read as a gap, or every tick would fill it again.
-// `out.notes` (not enumerable) is Map(loginLower -> the pool row's note), for
-// the caller that counts what the top-up itself brought in (eraForTask).
+// `out.notes` and `out.drops` (not enumerable) are Map(loginLower -> the pool
+// row's note / its claimed-drop count), for the caller that counts what the
+// top-up itself brought in (eraForTask).
 async function unsellableLogins(logins, { deps } = {}) {
   const d = deps || defaultDeps();
   const wanted = [...new Set((logins || []).map(lower).filter(Boolean))];
   const out = new Map();
   const notes = new Map();
+  const drops = new Map();
   Object.defineProperty(out, "notes", { value: notes, enumerable: false });
+  Object.defineProperty(out, "drops", { value: drops, enumerable: false });
   if (!wanted.length) return out;
   const [pools, listed] = await Promise.all([
     d.AvailableAccount.find(
       { usernameLower: { $in: wanted } },
-      { username: 1, usernameLower: 1, clientSecret: 1, claimedNote: 1, status: 1, manualSold: 1, listed: 1 },
+      { username: 1, usernameLower: 1, clientSecret: 1, claimedNote: 1, status: 1, manualSold: 1, listed: 1, dropCount: 1 },
     ).lean(),
     d.listedLogins.loginsOnActiveListings(),
   ]);
@@ -1111,6 +1117,7 @@ async function unsellableLogins(logins, { deps } = {}) {
   for (const p of pools) {
     const l = lower(p.usernameLower || p.username);
     notes.set(l, str(p.claimedNote));
+    drops.set(l, Math.max(0, Number(p.dropCount) || 0));
     if (p.manualSold === true) out.set(l, "hand-sold");
     else if (p.listed === true) out.set(l, "ticked listed");
     else if (p.status !== "claimed") out.set(l, "back in the pool");
@@ -1145,9 +1152,16 @@ async function eraForTask(task, { engineTarget, sales, deps, brain } = {}) {
   // unsellable after it was added is a gap again on the next tick. So a task
   // is given at most twice its target (and a few) this way, ever — a cap on
   // the worst case, not a number it is expected to reach.
+  //
+  // Only accounts that came in CLEAN are counted. The top-up wrote the same
+  // note before the era existed, on accounts stacked with claimed drops; a
+  // task that carried a few dozen of those read as "already given all it may"
+  // and never got its first sellable account.
   const mine = "auto-farm backfill: " + str(task.game) + " (" + str(task.campaignId) + ")";
   let added = 0;
-  for (const l of logins) if ((bad.notes.get(l) || "") === mine) added++;
+  for (const l of logins) {
+    if ((bad.notes.get(l) || "") === mine && (bad.drops.get(l) || 0) <= e.cleanMax) added++;
+  }
   const addCap = t.target * 2 + 4;
   return {
     target: t.target,
@@ -1159,6 +1173,13 @@ async function eraForTask(task, { engineTarget, sales, deps, brain } = {}) {
     windowDays: t.windowDays,
     added,
     room: Math.max(0, addCap - added),
+    // A reuse-only game is one the owner never spends FRESH accounts on: every
+    // account it claimed drops on was used up, sale or no sale. An account
+    // farmed for a campaign that needs a link is used up only when it is SOLD —
+    // unsold, its drops expire and it goes back to the pool as clean as it
+    // came. So a reuse-only game that does sell gets clean accounts here like
+    // any other; one with no sales to show still gets none.
+    openReuseOnly: rate >= e.reuseOnlyMinRate && e.reuseOnlyMinRate > 0,
   };
 }
 
