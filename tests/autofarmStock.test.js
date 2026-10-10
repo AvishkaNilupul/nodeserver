@@ -1047,7 +1047,11 @@ test("auto-farm hooks: a clean claim narrows BOTH passes, and null changes nothi
   assert.match(claim, /cleanMax = null/, "off by default");
   assert.match(claim, /const clean = cleanCap === null \? \{\} : \{ dropCount: \{ \$not: \{ \$gt: cleanCap \} \} \};/);
   // Inside the one query both passes share, next to the ready rule and the fence.
-  assert.match(claim, /\.\.\.readyPoolQuery\(\),\s*\.\.\.extra,\s*\.\.\.clean,/);
+  assert.match(claim, /\.\.\.readyPoolQuery\(\),\s*\.\.\.extra,\s*\.\.\.clean,\s*\.\.\.notListed,/);
+  // A clean claim also leaves accounts that are on an active listing alone;
+  // any other claim (cleanMax null) never even reads the list.
+  assert.match(claim, /let notListed = \{\};\s*if \(cleanCap !== null\) \{/);
+  assert.match(claim, /loginsOnActiveListings\(\);\s*if \(listed && listed\.size\) notListed = \{ usernameLower: \{ \$nin: \[\.\.\.listed\] \} \};/);
   // The pristine reserve still guards every claim.
   assert.match(claim, /pristineGuard,/);
 });

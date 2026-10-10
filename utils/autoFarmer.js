@@ -1180,6 +1180,21 @@ async function claimPoolAccounts(
       ? Math.max(0, Math.floor(Number(cleanMax)))
       : null;
   const clean = cleanCap === null ? {} : { dropCount: { $not: { $gt: cleanCap } } };
+  // …and one that is on an active listing is promised to that listing: it can
+  // never be sold whole, so a clean claim leaves it for a campaign that needs
+  // no link (where its bot can still claim and the listing can grow). Seen on
+  // the era's first day: the game's own recycled accounts are claimed first,
+  // and one in seven of those was on a listing. A list that cannot be read
+  // changes nothing — the top-up's own count still tells such an account apart.
+  let notListed = {};
+  if (cleanCap !== null) {
+    try {
+      const listed = await require("./listedLogins").loginsOnActiveListings();
+      if (listed && listed.size) notListed = { usernameLower: { $nin: [...listed] } };
+    } catch (e) {
+      console.error("claimPoolAccounts: active listings unreadable:", e && e.message);
+    }
+  }
   // Backfill's note ("auto-farm backfill: <game> (<campaignId>)") names the
   // same two things; it did not match here, so its usage events carried no
   // game and a caller that passed no preferGame got no soldGames exclusion.
@@ -1247,6 +1262,7 @@ async function claimPoolAccounts(
               ...readyPoolQuery(),
               ...extra,
               ...clean,
+              ...notListed,
               ...(targetGame ? { soldGames: { $ne: targetGame } } : {}),
               ...notInNoclaim,
             },
