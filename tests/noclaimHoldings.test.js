@@ -999,21 +999,34 @@ test("sweepOnce: auto-farm candidates join the snapshot, on a read quota of thei
   assert.ok(Holding.calls.updateMany[0].q.loginLower.$nin.includes("farmer2"));
 });
 
-test("sweepOnce: a refresh someone asked for reads the oldest rows across both farms", async () => {
+test("sweepOnce: a refresh reads both farms without taking a read from the no-claim farm", async () => {
   const fx = sweepFixture();
   const autofarm = {
     cfg: () => ({ on: true, perTick: 0 }),
-    collectCandidates: async () => [afCand("Farmer1", "s9")],
+    collectCandidates: async () => [afCand("Farmer1", "s9"), afCand("Farmer2", "s10"), afCand("Farmer3", "s11")],
     baseFacts: async () => ({ on: true, facts: new Map() }),
   };
-  fx.inventory.farmer1 = { sellable: [], login: "Farmer1" };
+  for (const l of ["farmer1", "farmer2", "farmer3"]) fx.inventory[l] = { sellable: [], login: l };
+  // Never-read auto-farm rows sort first: on ONE budget of 2 they would take
+  // both reads, and the no-claim farm's refresh would read nothing of its own.
   const { h, reads } = loadHoldings({ ...fx, autofarm });
-  await quiet(() => h.sweepOnce({ budget: 10, reason: "refresh" }));
-  assert.ok(reads.includes("Farmer1"), "one budget, both farms");
-  // And the tick's own quota of 0 reads none of them.
+  const r = await quiet(() => h.sweepOnce({ budget: 2, reason: "refresh" }));
+  assert.strictEqual(r.picked, 4, "2 for the no-claim farm, 2 for the auto-farm rows");
+  assert.deepStrictEqual([...reads].filter((x) => !/^Farmer/.test(x)).sort(), ["Alice", "bob"]);
+  assert.strictEqual([...reads].filter((x) => /^Farmer/.test(x)).length, 2);
+  // The tick's own quota of 0 reads none of them.
   const again = loadHoldings({ ...sweepFixture(), autofarm, inventory: { ...fx.inventory } });
   await quiet(() => again.h.sweepOnce({ budget: 10, reason: "tick" }));
-  assert.ok(!again.reads.includes("Farmer1"));
+  assert.ok(!again.reads.some((x) => /^Farmer/.test(x)));
+  // A forced re-read takes flagged rows of either farm on one budget.
+  const forced = loadHoldings({
+    ...sweepFixture(),
+    autofarm,
+    inventory: { ...fx.inventory },
+    holdings: [holding("Farmer1", { farm: "autofarm", recheckAt: new Date(), readAt: ago(HOUR) })],
+  });
+  await quiet(() => forced.h.sweepOnce({ budget: 5, reason: "recheck", recheckOnly: true }));
+  assert.deepStrictEqual(forced.reads, ["Farmer1"]);
 });
 
 test("sweepOnce: an auto-farm list that cannot be read flips no auto-farm row", async () => {
@@ -1053,4 +1066,10 @@ test("sweepWanted: auto-farm stock switched on is always wanted", async () => {
     },
   });
   assert.strictEqual(await h.sweepWanted(), true);
+  // … and a settings read that fails is not "wanted".
+  const broken = loadHoldings({
+    autofarm: { ...autofarm, cfg: () => { throw new Error("settings unreadable"); } },
+  });
+  stubs.set(path.join(ROOT, "models", "MarketplaceListing"), { async exists() { return null; } });
+  assert.strictEqual(await broken.h.sweepWanted(), false);
 });

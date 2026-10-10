@@ -44,6 +44,14 @@ const unclaimedAccountSchema = new mongoose.Schema(
     // post-sale clean-up differs: such an account sits in an auto-farm bot
     // config, which the no-claim clean-up (spendAccount) cannot see.
     farm: { type: String, default: "", index: true },
+    // Bot configs ("host|file") this sold auto-farm account was removed from
+    // while ENABLED, whose bot has not reloaded yet. Until the list is empty
+    // the bot may still be farming the buyer's account from memory, so the pool
+    // row is not stamped "spent" (utils/autofarmStock.retirePending).
+    farmReloads: { type: [String], default: [] },
+    // Why that pass cannot finish this sale by itself ("" = it can): its token
+    // sits in a renter stack or in a file the config editor will not write.
+    farmHuman: { type: String, default: "" },
 
     // Snapshot of the unclaimed drops that were listed, for the panel.
     drops: {

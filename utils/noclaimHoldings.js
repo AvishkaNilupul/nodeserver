@@ -985,24 +985,31 @@ async function sweepInner({ budget, concurrency, game, reason, t0, recheckOnly }
       a.readMs - b.readMs ||
       a.cand.loginLower.localeCompare(b.cand.loginLower),
   );
-  // The background tick reads the two farms on separate quotas: the no-claim
-  // farm keeps every read it had, and the auto-farm rows get their own few
-  // (autoFarm.autofarmStockPerTick). A refresh someone asked for, and a forced
-  // re-read, take whatever is oldest across both.
+  // The two farms are read on separate quotas, so the no-claim farm keeps
+  // every read it had: a never-read auto-farm row sorts first, and sharing one
+  // budget would hand a whole refresh to the other farm for hours after it is
+  // switched on. The tick gives the auto-farm rows their own few
+  // (autoFarm.autofarmStockPerTick); a refresh someone asked for gives them as
+  // many as it gives the no-claim farm, up to 60. Only a forced re-read takes
+  // the flagged rows of both, whichever they are.
   let picked;
-  if (reason === "tick" && !recheckOnly) {
+  if (recheckOnly) {
+    picked = eligible.slice(0, limit);
+  } else {
     let afLimit = 0;
-    try {
-      afLimit = Math.max(0, Math.floor(Number(autofarm().cfg().perTick)) || 0);
-    } catch {
-      afLimit = 0;
+    if (reason === "tick") {
+      try {
+        afLimit = Math.max(0, Math.floor(Number(autofarm().cfg().perTick)) || 0);
+      } catch {
+        afLimit = 0;
+      }
+    } else {
+      afLimit = Math.min(limit, 60);
     }
     picked = eligible
       .filter((e) => e.cand.farm !== AUTOFARM)
       .slice(0, limit)
       .concat(eligible.filter((e) => e.cand.farm === AUTOFARM).slice(0, afLimit));
-  } else {
-    picked = eligible.slice(0, limit);
   }
 
   // 5. Live reads, a few at a time.
@@ -1450,17 +1457,25 @@ function noteInterest() {
   lastInterestAt = Date.now();
 }
 
-async function sweepWanted() {
+// Whether the NO-CLAIM farm's rows are wanted: the picker was used lately, or
+// a no-claim listing is live.
+async function noclaimWanted() {
   if (Date.now() - lastInterestAt < INTEREST_WINDOW_MS) return true;
-  // Auto-farm stock on: its drops last seven days, so it is always wanted.
-  try {
-    if (autofarm().cfg().on) return true;
-  } catch {
-    /* a settings hiccup falls through to the listing check */
-  }
   try {
     const MarketplaceListing = require("../models/MarketplaceListing");
     return !!(await MarketplaceListing.exists({ noclaimStock: true, status: "active" }));
+  } catch {
+    return false;
+  }
+}
+
+// Whether the tick should sweep at all. Auto-farm stock on: its drops last
+// seven days, so its rows are always wanted — but that alone does not make the
+// no-claim farm's wanted (see the tick: it then reads none of them).
+async function sweepWanted() {
+  if (await noclaimWanted()) return true;
+  try {
+    return autofarm().cfg().on === true;
   } catch {
     return false;
   }
@@ -1478,7 +1493,10 @@ function start() {
     try {
       const cfg = shopSettings();
       if (cfg.enabled && cfg.sweep && (await sweepWanted())) {
-        const r = await sweepOnce({ budget: cfg.sweepPerTick, reason: "tick" });
+        // Wanted only for the auto-farm rows: the no-claim farm gets no reads
+        // (budget 0), exactly as before auto-farm stock existed.
+        const budget = (await noclaimWanted()) ? cfg.sweepPerTick : 0;
+        const r = await sweepOnce({ budget, reason: "tick" });
         backoff = !!(r && r.skipped === "pi unreachable");
         // Rows flagged for a re-read are no stock until read: finish them now
         // (a drain a failed host cut short, or one a restart interrupted).

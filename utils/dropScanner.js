@@ -562,6 +562,27 @@ async function scanAccount(acc, worker) {
   );
   if (twitchId) acc.twitchId = twitchId;
   if (login && !acc.login) acc.login = login;
+  // An account sold WHOLE for its unclaimed drops (utils/autofarmStock — its
+  // bot record carries the "unclaimed-sale:…" tag) belongs to its buyer, and so
+  // does every drop it shows from now on: the ones its bot claimed in the hours
+  // before the sale that no scan had logged yet, and whatever the buyer claims
+  // later. Logged as free stock they would put a sold login back on the shelf
+  // of every claimed-bundle seller (they pick by drop, never by account). So
+  // whatever this scan just logged, or left unsold, is stamped sold with it.
+  if (acc.soldAt && /^unclaimed-sale(:|$)/.test(String(acc.soldToUsername || ""))) {
+    await DropLog.updateMany(
+      { account: acc._id, soldAt: null },
+      {
+        $set: {
+          soldAt: acc.soldAt,
+          soldToUsername: acc.soldToUsername,
+          soldSetId: String(acc.soldSetId || ""),
+        },
+      },
+    ).catch((e) =>
+      console.error("dropScanner: sold-account stamp failed for " + maskedLogin(acc) + ": " + e.message),
+    );
+  }
   // Once a game on this account is SOLD to a buyer or CONNECTED (buyer took
   // delivery), farming it again is wasted and could interfere with the buyer,
   // so remove just that game from the account's bot-config FavouriteGames

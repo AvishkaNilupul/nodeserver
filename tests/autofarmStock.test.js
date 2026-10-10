@@ -56,6 +56,11 @@ function matchValue(v, cond) {
       if (eq(v, arg)) return false;
     } else if (op === "$gte") {
       if (v == null || !(new Date(v).getTime() >= new Date(arg).getTime())) return false;
+    } else if (op === "$lt") {
+      // Mongo: a missing field never matches a comparison.
+      if (v == null || !(new Date(v).getTime() < new Date(arg).getTime())) return false;
+    } else if (op === "$regex") {
+      if (typeof v !== "string" || !new RegExp(arg).test(v)) return false;
     } else {
       throw new Error("fake model: unsupported operator " + op);
     }
@@ -76,9 +81,23 @@ function matches(doc, q) {
 
 function fakeModel(docs = []) {
   const m = { docs, writes: [] };
+  // sort: null / missing first (as MongoDB orders them), then ascending.
+  const key = (v) => (v == null ? -Infinity : v instanceof Date ? v.getTime() : v);
   const chain = (rows) => {
     const c = {
-      sort: () => c,
+      sort: (spec) => {
+        const keys = Object.keys(spec || {});
+        rows = rows.slice().sort((a, b) => {
+          for (const k of keys) {
+            const x = key(a[k]);
+            const y = key(b[k]);
+            if (x < y) return -spec[k];
+            if (x > y) return spec[k];
+          }
+          return 0;
+        });
+        return c;
+      },
       limit: (n) => {
         rows = rows.slice(0, n);
         return c;
@@ -108,6 +127,13 @@ function fakeModel(docs = []) {
       const before = (d[k] || []).length;
       d[k] = (d[k] || []).filter((x) => !cond.$in.some((a) => eq(x, a)));
       if (d[k].length !== before) changed = true;
+    }
+    for (const [k, v] of Object.entries(u.$addToSet || {})) {
+      d[k] = d[k] || [];
+      if (!d[k].some((x) => eq(x, v))) {
+        d[k].push(v);
+        changed = true;
+      }
     }
     return changed;
   };
@@ -186,6 +212,7 @@ function world(o = {}) {
     },
     reloadConfig: async (host, file, container) => {
       reloads.push(host.id + "/" + file + " -> " + container);
+      if (o.reload) return o.reload(host, file, container);
       return { done: true, outcome: "restarted" };
     },
     containerForFile: (f) => (f === "config.json" ? "twitchbot" : "twitchbotx" + parseInt(f.replace(/\D/g, ""), 10)),
@@ -283,6 +310,8 @@ test("blockReason: every rule, in order; a clean auto-farm account is free", () 
     [{ twins: true }, "login used by another token"],
     [{ scan: "token_invalid" }, "dead token or suspended"],
     [{ scan: "suspended" }, "dead token or suspended"],
+    [{ noclaimBot: true }, "in a no-claim bot"],
+    [{ copied: true }, "credentials were copied by hand"],
     [{ reseller: true }, "reseller account"],
     [{ botSold: true }, "sold or reserved (bot record)"],
     [{ rented: true }, "in a renter stack"],
@@ -690,16 +719,91 @@ test("retirePending: a pack sale is marked as bulk in its sale signal", async ()
 
 test("retirePending: a sale that cannot be finished never holds up the ones behind it", async () => {
   const w = soldWorld();
-  // Older than the real one, and its pool row is gone.
-  w.deps.UnclaimedAccount.docs.unshift({
+  // Sold earlier than the real one, and its pool row is gone.
+  const orphan = {
     _id: oid(), source: "noclaim", farm: "autofarm", login: "orphan", status: "sold",
     poolAccountId: "ffffffffffffffffffffffff", soldAt: new Date("2026-10-01T00:00:00Z"),
+    lastCheckedAt: new Date("2026-10-01T00:00:00Z"),
     manualDeliveredAt: new Date(), manualSpentAt: null,
-  });
-  const r = await af.retirePending({ limit: 1, deps: w.deps });
-  assert.strictEqual(r.retired, 1);
-  assert.match(r.errors.join(" "), /orphan: no pool row or token/);
+  };
+  w.ledger.lastCheckedAt = new Date("2026-10-11T01:00:00Z");
+  w.deps.UnclaimedAccount.docs.unshift(orphan);
+  // One sale a pass: the first pass spends it on the one nobody can finish …
+  const first = await af.retirePending({ limit: 1, deps: w.deps });
+  assert.strictEqual(first.retired, 0);
+  assert.match(first.errors.join(" "), /orphan: no pool row or token — left for a human/);
+  assert.strictEqual(orphan.farmHuman, "no pool row or token");
+  assert.strictEqual(w.events.filter((e) => e.action === "autofarm_retire_needs_human").length, 1);
+  // … and the queue has moved on: the next pass finishes the real one.
+  const second = await af.retirePending({ limit: 1, deps: w.deps });
+  assert.strictEqual(second.retired, 1);
   assert.ok(w.ledger.manualSpentAt instanceof Date);
+  // The stuck one is looked at again only hours later, and says so once.
+  const third = await af.retirePending({ limit: 1, deps: w.deps });
+  assert.strictEqual(third.pending, 0);
+  orphan.lastCheckedAt = new Date(Date.now() - 7 * 3600e3);
+  assert.strictEqual((await af.retirePending({ limit: 1, deps: w.deps })).pending, 1);
+  assert.strictEqual(w.events.filter((e) => e.action === "autofarm_retire_needs_human").length, 1);
+});
+
+test("retirePending: a bot that did not reload is not 'spent' — the debt is kept and paid later", async () => {
+  let fail = true;
+  const w = soldWorld({
+    reload: () => (fail ? { done: false, outcome: "failed", note: "twitchbotx7 restart FAILED: ssh" } : { done: true, outcome: "restarted" }),
+  });
+  const r = await af.retirePending({ deps: w.deps });
+  assert.strictEqual(r.retired, 0);
+  assert.strictEqual(r.waiting, 1);
+  assert.match(r.errors.join(" "), /reload not done/);
+  // Out of the config file, but its bot still runs the old one from memory.
+  assert.deepStrictEqual(w.hostFiles.contabo["config_07.json"].map((u) => u.Login), ["Mate"]);
+  assert.deepStrictEqual(w.ledger.farmReloads, ["contabo|config_07.json"], "written on the ledger: it survives a restart of the server");
+  assert.strictEqual(w.pool.claimedNote, "auto-farm: Brawlhalla");
+  assert.strictEqual(w.bot.configFile, "config_07.json", "the bot record still says where it is");
+  assert.strictEqual(w.ledger.manualSpentAt, null);
+  // Later: nothing is left to remove, but the reload is still owed — and tried.
+  fail = false;
+  w.reloads.length = 0;
+  const again = await af.retirePending({ deps: w.deps });
+  assert.deepStrictEqual(w.reloads, ["contabo/config_07.json -> twitchbotx7"]);
+  assert.strictEqual(again.removed, 0);
+  assert.strictEqual(again.retired, 1);
+  assert.deepStrictEqual(w.ledger.farmReloads, []);
+  assert.match(w.pool.claimedNote, /^spent — /);
+  assert.strictEqual(w.bot.configFile, "");
+});
+
+test("retirePending: a token that is back in a config after the removal is not 'spent'", async () => {
+  const w = soldWorld();
+  // Something (a bot move, a re-arm) writes the entry into another config
+  // while the pass is at work.
+  const remove = w.deps.removeAccountFromConfig;
+  w.deps.removeAccountFromConfig = async (host, file, who) => {
+    const n = await remove(host, file, who);
+    if (file === "config_07.json") w.hostFiles.contabo["config_12.json"] = [{ Login: "Sold", ClientSecret: "cs-sold", Enabled: true }];
+    return n;
+  };
+  const r = await af.retirePending({ deps: w.deps });
+  assert.strictEqual(r.retired, 0);
+  assert.match(r.errors.join(" "), /still in contabo\/config_12\.json after the removal/);
+  assert.strictEqual(w.pool.claimedNote, "auto-farm: Brawlhalla");
+  // The next pass takes it out of there too.
+  w.deps.removeAccountFromConfig = remove;
+  const again = await af.retirePending({ deps: w.deps });
+  assert.strictEqual(again.retired, 1);
+  assert.deepStrictEqual(w.hostFiles.contabo["config_12.json"], []);
+});
+
+test("retirePending: only real bot configs are written — a copy that holds the token is a human's", async () => {
+  const w = soldWorld();
+  w.hostFiles.contabo["config_07-bak.json"] = [{ Login: "Sold", ClientSecret: "cs-sold", Enabled: true }];
+  const r = await af.retirePending({ deps: w.deps });
+  assert.strictEqual(r.retired, 0);
+  assert.match(r.errors.join(" "), /contabo\|config_07-bak\.json, which is not a bot config this can edit — left for a human/);
+  assert.strictEqual(w.hostFiles.contabo["config_07-bak.json"].length, 1, "never written");
+  // The real configs were still cleaned: the account is not left farming.
+  assert.deepStrictEqual(w.hostFiles.contabo["config_07.json"].map((u) => u.Login), ["Mate"]);
+  assert.strictEqual(w.pool.claimedNote, "auto-farm: Brawlhalla");
 });
 
 // ---------------------------------------------------------------------------
@@ -885,4 +989,182 @@ test("auto-farm hooks: the top-up measures an era task by what can be sold, and 
   assert.match(exec, /eraForTask\(task, \{\s*engineTarget: want,\s*sales: taskSales,\s*\}\)/);
   assert.match(exec, /want = Math\.max\(1, Math\.min\(want, era\.target - era\.sellable\)\);/);
   assert.match(exec, /recycledOnly: reuseOnly, cleanMax: eraCleanMax \}/);
+});
+
+// ---------------------------------------------------------------------------
+// Review fixes (2026-10-11)
+// ---------------------------------------------------------------------------
+
+test("factsFor: the archive keys a drop by the bot record OR the pool row — both are asked", async () => {
+  const pools = ["poolsold", "poollinked", "both"].map((l) => poolRow(l));
+  const bots = pools.map((p) => botRow(p.username));
+  const by = Object.fromEntries(pools.map((p, i) => [p.username, { pool: p, bot: bots[i] }]));
+  const drops = [
+    // Logged by the pool checker only, under the POOL row's id.
+    { _id: oid(), account: by.poolsold.pool._id, connected: false, soldAt: new Date(), soldToUsername: "bulk:1" },
+    { _id: oid(), account: by.poollinked.pool._id, connected: true, soldAt: null },
+    // The same three drops under both keys: 3 left over, never 6.
+    ...[0, 1, 2].map(() => drop(by.both.bot)),
+    ...[0, 1, 2].map(() => ({ _id: oid(), account: by.both.pool._id, connected: false, soldAt: null })),
+  ];
+  const { deps } = world({ pool: pools, bots, drops });
+  const facts = await af.factsFor(
+    pools.map((p) => ({ loginLower: p.usernameLower, login: p.username, clientSecret: p.clientSecret, note: p.claimedNote, poolId: p._id })),
+    { maxLeftover: 5, deps },
+  );
+  assert.strictEqual(facts.get("poolsold").reason, "a drop is sold or reserved");
+  assert.strictEqual(facts.get("poollinked").reason, "a game is connected");
+  assert.strictEqual(facts.get("both").leftover, 3);
+  assert.strictEqual(facts.get("both").reason, "");
+});
+
+test("factsFor: a login copied out by hand, or a bot record in a no-claim bot, is not ours to sell", async () => {
+  const bots = [
+    botRow("copied", { copiedCount: 1 }),
+    botRow("copieddate", { lastCopiedAt: new Date() }),
+    botRow("fleet", { container: "noclaim-bot-7" }),
+    botRow("fine", { copiedCount: 0, container: "twitchbotx7" }),
+  ];
+  const { deps } = world({ bots });
+  const facts = await af.factsFor(
+    bots.map((b) => ({ loginLower: b.login, login: b.login, clientSecret: b.clientSecret, note: "auto-farm: X" })),
+    { deps },
+  );
+  assert.strictEqual(facts.get("copied").reason, "credentials were copied by hand");
+  assert.strictEqual(facts.get("copieddate").reason, "credentials were copied by hand");
+  assert.strictEqual(facts.get("fleet").reason, "in a no-claim bot");
+  assert.strictEqual(facts.get("fine").reason, "");
+});
+
+test("settings that cannot be read are 'unknown', never 'nobody' and never 'on'", async () => {
+  const { deps } = candidateWorld();
+  const real = settings.getAutoFarm;
+  settings.getAutoFarm = () => {
+    throw new Error("settings.json unreadable");
+  };
+  const { error } = console;
+  console.error = () => {};
+  try {
+    assert.strictEqual(af.cfg().on, false, "nothing new is sold");
+    assert.strictEqual(af.cfg().unreadable, true);
+    // The sweep must not read this as an empty list and flip every row out.
+    await assert.rejects(() => af.collectCandidates({ deps }), /settings unreadable/);
+  } finally {
+    console.error = error;
+    settings.getAutoFarm = real;
+  }
+});
+
+test("baseFacts: switched off, it reads nothing — no row is free whatever its facts say", async () => {
+  autoFarm = {};
+  const { deps } = world({ pool: [poolRow("x")], bots: [botRow("x")] });
+  let reads = 0;
+  for (const m of [deps.AvailableAccount, deps.BotAccount, deps.DropLog]) {
+    for (const fn of ["find", "distinct", "aggregate"]) {
+      const real = m[fn];
+      m[fn] = (...a) => {
+        reads++;
+        return real(...a);
+      };
+    }
+  }
+  const r = await af.baseFacts([{ farm: "autofarm", loginLower: "x", poolAccountId: "0".repeat(24) }], { deps });
+  assert.deepStrictEqual({ on: r.on, size: r.facts.size }, { on: false, size: 0 });
+  assert.strictEqual(reads, 0);
+});
+
+test("liveBlockReason: what the claim's own Twitch read says — connected games and claimed drops", () => {
+  const claimed = (n, extra = {}) => Array.from({ length: n }, () => ({ name: "x", connected: false, ...extra }));
+  assert.strictEqual(af.liveBlockReason({ drops: claimed(5), inProgress: [] }, { maxLeftover: 5 }), "");
+  assert.strictEqual(af.liveBlockReason({ drops: claimed(6), inProgress: [] }, { maxLeftover: 5 }), "holds 6 claimed drops");
+  assert.strictEqual(af.liveBlockReason({ drops: claimed(1), inProgress: [] }, { maxLeftover: 0 }), "holds 1 claimed drops");
+  // A linked game: its bot can claim, and someone already has this login.
+  assert.strictEqual(af.liveBlockReason({ drops: claimed(1, { connected: true }) }, { maxLeftover: 5 }), "a game is connected");
+  assert.strictEqual(af.liveBlockReason({ drops: [], inProgress: [{ connected: true }] }, { maxLeftover: 5 }), "a game is connected");
+  assert.strictEqual(af.liveBlockReason(null, { maxLeftover: 5 }), "");
+  assert.strictEqual(af.liveBlockReason({}, { maxLeftover: 5 }), "");
+});
+
+test("reserveLeftovers: the pool row is marked from the moment of sale, compare-and-set — and undone with the rest", async () => {
+  const pool = poolRow("Free");
+  const bot = botRow("Free");
+  const botDrop = drop(bot);
+  const poolDrop = { _id: oid(), account: pool._id, connected: false, soldAt: null, soldToUsername: "" };
+  const { deps } = world({ pool: [pool], bots: [bot], drops: [botDrop, poolDrop] });
+  const r = await af.reserveLeftovers({ ...pool }, { market: "eldorado", orderId: "E-1", deps });
+  assert.strictEqual(r.ok, true);
+  assert.strictEqual(r.reserved, 2, "the drop under the pool row's id as well");
+  assert.strictEqual(poolDrop.soldToUsername, "unclaimed-sale:eldorado:E-1");
+  // Neither an auto-farm claim (recycled when its campaign ends) nor the stock
+  // hold (released when its drops expire) — nothing puts it back in the pool.
+  assert.strictEqual(pool.claimedNote, "unclaimed sale pending — eldorado order E-1");
+  assert.strictEqual(pool.status, "claimed");
+  // … and it no longer reads as an auto-farm account: it is sold.
+  const facts = await af.factsFor(
+    [{ loginLower: "free", login: "Free", clientSecret: pool.clientSecret, note: pool.claimedNote, poolId: pool._id }],
+    { deps },
+  );
+  assert.strictEqual(facts.get("free").reason, "not an auto-farm account");
+
+  // A claim that fails afterwards puts everything back as the claim read it.
+  const before = { ...pool, claimedNote: "auto-farm: Brawlhalla" };
+  assert.strictEqual(await af.releaseForPool(before, { market: "eldorado", orderId: "E-1", deps }), 2);
+  assert.strictEqual(pool.claimedNote, "auto-farm: Brawlhalla");
+  assert.strictEqual(botDrop.soldAt, null);
+  assert.strictEqual(poolDrop.soldAt, null);
+  assert.strictEqual(bot.soldAt, null);
+});
+
+test("reserveLeftovers: a pool row that changed since the claim read it loses — nothing stays stamped", async () => {
+  const pool = poolRow("Moved");
+  const bot = botRow("Moved");
+  const d1 = drop(bot);
+  const { deps } = world({ pool: [pool], bots: [bot], drops: [d1] });
+  // What the claim read a moment ago; the row has been recycled since.
+  const stale = { ...pool };
+  pool.status = "available";
+  pool.claimedNote = "recycled after Brawlhalla";
+  const r = await af.reserveLeftovers(stale, { market: "eldorado", orderId: "E-1", deps });
+  assert.strictEqual(r.ok, false);
+  assert.strictEqual(r.why, "the pool row changed meanwhile");
+  assert.strictEqual(d1.soldAt, null);
+  assert.strictEqual(bot.soldAt, null);
+  assert.strictEqual(pool.claimedNote, "recycled after Brawlhalla");
+});
+
+test("reserveForLedger: a resumed order re-asserts the stamps a cut-off first attempt may have missed", async () => {
+  const pool = poolRow("Sold");
+  const bot = botRow("Sold");
+  const d1 = drop(bot);
+  const { deps } = world({ pool: [pool], bots: [bot], drops: [d1] });
+  const ledger = {
+    farm: "autofarm", poolAccountId: String(pool._id), set: "set-1", soldAt: new Date("2026-10-11T02:00:00Z"),
+    soldMarket: "eldorado", note: "eldorado order E-9",
+  };
+  assert.strictEqual(await af.reserveForLedger(ledger, { deps }), true);
+  assert.strictEqual(d1.soldToUsername, "unclaimed-sale:eldorado:E-9");
+  assert.strictEqual(bot.soldToUsername, "unclaimed-sale:eldorado:E-9");
+  assert.match(pool.claimedNote, /^unclaimed sale pending — eldorado order E-9$/);
+  // Idempotent, and never for a no-claim ledger.
+  assert.strictEqual(await af.reserveForLedger(ledger, { deps }), true);
+  assert.strictEqual(await af.reserveForLedger({ ...ledger, farm: "" }, { deps }), false);
+  assert.strictEqual(await af.reserveForLedger(null, { deps }), false);
+});
+
+test("drop scanner: whatever it logs on an account sold whole is born sold", () => {
+  // The scanner visits every bot record about daily and logs new drops as free
+  // stock; the claimed-bundle sellers pick by drop, never by account. So a drop
+  // the bot claimed just before the sale, or one the buyer claims later, would
+  // put a sold login back on their shelf. Pinned by reading the source, like
+  // the other engine hooks: right after the upsert, before anything else.
+  const src = require("fs").readFileSync(require.resolve("../utils/dropScanner.js"), "utf8");
+  const at = src.indexOf("const newDrops = await upsertDrops(");
+  assert.ok(at > 0);
+  const after = src.slice(at, at + 2600).split("\n").filter((l) => !l.trim().startsWith("//")).join("\n");
+  assert.match(after, /if \(acc\.soldAt && \/\^unclaimed-sale\(:\|\$\)\/\.test\(String\(acc\.soldToUsername \|\| ""\)\)\)/);
+  assert.match(after, /DropLog\.updateMany\(\s*\{ account: acc\._id, soldAt: null \},/);
+  assert.match(after, /soldToUsername: acc\.soldToUsername,/);
+  // The tag the scanner looks for is the one a sale writes.
+  assert.match(af.soldTag("eldorado", "x"), /^unclaimed-sale(:|$)/);
+  assert.match(af.soldTag("", ""), /^unclaimed-sale(:|$)/);
 });

@@ -224,6 +224,7 @@ function resetState() {
     afCalls: [],
     afBlock: new Map(), // loginLower -> reason
     afReserve: new Map(), // usernameLower -> { ok, why } | Error
+    afLive: "", // what the live inventory says about an auto-farm account
   });
 }
 resetState();
@@ -334,6 +335,14 @@ const autofarmStub = {
   async releaseForPool(pool, opts) {
     state.afCalls.push(["release", pool.usernameLower, { ...opts }]);
     return 0;
+  },
+  liveBlockReason() {
+    state.afCalls.push(["live"]);
+    return state.afLive;
+  },
+  async reserveForLedger(row) {
+    state.afCalls.push(["resume-stamp", row.loginLower]);
+    return true;
   },
 };
 
@@ -1383,10 +1392,10 @@ test("auto-farm: a sold claim checks its rules, then takes its claimed drops out
   assert.strictEqual(out[0].login, "farmer");
   assert.deepStrictEqual(
     state.afCalls.map((c) => c[0]),
-    ["block", "reserve"],
-    "rules before the live read, archive after the commit",
+    ["block", "live", "reserve"],
+    "rules before the live read, the live read's own verdict, archive after the commit",
   );
-  assert.deepStrictEqual(state.afCalls[1][2], { market: "eldorado", orderId: "E-1", setId: SET_ID });
+  assert.deepStrictEqual(state.afCalls[2][2], { market: "eldorado", orderId: "E-1", setId: SET_ID });
   const [l] = ledgerFor("farmer");
   assert.strictEqual(l.status, "sold");
   assert.strictEqual(l.farm, "autofarm", "the ledger says whose clean-up it is");
@@ -1471,8 +1480,26 @@ test("auto-farm: a retried order resumes its accounts without asking the rules a
   state.afBlock.set("farmer", "auto-farm stock is switched off");
   const again = await ncs.claimForSet(SET, 1, AF_ORDER);
   assert.deepStrictEqual(again.map((a) => a.login), ["farmer"]);
-  assert.deepStrictEqual(state.afCalls, []);
+  // No rule is asked and nothing is read again — but the archive stamp is
+  // asserted once more, for a first attempt that was cut off right after its
+  // commit (the stamp is the claim's, and a resume is the same claim).
+  assert.deepStrictEqual(state.afCalls, [["resume-stamp", "farmer"]]);
   assert.deepStrictEqual(state.invCalls, []);
+});
+
+test("auto-farm: the live read itself can refuse — a game connected or a drop claimed since the last scan", async () => {
+  world([
+    { login: "linked", items: [ALPHA(2), BETA(1)], farm: "autofarm" },
+    { login: "noclaim", items: [ALPHA(2), BETA(1), GAMMA(1)] },
+  ]);
+  state.afLive = "a game is connected";
+  const out = await ncs.claimForSet(SET, 1, AF_ORDER);
+  // The auto-farm account is passed over; the no-claim one is never asked.
+  assert.deepStrictEqual(out.map((a) => a.login), ["noclaim"]);
+  assert.strictEqual(out.missed["a game is connected"], 1);
+  assert.strictEqual(ledgerFor("linked").length, 0, "nothing was committed for it");
+  assert.strictEqual(state.afCalls.filter((c) => c[0] === "live").length, 1);
+  assert.ok(!state.afCalls.some((c) => c[0] === "reserve"));
 });
 
 test("spendPending never spends an auto-farm ledger — spendAccount cannot see its bot", async () => {

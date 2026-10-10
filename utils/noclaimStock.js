@@ -538,6 +538,13 @@ async function liveCheck(c, pool, required) {
   const liveLogin = str(inv && inv.login).trim().toLowerCase();
   if (liveLogin && liveLogin !== c.loginLower) return { ok: false, why: "login changed" };
   if (!covers(heldCounts(sellable), required)) return { ok: false, why: "short of the set" };
+  // An auto-farm account answers to this very read too: a game connected or a
+  // drop claimed since the scanner last logged it is in Twitch's answer hours
+  // before it is in the database (utils/autofarmStock.liveBlockReason).
+  if (str(c.farm) === AUTOFARM) {
+    const why = autofarm().liveBlockReason(inv && inv.inv);
+    if (why) return { ok: false, why };
+  }
   return { ok: true, sellable };
 }
 
@@ -804,6 +811,11 @@ async function claimForSet(set, want, opts = {}) {
     for (const row of prior) {
       found++;
       skipLogins.add(str(row.loginLower));
+      // An auto-farm account's archive stamps belong to the claim; a first
+      // attempt cut off right after its commit may not have written them.
+      if (str(row.farm) === AUTOFARM) {
+        await safely("archive stamp", () => autofarm().reserveForLedger(row));
+      }
       const cred = await ual().credentialForLedger(row);
       if (!cred || !cred.login || !cred.password) {
         console.error(

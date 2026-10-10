@@ -39,7 +39,16 @@ const DAY_MS = 24 * 60 * 60 * 1000;
 const AUTO_FARM_NOTE = /^auto-farm( backfill)?:/i;
 const STOCK_NOTE = /^unclaimed stock — /;
 const DEAD_SCAN = new Set(["suspended", "token_invalid"]);
+// Every operator config a token could sit in is READ (a copy or a renter stack
+// may hold it) …
 const CONFIG_RE = /^config(_[A-Za-z0-9-]+)?\.json$/;
+// … but only the bot configs the config editor itself accepts are WRITTEN
+// (routes/botConfigRoutes FILE_RE — removeAccountFromConfig refuses the rest).
+const EDITABLE_RE = /^config(_\d{1,3})?\.json$/;
+// The pool note of an account a buyer has paid for, from the claim until the
+// post-sale pass replaces it with "spent — …". Neither an auto-farm claim nor
+// the stock hold, so nothing recycles it, re-arms it or releases it meanwhile.
+const PENDING_NOTE = "unclaimed sale pending — ";
 // Twitch's own placeholder for "this campaign needs no account link".
 const NO_LINK_RE = /^https?:\/\/(www\.)?twitch\.tv\/?$/i;
 // What the pool row says once the account has left farming for its buyer.
@@ -62,14 +71,20 @@ function clampInt(v, d, lo, hi) {
 // stub) reads as OFF.
 function cfg() {
   let af = null;
+  let unreadable = false;
   try {
     if (typeof settings.getAutoFarm === "function") af = settings.getAutoFarm();
   } catch (e) {
+    unreadable = true;
     console.error("autofarmStock: auto-farm settings unreadable:", e && e.message);
   }
   af = af && typeof af === "object" ? af : {};
   const norm = typeof settings.normGameName === "function" ? settings.normGameName : lower;
   return {
+    // Settings that could not be READ are not "switched off": nothing new is
+    // sold (on:false), but the candidate list says "unknown" instead of
+    // "nobody" (collectCandidates throws), so no row is flipped out on a blip.
+    unreadable,
     on: af.autofarmStock === true,
     // Live inventory reads per holdings tick, on top of the no-claim farm's
     // own quota — its cadence is never diluted.
@@ -144,6 +159,11 @@ function blockReason(f, { maxLeftover = 5 } = {}) {
   if (f.bots > 1) return "two bot records for one token";
   if (f.twins) return "login used by another token";
   if (DEAD_SCAN.has(f.scan)) return "dead token or suspended";
+  // Its bot record says it sits in a no-claim bot: that farm's own stock.
+  if (f.noclaimBot) return "in a no-claim bot";
+  // Someone copied its login out of the Drops Archive by hand — the way an
+  // account is sold by hand. Its buyer may simply not have claimed yet.
+  if (f.copied) return "credentials were copied by hand";
   if (f.reseller) return "reseller account";
   if (f.botSold) return "sold or reserved (bot record)";
   if (f.rented) return "in a renter stack";
@@ -205,7 +225,11 @@ async function loginSecrets(d) {
 }
 
 // Facts for a list of accounts, in a handful of batched reads.
-//   accounts  [{ loginLower, login, clientSecret, note }]
+//   accounts  [{ loginLower, login, clientSecret, note, poolId? }]
+// The Drops Archive keys a drop by the account's BOT record once it is deployed
+// and by its POOL row when the pool checker logged it first (DropLog
+// accountModel) — the same drops, twice. So "sold" and "connected" are asked of
+// both keys, and the leftover is the larger of the two counts, never their sum.
 // Returns Map(loginLower -> { noteOk, token, bots, botId, twins, scan, botSold,
 //   reseller, rented, connected, sold, leftover, reason }).
 async function factsFor(accounts, { maxLeftover, deps } = {}) {
@@ -221,7 +245,7 @@ async function factsFor(accounts, { maxLeftover, deps } = {}) {
         { clientSecret: { $in: secrets } },
         {
           login: 1, clientSecret: 1, lastScanStatus: 1, soldAt: 1, soldToUsername: 1,
-          soldBulkOrderId: 1, resellerId: 1,
+          soldBulkOrderId: 1, resellerId: 1, container: 1, copiedCount: 1, lastCopiedAt: 1,
         },
       ).lean()
     : [];
@@ -233,7 +257,9 @@ async function factsFor(accounts, { maxLeftover, deps } = {}) {
   }
   const secretsByLogin = await loginSecrets(d);
 
+  // Raw ids (ObjectIds from lean rows): the aggregation below is not cast.
   const ids = bots.map((b) => b._id);
+  for (const a of list) if (a.poolId) ids.push(a.poolId);
   const [connectedIds, soldIds, leftRows, rentedIdx] = await Promise.all([
     ids.length ? d.DropLog.distinct("account", { account: { $in: ids }, connected: true }) : [],
     ids.length ? d.DropLog.distinct("account", { account: { $in: ids }, soldAt: { $ne: null } }) : [],
@@ -254,6 +280,7 @@ async function factsFor(accounts, { maxLeftover, deps } = {}) {
     const mine = botsBySecret.get(secret) || [];
     const bot = mine[0] || null;
     const id = bot ? String(bot._id) : "";
+    const keys = [id, a.poolId ? String(a.poolId) : ""].filter(Boolean);
     const others = secretsByLogin.get(a.loginLower) || new Set();
     const f = {
       noteOk: AUTO_FARM_NOTE.test(str(a.note)) || STOCK_NOTE.test(str(a.note)),
@@ -262,12 +289,14 @@ async function factsFor(accounts, { maxLeftover, deps } = {}) {
       botId: id,
       twins: [...others].some((s) => s && s !== secret),
       scan: bot ? str(bot.lastScanStatus) : "",
+      noclaimBot: !!(bot && /^noclaim-bot-/i.test(str(bot.container))),
+      copied: !!(bot && (Number(bot.copiedCount) > 0 || bot.lastCopiedAt)),
       botSold: !!(bot && (bot.soldAt || bot.soldBulkOrderId)),
       reseller: !!(bot && bot.resellerId),
       rented: d.rentedAccounts.isRented(rentedIdx, { clientSecret: secret, login: a.login || a.loginLower }),
-      connected: id && connected.has(id) ? 1 : 0,
-      sold: id && sold.has(id) ? 1 : 0,
-      leftover: id ? leftover.get(id) || 0 : 0,
+      connected: keys.some((k) => connected.has(k)) ? 1 : 0,
+      sold: keys.some((k) => sold.has(k)) ? 1 : 0,
+      leftover: keys.reduce((m, k) => Math.max(m, leftover.get(k) || 0), 0),
     };
     f.reason = blockReason(f, { maxLeftover: max });
     out.set(a.loginLower, f);
@@ -286,6 +315,7 @@ async function factsFor(accounts, { maxLeftover, deps } = {}) {
 // (inventoryForCandidate reads `clientSecret`), plus `farm`.
 async function collectCandidates({ deps } = {}) {
   const c = cfg();
+  if (c.unreadable) throw new Error("auto-farm settings unreadable");
   if (!c.on) return [];
   const d = deps || defaultDeps();
   const since = new Date(Date.now() - c.taskDays * DAY_MS);
@@ -348,7 +378,7 @@ async function collectCandidates({ deps } = {}) {
   const accounts = [];
   for (const [l, p] of rows) {
     if (listed.has(l)) continue;
-    accounts.push({ loginLower: l, login: str(p.username), clientSecret: str(p.clientSecret), note: str(p.claimedNote) });
+    accounts.push({ loginLower: l, login: str(p.username), clientSecret: str(p.clientSecret), note: str(p.claimedNote), poolId: p._id });
   }
   const facts = await factsFor(accounts, { maxLeftover: c.maxLeftover, deps: d });
   const out = [];
@@ -376,7 +406,8 @@ async function collectCandidates({ deps } = {}) {
 async function baseFacts(holdings, { deps } = {}) {
   const c = cfg();
   const list = (holdings || []).filter((h) => h && h.farm === FARM);
-  if (!list.length) return { on: c.on, facts: new Map() };
+  // Off: no row is free whatever its facts say, so none are read.
+  if (!list.length || !c.on) return { on: c.on, facts: new Map() };
   const d = deps || defaultDeps();
   const ids = [...new Set(list.map((h) => str(h.poolAccountId)).filter((x) => /^[0-9a-f]{24}$/i.test(x)))];
   const pools = ids.length
@@ -395,6 +426,7 @@ async function baseFacts(holdings, { deps } = {}) {
       login: str(p.username || h.login),
       clientSecret: str(p.clientSecret),
       note: str(p.claimedNote),
+      poolId: p._id,
     });
   }
   return { on: c.on, facts: await factsFor(accounts, { maxLeftover: c.maxLeftover, deps: d }) };
@@ -410,11 +442,27 @@ async function claimBlockReason(cand, pool, { deps } = {}) {
   const loginLower = lower(cand && (cand.loginLower || cand.login));
   if (!loginLower) return "no login";
   const facts = await factsFor(
-    [{ loginLower, login: str(pool.username || (cand && cand.login)), clientSecret: str(pool.clientSecret), note: str(pool.claimedNote) }],
+    [{ loginLower, login: str(pool.username || (cand && cand.login)), clientSecret: str(pool.clientSecret), note: str(pool.claimedNote), poolId: pool._id }],
     { maxLeftover: c.maxLeftover, deps },
   );
   const f = facts.get(loginLower);
   return f ? f.reason : "not checked";
+}
+
+// What the LIVE inventory a claim just read says about the account, beyond the
+// finished drops it sells. The archive is filled by a scanner that visits an
+// account about once a day, so a drop the bot claimed since — or a game someone
+// connected since — is in Twitch's answer hours before it is in the database.
+// "" = go on. `inv` is twitchInventory.fetchInventory's result.
+function liveBlockReason(inv, { maxLeftover } = {}) {
+  const max = maxLeftover == null ? cfg().maxLeftover : maxLeftover;
+  const drops = inv && Array.isArray(inv.drops) ? inv.drops : [];
+  if (drops.some((d) => d && d.connected)) return "a game is connected";
+  if ((inv && inv.inProgress ? inv.inProgress : []).some((d) => d && d.connected)) {
+    return "a game is connected";
+  }
+  if (drops.length > max) return "holds " + drops.length + " claimed drops";
+  return "";
 }
 
 // ---------------------------------------------------------------------------
@@ -442,19 +490,21 @@ async function reserveLeftovers(pool, { market = "", orderId = "", setId = "", d
   const bots = await d.BotAccount.find({ clientSecret: secret }, { _id: 1 }).lean();
   if (bots.length !== 1) return { ok: false, botId: "", reserved: 0, why: "bot record changed" };
   const botId = bots[0]._id;
+  // Both keys the archive may hold this account's drops under (see factsFor).
+  const keys = archiveKeys(botId, pool);
   const tag = soldTag(market, orderId);
   const now = new Date();
   const r = await d.DropLog.updateMany(
-    { account: botId, connected: { $ne: true }, soldAt: null },
+    { account: { $in: keys }, connected: { $ne: true }, soldAt: null },
     { $set: { soldAt: now, soldToUsername: tag, soldToAdminId: "", soldSetId: str(setId), soldBulkOrderId: "" } },
   );
   const reserved = Number(r && (r.modifiedCount != null ? r.modifiedCount : r.nModified)) || 0;
   const foreign = await d.DropLog.countDocuments({
-    account: botId,
+    account: { $in: keys },
     $or: [{ connected: true }, { soldAt: { $ne: null }, soldToUsername: { $ne: tag } }],
   });
   if (foreign) {
-    await releaseLeftovers(botId, tag, { deps: d });
+    await releaseLeftovers(keys, tag, { deps: d });
     return { ok: false, botId: String(botId), reserved: 0, why: "a drop was reserved or connected meanwhile" };
   }
   // The account's own "sold" shadow, from this moment: it is what keeps the
@@ -468,19 +518,74 @@ async function reserveLeftovers(pool, { market = "", orderId = "", setId = "", d
   );
   if (!(shadow && (shadow.modifiedCount || shadow.nModified))) {
     // Somebody stamped the record between the facts check and now.
-    await releaseLeftovers(botId, tag, { deps: d });
+    await releaseLeftovers(keys, tag, { deps: d });
     return { ok: false, botId: String(botId), reserved: 0, why: "the bot record was sold or reserved meanwhile" };
   }
-  return { ok: true, botId: String(botId), reserved, tag };
+  // The pool row, compare-and-set on the note the claim read: an auto-farm
+  // claim can be recycled when its campaign ends, and a stock hold is released
+  // when its drops expire — either would put a paid-for account back in the
+  // pool before the post-sale pass reaches it. This note is neither.
+  const note = (PENDING_NOTE + str(market) + (orderId ? " order " + str(orderId) : "")).slice(0, 200);
+  const held = await d.AvailableAccount.updateOne(
+    { _id: pool._id, status: "claimed", claimedNote: str(pool.claimedNote) },
+    { $set: { claimedNote: note } },
+  );
+  if (!(held && (held.modifiedCount || held.nModified))) {
+    await releaseLeftovers(keys, tag, { deps: d });
+    return { ok: false, botId: String(botId), reserved: 0, why: "the pool row changed meanwhile" };
+  }
+  return { ok: true, botId: String(botId), reserved, tag, note };
 }
 
-// Undo reserveLeftovers: only what carries `tag`.
-async function releaseLeftovers(botId, tag, { deps } = {}) {
+// A resumed order (the same accounts, sent again): make sure what the first
+// attempt may not have finished is in place. Ours already, so nothing here can
+// refuse — it only stamps what is still free. Never throws.
+async function reserveForLedger(ledger, { deps } = {}) {
+  try {
+    const d = deps || defaultDeps();
+    if (!ledger || ledger.farm !== FARM || !ledger.poolAccountId) return false;
+    const pool = await d.AvailableAccount.findById(ledger.poolAccountId, { clientSecret: 1, claimedNote: 1, status: 1 }).lean();
+    if (!pool || !pool.clientSecret) return false;
+    const bots = await d.BotAccount.find({ clientSecret: str(pool.clientSecret) }, { _id: 1 }).lean();
+    const tag = soldTag(ledger.soldMarket || ledger.market, orderIdOf(ledger));
+    const at = ledger.soldAt || new Date();
+    const stamp = { soldAt: at, soldToUsername: tag, soldToAdminId: "", soldSetId: str(ledger.set || ""), soldBulkOrderId: "" };
+    await d.DropLog.updateMany(
+      { account: { $in: bots.map((b) => b._id).concat([pool._id]) }, connected: { $ne: true }, soldAt: null },
+      { $set: stamp },
+    );
+    for (const b of bots) await d.BotAccount.updateOne({ _id: b._id, soldAt: null }, { $set: stamp });
+    if (AUTO_FARM_NOTE.test(str(pool.claimedNote)) || STOCK_NOTE.test(str(pool.claimedNote))) {
+      await d.AvailableAccount.updateOne(
+        { _id: pool._id, status: "claimed", claimedNote: str(pool.claimedNote) },
+        { $set: { claimedNote: (PENDING_NOTE + str(ledger.note || ledger.soldMarket || "")).slice(0, 200) } },
+      );
+    }
+    return true;
+  } catch (e) {
+    console.error("autofarmStock: archive stamp for a resumed order failed:", e && e.message);
+    return false;
+  }
+}
+
+// The ids the archive keys one account's drops by: its bot record and its pool
+// row. Raw ids, never strings.
+function archiveKeys(botId, pool) {
+  const keys = [];
+  if (botId) keys.push(botId);
+  if (pool && pool._id) keys.push(pool._id);
+  return keys;
+}
+
+// Undo reserveLeftovers: only what carries `tag`, and only on THESE ids — a
+// tag names an order, and an order of three accounts stamps all three with it.
+async function releaseLeftovers(ids, tag, { deps } = {}) {
   const d = deps || defaultDeps();
-  if (!botId || !tag) return 0;
+  const keys = (Array.isArray(ids) ? ids : [ids]).filter(Boolean);
+  if (!keys.length || !tag) return 0;
   const empty = { soldAt: null, soldToUsername: "", soldToAdminId: "", soldSetId: "", soldBulkOrderId: "" };
-  const r = await d.DropLog.updateMany({ account: botId, soldToUsername: tag }, { $set: empty });
-  await d.BotAccount.updateOne({ _id: botId, soldToUsername: tag }, { $set: empty });
+  const r = await d.DropLog.updateMany({ account: { $in: keys }, soldToUsername: tag }, { $set: empty });
+  await d.BotAccount.updateMany({ _id: { $in: keys }, soldToUsername: tag }, { $set: empty });
   return Number(r && (r.modifiedCount != null ? r.modifiedCount : r.nModified)) || 0;
 }
 
@@ -494,7 +599,14 @@ async function releaseForPool(pool, { market = "", orderId = "", deps } = {}) {
   let n = 0;
   try {
     const bots = await d.BotAccount.find({ clientSecret: secret }, { _id: 1 }).lean();
-    for (const b of bots) n += await releaseLeftovers(b._id, tag, { deps: d });
+    const keys = bots.map((b) => b._id);
+    if (pool && pool._id) keys.push(pool._id);
+    n = await releaseLeftovers(keys, tag, { deps: d });
+    // The note this claim put on the pool row goes back to the one it read.
+    await d.AvailableAccount.updateOne(
+      { _id: pool._id, claimedNote: { $regex: "^" + PENDING_NOTE } },
+      { $set: { claimedNote: str(pool.claimedNote) } },
+    );
   } catch (e) {
     console.error("autofarmStock: archive release failed:", e && e.message);
   }
@@ -507,6 +619,8 @@ async function releaseForPool(pool, { market = "", orderId = "", deps } = {}) {
 
 const usersOf = (c) =>
   c && c.TwitchSettings && Array.isArray(c.TwitchSettings.TwitchUsers) ? c.TwitchSettings.TwitchUsers : [];
+
+const HUMAN_RETRY_MS = 6 * 60 * 60 * 1000;
 
 // Every operator config on every bot host, read in one batched round trip per
 // host. Returns { configs: [{ hostId, host, file, users }], unreadable: [..] }.
@@ -551,27 +665,27 @@ async function readOperatorConfigs(d) {
 }
 
 // Take sold auto-farm accounts out of farming. For each DELIVERED sale not yet
-// cleaned up (oldest first):
+// cleaned up (the one looked at longest ago first, so a sale that cannot be
+// finished never holds up the ones behind it):
 //   1. its claimed drops are already out of the archive (reserveLeftovers ran
 //      at the claim) — re-stamped here in case a scan logged more since;
-//   2. active tasks release the login;
-//   3. it is REMOVED from every operator config that holds its token — an
-//      entry that no longer exists cannot be re-armed for the next wave — and
-//      each bot it was enabled in reloads (only if running; one left with no
-//      enabled account is stopped: farmControl.reloadConfig);
-//   4. its bot record leaves its bot, and the sale becomes a sale signal the
+//   2. active tasks release the login, and the sale becomes a sale signal the
 //      auto-farm's demand model can see (it reads SaleSignal, which the
 //      claim-at-sale markets never write);
-//   5. the pool row says "spent — …" with the sold game — only once every
-//      config on every host was read and none holds the token any more. Until
-//      then the sale stays queued and the pass comes back to it.
+//   3. it is REMOVED from every bot config that holds its token — an entry that
+//      no longer exists cannot be re-armed for the next wave. A config it was
+//      ENABLED in owes a reload, written on the ledger first: a bot that is not
+//      reloaded keeps farming the buyer's account from memory;
+//   4. each such bot reloads (only if running; one left with no enabled account
+//      is stopped: farmControl.reloadConfig), and only a reload that LANDED
+//      clears the debt — it survives a restart of this server;
+//   5. every config on every host is read once more, and only when none holds
+//      the token, none could not be read and no reload is owed does the bot
+//      record leave its bot and the pool row say "spent — …" with the sold game.
 // One failure never blocks the rest. Never throws.
 async function retirePending({ limit = 10, deps } = {}) {
   const d = deps || defaultDeps();
   const out = { pending: 0, retired: 0, waiting: 0, removed: 0, reloaded: [], errors: [] };
-  // `limit` sales are finished a pass; three times as many are looked at, so a
-  // sale that cannot be finished (a human's to look at) never holds up the
-  // ones behind it.
   const max = clampInt(limit, 10, 1, 50);
   let rows;
   try {
@@ -581,9 +695,12 @@ async function retirePending({ limit = 10, deps } = {}) {
       status: "sold",
       manualDeliveredAt: { $ne: null },
       manualSpentAt: null,
+      // A sale only a human can finish (farmHuman) is looked at again every
+      // few hours, not every pass: each look reads every bot host twice.
+      $or: [{ farmHuman: { $in: ["", null] } }, { lastCheckedAt: { $lt: new Date(Date.now() - HUMAN_RETRY_MS) } }],
     })
-      .sort({ soldAt: 1, _id: 1 })
-      .limit(max * 3)
+      .sort({ lastCheckedAt: 1, soldAt: 1, _id: 1 })
+      .limit(max)
       .lean();
   } catch (e) {
     out.errors.push("could not read the sold ledgers: " + ((e && e.message) || e));
@@ -602,13 +719,18 @@ async function retirePending({ limit = 10, deps } = {}) {
     out.errors.push("could not read the renter stacks: " + ((e && e.message) || e));
     return out;
   }
-  const { configs, unreadable } = await readOperatorConfigs(d);
-  const touched = new Map(); // "hostId|file" -> { host, file, hostId }
+  const first = await readOperatorConfigs(d);
+  const work = []; // { l, pool, secret, bots, human, owed:Set }
+  const owedConfigs = new Map(); // "hostId|file" -> { host, hostId, file }
 
   for (const l of rows) {
-    if (out.retired >= max) break;
     const login = str(l.login);
+    const w = { l, login, pool: null, secret: "", bots: [], human: "", owed: new Set((l.farmReloads || []).map(str)) };
+    work.push(w);
     try {
+      // The queue rotates: whatever happens below, this one is not the first
+      // looked at next time.
+      await d.UnclaimedAccount.updateOne({ _id: l._id }, { $set: { lastCheckedAt: new Date() } });
       const pool = l.poolAccountId
         ? await d.AvailableAccount.findById(l.poolAccountId, {
             username: 1, clientSecret: 1, status: 1, claimedNote: 1, soldGames: 1,
@@ -616,25 +738,24 @@ async function retirePending({ limit = 10, deps } = {}) {
         : null;
       const secret = str(pool && pool.clientSecret);
       if (!pool || !secret) {
-        out.errors.push(login + ": no pool row or token — left for a human");
+        w.human = "no pool row or token";
         continue;
       }
-      const bots = await d.BotAccount.find({ clientSecret: secret }, { _id: 1, login: 1, host: 1, configFile: 1 }).lean();
+      w.pool = pool;
+      w.secret = secret;
+      w.bots = await d.BotAccount.find({ clientSecret: secret }, { _id: 1, login: 1 }).lean();
       const tag = soldTag(l.soldMarket || l.market, orderIdOf(l));
+      const stamp = { soldAt: l.soldAt || new Date(), soldToUsername: tag, soldToAdminId: "", soldSetId: str(l.set || ""), soldBulkOrderId: "" };
 
-      // 1. Claimed drops logged since the claim leave the archive too.
-      for (const b of bots) {
-        await d.DropLog.updateMany(
-          { account: b._id, connected: { $ne: true }, soldAt: null },
-          { $set: { soldAt: l.soldAt || new Date(), soldToUsername: tag, soldToAdminId: "", soldSetId: str(l.set || ""), soldBulkOrderId: "" } },
-        );
-        await d.BotAccount.updateOne(
-          { _id: b._id, soldAt: null },
-          { $set: { soldAt: l.soldAt || new Date(), soldToUsername: tag, soldToAdminId: "", soldSetId: str(l.set || ""), soldBulkOrderId: "" } },
-        );
-      }
+      // 1. Claimed drops logged since the claim leave the archive too — under
+      // the bot record's id and under the pool row's (see factsFor).
+      await d.DropLog.updateMany(
+        { account: { $in: w.bots.map((b) => b._id).concat([pool._id]) }, connected: { $ne: true }, soldAt: null },
+        { $set: stamp },
+      );
+      for (const b of w.bots) await d.BotAccount.updateOne({ _id: b._id, soldAt: null }, { $set: stamp });
 
-      // 2. Tasks.
+      // 2. Tasks, and the sale signal.
       const variants = [...new Set([login, lower(login), str(pool.username), lower(pool.username)].filter(Boolean))];
       if (variants.length) {
         await d.AutoFarmTask.updateMany(
@@ -642,42 +763,111 @@ async function retirePending({ limit = 10, deps } = {}) {
           { $pull: { assignedAccounts: { $in: variants } } },
         );
       }
+      await writeSaleSignal(d, l, w.bots[0] || null);
 
-      // 3. Configs.
-      const holding = configs.filter((c) =>
-        c.users.some((u) => u && str(u.ClientSecret) === secret),
-      );
-      let inStack = false;
+      // 3. Configs. A file the config editor would refuse, or a renter's stack,
+      // is never written: the account is then a human's to look at.
+      const holding = first.configs.filter((c) => c.users.some((u) => u && str(u.ClientSecret) === secret));
       for (const c of holding) {
         const key = c.hostId + "|" + c.file;
         if (stackKeys.has(lower(c.hostId) + "|" + lower(c.file))) {
-          inStack = true;
+          w.human = "its token is in a renter stack config (" + key + ")";
+          continue;
+        }
+        if (!EDITABLE_RE.test(c.file)) {
+          w.human = "its token is in " + key + ", which is not a bot config this can edit";
           continue;
         }
         const wasEnabled = c.users.some((u) => u && str(u.ClientSecret) === secret && u.Enabled !== false);
+        if (wasEnabled) {
+          // The debt first, the edit second: a crash between the two leaves a
+          // reload that is owed, never an edit nobody will reload.
+          await d.UnclaimedAccount.updateOne({ _id: l._id }, { $addToSet: { farmReloads: key } });
+          w.owed.add(key);
+        }
         const removed = await d.removeAccountFromConfig(c.host, c.file, { clientSecret: secret, login: "" });
         if (removed) {
           out.removed += removed;
           c.users = c.users.filter((u) => !(u && str(u.ClientSecret) === secret));
-          if (wasEnabled) touched.set(key, { host: c.host, hostId: c.hostId, file: c.file });
         }
       }
-      if (inStack) {
-        out.errors.push(login + ": its token is in a renter stack config — left for a human");
+      for (const key of w.owed) {
+        const [hostId, file] = key.split("|");
+        const host = d.hosts.resolveHost(hostId);
+        if (host && file) owedConfigs.set(key, { host, hostId, file });
+      }
+    } catch (e) {
+      w.human = w.human || "";
+      out.errors.push(login + ": " + ((e && e.message) || e));
+      w.failed = true;
+    }
+  }
+
+  // 4. One reload per config that owes one, after every edit to it.
+  const allowRestart = process.env.TWITCHBOT_ALLOW_RESTART !== "0";
+  const landed = new Set();
+  for (const [key, t] of owedConfigs) {
+    const container = d.containerForFile(t.file);
+    if (!container) {
+      landed.add(key); // no container reads this file
+      continue;
+    }
+    try {
+      const r = await d.reloadConfig(t.host, t.file, container, { restorePolicy: true, allowRestart });
+      out.reloaded.push(container + ": " + ((r && r.outcome) || "?"));
+      if (r && r.done) landed.add(key);
+      else out.errors.push(t.hostId + "/" + t.file + " reload not done: " + ((r && (r.note || r.error)) || "unknown"));
+    } catch (e) {
+      out.errors.push(t.hostId + "/" + t.file + " reload: " + ((e && e.message) || e));
+    }
+  }
+  for (const w of work) {
+    const done = [...w.owed].filter((k) => landed.has(k));
+    if (!done.length) continue;
+    try {
+      await d.UnclaimedAccount.updateOne({ _id: w.l._id }, { $pull: { farmReloads: { $in: done } } });
+      for (const k of done) w.owed.delete(k);
+    } catch (e) {
+      out.errors.push(w.login + ": could not clear a reload it owed: " + ((e && e.message) || e));
+    }
+  }
+
+  // 5. Proof: a second look at every config, after the edits and the reloads.
+  const second = await readOperatorConfigs(d);
+  for (const w of work) {
+    const l = w.l;
+    try {
+      if (w.failed) continue;
+      if (w.human) {
+        out.errors.push(w.login + ": " + w.human + " — left for a human");
+        if (str(l.farmHuman) !== w.human) {
+          await d.UnclaimedAccount.updateOne({ _id: l._id }, { $set: { farmHuman: w.human.slice(0, 300) } });
+          await Promise.resolve(
+            d.logEvent({
+              category: "noclaim_shop",
+              action: "autofarm_retire_needs_human",
+              actor: "autofarmStock",
+              severity: "error",
+              subject: w.login,
+              game: str(l.game),
+              detail: "sold auto-farm account could not be taken out of farming automatically: " + w.human,
+            }),
+          ).catch(() => {});
+        }
         continue;
       }
-
-      // 4. Bot record + sale signal.
-      for (const b of bots) {
+      const still = second.configs.filter((c) => c.users.some((u) => u && str(u.ClientSecret) === w.secret));
+      if (second.unreadable.length || still.length || w.owed.size) {
+        out.waiting++;
+        if (still.length) {
+          out.errors.push(w.login + ": still in " + still.map((c) => c.hostId + "/" + c.file).join(", ") + " after the removal");
+        }
+        continue;
+      }
+      for (const b of w.bots) {
         await d.BotAccount.updateOne({ _id: b._id }, { $set: { enabled: false, configFile: "", container: "" } });
       }
-      await writeSaleSignal(d, l, bots[0] || null);
-
-      // 5. Proof, then the pool row.
-      if (unreadable.length) {
-        out.waiting++;
-        continue;
-      }
+      const pool = w.pool;
       const game = settings.normGameName ? settings.normGameName(l.game) : lower(l.game);
       const games = new Set((Array.isArray(pool.soldGames) ? pool.soldGames : []).filter(Boolean));
       if (game) games.add(game);
@@ -700,34 +890,22 @@ async function retirePending({ limit = 10, deps } = {}) {
           action: "autofarm_retired",
           actor: "autofarmStock",
           severity: "info",
-          subject: login,
+          subject: w.login,
           game: str(l.game),
           detail:
             "sold auto-farm account taken out of farming (" + (l.note || l.soldMarket || "sold") +
-            "): removed from " + holding.length + " config(s), off its tasks, pool row spent",
+            "): in no bot config any more, off its tasks, pool row spent",
         }),
       ).catch(() => {});
     } catch (e) {
-      out.errors.push(login + ": " + ((e && e.message) || e));
+      out.errors.push(w.login + ": " + ((e && e.message) || e));
     }
   }
-
-  // One reload per touched config, after every edit to it.
-  const allowRestart = process.env.TWITCHBOT_ALLOW_RESTART !== "0";
-  for (const t of touched.values()) {
-    const container = d.containerForFile(t.file);
-    if (!container) continue;
-    try {
-      const r = await d.reloadConfig(t.host, t.file, container, { restorePolicy: true, allowRestart });
-      out.reloaded.push(container + ": " + ((r && r.outcome) || "?"));
-    } catch (e) {
-      out.errors.push(t.hostId + "/" + t.file + " reload: " + ((e && e.message) || e));
-    }
-  }
-  if (unreadable.length && out.waiting) {
+  const unread = [...new Set(first.unreadable.concat(second.unreadable))];
+  if (unread.length && out.waiting) {
     out.errors.push(
       out.waiting + " sale(s) wait for an unreadable config before the pool row says spent: " +
-        unreadable.slice(0, 5).join(", "),
+        unread.slice(0, 5).join(", "),
     );
   }
   return out;
@@ -912,7 +1090,7 @@ async function unsellableLogins(logins, { deps } = {}) {
     else if (p.listed === true) out.set(l, "ticked listed");
     else if (p.status !== "claimed") out.set(l, "back in the pool");
     else if (listed.has(l)) out.set(l, "on an active listing");
-    else accounts.push({ loginLower: l, login: str(p.username), clientSecret: str(p.clientSecret), note: str(p.claimedNote) });
+    else accounts.push({ loginLower: l, login: str(p.username), clientSecret: str(p.clientSecret), note: str(p.claimedNote), poolId: p._id });
   }
   const facts = await factsFor(accounts, { maxLeftover: cfg().maxLeftover, deps: d });
   for (const a of accounts) {
@@ -972,8 +1150,11 @@ module.exports = {
   baseFacts,
   claimBlockReason,
   // writes
+  liveBlockReason,
   reserveLeftovers,
+  reserveForLedger,
   releaseLeftovers,
   releaseForPool,
   retirePending,
+  PENDING_NOTE,
 };
