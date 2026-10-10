@@ -21,6 +21,7 @@ const mongoose = require("mongoose");
 
 const mp = require("../utils/marketplaces");
 const { buildPromoCoverImage } = require("../utils/setImage");
+const { connectFirstOffer, GUARANTEE_ONCE_CONNECTED } = require("../utils/farmHandover");
 
 const args = process.argv.slice(2);
 const has = (f) => args.includes(f);
@@ -62,11 +63,11 @@ function title(game, tier) {
 function description(game, tier) {
   return `Automatic Farm on our Twitch for the game ${game}
 
-Activation & Timing: After purchasing, link the received account to your own and start receiving new Drops every day 15 hours during GMT. Farming begins the moment you purchase the account. Time counting starts from the moment the account is transferred.
+Activation & Timing: ${connectFirstOffer(game)} Farming begins the moment you purchase the account, and our bot then collects every Twitch Drops campaign ${game} runs. Time counting starts from the moment the account is transferred.
 
 Manual Pickup: If our program does not activate any of the items, you can pick up the items manually on the inventory page.
 
-Bot Guarantee: We guarantee that you will receive an automatic farm account, and all events during this period will be automatically collected by our bot within the specified period [${tier.days} days].
+Bot Guarantee: We guarantee that you will receive an automatic farm account, and ${GUARANTEE_ONCE_CONNECTED}, all events during this period will be automatically collected by our bot within the specified period [${tier.days} days].
 
 Account Status: The account provided to you may already include some items on the account Twitch.
 

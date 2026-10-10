@@ -176,9 +176,15 @@ async function parseFarmOrder(order) {
 }
 
 // The buyer-facing hand-over. Mirrors the copy the operator sends by hand: the
-// credential, then the two things that actually matter (keep it linked, don't
-// change it), then the feedback ask. `until` (the window's end, counted from
-// this hand-over — utils/farmHandover) is stated as a date.
+// credential, then the things that actually matter (connect it first, keep it
+// linked, don't change it), then the feedback ask. `until` (the window's end,
+// counted from this hand-over — utils/farmHandover) is stated as a date.
+//
+// The "connect first" step is not advice. Since 2026-10-05 Twitch refuses a
+// drop claim from an account that is not linked to the game (twitchdev/issues
+// #1216), so a buyer who never connects gets nothing claimed: their account
+// sits with finished drops no bot can claim, and they are gone 7 days after
+// the event. The old copy said "you do not have to … do anything at all".
 function farmDeliveryMessage(accounts, days, game, { until = null } = {}) {
   const term = farmHandover.termWords(days);
   const forGame = game ? " for " + game : "";
@@ -193,12 +199,13 @@ function farmDeliveryMessage(accounts, days, game, { until = null } = {}) {
     blocks.join("\n\n") +
     "\n\nYour " + term + " of automatic farming starts now" +
     (until ? " and runs until " + farmHandover.dayText(until) + " (UTC)" : "") + ".\n\n" +
-    "KEEP THIS ACCOUNT LINKED to your game account. Our farm watches every " +
+    farmHandover.connectFirstText(game) + "\n\n" +
+    "Then KEEP THIS ACCOUNT LINKED to your game account. Our farm watches every " +
     "drop event" + forGame + " and claims the items automatically the moment " +
-    "they unlock — you do not have to watch any streams or do anything at " +
-    "all. Items appear whenever " + (game || "the game") + " runs a Twitch " +
-    "Drops campaign during your " + term + ", so just check back and claim " +
-    "them whenever you like.\n\n" +
+    "they unlock — you do not have to watch any streams. Items appear " +
+    "whenever " + (game || "the game") + " runs a Twitch " +
+    "Drops campaign during your " + term + ", so just check back whenever " +
+    "you like.\n\n" +
     "Please do not change the account's password or email — the automatic " +
     "farming stops if you do, and that is not covered by a refund.\n\n" +
     "If our bot ever misses an item you can also claim it by hand at " +

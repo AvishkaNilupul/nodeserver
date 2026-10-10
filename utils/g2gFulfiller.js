@@ -109,8 +109,8 @@ function unitsForOrder(listing, orderId) {
 // platforms do not (the "if this event is still running" hedge in particular is
 // load-bearing: a sold no-claim account keeps farming only until the operator
 // runs the spent scan).
-function g2gDeliveryCode(login, password) {
-  return eld.eldoradoDeliveryCode(login, password);
+function g2gDeliveryCode(login, password, opts = {}) {
+  return eld.eldoradoDeliveryCode(login, password, opts);
 }
 
 // The AccountOffer behind an account listing (contract B5), or null for every
@@ -140,8 +140,10 @@ async function offerForListing(listing) {
 //
 // `c` is always the plain object unit() builds, never a Mongoose sub-document —
 // which is the whole reason unit() exists; see the note above it.
-function deliveryBlock(c, offer) {
-  if (!offer) return g2gDeliveryCode(c.login, c.password);
+// `unclaimed` (a no-claim row) picks the guide for drops that are still
+// unclaimed — connect first, then claim (eldoradoUnclaimedGuide).
+function deliveryBlock(c, offer, opts = {}) {
+  if (!offer) return g2gDeliveryCode(c.login, c.password, opts);
   return require("./suppliedStock").deliveryText(c, offer);
 }
 
@@ -571,7 +573,9 @@ async function deliverOrder(order, { dryRun }) {
           error: "the listing's AccountOffer is gone — cannot render the hand-over",
         };
       }
-      const retryBlocks = retryCreds.map((c) => deliveryBlock(c, retryOffer));
+      const retryBlocks = retryCreds.map((c) =>
+        deliveryBlock(c, retryOffer, { unclaimed: !!listing.noclaimStock }),
+      );
       if (retryOffer && retryBlocks.some((b) => !String(b || "").trim())) {
         return { orderId, error: "delivery text rendered empty for this offer" };
       }
@@ -716,7 +720,9 @@ async function deliverOrder(order, { dryRun }) {
       error: "the listing's AccountOffer is gone — released, not shipped",
     };
   }
-  const blocks = creds.map((c) => deliveryBlock(c, offer));
+  const blocks = creds.map((c) =>
+    deliveryBlock(c, offer, { unclaimed: !!listing.noclaimStock }),
+  );
   // An empty render followed by a delivered stamp is the "Username: undefined"
   // incident with nothing at all in it. eldoradoFulfiller refuses the same way
   // (:403); only offer-backed rows are checked, because g2gDeliveryCode cannot

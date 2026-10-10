@@ -219,6 +219,12 @@ function suppliedMessages(stock, accounts, offer) {
   return copy.deliveryMessages(accounts, { kind: "bundle" });
 }
 
+// A no-claim row hands over accounts whose drops are still UNCLAIMED, so its
+// buyer gets the connect-first, claim-soon copy (playerauctionsCopy).
+function bundleKind(row) {
+  return row && row.noclaimStock ? "unclaimed" : "bundle";
+}
+
 // --- The hand-over ------------------------------------------------------
 // Send every message, then confirm delivery with a proof image. Order is
 // load-bearing: the credential must actually reach the buyer before the order
@@ -725,7 +731,7 @@ async function deliverOrder(order, { dryRun, supplied = suppliedDeps }) {
     const sent = await handOver({
       orderId,
       accounts: creds,
-      kind: "bundle",
+      kind: bundleKind(row),
       offerTitle,
       itemCount: paItemCount(row),
       alreadyMessaged: messaged,
@@ -796,7 +802,7 @@ async function deliverOrder(order, { dryRun, supplied = suppliedDeps }) {
       };
     }
     if (dryRun) {
-      const msgs = copy.deliveryMessages(picked, { kind: "bundle" });
+      const msgs = copy.deliveryMessages(picked, { kind: "unclaimed" });
       return {
         orderId,
         dryRun: true,
@@ -811,7 +817,7 @@ async function deliverOrder(order, { dryRun, supplied = suppliedDeps }) {
     const sent = await handOver({
       orderId,
       accounts: picked,
-      kind: "bundle",
+      kind: "unclaimed",
       offerTitle,
       itemCount: paItemCount(row),
       onMessaged: () => markUnitsMessaged(row, orderId),

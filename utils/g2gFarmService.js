@@ -98,19 +98,34 @@ async function credentialsFor(added) {
 
 // `until` is the window's end, counted from this hand-over (utils/farmHandover).
 function farmMessage(creds, { game, days }, { until = null } = {}) {
-  // Lazy require: g2gFulfiller requires this module, so pulling it in at load
-  // time would be a cycle and the export would be undefined here.
-  const { g2gDeliveryCode } = require("./g2gFulfiller");
-  const lines = creds.map((c) => g2gDeliveryCode(c.login, c.password));
+  // The login only — NOT the bundle card (g2gDeliveryCode). That card's guide
+  // sends the buyer to "Received → Connect", which is the bundle product's
+  // step and, for a farm window, the wrong order: since 2026-10-05 Twitch
+  // refuses a claim from an account that is not linked to the game, so the
+  // buyer has to connect FIRST or nothing is ever claimed for them
+  // (utils/farmHandover.connectFirstText). "TWITCH DROP ACCOUNT" and
+  // "automatic farming is now running" stay: utils/g2gInbox recognises our own
+  // hand-over in a thread by them.
+  const list = Array.isArray(creds) ? creds : [];
+  const blocks = list.map(
+    (c, i) =>
+      (list.length > 1 ? "=== ACCOUNT " + (i + 1) + " of " + list.length + " ===\n" : "") +
+      "Username: " + c.login + "\nPassword: " + c.password,
+  );
   return (
     "Your " + game + " Twitch Drops automatic farming is now running for " +
     farmHandover.termWords(days) +
     (until ? ", until " + farmHandover.dayText(until) + " (UTC)" : "") + ".\n\n" +
-    lines.join("\n") +
-    "\n\nThe account above is already connected and farming for you. Sign in " +
-    "to Twitch with it any time to see the drops as they arrive, and keep it " +
-    "linked to your game account so the rewards land where you want them.\n\n" +
-    "Please do not change the password — it would disconnect the farm."
+    "TWITCH DROP ACCOUNT\n\n" +
+    blocks.join("\n\n") +
+    "\n\n" + farmHandover.connectFirstText(game) +
+    "\n\nThen keep it linked to your game account: our farm claims every drop " +
+    "automatically the moment it unlocks, and the rewards land on the game " +
+    "account you connected. Sign in to Twitch with it any time to see them " +
+    "arrive.\n\n" +
+    "Please do not change the password or email — it would disconnect the " +
+    "farm, and that is not covered by a refund.\n\n" +
+    "Any problem at all, message me here first and I will sort it out."
   );
 }
 

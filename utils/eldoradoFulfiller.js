@@ -75,12 +75,45 @@ function eldoradoClaimGuide() {
   );
 }
 
-function eldoradoDeliveryCode(login, password) {
+// The guide for UNCLAIMED stock (the no-claim farm, and auto-farm accounts sold
+// the same way). Those drops were watched to 100% and never claimed, so they
+// are not under "Received": they wait at the top of the inventory page, and
+// since 2026-10-05 Twitch lets them be claimed only once the account is
+// connected to the buyer's own game account (twitchdev/issues #1216). The
+// guide above sends a buyer to "Received → Connect", where there is nothing.
+// No "our farm keeps collecting" here: a sold no-claim account leaves its bot
+// minutes after the hand-over.
+function eldoradoUnclaimedGuide() {
+  return (
+    "HOW TO CLAIM\n" +
+    "1. Log in to this Twitch account and open " +
+    "https://www.twitch.tv/drops/inventory\n" +
+    "2. Your drops are waiting at the top of the page, all at 100%. First " +
+    'press "Connect" there and sign in with YOUR OWN game account — Twitch ' +
+    "only lets a connected account claim.\n" +
+    '3. Then press "Claim Now" on each drop.\n\n' +
+    "CLAIM TODAY\n" +
+    "Twitch removes unclaimed drops about 7 days after their event ends, and " +
+    "that clock is already running — so please connect and claim them as soon " +
+    "as you receive the account.\n\n" +
+    "Please do not change the account's password or email.\n\n" +
+    "Any problem at all, message me here first and I will make it right. And " +
+    "if you are happy with the order, leaving a feedback would genuinely mean " +
+    "a lot — it helps a small seller more than you would think. Thank you!"
+  );
+}
+
+// `unclaimed` picks the guide: true for stock whose drops are still unclaimed.
+function guideFor(opts) {
+  return opts && opts.unclaimed ? eldoradoUnclaimedGuide() : eldoradoClaimGuide();
+}
+
+function eldoradoDeliveryCode(login, password, opts = {}) {
   return (
     "TWITCH DROP ACCOUNT\n\n" +
     "Username: " + login + "\n" +
     "Password: " + password + "\n\n" +
-    eldoradoClaimGuide()
+    guideFor(opts)
   );
 }
 
@@ -94,11 +127,11 @@ function eldoradoDeliveryCode(login, password) {
 // 400 — so the send threw every 60-second tick and the paid order never delivered
 // until it was sent by hand. `creds` is [{login, password}]; only those two
 // fields are read, so callers pass their richer row objects directly.
-function eldoradoAccountsMessage(creds, qty) {
+function eldoradoAccountsMessage(creds, qty, opts = {}) {
   const list = Array.isArray(creds) ? creds : [];
   if (!list.length) return "";
   if (list.length === 1) {
-    return eldoradoDeliveryCode(list[0].login, list[0].password);
+    return eldoradoDeliveryCode(list[0].login, list[0].password, opts);
   }
   const total = list.length;
   const blocks = list.map(
@@ -107,7 +140,7 @@ function eldoradoAccountsMessage(creds, qty) {
       "Username: " + c.login + "\n" +
       "Password: " + c.password,
   );
-  return blocks.join("\n\n") + "\n\n" + eldoradoClaimGuide();
+  return blocks.join("\n\n") + "\n\n" + guideFor(opts);
 }
 
 // Atomically reserve up to `max` unsold accounts that each hold the whole
@@ -475,7 +508,7 @@ async function deliverOrder(order, { dryRun }) {
           (set ? "" : " (the listing's no-claim set is missing)"),
       };
     }
-    const message = eldoradoAccountsMessage(picked, want);
+    const message = eldoradoAccountsMessage(picked, want, { unclaimed: true });
     if (dryRun) {
       return {
         orderId,
@@ -540,7 +573,7 @@ async function deliverOrder(order, { dryRun }) {
           " — " + (shortfall.detail || BY_GAME_RETIRED),
       };
     }
-    const message = eldoradoAccountsMessage(picked, qty);
+    const message = eldoradoAccountsMessage(picked, qty, { unclaimed: true });
     if (dryRun) {
       return {
         orderId,
@@ -1726,6 +1759,7 @@ module.exports = {
   start,
   eldoradoDeliveryCode,
   eldoradoClaimGuide,
+  eldoradoUnclaimedGuide,
   eldoradoAccountsMessage,
   claimAccountsForSet,
   claimUnclaimedForGame,

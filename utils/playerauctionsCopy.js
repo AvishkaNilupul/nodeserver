@@ -18,7 +18,7 @@
 // Both builders below hard-guarantee the limit: they drop optional trailing
 // sentences until the text fits, rather than truncating mid-credential.
 const LIMIT = 300;
-const { termWords, dayText } = require("./farmHandover");
+const { termWords, dayText, connectFirstShort } = require("./farmHandover");
 
 // Assemble `head` (never dropped) plus as many `tail` sentences as fit.
 // Returns the longest result within `limit`.
@@ -60,6 +60,24 @@ function bundleDeliveryMessage(accounts) {
   ]);
 }
 
+// --- Unclaimed bundle orders --------------------------------------------
+// The no-claim farm's stock (and auto-farm accounts sold the same way): the
+// drops were watched to 100% and never claimed, so there is nothing under
+// "Received" yet. Since 2026-10-05 Twitch lets them be claimed only once the
+// account is connected to the buyer's own game account, and keeps them only
+// about 7 days after the event ends — so "connect first" and "claim today" are
+// the two sentences that must survive the 300 characters, in that order.
+function unclaimedDeliveryMessage(accounts) {
+  const list = Array.isArray(accounts) ? accounts : [accounts];
+  const head =
+    (list.length > 1 ? list.length + " accounts:\n" : "") + credBlock(list);
+  return fit(head + "\n\n", [
+    "On Twitch open Drops & Rewards > Inventory: FIRST press Connect and link your own game account, then press Claim on each drop.",
+    "Claim today - unclaimed drops expire days after the event.",
+    "Full steps are in this offer's delivery instructions.",
+  ]);
+}
+
 // --- Rent-farm orders ---------------------------------------------------
 // The buyer bought a window of automated farming on an account we keep running.
 // The game is accepted (and ignored) so this matches farmInstruction's shape —
@@ -67,17 +85,27 @@ function bundleDeliveryMessage(accounts) {
 // `until` (the window's end, counted from this hand-over — utils/farmHandover)
 // costs ~20 characters and is part of the head: the date the farming ends is
 // what a buyer needs most after the login.
-function farmDeliveryMessage(accounts, days, _game, until = null) {
+//
+// Since 2026-10-05 Twitch refuses a claim from an account that is not linked to
+// the game, so the first sentence after the login is the one the buyer must
+// act on: connect first. It is tried with the game named, then without, so a
+// long login never pushes it out of the 300 characters.
+function farmDeliveryMessage(accounts, days, game, until = null) {
   const list = Array.isArray(accounts) ? accounts : [accounts];
   const term = termWords(days);
   const head =
-    (list.length > 1 ? list.length + " accounts:\n" : "") + credBlock(list);
-  return fit(head + "\n\nYour " + term + " of automatic farming starts now" +
-    (until ? " (until " + dayText(until) + ")" : "") + ".", [
-    "Keep it linked to your game account and do not change the password or email, or the farm stops.",
+    (list.length > 1 ? list.length + " accounts:\n" : "") + credBlock(list) +
+    "\n\nYour " + term + " of automatic farming starts now" +
+    (until ? " (until " + dayText(until) + ")" : "") + ".";
+  const rest = [
+    "Do not change the password or email, or the farm stops.",
     "Details are in this offer's delivery instructions.",
-    "Any problem, reply here first.",
-  ]);
+  ];
+  for (const connect of [connectFirstShort(game), connectFirstShort(""), "FIRST link your game account to it."]) {
+    const out = fit(head, [connect].concat(rest));
+    if (out.length > head.length) return out;
+  }
+  return head;
 }
 
 // --- The guide, for offer.instruction ---------------------------------
@@ -104,7 +132,10 @@ function clampInstruction(text) {
   return (stop > 200 ? cut.slice(0, stop) : cut).trim();
 }
 
-function bundleInstruction() {
+// `unclaimed` — the offer sells accounts whose drops are still unclaimed (a
+// no-claim set): connect first, then claim, and soon.
+function bundleInstruction(opts = {}) {
+  if (opts && opts.unclaimed) return unclaimedInstruction();
   return clampInstruction(
     [
       "HOW TO CLAIM",
@@ -119,16 +150,32 @@ function bundleInstruction() {
   );
 }
 
+function unclaimedInstruction() {
+  return clampInstruction(
+    [
+      "HOW TO CLAIM",
+      "1. Log in to the Twitch account from the order messages.",
+      "2. Open twitch.tv/drops/inventory - your drops are at the top, at 100%.",
+      "3. FIRST press Connect and sign in with your own game account. Twitch only lets a connected account claim.",
+      "4. Then press Claim Now on each drop.",
+      "",
+      "Claim today: Twitch removes unclaimed drops about 7 days after the event ends - the clock is already running.",
+      "",
+      "Do not change the password or email. Any problem, message me here first and I will make it right.",
+    ].join("\n"),
+  );
+}
+
 function farmInstruction(days, game) {
   const term = termWords(days);
   return clampInstruction(
     [
       "AUTOMATIC FARMING - " + term.toUpperCase(),
       "",
-      "You receive a Twitch account in the order messages. Our farm runs it for you and claims every drop automatically" +
-        (game ? " for " + game : "") + " - you do not have to watch anything.",
+      "You get a Twitch account in the order messages. FIRST connect your own" +
+        (game ? " " + game : " game") + " account to it: log in, open twitch.tv/drops/campaigns, find the game, press Connect. Twitch claims nothing for an unconnected account.",
       "",
-      "TO COLLECT: log in, open twitch.tv/drops/inventory, and under \"Received\" press Connect on each item to link it to your game account. Repeat as new events finish.",
+      "Then our farm claims every drop automatically - no watching needed. Drops earned before you connect are claimed once you do.",
       "",
       "Do NOT change the password or email or the farm stops. Events under 24h are not guaranteed.",
     ].join("\n"),
@@ -145,12 +192,16 @@ function farmInstruction(days, game) {
 // The caller MUST send every message before confirming delivery, and must
 // reserve the accounts before sending, so that a failure part-way through
 // resends the same credentials instead of claiming fresh ones.
+// kind: "bundle" (claimed drops), "unclaimed" (drops still to be claimed — a
+// no-claim offer) or "farm" (rent-farm).
 function deliveryMessages(accounts, { kind = "bundle", days, game, until = null } = {}) {
   const list = Array.isArray(accounts) ? accounts : [accounts];
   const single =
     kind === "farm"
       ? farmDeliveryMessage(list, days, game, until)
-      : bundleDeliveryMessage(list);
+      : kind === "unclaimed"
+        ? unclaimedDeliveryMessage(list)
+        : bundleDeliveryMessage(list);
   if (single.length <= LIMIT) return [single];
 
   // Pack greedily: a header naming the range, then as many credentials as fit.
@@ -190,9 +241,14 @@ function deliveryMessages(accounts, { kind = "bundle", days, game, until = null 
         ". Keep the accounts linked and do not " +
         "change any passwords or emails. Details are in this offer's delivery " +
         "instructions."
-      : "Log in on Twitch, open Drops & Rewards > Inventory, and press Connect " +
-        "under each item to link it to your own game account. Full steps are in " +
-        "this offer's delivery instructions.";
+      : kind === "unclaimed"
+        ? "On Twitch open Drops & Rewards > Inventory: FIRST press Connect " +
+          "and link your own game account, then press Claim on each drop. " +
+          "Claim today - unclaimed drops expire days after the event. Full " +
+          "steps are in this offer's delivery instructions."
+        : "Log in on Twitch, open Drops & Rewards > Inventory, and press Connect " +
+          "under each item to link it to your own game account. Full steps are in " +
+          "this offer's delivery instructions.";
   out.push(note.slice(0, LIMIT));
   return out;
 }
@@ -205,8 +261,10 @@ module.exports = {
   credLine,
   credBlock,
   bundleDeliveryMessage,
+  unclaimedDeliveryMessage,
   farmDeliveryMessage,
   deliveryMessages,
   bundleInstruction,
+  unclaimedInstruction,
   farmInstruction,
 };

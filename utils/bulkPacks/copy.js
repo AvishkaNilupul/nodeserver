@@ -38,6 +38,7 @@ const {
   SOURCE_MARKETS,
 } = require("./config");
 const { effectiveDiscount, round2 } = require("./pricing");
+const { connectFirstOffer, GUARANTEE_ONCE_CONNECTED } = require("../farmHandover");
 
 const DEFAULT_BASE = "Twitch Drops bundle";
 const MARKET_NAMES = { eldorado: "Eldorado", g2g: "G2G", gameflip: "Gameflip" };
@@ -471,18 +472,18 @@ function farmDescription({ game, days, minQty } = {}) {
     "Delivery: The login details for every account in your pack arrive in " +
       "the order chat.",
     "",
-    "Activation & Timing: After purchasing, link each received account to " +
-      "your own game account and start receiving new Drops every day. " +
-      "Farming begins the moment you purchase. Time counting starts from the " +
-      "moment the accounts are transferred.",
+    "Activation & Timing: " + connectFirstOffer(g, { each: true }) +
+      " Farming begins the moment you purchase, and our bot then collects " +
+      "every Twitch Drops campaign " + g + " runs. Time counting starts from " +
+      "the moment the accounts are transferred.",
     "",
     "Manual Pickup: If our program does not activate any of the items, you " +
       "can pick up the items manually on the inventory page.",
     "",
     "Bot Guarantee: We guarantee that you will receive every automatic farm " +
-      "account you order, and all events during this period will be " +
-      "automatically collected by our bot on each account within the " +
-      "specified period [" + d + " days].",
+      "account you order, and " + GUARANTEE_ONCE_CONNECTED + " to it, all " +
+      "events during this period will be automatically collected by our bot " +
+      "on each account within the specified period [" + d + " days].",
     "",
     "Account Status: The accounts provided to you may already include some " +
       "items on the Twitch account.",

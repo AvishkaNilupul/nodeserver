@@ -764,7 +764,10 @@ async function publishClaimAtSale(
       game: pa.game || pubGame,
       title,
       description,
-      instruction: pa.instruction || require("./playerauctionsCopy").bundleInstruction(),
+      // A no-claim set's drops are still unclaimed: connect first, then claim.
+      instruction:
+        pa.instruction ||
+        require("./playerauctionsCopy").bundleInstruction({ unclaimed: true }),
       priceUsd: price,
       itemsPerUnit: (set.items || []).length || 1,
       totalUnit: quantity,

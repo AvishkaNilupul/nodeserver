@@ -48,6 +48,7 @@ const operatorFarm = require("./operatorFarm");
 const rentFarmCapacity = require("./rentFarmCapacity");
 const settings = require("./settings");
 const farmAlert = require("./farmServiceAlert");
+const farmHandover = require("./farmHandover");
 const { decrypt } = require("./secretBox");
 const { recordPoolUsage } = require("./poolUsageLog");
 const { logEvent } = require("./systemLog");
@@ -326,17 +327,21 @@ function offerTitle(game, term) {
 function offerDescription(game, term) {
   return (
     "Automatic Farm on our Twitch for the game " + game + "\n\n" +
-    "Activation & Timing: After purchasing, link the received account to your " +
-    "own — our bot then farms every Twitch Drops campaign " + game + " runs " +
+    "Activation & Timing: After purchasing, CONNECT the received Twitch " +
+    "account to your own game account FIRST — this is required: Twitch only " +
+    "releases a drop to an account that is connected to the game, so nothing " +
+    "can be claimed until you do (open " + farmHandover.DROPS_CAMPAIGNS_URL +
+    ", find " + game + " and press Connect). Once it is connected " +
+    "our bot then farms every Twitch Drops campaign " + game + " runs " +
     "during your " + term.days + " days. Farming begins the moment " +
     "you purchase — the " + term.days + " days are counted from your purchase, " +
     "not from when this offer was listed.\n\n" +
     "Manual Pickup: If our program does not activate any of the items, you can " +
     "pick up the items manually at https://www.twitch.tv/drops/inventory\n\n" +
     "Bot Guarantee: We guarantee that you will receive an automatic farm " +
-    "account, and all events during this period will be automatically " +
-    "collected by our bot within the specified period [" + term.days +
-    " days].\n\n" +
+    "account, and " + farmHandover.GUARANTEE_ONCE_CONNECTED + ", all events " +
+    "during this period will be automatically collected by our bot within " +
+    "the specified period [" + term.days + " days].\n\n" +
     "Account Status: The account provided to you may already include some " +
     "items on the Twitch account.\n\n" +
     "Exclusivity: Each Twitch account is transferred strictly to one buyer.\n\n" +
@@ -357,20 +362,29 @@ function offerDescription(game, term) {
 // onBufferedSale re-stamps farmUntil. The two statements are the same event.
 function bufferedDeliveryCode(login, password, days, game) {
   const term = days === 365 ? "1 year" : days + " days";
+  // Connect first: since 2026-10-05 Twitch refuses a claim from an account
+  // that is not linked to the game (utils/farmHandover), so it is the first
+  // thing the buyer reads after the login.
+  //
+  // This text is NEVER LONGER than the one it replaced, whatever the game,
+  // term and login (it is 3 characters shorter). Gameflip's cap on a delivery
+  // code is not documented and the old text is the longest code it has ever
+  // accepted from us — a code it refuses fails every top-up and every renewal
+  // of this buffer, silently. Keep it inside that length when rewording.
   return (
     "TWITCH DROPS AUTOMATIC FARMING — " + game + "\n\n" +
     "Username: " + login + "\nPassword: " + password + "\n\n" +
     "Your " + term + " of automatic farming starts now.\n\n" +
-    "KEEP THIS ACCOUNT LINKED to your game account. Our farm watches every " +
-    "drop event for " + game + " and claims the items automatically the moment " +
-    "they unlock — you do not have to watch any streams. Items appear whenever " +
-    game + " runs a Twitch Drops campaign during your " + term + ", so check " +
-    "back and claim them whenever you like at " +
-    "https://www.twitch.tv/drops/inventory\n\n" +
-    "Please do not change the account's password or email — the automatic " +
-    "farming stops if you do, and that is not covered by a refund.\n\n" +
-    "Any problem at all, message me here on Gameflip first and I will sort it " +
-    "out."
+    "FIRST CONNECT YOUR OWN GAME ACCOUNT (required): log in to this Twitch " +
+    "account, open " + farmHandover.DROPS_CAMPAIGNS_URL + ", find " + game +
+    " and press Connect. Twitch claims nothing for an account that is not " +
+    "connected.\n\n" +
+    "Then keep it linked — our farm claims every drop automatically, no " +
+    "watching needed. Items appear whenever " + game + " runs a Twitch Drops " +
+    "campaign during your " + term + ".\n\n" +
+    "Do not change the account's password or email — the farming stops if " +
+    "you do, and that is not covered by a refund.\n\n" +
+    "Any problem, message me here on Gameflip first and I will sort it out."
   );
 }
 
