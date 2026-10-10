@@ -701,3 +701,188 @@ test("retirePending: a sale that cannot be finished never holds up the ones behi
   assert.match(r.errors.join(" "), /orphan: no pool row or token/);
   assert.ok(w.ledger.manualSpentAt instanceof Date);
 });
+
+// ---------------------------------------------------------------------------
+// The unclaimed era: who the auto-farm farms a link-needed campaign on, and
+// how many (autoFarm.unclaimedEra)
+// ---------------------------------------------------------------------------
+
+const ERA = { on: true, headroom: 2, safety: 3, minAccounts: 6, claimWindowDays: 7, maxWindowDays: 28, cleanMax: 5 };
+
+test("eraCfg: OFF unless unclaimedEra is exactly true; the numbers are clamped", () => {
+  autoFarm = {};
+  assert.strictEqual(af.eraCfg().on, false);
+  autoFarm = { unclaimedEra: true, unclaimedEraHeadroom: 99, unclaimedEraSafety: -1, unclaimedEraMinAccounts: 0, autofarmStockMaxLeftover: 2 };
+  const c = af.eraCfg();
+  assert.deepStrictEqual(
+    { on: c.on, headroom: c.headroom, safety: c.safety, minAccounts: c.minAccounts, cleanMax: c.cleanMax },
+    { on: true, headroom: 5, safety: 0, minAccounts: 1, cleanMax: 2 },
+  );
+});
+
+test("eraTarget: what the window can sell, with headroom — never above the engine's target", () => {
+  // 8 a week, 12 days left + 7 to claim - 1 of lead = 18 days: 21 sales, x2 + 3.
+  const big = af.eraTarget({ ratePerWeek: 8.09, hoursLeft: 296, engineTarget: 74, cfg: ERA });
+  assert.deepStrictEqual(big, { target: 46, windowDays: 18.3, expected: 21.2 });
+  // A long campaign is capped at the 28-day window.
+  assert.strictEqual(af.eraTarget({ ratePerWeek: 1.4, hoursLeft: 642, engineTarget: 60, cfg: ERA }).target, 15);
+  // No sales on record: the floor, so the game is still tested.
+  assert.strictEqual(af.eraTarget({ ratePerWeek: 0, hoursLeft: 114, engineTarget: 44, cfg: ERA }).target, 6);
+  // The engine's own target is a ceiling, whatever the rate says.
+  assert.strictEqual(af.eraTarget({ ratePerWeek: 50, hoursLeft: 200, engineTarget: 4, cfg: ERA }).target, 4);
+  assert.strictEqual(af.eraTarget({ ratePerWeek: 50, hoursLeft: 200, engineTarget: 0, cfg: ERA }).target, 0);
+  // An unknown end reads as a long campaign; junk rates read as none.
+  assert.strictEqual(af.eraTarget({ ratePerWeek: NaN, hoursLeft: NaN, engineTarget: 60, cfg: ERA }).target, 6);
+  assert.strictEqual(af.eraTarget({ ratePerWeek: 2, hoursLeft: Infinity, engineTarget: 60, cfg: ERA }).windowDays, 28);
+  // An ended campaign still has its claim window to sell in.
+  assert.strictEqual(af.eraTarget({ ratePerWeek: 7, hoursLeft: -5, engineTarget: 60, cfg: ERA }).windowDays, 6);
+});
+
+test("campaignNeedsLink: true / false, and null for a campaign that is not on record", async () => {
+  const { deps } = world({
+    campaigns: [
+      { campaignId: "a", accountLinkURL: NEEDS_LINK },
+      { campaignId: "b", accountLinkURL: "https://twitch.tv/" },
+      { campaignId: "c", accountLinkURL: "" },
+    ],
+  });
+  deps.TwitchCampaign.findOne = (q) => ({ lean: async () => deps.TwitchCampaign.docs.find((d) => d.campaignId === q.campaignId) || null });
+  assert.strictEqual(await af.campaignNeedsLink("a", { deps }), true);
+  assert.strictEqual(await af.campaignNeedsLink("b", { deps }), false);
+  assert.strictEqual(await af.campaignNeedsLink("c", { deps }), null, "no link URL stored = unknown");
+  assert.strictEqual(await af.campaignNeedsLink("zzz", { deps }), null);
+  assert.strictEqual(await af.campaignNeedsLink("", { deps }), null);
+});
+
+test("weeklyRate: the demand model's clean count when it is recent, else the engine's 45 days", async () => {
+  const row = (ageMs, avg45) => [{ at: new Date(Date.now() - ageMs), est: { avg45 } }];
+  const brain = (rows) => ({ gameHistory: async (k) => (k === "brawlhalla" ? rows : []) });
+  assert.deepStrictEqual(await af.weeklyRate("Brawlhalla", { count: 109 }, { brain: brain(row(60e3, 8.09)) }), { rate: 8.09, basis: "brain" });
+  // A stale row, no row, or a model that throws: the engine's own count.
+  const engine = { rate: Math.round(((109 * 7) / 45) * 100) / 100, basis: "engine" };
+  assert.deepStrictEqual(await af.weeklyRate("Brawlhalla", { count: 109 }, { brain: brain(row(7 * 3600e3, 8.09)) }), engine);
+  assert.deepStrictEqual(await af.weeklyRate("Other", { count: 109 }, { brain: brain(row(60e3, 8.09)) }), engine);
+  assert.deepStrictEqual(
+    await af.weeklyRate("Brawlhalla", 109, { brain: { gameHistory: async () => { throw new Error("db"); } } }),
+    engine,
+  );
+  assert.deepStrictEqual(await af.weeklyRate("Brawlhalla", null, { brain: {} }), { rate: 0, basis: "engine" });
+});
+
+function eraWorld() {
+  const pool = [
+    poolRow("Clean"),
+    poolRow("OnListing"),
+    poolRow("Linked"),
+    poolRow("Fresh"), // deployed a moment ago: no bot record yet
+    poolRow("Recycled", { status: "available", claimedNote: "recycled after Brawlhalla" }),
+    poolRow("HandSold", { manualSold: true }),
+  ];
+  const bots = pool.filter((p) => p.username !== "Fresh").map((p) => botRow(p.username));
+  const linked = bots.find((b) => b.login === "Linked");
+  const w = world({
+    pool,
+    bots,
+    drops: [drop(linked, { connected: true })],
+    listed: ["onlisting"],
+    campaigns: [
+      { campaignId: "c-link", accountLinkURL: NEEDS_LINK },
+      { campaignId: "c-free", accountLinkURL: "https://twitch.tv/" },
+    ],
+  });
+  w.deps.TwitchCampaign.findOne = (q) => ({ lean: async () => w.deps.TwitchCampaign.docs.find((d) => d.campaignId === q.campaignId) || null });
+  return w;
+}
+
+test("unsellableLogins: only what is PROVEN unsellable — an unknown is never a gap", async () => {
+  const { deps } = eraWorld();
+  const bad = await af.unsellableLogins(["Clean", "OnListing", "Linked", "Fresh", "Recycled", "HandSold", "NoPoolRow"], { deps });
+  assert.deepStrictEqual(Object.fromEntries(bad), {
+    onlisting: "on an active listing",
+    linked: "a game is connected",
+    recycled: "back in the pool",
+    handsold: "hand-sold",
+  });
+  // "Fresh" (no bot record yet) and "NoPoolRow" (nothing known) count as there:
+  // a top-up that read them as missing would add accounts again every tick.
+  assert.ok(!bad.has("fresh") && !bad.has("nopoolrow") && !bad.has("clean"));
+});
+
+test("eraForTask: null unless the era is on and the campaign needs a link", async () => {
+  const { deps } = eraWorld();
+  const task = { game: "Brawlhalla", campaignId: "c-link", campaignEndAt: new Date(Date.now() + 296 * 3600e3), assignedAccounts: ["Clean"] };
+  autoFarm = {};
+  assert.strictEqual(await af.eraForTask(task, { engineTarget: 74, sales: { count: 0 }, deps }), null);
+  autoFarm = { unclaimedEra: true };
+  assert.strictEqual(await af.eraForTask({ ...task, campaignId: "c-free" }, { engineTarget: 74, sales: { count: 0 }, deps }), null);
+  assert.strictEqual(await af.eraForTask({ ...task, campaignId: "unknown" }, { engineTarget: 74, sales: { count: 0 }, deps }), null);
+  assert.strictEqual(await af.eraForTask(null, { deps }), null);
+});
+
+test("eraForTask: counts what could be sold, sizes to the window, asks for clean accounts", async () => {
+  autoFarm = { unclaimedEra: true };
+  const { deps } = eraWorld();
+  const task = {
+    game: "Brawlhalla",
+    campaignId: "c-link",
+    campaignEndAt: new Date(Date.now() + 296 * 3600e3),
+    assignedAccounts: ["Clean", "OnListing", "Linked", "Fresh", "HandSold", "clean"],
+  };
+  const brain = { gameHistory: async () => [{ at: new Date(), est: { avg45: 8.09 } }] };
+  const era = await af.eraForTask(task, { engineTarget: 74, sales: { count: 109 }, deps, brain });
+  assert.deepStrictEqual(era, {
+    target: 46,
+    sellable: 2, // Clean and Fresh — the same login twice is one account
+    unsellable: 3,
+    cleanMax: 5,
+    rate: 8.09,
+    basis: "brain",
+    windowDays: 18.3,
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The engine's three hooks (utils/autoFarmer.js). claimPoolAccounts and the
+// top-up need a farm host and the no-claim fence to run, so — like
+// tests/farmSizingIntegration.test.js does for the top-up's ceiling — the
+// wiring is pinned by reading the source. What the hooks COMPUTE is tested
+// above (eraForTask, eraTarget, unsellableLogins).
+// ---------------------------------------------------------------------------
+
+function fnBody(src, header) {
+  const from = src.indexOf(header);
+  assert.ok(from >= 0, "missing " + header);
+  const rest = src.slice(from);
+  return rest
+    .slice(0, rest.indexOf("\n}\n"))
+    .split("\n")
+    .filter((l) => !l.trim().startsWith("//"))
+    .join("\n");
+}
+
+test("auto-farm hooks: a clean claim narrows BOTH passes, and null changes nothing", () => {
+  const src = require("fs").readFileSync(require.resolve("../utils/autoFarmer.js"), "utf8");
+  const claim = fnBody(src, "async function claimPoolAccounts(");
+  assert.match(claim, /cleanMax = null/, "off by default");
+  assert.match(claim, /const clean = cleanCap === null \? \{\} : \{ dropCount: \{ \$not: \{ \$gt: cleanCap \} \} \};/);
+  // Inside the one query both passes share, next to the ready rule and the fence.
+  assert.match(claim, /\.\.\.readyPoolQuery\(\),\s*\.\.\.extra,\s*\.\.\.clean,/);
+  // The pristine reserve still guards every claim.
+  assert.match(claim, /pristineGuard,/);
+});
+
+test("auto-farm hooks: the top-up measures an era task by what can be sold, and claims clean", () => {
+  const src = require("fs").readFileSync(require.resolve("../utils/autoFarmer.js"), "utf8");
+  const backfill = fnBody(src, "async function backfillActiveTasks");
+  assert.match(backfill, /eraForTask\(task, \{\s*engineTarget: target,\s*sales: gameSales,\s*\}\)/);
+  assert.match(backfill, /goal = era\.target;\s*have = Math\.min\(have, era\.sellable\);\s*eraCleanMax = era\.cleanMax;/);
+  assert.match(backfill, /const missing = goal - have;/);
+  assert.match(backfill, /recycledOnly: reuseOnly, cleanMax: eraCleanMax \}/, "reuse-only games stay reuse-only");
+  // The ceiling the era may never exceed is still the game's own cap.
+  assert.match(backfill, /capForGame\(af, gameSales, task\.game\)/);
+
+  const exec = fnBody(src, "async function executeTask(");
+  assert.match(exec, /eraForTask\(task, \{\s*engineTarget: want,\s*sales: taskSales,\s*\}\)/);
+  assert.match(exec, /want = Math\.max\(1, Math\.min\(want, era\.target - era\.sellable\)\);/);
+  assert.match(exec, /recycledOnly: reuseOnly, cleanMax: eraCleanMax \}/);
+});

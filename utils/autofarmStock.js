@@ -780,11 +780,185 @@ async function writeSaleSignal(d, ledger, bot) {
   }
 }
 
+// ---------------------------------------------------------------------------
+// THE UNCLAIMED ERA — which accounts the auto-farm farms, and how many
+// (docs/UNCLAIMED-SELLING-PLAN.md, Stage 3; switch autoFarm.unclaimedEra,
+// default OFF)
+// ---------------------------------------------------------------------------
+// A campaign that needs a link no longer produces claimed drops, so nothing it
+// farms can be stockpiled: what an account earns is stock for the campaign's
+// remaining days plus the seven Twitch keeps it, sold whole to one buyer, and
+// only if the account is free to hand over. Two things follow for the engine's
+// top-up (autoFarmer.backfillActiveTasks) and its claims:
+//
+//   WHO   an account already promised elsewhere (on a claimed listing, a drop
+//         sold or reserved, a connected game, rented) can farm such a campaign
+//         all month and yield nothing we can sell. So a task's accounts are
+//         counted by what could be SOLD, and new accounts are claimed clean
+//         (few or no claimed drops), so the whole account is the bundle.
+//   HOW MANY  enough to cover what the game sells in that window, with
+//         headroom, and never more than the engine's own target: the rate is
+//         the demand model's (utils/demandBrain, clean counting over every
+//         market), or the engine's own 45-day count when it has none.
+// Unsold accounts are not lost: their drops expire and they return to the pool.
+
+function clampNum(v, d, lo, hi) {
+  if (v == null || (typeof v === "string" && !v.trim())) return d;
+  const n = Number(v);
+  return Number.isFinite(n) ? Math.min(hi, Math.max(lo, n)) : d;
+}
+
+function eraCfg() {
+  let af = null;
+  try {
+    if (typeof settings.getAutoFarm === "function") af = settings.getAutoFarm();
+  } catch (e) {
+    console.error("autofarmStock: auto-farm settings unreadable:", e && e.message);
+  }
+  af = af && typeof af === "object" ? af : {};
+  return {
+    on: af.unclaimedEra === true,
+    // Expected sales in the window are multiplied by this before the safety
+    // stock is added: a sale needs an account that finished EVERY drop.
+    headroom: clampNum(af.unclaimedEraHeadroom, 2, 1, 5),
+    safety: clampInt(af.unclaimedEraSafety, 3, 0, 20),
+    // The least a farmed campaign gets, so a game with no sales on record is
+    // still tested on a handful of accounts.
+    minAccounts: clampInt(af.unclaimedEraMinAccounts, 6, 1, 30),
+    claimWindowDays: clampInt(af.unclaimedEraClaimDays, 7, 0, 14),
+    maxWindowDays: clampInt(af.unclaimedEraMaxWindowDays, 28, 7, 60),
+    // A fresh account may carry at most this many claimed drops (the same
+    // ceiling a sale applies): they would go to the buyer with it.
+    cleanMax: cfg().maxLeftover,
+  };
+}
+
+// Pure. How many SELLABLE accounts a link-needed campaign should have.
+//   ratePerWeek   accounts of this game sold per week
+//   hoursLeft     until the campaign ends (Infinity / NaN = unknown: long)
+//   engineTarget  what the engine would farm — a ceiling, never raised
+function eraTarget({ ratePerWeek, hoursLeft, engineTarget, cfg: c } = {}) {
+  const e = c || eraCfg();
+  const rate = Math.max(0, Number(ratePerWeek) || 0);
+  const hrs = Number(hoursLeft);
+  const left = Number.isFinite(hrs) ? Math.max(0, hrs) / 24 : e.maxWindowDays;
+  // The buyer needs time to claim: an offer stops a day before the copies go.
+  const windowDays = Math.min(e.maxWindowDays, Math.max(1, left + e.claimWindowDays - 1));
+  const expected = (rate * windowDays) / 7;
+  let t = Math.ceil(expected * e.headroom) + e.safety;
+  t = Math.max(t, e.minAccounts);
+  const ceiling = Math.floor(Number(engineTarget));
+  if (Number.isFinite(ceiling) && ceiling >= 0) t = Math.min(t, ceiling);
+  return { target: t, windowDays: Math.round(windowDays * 10) / 10, expected: Math.round(expected * 10) / 10 };
+}
+
+// true / false, or null when the campaign is not on record (unknown is never
+// treated as "needs a link": the engine then does exactly what it always did).
+const LINK_TTL_MS = 10 * 60 * 1000;
+const linkCache = new Map(); // campaignId -> { at, v }
+async function campaignNeedsLink(campaignId, { deps } = {}) {
+  const id = str(campaignId);
+  if (!id) return null;
+  const hit = linkCache.get(id);
+  if (hit && !deps && Date.now() - hit.at < LINK_TTL_MS) return hit.v;
+  const d = deps || defaultDeps();
+  const c = await d.TwitchCampaign.findOne({ campaignId: id }, { accountLinkURL: 1 }).lean();
+  const v = c ? (str(c.accountLinkURL).trim() ? linkRequired(c.accountLinkURL) : null) : null;
+  if (!deps) linkCache.set(id, { at: Date.now(), v });
+  return v;
+}
+
+// Accounts of this game sold per week: { rate, basis }. The demand model's
+// clean count when it has a recent row for the game, else the engine's own
+// 45-day count (`sales` = autoFarmer.internalSalesForGame's answer).
+const BRAIN_MAX_AGE_MS = 6 * 60 * 60 * 1000;
+async function weeklyRate(game, sales, { brain } = {}) {
+  const count = Math.max(0, Number(sales && typeof sales === "object" ? sales.count : sales) || 0);
+  const engine = { rate: Math.round(((count * 7) / 45) * 100) / 100, basis: "engine" };
+  try {
+    const b = brain || require("./demandBrain");
+    if (!b || typeof b.gameHistory !== "function") return engine;
+    const rows = await b.gameHistory(lower(game), "claim", 1);
+    const row = rows && rows[0];
+    if (!row || !row.est || !(Date.now() - new Date(row.at).getTime() < BRAIN_MAX_AGE_MS)) return engine;
+    const r = Number(row.est.avg45);
+    if (!Number.isFinite(r) || r < 0) return engine;
+    return { rate: r, basis: "brain" };
+  } catch {
+    return engine;
+  }
+}
+
+// Which of these logins the auto-farm could NOT sell whole, and why:
+// Map(loginLower -> reason). A login that is not in the map counts as sellable
+// — including one with no bot record yet (deployed a moment ago): an unknown
+// must never read as a gap, or every tick would fill it again.
+async function unsellableLogins(logins, { deps } = {}) {
+  const d = deps || defaultDeps();
+  const wanted = [...new Set((logins || []).map(lower).filter(Boolean))];
+  const out = new Map();
+  if (!wanted.length) return out;
+  const [pools, listed] = await Promise.all([
+    d.AvailableAccount.find(
+      { usernameLower: { $in: wanted } },
+      { username: 1, usernameLower: 1, clientSecret: 1, claimedNote: 1, status: 1, manualSold: 1, listed: 1 },
+    ).lean(),
+    d.listedLogins.loginsOnActiveListings(),
+  ]);
+  const accounts = [];
+  for (const p of pools) {
+    const l = lower(p.usernameLower || p.username);
+    if (p.manualSold === true) out.set(l, "hand-sold");
+    else if (p.listed === true) out.set(l, "ticked listed");
+    else if (p.status !== "claimed") out.set(l, "back in the pool");
+    else if (listed.has(l)) out.set(l, "on an active listing");
+    else accounts.push({ loginLower: l, login: str(p.username), clientSecret: str(p.clientSecret), note: str(p.claimedNote) });
+  }
+  const facts = await factsFor(accounts, { maxLeftover: cfg().maxLeftover, deps: d });
+  for (const a of accounts) {
+    const f = facts.get(a.loginLower);
+    if (f && f.reason && f.reason !== "no bot record") out.set(a.loginLower, f.reason);
+  }
+  return out;
+}
+
+// What the era says about one ACTIVE task: null when it does not apply (switch
+// off, campaign needs no link or is unknown), else
+//   { target, sellable, unsellable, cleanMax, rate, basis, windowDays }.
+//   engineTarget  the target the engine computed for this task (the ceiling)
+//   sales         internalSalesForGame(task.game)
+async function eraForTask(task, { engineTarget, sales, deps, brain } = {}) {
+  const e = eraCfg();
+  if (!e.on || !task) return null;
+  if ((await campaignNeedsLink(task.campaignId, { deps })) !== true) return null;
+  const hrs = task.campaignEndAt ? (new Date(task.campaignEndAt).getTime() - Date.now()) / 3600000 : Infinity;
+  const { rate, basis } = await weeklyRate(task.game, sales, { brain });
+  const t = eraTarget({ ratePerWeek: rate, hoursLeft: hrs, engineTarget, cfg: e });
+  const logins = [...new Set((task.assignedAccounts || []).map(lower).filter(Boolean))];
+  const bad = await unsellableLogins(logins, { deps });
+  return {
+    target: t.target,
+    sellable: logins.filter((l) => !bad.has(l)).length,
+    unsellable: bad.size,
+    cleanMax: e.cleanMax,
+    rate,
+    basis,
+    windowDays: t.windowDays,
+  };
+}
+
 module.exports = {
   FARM,
   SPENT_LABEL,
   SOLD_TAG,
   cfg,
+  // the unclaimed era
+  eraCfg,
+  eraTarget,
+  campaignNeedsLink,
+  weeklyRate,
+  unsellableLogins,
+  eraForTask,
   // pure, tested
   linkRequired,
   sellableFromInv,

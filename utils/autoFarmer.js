@@ -1166,9 +1166,20 @@ function fairShare(requests, budget) {
 async function claimPoolAccounts(
   n,
   note,
-  { preferGame = "", recycledOnly = false } = {},
+  { preferGame = "", recycledOnly = false, cleanMax = null } = {},
 ) {
   const claimed = [];
+  // `cleanMax` (the unclaimed era, utils/autofarmStock): an account farmed for
+  // a campaign that needs a link is sold WHOLE, so whatever claimed drops it
+  // already carries go to the buyer with it — and one tied to old stock cannot
+  // be sold at all. A number here keeps both passes to accounts holding at
+  // most that many claimed drops (absent / null count as 0, as everywhere).
+  // null — every existing caller — changes nothing.
+  const cleanCap =
+    cleanMax !== null && cleanMax !== undefined && Number.isFinite(Number(cleanMax))
+      ? Math.max(0, Math.floor(Number(cleanMax)))
+      : null;
+  const clean = cleanCap === null ? {} : { dropCount: { $not: { $gt: cleanCap } } };
   // Backfill's note ("auto-farm backfill: <game> (<campaignId>)") names the
   // same two things; it did not match here, so its usage events carried no
   // game and a caller that passed no preferGame got no soldGames exclusion.
@@ -1235,6 +1246,7 @@ async function claimPoolAccounts(
             {
               ...readyPoolQuery(),
               ...extra,
+              ...clean,
               ...(targetGame ? { soldGames: { $ne: targetGame } } : {}),
               ...notInNoclaim,
             },
@@ -2886,11 +2898,36 @@ async function executeTask(task, ctx, { append = false } = {}) {
   // overrides it: with a per-game cap or coverage sizing raising a game above
   // the flat `maxPerGame * SALES_CAP_MULT_MAX`, that flat product would clip a
   // legitimate plan on its way to the pool.
-  const want = Math.min(
+  const taskSales = await internalSalesForGame(game).catch(() => 0);
+  let want = Math.min(
     task.plannedAccounts || 0,
-    capForGame(af, await internalSalesForGame(game).catch(() => 0), game),
+    capForGame(af, taskSales, game),
   );
   if (want < 1) throw new Error("Task has no planned accounts");
+  // THE UNCLAIMED ERA (utils/autofarmStock, autoFarm.unclaimedEra — off unless
+  // switched on). Since 2026-10-05 a campaign that needs a link yields drops no
+  // bot can claim: they are sold with the whole account, inside the campaign's
+  // days plus seven. So such a task takes CLEAN accounts, and only as many as
+  // that window can sell on top of the sellable ones it already has — never
+  // more than the plan above, and never fewer than one (a plan that reached
+  // here is carried out). A check that fails leaves the plan as it was.
+  let eraCleanMax = null;
+  try {
+    const era = await require("./autofarmStock").eraForTask(task, {
+      engineTarget: want,
+      sales: taskSales,
+    });
+    if (era) {
+      eraCleanMax = era.cleanMax;
+      want = Math.max(1, Math.min(want, era.target - era.sellable));
+    }
+  } catch (e) {
+    progress(
+      "Unclaimed-era check failed for " + game + " (" + ((e && e.message) || e) +
+        ") — planned the usual way.",
+      "warn",
+    );
+  }
 
   // Re-check the reserve floor at execution time (things may have changed
   // since the plan was made). The pristine reserve is a floor too: the claim
@@ -2958,7 +2995,7 @@ async function executeTask(task, ctx, { append = false } = {}) {
   const claimed = await claimPoolAccounts(
     n,
     "auto-farm: " + game + " (" + task.campaignId + ")",
-    { preferGame: game, recycledOnly: reuseOnly },
+    { preferGame: game, recycledOnly: reuseOnly, cleanMax: eraCleanMax },
   );
   if (!claimed.length) {
     // Reuse-only game with none of its own recycled accounts free right now:
@@ -5588,8 +5625,34 @@ async function backfillActiveTasks(af, host, progress) {
     // Accounts SOLD from this task stay in assignedAccounts and count here
     // (defect 10b, 2026-10-03: left as is on purpose — counting policy for the
     // farm brain's wiring; not counting them now would grow farming).
-    const have = usableAssignedCount(task, suspendedLogins);
-    const missing = target - have;
+    let have = usableAssignedCount(task, suspendedLogins);
+    // THE UNCLAIMED ERA (utils/autofarmStock, autoFarm.unclaimedEra — off
+    // unless switched on). A campaign that needs a link is sold as whole
+    // accounts inside its own days plus seven, so its task is measured by the
+    // accounts that could be SOLD — one promised to an old listing farms it for
+    // nothing — against what that window can sell, never above `target`. What
+    // is missing comes in clean. A check that fails sizes this task the old
+    // way; a campaign that needs no link is not touched at all.
+    let goal = target;
+    let eraCleanMax = null;
+    try {
+      const era = await require("./autofarmStock").eraForTask(task, {
+        engineTarget: target,
+        sales: gameSales,
+      });
+      if (era) {
+        goal = era.target;
+        have = Math.min(have, era.sellable);
+        eraCleanMax = era.cleanMax;
+      }
+    } catch (e) {
+      progress(
+        "Backfill: unclaimed-era check failed for " + task.game + " (" +
+          ((e && e.message) || e) + ") — sized the usual way.",
+        "warn",
+      );
+    }
+    const missing = goal - have;
     if (missing < 1) continue;
 
     const ready = await countReadyPool();
@@ -5653,9 +5716,10 @@ async function backfillActiveTasks(af, host, progress) {
         ": +" +
         n +
         " account(s) toward target " +
-        target +
+        goal +
         " (have " +
         have +
+        (eraCleanMax === null ? "" : " sellable") +
         ")\u2026",
     );
     // Reuse-only games (World of Tanks / UFL) top up ONLY from their own
@@ -5670,7 +5734,7 @@ async function backfillActiveTasks(af, host, progress) {
     const claimed = await claimPoolAccounts(
       n,
       "auto-farm backfill: " + task.game + " (" + task.campaignId + ")",
-      { preferGame: task.game, recycledOnly: reuseOnly },
+      { preferGame: task.game, recycledOnly: reuseOnly, cleanMax: eraCleanMax },
     );
     if (!claimed.length) continue;
 
@@ -5759,27 +5823,33 @@ async function backfillActiveTasks(af, host, progress) {
       taskId: task._id,
       host: host.id,
       count: deployed.length,
-      reason: "backfilled toward target " + target,
+      reason:
+        "backfilled toward target " + goal +
+        (eraCleanMax === null ? "" : " sellable (unclaimed era: clean accounts)"),
       actor: "backfillActiveTasks",
     });
+    // An era task counts what could be sold, so its line says that — the task
+    // may hold many more accounts that are promised elsewhere.
+    const nowHave =
+      eraCleanMax === null ? task.assignedAccounts.length : have + deployed.length;
     progress(
       task.game +
         " backfilled: now " +
-        task.assignedAccounts.length +
+        nowHave +
         "/" +
-        target +
-        " account(s).",
+        goal +
+        (eraCleanMax === null ? " account(s)." : " sellable account(s)."),
     );
     await tg(
       "\ud83e\udd16 Auto-farm BACKFILL \u2014 " +
         task.game +
         "\n+" +
         deployed.length +
-        " account(s), now " +
-        task.assignedAccounts.length +
+        (eraCleanMax === null ? " account(s), now " : " clean account(s), now ") +
+        nowHave +
         "/" +
-        target +
-        ".",
+        goal +
+        (eraCleanMax === null ? "." : " sellable."),
     );
   }
   return added;

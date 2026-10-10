@@ -184,6 +184,17 @@ const AUTO_FARM_DEFAULTS = {
   autofarmStockTaskDays: 8,
   // Optional allow-list of games for a first rollout; empty = every game.
   autofarmStockGames: [],
+  // THE UNCLAIMED ERA (utils/autofarmStock.eraForTask). On = a campaign that
+  // needs a link is farmed for what can be SOLD: the top-up counts only the
+  // accounts a buyer could be handed whole, sizes the task to what the game
+  // sells in the campaign's days plus seven (never above the engine's own
+  // target), and brings the missing ones in clean. Campaigns that need no link,
+  // and every other decision, are untouched. Ships OFF.
+  unclaimedEra: false,
+  // expected sales in the window x headroom + safety, at least minAccounts.
+  unclaimedEraHeadroom: 2,
+  unclaimedEraSafety: 3,
+  unclaimedEraMinAccounts: 6,
   // Multi-market auto-listing categories.
   // Plati (Digiseller) cataloguer placement for Twitch-drop accounts:
   //   Digital Goods and Access > Services and social networks > Twitch,
