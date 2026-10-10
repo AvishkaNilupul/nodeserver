@@ -165,6 +165,7 @@ function world(o = {}) {
   const reloads = [];
   const usage = [];
   const events = [];
+  const telegrams = [];
   const deps = {
     AvailableAccount: fakeModel(o.pool || []),
     BotAccount: fakeModel(o.bots || []),
@@ -202,6 +203,7 @@ function world(o = {}) {
     },
     recordPoolUsage: async (ids, entry) => usage.push({ ids: ids.map(String), ...entry }),
     logEvent: async (e) => events.push(e),
+    sendTelegram: async (text) => telegrams.push(text),
     removeAccountFromConfig: async (host, file, { clientSecret }) => {
       const users = hostFiles[host.id][file];
       const kept = users.filter((u) => u.ClientSecret !== clientSecret);
@@ -217,7 +219,7 @@ function world(o = {}) {
     },
     containerForFile: (f) => (f === "config.json" ? "twitchbot" : "twitchbotx" + parseInt(f.replace(/\D/g, ""), 10)),
   };
-  return { deps, hostFiles, removals, reloads, usage, events };
+  return { deps, hostFiles, removals, reloads, usage, events, telegrams };
 }
 
 const NEEDS_LINK = "https://www.brawlhalla.com/twitch-link";
@@ -654,6 +656,10 @@ test("retirePending: the account leaves its bots, its tasks and the archive, the
   assert.strictEqual(sig.priceUsd, 1.5);
   assert.strictEqual(String(sig.account), String(w.bot._id));
   assert.strictEqual(sig.dedupeKey, "afstock:" + String(w.ledger._id));
+  // … and one message to the owner, in the words the no-claim farm's sales use.
+  assert.deepStrictEqual(w.telegrams, [
+    "💰 SOLD (auto-farm unclaimed stock)\n\nSold\nGame: Brawlhalla\nMarket: eldorado — $1.50\nReason: eldorado order E-7",
+  ]);
 });
 
 test("retirePending: an unreadable host proves nothing — the pool row is not stamped, the sale is retried", async () => {
@@ -677,6 +683,7 @@ test("retirePending: an unreadable host proves nothing — the pool row is not s
   assert.deepStrictEqual(again.reloaded, []);
   assert.match(w.pool.claimedNote, /^spent — /);
   assert.strictEqual(w.deps.SaleSignal.docs.length, 1, "still one sale");
+  assert.strictEqual(w.telegrams.length, 1, "and the owner heard of it once, on the first pass");
 });
 
 test("retirePending: a config that does not parse, or a file that cannot be read, is 'unreadable' too", async () => {

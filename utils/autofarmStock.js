@@ -193,6 +193,7 @@ function defaultDeps() {
     recordPoolUsage: (...a) => require("./poolUsageLog").recordPoolUsage(...a),
     logEvent: (...a) => require("./systemLog").logEvent(...a),
     // Lazily: routes/botConfigRoutes pulls in the whole route stack.
+    sendTelegram: (...a) => require("./telegram").sendTelegram(...a),
     removeAccountFromConfig: (...a) =>
       require("../routes/botConfigRoutes").removeAccountFromConfig(...a),
     reloadConfig: (...a) => require("./farmControl").reloadConfig(...a),
@@ -763,7 +764,23 @@ async function retirePending({ limit = 10, deps } = {}) {
           { $pull: { assignedAccounts: { $in: variants } } },
         );
       }
-      await writeSaleSignal(d, l, w.bots[0] || null);
+      // The owner hears of the sale once — the first time this pass sees it —
+      // in the words the no-claim farm's sales use (spendAccount).
+      if (await writeSaleSignal(d, l, w.bots[0] || null)) {
+        const price = Math.max(0, Number(l.soldPriceUsd) || 0);
+        try {
+          Promise.resolve(
+            d.sendTelegram(
+              "💰 SOLD (auto-farm unclaimed stock)\n\n" + (login || "?") +
+                "\nGame: " + (str(l.game) || "?") +
+                "\nMarket: " + (str(l.soldMarket || l.market) || "?") + (price ? " — $" + price.toFixed(2) : "") +
+                "\nReason: " + (str(l.note) || "sold"),
+            ),
+          ).catch((e) => console.error("autofarmStock: sale notify error:", e && e.message));
+        } catch (e) {
+          console.error("autofarmStock: sale notify error:", e && e.message);
+        }
+      }
 
       // 3. Configs. A file the config editor would refuse, or a renter's stack,
       // is never written: the account is then a human's to look at.
@@ -919,10 +936,11 @@ function orderIdOf(ledger) {
 
 // One real sale, once: the auto-farm's demand model counts SaleSignal rows
 // ("connected" + "listing_sold"), and Eldorado / G2G / PlayerAuctions write
-// none. Keyed by the ledger, so a repeated pass adds nothing.
+// none. Keyed by the ledger, so a repeated pass adds nothing. Returns true only
+// the first time (the signal was written by this call).
 async function writeSaleSignal(d, ledger, bot) {
   const game = str(ledger.game).trim();
-  if (!game) return;
+  if (!game) return false;
   let bulk = false;
   try {
     const lid = str(ledger.manualListing);
@@ -934,7 +952,7 @@ async function writeSaleSignal(d, ledger, bot) {
     bulk = false;
   }
   try {
-    await d.SaleSignal.updateOne(
+    const r = await d.SaleSignal.updateOne(
       { dedupeKey: "afstock:" + String(ledger._id) },
       {
         $setOnInsert: {
@@ -953,8 +971,10 @@ async function writeSaleSignal(d, ledger, bot) {
       },
       { upsert: true },
     );
+    return !!(r && (r.upsertedCount || r.upsertedId));
   } catch (e) {
     console.error("autofarmStock: sale signal for " + str(ledger.login) + " failed:", e && e.message);
+    return false;
   }
 }
 
