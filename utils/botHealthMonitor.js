@@ -24,6 +24,8 @@
 //    every account "active" — yet runs an image too old to be credited. None
 //    of the three triggers above can see it; see "Stale-build + disk" below.
 //  - Full disk on a bot host, which silently stops every container on it.
+//  - Watching but not credited: every bot healthy by all of the above while
+//    Twitch counts almost none of the minutes they watch; see "Watch credit".
 //
 // State is in-memory only and resets on server restart (same tradeoff
 // dropScanner.js makes for its session counters) — acceptable here since a
@@ -128,6 +130,31 @@ const CRASH_PATTERNS = [
 // Same day, an emptied no-claim bot spun on its login prompt and wrote a 186GB
 // log; at 100% disk every container on the host stopped being able to write.
 // Nothing alerted, so the disk is checked too.
+// ---------------------------------------------------------------------------
+// Watch credit
+// ---------------------------------------------------------------------------
+// 2026-10-07 ~21:30Z: Twitch stopped counting Drops watch time unless the
+// viewer requests the stream's media segments. Every bot kept running, kept
+// every account's thread alive and logged its "N/M minutes watched" line each
+// minute with no error — and N stopped moving. ~98% of watched minutes had
+// been credited; ~1% were, on every bot on every host, for 18 hours. No check
+// above can see that: nothing is silent, crashed, decayed or stale.
+//
+// The tell is in the line itself. While an account watches one drop (M stays
+// the same) N should rise by about one per minute. The hourly log scan adds
+// up, per bot, the time accounts spent watching in the last CREDIT_WINDOW_MIN
+// minutes and the minutes N rose over that time.
+//
+// Judged per HOST and per farm (regular bots / no-claim bots), never per bot:
+// one bot can sit flat for honest reasons (an event channel between
+// broadcasts, a drop waiting on an unclaimed one before it), a whole farm on a
+// host cannot. Too small a sample gives no verdict either way.
+const CREDIT_ENABLED = process.env.BOT_CREDIT_CHECK_DISABLED !== "1";
+const CREDIT_WINDOW_MIN = Number(process.env.BOT_CREDIT_WINDOW_MIN) || 60;
+const CREDIT_RATIO = Number(process.env.BOT_CREDIT_RATIO) || 0.3; // credited/watched floor
+const CREDIT_MIN_MINUTES = Number(process.env.BOT_CREDIT_MIN_MINUTES) || 200; // watched minutes needed to judge
+const CREDIT_MIN_WATCHERS = Number(process.env.BOT_CREDIT_MIN_WATCHERS) || 10; // accounts needed to judge
+
 const BUILD_ENABLED = process.env.BOT_BUILD_CHECK_DISABLED !== "1";
 const BUILD_INTERVAL_MS =
   Number(process.env.BOT_BUILD_INTERVAL_MS) || 60 * 60 * 1000; // hourly
@@ -149,6 +176,8 @@ const tracked = new Map();
 const decayTracked = new Map();
 // `${hostId}:${container}` -> GQL parse-error tracking entry
 const parseTracked = new Map();
+// `${hostId}:${farm}` -> watch-credit tracking entry (farm = "farm" | "noclaim")
+const creditTracked = new Map();
 // hostId -> Set of "response shape changed" texts already reported
 const shapeSeen = new Map();
 // hostId -> { signature, lastAlertAt, stale, missingImage, expectedId }
@@ -406,13 +435,31 @@ function parseUptimeMs(status) {
 // the "Twitch response shape changed" warnings a tolerant build logs when it
 // absorbs a new shape.
 //
+// And it measures watch credit (see "Watch credit" above): for each account,
+// between two consecutive "N/M minutes watched" lines of the same drop (same
+// M, at most 3 minutes apart, the later one at or after `cs`), the seconds
+// that passed count as watched and any rise of N as credited.
+//
 // Input: `docker logs -t` (docker's RFC3339 time on every line). `st` = the
 // container's StartedAt (19 chars): parse errors from before a restart are
-// history, not a current fault. POSIX awk only (mawk / gawk / BWK).
+// history, not a current fault. `cs` = where the watch-credit window starts
+// (19 chars; empty = the whole scanned window). POSIX awk only (mawk / gawk /
+// BWK).
 const LOG_SCAN_AWK = [
   "NR == 1 { first = substr($1, 1, 19) }",
   "{",
-  "  if (match($0, /TwitchUser - [A-Za-z0-9_]+/)) u[substr($0, RSTART + 13, RLENGTH - 13)] = 1",
+  '  who = ""',
+  "  if (match($0, /TwitchUser - [A-Za-z0-9_]+/)) { who = substr($0, RSTART + 13, RLENGTH - 13); u[who] = 1 }",
+  '  if (who != "" && match($0, /[0-9]+\\/[0-9]+ minutes watched/)) {',
+  '    split(substr($0, RSTART, RLENGTH), mw, "/"); cur = mw[1] + 0; tot = mw[2] + 0',
+  "    ts = substr($1, 1, 19); day = substr(ts, 1, 10)",
+  "    sec = substr(ts, 12, 2) * 3600 + substr(ts, 15, 2) * 60 + substr(ts, 18, 2)",
+  "    if ((who in lc) && lt[who] == tot && ts >= cs) {",
+  "      gap = sec - ls[who]; if (ld[who] != day) gap += 86400",
+  "      if (gap > 0 && gap <= 180) { ws += gap; wu[who] = 1; if (cur > lc[who]) wg += cur - lc[who] }",
+  "    }",
+  "    lc[who] = cur; lt[who] = tot; ls[who] = sec; ld[who] = day",
+  "  }",
   "  if (substr($1, 1, 19) >= st) {",
   '    if (index($0, "JsonException")) {',
   "      j++",
@@ -427,24 +474,31 @@ const LOG_SCAN_AWK = [
   "END {",
   "  n = 0; for (k in u) n++",
   '  print "FIRST|" first; print "USERS|" n; print "JSON|" (j + 0)',
+  "  nw = 0; for (k in wu) nw++",
+  '  print "CREDIT|" (ws + 0) "|" (wg + 0) "|" nw',
   '  for (k in jp) print "JPATH|" jp[k] "|" k',
   '  for (k in sc) print "SHAPE|" k',
   "}",
 ].join("\n");
 
-function logScanScript(containers, window = DECAY_WINDOW) {
+function logScanScript(containers, window = DECAY_WINDOW, creditWindowMin = CREDIT_WINDOW_MIN) {
   const shq = hosts.shq;
-  return containers
+  const scans = containers
     .filter((c) => /^[A-Za-z0-9_.-]+$/.test(c))
     .map(
       (c) =>
         "c=" + shq(c) + "; " +
         "st=$(docker inspect -f '{{.State.StartedAt}}' \"$c\" 2>/dev/null | cut -c1-19); " +
         "echo \"SCAN|$c|$st\"; " +
-        "docker logs -t --since " + shq(window) + " \"$c\" 2>&1 | awk -v st=\"$st\" " + shq(LOG_SCAN_AWK) + "; " +
+        "docker logs -t --since " + shq(window) + " \"$c\" 2>&1 | awk -v st=\"$st\" -v cs=\"$cs\" " + shq(LOG_SCAN_AWK) + "; " +
         "echo \"END|$c\"",
-    )
-    .join("; ");
+    );
+  if (!scans.length) return "";
+  // A host whose `date` cannot do this leaves cs empty: credit is then
+  // measured over the whole scanned window instead of failing the scan.
+  const minutes = Math.max(1, Math.round(Number(creditWindowMin) || CREDIT_WINDOW_MIN));
+  const cs = "cs=$(date -u -d '-" + minutes + " minutes' +%Y-%m-%dT%H:%M:%S 2>/dev/null)";
+  return [cs, ...scans].join("; ");
 }
 
 // Pure parser for logScanScript's output (unit-tested).
@@ -455,7 +509,17 @@ function parseLogScan(stdout) {
     const line = raw.trim();
     if (line.startsWith("SCAN|")) {
       const [, c, st] = line.split("|");
-      cur = out[c] = { startedAt: st || "", first: "", active: 0, jsonErrors: 0, jsonPaths: [], shapes: [] };
+      cur = out[c] = {
+        startedAt: st || "",
+        first: "",
+        active: 0,
+        jsonErrors: 0,
+        jsonPaths: [],
+        shapes: [],
+        watchedSec: 0,
+        creditedMin: 0,
+        watchers: 0,
+      };
       continue;
     }
     if (line.startsWith("END|")) {
@@ -467,6 +531,11 @@ function parseLogScan(stdout) {
     if (kind === "FIRST") cur.first = a || "";
     else if (kind === "USERS") cur.active = Number(a) || 0;
     else if (kind === "JSON") cur.jsonErrors = Number(a) || 0;
+    else if (kind === "CREDIT") {
+      cur.watchedSec = Number(a) || 0;
+      cur.creditedMin = Number(rest[0]) || 0;
+      cur.watchers = Number(rest[1]) || 0;
+    }
     else if (kind === "JPATH") cur.jsonPaths.push({ count: Number(a) || 0, path: rest.join("|") });
     else if (kind === "SHAPE") cur.shapes.push([a, ...rest].join("|").trim());
   }
@@ -558,6 +627,123 @@ async function alertNewShapes(host, items) {
         .join("; ") +
       ". Worth a look before a change like this lands on a field the bot needs.",
   ).catch(() => {});
+}
+
+// --- watch credit -----------------------------------------------------------
+
+// No-claim bots (utils/noclaimFleet.js) run their own containers next to the
+// farm bots; they watch the same way and are measured as their own farm.
+function isNoClaimBot(name) {
+  return /^noclaim-bot-[A-Za-z0-9_-]+$/.test(name);
+}
+
+// Add up the per-bot watch-credit figures of one farm on one host.
+function sumCredit(scans) {
+  const total = { watchedSec: 0, creditedMin: 0, watchers: 0, bots: 0 };
+  for (const scan of scans) {
+    if (!scan) continue;
+    total.watchedSec += scan.watchedSec || 0;
+    total.creditedMin += scan.creditedMin || 0;
+    total.watchers += scan.watchers || 0;
+    if (scan.watchers) total.bots++;
+  }
+  return total;
+}
+
+// Pure: "ok" | "not_credited" | "inconclusive" (too little watching to say).
+function creditVerdict({ watchedSec, creditedMin, watchers }) {
+  const watchedMin = Math.round((watchedSec || 0) / 60);
+  const ratio = watchedMin > 0 ? (creditedMin || 0) / watchedMin : null;
+  let verdict = "ok";
+  if (watchedMin < CREDIT_MIN_MINUTES || (watchers || 0) < CREDIT_MIN_WATCHERS) verdict = "inconclusive";
+  else if (ratio < CREDIT_RATIO) verdict = "not_credited";
+  return { verdict, watchedMin, ratio };
+}
+
+const CREDIT_FARMS = { farm: "farm bots", noclaim: "no-claim bots" };
+
+async function checkCredit(host, farm, total, now) {
+  const k = key(host.id, farm);
+  let entry = creditTracked.get(k);
+  if (!entry) {
+    entry = { lastAlertAt: 0, alerting: false };
+    creditTracked.set(k, entry);
+  }
+  const { verdict, watchedMin, ratio } = creditVerdict(total);
+  Object.assign(entry, {
+    verdict,
+    watchedMin,
+    creditedMin: total.creditedMin,
+    watchers: total.watchers,
+    bots: total.bots,
+    ratio,
+    at: now,
+  });
+  // Too little watching to judge: an open alarm stays open, nothing is cleared.
+  if (verdict === "inconclusive") return;
+
+  const head = host.label + " " + CREDIT_FARMS[farm];
+  const stat =
+    total.creditedMin + " of " + watchedMin + " watched minutes credited (" + Math.round(ratio * 100) + "%) across " +
+    total.watchers + " accounts on " + total.bots + " bots in the last " + CREDIT_WINDOW_MIN + " min";
+
+  if (verdict === "ok") {
+    if (!entry.alerting) return;
+    entry.alerting = false;
+    logEvent({
+      category: "bots",
+      action: "watch_credited_again",
+      actor: "healthMonitor",
+      severity: "info",
+      host: host.id,
+      detail: (CREDIT_FARMS[farm] + ": " + stat).slice(0, 300),
+    });
+    await sendTelegram("✅ " + head + ": Twitch is crediting watch time again — " + stat + ".").catch(() => {});
+    return;
+  }
+
+  entry.alerting = true;
+  if (now - entry.lastAlertAt < REMINDER_MS) return;
+  entry.lastAlertAt = now;
+  logEvent({
+    category: "bots",
+    action: "watch_not_credited",
+    actor: "healthMonitor",
+    severity: "error",
+    host: host.id,
+    detail: (CREDIT_FARMS[farm] + ": " + stat).slice(0, 300),
+  });
+  await sendTelegram(
+    "🕳️ " + head + " are watching but Twitch credits almost nothing: " + stat + ". The bots look healthy " +
+      "(running, logging, no errors) — restarting them will not help. Last time (2026-10-07) Twitch had " +
+      "changed what counts as watching and every bot earned nothing for 18 hours. Check whether the other " +
+      "hosts say the same, then the bot's watch code (WatchRequest.cs in the fork) against what other drop " +
+      "miners changed.",
+  ).catch(() => {});
+}
+
+// No-claim bots get their own short scan: only the watch-credit figures are
+// used, so the log does not need to reach back the decay window.
+async function creditScanNoClaim(host, states, now) {
+  const running = Object.keys(states).filter(
+    (name) => isNoClaimBot(name) && states[name].state === "running",
+  );
+  if (!running.length) {
+    creditTracked.delete(key(host.id, "noclaim"));
+    return;
+  }
+  let scans;
+  try {
+    const { stdout } = await hosts.runShell(
+      host,
+      logScanScript(running, CREDIT_WINDOW_MIN + 10 + "m"),
+      { timeout: LOG_SCAN_TIMEOUT_MS },
+    );
+    scans = parseLogScan(stdout);
+  } catch {
+    return; // scan failed — no verdict
+  }
+  await checkCredit(host, "noclaim", sumCredit(running.map((c) => scans[c])), now);
 }
 
 // --- thread-decay scan ----------------------------------------------------
@@ -705,7 +891,13 @@ async function decayScanHost(host, now) {
       if (k.startsWith(host.id + ":") && !seen.has(k)) m.delete(k);
     }
   }
-  if (!running.length) return;
+  if (CREDIT_ENABLED && host.runtime !== "native") {
+    await creditScanNoClaim(host, states, now).catch(() => {});
+  }
+  if (!running.length) {
+    creditTracked.delete(key(host.id, "farm"));
+    return;
+  }
   if (host.runtime === "native") {
     for (const container of running) {
       await checkDecay(host, container, states[container], now).catch(() => {});
@@ -741,6 +933,9 @@ async function decayScanHost(host, now) {
     }).catch(() => {});
   }
   if (shapes.length) await alertNewShapes(host, shapes).catch(() => {});
+  if (CREDIT_ENABLED) {
+    await checkCredit(host, "farm", sumCredit(running.map((c) => scans[c])), now).catch(() => {});
+  }
 }
 
 // --- stale-build + disk helpers (pure; exported for unit tests) -----------
@@ -1150,6 +1345,28 @@ function status() {
         alerting: !!v.alerting,
       })),
     },
+    credit: {
+      enabled: CREDIT_ENABLED,
+      basis:
+        "per host and farm: minutes N rose in the bots' own 'N/M minutes watched' lines over the minutes " +
+        "accounts spent watching, last " + CREDIT_WINDOW_MIN + " min of the hourly log scan",
+      windowMin: CREDIT_WINDOW_MIN,
+      ratio: CREDIT_RATIO,
+      minMinutes: CREDIT_MIN_MINUTES,
+      minWatchers: CREDIT_MIN_WATCHERS,
+      farms: Array.from(creditTracked.entries()).map(([k, v]) => ({
+        key: k,
+        verdict: v.verdict || "",
+        watchedMin: v.watchedMin || 0,
+        creditedMin: v.creditedMin || 0,
+        creditedPct: v.ratio == null ? null : Math.round(v.ratio * 100),
+        watchers: v.watchers || 0,
+        bots: v.bots || 0,
+        alerting: !!v.alerting,
+        measuredAt: v.at ? new Date(v.at).toISOString() : null,
+        lastAlertAt: v.lastAlertAt ? new Date(v.lastAlertAt).toISOString() : null,
+      })),
+    },
     build: {
       enabled: BUILD_ENABLED,
       image: FARM_IMAGE,
@@ -1194,6 +1411,9 @@ module.exports = {
   logScanScript,
   parseLogScan,
   logCoverageMs,
+  isNoClaimBot,
+  sumCredit,
+  creditVerdict,
   // Orchestration entrypoints exposed for integration tests (each drives one
   // scan of a host against an injectable `hosts` layer).
   decayScanHost,

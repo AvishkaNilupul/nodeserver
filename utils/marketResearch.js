@@ -181,6 +181,25 @@ async function scanGame(game, campaignsByGame, ctx = {}) {
   const gfActiveRel = relevant(gfActive, game).filter(notPack);
   const ggRel = relevant(gg, game);
   const plRel = relevant(pl, game);
+  // Market radar (utils/marketData, docs/MARKET-RADAR-PLAN.md): the rows this scan already
+  // fetched are handed to the recorder instead of being thrown away. It returns at once (one
+  // settings read while switched off), never throws and makes no request of its own; the try is
+  // a second belt so a recorder fault can never cost a scan.
+  try {
+    require("./marketData").tap({
+      game,
+      at: new Date(),
+      ownGf: String((ctx && ctx.gfOwnerId) || ""),
+      gfSold: gfSoldRel,
+      gfActive: gfActiveRel,
+      // Only a page the scout read in full proves a missing rival is gone (a failed fetch is [] without the flag).
+      gfActiveComplete: !!(gfActive && gfActive.complete === true),
+      gg: ggRel,
+      pl: plRel,
+    });
+  } catch {
+    /* the recorder must never be able to fail a scan */
+  }
 
   const soldRecentRows = gfSoldRel.filter(
     (r) => r.updated && new Date(r.updated).getTime() >= cutoff,

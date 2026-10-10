@@ -38,8 +38,10 @@
 // inside the server — the farmer tick calls it), then the row leaves its bot
 // (enabled false, configFile/container "") and active tasks release the login.
 // Rows, drops and sales are kept. A touched config's container is restarted once,
-// and only if it is RUNNING: restartConfigContainer is `docker restart`, which
-// would also start a parked bot.
+// and only if it is RUNNING (`docker restart` would also start a parked bot) —
+// checked and restarted in ONE shell command under the container's lock
+// (farmControl.restartIfRunning, 2026-10-03). A config the retirement empties
+// is stopped instead (botHosts.stopIfNoAccounts).
 const MarketplaceListing = require("../models/MarketplaceListing");
 const { isRealSale } = require("./marketClaimTags");
 
@@ -116,6 +118,9 @@ function defaultDeps() {
       const r = require("../routes/botConfigRoutes");
       return { removeAccountFromConfig: r.removeAccountFromConfig, restartConfigContainer: r.restartConfigContainer };
     },
+    restartIfRunning: (...a) => require("./farmControl").restartIfRunning(...a),
+    reloadConfig: (...a) => require("./farmControl").reloadConfig(...a),
+    retryPendingReloads: (...a) => require("./farmControl").retryPendingReloads(...a),
   };
 }
 
@@ -222,17 +227,41 @@ async function retireSoldDeadTokens({ hours = DEFAULT_HOURS, dryRun = false, now
   const d = deps || defaultDeps();
   const progress = typeof onProgress === "function" ? onProgress : () => {};
   const p = await plan({ hours, now, deps: d });
-  const report = { ...p, dryRun: !!dryRun, retired: [], errors: [], configs: 0, restarted: [] };
+  const report = {
+    ...p,
+    dryRun: !!dryRun,
+    retired: [],
+    errors: [],
+    configs: 0,
+    restarted: [],
+    stopped: [],
+    notRestarted: [],
+    owedReloads: [],
+  };
+  const fc = () => require("./farmControl");
+  const reloadConfig = d.reloadConfig || ((...a) => fc().reloadConfig(...a));
+  const retryOwed = d.retryPendingReloads || ((...a) => fc().retryPendingReloads(...a));
+  // Reloads an earlier pass could not decide (config unreadable, `docker ps`
+  // failed) are retried first, every pass — the retired rows' configFile is
+  // cleared in the same pass, so they are never planned again (round-3 review,
+  // 2026-10-03).
+  if (!dryRun) {
+    for (const r of await retryOwed().catch(() => [])) {
+      report.owedReloads.push(r.note + (r.done ? "" : " — still owed"));
+    }
+    if (report.owedReloads.length) progress("Dead-token retire: owed reload(s): " + report.owedReloads.join("; ") + ".");
+  }
   if (dryRun || !p.retire.length) return report;
 
-  const { removeAccountFromConfig, restartConfigContainer } = d.configOps();
+  const { removeAccountFromConfig } = d.configOps();
+  const restartIfRunning = d.restartIfRunning || fc().restartIfRunning;
+  const allowRestart = process.env.TWITCHBOT_ALLOW_RESTART !== "0";
   const groups = new Map();
   for (const e of p.retire) {
     const key = e.host + "|" + e.configFile;
     if (!groups.has(key)) groups.set(key, []);
     groups.get(key).push(e);
   }
-  const psByHost = new Map();
   for (const list of groups.values()) {
     const { host: hostId, configFile: file } = list[0];
     const host = d.hosts.resolveHost(hostId);
@@ -280,22 +309,33 @@ async function retireSoldDeadTokens({ hours = DEFAULT_HOURS, dryRun = false, now
     }
     if (!touched) continue;
     report.configs++;
-    try {
-      if (!psByHost.has(hostId)) psByHost.set(hostId, await d.hosts.dockerPs(host));
-      const ps = psByHost.get(hostId) || {};
-      const container = list[0].container;
-      if (container && ps[container] && ps[container].state === "running") {
-        await restartConfigContainer(host, file);
-        report.restarted.push(container);
-      }
-    } catch (err) {
-      report.errors.push(hostId + "/" + file + " restart: " + err.message);
-    }
+    // The bot drops the retired logins on a reload (farmControl.reloadConfig,
+    // the rule every config editor uses): restarted only while it RUNS — the
+    // check and the restart one shell command under the container's lock — and
+    // only while its config still holds an enabled account; a bot left with
+    // none is stopped (it would spin in a login-retry loop). One whose config
+    // or state cannot be read is not restarted now (report.notRestarted) but
+    // owed, and retried on the next pass. restorePolicy keeps what
+    // restartConfigContainer did; TWITCHBOT_ALLOW_RESTART=0 still turns the
+    // restart off.
+    const container = list[0].container;
+    if (!container) continue;
+    const r = await reloadConfig(host, file, container, {
+      restorePolicy: true,
+      allowRestart,
+      ops: { stopIfNoAccounts: d.hosts.stopIfNoAccounts, restartIfRunning },
+    });
+    if (r.outcome === "restarted") report.restarted.push(container);
+    else if (r.outcome === "stopped") report.stopped.push(container);
+    else if (r.outcome === "unknown") report.notRestarted.push(container + " (" + r.why + ")");
+    else if (r.outcome === "failed") report.errors.push(hostId + "/" + file + " restart: " + r.error);
   }
   if (report.retired.length) {
     progress(
       "Dead-token retire: took " + report.retired.length + " sold account(s) out of " + report.configs +
         " bot config(s)" + (report.restarted.length ? "; restarted " + report.restarted.join(", ") : "") +
+        (report.stopped.length ? "; stopped " + report.stopped.join(", ") + " (no accounts left)" : "") +
+        (report.notRestarted.length ? "; not restarted: " + report.notRestarted.join(", ") : "") +
         (report.surface.length ? "; " + report.surface.length + " unsold dead-token account(s) left for re-auth" : "") + ".",
     );
     await d

@@ -35,12 +35,33 @@ const HOST_CONCURRENCY_DEFAULT = 2;
 
 // A single cycle's budget, split and then spent down by the lanes.
 class BudgetCycle {
-  constructor({ accounts, seats, containers, perGameCap, hostConcurrency, reason }) {
+  constructor({
+    accounts,
+    seats,
+    containers,
+    perGameCap,
+    hostConcurrency,
+    reason,
+    pristineHeld = 0,
+    ramBlocked = false,
+    ramReason = "",
+    ramDenied = 0,
+  }) {
     this.totalAccounts = Math.max(0, Number(accounts) || 0);
     this.totalSeats = Math.max(0, Number(seats) || 0);
     this.totalContainers = Math.max(0, Number(containers) || 0);
     this.perGameCap = Math.max(0, Number(perGameCap) || 0);
     this.reason = reason || "";
+    // The two constraints a lane's skip row must name (steps/decide.js), as
+    // the legacy rows do: the pristine reserve's hold on the pool, and a shut
+    // RAM gate on the farm host — which also means no seat in a PARKED
+    // container counts (filling one restarts it).
+    this.pristineHeld = Math.max(0, Number(pristineHeld) || 0);
+    this.ramBlocked = !!ramBlocked;
+    this.ramReason = ramReason || "";
+    // Container slots the cap allowed and the RAM gate took away (0 = the cap
+    // itself was already reached).
+    this.ramDenied = Math.max(0, Number(ramDenied) || 0);
     this.grants = new Map(); // laneKey -> { accounts, seats, spentAccounts, spentSeats, onDemand }
     // The part of the budget no lane has been allocated. Lanes draw from it ON
     // DEMAND (spendAccounts), which is how the engine behaves like the legacy
@@ -217,6 +238,10 @@ class BudgetCycle {
       containers: this.totalContainers,
       perGameCap: this.perGameCap,
       reason: reason || this.reason,
+      pristineHeld: this.pristineHeld,
+      ramBlocked: this.ramBlocked,
+      ramReason: this.ramReason,
+      ramDenied: this.ramDenied,
     });
     f._hostSlots = 0;
     f._hostQueue = [];
@@ -237,6 +262,8 @@ class BudgetCycle {
       totalContainers: this.totalContainers,
       perGameCap: this.perGameCap,
       reason: this.reason,
+      pristineHeld: this.pristineHeld,
+      ramBlocked: this.ramBlocked,
       grants: out,
     };
   }
@@ -259,8 +286,27 @@ async function computeCycleBudget(af, opts = {}) {
     reasons.push("pool count failed: " + e.message);
   }
   const reserve = Math.max(0, Number(af.poolReserve) || 0);
-  const spendable = Math.max(0, ready - reserve);
-  if (spendable === 0) reasons.push(`pool at/below reserve (${ready}/${reserve})`);
+  // The pristine reserve (utils/pristineReserve.js via autoFarmer): ready
+  // accounts no farm may take, because paid rent-farm orders can only use
+  // never-farmed ones and nothing ever returns those to the pool (2026-10-03).
+  // Same helper, same number as the legacy engine's spend checks. Guarded: an
+  // autoFarmer.js without the export (a partial deploy) must not make every
+  // cycle throw while the lanes keep their games — protect 0 is what such a
+  // deploy's legacy engine does too.
+  const protect =
+    typeof autoFarmer.pristineProtect === "function"
+      ? await autoFarmer.pristineProtect(af)
+      : 0;
+  // The larger floor, not the sum: the pristine accounts held back are ready
+  // accounts, and they also stand as the manual-work floor (farmSpendable).
+  const spendable = Math.max(0, ready - Math.max(reserve, protect));
+  if (spendable === 0) {
+    reasons.push(
+      `pool at/below reserve (${ready}/${reserve}` +
+        (protect ? `; the pristine reserve is holding ${protect}` : "") +
+        ")",
+    );
+  }
 
   // NOT capped by marketStockFloor. An earlier version did
   // `spendable = min(spendable, marketStockFloor(af))`, reading the floor as a
@@ -291,9 +337,28 @@ async function computeCycleBudget(af, opts = {}) {
     activeContainers = maxAutoBots;
     reasons.push("container count failed: " + e.message);
   }
-  const containersFree = Math.max(0, maxAutoBots - activeContainers);
-  if (containersFree === 0)
+  let containersFree = Math.max(0, maxAutoBots - activeContainers);
+  if (containersFree === 0) {
     reasons.push(`container cap reached (${activeContainers}/${maxAutoBots})`);
+  }
+  // No NEW container while the farm host is short of RAM (2026-10-03,
+  // af.hostMinFreeMb), and then no seat in a PARKED container either — filling
+  // one restarts it. Read even at the cap: running bots' free seats stay
+  // usable, and the decide step must know to count only those (ramBlocked).
+  // Guarded like pristineProtect above; without the helper nothing is gated.
+  let ramBlocked = false;
+  let ramReason = "";
+  let ramDenied = 0;
+  if (typeof autoFarmer.containerSlots === "function") {
+    const gate = await autoFarmer.containerSlots(autoFarmer.resolveFarmHost(af), containersFree);
+    if (gate.blocked) {
+      ramBlocked = true;
+      ramReason = gate.reason;
+      ramDenied = containersFree;
+      containersFree = 0;
+      reasons.push("no new container: " + gate.reason);
+    }
+  }
 
   // Seats available for NEW accounts: what free containers could hold. Free
   // seats inside EXISTING containers are deliberately excluded here — counting
@@ -342,6 +407,10 @@ async function computeCycleBudget(af, opts = {}) {
     perGameCap,
     hostConcurrency: Number(opts.hostConcurrency) || HOST_CONCURRENCY_DEFAULT,
     reason: reasons.join("; ") || "ok",
+    pristineHeld: protect,
+    ramBlocked,
+    ramReason,
+    ramDenied,
   });
 }
 

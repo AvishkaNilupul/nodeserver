@@ -1,0 +1,212 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <script>
+      (function () {
+        try {
+          if (localStorage.getItem("theme") === "dark")
+            document.documentElement.setAttribute("data-theme", "dark");
+        } catch (e) {}
+      })();
+    </script>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>SOOP farm</title>
+    <!-- Tokens, sidebar shell and the whole component kit live in soop.css;
+         everything SOOP-specific is under /soop/ (see /soop/UI-KIT.md). -->
+    <link rel="stylesheet" href="/soop/soop.css" />
+  </head>
+  <body>
+    <aside class="nav">
+      <div class="brand">
+        <span class="mark">
+          <svg
+            width="18"
+            height="18"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="#fff"
+            stroke-width="2.2"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+          >
+            <polygon points="12 2 2 8.5 12 15 22 8.5 12 2"></polygon>
+            <path d="M2 8.5v7L12 22l10-6.5v-7"></path>
+          </svg>
+        </span>
+        <b>RedeemHub<span>Admin console</span></b>
+      </div>
+      <nav class="links">
+        <a href="/admin.html"
+          ><svg
+            width="18"
+            height="18"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2"
+            stroke-linecap="round"
+          >
+            <path
+              d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"
+            ></path>
+          </svg>
+          Inbox</a
+        >
+        <a href="/orders"
+          ><svg
+            width="18"
+            height="18"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2"
+            stroke-linecap="round"
+          >
+            <rect x="3" y="4" width="18" height="16" rx="2"></rect>
+            <path d="M3 9h18M7 14h6"></path>
+          </svg>
+          Orders</a
+        >
+        <a href="/inventory"
+          ><svg
+            width="18"
+            height="18"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2"
+            stroke-linecap="round"
+          >
+            <path d="M20 7H4M16 3H8M6 11h12l-1 10H7z"></path>
+          </svg>
+          Inventory</a
+        >
+      </nav>
+      <div class="me">
+        <span class="av" id="meAvatar">--</span>
+        <div class="who">
+          <b id="meName">Admin</b><span id="meRole">Seller</span>
+        </div>
+        <button
+          class="logout"
+          data-theme-toggle
+          onclick="toggleTheme()"
+          title="Toggle dark mode"
+        >
+          <svg
+            class="t-moon"
+            width="16"
+            height="16"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+          >
+            <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"></path>
+          </svg>
+          <svg
+            class="t-sun"
+            style="display: none"
+            width="16"
+            height="16"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+          >
+            <circle cx="12" cy="12" r="4"></circle>
+            <path
+              d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M6.34 17.66l-1.41 1.41M19.07 4.93l-1.41 1.41"
+            ></path>
+          </svg>
+        </button>
+      </div>
+    </aside>
+
+    <main class="s-main" id="soopMain">
+      <header class="s-head">
+        <div class="s-grow">
+          <h1>SOOP farm</h1>
+          <p class="s-status" id="soopStatus">
+            <span class="s-dot is-muted" aria-hidden="true"></span>
+            <span>Connecting…</span>
+          </p>
+        </div>
+        <div class="s-head-actions">
+          <button
+            type="button"
+            class="s-btn is-icon"
+            id="soopMenuBtn"
+            aria-label="Farm actions"
+            title="Farm actions"
+          >
+            <svg class="s-icon" width="16" height="16" viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M4 12a1 1 0 1 0 2 0 1 1 0 1 0-2 0M11 12a1 1 0 1 0 2 0 1 1 0 1 0-2 0M18 12a1 1 0 1 0 2 0 1 1 0 1 0-2 0"></path>
+            </svg>
+          </button>
+        </div>
+      </header>
+
+      <!-- Filled and shown by core.js after 3 failed /state polls. -->
+      <div class="s-banner" id="soopBanner" role="alert" hidden></div>
+
+      <!-- One button + one root per tab. A tab-*.js file claims its root with
+           Soop.registerTab({ id }); until then the root keeps its placeholder,
+           so a missing or broken tab file never takes the page down. -->
+      <div class="s-tabs" id="soopTabs" role="tablist" aria-label="SOOP farm sections">
+        <button type="button" class="s-tab is-active" role="tab" id="tab-overview" data-tab="overview" aria-controls="panel-overview" aria-selected="true">
+          <span class="s-tab-label">Overview</span><span class="s-tab-badge" hidden></span>
+        </button>
+        <button type="button" class="s-tab" role="tab" id="tab-bots" data-tab="bots" aria-controls="panel-bots" aria-selected="false" tabindex="-1">
+          <span class="s-tab-label">Bots</span><span class="s-tab-badge" hidden></span>
+        </button>
+        <button type="button" class="s-tab" role="tab" id="tab-campaigns" data-tab="campaigns" aria-controls="panel-campaigns" aria-selected="false" tabindex="-1">
+          <span class="s-tab-label">Campaigns</span><span class="s-tab-badge" hidden></span>
+        </button>
+        <button type="button" class="s-tab" role="tab" id="tab-accounts" data-tab="accounts" aria-controls="panel-accounts" aria-selected="false" tabindex="-1">
+          <span class="s-tab-label">Accounts</span><span class="s-tab-badge" hidden></span>
+        </button>
+        <button type="button" class="s-tab" role="tab" id="tab-inventory" data-tab="inventory" aria-controls="panel-inventory" aria-selected="false" tabindex="-1">
+          <span class="s-tab-label">Inventory</span><span class="s-tab-badge" hidden></span>
+        </button>
+        <button type="button" class="s-tab" role="tab" id="tab-activity" data-tab="activity" aria-controls="panel-activity" aria-selected="false" tabindex="-1">
+          <span class="s-tab-label">Activity</span><span class="s-tab-badge" hidden></span>
+        </button>
+      </div>
+
+      <section class="s-panel" id="panel-overview" role="tabpanel" aria-labelledby="tab-overview" data-tab-root="overview">
+        <p class="s-loading">Loading…</p>
+      </section>
+      <section class="s-panel" id="panel-bots" role="tabpanel" aria-labelledby="tab-bots" data-tab-root="bots" hidden>
+        <p class="s-loading">Loading…</p>
+      </section>
+      <section class="s-panel" id="panel-campaigns" role="tabpanel" aria-labelledby="tab-campaigns" data-tab-root="campaigns" hidden>
+        <p class="s-loading">Loading…</p>
+      </section>
+      <section class="s-panel" id="panel-accounts" role="tabpanel" aria-labelledby="tab-accounts" data-tab-root="accounts" hidden>
+        <p class="s-loading">Loading…</p>
+      </section>
+      <section class="s-panel" id="panel-inventory" role="tabpanel" aria-labelledby="tab-inventory" data-tab-root="inventory" hidden>
+        <p class="s-loading">Loading…</p>
+      </section>
+      <section class="s-panel" id="panel-activity" role="tabpanel" aria-labelledby="tab-activity" data-tab-root="activity" hidden>
+        <p class="s-loading">Loading…</p>
+      </section>
+    </main>
+
+    <script src="/theme.js"></script>
+    <script src="/admin-nav.js"></script>
+    <script src="/soop/core.js"></script>
+    <script src="/soop/tab-overview.js"></script>
+    <script src="/soop/tab-bots.js"></script>
+    <script src="/soop/tab-campaigns.js"></script>
+    <script src="/soop/tab-accounts.js"></script>
+    <script src="/soop/tab-inventory.js"></script>
+    <script src="/soop/tab-activity.js"></script>
+  </body>
+</html>

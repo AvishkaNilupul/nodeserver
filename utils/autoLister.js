@@ -14,7 +14,13 @@ const DropSet = require("../models/DropSet");
 const MarketplaceListing = require("../models/MarketplaceListing");
 const { loginsOnActiveListings } = require("./listedLogins");
 const MarketResearch = require("../models/MarketResearch");
-const { gameflipDeliveryCode, GF_CLAIM_TAG } = require("./gameflipFulfiller");
+const {
+  gameflipDeliveryCode,
+  GF_CLAIM_TAG,
+  gameflipCodeHeldLogins,
+  noteIfCodeRefused,
+  STUCK_ALERT_AT_ATTEMPT,
+} = require("./gameflipFulfiller");
 const {
   digisellerDeliveryCode,
   DS_CLAIM_TAG,
@@ -54,6 +60,9 @@ const { buildSetGridImage } = require("./setImage");
 // normalised identically and the holdings gate can match them (no circular
 // require — twitchInventory does not require autoLister).
 const { itemKeyFor } = require("./twitchInventory");
+// The one rule for "can a viewer earn this drop by watching" — the same one
+// that decides whether a campaign is worth farming at all.
+const { isWatchableDrop } = require("./campaignFarmability");
 const accountState = require("./twitchAccountState");
 
 const fsp = require("fs/promises");
@@ -126,15 +135,32 @@ function looksLikeTitlePlaceholder(name, { game, campaignName, hasImage = false 
 // BEFORE filtering, so the caller can tell "campaign resolved but every benefit
 // was a placeholder" (don't publish) apart from "campaign didn't resolve at
 // all" (try another token).
+//
+// Only drops a viewer can earn by WATCHING become items. A drop with
+// requiredSubs > 0 goes to paying subscribers alone and the bots drop it from
+// their own list, so no farmed account ever holds it — and a bundle that asks
+// for it is one no account can complete. Every campaign that mixed the two
+// kinds was farmed and never listed: PAYDAY 3 (three watch drops + "Dallas"
+// for a sub) had 18 accounts holding all three earnable items and a listing
+// that waited on the fourth for two weeks. `subOnlyBenefits` counts what was
+// left out for that reason (it is part of rawBenefits), so the caller can say
+// "every drop here needs a subscription" instead of "only a title". An item a
+// watch drop ALSO gives stays: it is earnable through that drop.
 function resolveCampaignItems(camp, { game, campaignName }) {
   const items = [];
   const seen = new Set();
   let rawBenefits = 0;
+  let subOnlyBenefits = 0;
   for (const d of (camp && camp.timeBasedDrops) || []) {
+    const subOnly = !isWatchableDrop(d);
     for (const e of d.benefitEdges || []) {
       const b = e && e.benefit;
       if (!b || !b.name) continue;
       rawBenefits++;
+      if (subOnly) {
+        subOnlyBenefits++;
+        continue;
+      }
       const hasImage = !!String((b && b.imageAssetURL) || "").trim();
       if (looksLikeTitlePlaceholder(b.name, { game, campaignName, hasImage }))
         continue;
@@ -166,13 +192,48 @@ function resolveCampaignItems(camp, { game, campaignName }) {
       });
     }
   }
-  return { items, rawBenefits };
+  return { items, rawBenefits, subOnlyBenefits };
+}
+
+// A campaign whose EVERY drop needs a paid subscription has nothing to list,
+// and that is the campaign's own definition: the same from any token, on any
+// day. So the answer is kept and Twitch is not asked again on each sweep —
+// such a task is swept every tick for as long as it stays active.
+const SUB_ONLY_CAMPAIGN = "sub_only_campaign";
+const SUB_ONLY_TTL_MS = 6 * 60 * 60 * 1000;
+const subOnlyCampaigns = new Map(); // campaignId -> ms
+
+function subOnlyCampaignError(campaignId, game, campaignName) {
+  const e = new Error(
+    "Campaign " +
+      campaignId +
+      " (" +
+      (campaignName || game) +
+      ") has only subscriber-only drops — nothing a farmed account can earn. " +
+      "Not publishing.",
+  );
+  e.code = SUB_ONLY_CAMPAIGN;
+  return e;
 }
 
 // Borrow a healthy bot-account token (same trick campaignWatcher uses) to ask
 // Twitch what items this campaign actually gives, before anything is farmed.
 // Refuses to return a set built only from a title placeholder (the AC bug).
+//
+// The items are the EARNABLE ones (see resolveCampaignItems). A campaign with
+// none — every drop subscriber-only — throws an error coded SUB_ONLY_CAMPAIGN:
+// nothing is listed and no pre-order is stamped for it, and the reason is the
+// error's own text rather than "waiting for an account to hold the full
+// bundle" (the legacy sweep records it as the task's listing error; a lane
+// reports it as the task's verify note).
 async function campaignItems(campaignId, game, campaignName) {
+  const knownSubOnly = subOnlyCampaigns.get(String(campaignId));
+  if (knownSubOnly) {
+    if (Date.now() - knownSubOnly < SUB_ONLY_TTL_MS) {
+      throw subOnlyCampaignError(campaignId, game, campaignName);
+    }
+    subOnlyCampaigns.delete(String(campaignId));
+  }
   const { fetchCampaignDetails } = require("./twitchInventory");
   // fetchCampaignDetails is integrity-gated: a token whose last scan failed
   // integrity will throw "Campaign details unavailable". So prefer known-good
@@ -205,14 +266,20 @@ async function campaignItems(campaignId, game, campaignName) {
   }
   let lastErr = null;
   let sawPlaceholderOnly = false;
+  let subOnly = false;
   for (const acc of ordered) {
     try {
       const camp = await fetchCampaignDetails(acc.clientSecret, campaignId);
-      const { items, rawBenefits } = resolveCampaignItems(camp, {
-        game,
-        campaignName,
-      });
+      const { items, rawBenefits, subOnlyBenefits } = resolveCampaignItems(
+        camp,
+        { game, campaignName },
+      );
       if (items.length) return items;
+      // Every drop needs a subscription. No other token will say otherwise.
+      if (rawBenefits > 0 && subOnlyBenefits === rawBenefits) {
+        subOnly = true;
+        break;
+      }
       // The campaign resolved, but every benefit it returned was a title
       // placeholder (or there were none). There is nothing real to sell here —
       // probing another token won't change that, and publishing would create
@@ -221,6 +288,10 @@ async function campaignItems(campaignId, game, campaignName) {
     } catch (e) {
       lastErr = e;
     }
+  }
+  if (subOnly) {
+    subOnlyCampaigns.set(String(campaignId), Date.now());
+    throw subOnlyCampaignError(campaignId, game, campaignName);
   }
   if (sawPlaceholderOnly) {
     throw new Error(
@@ -677,6 +748,33 @@ async function reserveAccountsForPublish(accounts, set, tag) {
   return out;
 }
 
+// Deal the sellable accounts across `marketOrder` round-robin into `shares`.
+// A Gameflip slot takes the next account Gameflip will ACCEPT. One whose code a
+// listing of ours already holds — sold on Gameflip before, its other games
+// still in stock — is refused with "code for digital goods already exists"
+// (gameflipFulfiller.gameflipCodeHeldLogins), and Gameflip anchors this
+// listing: its publish failing deletes the set and lists the bundle on NO
+// market. Such an account goes to the next market's slot instead, where its
+// old Gameflip code means nothing. With nothing held this is exactly the old
+// round-robin; with only Gameflip in the order, held accounts stay unlisted.
+function dealShares(accounts, marketOrder, shares, gfHeld) {
+  const queue = (accounts || []).slice();
+  const takes = (a) => !(gfHeld && gfHeld.has(String((a && a.login) || "").toLowerCase()));
+  for (let i = 0; queue.length; i++) {
+    const market = marketOrder[i % marketOrder.length];
+    let at = 0;
+    if (market === "gameflip") {
+      at = queue.findIndex(takes);
+      if (at === -1) {
+        if (marketOrder.length === 1) break;
+        continue;
+      }
+    }
+    shares[market].push(queue.splice(at, 1)[0]);
+  }
+  return shares;
+}
+
 // Same idea, for Gameflip's single immediately-shipped unit: try candidates
 // in order and reserve+return the first one that still holds the bundle.
 async function reserveOneForDelivery(accounts, set, tag) {
@@ -852,6 +950,10 @@ async function publishGgselShare({
         accounts.length +
         " account(s)",
       autoDeliver: true,
+      // Both fields, like the Drop Archive publish route writes them: the
+      // guardian's per-account checks read accountId, and a share recorded by
+      // login alone stayed invisible to them until its first refill.
+      accountId: accounts.map((a) => String(a.accountId || "")).filter(Boolean).join(","),
       accountLogin: accounts.map((a) => a.login).join(", "),
       qtyTarget: accounts.length,
     });
@@ -1455,6 +1557,18 @@ async function retryMissingSecondaries(task) {
         try {
           const r = await publishGgselShare({
             ...base,
+            // Same reason as Eldorado above: the Gameflip row's copy tells a
+            // GGSel buyer to message the seller "on Gameflip". GGSel gets its
+            // own support line, exactly as the first publish builds it.
+            description: buildDescription({
+              game: task.game,
+              items: (set.items || []).map((i) =>
+                i && typeof i.toObject === "function" ? i.toObject() : i,
+              ),
+              campaignName: task.campaignName,
+              postEvent: !!L.postEvent,
+              marketplace: "ggsel",
+            }),
             accounts,
             categoryId: t.slice("ggsel:".length),
           });
@@ -1916,9 +2030,7 @@ async function listActivatedTask(taskId, { dryRun = false } = {}) {
     playerauctions: [],
     g2g: [],
   };
-  accounts.forEach((acc, i) => {
-    shares[marketOrder[i % marketOrder.length]].push(acc);
-  });
+  dealShares(accounts, marketOrder, shares, await gameflipCodeHeldLogins());
 
   // The DropSet makes the listing part of the normal machinery: the relist
   // chain, the Shop and the drop archive all understand sets.
@@ -1958,7 +2070,10 @@ async function listActivatedTask(taskId, { dryRun = false } = {}) {
     throw new Error(
       "Auto-list " +
         task.game +
-        ": no account still held the full bundle unclaimed at publish time",
+        (gfAccounts.length
+          ? ": no account still held the full bundle unclaimed at publish time"
+          : ": every account holding the full bundle was already sold on " +
+            "Gameflip, which refuses the same login twice — nothing to anchor the listing"),
     );
   }
   let published;
@@ -1976,16 +2091,22 @@ async function listActivatedTask(taskId, { dryRun = false } = {}) {
       gfDeliver,
       set,
       () =>
-        mp.gameflipPublish({
-          title,
-          description,
-          priceUsd: price,
-          imagePath: img,
-          autoDeliverCode: gameflipDeliveryCode(
-            gfDeliver.login,
-            gfDeliver.password,
-          ),
-        }),
+        mp
+          .gameflipPublish({
+            title,
+            description,
+            priceUsd: price,
+            imagePath: img,
+            autoDeliverCode: gameflipDeliveryCode(
+              gfDeliver.login,
+              gfDeliver.password,
+            ),
+          })
+          .catch((e) => {
+            // A holder the DB cannot name: the next deal skips this account.
+            noteIfCodeRefused(gfDeliver.login, e);
+            throw e;
+          }),
       {
         release: async (acct, s) => {
           await releaseReservedForSet(acct, s);
@@ -2249,9 +2370,7 @@ async function publishStackedListing({
   if (platiEnabled) marketOrder.push("plati");
   if (ggselCategoryId && ggselTakesNewStock(af)) marketOrder.push("ggsel");
   const shares = { gameflip: [], plati: [], ggsel: [] };
-  accounts.forEach((acc, i) => {
-    shares[marketOrder[i % marketOrder.length]].push(acc);
-  });
+  dealShares(accounts, marketOrder, shares, await gameflipCodeHeldLogins());
 
   let img = "";
   try {
@@ -2266,7 +2385,9 @@ async function publishStackedListing({
     await DropSet.deleteOne({ _id: set._id }).catch(() => {});
     if (img) await fsp.unlink(img).catch(() => {});
     return {
-      skipped: "stack holder lost the race at publish time",
+      skipped: gfAccounts.length
+        ? "stack holder lost the race at publish time"
+        : "every stack holder was already sold on Gameflip, which refuses the same login twice",
       waiting: true,
     };
   }
@@ -2278,16 +2399,22 @@ async function publishStackedListing({
       gfDeliver,
       set,
       () =>
-        mp.gameflipPublish({
-          title,
-          description,
-          priceUsd: price,
-          imagePath: img,
-          autoDeliverCode: gameflipDeliveryCode(
-            gfDeliver.login,
-            gfDeliver.password,
-          ),
-        }),
+        mp
+          .gameflipPublish({
+            title,
+            description,
+            priceUsd: price,
+            imagePath: img,
+            autoDeliverCode: gameflipDeliveryCode(
+              gfDeliver.login,
+              gfDeliver.password,
+            ),
+          })
+          .catch((e) => {
+            // A holder the DB cannot name: the next deal skips this account.
+            noteIfCodeRefused(gfDeliver.login, e);
+            throw e;
+          }),
       {
         release: async (acct, s) => {
           await releaseReservedForSet(acct, s);
@@ -3071,9 +3198,15 @@ function chooseStackItems(current, stacked, holderCount) {
 // selling for.
 // How long a Gameflip relist may still be "pending" before the post-event markup
 // stops waiting for it. Long enough for a chain to republish (the fulfiller
-// retries on a 60s tick with backoff), short enough that a chain which never
-// relists cannot hold a task in the retry queue indefinitely.
+// retries on a 60s tick with backoff), short enough that a chain which is not
+// being retried at all cannot hold a task in the retry queue indefinitely. A
+// chain that IS being retried and keeps failing is bounded separately, by its
+// attempt count — see the deferral in onCampaignEnded.
 const POST_EVENT_RELIST_GRACE_MS = 24 * 60 * 60 * 1000;
+
+// Hard ceiling on a post-event price — the same model-failure backstop as
+// pricing.js `maxAbsoluteUsd`.
+const POST_EVENT_MAX_USD = 25;
 
 function postEventPrice(basePrice, { markup = POST_EVENT_MARKUP } = {}) {
   const base = Number(basePrice) > 0 ? Number(basePrice) : 1.0;
@@ -3147,6 +3280,20 @@ async function onCampaignEnded(taskId) {
   // the end, so a retry after a partial failure recomputes from the identical
   // base — marking up the live row's (already raised) price would compound.
   const price = postEventPrice(task.listing.price);
+  // Nothing here has ever sold above $4.50. A markup past the pricing engine's
+  // own backstop means the stored base is already wrong; refuse it before it is
+  // saved or pushed to Gameflip rather than publish it.
+  if (price > POST_EVENT_MAX_USD) {
+    throw new Error(
+      "post-event price $" +
+        price +
+        " is over the $" +
+        POST_EVENT_MAX_USD +
+        " ceiling — task price " +
+        task.listing.price +
+        " looks corrupt",
+    );
+  }
   const title = buildTitle({
     game: task.game,
     items,
@@ -3167,24 +3314,6 @@ async function onCampaignEnded(taskId) {
     postEvent: true,
     marketplace: "ggsel",
   });
-
-  // Persist the (possibly grown, possibly unchanged) items + the marked-up
-  // price. When the gate above kept `current`, this is an items no-op plus a
-  // price-only bump — the markup still applies to the already-backed bundle.
-  mySet.items = items;
-  mySet.price = price;
-  await mySet.save();
-
-  // Rebuild the cover from the stacked set so the Gameflip photo shows every
-  // item in the grown bundle, not the pre-stack picture with items missing.
-  // Best-effort: a failed image build falls back to the text/price-only reprice
-  // rather than blocking the markup. Temp file is cleaned up after the reprice.
-  let stackedImg = "";
-  try {
-    stackedImg = await buildSetGridImage(mySet);
-  } catch {
-    stackedImg = "";
-  }
 
   // Find the live Gameflip row by SET rather than by the id recorded on the
   // task: after the first sale the relist chain publishes a successor with a
@@ -3207,6 +3336,76 @@ async function onCampaignEnded(taskId) {
   // a later refactor could widen.
   const row = isAutoOwned(found) ? found : null;
   const heldBack = Math.max(0, Number(task.listing.heldBack) || 0);
+
+  // WAIT — and write NOTHING — while a relist is genuinely about to produce a row.
+  //
+  // "No ACTIVE row at this instant" is not the same as "no row will ever
+  // exist". A Gameflip chain mid-relist has a `sold` row still owing units, and
+  // a fresh listing lands moments later — marking the markup done in that window
+  // loses the whole +50% scarcity price permanently, because the retry queue
+  // will never look at the task again.
+  //
+  // So defer ONLY while a relist is genuinely pending, and only while it is
+  // RECENT and NOT STUCK. Those two bounds are what preserve the drain: a chain
+  // that never relists stops qualifying and the task leaves the queue exactly
+  // as it does today.
+  //
+  // Recency alone is not a bound. Every failed relist re-saves the sold row,
+  // and the fulfiller's backoff tops out at one retry per 12h — so a chain
+  // nothing can fulfil ("out of stock") keeps its updatedAt inside the 24h
+  // window for ever. The fulfiller already says when a chain has stopped being
+  // "about to land": STUCK_ALERT_AT_ATTEMPT consecutive misses, ~75 minutes.
+  //
+  // And the wait must come before every write below. It used to sit at the end
+  // and only withhold the postEvent flag, after the marked-up price had already
+  // been saved on the task and the set — so each retry marked up the price the
+  // previous retry had stored. One MARVEL Contest of Champions task whose chain
+  // was out of stock (19 failed relists) compounded x1.5 a tick, 465 times,
+  // from $1.75 to $1.5e82, and sent a Telegram notice for every one.
+  let relistPending = false;
+  if (!row) {
+    const owed = await MarketplaceListing.findOne(
+      {
+        set: mySet._id,
+        marketplace: "gameflip",
+        origin: "auto",
+        status: "sold",
+        qtyRemaining: { $gt: 0 },
+        updatedAt: {
+          $gte: new Date(Date.now() - POST_EVENT_RELIST_GRACE_MS),
+        },
+        // $not/$gte rather than $lt: a row from before the counter existed has
+        // no relistAttempts at all, and $lt would not match it.
+        relistAttempts: { $not: { $gte: STUCK_ALERT_AT_ATTEMPT } },
+      },
+      { _id: 1 },
+    )
+      .lean()
+      .catch(() => null);
+    relistPending = !!owed;
+  }
+  if (relistPending) {
+    return { skipped: "Gameflip relist pending — markup waits for the new row" };
+  }
+
+  // Persist the (possibly grown, possibly unchanged) items + the marked-up
+  // price. When the gate above kept `current`, this is an items no-op plus a
+  // price-only bump — the markup still applies to the already-backed bundle.
+  mySet.items = items;
+  mySet.price = price;
+  await mySet.save();
+
+  // Rebuild the cover from the stacked set so the Gameflip photo shows every
+  // item in the grown bundle, not the pre-stack picture with items missing.
+  // Best-effort: a failed image build falls back to the text/price-only reprice
+  // rather than blocking the markup. Temp file is cleaned up after the reprice.
+  let stackedImg = "";
+  try {
+    stackedImg = await buildSetGridImage(mySet);
+  } catch {
+    stackedImg = "";
+  }
+
   if (row) {
     try {
       await mp.gameflipReprice(row.externalId, {
@@ -3278,44 +3477,15 @@ async function onCampaignEnded(taskId) {
   task.listing.title = title;
   task.listing.price = price;
   task.listing.repricedAt = new Date();
-  // MARK IT DONE — unless a relist is genuinely about to produce a row.
+  // MARK IT DONE, in the same save as the marked-up price.
   //
   // Setting this even when no live row remains is DELIBERATE and must stay:
   // autoFarmer.repriceEndedTasks filters on exactly this flag, and the comment
   // there ("so this queue always drains rather than spinning on dead listings")
   // is the reason. Removing it would put the queue back to grinding on listings
-  // that will never exist again.
-  //
-  // But "no ACTIVE row at this instant" is not the same as "no row will ever
-  // exist". A Gameflip chain mid-relist has a `sold` row still owing units, and
-  // a fresh listing lands moments later — marking the markup done in that window
-  // loses the whole +50% scarcity price permanently, because the retry queue
-  // will never look at the task again.
-  //
-  // So defer ONLY while a relist is genuinely pending, and only while it is
-  // RECENT. The recency bound is what preserves the drain: a chain that never
-  // relists stops qualifying after POST_EVENT_RELIST_GRACE_MS and the task
-  // leaves the queue exactly as it does today.
-  let relistPending = false;
-  if (!row) {
-    const owed = await MarketplaceListing.findOne(
-      {
-        set: mySet._id,
-        marketplace: "gameflip",
-        origin: "auto",
-        status: "sold",
-        qtyRemaining: { $gt: 0 },
-        updatedAt: {
-          $gte: new Date(Date.now() - POST_EVENT_RELIST_GRACE_MS),
-        },
-      },
-      { _id: 1 },
-    )
-      .lean()
-      .catch(() => null);
-    relistPending = !!owed;
-  }
-  task.listing.postEvent = !relistPending;
+  // that will never exist again. The one case that must NOT be marked done — a
+  // relist still pending — returned above before anything was written.
+  task.listing.postEvent = true;
   if (row && heldBack > 0) {
     task.listing.qty = (Number(task.listing.qty) || 0) + heldBack;
     task.listing.heldBack = 0;
@@ -3357,6 +3527,7 @@ module.exports = {
   eldoradoShareMissing,
   isAutoOwned,
   // exported for tests
+  dealShares,
   platiTakesNewStock,
   ggselTakesNewStock,
   platiOffReason,
@@ -3374,6 +3545,10 @@ module.exports = {
   looksLikeTitlePlaceholder,
   resolveCampaignItems,
   campaignItems,
+  // The code on the error campaignItems throws for a campaign whose every drop
+  // is subscriber-only, and the remembered verdicts (tests reset them).
+  SUB_ONLY_CAMPAIGN,
+  _subOnlyCampaigns: subOnlyCampaigns,
   filterVerifiedHolders,
   // Additive export for the lane engine's drop checker
   // (utils/farm2/steps/verify.js). It reuses THIS holdings gate rather than

@@ -70,9 +70,21 @@ function rows(items, x, y, step) {
 }
 
 // Render the receipt. `accountCount` is how many accounts were handed over;
-// the logins themselves are never drawn.
-function proofSvg({ orderId, offerTitle, accountCount, itemCount, when, sellerName }) {
-  const titleLines = wrap(offerTitle || "PlayerAuctions order", 46, 2);
+// the logins themselves are never drawn. `market`, `method` and `banner` label
+// the card for another marketplace (G2G uses the same card, 2026-10-01); the
+// defaults are PlayerAuctions' own wording, unchanged.
+function proofSvg({
+  orderId,
+  offerTitle,
+  accountCount,
+  itemCount,
+  when,
+  sellerName,
+  market = "PlayerAuctions",
+  method = "Credential sent in order messages",
+  banner = "The account credentials were sent to the buyer through the PlayerAuctions order chat.",
+}) {
+  const titleLines = wrap(offerTitle || market + " order", 46, 2);
   const stamp = (when || new Date()).toISOString().replace("T", " ").slice(0, 19) + " UTC";
   const what =
     (accountCount || 1) +
@@ -96,7 +108,7 @@ function proofSvg({ orderId, offerTitle, accountCount, itemCount, when, sellerNa
     '<text x="70" y="88" font-family="DejaVu Sans, Arial, sans-serif" font-size="30" ' +
     'font-weight="700" fill="#ffffff">Delivery confirmation</text>' +
     '<text x="' + (W - 70) + '" y="88" text-anchor="end" ' +
-    'font-family="DejaVu Sans, Arial, sans-serif" font-size="20" fill="#8fa3b5">PlayerAuctions</text>' +
+    'font-family="DejaVu Sans, Arial, sans-serif" font-size="20" fill="#8fa3b5">' + esc(market) + '</text>' +
     titleLines
       .map(
         (l, i) =>
@@ -110,7 +122,7 @@ function proofSvg({ orderId, offerTitle, accountCount, itemCount, when, sellerNa
       [
         ["Order ID", orderId || "—"],
         ["Delivered", what],
-        ["Delivery method", "Credential sent in order messages"],
+        ["Delivery method", method],
         ["Timestamp", stamp],
         ["Seller", sellerName || "avishkarex2"],
       ],
@@ -122,7 +134,7 @@ function proofSvg({ orderId, offerTitle, accountCount, itemCount, when, sellerNa
     'fill="#eef7f0" stroke="#cfe6d6" stroke-width="2"/>' +
     '<text x="94" y="' + (bannerTop + 39) +
     '" font-family="DejaVu Sans, Arial, sans-serif" font-size="20" fill="#2c6b43">' +
-    "The account credentials were sent to the buyer through the PlayerAuctions order chat." +
+    esc(banner) +
     "</text>" +
     "</svg>"
   );
@@ -141,9 +153,14 @@ async function buildDeliveryProof(opts = {}) {
   return out;
 }
 
+// The same card as PNG bytes, for uploads that take a buffer (G2G).
+async function renderProofPng(opts = {}) {
+  return sharp(Buffer.from(proofSvg(opts))).png().toBuffer();
+}
+
 async function cleanupProof(p) {
   if (!p) return;
   await fsp.unlink(p).catch(() => {});
 }
 
-module.exports = { buildDeliveryProof, cleanupProof, proofSvg };
+module.exports = { buildDeliveryProof, renderProofPng, cleanupProof, proofSvg };

@@ -1,11 +1,16 @@
 // Tiny JSON-backed settings store for small site-wide flags (currently just the
 // "require two-factor for all admins" switch). Kept separate from admins.json so
 // toggling a setting never rewrites credential data.
+const crypto = require("crypto");
 const fs = require("fs");
 const fsp = require("fs/promises");
 const path = require("path");
 
-const settingsFile = path.join(__dirname, "settings.json");
+// SETTINGS_FILE is for tests only (tests/settingsSafeWrite.test.js runs the
+// store against a temp dir); production never sets it.
+const settingsFile = process.env.SETTINGS_FILE
+  ? path.resolve(process.env.SETTINGS_FILE)
+  : path.join(__dirname, "settings.json");
 
 const AUTO_FARM_DEFAULTS = {
   enabled: false, // master switch — ships OFF
@@ -14,6 +19,7 @@ const AUTO_FARM_DEFAULTS = {
   maxPerGame: 30, // hard cap of accounts spent on one game (user requirement)
   accountsPerBot: 10, // accounts per container
   poolReserve: 20, // never draw the pool below this many ready accounts
+  pristineReserve: 150, // pristine pool accounts farms must leave for rent-farm orders (0 = off)
   probeSize: 5, // batch size for unknown games (market test)
   // Cold-start probing (utils/autoFarmer.js). Ships OFF. When on, a game that
   // research scores below the demand floor is still farmed as a small probe
@@ -29,6 +35,7 @@ const AUTO_FARM_DEFAULTS = {
   probeCooldownDays: 90, // after a probe expires for a game, don't re-probe it for N days
   maxAutoBots: 20, // max auto containers on the host at once (total supply is
   // gated by the pool + reserve, NOT by this — raise it if the Pi can handle more)
+  hostMinFreeMb: 1500, // new containers only while the host has this much MemAvailable (0 = off)
   minHoursLeft: 12, // skip campaigns ending sooner than this
   // Games that CANNOT be sold via the normal click-claim-then-sell flow
   // (Overwatch, Rainbow Six, Call of Duty): the auto-farmer must NOT farm OR
@@ -123,6 +130,8 @@ const AUTO_FARM_DEFAULTS = {
   // The most accounts one allocator pass may claim, across all games. A rate
   // limit, so a mis-measured game cannot empty the pool in one cycle.
   noclaimSizeMaxPerRun: 60,
+  noclaimMaxBots: 40, // most no-claim containers (any state) the allocator may own (0 = off)
+  noclaimBurstGuard: false, // dark: one-day hand/bulk sale bursts stop reading as weekly demand
   // Per-game overrides on the no-claim target, keyed like noClaimGames:
   //   { "overwatch": { coverageDays: 21, safetyStock: 10, min: 40, max: 300 } }
   // Any field may be omitted and falls back to the global value above.
@@ -178,8 +187,10 @@ const AUTO_FARM_DEFAULTS = {
   // the switch. Set false on prod 2026-09-28 while the seller account is
   // blocked ("продавец товара заблокирован"): nothing listed there can sell.
   // A blocked seller also stops new listings on its own (marketplaces.js
-  // digisellerTakesNewStock), whatever this says.
-  platiEnabled: true,
+  // digisellerTakesNewStock), whatever this says. The DEFAULT is off since
+  // 2026-10-03: a settings file that loses the key (or a fresh install) must
+  // not quietly start feeding a blocked market again.
+  platiEnabled: false,
   ggselCategoryId: "",
   // GGSel on/off for every AUTOMATIC lister — same reach and meaning as
   // platiEnabled above: OFF = no new offer and no new product goes to GGSel;
@@ -498,20 +509,774 @@ const DEFAULTS = {
   epicAutoClaim: EPIC_AUTO_CLAIM_DEFAULTS,
 };
 
-function loadSettings() {
+// ---------------------------------------------------------------------------
+// The settings file: saves that cannot tear or wipe (docs/LIVE-FIXES-1003.md A1)
+// ---------------------------------------------------------------------------
+// Until 2026-10-03 every save wrote "settings.json.tmp-<pid>" and renamed it,
+// rewriting the WHOLE file from the caller's copy. Two saves in one process —
+// a G2G/ZeusX/Eldorado token refresh landing during an operator's toggle, the
+// allocator's shelf caps — shared that one temp file and could install a torn
+// settings.json, or the later save silently undid the earlier one. loadSettings
+// answered a parse error with DEFAULTS, and the next save wrote those defaults
+// back: every marketplace credential gone and every switch at its default.
+//
+// Since 2026-10-03:
+//   - saves run one at a time: in call order inside a process (one promise
+//     chain), and across processes — the server and an ops script — under
+//     settings.json.lock. A failed save rejects its own caller only. A lock is
+//     taken from another process only when its owner has exited or it is over
+//     120 s old, and a save whose lock was taken from it is dropped, not
+//     renamed over the newer file (see acquireLock);
+//   - saveSettings(s) re-reads the CURRENT file and applies only what its
+//     caller changed since the loadSettings() that produced `s` (a three-way
+//     merge), so writers that loaded the same file all land; the setters in
+//     this file edit the current file directly, under the lock;
+//   - every write goes to its own temp file (pid + counter + random) and is
+//     renamed over the target, settings.json fsync'd first. The temp is
+//     removed on any error; one a killed process left behind is swept on the
+//     first load once it is 10 minutes old;
+//   - the last text that parsed is kept in memory, and every save also writes
+//     settings.json.lastgood — NOT settings.json.bak, the operator's own hand
+//     backup, which is never read or written here. An unreadable or missing
+//     settings.json is served from the NEWER of the memory copy and .lastgood
+//     (another process may have saved since this one looked), and only then
+//     from DEFAULTS, logged. A save never writes over it without one of those
+//     good copies to build on (SETTINGS_CORRUPT). Unreadable bytes are kept
+//     once, as settings.json.corrupt-<time> (they may be a hand edit with a
+//     typo) or settings.json.lastgood-corrupt-<time>;
+//   - a missing settings.json is a fresh install only when there is no
+//     .lastgood either. One that exists but cannot be read means the settings
+//     existed and are damaged: DEFAULTS are served loudly and saves refuse.
+const lastGoodFile = settingsFile + ".lastgood";
+const lockFile = settingsFile + ".lock";
+const LOCK_RETRY_MS = 5;
+const LOCK_WAIT_MS = 3000;
+// A lock is broken only when its owner process has exited (on this host:
+// process.kill(pid, 0) answers ESRCH), when it names this process but none of
+// its saves holds it, or when it is older than this — never another live
+// owner's younger lock, however slow its save (a stalled fsync runs under the
+// lock). A lock is never seen without its owner (see createLock), so one that
+// names none is judged by its age alone.
+const LOCK_STALE_MS = 120 * 1000;
+// Breaks tried per save before it simply waits out its deadline: a lock that
+// keeps coming back is someone's, and a save never spins on it.
+const LOCK_MAX_BREAKS = 3;
+// File times come from the kernel's coarse clock (a few ms behind Date.now()),
+// so a .lastgood written just after this process read settings.json can carry
+// an mtime slightly EARLIER than that read. Within this slack .lastgood wins.
+const MTIME_SLACK_MS = 25;
+const TEMP_MAX_AGE_MS = 10 * 60 * 1000;
+const hasOwn = (o, k) => Object.prototype.hasOwnProperty.call(o, k);
+const noop = () => {};
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+function isPlainObject(v) {
+  return v !== null && typeof v === "object" && !Array.isArray(v);
+}
+
+// Set a key without ever running the __proto__ setter: JSON.parse makes
+// "__proto__" an ordinary own key, and a merge must carry it as one.
+function put(o, k, v) {
+  if (k === "__proto__")
+    Object.defineProperty(o, k, {
+      value: v,
+      enumerable: true,
+      writable: true,
+      configurable: true,
+    });
+  else o[k] = v;
+}
+
+// Each DEFAULTS block as JSON, taken once. Every object handed out gets its
+// own copy, so a caller editing s.autoFarm in place can never change the
+// defaults for the rest of the process, and a merge base rebuilt from text at
+// save time is exactly the object loadSettings handed out.
+const DEFAULT_KEYS = Object.keys(DEFAULTS);
+const DEFAULT_TEXT = {};
+for (const k of DEFAULT_KEYS) DEFAULT_TEXT[k] = JSON.stringify(DEFAULTS[k]);
+function freshDefault(k) {
+  return JSON.parse(DEFAULT_TEXT[k]);
+}
+
+// What a parsed file stands for: { ...DEFAULTS, ...file }, in that key order.
+function materialize(obj) {
+  const out = {};
+  for (const k of DEFAULT_KEYS)
+    out[k] = hasOwn(obj, k) ? obj[k] : freshDefault(k);
+  for (const k of Object.keys(obj)) if (!hasOwn(out, k)) put(out, k, obj[k]);
+  return out;
+}
+
+// Throws unless the text is a JSON object. A leading BOM (an editor's hand
+// edit) is not corruption; an empty or truncated file is.
+function parseSettingsText(text) {
+  const obj = JSON.parse(text.charCodeAt(0) === 0xfeff ? text.slice(1) : text);
+  if (!isPlainObject(obj)) throw new SyntaxError("not a JSON object");
+  return obj;
+}
+
+// Object loadSettings handed out -> the text it was parsed from, or
+// FROM_DEFAULTS when it was built from DEFAULTS alone: its next save's base.
+const bases = new WeakMap();
+const FROM_DEFAULTS = Symbol("settings:defaults");
+// The memory half of the good copy: the last settings text that parsed, read
+// or written here, and when (compared with .lastgood's mtime).
+let lastGoodText = null;
+let lastGoodAt = 0;
+let saveChain = Promise.resolve();
+let tmpSeq = 0;
+
+function remember(obj, base) {
+  bases.set(obj, base);
+  return obj;
+}
+
+function why(err) {
+  return String((err && (err.code || err.message)) || "unknown error").slice(0, 200);
+}
+
+// One console line per kind per minute, plus a SystemEvent when `event`
+// ({ action = settings_corrupt, severity = error, meta }) is given:
+// loadSettings runs on every settings read, so an unreadable file would
+// otherwise flood both. systemLog is required lazily and best-effort —
+// settings.js loads before everything, and a log must never break a read.
+const reportedAt = new Map();
+function report(kind, message, event) {
+  const now = Date.now();
+  if (now - (reportedAt.get(kind) || 0) < 60 * 1000) return;
+  reportedAt.set(kind, now);
   try {
-    const obj = JSON.parse(fs.readFileSync(settingsFile, "utf8"));
-    return { ...DEFAULTS, ...(obj && typeof obj === "object" ? obj : {}) };
+    console.error("[settings] " + message);
   } catch {
-    return { ...DEFAULTS };
+    /* ignore */
+  }
+  if (!event) return;
+  try {
+    const p = require("./systemLog").logEvent({
+      category: "settings",
+      action: event.action || "settings_corrupt",
+      severity: event.severity || "error",
+      subject: path.basename(settingsFile),
+      detail: message,
+      meta: event.meta,
+    });
+    if (p && typeof p.catch === "function") p.catch(noop);
+  } catch {
+    /* ignore */
   }
 }
 
+// Keep unreadable bytes before anything can replace them, once per content —
+// also across restarts: a copy already on disk with the same bytes counts.
+// `suffix` is ".corrupt-" (settings.json) or ".lastgood-corrupt-" (.lastgood).
+// true = the bytes are safe in a copy. A content counts as kept only once its
+// copy is fully written: a copy that failed (a full disk) is removed and tried
+// again by the next save, which must not overwrite the bytes meanwhile.
+const keptCopies = new Set();
+function keepBytesOnce(suffix, bytes) {
+  if (!bytes) return true;
+  const key = suffix + crypto.createHash("sha1").update(bytes).digest("hex");
+  if (keptCopies.has(key)) return true;
+  const dir = path.dirname(settingsFile);
+  const prefix = path.basename(settingsFile) + suffix;
+  try {
+    for (const name of fs.readdirSync(dir)) {
+      if (!name.startsWith(prefix)) continue;
+      const p = path.join(dir, name);
+      if (fs.statSync(p).size === Buffer.byteLength(bytes) && fs.readFileSync(p, "utf8") === bytes) {
+        keptCopies.add(key);
+        return true;
+      }
+    }
+  } catch {
+    /* fall through and keep another copy */
+  }
+  const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+  const file = path.join(dir, prefix + stamp);
+  try {
+    fs.writeFileSync(file, bytes, { flag: "wx" });
+  } catch (e) {
+    // A half-written copy is not a copy (EEXIST: the name was never ours).
+    if (e.code !== "EEXIST") {
+      try {
+        fs.unlinkSync(file);
+      } catch {
+        /* never created */
+      }
+    }
+    report("keep-failed" + suffix, `could not keep the unreadable bytes as ${file} (${why(e)}); not overwriting them`);
+    return false;
+  }
+  keptCopies.add(key);
+  console.error(`[settings] kept the unreadable bytes as ${file}`);
+  return true;
+}
+
+// Temp files of OURS ("<name>.tmp-<pid>-<n>-<hex>", for settings.json and
+// .lastgood) that a process killed mid-write left behind: swept once, on the
+// first read, when older than 10 minutes — no write is still using one that
+// old. Never the operator's .bak files, and never the legacy
+// "settings.json.tmp-<pid>" leftovers of the old code (those are moved by hand).
+let tempsSwept = false;
+function sweepStaleTemps() {
+  if (tempsSwept) return;
+  tempsSwept = true;
+  try {
+    const dir = path.dirname(settingsFile);
+    const name = path.basename(settingsFile).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const ours = new RegExp(`^${name}(\\.lastgood)?\\.tmp-\\d+-\\d+-[0-9a-f]{8}$`);
+    const now = Date.now();
+    for (const f of fs.readdirSync(dir)) {
+      if (!ours.test(f)) continue;
+      const p = path.join(dir, f);
+      try {
+        if (now - fs.statSync(p).mtimeMs > TEMP_MAX_AGE_MS) fs.unlinkSync(p);
+      } catch {
+        /* gone already */
+      }
+    }
+  } catch {
+    /* housekeeping never breaks a read */
+  }
+}
+
+// The good copy that stands in for an unreadable or missing settings.json:
+// the NEWER of the memory copy and settings.json.lastgood. Memory is never
+// preferred blindly — another process may have saved (and written .lastgood)
+// since this one last read the file. `lastgoodExists` reports a .lastgood that
+// is there even when it cannot be used.
+// Bytes of an unreadable .lastgood whose copy could not be written yet: commit
+// leaves .lastgood alone until they are kept.
+let unkeptLastgood = null;
+function goodCopy() {
+  const out = { copy: null, lastgoodExists: false };
+  let st = null;
+  try {
+    st = fs.statSync(lastGoodFile);
+    out.lastgoodExists = true;
+  } catch (e) {
+    if (e.code !== "ENOENT") out.lastgoodExists = true;
+  }
+  if (st && (lastGoodText === null || st.mtimeMs + MTIME_SLACK_MS >= lastGoodAt)) {
+    let text = null;
+    try {
+      text = fs.readFileSync(lastGoodFile, "utf8");
+      out.copy = { source: "lastgood", text, obj: parseSettingsText(text) };
+      unkeptLastgood = null;
+      return out;
+    } catch {
+      unkeptLastgood = keepBytesOnce(".lastgood-corrupt-", text) ? null : text;
+    }
+  }
+  if (lastGoodText !== null)
+    out.copy = { source: "memory", text: lastGoodText, obj: parseSettingsText(lastGoodText) };
+  return out;
+}
+
+// One look at the files — the same decision for loadSettings and for a save:
+//   served "file"      settings.json parsed (the normal case)
+//          "fresh"     no settings.json and no .lastgood: a fresh install
+//          "memory" /  settings.json unreadable or missing: the newer good
+//          "lastgood"  copy stands in
+//          "defaults"  damaged, and no good copy anywhere: saves refuse
+// `base` is what remember() ties the object to; `unreadable` holds the bytes
+// of a settings.json that exists but does not parse.
+function readState() {
+  sweepStaleTemps();
+  let text = null;
+  let failure = null;
+  try {
+    text = fs.readFileSync(settingsFile, "utf8");
+    const obj = parseSettingsText(text);
+    lastGoodText = text;
+    lastGoodAt = Date.now();
+    return { served: "file", obj, base: text };
+  } catch (e) {
+    failure = e;
+  }
+  const missing = failure.code === "ENOENT";
+  const unreadable = missing ? null : text;
+  const { copy, lastgoodExists } = goodCopy();
+  if (copy)
+    return { served: copy.source, obj: copy.obj, base: copy.text, missing, failure, unreadable };
+  if (missing && !lastgoodExists) return { served: "fresh", obj: {}, base: FROM_DEFAULTS };
+  return { served: "defaults", obj: {}, base: FROM_DEFAULTS, missing, failure, unreadable };
+}
+
+function damage(st) {
+  return st.missing ? "settings.json is missing" : `settings.json is unreadable (${why(st.failure)})`;
+}
+
+function reportState(st) {
+  if (st.served === "memory" || st.served === "lastgood") {
+    const from = st.served === "memory" ? "the last good copy held in memory" : "settings.json.lastgood";
+    report(st.served, `${damage(st)}: serving ${from}; the next save rewrites settings.json from it`, {
+      severity: "warn",
+      meta: { served: st.served, missing: !!st.missing, error: why(st.failure) },
+    });
+  } else if (st.served === "defaults") {
+    const msg = st.missing
+      ? "settings.json is missing and settings.json.lastgood cannot be read — this is NOT a fresh " +
+        "install: serving DEFAULTS, and every save is refused until settings.json is restored by hand"
+      : `${damage(st)} and there is no good copy (none in memory, no readable settings.json.lastgood): ` +
+        "serving DEFAULTS, and every save is refused until the file is restored by hand";
+    report("defaults", msg, {
+      meta: { served: "defaults", missing: !!st.missing, error: why(st.failure) },
+    });
+  }
+}
+
+function loadSettings() {
+  const st = readState();
+  reportState(st);
+  return remember(materialize(st.obj), st.base);
+}
+
+// The CURRENT settings a save builds on (called under the lock). Damaged with
+// no good copy: throws SETTINGS_CORRUPT — writing now would replace the file
+// with DEFAULTS, the credential wipe this section exists to stop.
+function readCurrent() {
+  const st = readState();
+  reportState(st);
+  if (st.served === "defaults") {
+    const msg = st.missing
+      ? "settings.json is missing and settings.json.lastgood cannot be read, so nothing was saved " +
+        "(this is not a fresh install; saving would start the settings over from defaults). " +
+        "Restore utils/settings.json from a backup or fix it by hand."
+      : `${damage(st)} and there is no good copy to rebuild it from, so nothing was saved ` +
+        "(saving would replace it with defaults). Restore utils/settings.json from a backup " +
+        "or fix it by hand.";
+    report("refused", "save refused: " + msg, {
+      meta: { served: "none", refusedSave: true, missing: !!st.missing, error: why(st.failure) },
+    });
+    const err = new Error(msg);
+    err.code = "SETTINGS_CORRUPT";
+    throw err;
+  }
+  return { current: materialize(st.obj), unreadable: st.unreadable || null };
+}
+
+// Write `text` to `file` atomically: a temp file of our own (pid + counter +
+// random, created exclusively), optionally fsync'd, then renamed over the
+// target once `beforeRename` (if given) has agreed. On any error the temp file
+// is removed and the target is left as is.
+async function writeAtomic(file, text, sync, beforeRename) {
+  const rand = crypto.randomBytes(4).toString("hex");
+  const tmp = `${file}.tmp-${process.pid}-${++tmpSeq}-${rand}`;
+  let fh = null;
+  let created = false;
+  try {
+    fh = await fsp.open(tmp, "wx");
+    created = true;
+    await fh.writeFile(text, "utf8");
+    if (sync) await fh.sync();
+    const h = fh;
+    fh = null;
+    await h.close();
+    if (beforeRename) await beforeRename();
+    await fsp.rename(tmp, file);
+  } catch (err) {
+    if (fh) await fh.close().catch(noop);
+    if (created) await fsp.unlink(tmp).catch(noop);
+    throw err;
+  }
+}
+
+// Write a whole settings object (DEFAULTS filled in, as before), then refresh
+// the memory copy and settings.json.lastgood.
+//   - Unreadable bytes are kept first; a save whose copy cannot be written
+//     stops before it would overwrite them.
+//   - Each rename happens only while `token` still holds settings.json.lock: a
+//     save whose lock another process took (judging it stale) is dropped —
+//     SETTINGS_LOCK_LOST — and never renamed over a file saved since.
+//   - .lastgood is not fsync'd: after a power cut it may be lost or torn, which
+//     only costs the spare (the file itself was synced). A .lastgood that
+//     cannot be written is logged, never thrown: the save itself landed.
+async function commit(next, unreadable, token) {
+  const text = JSON.stringify(materialize(next), null, 2);
+  if (!keepBytesOnce(".corrupt-", unreadable)) {
+    const err = new Error(
+      "settings.json is unreadable and a copy of it could not be written, so it was not " +
+        "overwritten and nothing was saved; free some disk space and try again",
+    );
+    err.code = "SETTINGS_CORRUPT";
+    throw err;
+  }
+  await writeAtomic(settingsFile, text, true, async () => {
+    if (!(await lockHeld(token))) throw lockLost();
+  });
+  lastGoodText = text;
+  lastGoodAt = Date.now();
+  if (unkeptLastgood !== null) {
+    if (!keepBytesOnce(".lastgood-corrupt-", unkeptLastgood)) {
+      report(
+        "lastgood-unkept",
+        "left the unreadable settings.json.lastgood as it is until a copy of it can be written; the save itself landed",
+      );
+      return;
+    }
+    unkeptLastgood = null;
+  }
+  try {
+    await writeAtomic(lastGoodFile, text, false, async () => {
+      if (!(await lockHeld(token))) throw new Error("the lock was taken by another process");
+    });
+  } catch (e) {
+    report("lastgood-write", `could not refresh settings.json.lastgood (${why(e)}); the save itself landed`);
+  }
+}
+
+// Is `pid` a live process on this host? Only ESRCH says no: EPERM is someone
+// else's live process, and anything unexpected counts as alive (the safe side).
+function pidAlive(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (e) {
+    return e.code !== "ESRCH";
+  }
+}
+
+// The owner pid in a lock ("<pid> <random>"); null when it names none.
+function lockOwner(content) {
+  const m = /^(\d{1,10})(?:\s|$)/.exec(content);
+  const pid = m ? Number(m[1]) : 0;
+  return pid > 0 && pid <= 0x7fffffff ? pid : null;
+}
+
+// Tokens of the locks THIS PROCESS holds right now, shared by every copy of
+// this module loaded in it (tests load several on one file to stand for
+// several processes). A token is in here from before its lock can exist until
+// its save ends — released, lost, or left behind by a release that failed —
+// so a lock naming this process's pid with a token not in here belongs to a
+// save that is over (or to an earlier process that had our pid): it is stale,
+// whoever put it back.
+const LIVE_TOKENS = Symbol.for("utils/settings.js: live lock tokens");
+const liveTokens = globalThis[LIVE_TOKENS] || (globalThis[LIVE_TOKENS] = new Set());
+
+function leakLock(message) {
+  report(
+    "lock-release",
+    `${message}; other processes wait for it to turn ${LOCK_STALE_MS / 1000} s old, this one breaks it on its next save`,
+    { action: "settings_lock", meta: { pid: process.pid } },
+  );
+}
+
+function lockedError(detail) {
+  const err = new Error(`settings.json is locked (${detail}), so nothing was saved; try again`);
+  err.code = "SETTINGS_LOCKED";
+  return err;
+}
+
+function lockLost() {
+  const err = new Error(
+    "settings.json.lock was taken from this save by another process (it judged the lock stale), " +
+      "so this save was dropped rather than written over a newer file; try again",
+  );
+  err.code = "SETTINGS_LOCK_LOST";
+  report("lock-lost", err.message, { action: "settings_lock", meta: { pid: process.pid } });
+  return err;
+}
+
+async function lockHeld(token) {
+  try {
+    return (await fsp.readFile(lockFile, "utf8")) === token;
+  } catch {
+    return false;
+  }
+}
+
+// Who holds settings.json.lock, and may it be broken? Read afresh each time.
+// Breakable: a lock naming this process that none of its saves holds, one
+// whose owner has exited, and any lock older than LOCK_STALE_MS. An mtime in
+// the future (the clock stepped back) is no age at all: such a lock is judged
+// by its owner alone — and one naming no owner by how far its time is off.
+async function inspectLock() {
+  let st;
+  let content;
+  try {
+    st = await fsp.stat(lockFile);
+    content = await fsp.readFile(lockFile, "utf8");
+  } catch (e) {
+    if (e.code === "ENOENT") return { gone: true };
+    return { holder: `held, and unreadable (${why(e)})` };
+  }
+  const look = { content, ino: st.ino };
+  const age = Date.now() - st.mtimeMs;
+  const pid = lockOwner(content);
+  if (pid === null) {
+    if (Math.abs(age) > LOCK_STALE_MS)
+      return { ...look, breakable: true, reason: `it names no owner and is ${Math.round(Math.abs(age) / 1000)} s off` };
+    return { holder: "held by an owner it does not name" };
+  }
+  if (pid === process.pid ? !liveTokens.has(content) : !pidAlive(pid))
+    return {
+      ...look,
+      breakable: true,
+      reason: pid === process.pid ? "it names this process, and none of its saves holds it" : `its owner, pid ${pid}, has exited`,
+    };
+  if (age > LOCK_STALE_MS)
+    return { ...look, breakable: true, reason: `held by pid ${pid} for ${Math.round(age / 1000)} s` };
+  return { holder: pid === process.pid ? "held by another save of this process" : `held by pid ${pid}` };
+}
+
+// Break the lock `look` judged breakable, as atomically as a file lock allows:
+// move it aside under a temp name of ours (one breaker's rename takes a given
+// lock; the other's finds it gone), then confirm the moved file is the very
+// lock judged — same inode, same content. A lock taken in between (a faster
+// breaker re-took it) is put straight back with link(), which fails rather
+// than replace a newer one; and should even that cost a holder its lock, that
+// holder's save stops at its pre-rename check instead of writing. (A lock put
+// back after its owner had already finished names a save that is over; its
+// owner breaks it on its next save.) A lock that cannot be moved at all (a
+// read-only directory) fails this save: it would never come free.
+async function breakLock(look) {
+  const aside = `${settingsFile}.tmp-${process.pid}-${++tmpSeq}-${crypto.randomBytes(4).toString("hex")}`;
+  try {
+    await fsp.rename(lockFile, aside);
+  } catch (e) {
+    if (e.code === "ENOENT") return; // released, or broken by someone else first
+    throw lockedError(`a stale lock (${look.reason}) cannot be removed: ${why(e)}`);
+  }
+  let same = false;
+  try {
+    const st = await fsp.stat(aside);
+    same = st.ino === look.ino && (await fsp.readFile(aside, "utf8")) === look.content;
+  } catch {
+    /* unreadable: not provably the lock judged */
+  }
+  if (!same) {
+    await fsp.link(aside, lockFile).catch(noop);
+    await fsp.unlink(aside).catch(noop);
+    return;
+  }
+  await fsp.unlink(aside).catch((e) =>
+    report("lock-aside", `could not delete a stale settings.json.lock moved aside as ${aside} (${why(e)})`),
+  );
+  report("lock-broken", `removed a stale settings.json.lock (${look.reason})`, {
+    action: "settings_lock",
+    severity: "warn",
+    meta: { reason: look.reason },
+  });
+}
+
+// Create settings.json.lock already holding `token`: the token is written to a
+// temp file of ours and that file is hard-linked into place, so no process
+// ever sees a lock without its owner. (A lock created empty and written a step
+// later lost its LIVE owner whenever that write waited on a busy libuv pool
+// and another process judged the empty lock a crash leftover.) false = held;
+// link() fails EEXIST rather than replace it. A filesystem without hard links
+// gets an exclusive create and a write instead — its moment without an owner
+// is safe, because a lock naming no owner is only ever broken by age.
+const NO_HARD_LINKS = new Set(["EPERM", "ENOTSUP", "EOPNOTSUPP", "ENOSYS"]);
+async function createLock(token) {
+  const tmp = `${settingsFile}.tmp-${process.pid}-${++tmpSeq}-${crypto.randomBytes(4).toString("hex")}`;
+  try {
+    await fsp.writeFile(tmp, token, { flag: "wx" });
+  } catch (e) {
+    if (e.code !== "EEXIST") await fsp.unlink(tmp).catch(noop);
+    throw e;
+  }
+  try {
+    await fsp.link(tmp, lockFile);
+    return true;
+  } catch (e) {
+    if (e.code === "EEXIST") return false;
+    if (!NO_HARD_LINKS.has(e.code)) throw e;
+  } finally {
+    await fsp.unlink(tmp).catch(noop);
+  }
+  let fh;
+  try {
+    fh = await fsp.open(lockFile, "wx");
+  } catch (e) {
+    if (e.code === "EEXIST") return false;
+    throw e;
+  }
+  try {
+    await fh.writeFile(token, "utf8");
+  } catch (e) {
+    await fh.close().catch(noop);
+    await fsp
+      .unlink(lockFile)
+      .catch((u) => leakLock(`could not remove the settings.json.lock it had just created (${why(u)})`));
+    throw e;
+  }
+  await fh.close().catch(noop);
+  return true;
+}
+
+// Take settings.json.lock, holding "<pid> <random>". Another process holds it
+// for the milliseconds of one save: retry every 5 ms until the 3 s deadline —
+// honoured on every path, breaks included — then fail this save with
+// SETTINGS_LOCKED (its caller handles a failed save).
+async function acquireLock() {
+  const token = `${process.pid} ${crypto.randomBytes(8).toString("hex")}`;
+  const deadline = Date.now() + LOCK_WAIT_MS;
+  let breaks = 0;
+  let holder = "held by another process";
+  liveTokens.add(token); // before the lock can exist: see liveTokens
+  try {
+    for (let first = true; ; first = false) {
+      if (!first && Date.now() >= deadline)
+        throw lockedError(`${holder} for over ${LOCK_WAIT_MS / 1000} s`);
+      if (await createLock(token)) return token;
+      const look = await inspectLock();
+      if (look.holder) holder = look.holder;
+      if (look.breakable && breaks < LOCK_MAX_BREAKS) {
+        breaks++;
+        await breakLock(look);
+        continue;
+      }
+      await sleep(LOCK_RETRY_MS);
+    }
+  } catch (e) {
+    liveTokens.delete(token);
+    throw e;
+  }
+}
+
+// Remove the lock while it is still ours: a lock broken as stale and retaken
+// must not be removed under its new holder. One of ours that cannot be
+// removed is reported, never left silently — and its token leaves the live
+// set either way, so this process breaks the leftover on its next save.
+async function releaseLock(token) {
+  try {
+    let held;
+    try {
+      held = await fsp.readFile(lockFile, "utf8");
+    } catch (e) {
+      if (e.code !== "ENOENT") leakLock(`could not read settings.json.lock to release it (${why(e)})`);
+      return;
+    }
+    if (held !== token) return;
+    try {
+      await fsp.unlink(lockFile);
+    } catch (e) {
+      leakLock(`could not remove its own settings.json.lock (${why(e)})`);
+    }
+  } finally {
+    liveTokens.delete(token);
+  }
+}
+
+async function withLock(fn) {
+  const token = await acquireLock();
+  try {
+    return await fn(token);
+  } finally {
+    await releaseLock(token);
+  }
+}
+
+// Deep equality of two JSON values; object key order is ignored.
+function jsonEqual(a, b) {
+  if (a === b) return true;
+  if (a === null || b === null || typeof a !== "object" || typeof b !== "object")
+    return false;
+  if (Array.isArray(a) || Array.isArray(b)) {
+    if (!Array.isArray(a) || !Array.isArray(b) || a.length !== b.length) return false;
+    for (let i = 0; i < a.length; i++) if (!jsonEqual(a[i], b[i])) return false;
+    return true;
+  }
+  const keys = Object.keys(a);
+  if (keys.length !== Object.keys(b).length) return false;
+  for (const k of keys) if (!hasOwn(b, k) || !jsonEqual(a[k], b[k])) return false;
+  return true;
+}
+
+// Three-way merge of JSON values: apply OUR edits (ours − base) onto THEIRS
+// (the file as it is now). Plain objects merge key by key, recursively; an
+// array or a scalar is one leaf, and if ours differs from base, ours replaces
+// it whole. A key in base that ours lacks is our deletion. `base` undefined =
+// the key did not exist when we loaded it, so two writers that both added it
+// (two credentials saved into a fresh `marketplaces`) keep both sides' keys.
+function merge3(base, ours, theirs) {
+  if (base !== undefined && jsonEqual(ours, base)) return theirs; // untouched
+  if (
+    !isPlainObject(ours) ||
+    !isPlainObject(theirs) ||
+    (base !== undefined && !isPlainObject(base))
+  )
+    return ours;
+  const b = base === undefined ? {} : base;
+  const out = { ...theirs };
+  for (const k of Object.keys(b)) if (!hasOwn(ours, k)) delete out[k];
+  for (const k of Object.keys(ours)) {
+    const inBase = hasOwn(b, k);
+    if (hasOwn(theirs, k)) put(out, k, merge3(inBase ? b[k] : undefined, ours[k], theirs[k]));
+    // Gone from the file since we loaded it: it stays gone unless we changed it.
+    else if (!inBase || !jsonEqual(ours[k], b[k])) put(out, k, ours[k]);
+  }
+  return out;
+}
+
+function baseObject(ref) {
+  return ref === FROM_DEFAULTS ? materialize({}) : materialize(parseSettingsText(ref));
+}
+
+// Saves run one at a time, in call order. The chain never rejects, so a
+// failed save rejects only its own caller.
+function enqueue(job) {
+  const run = saveChain.then(job);
+  saveChain = run.then(noop, noop);
+  return run;
+}
+
 async function saveSettings(settings) {
-  const text = JSON.stringify({ ...DEFAULTS, ...settings }, null, 2);
-  const tmp = settingsFile + ".tmp-" + process.pid;
-  await fsp.writeFile(tmp, text, "utf8");
-  await fsp.rename(tmp, settingsFile);
+  // The old `{ ...DEFAULTS, ...settings }` turned a null or undefined into a
+  // file of pure defaults — a wipe. Refuse anything that is not an object.
+  const oursText = isPlainObject(settings) ? JSON.stringify(settings) : undefined;
+  // Snapshot NOW, as the old synchronous stringify did: whatever the caller
+  // does to its object after this call cannot change what this save writes.
+  const parsed = oursText === undefined ? null : JSON.parse(oursText);
+  if (!isPlainObject(parsed))
+    throw new TypeError(
+      "saveSettings needs a settings object, got " +
+        (settings === null ? "null" : Array.isArray(settings) ? "an array" : typeof settings),
+    );
+  // DEFAULTS filled in, exactly as it will be written: a DEFAULTS block the
+  // object never carried is "the default", not a deletion that would reset
+  // another writer's change to it.
+  const ours = materialize(parsed);
+  return enqueue(() =>
+    withLock(async (token) => {
+      const { current, unreadable } = readCurrent();
+      // An object loadSettings did not hand out has no known base, so it is
+      // written whole, as before.
+      const base = bases.get(settings);
+      const next = base === undefined ? ours : merge3(baseObject(base), ours, current);
+      await commit(next, unreadable, token);
+      // The caller's object now descends from what it just saved: saving it
+      // again applies only its newer edits, never re-asserting these.
+      bases.set(settings, oursText);
+    }),
+  );
+}
+
+// Exact read-modify-write for this file's own setters: `mutate` edits the
+// CURRENT settings under the lock, so no merge is needed.
+function updateSettings(mutate) {
+  return enqueue(() =>
+    withLock(async (token) => {
+      const { current, unreadable } = readCurrent();
+      mutate(current);
+      await commit(current, unreadable, token);
+    }),
+  );
+}
+
+// A setter's patch as it is NOW (the old setters applied it synchronously),
+// each value copied the way JSON writes it. A value JSON cannot hold
+// (undefined, a function) stays undefined, which — as before — drops the key.
+function snapshotPatch(patch) {
+  const out = {};
+  if (!patch || typeof patch !== "object") return out;
+  for (const k of Object.keys(patch)) {
+    const t = JSON.stringify(patch[k]);
+    put(out, k, t === undefined ? undefined : JSON.parse(t));
+  }
+  return out;
 }
 
 function getRequire2fa() {
@@ -519,10 +1284,11 @@ function getRequire2fa() {
 }
 
 async function setRequire2fa(value) {
-  const s = loadSettings();
-  s.require2fa = !!value;
-  await saveSettings(s);
-  return s.require2fa;
+  const on = !!value;
+  await updateSettings((s) => {
+    s.require2fa = on;
+  });
+  return on;
 }
 
 // autoFarm block accessors. Deep-merged over defaults so a settings.json
@@ -539,18 +1305,23 @@ function getAutoFarm() {
 }
 
 async function setAutoFarm(patch, opts = {}) {
-  const s = loadSettings();
-  const cur = s.autoFarm && typeof s.autoFarm === "object" ? s.autoFarm : {};
-  const next = { ...AUTO_FARM_DEFAULTS, ...cur, ...(patch || {}) };
-  s.autoFarm = next;
-  await saveSettings(s);
+  const p = snapshotPatch(patch);
+  // Applied to the CURRENT autoFarm block inside the save chain, so two
+  // setAutoFarm calls (or one racing a credential write) both land.
+  let cur = {};
+  let next = null;
+  await updateSettings((s) => {
+    cur = s.autoFarm && typeof s.autoFarm === "object" ? s.autoFarm : {};
+    next = { ...freshDefault("autoFarm"), ...cur, ...p };
+    s.autoFarm = next;
+  });
   // Audit which settings actually changed (before→after) — this is the record
   // that was missing when purgeSuspended was found flipped with no trace of who.
   // Best-effort and lazily-required so it can never break a settings write or
   // fight module load order (settings.js is required very early).
   try {
     const changed = {};
-    for (const k of Object.keys(patch || {})) {
+    for (const k of Object.keys(p)) {
       if (JSON.stringify(cur[k]) !== JSON.stringify(next[k]))
         changed[k] = { from: cur[k], to: next[k] };
     }
@@ -567,7 +1338,7 @@ async function setAutoFarm(patch, opts = {}) {
   } catch (e) {
     /* never block a settings write on its audit */
   }
-  return s.autoFarm;
+  return next;
 }
 
 // Normalise a game label for tolerant comparison ("Rainbow Six Siege",
@@ -1098,25 +1869,31 @@ function getEpicAutoClaim() {
 
 async function setEpicAutoClaim(patch, opts = {}) {
   const secretBox = require("./secretBox");
-  const s = loadSettings();
-  const cur = s.epicAutoClaim && typeof s.epicAutoClaim === "object"
-    ? s.epicAutoClaim
-    : {};
-  const next = { ...EPIC_AUTO_CLAIM_DEFAULTS, ...cur, ...(patch || {}) };
-  if (Object.prototype.hasOwnProperty.call(patch || {}, "captchaKey")) {
-    const k = String(patch.captchaKey || "").trim();
-    next.captchaKey = k ? secretBox.encrypt(k) : "";
-  }
-  next.perAccountCooldownH = Math.max(
-    0,
-    Math.floor(Number(next.perAccountCooldownH) || 0),
-  );
-  next.dailyCap = Math.max(0, Math.floor(Number(next.dailyCap) || 0));
-  s.epicAutoClaim = next;
-  await saveSettings(s);
+  const p = snapshotPatch(patch);
+  // Encrypt before queueing: a missing CRED_SECRET throws here, with nothing
+  // written, exactly as before.
+  const setsKey = hasOwn(p, "captchaKey");
+  const key = setsKey ? String(patch.captchaKey || "").trim() : "";
+  const encryptedKey = key ? secretBox.encrypt(key) : "";
+  // Applied to the CURRENT block inside the save chain (see setAutoFarm).
+  let cur = {};
+  let next = null;
+  await updateSettings((s) => {
+    cur = s.epicAutoClaim && typeof s.epicAutoClaim === "object"
+      ? s.epicAutoClaim
+      : {};
+    next = { ...freshDefault("epicAutoClaim"), ...cur, ...p };
+    if (setsKey) next.captchaKey = encryptedKey;
+    next.perAccountCooldownH = Math.max(
+      0,
+      Math.floor(Number(next.perAccountCooldownH) || 0),
+    );
+    next.dailyCap = Math.max(0, Math.floor(Number(next.dailyCap) || 0));
+    s.epicAutoClaim = next;
+  });
   try {
     const changed = {};
-    for (const k of Object.keys(patch || {})) {
+    for (const k of Object.keys(p)) {
       const before = k === "captchaKey" ? (cur[k] ? "***" : "") : cur[k];
       const after = k === "captchaKey" ? (next[k] ? "***" : "") : next[k];
       if (JSON.stringify(before) !== JSON.stringify(after)) {
@@ -1135,7 +1912,7 @@ async function setEpicAutoClaim(patch, opts = {}) {
   } catch {
     /* never block a settings write on its audit */
   }
-  return s.epicAutoClaim;
+  return next;
 }
 
 module.exports = {

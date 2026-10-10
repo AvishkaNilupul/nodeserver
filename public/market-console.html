@@ -230,7 +230,8 @@
           "</div>" +
           '<div class="basis">' + esc(m.basis) +
             (m.errors ? ' · <b style="color:var(--red)">' + m.errors + " live error" + (m.errors === 1 ? "" : "s") + "</b>" : "") +
-            (!m.errors && m.errorsHistorical
+            (m.held ? ' · <span style="opacity:.75">' + m.held + " held (paused/hidden on purpose)</span>" : "") +
+            (!m.errors && !m.held && m.errorsHistorical
               ? ' · <span style="opacity:.75">' + m.errorsHistorical + " past</span>"
               : "") +
             " · " + esc(ago(m.lastActivityAt)) +
@@ -413,12 +414,13 @@
     function rowErrors(r) {
       // A dead row's error is history, not a job. Say which is which rather than
       // letting a delisted row look like something to go and fix.
-      var live = r.status === "active";
+      var live = r.status === "active" && !r.held;
+      var held = r.status === "active" && r.held;
       return '<div class="row"><div class="r1">' +
         '<span class="t">' + esc(r.title || r.externalId) + "</span>" +
         '<span class="amt">' + money(r.price) + "</span></div>" +
-        '<div class="r2"><span class="pill ' + (live ? "s-fail" : "s-unknown") + '">' +
-        (live ? "live" : esc(r.status)) + "</span>" +
+        '<div class="r2"><span class="pill ' + (live ? "s-fail" : held ? "s-warn" : "s-unknown") + '">' +
+        (live ? "live" : held ? "held" : esc(r.status)) + "</span>" +
         '<span class="mono">' + esc(r.externalId || "") + "</span>" +
         "<span>" + esc(when(r.updatedAt)) + "</span></div>" +
         '<div class="err"' + (live ? "" : ' style="opacity:.7"') + ">" + esc(r.lastError) + "</div></div>";
@@ -833,7 +835,7 @@
           '<div class="kpi"><b>' + m.deliveredUnits + "</b><span>delivered units</span></div>" +
           '<div class="kpi"><b>' + m.active + "/" + m.listings + "</b><span>live listings</span></div>" +
           '<div class="kpi"><b>' + m.sales7d + "</b><span>sales, 7 days</span></div>" +
-          '<div class="kpi"><b style="color:' + (m.errors ? "var(--red)" : "inherit") + '">' + m.errors + "</b><span>listings with errors</span></div>" +
+          '<div class="kpi"><b style="color:' + (m.errors ? "var(--red)" : "inherit") + '">' + m.errors + "</b><span>listings with errors" + (m.held ? " (" + m.held + " held on purpose)" : "") + "</span></div>" +
         "</div>" : "") +
         '<div class="tabs">' + tabsFor(market).map(function (t) {
           return '<button class="tab' + (t[0] === state.tab ? " on" : "") + '" data-tab="' + t[0] + '">' + t[1] + "</button>";

@@ -105,6 +105,12 @@ async function upsertTask(verdict, { dryRun = false } = {}) {
 //   skip_no_accounts                      the above + coverage, plannedAccounts 0
 //   skip_no_capacity                      the above + coverage, plannedAccounts
 //                                          = the target it could not seat
+//   skip_sub_only                         decision, status and reason ONLY.
+//                                          Settled before the sellability stage,
+//                                          so no demandScore, hadResearch or
+//                                          internalSales was measured and none
+//                                          is written — on a re-decided row the
+//                                          earlier values simply stay.
 //   skip_reuse_only                       the one edge. Legacy produces this at
 //                                          CLAIM time by rewriting a farm/probe
 //                                          row, so the row it leaves also has
@@ -154,6 +160,11 @@ function legacySkipFields(verdict, af) {
     decidedAt: new Date(),
     ...(verdict.decisionInputs ? { decisionInputs: verdict.decisionInputs } : {}),
   };
+  if (classes.isPreDemandDecision(d)) {
+    delete fields.demandScore;
+    delete fields.hadResearch;
+    delete fields.internalSales;
+  }
   if (SKIP_WITH_COVERAGE.has(d) && verdict.coverage) fields.coverage = verdict.coverage;
   if (d === "skip_no_accounts") fields.plannedAccounts = 0;
   if (d === "skip_no_capacity") fields.plannedAccounts = Number(verdict.plannedAccounts) || 0;
@@ -706,6 +717,39 @@ async function executeDecision({ verdict, lane, cycle, af, shadow, granted = 0 }
 
   const b = brain();
   const af2 = af || settings.getAutoFarm();
+
+  // ALREADY RUNNING (2026-10-03). An execute job can run twice — a restart
+  // mid-execute (jobs.requeueStale), a jobs.finish that failed after the work
+  // was done, a stale queued job drained after a paused lane is re-armed — and
+  // over an ACTIVE row the second run upserted it back to "planned", claimed a
+  // second set of accounts and let executeTask overwrite bots/assignedAccounts,
+  // the first set stranded in its containers. So the row is read first, and an
+  // active one finishes the job as a no-op; its rescan flag is cleared (only
+  // while it is still active) so it is not re-decided every cycle. Every other
+  // status runs exactly as before. A failed read throws: the job is retried.
+  const AutoFarmTask = require("../../../models/AutoFarmTask");
+  const current = await AutoFarmTask.findOne({
+    game: verdict.game,
+    campaignId: verdict.campaignId,
+  })
+    .select("status decision rescanRequested")
+    .lean();
+  if (current && current.status === "active") {
+    if (current.rescanRequested) {
+      await AutoFarmTask.updateOne(
+        { _id: current._id, status: "active" },
+        { $set: { rescanRequested: false } },
+      ).catch(() => {});
+    }
+    return {
+      taskId: current._id,
+      decision: current.decision || verdict.decision,
+      alreadyExecuted: true,
+      status: "active",
+      accounts: 0,
+      bots: [],
+    };
+  }
 
   // The engine's own dry-run flag still applies: an operator may run the whole
   // system in dry-run, and a live lane must honour that exactly as the legacy

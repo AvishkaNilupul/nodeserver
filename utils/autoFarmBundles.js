@@ -225,16 +225,39 @@ function itemsFromSet(set) {
     }));
 }
 
+// Only the copies a viewer can EARN by watching (`earnable`, set by the event
+// catalog). The manifest lists a campaign's subscriber-only drops too, and a
+// bundle that promised one could never find a holder — the same reason the
+// solo lister leaves them out (autoLister.resolveCampaignItems). An item with
+// no `earnable` came from a catalog built before the field existed: every
+// copy counts, as it did then.
 function itemsFromManifest(wave, game) {
   return (wave && wave.items ? wave.items : [])
     .filter((i) => i && text(i.itemKey))
+    .filter((i) => i.earnable == null || Number(i.earnable) > 0)
     .map((i) => ({
       itemKey: text(i.itemKey),
       name: text(i.name) || "Reward",
       game,
       image: "",
-      qty: Math.max(1, Math.floor(Number(i.qty) || 1)),
+      qty: Math.max(
+        1,
+        Math.floor(Number(i.earnable == null ? i.qty : i.earnable) || 1),
+      ),
     }));
+}
+
+// Did this wave's campaign also give something only a subscriber gets? Read
+// from the catalog's own record of the campaign (`earnable` below `qty`), so
+// the answer is the same whichever source the wave's ITEMS come from — a
+// published set lists the earnable items only and cannot tell.
+function waveHasSubOnly(wave) {
+  return ((wave && wave.items) || []).some(
+    (i) =>
+      i &&
+      i.earnable != null &&
+      Number(i.earnable) < Math.max(1, Math.floor(Number(i.qty) || 1)),
+  );
 }
 
 // Per-wave items, preferring what we actually PUBLISHED for that wave. A task's
@@ -341,12 +364,14 @@ function planEventBundles({
 
     const waves = [];
     let unknownItems = 0;
+    let subOnlyWaves = 0;
     for (const slot of held) {
       const resolved = waveItems(slot.wave, entry.game, slot.tasks, setsById);
       if (!resolved.items.length) {
         unknownItems += 1;
         continue;
       }
+      if (waveHasSubOnly(slot.wave)) subOnlyWaves += 1;
       waves.push({
         campaignId: text(slot.wave.campaignId),
         name: text(slot.wave.name),
@@ -375,8 +400,11 @@ function planEventBundles({
     // "Complete" means every started wave of the event is in the bundle. A
     // wave we farmed but whose items we could not resolve counts against it —
     // advertising COMPLETE while a wave's contents are unknown is exactly the
-    // over-promise the holdings gate exists to prevent.
-    const full = waves.length >= wavesTotal && unknownItems === 0;
+    // over-promise the holdings gate exists to prevent. So does a wave that
+    // also gave something only a subscriber gets: the bundle holds everything
+    // an account can EARN from it, which is not everything the event gave.
+    const full =
+      waves.length >= wavesTotal && unknownItems === 0 && subOnlyWaves === 0;
 
     plans.push({
       key: entry.key,
@@ -388,6 +416,7 @@ function planEventBundles({
       wavesHeld: waves.length,
       wavesTotal,
       wavesUnresolved: unknownItems,
+      wavesSubOnly: subOnlyWaves,
       full,
       items,
       totalQty: items.reduce((n, i) => n + Math.max(1, Number(i.qty) || 1), 0),

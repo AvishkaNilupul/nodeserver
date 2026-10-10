@@ -44,6 +44,13 @@ const farm2Ownership = require("./farm2/ownership");
 const DropSet = require("../models/DropSet");
 const catalogRoutes = require("../routes/catalogRoutes");
 const { stampPreorderSet } = require("./catalogPreorder");
+// Whether watching can earn a campaign's drops at all (the manifest
+// utils/campaignWatcher.js keeps). Shared with the lane engine's decide step.
+const {
+  campaignSubOnly,
+  guardOn: subOnlyGuardOn,
+  SUB_ONLY_REASON,
+} = require("./campaignFarmability");
 
 const TICK_MS = 10 * 60 * 1000; // scan every 10 minutes
 const FIRST_TICK_DELAY_MS = 90 * 1000; // let the campaign watcher seed first
@@ -198,6 +205,17 @@ const state = {
   // the next tick may re-check a plan that turns out not to be worth running.
   lastRepackAt: 0,
   lastCatalogVariantSyncAt: 0,
+  // When a tick last finished with no error and with its decisions made (a
+  // tick that deferred them is not ok). The health board judges by this one;
+  // lastRun is stamped by every tick, failed or not.
+  lastOkAt: null,
+  // Consecutive ticks that deferred every decision (noteDeferredTick).
+  deferredTicks: 0,
+  deferredAlerted: false,
+  // Main mode: lane key -> { ticks, since, alerted } for a game left waiting
+  // for a lane that did not appear: consecutive ticks, when the wait began,
+  // whether its fallback was announced (noteAwaitingLane).
+  awaitingLaneTicks: new Map(),
 };
 
 // Live progress log for the UI: every scan appends human-readable steps here
@@ -369,6 +387,12 @@ async function freshResearchForGame(game) {
 // never sold a single unit could hold itself at maximum allocation forever.
 async function internalSalesForGame(game) {
   const cutoff = new Date(Date.now() - SALES_WINDOW_MS);
+  const gameKey = String(game).toLowerCase();
+  const salesWindow = {
+    gameKey,
+    at: { $gte: cutoff },
+    source: { $in: ["connected", "listing_sold"] },
+  };
   try {
     // One SALE, not one drop row. The two real sources need different
     // collapsing, so the grouping key is per-source:
@@ -382,47 +406,259 @@ async function internalSalesForGame(game) {
     //     they fall back to their dedupeKey, which is unique per unit.
     // A Gameflip sale that the buyer then connects lands on the same account
     // under both sources and is correctly counted once.
-    const rows = await SaleSignal.aggregate([
+    //
+    // Quantity units (a login POOL in `login`, see QUANTITY_POOL_RE) are set
+    // aside by the facet and counted by quantityUnitSales below instead.
+    const [out] = await SaleSignal.aggregate([
+      { $match: salesWindow },
       {
-        $match: {
-          gameKey: String(game).toLowerCase(),
-          at: { $gte: cutoff },
-          source: { $in: ["connected", "listing_sold"] },
-        },
-      },
-      {
-        $group: {
-          _id: { $ifNull: ["$account", "$dedupeKey"] },
-          // One sale can produce several rows (a Gameflip sale the buyer then
-          // connects). Take the best price any of them carries rather than
-          // summing, or the same money would be counted twice.
-          priceUsd: { $max: { $ifNull: ["$priceUsd", 0] } },
-        },
-      },
-      {
-        $group: {
-          _id: null,
-          count: { $sum: 1 },
-          revenue: { $sum: "$priceUsd" },
-          // How many of those sales we actually know a price for. A connection
-          // flip proves a sale but names no price, and dividing revenue by
-          // every sale would report a game as half-price purely because some
-          // of its evidence is priceless rather than free.
-          priced: { $sum: { $cond: [{ $gt: ["$priceUsd", 0] }, 1, 0] } },
+        $facet: {
+          sales: [
+            { $match: { $nor: [QUANTITY_UNIT_MATCH] } },
+            {
+              $group: {
+                _id: { $ifNull: ["$account", "$dedupeKey"] },
+                // One sale can produce several rows (a Gameflip sale the buyer
+                // then connects). Take the best price any of them carries
+                // rather than summing, or the same money would be counted
+                // twice.
+                priceUsd: { $max: { $ifNull: ["$priceUsd", 0] } },
+              },
+            },
+            {
+              $group: {
+                _id: null,
+                count: { $sum: 1 },
+                revenue: { $sum: "$priceUsd" },
+                // How many of those sales we actually know a price for. A
+                // connection flip proves a sale but names no price, and
+                // dividing revenue by every sale would report a game as
+                // half-price purely because some of its evidence is priceless
+                // rather than free.
+                priced: { $sum: { $cond: [{ $gt: ["$priceUsd", 0] }, 1, 0] } },
+              },
+            },
+          ],
+          units: [
+            { $match: QUANTITY_UNIT_MATCH },
+            { $project: { _id: 0, login: 1, at: 1, priceUsd: 1, dedupeKey: 1 } },
+          ],
         },
       },
     ]);
-    const r = rows[0] || { count: 0, revenue: 0, priced: 0 };
-    const count = r.count || 0;
-    const revenue = Math.round((r.revenue || 0) * 100) / 100;
+    const r = (out && out.sales && out.sales[0]) || {
+      count: 0,
+      revenue: 0,
+      priced: 0,
+    };
+    const units = (out && out.units) || [];
+    let q = { count: 0, revenue: 0, priced: 0 };
+    if (units.length) {
+      try {
+        q = await quantityUnitSales(salesWindow, units);
+      } catch (e) {
+        // The pairing read failed: count every unit as its own sale (the
+        // pre-pairing count for these rows) rather than lose the game's sales
+        // to the catch below — a demand of 0 can skip a campaign for good.
+        q = unpairedUnitSales(units);
+        warnUnitPairing(gameKey, e);
+      }
+    }
+    const count = (r.count || 0) + q.count;
+    const revenue = Math.round(((r.revenue || 0) + q.revenue) * 100) / 100;
+    const priced = (r.priced || 0) + q.priced;
     return {
       count,
       revenue,
-      avgPrice: r.priced ? Math.round((revenue / r.priced) * 100) / 100 : 0,
+      avgPrice: priced ? Math.round((revenue / priced) * 100) / 100 : 0,
     };
   } catch {
     return { count: 0, revenue: 0, avgPrice: 0 };
   }
+}
+
+// QUANTITY UNITS (2026-10-03). A GGSel / Digiseller offer sells "whichever unit
+// the platform picks", so its listing_sold row cannot name the account: its
+// `login` is the listing's whole delivery pool ("a, b, c"), written once per
+// unit. When that buyer later connects the account, the drop scanner writes a
+// `connected` row under the account's own id — and the two rows used to be
+// counted as two sales (measured over 60 days: 54 such World of Tanks signals,
+// 20 Albion). A pool row whose `account` happened to be set was the opposite
+// error: every unit of the listing collapsed onto that one account.
+//
+// The rule is utils/priceTracker/games.js soldUnion's rule 3, so the engine and
+// the price tracker count one sale the same way: each pool row is ONE
+// anonymous unit; it is the sale behind the first connection, from a login in
+// its pool, seen at or after it (a day of slack: the stock-drop inference
+// stamps the sale when it notices it), that no named sale and no earlier unit
+// already took — then the pair is one sale. Otherwise the unit is its own sale.
+// A pool is two or more logins split the way the ledger splits them
+// (priceTracker/ledger.js loginList).
+const QUANTITY_POOL_RE = /[^\s,;][\s,;]+[^\s,;]/;
+const QUANTITY_UNIT_MATCH = { source: "listing_sold", login: QUANTITY_POOL_RE };
+const QUANTITY_CONNECT_SLACK_MS = 86400000;
+
+function loginPool(login) {
+  return String(login || "")
+    .split(/[\s,;]+/)
+    .map((x) => x.trim().toLowerCase())
+    .filter(Boolean);
+}
+
+// What the units add to the count: what pairing needs is read only when a game
+// has units at all (most have none). One facet: the earliest connection per
+// login, and the logins the named (single-login) sales already account for.
+//
+// Only rows that can matter are read, so the answer is bounded by the pools'
+// logins, not by how much a game sells: connections from a pool login, the
+// named sales of a pool login, and the accounts of login-less named sales
+// (one may map to a pool login through a connection). Returning every named
+// row in one $facet document hit the 16 MB cap on a big enough game.
+async function quantityUnitSales(salesWindow, units) {
+  const poolLogins = [...new Set(units.flatMap((u) => loginPool(u.login)))];
+  const login = {
+    $trim: {
+      input: { $toLower: { $ifNull: ["$login", ""] } },
+      chars: " ,;\t\n\r",
+    },
+  };
+  const [p] = await SaleSignal.aggregate([
+    { $match: salesWindow },
+    {
+      $facet: {
+        connected: [
+          {
+            $match: {
+              source: "connected",
+              $expr: { $in: [login, { $literal: poolLogins }] },
+            },
+          },
+          {
+            $group: {
+              _id: login,
+              at: { $min: "$at" },
+              accounts: { $addToSet: "$account" },
+            },
+          },
+        ],
+        namedLogins: [
+          {
+            $match: {
+              source: "listing_sold",
+              $nor: [{ login: QUANTITY_POOL_RE }],
+              $expr: { $in: [login, { $literal: poolLogins }] },
+            },
+          },
+          { $group: { _id: login } },
+        ],
+        namedAccounts: [
+          {
+            $match: {
+              source: "listing_sold",
+              account: { $ne: null },
+              $expr: { $eq: [login, ""] },
+            },
+          },
+          { $group: { _id: "$account" } },
+        ],
+      },
+    },
+  ]);
+  const named = ((p && p.namedLogins) || [])
+    .map((r) => ({ login: r._id }))
+    .concat(((p && p.namedAccounts) || []).map((r) => ({ login: "", account: r._id })));
+  return pairQuantityUnits(units, (p && p.connected) || [], named);
+}
+
+// Every unit its own sale — what the units add when pairing cannot be read.
+function unpairedUnitSales(units) {
+  const out = { count: 0, revenue: 0, priced: 0, paired: 0 };
+  for (const u of units || []) {
+    const price = Math.max(0, Number(u && u.priceUsd) || 0);
+    out.count += 1;
+    out.revenue += price;
+    if (price > 0) out.priced += 1;
+  }
+  return out;
+}
+
+// At most one console line an hour: a pairing read that keeps failing is a
+// finding for the operator, not a log flood (every decision reads sales).
+const UNIT_PAIRING_WARN_MS = 60 * 60 * 1000;
+let lastUnitPairingWarnAt = 0;
+function warnUnitPairing(gameKey, err) {
+  if (Date.now() - lastUnitPairingWarnAt < UNIT_PAIRING_WARN_MS) return;
+  lastUnitPairingWarnAt = Date.now();
+  console.error(
+    "autoFarmer: quantity-unit pairing read failed for " +
+      gameKey +
+      " — units counted one sale each:",
+    (err && err.message) || err,
+  );
+}
+
+// Pure. `units`: pool rows {login, at, priceUsd, dedupeKey}; `connected`: one
+// row per connected login {_id: login, at: earliest, accounts}; `named`: the
+// other listing_sold rows {login, account}. Returns what the units ADD to the
+// account-grouped count: a paired unit adds no sale (its connection is one
+// already) but brings its price, so that sale becomes a priced one.
+function pairQuantityUnits(units, connected, named) {
+  const connAt = new Map(); // login -> earliest connection (ms)
+  const acctLogin = new Map(); // account id -> login
+  for (const c of connected || []) {
+    const login = String((c && c._id) || "").trim().toLowerCase();
+    if (!login) continue;
+    const at = new Date(c.at).getTime();
+    if (Number.isFinite(at) && (!connAt.has(login) || at < connAt.get(login))) {
+      connAt.set(login, at);
+    }
+    for (const a of c.accounts || []) {
+      if (a) acctLogin.set(String(a).toLowerCase(), login);
+    }
+  }
+  for (const s of named || []) {
+    const ls = loginPool(s && s.login);
+    if (s && s.account && ls.length === 1) {
+      acctLogin.set(String(s.account).toLowerCase(), ls[0]);
+    }
+  }
+  const taken = new Set();
+  for (const s of named || []) {
+    const ls = loginPool(s && s.login);
+    const login =
+      ls.length === 1
+        ? ls[0]
+        : s && s.account
+          ? acctLogin.get(String(s.account).toLowerCase()) || ""
+          : "";
+    if (login) taken.add(login);
+  }
+  const out = { count: 0, revenue: 0, priced: 0, paired: 0 };
+  const sorted = (units || []).slice().sort(
+    (a, b) =>
+      new Date(a.at) - new Date(b.at) ||
+      String(a.dedupeKey || "").localeCompare(String(b.dedupeKey || "")),
+  );
+  for (const u of sorted) {
+    const t = new Date(u.at).getTime();
+    let best = null;
+    for (const l of loginPool(u.login)) {
+      const ct = connAt.get(l);
+      if (ct == null || taken.has(l)) continue;
+      if (ct < t - QUANTITY_CONNECT_SLACK_MS) continue; // connected before it sold
+      if (!best || ct < best.at) best = { login: l, at: ct };
+    }
+    if (best) {
+      taken.add(best.login);
+      out.paired += 1;
+    } else {
+      out.count += 1;
+    }
+    const price = Math.max(0, Number(u.priceUsd) || 0);
+    out.revenue += price;
+    if (price > 0) out.priced += 1;
+  }
+  return out;
 }
 
 // ---- Existing coverage: who is ALREADY farming/holding a game? ----
@@ -654,11 +890,18 @@ function marketStockFloor(af) {
   // Same enablement signals the auto-lister uses to decide which markets get
   // a share: plati needs platiCategoryId, ggsel rides along when its key is
   // configured (category can come from the drop or ggselCategoryId).
+  //
+  // ...and only while the market is SWITCHED ON (2026-10-03), the same switch
+  // test as autoLister.platiTakesNewStock / ggselTakesNewStock. A switched-off
+  // market gets no share of the stock, so counting its shelf made every new
+  // campaign farm 18 accounts for 12 shelves while Plati was blocked (09-28).
   let markets = 1; // gameflip is the primary and always listed
-  if (af.platiCategoryId) markets++;
+  if (af.platiCategoryId && af.platiEnabled !== false) markets++;
   try {
     const ks = mp.keyStatus();
-    if (ks && ks.ggsel && ks.ggsel.configured) markets++;
+    if (ks && ks.ggsel && ks.ggsel.configured && af.ggselEnabled !== false) {
+      markets++;
+    }
   } catch {
     /* marketplaces module unavailable — floor covers fewer markets */
   }
@@ -926,8 +1169,11 @@ async function claimPoolAccounts(
   { preferGame = "", recycledOnly = false } = {},
 ) {
   const claimed = [];
+  // Backfill's note ("auto-farm backfill: <game> (<campaignId>)") names the
+  // same two things; it did not match here, so its usage events carried no
+  // game and a caller that passed no preferGame got no soldGames exclusion.
   const noteMatch = String(note || "").match(
-    /^auto-farm:\s*(.*?)\s*\(([^)]+)\)\s*$/i,
+    /^auto-farm(?: backfill)?:\s*(.*?)\s*\(([^)]+)\)\s*$/i,
   );
   const targetGame = normGame(preferGame || (noteMatch && noteMatch[1]) || "");
   const passes = [];
@@ -938,13 +1184,62 @@ async function claimPoolAccounts(
     });
   }
   if (!recycledOnly) passes.push({});
+  // The pristine reserve (2026-10-03): never-farmed accounts are what paid
+  // rent-farm orders need, and a farm claim spends them for good. While the
+  // pristine count is above the reserve the filter is {} (no change); at the
+  // reserve it excludes pristine rows. Re-read before EVERY claim — it is
+  // cached, and noteClaimed() lowers the cached count — so one call cannot
+  // dig below the reserve between two refreshes.
+  let pristineReserve = null;
+  // One account, one bot (utils/fleetIntegrity.js, 2026-10-06): an account that
+  // sits in a no-claim bot is never claimed here, whatever its pool row says —
+  // on 09-21 68 such rows read "available", were claimed for Rocket League and
+  // had their unclaimed Overwatch drops claimed by these bots. When the
+  // no-claim configs cannot be read and never were, claim nothing: the caller
+  // keeps its plan and retries on the next tick.
+  let fence;
+  try {
+    const integrity = require("./fleetIntegrity");
+    fence = await integrity.claimFence("managed");
+    await integrity.reportFencedRows("managed", fence);
+  } catch (e) {
+    progress(
+      "Not claiming pool accounts: the no-claim bot configs could not be read (" +
+        ((e && e.message) || e) +
+        "), so which accounts already farm there is unknown.",
+      "warn",
+    );
+    return claimed;
+  }
+  // Folded into readyPoolQuery's own token rule (clientSecret: { $gt: "" }).
+  const notInNoclaim = fence.exclude.length
+    ? { clientSecret: { $gt: "", $nin: fence.exclude } }
+    : {};
   for (const extra of passes) {
     while (claimed.length < n) {
+      let pristineGuard;
+      try {
+        // Inside the guard: a deploy without the module is a filter that
+        // cannot be read, and takes the same safe exit.
+        pristineReserve = pristineReserve || require("./pristineReserve");
+        pristineGuard = await pristineReserve.farmClaimFilter();
+      } catch {
+        // Cannot tell whether one more claim digs into the reserve: claim no
+        // more, but hand back what already landed so the caller deploys or
+        // releases it (throwing here would strand those accounts claimed).
+        return claimed;
+      }
       const doc = await AvailableAccount.findOneAndUpdate(
         {
-          ...readyPoolQuery(),
-          ...extra,
-          ...(targetGame ? { soldGames: { $ne: targetGame } } : {}),
+          $and: [
+            {
+              ...readyPoolQuery(),
+              ...extra,
+              ...(targetGame ? { soldGames: { $ne: targetGame } } : {}),
+              ...notInNoclaim,
+            },
+            pristineGuard,
+          ],
         },
         {
           $set: {
@@ -957,6 +1252,11 @@ async function claimPoolAccounts(
       );
       if (!doc) break;
       claimed.push(doc);
+      try {
+        pristineReserve.noteClaimed(doc);
+      } catch {
+        /* bookkeeping only — the claim itself has landed and is returned */
+      }
       await recordPoolUsage(doc._id, {
         event: "claimed",
         actor: "auto-farm",
@@ -996,6 +1296,135 @@ async function activeAutoBotCount(ctx) {
     for (const b of t.bots || []) seen.add(b.host + "|" + b.container);
   }
   return seen.size;
+}
+
+// Ready accounts a FARM must leave in the pool for the pristine reserve
+// (utils/pristineReserve.js, af.pristineReserve; 2026-10-03). Subtracted with
+// poolReserve wherever ready-minus-reserve becomes a farm's spend budget —
+// executeTask, backfill, the tick's fair share and the farm2 cycle budget — so
+// a budget never counts accounts the claim filter will refuse. Display counts
+// do not subtract it. The helper fails safe on its own count errors (it reports
+// the whole reserve as protected); if the module itself cannot be used, this
+// does the same.
+async function pristineProtect(af) {
+  try {
+    const g = await require("./pristineReserve").farmGuard();
+    const p = Number(g && g.protect);
+    return Number.isFinite(p) && p > 0 ? Math.floor(p) : 0;
+  } catch {
+    return Math.max(0, Math.floor(Number(af && af.pristineReserve) || 0));
+  }
+}
+
+// What a FARM may spend out of `ready` pool accounts. The LARGER of the two
+// floors comes off, not their sum: the pristine accounts the reserve holds back
+// are ready accounts themselves, and while they sit in the pool they are also
+// the manual-work floor poolReserve keeps — subtracting both counted the same
+// accounts twice (2026-10-03 review). The farm2 cycle budget does the same.
+function farmSpendable(ready, poolReserve, protect) {
+  const floor = Math.max(Number(poolReserve) || 0, Number(protect) || 0);
+  return Math.max(0, (Number(ready) || 0) - floor);
+}
+
+// How many NEW containers a farm may create on `host`, given `slots` free under
+// maxAutoBots: none while the host is short of RAM (utils/hostCapacity.js,
+// af.hostMinFreeMb; 2026-10-03 — three farms share one VPS and nothing
+// arbitrated its memory). Only the containers term is gated: free seats inside
+// RUNNING containers cost no new RAM and stay usable. Seats inside a STOPPED
+// (parked) container are not: filling one restarts it, which is a whole
+// container's RAM — so while the gate is shut callers count and fill running
+// containers only (`blocked` -> autoSeatCapacity / fillExistingBots
+// runningOnly). That is why the gate is read even when the container cap
+// leaves no slot to create. Fails OPEN, as the helper itself does on an
+// unreadable host — the create needs the same SSH and fails loudly on its own.
+// Never throws. { slots, blocked, reason }.
+async function containerSlots(host, slots) {
+  const n = Math.max(0, Number(slots) || 0);
+  if (!host) return { slots: n, requested: n, blocked: false, reason: "" };
+  try {
+    const gate = await require("./hostCapacity").newContainerAllowed(host.id);
+    if (gate && gate.ok === false) {
+      const known =
+        typeof gate.availableMb === "number" &&
+        Number.isFinite(gate.availableMb);
+      return {
+        slots: 0,
+        requested: n,
+        blocked: true,
+        reason:
+          "the RAM gate is shut on " +
+          (host.label || host.id) +
+          (known
+            ? " (" +
+              gate.availableMb +
+              " MB available, minimum " +
+              gate.minFreeMb +
+              " MB)"
+            : gate.reason
+              ? " (" + gate.reason + ")"
+              : ""),
+      };
+    }
+  } catch {
+    /* fail open — see above */
+  }
+  return { slots: n, requested: n, blocked: false, reason: "" };
+}
+
+// The words both engines put on a decision row when the pool or the host is
+// what stopped it, so a legacy row and a lane's skip row name the same real
+// constraint (the RAM gate on <host> with its MB; the pristine reserve with
+// its count). steps/decide.js uses these too.
+function poolShortReason(poolReserve, pristineHeld) {
+  return (
+    "Pool has no spendable accounts (reserve floor " +
+    poolReserve +
+    " protects manual work" +
+    (pristineHeld > 0
+      ? "; the pristine reserve is holding " +
+        pristineHeld +
+        " account(s) for rent-farm orders"
+      : "") +
+    ") — will retry when the pool refills."
+  );
+}
+
+function capacityShortReason(af, host, containers) {
+  const label = host ? host.label || host.id : "?";
+  if (containers && containers.blocked && containers.requested >= 1) {
+    return (
+      "No new bot container: " +
+      containers.reason +
+      ", and no running bot has a free seat — queued; retries when memory " +
+      "frees up or a seat opens."
+    );
+  }
+  return (
+    "All " +
+    af.maxAutoBots +
+    " auto-bot slots on " +
+    label +
+    " are busy and no running bot has a free seat" +
+    (containers && containers.blocked
+      ? " (and " + containers.reason + ", so no parked bot is restarted)"
+      : "") +
+    " — queued; retries when a campaign ends and frees capacity."
+  );
+}
+
+// Containers on `host` that are running right now, as a Set of names: from the
+// tick's host snapshot when it covers the host (it is kept current as the tick
+// starts containers), else one `docker ps`. null when the state cannot be
+// read — callers then treat every container as stopped.
+const isRunningState = (s) => !!s && String(s.state || "").toLowerCase() === "running";
+async function runningContainers(host, ctx) {
+  try {
+    const row = ctx && ctx.hostState ? ctx.hostState.byHost.get(host.id) : null;
+    const ps = row && row.ok && row.docker ? row.docker : await hosts.dockerPs(host);
+    return new Set(Object.keys(ps || {}).filter((name) => isRunningState(ps[name])));
+  } catch {
+    return null;
+  }
 }
 
 // Logins that must NEVER go back into the pool, out of the given list.
@@ -1438,11 +1867,32 @@ async function buildDecisionHostState(taskRows, af, farmHost, opts = {}) {
 // Free seats inside containers that active auto-farm tasks already run on
 // this host. A "seat" is one enabled TwitchUsers slot out of accountsPerBot.
 // Unreadable configs count as zero free seats (never over-promise capacity).
-async function autoSeatCapacity(host, af, ctx) {
+//
+// `runningOnly` (the RAM gate is shut, containerSlots().blocked): count seats
+// in RUNNING containers only. A parked container's seats are not free while
+// memory is short — filling one restarts it (fillExistingBots). Unknown
+// container state counts as stopped.
+async function autoSeatCapacity(host, af, ctx, { runningOnly = false } = {}) {
   if (!host || af.consolidate === false) return 0;
+  let running = null;
+  if (runningOnly) {
+    running = await runningContainers(host, ctx);
+    if (!running) return 0;
+  }
   if (ctx && ctx.hostState) {
     const row = ctx.hostState.byHost.get(host.id);
-    if (row && row.ok) return ctx.hostState.seatCounter.freeSeats();
+    if (row && row.ok) {
+      if (!running) return ctx.hostState.seatCounter.freeSeats();
+      let free = 0;
+      for (const b of ctx.hostState.activeBots) {
+        if (b.host !== host.id || !running.has(b.container)) continue;
+        const data = ctx.hostState.config(host.id, b.file);
+        if (data) free += Math.max(0, af.accountsPerBot - botFactory.usedSeats(data));
+      }
+      // Never more than the tick's own seat ledger allows (it also tracks
+      // seats this tick has already filled).
+      return Math.min(free, ctx.hostState.seatCounter.freeSeats());
+    }
   }
   const rows = await AutoFarmTask.find(
     { status: "active" },
@@ -1453,6 +1903,7 @@ async function autoSeatCapacity(host, af, ctx) {
   for (const t of rows) {
     for (const b of t.bots || []) {
       if (b.host !== host.id) continue;
+      if (running && !running.has(b.container)) continue;
       const key = b.host + "|" + b.container;
       if (seen.has(key)) continue;
       seen.add(key);
@@ -1473,11 +1924,26 @@ async function autoSeatCapacity(host, af, ctx) {
 // many games at once. Returns { placed, remaining }; placed entries carry
 // the task.bots row plus the accounts that landed there. Every filled
 // container is restarted once so TwitchDropsBot reloads its config.
-async function fillExistingBots(host, claimed, game, af, ctx) {
+async function fillExistingBots(
+  host,
+  claimed,
+  game,
+  af,
+  ctx,
+  { runningOnly = false } = {},
+) {
   const placed = [];
   let remaining = claimed.slice();
   if (!remaining.length || af.consolidate === false) {
     return { placed, remaining };
+  }
+  // RAM gate shut (containerSlots().blocked): pack into RUNNING containers
+  // only. Packing into a parked one restarts it below, starting a whole
+  // container on a host the gate says is short of memory (2026-10-03).
+  let running = null;
+  if (runningOnly) {
+    running = await runningContainers(host, ctx);
+    if (!running) return { placed, remaining };
   }
   const containers =
     ctx && ctx.hostState
@@ -1488,6 +1954,7 @@ async function fillExistingBots(host, claimed, game, af, ctx) {
         );
   for (const b of containers) {
     if (!remaining.length) break;
+    if (running && !running.has(b.container)) continue;
     let freeSeats = 0;
     let present = new Set();
     try {
@@ -1573,9 +2040,26 @@ async function fillExistingBots(host, claimed, game, af, ctx) {
 //
 // Retrying costs nothing when conditions have not changed (the same gates
 // simply skip it again) and fixes it the moment they have.
-function isStranded(task) {
+//
+// A `planned` row is ALSO what a plan looks like while its executeTask is
+// still running: record() / the lane's upsertTask write it just before the
+// claim and the bot creation, which take minutes over a slow link. Read as
+// stranded in that window, the other engine re-decided it and ran a second
+// executeTask on the same row (2026-10-03: legacy planned The Quinfall, a lane
+// created a minute later took the plan as stranded). So a plan only counts as
+// stranded once nothing has touched it for STRANDED_PLAN_MS. A row with no
+// date at all predates both writers and keeps the old answer.
+const STRANDED_PLAN_MS = 15 * 60 * 1000;
+
+function isStranded(task, now = Date.now()) {
   if (!task) return false;
-  if (task.status === "planned") return true;
+  if (task.status === "planned") {
+    const at = Math.max(
+      task.decidedAt ? new Date(task.decidedAt).getTime() || 0 : 0,
+      task.updatedAt ? new Date(task.updatedAt).getTime() || 0 : 0,
+    );
+    return !at || now - at >= STRANDED_PLAN_MS;
+  }
   return task.status === "failed" && !(task.bots || []).length;
 }
 
@@ -1767,6 +2251,34 @@ async function processCampaign(c, ctx) {
       },
       { upsert: true, returnDocument: "after", setDefaultsOnInsert: true },
     );
+  }
+
+  // 0) Farmability gate. A campaign whose every drop needs a paid subscription
+  // cannot be earned by watching — the bots drop it from their own list — so it
+  // is settled before any market read: no probe slot, no pool account, and no
+  // storefront pre-order for an item nobody can deliver. Until 2026-10-08 such
+  // a campaign was decided like any other, and six of the eight probe slots
+  // (90 pool accounts) sat on badge campaigns while real games queued behind
+  // them. Only a PROVEN case stops here; a manifest that is missing, older
+  // than requiredSubs or unreadable changes nothing below. The row gets no
+  // demandScore/hadResearch/internalSales: none was measured. Switched off
+  // with autoFarm.subOnlyGuard: false.
+  if (subOnlyGuardOn(af) && (await campaignSubOnly(c.campaignId))) {
+    await record({
+      decision: "skip_sub_only",
+      status: "skipped",
+      reason: SUB_ONLY_REASON,
+    });
+    if (isNewDecision("skip_sub_only")) {
+      await tg(
+        "🤖 Auto-farm SKIP — " +
+          game +
+          "\nSubscribers-only drops" +
+          (c.name ? " (" + c.name + ")" : "") +
+          " — watching cannot earn them. No accounts spent.",
+      );
+    }
+    return { decision: "skip_sub_only" };
   }
 
   // 1) Sellability gate — fresh market data (Gameflip/GGSel/Plati, re-scanned
@@ -2234,10 +2746,7 @@ async function processCampaign(c, ctx) {
     await record({
       decision: "skip_no_accounts",
       status: "skipped",
-      reason:
-        "Pool has no spendable accounts (reserve floor " +
-        af.poolReserve +
-        " protects manual work) — will retry when the pool refills.",
+      reason: poolShortReason(af.poolReserve, ctx.pristineProtect),
       demandScore,
       hadResearch: !!research,
       internalSales,
@@ -2249,21 +2758,23 @@ async function processCampaign(c, ctx) {
 
   // 6) Capacity gate: free SEATS, not just container slots — running bots
   // with spare TwitchUsers slots can absorb accounts without new containers.
+  // No new container while the farm host is short of RAM (containerSlots),
+  // and then no seat in a parked one either (it would have to be restarted).
   const activeBots = await activeAutoBotCount(ctx);
-  const slotsFree = Math.max(0, af.maxAutoBots - activeBots);
-  const freeSeats = await autoSeatCapacity(host, af, ctx).catch(() => 0);
+  const containers = await containerSlots(
+    host,
+    Math.max(0, af.maxAutoBots - activeBots),
+  );
+  const slotsFree = containers.slots;
+  const freeSeats = await autoSeatCapacity(host, af, ctx, {
+    runningOnly: containers.blocked,
+  }).catch(() => 0);
   const seatCapacity = slotsFree * af.accountsPerBot + freeSeats;
   if (seatCapacity < 1) {
     await record({
       decision: "skip_no_capacity",
       status: "skipped",
-      reason:
-        "All " +
-        af.maxAutoBots +
-        " auto-bot slots on " +
-        host.label +
-        " are busy and no running bot has a free seat — queued; retries " +
-        "when a campaign ends and frees capacity.",
+      reason: capacityShortReason(af, host, containers),
       demandScore,
       hadResearch: !!research,
       internalSales,
@@ -2382,26 +2893,39 @@ async function executeTask(task, ctx, { append = false } = {}) {
   if (want < 1) throw new Error("Task has no planned accounts");
 
   // Re-check the reserve floor at execution time (things may have changed
-  // since the plan was made).
+  // since the plan was made). The pristine reserve is a floor too: the claim
+  // below cannot take those accounts (farmSpendable).
   const ready = await countReadyPool();
-  const spendable = Math.max(0, ready - af.poolReserve);
+  const protect = await pristineProtect(af);
+  const spendable = farmSpendable(ready, af.poolReserve, protect);
   // Re-check CONTAINER capacity here too, not just in processCampaign. The
   // decision gate runs when the plan is made; this runs when it is spent, and
   // in between other campaigns in the same tick (or a stale `planned` task
   // approved by hand days later) can have consumed every slot. Without this
   // term nothing bounded the createBot loop below at all — which is how 31
   // containers came to exist on the Pi under a maxAutoBots of 6.
+  // No NEW container while the host is short of RAM (containerSlots), and no
+  // seat in a parked one then either.
   const activeBots = await activeAutoBotCount(ctx);
-  const slotsFree = Math.max(0, af.maxAutoBots - activeBots);
-  const freeSeats = await autoSeatCapacity(host, af, ctx).catch(() => 0);
+  const containers = await containerSlots(
+    host,
+    Math.max(0, af.maxAutoBots - activeBots),
+  );
+  const slotsFree = containers.slots;
+  const runningOnly = containers.blocked;
+  const freeSeats = await autoSeatCapacity(host, af, ctx, {
+    runningOnly,
+  }).catch(() => 0);
   const capacity = slotsFree * af.accountsPerBot + freeSeats;
   if (capacity < 1) {
     throw new Error(
       "No capacity on " +
         (host.label || host.id) +
-        ": all " +
-        af.maxAutoBots +
-        " auto-bot slots are in use and no running bot has a free seat",
+        ": " +
+        (containers.blocked && containers.requested >= 1
+          ? "no new container (" + containers.reason + ")"
+          : "all " + af.maxAutoBots + " auto-bot slots are in use") +
+        " and no running bot has a free seat",
     );
   }
   const n = Math.min(want, spendable, capacity);
@@ -2418,6 +2942,11 @@ async function executeTask(task, ctx, { append = false } = {}) {
         ready +
         " ready, reserve " +
         af.poolReserve +
+        (protect
+          ? "; the pristine reserve is holding " +
+            protect +
+            " for rent-farm orders"
+          : "") +
         ")",
     );
   }
@@ -2474,7 +3003,9 @@ async function executeTask(task, ctx, { append = false } = {}) {
     // Pack into free seats of running auto-bots first — one container can
     // farm many games via per-account FavouriteGames, and every container
     // we don't create is RAM the Pi keeps.
-    const packed = await fillExistingBots(host, claimed, game, af, ctx);
+    const packed = await fillExistingBots(host, claimed, game, af, ctx, {
+      runningOnly,
+    });
     for (const pl of packed.placed) {
       bots.push(pl.bot);
       for (const a of pl.accounts) deployed.push(a);
@@ -2513,9 +3044,10 @@ async function executeTask(task, ctx, { append = false } = {}) {
       const spare = rest.slice(i);
       await releasePoolAccounts(spare);
       progress(
-        "Container budget reached (" +
-          af.maxAutoBots +
-          " max) — released " +
+        (containers.blocked && containers.requested >= 1
+          ? "No new container (" + containers.reason + ")"
+          : "Container budget reached (" + af.maxAutoBots + " max)") +
+          " — released " +
           spare.length +
           " unplaced account(s) back to the pool.",
         "warn",
@@ -2902,6 +3434,20 @@ async function repackAutoBots(af, host, progress) {
   return r;
 }
 
+// Restart `container` only if it is running (utils/farmControl.js, 2026-10-03):
+// a parked container stays parked. Should a deploy ever ship this file without
+// that helper, the old unconditional restart is kept rather than none — a
+// running container that never reloads keeps farming accounts this engine has
+// just returned to the pool.
+async function restartIfRunning(host, container) {
+  const fc = require("./farmControl");
+  if (typeof fc.restartIfRunning === "function") {
+    return fc.restartIfRunning(host, container);
+  }
+  await hosts.dockerContainer(host, "restart", container);
+  return { restarted: true, state: "unknown" };
+}
+
 // Apply one task's post-event markup, recording the outcome on the task so a
 // failure is visible instead of living only in the process log.
 async function repriceTask(t, notify) {
@@ -2999,16 +3545,63 @@ async function repriceEndedTasks() {
   return done;
 }
 
+// A cold-start probe that can never earn anything is ended here, with the same
+// teardown as a campaign that ran out, instead of holding its probe slot and
+// its accounts until the campaign's last day.
+//
+// The decision gate (processCampaign step 0, farm2 decide stage 0) keeps a
+// subscriber-only campaign from being probed in the first place; this is for
+// the probe that got through anyway — decided before the campaign's drop
+// manifest existed, or before that gate did. On 2026-10-08 six probes were in
+// that state: 15 accounts each on a badge that needs a subscription, 0 drops
+// earned in up to nine days, and a public pre-order page for each.
+//
+// PROBES ONLY. A reuse task costs nothing and ends with its campaign; a farm
+// task's accounts also farm the game's other campaigns. Inert when
+// autoFarm.subOnlyGuard is false.
+async function subOnlyProbe(t, ended) {
+  if (ended || t.decision !== "probe" || !subOnlyGuardOn(cfg())) return false;
+  return campaignSubOnly(t.campaignId);
+}
+
+// Every farm host one of the task's bots lives on answers right now. An early
+// end has no deadline, so it waits for a tick where its configs can be read
+// and rewritten rather than recycling accounts a bot may still be running.
+// `asked` remembers each host's answer for the pass, so several probes on one
+// unreachable host cost one probe between them.
+async function botHostsReachable(t, asked) {
+  for (const b of t.bots || []) {
+    if (!b) continue;
+    if (!asked.has(b.host)) {
+      const h = hosts.resolveHost(b.host);
+      asked.set(b.host, !!h && (await probeHost(h)));
+    }
+    if (!asked.get(b.host)) return false;
+  }
+  return true;
+}
+
 async function completeEndedTasks() {
   const active = await AutoFarmTask.find({ status: "active" });
   let completed = 0;
+  const hostAnswers = new Map();
   for (const t of active) {
     const c = await TwitchCampaign.findOne({ campaignId: t.campaignId }).lean();
     const ended =
       !c ||
       c.status === "EXPIRED" ||
       (c.endAt && new Date(c.endAt) < new Date());
-    if (!ended) continue;
+    const subOnly = await subOnlyProbe(t, ended);
+    if (!ended && !subOnly) continue;
+    if (subOnly && !(await botHostsReachable(t, hostAnswers))) {
+      progress(
+        "Subscribers-only probe " +
+          t.game +
+          ": its farm host is not answering — ending it on a later tick.",
+        "warn",
+      );
+      continue;
+    }
     const af = cfg();
     // Containers other ACTIVE tasks still use must survive this task ending.
     const others = await AutoFarmTask.find(
@@ -3040,6 +3633,8 @@ async function completeEndedTasks() {
     const stopped = [];
     const removed = [];
     const trimmed = [];
+    // Shared bots whose config could not be read or rewritten this pass.
+    const unedited = [];
     // Logins of THIS task that are still enabled in a container that survives
     // this cleanup. Recycling one of these back to the pool is what created
     // the duplicate-container loop: the account gets re-claimed while it is
@@ -3101,13 +3696,16 @@ async function completeEndedTasks() {
               b.file,
               JSON.stringify(data, null, 2),
             );
-            await hosts
-              .dockerContainer(h, "restart", b.container)
-              .catch(() => {});
+            // Reload the config only in a container that is RUNNING. A plain
+            // `docker restart` starts a stopped one, so this woke a shared bot
+            // botWaker had parked (the wake/park flap class, 2026-09-29); a
+            // stopped container reads the trimmed config when it next starts.
+            await restartIfRunning(h, b.container).catch(() => {});
             trimmed.push(b.container + " (" + changed + " acct)");
           }
         } catch {
           /* config unreadable — leave the shared bot alone */
+          unedited.push(b.container);
         }
         continue;
       }
@@ -3128,10 +3726,33 @@ async function completeEndedTasks() {
         }
       }
     }
+    // An early end is all or nothing. A shared config that could not be
+    // rewritten still has this probe's accounts enabled in a running bot, and
+    // recycling them now would hand the same account to a second bot. The
+    // task stays active and the whole pass repeats next tick — it is
+    // idempotent: accounts already trimmed are simply found trimmed.
+    if (subOnly && unedited.length) {
+      progress(
+        "Subscribers-only probe " +
+          t.game +
+          ": could not rewrite " +
+          unedited.join(", ") +
+          " — left active, retrying next tick.",
+        "warn",
+      );
+      continue;
+    }
     // Recycle the accounts for the next event: back to the ready pool unless
     // the account itself was sold to a buyer. The farmed drops live on the
     // Twitch account either way, and a later sale still triggers
     // farmControl.stopFarmingGame on whatever it farms next.
+    //
+    // A subscribers-only probe's accounts farmed nothing, so they go back
+    // WITHOUT the "recycled after <game>" note: that note is the game-affinity
+    // key claimPoolAccounts prefers and the only door into a reuse-only game.
+    const recycleNote = subOnly
+      ? "recycled — subscribers-only drops, nothing farmed (" + t.game + ")"
+      : "recycled after " + t.game;
     let recycled = 0;
     if (t.assignedAccounts && t.assignedAccounts.length) {
       try {
@@ -3174,7 +3795,7 @@ async function completeEndedTasks() {
               $set: {
                 status: "available",
                 claimedAt: null,
-                claimedNote: "recycled after " + t.game,
+                claimedNote: recycleNote,
               },
             },
           );
@@ -3186,7 +3807,7 @@ async function completeEndedTasks() {
                 event: "recycled",
                 actor: "auto-farm",
                 game: t.game,
-                note: "recycled after " + t.game,
+                note: recycleNote,
               },
             );
             await recordAutoFarmEvent({
@@ -3195,7 +3816,7 @@ async function completeEndedTasks() {
               campaignId: t.campaignId,
               taskId: t._id,
               count: recycled,
-              reason: "recycled after " + t.game,
+              reason: recycleNote,
               actor: "completeEndedTasks",
             });
           }
@@ -3209,7 +3830,15 @@ async function completeEndedTasks() {
     // straight away (expireStaleProbes reads probeOutcome). A probe that sold at
     // least once leaves no marker: its own sales lift future campaigns over the
     // demand floor and it graduates to a normal farm.
-    if (t.decision === "probe" && salesOf(await internalSalesForGame(t.game)).count === 0) {
+    //
+    // NOT a subscribers-only probe: nothing was ever on sale, so the market
+    // was never tested and the game owes no cooldown — a later campaign of its
+    // with watchable drops is probed like any untested game.
+    if (
+      !subOnly &&
+      t.decision === "probe" &&
+      salesOf(await internalSalesForGame(t.game)).count === 0
+    ) {
       t.probeOutcome = "expired";
     }
     t.status = "completed";
@@ -3222,9 +3851,61 @@ async function completeEndedTasks() {
       campaignId: t.campaignId,
       taskId: t._id,
       count: (t.assignedAccounts || []).length,
-      reason: t.probeOutcome === "expired" ? "probe ended — 0 sales" : "campaign ended",
+      reason: subOnly
+        ? "probe ended early — subscribers-only drops, nothing to farm"
+        : t.probeOutcome === "expired"
+          ? "probe ended — 0 sales"
+          : "campaign ended",
       actor: "completeEndedTasks",
     });
+    if (subOnly) {
+      // The pre-order page stamped when the probe went live promises delivery
+      // "when a farmed account completes the bundle", which cannot happen.
+      // Take it off the storefront now instead of leaving it up as a pre-order
+      // (or, once the task reads completed, as "sold out") until the campaign
+      // closes. No reprice either: the campaign is still running and no
+      // listing of it ever existed.
+      try {
+        const off = await DropSet.updateMany(
+          {
+            sourceType: "autofarm_event",
+            sourceEventKey: "autofarm:" + t.campaignId,
+            catalogState: "preorder",
+          },
+          { $set: { listed: false, catalogState: "soldout" } },
+        );
+        if (off && off.modifiedCount) catalogRoutes.invalidateCatalogCache();
+      } catch (e) {
+        progress(
+          "Subscribers-only probe " + t.game + ": pre-order page not removed: " + e.message,
+          "warn",
+        );
+      }
+      progress(
+        "Ended the " +
+          t.game +
+          " probe early: every drop of “" +
+          (t.campaignName || t.campaignId) +
+          "” needs a subscription. " +
+          recycled +
+          " account(s) back in the pool, probe slot freed.",
+      );
+      await tg(
+        "🤖 Auto-farm PROBE ENDED — " +
+          t.game +
+          "\nEvery drop of “" +
+          (t.campaignName || t.campaignId) +
+          "” needs a paid subscription, so nothing could be farmed." +
+          (trimmed.length ? " Trimmed from shared: " + trimmed.join(", ") + "." : "") +
+          (stopped.length ? " Stopped: " + stopped.join(", ") + "." : "") +
+          " " +
+          recycled +
+          " of " +
+          (t.assignedAccounts || []).length +
+          " account(s) recycled to the pool; the probe slot is free.",
+      );
+      continue;
+    }
     // Event over = supply fixed: apply the post-event scarcity markup and
     // rebuild the listing as a stacked bundle of every campaign this game's
     // accounts have farmed. A failure here is picked up by repriceEndedTasks
@@ -3406,6 +4087,130 @@ async function expireStaleProbes(af, progress) {
 
 /* -------------------------------- tick --------------------------------- */
 
+// Main mode leaves a game with no lane to the supervisor, which creates one at
+// the start of its next cycle (ownership.legacyMayDecide). A lane that cannot
+// be created — a write that keeps failing, a name the model rejects — would
+// leave that game to NOBODY, silently, while every tick still counted as ok
+// (2026-10-03 review H3). So once a game has waited LANE_FALLBACK_MS (30 min)
+// AND at least LANE_FALLBACK_TICKS ticks, the legacy engine decides and lists
+// it itself — the fail-safe direction for a game nobody owns — and says so
+// once. Both, because ticks alone are not time: "Scan now" pressed three
+// times in a row reached three ticks in seconds and handed a brand-new game
+// to legacy before the supervisor had had one cycle (review round 3). The
+// wait is timed from the first tick that saw the game waiting, and it ends
+// the moment the game stops waiting (its lane appeared, or its campaign
+// ended), which re-arms the alert.
+const LANE_FALLBACK_TICKS = 3;
+const LANE_FALLBACK_MS = 30 * 60 * 1000;
+
+// `w` is a game's waiting record { ticks, since, alerted }, `ticks` counting
+// the tick being judged.
+function laneFallbackDue(w, now = Date.now()) {
+  return (
+    !!w &&
+    w.ticks >= LANE_FALLBACK_TICKS &&
+    now - (Number(w.since) || now) >= LANE_FALLBACK_MS
+  );
+}
+
+async function noteAwaitingLane(awaitingNow, now = Date.now()) {
+  const next = new Map();
+  const reached = [];
+  for (const [key, game] of awaitingNow) {
+    const prev = state.awaitingLaneTicks.get(key);
+    const w = {
+      ticks: (prev ? prev.ticks : 0) + 1,
+      since: prev ? prev.since : now,
+      alerted: !!(prev && prev.alerted),
+    };
+    if (!w.alerted && laneFallbackDue(w, now)) {
+      w.alerted = true;
+      reached.push({ game, ticks: w.ticks, minutes: Math.floor((now - w.since) / 60000) });
+    }
+    next.set(key, w);
+  }
+  state.awaitingLaneTicks = next;
+  for (const { game, ticks, minutes } of reached) {
+    try {
+      require("./systemLog").logEvent({
+        category: "autofarm",
+        action: "lane_missing_fallback",
+        actor: "autoFarmer",
+        severity: "warn",
+        subject: game,
+        game,
+        count: ticks,
+        detail:
+          game +
+          " has waited " +
+          minutes +
+          " min (" +
+          ticks +
+          " ticks) for a farm2 lane that was never created; the legacy " +
+          "engine decides and lists it until one exists.",
+      });
+    } catch {
+      /* auditing must never break a tick */
+    }
+    await tg(
+      "⚠️ Auto-farm — " +
+        game +
+        " has had no farm2 lane for " +
+        minutes +
+        " min (" +
+        ticks +
+        " ticks): the lane engine is the main engine but its lane " +
+        "was never created (see the supervisor's last error). The legacy " +
+        "engine now decides and lists this game itself until the lane exists.",
+    );
+  }
+}
+
+// A main-mode tick that cannot read the lane table decides nothing (runOnce,
+// ownershipUnknown) — and the lane supervisor, reading the same table, is then
+// usually down too, so NO engine decides while both loops keep ticking. Say so
+// once it has lasted DEFERRED_ALERT_TICKS ticks (~30 min); one alert per stall,
+// re-armed by the first tick that can read the table again.
+const DEFERRED_ALERT_TICKS = 3;
+
+async function noteDeferredTick(deferred) {
+  if (!deferred) {
+    state.deferredTicks = 0;
+    state.deferredAlerted = false;
+    return;
+  }
+  state.deferredTicks += 1;
+  if (state.deferredTicks < DEFERRED_ALERT_TICKS || state.deferredAlerted) return;
+  state.deferredAlerted = true;
+  const text =
+    "legacy decisions deferred " +
+    state.deferredTicks +
+    " ticks: lane ownership unreadable";
+  try {
+    require("./systemLog").logEvent({
+      category: "autofarm",
+      action: "decisions_deferred",
+      actor: "autoFarmer",
+      severity: "warn",
+      subject: "main engine",
+      count: state.deferredTicks,
+      detail:
+        text +
+        " — the lane engine is the main engine and its FarmLane table could " +
+        "not be read, so no campaign is being decided.",
+    });
+  } catch {
+    /* auditing must never break a tick */
+  }
+  await tg(
+    "⚠️ Auto-farm — " +
+      text +
+      ". The lane engine is the main engine and its lane table cannot be " +
+      "read, so no new campaign is being decided by either engine. Check the " +
+      "database connection; this clears itself on the first readable tick.",
+  );
+}
+
 async function runOnce() {
   if (state.running) return { skipped: "already running" };
   state.running = true;
@@ -3466,6 +4271,8 @@ async function runOnce() {
     if (!af.enabled) {
       progress("Auto farmer is disabled in settings — nothing to do.", "warn");
       state.lastSummary = { enabled: false, catalogChanges };
+      state.lastError = "";
+      state.lastOkAt = new Date();
       return state.lastSummary;
     }
     progress(
@@ -3677,14 +4484,35 @@ async function runOnce() {
             decision: 1,
             rescanRequested: 1,
             bots: 1,
+            // isStranded dates a `planned` row by these (STRANDED_PLAN_MS).
+            decidedAt: 1,
+            updatedAt: 1,
           },
         ).lean()
       : [];
     const existingByKey = new Map(
       existingRows.map((row) => [row.game + "|" + row.campaignId, row]),
     );
+    // The loop below asks the lane engine's ownership cache once per campaign,
+    // synchronously. Bring the cache up to date first — the ONE await before
+    // the loop; the loop itself stays synchronous. A cold cache (boot, a lane
+    // auto-create, a failed read) answers "not owned" for every game, and this
+    // engine then decided campaigns the lane engine owns (2026-10-03).
+    await farm2Ownership.ensureFresh();
+    // Lane engine is the MAIN engine but its lane table still could not be
+    // read: which games it owns is unknown, so this tick decides nothing
+    // (below). Outside main mode the old fail-safe stands — this engine
+    // decides, because a lane engine that is only on trial owns nothing it
+    // is not running.
+    const ownershipUnknown = farm2Ownership.isMain() && farm2Ownership.isCold();
     let noClaimSkipped = 0;
     let farm2Skipped = 0;
+    // Main mode: games with no lane at all yet, left to the supervisor —
+    // and those that have waited long enough (laneFallbackDue), decided here.
+    const awaitingLane = new Set();
+    const awaitingNow = new Map(); // lane key -> game, this tick
+    const laneFallback = new Set();
+    const tickNow = Date.now();
     for (const c of live) {
       if (!c.game) continue;
       // No-claim games (Overwatch, Rainbow Six) are handled by the standalone
@@ -3705,9 +4533,29 @@ async function runOnce() {
       // uncertainty (engine stopped, master switch off, lane table unreadable,
       // cache cold) resolves to NOT owned so this engine keeps covering the
       // game. See the fail-safe note at the top of utils/farm2/ownership.js.
+      // (In main mode an unreadable table defers instead: ownershipUnknown.)
       if (farm2Ownership.isOwned(c.game)) {
         farm2Skipped++;
         continue;
+      }
+      // Main mode: a game with no lane yet is the lane engine's too — the
+      // supervisor creates its lane within a cycle (farm2/ownership.js
+      // legacyMayDecide). Outside main mode this is the isOwned test above.
+      // A game that has waited 30 min and 3 ticks is decided here after all
+      // (laneFallbackDue, noteAwaitingLane): nobody else is going to.
+      if (!ownershipUnknown && !farm2Ownership.legacyMayDecide(c.game)) {
+        const laneKey = farm2Ownership.normKey(c.game);
+        awaitingNow.set(laneKey, c.game);
+        const prev = state.awaitingLaneTicks.get(laneKey);
+        const waiting = {
+          ticks: (prev ? prev.ticks : 0) + 1,
+          since: prev ? prev.since : tickNow,
+        };
+        if (!laneFallbackDue(waiting, tickNow)) {
+          awaitingLane.add(c.game);
+          continue;
+        }
+        laneFallback.add(c.game);
       }
       const existing = existingByKey.get(c.game + "|" + c.campaignId);
       if (!existing) {
@@ -3744,6 +4592,46 @@ async function runOnce() {
           farm2Ownership.ownedKeys().join(", ") +
           ").",
       );
+    if (awaitingLane.size) {
+      progress(
+        "Left " +
+          awaitingLane.size +
+          " game(s) with no lane yet to the lane engine (main mode; the " +
+          "supervisor creates their lanes within a cycle): " +
+          [...awaitingLane].join(", ") +
+          ".",
+      );
+    }
+    if (laneFallback.size) {
+      progress(
+        "Deciding " +
+          laneFallback.size +
+          " game(s) here although the lane engine is the main engine: no lane " +
+          "for " +
+          LANE_FALLBACK_MS / 60000 +
+          "+ min — " +
+          [...laneFallback].join(", ") +
+          ".",
+        "warn",
+      );
+    }
+    // An unreadable table says nothing about which games have lanes, so the
+    // per-game waiting counts are only advanced by a tick that could read it.
+    if (!ownershipUnknown) await noteAwaitingLane(awaitingNow, tickNow);
+    if (ownershipUnknown) {
+      // Not a fallback to this engine: in main mode the lanes decide, and the
+      // next tick (10 min) re-reads the table. Maintenance sweeps still run.
+      progress(
+        "decisions deferred: lane ownership unknown — the lane engine is the " +
+          "main engine but its lane table could not be read; " +
+          candidates.length +
+          " campaign(s) left undecided this tick. Maintenance sweeps still run.",
+        "warn",
+      );
+      candidates.length = 0;
+      priorTasks.clear();
+    }
+    await noteDeferredTick(ownershipUnknown);
     progress(candidates.length + " campaign(s) to decide this tick.");
 
     // The tick-level twin of reusableTaskForGame, and it must apply the SAME
@@ -3905,8 +4793,10 @@ async function runOnce() {
 
     // Fair-share budget across everything competing in this tick. Weights use
     // the blended demand (market + own sales) so proven sellers win supply.
+    // The pristine reserve is not this engine's to spend (pristineProtect).
     const ready = await countReadyPool();
-    const spendable = Math.max(0, ready - af.poolReserve);
+    const pristineHeld = await pristineProtect(af);
+    const spendable = farmSpendable(ready, af.poolReserve, pristineHeld);
     const requests = [];
     for (const c of candidates) {
       const info = infoMap.get(c.campaignId);
@@ -3951,6 +4841,7 @@ async function runOnce() {
           host,
           hostOnline,
           budgetMap,
+          pristineProtect: pristineHeld,
           infoMap,
           farmMap,
           archiveHolders,
@@ -4084,6 +4975,26 @@ async function runOnce() {
       }
     }
 
+    // Who lists a task in the two listing sweeps below: the SAME rule as who
+    // decides (2026-10-03 review H1). Asking isOwned() alone read "not owned"
+    // for every game while the cache was cold — in a deferred tick, or right
+    // after an invalidate() — so this engine listed tasks a live lane owns, a
+    // second Gameflip create racing the lane's own publish job. In main mode:
+    // not while ownership is unknown, not for a game a lane owns or is about
+    // to own; yes for what legacyMayDecide gives this engine, for a game it
+    // took over after waiting for a lane (noteAwaitingLane), and — as before —
+    // for the old tasks of no-claim games, which no lane ever takes. Outside
+    // main mode this is exactly the old isOwned() test.
+    const laneFallbackKeys = new Set(
+      [...state.awaitingLaneTicks]
+        .filter(([, w]) => laneFallbackDue(w, tickNow))
+        .map(([key]) => key),
+    );
+    const legacyLists = (game) =>
+      settings.isNoClaimGame(game) ||
+      farm2Ownership.legacyMayDecide(game) ||
+      (!ownershipUnknown && laneFallbackKeys.has(farm2Ownership.normKey(game)));
+
     // Refill sweep: every LISTED active task gets its markets topped up —
     // sold-out (or shorted) gameflip/plati/ggsel stock is refilled from
     // spare accounts, then the post-event holdback, no delist/relist.
@@ -4132,12 +5043,13 @@ async function runOnce() {
         // Games owned by a LIVE lane (utils/farm2/*) re-list through the lane's
         // own publish/secondaries job, which calls this same helper on its own
         // retry clock. Two callers on one task would race two Plati/GGSel
-        // creates. isOwned() fails safe to false (engine off/stopped, cache
-        // cold), so this engine keeps re-listing every game until a lane is
-        // really live. Refill above is deliberately NOT gated: it tops up stock
-        // on an existing product and the lane has no equivalent.
+        // creates. Who re-lists here is legacyLists (above): the decision rule,
+        // so with the lane engine off or stopped this engine re-lists every
+        // game, and in main mode it never does while ownership is unknown.
+        // Refill above is deliberately NOT gated: it tops up stock on an
+        // existing product and the lane has no equivalent.
         try {
-          const retried = farm2Ownership.isOwned(t.game)
+          const retried = !legacyLists(t.game)
             ? null
             : await autoListerR.retryMissingSecondaries(t);
           if (retried) {
@@ -4182,9 +5094,9 @@ async function runOnce() {
       // Games owned by a LIVE lane (utils/farm2/*) are listed by the lane's
       // own publish/primary job — same listActivatedTask, own retry clock,
       // gated on a fresh holdings check. Listing here as well would race two
-      // Gameflip creates on one task. Same fail-safe as the decision skip
-      // above: any uncertainty reads as NOT owned and this sweep lists it.
-      if (farm2Ownership.isOwned(t.game)) {
+      // Gameflip creates on one task. The rule is legacyLists above — the
+      // decision rule, so a deferred tick defers its listings too.
+      if (!legacyLists(t.game)) {
         farm2ListSkipped++;
         continue;
       }
@@ -4385,6 +5297,11 @@ async function runOnce() {
               ready +
               " ready but the reserve floor is " +
               af.poolReserve +
+              (pristineHeld
+                ? " and " +
+                  pristineHeld +
+                  " pristine account(s) are kept for rent-farm orders"
+                : "") +
               ", so 0 are spendable.\n" +
               "Nothing can be farmed or topped up until the pool refills or the " +
               "reserve is lowered. " +
@@ -4400,7 +5317,17 @@ async function runOnce() {
       /* alerting must never break a tick */
     }
 
-    state.lastError = "";
+    // A tick that deferred its decisions finished, but did not do its job:
+    // it is not ok (the health board reads lastOkAt), and says why.
+    if (ownershipUnknown) {
+      state.lastError =
+        "decisions deferred: lane ownership unknown (" +
+        state.deferredTicks +
+        " tick(s) in a row)";
+    } else {
+      state.lastError = "";
+      state.lastOkAt = new Date();
+    }
     state.lastSummary = {
       enabled: true,
       dryRun: af.dryRun,
@@ -4408,7 +5335,11 @@ async function runOnce() {
       hostOnline,
       poolReady: ready,
       poolSpendable: spendable,
+      pristineHeld,
       candidates: candidates.length,
+      decisionsDeferred: ownershipUnknown,
+      awaitingLane: [...awaitingLane],
+      laneFallback: [...laneFallback],
       completed,
       catalogChanges,
       results,
@@ -4592,10 +5523,13 @@ async function backfillActiveTasks(af, host, progress) {
   }
   // Never let one game absorb an entire refill: cap this tick's backfill at
   // half of what is spendable so a fresh campaign can still be started.
+  // Spendable leaves the pristine reserve alone, as everywhere a farm spends.
   const readyNow = await countReadyPool();
   const backfillCap = Math.max(
     1,
-    Math.floor(Math.max(0, readyNow - af.poolReserve) / 2),
+    Math.floor(
+      farmSpendable(readyNow, af.poolReserve, await pristineProtect(af)) / 2,
+    ),
   );
   let added = 0;
   // Per-pass memo for capForGame's sales input (see the ceiling below).
@@ -4651,12 +5585,16 @@ async function backfillActiveTasks(af, host, progress) {
     // account ever held a full bundle to list while 1,471 healthy accounts sat
     // idle in the pool. A row that failed to save, or one classified after the
     // release phase, must not be able to reproduce that.
+    // Accounts SOLD from this task stay in assignedAccounts and count here
+    // (defect 10b, 2026-10-03: left as is on purpose — counting policy for the
+    // farm brain's wiring; not counting them now would grow farming).
     const have = usableAssignedCount(task, suspendedLogins);
     const missing = target - have;
     if (missing < 1) continue;
 
     const ready = await countReadyPool();
-    const spendable = Math.max(0, ready - af.poolReserve);
+    const protect = await pristineProtect(af);
+    const spendable = farmSpendable(ready, af.poolReserve, protect);
     if (spendable < 1) {
       // Pool exhausted — later tasks can't get any either. Say so: this used to
       // break silently, so a fleet sitting far under target looked healthy
@@ -4666,6 +5604,11 @@ async function backfillActiveTasks(af, host, progress) {
           ready +
           " ready, reserve " +
           af.poolReserve +
+          (protect
+            ? "; the pristine reserve is holding " +
+              protect +
+              " for rent-farm orders"
+            : "") +
           ") — " +
           (worthTopping.length - worthTopping.indexOf(task)) +
           " task(s) left under target this tick.",
@@ -4674,10 +5617,29 @@ async function backfillActiveTasks(af, host, progress) {
       break;
     }
 
+    // No new container while the farm host is short of RAM; free seats in
+    // RUNNING bots are still filled (a parked one would have to restart).
     const activeBots = await activeAutoBotCount();
-    const slotsFree = Math.max(0, af.maxAutoBots - activeBots);
-    const freeSeats = await autoSeatCapacity(host, af).catch(() => 0);
-    if (slotsFree < 1 && freeSeats < 1) break;
+    const containers = await containerSlots(
+      host,
+      Math.max(0, af.maxAutoBots - activeBots),
+    );
+    const slotsFree = containers.slots;
+    const runningOnly = containers.blocked;
+    const freeSeats = await autoSeatCapacity(host, af, null, {
+      runningOnly,
+    }).catch(() => 0);
+    if (slotsFree < 1 && freeSeats < 1) {
+      if (containers.blocked) {
+        progress(
+          "Backfill: no new container (" +
+            containers.reason +
+            ") and no running bot has a free seat — the rest waits.",
+          "warn",
+        );
+      }
+      break;
+    }
 
     const n = Math.min(
       missing,
@@ -4697,20 +5659,27 @@ async function backfillActiveTasks(af, host, progress) {
         ")\u2026",
     );
     // Reuse-only games (World of Tanks / UFL) top up ONLY from their own
-    // "recycled after <game>" accounts — never a fresh pool account. Every
-    // other game keeps the original unscoped claim, so nothing else changes.
+    // "recycled after <game>" accounts — never a fresh pool account.
+    //
+    // The game is passed for EVERY task (2026-10-03). The other games used to
+    // claim unscoped, so neither pass applied the soldGames exclusion: a
+    // recycled account the buyer already holds for this very game could be
+    // put back on it. Passing it also tries the game's own recycled accounts
+    // first, exactly as executeTask's claim does.
     const reuseOnly = settings.isReuseOnlyGame(task.game);
     const claimed = await claimPoolAccounts(
       n,
       "auto-farm backfill: " + task.game + " (" + task.campaignId + ")",
-      reuseOnly ? { preferGame: task.game, recycledOnly: true } : {},
+      { preferGame: task.game, recycledOnly: reuseOnly },
     );
     if (!claimed.length) continue;
 
     const deployed = [];
     let error = "";
     try {
-      const packed = await fillExistingBots(host, claimed, task.game, af);
+      const packed = await fillExistingBots(host, claimed, task.game, af, null, {
+        runningOnly,
+      });
       for (const pl of packed.placed) {
         const key = pl.bot.host + "|" + pl.bot.container;
         const already = (task.bots || []).some(
@@ -4744,9 +5713,10 @@ async function backfillActiveTasks(af, host, progress) {
         const spare = rest.slice(i);
         await releasePoolAccounts(spare);
         progress(
-          "Backfill hit the container budget (" +
-            af.maxAutoBots +
-            " max) — released " +
+          (containers.blocked && containers.requested >= 1
+            ? "Backfill: no new container (" + containers.reason + ")"
+            : "Backfill hit the container budget (" + af.maxAutoBots + " max)") +
+            " — released " +
             spare.length +
             " unplaced account(s) back to the pool.",
           "warn",
@@ -4864,6 +5834,29 @@ function status() {
   };
 }
 
+// Liveness for the health page (utils/systemHealth.js). Synchronous and never
+// throws. `lastTickAt` is when the last tick FINISHED — a disabled tick still
+// finishes, so an old value means the loop has stopped, not that the master
+// switch is off; `enabled` says that. `lastOkAt` is the last tick that
+// finished with no error and made its decisions (a tick that threw, or that
+// deferred every decision for want of the lane table, is not ok); `lastError`
+// is "" when the last tick was ok.
+function loopStatus() {
+  let enabled = false;
+  try {
+    enabled = cfg().enabled === true;
+  } catch {
+    enabled = !!(state.lastSummary && state.lastSummary.enabled);
+  }
+  return {
+    lastTickAt: state.lastRun || null,
+    lastOkAt: state.lastOkAt || null,
+    lastError: state.lastError || "",
+    intervalMin: TICK_MS / 60000,
+    enabled,
+  };
+}
+
 function start() {
   if (state.started) return;
   state.started = true;
@@ -4896,6 +5889,8 @@ module.exports = {
   runOnce,
   rescanAll,
   status,
+  // Liveness hook for the health page (utils/systemHealth.js).
+  loopStatus,
   executeTask,
   completeEndedTasks,
   reapRetiredBots,
@@ -4903,6 +5898,10 @@ module.exports = {
   reapDeadTokenAssignments,
   expireStalePlans,
   repackAutoBots,
+  // For the pool's Unclaim route (routes/accountPoolRoutes.js), which refuses
+  // to hand back an auto-farm account a buyer holds or a listing sells — the
+  // same sold / connected / listed / leased check every recycle path uses.
+  unrecyclableLogins,
   // exported for tests
   fairShare,
   demandAllocation,
@@ -4911,6 +5910,7 @@ module.exports = {
   internalSalesForGame,
   resolveFarmHost,
   isStranded,
+  STRANDED_PLAN_MS,
   mapWithConcurrency,
   createSeatCounter,
   buildDecisionHostState,
@@ -4953,4 +5953,19 @@ module.exports = {
   // 177 times); it now re-decides on exactly this engine's triggers, from this
   // engine's own set, so the two cannot drift.
   RETRYABLE,
+  // Additive exports for the lane engine (utils/farm2/budget.js and
+  // steps/decide.js), so both engines take the pristine reserve and the host
+  // RAM gate off their budgets with ONE implementation (2026-10-03).
+  pristineProtect,
+  // The lane-missing fallback rule (exported for tests).
+  laneFallbackDue,
+  LANE_FALLBACK_MS,
+  LANE_FALLBACK_TICKS,
+  containerSlots,
+  farmSpendable,
+  poolShortReason,
+  capacityShortReason,
+  // Pure: how quantity-listing units pair with buyer connections (exported
+  // for tests; internalSalesForGame is the caller).
+  pairQuantityUnits,
 };

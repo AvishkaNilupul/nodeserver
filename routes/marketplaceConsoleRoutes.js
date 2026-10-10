@@ -190,6 +190,15 @@ const ROLLUP_TTL_MS = 60 * 1000;
 // a truncated total that looks complete is worse than no total.
 const ROLLUP_ROW_CAP = 5000;
 
+// The stock guardian parks a listing it cannot deliver from by writing
+// "paused: ..." or "hidden: ..." into lastError while the row stays `active`.
+// That is a deliberate holding state with a stated reason, not a failure — on
+// 2026-10-01 all 12 of Eldorado's and PlayerAuctions' "live errors" were these,
+// and the page told the operator something was broken when nothing was.
+function isHeldNote(lastError) {
+  return /^\s*(paused|hidden)\s*:/i.test(String(lastError || ""));
+}
+
 async function rollup() {
   if (rollupCache.data && Date.now() - rollupCache.at < ROLLUP_TTL_MS) {
     return { ...rollupCache.data, cached: true };
@@ -233,6 +242,7 @@ async function rollup() {
       listings: 0,
       active: 0,
       errors: 0,
+      held: 0,
       errorsHistorical: 0,
       deliveredUnits: 0,
       deliveredRevenueUsd: 0,
@@ -260,7 +270,10 @@ async function rollup() {
     // removed rows, including the reconciliation notes this console's own
     // tooling writes. A number that sends the operator hunting a problem that
     // does not exist is worse than no number.
-    if (r.lastError && r.status === "active") p.errors += 1;
+    if (r.lastError && r.status === "active") {
+      if (isHeldNote(r.lastError)) p.held += 1;
+      else p.errors += 1;
+    }
     if (r.lastError) p.errorsHistorical += 1;
     p.unitsSold += Number(r.unitsSold) || 0;
     // A bulk pack row's price is for the whole pack of N accounts; each
@@ -275,8 +288,9 @@ async function rollup() {
       if (at >= week) p.delivered7d += 1;
       if (!p.lastActivityAt || at > p.lastActivityAt) p.lastActivityAt = at;
     }
-    const up = r.updatedAt ? new Date(r.updatedAt) : null;
-    if (up && (!p.lastActivityAt || up > p.lastActivityAt)) p.lastActivityAt = up;
+    // lastActivityAt is real evidence only (a delivery or a sale signal). A
+    // listing's updatedAt moves every time stock sync or a reprice touches the
+    // row, which made "2h ago" on Eldorado when its last delivery was a day old.
   }
 
   // Sales signals carry the price the platform actually reported, which is the
@@ -730,17 +744,19 @@ router.get(
         // exactly what explains why it was delisted — but each row carries its
         // status so a dead one cannot be mistaken for a live problem. The CARD
         // count above deliberately counts only active rows.
-        const rows = await MarketplaceListing.find(
-          {
-            marketplace: market,
-            lastError: { $ne: "" },
-            ...olderThan("updatedAt", cur),
-          },
-          { title: 1, externalId: 1, lastError: 1, status: 1, updatedAt: 1, price: 1 },
-        )
-          .sort({ updatedAt: -1, _id: -1 })
-          .limit(limit + 1)
-          .lean();
+        const rows = (
+          await MarketplaceListing.find(
+            {
+              marketplace: market,
+              lastError: { $ne: "" },
+              ...olderThan("updatedAt", cur),
+            },
+            { title: 1, externalId: 1, lastError: 1, status: 1, updatedAt: 1, price: 1 },
+          )
+            .sort({ updatedAt: -1, _id: -1 })
+            .limit(limit + 1)
+            .lean()
+        ).map((r) => ({ ...r, held: isHeldNote(r.lastError) }));
         return res.json({
           success: true,
           ...paginate(rows, limit, "updatedAt"),

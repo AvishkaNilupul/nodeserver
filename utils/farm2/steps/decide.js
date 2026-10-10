@@ -32,6 +32,9 @@ const {
 // The account-count half of the shadow comparison, scored only when both
 // engines counted the same thing (utils/farm2/accountGap.js).
 const { compareAccounts } = require("../accountGap");
+// Whether watching can earn a campaign's drops at all — the same rule and the
+// same words the legacy engine uses (utils/campaignFarmability.js).
+const farmability = require("../../campaignFarmability");
 
 // Load the legacy engine lazily. autoFarmer pulls in a wide dependency graph
 // (and, on prod, the catalog integration) and requires autoLister lazily itself
@@ -374,20 +377,38 @@ async function seatCapacityFor({ host, af, cycle, hostCache }) {
   const b = brain();
   const perBot = Math.max(1, Number(af.accountsPerBot) || 1);
   let slotsFree;
+  // The RAM gate, as the cycle budget or the legacy helper read it: while it
+  // is shut no NEW container is created, and no seat in a PARKED one counts
+  // either (filling it restarts it) — running bots' free seats stay usable.
+  let ram = { blocked: false, reason: "", requested: 0 };
   if (cycle && Number.isFinite(cycle.totalContainers)) {
+    // Already 0 while the farm host is short of RAM (budget.js).
     slotsFree = Math.max(0, cycle.totalContainers);
+    ram = {
+      blocked: !!cycle.ramBlocked,
+      reason: cycle.ramReason || "",
+      requested: cycle.ramBlocked ? Number(cycle.ramDenied) || 0 : slotsFree,
+    };
   } else {
     const active =
       typeof b.activeAutoBotCount === "function" ? await b.activeAutoBotCount({}) : 0;
     slotsFree = Math.max(0, (Number(af.maxAutoBots) || 0) - active);
+    if (typeof b.containerSlots === "function") {
+      const gate = await b.containerSlots(host, slotsFree);
+      ram = { blocked: !!gate.blocked, reason: gate.reason || "", requested: slotsFree };
+      slotsFree = gate.slots;
+    }
   }
-  if (slotsFree >= 1) return { seatCapacity: slotsFree * perBot, slotsFree, freeSeats: null };
+  if (slotsFree >= 1) {
+    return { seatCapacity: slotsFree * perBot, slotsFree, freeSeats: null, ram };
+  }
+  const runningOnly = ram.blocked;
   const freeSeats = await memo(
     hostCache,
-    "__farm2:freeSeats|" + (host ? host.id : "-"),
+    "__farm2:freeSeats|" + (host ? host.id : "-") + (runningOnly ? "|running" : ""),
     async () => {
       if (!host || typeof b.autoSeatCapacity !== "function") return 0;
-      const read = () => b.autoSeatCapacity(host, af, {});
+      const read = () => b.autoSeatCapacity(host, af, {}, { runningOnly });
       try {
         return Number(cycle ? await cycle.withHost(read) : await read()) || 0;
       } catch {
@@ -395,7 +416,7 @@ async function seatCapacityFor({ host, af, cycle, hostCache }) {
       }
     },
   );
-  return { seatCapacity: slotsFree * perBot + freeSeats, slotsFree, freeSeats };
+  return { seatCapacity: slotsFree * perBot + freeSeats, slotsFree, freeSeats, ram };
 }
 
 // Reuse-only games (World of Tanks / UFL) never draw a fresh pool account. The
@@ -414,10 +435,25 @@ async function recycledPoolCount(game) {
   const AvailableAccount = require("../../../models/AvailableAccount");
   const ready =
     typeof b.readyPoolQuery === "function" ? b.readyPoolQuery() : { status: "available" };
+  // claimPoolAccounts ANDs the pristine-reserve filter into this pass
+  // (2026-10-03), so the count does too — or a lane would plan a reuse-only
+  // farm on recycled accounts the claim is not allowed to take. A filter that
+  // cannot be read makes the claim take nothing, so it counts nothing here.
+  let pristineGuard;
+  try {
+    pristineGuard = await require("../../pristineReserve").farmClaimFilter();
+  } catch {
+    return 0;
+  }
   return AvailableAccount.countDocuments({
-    ...ready,
-    claimedNote: new RegExp("^recycled after " + escapeRe(game) + "$", "i"),
-    soldGames: { $ne: normGame(game) },
+    $and: [
+      {
+        ...ready,
+        claimedNote: new RegExp("^recycled after " + escapeRe(game) + "$", "i"),
+        soldGames: { $ne: normGame(game) },
+      },
+      pristineGuard,
+    ],
   });
 }
 
@@ -432,8 +468,8 @@ async function recycledPoolCount(game) {
 // engines stop at the same gate for the same inputs, so the sequence below is
 // processCampaign's, not a tidier one:
 //
-//   sellability -> host -> reuse-first -> time -> coverage -> pool floor ->
-//   capacity -> reuse-only -> farm/probe
+//   farmability -> sellability -> host -> reuse-first -> time -> coverage ->
+//   pool floor -> capacity -> reuse-only -> farm/probe
 //
 // Until this rewrite the lane implemented only the first and third of those,
 // so on any campaign the legacy engine settled at one of the other six a live
@@ -443,6 +479,40 @@ async function decideCampaign({ campaign, lane, cycle, af, shadow, hostCache, ct
   const game = campaign.game || campaign.name || "?";
   const af2 = af || settings.getAutoFarm();
   const b = brain();
+
+  // --- 0. Farmability ------------------------------------------------------
+  // A campaign whose every drop needs a paid subscription cannot be earned by
+  // watching — the bots drop it from their own list — so it is settled before
+  // any market read: no research, no probe slot, no pool account, and no
+  // storefront pre-order for an item nobody can deliver. Until this gate
+  // existed such a campaign went through the stages below like any other, and
+  // on 2026-10-08 six of the eight probe slots (90 pool accounts) sat on them.
+  //
+  // PROVEN cases only. A manifest that is missing, predates requiredSubs or
+  // cannot be read decides nothing here, and the campaign goes on exactly as
+  // before — a gap in the evidence must never stop a real farm. Switched off
+  // with autoFarm.subOnlyGuard: false.
+  if (farmability.guardOn(af2) && (await farmability.campaignSubOnly(campaign.campaignId))) {
+    const left = campaign.endAt ? (new Date(campaign.endAt) - Date.now()) / 3600000 : Infinity;
+    return {
+      game,
+      campaignId: campaign.campaignId,
+      campaignName: campaign.name || "",
+      campaignEndAt: campaign.endAt || null,
+      // Nothing below was read: this verdict carries no market score, no own
+      // sales and no decisionInputs snapshot, and says so with empty values.
+      demandScore: null,
+      hadResearch: false,
+      internalSales: 0,
+      effectiveDemand: null,
+      hoursLeft: Number.isFinite(left) ? Math.round(left * 10) / 10 : null,
+      decision: "skip_sub_only",
+      wouldFarm: false,
+      plannedAccounts: 0,
+      targetAccounts: 0,
+      reason: farmability.SUB_ONLY_REASON,
+    };
+  }
 
   // --- 1. Sellability ------------------------------------------------------
   // Shadow lanes use the READ-ONLY research lookup. freshResearchForGame can
@@ -672,11 +742,15 @@ async function decideCampaign({ campaign, lane, cycle, af, shadow, hostCache, ct
   const budget = cycle ? cycle.remainingAccounts(lane.gameKey) : uncovered;
   const target = Math.min(uncovered, budget);
   if (!Number.isFinite(target) || target < 1) {
+    // The legacy row's words, naming the pristine reserve when it is what
+    // holds the pool (autoFarmer.poolShortReason).
     return skip(
       "skip_no_accounts",
-      "Pool has no spendable accounts (reserve floor " +
-        af2.poolReserve +
-        " protects manual work) — will retry when the pool refills.",
+      typeof b.poolShortReason === "function"
+        ? b.poolShortReason(af2.poolReserve, cycle ? cycle.pristineHeld : 0)
+        : "Pool has no spendable accounts (reserve floor " +
+            af2.poolReserve +
+            " protects manual work) — will retry when the pool refills.",
       { targetAccounts: wanted, coverage },
     );
   }
@@ -688,12 +762,16 @@ async function decideCampaign({ campaign, lane, cycle, af, shadow, hostCache, ct
   if (cap.seatCapacity < 1) {
     return skip(
       "skip_no_capacity",
-      "All " +
-        af2.maxAutoBots +
-        " auto-bot slots on " +
-        (hostState.host ? hostState.host.label || hostState.host.id : "?") +
-        " are busy and no running bot has a free seat — queued; retries when a " +
-        "campaign ends and frees capacity.",
+      // The legacy row's words: a shut RAM gate is named with its host and
+      // MB, not reported as "all slots busy" (autoFarmer.capacityShortReason).
+      typeof b.capacityShortReason === "function"
+        ? b.capacityShortReason(af2, hostState.host, cap.ram)
+        : "All " +
+            af2.maxAutoBots +
+            " auto-bot slots on " +
+            (hostState.host ? hostState.host.label || hostState.host.id : "?") +
+            " are busy and no running bot has a free seat — queued; retries when a " +
+            "campaign ends and frees capacity.",
       // The legacy row keeps the intended plan on a capacity skip.
       { plannedAccounts: target, targetAccounts: wanted, coverage },
     );

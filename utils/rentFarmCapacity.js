@@ -51,6 +51,30 @@ let timer = null;
 // a deploy is wanted, not noise.
 let lastLevel = null;
 
+// A low/empty verdict built on a PARTIAL read is withheld, not paged. A host
+// that could not be read can only ADD slots, so "0 free" with Contabo unread
+// means "unknown", not "gone". On 2026-10-01 every holder stack was on Contabo,
+// one slow read marked it offline, and this paged "capacity is GONE" twice
+// while 283 slots were free. The health page's rentfarm.capacity check
+// (utils/systemHealth.js) already withheld that verdict; this applies the same
+// rule so the page and the Telegram alert cannot disagree. A GOOD verdict
+// stands (unread hosts only add room), and so does a holder-limit one (no host
+// lifts the holder's account limit).
+//
+// A withheld tick leaves the latch alone: a blip neither breaks an "ok" nor
+// re-pages a shortage already paged. A host that is really down is the host
+// watchdog's page (it names the host and says its bots stopped farming). What
+// is left is a read that keeps failing while the host is up, so after
+// WITHHELD_PAGE_TICKS in a row (3 h) that is said once, as what it is.
+const WITHHELD_PAGE_TICKS = 6;
+let withheldTicks = 0;
+let withheldPaged = false;
+
+function verdictWithheld(snap, level) {
+  const holderLimited = snap.limitedBy === "holder-limit" && !!snap.quota;
+  return level !== "ok" && (snap.offlineHosts || []).length > 0 && !holderLimited;
+}
+
 function renterAdmin() {
   return require("../routes/renterAdminRoutes");
 }
@@ -157,9 +181,54 @@ function describe(snap) {
 async function checkOnce({ notify = true, options = null } = {}) {
   const snap = await snapshot(options);
   const level = levelFor(snap.totalFree);
+  snap.alerted = false;
+
+  if (verdictWithheld(snap, level)) {
+    snap.level = "unknown";
+    snap.withheld = true;
+    if (notify) {
+      withheldTicks++;
+      console.warn(
+        "rentFarmCapacity: verdict withheld — not read: " + snap.offlineHosts.join(", ") +
+          "; " + snap.totalFree + " free on the hosts that were (" + withheldTicks + " tick(s) in a row)",
+      );
+      if (withheldTicks >= WITHHELD_PAGE_TICKS && !withheldPaged) {
+        withheldPaged = true;
+        snap.alerted = true;
+        await sendTelegram(
+          "⚠️ Rent-farm capacity has not been checkable for " +
+            Math.round((withheldTicks * TICK_MS) / 3600000) + " h — the stack read could not reach " +
+            snap.offlineHosts.join(", ") + ", so its stacks are not counted.\n\n" + describe(snap) +
+            "\n\nThis is a READ failure, not a full farm. If the host is down, the host watchdog " +
+            "pages that separately; if it is up, the stack read itself is failing — check the " +
+            "server log for 'rentFarmCapacity'.",
+        ).catch((e) => console.error("rentFarmCapacity telegram failed:", e.message));
+        logEvent({
+          category: "renter",
+          action: "rent_farm_capacity_unknown",
+          actor: "rentFarmCapacity",
+          severity: "warn",
+          count: snap.totalFree,
+          detail: describe(snap).replace(/\n/g, " | "),
+        }).catch(() => {});
+      }
+    }
+    return snap;
+  }
+  if (notify) {
+    if (withheldPaged) {
+      // Closes the loop on the "not checkable" page above.
+      await sendTelegram(
+        (level === "ok" ? "✅" : "⚠️") + " Rent-farm stacks can be read again — " +
+          snap.totalFree + " slot(s) free.",
+      ).catch(() => {});
+    }
+    withheldTicks = 0;
+    withheldPaged = false;
+  }
+
   const changed = level !== lastLevel;
   snap.level = level;
-  snap.alerted = false;
 
   if (notify && changed && level !== "ok") {
     snap.alerted = true;
@@ -554,11 +623,13 @@ function start() {
 }
 
 module.exports = { TICK_MS, LOW_WATER, snapshot, levelFor, describe, checkOnce, start, tickOnce,
-  deadStacksCheck, runwayCheck, runwayLevel, WARN_DAYS, CRIT_DAYS,
+  deadStacksCheck, runwayCheck, runwayLevel, WARN_DAYS, CRIT_DAYS, WITHHELD_PAGE_TICKS,
   // testing seams: the alert-state latches, and injectable reads
   __setDeps: (d) => { deps = { ...deps, ...(d || {}) }; },
   _reset: () => {
     lastLevel = null;
+    withheldTicks = 0;
+    withheldPaged = false;
     deadAlerted.clear();
     missingSeen.clear();
     runwayState.slots = { level: "ok", at: 0 };

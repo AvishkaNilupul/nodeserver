@@ -15,6 +15,10 @@
 // makes it safe to run this in its own process alongside the pm2 fulfiller —
 // see project_playerauctions_integration ("one PROCESS may refresh").
 //
+// G2G note (2026-10-01): buyer chat is read through utils/g2gInbox, which uses
+// the stored G2G token as it is and never refreshes it, never marks a channel
+// read, and masks passwords before a transcript reaches this report.
+//
 // Usage:  node scripts/complaint-sweep.js [--out DIR] [--window-hours N] [--quiet]
 require("dotenv").config();
 
@@ -334,6 +338,34 @@ async function sweepEldorado(mp) {
   note("eldorado.chat", "gap", "TalkJS read side not implemented — buyer chat messages are invisible to this sweep");
 }
 
+// --- 2b. G2G buyer chat ----------------------------------------------------
+// SendBird DMs via utils/g2gInbox (read-only, see the note at the top). A buyer
+// who spoke last is waiting on us. Spam and threads where WE are the buyer are
+// kept as info so they never bury a real one. Until 2026-10-01 this was a blind
+// spot: 18 G2G buyers were waiting, one since June, and nothing reported them.
+async function sweepG2g(mp) {
+  if (!(mp.keyStatus().g2g || {}).configured) return note("g2g.chat", "skipped", "no credential");
+  const inbox = require("../utils/g2gInbox");
+  let res;
+  try {
+    res = await inbox.readG2gInbox();
+  } catch (e) {
+    return note("g2g.chat", "error", e.message);
+  }
+  if (res.status !== "ok") return note("g2g.chat", res.status, res.detail);
+  let waiting = 0;
+  let quiet = 0;
+  for (const t of res.threads) {
+    const it = inbox.threadItem(t);
+    if (!it) continue;
+    if (it.meta.spam || it.meta.weAreBuyer) quiet++;
+    else waiting++;
+    add(it);
+  }
+  note("g2g.chat", "ok", res.detail + ", " + waiting + " buyer(s) waiting" + (quiet ? ", " + quiet + " spam/own-purchase" : ""));
+  note("g2g.orders", "gap", "order and dispute states are not read here — the G2G fulfiller alerts on stuck orders itself");
+}
+
 // --- 3. Own storefront chat + catalog inquiries ----------------------------
 async function sweepOwnSurfaces() {
   try {
@@ -480,7 +512,7 @@ function noteBlindSpots(mp) {
     gameflip: "no order/chat reader in utils/marketplaces.js — buyer messages and disputes invisible",
     digiseller: "no dispute/message API wired — Digiseller claims invisible",
     ggsel: "no message API wired",
-    g2g: "no order/chat reader wired",
+    // g2g: buyer chat is read by sweepG2g (2026-10-01).
     zeusx: "no order/chat reader wired",
   };
   for (const [k, why] of Object.entries(blind)) {
@@ -498,6 +530,7 @@ function noteBlindSpots(mp) {
   await sweepInternal();
   await sweepPlayerAuctions(mp);
   await sweepEldorado(mp);
+  await sweepG2g(mp);
   noteBlindSpots(mp);
 
   // Dedupe against previous sweeps so the digest can show only what is NEW.

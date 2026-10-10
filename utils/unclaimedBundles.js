@@ -20,6 +20,9 @@
 // parse to the same eventName/waveLabel here (radarEvents itself is untouched).
 
 const settings = require("./settings");
+// The one rule for "a viewer earns this drop by watching". Loading it defines
+// a model and no more: still no connection and no query above loadCatalog.
+const { isWatchableDrop } = require("./campaignFarmability");
 
 /* ------------------------------ text utils ------------------------------ */
 
@@ -182,20 +185,26 @@ function labelsText(labels) {
 
 /* ---------------------------- buildEventCatalog ------------------------- */
 
-// Manifest drops → [{itemKey,name,qty}], counting identical itemKeys as copies
-// (4× Alpha Pack), sorted by name.
+// Manifest drops → [{itemKey,name,qty,earnable}], counting identical itemKeys
+// as copies (4× Alpha Pack), sorted by name. `earnable` is how many of those
+// copies a viewer gets by watching: a subscriber-only drop is in the manifest
+// but never on a farmed account. `qty` still counts every copy, as it always
+// did — the auto-farm planner (utils/autoFarmBundles.js) is what reads
+// `earnable`.
 function manifestItems(manifest, game) {
   const byKey = new Map();
   for (const raw of (manifest && manifest.drops) || []) {
     const name = text(raw && raw.name) || "Reward";
     const itemKey = dropItemKey(raw, (manifest && manifest.game) || game);
     if (!itemKey) continue;
+    const earnable = isWatchableDrop(raw) ? 1 : 0;
     const cur = byKey.get(itemKey);
     if (cur) {
       cur.qty += 1;
+      cur.earnable += earnable;
       continue;
     }
-    byKey.set(itemKey, { itemKey, name, qty: 1 });
+    byKey.set(itemKey, { itemKey, name, qty: 1, earnable });
   }
   return [...byKey.values()].sort(
     (a, b) => a.name.localeCompare(b.name) || a.itemKey.localeCompare(b.itemKey),

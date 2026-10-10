@@ -321,9 +321,17 @@ router.get("/renters/options", requireSuperadmin, async (req, res) => {
 // A host that misses it is reported as offline rather than silently dropped —
 // the page says so, instead of showing a short list as if those bots no longer
 // existed.
+//
+// That short budget is for the PAGE only (`{ picker: true }`). Everything else
+// — the capacity alarm, the holder's stack choice on a paid order, the Gameflip
+// buffer's reserve floor — has no one waiting on it and takes the module's
+// patient read. With the picker budget there, one slow `ls` on Contabo (8.0 s,
+// against ~0.2 s normally; measured on prod 2026-10-01) read as "Contabo VPS
+// offline", dropped all eleven of its stacks, and paged "Rent-farm capacity is
+// GONE" while 283 slots were free.
 const PICKER_READ_TIMEOUT_MS = 8000;
 
-async function rentalStackOptions() {
+async function rentalStackOptions({ picker = false } = {}) {
   const stacks = await listStacks();
   const byHost = new Map();
   for (const stack of stacks) {
@@ -340,10 +348,10 @@ async function rentalStackOptions() {
       if (!host) return { meta, rows: [], online: false };
       try {
         const existing = new Set(
-          await hosts.readdir(host, {
-            timeout: PICKER_READ_TIMEOUT_MS,
-            retries: 0,
-          })
+          await hosts.readdir(
+            host,
+            picker ? { timeout: PICKER_READ_TIMEOUT_MS, retries: 0 } : undefined,
+          )
         );
         const files = hostStacks
           .map((stack) => stack.file)
@@ -490,7 +498,7 @@ async function availableRentalStack({ forHolder = false } = {}) {
 
 router.get("/renters/bots", requireSuperadmin, async (req, res) => {
   try {
-    res.json({ success: true, ...(await rentalStackOptions()) });
+    res.json({ success: true, ...(await rentalStackOptions({ picker: true })) });
   } catch (err) {
     console.error("renters bots error:", err.message);
     res.status(500).json({ success: false, message: "Server error" });
@@ -2501,6 +2509,26 @@ router.delete(
   },
 );
 
+// Pool owners the manual add below must not take an account from (2026-10-03).
+// Every other claim it hands over by design — off an operator bot, out of
+// auto-farm tasks, off another renter's bot. These three it cannot:
+//   * a no-claim bot ("noclaim-farm:…"): no no-claim config is touched here,
+//     so the login would farm in both, and a claiming renter bot empties the
+//     farmed-but-unclaimed stock the no-claim bot exists to keep;
+//   * unclaimed stock (utils/poolStock): "unclaimed stock — …" is held stock,
+//     the same stock in no bot yet; "unclaimed stock was claimed — probably
+//     sold by hand" is a sale. Every note starting "unclaimed stock" is one;
+//   * an account already sold to a buyer — "spent — …" (the no-claim sellers:
+//     unclaimedAutoList, noclaimFarmRoutes), "sold — token reclaimed by buyer"
+//     (the spent and sold-out recyclers), "burned — …" (the Gameflip buffer,
+//     credentials seen by a refunded buyer). The buyer holds that login.
+const NOCLAIM_OWNER_NOTE = /^noclaim-farm:/i;
+const STOCK_OWNER_NOTE = /^unclaimed stock/i;
+const SOLD_OWNER_NOTE = /^(spent|sold|burned)\b/i;
+function ownerRefusesHandover(note) {
+  return NOCLAIM_OWNER_NOTE.test(note) || STOCK_OWNER_NOTE.test(note) || SOLD_OWNER_NOTE.test(note);
+}
+
 // MANUAL ADD — operator types one account (username + password + client token)
 // straight into a renter's bot. If that Twitch account is already farming
 // anywhere on the server — an operator bot config or another renter's bot — it
@@ -2555,6 +2583,33 @@ router.post(
           message: username
             ? "No stored client token found for that username — paste it manually"
             : "Username is required",
+        });
+      }
+      // The pool note is the one record of which system owns a login, and this
+      // route ends by re-labelling the row "rented to <renter>". A login whose
+      // owner it cannot hand over (ownerRefusesHandover, above) is refused here,
+      // before anything is written (2026-10-03); every other owner goes on to
+      // the moves below. The pool is asked by login AND by the token in hand:
+      // the same account under an older login is the same account. What was
+      // read for this login is also what the final pool write is conditional on.
+      const poolRows = await AvailableAccount.find(
+        { $or: [{ usernameLower: username.toLowerCase() }, { clientSecret: token }] },
+        { username: 1, usernameLower: 1, status: 1, claimedNote: 1 },
+      ).lean();
+      const poolOwner = poolRows.find((r) => r.usernameLower === username.toLowerCase()) || null;
+      const poolOwnerNote = String((poolOwner && poolOwner.claimedNote) || "").trim();
+      const heldRow = poolRows.find(
+        (r) => r.status === "claimed" && ownerRefusesHandover(String(r.claimedNote || "").trim()),
+      );
+      if (heldRow) {
+        const heldNote = String(heldRow.claimedNote || "").trim();
+        return res.status(409).json({
+          success: false,
+          message:
+            "The account pool says " + username +
+            (heldRow.usernameLower !== username.toLowerCase() ? " (same token as " + heldRow.username + ")" : "") +
+            " belongs to another system (" + (heldNote || "claimed, no note") +
+            ") — release it there first. Nothing was changed.",
         });
       }
       const renter = await Renter.findById(req.params.id);
@@ -2658,6 +2713,7 @@ router.post(
       // happen by accident to a renter with a live lease or to a paying
       // rent-farm buyer (their window and order would vanish silently). Ask
       // first (409 needsForce → the page confirms and resends with force).
+      const moveReasons = [];
       if (otherRenterAcc && String(otherRenterAcc.renter) !== String(renter._id)) {
         const owner = await Renter.findById(otherRenterAcc.renter, {
           username: 1, usernameLower: 1, status: 1, accessEnd: 1,
@@ -2688,33 +2744,43 @@ router.post(
           }
         }
         if (body.force !== true) {
-          const reasons = [];
           if (owner && !holderOwned && !isBlocked(owner)) {
-            reasons.push("it farms for renter " + owner.username + ", whose lease is active");
+            moveReasons.push("it farms for renter " + owner.username + ", whose lease is active");
           }
           if (!otherRenterAcc.farmEndedAt && otherRenterAcc.farmUntil && new Date(otherRenterAcc.farmUntil) > new Date()) {
-            reasons.push("its paid farming window runs until " + new Date(otherRenterAcc.farmUntil).toISOString().slice(0, 10));
+            moveReasons.push("its paid farming window runs until " + new Date(otherRenterAcc.farmUntil).toISOString().slice(0, 10));
           }
-          if (holderOwned) {
-            const order = await FarmServiceOrder.findOne(
-              { "accounts.login": loginMatcher(otherRenterAcc.login || username) },
-              { orderId: 1, market: 1, buyerUsername: 1 },
-            ).lean();
-            if (order) {
-              reasons.push(
-                "it was sold as a rent-farm order (" + (order.market || "?") + " " +
-                  String(order.orderId || "").slice(0, 8) +
-                  (order.buyerUsername ? ", buyer " + order.buyerUsername : "") + ")",
-              );
-            }
-          }
-          if (reasons.length) {
-            return res.status(409).json({
-              success: false,
-              needsForce: true,
-              message: "Moving this account here ends its farming elsewhere: " + reasons.join("; ") + ".",
-            });
-          }
+        }
+      }
+      // A login sold as a rent-farm order is its buyer's wherever it sits now.
+      // That was asked only while the holder's renter row still existed — after
+      // a Remove on the Renters page (or the renter's delete) the buyer's
+      // account moved with no prompt at all. Asked every time now, by login or
+      // by the pool rows read above (2026-10-03).
+      if (body.force !== true) {
+        const orderOr = [{ "accounts.login": loginMatcher((otherRenterAcc && otherRenterAcc.login) || username) }];
+        if (poolRows.length) orderOr.push({ "accounts.poolId": { $in: poolRows.map((r) => String(r._id)) } });
+        const order = await FarmServiceOrder.findOne(
+          { $or: orderOr },
+          { orderId: 1, market: 1, buyerUsername: 1 },
+        ).lean();
+        if (order) {
+          moveReasons.push(
+            "it was sold as a rent-farm order (" + (order.market || "?") + " " +
+              String(order.orderId || "").slice(0, 8) +
+              (order.buyerUsername ? ", buyer " + order.buyerUsername : "") + ")",
+          );
+        }
+        if (moveReasons.length) {
+          return res.status(409).json({
+            success: false,
+            needsForce: true,
+            message:
+              (otherRenterAcc
+                ? "Moving this account here ends its farming elsewhere: "
+                : "This account belongs to a rent-farm buyer — confirm to add it here anyway: ") +
+              moveReasons.join("; ") + ".",
+          });
         }
       }
       if (!renter.botFile && quick && body.autoAssign === true) {
@@ -3016,11 +3082,77 @@ router.post(
         poolSet.password = encrypt(password);
         poolSet.hasPassword = true;
       }
-      const poolResult = await AvailableAccount.updateOne(
-        { usernameLower: lower },
-        { $set: poolSet, $setOnInsert: { usernameLower: lower } },
-        { upsert: true },
-      ).catch(() => {});
+      // Only while the row is still what the guard at the top approved: absent,
+      // available, rented to someone, or exactly the status and note read then.
+      // The config write and the moves above take seconds of SSH, and a farm
+      // claim landing in between (the no-claim feeder taking a row that was
+      // still available, say) used to be re-labelled here, so its owner lost
+      // sight of a login it still farms. Such a row is left as it is, and the
+      // operator is told (2026-10-03).
+      const approved = [{ status: "available" }, { claimedNote: /^rented to/i }];
+      if (poolOwner && poolOwner.status) {
+        approved.push({
+          status: poolOwner.status,
+          claimedNote: poolOwner.claimedNote ? poolOwner.claimedNote : { $in: [null, ""] },
+        });
+      }
+      let poolResult = null;
+      let poolConflict = null;
+      try {
+        poolResult = await AvailableAccount.updateOne(
+          { usernameLower: lower, $or: approved },
+          { $set: poolSet },
+        );
+        if (!(poolResult && (poolResult.matchedCount || poolResult.n))) {
+          // No such row: create it. $setOnInsert only, so a row that appeared
+          // meanwhile is a changed row like any other — never overwritten.
+          poolResult = await AvailableAccount.updateOne(
+            { usernameLower: lower },
+            { $setOnInsert: { ...poolSet, usernameLower: lower } },
+            { upsert: true },
+          );
+          if (!(poolResult && poolResult.upsertedCount)) {
+            poolResult = null;
+            poolConflict =
+              (await AvailableAccount.findOne({ usernameLower: lower }, { status: 1, claimedNote: 1 }).lean()) || {};
+          }
+        }
+      } catch (e) {
+        poolResult = null;
+        partial = true;
+        notes.push(
+          "⚠ Added, but the account pool row could not be marked rented (" + (e.message || e) +
+            ") — mark it on the Account pool page, or a farm may claim it.",
+        );
+      }
+      if (poolConflict) {
+        partial = true;
+        const nowNote = String(poolConflict.claimedNote || "").trim();
+        notes.push(
+          "⚠ The account pool row changed while this ran — it now says " + (nowNote || "claimed, no note") +
+            ". It was left as it is, so that owner may still hold " + username + " too: take it off one of them.",
+        );
+        logEvent({
+          category: "renter",
+          action: "renter_add_conflict",
+          severity: "warn",
+          actor: (req.session && req.session.admin && req.session.admin.username) || "superadmin",
+          subject: username,
+          host: host.id,
+          detail:
+            "manual add put " + username + " on " + renter.username + "'s bot " + renter.botFile +
+            ", but its pool row changed meanwhile (read " +
+            (poolOwner ? (poolOwner.status || "?") + (poolOwnerNote ? ' "' + poolOwnerNote + '"' : "") : "no row") +
+            ", now " + (poolConflict.status || "?") + (nowNote ? ' "' + nowNote + '"' : "") +
+            ") — left as it is; resolve by hand",
+          meta: {
+            renter: renter.username,
+            file: renter.botFile,
+            before: poolOwner ? { status: poolOwner.status || "", note: poolOwnerNote } : null,
+            now: { status: poolConflict.status || "", note: nowNote },
+          },
+        });
+      }
       const rentedPool = poolResult
         ? await AvailableAccount.findOne({ usernameLower: lower }, { _id: 1 }).lean().catch(() => null)
         : null;

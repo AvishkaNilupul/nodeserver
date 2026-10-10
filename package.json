@@ -35,6 +35,7 @@
     "qrcode": "^1.5.4",
     "sharp": "0.35.2",
     "socket.io": "^4.8.3",
+    "socks-proxy-agent": "^10.1.0",
     "validator": "^13.15.35",
     "ws": "^8.21.0"
   },

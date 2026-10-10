@@ -43,16 +43,120 @@ const {
 
 const GF_CLAIM_TAG = "gameflip";
 
+// Gameflip refuses a delivery code that one of our listings still holds ("code
+// for digital goods already exists"), and the code is nothing but the account's
+// login and password (gameflipDeliveryCode). A SOLD listing keeps its code for
+// good, so an account already sold here once can never be listed here again
+// with the same password — while the per-game reservation keeps its other
+// games in stock, and leanest-first puts exactly those accounts at the FRONT
+// (their sold drops no longer count). On 2026-10-01 the Hunt: Showdown renewal
+// (187 units owed) picked one of them on every attempt and failed eight times
+// in a row, with 119 accounts Gameflip would take queued behind it.
+//
+// A holder the database cannot name — a half-built draft whose discard the
+// limiter swallowed — is learned from the refusal itself and skipped for a
+// day, so the next attempt tries someone else instead of the same account.
+const CODE_REFUSED_TTL_MS = 24 * 60 * 60 * 1000;
+const codeRefusedAt = new Map(); // lower-case login -> ms Gameflip refused its code
+const CODE_EXISTS_RE = /code for digital goods already exists/i;
+
+// Remember `login` when `err` is Gameflip refusing its code. Every publish path
+// that puts an account's code on Gameflip calls this from its failure path.
+function noteIfCodeRefused(login, err) {
+  const l = String(login || "").toLowerCase();
+  if (l && CODE_EXISTS_RE.test(String((err && err.message) || err || ""))) {
+    codeRefusedAt.set(l, Date.now());
+  }
+}
+
+// An auto-lister head row names its WHOLE Gameflip share (accountLogin = every
+// share login, autoLister.listActivatedTask), yet only ONE of those accounts'
+// code went out on it: the one it reserved for the set. Reading every name as
+// held fenced 47 accounts off Gameflip whose codes were never there (27 sold
+// head rows, measured 2026-10-02). So per row: the named accounts holding a
+// gameflip reservation on its set, or — none found — the first name (true on
+// 25 of those 27). Lower-case logins out.
+async function codeLoginsOfShareRows(shareRows) {
+  const out = new Set();
+  if (!shareRows.length) return out;
+  const reservedBySet = new Map(); // set id -> Set(lower login)
+  try {
+    const names = [...new Set(shareRows.flatMap((r) => r.logins))];
+    const accounts = await BotAccount.find({ login: { $in: names } }, { login: 1 }).lean();
+    const loginOf = new Map(accounts.map((a) => [String(a._id), String(a.login).toLowerCase()]));
+    const reserved = await DropLog.find(
+      {
+        account: { $in: accounts.map((a) => a._id) },
+        soldToUsername: GF_CLAIM_TAG,
+        soldAt: { $ne: null },
+      },
+      { account: 1, soldSetId: 1 },
+    ).lean();
+    for (const d of reserved) {
+      const key = String(d.soldSetId || "");
+      if (!reservedBySet.has(key)) reservedBySet.set(key, new Set());
+      reservedBySet.get(key).add(loginOf.get(String(d.account)));
+    }
+  } catch (e) {
+    console.error("gameflip: reservation read for the code check failed:", e.message);
+  }
+  for (const r of shareRows) {
+    const onSet = reservedBySet.get(r.set);
+    const hits = r.logins.filter((l) => onSet && onSet.has(l.toLowerCase()));
+    for (const l of hits.length ? hits : r.logins.slice(0, 1)) out.add(l.toLowerCase());
+  }
+  return out;
+}
+
+// Logins whose code a Gameflip listing of ours still holds. A failed read holds
+// nothing back: the claim then behaves exactly as it did before this check.
+async function gameflipCodeHeldLogins() {
+  const held = new Set();
+  const now = Date.now();
+  for (const [l, at] of codeRefusedAt) {
+    if (now - at < CODE_REFUSED_TTL_MS) held.add(l);
+    else codeRefusedAt.delete(l);
+  }
+  try {
+    const rows = await MarketplaceListing.find(
+      { marketplace: "gameflip", status: "sold", autoDeliver: true },
+      { accountLogin: 1, set: 1 },
+    ).lean();
+    const shareRows = [];
+    for (const r of rows) {
+      const logins = String(r.accountLogin || "").split(/[,\s]+/).filter(Boolean);
+      if (logins.length === 1) held.add(logins[0].toLowerCase());
+      else if (logins.length > 1) shareRows.push({ set: String(r.set || ""), logins });
+    }
+    for (const l of await codeLoginsOfShareRows(shareRows)) held.add(l);
+  } catch (e) {
+    console.error("gameflip: sold-listing read for the code check failed:", e.message);
+  }
+  return held;
+}
+
 // Reserve this set's drops (per game) on an account that holds the whole
 // bundle, so a Shop buyer and a Gameflip listing can never get the same drops
 // while the account's other games stay sellable. Returns the account doc.
-async function claimAccountForSet(set) {
+// `info`, when given, is filled with { codeHeld, left }: how many holders were
+// skipped because Gameflip holds their code, and how many were left to try.
+async function claimAccountForSet(set, info = null) {
   let candidates = await availableAccountsForSet(set);
   // Skip accounts already attached to another active listing (as its
   // auto-delivery account or a fed Plati/GGSel unit): the buyer gets the whole
   // account, so its other listing's promised drops would ship with it. One
   // implementation for every claimer (utils/listedLogins.js).
   candidates = notListed(candidates, await loginsOnActiveListings());
+  // And accounts Gameflip would refuse (see CODE_REFUSED_TTL_MS above).
+  const held = await gameflipCodeHeldLogins();
+  const before = candidates.length;
+  candidates = candidates.filter(
+    (c) => !held.has(String((c && c.login) || "").toLowerCase()),
+  );
+  if (info) {
+    info.codeHeld = before - candidates.length;
+    info.left = candidates.length;
+  }
   // Hand out an account whose Twitch token still scans before one flagged
   // token_invalid / integrity_failed. A dead token does not always mean the
   // buyer cannot log in — the password is separate, and the guardian's own
@@ -312,11 +416,19 @@ async function publishAutoDelivery({
       origin,
     });
   }
-  const account = await claimAccountForSet(set);
+  const claim = {};
+  const account = await claimAccountForSet(set, claim);
   if (!account) {
+    // Still "Out of stock" first, so every out-of-stock path (backoff, the one
+    // alert) treats it the same — but say when the accounts exist and it is
+    // Gameflip refusing them, or the owner goes looking for stock that is there.
     throw new Error(
-      "Out of stock — no unsold account holds this whole bundle, " +
-        "so there is nothing to auto-deliver",
+      claim.codeHeld && !claim.left
+        ? "Out of stock — every account that holds this whole bundle (" +
+            claim.codeHeld + ") was already sold on Gameflip, and Gameflip " +
+            "refuses the same login twice"
+        : "Out of stock — no unsold account holds this whole bundle, " +
+            "so there is nothing to auto-deliver",
     );
   }
   const login = account.login || account.credUsername || "";
@@ -344,6 +456,7 @@ async function publishAutoDelivery({
     });
   } catch (e) {
     await releaseAccount(account._id, set && set._id);
+    noteIfCodeRefused(login, e);
     throw e;
   }
   return MarketplaceListing.create({
@@ -792,6 +905,19 @@ function isOutOfStockError(message) {
 // resolves itself first, early enough to be same-hour news.
 const RELIST_ALERT_AT_ATTEMPT = 3;
 
+// A chain failing for any OTHER reason — relist after a sale, or renewal after
+// expiry — was only ever logged: on 2026-09-28 nine sold chains failed to
+// relist up to 8 times each on "code for digital goods already exists", one
+// (Metin2, 21 units owed) for four days and 14 attempts, and the Hunt: Showdown
+// renewal (187 owed) failed eight times on 10-01; nobody was told. Said once a
+// row reaches this many misses — the 5th try comes 75 min after the first
+// (5 + 10 + 20 + 40), well past a rate-limit storm, which resets in minutes —
+// and at most once an hour per lane, as one summary.
+const STUCK_ALERT_AT_ATTEMPT = 5;
+const STUCK_ALERT_EVERY_MS = 60 * 60 * 1000;
+let relistStuckAlertAt = 0;
+let renewalStuckAlertAt = 0;
+
 // Record a failed relist: keep the reason, count the attempt and push the next
 // one out by the backoff. Called from both relist paths so a chain can never be
 // left with a stale deadline.
@@ -808,14 +934,40 @@ async function noteRelistFailure(row, err) {
       },
     },
   ).catch(() => {});
+  // Named, so a failure in the log can be traced to its chain (it could not).
   console.error(
-    "gameflip relist failed (attempt " +
+    "gameflip relist failed for " +
+      (row.externalId || row._id) +
+      " (attempt " +
       attempts +
       ", next in " +
       Math.round(relistRetryDelayMs(attempts) / 60000) +
       "m):",
     message,
   );
+  if (
+    !isOutOfStockError(message) &&
+    attempts === STUCK_ALERT_AT_ATTEMPT &&
+    Date.now() - relistStuckAlertAt >= STUCK_ALERT_EVERY_MS
+  ) {
+    relistStuckAlertAt = Date.now();
+    const stuck = await MarketplaceListing.countDocuments({
+      marketplace: "gameflip",
+      status: "sold",
+      qtyRemaining: { $gt: 0 },
+      relistAttempts: { $gte: STUCK_ALERT_AT_ATTEMPT },
+      lastError: /^auto-relist failed: (?!Out of stock)/,
+    }).catch(() => 0);
+    await sendTelegram(
+      "⚠️ Gameflip relists keep FAILING\n\n" +
+        Math.max(1, stuck) + " sold chain(s) have failed to relist " +
+        STUCK_ALERT_AT_ATTEMPT + "+ times for a reason other than stock, so the " +
+        "units they owe are not on sale (e.g. " + (row.title || "an untitled listing") +
+        ", " + (Number(row.qtyRemaining) || 0) + " unit(s) owed). Last error:\n" +
+        String(message).slice(0, 300) +
+        "\n\nThey keep retrying, up to 12 h apart. At most one of these an hour.",
+    ).catch(() => {});
+  }
   if (attempts === RELIST_ALERT_AT_ATTEMPT && isOutOfStockError(message)) {
     await sendTelegram(
       "⚠️ Gameflip chain out of stock\n\n" +
@@ -988,8 +1140,11 @@ async function setReleased(accountId, setId) {
 // a fleet-wide dip during a backlog would otherwise send one message per row.
 const RENEWAL_ALERT_EVERY_MS = 60 * 60 * 1000;
 let renewalAlertAt = 0;
+// Every alert latch in this file (the stuck-chain ones: STUCK_ALERT_AT_ATTEMPT).
 function resetRenewalAlert() {
   renewalAlertAt = 0;
+  renewalStuckAlertAt = 0;
+  relistStuckAlertAt = 0;
 }
 
 // Drop an "ending" stamp from a row whose listing is live again. Conditional on
@@ -1909,6 +2064,27 @@ async function syncOnce({
               (Number(row.qtyRemaining) || 0) + " more unit(s) owed).\n" +
               "They retry on their own, up to 12 h apart. At most one of these an hour.",
           ).catch((err) => console.error("gameflip renewal alert:", err.message));
+        } else if (
+          !dry &&
+          attempts === STUCK_ALERT_AT_ATTEMPT &&
+          Date.now() - renewalStuckAlertAt >= STUCK_ALERT_EVERY_MS
+        ) {
+          renewalStuckAlertAt = Date.now();
+          const stuck = await MarketplaceListing.countDocuments({
+            marketplace: "gameflip",
+            status: "removed",
+            relistAttempts: { $gte: STUCK_ALERT_AT_ATTEMPT },
+            lastError: /^expired on Gameflip — renewal pending \(attempt \d+ failed: (?!Out of stock)/,
+          }).catch(() => 0);
+          sendTelegram(
+            "⚠️ Gameflip renewals keep FAILING\n\n" +
+              Math.max(1, stuck) + " expired listing(s) have failed renewal " +
+              STUCK_ALERT_AT_ATTEMPT + "+ times for a reason other than stock, " +
+              "so the units they owe are not on sale (e.g. " +
+              (row.title || "an untitled listing") + ", " +
+              (Number(row.qtyRemaining) || 0) + " more unit(s) owed). Last error:\n" + msg +
+              "\n\nThey keep retrying, up to 12 h apart. At most one of these an hour.",
+          ).catch((err) => console.error("gameflip renewal alert:", err.message));
         }
       } finally {
         if (img) await fsp.unlink(img).catch(() => {});
@@ -2001,7 +2177,12 @@ module.exports = {
   relistNoclaimSuccessor,
   syncOnce,
   start,
+  // The Gameflip code check, for every other path that puts a code on Gameflip
+  // (autoLister's first unit of a campaign).
+  gameflipCodeHeldLogins,
+  noteIfCodeRefused,
   // exported for tests
+  noteRelistFailure,
   relistRetryDelayMs,
   UNPLACED_POLL_LIMIT,
   LAPSED_END_LIMIT,
@@ -2009,4 +2190,7 @@ module.exports = {
   resetRenewalAlert,
   isOutOfStockError,
   RELIST_RETRY_MAX_MS,
+  STUCK_ALERT_AT_ATTEMPT,
+  CODE_REFUSED_TTL_MS,
+  resetCodeRefused: () => codeRefusedAt.clear(),
 };

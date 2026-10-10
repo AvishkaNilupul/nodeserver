@@ -307,8 +307,16 @@ async function evictSuspendedFromConfigs({ onProgress } = {}) {
   // this module is loaded by utils/autoFarmer at require time.
   const {
     removeAccountFromConfig,
-    restartConfigContainer,
+    containerForFile,
   } = require("../routes/botConfigRoutes");
+  const { reloadConfig, retryPendingReloads } = require("./farmControl");
+  // Reloads an earlier sweep could not decide (config unreadable, `docker ps`
+  // failed) come first: the evicted rows' configFile is cleared in the same
+  // tick, so nothing else would ever bring them back (round-3 review).
+  const owed = await retryPendingReloads().catch(() => []);
+  for (const r of owed) {
+    if (!r.done) console.warn("[suspendedAccounts] owed reload still pending: " + r.note);
+  }
   const rows = await BotAccount.find(
     { lastScanStatus: "suspended", configFile: { $gt: "" } },
     { login: 1, clientSecret: 1, configFile: 1, host: 1 },
@@ -337,15 +345,25 @@ async function evictSuspendedFromConfigs({ onProgress } = {}) {
       );
     }
   }
+  // A touched bot reloads its config only on a restart, but restart it only
+  // while it RUNS: `docker restart` would also start a parked bot
+  // (utils/botWaker.js) and undo its park — the wake/park flap class
+  // (2026-09-29). A stopped bot reads the edited config when it next starts.
+  // farmControl.restartIfRunning checks and restarts in ONE shell command on
+  // the host, under the container's lock (2026-10-03): a `docker ps` followed
+  // by a separate restart left a round trip in which a park could land and be
+  // undone. restorePolicy keeps what restartConfigContainer did after a real
+  // restart, and TWITCHBOT_ALLOW_RESTART=0 still turns these restarts off.
+  // An eviction can empty a config, and a bot with no ENABLED account spins in
+  // a login loop: such a bot is stopped, never restarted; one whose config or
+  // state cannot be read is not restarted now but owed, and retried on the
+  // next sweep (farmControl.reloadConfig — the rule every config editor uses).
+  const allowRestart = process.env.TWITCHBOT_ALLOW_RESTART !== "0";
   for (const b of touched.values()) {
-    try {
-      await restartConfigContainer(b.host, b.file);
-    } catch (e) {
-      console.error(
-        "[suspendedAccounts] could not restart " + b.file + ":",
-        e.message,
-      );
-    }
+    const container = containerForFile(b.file);
+    if (!container) continue;
+    const r = await reloadConfig(b.host, b.file, container, { restorePolicy: true, allowRestart });
+    if (!r.done) console.warn("[suspendedAccounts] " + r.note + " — retried next sweep");
   }
   if (evicted && onProgress) {
     onProgress(

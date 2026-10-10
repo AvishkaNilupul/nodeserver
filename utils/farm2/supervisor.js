@@ -26,6 +26,9 @@ const state = {
   started: false,
   running: false,
   lastRun: null,
+  // When a cycle last finished with NO error — the health board judges the
+  // loop by this; lastRun is stamped by every cycle, failed or not.
+  lastOkAt: null,
   lastError: "",
   lastSummary: null,
   cycles: 0,
@@ -81,6 +84,11 @@ async function ensureLanesForLiveGames({ audit = true } = {}) {
     ),
   );
   const created = [];
+  // In main mode the legacy engine leaves a game with no lane to this function
+  // (ownership.legacyMayDecide), so one game that cannot get its lane must not
+  // stop every game after it in the list from getting theirs: each is tried,
+  // and the failures are reported together at the end.
+  const failed = [];
   for (const [key, game] of wanted) {
     if (existing.has(key)) continue;
     try {
@@ -95,7 +103,7 @@ async function ensureLanesForLiveGames({ audit = true } = {}) {
       created.push(game);
     } catch (e) {
       // A concurrent creation (the route, another cycle) is not a failure.
-      if (!(e && e.code === 11000)) throw e;
+      if (!(e && e.code === 11000)) failed.push(game + ": " + ((e && e.message) || e));
     }
   }
   if (created.length) {
@@ -115,6 +123,11 @@ async function ensureLanesForLiveGames({ audit = true } = {}) {
       }
     }
   }
+  if (failed.length) {
+    const err = new Error("could not create lane(s): " + failed.join("; "));
+    err.created = created;
+    throw err;
+  }
   return created;
 }
 
@@ -124,6 +137,19 @@ async function runCycle({ force = false } = {}) {
   state.running = true;
   const startedAt = Date.now();
 
+  // A cycle counts as ok (lastOkAt, which the health board judges by) only if
+  // nothing failed in it: an error recorded on the way, like a lane
+  // auto-create that failed, keeps it from counting just as a thrown one does
+  // — and is no longer wiped by the "" the end of a cycle used to write.
+  let cycleError = "";
+  const finish = (summary) => {
+    state.lastSummary = summary;
+    state.lastRun = new Date();
+    state.lastError = cycleError;
+    if (!cycleError) state.lastOkAt = state.lastRun;
+    return summary;
+  };
+
   try {
     const FarmLane = require("../../models/FarmLane");
     const af = settings.getAutoFarm();
@@ -132,9 +158,15 @@ async function runCycle({ force = false } = {}) {
     // ownership.killSwitchOn() reads the same flag, every lane's game falls
     // back to the legacy engine in the same instant.
     if (af.farm2Enabled !== true) {
-      state.lastSummary = { enabled: false, lanes: 0 };
-      state.lastRun = new Date();
-      return state.lastSummary;
+      return finish({ enabled: false, lanes: 0 });
+    }
+    // The AUTO-FARM master switch stops this engine too (2026-10-03). The
+    // legacy tick returns early when it is off, but lanes kept deciding,
+    // claiming and creating bots — "off" switched off only the half of the
+    // farm that also does the clean-up. Nothing is handed to the legacy
+    // engine here: it is off as well, which is what the switch means.
+    if (af.enabled === false) {
+      return finish({ enabled: false, masterSwitch: false, lanes: 0 });
     }
 
     // Re-drive anything a restart left stranded, then trim old history.
@@ -143,14 +175,17 @@ async function runCycle({ force = false } = {}) {
 
     // Main engine: every live game gets a live lane before dispatch, so a
     // campaign that appeared since the last cycle is decided here, not by the
-    // legacy path. Failure to create is logged on the cycle, never fatal —
-    // the legacy engine covers an unowned game exactly as before.
+    // legacy path. Failure to create is recorded on the cycle (not ok), never
+    // fatal to the other lanes. In main mode the legacy engine leaves a game
+    // with no lane to this step (ownership.legacyMayDecide), so a failure here
+    // is a game nobody decides until it succeeds — hence the not-ok cycle.
     let autoCreated = [];
     if (af.farm2Main === true) {
       try {
         autoCreated = await ensureLanesForLiveGames();
       } catch (e) {
-        state.lastError = "auto-lanes: " + String(e.message || e);
+        autoCreated = (e && e.created) || [];
+        cycleError = "auto-lanes: " + String((e && e.message) || e);
       }
     }
 
@@ -164,10 +199,8 @@ async function runCycle({ force = false } = {}) {
     }).lean();
 
     if (!due.length) {
-      state.lastSummary = { enabled: true, main: af.farm2Main === true, lanes: 0, requeued, autoCreated };
-      state.lastRun = new Date();
       state.cycles += 1;
-      return state.lastSummary;
+      return finish({ enabled: true, main: af.farm2Main === true, lanes: 0, requeued, autoCreated });
     }
 
     // Compute the shared budget ONCE. Lanes draw from it ON DEMAND
@@ -246,12 +279,10 @@ async function runCycle({ force = false } = {}) {
       durationMs: Date.now() - startedAt,
     };
 
-    state.lastSummary = summary;
-    state.lastRun = new Date();
-    state.lastError = "";
     state.cycles += 1;
-    return summary;
+    return finish(summary);
   } catch (e) {
+    // A thrown cycle — the FarmLane read among them — is never ok.
     state.lastError = String(e.message || e);
     state.lastRun = new Date();
     return { error: state.lastError };
@@ -306,10 +337,33 @@ function status() {
   };
 }
 
+// Liveness for the health page (utils/systemHealth.js). Synchronous and never
+// throws. `lastRun` is stamped at the end of every cycle, idle ones included,
+// so an old value means the loop itself has stopped, not that it had nothing
+// to do. `lastOkAt` is the last cycle that finished with no error (a cycle
+// whose FarmLane read or lane auto-create failed is not ok); `lastError` is ""
+// when the last cycle was ok.
+function loopStatus() {
+  let enabled = false;
+  try {
+    enabled = settings.getAutoFarm().farm2Enabled === true;
+  } catch {
+    enabled = false;
+  }
+  return {
+    lastRun: state.lastRun || null,
+    lastOkAt: state.lastOkAt || null,
+    lastError: state.lastError || "",
+    intervalMin: TICK_MS / 60000,
+    enabled,
+  };
+}
+
 module.exports = {
   start,
   stop,
   status,
+  loopStatus,
   runCycle,
   ensureLanesForLiveGames,
   mapWithConcurrency,

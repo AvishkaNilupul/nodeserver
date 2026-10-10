@@ -27,6 +27,7 @@ const autoFarmTaskSchema = new mongoose.Schema(
         "skip_host_offline", // the Pi was unreachable at decision time
         "skip_already_covered", // manual bots / archived accounts already cover this game's demand
         "skip_reuse_only", // reuse-only game (WoT/UFL): never spends fresh accounts and none of its own recycled ones are free right now
+        "skip_sub_only", // every drop needs a paid subscription — watching cannot earn it (utils/campaignFarmability.js)
       ],
       required: true,
     },
@@ -238,6 +239,21 @@ const autoFarmTaskSchema = new mongoose.Schema(
         error: { type: String, default: "" },
       },
       playerauctions: {
+        externalId: { type: String, default: "" },
+        url: { type: String, default: "" },
+        qty: { type: Number, default: 0 },
+        error: { type: String, default: "" },
+      },
+      // G2G's share. Declared here or strict mode drops it on save (see
+      // `bots.shared` above). autoLister wrote this record from the day G2G
+      // joined the split, but it was never declared, so it never reached the
+      // database: retryMissingSecondaries read G2G as missing on every sweep
+      // and, with g2gAuto on, published ANOTHER G2G offer for the same set
+      // each time the task had spare accounts — the half held back for the
+      // post-event price included (found live 2026-10-03: no task had ever
+      // stored this field). tests/autoFarmTaskG2gShare.test.js holds the
+      // lister's writes and this schema together.
+      g2g: {
         externalId: { type: String, default: "" },
         url: { type: String, default: "" },
         qty: { type: Number, default: 0 },

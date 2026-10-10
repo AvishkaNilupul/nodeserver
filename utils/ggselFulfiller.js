@@ -13,7 +13,7 @@ const { loginsOnActiveListings, notListed } = require("./listedLogins");
 const { decrypt } = require("./secretBox");
 const {
   reserveSetOnAccount,
-  releaseAccountsForTag,
+  releaseSetForAccounts,
 } = require("./dropReservation");
 
 // Distinct from the Gameflip tag so a Shop buyer, a Gameflip listing and a
@@ -72,7 +72,7 @@ async function claimAccountsForSet(set, max) {
     const login = account ? account.login || account.credUsername || "" : "";
     const password = account ? decrypt(account.credPassword) : "";
     if (!password) {
-      await releaseAccounts([c.accountId]);
+      await releaseAccounts([c.accountId], set._id);
       continue;
     }
     claimed.push({
@@ -84,10 +84,67 @@ async function claimAccountsForSet(set, max) {
   return claimed;
 }
 
-// Put reserved drops back in the sellable pool (only ones still reserved for
-// GGSel — never touches drops sold through the Shop or another marketplace).
-async function releaseAccounts(accountIds) {
-  await releaseAccountsForTag(accountIds, GG_CLAIM_TAG);
+// Put ONE set's GGSel-reserved drops on these accounts back in the sellable
+// pool. Never tag-wide: GGSel keeps no record of its own for us, so a "ggsel"
+// reservation on a set a buyer already bought IS the only thing stopping that
+// account being sold again — and one account is sold once per game, so the
+// same account routinely carries several "ggsel" sets. Releasing every "ggsel"
+// drop on it (as this did until 2026-10-01) re-opened the sold ones whenever a
+// publish failed, a feed failed or a listing was delisted. Without a set id
+// nothing is released: a stranded reservation costs one unit of stock, a
+// wrongly freed one sells an account twice.
+async function releaseAccounts(accountIds, setId) {
+  if (!setId) {
+    console.error(
+      "ggsel releaseAccounts: no set id given — nothing released (fail closed)",
+    );
+    return;
+  }
+  await releaseSetForAccounts(accountIds, String(setId), GG_CLAIM_TAG);
+}
+
+function escapeRe(s) {
+  return String(s).replace(/[.*+?^$(){}|[\]\\]/g, "\\$&");
+}
+
+// After a delisted offer's vault was emptied (mp.ggselEmptyVault), hand back
+// exactly the accounts GGSel proved never sold: their code was in stock and is
+// archived now. A login with a SOLD code on the offer is the buyer's — kept. A
+// code still in stock stays reserved (it can still sell if the offer is ever
+// re-activated). A login the listing row never recorded is not ours to
+// release. Only THIS row's set is released, and only its "ggsel" drops.
+async function releaseProvenUnsold(row, vault) {
+  const out = { released: [], keptSold: [], keptLeft: [], notOnRow: [] };
+  if (!row || !row.set || !vault) return out;
+  const low = (l) => String(l || "").trim().toLowerCase();
+  const sold = new Set((vault.sold || []).map((p) => low(p.login)).filter(Boolean));
+  const left = new Set((vault.left || []).map((p) => low(p.login)).filter(Boolean));
+  const onRow = new Set(
+    String(row.accountLogin || "")
+      .split(/[,\s]+/)
+      .map(low)
+      .filter(Boolean),
+  );
+  for (const u of row.units || []) if (u && u.login) onRow.add(low(u.login));
+  const free = [];
+  for (const login of new Set((vault.archived || []).map((p) => low(p.login)))) {
+    if (!login) continue;
+    if (sold.has(login)) out.keptSold.push(login);
+    else if (left.has(login)) out.keptLeft.push(login);
+    else if (!onRow.has(login)) out.notOnRow.push(login);
+    else free.push(login);
+  }
+  if (!free.length) return out;
+  // Every record of the login (one Twitch account can have two BotAccount
+  // records, utils/accountTwins.js): the reservation may sit on either.
+  const accounts = await BotAccount.find(
+    { login: { $in: free.map((l) => new RegExp("^" + escapeRe(l) + "$", "i")) } },
+    { _id: 1, login: 1 },
+  ).lean();
+  const ids = accounts.map((a) => String(a._id));
+  if (ids.length) await releaseAccounts(ids, row.set);
+  out.released = [...new Set(accounts.map((a) => low(a.login)))];
+  return out;
 }
 
 module.exports = {
@@ -95,4 +152,5 @@ module.exports = {
   ggselDeliveryCode,
   claimAccountsForSet,
   releaseAccounts,
+  releaseProvenUnsold,
 };

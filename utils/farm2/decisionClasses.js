@@ -30,6 +30,7 @@ const LEGACY_DECISIONS = Object.freeze([
   "skip_host_offline",
   "skip_already_covered",
   "skip_reuse_only",
+  "skip_sub_only",
 ]);
 
 // Everything utils/farm2/steps/decide.js can return.
@@ -60,6 +61,7 @@ const LANE_DECISIONS = Object.freeze([
   "skip_host_offline",
   "skip_already_covered",
   "skip_reuse_only",
+  "skip_sub_only",
 ]);
 
 // The gates the lane cannot express. Expected to be EMPTY; a test asserts it.
@@ -95,6 +97,7 @@ const ACTION_CLASS = Object.freeze({
   skip_host_offline: "skip",
   skip_already_covered: "skip",
   skip_reuse_only: "skip",
+  skip_sub_only: "skip",
 });
 
 // "unknown" for anything unclassified — never a silent fallback to "skip".
@@ -137,6 +140,19 @@ function isDemandStageDecision(decision) {
   return DEMAND_STAGE_DECISIONS.includes(decision);
 }
 
+// Decisions settled BEFORE the sellability stage runs at all.
+//
+// A subscriber-only campaign (utils/campaignFarmability.js) is turned away at
+// the door: no research is read, no own sales, no probe budget. So such a row
+// proves nothing about the demand stage in either direction — it neither
+// stopped there nor passed it — and it carries no decisionInputs snapshot,
+// because there were no inputs. Replay must not score it.
+const PRE_DEMAND_DECISIONS = Object.freeze(["skip_sub_only"]);
+
+function isPreDemandDecision(decision) {
+  return PRE_DEMAND_DECISIONS.includes(decision);
+}
+
 // The two decisions for which AutoFarmTask.demandScore is NOT the raw market
 // score.
 //
@@ -166,7 +182,8 @@ function recordsEffectiveDemand(decision) {
 // rows must know which fields the path in question really wrote:
 //
 //   internalSales    written on every path EXCEPT reuse_existing (both the live
-//                    and dry-run record calls) and skip_host_offline.
+//                    and dry-run record calls), skip_host_offline and
+//                    skip_sub_only (settled before sales are read).
 //   targetAccounts   written ONLY on farm/probe (the `wanted` tier target).
 //
 // skip_reuse_only is a later updateOne on a row record() had just written as
@@ -178,7 +195,11 @@ function recordsEffectiveDemand(decision) {
 // held 13 sales, the replay trusted the 0, skipped at the sellability gate and
 // called every one a disagreement — while the live shadow lane, reading
 // SaleSignal, agreed with legacy each time.
-const OMITS_INTERNAL_SALES = Object.freeze(["reuse_existing", "skip_host_offline"]);
+const OMITS_INTERNAL_SALES = Object.freeze([
+  "reuse_existing",
+  "skip_host_offline",
+  "skip_sub_only",
+]);
 const WRITES_TARGET_ACCOUNTS = Object.freeze(["farm", "probe", "skip_reuse_only"]);
 
 function recordsInternalSales(decision) {
@@ -239,6 +260,7 @@ module.exports = {
   LEGACY_ONLY_DECISIONS,
   ACTION_CLASS,
   DEMAND_STAGE_DECISIONS,
+  PRE_DEMAND_DECISIONS,
   DOWNSTREAM_DECISIONS,
   EFFECTIVE_DEMAND_DECISIONS,
   OMITS_INTERNAL_SALES,
@@ -246,6 +268,7 @@ module.exports = {
   actionClass,
   laneCanEmit,
   isDemandStageDecision,
+  isPreDemandDecision,
   recordsEffectiveDemand,
   recordsInternalSales,
   recordsTargetAccounts,

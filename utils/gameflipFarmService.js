@@ -1126,7 +1126,12 @@ async function settleStranded(cat, haveKey, cfg, out, { canRenew = true, parked 
       why = "renewal failed " + failures + " time(s) — returning the account";
     } else {
       if (cap === null) cap = await freeSlots();
-      if (cap.ok && cap.totalFree < cfg.reserve) {
+      // A read that missed a host is unreadable too: that host's slots count
+      // as 0, the misread that paged "capacity GONE" with 283 free on
+      // 2026-10-01. Every rental stack is on Contabo, so one such read during
+      // the 10-09 wave (58 offers lapse together) would hand back up to five
+      // renewing accounts a pass, each then replaced by a fresh pristine one.
+      if (cap.ok && !(cap.offlineHosts || []).length && cap.totalFree < cfg.reserve) {
         // The floor wins. Renewing keeps a slot a paid order may need; below
         // the reserve the unsold offer gives it back instead. An unreadable
         // capacity is no reason to release — renewal takes no NEW slot.
@@ -1335,16 +1340,16 @@ async function renewExpired(row, want) {
     return { held: true, reason: why };
   };
 
-  // End the lease after a failure, counting it. The row never stopped owning
-  // the account; if even this write fails the lease stays (a stale lease pages)
-  // — say so now rather than let it be silent.
-  const failed = async (reason) => {
+  // End the lease after a failure, counting it unless `count` is false. The row
+  // never stopped owning the account; if even this write fails the lease stays
+  // (a stale lease pages) — say so now rather than let it be silent.
+  const failed = async (reason, { count = true } = {}) => {
     try {
       await MarketplaceListing.updateOne(
         { _id: row._id, rentFarmRenewingAt: leaseAt },
         {
           $set: { rentFarmRenewingAt: null, lastError: ("renewal failed: " + reason).slice(0, 400) },
-          $inc: { rentFarmRenewFailures: 1 },
+          ...(count ? { $inc: { rentFarmRenewFailures: 1 } } : {}),
         },
       );
     } catch (e) {
@@ -1408,8 +1413,14 @@ async function renewExpired(row, want) {
       // recorded. Selling it again would be two live listings — hold.
       return await hold("Gameflip already has a listing with this renewal's code (an earlier attempt went live unrecorded?).");
     }
-    await failed(reason);
-    return { reason, stop: /429|too many|rate/i.test(reason) };
+    // A rate limit says nothing about the account, so it is not one of the
+    // RENEW_MAX_FAILURES strikes: counted, a busy hour in the 10-09 wave would
+    // hand healthy accounts back and spend fresh pristine ones on their slots.
+    // It still ends the lease and stops the pass; a renewal that keeps hitting
+    // it is retried every pass and reads as stranded after RENEW_STUCK_MS.
+    const limited = /429|too many|rate/i.test(reason);
+    await failed(reason, { count: !limited });
+    return { reason, stop: limited };
   } finally {
     if (cover) await fsp.unlink(cover).catch(() => {});
   }

@@ -62,6 +62,12 @@ function unitsFor(listing, accounts) {
 const DELIVER_TICK_MS = 60 * 1000;
 const STOCK_TICK_MS = 15 * 60 * 1000;
 const CONFIRM_SWEEP_MS = 5 * 60 * 1000;
+// Delivery proofs (see sweepDeliveryProofs).
+const PROOF_SWEEP_MS = 10 * 60 * 1000;
+const PROOF_RETRY_BASE_MS = 30 * 60 * 1000;
+const PROOF_RETRY_MAX_MS = 6 * 60 * 60 * 1000;
+const PROOF_PAGE_AFTER = 3;
+const G2G_SELLER_NAME = "Avishka_ReX";
 
 // The refusal for a no-claim row whose delivery switch is off
 // (docs/NOCLAIM-SHOP-LISTINGS-CONTRACT.md §0). One spelling for both places
@@ -1352,6 +1358,7 @@ function start() {
   loop(deliverPendingOrders, DELIVER_TICK_MS, 75 * 1000, "fulfiller");
   loop(syncStock, STOCK_TICK_MS, 6 * 60 * 1000, "stock sync");
   loop(sweepConfirmedFarmOrders, CONFIRM_SWEEP_MS, 4 * 60 * 1000, "farm confirm sweep");
+  loop(sweepDeliveryProofs, PROOF_SWEEP_MS, 3 * 60 * 1000, "proof sweep");
 }
 
 // Rent-farm orders the owner confirmed by hand on G2G leave the pending queue,
@@ -1361,6 +1368,156 @@ async function sweepConfirmedFarmOrders() {
   const af = getAutoFarm() || {};
   if (!af.g2gAutoDeliver) return { skipped: "g2gAutoDeliver is off" };
   return farmService.closeConfirmedFarmOrders();
+}
+
+// DELIVERY PROOFS (2026-10-01). G2G holds a delivered order's income until a
+// proof image is uploaded — its order item says
+// require_delivery_proof_to_credit_income — so a buyer who never presses
+// "received" left the money parked until someone uploaded a screenshot by hand.
+//
+// Every PROOF_SWEEP_MS: each order G2G shows as fully delivered (delivered_qty
+// >= purchased_qty, awaiting the buyer) whose credential OUR chat send handed
+// over (a unit stamped `messagedAt`, or a rent-farm row with messageSentAt) and
+// that has no proof yet (G2G's own total_uploaded_proofs) gets one: the
+// delivery card utils/playerauctionsProof draws — order, offer, how many
+// accounts, when the credential was sent, and that it went through the G2G
+// chat; never the login or password. Orders we did not send are left alone (the
+// card would attest to something this system did not do). Units the owner
+// confirmed by hand also get their missing `deliveredAt` stamp here, so the
+// bookkeeping matches G2G.
+//
+// Exactly once per order: G2G's proof count is read before every upload. A
+// failure backs off (30 min doubling to 6 h) and pages once after
+// PROOF_PAGE_AFTER failures. In-memory state only; after a restart the proof
+// count on G2G is the record.
+const proofState = new Map(); // orderItemId -> { tries, nextAt, done, paged }
+
+async function sentByUs(orderItemId) {
+  const listing = await MarketplaceListing.findOne({ marketplace: "g2g", "units.orderId": orderItemId });
+  const units = listing ? unitsForOrder(listing, orderItemId).filter((u) => u.messagedAt) : [];
+  if (units.length) {
+    const sentAt = new Date(Math.min(...units.map((u) => new Date(u.messagedAt).getTime())));
+    return { listing, units, accounts: units.length, sentAt };
+  }
+  const FarmServiceOrder = require("../models/FarmServiceOrder");
+  const row = await FarmServiceOrder.findOne(
+    { orderId: "g2g:" + orderItemId, messageSentAt: { $ne: null } },
+    { messageSentAt: 1, accounts: 1 },
+  ).lean();
+  if (row) return { listing: null, units: [], accounts: (row.accounts || []).length || 1, sentAt: row.messageSentAt };
+  return null;
+}
+
+// Completed orders count too: G2G marks them require_delivery_proof_to_credit_
+// income as well (measured 2026-10-01: every completed order carried it with
+// 0 proofs), so a buyer's "received" alone did not credit the income either.
+const PROOF_STATUSES = ["delivering", "completed"];
+const PROOF_PAGES = 3;
+const PROOF_PAGE_SIZE = 30;
+const PROOF_MAX_UPLOADS = 8; // per pass: a backlog drains over a few passes
+
+async function sweepDeliveryProofs({ now = Date.now() } = {}) {
+  const af = getAutoFarm() || {};
+  if (!af.g2gAutoDeliver) return { skipped: "g2gAutoDeliver is off" };
+  const dryRun = af.g2gDeliverDryRun !== false;
+  const out = { checked: 0, uploaded: 0, stamped: 0, failed: 0, notOurs: 0, already: 0, wouldUpload: 0 };
+  const rows = [];
+  for (const status of PROOF_STATUSES) {
+    for (let page = 1; page <= PROOF_PAGES; page++) {
+      const got = await mp.g2gOrders({ page, pageSize: PROOF_PAGE_SIZE, status });
+      rows.push(...got);
+      if (got.length < PROOF_PAGE_SIZE) break;
+    }
+  }
+  for (const o of rows) {
+    if (out.uploaded + out.failed >= PROOF_MAX_UPLOADS) break;
+    const id = String(o.orderItemId || "");
+    // Fully delivered: awaiting the buyer, or completed.
+    if (!id || !(o.purchasedQty > 0 && o.deliveredQty >= o.purchasedQty)) continue;
+    const st = proofState.get(id);
+    if (st && (st.done || now < st.nextAt)) continue;
+    out.checked++;
+    const ours = await sentByUs(id);
+    if (!ours) {
+      out.notOurs++;
+      proofState.set(id, { done: true });
+      continue;
+    }
+    const item = (await mp.g2gOrder(id)) || {};
+    // Units the owner confirmed by hand: stamp what G2G already says. A
+    // targeted update of just this order's unstamped units — never a whole-
+    // document save, which could overwrite a unit the delivery tick is
+    // reserving on the same listing right now.
+    if (ours.listing && !dryRun && ours.units.some((u) => !u.deliveredAt)) {
+      const stamp = item.order_delivered_at ? new Date(Number(item.order_delivered_at)) : new Date(now);
+      const res = await MarketplaceListing.updateOne(
+        { _id: ours.listing._id },
+        { $set: { "units.$[u].deliveredAt": stamp } },
+        { arrayFilters: [{ "u.orderId": id, "u.messagedAt": { $ne: null }, "u.deliveredAt": null }] },
+      ).catch((e) => {
+        console.error("g2g proof sweep: stamping " + id + " delivered failed:", e.message);
+        return null;
+      });
+      const n = (res && (res.modifiedCount || res.nModified)) || 0;
+      if (n) {
+        await markSuppliedDelivered(ours.listing, id);
+        out.stamped += n;
+      }
+    }
+    const needed = item.require_delivery_proof_to_credit_income || item.require_delivery_proof;
+    if (!needed || Number(item.total_uploaded_proofs) > 0) {
+      out.already++;
+      proofState.set(id, { done: true });
+      continue;
+    }
+    if (dryRun) {
+      out.wouldUpload++;
+      continue;
+    }
+    try {
+      const png = await require("./playerauctionsProof").renderProofPng({
+        orderId: id,
+        offerTitle: item.offer_title || o.title || "",
+        accountCount: ours.accounts,
+        when: ours.sentAt ? new Date(ours.sentAt) : new Date(now),
+        sellerName: G2G_SELLER_NAME,
+        market: "G2G",
+        method: "Sent to the buyer in the G2G chat",
+        banner: "The account credentials were sent to the buyer in the G2G chat for this order.",
+      });
+      await mp.g2gUploadDeliveryProof(id, png);
+      out.uploaded++;
+      proofState.set(id, { done: true });
+      try {
+        require("./systemLog")
+          .logEvent({
+            category: "marketplace",
+            action: "g2g_delivery_proof_uploaded",
+            actor: "g2g-fulfiller",
+            subject: id,
+            detail: "delivery proof uploaded for " + (item.offer_title || o.title || "order") + " (" + ours.accounts + " account(s))",
+          })
+          .catch(() => {});
+      } catch {
+        /* diagnostics only */
+      }
+    } catch (e) {
+      out.failed++;
+      const tries = ((st && st.tries) || 0) + 1;
+      const wait = Math.min(PROOF_RETRY_MAX_MS, PROOF_RETRY_BASE_MS * 2 ** (tries - 1));
+      const paged = !!(st && st.paged);
+      proofState.set(id, { tries, nextAt: now + wait, paged: paged || tries >= PROOF_PAGE_AFTER });
+      console.error("g2g delivery proof " + id + " failed (try " + tries + "):", e.message);
+      if (tries >= PROOF_PAGE_AFTER && !paged) {
+        await notify(
+          "G2G order " + id + ": the delivery proof could not be uploaded after " + tries +
+            " tries (" + String(e.message).slice(0, 200) + "). G2G holds the income until a proof " +
+            "is uploaded — upload a screenshot on the order page.",
+        ).catch(() => {});
+      }
+    }
+  }
+  return out;
 }
 
 // The intake-failure watch (utils/intakeWatch) must never break a delivery
@@ -1389,4 +1546,6 @@ module.exports = {
   confirmOnG2g,
   realStockFor,
   syncStock,
+  sweepDeliveryProofs,
+  _resetProofState: () => proofState.clear(),
 };

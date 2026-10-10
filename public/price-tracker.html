@@ -1,0 +1,998 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+<script>(function(){try{if(localStorage.getItem('theme')==='dark')document.documentElement.setAttribute('data-theme','dark');}catch(e){}})();</script>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<title>Price tracker | RedeemHub</title>
+<style>
+  :root{--bg:#f6f7fb;--surface:#ffffff;--surface-2:#f8fafc;--line:#e7eaf0;--ink:#0f172a;--muted:#6b7280;--accent:#4f46e5;--accent2:#6366f1;--green:#059669;--red:#dc2626;--yellow:#b45309;}
+  html[data-theme="dark"]{--bg:#0e1014;--surface:#161a22;--surface-2:#1e232e;--line:#2a3140;--ink:#e8ebf2;--muted:#9aa3b4;--green:#34d399;--red:#f87171;--yellow:#fbbf24;color-scheme:dark;}
+  html[data-theme="dark"] .nav .links a.active{background:rgba(99,102,241,0.20);}
+  html[data-theme="dark"] .pill.s-ok{background:rgba(52,211,153,.14);}
+  html[data-theme="dark"] .pill.s-warn{background:rgba(251,191,36,.14);}
+  html[data-theme="dark"] .pill.s-fail{background:rgba(248,113,113,.14);}
+  html[data-theme="dark"] .pill.s-unknown{background:rgba(154,163,180,.12);}
+  html[data-theme="dark"] .tab.on{background:rgba(99,102,241,.20);}
+  * { margin:0; padding:0; box-sizing:border-box; }
+  body { font-family:"Inter","Segoe UI",Tahoma,sans-serif; background:var(--bg); color:var(--ink); height:100vh; display:flex; overflow:hidden; }
+
+  .nav { width:236px; background:var(--surface); border-right:1px solid var(--line); display:flex; flex-direction:column; flex-shrink:0; }
+  .nav .brand { display:flex; align-items:center; gap:10px; padding:18px 20px; border-bottom:1px solid var(--line); }
+  .nav .brand .mark { width:34px; height:34px; border-radius:10px; background:linear-gradient(135deg,var(--accent2),var(--accent)); display:grid; place-items:center; box-shadow:0 6px 14px rgba(79,70,229,0.32); }
+  .nav .brand b { font-size:15px; font-weight:700; line-height:1.15; }
+  .nav .brand b span { display:block; font-size:10.5px; color:var(--muted); font-weight:500; }
+  .nav .links { padding:12px; flex:1; display:flex; flex-direction:column; gap:4px; overflow-y:auto; }
+  .nav .links a { display:flex; align-items:center; gap:11px; padding:11px 13px; border-radius:10px; color:var(--muted); text-decoration:none; font-size:14px; font-weight:500; }
+  .nav .links a:hover { background:var(--surface-2); }
+  .nav .links a.active { background:#eef2ff; color:var(--accent); font-weight:600; }
+  .nav .me { border-top:1px solid var(--line); padding:14px; display:flex; align-items:center; gap:10px; }
+  .nav .me .av { width:36px; height:36px; border-radius:10px; background:linear-gradient(135deg,#34d399,#10b981); display:grid; place-items:center; color:#fff; font-weight:700; font-size:13px; flex-shrink:0; }
+  .nav .me .who { line-height:1.2; min-width:0; }
+  .nav .me .who b { font-size:13.5px; display:block; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; max-width:84px; }
+  .nav .me .who span { display:block; font-size:11px; color:var(--muted); }
+  .nav .me .actions { margin-left:auto; display:flex; gap:6px; }
+  .nav .me .logout { width:32px; height:32px; border-radius:9px; border:1px solid var(--line); background:var(--surface); color:var(--muted); display:grid; place-items:center; cursor:pointer; }
+
+  .page { flex:1; overflow-y:auto; padding:26px 30px 64px; min-width:0; -webkit-overflow-scrolling:touch; }
+  h1 { font-size:22px; font-weight:800; }
+  .sub { color:var(--muted); font-size:13.5px; margin-top:4px; line-height:1.45; }
+  .head { display:flex; align-items:flex-start; gap:18px; flex-wrap:wrap; margin:0 0 18px; }
+  .head-actions { margin-left:auto; display:flex; gap:8px; align-items:center; }
+
+  button { border:1px solid var(--line); border-radius:9px; background:var(--surface); color:var(--ink); padding:9px 14px; cursor:pointer; font:inherit; font-size:13.5px; }
+  button:hover { border-color:var(--accent); }
+  button.primary { color:#fff; border-color:var(--accent); background:var(--accent); }
+  button:disabled { opacity:.5; cursor:not-allowed; }
+  a.plain { color:var(--accent); text-decoration:none; }
+
+  .pill { display:inline-flex; align-items:center; gap:5px; border-radius:999px; padding:3px 9px; font-size:11px; font-weight:700; border:1px solid transparent; white-space:nowrap; }
+  .pill.s-ok { color:var(--green); background:#ecfdf5; }
+  .pill.s-warn { color:var(--yellow); background:#fffbeb; }
+  .pill.s-fail { color:var(--red); background:#fef2f2; }
+  .pill.s-unknown { color:var(--muted); background:#f3f4f6; border-style:dashed; border-color:var(--line); }
+
+  /* ---------------------------- market cards ---------------------------- */
+  .grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(268px,1fr)); gap:14px; }
+  .mcard { background:var(--surface); border:1px solid var(--line); border-radius:14px; padding:15px 16px; cursor:pointer; display:flex; flex-direction:column; gap:11px; text-align:left; width:100%; }
+  .mcard:hover { border-color:var(--accent); }
+  .mcard .top { display:flex; align-items:center; gap:9px; }
+  .mcard .nm { font-size:15.5px; font-weight:750; text-transform:capitalize; }
+  .mcard .chev { margin-left:auto; color:var(--muted); flex-shrink:0; }
+  .mcard .money { font-size:24px; font-weight:800; letter-spacing:-.4px; line-height:1; }
+  .mcard .money small { font-size:12px; font-weight:600; color:var(--muted); margin-left:5px; letter-spacing:0; }
+  .mcard .stats { display:grid; grid-template-columns:repeat(3,1fr); gap:8px; }
+  .mcard .stat { background:var(--surface-2); border-radius:9px; padding:7px 9px; }
+  .mcard .stat b { display:block; font-size:15px; font-weight:750; line-height:1.2; }
+  .mcard .stat span { font-size:10.5px; color:var(--muted); }
+  .mcard .basis { font-size:11px; color:var(--muted); line-height:1.4; }
+
+  /* ------------------------------ detail -------------------------------- */
+  .back { display:inline-flex; align-items:center; gap:7px; color:var(--muted); background:none; border:none; padding:8px 0; font-size:13.5px; cursor:pointer; }
+  .back:hover { color:var(--accent); }
+  .kpis { display:grid; grid-template-columns:repeat(auto-fit,minmax(120px,1fr)); gap:10px; margin:14px 0 16px; }
+  .kpi { background:var(--surface); border:1px solid var(--line); border-radius:12px; padding:12px 13px; }
+  .kpi b { display:block; font-size:19px; font-weight:800; line-height:1.2; }
+  .kpi span { font-size:11.5px; color:var(--muted); }
+
+  .tabs { display:flex; gap:6px; overflow-x:auto; padding-bottom:8px; margin-bottom:12px; scrollbar-width:none; -webkit-overflow-scrolling:touch; }
+  .tabs::-webkit-scrollbar { display:none; }
+  .tab { flex:0 0 auto; border:1px solid var(--line); background:var(--surface); border-radius:999px; padding:8px 15px; font-size:13px; font-weight:600; color:var(--muted); cursor:pointer; white-space:nowrap; }
+  .tab.on { background:#eef2ff; color:var(--accent); border-color:var(--accent); }
+
+  .basisbar { font-size:12px; color:var(--muted); background:var(--surface-2); border:1px dashed var(--line); border-radius:10px; padding:9px 12px; margin-bottom:12px; line-height:1.45; }
+
+  .rows { display:flex; flex-direction:column; gap:8px; }
+  .row { background:var(--surface); border:1px solid var(--line); border-radius:12px; padding:12px 14px; }
+  .row .r1 { display:flex; align-items:baseline; gap:9px; flex-wrap:wrap; }
+  .row .r1 .t { font-weight:650; font-size:14px; line-height:1.35; word-break:break-word; }
+  .row .r1 .amt { margin-left:auto; font-weight:750; font-size:14px; white-space:nowrap; }
+  .row .r2 { margin-top:5px; font-size:12px; color:var(--muted); display:flex; gap:10px; flex-wrap:wrap; align-items:center; }
+  .row .err { margin-top:7px; font-size:12px; color:var(--red); background:rgba(220,38,38,.06); border-radius:8px; padding:7px 9px; line-height:1.45; word-break:break-word; }
+  /* A reason, not a fault. "Missing because the reserve floor was reached" is
+     the buffer working as designed, and painting it red like .err would teach
+     the operator to ignore the rows that ARE faults. */
+  .row .why { margin-top:7px; font-size:12px; color:var(--muted); background:var(--surface-2); border:1px dashed var(--line); border-radius:8px; padding:7px 9px; line-height:1.45; word-break:break-word; }
+  .row .kpis { margin:10px 0 2px; }
+  .mono { font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:11.5px; }
+  .oid { color:var(--accent); cursor:pointer; text-decoration:underline; text-underline-offset:2px; word-break:break-all; }
+  .empty { text-align:center; color:var(--muted); font-size:13.5px; padding:34px 16px; background:var(--surface); border:1px dashed var(--line); border-radius:12px; line-height:1.5; }
+  .more { width:100%; margin-top:10px; padding:12px; }
+  .sentinel { height:1px; }
+
+  /* --------------------------- order trail ------------------------------ */
+  .sheet { position:fixed; inset:0; background:rgba(15,23,42,.55); display:none; z-index:80; align-items:flex-end; justify-content:center; }
+  .sheet.on { display:flex; }
+  .sheet .inner { background:var(--surface); width:100%; max-width:620px; max-height:86vh; border-radius:16px 16px 0 0; display:flex; flex-direction:column; }
+  .sheet .sh { padding:15px 17px; border-bottom:1px solid var(--line); display:flex; align-items:center; gap:10px; }
+  .sheet .sh b { font-size:15px; font-weight:750; }
+  .sheet .sb { padding:15px 17px calc(24px + env(safe-area-inset-bottom)); overflow-y:auto; }
+  .tl { position:relative; padding-left:20px; }
+  .tl::before { content:""; position:absolute; left:5px; top:5px; bottom:5px; width:2px; background:var(--line); }
+  .tl .ev { position:relative; padding-bottom:15px; }
+  .tl .ev::before { content:""; position:absolute; left:-19px; top:4px; width:10px; height:10px; border-radius:50%; background:var(--accent); border:2px solid var(--surface); }
+  .tl .ev.bad::before { background:var(--red); }
+  .tl .ev .k { font-weight:700; font-size:13px; }
+  .tl .ev .w { font-size:11.5px; color:var(--muted); }
+  .tl .ev .d { font-size:12.5px; margin-top:3px; line-height:1.45; word-break:break-word; }
+
+  @media (max-width:768px) {
+    .page { padding:14px 14px calc(72px + env(safe-area-inset-bottom)); }
+    h1 { font-size:19px; }
+    .sub { font-size:12.5px; }
+    .grid { grid-template-columns:1fr; gap:11px; }
+    .kpis { grid-template-columns:repeat(2,1fr); }
+    /* Tap targets, not mouse targets. */
+    .tab { padding:10px 16px; font-size:13.5px; }
+    .mcard { padding:14px; }
+    .row { padding:13px 14px; }
+    .head-actions { width:100%; }
+    .head-actions button { flex:1; padding:11px 14px; }
+  }
+
+  /* ------------------------------ price tracker ------------------------------ */
+  .insights { display:flex; flex-direction:column; gap:8px; margin:0 0 18px; }
+  .insight { background:var(--surface); border:1px solid var(--line); border-left:4px solid var(--line); border-radius:12px; padding:11px 14px; }
+  .insight.warn { border-left-color:var(--yellow); }
+  .insight.opportunity { border-left-color:var(--green); }
+  .insight.info { border-left-color:var(--accent2); }
+  .insight b { font-size:13.5px; display:block; margin-bottom:3px; }
+  .insight span { font-size:12.5px; color:var(--muted); line-height:1.5; display:block; }
+  .vgrid { display:grid; grid-template-columns:repeat(auto-fill,minmax(300px,1fr)); gap:14px; }
+  .vcard { background:var(--surface); border:1px solid var(--line); border-radius:14px; padding:14px 16px; display:flex; flex-direction:column; gap:10px; }
+  .vcard .top { display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
+  .vcard .nm { font-size:15.5px; font-weight:750; }
+  .vcard .big { font-size:23px; font-weight:800; letter-spacing:-.4px; line-height:1; }
+  .vcard .big small { font-size:11.5px; font-weight:600; color:var(--muted); margin-left:5px; letter-spacing:0; }
+  .vcard .mini { display:grid; grid-template-columns:repeat(3,1fr); gap:7px; }
+  .vcard .mini div { background:var(--surface-2); border-radius:9px; padding:6px 9px; }
+  .vcard .mini b { display:block; font-size:14px; font-weight:750; }
+  .vcard .mini span { font-size:10.5px; color:var(--muted); }
+  .vcard .note { font-size:11.5px; color:var(--muted); line-height:1.45; }
+  .pill.s-info { color:var(--accent); background:#eef2ff; }
+  html[data-theme="dark"] .pill.s-info { background:rgba(99,102,241,.18); }
+  .ctl { display:flex; gap:8px; flex-wrap:wrap; align-items:center; margin:0 0 12px; }
+  .ctl select, .ctl input { border:1px solid var(--line); background:var(--surface); color:var(--ink); border-radius:9px; padding:9px 11px; font:inherit; font-size:13.5px; min-width:0; }
+  .ctl input[type=search] { flex:1 1 180px; }
+  table.curve { width:100%; border-collapse:collapse; font-size:12.5px; background:var(--surface); border:1px solid var(--line); border-radius:12px; overflow:hidden; }
+  table.curve th { text-align:right; font-weight:650; color:var(--muted); font-size:11px; padding:8px 9px; background:var(--surface-2); white-space:nowrap; }
+  table.curve td { text-align:right; padding:8px 9px; border-top:1px solid var(--line); white-space:nowrap; }
+  table.curve th:first-child, table.curve td:first-child { text-align:left; }
+  table.curve tr.best td { background:rgba(5,150,105,.09); font-weight:650; }
+  table.curve tr.thin td { opacity:.55; }
+  .scroll { overflow-x:auto; -webkit-overflow-scrolling:touch; }
+  .bar { display:inline-block; height:7px; border-radius:4px; background:var(--accent2); vertical-align:middle; }
+  .bar.range { background:rgba(99,102,241,.25); }
+  .chips { display:flex; flex-wrap:wrap; gap:6px; margin-top:7px; }
+  .chip { font-size:11.5px; border:1px solid var(--line); background:var(--surface-2); border-radius:8px; padding:4px 8px; line-height:1.3; }
+  .chip b { font-weight:700; }
+  .chip.sold { border-color:var(--green); }
+  .arrow { color:var(--muted); }
+  .good { color:var(--green); } .bad { color:var(--red); }
+  .row.clickable { cursor:pointer; } .row.clickable:hover { border-color:var(--accent); }
+  .gsum { display:grid; grid-template-columns:repeat(auto-fit,minmax(110px,1fr)); gap:8px; margin:0 0 12px; }
+  .gsum div { background:var(--surface); border:1px solid var(--line); border-radius:10px; padding:8px 11px; }
+  .gsum b { display:block; font-size:16px; font-weight:800; } .gsum span { font-size:11px; color:var(--muted); }
+  .pill.s-more { color:var(--green); background:#ecfdf5; } .pill.s-less { color:var(--yellow); background:#fffbeb; }
+  html[data-theme="dark"] .pill.s-more { background:rgba(52,211,153,.14); } html[data-theme="dark"] .pill.s-less { background:rgba(251,191,36,.14); }
+  .kv { display:grid; grid-template-columns:repeat(auto-fit,minmax(140px,1fr)); gap:8px; margin:8px 0 12px; }
+  .kv div { background:var(--surface-2); border-radius:9px; padding:7px 10px; } .kv b { display:block; font-size:14px; } .kv span { font-size:11px; color:var(--muted); }
+  .flagbox { font-size:12px; line-height:1.45; border-left:3px solid var(--line); background:var(--surface-2); border-radius:6px; padding:7px 10px; margin:6px 0; }
+  .flagbox.warn { border-left-color:var(--yellow); } .flagbox.opportunity { border-left-color:var(--green); } .flagbox.info { border-left-color:var(--accent2); }
+  table.pm { width:100%; border-collapse:collapse; font-size:12px; } table.pm th { text-align:left; color:var(--muted); font-weight:650; font-size:10.5px; padding:6px 7px; background:var(--surface-2); white-space:nowrap; }
+  table.pm td { padding:7px; border-top:1px solid var(--line); vertical-align:top; } table.pm td small { color:var(--muted); display:block; font-size:10.5px; line-height:1.35; }
+  h4.sec { font-size:13px; margin:16px 0 6px; }
+
+</style>
+</head>
+
+<body>
+  <aside class="nav">
+    <div class="brand">
+      <span class="mark"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polygon points="12 2 2 8.5 12 15 22 8.5 12 2"></polygon></svg></span>
+      <b>RedeemHub<span>Admin console</span></b>
+    </div>
+    <nav class="links"></nav>
+    <div class="me">
+      <div class="av" id="meAvatar">--</div>
+      <div class="who"><b id="meName">Admin</b><span id="meRole">...</span></div>
+      <div class="actions">
+        <button class="logout" data-theme-toggle onclick="toggleTheme()" title="Toggle dark mode" aria-pressed="false">☾</button>
+        <button class="logout" id="logoutBtn" title="Log out">⎋</button>
+      </div>
+    </div>
+  </aside>
+
+  <main class="page" id="page"></main>
+
+  <div class="sheet" id="sheet"><div class="inner">
+    <div class="sh"><b id="sheetTitle">Set</b><button style="margin-left:auto" id="sheetClose">Close</button></div>
+    <div class="sb" id="sheetBody"></div>
+  </div></div>
+
+  <script src="/theme.js"></script>
+  <script src="/admin-nav.js"></script>
+  <script>
+  (function () {
+    "use strict";
+    // Everything rendered here is marketplace-supplied text (offer titles, order
+    // ids). One unescaped value is an XSS hole on a superadmin page.
+    function esc(v) {
+      return String(v == null ? "" : v)
+        .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;").replace(/'/g, "&#39;");
+    }
+    function money(n) { return "$" + (Number(n) || 0).toFixed(2); }
+    function pct(n) { return Math.round((Number(n) || 0) * 100) + "%"; }
+    function ago(d) {
+      if (!d) return "never";
+      var s = Math.max(0, (Date.now() - new Date(d).getTime()) / 1000);
+      if (s < 3600) return Math.max(1, Math.round(s / 60)) + " min ago";
+      if (s < 86400) return Math.round(s / 3600) + "h ago";
+      return Math.round(s / 86400) + "d ago";
+    }
+    function day(d) { return d ? String(d).slice(0, 10) : "—"; }
+    async function api(path) {
+      // The Refresh button asks for a rebuild once, on whichever tab is showing.
+      if (state.forceNext && path.indexOf("/api/price-tracker/") === 0) {
+        path += (path.indexOf("?") < 0 ? "?" : "&") + "force=1";
+        state.forceNext = false;
+      }
+      var r = await fetch(path, { credentials: "same-origin", headers: { Accept: "application/json" } });
+      if (r.status === 401 || r.status === 403) throw new Error("Not signed in as a superadmin with 2FA.");
+      var j = await r.json().catch(function () { return null; });
+      if (!r.ok || !j || j.success === false) throw new Error((j && j.message) || "HTTP " + r.status);
+      return j;
+    }
+
+    var page = document.getElementById("page");
+    var TABS = [["games", "Games"], ["market", "Market radar"], ["brain", "Farm brain (test)"], ["overview", "Overview"], ["curve", "Price curve"], ["sets", "Same items"], ["advice", "Advice"], ["sales", "Sales ledger"], ["suggest", "Suggest"]];
+    var MARKETS = ["gameflip", "ggsel", "eldorado", "g2g", "playerauctions", "zeusx", "digiseller"];
+    var state = { tab: (location.hash || "#games").slice(1), overview: null };
+    if (!TABS.some(function (t) { return t[0] === state.tab; })) state.tab = "games";
+
+    // Every shell() starts a new render. A response that arrives after the user
+    // has moved to another tab (or changed a filter) must not write into the new
+    // DOM: it checks its generation and drops out instead.
+    function shell(inner) {
+      state.gen = (state.gen || 0) + 1;
+      var gen = state.gen;
+      page.innerHTML =
+        '<div class="head"><div><h1>Price tracker</h1>' +
+        '<div class="sub">What each market really pays for the same items, whether lower prices really sell more, and what each listing should cost. ' +
+        'Read-only — nothing here lists, delists or reprices, and it never calls a marketplace.</div></div>' +
+        '<div class="head-actions"><button id="refreshBtn">Refresh</button></div></div>' +
+        '<div class="tabs">' + TABS.map(function (t) {
+          return '<button class="tab' + (t[0] === state.tab ? " on" : "") + '" data-tab="' + t[0] + '">' + t[1] + "</button>";
+        }).join("") + "</div>" + inner;
+      page.querySelector("#refreshBtn").onclick = function () { state.overview = null; state.forceNext = true; render(true); };
+      Array.prototype.forEach.call(page.querySelectorAll(".tab"), function (b) {
+        b.onclick = function () { state.tab = b.getAttribute("data-tab"); location.hash = state.tab; render(); };
+      });
+      return gen;
+    }
+    function stale(g) { return g !== state.gen; }
+    function fail(e) { shell('<div class="empty">' + esc(e.message) + "</div>"); }
+    function marketOptions(sel, any) {
+      return (any ? '<option value="">All markets</option>' : "") + MARKETS.map(function (m) {
+        return '<option value="' + m + '"' + (m === sel ? " selected" : "") + ">" + m + "</option>";
+      }).join("");
+    }
+
+    /* ----------------------------- overview ----------------------------- */
+    async function getOverview(force) {
+      if (!state.overview || force) state.overview = await api("/api/price-tracker/overview");
+      return state.overview;
+    }
+    function venueCard(v, fees) {
+      var f = fees[v.market] || {};
+      var gap = v.askVsRealisedPct;
+      return '<div class="vcard"><div class="top"><span class="nm">' + esc(v.label) + "</span>" +
+        (v.blocked ? '<span class="pill s-fail">blocked</span>' : "") +
+        '<span class="pill ' + (f.verified ? "s-ok" : "s-unknown") + '" title="' + esc(f.source) + '">' + esc(f.feePct) + "% fee" + (f.verified ? "" : " · assumed") + "</span></div>" +
+        (v.realised.n
+          ? '<div class="big">' + money(v.realised.median) + "<small>median realised · " + v.realised.n + " sales</small></div>"
+          : '<div class="big">—<small>no priced sales recorded</small></div>') +
+        '<div class="mini"><div><b>' + money(v.realised.p75) + "</b><span>p75 paid</span></div>" +
+        "<div><b>" + money(v.grossUsd) + "</b><span>gross</span></div>" +
+        "<div><b>" + money(v.netUsd) + "</b><span>net of fee</span></div>" +
+        "<div><b>" + (v.live.n ? money(v.live.askMedian) : "—") + "</b><span>live ask median (" + v.live.n + ")</span></div>" +
+        "<div><b>" + (gap == null ? "—" : (gap > 0 ? "+" : "") + Math.round(gap) + "%") + "</b><span>ask vs paid</span></div>" +
+        "<div><b>" + pct(v.atFloorShare) + "</b><span>sold at floor " + money(v.floorUsd) + "</span></div></div>" +
+        '<div class="note">Sales: ' + v.sales.d7 + " in 7d · " + v.sales.d30 + " in 30d · " + v.sales.prev30 + " the 30d before. " +
+        (v.approxShare >= 0.5 ? "Prices are the listing price now, not the price at sale. " : "") +
+        esc(f.repriceMode || "") + "</div></div>";
+    }
+    async function renderOverview(force) {
+      var want = state.tab;
+      var o = await getOverview(force);
+      if (state.tab !== want) return;
+      var ins = o.insights.map(function (i) {
+        return '<div class="insight ' + esc(i.level) + '"><b>' + esc(i.title) + "</b><span>" + esc(i.detail) + "</span></div>";
+      }).join("");
+      var q = o.quality;
+      shell(
+        '<div class="basisbar">Evidence: ' + q.total + " sales in the ledger (" + q.priced + " priced) — " +
+        Object.keys(q.bySource).map(function (k) { return q.bySource[k] + " " + k; }).join(", ") +
+        ". Set aside: " + o.suspect.total + " mass-close signals, " + o.excluded.farm + " rent-farm, " + o.excluded.bulk + " bulk, " + o.excluded.duplicate +
+        " duplicates. " + o.counts.sets + " item sets, " + o.counts.crossMarketSets + " sold on 2+ markets. Built " + esc(ago(o.at)) + ".</div>" +
+        '<div class="insights">' + ins + "</div>" +
+        '<div class="vgrid">' + o.venues.map(function (v) { return venueCard(v, o.fees); }).join("") + "</div>"
+      );
+    }
+
+    /* -------------------------------- games --------------------------------- */
+    function dirPill(g) {
+      var d = g.direction;
+      if (d === "more") return '<span class="pill s-more">farm +' + g.need + " (target " + g.target + ")</span>";
+      if (d === "wait") return '<span class="pill s-warn">short ' + g.need + " — no campaign to farm</span>";
+      if (d === "less") return '<span class="pill s-less">over by ' + g.spare + " (target " + g.target + ")</span>";
+      if (d === "hold") return '<span class="pill s-ok">on target (' + g.target + ")</span>";
+      if (d === "managed") return '<span class="pill s-info">' + esc(g.managedBy || "managed elsewhere") + "</span>";
+      return '<span class="pill s-unknown">no sales in 45d</span>';
+    }
+    function engineChip(g) {
+      var c = g.engineCounts14d;
+      if (!c) return "";
+      var parts = Object.keys(c).map(function (k) { return k.replace(/^skip_/, "skip ") + " ×" + c[k]; });
+      return '<span class="chip">engine 14d: ' + esc(parts.join(", ")) + "</span>";
+    }
+    function priceChips(prices) {
+      return Object.keys(prices).map(function (m) {
+        var p = prices[m];
+        var parts = ["<b>" + esc(m) + "</b>"];
+        if (p.autoRows > 0) parts.push("auto ask " + money(p.askAuto));
+        else if (p.listings > 0) parts.push("hand-priced " + money(p.ask));
+        if (p.suggested > 0) parts.push((p.autoRows > 0 ? "→ " : "new listings ") + "<b>" + money(p.suggested) + "</b> " + esc(p.confidence));
+        else if (p.sold > 0) parts.push("sold " + p.sold + " @ " + money(p.soldMedian) + (p.blocked ? " (blocked)" : ""));
+        if (p.suggested > 0 && p.position && p.position !== "no rivals") parts.push(esc(p.position));
+        return '<span class="chip' + (p.sold > 0 ? " sold" : "") + '">' + parts.join(" · ") + "</span>";
+      }).join("");
+    }
+    async function renderGames() {
+      var f = state.games || (state.games = { scope: "own", q: "", sort: "revenue", direction: "", flag: "", offset: 0 });
+      var g = shell('<div class="ctl"><select id="gs"><option value="own">Our games</option><option value="market">Market only (we sell none)</option><option value="all">All researched games</option></select>' +
+        '<select id="go"><option value="revenue">Sort: weekly revenue</option><option value="demand">Sort: sales (45d)</option><option value="need">Sort: farm shortfall</option><option value="spare">Sort: over-stock</option><option value="cover">Sort: least stock cover</option><option value="gap">Sort: engine over-count</option><option value="market">Sort: market demand</option><option value="opportunity">Sort: opportunity score</option></select>' +
+        '<select id="gd"><option value="">Any farm advice</option><option value="more">Farm more (campaign running)</option><option value="wait">Short, no campaign running</option><option value="hold">On target</option><option value="less">Over-stocked</option><option value="managed">Managed elsewhere (no-claim / reuse-only)</option><option value="none">No sales</option></select>' +
+        '<select id="gf"><option value="">Any flag</option><option value="inflated-demand">Engine over-counts</option><option value="understated-demand">Engine under-counts</option><option value="stockout-risk">Stock-out risk</option><option value="overstocked">Over-stocked</option><option value="low-share">Low market share</option></select>' +
+        '<input id="gq" type="search" placeholder="Search a game" value="' + esc(f.q) + '"></div><div id="gl"><div class="empty">Loading…</div></div>');
+      [["gs", "scope"], ["go", "sort"], ["gd", "direction"], ["gf", "flag"]].forEach(function (p) {
+        var el = page.querySelector("#" + p[0]); el.value = f[p[1]]; el.onchange = function () { f[p[1]] = el.value; f.offset = 0; renderGames(); };
+      });
+      var gq = page.querySelector("#gq"), t; gq.oninput = function () { clearTimeout(t); t = setTimeout(function () { f.q = gq.value; f.offset = 0; renderGames(); }, 350); };
+      var j = await api("/api/price-tracker/games?scope=" + encodeURIComponent(f.scope) + "&sort=" + encodeURIComponent(f.sort) + "&direction=" + encodeURIComponent(f.direction) + "&flag=" + encodeURIComponent(f.flag) + "&q=" + encodeURIComponent(f.q) + "&limit=20&offset=" + f.offset);
+      if (stale(g)) return;
+      var s = j.summary, bd = s.byDirection || {};
+      var rows = j.rows.map(function (x) {
+        var inflated = x.engineCount45 > x.units45 + 2;
+        var flags = x.flags.map(function (fl) {
+          return '<span class="pill ' + (fl.level === "warn" ? "s-warn" : fl.level === "opportunity" ? "s-more" : "s-unknown") + '">' + esc(fl.id.replace(/-/g, " ")) + "</span>";
+        }).join(" ");
+        return '<div class="row clickable" data-key="' + esc(x.key) + '"><div class="r1"><span class="t">' + esc(x.game) + '</span><span class="amt">' + (x.weeklyRevenueUsd > 0 ? money(x.weeklyRevenueUsd) + "/wk" : "—") + "</span></div>" +
+          '<div class="r2"><span><b>' + x.units45 + "</b> sold in 45d (" + x.perWeek + "/wk)</span>" +
+          "<span>engine counts <b" + (inflated ? ' class="bad"' : "") + ">" + x.engineCount45 + "</b></span>" +
+          (x.valuePerAccount > 0 ? "<span>" + money(x.valuePerAccount) + " per account</span>" : "") +
+          (x.marketPerWeek != null ? "<span>market ~" + Math.round(x.marketPerWeek) + "/wk" + (x.share != null ? " (we have " + pct(x.share) + ")" : "") + "</span>" : "") +
+          "</div>" +
+          '<div class="r2">' + dirPill(x) + '<span class="chip">on hand ' + x.onHand + " (listed " + x.listedUnits + ")" + (x.inFlight ? " + " + x.inFlight + " farming" : "") + (x.daysCover != null ? " · " + x.daysCover + " d cover" : "") + "</span>" + engineChip(x) + " " + flags + "</div>" +
+          (Object.keys(x.prices).length ? '<div class="chips">' + priceChips(x.prices) + "</div>" : "") + "</div>";
+      }).join("");
+      page.querySelector("#gl").innerHTML =
+        '<div class="gsum"><div><b>' + s.games + "</b><span>games</span></div><div><b>" + money(s.weeklyRevenueUsd) + "</b><span>per week (clean evidence)</span></div><div><b>" + s.unitsPerWeek + "</b><span>accounts sold / week</span></div>" +
+        "<div><b>" + (bd.more || 0) + "</b><span>farm more now</span></div><div><b>" + (bd.wait || 0) + "</b><span>short, no campaign</span></div><div><b>" + (bd.less || 0) + "</b><span>over-stocked</span></div><div><b>" + (bd.managed || 0) + "</b><span>managed elsewhere</span></div><div><b>" + s.inflated + "</b><span>engine over-counts</span></div></div>" +
+        '<div class="basisbar">Each game: what we sold (each sold account counted once, from every source, with delist bursts removed), what it earns, how other sellers price it, and how many accounts it is worth farming using the farm engine&rsquo;s own stock-cover formula' +
+        (s.sizing ? " (" + s.sizing.coverageDays + " days of cover + " + s.sizing.safetyStock + " safety)" : "") + ". &ldquo;Farm more&rdquo; needs a campaign running, a real shortfall and at least 2 sales a week; the safety stock alone would make every small game look short. Advice only: it changes nothing. <b>Engine counts</b> is the farm engine&rsquo;s own 45-day sales figure, shown for comparison.</div>" +
+        (rows ? '<div class="rows">' + rows + "</div>" : '<div class="empty">Nothing matches.</div>') +
+        '<div class="ctl" style="margin-top:12px">' + (f.offset > 0 ? '<button id="pv">← Previous</button>' : "") + (f.offset + 20 < j.total ? '<button id="nx">Next →</button>' : "") + "<span class=\"sub\">" + j.total + " games</span></div>";
+      var nx = page.querySelector("#nx"), pv = page.querySelector("#pv");
+      if (nx) nx.onclick = function () { f.offset += 20; renderGames(); };
+      if (pv) pv.onclick = function () { f.offset = Math.max(0, f.offset - 20); renderGames(); };
+      Array.prototype.forEach.call(page.querySelectorAll(".row.clickable"), function (r) { r.onclick = function () { openGame(r.getAttribute("data-key")); }; });
+    }
+    function confPill(c) {
+      return '<span class="pill ' + (c === "high" ? "s-ok" : c === "medium" ? "s-warn" : "s-unknown") + '">' + esc(c) + "</span>";
+    }
+    function sugCell(sg) {
+      if (!(sg.price > 0)) return "<small>no suggestion</small>";
+      return "<b>" + money(sg.price) + "</b> " + confPill(sg.confidence) +
+        "<small>" + esc(sg.basis) + (sg.position && sg.position !== "no rivals" ? " · " + esc(sg.position) : "") + "</small>" +
+        (sg.test ? "<small><b>test " + money(sg.test.price) + "</b> — " + esc(sg.test.why) + "</small>" : "") +
+        "<small>" + esc((sg.reasons || []).join(" ")) + "</small>";
+    }
+    function rivalCell(r) {
+      if (!r) return "<small>no scan for this market</small>";
+      return "page median " + money(r.median) + (r.lowestOther > 0 ? "<small>cheapest other seller " + money(r.lowestOther) + "</small>" : "") +
+        "<small>" + r.sellers + " sellers · " + r.offers + " offers" + (r.pageWide ? " · includes our own rows" : "") + "</small>";
+    }
+    async function openGame(key) {
+      var tok = (state.sheetTok = (state.sheetTok || 0) + 1);
+      openSheet("Loading…", '<div class="empty">Loading…</div>');
+      try {
+        var j = await api("/api/price-tracker/game/" + encodeURIComponent(key));
+        if (tok !== state.sheetTok) return;
+        var g = j.game, fm = g.farm, d = g.demand;
+        var flags = g.flags.map(function (f) { return '<div class="flagbox ' + esc(f.level) + '">' + esc(f.text) + "</div>"; }).join("");
+        var src = Object.keys(d.bySource).map(function (k) { return d.bySource[k] + " " + k; }).join(" · ");
+        var kv = '<div class="kv"><div><b>' + d.units45 + "</b><span>accounts sold, 45d (clean)</span></div><div><b>" + d.engine.count45 + "</b><span>the farm engine counts</span></div><div><b>" + d.engineClean.count45 + "</b><span>engine count without delist bursts</span></div>" +
+          "<div><b>" + d.perWeek + "</b><span>per week</span></div><div><b>" + d.d7 + " / " + d.d14 + " / " + d.d30 + "</b><span>last 7 / 14 / 30 days</span></div><div><b>" + money(fm.valuePerAccount) + "</b><span>net per account sold</span></div>" +
+          "<div><b>" + money(fm.weeklyRevenueUsd) + "</b><span>per week</span></div>" +
+          (d.market ? "<div><b>" + (d.market.perWeek == null ? "—" : "~" + Math.round(d.market.perWeek)) + "</b><span>market units/wk (GGSel+Plati)</span></div><div><b>" + d.market.sellers + " / " + d.market.offers + "</b><span>rival sellers / offers</span></div>" : "") + "</div>";
+        var farm = '<div class="kv"><div><b>' + fm.target + "</b><span>accounts justified</span></div><div><b>" + fm.onHand + "</b><span>on hand (" + fm.listed + " listed, " + fm.archiveHolders + " held unsold)</span></div><div><b>" + fm.inFlight + "</b><span>being farmed (engine)</span></div>" +
+          "<div><b>" + (fm.daysCover == null ? "—" : fm.daysCover + " d") + "</b><span>stock on hand lasts</span></div><div><b>" + (fm.farmable ? "yes" : "no") + "</b><span>campaign running to farm</span></div>" + (fm.gameCap ? "<div><b>" + fm.gameCap + "</b><span>your cap for this game</span></div>" : "") + "</div>" +
+          fm.reasons.map(function (r) { return "<div class=\"flagbox info\">" + esc(r) + "</div>"; }).join("") + fm.notes.map(function (r) { return "<div class=\"flagbox warn\">" + esc(r) + "</div>"; }).join("");
+        var eng = fm.engine ? '<div class="flagbox info"><b>Farm engine, latest:</b> ' + esc(fm.engine.decision) + (fm.engine.campaign ? " — " + esc(fm.engine.campaign) : "") + " · target " + fm.engine.target + ", assigned " + fm.engine.assigned + (fm.engine.archiveHolders ? ", already held " + fm.engine.archiveHolders : "") + "<br>" + esc(fm.engine.reason) + "</div>" : '<div class="flagbox info">No farm decision for this game in the last 30 days.</div>';
+        var mk = Object.keys(g.price.markets).map(function (m) {
+          var v = g.price.markets[m];
+          if (!(v.suggested.price > 0 || v.sold.orders || v.live.listings)) return "";
+          var sg = v.suggested;
+          return "<tr><td><b>" + esc(m) + "</b>" + (v.blocked ? "<small>blocked by owner</small>" : "") + "</td>" +
+            "<td>" + (v.sold.orders ? v.sold.orders + " sold @ " + money(v.sold.median) + "<small>" + money(v.sold.p25) + "–" + money(v.sold.p75) + (v.sold.last ? " · last " + esc(day(v.sold.last)) : "") + "</small>" : "<small>no sale</small>") + "</td>" +
+            "<td>" + (v.live.listings ? v.live.listings + " live @ " + money(v.live.askMedian) + "<small>" + v.live.autoRows + " auto-priced" + (v.live.autoRows ? " @ " + money(v.live.autoAskMedian) : "") + " · " + money(v.live.askMin) + "–" + money(v.live.askMax) + " · " + v.live.units + " units" + (v.askVsSoldPct != null ? " · ask " + (v.askVsSoldPct > 0 ? "+" : "") + v.askVsSoldPct + "% vs sold" : "") + "</small>" : "<small>not listed</small>") + "</td>" +
+            "<td>" + rivalCell(v.rival) + "</td>" +
+            "<td>" + sugCell(sg) + "</td></tr>";
+        }).join("");
+        var sets = j.sets.map(adviceRow).join("");
+        var sales = j.sales.map(function (x) {
+          return '<div class="row"><div class="r1"><span class="t">' + esc(x.market) + " · " + esc(x.source) + '</span><span class="amt">' + (x.priced ? money(x.priceUsd) : "no price") + "</span></div>" +
+            '<div class="r2"><span>' + esc(day(x.at)) + "</span>" + (x.orderId ? '<span class="mono">order ' + esc(x.orderId) + "</span>" : "") + '<span class="mono">' + esc(x.externalId) + "</span><span>" + esc(String(x.title || "").slice(0, 80)) + "</span></div></div>";
+        }).join("");
+        var hist = j.history.map(function (t) {
+          return '<div class="row"><div class="r1"><span class="t">' + esc(t.decision) + (t.campaign ? " — " + esc(t.campaign) : "") + '</span><span class="amt">' + esc(day(t.decidedAt)) + "</span></div><div class=\"r2\"><span>target " + t.target + " · planned " + t.planned + " · assigned " + t.assigned + "</span></div><div class=\"r2\">" + esc(t.reason) + "</div></div>";
+        }).join("");
+        openSheet(g.game,
+          flags + "<h4 class=\"sec\">Demand</h4>" + kv + '<div class="basisbar">Sold accounts by source: ' + esc(src || "none") + ". One account counts once however many places saw it (login identity).</div>" +
+          "<h4 class=\"sec\">How many to farm</h4>" + farm + eng +
+          "<h4 class=\"sec\">Price by market, and other sellers</h4><div class=\"scroll\"><table class=\"pm\"><tr><th>market</th><th>we sold</th><th>our live asks</th><th>other sellers</th><th>suggested</th></tr>" + mk + "</table></div>" +
+          "<h4 class=\"sec\">Item sets of this game (advice)</h4><div class=\"rows\">" + (sets || '<div class="empty">No live listings.</div>') + "</div>" +
+          "<h4 class=\"sec\">Recent sales</h4><div class=\"rows\">" + (sales || '<div class="empty">None.</div>') + "</div>" +
+          "<h4 class=\"sec\">Farm engine decisions</h4><div class=\"rows\">" + (hist || '<div class="empty">None in 30 days.</div>') + "</div>");
+      } catch (e) { openSheet("Error", '<div class="empty">' + esc(e.message) + "</div>"); }
+    }
+
+    /* ---------------------------- price curve --------------------------- */
+    async function renderCurve() {
+      var market = state.curveMarket || "gameflip", origin = state.curveOrigin || "auto";
+      var g = shell('<div class="ctl"><select id="cm">' + marketOptions(market) + '</select><select id="co">' +
+        ["auto", "all", "manual"].map(function (x) { return '<option value="' + x + '"' + (x === origin ? " selected" : "") + ">" + x + " listings</option>"; }).join("") +
+        '</select></div><div id="cv"><div class="empty">Loading…</div></div>');
+      page.querySelector("#cm").onchange = function (e) { state.curveMarket = e.target.value; renderCurve(); };
+      page.querySelector("#co").onchange = function (e) { state.curveOrigin = e.target.value; renderCurve(); };
+      var j = await api("/api/price-tracker/curve/" + encodeURIComponent(market) + "?origin=" + encodeURIComponent(origin));
+      if (stale(g)) return;
+      var c = j.curve, single = c.saleModel === "single-unit";
+      var maxV = Math.max.apply(null, c.bins.map(function (b) { return single ? (b.expectedRevenuePerListing || 0) : b.revenuePerListingDay; }).concat([0.0001]));
+      var rows = c.bins.map(function (b) {
+        var v = single ? b.expectedRevenuePerListing : b.revenuePerListingDay;
+        return '<tr class="' + (b.label === c.best ? "best " : "") + (b.thin ? "thin" : "") + '"><td>' + esc(b.label) + (b.label === c.best ? " ★" : "") + (b.thin ? " · thin" : "") + "</td>" +
+          "<td>" + b.listings + "</td><td>" + (single ? b.resolved : "—") + "</td><td>" + b.soldUnits + "</td>" +
+          "<td>" + (b.conversion ? pct(b.conversion.p) + ' <span class="arrow">(' + pct(b.conversion.lo) + "–" + pct(b.conversion.hi) + ")</span>" : "—") + "</td>" +
+          "<td>" + (b.medianDaysToSale == null ? "—" : b.medianDaysToSale.toFixed(1) + "d") + "</td>" +
+          "<td>" + (b.fastShare24h == null ? "—" : pct(b.fastShare24h)) + "</td>" +
+          "<td>" + (single ? money(b.expectedRevenuePerListing) : money(b.revenuePerListingDay)) + ' <span class="bar" style="width:' + Math.round((v / maxV) * 60) + 'px"></span></td></tr>';
+      }).join("");
+      page.querySelector("#cv").innerHTML =
+        '<div class="basisbar"><b>' + esc(market) + "</b> · " + esc(origin) + " listings · metric: " + esc(c.metric) + ". " + esc(c.caveat) + "</div>" +
+        (c.bins.length ? '<div class="scroll"><table class="curve"><tr><th>price</th><th>listings</th><th>resolved</th><th>sold</th><th>conversion (80% range)</th><th>median days to sale</th><th>sold &lt;24h</th><th>' + (single ? "expected $ per listing" : "$ per listing-day") + "</th></tr>" + rows + "</table></div>" : '<div class="empty">No listings for this market.</div>');
+    }
+
+    /* ------------------------------ same items -------------------------- */
+    function marketChips(markets) {
+      return Object.keys(markets).map(function (m) {
+        var c = markets[m];
+        var txt = (c.sold ? "<b>" + c.sold + " sold @ " + money(c.soldMedian) + "</b>" : "no sale") + (c.liveN ? " · " + c.liveN + " live " + (c.askMin === c.askMax ? money(c.askMin) : money(c.askMin) + "–" + money(c.askMax)) : "");
+        return '<span class="chip' + (c.sold ? " sold" : "") + '">' + esc(m) + ": " + txt + "</span>";
+      }).join("");
+    }
+    async function renderSets() {
+      var f = state.sets || (state.sets = { market: "", q: "", evidence: "cross", offset: 0 });
+      var g = shell('<div class="ctl"><select id="sev"><option value="cross">sold on 2+ markets</option><option value="sold">sold anywhere</option><option value="live">live now</option><option value="all">everything</option></select>' +
+        '<select id="sm">' + marketOptions(f.market, true) + '</select><input id="sq" type="search" placeholder="Search game or title" value="' + esc(f.q) + '"></div><div id="sl"><div class="empty">Loading…</div></div>');
+      var ev = page.querySelector("#sev"); ev.value = f.evidence;
+      ev.onchange = function () { f.evidence = ev.value; f.offset = 0; renderSets(); };
+      page.querySelector("#sm").onchange = function (e) { f.market = e.target.value; f.offset = 0; renderSets(); };
+      var sq = page.querySelector("#sq"), t;
+      sq.oninput = function () { clearTimeout(t); t = setTimeout(function () { f.q = sq.value; f.offset = 0; renderSets(); }, 350); };
+      var j = await api("/api/price-tracker/sets?evidence=" + f.evidence + "&market=" + encodeURIComponent(f.market) + "&q=" + encodeURIComponent(f.q) + "&limit=25&offset=" + f.offset);
+      if (stale(g)) return;
+      var list = j.rows.map(function (s) {
+        return '<div class="row clickable" data-key="' + esc(s.key) + '"><div class="r1"><span class="t">' + esc(s.title || s.game) + "</span>" +
+          '<span class="amt">' + (s.spread ? "×" + s.spread.toFixed(2) + " spread" : s.soldTotal + " sold") + "</span></div>" +
+          '<div class="r2"><span class="pill ' + (s.tier === "exact" ? "s-ok" : "s-unknown") + '">' + (s.tier === "exact" ? "exact items" : "game + size band") + "</span>" +
+          "<span>" + esc(s.game) + (s.itemCount ? " · " + s.itemCount + " items" : "") + "</span>" + (s.bestVenue ? "<span>best after fees: " + esc(s.bestVenue) + "</span>" : "") + "</div>" +
+          '<div class="chips">' + marketChips(s.markets) + "</div></div>";
+      }).join("");
+      page.querySelector("#sl").innerHTML =
+        '<div class="basisbar">' + j.total + " sets. “Exact items” means the same items in the same amounts (content, not title or set id). A set that sold on two markets is the only like-for-like price comparison there is.</div>" +
+        (list ? '<div class="rows">' + list + "</div>" : '<div class="empty">Nothing matches.</div>') +
+        '<div class="ctl" style="margin-top:12px">' + (f.offset > 0 ? '<button id="pv">← Previous</button>' : "") + (f.offset + 25 < j.total ? '<button id="nx">Next →</button>' : "") + "</div>";
+      var nx = page.querySelector("#nx"), pv = page.querySelector("#pv");
+      if (nx) nx.onclick = function () { f.offset += 25; renderSets(); };
+      if (pv) pv.onclick = function () { f.offset = Math.max(0, f.offset - 25); renderSets(); };
+      Array.prototype.forEach.call(page.querySelectorAll(".row.clickable"), function (r) { r.onclick = function () { openSet(r.getAttribute("data-key")); }; });
+    }
+    function openSheet(title, html) {
+      document.getElementById("sheetTitle").textContent = title;
+      document.getElementById("sheetBody").innerHTML = html;
+      document.getElementById("sheet").classList.add("on");
+    }
+    document.getElementById("sheetClose").onclick = function () { document.getElementById("sheet").classList.remove("on"); };
+    async function openSet(key) {
+      var tok = (state.sheetTok = (state.sheetTok || 0) + 1);
+      openSheet("Loading…", '<div class="empty">Loading…</div>');
+      try {
+        var j = await api("/api/price-tracker/set/" + encodeURIComponent(key));
+        if (tok !== state.sheetTok) return;
+        var s = j.set;
+        var live = Object.keys(s.markets).map(function (m) {
+          return s.markets[m].live.map(function (l) {
+            return '<div class="row"><div class="r1"><span class="t">' + esc(m) + '</span><span class="amt">' + money(l.price) + "</span></div>" +
+              '<div class="r2"><span class="pill s-unknown">' + esc(l.origin) + "</span><span class=\"mono\">" + esc(l.externalId) + "</span><span>live " + l.ageDays.toFixed(1) + "d</span></div></div>";
+          }).join("");
+        }).join("");
+        var sales = j.sales.map(function (x) {
+          return '<div class="row"><div class="r1"><span class="t">' + esc(x.market) + " · " + esc(x.source) + '</span><span class="amt">' + (x.priced ? money(x.priceUsd) : "no price") + "</span></div>" +
+            '<div class="r2"><span>' + esc(day(x.at)) + "</span>" + (x.orderId ? '<span class="mono">order ' + esc(x.orderId) + "</span>" : "") + '<span class="mono">' + esc(x.externalId) + "</span><span>" +
+            (x.priceBasis === "listing-now" ? "price = listing now" : "price at sale") + "</span></div></div>";
+        }).join("");
+        var adv = j.advice.map(adviceRow).join("");
+        openSheet(s.title || s.game,
+          '<div class="basisbar">' + (s.tier === "exact" ? "Exact items." : "Grouped by game + size band (exact content unknown).") + "</div>" +
+          "<b>Live listings</b><div class=\"rows\" style=\"margin:8px 0 16px\">" + (live || '<div class="empty">None live.</div>') + "</div>" +
+          "<b>Advice</b><div class=\"rows\" style=\"margin:8px 0 16px\">" + (adv || '<div class="empty">No live listings to advise.</div>') + "</div>" +
+          "<b>Sales (newest first)</b><div class=\"rows\" style=\"margin:8px 0\">" + (sales || '<div class="empty">No sales.</div>') + "</div>");
+      } catch (e) { openSheet("Error", '<div class="empty">' + esc(e.message) + "</div>"); }
+    }
+
+    /* -------------------------------- advice ---------------------------- */
+    function adviceRow(a) {
+      var up = a.delta > 0;
+      return '<div class="row"><div class="r1"><span class="t">' + esc(a.title) + '</span><span class="amt">' + money(a.current) +
+        ' <span class="arrow">→</span> <span class="' + (up ? "good" : a.delta < 0 ? "bad" : "") + '">' + (a.price ? money(a.price) : "—") + "</span></span></div>" +
+        '<div class="r2"><span class="pill s-info">' + esc(a.market) + '</span><span class="pill ' + (a.action === "raise" ? "s-ok" : a.action === "lower" ? "s-warn" : "s-unknown") + '">' + esc(a.action) + "</span>" +
+        '<span class="pill ' + (a.confidence === "high" ? "s-ok" : a.confidence === "medium" ? "s-warn" : "s-unknown") + '">' + esc(a.confidence) + " confidence</span>" +
+        (a.applicable ? '<span class="pill s-ok">auto row — adjustable</span>' : '<span class="pill s-unknown">advisory · ' + esc(a.advisoryReason || "") + "</span>") +
+        "<span>live " + (a.ageDays || 0).toFixed(1) + "d</span><span class=\"mono\">" + esc(a.externalId) + "</span></div>" +
+        '<div class="why">' + esc(a.basis) + ". " + esc((a.reasons || []).join(" ")) + (a.clamped ? " Clamped by the " + esc(a.clamped) + " (" + money(a.floor) + "–" + money(a.cap) + ")." : "") +
+        (a.test ? "<br><b>Test:</b> " + money(a.test.price) + " — " + esc(a.test.why) : "") + "</div></div>";
+    }
+    async function renderAdvice() {
+      var f = state.advice || (state.advice = { market: "", action: "", conf: "", q: "", offset: 0, applicable: "" });
+      var g = shell('<div class="ctl"><select id="am">' + marketOptions(f.market, true) + '</select><select id="aa"><option value="">raise + lower</option><option value="raise">raise only</option><option value="lower">lower only</option><option value="ladder">deliberate ladders</option><option value="hold">hold</option></select>' +
+        '<select id="ac"><option value="">any confidence</option><option value="medium">medium +</option><option value="high">high only</option></select>' +
+        '<select id="ap"><option value="">all rows</option><option value="1">adjustable only</option></select><input id="aq" type="search" placeholder="Search" value="' + esc(f.q) + '"></div><div id="al"><div class="empty">Loading…</div></div>');
+      [["aa", "action"], ["ac", "conf"], ["ap", "applicable"]].forEach(function (p) { var el = page.querySelector("#" + p[0]); el.value = f[p[1]]; el.onchange = function () { f[p[1]] = el.value; f.offset = 0; renderAdvice(); }; });
+      page.querySelector("#am").onchange = function (e) { f.market = e.target.value; f.offset = 0; renderAdvice(); };
+      var aq = page.querySelector("#aq"), t; aq.oninput = function () { clearTimeout(t); t = setTimeout(function () { f.q = aq.value; f.offset = 0; renderAdvice(); }, 350); };
+      var j = await api("/api/price-tracker/advice?market=" + encodeURIComponent(f.market) + "&action=" + encodeURIComponent(f.action) + "&conf=" + encodeURIComponent(f.conf) + "&applicable=" + encodeURIComponent(f.applicable) + "&q=" + encodeURIComponent(f.q) + "&limit=25&offset=" + f.offset);
+      if (stale(g)) return;
+      page.querySelector("#al").innerHTML =
+        '<div class="basisbar">' + j.total + " listings. Advice only — only origin “auto” rows on an open market are ever eligible, and applying it is a separate step. Manual, no-claim and blocked-market rows are shown for information and keep the owner’s price.</div>" +
+        (j.rows.length ? '<div class="rows">' + j.rows.map(adviceRow).join("") + "</div>" : '<div class="empty">Nothing matches.</div>') +
+        '<div class="ctl" style="margin-top:12px">' + (f.offset > 0 ? '<button id="pv">← Previous</button>' : "") + (f.offset + 25 < j.total ? '<button id="nx">Next →</button>' : "") + "</div>";
+      var nx = page.querySelector("#nx"), pv = page.querySelector("#pv");
+      if (nx) nx.onclick = function () { f.offset += 25; renderAdvice(); };
+      if (pv) pv.onclick = function () { f.offset = Math.max(0, f.offset - 25); renderAdvice(); };
+    }
+
+    /* ------------------------------ sales ledger ------------------------ */
+    async function renderSales() {
+      var f = state.sales || (state.sales = { market: "", source: "", q: "", offset: 0, suspect: "" });
+      var g = shell('<div class="ctl"><select id="sm">' + marketOptions(f.market, true) + '</select><select id="ss"><option value="">all sources</option><option value="signal">signal (reported)</option><option value="unit">unit (order id)</option><option value="row">sold row</option><option value="hand">hand</option></select>' +
+        '<select id="sx"><option value="">real sales</option><option value="1">set aside (mass-close)</option></select><input id="sq" type="search" placeholder="Order id, listing id or title" value="' + esc(f.q) + '"></div><div id="sv"><div class="empty">Loading…</div></div>');
+      [["ss", "source"], ["sx", "suspect"]].forEach(function (p) { var el = page.querySelector("#" + p[0]); el.value = f[p[1]]; el.onchange = function () { f[p[1]] = el.value; f.offset = 0; renderSales(); }; });
+      page.querySelector("#sm").onchange = function (e) { f.market = e.target.value; f.offset = 0; renderSales(); };
+      var sq = page.querySelector("#sq"), t; sq.oninput = function () { clearTimeout(t); t = setTimeout(function () { f.q = sq.value; f.offset = 0; renderSales(); }, 350); };
+      var j = await api("/api/price-tracker/sales?market=" + encodeURIComponent(f.market) + "&source=" + encodeURIComponent(f.source) + "&suspect=" + encodeURIComponent(f.suspect) + "&q=" + encodeURIComponent(f.q) + "&limit=30&offset=" + f.offset);
+      if (stale(g)) return;
+      var rows = j.rows.map(function (x) {
+        if (j.suspect) return '<div class="row"><div class="r1"><span class="t">' + esc(x.market) + " · mass-close signal</span><span class=\"amt\">" + money(x.priceUsd) + "</span></div><div class=\"r2\"><span>" + esc(day(x.at)) + "</span><span class=\"mono\">" + esc(x.listingId) + "</span></div></div>";
+        return '<div class="row"><div class="r1"><span class="t">' + esc(x.title || x.game) + '</span><span class="amt">' + (x.priced ? money(x.priceUsd) : "no price") + "</span></div>" +
+          '<div class="r2"><span class="pill s-info">' + esc(x.market) + '</span><span class="pill s-unknown">' + esc(x.source) + "</span><span>" + esc(day(x.at)) + "</span>" +
+          (x.orderId ? '<span class="mono">order ' + esc(x.orderId) + "</span>" : "") + (x.externalId ? '<span class="mono">' + esc(x.externalId) + "</span>" : "") +
+          "<span>" + (x.priceBasis === "listing-now" ? "price = listing now" : x.priceBasis === "reported" ? "price at sale" : esc(x.priceBasis)) + "</span>" +
+          (x.titleMismatch ? '<span class="pill s-warn">title ≠ set</span>' : "") + "</div></div>";
+      }).join("");
+      page.querySelector("#sv").innerHTML =
+        '<div class="basisbar">' + j.total + (j.suspect ? " set-aside signals: written within seconds of their listing being delisted, in bursts. They are not counted as sales." : " sales, newest first. Each is tied to its exact listing and, where the marketplace gives one, its order id.") + "</div>" +
+        (rows ? '<div class="rows">' + rows + "</div>" : '<div class="empty">Nothing matches.</div>') +
+        '<div class="ctl" style="margin-top:12px">' + (f.offset > 0 ? '<button id="pv">← Previous</button>' : "") + (f.offset + 30 < j.total ? '<button id="nx">Next →</button>' : "") + "</div>";
+      var nx = page.querySelector("#nx"), pv = page.querySelector("#pv");
+      if (nx) nx.onclick = function () { f.offset += 30; renderSales(); };
+      if (pv) pv.onclick = function () { f.offset = Math.max(0, f.offset - 30); renderSales(); };
+    }
+
+    /* ------------------------------- suggest --------------------------- */
+    async function renderSuggest() {
+      var f = state.sug || (state.sug = { market: "gameflip", game: "", items: "" });
+      var g = shell('<div class="basisbar">What the auto-farm would be told for a NEW listing: the better-evidenced of this exact set\'s sales and the whole game\'s sales (which also know other sellers\' prices).</div>' +
+        '<div class="ctl"><select id="gm">' + marketOptions(f.market) + '</select><input id="gg" type="search" placeholder="Game, e.g. Albion Online" value="' + esc(f.game) + '"><input id="gi" type="number" min="1" max="200" placeholder="items" style="max-width:90px" value="' + esc(f.items) + '"><button class="primary" id="go">Suggest</button></div><div id="gr"></div>' +
+        '<h4 class="sec">Auto-farm link</h4><div id="lk"><div class="empty">Loading…</div></div>');
+      page.querySelector("#go").onclick = async function () {
+        f.market = page.querySelector("#gm").value; f.game = page.querySelector("#gg").value; f.items = page.querySelector("#gi").value;
+        try {
+          var j = await api("/api/price-tracker/suggest?market=" + encodeURIComponent(f.market) + "&game=" + encodeURIComponent(f.game) + "&items=" + encodeURIComponent(f.items));
+          if (stale(g)) return;
+          var s = j.suggestion;
+          page.querySelector("#gr").innerHTML = '<div class="row"><div class="r1"><span class="t">' + esc(f.market) + (s.game ? " · " + esc(s.game) : "") + '</span><span class="amt">' + (s.price ? money(s.price) : "no suggestion") + '</span></div><div class="r2">' + confPill(s.confidence || "none") + "<span>" + esc(s.basis || "") + "</span>" + (s.source ? '<span class="pill s-unknown">' + esc(s.source) + "-level</span>" : "") + (s.position && s.position !== "no rivals" ? "<span>" + esc(s.position) + "</span>" : "") + '</div><div class="why">' + esc((s.reasons || []).join(" ")) + (s.test ? "<br><b>Test:</b> " + money(s.test.price) + " — " + esc(s.test.why) : "") + "</div></div>";
+        } catch (e) { page.querySelector("#gr").innerHTML = '<div class="empty">' + esc(e.message) + "</div>"; }
+      };
+      try {
+        var L = await api("/api/price-tracker/link");
+        if (stale(g)) return;
+        var c = L.config, st = L.stats;
+        var mk = Object.keys(st.byMarket).map(function (m) {
+          var v = st.byMarket[m];
+          return "<tr><td><b>" + esc(m) + "</b></td><td>" + v.n + "</td><td>" + v.applied + "</td><td>" + v.higher + " / " + v.same + " / " + v.lower + "</td><td>" + (v.avgDeltaPct == null ? "—" : (v.avgDeltaPct > 0 ? "+" : "") + v.avgDeltaPct + "%") + "</td></tr>";
+        }).join("");
+        var rec = L.recent.slice(0, 25).map(function (x) {
+          return '<div class="row"><div class="r1"><span class="t">' + esc(x.market) + " · " + esc(x.game) + '</span><span class="amt">base ' + money(x.base) + (x.tracker > 0 ? ' <span class="arrow">→</span> ' + money(x.tracker) : "") + "</span></div>" +
+            '<div class="r2"><span class="pill s-unknown">' + esc(x.mode) + "</span>" + (x.applied ? '<span class="pill s-ok">applied ' + money(x.used) + "</span>" : '<span class="pill s-info">base kept</span>') + confPill(x.confidence || "none") + "<span>" + esc(day(x.at)) + "</span></div>" +
+            (x.basis ? '<div class="why">' + esc(x.basis) + (x.why ? " — " + esc(x.why) : "") + "</div>" : "") + "</div>";
+        }).join("");
+        page.querySelector("#lk").innerHTML =
+          '<div class="kv"><div><b>' + esc(c.mode) + "</b><span>mode (settings autoFarm.priceTracker)</span></div><div><b>" + (c.markets.length ? esc(c.markets.join(", ")) : "none") + "</b><span>markets it may change</span></div><div><b>" + esc(c.minConfidence) + " · ±" + c.maxDeviationPct + "%</b><span>min confidence · max move</span></div></div>" +
+          '<div class="basisbar">' + (c.mode === "off" ? "Off: publishers use their own prices and the tracker is never asked. " : c.mode === "shadow" ? "Shadow: the tracker is asked on every new listing and its price is logged beside the one that was used; nothing changes. " : "Apply: allowlisted markets get the tracker\'s price, within the guards. ") +
+          "Since the last restart: " + st.total + " comparisons, " + st.applied + " applied.</div>" +
+          (mk ? '<div class="scroll"><table class="pm"><tr><th>market</th><th>asked</th><th>applied</th><th>tracker higher / same / lower</th><th>avg difference</th></tr>' + mk + "</table></div>" : "") +
+          (rec ? '<div class="rows" style="margin-top:10px">' + rec + "</div>" : '<div class="empty">No comparisons yet. They appear here as the auto-farm publishes new listings in shadow or apply mode.</div>');
+      } catch (e) { if (!stale(g)) page.querySelector("#lk").innerHTML = '<div class="empty">' + esc(e.message) + "</div>"; }
+    }
+
+
+    /* ------------------------------ market radar ------------------------------ */
+    // What OTHER sellers' buyers pay (Gameflip sold feed, GGSel / Plati counter rises), who the
+    // rivals are, and which of our live listings have a cheaper comparable rival. Read-only.
+    var MK_VIEWS = [["overview", "Overview"], ["games", "Games"], ["rivals", "Rival sellers"], ["sales", "Market sales"], ["undercuts", "Undercut listings"]];
+    var MK_MARKETS = ["gameflip", "ggsel", "plati"];
+    function hrs(h) { return h == null ? "—" : h < 48 ? Math.round(h) + " h" : (h / 24).toFixed(1) + " d"; }
+    // A weekly rate needs two days of watching; before that it is unknown, not zero.
+    function wk(x) { return x.perWeek == null ? "rate after 2 days of watching" : x.perWeek + "/wk" + (x.ratePartial ? ", newest market not rated yet" : ""); }
+    function mkOpts(sel, any) {
+      return (any ? '<option value="">All markets</option>' : "") + MK_MARKETS.map(function (m) { return '<option value="' + m + '"' + (m === sel ? " selected" : "") + ">" + m + "</option>"; }).join("");
+    }
+    function stats(st) { return st && st.n ? money(st.median) + " <small>(" + st.n + ", " + money(st.p25) + "–" + money(st.p75) + ")</small>" : "—"; }
+    function mkFlagPills(flags) {
+      var cls = { "collector-niche": "s-more", fast: "s-ok", slow: "s-warn", crowded: "s-warn", alone: "s-ok", "not-selling": "s-more", undercut: "s-warn", "price-war": "s-fail", "stale-scan": "s-unknown" };
+      return (flags || []).map(function (f) { return '<span class="pill ' + (cls[f.id] || "s-unknown") + '" title="' + esc(f.text) + '">' + esc(f.id.replace(/-/g, " ")) + "</span>"; }).join(" ");
+    }
+    // A seller's price move; on GGSel / Plati shown in the roubles the seller set (the USD figure drifts with the rate).
+    function moveRow(p) {
+      var rub = p.fromNative != null && p.toNative != null ? " <small>(₽" + esc(p.fromNative) + " → ₽" + esc(p.toNative) + ")</small>" : "";
+      return '<div class="row"><div class="r1"><span class="t">' + esc(p.game) + " · " + esc(String(p.title).slice(0, 70)) + '</span><span class="amt">' + money(p.from) + ' <span class="arrow">→</span> <span class="' + (p.cut ? "bad" : "good") + '">' + money(p.to) + "</span>" + rub + "</span></div>" +
+        '<div class="r2"><span class="pill s-info">' + esc(p.market) + "</span><span>" + esc(p.seller) + "</span><span>" + esc(ago(p.at)) + "</span></div></div>";
+    }
+    function mkLink(url) { return url ? ' <a class="plain" href="' + esc(url) + '" target="_blank" rel="noopener noreferrer">open ↗</a>' : ""; }
+    function radarLine(rd) {
+      if (!rd) return "";
+      var c = rd.config || {}, s = rd.status || {};
+      var head = c.enabled ? '<span class="pill s-ok">recording ON</span>' : '<span class="pill s-unknown">recording OFF</span>';
+      if (s.paused) head += ' <span class="pill s-fail">paused (database errors) for ' + Math.ceil((s.pausedForMs || 0) / 60000) + " min</span>";
+      var t = s.totals || {};
+      return '<div class="basisbar">' + head + " Since the last restart: " + (s.jobsDone || 0) + " scans recorded, " + (t.salesInserted || 0) + " new sales, " + (t.rivalsInserted || 0) + " new rival listings" +
+        (s.jobsFailed ? ", " + s.jobsFailed + " failed" : "") + (s.lastJobAt ? " · last " + esc(ago(s.lastJobAt)) : "") + (s.lastError ? ' · last error: <span class="bad">' + esc(s.lastError) + "</span>" : "") +
+        (c.enabled ? "" : '. Switch on with settings <span class="mono">autoFarm.marketData.enabled = true</span> (no restart).') + "</div>";
+    }
+    function mkGameRow(x) {
+      var per = Object.keys(x.byMarket || {}).map(function (m) {
+        var v = x.byMarket[m];
+        return '<span class="chip' + (v.units ? " sold" : "") + '"><b>' + esc(m) + "</b> " + (v.units ? v.units + " sold" + (v.soldMedian != null ? " @ " + money(v.soldMedian) : "") : "no sale") + (v.live ? " · " + v.live + " live" + (v.askMedian != null ? " ask " + money(v.askMedian) : "") : "") + (v.oursLive ? " · ours " + v.oursLive : "") + "</span>";
+      }).join("");
+      var bands = (x.bands || []).filter(function (b) { return b.n >= 2; }).slice(0, 4).map(function (b) { return '<span class="chip">' + esc(b.band) + " items: <b>" + money(b.median) + "</b> (" + b.n + ")" + (b.medianTtsHours != null ? " · sells in " + hrs(b.medianTtsHours) : "") + "</span>"; }).join("");
+      return '<div class="row clickable" data-mkey="' + esc(x.key) + '"><div class="r1"><span class="t">' + esc(x.game) + '</span><span class="amt">' + (x.realised && x.realised.n ? money(x.realised.median) + ' <small class="sub">median paid, all sizes</small>' : "—") + "</span></div>" +
+        '<div class="r2"><span><b>' + x.units + "</b> sold by rivals (" + wk(x) + ")</span><span>sold listings took " + hrs(x.medianTtsHours) + "</span><span>" + x.rivalsLive + " live rival listings · " + x.rivalSellers + " sellers</span>" + (x.researchScannedAt ? "<span>market read " + esc(ago(x.researchScannedAt)) + "</span>" : "") +
+        (x.oursListed || x.oursLive || x.oursSold ? "<span>ours: " + (x.oursListed || 0) + " listed, " + x.oursSold + " sold seen" + (x.gameflipShare != null ? " (" + x.gameflipShare + "% of Gameflip)" : "") + "</span>" : "") + " " + mkFlagPills(x.flags) + "</div>" +
+        (per ? '<div class="chips">' + per + "</div>" : "") + (bands ? '<div class="chips">' + bands + "</div>" : "") + "</div>";
+    }
+    function undercutRow(u) {
+      return '<div class="row"><div class="r1"><span class="t">' + esc(u.title) + '</span><span class="amt">' + money(u.ourPrice) + ' <span class="arrow">vs</span> <span class="bad">' + money(u.cheapest.price) + "</span></span></div>" +
+        (u.ourPriceBasis ? '<div class="r2"><span>our price: ' + esc(u.ourPriceBasis) + "</span></div>" : "") +
+        '<div class="r2"><span class="pill s-info">' + esc(u.market) + '</span><span class="pill ' + (u.origin === "auto" ? "s-ok" : "s-unknown") + '">' + esc(u.origin || "?") + (u.origin === "auto" ? "" : " — never repriced automatically") + "</span>" +
+        "<span>" + u.cheaper + " of " + u.comparable + " comparable rivals are cheaper (cheapest −" + u.gapPct + "%)</span><span>rival median " + money(u.rivalMedian) + "</span>" +
+        "<span>" + (u.soldMedian != null ? "rivals' buyers paid " + money(u.soldMedian) + " (" + u.soldN + ")" : "not enough rival sales of this size") + '</span><span class="mono">' + esc(u.externalId) + "</span></div>" +
+        '<div class="why">Cheapest: ' + esc(u.cheapest.title) + " — " + esc(u.cheapest.seller) + "</div></div>";
+    }
+    async function renderMarket() {
+      var f = state.mk || (state.mk = { view: "overview", days: "30", q: "", flag: "", sort: "units", market: "", origin: "", ours: "0", kind: "drops", offset: 0 });
+      var views = '<select id="mv">' + MK_VIEWS.map(function (v) { return '<option value="' + v[0] + '"' + (v[0] === f.view ? " selected" : "") + ">" + v[1] + "</option>"; }).join("") + "</select>" +
+        '<select id="md">' + ["7", "30", "90"].map(function (d) { return '<option value="' + d + '"' + (d === f.days ? " selected" : "") + ">last " + d + " days</option>"; }).join("") + "</select>";
+      var extra = "";
+      if (f.view === "games") extra = '<select id="mso"><option value="units">Sort: units sold</option><option value="perWeek">Sort: units / week</option><option value="price">Sort: median paid (all sizes)</option><option value="fast">Sort: fastest selling</option><option value="rivals">Sort: live rivals</option><option value="undercut">Sort: our undercut listings</option></select>' +
+        '<select id="mfl"><option value="">Any flag</option><option value="collector-niche">Big collections sell high</option><option value="not-selling">Rivals sell, we do not list</option><option value="undercut">Our listings undercut</option><option value="price-war">Price war</option><option value="fast">Sells fast</option><option value="slow">Sells slowly</option><option value="crowded">Crowded</option><option value="alone">No rivals</option><option value="stale-scan">Market not re-read lately</option></select>';
+      if (f.view === "rivals" || f.view === "sales" || f.view === "undercuts") extra += '<select id="mmk">' + mkOpts(f.market, true) + "</select>";
+      if (f.view === "sales") extra += '<select id="mou"><option value="0">rivals only</option><option value="">rivals + ours</option><option value="1">ours only</option></select><select id="mki"><option value="drops">drop bundles</option><option value="farm">rent-farm windows</option><option value="">both</option></select>';
+      if (f.view === "undercuts") extra += '<select id="mor"><option value="">auto + manual</option><option value="auto">auto rows</option><option value="manual">manual rows</option></select>';
+      if (f.view !== "overview") extra += '<input id="mq" type="search" placeholder="Search" value="' + esc(f.q) + '">';
+      var g = shell('<div class="ctl">' + views + extra + '</div><div id="mk"><div class="empty">Loading…</div></div>');
+      var bind = function (id, key) { var el = page.querySelector("#" + id); if (!el) return; el.value = f[key]; el.onchange = function () { f[key] = el.value; f.offset = 0; renderMarket(); }; };
+      bind("mv", "view"); bind("md", "days"); bind("mso", "sort"); bind("mfl", "flag"); bind("mmk", "market"); bind("mou", "ours"); bind("mki", "kind"); bind("mor", "origin");
+      var mq = page.querySelector("#mq"), t; if (mq) mq.oninput = function () { clearTimeout(t); t = setTimeout(function () { f.q = mq.value; f.offset = 0; renderMarket(); }, 350); };
+      var box = function () { return page.querySelector("#mk"); };
+      var pager = function (j, size) {
+        return '<div class="ctl" style="margin-top:12px">' + (f.offset > 0 ? '<button id="pv">← Previous</button>' : "") + (f.offset + size < j.total ? '<button id="nx">Next →</button>' : "") + '<span class="sub">' + j.total + "</span></div>";
+      };
+      var wirePager = function (size) {
+        var nx = page.querySelector("#nx"), pv = page.querySelector("#pv");
+        if (nx) nx.onclick = function () { f.offset += size; renderMarket(); };
+        if (pv) pv.onclick = function () { f.offset = Math.max(0, f.offset - size); renderMarket(); };
+      };
+      var days = "days=" + encodeURIComponent(f.days);
+      if (f.view === "overview") {
+        var o = await api("/api/price-tracker/market/overview?" + days);
+        if (stale(g)) return;
+        var c = o.coverage;
+        var tr = o.truncated || {};
+        var cards = MK_MARKETS.map(function (m) {
+          var v = o.markets[m] || {};
+          return '<div class="vcard"><div class="top"><span class="nm">' + esc(m) + "</span>" + (m === "gameflip" ? '<span class="pill s-ok">dated sales</span>' : '<span class="pill s-unknown">counter rises</span>') + "</div>" +
+            (v.sold && v.sold.n ? '<div class="big">' + money(v.sold.median) + "<small>median paid to rivals · " + v.sold.n + " sales</small></div>" : '<div class="big">—<small>no rival sale recorded yet</small></div>') +
+            '<div class="mini"><div><b>' + (v.units || 0) + "</b><span>units sold by rivals</span></div><div><b>" + hrs(v.medianTtsHours) + "</b><span>time to sell</span></div><div><b>" + (v.liveRivals || 0) + "</b><span>live rival listings</span></div>" +
+            "<div><b>" + (v.liveSellers || 0) + "</b><span>rival sellers</span></div><div><b>" + (v.oursLive || 0) + "</b><span>our listings seen</span></div><div><b>" + (v.oursSold || 0) + "</b><span>our sales seen</span></div></div></div>";
+        }).join("");
+        var tg = o.topGames.map(mkGameRow).join("");
+        var tu = o.topUndercuts.map(undercutRow).join("");
+        var ts = o.topSellers.map(function (s) { return '<div class="row"><div class="r1"><span class="t">' + esc(s.label) + '</span><span class="amt">' + s.units + " sold</span></div><div class=\"r2\"><span class=\"pill s-info\">" + esc(s.market) + "</span><span>median " + (s.medianPrice != null ? money(s.medianPrice) : "—") + "</span><span>" + money(s.revenueUsd) + " turnover</span><span>" + s.games + " games · " + s.live + " live</span>" + (s.ratings != null ? "<span>" + s.ratings + " ratings</span>" : "") + "</div></div>"; }).join("");
+        var mv = o.recentMoves.map(moveRow).join("");
+        box().innerHTML = radarLine(o.radar) +
+          '<div class="basisbar">What OTHER sellers\' buyers actually paid on the three public markets, who the rivals are, and where our live listings stand. ' + c.gamesWithData + " games with data · " + c.salesStored + " sales and " + c.rivalsStored + " rival listings stored · research covers " + c.researchGames + " games (" + c.researchFresh24h + " scanned in the last 24 h)" +
+          (c.firstRecordAt ? " · recording since " + esc(day(c.firstRecordAt)) : "") + (tr.sales || tr.rivals ? ' · <span class="bad">the read was truncated: older data is not shown</span>' : "") + ". Built " + esc(ago(o.generatedAt)) + ". Read-only: nothing here changes a price.</div>" +
+          (c.gamesWithData ? '<div class="vgrid">' + cards + "</div>" : '<div class="empty">No market data yet. Once recording is on, every research scan (about 400 a day) adds what it saw; Gameflip\'s sold feed reaches about three weeks back on the first scan.</div>') +
+          (tg ? '<h4 class="sec">Busiest games (' + o.counts.games + " in total)</h4><div class=\"rows\">" + tg + "</div>" : "") +
+          (tu ? '<h4 class="sec">Our listings with a cheaper comparable rival (' + o.counts.undercuts + ")</h4><div class=\"rows\">" + tu + "</div>" : "") +
+          (ts ? '<h4 class="sec">Top rival sellers</h4><div class="rows">' + ts + "</div>" : "") +
+          (mv ? '<h4 class="sec">Rival price moves this week</h4><div class="rows">' + mv + "</div>" : "");
+        Array.prototype.forEach.call(page.querySelectorAll("[data-mkey]"), function (r) { r.onclick = function () { openMarketGame(r.getAttribute("data-mkey")); }; });
+        return;
+      }
+      if (f.view === "games") {
+        var j = await api("/api/price-tracker/market/games?" + days + "&sort=" + encodeURIComponent(f.sort) + "&flag=" + encodeURIComponent(f.flag) + "&q=" + encodeURIComponent(f.q) + "&limit=20&offset=" + f.offset);
+        if (stale(g)) return;
+        box().innerHTML = '<div class="basisbar">Per game, across Gameflip, GGSel and Plati: units rivals sold, what their buyers paid by size, how fast Gameflip listings sold, and how crowded it is. Rates use only the days each market was actually watched.</div>' +
+          (j.rows.length ? '<div class="rows">' + j.rows.map(mkGameRow).join("") + "</div>" : '<div class="empty">Nothing matches.</div>') + pager(j, 20);
+        wirePager(20);
+        Array.prototype.forEach.call(page.querySelectorAll("[data-mkey]"), function (r) { r.onclick = function () { openMarketGame(r.getAttribute("data-mkey")); }; });
+        return;
+      }
+      if (f.view === "rivals") {
+        var jr = await api("/api/price-tracker/market/rivals?" + days + "&market=" + encodeURIComponent(f.market) + "&q=" + encodeURIComponent(f.q) + "&limit=40&offset=" + f.offset);
+        if (stale(g)) return;
+        box().innerHTML = '<div class="basisbar">Every seller with a sale in the window or a live listing, ranked by units sold. Reputation is on each market\'s own scale.</div>' +
+          (jr.rows.length ? '<div class="scroll"><table class="pm"><tr><th>seller</th><th>market</th><th>units</th><th>median price</th><th>turnover</th><th>games</th><th>live</th><th>reputation</th></tr>' + jr.rows.map(function (s) {
+            return "<tr><td><b>" + esc(s.label) + "</b></td><td>" + esc(s.market) + "</td><td>" + s.units + "</td><td>" + (s.medianPrice != null ? money(s.medianPrice) : "—") + "</td><td>" + money(s.revenueUsd) + "</td><td>" + s.games + "</td><td>" + s.live + "</td><td>" + (s.score != null ? esc(Math.round(s.score * 100) / 100) : "—") + (s.ratings != null ? "<small>" + s.ratings + " ratings</small>" : "") + "</td></tr>";
+          }).join("") + "</table></div>" : '<div class="empty">Nothing matches.</div>') + pager(jr, 40);
+        wirePager(40);
+        return;
+      }
+      if (f.view === "sales") {
+        var js = await api("/api/price-tracker/market/sales?" + days + "&market=" + encodeURIComponent(f.market) + "&ours=" + encodeURIComponent(f.ours) + "&kind=" + encodeURIComponent(f.kind) + "&q=" + encodeURIComponent(f.q) + "&limit=40&offset=" + f.offset);
+        if (stale(g)) return;
+        box().innerHTML = '<div class="basisbar">Newest first. Gameflip rows are individual sold listings with the time they took to sell; GGSel / Plati rows are rises of a product\'s sold counter between two scans (units in that window, at the price seen).</div>' +
+          (js.rows.length ? '<div class="rows">' + js.rows.map(function (x) {
+            return '<div class="row"><div class="r1"><span class="t">' + esc(x.title) + '</span><span class="amt">' + money(x.priceUsd) + (x.units > 1 ? " × " + x.units : "") + "</span></div>" +
+              '<div class="r2"><span class="pill s-info">' + esc(x.market) + "</span>" + (x.ours ? '<span class="pill s-ok">ours</span>' : "") + (x.kind === "farm" ? '<span class="pill s-unknown">rent-farm</span>' : "") +
+              "<span>" + esc(x.game) + "</span><span>" + esc(day(x.soldAt)) + "</span><span>" + (x.itemCount ? x.itemCount + " items" : "size not stated") + "</span>" + (x.ttsHours != null ? "<span>sold after " + hrs(x.ttsHours) + "</span>" : "") + "<span>" + esc(x.seller) + "</span></div></div>";
+          }).join("") + "</div>" : '<div class="empty">Nothing matches.</div>') + pager(js, 40);
+        wirePager(40);
+        return;
+      }
+      var ju = await api("/api/price-tracker/market/undercuts?" + days + "&market=" + encodeURIComponent(f.market) + "&origin=" + encodeURIComponent(f.origin) + "&q=" + encodeURIComponent(f.q) + "&limit=30&offset=" + f.offset);
+      if (stale(g)) return;
+      box().innerHTML = '<div class="basisbar">Our LIVE listings that have a cheaper rival for the same kind and size of product on the same market, as the radar last saw it (Gameflip rivals within 3 days, GGSel within 7). Bulk packs and rent-farm windows are left out (different products). Cheaper is not automatically better: compare with what rivals\' buyers actually paid. Advice only — manual listings are never repriced automatically.</div>' +
+        (ju.rows.length ? '<div class="rows">' + ju.rows.map(undercutRow).join("") + "</div>" : '<div class="empty">No undercut listings.</div>') + pager(ju, 30);
+      wirePager(30);
+    }
+    async function openMarketGame(key) {
+      var tok = (state.sheetTok = (state.sheetTok || 0) + 1);
+      openSheet("Loading…", '<div class="empty">Loading…</div>');
+      try {
+        var j = await api("/api/price-tracker/market/game/" + encodeURIComponent(key) + "?days=" + encodeURIComponent((state.mk && state.mk.days) || "30"));
+        if (tok !== state.sheetTok) return;
+        var g = j.game;
+        var flags = (g.flags || []).map(function (fl) { return '<div class="flagbox ' + (fl.id === "price-war" || fl.id === "undercut" || fl.id === "slow" || fl.id === "crowded" ? "warn" : "opportunity") + '">' + esc(fl.text) + "</div>"; }).join("");
+        var kv = '<div class="kv"><div><b>' + g.units + "</b><span>units sold by rivals (" + j.windowDays + " d)</span></div><div><b>" + (g.perWeek == null ? "—" : g.perWeek) + "</b><span>per week" + (g.perWeek == null ? " (after 2 days of watching)" : g.ratePartial ? " (newest market not rated yet)" : "") + "</span></div><div><b>" + (g.realised.n ? money(g.realised.median) : "—") + "</b><span>median paid, all sizes (see By size)</span></div>" +
+          "<div><b>" + hrs(g.medianTtsHours) + "</b><span>sold listings took (Gameflip)</span></div><div><b>" + g.rivalsLive + " / " + g.rivalSellers + "</b><span>live rival listings / sellers</span></div><div><b>" + g.oursLive + " / " + g.oursSold + "</b><span>ours seen live / sold</span></div><div><b>" + (g.oursListed || 0) + "</b><span>our live listings (Gameflip + GGSel)</span></div></div>";
+        var mrows = Object.keys(g.byMarket).map(function (m) {
+          var v = g.byMarket[m];
+          if (!(v.units || v.live || v.oursLive || v.oursSold)) return "";
+          return "<tr><td><b>" + esc(m) + "</b></td><td>" + v.units + (v.perWeek != null ? "<small>" + v.perWeek + "/wk over " + v.observedDays + " d</small>" : v.observedDays != null ? "<small>watched " + v.observedDays + " d — no rate yet</small>" : "") + "</td><td>" + stats(v.sold) + "</td><td>" + hrs(v.medianTtsHours) + "</td><td>" + v.live + " (" + v.liveSellers + " sellers)<small>ask " + stats(v.asking) + (v.farmLive ? " · + " + v.farmLive + " rent-farm" : "") + "</small></td><td>" + v.oursLive + " live · " + v.oursSold + " sold</td></tr>";
+        }).join("");
+        var brows = (g.bands || []).map(function (b) { return "<tr><td>" + esc(b.band) + "</td><td>" + b.n + "</td><td>" + money(b.median) + "<small>" + money(b.p25) + "–" + money(b.p75) + "</small></td><td>" + b.units + "</td><td>" + hrs(b.medianTtsHours) + "</td></tr>"; }).join("");
+        var srows = j.sellers.map(function (s) { return "<tr><td><b>" + esc(s.seller) + "</b></td><td>" + esc(s.market) + "</td><td>" + s.units + "</td><td>" + (s.medianPrice != null ? money(s.medianPrice) : "—") + "</td><td>" + s.live + "</td></tr>"; }).join("");
+        var live = j.live.slice(0, 60).map(function (l) {
+          return '<div class="row"><div class="r1"><span class="t">' + esc(l.title) + '</span><span class="amt">' + money(l.priceUsd) + "</span></div>" +
+            '<div class="r2"><span class="pill s-info">' + esc(l.market) + "</span>" + (l.ours ? '<span class="pill s-ok">ours</span>' : "") + (l.kind === "farm" ? '<span class="pill s-unknown">rent-farm</span>' : "") + "<span>" + (l.itemCount ? l.itemCount + " items" : "size not stated") + "</span><span>" + esc(l.seller) + "</span>" + (l.counter != null ? "<span>" + l.counter + " sold (lifetime)</span>" : "") + "<span>seen " + esc(ago(l.lastSeenAt)) + "</span>" + mkLink(l.url) + "</div></div>";
+        }).join("");
+        var sales = j.sales.map(function (x) {
+          return '<div class="row"><div class="r1"><span class="t">' + esc(x.title) + '</span><span class="amt">' + money(x.priceUsd) + (x.units > 1 ? " × " + x.units : "") + "</span></div><div class=\"r2\"><span class=\"pill s-info\">" + esc(x.market) + "</span>" + (x.ours ? '<span class="pill s-ok">ours</span>' : "") + "<span>" + esc(day(x.soldAt)) + "</span>" + (x.ttsHours != null ? "<span>sold after " + hrs(x.ttsHours) + "</span>" : "") + "<span>" + esc(x.seller) + "</span></div></div>";
+        }).join("");
+        var moves = j.moves.map(moveRow).join("");
+        openSheet(g.game, flags + kv +
+          '<h4 class="sec">By market</h4><div class="scroll"><table class="pm"><tr><th>market</th><th>units</th><th>paid (n, p25–p75)</th><th>time to sell</th><th>live rivals</th><th>ours</th></tr>' + (mrows || '<tr><td colspan="6">No data.</td></tr>') + "</table></div>" +
+          (brows ? '<h4 class="sec">By size</h4><div class="scroll"><table class="pm"><tr><th>items</th><th>sales</th><th>paid</th><th>units</th><th>time to sell</th></tr>' + brows + "</table></div>" : "") +
+          (srows ? '<h4 class="sec">Rivals in this game</h4><div class="scroll"><table class="pm"><tr><th>seller</th><th>market</th><th>units</th><th>median</th><th>live</th></tr>' + srows + "</table></div>" : "") +
+          (j.undercuts.length ? '<h4 class="sec">Our listings with a cheaper rival</h4><div class="rows">' + j.undercuts.map(undercutRow).join("") + "</div>" : "") +
+          '<h4 class="sec">Live listings (cheapest first)</h4><div class="rows">' + (live || '<div class="empty">None seen recently.</div>') + "</div>" +
+          '<h4 class="sec">Recent sales</h4><div class="rows">' + (sales || '<div class="empty">None in the window.</div>') + "</div>" +
+          (moves ? '<h4 class="sec">Price moves this week</h4><div class="rows">' + moves + "</div>" : ""));
+      } catch (e) { openSheet("Error", '<div class="empty">' + esc(e.message) + "</div>"); }
+    }
+
+    /* --------------------------- farm brain (test mode) --------------------------- */
+    // One demand model for both farms, in TEST MODE: what it would tell each farm per game, beside
+    // what each farm's own logic says at the same moment, and how well each one forecasts. It
+    // changes nothing: no farm decision, setting, listing or account.
+    var BR_VIEWS = [["overview", "Overview"], ["games", "Games"], ["accuracy", "Accuracy"]];
+    var DIFF_LABEL = { agree: "same answer", "agree-skip": "both skip", "brain-more": "brain: more", "brain-less": "brain: fewer", "brain-farm": "brain: farm (today: skip)", "brain-skip": "brain: skip (today: farm)", "brain-unknown": "brain: no evidence", "old-error": "today's logic: error", mirror: "brain could not compute (shows today's)" };
+    var DIFF_CLS = { agree: "s-ok", "agree-skip": "s-ok", "brain-more": "s-more", "brain-less": "s-less", "brain-farm": "s-more", "brain-skip": "s-warn", "brain-unknown": "s-unknown", "old-error": "s-fail", mirror: "s-unknown" };
+    var EST_LABEL = { engine: "today's auto-farm count (45 d)", avg45: "45-day average", avg30: "30-day average", max30_14: "larger of 30 / 14 days", v2: "no-claim feeder rule", v2g: "no-claim feeder rule, hand/pack sales at raw rate", sba: "irregular-sales forecast (SBA)", tsb: "irregular-sales forecast, fades dying games (TSB)", listed: "only days we had stock" };
+    function diffPill(d) { return '<span class="pill ' + (DIFF_CLS[d] || "s-unknown") + '">' + esc(DIFF_LABEL[d] || d) + "</span>"; }
+    function verdictTxt(v) {
+      if (!v) return "—";
+      if (v.c === "farm" || v.c === "fleet") return "farm " + esc(v.t);
+      if (v.c === "probe") return "probe " + esc(v.t);
+      if (v.c === "skip") return "skip";
+      if (v.c === "unknown") return "no evidence";
+      if (v.c === "error") return "error";
+      return esc(v.c);
+    }
+    function brainLine(st) {
+      if (!st) return "";
+      var c = st.config || {};
+      var head = c.enabled ? '<span class="pill s-ok">test log ON</span>' : '<span class="pill s-unknown">test log OFF</span>';
+      return '<div class="basisbar">' + head + " Runs since the last restart: " + (st.runs || 0) + (st.lastRunAt ? " · last " + esc(ago(st.lastRunAt)) + (st.lastMs != null ? " (" + (st.lastMs / 1000).toFixed(1) + " s)" : "") : "") +
+        (st.nextRunAt ? " · next in " + Math.max(0, Math.round((new Date(st.nextRunAt).getTime() - Date.now()) / 60000)) + " min" : "") +
+        (st.lastError ? ' · last error: <span class="bad">' + esc(st.lastError) + "</span>" : "") +
+        (c.enabled ? " · every " + esc(c.intervalMin) + " min" : '. Switch on with settings <span class="mono">autoFarm.demandBrain.enabled = true</span> (no restart).') +
+        " Test mode: it writes down what it would decide and changes nothing.</div>";
+    }
+    function brRow(r) {
+      var b = r.br || {}, o = r.old || {};
+      var mk = r.f === "noclaim"
+        ? (r.mk ? "rivals on Gameflip/GGSel/Plati: " + (r.mk.rw == null ? "not rated yet" : r.mk.rw + "/wk") : "no radar data")
+        : !r.mk ? "no radar data for this game" : r.mk.rw == null ? "market not rated yet (needs 2 days)" : "rivals " + r.mk.rw + "/wk" + (b.sh != null ? " · our share " + pct(b.sh) : "");
+      return '<div class="row clickable" data-bkey="' + esc(r.k) + '" data-bfarm="' + esc(r.f) + '"><div class="r1"><span class="t">' + esc(r.g) +
+        (r.live ? ' <span class="pill s-ok">campaign live' + (r.hl != null ? " · " + esc(hrs(r.hl)) + " left" : "") + "</span>" : "") +
+        (r.ro ? ' <span class="pill s-unknown">reuse-only</span>' : "") + (r.f === "noclaim" ? ' <span class="pill s-info">no-claim farm</span>' : "") +
+        '</span><span class="amt">today ' + verdictTxt(o) + ' <span class="arrow">→</span> brain <b>' + verdictTxt(b) + "</b></span></div>" +
+        '<div class="r2">' + diffPill(r.d) + "<span>brain: sells " + esc(b.w) + "/wk" + (b.b ? " (" + esc(b.b === "own" ? "our sales" : b.b === "market" ? "market share" : b.b === "cold" ? "new drop: small test batch" : b.b) + ")" : "") + "</span>" +
+        (o.w != null ? "<span>today reads " + esc(o.w) + "/wk" + (o.n != null ? " (" + esc(o.n) + " sales in 45 d)" : "") + "</span>" : "") +
+        "<span>" + esc(mk) + "</span>" + (b.u != null ? "<span>≈ " + money(b.u) + "/wk</span>" : "") +
+        (r.stk ? "<span>stock " + esc(r.stk.on) + (r.stk.fl ? " + " + esc(r.stk.fl) + " farming" : "") + "</span>" : "") +
+        (r.act && r.act.d ? "<span>farm's last decision: " + esc(String(r.act.d).replace(/_/g, " ")) + "</span>" : "") + "</div>" +
+        (r.why && r.why.length ? '<div class="why">' + r.why.map(esc).join(" ") + "</div>" : "") + "</div>";
+    }
+    function scoreTable(scores, best) {
+      var farms = Object.keys(scores || {});
+      if (!farms.length) return '<div class="empty">Nothing to score yet.</div>';
+      return farms.map(function (farm) {
+        var m = scores[farm];
+        var ids = Object.keys(m).sort(function (a, b) { return (m[a].rmse == null ? 1e9 : m[a].rmse) - (m[b].rmse == null ? 1e9 : m[b].rmse); });
+        return '<h4 class="sec">' + (farm === "noclaim" ? "No-claim farm" : "Auto-farm (claim farm)") + "</h4>" +
+          '<div class="scroll"><table class="pm"><tr><th>way of estimating weekly sales</th><th>typical miss (RMSE)</th><th>average miss</th><th>bias</th><th>forecast vs sold</th><th>game-weeks</th></tr>' +
+          ids.map(function (id) {
+            var s = m[id], isBest = best && best[farm] && best[farm].id === id;
+            return "<tr><td>" + (isBest ? "<b>" : "") + esc(EST_LABEL[id] || id) + (isBest ? " ✓ best</b>" : "") + (s.partial ? " — not enough history yet" : "") + ' <small class="mono">' + esc(id) + "</small></td><td>" + (s.rmse == null ? "—" : esc(s.rmse)) + "</td><td>" + (s.mae == null ? "—" : esc(s.mae)) + "</td><td>" + (s.bias == null ? "—" : (s.bias > 0 ? "+" : "") + esc(s.bias)) + "</td><td>" + esc(s.forecast) + " vs " + esc(s.actual) + "</td><td>" + esc(s.n) + "</td></tr>";
+          }).join("") + "</table></div>";
+      }).join("");
+    }
+    async function renderBrain() {
+      var f = state.br || (state.br = { view: "overview", farm: "", d: "", live: "", q: "", sort: "gap", offset: 0 });
+      var views = '<select id="bv">' + BR_VIEWS.map(function (v) { return '<option value="' + v[0] + '"' + (v[0] === f.view ? " selected" : "") + ">" + v[1] + "</option>"; }).join("") + "</select>";
+      var extra = "";
+      if (f.view === "games") {
+        extra = '<select id="bf"><option value="">Both farms</option><option value="claim">Auto-farm (claim)</option><option value="noclaim">No-claim farm</option></select>' +
+          '<select id="bd"><option value="">Any comparison</option>' + Object.keys(DIFF_LABEL).map(function (k) { return '<option value="' + k + '">' + esc(DIFF_LABEL[k]) + "</option>"; }).join("") + "</select>" +
+          '<select id="bl"><option value="">Live campaign or not</option><option value="1">Campaign live now</option></select>' +
+          '<select id="bs"><option value="gap">Sort: biggest disagreement</option><option value="brain">Sort: brain target</option><option value="old">Sort: today\'s target</option><option value="rate">Sort: weekly sales</option><option value="market">Sort: market size</option><option value="value">Sort: weekly value</option></select>' +
+          '<input id="bq" type="search" placeholder="Search" value="' + esc(f.q) + '">';
+      }
+      var g = shell('<div class="ctl">' + views + extra + '</div><div id="br"><div class="empty">Loading…</div></div>');
+      var bind = function (id, key) { var el = page.querySelector("#" + id); if (!el) return; el.value = f[key]; el.onchange = function () { f[key] = el.value; f.offset = 0; renderBrain(); }; };
+      bind("bv", "view"); bind("bf", "farm"); bind("bd", "d"); bind("bl", "live"); bind("bs", "sort");
+      var bq = page.querySelector("#bq"), t; if (bq) bq.oninput = function () { clearTimeout(t); t = setTimeout(function () { f.q = bq.value; f.offset = 0; renderBrain(); }, 350); };
+      var box = function () { return page.querySelector("#br"); };
+      var wireRows = function () { Array.prototype.forEach.call(page.querySelectorAll("[data-bkey]"), function (r) { r.onclick = function () { openBrainGame(r.getAttribute("data-bkey"), r.getAttribute("data-bfarm")); }; }); };
+      if (f.view === "overview") {
+        var j = await api("/api/price-tracker/brain/latest?farm=claim&live=1&limit=8");
+        var jn = j.empty ? null : await api("/api/price-tracker/brain/latest?farm=noclaim&limit=50");
+        if (stale(g)) return;
+        if (j.empty) { box().innerHTML = brainLine(j.status) + '<div class="empty">No run logged yet. When the test log is on, the first run comes about 6 minutes after a restart, then every hour.</div>'; return; }
+        var s = j.summary, L = s.claim.byDiffLive, A = s.claim.byDiff, cfg = j.cfg || {}, sz = cfg.sizing || {};
+        var card = function (title, sub, cells) { return '<div class="vcard"><div class="top"><span class="nm">' + esc(title) + "</span></div>" + (sub ? '<div class="note">' + sub + "</div>" : "") + '<div class="mini">' + cells.map(function (c) { return "<div><b>" + esc(c[0]) + "</b><span>" + esc(c[1]) + "</span></div>"; }).join("") + "</div></div>"; };
+        var nc = (jn && jn.rows) || [];
+        // the route sorts disagreements first, so the first live rows that differ are the biggest
+        var top = j.rows.filter(function (r) { return r.d !== "agree" && r.d !== "agree-skip"; });
+        box().innerHTML = brainLine(j.status) +
+          '<div class="basisbar">Run ' + esc(ago(j.at)) + (j.persisted ? "" : ' · <span class="bad">this run could not be written to the log</span>') + ". Both sides are worked out at the same moment: <b>today</b> = each farm's own logic (the auto-farm's demand check, the no-claim feeder's target); <b>brain</b> = one counting rule for every game (each sold account once, every market incl. Eldorado / PlayerAuctions / G2G) plus the market radar. Targets are accounts a game deserves before stock on hand is subtracted.</div>" +
+          '<div class="vgrid">' +
+          card("Auto-farm — campaigns live now", s.claim.live + " games with a live campaign", [[L.agree + L["agree-skip"], "same answer"], [L["brain-more"], "brain: more"], [L["brain-less"], "brain: fewer"], [L["brain-farm"], "brain farms, today skips"], [L["brain-skip"], "brain skips, today farms"], [L["brain-unknown"], "brain: no evidence"]]) +
+          card("Accounts asked for (live games)", "the " + esc(s.claim.comparedLive) + " live games both sides have a verdict on" + (s.claim.unknownLive ? "; on the other " + esc(s.claim.unknownLive) + " the brain has no evidence and today's logic asks for " + esc(s.claim.oldTargetUnknownLive) : ""), [[s.claim.oldTargetLive, "today"], [s.claim.brainTargetLive, "brain"], [s.claim.games, "games compared in total"], [A["brain-farm"], "all games: brain farms, today skips"], [A["brain-skip"], "all games: brain skips, today farms"], [A["old-error"] || 0, "today's logic errored"]]) +
+          card("No-claim farm", "fleet target per game (the brain uses the feeder's own rule until the scores say otherwise)", nc.map(function (r) { return [r.old.t + " → " + r.br.t + (r.d === "mirror" ? " (mirror)" : ""), r.g]; }).concat([[s.noclaim.oldTarget + " → " + s.noclaim.brainTarget, "total"]])) +
+          "</div>" +
+          (top.length ? '<h4 class="sec">Biggest disagreements on live campaigns</h4><div class="rows">' + top.map(brRow).join("") + "</div>" : "") +
+          '<h4 class="sec">Settings in use</h4><div class="basisbar">Weekly sales: <b>' + esc(EST_LABEL[cfg.estimatorClaim] || cfg.estimatorClaim) + "</b> (auto-farm), <b>" + esc(EST_LABEL[cfg.estimatorNoclaim] || cfg.estimatorNoclaim) + "</b> (no-claim). Market share assumed when a market is proven: " + pct(cfg.captureShare) +
+          " (rivals ≥ " + esc(cfg.minMarketRate) + "/wk and ≥ " + esc(cfg.minMarketUnits) + " units). Skip under " + esc(cfg.minRate) + " sales/wk or $" + esc(cfg.minWeeklyUsd) + "/wk. Cover " + esc(sz.coverageDays) + " days + " + esc(sz.safetyStock) + " safety, at most " + esc(sz.maxPerGame) + "; probes " + esc(cfg.probeSize) +
+          (cfg.engine && cfg.engine.floor ? "; both sides keep the auto-farm's shelf floor of " + esc(cfg.engine.floor) + " accounts" : "") + ". All adjustable live under <span class=\"mono\">autoFarm.demandBrain</span>.</div>" +
+          ((j.notes || []).length ? '<h4 class="sec">Notes from this run</h4>' + j.notes.map(function (n) { return '<div class="flagbox info">' + esc(n) + "</div>"; }).join("") : "");
+        wireRows();
+        return;
+      }
+      if (f.view === "games") {
+        var jg = await api("/api/price-tracker/brain/latest?farm=" + encodeURIComponent(f.farm) + "&d=" + encodeURIComponent(f.d) + "&live=" + encodeURIComponent(f.live) + "&sort=" + encodeURIComponent(f.sort) + "&q=" + encodeURIComponent(f.q) + "&limit=30&offset=" + f.offset);
+        if (stale(g)) return;
+        if (jg.empty) { box().innerHTML = brainLine(jg.status) + '<div class="empty">No run logged yet.</div>'; return; }
+        box().innerHTML = brainLine(jg.status) + '<div class="basisbar">Run ' + esc(ago(jg.at)) + ". Live campaigns first. Open a game for its reasons and its history.</div>" +
+          (jg.rows.length ? '<div class="rows">' + jg.rows.map(brRow).join("") + "</div>" : '<div class="empty">Nothing matches.</div>') +
+          '<div class="ctl" style="margin-top:12px">' + (f.offset > 0 ? '<button id="pv">← Previous</button>' : "") + (f.offset + 30 < jg.total ? '<button id="nx">Next →</button>' : "") + '<span class="sub">' + jg.total + "</span></div>";
+        var nx = page.querySelector("#nx"), pv = page.querySelector("#pv");
+        if (nx) nx.onclick = function () { f.offset += 30; renderBrain(); };
+        if (pv) pv.onclick = function () { f.offset = Math.max(0, f.offset - 30); renderBrain(); };
+        wireRows();
+        return;
+      }
+      var a = await api("/api/price-tracker/brain/accuracy");
+      if (stale(g)) return;
+      var bt = a.backtest || {}, fw = a.forward || {};
+      var weeks = (bt.weeks || []).map(function (w) { return "<tr><td>" + esc(day(w.from)) + " → " + esc(day(w.to)) + "</td><td>" + esc(w.games) + "</td><td>" + esc(w.inStock || 0) + "</td><td>" + esc(w.actual) + "</td></tr>"; }).join("");
+      var hasStocked = function (x) { return x && x.scoresInStock && Object.keys(x.scoresInStock).length > 0; };
+      var stockNote = '<div class="basisbar">Sales are capped by stock: a week with nothing listed sells nothing whatever the demand, so the estimators that try to see through stock-outs (<span class="mono">listed</span>, <span class="mono">v2</span>) always look too high against such weeks. The table below scores only weeks the game was listed on at least ' + esc(6) + " of its 7 days — the fairer comparison. (Auto-farm only: the no-claim Eldorado offers stay listed even when they cover no account.)</div>";
+      var review = (a.review || []).map(function (x) {
+        return '<div class="row"><div class="r1"><span class="t">' + esc(x.game) + '</span><span class="amt">today ' + verdictTxt(x.old) + ' <span class="arrow">→</span> brain ' + verdictTxt(x.brain) + "</span></div>" +
+          '<div class="r2">' + diffPill(x.d) + "<span>" + esc(day(x.at)) + "</span><span>the 7 days after: we sold " + esc(x.ourSales7) + "</span><span>rivals sold " + (x.rivalUnits7 == null ? "—" : esc(x.rivalUnits7)) + "</span></div></div>";
+      }).join("");
+      box().innerHTML = '<div class="basisbar">How good is each way of estimating a game\'s weekly sales? <b>Average miss</b> = how far the forecast for the next 7 days was from what really sold, per game (lower is better). <b>Bias</b> above 0 = it expects more than sells. Evidence built ' + esc(ago(a.evidenceAt)) + ".</div>" +
+        '<h4 class="sec">Backtest — the last ' + (bt.weeks || []).length + " weeks, replayed from our own sales (works from day one)</h4>" + scoreTable(bt.scores, bt.best) +
+        (hasStocked(bt) ? stockNote + '<h4 class="sec">Backtest — only weeks the game was listed all week</h4>' + scoreTable(bt.scoresInStock, bt.bestInStock) : "") +
+        (weeks ? '<div class="scroll"><table class="pm"><tr><th>week</th><th>games with sales</th><th>of them listed all week</th><th>accounts sold</th></tr>' + weeks + "</table></div>" : "") +
+        '<div class="basisbar">The backtest replays the brain\'s own counting (every sold account once, 135 days of evidence). It cannot replay today\'s auto-farm count, which reads raw signal rows as they were at decision time, or the market radar, which started on 2026-10-02. Both are scored below, live, once a logged run is a week old.</div>' +
+        '<h4 class="sec">Live test — logged runs scored after their week</h4><div class="basisbar">' + esc(fw.runsScored || 0) + " day(s) scored, " + esc(fw.runsWaiting || 0) + " still inside their week (one run per day is scored).</div>" +
+        (fw.runsScored ? scoreTable(fw.scores, fw.best) + (hasStocked(fw) ? '<h4 class="sec">Live test — only weeks the game was listed all week</h4>' + scoreTable(fw.scoresInStock, fw.bestInStock) : "") : '<div class="empty">The first scores appear 7 days after the first logged run.</div>') +
+        '<h4 class="sec">Where they disagreed, and what happened next</h4>' + (review || '<div class="empty">Appears once a run with a disagreement on a live campaign is a week old.</div>');
+    }
+    async function openBrainGame(key, farm) {
+      var tok = (state.sheetTok = (state.sheetTok || 0) + 1);
+      openSheet("Loading…", '<div class="empty">Loading…</div>');
+      try {
+        var j = await api("/api/price-tracker/brain/game/" + encodeURIComponent(key) + "?farm=" + encodeURIComponent(farm || "claim"));
+        if (tok !== state.sheetTok) return;
+        var r = j.row || (j.history && j.history[0]) || {};
+        var b = r.br || {}, o = r.old || {};
+        var est = r.est ? Object.keys(r.est).map(function (id) { return "<tr><td>" + esc(EST_LABEL[id] || id) + ' <small class="mono">' + esc(id) + "</small></td><td>" + esc(r.est[id]) + "/wk</td></tr>"; }).join("") : "";
+        var hist = (j.history || []).map(function (h) {
+          return "<tr><td>" + esc(new Date(h.at).toISOString().slice(5, 16).replace("T", " ")) + "</td><td>" + verdictTxt(h.old) + "</td><td>" + verdictTxt(h.br) + "</td><td>" + diffPill(h.d) + "</td><td>" + esc(h.br && h.br.w) + "</td><td>" + (h.old && h.old.w != null ? esc(h.old.w) : "—") + "</td><td>" + (h.live ? "live" : "") + "</td></tr>";
+        }).join("");
+        openSheet((r.g || key) + (farm === "noclaim" ? " — no-claim farm" : ""),
+          '<div class="kv"><div><b>' + verdictTxt(o) + "</b><span>today's logic</span></div><div><b>" + verdictTxt(b) + "</b><span>brain</span></div><div><b>" + esc(b.w) + "/wk</b><span>brain's weekly sales</span></div>" +
+          "<div><b>" + (o.w != null ? esc(o.w) + "/wk" : "—") + "</b><span>what today's logic reads</span></div>" +
+          (r.mk ? "<div><b>" + (r.mk.rw == null ? "—" : esc(r.mk.rw) + "/wk") + "</b><span>rivals on Gameflip/GGSel/Plati</span></div>" : "") +
+          (b.u != null ? "<div><b>" + money(b.u) + "</b><span>weekly value at " + money(b.v) + "/account</span></div>" : "") + "</div>" +
+          (r.d ? '<div style="margin:8px 0">' + diffPill(r.d) + (o.ds != null ? ' <span class="chip">today\'s demand score ' + esc(o.ds) + "</span>" : "") +
+            (o.ra != null ? ' <span class="chip">its market research is ' + esc(o.ra) + " days old</span>" : "") +
+            (o.pb ? ' <span class="chip">today: probe held (budget full or cooling down)</span>' : "") +
+            (b.td != null && b.t > b.td && (b.c === "farm") ? ' <span class="chip">brain: ' + esc(b.td) + " from demand, raised to " + esc(b.t) + " by the shelf floor</span>" : "") +
+            (o.e ? ' <span class="pill s-fail">' + esc(o.e) + "</span>" : "") + "</div>" : "") +
+          (r.why && r.why.length ? r.why.map(function (w) { return '<div class="flagbox info">' + esc(w) + "</div>"; }).join("") : '<div class="note">Reasons are kept for the newest run only.</div>') +
+          (est ? '<h4 class="sec">Every estimator for this game, now</h4><div class="scroll"><table class="pm"><tr><th>estimator</th><th>weekly sales</th></tr>' + est + "</table></div>" : "") +
+          '<h4 class="sec">History (newest first)</h4><div class="scroll"><table class="pm"><tr><th>time (UTC)</th><th>today</th><th>brain</th><th>comparison</th><th>brain /wk</th><th>today /wk</th><th></th></tr>' + (hist || '<tr><td colspan="7">Not logged yet.</td></tr>') + "</table></div>");
+      } catch (e) { openSheet("Error", '<div class="empty">' + esc(e.message) + "</div>"); }
+    }
+
+    async function render(force) {
+      try {
+        if (state.tab === "games") await renderGames();
+        else if (state.tab === "market") await renderMarket();
+        else if (state.tab === "brain") await renderBrain();
+        else if (state.tab === "overview") await renderOverview(force);
+        else if (state.tab === "curve") await renderCurve();
+        else if (state.tab === "sets") await renderSets();
+        else if (state.tab === "advice") await renderAdvice();
+        else if (state.tab === "sales") await renderSales();
+        else await renderSuggest();
+      } catch (e) { fail(e); }
+    }
+    window.addEventListener("hashchange", function () { var h = (location.hash || "#games").slice(1); if (h !== state.tab && TABS.some(function (t) { return t[0] === h; })) { state.tab = h; render(); } });
+    render();
+  })();
+  </script>
+</body>
+</html>

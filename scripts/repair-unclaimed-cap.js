@@ -34,7 +34,7 @@ async function main() {
 
   if (APPLY) {
     const prev = !!settings.getAutoFarm().unclaimedAutoListPaused;
-    settings.setAutoFarm({ unclaimedAutoListPaused: true });
+    await settings.setAutoFarm({ unclaimedAutoListPaused: true });
     out.paused = prev;
     log("engine paused for repair");
   }
@@ -248,7 +248,7 @@ async function main() {
     log(JSON.stringify(out, null, 2));
   } finally {
     if (APPLY && !out.paused) {
-      settings.setAutoFarm({ unclaimedAutoListPaused: false });
+      await settings.setAutoFarm({ unclaimedAutoListPaused: false });
       log("engine resumed");
     }
     await mongoose.disconnect();

@@ -1638,9 +1638,11 @@ function digisellerBlockState(now = Date.now()) {
 // Plati are not touched by this; it only gates what is added.
 function digisellerTakesNewStock() {
   if (dsBlocked) return false;
-  const s = loadSettings() || {};
-  const af = s.autoFarm && typeof s.autoFarm === "object" ? s.autoFarm : {};
-  return af.platiEnabled !== false;
+  // The MERGED block (getAutoFarm puts AUTO_FARM_DEFAULTS under the stored
+  // values). The raw block read a key it did not carry as "on", so a settings
+  // file written before platiEnabled existed never saw its default — off since
+  // 2026-10-03.
+  return require("./settings").getAutoFarm().platiEnabled !== false;
 }
 
 // Returns { stock, reason }: `stock` is the unit count, or null when it could
@@ -2660,9 +2662,9 @@ async function ggselFinalizeStock(offerId) {
 // products on one? Only while the owner's switch is on (settings
 // autoFarm.ggselEnabled). Offers already on GGSel are not touched by this.
 function ggselTakesNewStock() {
-  const s = loadSettings() || {};
-  const af = s.autoFarm && typeof s.autoFarm === "object" ? s.autoFarm : {};
-  return af.ggselEnabled !== false;
+  // The merged block, as digisellerTakesNewStock: a missing key reads as its
+  // default (on, for GGSel), never as whatever a raw read makes of undefined.
+  return require("./settings").getAutoFarm().ggselEnabled !== false;
 }
 
 async function ggselDelist(offerId) {
@@ -3590,6 +3592,65 @@ async function g2gDeliveries(orderItemId) {
     { params: { seller_id: g2gSellerId() }, what: "G2G deliveries" },
   );
   return (p && p.results) || [];
+}
+
+// Upload a delivery-proof image to an order item, the way G2G's own seller page
+// does it (www.g2g.com `g-delivery-dialog-proof` chunk + the order store's
+// uploadReportProof, read 2026-10-01):
+//   1. GET /order/upload_url { name, upload_type: "delivery_proof" } -> a
+//      pre-signed storage form { url, fields };
+//   2. a multipart POST of every field, then the image as "file", to that url —
+//      with NO G2G authorization (the page blanks its header for this one call);
+//      `fields.key` is the uploaded file's name;
+//   3. POST /order/item/<id>/delivery_proof { upload_list: [key], seller_id }.
+// G2G holds an order's income until a proof is uploaded: its order item says
+// require_delivery_proof_to_credit_income. `png` is the image bytes (Buffer).
+// Returns { key, results }; throws when any step fails or G2G does not list the
+// file as accepted.
+async function g2gUploadDeliveryProof(orderItemId, png, { fileName } = {}) {
+  if (!orderItemId) throw new Error("G2G order_item_id is required");
+  if (!png || !png.length) throw new Error("G2G delivery proof: no image");
+  const name = fileName || "delivery-proof-" + String(orderItemId).replace(/[^A-Za-z0-9_-]/g, "") + ".png";
+  const form = await g2gRequest("get", "/order/upload_url", {
+    params: { name, upload_type: "delivery_proof" },
+    what: "G2G proof upload url",
+  });
+  const url = form && form.url;
+  const fields = (form && form.fields) || {};
+  if (!url || !fields.key) throw new Error("G2G proof upload url: the answer carried no upload form");
+  // Node's own (WHATWG) FormData + Blob, which fetch encodes itself — not the
+  // `form-data` package this module imports as FormData for axios uploads.
+  const body = new globalThis.FormData();
+  for (const [k, v] of Object.entries(fields)) body.append(k, String(v));
+  body.append("file", new globalThis.Blob([png], { type: "image/png" }), name);
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), 60000);
+  let res;
+  try {
+    res = await fetch(url, { method: "POST", body, signal: ctrl.signal });
+  } catch (e) {
+    throw new Error("G2G proof upload failed: " + String((e && e.message) || e).slice(0, 160));
+  } finally {
+    clearTimeout(timer);
+  }
+  if (!res.ok) {
+    const txt = await res.text().catch(() => "");
+    throw new Error("G2G proof upload failed (HTTP " + res.status + "): " + String(txt).slice(0, 200));
+  }
+  const p = await g2gRequest(
+    "post",
+    "/order/item/" + encodeURIComponent(orderItemId) + "/delivery_proof",
+    { body: { upload_list: [fields.key], seller_id: g2gSellerId() }, what: "G2G delivery proof" },
+  );
+  const results = (p && p.results) || [];
+  // G2G answers with the stored file's NAME, not the upload key: the key
+  // "delivery_proof/<uuid>.png" comes back as "<uuid>.png" (seen live on
+  // 2026-10-01 — every proof was accepted and still reported as refused).
+  const base = String(fields.key).split("/").pop();
+  if (!results.some((r) => r === fields.key || r === base)) {
+    throw new Error("G2G delivery proof: the uploaded file was not accepted (" + JSON.stringify(results).slice(0, 120) + ")");
+  }
+  return { key: fields.key, results };
 }
 
 // Proof of delivery. G2G only holds payment when a buyer does NOT confirm or
@@ -6599,6 +6660,7 @@ module.exports = {
   g2gStartDeliver,
   g2gMarkDelivering,
   g2gSetDeliveredQty,
+  g2gUploadDeliveryProof,
   g2gDeliveries,
   g2gDeliveryProofs,
   g2gSellerId,
