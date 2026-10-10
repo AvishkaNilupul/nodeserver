@@ -1071,10 +1071,14 @@ async function weeklyRate(game, sales, { brain } = {}) {
 // Map(loginLower -> reason). A login that is not in the map counts as sellable
 // — including one with no bot record yet (deployed a moment ago): an unknown
 // must never read as a gap, or every tick would fill it again.
+// `out.notes` (not enumerable) is Map(loginLower -> the pool row's note), for
+// the caller that counts what the top-up itself brought in (eraForTask).
 async function unsellableLogins(logins, { deps } = {}) {
   const d = deps || defaultDeps();
   const wanted = [...new Set((logins || []).map(lower).filter(Boolean))];
   const out = new Map();
+  const notes = new Map();
+  Object.defineProperty(out, "notes", { value: notes, enumerable: false });
   if (!wanted.length) return out;
   const [pools, listed] = await Promise.all([
     d.AvailableAccount.find(
@@ -1086,6 +1090,7 @@ async function unsellableLogins(logins, { deps } = {}) {
   const accounts = [];
   for (const p of pools) {
     const l = lower(p.usernameLower || p.username);
+    notes.set(l, str(p.claimedNote));
     if (p.manualSold === true) out.set(l, "hand-sold");
     else if (p.listed === true) out.set(l, "ticked listed");
     else if (p.status !== "claimed") out.set(l, "back in the pool");
@@ -1114,6 +1119,16 @@ async function eraForTask(task, { engineTarget, sales, deps, brain } = {}) {
   const t = eraTarget({ ratePerWeek: rate, hoursLeft: hrs, engineTarget, cfg: e });
   const logins = [...new Set((task.assignedAccounts || []).map(lower).filter(Boolean))];
   const bad = await unsellableLogins(logins, { deps });
+  // What the top-up has already brought to THIS task (its claim note names the
+  // game and the campaign). The pool's own drop count is what "clean" is
+  // claimed on, and it can be behind the archive: an account that turns out
+  // unsellable after it was added is a gap again on the next tick. So a task
+  // is given at most twice its target (and a few) this way, ever — a cap on
+  // the worst case, not a number it is expected to reach.
+  const mine = "auto-farm backfill: " + str(task.game) + " (" + str(task.campaignId) + ")";
+  let added = 0;
+  for (const l of logins) if ((bad.notes.get(l) || "") === mine) added++;
+  const addCap = t.target * 2 + 4;
   return {
     target: t.target,
     sellable: logins.filter((l) => !bad.has(l)).length,
@@ -1122,6 +1137,8 @@ async function eraForTask(task, { engineTarget, sales, deps, brain } = {}) {
     rate,
     basis,
     windowDays: t.windowDays,
+    added,
+    room: Math.max(0, addCap - added),
   };
 }
 

@@ -5635,6 +5635,7 @@ async function backfillActiveTasks(af, host, progress) {
     // way; a campaign that needs no link is not touched at all.
     let goal = target;
     let eraCleanMax = null;
+    let eraRoom = Infinity;
     try {
       const era = await require("./autofarmStock").eraForTask(task, {
         engineTarget: target,
@@ -5644,6 +5645,7 @@ async function backfillActiveTasks(af, host, progress) {
         goal = era.target;
         have = Math.min(have, era.sellable);
         eraCleanMax = era.cleanMax;
+        eraRoom = era.room;
       }
     } catch (e) {
       progress(
@@ -5652,8 +5654,20 @@ async function backfillActiveTasks(af, host, progress) {
         "warn",
       );
     }
-    const missing = goal - have;
-    if (missing < 1) continue;
+    // An era task is topped up at most `room` more accounts, ever (see
+    // eraForTask): accounts that turn out unsellable after they were added must
+    // not be refilled without end.
+    const missing = Math.min(goal - have, eraRoom);
+    if (missing < 1) {
+      if (eraCleanMax !== null && goal - have >= 1) {
+        progress(
+          "Backfill: " + task.game + " is " + (goal - have) + " sellable account(s) short, but " +
+            "the top-up has already added all it may for this task — left as it is.",
+          "warn",
+        );
+      }
+      continue;
+    }
 
     const ready = await countReadyPool();
     const protect = await pristineProtect(af);

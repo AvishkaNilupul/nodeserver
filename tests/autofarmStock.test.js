@@ -942,7 +942,32 @@ test("eraForTask: counts what could be sold, sizes to the window, asks for clean
     rate: 8.09,
     basis: "brain",
     windowDays: 18.3,
+    added: 0,
+    room: 96, // twice the target and a few: the most the top-up may ever add
   });
+});
+
+test("eraForTask: the top-up's own additions are counted, and it stops at twice the target", async () => {
+  autoFarm = { unclaimedEra: true };
+  const note = "auto-farm backfill: THE FINALS (c-link)";
+  const names = Array.from({ length: 16 }, (_, i) => "Added" + i);
+  const pool = names.map((n) => poolRow(n, { claimedNote: note }));
+  // Every one of them turned out to hold too many claimed drops.
+  const bots = names.map((n) => botRow(n));
+  const drops = bots.flatMap((b) => Array.from({ length: 9 }, () => drop(b)));
+  const w = world({ pool, bots, drops, campaigns: [{ campaignId: "c-link", accountLinkURL: NEEDS_LINK }] });
+  w.deps.TwitchCampaign.findOne = () => ({ lean: async () => w.deps.TwitchCampaign.docs[0] });
+  const task = { game: "THE FINALS", campaignId: "c-link", campaignEndAt: new Date(Date.now() + 114 * 3600e3), assignedAccounts: names };
+  const era = await af.eraForTask(task, { engineTarget: 44, sales: { count: 0 }, deps: w.deps, brain: {} });
+  assert.strictEqual(era.target, 6);
+  assert.strictEqual(era.sellable, 0, "none of them can be sold");
+  assert.strictEqual(era.added, 16);
+  assert.strictEqual(era.room, 0, "16 added against a cap of 2 x 6 + 4: no more for this task");
+  // What the top-up added for ANOTHER campaign of the same game does not count
+  // against this one (the fake campaign lookup answers "needs a link" for any id).
+  const other = await af.eraForTask({ ...task, campaignId: "c-other" }, { engineTarget: 44, sales: { count: 0 }, deps: w.deps, brain: {} });
+  assert.strictEqual(other.added, 0);
+  assert.strictEqual(other.room, 16);
 });
 
 // ---------------------------------------------------------------------------
@@ -979,8 +1004,11 @@ test("auto-farm hooks: the top-up measures an era task by what can be sold, and 
   const src = require("fs").readFileSync(require.resolve("../utils/autoFarmer.js"), "utf8");
   const backfill = fnBody(src, "async function backfillActiveTasks");
   assert.match(backfill, /eraForTask\(task, \{\s*engineTarget: target,\s*sales: gameSales,\s*\}\)/);
-  assert.match(backfill, /goal = era\.target;\s*have = Math\.min\(have, era\.sellable\);\s*eraCleanMax = era\.cleanMax;/);
-  assert.match(backfill, /const missing = goal - have;/);
+  assert.match(backfill, /goal = era\.target;\s*have = Math\.min\(have, era\.sellable\);\s*eraCleanMax = era\.cleanMax;\s*eraRoom = era\.room;/);
+  // Never more than the room the task has left — accounts that turn out
+  // unsellable after they were added are not refilled without end.
+  assert.match(backfill, /let eraRoom = Infinity;/);
+  assert.match(backfill, /const missing = Math\.min\(goal - have, eraRoom\);/);
   assert.match(backfill, /recycledOnly: reuseOnly, cleanMax: eraCleanMax \}/, "reuse-only games stay reuse-only");
   // The ceiling the era may never exceed is still the game's own cap.
   assert.match(backfill, /capForGame\(af, gameSales, task\.game\)/);
