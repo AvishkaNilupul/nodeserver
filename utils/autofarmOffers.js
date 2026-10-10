@@ -33,7 +33,9 @@
 //      stock sync would count that account on both offers, and the layer only
 //      splits a shelf between offers of the SAME set. (So accounts that
 //      stopped part-way wait until the fuller offer has sold.)
-//   4. It is listed once it has SETTLED: its campaigns have ended, or it has
+//   4. It is listed once it is FINISHED: every account that can deliver it
+//      has nothing left to earn for the game (the sweep stores that with each
+//      read), or its campaigns have ended, or — when neither is known — it has
 //      not changed for `settleHours`. An offer keeps the price it was made
 //      with, so one made while the accounts are still earning would sell the
 //      finished bundle at the price of its first drop. And while a campaign
@@ -380,7 +382,7 @@ function campaignOver(d, base, game, name, now) {
 // What could be offered right now: one entry per game, bundles that are ready
 // first, then the most widely held. Database only. Each entry:
 //   { key, game, items:[{itemKey,name,game,image,qty}], signature, campaign,
-//     cover, holders, onShelf, goneAt, ended, ready, readyAt, skip }
+//     cover, holders, onShelf, goneAt, ended, complete, ready, readyAt, skip }
 // `skip` is "" for a bundle that may be published (when ready), else why not.
 async function plan({ deps, now = Date.now() } = {}) {
   const d = deps || defaultDeps();
@@ -473,11 +475,24 @@ async function plan({ deps, now = Date.now() } = {}) {
       if (k) raw.set(k, it);
     }
     const freeFor = new Map();
+    // What its last sweep read said it has still to earn, per game.
+    const pend = new Map();
+    for (const x of Array.isArray(h.pending) ? h.pending : []) {
+      const pk = gameKey(x && x.game);
+      if (pk) pend.set(pk, (pend.get(pk) || 0) + (Math.max(0, Number(x.n)) || 0));
+    }
     const acct = {
       loginLower: h.loginLower,
       readMs: msOf(h.readAt),
       heldAtSell,
       raw,
+      // null = not known (a row no sweep has read since this was stored).
+      left: (k) => {
+        if (!h.pendingAt) return null;
+        let n = 0;
+        for (const [pk, v] of pend) if (sameKey(pk, k)) n += v;
+        return n;
+      },
       // Rule 2 — any shelf, any game: the claim hands over the whole account.
       onShelf: shelves.some((x) => d.ncs.covers(heldAtSell, x.required)),
       isFree: (k) => {
@@ -544,7 +559,10 @@ async function plan({ deps, now = Date.now() } = {}) {
     const memKey = key + "\n" + signature;
     seen.add(memKey);
     if (!memory.firstSeen.has(memKey)) memory.firstSeen.set(memKey, now);
-    const readyAt = ended ? now : memory.firstSeen.get(memKey) + c.settleMs;
+    // Complete: every account that can deliver it has nothing left to earn for
+    // this game. Then there is nothing to wait for.
+    const complete = best.who.length > 0 && best.who.every((w) => w.left(key) === 0);
+    const readyAt = ended || complete ? now : memory.firstSeen.get(memKey) + c.settleMs;
     // Rule 3: accounts that are on a shelf and hold this bundle too.
     const shared = all.filter((a) => a.onShelf && a.isFree(key) && d.ncs.covers(a.heldAtSell, need)).length;
     // Rule 4: accounts part-way through a campaign whose full bundle is
@@ -582,6 +600,7 @@ async function plan({ deps, now = Date.now() } = {}) {
       shared,
       goneAt,
       ended,
+      complete,
       ready: readyAt <= now,
       readyAt,
       skip,

@@ -149,6 +149,23 @@ function sellableFromInv(inv) {
   return out;
 }
 
+// What the account has STILL TO EARN, per game: [{ game, n }] — drops of
+// in-progress campaigns that need a link it does not have, not yet at 100 %. A
+// game with nothing left is not listed. Read with sellableFromInv, it says
+// whether the bundle an account holds is the whole of what it is farming.
+function pendingFromInv(inv) {
+  const by = new Map();
+  for (const d of (inv && inv.inProgress) || []) {
+    if (!d || d.claimed || d.connected) continue;
+    if (Number(d.percent) >= 100) continue;
+    if (!linkRequired(d.accountLinkURL)) continue;
+    const g = str(d.game).trim();
+    if (!g) continue;
+    by.set(g, (by.get(g) || 0) + 1);
+  }
+  return [...by].map(([game, n]) => ({ game, n }));
+}
+
 // ---------------------------------------------------------------------------
 // Free rules
 // ---------------------------------------------------------------------------
@@ -1205,6 +1222,7 @@ module.exports = {
   // pure, tested
   linkRequired,
   sellableFromInv,
+  pendingFromInv,
   blockReason,
   gameAllowed,
   soldTag,

@@ -56,6 +56,19 @@ const noclaimHoldingSchema = new mongoose.Schema(
       },
     ],
     sellableCount: { type: Number, default: 0 }, // sum of qty
+    // Auto-farm rows only: what the account had STILL TO EARN at `pendingAt`,
+    // per game — drops of in-progress campaigns that need a link, not yet at
+    // 100 % (utils/autofarmStock.pendingFromInv). A game with nothing left is
+    // not listed, so [] with a `pendingAt` means "everything it is farming is
+    // finished": the bundle it holds is complete, and utils/autofarmOffers may
+    // list it without waiting to see whether it grows. Absent (and a null
+    // `pendingAt`) = not known: every no-claim row, and every row written
+    // before 2026-10-11.
+    pending: {
+      type: [{ _id: false, game: { type: String, default: "" }, n: { type: Number, default: 0 } }],
+      default: undefined,
+    },
+    pendingAt: { type: Date, default: null },
     readAt: { type: Date, default: null, index: true }, // last SUCCESSFUL live read
     // Set when something proved the snapshot wrong for this account's items (a
     // paid order found no account, or several accounts lost copies nobody

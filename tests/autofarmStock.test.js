@@ -286,6 +286,43 @@ test("linkRequired: only a campaign KNOWN to need a link", () => {
   assert.strictEqual(af.linkRequired("https://www.twitch.tv/drops/campaigns"), true, "a real page on twitch.tv is a link");
 });
 
+test("pendingFromInv: what the account has still to earn, per game — the other half of sellableFromInv", () => {
+  const d = (extra) => ({ name: "Sword", game: "Brawlhalla", campaign: "Autumn", percent: 40, claimed: false, connected: false, accountLinkURL: NEEDS_LINK, ...extra });
+  assert.deepStrictEqual(
+    af.pendingFromInv({
+      inProgress: [
+        d({}),
+        d({ name: "Shield", percent: 0 }),
+        d({ name: "Done", percent: 100 }), // finished: stock, not pending
+        d({ name: "Claimed", percent: 100, claimed: true }),
+        d({ name: "Linked", connected: true }), // its bot will claim it: never stock
+        d({ name: "NoLink", accountLinkURL: "https://twitch.tv/" }), // nor this
+        d({ name: "Unknown", accountLinkURL: "" }),
+        d({ name: "Other", game: "Marvel Rivals", percent: 99 }),
+        d({ name: "NoGame", game: "" }),
+      ],
+    }),
+    [
+      { game: "Brawlhalla", n: 2 },
+      { game: "Marvel Rivals", n: 1 },
+    ],
+  );
+  // Everything finished: nothing listed — "complete".
+  assert.deepStrictEqual(af.pendingFromInv({ inProgress: [d({ percent: 100 }), d({ name: "B", percent: 100 })] }), []);
+  assert.deepStrictEqual(af.pendingFromInv(null), []);
+  assert.deepStrictEqual(af.pendingFromInv({}), []);
+});
+
+test("the engine's reader hands `pending` back for an auto-farm account, and only for one", () => {
+  const src = require("fs").readFileSync(require.resolve("../utils/unclaimedAutoList.js"), "utf8");
+  const from = src.indexOf("async function inventoryForCandidate(");
+  const body = src.slice(from, src.indexOf("\n}\n", from));
+  assert.match(body, /const autofarm = cand && cand\.farm === "autofarm";/);
+  assert.match(body, /if \(autofarm\) out\.pending = require\("\.\/autofarmStock"\)\.pendingFromInv\(inv\);/);
+  // The no-claim branch still reads the no-claim way.
+  assert.match(body, /: sellableDropsFromNoClaimInv\(inv\),/);
+});
+
 test("sellableFromInv: finished, unclaimed, link needed, account not connected — nothing else", () => {
   const d = (extra) => ({ name: "Sword", game: "Brawlhalla", campaign: "Autumn", imageURL: "i", percent: 100, claimed: false, connected: false, accountLinkURL: NEEDS_LINK, ...extra });
   const out = af.sellableFromInv({

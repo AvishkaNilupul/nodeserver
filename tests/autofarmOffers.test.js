@@ -492,6 +492,49 @@ test("nothing is listed while the accounts are still earning; six quiet hours la
   assert.match(w.published[0].description, /claim these before 30 Oct 2026, 08:00 UTC\.$/);
 });
 
+test("a bundle whose accounts have nothing left to earn is listed at once — no six-hour wait", async () => {
+  // The campaign runs for weeks yet, but its only three drops are done on
+  // every account: the sweep's last read of each says "nothing left".
+  const running = { Brawlhalloween: T0 + 20 * DAY };
+  const done = { pendingAt: new Date(T0 - 10 * 60 * 1000), pending: [] };
+  const w = world({ holdings: cohort("b", 8, BRAWL, done), gone: running });
+  let r = await ao.runPass({ deps: w.deps, now: T0 });
+  assert.strictEqual(r.created.length, 1);
+  assert.strictEqual(w.published[0].set.items.length, 3);
+
+  // One of them still has a drop to go: the bundle may yet grow. It waits.
+  const some = cohort("b", 8, BRAWL, done);
+  some[3].pending = [{ game: "Brawlhalla", n: 1 }];
+  const w2 = world({ holdings: some, gone: running });
+  r = await ao.runPass({ deps: w2.deps, now: T0 });
+  assert.strictEqual(r.created.length, 0);
+  assert.strictEqual(r.waiting.length, 1);
+
+  // …but only the accounts that can DELIVER the bundle are asked: seven are
+  // done with all three; an eighth, two drops in, is still earning.
+  const mixed = cohort("b", 7, BRAWL, done).concat(
+    cohort("late", 1, BRAWL.slice(0, 2), { pendingAt: new Date(T0), pending: [{ game: "Brawlhalla", n: 1 }] }),
+  );
+  const w3 = world({ holdings: mixed, gone: running });
+  r = await ao.runPass({ deps: w3.deps, now: T0 });
+  assert.strictEqual(r.created.length, 1);
+  assert.strictEqual(w3.published[0].body.eldorado.quantity, 7);
+
+  // Drops still to earn on ANOTHER game say nothing about this bundle.
+  const other = cohort("b", 8, BRAWL, { pendingAt: new Date(T0), pending: [{ game: "Marvel Rivals", n: 3 }] });
+  const w4 = world({ holdings: other, gone: running });
+  r = await ao.runPass({ deps: w4.deps, now: T0 });
+  assert.strictEqual(r.created.length, 1);
+
+  // Not known (a row no sweep has read since this was stored): the quiet
+  // hours decide, as before.
+  const unknown = world({ holdings: cohort("b", 8, BRAWL), gone: running });
+  r = await ao.runPass({ deps: unknown.deps, now: T0 });
+  assert.strictEqual(r.created.length, 0);
+  r = await ao.runPass({ deps: unknown.deps, now: T0 + 6 * HOUR });
+  assert.strictEqual(r.created.length, 1);
+});
+
 test("an item with no campaign on record is never called finished: it waits the quiet hours", async () => {
   const plain = [item("Mystery", "Predecessor", ""), item("Box", "Predecessor", "")];
   const w = world({ holdings: cohort("p", 6, plain) });

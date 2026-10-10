@@ -562,7 +562,7 @@ async function mapLimit(items, n, fn) {
 // freshness keeps ageing honestly). Never an upsert: a row that exists only
 // because a claim read it would claim to be in a bot config. Never throws — it
 // is bookkeeping, and a claim must not fail on it.
-async function writeRead(loginLower, { sellable, login, error } = {}) {
+async function writeRead(loginLower, { sellable, login, error, pending } = {}) {
   let update;
   let items = null;
   if (error) {
@@ -582,6 +582,16 @@ async function writeRead(loginLower, { sellable, login, error } = {}) {
     // The live login wins over the config's (a Twitch rename).
     const live = String(login || "").trim();
     if (live) update.$set.login = live;
+    // What the account has still to earn, when the read says (auto-farm rows:
+    // utils/autofarmStock.pendingFromInv). A read that does not say leaves the
+    // stored answer and its date as they are.
+    if (Array.isArray(pending)) {
+      update.$set.pending = pending
+        .filter((p) => p && String(p.game || "").trim())
+        .map((p) => ({ game: String(p.game).trim(), n: Math.max(0, Math.floor(Number(p.n)) || 0) }))
+        .filter((p) => p.n > 0);
+      update.$set.pendingAt = update.$set.readAt;
+    }
   }
   // What the row held before this read, to notice copies that went without any
   // campaign end explaining it (noteLosses). Best effort: bookkeeping only.
@@ -1044,7 +1054,7 @@ async function sweepInner({ budget, concurrency, game, reason, t0, recheckOnly }
       return;
     }
     read++;
-    await writeRead(cand.loginLower, { sellable: res.sellable, login: res.login });
+    await writeRead(cand.loginLower, { sellable: res.sellable, login: res.login, pending: res.pending });
   });
 
   // 6.

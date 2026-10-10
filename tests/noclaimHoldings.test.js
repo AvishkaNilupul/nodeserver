@@ -1034,6 +1034,30 @@ test("sweepOnce: an auto-farm row is re-read on its own, shorter clock — the a
   assert.deepStrictEqual(long.reads.filter((x) => /^Farmer/.test(x)), ["Farmer3"]);
 });
 
+test("sweepOnce: what an auto-farm account has still to earn is stored with its read — a no-claim row is written as before", async () => {
+  const fx = sweepFixture();
+  const autofarm = {
+    cfg: () => ({ on: true, perTick: 5 }),
+    collectCandidates: async () => [afCand("Farmer1", "s9"), afCand("Farmer2", "s10")],
+    baseFacts: async () => ({ on: true, facts: new Map() }),
+  };
+  // Farmer1 has two drops to go on Brawlhalla; Farmer2 has finished everything.
+  fx.inventory.farmer1 = { sellable: [], login: "Farmer1", pending: [{ game: "Brawlhalla", n: 2 }, { game: "", n: 4 }, { game: "Zero", n: 0 }] };
+  fx.inventory.farmer2 = { sellable: [], login: "Farmer2", pending: [] };
+  const { h, Holding } = loadHoldings({ ...fx, autofarm });
+  await quiet(() => h.sweepOnce({ budget: 3, reason: "tick" }));
+  const writes = new Map(Holding.calls.updateOne.map((w) => [w.q.loginLower, w.u.$set]));
+  assert.deepStrictEqual(writes.get("farmer1").pending, [{ game: "Brawlhalla", n: 2 }]);
+  assert.strictEqual(writes.get("farmer1").pendingAt, writes.get("farmer1").readAt);
+  assert.deepStrictEqual(writes.get("farmer2").pending, [], "known, and nothing left");
+  assert.ok(writes.get("farmer2").pendingAt instanceof Date);
+  // The no-claim reads say nothing about it, and nothing is written about it.
+  for (const l of ["alice", "bob"]) {
+    assert.ok(writes.has(l), l);
+    assert.ok(!("pending" in writes.get(l)) && !("pendingAt" in writes.get(l)), l);
+  }
+});
+
 test("sweepOnce: a refresh reads both farms without taking a read from the no-claim farm", async () => {
   const fx = sweepFixture();
   const autofarm = {

@@ -1227,16 +1227,21 @@ async function inventoryForCandidate(cand) {
   const inv = await twitchInventory.fetchInventory(cand.clientSecret, {
     host: pi(),
   });
-  return {
+  const autofarm = cand && cand.farm === "autofarm";
+  const out = {
     inv,
     // An auto-farm account (utils/autofarmStock) sits on a CLAIMING bot: only
     // the finished drops that bot cannot claim are there for a buyer.
-    sellable:
-      cand && cand.farm === "autofarm"
-        ? require("./autofarmStock").sellableFromInv(inv)
-        : sellableDropsFromNoClaimInv(inv),
+    sellable: autofarm
+      ? require("./autofarmStock").sellableFromInv(inv)
+      : sellableDropsFromNoClaimInv(inv),
     login: inv.login || cand.login,
   };
+  // …and what it has still to earn, so a finished bundle can be told from one
+  // that is still growing. Auto-farm reads only: a no-claim read returns
+  // exactly what it always did.
+  if (autofarm) out.pending = require("./autofarmStock").pendingFromInv(inv);
+  return out;
 }
 
 // ---------------------------------------------------------------------------
