@@ -177,6 +177,10 @@ const AUTO_FARM_DEFAULTS = {
   // Live inventory reads per 10-minute holdings tick for those accounts, on top
   // of the no-claim farm's own quota (clamped 0..60).
   autofarmStockPerTick: 15,
+  // …and how old a read may get before such an account is read again (these
+  // accounts are still earning; the no-claim farm's own clock is four hours).
+  // Clamped 10..240.
+  autofarmStockRereadMinutes: 60,
   // Most unsold CLAIMED drops an account may still carry and be sold whole —
   // they go to the buyer with it (clamped 0..200).
   autofarmStockMaxLeftover: 5,

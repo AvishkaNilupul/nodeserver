@@ -951,6 +951,19 @@ async function sweepInner({ budget, concurrency, game, reason, t0, recheckOnly }
   // flagged for a re-read (it is not stock until then — these go first), and
   // one stored without per-campaign copies (its expiry cannot be predicted).
   const rereadBefore = Date.now() - maxAgeMs / 2;
+  // An auto-farm account is still earning, so its rows go stale by the hour,
+  // not by the half-day: they are re-read on their own, shorter clock
+  // (utils/autofarmStock cfg().rereadMs — never longer than the one above).
+  // On the 4-hour clock an account that finished its drops at 17:30 was not
+  // stock until 21:00, and "unchanged for six hours" was two looks. A clock
+  // that cannot be read leaves them on the no-claim farm's.
+  let afRereadBefore = rereadBefore;
+  try {
+    const ms = Number(autofarm().cfg().rereadMs);
+    if (Number.isFinite(ms) && ms > 0) afRereadBefore = Date.now() - Math.min(ms, maxAgeMs / 2);
+  } catch {
+    afRereadBefore = rereadBefore;
+  }
   const wavesWanted = expirySettings().on;
   const eligible = [];
   for (const c of cands) {
@@ -966,7 +979,7 @@ async function sweepInner({ budget, concurrency, game, reason, t0, recheckOnly }
       !flagged &&
       !(wavesWanted && lacksWaves(st)) &&
       Number.isFinite(readMs) &&
-      readMs > rereadBefore
+      readMs > (c.farm === AUTOFARM ? afRereadBefore : rereadBefore)
     ) {
       continue;
     }

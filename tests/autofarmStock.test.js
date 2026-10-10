@@ -266,6 +266,12 @@ test("cfg: OFF unless autofarmStock is exactly true; numbers are clamped", () =>
     { perTick: af.cfg().perTick, maxLeftover: af.cfg().maxLeftover, taskDays: af.cfg().taskDays, games: af.cfg().games },
     { perTick: 15, maxLeftover: 5, taskDays: 8, games: [] },
   );
+  // The re-read clock for these still-earning accounts: an hour by default.
+  assert.strictEqual(af.cfg().rereadMs, 60 * 60 * 1000);
+  autoFarm = { autofarmStock: true, autofarmStockRereadMinutes: 1 };
+  assert.strictEqual(af.cfg().rereadMs, 10 * 60 * 1000);
+  autoFarm = { autofarmStock: true, autofarmStockRereadMinutes: 9999 };
+  assert.strictEqual(af.cfg().rereadMs, 240 * 60 * 1000);
 });
 
 test("linkRequired: only a campaign KNOWN to need a link", () => {

@@ -89,6 +89,13 @@ function cfg() {
     // Live inventory reads per holdings tick, on top of the no-claim farm's
     // own quota — its cadence is never diluted.
     perTick: clampInt(af.autofarmStockPerTick, 15, 0, 60),
+    // How old a read may get before the tick reads the account again. These
+    // accounts are still EARNING, so what they hold changes by the hour — and
+    // an offer's stock and the lister's "has it settled?" both read the
+    // snapshot. (The no-claim farm's rows are re-read every half freshness
+    // window, four hours: their drops do not move.) The quota above still
+    // bounds how many are read a tick.
+    rereadMs: clampInt(af.autofarmStockRereadMinutes, 60, 10, 240) * 60 * 1000,
     // Most unsold CLAIMED drops an account may carry and still be sold whole:
     // they go to the buyer with it, and the claimed archive loses them.
     maxLeftover: clampInt(af.autofarmStockMaxLeftover, 5, 0, 200),

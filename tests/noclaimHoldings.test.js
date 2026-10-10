@@ -999,6 +999,41 @@ test("sweepOnce: auto-farm candidates join the snapshot, on a read quota of thei
   assert.ok(Holding.calls.updateMany[0].q.loginLower.$nin.includes("farmer2"));
 });
 
+test("sweepOnce: an auto-farm row is re-read on its own, shorter clock — the account is still earning", async () => {
+  const mk = (cfg) => {
+    const fx = sweepFixture();
+    const autofarm = {
+      cfg: () => ({ on: true, perTick: 5, ...cfg }),
+      collectCandidates: async () => [afCand("Farmer1", "s9"), afCand("Farmer2", "s10"), afCand("Farmer3", "s11")],
+      baseFacts: async () => ({ on: true, facts: new Map() }),
+    };
+    for (const l of ["farmer1", "farmer2", "farmer3"]) fx.inventory[l] = { sellable: [], login: l };
+    // Read 90 minutes, 30 minutes and 5 hours ago. (carol, a no-claim account,
+    // was read an hour ago and stays on the four-hour clock.)
+    fx.holdings.push(
+      holding("Farmer1", { farm: "autofarm", readAt: ago(1.5 * HOUR), items: [{ ...item("a|brawlhalla", "A", "Brawlhalla"), waves: [{ campaign: "E", qty: 1 }] }] }),
+      holding("Farmer2", { farm: "autofarm", readAt: ago(0.5 * HOUR), items: [{ ...item("a|brawlhalla", "A", "Brawlhalla"), waves: [{ campaign: "E", qty: 1 }] }] }),
+      holding("Farmer3", { farm: "autofarm", readAt: ago(5 * HOUR), items: [{ ...item("a|brawlhalla", "A", "Brawlhalla"), waves: [{ campaign: "E", qty: 1 }] }] }),
+    );
+    return loadHoldings({ ...fx, autofarm });
+  };
+  // An hour's clock: the 90-minute-old row and the 5-hour-old one are due, the
+  // 30-minute-old one is not — and no no-claim row is read any sooner for it.
+  const hourly = mk({ rereadMs: HOUR });
+  await quiet(() => hourly.h.sweepOnce({ budget: 3, reason: "tick" }));
+  assert.deepStrictEqual(hourly.reads.filter((x) => /^Farmer/.test(x)).sort(), ["Farmer1", "Farmer3"]);
+  assert.ok(!hourly.reads.includes("carol"), "the no-claim farm keeps its four hours");
+  // No clock of its own (an older autofarmStock, or one that cannot be read):
+  // the no-claim farm's four hours apply.
+  const none = mk({});
+  await quiet(() => none.h.sweepOnce({ budget: 3, reason: "tick" }));
+  assert.deepStrictEqual(none.reads.filter((x) => /^Farmer/.test(x)), ["Farmer3"]);
+  // A clock longer than the freshness window allows is cut to it.
+  const long = mk({ rereadMs: 20 * HOUR });
+  await quiet(() => long.h.sweepOnce({ budget: 3, reason: "tick" }));
+  assert.deepStrictEqual(long.reads.filter((x) => /^Farmer/.test(x)), ["Farmer3"]);
+});
+
 test("sweepOnce: a refresh reads both farms without taking a read from the no-claim farm", async () => {
   const fx = sweepFixture();
   const autofarm = {
