@@ -195,6 +195,26 @@ const AUTO_FARM_DEFAULTS = {
   unclaimedEraHeadroom: 2,
   unclaimedEraSafety: 3,
   unclaimedEraMinAccounts: 6,
+  // OFFERS FOR THAT STOCK (utils/autofarmOffers.js). On = each no-claim
+  // maintenance pass publishes one claim-at-sale Eldorado offer for a bundle of
+  // unclaimed drops that at least MinHolders free auto-farm accounts hold, that
+  // has settled (campaigns over, or unchanged for SettleHours), and that no
+  // live offer sells yet. Games the no-claim bots farm are never touched, and a
+  // bundle that ever had an offer is never listed twice. Ships OFF.
+  autofarmOffers: false,
+  autofarmOfferMinHolders: 5,
+  autofarmOfferSettleHours: 6,
+  autofarmOfferMaxPerPass: 2,
+  autofarmOfferMaxPerDay: 6,
+  // Price = the pricing engine's price x PriceFactor, rounded down to x.x9,
+  // kept inside [MinPrice, MaxPrice]. Quantity discounts are 5/10/15 % from
+  // 3/5/10 accounts.
+  autofarmOfferPriceFactor: 0.85,
+  autofarmOfferMinPrice: 0.99,
+  autofarmOfferMaxPrice: 1.49,
+  // Most accounts a new offer advertises; the stock sync follows the real
+  // stock afterwards.
+  autofarmOfferQuantity: 20,
   // Multi-market auto-listing categories.
   // Plati (Digiseller) cataloguer placement for Twitch-drop accounts:
   //   Digital Goods and Access > Services and social networks > Twitch,

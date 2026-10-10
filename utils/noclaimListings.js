@@ -1895,6 +1895,7 @@ async function runPass({ sweep = false } = {}) {
   const out = {
     spend: null,
     autofarm: null,
+    offers: null,
     settled: 0,
     heldReleased: 0,
     manualSold: { units: 0, ledgers: 0 },
@@ -2002,6 +2003,14 @@ async function runPass({ sweep = false } = {}) {
         }
       });
     }
+    // 6b. Unclaimed auto-farm stock that no offer sells yet goes on sale
+    // (utils/autofarmOffers; database only until there is something to list).
+    // Last of the lifecycle steps: a publish takes seconds, the rest must not
+    // wait for it.
+    await step("autofarm-offers", async () => {
+      out.offers = await require("./autofarmOffers").runPass();
+      for (const e of (out.offers && out.offers.errors) || []) out.errors.push("autofarm offer " + e);
+    });
     // 7. Gameflip chains whose successor failed are gameflipFulfiller's own
     // stalled-lane retry — nothing to do here.
     // 8. Optional holdings sweep.

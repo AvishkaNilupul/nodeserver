@@ -496,6 +496,12 @@ function load(o = {}) {
         o.autofarm,
       ),
     ],
+    // …and their unclaimed stock is put on sale by its own module too
+    // (tests/autofarmOffers.test.js).
+    [
+      "./autofarmOffers",
+      stubFns({ runPass: () => ({ created: [], waiting: [], skipped: {}, errors: [] }) }, o.offers),
+    ],
   ]);
   delete require.cache[MOD];
   const mod = require(MOD);
@@ -1217,6 +1223,32 @@ test("runPass: one pass at a time, and none at all while switched off", async ()
   open();
   assert.deepStrictEqual((await first).errors, []);
   assert.strictEqual(t.mod.status().running, false);
+});
+
+test("runPass: unclaimed auto-farm stock is offered each pass; a failure there is one error line, not a stopped pass", async () => {
+  const ok = load({
+    settings: { healthPerPass: 0 },
+    offers: { runPass: () => ({ created: [{ game: "Brawlhalla" }], waiting: [], skipped: {}, errors: ["SPAM: Eldorado said no"] }) },
+  });
+  const r = await ok.mod.runPass();
+  assert.strictEqual(ok.called("runPass").length, 1);
+  assert.strictEqual(r.offers.created.length, 1);
+  assert.deepStrictEqual(r.errors, ["autofarm offer SPAM: Eldorado said no"]);
+
+  const bad = load({
+    settings: { healthPerPass: 0 },
+    offers: {
+      runPass: () => {
+        throw new Error("boom");
+      },
+    },
+  });
+  const r2 = await bad.mod.runPass();
+  assert.deepStrictEqual(r2.errors, ["autofarm-offers: boom"]);
+  // Every other step still ran.
+  assert.strictEqual(bad.called("spendPending").length, 1);
+  assert.strictEqual(bad.called("retirePending").length, 1);
+  assert.strictEqual(bad.mod.status().running, false);
 });
 
 test("runPass orphans: an old unattached claim is re-homed onto its row, or pinned — never released", async () => {
