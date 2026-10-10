@@ -300,6 +300,32 @@ function setGameNorms(set) {
   return [...out];
 }
 
+// The expiry leads (utils/noclaimHoldings, "EXPIRY"), shared with the grow
+// pass. A drop leaves the accounts seven days after its campaign ends, so:
+//   sellLeadMs   — an offer must be covered this far ahead to stay on sale
+//                  (what the stock sync counts)
+//   bundleLeadMs — a bundle is only BUILT from copies that last this long, a
+//                  margin past the sell lead, so a rewrite is not paused again
+//                  by the next sync
+// Both 0 when the rules are off or the holdings module predates them.
+function expiryLeads(d) {
+  const nh = d && d.nh;
+  const exp = nh && typeof nh.expirySettings === "function" ? nh.expirySettings() : null;
+  if (!exp || !exp.on) return { sellLeadMs: 0, bundleLeadMs: 0 };
+  return {
+    sellLeadMs: Number(exp.sellLeadMs) || 0,
+    bundleLeadMs: Number(exp.bundleLeadMs) || 0,
+  };
+}
+
+// The snapshot's holdings with their items as they will stand at `atMs` — what
+// the pickers build a bundle from.
+function holdingsAt(d, base, atMs) {
+  const nh = d && d.nh;
+  if (nh && typeof nh.durableHoldings === "function") return nh.durableHoldings(base, atMs) || [];
+  return (base && base.holdings) || [];
+}
+
 // ---------------------------------------------------------------------------
 // One pass
 // ---------------------------------------------------------------------------
@@ -458,6 +484,7 @@ async function rotationPass(opts = {}) {
     let paidOffers = null;
     let setsDone = 0;
     let rowsLeft = MAX_ROWS_PER_PASS;
+    const leads = expiryLeads(d);
     for (const [setId, group] of bySet) {
       if (setsDone >= MAX_SETS_PER_PASS || rowsLeft <= 0) break;
       const set = await d.DropSet.findById(setId).lean();
@@ -467,7 +494,12 @@ async function rotationPass(opts = {}) {
         skip("not a no-claim set");
         continue;
       }
-      const st = await d.ncs.stockForSet(set);
+      // Counted the way the stock sync counts what the offer may advertise:
+      // on the copies still there a sell lead from now (expiryLeads). The sync
+      // pauses an offer a day BEFORE a wave leaves its accounts; asked about
+      // today's copies this would answer "still held" and leave it paused
+      // until they were really gone.
+      const st = await d.ncs.stockForSet(set, { leadMs: leads.sellLeadMs });
       if (st.free > 0 || st.stale > 0) {
         // A free account still holds it (or did at its last read): the sync
         // resumes the offer by itself.
@@ -489,8 +521,11 @@ async function rotationPass(opts = {}) {
       const game = setGame(set);
       if (!base) base = await d.nh.snapshotBase();
       const norms = setGameNorms(set);
+      // Built from the copies that outlast the bundle lead, so the new text is
+      // not one the next expiry takes straight back off sale.
+      const lasting = holdingsAt(d, base, now + leads.bundleLeadMs);
       const names = new Set();
-      for (const h of (base && base.holdings) || []) {
+      for (const h of lasting) {
         for (const it of (h && h.items) || []) {
           if (it && it.campaign && sameGame(it.game, game)) names.add(str(it.campaign).trim());
         }
@@ -505,7 +540,7 @@ async function rotationPass(opts = {}) {
           )
         : new Map();
       const pick = pickRotationBundle({
-        holdings: (base && base.holdings) || [],
+        holdings: lasting,
         isFree: (h) => d.nh.freeReason(h, base, norms) === "",
         isFresh: (h) => d.nh.isFresh(h, base, now),
         game,
@@ -708,4 +743,6 @@ module.exports = {
   setGameNorms,
   targetSet,
   realDeps,
+  expiryLeads,
+  holdingsAt,
 };

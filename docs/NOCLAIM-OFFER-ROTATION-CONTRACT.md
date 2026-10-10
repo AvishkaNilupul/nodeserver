@@ -33,8 +33,10 @@ Vault markets (Gameflip / GGSel / Plati) belong to the unclaimed auto-lister.
 4. The set has ≥1 row with `marketplace:"eldorado"`, `noclaimStock:true`,
    `status:"active"`, `autoPaused:true`, `lastError:"paused: no claimable stock"`,
    no `bulkOfferId`, last written ≥ 30 min ago.
-5. `noclaimStock.stockForSet(set)` has `free === 0` and `stale === 0`: no FREE
-   account holds the whole bundle any more. (Until 2026-10-06 this was
+5. `noclaimStock.stockForSet(set, { leadMs: sell lead })` has `free === 0` and
+   `stale === 0`: no FREE account will still hold the whole bundle a sell lead
+   from now — the count the stock sync paused it on (see Expiry). (Until
+   2026-10-06 this was
    `covering === 0`. Accounts that are sold or on another listing may still
    hold it; that alone no longer blocks a rotation, because an offer grown to
    a bigger bundle — see Grow below — ends exactly there when the extra drops
@@ -50,7 +52,8 @@ Vault markets (Gameflip / GGSel / Plati) belong to the unclaimed auto-lister.
 
 - Pool = holdings that are in a bot config, free for the game
   (`noclaimHoldings.freeReason === ""`) and fresh (`isFresh`), counting only
-  items of the set's game.
+  items of the set's game — and of those only the copies that outlast the
+  bundle lead (`noclaimHoldings.durableHoldings`; see Expiry).
 - Fewer than 10 such accounts → no bundle.
 - An item is "newest" when one of its recorded campaigns is ACTIVE now or ended
   ≤ 72 h ago (`TwitchCampaign` by name). Only newest items are used when any
@@ -125,12 +128,15 @@ these rows: it reads Eldorado rows by `unclaimedGame`, retired 2026-09-28.
 6. No other on-sale Eldorado no-claim set of the game already sells exactly
    that bundle (two deliberately different offers stay different; the bigger
    set is considered first).
-7. `noclaimStock.stockForSet` counts ≥ 10 free accounts for the bigger bundle.
+7. `noclaimStock.stockForSet` (with the sell lead) counts ≥ 10 free accounts
+   for the bigger bundle.
 
 ## The picker (pure)
 
 - Holders = free + fresh accounts that hold the whole current bundle — the
-  offer's own stock. Fewer than 10 → nothing.
+  offer's own stock — judged, like everything in this picker, on the copies
+  that outlast the bundle lead (see Expiry): a wave about to leave the accounts
+  is not "more". Fewer than 10 → nothing.
   `minCover = max(10, ceil(holders × 0.8))` (`GROW_KEEP`).
   (Until 2026-10-07 the bar was half of the game's WHOLE free farm. It froze as
   soon as the farm was two cohorts: ~490 new Overwatch accounts holding only
@@ -176,10 +182,95 @@ Until then the offer under-advertises, exactly as before this existed.
 
 No free account holds the grown bundle → the stock sync pauses the offer → the
 rotation (rule 5 above) moves it to the bundle the free farm holds now, after
-its usual 30 minutes. So a grown offer costs one short pause per expiry.
+its usual 30 minutes. So a grown offer costs one short pause per expiry — a day
+BEFORE the copies go, never after (see Expiry below).
 
 ## Never
 
 Removes an item or lowers a count; changes a price; pauses or resumes an offer
 the owner paused; touches a bulk-pack row, a sync-paused row, PlayerAuctions,
 G2G or a vault market; edits a set.
+
+---
+
+# Expiry — an offer never promises what is about to leave the accounts
+
+Owner rule, 2026-10-10: *"this cannot happen again"* — after Eldorado order
+`588d88a3` was paid for a bundle no account held any more, and was disputed.
+
+## What happened
+
+An earned, unclaimed drop leaves the inventory **7 days after its campaign
+ends**, on every account at once. Measured on five Rainbow Six waves in a row:
+the first Gameflip unit came off sale as "part of its bundle expired" at 05:48,
+05:21, 05:25, 05:26 and 05:22 UTC on 09-30, 10-03, 10-05, 10-07 and 10-10 — each
+wave had ended at 04:58 UTC exactly seven days earlier (two confirming reads
+20 minutes apart account for the gap).
+
+The holdings snapshot learned that one account at a time: a row is trusted for
+`maxAgeHours` (8) and not re-read for half of that. On 2026-10-10 the offer
+"OL' CLANKER + 14× Esports Pack 26 Stage 2.1" (grown to 14× the day before,
+18 hours ahead of wave 12's expiry) kept an advertised quantity for 3 h 55 min
+after those three packs had gone, shrinking one re-read at a time until the
+sync paused it at 08:53 UTC. The buyer paid inside that window.
+
+## The rules (`utils/noclaimHoldings.js`)
+
+1. **Copies are kept per campaign.** `NoclaimHolding.items[].waves` =
+   `[{ campaign, qty }]`, summing to the item's `qty`. "14× Esports Pack" is
+   3 of wave 12 + 3 of 13 + 4 of 14 + 4 of 15.
+2. **A copy is gone at `TwitchCampaign.endAt + claim window`** (7 days), matched
+   by campaign name and game. Not known → it counts until a read shows it gone:
+   no campaign of that name, no end date, a row stored before waves were kept,
+   or a copy still seen more than 6 h after its campaign should have taken it
+   (a re-used name, or a rule we do not know — inside the 6 h a late sighting is
+   Twitch clearing up slowly and is not believed).
+3. **Stock is counted on the copies still there at a moment**
+   (`durableItems`, `noclaimStock.scanSet({ leadMs })`):
+   - *now* — every count and every claim's shortlist. A row read before an
+     expiry stops counting the expired copies at the expiry, not when it is
+     next read. This alone closes the four-hour hole, on every market.
+   - *now + sell lead* — what a claim-at-sale offer may ADVERTISE
+     (`stockForListing`). Eldorado: **24 h**, so the offer comes off sale a day
+     before a wave goes and every buyer has a day to claim what they were sold.
+     PlayerAuctions / G2G (no rotation to move them on): 1 h.
+   - *now + sell lead + 12 h* — what the rotation and the grow may BUILD a
+     bundle from, so a rewritten offer is not paused by the next sync.
+   A paid order is still claimed on what the accounts hold *now*: one that lands
+   between the lead and the pause is filled in full.
+4. **The rotation asks the same question as the sync** (`stockForSet` with the
+   sell lead), or it would see "still held" and leave the offer paused until the
+   copies were really gone.
+
+Settings (autoFarm, read on every snapshot build — no restart):
+`noclaimExpiryAware` (`false` = the old behaviour), `noclaimClaimWindowHours`
+(168), `noclaimSellLeadHours` (24; never under 1).
+
+## When the prediction is wrong
+
+Two nets, so a wrong or missing end date costs minutes, not hours:
+
+- **Losses nobody predicted.** When 3 different FREE accounts are read short of
+  the same item within 30 minutes and no campaign end explains it, every holder
+  of that item read before them is flagged (`recheckAt`). A flagged row is not
+  fresh — it counts as no stock, though it stays on a paid order's shortlist —
+  and is read first; a drain re-reads them at once (`refreshBudget` a pass). An
+  account read as holding nothing at all is not evidence, and a forced re-read
+  never empties a row: Twitch answers an empty inventory now and then, and that
+  answer is left for the regular sweep to confirm.
+- **A paid order that finds no account** (`eldoradoFulfiller.holdShortOffer`).
+  When the claim read accounts and found them short, every on-sale Eldorado row
+  of the set is paused at once, the way the stock sync pauses an empty one, and
+  the holders of the set's items are flagged. When nothing was read at all
+  (the last accounts went to another order) the rows are paused without a
+  flag. When the scan host simply did not answer, nothing is paused: the order
+  ships on the next tick that reaches the accounts.
+
+`SystemEvent` `noclaim_shop/recheck_flagged` (warn) for every flag.
+
+## Never
+
+Shortens what an account is believed to hold on a forced re-read's empty
+answer; pauses an offer because the scan host was unreachable; counts a copy
+for an offer inside its sell lead; delivers a different bundle than the one
+the row sells.

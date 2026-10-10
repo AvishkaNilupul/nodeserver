@@ -458,6 +458,11 @@ async function deliverOrder(order, { dryRun }) {
       // what was taken stays sold to THIS order and the next tick resumes it.
       // A bulk pack short of a whole pack is the same paid-and-stuck order,
       // named so it pages as one (FIXES-1 L5).
+      //
+      // And nobody else may buy it: the offer said there was stock and there
+      // was not, so it comes off sale now and every holder is re-read before
+      // the stock sync may count it again (holdShortOffer).
+      if (!dryRun && set) await holdShortOffer(listing, set, orderId, picked.missed);
       const advertised =
         (listing.requiredDrops || []).length || ((set && set.items) || []).length;
       return {
@@ -1005,6 +1010,80 @@ const alertedOrders = new Set();
 
 function alertsOperator(reason) {
   return ALERT_REASONS.test(String(reason || ""));
+}
+
+// A paid no-claim order found no account that holds its bundle. The stock
+// sync's count was wrong — it reads a snapshot — and stays wrong until every
+// holder is read again, so the offer would go on selling something nobody can
+// hand over. Order 588d88a3 (2026-10-10, Rainbow Six 14× Esports Pack) was the
+// first buyer to hit that; the second must not exist.
+//
+// Once per order per process (a stuck order comes back every tick):
+//   1. every on-sale Eldorado row of the set is paused exactly as the stock
+//      sync pauses an empty one (autoPaused + its lastError), so the sync
+//      resumes it, or the rotation moves it on, when stock is real again;
+//   2. the holders of the set's items are flagged for a re-read
+//      (noclaimHoldings.flagRecheck): until then they count as no stock.
+//
+// `missed` is the claim's own account of the candidates it passed over
+// (noclaimStock.claimForSet). Step 2 runs only when an account was READ and
+// found short: that is the snapshot being wrong. And when all that went wrong
+// is that the scan host did not answer, nothing is paused at all — the accounts
+// may be exactly what the snapshot says, the order ships on the next tick that
+// reaches them, and the operator has already been paged.
+//
+// Never throws: the order is already held, and this must not hide why.
+const shortHeldOrders = new Set();
+async function holdShortOffer(listing, set, orderId, missed) {
+  const key = String(orderId || "");
+  if (!key || shortHeldOrders.has(key)) return;
+  const why = missed && typeof missed === "object" ? missed : {};
+  const foundShort = Number(why["short of the set"]) || 0;
+  const unread = Number(why["live read failed"]) || 0;
+  if (!foundShort && unread) return; // not proven, and not remembered: asked again next tick
+  shortHeldOrders.add(key);
+  try {
+    const MarketplaceListing = require("../models/MarketplaceListing");
+    const rows = await MarketplaceListing.find({
+      marketplace: "eldorado",
+      noclaimStock: true,
+      set: listing.set,
+      status: "active",
+      autoPaused: { $ne: true },
+    });
+    for (const row of rows) {
+      try {
+        const offer = await mp.eldoradoOffer(row.externalId);
+        // An offer the owner paused is theirs; only one on sale is taken down.
+        if (!offer || offer.offerState !== "Active") continue;
+        await mp.eldoradoDelist(row.externalId);
+        row.autoPaused = true;
+        row.lastError = "paused: no claimable stock";
+        await row.save();
+        console.log(
+          "eldorado offer paused — order " + key + " found no account: " + row.title,
+        );
+      } catch (e) {
+        console.error("eldorado short-order pause of " + row.externalId + ":", e.message);
+      }
+    }
+  } catch (e) {
+    console.error("eldorado short-order pause:", e.message);
+  }
+  if (!foundShort) return;
+  try {
+    const ncs = require("./noclaimStock");
+    const keys = [...ncs.requiredFromSet(set).keys()];
+    const nh = require("./noclaimHoldings");
+    if (typeof nh.flagRecheck === "function") {
+      await nh.flagRecheck({
+        itemKeys: keys,
+        reason: "Eldorado order " + key + " found no account holding its bundle",
+      });
+    }
+  } catch (e) {
+    console.error("eldorado short-order recheck:", e.message);
+  }
 }
 
 // Returns true only on the tick that actually paged, so the tick's new log line
@@ -1668,4 +1747,6 @@ module.exports = {
   alertsOperator,
   alertUnfulfillable,
   alertedOrders,
+  holdShortOffer,
+  shortHeldOrders,
 };

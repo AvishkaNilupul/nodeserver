@@ -429,9 +429,22 @@ function candidateOf(h, led, required) {
   };
 }
 
+// How far ahead a market's offers must already be covered (the expiry rules in
+// utils/noclaimHoldings). 0 when that module predates them.
+function advertiseLeadMs(market) {
+  const nh = holdings();
+  return typeof nh.advertiseLeadMs === "function" ? nh.advertiseLeadMs(market) : 0;
+}
+
 // One pass over the snapshot for one set: every in-config holding that covers
 // the set, split into free+fresh, free-but-stale and committed.
-async function scanSet(set) {
+//
+// "Covers" is asked of the copies that will still be on the account `leadMs`
+// from now (0 = right now). A row read before a wave expired still lists the
+// wave's copies; counting them is how an offer stayed on sale for four hours
+// with nothing behind it (2026-10-10). The candidates keep their full items —
+// a claim's own live read decides what is really there.
+async function scanSet(set, { leadMs = 0 } = {}) {
   const out = {
     base: null,
     required: new Map(),
@@ -448,9 +461,12 @@ async function scanSet(set) {
   const base = await nh.snapshotBase();
   out.base = base || null;
   const norms = setGameNorms(set);
+  const at = Date.now() + Math.max(0, Number(leadMs) || 0);
+  const heldAt =
+    typeof nh.durableItems === "function" ? (h) => nh.durableItems(h, base, at) : (h) => h.items;
   for (const h of (base && base.holdings) || []) {
     if (!h || h.inConfig === false) continue;
-    if (!covers(heldCounts(h.items), out.required)) continue;
+    if (!covers(heldCounts(heldAt(h)), out.required)) continue;
     out.covering++;
     const led = ledgerOf(base, h.loginLower);
     if (freeForSet(h, base, norms)) {
@@ -651,9 +667,10 @@ async function freeCandidates(set, { fresh = true } = {}) {
 }
 
 // The panel's numbers for one set. Counts only; a DB error propagates rather
-// than reading as an empty farm.
-async function stockForSet(set) {
-  const scan = await scanSet(set);
+// than reading as an empty farm. `leadMs` counts the accounts that will still
+// hold the set that far ahead (see scanSet) — what an offer may advertise.
+async function stockForSet(set, { leadMs = 0 } = {}) {
+  const scan = await scanSet(set, { leadMs });
   return {
     free: scan.fresh.length,
     stale: scan.stale.length,
@@ -687,7 +704,9 @@ async function stockForListing(row) {
   if (!row.set) return 0;
   const set = await DropSet.findById(row.set).lean();
   if (!isNoclaimSet(set)) return 0;
-  const { free } = await stockForSet(set);
+  // Advertised ahead of the next expiry, never up to it: a buyer gets time to
+  // claim what they were sold, and the offer is off sale before a wave goes.
+  const { free } = await stockForSet(set, { leadMs: advertiseLeadMs(market) });
   const capped = Math.min(free, ADVERTISE_MAX);
   if (!capped) return 0;
   const sharers = await MarketplaceListing.find(
@@ -791,6 +810,12 @@ async function claimForSet(set, want, opts = {}) {
   let reads = 0;
   let took = 0;
   const taken = [];
+  // Why live-checked candidates were passed over ({ why: count }), handed back
+  // as `out.missed` (not enumerable — the return is still the claimed list). A
+  // caller left short can tell "the snapshot was wrong about these accounts"
+  // from "the scan host did not answer".
+  const missed = {};
+  Object.defineProperty(out, "missed", { value: missed, enumerable: false });
 
   for (const c of walk) {
     if (took >= need || reads >= budget) break;
@@ -817,7 +842,11 @@ async function claimForSet(set, want, opts = {}) {
 
       reads++;
       const live = await liveCheck(c, pool, required);
-      if (!live.ok) continue;
+      if (!live.ok) {
+        const why = str(live.why) || "not usable";
+        missed[why] = (missed[why] || 0) + 1;
+        continue;
+      }
       if (dryRun) {
         // Reads only: what a real claim would take, never what it would skip.
         const busy = await ual().activeListingsForLogin(c.login);
@@ -1128,6 +1157,7 @@ module.exports = {
   poolBlockReason,
   orderNote,
   // reads
+  advertiseLeadMs,
   freeCandidates,
   stockForSet,
   stockForListing,

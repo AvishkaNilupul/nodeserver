@@ -25,6 +25,11 @@ const settings = require("./settings");
 function ual() {
   return require("./unclaimedAutoList");
 }
+// Lazy too: only the expiry rules read campaigns, and only when a holding
+// names one.
+function campaignModel() {
+  return require("../models/TwitchCampaign");
+}
 
 // Contract §1e defaults. Used only when settings.getNoclaimShopSettings is
 // missing (the accessor ships in the same change): a settings.js without it
@@ -62,6 +67,66 @@ function posNum(v, d) {
 function maxAgeMsOf(cfg) {
   return posNum(cfg && cfg.maxAgeHours, NOCLAIM_FALLBACK.maxAgeHours) * 3600 * 1000;
 }
+
+// ---------------------------------------------------------------------------
+// EXPIRY (docs/NOCLAIM-OFFER-ROTATION-CONTRACT.md, "Expiry").
+//
+// An earned, unclaimed drop leaves the inventory a fixed time after its
+// CAMPAIGN ends, on every account at once. Measured on five Rainbow Six waves
+// in a row (expiries of 2026-09-30, 10-03, 10-05, 10-07 and 10-10): the copies
+// were gone within minutes of endAt + 7 days.
+//
+// The snapshot used to learn that one account at a time, hours later: a row is
+// trusted for maxAgeHours and not re-read for half of that. On 2026-10-10 the
+// Eldorado offer "OL' CLANKER + 14× Esports Pack" stayed on sale for 3 h 55 min
+// after the oldest wave's packs had gone; a buyer paid, no account held the
+// bundle, and the order was disputed.
+//
+// So each holding keeps its copies per campaign (`items[].waves`), and stock is
+// counted on the copies that will still be there at a given moment:
+//   - now          — a claim's shortlist, and every market's count
+//   - now + lead   — what an offer may ADVERTISE, so it comes off sale a day
+//                    before a wave goes instead of hours after, and a buyer
+//                    always has that long to claim everything they were sold
+// Read fresh on every snapshot build (autoFarm, so one settings edit retunes
+// it without a restart):
+//   noclaimExpiryAware      false = off: every copy counts until a read shows
+//                           it gone (the behaviour before 2026-10-10)
+//   noclaimClaimWindowHours how long a drop outlives its campaign (168)
+//   noclaimSellLeadHours    how long before that an offer stops promising it (24)
+// ---------------------------------------------------------------------------
+const HOUR_MS = 60 * 60 * 1000;
+const EXPIRY_DEFAULTS = {
+  claimWindowHours: 168,
+  sellLeadHours: 24,
+  // A bundle is BUILT (rotation, grow) only from copies that stay advertisable
+  // this much longer, so a rewrite is not undone by the next stock sync.
+  bundleMarginHours: 12,
+};
+// Offers of the claim-at-sale markets that have no rotation behind them keep
+// selling to the last hour; they only need to be off sale before the copies go.
+const TECH_LEAD_MS = HOUR_MS;
+// A copy read alive this long after its campaign should have taken it was not
+// that campaign's (a re-used name) or follows a rule this file does not know:
+// its expiry is unknown and it counts until a read shows it gone. Inside the
+// grace, a late sighting is Twitch clearing up slowly and is not believed.
+const REFUTE_GRACE_MS = 6 * HOUR_MS;
+// Copies lost that no campaign end explains, on this many different free
+// accounts within the window, are an expiry nobody predicted: every holder of
+// the item is re-read before it counts as stock again.
+const LOSS_CONFIRM = 3;
+const LOSS_WINDOW_MS = 30 * 60 * 1000;
+// Re-reading flagged rows: passes of `refreshBudget` reads until none is left.
+const DRAIN_MAX_PASSES = 12;
+// Twitch answers an EMPTY inventory now and then for an account that holds
+// plenty. One row emptied by that costs one row; a forced re-read of every
+// holder of an item, answered that way, would take a whole game off sale for
+// hours. So a forced re-read never empties a row: an empty answer for an
+// account that held something is recorded as this "error" (the row keeps its
+// items and stays flagged — no stock) and the regular sweep, minutes later,
+// reads it again and is believed.
+const FORCED_EMPTY = "empty inventory on a forced re-read";
+const FORCED_EMPTY_RE = /^empty inventory on a forced re-read/;
 
 const BASE_TTL_MS = 30 * 1000;
 const FIRST_SWEEP_MS = 60 * 1000;
@@ -106,9 +171,23 @@ function copies(qty) {
   return Number.isFinite(q) && q >= 1 ? q : 1;
 }
 
+function addWave(waves, campaign, qty) {
+  if (!(qty > 0)) return;
+  const name = String(campaign || "").trim();
+  const cur = waves.find((w) => w.campaign === name);
+  if (cur) cur.qty += qty;
+  else waves.push({ campaign: name, qty });
+}
+
 // sellableDropsFromNoClaimInv output (one entry per copy) -> one entry per
 // item with qty = copies, in first-seen order. An entry that already carries a
 // qty counts as that many copies, so folding a folded list changes nothing.
+//
+// `waves` keeps the same copies split by the campaign each came from (it sums
+// to qty): a raw inventory entry is one copy of its own campaign, and a folded
+// entry brings its waves along. A folded entry WITHOUT waves (a row written
+// before they were kept) is n copies of unknown origin — campaign "" — never n
+// copies of its first campaign, which would expire all of them with it.
 function foldSellable(sellable) {
   const byKey = new Map();
   for (const s of Array.isArray(sellable) ? sellable : []) {
@@ -119,26 +198,208 @@ function foldSellable(sellable) {
         "|" +
         String(s.game || "").trim().toLowerCase();
     const n = copies(s.qty);
-    const cur = byKey.get(key);
+    let cur = byKey.get(key);
     if (!cur) {
-      byKey.set(key, {
+      cur = {
         itemKey: key,
         name: String(s.name || ""),
         game: String(s.game || ""),
         campaign: String(s.campaign || ""),
         image: String(s.imageURL || s.image || ""),
-        qty: n,
-      });
-      continue;
+        qty: 0,
+        waves: [],
+      };
+      byKey.set(key, cur);
+    } else {
+      // First-seen wins; a later copy only fills a blank.
+      if (!cur.name && s.name) cur.name = String(s.name);
+      if (!cur.game && s.game) cur.game = String(s.game);
+      if (!cur.campaign && s.campaign) cur.campaign = String(s.campaign);
+      if (!cur.image && (s.imageURL || s.image)) cur.image = String(s.imageURL || s.image);
     }
     cur.qty += n;
-    // First-seen wins; a later copy only fills a blank.
-    if (!cur.name && s.name) cur.name = String(s.name);
-    if (!cur.game && s.game) cur.game = String(s.game);
-    if (!cur.campaign && s.campaign) cur.campaign = String(s.campaign);
-    if (!cur.image && (s.imageURL || s.image)) cur.image = String(s.imageURL || s.image);
+    let left = n;
+    if (Array.isArray(s.waves)) {
+      for (const w of s.waves) {
+        const q = Math.min(left, copies(w && w.qty));
+        addWave(cur.waves, w && w.campaign, q);
+        left -= q;
+      }
+      addWave(cur.waves, "", left);
+    } else {
+      addWave(cur.waves, s.qty == null ? s.campaign : "", left);
+    }
   }
   return [...byKey.values()];
+}
+
+// ---------------------------------------------------------------------------
+// Expiry rules (pure; see the EXPIRY note at the top)
+// ---------------------------------------------------------------------------
+
+function hoursSetting(v, d, lo, hi) {
+  if (v == null || (typeof v === "string" && !v.trim())) return d;
+  const n = Number(v);
+  return Number.isFinite(n) ? Math.min(hi, Math.max(lo, n)) : d;
+}
+
+// { on, claimWindowMs, sellLeadMs, bundleLeadMs }. A settings.js without
+// getAutoFarm (or a throw in it) degrades to the documented defaults.
+function expirySettings() {
+  let af = null;
+  try {
+    if (typeof settings.getAutoFarm === "function") af = settings.getAutoFarm();
+  } catch (e) {
+    console.error("noclaimHoldings: auto-farm settings unreadable:", e.message);
+  }
+  af = af && typeof af === "object" ? af : {};
+  const D = EXPIRY_DEFAULTS;
+  // Never under an hour: the lead has to outlast a stock sync (15 min on
+  // Eldorado, 30 on PlayerAuctions), or an offer could still be on sale when
+  // the copies go.
+  const sellH = hoursSetting(af.noclaimSellLeadHours, D.sellLeadHours, 1, 120);
+  return {
+    on: af.noclaimExpiryAware !== false,
+    claimWindowMs: hoursSetting(af.noclaimClaimWindowHours, D.claimWindowHours, 1, 24 * 60) * HOUR_MS,
+    sellLeadMs: sellH * HOUR_MS,
+    bundleLeadMs: (sellH + D.bundleMarginHours) * HOUR_MS,
+  };
+}
+
+// How far ahead a market's offers must already be covered. 0 with the switch
+// off. Eldorado has the rotation to move an offer on to the next bundle, so it
+// can afford to stop a day early; the others only get the safety hour.
+function advertiseLeadMs(market, exp = expirySettings()) {
+  if (!exp || !exp.on) return 0;
+  const m = String(market || "").trim().toLowerCase();
+  return m === "eldorado" ? exp.sellLeadMs : Math.min(exp.sellLeadMs, TECH_LEAD_MS);
+}
+
+function sameGameNorm(a, b) {
+  const x = normGame(a);
+  const y = normGame(b);
+  return !!x && !!y && (x === y || x.includes(y) || y.includes(x));
+}
+
+function msOf(v) {
+  if (!v) return NaN;
+  const t = v instanceof Date ? v.getTime() : new Date(v).getTime();
+  return Number.isFinite(t) ? t : NaN;
+}
+
+// Map<lowercased campaign name, [{ game, endMs }]> from TwitchCampaign rows. A
+// row without an end date says nothing and is left out.
+function campaignEndIndex(rows) {
+  const out = new Map();
+  for (const c of rows || []) {
+    const name = String((c && c.name) || "").trim().toLowerCase();
+    const endMs = msOf(c && c.endAt);
+    if (!name || !Number.isFinite(endMs)) continue;
+    const entry = { game: String(c.game || ""), endMs };
+    const list = out.get(name);
+    if (list) list.push(entry);
+    else out.set(name, [entry]);
+  }
+  return out;
+}
+
+// When the copies a holding got from `campaign` leave the account: the
+// campaign's end + the claim window. Infinity = not known (no campaign of that
+// name for the game, no end date, or expiry awareness off) — such a copy
+// counts until a live read shows it gone.
+//
+// `readMs` is when the copy was last SEEN. A campaign that should have taken it
+// more than REFUTE_GRACE before that was not its source — Twitch re-uses names
+// — so it is skipped; the earliest of the rest decides (the cautious pick).
+function waveGoneAt(base, game, campaign, readMs) {
+  const exp = base && base.expiry;
+  if (!exp || !exp.on) return Infinity;
+  const name = String(campaign || "").trim().toLowerCase();
+  const list = name && base.campaignEnds ? base.campaignEnds.get(name) : null;
+  if (!list) return Infinity;
+  let best = Infinity;
+  for (const c of list) {
+    if (c.game && game && !sameGameNorm(c.game, game)) continue;
+    const gone = c.endMs + exp.claimWindowMs;
+    if (Number.isFinite(readMs) && readMs > gone + REFUTE_GRACE_MS) continue;
+    if (gone < best) best = gone;
+  }
+  return best;
+}
+
+// The holding's items as they will stand at `atMs`: each item's qty is the
+// copies still on the account then, and an item with none left is dropped. A
+// kept item carries the campaign of its longest-lived copies, so "is this item
+// part of a current event?" is asked of what will actually be sold.
+// Never mutates the holding; an item the rules leave whole is returned as is.
+function durableItems(holding, base, atMs = Date.now()) {
+  const items = Array.isArray(holding && holding.items) ? holding.items : [];
+  const exp = base && base.expiry;
+  if (!exp || !exp.on || !items.length) return items;
+  const readMs = msOf(holding.readAt);
+  const out = [];
+  for (const it of items) {
+    const waves = it && Array.isArray(it.waves) && it.waves.length ? it.waves : null;
+    if (!waves) {
+      if (it) out.push(it); // written before waves were kept: nothing known
+      continue;
+    }
+    const total = copies(it.qty);
+    let left = total;
+    let qty = 0;
+    let label = "";
+    let labelGone = -Infinity;
+    for (const w of waves) {
+      const n = Math.min(left, copies(w && w.qty));
+      if (n <= 0) continue;
+      left -= n;
+      const gone = waveGoneAt(base, it.game, w && w.campaign, readMs);
+      if (!(gone > atMs)) continue;
+      qty += n;
+      const name = String((w && w.campaign) || "").trim();
+      if (name && gone >= labelGone) {
+        labelGone = gone;
+        label = name;
+      }
+    }
+    qty += left; // copies the waves do not account for: unknown, so they count
+    if (qty <= 0) continue;
+    const campaign = label || String(it.campaign || "");
+    if (qty === total && campaign === String(it.campaign || "")) out.push(it);
+    else out.push({ ...it, qty, campaign });
+  }
+  return out;
+}
+
+// Every in-config holding with its items as of `atMs` (durableItems). The
+// shape the offer pickers read, so they build bundles out of what will last.
+function durableHoldings(base, atMs = Date.now()) {
+  const list = (base && base.holdings) || [];
+  const exp = base && base.expiry;
+  if (!exp || !exp.on) return list;
+  return list.map((h) => {
+    if (!h) return h;
+    const items = durableItems(h, base, atMs);
+    return items === h.items ? h : { ...h, items };
+  });
+}
+
+// [{ itemKey, name, game, had, has }] for every item of which the fresh read
+// holds FEWER copies than the old row was expected to hold by now — a loss no
+// campaign end explains. `before` is the stored row, `items` the new fold.
+function unpredictedLosses(before, items, base, now = Date.now()) {
+  if (!before || !Array.isArray(before.items) || !before.items.length) return [];
+  const have = new Map();
+  for (const it of items || []) have.set(String(it.itemKey || ""), copies(it.qty));
+  const out = [];
+  for (const it of durableItems(before, base, now)) {
+    const key = String((it && it.itemKey) || "");
+    if (!key) continue;
+    const had = copies(it.qty);
+    const has = have.get(key) || 0;
+    if (has < had) out.push({ itemKey: key, name: String(it.name || ""), game: String(it.game || ""), had, has });
+  }
+  return out;
 }
 
 // Both names a holding can be known by: its row key (the config's login) and
@@ -221,6 +482,16 @@ function freeReason(holding, base, gameNorm) {
   return "";
 }
 
+// True while the row is flagged for a re-read (recheckAt) and no live read has
+// landed since. A flag only ever marks rows read BEFORE its moment
+// (flagRecheck), so a read stamped at that very moment already answers it.
+function needsRecheck(holding) {
+  const rc = msOf(holding && holding.recheckAt);
+  if (!Number.isFinite(rc)) return false;
+  const ms = msOf(holding.readAt);
+  return !Number.isFinite(ms) || ms < rc;
+}
+
 // `now` is optional so tests (and a caller holding one clock) can pin it.
 function isFresh(holding, base, now = Date.now()) {
   const readAt = holding && holding.readAt;
@@ -228,6 +499,9 @@ function isFresh(holding, base, now = Date.now()) {
   const ms = new Date(readAt).getTime();
   const maxAgeMs = Number(base && base.maxAgeMs);
   if (!Number.isFinite(ms) || !Number.isFinite(maxAgeMs)) return false;
+  // Something proved the snapshot wrong about this account's items: it is not
+  // stock again until it has been read after that.
+  if (needsRecheck(holding)) return false;
   return now - ms <= maxAgeMs;
 }
 
@@ -271,12 +545,13 @@ async function mapLimit(items, n, fn) {
 // is bookkeeping, and a claim must not fail on it.
 async function writeRead(loginLower, { sellable, login, error } = {}) {
   let update;
+  let items = null;
   if (error) {
     const msg = String((error && error.message) || error || "read failed");
     update = { $set: { readError: msg.slice(0, 300) } };
   } else {
     if (!Array.isArray(sellable)) return false; // nothing read — never wipe items
-    const items = foldSellable(sellable);
+    items = foldSellable(sellable);
     update = {
       $set: {
         items,
@@ -289,9 +564,21 @@ async function writeRead(loginLower, { sellable, login, error } = {}) {
     const live = String(login || "").trim();
     if (live) update.$set.login = live;
   }
+  // What the row held before this read, to notice copies that went without any
+  // campaign end explaining it (noteLosses). Best effort: bookkeeping only.
+  let before = null;
+  if (items) {
+    try {
+      before = await NoclaimHolding.findOne({ loginLower }).lean();
+    } catch {
+      before = null;
+    }
+  }
   try {
     const r = await NoclaimHolding.updateOne({ loginLower }, update);
-    return !!(r && (r.matchedCount || r.n));
+    const ok = !!(r && (r.matchedCount || r.n));
+    if (ok && before) await noteLosses(before, items, update.$set.readAt);
+    return ok;
   } catch (e) {
     console.error(
       "noclaimHoldings: holding write failed for " + loginLower + ":",
@@ -299,6 +586,186 @@ async function writeRead(loginLower, { sellable, login, error } = {}) {
     );
     return false;
   }
+}
+
+// ---------------------------------------------------------------------------
+// Losses nobody predicted, and the re-read they force
+// ---------------------------------------------------------------------------
+// The expiry rules know when a wave goes — when its campaign is on record with
+// an end date and Twitch keeps to seven days. When copies leave FREE accounts
+// some other way, the snapshot is wrong about every account still holding that
+// item, and stays wrong until each is read again (hours, at the sweep's pace).
+// So: LOSS_CONFIRM different accounts short of the same item inside
+// LOSS_WINDOW_MS flag every holder read BEFORE the first of them (the ones that
+// showed it, and anything read since, already tell the truth). A flagged row is
+// not fresh (isFresh) — it counts as no stock — and is read first.
+
+const lossWindow = new Map(); // itemKey -> Map<loginLower, { at: its read, name }>
+const lossFlagged = new Map(); // itemKey -> ms of the last flag it raised
+let draining = false;
+let drainBackoffUntil = 0;
+
+function sleep(ms) {
+  return new Promise((r) => {
+    const t = setTimeout(r, ms);
+    if (t.unref) t.unref();
+  });
+}
+
+// `readAt` is the read that produced `items`. Never throws: called from
+// writeRead, which a claim must not fail on.
+async function noteLosses(before, items, readAt) {
+  try {
+    if (!expirySettings().on) return;
+    // An account read as holding NOTHING is more often Twitch answering an
+    // empty inventory than an expiry (see FORCED_EMPTY): it is not evidence.
+    if (!items || !items.length) return;
+    const have = new Map();
+    for (const it of items || []) have.set(String(it.itemKey || ""), copies(it.qty));
+    // The usual read lost nothing: answer before building anything.
+    const shrank = (before.items || []).some(
+      (it) => it && (have.get(String(it.itemKey || "")) || 0) < copies(it.qty),
+    );
+    if (!shrank) return;
+    const base = await snapshotBase();
+    // A committed account loses copies when its buyer claims them — not news.
+    if (before.inConfig !== true || freeReason(before, base, "") !== "") return;
+    const now = Date.now();
+    const readMs = Number.isFinite(msOf(readAt)) ? msOf(readAt) : now;
+    const key = String(before.loginLower || "").toLowerCase();
+    for (const l of unpredictedLosses(before, items, base, now)) {
+      let seen = lossWindow.get(l.itemKey);
+      if (!seen) {
+        seen = new Map();
+        lossWindow.set(l.itemKey, seen);
+      }
+      for (const [login, o] of seen) if (now - o.at > LOSS_WINDOW_MS) seen.delete(login);
+      seen.set(key, { at: readMs, name: l.name || l.itemKey });
+      if (seen.size < LOSS_CONFIRM) continue;
+      if (now - (lossFlagged.get(l.itemKey) || 0) < LOSS_WINDOW_MS) continue;
+      lossFlagged.set(l.itemKey, now);
+      let first = now;
+      for (const o of seen.values()) if (o.at < first) first = o.at;
+      await flagRecheck({
+        itemKeys: [l.itemKey],
+        before: first,
+        reason:
+          seen.size + " free accounts lost copies of " + (l.name || l.itemKey) +
+          " that no campaign end explains",
+      });
+    }
+  } catch (e) {
+    console.error("noclaimHoldings: loss check failed:", e && e.message);
+  }
+}
+
+// Every in-config holding of these items last read BEFORE `before` (default:
+// now) must be read again before it counts as stock. A row read at that very
+// moment or later is left alone: it is the evidence. Returns { flagged }.
+// Never throws.
+async function flagRecheck({ itemKeys, before, reason = "" } = {}) {
+  const keys = [
+    ...new Set(
+      (Array.isArray(itemKeys) ? itemKeys : [])
+        .map((k) => String(k || "").trim().toLowerCase())
+        .filter(Boolean),
+    ),
+  ];
+  if (!keys.length) return { flagged: 0 };
+  const beforeMs = msOf(before);
+  const at = new Date(Number.isFinite(beforeMs) ? beforeMs : Date.now());
+  let flagged = 0;
+  try {
+    const r = await NoclaimHolding.updateMany(
+      {
+        inConfig: true,
+        "items.itemKey": { $in: keys },
+        $or: [{ readAt: null }, { readAt: { $lt: at } }],
+      },
+      { $set: { recheckAt: at } },
+    );
+    flagged = Number(r && (r.modifiedCount != null ? r.modifiedCount : r.nModified)) || 0;
+  } catch (e) {
+    console.error("noclaimHoldings: recheck flag failed:", e.message);
+    return { flagged: 0, error: e.message };
+  }
+  invalidate();
+  if (!flagged) return { flagged: 0 };
+  console.log(
+    "noclaimHoldings: " + flagged + " holding(s) of " + keys.join(", ") +
+      " are re-read before they count as stock again — " + (reason || "snapshot proved wrong"),
+  );
+  try {
+    require("./systemLog").logEvent({
+      category: "noclaim_shop",
+      action: "recheck_flagged",
+      actor: "noclaimHoldings",
+      severity: "warn",
+      subject: keys.slice(0, 3).join(", "),
+      count: flagged,
+      detail:
+        flagged + " no-claim holding(s) taken out of stock until re-read: " +
+        (reason || "the snapshot proved wrong"),
+    });
+  } catch {
+    /* the audit row is not worth failing a flag */
+  }
+  kickDrain();
+  return { flagged };
+}
+
+// In-config rows flagged and not read since (needsRecheck, as a query — it
+// compares two fields, so $expr; a never-read row's null sorts before any date).
+// Rows a forced re-read already left to the regular sweep (FORCED_EMPTY) are
+// not pending: the drain has done what it may with them.
+async function pendingRecheck() {
+  return NoclaimHolding.countDocuments({
+    inConfig: true,
+    recheckAt: { $ne: null },
+    readError: { $not: FORCED_EMPTY_RE },
+    $expr: { $lt: ["$readAt", "$recheckAt"] },
+  });
+}
+
+// Read the flagged rows now instead of at the sweep's pace: `refreshBudget`
+// reads a pass until none is left. A pass in which every read failed (the scan
+// host is down) ends the drain and holds the next one off for a few minutes —
+// the regular tick comes back to it.
+async function drainRecheck() {
+  for (let pass = 0; pass < DRAIN_MAX_PASSES; pass++) {
+    const cfg = shopSettings();
+    if (!cfg.enabled || !cfg.sweep) return;
+    const r = await sweepOnce({
+      budget: cfg.refreshBudget,
+      concurrency: 3,
+      reason: "recheck",
+      recheckOnly: true,
+    });
+    if (r && r.skipped === "running") {
+      await sleep(15 * 1000);
+      continue;
+    }
+    if (!r || r.skipped || !r.picked) return;
+    if (!r.read) {
+      drainBackoffUntil = Date.now() + 5 * 60 * 1000;
+      return;
+    }
+  }
+}
+
+function kickDrain() {
+  if (draining || Date.now() < drainBackoffUntil) return;
+  draining = true;
+  const t = setTimeout(async () => {
+    try {
+      await drainRecheck();
+    } catch (e) {
+      console.error("noclaimHoldings: recheck drain failed:", e && e.message);
+    } finally {
+      draining = false;
+    }
+  }, 1000);
+  if (t.unref) t.unref();
 }
 
 // A claim's own live read, recorded so the picker and the next claim see it.
@@ -320,7 +787,15 @@ function sweepGameMatches(cand, state, wantNorm) {
   );
 }
 
-async function sweepInner({ budget, concurrency, game, reason, t0 }) {
+// A row whose items were stored before copies were split per campaign: its
+// expiry cannot be predicted until it is read once more.
+function lacksWaves(row) {
+  return ((row && row.items) || []).some(
+    (it) => it && !(Array.isArray(it.waves) && it.waves.length),
+  );
+}
+
+async function sweepInner({ budget, concurrency, game, reason, t0, recheckOnly }) {
   const cfg = shopSettings();
   const maxAgeMs = maxAgeMsOf(cfg);
   const wantBudget =
@@ -422,30 +897,48 @@ async function sweepInner({ budget, concurrency, game, reason, t0 }) {
   if (cands.length) {
     const rows = await NoclaimHolding.find(
       { loginLower: { $in: [...seen] } },
-      { loginLower: 1, readAt: 1, readError: 1, "items.game": 1 },
+      { loginLower: 1, readAt: 1, readError: 1, recheckAt: 1, "items.game": 1, "items.waves": 1 },
     ).lean();
     for (const r of rows) state.set(r.loginLower, r);
   }
   const wantGame =
     String(game || "").trim() === OTHER_REWARDS ? "" : normGame(game);
   // A refresh never re-reads something fresh: anything read within half the
-  // freshness window is left alone.
+  // freshness window is left alone. Two kinds of row are read regardless: one
+  // flagged for a re-read (it is not stock until then — these go first), and
+  // one stored without per-campaign copies (its expiry cannot be predicted).
   const rereadBefore = Date.now() - maxAgeMs / 2;
+  const wavesWanted = expirySettings().on;
   const eligible = [];
   for (const c of cands) {
     const st = state.get(c.loginLower) || {};
     if (wantGame && !sweepGameMatches(c, st, wantGame)) continue;
+    const flagged = needsRecheck(st);
+    // A forced re-read already asked this row once and got an empty answer:
+    // it waits for the regular sweep, and there it is not a failing token.
+    const deferred = FORCED_EMPTY_RE.test(String(st.readError || ""));
+    if (recheckOnly && (!flagged || deferred)) continue;
     const readMs = st.readAt ? new Date(st.readAt).getTime() : NaN;
-    if (Number.isFinite(readMs) && readMs > rereadBefore) continue;
+    if (
+      !flagged &&
+      !(wavesWanted && lacksWaves(st)) &&
+      Number.isFinite(readMs) &&
+      readMs > rereadBefore
+    ) {
+      continue;
+    }
     eligible.push({
       cand: c,
       readMs: Number.isFinite(readMs) ? readMs : 0,
-      failing: st.readError ? 1 : 0,
+      failing: st.readError && !deferred ? 1 : 0,
+      later: flagged ? 0 : 1,
+      held: ((st && st.items) || []).length > 0,
     });
   }
   eligible.sort(
     (a, b) =>
       a.failing - b.failing ||
+      a.later - b.later ||
       a.readMs - b.readMs ||
       a.cand.loginLower.localeCompare(b.cand.loginLower),
   );
@@ -454,12 +947,15 @@ async function sweepInner({ budget, concurrency, game, reason, t0 }) {
   // 5. Live reads, a few at a time.
   let read = 0;
   let failed = 0;
-  await mapLimit(picked, workers, async ({ cand }) => {
+  await mapLimit(picked, workers, async ({ cand, held }) => {
     let res;
     try {
       res = await engine.inventoryForCandidate(cand);
       if (!res || !Array.isArray(res.sellable)) {
         throw new Error("empty inventory response");
+      }
+      if (recheckOnly && held && !res.sellable.length) {
+        throw new Error(FORCED_EMPTY + " — left for the regular sweep to confirm");
       }
     } catch (e) {
       failed++;
@@ -487,13 +983,20 @@ async function sweepInner({ budget, concurrency, game, reason, t0 }) {
   };
 }
 
-async function sweepOnce({ budget, concurrency = 2, game = "", reason = "tick" } = {}) {
+// `recheckOnly` reads nothing but rows flagged for a re-read (drainRecheck).
+async function sweepOnce({
+  budget,
+  concurrency = 2,
+  game = "",
+  reason = "tick",
+  recheckOnly = false,
+} = {}) {
   if (sweeping) return { skipped: "running" };
   sweeping = true;
   const t0 = Date.now();
   let out;
   try {
-    out = await sweepInner({ budget, concurrency, game, reason, t0 });
+    out = await sweepInner({ budget, concurrency, game, reason, t0, recheckOnly });
   } catch (e) {
     // A DB error mid-sweep. Never reject: the refresh route starts a sweep
     // without awaiting it, and an unhandled rejection would take the server
@@ -616,6 +1119,7 @@ async function buildBase() {
       hasPassword: hasPoolPassword(engine, p),
     });
   }
+  const expiry = expirySettings();
   return {
     at,
     maxAgeMs: maxAgeMsOf(cfg),
@@ -623,7 +1127,54 @@ async function buildBase() {
     ledgerByLogin,
     activeLogins,
     poolById,
+    expiry,
+    campaignEnds: expiry.on ? await campaignEndsFor(holdings) : new Map(),
   };
+}
+
+// End dates of every campaign a holding's copies came from. A failed read
+// keeps the last good answer: without end dates nothing is predicted and every
+// copy counts until a read shows it gone — the hole these rules close.
+//
+// Matched ignoring case and surrounding blanks: Twitch's own names carry them
+// ("Ironmouse Drops Rerun! " ends in a space), and a wave's label is stored
+// trimmed. The answer is kept for a few minutes — the snapshot is rebuilt after
+// every claim read, and an end date does not move that fast.
+const CAMPAIGN_ENDS_TTL_MS = 5 * 60 * 1000;
+let lastCampaignEnds = new Map();
+let lastCampaignKey = "";
+let lastCampaignAt = 0;
+
+function nameRegex(name) {
+  return new RegExp("^\\s*" + name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + "\\s*$", "i");
+}
+
+async function campaignEndsFor(holdings) {
+  const names = new Set();
+  for (const h of holdings || []) {
+    for (const it of (h && h.items) || []) {
+      for (const w of (it && it.waves) || []) {
+        const n = String((w && w.campaign) || "").trim();
+        if (n) names.add(n);
+      }
+    }
+  }
+  if (!names.size) return new Map();
+  const key = [...names].sort().join("\n");
+  if (key === lastCampaignKey && Date.now() - lastCampaignAt < CAMPAIGN_ENDS_TTL_MS) {
+    return lastCampaignEnds;
+  }
+  try {
+    const rows = await campaignModel()
+      .find({ name: { $in: [...names].map(nameRegex) } }, { name: 1, game: 1, endAt: 1 })
+      .lean();
+    lastCampaignEnds = campaignEndIndex(rows);
+    lastCampaignKey = key;
+    lastCampaignAt = Date.now();
+  } catch (e) {
+    console.error("noclaimHoldings: campaign end dates unreadable:", e.message);
+  }
+  return lastCampaignEnds;
 }
 
 // Cached for 30 s; concurrent callers share one in-flight build, and a failed
@@ -848,6 +1399,9 @@ function start() {
       if (cfg.enabled && cfg.sweep && (await sweepWanted())) {
         const r = await sweepOnce({ budget: cfg.sweepPerTick, reason: "tick" });
         backoff = !!(r && r.skipped === "pi unreachable");
+        // Rows flagged for a re-read are no stock until read: finish them now
+        // (a drain a failed host cut short, or one a restart interrupted).
+        if (!backoff && (await pendingRecheck()) > 0) kickDrain();
       }
     } catch (e) {
       console.error("noclaimHoldings tick error:", e.message);
@@ -863,11 +1417,27 @@ function start() {
 }
 
 module.exports = {
+  // constants
+  EXPIRY_DEFAULTS,
+  REFUTE_GRACE_MS,
+  LOSS_CONFIRM,
+  FORCED_EMPTY,
   // pure, tested
   foldSellable,
   normGame,
   freeReason,
   isFresh,
+  needsRecheck,
+  expirySettings,
+  advertiseLeadMs,
+  campaignEndIndex,
+  waveGoneAt,
+  durableItems,
+  durableHoldings,
+  unpredictedLosses,
+  // re-read forcing
+  flagRecheck,
+  pendingRecheck,
   // snapshot
   sweepOnce,
   recordRead,

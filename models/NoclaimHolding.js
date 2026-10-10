@@ -33,10 +33,29 @@ const noclaimHoldingSchema = new mongoose.Schema(
         campaign: String,
         image: String,
         qty: { type: Number, default: 1 },
+        // The same copies, split by the campaign each one came from (sums to
+        // qty). An item that recurs — Rainbow Six's "Esports Pack", three or
+        // four per wave — is ONE item here but its copies leave the account
+        // wave by wave, seven days after each wave ends. Without the split the
+        // snapshot cannot tell 14 packs from "11 packs and 3 that expire
+        // tonight" (docs/NOCLAIM-OFFER-ROTATION-CONTRACT.md, Expiry). A row
+        // written before 2026-10-10 has none; its copies count as unknown.
+        waves: [
+          {
+            _id: false,
+            campaign: String,
+            qty: { type: Number, default: 1 },
+          },
+        ],
       },
     ],
     sellableCount: { type: Number, default: 0 }, // sum of qty
     readAt: { type: Date, default: null, index: true }, // last SUCCESSFUL live read
+    // Set when something proved the snapshot wrong for this account's items (a
+    // paid order found no account, or several accounts lost copies nobody
+    // predicted). Until a live read LATER than this lands, the row is not fresh:
+    // it counts as no stock and is read first by the sweep.
+    recheckAt: { type: Date, default: null },
     // Why the last read failed ("" = it did not). A failed read keeps the
     // previous items/readAt, so the row ages into "stale" instead of looking
     // empty — an unreachable account is not the same as an empty one.

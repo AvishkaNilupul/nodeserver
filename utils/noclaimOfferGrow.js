@@ -479,6 +479,7 @@ async function growPass(opts = {}) {
     let base = null;
     let setsDone = 0;
     let rowsLeft = MAX_ROWS_PER_PASS;
+    const leads = rot.expiryLeads(d);
     for (const { setId, group, set } of groups) {
       const label = set ? setGame(set) + " " + bundleLabel(set.items) : setId;
       const skip = (why) => out.skipped.push({ set: setId, label, why });
@@ -525,8 +526,13 @@ async function growPass(opts = {}) {
       if (group.some((r) => now - timeOf(r.rebundledAt) < GROW_COOLDOWN_MS)) continue;
       if (!base) base = await d.nh.snapshotBase();
       const norms = setGameNorms(set);
+      // Only copies that outlast the bundle lead can make an offer bigger. A
+      // wave about to leave the accounts is not "more": on 2026-10-09 this
+      // pass raised Rainbow Six to 14× Esports Pack eighteen hours before the
+      // oldest three expired, and the next day nothing held the bundle.
+      const lasting = rot.holdingsAt(d, base, now + leads.bundleLeadMs);
       const names = new Set();
-      for (const h of (base && base.holdings) || []) {
+      for (const h of lasting) {
         for (const it of (h && h.items) || []) {
           if (it && it.campaign && sameGame(it.game, game)) names.add(str(it.campaign).trim());
         }
@@ -541,7 +547,7 @@ async function growPass(opts = {}) {
           )
         : new Map();
       const pick = pickGrowBundle({
-        holdings: (base && base.holdings) || [],
+        holdings: lasting,
         isFree: (h) => d.nh.freeReason(h, base, norms) === "",
         isFresh: (h) => d.nh.isFresh(h, base, now),
         game,
@@ -563,8 +569,12 @@ async function growPass(opts = {}) {
         continue;
       }
       // The stock counter has the last word: never move an offer onto a bundle
-      // it would count as (nearly) empty.
-      const st = await d.ncs.stockForSet({ stockSource: "noclaim", coverGame: game, items: pick.items });
+      // it would count as (nearly) empty. Counted as the sync will count it,
+      // a sell lead ahead.
+      const st = await d.ncs.stockForSet(
+        { stockSource: "noclaim", coverGame: game, items: pick.items },
+        { leadMs: leads.sellLeadMs },
+      );
       if (!st || !(st.free >= MIN_ACCOUNTS)) {
         skip("only " + ((st && st.free) || 0) + " free account(s) hold the bigger bundle (" + addedLabel(pick.added) + " more)");
         continue;
