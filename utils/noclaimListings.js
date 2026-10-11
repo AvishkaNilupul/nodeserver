@@ -34,6 +34,7 @@ const ncs = require("./noclaimStock");
 const noclaimHoldings = require("./noclaimHoldings");
 const { digisellerDeliveryCode } = require("./digisellerFulfiller");
 const { ggselDeliveryCode } = require("./ggselFulfiller");
+const { gameflipGone } = require("./gameflipGone");
 
 // Required lazily. gameflipFulfiller calls back into this module from its sold
 // and retire paths, unclaimedAutoList from its manual-sold tick, and the engine
@@ -109,6 +110,21 @@ function shopSettings() {
 
 function lower(s) {
   return String(s || "").trim().toLowerCase();
+}
+
+// A message to the owner's phone. Only for a held account that now needs a
+// human, or has waited too long: an event in the activity log is not "told".
+// Best-effort, required lazily (as the fulfillers are), never awaited.
+function tellOwner(text) {
+  try {
+    Promise.resolve(require("./telegram").sendTelegram(String(text || ""))).catch(() => {});
+  } catch (e) {
+    console.error("noclaimListings: owner notice failed:", e && e.message);
+  }
+}
+// How to hand a pinned auto-farm account back, said the same way everywhere.
+function releaseHowTo(ledger) {
+  return 'POST /noclaim-stock/ledgers/' + String(ledger._id) + '/release with { "confirmGone": true }';
 }
 
 function escapeRe(s) {
@@ -1070,15 +1086,26 @@ async function onGameflipSold(row, { priceUsd = 0 } = {}) {
 // gameflipFulfiller's retire path (404 / expired / cancelled): the listing
 // never sold, so its account goes back — "manual" only; a sold ledger is never
 // released. `gone`: Gameflip answered 404 for it (an auto-farm account is
-// handed back on nothing less; one retired as expired or cancelled stays held,
-// and the pass's limbo step settles it).
-async function onGameflipRetired(row, { reason = "", gone = false } = {}) {
+// handed back on nothing less; one retired as expired stays held, and the
+// pass's limbo step settles it). `burned`: it was retired as cancelled.
+async function onGameflipRetired(row, { reason = "", gone = false, burned = false } = {}) {
   const out = { released: 0 };
   if (!row || !row._id || !row.noclaimStock) return out;
   const cur = (await freshRow(row)) || row;
   const pending = undeliveredUnits(cur);
   if (!pending.length) return out;
   const owned = await ownedLedgers(await ledgersForLogins(pending.map((u) => u.login)), cur._id);
+  if (burned) {
+    // Retired as CANCELLED: paid for, then refunded. Its buyer has seen the
+    // login, so "the listing never sold" is not "nobody has the account" — it
+    // is retired, never released (burnGameflipUnit).
+    out.burned = 0;
+    for (const u of pending) {
+      const ledger = owned.get(lower(u.login));
+      if (ledger) out.burned += await burnGameflipUnit(cur, ledger);
+    }
+    return out;
+  }
   const ids = pending.map((u) => owned.get(lower(u.login))).filter(Boolean).map((l) => l._id);
   out.released = await releaseIds(ids, reason || "gameflip listing retired", { listingGone: gone === true });
   return out;
@@ -1131,14 +1158,15 @@ async function removeUnitLocked(row, login, reason) {
 
 // Gameflip's own word on a listing: its status; "gone" when Gameflip no longer
 // has it (a deleted listing 404s — a SOLD one stays readable for good); "" when
-// it would not say. Gone is the HTTP status and nothing else: an error that
-// merely SAYS "not found" (a refused key, a proxy's page) is no answer about
-// the listing, and everything that reads "gone" here hands an account back.
+// it would not say. Gone is Gameflip's own 404 and nothing else
+// (utils/gameflipGone): an error that merely SAYS "not found", or a 404 from
+// something in between, is no answer about the listing — and everything that
+// reads "gone" here hands an account back.
 async function gameflipState(externalId) {
   try {
     return String((await mp.gameflipListingStatus(externalId)) || "") || "unknown";
   } catch (e) {
-    return e && e.status === 404 ? "gone" : "";
+    return gameflipGone(e) ? "gone" : "";
   }
 }
 
@@ -1167,13 +1195,14 @@ async function gameflipTakeDown(externalId) {
   try {
     // From the status just read: off sale first only when it IS on sale (a
     // draft that refuses the off-sale patch would otherwise never reach its
-    // delete), then the delete, then Gameflip's own 404 for it — this returns
-    // only once the listing is gone.
+    // delete), then the delete.
     await mp.gameflipEndListing(externalId, { status: before });
-    return { state: "gone", status: "gone" };
   } catch {
-    /* Gameflip's own answer, next, is the verdict */
+    /* whatever it threw, Gameflip's own answer is the verdict */
   }
+  // …and the verdict is ALWAYS a fresh read, never the end call's own report:
+  // it calls a listing ended when its delete answered 404, with nothing read
+  // back. One more GET for the only answer an account is handed back on.
   const after = await gameflipState(externalId);
   if (!after) return { state: "unreadable", status: "" };
   if (after === "gone" || after === "sold") return { state: after, status: after };
@@ -1685,6 +1714,18 @@ async function orphansStep(tally, errors) {
           // owner's word that no listing carries it (the route asks for it).
           (String(ledger.farm || "") === "autofarm" ? ' with { "confirmGone": true })' : ")"),
       });
+      // An auto-farm account is sold whole on every market it is free on, so
+      // one pinned here earns nothing anywhere until somebody looks: said out
+      // loud, once (a pinned claim is never looked at again by this pass).
+      if (String(ledger.farm || "") === "autofarm") {
+        tellOwner(
+          "⚠️ An auto-farm account is HELD and needs you\n\n" + login + (ledger.game ? " (" + ledger.game + ")" : "") +
+            " was held for a " + marketLabel(ledger.market) + " listing, but no listing row records it — its " +
+            "publish never finished.\nCheck " + marketLabel(ledger.market) + " for a listing carrying this " +
+            "account and delete it, then release it:\n" + releaseHowTo(ledger) +
+            "\nUntil then it is not sold anywhere.",
+        );
+      }
     } catch (e) {
       errors.push("orphan " + login + ": " + ((e && e.message) || String(e)));
     }
@@ -2004,7 +2045,15 @@ async function bookGameflipSale(row, ledger, { reason = "gameflip sale", burned 
     try {
       const set = await DropSet.findById(row.set).lean();
       if (set) {
-        await require("./saleLearning").recordListingSale({ listing: row, set, units: 1, priceUsd: price });
+        // With the login, as the sale watcher's own record has it: demand is
+        // counted per account, and a signal with none is nobody's sale.
+        await require("./saleLearning").recordListingSale({
+          listing: row,
+          set,
+          units: 1,
+          priceUsd: price,
+          logins: [login],
+        });
       }
     } catch (e) {
       console.error("noclaimListings: sale learning for " + (row.externalId || row._id) + " failed:", e && e.message);
@@ -2037,7 +2086,7 @@ async function autofarmLimboStep(tally, errors) {
     ids.length
       ? MarketplaceListing.find(
           { _id: { $in: ids } },
-          { status: 1, marketplace: 1, externalId: 1, price: 1, set: 1, title: 1, units: 1 },
+          { status: 1, marketplace: 1, externalId: 1, price: 1, set: 1, title: 1, units: 1, accountLogin: 1, updatedAt: 1 },
         ).lean()
       : [];
   let rows = [];
@@ -2097,9 +2146,15 @@ async function autofarmLimboStep(tally, errors) {
         count: 1,
         detail:
           "a held auto-farm account's listing row is missing — check " + marketLabel(ledger.market) +
-          " for a listing carrying this account, delete it, then release it (POST /noclaim-stock/ledgers/" +
-          String(ledger._id) + '/release with { "confirmGone": true })',
+          " for a listing carrying this account, delete it, then release it (" + releaseHowTo(ledger) + ")",
       });
+      tellOwner(
+        "⚠️ An auto-farm account is HELD and needs you\n\n" + login + (ledger.game ? " (" + ledger.game + ")" : "") +
+          " was held for a " + marketLabel(ledger.market) + " listing whose row is missing from our books, so " +
+          "nobody can ask " + marketLabel(ledger.market) + " about it.\nCheck " + marketLabel(ledger.market) +
+          " for a listing carrying this account and delete it, then release it:\n" + releaseHowTo(ledger) +
+          "\nUntil then it is not sold anywhere.",
+      );
       return;
     }
     // Our own books already say a buyer has it (the sale watcher flipped the
@@ -2109,11 +2164,26 @@ async function autofarmLimboStep(tally, errors) {
       tally.sold += await bookGameflipSale(row, ledger);
       return;
     }
+    // "" once the account's fate is settled this pass; else why it still waits.
+    let waiting = "";
     const down = await gameflipTakeDown(row.externalId);
     if (down.state === "unreadable") {
       errors.push("limbo " + login + ": gameflip status unreadable");
+      waiting = "Gameflip would not answer about its listing";
     } else if (down.state === "gone") {
-      tally.released += await releaseIds([ledger._id], "its listing is gone", { listingGone: true });
+      const n = await releaseIds([ledger._id], "its listing is gone", { listingGone: true });
+      tally.released += n;
+      if (!n) {
+        // Gone on Gameflip, and still not handed back: the release gate says why.
+        try {
+          waiting =
+            String((await require("./autofarmStock").releaseBlocked(ledger, { listingGone: true })) || "") ||
+            "its release did not go through";
+        } catch {
+          waiting = "its release did not go through";
+        }
+        waiting = "its listing is gone, but " + waiting;
+      }
     } else if (down.state === "sold") {
       // A sale nobody booked: the row came down in our books first.
       tally.sold += await bookGameflipSale(row, ledger);
@@ -2121,27 +2191,85 @@ async function autofarmLimboStep(tally, errors) {
       // Paid, then refunded: the buyer has seen this login. It is never sold
       // again — its ledger is closed like a sale's, at no price, so the
       // account leaves farming and stock exactly as a sold one does.
-      tally.burned = (tally.burned || 0) + (await bookGameflipSale(row, ledger, { reason: BURNED_REASON, burned: true }));
-      logEvent({
-        category: "noclaim_shop",
-        action: "autofarm_unit_burned",
-        actor: "noclaimListings",
-        severity: "warn",
-        subject: login,
-        game: ledger.game || "",
-        count: 1,
-        detail:
-          "its Gameflip listing " + row.externalId + " was paid for and then cancelled — the buyer saw the " +
-          "login, so the account is retired instead of going back to stock",
-      });
+      tally.burned = (tally.burned || 0) + (await burnGameflipUnit(row, ledger));
     } else {
       // Still there, and the take-down did not take (or a buyer is in the
       // middle of paying): the next pass asks again.
       tally.retried++;
+      waiting = "Gameflip still has its listing (" + down.status + ")";
     }
+    if (waiting) await noteLimboWait(ledger, row, waiting);
   } catch (e) {
     errors.push("limbo " + login + ": " + ((e && e.message) || String(e)));
   }
+}
+
+// A held account that the limbo step could not settle this pass. Waiting is the
+// safe side and usually short — Gameflip's limiter lets go, a buyer finishes
+// paying, the park pass proves the account out of its bot. One that has waited
+// LIMBO_TELL_AFTER_MS is said out loud, once: it is earning nothing anywhere,
+// and nothing else would ever mention it.
+const LIMBO_TELL_AFTER_MS = 3 * 60 * 60 * 1000;
+async function noteLimboWait(ledger, row, why) {
+  const now = Date.now();
+  const since = ms(ledger.farmLimboAt);
+  if (!since) {
+    await UnclaimedAccount.updateOne(
+      { _id: ledger._id, status: "manual" },
+      { $set: { farmLimboAt: new Date(now) } },
+    ).catch(() => {});
+    return;
+  }
+  if (ledger.farmLimboToldAt || now - since < LIMBO_TELL_AFTER_MS) return;
+  // The stamp first, and only the pass that lands it speaks.
+  const w = await UnclaimedAccount.updateOne(
+    { _id: ledger._id, status: "manual", farmLimboToldAt: null },
+    { $set: { farmLimboToldAt: new Date(now) } },
+  ).catch(() => null);
+  if (!w || !w.modifiedCount) return;
+  const login = ledger.login || ledger.loginLower || "";
+  const hours = Math.max(1, Math.round((now - since) / (60 * 60 * 1000)));
+  logEvent({
+    category: "noclaim_shop",
+    action: "autofarm_unit_waiting",
+    actor: "noclaimListings",
+    severity: "warn",
+    subject: login,
+    game: ledger.game || "",
+    count: 1,
+    detail: "held, off sale in our books for " + hours + " h and not handed back: " + why,
+  });
+  tellOwner(
+    "⚠️ A held auto-farm account has been waiting " + hours + " h\n\n" + login +
+      (ledger.game ? " (" + ledger.game + ")" : "") + ": its Gameflip listing " + String(row.externalId || "?") +
+      " is off sale in our books, but the account is not back in stock — " + why +
+      ".\nIt stays held (sold nowhere else) and is tried again every pass. If this does not clear by " +
+      "itself, look at that listing on Gameflip. Said once.",
+  );
+}
+
+// A Gameflip listing that was paid for and then cancelled: its buyer has seen
+// the login. The account is never sold again — its ledger is closed like a
+// sale's, at no price, so it leaves stock and farming exactly as a sold one
+// does — and the row is not called sold. For every no-claim account, whichever
+// farm it came from. Returns how many ledgers were closed.
+async function burnGameflipUnit(row, ledger) {
+  const n = await bookGameflipSale(row, ledger, { reason: BURNED_REASON, burned: true });
+  if (n) {
+    logEvent({
+      category: "noclaim_shop",
+      action: "unit_burned",
+      actor: "noclaimListings",
+      severity: "warn",
+      subject: ledger.login || ledger.loginLower || "",
+      game: ledger.game || "",
+      count: 1,
+      detail:
+        "its Gameflip listing " + String(row.externalId || "?") + " was paid for and then cancelled — the buyer saw " +
+        "the login, so the account is retired instead of going back to stock",
+    });
+  }
+  return n;
 }
 
 async function healthStep(budget, tally, errors) {

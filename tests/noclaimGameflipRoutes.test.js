@@ -66,7 +66,7 @@ test.before(async () => {
 
   mp.gameflipListingStatus = async (id) => {
     calls.status.push(id);
-    if (!gameflip.has(id)) throw http(404, 'Gameflip listing status: {"error":{"message":"Listing not found","code":404}}');
+    if (!gameflip.has(id)) throw http(404, 'Gameflip listing status: {"status":"FAILURE","data":null,"error":{"message":"Not Found","code":404,"http_status":404}}');
     const st = gameflip.get(id);
     if (st instanceof Error) throw st;
     return st;
@@ -286,8 +286,9 @@ test("Delist: an AUTO-FARM account goes back with Gameflip's 404 as its proof �
   const pool = await poolNow(u);
   assert.equal(pool.claimedNote, "auto-farm: Brawlhalla (c-" + seq + ")", "still in its bot: the note it carried");
   assert.equal(pool.listed, false);
-  // The route's verified take-down is the proof: Gameflip is not asked again.
-  assert.equal(calls.status.length, 1);
+  // Read, ended, read again — and that last answer is the proof the release
+  // goes on: Gameflip is not asked a third time.
+  assert.equal(calls.status.length, 2);
 });
 
 test("Delist: an ordinary (archive) Gameflip listing takes the path it always took", async () => {
@@ -369,6 +370,54 @@ test("hand release: where nobody can ask Gameflip, only the owner's own look lif
   r = await release(loose.ledger, { confirmGone: true });
   assert.equal(r.status, 200, JSON.stringify(r.body));
   assert.equal(await ledgerNow(loose), null);
+});
+
+test("hand release: confirmGone is refused while the claim may still be inside its publish — unless the pass has pinned it", async () => {
+  // Claimed seconds ago, no listing row yet: the publish is on its way to
+  // Gameflip. Released now — even on the owner's word — it would go on to put
+  // the login on sale behind an account that is stock again.
+  const fresh = await unit({ farm: "autofarm", attached: false, rowStatus: "delisted" });
+  await UnclaimedAccount.updateOne({ _id: fresh.ledger._id }, { $set: { manualAt: new Date() } });
+  let r = await release(fresh.ledger);
+  assert.equal(r.status, 409);
+  assert.equal(r.body.needsConfirm, false, "it does not invite a confirmation it would refuse");
+  assert.match(r.body.message, /it is attached to no listing row, and it was claimed 0 min ago: its publish may still be running\. Try again in 30 min/);
+  r = await release(fresh.ledger, { confirmGone: true });
+  assert.equal(r.status, 409);
+  assert.match(r.body.message, /its publish may still be running/);
+  assert.equal((await ledgerNow(fresh)).status, "manual");
+
+  // Twenty-nine minutes: still not. Thirty-one: no publish is at it any more.
+  await UnclaimedAccount.updateOne({ _id: fresh.ledger._id }, { $set: { manualAt: new Date(Date.now() - 29 * 60 * 1000) } });
+  r = await release(fresh.ledger, { confirmGone: true });
+  assert.equal(r.status, 409);
+  assert.match(r.body.message, /Try again in 1 min/);
+  await UnclaimedAccount.updateOne({ _id: fresh.ledger._id }, { $set: { manualAt: new Date(Date.now() - 31 * 60 * 1000) } });
+  r = await release(fresh.ledger, { confirmGone: true });
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  assert.equal(await ledgerNow(fresh), null);
+
+  // Pinned by the pass (it only pins a claim nothing is publishing): its age is not asked.
+  const pinned = await unit({ farm: "autofarm", attached: false, rowStatus: "delisted" });
+  await UnclaimedAccount.updateOne(
+    { _id: pinned.ledger._id },
+    { $set: { manualAt: new Date(), note: "unrecorded publish — Gameflip (offer unknown) holds this account but no listing row records it — delist it by hand, then release" } },
+  );
+  r = await release(pinned.ledger);
+  assert.equal(r.status, 409);
+  assert.equal(r.body.needsConfirm, true);
+  r = await release(pinned.ledger, { confirmGone: true });
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+});
+
+test("Delist: a 404 that is not Gameflip's own answer does not take a listing off the books", async () => {
+  const u = await unit();
+  gameflip.set(u.ext, http(404, 'Gameflip listing status: "<html><h1>404 Not Found</h1><hr>nginx</html>"'));
+  const r = await delist(u.row);
+  assert.equal(r.body.success, false, JSON.stringify(r.body));
+  assert.match(r.body.message, /Gameflip did not answer, so nothing was changed/);
+  assert.equal((await rowNow(u)).status, "active");
+  assert.equal((await ledgerNow(u)).status, "manual");
 });
 
 test("hand release: an account whose bot removal is under way waits — whatever is confirmed", async () => {

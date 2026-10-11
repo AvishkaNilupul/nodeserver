@@ -120,6 +120,8 @@ const LEDGER_DEFAULTS = {
   farmParkTriedAt: null,
   farmGoneAt: null,
   farmDownTriedAt: null,
+  farmLimboAt: null,
+  farmLimboToldAt: null,
 };
 
 // ---------------------------------------------------------------------------
@@ -695,6 +697,8 @@ async function commitLedger(c, ctx) {
     // Only a HELD unit has a date it must come off sale by.
     fields.farmGoneAt = ctx.goneAt ? new Date(ctx.goneAt) : null;
     fields.farmDownTriedAt = null;
+    fields.farmLimboAt = null;
+    fields.farmLimboToldAt = null;
     fields.farmReloads = [];
     fields.farmHuman = "";
   }

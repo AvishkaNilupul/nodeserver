@@ -33,6 +33,7 @@
 // clean-up whatever the switch says now.
 // ---------------------------------------------------------------------------
 const settings = require("./settings");
+const { gameflipGone } = require("./gameflipGone");
 
 const FARM = "autofarm";
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -770,9 +771,10 @@ async function releaseBlocked(ledger, { deps, listingGone = false } = {}) {
     const st = str(await d.listingStatus("gameflip", row.externalId));
     return st === "sold" ? "its Gameflip listing SOLD" : "its Gameflip listing still exists (" + (st || "?") + ")";
   } catch (e) {
-    // Gone is the HTTP status and nothing else: an error that merely SAYS
-    // "not found" (a refused key, a proxy's page) is no answer about the listing.
-    return e && e.status === 404 ? "" : "Gameflip would not say whether its listing is gone";
+    // Gone is Gameflip's own 404 and nothing else (utils/gameflipGone): an
+    // error that merely SAYS "not found", or a 404 from something in between,
+    // is no answer about the listing.
+    return gameflipGone(e) ? "" : "Gameflip would not say whether its listing is gone";
   }
 }
 

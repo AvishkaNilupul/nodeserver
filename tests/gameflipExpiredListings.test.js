@@ -253,6 +253,36 @@ test("a renewal that hits Gameflip's limiter backs off and stays pending — nev
   assert.strictEqual(pub.calls.length, 1, "inside the backoff nothing is retried");
 });
 
+test("a renewal that kept an account held, or went live without a row, STOPS — it is not tried again with another account", async () => {
+  // The sold-row lanes stop a chain on these two failures (noteRelistFailure):
+  // each retry would put ANOTHER account out next to a listing nobody tracks.
+  // The renewal lane backed off five minutes and tried again, and again.
+  for (const [id, message] of [
+    ["gf-held", "Gameflip created 4f1b3263-aaaa-bbbb-cccc-000000000001 but could not put it on sale (draft discarded): x [account kept held]"],
+    ["gf-norow", "published on Gameflip but the row could not be saved — delist it by hand: gf-10 (E11000 duplicate key)"],
+  ]) {
+    await chain(id, { noclaimStock: true });
+    const pub = fakePublisher(() => {
+      throw new Error(message);
+    });
+    await gf.syncOnce(pub.opts);
+    assert.strictEqual(pub.calls.length, 1, id);
+    const after = await MarketplaceListing.findOne({ externalId: id }).lean();
+    assert.strictEqual(after.status, "removed");
+    assert.match(after.lastError, /^auto-relist stopped: /, "no longer 'renewal pending': the lane never picks it up again");
+    assert.strictEqual(after.qtyRemaining, 0, "the chain owes nothing more");
+    assert.strictEqual(after.relistRetryAt, null, "and has no next try");
+    // Hours later, pass after pass: no second publish.
+    await MarketplaceListing.updateOne({ externalId: id }, { $set: { updatedAt: new Date(Date.now() - 13 * 3600 * 1000) } });
+    await gf.syncOnce(pub.opts);
+    await gf.syncOnce(pub.opts);
+    assert.strictEqual(pub.calls.length, 1, id + ": never retried");
+    await MarketplaceListing.deleteMany({});
+    world.state = {};
+    world.ended = [];
+  }
+});
+
 test("out of stock is a dip, not an end: the chain backs off, keeps its debt, and the owner hears once", async () => {
   // Ending a 520-unit chain on one empty read would lose it for good; the
   // stalled lane retries out-of-stock with backoff and alerts at the 3rd miss.

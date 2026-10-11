@@ -734,6 +734,11 @@ router.post("/noclaim-stock/run", requireSuperadmin, requireEnabled, async (req,
   }
 });
 
+// How long after its claim a held account may still be inside its publish —
+// the age at which the lifecycle pass itself calls an unattached claim
+// orphaned (utils/noclaimListings ORPHAN_AFTER_MS).
+const CLAIM_SETTLE_MS = 30 * 60 * 1000;
+
 // Hand back ONE committed ("manual") no-claim account by hand — the way out for
 // a claim the lifecycle pass pinned because its publish never reached a
 // listing row (it never releases those itself: nobody knows whether the
@@ -790,6 +795,25 @@ router.post(
           blocked = "the release check failed: " + ((e && e.message) || e);
         }
         const ownerOnly = !!blocked && afs.releaseNeedsOwner(blocked);
+        // …and never for a claim whose publish may still be running. A claim
+        // has no listing row for the seconds (under Gameflip's limiter, the
+        // minutes) between the claim and the row: released then, the publish
+        // goes on to put the login on sale behind an account that is stock
+        // again. Only a claim the pass has pinned, or one old enough that no
+        // publish is still at it, has nothing left that could attach it.
+        const pinned = String(ledger.note || "").startsWith("unrecorded publish — ");
+        const claimedAt = ledger.manualAt ? new Date(ledger.manualAt).getTime() : 0;
+        const waitMs = pinned ? 0 : claimedAt + CLAIM_SETTLE_MS - Date.now();
+        if (blocked && ownerOnly && waitMs > 0) {
+          return res.status(409).json({
+            success: false,
+            message:
+              "Not released — " + blocked + ", and it was claimed " +
+              Math.max(0, Math.round((Date.now() - claimedAt) / 60000)) + " min ago: its publish may still be " +
+              "running. Try again in " + Math.ceil(waitMs / 60000) + " min",
+            needsConfirm: false,
+          });
+        }
         if (blocked && !(ownerOnly && confirmGone)) {
           return res.status(409).json({
             success: false,

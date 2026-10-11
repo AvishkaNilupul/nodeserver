@@ -76,6 +76,11 @@ const unclaimedAccountSchema = new mongoose.Schema(
     // own clock, so one unit that will not come down (a buyer in the middle of
     // paying) never keeps the ones behind it on sale past their day.
     farmDownTriedAt: { type: Date, default: null },
+    // A held account whose listing row is off sale but which could not be
+    // handed back yet (utils/noclaimListings limbo step): when that was first
+    // seen, and when the owner was told it had waited too long (once).
+    farmLimboAt: { type: Date, default: null },
+    farmLimboToldAt: { type: Date, default: null },
 
     // Snapshot of the unclaimed drops that were listed, for the panel.
     drops: {

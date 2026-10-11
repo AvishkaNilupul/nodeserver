@@ -217,7 +217,10 @@ function world(o = {}) {
       const v = typeof o.listingStatus === "function" ? o.listingStatus(market, externalId) : o.listingStatus;
       if (v instanceof Error) throw v;
       if (v === undefined) {
-        const e = new Error("Gameflip listing status: not found");
+        // Gameflip's own answer for a listing it no longer has (read live 2026-10-11).
+        const e = new Error(
+          'Gameflip listing status: {"status":"FAILURE","data":null,"error":{"message":"Not Found","code":404,"http_status":404}}',
+        );
         e.status = 404;
         throw e;
       }
@@ -884,6 +887,9 @@ test("releaseBlocked: a held account goes back only when the market no longer ha
     new Error('Gameflip listing status: {"http_status": 404}'),
     Object.assign(new Error('Gameflip listing status: {"error":{"message":"Api key not found"}}'), { status: 401 }),
     new Error("Gameflip listing status: host not found"),
+    // …and a 404 that is not Gameflip's own (a proxy's page, a bare status) is not its answer either.
+    Object.assign(new Error('Gameflip listing status: "<html><h1>404 Not Found</h1></html>"'), { status: 404 }),
+    Object.assign(new Error("Gameflip listing status: Request failed with status code 404"), { status: 404 }),
   ]) {
     assert.match(await ask({}, { listingStatus: e }), /would not say/, e.message);
   }

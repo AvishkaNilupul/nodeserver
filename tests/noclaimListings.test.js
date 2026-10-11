@@ -259,11 +259,23 @@ const SET = {
   ],
 };
 
-// What Gameflip answers for a listing it no longer has: an HTTP 404.
+// What Gameflip answers for a listing it no longer has — HTTP 404 with its own
+// error envelope, as read live on 2026-10-11 (utils/gameflipGone).
 function gone404() {
-  const e = new Error('Gameflip listing status: {"status":"FAILURE","error":{"message":"Listing not found","code":404}}');
+  const e = new Error(
+    'Gameflip listing status: {"status":"FAILURE","data":null,"error":{"message":"Not Found","code":404,"http_status":404}}',
+  );
   e.status = 404;
   return e;
+}
+// A Gameflip status stub for a listing that reads `status` until it is ended
+// (state.gfDown), and 404s afterwards. `world` returns the harness, which only
+// exists once load() has returned.
+function until(world, status) {
+  return (id) => {
+    if (world().state.gfDown.has(String(id))) throw gone404();
+    return status;
+  };
 }
 // What a take-down that did not take throws (mp.gameflipEndListing).
 function stillThere(status = "onsale") {
@@ -521,6 +533,10 @@ function load(o = {}) {
     ["./setImage", { buildSetGridImage: async () => "" }],
     // What a booked sale teaches the demand model (one call a sale, ever).
     ["./saleLearning", stubFns({ recordListingSale: () => 1 })],
+    // The real rule for "Gameflip says it is gone" — it is what is under test.
+    ["./gameflipGone", require("../utils/gameflipGone")],
+    // Messages to the owner's phone.
+    ["./telegram", stubFns({ sendTelegram: () => undefined })],
     ["./playerauctionsCopy", { bundleInstruction: () => "PA GUIDE" }],
     // Sold AUTO-FARM accounts are cleaned up by their own module; the pass
     // only calls it (tests/autofarmStock.test.js covers what it does).
@@ -1288,23 +1304,37 @@ test("removeUnit gameflip: 'down' is Gameflip's word — a delete that did not t
   t = load({
     rows: [gameflipRow()],
     ledgers: [ledger(1, { manualListing: "G1" })],
-    mp: { gameflipListingStatus: () => "draft" },
+    mp: { gameflipListingStatus: until(() => t, "draft") },
   });
   r = await t.mod.removeUnit(gameflipRow(), "acc1", { reason: "x" });
   assert.strictEqual(r.removed, true);
   assert.deepStrictEqual(t.called("gameflipEndListing").map((c) => c.args), [["gf-1", { status: "draft" }]]);
-  assert.strictEqual(t.called("gameflipListingStatus").length, 1, "the end's own read-back is the proof — not asked twice");
+  assert.strictEqual(t.called("gameflipListingStatus").length, 2, "read, ended, read again: the second read is the proof");
   assert.strictEqual(t.db.Listing.get("G1").status, "delisted");
 
   // Expired on Gameflip — dead for every buyer, the login still in it: binned too.
   t = load({
     rows: [gameflipRow()],
     ledgers: [ledger(1, { manualListing: "G1" })],
-    mp: { gameflipListingStatus: () => "expired" },
+    mp: { gameflipListingStatus: until(() => t, "expired") },
   });
   r = await t.mod.removeUnit(gameflipRow(), "acc1", { reason: "x" });
   assert.strictEqual(r.removed, true);
   assert.deepStrictEqual(t.called("gameflipEndListing").map((c) => c.args), [["gf-1", { status: "expired" }]]);
+
+  // The end call REPORTS the listing ended — its delete answered 404, and it
+  // read nothing back — while Gameflip still shows the draft. Its report is
+  // not the verdict: the listing is still there, nothing is handed back.
+  t = load({
+    rows: [gameflipRow()],
+    ledgers: [ledger(1, { manualListing: "G1" })],
+    mp: { gameflipListingStatus: () => "draft", gameflipEndListing: () => ({ deleted: false }) },
+  });
+  r = await t.mod.removeUnit(gameflipRow(), "acc1", { reason: "x" });
+  assert.strictEqual(r.ok, false);
+  assert.strictEqual(r.removed, false);
+  assert.match(r.error, /draft after the take-down/);
+  assert.strictEqual(t.db.Listing.get("G1").status, "active");
 
   // Already gone on Gameflip (deleted by hand): nothing to delete, the books follow.
   t = load({
@@ -1344,6 +1374,9 @@ test("removeUnit gameflip: gone is Gameflip's 404 — an error that only SAYS 'n
     Object.assign(new Error('Gameflip listing status: {"error":{"message":"Api key not found"}}'), { status: 401 }),
     new Error("Gameflip listing status: getaddrinfo ENOTFOUND — host not found"),
     Object.assign(new Error('Gameflip listing status: {"http_status": 404}'), { status: 502 }),
+    // A 404 that is not Gameflip's own answer: something in between replied.
+    Object.assign(new Error('Gameflip listing status: "<html><h1>404 Not Found</h1><hr>nginx</html>"'), { status: 404 }),
+    Object.assign(new Error("Gameflip listing status: Request failed with status code 404"), { status: 404 }),
   ]) {
     const t = load({
       rows: [gameflipRow()],
@@ -1663,13 +1696,14 @@ test("runPass limbo: a held account whose row came down but was not handed back 
   assert.strictEqual(t.called("recordListingSale").length, 1);
   assert.strictEqual(t.called("recordListingSale")[0].args[0].priceUsd, 9);
   assert.strictEqual(t.called("recordListingSale")[0].args[0].units, 1);
+  assert.deepStrictEqual(t.called("recordListingSale")[0].args[0].logins, ["acc1"], "whose sale it was — demand is counted per account");
 
   // Still there as a draft: the take-down is finished — ended AS a draft — and
   // with Gameflip's 404 for it the account goes back in the same pass.
   t = load({
     rows: [down()],
     ledgers: [farmLedger(1, { manualListing: "G1", farmGoneAt: null })],
-    mp: { gameflipListingStatus: () => "draft" },
+    mp: { gameflipListingStatus: until(() => t, "draft") },
     settings: QUIET,
   });
   out = await t.mod.runPass();
@@ -1806,7 +1840,7 @@ test("runPass limbo: only a listing that is ours to bin is deleted — a buyer m
   assert.strictEqual(t.db.Listing.get("G1").units[0].orderId, "gameflip-cancelled");
   assert.ok(t.db.Listing.get("G1").units[0].deliveredAt, "its buyer did receive the login");
   assert.strictEqual(t.called("recordListingSale").length, 0, "a refund is not demand");
-  assert.ok(t.events.some((e) => e.action === "autofarm_unit_burned" && e.subject === "acc1"));
+  assert.ok(t.events.some((e) => e.action === "unit_burned" && e.subject === "acc1"));
 });
 
 test("runPass limbo: a row our own books call SOLD is finished as that sale — never released, whatever Gameflip says now", async () => {
@@ -2079,6 +2113,144 @@ test("runPass orphans: an old unattached claim is re-homed onto its row, or pinn
   assert.strictEqual(t.db.Ledger.get("L4").status, "sold");
   assert.strictEqual(t.db.Ledger.get("L5").status, "manual");
   assert.strictEqual(out.conflicts.removed, 0, "the re-homed unit is no conflict");
+  assert.strictEqual(t.called("sendTelegram").length, 0, "a no-claim bot's pin is told as it always was: in the activity log");
+});
+
+test("a held AUTO-FARM account that is pinned is said out loud, once — with the one way to release it", async () => {
+  // Its publish never recorded a row (the orphans step pins it)…
+  let t = load({
+    rows: [],
+    ledgers: [farmLedger(1, { manualListing: "", manualAt: ago(120), farmGoneAt: null })],
+    settings: QUIET,
+  });
+  await t.mod.runPass();
+  assert.match(t.db.Ledger.get("L1").note, /^unrecorded publish — /);
+  let told = t.called("sendTelegram");
+  assert.strictEqual(told.length, 1);
+  assert.match(told[0].args[0], /An auto-farm account is HELD and needs you/);
+  assert.match(told[0].args[0], /acc1 \(Rainbow Six Siege\)/);
+  assert.match(told[0].args[0], /POST \/noclaim-stock\/ledgers\/L1\/release with \{ "confirmGone": true \}/);
+  const pin = t.events.find((e) => e.action === "orphan_pinned");
+  assert.match(pin.detail, /"confirmGone": true/);
+  // A pinned claim is never looked at again: no second message, pass after pass.
+  await t.mod.runPass();
+  await t.mod.runPass();
+  assert.strictEqual(t.called("sendTelegram").length, 1);
+
+  // …or its listing row went missing (the limbo step pins it).
+  t = load({ rows: [], ledgers: [farmLedger(1, { manualListing: "G1", farmGoneAt: null })], settings: QUIET });
+  await t.mod.runPass();
+  told = t.called("sendTelegram");
+  assert.strictEqual(told.length, 1);
+  assert.match(told[0].args[0], /whose row is missing from our books/);
+  assert.match(told[0].args[0], /POST \/noclaim-stock\/ledgers\/L1\/release with \{ "confirmGone": true \}/);
+  await t.mod.runPass();
+  assert.strictEqual(t.called("sendTelegram").length, 1);
+});
+
+test("runPass limbo: a held account that keeps waiting is said out loud after three hours — once, with why", async () => {
+  const down = gameflipRow({ status: "delisted", lastError: "drops leave within 24 h" });
+  const stuck = { gameflipListingStatus: () => "sale_pending" }; // a buyer who never finishes paying
+  // First sight: nothing is said, the wait is timed from here.
+  let t = load({ rows: [down], ledgers: [farmLedger(1, { manualListing: "G1", farmGoneAt: null })], mp: stuck, settings: QUIET });
+  let out = await t.mod.runPass();
+  assert.deepStrictEqual(out.limbo, { released: 0, sold: 0, retried: 1 });
+  assert.ok(t.db.Ledger.get("L1").farmLimboAt, "the wait is on the ledger, so a restart does not forget it");
+  assert.strictEqual(t.called("sendTelegram").length, 0);
+  await t.mod.runPass();
+  assert.strictEqual(t.called("sendTelegram").length, 0, "minutes of waiting are normal");
+
+  // Three hours on: said once.
+  t = load({
+    rows: [down],
+    ledgers: [farmLedger(1, { manualListing: "G1", farmGoneAt: null, farmLimboAt: ago(200) })],
+    mp: stuck,
+    settings: QUIET,
+  });
+  await t.mod.runPass();
+  let told = t.called("sendTelegram");
+  assert.strictEqual(told.length, 1);
+  assert.match(told[0].args[0], /A held auto-farm account has been waiting 3 h/);
+  assert.match(told[0].args[0], /acc1[^]*Gameflip listing gf-1[^]*Gameflip still has its listing \(sale_pending\)/);
+  assert.ok(t.db.Ledger.get("L1").farmLimboToldAt);
+  assert.ok(t.events.some((e) => e.action === "autofarm_unit_waiting" && e.subject === "acc1"));
+  await t.mod.runPass();
+  await t.mod.runPass();
+  assert.strictEqual(t.called("sendTelegram").length, 1, "once");
+
+  // Gone on Gameflip but not handed back (its bot removal never finishes): the release gate's own reason.
+  t = load({
+    rows: [down],
+    ledgers: [farmLedger(1, { manualListing: "G1", farmGoneAt: null, farmLimboAt: ago(200), farmParkStartedAt: ago(190) })],
+    mp: {
+      gameflipListingStatus: () => {
+        throw gone404();
+      },
+    },
+    ncs: { releaseClaim: () => 0 }, // the claim layer's gate refuses it
+    autofarm: { releaseBlocked: () => "its bot removal is still under way" },
+    settings: QUIET,
+  });
+  out = await t.mod.runPass();
+  assert.deepStrictEqual(out.limbo, { released: 0, sold: 0, retried: 0 });
+  told = t.called("sendTelegram");
+  assert.strictEqual(told.length, 1);
+  assert.match(told[0].args[0], /its listing is gone, but its bot removal is still under way/);
+
+  // Gameflip not answering is a wait too.
+  t = load({
+    rows: [down],
+    ledgers: [farmLedger(1, { manualListing: "G1", farmGoneAt: null, farmLimboAt: ago(200) })],
+    mp: {
+      gameflipListingStatus: () => {
+        throw new Error("429");
+      },
+    },
+    settings: QUIET,
+  });
+  await t.mod.runPass();
+  assert.match(t.called("sendTelegram")[0].args[0], /Gameflip would not answer about its listing/);
+
+  // Settled in the same pass: nothing to say, however long it waited.
+  t = load({
+    rows: [down],
+    ledgers: [farmLedger(1, { manualListing: "G1", farmGoneAt: null, farmLimboAt: ago(200) })],
+    mp: {
+      gameflipListingStatus: () => {
+        throw gone404();
+      },
+    },
+    settings: QUIET,
+  });
+  out = await t.mod.runPass();
+  assert.deepStrictEqual(out.limbo, { released: 1, sold: 0, retried: 0 });
+  assert.strictEqual(t.called("sendTelegram").length, 0);
+});
+
+test("onGameflipRetired: retired as CANCELLED the account is never handed back — whichever farm it came from", async () => {
+  // Paid, then refunded: the buyer has seen the login. A no-claim bot's
+  // account used to go straight back to stock here.
+  for (const led of [ledger(1, { manualListing: "G1" }), farmLedger(1, { manualListing: "G1", farmGoneAt: null })]) {
+    const g1 = gameflipRow({ status: "removed", price: 9 });
+    const t = load({ rows: [g1], ledgers: [led] });
+    const out = await t.mod.onGameflipRetired(g1, { reason: 'gameflip reports "cancelled"', burned: true });
+    assert.deepStrictEqual(out, { released: 0, burned: 1 }, led.farm || "fleet");
+    assert.strictEqual(t.called("releaseClaim").length, 0);
+    assert.strictEqual(t.db.Ledger.get("L1").status, "sold", "closed like a sale: out of stock, out of its bot");
+    assert.deepStrictEqual(t.called("markSold")[0].args, [
+      ["L1"],
+      { market: "gameflip", priceUsd: 0, reason: "gameflip sale cancelled after delivery — its login was seen" },
+    ]);
+    const row = t.db.Listing.get("G1");
+    assert.strictEqual(row.status, "removed", "nobody bought it: the row is not called sold");
+    assert.strictEqual(row.units[0].orderId, "gameflip-cancelled");
+    assert.strictEqual(t.called("recordListingSale").length, 0);
+    assert.ok(t.events.some((e) => e.action === "unit_burned" && e.subject === "acc1"));
+  }
+  // Retired as expired (or 404): the old rule, a release.
+  const g1 = gameflipRow({ status: "removed" });
+  const t = load({ rows: [g1], ledgers: [ledger(1, { manualListing: "G1" })] });
+  assert.deepStrictEqual(await t.mod.onGameflipRetired(g1, { reason: 'gameflip reports "expired"' }), { released: 1 });
 });
 
 test("runPass conflicts: a foreign unit leaves via a GGSel rebuild; stale pointers heal first", async () => {

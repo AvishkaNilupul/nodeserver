@@ -29,6 +29,9 @@ function gfError(message, status) {
   if (status) e.status = status;
   return e;
 }
+// Gameflip's own answer for a listing it no longer has (read live 2026-10-11).
+const gone404 = () =>
+  gfError('Gameflip listing status: {"status":"FAILURE","data":null,"error":{"message":"Not Found","code":404,"http_status":404}}', 404);
 
 // Load the real fulfiller with marketplaces / the listing model / telegram /
 // the no-claim claim layer replaced, for the length of `fn`.
@@ -88,7 +91,7 @@ function makeWorld(o = {}) {
       w.statusReads.push(id);
       const next = (o.statuses || []).shift();
       if (next instanceof Error) throw next;
-      if (next === undefined) throw gfError("Gameflip listing status: not found", 404);
+      if (next === undefined) throw gone404();
       return next;
     },
     // Ends a listing from the status the caller just read — off sale first
@@ -106,6 +109,7 @@ function makeWorld(o = {}) {
   };
   w.Listing = {
     create: (doc) => {
+      if (o.createError) return Promise.reject(o.createError);
       const row = { _id: "row-" + (w.rows.length + 1), ...doc };
       w.rows.push(row);
       const p = Promise.resolve(row);
@@ -125,6 +129,7 @@ function makeWorld(o = {}) {
     }),
     attachListing: async (ids, listingId) => {
       w.attached.push({ ids, listingId });
+      return o.attachFails ? 0 : ids.length;
     },
     releaseClaim: async (ids, opts) => {
       w.released.push({ ids, ...opts });
@@ -230,16 +235,22 @@ test("an auto-farm account goes back after a failed publish only when the listin
   assert.deepStrictEqual(w.statusReads, [ID]);
   assert.deepStrictEqual(w.released, [{ ids: ["L2"], reason: "gameflip publish failed", listingGone: true }]);
   assert.strictEqual(w.telegrams.length, 0);
+  assert.strictEqual(w.rows.length, 0);
 
   // Still there as a draft: ended once more AS a draft (deleted outright — a
   // draft refuses the off-sale patch, and that used to stop the delete), and
-  // the end's own 404 read-back is the proof.
+  // then Gameflip is asked again: its own 404 is the proof, not the end call.
   w = makeWorld({ accounts: [FARM], publishError: attach, statuses: ["draft"] });
   await assert.rejects(withLane(w, (g) => g.publishAutoDelivery(ARGS)), /could not attach/);
-  assert.deepStrictEqual(w.statusReads, [ID]);
   assert.deepStrictEqual(w.ends, [[ID, "draft"]]);
+  assert.deepStrictEqual(w.statusReads, [ID, ID]);
   assert.deepStrictEqual(w.delists, [], "never the patch-then-delete a draft can refuse");
   assert.deepStrictEqual(w.released, [{ ids: ["L2"], reason: "gameflip publish failed", listingGone: true }]);
+
+  // The end call says it ended it, and Gameflip still shows the listing: not gone.
+  w = makeWorld({ accounts: [FARM], publishError: attach, statuses: ["draft", "draft"] });
+  await assert.rejects(withLane(w, (g) => g.publishAutoDelivery(ARGS)), /\[account kept held\]$/);
+  assert.deepStrictEqual(w.released, []);
 
   // Still there after that — maybe even on sale: the account stays held, the owner is told.
   w = makeWorld({ accounts: [FARM], publishError: onsale, statuses: ["onsale", "onsale"], endError: gfError("Gameflip end listing: still exists after the delete", 409) });
@@ -250,7 +261,6 @@ test("an auto-farm account goes back after a failed publish only when the listin
   assert.strictEqual(w.telegrams.length, 1);
   assert.match(w.telegrams[0], /could not be confirmed deleted[^]*farm_one[^]*stays held/);
   assert.ok(w.errors.some((e) => /farm_one stays HELD/.test(e)));
-  assert.strictEqual(w.rows.length, 0);
   // …and the error says so, for a caller that would otherwise just try again.
   w = makeWorld({ accounts: [FARM], publishError: gfError("Gameflip created " + ID + " but could not put it on sale (draft discarded): x"), statuses: ["onsale", "onsale"], endError: gfError("429", 429) });
   await assert.rejects(withLane(w, (g) => g.publishAutoDelivery(ARGS)), /\[account kept held\]$/);
@@ -266,6 +276,51 @@ test("an auto-farm account goes back after a failed publish only when the listin
   await assert.rejects(withLane(w, (g) => g.publishAutoDelivery(ARGS)), /could not put it on sale/);
   assert.deepStrictEqual(w.released, []);
   assert.strictEqual(w.telegrams.length, 1);
+
+  // A 404 that is not Gameflip's own answer (something in between replied): not gone either.
+  w = makeWorld({ accounts: [FARM], publishError: onsale, statuses: [gfError('Gameflip listing status: "<html>404 Not Found</html>"', 404)] });
+  await assert.rejects(withLane(w, (g) => g.publishAutoDelivery(ARGS)), /\[account kept held\]$/);
+  assert.deepStrictEqual(w.released, []);
+});
+
+test("the listing a failed publish may have left behind is put on the books — so the pass can finish it without anybody", async () => {
+  const ID = "4f1b3263-aaaa-bbbb-cccc-000000000009";
+  const onsale = gfError("Gameflip created " + ID + " but could not put it on sale (draft discarded): Too many attempts - Retry later");
+  let w = makeWorld({ accounts: [FARM], publishError: onsale, statuses: ["ready", "ready"], endError: gfError("429", 429) });
+  await assert.rejects(withLane(w, (g) => g.publishAutoDelivery(ARGS)), /\[account kept held\]$/);
+  assert.deepStrictEqual(w.released, [], "still held");
+  // A row that was never on sale, naming the listing and the account…
+  assert.strictEqual(w.rows.length, 1);
+  const row = w.rows[0];
+  assert.strictEqual(row.marketplace, "gameflip");
+  assert.strictEqual(row.externalId, ID);
+  assert.strictEqual(row.status, "removed", "never 'active': nothing reads it as on sale");
+  assert.strictEqual(row.qtyRemaining, 0, "it owes no further unit");
+  assert.strictEqual(row.noclaimStock, true);
+  assert.strictEqual(row.autoDeliver, true);
+  assert.deepStrictEqual(row.units.map((u) => u.login), ["farm_one"]);
+  assert.match(row.lastError, /^publish failed — its listing may still exist on Gameflip, being taken down: /);
+  // …and the claim attached to it: from here the pass's limbo step owns it.
+  assert.deepStrictEqual(w.attached, [{ ids: ["L2"], listingId: "row-1" }]);
+  assert.strictEqual(w.telegrams.length, 1);
+  assert.match(w.telegrams[0], /taken down automatically[^]*Nothing to do unless this repeats/);
+  assert.doesNotMatch(w.telegrams[0], /POST \/noclaim-stock/);
+
+  // The row cannot be written, or the claim cannot be attached: the owner is
+  // given the one way to release it (there is no button for it).
+  for (const o of [{ createError: new Error("E11000 duplicate key") }, { attachFails: true }]) {
+    w = makeWorld({ accounts: [FARM], publishError: onsale, statuses: ["ready", "ready"], endError: gfError("429", 429), ...o });
+    await assert.rejects(withLane(w, (g) => g.publishAutoDelivery(ARGS)), /\[account kept held\]$/);
+    assert.deepStrictEqual(w.released, []);
+    assert.strictEqual(w.telegrams.length, 1);
+    assert.match(w.telegrams[0], /delete it, then release the account: POST \/noclaim-stock\/ledgers\/L2\/release with \{ "confirmGone": true \}/);
+  }
+
+  // A no-claim bot's account: nothing of this — released as it always was, no row.
+  w = makeWorld({ accounts: [FLEET], publishError: onsale, statuses: ["ready", "ready"] });
+  await assert.rejects(withLane(w, (g) => g.publishAutoDelivery(ARGS)), /could not put it on sale/);
+  assert.strictEqual(w.rows.length, 0);
+  assert.deepStrictEqual(w.released, [{ ids: ["L1"], reason: "gameflip publish failed" }]);
 });
 
 test("failedPublishRemains: none / gone / there", async () => {
@@ -279,20 +334,24 @@ test("failedPublishRemains: none / gone / there", async () => {
   assert.strictEqual((await ask("Gameflip minimum price is $0.75", {})).r, "none");
   assert.strictEqual((await ask("Gameflip created " + ID + " but could not put it on sale (draft discarded): x", { statuses: [] })).r, "gone");
   // "Not found" said in WORDS is no answer about the listing (a refused key
-  // says it too): gone is Gameflip's HTTP 404 and nothing else.
+  // says it too), and neither is a 404 that is not Gameflip's own.
   for (const e of [
     new Error('Gameflip listing status: {"http_status": 404}'),
     gfError('Gameflip listing status: {"error":{"message":"Api key not found"}}', 401),
+    gfError("Gameflip listing status: Request failed with status code 404", 404),
   ]) {
     assert.strictEqual((await ask("x (draft " + ID + " discarded): y", { statuses: [e] })).r, "there", e.message);
   }
   const still = await ask("x (draft " + ID + " discarded): y", { statuses: ["draft", "draft"], endError: new Error("429") });
   assert.strictEqual(still.r, "there");
   assert.deepStrictEqual(still.w.ends, [[ID, "draft"]], "one more end was tried, from the status just read");
-  // The end went through: its own read-back is the proof, Gameflip is not asked again.
+  // The end went through: Gameflip is asked again, and ITS 404 is the proof.
   const ended = await ask("x (draft " + ID + " discarded): y", { statuses: ["ready"] });
   assert.strictEqual(ended.r, "gone");
-  assert.deepStrictEqual(ended.w.statusReads, [ID]);
+  assert.deepStrictEqual(ended.w.statusReads, [ID, ID]);
+  // The end call reports success and the listing is still there: not gone.
+  const lied = await ask("x (draft " + ID + " discarded): y", { statuses: ["ready", "ready"] });
+  assert.strictEqual(lied.r, "there");
 });
 
 test("a listing that is live but whose row could not be saved says so in the words every such failure uses", async () => {
