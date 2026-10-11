@@ -32,6 +32,7 @@
 // on disk as an automatic rollback artifact.
 const hosts = require("./botHosts");
 const botFactory = require("./botFactory");
+const { withFileLock } = require("./fileLock");
 const AutoFarmTask = require("../models/AutoFarmTask");
 const BotAccount = require("../models/BotAccount");
 
@@ -342,6 +343,51 @@ async function plan(hostId, opts = {}) {
   };
 }
 
+// The donors' entries as their configs hold them NOW (one batched read),
+// with inherited games pinned exactly as readContainer pinned the gathered
+// ones. `entry(gathered)` is the entry to move in place of a gathered one: the
+// current entry of the same account IN THE SAME DONOR, null when the account
+// is no longer in that donor, or the gathered copy itself when that donor
+// cannot be read right now (the move then runs as planned). One account can
+// have an entry in two containers of one repack — live in one, retired in the
+// other — so the donor is taken from the gathered entry, never from the token.
+async function donorEntriesNow(host, donorList, containers) {
+  const fromFile = new Map(); // gathered entry -> the file it was gathered from
+  for (const c of containers) {
+    for (const u of c.users) fromFile.set(u, c.file);
+  }
+  const files = donorList.map((d) => d.file);
+  let raw = {};
+  try {
+    raw = files.length ? await hosts.readFiles(host, files) : {};
+  } catch {
+    raw = {};
+  }
+  const now = new Map(); // donor file -> Map(secret -> entry) | null (unreadable)
+  for (const f of files) {
+    let users = null;
+    try {
+      if (raw[f] && raw[f].ok) {
+        const data = JSON.parse(raw[f].text);
+        users = materializeGames(usersOf(data), data.FavouriteGames).users;
+      }
+    } catch {
+      users = null;
+    }
+    now.set(
+      f,
+      users && new Map(users.map((u) => [secretOf(u), u]).filter(([s]) => s)),
+    );
+  }
+  return {
+    entry(gathered) {
+      const held = now.get(fromFile.get(gathered));
+      if (!held) return gathered;
+      return held.get(secretOf(gathered)) || null;
+    },
+  };
+}
+
 // Execute the plan.
 //
 // Ordering matters. Donors are STOPPED before their accounts are written into a
@@ -391,29 +437,61 @@ async function consolidate(hostId, opts = {}) {
   }
 
   // 2) Write merged configs, dropping any duplicate ClientSecret.
+  //
+  // Nothing is written from the copies gathered above. They are as old as the
+  // plan plus every donor's `docker stop`, and a config rewritten from one lost
+  // whatever had been written to it meanwhile:
+  //   * each TARGET is read again and rewritten from what it holds NOW, under
+  //     its file lock — a farm placed there or an account switched off there
+  //     since the gather stays as it is;
+  //   * each moved entry is taken as its DONOR holds it now — an account
+  //     switched off there since the gather (sold) moves switched off, and one
+  //     that has left the donor (removed, or moved elsewhere) is not moved.
+  // A duplicate is dropped in favour of the entry already there, with one
+  // exception: a RETIRED entry (switched off) gives way to a live one of the
+  // same account. Kept, it left the account switched on nowhere the moment its
+  // donor was renamed away.
+  const donorNow = await donorEntriesNow(host, donorList, containers);
   const moved = [];
   for (const t of targets) {
     if (!t.incoming.length) continue;
-    const have = new Set(usersOf(t.data).map(secretOf).filter(Boolean));
-    const fresh = [];
-    for (const u of t.incoming) {
-      const s = secretOf(u);
-      if (!s || have.has(s)) continue;
-      have.add(s);
-      fresh.push(u);
-    }
-    if (!fresh.length) continue;
-    if (!t.data.TwitchSettings || typeof t.data.TwitchSettings !== "object") {
-      t.data.TwitchSettings = {};
-    }
-    t.data.TwitchSettings.TwitchUsers = usersOf(t.data).concat(fresh);
-    log("Writing " + t.file + " (+" + fresh.length + " accounts)…");
-    await hosts.writeFileAtomic(
-      host,
-      t.file,
-      JSON.stringify(t.data, null, 2),
-    );
-    for (const u of fresh) moved.push({ user: u, file: t.file });
+    const landed = await withFileLock(host, t.file, async () => {
+      const raw = await hosts.readFile(host, t.file);
+      const data = JSON.parse(raw);
+      const users = usersOf(data).slice();
+      const at = new Map(); // token -> its place in `users`
+      users.forEach((u, i) => {
+        const s = secretOf(u);
+        if (s && !at.has(s)) at.set(s, i);
+      });
+      const put = new Map(); // token -> the entry this move put into the target
+      for (const u of t.incoming) {
+        const s = secretOf(u);
+        if (!s) continue;
+        const now = donorNow.entry(u);
+        if (!now) continue;
+        if (at.has(s)) {
+          const held = users[at.get(s)];
+          if (!(held && held.Enabled === false && now.Enabled !== false)) continue;
+          users[at.get(s)] = now;
+        } else {
+          at.set(s, users.length);
+          users.push(now);
+        }
+        put.set(s, now);
+      }
+      if (!put.size) return [];
+      if (!data.TwitchSettings || typeof data.TwitchSettings !== "object") {
+        data.TwitchSettings = {};
+      }
+      data.TwitchSettings.TwitchUsers = users;
+      log("Writing " + t.file + " (+" + put.size + " accounts)…");
+      await hosts.writeFileAtomic(host, t.file, JSON.stringify(data, null, 2), {
+        prev: raw,
+      });
+      return [...put.values()];
+    });
+    for (const u of landed) moved.push({ user: u, file: t.file });
   }
 
   // 3) Point BotAccount at the new home. Keyed on clientSecret, which is the
@@ -463,15 +541,22 @@ async function consolidate(hostId, opts = {}) {
     retired.push({ container: d.container, steps });
     if (typeof steps !== "string" || !steps.startsWith("failed:")) continue;
     try {
-      const data = JSON.parse(await hosts.readFile(host, d.file));
-      const users = usersOf(data);
-      const kept = users.filter((u) => !movedSecrets.has(secretOf(u)));
-      if (kept.length === users.length) continue;
-      data.TwitchSettings.TwitchUsers = kept;
-      await hosts.writeFileAtomic(host, d.file, JSON.stringify(data, null, 2));
+      const stripped = await withFileLock(host, d.file, async () => {
+        const raw = await hosts.readFile(host, d.file);
+        const data = JSON.parse(raw);
+        const users = usersOf(data);
+        const kept = users.filter((u) => !movedSecrets.has(secretOf(u)));
+        if (kept.length === users.length) return 0;
+        data.TwitchSettings.TwitchUsers = kept;
+        await hosts.writeFileAtomic(host, d.file, JSON.stringify(data, null, 2), {
+          prev: raw,
+        });
+        return users.length - kept.length;
+      });
+      if (!stripped) continue;
       log(
         "Retire failed for " + d.container + " — stripped " +
-          (users.length - kept.length) +
+          stripped +
           " moved account(s) from its config so they cannot farm twice.",
       );
     } catch (e) {

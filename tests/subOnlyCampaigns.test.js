@@ -888,3 +888,53 @@ test("a subscriber-only campaign that has ENDED takes the ordinary path, not the
   assert.equal((await AutoFarmEvent.findOne({ type: "task_completed", taskId: f.task._id }).lean()).reason, "probe ended — 0 sales");
   assert.equal((await AvailableAccount.findOne({ usernameLower: f.probeOnly[0] }).lean()).claimedNote, "recycled after " + f.game);
 });
+
+/* ------- 6. the clean-up edit and another writer of the same shared bot ------ */
+
+test("2026-10-11: a farm placed into the shared bot while a probe is being trimmed out of it — both edits land", async () => {
+  // The clean-up reads the shared config, edits it and writes it back. Before
+  // it took the file's lock (utils/fileLock), whatever another writer put into
+  // that config between its read and its write was overwritten by it — or
+  // overwrote it, leaving the ended probe's accounts farming.
+  await db();
+  await clearTasks();
+  const f = await sharedBotFixture("race");
+  const fleetIntegrity = require("../utils/fleetIntegrity");
+  const realGuard = fleetIntegrity.guardManagedWrite;
+  // What holds the gap between a read and its write open in production: the
+  // no-claim check inside every config write, an SSH read seconds long.
+  fleetIntegrity.guardManagedWrite = async (host, file, text) => {
+    await new Promise((r) => setTimeout(r, 30));
+    return text;
+  };
+  const late = ["race_late1", "race_late2"];
+  try {
+    const [completed, placed] = await Promise.all([
+      autoFarmer.completeEndedTasks(),
+      (async () => {
+        await new Promise((r) => setTimeout(r, 5)); // the clean-up has read the config
+        return botFactory.addAccountsToBot(
+          HOST,
+          "config_44.json",
+          late.map((u) => ({ username: u, clientSecret: "secret-" + u, twitchId: "id-" + u })),
+          f.other,
+        );
+      })(),
+    ]);
+    assert.equal(completed, 1);
+    assert.equal(placed.added, 2);
+  } finally {
+    fleetIntegrity.guardManagedWrite = realGuard;
+  }
+  const users = new Map(readConfig("config_44.json").map((u) => [u.Login, u]));
+  for (const u of f.probeOnly) {
+    assert.equal(users.get(u).Enabled, false, u + " was trimmed");
+    assert.deepEqual(users.get(u).FavouriteGames, []);
+  }
+  for (const u of late) {
+    assert.ok(users.has(u), u + " — placed meanwhile — is still in the config");
+    assert.equal(users.get(u).Enabled, true);
+    assert.deepEqual(users.get(u).FavouriteGames, [f.other]);
+  }
+  assert.deepEqual(users.get(f.both).FavouriteGames, [f.other]);
+});

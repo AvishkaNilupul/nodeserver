@@ -539,7 +539,12 @@ async function exists(host, file) {
 // Write `text` to <dir>/<file> atomically (temp file + rename), keeping a .bak
 // copy of any previous version — matching the local behaviour the routes relied
 // on before, but for either transport.
-async function writeFileAtomic(host, file, text) {
+//
+// `opts.prev` is what the file held just before this write, for a caller that
+// has just read it under the file's lock: a string, or null for a file that
+// did not exist. Left out, it is read here. The single-home guard needs it to
+// tell an account this write switched ON from one that was already on.
+async function writeFileAtomic(host, file, text, opts) {
   // One account, one bot (utils/fleetIntegrity.js, 2026-10-06): an entry for an
   // account that sits in a no-claim bot is written switched OFF, whoever asked.
   // Every bot configured here claims drops, and a claimed drop is no-claim
@@ -551,19 +556,73 @@ async function writeFileAtomic(host, file, text) {
   } catch (e) {
     console.error("[botHosts] one-home guard error: " + e.message);
   }
-  await writeFileRaw(host, file, text);
-  try {
-    if (integrity) integrity.forget("managed");
-  } catch {
-    /* a cache that is not dropped only ages out a minute later */
-  }
+  const written = () => {
+    try {
+      if (integrity) integrity.forget("managed");
+    } catch {
+      /* a cache that is not dropped only ages out a minute later */
+    }
+  };
   // An account may only be enabled in one config per host — strip stale copies
-  // left in sibling configs (utils/dupeGuard.js).
+  // left in sibling configs (utils/dupeGuard.js). The heal rewrites OTHER
+  // files under their own locks; called from inside a file lock it runs once
+  // that lock is released, not before this returns.
+  let guard = null;
   try {
-    const guard = require("./dupeGuard");
-    await guard.enforceSingleHome(module.exports, host, file, text);
+    guard = require("./dupeGuard");
   } catch (e) {
     console.error("[botHosts] dupe guard error: " + e.message);
+  }
+  const fileLock = require("./fileLock");
+  const guarded =
+    !!guard &&
+    typeof guard.noteWrite === "function" &&
+    typeof fileLock.afterUnlock === "function" &&
+    guard.watches(host, file);
+  if (!guarded) {
+    // Not a bot config, a heal's own rewrite of a sibling, or this file
+    // running beside a dupeGuard.js / fileLock.js from before 2026-10-11.
+    await writeFileRaw(host, file, text);
+    written();
+    try {
+      if (guard) await guard.enforceSingleHome(module.exports, host, file, text);
+    } catch (e) {
+      console.error("[botHosts] dupe guard error: " + e.message);
+    }
+    return;
+  }
+  // What the file held, the write, and the note of what the write switched on
+  // are ONE step under the file's lock — straight through for a caller that
+  // already holds it. A heal stripping an account from this file cannot fall
+  // between the look and the write: it would have been written back as an
+  // account "that was already here", which nothing then removes.
+  await fileLock.withFileLock(host, file, async () => {
+    const prev = opts && "prev" in opts ? opts.prev : await previousText(host, file);
+    await writeFileRaw(host, file, text);
+    written();
+    try {
+      const write = guard.noteWrite(host, file, text, prev);
+      await guard.enforceSingleHome(module.exports, host, file, text, write);
+    } catch (e) {
+      console.error("[botHosts] dupe guard error: " + e.message);
+    }
+  });
+}
+// What (host, file) holds right now, asked once: its text, null when there is
+// no such file, undefined when that cannot be learned. Never throws — the
+// write that follows is attempted either way, exactly as it always was.
+async function previousText(host, file) {
+  try {
+    if (host.transport === "local") {
+      return await fsp.readFile(path.join(host.dir, file), "utf8");
+    }
+    const { stdout } = await sshRun(host, "cat -- " + shq(remotePath(host, file)), {
+      timeout: SHORT_TIMEOUT,
+    });
+    return stdout;
+  } catch (e) {
+    const gone = e && (e.code === "ENOENT" || /No such file/i.test(e.stderr || e.message || ""));
+    return gone ? null : undefined;
   }
 }
 async function writeFileRaw(host, file, text) {

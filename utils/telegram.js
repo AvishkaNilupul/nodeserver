@@ -4,6 +4,8 @@ const { getTelegramChatId } = require("./admins");
 
 require("dotenv").config();
 
+const SEND_TIMEOUT_MS = 15000;
+
 // The chat IDs in TG_CHAT_IDS are the "always notify" super-admin recipients:
 // they receive every notification, regardless of which admin created the
 // order. Individual admins link their own chat separately (see admins.js) and
@@ -21,10 +23,13 @@ async function sendToChat(chatId, text) {
   const token = process.env.TG_TOKEN;
   if (!token || !chatId) return;
   try {
-    await axios.post(`https://api.telegram.org/bot${token}/sendMessage`, {
-      chat_id: String(chatId).trim(),
-      text,
-    });
+    // With a deadline: this is awaited inside the auto-farm's structural steps
+    // (utils/farmOps), and a post that never answers held up whatever awaited it.
+    await axios.post(
+      `https://api.telegram.org/bot${token}/sendMessage`,
+      { chat_id: String(chatId).trim(), text },
+      { timeout: SEND_TIMEOUT_MS },
+    );
   } catch (err) {
     console.error("Telegram error:", err.response?.data || err.message);
   }

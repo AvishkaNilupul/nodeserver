@@ -33,6 +33,7 @@ const { buildReuseInputs, withReuseInputs } = require("../../decisionInputs");
 // records task_started / task_failed on its inline reuse; a lane must too, or
 // a lane-farmed game leaves no trail there.
 const { recordAutoFarmEvent } = require("../../autoFarmEventLog");
+const farmOps = require("../../farmOps");
 const notify = require("../notify");
 
 function brain() {
@@ -766,7 +767,13 @@ async function executeDecision({ verdict, lane, cycle, af, shadow, granted = 0 }
     // No host configured → no top-up, the reuse still runs.
     const host = dryRun ? null : b.resolveFarmHost(af2);
     const run = () => executeReuse({ verdict, dryRun, af: af2, host, granted });
-    return cycle ? await cycle.withHost(run) : await run();
+    const onHost = () => (cycle ? cycle.withHost(run) : run());
+    // A dry run touches nothing, so it waits for nothing. A real reuse re-arms
+    // accounts and restarts bots: one structural operation (utils/farmOps),
+    // taken BEFORE the cycle's host slot so a reuse that is waiting its turn
+    // does not hold one of the two slots every other lane reads through.
+    if (dryRun) return await onHost();
+    return await farmOps.run("reusing " + verdict.game, onHost);
   }
 
   const task = await upsertTask(verdict, { dryRun });
@@ -795,8 +802,13 @@ async function executeDecision({ verdict, lane, cycle, af, shadow, granted = 0 }
   // fleet-wide host snapshot (that is the legacy tick's job), so executeTask
   // falls back to its own DB/host reads. Those reads go through the cycle's
   // SSH semaphore when one is available, so parallel lanes cannot storm the Pi.
+  // executeTask is itself one structural operation (utils/farmOps); taking the
+  // turn here, before the cycle's host slot, keeps a placement that is waiting
+  // behind a repack or another placement from holding one of the two slots.
   const run = () => b.executeTask(task, { af: af2, host });
-  const result = cycle ? await cycle.withHost(run) : await run();
+  const result = await farmOps.run("placing " + verdict.game, () =>
+    cycle ? cycle.withHost(run) : run(),
+  );
 
   return {
     taskId: task._id,

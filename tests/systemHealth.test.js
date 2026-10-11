@@ -364,6 +364,9 @@ function healthyDeps(over = {}) {
     fleetIntegrity: {
       oneAccountOneBot: async () => ({ at: now, configs: 40, accounts: 1800, collisions: [], unreadable: [] }),
     },
+    armedAudit: {
+      audit: async () => ({ tasks: 20, accounts: 615, armed: 369, stranded: [], blind: [] }),
+    },
     backup: {
       status: async () => ({
         lastSuccess: { at: new Date(NOW.getTime() - 3600e3).toISOString(), id: "b1", problems: [] },

@@ -64,6 +64,7 @@ const REAL_DEPS = {
   unclaimedListingAudit: () => require("./unclaimedListingAudit"),
   unclaimedAutoList: () => require("./unclaimedAutoList"),
   fleetIntegrity: () => require("./fleetIntegrity"),
+  armedAudit: () => require("./armedAudit"),
   marketplaces: () => require("./marketplaces"),
   connectors: () => require("./systemHealthConnectors"),
   eldoradoFarmService: () => require("./eldoradoFarmService"),
@@ -427,6 +428,12 @@ const STALE_VAULT_MARKETS = new Set(["gameflip", "ggsel", "digiseller"]);
 const STALE_ATTACHED_POOL = 12;
 
 // Gameflip suspects confirmed per run, one live GET each, sequentially.
+// fleet.armed: accounts a farm counts as deployed that no bot is farming. One
+// or two are a warning; a farm missing this many, or this share of what it
+// counts, is not farming what the engine thinks it is.
+const ARMED_FAIL_COUNT = 3;
+const ARMED_FAIL_PCT = 20;
+
 const GHOST_CONFIRM_CAP = 20;
 // `gameflipListingIdsByStatus` pages in hundreds, and on 2026-09-09 it returned
 // exactly 200 ids — a round number is the signature of a cap, not of a fleet.
@@ -2642,6 +2649,63 @@ const CHECKS = [
           (blind ? " Unreadable: " + r.unreadable.slice(0, 5).join("; ") : ""),
         items: capItems(
           r.collisions.map((c) => ({ login: c.login, secret: c.secretTail, bots: c.homes.join(", ") })),
+        ),
+      };
+    },
+  },
+
+  {
+    id: "fleet.armed",
+    title: "Farm accounts switched on",
+    group: "pool",
+    severity: "critical",
+    // An active farm's assignedAccounts is the database's word for "farming";
+    // the bots read only their config files. This reads those files (one
+    // batched read per farm host, plus the no-claim tree) and reports every
+    // account a farm counts that is switched off, in no bot at all, or
+    // switched on in another bot on other games, with nothing to explain it —
+    // utils/armedAudit, which judges with the same guards the engine's own
+    // re-arm uses. On 2026-10-09 thirteen of a probe's fifteen accounts sat
+    // like that for 2.5 hours and nothing said so.
+    timeoutMs: 150 * 1000,
+    async run(ctx) {
+      const r = await ctx.dep("armedAudit").audit({ now: ctx.now().getTime() });
+      const count = (t) => t.off.length + t.missing.length + (t.elsewhere || []).length;
+      const n = r.stranded.reduce((sum, t) => sum + count(t), 0);
+      const bad = r.stranded.some(
+        (t) => count(t) >= ARMED_FAIL_COUNT || count(t) * 100 >= t.assigned * ARMED_FAIL_PCT,
+      );
+      const blind = r.blind.length;
+      const worst = r.stranded.slice().sort((a, b) => count(b) - count(a));
+      return {
+        status: n ? (bad ? "fail" : "warn") : blind ? "unknown" : "ok",
+        measured: n,
+        threshold: "0 accounts counted as farming that no bot farms",
+        summary: n
+          ? n + " account(s) are counted as farming but no bot farms them (" +
+            worst.slice(0, 3).map((t) => t.game + " " + count(t) + " of " + t.assigned).join(", ") +
+            (worst.length > 3 ? ", +" + (worst.length - 3) + " more" : "") + ")"
+          : blind
+            ? "not judged: " + blind + " farm(s) or host(s) could not be read"
+            : "every account a farm counts is farming or is off for a known reason (" +
+              r.tasks + " farms, " + r.accounts + " accounts, " + r.armed + " switched on)",
+        detail:
+          "Read-only. Accounts that are off on purpose (sold, holding unclaimed drops, moved to " +
+          "the no-claim farm, dead token) are not counted. Switched-off ones can be switched back " +
+          "on by the engine's own re-arm: autoFarm.rearmStranded = true lets the janitor tick do " +
+          "it. An account in no bot at all, or switched on in another bot without this game, needs " +
+          "placing again." +
+          (blind ? " Not judged: " + r.blind.slice(0, 5).join("; ") : ""),
+        items: capItems(
+          worst.map((t) => ({
+            game: t.game,
+            campaign: t.campaignName,
+            stranded: count(t) + " of " + t.assigned,
+            switchedOff: t.off.length,
+            inNoBot: t.missing.length,
+            inAnotherBot: (t.elsewhere || []).length,
+            bots: t.bots.map((b) => b.container || b.file).join(", "),
+          })),
         ),
       };
     },
