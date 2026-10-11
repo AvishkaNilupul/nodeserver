@@ -1136,3 +1136,345 @@ test("PlayerAuctions: a by-game row is held and counts nothing, and never loads 
     assert.strictEqual(h.ncsLoads(), 0, "a row without the flag must never load utils/noclaimStock");
   });
 });
+
+/* --------------------------------- G2G ----------------------------------- */
+// G2G hands the account over in the buyer's chat and then tells G2G the count.
+// Its no-claim branch is the same contract (§8c) as the two above. A copy of an
+// auto-farm unclaimed offer (utils/autofarmOffers rule 8) is the first no-claim
+// row to sell there, so the path is pinned here before a buyer walks it.
+
+function g2gEnv({ rows = [], ncs, set = SET, log = [], af = {}, sendError = null, confirmError = null } = {}) {
+  const arch = archiveSpies();
+  const Listing = fakeListingModel(rows);
+  const DropSet = fakeById(set);
+  const mp = {
+    g2gStartDeliver: spy(async () => ({})),
+    g2gMarkDelivering: spy(async () => ({})),
+    g2gSetDeliveredQty: spy(async () => {
+      log.push("confirm");
+      if (confirmError) throw new Error(confirmError);
+      return {};
+    }),
+    g2gSetQuantity: spy(async () => {
+      log.push("setQuantity");
+      return {};
+    }),
+    g2gDelist: spy(async () => {
+      log.push("delist");
+      return {};
+    }),
+    g2gRelist: spy(async () => {
+      log.push("relist");
+      return {};
+    }),
+  };
+  const chat = {
+    canSend: () => true,
+    sendToBuyer: spy(async () => {
+      log.push("send");
+      if (chat.failWith) throw chat.failWith;
+      return {};
+    }),
+    failWith: sendError,
+  };
+  const eld = {
+    // The real text lives in eldoradoFulfiller (tests/connectFirstCopy.test.js);
+    // what matters here is WHICH guide the row asks for.
+    eldoradoDeliveryCode: (login, password, opts = {}) =>
+      "Login: " + login + "\nPassword: " + password + "\n" + (opts.unclaimed ? "[UNCLAIMED GUIDE]" : "[CLAIMED GUIDE]"),
+    releaseAccounts: spy(async () => 0),
+    claimUnclaimedForGame: spy(async () => []),
+  };
+  const stubs = {
+    "../models/MarketplaceListing": Listing,
+    "../models/BotAccount": fakeById(null),
+    "../models/DropSet": DropSet,
+    "../routes/shopRoutes": { availableAccountsForSet: arch.availableAccountsForSet },
+    "../utils/listedLogins": {
+      loginsOnActiveListings: async () => new Set(),
+      notListed: (a) => a,
+    },
+    "../utils/secretBox": { decrypt: (v) => String(v || "") },
+    "../utils/settings": {
+      getAutoFarm: () => ({ g2gAuto: true, g2gAutoDeliver: true, g2gDeliverDryRun: false, ...af }),
+      getAccountListingSettings: () => ({ enabled: true, autoDeliver: true }),
+    },
+    "../utils/marketplaces": mp,
+    "../utils/g2gChat": chat,
+    "../utils/eldoradoFulfiller": eld,
+    "../utils/g2gFarmService": { deliverFarmOrder: async () => null, closeConfirmedFarmOrders: async () => ({}) },
+    "../utils/telegram": { sendTelegram: async () => {} },
+    "../utils/noclaimStock": ncs || fakeNcs(),
+  };
+  return { stubs, arch, mp, chat, eld, Listing, DropSet };
+}
+
+function g2gNoclaimRow(log, extra = {}) {
+  return row(
+    {
+      _id: "G-NC",
+      marketplace: "g2g",
+      externalId: "G1",
+      title: "Brawlhalla Brawlhalloween Twitch Drops (2 Items)",
+      price: 0.99,
+      noclaimStock: true,
+      set: "SET-NC",
+      requiredDrops: REQUIRED,
+      ...extra,
+    },
+    log,
+  );
+}
+
+function g2gOrder(id, extra = {}) {
+  return {
+    orderItemId: id,
+    offerId: "G1",
+    title: "Brawlhalla Brawlhalloween Twitch Drops (2 Items)",
+    purchasedQty: 1,
+    deliveredQty: 0,
+    buyerId: "buyer-4471",
+    currency: "USD",
+    amount: 0.99,
+    ...extra,
+  };
+}
+
+test("G2G: a no-claim order claims via noclaimStock (mode sold), sends the UNCLAIMED guide in chat, stamps the sale, then confirms", async () => {
+  const log = [];
+  const listing = g2gNoclaimRow(log);
+  const ncs = fakeNcs({ free: [NC1], stock: 3, log });
+  const env = g2gEnv({ rows: [listing], ncs, log });
+
+  const out = await withStubbed("../utils/g2gFulfiller", env.stubs, (g) =>
+    g.deliverOrder(g2gOrder("go-1"), { dryRun: false }),
+  );
+
+  assert.strictEqual(out.delivered, 1, JSON.stringify(out));
+  assert.strictEqual(out.source, "noclaim-set:SET-NC");
+  assert.strictEqual(ncs.calls.claimForSet.length, 1);
+  assert.strictEqual(ncs.calls.claimForSet[0].set, SET);
+  assert.strictEqual(ncs.calls.claimForSet[0].want, 1);
+  assert.deepStrictEqual(ncs.calls.claimForSet[0].opts, {
+    market: "g2g",
+    listingId: "G-NC",
+    orderId: "go-1",
+    mode: "sold",
+    dryRun: false,
+  });
+
+  // The order's anchor is on the row before anything reaches the buyer.
+  assert.ok(log.indexOf("save") > -1 && log.indexOf("save") < log.indexOf("send"), log.join(","));
+  assert.strictEqual(listing.units.length, 1);
+  assert.strictEqual(listing.units[0].contentId, "LED1");
+  assert.strictEqual(listing.units[0].login, "nc_one");
+  assert.strictEqual(listing.units[0].accountId, "", "a no-claim unit has no BotAccount id");
+  assert.strictEqual(listing.units[0].orderId, "go-1");
+  assert.ok(listing.units[0].messagedAt && listing.units[0].deliveredAt);
+
+  // One message, to this buyer, naming the order, with the claimed credential
+  // and the guide for drops that are still unclaimed.
+  assert.strictEqual(env.chat.sendToBuyer.calls.length, 1);
+  const [buyer, message] = env.chat.sendToBuyer.calls[0];
+  assert.strictEqual(buyer, "buyer-4471");
+  assert.match(message, /^Order go-1\n\n/);
+  assert.match(message, /Login: nc_one\nPassword: pw1/);
+  assert.match(message, /\[UNCLAIMED GUIDE\]/);
+  assert.doesNotMatch(message, /\[CLAIMED GUIDE\]/);
+
+  // The sale is recorded after the send and before G2G is told the count.
+  assert.deepStrictEqual(ncs.calls.markSold, [
+    { ids: ["LED1"], opts: { market: "g2g", priceUsd: 0.99, orderId: "go-1", reason: "g2g order go-1" } },
+  ]);
+  assert.ok(log.indexOf("send") < log.indexOf("markSold"), log.join(","));
+  assert.ok(log.indexOf("markSold") < log.indexOf("confirm"), log.join(","));
+  assert.deepStrictEqual(env.mp.g2gSetDeliveredQty.calls, [["go-1", 1]]);
+
+  assert.strictEqual(archiveTouches(env.arch), 0, "no Drop Archive account for a no-claim sale");
+  assert.strictEqual(env.eld.claimUnclaimedForGame.calls.length, 0, "the by-game walk never ran");
+});
+
+test("G2G: two units in one order are two accounts in one message, priced per account", async () => {
+  const listing = g2gNoclaimRow([]);
+  const ncs = fakeNcs({ free: [NC1, NC2], stock: 5 });
+  const env = g2gEnv({ rows: [listing], ncs });
+  const out = await withStubbed("../utils/g2gFulfiller", env.stubs, (g) =>
+    g.deliverOrder(g2gOrder("go-2", { purchasedQty: 2, amount: 1.9 }), { dryRun: false }),
+  );
+  assert.strictEqual(out.delivered, 2, JSON.stringify(out));
+  assert.strictEqual(ncs.calls.claimForSet[0].want, 2);
+  const message = env.chat.sendToBuyer.calls[0][1];
+  assert.match(message, /=== ACCOUNT 1 of 2 ===[^]*nc_one[^]*=== ACCOUNT 2 of 2 ===[^]*nc_two/);
+  assert.deepStrictEqual(ncs.calls.markSold[0].ids, ["LED1", "LED2"]);
+  assert.strictEqual(ncs.calls.markSold[0].opts.priceUsd, 0.95);
+  assert.deepStrictEqual(env.mp.g2gSetDeliveredQty.calls, [["go-2", 2]]);
+});
+
+test("G2G: a chat send that fails keeps the claim on the order — the retry re-reads the SAME account, never a second one", async () => {
+  const listing = g2gNoclaimRow([]);
+  const ncs = fakeNcs({ free: [NC1, NC2], stock: 3 });
+  const env = g2gEnv({ rows: [listing], ncs, sendError: new Error("socket closed") });
+
+  await withStubbed("../utils/g2gFulfiller", env.stubs, async (g) => {
+    const first = await g.deliverOrder(g2gOrder("go-3"), { dryRun: false });
+    assert.match(first.error, /chat send failed: socket closed/);
+    assert.strictEqual(listing.units.length, 1, "the account stays reserved to this order");
+    assert.strictEqual(listing.units[0].orderId, "go-3");
+    assert.strictEqual(listing.units[0].messagedAt, null);
+    assert.strictEqual(ncs.calls.markSold.length, 0, "no sale recorded for a hand-over that did not happen");
+    assert.strictEqual(env.mp.g2gSetDeliveredQty.calls.length, 0, "G2G is never told 'delivered' about an unsent order");
+
+    // Chat is back. The same order comes round again.
+    env.chat.failWith = null;
+    const second = await g.deliverOrder(g2gOrder("go-3"), { dryRun: false });
+    assert.strictEqual(second.delivered, 1, JSON.stringify(second));
+    assert.strictEqual(second.source, "retry-send");
+  });
+
+  assert.strictEqual(ncs.fresh.length, 1, "one account for one order, however many tries");
+  assert.deepStrictEqual(ncs.fresh, [NC1]);
+  assert.strictEqual(listing.units.length, 1);
+  assert.match(env.chat.sendToBuyer.calls[1][1], /Login: nc_one\nPassword: pw1\n\[UNCLAIMED GUIDE\]/);
+  // The resume asked the claim layer for this order's own ledgers.
+  const resume = ncs.calls.claimForSet[1].opts;
+  assert.deepStrictEqual(resume, { market: "g2g", listingId: "G-NC", orderId: "go-3", mode: "sold" });
+  assert.deepStrictEqual(ncs.calls.markSold.map((m) => m.ids), [["LED1"]]);
+});
+
+test("G2G: a refused delivered-count after a verified send is 'awaiting confirm' — sold once, never sent twice", async () => {
+  const listing = g2gNoclaimRow([]);
+  const ncs = fakeNcs({ free: [NC1, NC2], stock: 3 });
+  const env = g2gEnv({ rows: [listing], ncs, confirmError: "G2G delivered qty failed (HTTP 500): Internal server error" });
+
+  await withStubbed("../utils/g2gFulfiller", env.stubs, async (g) => {
+    const first = await g.deliverOrder(g2gOrder("go-4"), { dryRun: false });
+    assert.strictEqual(first.awaitingConfirm, true, JSON.stringify(first));
+    assert.strictEqual(first.sent, 1);
+    assert.ok(listing.units[0].messagedAt, "the buyer has the account");
+    assert.strictEqual(listing.units[0].deliveredAt, null);
+    // The next tick only confirms: no second message, no second claim.
+    const second = await g.deliverOrder(g2gOrder("go-4"), { dryRun: false });
+    assert.strictEqual(second.awaitingConfirm, true);
+    // …and once the owner confirmed it on G2G, the books catch up.
+    const third = await g.deliverOrder(g2gOrder("go-4", { deliveredQty: 1 }), { dryRun: false });
+    assert.strictEqual(third.source, "confirmed-on-g2g");
+  });
+  assert.strictEqual(env.chat.sendToBuyer.calls.length, 1);
+  assert.strictEqual(ncs.calls.claimForSet.length, 1);
+  assert.strictEqual(ncs.calls.markSold.length, 1, "the sale is recorded once, at the send");
+  assert.ok(listing.units[0].deliveredAt);
+});
+
+test("G2G: the kill switch refuses, a shortfall holds the order, a dry run commits nothing", async () => {
+  // Kill switch.
+  let listing = g2gNoclaimRow([]);
+  let ncs = fakeNcs({ enabled: false, free: [NC1] });
+  let env = g2gEnv({ rows: [listing], ncs });
+  let out = await withStubbed("../utils/g2gFulfiller", env.stubs, (g) => g.deliverOrder(g2gOrder("go-5"), { dryRun: false }));
+  assert.match(out.error, /no-claim listing auto-delivery is off/);
+  assert.strictEqual(ncs.calls.claimForSet.length, 0);
+  assert.strictEqual(env.chat.sendToBuyer.calls.length, 0);
+  assert.strictEqual(listing.units.length, 0);
+
+  // Two bought, one account free: never a short shipment.
+  listing = g2gNoclaimRow([]);
+  ncs = fakeNcs({ free: [NC1], stock: 1 });
+  env = g2gEnv({ rows: [listing], ncs });
+  out = await withStubbed("../utils/g2gFulfiller", env.stubs, (g) =>
+    g.deliverOrder(g2gOrder("go-6", { purchasedQty: 2 }), { dryRun: false }),
+  );
+  assert.match(out.error, /only 1 of 2 no-claim account\(s\) claimed/);
+  assert.strictEqual(env.chat.sendToBuyer.calls.length, 0, "nothing is sent short");
+  assert.strictEqual(env.mp.g2gSetDeliveredQty.calls.length, 0);
+  assert.strictEqual(ncs.calls.markSold.length, 0);
+
+  // A rehearsal names what it would send and writes nothing.
+  listing = g2gNoclaimRow([]);
+  ncs = fakeNcs({ free: [NC1], stock: 1 });
+  env = g2gEnv({ rows: [listing], ncs });
+  out = await withStubbed("../utils/g2gFulfiller", env.stubs, (g) => g.deliverOrder(g2gOrder("go-7"), { dryRun: true }));
+  assert.strictEqual(out.dryRun, true);
+  assert.match(out.wouldSend, /nc_one/);
+  assert.strictEqual(ncs.calls.claimForSet[0].opts.dryRun, true);
+  assert.strictEqual(listing.units.length, 0);
+  assert.strictEqual(listing.saves, 0);
+  assert.strictEqual(env.chat.sendToBuyer.calls.length, 0);
+  assert.strictEqual(archiveTouches(env.arch), 0);
+});
+
+test("G2G: the stock sync counts a no-claim row with stockForListing — 0 takes it off sale, stock brings it back, a throw touches nothing", async () => {
+  // In stock: the share is written, nothing else.
+  let listing = g2gNoclaimRow([]);
+  let ncs = fakeNcs({ stock: 4 });
+  let env = g2gEnv({ rows: [listing], ncs });
+  let out = await withStubbed("../utils/g2gFulfiller", env.stubs, (g) => g.syncStock());
+  assert.deepStrictEqual(env.mp.g2gSetQuantity.calls, [["G1", 4]]);
+  assert.strictEqual(env.mp.g2gDelist.calls.length, 0);
+  assert.strictEqual(ncs.calls.stockForListing[0], listing, "the claim layer counts THIS row's share");
+  assert.strictEqual(archiveTouches(env.arch), 0, "never the Drop Archive's count");
+  assert.strictEqual(out.dryRun, false);
+
+  // Empty: off sale, and remembered as paused by the sync.
+  listing = g2gNoclaimRow([]);
+  ncs = fakeNcs({ stock: 0 });
+  env = g2gEnv({ rows: [listing], ncs });
+  await withStubbed("../utils/g2gFulfiller", env.stubs, (g) => g.syncStock());
+  assert.deepStrictEqual(env.mp.g2gDelist.calls, [["G1"]]);
+  assert.strictEqual(env.mp.g2gSetQuantity.calls.length, 0);
+  assert.strictEqual(listing.autoPaused, true);
+
+  // Stock again: the quantity first, then back on sale.
+  listing = g2gNoclaimRow([], { autoPaused: true });
+  ncs = fakeNcs({ stock: 2 });
+  env = g2gEnv({ rows: [listing], ncs });
+  await withStubbed("../utils/g2gFulfiller", env.stubs, (g) => g.syncStock());
+  assert.deepStrictEqual(env.mp.g2gSetQuantity.calls, [["G1", 2]]);
+  assert.deepStrictEqual(env.mp.g2gRelist.calls, [["G1"]]);
+  assert.strictEqual(listing.autoPaused, false);
+
+  // The count could not be read: 0 would take a live offer off sale, so nothing is written.
+  listing = g2gNoclaimRow([]);
+  ncs = fakeNcs({ stockThrows: true });
+  env = g2gEnv({ rows: [listing], ncs });
+  await withStubbed("../utils/g2gFulfiller", env.stubs, (g) => g.syncStock());
+  assert.strictEqual(env.mp.g2gSetQuantity.calls.length + env.mp.g2gDelist.calls.length + env.mp.g2gRelist.calls.length, 0);
+
+  // In a dry run the sync writes nothing either.
+  listing = g2gNoclaimRow([]);
+  ncs = fakeNcs({ stock: 0 });
+  env = g2gEnv({ rows: [listing], ncs, af: { g2gDeliverDryRun: true } });
+  out = await withStubbed("../utils/g2gFulfiller", env.stubs, (g) => g.syncStock());
+  assert.strictEqual(env.mp.g2gDelist.calls.length, 0);
+  assert.deepStrictEqual(out.changes, [{ offer: "G1", wouldSet: 0 }]);
+});
+
+test("G2G: the stock sync never writes to an offer whose row was delisted since the pass read it", async () => {
+  // The auto-lister's sweep (or the owner's Delist button) took the copy down
+  // after the sync had loaded its rows: the stale copy still says "paused by
+  // the sync", and stock is back. Relisting from it would put a delisted offer
+  // on sale with no pass left to watch it.
+  const listing = g2gNoclaimRow([], { autoPaused: true });
+  const ncs = fakeNcs({ stock: 3 });
+  const env = g2gEnv({ rows: [listing], ncs });
+  const seen = [];
+  env.Listing.findOne = async (q) => {
+    seen.push(q);
+    return null; // no ACTIVE row of that id any more
+  };
+  const out = await withStubbed("../utils/g2gFulfiller", env.stubs, (g) => g.syncStock());
+  assert.deepStrictEqual(seen, [{ _id: "G-NC", status: "active" }]);
+  assert.strictEqual(env.mp.g2gSetQuantity.calls.length, 0);
+  assert.strictEqual(env.mp.g2gRelist.calls.length, 0);
+  assert.strictEqual(env.mp.g2gDelist.calls.length, 0);
+  assert.strictEqual(listing.saves, 0);
+  assert.deepStrictEqual(out.changes, [{ offer: "G1", skipped: "no longer active" }]);
+
+  // A re-read that fails proves nothing either way: the row waits a pass.
+  const l2 = g2gNoclaimRow([]);
+  const env2 = g2gEnv({ rows: [l2], ncs: fakeNcs({ stock: 0 }) });
+  env2.Listing.findOne = async () => {
+    throw new Error("mongo blip");
+  };
+  await withStubbed("../utils/g2gFulfiller", env2.stubs, (g) => g.syncStock());
+  assert.strictEqual(env2.mp.g2gDelist.calls.length + env2.mp.g2gSetQuantity.calls.length, 0);
+});

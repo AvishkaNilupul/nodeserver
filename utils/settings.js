@@ -223,6 +223,19 @@ const AUTO_FARM_DEFAULTS = {
   // Most accounts a new offer advertises; the stock sync follows the real
   // stock afterwards.
   autofarmOfferQuantity: 20,
+  // COPIES: a finished offer is also listed on these claim-at-sale markets
+  // (only "g2g" is known), on the SAME set — the stock sync splits the one
+  // shelf between the two offers. [] = none. A copy needs CopyMinHolders free
+  // accounts behind it; at most CopiesPerDay are made a day, one a pass.
+  autofarmOfferCopyMarkets: [],
+  autofarmOfferCopyMinHolders: 6,
+  autofarmOfferCopiesPerDay: 6,
+  // A copy never costs more than the Eldorado offer of the same bundle x this
+  // (rounded down to x.x9), and never under the market's own floor (G2G: $1).
+  autofarmOfferCopyPriceFactor: 1.2,
+  // A copy whose Eldorado offer moved on or came down is taken off sale — also
+  // while autofarmOffers is off. false stops that too.
+  autofarmOfferCopySweep: true,
   // Multi-market auto-listing categories.
   // Plati (Digiseller) cataloguer placement for Twitch-drop accounts:
   //   Digital Goods and Access > Services and social networks > Twitch,

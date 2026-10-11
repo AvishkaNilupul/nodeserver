@@ -277,11 +277,16 @@ function expirySettings() {
 
 // How far ahead a market's offers must already be covered. 0 with the switch
 // off. Eldorado has the rotation to move an offer on to the next bundle, so it
-// can afford to stop a day early; the others only get the safety hour.
+// can afford to stop a day early. So can G2G: its only no-claim offers are the
+// copies utils/autofarmOffers makes of an Eldorado offer, whose text tells the
+// buyer to claim by the moment the Eldorado offer comes off sale — and a buyer
+// who still has to connect a game account needs more than an hour. The others
+// only get the safety hour.
+const FULL_LEAD_MARKETS = ["eldorado", "g2g"];
 function advertiseLeadMs(market, exp = expirySettings()) {
   if (!exp || !exp.on) return 0;
   const m = String(market || "").trim().toLowerCase();
-  return m === "eldorado" ? exp.sellLeadMs : Math.min(exp.sellLeadMs, TECH_LEAD_MS);
+  return FULL_LEAD_MARKETS.includes(m) ? exp.sellLeadMs : Math.min(exp.sellLeadMs, TECH_LEAD_MS);
 }
 
 function sameGameNorm(a, b) {

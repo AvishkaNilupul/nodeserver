@@ -95,6 +95,7 @@ function world(o = {}) {
     unlinked: [],
     telegrams: [],
     events: [],
+    delisted: [],
     reads: { snapshot: 0, durableAt: [] },
   };
   for (const r of o.rows || []) w.rows.push({ _id: oid(), marketplace: "eldorado", noclaimStock: true, status: "active", ...r });
@@ -166,9 +167,13 @@ function world(o = {}) {
           if (w.publishResult instanceof Error) throw w.publishResult;
           return w.publishResult;
         }
-        const row = { _id: oid(), marketplace: market, noclaimStock: true, status: "active", set: ctx.set._id };
+        const row = {
+          _id: oid(), marketplace: market, noclaimStock: true, status: "active", set: ctx.set._id,
+          externalId: "ext-" + w.published.length, createdAt: new Date(o.createdAt || T0),
+          note: "no-claim auto-delivery: an account is claimed when an order lands",
+        };
         w.rows.push(row);
-        return { success: true, id: String(row._id), externalId: "ext-" + w.published.length, url: "https://eldorado/x" };
+        return { success: true, id: String(row._id), externalId: row.externalId, url: "https://eldorado/x", note: row.note };
       },
     }),
     DropSet: {
@@ -185,7 +190,10 @@ function world(o = {}) {
         return { deletedCount: i >= 0 ? 1 : 0 };
       },
       updateOne: async (q, u) => {
-        const doc = w.sets.find((s) => String(s._id) === String(q._id));
+        if (typeof o.onSetUpdate === "function") o.onSetUpdate(q, u, w);
+        const doc = w.sets.find(
+          (s) => String(s._id) === String(q._id) && (q.note === undefined || String(s.note || "") === q.note),
+        );
         if (doc) Object.assign(doc, u.$set || {});
         return { modifiedCount: doc ? 1 : 0 };
       },
@@ -203,9 +211,23 @@ function world(o = {}) {
               if (!q.set.$in.map(String).includes(String(r.set))) return false;
             } else if (q.set && String(r.set) !== String(q.set)) return false;
             if (q.updatedAt && q.updatedAt.$gte && !(new Date(r.updatedAt || 0) >= q.updatedAt.$gte)) return false;
+            if (q.createdAt && q.createdAt.$gte && !(new Date(r.createdAt || 0) >= q.createdAt.$gte)) return false;
             return true;
           }),
         ),
+      updateOne: async (q, u) => {
+        if (o.tagError) throw new Error(o.tagError);
+        const row = w.rows.find((r) => String(r._id) === String(q._id) && (!q.status || r.status === q.status));
+        if (row) Object.assign(row, u.$set || {});
+        return { modifiedCount: row ? 1 : 0 };
+      },
+    },
+    // Rule 8: the games G2G lists, and taking a copy down.
+    g2gCategory: (game) =>
+      (o.g2gGames || ["Brawlhalla"]).includes(game) ? { serviceId: "svc-items", brandId: "brand-" + game.toLowerCase() } : null,
+    delistCopy: async (market, id) => {
+      if (o.delistError) throw new Error(o.delistError);
+      w.delisted.push({ market, id });
     },
     pricing: () => ({ priceListing: () => ({ price: w.enginePrice, basis: "game" }) }),
     pricingEvidence: () => ({ evidenceFor: async () => ({}) }),
@@ -1078,4 +1100,732 @@ test("the pass never throws: a broken snapshot is an error line", async () => {
   const r = await ao.runPass({ deps: w.deps, now: T0 });
   assert.deepStrictEqual(r.errors, ["mongo down"]);
   assert.strictEqual(w.published.length, 0);
+});
+
+// ---------------------------------------------------------------------------
+// Rule 8 — copies on a second claim-at-sale market (G2G)
+// ---------------------------------------------------------------------------
+
+const OWN_NOTE = ao.SET_NOTE + " (utils/autofarmOffers)";
+const G2G_ON = { autofarmOfferCopyMarkets: ["g2g"], g2gAutoDeliver: true, g2gDeliverDryRun: false };
+
+// A world in which the Brawlhalla bundle is already on sale on Eldorado, on a
+// set this lister made, and `n` free accounts hold it.
+function copyWorld(n = 8, o = {}) {
+  const w = world({
+    holdings: cohort("b", n, BRAWL, o.extra || {}).concat(o.more || []),
+    gone: o.gone || ENDED,
+    sets: [{ name: "Brawlhalla set", note: o.note === undefined ? OWN_NOTE : o.note, coverGame: "Brawlhalla", items: asSet(BRAWL), price: 0.99 }].concat(o.sets || []),
+    ...o.world,
+  });
+  w.set = w.sets[0];
+  w.eld = { _id: oid(), marketplace: "eldorado", noclaimStock: true, status: "active", set: w.set._id, externalId: "eld-1", price: 0.99, ...(o.eld || {}) };
+  w.rows.push(w.eld);
+  return w;
+}
+
+test("cfg: copies are off by default, only a known market is kept, and G2G must really be delivering", () => {
+  assert.deepStrictEqual(ao.cfg().copyMarkets, []);
+  autoFarm = { ...autoFarm, autofarmOfferCopyMarkets: ["G2G", "g2g", "ggsel", "digiseller", "playerauctions", ""] };
+  assert.deepStrictEqual(ao.cfg().copyMarkets, ["g2g"], "never a vault market, never Plati");
+  assert.strictEqual(ao.cfg().g2gOn, false);
+  autoFarm = { ...autoFarm, g2gAutoDeliver: true };
+  assert.strictEqual(ao.cfg().g2gOn, false, "the dry-run flag ships on");
+  autoFarm = { ...autoFarm, g2gDeliverDryRun: false };
+  assert.strictEqual(ao.cfg().g2gOn, true);
+  autoFarm = { ...autoFarm, g2gSyncStock: false };
+  assert.strictEqual(ao.cfg().g2gOn, false, "a copy nobody keeps in step with the stock oversells");
+  autoFarm = { ...autoFarm, autofarmOfferCopyMarkets: "g2g" };
+  assert.deepStrictEqual(ao.cfg().copyMarkets, [], "a list, or nothing");
+});
+
+test("ownSet: this lister's sets, and sets grown or rotated out of them — never anyone else's", () => {
+  const a = { _id: "a".repeat(24), note: OWN_NOTE };
+  const grown = { _id: "b".repeat(24), note: "Made 2026-10-11 by the no-claim offer grow: the accounts behind set " + "a".repeat(24) + " (3 Items) now also hold X." };
+  const rotated = { _id: "c".repeat(24), note: "Made 2026-10-12 by the no-claim offer rotation: set " + "b".repeat(24) + " (4 Items) had expired off every account." };
+  const owners = { _id: "d".repeat(24), note: "Overwatch OWCS bundle" };
+  const fromOwners = { _id: "e".repeat(24), note: "Made 2026-10-11 by the no-claim offer grow: the accounts behind set " + "d".repeat(24) + " (6 Items) now also hold Y." };
+  const byId = new Map([a, grown, rotated, owners, fromOwners].map((x) => [x._id, x]));
+  assert.strictEqual(ao.ownSet(a, byId), true);
+  assert.strictEqual(ao.ownSet(grown, byId), true);
+  assert.strictEqual(ao.ownSet(rotated, byId), true, "two steps back");
+  assert.strictEqual(ao.ownSet(owners, byId), false);
+  assert.strictEqual(ao.ownSet(fromOwners, byId), false);
+  // A parent that cannot be read proves nothing.
+  assert.strictEqual(ao.ownSet(grown, new Map()), false);
+  // A note that merely mentions a set is not a lineage.
+  assert.strictEqual(ao.ownSet({ note: "see set " + "a".repeat(24) }, byId), false);
+  assert.strictEqual(ao.ownSet(null, byId), false);
+});
+
+test("a finished offer gets ONE copy on G2G: the same set, G2G's fields, and marked as a copy", async () => {
+  autoFarm = { ...autoFarm, ...G2G_ON };
+  const w = copyWorld(8);
+  const r = await ao.runPass({ deps: w.deps, now: T0 });
+  assert.deepStrictEqual(r.errors, []);
+  assert.strictEqual(r.created.length, 0, "the accounts are on a shelf: no second Eldorado offer");
+  assert.strictEqual(r.copies.length, 1);
+  assert.strictEqual(w.published.length, 1);
+  const p = w.published[0];
+  assert.strictEqual(p.market, "g2g");
+  assert.strictEqual(String(p.set._id), String(w.set._id), "the SAME set: the stock sync splits one shelf");
+  assert.deepStrictEqual(p.body, { g2g: { qty: 8 } });
+  assert.deepStrictEqual(p.cat, { serviceId: "svc-items", brandId: "brand-brawlhalla" });
+  assert.strictEqual(p.priceUsd, 1, "G2G's own floor: an offer under a dollar is refused there");
+  assert.strictEqual(w.set.note, OWN_NOTE, "the record made before the publish is gone again");
+  assert.ok(p.title.length <= 128, "G2G cuts a title at 128");
+  assert.match(p.title, /^Brawlhalla Brawlhalloween Twitch Drops \(3 Items\)/);
+  assert.match(p.description, /claim these before 15 Oct 2026, 08:00 UTC\.$/);
+  assert.strictEqual(w.sets.length, 1, "no new set");
+  const row = w.rows.find((x) => x.marketplace === "g2g");
+  assert.ok(row.note.endsWith(ao.COPY_MARK));
+  assert.strictEqual(r.copies[0].tagged, true);
+  assert.strictEqual(r.copies[0].holders, 8);
+  assert.ok(w.telegrams.some((t) => /ALSO LISTED on G2G/.test(t)));
+  assert.ok(w.events.some((e) => e.action === "autofarm_offer_copied" && e.severity === "info"));
+
+  // The next pass: the set has its copy.
+  const again = await ao.runPass({ deps: w.deps, now: T0 + HOUR });
+  assert.strictEqual(again.copies.length, 0);
+  assert.strictEqual(w.published.length, 1);
+  assert.deepStrictEqual(again.copiesDown, [], "it still has its Eldorado offer");
+});
+
+test("a copy is made only when every condition holds", async () => {
+  const run = async (o = {}, af = {}) => {
+    autoFarm = { autofarmOffers: true, eldoradoAutoDeliver: true, eldoradoDeliverDryRun: false, noClaimGames: ["overwatch", "rainbow six"], ...G2G_ON, ...af };
+    ao.resetMemory();
+    const w = copyWorld(o.n || 8, o);
+    const r = await ao.runPass({ deps: w.deps, now: T0 });
+    return { w, r, n: w.published.filter((p) => p.market === "g2g").length };
+  };
+  assert.strictEqual((await run()).n, 1, "the base case copies");
+
+  // The switch.
+  assert.strictEqual((await run({}, { autofarmOfferCopyMarkets: [] })).n, 0);
+  // G2G not really delivering.
+  let x = await run({}, { g2gDeliverDryRun: true });
+  assert.strictEqual(x.n, 0);
+  assert.strictEqual(x.r.skipped["copy: G2G delivery or its stock sync is off"], 1);
+  // A game G2G does not list (or that nobody mapped): never a guess.
+  x = await run({ world: { g2gGames: [] } });
+  assert.strictEqual(x.n, 0);
+  assert.strictEqual(x.r.skipped["copy: the market does not list this game"], 1);
+  // Too few accounts to share between two offers.
+  x = await run({ n: 5 });
+  assert.strictEqual(x.n, 0);
+  assert.strictEqual(x.r.skipped["copy: too few accounts for a second market"], 1);
+  assert.strictEqual((await run({ n: 5 }, { autofarmOfferCopyMinHolders: 5 })).n, 1);
+  // Still earning: the offer may yet grow, and a copy would be left behind.
+  x = await run({ gone: { Brawlhalloween: T0 + 12 * DAY }, extra: { pendingAt: new Date(T0 - HOUR), pending: [{ game: "Brawlhalla", n: 2 }] } });
+  assert.strictEqual(x.n, 0);
+  assert.strictEqual(x.r.skipped["copy: its accounts are still earning"], 1);
+  // …and copied the moment every account has nothing left to earn.
+  x = await run({ gone: { Brawlhalloween: T0 + 12 * DAY }, extra: { pendingAt: new Date(T0 - HOUR), pending: [] } });
+  assert.strictEqual(x.n, 1);
+  // Not known whether they are still earning (no sweep read since): wait.
+  x = await run({ gone: { Brawlhalloween: T0 + 12 * DAY } });
+  assert.strictEqual(x.n, 0);
+  // About to come off sale: a day's lead, and under a day of selling left.
+  x = await run({ gone: { Brawlhalloween: T0 + 47 * HOUR } });
+  assert.strictEqual(x.n, 0);
+  // The Eldorado offer is paused by the stock sync: nothing to stand beside.
+  assert.strictEqual((await run({ eld: { autoPaused: true } })).n, 0);
+  // …or delisted.
+  assert.strictEqual((await run({ eld: { status: "delisted" } })).n, 0);
+  // A set this lister did not make (the owner's own listing of the game).
+  assert.strictEqual((await run({ note: "my Brawlhalla bundle" })).n, 0);
+  // A set kept as the record of a publish that may be live without a row.
+  assert.strictEqual((await run({ note: OWN_NOTE + " — HOLD: Eldorado publish failed (HTTP 502)" })).n, 0);
+  // The owner's no-claim game, even on a set with this lister's note.
+  x = await run({}, { noClaimGames: ["brawlhalla"] });
+  assert.strictEqual(x.n, 0);
+  assert.strictEqual(x.r.skipped["copy: a no-claim bot farms this game"], 1);
+  // A no-claim bot account that holds the bundle too: not purely auto-farm stock.
+  x = await run({ more: [{ loginLower: "fleet1", login: "fleet1", farm: "", inConfig: true, fresh: true, game: "Overwatch", items: BRAWL.map((i) => ({ ...i })) }] });
+  assert.strictEqual(x.n, 0);
+  assert.strictEqual(x.r.skipped["copy: a no-claim bot account holds this bundle too"], 1);
+  // Accounts that are not free do not count toward the bar.
+  assert.strictEqual((await run({ n: 8, extra: { notFree: "a game is connected" } })).n, 0);
+});
+
+test("a set grown out of this lister's set gets its copy; one grown out of the owner's does not", async () => {
+  autoFarm = { ...autoFarm, ...G2G_ON };
+  const parent = { name: "parent", note: OWN_NOTE, coverGame: "Brawlhalla", items: asSet(BRAWL.slice(0, 2)) };
+  const w = copyWorld(8, { note: "placeholder", sets: [parent] });
+  w.set.note = "Made 2026-10-11 by the no-claim offer grow: the accounts behind set " + String(w.sets[1]._id) + " (2 Items) now also hold Brain Rotted Title.";
+  const r = await ao.runPass({ deps: w.deps, now: T0 });
+  assert.strictEqual(r.copies.length, 1);
+  assert.strictEqual(String(w.published[0].set._id), String(w.set._id));
+
+  ao.resetMemory();
+  const w2 = copyWorld(8, { note: "placeholder", sets: [{ ...parent, note: "the owner's set" }] });
+  w2.set.note = "Made 2026-10-11 by the no-claim offer grow: the accounts behind set " + String(w2.sets[1]._id) + " (2 Items) now also hold Brain Rotted Title.";
+  assert.strictEqual((await ao.runPass({ deps: w2.deps, now: T0 })).copies.length, 0);
+});
+
+test("a set never gets a second copy on a market — whatever became of the first", async () => {
+  autoFarm = { ...autoFarm, ...G2G_ON };
+  for (const status of ["active", "delisted", "sold", "removed"]) {
+    ao.resetMemory();
+    const w = copyWorld(8);
+    w.rows.push({ _id: oid(), marketplace: "g2g", noclaimStock: true, status, set: w.set._id, externalId: "g-old", note: "x" + ao.COPY_MARK, createdAt: new Date(T0 - 3 * DAY) });
+    const r = await ao.runPass({ deps: w.deps, now: T0 });
+    assert.strictEqual(r.copies.length, 0, status);
+    assert.strictEqual(w.published.length, 0, status);
+  }
+});
+
+test("one copy a pass, the most widely held first, and a daily limit", async () => {
+  autoFarm = { ...autoFarm, ...G2G_ON, autofarmOfferCopiesPerDay: 2 };
+  const games = ["Alpha", "Beta", "Gamma"];
+  const holdings = [];
+  const sets = [];
+  const gone = {};
+  games.forEach((g, i) => {
+    const items = [item(g + " Skin", g, g + " Launch")];
+    gone[g + " Launch"] = T0 + 5 * DAY;
+    holdings.push(...cohort(g.toLowerCase(), 6 + i, items));
+    sets.push({ name: g, note: OWN_NOTE, coverGame: g, items: asSet(items) });
+  });
+  const w = world({ holdings, gone, sets, g2gGames: games });
+  for (const s of w.sets) w.rows.push({ _id: oid(), marketplace: "eldorado", noclaimStock: true, status: "active", set: s._id });
+  const first = await ao.runPass({ deps: w.deps, now: T0 });
+  assert.strictEqual(first.copies.length, 1);
+  assert.strictEqual(first.copies[0].game, "Gamma", "eight accounts: the widest shelf first");
+  const second = await ao.runPass({ deps: w.deps, now: T0 + HOUR });
+  assert.strictEqual(second.copies[0].game, "Beta");
+  const third = await ao.runPass({ deps: w.deps, now: T0 + 2 * HOUR });
+  assert.strictEqual(third.copies.length, 0);
+  assert.strictEqual(third.skipped["copy: daily limit reached"], 1);
+  // A restart forgets nothing: the rows themselves say what was made today.
+  ao.resetMemory();
+  assert.strictEqual((await ao.runPass({ deps: w.deps, now: T0 + 3 * HOUR })).copies.length, 0);
+  // Tomorrow there is room again.
+  assert.strictEqual((await ao.runPass({ deps: w.deps, now: T0 + DAY })).copies[0].game, "Alpha");
+});
+
+test("a copy follows its Eldorado offer: when that moves on or comes down, the copy comes down too", async () => {
+  autoFarm = { ...autoFarm, ...G2G_ON };
+  const w = copyWorld(8);
+  await ao.runPass({ deps: w.deps, now: T0 });
+  const copy = w.rows.find((x) => x.marketplace === "g2g");
+  assert.strictEqual(copy.status, "active");
+  // A row the owner published by hand on the same set: no mark, never touched.
+  const manual = { _id: oid(), marketplace: "g2g", noclaimStock: true, status: "active", set: w.set._id, externalId: "g-manual", note: "my own listing" };
+  w.rows.push(manual);
+
+  // While the Eldorado offer stands on the set — even paused by the stock sync — nothing moves.
+  w.eld.autoPaused = true;
+  assert.deepStrictEqual((await ao.runPass({ deps: w.deps, now: T0 + HOUR })).copiesDown, []);
+  assert.deepStrictEqual(w.delisted, []);
+
+  // The grow pass moves the Eldorado offer on to a bigger set.
+  w.eld.autoPaused = false;
+  w.eld.set = oid();
+  const r = await ao.runPass({ deps: w.deps, now: T0 + 2 * HOUR });
+  assert.deepStrictEqual(r.copiesDown, [{ market: "g2g", externalId: copy.externalId, title: "" }]);
+  assert.deepStrictEqual(w.delisted, [{ market: "g2g", id: copy.externalId }]);
+  assert.strictEqual(copy.status, "delisted");
+  assert.match(copy.note, /taken down 2026-10-11 10:00Z: its Eldorado offer moved on$/);
+  assert.strictEqual(manual.status, "active", "the owner's own row is not this lister's to take down");
+  assert.ok(w.events.some((e) => e.action === "autofarm_copy_down"));
+  // Once: a delisted copy is not swept again.
+  assert.deepStrictEqual((await ao.runPass({ deps: w.deps, now: T0 + 3 * HOUR })).copiesDown, []);
+  assert.strictEqual(w.delisted.length, 1);
+});
+
+test("a copy that cannot be taken down stays on the books and is tried again; copies are swept even with the copy switch off", async () => {
+  autoFarm = { ...autoFarm, ...G2G_ON };
+  const w = copyWorld(8, { world: { delistError: "G2G update offer failed (HTTP 503)" } });
+  await ao.runPass({ deps: w.deps, now: T0 });
+  const copy = w.rows.find((x) => x.marketplace === "g2g");
+  w.eld.status = "delisted";
+  const r = await ao.runPass({ deps: w.deps, now: T0 + HOUR });
+  assert.deepStrictEqual(r.copiesDown, []);
+  assert.strictEqual(copy.status, "active", "still on sale: the row must keep saying so");
+
+  // The owner turns copies off: no new ones, but the one left behind still comes down.
+  autoFarm = { ...autoFarm, autofarmOfferCopyMarkets: [] };
+  w.deps.delistCopy = async (market, id) => {
+    w.delisted.push({ market, id });
+  };
+  const r2 = await ao.runPass({ deps: w.deps, now: T0 + 2 * HOUR });
+  assert.strictEqual(r2.copiesDown.length, 1);
+  assert.strictEqual(copy.status, "delisted");
+});
+
+test("a failed copy: a clean refusal rests an hour, an unlistable game a week, and nothing is marked", async () => {
+  autoFarm = { ...autoFarm, ...G2G_ON };
+  const w = copyWorld(8, { world: { publishResult: { success: false, message: "Could not count the no-claim stock right now: x" } } });
+  const r = await ao.runPass({ deps: w.deps, now: T0 });
+  assert.strictEqual(r.copies.length, 0);
+  assert.match(r.errors[0], /^Brawlhalla \(g2g copy\): Could not count/);
+  assert.strictEqual(w.set.note, OWN_NOTE, "a clean failure leaves the set as it was");
+  assert.strictEqual(w.telegrams.length, 0);
+  // Not again inside the hour…
+  const soon = await ao.runPass({ deps: w.deps, now: T0 + 30 * 60 * 1000 });
+  assert.strictEqual(w.published.length, 1);
+  assert.strictEqual(soon.skipped["copy: waiting after a failed publish"], 1);
+  // …then again, three times a day at most.
+  await ao.runPass({ deps: w.deps, now: T0 + 61 * 60 * 1000 });
+  await ao.runPass({ deps: w.deps, now: T0 + 122 * 60 * 1000 });
+  assert.strictEqual(w.published.length, 3);
+  const capped = await ao.runPass({ deps: w.deps, now: T0 + 190 * 60 * 1000 });
+  assert.strictEqual(w.published.length, 3);
+  assert.strictEqual(capped.skipped["copy: failed 3 times today"], 1);
+
+  ao.resetMemory();
+  const u = copyWorld(8, { world: { publishResult: { success: false, message: "G2G needs Server for this game and we have no offer of our own to copy it from. List one brand offer by hand on g2g.com first" } } });
+  await ao.runPass({ deps: u.deps, now: T0 });
+  await ao.runPass({ deps: u.deps, now: T0 + 2 * DAY });
+  assert.strictEqual(u.published.length, 1, "asking again tomorrow changes nothing");
+  await ao.runPass({ deps: u.deps, now: T0 + 8 * DAY - HOUR });
+  assert.strictEqual(u.published.length, 1);
+});
+
+test("a copy that may be live without a row is never tried again, and the owner is told once", async () => {
+  autoFarm = { ...autoFarm, ...G2G_ON };
+  for (const [message, kind] of [
+    ["G2G publish offer failed (HTTP 502): Bad gateway", /may have gone live without being recorded — check g2g/],
+    ["G2G publish: offer 123 did not read back as a live offer", /may have gone live without being recorded/],
+    ["published on G2G but the row could not be saved — delist it by hand: 123", /went live but was not recorded — take it down by hand/],
+  ]) {
+    ao.resetMemory();
+    const w = copyWorld(8, { world: { publishResult: { success: false, message } } });
+    const r = await ao.runPass({ deps: w.deps, now: T0 });
+    assert.strictEqual(r.copies.length, 0);
+    assert.ok(w.set.note.startsWith(OWN_NOTE + " — HOLD: g2g copy 2026-10-11 08:00Z: "), w.set.note);
+    assert.strictEqual(w.telegrams.length, 1);
+    assert.match(w.telegrams[0], kind);
+    // Not after a day, not after a restart: the set's own note says so.
+    ao.resetMemory();
+    await ao.runPass({ deps: w.deps, now: T0 + 2 * DAY });
+    assert.strictEqual(w.published.length, 1, message);
+    assert.strictEqual(w.telegrams.length, 1);
+    // And the Eldorado offer of the set is untouched.
+    assert.strictEqual(w.eld.status, "active");
+  }
+});
+
+test("a copy whose row could not be marked is reported, and a dry run writes nothing", async () => {
+  autoFarm = { ...autoFarm, ...G2G_ON };
+  const w = copyWorld(8, { world: { tagError: "mongo write failed" } });
+  const r = await ao.runPass({ deps: w.deps, now: T0 });
+  assert.strictEqual(r.copies.length, 1);
+  assert.strictEqual(r.copies[0].tagged, false);
+  assert.ok(w.events.some((e) => e.action === "autofarm_offer_copied" && e.severity === "warn" && /NOT marked as a copy/.test(e.detail)));
+
+  ao.resetMemory();
+  const d = copyWorld(8);
+  const dry = await ao.runPass({ deps: d.deps, now: T0, dryRun: true });
+  assert.strictEqual(dry.copies.length, 1);
+  assert.strictEqual(dry.copies[0].dryRun, true);
+  assert.strictEqual(dry.copies[0].market, "g2g");
+  assert.strictEqual(d.published.length, 0);
+  assert.strictEqual(d.rows.filter((x) => x.marketplace === "g2g").length, 0);
+});
+
+test("copies run on their own feet: a failure in them never undoes the Eldorado pass, and the pass still never throws", async () => {
+  autoFarm = { ...autoFarm, ...G2G_ON };
+  const w = world({ holdings: cohort("b", 8, BRAWL), gone: ENDED });
+  const realFind = w.deps.MarketplaceListing.find;
+  let calls = 0;
+  w.deps.MarketplaceListing.find = (q) => {
+    // The copy sweep's read (active rows on the copy markets alone) fails.
+    if (q.marketplace && q.marketplace.$in && q.marketplace.$in.join() === ao.COPY_MARKETS.join() && q.status === "active") {
+      calls++;
+      return { lean: async () => { throw new Error("mongo blip"); } };
+    }
+    return realFind(q);
+  };
+  const r = await ao.runPass({ deps: w.deps, now: T0 });
+  assert.strictEqual(r.created.length, 1, "the Eldorado offer was made");
+  assert.strictEqual(calls, 1);
+  assert.deepStrictEqual(r.errors, ["copy sweep: mongo blip"]);
+
+  // The copy plan failing is an error line too, after the Eldorado pass.
+  ao.resetMemory();
+  const w2 = world({ holdings: cohort("b", 8, BRAWL), gone: ENDED });
+  const find2 = w2.deps.MarketplaceListing.find;
+  w2.deps.MarketplaceListing.find = (q) => {
+    if (q.marketplace === "eldorado" && q.status === "active" && !q.set) {
+      return { lean: async () => { throw new Error("plan blip"); } };
+    }
+    return find2(q);
+  };
+  const r2 = await ao.runPass({ deps: w2.deps, now: T0 });
+  assert.strictEqual(r2.created.length, 1);
+  assert.deepStrictEqual(r2.errors, ["copies: plan blip"]);
+});
+
+// --- what the independent review found, pinned -------------------------------
+
+test("copyPrice: never above the Eldorado offer times the factor, never under the market's own floor", () => {
+  const c = { priceFactor: 0.85, minPrice: 0.75, maxPrice: 1.49, copyPriceFactor: 1.2 };
+  // The engine wants $1.49 for a bundle that costs $0.99 on Eldorado: $1.09.
+  assert.strictEqual(ao.copyPrice(1.81, 0.99, "g2g", c), 1.09);
+  // The engine's own figure when it is the lower one.
+  assert.strictEqual(ao.copyPrice(3.21, 1.39, "g2g", c), 1.49);
+  assert.strictEqual(ao.copyPrice(1.34, 1.39, "g2g", c), 1.09);
+  // G2G refuses an offer under a dollar: a $0.75 bundle is $1.00 there, not $0.89.
+  assert.strictEqual(ao.copyPrice(1.13, 0.75, "g2g", c), 1);
+  assert.strictEqual(ao.copyPrice(0, 0.75, "g2g", c), 1);
+  // No Eldorado price on record: the engine's figure, still over the floor.
+  assert.strictEqual(ao.copyPrice(1.25, 0, "g2g", c), 1);
+  assert.strictEqual(ao.copyPrice(1.62, undefined, "g2g", c), 1.29);
+  // A market with no floor of its own keeps the lister's.
+  assert.strictEqual(ao.copyPrice(1.13, 0.75, "elsewhere", c), 0.89);
+});
+
+test("holdNote: the record survives however long the set's note is", () => {
+  const long = "Made 2026-10-11 by the no-claim offer grow: " + "x".repeat(700);
+  const n = ao.holdNote(long, "g2g copy: G2G publish offer failed (HTTP 502): Bad gateway");
+  assert.ok(n.length <= 600);
+  assert.ok(n.includes(" — HOLD: g2g copy: G2G publish offer failed (HTTP 502)"));
+  assert.ok(n.startsWith("Made 2026-10-11 by the no-claim offer grow: "));
+  // A very long message is cut, the mark is not.
+  const m = ao.holdNote("short", "y".repeat(900));
+  assert.ok(m.startsWith("short — HOLD: y"));
+  assert.ok(m.length <= 600);
+});
+
+test("the price of a copy follows its Eldorado offer", async () => {
+  autoFarm = { ...autoFarm, ...G2G_ON };
+  let w = copyWorld(8, { world: { enginePrice: 1.81 } });
+  await ao.runPass({ deps: w.deps, now: T0 });
+  assert.strictEqual(w.published[0].priceUsd, 1.09, "$0.99 on Eldorado, never $1.49 beside it");
+  ao.resetMemory();
+  w = copyWorld(8, { eld: { price: 1.39 }, world: { enginePrice: 3.21 } });
+  await ao.runPass({ deps: w.deps, now: T0 });
+  assert.strictEqual(w.published[0].priceUsd, 1.49);
+  // Two Eldorado offers on the set: the cheaper one decides.
+  ao.resetMemory();
+  w = copyWorld(8, { eld: { price: 1.39 }, world: { enginePrice: 3.21 } });
+  w.rows.push({ _id: oid(), marketplace: "eldorado", noclaimStock: true, status: "active", set: w.set._id, price: 0.99 });
+  await ao.runPass({ deps: w.deps, now: T0 });
+  assert.strictEqual(w.published[0].priceUsd, 1.09);
+});
+
+test("one attempt a pass even when it fails — five sets are never five refusals in one breath", async () => {
+  autoFarm = { ...autoFarm, ...G2G_ON };
+  const games = ["Alpha", "Beta", "Gamma", "Delta", "Epsilon"];
+  const holdings = [];
+  const sets = [];
+  const gone = {};
+  for (const g of games) {
+    const items = [item(g + " Skin", g, g + " Launch")];
+    gone[g + " Launch"] = T0 + 5 * DAY;
+    holdings.push(...cohort(g.toLowerCase(), 7, items));
+    sets.push({ name: g, note: OWN_NOTE, coverGame: g, items: asSet(items) });
+  }
+  const w = world({ holdings, gone, sets, g2gGames: games, publishResult: { success: false, message: "G2G publish offer failed (HTTP 400): title is invalid" } });
+  for (const s of w.sets) w.rows.push({ _id: oid(), marketplace: "eldorado", noclaimStock: true, status: "active", set: s._id, price: 0.99 });
+  const r = await ao.runPass({ deps: w.deps, now: T0 });
+  assert.strictEqual(w.published.length, 1, "one try, then the pass is over");
+  assert.strictEqual(r.errors.length, 1);
+  // A plain refusal (4xx) did not land: nothing is held, nobody is paged.
+  assert.strictEqual(w.telegrams.length, 0);
+  assert.ok(w.sets.every((s) => s.note === OWN_NOTE));
+  // The next pass moves on to the next set.
+  await ao.runPass({ deps: w.deps, now: T0 + 10 * 60 * 1000 });
+  assert.strictEqual(w.published.length, 2);
+  assert.notStrictEqual(String(w.published[0].set._id), String(w.published[1].set._id));
+});
+
+test("what counts as 'may be live': once the write was sent, everything but a plain 4xx refusal", async () => {
+  autoFarm = { ...autoFarm, ...G2G_ON };
+  const held = [
+    "G2G publish offer failed (HTTP 502): Bad gateway",
+    "G2G publish offer failed (HTTP 504)",
+    "G2G publish offer failed: timeout of 30000ms exceeded",
+    "G2G publish offer failed: socket hang up",
+    "G2G publish offer failed: read ECONNRESET",
+    // G2G answered 200 and the body broke off: the write landed.
+    "G2G publish offer failed (HTTP 200): stream has been aborted",
+    // An error reported INSIDE a 200 does not say which side failed.
+    "G2G publish offer failed: Internal server error",
+    "G2G publish offer failed: code 5003",
+    "G2G publish offer failed: Missing mandatory parameter: currency",
+    "G2G publish: offer 9f3 did not read back as a live offer",
+    "published on G2G but the row could not be saved — delist it by hand: 9f3",
+  ];
+  const clean = [
+    "G2G publish offer failed (HTTP 400): title is invalid",
+    "G2G publish offer failed (HTTP 422): unit_price below the minimum; timeout window",
+    "G2G publish offer failed (HTTP 429): Too many requests",
+    "G2G publish offer failed (HTTP 401): Unauthorized",
+    "G2G's minimum price is 1.00",
+    "G2G create offer failed (HTTP 502): Bad gateway", // the shell: nothing is on sale yet
+    "G2G needs Server for this game and we have no offer of our own to copy it from.",
+    "Out of stock — no free no-claim account holds this whole bundle right now",
+  ];
+  for (const message of held) {
+    ao.resetMemory();
+    const w = copyWorld(8, { world: { publishResult: { success: false, message } } });
+    await ao.runPass({ deps: w.deps, now: T0 });
+    const rec = ao.copyRecord(w.set.note);
+    assert.ok(rec && rec.market === "g2g" && rec.at === T0 && !rec.started, "held: " + message + " | " + w.set.note);
+    assert.strictEqual(w.telegrams.length, 1, message);
+  }
+  for (const message of clean) {
+    ao.resetMemory();
+    const w = copyWorld(8, { world: { publishResult: { success: false, message } } });
+    await ao.runPass({ deps: w.deps, now: T0 });
+    assert.strictEqual(w.set.note, OWN_NOTE, "clean: " + message);
+    assert.strictEqual(w.telegrams.length, 0, message);
+  }
+});
+
+test("after a copy that may be live, no other copy is tried for six hours", async () => {
+  autoFarm = { ...autoFarm, ...G2G_ON };
+  const games = ["Alpha", "Beta"];
+  const holdings = [];
+  const sets = [];
+  const gone = {};
+  for (const g of games) {
+    const items = [item(g + " Skin", g, g + " Launch")];
+    gone[g + " Launch"] = T0 + 5 * DAY;
+    holdings.push(...cohort(g.toLowerCase(), 7, items));
+    sets.push({ name: g, note: OWN_NOTE, coverGame: g, items: asSet(items) });
+  }
+  const w = world({ holdings, gone, sets, g2gGames: games, publishResult: { success: false, message: "G2G publish offer failed (HTTP 502): Bad gateway" } });
+  for (const s of w.sets) w.rows.push({ _id: oid(), marketplace: "eldorado", noclaimStock: true, status: "active", set: s._id, price: 0.99 });
+  await ao.runPass({ deps: w.deps, now: T0 });
+  assert.strictEqual(w.published.length, 1);
+  assert.strictEqual(w.telegrams.length, 1);
+  const soon = await ao.runPass({ deps: w.deps, now: T0 + HOUR });
+  assert.strictEqual(w.published.length, 1, "the other set waits too");
+  assert.strictEqual(soon.skipped["copy: resting after a publish that may be live"], 1);
+  // A restart forgets nothing: the record on the set carries its own time.
+  ao.resetMemory();
+  const restarted = await ao.runPass({ deps: w.deps, now: T0 + 2 * HOUR });
+  assert.strictEqual(w.published.length, 1);
+  assert.strictEqual(restarted.skipped["copy: resting after a publish that may be live"], 1);
+  // Six hours on, the other set is tried (the held one never again).
+  w.publishResult = null;
+  ao.resetMemory();
+  const later = await ao.runPass({ deps: w.deps, now: T0 + 6 * HOUR + 60 * 1000 });
+  assert.strictEqual(later.copies.length, 1);
+  assert.strictEqual(w.published.length, 2);
+  assert.notStrictEqual(String(w.published[0].set._id), String(w.published[1].set._id));
+  assert.strictEqual(later.skipped["copy: an earlier copy of this bundle may be live — left to the owner"], 1);
+});
+
+test("a publish that may be live counts toward the day's copies — the limit bounds attempts, not only successes", async () => {
+  autoFarm = { ...autoFarm, ...G2G_ON, autofarmOfferCopiesPerDay: 1 };
+  const games = ["Alpha", "Beta", "Gamma"];
+  const holdings = [];
+  const sets = [];
+  const gone = {};
+  for (const g of games) {
+    const items = [item(g + " Skin", g, g + " Launch")];
+    gone[g + " Launch"] = T0 + 5 * DAY;
+    holdings.push(...cohort(g.toLowerCase(), 7, items));
+    sets.push({ name: g, note: OWN_NOTE, coverGame: g, items: asSet(items) });
+  }
+  const w = world({ holdings, gone, sets, g2gGames: games, publishResult: { success: false, message: "G2G publish offer failed (HTTP 502): Bad gateway" } });
+  for (const s of w.sets) w.rows.push({ _id: oid(), marketplace: "eldorado", noclaimStock: true, status: "active", set: s._id, price: 0.99 });
+  // Three passes with a restart between each: one attempt, one page.
+  for (let i = 0; i < 3; i++) {
+    ao.resetMemory();
+    await ao.runPass({ deps: w.deps, now: T0 + i * 10 * 60 * 1000 });
+  }
+  assert.strictEqual(w.published.length, 1);
+  assert.strictEqual(w.telegrams.length, 1);
+  // Past the six hours, still the same day: the day's one copy is spent.
+  ao.resetMemory();
+  const later = await ao.runPass({ deps: w.deps, now: T0 + 7 * HOUR });
+  assert.strictEqual(w.published.length, 1);
+  assert.strictEqual(later.skipped["copy: daily limit reached"], 1);
+  // Tomorrow the next set is tried.
+  ao.resetMemory();
+  await ao.runPass({ deps: w.deps, now: T0 + DAY });
+  assert.strictEqual(w.published.length, 2);
+});
+
+test("a hold is inherited: a set grown out of one whose copy may be live gets no copy of its own", async () => {
+  autoFarm = { ...autoFarm, ...G2G_ON };
+  const parent = { name: "parent", note: OWN_NOTE + " — HOLD: g2g copy 2026-10-09 10:00Z: G2G publish offer failed (HTTP 502): Bad gateway", coverGame: "Brawlhalla", items: asSet(BRAWL.slice(0, 2)) };
+  const w = copyWorld(8, { note: "placeholder", sets: [parent] });
+  w.set.note = "Made 2026-10-11 by the no-claim offer grow: the accounts behind set " + String(w.sets[1]._id) + " (2 Items) now also hold Brain Rotted Title.";
+  const r = await ao.runPass({ deps: w.deps, now: T0 });
+  assert.strictEqual(r.copies.length, 0);
+  assert.strictEqual(w.published.length, 0);
+  assert.strictEqual(r.skipped["copy: an earlier copy of this bundle may be live — left to the owner"], 1);
+  // An Eldorado-side hold on the parent says nothing about G2G.
+  ao.resetMemory();
+  const w2 = copyWorld(8, { note: "placeholder", sets: [{ ...parent, note: OWN_NOTE + " — HOLD: Eldorado publish failed (HTTP 502)" }] });
+  w2.set.note = "Made 2026-10-11 by the no-claim offer grow: the accounts behind set " + String(w2.sets[1]._id) + " (2 Items) now also hold Brain Rotted Title.";
+  assert.strictEqual((await ao.runPass({ deps: w2.deps, now: T0 })).copies.length, 1);
+});
+
+test("the sweep stops at the first take-down the market refuses, and takes at most two a pass", async () => {
+  autoFarm = { ...autoFarm, ...G2G_ON };
+  const mk = (o = {}) => {
+    const w = world({ holdings: [], gone: {}, ...o });
+    for (let i = 0; i < 5; i++) {
+      w.rows.push({ _id: oid(), marketplace: "g2g", noclaimStock: true, status: "active", set: oid(), externalId: "left-" + i, note: "x" + ao.COPY_MARK });
+    }
+    return w;
+  };
+  // G2G is not answering: one call, not five 30-second waits.
+  const bad = mk({ delistError: "G2G update offer failed: timeout of 30000ms exceeded" });
+  let calls = 0;
+  bad.deps.delistCopy = async () => {
+    calls++;
+    throw new Error("G2G update offer failed: timeout of 30000ms exceeded");
+  };
+  const r = await ao.runPass({ deps: bad.deps, now: T0 });
+  assert.strictEqual(calls, 1);
+  assert.deepStrictEqual(r.copiesDown, []);
+  assert.ok(bad.rows.every((x) => x.status === "active"));
+  // Answering: two a pass.
+  const ok = mk();
+  const r1 = await ao.runPass({ deps: ok.deps, now: T0 });
+  assert.strictEqual(r1.copiesDown.length, 2);
+  const r2 = await ao.runPass({ deps: ok.deps, now: T0 + 10 * 60 * 1000 });
+  assert.strictEqual(r2.copiesDown.length, 2);
+  assert.strictEqual(ok.rows.filter((x) => x.status === "delisted").length, 4);
+});
+
+test("the copy's record is on the set BEFORE the publish, and a set that changed meanwhile is not copied", async () => {
+  autoFarm = { ...autoFarm, ...G2G_ON };
+  let during = "";
+  const w = copyWorld(8, { world: { onPublish: (ctx, world) => { during = world.sets[0].note; } } });
+  await ao.runPass({ deps: w.deps, now: T0 });
+  assert.strictEqual(during, OWN_NOTE + " — HOLD: g2g copy 2026-10-11 08:00Z: publish started and never finished — check g2g for a stray offer");
+  assert.strictEqual(w.set.note, OWN_NOTE, "and comes off once the publish has answered");
+
+  // A process that dies mid-publish leaves the record: a restart copies nothing…
+  ao.resetMemory();
+  const dead = copyWorld(8);
+  dead.set.note = during;
+  const r = await ao.runPass({ deps: dead.deps, now: T0 + 60 * 1000 });
+  assert.strictEqual(r.copies.length, 0);
+  assert.strictEqual(dead.published.length, 0);
+  assert.strictEqual(dead.telegrams.length, 0, "a publish can take a minute: nobody is paged yet");
+  // …and once it has plainly not finished, the owner is told — once.
+  ao.resetMemory();
+  await ao.runPass({ deps: dead.deps, now: T0 + 11 * 60 * 1000 });
+  assert.strictEqual(dead.telegrams.length, 1);
+  assert.match(dead.telegrams[0], /a g2g publish of "Brawlhalla set" started at 2026-10-11 08:00Z and never finished/);
+  assert.ok(dead.events.some((e) => e.action === "autofarm_copy_unfinished" && e.severity === "error"));
+  assert.match(dead.set.note, / — HOLD: g2g copy 2026-10-11 08:00Z: publish never finished \(owner told\) — check g2g for a stray offer$/);
+  ao.resetMemory();
+  await ao.runPass({ deps: dead.deps, now: T0 + 30 * 60 * 1000 });
+  await ao.runPass({ deps: dead.deps, now: T0 + 2 * DAY });
+  assert.strictEqual(dead.telegrams.length, 1, "told once, whatever restarts in between");
+  assert.strictEqual(dead.published.length, 0, "and the set is never copied by itself");
+
+  // Two passes at once: the note the plan read is no longer the note on the set.
+  ao.resetMemory();
+  const race = copyWorld(8, { world: { onSetUpdate: (q, u, world) => { if (q.note !== undefined && !race.raced) { race.raced = true; world.sets[0].note = OWN_NOTE + " (touched)"; } } } });
+  const rr = await ao.runPass({ deps: race.deps, now: T0 });
+  assert.strictEqual(race.published.length, 0, "nothing reaches the market");
+  assert.match(rr.errors[0], /the set changed while its copy was being prepared/);
+  assert.strictEqual(race.telegrams.length, 0);
+
+  // A clean failure takes the record off again.
+  ao.resetMemory();
+  const f = copyWorld(8, { world: { publishResult: { success: false, message: "G2G publish offer failed (HTTP 400): nope" } } });
+  await ao.runPass({ deps: f.deps, now: T0 });
+  assert.strictEqual(f.set.note, OWN_NOTE);
+});
+
+test("a held copy on a set with a very long note still leaves its record", async () => {
+  autoFarm = { ...autoFarm, ...G2G_ON };
+  const parent = { name: "parent", note: OWN_NOTE, coverGame: "Brawlhalla", items: asSet(BRAWL.slice(0, 2)) };
+  const w = copyWorld(8, { note: "placeholder", sets: [parent], world: { publishResult: { success: false, message: "G2G publish offer failed (HTTP 502): Bad gateway" } } });
+  w.set.note = "Made 2026-10-11 by the no-claim offer grow: the accounts behind set " + String(w.sets[1]._id) + " (" + "A + ".repeat(170) + "Z) now also hold Brain Rotted Title.";
+  assert.ok(w.set.note.length > 700);
+  await ao.runPass({ deps: w.deps, now: T0 });
+  assert.ok(w.set.note.length <= 600);
+  assert.ok(w.set.note.includes(" — HOLD: g2g copy 2026-10-11 08:00Z: G2G publish offer failed (HTTP 502)"));
+  // …and it still reads as a set of this lister's family, held.
+  ao.resetMemory();
+  await ao.runPass({ deps: w.deps, now: T0 + 2 * DAY });
+  assert.strictEqual(w.published.length, 1);
+});
+
+test("the sweep does not ask whether the lister is on — only its own switch stops it", async () => {
+  autoFarm = { ...autoFarm, ...G2G_ON };
+  const mk = async (af) => {
+    autoFarm = { autofarmOffers: true, eldoradoAutoDeliver: true, eldoradoDeliverDryRun: false, noClaimGames: [], ...G2G_ON };
+    ao.resetMemory();
+    const w = copyWorld(8);
+    await ao.runPass({ deps: w.deps, now: T0 });
+    const copy = w.rows.find((x) => x.marketplace === "g2g");
+    w.eld.set = oid(); // the Eldorado offer grew on to another set
+    autoFarm = { ...autoFarm, ...af };
+    const r = await ao.runPass({ deps: w.deps, now: T0 + HOUR });
+    return { r, copy, w };
+  };
+  // The lister switched off.
+  let x = await mk({ autofarmOffers: false });
+  assert.strictEqual(x.r.off, true);
+  assert.strictEqual(x.copy.status, "delisted");
+  assert.strictEqual(x.r.copiesDown.length, 1);
+  // Eldorado delivery in dry-run.
+  x = await mk({ eldoradoDeliverDryRun: true });
+  assert.strictEqual(x.copy.status, "delisted");
+  // No-claim delivery off.
+  autoFarm = { autofarmOffers: true, eldoradoAutoDeliver: true, eldoradoDeliverDryRun: false, noClaimGames: [], ...G2G_ON };
+  ao.resetMemory();
+  const w = copyWorld(8);
+  await ao.runPass({ deps: w.deps, now: T0 });
+  const copy = w.rows.find((r) => r.marketplace === "g2g");
+  w.eld.set = oid();
+  w.delivery = false;
+  const off = await ao.runPass({ deps: w.deps, now: T0 + HOUR });
+  assert.strictEqual(off.off, true);
+  assert.strictEqual(copy.status, "delisted");
+  // The sweep's own switch.
+  x = await mk({ autofarmOfferCopySweep: false });
+  assert.strictEqual(x.copy.status, "active");
+  assert.deepStrictEqual(x.w.delisted, []);
+  // A dry run takes nothing down.
+  autoFarm = { autofarmOffers: true, eldoradoAutoDeliver: true, eldoradoDeliverDryRun: false, noClaimGames: [], ...G2G_ON };
+  ao.resetMemory();
+  const d = copyWorld(8);
+  await ao.runPass({ deps: d.deps, now: T0 });
+  d.eld.set = oid();
+  await ao.runPass({ deps: d.deps, now: T0 + HOUR, dryRun: true });
+  assert.deepStrictEqual(d.delisted, []);
+});
+
+test("a copy somebody else took down rests the game for two weeks; one the sweep took down does not", async () => {
+  autoFarm = { ...autoFarm, ...G2G_ON };
+  // The owner delisted the copy of an EARLIER Brawlhalla set by hand; the Eldorado offer has since grown on to this one.
+  const old = { name: "old", note: OWN_NOTE, coverGame: "Brawlhalla", items: asSet(BRAWL.slice(0, 2)) };
+  // A campaign that runs for weeks yet, and accounts with nothing left to earn.
+  const w = copyWorld(8, { sets: [old], gone: { Brawlhalloween: T0 + 60 * DAY }, extra: { pendingAt: new Date(T0 - HOUR), pending: [] } });
+  const gone = { _id: oid(), marketplace: "g2g", noclaimStock: true, status: "delisted", set: w.sets[1]._id, externalId: "g-old", note: "no-claim auto-delivery" + ao.COPY_MARK, updatedAt: new Date(T0 - 3 * DAY) };
+  w.rows.push(gone);
+  const r = await ao.runPass({ deps: w.deps, now: T0 });
+  assert.strictEqual(r.copies.length, 0);
+  assert.strictEqual(r.skipped["copy: a copy of this game was taken down lately — left to the owner"], 1);
+  // Ten days on (thirteen since the take-down): still the owner's call.
+  ao.resetMemory();
+  assert.strictEqual((await ao.runPass({ deps: w.deps, now: T0 + 10 * DAY })).copies.length, 0);
+  // After the fortnight it is this lister's again.
+  ao.resetMemory();
+  const later = await ao.runPass({ deps: w.deps, now: T0 + 12 * DAY });
+  assert.strictEqual(later.copies.length, 1, JSON.stringify(later.skipped));
+  // A copy whose set is gone still names its game in its title.
+  ao.resetMemory();
+  const w2 = copyWorld(8);
+  w2.rows.push({ _id: oid(), marketplace: "g2g", noclaimStock: true, status: "delisted", set: oid(), externalId: "g-x", title: "Brawlhalla Twitch Drops (2 Items)", note: "x" + ao.COPY_MARK, updatedAt: new Date(T0 - DAY) });
+  assert.strictEqual((await ao.runPass({ deps: w2.deps, now: T0 })).copies.length, 0);
+});
+
+test("…and the sweep's own take-down never rests a game", async () => {
+  autoFarm = { ...autoFarm, ...G2G_ON };
+  const old = { name: "old", note: OWN_NOTE, coverGame: "Brawlhalla", items: asSet(BRAWL.slice(0, 2)) };
+  const w = copyWorld(8, { sets: [old] });
+  w.rows.push({ _id: oid(), marketplace: "g2g", noclaimStock: true, status: "delisted", set: w.sets[1]._id, externalId: "g-old", note: "no-claim auto-delivery" + ao.COPY_MARK + " — taken down 2026-10-10 09:00Z" + ao.SWEPT_MARK, updatedAt: new Date(T0 - DAY) });
+  // A row that is not a copy at all (the owner's own G2G listing, delisted) says nothing either.
+  w.rows.push({ _id: oid(), marketplace: "g2g", noclaimStock: true, status: "delisted", set: w.sets[1]._id, externalId: "g-own", note: "mine", updatedAt: new Date(T0 - DAY) });
+  const r = await ao.runPass({ deps: w.deps, now: T0 });
+  assert.strictEqual(r.copies.length, 1);
 });

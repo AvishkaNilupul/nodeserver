@@ -50,6 +50,16 @@
 //      failed, three tries a day. A publish that may have gone live without
 //      a row (a timeout, a 5xx, a row that could not be saved) is never tried
 //      again by itself: its set is kept as the record and the owner is told.
+//   8. COPIES (autoFarm.autofarmOfferCopyMarkets, default none). A finished
+//      offer of this lister's is also listed on another claim-at-sale market
+//      (G2G) — the SAME set, so the stock sync splits the one shelf between
+//      the two offers and no account is advertised twice over. Only where the
+//      market lists the game, its orders are really delivered, and enough
+//      accounts hold the bundle. A copy follows its Eldorado offer: when that
+//      one moves on to another bundle or comes down, the copy comes down too —
+//      and that sweep runs whether or not the lister itself is switched on
+//      (its own switch: autoFarm.autofarmOfferCopySweep). A game whose copy
+//      somebody else took down is left alone for two weeks, like rule 5.
 // ---------------------------------------------------------------------------
 const settings = require("./settings");
 
@@ -76,6 +86,43 @@ const HOLD_MARK = " — HOLD: ";
 const MAYBE_LANDED_RE =
   /^Eldorado publish failed.*(\(HTTP 5\d\d\)|timeout|timed out|ETIMEDOUT|ECONNRESET|ECONNABORTED|socket hang up|network)/i;
 const ORPHAN_RE = /row could not be saved/i;
+// Rule 8 — the claim-at-sale markets a copy may go to, and their title limits.
+const COPY_MARKETS = ["g2g"];
+const COPY_TITLE_MAX = { g2g: 128 };
+// On the row of every copy this makes: what tells it from a listing the owner
+// published by hand, which is never taken down from here.
+const COPY_MARK = " — auto-farm copy";
+// The sweep's own words on a row it took down: what tells its take-downs from
+// anyone else's (the owner's Delist button).
+const SWEPT_MARK = ": its Eldorado offer moved on";
+// The least a market lets an offer cost (utils/marketplaces G2G_MIN_PRICE:
+// G2G enforces min_qty × unit_price >= USD 1).
+const COPY_MIN_PRICE = { g2g: 1 };
+// A G2G publish is two calls and a read-back (create a shell, write the offer,
+// read it). The write is worded "G2G publish offer failed …" and the read-back
+// "G2G publish: offer … did not read back". Once the write was sent, the copy
+// MAY be live unless G2G plainly refused it with a 4xx: a 5xx, no answer at
+// all, a 2xx whose body broke off, an error reported inside a 200, a failed
+// read-back — none of those says it did not land. (A needless hold costs one
+// look at G2G; a missed one is a second live offer no order can reach.)
+const COPY_MAYBE_RE = /^G2G publish(?!.*\(HTTP 4\d\d\))/i;
+// The record a copy leaves on its set's note:
+//   " — HOLD: <market> copy <YYYY-MM-DD HH:MM>Z: <what happened>"
+// It carries its own time, so the six-hour rest and the daily limit below are
+// read off the database and outlive a restart.
+const COPY_RECORD_RE = / — HOLD: (\w+) copy (\d{4}-\d{2}-\d{2} \d{2}:\d{2})Z: /;
+// …while a publish is in flight, and once the owner was told it never ended.
+const COPY_STARTED = "publish started and never finished";
+const COPY_STARTED_TOLD = "publish never finished (owner told)";
+// How long a publish may be in flight before "started" means "never finished".
+const COPY_UNFINISHED_MS = 10 * 60 * 1000;
+// After a copy that may be live without a row, no other copy is tried for this
+// long: whatever broke that publish would break the next one the same way.
+const COPY_PAUSE_MS = 6 * HOUR_MS;
+// Not worth a second offer when the bundle comes off sale within the day.
+const COPY_MIN_LIFE_MS = 24 * HOUR_MS;
+// The sets the grow and rotation passes make name the set they came from.
+const LINEAGE_RE = /^Made \d{4}-\d{2}-\d{2} by the no-claim offer (?:grow|rotation):[^]*?\bset ([0-9a-f]{24})\b/i;
 
 const lower = (s) => String(s || "").trim().toLowerCase();
 const str = (v) => (v == null ? "" : String(v));
@@ -121,6 +168,22 @@ function cfg() {
     noClaimGames: (Array.isArray(af.noClaimGames) ? af.noClaimGames : [])
       .map((g) => settings.normGameName(g))
       .filter(Boolean),
+    // Rule 8. Only markets this module knows how to copy to are kept.
+    copyMarkets: (Array.isArray(af.autofarmOfferCopyMarkets) ? af.autofarmOfferCopyMarkets : [])
+      .map(lower)
+      .filter((m, i, a) => COPY_MARKETS.includes(m) && a.indexOf(m) === i),
+    // G2G orders really delivered, and its stock really kept in step — the
+    // switches utils/g2gFulfiller reads (its dry-run ships ON).
+    g2gOn: af.g2gAutoDeliver === true && af.g2gDeliverDryRun === false && af.g2gSyncStock !== false,
+    copyMinHolders: Math.floor(clampNum(af.autofarmOfferCopyMinHolders, 6, 2, 80)),
+    copiesPerDay: Math.floor(clampNum(af.autofarmOfferCopiesPerDay, 6, 1, 30)),
+    // A copy never costs more than the Eldorado offer of the same bundle times
+    // this: the engine's figure for a market is an average over bundles of
+    // every size sold there.
+    copyPriceFactor: clampNum(af.autofarmOfferCopyPriceFactor, 1.2, 1, 2),
+    // Copies left behind come down even while the lister is off — unless this
+    // says not to.
+    copySweep: af.autofarmOfferCopySweep !== false,
   };
 }
 
@@ -256,6 +319,49 @@ function offerPrice(enginePrice, c) {
   return fit(Math.floor(raw * 10 + 1e-9) / 10 - 0.01);
 }
 
+// What a copy costs on `market`: the engine's price for that market, made
+// cheaper like any offer — but never above the Eldorado offer of the same
+// bundle times the copy factor (rounded down to a x.x9), and never under what
+// the market lets an offer cost.
+function copyPrice(enginePrice, eldoradoPrice, market, c) {
+  const conf = c || cfg();
+  let p = offerPrice(enginePrice, conf);
+  const eld = Number(eldoradoPrice);
+  if (Number.isFinite(eld) && eld > 0) {
+    p = Math.min(p, Math.floor(eld * conf.copyPriceFactor * 10 + 1e-9) / 10 - 0.01);
+  }
+  const floor = Math.max(conf.minPrice, Number(COPY_MIN_PRICE[market]) || 0);
+  return Math.round(Math.max(floor, p) * 100) / 100;
+}
+
+// A set's note with a HOLD record on it. The record is what must survive: the
+// note is cut to make room for it, never the other way round.
+function holdNote(note, text) {
+  const mark = (HOLD_MARK + str(text)).slice(0, 240);
+  return str(note).slice(0, 600 - mark.length) + mark;
+}
+
+// The text of a copy's record (see COPY_RECORD_RE).
+function copyRecordText(market, now, what) {
+  return str(market) + " copy " + new Date(now).toISOString().slice(0, 16).replace("T", " ") + "Z: " + str(what);
+}
+
+// The copy record on a set's note, or null:
+//   { market, at (ms), started, told }
+function copyRecord(note) {
+  const text = str(note);
+  const m = COPY_RECORD_RE.exec(text);
+  if (!m) return null;
+  const at = Date.parse(m[2].replace(" ", "T") + ":00Z");
+  const rest = text.slice(m.index + m[0].length);
+  return {
+    market: lower(m[1]),
+    at: Number.isFinite(at) ? at : 0,
+    started: rest.startsWith(COPY_STARTED),
+    told: rest.startsWith(COPY_STARTED_TOLD),
+  };
+}
+
 // A campaign's name as a title can carry it: "Launch Drops" -> "Launch".
 function eventLabel(campaign) {
   return str(campaign)
@@ -268,7 +374,7 @@ function eventLabel(campaign) {
 
 // "{Game} {Event} Twitch Drops (N Items) — A + B + C" with every item named
 // when it fits; null when it does not (the caller then uses the house title).
-function fullTitle(game, campaign, items) {
+function fullTitle(game, campaign, items, max = TITLE_MAX) {
   const g = str(game).trim();
   const list = items || [];
   const names = list
@@ -287,7 +393,7 @@ function fullTitle(game, campaign, items) {
   const count = " Twitch Drops (" + copies + " Item" + (copies === 1 ? "" : "s") + ") — ";
   for (const head of heads) {
     const t = head + count + names.join(" + ");
-    if (t.length <= TITLE_MAX) return t;
+    if (t.length <= max) return t;
   }
   return null;
 }
@@ -309,6 +415,9 @@ const memory = {
   firstSeen: new Map(), // game key + "\n" + signature -> ms the bundle was first seen
   retryAt: new Map(), // game key -> ms before which a failed publish is not retried
   tries: new Map(), // game key -> failed publishes today
+  copyRetryAt: new Map(), // set id + "|" + market -> ms before which a copy is not tried
+  copyTries: new Map(), // set id + "|" + market -> failed copies today
+  copyPauseUntil: 0, // ms before which no copy at all is tried
   day: "",
   madeToday: 0,
 };
@@ -317,6 +426,9 @@ function resetMemory() {
   memory.firstSeen.clear();
   memory.retryAt.clear();
   memory.tries.clear();
+  memory.copyRetryAt.clear();
+  memory.copyTries.clear();
+  memory.copyPauseUntil = 0;
   memory.day = "";
   memory.madeToday = 0;
 }
@@ -342,6 +454,17 @@ function defaultDeps() {
     sendTelegram: (text) => require("./telegram").sendTelegram(text),
     // { PAUSED_ERROR, MIN_ACCOUNTS, RECENT_SALE_MS, lastDeliveredAt } — rule 6.
     rotation: () => require("./noclaimOfferRotation"),
+    // Rule 8: { serviceId, brandId } of the game on G2G, or null (never a guess).
+    g2gCategory: (game) => {
+      const g = require("./g2gGames");
+      const brand = g.brandForGame(game);
+      return brand ? { serviceId: g.G2G_ITEMS_SERVICE, brandId: brand.brandId } : null;
+    },
+    // Takes a copy off sale (a status change on G2G, never a delete).
+    delistCopy: (market, externalId) => {
+      if (market === "g2g") return require("./marketplaces").g2gDelist(externalId);
+      throw new Error("no way to take a " + market + " copy down");
+    },
   };
 }
 
@@ -379,6 +502,90 @@ function campaignOver(d, base, game, name, now) {
   return Number.isFinite(gone) && gone - windowMs <= now;
 }
 
+// Rule 1: the games the no-claim bots farm — a bot's own game, or one whose
+// drops several of them hold. (One stray account that picked up another
+// game's drop on the side does not make it theirs.)
+function fleetKeys(base) {
+  const fleet = new Set();
+  const strays = new Map();
+  for (const h of (base && base.holdings) || []) {
+    if (!h || h.farm === FARM || h.inConfig !== true) continue;
+    const k0 = gameKey(h.game);
+    if (k0) fleet.add(k0);
+    const mine = new Set();
+    for (const it of h.items || []) {
+      const k = gameKey(it && it.game);
+      if (k) mine.add(k);
+    }
+    for (const k of mine) strays.set(k, (strays.get(k) || 0) + 1);
+  }
+  for (const [k, n] of strays) if (n >= FLEET_GAME_MIN) fleet.add(k);
+  return fleet;
+}
+
+// Is this a game the no-claim bots (or the owner's no-claim list) own?
+function ownersGame(key, c, fleet) {
+  return c.noClaimGames.some((g) => key.includes(g)) || [...fleet].some((f) => sameKey(f, key));
+}
+
+// One fresh auto-farm account as the rules below read it:
+//   heldAtSell  what it will still hold a sell lead from now (item key -> copies)
+//   raw         its items as its last read wrote them (item key -> item)
+//   left(k)     drops it has still to earn for game key k (null = not known)
+//   isFree(k)   may a paid order take it for game key k?
+function accountOf(d, h, base, now, sellLeadMs) {
+  const heldAtSell = d.ncs.heldCounts(d.nh.durableItems(h, base, now + sellLeadMs) || []);
+  const raw = new Map();
+  for (const it of h.items || []) {
+    const k = keyOfItem(it);
+    if (k) raw.set(k, it);
+  }
+  const freeFor = new Map();
+  // What its last sweep read said it has still to earn, per game.
+  const pend = new Map();
+  for (const x of Array.isArray(h.pending) ? h.pending : []) {
+    const pk = gameKey(x && x.game);
+    if (pk) pend.set(pk, (pend.get(pk) || 0) + (Math.max(0, Number(x.n)) || 0));
+  }
+  return {
+    loginLower: h.loginLower,
+    readMs: msOf(h.readAt),
+    heldAtSell,
+    raw,
+    // null = not known (a row no sweep has read since this was stored).
+    left: (k) => {
+      if (!h.pendingAt) return null;
+      let n = 0;
+      for (const [pk, v] of pend) if (sameKey(pk, k)) n += v;
+      return n;
+    },
+    isFree: (k) => {
+      if (!freeFor.has(k)) freeFor.set(k, d.nh.freeReason(h, base, k) === "");
+      return freeFor.get(k);
+    },
+  };
+}
+
+// When the copies a buyer of `items` is promised first leave ANY of the
+// accounts in `who`, whether every campaign they came from is over, and the
+// campaigns' names.
+function bundleLife(d, base, items, who, now) {
+  let goneAt = Infinity;
+  let ended = (items || []).length > 0;
+  const camps = new Set();
+  for (const w of who || []) {
+    for (const it of items || []) {
+      const rawItem = w.raw.get(keyOfItem(it)) || it;
+      for (const part of longestLived(rawItem, it.qty, (name) => d.nh.waveGoneAt(base, it.game, name, w.readMs))) {
+        if (part.gone < goneAt) goneAt = part.gone;
+        if (part.campaign) camps.add(part.campaign);
+        if (!part.campaign || !campaignOver(d, base, it.game, part.campaign, now)) ended = false;
+      }
+    }
+  }
+  return { goneAt, ended, camps };
+}
+
 // What could be offered right now: one entry per game, bundles that are ready
 // first, then the most widely held. Database only. Each entry:
 //   { key, game, items:[{itemKey,name,game,image,qty}], signature, campaign,
@@ -394,23 +601,7 @@ async function plan({ deps, now = Date.now() } = {}) {
   // the next stock sync does not take a brand-new offer off again.
   const buildLeadMs = Math.max(Number(exp.bundleLeadMs) || 0, sellLeadMs + 12 * HOUR_MS);
 
-  // Rule 1: the games the no-claim bots farm — a bot's own game, or one whose
-  // drops several of them hold. (One stray account that picked up another
-  // game's drop on the side does not make it theirs.)
-  const fleet = new Set();
-  const strays = new Map();
-  for (const h of (base && base.holdings) || []) {
-    if (!h || h.farm === FARM || h.inConfig !== true) continue;
-    const k0 = gameKey(h.game);
-    if (k0) fleet.add(k0);
-    const mine = new Set();
-    for (const it of h.items || []) {
-      const k = gameKey(it && it.game);
-      if (k) mine.add(k);
-    }
-    for (const k of mine) strays.set(k, (strays.get(k) || 0) + 1);
-  }
-  for (const [k, n] of strays) if (n >= FLEET_GAME_MIN) fleet.add(k);
+  const fleet = fleetKeys(base);
 
   // Rules 2, 5 and 6 read the no-claim rows: every live claim-at-sale one
   // (their sets are the shelves), and the Eldorado ones taken down lately.
@@ -468,38 +659,9 @@ async function plan({ deps, now = Date.now() } = {}) {
   for (const h of (base && base.holdings) || []) {
     if (!h || h.farm !== FARM || h.inConfig !== true) continue;
     if (!d.nh.isFresh(h, base, now)) continue;
-    const heldAtSell = d.ncs.heldCounts(d.nh.durableItems(h, base, now + sellLeadMs) || []);
-    const raw = new Map();
-    for (const it of h.items || []) {
-      const k = keyOfItem(it);
-      if (k) raw.set(k, it);
-    }
-    const freeFor = new Map();
-    // What its last sweep read said it has still to earn, per game.
-    const pend = new Map();
-    for (const x of Array.isArray(h.pending) ? h.pending : []) {
-      const pk = gameKey(x && x.game);
-      if (pk) pend.set(pk, (pend.get(pk) || 0) + (Math.max(0, Number(x.n)) || 0));
-    }
-    const acct = {
-      loginLower: h.loginLower,
-      readMs: msOf(h.readAt),
-      heldAtSell,
-      raw,
-      // null = not known (a row no sweep has read since this was stored).
-      left: (k) => {
-        if (!h.pendingAt) return null;
-        let n = 0;
-        for (const [pk, v] of pend) if (sameKey(pk, k)) n += v;
-        return n;
-      },
-      // Rule 2 — any shelf, any game: the claim hands over the whole account.
-      onShelf: shelves.some((x) => d.ncs.covers(heldAtSell, x.required)),
-      isFree: (k) => {
-        if (!freeFor.has(k)) freeFor.set(k, d.nh.freeReason(h, base, k) === "");
-        return freeFor.get(k);
-      },
-    };
+    const acct = accountOf(d, h, base, now, sellLeadMs);
+    // Rule 2 — any shelf, any game: the claim hands over the whole account.
+    acct.onShelf = shelves.some((x) => d.ncs.covers(acct.heldAtSell, x.required));
     all.push(acct);
     const perGame = new Map();
     for (const it of d.nh.durableItems(h, base, now + buildLeadMs) || []) {
@@ -543,19 +705,7 @@ async function plan({ deps, now = Date.now() } = {}) {
     // When the copies a buyer is promised first leave ANY account that can be
     // handed over, whether every campaign they came from is over, and the
     // event's name (one, or none when they span several).
-    let goneAt = Infinity;
-    let ended = items.length > 0;
-    const camps = new Set();
-    for (const who of best.who) {
-      for (const it of items) {
-        const rawItem = who.raw.get(keyOfItem(it)) || it;
-        for (const part of longestLived(rawItem, it.qty, (name) => d.nh.waveGoneAt(base, it.game, name, who.readMs))) {
-          if (part.gone < goneAt) goneAt = part.gone;
-          if (part.campaign) camps.add(part.campaign);
-          if (!part.campaign || !campaignOver(d, base, it.game, part.campaign, now)) ended = false;
-        }
-      }
-    }
+    const { goneAt, ended, camps } = bundleLife(d, base, items, best.who, now);
     const memKey = key + "\n" + signature;
     seen.add(memKey);
     if (!memory.firstSeen.has(memKey)) memory.firstSeen.set(memKey, now);
@@ -577,7 +727,7 @@ async function plan({ deps, now = Date.now() } = {}) {
           [...need].every(([k, q]) => (x.required.get(k) || 0) >= q),
       );
     let skip = "";
-    if (c.noClaimGames.some((g) => key.includes(g)) || [...fleet].some((f) => sameKey(f, key))) {
+    if (ownersGame(key, c, fleet)) {
       skip = "a no-claim bot farms this game";
     } else if (isRested(key)) {
       skip = "an offer of this game was taken down lately — left to the owner";
@@ -641,20 +791,31 @@ async function sameBundle(d, p, now) {
 // One pass. Never throws. Returns
 //   { created:[…], waiting:[{game, readyAt}], skipped:{reason:n}, errors:[…] }
 async function runPass({ deps, dryRun = false, now = Date.now() } = {}) {
-  const out = { created: [], waiting: [], skipped: {}, errors: [] };
+  const out = { created: [], waiting: [], skipped: {}, errors: [], copies: [], copiesDown: [] };
   const skip = (why) => {
     out.skipped[why] = (out.skipped[why] || 0) + 1;
   };
   const c = cfg();
+  const d = deps || defaultDeps();
+  // Rule 8's sweep comes first and does not ask whether the lister is on: a
+  // copy whose Eldorado offer moved on advertises the same accounts a second
+  // time, and switching the lister off must not leave it doing so.
+  if (!dryRun && c.copySweep) {
+    try {
+      out.copiesDown = await sweepCopies({ deps: d, now });
+    } catch (e) {
+      out.errors.push("copy sweep: " + ((e && e.message) || String(e)));
+    }
+  }
   if (!c.on) return { ...out, off: true };
   if (!c.eldoradoOn) return { ...out, off: true, why: "Eldorado auto-delivery is off or in dry-run" };
-  const d = deps || defaultDeps();
   try {
     if (!d.ncs.deliveryEnabled()) return { ...out, off: true, why: "no-claim auto-delivery is off" };
     if (memory.day !== utcDay(now)) {
       memory.day = utcDay(now);
       memory.madeToday = 0;
       memory.tries.clear();
+      memory.copyTries.clear();
     }
     let room = 0;
     let roomKnown = false;
@@ -755,38 +916,538 @@ async function runPass({ deps, dryRun = false, now = Date.now() } = {}) {
   } catch (e) {
     out.errors.push((e && e.message) || String(e));
   }
+  // Rule 8, on its own feet: nothing above may keep a copy that was left
+  // behind on sale, and nothing here may undo what the pass above did.
+  try {
+    await copyPass(c, d, out, skip, { dryRun, now });
+  } catch (e) {
+    out.errors.push("copies: " + ((e && e.message) || String(e)));
+  }
   return out;
 }
 
-async function publishOne(p, reuse, c, d, dryRun) {
+// ---------------------------------------------------------------------------
+// Rule 8 — copies on another claim-at-sale market
+// ---------------------------------------------------------------------------
+
+// Is this set one of this lister's: made by it, or made by the grow / rotation
+// pass out of one that was? `byId` holds the sets already read.
+function ownSet(set, byId, depth = 0) {
+  const note = str(set && set.note);
+  if (note.startsWith(SET_NOTE)) return true;
+  if (depth >= 4) return false;
+  const m = LINEAGE_RE.exec(note);
+  const parent = m ? byId.get(m[1].toLowerCase()) : null;
+  return parent ? ownSet(parent, byId, depth + 1) : false;
+}
+
+// Does this set, or a set it was grown or rotated from, carry the record of a
+// copy on `market` that is or may be live without a row? Its family then gets
+// no copy by itself: a second offer beside a stray one is how one bundle ends
+// up on a market twice.
+function familyHeld(set, byId, market, depth = 0) {
+  const rec = copyRecord(set && set.note);
+  if (rec && rec.market === market) return true;
+  if (depth >= 4) return false;
+  const m = LINEAGE_RE.exec(str(set && set.note));
+  const parent = m ? byId.get(m[1].toLowerCase()) : null;
+  return parent ? familyHeld(parent, byId, market, depth + 1) : false;
+}
+
+// Every copy record there is, with its set: [{ set, rec }].
+async function copyRecords(d) {
+  const sets =
+    (await d.DropSet.find(
+      { stockSource: "noclaim", note: /— HOLD: \w+ copy / },
+      { name: 1, note: 1, coverGame: 1 },
+    )
+      .limit(200)
+      .lean()) || [];
+  return sets.map((set) => ({ set, rec: copyRecord(set.note) })).filter((x) => x.rec);
+}
+
+// A publish that never answered (the server stopped in the middle of it, or
+// its record could not be cleared): the set is held, and until now nobody
+// would have known. The owner is told once; the record then says so.
+async function tellUnfinished(d, records, now) {
+  for (const x of records) {
+    if (!x.rec.started || now - x.rec.at < COPY_UNFINISHED_MS) continue;
+    const note = str(x.set.note);
+    let w = null;
+    try {
+      w = await d.DropSet.updateOne({ _id: x.set._id, note }, { $set: { note: note.replace(COPY_STARTED, COPY_STARTED_TOLD) } });
+    } catch {
+      w = null;
+    }
+    if (!(w && (w.modifiedCount || w.nModified))) continue; // told already, or the note moved on
+    x.rec.started = false;
+    x.rec.told = true;
+    const name = str(x.set.name || x.set.coverGame || x.set._id);
+    try {
+      Promise.resolve(
+        d.logEvent({
+          category: "noclaim_shop",
+          action: "autofarm_copy_unfinished",
+          actor: "autofarmOffers",
+          severity: "error",
+          subject: name,
+          count: 1,
+          detail:
+            "a " + x.rec.market + " copy of this set was being published at " + new Date(x.rec.at).toISOString().slice(0, 16).replace("T", " ") +
+            "Z and never finished — check " + x.rec.market + " for an offer with no listing row; the set is held",
+        }),
+      ).catch(() => {});
+      Promise.resolve(
+        d.sendTelegram(
+          "⚠️ Auto-farm unclaimed copy: a " + x.rec.market + " publish of \"" + name + "\" started at " +
+            new Date(x.rec.at).toISOString().slice(0, 16).replace("T", " ") + "Z and never finished (the server stopped, or its record could not be cleared).\n" +
+            "Check " + x.rec.market + " for an offer of it that is not on the Listings page and take it down. It will not be copied again by itself.",
+        ),
+      ).catch(() => {});
+    } catch {
+      /* the notice is best-effort */
+    }
+  }
+}
+
+// The offers of this lister's that could get a copy, one entry per (set,
+// market), the most widely held first. Database only. Each entry:
+//   { market, set, setId, key, game, cover, finished, goneAt, campaign,
+//     category, skip }
+// `skip` is "" for a copy that may be published, else why not.
+async function planCopies({ deps, now = Date.now() } = {}) {
+  const d = deps || defaultDeps();
+  const c = cfg();
+  if (!c.copyMarkets.length) return [];
+  // Offers that are on sale on Eldorado right now.
+  const eld = (
+    (await d.MarketplaceListing.find(
+      { marketplace: MARKET, noclaimStock: true, status: "active" },
+      { set: 1, autoPaused: 1, price: 1 },
+    ).lean()) || []
+  ).filter((r) => r.autoPaused !== true && r.set);
+  const setIds = [...new Set(eld.map((r) => str(r.set)))];
+  if (!setIds.length) return [];
+  // What the bundle costs on Eldorado (the cheapest of its offers there).
+  const eldPrice = new Map();
+  for (const r of eld) {
+    const p = Number(r.price);
+    if (!(p > 0)) continue;
+    const k = str(r.set);
+    if (!eldPrice.has(k) || p < eldPrice.get(k)) eldPrice.set(k, p);
+  }
+  // Copies somebody else took down lately (the owner's Delist button): their
+  // games are left alone, as rule 5 leaves a game whose offer was taken down.
+  const gone = (
+    (await d.MarketplaceListing.find(
+      { marketplace: { $in: c.copyMarkets }, noclaimStock: true, status: "delisted", updatedAt: { $gte: new Date(now - DELIST_REST_MS) } },
+      { set: 1, marketplace: 1, note: 1, title: 1 },
+    ).lean()) || []
+  ).filter((r) => str(r.note).includes(COPY_MARK) && !str(r.note).includes(SWEPT_MARK));
+  // A set never gets a second copy on a market, whatever became of the first.
+  const had = new Set(
+    (
+      (await d.MarketplaceListing.find(
+        { marketplace: { $in: c.copyMarkets }, noclaimStock: true, set: { $in: setIds } },
+        { set: 1, marketplace: 1 },
+      ).lean()) || []
+    ).map((r) => str(r.set) + "|" + r.marketplace),
+  );
+  const fields = { name: 1, note: 1, price: 1, items: 1, coverGame: 1, stockSource: 1, createdAt: 1 };
+  const byId = new Map();
+  let want = [...new Set(setIds.concat(gone.map((r) => str(r.set)).filter(Boolean)))];
+  // The sets, and the sets they were grown or rotated from (a few steps back).
+  for (let step = 0; step < 5 && want.length; step++) {
+    const got = (await d.DropSet.find({ _id: { $in: want } }, fields).lean()) || [];
+    for (const x of got) byId.set(str(x._id).toLowerCase(), x);
+    want = [];
+    for (const x of got) {
+      const m = LINEAGE_RE.exec(str(x.note));
+      if (m && !byId.has(m[1].toLowerCase()) && !want.includes(m[1].toLowerCase())) want.push(m[1].toLowerCase());
+    }
+  }
+  // market + "|" + game key of every copy taken down by someone else. A row
+  // whose set is gone still names its game in its title.
+  const rested = gone.map((r) => {
+    const set = byId.get(str(r.set).toLowerCase());
+    return { market: r.marketplace, keys: set ? setKeys(set) : [], title: set ? "" : gameKey(r.title) };
+  });
+  const isRested = (market, key) =>
+    rested.some((x) => x.market === market && (x.keys.some((k) => sameKey(k, key)) || (x.title && x.title.includes(key))));
+  const base = await d.nh.snapshotBase();
+  const exp = (base && base.expiry) || {};
+  const fleet = fleetKeys(base);
+  const accounts = []; // every fresh account that can be handed over
+  const strangers = []; // …and the no-claim bots' own
+  const out = [];
+  for (const market of c.copyMarkets) {
+    const sellLeadMs = d.nh.advertiseLeadMs(market);
+    const buildLeadMs = Math.max(Number(exp.bundleLeadMs) || 0, sellLeadMs + 12 * HOUR_MS);
+    accounts.length = 0;
+    strangers.length = 0;
+    for (const h of (base && base.holdings) || []) {
+      if (!h || h.inConfig !== true || !d.nh.isFresh(h, base, now)) continue;
+      const acct = accountOf(d, h, base, now, sellLeadMs);
+      acct.heldAtBuild = d.ncs.heldCounts(d.nh.durableItems(h, base, now + buildLeadMs) || []);
+      (h.farm === FARM ? accounts : strangers).push(acct);
+    }
+    for (const id of setIds) {
+      const set = byId.get(id.toLowerCase());
+      if (!set || set.stockSource !== "noclaim" || had.has(id + "|" + market)) continue;
+      // A set kept as the record of an Eldorado publish that may be live without
+      // a row. (A copy's own record is reported below, as a skip.)
+      if (str(set.note).includes(HOLD_MARK) && !copyRecord(set.note)) continue;
+      if (!ownSet(set, byId)) continue;
+      const game = str(set.coverGame || (set.items && set.items[0] && set.items[0].game)).trim();
+      const key = gameKey(game);
+      const required = d.ncs.requiredFromSet(set);
+      if (!key || !required.size) continue;
+      const who = accounts.filter((a) => a.isFree(key) && d.ncs.covers(a.heldAtBuild, required));
+      const foreign = strangers.filter((a) => a.isFree(key) && d.ncs.covers(a.heldAtBuild, required)).length;
+      const life = bundleLife(d, base, set.items || [], who, now);
+      const finished = who.length > 0 && (life.ended || who.every((w) => w.left(key) === 0));
+      const category = market === "g2g" ? d.g2gCategory(game) : null;
+      let skip = "";
+      if (market === "g2g" && !c.g2gOn) skip = "G2G delivery or its stock sync is off";
+      else if (familyHeld(set, byId, market)) skip = "an earlier copy of this bundle may be live — left to the owner";
+      else if (ownersGame(key, c, fleet)) skip = "a no-claim bot farms this game";
+      else if (isRested(market, key)) skip = "a copy of this game was taken down lately — left to the owner";
+      else if (foreign > 0) skip = "a no-claim bot account holds this bundle too";
+      else if (!category) skip = "the market does not list this game";
+      else if (who.length < c.copyMinHolders) skip = "too few accounts for a second market";
+      else if (!finished) skip = "its accounts are still earning";
+      else if (Number.isFinite(life.goneAt) && life.goneAt - sellLeadMs - now < COPY_MIN_LIFE_MS) {
+        skip = "it comes off sale within the day";
+      }
+      out.push({
+        market,
+        set,
+        setId: str(set._id),
+        key,
+        game,
+        cover: who.length,
+        finished,
+        goneAt: life.goneAt,
+        campaign: life.camps.size === 1 ? [...life.camps][0] : "",
+        category,
+        eldoradoPrice: eldPrice.get(id) || 0,
+        skip,
+      });
+    }
+  }
+  return out.sort((a, b) => b.cover - a.cover || a.game.localeCompare(b.game));
+}
+
+// Copies this lister made since `since`.
+async function copiesMadeSince(d, since) {
+  const rows =
+    (await d.MarketplaceListing.find(
+      { marketplace: { $in: COPY_MARKETS }, noclaimStock: true, createdAt: { $gte: since } },
+      { note: 1 },
+    ).lean()) || [];
+  return rows.filter((r) => str(r.note).includes(COPY_MARK)).length;
+}
+
+// A copy follows its Eldorado offer. One whose set no longer carries an
+// Eldorado offer — it grew or rotated on to another bundle, or was taken down
+// — comes off sale: the stock sync splits a shelf only between offers of the
+// SAME set, so left alone the two would advertise the same accounts twice.
+// Only rows this lister made (COPY_MARK). Returns what came down.
+async function sweepCopies({ deps, now = Date.now(), limit = 2 } = {}) {
+  const d = deps || defaultDeps();
+  const rows = (
+    (await d.MarketplaceListing.find(
+      { marketplace: { $in: COPY_MARKETS }, noclaimStock: true, status: "active" },
+      { set: 1, marketplace: 1, externalId: 1, note: 1, title: 1 },
+    ).lean()) || []
+  ).filter((r) => str(r.note).includes(COPY_MARK));
+  if (!rows.length) return [];
+  const setIds = [...new Set(rows.map((r) => str(r.set)).filter(Boolean))];
+  const kept = new Set(
+    (
+      (await d.MarketplaceListing.find(
+        { marketplace: MARKET, noclaimStock: true, status: "active", set: { $in: setIds } },
+        { set: 1 },
+      ).lean()) || []
+    ).map((r) => str(r.set)),
+  );
+  const down = [];
+  let tries = 0;
+  for (const r of rows) {
+    if (kept.has(str(r.set))) continue;
+    if (tries >= limit) break;
+    tries++;
+    try {
+      await d.delistCopy(r.marketplace, str(r.externalId));
+    } catch (e) {
+      // Still on sale: the stock sync keeps its quantity honest, and the next
+      // pass tries again. The market is not answering — the others wait too.
+      console.error("autofarmOffers: copy " + r.marketplace + " " + r.externalId + " could not be taken down:", e && e.message);
+      break;
+    }
+    await d.MarketplaceListing.updateOne(
+      { _id: r._id, status: "active" },
+      {
+        $set: {
+          status: "delisted",
+          autoPaused: false,
+          lastError: "",
+          note: (str(r.note) + " — taken down " + new Date(now).toISOString().slice(0, 16).replace("T", " ") + "Z" + SWEPT_MARK).slice(0, 600),
+        },
+      },
+    );
+    down.push({ market: r.marketplace, externalId: str(r.externalId), title: str(r.title) });
+    try {
+      Promise.resolve(
+        d.logEvent({
+          category: "noclaim_shop",
+          action: "autofarm_copy_down",
+          actor: "autofarmOffers",
+          severity: "info",
+          subject: str(r.title),
+          count: 1,
+          detail: "the " + r.marketplace + " copy " + r.externalId + " was taken down: its Eldorado offer moved on to another bundle or came down",
+        }),
+      ).catch(() => {});
+    } catch {
+      /* the notice is best-effort */
+    }
+  }
+  return down;
+}
+
+async function copyPass(c, d, out, skip, { dryRun, now }) {
+  if (!c.copyMarkets.length) return;
+  const records = await copyRecords(d);
+  if (!dryRun) await tellUnfinished(d, records, now);
+  // After a copy that is or may be live without a row, no other copy is tried
+  // for six hours — read off the records, so a restart does not forget it.
+  if (memory.copyPauseUntil > now || records.some((x) => now - x.rec.at < COPY_PAUSE_MS)) {
+    skip("copy: resting after a publish that may be live");
+    return;
+  }
+  const dayStart = utcDayStart(now);
+  const entries = await planCopies({ deps: d, now });
+  let made = null;
+  for (const e of entries) {
+    const id = e.setId + "|" + e.market;
+    if (e.skip) {
+      skip("copy: " + e.skip);
+      continue;
+    }
+    if ((memory.copyRetryAt.get(id) || 0) > now) {
+      skip("copy: waiting after a failed publish");
+      continue;
+    }
+    if ((memory.copyTries.get(id) || 0) >= MAX_TRIES_PER_DAY) {
+      skip("copy: failed " + MAX_TRIES_PER_DAY + " times today");
+      continue;
+    }
+    // Today's copies, and today's publishes that may be live: both are offers
+    // this lister put (or may have put) on the market.
+    if (made == null) {
+      made = (await copiesMadeSince(d, dayStart)) + records.filter((x) => x.rec.at >= dayStart.getTime()).length;
+    }
+    if (made >= c.copiesPerDay) {
+      skip("copy: daily limit reached");
+      break;
+    }
+    try {
+      out.copies.push(await copyOne(e, c, d, dryRun, now));
+      if (!dryRun) break; // one copy a pass
+    } catch (err) {
+      const msg = (err && err.message) || String(err);
+      out.errors.push(e.game + " (" + e.market + " copy): " + msg);
+      console.error("autofarmOffers: " + e.game + " was not copied to " + e.market + ": " + msg);
+      const held = !!(err && err.hold);
+      // The market cannot take this game as things stand (no offer of ours to
+      // copy its fields from, no product): asking again tomorrow changes nothing.
+      const unlistable = /no offer of our own to copy|cannot be listed there|no delivery method available/i.test(msg);
+      memory.copyRetryAt.set(id, now + (held ? 24 * HOUR_MS : unlistable ? 7 * 24 * HOUR_MS : RETRY_AFTER_MS));
+      memory.copyTries.set(id, (memory.copyTries.get(id) || 0) + 1);
+      if (held) {
+        memory.copyPauseUntil = now + COPY_PAUSE_MS;
+        try {
+          Promise.resolve(
+            d.sendTelegram(
+              "⚠️ Auto-farm unclaimed copy for " + e.game + " on " + e.market +
+                (err.hold === "orphan"
+                  ? " went live but was not recorded — take it down by hand.\n"
+                  : " may have gone live without being recorded — check " + e.market + " for a stray offer.\n") +
+                msg + "\nIt will not be tried again by itself.",
+            ),
+          ).catch(() => {});
+        } catch {
+          /* the notice is best-effort */
+        }
+      }
+      // One attempt a pass, whatever became of it: a market that refuses one
+      // copy is not asked for the next in the same breath.
+      if (!dryRun) break;
+    }
+  }
+}
+
+// Publish one copy: the SAME set as the Eldorado offer, on `e.market`.
+async function copyOne(e, c, d, dryRun, now = Date.now()) {
+  const set = e.set;
+  const { title, description } = offerText(d, e.market, e.game, e.campaign, set.items || [], e.goneAt);
+  if (!title.trim()) throw new Error("no title for the bundle");
+  const { engine, basis } = await enginePrice(d, e.market, e.game, (set.items || []).length);
+  const price = copyPrice(engine, e.eldoradoPrice, e.market, c);
+  // The publish itself advertises this offer's SHARE of the shelf.
+  const quantity = Math.max(1, Math.min(e.cover, c.quantityCap));
+  const summary = {
+    market: e.market, game: e.game, title, price, enginePrice: engine, basis, quantity,
+    items: (set.items || []).length, holders: e.cover, setId: e.setId,
+    claimBefore: Number.isFinite(e.goneAt) ? new Date(e.goneAt).toISOString() : null,
+  };
+  if (dryRun) return { ...summary, dryRun: true };
+  // Written BEFORE the publish, on the note the plan read (compare-and-set, so
+  // two passes can never copy one set at once): if this process dies between
+  // the market accepting the offer and the row being saved, the record is what
+  // stops a restart from publishing a second copy. It comes off again when the
+  // publish has an answer.
+  const before = str(set.note);
+  const started = holdNote(
+    before,
+    copyRecordText(e.market, now, COPY_STARTED + " — check " + e.market + " for a stray offer"),
+  );
+  const lock = await d.DropSet.updateOne({ _id: set._id, note: before }, { $set: { note: started } });
+  if (!(lock && (lock.modifiedCount || lock.nModified))) {
+    throw new Error("the set changed while its copy was being prepared");
+  }
+  // Put the note back as it was (twice: the record must not outlive a publish
+  // that ended cleanly, or the set never gets its copy).
+  const unlock = async () => {
+    for (let i = 0; i < 2; i++) {
+      try {
+        await d.DropSet.updateOne({ _id: set._id, note: started }, { $set: { note: before } });
+        return;
+      } catch (err) {
+        console.error("autofarmOffers: the copy record on set " + str(set._id) + " could not be cleared:", err && err.message);
+      }
+    }
+  };
+  let r;
+  try {
+    r = await d.nl().publishNoclaim(e.market, {
+      set,
+      body: { [e.market]: { qty: quantity } },
+      title,
+      description,
+      priceUsd: price,
+      gridImage: "",
+      coverPath: "",
+      cat: e.category || {},
+      pubGame: d.listingGame({ set }),
+    });
+  } catch (err) {
+    r = { success: false, message: (err && err.message) || String(err) };
+  }
+  if (!r || !r.success) {
+    const msg = (r && r.message) || "the publish failed";
+    const hold = ORPHAN_RE.test(msg) ? "orphan" : COPY_MAYBE_RE.test(msg) ? "maybe" : "";
+    if (hold) {
+      // The copy is, or may be, live with no row: an order against it would
+      // reach nothing. The set's note is the record that outlives a restart —
+      // no copy of it is tried again (and its Eldorado offer is untouched).
+      // Should this write fail, the record made before the publish stands.
+      await d.DropSet.updateOne(
+        { _id: set._id },
+        { $set: { note: holdNote(before, copyRecordText(e.market, now, msg)) } },
+      ).catch(() => {});
+    } else {
+      await unlock();
+    }
+    const err = new Error(msg);
+    err.hold = hold;
+    throw err;
+  }
+  await unlock();
+  // What tells this row from one the owner published by hand (sweepCopies).
+  let tagged = false;
+  for (let i = 0; i < 2 && !tagged; i++) {
+    try {
+      await d.MarketplaceListing.updateOne({ _id: r.id }, { $set: { note: (str(r.note) || "no-claim auto-delivery") + COPY_MARK } });
+      tagged = true;
+    } catch (err) {
+      console.error("autofarmOffers: the " + e.market + " copy " + r.externalId + " could not be marked as a copy:", err && err.message);
+    }
+  }
+  const made = { ...summary, listingId: str(r.id), externalId: str(r.externalId), url: str(r.url), tagged };
+  console.log(
+    "autofarmOffers: copied " + title + " to " + e.market + " at $" + price.toFixed(2) + " × " + quantity +
+      " (offer " + made.externalId + ")",
+  );
+  try {
+    Promise.resolve(
+      d.logEvent({
+        category: "noclaim_shop",
+        action: "autofarm_offer_copied",
+        actor: "autofarmOffers",
+        severity: tagged ? "info" : "warn",
+        subject: title,
+        game: e.game,
+        count: quantity,
+        detail:
+          "auto-farm unclaimed offer also listed on " + e.market + ": " + (set.items || []).length + " item(s) at $" +
+          price.toFixed(2) + " (engine $" + engine.toFixed(2) + (basis ? ", " + basis : "") + "), " + e.cover +
+          " free account(s) hold it" + (tagged ? "" : " — NOT marked as a copy: it will not follow its Eldorado offer"),
+      }),
+    ).catch(() => {});
+    Promise.resolve(
+      d.sendTelegram(
+        "🆕 ALSO LISTED on " + e.market.toUpperCase() + " (auto-farm unclaimed stock)\n\n" + title + "\n$" +
+          price.toFixed(2) + " — the same accounts as the Eldorado offer (" + e.cover + " hold it)",
+      ),
+    ).catch(() => {});
+  } catch {
+    /* the notice is best-effort */
+  }
+  return made;
+}
+
+// The title and description of an offer for `items` on `market`. The title is
+// "" when none could be built.
+function offerText(d, market, game, campaign, items, goneAt) {
+  const max = COPY_TITLE_MAX[market] || TITLE_MAX;
   const drops = [];
-  for (const it of p.items) {
-    for (let i = 0; i < it.qty; i++) drops.push({ name: it.name, game: it.game, itemKey: it.itemKey, imageURL: it.image });
+  for (const it of items || []) {
+    for (let i = 0; i < copiesOf(it); i++) drops.push({ name: it.name, game: it.game, itemKey: it.itemKey, imageURL: it.image });
   }
   const ual = d.ual();
-  const title = fullTitle(p.game, p.campaign, p.items) || str(ual.listingTitle(p.game, drops, null)).slice(0, TITLE_MAX);
-  if (!title.trim()) throw new Error("no title for the bundle");
-  let description = str(ual.listingDescription(p.game, drops, MARKET, null));
-  if (Number.isFinite(p.goneAt)) {
+  const title = fullTitle(game, campaign, items, max) || str(ual.listingTitle(game, drops, null)).slice(0, max);
+  let description = str(ual.listingDescription(game, drops, market, null));
+  if (Number.isFinite(goneAt)) {
     // A day before the copies are due to leave, to the minute and in UTC —
     // the moment the offer itself comes off sale, so the line is never in the
     // past while a buyer can still read it.
     const line =
       "\n\n⏳ These drops are unclaimed: connect your game account and claim them right after " +
       "delivery. Twitch removes unclaimed drops about a week after the event ends — claim these before " +
-      utcStamp(p.goneAt - 24 * HOUR_MS) + ".";
+      utcStamp(goneAt - 24 * HOUR_MS) + ".";
     description = description.slice(0, DESCRIPTION_MAX - line.length) + line;
   }
-  let engine = 0;
-  let basis = "";
+  return { title, description };
+}
+
+// What the pricing engine reads off our own sales for this game on `market`.
+async function enginePrice(d, market, game, itemCount) {
   try {
-    const ev = await d.pricingEvidence().evidenceFor({ game: p.game, marketplace: MARKET });
-    const r = d.pricing().priceListing({ evidence: ev, itemCount: p.items.length, marketplace: MARKET });
-    engine = Number(r && r.price) || 0;
-    basis = str(r && r.basis);
+    const ev = await d.pricingEvidence().evidenceFor({ game, marketplace: market });
+    const r = d.pricing().priceListing({ evidence: ev, itemCount, marketplace: market });
+    return { engine: Number(r && r.price) || 0, basis: str(r && r.basis) };
   } catch (e) {
-    console.error("autofarmOffers: pricing for " + p.game + " failed:", e && e.message);
+    console.error("autofarmOffers: pricing for " + game + " on " + market + " failed:", e && e.message);
+    return { engine: 0, basis: "" };
   }
+}
+
+async function publishOne(p, reuse, c, d, dryRun) {
+  const { title, description } = offerText(d, MARKET, p.game, p.campaign, p.items, p.goneAt);
+  if (!title.trim()) throw new Error("no title for the bundle");
+  const { engine, basis } = await enginePrice(d, MARKET, p.game, p.items.length);
   const price = offerPrice(engine, c);
   const quantity = Math.max(1, Math.min(p.cover, c.quantityCap));
   const summary = {
@@ -935,4 +1596,14 @@ module.exports = {
   runPass,
   resetMemory,
   defaultDeps,
+  // rule 8
+  COPY_MARKETS,
+  COPY_MARK,
+  SWEPT_MARK,
+  copyPrice,
+  holdNote,
+  copyRecord,
+  ownSet,
+  planCopies,
+  sweepCopies,
 };

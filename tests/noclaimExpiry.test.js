@@ -467,7 +467,8 @@ test("expirySettings: seven days and a one-day lead by default; the lead never d
   });
   assert.strictEqual(a.advertiseLeadMs("eldorado"), 24 * HOUR);
   assert.strictEqual(a.advertiseLeadMs("playerauctions"), HOUR, "no rotation behind it: the safety hour only");
-  assert.strictEqual(a.advertiseLeadMs("g2g"), HOUR);
+  // G2G's only no-claim offers are copies of an Eldorado offer: the same day.
+  assert.strictEqual(a.advertiseLeadMs("g2g"), 24 * HOUR);
 
   const b = load({ af: { noclaimSellLeadHours: "6", noclaimClaimWindowHours: 48 } }).h;
   assert.strictEqual(b.expirySettings().sellLeadMs, 6 * HOUR);

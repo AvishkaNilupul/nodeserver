@@ -1319,6 +1319,21 @@ async function syncStock() {
       changes.push({ offer: row.externalId, wouldSet: real });
       continue;
     }
+    // The rows were read at the top of the pass, and a delist can have landed
+    // since — the owner's, or the auto-lister taking a copy down
+    // (utils/autofarmOffers.sweepCopies). Writing from the stale copy would put
+    // a delisted offer back on sale with no pass left to watch it. A read that
+    // fails proves nothing: the row waits for the next pass.
+    let stillActive = null;
+    try {
+      stillActive = await MarketplaceListing.findOne({ _id: row._id, status: "active" }, { _id: 1 });
+    } catch {
+      stillActive = null;
+    }
+    if (!stillActive) {
+      changes.push({ offer: row.externalId, skipped: "no longer active" });
+      continue;
+    }
     try {
       if (real <= 0) {
         await mp.g2gDelist(row.externalId);
