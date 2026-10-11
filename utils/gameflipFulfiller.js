@@ -1266,6 +1266,10 @@ let unplacedCursor = 0;
 // gap between ends because Gameflip's limiter counts writes too.
 const LAPSED_END_LIMIT = 3;
 const LAPSED_END_GAP_MS = 2000;
+// How long a lapsed listing whose end just failed stands aside for the others
+// (in memory: a restart simply tries it again).
+const LAPSED_END_RETRY_MS = 60 * 60 * 1000;
+const lapsedEndFailedAt = new Map(); // row id -> ms of its last failed end
 
 // RENEWAL. An auto-delivery listing that expired UNSOLD has not used up its
 // unit: retiring it ended the chain, and on 2026-10-01 that would have dropped
@@ -1312,6 +1316,32 @@ async function setReleased(accountId, setId) {
   }
 }
 
+// A 404 for a listing that is NOT in Gameflip's own voice (utils/gameflipGone)
+// retires nothing — the safe side. But should Gameflip ever change the body of
+// its 404, EVERY deleted or expired listing would read that way: rows would
+// stay active, read again every tick, with retirement and renewal stopped for
+// the whole Gameflip fleet and not a word about it. So it is said: one log
+// line and one message, at most every six hours.
+const FOREIGN_404_EVERY_MS = 6 * 60 * 60 * 1000;
+let foreign404At = 0;
+function noteForeign404(row, e) {
+  if (Date.now() - foreign404At < FOREIGN_404_EVERY_MS) return;
+  foreign404At = Date.now();
+  const body = String((e && e.message) || e).slice(0, 220);
+  console.error(
+    "gameflip listing " + (row && row.externalId) + " answered 404 in a form that is not Gameflip's own — " +
+      "nothing retired: " + body,
+  );
+  sendTelegram(
+    "⚠️ Gameflip: a listing answered 404, but not in Gameflip's own words\n\n" +
+      "Listing " + ((row && row.externalId) || "?") + ": " + body +
+      "\n\nNothing was retired or handed back (a 404 from something in between says nothing about the " +
+      "listing). If this keeps coming, Gameflip may have changed its error format — then deleted and " +
+      "expired listings stay 'active' here until utils/gameflipGone.js is updated. At most one of these " +
+      "every six hours.",
+  ).catch(() => {});
+}
+
 // Out-of-stock renewals page the owner at most once an hour, as one summary:
 // a fleet-wide dip during a backlog would otherwise send one message per row.
 const RENEWAL_ALERT_EVERY_MS = 60 * 60 * 1000;
@@ -1321,6 +1351,8 @@ function resetRenewalAlert() {
   renewalAlertAt = 0;
   renewalStuckAlertAt = 0;
   relistStuckAlertAt = 0;
+  foreign404At = 0;
+  lapsedEndFailedAt.clear();
 }
 
 // Drop an "ending" stamp from a row whose listing is live again. Conditional on
@@ -1666,6 +1698,12 @@ async function syncOnce({
       return st.status || "";
     }
     if (!bulkSwept || lapsedEnded >= LAPSED_END_LIMIT) return "";
+    // A listing whose end failed a moment ago is not this pass's first choice
+    // again: three that will not end (the limiter answering and changing
+    // nothing) would otherwise take the whole budget every tick, and the
+    // lapsed listings behind them would never get their turn.
+    const failedAt = lapsedEndFailedAt.get(String(row._id)) || 0;
+    if (failedAt && Date.now() - failedAt < LAPSED_END_RETRY_MS) return "";
     if (lapsedEnded > 0) {
       await new Promise((r) => setTimeout(r, LAPSED_END_GAP_MS));
     }
@@ -1682,10 +1720,18 @@ async function syncOnce({
     try {
       await mp.gameflipEndListing(row.externalId, { status: st.status });
     } catch (e) {
-      // Gone between the read and the end (Gameflip's own 404 for the
-      // listing): the same outcome as ending it.
-      if (!gameflipGone(e)) throw e;
+      // Whatever the end call threw is NOT the listing's own answer — not even
+      // a 404 (its off-sale patch can answer one, with nothing deleted and
+      // nothing read). So nothing is settled here, and the error goes up
+      // without a status, so the caller's 404 branch cannot retire the row on
+      // it either: the row waits, stamped, and the next tick's own read of the
+      // listing finishes it through the stamp branch above.
+      lapsedEndFailedAt.set(String(row._id), Date.now());
+      throw new Error(
+        "gameflip end of lapsed listing " + row.externalId + " did not complete: " + ((e && e.message) || e),
+      );
     }
+    lapsedEndFailedAt.delete(String(row._id));
     await settleLapsed(row, { expiration: resumeEnd ? date : st.expiration });
     return LAPSED_DONE;
   }
@@ -1754,6 +1800,8 @@ async function syncOnce({
               " unit(s) were still owed",
           );
         }
+      } else if (e && e.status === 404) {
+        noteForeign404(row, e);
       }
       continue;
     }

@@ -25,6 +25,8 @@ const GF_404 =
   'Gameflip listing status: {"status":"FAILURE","data":null,"error":{"message":"Not Found","code":404,"http_status":404}}';
 const world = {
   notFoundBody: "",
+  endThrows: {},
+  endTried: [],
   onsale: new Set(),
   state: {},
   ended: [],
@@ -57,6 +59,8 @@ const fakeMp = {
     throw new Error("the expiry-aware read must be used when available");
   },
   async gameflipEndListing(id, opts) {
+    world.endTried.push(id);
+    if (world.endThrows[id]) throw world.endThrows[id];
     if (world.endFails.has(id)) {
       const e = new Error('Gameflip end listing (off sale): {"code":429}');
       e.status = 429;
@@ -110,6 +114,8 @@ test.beforeEach(async () => {
   world.endFails = new Set();
   world.af = {};
   world.notFoundBody = "";
+  world.endThrows = {};
+  world.endTried = [];
 });
 
 const PAST = "2026-08-25T17:06:48.066Z";
@@ -458,6 +464,71 @@ test("a 404 that is not Gameflip's own answer retires nothing — the account st
   world.notFoundBody = "";
   await gf.syncOnce();
   assert.strictEqual((await MarketplaceListing.findOne({ externalId: "gf-proxy" }).lean()).status, "removed");
+});
+
+test("the end call's OWN 404 is not the listing's answer: nothing is settled on it — the next tick's read of the listing is", async () => {
+  // The listing read "onsale" a moment ago; the end call's off-sale patch then
+  // answers Gameflip's 404. Nothing was deleted and nothing read back — yet it
+  // used to count as "gone between the read and the end", and the account went
+  // back to stock on it.
+  await chain("gf-patch404", { accountId: "b".repeat(24) });
+  world.endThrows["gf-patch404"] = Object.assign(
+    new Error('Gameflip end listing (off sale): {"status":"FAILURE","data":null,"error":{"message":"Not Found","code":404,"http_status":404}}'),
+    { status: 404 },
+  );
+  const pub = fakePublisher();
+  await gf.syncOnce(pub.opts);
+  let after = await MarketplaceListing.findOne({ externalId: "gf-patch404" }).lean();
+  assert.strictEqual(after.status, "active", "not settled, not retired as a plain 404 either");
+  assert.strictEqual(after.accountId, "b".repeat(24), "its account stays with it");
+  assert.match(after.lastError, /^expired on Gameflip — ending \(2026-08-25\)/, "stamped, so the next tick knows whose it is");
+  assert.strictEqual(pub.calls.length, 0);
+  // The listing really is gone: the next tick's OWN read answers Gameflip's
+  // 404, and the stamp finishes the job — renewal included.
+  delete world.state["gf-patch404"];
+  await gf.syncOnce(pub.opts);
+  after = await MarketplaceListing.findOne({ externalId: "gf-patch404" }).lean();
+  assert.strictEqual(after.status, "removed");
+  assert.match(after.lastError, /renewed as gf-new-1/);
+  assert.strictEqual(pub.calls.length, 1);
+});
+
+test("a 404 that is not Gameflip's own is said — once — so a changed error format cannot silently stop every retirement", async () => {
+  const errors = [];
+  const realError = console.error;
+  console.error = (...a) => errors.push(a.join(" "));
+  try {
+    await row("gf-odd-1");
+    await row("gf-odd-2");
+    world.notFoundBody = 'Gameflip listing status: {"status":"FAILURE","error":{"message":"Not Found","code":"404"}}';
+    await gf.syncOnce();
+    await gf.syncOnce();
+  } finally {
+    console.error = realError;
+  }
+  assert.strictEqual(await MarketplaceListing.countDocuments({ status: "active" }), 2, "nothing retired");
+  const said = errors.filter((e) => /answered 404 in a form that is not Gameflip's own/.test(e));
+  assert.strictEqual(said.length, 1, "one line for two rows over two ticks");
+  const told = world.telegrams.filter((m) => /answered 404, but not in Gameflip's own words/.test(m));
+  assert.strictEqual(told.length, 1);
+  assert.match(told[0], /Gameflip may have changed its error format/);
+});
+
+test("listings that will not end stand aside for the ones behind them", async () => {
+  // Three lapsed listings whose end keeps failing sat at the head of every
+  // tick and took the whole per-pass budget: the fourth never got its turn.
+  for (const id of ["gf-w1", "gf-w2", "gf-w3", "gf-w4"]) {
+    await row(id);
+    world.state[id] = { status: "onsale", expiration: PAST, expired: true };
+  }
+  for (const id of ["gf-w1", "gf-w2", "gf-w3"]) world.endFails.add(id);
+  await gf.syncOnce();
+  assert.strictEqual(world.endTried.length, gf.LAPSED_END_LIMIT, "the budget, spent on the first three");
+  assert.ok(!world.endTried.includes("gf-w4"));
+  await gf.syncOnce();
+  assert.ok(world.endTried.includes("gf-w4"), "the fourth gets its turn on the next tick");
+  assert.strictEqual((await MarketplaceListing.findOne({ externalId: "gf-w4" }).lean()).status, "removed");
+  assert.strictEqual(world.endTried.filter((id) => id !== "gf-w4").length, gf.LAPSED_END_LIMIT, "the three that failed are not tried again at once");
 });
 
 test("nothing is ended or renewed while the bulk sweep is down — Gameflip is throttling us", async () => {
