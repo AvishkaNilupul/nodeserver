@@ -86,6 +86,8 @@ function cfg() {
     // "nobody" (collectCandidates throws), so no row is flipped out on a blip.
     unreadable,
     on: af.autofarmStock === true,
+    // May such an account be HELD for a vault unit (see vaultAllowed)?
+    vault: af.autofarmStock === true && af.autofarmStockVault === true,
     // Live inventory reads per holdings tick, on top of the no-claim farm's
     // own quota — its cadence is never diluted.
     perTick: clampInt(af.autofarmStockPerTick, 15, 0, 60),
@@ -506,6 +508,36 @@ function soldTag(market, orderId) {
   return SOLD_TAG + ":" + str(market) + (orderId ? ":" + str(orderId) : "");
 }
 
+// ---------------------------------------------------------------------------
+// Vault markets (docs/UNCLAIMED-SELLING-PLAN.md §10; switch
+// autoFarm.autofarmStockVault, default OFF)
+// ---------------------------------------------------------------------------
+// GGSel keeps the credentials in its own vault and Gameflip in the listing's
+// delivery code, so the account is taken when the offer is MADE (the claim
+// layer's "fed" mode), not when a buyer pays. An auto-farm account HELD that
+// way is treated as sold from that moment, except for the money:
+//   - reserveLeftovers stamps it exactly as a sale does (order id empty);
+//   - parkHeld takes it out of its bot — the marketplace has its login now;
+//   - a sale ends in retirePending like any other;
+//   - a unit that ends WITHOUT a sale goes through noclaimStock.releaseClaim,
+//     which calls releaseHeld: the stamps come off and the account is stock
+//     again.
+// Never Plati / Digiseller: the owner blocked that market (2026-09-28).
+const VAULT_MARKETS = ["ggsel", "gameflip"];
+
+function vaultAllowed(market) {
+  return cfg().vault && VAULT_MARKETS.includes(lower(market));
+}
+
+// The pool note of an account that holds unclaimed stock and sits in no bot —
+// utils/poolStock's own wording, so the pool check manages it from here on
+// (it frees the account once the drops are gone).
+function stockHoldNote(ledger) {
+  const n = Array.isArray(ledger && ledger.drops) ? ledger.drops.length : 0;
+  const game = str(ledger && ledger.game).trim();
+  return ("unclaimed stock — " + n + " drop(s)" + (game ? " (" + game + ")" : "") + " held out of the pool until sold").slice(0, 200);
+}
+
 // Returns { ok, botId, reserved } — ok:false means the caller must undo its
 // ledger commit and move on.
 async function reserveLeftovers(pool, { market = "", orderId = "", setId = "", deps } = {}) {
@@ -638,6 +670,55 @@ async function releaseForPool(pool, { market = "", orderId = "", deps } = {}) {
   return n;
 }
 
+// A HELD account whose vault unit ended without a sale goes back to stock. The
+// stamps of the hold come off (this account's ids, this market's tag), and the
+// pool row gets a note that makes it a candidate again: the stock hold when it
+// has left its bot (parked), the note it carried when it is still farming
+// there. With neither to go by the pending note stays and a human is told —
+// a stock hold on an account that still sits in a bot would let the pool
+// check free it into a second one. Never throws; true = the pool row is stock.
+async function releaseHeld(ledger, { deps } = {}) {
+  const d = deps || defaultDeps();
+  try {
+    if (!ledger || ledger.farm !== FARM || !ledger.poolAccountId) return false;
+    const pool = await d.AvailableAccount.findById(ledger.poolAccountId, { clientSecret: 1, claimedNote: 1, status: 1 }).lean();
+    if (!pool) return false;
+    const bots = pool.clientSecret
+      ? await d.BotAccount.find({ clientSecret: str(pool.clientSecret) }, { _id: 1 }).lean()
+      : [];
+    await releaseLeftovers(
+      bots.map((b) => b._id).concat([pool._id]),
+      soldTag(ledger.market || ledger.soldMarket, ""),
+      { deps: d },
+    );
+    const note = ledger.farmParkedAt ? stockHoldNote(ledger) : str(ledger.farmPoolNote);
+    if (!note) {
+      await Promise.resolve(
+        d.logEvent({
+          category: "noclaim_shop",
+          action: "autofarm_release_needs_human",
+          actor: "autofarmStock",
+          severity: "error",
+          subject: str(ledger.login),
+          game: str(ledger.game),
+          detail:
+            "an auto-farm account came back unsold from " + str(ledger.market) +
+            " but the note its pool row had is not on record — its pool row still says a sale is pending",
+        }),
+      ).catch(() => {});
+      return false;
+    }
+    const r = await d.AvailableAccount.updateOne(
+      { _id: pool._id, status: "claimed", claimedNote: { $regex: "^" + PENDING_NOTE } },
+      { $set: { claimedNote: note } },
+    );
+    return !!(r && (r.modifiedCount || r.nModified));
+  } catch (e) {
+    console.error("autofarmStock: release of a held account failed:", e && e.message);
+    return false;
+  }
+}
+
 // ---------------------------------------------------------------------------
 // After the sale
 // ---------------------------------------------------------------------------
@@ -708,27 +789,38 @@ async function readOperatorConfigs(d) {
 //      the token, none could not be read and no reload is owed does the bot
 //      record leave its bot and the pool row say "spent — …" with the sold game.
 // One failure never blocks the rest. Never throws.
-async function retirePending({ limit = 10, deps } = {}) {
+//
+// `held: true` is the same walk for accounts HELD for a vault unit (parkHeld):
+// nobody has bought them, but the marketplace has their login, so they leave
+// their bot now. It differs in three places only — which ledgers it takes
+// ("manual", not yet parked), that no sale is announced, and that it ends by
+// stamping `farmParkedAt` instead of "spent".
+async function retirePending({ limit = 10, deps, held = false } = {}) {
   const d = deps || defaultDeps();
   const out = { pending: 0, retired: 0, waiting: 0, removed: 0, reloaded: [], errors: [] };
   const max = clampInt(limit, 10, 1, 50);
   let rows;
   try {
-    rows = await d.UnclaimedAccount.find({
-      source: "noclaim",
-      farm: FARM,
-      status: "sold",
-      manualDeliveredAt: { $ne: null },
-      manualSpentAt: null,
-      // A sale only a human can finish (farmHuman) is looked at again every
-      // few hours, not every pass: each look reads every bot host twice.
-      $or: [{ farmHuman: { $in: ["", null] } }, { lastCheckedAt: { $lt: new Date(Date.now() - HUMAN_RETRY_MS) } }],
-    })
+    // One only a human can finish (farmHuman) is looked at again every few
+    // hours, not every pass: each look reads every bot host twice.
+    const later = [{ farmHuman: { $in: ["", null] } }, { lastCheckedAt: { $lt: new Date(Date.now() - HUMAN_RETRY_MS) } }];
+    rows = await d.UnclaimedAccount.find(
+      held
+        ? { source: "noclaim", farm: FARM, status: "manual", farmParkedAt: null, $or: later }
+        : {
+            source: "noclaim",
+            farm: FARM,
+            status: "sold",
+            manualDeliveredAt: { $ne: null },
+            manualSpentAt: null,
+            $or: later,
+          },
+    )
       .sort({ lastCheckedAt: 1, soldAt: 1, _id: 1 })
       .limit(max)
       .lean();
   } catch (e) {
-    out.errors.push("could not read the sold ledgers: " + ((e && e.message) || e));
+    out.errors.push("could not read the " + (held ? "held" : "sold") + " ledgers: " + ((e && e.message) || e));
     return out;
   }
   out.pending = rows.length;
@@ -770,7 +862,7 @@ async function retirePending({ limit = 10, deps } = {}) {
       w.secret = secret;
       w.bots = await d.BotAccount.find({ clientSecret: secret }, { _id: 1, login: 1 }).lean();
       const tag = soldTag(l.soldMarket || l.market, orderIdOf(l));
-      const stamp = { soldAt: l.soldAt || new Date(), soldToUsername: tag, soldToAdminId: "", soldSetId: str(l.set || ""), soldBulkOrderId: "" };
+      const stamp = { soldAt: l.soldAt || l.manualAt || new Date(), soldToUsername: tag, soldToAdminId: "", soldSetId: str(l.set || ""), soldBulkOrderId: "" };
 
       // 1. Claimed drops logged since the claim leave the archive too — under
       // the bot record's id and under the pool row's (see factsFor).
@@ -789,8 +881,9 @@ async function retirePending({ limit = 10, deps } = {}) {
         );
       }
       // The owner hears of the sale once — the first time this pass sees it —
-      // in the words the no-claim farm's sales use (spendAccount).
-      if (await writeSaleSignal(d, l, w.bots[0] || null)) {
+      // in the words the no-claim farm's sales use (spendAccount). A held
+      // account has not been sold to anybody: nothing is announced.
+      if (!held && (await writeSaleSignal(d, l, w.bots[0] || null))) {
         const price = Math.max(0, Number(l.soldPriceUsd) || 0);
         try {
           Promise.resolve(
@@ -891,7 +984,9 @@ async function retirePending({ limit = 10, deps } = {}) {
               severity: "error",
               subject: w.login,
               game: str(l.game),
-              detail: "sold auto-farm account could not be taken out of farming automatically: " + w.human,
+              detail:
+                (held ? "held" : "sold") +
+                " auto-farm account could not be taken out of farming automatically: " + w.human,
             }),
           ).catch(() => {});
         }
@@ -908,14 +1003,38 @@ async function retirePending({ limit = 10, deps } = {}) {
       for (const b of w.bots) {
         await d.BotAccount.updateOne({ _id: b._id }, { $set: { enabled: false, configFile: "", container: "" } });
       }
+      if (held) {
+        // Out of every bot, proved. The pool row keeps its pending note: the
+        // unit is on a shelf, not sold.
+        const parked = await d.UnclaimedAccount.updateOne(
+          { _id: l._id, status: "manual", farmParkedAt: null },
+          { $set: { farmParkedAt: new Date() } },
+        );
+        if (parked && (parked.modifiedCount || parked.nModified)) {
+          out.retired++;
+        } else {
+          // The unit ended while this pass was taking the account out of its
+          // bot. A release put the pool row's old farming note back — but the
+          // account farms nowhere now, so it is held as stock instead (the
+          // pool check frees it when the drops are gone). A sale leaves the
+          // pending note, and the sold pass finds the configs clean.
+          await d.AvailableAccount.updateOne(
+            { _id: w.pool._id, status: "claimed", claimedNote: AUTO_FARM_NOTE },
+            { $set: { claimedNote: stockHoldNote(l) } },
+          );
+        }
+        continue;
+      }
       const pool = w.pool;
       const game = settings.normGameName ? settings.normGameName(l.game) : lower(l.game);
       const games = new Set((Array.isArray(pool.soldGames) ? pool.soldGames : []).filter(Boolean));
       if (game) games.add(game);
       const note = ("spent — " + SPENT_LABEL + " (" + (l.note || l.soldMarket || "sold") + ")").slice(0, 200);
+      // `listed` is the tick a vault unit put on the row while it was on a
+      // shelf; a sold account is on none.
       await d.AvailableAccount.updateOne(
         { _id: pool._id },
-        { $set: { status: "claimed", claimedNote: note, soldGames: [...games] } },
+        { $set: { status: "claimed", claimedNote: note, soldGames: [...games], listed: false } },
       );
       await Promise.resolve(
         d.recordPoolUsage([pool._id], { event: "spent", actor: "autofarmStock", note, game: game || "" }),
@@ -950,6 +1069,12 @@ async function retirePending({ limit = 10, deps } = {}) {
     );
   }
   return out;
+}
+
+// Take the auto-farm accounts HELD for a vault unit out of farming (see
+// retirePending, `held`). { pending, retired (= parked), waiting, … }.
+function parkHeld({ limit = 10, deps } = {}) {
+  return retirePending({ limit, deps, held: true });
 }
 
 // "eldorado order 1234" -> "1234" (noclaimStock.orderNote).
@@ -1240,4 +1365,10 @@ module.exports = {
   releaseForPool,
   retirePending,
   PENDING_NOTE,
+  // vault markets
+  VAULT_MARKETS,
+  vaultAllowed,
+  stockHoldNote,
+  releaseHeld,
+  parkHeld,
 };

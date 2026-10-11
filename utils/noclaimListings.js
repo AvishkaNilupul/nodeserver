@@ -1683,6 +1683,9 @@ async function checkUnitHealth(ledger, row, set, tally, errors) {
         game: ledger.game || "",
         botId: ledger.botId || "",
         container: ledger.container || "",
+        // An auto-farm account is read by the auto-farm rule: only the finished
+        // drops its campaign will not let a bot claim are what the unit holds.
+        farm: ledger.farm || "",
       });
     } catch {
       res = null;
@@ -1931,6 +1934,14 @@ async function runPass({ sweep = false } = {}) {
     await step("autofarm-retire", async () => {
       out.autofarm = await require("./autofarmStock").retirePending({ limit: 10 });
       for (const e of (out.autofarm && out.autofarm.errors) || []) out.errors.push("autofarm " + e);
+    });
+    // 1c. …and an auto-farm account HELD for a vault unit leaves its bot the
+    // same way, before any buyer has its login (nothing to do unless one is).
+    await step("autofarm-park", async () => {
+      const afs = require("./autofarmStock");
+      if (typeof afs.parkHeld !== "function") return;
+      out.autofarmParked = await afs.parkHeld({ limit: 10 });
+      for (const e of (out.autofarmParked && out.autofarmParked.errors) || []) out.errors.push("autofarm park " + e);
     });
     // 2. Quantity sales on every live GGSel / Plati row, then any delisted
     // row whose release was held because its stock could not be read.

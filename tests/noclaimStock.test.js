@@ -225,6 +225,7 @@ function resetState() {
     afBlock: new Map(), // loginLower -> reason
     afReserve: new Map(), // usernameLower -> { ok, why } | Error
     afLive: "", // what the live inventory says about an auto-farm account
+    afVault: new Set(), // vault markets an auto-farm account may be held for
   });
 }
 resetState();
@@ -342,6 +343,13 @@ const autofarmStub = {
   },
   async reserveForLedger(row) {
     state.afCalls.push(["resume-stamp", row.loginLower]);
+    return true;
+  },
+  vaultAllowed(market) {
+    return state.afVault.has(market);
+  },
+  async releaseHeld(ledger) {
+    state.afCalls.push(["release-held", ledger.loginLower, ledger.farmPoolNote]);
     return true;
   },
 };
@@ -1469,6 +1477,71 @@ test("auto-farm: never fed to a vault listing — only a claim-at-sale order tak
   assert.deepStrictEqual(out.map((a) => a.login), ["noclaim"]);
   assert.deepStrictEqual(state.afCalls, []);
   assert.strictEqual(ledgerFor("farmer").length, 0);
+});
+
+test("auto-farm: with its vault switch on, a fed claim HOLDS one for GGSel — stamped like a sale, its pool note remembered", async () => {
+  world([
+    { login: "farmer", items: [ALPHA(2), BETA(1)], farm: "autofarm", pool: { claimedNote: "auto-farm: Overwatch 2 (c-1)" } },
+    { login: "noclaim", items: [ALPHA(2), BETA(1), GAMMA(1)] },
+  ]);
+  state.afVault.add("ggsel");
+  const out = await ncs.claimForSet(SET, 2, { market: "ggsel", listingId: LISTING_ID, mode: "fed" });
+  assert.deepStrictEqual(out.map((a) => a.login).sort(), ["farmer", "noclaim"]);
+  const [af] = ledgerFor("farmer");
+  assert.strictEqual(af.status, "manual");
+  assert.strictEqual(af.farm, "autofarm");
+  assert.strictEqual(af.market, "ggsel");
+  assert.strictEqual(af.farmPoolNote, "auto-farm: Overwatch 2 (c-1)", "what a release puts back");
+  assert.strictEqual(af.farmParkedAt, null);
+  assert.strictEqual(af.manualDeliveredAt, null);
+  // The same rules as a sale, then the same stamps — with no order to name.
+  const calls = state.afCalls.filter((c) => c[1] === "farmer" || c[0] === "live");
+  assert.deepStrictEqual(calls.map((c) => c[0]), ["block", "live", "reserve"]);
+  assert.deepStrictEqual(calls[2][2], { market: "ggsel", orderId: "", setId: SET_ID });
+  // The console's "Listed" tick, like any vault unit.
+  assert.strictEqual(poolFor("farmer").listed, true);
+  // The no-claim account next to it is claimed exactly as it always was.
+  const [nc] = ledgerFor("noclaim");
+  assert.ok(!nc.farm, "no farm on a no-claim ledger");
+  assert.ok(!("farmPoolNote" in nc) && !("farmParkedAt" in nc), "and nothing auto-farm is written on it");
+});
+
+test("auto-farm: the switch is per market — one that is not allowed never holds one (Plati least of all)", async () => {
+  world([{ login: "farmer", items: [ALPHA(2), BETA(1)], farm: "autofarm" }]);
+  state.afVault.add("ggsel");
+  for (const market of ["digiseller", "gameflip"]) {
+    const out = await ncs.claimForSet(SET, 1, { market, listingId: LISTING_ID, mode: "fed" });
+    assert.deepStrictEqual(out, [], market);
+  }
+  assert.strictEqual(ledgerFor("farmer").length, 0);
+  assert.deepStrictEqual(state.afCalls, []);
+});
+
+test("auto-farm: a held account whose stamps are refused is not held", async () => {
+  world([{ login: "farmer", items: [ALPHA(2), BETA(1)], farm: "autofarm" }]);
+  state.afVault.add("ggsel");
+  state.afReserve.set("farmer", { ok: false, why: "a drop was reserved or connected meanwhile" });
+  const out = await ncs.claimForSet(SET, 1, { market: "ggsel", listingId: LISTING_ID, mode: "fed" });
+  assert.deepStrictEqual(out, []);
+  assert.strictEqual(ledgerFor("farmer").length, 0, "the ledger commit is undone");
+  assert.strictEqual(poolFor("farmer").listed, false);
+});
+
+test("auto-farm: a held unit that ends without a sale hands the account back — a no-claim one is released as before", async () => {
+  const held = ledgerDoc({ login: "farmer", loginLower: "farmer", farm: "autofarm", market: "ggsel", manualPriorStatus: "", manualListing: LISTING_ID, poolAccountId: "p1", farmPoolNote: "auto-farm: Overwatch 2 (c-1)" });
+  const fleet = ledgerDoc({ login: "bot", loginLower: "bot", manualPriorStatus: "", manualListing: LISTING_ID, poolAccountId: "p2" });
+  const n = await ncs.releaseClaim([held._id, fleet._id], { reason: "delisted" });
+  assert.strictEqual(n, 2);
+  assert.strictEqual(ledgerFor("farmer").length, 0);
+  assert.strictEqual(ledgerFor("bot").length, 0);
+  // Only the auto-farm ledger goes back through its own module, with what it
+  // needs to restore the pool row — read before the ledger was deleted.
+  assert.deepStrictEqual(state.afCalls, [["release-held", "farmer", "auto-farm: Overwatch 2 (c-1)"]]);
+  // A ledger that was not released (sold meanwhile) is not handed back.
+  const sold = ledgerDoc({ login: "gone", loginLower: "gone", farm: "autofarm", status: "sold", manualPriorStatus: "" });
+  state.afCalls.length = 0;
+  assert.strictEqual(await ncs.releaseClaim([sold._id]), 0);
+  assert.deepStrictEqual(state.afCalls, []);
 });
 
 test("auto-farm: a retried order resumes its accounts without asking the rules again", async () => {

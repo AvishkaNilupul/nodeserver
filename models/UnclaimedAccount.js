@@ -52,6 +52,14 @@ const unclaimedAccountSchema = new mongoose.Schema(
     // Why that pass cannot finish this sale by itself ("" = it can): its token
     // sits in a renter stack or in a file the config editor will not write.
     farmHuman: { type: String, default: "" },
+    // An auto-farm account HELD for a vault unit (GGSel / Gameflip — the claim
+    // layer's "fed" mode, utils/autofarmStock.vaultAllowed). `farmPoolNote` is
+    // the note its pool row carried when it was held: what a release puts back
+    // while the account is still in its bot. `farmParkedAt` is when it was
+    // taken out of its bot configs — the marketplace has its login from the
+    // moment it is held — after which a release makes it a stock hold instead.
+    farmPoolNote: { type: String, default: "" },
+    farmParkedAt: { type: Date, default: null },
 
     // Snapshot of the unclaimed drops that were listed, for the panel.
     drops: {

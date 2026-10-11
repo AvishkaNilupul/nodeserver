@@ -114,6 +114,8 @@ const LEDGER_DEFAULTS = {
   manualAt: null,
   manualDeliveredAt: null,
   manualSpentAt: null,
+  farmPoolNote: "",
+  farmParkedAt: null,
 };
 
 // ---------------------------------------------------------------------------
@@ -603,7 +605,16 @@ async function commitLedger(c, ctx) {
   // An auto-farm account: its sale is cleaned up by utils/autofarmStock, never
   // by spendAccount (see spendPending). Written only for those, so a no-claim
   // claim writes exactly what it always did.
-  if (str(c.farm)) fields.farm = str(c.farm);
+  if (str(c.farm)) {
+    fields.farm = str(c.farm);
+    // A claim starts a new life here too: what a HELD unit's release puts back
+    // (the note the pool row carries right now), and no leftover from a row
+    // that was held, parked or flagged before.
+    fields.farmPoolNote = str(ctx.poolNote);
+    fields.farmParkedAt = null;
+    fields.farmReloads = [];
+    fields.farmHuman = "";
+  }
 
   // 2. The existing ledger row, compare-and-set on the status it has. Two rows
   // for one login is ambiguous — the other row may be selling this account
@@ -857,10 +868,11 @@ async function claimForSet(set, want, opts = {}) {
     // config catches up and the sweep files it under one name.
     if (str(c.login).trim().toLowerCase() !== c.loginLower) continue;
     const isAutofarm = str(c.farm) === AUTOFARM;
-    // An auto-farm account is sold on the claim-at-sale markets only: a vault
-    // unit can be released again, and nothing here hands its claimed drops
-    // back to the archive when that happens.
-    if (isAutofarm && mode !== "sold") continue;
+    // An auto-farm account is HELD for a vault unit (GGSel / Gameflip, never
+    // Plati) only when its own switch allows it — utils/autofarmStock
+    // .vaultAllowed. A held account is treated as sold from this moment except
+    // for the money, and releaseClaim hands it back (releaseHeld).
+    if (isAutofarm && mode !== "sold" && !autofarm().vaultAllowed(m)) continue;
     let commit = null;
     let pool = null;
     try {
@@ -919,6 +931,7 @@ async function claimForSet(set, want, opts = {}) {
         drops,
         game,
         now: new Date(),
+        poolNote: pool && pool.claimedNote,
       });
       if (!commit) continue;
 
@@ -1057,6 +1070,13 @@ async function releaseClaim(ledgerIds, { reason = "" } = {}) {
     // Clears the console's "Listed" tick unless another listed/manual ledger
     // of the same pool account still holds it.
     await safely("markOwnerUnlisted", () => ual().markOwnerUnlisted(l));
+    // An auto-farm account held for a vault unit carries the stamps of a sale
+    // (its claimed drops out of the archive, its bot record sold, a pending
+    // note on its pool row). The unit ended without one: they all come off, or
+    // the account is neither stock nor sold for good.
+    if (str(l.farm) === AUTOFARM) {
+      await safely("autofarm release", () => autofarm().releaseHeld(l));
+    }
   }
   if (logins.length) {
     invalidateSnapshot();

@@ -492,7 +492,10 @@ function load(o = {}) {
     [
       "./autofarmStock",
       stubFns(
-        { retirePending: () => ({ pending: 0, retired: 0, waiting: 0, removed: 0, reloaded: [], errors: [] }) },
+        {
+          retirePending: () => ({ pending: 0, retired: 0, waiting: 0, removed: 0, reloaded: [], errors: [] }),
+          parkHeld: () => ({ pending: 0, retired: 0, waiting: 0, removed: 0, reloaded: [], errors: [] }),
+        },
         o.autofarm,
       ),
     ],
@@ -1264,6 +1267,7 @@ test("runPass: unclaimed auto-farm stock is offered each pass; a failure there i
   // Every other step still ran.
   assert.strictEqual(bad.called("spendPending").length, 1);
   assert.strictEqual(bad.called("retirePending").length, 1);
+  assert.strictEqual(bad.called("parkHeld").length, 1, "accounts held for a vault unit are parked each pass");
   assert.strictEqual(bad.mod.status().running, false);
 });
 

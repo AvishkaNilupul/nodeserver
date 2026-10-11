@@ -188,6 +188,13 @@ const AUTO_FARM_DEFAULTS = {
   autofarmStockTaskDays: 8,
   // Optional allow-list of games for a first rollout; empty = every game.
   autofarmStockGames: [],
+  // VAULT MARKETS. On = such an account may also be HELD for a GGSel or
+  // Gameflip unit — markets that take the credentials when the offer is made,
+  // not when a buyer pays. A held account is treated as sold from that moment
+  // except for the money: its claimed drops leave the archive, it is taken out
+  // of its bot, and an unsold unit hands it back as stock. Never Plati. Off =
+  // the claim-at-sale markets only (Eldorado, G2G, PlayerAuctions). Ships OFF.
+  autofarmStockVault: false,
   // THE UNCLAIMED ERA (utils/autofarmStock.eraForTask). On = a campaign that
   // needs a link is farmed for what can be SOLD: the top-up counts only the
   // accounts a buyer could be handed whole, sizes the task to what the game

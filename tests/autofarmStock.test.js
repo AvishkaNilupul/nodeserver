@@ -653,6 +653,214 @@ function soldWorld(extra = {}) {
   return { ...w, pool, bot, ledger };
 }
 
+// ---------------------------------------------------------------------------
+// Vault markets (GGSel / Gameflip): held, parked, sold or released
+// ---------------------------------------------------------------------------
+
+function heldWorld(ledgerOver = {}, extra = {}) {
+  const pool = poolRow("Held", { claimedNote: "unclaimed sale pending — ggsel", listed: true });
+  const heldAt = new Date("2026-10-11T02:00:00Z");
+  const bot = botRow("Held", {
+    host: "contabo", configFile: "config_07.json", container: "twitchbotx7", enabled: true,
+    soldAt: heldAt, soldToUsername: "unclaimed-sale:ggsel",
+  });
+  const other = botRow("Other", { soldAt: heldAt, soldToUsername: "unclaimed-sale:ggsel" });
+  const ledger = {
+    _id: oid(),
+    source: "noclaim",
+    farm: "autofarm",
+    login: "Held",
+    loginLower: "held",
+    game: "Brawlhalla",
+    poolAccountId: String(pool._id),
+    status: "manual",
+    market: "ggsel",
+    note: "manual no-claim listing — ggsel",
+    set: "set-1",
+    manualListing: "5f0000000000000000000002",
+    manualAt: heldAt,
+    manualDeliveredAt: null,
+    manualSpentAt: null,
+    farmPoolNote: "auto-farm: Brawlhalla (c-1)",
+    farmParkedAt: null,
+    drops: [{ name: "A" }, { name: "B" }, { name: "C" }],
+    ...ledgerOver,
+  };
+  const w = world({
+    pool: [pool],
+    bots: [bot, other],
+    drops: [
+      drop(bot, { soldAt: heldAt, soldToUsername: "unclaimed-sale:ggsel" }),
+      // Another account held on the same market carries the same tag…
+      drop(other, { soldAt: heldAt, soldToUsername: "unclaimed-sale:ggsel" }),
+      // …and has history of its own.
+      drop(other, { connected: true }),
+    ],
+    ledgers: [ledger],
+    tasks: [{ _id: oid(), status: "active", game: "Brawlhalla", assignedAccounts: ["Held", "Mate"] }],
+    hostFiles: {
+      contabo: {
+        "config_07.json": [
+          { Login: "Held", ClientSecret: "cs-held", Enabled: true },
+          { Login: "Mate", ClientSecret: "cs-mate", Enabled: true },
+        ],
+      },
+    },
+    ...extra,
+  });
+  return { ...w, pool, bot, other, ledger };
+}
+
+test("vaultAllowed: its own switch on top of the stock switch — GGSel and Gameflip, never Plati", () => {
+  autoFarm = { autofarmStock: true };
+  assert.strictEqual(af.vaultAllowed("ggsel"), false, "ships off");
+  autoFarm = { autofarmStockVault: true };
+  assert.strictEqual(af.vaultAllowed("ggsel"), false, "nothing without the stock switch");
+  autoFarm = { autofarmStock: true, autofarmStockVault: "true" };
+  assert.strictEqual(af.vaultAllowed("ggsel"), false, "exactly true");
+  autoFarm = { autofarmStock: true, autofarmStockVault: true };
+  assert.strictEqual(af.vaultAllowed("ggsel"), true);
+  assert.strictEqual(af.vaultAllowed("GGSel "), true);
+  assert.strictEqual(af.vaultAllowed("gameflip"), true);
+  for (const m of ["digiseller", "plati", "eldorado", "g2g", "playerauctions", "", null]) {
+    assert.strictEqual(af.vaultAllowed(m), false, String(m));
+  }
+  assert.deepStrictEqual(af.VAULT_MARKETS, ["ggsel", "gameflip"]);
+});
+
+test("parkHeld: an account held for a vault unit leaves its bot — nothing is announced, nothing says spent", async () => {
+  const w = heldWorld();
+  const r = await af.parkHeld({ deps: w.deps });
+  assert.strictEqual(r.retired, 1);
+  assert.strictEqual(r.removed, 1);
+  assert.deepStrictEqual(r.errors, []);
+  // Out of its config, the bot reloaded, the task no longer counts on it.
+  assert.deepStrictEqual(w.hostFiles.contabo["config_07.json"].map((u) => u.Login), ["Mate"]);
+  assert.deepStrictEqual(w.reloads, ["contabo/config_07.json -> twitchbotx7"]);
+  assert.deepStrictEqual(w.deps.AutoFarmTask.docs[0].assignedAccounts, ["Mate"]);
+  assert.strictEqual(w.bot.enabled, false);
+  assert.strictEqual(w.bot.configFile, "");
+  // The ledger is parked, still a unit on a shelf.
+  assert.ok(w.ledger.farmParkedAt instanceof Date);
+  assert.strictEqual(w.ledger.status, "manual");
+  assert.strictEqual(w.ledger.manualSpentAt, null);
+  // The pool row still says a sale is pending, and is still ticked listed.
+  assert.strictEqual(w.pool.claimedNote, "unclaimed sale pending — ggsel");
+  assert.strictEqual(w.pool.listed, true);
+  // Nobody bought anything: no sale signal, no message, no "spent" in the usage trail.
+  assert.strictEqual(w.deps.SaleSignal.docs.length, 0);
+  assert.deepStrictEqual(w.telegrams, []);
+  assert.deepStrictEqual(w.usage, []);
+  // Done once.
+  assert.strictEqual((await af.parkHeld({ deps: w.deps })).pending, 0);
+  // And the sold pass has nothing to do with it either.
+  assert.strictEqual((await af.retirePending({ deps: w.deps })).pending, 0);
+});
+
+test("parkHeld: an unreadable host proves nothing — the account is not called parked", async () => {
+  const w = heldWorld({}, { hostFiles: { contabo: new Error("ssh timeout") } });
+  const r = await af.parkHeld({ deps: w.deps });
+  assert.strictEqual(r.retired, 0);
+  assert.strictEqual(w.ledger.farmParkedAt, null);
+});
+
+test("a held account that then sells is finished by the sold pass: spent, the listed tick cleared, one message", async () => {
+  const w = heldWorld();
+  await af.parkHeld({ deps: w.deps });
+  // GGSel sold the unit: the stock count fell and markSold recorded it.
+  Object.assign(w.ledger, { status: "sold", soldAt: new Date("2026-10-11T05:00:00Z"), soldMarket: "ggsel", soldPriceUsd: 0.95, note: "ggsel sale", manualDeliveredAt: new Date("2026-10-11T05:00:01Z") });
+  const r = await af.retirePending({ deps: w.deps });
+  assert.strictEqual(r.retired, 1);
+  assert.strictEqual(r.removed, 0, "it left its bot when it was held");
+  assert.deepStrictEqual(r.errors, []);
+  assert.match(w.pool.claimedNote, /^spent — auto-farm unclaimed sale \(ggsel sale\)$/);
+  assert.strictEqual(w.pool.listed, false);
+  assert.deepStrictEqual(w.pool.soldGames, [settings.normGameName("Brawlhalla")]);
+  assert.ok(w.ledger.manualSpentAt instanceof Date);
+  // The stamp the hold put on its claimed drop is the sale's stamp: same tag.
+  assert.strictEqual(w.deps.DropLog.docs[0].soldToUsername, "unclaimed-sale:ggsel");
+  assert.strictEqual(w.deps.SaleSignal.docs.length, 1);
+  assert.strictEqual(w.deps.SaleSignal.docs[0].marketplace, "ggsel");
+  assert.strictEqual(w.telegrams.length, 1);
+  assert.match(w.telegrams[0], /SOLD \(auto-farm unclaimed stock\)[\s\S]*Market: ggsel — \$0\.95/);
+});
+
+test("a unit sold before the account was parked: the sold pass takes it out of its bot itself", async () => {
+  const w = heldWorld({ status: "sold", soldAt: new Date(), soldMarket: "ggsel", note: "ggsel sale", manualDeliveredAt: new Date() });
+  assert.strictEqual((await af.parkHeld({ deps: w.deps })).pending, 0, "not a held ledger any more");
+  const r = await af.retirePending({ deps: w.deps });
+  assert.strictEqual(r.retired, 1);
+  assert.strictEqual(r.removed, 1);
+  assert.deepStrictEqual(w.hostFiles.contabo["config_07.json"].map((u) => u.Login), ["Mate"]);
+  assert.strictEqual(w.pool.listed, false);
+});
+
+test("releaseHeld: an unsold unit hands the account back — the hold's stamps come off, on this account only", async () => {
+  // Parked: it sits in no bot, so it is held as stock (the pool check's own wording).
+  const parked = heldWorld({ farmParkedAt: new Date() });
+  assert.strictEqual(await af.releaseHeld(parked.ledger, { deps: parked.deps }), true);
+  assert.strictEqual(parked.pool.claimedNote, "unclaimed stock — 3 drop(s) (Brawlhalla) held out of the pool until sold");
+  assert.strictEqual(parked.pool.status, "claimed");
+  const [mine, others, linked] = parked.deps.DropLog.docs;
+  assert.strictEqual(mine.soldAt, null);
+  assert.strictEqual(mine.soldToUsername, "");
+  assert.strictEqual(others.soldToUsername, "unclaimed-sale:ggsel", "another held account keeps its stamp");
+  assert.strictEqual(linked.connected, true, "history is left alone");
+  assert.strictEqual(parked.bot.soldAt, null);
+  assert.strictEqual(parked.bot.soldToUsername, "");
+  assert.strictEqual(parked.other.soldToUsername, "unclaimed-sale:ggsel");
+  // The auto-farm's own rules call it free again.
+  const facts = await af.factsFor(
+    [{ loginLower: "held", login: "Held", clientSecret: "cs-held", note: parked.pool.claimedNote, poolId: parked.pool._id }],
+    { deps: parked.deps },
+  );
+  assert.strictEqual(facts.get("held").reason, "");
+
+  // Still in its bot (released before the park pass reached it): the note it had.
+  const farming = heldWorld();
+  assert.strictEqual(await af.releaseHeld(farming.ledger, { deps: farming.deps }), true);
+  assert.strictEqual(farming.pool.claimedNote, "auto-farm: Brawlhalla (c-1)");
+  assert.strictEqual(farming.bot.soldAt, null);
+
+  // Neither to go by: the pending note stays, and a human is told. (A stock
+  // hold on an account that still sits in a bot would let the pool check free
+  // it into a second one.)
+  const blank = heldWorld({ farmPoolNote: "" });
+  assert.strictEqual(await af.releaseHeld(blank.ledger, { deps: blank.deps }), false);
+  assert.strictEqual(blank.pool.claimedNote, "unclaimed sale pending — ggsel");
+  assert.ok(blank.events.find((e) => e.action === "autofarm_release_needs_human"));
+
+  // Not this module's ledger: nothing is touched.
+  const fleet = heldWorld({ farm: "" });
+  assert.strictEqual(await af.releaseHeld(fleet.ledger, { deps: fleet.deps }), false);
+  assert.strictEqual(fleet.pool.claimedNote, "unclaimed sale pending — ggsel");
+  assert.strictEqual(fleet.deps.DropLog.docs[0].soldToUsername, "unclaimed-sale:ggsel");
+  assert.strictEqual(await af.releaseHeld(null), false);
+});
+
+test("parkHeld: a unit released while the pass was taking the account out is held as stock — not left farming nowhere", async () => {
+  const w = heldWorld();
+  // The release lands between the config edit and the parked stamp: the
+  // ledger is deleted and the pool row gets its farming note back.
+  const realRemove = w.deps.removeAccountFromConfig;
+  w.deps.removeAccountFromConfig = async (...a) => {
+    const n = await realRemove(...a);
+    w.deps.UnclaimedAccount.docs.length = 0;
+    w.pool.claimedNote = "auto-farm: Brawlhalla (c-1)";
+    return n;
+  };
+  const r = await af.parkHeld({ deps: w.deps });
+  assert.strictEqual(r.retired, 0);
+  assert.deepStrictEqual(w.hostFiles.contabo["config_07.json"].map((u) => u.Login), ["Mate"]);
+  assert.strictEqual(w.pool.claimedNote, "unclaimed stock — 3 drop(s) (Brawlhalla) held out of the pool until sold");
+});
+
+test("stockHoldNote: the pool check's own wording, so it manages the account from there", () => {
+  assert.strictEqual(af.stockHoldNote({ drops: [{}, {}], game: "SPAM" }), "unclaimed stock — 2 drop(s) (SPAM) held out of the pool until sold");
+  assert.strictEqual(af.stockHoldNote({}), "unclaimed stock — 0 drop(s) held out of the pool until sold");
+  assert.match(af.stockHoldNote({ drops: [{}], game: "G" }), /^unclaimed stock — /);
+});
+
 test("retirePending: nothing waiting = no host is read", async () => {
   const w = world({ hostFiles: { contabo: new Error("should not be read") } });
   const r = await af.retirePending({ deps: w.deps });
