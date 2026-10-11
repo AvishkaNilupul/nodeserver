@@ -774,6 +774,9 @@ async function publishNoclaimAutoDelivery({
           "\nThe account (" + (login || "?") + ") stays held so it cannot be sold elsewhere. " +
           "Check Gameflip for that draft/listing, delete it, then release the account on the no-claim page.",
       ).catch(() => {});
+      // Said in the error too, so a caller that lists by itself (utils/
+      // autofarmOffers) does not simply try again with another account.
+      e.message = String((e && e.message) || e) + HELD_MARK;
       throw e;
     }
     // Matching release, exactly as the other lanes release theirs: a publish
@@ -812,7 +815,14 @@ async function publishNoclaimAutoDelivery({
         " stays claimed on purpose:",
       e.message,
     );
-    throw e;
+    // The words every "live without a row" failure uses (noclaimListings
+    // .orphanedPublish), so whoever asked for the listing knows it exists.
+    const live = new Error(
+      "published on Gameflip but the row could not be saved — delist it by hand: " +
+        r.externalId + " (" + ((e && e.message) || e) + ")",
+    );
+    live.cause = e;
+    throw live;
   });
   // Best-effort and AFTER the row exists, like the account-listing lane's
   // markFed: throwing here would report a failed publish for a listing that
@@ -859,6 +869,8 @@ async function releaseNoclaimClaim(acc, reason) {
 //   "gone"   Gameflip no longer has it
 //   "there"  it still exists, or Gameflip would not say
 // A listing found still there gets one more delete before the second look.
+// On the error of a failed publish whose auto-farm account was NOT handed back.
+const HELD_MARK = " [account kept held]";
 const FAILED_LISTING_RE = /\(draft ([0-9a-f][0-9a-f-]{7,}) discarded\)|Gameflip created ([0-9a-f][0-9a-f-]{7,}) but/i;
 async function failedPublishRemains(err) {
   const m = FAILED_LISTING_RE.exec(String((err && err.message) || err || ""));
@@ -2231,6 +2243,7 @@ module.exports = {
   gameflipCodeHeldLogins,
   noteIfCodeRefused,
   failedPublishRemains,
+  HELD_MARK,
   // exported for tests
   noteRelistFailure,
   relistRetryDelayMs,

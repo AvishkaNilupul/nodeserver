@@ -60,6 +60,11 @@
 //      and that sweep runs whether or not the lister itself is switched on
 //      (its own switch: autoFarm.autofarmOfferCopySweep). A game whose copy
 //      somebody else took down is left alone for two weeks, like rule 5.
+//      GAMEFLIP is a copy market of another kind: it takes the account when
+//      the listing is MADE, one account per listing. There an account is HELD
+//      (utils/autofarmStock's vault switch, on top of this one), a chain of a
+//      few units is listed, nobody's shelf is shared — so nothing follows
+//      anything — and a set gets a new chain only after the last one sold out.
 // ---------------------------------------------------------------------------
 const settings = require("./settings");
 
@@ -87,8 +92,16 @@ const MAYBE_LANDED_RE =
   /^Eldorado publish failed.*(\(HTTP 5\d\d\)|timeout|timed out|ETIMEDOUT|ECONNRESET|ECONNABORTED|socket hang up|network)/i;
 const ORPHAN_RE = /row could not be saved/i;
 // Rule 8 — the claim-at-sale markets a copy may go to, and their title limits.
-const COPY_MARKETS = ["g2g"];
-const COPY_TITLE_MAX = { g2g: 128 };
+const COPY_MARKETS = ["g2g", "gameflip"];
+// How a copy market takes an account. "claim": when a buyer pays — the copy
+// shares the set's shelf with the Eldorado offer and follows it. "vault": when
+// the listing is made — the account is HELD from then on (utils/autofarmStock
+// decides whether, and for how long it may be), so no shelf is shared.
+const COPY_KIND = { g2g: "claim", gameflip: "vault" };
+const SHELF_MARKETS = COPY_MARKETS.filter((m) => COPY_KIND[m] === "claim");
+const COPY_TITLE_MAX = { g2g: 128, gameflip: 120 };
+// Gameflip refuses a listing without a photo.
+const COPY_NEEDS_COVER = { gameflip: true };
 // On the row of every copy this makes: what tells it from a listing the owner
 // published by hand, which is never taken down from here.
 const COPY_MARK = " — auto-farm copy";
@@ -97,7 +110,7 @@ const COPY_MARK = " — auto-farm copy";
 const SWEPT_MARK = ": its Eldorado offer moved on";
 // The least a market lets an offer cost (utils/marketplaces G2G_MIN_PRICE:
 // G2G enforces min_qty × unit_price >= USD 1).
-const COPY_MIN_PRICE = { g2g: 1 };
+const COPY_MIN_PRICE = { g2g: 1, gameflip: 0.75 };
 // A G2G publish is two calls and a read-back (create a shell, write the offer,
 // read it). The write is worded "G2G publish offer failed …" and the read-back
 // "G2G publish: offer … did not read back". Once the write was sent, the copy
@@ -105,7 +118,13 @@ const COPY_MIN_PRICE = { g2g: 1 };
 // all, a 2xx whose body broke off, an error reported inside a 200, a failed
 // read-back — none of those says it did not land. (A needless hold costs one
 // look at G2G; a missed one is a second live offer no order can reach.)
-const COPY_MAYBE_RE = /^G2G publish(?!.*\(HTTP 4\d\d\))/i;
+// Gameflip's own lane decides what a failed publish leaves behind, and says so
+// in the error when it kept the account held (utils/gameflipFulfiller
+// HELD_MARK — it has paged the owner itself by then).
+const COPY_MAYBE = {
+  g2g: /^G2G publish(?!.*\(HTTP 4\d\d\))/i,
+  gameflip: /\[account kept held\]/,
+};
 // The record a copy leaves on its set's note:
 //   " — HOLD: <market> copy <YYYY-MM-DD HH:MM>Z: <what happened>"
 // It carries its own time, so the six-hour rest and the daily limit below are
@@ -176,6 +195,11 @@ function cfg() {
     // switches utils/g2gFulfiller reads (its dry-run ships ON).
     g2gOn: af.g2gAutoDeliver === true && af.g2gDeliverDryRun === false && af.g2gSyncStock !== false,
     copyMinHolders: Math.floor(clampNum(af.autofarmOfferCopyMinHolders, 6, 2, 80)),
+    // A market that HOLDS accounts (Gameflip): how many units one chain sells
+    // (one live listing at a time, the rest queued), and how many free
+    // accounts must hold the bundle before any is taken off the shelf for it.
+    vaultUnits: Math.floor(clampNum(af.autofarmOfferVaultUnits, 2, 1, 10)),
+    vaultMinHolders: Math.floor(clampNum(af.autofarmOfferVaultMinHolders, 8, 2, 80)),
     copiesPerDay: Math.floor(clampNum(af.autofarmOfferCopiesPerDay, 6, 1, 30)),
     // A copy never costs more than the Eldorado offer of the same bundle times
     // this: the engine's figure for a market is an average over bundles of
@@ -460,6 +484,10 @@ function defaultDeps() {
       const brand = g.brandForGame(game);
       return brand ? { serviceId: g.G2G_ITEMS_SERVICE, brandId: brand.brandId } : null;
     },
+    // May an auto-farm account be HELD for this market, and how long its
+    // bundle must still last for that (utils/autofarmStock's vault rules).
+    vaultAllowed: (market) => require("./autofarmStock").vaultAllowed(market),
+    vaultMinLifeMs: () => require("./autofarmStock").vaultMinLifeMs(),
     // Takes a copy off sale (a status change on G2G, never a delete).
     delistCopy: (market, externalId) => {
       if (market === "g2g") return require("./marketplaces").g2gDelist(externalId);
@@ -1038,21 +1066,45 @@ async function planCopies({ deps, now = Date.now() } = {}) {
   }
   // Copies somebody else took down lately (the owner's Delist button): their
   // games are left alone, as rule 5 leaves a game whose offer was taken down.
+  // A shelf copy this lister swept carries the sweep's own words; a held unit
+  // every automatic take-down writes its reason on (lastError) — the owner's
+  // Delist button leaves that empty.
   const gone = (
     (await d.MarketplaceListing.find(
       { marketplace: { $in: c.copyMarkets }, noclaimStock: true, status: "delisted", updatedAt: { $gte: new Date(now - DELIST_REST_MS) } },
-      { set: 1, marketplace: 1, note: 1, title: 1 },
+      { set: 1, marketplace: 1, note: 1, title: 1, lastError: 1 },
     ).lean()) || []
-  ).filter((r) => str(r.note).includes(COPY_MARK) && !str(r.note).includes(SWEPT_MARK));
-  // A set never gets a second copy on a market, whatever became of the first.
-  const had = new Set(
-    (
-      (await d.MarketplaceListing.find(
-        { marketplace: { $in: c.copyMarkets }, noclaimStock: true, set: { $in: setIds } },
-        { set: 1, marketplace: 1 },
-      ).lean()) || []
-    ).map((r) => str(r.set) + "|" + r.marketplace),
+  ).filter((r) =>
+    COPY_KIND[r.marketplace] === "vault"
+      ? !str(r.lastError).trim()
+      : str(r.note).includes(COPY_MARK) && !str(r.note).includes(SWEPT_MARK),
   );
+  // What each set has, or had, on each copy market.
+  //   shelf copy — one per set and market, ever, whatever became of it;
+  //   held chain — none while one is on sale, and a new one only when the
+  //                last listing of the set SOLD (a chain that sold through is
+  //                demand; one that came down unsold is not asked twice).
+  const past = new Map(); // set id + "|" + market -> { active, lastStatus, lastAt }
+  for (const r of (await d.MarketplaceListing.find(
+    { marketplace: { $in: c.copyMarkets }, noclaimStock: true, set: { $in: setIds } },
+    { set: 1, marketplace: 1, status: 1, createdAt: 1 },
+  ).lean()) || []) {
+    const k = str(r.set) + "|" + r.marketplace;
+    const cur = past.get(k) || { active: false, lastStatus: "", lastAt: -Infinity };
+    if (r.status === "active") cur.active = true;
+    const at = msOf(r.createdAt);
+    if (!(at < cur.lastAt)) {
+      cur.lastAt = Number.isFinite(at) ? at : cur.lastAt;
+      cur.lastStatus = str(r.status);
+    }
+    past.set(k, cur);
+  }
+  const had = (id, market) => {
+    const p = past.get(id + "|" + market);
+    if (!p) return false;
+    if (COPY_KIND[market] !== "vault") return true;
+    return p.active || p.lastStatus !== "sold";
+  };
   const fields = { name: 1, note: 1, price: 1, items: 1, coverGame: 1, stockSource: 1, createdAt: 1 };
   const byId = new Map();
   let want = [...new Set(setIds.concat(gone.map((r) => str(r.set)).filter(Boolean)))];
@@ -1081,8 +1133,16 @@ async function planCopies({ deps, now = Date.now() } = {}) {
   const strangers = []; // …and the no-claim bots' own
   const out = [];
   for (const market of c.copyMarkets) {
-    const sellLeadMs = d.nh.advertiseLeadMs(market);
-    const buildLeadMs = Math.max(Number(exp.bundleLeadMs) || 0, sellLeadMs + 12 * HOUR_MS);
+    const vault = COPY_KIND[market] === "vault";
+    // A shelf copy stops when its market stops advertising the bundle; a held
+    // unit comes off a day early as an Eldorado offer does.
+    const sellLeadMs = d.nh.advertiseLeadMs(vault ? MARKET : market);
+    // What the accounts must still hold for the copy to be worth making: past
+    // the market's lead for a shelf copy; for a held unit the life the claim
+    // layer itself asks before it holds an account, and a margin.
+    const buildLeadMs = vault
+      ? Math.max(Number(d.vaultMinLifeMs()) || 0, sellLeadMs) + 12 * HOUR_MS
+      : Math.max(Number(exp.bundleLeadMs) || 0, sellLeadMs + 12 * HOUR_MS);
     accounts.length = 0;
     strangers.length = 0;
     for (const h of (base && base.holdings) || []) {
@@ -1093,7 +1153,7 @@ async function planCopies({ deps, now = Date.now() } = {}) {
     }
     for (const id of setIds) {
       const set = byId.get(id.toLowerCase());
-      if (!set || set.stockSource !== "noclaim" || had.has(id + "|" + market)) continue;
+      if (!set || set.stockSource !== "noclaim" || had(id, market)) continue;
       // A set kept as the record of an Eldorado publish that may be live without
       // a row. (A copy's own record is reported below, as a skip.)
       if (str(set.note).includes(HOLD_MARK) && !copyRecord(set.note)) continue;
@@ -1106,17 +1166,23 @@ async function planCopies({ deps, now = Date.now() } = {}) {
       const foreign = strangers.filter((a) => a.isFree(key) && d.ncs.covers(a.heldAtBuild, required)).length;
       const life = bundleLife(d, base, set.items || [], who, now);
       const finished = who.length > 0 && (life.ended || who.every((w) => w.left(key) === 0));
-      const category = market === "g2g" ? d.g2gCategory(game) : null;
+      // G2G files an offer under the game's own brand; Gameflip has no such
+      // shelf (every listing is one generic digital-goods item).
+      const category = market === "g2g" ? d.g2gCategory(game) : {};
       let skip = "";
       if (market === "g2g" && !c.g2gOn) skip = "G2G delivery or its stock sync is off";
+      else if (vault && !d.vaultAllowed(market)) skip = "holding accounts for this market is switched off";
       else if (familyHeld(set, byId, market)) skip = "an earlier copy of this bundle may be live — left to the owner";
       else if (ownersGame(key, c, fleet)) skip = "a no-claim bot farms this game";
       else if (isRested(market, key)) skip = "a copy of this game was taken down lately — left to the owner";
       else if (foreign > 0) skip = "a no-claim bot account holds this bundle too";
       else if (!category) skip = "the market does not list this game";
-      else if (who.length < c.copyMinHolders) skip = "too few accounts for a second market";
+      else if (who.length < (vault ? c.vaultMinHolders : c.copyMinHolders)) skip = "too few accounts for a second market";
       else if (!finished) skip = "its accounts are still earning";
-      else if (Number.isFinite(life.goneAt) && life.goneAt - sellLeadMs - now < COPY_MIN_LIFE_MS) {
+      // A held account needs a leave date on record (the claim layer refuses
+      // one without); "who" already holds only what lasts the vault's minimum.
+      else if (vault && !Number.isFinite(life.goneAt)) skip = "no leave date on record for its drops";
+      else if (!vault && Number.isFinite(life.goneAt) && life.goneAt - sellLeadMs - now < COPY_MIN_LIFE_MS) {
         skip = "it comes off sale within the day";
       }
       out.push({
@@ -1125,6 +1191,7 @@ async function planCopies({ deps, now = Date.now() } = {}) {
         setId: str(set._id),
         key,
         game,
+        kind: COPY_KIND[market],
         cover: who.length,
         finished,
         goneAt: life.goneAt,
@@ -1157,7 +1224,9 @@ async function sweepCopies({ deps, now = Date.now(), limit = 2 } = {}) {
   const d = deps || defaultDeps();
   const rows = (
     (await d.MarketplaceListing.find(
-      { marketplace: { $in: COPY_MARKETS }, noclaimStock: true, status: "active" },
+      // Shelf copies only: a held unit shares nobody's shelf, and comes off
+      // by its own rules (noclaimListings' expiry and health steps).
+      { marketplace: { $in: SHELF_MARKETS }, noclaimStock: true, status: "active" },
       { set: 1, marketplace: 1, externalId: 1, note: 1, title: 1 },
     ).lean()) || []
   ).filter((r) => str(r.note).includes(COPY_MARK));
@@ -1265,8 +1334,8 @@ async function copyPass(c, d, out, skip, { dryRun, now }) {
       const unlistable = /no offer of our own to copy|cannot be listed there|no delivery method available/i.test(msg);
       memory.copyRetryAt.set(id, now + (held ? 24 * HOUR_MS : unlistable ? 7 * 24 * HOUR_MS : RETRY_AFTER_MS));
       memory.copyTries.set(id, (memory.copyTries.get(id) || 0) + 1);
-      if (held) {
-        memory.copyPauseUntil = now + COPY_PAUSE_MS;
+      if (held) memory.copyPauseUntil = now + COPY_PAUSE_MS;
+      if (held && !err.told) {
         try {
           Promise.resolve(
             d.sendTelegram(
@@ -1295,14 +1364,31 @@ async function copyOne(e, c, d, dryRun, now = Date.now()) {
   if (!title.trim()) throw new Error("no title for the bundle");
   const { engine, basis } = await enginePrice(d, e.market, e.game, (set.items || []).length);
   const price = copyPrice(engine, e.eldoradoPrice, e.market, c);
-  // The publish itself advertises this offer's SHARE of the shelf.
-  const quantity = Math.max(1, Math.min(e.cover, c.quantityCap));
+  const vault = e.kind === "vault";
+  // A shelf copy: the publish itself advertises this offer's SHARE of the
+  // shelf. A held chain: its units, one listing at a time.
+  const quantity = vault ? c.vaultUnits : Math.max(1, Math.min(e.cover, c.quantityCap));
   const summary = {
     market: e.market, game: e.game, title, price, enginePrice: engine, basis, quantity,
     items: (set.items || []).length, holders: e.cover, setId: e.setId,
     claimBefore: Number.isFinite(e.goneAt) ? new Date(e.goneAt).toISOString() : null,
   };
   if (dryRun) return { ...summary, dryRun: true };
+  let cover = "";
+  if (COPY_NEEDS_COVER[e.market]) {
+    try {
+      cover = await d.buildCover(set);
+    } catch {
+      cover = "";
+    }
+    if (!cover) throw new Error("no cover image could be built");
+  }
+  const dropCover = () =>
+    cover
+      ? Promise.resolve()
+          .then(() => d.unlink(cover))
+          .catch(() => {})
+      : Promise.resolve();
   // Written BEFORE the publish, on the note the plan read (compare-and-set, so
   // two passes can never copy one set at once): if this process dies between
   // the market accepting the offer and the row being saved, the record is what
@@ -1313,8 +1399,15 @@ async function copyOne(e, c, d, dryRun, now = Date.now()) {
     before,
     copyRecordText(e.market, now, COPY_STARTED + " — check " + e.market + " for a stray offer"),
   );
-  const lock = await d.DropSet.updateOne({ _id: set._id, note: before }, { $set: { note: started } });
+  let lock = null;
+  try {
+    lock = await d.DropSet.updateOne({ _id: set._id, note: before }, { $set: { note: started } });
+  } catch (err) {
+    await dropCover();
+    throw err;
+  }
   if (!(lock && (lock.modifiedCount || lock.nModified))) {
+    await dropCover();
     throw new Error("the set changed while its copy was being prepared");
   }
   // Put the note back as it was (twice: the record must not outlive a publish
@@ -1337,17 +1430,19 @@ async function copyOne(e, c, d, dryRun, now = Date.now()) {
       title,
       description,
       priceUsd: price,
-      gridImage: "",
+      gridImage: cover,
       coverPath: "",
       cat: e.category || {},
       pubGame: d.listingGame({ set }),
     });
   } catch (err) {
     r = { success: false, message: (err && err.message) || String(err) };
+  } finally {
+    await dropCover();
   }
   if (!r || !r.success) {
     const msg = (r && r.message) || "the publish failed";
-    const hold = ORPHAN_RE.test(msg) ? "orphan" : COPY_MAYBE_RE.test(msg) ? "maybe" : "";
+    const hold = ORPHAN_RE.test(msg) ? "orphan" : COPY_MAYBE[e.market].test(msg) ? "maybe" : "";
     if (hold) {
       // The copy is, or may be, live with no row: an order against it would
       // reach nothing. The set's note is the record that outlives a restart —
@@ -1362,6 +1457,8 @@ async function copyOne(e, c, d, dryRun, now = Date.now()) {
     }
     const err = new Error(msg);
     err.hold = hold;
+    // Gameflip's lane pages the owner itself when it keeps an account held.
+    err.told = vault && hold === "maybe";
     throw err;
   }
   await unlock();
@@ -1393,13 +1490,18 @@ async function copyOne(e, c, d, dryRun, now = Date.now()) {
         detail:
           "auto-farm unclaimed offer also listed on " + e.market + ": " + (set.items || []).length + " item(s) at $" +
           price.toFixed(2) + " (engine $" + engine.toFixed(2) + (basis ? ", " + basis : "") + "), " + e.cover +
-          " free account(s) hold it" + (tagged ? "" : " — NOT marked as a copy: it will not follow its Eldorado offer"),
+          " free account(s) hold it" +
+          (vault ? " — a chain of " + quantity + ", one account held at a time" : "") +
+          (tagged ? "" : " — NOT marked as a copy" + (vault ? "" : ": it will not follow its Eldorado offer")),
       }),
     ).catch(() => {});
     Promise.resolve(
       d.sendTelegram(
         "🆕 ALSO LISTED on " + e.market.toUpperCase() + " (auto-farm unclaimed stock)\n\n" + title + "\n$" +
-          price.toFixed(2) + " — the same accounts as the Eldorado offer (" + e.cover + " hold it)",
+          price.toFixed(2) +
+          (vault
+            ? " — " + quantity + " unit(s), one account held at a time (" + e.cover + " hold the bundle)"
+            : " — the same accounts as the Eldorado offer (" + e.cover + " hold it)"),
       ),
     ).catch(() => {});
   } catch {
@@ -1598,6 +1700,7 @@ module.exports = {
   defaultDeps,
   // rule 8
   COPY_MARKETS,
+  COPY_KIND,
   COPY_MARK,
   SWEPT_MARK,
   copyPrice,

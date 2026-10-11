@@ -229,6 +229,10 @@ function world(o = {}) {
       if (o.delistError) throw new Error(o.delistError);
       w.delisted.push({ market, id });
     },
+    // utils/autofarmStock's vault rules: may an account be HELD for a market,
+    // and how long its bundle must still last for that.
+    vaultAllowed: (market) => o.vault === true && market === "gameflip",
+    vaultMinLifeMs: () => 72 * HOUR,
     pricing: () => ({ priceListing: () => ({ price: w.enginePrice, basis: "game" }) }),
     pricingEvidence: () => ({ evidenceFor: async () => ({}) }),
     buildCover: async () => w.cover,
@@ -1137,6 +1141,15 @@ test("cfg: copies are off by default, only a known market is kept, and G2G must 
   assert.strictEqual(ao.cfg().g2gOn, false, "a copy nobody keeps in step with the stock oversells");
   autoFarm = { ...autoFarm, autofarmOfferCopyMarkets: "g2g" };
   assert.deepStrictEqual(ao.cfg().copyMarkets, [], "a list, or nothing");
+  // Gameflip is a copy market of the other kind (it HOLDS the account).
+  autoFarm = { ...autoFarm, autofarmOfferCopyMarkets: ["gameflip", "g2g", "Gameflip"] };
+  assert.deepStrictEqual(ao.cfg().copyMarkets, ["gameflip", "g2g"]);
+  assert.deepStrictEqual(ao.COPY_KIND, { g2g: "claim", gameflip: "vault" });
+  assert.strictEqual(ao.cfg().vaultUnits, 2);
+  assert.strictEqual(ao.cfg().vaultMinHolders, 8);
+  autoFarm = { ...autoFarm, autofarmOfferVaultUnits: 99, autofarmOfferVaultMinHolders: 0 };
+  assert.strictEqual(ao.cfg().vaultUnits, 10);
+  assert.strictEqual(ao.cfg().vaultMinHolders, 2);
 });
 
 test("ownSet: this lister's sets, and sets grown or rotated out of them — never anyone else's", () => {
@@ -1433,7 +1446,7 @@ test("copies run on their own feet: a failure in them never undoes the Eldorado 
   let calls = 0;
   w.deps.MarketplaceListing.find = (q) => {
     // The copy sweep's read (active rows on the copy markets alone) fails.
-    if (q.marketplace && q.marketplace.$in && q.marketplace.$in.join() === ao.COPY_MARKETS.join() && q.status === "active") {
+    if (q.marketplace && q.marketplace.$in && q.marketplace.$in.join() === "g2g" && q.status === "active") {
       calls++;
       return { lean: async () => { throw new Error("mongo blip"); } };
     }
@@ -1828,4 +1841,187 @@ test("…and the sweep's own take-down never rests a game", async () => {
   w.rows.push({ _id: oid(), marketplace: "g2g", noclaimStock: true, status: "delisted", set: w.sets[1]._id, externalId: "g-own", note: "mine", updatedAt: new Date(T0 - DAY) });
   const r = await ao.runPass({ deps: w.deps, now: T0 });
   assert.strictEqual(r.copies.length, 1);
+});
+
+// ---------------------------------------------------------------------------
+// Rule 8, the other kind — Gameflip HOLDS the account when the listing is made
+// ---------------------------------------------------------------------------
+
+const GF_ON = { autofarmOfferCopyMarkets: ["gameflip"] };
+const gfWorld = (n = 10, o = {}) => copyWorld(n, { ...o, world: { vault: true, ...(o.world || {}) } });
+
+test("a finished bundle gets a Gameflip chain: a few units, one account held at a time, its own price floor and a photo", async () => {
+  autoFarm = { ...autoFarm, ...GF_ON };
+  const w = gfWorld(10, { world: { enginePrice: 1.4 } });
+  const r = await ao.runPass({ deps: w.deps, now: T0 });
+  assert.deepStrictEqual(r.errors, []);
+  assert.strictEqual(r.copies.length, 1);
+  const p = w.published[0];
+  assert.strictEqual(p.market, "gameflip");
+  assert.strictEqual(String(p.set._id), String(w.set._id));
+  assert.deepStrictEqual(p.body, { gameflip: { qty: 2 } }, "one live listing, one queued — not the whole shelf");
+  assert.deepStrictEqual(p.cat, {});
+  assert.strictEqual(p.gridImage, "/tmp/cover.png", "Gameflip refuses a listing without a photo");
+  assert.deepStrictEqual(w.unlinked, ["/tmp/cover.png"]);
+  assert.ok(p.title.length <= 120);
+  // $0.99 on Eldorado: never more than 1.2x that; Gameflip's own floor is $0.75, not G2G's dollar.
+  assert.strictEqual(p.priceUsd, 1.09);
+  const pc = { priceFactor: 0.85, minPrice: 0.75, maxPrice: 1.49, copyPriceFactor: 1.2 };
+  assert.strictEqual(ao.copyPrice(1.13, 0.75, "gameflip", pc), 0.89);
+  assert.strictEqual(ao.copyPrice(1.13, 0.75, "g2g", pc), 1);
+  assert.strictEqual(r.copies[0].quantity, 2);
+  assert.strictEqual(w.set.note, OWN_NOTE);
+  const row = w.rows.find((x) => x.marketplace === "gameflip");
+  assert.ok(row.note.endsWith(ao.COPY_MARK));
+  assert.ok(w.telegrams.some((t) => /ALSO LISTED on GAMEFLIP[^]*2 unit\(s\), one account held at a time/.test(t)));
+  // While that chain is on sale the set gets no second one.
+  const again = await ao.runPass({ deps: w.deps, now: T0 + HOUR });
+  assert.strictEqual(again.copies.length, 0);
+  assert.strictEqual(w.published.length, 1);
+});
+
+test("no Gameflip chain unless every condition holds", async () => {
+  const run = async (o = {}, af = {}) => {
+    autoFarm = { autofarmOffers: true, eldoradoAutoDeliver: true, eldoradoDeliverDryRun: false, noClaimGames: ["overwatch"], ...GF_ON, ...af };
+    ao.resetMemory();
+    const w = gfWorld(o.n || 10, o);
+    const r = await ao.runPass({ deps: w.deps, now: T0 });
+    return { w, r, n: w.published.filter((p) => p.market === "gameflip").length };
+  };
+  assert.strictEqual((await run()).n, 1, "the base case lists");
+  // The stock side's own switch: without it no account may be held at all.
+  let x = await run({ world: { vault: false } });
+  assert.strictEqual(x.n, 0);
+  assert.strictEqual(x.r.skipped["copy: holding accounts for this market is switched off"], 1);
+  // Fewer accounts than it takes to spare some for a second market.
+  x = await run({ n: 7 });
+  assert.strictEqual(x.n, 0);
+  assert.strictEqual(x.r.skipped["copy: too few accounts for a second market"], 1);
+  assert.strictEqual((await run({ n: 7 }, { autofarmOfferVaultMinHolders: 7 })).n, 1);
+  // Drops that leave inside the vault's minimum life (72 h, and a margin): nobody could be held.
+  x = await run({ gone: { Brawlhalloween: T0 + 3 * DAY } });
+  assert.strictEqual(x.n, 0);
+  // No leave date on record at all.
+  x = await run({ gone: {}, extra: { pendingAt: new Date(T0 - HOUR), pending: [] } });
+  assert.strictEqual(x.n, 0);
+  assert.strictEqual(x.r.skipped["copy: no leave date on record for its drops"], 1);
+  // Still earning.
+  x = await run({ gone: { Brawlhalloween: T0 + 12 * DAY }, extra: { pendingAt: new Date(T0 - HOUR), pending: [{ game: "Brawlhalla", n: 1 }] } });
+  assert.strictEqual(x.n, 0);
+  assert.strictEqual(x.r.skipped["copy: its accounts are still earning"], 1);
+  // The owner's game; a set this lister did not make; a paused Eldorado offer.
+  assert.strictEqual((await run({}, { noClaimGames: ["brawlhalla"] })).n, 0);
+  assert.strictEqual((await run({ note: "my own bundle" })).n, 0);
+  assert.strictEqual((await run({ eld: { autoPaused: true } })).n, 0);
+  // G2G's switches say nothing about Gameflip.
+  assert.strictEqual((await run({}, { g2gAutoDeliver: false })).n, 1);
+});
+
+test("a set gets a new Gameflip chain only after the last one SOLD — never while one is on sale, never after one came down unsold", async () => {
+  autoFarm = { ...autoFarm, ...GF_ON };
+  const withRows = async (rows) => {
+    ao.resetMemory();
+    const w = gfWorld(10);
+    for (const r of rows) w.rows.push({ _id: oid(), marketplace: "gameflip", noclaimStock: true, set: w.set._id, externalId: "gf-" + oid().slice(-4), note: "no-claim auto-delivery — x", ...r });
+    await ao.runPass({ deps: w.deps, now: T0 });
+    return w.published.length;
+  };
+  const old = (d) => new Date(T0 - d * DAY);
+  // On sale now.
+  assert.strictEqual(await withRows([{ status: "active", createdAt: old(1) }]), 0);
+  // The chain sold through (two units, both sold): demand — another chain.
+  assert.strictEqual(await withRows([{ status: "sold", createdAt: old(3) }, { status: "sold", createdAt: old(2) }]), 1);
+  // A sold unit, and its successor still on sale.
+  assert.strictEqual(await withRows([{ status: "sold", createdAt: old(3) }, { status: "active", createdAt: old(2) }]), 0);
+  // The last listing came down unsold (its drops were about to leave): not asked twice.
+  assert.strictEqual(await withRows([{ status: "sold", createdAt: old(3) }, { status: "delisted", lastError: "drops leave within 24 h", createdAt: old(2) }]), 0);
+  assert.strictEqual(await withRows([{ status: "removed", createdAt: old(2) }]), 0);
+});
+
+test("a Gameflip listing somebody else took down rests the game; one the system took down does not", async () => {
+  autoFarm = { ...autoFarm, ...GF_ON };
+  const other = { name: "old", note: OWN_NOTE, coverGame: "Brawlhalla", items: asSet(BRAWL.slice(0, 2)) };
+  const mk = async (lastError) => {
+    ao.resetMemory();
+    const w = gfWorld(10, { sets: [other] });
+    w.rows.push({ _id: oid(), marketplace: "gameflip", noclaimStock: true, status: "delisted", set: w.sets[1]._id, externalId: "gf-old", note: "no-claim auto-delivery — x", lastError, updatedAt: new Date(T0 - 2 * DAY), createdAt: new Date(T0 - 4 * DAY) });
+    const r = await ao.runPass({ deps: w.deps, now: T0 });
+    return { n: w.published.length, r };
+  };
+  // The owner's Delist button leaves no reason on the row.
+  const owner = await mk("");
+  assert.strictEqual(owner.n, 0);
+  assert.strictEqual(owner.r.skipped["copy: a copy of this game was taken down lately — left to the owner"], 1);
+  // Every automatic take-down says why.
+  assert.strictEqual((await mk("drops leave within 24 h")).n, 1);
+  assert.strictEqual((await mk("drops expired")).n, 1);
+});
+
+test("a failed Gameflip chain: held accounts and live-without-a-row hold the set; anything else rests an hour", async () => {
+  autoFarm = { ...autoFarm, ...GF_ON };
+  // Gameflip's own lane kept the account held and paged the owner itself: recorded, not paged twice.
+  let w = gfWorld(10, { world: { publishResult: { success: false, message: "Gameflip created 4f1b-aaaa but could not put it on sale (draft discarded): x [account kept held]" } } });
+  await ao.runPass({ deps: w.deps, now: T0 });
+  let rec = ao.copyRecord(w.set.note);
+  assert.ok(rec && rec.market === "gameflip" && !rec.started, w.set.note);
+  assert.strictEqual(w.telegrams.length, 0, "Gameflip's lane told the owner already");
+  assert.deepStrictEqual(w.unlinked, ["/tmp/cover.png"], "the cover is cleaned up whatever happened");
+  ao.resetMemory();
+  await ao.runPass({ deps: w.deps, now: T0 + 2 * DAY });
+  assert.strictEqual(w.published.length, 1, "never again by itself");
+
+  // Live on Gameflip, no row: the words every such failure uses.
+  ao.resetMemory();
+  w = gfWorld(10, { world: { publishResult: { success: false, message: "published on Gameflip but the row could not be saved — delist it by hand: gf-9 (E11000)" } } });
+  await ao.runPass({ deps: w.deps, now: T0 });
+  rec = ao.copyRecord(w.set.note);
+  assert.ok(rec && rec.market === "gameflip");
+  assert.strictEqual(w.telegrams.length, 1);
+  assert.match(w.telegrams[0], /went live but was not recorded/);
+
+  // Nothing could be held, or Gameflip refused before anything existed: clean.
+  for (const message of ["Out of stock — no free no-claim account holds this whole bundle", "Gameflip create: Too many attempts - Retry later", "Gameflip created 4f1b-bbbb but could not put it on sale (draft discarded): x"]) {
+    ao.resetMemory();
+    w = gfWorld(10, { world: { publishResult: { success: false, message } } });
+    const r = await ao.runPass({ deps: w.deps, now: T0 });
+    assert.strictEqual(w.set.note, OWN_NOTE, message);
+    assert.strictEqual(w.telegrams.length, 0);
+    assert.strictEqual(r.errors.length, 1);
+    await ao.runPass({ deps: w.deps, now: T0 + 30 * 60 * 1000 });
+    assert.strictEqual(w.published.length, 1, "rests an hour: " + message);
+  }
+
+  // No photo: nothing is asked of Gameflip, and the set is not even marked.
+  ao.resetMemory();
+  w = gfWorld(10, { world: { cover: "" } });
+  const r = await ao.runPass({ deps: w.deps, now: T0 });
+  assert.strictEqual(w.published.length, 0);
+  assert.match(r.errors[0], /no cover image could be built/);
+  assert.strictEqual(w.set.note, OWN_NOTE);
+});
+
+test("the sweep leaves Gameflip alone — a held unit shares nobody's shelf", async () => {
+  autoFarm = { ...autoFarm, ...GF_ON };
+  const w = gfWorld(10);
+  await ao.runPass({ deps: w.deps, now: T0 });
+  const chain = w.rows.find((x) => x.marketplace === "gameflip");
+  // The Eldorado offer grows on to another set.
+  w.eld.set = oid();
+  const r = await ao.runPass({ deps: w.deps, now: T0 + HOUR });
+  assert.deepStrictEqual(r.copiesDown, []);
+  assert.deepStrictEqual(w.delisted, []);
+  assert.strictEqual(chain.status, "active");
+});
+
+test("both kinds together: one a pass, the day's limit shared", async () => {
+  autoFarm = { ...autoFarm, ...G2G_ON, autofarmOfferCopyMarkets: ["g2g", "gameflip"], autofarmOfferCopiesPerDay: 2 };
+  const w = gfWorld(10);
+  const a = await ao.runPass({ deps: w.deps, now: T0 });
+  const b = await ao.runPass({ deps: w.deps, now: T0 + 10 * 60 * 1000 });
+  const c = await ao.runPass({ deps: w.deps, now: T0 + 20 * 60 * 1000 });
+  assert.deepStrictEqual([a.copies.length, b.copies.length, c.copies.length], [1, 1, 0]);
+  assert.deepStrictEqual(w.published.map((p) => p.market).sort(), ["g2g", "gameflip"]);
+  // The G2G copy advertises what is free; the Gameflip chain its two units.
+  assert.deepStrictEqual(w.published.find((p) => p.market === "g2g").body, { g2g: { qty: 10 } });
+  assert.deepStrictEqual(w.published.find((p) => p.market === "gameflip").body, { gameflip: { qty: 2 } });
 });

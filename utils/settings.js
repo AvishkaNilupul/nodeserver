@@ -249,6 +249,13 @@ const AUTO_FARM_DEFAULTS = {
   // A copy whose Eldorado offer moved on or came down is taken off sale — also
   // while autofarmOffers is off. false stops that too.
   autofarmOfferCopySweep: true,
+  // "gameflip" in CopyMarkets is a copy of another kind: Gameflip takes the
+  // account when the listing is made, so accounts are HELD for it — that also
+  // needs autofarmStockVault. One chain per set: VaultUnits accounts, one
+  // listing at a time; only when VaultMinHolders free accounts hold the
+  // bundle. A set gets a new chain only after the last one sold out.
+  autofarmOfferVaultUnits: 2,
+  autofarmOfferVaultMinHolders: 8,
   // Multi-market auto-listing categories.
   // Plati (Digiseller) cataloguer placement for Twitch-drop accounts:
   //   Digital Goods and Access > Services and social networks > Twitch,

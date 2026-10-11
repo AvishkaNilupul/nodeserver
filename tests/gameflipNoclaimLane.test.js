@@ -227,6 +227,9 @@ test("an auto-farm account goes back after a failed publish only when the listin
   assert.match(w.telegrams[0], /could not be confirmed deleted[^]*farm_one[^]*stays held/);
   assert.ok(w.errors.some((e) => /farm_one stays HELD/.test(e)));
   assert.strictEqual(w.rows.length, 0);
+  // …and the error says so, for a caller that would otherwise just try again.
+  w = makeWorld({ accounts: [FARM], publishError: gfError("Gameflip created " + ID + " but could not put it on sale (draft discarded): x"), statuses: ["onsale", "onsale"] });
+  await assert.rejects(withLane(w, (g) => g.publishAutoDelivery(ARGS)), /\[account kept held\]$/);
 
   // Gameflip will not say (its limiter): not known is not gone.
   w = makeWorld({ accounts: [FARM], publishError: onsale, statuses: [gfError("Gameflip listing status: Too many attempts", 429)] });
@@ -250,4 +253,15 @@ test("failedPublishRemains: none / gone / there", async () => {
   const still = await ask("x (draft " + ID + " discarded): y", { statuses: ["draft", "draft"], delistError: new Error("429") });
   assert.strictEqual(still.r, "there");
   assert.deepStrictEqual(still.w.delists, [ID], "one more delete was tried");
+});
+
+test("a listing that is live but whose row could not be saved says so in the words every such failure uses", async () => {
+  const w = makeWorld({ accounts: [FARM] });
+  w.Listing.create = () => Promise.reject(new Error("E11000 duplicate key"));
+  await assert.rejects(
+    withLane(w, (g) => g.publishAutoDelivery(ARGS)),
+    /^Error: published on Gameflip but the row could not be saved — delist it by hand: gf-1 \(E11000 duplicate key\)$/,
+  );
+  assert.deepStrictEqual(w.released, [], "Gameflip has its login: the account is not handed back");
+  assert.strictEqual(w.published.length, 1);
 });
