@@ -735,7 +735,8 @@ async function publishNoclaimAutoDelivery({
   // this is the last line before the credentials go on sale: a listing
   // published with a blank password is a paid buyer holding half a login.
   if (!acc.password) {
-    await releaseNoclaimClaim(acc, "no readable password");
+    // Nothing has been sent to Gameflip yet: no listing can carry this login.
+    await releaseNoclaimClaim(acc, "no readable password", { listingGone: true });
     throw new Error(
       "Account " + (login || "(no login)") + " has no readable password — " +
         "cannot auto-deliver",
@@ -767,7 +768,8 @@ async function publishNoclaimAutoDelivery({
     // and under Gameflip's limiter that delete fails like everything else.
     // Kept, the account stays held with no listing row; the maintenance pass
     // pins such a claim and tells the owner how to release it.
-    if (acc.farm === "autofarm" && (await failedPublishRemains(e)) === "there") {
+    const remains = acc.farm === "autofarm" ? await failedPublishRemains(e) : "";
+    if (remains === "there") {
       console.error(
         "gameflip no-claim: " + (login || "the account") + " stays HELD — the listing its failed publish " +
           "built may still exist on Gameflip with its login: " + ((e && e.message) || e),
@@ -785,8 +787,11 @@ async function publishNoclaimAutoDelivery({
     }
     // Matching release, exactly as the other lanes release theirs: a publish
     // that threw must not leave the account committed to a listing that does
-    // not exist.
-    await releaseNoclaimClaim(acc, "gameflip publish failed");
+    // not exist. For an auto-farm account that is now KNOWN — the publish
+    // built no listing, or Gameflip answered 404 for the one it built — and
+    // said so: its claim is attached to no row, and such a claim is otherwise
+    // never handed back (nobody could say which listing holds its login).
+    await releaseNoclaimClaim(acc, "gameflip publish failed", { listingGone: remains === "none" || remains === "gone" });
     throw e;
   }
   const doc = await MarketplaceListing.create({
@@ -850,9 +855,9 @@ async function publishNoclaimAutoDelivery({
 // fails leaves the account committed ("manual") to a listing that does not
 // exist, so it is loud — and it is never allowed to mask the error that made
 // the publish fail in the first place.
-async function releaseNoclaimClaim(acc, reason) {
+async function releaseNoclaimClaim(acc, reason, { listingGone = false } = {}) {
   try {
-    await noclaimStock().releaseClaim([acc.ledgerId], { reason });
+    await noclaimStock().releaseClaim([acc.ledgerId], listingGone ? { reason, listingGone: true } : { reason });
   } catch (e) {
     console.error(
       "gameflip no-claim: could not hand " +
@@ -872,7 +877,11 @@ async function releaseNoclaimClaim(acc, reason) {
 //   "none"   the publish failed before any listing existed
 //   "gone"   Gameflip no longer has it
 //   "there"  it still exists, or Gameflip would not say
-// A listing found still there gets one more delete before the second look.
+// A listing found still there is ended once more before the second look —
+// from the status just read (mp.gameflipEndListing): a draft is deleted
+// outright, with no off-sale patch for it to refuse first; one a buyer has or
+// is paying for is never touched; and the end only returns once Gameflip
+// itself answers 404 for the listing.
 // On the error of a failed publish whose auto-farm account was NOT handed back.
 const HELD_MARK = " [account kept held]";
 const FAILED_LISTING_RE = /\(draft ([0-9a-f][0-9a-f-]{7,}) discarded\)|Gameflip created ([0-9a-f][0-9a-f-]{7,}) but/i;
@@ -881,13 +890,22 @@ async function failedPublishRemains(err) {
   const id = m && (m[1] || m[2]);
   if (!id) return "none";
   for (let look = 0; look < 2; look++) {
+    let status = "";
     try {
-      await mp.gameflipListingStatus(id);
+      status = await mp.gameflipListingStatus(id);
     } catch (e) {
-      const gone = (e && e.status === 404) || mp.delistOutcome((e && e.message) || "") === "gone";
-      return gone ? "gone" : "there"; // an unreadable answer proves nothing
+      // Gone is the HTTP status, never the error's words: an unreadable
+      // answer — even one that says "not found" — proves nothing.
+      return e && e.status === 404 ? "gone" : "there";
     }
-    if (look === 0) await mp.gameflipDelist(id).catch(() => {});
+    if (look === 0) {
+      try {
+        await mp.gameflipEndListing(id, { status });
+        return "gone";
+      } catch {
+        /* the second look is the verdict */
+      }
+    }
   }
   return "there";
 }
@@ -899,9 +917,12 @@ async function failedPublishRemains(err) {
 // committed behind a listing that no longer exists. onGameflipRetired releases
 // only a still-"manual" ledger, so a unit a buyer paid for is never handed
 // back. Best-effort like its siblings: the row is already terminal.
-async function retireNoclaimUnit(row, reason) {
+// `gone`: Gameflip itself answered 404 for the listing — the one thing an
+// auto-farm account held for it is handed back on (utils/autofarmStock
+// .releaseBlocked); retired as "expired" or "cancelled" it still exists there.
+async function retireNoclaimUnit(row, reason, { gone = false } = {}) {
   try {
-    await noclaimListings().onGameflipRetired(row, { reason });
+    await noclaimListings().onGameflipRetired(row, { reason, gone: gone === true });
   } catch (e) {
     console.error(
       "gameflip no-claim listing " +
@@ -1375,7 +1396,8 @@ async function settleLapsed(row, { expiration } = {}) {
       console.error("gameflip head row " + row.externalId + " release:", e.message),
     );
   }
-  if (row.noclaimStock) await retireNoclaimUnit(row, why);
+  // Every caller ended the listing first and had Gameflip's 404 for it.
+  if (row.noclaimStock) await retireNoclaimUnit(row, why, { gone: true });
   if (!row.rentFarm && released) {
     await MarketplaceListing.updateOne(
       { _id: row._id },
@@ -1637,7 +1659,7 @@ async function syncOnce({
         // Nor can it reach a no-claim row's (accountId is always ""). Its own
         // `if` rather than one more `else`, so no branch above can skip it.
         if (retired && row.noclaimStock) {
-          await retireNoclaimUnit(row, "listing 404 on Gameflip");
+          await retireNoclaimUnit(row, "listing 404 on Gameflip", { gone: true });
         }
         if (retired) {
           console.error(

@@ -706,6 +706,15 @@ async function releaseForPool(pool, { market = "", orderId = "", deps } = {}) {
   return n;
 }
 
+// The two answers of releaseBlocked that no later pass can change: there is no
+// listing row to ask the market about. Only the owner, having looked at the
+// market, can lift them (releaseNeedsOwner; the hand-release route).
+const HELD_NO_ROW = "it is attached to no listing row";
+const HELD_ROW_MISSING = "its listing row is missing";
+function releaseNeedsOwner(reason) {
+  return reason === HELD_NO_ROW || reason === HELD_ROW_MISSING;
+}
+
 // May a HELD account go back to stock now? "" = yes, else why not yet. Asked
 // by noclaimStock.releaseClaim of every auto-farm ledger, whoever wants it
 // released — the Delist button, a retired listing, a removed unit:
@@ -717,13 +726,19 @@ async function releaseForPool(pool, { market = "", orderId = "", deps } = {}) {
 //     after the listing went to draft — so "we took it down" is not "it is
 //     gone"; only Gameflip no longer having it is (a 404; a SOLD listing
 //     stays readable for good).
-// `listingGone`: the caller has just had that answer itself.
+//   - it is attached to no listing row at all (a publish that never recorded
+//     one, an attach that failed): nobody can say which listing, if any,
+//     carries its login, so nobody may assume there is none.
+// `listingGone`: the caller has that answer itself — the market's 404 for the
+// listing, a publish that built none, or the owner's own word after looking
+// (the hand-release route).
 // A blocked ledger stays "manual" and the maintenance pass comes back to it.
 async function releaseBlocked(ledger, { deps, listingGone = false } = {}) {
   if (!ledger || ledger.farm !== FARM) return "";
   if (ledger.farmParkStartedAt && !ledger.farmParkedAt) return "its bot removal is still under way";
   if (listingGone) return "";
-  if (lower(ledger.market) !== "gameflip" || !/^[0-9a-f]{24}$/i.test(str(ledger.manualListing))) return "";
+  if (lower(ledger.market) !== "gameflip") return "";
+  if (!/^[0-9a-f]{24}$/i.test(str(ledger.manualListing))) return HELD_NO_ROW;
   const d = deps || defaultDeps();
   let row = null;
   try {
@@ -733,15 +748,16 @@ async function releaseBlocked(ledger, { deps, listingGone = false } = {}) {
   }
   // The row that said which listing held its login is gone: nobody can ask
   // the market about it, so nobody may assume.
-  if (!row) return "its listing row is missing";
+  if (!row) return HELD_ROW_MISSING;
   // A row that is not a Gameflip listing: nothing there holds its login.
   if (!row.externalId || lower(row.marketplace) !== "gameflip") return "";
   try {
     const st = str(await d.listingStatus("gameflip", row.externalId));
     return st === "sold" ? "its Gameflip listing SOLD" : "its Gameflip listing still exists (" + (st || "?") + ")";
   } catch (e) {
-    const gone = (e && e.status === 404) || /not found|http_status":\s*404/i.test(str(e && e.message));
-    return gone ? "" : "Gameflip would not say whether its listing is gone";
+    // Gone is the HTTP status and nothing else: an error that merely SAYS
+    // "not found" (a refused key, a proxy's page) is no answer about the listing.
+    return e && e.status === 404 ? "" : "Gameflip would not say whether its listing is gone";
   }
 }
 
@@ -802,6 +818,9 @@ const usersOf = (c) =>
   c && c.TwitchSettings && Array.isArray(c.TwitchSettings.TwitchUsers) ? c.TwitchSettings.TwitchUsers : [];
 
 const HUMAN_RETRY_MS = 6 * 60 * 60 * 1000;
+// How old a held claim with no listing row must be before the park pass takes
+// it: past any publish (utils/noclaimListings pins such a claim at the same age).
+const PARK_UNATTACHED_AFTER_MS = 30 * 60 * 1000;
 
 // Every operator config on every bot host, read in one batched round trip per
 // host. Returns { configs: [{ hostId, host, file, users }], unreadable: [..] }.
@@ -887,9 +906,19 @@ async function retirePending({ limit = 10, deps, held = false } = {}) {
       { farmParkTriedAt: null },
       { farmParkTriedAt: { $lt: new Date(Date.now() - HUMAN_RETRY_MS) } },
     ];
+    // Only a claim whose listing EXISTS in our books — or one old enough that
+    // its publish is long over (a claim no row ever recorded is held all the
+    // same: the market may have its login). A claim still inside its publish
+    // is not parked: started here, a publish that then failed in the ordinary
+    // way could not hand the account back ("bot removal under way"), and
+    // nothing would ever come for it.
+    const attached = [
+      { manualListing: { $nin: ["", null] } },
+      { manualAt: { $lt: new Date(Date.now() - PARK_UNATTACHED_AFTER_MS) } },
+    ];
     rows = await d.UnclaimedAccount.find(
       held
-        ? { source: "noclaim", farm: FARM, status: "manual", farmParkedAt: null, $or: laterHeld }
+        ? { source: "noclaim", farm: FARM, status: "manual", farmParkedAt: null, $and: [{ $or: laterHeld }, { $or: attached }] }
         : {
             source: "noclaim",
             farm: FARM,
@@ -983,10 +1012,14 @@ async function retirePending({ limit = 10, deps, held = false } = {}) {
       // account has not been sold to anybody: nothing is announced.
       if (!held && (await writeSaleSignal(d, l, w.bots[0] || null))) {
         const price = Math.max(0, Number(l.soldPriceUsd) || 0);
+        // A listing paid for and then cancelled is closed like a sale (its
+        // buyer saw the login) — and said for what it is: nothing was sold.
+        const burned = /login was seen/i.test(str(l.note));
         try {
           Promise.resolve(
             d.sendTelegram(
-              "💰 SOLD (auto-farm unclaimed stock)\n\n" + (login || "?") +
+              (burned ? "⚠️ RETIRED, not sold (auto-farm unclaimed stock)" : "💰 SOLD (auto-farm unclaimed stock)") +
+                "\n\n" + (login || "?") +
                 "\nGame: " + (str(l.game) || "?") +
                 "\nMarket: " + (str(l.soldMarket || l.market) || "?") + (price ? " — $" + price.toFixed(2) : "") +
                 "\nReason: " + (str(l.note) || "sold"),
@@ -1475,6 +1508,7 @@ module.exports = {
   vaultLeadMs,
   stockHoldNote,
   releaseBlocked,
+  releaseNeedsOwner,
   releaseHeld,
   parkHeld,
 };

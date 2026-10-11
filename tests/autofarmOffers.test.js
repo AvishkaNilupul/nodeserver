@@ -1936,8 +1936,33 @@ test("a set gets a new Gameflip chain only after the last one SOLD — never whi
   // The last listing came down unsold (its drops were about to leave): not asked twice.
   assert.strictEqual(await withRows([{ status: "sold", createdAt: old(3) }, { status: "delisted", lastError: "drops leave within 24 h", createdAt: old(2) }]), 0);
   assert.strictEqual(await withRows([{ status: "removed", createdAt: old(2) }]), 0);
-  // Sold, with a unit still owed: its relist is pending (a backoff, a retry) — the chain is not over.
-  assert.strictEqual(await withRows([{ status: "sold", qtyRemaining: 1, createdAt: old(1) }]), 0);
+  // Sold, with its relist still to come — the chain is not over: the relist
+  // lane says it failed and will retry (a backoff)…
+  assert.strictEqual(
+    await withRows([{ status: "sold", qtyRemaining: 1, lastError: "auto-relist failed: Gameflip create: Too many attempts - Retry later", createdAt: old(1), updatedAt: old(0.5) }]),
+    0,
+  );
+  // …or it sold minutes ago and the relist may be inside its publish right now.
+  assert.strictEqual(await withRows([{ status: "sold", qtyRemaining: 1, createdAt: old(1), updatedAt: new Date(T0 - 5 * 60 * 1000) }]), 0);
+  // A sold unit KEEPS its qtyRemaining after its relist went through (the debt
+  // moved to the new row; the number is never cleared). Read as "relist
+  // pending", the first unit of every chain of two blocked the set for good —
+  // no set ever got a second chain. Both units sold: that is demand.
+  assert.strictEqual(
+    await withRows([
+      { status: "sold", qtyRemaining: 1, lastError: "", createdAt: old(3), updatedAt: old(2.5) },
+      { status: "sold", qtyRemaining: 0, lastError: "", createdAt: old(2), updatedAt: old(1) },
+    ]),
+    1,
+  );
+  // The same first unit while its successor is still on sale: not yet.
+  assert.strictEqual(
+    await withRows([
+      { status: "sold", qtyRemaining: 1, lastError: "", createdAt: old(3), updatedAt: old(2.5) },
+      { status: "active", qtyRemaining: 0, createdAt: old(2), updatedAt: old(2) },
+    ]),
+    0,
+  );
   // Its own relist lane stopped the chain (an account kept held, a listing live without a row):
   // something of it may still be out there — never another by itself.
   assert.strictEqual(await withRows([{ status: "sold", qtyRemaining: 0, lastError: "auto-relist stopped: x [account kept held]", createdAt: old(1) }]), 0);

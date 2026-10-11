@@ -54,6 +54,10 @@ function matchValue(v, cond) {
       if (!vals.some((x) => arg.some((a) => eq(x, a)))) return false;
     } else if (op === "$ne") {
       if (eq(v, arg)) return false;
+    } else if (op === "$nin") {
+      // Mongo: a missing field is "not in" any list that has no null in it.
+      const vals = Array.isArray(v) ? v : [v];
+      if (vals.some((x) => arg.some((a) => eq(x, a)))) return false;
     } else if (op === "$gte") {
       if (v == null || !(new Date(v).getTime() >= new Date(arg).getTime())) return false;
     } else if (op === "$lt") {
@@ -72,6 +76,10 @@ function matches(doc, q) {
   for (const [k, cond] of Object.entries(q || {})) {
     if (k === "$or") {
       if (!cond.some((sub) => matches(doc, sub))) return false;
+      continue;
+    }
+    if (k === "$and") {
+      if (!cond.every((sub) => matches(doc, sub))) return false;
       continue;
     }
     if (!matchValue(doc[k], cond)) return false;
@@ -828,6 +836,32 @@ test("parkHeld: a row only a human can finish is looked at again after six hours
   assert.ok(w.ledger.farmParkTriedAt instanceof Date, "and the try is on the park's clock");
 });
 
+test("parkHeld: a claim still inside its publish is left alone — parked mid-publish, an ordinary failure could never hand it back", async () => {
+  // Claimed a moment ago, its listing row not written yet (the publish is on
+  // its way to Gameflip). Started here, a publish that then failed could not
+  // release the account ("its bot removal is still under way") and nothing
+  // would ever come back for it.
+  let w = heldWorld({ manualListing: "", manualAt: new Date() });
+  let r = await af.parkHeld({ deps: w.deps });
+  assert.strictEqual(r.pending, 0);
+  assert.strictEqual(w.ledger.farmParkStartedAt, undefined, "not claimed by the park");
+  assert.deepStrictEqual(w.hostFiles.contabo["config_07.json"].map((u) => u.Login), ["Held", "Mate"], "still in its bot");
+  // …and the release of that failed publish is not blocked by any park.
+  assert.strictEqual(await af.releaseBlocked(w.ledger, { deps: w.deps, listingGone: true }), "");
+
+  // Attached to its row: parked.
+  w = heldWorld({ manualAt: new Date() });
+  r = await af.parkHeld({ deps: w.deps });
+  assert.strictEqual(r.retired, 1);
+
+  // No row after half an hour: no publish is still running. Whatever became of
+  // it the market may have its login — it leaves its bot like any held account.
+  w = heldWorld({ manualListing: "", manualAt: new Date(Date.now() - 31 * 60 * 1000) });
+  r = await af.parkHeld({ deps: w.deps });
+  assert.strictEqual(r.retired, 1);
+  assert.ok(w.ledger.farmParkedAt instanceof Date);
+});
+
 test("releaseBlocked: a held account goes back only when the market no longer has its listing, and never mid-park", async () => {
   const LISTING = "5f0000000000000000000002";
   const row = { _id: LISTING, marketplace: "gameflip", externalId: "gf-77" };
@@ -844,8 +878,15 @@ test("releaseBlocked: a held account goes back only when the market no longer ha
   assert.match(await ask({}, { listingStatus: "sold" }), /SOLD/);
   // Gameflip will not say: not known is not gone.
   assert.match(await ask({}, { listingStatus: new Error("429 Too many attempts") }), /would not say/);
-  // A 404 said in words.
-  assert.strictEqual(await ask({}, { listingStatus: new Error('Gameflip listing status: {"http_status": 404}') }), "");
+  // "Not found" said in WORDS is no answer about the listing — a refused key
+  // says it too. Gone is the HTTP status and nothing else.
+  for (const e of [
+    new Error('Gameflip listing status: {"http_status": 404}'),
+    Object.assign(new Error('Gameflip listing status: {"error":{"message":"Api key not found"}}'), { status: 401 }),
+    new Error("Gameflip listing status: host not found"),
+  ]) {
+    assert.match(await ask({}, { listingStatus: e }), /would not say/, e.message);
+  }
   // The caller has just had Gameflip's 404 itself: not asked twice.
   let asked = 0;
   assert.strictEqual(await ask({}, { listingStatus: () => { asked++; return "onsale"; } }, { listingGone: true }), "");
@@ -854,10 +895,25 @@ test("releaseBlocked: a held account goes back only when the market no longer ha
   assert.match(await ask({ farmParkStartedAt: new Date() }), /bot removal is still under way/);
   assert.match(await ask({ farmParkStartedAt: new Date() }, {}, { listingGone: true }), /bot removal is still under way/);
   assert.strictEqual(await ask({ farmParkStartedAt: new Date(), farmParkedAt: new Date() }), "");
-  // A claim that never reached a listing (its publish failed): nothing to ask about.
-  assert.strictEqual(await ask({ manualListing: "" }, { listingStatus: "onsale" }), "");
+  // Attached to no listing row (its publish never recorded one, an attach that
+  // failed): nobody can say which listing, if any, carries its login — so it
+  // is not handed back on that silence. Only with the answer in hand: a
+  // publish that built nothing, Gameflip's 404, or the owner's own look.
+  let unasked = 0;
+  const noRow = await ask({ manualListing: "" }, { listingStatus: () => { unasked++; return "onsale"; } });
+  assert.strictEqual(noRow, "it is attached to no listing row");
+  assert.strictEqual(unasked, 0, "there is no listing to ask about");
+  assert.strictEqual(await ask({ manualListing: "" }, {}, { listingGone: true }), "");
+  assert.strictEqual(await ask({ manualListing: "not-an-id" }), "it is attached to no listing row");
   // The row that named its listing is gone: nobody can ask the market, nobody may assume.
-  assert.match(await ask({}, { listings: [], listingStatus: "onsale" }), /listing row is missing/);
+  const missing = await ask({}, { listings: [], listingStatus: "onsale" });
+  assert.match(missing, /listing row is missing/);
+  // Those two — and only those — are the owner's to lift after looking at the market.
+  assert.strictEqual(af.releaseNeedsOwner(noRow), true);
+  assert.strictEqual(af.releaseNeedsOwner(missing), true);
+  for (const other of ["", "its Gameflip listing still exists (onsale)", "its Gameflip listing SOLD", "its bot removal is still under way", "Gameflip would not say whether its listing is gone"]) {
+    assert.strictEqual(af.releaseNeedsOwner(other), false, other);
+  }
   // A row that is not a Gameflip listing holds no login there.
   assert.strictEqual(await ask({}, { listings: [{ _id: LISTING, marketplace: "eldorado", externalId: "e-1" }], listingStatus: "onsale" }), "");
   // Not an auto-farm ledger: this rule is not asked of it.
@@ -893,6 +949,24 @@ test("a held account that then sells is finished by the sold pass: spent, the li
   assert.strictEqual(w.deps.SaleSignal.docs[0].source, "drop_reserved");
   assert.strictEqual(w.telegrams.length, 1);
   assert.match(w.telegrams[0], /SOLD \(auto-farm unclaimed stock\)[\s\S]*Market: gameflip — \$0\.95/);
+});
+
+test("a held account whose Gameflip sale was paid and then cancelled is retired — and the owner is not told it SOLD", async () => {
+  const w = heldWorld();
+  await af.parkHeld({ deps: w.deps });
+  // The buyer saw the login before the refund: the ledger is closed like a sale, at no price.
+  Object.assign(w.ledger, {
+    status: "sold", soldAt: new Date("2026-10-11T05:00:00Z"), soldMarket: "gameflip", soldPriceUsd: 0,
+    note: "gameflip sale cancelled after delivery — its login was seen", manualDeliveredAt: new Date("2026-10-11T05:00:01Z"),
+  });
+  const r = await af.retirePending({ deps: w.deps });
+  assert.strictEqual(r.retired, 1);
+  assert.match(w.pool.claimedNote, /^spent — auto-farm unclaimed sale \(gameflip sale cancelled after delivery/);
+  assert.strictEqual(w.telegrams.length, 1);
+  assert.match(w.telegrams[0], /^⚠️ RETIRED, not sold \(auto-farm unclaimed stock\)[\s\S]*Reason: gameflip sale cancelled after delivery/);
+  assert.doesNotMatch(w.telegrams[0], /💰|\$/);
+  // Not demand: only the once-only marker, never a "listing_sold" row.
+  assert.deepStrictEqual(w.deps.SaleSignal.docs.map((x) => x.source), ["drop_reserved"]);
 });
 
 test("a unit sold before the account was parked: the sold pass takes it out of its bot itself", async () => {

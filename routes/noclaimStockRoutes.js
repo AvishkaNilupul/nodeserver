@@ -772,14 +772,59 @@ router.post(
             " — delist it first",
         });
       }
-      const released = await stock.releaseClaim([id], { reason: "released by hand" });
+      // An AUTO-FARM account held for a listing goes back only on the market's
+      // own word that the listing is gone (utils/autofarmStock.releaseBlocked)
+      // — whoever asks, this route included: where its listing row exists,
+      // Gameflip is asked, and "still there" stands. Two cases nobody can ask
+      // about: its listing row is missing, or it was never attached to one.
+      // There the owner's word, after looking at the market, is the only one
+      // left — `confirmGone: true` in the body. Nothing else does it lift.
+      const confirmGone = !!(req.body && req.body.confirmGone === true);
+      let listingGone = false;
+      if (ledger.farm === "autofarm") {
+        const afs = require("../utils/autofarmStock");
+        let blocked = "";
+        try {
+          blocked = String((await afs.releaseBlocked(ledger)) || "");
+        } catch (e) {
+          blocked = "the release check failed: " + ((e && e.message) || e);
+        }
+        const ownerOnly = !!blocked && afs.releaseNeedsOwner(blocked);
+        if (blocked && !(ownerOnly && confirmGone)) {
+          return res.status(409).json({
+            success: false,
+            message:
+              "Not released — " + blocked +
+              (ownerOnly
+                ? ". Check " + (ledger.market || "the marketplace") + " for a listing carrying this account, " +
+                  'delete it, then send this again with { "confirmGone": true }'
+                : ""),
+            needsConfirm: ownerOnly,
+          });
+        }
+        listingGone = ownerOnly && confirmGone;
+      }
+      const released = await stock.releaseClaim(
+        [id],
+        listingGone ? { reason: "released by hand", listingGone: true } : { reason: "released by hand" },
+      );
+      if (!released) {
+        // Never a silent "success, 0": the ledger changed under this request,
+        // or its release was refused after the check above.
+        return res.status(409).json({
+          success: false,
+          message: "Not released — the account changed meanwhile or is still held; look at it again",
+        });
+      }
       logEvent({
         category: "noclaim_shop",
         action: "released_by_hand",
         actor: actorFromReq(req),
         subject: ledger.login || id,
         count: released,
-        detail: "operator released a committed no-claim account",
+        detail:
+          "operator released a committed no-claim account" +
+          (listingGone ? " — confirmed by hand that no listing carries it" : ""),
       });
       res.json({ success: true, released });
     } catch (err) {

@@ -823,9 +823,9 @@ async function markZeusxUnitsDelivered(row) {
 // runs, so — like the supplied-stock release — a failure must not become a 500
 // the owner retries against an offer that no longer exists. It answers zeros
 // plus the error, and logs it: those units stay committed to a dead listing.
-async function noclaimAfterDelist(row, outcome) {
+async function noclaimAfterDelist(row, outcome, { gone = false } = {}) {
   try {
-    const r = (await noclaimListings().afterDelist(row, { outcome })) || {};
+    const r = (await noclaimListings().afterDelist(row, { outcome, gone })) || {};
     return { released: Number(r.released) || 0, sold: Number(r.sold) || 0 };
   } catch (err) {
     console.error("noclaim afterDelist:", err.message);
@@ -1731,8 +1731,38 @@ router.delete(
           });
         }
       }
+      // The market's own word that the listing no longer exists there (the
+      // verified Gameflip take-down below) — what a held auto-farm account's
+      // hand-back waits for.
+      let noclaimGone = false;
       try {
-        if (row.marketplace === "gameflip") {
+        if (row.marketplace === "gameflip" && row.noclaimStock) {
+          // A no-claim listing carries a whole account's login, so "down" is
+          // Gameflip's word, never the delete call's: under its limiter it
+          // answers the take-down with 200 and changes nothing, and the row
+          // would be delisted here — its account handed back to be sold
+          // again — over a listing a buyer can still pay for. Nothing is
+          // changed until Gameflip no longer has it.
+          // Whatever goes wrong inside it is "no answer", never an outcome
+          // read off an error's wording further down.
+          let down;
+          try {
+            down = (await noclaimListings().gameflipTakeDown(row.externalId)) || {};
+          } catch (err) {
+            console.error("noclaim gameflip take-down:", err.message);
+            down = { state: "unreadable", status: "" };
+          }
+          if (down.state === "sold") throw new Error("Gameflip listing already sold");
+          if (down.state !== "gone") {
+            throw new Error(
+              down.state === "unreadable"
+                ? "Gameflip did not answer, so nothing was changed — try again in a few minutes"
+                : 'Gameflip still has this listing ("' + down.status + '") — NOT taken down yet, ' +
+                  "try again in a few minutes",
+            );
+          }
+          noclaimGone = true;
+        } else if (row.marketplace === "gameflip") {
           await mp.gameflipDelist(row.externalId);
         } else if (row.marketplace === "digiseller") {
           await mp.digisellerDelist(row.externalId);
@@ -1959,7 +1989,7 @@ router.delete(
       // A no-claim row keeps accountId "" and has no accountOffer, so neither
       // release above reaches it; its own layer hands the undelivered units back.
       if (row.noclaimStock) {
-        noclaim = await noclaimAfterDelist(row, noclaimOutcome);
+        noclaim = await noclaimAfterDelist(row, noclaimOutcome, { gone: noclaimGone });
       }
       res.json({
         success: true,

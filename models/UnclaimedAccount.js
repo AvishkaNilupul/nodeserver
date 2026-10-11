@@ -72,6 +72,10 @@ const unclaimedAccountSchema = new mongoose.Schema(
     // the claim's own live inventory, so the expiry step needs nobody else's
     // snapshot row to know when the unit must come off sale.
     farmGoneAt: { type: Date, default: null },
+    // When the expiry step last tried to take this held unit off sale — its
+    // own clock, so one unit that will not come down (a buyer in the middle of
+    // paying) never keeps the ones behind it on sale past their day.
+    farmDownTriedAt: { type: Date, default: null },
 
     // Snapshot of the unclaimed drops that were listed, for the panel.
     drops: {

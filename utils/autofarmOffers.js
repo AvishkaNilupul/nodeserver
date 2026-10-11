@@ -140,6 +140,12 @@ const COPY_UNFINISHED_MS = 10 * 60 * 1000;
 const COPY_PAUSE_MS = 6 * HOUR_MS;
 // Not worth a second offer when the bundle comes off sale within the day.
 const COPY_MIN_LIFE_MS = 24 * HOUR_MS;
+// A sold unit of a held chain whose relist is still to come: the words the
+// Gameflip relist lane writes on a row it will retry (gameflipFulfiller
+// .noteRelistFailure), and how long after a sale its first try may still be
+// inside the publish (that lane can sit minutes in Gameflip's rate-limit backoff).
+const RELIST_FAILED_RE = /^auto-relist failed/;
+const RELIST_GRACE_MS = 30 * 60 * 1000;
 // The sets the grow and rotation passes make name the set they came from.
 const LINEAGE_RE = /^Made \d{4}-\d{2}-\d{2} by the no-claim offer (?:grow|rotation):[^]*?\bset ([0-9a-f]{24})\b/i;
 
@@ -1087,13 +1093,20 @@ async function planCopies({ deps, now = Date.now() } = {}) {
   const past = new Map(); // set id + "|" + market -> { active, stopped, lastStatus, lastAt }
   for (const r of (await d.MarketplaceListing.find(
     { marketplace: { $in: c.copyMarkets }, noclaimStock: true, set: { $in: setIds } },
-    { set: 1, marketplace: 1, status: 1, createdAt: 1, qtyRemaining: 1, lastError: 1 },
+    { set: 1, marketplace: 1, status: 1, createdAt: 1, updatedAt: 1, qtyRemaining: 1, lastError: 1 },
   ).lean()) || []) {
     const k = str(r.set) + "|" + r.marketplace;
     const cur = past.get(k) || { active: false, stopped: false, lastStatus: "", lastAt: -Infinity };
-    // On sale — or sold with units still owed: its relist is pending, and the
-    // chain is not over until that has had its turn.
-    if (r.status === "active" || (r.status === "sold" && Number(r.qtyRemaining) > 0)) cur.active = true;
+    // On sale — or sold with its relist still to come: the chain is not over
+    // until that has had its turn. A sold row KEEPS its qtyRemaining once the
+    // relist went through (the debt moved to the new row, the number stays),
+    // so the number alone says nothing: the relist is pending while its lane
+    // says it failed and will retry, or in the minutes after the sale, when
+    // the relist may be inside its publish.
+    const owes = r.status === "sold" && Number(r.qtyRemaining) > 0;
+    const relistPending =
+      owes && (RELIST_FAILED_RE.test(str(r.lastError)) || now - msOf(r.updatedAt) < RELIST_GRACE_MS);
+    if (r.status === "active" || relistPending) cur.active = true;
     // A chain its own relist lane stopped (an account kept held, a listing
     // live without a row): something of it may still be out there.
     if (/^auto-relist stopped:/.test(str(r.lastError))) cur.stopped = true;
