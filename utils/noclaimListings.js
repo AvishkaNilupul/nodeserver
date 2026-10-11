@@ -414,7 +414,7 @@ async function feedGgsel(externalId, claims) {
   try {
     await mp.ggselAddProducts(
       externalId,
-      claims.map((c) => ggselDeliveryCode(c.login, c.password)),
+      claims.map((c) => ggselDeliveryCode(c.login, c.password, { unclaimed: c.farm === "autofarm" })),
     );
     return { fed: all, unfed: [], error: "" };
   } catch (e) {
@@ -542,7 +542,9 @@ async function publishVault(name, { set, body, title, description, priceUsd, cov
         delivery: "auto",
         instructions: opts.instructions,
         coverImagePath: cover || undefined,
-        products: claimed.map((x) => ggselDeliveryCode(x.login, x.password)),
+        // An auto-farm account's drops are unclaimed: its buyer connects,
+        // then claims. A no-claim account's code is what it always was.
+        products: claimed.map((x) => ggselDeliveryCode(x.login, x.password, { unclaimed: x.farm === "autofarm" })),
       });
       await mp.ggselEnableAutoselling(r.externalId).catch(() => {});
     } else {
@@ -1316,7 +1318,9 @@ async function rebuildGgsel(cur, keep, reason) {
       categoryId,
       delivery: "auto",
       coverImagePath: img || undefined,
-      products: usable.map((x) => ggselDeliveryCode(x.login, x.password)),
+      products: usable.map((x) =>
+        ggselDeliveryCode(x.login, x.password, { unclaimed: !!(x.ledger && x.ledger.farm === "autofarm") }),
+      ),
     });
   } catch (e) {
     if (img) await fsp.unlink(img).catch(() => {});

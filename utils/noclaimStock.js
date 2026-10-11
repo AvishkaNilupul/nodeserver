@@ -495,13 +495,16 @@ async function scanSet(set, { leadMs = 0 } = {}) {
   return out;
 }
 
-function claimedAccount(ledgerId, cred, poolAccountId) {
+// `farm` ("" or "autofarm") rides along so a vault publish can hand an
+// auto-farm account's buyer the unclaimed-drops steps.
+function claimedAccount(ledgerId, cred, poolAccountId, farm) {
   return {
     ledgerId: ledgerId ? String(ledgerId) : "",
     login: str(cred && cred.login),
     password: str(cred && cred.password),
     email: str(cred && cred.email),
     poolAccountId: str(poolAccountId),
+    farm: str(farm),
   };
 }
 
@@ -834,7 +837,7 @@ async function claimForSet(set, want, opts = {}) {
         );
         continue;
       }
-      out.push(claimedAccount(row._id, cred, row.poolAccountId));
+      out.push(claimedAccount(row._id, cred, row.poolAccountId, row.farm));
     }
     if (found >= n) return out;
   }
@@ -908,7 +911,7 @@ async function claimForSet(set, want, opts = {}) {
         const busy = await ual().activeListingsForLogin(c.login);
         if (busy && busy.length) continue;
         const led = ledgerOf(scan.base, c.loginLower);
-        out.push(claimedAccount(led && led._id, { ...cred, login: cred.login || c.login }, c.poolAccountId));
+        out.push(claimedAccount(led && led._id, { ...cred, login: cred.login || c.login }, c.poolAccountId, c.farm));
         took++;
         continue;
       }
@@ -967,7 +970,7 @@ async function claimForSet(set, want, opts = {}) {
 
       const ledgerId = commit.ledgerId;
       commit = null; // handed out — never undone past this point
-      out.push(claimedAccount(ledgerId, { ...cred, login: cred.login || c.login }, c.poolAccountId));
+      out.push(claimedAccount(ledgerId, { ...cred, login: cred.login || c.login }, c.poolAccountId, c.farm));
       taken.push(c.login);
       took++;
       if (mode === "fed") {

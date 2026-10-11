@@ -198,4 +198,30 @@ function loginsOf(row) {
   return ((row && row.accounts) || []).map((a) => String((a && a.login) || "")).filter(Boolean);
 }
 
-module.exports = { termWords, untilFrom, dayText, connectFirstText, connectFirstOffer, connectFirstShort, DROPS_CAMPAIGNS_URL, GUARANTEE_ONCE_CONNECTED, pinUntil, handoverStamp, stampFromHandover, sentButUnconfirmed, loginsOf };
+// The three steps a buyer of an UNCLAIMED bundle follows, for the markets that
+// hand the login over inside a delivery code (GGSel, Gameflip). The claimed
+// steps those codes have always carried send the buyer to the "Received"
+// section, where an unclaimed drop is not: it sits at the top, finished, and
+// Twitch releases it only after the buyer has connected a game account.
+//
+// Deliberately NO LONGER than the claimed steps (tests/vaultCodeText.test.js):
+// Gameflip's limit on a code is undocumented and that text is the longest it
+// is known to accept.
+const CLAIMED_CODE_STEPS =
+  "1. Log in to the received Twitch account, then go to " +
+  "https://www.twitch.tv/drops/inventory and scroll to the bottom of the " +
+  'page, to the "Received" section.\n\n' +
+  '2. Click on the purple "Connect" button, which is located below the ' +
+  "item you want to add to your account.\n\n" +
+  "3. Connect the account by following the instructions shown on the site " +
+  "where the connection is made.\n\n";
+const UNCLAIMED_CODE_STEPS =
+  "1. Log in to the received Twitch account and open " +
+  "https://www.twitch.tv/drops/inventory - your drops are at the top, " +
+  "finished.\n\n" +
+  '2. FIRST press "Connect" on the campaign and sign in with YOUR OWN game ' +
+  "account. Twitch only releases a drop to a connected account.\n\n" +
+  '3. Then press "Claim Now" on each drop. Do it today: unclaimed drops ' +
+  "vanish a week after the event.\n\n";
+
+module.exports = { termWords, untilFrom, dayText, connectFirstText, connectFirstOffer, connectFirstShort, DROPS_CAMPAIGNS_URL, GUARANTEE_ONCE_CONNECTED, pinUntil, handoverStamp, stampFromHandover, sentButUnconfirmed, loginsOf, CLAIMED_CODE_STEPS, UNCLAIMED_CODE_STEPS };

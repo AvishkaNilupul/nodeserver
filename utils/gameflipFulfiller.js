@@ -267,7 +267,13 @@ async function releaseBufferedRow(row, reason, opts = {}) {
   }
 }
 
-function gameflipDeliveryCode(login, password) {
+// `opts.unclaimed`: an auto-farm account sold for its UNCLAIMED drops — the
+// buyer connects first, then claims (utils/farmHandover.UNCLAIMED_CODE_STEPS,
+// never longer than the steps below). Without it the code is, byte for byte,
+// what it always was: Gameflip refusing a code it has already seen is the
+// last guard against listing one login twice, and that guard is the text.
+function gameflipDeliveryCode(login, password, opts = {}) {
+  const steps = require("./farmHandover");
   return (
     "TWITCH DROP ACCOUNT\n\n" +
     "Login: " +
@@ -275,13 +281,7 @@ function gameflipDeliveryCode(login, password) {
     "\nPassword: " +
     password +
     "\n\n" +
-    "1. Log in to the received Twitch account, then go to " +
-    "https://www.twitch.tv/drops/inventory and scroll to the bottom of the " +
-    'page, to the "Received" section.\n\n' +
-    '2. Click on the purple "Connect" button, which is located below the ' +
-    "item you want to add to your account.\n\n" +
-    "3. Connect the account by following the instructions shown on the site " +
-    "where the connection is made.\n\n" +
+    (opts && opts.unclaimed ? steps.UNCLAIMED_CODE_STEPS : steps.CLAIMED_CODE_STEPS) +
     "If you have any issue please message me here on Gameflip."
   );
 }
@@ -749,7 +749,9 @@ async function publishNoclaimAutoDelivery({
       description,
       priceUsd,
       imagePath,
-      autoDeliverCode: gameflipDeliveryCode(login, acc.password),
+      // An auto-farm account's drops are unclaimed: its buyer connects, then
+      // claims. A no-claim account's code is what it always was.
+      autoDeliverCode: gameflipDeliveryCode(login, acc.password, { unclaimed: acc.farm === "autofarm" }),
     });
   } catch (e) {
     // Matching release, exactly as the other lanes release theirs: a publish
