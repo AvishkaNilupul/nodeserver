@@ -793,8 +793,10 @@ async function publishNoclaimAutoDelivery({
               'POST /noclaim-stock/ledgers/' + String(acc.ledgerId) + '/release with { "confirmGone": true }'),
       ).catch(() => {});
       // Said in the error too, so a caller that lists by itself (utils/
-      // autofarmOffers) does not simply try again with another account.
-      e.message = what + HELD_MARK;
+      // autofarmOffers) does not simply try again with another account — and
+      // whether the listing is on the books: tracked, nothing of it is "live
+      // with no row", so that caller need not hold the whole set for a human.
+      e.message = what + HELD_MARK + (tracked ? TRACKED_MARK : "");
       throw e;
     }
     // Matching release, exactly as the other lanes release theirs: a publish
@@ -941,11 +943,19 @@ async function releaseNoclaimClaim(acc, reason, { listingGone = false } = {}) {
 // never the end call's own report.
 // On the error of a failed publish whose auto-farm account was NOT handed back.
 const HELD_MARK = " [account kept held]";
+// …and, after it, when the listing that publish left behind was put on the
+// books (trackFailedListing): the pass finishes it without anybody.
+const TRACKED_MARK = " [listing tracked]";
 const FAILED_LISTING_RE = /\(draft ([0-9a-f][0-9a-f-]{7,}) discarded\)|Gameflip created ([0-9a-f][0-9a-f-]{7,}) but/i;
+const FAILED_LISTING_SAID_RE = /\(draft \S* ?discarded\)|Gameflip created \S+ but/i;
 async function failedPublishRemains(err) {
-  const m = FAILED_LISTING_RE.exec(String((err && err.message) || err || ""));
+  const text = String((err && err.message) || err || "");
+  const m = FAILED_LISTING_RE.exec(text);
   const id = m && (m[1] || m[2]);
-  if (!id) return "none";
+  // "None" is the ABSENCE of the two forms that say a listing was built — not
+  // a failure to read its id out of one of them: a listing that was created
+  // and cannot be named cannot be asked about, which is "there", not "none".
+  if (!id) return FAILED_LISTING_SAID_RE.test(text) ? "there" : "none";
   for (let look = 0; look < 2; look++) {
     let status = "";
     try {
@@ -957,7 +967,9 @@ async function failedPublishRemains(err) {
     }
     if (look === 0) {
       try {
-        await mp.gameflipEndListing(id, { status });
+        // `confirmed`: its own read-back was Gameflip's 404 for the listing.
+        const ended = await mp.gameflipEndListing(id, { status });
+        if (ended && ended.confirmed === true) return "gone";
       } catch {
         /* whatever it threw, the second look is the verdict */
       }
@@ -1623,7 +1635,7 @@ async function syncOnce({
       // from the database when this pass's copy lacks it: an overlapping pass
       // (a manual /marketplaces/sync beside the tick) may have stamped and
       // ended it after this pass loaded its rows.
-      if (e && e.status === 404) {
+      if (gameflipGone(e)) {
         let m = LAPSED_ENDING_RE.exec(String(row.lastError || ""));
         if (!m) {
           const fresh = await MarketplaceListing.findById(row._id, { lastError: 1 })
@@ -1670,8 +1682,9 @@ async function syncOnce({
     try {
       await mp.gameflipEndListing(row.externalId, { status: st.status });
     } catch (e) {
-      // Gone between the read and the end: the same outcome as ending it.
-      if (!(e && e.status === 404)) throw e;
+      // Gone between the read and the end (Gameflip's own 404 for the
+      // listing): the same outcome as ending it.
+      if (!gameflipGone(e)) throw e;
     }
     await settleLapsed(row, { expiration: resumeEnd ? date : st.expiration });
     return LAPSED_DONE;
@@ -1700,7 +1713,10 @@ async function syncOnce({
       // units it still owes are never relisted, and its account stays reserved
       // out of the sellable pool. Retire the row and hand the account back.
       // Every other error (timeout, 429, 5xx) really is transient — skip those.
-      if (e && e.status === 404) {
+      // And only Gameflip's OWN 404 (utils/gameflipGone): a 404 from something
+      // in between says nothing about the listing, and retiring on it hands
+      // the account back behind a listing that may be on sale.
+      if (gameflipGone(e)) {
         const retired = await MarketplaceListing.findOneAndUpdate(
           { _id: row._id, status: "active" },
           {
@@ -1727,10 +1743,7 @@ async function syncOnce({
         // Nor can it reach a no-claim row's (accountId is always ""). Its own
         // `if` rather than one more `else`, so no branch above can skip it.
         if (retired && row.noclaimStock) {
-          // The hand-back of an auto-farm account turns on that 404 being
-          // Gameflip's own (utils/gameflipGone); if it was not, the claim
-          // layer asks Gameflip itself before it lets the account go.
-          await retireNoclaimUnit(row, "listing 404 on Gameflip", { gone: gameflipGone(e) });
+          await retireNoclaimUnit(row, "listing 404 on Gameflip", { gone: true });
         }
         if (retired) {
           console.error(
@@ -2363,6 +2376,7 @@ module.exports = {
   noteIfCodeRefused,
   failedPublishRemains,
   HELD_MARK,
+  TRACKED_MARK,
   // exported for tests
   noteRelistFailure,
   relistRetryDelayMs,

@@ -76,7 +76,7 @@ test.before(async () => {
     if (endMode === "limited") throw http(429, "Gameflip end listing (off sale): Too many attempts - Retry later");
     if (endMode === "swallow") throw http(409, "Gameflip end listing: " + id + " still exists after the delete");
     gameflip.delete(id);
-    return { deleted: true };
+    return { deleted: true, confirmed: true };
   };
   mp.gameflipDelist = async (id) => {
     calls.delist.push(id);
@@ -286,9 +286,9 @@ test("Delist: an AUTO-FARM account goes back with Gameflip's 404 as its proof �
   const pool = await poolNow(u);
   assert.equal(pool.claimedNote, "auto-farm: Brawlhalla (c-" + seq + ")", "still in its bot: the note it carried");
   assert.equal(pool.listed, false);
-  // Read, ended, read again — and that last answer is the proof the release
-  // goes on: Gameflip is not asked a third time.
-  assert.equal(calls.status.length, 2);
+  // Read once, ended with its own proof — and the release goes on that:
+  // Gameflip is not asked again.
+  assert.equal(calls.status.length, 1);
 });
 
 test("Delist: an ordinary (archive) Gameflip listing takes the path it always took", async () => {
@@ -407,6 +407,23 @@ test("hand release: confirmGone is refused while the claim may still be inside i
   assert.equal(r.status, 409);
   assert.equal(r.body.needsConfirm, true);
   r = await release(pinned.ledger, { confirmGone: true });
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+});
+
+test("hand release: a no-claim bot's claim with no listing row yet is not released while its publish may be running", async () => {
+  const u = await unit({ attached: false, rowStatus: "delisted" });
+  await UnclaimedAccount.updateOne({ _id: u.ledger._id }, { $set: { manualAt: new Date() } });
+  let r = await release(u.ledger);
+  assert.equal(r.status, 409);
+  assert.match(r.body.message, /claimed 0 min ago and has no listing row yet: its publish may still be running\. Try again in 30 min/);
+  assert.equal((await ledgerNow(u)).status, "manual");
+  // Old enough, or attached to its row: released as it always was.
+  await UnclaimedAccount.updateOne({ _id: u.ledger._id }, { $set: { manualAt: new Date(Date.now() - 31 * 60 * 1000) } });
+  r = await release(u.ledger);
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  const fresh = await unit({ rowStatus: "delisted" });
+  await UnclaimedAccount.updateOne({ _id: fresh.ledger._id }, { $set: { manualAt: new Date() } });
+  r = await release(fresh.ledger);
   assert.equal(r.status, 200, JSON.stringify(r.body));
 });
 

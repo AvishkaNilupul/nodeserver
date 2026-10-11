@@ -15,6 +15,7 @@ const otplib = require("otplib");
 
 const { loadSettings, saveSettings } = require("./settings");
 const { encrypt, decrypt } = require("./secretBox");
+const { gameflipGone } = require("./gameflipGone");
 
 // Which credential fields each marketplace needs.
 const FIELDS = {
@@ -497,11 +498,12 @@ async function gameflipListingState(listingId) {
 // delete means it is already gone, which is the goal. `status` is the state the
 // caller just read, so a listing already off sale is not patched again.
 //
-// Success is only reported once a read-back answers 404. Under its limiter
-// Gameflip answers 200 to writes it never applies (gfTakeOffSale above exists
-// for that), and the caller hands the listing's account back on success — a
-// swallowed delete would leave that account behind a listing that still holds
-// its code.
+// Success is only reported once a read-back answers Gameflip's own 404. Under
+// its limiter Gameflip answers 200 to writes it never applies (gfTakeOffSale
+// above exists for that), and the caller hands the listing's account back on
+// success — a swallowed delete would leave that account behind a listing that
+// still holds its code. Returns { deleted, confirmed: true }; anything short
+// of that proof throws.
 async function gameflipEndListing(listingId, { status = "onsale" } = {}) {
   const keys = requireKeys("gameflip");
   const st = String(status || "");
@@ -525,26 +527,38 @@ async function gameflipEndListing(listingId, { status = "onsale" } = {}) {
       throw apiError("Gameflip end listing (off sale)", e);
     }
   }
+  // `deleted`: this call's delete went through (false: the delete itself
+  // answered 404, so the listing was most likely gone already).
+  let deleted = true;
   try {
     await axios.delete(GF_API + "/listing/" + listingId, {
       headers: gfHeaders(keys),
       timeout: 20000,
     });
   } catch (e) {
-    if (e && e.response && e.response.status === 404) return { deleted: false };
-    throw apiError("Gameflip end listing (delete)", e);
+    // A 404 on the delete is the DELETE's answer, not yet the listing's: it
+    // is read back like any other, so "ended" never rests on a call nobody
+    // checked (this used to return here, with nothing read).
+    if (!(e && e.response && e.response.status === 404)) {
+      throw apiError("Gameflip end listing (delete)", e);
+    }
+    deleted = false;
   }
   let still = "";
   try {
     still = (await gameflipListingStatus(listingId)) || "?";
   } catch (e) {
-    if (e && e.status === 404) return { deleted: true };
+    // Gameflip's OWN 404 for the listing (utils/gameflipGone: the status and
+    // its error envelope) — the one answer that says it is gone. `confirmed`
+    // tells a caller it need not ask again.
+    if (gameflipGone(e)) return { deleted, confirmed: true };
     throw apiError("Gameflip end listing (confirm)", e);
   }
-  // Deleted listings answer 404 (verified again 2026-10-01); a "deleted" status,
-  // should Gameflip ever answer one instead, is just as gone. Nothing broader:
-  // a status that might still hold the code must not read as deleted.
-  if (/^deleted$/i.test(String(still))) return { deleted: true };
+  // Deleted listings answer 404 (verified again 2026-10-01 and 2026-10-11); a
+  // "deleted" status, should Gameflip ever answer one instead, is just as
+  // gone. Nothing broader: a status that might still hold the code must not
+  // read as deleted.
+  if (/^deleted$/i.test(String(still))) return { deleted, confirmed: true };
   const err = new Error(
     "Gameflip end listing: " + listingId + ' still exists after the delete (status "' +
       still + '") — left as it is for the next pass',

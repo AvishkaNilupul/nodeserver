@@ -786,6 +786,22 @@ router.post(
       // left — `confirmGone: true` in the body. Nothing else does it lift.
       const confirmGone = !!(req.body && req.body.confirmGone === true);
       let listingGone = false;
+      // Whichever farm it came from: a claim with no listing row yet may still
+      // be inside its publish — released now, that publish goes on to put the
+      // login on sale behind an account that is stock again. Only a claim the
+      // pass has pinned, or one old enough that no publish is still at it.
+      const pinnedClaim = String(ledger.note || "").startsWith("unrecorded publish — ");
+      const claimAt = ledger.manualAt ? new Date(ledger.manualAt).getTime() : 0;
+      const settleMs = pinnedClaim ? 0 : claimAt + CLAIM_SETTLE_MS - Date.now();
+      if (ledger.farm !== "autofarm" && !String(ledger.manualListing || "") && settleMs > 0) {
+        return res.status(409).json({
+          success: false,
+          message:
+            "Not released — it was claimed " + Math.max(0, Math.round((Date.now() - claimAt) / 60000)) +
+            " min ago and has no listing row yet: its publish may still be running. Try again in " +
+            Math.ceil(settleMs / 60000) + " min",
+        });
+      }
       if (ledger.farm === "autofarm") {
         const afs = require("../utils/autofarmStock");
         let blocked = "";

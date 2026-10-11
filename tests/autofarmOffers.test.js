@@ -2030,6 +2030,57 @@ test("a failed Gameflip chain: held accounts and live-without-a-row hold the set
   assert.strictEqual(w.set.note, OWN_NOTE);
 });
 
+test("a failed Gameflip publish whose leftover listing is ON THE BOOKS is an ordinary failure — the set is not held for a human", async () => {
+  autoFarm = { ...autoFarm, ...GF_ON };
+  // Gameflip's lane kept the account held AND put the listing it may have left
+  // behind on the books: the lifecycle pass takes it down and hands the account
+  // back by itself. Nothing is live without a row, so the set is not marked
+  // "may be live", no copy is paused for six hours, and nobody is paged twice.
+  const tracked = "Gameflip created 4f1b3263-aaaa-bbbb-cccc-00000000000a but could not put it on sale (draft discarded): x [account kept held] [listing tracked]";
+  ao.resetMemory();
+  const w = gfWorld(10, { world: { publishResult: { success: false, message: tracked } } });
+  let r = await ao.runPass({ deps: w.deps, now: T0 });
+  assert.strictEqual(w.set.note, OWN_NOTE, "no hold record on the set");
+  assert.strictEqual(ao.copyRecord(w.set.note), null);
+  assert.strictEqual(w.telegrams.length, 0, "Gameflip's lane told the owner already");
+  assert.strictEqual(r.errors.length, 1);
+  // Half an hour later: resting. An hour later: tried again.
+  await ao.runPass({ deps: w.deps, now: T0 + 30 * 60 * 1000 });
+  assert.strictEqual(w.published.length, 1);
+  await ao.runPass({ deps: w.deps, now: T0 + 61 * 60 * 1000 });
+  assert.strictEqual(w.published.length, 2, "an ordinary failed publish: retried after its rest");
+});
+
+test("the row a failed publish left on the books rests its set six hours — then it is no part of the set's history", async () => {
+  autoFarm = { ...autoFarm, ...GF_ON };
+  const failed = (hoursAgo, extra = {}) => ({
+    status: "removed",
+    qtyRemaining: 0,
+    lastError: "publish failed — its listing may still exist on Gameflip, being taken down: Gameflip created 4f1b but could not put it on sale",
+    createdAt: new Date(T0 - hoursAgo * 60 * 60 * 1000),
+    updatedAt: new Date(T0 - hoursAgo * 60 * 60 * 1000),
+    ...extra,
+  });
+  const withRows = async (rows) => {
+    ao.resetMemory();
+    const w = gfWorld(10);
+    for (const r of rows) w.rows.push({ _id: oid(), marketplace: "gameflip", noclaimStock: true, set: w.set._id, externalId: "gf-" + oid().slice(-4), note: "no-claim auto-delivery — x — publish failed", ...r });
+    await ao.runPass({ deps: w.deps, now: T0 });
+    return w.published.length;
+  };
+  // An hour ago: the pass is still clearing it up, its account is held — no new chain.
+  assert.strictEqual(await withRows([failed(1)]), 0);
+  // Seven hours ago: it never was on sale, so it is neither "came down unsold"
+  // (which would end Gameflip for the set) nor "sold" — the set is tried again.
+  assert.strictEqual(await withRows([failed(7)]), 1);
+  // It does not hide what really happened before it: a unit that came down unsold still ends it…
+  assert.strictEqual(await withRows([{ status: "delisted", lastError: "drops leave within 24 h", createdAt: new Date(T0 - 3 * DAY) }, failed(7)]), 0);
+  // …and a chain that sold through still earns the next one.
+  assert.strictEqual(await withRows([{ status: "sold", qtyRemaining: 0, createdAt: new Date(T0 - 3 * DAY), updatedAt: new Date(T0 - 2 * DAY) }, failed(7)]), 1);
+  // Limbo found the "failed" listing had SOLD and booked it: a sale like any other.
+  assert.strictEqual(await withRows([failed(7, { status: "sold" })]), 1);
+});
+
 test("the sweep leaves Gameflip alone — a held unit shares nobody's shelf", async () => {
   autoFarm = { ...autoFarm, ...GF_ON };
   const w = gfWorld(10);

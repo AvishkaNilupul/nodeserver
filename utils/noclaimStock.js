@@ -121,7 +121,7 @@ const LEDGER_DEFAULTS = {
   farmGoneAt: null,
   farmDownTriedAt: null,
   farmLimboAt: null,
-  farmLimboToldAt: null,
+  farmToldAt: null,
 };
 
 // ---------------------------------------------------------------------------
@@ -698,7 +698,7 @@ async function commitLedger(c, ctx) {
     fields.farmGoneAt = ctx.goneAt ? new Date(ctx.goneAt) : null;
     fields.farmDownTriedAt = null;
     fields.farmLimboAt = null;
-    fields.farmLimboToldAt = null;
+    fields.farmToldAt = null;
     fields.farmReloads = [];
     fields.farmHuman = "";
   }

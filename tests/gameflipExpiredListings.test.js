@@ -21,7 +21,10 @@ const { MongoMemoryServer } = require("mongodb-memory-server");
 process.env.SESSION_SECRET ||= "gf-expired-listings-test";
 process.env.CRED_SECRET ||= "gf-expired-listings-cred";
 
+const GF_404 =
+  'Gameflip listing status: {"status":"FAILURE","data":null,"error":{"message":"Not Found","code":404,"http_status":404}}';
 const world = {
+  notFoundBody: "",
   onsale: new Set(),
   state: {},
   ended: [],
@@ -42,7 +45,9 @@ const fakeMp = {
     world.stateReads.push(id);
     const s = world.state[id];
     if (!s) {
-      const e = new Error("Gameflip listing status: not found");
+      // Gameflip's own answer for a listing it no longer has (read live
+      // 2026-10-11): the watcher retires a row on nothing less.
+      const e = new Error(world.notFoundBody || GF_404);
       e.status = 404;
       throw e;
     }
@@ -104,6 +109,7 @@ test.beforeEach(async () => {
   world.stateReads = [];
   world.endFails = new Set();
   world.af = {};
+  world.notFoundBody = "";
 });
 
 const PAST = "2026-08-25T17:06:48.066Z";
@@ -430,6 +436,28 @@ test("an unstamped 404 keeps the 404 branch it always had", async () => {
   const after = await MarketplaceListing.findOne({ externalId: "gf-gone" }).lean();
   assert.match(after.lastError, /gone from Gameflip \(404\)/);
   assert.strictEqual(pub.calls.length, 0);
+});
+
+test("a 404 that is not Gameflip's own answer retires nothing — the account stays behind a listing that may be on sale", async () => {
+  // Something in between answered (a proxy's page, a bare status): it says
+  // nothing about the listing. Retired on it, the row's account went back to
+  // stock while the listing could still be bought.
+  for (const body of [
+    'Gameflip listing status: "<html><h1>404 Not Found</h1><hr>nginx</html>"',
+    "Gameflip listing status: Request failed with status code 404",
+  ]) {
+    await MarketplaceListing.deleteMany({});
+    await row("gf-proxy", { autoDeliver: true, origin: "auto", qtyRemaining: 3 });
+    world.notFoundBody = body;
+    await gf.syncOnce();
+    const after = await MarketplaceListing.findOne({ externalId: "gf-proxy" }).lean();
+    assert.strictEqual(after.status, "active", body);
+    assert.strictEqual(after.qtyRemaining, 3);
+  }
+  // Gameflip's own 404: retired, as always.
+  world.notFoundBody = "";
+  await gf.syncOnce();
+  assert.strictEqual((await MarketplaceListing.findOne({ externalId: "gf-proxy" }).lean()).status, "removed");
 });
 
 test("nothing is ended or renewed while the bulk sweep is down — Gameflip is throttling us", async () => {

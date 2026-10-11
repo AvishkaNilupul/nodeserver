@@ -123,7 +123,11 @@ const COPY_MIN_PRICE = { g2g: 1, gameflip: 0.75 };
 // HELD_MARK — it has paged the owner itself by then).
 const COPY_MAYBE = {
   g2g: /^G2G publish(?!.*\(HTTP 4\d\d\))/i,
-  gameflip: /\[account kept held\]/,
+  // …unless the listing that publish left behind is on the books ("[listing
+  // tracked]", gameflipFulfiller.trackFailedListing): the lifecycle pass then
+  // takes it down and hands the account back by itself, nothing is live
+  // without a row, and this is an ordinary failed publish — retried later.
+  gameflip: /\[account kept held\](?! \[listing tracked\])/,
 };
 // The record a copy leaves on its set's note:
 //   " — HOLD: <market> copy <YYYY-MM-DD HH:MM>Z: <what happened>"
@@ -146,6 +150,10 @@ const COPY_MIN_LIFE_MS = 24 * HOUR_MS;
 // inside the publish (that lane can sit minutes in Gameflip's rate-limit backoff).
 const RELIST_FAILED_RE = /^auto-relist failed/;
 const RELIST_GRACE_MS = 30 * 60 * 1000;
+// A held chain's publish that failed and left a listing behind: the words its
+// tracking row carries, and how long the set rests on that market after one.
+const FAILED_PUBLISH_RE = /^publish failed — /;
+const FAILED_PUBLISH_REST_MS = 6 * HOUR_MS;
 // The sets the grow and rotation passes make name the set they came from.
 const LINEAGE_RE = /^Made \d{4}-\d{2}-\d{2} by the no-claim offer (?:grow|rotation):[^]*?\bset ([0-9a-f]{24})\b/i;
 
@@ -1097,6 +1105,18 @@ async function planCopies({ deps, now = Date.now() } = {}) {
   ).lean()) || []) {
     const k = str(r.set) + "|" + r.marketplace;
     const cur = past.get(k) || { active: false, stopped: false, lastStatus: "", lastAt: -Infinity };
+    // The row of a publish that FAILED and left a listing behind (it was never
+    // on sale; gameflipFulfiller.trackFailedListing). While it is fresh the
+    // pass is still clearing it up — its account is held — so no new chain.
+    // After that it is no part of the set's selling history at all: neither
+    // "came down unsold" nor "sold", and the set may be tried again.
+    if (FAILED_PUBLISH_RE.test(str(r.lastError))) {
+      if (now - msOf(r.createdAt) < FAILED_PUBLISH_REST_MS) {
+        cur.active = true;
+        past.set(k, cur);
+      }
+      continue;
+    }
     // On sale — or sold with its relist still to come: the chain is not over
     // until that has had its turn. A sold row KEEPS its qtyRemaining once the
     // relist went through (the debt moved to the new row, the number stays),
