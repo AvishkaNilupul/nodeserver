@@ -1780,6 +1780,100 @@ async function checkUnitHealth(ledger, row, set, tally, errors) {
   });
 }
 
+// How many held units one pass takes off (each is a marketplace round trip,
+// and on Gameflip a replacement listing as well).
+const EXPIRY_MAX_PER_PASS = 3;
+
+// The bundle a ledger was listed with, shaped like a holding: its drops are
+// the live copies the claim read ({ name, game, campaign, itemKey }, one entry
+// per copy), so each carries the campaign that says when it leaves. Read off
+// the LEDGER on purpose — a held account is no longer a sweep candidate, and
+// its snapshot row is not kept up.
+function holdingFromLedger(ledger) {
+  const byKey = new Map();
+  for (const d of (ledger && Array.isArray(ledger.drops) ? ledger.drops : [])) {
+    if (!d) continue;
+    const k = lower(d.itemKey) || lower(d.name) + "|" + lower(d.game);
+    if (!k || k === "|") continue;
+    if (!byKey.has(k)) byKey.set(k, { itemKey: d.itemKey || k, name: d.name || "", game: d.game || "", qty: 0, waves: [] });
+    const it = byKey.get(k);
+    it.qty++;
+    const name = String(d.campaign || "").trim();
+    const w = it.waves.find((x) => x.campaign === name);
+    if (w) w.qty++;
+    else it.waves.push({ campaign: name, qty: 1 });
+  }
+  return { items: [...byKey.values()], readAt: (ledger && (ledger.manualAt || ledger.lastCheckedAt)) || null };
+}
+
+// Step: an AUTO-FARM account sitting in a market's hands comes off sale a day
+// before the drops it was listed for leave it. The health step only notices
+// once they are GONE, and a buyer can pay in between — for an account whose
+// whole worth is those drops. Runs whatever the vault switch says: a unit that
+// is already out there must still come back in time. Database only until a
+// unit is due.
+async function autofarmExpiryStep(tally, errors) {
+  const vault = await activeVaultRows();
+  if (!vault.length) return;
+  const byId = new Map(vault.map((r) => [String(r._id), r]));
+  const ledgers = await UnclaimedAccount.find({
+    source: "noclaim",
+    farm: "autofarm",
+    status: "manual",
+    manualListing: { $in: [...byId.keys()] },
+  }).lean();
+  if (!ledgers.length) return;
+  const afs = require("./autofarmStock");
+  const lead = typeof afs.vaultLeadMs === "function" ? Number(await afs.vaultLeadMs()) : NaN;
+  const leadMs = Number.isFinite(lead) && lead > 0 ? lead : 24 * 60 * 60 * 1000;
+  const base = await noclaimHoldings.snapshotBase();
+  const sets = new Map();
+  const now = Date.now();
+  for (const ledger of ledgers) {
+    if (tally.removed >= EXPIRY_MAX_PER_PASS) break;
+    const l = lower(ledger.login || ledger.loginLower);
+    try {
+      if (isUnrecorded(ledger)) continue; // pinned: only a human releases it
+      const row = byId.get(String(ledger.manualListing));
+      if (!row) continue;
+      const unit = undeliveredUnits(row).find((u) => lower(u.login) === l);
+      if (!unit) continue; // sold, or not on the row: other steps own it
+      const key = String(row.set);
+      if (!sets.has(key)) sets.set(key, await DropSet.findById(row.set).lean().catch(() => null));
+      const set = sets.get(key);
+      if (!set) continue;
+      const gone = Number(await ncs.coverGoneAt(holdingFromLedger(ledger), base, ncs.requiredFromSet(set)));
+      // 0 = the ledger does not show the bundle, Infinity = no leave time on
+      // record: either way there is nothing to count down, and the health
+      // step's live read stays the judge.
+      if (!(gone > 0) || !Number.isFinite(gone) || gone - now > leadMs) continue;
+      tally.due++;
+      const reason = "drops leave within " + Math.max(1, Math.round(leadMs / (60 * 60 * 1000))) + " h";
+      const r = await removeUnit(row, unit.login, { reason });
+      if (!r.ok) {
+        errors.push("expiry " + unit.login + ": " + (r.error || "removal failed"));
+        continue;
+      }
+      if (!r.removed) continue; // sold meanwhile, or someone else took it down
+      tally.removed++;
+      await releaseIds([ledger._id], reason);
+      logEvent({
+        category: "noclaim_shop",
+        action: "autofarm_unit_expiring",
+        actor: "noclaimListings",
+        subject: unit.login,
+        game: ledger.game || "",
+        count: 1,
+        detail:
+          "its drops leave " + new Date(gone).toISOString().slice(0, 16).replace("T", " ") + "Z — taken off " +
+          marketLabel(row.marketplace) + " and handed back before a buyer could pay for them",
+      });
+    } catch (e) {
+      errors.push("expiry " + l + ": " + ((e && e.message) || String(e)));
+    }
+  }
+}
+
 async function healthStep(budget, tally, errors) {
   if (!budget) return;
   const vault = await activeVaultRows();
@@ -1915,6 +2009,7 @@ async function runPass({ sweep = false } = {}) {
     orphans: { attached: 0, pinned: 0 },
     conflicts: { removed: 0, reattached: 0 },
     health: { checked: 0, ok: 0, sold: 0, strikes: 0, expired: 0, failed: 0 },
+    expiring: { due: 0, removed: 0 },
     toppedUp: 0,
     sweep: null,
     errors: [],
@@ -2003,6 +2098,9 @@ async function runPass({ sweep = false } = {}) {
     await step("orphans", () => orphansStep(out.orphans, out.errors));
     // 4. Units whose ledger or login disagrees with the row.
     await step("conflicts", () => conflictsStep(out.conflicts, out.errors));
+    // 4b. Auto-farm accounts held for a vault unit come off a day before the
+    // drops they were listed for leave them.
+    await step("autofarm-expiry", () => autofarmExpiryStep(out.expiring, out.errors));
     // 5. Live re-checks of committed vault units.
     const healthBudget = Math.max(0, Math.min(100, Math.floor(Number(cfg.healthPerPass) || 0)));
     await step("health", () => healthStep(healthBudget, out.health, out.errors));
@@ -2096,5 +2194,6 @@ module.exports = {
   // pure, exported for tests
   undeliveredUnits,
   healthStrike,
+  holdingFromLedger,
   writeMaybeLanded,
 };

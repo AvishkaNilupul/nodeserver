@@ -754,6 +754,28 @@ async function publishNoclaimAutoDelivery({
       autoDeliverCode: gameflipDeliveryCode(login, acc.password, { unclaimed: acc.farm === "autofarm" }),
     });
   } catch (e) {
+    // An account Gameflip refuses is remembered, as on every other lane, so
+    // the next attempt tries someone else.
+    noteIfCodeRefused(login, e);
+    // An AUTO-FARM account is sold whole, on any market, the moment it is
+    // free again — so it goes back only when the listing this publish built
+    // is provably gone. gameflipPublish bins a half-built listing best-effort,
+    // and under Gameflip's limiter that delete fails like everything else.
+    // Kept, the account stays held with no listing row; the maintenance pass
+    // pins such a claim and tells the owner how to release it.
+    if (acc.farm === "autofarm" && (await failedPublishRemains(e)) === "there") {
+      console.error(
+        "gameflip no-claim: " + (login || "the account") + " stays HELD — the listing its failed publish " +
+          "built may still exist on Gameflip with its login: " + ((e && e.message) || e),
+      );
+      sendTelegram(
+        "⚠️ Gameflip: a publish of an auto-farm unclaimed account failed, and the listing it had " +
+          "built could not be confirmed deleted.\n" + String((e && e.message) || e).slice(0, 300) +
+          "\nThe account (" + (login || "?") + ") stays held so it cannot be sold elsewhere. " +
+          "Check Gameflip for that draft/listing, delete it, then release the account on the no-claim page.",
+      ).catch(() => {});
+      throw e;
+    }
     // Matching release, exactly as the other lanes release theirs: a publish
     // that threw must not leave the account committed to a listing that does
     // not exist.
@@ -827,6 +849,31 @@ async function releaseNoclaimClaim(acc, reason) {
       e.message,
     );
   }
+}
+
+// A failed publish names the listing it had built: "… (draft <id> discarded)"
+// when the code would not attach, "Gameflip created <id> but could not put it
+// on sale (draft discarded)" when it would not go on sale. "Discarded" is what
+// gameflipPublish TRIED. What Gameflip really holds now:
+//   "none"   the publish failed before any listing existed
+//   "gone"   Gameflip no longer has it
+//   "there"  it still exists, or Gameflip would not say
+// A listing found still there gets one more delete before the second look.
+const FAILED_LISTING_RE = /\(draft ([0-9a-f][0-9a-f-]{7,}) discarded\)|Gameflip created ([0-9a-f][0-9a-f-]{7,}) but/i;
+async function failedPublishRemains(err) {
+  const m = FAILED_LISTING_RE.exec(String((err && err.message) || err || ""));
+  const id = m && (m[1] || m[2]);
+  if (!id) return "none";
+  for (let look = 0; look < 2; look++) {
+    try {
+      await mp.gameflipListingStatus(id);
+    } catch (e) {
+      const gone = (e && e.status === 404) || mp.delistOutcome((e && e.message) || "") === "gone";
+      return gone ? "gone" : "there"; // an unreadable answer proves nothing
+    }
+    if (look === 0) await mp.gameflipDelist(id).catch(() => {});
+  }
+  return "there";
 }
 
 // The no-claim sibling of the retire-path releases above (archive reservation,
@@ -2183,6 +2230,7 @@ module.exports = {
   // (autoLister's first unit of a campaign).
   gameflipCodeHeldLogins,
   noteIfCodeRefused,
+  failedPublishRemains,
   // exported for tests
   noteRelistFailure,
   relistRetryDelayMs,

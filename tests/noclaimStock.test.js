@@ -226,6 +226,10 @@ function resetState() {
     afReserve: new Map(), // usernameLower -> { ok, why } | Error
     afLive: "", // what the live inventory says about an auto-farm account
     afVault: new Set(), // vault markets an auto-farm account may be held for
+    afMinLifeMs: 72 * 60 * 60 * 1000, // the least life a held bundle must have left
+    gone: new Map(), // campaign name -> ms its copies leave (the expiry rules)
+    gfHeld: new Set(), // logins Gameflip already holds a code for
+    gfHeldError: null,
   });
 }
 resetState();
@@ -275,6 +279,8 @@ const holdingsStub = {
     return "";
   },
   isFresh: (h, base) => !!h.readAt && Date.now() - new Date(h.readAt).getTime() <= base.maxAgeMs,
+  // When a campaign's copies leave an account (Infinity = not known).
+  waveGoneAt: (base, game, name) => (state.gone.has(name) ? state.gone.get(name) : Infinity),
   recordRead: async (loginLower, r) => {
     state.reads.push({ loginLower, ...r });
     return true;
@@ -348,6 +354,9 @@ const autofarmStub = {
   vaultAllowed(market) {
     return state.afVault.has(market);
   },
+  vaultMinLifeMs() {
+    return state.afMinLifeMs;
+  },
   async releaseHeld(ledger) {
     state.afCalls.push(["release-held", ledger.loginLower, ledger.farmPoolNote]);
     return true;
@@ -365,6 +374,17 @@ const STUBS = new Map([
   [path.join(ROOT, "utils/systemLog.js"), systemLogStub],
   [path.join(ROOT, "utils/noclaimHoldings.js"), holdingsStub],
   [path.join(ROOT, "utils/unclaimedAutoList.js"), ualStub],
+  // Asked only when an auto-farm account is about to be held for Gameflip.
+  [
+    path.join(ROOT, "utils/gameflipFulfiller.js"),
+    {
+      gameflipCodeHeldLogins: async () => {
+        state.afCalls.push(["gf-held"]);
+        if (state.gfHeldError) throw state.gfHeldError;
+        return state.gfHeld;
+      },
+    },
+  ],
 ]);
 
 const origLoad = Module._load;
@@ -388,10 +408,12 @@ test.after(() => {
 
 const ncs = require("../utils/noclaimStock");
 
-test.beforeEach(() => {
+// A clean world, also from inside a test that walks several cases.
+function resetAll() {
   resetState();
   for (const m of [Unclaimed, Pool, Listing, Sets]) m.reset();
-});
+}
+test.beforeEach(resetAll);
 
 // ---------------------------------------------------------------------------
 // Fixtures: a set promising 2× Alpha Pack + 1× Beta Spray (Overwatch 2).
@@ -408,6 +430,9 @@ const item = (name, qty = 1, game = "Overwatch 2") => ({
   image: "",
   qty,
 });
+// The same item with the campaign its copies came from (one wave).
+const waved = (it, campaign) => ({ ...it, campaign, waves: [{ campaign, qty: it.qty }] });
+const DAY = 24 * 60 * 60 * 1000;
 const ALPHA = (qty = 2) => item("Alpha Pack", qty);
 const BETA = (qty = 1) => item("Beta Spray", qty);
 const GAMMA = (qty = 1) => item("Gamma Skin", qty);
@@ -441,6 +466,8 @@ function world(accounts, { maxAgeMs = 8 * HOUR } = {}) {
     ledgerByLogin: new Map(),
     activeLogins: new Set(),
     poolById: new Map(),
+    // The expiry rules are on; a campaign's leave time comes from state.gone.
+    expiry: { on: true },
   };
   const out = {};
   for (const a of accounts) {
@@ -1479,25 +1506,29 @@ test("auto-farm: never fed to a vault listing — only a claim-at-sale order tak
   assert.strictEqual(ledgerFor("farmer").length, 0);
 });
 
-test("auto-farm: with its vault switch on, a fed claim HOLDS one for GGSel — stamped like a sale, its pool note remembered", async () => {
+test("auto-farm: with its vault switch on, a fed claim HOLDS one for Gameflip — stamped like a sale, its pool note remembered", async () => {
+  state.gone.set("Spring Cup", Date.now() + 5 * DAY);
   world([
-    { login: "farmer", items: [ALPHA(2), BETA(1)], farm: "autofarm", pool: { claimedNote: "auto-farm: Overwatch 2 (c-1)" } },
+    { login: "farmer", items: [waved(ALPHA(2), "Spring Cup"), waved(BETA(1), "Spring Cup")], farm: "autofarm", pool: { claimedNote: "auto-farm: Overwatch 2 (c-1)" } },
     { login: "noclaim", items: [ALPHA(2), BETA(1), GAMMA(1)] },
   ]);
-  state.afVault.add("ggsel");
-  const out = await ncs.claimForSet(SET, 2, { market: "ggsel", listingId: LISTING_ID, mode: "fed" });
+  state.afVault.add("gameflip");
+  const out = await ncs.claimForSet(SET, 2, { market: "gameflip", listingId: LISTING_ID, mode: "fed" });
   assert.deepStrictEqual(out.map((a) => a.login).sort(), ["farmer", "noclaim"]);
+  assert.strictEqual(out.find((a) => a.login === "farmer").farm, "autofarm", "the publish needs to know whose steps to print");
   const [af] = ledgerFor("farmer");
   assert.strictEqual(af.status, "manual");
   assert.strictEqual(af.farm, "autofarm");
-  assert.strictEqual(af.market, "ggsel");
+  assert.strictEqual(af.market, "gameflip");
   assert.strictEqual(af.farmPoolNote, "auto-farm: Overwatch 2 (c-1)", "what a release puts back");
   assert.strictEqual(af.farmParkedAt, null);
   assert.strictEqual(af.manualDeliveredAt, null);
   // The same rules as a sale, then the same stamps — with no order to name.
   const calls = state.afCalls.filter((c) => c[1] === "farmer" || c[0] === "live");
   assert.deepStrictEqual(calls.map((c) => c[0]), ["block", "live", "reserve"]);
-  assert.deepStrictEqual(calls[2][2], { market: "ggsel", orderId: "", setId: SET_ID });
+  assert.deepStrictEqual(calls[2][2], { market: "gameflip", orderId: "", setId: SET_ID });
+  // Gameflip's own guard was asked, once.
+  assert.strictEqual(state.afCalls.filter((c) => c[0] === "gf-held").length, 1);
   // The console's "Listed" tick, like any vault unit.
   assert.strictEqual(poolFor("farmer").listed, true);
   // The no-claim account next to it is claimed exactly as it always was.
@@ -1507,9 +1538,10 @@ test("auto-farm: with its vault switch on, a fed claim HOLDS one for GGSel — s
 });
 
 test("auto-farm: the switch is per market — one that is not allowed never holds one (Plati least of all)", async () => {
-  world([{ login: "farmer", items: [ALPHA(2), BETA(1)], farm: "autofarm" }]);
-  state.afVault.add("ggsel");
-  for (const market of ["digiseller", "gameflip"]) {
+  state.gone.set("Spring Cup", Date.now() + 5 * DAY);
+  world([{ login: "farmer", items: [waved(ALPHA(2), "Spring Cup"), waved(BETA(1), "Spring Cup")], farm: "autofarm" }]);
+  state.afVault.add("gameflip");
+  for (const market of ["digiseller", "ggsel"]) {
     const out = await ncs.claimForSet(SET, 1, { market, listingId: LISTING_ID, mode: "fed" });
     assert.deepStrictEqual(out, [], market);
   }
@@ -1517,11 +1549,119 @@ test("auto-farm: the switch is per market — one that is not allowed never hold
   assert.deepStrictEqual(state.afCalls, []);
 });
 
+test("auto-farm: an account is only HELD while its copies have days left — and every one a known leave time", async () => {
+  const hold = () => ncs.claimForSet(SET, 1, { market: "gameflip", listingId: LISTING_ID, mode: "fed" });
+  state.afVault.add("gameflip");
+  // Two days left: it would come straight back off the listing.
+  state.gone.set("Spring Cup", Date.now() + 2 * DAY);
+  world([{ login: "soon", items: [waved(ALPHA(2), "Spring Cup"), waved(BETA(1), "Spring Cup")], farm: "autofarm" }]);
+  let out = await hold();
+  assert.deepStrictEqual(out, []);
+  assert.strictEqual(out.missed["drops leave too soon to hold"], 1);
+  assert.deepStrictEqual(state.afCalls, [], "no rule asked, no live read, nothing stamped");
+  assert.deepStrictEqual(state.invCalls, []);
+
+  // No leave time on record (no waves kept, or a campaign nobody has an end for): "not known" is not "lasts".
+  resetAll();
+  state.afVault.add("gameflip");
+  world([
+    { login: "nowaves", items: [ALPHA(2), BETA(1)], farm: "autofarm" },
+    { login: "noend", items: [waved(ALPHA(2), "Mystery Cup"), waved(BETA(1), "Mystery Cup")], farm: "autofarm" },
+  ]);
+  out = await hold();
+  assert.deepStrictEqual(out, []);
+  assert.strictEqual(out.missed["drops leave too soon to hold"], 2);
+
+  // One item lasts, the other does not: the bundle is as short-lived as its first copy to go.
+  resetAll();
+  state.afVault.add("gameflip");
+  state.gone.set("Spring Cup", Date.now() + 9 * DAY);
+  state.gone.set("Last Week", Date.now() + 1 * DAY);
+  world([{ login: "mixed", items: [waved(ALPHA(2), "Spring Cup"), waved(BETA(1), "Last Week")], farm: "autofarm" }]);
+  assert.deepStrictEqual(await hold(), []);
+
+  // Just over the bar: held.
+  resetAll();
+  state.afVault.add("gameflip");
+  state.gone.set("Spring Cup", Date.now() + 73 * 60 * 60 * 1000);
+  world([{ login: "ok", items: [waved(ALPHA(2), "Spring Cup"), waved(BETA(1), "Spring Cup")], farm: "autofarm" }]);
+  out = await hold();
+  assert.deepStrictEqual(out.map((a) => a.login), ["ok"]);
+
+  // A PAID order is not asked how long the drops last: it takes what the account holds now.
+  resetAll();
+  state.gone.set("Spring Cup", Date.now() + 2 * DAY);
+  world([{ login: "soon", items: [waved(ALPHA(2), "Spring Cup"), waved(BETA(1), "Spring Cup")], farm: "autofarm" }]);
+  out = await ncs.claimForSet(SET, 1, AF_ORDER);
+  assert.deepStrictEqual(out.map((a) => a.login), ["soon"]);
+});
+
+test("auto-farm: an account Gameflip already holds a code for is never held for Gameflip; an unreadable guard holds nobody", async () => {
+  state.gone.set("Spring Cup", Date.now() + 5 * DAY);
+  const two = () =>
+    world([
+      { login: "soldthere", items: [waved(ALPHA(2), "Spring Cup"), waved(BETA(1), "Spring Cup")], farm: "autofarm" },
+      { login: "clean", items: [waved(ALPHA(2), "Spring Cup"), waved(BETA(1), "Spring Cup")], farm: "autofarm" },
+    ]);
+  two();
+  state.afVault.add("gameflip");
+  state.gfHeld = new Set(["soldthere"]);
+  let out = await ncs.claimForSet(SET, 2, { market: "gameflip", listingId: LISTING_ID, mode: "fed" });
+  assert.deepStrictEqual(out.map((a) => a.login), ["clean"]);
+  assert.strictEqual(out.missed["Gameflip already holds a code for it"], 1);
+  assert.strictEqual(ledgerFor("soldthere").length, 0);
+
+  resetAll();
+  state.gone.set("Spring Cup", Date.now() + 5 * DAY);
+  two();
+  state.afVault.add("gameflip");
+  state.gfHeldError = new Error("mongo blip");
+  const { error } = console;
+  console.error = () => {};
+  try {
+    out = await ncs.claimForSet(SET, 2, { market: "gameflip", listingId: LISTING_ID, mode: "fed" });
+  } finally {
+    console.error = error;
+  }
+  assert.deepStrictEqual(out, [], "not known = nobody is held");
+  assert.strictEqual(ledgerFor("clean").length, 0);
+});
+
+test("coverGoneAt: when the copies an account would hand over first leave it", () => {
+  const base = { expiry: { on: true } };
+  const req = ncs.requiredFromSet(SET); // 2× Alpha Pack + 1× Beta Spray
+  const T = Date.now();
+  state.gone.set("Old", T + 1 * DAY);
+  state.gone.set("New", T + 9 * DAY);
+  // One wave each: the earlier of the two.
+  assert.strictEqual(ncs.coverGoneAt({ items: [waved(ALPHA(2), "New"), waved(BETA(1), "Old")] }, base, req), T + 1 * DAY);
+  // Three Alpha copies, two needed: the two that last longest are the ones sold.
+  const alpha3 = { ...ALPHA(3), waves: [{ campaign: "Old", qty: 1 }, { campaign: "New", qty: 2 }] };
+  assert.strictEqual(ncs.coverGoneAt({ items: [alpha3, waved(BETA(1), "New")] }, base, req), T + 9 * DAY);
+  // …but with only two, the old one is part of the bundle.
+  const alpha2 = { ...ALPHA(2), waves: [{ campaign: "Old", qty: 1 }, { campaign: "New", qty: 1 }] };
+  assert.strictEqual(ncs.coverGoneAt({ items: [alpha2, waved(BETA(1), "New")] }, base, req), T + 1 * DAY);
+  // A needed copy with no leave time on record: not known.
+  assert.strictEqual(ncs.coverGoneAt({ items: [ALPHA(2), waved(BETA(1), "New")] }, base, req), Infinity);
+  assert.strictEqual(ncs.coverGoneAt({ items: [waved(ALPHA(2), "Nobody Knows"), waved(BETA(1), "New")] }, base, req), Infinity);
+  // Copies the waves do not account for are unknown too.
+  const short = { ...ALPHA(2), waves: [{ campaign: "New", qty: 1 }] };
+  assert.strictEqual(ncs.coverGoneAt({ items: [short, waved(BETA(1), "New")] }, base, req), Infinity);
+  // Does not hold the bundle at all.
+  assert.strictEqual(ncs.coverGoneAt({ items: [waved(ALPHA(1), "New"), waved(BETA(1), "New")] }, base, req), 0);
+  assert.strictEqual(ncs.coverGoneAt({ items: [] }, base, req), 0);
+  assert.strictEqual(ncs.coverGoneAt(null, base, req), 0);
+  // Expiry awareness off: nothing is known.
+  assert.strictEqual(ncs.coverGoneAt({ items: [waved(ALPHA(2), "New"), waved(BETA(1), "New")] }, { expiry: { on: false } }, req), Infinity);
+  assert.strictEqual(ncs.coverGoneAt({ items: [waved(ALPHA(2), "New"), waved(BETA(1), "New")] }, null, req), Infinity);
+});
+
 test("auto-farm: a held account whose stamps are refused is not held", async () => {
-  world([{ login: "farmer", items: [ALPHA(2), BETA(1)], farm: "autofarm" }]);
-  state.afVault.add("ggsel");
+  state.gone.set("Spring Cup", Date.now() + 5 * DAY);
+  world([{ login: "farmer", items: [waved(ALPHA(2), "Spring Cup"), waved(BETA(1), "Spring Cup")], farm: "autofarm" }]);
+  state.afVault.add("gameflip");
   state.afReserve.set("farmer", { ok: false, why: "a drop was reserved or connected meanwhile" });
-  const out = await ncs.claimForSet(SET, 1, { market: "ggsel", listingId: LISTING_ID, mode: "fed" });
+  const out = await ncs.claimForSet(SET, 1, { market: "gameflip", listingId: LISTING_ID, mode: "fed" });
   assert.deepStrictEqual(out, []);
   assert.strictEqual(ledgerFor("farmer").length, 0, "the ledger commit is undone");
   assert.strictEqual(poolFor("farmer").listed, false);

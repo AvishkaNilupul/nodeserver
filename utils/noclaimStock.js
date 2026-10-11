@@ -448,6 +448,59 @@ function advertiseLeadMs(market) {
   return typeof nh.advertiseLeadMs === "function" ? nh.advertiseLeadMs(market) : 0;
 }
 
+// When the copies of `required` (item key -> copies) this account would hand
+// over first leave it, counting its longest-lived copies of each item:
+//   a finite ms   every needed copy has a KNOWN leave time; this is the first
+//   Infinity      a needed copy's leave time is not known (no waves kept, a
+//                 campaign with no end date on record, expiry awareness off)
+//   0             it does not hold them
+// `h` is a NoclaimHolding row or a scan candidate ({ items, readAt }). An
+// auto-farm account is HELD for a vault unit, and kept in one, only on a
+// finite answer far enough out — "not known" is not "lasts".
+function coverGoneAt(h, base, required) {
+  const nh = holdings();
+  const exp = base && base.expiry;
+  const known = !!(exp && exp.on && typeof nh.waveGoneAt === "function");
+  const readMs = h && h.readAt ? new Date(h.readAt).getTime() : NaN;
+  const byKey = new Map();
+  for (const it of (h && Array.isArray(h.items) ? h.items : [])) {
+    const k = keyOfEntry(it);
+    if (!k) continue;
+    if (!byKey.has(k)) byKey.set(k, []);
+    byKey.get(k).push(it);
+  }
+  let first = Infinity;
+  let unknown = false;
+  for (const [k, need] of required || []) {
+    const parts = [];
+    for (const it of byKey.get(k) || []) {
+      const total = Math.max(1, Math.floor(Number(it.qty)) || 1);
+      let left = total;
+      for (const w of Array.isArray(it.waves) ? it.waves : []) {
+        const n = Math.min(left, Math.max(1, Math.floor(Number(w && w.qty)) || 1));
+        if (n <= 0) continue;
+        left -= n;
+        const name = str(w && w.campaign).trim();
+        parts.push({ n, gone: known && name ? nh.waveGoneAt(base, it.game, name, readMs) : Infinity });
+      }
+      if (left > 0) parts.push({ n: left, gone: Infinity });
+    }
+    if (parts.reduce((s, p) => s + p.n, 0) < need) return 0;
+    parts.sort((a, b) => (b.gone === a.gone ? 0 : b.gone > a.gone ? 1 : -1));
+    let take = need;
+    for (const p of parts) {
+      if (take <= 0) break;
+      if (Number.isFinite(p.gone)) {
+        if (p.gone < first) first = p.gone;
+      } else {
+        unknown = true;
+      }
+      take -= Math.min(take, p.n);
+    }
+  }
+  return unknown ? Infinity : first;
+}
+
 // One pass over the snapshot for one set: every in-config holding that covers
 // the set, split into free+fresh, free-but-stale and committed.
 //
@@ -859,6 +912,9 @@ async function claimForSet(set, want, opts = {}) {
   // from "the scan host did not answer".
   const missed = {};
   Object.defineProperty(out, "missed", { value: missed, enumerable: false });
+  // Logins Gameflip holds a code for; read once, and only when an auto-farm
+  // account is about to be held for Gameflip.
+  let gfHeld = null;
 
   for (const c of walk) {
     if (took >= need || reads >= budget) break;
@@ -871,11 +927,42 @@ async function claimForSet(set, want, opts = {}) {
     // config catches up and the sweep files it under one name.
     if (str(c.login).trim().toLowerCase() !== c.loginLower) continue;
     const isAutofarm = str(c.farm) === AUTOFARM;
-    // An auto-farm account is HELD for a vault unit (GGSel / Gameflip, never
-    // Plati) only when its own switch allows it — utils/autofarmStock
-    // .vaultAllowed. A held account is treated as sold from this moment except
-    // for the money, and releaseClaim hands it back (releaseHeld).
-    if (isAutofarm && mode !== "sold" && !autofarm().vaultAllowed(m)) continue;
+    // An auto-farm account is HELD for a vault unit only on the markets its
+    // own switch allows — utils/autofarmStock.vaultAllowed (never Plati). A
+    // held account is treated as sold from this moment except for the money,
+    // and releaseClaim hands it back (releaseHeld).
+    if (isAutofarm && mode !== "sold") {
+      if (!autofarm().vaultAllowed(m)) continue;
+      // …and only while its copies of the bundle have days left, every one of
+      // them with a known leave time: the account is about to sit in the
+      // market's hands, and it comes off again a day before they go
+      // (noclaimListings' expiry step). One that would come straight back
+      // off is not put on.
+      const gone = coverGoneAt(c, scan.base, required);
+      if (!(Number.isFinite(gone) && gone - Date.now() >= autofarm().vaultMinLifeMs())) {
+        missed["drops leave too soon to hold"] = (missed["drops leave too soon to hold"] || 0) + 1;
+        continue;
+      }
+      // Gameflip refuses a code one of our listings still holds, sold ones
+      // for good — and that refusal is the last guard against one login on
+      // two listings. An auto-farm account's unclaimed code is worded
+      // differently, so the guard is asked directly: an account Gameflip
+      // already holds a code for is never held for Gameflip.
+      if (m === "gameflip") {
+        if (gfHeld === null) {
+          try {
+            gfHeld = await require("./gameflipFulfiller").gameflipCodeHeldLogins();
+          } catch (e) {
+            console.error("noclaimStock: Gameflip's held codes could not be read:", e && e.message);
+            break; // not known = nobody is held this time
+          }
+        }
+        if (gfHeld.has(c.loginLower)) {
+          missed["Gameflip already holds a code for it"] = (missed["Gameflip already holds a code for it"] || 0) + 1;
+          continue;
+        }
+      }
+    }
     let commit = null;
     let pool = null;
     try {
@@ -1253,6 +1340,7 @@ module.exports = {
   orderNote,
   // reads
   advertiseLeadMs,
+  coverGoneAt,
   freeCandidates,
   stockForSet,
   stockForListing,

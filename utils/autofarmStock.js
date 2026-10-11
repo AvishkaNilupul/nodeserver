@@ -88,6 +88,13 @@ function cfg() {
     on: af.autofarmStock === true,
     // May such an account be HELD for a vault unit (see vaultAllowed)?
     vault: af.autofarmStock === true && af.autofarmStockVault === true,
+    // A held account sits in a marketplace's hands, so it is only held while
+    // its copies of the bundle have at least MinLife left (and every copy's
+    // leave time is KNOWN), and it comes off sale Lead before they go — the
+    // maintenance pass's expiry step. That step keeps running with the vault
+    // switch off: a unit already out there must still come back in time.
+    vaultMinLifeMs: clampInt(af.autofarmStockVaultMinLifeHours, 72, 24, 336) * 60 * 60 * 1000,
+    vaultLeadMs: clampInt(af.autofarmStockVaultLeadHours, 24, 1, 120) * 60 * 60 * 1000,
     // Live inventory reads per holdings tick, on top of the no-claim farm's
     // own quota — its cadence is never diluted.
     perTick: clampInt(af.autofarmStockPerTick, 15, 0, 60),
@@ -523,10 +530,27 @@ function soldTag(market, orderId) {
 //     which calls releaseHeld: the stamps come off and the account is stock
 //     again.
 // Never Plati / Digiseller: the owner blocked that market (2026-09-28).
-const VAULT_MARKETS = ["ggsel", "gameflip"];
+//
+// Gameflip only, for now. NOT GGSel: every automatic GGSel take-down in the
+// no-claim layer (a removed unit, a rebuild, and the Listings Delist route for
+// a no-claim row) only PAUSES the offer and leaves the codes in its vault; an
+// auto-farm account handed back that way would be on Eldorado's shelf with
+// its login still inside a GGSel offer somebody can re-activate. GGSel joins
+// this list when a release archives the unit's code and reads it back first.
+// (A Gameflip take-down deletes the listing, code and all.)
+const VAULT_MARKETS = ["gameflip"];
 
 function vaultAllowed(market) {
   return cfg().vault && VAULT_MARKETS.includes(lower(market));
+}
+
+// The least life a bundle's copies must have left for its account to be held,
+// and how long before they leave a held unit comes off sale.
+function vaultMinLifeMs() {
+  return cfg().vaultMinLifeMs;
+}
+function vaultLeadMs() {
+  return cfg().vaultLeadMs;
 }
 
 // The pool note of an account that holds unclaimed stock and sits in no bot —
@@ -1368,6 +1392,8 @@ module.exports = {
   // vault markets
   VAULT_MARKETS,
   vaultAllowed,
+  vaultMinLifeMs,
+  vaultLeadMs,
   stockHoldNote,
   releaseHeld,
   parkHeld,

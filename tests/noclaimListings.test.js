@@ -461,7 +461,12 @@ function load(o = {}) {
     o.ual,
   );
   const holdings = stubFns(
-    { recordRead: () => undefined, sweepOnce: () => ({ read: 0 }), start: () => undefined },
+    {
+      recordRead: () => undefined,
+      sweepOnce: () => ({ read: 0 }),
+      start: () => undefined,
+      snapshotBase: () => ({ holdings: [], expiry: { on: true } }),
+    },
     o.holdings,
   );
   stubs = new Map([
@@ -495,6 +500,8 @@ function load(o = {}) {
         {
           retirePending: () => ({ pending: 0, retired: 0, waiting: 0, removed: 0, reloaded: [], errors: [] }),
           parkHeld: () => ({ pending: 0, retired: 0, waiting: 0, removed: 0, reloaded: [], errors: [] }),
+          // A held auto-farm unit comes off sale this long before its drops leave.
+          vaultLeadMs: () => 24 * 60 * 60 * 1000,
         },
         o.autofarm,
       ),
@@ -1183,6 +1190,161 @@ test("removeUnit gameflip: an unsold listing gets a successor; a sold one is lef
 // ---------------------------------------------------------------------------
 // runPass
 // ---------------------------------------------------------------------------
+
+// A held auto-farm unit: its ledger carries the live copies the claim read.
+const DAY_MS = 24 * 60 * 60 * 1000;
+const farmLedger = (n, extra = {}) =>
+  ledger(n, {
+    farm: "autofarm",
+    manualPriorStatus: "",
+    market: "gameflip",
+    note: "manual no-claim listing — gameflip",
+    drops: [{ name: "Alpha Pack", game: "Rainbow Six Siege", campaign: "Spring Cup", itemKey: "alpha pack|rainbow six siege" }],
+    ...extra,
+  });
+
+test("holdingFromLedger: the bundle a ledger was listed with, one wave per campaign", () => {
+  const { mod } = load({});
+  const h = mod.holdingFromLedger({
+    manualAt: new Date("2026-10-11T00:00:00Z"),
+    drops: [
+      { name: "Coin", game: "G", campaign: "Old", itemKey: "coin|g" },
+      { name: "Coin", game: "G", campaign: "New", itemKey: "coin|g" },
+      { name: "Coin", game: "G", campaign: "New", itemKey: "coin|g" },
+      { name: "Skin", game: "G", campaign: "New", itemKey: "" },
+      null,
+    ],
+  });
+  assert.deepStrictEqual(h.items, [
+    { itemKey: "coin|g", name: "Coin", game: "G", qty: 3, waves: [{ campaign: "Old", qty: 1 }, { campaign: "New", qty: 2 }] },
+    { itemKey: "skin|g", name: "Skin", game: "G", qty: 1, waves: [{ campaign: "New", qty: 1 }] },
+  ]);
+  assert.strictEqual(new Date(h.readAt).toISOString(), "2026-10-11T00:00:00.000Z");
+  assert.deepStrictEqual(mod.holdingFromLedger({}).items, []);
+  assert.deepStrictEqual(mod.holdingFromLedger(null).items, []);
+});
+
+test("runPass expiry: a held auto-farm unit comes off sale a day before its drops leave — and is handed back", async () => {
+  const seen = [];
+  const t = load({
+    rows: [gameflipRow()],
+    ledgers: [farmLedger(1, { manualListing: "G1" })],
+    ncs: {
+      // The claim layer's own rule, asked of the LEDGER's copies.
+      coverGoneAt: (h) => {
+        seen.push(h);
+        return Date.now() + 20 * 60 * 60 * 1000; // twenty hours left
+      },
+    },
+    settings: { topUp: false, healthPerPass: 0 },
+  });
+  const out = await t.mod.runPass();
+  assert.deepStrictEqual(out.errors, []);
+  assert.deepStrictEqual(out.expiring, { due: 1, removed: 1 });
+  assert.deepStrictEqual(seen[0].items.map((i) => [i.itemKey, i.qty, i.waves]), [["alpha pack|rainbow six siege", 1, [{ campaign: "Spring Cup", qty: 1 }]]]);
+  // Down on Gameflip first (status read, verified delist), then released.
+  assert.strictEqual(t.db.Listing.get("G1").status, "delisted");
+  assert.strictEqual(t.called("delistRowVerified")[0].args[1], "drops leave within 24 h");
+  assert.deepStrictEqual(t.called("releaseClaim").map((c) => c.args), [[["L1"], { reason: "drops leave within 24 h" }]]);
+  assert.ok(t.events.some((e) => e.action === "autofarm_unit_expiring" && e.subject === "acc1"));
+  // The chain is asked for a successor; the claim layer only holds one that lasts.
+  assert.strictEqual(t.called("relistNoclaimSuccessor").length, 1);
+});
+
+test("runPass expiry: nothing is taken off while the drops have more than the lead left, or when no leave time is on record", async () => {
+  for (const gone of [Date.now() + 3 * DAY_MS, Infinity, 0]) {
+    const t = load({
+      rows: [gameflipRow()],
+      ledgers: [farmLedger(1, { manualListing: "G1" })],
+      ncs: { coverGoneAt: () => gone },
+      settings: { topUp: false, healthPerPass: 0 },
+    });
+    const out = await t.mod.runPass();
+    assert.deepStrictEqual(out.expiring, { due: 0, removed: 0 }, String(gone));
+    assert.strictEqual(t.db.Listing.get("G1").status, "active");
+    assert.strictEqual(t.called("releaseClaim").length, 0);
+    assert.strictEqual(t.called("gameflipListingStatus").length, 0, "database only until a unit is due");
+  }
+});
+
+test("runPass expiry: only auto-farm units, only undelivered ones, never a pinned one — and a unit that will not come down is not released", async () => {
+  // A no-claim bot's unit on the same kind of row is the health step's, as it always was.
+  let t = load({
+    rows: [gameflipRow()],
+    ledgers: [ledger(1, { manualListing: "G1" })],
+    ncs: { coverGoneAt: () => Date.now() + 60 * 1000 },
+    settings: { topUp: false, healthPerPass: 0 },
+  });
+  let out = await t.mod.runPass();
+  assert.deepStrictEqual(out.expiring, { due: 0, removed: 0 });
+  assert.strictEqual(t.called("coverGoneAt").length, 0);
+
+  // Already delivered: a buyer has it.
+  t = load({
+    rows: [gameflipRow({ units: [unit("acc1", 1, { contentId: "", deliveredAt: at(5), orderId: "gameflip-sale" })] })],
+    ledgers: [farmLedger(1, { manualListing: "G1" })],
+    ncs: { coverGoneAt: () => Date.now() + 60 * 1000 },
+    settings: { topUp: false, healthPerPass: 0 },
+  });
+  out = await t.mod.runPass();
+  assert.deepStrictEqual(out.expiring, { due: 0, removed: 0 });
+  assert.strictEqual(t.called("releaseClaim").length, 0);
+
+  // Pinned as unrecorded: only a human releases it.
+  t = load({
+    rows: [gameflipRow()],
+    ledgers: [farmLedger(1, { manualListing: "G1", note: "unrecorded publish — gameflip (offer unknown)" })],
+    ncs: { coverGoneAt: () => Date.now() + 60 * 1000 },
+    settings: { topUp: false, healthPerPass: 0 },
+  });
+  out = await t.mod.runPass();
+  assert.deepStrictEqual(out.expiring, { due: 0, removed: 0 });
+
+  // Gameflip will not say whether it is on sale: not taken down, NOT released, an error line.
+  t = load({
+    rows: [gameflipRow()],
+    ledgers: [farmLedger(1, { manualListing: "G1" })],
+    ncs: { coverGoneAt: () => Date.now() + 60 * 1000 },
+    mp: {
+      gameflipListingStatus: () => {
+        throw new Error("429 Too Many Requests");
+      },
+    },
+    settings: { topUp: false, healthPerPass: 0 },
+  });
+  out = await t.mod.runPass();
+  assert.deepStrictEqual(out.expiring, { due: 1, removed: 0 });
+  assert.strictEqual(t.called("releaseClaim").length, 0, "its login may still be on sale");
+  assert.ok(out.errors.some((e) => /^expiry acc1: gameflip status unreadable/.test(e)), JSON.stringify(out.errors));
+  assert.strictEqual(t.db.Listing.get("G1").status, "active");
+
+  // Sold a moment ago: the sale path owns it.
+  t = load({
+    rows: [gameflipRow()],
+    ledgers: [farmLedger(1, { manualListing: "G1" })],
+    ncs: { coverGoneAt: () => Date.now() + 60 * 1000 },
+    mp: { gameflipListingStatus: () => "sold" },
+    settings: { topUp: false, healthPerPass: 0 },
+  });
+  out = await t.mod.runPass();
+  assert.deepStrictEqual(out.expiring, { due: 1, removed: 0 });
+  assert.strictEqual(t.called("releaseClaim").length, 0);
+});
+
+test("runPass expiry: at most three units a pass", async () => {
+  const rows = [];
+  const ledgers = [];
+  for (let i = 1; i <= 5; i++) {
+    rows.push(gameflipRow({ _id: "G" + i, externalId: "gf-" + i, accountLogin: "acc" + i, units: [unit("acc" + i, i, { contentId: "" })] }));
+    ledgers.push(farmLedger(i, { manualListing: "G" + i }));
+  }
+  const t = load({ rows, ledgers, ncs: { coverGoneAt: () => Date.now() + 60 * 1000 }, settings: { topUp: false, healthPerPass: 0 } });
+  const out = await t.mod.runPass();
+  assert.deepStrictEqual(out.expiring, { due: 3, removed: 3 });
+  assert.strictEqual(t.called("releaseClaim").length, 3);
+  const again = await t.mod.runPass();
+  assert.deepStrictEqual(again.expiring, { due: 2, removed: 2 });
+});
 
 test("runPass: a failing step never stops the ones after it", async () => {
   const r1 = row({
