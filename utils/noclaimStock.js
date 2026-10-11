@@ -116,6 +116,9 @@ const LEDGER_DEFAULTS = {
   manualSpentAt: null,
   farmPoolNote: "",
   farmParkedAt: null,
+  farmParkStartedAt: null,
+  farmParkTriedAt: null,
+  farmGoneAt: null,
 };
 
 // ---------------------------------------------------------------------------
@@ -501,6 +504,24 @@ function coverGoneAt(h, base, required) {
   return unknown ? Infinity : first;
 }
 
+// A claim's live copies ({ name, game, campaign, itemKey }, one entry each) as
+// holding items: per item its copies, grouped by the campaign they came from.
+function wavesOfDrops(drops) {
+  const byKey = new Map();
+  for (const d of drops || []) {
+    const k = keyOfEntry(d);
+    if (!k) continue;
+    if (!byKey.has(k)) byKey.set(k, { itemKey: k, name: str(d.name), game: str(d.game), qty: 0, waves: [] });
+    const it = byKey.get(k);
+    it.qty++;
+    const name = str(d.campaign).trim();
+    const w = it.waves.find((x) => x.campaign === name);
+    if (w) w.qty++;
+    else it.waves.push({ campaign: name, qty: 1 });
+  }
+  return [...byKey.values()];
+}
+
 // One pass over the snapshot for one set: every in-config holding that covers
 // the set, split into free+fresh, free-but-stale and committed.
 //
@@ -668,6 +689,10 @@ async function commitLedger(c, ctx) {
     // that was held, parked or flagged before.
     fields.farmPoolNote = str(ctx.poolNote);
     fields.farmParkedAt = null;
+    fields.farmParkStartedAt = null;
+    fields.farmParkTriedAt = null;
+    // Only a HELD unit has a date it must come off sale by.
+    fields.farmGoneAt = ctx.goneAt ? new Date(ctx.goneAt) : null;
     fields.farmReloads = [];
     fields.farmHuman = "";
   }
@@ -951,7 +976,8 @@ async function claimForSet(set, want, opts = {}) {
       if (m === "gameflip") {
         if (gfHeld === null) {
           try {
-            gfHeld = await require("./gameflipFulfiller").gameflipCodeHeldLogins();
+            // strict: a failed read throws here instead of holding nothing back.
+            gfHeld = await require("./gameflipFulfiller").gameflipCodeHeldLogins({ strict: true });
           } catch (e) {
             console.error("noclaimStock: Gameflip's held codes could not be read:", e && e.message);
             break; // not known = nobody is held this time
@@ -1012,6 +1038,19 @@ async function claimForSet(set, want, opts = {}) {
           campaign: str(d.campaign),
           itemKey: keyOfEntry(d),
         }));
+      // A HELD account: how long its bundle lasts is asked again of the copies
+      // Twitch has just shown (the snapshot's waves can be an hour old), and
+      // the answer goes on the ledger — it is the date the unit comes off sale
+      // by, whoever else still holds the campaign by then.
+      let goneAt = null;
+      if (isAutofarm && mode !== "sold") {
+        const g = coverGoneAt({ items: wavesOfDrops(drops), readAt: new Date() }, scan.base, required);
+        if (!(Number.isFinite(g) && g - Date.now() >= autofarm().vaultMinLifeMs())) {
+          missed["drops leave too soon to hold"] = (missed["drops leave too soon to hold"] || 0) + 1;
+          continue;
+        }
+        goneAt = g;
+      }
       commit = await commitLedger(c, {
         status,
         setId,
@@ -1022,6 +1061,7 @@ async function claimForSet(set, want, opts = {}) {
         game,
         now: new Date(),
         poolNote: pool && pool.claimedNote,
+        goneAt,
       });
       if (!commit) continue;
 
@@ -1120,7 +1160,7 @@ async function attachListing(ledgerIds, listingId) {
 // deleted when the claim created them. Only "manual" — a "sold" ledger went to
 // a buyer and is never released. The caller takes the unit off the platform
 // first; this only returns the account. Returns the number released.
-async function releaseClaim(ledgerIds, { reason = "" } = {}) {
+async function releaseClaim(ledgerIds, { reason = "", listingGone = false } = {}) {
   const ids = idList(ledgerIds);
   if (!ids.length) return 0;
   const rows = await UnclaimedAccount.find({ _id: { $in: ids }, status: "manual" }).lean();
@@ -1128,9 +1168,31 @@ async function releaseClaim(ledgerIds, { reason = "" } = {}) {
   const logins = [];
   for (const l of rows) {
     let ok = false;
+    // The write only lands on the ledger as it was read — for an auto-farm
+    // one, with the park pass where it was: a park that started in between
+    // owns the account until it has proved it out of its bot.
+    const held = str(l.farm) === AUTOFARM;
+    const same = held
+      ? { _id: l._id, status: "manual", farmParkStartedAt: l.farmParkStartedAt || null, farmParkedAt: l.farmParkedAt || null }
+      : { _id: l._id, status: "manual" };
     try {
+      if (held) {
+        // An auto-farm account is sold whole wherever it is free: it goes back
+        // only when the market it was held for provably no longer has its
+        // login, and never in the middle of its bot removal. Whoever asked.
+        let blocked = "";
+        try {
+          blocked = str(await autofarm().releaseBlocked(l, { listingGone }));
+        } catch (e) {
+          blocked = "the release check failed: " + ((e && e.message) || e);
+        }
+        if (blocked) {
+          console.error("noclaimStock: " + (l.login || String(l._id)) + " stays held (" + (why || "release") + "): " + blocked);
+          continue;
+        }
+      }
       if (!l.manualPriorStatus) {
-        const r = await UnclaimedAccount.deleteOne({ _id: l._id, status: "manual" });
+        const r = await UnclaimedAccount.deleteOne(same);
         ok = !!(r && r.deletedCount);
       } else {
         // Only a FREE status can have been the prior one (claims take nothing
@@ -1138,7 +1200,7 @@ async function releaseClaim(ledgerIds, { reason = "" } = {}) {
         // normally, rather than to "listed", which would fake an auto unit.
         const back = FREE_STATUSES.includes(l.manualPriorStatus) ? l.manualPriorStatus : "skipped";
         const r = await UnclaimedAccount.updateOne(
-          { _id: l._id, status: "manual" },
+          same,
           {
             $set: {
               status: back,
@@ -1341,6 +1403,7 @@ module.exports = {
   // reads
   advertiseLeadMs,
   coverGoneAt,
+  wavesOfDrops,
   freeCandidates,
   stockForSet,
   stockForListing,

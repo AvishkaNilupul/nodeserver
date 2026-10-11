@@ -1936,6 +1936,11 @@ test("a set gets a new Gameflip chain only after the last one SOLD — never whi
   // The last listing came down unsold (its drops were about to leave): not asked twice.
   assert.strictEqual(await withRows([{ status: "sold", createdAt: old(3) }, { status: "delisted", lastError: "drops leave within 24 h", createdAt: old(2) }]), 0);
   assert.strictEqual(await withRows([{ status: "removed", createdAt: old(2) }]), 0);
+  // Sold, with a unit still owed: its relist is pending (a backoff, a retry) — the chain is not over.
+  assert.strictEqual(await withRows([{ status: "sold", qtyRemaining: 1, createdAt: old(1) }]), 0);
+  // Its own relist lane stopped the chain (an account kept held, a listing live without a row):
+  // something of it may still be out there — never another by itself.
+  assert.strictEqual(await withRows([{ status: "sold", qtyRemaining: 0, lastError: "auto-relist stopped: x [account kept held]", createdAt: old(1) }]), 0);
 });
 
 test("a Gameflip listing somebody else took down rests the game; one the system took down does not", async () => {

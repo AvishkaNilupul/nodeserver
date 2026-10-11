@@ -65,6 +65,8 @@ function matchValue(v, cond) {
         return arg.some((a) => (Array.isArray(v) ? v.some((x) => eq(x, a)) : eq(v, a)));
       case "$ne":
         return !eq(v, arg);
+      case "$nin":
+        return !arg.some((a) => (Array.isArray(v) ? v.some((x) => eq(x, a)) : eq(v, a)));
       case "$gt":
         return v != null && v > arg;
       case "$lt":
@@ -283,6 +285,7 @@ function load(o = {}) {
     inventory: o.inventory || {},
     spendThrows: o.spendThrows || "",
     spendGate: null,
+    gfDown: new Set(), // Gameflip listings that were deleted
   };
   const rec = (fn, impl) => async (...args) => {
     calls.push({ fn, args });
@@ -331,7 +334,18 @@ function load(o = {}) {
         digisellerUploadImage: () => ({}),
         digisellerProductStock: () => state.dsStock,
         digisellerDelist: () => undefined,
-        gameflipListingStatus: () => "onsale",
+        // A listing is on sale until it is deleted; then Gameflip 404s.
+        gameflipListingStatus: (id) => {
+          if (state.gfDown.has(String(id))) {
+            const e = new Error("Gameflip listing status: not found");
+            e.status = 404;
+            throw e;
+          }
+          return "onsale";
+        },
+        gameflipDelist: (id) => {
+          state.gfDown.add(String(id));
+        },
         eldoradoPublish: () => ({ externalId: "el-1", url: "https://eldorado.gg/el-1" }),
         playerauctionsPublish: () => ({
           offerId: "pa-1",
@@ -1153,7 +1167,10 @@ test("removeUnit gameflip: an unsold listing gets a successor; a sold one is lef
   const r = await t.mod.removeUnit(g1, "ACC1", { reason: "drops expired" });
   assert.strictEqual(r.ok, true);
   assert.strictEqual(r.removed, true);
+  assert.strictEqual(r.gone, true, "Gameflip itself said the listing is gone");
+  assert.deepStrictEqual(t.called("gameflipDelist").map((c) => c.args), [["gf-1"]]);
   assert.strictEqual(t.db.Listing.get("G1").status, "delisted");
+  assert.strictEqual(t.db.Listing.get("G1").lastError, "drops expired", "every automatic take-down says why");
   assert.strictEqual(t.called("relistNoclaimSuccessor").length, 1);
 
   const t2 = load({
@@ -1163,104 +1180,157 @@ test("removeUnit gameflip: an unsold listing gets a successor; a sold one is lef
   });
   const r2 = await t2.mod.removeUnit(g1, "acc1", { reason: "drops expired" });
   assert.deepStrictEqual(r2, { ok: true, removed: false, sold: true });
-  assert.strictEqual(t2.called("delistRowVerified").length, 0);
+  assert.strictEqual(t2.called("gameflipDelist").length, 0);
   assert.strictEqual(t2.called("relistNoclaimSuccessor").length, 0);
 
-  // Unreadable (a 429) or not on sale proves nothing: never taken down, and
-  // ok:false so no caller hands the account back.
-  for (const status of [
-    () => {
-      throw new Error("429 Too Many Requests");
+  // Unreadable (a 429) proves nothing: never taken down, and ok:false so no
+  // caller hands the account back.
+  const t3 = load({
+    rows: [gameflipRow()],
+    ledgers: [ledger(1, { manualListing: "G1" })],
+    mp: {
+      gameflipListingStatus: () => {
+        throw new Error("429 Too Many Requests");
+      },
     },
-    () => "draft",
-  ]) {
-    const t3 = load({
-      rows: [gameflipRow()],
-      ledgers: [ledger(1, { manualListing: "G1" })],
-      mp: { gameflipListingStatus: status },
-    });
-    const r3 = await t3.mod.removeUnit(gameflipRow(), "acc1", { reason: "drops expired" });
-    assert.strictEqual(r3.ok, false);
-    assert.strictEqual(r3.removed, false);
-    assert.strictEqual(t3.called("delistRowVerified").length, 0);
-    assert.strictEqual(t3.called("relistNoclaimSuccessor").length, 0);
-  }
+  });
+  const r3 = await t3.mod.removeUnit(gameflipRow(), "acc1", { reason: "drops expired" });
+  assert.strictEqual(r3.ok, false);
+  assert.strictEqual(r3.removed, false);
+  assert.match(r3.error, /^gameflip status unreadable/);
+  assert.strictEqual(t3.called("gameflipDelist").length, 0);
+  assert.strictEqual(t3.db.Listing.get("G1").status, "active");
+});
+
+test("removeUnit gameflip: 'down' is Gameflip's word — a delete that did not take is not a removal", async () => {
+  // Under its limiter Gameflip answers the take-down with 200 and changes nothing.
+  let t = load({
+    rows: [gameflipRow()],
+    ledgers: [ledger(1, { manualListing: "G1" })],
+    mp: { gameflipListingStatus: () => "onsale", gameflipDelist: () => undefined },
+  });
+  let r = await t.mod.removeUnit(gameflipRow(), "acc1", { reason: "drops leave within 24 h" });
+  assert.strictEqual(r.ok, false);
+  assert.strictEqual(r.removed, false);
+  assert.match(r.error, /still onsale|is onsale after the take-down/);
+  assert.strictEqual(t.db.Listing.get("G1").status, "active", "the row keeps saying it is on sale");
+  assert.strictEqual(t.called("relistNoclaimSuccessor").length, 0);
+
+  // The draft patch landed and the delete was refused: a draft keeps the login.
+  let calls = 0;
+  t = load({
+    rows: [gameflipRow()],
+    ledgers: [ledger(1, { manualListing: "G1" })],
+    mp: {
+      gameflipListingStatus: () => (calls++ === 0 ? "onsale" : "draft"),
+      gameflipDelist: () => {
+        throw new Error("Gameflip delist: 429");
+      },
+    },
+  });
+  r = await t.mod.removeUnit(gameflipRow(), "acc1", { reason: "x" });
+  assert.strictEqual(r.ok, false);
+  assert.match(r.error, /draft after the take-down/);
+  assert.strictEqual(t.db.Listing.get("G1").status, "active");
+
+  // …and the next pass finishes it: a draft is ours to bin.
+  calls = 0;
+  t = load({
+    rows: [gameflipRow()],
+    ledgers: [ledger(1, { manualListing: "G1" })],
+    mp: {
+      gameflipListingStatus: () => {
+        if (calls++ === 0) return "draft";
+        const e = new Error("Gameflip listing status: not found");
+        e.status = 404;
+        throw e;
+      },
+    },
+  });
+  r = await t.mod.removeUnit(gameflipRow(), "acc1", { reason: "x" });
+  assert.strictEqual(r.removed, true);
+  assert.strictEqual(t.db.Listing.get("G1").status, "delisted");
+
+  // Already gone on Gameflip (deleted by hand): nothing to delete, the books follow.
+  t = load({
+    rows: [gameflipRow()],
+    ledgers: [ledger(1, { manualListing: "G1" })],
+    mp: {
+      gameflipListingStatus: () => {
+        const e = new Error("Gameflip listing status: not found");
+        e.status = 404;
+        throw e;
+      },
+    },
+  });
+  r = await t.mod.removeUnit(gameflipRow(), "acc1", { reason: "x" });
+  assert.strictEqual(r.removed, true);
+  assert.strictEqual(t.called("gameflipDelist").length, 0);
+
+  // A sale landed between the read and the delete: booked, never "removed".
+  calls = 0;
+  t = load({
+    rows: [gameflipRow({ price: 12 })],
+    ledgers: [ledger(1, { manualListing: "G1" })],
+    mp: { gameflipListingStatus: () => (calls++ === 0 ? "onsale" : "sold") },
+  });
+  r = await t.mod.removeUnit(gameflipRow({ price: 12 }), "acc1", { reason: "x" });
+  assert.deepStrictEqual(r, { ok: true, removed: false, sold: true });
+  assert.strictEqual(t.db.Listing.get("G1").status, "sold");
+  assert.strictEqual(t.db.Ledger.get("L1").status, "sold");
+
+  // A status that is neither ours to bin nor a sale: not now.
+  t = load({
+    rows: [gameflipRow()],
+    ledgers: [ledger(1, { manualListing: "G1" })],
+    mp: { gameflipListingStatus: () => "sale_pending" },
+  });
+  r = await t.mod.removeUnit(gameflipRow(), "acc1", { reason: "x" });
+  assert.strictEqual(r.ok, false);
+  assert.match(r.error, /sale_pending — not taking it down now/);
+  assert.strictEqual(t.called("gameflipDelist").length, 0);
 });
 
 // ---------------------------------------------------------------------------
 // runPass
 // ---------------------------------------------------------------------------
 
-// A held auto-farm unit: its ledger carries the live copies the claim read.
+// A held auto-farm unit: its ledger carries the date its drops leave.
 const DAY_MS = 24 * 60 * 60 * 1000;
+const HOUR_MS = 60 * 60 * 1000;
 const farmLedger = (n, extra = {}) =>
   ledger(n, {
     farm: "autofarm",
     manualPriorStatus: "",
     market: "gameflip",
     note: "manual no-claim listing — gameflip",
-    drops: [{ name: "Alpha Pack", game: "Rainbow Six Siege", campaign: "Spring Cup", itemKey: "alpha pack|rainbow six siege" }],
+    farmGoneAt: new Date(Date.now() + 20 * HOUR_MS), // twenty hours left
     ...extra,
   });
-
-test("holdingFromLedger: the bundle a ledger was listed with, one wave per campaign", () => {
-  const { mod } = load({});
-  const h = mod.holdingFromLedger({
-    manualAt: new Date("2026-10-11T00:00:00Z"),
-    drops: [
-      { name: "Coin", game: "G", campaign: "Old", itemKey: "coin|g" },
-      { name: "Coin", game: "G", campaign: "New", itemKey: "coin|g" },
-      { name: "Coin", game: "G", campaign: "New", itemKey: "coin|g" },
-      { name: "Skin", game: "G", campaign: "New", itemKey: "" },
-      null,
-    ],
-  });
-  assert.deepStrictEqual(h.items, [
-    { itemKey: "coin|g", name: "Coin", game: "G", qty: 3, waves: [{ campaign: "Old", qty: 1 }, { campaign: "New", qty: 2 }] },
-    { itemKey: "skin|g", name: "Skin", game: "G", qty: 1, waves: [{ campaign: "New", qty: 1 }] },
-  ]);
-  assert.strictEqual(new Date(h.readAt).toISOString(), "2026-10-11T00:00:00.000Z");
-  assert.deepStrictEqual(mod.holdingFromLedger({}).items, []);
-  assert.deepStrictEqual(mod.holdingFromLedger(null).items, []);
-});
+const QUIET = { topUp: false, healthPerPass: 0 };
 
 test("runPass expiry: a held auto-farm unit comes off sale a day before its drops leave — and is handed back", async () => {
-  const seen = [];
-  const t = load({
-    rows: [gameflipRow()],
-    ledgers: [farmLedger(1, { manualListing: "G1" })],
-    ncs: {
-      // The claim layer's own rule, asked of the LEDGER's copies.
-      coverGoneAt: (h) => {
-        seen.push(h);
-        return Date.now() + 20 * 60 * 60 * 1000; // twenty hours left
-      },
-    },
-    settings: { topUp: false, healthPerPass: 0 },
-  });
+  const t = load({ rows: [gameflipRow()], ledgers: [farmLedger(1, { manualListing: "G1" })], settings: QUIET });
   const out = await t.mod.runPass();
   assert.deepStrictEqual(out.errors, []);
   assert.deepStrictEqual(out.expiring, { due: 1, removed: 1 });
-  assert.deepStrictEqual(seen[0].items.map((i) => [i.itemKey, i.qty, i.waves]), [["alpha pack|rainbow six siege", 1, [{ campaign: "Spring Cup", qty: 1 }]]]);
-  // Down on Gameflip first (status read, verified delist), then released.
+  // Down on Gameflip first — by Gameflip's own word — then released with that proof.
+  assert.deepStrictEqual(t.called("gameflipDelist").map((c) => c.args), [["gf-1"]]);
   assert.strictEqual(t.db.Listing.get("G1").status, "delisted");
-  assert.strictEqual(t.called("delistRowVerified")[0].args[1], "drops leave within 24 h");
-  assert.deepStrictEqual(t.called("releaseClaim").map((c) => c.args), [[["L1"], { reason: "drops leave within 24 h" }]]);
+  assert.strictEqual(t.db.Listing.get("G1").lastError, "drops leave within 24 h");
+  assert.deepStrictEqual(t.called("releaseClaim").map((c) => c.args), [[["L1"], { reason: "drops leave within 24 h", listingGone: true }]]);
   assert.ok(t.events.some((e) => e.action === "autofarm_unit_expiring" && e.subject === "acc1"));
   // The chain is asked for a successor; the claim layer only holds one that lasts.
   assert.strictEqual(t.called("relistNoclaimSuccessor").length, 1);
+  // The snapshot is not asked: the date is the ledger's own.
+  assert.strictEqual(t.called("snapshotBase").length, 0);
 });
 
-test("runPass expiry: nothing is taken off while the drops have more than the lead left, or when no leave time is on record", async () => {
-  for (const gone of [Date.now() + 3 * DAY_MS, Infinity, 0]) {
-    const t = load({
-      rows: [gameflipRow()],
-      ledgers: [farmLedger(1, { manualListing: "G1" })],
-      ncs: { coverGoneAt: () => gone },
-      settings: { topUp: false, healthPerPass: 0 },
-    });
+test("runPass expiry: nothing is taken off while the drops have more than the lead left, or when no date is on record", async () => {
+  for (const farmGoneAt of [new Date(Date.now() + 3 * DAY_MS), null]) {
+    const t = load({ rows: [gameflipRow()], ledgers: [farmLedger(1, { manualListing: "G1", farmGoneAt })], settings: QUIET });
     const out = await t.mod.runPass();
-    assert.deepStrictEqual(out.expiring, { due: 0, removed: 0 }, String(gone));
+    assert.deepStrictEqual(out.expiring, { due: 0, removed: 0 }, String(farmGoneAt));
     assert.strictEqual(t.db.Listing.get("G1").status, "active");
     assert.strictEqual(t.called("releaseClaim").length, 0);
     assert.strictEqual(t.called("gameflipListingStatus").length, 0, "database only until a unit is due");
@@ -1269,22 +1339,16 @@ test("runPass expiry: nothing is taken off while the drops have more than the le
 
 test("runPass expiry: only auto-farm units, only undelivered ones, never a pinned one — and a unit that will not come down is not released", async () => {
   // A no-claim bot's unit on the same kind of row is the health step's, as it always was.
-  let t = load({
-    rows: [gameflipRow()],
-    ledgers: [ledger(1, { manualListing: "G1" })],
-    ncs: { coverGoneAt: () => Date.now() + 60 * 1000 },
-    settings: { topUp: false, healthPerPass: 0 },
-  });
+  let t = load({ rows: [gameflipRow()], ledgers: [ledger(1, { manualListing: "G1", farmGoneAt: new Date(Date.now() + HOUR_MS) })], settings: QUIET });
   let out = await t.mod.runPass();
   assert.deepStrictEqual(out.expiring, { due: 0, removed: 0 });
-  assert.strictEqual(t.called("coverGoneAt").length, 0);
+  assert.strictEqual(t.called("gameflipListingStatus").length, 0);
 
   // Already delivered: a buyer has it.
   t = load({
     rows: [gameflipRow({ units: [unit("acc1", 1, { contentId: "", deliveredAt: at(5), orderId: "gameflip-sale" })] })],
     ledgers: [farmLedger(1, { manualListing: "G1" })],
-    ncs: { coverGoneAt: () => Date.now() + 60 * 1000 },
-    settings: { topUp: false, healthPerPass: 0 },
+    settings: QUIET,
   });
   out = await t.mod.runPass();
   assert.deepStrictEqual(out.expiring, { due: 0, removed: 0 });
@@ -1294,8 +1358,7 @@ test("runPass expiry: only auto-farm units, only undelivered ones, never a pinne
   t = load({
     rows: [gameflipRow()],
     ledgers: [farmLedger(1, { manualListing: "G1", note: "unrecorded publish — gameflip (offer unknown)" })],
-    ncs: { coverGoneAt: () => Date.now() + 60 * 1000 },
-    settings: { topUp: false, healthPerPass: 0 },
+    settings: QUIET,
   });
   out = await t.mod.runPass();
   assert.deepStrictEqual(out.expiring, { due: 0, removed: 0 });
@@ -1304,13 +1367,12 @@ test("runPass expiry: only auto-farm units, only undelivered ones, never a pinne
   t = load({
     rows: [gameflipRow()],
     ledgers: [farmLedger(1, { manualListing: "G1" })],
-    ncs: { coverGoneAt: () => Date.now() + 60 * 1000 },
     mp: {
       gameflipListingStatus: () => {
         throw new Error("429 Too Many Requests");
       },
     },
-    settings: { topUp: false, healthPerPass: 0 },
+    settings: QUIET,
   });
   out = await t.mod.runPass();
   assert.deepStrictEqual(out.expiring, { due: 1, removed: 0 });
@@ -1318,32 +1380,174 @@ test("runPass expiry: only auto-farm units, only undelivered ones, never a pinne
   assert.ok(out.errors.some((e) => /^expiry acc1: gameflip status unreadable/.test(e)), JSON.stringify(out.errors));
   assert.strictEqual(t.db.Listing.get("G1").status, "active");
 
+  // The delete did not take (200, nothing changed): still on sale, still held.
+  t = load({
+    rows: [gameflipRow()],
+    ledgers: [farmLedger(1, { manualListing: "G1" })],
+    mp: { gameflipListingStatus: () => "onsale", gameflipDelist: () => undefined },
+    settings: QUIET,
+  });
+  out = await t.mod.runPass();
+  assert.deepStrictEqual(out.expiring, { due: 1, removed: 0 });
+  assert.strictEqual(t.called("releaseClaim").length, 0);
+  assert.strictEqual(t.db.Listing.get("G1").status, "active");
+
   // Sold a moment ago: the sale path owns it.
   t = load({
     rows: [gameflipRow()],
     ledgers: [farmLedger(1, { manualListing: "G1" })],
-    ncs: { coverGoneAt: () => Date.now() + 60 * 1000 },
     mp: { gameflipListingStatus: () => "sold" },
-    settings: { topUp: false, healthPerPass: 0 },
+    settings: QUIET,
   });
   out = await t.mod.runPass();
   assert.deepStrictEqual(out.expiring, { due: 1, removed: 0 });
   assert.strictEqual(t.called("releaseClaim").length, 0);
 });
 
-test("runPass expiry: at most three units a pass", async () => {
+test("runPass expiry: ONE take-down a pass, the soonest first — and a failed one is not followed by another", async () => {
   const rows = [];
   const ledgers = [];
-  for (let i = 1; i <= 5; i++) {
+  for (let i = 1; i <= 4; i++) {
     rows.push(gameflipRow({ _id: "G" + i, externalId: "gf-" + i, accountLogin: "acc" + i, units: [unit("acc" + i, i, { contentId: "" })] }));
-    ledgers.push(farmLedger(i, { manualListing: "G" + i }));
+    // acc4's drops leave first.
+    ledgers.push(farmLedger(i, { manualListing: "G" + i, farmGoneAt: new Date(Date.now() + (10 - i) * HOUR_MS) }));
   }
-  const t = load({ rows, ledgers, ncs: { coverGoneAt: () => Date.now() + 60 * 1000 }, settings: { topUp: false, healthPerPass: 0 } });
+  const t = load({ rows, ledgers, settings: QUIET });
   const out = await t.mod.runPass();
-  assert.deepStrictEqual(out.expiring, { due: 3, removed: 3 });
-  assert.strictEqual(t.called("releaseClaim").length, 3);
+  assert.deepStrictEqual(out.expiring, { due: 1, removed: 1 });
+  assert.deepStrictEqual(t.called("gameflipDelist").map((c) => c.args), [["gf-4"]]);
   const again = await t.mod.runPass();
-  assert.deepStrictEqual(again.expiring, { due: 2, removed: 2 });
+  assert.deepStrictEqual(again.expiring, { due: 1, removed: 1 });
+  assert.deepStrictEqual(t.called("gameflipDelist").map((c) => c.args), [["gf-4"], ["gf-3"]]);
+
+  // Gameflip is throttling: one call, not one per due unit.
+  const bad = load({
+    rows,
+    ledgers,
+    mp: {
+      gameflipListingStatus: () => {
+        throw new Error("429 Too Many Requests");
+      },
+    },
+    settings: QUIET,
+  });
+  const o = await bad.mod.runPass();
+  assert.deepStrictEqual(o.expiring, { due: 1, removed: 0 });
+  assert.strictEqual(bad.called("gameflipListingStatus").length, 1);
+});
+
+test("runPass limbo: a held account whose row came down but was not handed back is asked about again — one a pass", async () => {
+  const down = (extra = {}) => gameflipRow({ status: "delisted", lastError: "drops leave within 24 h", ...extra });
+  // Gameflip no longer has it: handed back, with that proof.
+  let t = load({
+    rows: [down()],
+    ledgers: [farmLedger(1, { manualListing: "G1", farmGoneAt: null })],
+    mp: {
+      gameflipListingStatus: () => {
+        const e = new Error("Gameflip listing status: not found");
+        e.status = 404;
+        throw e;
+      },
+    },
+    settings: QUIET,
+  });
+  let out = await t.mod.runPass();
+  assert.deepStrictEqual(out.limbo, { released: 1, sold: 0, retried: 0 });
+  assert.deepStrictEqual(t.called("releaseClaim").map((c) => c.args), [[["L1"], { reason: "its listing is gone", listingGone: true }]]);
+
+  // It SOLD while our books said it was down: booked as the sale it is.
+  t = load({
+    rows: [down({ price: 9 })],
+    ledgers: [farmLedger(1, { manualListing: "G1", farmGoneAt: null })],
+    mp: { gameflipListingStatus: () => "sold" },
+    settings: QUIET,
+  });
+  out = await t.mod.runPass();
+  assert.deepStrictEqual(out.limbo, { released: 0, sold: 1, retried: 0 });
+  assert.strictEqual(t.db.Ledger.get("L1").status, "sold");
+  assert.strictEqual(t.db.Listing.get("G1").status, "sold");
+  assert.strictEqual(t.db.Listing.get("G1").units[0].orderId, "gameflip-sale");
+  assert.deepStrictEqual(t.called("markSold")[0].args[1], { market: "gameflip", priceUsd: 9, reason: "gameflip sale" });
+  assert.strictEqual(t.called("releaseClaim").length, 0);
+
+  // Still there as a draft: the take-down is finished, nothing is released yet.
+  t = load({
+    rows: [down()],
+    ledgers: [farmLedger(1, { manualListing: "G1", farmGoneAt: null })],
+    mp: { gameflipListingStatus: () => "draft", gameflipDelist: () => undefined },
+    settings: QUIET,
+  });
+  out = await t.mod.runPass();
+  assert.deepStrictEqual(out.limbo, { released: 0, sold: 0, retried: 1 });
+  assert.deepStrictEqual(t.called("gameflipDelist").map((c) => c.args), [["gf-1"]]);
+  assert.strictEqual(t.called("releaseClaim").length, 0);
+  assert.strictEqual(t.db.Ledger.get("L1").status, "manual");
+
+  // Gameflip will not say: an error line, nothing else.
+  t = load({
+    rows: [down()],
+    ledgers: [farmLedger(1, { manualListing: "G1", farmGoneAt: null })],
+    mp: {
+      gameflipListingStatus: () => {
+        throw new Error("429");
+      },
+    },
+    settings: QUIET,
+  });
+  out = await t.mod.runPass();
+  assert.deepStrictEqual(out.limbo, { released: 0, sold: 0, retried: 0 });
+  assert.ok(out.errors.some((e) => /^limbo acc1: gameflip status unreadable/.test(e)));
+
+  // Not its business: a unit on a live row, a pinned claim, a park in flight, a no-claim bot's ledger.
+  for (const [row, led] of [
+    [gameflipRow(), farmLedger(1, { manualListing: "G1", farmGoneAt: null })],
+    [down(), farmLedger(1, { manualListing: "G1", farmGoneAt: null, note: "unrecorded publish — gameflip gf-1" })],
+    [down(), farmLedger(1, { manualListing: "G1", farmGoneAt: null, farmParkStartedAt: new Date() })],
+    [down(), ledger(1, { manualListing: "G1" })],
+  ]) {
+    t = load({ rows: [row], ledgers: [led], mp: { gameflipListingStatus: () => "draft" }, settings: QUIET });
+    out = await t.mod.runPass();
+    assert.deepStrictEqual(out.limbo, { released: 0, sold: 0, retried: 0 });
+    assert.strictEqual(t.called("gameflipDelist").length, 0);
+  }
+
+  // The row that named its listing is gone: pinned for a human, never released.
+  t = load({ rows: [], ledgers: [farmLedger(1, { manualListing: "G1", farmGoneAt: null })], settings: QUIET });
+  out = await t.mod.runPass();
+  assert.strictEqual(out.limbo.released, 0);
+  assert.strictEqual(out.limbo.pinned, 1);
+  assert.match(t.db.Ledger.get("L1").note, /^unrecorded publish — /);
+  assert.strictEqual(t.called("releaseClaim").length, 0);
+  assert.ok(t.events.some((e) => e.action === "orphan_pinned" && /listing row is missing/.test(e.detail)));
+
+  // One a pass.
+  const rows = [];
+  const ledgers = [];
+  for (let i = 1; i <= 3; i++) {
+    rows.push(down({ _id: "G" + i, externalId: "gf-" + i, accountLogin: "acc" + i, units: [unit("acc" + i, i, { contentId: "" })] }));
+    ledgers.push(farmLedger(i, { manualListing: "G" + i, farmGoneAt: null }));
+  }
+  t = load({ rows, ledgers, mp: { gameflipListingStatus: () => "draft", gameflipDelist: () => undefined }, settings: QUIET });
+  out = await t.mod.runPass();
+  assert.strictEqual(t.called("gameflipListingStatus").length, 1);
+  assert.deepStrictEqual(out.limbo, { released: 0, sold: 0, retried: 1 });
+});
+
+test("removeForPoolAccount: an auto-farm account sold by hand is booked as a sale, not parked 'removed'", async () => {
+  const t = load({
+    rows: [gameflipRow()],
+    ledgers: [farmLedger(1, { manualListing: "G1", farmGoneAt: null })],
+    pool: [{ _id: poolId(1), clientSecret: "cs1", manualSold: true }],
+  });
+  const out = await t.mod.removeForPoolAccount(poolId(1), { actor: "owner" });
+  assert.deepStrictEqual(out.errors, []);
+  assert.strictEqual(out.units, 1);
+  assert.strictEqual(out.ledgers, 1);
+  // Off Gameflip (verified), then SOLD — so its own clean-up takes it out of its bot.
+  assert.strictEqual(t.db.Listing.get("G1").status, "delisted");
+  assert.strictEqual(t.db.Ledger.get("L1").status, "sold");
+  assert.deepStrictEqual(t.called("markSold")[0].args, [["L1"], { market: "gameflip", priceUsd: 0, reason: "sold by hand" }]);
+  assert.strictEqual(t.called("releaseClaim").length, 0);
 });
 
 test("runPass: a failing step never stops the ones after it", async () => {

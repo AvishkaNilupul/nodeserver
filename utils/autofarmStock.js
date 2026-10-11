@@ -93,7 +93,13 @@ function cfg() {
     // leave time is KNOWN), and it comes off sale Lead before they go — the
     // maintenance pass's expiry step. That step keeps running with the vault
     // switch off: a unit already out there must still come back in time.
-    vaultMinLifeMs: clampInt(af.autofarmStockVaultMinLifeHours, 72, 24, 336) * 60 * 60 * 1000,
+    // The minimum life is never within a day of the lead: an account held at
+    // the minimum must not be due to come off again on the very next pass.
+    vaultMinLifeMs:
+      Math.max(
+        clampInt(af.autofarmStockVaultMinLifeHours, 72, 24, 336),
+        clampInt(af.autofarmStockVaultLeadHours, 24, 1, 120) + 24,
+      ) * 60 * 60 * 1000,
     vaultLeadMs: clampInt(af.autofarmStockVaultLeadHours, 24, 1, 120) * 60 * 60 * 1000,
     // Live inventory reads per holdings tick, on top of the no-claim farm's
     // own quota — its cadence is never diluted.
@@ -229,6 +235,12 @@ function defaultDeps() {
     sendTelegram: (...a) => require("./telegram").sendTelegram(...a),
     removeAccountFromConfig: (...a) =>
       require("../routes/botConfigRoutes").removeAccountFromConfig(...a),
+    // The market's own word on a listing (releaseBlocked): its status, or a
+    // throw — with status 404 when the market no longer has it.
+    listingStatus: (market, externalId) => {
+      if (lower(market) === "gameflip") return require("./marketplaces").gameflipListingStatus(externalId);
+      throw new Error("no way to read a " + market + " listing");
+    },
     reloadConfig: (...a) => require("./farmControl").reloadConfig(...a),
     containerForFile: (f) => require("./botFactory").containerForFile(f),
   };
@@ -694,6 +706,45 @@ async function releaseForPool(pool, { market = "", orderId = "", deps } = {}) {
   return n;
 }
 
+// May a HELD account go back to stock now? "" = yes, else why not yet. Asked
+// by noclaimStock.releaseClaim of every auto-farm ledger, whoever wants it
+// released — the Delist button, a retired listing, a removed unit:
+//   - its bot removal is under way (started, not proved): a release now would
+//     put a farming note back on an account that may be in no bot;
+//   - the listing it was held for still exists on the market, or the market
+//     would not say. Its login is in there. Gameflip answers a status patch
+//     with 200 under its limiter and changes nothing, and a delete can fail
+//     after the listing went to draft — so "we took it down" is not "it is
+//     gone"; only Gameflip no longer having it is (a 404; a SOLD listing
+//     stays readable for good).
+// `listingGone`: the caller has just had that answer itself.
+// A blocked ledger stays "manual" and the maintenance pass comes back to it.
+async function releaseBlocked(ledger, { deps, listingGone = false } = {}) {
+  if (!ledger || ledger.farm !== FARM) return "";
+  if (ledger.farmParkStartedAt && !ledger.farmParkedAt) return "its bot removal is still under way";
+  if (listingGone) return "";
+  if (lower(ledger.market) !== "gameflip" || !/^[0-9a-f]{24}$/i.test(str(ledger.manualListing))) return "";
+  const d = deps || defaultDeps();
+  let row = null;
+  try {
+    row = await d.MarketplaceListing.findById(ledger.manualListing, { externalId: 1, marketplace: 1 }).lean();
+  } catch {
+    return "its listing row could not be read";
+  }
+  // The row that said which listing held its login is gone: nobody can ask
+  // the market about it, so nobody may assume.
+  if (!row) return "its listing row is missing";
+  // A row that is not a Gameflip listing: nothing there holds its login.
+  if (!row.externalId || lower(row.marketplace) !== "gameflip") return "";
+  try {
+    const st = str(await d.listingStatus("gameflip", row.externalId));
+    return st === "sold" ? "its Gameflip listing SOLD" : "its Gameflip listing still exists (" + (st || "?") + ")";
+  } catch (e) {
+    const gone = (e && e.status === 404) || /not found|http_status":\s*404/i.test(str(e && e.message));
+    return gone ? "" : "Gameflip would not say whether its listing is gone";
+  }
+}
+
 // A HELD account whose vault unit ended without a sale goes back to stock. The
 // stamps of the hold come off (this account's ids, this market's tag), and the
 // pool row gets a note that makes it a candidate again: the stock hold when it
@@ -828,9 +879,17 @@ async function retirePending({ limit = 10, deps, held = false } = {}) {
     // One only a human can finish (farmHuman) is looked at again every few
     // hours, not every pass: each look reads every bot host twice.
     const later = [{ farmHuman: { $in: ["", null] } }, { lastCheckedAt: { $lt: new Date(Date.now() - HUMAN_RETRY_MS) } }];
+    // A held row keeps its own clock (farmParkTriedAt): the health step moves
+    // lastCheckedAt every pass, and a row only a human can finish would then
+    // never be looked at again.
+    const laterHeld = [
+      { farmHuman: { $in: ["", null] } },
+      { farmParkTriedAt: null },
+      { farmParkTriedAt: { $lt: new Date(Date.now() - HUMAN_RETRY_MS) } },
+    ];
     rows = await d.UnclaimedAccount.find(
       held
-        ? { source: "noclaim", farm: FARM, status: "manual", farmParkedAt: null, $or: later }
+        ? { source: "noclaim", farm: FARM, status: "manual", farmParkedAt: null, $or: laterHeld }
         : {
             source: "noclaim",
             farm: FARM,
@@ -840,7 +899,7 @@ async function retirePending({ limit = 10, deps, held = false } = {}) {
             $or: later,
           },
     )
-      .sort({ lastCheckedAt: 1, soldAt: 1, _id: 1 })
+      .sort(held ? { farmParkTriedAt: 1, _id: 1 } : { lastCheckedAt: 1, soldAt: 1, _id: 1 })
       .limit(max)
       .lean();
   } catch (e) {
@@ -869,9 +928,24 @@ async function retirePending({ limit = 10, deps, held = false } = {}) {
     const w = { l, login, pool: null, secret: "", bots: [], human: "", owed: new Set((l.farmReloads || []).map(str)) };
     work.push(w);
     try {
-      // The queue rotates: whatever happens below, this one is not the first
-      // looked at next time.
-      await d.UnclaimedAccount.updateOne({ _id: l._id }, { $set: { lastCheckedAt: new Date() } });
+      if (held) {
+        // The park claims the ledger before it touches anything: from here on
+        // the account may be in no bot, so a release has to wait for the proof
+        // (releaseBlocked). A ledger that is no longer held — released or sold
+        // since the list above was read — is not this pass's to stamp.
+        const mine = await d.UnclaimedAccount.updateOne(
+          { _id: l._id, status: "manual", farmParkedAt: null },
+          { $set: { farmParkStartedAt: l.farmParkStartedAt || new Date(), farmParkTriedAt: new Date() } },
+        );
+        if (!(mine && (mine.modifiedCount || mine.nModified))) {
+          w.skipped = true;
+          continue;
+        }
+      } else {
+        // The queue rotates: whatever happens below, this one is not the first
+        // looked at next time.
+        await d.UnclaimedAccount.updateOne({ _id: l._id }, { $set: { lastCheckedAt: new Date() } });
+      }
       const pool = l.poolAccountId
         ? await d.AvailableAccount.findById(l.poolAccountId, {
             username: 1, clientSecret: 1, status: 1, claimedNote: 1, soldGames: 1,
@@ -995,7 +1069,7 @@ async function retirePending({ limit = 10, deps, held = false } = {}) {
   for (const w of work) {
     const l = w.l;
     try {
-      if (w.failed) continue;
+      if (w.failed || w.skipped) continue;
       if (w.human) {
         out.errors.push(w.login + ": " + w.human + " — left for a human");
         if (str(l.farmHuman) !== w.human) {
@@ -1135,7 +1209,12 @@ async function writeSaleSignal(d, ledger, bot) {
           name: "",
           login: str(ledger.login),
           account: bot ? bot._id : null,
-          source: "listing_sold",
+          // Gameflip's sale watcher records each of its sales itself
+          // (saleLearning.recordListingSale): a second "listing_sold" row
+          // would count the sale twice in the demand model. This row is then
+          // only the once-only marker ("drop_reserved" = stock put on a
+          // shelf, counted nowhere) — which a held account also was.
+          source: lower(ledger.soldMarket || ledger.market) === "gameflip" ? "drop_reserved" : "listing_sold",
           marketplace: str(ledger.soldMarket || ledger.market),
           priceUsd: Math.max(0, Number(ledger.soldPriceUsd) || 0),
           bulk,
@@ -1395,6 +1474,7 @@ module.exports = {
   vaultMinLifeMs,
   vaultLeadMs,
   stockHoldNote,
+  releaseBlocked,
   releaseHeld,
   parkHeld,
 };

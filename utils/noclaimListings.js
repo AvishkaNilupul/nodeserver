@@ -237,11 +237,14 @@ async function markUnrecorded(ids, market, externalId) {
   );
 }
 
-async function releaseIds(ids, reason) {
+// `opts.listingGone`: the caller has the market's own word that the listing
+// these accounts were held for is gone (an auto-farm account is released on
+// nothing less — noclaimStock.releaseClaim asks the market itself otherwise).
+async function releaseIds(ids, reason, opts = {}) {
   const list = (ids || []).filter(Boolean).map(String);
   if (!list.length) return 0;
   try {
-    return Number(await ncs.releaseClaim(list, { reason })) || 0;
+    return Number(await ncs.releaseClaim(list, opts && opts.listingGone ? { reason, listingGone: true } : { reason })) || 0;
   } catch (e) {
     console.error("noclaimListings: release failed (" + reason + "):", e.message);
     return 0;
@@ -1119,67 +1122,91 @@ async function removeUnitLocked(row, login, reason) {
   return rebuildGgsel(cur, keep, reason);
 }
 
+// Gameflip's own word on a listing: its status; "gone" when Gameflip no longer
+// has it (a deleted listing 404s — a SOLD one stays readable for good); "" when
+// it would not say.
+async function gameflipState(externalId) {
+  try {
+    return String((await mp.gameflipListingStatus(externalId)) || "") || "unknown";
+  } catch (e) {
+    const gone = (e && e.status === 404) || mp.delistOutcome(String((e && e.message) || "")) === "gone";
+    return gone ? "gone" : "";
+  }
+}
+
 // A Gameflip no-claim row IS its unit: take the listing down, then publish a
 // successor so the chain still owes the same number of units (the removed one
 // never sold). The successor claims a free account; the removed one is still
 // "manual" at that point, so it can never be picked again.
+//
+// "Down" is Gameflip's word, never ours. Under its limiter Gameflip answers a
+// status patch with 200 and changes nothing, and a delete can fail after the
+// listing went to draft — a draft keeps the login. So the row is only marked
+// delisted, and `removed` only reported (which is what lets a caller hand the
+// account back), once Gameflip no longer HAS the listing. Anything else is
+// ok:false: nothing is released, and the next pass comes back to it.
 async function removeGameflipUnit(cur, l, reason) {
   if (!undeliveredUnits(cur).some((u) => lower(u.login) === l)) return { ok: true, removed: false };
-  // Only a listing Gameflip says is ON SALE is ours to take down. A sold one
-  // belongs to the fulfiller's sold path; an unreadable status (Gameflip
-  // rate-limits readily) proves nothing — and delistRowVerified would count a
-  // "(sold)" refusal or any non-onsale status as "down", flip the row to
-  // delisted where the sold path never looks again, and the caller would hand
-  // back an account a buyer holds. So: unreadable or not onsale = not now.
-  let before = "";
-  try {
-    before = String((await mp.gameflipListingStatus(cur.externalId)) || "");
-  } catch (e) {
-    return { ok: false, removed: false, error: "gameflip status unreadable: " + ((e && e.message) || e) };
+  const before = await gameflipState(cur.externalId);
+  if (!before) {
+    return { ok: false, removed: false, error: "gameflip status unreadable — not taking it down now" };
   }
+  // A sold one belongs to the fulfiller's sold path.
   if (before === "sold") return { ok: true, removed: false, sold: true };
-  if (before !== "onsale") {
-    return { ok: false, removed: false, error: "gameflip listing is " + (before || "unknown") + " — not taking it down now" };
-  }
-  const d = await ual().delistRowVerified(cur, reason);
-  if (!d || !d.ok) return { ok: false, removed: false, error: (d && d.error) || "delist failed" };
-  // Someone else took it down between our read and the delist; whoever did
-  // owns the outcome (and its successor).
-  if (!d.changed) return { ok: true, removed: false };
-  // A sale that landed between the read and the delist: the delist answers
-  // "(sold)" and the row now says delisted. Put the sale back on the books
-  // (the sold path only watches active rows, so it would never see it) and
-  // carry the chain on as a sale would.
-  let after = "";
-  try {
-    after = String((await mp.gameflipListingStatus(cur.externalId)) || "");
-  } catch {
-    after = "";
-  }
-  if (after === "sold") {
-    await MarketplaceListing.updateOne(
-      { _id: cur._id, status: "delisted" },
-      { $set: { status: "sold", lastError: "" } },
-    ).catch(() => {});
-    await onGameflipSold(cur, { priceUsd: cur.price });
-    const owed = Math.max(0, (Number(cur.qtyRemaining) || 0) - 1);
-    if (Number(cur.qtyRemaining) > 0) {
-      await MarketplaceListing.updateOne({ _id: cur._id }, { $set: { qtyRemaining: owed } }).catch(() => {});
-      try {
-        await gf().relistNoclaimSuccessor({ ...cur, status: "sold", qtyRemaining: owed });
-      } catch (e) {
-        console.error("noclaimListings gameflip successor after a late sale failed:", e.message);
-      }
+  if (before !== "gone") {
+    // On sale, or already off sale with the login still attached (a take-down
+    // that stopped half way): both are ours to bin. Any other status is not.
+    if (!["onsale", "draft", "ready"].includes(before)) {
+      return { ok: false, removed: false, error: "gameflip listing is " + before + " — not taking it down now" };
     }
-    return { ok: true, removed: false, sold: true };
+    try {
+      await mp.gameflipDelist(cur.externalId);
+    } catch {
+      /* Gameflip's own answer, next, is the verdict */
+    }
+    const after = await gameflipState(cur.externalId);
+    if (after === "sold") {
+      // A sale landed between the read and the delete. Put it on the books
+      // (the sold path only watches active rows) and carry the chain on as a
+      // sale would.
+      await MarketplaceListing.updateOne(
+        { _id: cur._id, status: { $in: ["active", "delisted"] } },
+        { $set: { status: "sold", lastError: "" } },
+      ).catch(() => {});
+      await onGameflipSold(cur, { priceUsd: cur.price });
+      const owed = Math.max(0, (Number(cur.qtyRemaining) || 0) - 1);
+      if (Number(cur.qtyRemaining) > 0) {
+        await MarketplaceListing.updateOne({ _id: cur._id }, { $set: { qtyRemaining: owed } }).catch(() => {});
+        try {
+          await gf().relistNoclaimSuccessor({ ...cur, status: "sold", qtyRemaining: owed });
+        } catch (e) {
+          console.error("noclaimListings gameflip successor after a late sale failed:", e.message);
+        }
+      }
+      return { ok: true, removed: false, sold: true };
+    }
+    if (after !== "gone") {
+      return {
+        ok: false,
+        removed: false,
+        error: "gameflip listing is " + (after || "unreadable") + " after the take-down — tried again next pass",
+      };
+    }
   }
+  // Gone on Gameflip. Now the books — and only the caller whose write flips
+  // the row owns what follows (the successor, the hand-back).
+  const w = await MarketplaceListing.updateOne(
+    { _id: cur._id, status: "active" },
+    { $set: { status: "delisted", lastError: reason || "" } },
+  ).catch(() => null);
+  if (!w || !w.modifiedCount) return { ok: true, removed: false };
   let successor = null;
   try {
     successor = await gf().relistNoclaimSuccessor(cur);
   } catch (e) {
     console.error("noclaimListings gameflip successor failed for " + cur.externalId + ":", e.message);
   }
-  return { ok: true, removed: true, successor: successor || null };
+  return { ok: true, removed: true, gone: true, successor: successor || null };
 }
 
 async function removeDigisellerUnit(cur, unit, keep, reason) {
@@ -1440,6 +1467,26 @@ async function removeForPoolAccount(poolAccountId, { actor = "" } = {}) {
         out.errors.push(login + ": " + failed);
         continue;
       }
+      // An AUTO-FARM account sold by hand is a sale like any other: its own
+      // clean-up (utils/autofarmStock.retirePending) takes it out of its bot
+      // and marks its pool row spent. Parked "removed" it would keep a
+      // pending note for good, and keep farming if it was not parked yet.
+      if (String(ledger.farm || "") === "autofarm" && !isUnrecorded(ledger)) {
+        const n = await markSoldIds([ledger._id], { market: ledger.market || "", priceUsd: 0, reason: "sold by hand" });
+        if (n) {
+          out.ledgers++;
+          logEvent({
+            category: "noclaim_shop",
+            action: "manual_sold_removed",
+            actor: actor || "noclaimListings",
+            subject: login,
+            game: ledger.game || "",
+            count: 1,
+            detail: "auto-farm account sold by hand: taken off its listing and booked as sold",
+          });
+        }
+        continue;
+      }
       const w = await UnclaimedAccount.updateOne(
         { _id: ledger._id, status: "manual" },
         {
@@ -1632,7 +1679,7 @@ async function conflictsStep(tally, errors) {
         }
         if (!r.removed) continue;
         tally.removed++;
-        if (ours) await releaseIds([ledger._id], "conflict — " + why);
+        if (ours) await releaseIds([ledger._id], "conflict — " + why, { listingGone: !!r.gone });
         logEvent({
           category: "noclaim_shop",
           action: "conflict_removed",
@@ -1768,7 +1815,7 @@ async function checkUnitHealth(ledger, row, set, tally, errors) {
   }
   if (!r.removed) return;
   tally.expired++;
-  await releaseIds([ledger._id], "drops expired");
+  await releaseIds([ledger._id], "drops expired", { listingGone: !!r.gone });
   logEvent({
     category: "noclaim_shop",
     action: "expired",
@@ -1780,38 +1827,15 @@ async function checkUnitHealth(ledger, row, set, tally, errors) {
   });
 }
 
-// How many held units one pass takes off (each is a marketplace round trip,
-// and on Gameflip a replacement listing as well).
-const EXPIRY_MAX_PER_PASS = 3;
-
-// The bundle a ledger was listed with, shaped like a holding: its drops are
-// the live copies the claim read ({ name, game, campaign, itemKey }, one entry
-// per copy), so each carries the campaign that says when it leaves. Read off
-// the LEDGER on purpose — a held account is no longer a sweep candidate, and
-// its snapshot row is not kept up.
-function holdingFromLedger(ledger) {
-  const byKey = new Map();
-  for (const d of (ledger && Array.isArray(ledger.drops) ? ledger.drops : [])) {
-    if (!d) continue;
-    const k = lower(d.itemKey) || lower(d.name) + "|" + lower(d.game);
-    if (!k || k === "|") continue;
-    if (!byKey.has(k)) byKey.set(k, { itemKey: d.itemKey || k, name: d.name || "", game: d.game || "", qty: 0, waves: [] });
-    const it = byKey.get(k);
-    it.qty++;
-    const name = String(d.campaign || "").trim();
-    const w = it.waves.find((x) => x.campaign === name);
-    if (w) w.qty++;
-    else it.waves.push({ campaign: name, qty: 1 });
-  }
-  return { items: [...byKey.values()], readAt: (ledger && (ledger.manualAt || ledger.lastCheckedAt)) || null };
-}
-
 // Step: an AUTO-FARM account sitting in a market's hands comes off sale a day
 // before the drops it was listed for leave it. The health step only notices
 // once they are GONE, and a buyer can pay in between — for an account whose
-// whole worth is those drops. Runs whatever the vault switch says: a unit that
-// is already out there must still come back in time. Database only until a
-// unit is due.
+// whole worth is those drops. The date is the ledger's own (farmGoneAt, read
+// off the claim's live inventory): nobody else's snapshot row has to exist.
+// Runs whatever the vault switch says — a unit that is already out there must
+// still come back in time. Database only until a unit is due, and then ONE
+// take-down a pass, whatever becomes of it: Gameflip's limiter is harsh, and
+// while it is tripped nobody's sales are seen.
 async function autofarmExpiryStep(tally, errors) {
   const vault = await activeVaultRows();
   if (!vault.length) return;
@@ -1821,56 +1845,132 @@ async function autofarmExpiryStep(tally, errors) {
     farm: "autofarm",
     status: "manual",
     manualListing: { $in: [...byId.keys()] },
-  }).lean();
+    farmGoneAt: { $ne: null },
+  })
+    .sort({ farmGoneAt: 1, _id: 1 })
+    .lean();
   if (!ledgers.length) return;
   const afs = require("./autofarmStock");
   const lead = typeof afs.vaultLeadMs === "function" ? Number(await afs.vaultLeadMs()) : NaN;
   const leadMs = Number.isFinite(lead) && lead > 0 ? lead : 24 * 60 * 60 * 1000;
-  const base = await noclaimHoldings.snapshotBase();
-  const sets = new Map();
   const now = Date.now();
   for (const ledger of ledgers) {
-    if (tally.removed >= EXPIRY_MAX_PER_PASS) break;
     const l = lower(ledger.login || ledger.loginLower);
+    const gone = ms(ledger.farmGoneAt);
+    if (!(gone > 0) || gone - now > leadMs) break; // sorted: nothing later is due either
     try {
       if (isUnrecorded(ledger)) continue; // pinned: only a human releases it
       const row = byId.get(String(ledger.manualListing));
       if (!row) continue;
       const unit = undeliveredUnits(row).find((u) => lower(u.login) === l);
       if (!unit) continue; // sold, or not on the row: other steps own it
-      const key = String(row.set);
-      if (!sets.has(key)) sets.set(key, await DropSet.findById(row.set).lean().catch(() => null));
-      const set = sets.get(key);
-      if (!set) continue;
-      const gone = Number(await ncs.coverGoneAt(holdingFromLedger(ledger), base, ncs.requiredFromSet(set)));
-      // 0 = the ledger does not show the bundle, Infinity = no leave time on
-      // record: either way there is nothing to count down, and the health
-      // step's live read stays the judge.
-      if (!(gone > 0) || !Number.isFinite(gone) || gone - now > leadMs) continue;
       tally.due++;
       const reason = "drops leave within " + Math.max(1, Math.round(leadMs / (60 * 60 * 1000))) + " h";
       const r = await removeUnit(row, unit.login, { reason });
-      if (!r.ok) {
-        errors.push("expiry " + unit.login + ": " + (r.error || "removal failed"));
-        continue;
+      if (!r.ok) errors.push("expiry " + unit.login + ": " + (r.error || "removal failed"));
+      if (r.ok && r.removed) {
+        tally.removed++;
+        await releaseIds([ledger._id], reason, { listingGone: !!r.gone });
+        logEvent({
+          category: "noclaim_shop",
+          action: "autofarm_unit_expiring",
+          actor: "noclaimListings",
+          subject: unit.login,
+          game: ledger.game || "",
+          count: 1,
+          detail:
+            "its drops leave " + new Date(gone).toISOString().slice(0, 16).replace("T", " ") + "Z — taken off " +
+            marketLabel(row.marketplace) + " and handed back before a buyer could pay for them",
+        });
       }
-      if (!r.removed) continue; // sold meanwhile, or someone else took it down
-      tally.removed++;
-      await releaseIds([ledger._id], reason);
-      logEvent({
-        category: "noclaim_shop",
-        action: "autofarm_unit_expiring",
-        actor: "noclaimListings",
-        subject: unit.login,
-        game: ledger.game || "",
-        count: 1,
-        detail:
-          "its drops leave " + new Date(gone).toISOString().slice(0, 16).replace("T", " ") + "Z — taken off " +
-          marketLabel(row.marketplace) + " and handed back before a buyer could pay for them",
-      });
     } catch (e) {
       errors.push("expiry " + l + ": " + ((e && e.message) || String(e)));
     }
+    break; // one take-down a pass
+  }
+}
+
+// Step: a HELD auto-farm account whose listing row is no longer on sale but
+// which was not handed back — the market would not confirm the listing gone,
+// or its bot removal was under way when the unit ended. One a pass: ask the
+// market again, finish the take-down if the listing still exists, book the
+// sale if it sold. Until then the account stays held, which is the safe side.
+async function autofarmLimboStep(tally, errors) {
+  const ledgers = await UnclaimedAccount.find({
+    source: "noclaim",
+    farm: "autofarm",
+    status: "manual",
+    manualListing: { $nin: ["", null] },
+  })
+    .sort({ lastCheckedAt: 1, _id: 1 })
+    .limit(20)
+    .lean();
+  if (!ledgers.length) return;
+  for (const ledger of ledgers) {
+    if (isUnrecorded(ledger)) continue;
+    if (ledger.farmParkStartedAt && !ledger.farmParkedAt) continue; // the park pass first
+    const login = ledger.login || ledger.loginLower || "";
+    let row = null;
+    try {
+      row = await MarketplaceListing.findById(ledger.manualListing).lean();
+    } catch (e) {
+      // A listing id that is not one at all reads as "no such row" below; any
+      // other failure proves nothing, and the ledger waits.
+      if (!(e && e.name === "CastError")) {
+        errors.push("limbo " + login + ": its listing row could not be read");
+        continue;
+      }
+    }
+    if (row && row.status === "active") continue; // on sale: the other steps own it
+    try {
+      await UnclaimedAccount.updateOne({ _id: ledger._id, status: "manual" }, { $set: { lastCheckedAt: new Date() } }).catch(() => {});
+      if (!row || row.marketplace !== "gameflip" || !row.externalId) {
+        // Nothing left that says WHICH listing held its login, so nobody can
+        // ask the market about it: never released from here. Pinned, like a
+        // claim whose publish was never recorded, and the owner is told.
+        await markUnrecorded([ledger._id], ledger.market, "(listing row missing)");
+        tally.pinned = (tally.pinned || 0) + 1;
+        logEvent({
+          category: "noclaim_shop",
+          action: "orphan_pinned",
+          actor: "noclaimListings",
+          severity: "error",
+          subject: login,
+          game: ledger.game || "",
+          count: 1,
+          detail:
+            "a held auto-farm account's listing row is missing — check " + marketLabel(ledger.market) +
+            " for a listing carrying this account, delete it, then release it (POST /noclaim-stock/ledgers/" +
+            String(ledger._id) + "/release)",
+        });
+        break;
+      }
+      const st = await gameflipState(row.externalId);
+      if (!st) {
+        errors.push("limbo " + login + ": gameflip status unreadable");
+      } else if (st === "gone") {
+        tally.released += await releaseIds([ledger._id], "its listing is gone", { listingGone: true });
+      } else if (st === "sold") {
+        // A sale nobody booked: the row came down in our books first.
+        await MarketplaceListing.updateOne(
+          { _id: row._id, units: { $elemMatch: { login: { $in: [login, lower(login)] }, deliveredAt: null } } },
+          { $set: { "units.$.deliveredAt": new Date(), "units.$.orderId": "gameflip-sale", status: "sold" } },
+        ).catch(() => {});
+        tally.sold += await markSoldIds([ledger._id], {
+          market: "gameflip",
+          priceUsd: Number(row.price) || 0,
+          reason: "gameflip sale",
+        });
+      } else {
+        // Still there (draft, ready or even on sale) under a row that says it
+        // is down: finish the take-down. The next pass asks again.
+        tally.retried++;
+        await mp.gameflipDelist(row.externalId).catch(() => {});
+      }
+    } catch (e) {
+      errors.push("limbo " + login + ": " + ((e && e.message) || String(e)));
+    }
+    break; // one a pass
   }
 }
 
@@ -2010,6 +2110,7 @@ async function runPass({ sweep = false } = {}) {
     conflicts: { removed: 0, reattached: 0 },
     health: { checked: 0, ok: 0, sold: 0, strikes: 0, expired: 0, failed: 0 },
     expiring: { due: 0, removed: 0 },
+    limbo: { released: 0, sold: 0, retried: 0 },
     toppedUp: 0,
     sweep: null,
     errors: [],
@@ -2101,6 +2202,9 @@ async function runPass({ sweep = false } = {}) {
     // 4b. Auto-farm accounts held for a vault unit come off a day before the
     // drops they were listed for leave them.
     await step("autofarm-expiry", () => autofarmExpiryStep(out.expiring, out.errors));
+    // 4c. …and one that came off a listing but could not be handed back yet
+    // is asked about again.
+    await step("autofarm-limbo", () => autofarmLimboStep(out.limbo, out.errors));
     // 5. Live re-checks of committed vault units.
     const healthBudget = Math.max(0, Math.min(100, Math.floor(Number(cfg.healthPerPass) || 0)));
     await step("health", () => healthStep(healthBudget, out.health, out.errors));
@@ -2194,6 +2298,5 @@ module.exports = {
   // pure, exported for tests
   undeliveredUnits,
   healthStrike,
-  holdingFromLedger,
   writeMaybeLanded,
 };

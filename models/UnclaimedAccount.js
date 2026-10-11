@@ -60,6 +60,18 @@ const unclaimedAccountSchema = new mongoose.Schema(
     // moment it is held — after which a release makes it a stock hold instead.
     farmPoolNote: { type: String, default: "" },
     farmParkedAt: { type: Date, default: null },
+    // When the park pass first touched a held account (its task, its bot
+    // config): from then on it may be in no bot, proved or not, so a release
+    // waits for `farmParkedAt` instead of putting a farming note back.
+    farmParkStartedAt: { type: Date, default: null },
+    // When the park pass last looked at a held account. Its own clock: the
+    // health step moves lastCheckedAt every pass, which would keep a row only
+    // a human can finish from ever being looked at again.
+    farmParkTriedAt: { type: Date, default: null },
+    // When the copies a HELD unit was listed for leave the account — read off
+    // the claim's own live inventory, so the expiry step needs nobody else's
+    // snapshot row to know when the unit must come off sale.
+    farmGoneAt: { type: Date, default: null },
 
     // Snapshot of the unclaimed drops that were listed, for the panel.
     drops: {

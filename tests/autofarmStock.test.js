@@ -204,6 +204,17 @@ function world(o = {}) {
     recordPoolUsage: async (ids, entry) => usage.push({ ids: ids.map(String), ...entry }),
     logEvent: async (e) => events.push(e),
     sendTelegram: async (text) => telegrams.push(text),
+    // What the market says about a listing: a status, or a throw (404 = gone).
+    listingStatus: async (market, externalId) => {
+      const v = typeof o.listingStatus === "function" ? o.listingStatus(market, externalId) : o.listingStatus;
+      if (v instanceof Error) throw v;
+      if (v === undefined) {
+        const e = new Error("Gameflip listing status: not found");
+        e.status = 404;
+        throw e;
+      }
+      return v;
+    },
     removeAccountFromConfig: async (host, file, { clientSecret }) => {
       const users = hostFiles[host.id][file];
       const kept = users.filter((u) => u.ClientSecret !== clientSecret);
@@ -736,14 +747,19 @@ test("a held account needs days of life and comes off a day early — both clamp
   assert.strictEqual(af.vaultMinLifeMs(), 72 * H);
   assert.strictEqual(af.vaultLeadMs(), 24 * H, "the take-off still runs for units already out there");
   autoFarm = { autofarmStockVaultMinLifeHours: 1, autofarmStockVaultLeadHours: 0 };
-  assert.strictEqual(af.vaultMinLifeMs(), 24 * H, "never under a day");
   assert.strictEqual(af.vaultLeadMs(), 1 * H, "never to the last minute");
+  assert.strictEqual(af.vaultMinLifeMs(), 25 * H, "never under a day, and never within a day of the lead");
   autoFarm = { autofarmStockVaultMinLifeHours: 9999, autofarmStockVaultLeadHours: 9999 };
   assert.strictEqual(af.vaultMinLifeMs(), 336 * H);
   assert.strictEqual(af.vaultLeadMs(), 120 * H);
   autoFarm = { autofarmStockVaultMinLifeHours: "96", autofarmStockVaultLeadHours: "36" };
   assert.strictEqual(af.vaultMinLifeMs(), 96 * H);
   assert.strictEqual(af.vaultLeadMs(), 36 * H);
+  // A minimum life at or under the lead would hold an account that is due to
+  // come off on the very next pass — and hold another, and another.
+  autoFarm = { autofarmStockVaultMinLifeHours: 48, autofarmStockVaultLeadHours: 72 };
+  assert.strictEqual(af.vaultLeadMs(), 72 * H);
+  assert.strictEqual(af.vaultMinLifeMs(), 96 * H);
 });
 
 test("parkHeld: an account held for a vault unit leaves its bot — nothing is announced, nothing says spent", async () => {
@@ -760,6 +776,7 @@ test("parkHeld: an account held for a vault unit leaves its bot — nothing is a
   assert.strictEqual(w.bot.configFile, "");
   // The ledger is parked, still a unit on a shelf.
   assert.ok(w.ledger.farmParkedAt instanceof Date);
+  assert.ok(w.ledger.farmParkStartedAt instanceof Date, "the park claimed it before touching anything");
   assert.strictEqual(w.ledger.status, "manual");
   assert.strictEqual(w.ledger.manualSpentAt, null);
   // The pool row still says a sale is pending, and is still ticked listed.
@@ -773,6 +790,79 @@ test("parkHeld: an account held for a vault unit leaves its bot — nothing is a
   assert.strictEqual((await af.parkHeld({ deps: w.deps })).pending, 0);
   // And the sold pass has nothing to do with it either.
   assert.strictEqual((await af.retirePending({ deps: w.deps })).pending, 0);
+});
+
+test("parkHeld: a ledger released or sold since the list was read is not this pass's to stamp", async () => {
+  for (const becomes of ["gone", "sold", "skipped"]) {
+    const w = heldWorld();
+    // The renter-stack read comes after the list read: the unit ends in between.
+    const realFind = w.deps.RenterBotStack.find;
+    w.deps.RenterBotStack.find = (q) => {
+      if (becomes === "gone") w.deps.UnclaimedAccount.docs.splice(0, 1);
+      else w.ledger.status = becomes;
+      return realFind(q);
+    };
+    const drops = JSON.stringify(w.deps.DropLog.docs);
+    const r = await af.parkHeld({ deps: w.deps });
+    assert.strictEqual(r.retired, 0, becomes);
+    assert.strictEqual(r.removed, 0, becomes);
+    assert.deepStrictEqual(r.errors, [], becomes);
+    assert.deepStrictEqual(w.hostFiles.contabo["config_07.json"].map((u) => u.Login), ["Held", "Mate"], "still in its bot");
+    assert.deepStrictEqual(w.deps.AutoFarmTask.docs[0].assignedAccounts, ["Held", "Mate"], "still on its task");
+    assert.strictEqual(JSON.stringify(w.deps.DropLog.docs), drops, "nothing was stamped");
+    assert.strictEqual(w.ledger.farmParkStartedAt, undefined);
+  }
+});
+
+test("parkHeld: a row only a human can finish is looked at again after six hours by its OWN clock — the health check's does not starve it", async () => {
+  const sixHoursAgo = new Date(Date.now() - 7 * 60 * 60 * 1000);
+  // The health step read this account a minute ago (lastCheckedAt), as it does every pass.
+  let w = heldWorld({ farmHuman: "its token is in a renter stack config (contabo|config_07.json)", lastCheckedAt: new Date(), farmParkTriedAt: sixHoursAgo });
+  assert.strictEqual((await af.parkHeld({ deps: w.deps })).pending, 1, "due again by the park's own clock");
+  // Tried an hour ago: not yet.
+  w = heldWorld({ farmHuman: "x", lastCheckedAt: sixHoursAgo, farmParkTriedAt: new Date(Date.now() - 60 * 60 * 1000) });
+  assert.strictEqual((await af.parkHeld({ deps: w.deps })).pending, 0);
+  // Never tried: now.
+  w = heldWorld({ farmHuman: "x", lastCheckedAt: new Date(), farmParkTriedAt: null });
+  assert.strictEqual((await af.parkHeld({ deps: w.deps })).pending, 1);
+  assert.ok(w.ledger.farmParkTriedAt instanceof Date, "and the try is on the park's clock");
+});
+
+test("releaseBlocked: a held account goes back only when the market no longer has its listing, and never mid-park", async () => {
+  const LISTING = "5f0000000000000000000002";
+  const row = { _id: LISTING, marketplace: "gameflip", externalId: "gf-77" };
+  const ask = async (ledgerOver, o = {}, opts = {}) => {
+    const w = heldWorld(ledgerOver, { listings: [row], ...o });
+    return af.releaseBlocked(w.ledger, { deps: w.deps, ...opts });
+  };
+  // Gameflip no longer has it (a deleted listing 404s): free to go back.
+  assert.strictEqual(await ask({}), "");
+  // It still exists — on sale, in draft, or "ready": its login is in there.
+  assert.match(await ask({}, { listingStatus: "onsale" }), /still exists \(onsale\)/);
+  assert.match(await ask({}, { listingStatus: "draft" }), /still exists \(draft\)/);
+  // It SOLD: never stock.
+  assert.match(await ask({}, { listingStatus: "sold" }), /SOLD/);
+  // Gameflip will not say: not known is not gone.
+  assert.match(await ask({}, { listingStatus: new Error("429 Too many attempts") }), /would not say/);
+  // A 404 said in words.
+  assert.strictEqual(await ask({}, { listingStatus: new Error('Gameflip listing status: {"http_status": 404}') }), "");
+  // The caller has just had Gameflip's 404 itself: not asked twice.
+  let asked = 0;
+  assert.strictEqual(await ask({}, { listingStatus: () => { asked++; return "onsale"; } }, { listingGone: true }), "");
+  assert.strictEqual(asked, 0);
+  // Its bot removal is under way: wait for the proof, whatever the listing says.
+  assert.match(await ask({ farmParkStartedAt: new Date() }), /bot removal is still under way/);
+  assert.match(await ask({ farmParkStartedAt: new Date() }, {}, { listingGone: true }), /bot removal is still under way/);
+  assert.strictEqual(await ask({ farmParkStartedAt: new Date(), farmParkedAt: new Date() }), "");
+  // A claim that never reached a listing (its publish failed): nothing to ask about.
+  assert.strictEqual(await ask({ manualListing: "" }, { listingStatus: "onsale" }), "");
+  // The row that named its listing is gone: nobody can ask the market, nobody may assume.
+  assert.match(await ask({}, { listings: [], listingStatus: "onsale" }), /listing row is missing/);
+  // A row that is not a Gameflip listing holds no login there.
+  assert.strictEqual(await ask({}, { listings: [{ _id: LISTING, marketplace: "eldorado", externalId: "e-1" }], listingStatus: "onsale" }), "");
+  // Not an auto-farm ledger: this rule is not asked of it.
+  assert.strictEqual(await af.releaseBlocked({ farm: "", market: "gameflip", manualListing: LISTING }, {}), "");
+  assert.strictEqual(await af.releaseBlocked(null, {}), "");
 });
 
 test("parkHeld: an unreadable host proves nothing — the account is not called parked", async () => {
@@ -799,6 +889,8 @@ test("a held account that then sells is finished by the sold pass: spent, the li
   assert.strictEqual(w.deps.DropLog.docs[0].soldToUsername, "unclaimed-sale:gameflip");
   assert.strictEqual(w.deps.SaleSignal.docs.length, 1);
   assert.strictEqual(w.deps.SaleSignal.docs[0].marketplace, "gameflip");
+  // Gameflip's own sale watcher records the sale; this row must not count it twice.
+  assert.strictEqual(w.deps.SaleSignal.docs[0].source, "drop_reserved");
   assert.strictEqual(w.telegrams.length, 1);
   assert.match(w.telegrams[0], /SOLD \(auto-farm unclaimed stock\)[\s\S]*Market: gameflip — \$0\.95/);
 });

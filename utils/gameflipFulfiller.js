@@ -109,8 +109,11 @@ async function codeLoginsOfShareRows(shareRows) {
 }
 
 // Logins whose code a Gameflip listing of ours still holds. A failed read holds
-// nothing back: the claim then behaves exactly as it did before this check.
-async function gameflipCodeHeldLogins() {
+// nothing back: the claim then behaves exactly as it did before this check —
+// unless the caller asks `strict`, for which a failed read THROWS (a caller
+// about to put an auto-farm account's login on Gameflip under a differently
+// worded code: for it, "not known" must be "no").
+async function gameflipCodeHeldLogins({ strict = false } = {}) {
   const held = new Set();
   const now = Date.now();
   for (const [l, at] of codeRefusedAt) {
@@ -131,6 +134,7 @@ async function gameflipCodeHeldLogins() {
     for (const l of await codeLoginsOfShareRows(shareRows)) held.add(l);
   } catch (e) {
     console.error("gameflip: sold-listing read for the code check failed:", e.message);
+    if (strict) throw e;
   }
   return held;
 }
@@ -985,6 +989,19 @@ let renewalStuckAlertAt = 0;
 async function noteRelistFailure(row, err) {
   const attempts = (Number(row.relistAttempts) || 0) + 1;
   const message = (err && err.message) || String(err);
+  // The publish kept an auto-farm account HELD (the listing it built could not
+  // be confirmed deleted), or went live without a row. Trying again would put
+  // ANOTHER account out there next to a listing nobody is tracking — three in
+  // half an hour at this lane's pace. The chain stops here and owes nothing;
+  // the publish itself has told the owner.
+  if (message.includes(HELD_MARK) || /row could not be saved/i.test(message)) {
+    await MarketplaceListing.updateOne(
+      { _id: row._id },
+      { $set: { lastError: ("auto-relist stopped: " + message).slice(0, 400), qtyRemaining: 0, relistRetryAt: null } },
+    ).catch(() => {});
+    console.error("gameflip relist STOPPED for " + (row.externalId || row._id) + ":", message);
+    return;
+  }
   await MarketplaceListing.updateOne(
     { _id: row._id },
     {

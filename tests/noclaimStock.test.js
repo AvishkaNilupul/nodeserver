@@ -230,6 +230,7 @@ function resetState() {
     gone: new Map(), // campaign name -> ms its copies leave (the expiry rules)
     gfHeld: new Set(), // logins Gameflip already holds a code for
     gfHeldError: null,
+    afReleaseBlocked: new Map(), // loginLower -> why a held account may not go back yet
   });
 }
 resetState();
@@ -357,6 +358,13 @@ const autofarmStub = {
   vaultMinLifeMs() {
     return state.afMinLifeMs;
   },
+  async releaseBlocked(ledger, opts) {
+    state.afCalls.push(["release-check", ledger.loginLower, { ...(opts || {}) }]);
+    const v = state.afReleaseBlocked.get(ledger.loginLower);
+    if (typeof v === "function") return v(ledger);
+    if (v instanceof Error) throw v;
+    return v || "";
+  },
   async releaseHeld(ledger) {
     state.afCalls.push(["release-held", ledger.loginLower, ledger.farmPoolNote]);
     return true;
@@ -446,12 +454,19 @@ const SET = {
 };
 
 // Folded items -> the raw inventory's one-entry-per-copy sellable list.
+// What Twitch shows for these items: one entry per copy, each with the
+// campaign it came from (an item's own waves when it has them).
 function sellableOf(items) {
   const out = [];
   for (const it of items || []) {
-    for (let i = 0; i < (it.qty || 1); i++) {
-      out.push({ name: it.name, game: it.game, campaign: "Spring", imageURL: "", itemKey: it.itemKey });
+    const waves = Array.isArray(it.waves) && it.waves.length ? it.waves : [{ campaign: "Spring", qty: it.qty || 1 }];
+    let left = it.qty || 1;
+    for (const w of waves) {
+      for (let i = 0; i < (w.qty || 1) && left > 0; i++, left--) {
+        out.push({ name: it.name, game: it.game, campaign: w.campaign, imageURL: "", itemKey: it.itemKey });
+      }
     }
+    for (; left > 0; left--) out.push({ name: it.name, game: it.game, campaign: "Spring", imageURL: "", itemKey: it.itemKey });
   }
   return out;
 }
@@ -1522,6 +1537,9 @@ test("auto-farm: with its vault switch on, a fed claim HOLDS one for Gameflip �
   assert.strictEqual(af.market, "gameflip");
   assert.strictEqual(af.farmPoolNote, "auto-farm: Overwatch 2 (c-1)", "what a release puts back");
   assert.strictEqual(af.farmParkedAt, null);
+  assert.strictEqual(af.farmParkStartedAt, null);
+  // The date the unit must come off sale by, read off the claim's own live copies.
+  assert.strictEqual(new Date(af.farmGoneAt).getTime(), state.gone.get("Spring Cup"));
   assert.strictEqual(af.manualDeliveredAt, null);
   // The same rules as a sale, then the same stamps — with no order to name.
   const calls = state.afCalls.filter((c) => c[1] === "farmer" || c[0] === "live");
@@ -1588,12 +1606,48 @@ test("auto-farm: an account is only HELD while its copies have days left — and
   out = await hold();
   assert.deepStrictEqual(out.map((a) => a.login), ["ok"]);
 
+  // The snapshot is an hour old and says the copies last; Twitch's own answer, read by
+  // the claim, says they came from a campaign that is nearly gone. The live read decides.
+  resetAll();
+  state.afVault.add("gameflip");
+  state.gone.set("Spring Cup", Date.now() + 9 * DAY);
+  state.gone.set("Last Week", Date.now() + 1 * DAY);
+  world([
+    {
+      login: "stale",
+      items: [waved(ALPHA(2), "Spring Cup"), waved(BETA(1), "Spring Cup")],
+      farm: "autofarm",
+      live: { sellable: sellableOf([waved(ALPHA(2), "Last Week"), waved(BETA(1), "Spring Cup")]), login: "stale" },
+    },
+  ]);
+  out = await hold();
+  assert.deepStrictEqual(out, []);
+  assert.strictEqual(out.missed["drops leave too soon to hold"], 1);
+  assert.strictEqual(ledgerFor("stale").length, 0, "nothing was committed");
+
   // A PAID order is not asked how long the drops last: it takes what the account holds now.
   resetAll();
   state.gone.set("Spring Cup", Date.now() + 2 * DAY);
   world([{ login: "soon", items: [waved(ALPHA(2), "Spring Cup"), waved(BETA(1), "Spring Cup")], farm: "autofarm" }]);
   out = await ncs.claimForSet(SET, 1, AF_ORDER);
   assert.deepStrictEqual(out.map((a) => a.login), ["soon"]);
+  assert.strictEqual(ledgerFor("soon")[0].farmGoneAt, null, "only a held unit has a date to come off by");
+});
+
+test("wavesOfDrops: a claim's live copies as items with their waves", () => {
+  assert.deepStrictEqual(
+    ncs.wavesOfDrops([
+      { name: "Coin", game: "G", campaign: "Old", itemKey: "coin|g" },
+      { name: "Coin", game: "G", campaign: "New", itemKey: "coin|g" },
+      { name: "Coin", game: "G", campaign: "New", itemKey: "coin|g" },
+      { name: "Skin", game: "G", campaign: "", itemKey: "skin|g" },
+    ]),
+    [
+      { itemKey: "coin|g", name: "Coin", game: "G", qty: 3, waves: [{ campaign: "Old", qty: 1 }, { campaign: "New", qty: 2 }] },
+      { itemKey: "skin|g", name: "Skin", game: "G", qty: 1, waves: [{ campaign: "", qty: 1 }] },
+    ],
+  );
+  assert.deepStrictEqual(ncs.wavesOfDrops(null), []);
 });
 
 test("auto-farm: an account Gameflip already holds a code for is never held for Gameflip; an unreadable guard holds nobody", async () => {
@@ -1674,9 +1728,13 @@ test("auto-farm: a held unit that ends without a sale hands the account back —
   assert.strictEqual(n, 2);
   assert.strictEqual(ledgerFor("farmer").length, 0);
   assert.strictEqual(ledgerFor("bot").length, 0);
-  // Only the auto-farm ledger goes back through its own module, with what it
-  // needs to restore the pool row — read before the ledger was deleted.
-  assert.deepStrictEqual(state.afCalls, [["release-held", "farmer", "auto-farm: Overwatch 2 (c-1)"]]);
+  // Only the auto-farm ledger goes back through its own module — asked first
+  // whether it MAY go back, then with what it needs to restore the pool row
+  // (read before the ledger was deleted).
+  assert.deepStrictEqual(state.afCalls, [
+    ["release-check", "farmer", { listingGone: false }],
+    ["release-held", "farmer", "auto-farm: Overwatch 2 (c-1)"],
+  ]);
   // A ledger that was not released (sold meanwhile) is not handed back.
   const sold = ledgerDoc({ login: "gone", loginLower: "gone", farm: "autofarm", status: "sold", manualPriorStatus: "" });
   state.afCalls.length = 0;
@@ -1722,4 +1780,49 @@ test("spendPending never spends an auto-farm ledger — spendAccount cannot see 
   assert.strictEqual(await ncs.spendPending({ limit: 10 }), 1);
   assert.deepStrictEqual(state.spent.map((x) => x.id), [String(nc._id)]);
   assert.strictEqual(af.manualSpentAt, null, "left for autofarmStock.retirePending");
+});
+
+test("auto-farm: a held account whose listing may still exist is NOT released, whoever asks — and a proof is passed on", async () => {
+  const mk = () => ledgerDoc({ login: "farmer", loginLower: "farmer", farm: "autofarm", market: "gameflip", manualPriorStatus: "", manualListing: LISTING_ID, poolAccountId: "p1", farmPoolNote: "n" });
+  const { error } = console;
+  console.error = () => {};
+  try {
+    // The market still has its listing.
+    let held = mk();
+    state.afReleaseBlocked.set("farmer", "its Gameflip listing still exists (onsale)");
+    assert.strictEqual(await ncs.releaseClaim([held._id], { reason: "listing delisted" }), 0);
+    assert.strictEqual(ledgerFor("farmer")[0].status, "manual", "still held");
+    assert.ok(!state.afCalls.some((c) => c[0] === "release-held"));
+
+    // The check itself failing is not a yes.
+    state.afReleaseBlocked.set("farmer", new Error("mongo blip"));
+    assert.strictEqual(await ncs.releaseClaim([held._id]), 0);
+    assert.strictEqual(ledgerFor("farmer").length, 1);
+
+    // The caller has Gameflip's own 404 in hand: said once, passed on.
+    state.afReleaseBlocked.clear();
+    state.afCalls.length = 0;
+    assert.strictEqual(await ncs.releaseClaim([held._id], { reason: "drops leave soon", listingGone: true }), 1);
+    assert.deepStrictEqual(state.afCalls[0], ["release-check", "farmer", { listingGone: true }]);
+    assert.strictEqual(ledgerFor("farmer").length, 0);
+
+    // The park pass claimed the account between the read and the write: the release loses.
+    resetAll();
+    held = mk();
+    state.afReleaseBlocked.set("farmer", (l) => {
+      Unclaimed.docs.find((d) => String(d._id) === String(l._id)).farmParkStartedAt = new Date();
+      return "";
+    });
+    assert.strictEqual(await ncs.releaseClaim([held._id]), 0);
+    assert.strictEqual(ledgerFor("farmer")[0].status, "manual");
+    assert.ok(!state.afCalls.some((c) => c[0] === "release-held"), "nothing was handed back");
+
+    // A no-claim bot's account is never asked.
+    resetAll();
+    const fleet = ledgerDoc({ login: "bot", loginLower: "bot", manualPriorStatus: "", manualListing: LISTING_ID, poolAccountId: "p2" });
+    assert.strictEqual(await ncs.releaseClaim([fleet._id]), 1);
+    assert.deepStrictEqual(state.afCalls, []);
+  } finally {
+    console.error = error;
+  }
 });

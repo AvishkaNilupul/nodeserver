@@ -1084,14 +1084,19 @@ async function planCopies({ deps, now = Date.now() } = {}) {
   //   held chain — none while one is on sale, and a new one only when the
   //                last listing of the set SOLD (a chain that sold through is
   //                demand; one that came down unsold is not asked twice).
-  const past = new Map(); // set id + "|" + market -> { active, lastStatus, lastAt }
+  const past = new Map(); // set id + "|" + market -> { active, stopped, lastStatus, lastAt }
   for (const r of (await d.MarketplaceListing.find(
     { marketplace: { $in: c.copyMarkets }, noclaimStock: true, set: { $in: setIds } },
-    { set: 1, marketplace: 1, status: 1, createdAt: 1 },
+    { set: 1, marketplace: 1, status: 1, createdAt: 1, qtyRemaining: 1, lastError: 1 },
   ).lean()) || []) {
     const k = str(r.set) + "|" + r.marketplace;
-    const cur = past.get(k) || { active: false, lastStatus: "", lastAt: -Infinity };
-    if (r.status === "active") cur.active = true;
+    const cur = past.get(k) || { active: false, stopped: false, lastStatus: "", lastAt: -Infinity };
+    // On sale — or sold with units still owed: its relist is pending, and the
+    // chain is not over until that has had its turn.
+    if (r.status === "active" || (r.status === "sold" && Number(r.qtyRemaining) > 0)) cur.active = true;
+    // A chain its own relist lane stopped (an account kept held, a listing
+    // live without a row): something of it may still be out there.
+    if (/^auto-relist stopped:/.test(str(r.lastError))) cur.stopped = true;
     const at = msOf(r.createdAt);
     if (!(at < cur.lastAt)) {
       cur.lastAt = Number.isFinite(at) ? at : cur.lastAt;
@@ -1103,7 +1108,7 @@ async function planCopies({ deps, now = Date.now() } = {}) {
     const p = past.get(id + "|" + market);
     if (!p) return false;
     if (COPY_KIND[market] !== "vault") return true;
-    return p.active || p.lastStatus !== "sold";
+    return p.active || p.stopped || p.lastStatus !== "sold";
   };
   const fields = { name: 1, note: 1, price: 1, items: 1, coverGame: 1, stockSource: 1, createdAt: 1 };
   const byId = new Map();

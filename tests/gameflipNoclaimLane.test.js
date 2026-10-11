@@ -265,3 +265,39 @@ test("a listing that is live but whose row could not be saved says so in the wor
   assert.deepStrictEqual(w.released, [], "Gameflip has its login: the account is not handed back");
   assert.strictEqual(w.published.length, 1);
 });
+
+test("a relist that kept an account held, or went live without a row, STOPS its chain — it is not retried with another account", async () => {
+  const mk = () => {
+    const w = makeWorld({});
+    w.updates = [];
+    w.Listing.updateOne = (q, u) => {
+      w.updates.push({ q, u });
+      return Promise.resolve({ modifiedCount: 1 });
+    };
+    w.Listing.countDocuments = () => Promise.resolve(0);
+    return w;
+  };
+  const row = { _id: "row-9", externalId: "gf-9", title: "T", qtyRemaining: 3, relistAttempts: 0 };
+  for (const message of [
+    "Gameflip created 4f1b-aaaa but could not put it on sale (draft discarded): x [account kept held]",
+    "published on Gameflip but the row could not be saved — delist it by hand: gf-10 (E11000)",
+  ]) {
+    const w = mk();
+    await withLane(w, (g) => g.noteRelistFailure(row, new Error(message)));
+    assert.strictEqual(w.updates.length, 1, message);
+    const set = w.updates[0].u.$set;
+    assert.strictEqual(set.qtyRemaining, 0, "the chain owes nothing more");
+    assert.strictEqual(set.relistRetryAt, null, "and has no next try");
+    assert.match(set.lastError, /^auto-relist stopped: /);
+    assert.ok(!("relistAttempts" in set));
+    assert.strictEqual(w.telegrams.length, 0, "the publish itself told the owner");
+  }
+  // Any other failure keeps the lane's own backoff.
+  const w = mk();
+  await withLane(w, (g) => g.noteRelistFailure(row, new Error("Gameflip create: Too many attempts - Retry later")));
+  const set = w.updates[0].u.$set;
+  assert.strictEqual(set.relistAttempts, 1);
+  assert.ok(set.relistRetryAt instanceof Date);
+  assert.match(set.lastError, /^auto-relist failed: /);
+  assert.ok(!("qtyRemaining" in set));
+});
