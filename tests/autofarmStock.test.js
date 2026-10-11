@@ -914,6 +914,16 @@ test("releaseBlocked: a held account goes back only when the market no longer ha
   for (const other of ["", "its Gameflip listing still exists (onsale)", "its Gameflip listing SOLD", "its bot removal is still under way", "Gameflip would not say whether its listing is gone"]) {
     assert.strictEqual(af.releaseNeedsOwner(other), false, other);
   }
+  // Ticked sold by hand while it was held: somebody owns it. Never back to
+  // stock — not on Gameflip's 404, not on the caller's own word, not by hand.
+  const ticked = async (opts) => {
+    const w = heldWorld({}, { listings: [row] });
+    w.pool.manualSold = true;
+    return af.releaseBlocked(w.ledger, { deps: w.deps, ...opts });
+  };
+  assert.match(await ticked({}), /ticked sold by hand/);
+  assert.match(await ticked({ listingGone: true }), /ticked sold by hand/);
+  assert.strictEqual(af.releaseNeedsOwner(await ticked({})), false, "confirming the listing gone does not lift it either");
   // A row that is not a Gameflip listing holds no login there.
   assert.strictEqual(await ask({}, { listings: [{ _id: LISTING, marketplace: "eldorado", externalId: "e-1" }], listingStatus: "onsale" }), "");
   // Not an auto-farm ledger: this rule is not asked of it.

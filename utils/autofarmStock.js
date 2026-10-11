@@ -711,6 +711,7 @@ async function releaseForPool(pool, { market = "", orderId = "", deps } = {}) {
 // market, can lift them (releaseNeedsOwner; the hand-release route).
 const HELD_NO_ROW = "it is attached to no listing row";
 const HELD_ROW_MISSING = "its listing row is missing";
+const HELD_HAND_SOLD = "it is ticked sold by hand — booked as that sale, never handed back";
 function releaseNeedsOwner(reason) {
   return reason === HELD_NO_ROW || reason === HELD_ROW_MISSING;
 }
@@ -726,6 +727,7 @@ function releaseNeedsOwner(reason) {
 //     after the listing went to draft — so "we took it down" is not "it is
 //     gone"; only Gameflip no longer having it is (a 404; a SOLD listing
 //     stays readable for good).
+//   - the owner ticked it sold by hand: it is somebody's, not stock;
 //   - it is attached to no listing row at all (a publish that never recorded
 //     one, an attach that failed): nobody can say which listing, if any,
 //     carries its login, so nobody may assume there is none.
@@ -736,10 +738,23 @@ function releaseNeedsOwner(reason) {
 async function releaseBlocked(ledger, { deps, listingGone = false } = {}) {
   if (!ledger || ledger.farm !== FARM) return "";
   if (ledger.farmParkStartedAt && !ledger.farmParkedAt) return "its bot removal is still under way";
+  const d = deps || defaultDeps();
+  // Ticked sold by hand while it was held: somebody owns it. It never goes
+  // back to stock, whatever became of its listing — the pass's manual-sold
+  // step books that sale once the listing is gone (and with it the clean-up
+  // that takes the account out of its bot). Asked before `listingGone`: a
+  // listing that is gone makes a held account stock, not a sold one.
+  if (ledger.poolAccountId) {
+    try {
+      const pool = await d.AvailableAccount.findById(ledger.poolAccountId, { manualSold: 1 }).lean();
+      if (pool && pool.manualSold === true) return HELD_HAND_SOLD;
+    } catch {
+      return "its pool row could not be read";
+    }
+  }
   if (listingGone) return "";
   if (lower(ledger.market) !== "gameflip") return "";
   if (!/^[0-9a-f]{24}$/i.test(str(ledger.manualListing))) return HELD_NO_ROW;
-  const d = deps || defaultDeps();
   let row = null;
   try {
     row = await d.MarketplaceListing.findById(ledger.manualListing, { externalId: 1, marketplace: 1 }).lean();

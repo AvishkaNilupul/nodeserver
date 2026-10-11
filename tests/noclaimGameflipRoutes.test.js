@@ -382,6 +382,29 @@ test("hand release: an account whose bot removal is under way waits — whatever
   assert.equal((await ledgerNow(u)).status, "manual");
 });
 
+test("hand release / Delist: an account ticked sold by hand is never handed back — not even with its listing gone", async () => {
+  // By hand: Gameflip has no such listing any more, and the owner even confirms it.
+  let u = await unit({ farm: "autofarm", rowStatus: "delisted" });
+  gameflip.delete(u.ext);
+  await AvailableAccount.updateOne({ _id: u.pool._id }, { $set: { manualSold: true } });
+  let r = await release(u.ledger, { confirmGone: true });
+  assert.equal(r.status, 409);
+  assert.match(r.body.message, /Not released — it is ticked sold by hand/);
+  assert.equal(r.body.needsConfirm, false);
+  assert.equal((await ledgerNow(u)).status, "manual", "it stays held until the pass books the hand sale");
+  assert.equal((await poolNow(u)).claimedNote, "unclaimed sale pending — gameflip");
+
+  // The Delist button on its live listing: the listing comes down, the account does not come back.
+  u = await unit({ farm: "autofarm" });
+  await AvailableAccount.updateOne({ _id: u.pool._id }, { $set: { manualSold: true } });
+  r = await delist(u.row);
+  assert.equal(r.body.success, true, JSON.stringify(r.body));
+  assert.deepEqual(r.body.noclaim, { released: 0, sold: 0 });
+  assert.equal((await rowNow(u)).status, "delisted");
+  assert.equal((await ledgerNow(u)).status, "manual");
+  assert.equal((await poolNow(u)).claimedNote, "unclaimed sale pending — gameflip");
+});
+
 test("hand release: still refused while any live listing carries the login", async () => {
   const u = await unit({ farm: "autofarm" }); // row active
   const r = await release(u.ledger, { confirmGone: true });
