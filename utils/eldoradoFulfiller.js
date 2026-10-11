@@ -12,6 +12,7 @@
 // accounts are tracked as `units` on the MarketplaceListing row, and each unit
 // is stamped with the order that consumed it — which is what makes delivering
 // the same order twice impossible.
+const crypto = require("crypto");
 const MarketplaceListing = require("../models/MarketplaceListing");
 const BotAccount = require("../models/BotAccount");
 const { availableAccountsForSet } = require("../routes/shopRoutes");
@@ -300,9 +301,206 @@ async function restockListing(listing, set, want) {
   return claimed.length;
 }
 
+// LONG ACCOUNT-LISTING DELIVERIES: one chat message per unit.
+//
+// An account listing renders its offer's whole deliveryTemplate once per unit,
+// and the lot used to go out as ONE message that grows with every unit bought.
+// The chat (TalkJS) has a ceiling nobody documents: a 14,952-character delivery
+// was refused with HTTP 400 on 2026-09-15 and that order sat paid and
+// undelivered for hours. The largest message it has accepted from us is about
+// 2,400 characters (a 16-account order) and its own editor stops at 10,000. On
+// 2026-10-11 a whole shelf of the two code bundles on sale measured 4,638 and
+// 7,186 characters, with about 55 more per unit for every code they gain.
+//
+// So a multi-unit order whose single message would be longer than this goes out
+// as one message per unit, each under the "=== ACCOUNT i of N ===" header the
+// single message already uses. An order at or under it — and every one-unit
+// order, whatever its length — is sent exactly as it always was.
+//
+// The figure is deliberately UNDER the largest message the chat has taken, not
+// between that and the editor's limit: a single message of a size nobody has
+// seen delivered may fail the way 09-15 did, silently, while a split one is
+// made of messages no longer than one unit each. Splitting sooner costs nothing.
+//
+// Live setting, no restart: autoFarm.eldoradoLongDeliveryChars. Unset is this
+// default; a whole number from 1 to ELD_LONG_DELIVERY_MAX is the new limit; 0
+// (or false) sends every order as one message again. An order that has already
+// started going out per unit finishes per unit whatever the setting says by
+// then (see unitMessagesFor).
+const ELD_LONG_DELIVERY_CHARS = 2000;
+// Nothing above the chat editor's own limit can be the right setting: 14,952
+// is known to be refused. A larger value is read as this.
+const ELD_LONG_DELIVERY_MAX = 10000;
+
+// Pause between two unit messages, so one buyer's chat never takes a burst.
+const ELD_UNIT_MESSAGE_GAP_MS = 400;
+
+// A long delivery that has made no progress for this many attempts in a row
+// pages the operator ("long delivery stuck" is in ALERT_REASONS). Short of it a
+// failed send is a blip the next 60-second tick is expected to get past.
+const ELD_LONG_DELIVERY_STUCK_AFTER = 3;
+
+// How long one attempt waits, once, for the ledger stamps of the units it sent
+// (see deliverOrder). They are bookkeeping about units the buyer already holds:
+// a ledger write that hangs must not hold up a paid order.
+const ELD_UNIT_STAMP_WAIT_MS = 5000;
+
+function longDeliveryChars() {
+  const raw = (getAutoFarm() || {}).eldoradoLongDeliveryChars;
+  // Off is said on purpose, in exactly these three ways.
+  if (raw === 0 || raw === false || raw === "0") return 0;
+  const n =
+    typeof raw === "number"
+      ? raw
+      : typeof raw === "string" && /^\d+$/.test(raw.trim())
+        ? Number(raw.trim())
+        : NaN;
+  // Anything else that is not a number of at least 1 — a blank, a fraction, a
+  // word, a list — is the default, never "off": off is the unsafe side.
+  if (!Number.isFinite(n) || n < 1) return ELD_LONG_DELIVERY_CHARS;
+  return Math.min(ELD_LONG_DELIVERY_MAX, Math.floor(n));
+}
+
+// What this process has seen the chat ACCEPT of a long delivery that is still
+// under way: orderId -> { sent: Set(sha1 of the message), stalled }.
+//
+// A long delivery that stops half way starts again from the top on the next
+// tick: the claim resumes the same units, so the same messages are rebuilt.
+// Each carries the idempotencyKey eldoradoSendOrderMessage derives from the
+// order id and a hash of the body, and TalkJS's REST documentation says only
+// the first message with a key is processed, for 24 hours. But the send goes to
+// the chat widget's own endpoint, where that is inferred, not documented — a
+// repeated key comes back 2xx there, which is all we have ever observed. So
+// within one process a message the chat accepted is simply not posted again,
+// whatever the key does. It is left to the key only when this memory is gone —
+// a restart, or the bound below — and then each accepted message is posted once
+// more. A message whose TEXT changed (the owner edited the offer or a row) is a
+// new message to the chat and to us, and is posted again under its new key.
+//
+// `stalled` counts the attempts in a row that got no new message accepted.
+//
+// Bounded, because an order that never finishes here (cancelled, or completed
+// by hand) would otherwise stay until the next restart; the oldest goes first.
+const longDeliveryProgress = new Map();
+const LONG_DELIVERY_PROGRESS_MAX = 200;
+
+// Trimmed first, as eldoradoSendOrderMessage trims before it hashes the body
+// for its key: the two must call the same text the same message.
+function messageDigest(text) {
+  return crypto.createHash("sha1").update(String(text || "").trim()).digest("hex");
+}
+
+// The unit messages of a long delivery, or null for an order that goes out as
+// the single message it always did.
+//
+// The units are put in ledger-id order first. A unit message carries its place
+// ("ACCOUNT 3 of 8"), so a retry has to number the same units the same way, or
+// the chat takes the renumbered ones for new messages and the buyer gets them
+// twice. suppliedStock.claimForListing hands a first claim back in
+// (createdAt, _id) order and a resumed one in (soldAt, _id) order; the two
+// differ whenever a row with a later id carries an earlier createdAt. The
+// ledger id never moves.
+//
+// An order this process has already started sending per unit stays per unit,
+// whatever the limit or the text has become since: going back to one message
+// would put the units the buyer already holds in front of them again, on the
+// path that neither counts its failures nor pages.
+function unitMessagesFor(orderId, picked, blocks, message) {
+  const total = blocks.length;
+  if (total < 2) return null;
+  if (!longDeliveryProgress.has(orderId)) {
+    const limit = longDeliveryChars();
+    if (!limit || String(message || "").length <= limit) return null;
+  }
+  const units = picked
+    .map((p, i) => ({ id: String(p.ledgerId || ""), login: p.login, block: blocks[i] }))
+    .sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+  return {
+    ledgerIds: units.map((u) => u.id),
+    logins: units.map((u) => u.login),
+    blank: units.findIndex((u) => !String(u.block || "").trim()),
+    messages: units.map(
+      (u, i) => "=== ACCOUNT " + (i + 1) + " of " + total + " ===\n\n" + u.block,
+    ),
+  };
+}
+
+// Post the unit messages in order, leaving out what this process has already
+// seen the chat accept. `onAccepted(i)` is called, and not waited for, as each
+// message lands. Returns { posted } once every message is in the buyer's chat,
+// or { error } saying where it stopped. On an error, returned or thrown, the
+// caller marks the ORDER as nothing: the units stay claimed under the order id,
+// and the next tick carries on from the first message not known to be there.
+async function sendUnitMessages(order, messages, gapMs, onAccepted) {
+  const orderId = String(order.id || "");
+  let progress = longDeliveryProgress.get(orderId);
+  if (!progress) {
+    if (longDeliveryProgress.size >= LONG_DELIVERY_PROGRESS_MAX) {
+      longDeliveryProgress.delete(longDeliveryProgress.keys().next().value);
+    }
+    progress = { sent: new Set(), stalled: 0 };
+    longDeliveryProgress.set(orderId, progress);
+  }
+  let posted = 0;
+  for (let i = 0; i < messages.length; i++) {
+    const digest = messageDigest(messages[i]);
+    if (progress.sent.has(digest)) continue;
+    if (posted && gapMs > 0) await new Promise((r) => setTimeout(r, gapMs));
+    try {
+      await mp.eldoradoSendOrderMessage(order, messages[i]);
+    } catch (e) {
+      // A chat Eldorado has not minted yet is "not deliverable YET", not a
+      // failure: it appears when the buyer first opens the order, and the next
+      // tick after that delivers. Thrown on exactly as a single message throws
+      // it — counted nowhere, paged by nothing.
+      if (!order.talkJsConversationId) {
+        if (!progress.sent.size) longDeliveryProgress.delete(orderId);
+        throw e;
+      }
+      progress.stalled = posted ? 0 : progress.stalled + 1;
+      // What THIS process saw accepted of the messages as they read now. The
+      // buyer may hold more than it knows of (sent before a restart, or under
+      // a text since edited), never less — hence "at least".
+      const known = messages.filter((m) => progress.sent.has(messageDigest(m))).length;
+      const stuck = progress.stalled >= ELD_LONG_DELIVERY_STUCK_AFTER;
+      return {
+        error:
+          (stuck ? "long delivery stuck" : "long delivery interrupted") +
+          " at message " + (i + 1) + " of " + messages.length + " (" +
+          (known
+            ? "at least " + known + " of " + messages.length + " are in the buyer's chat"
+            : "this process has not seen any of them accepted") +
+          (stuck ? "; " + progress.stalled + " attempts in a row got no further" : "") +
+          "): " + e.message +
+          " — the order is not marked delivered, the next tick tries again",
+      };
+    }
+    progress.sent.add(digest);
+    posted += 1;
+    if (onAccepted) onAccepted(i);
+  }
+  return { posted };
+}
+
+// Wait for `promises` to settle, but no longer than `ms`. The timer is a wait
+// in the middle of a delivery, so unlike this file's background ticks it is
+// NOT unref'd: a process with nothing else pending must stay up for it.
+function settledWithin(promises, ms) {
+  if (!promises.length) return Promise.resolve();
+  let timer;
+  return Promise.race([
+    Promise.all(promises),
+    new Promise((resolve) => {
+      timer = setTimeout(resolve, ms);
+    }),
+  ]).finally(() => clearTimeout(timer));
+}
+
 // Deliver one paid order. Returns a short result describing what happened so
-// the tick can log it without re-deriving anything.
-async function deliverOrder(order, { dryRun }) {
+// the tick can log it without re-deriving anything. `unitGapMs` is the pause
+// between the unit messages of a long account-listing delivery; only a test
+// passes it.
+async function deliverOrder(order, { dryRun, unitGapMs }) {
   const orderId = String(order.id || "");
   const offerId = String(order.offerId || "");
   const qty = Math.max(1, parseInt(order.purchaseQuantity, 10) || 1);
@@ -393,7 +591,39 @@ async function deliverOrder(order, { dryRun }) {
       // empty render is the same failure with nothing at all in it.
       return { orderId, error: "delivery text rendered empty for this offer" };
     }
+
+    // A long multi-unit delivery goes out as one message per unit (see
+    // ELD_LONG_DELIVERY_CHARS). `perUnit` is null for every other order, which
+    // is then sent, marked and recorded exactly as before this existed.
+    const perUnit = unitMessagesFor(orderId, picked, blocks, message);
+    if (perUnit && perUnit.blank >= 0) {
+      // In the single message a unit that rendered empty hides behind the other
+      // units. Here it would be a message holding nothing but its header: the
+      // empty render above, one unit at a time. Refused before this attempt
+      // sends anything.
+      return {
+        orderId,
+        error:
+          "delivery text rendered empty for unit " + (perUnit.blank + 1) + " of " +
+          qty + " on this offer — this attempt sent nothing",
+      };
+    }
     if (dryRun) {
+      if (perUnit) {
+        return {
+          orderId,
+          dryRun: true,
+          source: "offer:" + offer.title,
+          wouldSend:
+            qty + " account(s) [" + perUnit.logins.join(", ") + "], " +
+            message.length + " chars as " + perUnit.messages.length +
+            " messages, one per unit (longest " +
+            Math.max(...perUnit.messages.map((m) => m.length)) + " chars)",
+          preview: perUnit.messages.join("\n\n"),
+          // Lengths only: a caller that must not print the text can print these.
+          messages: perUnit.messages.map((m) => m.length),
+        };
+      }
       return {
         orderId,
         dryRun: true,
@@ -408,9 +638,52 @@ async function deliverOrder(order, { dryRun }) {
     // Send, mark the order, then burn the ledger. A send that throws leaves the
     // rows claimed under this order id and the resume inside claimForListing
     // hands the SAME accounts back next tick instead of spending more stock —
-    // the e69b19d3 lesson, designed in from the start here.
-    await mp.eldoradoSendOrderMessage(order, message);
+    // the e69b19d3 lesson, designed in from the start here. A long delivery
+    // keeps that order: every unit message first, and only then the two below.
+    if (perUnit) {
+      // The buyer holds a unit from the moment its message lands, whatever
+      // becomes of the rest of the order, so its ledger row says so at once.
+      // deliveredAt is the ledger's hard stop against a row ever going back on
+      // the shelf (suppliedStock.releaseClaim), and the durable record of which
+      // units of a half-sent order are already out. That record is a floor: a
+      // unit whose stamp failed, or that was sent by hand, is out without one.
+      // It does not move the row out of the resume, which reads by order id
+      // and status. Best-effort and never waited for between two messages: the
+      // order is still marked, and its sale recorded, by the lines below and
+      // nowhere else.
+      const stamps = [];
+      let sent;
+      try {
+        sent = await sendUnitMessages(
+          order,
+          perUnit.messages,
+          unitGapMs == null ? ELD_UNIT_MESSAGE_GAP_MS : unitGapMs,
+          (i) => {
+            stamps.push(
+              supplied
+                .markDelivered([perUnit.ledgerIds[i]], { orderId, market: "eldorado" })
+                .catch((e) =>
+                  console.error("eldorado long delivery unit stamp:", e.message),
+                ),
+            );
+          },
+        );
+      } finally {
+        await settledWithin(stamps, ELD_UNIT_STAMP_WAIT_MS);
+      }
+      if (sent.error) return { orderId, error: sent.error };
+      console.log(
+        "eldorado long delivery " + orderId + ": " + message.length +
+          " chars sent as " + perUnit.messages.length + " messages (" +
+          sent.posted + " posted now)",
+      );
+    } else {
+      await mp.eldoradoSendOrderMessage(order, message);
+    }
     await mp.eldoradoMarkDelivered(orderId);
+    // Whatever this process remembered of the order as a long delivery is
+    // done with.
+    longDeliveryProgress.delete(orderId);
     await supplied.markDelivered(
       picked.map((p) => p.ledgerId),
       { orderId, market: "eldorado" },
@@ -1031,15 +1304,25 @@ async function syncBundleStock({ dryRun = false } = {}) {
 //
 // "bulk pack short" is a bulk pack row without enough free units for a paid
 // order (docs/bulk-packs/FIXES-1.md L5) — the same stuck-and-paid state.
+//
+// "long delivery stuck" is an account-listing order sent one message per unit
+// that has got no further for ELD_LONG_DELIVERY_STUCK_AFTER attempts in a row:
+// the order is not marked delivered and the buyer may hold part of it. An
+// attempt that fails after getting somewhere reads "long delivery interrupted"
+// and deliberately does not page. An order going out per unit gets a page of
+// its own (alertUnfulfillable): one already paged for something else is still
+// heard about when it stops part way.
 const SWITCHED_OFF_SKIPS = /auto-delivery is off/i;
 const ALERT_REASONS = new RegExp(
   "out of stock|no listing row|no unsold account|ambiguous|cannot be " +
     "identified|no sellable|free in the no-claim farm|AccountOffer is " +
     "missing|rendered empty|no free no-claim account|bulk pack short|" +
+    "long delivery stuck|" +
     SWITCHED_OFF_SKIPS.source,
   "i",
 );
 const alertedOrders = new Set();
+const LONG_DELIVERY_STUCK = /long delivery stuck/i;
 
 function alertsOperator(reason) {
   return ALERT_REASONS.test(String(reason || ""));
@@ -1123,8 +1406,15 @@ async function holdShortOffer(listing, set, orderId, missed) {
 // (S3) rides this same once-per-order gate instead of inventing a second one.
 async function alertUnfulfillable(order, why) {
   const id = String((order && (order.id || order.orderId)) || "");
-  if (!id || alertedOrders.has(id)) return false;
-  alertedOrders.add(id);
+  // Once per order — and once more for an order going out one message per
+  // unit: whatever stops it then (stuck, or any other reason raised while this
+  // process holds its progress) is a different thing to hear about than an
+  // earlier page said, because the buyer may now hold part of the order.
+  const partSent =
+    LONG_DELIVERY_STUCK.test(String(why || "")) || longDeliveryProgress.has(id);
+  const key = partSent ? id + ":long-delivery" : id;
+  if (!id || alertedOrders.has(key)) return false;
+  alertedOrders.add(key);
   await require("./telegram")
     .sendTelegram(
       "⚠️ Eldorado order " + id + " is PAID and the bot cannot ship it.\n\n" +
@@ -1154,6 +1444,12 @@ async function alertUnfulfillable(order, why) {
           ? "The accounts are on the shelf. Turn account-listing delivery back " +
             "on (Settings, or this offer's own toggle) and the next tick ships " +
             "it — the delivery guarantee is running."
+          : partSent
+          ? "Part of this order may already be in the buyer's chat — each unit " +
+            'is its own "ACCOUNT i of N" message there. The bot keeps trying ' +
+            "every minute. If it has to be finished by hand, look at the chat " +
+            "first and send only the missing units — the delivery guarantee " +
+            "is running."
           : "This one needs delivering by hand, and the delivery guarantee is running."),
     )
     .catch(() => {});
@@ -1783,4 +2079,14 @@ module.exports = {
   alertedOrders,
   holdShortOffer,
   shortHeldOrders,
+  // Exported for tests/eldoradoLongDelivery*.test.js: the figures a long
+  // account-listing delivery runs on, and what this process remembers of one
+  // under way (clearing it is how a test plays a restart).
+  ELD_LONG_DELIVERY_CHARS,
+  ELD_LONG_DELIVERY_MAX,
+  ELD_UNIT_MESSAGE_GAP_MS,
+  ELD_UNIT_STAMP_WAIT_MS,
+  ELD_LONG_DELIVERY_STUCK_AFTER,
+  LONG_DELIVERY_PROGRESS_MAX,
+  longDeliveryProgress,
 };
