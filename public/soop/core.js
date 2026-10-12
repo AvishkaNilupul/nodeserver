@@ -273,6 +273,7 @@
     bits.push(fmt.num(t.farming || 0) + " of " + fmt.num(t.accounts || 0) + " accounts farming" + (t.waiting ? ", " + fmt.num(t.waiting) + " waiting" : "") + (t.sleeping ? ", " + fmt.num(t.sleeping) + " sleeping" : ""));
     bits.push(fmt.num(t.botsActive || 0) + (t.botsActive === 1 ? " bot" : " bots") + " on");
     if (t.dead) bits.push(fmt.num(t.dead) + " logged out");
+    if (t.rejected) bits.push(fmt.num(t.rejected) + " refused by the drops site");
     if (eg.country) bits.push("from " + eg.country + (eg.credited === "no" ? " (not credited)" : ""));
     if (errs + warns) bits.push(errs + warns + (errs + warns === 1 ? " alert" : " alerts"));
     fill(box, dot(tone), el("span", null, el("b", lead), " · " + bits.join(" · ")));

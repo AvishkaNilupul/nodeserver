@@ -19,6 +19,11 @@ const soopAccountSchema = new mongoose.Schema(
     lastCheckedAt: { type: Date, default: null },
     // Set when the login was found dead, cleared by a fresh cookie import.
     deadAt: { type: Date, default: null },
+    // Kept by utils/soop/loginAlert.js. Since when this login has been unable to
+    // farm (logged out, or refused by the drops site), and when the owner was
+    // told. Both are cleared once the login is `ok` again.
+    unusableSince: { type: Date, default: null },
+    unusableAlertAt: { type: Date, default: null },
     // Last health probe summary for the panel: missions, live campaigns, etc.
     check: { type: mongoose.Schema.Types.Mixed, default: null },
     // A sold account stops being farmed (mirrors how Twitch accounts work).

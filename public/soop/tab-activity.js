@@ -206,9 +206,10 @@
 
     // Accounts
     v.accOk.set(fmt.num(t.ok || 0), "of " + plural(t.accounts, "account"), t.ok ? "ok" : null);
-    v.accDead.set(fmt.num(t.dead || 0), t.dead ? "Re-import the cookie" : "None need attention", t.dead ? "error" : null);
+    const lost = (t.dead || 0) + (t.rejected || 0);     // logged out, or refused by the drops site
+    v.accDead.set(fmt.num(lost), lost ? "Re-import the cookie" : "None need attention", lost ? "error" : null);
     v.accSold.set(fmt.num(t.sold || 0), "Never farmed");
-    v.deadLink.hidden = !t.dead;
+    v.deadLink.hidden = !lost;
     v.recheck.disabled = !t.accounts;
 
     // Resources

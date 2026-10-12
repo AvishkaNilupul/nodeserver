@@ -204,7 +204,8 @@
     const unsure = farming.filter((a) => a.session.credited !== true).length, usable = t.ok || 0;
     stat(st.earning, fmt.num(farming.length - unsure), "of " + plural(usable, "usable account") + (unsure ? ", " + fmt.num(unsure) + " not confirmed yet" : ""), farming.length - unsure ? "ok" : null);
     stat(st.waiting, fmt.num((t.sleeping || 0) + (t.waiting || 0)), t.idle ? plural(t.idle, "account") + " not in any bot" : (t.sleeping ? "Asleep until there is something to farm" : "Every usable account is in a bot"), null);
-    stat(st.dead, fmt.num(t.dead || 0), t.dead ? "Re-import the cookie" : "All signed in", t.dead ? "error" : null);
+    const lost = (t.dead || 0) + (t.rejected || 0);     // logged out, or signed in but refused by the drops site: neither can farm
+    stat(st.dead, fmt.num(lost), lost ? "Re-import the cookie" : "All signed in", lost ? "error" : null);
     stat(st.bots, fmt.num(t.botsActive || 0), "of " + plural(t.bots || 0, "bot"), null);
     if (eg.proxied && !eg.ready) stat(st.egress, "Proxy down", "Nothing reaches SOOP", "error");
     else if (!eg.country) stat(st.egress, "Unknown", "Country not checked yet", "warn");

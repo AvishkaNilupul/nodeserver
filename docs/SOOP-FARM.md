@@ -30,6 +30,12 @@ up to `7eb67df`). What changed and why is in "What v1 got wrong" at the end.
   encrypted and only shown on an explicit, logged "reveal".
 - **Health** — every login is re-checked shortly after boot and every 6 hours; a
   login that dies mid-farm stops its session and raises an alert.
+- **Login alert** — a login that is logged out, or that the drops site refuses
+  while the main site still calls it signed in, cannot farm. The panel shows it
+  as an error, System Health has a `soop.logins` row for it, and the owner gets
+  one Telegram message naming every such login (and one when all are accepted
+  again). The fix is always the same: sign the account in, open
+  drops.sooplive.com, export its cookies and import them again.
 - **Activity log** — what each account and bot did, kept 14 days.
 
 Nothing is ever claimed **automatically**. A reward is claimed only when a

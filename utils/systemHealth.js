@@ -86,6 +86,10 @@ const REAL_DEPS = {
   unclaimedAllocator: () => loadedModule("./unclaimedAllocator"),
   demandBrain: () => loadedModule("./demandBrain"),
   hostCapacity: () => loadedModule("./hostCapacity"),
+  // The SOOP farm's panel state is built from what the running service holds
+  // (its sessions, the last campaign scan, the egress), so like the loops above
+  // this is the instance the server started and never a fresh, empty one.
+  soopFarm: () => loadedModule("./soopFarm"),
   // How long this process has been up. Those in-memory stamps start empty at
   // every restart, so the restart is where a loop's clock starts.
   uptimeMs: () => () => process.uptime() * 1000,
@@ -848,6 +852,90 @@ async function readLoopHook(ctx, def) {
 // (or less) switches the gate off, and a missing or non-numeric value is the
 // shipped default — so a half-written setting never makes this check laxer
 // than the gate.
+// ---------------------------------------------------------------------------
+// SOOP farm logins (docs/SOOP-FARM-CONTRACT.md §16)
+// ---------------------------------------------------------------------------
+
+// The farm re-checks every login six-hourly and whenever a drops call is
+// refused, so a newest check older than two sweeps is a memory, not a reading.
+const SOOP_CHECK_STALE_MS = 13 * 60 * 60 * 1000;
+// The two ways a login stops being able to farm, as the account row names them.
+const SOOP_LOST = {
+  not_logged_in: "logged out",
+  drops_rejected: "refused by the drops site",
+};
+
+// Pure: the verdict on the SOOP panel's own state (utils/soopFarm.stateView()).
+//   fail     an active bot — or every login — has no login left that can farm,
+//            or the connection itself can earn nothing (proxy unusable, or SOOP
+//            sees a country it does not credit)
+//   warn     some logins cannot farm, but every active bot still has one that can
+//   unknown  the last call to SOOP failed, or no login has been checked recently
+//            enough to call it working. A tunnel blip is not a dead login, and a
+//            login status only ever changes on a definite answer from SOOP.
+function judgeSoopLogins(state, nowMs) {
+  const s = state || {};
+  const accounts = (s.accounts || []).filter((a) => a && !a.sold);
+  const lost = accounts.filter((a) => SOOP_LOST[a.status]);
+  const byId = new Map(accounts.map((a) => [a.id, a]));
+  const bots = (s.bots || []).filter((b) => b && b.active);
+  const botOf = new Map();
+  const deadBots = [];
+  for (const b of bots) {
+    const mine = (b.accountIds || []).map((id) => byId.get(id)).filter(Boolean);
+    for (const a of mine) botOf.set(a.id, b.name || b.id);
+    if (mine.length && mine.every((a) => SOOP_LOST[a.status])) {
+      deadBots.push(b.name || b.id);
+    }
+  }
+  // The panel's own error alerts about the connection. Two of them are settled
+  // facts — the proxy cannot be used at all, SOOP does not credit this country —
+  // and with either a login being accepted is beside the point. The third, "the
+  // last call failed", is what a blip on the tunnel looks like.
+  const eg = s.egress || {};
+  const proxyDead = Boolean(eg.proxied) && !eg.ready;
+  const errors = (s.alerts || []).filter((x) => x && x.level === "error");
+  const blocked = errors.filter((x) => x.kind === "country" || (x.kind === "egress" && proxyDead));
+  const unreachable = errors.filter((x) => x.kind === "egress" && !proxyDead);
+  const items = [
+    ...[...blocked, ...unreachable].map((x) => ({
+      label: "connection",
+      problem: String(x.msg || "").slice(0, 160),
+    })),
+    ...lost.map((a) => ({
+      login: a.id,
+      problem: SOOP_LOST[a.status],
+      bot: botOf.get(a.id) || "none",
+    })),
+  ];
+  let newest = null;
+  for (const a of accounts) {
+    const t = a.lastCheckedAt ? new Date(a.lastCheckedAt).getTime() : NaN;
+    if (Number.isFinite(t) && (newest == null || t > newest)) newest = t;
+  }
+  const checkAgeMs = newest == null ? null : Math.max(0, nowMs - newest);
+  const stale =
+    accounts.length > 0 && (checkAgeMs == null || checkAgeMs > SOOP_CHECK_STALE_MS);
+  const allLost = accounts.length > 0 && lost.length === accounts.length;
+  let status = "ok";
+  if (blocked.length || allLost || deadBots.length) status = "fail";
+  else if (lost.length) status = "warn";
+  else if (unreachable.length || stale) status = "unknown";
+  return {
+    status,
+    total: accounts.length,
+    lost: lost.length,
+    refused: lost.filter((a) => a.status === "drops_rejected").length,
+    loggedOut: lost.filter((a) => a.status === "not_logged_in").length,
+    deadBots,
+    blocked: blocked.map((x) => String(x.msg || "")),
+    unreachable: unreachable.map((x) => String(x.msg || "")),
+    checkAgeMs,
+    stale,
+    items,
+  };
+}
+
 function hostMinFreeMbOf(af) {
   const raw = af ? af.hostMinFreeMb : undefined;
   if (raw == null || raw === "") return HOST_MIN_FREE_MB_DEFAULT;
@@ -2842,6 +2930,86 @@ const CHECKS = [
   },
 
   {
+    id: "soop.logins",
+    title: "SOOP farm logins can farm",
+    group: "soop",
+    severity: "warn",
+    // On 2026-10-11 SOOP's drops site refused all eight logins at once and the
+    // farm earned nothing for nine hours, while its own panel counted them as
+    // healthy and nothing else looked. Reads the panel's state rather than the
+    // account rows, so this row and /soop.html cannot disagree about what a
+    // working login is — and it asks SOOP nothing: the farm's own checks did.
+    async run(ctx) {
+      const threshold =
+        "0 logins unable to farm; fail when an active bot, or every login, has none left";
+      const farm = ctx.dep("soopFarm");
+      if (!farm || !farm.started || typeof farm.stateView !== "function") {
+        return {
+          status: "unknown",
+          measured: null,
+          threshold,
+          summary: "The SOOP farm service is not running in this process",
+          detail:
+            "Its sessions, last campaign scan and egress live in the running " +
+            "server, so a run outside it — or before the farm has started — " +
+            "cannot say anything about the logins.",
+        };
+      }
+      const v = judgeSoopLogins(await farm.stateView(), ctx.now().getTime());
+      const checked =
+        v.checkAgeMs == null ? "never checked" : "last checked " + fmtAge(v.checkAgeMs) + " ago";
+      const why = [
+        v.refused ? v.refused + " refused by the drops site" : "",
+        v.loggedOut ? v.loggedOut + " logged out" : "",
+      ]
+        .filter(Boolean)
+        .join(", ");
+      let summary;
+      if (!v.total) {
+        summary = "No SOOP logins imported — the SOOP farm is not in use";
+      } else if (v.blocked.length) {
+        summary = "SOOP cannot be farmed from this server: " + v.blocked[0].slice(0, 140);
+      } else if (v.lost === v.total) {
+        summary =
+          "None of the " + v.total + " SOOP login(s) can farm (" + why + ") — " + checked;
+      } else if (v.lost) {
+        summary =
+          v.lost + " of " + v.total + " SOOP login(s) cannot farm (" + why + ")" +
+          (v.deadBots.length
+            ? ", leaving " + v.deadBots.length + " bot(s) with none: " +
+              v.deadBots.slice(0, 3).join(", ")
+            : "") +
+          " — " + checked;
+      } else if (v.unreachable.length) {
+        summary =
+          "The last call to SOOP failed, so the " + v.total +
+          " login(s) cannot be confirmed: " + v.unreachable[0].slice(0, 120);
+      } else if (v.stale) {
+        summary =
+          "The " + v.total + " SOOP login(s) were " + checked +
+          " — too long ago to call them working";
+      } else {
+        summary = "All " + v.total + " SOOP login(s) are accepted — " + checked;
+      }
+      return {
+        status: v.status,
+        // A stale reading with nothing wrong in it is not a count of zero.
+        measured: v.status === "unknown" ? null : v.lost,
+        threshold,
+        summary,
+        detail:
+          "A login is out when SOOP says it is logged out, or when the drops " +
+          "site refuses it — signed in on the main site, yet every drops call " +
+          "answers \"please log in\". Either way it reads no campaigns, earns " +
+          "no watch time and syncs no inventory until a fresh cookie is " +
+          "imported on the SOOP page (Accounts → Import accounts). The farm " +
+          "re-checks every login six-hourly and whenever a drops call is refused.",
+        items: capItems(v.items),
+      };
+    },
+  },
+
+  {
     id: "loops.alive",
     title: "Background loops doing work",
     group: "loops",
@@ -3555,6 +3723,8 @@ module.exports = {
   fmtClock,
   loadedModule,
   hostMinFreeMbOf,
+  judgeSoopLogins,
+  SOOP_CHECK_STALE_MS,
   FARM_LOOPS,
   LOOP_OK_INTERVALS,
   LOOP_WARN_INTERVALS,

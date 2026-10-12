@@ -11,6 +11,7 @@ process.env.CRED_SECRET ||= "soop-farm-test-cred-secret";
 const SoopAccount = require("../models/SoopAccount");
 const SoopFarmTask = require("../models/SoopFarmTask");
 const farm = require("../utils/soopFarm");
+const { createLoginAlert } = require("../utils/soop/loginAlert");
 const { createFakeSoop } = require("./helpers/soopFake");
 
 const FAST = { pollMs: 20, idleMs: 20, retryMs: 20, joinWaitMs: 300, flatPolls: 3, backoffMs: [40], readFailures: 3, primePaceMs: 1, parkCooldownMs: 60 };
@@ -148,6 +149,88 @@ test("a login that dies while farming is marked logged out, alerted, and revived
   assert.equal(await status("acc1"), "ok");
   await until(() => bridgesOf("acc1").length === 1, "farming resumes in the same bot");
   assert.equal((await botState(bot.id)).active, true);
+});
+
+// 2026-10-11: the drops site began refusing all eight logins while the main site
+// still called them signed in. The panel showed "8 ok, 8 sleeping" for nine hours.
+test("logins the drops site refuses are shown as out — not ok, not asleep — and the owner is told once", async () => {
+  await fresh();
+  const camp = world.addCampaign({ live: true, itemList: [60] });
+  await addAccount("acc1");
+  await addAccount("acc2");
+  await farm.campaignsView({ force: true });
+  const { bot } = await farm.createBot({ mode: "campaign", dropsIdx: camp.dropsIdx, accountIds: ["acc1", "acc2"] });
+  await until(() => bridgesOf("acc1").length === 1 && bridgesOf("acc2").length === 1, "both farming");
+  const before = (await farm.stateView()).totals;
+  assert.equal(before.ok, 2);
+  assert.equal(before.rejected, 0);
+
+  world.rejectDrops("acc1");
+  world.rejectDrops("acc2");
+  await until(() => farm.sessions.size === 0, "both sessions end on the refused call");
+  // What the sweep two minutes after a restart did that night: the main site
+  // still answers for the login, so it is no longer "logged out".
+  await farm.health.check("acc1");
+  await farm.health.check("acc2");
+  assert.equal(await status("acc1"), "drops_rejected");
+  assert.equal(await status("acc2"), "drops_rejected");
+
+  const sent = [];
+  farm.loginAlert = createLoginAlert({ send: async (t) => sent.push(t), activity: farm.activity, waitMs: 0, quietMs: 0 });
+  assert.equal((await farm.loginAlert.pass()).sent, "down");
+  assert.equal((await farm.loginAlert.pass()).sent, null);
+  assert.equal(sent.length, 1, "one message for both, and not again");
+  assert.match(sent[0], /none of the 2 logins can farm/);
+  assert.match(sent[0], /Refused by the drops site \(2\): acc1, acc2/);
+
+  farm.accountsCache = null;
+  const state = await farm.stateView();
+  assert.deepEqual(
+    { ok: state.totals.ok, rejected: state.totals.rejected, dead: state.totals.dead, sleeping: state.totals.sleeping, idle: state.totals.idle },
+    { ok: 0, rejected: 2, dead: 0, sleeping: 0, idle: 0 },
+  );
+  const alerts = state.alerts.filter((x) => x.kind === "auth");
+  assert.deepEqual(alerts.map((x) => [x.level, x.accountId]).sort(), [["error", "acc1"], ["error", "acc2"]]);
+  assert.match(alerts[0].msg, /refused by the drops site, so it cannot farm/);
+  const since = (await SoopAccount.findOne({ loginId: "acc1" }).lean()).unusableSince;
+  assert.equal(new Date(alerts.find((x) => x.accountId === "acc1").at).getTime(), since.getTime(), "the alert says since when, not when it was last re-checked");
+  assert.ok(state.accounts.every((a) => a.session === null), "neither is shown as sleeping");
+  assert.equal(state.bots.find((b) => b.id === bot.id).counts.error, 2);
+
+  await addAccount("acc1"); // the owner pastes fresh cookies
+  await addAccount("acc2");
+  await until(() => bridgesOf("acc1").length === 1 && bridgesOf("acc2").length === 1, "farming resumes in the same bot");
+  assert.equal((await farm.loginAlert.pass()).sent, "back");
+  assert.match(sent[1], /all 2 logins are accepted again/);
+  farm.accountsCache = null;
+  const after = await farm.stateView();
+  assert.equal(after.totals.ok, 2);
+  assert.equal(after.alerts.filter((x) => x.kind === "auth").length, 0);
+});
+
+test("a refusal that passes by itself is cleared the moment the login farms again, not at the next sweep", async () => {
+  await fresh();
+  const camp = world.addCampaign({ live: true, itemList: [60] });
+  await addAccount("acc1");
+  await addAccount("acc2");
+  await farm.campaignsView({ force: true });
+  await farm.createBot({ mode: "campaign", dropsIdx: camp.dropsIdx, accountIds: ["acc1", "acc2"] });
+  await until(() => bridgesOf("acc1").length === 1 && bridgesOf("acc2").length === 1, "both farming");
+
+  world.rejectDrops("acc1");
+  await until(async () => (await status("acc1")) === "not_logged_in", "its session ends on the refused call");
+  await farm.health.check("acc1");
+  assert.equal(await status("acc1"), "drops_rejected");
+  assert.equal(bridgesOf("acc2").length, 1, "the other login is not disturbed");
+
+  world.rejectDrops("acc1", false); // SOOP accepts it again; nobody imported anything
+  await farm._reconcile({ force: true }); // the watcher's next look
+  await until(() => bridgesOf("acc1").length === 1, "it farms again");
+  await until(async () => (await status("acc1")) === "ok", "and its row says so");
+  farm.accountsCache = null;
+  const state = await farm.stateView();
+  assert.equal(state.totals.rejected, 0);
+  assert.equal(state.alerts.filter((x) => x.kind === "auth").length, 0);
 });
 
 test("joined but not credited backs off, says so, and frees the socket", async () => {

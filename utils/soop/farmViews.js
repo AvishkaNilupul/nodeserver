@@ -4,7 +4,16 @@
 const { creditStatus } = require("./geo");
 
 const DEAD = "not_logged_in";
+// Signed in on the main site but refused by the drops site: SOOP still answers
+// "who am I" for the login, while every drops call says "please log in". It
+// cannot read the campaign list, its watch time or its inventory.
+const REJECTED = "drops_rejected";
 const canFarm = (a) => !a.sold && a.status !== DEAD;
+// What the panel may call a working login. canFarm stays wider on purpose: the
+// farm keeps trying a refused login, which is how it comes back by itself when
+// the drops site accepts it again. On 2026-10-11 every login was refused at
+// once and the panel showed them as "ok, sleeping" for nine hours.
+const usable = (a) => canFarm(a) && a.status !== REJECTED;
 
 function sessionView(s) {
   if (!s) return null;
@@ -54,7 +63,7 @@ function accountView(a, { session, botId, sleep, minutes }) {
     cookieAt: a.cookieAt || a.createdAt || null,
     lastCheckedAt: a.lastCheckedAt || null,
     botId: botId || null,
-    session: sessionView(session) || (botId && sleep && canFarm(a) ? sleepView(sleep, minutes) : null),
+    session: sessionView(session) || (botId && sleep && usable(a) ? sleepView(sleep, minutes) : null),
   };
 }
 
@@ -68,7 +77,7 @@ function botView(bot, ctx) {
     const mine = s && s.botId === bot.id ? s : null;
     const acc = ctx.accountsById.get(id);
     if (done.has(id)) counts.done++;
-    else if (!acc || !canFarm(acc) || (mine && mine.view.state === "error")) counts.error++;
+    else if (!acc || !usable(acc) || (mine && mine.view.state === "error")) counts.error++;
     else if (mine && mine.view.state === "farming") counts.farming++;
     else if (bot.active) counts.waiting++;
 
@@ -163,8 +172,12 @@ function alertsView({ egress, accounts, sessions, scan, inventoryTotals, now }) 
     add("warn", "scan", "The campaign list could not be refreshed: " + scan.error, { at: scan.at });
   }
   for (const a of accounts) {
-    if (a.status === DEAD && !a.sold) {
-      add("error", "auth", `${a.loginId} is logged out — re-import its cookie.`, { accountId: a.loginId, at: a.deadAt || a.lastCheckedAt });
+    if (a.sold) continue;
+    if (a.status === DEAD) {
+      add("error", "auth", `${a.loginId} is logged out — re-import its cookie.`, { accountId: a.loginId, at: a.deadAt || a.unusableSince || a.lastCheckedAt });
+    } else if (a.status === REJECTED) {
+      // `lastCheckedAt` moves with every re-check, so it cannot say since when.
+      add("error", "auth", `${a.loginId} is refused by the drops site, so it cannot farm — re-import its cookie.`, { accountId: a.loginId, at: a.unusableSince || a.lastCheckedAt });
     }
   }
   for (const s of sessions.values()) {
@@ -180,14 +193,16 @@ function alertsView({ egress, accounts, sessions, scan, inventoryTotals, now }) 
 }
 
 function totalsView(accounts, sessions, bots, inBot = () => false) {
-  const t = { accounts: accounts.length, ok: 0, dead: 0, sold: 0, farming: 0, waiting: 0, sleeping: 0, idle: 0, bots: bots.length, botsActive: 0 };
+  const t = { accounts: accounts.length, ok: 0, dead: 0, rejected: 0, sold: 0, farming: 0, waiting: 0, sleeping: 0, idle: 0, bots: bots.length, botsActive: 0 };
   for (const a of accounts) {
     if (a.sold) t.sold++;
     else if (a.status === DEAD) t.dead++;
+    else if (a.status === REJECTED) t.rejected++;
     else t.ok++;
     const s = sessions.get(a.loginId);
     if (!s) {
-      if (!canFarm(a)) continue;
+      // A refused login in a bot is not asleep: nothing will wake it.
+      if (!usable(a)) continue;
       if (inBot(a.loginId)) t.sleeping++;
       else t.idle++;
     } else if (s.view.state === "farming") t.farming++;
@@ -197,4 +212,4 @@ function totalsView(accounts, sessions, bots, inBot = () => false) {
   return t;
 }
 
-module.exports = { canFarm, sessionView, sleepView, accountView, botView, egressView, alertsView, totalsView, DEAD };
+module.exports = { canFarm, usable, sessionView, sleepView, accountView, botView, egressView, alertsView, totalsView, DEAD, REJECTED };

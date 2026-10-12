@@ -13,6 +13,10 @@ const { creditStatus } = require("../../utils/soop/geo");
 const DIVISIONS = ["available", "acquired", "expired"];
 const METHODS =
   "privateInfo missions campaigns campaignsAll liveInfo categoryChannels inventoryCounts inventory useInfo openBridge".split(" ");
+// The calls that go to drops.sooplive.com. On 2026-10-11 the real site refused
+// all of them ("Please log in to continue.") for logins the main site still
+// called signed in — the event list included, which is not public.
+const DROPS_SITE = new Set(["missions", "campaigns", "campaignsAll", "inventoryCounts", "inventory", "useInfo"]);
 const DAY = 24 * 3600 * 1000;
 const clone = (v) => JSON.parse(JSON.stringify(v));
 const cc = (v) => (v ? String(v).trim().toUpperCase() : null);
@@ -170,6 +174,15 @@ function createFakeSoop({ now = Date.now } = {}) {
       return true;
     },
 
+    // The drops site stops (or, with `false`, starts again) accepting a login
+    // that the main site still calls signed in. Open bridges stay open.
+    rejectDrops(id, on = true) {
+      const acct = accounts.get(String(id));
+      if (!acct) return false;
+      acct.dropsRejected = on !== false;
+      return true;
+    },
+
     // Only the keys given change. Going down drops every open bridge, as a dead
     // tunnel would; a country change leaves bridges open with a stale claim.
     setEgress({ country, down } = {}) {
@@ -239,6 +252,9 @@ function createFakeSoop({ now = Date.now } = {}) {
         }
         if (needsLogin && !(acct && acct.loggedIn)) {
           throw new SoopError("Please log in. (로그인이 필요합니다)", { code: "AUTH" });
+        }
+        if (acct && acct.dropsRejected && DROPS_SITE.has(method)) {
+          throw new SoopError("Please log in to continue.", { code: "AUTH" });
         }
       };
       const listed = (filter) =>

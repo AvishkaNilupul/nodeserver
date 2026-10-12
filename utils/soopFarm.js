@@ -15,6 +15,7 @@ const { createCampaignStore } = require("./soop/campaignStore");
 const { createActivityLog } = require("./soop/activity");
 const { createInventoryService } = require("./soop/inventory");
 const { createHealthService } = require("./soop/health");
+const { createLoginAlert } = require("./soop/loginAlert");
 const { createMetrics } = require("./soop/metrics");
 const { isAuthError, plainMessage } = require("./soop/errors");
 const { runSession, sleep, goalOf, channelMemo } = require("./soopWorker");
@@ -37,6 +38,8 @@ const PARK_COOLDOWN_MS = 180000;
 // The panel refreshes the campaign list in the background once it is this old.
 const PAGE_SCAN_MS = 300000;
 const PRIME_PACE_MS = 3000;
+// How often the login alert looks for logins that stopped being able to farm.
+const LOGIN_ALERT_MS = 60000;
 
 class SoopFarm {
   constructor() {
@@ -77,6 +80,7 @@ class SoopFarm {
       onDead: (id, reason) => this._onDead(id, reason),
     });
     this.metrics = createMetrics();
+    this.loginAlert = createLoginAlert({ activity: this.activity });
   }
 
   // ---- lifecycle ----------------------------------------------------------
@@ -104,6 +108,7 @@ class SoopFarm {
     this.health.start();
     this._every(RECONCILE_MS, () => this._reconcile());
     this._every(PROGRESS_FLUSH_MS, () => this._flushProgress());
+    this._every(LOGIN_ALERT_MS, () => this.loginAlert.pass());
     // The health service only sweeps on its interval, and this process restarts
     // more often than that — so check every login once, shortly after boot.
     this.bootTimer = setTimeout(() => {
@@ -272,6 +277,17 @@ class SoopFarm {
   _onDead(id) {
     this.accountsCache = null;
     this._stopSession(id).catch(() => {});
+  }
+
+  // A session got as far as watching, so the drops site accepts this login. If
+  // the account row still says otherwise (a refusal that passed by itself),
+  // check it now instead of leaving the panel and the alert wrong until the
+  // next six-hourly sweep.
+  async _provedWorking(id) {
+    const doc = await SoopAccount.findOne({ loginId: id }).select("status").lean();
+    if (!doc || doc.status === "ok") return;
+    await this.health.check(id);
+    this.accountsCache = null;
   }
 
   // ---- per-campaign progress ---------------------------------------------
@@ -522,6 +538,10 @@ class SoopFarm {
       });
       if (changed) {
         this.activity.add({ ...where, level: ev.state === "backoff" || ev.error ? "warn" : "info", kind: "session", msg: `${s.id}: ${ev.detail}` });
+      }
+      if (ev.state === "farming" && !s.proved) {
+        s.proved = true;
+        this._provedWorking(s.id).catch(() => {});
       }
     } else if (ev.k === "step") {
       this.activity.add({ ...where, kind: "step", msg: `${s.id} reached the ${ev.step} min step of ${ev.title}` });

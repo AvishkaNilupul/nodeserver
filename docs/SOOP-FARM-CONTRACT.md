@@ -371,7 +371,7 @@ State = {
   now: ISO string, started: boolean,
   egress: { proxied, ready, via: string, country: string|null, credited: "yes"|"no"|"unknown",
             lastOkAt, lastErrorAt, lastError },
-  totals: { accounts, ok, dead, sold, farming, waiting, idle, bots, botsActive },
+  totals: { accounts, ok, dead, rejected, sold, farming, waiting, sleeping, idle, bots, botsActive },
   accounts: [Account], bots: [Bot], alerts: [Alert],
   scan: { at, ok, error, count },
   inventory: { running, done, total, lastAt },
@@ -572,3 +572,50 @@ it when you are done. It cannot reach the real database or sooplive.com.
   `POST /api/soop/inventory/reveal` now returns `{ code, claim }`.
 - Items carry `claimedAt` and `claim` (`{ kind, message, description, gameTitle, dropsName }`,
   never a code). Inventory rows are keyed by SOOP's `itemCodeIdx`.
+
+## 16. Logins that cannot farm (added 2026-10-12)
+
+On 2026-10-11 18:02Z the drops site began answering "Please log in to continue."
+to every drops call of all eight logins, while the main site still called them
+signed in. Health filed them as `drops_rejected`; the panel counted that as ok
+and asleep, nothing reached the owner, and nothing was farmed for nine hours.
+
+- **A login cannot farm** when its status is `not_logged_in` or `drops_rejected`.
+  `farmViews.usable(a)` is the panel's test for a working login. `canFarm(a)`
+  is unchanged and still admits `drops_rejected`: the farm keeps trying such a
+  login (as a scan reader, and with a session when the list can be read), which
+  is how it recovers by itself if the drops site accepts it again.
+- **State**: `totals.ok` no longer counts a refused login; `totals.rejected` is
+  new and `totals.dead` is still "logged out" only. A refused login in a bot has
+  no sleeping session and counts as an `error` in its bot. `alerts` carries one
+  `error` / `auth` alert per refused login, like a logged-out one, with `at` =
+  since when (`unusableSince`), not the last re-check.
+- **A session that reaches `farming` proves the login works.** If the account
+  row is not `ok` at that moment, the farm re-checks it at once
+  (`_provedWorking`) instead of waiting for the six-hourly sweep.
+- **Telegram** — `utils/soop/loginAlert.js`, one pass a minute from the farm:
+
+  ```
+  createLoginAlert({ models?, send?, activity?, waitMs?, quietMs?, maxWaitMs?, now? }) -> {
+    pass() -> Promise<{ sent: "down" | "back" | null, down, pending, text? }>
+  }
+  ```
+
+  It reads account state, never events. `SoopAccount.unusableSince` is the first
+  pass that found a login unable to farm, `unusableAlertAt` when the owner was
+  told; both are cleared once the login is `ok`. One message names every login
+  in the batch, sent when the oldest has been out for `waitMs` (5 min) and none
+  joined in the last `quietMs` (2 min), or after `maxWaitMs` (15 min) at the
+  latest. A login that flips between the two statuses, a restart, and a pass
+  that cannot write the database never repeat it. A cookie imported after the
+  message that is unusable as well is a new problem and is reported again. When
+  no login is out any more and none that was reported is still unchecked, one
+  "accepted again" message goes out. Sold accounts are ignored.
+- **System health** — check `soop.logins` (group `soop`) in
+  `utils/systemHealth.js` judges `stateView()` of the farm the server runs:
+  `fail` when an active bot, or every login, has no login left that can farm, or
+  the proxy is unusable or SOOP does not credit the country; `warn` when some
+  logins are out; `unknown` when the farm is not running in the process, the
+  last call to SOOP failed, or no login was checked in the last 13 hours.
+- The fake SOOP has `world.rejectDrops(id, on = true)`; the dev harness takes
+  `--refuse=all|<n>` and prints what the alert would have sent.

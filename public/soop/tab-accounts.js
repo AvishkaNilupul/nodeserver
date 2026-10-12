@@ -54,9 +54,10 @@
     return out.length ? out : [t];
   }
 
-  const DEAD = "not_logged_in", STALE_MS = 3 * 864e5;
+  const DEAD = "not_logged_in", REJECTED = "drops_rejected", STALE_MS = 3 * 864e5;
   const STATUS = { ok: ["ok", "Ready"], not_logged_in: ["error", "Logged out — re-import its cookie"],
-    drops_rejected: ["warn", "Drops site rejected the session"], untested: [null, "Not checked yet"] };
+    drops_rejected: ["error", "Refused by the drops site — re-import its cookie"], untested: [null, "Not checked yet"] };
+  const lost = (a) => a.status === DEAD || a.status === REJECTED;      // cannot farm until its cookie is re-imported
   const SESSION = { starting: ["info", "Joining"], waiting: [null, "Waiting"], sleeping: [null, "Sleeping"], backoff: ["warn", "Not earning"], stopping: [null, "Stopping"], error: ["error", "Error"] };
   const FROM_LINK = { ok: "ok", dead: "dead", sold: "sold", idle: "idle" };      // Soop.go("accounts", { status })
   const plural = (n, word) => fmt.num(n) + " " + word + (n === 1 ? "" : "s");
@@ -65,11 +66,11 @@
   function bucket(a) {                           // which activity chip an account belongs to
     if (a.sold) return "sold";
     if (a.session) return a.session.state === "farming" ? "earning" : "waiting";
-    return a.status === DEAD ? "dead" : "idle";
+    return lost(a) ? "dead" : "idle";
   }
   function idleSentence(a) {
     if (a.sold) return "Sold — it is not farmed";
-    if (a.status === DEAD) return "Cannot farm until its cookie is re-imported";
+    if (lost(a)) return "Cannot farm until its cookie is re-imported";
     const bot = a.botId ? Soop.botById(a.botId) : null;
     if (!bot) return "Idle — not in a bot";
     if (bot.state === "stopped") return "Idle — its bot is stopped";
@@ -101,7 +102,7 @@
   function rows() {
     const q = query.toLowerCase();
     return Soop.state.accounts.filter((a) => {
-      if (filter === "ok" ? a.sold || a.status === DEAD : filter !== "all" && bucket(a) !== filter) return false;
+      if (filter === "ok" ? a.sold || lost(a) : filter !== "all" && bucket(a) !== filter) return false;
       if (!q) return true;
       const bot = a.botId ? Soop.botById(a.botId) : null;
       return [a.id, a.nick, a.country, a.note, bot && bot.name].join(" ").toLowerCase().includes(q);
@@ -279,7 +280,7 @@
   }
   function drawChips() {
     const n = { all: 0, earning: 0, waiting: 0, idle: 0, dead: 0, sold: 0, ok: 0 };
-    Soop.state.accounts.forEach((a) => { n.all++; n[bucket(a)]++; if (!a.sold && a.status !== DEAD) n.ok++; });
+    Soop.state.accounts.forEach((a) => { n.all++; n[bucket(a)]++; if (!a.sold && !lost(a)) n.ok++; });
     const sig = filter + JSON.stringify(n);
     if (sig === chipSig) return;
     chipSig = sig;
@@ -301,7 +302,7 @@
         el("div", { class: "s-stack" }, bulk, table));
     },
     update() { drawChips(); redraw(); },
-    badge() { const n = Soop.state.totals.dead; return n ? { text: n, tone: "error" } : null; },
+    badge() { const t = Soop.state.totals, n = (t.dead || 0) + (t.rejected || 0); return n ? { text: n, tone: "error" } : null; },
   });
 
   Soop.on("tab", ({ id, params }) => {

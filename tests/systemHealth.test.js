@@ -374,7 +374,30 @@ function healthyDeps(over = {}) {
         offsite: { pi: { id: "b1", ok: true }, contabo: { id: "b1", ok: true } },
       }),
     },
+    soopFarm: fakeSoopFarm(),
     ...over,
+  };
+}
+
+// The SOOP farm service as the health engine sees it: `started` and the panel
+// state. Eight logins in one bot, all accepted, checked two minutes ago.
+const soopLogin = (id, status = "ok", over = {}) => ({
+  id,
+  status,
+  sold: false,
+  lastCheckedAt: ago(2 * MIN),
+  ...over,
+});
+function fakeSoopFarm({ accounts, bots, alerts = [], egress = { proxied: true, ready: true }, started = true } = {}) {
+  const rows = accounts || ["a", "b", "c", "d", "e", "f", "g", "h"].map((id) => soopLogin(id));
+  return {
+    started,
+    stateView: async () => ({
+      accounts: rows,
+      bots: bots || [{ id: "bot1", name: "Everything", active: true, accountIds: rows.map((a) => a.id) }],
+      alerts,
+      egress,
+    }),
   };
 }
 
@@ -1166,6 +1189,127 @@ test("every check id the contract froze is present exactly once", () => {
   ]) {
     assert.ok(ids.includes(id), "the contract froze " + id + " and it is gone");
   }
+});
+
+/* ========================================================================== *
+ * soop.logins — the farm that was dead for nine hours behind a green panel
+ * ========================================================================== */
+
+test("soop.logins: every login accepted is ok, and says when that was last checked", async () => {
+  const check = await runCheck("soop.logins", healthyDeps());
+  assert.strictEqual(check.status, "ok");
+  assert.strictEqual(check.measured, 0);
+  assert.strictEqual(check.group, "soop");
+  assert.match(check.summary, /All 8 SOOP login\(s\) are accepted — last checked 2m ago/);
+  assert.deepStrictEqual(check.items, []);
+});
+
+test("REGRESSION: soop.logins FAILS when the drops site refuses every login", async () => {
+  // 2026-10-11 18:02Z. The main site still called all eight signed in, so the
+  // farm's own panel counted them as ok and asleep. This is that state.
+  const accounts = ["a", "b", "c", "d", "e", "f", "g", "h"].map((id) => soopLogin(id, "drops_rejected"));
+  const check = await runCheck("soop.logins", healthyDeps({ soopFarm: fakeSoopFarm({ accounts }) }));
+  assert.strictEqual(check.status, "fail");
+  assert.strictEqual(check.measured, 8);
+  assert.match(check.summary, /None of the 8 SOOP login\(s\) can farm \(8 refused by the drops site\)/);
+  assert.strictEqual(check.items.length, 8);
+  assert.deepStrictEqual(check.items[0], { login: "a", problem: "refused by the drops site", bot: "Everything" });
+});
+
+test("soop.logins: some logins out is a warning while every bot can still farm, a failure once one cannot", async () => {
+  const accounts = [soopLogin("a"), soopLogin("b", "drops_rejected"), soopLogin("c", "not_logged_in")];
+  const shared = await runCheck("soop.logins", healthyDeps({ soopFarm: fakeSoopFarm({ accounts }) }));
+  assert.strictEqual(shared.status, "warn");
+  assert.strictEqual(shared.measured, 2);
+  assert.match(shared.summary, /2 of 3 SOOP login\(s\) cannot farm \(1 refused by the drops site, 1 logged out\)/);
+
+  const bots = [
+    { id: "b1", name: "Overwatch", active: true, accountIds: ["a"] },
+    { id: "b2", name: "Delta Force", active: true, accountIds: ["b", "c"] },
+    { id: "b3", name: "Old run", active: false, accountIds: ["b"] },
+  ];
+  const emptied = await runCheck("soop.logins", healthyDeps({ soopFarm: fakeSoopFarm({ accounts, bots }) }));
+  assert.strictEqual(emptied.status, "fail", "a bot with no working login farms nothing");
+  assert.match(emptied.summary, /leaving 1 bot\(s\) with none: Delta Force/);
+  assert.doesNotMatch(emptied.summary, /Old run/, "a stopped bot is not farming anyway");
+});
+
+test("soop.logins: a sold login is never counted, in or out", async () => {
+  const accounts = [soopLogin("a"), soopLogin("gone", "not_logged_in", { sold: true })];
+  const check = await runCheck("soop.logins", healthyDeps({ soopFarm: fakeSoopFarm({ accounts }) }));
+  assert.strictEqual(check.status, "ok");
+  assert.match(check.summary, /All 1 SOOP login/);
+});
+
+test("soop.logins: no logins at all is a farm that is not in use, not a broken one", async () => {
+  const check = await runCheck("soop.logins", healthyDeps({ soopFarm: fakeSoopFarm({ accounts: [], bots: [] }) }));
+  assert.strictEqual(check.status, "ok");
+  assert.strictEqual(check.measured, 0);
+  assert.match(check.summary, /not in use/);
+});
+
+test("soop.logins is UNKNOWN, never ok, when it could not measure", async () => {
+  // Outside the server there is no farm to ask. A fresh copy of the module
+  // would hold no sessions and no scan, and read as a healthy idle farm.
+  for (const soopFarm of [null, fakeSoopFarm({ started: false })]) {
+    const check = await runCheck("soop.logins", healthyDeps({ soopFarm }));
+    assert.strictEqual(check.status, "unknown");
+    assert.strictEqual(check.measured, null);
+    assert.match(check.summary, /not running in this process/);
+  }
+
+  // Statuses only change on a definite answer from SOOP, so with the farm's own
+  // checker stopped they would say "ok" for ever.
+  const old = ["a", "b"].map((id) => soopLogin(id, "ok", { lastCheckedAt: ago(20 * HOUR) }));
+  const stale = await runCheck("soop.logins", healthyDeps({ soopFarm: fakeSoopFarm({ accounts: old }) }));
+  assert.strictEqual(stale.status, "unknown");
+  assert.strictEqual(stale.measured, null);
+  assert.match(stale.summary, /last checked 20h 0m ago — too long ago/);
+  const never = await runCheck("soop.logins", healthyDeps({ soopFarm: fakeSoopFarm({ accounts: [soopLogin("a", "untested", { lastCheckedAt: null })] }) }));
+  assert.strictEqual(never.status, "unknown");
+  assert.match(never.summary, /never checked/);
+});
+
+test("soop.logins: a tunnel blip is unknown, a connection that can earn nothing is a failure", async () => {
+  const blip = [{ level: "error", kind: "egress", msg: "SOOP is unreachable through the egress right now (EGRESS: timeout)." }];
+  const hiccup = await runCheck("soop.logins", healthyDeps({ soopFarm: fakeSoopFarm({ alerts: blip }) }));
+  assert.strictEqual(hiccup.status, "unknown", "one failed call through the Pi is not a dead farm");
+  assert.match(hiccup.summary, /last call to SOOP failed/);
+
+  const refused = ["a", "b"].map((id) => soopLogin(id, "drops_rejected"));
+  const both = await runCheck("soop.logins", healthyDeps({ soopFarm: fakeSoopFarm({ accounts: refused, alerts: blip }) }));
+  assert.strictEqual(both.status, "fail", "but a blip does not excuse logins SOOP has already refused");
+
+  const noProxy = await runCheck(
+    "soop.logins",
+    healthyDeps({
+      soopFarm: fakeSoopFarm({
+        egress: { proxied: true, ready: false },
+        alerts: [{ level: "error", kind: "egress", msg: "The proxy is configured but could not be started, so nothing is sent to SOOP." }],
+      }),
+    }),
+  );
+  assert.strictEqual(noProxy.status, "fail");
+  assert.match(noProxy.summary, /cannot be farmed from this server/);
+
+  const wrongCountry = await runCheck(
+    "soop.logins",
+    healthyDeps({ soopFarm: fakeSoopFarm({ alerts: [{ level: "error", kind: "country", msg: "SOOP sees this connection in US, where watch time is not credited." }] }) }),
+  );
+  assert.strictEqual(wrongCountry.status, "fail");
+
+  // A warning-level alert (the campaign list failed to refresh once) is not this check's business.
+  const scan = await runCheck("soop.logins", healthyDeps({ soopFarm: fakeSoopFarm({ alerts: [{ level: "warn", kind: "scan", msg: "The campaign list could not be refreshed" }] }) }));
+  assert.strictEqual(scan.status, "ok");
+});
+
+test("soop.logins reads the farm the server is running, never a fresh copy", () => {
+  // loadedModule() hands back what this process already holds. The test process
+  // never started a farm, so the real seam must answer null — not load one.
+  const ctx = health.makeCtx({ deps: {}, now });
+  const loaded = Object.keys(require.cache).some((k) => /utils[\\/]soopFarm\.js$/.test(k));
+  assert.strictEqual(loaded, false, "this test file must not load the farm itself");
+  assert.strictEqual(ctx.dep("soopFarm"), null);
 });
 
 /* ========================================================================== *

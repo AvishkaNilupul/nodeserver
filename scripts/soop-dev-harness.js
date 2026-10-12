@@ -3,13 +3,16 @@
 // SOOP farm dev harness (contract §12):
 //
 //   node scripts/soop-dev-harness.js [port=4599]   ->   http://127.0.0.1:4599/soop.html
+//   node scripts/soop-dev-harness.js 4599 --refuse=all   the 2026-10-11 state: the
+//                         drops site refuses every farming login (or --refuse=3)
 //
 // The real routes, farm service and page, running against an in-memory MongoDB
 // and the fake SOOP from tests/helpers/soopFake.js. Nothing here can reach the
 // real database or sooplive.com: .env is never loaded, MONGO_URI is dropped, the
 // farm only ever gets fake clients, and outbound requests to SOOP hosts throw.
 // Time runs 30x: the fake credits one minute every 2 s and the farm's waits are
-// shortened to match, so progress moves while you watch.
+// shortened to match, so progress moves while you watch. The login alert never
+// reaches Telegram from here: what it would have sent is printed instead.
 const path = require("path");
 const http = require("http");
 const https = require("https");
@@ -41,8 +44,10 @@ const express = require("express");
 const mongoose = require("mongoose");
 const { MongoMemoryServer } = require("mongodb-memory-server");
 const { createFakeSoop } = require("../tests/helpers/soopFake");
+const { createLoginAlert } = require("../utils/soop/loginAlert");
 
 const PORT = Number(process.argv[2]) || 4599;
+const REFUSE = (process.argv.find((a) => a.startsWith("--refuse=")) || "").slice(9);
 const SPEED = 30; // simulated minutes per real minute
 const ADVANCE_MS = 60000 / SPEED; // one fake minute
 const HOUR = 3600 * 1000;
@@ -184,6 +189,18 @@ async function seed(farm, world) {
     if (r && !r.ok) log(`create bot "${b.name}" refused: ${r.error}`);
   }
   await step("inventory sync", () => farm.inventory.syncMany(ids.slice(0, 10)));
+  if (REFUSE) {
+    const n = REFUSE === "all" ? 10 : Math.max(0, Math.min(10, Number(REFUSE) || 0));
+    const refused = ids.slice(0, n);
+    await step("drops site refuses " + n + " login(s)", async () => {
+      for (const id of refused) world.rejectDrops(id);
+      // As it went that night: the running sessions end on a refused call and
+      // are marked logged out, then the next sweep finds the main site still
+      // answering for them and files them as refused.
+      for (let i = 0; i < 100 && refused.some((id) => farm.sessions.has(id)); i++) await fastSleep(3000);
+      for (const id of refused) await farm.health.check(id).catch(() => {});
+    });
+  }
   log(`seeded: ${ids.length} accounts (${loggedOut} logged out, ${sold} sold, ${ids.slice(7, 10).join(", ")} free), ${bots.length} bots`);
 }
 
@@ -216,6 +233,12 @@ async function main() {
   const farm = require("../utils/soopFarm");
   farm.setClientFactory((cookies, opts) => world.clientFor(cookies, opts));
   farm.setClock({ sleep: fastSleep });
+  farm.loginAlert = createLoginAlert({
+    send: async (text) => log("the login alert would send this on Telegram:\n" + text),
+    activity: farm.activity,
+    waitMs: 10000,
+    quietMs: 4000,
+  });
   await seed(farm, world);
 
   setInterval(() => world.advance(1), ADVANCE_MS);

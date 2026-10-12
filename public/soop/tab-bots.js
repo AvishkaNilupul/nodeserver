@@ -28,6 +28,7 @@
     if (!a) return { label: "Missing", tone: "error", detail: "This account was deleted — remove it from the bot" };
     if (a.sold) return { label: "Sold", tone: "error", detail: "Marked sold, so it no longer farms" };
     if (a.status === "not_logged_in") return { label: "Logged out", tone: "error", detail: "Logged out — re-import the cookie" };
+    if (a.status === "drops_rejected" && !s) return { label: "Refused", tone: "error", detail: "The drops site refuses this login — re-import the cookie" };
     if (s) {
       const w = s.state !== "farming" ? SESSION[s.state] || [s.state, null] : s.credited === true ? ["Earning", "ok"] : s.credited === false ? ["Not earning", "warn"] : ["Watching", "info"];
       return { label: w[0], tone: w[1], detail: (s.detail || "") + (s.title && bot.mode !== "campaign" ? " · " + s.title : ""),
@@ -42,6 +43,7 @@
     if (bot.state === "running") return count(c.farming, "account") + " of " + fmt.num(c.total) + " earning watch time";
     if (bot.state === "finished") return "Every account reached its goal" + (ended ? " · finished" + ended : "");
     if (bot.state === "stopped") return "Not farming" + (ended ? " · stopped" + ended : "") + " — resume to carry on";
+    if (c.error && c.error >= c.total - c.done) return "Not farming — every account it has left has a problem (see Accounts below)";
     const said = {};                  // waiting: the reason most of its accounts give
     let top = "";
     bot.accountIds.forEach((id) => {
