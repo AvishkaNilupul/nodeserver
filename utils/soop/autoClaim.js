@@ -29,10 +29,12 @@ const WAITING = { division: "available", kind: "code", needsLink: { $ne: true },
 // Claimed (by us, by hand on SOOP, or by a claim whose reply was lost) but with
 // no code stored yet: reading it back is the same call, and only reads.
 const CODELESS = { division: "acquired", kind: "code", hasCode: { $ne: true } };
-const ROW_FIELDS = "loginId name expiresAt sentAt claimedAt createdAt raw.itemCodeIdx auto claim.kind";
-// ...unless SOOP already said there is no code to have (it went to a game
-// account): only a reward never read, or one SOOP owes a code for.
-const owedCode = (r) => !r.claim || !r.claim.kind || r.claim.kind === "pending";
+const ROW_FIELDS = "loginId name expiresAt sentAt claimedAt receivedAt createdAt raw.itemCodeIdx auto claim.kind";
+// ...unless there is no code to have: only a reward never read, one SOOP says
+// it owes a code for, or one whose claim came back without a code.
+const owedCode = (r) => !r.claim || !r.claim.kind || r.claim.kind === "pending" || Boolean(r.auto && r.auto.kind === "pending");
+// Recorded on a reward SOOP answered "log in" for while the login check passed.
+const ODD_LOGIN = 'SOOP answered "log in" for this reward although the login works';
 
 const canClaim = (a) => Boolean(a) && !a.sold && a.status !== DEAD && a.status !== REJECTED;
 const plural = (n, one) => `${n} ${one}${n === 1 ? "" : "s"}`;
@@ -57,6 +59,10 @@ function createAutoClaimer({
   // ...and before a code SOOP owes is asked for again. Under six hours, so the
   // second three-hourly sweep after it is not seconds too early.
   owedMs = 5.5 * HOUR,
+  // A reward whose claim got no answer goes to the back of its account's line
+  // for this long: the tunnel, most likely — but one reward that never gets
+  // an answer must not stand in front of the others for ever.
+  unansweredMs = 5 * MIN,
   // An owed code is asked for this long after the claim, then left alone.
   owedForMs = 30 * DAY,
   // Unclaimed this long on a login that works: something is wrong, say so.
@@ -74,7 +80,7 @@ function createAutoClaimer({
   const Item = () => (models && models.SoopInventoryItem) || require("../../models/SoopInventoryItem");
   const Account = () => (models && models.SoopAccount) || require("../../models/SoopAccount");
 
-  const state = { running: false, claimed: 0, read: 0, lastClaimAt: null, lastSweepAt: null, lastSweep: null, lastError: null };
+  const state = { running: false, claimed: 0, read: 0, lastClaimAt: null, lastSweepAt: null, lastSweep: null, lastError: null, resume: null };
   const queued = new Map(); // key -> promise, for work that has not started yet
   let chain = Promise.resolve();
   let lastCallAt = 0;
@@ -106,16 +112,20 @@ function createAutoClaimer({
   const ms = (d) => (d ? new Date(d).getTime() : 0);
   const hasId = (r) => Boolean(r.raw && r.raw.itemCodeIdx);
   const notExpired = (r, t) => !r.expiresAt || ms(r.expiresAt) > t;
-  // A reward that was refused, or that SOOP has no code for yet, is not asked
-  // for again until its wait has passed.
-  const due = (r, t) => !(r.auto && r.auto.at) || t - ms(r.auto.at) >= (r.auto.kind === "failed" ? retryMs : owedMs);
+  // A reward that was refused, went unanswered, or that SOOP has no code for
+  // yet, is not asked for again until its wait has passed.
+  const WAITS = { failed: retryMs, unanswered: unansweredMs };
+  const due = (r, t) => !(r.auto && r.auto.at) || t - ms(r.auto.at) >= (WAITS[r.auto.kind] ?? owedMs);
+  // Never tried first, oldest first; then the ones tried before, the longest
+  // ago first. A reward SOOP keeps refusing never stands in front of a new one.
+  const byTurn = (a, b) => ms(a.auto && a.auto.at) - ms(b.auto && b.auto.at);
 
   // Unclaimed rewards to claim now. `force`: a fresh login is a fresh start —
   // what an earlier attempt was refused is tried again at once.
   async function waitingRows(id, { force = false } = {}) {
     const t = now();
     const rows = await Item().find({ ...WAITING, loginId: id }).select(ROW_FIELDS).sort({ sentAt: 1, _id: 1 }).lean();
-    return rows.filter((r) => hasId(r) && notExpired(r, t) && (force || due(r, t)));
+    return rows.filter((r) => hasId(r) && notExpired(r, t) && (force || due(r, t))).sort(byTurn);
   }
 
   // Claimed rewards whose code is still to be read. The date on such a row is
@@ -124,7 +134,9 @@ function createAutoClaimer({
   async function codelessRows(id) {
     const t = now();
     const rows = await Item().find({ ...CODELESS, loginId: id }).select(ROW_FIELDS).sort({ sentAt: 1, _id: 1 }).lean();
-    return rows.filter((r) => hasId(r) && owedCode(r) && due(r, t) && t - ms(r.claimedAt || r.createdAt) < owedForMs);
+    return rows
+      .filter((r) => hasId(r) && owedCode(r) && due(r, t) && t - ms(r.claimedAt || r.receivedAt || r.createdAt) < owedForMs)
+      .sort(byTurn);
   }
 
   function stamp(row, kind, error) {
@@ -135,14 +147,19 @@ function createAutoClaimer({
   const clear = (row) => (row.auto ? Item().updateOne({ _id: row._id }, { $set: { auto: null } }) : null);
   const why = (err) => (err && err.code === "API" && err.message) || plainMessage(err);
 
-  // -> "code" | "pending" | "renewed" | "other" | "refused" | "failed"
-  // Throws when nothing was learned (see `unanswered`) or SOOP said "log in".
+  // -> "code" | "pending" | "renewed" | "refused" | "failed"
+  // Throws when SOOP gave no answer (see `unanswered`) or said "log in".
   async function claimOne(row) {
     let res;
     try {
       res = await inventory.claim(String(row._id), { sync: false });
     } catch (err) {
-      if (unanswered(err) || isAuthError(err)) throw err;
+      if (isAuthError(err)) throw err;
+      if (unanswered(err)) {
+        // Nothing is known about the reward: it only loses its place in line.
+        await stamp(row, "unanswered", plainMessage(err));
+        throw err;
+      }
       await stamp(row, "failed", why(err));
       return "failed";
     }
@@ -156,21 +173,28 @@ function createAutoClaimer({
       state.lastClaimAt = new Date(now());
       return "code";
     }
-    if (kind === "pending" || kind === "renewed") {
-      await stamp(row, kind, message);
-      return kind;
+    if (kind === "renewed") {
+      await stamp(row, "renewed", message);
+      return "renewed";
     }
-    // Claimed, and there is no code to have: nothing is owed, nothing to retry.
-    await clear(row);
-    return "other";
+    // SOOP has run out and owes the code — or answered with no code at all,
+    // which on a reward that is a code and tied to no game account is the
+    // same thing to us: it is asked for again later.
+    await stamp(row, "pending", kind === "pending" ? message : "SOOP gave no code for this reward");
+    return "pending";
   }
 
+  // -> true when the code was read and stored. Throws like claimOne.
   async function readOne(row) {
     let found;
     try {
       found = await inventory.reveal(String(row._id));
     } catch (err) {
-      if (unanswered(err) || isAuthError(err)) throw err;
+      if (isAuthError(err)) throw err;
+      if (unanswered(err)) {
+        await stamp(row, "unanswered", plainMessage(err));
+        throw err;
+      }
       await stamp(row, "pending", why(err));
       return false;
     }
@@ -183,19 +207,21 @@ function createAutoClaimer({
     return false;
   }
 
-  // Everything waiting on one login. `sync: false` trusts the stored copy
-  // instead of reading the inventory first.
-  // -> { id, claimed, read, failed, pending, added, synced, skipped }
-  async function runAccount(id, { sync = true, force = false } = {}) {
-    const out = blank(id);
-    if (!on()) return { ...out, skipped: "off" };
+  // Everything waiting on one login, counted into `out` as it goes — so a run
+  // that is stopped half way still says what it did. `sync: false` trusts the
+  // stored copy instead of reading the inventory first.
+  async function runAccount(id, { sync = true, force = false } = {}, out) {
+    if (!on()) {
+      out.skipped = "off";
+      return;
+    }
     const mayClaim = async () => {
       const acc = await Account().findOne({ loginId: id }).select("loginId status sold").lean();
       if (!acc) return "unknown";
       return canClaim(acc) ? null : acc.sold ? "sold" : "login";
     };
     out.skipped = await mayClaim();
-    if (out.skipped) return out;
+    if (out.skipped) return;
     await inventory.settled(id); // claims never start in the middle of a sync
     if (sync) {
       // Quiet: thirty logins read every three hours would bury the activity log.
@@ -204,25 +230,33 @@ function createAutoClaimer({
       out.added = Number(read && read.added) || 0;
     }
 
-    let loginOk = null; // asked once, when SOOP answers a claim with "log in"
+    // Switched off, sold, or its login marked dead while it waited its turn:
+    // checked AFTER the pause, so the call that follows is never a stale decision.
+    const stillOurs = async () => on() && !(await mayClaim());
+    // "Log in" in answer to one call: the login, or that one reward? Asked
+    // once a run. A login the drops site still takes was not what SOOP refused.
+    let loginOk = null;
+    const notTheLogin = async (err) => {
+      if (loginOk === null) loginOk = await loginWorks(id);
+      if (!loginOk) throw Object.assign(err, { loginChecked: true });
+    };
+
     let refusals = 0;
-    for (let round = 0; round < ROUNDS; round++) {
-      const rows = await waitingRows(id, { force });
+    rounds: for (let round = 0; round < ROUNDS; round++) {
+      // `force` for the first look only: a reward refused in this very run is not asked twice.
+      const rows = await waitingRows(id, { force: force && round === 0 });
       let reissued = false;
       for (const row of rows) {
-        // Sold, or its login marked dead, a moment ago: not ours to claim on.
-        if (!on() || (await mayClaim())) break;
+        if (!on()) return;
         await pace();
+        if (!(await stillOurs())) return;
         let got;
         try {
           got = await claimOne(row);
         } catch (err) {
           if (!isAuthError(err)) throw err;
-          // The login, or this one reward? A login the drops site still
-          // accepts was not what SOOP refused.
-          if (loginOk === null) loginOk = await loginWorks(id);
-          if (!loginOk) throw Object.assign(err, { loginChecked: true });
-          await stamp(row, "failed", why(err));
+          await notTheLogin(err);
+          await stamp(row, "failed", ODD_LOGIN);
           got = "failed";
         }
         if (got === "code") out.claimed += 1;
@@ -232,7 +266,7 @@ function createAutoClaimer({
           out.failed += 1;
           // Refused twice running: whatever it is, it is not about one
           // reward. The rest is left as it is for the next run.
-          if (++refusals >= maxRefusals) return out;
+          if (++refusals >= maxRefusals) break rounds;
         } else if (got !== "refused") {
           refusals = 0;
         }
@@ -245,12 +279,21 @@ function createAutoClaimer({
     }
 
     for (const row of await codelessRows(id)) {
-      if (!on()) break;
+      if (!on()) return;
       await pace();
-      if (await readOne(row)) out.read += 1;
+      if (!(await stillOurs())) return;
+      let ok;
+      try {
+        ok = await readOne(row);
+      } catch (err) {
+        if (!isAuthError(err)) throw err;
+        await notTheLogin(err);
+        await stamp(row, "pending", ODD_LOGIN);
+        ok = false;
+      }
+      if (ok) out.read += 1;
       else out.pending += 1;
     }
-    return out;
   }
 
   async function loginWorks(id) {
@@ -273,26 +316,30 @@ function createAutoClaimer({
     if (out.read) note({ accountId: out.id, msg: `Read back the code of ${plural(out.read, "claimed reward")} on ${out.id}` });
   }
 
-  // Never rejects: the result says what stopped it.
-  // error: "auth" the login is refused · "egress" nothing was learned (tunnel,
+  // Never rejects: the result says what was done and what stopped it.
+  // error: "auth" the login is refused · "egress" SOOP gave no answer (tunnel,
   // timeout, unreadable reply) · "error" anything else.
   async function guarded(id, opts) {
+    const out = blank(id);
+    let error;
     try {
-      const out = await runAccount(id, opts);
-      report(out);
-      return out;
+      await runAccount(id, opts, out);
     } catch (err) {
       state.lastError = { at: new Date(now()), accountId: id, error: plainMessage(err) };
       if (isAuthError(err)) {
+        error = "auth";
         note({ level: "warn", accountId: id, msg: `SOOP refused ${id} while its rewards were being claimed — anything unclaimed on it waits until its cookie is re-imported` });
         // So the panel and the login alert say so now, not at the next sweep.
         if (!err.loginChecked) loginWorks(id);
-        return { ...blank(id), error: "auth" };
+      } else if (unanswered(err)) {
+        error = "egress";
+      } else {
+        error = "error";
+        note({ level: "warn", accountId: id, msg: `Automatic claiming stopped on ${id}: ${plainMessage(err)}` });
       }
-      if (unanswered(err)) return { ...blank(id), error: "egress" };
-      note({ level: "warn", accountId: id, msg: `Automatic claiming stopped on ${id}: ${plainMessage(err)}` });
-      return { ...blank(id), error: "error" };
     }
+    report(out);
+    return error ? { ...out, error } : out;
   }
 
   function enqueue(key, work) {
@@ -322,35 +369,54 @@ function createAutoClaimer({
   // whatever is waiting claimed. A reward can land without the farm seeing it
   // (a restart between a step and its sync, a reward handed out late), and a
   // claim can fail.
-  // -> { accounts, claimed, read, failed, pending, added, stopped }
+  //
+  // One login that gets no answer is skipped: its own trouble, or a blip. Two
+  // running is the tunnel, and the sweep stops — to go on, next time, from
+  // the login it stopped at. Starting over would read the first logins again
+  // and again on a poor link and never reach the last.
+  // -> { accounts, unread, claimed, read, failed, pending, added, stopped }
   async function doSweep() {
-    const sum = { accounts: 0, claimed: 0, read: 0, failed: 0, pending: 0, added: 0, stopped: null };
+    const sum = { accounts: 0, unread: 0, claimed: 0, read: 0, failed: 0, pending: 0, added: 0, stopped: null };
     if (!on()) return { ...sum, stopped: "off" };
     const rows = await Account().find({ sold: { $ne: true } }).select("loginId status sold").sort({ createdAt: 1 }).lean();
-    for (const a of rows.filter(canClaim)) {
+    const all = rows.filter(canClaim).map((a) => a.loginId);
+    const resume = state.resume;
+    state.resume = null;
+    const from = resume ? Math.max(0, all.indexOf(resume.at)) : 0;
+    const order = [...all.slice(from), ...all.slice(0, from)].slice(0, resume ? Math.min(resume.left, all.length) : all.length);
+    let silent = 0;
+    for (let i = 0; i < order.length; i++) {
       if (!on()) {
         sum.stopped = "off";
         break;
       }
       if (sum.accounts) await sleep(checkPaceMs);
       sum.accounts += 1;
-      const out = await guarded(a.loginId, { sync: true });
+      const out = await guarded(order[i], { sync: true });
       for (const k of ["claimed", "read", "failed", "pending", "added"]) sum[k] += out[k];
-      // A dead tunnel is dead for every login: the caller starts over later.
-      if (out.error === "egress") {
-        sum.stopped = "egress";
-        break;
+      if (out.error !== "egress") {
+        silent = 0;
+        continue;
       }
+      sum.unread += 1;
+      if (++silent < 2) continue;
+      sum.stopped = "egress";
+      state.resume = { at: order[i - 1], left: order.length - (i - 1) };
+      break;
     }
+    // Nobody answered at all (a farm of one login never has two running):
+    // that is the tunnel as well, and the whole pass is still to do.
+    if (!sum.stopped && sum.accounts && sum.unread === sum.accounts) sum.stopped = "egress";
     state.lastSweepAt = new Date(now());
     state.lastSweep = sum;
-    if (sum.claimed || sum.read || sum.failed || sum.stopped === "egress") {
+    if (sum.claimed || sum.read || sum.failed || sum.unread) {
       note({
-        level: sum.failed || sum.stopped ? "warn" : "info",
+        level: sum.failed || sum.unread ? "warn" : "info",
         msg:
           `Checked ${plural(sum.accounts, "login")} for unclaimed codes: ${sum.claimed} claimed, ${sum.read} read back` +
           (sum.failed ? `, ${sum.failed} could not be claimed` : "") +
-          (sum.stopped === "egress" ? " — stopped early: SOOP could not be reached" : ""),
+          (sum.unread ? `, ${plural(sum.unread, "login")} got no answer from SOOP` : "") +
+          (sum.stopped === "egress" ? " — stopped there, to go on from that login shortly" : ""),
       });
     }
     return sum;
@@ -360,7 +426,7 @@ function createAutoClaimer({
     enqueue("sweep", () =>
       doSweep().catch((err) => {
         state.lastError = { at: new Date(now()), accountId: null, error: plainMessage(err) };
-        return { accounts: 0, claimed: 0, read: 0, failed: 0, pending: 0, added: 0, stopped: "error" };
+        return { accounts: 0, unread: 0, claimed: 0, read: 0, failed: 0, pending: 0, added: 0, stopped: "error" };
       }),
     );
 
@@ -379,13 +445,19 @@ function createAutoClaimer({
     const overdue = { rewards: 0 };
     for (const r of rows) {
       const a = byId.get(r.loginId);
-      if (!a || a.sold || !hasId(r) || !notExpired(r, t)) continue;
+      if (!a || a.sold || !notExpired(r, t)) continue;
+      // One unanswered call is the tunnel's business, not the reward's; three are.
+      const told = r.auto && r.auto.error && !(r.auto.kind === "unanswered" && (Number(r.auto.tries) || 0) < 3);
       if (!canClaim(a)) {
         stuck.rewards += 1;
         stuck.logins.add(r.loginId);
         const exp = r.expiresAt ? new Date(r.expiresAt) : null;
         if (exp && (!stuck.soonest || exp < stuck.soonest)) stuck.soonest = exp;
-      } else if (r.auto && r.auto.error) {
+      } else if (!hasId(r)) {
+        // Nothing to ask SOOP with: it cannot be claimed from here at all.
+        failed.rewards += 1;
+        failed.error = failed.error || "the reward has no SOOP item id";
+      } else if (told) {
         failed.rewards += 1;
         failed.error = failed.error || String(r.auto.error);
       } else if (t - ms(r.createdAt) > overdueMs) {

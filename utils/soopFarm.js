@@ -180,6 +180,10 @@ class SoopFarm {
     for (const e of this.invTimers.values()) clearTimeout(e.timer);
     clearTimeout(this.bootTimer);
     clearTimeout(this.claimTimer);
+    // The claimer about to be replaced finishes what it is on and starts
+    // nothing more: off stops it before its next call.
+    this.autoClaimEnabled = () => false;
+    await this.autoClaim.idle();
     // Never the real switch here: it reads the site's settings file.
     this.autoClaimEnabled = opts.autoClaimEnabled || (() => true);
     this.metrics.stop();
@@ -660,15 +664,17 @@ class SoopFarm {
   // claimer's queue, which works on one account at a time: every account of a
   // bot reaches a step in the same minute, and thirty inventories read at once
   // is a burst from one address. Switched off, the claimer does nothing at
-  // all, so the plain read stays. -> true when it is worth looking again.
+  // all, so the plain read of before stays: once, through the paced batch.
+  // -> true when it is worth looking again.
   async _readAndClaim(id) {
     if (!this.autoClaim.status().enabled) {
-      const read = await this.inventory.syncAccount(id).catch(() => null);
-      return !read || !read.added;
+      this.inventory.syncMany([id]);
+      return false;
     }
     const out = await this.autoClaim.account(id, { sync: true });
     if (out.skipped || out.error === "auth") return false; // nothing a second look would change
-    return Boolean(out.error) || (!out.added && !out.claimed && !out.read);
+    if (out.error) return true; // the read may not have happened at all
+    return !out.added && !out.claimed && !out.read; // nothing new was there yet
   }
 
   // One line in the process log per sweep: the only trace of a sweep that had
@@ -678,6 +684,7 @@ class SoopFarm {
     const s = await this.autoClaim.sweep();
     console.log(
       `[soop] claim sweep: ${s.accounts} login(s) read, ${s.added} new item(s), ${s.claimed} claimed, ${s.read} read back, ${s.failed} refused` +
+        (s.unread ? `, ${s.unread} got no answer` : "") +
         (s.stopped ? ` — stopped: ${s.stopped}` : ""),
     );
     this.claimView = { at: 0, value: this.claimView.value };

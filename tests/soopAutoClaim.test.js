@@ -31,6 +31,7 @@ const HOUR = 60 * MIN;
 const DAY = 24 * HOUR;
 const RETRY_MS = 30 * MIN; // before a refused claim is tried again
 const OWED_MS = 5.5 * HOUR; // before an owed code is asked for again
+const UNANSWERED_MS = 5 * MIN; // before a reward whose claim got no answer is tried again
 const PENDING = "2차지급예정"; // what SOOP answers when it has run out of codes
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 // SOOP's dates are Korea wall-clock strings.
@@ -202,6 +203,7 @@ test("an account marked sold in the middle of a run is not claimed on any furthe
   const s = setup({ paceMs: 5 });
   await s.add("acc1");
   for (const n of [1, 2, 3, 4]) s.world.addInventory("acc1", { itemName: "Code " + n, claimCode: "SOLD-MID-" + n });
+  s.world.addInventory("acc1", { itemName: "By Hand", claimCode: "SOLD-MID-HAND" }, "acquired");
   let pauses = 0;
   const claimer = s.make({
     sleep: async (ms) => {
@@ -210,12 +212,23 @@ test("an account marked sold in the middle of a run is not claimed on any furthe
     },
   });
   const out = await claimer.account("acc1");
-  assert.equal(out.claimed, 2, "the claim already under way is made; the next one sees the account is sold");
-  assert.equal(s.world.calls().useInfo, 2);
-  assert.equal(await SoopInventoryItem.countDocuments({ loginId: "acc1", division: "available" }), 2);
+  assert.equal(out.claimed, 1, "the claim that follows the wait is not made: the account is no longer ours");
+  assert.equal(s.world.calls().useInfo, 1, "and nothing is read back on it either");
+  assert.equal(await SoopInventoryItem.countDocuments({ loginId: "acc1", division: "available" }), 3);
+
+  // The same while it is reading codes back.
+  await SoopAccount.updateOne({ loginId: "acc1" }, { $set: { sold: false } });
+  for (const n of [2, 3]) s.world.addInventory("acc1", { itemName: "By Hand " + n, claimCode: "SOLD-MID-HAND-" + n }, "acquired");
+  await s.inventory.syncAccount("acc1");
+  await SoopInventoryItem.updateMany({ loginId: "acc1", division: "available" }, { $set: { expiresAt: new Date(s.clock.t - HOUR) } }); // nothing left to claim
+  pauses = 0;
+  s.clock.t += HOUR;
+  const again = await claimer.account("acc1", { sync: false });
+  assert.deepEqual({ claimed: again.claimed, read: again.read }, { claimed: 0, read: 1 }, "one code read back, then the account was sold");
+  assert.equal(await SoopInventoryItem.countDocuments({ loginId: "acc1", division: "acquired", hasCode: { $ne: true } }), 2);
 });
 
-test("switched off, SOOP is asked for nothing; switched off mid-run, it stops within one call", async () => {
+test("switched off, SOOP is asked for nothing; switched off mid-run, the next call is not made", async () => {
   let on = false;
   const s = setup({ enabled: () => on, paceMs: 5 });
   await s.add("acc1");
@@ -228,12 +241,12 @@ test("switched off, SOOP is asked for nothing; switched off mid-run, it stops wi
   assert.equal(s.claimer.status().enabled, false);
   assert.equal(JSON.stringify(s.world.calls()), before, "off means not one call");
 
-  // On again — and off at the first pause, which is before the second claim.
+  // On again — and off during the first pause, which is before the second claim.
   on = true;
   const claimer = s.make({ sleep: async (ms) => { s.clock.t += ms; on = false; } });
   const out = await claimer.account("acc1");
-  assert.equal(out.claimed, 2, "the call already decided on is made, the next is not");
-  assert.equal(await SoopInventoryItem.countDocuments({ loginId: "acc1", division: "available" }), 1);
+  assert.equal(out.claimed, 1, "off stops the call that was about to be made");
+  assert.equal(await SoopInventoryItem.countDocuments({ loginId: "acc1", division: "available" }), 2);
 });
 
 test("a switch that cannot be read counts as on", async () => {
@@ -356,20 +369,29 @@ test("an owed code is asked for after the reward's own date has passed, and not 
   assert.equal(s.world.calls().useInfo, asked, "no call after thirty days");
 });
 
-test("a claimed reward with no code to have is not asked about again", async () => {
+test("a claim that comes back with no code at all is an owed code: asked for again, not forgotten", async () => {
   const s = setup();
   await s.add("acc1");
-  s.world.addInventory("acc1", { itemName: "Went To The Game", noCode: true });
+  const raw = s.world.addInventory("acc1", { itemName: "Answered Empty", noCode: true });
   const out = await s.claimer.account("acc1");
-  assert.deepEqual({ claimed: out.claimed, failed: out.failed, pending: out.pending }, { claimed: 0, failed: 0, pending: 0 });
-  const row = (await s.rows("acc1"))["Went To The Game"];
+  assert.deepEqual({ claimed: out.claimed, failed: out.failed, pending: out.pending }, { claimed: 0, failed: 0, pending: 1 });
+  let row = (await s.rows("acc1"))["Answered Empty"];
   assert.equal(row.division, "acquired");
-  assert.equal(row.auto, null, "nothing is owed, so nothing is recorded against it");
-  s.clock.t += 2 * DAY;
+  assert.equal(row.hasCode, false);
+  assert.deepEqual({ kind: row.auto.kind, tries: row.auto.tries, error: row.auto.error }, { kind: "pending", tries: 1, error: "SOOP gave no code for this reward" });
+  assert.match(s.said(), /SOOP has no code yet for 1 reward on acc1/);
+
   await s.claimer.account("acc1");
-  await s.claimer.sweep();
-  assert.equal(s.world.calls().useInfo, 1);
-  assert.equal((await s.claimer.waiting()).failed.rewards, 0);
+  assert.equal(s.world.calls().useInfo, 1, "not asked again before the wait has passed");
+  s.clock.t += OWED_MS + 1000;
+  assert.equal((await s.claimer.account("acc1")).pending, 1, "asked again, still nothing");
+  assert.equal(s.world.calls().useInfo, 2);
+  s.world.setClaimCode("acc1", raw.itemCodeIdx, "CAME-AFTER-ALL-1");
+  s.clock.t += OWED_MS + 1000;
+  assert.equal((await s.claimer.account("acc1")).read, 1);
+  row = (await s.rows("acc1"))["Answered Empty"];
+  assert.equal(row.auto, null);
+  assert.equal(await s.inventory.revealCode(String(row._id)), "CAME-AFTER-ALL-1");
 });
 
 test("a reward SOOP reissues is claimed as its new item, in the same run", async () => {
@@ -432,7 +454,17 @@ test("a fresh login is a fresh start: what was refused before is tried at once",
   assert.equal((await s.claimer.account("acc1", { force: true })).claimed, 2, "the run after a cookie import does not");
 });
 
-test("a reply that could not be read marks nothing: the rewards are tried again at the next run", async () => {
+test("a forced run asks a refused reward once, and still claims the one SOOP reissued", async () => {
+  const s = setup();
+  await s.add("acc1");
+  s.world.addInventory("acc1", { itemName: "Refused", claimCode: "NEVER-1", refuseOnClaim: true });
+  s.world.addInventory("acc1", { itemName: "Reissued", claimCode: "FORCED-RENEW-1", renewFlag: "Y" });
+  const out = await s.claimer.account("acc1", { force: true });
+  assert.deepEqual({ claimed: out.claimed, failed: out.failed }, { claimed: 1, failed: 1 });
+  assert.equal((await s.rows("acc1"))["Refused"].auto.tries, 1, "not asked a second time in the round after the reissue");
+});
+
+test("a claim that gets no readable answer blames nobody: the reward goes to the back of the line and the sweep goes on", async () => {
   const s = setup();
   for (const id of ["acc1", "acc2"]) {
     await s.add(id);
@@ -440,14 +472,78 @@ test("a reply that could not be read marks nothing: the rewards are tried again 
   }
   s.world.refuseClaims("acc1", true, "HTTP"); // an error page instead of an answer
   const sum = await s.claimer.sweep();
-  assert.deepEqual({ accounts: sum.accounts, claimed: sum.claimed, failed: sum.failed, stopped: sum.stopped }, { accounts: 1, claimed: 0, failed: 0, stopped: "egress" }, "SOOP is not answering: the other logins are not tried either");
-  assert.equal(s.world.calls().useInfo, 1, "one unreadable answer is enough");
-  assert.equal(await SoopInventoryItem.countDocuments({ auto: { $ne: null } }), 0, "nothing is held against any reward");
+  assert.deepEqual(
+    { accounts: sum.accounts, unread: sum.unread, claimed: sum.claimed, failed: sum.failed, stopped: sum.stopped },
+    { accounts: 2, unread: 1, claimed: 2, failed: 0, stopped: null },
+    "one login without an answer is skipped; the next one is still worked on",
+  );
+  assert.equal(s.world.calls().useInfo, 3, "one unanswered call on acc1 was enough for this run");
+  let r = await s.rows("acc1");
+  assert.deepEqual({ kind: r["Code 1"].auto.kind, tries: r["Code 1"].auto.tries }, { kind: "unanswered", tries: 1 });
+  assert.equal(r["Code 2"].auto, null, "the reward that was not asked for carries nothing");
+  assert.equal((await s.claimer.waiting()).failed.rewards, 0, "one unanswered call is not worth an alert");
   assert.ok(!s.said().includes("Bad Gateway"), "the page's text is not repeated");
+  assert.match(s.said(), /1 login got no answer from SOOP/);
 
+  // A minute later SOOP is fine: the reward that was never asked for is claimed at once...
   s.world.refuseClaims("acc1", false);
-  s.clock.t += MIN; // a minute later SOOP is fine: nothing has to wait out a retry time
-  assert.equal((await s.claimer.sweep()).claimed, 4);
+  s.clock.t += MIN;
+  assert.equal((await s.claimer.sweep()).claimed, 1);
+  // ...and the one that went unanswered a few minutes after, not hours.
+  s.clock.t += UNANSWERED_MS;
+  assert.equal((await s.claimer.sweep()).claimed, 1);
+  r = await s.rows("acc1");
+  assert.equal(r["Code 1"].auto, null);
+  assert.equal(await SoopInventoryItem.countDocuments({ hasCode: true }), 4);
+});
+
+test("one reward that never gets an answer does not stand in front of the others, and is reported once it repeats", async () => {
+  const s = setup();
+  await s.add("acc1");
+  await s.add("acc2");
+  s.world.addInventory("acc1", { itemName: "Never Answered", claimCode: "POISON-1", httpOnClaim: true });
+  s.world.addInventory("acc2", { itemName: "Fine", claimCode: "FINE-2" });
+  const first = await s.claimer.sweep();
+  assert.deepEqual({ accounts: first.accounts, unread: first.unread, claimed: first.claimed, stopped: first.stopped }, { accounts: 2, unread: 1, claimed: 1, stopped: null }, "the login behind it is still read");
+
+  // A new code lands on the same account: it is claimed BEFORE the odd one is tried again.
+  s.world.addInventory("acc1", { itemName: "New Code", claimCode: "AFTER-POISON-1" });
+  s.clock.t += UNANSWERED_MS + 1000;
+  const second = await s.claimer.account("acc1");
+  assert.deepEqual({ claimed: second.claimed, error: second.error }, { claimed: 1, error: "egress" }, "what it did before it was stopped is still reported");
+  const r = await s.rows("acc1");
+  assert.equal(r["New Code"].hasCode, true);
+  assert.equal(r["Never Answered"].auto.tries, 2);
+  assert.equal((await s.claimer.waiting()).failed.rewards, 0);
+
+  s.clock.t += UNANSWERED_MS + 1000;
+  await s.claimer.account("acc1");
+  const w = await s.claimer.waiting();
+  assert.deepEqual({ failed: w.failed.rewards, error: w.failed.error }, { failed: 1, error: "SOOP sent a reply that could not be read — try again in a moment" }, "three times without an answer is the reward's business after all");
+});
+
+test("two rewards SOOP keeps refusing do not keep a newer one from being claimed", async () => {
+  const s = setup();
+  await s.add("acc1");
+  for (const n of [1, 2]) s.world.addInventory("acc1", { itemName: "Always Refused " + n, claimCode: "NEVER-" + n, refuseOnClaim: true });
+  assert.equal((await s.claimer.account("acc1")).failed, 2);
+  for (let round = 0; round < 3; round++) {
+    s.clock.t += RETRY_MS + 1000; // both are due again, and both will be refused again
+    s.world.addInventory("acc1", { itemName: "Newer " + round, claimCode: "NEWER-" + round });
+    const out = await s.claimer.account("acc1");
+    assert.equal(out.claimed, 1, "the newer reward is asked for first, whatever the old ones do");
+  }
+  assert.equal(await SoopInventoryItem.countDocuments({ loginId: "acc1", hasCode: true }), 3);
+  assert.equal((await s.rows("acc1"))["Always Refused 1"].auto.tries, 4);
+});
+
+test("a refusal trips the breaker for claims only: codes are still read back in that run", async () => {
+  const s = setup();
+  await s.add("acc1");
+  for (const n of [1, 2, 3]) s.world.addInventory("acc1", { itemName: "Refused " + n, claimCode: "NEVER-" + n, refuseOnClaim: true });
+  s.world.addInventory("acc1", { itemName: "By Hand", claimCode: "HAND-AFTER-BREAKER" }, "acquired");
+  const out = await s.claimer.account("acc1");
+  assert.deepEqual({ failed: out.failed, read: out.read }, { failed: 2, read: 1 });
 });
 
 test("a login SOOP refuses while claiming stops that account only, and is checked once", async () => {
@@ -488,34 +584,81 @@ test("\"log in\" for one reward on a login that works is that reward's refusal, 
   assert.deepEqual({ claimed: out.claimed, failed: out.failed, error: out.error }, { claimed: 2, failed: 2, error: undefined }, "the rewards behind the odd one are not blocked by it");
   assert.deepEqual(s.checks, ["acc1"], "the login was checked once, and it works");
   const r = await s.rows("acc1");
-  assert.equal(r["Odd 1"].auto.kind, "failed");
+  assert.deepEqual({ kind: r["Odd 1"].auto.kind, error: r["Odd 1"].auto.error }, { kind: "failed", error: 'SOOP answered "log in" for this reward although the login works' });
   assert.equal(r["Good 2"].hasCode, true);
   assert.equal((await s.claimer.waiting()).failed.rewards, 2, "and the panel says two are being refused");
 });
 
-test("a dead tunnel marks nothing and stops the sweep; the next sweep claims", async () => {
+test("a dead tunnel stops the sweep at the second silent login, and the next sweep goes on from there", async () => {
   const s = setup();
-  for (const id of ["acc1", "acc2", "acc3"]) {
+  const ids = ["acc1", "acc2", "acc3", "acc4", "acc5"];
+  for (const id of ids) {
     await s.add(id);
     s.world.addInventory(id, { itemName: "Tunnel " + id, claimCode: "TUN-" + id });
   }
-  s.world.setEgress({ down: true });
-  const down = await s.claimer.sweep();
-  assert.deepEqual({ accounts: down.accounts, stopped: down.stopped }, { accounts: 1, stopped: "egress" }, "it does not try the other logins through a dead tunnel");
-  assert.equal(await SoopInventoryItem.countDocuments({}), 0);
+  // acc1 answers; then the tunnel goes: acc2 and acc3 get nothing.
+  const dead = new Set();
+  for (const id of ids) {
+    s.wrap.set(id, (c) => ({
+      ...c,
+      inventoryCounts: async () => {
+        if (dead.has(id)) throw new SoopError("SOOP did not answer", { code: "TIMEOUT" });
+        return c.inventoryCounts();
+      },
+    }));
+  }
+  dead.add("acc2").add("acc3").add("acc4").add("acc5");
+  const cut = await s.claimer.sweep();
+  assert.deepEqual({ accounts: cut.accounts, unread: cut.unread, claimed: cut.claimed, stopped: cut.stopped }, { accounts: 3, unread: 2, claimed: 1, stopped: "egress" }, "two silent logins running: it does not try the rest through a dead tunnel");
   assert.deepEqual(s.checks, [], "a tunnel failure is never read as a dead login");
+  assert.equal(await SoopInventoryItem.countDocuments({ auto: { $ne: null } }), 0);
+  assert.ok(!s.said().includes("Inventory sync failed"), "the sweep says it once, in its own line");
+  assert.match(s.said(), /2 logins got no answer from SOOP — stopped there/);
 
-  // The tunnel dies between the read and the claim: the reward is not blamed.
-  s.world.setEgress({ down: false });
-  await s.inventory.syncAccount("acc1");
+  // The tunnel is back. The pass goes on from acc2: acc1 is not read a second time.
+  dead.clear();
+  const c0 = s.world.calls().inventoryCounts;
+  const rest = await s.claimer.sweep();
+  assert.deepEqual({ accounts: rest.accounts, unread: rest.unread, claimed: rest.claimed, stopped: rest.stopped }, { accounts: 4, unread: 0, claimed: 4, stopped: null });
+  assert.equal(s.world.calls().inventoryCounts - c0, 4, "four logins read, not five");
+  assert.equal(s.claimer.status().lastSweep.claimed, 4);
+  // And the sweep after that is a whole pass again.
+  assert.equal((await s.claimer.sweep()).accounts, 5);
+});
+
+test("one silent login in a sweep is skipped, not a reason to stop; nobody answering is", async () => {
+  const s = setup();
+  for (const id of ["acc1", "acc2", "acc3"]) {
+    await s.add(id);
+    s.world.addInventory(id, { itemName: "Code " + id, claimCode: "SKIP-" + id });
+  }
+  let silent = true;
+  s.wrap.set("acc2", (c) => ({
+    ...c,
+    inventoryCounts: async () => {
+      if (silent) throw new SoopError("SOOP did not answer", { code: "TIMEOUT" });
+      return c.inventoryCounts();
+    },
+  }));
+  const sum = await s.claimer.sweep();
+  assert.deepEqual({ accounts: sum.accounts, unread: sum.unread, claimed: sum.claimed, stopped: sum.stopped }, { accounts: 3, unread: 1, claimed: 2, stopped: null });
+
+  // The tunnel dies between a read and a claim: the reward only loses its place in line.
+  silent = false;
+  await s.inventory.syncAccount("acc2");
   s.world.setEgress({ down: true });
-  assert.equal((await s.claimer.account("acc1", { sync: false })).error, "egress");
-  assert.equal((await s.rows("acc1"))["Tunnel acc1"].auto, null);
+  assert.equal((await s.claimer.account("acc2", { sync: false })).error, "egress");
+  assert.equal((await s.rows("acc2"))["Code acc2"].auto.kind, "unanswered");
+  // With everything down, a pass in which nobody answers counts as cut short — also for a farm of one login.
+  const down = await s.claimer.sweep();
+  assert.deepEqual({ accounts: down.accounts, unread: down.unread, stopped: down.stopped }, { accounts: 2, unread: 2, stopped: "egress" });
+  await SoopAccount.deleteMany({ loginId: { $in: ["acc1", "acc3"] } });
+  const lone = await s.claimer.sweep();
+  assert.deepEqual({ accounts: lone.accounts, unread: lone.unread, stopped: lone.stopped }, { accounts: 1, unread: 1, stopped: "egress" });
 
   s.world.setEgress({ down: false });
-  const up = await s.claimer.sweep();
-  assert.deepEqual({ accounts: up.accounts, claimed: up.claimed, stopped: up.stopped }, { accounts: 3, claimed: 3, stopped: null });
-  assert.equal(s.claimer.status().lastSweep.claimed, 3);
+  s.clock.t += UNANSWERED_MS + 1000;
+  assert.equal((await s.claimer.sweep()).claimed, 1);
 });
 
 // ------------------------------------------------------------------ the sweep
@@ -568,17 +711,48 @@ test("a reward claimed by hand on SOOP has its code read back and stored — pac
   assert.equal(await s.inventory.revealCode(String(row._id)), "HAND-CODE-1");
   assert.match(s.said(), /Read back the code of 3 claimed rewards on acc1/);
 
-  // Switched off while it reads: the read already decided on is made, the next is not.
+  // Switched off while it waits to read the second one: that read is not made.
   for (const n of [4, 5, 6]) s.world.addInventory("acc1", { itemName: "By Hand " + n, claimCode: "HAND-CODE-" + n }, "acquired");
   s.clock.t += HOUR;
   const claimer = s.make({ sleep: async (ms) => { s.clock.t += ms; on = false; } });
-  assert.equal((await claimer.account("acc1")).read, 2);
-  assert.equal(await SoopInventoryItem.countDocuments({ loginId: "acc1", hasCode: true }), 5);
+  assert.equal((await claimer.account("acc1")).read, 1);
+  assert.equal(await SoopInventoryItem.countDocuments({ loginId: "acc1", hasCode: true }), 4);
 
   // Off before a run starts: nothing is read back.
   const asked = s.world.calls().useInfo;
   assert.equal((await claimer.account("acc1")).skipped, "off");
   assert.equal(s.world.calls().useInfo, asked);
+});
+
+test("\"log in\" for one code being read back, on a login that works, does not stop the others", async () => {
+  const s = setup();
+  await s.add("acc1");
+  s.world.addInventory("acc1", { itemName: "Odd", claimCode: "ODD-READ-1", authOnClaim: true }, "acquired");
+  for (const n of [1, 2]) s.world.addInventory("acc1", { itemName: "By Hand " + n, claimCode: "READ-BACK-" + n }, "acquired");
+  const out = await s.claimer.account("acc1");
+  assert.deepEqual({ read: out.read, pending: out.pending, error: out.error }, { read: 2, pending: 1, error: undefined });
+  assert.deepEqual(s.checks, ["acc1"]);
+  const odd = (await s.rows("acc1"))["Odd"];
+  assert.deepEqual({ kind: odd.auto.kind, error: odd.auto.error }, { kind: "pending", error: 'SOOP answered "log in" for this reward although the login works' });
+  assert.ok(!s.said().includes("waits until its cookie is re-imported"), "nothing tells the owner to re-import a login that works");
+});
+
+test("a code first seen long ago and claimed elsewhere since is still read back; one with nothing to ask SOOP with is reported", async () => {
+  const s = setup();
+  await s.add("acc1");
+  const raw = s.world.addInventory("acc1", { itemName: "Old Row", claimCode: "OLD-ROW-CODE-1" }, "acquired");
+  const longAgo = new Date(s.clock.t - 40 * DAY);
+  // Stored forty days ago as unclaimed, claimed by hand yesterday.
+  await SoopInventoryItem.collection.insertOne({
+    loginId: "acc1", key: raw.itemCodeIdx, division: "acquired", kind: "code", name: "Old Row", hasCode: false, codeEnc: "",
+    raw: { itemCodeIdx: raw.itemCodeIdx }, claimedAt: null, receivedAt: new Date(s.clock.t - DAY), createdAt: longAgo, updatedAt: longAgo,
+  });
+  assert.equal((await s.claimer.account("acc1", { sync: false })).read, 1);
+
+  await SoopInventoryItem.create({ loginId: "acc1", key: "no-id-1", division: "available", kind: "code", name: "No Id", raw: {} });
+  assert.equal((await s.claimer.account("acc1", { sync: false })).claimed, 0);
+  const w = await s.claimer.waiting();
+  assert.deepEqual({ failed: w.failed.rewards, error: w.failed.error }, { failed: 1, error: "the reward has no SOOP item id" });
 });
 
 // ------------------------------------------------- what a sync may not undo
@@ -864,7 +1038,8 @@ test("farm: switched off, a step is still followed by the plain read, and nothin
   await startBot([2]);
   await advanceUntil(() => reads() > base, "the step was followed by a read");
   await until(() => SoopInventoryItem.countDocuments({ loginId: "acc1", division: "available" }), "the reward is in the stored copy");
-  await sleep(150);
+  await sleep(300);
+  assert.equal(reads() - base, 1, "one read, as before there was a claimer: no looking again");
   assert.equal(world.calls().useInfo, 0);
   assert.equal(await coded("acc1"), 0);
   const state = await farm.stateView();
@@ -948,6 +1123,19 @@ test("farm: a sweep runs shortly after start, and one the tunnel cut short runs 
   await until(async () => (await coded("acc1")) === 1, "it ran again without waiting for the interval", 2000);
 });
 
+test("farm: a sweep that failed outright is run again soon as well", async () => {
+  await freshFarm({ rewards: false, timings: { claimSweepBootMs: 40, claimSweepMs: 600000, claimSweepRetryMs: 50 } });
+  await importAccount("acc1");
+  world.addInventory("acc1", { itemName: "Found On The Second Try", claimCode: "SWEEP-FARM-3" });
+  const real = farm.autoClaim.sweep;
+  let calls = 0;
+  farm.autoClaim.sweep = async () =>
+    ++calls === 1 ? { accounts: 0, unread: 0, claimed: 0, read: 0, failed: 0, pending: 0, added: 0, stopped: "error" } : real();
+  await farm.start();
+  await until(async () => (await coded("acc1")) === 1, "the sweep was run again after it failed", 2000);
+  assert.ok(calls >= 2);
+});
+
 test("farm: the sweep comes round again on its interval", async () => {
   // The sweep after start is far away: whatever sweeps here is the interval.
   await freshFarm({ rewards: false, timings: { claimSweepBootMs: 600000, claimSweepMs: 120 } });
@@ -990,6 +1178,9 @@ test("farm: the look at unclaimed codes is refreshed after a minute, not on ever
   t += 61 * 1000;
   await farm.stateView();
   assert.equal(asked, 2, "and a fresh one a minute later");
+  await farm._claimSweep();
+  await farm.stateView();
+  assert.equal(asked, 3, "and right after a sweep, which is when it changes");
 });
 
 // ------------------------------------------------------------------ the switch

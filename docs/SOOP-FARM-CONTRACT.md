@@ -702,9 +702,10 @@ and no other.
   ```
   createAutoClaimer({ models?, inventory, activity?, enabled?, checkLogin?,
                       paceMs = 7000, checkPaceMs = 2500, retryMs = 30 min, owedMs = 5.5 h,
-                      owedForMs = 30 d, overdueMs = 4 h, maxRefusals = 2, now?, sleep? }) -> {
+                      unansweredMs = 5 min, owedForMs = 30 d, overdueMs = 4 h, maxRefusals = 2,
+                      now?, sleep? }) -> {
     account(id, { sync = true, force = false }) -> Promise<Result>
-    sweep()   -> Promise<{ accounts, claimed, read, failed, pending, added, stopped }>
+    sweep()   -> Promise<{ accounts, unread, claimed, read, failed, pending, added, stopped }>
     waiting() -> Promise<{ enabled, stuck: { rewards, logins: [], soonest },
                            failed: { rewards, error }, overdue: { rewards } }>   // database only
     status()  -> { enabled, running, claimed, read, lastClaimAt, lastSweepAt, lastSweep, lastError }
@@ -716,11 +717,13 @@ and no other.
   One queue for everything: one account at a time, and one call that claims or
   reads a code every `paceMs`, whatever queues up. No call ever rejects.
   `skipped` is `off | sold | login | unknown`; `error` is `auth` (the login is
-  refused), `egress` (nothing was learned: tunnel, timeout, or a reply that
-  could not be read) or `error`. `added` is how many rows the inventory read
-  found new. `sync: false` trusts the stored copy instead of reading first;
-  `force` tries at once what an earlier attempt was refused. A sweep's `stopped`
-  is `off | egress | error`.
+  refused), `egress` (SOOP gave no answer: tunnel, timeout, or a reply that
+  could not be read) or `error` — and a result that carries one still counts
+  what was done before the run stopped. `added` is how many rows the inventory
+  read found new. `sync: false` trusts the stored copy instead of reading
+  first; `force` tries at once what an earlier attempt was refused. A sweep's
+  `stopped` is `off | egress | error`, and `unread` is how many logins gave no
+  answer.
 - **When** — three ways in, all through that queue:
   1. **After a step.** 90 s after a step or a finished campaign (as before) the
      account's inventory is read and its new codes claimed: `account(id)`. Every
@@ -736,27 +739,36 @@ and no other.
      can claim has its inventory read (four small calls) and whatever is
      waiting claimed, with `checkPaceMs` between two logins. It exists because
      a restart drops the 90-second timer, a reward can land late, and a claim
-     can fail. One the tunnel cut short runs again 10 minutes later.
+     can fail. One login that gives no answer is skipped; two running (or a
+     pass in which nobody answers) is the tunnel, and the sweep stops — to run
+     again 10 minutes later **from the login it stopped at**. Starting over
+     would read the first logins again and again on a poor link and never
+     reach the last.
 - **What a claim can answer** (`inventory.claim`, §15):
   - a code — stored, done. A claim writes the reward's new state itself, so it
     is not followed by a read.
-  - `pending` (SOOP has run out and will deliver later) — the reward is claimed;
-    its code is asked for again every `owedMs`, for `owedForMs` after the
-    claim, whatever date the reward itself carried.
+  - `pending` (SOOP has run out and will deliver later), or an answer with no
+    code in it at all — the reward is claimed; its code is asked for again
+    every `owedMs`, for `owedForMs` after the claim, whatever date the reward
+    itself carried.
   - `renewed` (SOOP reissued it as a new item) — the inventory is read again and
     the new item is claimed in the same run.
-  - claimed, and no code to have (it went to a game account) — nothing is owed
-    and nothing is recorded.
   - a refusal for that reward — recorded on it (`auto: { kind, tries, at, error }`,
-    `kind` `failed | pending | renewed`), tried again after `retryMs`. After
-    `maxRefusals` in a row the rest of the account is left untouched for the
-    next run.
-  - "log in" — the login check (`checkLogin`, the health check of §9) decides:
-    a login the drops site refuses stops the account, with nothing recorded
-    against its rewards, and the panel and the Telegram alert (§16) say so at
-    once; a login it accepts makes it that one reward's refusal.
+    `kind` `failed | unanswered | pending | renewed`), tried again after
+    `retryMs`. After `maxRefusals` in a row the account's other claims wait for
+    the next run (its codes are still read back).
+  - "log in" — the login check (`checkLogin`, the health check of §9) decides,
+    for a claim and for a read-back alike: a login the drops site refuses stops
+    the account, with nothing recorded against its rewards, and the panel and
+    the Telegram alert (§16) say so at once; a login it accepts makes it that
+    one reward's refusal.
   - no answer at all (the tunnel, a timeout, a reply that could not be read) —
-    nothing is recorded against anything; the account's run and the sweep stop.
+    the account's run stops, and that reward is marked `unanswered`: it is
+    tried again after `unansweredMs`, and it is reported only once it has gone
+    unanswered three times.
+- **Whose turn** — rewards never tried before go first, oldest first; then the
+  ones tried before, the longest ago first. A reward SOOP keeps refusing, or
+  never answers for, cannot stand in front of a new one.
 - **A claimed reward with no code stored** (claimed by hand on SOOP, or by a
   claim whose reply was lost) has its code read back the same way. That call
   only reads.
@@ -776,7 +788,9 @@ and no other.
 - **Switch** — on unless switched off: `autoFarm.soopAutoClaim = false` in the
   settings file (live, read at most every 30 s), or `SOOP_AUTO_CLAIM=0` in the
   environment. A switch that cannot be read counts as on. Off stops every call
-  before it is made, including the one after the current one. `farm._reset()`
+  before it is made: it is read again after each pause, as is whether the
+  account has been sold meanwhile, so the call that was about to follow is not
+  made. `farm._reset()`
   (tests) puts an always-on switch in its place, and the dev harness sets its
   own, so neither reads the site's settings file; `farm.autoClaimSwitch` is the
   real one.
@@ -795,6 +809,7 @@ and no other.
   them against the codes it planted.
 - The fake SOOP gained `{ rewards: true }` (a reward is handed out as each step
   is crossed), `refuseClaims(id, on, code)`, `removeInventory(id, idx)`,
-  `setClaimCode(id, idx, code)`, and three row flags: `renewFlag: "Y"` (reissued
-  on its first claim), `noCode` (claimed, no code to show) and `authOnClaim`
-  ("log in" for that reward only).
+  `setClaimCode(id, idx, code)`, and row flags: `renewFlag: "Y"` (reissued on
+  its first claim), `noCode` (claimed, no code to show), and `authOnClaim` /
+  `refuseOnClaim` / `httpOnClaim` ("log in", a refusal, or an unreadable reply
+  for that reward only).

@@ -247,14 +247,15 @@ function createInventoryService({ models, getClient, activity, paceMs = 2500, no
 
   // Two syncs of one account at once would race on the unique (loginId, key)
   // index, so a second caller gets the first caller's promise.
-  // `quiet`: no activity entry for a read that found nothing new.
+  // `quiet`: no activity entry for a read that found nothing new, or that failed.
   function syncAccount(rawId, { quiet = false } = {}) {
     const id = String(rawId || "");
     if (!id) return Promise.reject(new Error("no account given"));
     if (inFlight.has(id)) return inFlight.get(id);
     const p = doSync(id, { quiet })
       .catch((err) => {
-        note({ level: "warn", accountId: id, msg: `Inventory sync failed: ${plainMessage(err)}`, data: { code: err.code || null } });
+        // A quiet caller says what went wrong itself, once, in its own words.
+        if (!quiet) note({ level: "warn", accountId: id, msg: `Inventory sync failed: ${plainMessage(err)}`, data: { code: err.code || null } });
         throw err;
       })
       .finally(() => inFlight.delete(id));

@@ -279,6 +279,9 @@ whatever happens to the login.
 - When SOOP has run out of codes for a reward ("to be delivered later") the
   reward is claimed anyway and its code is asked for again every few hours,
   for a month.
+- On a poor link the sweep goes on from the login it stopped at instead of
+  starting over, and one reward SOOP keeps refusing never holds up the others
+  on its account.
 - A code is never deleted by the farm: not when SOOP stops listing the reward,
   and not when its account is deleted from the panel.
 

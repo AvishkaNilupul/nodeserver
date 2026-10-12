@@ -237,7 +237,7 @@ function createFakeSoop({ now = Date.now, rewards = false } = {}) {
     setClaimCode(id, itemCodeIdx, code) {
       const acct = accounts.get(String(id));
       const row = acct && DIVISIONS.flatMap((d) => acct.inventory[d]).find((r) => String(r.itemCodeIdx) === String(itemCodeIdx));
-      if (row) row.claimCode = code;
+      if (row) Object.assign(row, { claimCode: code, noCode: false });
       return Boolean(row);
     },
 
@@ -418,6 +418,9 @@ function createFakeSoop({ now = Date.now, rewards = false } = {}) {
           // (`authOnClaim: true` on the row).
           const odd = DIVISIONS.flatMap((d) => acct.inventory[d]).find(match);
           if (odd && odd.authOnClaim) throw new SoopError("Please log in to continue.", { code: "AUTH" });
+          // ...or refuses (`refuseOnClaim`), or never answers readably (`httpOnClaim`).
+          if (odd && odd.refuseOnClaim) throw new SoopError("This reward cannot be handed out.", { code: "API" });
+          if (odd && odd.httpOnClaim) throw new SoopError("https://drops.sooplive.com/api/x -> HTTP 502: <html>Bad Gateway", { code: "HTTP" });
           let row = acct.inventory.acquired.find(match);
           if (!row) {
             const i = acct.inventory.available.findIndex(match);
