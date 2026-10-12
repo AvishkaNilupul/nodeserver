@@ -341,6 +341,24 @@ Not yet seen on v2: an account earning. No guaranteed campaign was live at
 deploy time; the next are OWCS Korea's next broadcast and Delta Force Rise
 Series Day 1 (2026-10-08 06:00 UTC).
 
+**2026-10-12 15:23 UTC — import from files, and a login check of its own for a
+fresh cookie** (contract §17): `public/soop/account-import.js` (new, `29b50449`),
+`public/soop/soop.css` `e26e6ca4`→`5eaada98`, `public/soop/tab-accounts.js`
+`d8ba6061`→`06ff2de7`, `utils/soop/health.js` `f5daa071`→`e3b4b3fd`,
+`utils/soopFarm.js` `3c4f8a09`→`ef27335b` — the bytes of
+`origin/feat/soop-import-files` `cbdcb29`, cut from
+`origin/fix/telegram-send-retry` `0344d26`, which is what production held for
+all four. Backup `_deploy_backup_20261012152316_soop-import-files`; pm2 restart
+50 at 15:23:17Z (0 unstable), 23 minutes after an allocator pass. The panel's
+entry file (`tab-accounts.js`) was copied last, so no page load could ask for a
+file that was not there yet; the three panel files were then fetched from the
+public site and matched the commit byte for byte. After the restart the farm
+came back with its bot, the sweep two minutes later checked every login
+through the new code, and the first allocator pass (15:26Z) applied nothing
+unusual. Fingerprint the SOOP files against `cbdcb29` next time. The deploys
+of 2026-10-12 before this one (login alert, Telegram retry) are in the same
+line of commits.
+
 ## What v1 got wrong (fixed here, each pinned by a test in `tests/soopFarm.test.js`)
 
 1. Stopping an account and starting it again within a minute lost the new
