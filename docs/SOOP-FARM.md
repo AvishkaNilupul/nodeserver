@@ -405,6 +405,31 @@ unusual. Fingerprint the SOOP files against `cbdcb29` next time. The deploys
 of 2026-10-12 before this one (login alert, Telegram retry) are in the same
 line of commits.
 
+**2026-10-12 17:46 UTC — code rewards are claimed as they are earned** (contract
+§18): `utils/soop/autoClaim.js` (new, `32d204a1`), `utils/soop/inventory.js`
+`87a1c5ef`→`3ce24d84`, `utils/soop/farmViews.js` `27f337b2`→`c7d7242c`,
+`utils/soopFarm.js` `ef27335b`→`3d2f4070`, `models/SoopInventoryItem.js`
+`5e1293f8`→`0ad2cc2c`, `public/soop/tab-overview.js` `68b13ba5`→`8eba38da`,
+`public/soop/tab-inventory.js` `940cb850`→`1d262ecf` — the bytes of
+`origin/feat/soop-auto-claim` `df6270d`, cut from `feat/soop-import-files`
+`1d3187a`, which is what production held for all six. Backup
+`_deploy_backup_20261012174557_soop-auto-claim`; pm2 restart 51 at 17:45:59Z
+(0 unstable), 20 minutes after an allocator pass. The deploy script was
+rehearsed first against a copy of the base tree with a stub `pm2` (apply,
+re-check, rollback, a drifted file, a file that does not load).
+
+In the same step the logins imported that day were put in the "everything"
+bot. The live process holds its bots in memory and reads them only at start, so
+the bot's row was written right before the restart. Within a minute of it every
+one of them had joined a drops-enabled stream of the one campaign that was live.
+
+Before the deploy, the code rewards waiting on the logins that work were
+claimed by hand through the claim route (every one came back as a code), so the
+first sweep had nothing left to claim. What it cannot reach: the rewards on the
+logins that are still logged out.
+
+Fingerprint the SOOP files against `df6270d` next time.
+
 ## What v1 got wrong (fixed here, each pinned by a test in `tests/soopFarm.test.js`)
 
 1. Stopping an account and starting it again within a minute lost the new
