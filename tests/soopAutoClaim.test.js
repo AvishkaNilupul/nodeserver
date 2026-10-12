@@ -394,6 +394,29 @@ test("a claim that comes back with no code at all is an owed code: asked for aga
   assert.equal(await s.inventory.revealCode(String(row._id)), "CAME-AFTER-ALL-1");
 });
 
+test("an owed code stays owed when one call for it gets no answer", async () => {
+  const s = setup();
+  await s.add("acc1");
+  const raw = s.world.addInventory("acc1", { itemName: "Answered Empty", noCode: true });
+  assert.equal((await s.claimer.account("acc1")).pending, 1);
+  // The next time it is asked for, the tunnel is down: nothing was learned about it.
+  s.clock.t += OWED_MS + 1000;
+  s.world.setEgress({ down: true });
+  assert.equal((await s.claimer.account("acc1", { sync: false })).error, "egress");
+  let row = (await s.rows("acc1"))["Answered Empty"];
+  assert.deepEqual({ kind: row.auto.kind, tries: row.auto.tries, hasCode: row.hasCode }, { kind: "unanswered", tries: 2, hasCode: false });
+
+  // SOOP delivers. The code is asked for again — a few minutes on, not at once and not never.
+  s.world.setEgress({ down: false });
+  s.world.setClaimCode("acc1", raw.itemCodeIdx, "NOT-FORGOTTEN-1");
+  assert.equal((await s.claimer.account("acc1")).read, 0, "not before its wait has passed");
+  s.clock.t += UNANSWERED_MS + 1000;
+  assert.equal((await s.claimer.sweep()).read, 1);
+  row = (await s.rows("acc1"))["Answered Empty"];
+  assert.equal(row.auto, null);
+  assert.equal(await s.inventory.revealCode(String(row._id)), "NOT-FORGOTTEN-1");
+});
+
 test("a reward SOOP reissues is claimed as its new item, in the same run", async () => {
   const s = setup();
   await s.add("acc1");
@@ -589,76 +612,288 @@ test("\"log in\" for one reward on a login that works is that reward's refusal, 
   assert.equal((await s.claimer.waiting()).failed.rewards, 2, "and the panel says two are being refused");
 });
 
-test("a dead tunnel stops the sweep at the second silent login, and the next sweep goes on from there", async () => {
-  const s = setup();
-  const ids = ["acc1", "acc2", "acc3", "acc4", "acc5"];
+// Five (or more) logins with one code each; `dead` holds the ones whose
+// inventory gets no answer, `tries` counts the reads that were attempted.
+async function tunnelFarm(s, n) {
+  const ids = Array.from({ length: n }, (_, i) => "acc" + (i + 1));
+  const dead = new Set();
+  const tries = {};
   for (const id of ids) {
     await s.add(id);
     s.world.addInventory(id, { itemName: "Tunnel " + id, claimCode: "TUN-" + id });
-  }
-  // acc1 answers; then the tunnel goes: acc2 and acc3 get nothing.
-  const dead = new Set();
-  for (const id of ids) {
+    tries[id] = 0;
     s.wrap.set(id, (c) => ({
       ...c,
       inventoryCounts: async () => {
+        tries[id] += 1;
         if (dead.has(id)) throw new SoopError("SOOP did not answer", { code: "TIMEOUT" });
         return c.inventoryCounts();
       },
     }));
   }
+  const shape = (r) => ({ accounts: r.accounts, unread: r.unread, claimed: r.claimed, stopped: r.stopped });
+  return { ids, dead, tries, shape };
+}
+
+test("a dead tunnel ends the run at the second silent login; the pass goes on with the rest, then looks at those two once more", async () => {
+  const s = setup();
+  const { dead, tries, shape } = await tunnelFarm(s, 5);
+  // acc1 answers; then the tunnel goes: acc2 and acc3 get nothing.
   dead.add("acc2").add("acc3").add("acc4").add("acc5");
   const cut = await s.claimer.sweep();
-  assert.deepEqual({ accounts: cut.accounts, unread: cut.unread, claimed: cut.claimed, stopped: cut.stopped }, { accounts: 3, unread: 2, claimed: 1, stopped: "egress" }, "two silent logins running: it does not try the rest through a dead tunnel");
+  assert.deepEqual(shape(cut), { accounts: 3, unread: 2, claimed: 1, stopped: "egress" }, "two silent logins running: it does not try the rest through a dead tunnel");
   assert.deepEqual(s.checks, [], "a tunnel failure is never read as a dead login");
   assert.equal(await SoopInventoryItem.countDocuments({ auto: { $ne: null } }), 0);
   assert.ok(!s.said().includes("Inventory sync failed"), "the sweep says it once, in its own line");
-  assert.match(s.said(), /2 logins got no answer from SOOP — stopped there/);
+  assert.match(s.said(), /2 logins got no answer from SOOP — it goes on shortly with what is left/);
+  assert.equal(s.claimer.status().lastSweepAt, null, "a run that was cut short is not \"every login checked\"");
 
-  // The tunnel is back. The pass goes on from acc2: acc1 is not read a second time.
+  // The tunnel is back. The pass goes on behind those two: acc1 is not read a second time...
   dead.clear();
-  const c0 = s.world.calls().inventoryCounts;
   const rest = await s.claimer.sweep();
-  assert.deepEqual({ accounts: rest.accounts, unread: rest.unread, claimed: rest.claimed, stopped: rest.stopped }, { accounts: 4, unread: 0, claimed: 4, stopped: null });
-  assert.equal(s.world.calls().inventoryCounts - c0, 4, "four logins read, not five");
-  assert.equal(s.claimer.status().lastSweep.claimed, 4);
+  assert.deepEqual(shape(rest), { accounts: 2, unread: 0, claimed: 2, stopped: "egress" }, "acc4 and acc5 — and the two that got no answer are still owed a look");
+  // ...and the two that got no answer are looked at once more, in a run of their own.
+  assert.equal(s.claimer.status().lastSweepAt, null, "nor is one that still owes two logins a look");
+  const again = await s.claimer.sweep();
+  assert.deepEqual(shape(again), { accounts: 2, unread: 0, claimed: 2, stopped: null });
+  assert.equal(s.claimer.status().lastSweepAt.getTime(), s.clock.t, "the pass is over: now it is");
+  assert.deepEqual(tries, { acc1: 1, acc2: 2, acc3: 2, acc4: 1, acc5: 1 }, "nobody read twice for nothing, nobody missed");
+  assert.equal(s.claimer.status().lastSweep.claimed, 2);
   // And the sweep after that is a whole pass again.
   assert.equal((await s.claimer.sweep()).accounts, 5);
 });
 
-test("one silent login in a sweep is skipped, not a reason to stop; nobody answering is", async () => {
+test("one silent login does not stop a pass: it is looked at once more, gets one round of its own, and is then left for the next pass", async () => {
+  const s = setup();
+  const { dead, tries, shape } = await tunnelFarm(s, 3);
+  dead.add("acc2");
+  assert.deepEqual(shape(await s.claimer.sweep()), { accounts: 3, unread: 1, claimed: 2, stopped: "egress" }, "the others are read; acc2 is owed one more look");
+  // Silent on the second look as well, while the others answered: a round of its own, two looks...
+  assert.deepEqual(shape(await s.claimer.sweep()), { accounts: 1, unread: 1, claimed: 0, stopped: "egress" });
+  assert.deepEqual(shape(await s.claimer.sweep()), { accounts: 1, unread: 1, claimed: 0, stopped: "egress" });
+  // ...and then the pass is over: it is not asked every ten minutes for ever.
+  assert.deepEqual(shape(await s.claimer.sweep()), { accounts: 1, unread: 1, claimed: 0, stopped: null });
+  assert.deepEqual(tries, { acc1: 1, acc2: 4, acc3: 1 });
+  // The next pass is a whole one again; by then acc2 answers.
+  dead.clear();
+  assert.deepEqual(shape(await s.claimer.sweep()), { accounts: 3, unread: 0, claimed: 1, stopped: null });
+});
+
+test("silent logins that are not neighbours are not the tunnel: the run goes through, and each gets its second look", async () => {
+  const s = setup();
+  const { dead, tries, shape } = await tunnelFarm(s, 5);
+  dead.add("acc2").add("acc4");
+  assert.deepEqual(shape(await s.claimer.sweep()), { accounts: 5, unread: 2, claimed: 3, stopped: "egress" });
+  dead.delete("acc4");
+  assert.deepEqual(shape(await s.claimer.sweep()), { accounts: 2, unread: 1, claimed: 1, stopped: "egress" }, "acc2 and acc4 once more; acc4 answers now, acc2 is owed its own round");
+  dead.clear();
+  assert.deepEqual(shape(await s.claimer.sweep()), { accounts: 1, unread: 0, claimed: 1, stopped: null });
+  assert.deepEqual(tries, { acc1: 1, acc2: 3, acc3: 1, acc4: 2, acc5: 1 });
+});
+
+test("two logins that never answer do not hold the others up: every pass reads everyone else, and asks those two four times at most", async () => {
+  const s = setup();
+  const { ids, dead, tries, shape } = await tunnelFarm(s, 6);
+  await s.claimer.sweep();
+  dead.add("acc3").add("acc4");
+  for (let pass = 0; pass < 3; pass++) {
+    for (const id of ids) tries[id] = 0;
+    // A code lands in front of the two, and one behind them.
+    s.world.addInventory("acc1", { itemName: "Front " + pass, claimCode: "FRONT-" + pass });
+    s.world.addInventory("acc6", { itemName: "Behind " + pass, claimCode: "BEHIND-" + pass });
+    const runs = [];
+    do runs.push(await s.claimer.sweep());
+    while (runs[runs.length - 1].stopped === "egress" && runs.length < 10);
+    assert.deepEqual(
+      runs.map(shape),
+      [
+        { accounts: 4, unread: 2, claimed: 1, stopped: "egress" },
+        { accounts: 2, unread: 0, claimed: 1, stopped: "egress" },
+        { accounts: 2, unread: 2, claimed: 0, stopped: "egress" },
+        { accounts: 2, unread: 2, claimed: 0, stopped: "egress" },
+        { accounts: 2, unread: 2, claimed: 0, stopped: null },
+      ],
+      "up to the two, then the rest, the two once more, a round of their own — and then the pass is over: no coming back every ten minutes",
+    );
+    assert.deepEqual(tries, { acc1: 1, acc2: 1, acc3: 4, acc4: 4, acc5: 1, acc6: 1 });
+    s.clock.t += 3 * HOUR;
+  }
+});
+
+test("one reward that never gets an answer, on login after login, does not end a pass: every login is still read", async () => {
+  const s = setup();
+  const ids = ["acc1", "acc2", "acc3", "acc4", "acc5"];
+  for (const id of ids) {
+    await s.add(id);
+    s.world.addInventory(id, { itemName: "Never Answered", claimCode: "POISON-" + id, httpOnClaim: true });
+  }
+  const first = await s.claimer.sweep();
+  assert.deepEqual(
+    { accounts: first.accounts, unread: first.unread, stopped: first.stopped },
+    { accounts: 5, unread: 5, stopped: null },
+    "each inventory was read: one call left unanswered is that reward's trouble, not the tunnel's",
+  );
+  for (let pass = 0; pass < 3; pass++) {
+    s.clock.t += 3 * HOUR;
+    s.world.addInventory("acc5", { itemName: "Late " + pass, claimCode: "LATE-" + pass }); // on the last login
+    const c0 = s.world.calls().inventoryCounts;
+    const sum = await s.claimer.sweep();
+    assert.deepEqual({ accounts: sum.accounts, claimed: sum.claimed, stopped: sum.stopped }, { accounts: 5, claimed: 1, stopped: null });
+    assert.equal(s.world.calls().inventoryCounts - c0, 5);
+  }
+});
+
+test("what is left of a pass is its logins, not a place in a list: one sold meanwhile is left out, the others are neither missed nor read twice", async () => {
+  const s = setup();
+  const { dead, tries, shape } = await tunnelFarm(s, 6);
+  dead.add("acc3").add("acc4");
+  assert.deepEqual(shape(await s.claimer.sweep()), { accounts: 4, unread: 2, claimed: 2, stopped: "egress" });
+  // Before the next run acc3 is sold, and the tunnel is back.
+  await SoopAccount.updateOne({ loginId: "acc3" }, { $set: { sold: true } });
+  dead.clear();
+  assert.deepEqual(shape(await s.claimer.sweep()), { accounts: 2, unread: 0, claimed: 2, stopped: "egress" }, "acc5 and acc6");
+  assert.deepEqual(shape(await s.claimer.sweep()), { accounts: 1, unread: 0, claimed: 1, stopped: null }, "acc4 once more; acc3 is no longer ours to read");
+  assert.deepEqual(tries, { acc1: 1, acc2: 1, acc3: 1, acc4: 2, acc5: 1, acc6: 1 });
+  assert.equal(await SoopInventoryItem.countDocuments({ loginId: "acc3", hasCode: true }), 0, "nothing was claimed on the sold account");
+});
+
+test("when every login a run left behind is gone, the next run is a new pass over whoever is there", async () => {
+  const s = setup();
+  const { dead, tries, shape } = await tunnelFarm(s, 3);
+  dead.add("acc2").add("acc3");
+  assert.deepEqual(shape(await s.claimer.sweep()), { accounts: 3, unread: 2, claimed: 1, stopped: "egress" }, "acc1 is read; the other two are owed a second look");
+  await SoopAccount.updateMany({ loginId: { $in: ["acc2", "acc3"] } }, { $set: { sold: true } });
+  s.world.addInventory("acc1", { itemName: "Since Then", claimCode: "SINCE-THEN-1" });
+  assert.deepEqual(shape(await s.claimer.sweep()), { accounts: 1, unread: 0, claimed: 1, stopped: null }, "nothing of the old pass was left: acc1, read before, is read again");
+  assert.equal(tries.acc1, 2);
+});
+
+test("a tunnel that comes back late: the logins asked twice in vain get a round of their own, not a wait for the next pass", async () => {
+  const s = setup();
+  const { ids, dead, tries, shape } = await tunnelFarm(s, 6);
+  for (const id of ids) dead.add(id);
+  // The first look, two logins a run, and nobody answers...
+  for (let i = 0; i < 3; i++) assert.deepEqual(shape(await s.claimer.sweep()), { accounts: 2, unread: 2, claimed: 0, stopped: "egress" });
+  // ...the second look begins: acc1 and acc2 have now been asked twice.
+  assert.deepEqual(shape(await s.claimer.sweep()), { accounts: 2, unread: 2, claimed: 0, stopped: "egress" });
+  // The tunnel is back. The rest of the second look answers...
+  dead.clear();
+  assert.deepEqual(shape(await s.claimer.sweep()), { accounts: 4, unread: 0, claimed: 4, stopped: "egress" }, "acc3 to acc6 — and the pass is not over");
+  // ...and the two it came back too late for are read in the next run.
+  assert.deepEqual(shape(await s.claimer.sweep()), { accounts: 2, unread: 0, claimed: 2, stopped: null });
+  assert.deepEqual(tries, { acc1: 3, acc2: 3, acc3: 2, acc4: 2, acc5: 2, acc6: 2 });
+  assert.equal(await SoopInventoryItem.countDocuments({ hasCode: true }), 6);
+});
+
+test("a login sold before its own round is not looked at again", async () => {
+  const s = setup();
+  const { dead, tries, shape } = await tunnelFarm(s, 4);
+  dead.add("acc2").add("acc4");
+  assert.deepEqual(shape(await s.claimer.sweep()), { accounts: 4, unread: 2, claimed: 2, stopped: "egress" });
+  assert.deepEqual(shape(await s.claimer.sweep()), { accounts: 2, unread: 2, claimed: 0, stopped: "egress" }, "silent on the second look too: a round of their own is owed");
+  await SoopAccount.updateOne({ loginId: "acc2" }, { $set: { sold: true } });
+  dead.clear();
+  assert.deepEqual(shape(await s.claimer.sweep()), { accounts: 1, unread: 0, claimed: 1, stopped: null }, "acc4 alone");
+  assert.equal(tries.acc2, 2);
+  assert.equal(await SoopInventoryItem.countDocuments({ loginId: "acc2", hasCode: true }), 0);
+});
+
+test("what a pass still owes is checked against the logins at every run, whichever list they are on", async () => {
+  const s = setup();
+  const { dead, tries, shape } = await tunnelFarm(s, 5);
+  for (const id of ["acc1", "acc2", "acc3", "acc4"]) dead.add(id);
+  assert.deepEqual(shape(await s.claimer.sweep()), { accounts: 2, unread: 2, claimed: 0, stopped: "egress" });
+  assert.deepEqual(shape(await s.claimer.sweep()), { accounts: 2, unread: 2, claimed: 0, stopped: "egress" });
+  assert.deepEqual(shape(await s.claimer.sweep()), { accounts: 1, unread: 0, claimed: 1, stopped: "egress" }, "acc5 answers; four are owed a second look");
+  assert.deepEqual(shape(await s.claimer.sweep()), { accounts: 2, unread: 2, claimed: 0, stopped: "egress" }, "acc1 and acc2 silent twice; acc3 and acc4 still to do");
+  // Sold before the next run: the two still to do, and one of the two silent twice.
+  await SoopAccount.updateMany({ loginId: { $in: ["acc1", "acc3", "acc4"] } }, { $set: { sold: true } });
+  dead.clear();
+  assert.deepEqual(shape(await s.claimer.sweep()), { accounts: 1, unread: 0, claimed: 1, stopped: null }, "acc2's own round, and nobody else's");
+  assert.deepEqual(tries, { acc1: 2, acc2: 3, acc3: 1, acc4: 1, acc5: 1 });
+});
+
+test("switched off, what was left of a pass is forgotten: the sweep after switching on again is a whole one", async () => {
+  let on = true;
+  const s = setup({ enabled: () => on });
+  const { dead, shape } = await tunnelFarm(s, 6);
+  dead.add("acc3").add("acc4");
+  assert.deepEqual(shape(await s.claimer.sweep()), { accounts: 4, unread: 2, claimed: 2, stopped: "egress" });
+  // Off before the run that would have gone on, and that run finds it off.
+  on = false;
+  assert.equal((await s.claimer.sweep()).stopped, "off");
+  // On again, some time later: not the four logins that were left, but everyone.
+  on = true;
+  dead.clear();
+  s.world.addInventory("acc1", { itemName: "Meanwhile", claimCode: "MEANWHILE-1" });
+  assert.deepEqual(shape(await s.claimer.sweep()), { accounts: 6, unread: 0, claimed: 5, stopped: null });
+});
+
+test("switched off while a login waits its turn, a sweep stops there and forgets its pass", async () => {
+  let on = true;
+  const s = setup();
+  const { dead, tries, shape } = await tunnelFarm(s, 6);
+  // Off during the third pause between two logins: the one before acc5, in the second run.
+  let pauses = 0;
+  const claimer = s.make({
+    enabled: () => on,
+    checkPaceMs: 2500,
+    sleep: async (ms) => {
+      s.clock.t += ms;
+      if (ms === 2500 && ++pauses === 3) on = false;
+    },
+  });
+  dead.add("acc1").add("acc2");
+  assert.deepEqual(shape(await claimer.sweep()), { accounts: 2, unread: 2, claimed: 0, stopped: "egress" }, "a pass with four logins still to do, and two owed a second look");
+  dead.clear();
+  assert.deepEqual(shape(await claimer.sweep()), { accounts: 2, unread: 0, claimed: 2, stopped: "off" }, "acc3 and acc4; off before acc5");
+  assert.equal(tries.acc5, 0, "the login whose turn it was is not read");
+  on = true;
+  assert.deepEqual(shape(await claimer.sweep()), { accounts: 6, unread: 0, claimed: 4, stopped: null }, "a whole pass: neither the pass from before nor what this run had left");
+});
+
+test("the round of their own is the last one: whoever is still silent after it waits for the next pass", async () => {
+  const s = setup();
+  const { dead, tries, shape } = await tunnelFarm(s, 4);
+  dead.add("acc2").add("acc4");
+  assert.deepEqual(shape(await s.claimer.sweep()), { accounts: 4, unread: 2, claimed: 2, stopped: "egress" });
+  assert.deepEqual(shape(await s.claimer.sweep()), { accounts: 2, unread: 2, claimed: 0, stopped: "egress" }, "the second look: both silent again");
+  // Their own round: acc2 answers now, acc4 does not — on either look.
+  dead.delete("acc2");
+  assert.deepEqual(shape(await s.claimer.sweep()), { accounts: 2, unread: 1, claimed: 1, stopped: "egress" });
+  assert.deepEqual(shape(await s.claimer.sweep()), { accounts: 1, unread: 1, claimed: 0, stopped: null }, "and that was it: no further round because somebody answered in this one");
+  assert.deepEqual(tries, { acc1: 1, acc2: 3, acc3: 1, acc4: 4 });
+});
+
+test("nobody answering at all is the tunnel: the pass is still to do, also for a farm of one login", async () => {
   const s = setup();
   for (const id of ["acc1", "acc2", "acc3"]) {
     await s.add(id);
     s.world.addInventory(id, { itemName: "Code " + id, claimCode: "SKIP-" + id });
   }
-  let silent = true;
-  s.wrap.set("acc2", (c) => ({
-    ...c,
-    inventoryCounts: async () => {
-      if (silent) throw new SoopError("SOOP did not answer", { code: "TIMEOUT" });
-      return c.inventoryCounts();
-    },
-  }));
-  const sum = await s.claimer.sweep();
-  assert.deepEqual({ accounts: sum.accounts, unread: sum.unread, claimed: sum.claimed, stopped: sum.stopped }, { accounts: 3, unread: 1, claimed: 2, stopped: null });
-
+  const shape = (r) => ({ accounts: r.accounts, unread: r.unread, stopped: r.stopped });
   // The tunnel dies between a read and a claim: the reward only loses its place in line.
-  silent = false;
   await s.inventory.syncAccount("acc2");
   s.world.setEgress({ down: true });
   assert.equal((await s.claimer.account("acc2", { sync: false })).error, "egress");
   assert.equal((await s.rows("acc2"))["Code acc2"].auto.kind, "unanswered");
-  // With everything down, a pass in which nobody answers counts as cut short — also for a farm of one login.
-  const down = await s.claimer.sweep();
-  assert.deepEqual({ accounts: down.accounts, unread: down.unread, stopped: down.stopped }, { accounts: 2, unread: 2, stopped: "egress" });
+  // Everything down. The first look stops at two, goes on to the third...
+  assert.deepEqual(shape(await s.claimer.sweep()), { accounts: 2, unread: 2, stopped: "egress" });
+  assert.deepEqual(shape(await s.claimer.sweep()), { accounts: 1, unread: 1, stopped: "egress" });
+  // ...the second look does the same...
+  assert.deepEqual(shape(await s.claimer.sweep()), { accounts: 2, unread: 2, stopped: "egress" });
+  // ...and a pass in which nobody answered is not over: the next run starts it again.
+  assert.deepEqual(shape(await s.claimer.sweep()), { accounts: 1, unread: 1, stopped: "egress" });
+  assert.deepEqual(shape(await s.claimer.sweep()), { accounts: 2, unread: 2, stopped: "egress" });
+
+  // A farm of one login never has two running: it is asked, asked once more, and the pass begins again.
   await SoopAccount.deleteMany({ loginId: { $in: ["acc1", "acc3"] } });
-  const lone = await s.claimer.sweep();
-  assert.deepEqual({ accounts: lone.accounts, unread: lone.unread, stopped: lone.stopped }, { accounts: 1, unread: 1, stopped: "egress" });
+  for (let i = 0; i < 4; i++) assert.deepEqual(shape(await s.claimer.sweep()), { accounts: 1, unread: 1, stopped: "egress" });
 
   s.world.setEgress({ down: false });
   s.clock.t += UNANSWERED_MS + 1000;
-  assert.equal((await s.claimer.sweep()).claimed, 1);
+  const back = await s.claimer.sweep();
+  assert.deepEqual({ claimed: back.claimed, stopped: back.stopped }, { claimed: 1, stopped: null });
 });
 
 // ------------------------------------------------------------------ the sweep
@@ -906,8 +1141,8 @@ const FAST = { pollMs: 20, idleMs: 20, retryMs: 20, joinWaitMs: 300, flatPolls: 
 let world;
 const tickets = new Map();
 
-async function freshFarm({ rewards = true, timings = {} } = {}) {
-  await farm._reset({ store: { ttlMs: 15 }, autoClaim: { paceMs: 0, checkPaceMs: 0 } });
+async function freshFarm({ rewards = true, timings = {}, claim = {} } = {}) {
+  await farm._reset({ store: { ttlMs: 15 }, autoClaim: { paceMs: 0, checkPaceMs: 0, ...claim } });
   world = createFakeSoop({ rewards });
   tickets.clear();
   farm.setClientFactory(world.clientFor);
@@ -1044,6 +1279,95 @@ test("farm: switched off, a step is still followed by the plain read, and nothin
   assert.equal(await coded("acc1"), 0);
   const state = await farm.stateView();
   assert.equal(state.autoClaim.enabled, false);
+});
+
+test("farm: switched off, the reads after a step come one account at a time and leave the panel's own Sync as it was", async () => {
+  await freshFarm();
+  farm.autoClaimEnabled = () => false;
+  let busy = 0;
+  let most = 0;
+  farm.setClientFactory((cookies, o) => {
+    const c = world.clientFor(cookies, o);
+    return {
+      ...c,
+      inventoryCounts: async () => {
+        most = Math.max(most, ++busy);
+        await sleep(30);
+        busy -= 1;
+        return c.inventoryCounts();
+      },
+    };
+  });
+  await importAccount("acc1");
+  await importAccount("acc2");
+  // The Sync somebody last pressed, as the panel shows it.
+  farm.inventory.syncMany(["acc1"]);
+  await until(() => !farm.inventory.status().running, "that Sync has finished");
+  const shown = farm.inventory.status();
+  assert.deepEqual({ done: shown.done, total: shown.total }, { done: 1, total: 1 });
+  most = 0;
+  const base = reads();
+
+  const camp = world.addCampaign({ live: true, itemList: [2] });
+  await farm.campaignsView({ force: true });
+  const { ok, error } = await farm.createBot({ mode: "campaign", dropsIdx: camp.dropsIdx, accountIds: ["acc1", "acc2"] });
+  assert.equal(ok, true, error);
+  await advanceUntil(() => reads() >= base + 2, "both accounts were read after their step");
+  await sleep(200);
+  assert.equal(reads() - base, 2, "one read each");
+  assert.equal(most, 1, "never two inventories read at once");
+  assert.deepEqual(farm.inventory.status(), shown, "the panel's progress and its list of failures are untouched");
+  assert.equal(world.calls().useInfo, 0);
+});
+
+test("farm: when every look after a step gets no answer, the process log says so once", async () => {
+  await freshFarm();
+  let down = false;
+  farm.setClientFactory((cookies, o) => {
+    const c = world.clientFor(cookies, o);
+    return {
+      ...c,
+      inventoryCounts: async () => {
+        if (down) throw new SoopError("SOOP did not answer", { code: "TIMEOUT" });
+        return c.inventoryCounts();
+      },
+    };
+  });
+  await importAccount("acc1");
+  down = true;
+  const lines = [];
+  const real = console.log;
+  console.log = (...a) => lines.push(a.join(" "));
+  try {
+    await startBot([2]);
+    await advanceUntil(() => lines.some((l) => /no look at its rewards/.test(l)), "the last look said it had not seen the rewards");
+    await sleep(250);
+  } finally {
+    console.log = real;
+  }
+  const told = lines.filter((l) => /no look at its rewards/.test(l));
+  assert.deepEqual(told, ["[soop] acc1: no look at its rewards after a step (egress) - left to the next sweep"]);
+});
+
+test("farm: a last look that did read the inventory says nothing, whatever became of one reward's call", async () => {
+  // No wait before a reward that got no answer is asked again: every look asks.
+  await freshFarm({ claim: { unansweredMs: 0 } });
+  await importAccount("acc1");
+  world.addInventory("acc1", { itemName: "Never Answered", claimCode: "POISON-FARM-1", httpOnClaim: true });
+  const base = reads();
+  const lines = [];
+  const real = console.log;
+  console.log = (...a) => lines.push(a.join(" "));
+  try {
+    await startBot([2]);
+    await advanceUntil(() => reads() >= base + 3, "all three looks were taken");
+    await sleep(250);
+  } finally {
+    console.log = real;
+  }
+  assert.equal(await coded("acc1"), 1, "the step's code was claimed");
+  assert.equal((await SoopInventoryItem.findOne({ loginId: "acc1", name: "Never Answered" }).lean()).auto.tries, 3, "and every look did end on the call that gets no answer");
+  assert.deepEqual(lines.filter((l) => /no look at its rewards/.test(l)), []);
 });
 
 test("farm: re-importing the cookie of a login whose rewards were stuck claims them at once", async () => {

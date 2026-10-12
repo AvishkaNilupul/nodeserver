@@ -722,8 +722,11 @@ and no other.
   what was done before the run stopped. `added` is how many rows the inventory
   read found new. `sync: false` trusts the stored copy instead of reading
   first; `force` tries at once what an earlier attempt was refused. A sweep's
-  `stopped` is `off | egress | error`, and `unread` is how many logins gave no
-  answer.
+  `stopped` is `off`, `error`, or `egress` — its pass has more to do, and
+  `sweep()` is to be called again shortly; `null` means the pass is over.
+  `unread` is how many logins had a call go unanswered. `lastSweepAt` is when
+  a pass was last over (the panel's "every login was last checked"): a run cut
+  short, or one with more to do, does not move it.
 - **When** — three ways in, all through that queue:
   1. **After a step.** 90 s after a step or a finished campaign (as before) the
      account's inventory is read and its new codes claimed: `account(id)`. Every
@@ -731,19 +734,38 @@ and no other.
      keeps thirty inventories from being read at once. SOOP hands a reward out
      a minute or two after its step, so when the read found nothing new — or
      failed — it looks again 5 minutes later, twice at most; a step that
-     arrives during that wait starts the looking over. (Switched off, the plain
-     read of before stays.)
+     arrives during that wait starts the looking over. A last look that could
+     not read the inventory says so in the process log, once. (Switched off,
+     the plain read of before stays: once, one account after the other, and
+     not through the panel's Sync batch.)
   2. **After an import.** A login that works again can claim what was waiting
      on it: `account(id, { force: true })` once its login check has run.
   3. **The sweep**, 8 minutes after start and every 3 hours: every login that
      can claim has its inventory read (four small calls) and whatever is
      waiting claimed, with `checkPaceMs` between two logins. It exists because
      a restart drops the 90-second timer, a reward can land late, and a claim
-     can fail. One login that gives no answer is skipped; two running (or a
-     pass in which nobody answers) is the tunnel, and the sweep stops — to run
-     again 10 minutes later **from the login it stopped at**. Starting over
-     would read the first logins again and again on a poor link and never
-     reach the last.
+     can fail. A **pass** looks at every login once, and may take several
+     runs, 10 minutes apart:
+     - a login whose inventory got no answer is looked at **once more**, in a
+       later run, when the others are through;
+     - two such logins running is the tunnel: the run ends there, and the next
+       one goes on **with the logins still to do**, not with those two;
+     - logins silent on both looks while others answered get one round more,
+       of their own (a look and a second look), and are then left for the next
+       pass — four reads a pass at most. After hours without the tunnel they
+       are the ones it came back too late for;
+     - a login whose inventory was read, but where one reward's call got no
+       answer, is not silent: that is the reward's trouble (below);
+     - a pass in which nobody answered at all is not over: the next run starts
+       it again.
+
+     What is left of a pass is a list of logins, checked against the accounts
+     at every run: one sold or logged out meanwhile is left out, and when none
+     is left the run is a new pass. Found switched off, a sweep forgets what
+     was left: the one after it is switched on again is a whole pass.
+     Starting over would read the first logins again and again on a poor link
+     and never reach the last; standing still on two logins that never answer
+     would never reach the others.
 - **What a claim can answer** (`inventory.claim`, §15):
   - a code — stored, done. A claim writes the reward's new state itself, so it
     is not followed by a read.
@@ -765,7 +787,8 @@ and no other.
   - no answer at all (the tunnel, a timeout, a reply that could not be read) —
     the account's run stops, and that reward is marked `unanswered`: it is
     tried again after `unansweredMs`, and it is reported only once it has gone
-    unanswered three times.
+    unanswered three times. A code SOOP owes stays owed when a call for it
+    goes unanswered.
 - **Whose turn** — rewards never tried before go first, oldest first; then the
   ones tried before, the longest ago first. A reward SOOP keeps refusing, or
   never answers for, cannot stand in front of a new one.

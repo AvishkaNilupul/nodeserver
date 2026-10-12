@@ -31,8 +31,10 @@ const WAITING = { division: "available", kind: "code", needsLink: { $ne: true },
 const CODELESS = { division: "acquired", kind: "code", hasCode: { $ne: true } };
 const ROW_FIELDS = "loginId name expiresAt sentAt claimedAt receivedAt createdAt raw.itemCodeIdx auto claim.kind";
 // ...unless there is no code to have: only a reward never read, one SOOP says
-// it owes a code for, or one whose claim came back without a code.
-const owedCode = (r) => !r.claim || !r.claim.kind || r.claim.kind === "pending" || Boolean(r.auto && r.auto.kind === "pending");
+// it owes a code for, or one whose claim came back without a code — and such a
+// reward stays owed when a later call for it got no answer at all.
+const OWED = new Set(["pending", "unanswered"]);
+const owedCode = (r) => !r.claim || !r.claim.kind || r.claim.kind === "pending" || Boolean(r.auto && OWED.has(r.auto.kind));
 // Recorded on a reward SOOP answered "log in" for while the login check passed.
 const ODD_LOGIN = 'SOOP answered "log in" for this reward although the login works';
 
@@ -370,44 +372,88 @@ function createAutoClaimer({
   // (a restart between a step and its sync, a reward handed out late), and a
   // claim can fail.
   //
-  // One login that gets no answer is skipped: its own trouble, or a blip. Two
-  // running is the tunnel, and the sweep stops — to go on, next time, from
-  // the login it stopped at. Starting over would read the first logins again
-  // and again on a poor link and never reach the last.
+  // A pass looks at every login once. One whose inventory got no answer is
+  // looked at once more when the others are through, in a later run: its own
+  // trouble, or a blip. Two such logins running is the tunnel, and the run
+  // ends there — the next one goes on with the logins still to do. Starting
+  // over would read the first logins again and again on a poor link and never
+  // reach the last; going back to the two that got no answer would never
+  // reach the others if those two never get one.
+  //
+  // Logins silent on both looks while others answered get one round more, of
+  // their own, before the pass is over: after hours without the tunnel they
+  // are the ones it came back too late for, and they are not to wait for the
+  // next pass. A pass in which nobody answered at all is simply done again.
   // -> { accounts, unread, claimed, read, failed, pending, added, stopped }
+  // stopped: "egress" the pass has more to do, shortly · "off" · null it is over.
+  const newPass = (todo, follow = false) => ({ todo, again: [], dropped: [], second: false, answered: 0, follow });
+  // What a pass goes on with when the logins of its look are through.
+  function after(pass) {
+    if (pass.again.length) return { ...pass, todo: pass.again, again: [], second: true };
+    if (pass.dropped.length && pass.answered && !pass.follow) return newPass(pass.dropped, true);
+    return null;
+  }
+
   async function doSweep() {
     const sum = { accounts: 0, unread: 0, claimed: 0, read: 0, failed: 0, pending: 0, added: 0, stopped: null };
-    if (!on()) return { ...sum, stopped: "off" };
+    if (!on()) {
+      // What was left of a pass is not kept for the day it is switched on
+      // again: the sweep after that is a whole one.
+      state.resume = null;
+      return { ...sum, stopped: "off" };
+    }
     const rows = await Account().find({ sold: { $ne: true } }).select("loginId status sold").sort({ createdAt: 1 }).lean();
     const all = rows.filter(canClaim).map((a) => a.loginId);
-    const resume = state.resume;
+    // The pass a run before this one left unfinished, as far as its logins are
+    // still ours to read. Nothing left of it: a new pass, over every login.
+    const ours = new Set(all);
+    const kept = (ids) => ids.filter((id) => ours.has(id));
+    let pass = state.resume;
     state.resume = null;
-    const from = resume ? Math.max(0, all.indexOf(resume.at)) : 0;
-    const order = [...all.slice(from), ...all.slice(0, from)].slice(0, resume ? Math.min(resume.left, all.length) : all.length);
+    if (pass) pass = { ...pass, todo: kept(pass.todo), again: kept(pass.again), dropped: kept(pass.dropped) };
+    while (pass && !pass.todo.length) pass = after(pass);
+    if (!pass) pass = newPass(all);
+    const { todo } = pass;
+    let i = 0;
     let silent = 0;
-    for (let i = 0; i < order.length; i++) {
+    for (; i < todo.length; i++) {
       if (!on()) {
         sum.stopped = "off";
         break;
       }
       if (sum.accounts) await sleep(checkPaceMs);
+      const out = await guarded(todo[i], { sync: true });
+      // Switched off while this login waited its turn: it was not looked at.
+      if (out.skipped === "off") {
+        sum.stopped = "off";
+        break;
+      }
       sum.accounts += 1;
-      const out = await guarded(order[i], { sync: true });
       for (const k of ["claimed", "read", "failed", "pending", "added"]) sum[k] += out[k];
-      if (out.error !== "egress") {
+      if (out.error === "egress") sum.unread += 1;
+      // The login itself got no answer only when its inventory could not be
+      // read. Read, with one reward's call left unanswered, is that reward's
+      // trouble: it is marked (claimOne) and waits its turn.
+      if (out.error !== "egress" || out.synced) {
         silent = 0;
+        pass.answered += 1;
         continue;
       }
-      sum.unread += 1;
+      (pass.second ? pass.dropped : pass.again).push(todo[i]);
       if (++silent < 2) continue;
-      sum.stopped = "egress";
-      state.resume = { at: order[i - 1], left: order.length - (i - 1) };
+      i += 1;
       break;
     }
-    // Nobody answered at all (a farm of one login never has two running):
-    // that is the tunnel as well, and the whole pass is still to do.
-    if (!sum.stopped && sum.accounts && sum.unread === sum.accounts) sum.stopped = "egress";
-    state.lastSweepAt = new Date(now());
+    if (sum.stopped !== "off") {
+      const rest = todo.slice(i);
+      state.resume = rest.length ? { ...pass, todo: rest } : after(pass);
+      // More to do — or nobody answered in the whole pass, which is the tunnel
+      // as well (a farm of one login never has two running): it is all still to do.
+      if (state.resume || (sum.accounts && !pass.answered && !pass.follow)) sum.stopped = "egress";
+    }
+    // "Every login was last checked …" in the panel: a pass that is over. A
+    // run cut short, or one with more to do, is not that.
+    if (!sum.stopped) state.lastSweepAt = new Date(now());
     state.lastSweep = sum;
     if (sum.claimed || sum.read || sum.failed || sum.unread) {
       note({
@@ -416,7 +462,7 @@ function createAutoClaimer({
           `Checked ${plural(sum.accounts, "login")} for unclaimed codes: ${sum.claimed} claimed, ${sum.read} read back` +
           (sum.failed ? `, ${sum.failed} could not be claimed` : "") +
           (sum.unread ? `, ${plural(sum.unread, "login")} got no answer from SOOP` : "") +
-          (sum.stopped === "egress" ? " — stopped there, to go on from that login shortly" : ""),
+          (sum.stopped === "egress" ? " — it goes on shortly with what is left" : ""),
       });
     }
     return sum;

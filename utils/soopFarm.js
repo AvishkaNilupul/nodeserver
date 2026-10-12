@@ -106,6 +106,7 @@ class SoopFarm {
     this.nextWatchAt = 0;
     this.timers = [];
     this.invTimers = new Map();
+    this.plainReads = Promise.resolve();
     this.store = createCampaignStore(opts.store || {});
     this.activity = createActivityLog();
     this.inventory = createInventoryService({
@@ -650,7 +651,7 @@ class SoopFarm {
       : this.timings.inventoryAfterStepMs ?? INVENTORY_AFTER_STEP_MS;
     const timer = setTimeout(() => {
       this.invTimers.delete(id);
-      this._readAndClaim(id)
+      this._readAndClaim(id, { last: attempt >= INVENTORY_RETRIES })
         .then((again) => {
           if (again && attempt < INVENTORY_RETRIES && !this.invTimers.has(id)) this._inventorySoon(id, attempt + 1);
         })
@@ -664,16 +665,23 @@ class SoopFarm {
   // claimer's queue, which works on one account at a time: every account of a
   // bot reaches a step in the same minute, and thirty inventories read at once
   // is a burst from one address. Switched off, the claimer does nothing at
-  // all, so the plain read of before stays: once, through the paced batch.
+  // all, so the plain read of before stays: once, one account after the
+  // other — and not through the panel's batch, whose progress and list of
+  // failures are those of the Sync somebody last asked for.
   // -> true when it is worth looking again.
-  async _readAndClaim(id) {
+  async _readAndClaim(id, { last = false } = {}) {
     if (!this.autoClaim.status().enabled) {
-      this.inventory.syncMany([id]);
+      const { inventory } = this;
+      this.plainReads = this.plainReads.then(() => inventory.syncAccount(id)).catch(() => {});
       return false;
     }
     const out = await this.autoClaim.account(id, { sync: true });
     if (out.skipped || out.error === "auth") return false; // nothing a second look would change
-    if (out.error) return true; // the read may not have happened at all
+    if (out.error) {
+      // The last look, and its inventory still not read: the sweep reads it next.
+      if (last && !out.synced) console.log(`[soop] ${id}: no look at its rewards after a step (${out.error}) - left to the next sweep`);
+      return true; // the read may not have happened at all
+    }
     return !out.added && !out.claimed && !out.read; // nothing new was there yet
   }
 

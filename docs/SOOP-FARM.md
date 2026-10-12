@@ -279,9 +279,14 @@ whatever happens to the login.
 - When SOOP has run out of codes for a reward ("to be delivered later") the
   reward is claimed anyway and its code is asked for again every few hours,
   for a month.
-- On a poor link the sweep goes on from the login it stopped at instead of
-  starting over, and one reward SOOP keeps refusing never holds up the others
-  on its account.
+- On a poor link the sweep goes on with the logins it has not read yet instead
+  of starting over. A login that gives no answer is looked at again ten
+  minutes later — four times at most — and then left for the next sweep, so
+  logins that never answer cannot hold up the others; and one reward SOOP
+  keeps refusing, or never answers for, never holds up the others on its
+  account. After an outage every login is normally read within about twenty
+  minutes of the link coming back, and by the next three-hourly sweep at the
+  latest.
 - A code is never deleted by the farm: not when SOOP stops listing the reward,
   and not when its account is deleted from the panel.
 
