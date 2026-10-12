@@ -207,18 +207,26 @@ test("inventory: syncAccount upserts by key and removes rows that vanished", asy
   const before = await SoopInventoryItem.find({ loginId: "acc1" }).lean();
   const idOf = (rows, key) => String(rows.find((r) => r.key === key)._id);
 
-  // 101 was claimed by the buyer, 102 is gone, 106 is new.
+  // 101 was claimed by the buyer, 102 (which holds a code) and 103 (which
+  // does not) are gone from SOOP's lists, 106 is new.
   inv.acc1.acquired.push(inv.acc1.available.shift());
+  inv.acc1.available.shift();
   inv.acc1.available.shift();
   inv.acc1.available.push(row("106"));
   const second = await service.syncAccount("acc1");
   assert.equal(second.added, 1);
 
   const after = await SoopInventoryItem.find({ loginId: "acc1" }).lean();
-  assert.deepEqual(after.map((r) => r.key).sort(), ["101", "103", "104", "105", "106"]);
+  assert.deepEqual(after.map((r) => r.key).sort(), ["101", "102", "104", "105", "106"]);
   assert.equal(idOf(after, "101"), idOf(before, "101"), "an existing row is updated in place");
   assert.equal(after.find((r) => r.key === "101").division, "acquired");
-  assert.equal(await SoopInventoryItem.countDocuments({ loginId: "acc1", key: "102" }), 0);
+  assert.equal(await SoopInventoryItem.countDocuments({ loginId: "acc1", key: "103" }), 0, "a vanished row without a code is deleted");
+  // A code is ours whatever SOOP still lists: the row stays, marked.
+  const kept = after.find((r) => r.key === "102");
+  assert.equal(kept.hasCode, true);
+  assert.equal(kept.goneAt.getTime(), NOW);
+  assert.equal(await service.revealCode(String(kept._id)), CODES[1]);
+  assert.ok(after.filter((r) => r.key !== "102").every((r) => r.goneAt === null), "rows SOOP still lists carry no such mark");
 });
 
 test("inventory: a sync of one account never touches another account's rows", async () => {
@@ -347,10 +355,13 @@ test("inventory: an empty read that contradicts SOOP's own counter deletes nothi
   assert.equal(await SoopInventoryItem.countDocuments({ loginId: "acc1" }), 5);
   assert.ok(activity.recent({ level: "warn" }).length >= 1);
 
-  // A genuinely empty inventory (counter agrees) does clear the rows.
+  // A genuinely empty inventory (counter agrees) does clear the rows — all but
+  // the ones holding a code, which are ours to keep (contract §18).
   inv.acc1 = {};
   await service.syncAccount("acc1");
-  assert.equal(await SoopInventoryItem.countDocuments({ loginId: "acc1" }), 0);
+  const left = await SoopInventoryItem.find({ loginId: "acc1" }).lean();
+  assert.deepEqual(left.map((r) => r.key).sort(), ["101", "102", "104", "105"], "103 held no code and is gone");
+  assert.ok(left.every((r) => r.hasCode && r.goneAt.getTime() === NOW), "each kept row says since when SOOP no longer lists it");
 });
 
 test("inventory: a failed list read fails the whole sync and deletes nothing", async () => {

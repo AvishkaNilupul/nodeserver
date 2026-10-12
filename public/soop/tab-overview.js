@@ -63,6 +63,7 @@
     egress: toSystem, country: toSystem, geo: toSystem,
     scan: { label: "Retry scan", icon: "refresh", run: rescan },
     expiring: { label: "Open inventory", icon: "gift", run: () => Soop.go("inventory") },
+    claim: { label: "Open accounts", icon: "user", run: () => Soop.go("accounts", { status: "dead" }) },
   };
   function alertView(first) {
     let cur = first;

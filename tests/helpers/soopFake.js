@@ -24,7 +24,10 @@ const cc = (v) => (v ? String(v).trim().toUpperCase() : null);
 const kst = (ms) =>
   new Date(ms + 9 * 3600 * 1000).toISOString().slice(0, 19).replace("T", " ");
 
-function createFakeSoop({ now = Date.now } = {}) {
+// `rewards: true` makes the world hand a reward out — an unclaimed inventory
+// row — each time an account's minutes cross one of a campaign's steps, as the
+// real site does a minute or so after the step.
+function createFakeSoop({ now = Date.now, rewards = false } = {}) {
   const accounts = new Map(); // id -> account
   const tickets = new Map(); // AuthTicket value -> id
   const campaigns = new Map(); // dropsIdx -> raw row (insertion order = list order)
@@ -183,6 +186,15 @@ function createFakeSoop({ now = Date.now } = {}) {
       return true;
     },
 
+    // SOOP answers every claim / check-info call of this login with a refusal
+    // that is not about the login (an API error), until switched back.
+    refuseClaims(id, on = true) {
+      const acct = accounts.get(String(id));
+      if (!acct) return false;
+      acct.claimsRefused = on !== false;
+      return true;
+    },
+
     // Only the keys given change. Going down drops every open bridge, as a dead
     // tunnel would; a country change leaves bridges open with a stale claim.
     setEgress({ country, down } = {}) {
@@ -209,6 +221,25 @@ function createFakeSoop({ now = Date.now } = {}) {
       return clone(row);
     },
 
+    // Takes a reward out of an account's inventory, whichever list it is in
+    // (SOOP stops listing it), or changes what its claim will answer.
+    removeInventory(id, itemCodeIdx) {
+      const acct = accounts.get(String(id));
+      let n = 0;
+      for (const d of DIVISIONS) {
+        const before = acct ? acct.inventory[d].length : 0;
+        if (acct) acct.inventory[d] = acct.inventory[d].filter((r) => String(r.itemCodeIdx) !== String(itemCodeIdx));
+        n += before - (acct ? acct.inventory[d].length : 0);
+      }
+      return n;
+    },
+    setClaimCode(id, itemCodeIdx, code) {
+      const acct = accounts.get(String(id));
+      const row = acct && DIVISIONS.flatMap((d) => acct.inventory[d]).find((r) => String(r.itemCodeIdx) === String(itemCodeIdx));
+      if (row) row.claimCode = code;
+      return Boolean(row);
+    },
+
     advance(minutes = 1) {
       const credited = [];
       if (egress.down) return credited;
@@ -223,9 +254,20 @@ function createFakeSoop({ now = Date.now } = {}) {
           const key = `${acct.id}|${row.dropsIdx}`;
           if (!row.live || !covers(row, ch) || seen.has(key)) continue;
           seen.add(key);
-          const total = (acct.minutes.get(row.dropsIdx) || 0) + Number(minutes);
+          const had = acct.minutes.get(row.dropsIdx) || 0;
+          const total = had + Number(minutes);
           acct.minutes.set(row.dropsIdx, total);
           credited.push({ id: acct.id, dropsIdx: row.dropsIdx, minutes: total });
+          if (!rewards) continue;
+          for (const item of row.itemList) {
+            const step = Number(item.giveTerm) || 0;
+            if (step > had && step <= total) {
+              world.addInventory(acct.id, {
+                ...{ itemName: item.itemName, itemType: item.itemType, gameNo: row.gameNo },
+                ...{ ingameGiveYn: row.ingameGiveYn, claimCode: `CODE-${acct.id}-${row.dropsIdx}-${step}` },
+              });
+            }
+          }
         }
       }
       return credited;
@@ -367,6 +409,7 @@ function createFakeSoop({ now = Date.now } = {}) {
         // calls only read. The code lives here, never in the list rows.
         async useInfo(itemCodeIdx) {
           enter("useInfo", true);
+          if (acct.claimsRefused) throw new SoopError("Rewards cannot be handed out right now.", { code: "API" });
           const key = String(itemCodeIdx);
           const match = (r) => String(r.itemCodeIdx) === key;
           let row = acct.inventory.acquired.find(match);
@@ -374,6 +417,13 @@ function createFakeSoop({ now = Date.now } = {}) {
             const i = acct.inventory.available.findIndex(match);
             if (i < 0) throw new SoopError("No such reward.", { code: "API" });
             [row] = acct.inventory.available.splice(i, 1);
+            // A reissued reward (`renewFlag: "Y"` on the row): the old item is
+            // withdrawn unclaimed and a new one takes its place in the inventory.
+            if (row.renewFlag === "Y") {
+              const { renewFlag, itemCodeIdx: _old, ...rest } = row;
+              acct.inventory.available.push({ ...rest, itemCodeIdx: String(++seq) });
+              return { itemCode: "", itemType: row.itemType, itemName: row.itemName, renewFlag: "Y", itemDescription: "" };
+            }
             row.useFlag = "Y";
             row.receiveDate = kst(now());
             acct.inventory.acquired.push(row);

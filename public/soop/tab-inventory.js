@@ -1,5 +1,7 @@
-/* SOOP farm v2 — Inventory tab (contract §13, §14): the stock room. What every
-   account has earned, what is about to expire and which accounts hold it.
+/* SOOP farm v2 — Inventory tab (contract §13, §14, §18): the stock room. What
+   every account has earned, what is about to expire and which accounts hold it.
+   Code rewards are claimed by the server as they are earned; this page says so
+   and shows what is still waiting, and why.
    The summary is not part of /state: it is loaded on first render, when a sync
    finishes, on a manual refresh and when the tab is re-shown after a minute —
    never on the 3 s poll. A revealed code exists only as text inside its drawer
@@ -18,7 +20,7 @@
   let summary = null, loadError = "", loading = null, loadedAt = 0, seenLastAt = null, wasRunning = false;
   let query = "", division = "all", kind = "all", drawer = null;
   const open = new Set();             // item rows whose account list is expanded
-  let stats, syncLine, syncBar, syncBtn, failBox, search, divChips, kindChips, listBox;
+  let stats, claimLine, syncLine, syncBar, syncBtn, failBox, search, divChips, kindChips, listBox;
 
   // ---------- small helpers --------------------------------------------------
   function fill(node, ...kids) {
@@ -73,7 +75,7 @@
   function paint() {
     const t = (summary && summary.totals) || {}, n = (k) => (summary ? fmt.num(t[k] || 0) : "–");
     stats.available.set(n("available"), "waiting in each account's SOOP inventory");
-    stats.acquired.set(n("acquired"), "claimed by hand on SOOP");
+    stats.acquired.set(n("acquired"), "claimed — the codes are stored here");
     stats.expired.set(n("expired"), "ran out before anyone claimed them");
     stats.soon.set(n("expiringSoon"), t.expiringSoon ? "claim these first" : "nothing is about to run out", t.expiringSoon ? "warn" : null);
 
@@ -95,8 +97,25 @@
     paintSync();
   }
 
+  // What happens to a new reward, in one line, from the state the server sends.
+  function paintClaim() {
+    const c = Soop.state.autoClaim;
+    if (!c) { claimLine.textContent = ""; return; }
+    claimLine.className = "s-small " + (c.enabled && !c.waiting && !c.failing ? "s-muted" : "s-warn");
+    if (!c.enabled) {
+      claimLine.textContent = "Automatic claiming is switched off. Rewards stay unclaimed until someone claims them by hand, and one left on a login that stops working cannot be claimed at all.";
+      return;
+    }
+    const bits = ["Code rewards are claimed automatically as soon as they are earned, and the code is stored here — so a login that stops working cannot take it along. Links, forms and in-game rewards are left for you."];
+    if (c.waiting) bits.push(plural(c.waiting, "code reward") + " cannot be claimed: the login is logged out or refused. Re-import its cookie and they are claimed at once.");
+    if (c.failing) bits.push(plural(c.failing, "code reward") + " could not be claimed yet and will be tried again.");
+    if (c.lastSweepAt) bits.push("Every login was last checked " + fmt.ago(c.lastSweepAt) + ".");
+    claimLine.textContent = bits.join(" ");
+  }
+
   // Runs on every poll: text and a progress bar only, plus the "a sync just finished" check.
   function paintSync() {
+    paintClaim();
     const inv = Soop.state.inventory || {}, running = !!inv.running, at = inv.lastAt || (summary && summary.lastSyncAt);
     syncBtn.disabled = running;
     syncBar.hidden = !running;
@@ -209,7 +228,9 @@
     out.push(el("div", { class: "s-row" }, Object.keys(DIV).map((d) => ui.badge(fmt.num(count(d)) + " " + DIV[d].label.toLowerCase(), count(d) ? DIV[d].tone : null)),
       acc && acc.sold ? ui.badge("Account sold", "warn") : null,
       el("span", { class: "s-muted s-small" }, synced ? "Synced " + fmt.ago(synced) : "")));
-    out.push(el("div", { class: "s-note" }, ui.icon("info"), el("span", "Nothing is claimed automatically. Claim is one click per reward, uses this account's stored login, and cannot be undone.")));
+    out.push(el("div", { class: "s-note" }, ui.icon("info"), el("span", (Soop.state.autoClaim || {}).enabled
+      ? "Code rewards are claimed automatically as they are earned. Anything else is one click per reward: it uses this account's stored login and cannot be undone."
+      : "Automatic claiming is switched off. Claim is one click per reward, uses this account's stored login, and cannot be undone.")));
     out.push(el("ul", { class: "s-list" }, items.map((it) => accountItem(it, ctx))));
     return out;
   }
@@ -229,7 +250,7 @@
           el("span", { class: "s-muted s-small" }, (KINDS[it.kind] || KINDS.other) + " · " + gameLabel(it))),
         time, link,
         it.sentAt ? el("span", { class: "s-small s-muted" }, "Earned " + fmt.when(it.sentAt)) : null,
-        claimNote(it),
+        claimNote(it), autoNote(it),
         canClaim(it) ? claimSlot(it, ctx) : it.division === "acquired" && it.kind !== "ingame" ? codeSlot(it, ctx) : null));
   }
   function canClaim(it) {
@@ -242,6 +263,15 @@
     return el("div", { class: "s-stack is-tight" },
       el("span", { class: "s-small" + (c.kind === "pending" || c.kind === "renewed" ? " s-warn" : " s-muted") }, c.message),
       c.description ? el("span", { class: "s-small s-muted", style: { whiteSpace: "pre-line" } }, c.description) : null);
+  }
+  // Why the automatic claim has not finished this reward, and a code kept after SOOP stopped listing it.
+  function autoNote(it) {
+    const out = [];
+    if (it.auto && it.auto.error && !it.hasCode) {
+      out.push(el("span", { class: "s-small s-warn" }, "Not claimed automatically yet (tried " + plural(it.auto.tries || 1, "time") + "): " + it.auto.error));
+    }
+    if (it.goneAt) out.push(el("span", { class: "s-small s-muted" }, "SOOP stopped listing this reward " + fmt.ago(it.goneAt) + ". Its code is kept."));
+    return out.length ? el("div", { class: "s-stack is-tight" }, out) : null;
   }
   // "Claim": one reward, on SOOP, with the account's stored login. Irreversible, so it always confirms.
   function claimSlot(it, ctx) {
@@ -327,8 +357,7 @@
       listBox = el("div", { class: "s-stack" });
       root.append(el("div", { class: "s-stack" },
         el("div", { class: "s-stats" }, stats.available, stats.acquired, stats.expired, stats.soon),
-        el("div", { class: "s-small s-muted" },
-          "The system never claims drops. They stay unclaimed in each account's SOOP inventory until someone claims them by hand."),
+        (claimLine = el("div", { class: "s-small s-muted", role: "status" })),
         el("section", { class: "s-card" }, el("div", { class: "s-card-bd s-stack" },
           el("div", { class: "s-spread" },
             el("div", { class: "s-grow s-stack is-tight" }, syncLine, syncBar),

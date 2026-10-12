@@ -29,6 +29,12 @@ const soopInventoryItemSchema = new mongoose.Schema(
     // back from SOOP: { kind, message, description, gameTitle, dropsName }. No code in here.
     claimedAt: { type: Date, default: null },
     claim: { type: mongoose.Schema.Types.Mixed, default: null },
+    // Kept by utils/soop/autoClaim.js for a reward it could not finish:
+    // { tries, at, error }. Null once the code is stored. No code in here.
+    auto: { type: mongoose.Schema.Types.Mixed, default: null },
+    // When a sync first found this row missing from SOOP's lists. Only a row
+    // holding a code outlives that; everything else is deleted.
+    goneAt: { type: Date, default: null },
     syncedAt: { type: Date, default: null },
   },
   { timestamps: true },

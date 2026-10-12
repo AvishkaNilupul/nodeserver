@@ -19,7 +19,8 @@ Background reading (do not copy from, but understand): `docs/SOOP-FARM.md`,
   header saying what the file is for, comments only where the WHY is not obvious.
 - **Never call sooplive.com** from a test, a script you run, or while developing.
 - **Never log, return or persist in clear text**: cookies, `AuthTicket`, reward codes.
-- **Never claim a drop.** The system only reads inventory.
+- **Never claim a drop.** The system only reads inventory. (True of v2 as built;
+  since 2026-10-13 code rewards are claimed automatically — §18 says exactly which.)
 - Untrusted text: campaign titles, nicknames, item names and messages come from
   SOOP. Server code treats them as data; UI code renders them with
   `textContent` / the `Soop.el` builder — never string-built `innerHTML`.
@@ -45,6 +46,7 @@ Background reading (do not copy from, but understand): `docs/SOOP-FARM.md`,
 | `public/soop.html`, `public/soop/soop.css`, `public/soop/core.js`, `public/soop/UI-KIT.md` | U1 |
 | `public/soop/tab-*.js` (one per tab, see §9) | U2–U6 |
 | `public/soop/account-import.js`, `tests/soopAccountImport.test.js` (§17) | added 2026-10-13 |
+| `utils/soop/autoClaim.js`, `tests/soopAutoClaim.test.js` (§18) | added 2026-10-13 |
 
 ## 2. Errors — `utils/soop/errors.js`
 
@@ -676,3 +678,93 @@ reached through `Soop._accountImport.open()`.
 - The dev harness takes `--cookie-files=<dir>` and writes exports the farm does
   not have yet (six new logins, one saved last week that the drops site refuses,
   one made while signed out, one file that is no export) to try all of it with.
+
+## 18. Code rewards are claimed as they are earned (added 2026-10-13)
+
+SOOP hands a reward's code out only when the reward is claimed, and a reward
+can only be claimed while its login works. On 2026-10-11 the drops site dropped
+all eight logins at once (§16): what was unclaimed on them could not be reached
+until each account had been signed in again by hand, and 32 rewards that last
+one day ran out in the meantime. A code that has been claimed is stored
+encrypted and stays ours whatever happens to the login. So the owner's rule,
+2026-10-13: claim the codes as soon as they are earned, always, and keep them.
+
+This replaces "the system never claims" (§0, §13, §15) for one kind of reward
+and no other.
+
+- **What is claimed automatically**: a reward that is unclaimed (`available`),
+  of kind `code`, not expired, with a SOOP item id, that needs no linked game
+  account, on an account that is not sold and whose login is not `not_logged_in`
+  or `drops_rejected`. **Never** a link, a form or an in-game reward: those
+  stay one deliberate click each (§15).
+- **Module** — `utils/soop/autoClaim.js`:
+
+  ```
+  createAutoClaimer({ models?, inventory, getClient, activity?, enabled?, onAuth?,
+                      paceMs = 7000, checkPaceMs = 2500, retryMs = 6 h, now?, sleep? }) -> {
+    account(id, { sync = false | true | "check" }) -> Promise<{ id, claimed, read, failed, pending, synced, skipped, error? }>
+    sweep()   -> Promise<{ accounts, synced, claimed, read, failed, pending, stopped }>
+    waiting() -> Promise<{ stuck: { rewards, logins: [], soonest }, failed: { rewards, error } }>   // database only
+    status()  -> { enabled, running, claimed, read, lastClaimAt, lastSweepAt, lastSweep, lastError }
+  }
+  ```
+
+  One queue for everything: one account at a time, and one call that claims or
+  reads a code every `paceMs`, whatever queues up. Neither call ever rejects;
+  `skipped` is `off | sold | login | unknown`, `error` is `auth | egress | error`.
+- **When** — three ways in, all through that queue:
+  1. **After a step.** The sync that follows a step or a finished campaign
+     (90 s later, as before) is followed by `account(id)`. SOOP hands a reward
+     out a minute or two after its step, so when that sync found nothing to
+     claim it looks again 5 minutes later, twice at most.
+  2. **After an import.** A login that works again can claim what was waiting
+     on it: `account(id, { sync: "check" })` once its login check has run.
+  3. **The sweep**, 8 minutes after start and every 3 hours: every login that
+     can claim. One small call each (SOOP's own counters); the inventory is read
+     only when they disagree with the stored copy (an unclaimed reward it does
+     not show, or more claimed than it shows). It exists because a restart drops
+     the 90-second timer, a reward can land late, and a claim can fail.
+- **What a claim can answer** (`inventory.claim`, §15): a code — stored, done.
+  `pending` (SOOP has run out and will deliver later) — the reward is claimed,
+  and its code is asked for again every `retryMs` until it is there. `renewed`
+  (SOOP reissued it as a new item) — the new item is claimed in the same run.
+  A refusal for one reward — recorded on that reward (`auto: { tries, at, error }`),
+  tried again after `retryMs`, and the rest of the account goes on. A refused
+  **login** — that account stops, nothing is recorded against its rewards, and
+  the login is checked at once so the panel and the Telegram alert (§16) say
+  so. A dead **tunnel** — everything stops, nothing is marked; the next sweep
+  starts over.
+- **A claimed reward with no code stored** (claimed by hand on SOOP, or by a
+  claim whose reply was lost) has its code read back the same way. That call
+  only reads.
+- **The inventory service changed with it** (`utils/soop/inventory.js`):
+  - `claim(itemId, { sync = true })` — `sync: false` leaves the follow-up sync
+    to a caller that claims several rewards in a row and syncs once; `settled(id)`
+    resolves when no sync of that account is under way.
+  - **A sync never undoes a claim.** A reward claimed while a sync was reading
+    is still in the list that sync read; rows claimed since the sync began are
+    left as the claim wrote them. (Seen on 2026-10-12: forty claims seven
+    seconds apart, four rows back to "unclaimed" behind them.)
+  - **A row that holds a code is never deleted.** When SOOP stops listing it the
+    row stays and gets `goneAt`; listed again, `goneAt` is cleared. Rows without
+    a code are deleted as before. Deleting an account keeps its rows that hold a
+    code, for the same reason.
+- **Switch** — on unless switched off: `autoFarm.soopAutoClaim = false` in the
+  settings file (live, read at most every 30 s), or `SOOP_AUTO_CLAIM=0` in the
+  environment (needs a restart). A switch that cannot be read counts as on. Off
+  stops every call before it is made, including the one after the current one.
+  `farm._reset()` (tests, the dev harness) never reads the settings file.
+- **State** — `State.autoClaim = status() + { waiting, failing }` (counts of
+  code rewards stuck on a login that cannot claim, and of ones the claim keeps
+  failing on). Two alerts of kind `claim`, level `warn`: "N code reward(s) are
+  waiting on M login(s) that cannot claim them (ids) — re-import their cookies;
+  the first runs out in …", and "N code reward(s) could not be claimed
+  automatically (reason)". Inventory items carry `auto` and `goneAt`. Activity
+  kind `claim`.
+- **The cookie rule (§0) for codes**: the claimer holds a code only between
+  SOOP's reply and the encrypted write. No log line, activity entry, status,
+  alert or result carries one — `tests/soopAutoClaim.test.js` checks all of
+  them against the codes it planted.
+- The fake SOOP gained `{ rewards: true }` (a reward is handed out as each step
+  is crossed), `refuseClaims(id)`, `removeInventory(id, idx)`, `setClaimCode(id, idx, code)`,
+  and a row with `renewFlag: "Y"` is reissued on its first claim.

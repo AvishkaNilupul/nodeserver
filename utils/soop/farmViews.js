@@ -142,12 +142,20 @@ function egressView(transport, country) {
   };
 }
 
+// "in 3 hours" / "in 12 days", for a deadline in an alert.
+function inWords(ms) {
+  const hours = Math.max(1, Math.round(ms / 3600000));
+  if (hours < 48) return `in ${hours} hour${hours === 1 ? "" : "s"}`;
+  return `in ${Math.round(hours / 24)} days`;
+}
+
 // Conditions the owner should act on, worst first.
-function alertsView({ egress, accounts, sessions, scan, inventoryTotals, now }) {
+// claims: what ./autoClaim.js waiting() answered, or null when it could not be read.
+function alertsView({ egress, accounts, sessions, scan, inventoryTotals, claims, now }) {
   const out = [];
   const add = (level, kind, msg, extra = {}) =>
     out.push({
-      id: [kind, extra.accountId || "", extra.botId || ""].join(":"),
+      id: [kind, extra.accountId || "", extra.botId || ""].concat(extra.tag ? [extra.tag] : []).join(":"),
       level,
       kind,
       msg,
@@ -187,6 +195,25 @@ function alertsView({ egress, accounts, sessions, scan, inventoryTotals, now }) 
   }
   if (inventoryTotals && inventoryTotals.expiringSoon > 0) {
     add("warn", "expiring", `${inventoryTotals.expiringSoon} unclaimed reward(s) expire within 72 hours.`);
+  }
+  // Codes are claimed as they are earned, so one still unclaimed is stuck: on a
+  // login that cannot claim, or on a reward SOOP keeps refusing.
+  const stuck = claims && claims.stuck;
+  if (stuck && stuck.rewards > 0) {
+    const ids = stuck.logins || [];
+    const names = ids.slice(0, 6).join(", ") + (ids.length > 6 ? ` and ${ids.length - 6} more` : "");
+    const left = stuck.soonest ? new Date(stuck.soonest).getTime() - now : null;
+    add(
+      "warn",
+      "claim",
+      `${stuck.rewards} code reward(s) are waiting on ${ids.length} login(s) that cannot claim them (${names}) — re-import their cookies` +
+        (left !== null && left > 0 ? `; the first runs out ${inWords(left)}.` : "."),
+      { tag: "stuck" },
+    );
+  }
+  const failed = claims && claims.failed;
+  if (failed && failed.rewards > 0) {
+    add("warn", "claim", `${failed.rewards} code reward(s) could not be claimed automatically (${failed.error || "no reason given"}) — they are tried again every few hours.`, { tag: "failed" });
   }
   const rank = { error: 0, warn: 1, info: 2 };
   return out.sort((a, b) => rank[a.level] - rank[b.level]);

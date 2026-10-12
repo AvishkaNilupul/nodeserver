@@ -16,6 +16,7 @@ const { createActivityLog } = require("./soop/activity");
 const { createInventoryService } = require("./soop/inventory");
 const { createHealthService } = require("./soop/health");
 const { createLoginAlert } = require("./soop/loginAlert");
+const { createAutoClaimer } = require("./soop/autoClaim");
 const { createMetrics } = require("./soop/metrics");
 const { isAuthError, plainMessage } = require("./soop/errors");
 const { runSession, sleep, goalOf, channelMemo } = require("./soopWorker");
@@ -40,6 +41,35 @@ const PAGE_SCAN_MS = 300000;
 const PRIME_PACE_MS = 3000;
 // How often the login alert looks for logins that stopped being able to farm.
 const LOGIN_ALERT_MS = 60000;
+// Automatic claiming (./soop/autoClaim.js). A reward is claimed right after the
+// sync that follows its step; SOOP hands one out a minute or two after the
+// step, so a sync that found nothing new looks again this much later, twice.
+const INVENTORY_RETRY_MS = 5 * 60000;
+const INVENTORY_RETRIES = 2;
+// The sweep over every login: once after boot (behind the health sweep, which
+// starts at two minutes and takes four seconds a login), then on this interval.
+const CLAIM_SWEEP_BOOT_MS = 8 * 60000;
+const CLAIM_SWEEP_MS = 3 * 3600 * 1000;
+const CLAIM_VIEW_MS = 60000;
+const SWITCH_MEMO_MS = 30000;
+
+// Automatic claiming is on unless it is switched off: SOOP_AUTO_CLAIM=0 in the
+// environment (read at start), or autoFarm.soopAutoClaim = false in the
+// settings file (live, no restart). Anything unreadable leaves it on.
+const isOff = (v) => v === false || v === 0 || /^(0|false|off|no)$/i.test(String(v == null ? "" : v).trim());
+let switchMemo = { at: 0, on: true };
+function autoClaimSwitch() {
+  if (isOff(process.env.SOOP_AUTO_CLAIM)) return false;
+  if (Date.now() - switchMemo.at < SWITCH_MEMO_MS) return switchMemo.on;
+  let on = true;
+  try {
+    on = !isOff(require("./settings").getAutoFarm().soopAutoClaim);
+  } catch {
+    on = true;
+  }
+  switchMemo = { at: Date.now(), on };
+  return on;
+}
 
 class SoopFarm {
   constructor() {
@@ -47,6 +77,7 @@ class SoopFarm {
     this.clock = { now: Date.now, sleep };
     this.timings = {}; // worker timing overrides (tests)
     this.autoInventory = true;
+    this.autoClaimEnabled = autoClaimSwitch;
     this._build();
   }
 
@@ -81,6 +112,17 @@ class SoopFarm {
     });
     this.metrics = createMetrics();
     this.loginAlert = createLoginAlert({ activity: this.activity });
+    this.autoClaim = createAutoClaimer({
+      inventory: this.inventory,
+      getClient: (id) => this.ensureClient(id),
+      activity: this.activity,
+      enabled: () => this.autoClaimEnabled(),
+      // SOOP refused the login while claiming: have it checked now, so the
+      // panel and the login alert say so, instead of at the next sweep.
+      onAuth: (id) => this.health.check(id).catch(() => {}),
+      ...(opts.autoClaim || {}),
+    });
+    this.claimView = { at: 0, value: null };
   }
 
   // ---- lifecycle ----------------------------------------------------------
@@ -109,12 +151,19 @@ class SoopFarm {
     this._every(RECONCILE_MS, () => this._reconcile());
     this._every(PROGRESS_FLUSH_MS, () => this._flushProgress());
     this._every(LOGIN_ALERT_MS, () => this.loginAlert.pass());
+    this._every(CLAIM_SWEEP_MS, () => this._claimSweep());
     // The health service only sweeps on its interval, and this process restarts
     // more often than that — so check every login once, shortly after boot.
     this.bootTimer = setTimeout(() => {
       this.checkAccounts([]).catch((err) => console.error("[soop] boot health sweep failed:", err.message));
     }, BOOT_SWEEP_MS);
     if (this.bootTimer.unref) this.bootTimer.unref();
+    // A restart drops the timer that was about to sync an account after a
+    // step, so whatever landed around it is picked up here.
+    this.claimTimer = setTimeout(() => {
+      this._claimSweep().catch((err) => console.error("[soop] boot claim sweep failed:", err.message));
+    }, CLAIM_SWEEP_BOOT_MS);
+    if (this.claimTimer.unref) this.claimTimer.unref();
     await this._reconcile({ force: true });
     const active = [...this.bots.values()].filter((b) => b.active).length;
     console.log(`[soop] farm service ready (${active} active bot(s))`);
@@ -126,6 +175,9 @@ class SoopFarm {
     for (const t of this.timers) clearInterval(t);
     for (const t of this.invTimers.values()) clearTimeout(t);
     clearTimeout(this.bootTimer);
+    clearTimeout(this.claimTimer);
+    // Never the real switch here: it reads the site's settings file.
+    this.autoClaimEnabled = opts.autoClaimEnabled || (() => true);
     this.metrics.stop();
     this.health.stop();
     this.activity.stop();
@@ -216,6 +268,10 @@ class SoopFarm {
     this.activity.add({ kind: "account", accountId: id, msg: `Imported ${id}` });
     // `fresh`: a check of this login may be under way with the cookie just replaced.
     await this.health.check(id, { fresh: true }).catch(() => {});
+    // A login that works again can claim what was waiting on it — which is
+    // the reason to re-import one whose rewards were stuck. In the background:
+    // the import does not wait for SOOP's inventory.
+    if (this.autoInventory) this.autoClaim.account(id, { sync: "check" }).catch(() => {});
     return { id, nick: info.nick || null, country: info.country || null };
   }
 
@@ -259,7 +315,9 @@ class SoopFarm {
       }
     }
     await SoopFarmTask.updateMany({}, { $pull: { accountIds: { $in: list }, doneIds: { $in: list } } });
-    await SoopInventoryItem.deleteMany({ loginId: { $in: list } });
+    // Not the rows that hold a code: a code that was claimed is ours with or
+    // without the account, and deleting the account is no reason to lose it.
+    await SoopInventoryItem.deleteMany({ loginId: { $in: list }, hasCode: { $ne: true } });
     const r = await SoopAccount.deleteMany({ loginId: { $in: list } });
     this.accountsCache = null;
     return r.deletedCount || 0;
@@ -565,15 +623,48 @@ class SoopFarm {
     return p ? Number(p.minutes) || 0 : 0;
   }
 
-  // A reward should have landed a little after a step: refresh that inventory.
-  _inventorySoon(id) {
+  // A reward should have landed a little after a step: refresh that inventory
+  // and claim what is new. When nothing was there to claim yet, look again.
+  _inventorySoon(id, attempt = 0) {
     if (!this.autoInventory || this.invTimers.has(id)) return;
+    const wait = attempt
+      ? this.timings.inventoryRetryMs ?? INVENTORY_RETRY_MS
+      : this.timings.inventoryAfterStepMs ?? INVENTORY_AFTER_STEP_MS;
     const t = setTimeout(() => {
       this.invTimers.delete(id);
-      this.inventory.syncAccount(id).catch(() => {});
-    }, INVENTORY_AFTER_STEP_MS);
+      this.inventory
+        .syncAccount(id)
+        .then(() => this.autoClaim.account(id))
+        .then((out) => {
+          const nothing = out && !out.skipped && !out.error && !out.claimed;
+          if (nothing && attempt < INVENTORY_RETRIES) this._inventorySoon(id, attempt + 1);
+        })
+        .catch(() => {});
+    }, wait);
     if (t.unref) t.unref();
     this.invTimers.set(id, t);
+  }
+
+  // One line in the process log per sweep: the only trace of a sweep that had
+  // nothing to do, and the first place to look when asked "is it claiming?".
+  async _claimSweep() {
+    const s = await this.autoClaim.sweep();
+    console.log(
+      `[soop] claim sweep: ${s.accounts} login(s) checked, ${s.synced} synced, ${s.claimed} claimed, ${s.read} read back, ${s.failed} failed` +
+        (s.stopped ? ` — stopped: ${s.stopped}` : ""),
+    );
+    this.claimView = { at: 0, value: this.claimView.value };
+    return s;
+  }
+
+  // Codes waiting where nothing can claim them, for the alerts. Asked of the
+  // database at most once a minute, however often the panel polls.
+  async _claimsWaiting() {
+    const c = this.claimView;
+    if (c.value && this.clock.now() - c.at < CLAIM_VIEW_MS) return c.value;
+    const value = await this.autoClaim.waiting().catch(() => c.value);
+    this.claimView = { at: this.clock.now(), value };
+    return value;
   }
 
   async _stopSession(id) {
@@ -623,6 +714,7 @@ class SoopFarm {
     const egress = views.egressView(getTransport(), (geo && geo.cc) || this.egressCountry);
     const scan = this._scanView();
     const inv = this.inventory.status();
+    const claims = await this._claimsWaiting();
     return {
       now: new Date(this.clock.now()).toISOString(),
       started: this.started,
@@ -638,9 +730,10 @@ class SoopFarm {
         });
       }),
       bots,
-      alerts: views.alertsView({ egress, accounts, sessions: this.sessions, scan, inventoryTotals: this.invTotals, now: this.clock.now() }),
+      alerts: views.alertsView({ egress, accounts, sessions: this.sessions, scan, inventoryTotals: this.invTotals, claims, now: this.clock.now() }),
       scan,
       inventory: { running: inv.running, done: inv.done, total: inv.total, lastAt: inv.lastAt },
+      autoClaim: { ...this.autoClaim.status(), waiting: claims ? claims.stuck.rewards : 0, failing: claims ? claims.failed.rewards : 0 },
       metrics: this.metrics.view([...this.sessions.values()].filter((s) => s.view.state === "farming").length),
     };
   }

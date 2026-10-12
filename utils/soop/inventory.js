@@ -1,12 +1,15 @@
-// SOOP drops inventory (docs/SOOP-FARM-CONTRACT.md §9).
+// SOOP drops inventory (docs/SOOP-FARM-CONTRACT.md §9, §15, §18).
 //
-// Reads what each account holds — it never claims anything — and keeps a local
-// copy so the panel can answer "what do we have, and what expires first"
-// without asking SOOP on every page load.
+// Reads what each account holds and keeps a local copy, so the panel can answer
+// "what do we have, and what expires first" without asking SOOP on every page
+// load. A sync only reads. claim() is the one call that changes anything on
+// SOOP; who decides to make it is the caller's business (a click in the panel,
+// or ./autoClaim.js for code rewards).
 //
 // Reward codes are the product. A code leaves this file in exactly one place,
 // revealCode(); everywhere else it exists only as `codeEnc` (utils/secretBox),
-// and no read path selects that field. Never log a code.
+// and no read path selects that field. Never log a code. A row that holds a
+// code is never deleted by a sync: the code is ours whatever SOOP still lists.
 
 const mongoose = require("mongoose");
 const { plainMessage } = require("./errors");
@@ -17,7 +20,7 @@ const DIVISIONS = ["available", "acquired", "expired"];
 const CODE_FIELDS = ["itemCode", "code", "pinNo", "couponNo"];
 const SOON_MS = 72 * 3600 * 1000;
 const VIEW_FIELDS =
-  "loginId key division name nameRaw kind gameNo gameName image expiresAt sentAt receivedAt needsLink linkPath used hasCode syncedAt claimedAt claim";
+  "loginId key division name nameRaw kind gameNo gameName image expiresAt sentAt receivedAt needsLink linkPath used hasCode syncedAt claimedAt claim auto goneAt";
 // What SOOP puts in `itemCode` when it has run out of codes for a reward.
 const PENDING_CODE = "2차지급예정";
 const CLAIM_MESSAGES = {
@@ -138,6 +141,9 @@ function view(doc) {
     syncedAt: doc.syncedAt || null,
     claimedAt: doc.claimedAt || null,
     claim: doc.claim || null,
+    // Why the automatic claim has not finished this one, when it has not.
+    auto: doc.auto ? { tries: Number(doc.auto.tries) || 0, at: doc.auto.at || null, error: String(doc.auto.error || "") } : null,
+    goneAt: doc.goneAt || null,
   };
 }
 
@@ -164,6 +170,7 @@ function createInventoryService({ models, getClient, activity, paceMs = 2500, no
   }
 
   async function doSync(id) {
+    const startedAt = new Date(now());
     const client = await getClient(id);
     const counts = await client.inventoryCounts();
     // All three lists are read BEFORE anything is written: if one read fails the
@@ -176,8 +183,16 @@ function createInventoryService({ models, getClient, activity, paceMs = 2500, no
       }
     }
     const at = new Date(now());
+    // A reward claimed while these lists were being read is still in the list
+    // it was read from. The claim's own write is the newer truth, so its row
+    // is left alone here (seen on 2026-10-12: forty claims seven seconds
+    // apart, four rows back to "unclaimed" behind them).
+    const claimedSince = new Set(
+      (await Item().find({ loginId: id, claimedAt: { $gte: startedAt } }).select("key").lean()).map((r) => String(r.key)),
+    );
     const ops = [];
     for (const [key, item] of byKey) {
+      if (claimedSince.has(key)) continue;
       const { code, key: _key, raw, ...fields } = item;
       const safeRaw = { ...(raw || {}) };
       for (const f of CODE_FIELDS) delete safeRaw[f];
@@ -192,6 +207,7 @@ function createInventoryService({ models, getClient, activity, paceMs = 2500, no
               raw: safeRaw,
               ...(code ? { hasCode: true, codeEnc: encrypt(code) } : {}),
               syncedAt: at,
+              goneAt: null,
             },
           },
           upsert: true,
@@ -209,7 +225,12 @@ function createInventoryService({ models, getClient, activity, paceMs = 2500, no
     if (!byKey.size && claimed > 0) {
       note({ level: "warn", accountId: id, msg: `Inventory lists came back empty although SOOP counts ${claimed} item(s); kept the stored rows` });
     } else {
-      await Item().deleteMany({ loginId: id, key: { $nin: [...byKey.keys()] } });
+      // What SOOP no longer lists is gone — except a row holding a code. That
+      // code was handed to us and may still be unused, so the row stays, with
+      // the day it dropped off SOOP's lists.
+      const listed = [...byKey.keys()];
+      await Item().deleteMany({ loginId: id, key: { $nin: listed }, hasCode: { $ne: true } });
+      await Item().updateMany({ loginId: id, key: { $nin: listed }, hasCode: true, goneAt: null }, { $set: { goneAt: at } });
     }
     const items = await forAccount(id);
     note({ accountId: id, msg: `Inventory synced: ${byKey.size} item(s), ${added} new` });
@@ -230,6 +251,12 @@ function createInventoryService({ models, getClient, activity, paceMs = 2500, no
       .finally(() => inFlight.delete(id));
     inFlight.set(id, p);
     return p;
+  }
+
+  // Resolves once no sync of this account is under way. Never rejects.
+  function settled(rawId) {
+    const p = inFlight.get(String(rawId || ""));
+    return p ? p.then(() => {}, () => {}) : Promise.resolve();
   }
 
   const batch = createBatchRunner({ run: syncAccount, paceMs, now });
@@ -329,8 +356,10 @@ function createInventoryService({ models, getClient, activity, paceMs = 2500, no
 
   // Claims ONE unclaimed reward on SOOP with the account's stored session. This
   // cannot be undone, so every refusal below is checked before SOOP is called.
+  // `sync: false` leaves the follow-up sync to a caller that claims several
+  // rewards of one account in a row and syncs once at the end.
   // -> { ok: true, result: { kind, message, description, code } } | { ok: false, error }
-  async function claim(itemId) {
+  async function claim(itemId, { sync = true } = {}) {
     if (!itemId || !mongoose.isValidObjectId(itemId)) return { ok: false, error: "Unknown inventory item" };
     const row = await Item().findById(itemId).lean();
     if (!row) return { ok: false, error: "Unknown inventory item" };
@@ -348,7 +377,7 @@ function createInventoryService({ models, getClient, activity, paceMs = 2500, no
     if (out.claim.kind !== "renewed") Object.assign(set, { division: "acquired", claimedAt: at, receivedAt: at });
     await Item().updateOne({ _id: row._id }, { $set: set });
     note({ kind: "claim", accountId: row.loginId, msg: `Claimed "${row.name}" on ${row.loginId}: ${out.claim.message}` });
-    syncAccount(row.loginId).catch(() => {});
+    if (sync) syncAccount(row.loginId).catch(() => {});
     return { ok: true, result: { ...out.claim, name: row.name, loginId: row.loginId, code: out.secret || null } };
   }
 
@@ -394,6 +423,7 @@ function createInventoryService({ models, getClient, activity, paceMs = 2500, no
 
   return {
     syncAccount,
+    settled,
     syncMany: (ids) => batch.enqueue(ids),
     status: () => batch.status(),
     summary,

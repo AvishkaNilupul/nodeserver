@@ -39,8 +39,11 @@ up to `7eb67df`). What changed and why is in "What v1 got wrong" at the end.
   drops.sooplive.com, export its cookies and import them again.
 - **Activity log** — what each account and bot did, kept 14 days.
 
-Nothing is ever claimed **automatically**. A reward is claimed only when a
-superadmin presses "Claim on SOOP" on that one reward (see "Claiming a reward").
+**Code rewards are claimed automatically** as soon as they are earned, and the
+code is stored encrypted — so a login that stops working cannot take it along
+(see "Codes are claimed as they are earned"). A link, a form or an in-game
+reward is still claimed only when a superadmin presses "Claim on SOOP" on that
+one reward (see "Claiming a reward").
 
 ## Pieces
 
@@ -56,6 +59,7 @@ superadmin presses "Claim on SOOP" on that one reward (see "Claiming a reward").
 | `utils/soopFarm.js`, `utils/soop/farmBots.js`, `utils/soop/farmViews.js` | The service: sessions, bots, the panel's read model. `.start()` runs after Mongo connects. |
 | `utils/soop/campaignStore.js` | Shared campaign cache (one scan serves every account) and the remembered-campaign store. |
 | `utils/soop/inventory.js`, `health.js`, `activity.js`, `metrics.js` | Inventory sync, login health, activity log, RAM/CPU sampler. |
+| `utils/soop/autoClaim.js` | Claims code rewards as they are earned: after a step, after an import, and on a sweep. |
 | `models/Soop*.js` | `SoopAccount`, `SoopCampaign`, `SoopFarmTask` (a bot), `SoopInventoryItem`, `SoopGame`, `SoopTranslation`, `SoopActivity`. |
 | `routes/soopRoutes.js` | Superadmin API (`/api/soop/*`), every route behind `requireSuperadmin`. |
 | `public/soop.html`, `public/soop/*` | The panel: Overview, Bots, Campaigns, Accounts, Inventory, Activity. |
@@ -235,6 +239,41 @@ First real claim, 2026-10-06 01:16 UTC: an OWCS "Sun Tea Icon" returned a
 25-character code shaped `XXXX-XXXX-XXXXX-XXXX-XXXX` — the Battle.net code
 format — with no instructions text. Whether it redeems on a non-Korean
 Battle.net account is still to be confirmed by redeeming one.
+
+## Codes are claimed as they are earned
+
+Since 2026-10-13 (contract §18). SOOP gives a reward's code out only when the
+reward is claimed, and only a working login can claim. When all eight logins
+were dropped on 2026-10-11, everything still unclaimed was out of reach until
+each account had been signed in again — and 32 Eternal Return rewards, which
+last one day, were gone by then. A code that is claimed and stored is ours
+whatever happens to the login.
+
+- **What**: every unclaimed **code** reward that has not expired and needs no
+  linked game account, on an account that is not sold and can log in. Nothing
+  else.
+- **When**: about two minutes after the step that earns it (the sync that
+  follows a step, then the claim; if the reward is not there yet it looks again
+  after 5 and 10 minutes); the moment a cookie is re-imported, for whatever was
+  waiting on that login; and on a sweep of every login 8 minutes after a restart
+  and every 3 hours, which costs one small call per login.
+- **Pace**: one account at a time, one claim every 7 seconds.
+- **Where to see it**: Inventory tab (the line under the totals, and "Claimed"
+  counts); Activity, kind `claim`; an alert on the Overview when codes are
+  waiting on a login that cannot claim them.
+- **Switch it off** without a restart, from the app's directory on the server:
+
+  ```
+  node -e 'require("./utils/settings").setAutoFarm({soopAutoClaim:false},{actor:"owner"})'
+  ```
+
+  (`true` turns it back on; it is read within 30 seconds.) `SOOP_AUTO_CLAIM=0`
+  in `.env` does the same at the next restart.
+- **What it cannot do**: claim on a login SOOP refuses. Those rewards wait, the
+  alert names the logins and says when the first one runs out, and re-importing
+  the cookie claims them at once.
+- A code is never deleted by the farm: not when SOOP stops listing the reward,
+  and not when its account is deleted from the panel.
 
 ## Logins expire
 
