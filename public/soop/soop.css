@@ -162,6 +162,11 @@ html[data-theme="dark"] .nav .links a.active{background:rgba(99,102,241,.2);}
 .s-pick{display:flex;align-items:flex-start;gap:10px;width:100%;padding:11px 12px;border:1px solid var(--s-line-strong);border-radius:10px;background:var(--surface);color:var(--ink);font:inherit;text-align:left;cursor:pointer;}
 .s-pick:hover{border-color:var(--muted);}
 .s-pick.is-on{border-color:var(--accent);background:var(--s-accent-soft);box-shadow:inset 0 0 0 1px var(--accent);}
+/* Where files are dropped: <div class="s-drop">. `s-dropveil` puts one over the whole page while files are dragged across the window. */
+.s-drop{display:flex;flex-direction:column;align-items:center;gap:8px;padding:16px;border:1.5px dashed var(--s-line-strong);border-radius:12px;background:var(--surface-2);color:var(--muted);font-size:13px;text-align:center;}
+.s-drop b{color:var(--ink);font-weight:650;}
+.s-dropveil{position:fixed;inset:0;z-index:600;display:flex;align-items:center;justify-content:center;padding:24px;background:var(--s-scrim);animation:s-fade .12s ease;}
+.s-dropveil>.s-drop{width:min(460px,100%);padding:36px 24px;border-color:var(--accent);background:var(--surface);box-shadow:var(--s-shadow);pointer-events:none;}
 
 /* ---- Status atoms. A dot's SHAPE changes with its tone, so it is never colour alone. */
 .s-badge{display:inline-flex;align-items:center;gap:5px;padding:1px 8px;border-radius:999px;background:var(--s-muted-soft);color:var(--muted);font-size:11.5px;font-weight:650;line-height:18px;white-space:nowrap;}
@@ -209,7 +214,7 @@ html[data-theme="dark"] .nav .links a.active{background:rgba(99,102,241,.2);}
 .s-table .s-td-check{width:38px;padding-right:0;}
 .s-table td.s-td-empty{padding:0;}
 
-/* ---- Floating layers. z-order: mobile nav 200 < overlay 300 < menu 400 < toast 500 */
+/* ---- Floating layers. z-order: mobile nav 200 < overlay 300 < menu 400 < toast 500 < drop veil 600 */
 html.s-lock,html.s-lock body{overflow:hidden;}
 .s-overlay{position:fixed;inset:0;z-index:300;display:flex;align-items:center;justify-content:center;padding:20px;background:var(--s-scrim);animation:s-fade .14s ease;}
 .s-overlay.is-drawer{justify-content:flex-end;padding:0;}

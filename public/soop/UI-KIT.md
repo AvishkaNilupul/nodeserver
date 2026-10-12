@@ -195,6 +195,7 @@ Forms (plain elements; buttons, chips and search come from `ui`)
 | `s-input` `s-select` `s-textarea` | `el("input", { class: "s-input", value: bot.name })` |
 | `s-check` | `el("label", { class: "s-check" }, el("input", { type: "checkbox", checked: on }), "Codes only")` |
 | `s-pick` (`is-on`) | `el("button", { type: "button", class: "s-pick is-on", "aria-pressed": "true" }, ui.icon("bot"), el("span", "Everything"))` — selectable card |
+| `s-drop` | `el("div", { class: "s-drop" }, ui.icon("upload", 22), el("b", "Drop files anywhere on this page"), ui.button("Choose files", { size: "sm", onClick }))` — dashed box that says where files go; a hidden `<input type="file">` may sit inside it |
 | `s-btn` (`is-primary is-danger is-ghost is-sm is-icon`) | `el("a", { class: "s-btn", href: url, download: "" }, ui.icon("download"), "Export CSV")` — only for a link that should look like a button |
 
 Made for you by helpers — do not hand-build: `s-badge` `s-dot` `s-icon` `s-progress` `s-stat`
@@ -202,6 +203,10 @@ Made for you by helpers — do not hand-build: `s-badge` `s-dot` `s-icon` `s-pro
 `s-table-wrap` (`is-flush`) `s-table` (`s-td-check s-td-empty is-right is-center is-wrap
 is-grow is-click is-selected`) `s-menu` (`-item -sep`) `s-toasts` `s-toast` (`-msg`)
 `s-overlay` `s-modal` `s-drawer` (`is-sm is-lg`) `s-ov-hd` `s-ov-title` `s-ov-bd` `s-ov-ft` `s-lock`.
+
+Files dropped on the page — `account-import.js` owns the window's drag events and the
+`s-dropveil` it shows over everything while files are dragged across. A tab that needs
+files of its own asks for them in a layer; it does not add a second page-wide drop target.
 
 Page shell — core's, leave alone: `s-main` `s-head` `s-status` `s-head-actions` `s-banner` `s-tabs` `s-tab`
 (`-label -badge`) `s-panel` `s-loading`, and ids `soopMain soopStatus soopBanner soopTabs soopMenuBtn soopToasts`.

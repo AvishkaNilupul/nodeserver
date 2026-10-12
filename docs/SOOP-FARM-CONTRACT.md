@@ -44,6 +44,7 @@ Background reading (do not copy from, but understand): `docs/SOOP-FARM.md`,
 | `tests/helpers/soopFake.js`, `scripts/soop-dev-harness.js`, `scripts/soop-status.js` | A9 |
 | `public/soop.html`, `public/soop/soop.css`, `public/soop/core.js`, `public/soop/UI-KIT.md` | U1 |
 | `public/soop/tab-*.js` (one per tab, see §9) | U2–U6 |
+| `public/soop/account-import.js`, `tests/soopAccountImport.test.js` (§17) | added 2026-10-13 |
 
 ## 2. Errors — `utils/soop/errors.js`
 
@@ -619,3 +620,51 @@ and asleep, nothing reached the owner, and nothing was farmed for nine hours.
   last call to SOOP failed, or no login was checked in the last 13 hours.
 - The fake SOOP has `world.rejectDrops(id, on = true)`; the dev harness takes
   `--refuse=all|<n>` and prints what the alert would have sent.
+
+## 17. Importing from files (added 2026-10-13)
+
+Every login is re-imported about once a week, each export kept as a file of its
+own, and the dialog took pasted text only. The route, its body (`{ cookies }`,
+which the audit log redacts by that key) and "one request per account" (§14)
+are as they were. The dialog moved out of `tab-accounts.js` into
+`public/soop/account-import.js`, loaded at start-up like the account drawer and
+reached through `Soop._accountImport.open()`.
+
+- **Files come in three ways** — dropped anywhere on the page, on any tab (the
+  dialog opens by itself); "Choose files", many at once; "Choose a folder". A
+  dropped folder is read four levels deep, 500 files at most per drop, hidden
+  files (`.DS_Store`, `._x`, `__MACOSX`) left out without a word. A file over
+  1 MB is not read. Files and a paste may be mixed in one run; files go first,
+  sorted by name, then the paste.
+- **Nothing is sent before Import is pressed.** A file is read in the browser
+  and split exactly as a paste is (`splitCookiePaste`, which mirrors
+  `splitCookieExports` — `tests/soopAccountImport.test.js` holds the two to the
+  same answers). Each export with an `AuthTicket` in it is one account. A file
+  with none is listed as skipped and never sent; an export already in the list
+  is not listed twice.
+- **A file saved more than 3 days ago is called out** before the run, with one
+  button to take all such files off the list: importing one replaces the cookie
+  the account has now with one that has very likely expired (the same 3 days
+  after which the table calls a cookie old).
+- **One result line per account, named after its file.** After the run the
+  dialog reads the state twice (the first answer may be a poll that left before
+  the last import finished) and marks each login the check that follows an
+  import found unable to farm: "Imported x, but the drops site refuses this
+  login". Importing proves only that the main site accepts the cookie; §16 is
+  why that is not enough.
+- **The page-wide drop target** is the window's `dragenter` / `dragover` / `drop`,
+  taken only for a drag that carries files and did not start on the page (Chrome
+  puts "Files" on the drag of an image already on it). `dragover` is always
+  cancelled for such a drag — otherwise a drop that misses makes the browser
+  open the file and show its cookies. While files are over the window a veil
+  (`s-dropveil`) covers everything; it also comes down by itself 1.5 s after the
+  last `dragover`, so a drag that ends without a `dragleave` cannot leave the
+  page covered.
+- **The cookie rule (§0) in the browser**: file text lives only in the dialog's
+  list and then in the run's queue; each export is blanked as soon as its
+  request has been answered, and closing the dialog drops the rest. The file
+  never logs, never stores, never builds markup from text — the test file pins
+  that against the source.
+- The dev harness takes `--cookie-files=<dir>` and writes exports the farm does
+  not have yet (six new logins, one saved last week that the drops site refuses,
+  one made while signed out, one file that is no export) to try all of it with.

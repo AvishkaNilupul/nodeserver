@@ -1,58 +1,10 @@
-/* SOOP farm — Accounts tab: the account table, its filters and bulk actions, and
-   the import dialog. The per-account drawer lives in account-drawer.js, which
-   this file loads at start-up and reaches through Soop._accountDrawer.open(id). */
+/* SOOP farm — Accounts tab: the account table, its filters and bulk actions. The
+   per-account drawer (account-drawer.js) and the import dialog (account-import.js)
+   are separate files, loaded by this one at start-up and reached through
+   Soop._accountDrawer.open(id) and Soop._accountImport.open(). */
 (function () {
   "use strict";
   const { el, ui, fmt } = Soop;
-
-  /* Paste splitter — pure: pasted text in, one string per account out, in paste
-     order. The result is only ever POSTed; it is never shown and never logged.
-     Mirrors splitCookieExports in utils/soopClient.js. Cases:
-       1. one Cookie-Editor export             [ {..}, {..} ]              -> [that text]
-       2. JSON arrays back to back             [..][..]  or  [..],[..]     -> one per array
-       3. JSON arrays split by blank lines     [..]\n\n[..]                -> one per array
-       4. one "AuthTicket=…" per line                                      -> one per line
-          (other name=value lines join the ticket above them, or the first one)
-       5. a mix of 2–4; a bracket inside a JSON string or in the middle of a
-          cookie-header line never starts an export
-       6. nothing recognisable -> [whole text] (the server says why); blank -> [] */
-  function splitCookiePaste(text) {
-    const t = String(text == null ? "" : text).trim();
-    if (!t) return [];
-    const TICKET = /(^|[;\s])AuthTicket\s*=/;
-    const jsonEnd = (start) => {                 // index just past the JSON value opening at `start`
-      let depth = 0, inStr = false;
-      for (let i = start; i < t.length; i++) {
-        const c = t[i];
-        if (inStr) { if (c === "\\") i++; else if (c === '"') inStr = false; }
-        else if (c === '"') inStr = true;
-        else if (c === "[" || c === "{") depth++;
-        else if ((c === "]" || c === "}") && --depth === 0) return i + 1;
-      }
-      return t.length;
-    };
-    const loose = (chunk) => {                   // header lines between JSON exports
-      const groups = [], lead = [];
-      chunk.split(/\r?\n/).map((s) => s.trim()).forEach((line) => {
-        if (TICKET.test(line)) groups.push(lead.splice(0).concat(line));
-        else if (line.includes("=")) (groups[groups.length - 1] || lead).push(line);
-      });
-      return groups.map((g) => g.join("\n"));
-    };
-    const out = [];
-    let from = 0, i = 0, lineStart = 0;
-    while (i < t.length) {
-      const c = t[i];
-      if (c === "\n") lineStart = i + 1;
-      if ((c === "[" || c === "{") && /^[\s,]*$/.test(t.slice(Math.max(from, lineStart), i))) {
-        const end = jsonEnd(i);
-        out.push(...loose(t.slice(from, i)), t.slice(i, end));
-        from = i = end;
-      } else i++;
-    }
-    out.push(...loose(t.slice(from)));
-    return out.length ? out : [t];
-  }
 
   const DEAD = "not_logged_in", REJECTED = "drops_rejected", STALE_MS = 3 * 864e5;
   const STATUS = { ok: ["ok", "Ready"], not_logged_in: ["error", "Logged out — re-import its cookie"],
@@ -80,23 +32,26 @@
 
   let filter = "all", query = "", chips, search, table, bulk, emptyBox, emptyMode = "", chipSig = "";
 
-  // ---- the drawer (separate file, loaded once) --------------------------------
-  let drawerReady = null;
-  function loadDrawer() {
-    if (!drawerReady) drawerReady = new Promise((resolve, reject) => {
-      if (Soop._accountDrawer) { resolve(); return; }
-      document.head.appendChild(el("script", { src: "/soop/account-drawer.js", onLoad: resolve,
-        onError: () => { drawerReady = null; reject(new Error("The account panel could not be loaded — check the connection and try again")); } }));
+  // ---- the drawer and the import dialog (separate files, each loaded once) -----
+  const PARTS = { _accountDrawer: ["/soop/account-drawer.js", "The account panel"], _accountImport: ["/soop/account-import.js", "The import dialog"] };
+  const loading = {};
+  function part(key) {                           // resolves with Soop[key] once its file has run
+    if (!loading[key]) loading[key] = new Promise((resolve, reject) => {
+      if (Soop[key]) { resolve(Soop[key]); return; }
+      document.head.appendChild(el("script", { src: PARTS[key][0], onLoad: () => resolve(Soop[key]),
+        onError: () => { loading[key] = null; reject(new Error(PARTS[key][1] + " could not be loaded — check the connection and try again")); } }));
     });
-    return drawerReady;
+    return loading[key];
   }
   function openDrawer(id) {
-    return loadDrawer().then(() => {
+    return part("_accountDrawer").then((drawer) => {
       if (!Soop.accountById(id)) throw new Error("There is no account called " + id + " — it may have been deleted");
-      Soop._accountDrawer.open(id);
+      drawer.open(id);
     }).catch(Soop.toast);
   }
-  loadDrawer().catch(() => {});
+  const openImport = () => part("_accountImport").then((dialog) => dialog.open()).catch(Soop.toast);
+  // Loaded up front: the drawer so a row opens at once, the dialog because it also takes files dropped on the page.
+  Object.keys(PARTS).forEach((key) => part(key).catch(() => {}));
 
   // ---- rows and columns -------------------------------------------------------
   function rows() {
@@ -186,85 +141,6 @@
       unsell.hidden = !list.some((a) => a.sold);
     };
     return bar;
-  }
-
-  // ---- import dialog ----------------------------------------------------------
-  let importOpen = false;
-  function openImport() {
-    if (importOpen) return;
-    importOpen = true;
-    let parts = [], stopped = false, running = false;
-    const area = el("textarea", { class: "s-textarea", style: { minHeight: "200px" }, spellcheck: "false", autocomplete: "off", autocapitalize: "off", "data-autofocus": true,
-      placeholder: "Paste here", onInput: recount });
-    const found = el("span", { class: "s-help", "aria-live": "polite" });
-    const go = ui.button("Import", { tone: "primary", icon: "upload", disabled: true, onClick: start });
-    const form = el("div", { class: "s-stack" },
-      el("div", { class: "s-note" }, ui.icon("info"), el("span", null, "Sign in to sooplive.com, open the Cookie-Editor extension there and press Export, then paste the result below. Repeat for each account — the exports can simply follow one another. Every export must contain the ", el("b", "AuthTicket"), " cookie; one made while signed out is rejected.")),
-      el("label", { class: "s-field" }, "Paste one or many Cookie-Editor exports", area, found),
-      el("p", { class: "s-muted s-small", style: { margin: "0" } }, "Cookies are stored encrypted and are never shown again. SOOP logins have died within about 2 days, so expect to re-import now and then."));
-    const bar = ui.progress(0, 1), status = el("span", { class: "s-small", role: "status" }), list = el("ul", { class: "s-list" }), summary = el("div", { hidden: true });
-    const runView = el("div", { class: "s-stack", hidden: true }, el("div", { class: "s-stack is-tight" }, status, bar), summary, el("div", { class: "s-scroll" }, list));
-    const m = Soop.modal({ title: "Import accounts", size: "lg", sticky: true, body: el("div", null, form, runView),
-      onClose: () => { importOpen = false; stopped = true; area.value = ""; parts = []; } });
-    const formActions = () => m.setActions([ui.button("Cancel", { onClick: () => m.close() }), go]);
-    function recount() {
-      const p = splitCookiePaste(area.value), good = p.filter((x) => x.includes("AuthTicket")).length, bad = p.length - good;
-      go.disabled = !good;
-      go.lastChild.nodeValue = good ? "Import " + plural(p.length, "account") : "Import";
-      found.className = "s-help" + (p.length && bad ? " s-warn" : "");
-      found.textContent = !p.length ? "Nothing pasted yet." : !good ? "No account found in this paste yet — an export must contain AuthTicket."
-        : plural(p.length, "account") + " detected" + (bad ? " — " + bad + (bad === 1 ? " has" : " have") + " no AuthTicket and will be rejected." : ".");
-    }
-    function line(n) {
-      const li = el("li", { class: "s-list-item" });
-      li.set = (tone, label, text, cls) => { li.textContent = ""; li.append(ui.dot(tone, label), el("span", { class: "s-grow" }, el("b", "Export " + n), el("span", { class: cls || "s-muted" }, " — " + text))); };
-      li.set(null, "Waiting", "waiting its turn");
-      return li;
-    }
-    function start() {
-      if (running) return;
-      parts = splitCookiePaste(area.value);
-      area.value = "";                           // from here the paste exists only in `parts`, and each part is dropped once sent
-      if (!parts.length) { recount(); return; }
-      running = true; stopped = false;
-      list.textContent = ""; summary.hidden = true;
-      form.hidden = true; runView.hidden = false;
-      m.setTitle("Importing accounts");
-      m.setActions([ui.button("Stop", { icon: "stop", onClick: () => { stopped = true; } })]);
-      run();
-    }
-    async function run() {
-      const total = parts.length, lines = parts.map((_, i) => list.appendChild(line(i + 1)));
-      let ok = 0, failed = 0, sent = 0;
-      for (let i = 0; i < total && !stopped; i++) {
-        lines[i].set("info", "Importing", "importing…");
-        status.textContent = "Importing " + (i + 1) + " of " + total + "…";
-        let res;
-        try { res = (await Soop.api.post("/accounts/import", { cookies: parts[i] })).results || []; }
-        catch (e) { res = [{ ok: false, error: e.message }]; if (e.status === 401 || e.status === 403) stopped = true; }
-        if (parts.length) parts[i] = "";
-        if (!res.length) res = [{ ok: false, error: "The server found no account in this export" }];
-        res.forEach((r, n) => {
-          const li = n ? lines[i].parentNode.insertBefore(line(i + 1), lines[i].nextSibling) : lines[i];
-          if (r.ok) { ok++; li.set("ok", "Imported", ["Imported " + r.id, r.nick, r.country ? "seen from " + r.country : null].filter(Boolean).join(" · "), "s-ok"); }
-          else { failed++; li.set("error", "Failed", "Failed: " + (r.error || "The server gave no reason"), "s-error"); }
-        });
-        sent++; bar.set(sent, total);
-      }
-      parts = []; running = false;
-      const left = total - sent, text = (ok ? plural(ok, "account") + " imported" : "No account was imported") + (failed ? ", " + failed + " failed" : "") + (left ? ", " + left + " not sent" : "") + ".";
-      Soop.refresh();
-      if (!importOpen) { Soop.toast("Import closed early: " + text, ok && !failed ? "ok" : "warn"); return; }
-      for (let i = sent; i < total; i++) lines[i].set(null, "Not sent", "not sent — the import was stopped");
-      status.textContent = left ? "Stopped." : "Finished.";
-      summary.hidden = false; summary.className = "s-note " + (failed || left ? (ok ? "is-warn" : "is-error") : "is-ok");
-      summary.textContent = "";
-      summary.append(ui.icon(failed || left ? "alert" : "check"), el("span", null, el("b", text), failed ? " Export the failed ones again while signed in to sooplive.com, then paste them here." : ""));
-      m.setTitle(left ? "Import stopped" : "Import finished");
-      m.setActions([ui.button("Import more", { icon: "plus", onClick: () => { runView.hidden = true; form.hidden = false; m.setTitle("Import accounts"); recount(); formActions(); area.focus(); } }),
-        ui.button("Done", { tone: "primary", onClick: () => m.close() })]);
-    }
-    recount(); formActions();
   }
 
   // ---- the tab ----------------------------------------------------------------

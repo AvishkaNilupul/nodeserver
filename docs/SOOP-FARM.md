@@ -16,8 +16,9 @@ up to `7eb67df`). What changed and why is in "What v1 got wrong" at the end.
 
 ## What it does
 
-- **Accounts** — SOOP logins imported from Cookie-Editor exports (one or many per
-  paste). Cookies are encrypted at rest and never leave the server.
+- **Accounts** — SOOP logins imported from Cookie-Editor exports: saved as files
+  and dropped on the page (many at once, or a whole folder), or pasted (one or
+  many per paste). Cookies are encrypted at rest and never leave the server.
 - **Bots** — a bot is a plan plus accounts. Three kinds: one pinned campaign
   (finishes when every account reaches its goal), a **game** (farms every
   guaranteed campaign of that game as each goes live, never finishes on its own),
@@ -255,6 +256,8 @@ node --test tests/soop*.test.js
 
 The harness uses an in-memory database and the fake SOOP; it cannot reach the
 real database or sooplive.com. Time runs 30× so progress moves while you watch.
+Add `--cookie-files=<dir>` and it also writes cookie exports the farm does not
+have yet into `<dir>`: drop that folder on the page to try the import dialog.
 
 ## Deploying
 

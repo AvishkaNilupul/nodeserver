@@ -5,6 +5,9 @@
 //   node scripts/soop-dev-harness.js [port=4599]   ->   http://127.0.0.1:4599/soop.html
 //   node scripts/soop-dev-harness.js 4599 --refuse=all   the 2026-10-11 state: the
 //                         drops site refuses every farming login (or --refuse=3)
+//   node scripts/soop-dev-harness.js 4599 --cookie-files=<dir>   also writes cookie
+//                         exports the farm does not have yet into <dir>, to try the
+//                         import dialog with: drop that folder on the page
 //
 // The real routes, farm service and page, running against an in-memory MongoDB
 // and the fake SOOP from tests/helpers/soopFake.js. Nothing here can reach the
@@ -13,7 +16,9 @@
 // Time runs 30x: the fake credits one minute every 2 s and the farm's waits are
 // shortened to match, so progress moves while you watch. The login alert never
 // reaches Telegram from here: what it would have sent is printed instead.
+const fs = require("fs");
 const path = require("path");
+const crypto = require("crypto");
 const http = require("http");
 const https = require("https");
 
@@ -48,6 +53,7 @@ const { createLoginAlert } = require("../utils/soop/loginAlert");
 
 const PORT = Number(process.argv[2]) || 4599;
 const REFUSE = (process.argv.find((a) => a.startsWith("--refuse=")) || "").slice(9);
+const COOKIE_DIR = (process.argv.find((a) => a.startsWith("--cookie-files=")) || "").slice(15);
 const SPEED = 30; // simulated minutes per real minute
 const ADVANCE_MS = 60000 / SPEED; // one fake minute
 const HOUR = 3600 * 1000;
@@ -204,6 +210,37 @@ async function seed(farm, world) {
   log(`seeded: ${ids.length} accounts (${loggedOut} logged out, ${sold} sold, ${ids.slice(7, 10).join(", ")} free), ${bots.length} bots`);
 }
 
+// Six accounts SOOP knows and the farm does not, one Cookie-Editor export each,
+// and the three files an import has to cope with: an export from last week that
+// the drops site now refuses, one made while signed out, and a file that is no
+// cookie export at all. The tickets only mean something to this fake world.
+function writeCookieFiles(world, dir) {
+  const jar = (cookies) => {
+    const all = [...cookies, { name: "_au", value: crypto.randomBytes(16).toString("hex") }, { name: "AbroadChk", value: "FAIL" }];
+    // prettier-ignore
+    return JSON.stringify(all.map((c) => ({
+      domain: ".sooplive.com", hostOnly: false, httpOnly: false, name: c.name, path: "/",
+      sameSite: "unspecified", secure: false, session: true, storeId: "0", value: c.value,
+    })), null, 4);
+  };
+  const write = (name, text, daysOld = 0) => {
+    const file = path.join(dir, name);
+    fs.writeFileSync(file, text);
+    const at = new Date(Date.now() - daysOld * 24 * HOUR);
+    if (daysOld) fs.utimesSync(file, at, at);
+  };
+  fs.mkdirSync(dir, { recursive: true });
+  for (let i = 1; i <= 6; i++) {
+    const id = `spare${String(i).padStart(2, "0")}`;
+    write(`${id}.json`, jar(world.addAccount({ id, nick: `Spare ${i}`, country: "LK" })));
+  }
+  write("oldcookie.json", jar(world.addAccount({ id: "oldcookie", nick: "Old cookie", country: "LK" })), 8);
+  world.rejectDrops("oldcookie");
+  write("signedout.json", jar(world.addAccount({ id: "signedout", loggedIn: false })));
+  write("notes.txt", "Not a cookie export.\n");
+  log(`cookie files to try the import dialog with: ${dir}`);
+}
+
 function buildApp() {
   const app = express();
   app.disable("x-powered-by");
@@ -240,6 +277,7 @@ async function main() {
     quietMs: 4000,
   });
   await seed(farm, world);
+  if (COOKIE_DIR) await step("write cookie files", () => writeCookieFiles(world, path.resolve(COOKIE_DIR)));
 
   setInterval(() => world.advance(1), ADVANCE_MS);
   const server = buildApp().listen(PORT, "127.0.0.1", () => {
