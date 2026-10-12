@@ -383,6 +383,9 @@ async function publishAutoDelivery({
   qtyRemaining,
   origin,
   noclaim,
+  // This unit is the NEXT of an existing chain (a relist after a sale, its
+  // retry, a renewal, a removed unit's successor) — said by those lanes only.
+  chain,
 }) {
   // An account listing carries no DropSet at all, and nothing below applies to
   // one. Routed out whole rather than branched through, so a row without an
@@ -419,6 +422,7 @@ async function publishAutoDelivery({
       imagePath,
       qtyRemaining,
       origin,
+      chain: chain === true,
     });
   }
   const claim = {};
@@ -717,6 +721,7 @@ async function publishNoclaimAutoDelivery({
   imagePath,
   qtyRemaining,
   origin,
+  chain,
 }) {
   if (!set || !set._id) {
     throw new Error("This no-claim listing has no drop set to sell from");
@@ -763,34 +768,55 @@ async function publishNoclaimAutoDelivery({
     // An account Gameflip refuses is remembered, as on every other lane, so
     // the next attempt tries someone else.
     noteIfCodeRefused(login, e);
-    // An AUTO-FARM account is sold whole, on any market, the moment it is
-    // free again — so it goes back only when the listing this publish built
-    // is provably gone. gameflipPublish bins a half-built listing best-effort,
+    // The account goes back only when the listing this publish built is
+    // provably gone — an auto-farm account's or a no-claim bot's alike: either
+    // is sold again the moment it is free, and a listing that went live after
+    // all would then sell the same login to a second buyer, with no row of
+    // ours watching it. gameflipPublish bins a half-built listing best-effort,
     // and under Gameflip's limiter that delete fails like everything else.
     // Kept, the account stays held — and the listing it may still be in is
     // put on the books (trackFailedListing), so the maintenance pass keeps
     // asking Gameflip about it and hands the account back, or books its sale,
     // by itself. Only when even that row cannot be written is it left for the
     // owner: the pass then pins the claim.
-    const remains = acc.farm === "autofarm" ? await failedPublishRemains(e) : "";
+    const remains = await failedPublishRemains(e);
     if (remains === "there") {
       const what = String((e && e.message) || e);
       const tracked = await trackFailedListing({ acc, set, fields, title, description, priceUsd, origin, error: what });
+      // The next unit of a chain is not asked for again after an error that
+      // says "kept held" (relistMustStop): the chain ends here, and what it
+      // still owed is queued nowhere. Said for those publishes only — the
+      // auto-farm lister tries its own copy again by itself, and a publish by
+      // hand failed in front of the owner.
+      const owed = Math.max(0, Math.floor(Number(qtyRemaining) || 0));
+      const ended =
+        chain === true
+          ? "\nThis publish was a relist — the next unit of an existing listing's chain — and that chain " +
+            "stops here: this unit" + (owed ? " and the " + owed + " queued behind it are" : " is") +
+            " not put up again by " + (owed ? "themselves" : "itself") +
+            ". Publish the listing again once Gameflip is answering."
+          : "";
       console.error(
         "gameflip no-claim: " + (login || "the account") + " stays HELD — the listing its failed publish " +
           "built may still exist on Gameflip with its login" + (tracked ? " (tracked as " + tracked.externalId + ")" : "") +
           ": " + what,
       );
       sendTelegram(
-        "⚠️ Gameflip: a publish of an auto-farm unclaimed account failed, and the listing it had " +
-          "built could not be confirmed deleted.\n" + what.slice(0, 300) +
+        "⚠️ Gameflip: a publish of " +
+          (acc.farm === "autofarm" ? "an auto-farm unclaimed account" : "a no-claim account") +
+          " failed, and the listing it had built could not be confirmed deleted.\n" + what.slice(0, 300) +
           "\nThe account (" + (login || "?") + ") stays held so it cannot be sold elsewhere. " +
           (tracked
             ? "That listing is on the books now: it is taken down automatically and the account comes back " +
-              "by itself once Gameflip confirms it is gone (or its sale is booked, should it have sold). " +
-              "Nothing to do unless this repeats."
+              "by itself once Gameflip confirms it is gone (or its sale is booked, should it have sold)." +
+              (ended ? "" : " Nothing to do unless this repeats.")
             : "Check Gameflip for that draft/listing and delete it, then release the account: " +
-              'POST /noclaim-stock/ledgers/' + String(acc.ledgerId) + '/release with { "confirmGone": true }'),
+              'POST /noclaim-stock/ledgers/' + String(acc.ledgerId) + '/release' +
+              // The owner's own word that no listing carries it is what an
+              // auto-farm account's release asks for; a no-claim bot's takes none.
+              (acc.farm === "autofarm" ? ' with { "confirmGone": true }' : "") +
+              " (refused for the first 30 minutes after the claim, while its publish could still be running)") +
+          ended,
       ).catch(() => {});
       // Said in the error too, so a caller that lists by itself (utils/
       // autofarmOffers) does not simply try again with another account — and
@@ -801,10 +827,10 @@ async function publishNoclaimAutoDelivery({
     }
     // Matching release, exactly as the other lanes release theirs: a publish
     // that threw must not leave the account committed to a listing that does
-    // not exist. For an auto-farm account that is now KNOWN — the publish
-    // built no listing, or Gameflip answered 404 for the one it built — and
-    // said so: its claim is attached to no row, and such a claim is otherwise
-    // never handed back (nobody could say which listing holds its login).
+    // not exist. That is now KNOWN — the publish built no listing, or
+    // Gameflip answered 404 for the one it built — and said so: an auto-farm
+    // claim is attached to no row, and such a claim is otherwise never handed
+    // back (nobody could say which listing holds its login).
     await releaseNoclaimClaim(acc, "gameflip publish failed", { listingGone: remains === "none" || remains === "gone" });
     throw e;
   }
@@ -866,15 +892,18 @@ async function publishNoclaimAutoDelivery({
 }
 
 // A failed publish left a listing on Gameflip that could not be confirmed
-// deleted, and its (auto-farm) account stays held. Put that listing on the
-// books — a row that was never on sale ("removed"), naming the listing and the
-// account, with the claim attached to it. From then on it is an ordinary held
-// unit whose row is off sale: the lifecycle pass (utils/noclaimListings, its
-// limbo step) asks Gameflip about it every pass, finishes the take-down,
-// hands the account back on Gameflip's own 404, or books the sale should the
-// "failed" listing have gone live and sold. Without the row nobody could ever
-// ask, and the account waited for a human. Returns the row, or null when it
-// could not be written (the caller then says so). Never throws.
+// deleted, and its account stays held. Put that listing on the books — a row
+// that was never on sale ("removed"), naming the listing and the account, with
+// the claim attached to it. From then on it is a held unit whose row is off
+// sale: the lifecycle pass (utils/noclaimListings, its limbo step) asks
+// Gameflip about it every pass, finishes the take-down, hands the account back
+// on Gameflip's own 404, or books the sale should the "failed" listing have
+// gone live and sold. Without the row nobody could ever ask, and the account
+// waited for a human. The row's note ends " — publish failed": that is how the
+// pass and the claim layer's release gate know a no-claim bot's account on it
+// (utils/noclaimListings, utils/noclaimStock.failedPublishBlock). Returns the
+// row, or null when it could not be written (the caller then says so). Never
+// throws.
 async function trackFailedListing({ acc, set, fields, title, description, priceUsd, origin, error }) {
   const m = FAILED_LISTING_RE.exec(String(error || ""));
   const id = m && (m[1] || m[2]);
@@ -941,7 +970,7 @@ async function releaseNoclaimClaim(acc, reason, { listingGone = false } = {}) {
 // outright, with no off-sale patch for it to refuse first, and one a buyer has
 // or is paying for is never touched. The verdict is always the second look,
 // never the end call's own report.
-// On the error of a failed publish whose auto-farm account was NOT handed back.
+// On the error of a failed publish whose account was NOT handed back.
 const HELD_MARK = " [account kept held]";
 // …and, after it, when the listing that publish left behind was put on the
 // books (trackFailedListing): the pass finishes it without anybody.
@@ -1105,8 +1134,8 @@ let renewalStuckAlertAt = 0;
 // Record a failed relist: keep the reason, count the attempt and push the next
 // one out by the backoff. Called from both relist paths so a chain can never be
 // left with a stale deadline.
-// A publish that kept an auto-farm account HELD (the listing it built could
-// not be confirmed deleted), or went live without a row. Trying again would put
+// A publish that kept its account HELD (the listing it built could not be
+// confirmed deleted), or went live without a row. Trying again would put
 // ANOTHER account out there next to a listing nobody is tracking — three in
 // half an hour at these lanes' pace. Whichever lane asked for it stops there:
 // the chain owes nothing more, and the publish itself has told the owner.
@@ -1234,6 +1263,7 @@ async function relistNoclaimSuccessor(row) {
       qtyRemaining: row.qtyRemaining || 0,
       origin: row.origin || "manual",
       noclaim: true,
+      chain: true,
     });
     await MarketplaceListing.updateOne(
       { _id: row._id },
@@ -2115,6 +2145,7 @@ async function syncOnce({
         // A no-claim chain relists from the no-claim farm on the row's own
         // flag as well as its set's, never out of the archive.
         noclaim: row.noclaimStock === true,
+        chain: true,
       });
       relisted++;
     } catch (e) {
@@ -2201,6 +2232,7 @@ async function syncOnce({
         qtyRemaining: row.qtyRemaining - 1,
         origin: row.origin,
         noclaim: row.noclaimStock === true,
+        chain: true,
       });
       // The debt now lives on the new row — clear it here so the retry can
       // never double-list the same units.
@@ -2280,6 +2312,7 @@ async function syncOnce({
           qtyRemaining: Math.max(0, Number(row.qtyRemaining) || 0),
           origin: row.origin,
           noclaim: row.noclaimStock === true,
+          chain: true,
         });
         // The unit and the chain's debt now live on the new row; clearing them
         // here is what stops this lane ever publishing the same unit again.

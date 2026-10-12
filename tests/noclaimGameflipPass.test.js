@@ -1426,3 +1426,450 @@ test("the claim layer's own rule: a refunded account is never released — found
   });
   assert.equal(await ncs.refundSeenFor(await ledgerNow(again)), false);
 });
+
+// ---------------------------------------------------------------------------
+// A NO-CLAIM BOT's account whose Gameflip publish FAILED, leaving a listing
+// ---------------------------------------------------------------------------
+
+// One free no-claim bot account, and a publish of it that Gameflip accepts —
+// the listing exists there as `ext`, in the state `left` — and then fails to
+// finish, with the publish's own delete not taking either. Run through the real
+// lane (gameflipFulfiller.publishAutoDelivery): the real second look at
+// Gameflip, the real row, the real claim layer's attach. Only the claim itself
+// is played — what claimForSet leaves for an account taken from stock, without
+// its live Twitch read. `prior` "" = the claim created the ledger.
+async function failedPublish({ game = "Overwatch", left = "ready", prior = "skipped", qty = 1, set = null, publish = null } = {}) {
+  const n = ++seq;
+  const login = "fleet" + n;
+  const ext = "4f1b3263-aaaa-bbbb-cccc-" + String(n).padStart(12, "0");
+  const secret = "cs-" + login;
+  set =
+    set ||
+    (await DropSet.create({
+      name: game + " bundle " + n,
+      stockSource: "noclaim",
+      coverGame: game,
+      items: [{ itemKey: "a|" + game.toLowerCase(), name: "A", game, qty: 1 }],
+    }));
+  const pool = await AvailableAccount.create({
+    username: login,
+    usernameLower: login,
+    clientSecret: secret,
+    status: "claimed",
+    claimedNote: "noclaim-farm:" + game,
+    listed: true,
+  });
+  fleetAdd("7", { Login: login, ClientSecret: secret, Id: "id-" + n }, game);
+  const played = { claimForSet: ncs.claimForSet, gameflipPublish: mp.gameflipPublish };
+  let led = null;
+  ncs.claimForSet = async () => {
+    led = await UnclaimedAccount.create({
+      source: "noclaim",
+      login,
+      loginLower: login,
+      game,
+      poolAccountId: String(pool._id),
+      botId: "7",
+      container: "noclaim-bot-7",
+      status: "manual",
+      market: "gameflip",
+      set: set._id,
+      manualListing: "",
+      manualAt: new Date(),
+      manualPriorStatus: prior,
+      listedAt: new Date(),
+      note: "manual no-claim listing — gameflip",
+      drops: [{ name: "A", game, itemKey: "a|" + game.toLowerCase() }],
+    });
+    return [{ ledgerId: String(led._id), login, password: "pw-" + login, email: "", poolAccountId: String(pool._id), farm: "" }];
+  };
+  mp.gameflipPublish = async () => {
+    if (left) gameflip.set(ext, left);
+    throw new Error("Gameflip created " + ext + " but could not put it on sale (draft discarded): Too many attempts - Retry later");
+  };
+  let error = null;
+  try {
+    // `publish`: whoever asks for the unit instead of a first publish by hand
+    // (the sale watcher's relist lane, say) — run with the same failure played.
+    await (publish
+      ? publish()
+      : gf.publishAutoDelivery({
+          set: set.toObject(),
+          title: game + " Twitch Drops (1 Item)",
+          description: "d",
+          priceUsd: 1.49,
+          imagePath: "",
+          qtyRemaining: qty - 1,
+          origin: "manual",
+          noclaim: true,
+        }));
+  } catch (e) {
+    error = e;
+  } finally {
+    ncs.claimForSet = played.claimForSet;
+    mp.gameflipPublish = played.gameflipPublish;
+  }
+  const listing = await MarketplaceListing.findOne({ externalId: ext }).lean();
+  return { n, login, ext, secret, set, pool, led, listing, error };
+}
+
+test("fleet, FAILED PUBLISH: the account stays held and the listing that publish left is on the books — the pass takes it down and hands the account back on Gameflip's own 404", async () => {
+  endMode = "swallow"; // Gameflip answers every delete and changes nothing
+  const u = await failedPublish({ left: "ready", qty: 3 });
+
+  // --- The publish itself: held, tracked, said — and nothing released. ---
+  assert.match(u.error.message, /could not put it on sale[^]* \[account kept held\] \[listing tracked\]$/);
+  assert.deepEqual(calls.end, [[u.ext, "ready"]], "one more end was tried, from the status just read");
+  let led = await ledgerNow(u);
+  assert.equal(led.status, "manual", "before this, the account went straight back to stock here");
+  assert.ok(ncs.COMMITTED_STATUSES.includes(led.status) && !ncs.FREE_STATUSES.includes(led.status));
+  assert.ok(u.listing, "the listing that publish built is on our books");
+  assert.equal(led.manualListing, String(u.listing._id));
+  assert.equal(u.listing.status, "removed", "never 'active': nothing reads it as on sale");
+  assert.equal(u.listing.qtyRemaining, 0);
+  assert.equal(u.listing.noclaimStock, true);
+  assert.equal(u.listing.origin, "manual");
+  assert.equal(u.listing.note, "no-claim auto-delivery — " + u.login + " — publish failed");
+  assert.deepEqual(u.listing.units.map((x) => [x.login, x.deliveredAt, x.orderId]), [[u.login, null, ""]]);
+  assert.equal(told.length, 1);
+  assert.match(told[0], /^⚠️ Gameflip: a publish of a no-claim account failed, and the listing it had built could not be confirmed deleted\./);
+  assert.match(told[0], new RegExp("The account \\(" + u.login + "\\) stays held so it cannot be sold elsewhere\\. That listing is on the books now"));
+  assert.match(told[0], /should it have sold\)\. Nothing to do unless this repeats\.$/, "a publish by hand is no chain: nothing is said of one");
+  assert.deepEqual(fleetLogins("7"), [u.login], "still farming in its bot");
+
+  // --- Nobody can free it while Gameflip has that listing. ---
+  told.length = 0;
+  calls.status.length = 0;
+  assert.equal(await ncs.failedPublishBlock(led), "its Gameflip listing still exists (ready)");
+  assert.equal(await ncs.releaseClaim([u.led._id], { reason: "released by hand" }), 0);
+  assert.equal((await ledgerNow(u)).status, "manual");
+  assert.deepEqual(calls.status, [u.ext, u.ext], "Gameflip itself was asked, each time");
+
+  // --- The pass: asks again, tries the take-down, waits while it does not take. ---
+  calls.end.length = 0;
+  let out = await nl.runPass();
+  assert.deepEqual(out.limbo, { released: 0, sold: 0, retried: 1 });
+  assert.deepEqual(calls.end, [[u.ext, "ready"]]);
+  assert.equal((await ledgerNow(u)).status, "manual");
+  assert.equal((await ledgerNow(u)).farmLimboAt, null, "no limbo stamp on that farm's ledger");
+  assert.deepEqual(told, [], "minutes of waiting are normal");
+
+  // --- Gameflip lets go: deleted, its own 404 read back, the account is stock again. ---
+  endMode = "ok";
+  out = await nl.runPass();
+  assert.deepEqual(out.limbo, { released: 1, sold: 0, retried: 0 });
+  assert.deepEqual(out.errors, []);
+  assert.equal(gameflip.has(u.ext), false);
+  led = await ledgerNow(u);
+  assert.equal(led.status, "skipped", "back where it was before the claim");
+  assert.equal(led.manualListing, "");
+  assert.equal(led.note, "manual listing released — its listing is gone");
+  assert.equal((await poolNow(u)).listed, false, "its Listed tick is cleared: the auto-lister may take it again");
+  assert.equal((await poolNow(u)).claimedNote, "noclaim-farm:Overwatch", "its pool row was never touched");
+  assert.deepEqual(fleetLogins("7"), [u.login], "and it never left its bot");
+  assert.deepEqual(fleetWrites, []);
+  // Nothing left for a later pass, and nothing was said: it settled by itself.
+  out = await nl.runPass();
+  assert.deepEqual(out.limbo, { released: 0, sold: 0, retried: 0 });
+  assert.deepEqual(told, []);
+
+  // --- A claim that CREATED its ledger is simply dropped on the same answer.
+  // (Its ledger names no pool row here: "was it ticked sold by hand?" has
+  // nothing to read, which is a no — not a read that fails for good.) ---
+  endMode = "swallow";
+  const fresh = await failedPublish({ left: "draft", prior: "" });
+  assert.equal((await ledgerNow(fresh)).status, "manual");
+  await UnclaimedAccount.updateOne({ _id: fresh.led._id }, { $set: { poolAccountId: "" } });
+  endMode = "ok";
+  out = await nl.runPass();
+  assert.deepEqual(out.errors, []);
+  assert.equal(out.limbo.released, 1);
+  assert.equal(await ledgerNow(fresh), null);
+
+  // --- …and a publish whose own delete DID take holds nothing: released at once, no row. ---
+  const clean = await failedPublish({ left: "" });
+  assert.doesNotMatch(clean.error.message, /kept held/);
+  assert.equal(clean.listing, null);
+  assert.equal((await ledgerNow(clean)).status, "skipped");
+});
+
+test("fleet, FAILED PUBLISH: the listing went on sale after all — a sale is booked as a sale, a refund retires the account, and neither is ever handed back", async () => {
+  await withNoClaimGames(["overwatch"], async () => {
+    endMode = "swallow";
+    const bought = await failedPublish({ left: "onsale" });
+    const refunded = await failedPublish({ left: "onsale" });
+    assert.match(bought.error.message, /\[account kept held\] \[listing tracked\]$/);
+    told.length = 0;
+    // A buyer was quicker than the take-down; another paid and was refunded.
+    gameflip.set(bought.ext, "sold");
+    gameflip.set(refunded.ext, "cancelled");
+    calls.end.length = 0;
+
+    // One a pass, the account looked at longest ago first. (A pass starts with
+    // the post-sale step, so the second one also takes the sold account out of
+    // its bot before it comes to the refunded one.)
+    let out = await nl.runPass();
+    assert.deepEqual(out.limbo, { released: 0, sold: 1, retried: 0 });
+    assert.equal(out.spend, 0);
+    out = await nl.runPass();
+    assert.deepEqual(out.limbo, { released: 0, sold: 0, retried: 0, burned: 1 });
+    assert.equal(out.spend, 1);
+    assert.deepEqual(fleetLogins("7"), [refunded.login]);
+    assert.deepEqual(calls.end, [], "a listing a buyer paid for is never deleted by us");
+
+    // The sale: its ledger closed at the listing's price, its row called sold,
+    // the demand model told — exactly what the sale watcher books for a live row.
+    let led = await ledgerNow(bought);
+    assert.equal(led.status, "sold");
+    assert.equal(led.soldPriceUsd, 1.49);
+    assert.equal(led.soldMarket, "gameflip");
+    assert.equal(led.note, "gameflip sale");
+    let row = await MarketplaceListing.findById(bought.listing._id).lean();
+    assert.equal(row.status, "sold");
+    assert.equal(row.units[0].orderId, "gameflip-sale");
+    assert.ok(row.units[0].deliveredAt);
+    assert.equal(await SaleSignal.countDocuments({ source: "listing_sold", login: bought.login }), 1);
+
+    // The refund: closed like a sale at no price, its row NOT called sold, no demand.
+    led = await ledgerNow(refunded);
+    assert.equal(led.status, "sold");
+    assert.equal(led.soldPriceUsd, 0);
+    assert.equal(led.note, nl.BURNED_REASON);
+    row = await MarketplaceListing.findById(refunded.listing._id).lean();
+    assert.equal(row.status, "removed");
+    assert.equal(row.units[0].orderId, "gameflip-cancelled");
+    assert.equal(await SaleSignal.countDocuments({ login: refunded.login }), 0);
+
+    // Neither can be released by anybody, with or without a word about the listing.
+    for (const u of [bought, refunded]) {
+      assert.equal(await ncs.releaseClaim([u.led._id], { reason: "released by hand", listingGone: true }), 0);
+    }
+
+    // Their farm's post-sale step (the first of every lifecycle pass): both
+    // have left the bot now, and the owner is told which was a sale and which
+    // was not.
+    out = await nl.runPass();
+    assert.equal(out.spend, 1);
+    assert.deepEqual(fleetLogins("7"), []);
+    assert.deepEqual(told.filter((m) => m.includes(bought.login)), [
+      "💰 SOLD (manual no-claim listing)\n\n" + bought.login + "\nGame: Overwatch\nSource: noclaim\nReason: gameflip sale",
+    ]);
+    assert.deepEqual(told.filter((m) => m.includes(refunded.login)), [
+      "⚠️ RETIRED, not sold (manual no-claim listing)\n\n" + refunded.login +
+        "\nGame: Overwatch\nSource: noclaim\nReason: " + nl.BURNED_REASON,
+    ]);
+    assert.equal((await spentViewOf(bought)).sold, true);
+    assert.equal((await spentViewOf(refunded)).sold, false);
+    // The demand model that sizes the fleet: one sale.
+    const ev = await farmDemand.saleEvidenceByBucket({ days: 30 });
+    assert.deepEqual([...ev.units.get("overwatch").keys()], [bought.login]);
+  });
+});
+
+test("fleet, FAILED PUBLISH: only that hold waits on Gameflip — an ordinary unit of that farm whose row came down is released as it always was, and the pass never asks about it", async () => {
+  // The same shapes on a real MongoDB (the fake models take no projection): a
+  // row that was delisted, one retired by the watcher, one that merely lapsed.
+  for (const [status, lastError] of [
+    ["delisted", ""],
+    ["removed", 'gameflip reports "expired" — retired by the watcher'],
+    ["removed", "expired on Gameflip — renewal pending"],
+  ]) {
+    const plain = await fleetUnit({ row: { status, lastError } });
+    // Gameflip still shows its listing: were this farm's ordinary units held on
+    // Gameflip's word, this one would be.
+    assert.equal(gameflip.get(plain.ext), "onsale");
+    calls.status.length = 0;
+    const out = await nl.runPass();
+    assert.deepEqual(out.limbo, { released: 0, sold: 0, retried: 0 }, status);
+    assert.deepEqual(calls.status, [], "the pass does not ask Gameflip about it");
+    assert.equal((await ledgerNow(plain)).lastCheckedAt, null, "nor touch its ledger");
+    assert.equal(await ncs.failedPublishBlock(await ledgerNow(plain)), "");
+    assert.equal(await ncs.releaseClaim([plain.led._id], { reason: "listing delisted" }), 1, status);
+    assert.equal(await ledgerNow(plain), null);
+    assert.deepEqual(calls.status, [], "and neither does its release");
+  }
+  // A claim whose pointer is no row id at all (nothing writes one; the read of
+  // it throws on a real MongoDB): not such a hold — released, and parked by the
+  // Sold tick, exactly as before.
+  const odd = await fleetUnit({ row: { status: "delisted" }, ledger: { manualListing: "not-an-id" } });
+  assert.equal(await ncs.failedPublishBlock(await ledgerNow(odd)), "");
+  assert.equal(await ncs.releaseClaim([odd.led._id], { reason: "listing delisted" }), 1);
+  const ticked = await fleetUnit({ row: { status: "delisted" }, ledger: { manualListing: "not-an-id" } });
+  await AvailableAccount.updateOne({ _id: ticked.pool._id }, { $set: { manualSold: true } });
+  const r = await nl.removeForPoolAccount(String(ticked.pool._id), { actor: "owner" });
+  assert.deepEqual(r.errors, []);
+  assert.equal((await ledgerNow(ticked)).status, "removed");
+  assert.deepEqual(calls.status, []);
+});
+
+test("fleet, FAILED PUBLISH: the Sold tick waits for Gameflip's word too; a wait of hours is said once; and with Gameflip silent nothing is released", async () => {
+  // 1. Ticked sold by hand while the leftover listing still exists: not parked
+  // "removed" (the pass would stop asking about that listing) until it is gone.
+  endMode = "swallow";
+  const ticked = await failedPublish({ left: "ready" });
+  await AvailableAccount.updateOne({ _id: ticked.pool._id }, { $set: { manualSold: true, listed: false } });
+  told.length = 0;
+  let out = await nl.runPass();
+  assert.ok(
+    out.errors.includes(
+      "manual-sold " + ticked.login + ": not taken off as sold by hand yet — the listing its failed publish left still exists on Gameflip (ready) — it is taken down first",
+    ),
+    JSON.stringify(out.errors),
+  );
+  assert.equal((await ledgerNow(ticked)).status, "manual");
+  // Gameflip lets go: the pass takes the listing down — and does not hand a
+  // hand-sold account back. The tick's own step parks it on the next pass, as
+  // the hand sale it is.
+  endMode = "ok";
+  out = await nl.runPass();
+  assert.deepEqual(out.limbo, { released: 0, sold: 0, retried: 0 });
+  assert.equal(gameflip.has(ticked.ext), false, "the listing is gone from Gameflip");
+  assert.equal((await ledgerNow(ticked)).status, "manual", "ticked sold by hand: never released");
+  out = await nl.runPass();
+  assert.deepEqual(out.errors, []);
+  assert.deepEqual(out.manualSold, { units: 0, ledgers: 1 });
+  const parked = await ledgerNow(ticked);
+  assert.equal(parked.status, "removed");
+  assert.equal(parked.note, "manual sold — removed from manual listing");
+  assert.equal(ncs.poolBlockReason(await poolNow(ticked), ["overwatch"]), "manual sold");
+  await new Promise((r) => setTimeout(r, 30)); // the activity log is written without being awaited
+  assert.equal(await SystemEvent.countDocuments({ category: "noclaim_shop", action: "manual_sold_removed", subject: ticked.login }), 1);
+  assert.equal(await SystemEvent.countDocuments({ category: "noclaim_shop", action: "released" }), 0, "its books never say it went back to stock");
+
+  // 2. Hours of waiting: said once, on the ledger (a restart does not repeat it).
+  endMode = "swallow";
+  const slow = await failedPublish({ left: "ready" });
+  await UnclaimedAccount.updateOne({ _id: slow.led._id }, { $set: { manualAt: new Date(Date.now() - 4 * HOUR - 60 * 1000) } });
+  told.length = 0;
+  await nl.runPass();
+  assert.equal(told.length, 1);
+  assert.match(told[0], new RegExp("^⚠️ A held no-claim account has been waiting 4 h\\n\\n" + slow.login + " \\(Overwatch\\): its Gameflip publish failed and left listing " + slow.ext + " behind"));
+  assert.match(told[0], /Gameflip still has its listing \(ready\)\.\nIt stays held \(sold nowhere else\) and is tried again in its turn — one held account a pass\./);
+  assert.ok((await ledgerNow(slow)).farmToldAt);
+  await nl.runPass();
+  await nl.runPass();
+  assert.equal(told.length, 1, "once");
+  assert.equal(await SystemEvent.countDocuments({ action: "held_unit_waiting", subject: slow.login }), 1);
+  // A stamp from an earlier hold of the same account does not silence a new one.
+  await UnclaimedAccount.updateOne({ _id: slow.led._id }, { $set: { farmToldAt: new Date(Date.now() - 30 * 24 * HOUR) } });
+  await nl.runPass();
+  assert.equal(told.length, 2);
+  await nl.runPass();
+  assert.equal(told.length, 2);
+
+  // 3. Gameflip will not answer at all: an error line a pass, nothing released.
+  gameflip.set(slow.ext, http(429, "Gameflip listing status: Too many attempts - Retry later"));
+  out = await nl.runPass();
+  assert.ok(out.errors.includes("limbo " + slow.login + ": gameflip status unreadable"));
+  assert.equal(await ncs.failedPublishBlock(await ledgerNow(slow)), "Gameflip would not say whether its listing is gone");
+  assert.equal(await ncs.releaseClaim([slow.led._id], { reason: "released by hand" }), 0);
+  assert.equal((await ledgerNow(slow)).status, "manual");
+});
+
+test("fleet, FAILED PUBLISH: a relist that ends so stops its chain — the sold unit is booked, the next account is held, and the owner is told the chain is over", async () => {
+  // A hand-made listing of three: one live, two queued. It sells; the sale
+  // watcher books the sale and relists the next unit — and that publish fails
+  // after Gameflip built the listing, with the delete not taking.
+  const sold = await fleetUnit({ row: { qtyRemaining: 2 } });
+  gameflip.set(sold.ext, "sold");
+  endMode = "swallow";
+  let tick = null;
+  const next = await failedPublish({
+    set: sold.set,
+    left: "ready",
+    publish: async () => {
+      tick = await gf.syncOnce();
+    },
+  });
+  assert.equal(next.error, null, "the watcher never throws over one chain");
+  assert.equal(tick.sold, 1);
+  assert.equal(tick.relisted, 0);
+
+  // The sale itself is booked exactly as ever.
+  assert.equal((await ledgerNow(sold)).status, "sold");
+  const row = await rowNow(sold);
+  assert.equal(row.status, "sold");
+  // The chain: stopped for good — not retried five minutes later with a third account.
+  assert.equal(row.qtyRemaining, 0, "it owes nothing more");
+  assert.equal(row.relistRetryAt, null);
+  assert.match(row.lastError, /^auto-relist stopped: Gameflip created [^ ]+ but could not put it on sale[^]*\[account kept held\] \[listing tracked\]$/);
+  // The next account: held for the listing that publish left, on the books.
+  assert.ok(next.led, "an account was claimed for the next unit");
+  assert.equal((await ledgerNow(next)).status, "manual");
+  assert.equal((await ledgerNow(next)).manualListing, String(next.listing._id));
+  assert.equal(next.listing.status, "removed");
+  assert.equal(next.listing.qtyRemaining, 0, "the leftover row carries no queue: nothing relists from it");
+  // The owner: one message for the failed relist, and it says the chain is over.
+  const said = told.filter((m) => m.includes(next.login));
+  assert.equal(said.length, 1);
+  assert.match(said[0], /^⚠️ Gameflip: a publish of a no-claim account failed/);
+  assert.match(
+    said[0],
+    /\nThis publish was a relist — the next unit of an existing listing's chain — and that chain stops here: this unit and the 1 queued behind it are not put up again by themselves\. Publish the listing again once Gameflip is answering\.$/,
+  );
+  assert.doesNotMatch(said[0], /Nothing to do/);
+
+  // Later ticks and passes: nothing publishes for that chain again; the held
+  // account comes back once its leftover listing is really gone.
+  const publishes = [];
+  const realPublish = mp.gameflipPublish;
+  mp.gameflipPublish = async (a) => {
+    publishes.push(a);
+    throw new Error("must not be called");
+  };
+  try {
+    await gf.syncOnce();
+    endMode = "ok";
+    const out = await nl.runPass();
+    assert.equal(out.limbo.released, 1);
+    await gf.syncOnce();
+  } finally {
+    mp.gameflipPublish = realPublish;
+  }
+  assert.deepEqual(publishes, []);
+  assert.equal((await ledgerNow(next)).status, "skipped");
+});
+
+test("fleet, FAILED PUBLISH: a refund the pass finds on the leftover listing is on record before it is booked — Gameflip dropping that listing later hands nothing back", async () => {
+  endMode = "swallow";
+  const u = await failedPublish({ left: "onsale" });
+  gameflip.set(u.ext, "cancelled"); // it went on sale after all, was paid for, and refunded
+  // The write that closes its ledger does not land (the claim layer answers 0).
+  ncs.markSold = async () => 0;
+  let out;
+  try {
+    out = await nl.runPass();
+    assert.equal(out.limbo.burned || 0, 0);
+    assert.equal((await ledgerNow(u)).status, "manual");
+    // On record all the same: the row's own unit says "refunded, not booked yet"…
+    let row = await MarketplaceListing.findById(u.listing._id).lean();
+    assert.equal(row.units[0].orderId, "gameflip-cancelled");
+    assert.equal(row.units[0].deliveredAt, null);
+    // …which is what every release goes by, whoever asks and whatever they say of the listing.
+    assert.equal(await ncs.refundSeenFor(await ledgerNow(u)), true);
+    assert.equal(await ncs.releaseClaim([u.led._id], { reason: "released by hand", listingGone: true }), 0);
+
+    // Gameflip drops the listing. Asked again, it would answer 404 — and the
+    // account, its login seen by a refunded buyer, would be back in stock.
+    gameflip.delete(u.ext);
+    calls.status.length = 0;
+    out = await nl.runPass();
+    assert.deepEqual(out.limbo, { released: 0, sold: 0, retried: 0 });
+    assert.deepEqual(calls.status, [], "the pass does not even ask about it any more");
+    assert.deepEqual(out.refunds, { booked: 0, waiting: 1 });
+    assert.equal((await ledgerNow(u)).status, "manual");
+  } finally {
+    ncs.markSold = real.markSold;
+  }
+  // The write lands: retired by the pass's own refund step — never sold, never stock.
+  out = await nl.runPass();
+  assert.deepEqual(out.refunds, { booked: 1, waiting: 0 });
+  const led = await ledgerNow(u);
+  assert.equal(led.status, "sold");
+  assert.equal(led.note, nl.BURNED_REASON);
+  assert.equal(led.soldPriceUsd, 0);
+  const row = await MarketplaceListing.findById(u.listing._id).lean();
+  assert.equal(row.status, "removed", "the row is not called sold");
+  assert.ok(row.units[0].deliveredAt);
+  assert.equal(await SaleSignal.countDocuments({ login: u.login }), 0, "a refund is not demand");
+});

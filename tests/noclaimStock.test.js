@@ -231,6 +231,8 @@ function resetState() {
     gfHeld: new Set(), // logins Gameflip already holds a code for
     gfHeldError: null,
     afReleaseBlocked: new Map(), // loginLower -> why a held account may not go back yet
+    gfStatus: new Map(), // Gameflip listing id -> its status | Error (none scripted: Gameflip's own 404)
+    gfStatusReads: [],
   });
 }
 resetState();
@@ -371,8 +373,26 @@ const autofarmStub = {
   },
 };
 
+// Gameflip's word on a listing (utils/marketplaces): asked only by the release
+// gate of a no-claim bot's account held after a failed publish.
+function gone404() {
+  const e = new Error('Gameflip listing status: {"status":"FAILURE","data":null,"error":{"message":"Not Found","code":404,"http_status":404}}');
+  e.status = 404;
+  return e;
+}
+const marketplacesStub = {
+  async gameflipListingStatus(id) {
+    state.gfStatusReads.push(String(id));
+    const v = state.gfStatus.get(String(id));
+    if (v instanceof Error) throw v;
+    if (v === undefined) throw gone404();
+    return v;
+  },
+};
+
 const ROOT = path.join(__dirname, "..");
 const STUBS = new Map([
+  [path.join(ROOT, "utils/marketplaces.js"), marketplacesStub],
   [path.join(ROOT, "utils/autofarmStock.js"), autofarmStub],
   [path.join(ROOT, "models/UnclaimedAccount.js"), Unclaimed],
   [path.join(ROOT, "models/AvailableAccount.js"), Pool],
@@ -1825,4 +1845,183 @@ test("auto-farm: a held account whose listing may still exist is NOT released, w
   } finally {
     console.error = error;
   }
+});
+
+// The row utils/gameflipFulfiller.trackFailedListing leaves for the listing a
+// failed publish may have built, and the no-claim bot's claim attached to it.
+function failedPublishWorld(rowFields = {}, ledgerFields = {}) {
+  Listing.docs.push({
+    _id: LISTING_ID,
+    noclaimStock: true,
+    marketplace: "gameflip",
+    externalId: "gf-left-1",
+    status: "removed",
+    note: "no-claim auto-delivery — bot — publish failed",
+    units: [{ login: "bot", deliveredAt: null, orderId: "" }],
+    ...rowFields,
+  });
+  return ledgerDoc({ login: "bot", loginLower: "bot", market: "gameflip", manualPriorStatus: "skipped", manualListing: LISTING_ID, poolAccountId: "p2", ...ledgerFields });
+}
+
+test("a no-claim bot's account held after a FAILED Gameflip publish is not released while the listing that publish built may still exist — whoever asks", async () => {
+  const { error } = console;
+  const said = [];
+  console.error = (...a) => said.push(a.join(" "));
+  try {
+    // Gameflip still has it — as a draft that would not delete, off sale, on
+    // sale after all, or sold: not released.
+    for (const [status, why] of [
+      ["draft", "its Gameflip listing still exists (draft)"],
+      ["ready", "its Gameflip listing still exists (ready)"],
+      ["onsale", "its Gameflip listing still exists (onsale)"],
+      ["sale_pending", "its Gameflip listing still exists (sale_pending)"],
+      ["cancelled", "its Gameflip listing still exists (cancelled)"],
+      ["sold", "its Gameflip listing SOLD"],
+      ["", "its Gameflip listing still exists (?)"],
+    ]) {
+      resetAll();
+      said.length = 0;
+      const held = failedPublishWorld();
+      state.gfStatus.set("gf-left-1", status);
+      assert.strictEqual(await ncs.failedPublishBlock(held), why);
+      assert.strictEqual(await ncs.releaseClaim([held._id], { reason: "released by hand" }), 0, status);
+      assert.strictEqual(ledgerFor("bot")[0].status, "manual", status + ": still held");
+      assert.strictEqual(ledgerFor("bot")[0].manualListing, LISTING_ID);
+      assert.ok(said.some((m) => m.includes("bot stays held (released by hand): " + why)), status);
+      assert.deepStrictEqual(state.unlisted, [], "its Listed tick stays");
+    }
+
+    // Gameflip will not say, or something in between answered 404: not known is not gone.
+    for (const e of [
+      new Error("Gameflip listing status: Too many attempts"),
+      Object.assign(new Error('Gameflip listing status: "<html>404 Not Found</html>"'), { status: 404 }),
+      new Error('Gameflip listing status: {"http_status": 404}'),
+    ]) {
+      resetAll();
+      const held = failedPublishWorld();
+      state.gfStatus.set("gf-left-1", e);
+      assert.strictEqual(await ncs.failedPublishBlock(held), "Gameflip would not say whether its listing is gone", e.message);
+      assert.strictEqual(await ncs.releaseClaim([held._id]), 0, e.message);
+      assert.strictEqual(ledgerFor("bot")[0].status, "manual");
+    }
+
+    // Its row cannot be read: the check fails, and a failed check is not a yes.
+    // (The read REJECTS, as a real one does — it does not throw on the spot.)
+    resetAll();
+    let held = failedPublishWorld();
+    const realFindById = Listing.findById;
+    let reads = 0;
+    let failing = Infinity; // how many reads still fail
+    Listing.findById = (...args) => ({
+      lean: async () => {
+        reads++;
+        if (failing-- > 0) throw new Error("mongo blip");
+        return realFindById(...args).lean();
+      },
+    });
+    try {
+      await assert.rejects(ncs.failedPublishBlock(held), /mongo blip/);
+      assert.strictEqual(reads, 2, "asked twice before it is given up");
+      assert.strictEqual(await ncs.releaseClaim([held._id]), 0);
+      assert.strictEqual(ledgerFor("bot")[0].status, "manual");
+      assert.deepStrictEqual(state.gfStatusReads, [], "Gameflip was not even reached");
+      // One failed read is not the end of it: the second answers, and
+      // Gameflip's word decides as ever.
+      state.gfStatus.set("gf-left-1", "ready");
+      reads = 0;
+      failing = 1;
+      assert.strictEqual(await ncs.releaseClaim([held._id]), 0);
+      assert.strictEqual(reads, 2);
+      assert.deepStrictEqual(state.gfStatusReads, ["gf-left-1"]);
+      state.gfStatus.delete("gf-left-1");
+      reads = 0;
+      failing = 1;
+      assert.strictEqual(await ncs.releaseClaim([held._id]), 1, "gone on Gameflip: released through the same blip");
+      assert.strictEqual(reads, 2);
+    } finally {
+      Listing.findById = realFindById;
+    }
+
+    // Gameflip's own 404 for that listing: released, back where it was before the claim.
+    resetAll();
+    held = failedPublishWorld();
+    assert.strictEqual(await ncs.failedPublishBlock(held), "");
+    assert.strictEqual(await ncs.releaseClaim([held._id], { reason: "listing delisted" }), 1);
+    assert.strictEqual(ledgerFor("bot")[0].status, "skipped");
+    assert.strictEqual(ledgerFor("bot")[0].manualListing, "");
+    assert.deepStrictEqual(state.gfStatusReads, ["gf-left-1", "gf-left-1"], "asked by the test, then by the release itself");
+
+    // The caller has Gameflip's 404 in hand (the pass's verified take-down):
+    // released on that word — Gameflip is not asked again.
+    resetAll();
+    held = failedPublishWorld();
+    state.gfStatus.set("gf-left-1", "ready"); // whatever a second look would say
+    assert.strictEqual(await ncs.releaseClaim([held._id], { reason: "its listing is gone", listingGone: true }), 1);
+    assert.strictEqual(ledgerFor("bot")[0].status, "skipped");
+    assert.deepStrictEqual(state.gfStatusReads, []);
+
+    // An auto-farm account on such a row answers to its own gate, not this one.
+    resetAll();
+    held = failedPublishWorld({}, { farm: "autofarm", manualPriorStatus: "" });
+    state.gfStatus.set("gf-left-1", "ready");
+    assert.strictEqual(await ncs.failedPublishBlock(held), "");
+    assert.strictEqual(await ncs.releaseClaim([held._id]), 1, "the stubbed auto-farm gate lets it go");
+    assert.deepStrictEqual(state.afCalls.map((c) => c[0]), ["release-check", "release-held"]);
+    assert.deepStrictEqual(state.gfStatusReads, []);
+  } finally {
+    console.error = error;
+  }
+});
+
+test("…and ONLY that hold: every other commitment of a no-claim bot's account is released as it always was, without a word from Gameflip", async () => {
+  const freed = async (rowFields, ledgerFields, what) => {
+    resetAll();
+    const held = failedPublishWorld(rowFields, ledgerFields);
+    state.gfStatus.set("gf-left-1", "onsale"); // would hold it, were it asked
+    assert.strictEqual(await ncs.failedPublishBlock(held), "", what);
+    assert.strictEqual(await ncs.releaseClaim([held._id], { reason: "listing delisted" }), 1, what);
+    assert.deepStrictEqual(state.gfStatusReads, [], what + ": Gameflip is not asked");
+  };
+  // An ordinary Gameflip row that came down: delisted, retired, lapsed.
+  await freed({ status: "delisted", note: "no-claim auto-delivery — bot" }, {}, "a delisted row");
+  await freed({ status: "removed", note: "no-claim auto-delivery — bot", lastError: "expired on Gameflip — renewal pending" }, {}, "a lapsed row");
+  await freed({ status: "removed", note: "" }, {}, "a row with no note");
+  await freed({ status: "removed", note: "no-claim auto-delivery — bot — republish failed" }, {}, "letters inside another word are not the mark");
+  // A unit that is on sale is released by whoever has just taken it down.
+  await freed({ status: "active" }, {}, "a live row");
+  // The mark on another market's row, or one naming no listing: nothing to ask Gameflip about.
+  await freed({ marketplace: "ggsel", externalId: "gg-1" }, { market: "ggsel" }, "another market's row");
+  await freed({ externalId: "" }, {}, "a row naming no listing");
+  // One failed read of its row does not cost an ordinary release (it used to need none).
+  resetAll();
+  const plain = failedPublishWorld({ status: "delisted", note: "no-claim auto-delivery — bot" });
+  const realFindById = Listing.findById;
+  let blips = 0;
+  Listing.findById = (...args) => ({
+    lean: async () => {
+      if (blips++ === 0) throw new Error("mongo blip");
+      return realFindById(...args).lean();
+    },
+  });
+  try {
+    assert.strictEqual(await ncs.releaseClaim([plain._id], { reason: "listing delisted" }), 1);
+  } finally {
+    Listing.findById = realFindById;
+  }
+  assert.strictEqual(blips, 2);
+  // Attached to no row, to one that is gone, or to something that is no id.
+  await freed({}, { manualListing: "" }, "unattached");
+  await freed({ _id: "5f00000000000000000000aa" }, {}, "its row is missing");
+  await freed({}, { manualListing: "not-an-id" }, "a pointer that is no id");
+  // The mark survives whatever is appended to the note after it (the Delist
+  // route and the listers both add to a row's note): still held.
+  for (const tail of [" — auto-farm copy", " gone from the marketplace"]) {
+    resetAll();
+    const held = failedPublishWorld({ status: "delisted", note: "no-claim auto-delivery — bot — publish failed" + tail });
+    state.gfStatus.set("gf-left-1", "onsale");
+    assert.strictEqual(await ncs.failedPublishBlock(held), "its Gameflip listing still exists (onsale)", tail);
+    assert.strictEqual(await ncs.releaseClaim([held._id]), 0, tail);
+  }
+  // Nothing to judge.
+  assert.strictEqual(await ncs.failedPublishBlock(null), "");
 });

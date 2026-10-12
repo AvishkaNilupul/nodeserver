@@ -86,6 +86,14 @@ const BURNED_REASON = "gameflip sale cancelled after delivery — its login was 
 // for good afterwards. routes/marketplaceConsoleRoutes reads it too — a
 // refunded unit is no delivery and no revenue.
 const REFUNDED_ORDER = "gameflip-cancelled";
+// The row a FAILED Gameflip publish left on the books for the listing it may
+// have built: utils/gameflipFulfiller.trackFailedListing words its note so. A
+// no-claim bot's account attached to one is HELD — the only hold of that farm
+// that waits on Gameflip's word (failedPublishRow); the claim layer's release
+// gate reads the same words (utils/noclaimStock.failedPublishBlock). Anywhere
+// in the note, as a part of their own: other paths append to a row's note, and
+// a mark lost that way would let a held account go.
+const FAILED_PUBLISH_ROW = / — publish failed(?: |$)/;
 // A "manual" ledger still unattached this long after its claim belongs to a
 // publish that never finished (a crash or throw between claimForSet and
 // attachListing) — nothing is still publishing it.
@@ -223,8 +231,11 @@ async function ledgersForLogins(logins) {
 // login sitting on the row is what ties it here, since a claim refuses any
 // login already on an active listing — or at a row that is no longer active (a
 // rebuild or publish whose attachListing did not land). A pointer at another
-// ACTIVE row is someone else's commitment and never ours, and when that cannot
-// be checked only an exact match counts.
+// ACTIVE row is someone else's commitment and never ours — and so is one at
+// the row a failed publish left (failedPublishRow): that account is HELD for
+// that row's listing until Gameflip says it is gone, and a word about THIS
+// row's listing says nothing about it. When neither can be checked only an
+// exact match counts.
 async function ownedLedgers(ledgers, rowId, { strict = false } = {}) {
   const id = String(rowId);
   const manual = [...ledgers.values()].filter((l) => l && l.status === "manual");
@@ -237,10 +248,12 @@ async function ownedLedgers(ledgers, rowId, { strict = false } = {}) {
   } else {
     try {
       const rows = await MarketplaceListing.find(
-        { _id: { $in: ptrs }, status: "active" },
-        { _id: 1 },
+        { _id: { $in: ptrs } },
+        { status: 1, marketplace: 1, externalId: 1, note: 1 },
       ).lean();
-      active = new Set(rows.map((r) => String(r._id)));
+      active = new Set(
+        rows.filter((r) => r.status === "active" || failedPublishRow(r)).map((r) => String(r._id)),
+      );
     } catch {
       active = null;
     }
@@ -259,6 +272,22 @@ async function ownedLedgers(ledgers, rowId, { strict = false } = {}) {
 
 function isUnrecorded(ledger) {
   return String((ledger && ledger.note) || "").startsWith(UNRECORDED_PREFIX);
+}
+
+function isAutofarm(ledger) {
+  return String((ledger && ledger.farm) || "") === "autofarm";
+}
+
+// The off-sale Gameflip row of a listing that a failed publish may have left
+// behind — one whose listing can be named, and so asked about.
+function failedPublishRow(row) {
+  return (
+    !!row &&
+    row.marketplace === "gameflip" &&
+    row.status !== "active" &&
+    !!row.externalId &&
+    FAILED_PUBLISH_ROW.test(String(row.note || ""))
+  );
 }
 
 // Pin claims whose credentials went into an offer no row of ours records, so
@@ -281,8 +310,9 @@ async function markUnrecorded(ids, market, externalId) {
 }
 
 // `opts.listingGone`: the caller has the market's own word that the listing
-// these accounts were held for is gone (an auto-farm account is released on
-// nothing less — noclaimStock.releaseClaim asks the market itself otherwise).
+// these accounts were held for is gone. An auto-farm account is released on
+// nothing less, and so is a no-claim bot's account held after a failed
+// Gameflip publish — noclaimStock.releaseClaim asks the market itself otherwise.
 async function releaseIds(ids, reason, opts = {}) {
   const list = (ids || []).filter(Boolean).map(String);
   if (!list.length) return 0;
@@ -1759,6 +1789,41 @@ async function handSaleBlocked(ledger, goneRows) {
     : "its Gameflip listing still exists (" + st + ") — it is taken down first";
 }
 
+// Has the owner ticked this ledger's pool account sold by hand? THROWS when
+// that cannot be read (the caller then leaves the account as it is).
+async function tickedSold(ledger) {
+  const id = String((ledger && ledger.poolAccountId) || "");
+  if (!isObjectIdLike(id)) return false;
+  const pool = await AvailableAccount.findById(id, { manualSold: 1 }).lean();
+  return !!pool && pool.manualSold === true;
+}
+
+// The same question for a NO-CLAIM BOT's account, in the one hold of that farm
+// that waits on Gameflip: on the row a failed publish left behind
+// (failedPublishRow). Parked "removed" by the Sold tick it leaves "manual", and
+// the limbo step — the only thing still asking Gameflip about that listing —
+// never looks at it again, while the listing may be a draft that would not
+// delete, or on sale after all with the login a hand buyer now has. "" = it may
+// be parked (not such a hold, or Gameflip says the listing is gone).
+async function failedPublishSaleBlocked(ledger) {
+  const p = String(ledger.manualListing || "");
+  if (!p) return "";
+  let row = null;
+  try {
+    row = await MarketplaceListing.findById(p, { status: 1, marketplace: 1, externalId: 1, note: 1 }).lean();
+  } catch (e) {
+    // A pointer that is not an id at all names no row: not such a hold.
+    if (!(e && e.name === "CastError")) return "its listing row could not be read";
+  }
+  if (!failedPublishRow(row)) return "";
+  const st = await gameflipState(row.externalId);
+  if (st === "gone") return "";
+  if (!st) return "Gameflip would not say whether the listing its failed publish left is gone";
+  return st === "sold"
+    ? "the listing its failed publish left SOLD on Gameflip (booked as that sale by the maintenance pass)"
+    : "the listing its failed publish left still exists on Gameflip (" + st + ") — it is taken down first";
+}
+
 // The owner ticked this pool account manual-sold: every account of it on a
 // no-claim listing comes off sale, and its ledger becomes "removed" — NOT
 // released (it was sold by hand; it keeps farming). A ledger whose removal
@@ -1830,6 +1895,17 @@ async function removeForPoolAccount(poolAccountId, { actor = "" } = {}) {
           });
         }
         continue;
+      }
+      // A no-claim bot's account held after a failed publish: the same word
+      // from Gameflip first, for the same reason (failedPublishSaleBlocked).
+      // Never a pinned claim — that one is a human's, and nothing takes its
+      // listing down by itself (an auto-farm account that gets here is one).
+      if (!isUnrecorded(ledger)) {
+        const blocked = await failedPublishSaleBlocked(ledger);
+        if (blocked) {
+          out.errors.push(login + ": not taken off as sold by hand yet — " + blocked);
+          continue;
+        }
       }
       const w = await UnclaimedAccount.updateOne(
         { _id: ledger._id, status: "manual" },
@@ -2378,20 +2454,25 @@ async function bookGameflipSale(row, ledger, { reason = "gameflip sale", burned 
   return n;
 }
 
-// Step: a HELD auto-farm account whose listing row is no longer on sale but
-// which was not handed back — the market would not confirm the listing gone,
-// or its bot removal was under way when the unit ended. One a pass, the one
-// looked at longest ago: ask the market again, finish the take-down if the
-// listing is still there and ours to bin, book the sale if it sold. Until then
-// the account stays held, which is the safe side.
+// Step: a HELD account whose listing row is no longer on sale but which was
+// not handed back — the market would not confirm the listing gone, or (an
+// auto-farm account) its bot removal was under way when the unit ended. One a
+// pass, the one looked at longest ago: ask the market again, finish the
+// take-down if the listing is still there and ours to bin, book the sale if it
+// sold. Until then the account stays held, which is the safe side.
+//
+// An AUTO-FARM account is held on every vault unit, so any of its rows that is
+// off sale is this step's. A NO-CLAIM BOT's account is held in one case only:
+// on the row a failed Gameflip publish left for the listing it may have built
+// (failedPublishRow). Every other commitment of that farm is ended by whoever
+// takes its unit down, as it always was, and is never looked at here.
 async function autofarmLimboStep(tally, errors) {
-  // Every held auto-farm account attached to a row (a handful: one per unit
-  // out there). Read whole and narrowed here, not with a limit: a limit lets
-  // the ones that are not this step's — on sale, or pinned for a human —
-  // fill the window and starve the rest.
+  // Every committed account attached to a row. Read whole and narrowed here,
+  // not with a limit: a limit lets the ones that are not this step's — on
+  // sale, pinned for a human, a no-claim bot's ordinary unit — fill the
+  // window and starve the rest.
   const all = await UnclaimedAccount.find({
     source: "noclaim",
-    farm: "autofarm",
     status: "manual",
     manualListing: { $nin: ["", null] },
   }).lean();
@@ -2402,7 +2483,10 @@ async function autofarmLimboStep(tally, errors) {
     ids.length
       ? MarketplaceListing.find(
           { _id: { $in: ids } },
-          { status: 1, marketplace: 1, externalId: 1, price: 1, set: 1, title: 1, units: 1, accountLogin: 1, updatedAt: 1 },
+          {
+            status: 1, marketplace: 1, externalId: 1, price: 1, set: 1, title: 1, units: 1, accountLogin: 1,
+            updatedAt: 1, note: 1, noclaimStock: 1,
+          },
         ).lean()
       : [];
   let rows = [];
@@ -2423,6 +2507,8 @@ async function autofarmLimboStep(tally, errors) {
   const due = held
     .filter((l) => {
       const r = rowOf.get(String(l.manualListing));
+      // A no-claim bot's account: only on the row its failed publish left.
+      if (!isAutofarm(l)) return failedPublishRow(r);
       return !r || r.status !== "active"; // on sale: the other steps own it
     })
     .sort((a, b) => ms(a.lastCheckedAt) - ms(b.lastCheckedAt) || String(a._id).localeCompare(String(b._id)));
@@ -2491,6 +2577,12 @@ async function autofarmLimboStep(tally, errors) {
       errors.push("limbo " + login + ": gameflip status unreadable");
       waiting = "Gameflip would not answer about its listing";
     } else if (down.state === "gone") {
+      // A no-claim bot's account the owner has ticked SOLD since: somebody owns
+      // it, so it is not handed back. The listing being gone is all the tick's
+      // own step was waiting for (failedPublishSaleBlocked): it parks the
+      // account as the hand sale it is on the next pass. (An auto-farm
+      // account's release gate refuses a ticked one itself.)
+      if (!isAutofarm(ledger) && (await tickedSold(ledger))) return;
       const n = await releaseIds([ledger._id], "its listing is gone", { listingGone: true });
       tally.released += n;
       if (!n) {
@@ -2511,7 +2603,15 @@ async function autofarmLimboStep(tally, errors) {
       // Paid, then refunded: the buyer has seen this login. It is never sold
       // again — its ledger is closed like a sale's, at no price, so the
       // account leaves farming and stock exactly as a sold one does.
-      tally.burned = (tally.burned || 0) + (await burnGameflipUnit(row, ledger));
+      // Put on RECORD first, the way the sale watcher does it (the row's unit
+      // is marked): should the closing write not land, the refund is then
+      // finished by finishRefunds on every pass and said out loud if it keeps
+      // failing — and nothing hands the account back meanwhile, not even
+      // Gameflip dropping that listing later. A row that no longer carries the
+      // unit has nothing to mark: its ledger is closed directly.
+      const onRow = row.noclaimStock === true && undeliveredUnits(row).some((u) => lower(u.login) === lower(login));
+      const n = onRow ? (await onGameflipCancelled(row)).burned : await burnGameflipUnit(row, ledger);
+      tally.burned = (tally.burned || 0) + n;
     } else {
       // Still there, and the take-down did not take (or a buyer is in the
       // middle of paying): the next pass asks again.
@@ -2532,18 +2632,25 @@ async function autofarmLimboStep(tally, errors) {
 const LIMBO_TELL_AFTER_MS = 3 * 60 * 60 * 1000;
 async function noteLimboWait(ledger, row, why) {
   const now = Date.now();
-  const since = ms(ledger.farmLimboAt);
+  const fleet = !isAutofarm(ledger);
+  // A no-claim bot's account has waited since its claim: its publish failed
+  // seconds after it. Its ledger keeps the limbo stamps of an earlier hold (a
+  // claim of that farm resets none of them), so it is never given one, and
+  // "told" is a stamp newer than this claim.
+  const since = fleet ? ms(ledger.manualAt) : ms(ledger.farmLimboAt);
   if (!since) {
+    if (fleet) return;
     await UnclaimedAccount.updateOne(
       { _id: ledger._id, status: "manual" },
       { $set: { farmLimboAt: new Date(now) } },
     ).catch(() => {});
     return;
   }
-  if (ledger.farmToldAt || now - since < LIMBO_TELL_AFTER_MS) return;
+  const told = fleet ? ms(ledger.farmToldAt) >= since : !!ledger.farmToldAt;
+  if (told || now - since < LIMBO_TELL_AFTER_MS) return;
   // The stamp first, and only the pass that lands it speaks.
   const w = await UnclaimedAccount.updateOne(
-    { _id: ledger._id, status: "manual", farmToldAt: null },
+    { _id: ledger._id, status: "manual", farmToldAt: ledger.farmToldAt || null },
     { $set: { farmToldAt: new Date(now) } },
   ).catch(() => null);
   if (!w || !w.modifiedCount) return;
@@ -2551,20 +2658,28 @@ async function noteLimboWait(ledger, row, why) {
   const hours = Math.max(1, Math.round((now - since) / (60 * 60 * 1000)));
   logEvent({
     category: "noclaim_shop",
-    action: "autofarm_unit_waiting",
+    action: fleet ? "held_unit_waiting" : "autofarm_unit_waiting",
     actor: "noclaimListings",
     severity: "warn",
     subject: login,
     game: ledger.game || "",
     count: 1,
-    detail: "held, off sale in our books for " + hours + " h and not handed back: " + why,
+    detail: fleet
+      ? "held for " + hours + " h since its Gameflip publish failed, and not handed back: " + why
+      : "held, off sale in our books for " + hours + " h and not handed back: " + why,
   });
   tellOwner(
-    "⚠️ A held auto-farm account has been waiting " + hours + " h\n\n" + login +
-      (ledger.game ? " (" + ledger.game + ")" : "") + ": its Gameflip listing " + String(row.externalId || "?") +
-      " is off sale in our books, but the account is not back in stock — " + why +
-      ".\nIt stays held (sold nowhere else) and is tried again every pass. If this does not clear by " +
-      "itself, look at that listing on Gameflip. Said once.",
+    fleet
+      ? "⚠️ A held no-claim account has been waiting " + hours + " h\n\n" + login +
+          (ledger.game ? " (" + ledger.game + ")" : "") + ": its Gameflip publish failed and left listing " +
+          String(row.externalId || "?") + " behind, and the account is not back in stock — " + why +
+          ".\nIt stays held (sold nowhere else) and is tried again in its turn — one held account a pass. " +
+          "If this does not clear by itself, look at that listing on Gameflip. Said once."
+      : "⚠️ A held auto-farm account has been waiting " + hours + " h\n\n" + login +
+          (ledger.game ? " (" + ledger.game + ")" : "") + ": its Gameflip listing " + String(row.externalId || "?") +
+          " is off sale in our books, but the account is not back in stock — " + why +
+          ".\nIt stays held (sold nowhere else) and is tried again in its turn — one held account a pass. " +
+          "If this does not clear by itself, look at that listing on Gameflip. Said once.",
   );
 }
 
@@ -2905,7 +3020,8 @@ async function runPass({ sweep = false } = {}) {
     // drops they were listed for leave them.
     await step("autofarm-expiry", () => autofarmExpiryStep(out.expiring, out.errors));
     // 4c. …and one that came off a listing but could not be handed back yet
-    // is asked about again.
+    // is asked about again — as is a no-claim bot's account held after a
+    // failed Gameflip publish, until the listing that publish left is gone.
     await step("autofarm-limbo", () => autofarmLimboStep(out.limbo, out.errors));
     // 4d. An auto-farm account HELD for a vault unit leaves its bot the way a
     // sold one does (1b), before any buyer has its login — nothing to do

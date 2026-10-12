@@ -867,6 +867,48 @@ router.post(
           });
         }
         listingGone = ownerOnly && confirmGone;
+      } else if (typeof stock.failedPublishBlock === "function") {
+        // A NO-CLAIM BOT's account held after a failed Gameflip publish: the
+        // listing that publish built may still exist with its login, so it goes
+        // back only on Gameflip's own word that the listing is gone
+        // (utils/noclaimStock.failedPublishBlock). The claim layer refuses it
+        // whoever asks; this is the same answer in words. Its listing row names
+        // the listing, so Gameflip can always be asked — there is no owner's
+        // word to take instead (`confirmGone` lifts nothing here).
+        let stuck = "";
+        try {
+          stuck = String((await stock.failedPublishBlock(ledger)) || "");
+        } catch (e) {
+          // Whether it IS such a hold could not be read: nothing is said
+          // about a failed publish, and nothing is released on a guess.
+          return res.status(409).json({
+            success: false,
+            message:
+              "Not released — could not check whether it is held for a listing a failed Gameflip publish left " +
+              "behind (" + ((e && e.message) || e) + "); try again",
+          });
+        }
+        if (stuck) {
+          // What the maintenance pass does about that listing, by what
+          // Gameflip says of it: it books a sale, retires a refunded one,
+          // waits for a buyer who is paying, and takes anything else down.
+          const next = /SOLD/.test(stuck)
+            ? "that listing went on sale after all and a buyer has it — the maintenance pass books the sale"
+            : /\(cancelled\)/.test(stuck)
+              ? "that listing was paid for and then refunded, so its buyer has seen the login — the " +
+                "maintenance pass retires the account"
+              : /\(sale_pending\)/.test(stuck)
+                ? "a buyer is paying for that listing right now — the maintenance pass waits for that to " +
+                  "end, then books the sale or takes the listing down"
+                : "that listing is taken down automatically, and the account comes back by itself once " +
+                  "Gameflip confirms it is gone";
+          return res.status(409).json({
+            success: false,
+            message:
+              "Not released — " + stuck + ". It is held because its Gameflip publish failed and the listing " +
+              "that publish built could not be confirmed deleted: " + next + ".",
+          });
+        }
       }
       const released = await stock.releaseClaim(
         [id],

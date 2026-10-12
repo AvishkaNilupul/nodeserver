@@ -1199,6 +1199,45 @@ async function refundSeenFor(ledger) {
   return !!hit;
 }
 
+// The row a FAILED Gameflip publish left on the books for the listing it may
+// have built (utils/gameflipFulfiller.trackFailedListing words its note so).
+// The words anywhere in the note, as a part of their own: other paths append
+// to a row's note, and a mark lost that way would let a held account go.
+const FAILED_PUBLISH_ROW = / — publish failed(?: |$)/;
+
+// Why a no-claim bot's account HELD after a failed publish may not go back yet
+// ("" = it may). The listing that publish built may still exist on Gameflip
+// with its login — a draft that would not delete, or one that went on sale
+// after all — so it goes back only on Gameflip's own word that the listing is
+// gone: the caller's (`listingGone`: the pass's verified take-down, the Delist
+// button's) or, asked here, Gameflip's own 404. An auto-farm account answers to
+// its own gate (utils/autofarmStock.releaseBlocked). THROWS when its row
+// cannot be read: a release then waits.
+async function failedPublishBlock(ledger, { listingGone = false } = {}) {
+  if (!ledger || str(ledger.farm) === AUTOFARM || listingGone) return "";
+  const id = str(ledger.manualListing);
+  if (!/^[0-9a-f]{24}$/i.test(id)) return "";
+  // Asked twice before it is given up, as refundSeenFor is: every release of
+  // that farm's accounts passes here, and one skipped over a single failed
+  // read leaves an account committed to a dead listing with nothing to retry it.
+  const read = () => MarketplaceListing.findById(id, { marketplace: 1, status: 1, externalId: 1, note: 1 }).lean();
+  let row;
+  try {
+    row = await read();
+  } catch {
+    row = await read();
+  }
+  if (!row || str(row.marketplace) !== "gameflip" || row.status === "active" || !row.externalId) return "";
+  if (!FAILED_PUBLISH_ROW.test(str(row.note))) return "";
+  try {
+    const st = str(await require("./marketplaces").gameflipListingStatus(row.externalId));
+    return st === "sold" ? "its Gameflip listing SOLD" : "its Gameflip listing still exists (" + (st || "?") + ")";
+  } catch (e) {
+    // Gone is Gameflip's own 404 and nothing else (utils/gameflipGone).
+    return require("./gameflipGone").gameflipGone(e) ? "" : "Gameflip would not say whether its listing is gone";
+  }
+}
+
 // Hand "manual" ledgers back: to the status they had before the claim, or
 // deleted when the claim created them. Only "manual" — a "sold" ledger went to
 // a buyer and is never released. The caller takes the unit off the platform
@@ -1206,9 +1245,11 @@ async function refundSeenFor(ledger) {
 //
 // Never an account whose listing was REFUNDED (refundSeenFor) — its buyer has
 // seen the login — whoever asks, and however long its retirement is taking to
-// book: that one is the lifecycle pass's to finish, not anybody's to free. A
-// check that cannot be made is not a "no": the release fails and can be asked
-// again.
+// book: that one is the lifecycle pass's to finish, not anybody's to free. And
+// not, while Gameflip may still have it, an account held for the listing a
+// FAILED publish left behind (failedPublishBlock; an auto-farm account has its
+// own, wider gate). A check that cannot be made is not a "no": the release
+// fails and can be asked again.
 async function releaseClaim(ledgerIds, { reason = "", listingGone = false } = {}) {
   const ids = idList(ledgerIds);
   if (!ids.length) return 0;
@@ -1231,6 +1272,13 @@ async function releaseClaim(ledgerIds, { reason = "", listingGone = false } = {}
             "): its Gameflip sale was refunded — its login has been seen",
         );
         continue;
+      }
+      if (!held) {
+        const stuck = await failedPublishBlock(l, { listingGone });
+        if (stuck) {
+          console.error("noclaimStock: " + (l.login || String(l._id)) + " stays held (" + (why || "release") + "): " + stuck);
+          continue;
+        }
       }
       if (held) {
         // An auto-farm account is sold whole wherever it is free: it goes back
@@ -1478,6 +1526,7 @@ module.exports = {
   attachListing,
   releaseClaim,
   refundSeenFor,
+  failedPublishBlock,
   markSold,
   spendPending,
   ledgerForLogin,

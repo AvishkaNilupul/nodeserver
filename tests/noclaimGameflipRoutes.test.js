@@ -316,6 +316,126 @@ test("hand release: a no-claim bot's committed account is released as before", a
   assert.deepEqual(calls.status, [], "that farm's rule is untouched: Gameflip is not asked");
 });
 
+// A no-claim bot's account held after a FAILED Gameflip publish: the row that
+// publish left for the listing it may have built (never on sale, its note
+// worded so by gameflipFulfiller.trackFailedListing), the claim attached to it,
+// and Gameflip still showing the listing as `left`.
+async function failedPublishHold(left = "ready") {
+  const u = await unit({ rowStatus: "removed" });
+  await MarketplaceListing.updateOne(
+    { _id: u.row._id },
+    {
+      $set: {
+        qtyRemaining: 0,
+        note: "no-claim auto-delivery — " + u.login + " — publish failed",
+        lastError: "publish failed — its listing may still exist on Gameflip, being taken down: Too many attempts",
+      },
+    },
+  );
+  gameflip.set(u.ext, left);
+  return u;
+}
+
+test("hand release: a no-claim bot's account HELD after a failed publish is refused while Gameflip still has that listing — and says why", async () => {
+  const u = await failedPublishHold("ready");
+  let r = await release(u.ledger);
+  assert.equal(r.status, 409);
+  assert.equal(r.body.success, false);
+  assert.equal(
+    r.body.message,
+    "Not released — its Gameflip listing still exists (ready). It is held because its Gameflip publish failed and the " +
+      "listing that publish built could not be confirmed deleted: that listing is taken down automatically, and the " +
+      "account comes back by itself once Gameflip confirms it is gone.",
+  );
+  assert.equal((await ledgerNow(u)).status, "manual");
+  // Its row names the listing, so Gameflip can always be asked: the owner's
+  // word is not taken instead.
+  r = await release(u.ledger, { confirmGone: true });
+  assert.equal(r.status, 409);
+  assert.match(r.body.message, /still exists \(ready\)/);
+  assert.equal((await ledgerNow(u)).status, "manual");
+  // On sale after all, and a buyer has it: never stock — the pass books the sale.
+  gameflip.set(u.ext, "sold");
+  r = await release(u.ledger, { confirmGone: true });
+  assert.equal(r.status, 409);
+  assert.match(r.body.message, /^Not released — its Gameflip listing SOLD\. [^]*: that listing went on sale after all and a buyer has it — the maintenance pass books the sale\.$/);
+  // Paid for and refunded: its buyer saw the login — the pass retires it.
+  gameflip.set(u.ext, "cancelled");
+  r = await release(u.ledger);
+  assert.equal(r.status, 409);
+  assert.match(r.body.message, /still exists \(cancelled\)[^]*so its buyer has seen the login — the maintenance pass retires the account\.$/);
+  // Gameflip will not say: not known is not gone.
+  gameflip.set(u.ext, http(429, "Gameflip listing status: Too many attempts - Retry later"));
+  r = await release(u.ledger);
+  assert.equal(r.status, 409);
+  assert.match(r.body.message, /^Not released — Gameflip would not say whether its listing is gone\. /);
+  assert.equal((await ledgerNow(u)).status, "manual");
+  // The check itself cannot be made (its row will not read): not a yes either.
+  gameflip.delete(u.ext); // Gameflip would even say "gone", were it reached
+  const ncs = require("../utils/noclaimStock");
+  const realBlock = ncs.failedPublishBlock;
+  ncs.failedPublishBlock = async () => {
+    throw new Error("MongoNetworkTimeoutError");
+  };
+  try {
+    r = await release(u.ledger);
+  } finally {
+    ncs.failedPublishBlock = realBlock;
+  }
+  assert.equal(r.status, 409);
+  // Whether it is such a hold at all is what could not be read: nothing is
+  // said about a failed publish (an ordinary unit gets this same answer).
+  assert.equal(
+    r.body.message,
+    "Not released — could not check whether it is held for a listing a failed Gameflip publish left behind " +
+      "(MongoNetworkTimeoutError); try again",
+  );
+  assert.equal((await ledgerNow(u)).status, "manual");
+  // A buyer is in the middle of paying: nothing is taken down while they are.
+  gameflip.set(u.ext, "sale_pending");
+  r = await release(u.ledger);
+  assert.equal(r.status, 409);
+  assert.match(
+    r.body.message,
+    /still exists \(sale_pending\)[^]*: a buyer is paying for that listing right now — the maintenance pass waits for that to end, then books the sale or takes the listing down\.$/,
+  );
+  gameflip.set(u.ext, "ready");
+  // Gone on Gameflip (its own 404): released, nothing to confirm.
+  gameflip.delete(u.ext);
+  r = await release(u.ledger);
+  assert.equal(r.status, 200, JSON.stringify(r.body));
+  assert.deepEqual(r.body, { success: true, released: 1 });
+  assert.equal(await ledgerNow(u), null);
+});
+
+test("Delist on the row a failed publish left: the listing really comes down first — then, and only then, its account is handed back", async () => {
+  // Gameflip answers the delete and changes nothing: not delisted, not handed back.
+  endMode = "swallow";
+  let u = await failedPublishHold("ready");
+  let r = await delist(u.row);
+  assert.equal(r.body.success, false);
+  assert.match(r.body.message, /Gameflip still has this listing \("ready"\) — NOT taken down yet/);
+  assert.equal((await ledgerNow(u)).status, "manual");
+  // The same click once Gameflip lets go: deleted (as the draft it is — no
+  // off-sale patch first), its own 404 read back, the account released on that.
+  endMode = "ok";
+  calls.end.length = 0;
+  r = await delist(u.row);
+  assert.equal(r.body.success, true, JSON.stringify(r.body));
+  assert.deepEqual(r.body.noclaim, { released: 1, sold: 0 });
+  assert.deepEqual(calls.end, [[u.ext, "ready"]]);
+  assert.equal(await ledgerNow(u), null);
+  assert.equal((await rowNow(u)).status, "delisted");
+
+  // It sold after all: booked as that sale, never handed back.
+  u = await failedPublishHold("sold");
+  r = await delist(u.row);
+  assert.equal(r.body.success, true, JSON.stringify(r.body));
+  assert.deepEqual(r.body.noclaim, { released: 0, sold: 1 });
+  assert.equal((await ledgerNow(u)).status, "sold");
+  assert.equal((await rowNow(u)).status, "sold");
+});
+
 test("hand release: an auto-farm account whose Gameflip listing still exists is refused — and says why", async () => {
   const u = await unit({ farm: "autofarm", rowStatus: "delisted" });
   // Our row says delisted; Gameflip still has the listing.
