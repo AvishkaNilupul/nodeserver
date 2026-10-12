@@ -167,7 +167,9 @@ test("logins the drops site refuses are shown as out — not ok, not asleep — 
 
   world.rejectDrops("acc1");
   world.rejectDrops("acc2");
-  await until(() => farm.sessions.size === 0, "both sessions end on the refused call");
+  // Each session ends on the refused call and its login is marked logged out.
+  await until(async () => (await status("acc1")) === "not_logged_in" && (await status("acc2")) === "not_logged_in", "both marked logged out");
+  await until(() => farm.sessions.size === 0, "both sessions ended");
   // What the sweep two minutes after a restart did that night: the main site
   // still answers for the login, so it is no longer "logged out".
   await farm.health.check("acc1");
@@ -221,7 +223,8 @@ test("a refusal that passes by itself is cleared the moment the login farms agai
   await until(async () => (await status("acc1")) === "not_logged_in", "its session ends on the refused call");
   await farm.health.check("acc1");
   assert.equal(await status("acc1"), "drops_rejected");
-  assert.equal(bridgesOf("acc2").length, 1, "the other login is not disturbed");
+  assert.equal(await status("acc2"), "ok", "the other login is not disturbed");
+  await until(() => bridgesOf("acc2").length === 1, "and keeps farming");
 
   world.rejectDrops("acc1", false); // SOOP accepts it again; nobody imported anything
   await farm._reconcile({ force: true }); // the watcher's next look

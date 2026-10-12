@@ -15,7 +15,7 @@ const mongoose = require("mongoose");
 const { MongoMemoryServer } = require("mongodb-memory-server");
 
 const SoopAccount = require("../models/SoopAccount");
-const { createLoginAlert, WAIT_MS, QUIET_MS, MAX_WAIT_MS } = require("../utils/soop/loginAlert");
+const { createLoginAlert, createTelegramSend, WAIT_MS, QUIET_MS, MAX_WAIT_MS, RETRY_MS } = require("../utils/soop/loginAlert");
 
 const MIN = 60000;
 const T0 = Date.parse("2026-10-11T18:02:00Z");
@@ -266,7 +266,8 @@ test("a message that could not be sent is tried again; one that was sent is not 
   await assert.rejects(w.after(WAIT_MS), /telegram is down/);
   assert.equal((await row("a")).unusableAlertAt, null, "nothing is marked as told");
   fail = false;
-  assert.equal((await w.after(MIN)).sent, "down", "the next pass delivers it");
+  assert.equal((await w.after(MIN)).sent, null, "not hammered: a failed send is followed by a pause");
+  assert.equal((await w.after(RETRY_MS)).sent, "down", "then it is delivered");
   assert.equal(w.sent.length, 1);
 
   // Reads work, writes do not (2026-09-29 looked like this for hours).
@@ -297,6 +298,80 @@ test("a message that could not be sent is tried again; one that was sent is not 
   }
   assert.equal(sent.length, 1, "told once, on time, from memory alone");
   assert.ok(logged.some((l) => /could not save its stamps/.test(l)), "and the failed write is logged");
+});
+
+test("a recovery message that could not be sent is still owed, and is sent once", async () => {
+  let fail = false;
+  const w = world();
+  const notes = [];
+  w.alert = createLoginAlert({
+    send: async (text) => {
+      if (fail) throw new Error("telegram is down");
+      w.sent.push(text);
+    },
+    activity: { add: (e) => notes.push(e) },
+    now: () => w.at,
+  });
+  await add(["a", "b"], "drops_rejected");
+  await w.pass();
+  await w.after(WAIT_MS);
+  assert.equal(w.sent.length, 1);
+
+  await set(["a", "b"], "ok");
+  fail = true;
+  await assert.rejects(w.after(MIN), /telegram is down/);
+  assert.ok((await row("a")).unusableAlertAt, "the stamp that says a message is owed is kept");
+  assert.equal(notes.filter((n) => n.level === "warn" && /could not be sent/.test(n.msg)).length, 1, "the activity log says the send failed");
+  fail = false;
+  assert.equal((await w.after(MIN)).sent, null);
+  assert.equal((await w.after(RETRY_MS)).sent, "back");
+  assert.match(w.sent[1], /all 2 logins are accepted again/);
+  for (let i = 0; i < 10; i++) await w.after(MIN);
+  assert.equal(w.sent.length, 2);
+  assert.equal((await row("a")).unusableAlertAt, null);
+});
+
+// The real sender. On 2026-10-12 the alert's first live message was logged as
+// "Telegram error:" with no text and stamped as told: the shared helper swallows
+// a failed post, and this server's posts to Telegram fail now and then.
+test("the Telegram sender: throws when no chat took the message, retries over IPv4, never leaks the token", async () => {
+  const calls = [];
+  const opts = { token: "123:SECRET-TOKEN", chats: () => ["111", " 222 ", "111", ""], pauseMs: 0 };
+
+  // every post fails -> throws, having tried each chat three times
+  const dead = createTelegramSend({ ...opts, post: async (url, body, o) => {
+    calls.push([body.chat_id, o.family || null]);
+    throw Object.assign(new Error(""), { name: "AggregateError", code: "ETIMEDOUT", config: { url } });
+  } });
+  await assert.rejects(dead("hello"), (err) => {
+    assert.match(err.message, /none of 2 chat\(s\): ETIMEDOUT/);
+    assert.doesNotMatch(err.message + String(err.stack), /SECRET-TOKEN/, "the bot token must never reach a log");
+    return true;
+  });
+  assert.deepEqual(calls, [["111", null], ["111", 4], ["111", 4], ["222", null], ["222", 4], ["222", 4]], "two chats (deduplicated), three tries each, the retries pinned to IPv4");
+
+  // the first try fails the way it does on this server, the retry gets through
+  let n = 0;
+  const flaky = createTelegramSend({ ...opts, chats: () => ["111"], post: async () => {
+    if (++n === 1) throw Object.assign(new Error(""), { name: "AggregateError" });
+    return { data: { ok: true } };
+  } });
+  assert.deepEqual(await flaky("hello"), { sent: 1, configured: true });
+  assert.equal(n, 2);
+
+  // one chat of two is enough: the message arrived somewhere, do not send it again
+  const partial = createTelegramSend({ ...opts, post: async (url, body) => {
+    if (body.chat_id === "111") throw Object.assign(new Error("Request failed"), { response: { status: 403 } });
+  } });
+  assert.deepEqual(await partial("hello"), { sent: 1, configured: true });
+
+  // Telegram is not set up: nobody to tell, nothing to retry, nothing posted
+  let posted = 0;
+  for (const off of [{ token: "", chats: () => ["111"] }, { token: "123:SECRET-TOKEN", chats: () => [] }]) {
+    const none = createTelegramSend({ ...off, post: async () => posted++ });
+    assert.deepEqual(await none("hello"), { sent: 0, configured: false });
+  }
+  assert.equal(posted, 0);
 });
 
 test("the timings: a wait long enough to skip a blip, short enough to matter", () => {

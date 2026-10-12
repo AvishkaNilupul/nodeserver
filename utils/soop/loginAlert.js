@@ -25,6 +25,8 @@ const WAIT_MS = 5 * 60000;
 const QUIET_MS = 2 * 60000;
 // ...but the news is never held longer than this.
 const MAX_WAIT_MS = 15 * 60000;
+// After a message that could not be delivered, wait this long before trying again.
+const RETRY_MS = 3 * 60000;
 // A login found unusable this soon after its cookie was imported never worked
 // with that cookie.
 const NEW_COOKIE_MS = 10 * 60000;
@@ -77,6 +79,51 @@ function backMessage({ total }) {
   return `✅ SOOP farm: ${total === 1 ? "its login is" : `all ${logins(total)} are`} accepted again.`;
 }
 
+// A sender that knows whether the message arrived.
+//
+// utils/telegram's sendTelegram never throws and never says: a post that fails
+// is logged and swallowed. This server has no IPv6 route, and Node's connect
+// race between the two address families fails now and then with an empty
+// error — four times in the 32 hours to 2026-10-12, the last one on this very
+// alert's first message, which was stamped as told and never arrived. So each
+// chat gets a few tries (the later ones over IPv4 only), and when no chat took
+// the message this THROWS, which leaves the pass to try again.
+//
+// Nothing here may put the request URL in an error or a log: it holds the bot token.
+function createTelegramSend({ post, chats, token, tries = 3, pauseMs = 1500, timeoutMs = 15000 } = {}) {
+  // Required lazily: Telegram must never be able to stop the farm loading.
+  const doPost = post || ((url, body, opts) => require("axios").post(url, body, opts));
+  const pause = (ms) => new Promise((r) => setTimeout(r, ms));
+  return async function sendTelegramChecked(text) {
+    const key = token !== undefined ? token : process.env.TG_TOKEN;
+    const raw = typeof chats === "function" ? chats() : require("../telegram").getSuperChatIds();
+    const ids = [...new Set((raw || []).map((c) => String(c).trim()).filter(Boolean))];
+    // Telegram is not set up at all: there is nobody to tell and nothing to retry.
+    if (!key || !ids.length) return { sent: 0, configured: false };
+    let sent = 0;
+    let why = "";
+    for (const id of ids) {
+      for (let n = 1; n <= tries; n++) {
+        try {
+          await doPost(
+            `https://api.telegram.org/bot${key}/sendMessage`,
+            { chat_id: id, text },
+            n === 1 ? { timeout: timeoutMs } : { timeout: timeoutMs, family: 4 },
+          );
+          sent++;
+          break;
+        } catch (err) {
+          const status = err && err.response && err.response.status;
+          why = String((err && (err.code || err.name)) || "error") + (status ? ` (HTTP ${status})` : "");
+          if (n < tries) await pause(pauseMs);
+        }
+      }
+    }
+    if (!sent) throw new Error(`Telegram took the message for none of ${ids.length} chat(s): ${why}`);
+    return { sent, configured: true };
+  };
+}
+
 function createLoginAlert({
   models,
   send,
@@ -84,11 +131,22 @@ function createLoginAlert({
   waitMs = WAIT_MS,
   quietMs = QUIET_MS,
   maxWaitMs = MAX_WAIT_MS,
+  retryMs = RETRY_MS,
   now = Date.now,
 } = {}) {
   const Account = () => (models && models.SoopAccount) || require("../../models/SoopAccount");
-  // Required lazily: Telegram must never be able to stop the farm loading.
-  const deliver = typeof send === "function" ? send : (text) => require("../telegram").sendTelegram(text);
+  const send_ = typeof send === "function" ? send : createTelegramSend();
+  let holdUntil = 0; // no new attempt before this, after one that failed
+  // Nothing is stamped or remembered as said unless this returns.
+  async function deliver(text, at) {
+    try {
+      return await send_(text);
+    } catch (err) {
+      holdUntil = at + retryMs;
+      note("warn", `A Telegram message about the logins could not be sent — trying again in ${Math.round(retryMs / 60000)} min`);
+      throw err;
+    }
+  }
   // What this process has seen and said, for a pass that cannot write the
   // database: the wait still runs, and a message is never sent twice.
   const seen = new Map(); // loginId -> first seen unusable (ms)
@@ -124,11 +182,14 @@ function createLoginAlert({
     for (const id of [...backSaid]) if (downIds.has(id)) backSaid.delete(id);
 
     // 1. Logins that work again. `untested` (a cookie just imported, its check
-    //    still to come) proves nothing either way and is left alone.
+    //    still to come) proves nothing either way and is left alone. Their stamps
+    //    are what says a "works again" message is owed, so they are cleared only
+    //    once that is settled (step 4).
     const healed = rows.filter((a) => a.status === "ok" && (a.unusableSince || a.unusableAlertAt));
-    if (healed.length) {
+    const forget = async () => {
+      if (!healed.length) return;
       await save({ loginId: { $in: healed.map((a) => a.loginId) } }, { unusableSince: null, unusableAlertAt: null });
-    }
+    };
 
     // 2. A cookie imported after the owner was told, and the login is unusable
     //    all the same: that is a new problem, and the one they most need to hear.
@@ -152,15 +213,23 @@ function createLoginAlert({
     // 4. Everything is back, and the owner had been told otherwise. Held while
     //    a reported login is still waiting for its check, so it is said once.
     if (!down.length) {
+      const quiet = { sent: null, down: 0, pending: 0 };
       const owed = healed.some((a) => a.unusableAlertAt && !backSaid.has(a.loginId));
       const waiting = rows.some((a) => a.status !== "ok" && a.unusableAlertAt);
-      if (!owed || waiting) return { sent: null, down: 0, pending: 0 };
+      if (!owed || waiting) {
+        await forget();
+        return quiet;
+      }
+      if (at < holdUntil) return quiet; // still owed: the stamps stay until it is said
       const text = backMessage({ total: rows.length });
-      await deliver(text);
+      await deliver(text, at); // a throw leaves the stamps, so it is still owed
       for (const a of healed) backSaid.add(a.loginId);
+      await forget();
       note("info", "Told the owner on Telegram: every login is accepted again");
       return { sent: "back", text, down: 0, pending: 0 };
     }
+    // Some are still out: the ones that came back are not announced.
+    await forget();
 
     // 5. Anyone the owner has not been told about, and has the batch settled?
     const fresh = down.filter((a) => !a.unusableAlertAt && !told.has(a.loginId));
@@ -169,10 +238,10 @@ function createLoginAlert({
     const ages = fresh.map((a) => at - ms(a.unusableSince));
     const oldest = Math.max(...ages);
     const due = oldest >= maxWaitMs || (oldest >= waitMs && Math.min(...ages) >= quietMs);
-    if (!due) return result;
+    if (!due || at < holdUntil) return result;
 
     const text = downMessage({ fresh, down, total: rows.length });
-    await deliver(text); // a throw leaves nothing stamped, so the next pass tries again
+    await deliver(text, at); // a throw leaves nothing stamped, so a later pass tries again
     for (const a of fresh) told.add(a.loginId);
     await save({ loginId: { $in: fresh.map((a) => a.loginId) } }, { unusableAlertAt: new Date(at) });
     note("error", `Told the owner on Telegram: ${down.length} of ${logins(rows.length)} cannot farm`);
@@ -192,4 +261,4 @@ function createLoginAlert({
   return { pass };
 }
 
-module.exports = { createLoginAlert, downMessage, backMessage, WAIT_MS, QUIET_MS, MAX_WAIT_MS };
+module.exports = { createLoginAlert, createTelegramSend, downMessage, backMessage, WAIT_MS, QUIET_MS, MAX_WAIT_MS, RETRY_MS };
