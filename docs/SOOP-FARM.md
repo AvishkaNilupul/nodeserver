@@ -431,7 +431,20 @@ claimed by hand through the claim route (every one came back as a code), so the
 first sweep had nothing left to claim. What it cannot reach: the rewards on the
 logins that are still logged out.
 
-Fingerprint the SOOP files against `df6270d` next time.
+Seen live after it: the first automatic sweep read every login and found
+nothing left to claim; three minutes after the new logins reached a step, each
+was read in turn and its code claimed and stored, one account about every ten
+seconds, with no refusal.
+
+**18:54 UTC — the second review's fixes**: `utils/soop/autoClaim.js`
+`32d204a1`→`41648521`, `utils/soop/inventory.js` `3ce24d84`→`81c4fcc6`,
+`utils/soopFarm.js` `3d2f4070`→`ec252aac` — the bytes of
+`origin/feat/soop-auto-claim` `078abd5`. Backup
+`_deploy_backup_20261012185422_soop-auto-claim-2`; pm2 restart 52 at 18:54:24Z
+(0 unstable), five minutes after an allocator pass and between two reward
+steps. Watch time carried over the restart.
+
+Fingerprint the SOOP files against `078abd5` next time.
 
 ## What v1 got wrong (fixed here, each pinned by a test in `tests/soopFarm.test.js`)
 
