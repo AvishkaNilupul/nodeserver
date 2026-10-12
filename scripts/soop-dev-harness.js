@@ -270,6 +270,8 @@ async function main() {
   const farm = require("../utils/soopFarm");
   farm.setClientFactory((cookies, opts) => world.clientFor(cookies, opts));
   farm.setClock({ sleep: fastSleep });
+  // The real switch reads the site's settings file; the harness has none of its own.
+  farm.autoClaimEnabled = () => true;
   farm.loginAlert = createLoginAlert({
     send: async (text) => log("the login alert would send this on Telegram:\n" + text),
     activity: farm.activity,

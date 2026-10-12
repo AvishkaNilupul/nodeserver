@@ -249,29 +249,36 @@ each account had been signed in again — and 32 Eternal Return rewards, which
 last one day, were gone by then. A code that is claimed and stored is ours
 whatever happens to the login.
 
-- **What**: every unclaimed **code** reward that has not expired and needs no
-  linked game account, on an account that is not sold and can log in. Nothing
-  else.
-- **When**: about two minutes after the step that earns it (the sync that
-  follows a step, then the claim; if the reward is not there yet it looks again
-  after 5 and 10 minutes); the moment a cookie is re-imported, for whatever was
-  waiting on that login; and on a sweep of every login 8 minutes after a restart
-  and every 3 hours, which costs one small call per login.
+- **What**: every unclaimed **code** reward that has not expired and is not
+  tied to a game account, on an account that is not sold and can log in.
+  Nothing else.
+- **When**: a couple of minutes after the step that earns it (the account's
+  inventory is read, then the claim; if the reward is not there yet it looks
+  again after 5 and 10 minutes); the moment a cookie is re-imported, for
+  whatever was waiting on that login; and on a sweep of every login 8 minutes
+  after a restart and every 3 hours.
 - **Pace**: one account at a time, one claim every 7 seconds.
 - **Where to see it**: Inventory tab (the line under the totals, and "Claimed"
   counts); Activity, kind `claim`; an alert on the Overview when codes are
-  waiting on a login that cannot claim them.
+  waiting on a login that cannot claim them, or have gone unclaimed for hours
+  on one that can; and one line per sweep in the process log
+  (`[soop] claim sweep: …`).
 - **Switch it off** without a restart, from the app's directory on the server:
 
   ```
   node -e 'require("./utils/settings").setAutoFarm({soopAutoClaim:false},{actor:"owner"})'
   ```
 
-  (`true` turns it back on; it is read within 30 seconds.) `SOOP_AUTO_CLAIM=0`
-  in `.env` does the same at the next restart.
+  (`true` turns it back on; it is read within 30 seconds. The command sits for
+  about ten seconds and may print a warning about its own audit entry — the
+  setting is saved.) `SOOP_AUTO_CLAIM=0` in `.env` does the same at the next
+  restart.
 - **What it cannot do**: claim on a login SOOP refuses. Those rewards wait, the
   alert names the logins and says when the first one runs out, and re-importing
   the cookie claims them at once.
+- When SOOP has run out of codes for a reward ("to be delivered later") the
+  reward is claimed anyway and its code is asked for again every few hours,
+  for a month.
 - A code is never deleted by the farm: not when SOOP stops listing the reward,
   and not when its account is deleted from the panel.
 

@@ -42,20 +42,22 @@ const PRIME_PACE_MS = 3000;
 // How often the login alert looks for logins that stopped being able to farm.
 const LOGIN_ALERT_MS = 60000;
 // Automatic claiming (./soop/autoClaim.js). A reward is claimed right after the
-// sync that follows its step; SOOP hands one out a minute or two after the
-// step, so a sync that found nothing new looks again this much later, twice.
+// read that follows its step; SOOP hands one out a minute or two after the
+// step, so a read that found nothing new looks again this much later, twice.
 const INVENTORY_RETRY_MS = 5 * 60000;
 const INVENTORY_RETRIES = 2;
 // The sweep over every login: once after boot (behind the health sweep, which
-// starts at two minutes and takes four seconds a login), then on this interval.
+// starts at two minutes and takes four seconds a login), then on this
+// interval — and sooner again when the tunnel cut one short.
 const CLAIM_SWEEP_BOOT_MS = 8 * 60000;
 const CLAIM_SWEEP_MS = 3 * 3600 * 1000;
+const CLAIM_SWEEP_RETRY_MS = 10 * 60000;
 const CLAIM_VIEW_MS = 60000;
 const SWITCH_MEMO_MS = 30000;
 
 // Automatic claiming is on unless it is switched off: SOOP_AUTO_CLAIM=0 in the
-// environment (read at start), or autoFarm.soopAutoClaim = false in the
-// settings file (live, no restart). Anything unreadable leaves it on.
+// environment, or autoFarm.soopAutoClaim = false in the settings file (live,
+// no restart). Anything unreadable leaves it on. Never throws.
 const isOff = (v) => v === false || v === 0 || /^(0|false|off|no)$/i.test(String(v == null ? "" : v).trim());
 let switchMemo = { at: 0, on: true };
 function autoClaimSwitch() {
@@ -70,6 +72,10 @@ function autoClaimSwitch() {
   switchMemo = { at: Date.now(), on };
   return on;
 }
+// Tests: read the settings again on the next call.
+autoClaimSwitch.forget = () => {
+  switchMemo = { at: 0, on: true };
+};
 
 class SoopFarm {
   constructor() {
@@ -77,6 +83,7 @@ class SoopFarm {
     this.clock = { now: Date.now, sleep };
     this.timings = {}; // worker timing overrides (tests)
     this.autoInventory = true;
+    this.autoClaimSwitch = autoClaimSwitch;
     this.autoClaimEnabled = autoClaimSwitch;
     this._build();
   }
@@ -114,12 +121,12 @@ class SoopFarm {
     this.loginAlert = createLoginAlert({ activity: this.activity });
     this.autoClaim = createAutoClaimer({
       inventory: this.inventory,
-      getClient: (id) => this.ensureClient(id),
       activity: this.activity,
       enabled: () => this.autoClaimEnabled(),
-      // SOOP refused the login while claiming: have it checked now, so the
-      // panel and the login alert say so, instead of at the next sweep.
-      onAuth: (id) => this.health.check(id).catch(() => {}),
+      // SOOP answered a claim with "log in": the login check says whether it
+      // is the login (the panel and the login alert then say so at once) or
+      // that one reward.
+      checkLogin: (id) => this.health.check(id),
       ...(opts.autoClaim || {}),
     });
     this.claimView = { at: 0, value: null };
@@ -151,7 +158,7 @@ class SoopFarm {
     this._every(RECONCILE_MS, () => this._reconcile());
     this._every(PROGRESS_FLUSH_MS, () => this._flushProgress());
     this._every(LOGIN_ALERT_MS, () => this.loginAlert.pass());
-    this._every(CLAIM_SWEEP_MS, () => this._claimSweep());
+    this._every(this.timings.claimSweepMs ?? CLAIM_SWEEP_MS, () => this._claimSweep());
     // The health service only sweeps on its interval, and this process restarts
     // more often than that — so check every login once, shortly after boot.
     this.bootTimer = setTimeout(() => {
@@ -160,10 +167,7 @@ class SoopFarm {
     if (this.bootTimer.unref) this.bootTimer.unref();
     // A restart drops the timer that was about to sync an account after a
     // step, so whatever landed around it is picked up here.
-    this.claimTimer = setTimeout(() => {
-      this._claimSweep().catch((err) => console.error("[soop] boot claim sweep failed:", err.message));
-    }, CLAIM_SWEEP_BOOT_MS);
-    if (this.claimTimer.unref) this.claimTimer.unref();
+    this._claimSweepIn(this.timings.claimSweepBootMs ?? CLAIM_SWEEP_BOOT_MS);
     await this._reconcile({ force: true });
     const active = [...this.bots.values()].filter((b) => b.active).length;
     console.log(`[soop] farm service ready (${active} active bot(s))`);
@@ -173,7 +177,7 @@ class SoopFarm {
   async _reset(opts = {}) {
     for (const id of [...this.sessions.keys()]) await this._stopSession(id);
     for (const t of this.timers) clearInterval(t);
-    for (const t of this.invTimers.values()) clearTimeout(t);
+    for (const e of this.invTimers.values()) clearTimeout(e.timer);
     clearTimeout(this.bootTimer);
     clearTimeout(this.claimTimer);
     // Never the real switch here: it reads the site's settings file.
@@ -271,7 +275,8 @@ class SoopFarm {
     // A login that works again can claim what was waiting on it — which is
     // the reason to re-import one whose rewards were stuck. In the background:
     // the import does not wait for SOOP's inventory.
-    if (this.autoInventory) this.autoClaim.account(id, { sync: "check" }).catch(() => {});
+    // `force`: what an earlier login was refused is tried again with this one.
+    if (this.autoInventory) this.autoClaim.account(id, { sync: true, force: true }).catch(() => {});
     return { id, nick: info.nick || null, country: info.country || null };
   }
 
@@ -623,38 +628,69 @@ class SoopFarm {
     return p ? Number(p.minutes) || 0 : 0;
   }
 
-  // A reward should have landed a little after a step: refresh that inventory
-  // and claim what is new. When nothing was there to claim yet, look again.
+  // A reward should have landed a little after a step: read that inventory and
+  // claim what is new. When nothing new was there yet, or the read failed,
+  // look again — twice at most.
   _inventorySoon(id, attempt = 0) {
-    if (!this.autoInventory || this.invTimers.has(id)) return;
+    if (!this.autoInventory) return;
+    const pending = this.invTimers.get(id);
+    if (pending) {
+      // Already waiting for the first look: this step is covered by it. Waiting
+      // for a later look, a new step starts the chain over — its reward has
+      // not been handed out yet, and that look could come too early for it.
+      if (attempt > 0 || pending.attempt === 0) return;
+      clearTimeout(pending.timer);
+    }
     const wait = attempt
       ? this.timings.inventoryRetryMs ?? INVENTORY_RETRY_MS
       : this.timings.inventoryAfterStepMs ?? INVENTORY_AFTER_STEP_MS;
-    const t = setTimeout(() => {
+    const timer = setTimeout(() => {
       this.invTimers.delete(id);
-      this.inventory
-        .syncAccount(id)
-        .then(() => this.autoClaim.account(id))
-        .then((out) => {
-          const nothing = out && !out.skipped && !out.error && !out.claimed;
-          if (nothing && attempt < INVENTORY_RETRIES) this._inventorySoon(id, attempt + 1);
+      this._readAndClaim(id)
+        .then((again) => {
+          if (again && attempt < INVENTORY_RETRIES && !this.invTimers.has(id)) this._inventorySoon(id, attempt + 1);
         })
         .catch(() => {});
     }, wait);
-    if (t.unref) t.unref();
-    this.invTimers.set(id, t);
+    if (timer.unref) timer.unref();
+    this.invTimers.set(id, { timer, attempt });
+  }
+
+  // One account's inventory read, and its new codes claimed. Through the
+  // claimer's queue, which works on one account at a time: every account of a
+  // bot reaches a step in the same minute, and thirty inventories read at once
+  // is a burst from one address. Switched off, the claimer does nothing at
+  // all, so the plain read stays. -> true when it is worth looking again.
+  async _readAndClaim(id) {
+    if (!this.autoClaim.status().enabled) {
+      const read = await this.inventory.syncAccount(id).catch(() => null);
+      return !read || !read.added;
+    }
+    const out = await this.autoClaim.account(id, { sync: true });
+    if (out.skipped || out.error === "auth") return false; // nothing a second look would change
+    return Boolean(out.error) || (!out.added && !out.claimed && !out.read);
   }
 
   // One line in the process log per sweep: the only trace of a sweep that had
   // nothing to do, and the first place to look when asked "is it claiming?".
+  // A sweep the tunnel cut short is run again soon, not at the next interval.
   async _claimSweep() {
     const s = await this.autoClaim.sweep();
     console.log(
-      `[soop] claim sweep: ${s.accounts} login(s) checked, ${s.synced} synced, ${s.claimed} claimed, ${s.read} read back, ${s.failed} failed` +
+      `[soop] claim sweep: ${s.accounts} login(s) read, ${s.added} new item(s), ${s.claimed} claimed, ${s.read} read back, ${s.failed} refused` +
         (s.stopped ? ` — stopped: ${s.stopped}` : ""),
     );
     this.claimView = { at: 0, value: this.claimView.value };
+    if (s.stopped === "egress" || s.stopped === "error") this._claimSweepIn(this.timings.claimSweepRetryMs ?? CLAIM_SWEEP_RETRY_MS);
     return s;
+  }
+
+  _claimSweepIn(ms) {
+    clearTimeout(this.claimTimer);
+    this.claimTimer = setTimeout(() => {
+      this._claimSweep().catch((err) => console.error("[soop] claim sweep failed:", err.message));
+    }, ms);
+    if (this.claimTimer.unref) this.claimTimer.unref();
   }
 
   // Codes waiting where nothing can claim them, for the alerts. Asked of the
@@ -733,7 +769,12 @@ class SoopFarm {
       alerts: views.alertsView({ egress, accounts, sessions: this.sessions, scan, inventoryTotals: this.invTotals, claims, now: this.clock.now() }),
       scan,
       inventory: { running: inv.running, done: inv.done, total: inv.total, lastAt: inv.lastAt },
-      autoClaim: { ...this.autoClaim.status(), waiting: claims ? claims.stuck.rewards : 0, failing: claims ? claims.failed.rewards : 0 },
+      autoClaim: {
+        ...this.autoClaim.status(),
+        waiting: claims ? claims.stuck.rewards : 0,
+        failing: claims ? claims.failed.rewards : 0,
+        overdue: claims ? claims.overdue.rewards : 0,
+      },
       metrics: this.metrics.view([...this.sessions.values()].filter((s) => s.view.state === "farming").length),
     };
   }

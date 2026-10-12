@@ -169,7 +169,7 @@ function createInventoryService({ models, getClient, activity, paceMs = 2500, no
     }
   }
 
-  async function doSync(id) {
+  async function doSync(id, { quiet = false } = {}) {
     const startedAt = new Date(now());
     const client = await getClient(id);
     const counts = await client.inventoryCounts();
@@ -187,13 +187,20 @@ function createInventoryService({ models, getClient, activity, paceMs = 2500, no
     // it was read from. The claim's own write is the newer truth, so its row
     // is left alone here (seen on 2026-10-12: forty claims seven seconds
     // apart, four rows back to "unclaimed" behind them).
-    const claimedSince = new Set(
-      (await Item().find({ loginId: id, claimedAt: { $gte: startedAt } }).select("key").lean()).map((r) => String(r.key)),
-    );
+    const known = await Item()
+      .find({ loginId: id, $or: [{ claimedAt: { $gte: startedAt } }, { hasCode: true }] })
+      .select("key claimedAt hasCode")
+      .lean();
+    const claimedSince = new Set(known.filter((r) => r.claimedAt && r.claimedAt >= startedAt).map((r) => String(r.key)));
+    // A code we hold came from the claim call. Whatever a list row carries in
+    // a code field later (SOOP's lists carry none today; a masked one would do
+    // it) must never replace it.
+    const holdsCode = new Set(known.filter((r) => r.hasCode).map((r) => String(r.key)));
     const ops = [];
     for (const [key, item] of byKey) {
       if (claimedSince.has(key)) continue;
-      const { code, key: _key, raw, ...fields } = item;
+      const { code: listed, key: _key, raw, ...fields } = item;
+      const code = holdsCode.has(key) ? null : listed;
       const safeRaw = { ...(raw || {}) };
       for (const f of CODE_FIELDS) delete safeRaw[f];
       ops.push({
@@ -233,17 +240,19 @@ function createInventoryService({ models, getClient, activity, paceMs = 2500, no
       await Item().updateMany({ loginId: id, key: { $nin: listed }, hasCode: true, goneAt: null }, { $set: { goneAt: at } });
     }
     const items = await forAccount(id);
-    note({ accountId: id, msg: `Inventory synced: ${byKey.size} item(s), ${added} new` });
+    // A read made on a schedule says so only when it found something.
+    if (!quiet || added) note({ accountId: id, msg: `Inventory synced: ${byKey.size} item(s), ${added} new` });
     return { id, counts, items, added, at };
   }
 
   // Two syncs of one account at once would race on the unique (loginId, key)
   // index, so a second caller gets the first caller's promise.
-  function syncAccount(rawId) {
+  // `quiet`: no activity entry for a read that found nothing new.
+  function syncAccount(rawId, { quiet = false } = {}) {
     const id = String(rawId || "");
     if (!id) return Promise.reject(new Error("no account given"));
     if (inFlight.has(id)) return inFlight.get(id);
-    const p = doSync(id)
+    const p = doSync(id, { quiet })
       .catch((err) => {
         note({ level: "warn", accountId: id, msg: `Inventory sync failed: ${plainMessage(err)}`, data: { code: err.code || null } });
         throw err;

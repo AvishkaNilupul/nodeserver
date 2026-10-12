@@ -101,7 +101,7 @@
   function paintClaim() {
     const c = Soop.state.autoClaim;
     if (!c) { claimLine.textContent = ""; return; }
-    claimLine.className = "s-small " + (c.enabled && !c.waiting && !c.failing ? "s-muted" : "s-warn");
+    claimLine.className = "s-small " + (c.enabled && !c.waiting && !c.failing && !c.overdue ? "s-muted" : "s-warn");
     if (!c.enabled) {
       claimLine.textContent = "Automatic claiming is switched off. Rewards stay unclaimed until someone claims them by hand, and one left on a login that stops working cannot be claimed at all.";
       return;
@@ -109,6 +109,7 @@
     const bits = ["Code rewards are claimed automatically as soon as they are earned, and the code is stored here — so a login that stops working cannot take it along. Links, forms and in-game rewards are left for you."];
     if (c.waiting) bits.push(plural(c.waiting, "code reward") + " cannot be claimed: the login is logged out or refused. Re-import its cookie and they are claimed at once.");
     if (c.failing) bits.push(plural(c.failing, "code reward") + " could not be claimed yet and will be tried again.");
+    if (c.overdue) bits.push(plural(c.overdue, "code reward") + " has been unclaimed for hours on a login that works. Look at the Activity tab.");
     if (c.lastSweepAt) bits.push("Every login was last checked " + fmt.ago(c.lastSweepAt) + ".");
     claimLine.textContent = bits.join(" ");
   }
@@ -268,7 +269,8 @@
   function autoNote(it) {
     const out = [];
     if (it.auto && it.auto.error && !it.hasCode) {
-      out.push(el("span", { class: "s-small s-warn" }, "Not claimed automatically yet (tried " + plural(it.auto.tries || 1, "time") + "): " + it.auto.error));
+      out.push(el("span", { class: "s-small s-warn" }, (it.division === "available" ? "Not claimed automatically yet" : "No code yet")
+        + " (tried " + plural(it.auto.tries || 1, "time") + "): " + it.auto.error));
     }
     if (it.goneAt) out.push(el("span", { class: "s-small s-muted" }, "SOOP stopped listing this reward " + fmt.ago(it.goneAt) + ". Its code is kept."));
     return out.length ? el("div", { class: "s-stack is-tight" }, out) : null;

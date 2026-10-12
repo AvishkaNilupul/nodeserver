@@ -197,7 +197,8 @@ function alertsView({ egress, accounts, sessions, scan, inventoryTotals, claims,
     add("warn", "expiring", `${inventoryTotals.expiringSoon} unclaimed reward(s) expire within 72 hours.`);
   }
   // Codes are claimed as they are earned, so one still unclaimed is stuck: on a
-  // login that cannot claim, or on a reward SOOP keeps refusing.
+  // login that cannot claim ("claim": re-import it), or on a login that works
+  // ("claim-failed": refused by SOOP, or not got to in hours).
   const stuck = claims && claims.stuck;
   if (stuck && stuck.rewards > 0) {
     const ids = stuck.logins || [];
@@ -208,12 +209,22 @@ function alertsView({ egress, accounts, sessions, scan, inventoryTotals, claims,
       "claim",
       `${stuck.rewards} code reward(s) are waiting on ${ids.length} login(s) that cannot claim them (${names}) — re-import their cookies` +
         (left !== null && left > 0 ? `; the first runs out ${inWords(left)}.` : "."),
-      { tag: "stuck" },
     );
   }
   const failed = claims && claims.failed;
   if (failed && failed.rewards > 0) {
-    add("warn", "claim", `${failed.rewards} code reward(s) could not be claimed automatically (${failed.error || "no reason given"}) — they are tried again every few hours.`, { tag: "failed" });
+    add("warn", "claim-failed", `${failed.rewards} code reward(s) could not be claimed automatically (${failed.error || "no reason given"}) — they are tried again.`, { tag: "refused" });
+  }
+  const overdue = claims && claims.overdue;
+  if (overdue && overdue.rewards > 0) {
+    add(
+      "warn",
+      "claim-failed",
+      claims.enabled === false
+        ? `Automatic claiming is switched off: ${overdue.rewards} code reward(s) are unclaimed, and a login that stops working takes them along.`
+        : `${overdue.rewards} code reward(s) have been unclaimed for hours on logins that work — automatic claiming is not getting to them; see the Activity tab.`,
+      { tag: "overdue" },
+    );
   }
   const rank = { error: 0, warn: 1, info: 2 };
   return out.sort((a, b) => rank[a.level] - rank[b.level]);

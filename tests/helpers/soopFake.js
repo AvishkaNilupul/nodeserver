@@ -187,11 +187,12 @@ function createFakeSoop({ now = Date.now, rewards = false } = {}) {
     },
 
     // SOOP answers every claim / check-info call of this login with a refusal
-    // that is not about the login (an API error), until switched back.
-    refuseClaims(id, on = true) {
+    // that is not about the login, until switched back. `code`: "API" SOOP said
+    // no · "HTTP" what came back could not be read (an error page).
+    refuseClaims(id, on = true, code = "API") {
       const acct = accounts.get(String(id));
       if (!acct) return false;
-      acct.claimsRefused = on !== false;
+      acct.claimsRefused = on !== false ? code : null;
       return true;
     },
 
@@ -409,9 +410,14 @@ function createFakeSoop({ now = Date.now, rewards = false } = {}) {
         // calls only read. The code lives here, never in the list rows.
         async useInfo(itemCodeIdx) {
           enter("useInfo", true);
+          if (acct.claimsRefused === "HTTP") throw new SoopError("https://drops.sooplive.com/api/x -> HTTP 502: <html>Bad Gateway", { code: "HTTP" });
           if (acct.claimsRefused) throw new SoopError("Rewards cannot be handed out right now.", { code: "API" });
           const key = String(itemCodeIdx);
           const match = (r) => String(r.itemCodeIdx) === key;
+          // One reward SOOP answers "log in" for while the login is fine
+          // (`authOnClaim: true` on the row).
+          const odd = DIVISIONS.flatMap((d) => acct.inventory[d]).find(match);
+          if (odd && odd.authOnClaim) throw new SoopError("Please log in to continue.", { code: "AUTH" });
           let row = acct.inventory.acquired.find(match);
           if (!row) {
             const i = acct.inventory.available.findIndex(match);
@@ -429,7 +435,8 @@ function createFakeSoop({ now = Date.now, rewards = false } = {}) {
             acct.inventory.acquired.push(row);
           }
           return {
-            itemCode: row.claimCode || "FAKE-" + key,
+            // `noCode: true`: claimed, and SOOP has no code to show (it went to a game account).
+            itemCode: row.noCode ? "" : row.claimCode || "FAKE-" + key,
             itemType: row.itemType,
             itemName: row.itemName,
             dropsName: "Fake drops event",
