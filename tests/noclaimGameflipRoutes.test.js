@@ -478,3 +478,73 @@ test("hand release: still refused while any live listing carries the login", asy
   assert.match(r.body.message, /Still on sale: gameflip /);
   assert.equal((await ledgerNow(u)).status, "manual");
 });
+
+// ---------------------------------------------------------------------------
+// A refunded sale: neither button hands its account back
+// ---------------------------------------------------------------------------
+
+test("a REFUNDED sale's account is never handed back by hand — whatever farm, whatever became of the listing or its row", async () => {
+  // Its Gameflip listing was paid for and then cancelled: the sale watcher
+  // marked the unit on the row, and the booking has not landed yet.
+  const refunded = async (opts) => {
+    const u = await unit(opts);
+    await MarketplaceListing.updateOne({ _id: u.row._id }, { $set: { "units.0.orderId": "gameflip-cancelled" } });
+    gameflip.set(u.ext, "cancelled");
+    return u;
+  };
+  const REFUSED = "Not released — its Gameflip sale was refunded, so the buyer has seen this login: " +
+    "it never goes back to stock.";
+
+  for (const farm of ["", "autofarm"]) {
+    // On a row still on sale in our books: the refund is the answer, not "delist it first".
+    const live = await refunded({ farm });
+    let r = await release(live.ledger, { confirmGone: true });
+    assert.equal(r.status, 409);
+    assert.equal(r.body.message, REFUSED);
+    // Delist: Gameflip still has the (cancelled) listing — nothing changes.
+    let d = await delist(live.row);
+    assert.equal(d.body.success, false);
+    assert.equal((await ledgerNow(live)).status, "manual");
+
+    // The listing is gone from Gameflip and the row is off sale: still refused,
+    // and a Delist of what is left releases nothing.
+    const gone = await refunded({ farm, rowStatus: "removed" });
+    gameflip.delete(gone.ext);
+    r = await release(gone.ledger, { confirmGone: true });
+    assert.equal(r.status, 409);
+    assert.equal(r.body.message, REFUSED);
+    d = await delist(gone.row);
+    assert.deepEqual(d.body.noclaim, { released: 0, sold: 0 });
+    assert.equal((await ledgerNow(gone)).status, "manual");
+
+    // A claim that never reached its row points at none: found by its login.
+    const loose = await refunded({ farm, attached: false, rowStatus: "removed" });
+    await UnclaimedAccount.updateOne({ _id: loose.ledger._id }, { $set: { manualAt: new Date(Date.now() - 2 * 60 * 60 * 1000) } });
+    r = await release(loose.ledger, { confirmGone: true });
+    assert.equal(r.status, 409);
+    assert.equal(r.body.message, REFUSED);
+    assert.equal((await ledgerNow(loose)).status, "manual");
+  }
+
+  // Whether it was refunded cannot be read: not released, and said as that.
+  const u = await unit({ rowStatus: "delisted" });
+  gameflip.delete(u.ext);
+  const realFindOne = MarketplaceListing.findOne;
+  MarketplaceListing.findOne = function (filter, ...rest) {
+    if (filter && filter.noclaimStock === true && filter.$or) throw new Error("MongoNetworkTimeoutError");
+    return realFindOne.call(this, filter, ...rest);
+  };
+  let r;
+  try {
+    r = await release(u.ledger);
+  } finally {
+    MarketplaceListing.findOne = realFindOne;
+  }
+  assert.equal(r.status, 409);
+  assert.match(r.body.message, /^Not released — could not check whether its Gameflip sale was refunded \(MongoNetworkTimeoutError\); try again$/);
+  assert.equal((await ledgerNow(u)).status, "manual");
+  // …and with the check answering, an ordinary committed account is released as before.
+  r = await release(u.ledger);
+  assert.equal(r.body.success, true, JSON.stringify(r.body));
+  assert.equal(await ledgerNow(u), null);
+});

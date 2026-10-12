@@ -1003,6 +1003,36 @@ async function retireNoclaimUnit(row, reason, { gone = false, burned = false } =
   }
 }
 
+// A no-claim row whose listing reads CANCELLED: paid for, then refunded — its
+// buyer has seen the login, so its account is RETIRED, never handed back
+// (utils/noclaimListings.onGameflipCancelled). That is put on record, and
+// booked, BEFORE the row is retired — the reverse of every release in this
+// file, and for the reverse reason. A ledger closed early can sell nothing
+// twice; a row retired first is one whose account an ordinary retirement, or
+// a hand release, would give back. Left active, the row keeps every guard an
+// on-sale account has, and the next tick tries again; a refund that is on
+// record but keeps failing to book is the lifecycle pass's to say out loud.
+// Resolves false when it is NOT booked yet.
+// An older lifecycle module has no such hook: it books the refund from its
+// retire hook, after the row, as it always did.
+async function noclaimRefundBooked(row) {
+  let why = "";
+  try {
+    const lifecycle = noclaimListings();
+    if (typeof lifecycle.onGameflipCancelled !== "function") return true;
+    const r = await lifecycle.onGameflipCancelled(row);
+    if (!(r && Number(r.pending) > 0)) return true;
+    why = "its account could not be marked retired";
+  } catch (e) {
+    why = String((e && e.message) || e);
+  }
+  console.error(
+    "gameflip no-claim listing " + (row.externalId || row._id) +
+      " is cancelled, but its refund is not booked yet — the row is left active and tried again: " + why,
+  );
+  return false;
+}
+
 // What a relist republishes FROM. A DropSet-backed chain rebuilds its cover
 // from the set's item grid; an account listing has no set at all, so it
 // rebuilds the promo cover from the offer's own text — the same generator the
@@ -1511,9 +1541,14 @@ async function settleLapsed(row, { expiration } = {}) {
   // week-long drop never reaches anyway).
   if (row.noclaimStock) await retireNoclaimUnit(row, why);
   if (!row.rentFarm && released) {
+    // A no-claim row keeps any unit whose refund was seen (utils/
+    // noclaimListings marks it "gameflip-cancelled"): that mark is the only
+    // record that its account must be retired, never handed back.
     await MarketplaceListing.updateOne(
       { _id: row._id },
-      { $set: { accountId: "", units: [] } },
+      row.noclaimStock
+        ? { $set: { accountId: "" }, $pull: { units: { orderId: { $ne: "gameflip-cancelled" } } } }
+        : { $set: { accountId: "", units: [] } },
     ).catch(() => {});
   } else if (!row.rentFarm) {
     console.error(
@@ -1837,6 +1872,10 @@ async function syncOnce({
     } catch {
       renew = false; // a settings read failing must not stop the sale watcher
     }
+    // A no-claim row's refund is booked BEFORE the row is retired (see
+    // noclaimRefundBooked): not booked yet, the row is left exactly as it is
+    // and this watcher is back in a minute.
+    if (status === "cancelled" && row.noclaimStock && !(await noclaimRefundBooked(row))) continue;
     if (status === "expired" || status === "cancelled") {
       const retired = await MarketplaceListing.findOneAndUpdate(
         { _id: row._id, status: "active" },

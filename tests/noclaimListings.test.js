@@ -2253,36 +2253,645 @@ test("runPass limbo: a held account that keeps waiting is said out loud after th
   assert.strictEqual(t.called("sendTelegram").length, 0);
 });
 
-test("onGameflipRetired: retired as CANCELLED an auto-farm account is retired, never handed back; a no-claim bot's keeps its rule", async () => {
-  // Paid, then refunded: the buyer has seen the login. An auto-farm account is
-  // sold whole on every market the moment it is free — so it never is again.
+test("onGameflipRetired: retired as CANCELLED the account is retired, never handed back — an auto-farm one and a no-claim bot's alike", async () => {
+  // Paid, then refunded: the buyer has seen the login. Released, the account
+  // would be sold to a second buyer while the first still has its password.
+  const BURNED = "gameflip sale cancelled after delivery — its login was seen";
+  const cancelled = { reason: 'gameflip reports "cancelled"', burned: true };
   const g1 = gameflipRow({ status: "removed", price: 9 });
+  const burnedOnce = (t) => {
+    assert.strictEqual(t.called("releaseClaim").length, 0, "nothing is handed back on a cancelled listing");
+    assert.strictEqual(t.db.Ledger.get("L1").status, "sold", "closed like a sale: out of stock, out of its bot");
+    assert.deepStrictEqual(t.called("markSold").map((c) => c.args), [
+      [["L1"], { market: "gameflip", priceUsd: 0, reason: BURNED }],
+    ]);
+    const row = t.db.Listing.get("G1");
+    assert.strictEqual(row.status, "removed", "nobody bought it: the row is not called sold");
+    assert.strictEqual(row.units[0].orderId, "gameflip-cancelled");
+    assert.strictEqual(t.called("recordListingSale").length, 0, "a refund is not demand");
+    assert.ok(t.events.some((e) => e.action === "unit_burned" && e.subject === "acc1"));
+    // Its own farm's clean-up is what tells the owner — once, as "retired".
+    assert.strictEqual(t.called("sendTelegram").length, 0);
+  };
+
   let t = load({ rows: [g1], ledgers: [farmLedger(1, { manualListing: "G1", farmGoneAt: null })] });
-  let out = await t.mod.onGameflipRetired(g1, { reason: 'gameflip reports "cancelled"', burned: true });
-  assert.deepStrictEqual(out, { released: 0, burned: 1 });
-  assert.strictEqual(t.called("releaseClaim").length, 0);
-  assert.strictEqual(t.db.Ledger.get("L1").status, "sold", "closed like a sale: out of stock, out of its bot");
-  assert.deepStrictEqual(t.called("markSold")[0].args, [
-    ["L1"],
-    { market: "gameflip", priceUsd: 0, reason: "gameflip sale cancelled after delivery — its login was seen" },
-  ]);
-  const row = t.db.Listing.get("G1");
-  assert.strictEqual(row.status, "removed", "nobody bought it: the row is not called sold");
-  assert.strictEqual(row.units[0].orderId, "gameflip-cancelled");
-  assert.strictEqual(t.called("recordListingSale").length, 0);
-  assert.ok(t.events.some((e) => e.action === "unit_burned" && e.subject === "acc1"));
+  assert.strictEqual(t.mod.BURNED_REASON, BURNED);
+  assert.deepStrictEqual(await t.mod.onGameflipRetired(g1, cancelled), { released: 0, burned: 1 });
+  burnedOnce(t);
+  assert.strictEqual(t.called("attachListing").length, 0, "already this row's");
 
-  // A no-claim bot's account: released, exactly as before (its own farm's sale
-  // bookkeeping would announce and count a sale that never was).
+  // A no-claim bot's account: the same. (It used to be released here.)
   t = load({ rows: [g1], ledgers: [ledger(1, { manualListing: "G1" })] });
-  out = await t.mod.onGameflipRetired(g1, { reason: 'gameflip reports "cancelled"', burned: true });
-  assert.deepStrictEqual(out, { released: 1, burned: 0 });
-  assert.strictEqual(t.called("markSold").length, 0);
-  assert.deepStrictEqual(t.called("releaseClaim")[0].args, [["L1"], { reason: 'gameflip reports "cancelled"' }]);
+  assert.deepStrictEqual(await t.mod.onGameflipRetired(g1, cancelled), { released: 0, burned: 1 });
+  burnedOnce(t);
 
-  // Retired as expired (or 404): the old rule, a release.
+  // A claim whose attach never landed is still this row's unit: tied to the
+  // row first, so its farm's post-sale pass (which wants a listing id) sees it.
+  t = load({ rows: [g1], ledgers: [ledger(1, { manualListing: "" })] });
+  assert.deepStrictEqual(await t.mod.onGameflipRetired(g1, cancelled), { released: 0, burned: 1 });
+  burnedOnce(t);
+  assert.deepStrictEqual(t.called("attachListing").map((c) => c.args), [[["L1"], "G1"]]);
+  assert.strictEqual(t.db.Ledger.get("L1").manualListing, "G1");
+  assert.strictEqual(t.calls.findIndex((c) => c.fn === "attachListing") < t.calls.findIndex((c) => c.fn === "markSold"), true);
+  // …and so is one still pointing at a row that is no longer on sale.
+  t = load({
+    rows: [g1, row({ _id: "OLD", marketplace: "gameflip", externalId: "gf-0", status: "delisted" })],
+    ledgers: [ledger(1, { manualListing: "OLD" })],
+  });
+  assert.deepStrictEqual(await t.mod.onGameflipRetired(g1, cancelled), { released: 0, burned: 1 });
+  assert.strictEqual(t.db.Ledger.get("L1").manualListing, "G1");
+
+  // Not this row's to settle, as for a release: a ledger committed to another
+  // LIVE listing, and a claim pinned for the owner. Neither burned nor released.
+  for (const other of [
+    ledger(1, { manualListing: "LIVE" }),
+    ledger(1, { manualListing: "G1", note: "unrecorded publish — Gameflip gf-1 holds this account but no listing row records it" }),
+  ]) {
+    t = load({ rows: [g1, row({ _id: "LIVE", status: "active" })], ledgers: [other] });
+    assert.deepStrictEqual(await t.mod.onGameflipRetired(g1, cancelled), { released: 0, burned: 0 });
+    assert.strictEqual(t.called("releaseClaim").length, 0);
+    assert.strictEqual(t.called("markSold").length, 0);
+    assert.strictEqual(t.db.Ledger.get("L1").status, "manual");
+  }
+
+  // Retired as expired (or 404): the old rule for a no-claim bot's account, a release.
   t = load({ rows: [g1], ledgers: [ledger(1, { manualListing: "G1" })] });
   assert.deepStrictEqual(await t.mod.onGameflipRetired(g1, { reason: 'gameflip reports "expired"' }), { released: 1 });
+  assert.strictEqual(t.called("markSold").length, 0);
+});
+
+test("onGameflipCancelled: the watcher's hook, called while the row is still on sale — marks the refund on the row, books it, never releases", async () => {
+  const BURNED = "gameflip sale cancelled after delivery — its login was seen";
+  const g1 = gameflipRow({ price: 9 }); // still "active": the watcher retires it only afterwards
+  const unitNow = (t) => t.db.Listing.get("G1").units[0];
+
+  // Booked: the ledger is closed, then its unit, and nothing waits.
+  let t = load({ rows: [g1], ledgers: [ledger(1, { manualListing: "G1" })] });
+  assert.deepStrictEqual(await t.mod.onGameflipCancelled(g1), { burned: 1, pending: 0 });
+  assert.strictEqual(t.db.Ledger.get("L1").status, "sold");
+  assert.deepStrictEqual(t.called("markSold")[0].args, [["L1"], { market: "gameflip", priceUsd: 0, reason: BURNED }]);
+  assert.strictEqual(unitNow(t).orderId, "gameflip-cancelled");
+  assert.ok(unitNow(t).deliveredAt);
+  assert.strictEqual(t.db.Listing.get("G1").status, "active", "the row is the watcher's to retire");
+  assert.strictEqual(t.called("releaseClaim").length, 0);
+  assert.strictEqual(t.called("recordListingSale").length, 0);
+  // Asked again (the watcher's next look, before its row write landed): nothing left.
+  assert.deepStrictEqual(await t.mod.onGameflipCancelled(g1), { burned: 0, pending: 0 });
+  assert.strictEqual(t.called("markSold").length, 1);
+
+  // The ledger write does not land: PENDING. The refund is on the row all the
+  // same — marked, not yet closed — so the unit waits for no buyer any more
+  // and nothing that hands accounts back can see it.
+  for (const l of [ledger(1, { manualListing: "G1" }), farmLedger(1, { manualListing: "G1", farmGoneAt: null })]) {
+    t = load({ rows: [g1], ledgers: [l], ncs: { markSold: () => 0 } });
+    assert.deepStrictEqual(await t.mod.onGameflipCancelled(g1), { burned: 0, pending: 1 });
+    assert.strictEqual(t.db.Ledger.get("L1").status, "manual", "still committed: sold nowhere");
+    assert.strictEqual(unitNow(t).orderId, "gameflip-cancelled", "seen");
+    assert.strictEqual(unitNow(t).deliveredAt, null, "not booked");
+    assert.deepStrictEqual(t.mod.undeliveredUnits(t.db.Listing.get("G1")), []);
+    assert.strictEqual(t.called("releaseClaim").length, 0);
+    assert.strictEqual(t.called("sendTelegram").length, 0, "the pass speaks if it keeps failing, not this");
+    // Still failing on the next try: still pending.
+    assert.deepStrictEqual(await t.mod.onGameflipCancelled(g1), { burned: 0, pending: 1 });
+    // No ordinary retirement of the row hands it back now — Gameflip saying
+    // the listing expired, or is gone, or the owner delisting what is left.
+    // (This process knows the row is a refund's, and tries the booking again.)
+    assert.deepStrictEqual(await t.mod.onGameflipRetired(g1, { reason: 'gameflip reports "expired"' }), { released: 0, burned: 0 });
+    assert.deepStrictEqual(await t.mod.onGameflipRetired(g1, { reason: "listing 404 on Gameflip", gone: true }), { released: 0, burned: 0 });
+    await t.mod.beforeDelist(g1);
+    t.db.Listing.get("G1").status = "delisted";
+    assert.deepStrictEqual(await t.mod.afterDelist(g1, { outcome: "", gone: true }), { released: 0, sold: 0, held: 0 });
+    assert.strictEqual(t.called("releaseClaim").length, 0);
+    assert.strictEqual(t.db.Ledger.get("L1").status, "manual");
+    // The same after a restart — nothing in memory, only the mark on the row.
+    const marked = clone(t.db.Listing.get("G1"));
+    t = load({ rows: [{ ...marked, status: "active" }], ledgers: [l], ncs: { markSold: () => 0 } });
+    assert.deepStrictEqual(await t.mod.onGameflipRetired(marked, { reason: 'gameflip reports "expired"' }), { released: 0 });
+    assert.deepStrictEqual(await t.mod.onGameflipRetired(marked, { reason: "listing 404 on Gameflip", gone: true }), { released: 0 });
+    await t.mod.beforeDelist(marked);
+    t.db.Listing.get("G1").status = "delisted";
+    assert.deepStrictEqual(await t.mod.afterDelist(marked, { outcome: "", gone: true }), { released: 0, sold: 0, held: 0 });
+    assert.strictEqual(t.called("releaseClaim").length, 0);
+    assert.strictEqual(t.db.Ledger.get("L1").status, "manual");
+  }
+  // …and the try on which the write lands finishes it.
+  let fail = true;
+  t = load({
+    rows: [g1],
+    ledgers: [ledger(1, { manualListing: "G1" })],
+    ncs: {
+      markSold: (ids) => {
+        if (fail) return 0;
+        t.db.Ledger.get(ids[0]).status = "sold";
+        return 1;
+      },
+    },
+  });
+  assert.deepStrictEqual(await t.mod.onGameflipCancelled(g1), { burned: 0, pending: 1 });
+  fail = false;
+  assert.deepStrictEqual(await t.mod.onGameflipCancelled(g1), { burned: 1, pending: 0 });
+  assert.ok(unitNow(t).deliveredAt);
+
+  // A read that fails is the caller's "not booked yet" as well: it throws —
+  // before the mark (nothing is on record, the caller must keep the row)…
+  t = load({ rows: [g1], ledgers: [ledger(1, { manualListing: "G1" })] });
+  t.db.Listing.findById = () => ({ lean: () => Promise.reject(new Error("MongoNetworkTimeoutError")) });
+  await assert.rejects(() => t.mod.onGameflipCancelled(g1), /MongoNetworkTimeoutError/);
+  assert.strictEqual(unitNow(t).orderId, "", "never decided on the caller's copy of the row");
+  // …or after it (the mark stays).
+  t = load({ rows: [g1], ledgers: [ledger(1, { manualListing: "G1" })] });
+  t.db.Ledger.find = () => {
+    throw new Error("MongoNetworkTimeoutError");
+  };
+  await assert.rejects(() => t.mod.onGameflipCancelled(g1), /MongoNetworkTimeoutError/);
+  assert.strictEqual(unitNow(t).orderId, "gameflip-cancelled");
+  assert.strictEqual(unitNow(t).deliveredAt, null);
+
+  // The mark and the booking do not wait for each other. The row's unit cannot
+  // be written, the ledger can: the account is closed all the same — which is
+  // what keeps it out of stock — and the row may be retired.
+  const unitWritesFail = (t) => {
+    const realUpdate = t.db.Listing.updateOne;
+    t.db.Listing.updateOne = async (q, u) => {
+      if (u && u.$set && Object.keys(u.$set).some((k) => k.startsWith("units.$"))) throw new Error("MongoNetworkTimeoutError");
+      return realUpdate(q, u);
+    };
+  };
+  t = load({ rows: [g1], ledgers: [ledger(1, { manualListing: "G1" })] });
+  unitWritesFail(t);
+  assert.deepStrictEqual(await t.mod.onGameflipCancelled(g1), { burned: 1, pending: 0 });
+  assert.strictEqual(t.db.Ledger.get("L1").status, "sold");
+  assert.strictEqual(unitNow(t).orderId, "");
+  assert.deepStrictEqual(await t.mod.onGameflipRetired(g1, { reason: "listing 404 on Gameflip", gone: true }), { released: 0 });
+  assert.strictEqual(t.called("releaseClaim").length, 0, "a closed ledger is never handed back");
+  // Neither can be written: nothing on record, nothing booked — it throws, and
+  // the caller keeps the row exactly as it is.
+  let writes = false;
+  t = load({
+    rows: [g1],
+    ledgers: [ledger(1, { manualListing: "G1" })],
+    ncs: {
+      markSold: (ids) => {
+        if (!writes) return 0;
+        t.db.Ledger.get(ids[0]).status = "sold";
+        return 1;
+      },
+    },
+  });
+  unitWritesFail(t);
+  await assert.rejects(() => t.mod.onGameflipCancelled(g1), /MongoNetworkTimeoutError/);
+  assert.strictEqual(t.db.Ledger.get("L1").status, "manual");
+  assert.strictEqual(t.called("releaseClaim").length, 0);
+  // Gameflip then drops the listing, and the watcher retires the row on that
+  // 404 — which hands an account back. Not this one: this process has seen it
+  // cancelled, on record or not.
+  writes = true;
+  assert.deepStrictEqual(await t.mod.onGameflipRetired(g1, { reason: "listing 404 on Gameflip", gone: true }), { released: 0, burned: 1 });
+  assert.strictEqual(t.called("releaseClaim").length, 0);
+  assert.strictEqual(t.db.Ledger.get("L1").status, "sold");
+
+  // Nothing of this row's to book: settled by somebody else in the same moment
+  // (ticked sold by hand, booked by a second look, or no longer on the books),
+  // already a buyer's, or pinned for the owner. The unit is closed as it is,
+  // and no ledger is touched.
+  for (const settle of [
+    (l) => (l.status = "removed"),
+    (l) => (l.status = "sold"),
+    (l, db) => db.Ledger.docs.splice(db.Ledger.docs.indexOf(l), 1),
+  ]) {
+    t = load({
+      rows: [g1],
+      ledgers: [ledger(1, { manualListing: "G1" })],
+      ncs: {
+        markSold: (ids) => {
+          settle(t.db.Ledger.get(ids[0]), t.db);
+          return 0;
+        },
+      },
+    });
+    assert.deepStrictEqual(await t.mod.onGameflipCancelled(g1), { burned: 0, pending: 0 });
+    assert.ok(unitNow(t).deliveredAt);
+  }
+  for (const l of [
+    ledger(1, { manualListing: "G1", status: "sold" }),
+    ledger(1, { manualListing: "G1", note: "unrecorded publish — Gameflip gf-1 holds this account but no listing row records it" }),
+  ]) {
+    t = load({ rows: [g1], ledgers: [l] });
+    assert.deepStrictEqual(await t.mod.onGameflipCancelled(g1), { burned: 0, pending: 0 });
+    assert.strictEqual(t.called("markSold").length, 0);
+    assert.strictEqual(unitNow(t).orderId, "gameflip-cancelled");
+    assert.ok(unitNow(t).deliveredAt);
+    assert.strictEqual(t.db.Ledger.get("L1").status, l.status);
+  }
+  // Not a no-claim row at all.
+  t = load({ rows: [{ ...g1, noclaimStock: false }], ledgers: [ledger(1, { manualListing: "G1" })] });
+  assert.deepStrictEqual(await t.mod.onGameflipCancelled({ ...g1, noclaimStock: false }), { burned: 0, pending: 0 });
+  assert.strictEqual(t.db.Ledger.get("L1").status, "manual");
+  assert.strictEqual(unitNow(t).orderId, "");
+});
+
+test("runPass refunds: a refund that was seen and not booked is finished by the pass, whatever became of its row — and said once if it keeps failing", async () => {
+  // Retired FIRST (an older watcher, or its listing expired / vanished while
+  // the booking was failing): the row is off sale, the unit still marked.
+  const marked = (status) =>
+    gameflipRow({ status, price: 9, units: [unit("acc1", 1, { contentId: "", orderId: "gameflip-cancelled" })] });
+  const realNow = Date.now;
+  const t0 = realNow();
+  try {
+    for (const status of ["removed", "delisted", "active"]) {
+      let fail = true;
+      const t = load({
+        rows: [marked(status)],
+        ledgers: [ledger(1, { manualListing: "G1" })],
+        settings: QUIET,
+        ncs: {
+          markSold: (ids) => {
+            if (fail) return 0;
+            t.db.Ledger.get(ids[0]).status = "sold";
+            return 1;
+          },
+        },
+      });
+      let out = await t.mod.runPass();
+      assert.deepStrictEqual(out.refunds, { booked: 0, waiting: 1 });
+      assert.ok(out.errors.some((e) => /^refund acc1: could not be booked as retired — still committed/.test(e)));
+      assert.strictEqual(t.db.Ledger.get("L1").status, "manual");
+      assert.strictEqual(t.called("releaseClaim").length, 0, "never handed back, by any step of the pass");
+      assert.strictEqual(t.called("gameflipListingStatus").length, 0, "nor is Gameflip asked about it");
+      assert.strictEqual(t.called("sendTelegram").length, 0, "one failed pass is not worth a message");
+      // Half an hour on and still failing: the owner is told — once.
+      Date.now = () => t0 + 31 * 60 * 1000;
+      out = await t.mod.runPass();
+      assert.deepStrictEqual(out.refunds, { booked: 0, waiting: 1 });
+      let told = t.called("sendTelegram");
+      assert.strictEqual(told.length, 1);
+      assert.match(told[0].args[0], /^⚠️ A refunded Gameflip sale is still not booked/);
+      assert.match(told[0].args[0], /acc1 \(Rainbow Six Siege\): its Gameflip listing gf-1 was paid for and then cancelled/);
+      assert.match(told[0].args[0], /stays committed, so it is sold nowhere, and nothing hands it back/);
+      assert.doesNotMatch(told[0].args[0], /tick/i, "the Sold tick would book a hand sale that never was");
+      assert.ok(t.events.some((e) => e.action === "refund_not_booked" && e.severity === "error" && e.subject === "acc1"));
+      Date.now = () => t0 + 90 * 60 * 1000;
+      await t.mod.runPass();
+      assert.strictEqual(t.called("sendTelegram").length, 1, "once");
+      // The write lands: booked, the unit closed, and nothing more to do or say.
+      fail = false;
+      out = await t.mod.runPass();
+      assert.deepStrictEqual(out.refunds, { booked: 1, waiting: 0 });
+      assert.strictEqual(t.db.Ledger.get("L1").status, "sold");
+      assert.ok(t.db.Listing.get("G1").units[0].deliveredAt);
+      assert.ok(t.events.some((e) => e.action === "unit_burned" && e.subject === "acc1"));
+      out = await t.mod.runPass();
+      assert.deepStrictEqual(out.refunds, { booked: 0, waiting: 0 });
+      assert.strictEqual(t.called("releaseClaim").length, 0);
+      Date.now = realNow;
+    }
+  } finally {
+    Date.now = realNow;
+  }
+
+  // Two refunds stuck at different times: each is said, once, on its own clock.
+  try {
+    const t = load({
+      rows: [marked("removed")],
+      ledgers: [ledger(1, { manualListing: "G1" }), ledger(2, { manualListing: "G2" })],
+      settings: QUIET,
+      ncs: { markSold: () => 0 },
+    });
+    await t.mod.runPass();
+    Date.now = () => t0 + 31 * 60 * 1000;
+    await t.mod.runPass();
+    assert.strictEqual(t.called("sendTelegram").length, 1);
+    t.db.Listing.docs.push({
+      ...marked("removed"),
+      _id: "G2",
+      externalId: "gf-2",
+      accountLogin: "acc2",
+      units: [unit("acc2", 1, { contentId: "", orderId: "gameflip-cancelled" })],
+    });
+    await t.mod.runPass();
+    assert.strictEqual(t.called("sendTelegram").length, 1, "the second has only just been seen");
+    Date.now = () => t0 + 62 * 60 * 1000;
+    const out = await t.mod.runPass();
+    assert.deepStrictEqual(out.refunds, { booked: 0, waiting: 2 });
+    const told = t.called("sendTelegram").map((c) => /^.*\n\n(\S+) /.exec(c.args[0])[1]);
+    assert.deepStrictEqual(told, ["acc1", "acc2"]);
+  } finally {
+    Date.now = realNow;
+  }
+
+  // An AUTO-FARM account the same: its limbo step would ask Gameflip, find the
+  // listing gone and hand the account back — it never looks at a refund.
+  let t = load({
+    rows: [marked("removed")],
+    ledgers: [farmLedger(1, { manualListing: "G1", farmGoneAt: null })],
+    settings: QUIET,
+    mp: {
+      gameflipListingStatus: () => {
+        throw gone404();
+      },
+    },
+    ncs: { markSold: () => 0 },
+  });
+  let out = await t.mod.runPass();
+  assert.deepStrictEqual(out.refunds, { booked: 0, waiting: 1 });
+  assert.deepStrictEqual(out.limbo, { released: 0, sold: 0, retried: 0 });
+  assert.strictEqual(t.called("gameflipListingStatus").length, 0);
+  assert.strictEqual(t.called("releaseClaim").length, 0);
+  assert.strictEqual(t.db.Ledger.get("L1").status, "manual");
+  t = load({ rows: [marked("removed")], ledgers: [farmLedger(1, { manualListing: "G1", farmGoneAt: null })], settings: QUIET });
+  out = await t.mod.runPass();
+  assert.deepStrictEqual(out.refunds, { booked: 1, waiting: 0 });
+  assert.strictEqual(t.db.Ledger.get("L1").status, "sold");
+
+  // A caller that retires the row first (burned) is served the same way: marked, booked.
+  t = load({ rows: [gameflipRow({ status: "removed", price: 9 })], ledgers: [ledger(1, { manualListing: "G1" })], ncs: { markSold: () => 0 } });
+  assert.deepStrictEqual(
+    await t.mod.onGameflipRetired(gameflipRow({ status: "removed", price: 9 }), { reason: 'gameflip reports "cancelled"', burned: true }),
+    { released: 0, burned: 0 },
+  );
+  assert.strictEqual(t.called("releaseClaim").length, 0);
+  assert.strictEqual(t.db.Listing.get("G1").units[0].orderId, "gameflip-cancelled", "on record: the pass finishes it");
+  assert.strictEqual(t.db.Listing.get("G1").units[0].deliveredAt, null);
+});
+
+test("a refund whose account is NOT that listing's to retire is said out loud — once — never guessed at, never silent", async () => {
+  const g1 = gameflipRow({ price: 9 });
+  const cases = [
+    // One login on two listings: its ledger is the other live listing's.
+    [
+      { rows: [g1, row({ _id: "LIVE", marketplace: "ggsel", externalId: "gg-7", status: "active" })], ledgers: [ledger(1, { manualListing: "LIVE" })] },
+      /but it is committed to another live listing \(GGSel gg-7\)/,
+    ],
+    // No ledger of ours at all.
+    [{ rows: [g1], ledgers: [] }, /but no ledger of ours records it/],
+    // Pinned for the owner by an earlier publish that was never recorded.
+    [
+      { rows: [g1], ledgers: [ledger(1, { manualListing: "G1", note: "unrecorded publish — Gameflip gf-1 holds this account but no listing row records it" })] },
+      /but its claim is pinned for you: unrecorded publish — Gameflip gf-1/,
+    ],
+    // Its ledger reads as stock, or as the auto-lister's unit.
+    [{ rows: [g1], ledgers: [ledger(1, { manualListing: "", status: "skipped" })] }, /but its ledger says "skipped", which is stock/],
+    [{ rows: [g1], ledgers: [ledger(1, { manualListing: "", status: "listed" })] }, /but its ledger says "listed", which is stock/],
+  ];
+  for (const [world, re] of cases) {
+    const t = load(world);
+    assert.deepStrictEqual(await t.mod.onGameflipCancelled(g1), { burned: 0, pending: 0 });
+    assert.strictEqual(t.called("markSold").length, 0, "not this row's ledger to close");
+    assert.strictEqual(t.called("releaseClaim").length, 0);
+    const told = t.called("sendTelegram");
+    assert.strictEqual(told.length, 1);
+    assert.match(told[0].args[0], /^⚠️ A refunded Gameflip sale left an account that could not be retired\n\nacc1: its Gameflip listing gf-1 was paid for and then cancelled/);
+    assert.match(told[0].args[0], re);
+    assert.match(told[0].args[0], /take it off sale by hand/);
+    assert.ok(t.events.some((e) => e.action === "refund_stray" && e.severity === "error" && e.subject === "acc1"));
+    // Its unit is closed (nothing waits to be booked), and it is said once.
+    assert.ok(t.db.Listing.get("G1").units[0].deliveredAt);
+    await t.mod.onGameflipCancelled(g1);
+    await t.mod.runPass();
+    assert.strictEqual(t.called("sendTelegram").length, 1);
+  }
+  // Already a buyer's, or sold by hand: settled, and nothing to say.
+  for (const status of ["sold", "removed"]) {
+    const t = load({ rows: [g1], ledgers: [ledger(1, { manualListing: "G1", status })] });
+    assert.deepStrictEqual(await t.mod.onGameflipCancelled(g1), { burned: 0, pending: 0 });
+    assert.strictEqual(t.called("sendTelegram").length, 0);
+  }
+  // A pointer at a row that is off sale — or that names no row — is stale: this row's, and retired.
+  for (const rows of [[g1, row({ _id: "OLD", status: "delisted" })], [g1]]) {
+    const t = load({ rows, ledgers: [ledger(1, { manualListing: "OLD" })] });
+    assert.deepStrictEqual(await t.mod.onGameflipCancelled(g1), { burned: 1, pending: 0 });
+    assert.strictEqual(t.called("sendTelegram").length, 0);
+  }
+  // Whose it is cannot be read: nothing is decided on that — it throws, and the unit stays to be booked.
+  const t = load({ rows: [g1, row({ _id: "LIVE", status: "active" })], ledgers: [ledger(1, { manualListing: "LIVE" })] });
+  const realFindById = t.db.Listing.findById;
+  t.db.Listing.findById = (id) => (id === "LIVE" ? { lean: () => Promise.reject(new Error("MongoNetworkTimeoutError")) } : realFindById(id));
+  await assert.rejects(() => t.mod.onGameflipCancelled(g1), /MongoNetworkTimeoutError/);
+  assert.strictEqual(t.db.Listing.get("G1").units[0].orderId, "gameflip-cancelled");
+  assert.strictEqual(t.db.Listing.get("G1").units[0].deliveredAt, null);
+  assert.strictEqual(t.called("sendTelegram").length, 0);
+});
+
+test("a refund that cannot be booked is said in EVERY shape of failure — a write that does not land, a read that throws, writes refused outright", async () => {
+  const g1 = gameflipRow({ price: 9 });
+  const realNow = Date.now;
+  const t0 = realNow();
+  const later = (min) => {
+    Date.now = () => t0 + min * 60 * 1000;
+  };
+  const saidOnce = (t, re) => {
+    const told = t.called("sendTelegram");
+    assert.strictEqual(told.length, 1);
+    assert.match(told[0].args[0], /^⚠️ A refunded Gameflip sale is still not booked\n\nacc1/);
+    assert.match(told[0].args[0], /its Gameflip listing gf-1 was paid for and then cancelled/);
+    assert.match(told[0].args[0], re);
+    assert.match(told[0].args[0], /nothing hands it back/);
+    assert.ok(t.events.some((e) => e.action === "refund_not_booked" && e.severity === "error"));
+  };
+  try {
+    // 1. The watcher's hook keeps failing with NOTHING on record (the 09-29
+    // shape: reads answer, every write is refused). The pass finds no mark to
+    // work from, so the hook's own clock is what speaks.
+    let t = load({ rows: [g1], ledgers: [ledger(1, { manualListing: "G1" })], settings: QUIET, ncs: { markSold: () => 0 } });
+    const realUpdate = t.db.Listing.updateOne;
+    t.db.Listing.updateOne = async (q, u) => {
+      if (u && u.$set && Object.keys(u.$set).some((k) => k.startsWith("units.$"))) throw new Error("not primary: writes are blocked");
+      return realUpdate(q, u);
+    };
+    await assert.rejects(() => t.mod.onGameflipCancelled(g1), /writes are blocked/);
+    let out = await t.mod.runPass();
+    assert.deepStrictEqual(out.refunds, { booked: 0, waiting: 0 }, "no mark: the pass cannot see it");
+    later(29);
+    await assert.rejects(() => t.mod.onGameflipCancelled(g1), /writes are blocked/);
+    assert.strictEqual(t.called("sendTelegram").length, 0, "not yet");
+    later(31);
+    await assert.rejects(() => t.mod.onGameflipCancelled(g1), /writes are blocked/);
+    saidOnce(t, /for 31 min the account could not be booked as retired \(not primary: writes are blocked\)/);
+    later(300);
+    await assert.rejects(() => t.mod.onGameflipCancelled(g1), /writes are blocked/);
+    assert.strictEqual(t.called("sendTelegram").length, 1, "once");
+    assert.strictEqual(t.called("releaseClaim").length, 0);
+    Date.now = realNow;
+
+    // 2. On record, and the pass's booking THROWS (a read fails) every time.
+    t = load({
+      rows: [gameflipRow({ status: "removed", price: 9, units: [unit("acc1", 1, { contentId: "", orderId: "gameflip-cancelled" })] })],
+      ledgers: [ledger(1, { manualListing: "G1" })],
+      settings: QUIET,
+    });
+    t.db.Ledger.find = () => {
+      throw new Error("MongoNetworkTimeoutError");
+    };
+    out = await t.mod.runPass();
+    assert.deepStrictEqual(out.refunds, { booked: 0, waiting: 1 }, "a throw is a refund still waiting");
+    assert.ok(out.errors.some((e) => e === "refund gf-1: MongoNetworkTimeoutError"));
+    later(31);
+    out = await t.mod.runPass();
+    saidOnce(t, /\(MongoNetworkTimeoutError\)/);
+    later(120);
+    await t.mod.runPass();
+    assert.strictEqual(t.called("sendTelegram").length, 1, "once");
+    Date.now = realNow;
+
+    // 3. On record, the ledger write not landing — and the two tellers (the
+    // watcher's hook on a row still on sale, the pass) share one clock: one message.
+    t = load({ rows: [g1], ledgers: [ledger(1, { manualListing: "G1" })], settings: QUIET, ncs: { markSold: () => 0 } });
+    assert.deepStrictEqual(await t.mod.onGameflipCancelled(g1), { burned: 0, pending: 1 });
+    await t.mod.runPass();
+    later(31);
+    assert.deepStrictEqual(await t.mod.onGameflipCancelled(g1), { burned: 0, pending: 1 });
+    await t.mod.runPass();
+    saidOnce(t, /— but it is still in its bot\./);
+    // An auto-farm account may already be out of its bot: not claimed of it.
+    Date.now = realNow;
+    t = load({ rows: [g1], ledgers: [farmLedger(1, { manualListing: "G1", farmGoneAt: null })], settings: QUIET, ncs: { markSold: () => 0 } });
+    await t.mod.onGameflipCancelled(g1);
+    later(31);
+    await t.mod.onGameflipCancelled(g1);
+    assert.doesNotMatch(t.called("sendTelegram")[0].args[0], /still in its bot/);
+  } finally {
+    Date.now = realNow;
+  }
+});
+
+test("a refund seen with nothing on record is not forgotten when the row is retired meanwhile — and its clock is cleared once it is booked", async () => {
+  const g1 = gameflipRow({ price: 9 });
+  const realNow = Date.now;
+  const t0 = realNow();
+  try {
+    // Neither the mark nor the ledger can be written: the hook throws, and all
+    // that says "refunded" is this process's own memory of it.
+    let writes = false;
+    const t = load({
+      rows: [g1],
+      ledgers: [ledger(1, { manualListing: "G1" })],
+      settings: QUIET,
+      ncs: {
+        markSold: (ids) => {
+          if (!writes) return 0;
+          t.db.Ledger.get(ids[0]).status = "sold";
+          return 1;
+        },
+      },
+    });
+    const realUpdate = t.db.Listing.updateOne;
+    t.db.Listing.updateOne = async (q, u) => {
+      if (!writes && u && u.$set && Object.keys(u.$set).some((k) => k.startsWith("units.$"))) throw new Error("writes are blocked");
+      return realUpdate(q, u);
+    };
+    await assert.rejects(() => t.mod.onGameflipCancelled(g1), /writes are blocked/);
+    // The listing then vanishes and the watcher retires the row on that 404 —
+    // its retire hook failing the same way. The row is off sale, unmarked.
+    t.db.Listing.get("G1").status = "removed";
+    await assert.rejects(() => t.mod.onGameflipRetired(g1, { reason: "listing 404 on Gameflip", gone: true }), /writes are blocked/);
+    assert.strictEqual(t.called("releaseClaim").length, 0);
+    let out = await t.mod.runPass();
+    assert.deepStrictEqual(out.refunds, { booked: 0, waiting: 1 }, "still waiting, and the pass knows it");
+    assert.strictEqual(t.db.Ledger.get("L1").status, "manual");
+    // Writes are back: the pass finishes it, though no query could have found it.
+    writes = true;
+    out = await t.mod.runPass();
+    assert.deepStrictEqual(out.refunds, { booked: 1, waiting: 0 });
+    assert.strictEqual(t.db.Ledger.get("L1").status, "sold");
+    assert.strictEqual(t.called("releaseClaim").length, 0);
+    assert.strictEqual(t.called("sendTelegram").length, 0);
+
+    // Booked: its clock is gone. Were the same row found waiting again much
+    // later, that is a new wait — not one that began with the old one.
+    Date.now = () => t0 + 40 * 60 * 1000;
+    t.db.Ledger.get("L1").status = "manual";
+    t.db.Listing.get("G1").units[0].deliveredAt = null;
+    writes = false;
+    out = await t.mod.runPass();
+    assert.deepStrictEqual(out.refunds, { booked: 0, waiting: 1 });
+    assert.strictEqual(t.called("sendTelegram").length, 0, "forty minutes after the FIRST wait began is not thirty into this one");
+  } finally {
+    Date.now = realNow;
+  }
+
+  // An account that cannot be retired is said once even when its unit cannot be closed either.
+  const t = load({
+    rows: [g1, row({ _id: "LIVE", marketplace: "ggsel", externalId: "gg-7", status: "active" })],
+    ledgers: [ledger(1, { manualListing: "LIVE" })],
+    settings: QUIET,
+  });
+  const realUpdate = t.db.Listing.updateOne;
+  t.db.Listing.updateOne = async (q, u) => {
+    if (u && u.$set && "units.$.deliveredAt" in u.$set) throw new Error("MongoNetworkTimeoutError");
+    return realUpdate(q, u);
+  };
+  await t.mod.onGameflipCancelled(g1);
+  await t.mod.onGameflipCancelled(g1);
+  await t.mod.runPass();
+  assert.strictEqual(t.db.Listing.get("G1").units[0].deliveredAt, null, "still marked: the close did not land");
+  assert.strictEqual(t.called("sendTelegram").length, 1);
+});
+
+test("runPass health: a unit whose refund was seen is neither re-checked nor sold — and a read begun before the refund books no sale", async () => {
+  // Marked refunded, still to be booked (the booking is failing): no live read,
+  // no "buyer claimed a listed drop" sale, whatever its buyer did with the login.
+  const claimed = { login: "acc1", sellable: [], inv: { inProgress: [{ name: "Alpha Pack", claimed: true }] } };
+  let t = load({
+    rows: [gameflipRow({ units: [unit("acc1", 1, { contentId: "", orderId: "gameflip-cancelled" })] })],
+    ledgers: [ledger(1, { manualListing: "G1" })],
+    pool: [{ _id: poolId(1), clientSecret: "cs1" }],
+    inventory: { acc1: claimed },
+    settings: { topUp: false },
+    ncs: { markSold: () => 0 },
+  });
+  let out = await t.mod.runPass();
+  assert.strictEqual(t.called("inventoryForCandidate").length, 0);
+  assert.deepStrictEqual(out.health, { checked: 0, ok: 0, sold: 0, strikes: 0, expired: 0, failed: 0 });
+  assert.strictEqual(t.db.Ledger.get("L1").status, "manual");
+  assert.strictEqual(t.db.Listing.get("G1").units[0].orderId, "gameflip-cancelled");
+  assert.ok(!t.events.some((e) => e.action === "buyer_claimed"));
+
+  // The live read is under way when the refund is seen: what comes back says
+  // "a drop was claimed", and it is still no sale.
+  t = load({
+    rows: [gameflipRow()],
+    ledgers: [ledger(1, { manualListing: "G1" })],
+    pool: [{ _id: poolId(1), clientSecret: "cs1" }],
+    settings: { topUp: false },
+    ual: {
+      inventoryForCandidate: () => {
+        t.db.Listing.get("G1").units[0].orderId = "gameflip-cancelled"; // the watcher's look, mid-read
+        return claimed;
+      },
+    },
+  });
+  out = await t.mod.runPass();
+  assert.strictEqual(out.health.sold, 0);
+  assert.strictEqual(t.called("markSold").length, 0);
+  assert.strictEqual(t.db.Ledger.get("L1").status, "manual", "the refund's to book, not a sale");
+  assert.strictEqual(t.db.Listing.get("G1").units[0].orderId, "gameflip-cancelled");
+  assert.ok(!t.events.some((e) => e.action === "buyer_claimed"));
+
+  // A claimed drop whose sale could not be booked this time is not announced as counted.
+  t = load({
+    rows: [gameflipRow()],
+    ledgers: [ledger(1, { manualListing: "G1" })],
+    pool: [{ _id: poolId(1), clientSecret: "cs1" }],
+    inventory: { acc1: claimed },
+    settings: { topUp: false },
+    ncs: { markSold: () => 0 },
+  });
+  out = await t.mod.runPass();
+  assert.strictEqual(out.health.sold, 0);
+  assert.ok(!t.events.some((e) => e.action === "buyer_claimed"));
+
+  // Without a refund the rule is the one it was: a claimed drop is a sale.
+  t = load({
+    rows: [gameflipRow()],
+    ledgers: [ledger(1, { manualListing: "G1" })],
+    pool: [{ _id: poolId(1), clientSecret: "cs1" }],
+    inventory: { acc1: claimed },
+    settings: { topUp: false },
+  });
+  out = await t.mod.runPass();
+  assert.strictEqual(out.health.sold, 1);
+  assert.strictEqual(t.db.Listing.get("G1").units[0].orderId, "buyer-claimed");
+  assert.ok(t.events.some((e) => e.action === "buyer_claimed" && e.subject === "acc1"));
 });
 
 test("runPass expiry: a held unit STILL on sale with its drops about to leave is said out loud — once", async () => {
@@ -2512,4 +3121,8 @@ test("undeliveredUnits: FIFO order, delivered and login-less units left out", ()
   const units = [unit("b", 2), unit("a", 1), unit("c", 3, { deliveredAt: at(4) }), { login: "" }];
   assert.deepStrictEqual(mod.undeliveredUnits({ units }).map((u) => u.login), ["a", "b"]);
   assert.deepStrictEqual(mod.undeliveredUnits(null), []);
+  // A unit whose Gameflip sale was refunded waits for no buyer, booked or not;
+  // any other order mark on an undelivered unit changes nothing.
+  const refunded = [unit("a", 1, { orderId: "gameflip-cancelled" }), unit("b", 2, { orderId: "qty-sale" }), unit("c", 3)];
+  assert.deepStrictEqual(mod.undeliveredUnits({ units: refunded }).map((u) => u.login), ["b", "c"]);
 });

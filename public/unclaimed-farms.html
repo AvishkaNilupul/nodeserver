@@ -303,6 +303,7 @@
             <option value="released">Back to pool</option>
             <option value="skipped">Skipped</option>
             <option value="removed">Manual sold (removed)</option>
+            <option value="retired">Retired (refunded sale)</option>
           </select>
         </div>
         <div style="overflow-x:auto;">
@@ -352,6 +353,7 @@
           <option value="released">Back to pool</option>
           <option value="skipped">Skipped</option>
           <option value="removed">Manual sold</option>
+          <option value="retired">Retired (refunded sale)</option>
         </select>
         <select id="arcSource" title="Filter by farm">
           <option value="">All farms</option>
@@ -488,7 +490,7 @@ function esc(s){return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'
 async function api(path,opts){var r=await fetch(path,Object.assign({headers:{'Content-Type':'application/json'}},opts||{}));var j=await r.json().catch(function(){return {};});if(!r.ok||j.success===false)throw new Error(j.message||('HTTP '+r.status));return j;}
 function fmt(d){if(!d)return '–';try{return new Date(d).toLocaleString();}catch(e){return '–';}}
 function chipFor(status){
-  var m={listed:['on','listed'],sold:['off','sold'],expired:['warn','expired'],released:['','back to pool'],skipped:['warn','skipped'],removed:['off','manual sold']}[status]||['','?'+status];
+  var m={listed:['on','listed'],sold:['off','sold'],expired:['warn','expired'],released:['','back to pool'],skipped:['warn','skipped'],removed:['off','manual sold'],retired:['warn','retired · refunded']}[status]||['','?'+status];
   return '<span class="chip '+m[0]+'">'+m[1]+'</span>';
 }
 

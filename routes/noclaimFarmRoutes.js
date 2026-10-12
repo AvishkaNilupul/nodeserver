@@ -43,6 +43,16 @@ const { lookupAccountByUsername } = require("../utils/accountLookup");
 
 const router = express.Router();
 
+// A ledger closed over a refunded Gameflip sale has the status "sold" and sold
+// nothing (the words utils/noclaimListings BURNED_REASON leaves in its note).
+// Its account is spent all the same — it must leave its bot and is never for
+// sale — but nothing on this page calls it sold or records a sale for it.
+const RETIRED_UNSOLD = /login was seen/i;
+const RETIRED_WHY = "retired, not sold — ";
+function retiredUnsold(ledger) {
+  return !!ledger && ledger.status === "sold" && RETIRED_UNSOLD.test(String(ledger.note || ""));
+}
+
 // --- Sandbox constants + bot machinery -------------------------------------
 //
 // All of this used to be defined inline here. It moved to utils/noclaimFleet.js
@@ -565,7 +575,7 @@ router.get(
             poolAccountId: { $in: rows.map((r) => String(r._id)) },
             status: { $in: ["sold", "listed", "manual"] },
           },
-          { poolAccountId: 1, status: 1, market: 1, soldMarket: 1 },
+          { poolAccountId: 1, status: 1, market: 1, soldMarket: 1, note: 1 },
         ).lean();
         const ledgerByPool = new Map(ledgers.map((l) => [String(l.poolAccountId), l]));
         for (const r of rows) {
@@ -580,8 +590,11 @@ router.get(
           listedMap.set(r.clientSecret, !!r.listed);
           const l = ledgerByPool.get(String(r._id));
           let why = "";
-          if (l && l.status === "sold") why = "sold on " + (l.soldMarket || l.market || "a marketplace");
-          else if (l && l.status === "manual") why = "on your no-claim listing";
+          if (l && l.status === "sold") {
+            why = retiredUnsold(l)
+              ? RETIRED_WHY + String(l.note)
+              : "sold on " + (l.soldMarket || l.market || "a marketplace");
+          } else if (l && l.status === "manual") why = "on your no-claim listing";
           else if (l) why = "on an auto-listing" + (l.market ? " (" + l.market + ")" : "");
           else if (/^(spent|sold)/i.test(String(r.claimedNote || "").trim())) why = "spent";
           if (why) notForSale.set(r.clientSecret, why);
@@ -1318,7 +1331,7 @@ async function soldMapForSecrets(secrets) {
   // operator's own personal-bot accounts, which were never sold.)
   const soldLedgers = await UnclaimedAccount.find(
     { poolAccountId: { $in: pool.map((p) => String(p._id)) }, status: "sold" },
-    { poolAccountId: 1, market: 1, soldMarket: 1 },
+    { poolAccountId: 1, status: 1, market: 1, soldMarket: 1, note: 1 },
   ).lean();
   const soldByPool = new Map(soldLedgers.map((l) => [String(l.poolAccountId), l]));
   for (const b of bots) {
@@ -1332,7 +1345,14 @@ async function soldMapForSecrets(secrets) {
     if (map.has(p.clientSecret)) continue; // BotAccount signal already wins
     const l = soldByPool.get(String(p._id));
     if (l) {
-      map.set(p.clientSecret, { sold: true, why: "sold on " + (l.soldMarket || l.market || "a marketplace") });
+      // Spent either way — it must leave the bot — but a refunded sale is
+      // never shown or recorded as a sale (`unsold`).
+      map.set(
+        p.clientSecret,
+        retiredUnsold(l)
+          ? { sold: true, unsold: true, why: RETIRED_WHY + String(l.note) }
+          : { sold: true, why: "sold on " + (l.soldMarket || l.market || "a marketplace") },
+      );
       continue;
     }
     if (Array.isArray(p.soldGames) && p.soldGames.length) {
@@ -1407,7 +1427,7 @@ router.get("/api/noclaim-farm/spent/scan", requireSuperadmin, async (req, res) =
         clientSecret: u.ClientSecret || "",
         login: u.Login || "",
         twitchId: u.Id || "",
-        sold: !!s.sold,
+        sold: !!s.sold && !s.unsold,
         soldWhy: s.why || "",
         connected: !!l.connected,
         connectedGames: l.connectedGames || [],
@@ -1513,7 +1533,7 @@ router.post("/api/noclaim-farm/spent/remove", requireSuperadmin, async (req, res
             game,
             botId: id,
             container: containerFor(id),
-            sold: !!(s.sold || meta.sold),
+            sold: !!(s.sold || meta.sold) && !s.unsold,
             connected: !!meta.connected,
             soldWhy: s.why || meta.soldWhy || "",
             tokenStatus: meta.tokenStatus || "",

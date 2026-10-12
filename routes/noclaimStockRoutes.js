@@ -767,6 +767,30 @@ router.post(
           message: "Only a committed (manual) account can be released — this one is " + ledger.status,
         });
       }
+      // An account whose Gameflip sale was REFUNDED is never handed back: its
+      // buyer has seen the login. The claim layer refuses it whoever asks; this
+      // is the same answer in words, before anything suggests delisting it.
+      if (typeof stock.refundSeenFor === "function") {
+        let refunded = false;
+        try {
+          refunded = await stock.refundSeenFor(ledger);
+        } catch (e) {
+          return res.status(409).json({
+            success: false,
+            message:
+              "Not released — could not check whether its Gameflip sale was refunded (" +
+              ((e && e.message) || e) + "); try again",
+          });
+        }
+        if (refunded) {
+          return res.status(409).json({
+            success: false,
+            message:
+              "Not released — its Gameflip sale was refunded, so the buyer has seen this login: " +
+              "it never goes back to stock.",
+          });
+        }
+      }
       const live = await engine.activeListingsForLogin(ledger.login);
       if (live && live.length) {
         return res.status(409).json({

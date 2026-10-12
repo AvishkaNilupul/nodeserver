@@ -42,6 +42,14 @@ function moduleUnavailable(res, name, err) {
   });
 }
 
+// A ledger closed over a refunded Gameflip sale has the status "sold" and sold
+// nothing (the words utils/noclaimListings BURNED_REASON leaves in its note):
+// no "sold" figure on this page counts it.
+const RETIRED_UNSOLD = /login was seen/i;
+function retiredUnsold(ledger) {
+  return !!ledger && ledger.status === "sold" && RETIRED_UNSOLD.test(String(ledger.note || ""));
+}
+
 // Everything the panel's summary row needs: engine state + ledger counts +
 // live unclaimed rows.
 router.get("/api/unclaimed-auto/state", requireSuperadmin, async (req, res) => {
@@ -49,7 +57,7 @@ router.get("/api/unclaimed-auto/state", requireSuperadmin, async (req, res) => {
     const [listed, sold, expired, released, skipped, removed, activeRows, soldRows, integrity] =
       await Promise.all([
         UnclaimedAccount.countDocuments({ status: "listed" }),
-        UnclaimedAccount.countDocuments({ status: "sold" }),
+        UnclaimedAccount.countDocuments({ status: "sold", note: { $not: RETIRED_UNSOLD } }),
         UnclaimedAccount.countDocuments({ status: "expired" }),
         UnclaimedAccount.countDocuments({ status: "released" }),
         UnclaimedAccount.countDocuments({ status: "skipped" }),
@@ -82,6 +90,9 @@ router.get("/api/unclaimed-auto/accounts", requireSuperadmin, async (req, res) =
     const source = String(req.query.source || "").trim().toLowerCase();
     const filter = {};
     if (status === "held") filter.status = { $in: ["listed", "skipped"] };
+    // "sold" is the sales; a refunded one answers to "retired" (retiredUnsold).
+    else if (status === "sold") Object.assign(filter, { status: "sold", note: { $not: RETIRED_UNSOLD } });
+    else if (status === "retired") Object.assign(filter, { status: "sold", note: RETIRED_UNSOLD });
     else if (status && status !== "all") filter.status = status;
     if (q) filter.loginLower = new RegExp(q.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i");
     if (game) filter.game = game;
@@ -103,7 +114,7 @@ router.get("/api/unclaimed-auto/accounts", requireSuperadmin, async (req, res) =
         botId: a.botId,
         set: a.set ? String(a.set) : "",
         market: a.market || "",
-        status: a.status,
+        status: retiredUnsold(a) ? "retired" : a.status,
         note: a.note,
         drops: a.drops || [],
         listedAt: a.listedAt,
@@ -136,6 +147,8 @@ const ARCHIVE_ACCOUNT_PROJECTION = {
   game: 1,
   drops: 1,
   status: 1,
+  // What tells a refunded "sold" ledger from a sale (shown as "retired").
+  note: 1,
   market: 1,
   listedAt: 1,
   soldAt: 1,
@@ -166,6 +179,7 @@ router.get("/api/unclaimed-auto/archive/by-item", requireSuperadmin, async (req,
       source: 1,
       game: 1,
       status: 1,
+      note: 1,
       drops: 1,
     }).lean();
     const withStatus = status === "all";
@@ -187,6 +201,7 @@ router.get("/api/unclaimed-auto/archive/by-game", requireSuperadmin, async (req,
       source: 1,
       game: 1,
       status: 1,
+      note: 1,
       drops: 1,
     }).lean();
     const withStatus = status === "all";
@@ -221,7 +236,7 @@ router.get("/api/unclaimed-auto/archive/item-accounts", requireSuperadmin, async
         id: String(a._id),
         login: a.login,
         source: a.source,
-        status: a.status,
+        status: retiredUnsold(a) ? "retired" : a.status,
         market: a.market || "",
         game: a.game,
         drops: (a.drops || []).map((d) => d.name || ""),
@@ -329,11 +344,11 @@ async function gamesSummary(now = new Date()) {
     holdingsMod.pickerGames().catch(() => []),
     UnclaimedAccount.find(
       { $or: [{ status: { $in: ["listed", "manual"] } }, { status: "sold", soldAt: { $gte: since30 } }] },
-      { game: 1, status: 1, market: 1, soldAt: 1, soldPriceUsd: 1 },
+      { game: 1, status: 1, market: 1, soldAt: 1, soldPriceUsd: 1, note: 1 },
     ).lean(),
     MarketplaceListing.find(
       { status: "active", $or: [{ noclaimStock: true }, { origin: "unclaimed" }] },
-      { marketplace: 1, set: 1, accountLogin: 1, noclaimStock: 1, lotSize: 1, qtyTarget: 1, autoPaused: 1, "units.deliveredAt": 1 },
+      { marketplace: 1, set: 1, accountLogin: 1, noclaimStock: 1, lotSize: 1, qtyTarget: 1, autoPaused: 1, "units.deliveredAt": 1, "units.orderId": 1 },
     ).lean(),
     TwitchCampaign.find(
       { active: true, status: "ACTIVE", endAt: { $gt: now } },
@@ -386,6 +401,8 @@ async function gamesSummary(now = new Date()) {
     if (l.status === "manual") r.onShopListings++;
     else if (l.status === "listed" && l.market !== "gameflip") r.autoListed.other++;
     else if (l.status === "sold") {
+      // Gone from stock, but nothing sold.
+      if (retiredUnsold(l)) continue;
       const usd = Math.max(0, Number(l.soldPriceUsd) || 0);
       r.sold30.n++;
       r.sold30.usd += usd;
@@ -405,7 +422,10 @@ async function gamesSummary(now = new Date()) {
         market: s.marketplace,
         paused: !!s.autoPaused,
         stock: Number(s.qtyTarget) || 0,
-        delivered7: (s.units || []).filter((u) => u.deliveredAt && new Date(u.deliveredAt) >= since7).length,
+        // Never a unit whose Gameflip sale was refunded (its order mark says so).
+        delivered7: (s.units || []).filter(
+          (u) => u.deliveredAt && u.orderId !== "gameflip-cancelled" && new Date(u.deliveredAt) >= since7,
+        ).length,
       });
     } else if (s.marketplace === "gameflip" && !(Number(s.lotSize) > 0)) {
       r.autoListed.gameflipLive++;
@@ -717,6 +737,7 @@ router.get("/api/unclaimed-auto/bundles", requireSuperadmin, async (req, res) =>
         set: 1,
         market: 1,
         status: 1,
+        note: 1,
         lotId: 1,
         bundleKey: 1,
         bundleLabel: 1,
@@ -809,7 +830,7 @@ router.get("/api/unclaimed-auto/bundles", requireSuperadmin, async (req, res) =>
       const gk = gameKeyOf(l.game);
       const t = perGameTotals.get(gk) || { listed: 0, sold: 0, held: 0 };
       if (l.status === "listed") t.listed++;
-      else if (l.status === "sold") t.sold++;
+      else if (l.status === "sold" && !retiredUnsold(l)) t.sold++;
       else if (l.status === "skipped") t.held++;
       perGameTotals.set(gk, t);
       // "held" (skipped) ledgers hold their drops but sit on no listing —
@@ -920,7 +941,7 @@ router.get("/api/unclaimed-auto/bundles", requireSuperadmin, async (req, res) =>
             ggsel: listedLedgers.filter((l) => l.market === "ggsel").length,
           },
           lots: lotRows.length,
-          sold: sl.filter((l) => l.status === "sold").length,
+          sold: sl.filter((l) => l.status === "sold" && !retiredUnsold(l)).length,
           driftPct,
         });
       }

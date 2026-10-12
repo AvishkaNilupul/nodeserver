@@ -73,9 +73,19 @@ const HOLD_PREFIX = "no-claim hold: ";
 // not record (the platform took the publish, our row did not save). No path
 // here ever releases such a ledger: only the owner, after delisting by hand.
 const UNRECORDED_PREFIX = "unrecorded publish — ";
-// The ledger note of a held account whose Gameflip listing was paid for and
-// then cancelled (utils/autofarmStock reads it: nothing was sold).
+// The ledger note of an account whose Gameflip listing was paid for and then
+// cancelled: closed like a sale, and nothing was sold. Everything that reads a
+// "sold" ledger as a SALE tells the two apart by these words ("login was
+// seen"): utils/autofarmStock.retirePending and unclaimedAutoList.spendAccount
+// / handToRecycler (the owner's message, the spent view), utils/farmDemand (a
+// refund is not demand). Reword it and they must follow — the tests on a real
+// MongoDB (tests/noclaimGameflipPass.test.js) run the whole chain.
 const BURNED_REASON = "gameflip sale cancelled after delivery — its login was seen";
+// What a unit of such a listing carries in place of an order id: from the
+// moment its refund is seen (not yet delivered-stamped: still to be booked) and
+// for good afterwards. routes/marketplaceConsoleRoutes reads it too — a
+// refunded unit is no delivery and no revenue.
+const REFUNDED_ORDER = "gameflip-cancelled";
 // A "manual" ledger still unattached this long after its claim belongs to a
 // publish that never finished (a crash or throw between claimForSet and
 // attachListing) — nothing is still publishing it.
@@ -162,11 +172,25 @@ function plainUnit(u) {
 
 // The units still waiting for a buyer, oldest first — the FIFO order every
 // quantity-sale attribution uses (stable when addedAt ties or is missing).
+// Never a unit marked REFUNDED (refundUnits): its listing was paid for and then
+// cancelled, so it waits for no buyer — and everything here that hands an
+// account back, takes a unit off sale or replaces one starts from this list.
 function undeliveredUnits(row) {
   return ((row && row.units) || [])
     .map(plainUnit)
-    .filter((u) => u.login && !u.deliveredAt)
+    .filter((u) => u.login && !u.deliveredAt && u.orderId !== REFUNDED_ORDER)
     .sort((a, b) => ms(a.addedAt) - ms(b.addedAt));
+}
+
+// The units of a row whose Gameflip listing was seen CANCELLED and whose
+// account is not booked as retired yet. The mark is the row's own record of
+// the refund — written before anything else is tried (markRefundSeen), so no
+// restart, failed write or later answer from Gameflip (expired, 404) can lose
+// it — and it stays until the booking lands (finishRefunds).
+function refundUnits(row) {
+  return ((row && row.units) || [])
+    .map(plainUnit)
+    .filter((u) => u.login && !u.deliveredAt && u.orderId === REFUNDED_ORDER);
 }
 
 async function freshRow(row) {
@@ -1083,33 +1107,251 @@ async function onGameflipSold(row, { priceUsd = 0 } = {}) {
   return out;
 }
 
+// A Gameflip listing that reads CANCELLED was paid for and then refunded: its
+// buyer has seen the login, so "the listing never sold" is not "nobody has the
+// account" — released, it would be sold to a second buyer while the first
+// still has its password. Whichever farm it came from, the account is retired
+// instead, and nothing of the row is ever handed back.
+//
+// Step one, and the durable one: the row itself is told. Every unit still
+// waiting for a buyer is marked REFUNDED, after which no path here counts it
+// as waiting (undeliveredUnits) — whatever becomes of the row or its listing
+// afterwards — and the booking is retried until it lands (finishRefunds).
+// THROWS when the mark cannot be written: nothing durable says "refunded"
+// then, and the caller must not treat the row as settled.
+async function markRefundSeen(cur) {
+  for (const u of undeliveredUnits(cur)) {
+    await MarketplaceListing.updateOne(
+      { _id: cur._id, units: { $elemMatch: { login: u.login, deliveredAt: null } } },
+      { $set: { "units.$.orderId": REFUNDED_ORDER } },
+    );
+  }
+}
+
+// Step two: close the ledger of every unit marked refunded (burnGameflipUnit),
+// and with it the unit. Exactly the ledgers a release would have handed back
+// are retired, no others (the rule of ownedLedgers — read strictly here: a
+// read that fails throws, and nothing is decided on it). A unit whose ledger
+// is not this row's to close has nothing to book and is closed as it is:
+//   - already a buyer's or a hand sale's ("sold" / "removed"): settled;
+//   - anything else — no ledger of ours, a ledger that is free or auto-listed,
+//     one committed to another LIVE listing, one pinned for the owner — is an
+//     account whose login was seen and which this cannot keep off sale. That
+//     is said, once (noteRefundStray): never guessed at, never silent.
+// Returns { burned, stuck }: `stuck` are the units STILL to book, because
+// their ledger write did not land (it is still "manual").
+// `unmarked`: the caller has Gameflip's own "cancelled" for this row right now,
+// so every unit still waiting for a buyer is a refund's, marked or not.
+async function bookRefunds(row, { unmarked = false } = {}) {
+  const out = { burned: 0, stuck: [] };
+  const pending = refundUnits(row).concat(unmarked ? undeliveredUnits(row) : []);
+  if (!pending.length) return out;
+  const rowId = String(row._id);
+  const ledgers = await ledgersForLogins(pending.map((u) => u.login));
+  for (const u of pending) {
+    const ledger = ledgers.get(lower(u.login)) || null;
+    let stray = "";
+    if (!ledger) {
+      stray = "no ledger of ours records it";
+    } else if (ledger.status === "manual") {
+      const ptr = String(ledger.manualListing || "");
+      if (isUnrecorded(ledger)) {
+        stray = "its claim is pinned for you: " + String(ledger.note || "").slice(0, 120);
+      } else if (ptr && ptr !== rowId) {
+        // A pointer at a row that is off sale is stale, and the account this
+        // row's all the same; at a live one it is that listing's. (A pointer
+        // that is not an id at all names no row.)
+        let other = null;
+        try {
+          other = await MarketplaceListing.findById(ptr, { status: 1, marketplace: 1, externalId: 1 }).lean();
+        } catch (e) {
+          if (!(e && e.name === "CastError")) throw e;
+        }
+        if (other && other.status === "active") {
+          stray =
+            "it is committed to another live listing (" + marketLabel(other.marketplace) + " " +
+            String(other.externalId || ptr) + ")";
+        }
+      }
+      if (!stray) {
+        const n = await burnGameflipUnit(row, ledger);
+        out.burned += n;
+        if (n) continue; // its unit was closed with it
+        let status = "manual"; // unreadable = not known settled
+        try {
+          const now = await UnclaimedAccount.findById(ledger._id).lean();
+          status = now ? String(now.status || "") : "gone";
+        } catch {
+          /* stays "manual" */
+        }
+        if (status === "manual") {
+          out.stuck.push({ unit: u, ledger });
+          continue;
+        }
+      }
+    } else if (ledger.status !== "sold" && ledger.status !== "removed") {
+      stray = "its ledger says \"" + ledger.status + "\", which is stock";
+    }
+    await MarketplaceListing.updateOne(
+      { _id: row._id, units: { $elemMatch: { login: u.login, deliveredAt: null, orderId: REFUNDED_ORDER } } },
+      { $set: { "units.$.deliveredAt": new Date() } },
+    ).catch(() => {});
+    if (stray) noteRefundStray(row, u, ledger, stray);
+  }
+  return out;
+}
+
+// An account whose login a refunded buyer has seen, and which bookRefunds
+// cannot retire because it is not this listing's. Nothing here keeps it off
+// sale, so the owner is told — once a unit (in memory).
+const refundStrayTold = new Set(); // "rowId|login"
+function noteRefundStray(row, unit, ledger, why) {
+  const key = String(row._id) + "|" + lower(unit.login);
+  if (refundStrayTold.has(key)) return;
+  refundStrayTold.add(key);
+  logEvent({
+    category: "noclaim_shop",
+    action: "refund_stray",
+    actor: "noclaimListings",
+    severity: "error",
+    subject: unit.login,
+    game: (ledger && ledger.game) || "",
+    count: 1,
+    detail:
+      "its Gameflip listing " + String(row.externalId || "?") + " was paid for and then cancelled — its login " +
+      "has been seen — but the account is not that listing's to retire: " + why,
+  });
+  tellOwner(
+    "⚠️ A refunded Gameflip sale left an account that could not be retired\n\n" + unit.login +
+      ": its Gameflip listing " + String(row.externalId || "?") + " was paid for and then cancelled — the buyer " +
+      "has seen its login — but " + why + ".\nNothing here keeps that account from being sold again: take it " +
+      "off sale by hand. Said once.",
+  );
+}
+
+// A refund that is SEEN and not booked yet, per listing row: when it was first
+// found waiting, and whether the owner has been told. One clock and one
+// message a row, whoever finds it waiting — the watcher's hook (whose mark may
+// not even have been written: writes refused, nothing on record) or the pass
+// (finishRefunds). Waiting is the safe side and usually one minute long; one
+// that lasts is said, once: the account earns nothing anywhere and may still
+// be farming a login somebody has seen.
+const REFUND_TELL_AFTER_MS = 30 * 60 * 1000;
+const refundWaiting = new Map(); // row id -> { since, told }
+function noteRefundWaiting(row, { login = "", game = "", farm = null, why = "" } = {}) {
+  const id = String(row._id);
+  const w = refundWaiting.get(id) || { since: Date.now(), told: false };
+  refundWaiting.set(id, w);
+  if (w.told || Date.now() - w.since < REFUND_TELL_AFTER_MS) return;
+  w.told = true;
+  const who = login || row.accountLogin || "its account";
+  const reason = String(why || "").slice(0, 160);
+  logEvent({
+    category: "noclaim_shop",
+    action: "refund_not_booked",
+    actor: "noclaimListings",
+    severity: "error",
+    subject: who,
+    game,
+    count: 1,
+    detail:
+      "its Gameflip listing " + String(row.externalId || "?") + " was paid for and then cancelled, but the " +
+      "account could not be booked as retired — it stays committed (sold nowhere), never released" +
+      (reason ? ": " + reason : ""),
+  });
+  tellOwner(
+    "⚠️ A refunded Gameflip sale is still not booked\n\n" + who + (game ? " (" + game + ")" : "") +
+      ": its Gameflip listing " + String(row.externalId || "?") + " was paid for and then cancelled — the buyer " +
+      "has seen its login — but for " + Math.round((Date.now() - w.since) / 60000) + " min the account could not " +
+      "be booked as retired" + (reason ? " (" + reason + ")" : "") + ".\nIt stays committed, so it is sold " +
+      "nowhere, and nothing hands it back" + (farm === "" ? " — but it is still in its bot" : "") +
+      ". It is tried again by itself; if this does not clear, it needs a look. Said once.",
+  );
+}
+
+// gameflipFulfiller's CANCELLED path, called while the row is still on sale in
+// our books — the reverse of every release, and for the reverse reason. A
+// ledger closed early can sell nothing twice; a row retired before its refund
+// is on record is one whose account a later, ordinary retirement would hand
+// back. So the watcher retires the row only when this has not thrown and
+// `pending` is 0; until then the row stays as it is and the watcher is back in
+// a minute. Never releases anything.
+async function onGameflipCancelled(row) {
+  if (!row || !row._id || !row.noclaimStock) return { burned: 0, pending: 0 };
+  try {
+    const out = await bookCancelled(row);
+    if (out.pending) noteRefundWaiting(row, out.waiting);
+    else refundWaiting.delete(String(row._id));
+    return { burned: out.burned, pending: out.pending };
+  } catch (e) {
+    noteRefundWaiting(row, { why: (e && e.message) || String(e) });
+    throw e;
+  }
+}
+
+async function bookCancelled(row) {
+  const out = { burned: 0, pending: 0, waiting: {} };
+  // Read here, and strictly — a read that fails throws (not booked), and the
+  // caller's copy of the row is never what a refund is decided on.
+  let cur = await MarketplaceListing.findById(row._id).lean();
+  if (!cur) return out;
+  // The mark and the booking do not wait for each other: a ledger is closed
+  // even when its unit could not be marked (it is what every release reads),
+  // and a unit is marked even when its ledger will not close (it is what the
+  // retry, and every later retirement of the row, goes by).
+  let unmarked = null;
+  try {
+    await markRefundSeen(cur);
+    cur = (await MarketplaceListing.findById(row._id).lean()) || cur;
+  } catch (e) {
+    unmarked = e;
+  }
+  const r = await bookRefunds(cur, { unmarked: true });
+  out.burned = r.burned;
+  out.pending = r.stuck.length;
+  // Neither on record nor booked: nothing durable says "refunded" — the
+  // caller must keep the row exactly as it is and come back.
+  if (unmarked && out.pending) throw unmarked;
+  if (out.pending) out.waiting = waitingOf(r.stuck[0]);
+  return out;
+}
+
+// What noteRefundWaiting says about a unit bookRefunds left stuck.
+function waitingOf(stuck) {
+  const ledger = (stuck && stuck.ledger) || {};
+  return {
+    login: (stuck && stuck.unit && stuck.unit.login) || "",
+    game: ledger.game || "",
+    farm: String(ledger.farm || ""),
+    why: "its ledger could not be written",
+  };
+}
+
 // gameflipFulfiller's retire path (404 / expired / cancelled): the listing
 // never sold, so its account goes back — "manual" only; a sold ledger is never
-// released. `gone`: Gameflip answered 404 for it (an auto-farm account is
-// handed back on nothing less; one retired as expired stays held, and the
-// pass's limbo step settles it). `burned`: it was retired as cancelled.
+// released, and neither is a unit whose refund was seen (undeliveredUnits).
+// `gone`: Gameflip answered 404 for it (an auto-farm account is handed back on
+// nothing less; one retired as expired stays held, and the pass's limbo step
+// settles it). `burned`: it was retired as cancelled — the one retirement that
+// hands nothing back. The watcher has booked that already (onGameflipCancelled,
+// before it retired the row), so there is normally nothing left to do here; a
+// caller that retires first is served all the same, and what does not land now
+// is finished by the pass (finishRefunds).
 async function onGameflipRetired(row, { reason = "", gone = false, burned = false } = {}) {
   const out = { released: 0 };
   if (!row || !row._id || !row.noclaimStock) return out;
+  // A row this process has seen CANCELLED and could not even mark (writes were
+  // refused: nothing is on record) is a refund's all the same, whatever
+  // Gameflip says about the listing now.
+  if (burned || refundWaiting.has(String(row._id))) {
+    out.burned = (await onGameflipCancelled(row)).burned;
+    return out;
+  }
   const cur = (await freshRow(row)) || row;
   const pending = undeliveredUnits(cur);
   if (!pending.length) return out;
   const owned = await ownedLedgers(await ledgersForLogins(pending.map((u) => u.login)), cur._id);
-  let mine = pending.map((u) => owned.get(lower(u.login))).filter(Boolean);
-  if (burned) {
-    // Retired as CANCELLED: paid for, then refunded. Its buyer has seen the
-    // login, so "the listing never sold" is not "nobody has the account". An
-    // AUTO-FARM account — sold whole, on every market, the moment it is free —
-    // is retired instead of released (burnGameflipUnit). A no-claim bot's
-    // account keeps the rule it has always had here (released): retiring one
-    // goes through that farm's own sale bookkeeping, which would announce and
-    // count a sale that never was.
-    out.burned = 0;
-    for (const ledger of mine.filter((l) => String(l.farm || "") === "autofarm")) {
-      out.burned += await burnGameflipUnit(cur, ledger);
-    }
-    mine = mine.filter((l) => String(l.farm || "") !== "autofarm");
-  }
+  const mine = pending.map((u) => owned.get(lower(u.login))).filter(Boolean);
   const ids = mine.map((l) => l._id);
   out.released = await releaseIds(ids, reason || "gameflip listing retired", { listingGone: gone === true });
   return out;
@@ -1818,6 +2060,16 @@ async function checkUnitHealth(ledger, row, set, tally, errors) {
   const now = new Date();
   const l = lower(ledger.login || ledger.loginLower);
   const mine = ((row.units || []).map(plainUnit)).filter((u) => lower(u.login) === l);
+  // Its listing was refunded and that is still to be booked (finishRefunds):
+  // not a unit to re-check — and whatever its buyer claimed while he had the
+  // login is no sale to count.
+  if (mine.some((u) => !u.deliveredAt && u.orderId === REFUNDED_ORDER)) {
+    await UnclaimedAccount.updateOne(
+      { _id: ledger._id, status: "manual" },
+      { $set: { lastCheckedAt: now } },
+    ).catch(() => {});
+    return;
+  }
   const unit = mine.find((u) => !u.deliveredAt);
   if (!unit) {
     // Its unit already went to a buyer but the ledger missed the news (a
@@ -1888,15 +2140,24 @@ async function checkUnitHealth(ledger, row, set, tally, errors) {
     (d) => d && d.claimed && names.has(lower(d.name)),
   );
   if (claimedNow) {
-    tally.sold += await markSoldIds([ledger._id], {
+    // The live read above takes seconds. Has the sale watcher seen this unit's
+    // listing REFUNDED meanwhile? Then whatever its buyer claimed is the
+    // refund's to book (finishRefunds), not a sale at the listing's price.
+    const latest = await freshRow(row);
+    if (latest && (latest.units || []).some((u) => u && lower(u.login) === l && u.orderId === REFUNDED_ORDER)) return;
+    const booked = await markSoldIds([ledger._id], {
       market: row.marketplace,
       priceUsd: Number(row.price) || 0,
       reason: "buyer claimed a listed drop",
     });
+    tally.sold += booked;
+    // (…or in the instant since that look: the refund's mark is never written
+    // over, and the claim layer leaves a refunded ledger as it is.)
     await MarketplaceListing.updateOne(
-      { _id: row._id, units: { $elemMatch: { login: unit.login, deliveredAt: null } } },
+      { _id: row._id, units: { $elemMatch: { login: unit.login, deliveredAt: null, orderId: { $ne: REFUNDED_ORDER } } } },
       { $set: { "units.$.deliveredAt": now, "units.$.orderId": "buyer-claimed" } },
     ).catch(() => {});
+    if (!booked) return;
     logEvent({
       category: "noclaim_shop",
       action: "buyer_claimed",
@@ -2074,19 +2335,27 @@ async function noteStillOnSale(ledger, row, goneMs, why) {
 async function bookGameflipSale(row, ledger, { reason = "gameflip sale", burned = false } = {}) {
   const login = ledger.login || ledger.loginLower || "";
   const price = burned ? 0 : Number(row.price) || 0;
-  await MarketplaceListing.updateOne(
-    { _id: row._id, units: { $elemMatch: { login: { $in: [login, lower(login)] }, deliveredAt: null } } },
-    { $set: { "units.$.deliveredAt": new Date(), "units.$.orderId": burned ? "gameflip-cancelled" : "gameflip-sale" } },
-  ).catch(() => {});
+  const stampUnit = () =>
+    MarketplaceListing.updateOne(
+      { _id: row._id, units: { $elemMatch: { login: { $in: [login, lower(login)] }, deliveredAt: null } } },
+      { $set: { "units.$.deliveredAt": new Date(), "units.$.orderId": burned ? REFUNDED_ORDER : "gameflip-sale" } },
+    ).catch(() => {});
+  if (burned) {
+    // The LEDGER first, and the unit's stamp only once that has landed. The
+    // ledger is what every release reads; and a unit stamped over a ledger
+    // that then failed to close would look settled — no unit left to book on
+    // the next try (bookRefunds) — with its account still committed.
+    const closed = await markSoldIds([ledger._id], { market: "gameflip", priceUsd: 0, reason });
+    if (closed) await stampUnit();
+    return closed;
+  }
+  await stampUnit();
   // Only the write that flips the row is the one that learns from the sale: a
   // row already "sold" was seen by the sale watcher, which has recorded it.
-  let flipped = null;
-  if (!burned) {
-    flipped = await MarketplaceListing.updateOne(
-      { _id: row._id, status: { $ne: "sold" } },
-      { $set: { status: "sold" } },
-    ).catch(() => null);
-  }
+  const flipped = await MarketplaceListing.updateOne(
+    { _id: row._id, status: { $ne: "sold" } },
+    { $set: { status: "sold" } },
+  ).catch(() => null);
   const n = await markSoldIds([ledger._id], { market: "gameflip", priceUsd: price, reason });
   if (flipped && flipped.modifiedCount && price > 0) {
     try {
@@ -2204,6 +2473,10 @@ async function autofarmLimboStep(tally, errors) {
       );
       return;
     }
+    // Its refund was seen and is still to be booked — which finishRefunds does,
+    // every pass. Never asked about here: Gameflip dropping that listing since
+    // must not hand back an account whose login was seen.
+    if (refundUnits(row).some((u) => lower(u.login) === lower(login))) return;
     // Our own books already say a buyer has it (the sale watcher flipped the
     // row; the ledger write failed): the sale is finished here. Never a
     // release, whatever the market answers about the listing now.
@@ -2296,11 +2569,24 @@ async function noteLimboWait(ledger, row, why) {
 }
 
 // A Gameflip listing that was paid for and then cancelled: its buyer has seen
-// the login. The (auto-farm) account is never sold again — its ledger is
-// closed like a sale's, at no price, so it leaves stock and farming exactly as
-// a sold one does (utils/autofarmStock.retirePending, which says "retired, not
-// sold") — and the row is not called sold. Returns how many ledgers were closed.
+// the login. The account is never sold again — its ledger is closed like a
+// sale's, at no price, so it leaves stock and farming exactly as a sold one
+// does — and the row is not called sold. The clean-up that follows is its own
+// farm's, and each says "retired, not sold" and counts no sale: an auto-farm
+// account's utils/autofarmStock.retirePending, a no-claim bot's
+// noclaimStock.spendPending -> unclaimedAutoList.spendAccount.
+// Returns how many ledgers were closed.
 async function burnGameflipUnit(row, ledger) {
+  // Tied to the row whose listing was cancelled before it is closed: a claim
+  // whose attach never landed is still this row's unit, and a no-claim bot's
+  // "sold" ledger that points at no listing is one its post-sale pass never
+  // looks at (spendPending). A ledger is attached only while it is "manual",
+  // so this comes first; should it not land, the ledger is closed all the
+  // same — never released — and that farm's own net (unclaimedAutoList
+  // .retireSoldFromBots) takes the account out of its bot an hour later.
+  if (String(ledger.manualListing || "") !== String(row._id)) {
+    await attachIds([ledger._id], String(row._id));
+  }
   const n = await bookGameflipSale(row, ledger, { reason: BURNED_REASON, burned: true });
   if (n) {
     logEvent({
@@ -2317,6 +2603,80 @@ async function burnGameflipUnit(row, ledger) {
     });
   }
   return n;
+}
+
+// Step: a refund that was SEEN and is not booked yet — a unit still marked
+// refunded on its row (refundUnits), whatever that row's status. The watcher
+// books a refund before it retires the row and comes back every minute while
+// it cannot; this is the same for every row it no longer looks at (retired
+// since by an ordinary answer — the listing expired, or is gone — delisted by
+// hand, or retired first by an older watcher), and it is what makes the mark
+// enough: no account whose refund was seen stays committed and farming for
+// good, and none is ever handed back. Database only.
+async function finishRefunds(tally, errors) {
+  const rows = await MarketplaceListing.find({
+    noclaimStock: true,
+    marketplace: "gameflip",
+    units: { $elemMatch: { orderId: REFUNDED_ORDER, deliveredAt: null } },
+  }).lean();
+  for (const row of rows) {
+    let r;
+    try {
+      r = await bookRefunds(row);
+    } catch (e) {
+      // A read that failed: nothing was decided — and it is waiting all the same.
+      const why = (e && e.message) || String(e);
+      const units = refundUnits(row);
+      tally.waiting += units.length;
+      errors.push("refund " + (row.externalId || row._id) + ": " + why);
+      noteRefundWaiting(row, { login: (units[0] && units[0].login) || "", why });
+      continue;
+    }
+    tally.booked += r.burned;
+    if (!r.stuck.length) {
+      refundWaiting.delete(String(row._id));
+      continue;
+    }
+    tally.waiting += r.stuck.length;
+    for (const x of r.stuck) {
+      errors.push("refund " + x.unit.login + ": could not be booked as retired — still committed, tried again next pass");
+    }
+    noteRefundWaiting(row, waitingOf(r.stuck[0]));
+  }
+  // …and a row this process has seen cancelled with NOTHING on record yet (not
+  // even its mark could be written), which the watcher has stopped looking at
+  // since — retired meanwhile on a 404 or an "expired". No query finds that
+  // one; what is still known of it is this process's own (refundWaiting).
+  const marked = new Set(rows.map((r) => String(r._id)));
+  for (const id of [...refundWaiting.keys()]) {
+    if (marked.has(id)) continue;
+    let row = null;
+    try {
+      row = await MarketplaceListing.findById(id).lean();
+    } catch {
+      continue; // asked again next pass
+    }
+    if (!row) {
+      refundWaiting.delete(id);
+      continue;
+    }
+    if (row.status === "active") continue; // the watcher's: it is back every minute
+    try {
+      const out = await bookCancelled(row);
+      tally.booked += out.burned;
+      if (!out.pending) {
+        refundWaiting.delete(id);
+        continue;
+      }
+      tally.waiting += out.pending;
+      noteRefundWaiting(row, out.waiting);
+    } catch (e) {
+      const why = (e && e.message) || String(e);
+      tally.waiting++;
+      errors.push("refund " + (row.externalId || row._id) + ": " + why);
+      noteRefundWaiting(row, { why });
+    }
+  }
 }
 
 async function healthStep(budget, tally, errors) {
@@ -2456,6 +2816,7 @@ async function runPass({ sweep = false } = {}) {
     health: { checked: 0, ok: 0, sold: 0, strikes: 0, expired: 0, failed: 0 },
     expiring: { due: 0, removed: 0 },
     limbo: { released: 0, sold: 0, retried: 0 },
+    refunds: { booked: 0, waiting: 0 },
     toppedUp: 0,
     sweep: null,
     errors: [],
@@ -2469,6 +2830,10 @@ async function runPass({ sweep = false } = {}) {
     }
   };
   try {
+    // 0. A refund that was seen and is not booked yet (finishRefunds). First:
+    // the steps below then find a closed ledger, and step 1 takes a no-claim
+    // bot's account out of its bot in the same pass.
+    await step("refunds", () => finishRefunds(out.refunds, out.errors));
     // 1. Post-sale bookkeeping (bot removal + pool stamps) for sold accounts.
     await step("spend", async () => {
       out.spend = await ncs.spendPending({ limit: 10 });
@@ -2636,6 +3001,7 @@ module.exports = {
   beforeDelist,
   afterDelist,
   onGameflipSold,
+  onGameflipCancelled,
   onGameflipRetired,
   settleQuantitySales,
   removeUnit,
@@ -2649,4 +3015,5 @@ module.exports = {
   undeliveredUnits,
   healthStrike,
   writeMaybeLanded,
+  BURNED_REASON,
 };

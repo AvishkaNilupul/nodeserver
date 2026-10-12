@@ -36,9 +36,41 @@ test("archive status filter: held = listed+skipped, other statuses excluded", ()
 });
 
 test("archive status filter: raw status passes through; only 'all' means unfiltered", () => {
-  assert.deepStrictEqual(archiveStatusFilter("sold"), { status: "sold" });
   assert.deepStrictEqual(archiveStatusFilter("listed"), { status: "listed" });
+  assert.deepStrictEqual(archiveStatusFilter("removed"), { status: "removed" });
   assert.deepStrictEqual(archiveStatusFilter("all"), null);
+});
+
+test("archive: a ledger closed over a refunded sale is 'retired' — never among the sold", () => {
+  const { archiveStatus } = require("../utils/unclaimedAutoList");
+  const refund = "gameflip sale cancelled after delivery — its login was seen";
+  // "sold" is the sales; the refunded ones answer to "retired".
+  const sold = archiveStatusFilter("sold");
+  assert.strictEqual(sold.status, "sold");
+  assert.ok(sold.note.$not instanceof RegExp);
+  assert.strictEqual(sold.note.$not.test(refund), true);
+  assert.strictEqual(sold.note.$not.test("gameflip sale"), false);
+  const retired = archiveStatusFilter("retired");
+  assert.strictEqual(retired.status, "sold");
+  assert.strictEqual(retired.note.test(refund), true);
+  assert.strictEqual(archiveStatus({ status: "sold", note: refund }), "retired");
+  assert.strictEqual(archiveStatus({ status: "sold", note: "gameflip sale" }), "sold");
+  assert.strictEqual(archiveStatus({ status: "sold" }), "sold");
+  assert.strictEqual(archiveStatus({ status: "listed", note: refund }), "listed", "only a closed ledger is one");
+  assert.strictEqual(archiveStatus({}), "skipped");
+  // Counted under its own name in both roll-ups, and only when there is one:
+  // a view without it is the view it always was.
+  const rows = [
+    { _id: "a1", source: "noclaim", game: "Overwatch", status: "sold", note: "gameflip sale", drops: [{ name: "A", itemKey: "a|overwatch" }] },
+    { _id: "a2", source: "noclaim", game: "Overwatch", status: "sold", note: refund, drops: [{ name: "A", itemKey: "a|overwatch" }] },
+  ];
+  const game = groupArchiveByGame(rows, true)[0];
+  assert.strictEqual(game.byStatus.sold, 1);
+  assert.strictEqual(game.byStatus.retired, 1);
+  const item = groupArchiveByItem(rows, true)[0];
+  assert.strictEqual(item.byStatus.sold, 1);
+  assert.strictEqual(item.byStatus.retired, 1);
+  assert.strictEqual("retired" in groupArchiveByGame(rows.slice(0, 1), true)[0].byStatus, false);
 });
 
 test("archive item key: prefers stored itemKey, falls back to normalized game|name", () => {
@@ -101,6 +133,7 @@ test("by item: distinct accounts vs units, plus the per-status rollup", () => {
     released: 0,
     skipped: 0,
     removed: 0,
+    manual: 0,
   });
 });
 
@@ -141,6 +174,7 @@ test("by game: distinct accounts and items per game, with status rollup", () => 
     released: 0,
     skipped: 0,
     removed: 0,
+    manual: 0,
   });
   const r6 = games.find((g) => g.game === "Rainbow Six Siege");
   assert.strictEqual(r6.accounts, 1);

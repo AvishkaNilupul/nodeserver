@@ -428,14 +428,16 @@ async function unclaimedStats(game) {
     const esc = String(game).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
     q.game = new RegExp("^" + esc + "$", "i");
   }
-  const rows = await UnclaimedAccount.find(q).select("game status").lean();
+  const rows = await UnclaimedAccount.find(q).select("game status note").lean();
   const by = {};
   for (const r of rows) {
     const k = String(r.game || "").trim().toLowerCase();
     if (!k) continue;
     const cur = by[k] || (by[k] = { stock: 0, sold: 0 });
     if (r.status === "listed") cur.stock++;
-    else if (r.status === "sold") cur.sold++;
+    // A ledger closed over a refunded Gameflip sale (the words utils/
+    // noclaimListings BURNED_REASON leaves in its note) sold nothing.
+    else if (r.status === "sold" && !/login was seen/i.test(String(r.note || ""))) cur.sold++;
   }
   return by;
 }

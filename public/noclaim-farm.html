@@ -997,6 +997,8 @@ async function scanSpent(){
 function reasonChips(a){
   var h='';
   if(a.sold) h+='<span class="chip off">sold'+(a.soldWhy?' · '+esc(a.soldWhy):'')+'</span> ';
+  // Taken out of its bot without a sale (a refunded one): the reason says so.
+  else if(a.soldWhy) h+='<span class="chip warn">'+esc(a.soldWhy)+'</span> ';
   if(a.connected) h+='<span class="chip warn">connected'+((a.connectedGames&&a.connectedGames.length)?' · '+esc(a.connectedGames.join(', ')):'')+'</span> ';
   if(a.sellable) h+='<span class="chip warn">'+a.sellable+' unclaimed still on it</span> ';
   if(a.tokenStatus&&a.tokenStatus!=='ok') h+='<span class="chip">token '+esc(a.tokenStatus)+'</span>';

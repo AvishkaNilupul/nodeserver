@@ -178,6 +178,15 @@ function paginate(rows, limit, field) {
 
 const money = (n) => Math.round((Number(n) || 0) * 100) / 100;
 
+// A unit of a Gameflip listing that was paid for and then cancelled carries
+// this in place of an order id (utils/noclaimListings.bookGameflipSale). Its
+// stamp says it left the shelf; it was refunded, so it is neither a delivered
+// unit nor revenue anywhere on this page.
+const REFUNDED_ORDER_ID = "gameflip-cancelled";
+function refundedUnit(unit) {
+  return !!unit && String(unit.orderId || "") === REFUNDED_ORDER_ID;
+}
+
 /* ------------------------------- the rollup ------------------------------ */
 
 // Per-market totals. Recomputed at most once a minute: it reads every listing
@@ -219,6 +228,7 @@ async function rollup() {
       lastError: 1,
       updatedAt: 1,
       "units.deliveredAt": 1,
+      "units.orderId": 1,
       bulkOfferId: 1,
       bulkPackSize: 1,
     },
@@ -280,7 +290,7 @@ async function rollup() {
     // delivered account carries 1/N of it (docs/bulk-packs/PACKS-2.md).
     const price = (Number(r.price) || 0) / packSizeOf(r);
     for (const u of r.units || []) {
-      if (!u.deliveredAt) continue;
+      if (!u.deliveredAt || refundedUnit(u)) continue;
       const at = new Date(u.deliveredAt);
       p.deliveredUnits += 1;
       p.deliveredRevenueUsd += price;
@@ -620,7 +630,7 @@ router.get(
           priceUsd: Number(r.price) || 0,
           updatedAt: r.updatedAt,
           deliveries: (r.units || [])
-            .filter((u) => u.deliveredAt)
+            .filter((u) => u.deliveredAt && !refundedUnit(u))
             .map((u) => ({
               login: u.login,
               orderId: u.orderId,
@@ -628,6 +638,8 @@ router.get(
               messagedAt: u.messagedAt,
             })),
         }));
+        // A row whose only stamped unit was a refunded sale delivered nothing.
+        out.items = out.items.filter((r) => r.deliveries.length);
         return res.json({
           success: true,
           ...out,

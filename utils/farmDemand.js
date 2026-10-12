@@ -121,6 +121,18 @@ function bucketLabel(key) {
 const DATING_SOURCES = new Set(["ledger", "listing_sold", "connected"]);
 const PRIOR_DAYS = 90;
 
+// A REFUND IS NOT A SALE. A Gameflip listing that was paid for and then
+// cancelled closes its account's ledger as "sold" too — its buyer saw the
+// login, so the account leaves stock and its bot exactly as a sold one does
+// (utils/noclaimListings.burnGameflipUnit) — but nobody bought anything, and
+// counted here it would grow the fleet on a sale that was refunded. That ledger
+// keeps the burn's own words in its note (noclaimListings.BURNED_REASON), and
+// the spent-view row its clean-up writes says them too.
+const RETIRED_UNSOLD = /login was seen/i;
+function isRetiredUnsold(text) {
+  return RETIRED_UNSOLD.test(String(text || ""));
+}
+
 // A `listing_sold` signal names the account the buyer got only when the listing
 // sells ONE account. A GGSel/Digiseller quantity row hands out "whichever unit
 // the platform picks", so saleLearning.recordListingSale falls back to the
@@ -239,7 +251,7 @@ async function saleEvidenceByBucket({ days = 30, priorDays = PRIOR_DAYS } = {}) 
 
   // 1. The unclaimed ledger — every automated channel, including the four
   //    (Eldorado, PlayerAuctions, G2G) that write no SaleSignal.
-  const ledgers = await UnclaimedAccount.find(
+  const soldLedgers = await UnclaimedAccount.find(
     { status: "sold", soldAt: { $gte: lookSince } },
     {
       login: 1,
@@ -250,8 +262,17 @@ async function saleEvidenceByBucket({ days = 30, priorDays = PRIOR_DAYS } = {}) 
       soldPriceUsd: 1,
       soldMarket: 1,
       manualListing: 1,
+      note: 1,
     },
   ).lean();
+  // Closed over a refunded sale (RETIRED_UNSOLD): not a sale, so not a unit —
+  // and the same account's spent-view row is no witness of one either (3.).
+  const retiredUnsold = new Set();
+  const ledgers = [];
+  for (const l of soldLedgers) {
+    if (!isRetiredUnsold(l.note)) ledgers.push(l);
+    else if (lower(l.login)) retiredUnsold.add(lower(l.login));
+  }
   // Rows sold since `soldPriceUsd` shipped carry the price they ACTUALLY sold
   // at. Older rows carry nothing, so their price is reconstructed from the set's
   // live listings — the CURRENT price, not the price at sale, which is good
@@ -395,11 +416,16 @@ async function saleEvidenceByBucket({ days = 30, priorDays = PRIOR_DAYS } = {}) 
   // 3. What the operator swept out of a no-claim bot as sold or connected. It
   //    CONFIRMS a sale (the only witness for an account hand-sold in bulk that
   //    the buyer has not linked yet) but sweptAt is when the bot was cleaned.
+  //    Never for an account retired over a refunded sale: its own clean-up
+  //    writes the row unflagged, but an operator's hand sweep of the same
+  //    account (routes/noclaimFarmRoutes) flags it "sold" like any other.
   const spent = await NoclaimSpentAccount.find(
     { sweptAt: { $gte: since }, $or: [{ sold: true }, { connected: true }] },
-    { loginLower: 1, login: 1, game: 1, sweptAt: 1 },
+    { loginLower: 1, login: 1, game: 1, sweptAt: 1, soldWhy: 1 },
   ).lean();
   for (const s of spent) {
+    const who = lower(s.loginLower || s.login);
+    if (isRetiredUnsold(s.soldWhy) || (who && retiredUnsold.has(who))) continue;
     add(s.game, s.loginLower || s.login, "swept", { at: s.sweptAt });
   }
 
@@ -497,10 +523,12 @@ async function timeToSaleByBucket({ days = 90 } = {}) {
   const since = new Date(Date.now() - Math.max(1, days) * DAY_MS);
   const rows = await UnclaimedAccount.find(
     { status: "sold", soldAt: { $gte: since }, listedAt: { $ne: null } },
-    { game: 1, listedAt: 1, soldAt: 1 },
+    { game: 1, listedAt: 1, soldAt: 1, note: 1 },
   ).lean();
   const buckets = new Map();
   for (const r of rows) {
+    // A refunded sale's ledger closed without a sale: no time to one either.
+    if (isRetiredUnsold(r.note)) continue;
     const b = bucketFor(r.game, keys);
     if (!b) continue;
     const hrs = (new Date(r.soldAt) - new Date(r.listedAt)) / 3600000;
@@ -846,6 +874,7 @@ module.exports = {
   BURST_MARKETS,
   isLoginPool,
   isBurstSale,
+  isRetiredUnsold,
   saleAccumulator,
   demandRates,
   saleEvidenceByBucket,

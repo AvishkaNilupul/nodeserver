@@ -86,6 +86,14 @@ const MARKET_LABELS = {
 
 const MODES = ["fed", "sold"];
 
+// The note of a ledger closed over a Gameflip listing that was paid for and
+// then cancelled (the reason utils/noclaimListings closes it with): its status
+// is "sold", its buyer was refunded, and nothing was sold.
+const RETIRED_UNSOLD = /login was seen/i;
+// …and what the unit of such a listing carries on its row from the moment the
+// refund is SEEN, booked yet or not (utils/noclaimListings REFUNDED_ORDER).
+const REFUNDED_ORDER = "gameflip-cancelled";
+
 // What a ledger field reads as when the row never carried it (the model's
 // defaults). A rolled-back claim writes back exactly what the row held before,
 // so the auto-lister finds its row as it left it.
@@ -1162,10 +1170,45 @@ async function attachListing(ledgerIds, listingId) {
   return (r && r.modifiedCount) || 0;
 }
 
+// Was this ledger's account on a Gameflip listing that was paid for and then
+// refunded? The listing's row says so itself — its unit there is marked from
+// the moment the sale watcher sees the cancelled listing: on the row this
+// ledger is committed to (booked yet or not), or, for a refund still to be
+// booked, on any row carrying its login (a claim whose attach never landed
+// points at none). THROWS when that cannot be read: a release then waits.
+async function refundSeenFor(ledger) {
+  const login = str(ledger && (ledger.loginLower || ledger.login)).trim().toLowerCase();
+  if (!login) return false;
+  // Whatever letter case the unit was stored in: a login is one account.
+  const who = new RegExp("^" + login.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + "$", "i");
+  const id = str(ledger.manualListing);
+  const or = [{ units: { $elemMatch: { login: who, orderId: REFUNDED_ORDER, deliveredAt: null } } }];
+  if (/^[0-9a-f]{24}$/i.test(id)) {
+    or.push({ _id: id, units: { $elemMatch: { login: who, orderId: REFUNDED_ORDER } } });
+  }
+  const ask = () =>
+    MarketplaceListing.findOne({ noclaimStock: true, marketplace: "gameflip", $or: or }, { _id: 1 }).lean();
+  // Asked twice before it is given up: a release skipped over one failed read
+  // is an account left committed to a dead listing, and nothing here retries it.
+  let hit;
+  try {
+    hit = await ask();
+  } catch {
+    hit = await ask();
+  }
+  return !!hit;
+}
+
 // Hand "manual" ledgers back: to the status they had before the claim, or
 // deleted when the claim created them. Only "manual" — a "sold" ledger went to
 // a buyer and is never released. The caller takes the unit off the platform
 // first; this only returns the account. Returns the number released.
+//
+// Never an account whose listing was REFUNDED (refundSeenFor) — its buyer has
+// seen the login — whoever asks, and however long its retirement is taking to
+// book: that one is the lifecycle pass's to finish, not anybody's to free. A
+// check that cannot be made is not a "no": the release fails and can be asked
+// again.
 async function releaseClaim(ledgerIds, { reason = "", listingGone = false } = {}) {
   const ids = idList(ledgerIds);
   if (!ids.length) return 0;
@@ -1182,6 +1225,13 @@ async function releaseClaim(ledgerIds, { reason = "", listingGone = false } = {}
       ? { _id: l._id, status: "manual", farmParkStartedAt: l.farmParkStartedAt || null, farmParkedAt: l.farmParkedAt || null }
       : { _id: l._id, status: "manual" };
     try {
+      if (await refundSeenFor(l)) {
+        console.error(
+          "noclaimStock: " + (l.login || String(l._id)) + " is NOT released (" + (why || "release") +
+            "): its Gameflip sale was refunded — its login has been seen",
+        );
+        continue;
+      }
       if (held) {
         // An auto-farm account is sold whole wherever it is free: it goes back
         // only when the market it was held for provably no longer has its
@@ -1260,6 +1310,12 @@ async function releaseClaim(ledgerIds, { reason = "", listingGone = false } = {}
 // bookkeeping already ran: spendAccount twice restarts the bot container for
 // nothing and sends the owner a second SOLD message. For the same reason a
 // repeat never wipes a recorded price, market or order anchor with blanks.
+//
+// And a ledger closed over a REFUNDED sale stays exactly that (RETIRED_UNSOLD).
+// Nothing was sold, and everything that reads a "sold" ledger as a sale tells
+// by its note; a later caller that believes it saw a sale of the same account
+// — the health step, finding a drop its refunded buyer claimed — must not turn
+// the refund into one, with a price. Such a ledger is not counted in the return.
 // Returns how many of the ledgers are recorded as sold by this call.
 async function markSold(ledgerIds, { market = "", priceUsd = 0, reason = "", orderId = "" } = {}) {
   const ids = idList(ledgerIds);
@@ -1278,6 +1334,7 @@ async function markSold(ledgerIds, { market = "", priceUsd = 0, reason = "", ord
   let n = 0;
   for (const l of rows) {
     const fresh = l.status === "manual";
+    if (!fresh && RETIRED_UNSOLD.test(str(l.note))) continue;
     const mk = m || str(l.soldMarket) || str(l.market);
     const $set = { status: "sold" };
     if (!l.soldAt) $set.soldAt = now;
@@ -1296,14 +1353,17 @@ async function markSold(ledgerIds, { market = "", priceUsd = 0, reason = "", ord
     }
   }
   if (n) {
+    // A refund closes its ledger through here too, and is logged as what it is.
+    const unsold = RETIRED_UNSOLD.test(why);
     logSafely({
       category: "noclaim_shop",
-      action: "sold",
+      action: unsold ? "retired" : "sold",
       actor: "noclaimStock",
       count: n,
-      detail:
-        n + " no-claim account(s) sold" + (m ? " on " + m : "") + (oid ? " (order " + oid + ")" : "") +
-        (price ? " at $" + price.toFixed(2) : ""),
+      detail: unsold
+        ? n + " no-claim account(s) retired, not sold" + (m ? " (" + m + ")" : "") + " — " + why
+        : n + " no-claim account(s) sold" + (m ? " on " + m : "") + (oid ? " (order " + oid + ")" : "") +
+          (price ? " at $" + price.toFixed(2) : ""),
     });
   }
   return n;
@@ -1417,6 +1477,7 @@ module.exports = {
   claimForSet,
   attachListing,
   releaseClaim,
+  refundSeenFor,
   markSold,
   spendPending,
   ledgerForLogin,

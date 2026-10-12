@@ -276,13 +276,34 @@ const ARCHIVE_STATUS_ZERO = {
   manual: 0,
 };
 
+// A ledger closed over a Gameflip listing that was paid for and then CANCELLED
+// carries these words in its note (utils/noclaimListings BURNED_REASON, the
+// test utils/autofarmStock.retirePending makes). Its refunded buyer saw the
+// login, so the account leaves its bot and stock exactly as a sold one does —
+// but nothing was sold, and nothing here may say, record or count that it was.
+const RETIRED_UNSOLD = /login was seen/i;
+function retiredUnsold(reason) {
+  return RETIRED_UNSOLD.test(String(reason || ""));
+}
+
+// Such a ledger has the raw status "sold". The archive shows and counts it as
+// "retired", never among the sold.
+const ARCHIVE_RETIRED = "retired";
+function archiveStatus(row) {
+  const status = (row && row.status) || "skipped";
+  return status === "sold" && retiredUnsold(row.note) ? ARCHIVE_RETIRED : status;
+}
+
 // Map the archive views' ?status= onto a Mongo filter. Empty/"held" (the
 // default) mean the listed+skipped bucket; "all" means no filter (the
-// per-status breakdown is shown); any other value is a single raw status.
+// per-status breakdown is shown); any other value is a single raw status —
+// "sold" without the refunded ones, which answer to "retired".
 function archiveStatusFilter(status) {
   const raw = String(status || "").trim().toLowerCase();
   if (!raw || raw === "held") return { status: { $in: ARCHIVE_HELD_STATUSES.slice() } };
   if (raw === "all") return null;
+  if (raw === "sold") return { status: "sold", note: { $not: RETIRED_UNSOLD } };
+  if (raw === ARCHIVE_RETIRED) return { status: "sold", note: RETIRED_UNSOLD };
   return { status: raw };
 }
 
@@ -337,7 +358,7 @@ function groupArchiveByItem(rows, withStatus) {
   const items = new Map();
   for (const row of rows || []) {
     const game = String((row && row.game) || "").trim();
-    const status = (row && row.status) || "skipped";
+    const status = archiveStatus(row);
     const source = archiveSource(row);
     const seen = new Set();
     for (const drop of (row && row.drops) || []) {
@@ -360,7 +381,7 @@ function groupArchiveByItem(rows, withStatus) {
       if (source) it.bySourceAccts[source].add(String(row._id));
       if (game) it.labels.set(game, (it.labels.get(game) || 0) + 1);
       if (it.byStatus && !seen.has(key)) {
-        it.byStatus[status] += 1;
+        it.byStatus[status] = (it.byStatus[status] || 0) + 1;
         seen.add(key);
       }
     }
@@ -391,7 +412,7 @@ function groupArchiveByGame(rows, withStatus) {
   const games = new Map();
   for (const row of rows || []) {
     const game = String((row && row.game) || "").trim();
-    const status = (row && row.status) || "skipped";
+    const status = archiveStatus(row);
     const source = archiveSource(row);
     const key = String(settings.normGameName(game) || game || "").trim() || "(none)";
     let g = games.get(key);
@@ -411,7 +432,7 @@ function groupArchiveByGame(rows, withStatus) {
     for (const drop of (row && row.drops) || []) {
       g.items.add(archiveItemKey(drop, game));
     }
-    if (g.byStatus) g.byStatus[status] += 1;
+    if (g.byStatus) g.byStatus[status] = (g.byStatus[status] || 0) + 1;
   }
   return [...games.values()]
     .map((g) => ({
@@ -2933,12 +2954,18 @@ async function takeOutOfBots(ledger) {
 // drop flipped to claimed). Stop farming it, remove its unit from its listing
 // (unless the platform already consumed it), stamp the pool row so the
 // recycler sees it, NEVER return it to the pool.
+//
+// The same path retires an account nobody bought (retiredUnsold: `reason` is a
+// refunded sale's, and its ledger is already closed at no price). Everything
+// that keeps it out of farming and stock is done as for a sale; the owner's
+// message, the spent view and the log say "retired, not sold".
 async function spendAccount(ledger, reason, opts = {}) {
   const at = new Date();
   // `opts.label` names a seller other than the auto-lister (the owner's no-claim
   // listings pass "manual no-claim listing") in the pool note, the spent view
   // and the alert. Without it every string below is exactly the auto-lister's.
   const label = String(opts.label || "");
+  const unsold = retiredUnsold(reason);
   const spentNote = label
     ? "spent — " + label + " (" + reason + ")"
     : "spent — unclaimed auto-listed (" + reason + ")";
@@ -3039,9 +3066,13 @@ async function spendAccount(ledger, reason, opts = {}) {
           // The bot it was really taken out of; the ledger's may be stale.
           botId: botIds[0] || ledger.botId || "",
           container: botIds[0] ? containerFor(botIds[0]) : ledger.container || "",
-          sold: true,
+          // Neither flag for an account nobody bought: `soldWhy` then says why
+          // it left its bot, and utils/farmDemand reads only flagged rows.
+          sold: !unsold,
           connected: false,
-          soldWhy: label ? label + ": " + reason : "unclaimed auto-list: " + reason,
+          soldWhy:
+            (unsold ? "retired, not sold — " : "") +
+            (label ? label + ": " + reason : "unclaimed auto-list: " + reason),
           tokenStatus: "ok",
           actor: "unclaimedAutoList",
           sweptAt: at,
@@ -3069,16 +3100,17 @@ async function spendAccount(ledger, reason, opts = {}) {
 
   logEvent({
     category: "unclaimed",
-    action: "sold",
+    action: unsold ? "retired" : "sold",
     actor: "unclaimedAutoList",
     subject: ledger.login || ledger._id || "",
     game: ledger.game || "",
     count: 1,
     detail:
-      "sold (" + reason + ") — " + (ledger.source || "") + " account " + (ledger.login || ""),
+      (unsold ? "retired, not sold (" : "sold (") + reason + ") — " +
+      (ledger.source || "") + " account " + (ledger.login || ""),
   });
   sendTelegram(
-    (label ? "💰 SOLD (" + label + ")\n\n" : "💰 SOLD (unclaimed auto-list)\n\n") +
+    (unsold ? "⚠️ RETIRED, not sold (" : "💰 SOLD (") + (label || "unclaimed auto-list") + ")\n\n" +
       (ledger.login || "?") +
       "\nGame: " +
       (ledger.game || "?") +
@@ -3369,10 +3401,19 @@ function soldRetireReason(pool, ledger, now = Date.now()) {
     const at = ledger.manualListing ? ledger.manualDeliveredAt : ledger.soldAt;
     const settle = ledger.manualListing ? RETIRE_OWNER_SETTLE_MS : RETIRE_SETTLE_MS;
     if (at && now - new Date(at).getTime() >= settle) {
+      // Closed over a refunded sale (retiredUnsold): it leaves its bot all the
+      // same, in its own words — never as "<market> sale".
+      if (retiredUnsold(ledger.note)) return String(ledger.note);
       return (ledger.soldMarket || ledger.market || "marketplace") + " sale";
     }
   }
-  if (pool.manualSold === true) return "sold by hand";
+  // The Sold tick takes an account out of its bot at once. On one whose ledger
+  // is a refunded sale it changes when, never what: still not a sale.
+  if (pool.manualSold === true) {
+    return ledger && ledger.status === "sold" && retiredUnsold(ledger.note) && !reclaimedAfterSale(pool, ledger)
+      ? String(ledger.note)
+      : "sold by hand";
+  }
   return "";
 }
 
@@ -3404,6 +3445,9 @@ const NOCLAIM_LEGACY_NOTE = /^(unclaimed stock|deployed to |assigned to a bot|ma
 // then the pool row belongs to that system and its note is left alone.
 async function handToRecycler(x, botIds, { deployedElsewhere = false } = {}) {
   const { p, l, reason } = x;
+  // Leaving its bot over a refunded sale (soldRetireReason passes that
+  // ledger's own words): the same hand-over, recorded as what it is.
+  const unsold = retiredUnsold(reason);
   const at = new Date();
   const game = (l && l.game) || x.game || "";
   const stampGame = settings.normGameName(game);
@@ -3447,9 +3491,11 @@ async function handToRecycler(x, botIds, { deployedElsewhere = false } = {}) {
         game,
         botId: botIds[0] || "",
         container: botIds[0] ? containerFor(botIds[0]) : "",
-        sold: true,
+        // As in spendAccount: an account nobody bought carries neither flag.
+        sold: !unsold,
         connected: false,
-        soldWhy: reason + " — taken out of its bot, handed to the recycler",
+        soldWhy:
+          (unsold ? "retired, not sold — " : "") + reason + " — taken out of its bot, handed to the recycler",
         tokenStatus: "ok",
         actor: "unclaimedAutoList",
         sweptAt: at,
@@ -3459,17 +3505,19 @@ async function handToRecycler(x, botIds, { deployedElsewhere = false } = {}) {
   ).catch(() => {});
   if (l) {
     const price = await deliveredUnitPrice(l);
-    await UnclaimedAccount.updateOne(
-      { _id: l._id, status: "sold" },
-      {
-        $set: {
-          note: "sold — taken out of its no-claim bot, handed to the recycler",
-          ...(l.soldMarket ? {} : { soldMarket: l.market || "" }),
-          ...(price ? { soldPriceUsd: price } : {}),
-          ...(l.manualListing && !l.manualSpentAt ? { manualSpentAt: at } : {}),
-        },
-      },
-    ).catch(() => {});
+    const $set = {
+      // A refunded sale keeps its ledger note, whatever takes the account out
+      // of its bot (its own settled ledger, or the Sold tick getting there
+      // first): those words are what tells every later reader (utils/
+      // farmDemand) that this "sold" ledger is no sale.
+      ...(retiredUnsold(l.note) ? {} : { note: "sold — taken out of its no-claim bot, handed to the recycler" }),
+      ...(l.soldMarket ? {} : { soldMarket: l.market || "" }),
+      ...(price ? { soldPriceUsd: price } : {}),
+      ...(l.manualListing && !l.manualSpentAt ? { manualSpentAt: at } : {}),
+    };
+    if (Object.keys($set).length) {
+      await UnclaimedAccount.updateOne({ _id: l._id, status: "sold" }, { $set }).catch(() => {});
+    }
   }
   await markOwnerUnlisted({ source: "noclaim", poolAccountId: String(p._id) });
 }
@@ -3498,6 +3546,8 @@ async function retireSoldFromBots(cands, poolBySecret) {
     {
       poolAccountId: 1, status: 1, soldAt: 1, market: 1, soldMarket: 1, soldPriceUsd: 1,
       manualListing: 1, manualDeliveredAt: 1, manualSpentAt: 1, game: 1, login: 1, twitchId: 1,
+      // What says a "sold" ledger was a refunded sale, not a sale (retiredUnsold).
+      note: 1,
     },
   ).lean();
   const soldByPool = new Map(sold.map((l) => [String(l.poolAccountId), l]));
@@ -3604,6 +3654,7 @@ async function retireSoldFromBots(cands, poolBySecret) {
         .catch(() => [])
     ).map((b) => String(b.clientSecret)),
   );
+  let unsold = 0; // of out.retired: left over a refunded sale, not a sale
   for (const t of todo) {
     const left = leftBots.get(t.secret) || [];
     // Out of EVERY bot it was in, or the recycler does not get it yet.
@@ -3613,6 +3664,7 @@ async function retireSoldFromBots(cands, poolBySecret) {
       await handToRecycler(t.x, left, { deployedElsewhere });
       if (deployedElsewhere) out.foreignOwner++;
       out.retired++;
+      if (retiredUnsold(t.x.reason)) unsold++;
     } catch (e) {
       out.errors.push((t.x.login || "?") + ": " + e.message);
     }
@@ -3625,7 +3677,8 @@ async function retireSoldFromBots(cands, poolBySecret) {
       count: out.retired,
       detail:
         out.retired + " sold account(s) taken out of " + out.bots +
-        " no-claim bot(s) and handed to the recycler",
+        " no-claim bot(s) and handed to the recycler" +
+        (unsold ? " (" + unsold + " of them not sold: retired after a refunded sale)" : ""),
     });
   }
   if (out.errors.length) {
@@ -5539,6 +5592,7 @@ module.exports = {
   chooseCapReleases,
   allocateCapKeep,
   archiveStatusFilter,
+  archiveStatus,
   archiveItemKey,
   groupArchiveByItem,
   groupArchiveByGame,
