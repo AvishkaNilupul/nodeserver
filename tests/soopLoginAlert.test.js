@@ -332,46 +332,39 @@ test("a recovery message that could not be sent is still owed, and is sent once"
 });
 
 // The real sender. On 2026-10-12 the alert's first live message was logged as
-// "Telegram error:" with no text and stamped as told: the shared helper swallows
-// a failed post, and this server's posts to Telegram fail now and then.
-test("the Telegram sender: throws when no chat took the message, retries over IPv4, never leaks the token", async () => {
-  const calls = [];
-  const opts = { token: "123:SECRET-TOKEN", chats: () => ["111", " 222 ", "111", ""], pauseMs: 0 };
+// "Telegram error:" with no text and stamped as told. utils/telegram never
+// throws; this is what turns "nobody received it" into something the pass sees.
+test("the Telegram sender throws when no chat took the message, and only then", async () => {
+  const via = (result) => createTelegramSend({ telegram: { sendTelegram: async () => result } });
 
-  // every post fails -> throws, having tried each chat three times
-  const dead = createTelegramSend({ ...opts, post: async (url, body, o) => {
-    calls.push([body.chat_id, o.family || null]);
-    throw Object.assign(new Error(""), { name: "AggregateError", code: "ETIMEDOUT", config: { url } });
-  } });
-  await assert.rejects(dead("hello"), (err) => {
-    assert.match(err.message, /none of 2 chat\(s\): ETIMEDOUT/);
-    assert.doesNotMatch(err.message + String(err.stack), /SECRET-TOKEN/, "the bot token must never reach a log");
-    return true;
+  await assert.rejects(
+    via({ configured: true, chats: 2, sent: 0, failed: 2, reasons: ["AggregateError ETIMEDOUT (ETIMEDOUT+ENETUNREACH)"] })("hello"),
+    /none of 2 chat\(s\): AggregateError ETIMEDOUT/,
+  );
+  // one chat of two is enough: it arrived somewhere, so it is not sent again
+  assert.deepEqual(await via({ configured: true, chats: 2, sent: 1, failed: 1, reasons: ["HTTP 403 Forbidden"] })("hello"), { sent: 1, configured: true });
+  // Telegram is not set up: nobody to tell, nothing to retry
+  assert.deepEqual(await via({ configured: false, chats: 0, sent: 0, failed: 0, reasons: [] })("hello"), { sent: 0, configured: false });
+  // a helper that reports nothing (an older utils/telegram) must not turn into a retry loop
+  assert.deepEqual(await via(undefined)("hello"), { sent: null, configured: true });
+});
+
+test("a send that reaches nobody is retried by the alert until one arrives", async () => {
+  const w = world();
+  let result = { configured: true, chats: 1, sent: 0, failed: 1, reasons: ["AggregateError ETIMEDOUT"] };
+  let posts = 0;
+  w.alert = createLoginAlert({
+    send: createTelegramSend({ telegram: { sendTelegram: async () => (posts++, result) } }),
+    now: () => w.at,
   });
-  assert.deepEqual(calls, [["111", null], ["111", 4], ["111", 4], ["222", null], ["222", 4], ["222", 4]], "two chats (deduplicated), three tries each, the retries pinned to IPv4");
-
-  // the first try fails the way it does on this server, the retry gets through
-  let n = 0;
-  const flaky = createTelegramSend({ ...opts, chats: () => ["111"], post: async () => {
-    if (++n === 1) throw Object.assign(new Error(""), { name: "AggregateError" });
-    return { data: { ok: true } };
-  } });
-  assert.deepEqual(await flaky("hello"), { sent: 1, configured: true });
-  assert.equal(n, 2);
-
-  // one chat of two is enough: the message arrived somewhere, do not send it again
-  const partial = createTelegramSend({ ...opts, post: async (url, body) => {
-    if (body.chat_id === "111") throw Object.assign(new Error("Request failed"), { response: { status: 403 } });
-  } });
-  assert.deepEqual(await partial("hello"), { sent: 1, configured: true });
-
-  // Telegram is not set up: nobody to tell, nothing to retry, nothing posted
-  let posted = 0;
-  for (const off of [{ token: "", chats: () => ["111"] }, { token: "123:SECRET-TOKEN", chats: () => [] }]) {
-    const none = createTelegramSend({ ...off, post: async () => posted++ });
-    assert.deepEqual(await none("hello"), { sent: 0, configured: false });
-  }
-  assert.equal(posted, 0);
+  await add("a", "drops_rejected");
+  await w.pass();
+  await assert.rejects(w.after(WAIT_MS), /none of 1 chat/);
+  assert.equal((await row("a")).unusableAlertAt, null, "not marked as told");
+  result = { configured: true, chats: 1, sent: 1, failed: 0, reasons: [] };
+  assert.equal((await w.after(RETRY_MS)).sent, "down");
+  assert.ok((await row("a")).unusableAlertAt, "told only once Telegram took it");
+  assert.equal(posts, 2);
 });
 
 test("the timings: a wait long enough to skip a blip, short enough to matter", () => {

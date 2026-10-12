@@ -81,46 +81,26 @@ function backMessage({ total }) {
 
 // A sender that knows whether the message arrived.
 //
-// utils/telegram's sendTelegram never throws and never says: a post that fails
-// is logged and swallowed. This server has no IPv6 route, and Node's connect
-// race between the two address families fails now and then with an empty
-// error — four times in the 32 hours to 2026-10-12, the last one on this very
-// alert's first message, which was stamped as told and never arrived. So each
-// chat gets a few tries (the later ones over IPv4 only), and when no chat took
-// the message this THROWS, which leaves the pass to try again.
-//
-// Nothing here may put the request URL in an error or a log: it holds the bot token.
-function createTelegramSend({ post, chats, token, tries = 3, pauseMs = 1500, timeoutMs = 15000 } = {}) {
-  // Required lazily: Telegram must never be able to stop the farm loading.
-  const doPost = post || ((url, body, opts) => require("axios").post(url, body, opts));
-  const pause = (ms) => new Promise((r) => setTimeout(r, ms));
+// This alert's first live message (2026-10-12 07:46Z) was logged by the server
+// as "Telegram error:" with nothing after it, and stamped as told: the shared
+// helper swallowed a failed post, and nothing could tell. utils/telegram now
+// retries and reports what happened, but by its contract it still never throws
+// — so this turns "no chat took the message" into a throw, which is what leaves
+// the pass to try again instead of marking the owner as told.
+function createTelegramSend({ telegram } = {}) {
   return async function sendTelegramChecked(text) {
-    const key = token !== undefined ? token : process.env.TG_TOKEN;
-    const raw = typeof chats === "function" ? chats() : require("../telegram").getSuperChatIds();
-    const ids = [...new Set((raw || []).map((c) => String(c).trim()).filter(Boolean))];
+    // Required lazily: Telegram must never be able to stop the farm loading.
+    const tg = telegram || require("../telegram");
+    const r = (await tg.sendTelegram(text)) || {};
     // Telegram is not set up at all: there is nobody to tell and nothing to retry.
-    if (!key || !ids.length) return { sent: 0, configured: false };
-    let sent = 0;
-    let why = "";
-    for (const id of ids) {
-      for (let n = 1; n <= tries; n++) {
-        try {
-          await doPost(
-            `https://api.telegram.org/bot${key}/sendMessage`,
-            { chat_id: id, text },
-            n === 1 ? { timeout: timeoutMs } : { timeout: timeoutMs, family: 4 },
-          );
-          sent++;
-          break;
-        } catch (err) {
-          const status = err && err.response && err.response.status;
-          why = String((err && (err.code || err.name)) || "error") + (status ? ` (HTTP ${status})` : "");
-          if (n < tries) await pause(pauseMs);
-        }
-      }
+    if (r.configured === false) return { sent: 0, configured: false };
+    // A helper that does not report (an older copy of utils/telegram): it cannot
+    // be known, and retrying on that would repeat the message for ever.
+    if (typeof r.sent !== "number") return { sent: null, configured: true };
+    if (!r.sent) {
+      throw new Error(`Telegram took the message for none of ${r.chats} chat(s): ${(r.reasons || []).join("; ") || "no reason given"}`);
     }
-    if (!sent) throw new Error(`Telegram took the message for none of ${ids.length} chat(s): ${why}`);
-    return { sent, configured: true };
+    return { sent: r.sent, configured: true };
   };
 }
 
