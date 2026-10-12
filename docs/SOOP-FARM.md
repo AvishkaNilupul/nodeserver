@@ -449,7 +449,27 @@ seconds, with no refusal.
 (0 unstable), five minutes after an allocator pass and between two reward
 steps. Watch time carried over the restart.
 
-Fingerprint the SOOP files against `078abd5` next time.
+**20:31 UTC — the third review's fixes** (the sweep: logins that never answer
+cannot hold it up, and a tunnel that comes back late leaves nobody waiting for
+the next pass): `utils/soop/autoClaim.js` `41648521`→`ae7a0e19`,
+`utils/soopFarm.js` `ec252aac`→`8126df85` — the bytes of
+`origin/feat/soop-auto-claim` `5e71873`. Backup
+`_deploy_backup_20261012203121_soop-auto-claim-3`; pm2 restart 53 at 20:31:22Z
+(0 unstable), 34 minutes after an allocator pass, with no campaign in progress.
+
+Seen live before it, on the second round's code: the last step of the campaign
+the new logins were on was reached at about 19:47 UTC, and every code of that
+step was claimed and stored within eight minutes, with no refusal. Seen live
+after it: the sweep eight minutes after the restart read every login that can
+log in, in one run, and found nothing left to claim.
+
+A known limit, accepted: when the tunnel goes in the middle of a pass (somebody
+had already answered), or comes back for a moment and goes again, a few logins
+can use up their four looks and then wait for the next three-hourly pass. Steps
+reached after the tunnel is back are not affected: each is followed by its own
+read.
+
+Fingerprint the SOOP files against `5e71873` next time.
 
 ## What v1 got wrong (fixed here, each pinned by a test in `tests/soopFarm.test.js`)
 
