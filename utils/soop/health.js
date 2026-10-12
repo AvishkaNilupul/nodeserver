@@ -118,12 +118,19 @@ function createHealthService({
     return result;
   }
 
-  // Overlapping checks of one account share a single round trip.
-  function check(rawId) {
+  // Overlapping checks of one account share a single round trip — unless the
+  // caller has just replaced the cookie (`fresh`). A check already under way
+  // read the old one, so its answer says nothing about the new: this one lets
+  // it finish (two checks never write at once) and then asks again.
+  function check(rawId, { fresh = false } = {}) {
     const id = String(rawId || "");
     if (!id) return Promise.reject(new Error("no account given"));
-    if (inFlight.has(id)) return inFlight.get(id);
-    const p = doCheck(id).finally(() => inFlight.delete(id));
+    const busy = inFlight.get(id);
+    if (busy && !fresh) return busy;
+    const again = () => doCheck(id);
+    const p = (busy ? busy.then(again, again) : doCheck(id)).finally(() => {
+      if (inFlight.get(id) === p) inFlight.delete(id);
+    });
     inFlight.set(id, p);
     return p;
   }

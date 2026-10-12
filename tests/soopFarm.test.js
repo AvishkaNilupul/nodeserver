@@ -12,6 +12,7 @@ const SoopAccount = require("../models/SoopAccount");
 const SoopFarmTask = require("../models/SoopFarmTask");
 const farm = require("../utils/soopFarm");
 const { createLoginAlert } = require("../utils/soop/loginAlert");
+const { SoopError } = require("../utils/soop/errors");
 const { createFakeSoop } = require("./helpers/soopFake");
 
 const FAST = { pollMs: 20, idleMs: 20, retryMs: 20, joinWaitMs: 300, flatPolls: 3, backoffMs: [40], readFailures: 3, primePaceMs: 1, parkCooldownMs: 60 };
@@ -234,6 +235,47 @@ test("a refusal that passes by itself is cleared the moment the login farms agai
   const state = await farm.stateView();
   assert.equal(state.totals.rejected, 0);
   assert.equal(state.alerts.filter((x) => x.kind === "auth").length, 0);
+});
+
+// The farm keeps trying a refused login as a campaign-list reader, and every
+// refusal starts a login check of it in the background. Re-importing all the
+// cookies in one run puts each import a moment after such a check began: the
+// import then waited on THAT check — made with the cookie it had just replaced —
+// and took its "refused" for the new cookie. The login stayed out, and the
+// owner was told so on Telegram, until something checked it again.
+test("a fresh cookie is judged by a check of its own, not by one already under way for the old cookie", async () => {
+  await fresh();
+  const old = world.addAccount({ id: "acc1" });
+  assert.equal((await farm.importAccounts(JSON.stringify(old)))[0].ok, true);
+  assert.equal(await status("acc1"), "ok");
+
+  // From here the drops site refuses the old cookie, slowly: its check stays under way until `release()`.
+  let release, asked = 0;
+  const held = new Promise((resolve) => { release = resolve; });
+  farm.setClientFactory((cookies, opts) => {
+    const client = world.clientFor(cookies, opts);
+    if (cookies[0].value !== old[0].value) return client;
+    const missions = async () => {
+      asked++;
+      await held;
+      throw new SoopError("Please log in to continue.", { code: "AUTH" });
+    };
+    return { ...client, missions };
+  });
+  const background = farm.health.check("acc1"); // what a refused campaign-list read sets off
+  await until(() => asked === 1, "the old cookie's check to be under way");
+
+  const importing = farm.importAccounts(JSON.stringify(world.addAccount({ id: "acc1" }))); // a new export of the same login
+  await until(async () => (await status("acc1")) === "untested", "the new cookie to be stored");
+  await sleep(30); // the import is now at its own login check
+  release();
+  const [r] = await importing;
+  await background;
+
+  assert.equal(r.ok, true, r.error);
+  assert.equal(asked, 1, "the old cookie was asked once; the new one has its own client");
+  assert.equal(await status("acc1"), "ok", "the new cookie works — the old cookie's refusal must not stand as its verdict");
+  assert.equal((await SoopAccount.findOne({ loginId: "acc1" }).lean()).lastError, "");
 });
 
 test("joined but not credited backs off, says so, and frees the socket", async () => {

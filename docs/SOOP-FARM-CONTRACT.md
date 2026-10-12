@@ -288,7 +288,7 @@ createInventoryService({ models = { SoopInventoryItem }, getClient, activity, pa
 }
 // utils/soop/health.js
 createHealthService({ models = { SoopAccount }, getClient, activity, onDead, paceMs = 4000, everyMs = 6 * 3600 * 1000, now = Date.now }) -> {
-  check(id) -> Promise<{ at, loggedIn, nick, country, dropsOk, dropsError, missions }>,
+  check(id, { fresh } = {}) -> Promise<{ at, loggedIn, nick, country, dropsOk, dropsError, missions }>,   // fresh: §17
   checkMany(ids) -> { total }, status(), start(), stop(),
 }
 ```
@@ -652,6 +652,14 @@ reached through `Soop._accountImport.open()`.
   import found unable to farm: "Imported x, but the drops site refuses this
   login". Importing proves only that the main site accepts the cookie; §16 is
   why that is not enough.
+- **A fresh cookie gets a login check of its own.** Overlapping checks of one
+  login share a round trip, and the farm starts one in the background each time
+  a refused login fails to read the campaign list. An import that arrived a
+  moment later waited on that check — made with the cookie it had just
+  replaced — and took its "refused" for the new cookie, which is what a run
+  over every login invites. `_importOne` now calls
+  `health.check(id, { fresh: true })`: it lets a check already under way finish
+  (two checks never write at once), then asks again with the new cookie.
 - **The page-wide drop target** is the window's `dragenter` / `dragover` / `drop`,
   taken only for a drag that carries files and did not start on the page (Chrome
   puts "Files" on the drag of an image already on it). `dragover` is always

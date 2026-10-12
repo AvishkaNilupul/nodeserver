@@ -559,6 +559,67 @@ test("health: AUTH from missions -> drops_rejected, and the login is not reporte
   assert.deepEqual(dead, []);
 });
 
+test("health: overlapping checks share one round trip, but a fresh one waits and asks again", async () => {
+  await account("h1");
+  // Each check takes the client of the cookie stored at that moment. The drops
+  // site refuses the old cookie — slowly, so its check stays under way.
+  const asked = [];
+  const pause = (ms) => new Promise((r) => setTimeout(r, ms));
+  let release, cookie = "old", down = false;
+  const held = new Promise((resolve) => (release = resolve));
+  const service = createHealthService({
+    activity: quietActivity(),
+    paceMs: 0,
+    now: () => NOW,
+    getClient: async (id) => {
+      const mine = cookie, broken = down;
+      asked.push(mine);
+      return {
+        privateInfo: async () => {
+          if (broken) throw new SoopError("proxy down", { code: "EGRESS" });
+          return { loggedIn: true, loginId: id, nick: "Nick", country: "LK" };
+        },
+        missions: async () => {
+          if (mine === "new") return [];
+          await held;
+          throw new SoopError("Please log in to continue.", { code: "AUTH" });
+        },
+      };
+    },
+  });
+
+  const first = service.check("h1");
+  assert.equal(service.check("h1"), first, "a second caller gets the check already under way");
+  while (asked.length < 1) await pause(5);
+  cookie = "new"; // a fresh export is imported while that check is still out
+  const fresh = service.check("h1", { fresh: true });
+  assert.notEqual(fresh, first, "the caller that has just replaced the cookie gets a check of its own");
+  assert.equal(service.check("h1"), fresh, "and later callers wait on the newer check");
+  await pause(40);
+  assert.deepEqual(asked, ["old"], "it does not start while the first is under way: two checks never write at once");
+
+  release();
+  assert.equal((await first).dropsOk, false, "the check made with the old cookie reports what it saw");
+  assert.equal((await fresh).dropsOk, true);
+  assert.deepEqual(asked, ["old", "new"]);
+  const doc = await SoopAccount.findOne({ loginId: "h1" }).lean();
+  assert.equal(doc.status, "ok", "the last word is the fresh check's");
+  assert.equal(doc.lastError, "");
+
+  // A check that fails outright does not stop the fresh one queued behind it.
+  down = true;
+  const failing = assert.rejects(service.check("h1"), (e) => e.code === "EGRESS");
+  while (asked.length < 3) await pause(5);
+  down = false;
+  const after = service.check("h1", { fresh: true });
+  await failing;
+  assert.equal((await after).dropsOk, true);
+  // Nothing is left marked as under way: the next plain check is a round trip of its own.
+  const n = asked.length;
+  await service.check("h1");
+  assert.equal(asked.length, n + 1);
+});
+
 test("health: EGRESS / TIMEOUT change nothing but lastError", async () => {
   const { service, state, dead } = healthWorld();
   const DEAD_AT = new Date("2026-09-30T00:00:00Z");

@@ -214,7 +214,8 @@ class SoopFarm {
     this.clients.set(id, this.clientFactory(cookies, { id }));
     if (!this.progress.has(id)) this.progress.set(id, {});
     this.activity.add({ kind: "account", accountId: id, msg: `Imported ${id}` });
-    await this.health.check(id).catch(() => {});
+    // `fresh`: a check of this login may be under way with the cookie just replaced.
+    await this.health.check(id, { fresh: true }).catch(() => {});
     return { id, nick: info.nick || null, country: info.country || null };
   }
 
