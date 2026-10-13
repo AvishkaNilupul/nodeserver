@@ -637,6 +637,20 @@ async function deliverOrder(order, { dryRun }) {
           "deliver on the next tick",
       };
     }
+    // A row that sells its own reserved units and has too few free is not a
+    // hand-filled listing either: this is a PAID order with nothing to ship.
+    // It used to fall through to the quiet skip below, whose words ("no
+    // reserved units") were not even true of it, and nobody was told.
+    if ((listing.units || []).length) {
+      return {
+        orderId,
+        error:
+          "out of reserved stock: this offer has " +
+          undeliveredUnits(listing).filter((u) => !u.orderId).length +
+          " free account(s) and the order needs " + want +
+          " — deliver it by hand or refund it",
+      };
+    }
     // Neither a stock source nor a reserved unit: this is a service listing
     // ("Automatic farming 180 days") or one the operator fills by hand. Skip
     // quietly rather than erroring every minute for an order we were never
@@ -1226,10 +1240,12 @@ async function realStockFor(row, listedElsewhere) {
   if (row.unclaimedGame) return 0;
   // Only a row that CLAIMS its set at the sale (pickStock's autoClaimSet
   // branch) is as deep as the archive. A row that merely carries a `set` but
-  // sells pre-reserved units — the auto-lister's G2G share, a bulk pack — can
-  // hand over those units and nothing else: counting the archive for it read
-  // 569 on an offer with one account behind it. It went unnoticed only because
-  // the quantity write never reached G2G (see g2gUpdateOffer).
+  // sells pre-reserved units — the auto-lister's G2G share — can hand over
+  // those units and nothing else: counting the archive for it read 569 on an
+  // offer with one account behind it. It went unnoticed only because the
+  // quantity write never reached G2G (see g2gUpdateOffer). A row with a `set`
+  // and neither is "cannot tell" below, as a row with no stock source always
+  // was: delivery cannot fill it, and no number is guessed for it.
   if (row.autoClaimSet && row.set) {
     const DropSet = require("../models/DropSet");
     const { availableAccountsForSet } = require("../routes/shopRoutes");
@@ -1241,10 +1257,24 @@ async function realStockFor(row, listedElsewhere) {
   }
   // A row whose stock is pre-reserved units: what is left is what nobody has
   // bought yet.
-  if ((row.units || []).length) {
-    return (row.units || []).filter((u) => !u.orderId && !u.deliveredAt).length;
-  }
+  if ((row.units || []).length) return freeUnitCount(row);
   return null;
+}
+
+function freeUnitCount(row) {
+  return ((row && row.units) || []).filter((u) => !u.orderId && !u.deliveredAt).length;
+}
+
+// The rows realStockFor answers from their own units (its last branch).
+function sellsOwnUnits(row) {
+  return !!(
+    row &&
+    !row.accountOffer &&
+    !row.noclaimStock &&
+    !row.unclaimedGame &&
+    !(row.autoClaimSet && row.set) &&
+    (row.units || []).length
+  );
 }
 
 // Advertise only what a delivery could really claim. Stock moves without any
@@ -1255,11 +1285,15 @@ async function realStockFor(row, listedElsewhere) {
 // The quantity this process last put on each offer. Most passes find most
 // offers unchanged, and repeating the number is one more write on the seller
 // login per offer per pass. So a number already written is not sent again —
-// except on every REASSERT_EVERY-th pass (6 hours), which writes them all in
-// case G2G's own counter drifted, and whenever an offer is being brought back
-// on sale. A restart forgets it, so the first pass after one writes them all.
+// except on every REASSERT_EVERY-th pass (once an hour), which writes them
+// all, and whenever an offer is being brought back on sale. The hourly pass is
+// what catches a number G2G moved by itself (it gives stock back on a
+// cancelled order) or somebody edited by hand: our own count did not move, so
+// nothing else would send it. A restart forgets the memory, so the first pass
+// after one writes them all. The same pass is the only one that repeats the
+// delist of an offer this sync already took off sale.
 const lastQtyWritten = new Map();
-const REASSERT_EVERY = 24;
+const REASSERT_EVERY = 4;
 let stockPasses = 0;
 
 async function syncStock() {
@@ -1305,7 +1339,10 @@ async function syncStock() {
     }
     // null means "could not tell". Never write a guess into a live offer —
     // advertising 0 by accident takes a working listing off sale.
-    if (real == null) continue;
+    if (real == null) {
+      changes.push({ offer: row.externalId, uncounted: true });
+      continue;
+    }
     // A bulk pack row (docs/bulk-packs/FIXES-1.md R3-3): below its offer's
     // minimum order nothing can be bought, so it counts as empty and is
     // delisted like one; and a bulk offer that is not "live" (owner pause,
@@ -1343,7 +1380,7 @@ async function syncStock() {
     // fails proves nothing: the row waits for the next pass.
     let stillActive = null;
     try {
-      stillActive = await MarketplaceListing.findOne({ _id: row._id, status: "active" }, { _id: 1 });
+      stillActive = await MarketplaceListing.findOne({ _id: row._id, status: "active" }, { _id: 1, units: 1 });
     } catch {
       stillActive = null;
     }
@@ -1351,15 +1388,28 @@ async function syncStock() {
       changes.push({ offer: row.externalId, skipped: "no longer active" });
       continue;
     }
+    // A row that sells its own units is counted again from this fresh copy.
+    // The pass can be minutes old by the time it reaches a row (every archive
+    // row before it is a count of its own), and a unit sold in that time would
+    // be written back onto the shelf — an offer advertising an account its
+    // buyer already has. (Bulk rows are not in this pass; their own loop sets
+    // their quantity.)
+    if (sellsOwnUnits(row) && !row.bulkOfferId) real = freeUnitCount(stillActive);
     const offerKey = String(row.externalId);
     try {
       if (real <= 0) {
         const again = !!row.autoPaused;
-        await mp.g2gDelist(row.externalId);
-        row.autoPaused = true;
-        await row.save();
         lastQtyWritten.delete(offerKey);
-        changes.push({ offer: row.externalId, delisted: true, ...(again ? { again: true } : {}) });
+        if (again && !reassert) {
+          // Already off sale by this sync's own hand: said once an hour, not
+          // on every pass for every sold-out offer there will ever be.
+          changes.push({ offer: row.externalId, unchanged: 0 });
+        } else {
+          await mp.g2gDelist(row.externalId);
+          row.autoPaused = true;
+          await row.save();
+          changes.push({ offer: row.externalId, delisted: true, ...(again ? { again: true } : {}) });
+        }
       } else {
         const bringBack = !!(row.autoPaused && bulkLive);
         if (!bringBack && !reassert && lastQtyWritten.get(offerKey) === real) {
@@ -1393,11 +1443,18 @@ function reportStockSync(r) {
   const set = changes.filter((c) => c && c.set != null).length;
   const relisted = changes.filter((c) => c && c.relisted).length;
   const delisted = changes.filter((c) => c && c.delisted && !c.again).length;
+  const uncounted = changes.filter((c) => c && c.uncounted).length;
   if (set || relisted || delisted) {
     console.log(
       "g2g stock sync: " + set + " quantity write(s), " + relisted + " relisted, " +
-        delisted + " delisted, of " + r.checked + " offer(s)",
+        delisted + " delisted, of " + r.checked + " offer(s)" +
+        (uncounted ? " (" + uncounted + " could not be counted)" : ""),
     );
+  }
+  // Every count failing is a broken read, not an empty shelf: nothing was
+  // written, and saying nothing would look exactly like a quiet healthy pass.
+  if (uncounted && uncounted === r.checked) {
+    console.error("g2g stock sync: could not count any of " + r.checked + " offer(s) — nothing was written");
   }
   if (failed.length) {
     console.error(
@@ -1406,7 +1463,7 @@ function reportStockSync(r) {
         (failed.length > 1 ? " (+" + (failed.length - 1) + " more)" : ""),
     );
   }
-  return { set, relisted, delisted, failed: failed.length };
+  return { set, relisted, delisted, failed: failed.length, uncounted };
 }
 
 let started = false;

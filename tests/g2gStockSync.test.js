@@ -67,7 +67,9 @@ const unit = (login, sold = false) => ({ login, orderId: sold ? "order-" + login
 
 // `archive` maps a set id to the accounts that still hold it; `listed` are
 // logins on a live listing somewhere, which a claim would skip.
-function env({ rows = [], archive = {}, listed = [], af = {}, failSet = () => false } = {}) {
+// `fresh(row)` is what a re-read of the row returns just before the write (by
+// default the row itself): a sale that lands while a pass is running shows there.
+function env({ rows = [], archive = {}, listed = [], af = {}, failSet = () => false, fresh = (r) => r } = {}) {
   const calls = [];
   const mp = {
     g2gSetQuantity: spy(async (id, n) => {
@@ -87,7 +89,11 @@ function env({ rows = [], archive = {}, listed = [], af = {}, failSet = () => fa
   const stubs = {
     "../models/MarketplaceListing": {
       find: () => chain(),
-      findOne: async (q) => rows.find((r) => String(r._id) === String(q._id) && r.status === "active") || null,
+      findOne: async (q) => {
+        if (q.externalId) return rows.find((r) => r.externalId === q.externalId) || null;
+        const r = rows.find((r) => String(r._id) === String(q._id) && r.status === "active");
+        return r ? fresh(r) : null;
+      },
     },
     "../models/BotAccount": { findById: () => ({ lean: async () => null }) },
     "../models/DropSet": { findById: (id) => ({ lean: async () => ({ _id: id, name: "set " + id }) }) },
@@ -206,10 +212,11 @@ test("an empty offer is taken off sale, and comes back with its quantity when th
     assert.deepEqual(out.changes, [{ offer: "G1", delisted: true }]);
     assert.equal(share.autoPaused, true);
 
-    // still empty: delisted again, as before, but not counted as news
+    // still empty: it is already off sale by this sync's own hand, so nothing
+    // is sent (the hourly pass repeats the delist — see below)
     out = await g.syncStock();
-    assert.deepEqual(out.changes, [{ offer: "G1", delisted: true, again: true }]);
-    taken(e);
+    assert.deepEqual(out.changes, [{ offer: "G1", unchanged: 0 }]);
+    assert.deepEqual(taken(e), []);
 
     // one account is back. The quantity is written even though "1" was the
     // last number this process put there — G2G counted it down to zero since.
@@ -238,10 +245,10 @@ test("an offer this pass took off sale itself is brought back; a refused quantit
   });
 });
 
-test("an offer somebody else paused is brought back even when its number has not moved", async () => {
-  // The auto-lister's copy sweep (or the owner) can mark a row autoPaused
-  // without this pass having delisted it. The stock is what it was, so the
-  // number is "already written" — and the relist must still happen, with it.
+test("a paused offer is brought back even when its number is one this process already wrote", async () => {
+  // Nothing but this sync sets autoPaused on a G2G row today. The guard is for
+  // the day something else does: the stock is what it was, so the number is
+  // "already written" — and the relist must still happen, with the number.
   const share = row({ externalId: "G1", set: "S1", units: [unit("a"), unit("b")] });
   const e = env({ rows: [share] });
   await run(e, async (g) => {
@@ -255,16 +262,63 @@ test("an offer somebody else paused is brought back even when its number has not
   });
 });
 
-test("every 24th pass writes all the numbers again, in case G2G's own counter drifted", async () => {
+test("once an hour every number is written again, in case G2G's own counter moved", async () => {
+  // G2G gives stock back on a cancelled order, and a quantity can be edited by
+  // hand on g2g.com. Our own count does not move then, so only this sends it.
   const share = row({ externalId: "G1", set: "S1", units: [unit("a"), unit("b")] });
   const e = env({ rows: [share] });
   await run(e, async (g) => {
     const wrote = [];
-    for (let pass = 1; pass <= 49; pass++) {
+    for (let pass = 1; pass <= 9; pass++) {
       await g.syncStock();
       if (taken(e).length) wrote.push(pass);
     }
-    assert.deepEqual(wrote, [1, 25, 49]);
+    assert.deepEqual(wrote, [1, 5, 9]);
+  });
+});
+
+test("an offer already off sale is delisted again once an hour, not on every pass", async () => {
+  // The repeat is a safety net (somebody relisting an empty offer by hand).
+  // Sent every 15 minutes for every sold-out offer it was most of the writes.
+  const empty = row({ externalId: "G1", set: "S1", autoPaused: true, units: [unit("a", true)] });
+  const e = env({ rows: [empty] });
+  await run(e, async (g) => {
+    const delisted = [];
+    for (let pass = 1; pass <= 9; pass++) {
+      const out = await g.syncStock();
+      if (taken(e).includes("delist G1")) delisted.push(pass);
+      assert.equal(out.changes.length, 1);
+    }
+    assert.deepEqual(delisted, [1, 5, 9]);
+  });
+});
+
+test("a unit sold while the pass was running is not written back onto the shelf", async () => {
+  // The rows are read once at the top of a pass; an archive row ahead of this
+  // one can take a while to count. By the time the pass gets here a buyer has
+  // been sent account "b" — the copy read at the top still calls it free.
+  const share = row({ externalId: "G1", set: "S1", units: [unit("a"), unit("b")] });
+  const e = env({ rows: [share], fresh: (r) => ({ _id: r._id, units: [unit("a"), unit("b", true)] }) });
+  await run(e, async (g) => {
+    const out = await g.syncStock();
+    assert.deepEqual(taken(e), ["set G1 1"]);
+    assert.deepEqual(out.changes, [{ offer: "G1", set: 1 }]);
+  });
+  // and when the last one went, the offer comes off sale instead of staying on at 1
+  const last = row({ externalId: "G2", set: "S1", units: [unit("a")] });
+  const e2 = env({ rows: [last], fresh: (r) => ({ _id: r._id, units: [unit("a", true)] }) });
+  await run(e2, async (g) => {
+    await g.syncStock();
+    assert.deepEqual(taken(e2), ["delist G2"]);
+  });
+});
+
+test("a row that claims its set at the sale keeps the archive count; the fresh units are not used for it", async () => {
+  const bundle = row({ externalId: "G1", set: "S1", autoClaimSet: true, units: [unit("old", true)] });
+  const e = env({ rows: [bundle], archive: { S1: ["a", "b", "c"] }, fresh: (r) => ({ _id: r._id, units: [] }) });
+  await run(e, async (g) => {
+    await g.syncStock();
+    assert.deepEqual(taken(e), ["set G1 3"]);
   });
 });
 
@@ -324,7 +378,7 @@ test("a pass that could not update an offer says so, with the offer and G2G's wo
         ],
       }),
     );
-    assert.deepEqual(c.result, { set: 1, relisted: 0, delisted: 0, failed: 2 });
+    assert.deepEqual(c.result, { set: 1, relisted: 0, delisted: 0, failed: 2, uncounted: 0 });
     assert.deepEqual(c.error, ["g2g stock sync: 2 of 4 offer(s) could not be updated — G1: G2G update offer failed (HTTP 400): no attributes to be updated (+1 more)"]);
     assert.deepEqual(c.log, ["g2g stock sync: 1 quantity write(s), 0 relisted, 0 delisted, of 4 offer(s)"]);
   });
@@ -337,7 +391,51 @@ test("a pass that changed nothing says nothing; an offer delisted again is not n
     assert.deepEqual([quiet.log, quiet.error], [[], []]);
     const news = captured(() => g.reportStockSync({ checked: 2, changes: [{ offer: "G1", delisted: true }, { offer: "G2", set: 3, relisted: true }] }));
     assert.deepEqual(news.log, ["g2g stock sync: 1 quantity write(s), 1 relisted, 1 delisted, of 2 offer(s)"]);
-    assert.deepEqual(captured(() => g.reportStockSync({ skipped: "g2g is off" })).result, { set: 0, relisted: 0, delisted: 0, failed: 0 });
-    assert.deepEqual(captured(() => g.reportStockSync(undefined)).result, { set: 0, relisted: 0, delisted: 0, failed: 0 });
+    assert.deepEqual(captured(() => g.reportStockSync({ skipped: "g2g is off" })).result, { set: 0, relisted: 0, delisted: 0, failed: 0, uncounted: 0 });
+    assert.deepEqual(captured(() => g.reportStockSync(undefined)).result, { set: 0, relisted: 0, delisted: 0, failed: 0, uncounted: 0 });
+  });
+});
+
+test("a pass that could count nothing says so: a broken read must not look like a quiet pass", async () => {
+  const e = env({ rows: [row({ externalId: "G1", set: "S1" }), row({ externalId: "G2" })] });
+  await run(e, async (g) => {
+    const out = await g.syncStock();
+    assert.deepEqual(out.changes, [{ offer: "G1", uncounted: true }, { offer: "G2", uncounted: true }]);
+    const c = captured(() => g.reportStockSync(out));
+    assert.deepEqual(c.error, ["g2g stock sync: could not count any of 2 offer(s) — nothing was written"]);
+    // one uncounted row among counted ones rides along on the pass's line
+    const mixed = captured(() => g.reportStockSync({ checked: 3, changes: [{ offer: "G1", uncounted: true }, { offer: "G2", set: 2 }, { offer: "G3", unchanged: 1 }] }));
+    assert.deepEqual(mixed.log, ["g2g stock sync: 1 quantity write(s), 0 relisted, 0 delisted, of 3 offer(s) (1 could not be counted)"]);
+    assert.deepEqual(mixed.error, []);
+  });
+});
+
+/* ------------------------ a paid order with nothing behind it ------------- */
+
+test("a paid order on an offer whose reserved accounts are all gone is an error, not a quiet skip", async () => {
+  // The quiet skip is for a listing somebody fills by hand. A share row out of
+  // units is a buyer who paid and gets nothing unless a person is told.
+  const sold = row({ externalId: "G1", set: "S1", units: [unit("a", true)] });
+  const e = env({ rows: [sold] });
+  await run(e, async (g) => {
+    const out = await g.deliverOrder({ orderItemId: "ORD-2", offerId: "G1", purchasedQty: 1, deliveredQty: 0 }, { dryRun: false });
+    assert.match(out.error, /^out of reserved stock: this offer has 0 free account\(s\) and the order needs 1/);
+    assert.equal(out.skipped, undefined);
+  });
+  const short = row({ externalId: "G2", set: "S1", units: [unit("a"), unit("b", true)] });
+  const e2 = env({ rows: [short] });
+  await run(e2, async (g) => {
+    const out = await g.deliverOrder({ orderItemId: "ORD-3", offerId: "G2", purchasedQty: 2, deliveredQty: 0 }, { dryRun: false });
+    assert.match(out.error, /has 1 free account\(s\) and the order needs 2/);
+  });
+});
+
+test("a listing with no stock source at all is still skipped quietly: it is filled by hand", async () => {
+  const manual = row({ externalId: "G1", origin: "manual", units: [] });
+  const e = env({ rows: [manual] });
+  await run(e, async (g) => {
+    const out = await g.deliverOrder({ orderItemId: "ORD-4", offerId: "G1", purchasedQty: 1, deliveredQty: 0 }, { dryRun: false });
+    assert.match(out.skipped, /^manual-delivery listing/);
+    assert.equal(out.error, undefined);
   });
 });
