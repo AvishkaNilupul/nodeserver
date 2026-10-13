@@ -51,6 +51,9 @@ const FIRST_DELAY_MS = 2 * 60 * 1000;
 const EVENT_CATEGORY = "marketplace";
 const REMINDER_ACTION = "eldorado_login_reminder";
 const SEEN_ACTION = "eldorado_login_seen";
+const UNREADABLE_ACTION = "eldorado_login_unreadable";
+// A stored cookie whose sign-in time cannot be read is said at most this often.
+const UNREADABLE_REMIND_MS = 7 * DAY_MS;
 
 // ---------------------------------------------------------------------------
 // Pure parts
@@ -138,6 +141,16 @@ function reminderText(stage, authMs, now) {
   );
 }
 
+// A cookie is stored but its sign-in time cannot be read, so no reminder can
+// ever fire: the owner has to know he is NOT being watched over.
+const UNREADABLE_TEXT =
+  "⚠️ Eldorado login reminder: the stored cookie has no readable sign-in time, so " +
+  "nothing can warn before the 30-day limit.\n\n" +
+  "If Eldorado orders are still being delivered, the login itself works. Paste a " +
+  "fresh, complete Cookie request header (Listings → Marketplace keys → Eldorado). " +
+  "If this message comes back after that, Eldorado has changed its cookie and the " +
+  "reminder needs a fix.";
+
 function newLoginText(authMs, now) {
   const limit = limitMs(authMs);
   const left = limit - now;
@@ -216,6 +229,25 @@ const REAL = {
       meta: { authTime: authMs, stage: stage || "", limit: limitMs(authMs) },
     });
   },
+  // When the "sign-in time cannot be read" line was last sent (0 = never).
+  lastUnreadableAt: async () => {
+    const SystemEvent = require("../models/SystemEvent");
+    const row = await SystemEvent.findOne({ category: EVENT_CATEGORY, action: UNREADABLE_ACTION }, { at: 1 })
+      .sort({ at: -1 })
+      .lean();
+    return row && row.at ? new Date(row.at).getTime() : 0;
+  },
+  recordUnreadable: async () => {
+    const SystemEvent = require("../models/SystemEvent");
+    await SystemEvent.create({
+      category: EVENT_CATEGORY,
+      action: UNREADABLE_ACTION,
+      actor: "eldoradoSessionWatch",
+      severity: "warn",
+      subject: "Eldorado",
+      detail: "the stored cookie has no readable __Host-EldoradoIdToken; the 30-day limit cannot be predicted",
+    });
+  },
   send: (text) => require("./telegram").sendTelegram(text),
 };
 function dep(name) {
@@ -236,12 +268,35 @@ async function deliver(text) {
   }
 }
 
-// What THIS process already sent ("<sign-in>" for the login-updated line,
-// "<sign-in>|<stage>" for a reminder): if the event cannot be written, the
-// same message must still not repeat every tick.
-const announced = new Set();
-const sentHere = new Set();
+// What THIS process already sent: if the event cannot be written, the same
+// message must still not repeat every tick.
+let lastAnnounced = null; // the sign-in whose "login updated" line went last
+const sentHere = new Set(); // "<sign-in>|<stage>" of every reminder sent
 let noTokenLogged = false;
+let unreadableSaidAt = 0;
+
+// A cookie without a readable sign-in time: said once a week, restarts included.
+async function sayUnreadable(now) {
+  if (unreadableSaidAt && now - unreadableSaidAt < UNREADABLE_REMIND_MS) return false;
+  let last = 0;
+  try {
+    last = (await dep("lastUnreadableAt")()) || 0;
+  } catch {
+    last = 0;
+  }
+  if (last && now - last < UNREADABLE_REMIND_MS) {
+    unreadableSaidAt = last;
+    return false;
+  }
+  if (!(await deliver(UNREADABLE_TEXT))) return false; // not taken: next tick
+  unreadableSaidAt = now;
+  try {
+    await dep("recordUnreadable")();
+  } catch (e) {
+    console.error("eldorado login reminder: could not record the unreadable-cookie notice:", (e && e.message) || e);
+  }
+  return true;
+}
 
 async function check() {
   const af = dep("autoFarm")();
@@ -264,7 +319,8 @@ async function check() {
           "the 30-day limit cannot be predicted",
       );
     }
-    return { skipped: "no sign-in time in the stored cookie" };
+    const said = await sayUnreadable(dep("now")());
+    return { skipped: "no sign-in time in the stored cookie", ...(said ? { sent: ["unreadable"] } : {}) };
   }
   noTokenLogged = false;
 
@@ -279,9 +335,11 @@ async function check() {
   const prev = await dep("lastSeenAuth")();
   if (prev === null) {
     await dep("record")(SEEN_ACTION, authMs, "", "first look: signed in " + new Date(authMs).toISOString());
-  } else if (prev !== authMs && !announced.has(authMs)) {
-    announced.add(authMs);
+  } else if (prev !== authMs && lastAnnounced !== authMs) {
+    // Only the LAST one announced is remembered: going back to an older
+    // cookie and forward again is confirmed each time.
     if (await deliver(newLoginText(authMs, now))) {
+      lastAnnounced = authMs;
       out.sent.push("new-login");
       await dep("record")(
         SEEN_ACTION,
@@ -294,9 +352,8 @@ async function check() {
         await dep("record")(REMINDER_ACTION, authMs, stage.key, "covered by the new-login message", "info");
         return out;
       }
-    } else {
-      announced.delete(authMs); // not delivered: next tick tries again
     }
+    // Not delivered: nothing was remembered, so the next tick tries again.
   }
 
   if (!stage) return out;
@@ -356,8 +413,9 @@ module.exports = {
   },
   _reset: () => {
     deps = {};
-    announced.clear();
+    lastAnnounced = null;
     sentHere.clear();
     noTokenLogged = false;
+    unreadableSaidAt = 0;
   },
 };

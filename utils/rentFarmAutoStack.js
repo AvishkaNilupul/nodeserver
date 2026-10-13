@@ -17,10 +17,20 @@
 // and starts it (utils/operatorFarm.farmFreshAccounts).
 //
 // It only ever ADDS room, and refuses whenever it cannot be sure room is what
-// is missing: a host that could not be read, the holder's account limit being
-// the nearer wall, a host short of memory, or too many stacks added in a day.
-// When it is switched on, needs a stack and may not add one, it says why
-// (once a day) — the runway page alone would read as "it is being handled".
+// is missing:
+//   - a host that could not be read, or the holder's account limit being the
+//     nearer wall;
+//   - a "short" reading seen once only: a stack whose config could not be read
+//     this tick is simply missing from the listing, which looks the same as a
+//     full farm, so the slots must read short on two ticks in a row;
+//   - a host short of memory. A stack that has not started yet uses nothing
+//     until its first order, so the memory it WILL need is counted too: free
+//     memory, less a share for every stack not yet started and for the new
+//     one, must leave the floor.
+// When it is switched on, needs a stack and may not add one, it says why —
+// once a day per reason, and only counted as said once Telegram took it. The
+// runway page alone would read as "it is being handled". An add that failed is
+// not tried again for six hours: each try costs a slot number.
 //
 // Off unless autoFarm.rentFarmAutoStack is true. Settings (all autoFarm.*,
 // read every tick, no restart):
@@ -29,17 +39,28 @@
 //   rentFarmAutoStackMinFree       ... and never fewer than this many slots (40)
 //   rentFarmAutoStackCapacity      slots in a new stack, 1-100 (50)
 //   rentFarmAutoStackMaxPerDay     stacks added per 24 h on the host, by anyone (3)
-//   rentFarmAutoStackMinHostFreeMb host memory a new stack needs to see free (2000)
+//   rentFarmAutoStackMinHostFreeMb host memory that must stay free (2000; 0 = do not look)
+//   rentFarmAutoStackPerStackMb    memory one full stack is counted as (300)
 //   rentFarmAutoStackMaxStacks     rental stacks on the host, in all (40)
 //   rentFarmAutoStackHost          host id; default = where the holder's stack is
 
 const DAY_MS = 24 * 60 * 60 * 1000;
+const HOUR_MS = 60 * 60 * 1000;
 const HOLDER_USERNAME = "operator-selffarm";
 // Under this many days of slots the day's limit on new stacks is worth the
 // owner's attention (the watchdog's own runway warning starts at the same
 // line, rentFarmCapacity.WARN_DAYS). Above it the limit only means "the rest
 // tomorrow" and nothing is said.
 const URGENT_DAYS = 10;
+// The slots must read short on this many ticks in a row before a stack is made.
+const CONFIRM_TICKS = 2;
+// A failed add is not tried again sooner than this.
+const RETRY_AFTER_FAIL_MS = 6 * HOUR_MS;
+const BLOCKED_REMIND_MS = DAY_MS;
+
+const BLOCKED_ACTION = "rent_farm_stack_blocked";
+const FAILED_ACTION = "rent_farm_stack_add_failed";
+const ADDED_ACTION = "rent_farm_stack_added";
 
 const DEFAULTS = {
   enabled: false,
@@ -48,6 +69,7 @@ const DEFAULTS = {
   capacity: 50,
   maxPerDay: 3,
   minHostFreeMb: 2000,
+  perStackMb: 300,
   maxStacks: 40,
   host: "",
 };
@@ -68,6 +90,7 @@ function config(af) {
     capacity: Math.floor(num(a.rentFarmAutoStackCapacity, DEFAULTS.capacity, 1, 100)),
     maxPerDay: Math.floor(num(a.rentFarmAutoStackMaxPerDay, DEFAULTS.maxPerDay, 1, 20)),
     minHostFreeMb: Math.floor(num(a.rentFarmAutoStackMinHostFreeMb, DEFAULTS.minHostFreeMb, 0, 1000000)),
+    perStackMb: Math.floor(num(a.rentFarmAutoStackPerStackMb, DEFAULTS.perStackMb, 0, 5000)),
     maxStacks: Math.floor(num(a.rentFarmAutoStackMaxStacks, DEFAULTS.maxStacks, 1, 500)),
     host: String(a.rentFarmAutoStackHost || "").trim(),
   };
@@ -78,12 +101,15 @@ function round1(n) {
 }
 
 // PURE. What this tick should do.
-//   { add: true, why }                    add one stack
-//   { add: false, why }                   nothing to do / not safe to judge
-//   { add: false, why, blocked: reason }  a stack IS needed and may not be added
+//   { add: true, why }                            add one stack
+//   { add: false, why, enough: true }             there is room: nothing to do
+//   { add: false, why }                           not safe to judge this tick
+//   { add: false, why, blocked, reason }          a stack IS needed and may not be added
 // `blocked` is what gets said to the owner; a state that clears by itself (an
 // unread host, unknown memory) is never one.
-function decide({ cfg, snap, runway, hostId, hostStacks, addedLast24h, hostFreeMb, gate }) {
+//   hostKnown  false = the host id is in no host list (null/undefined = not asked)
+//   unstarted  stacks on the host that hold no accounts and run no container yet
+function decide({ cfg, snap, runway, hostId, hostKnown, hostStacks, unstarted, addedLast24h, hostFreeMb, gate }) {
   if (!cfg || !cfg.enabled) return { add: false, why: "off" };
   if (!snap) return { add: false, why: "no capacity reading this tick" };
   if (snap.withheld || (snap.offlineHosts || []).length) {
@@ -97,7 +123,7 @@ function decide({ cfg, snap, runway, hostId, hostStacks, addedLast24h, hostFreeM
   const days = runway && Number.isFinite(runway.slotDays) && runway.slotDays >= 0 ? runway.slotDays : null;
   const short = free < cfg.minFree || (days !== null && days < cfg.targetDays);
   const room = free + " slot(s) free" + (days !== null ? ", about " + round1(days) + " day(s)" : "");
-  if (!short) return { add: false, why: "enough room (" + room + ")" };
+  if (!short) return { add: false, enough: true, why: "enough room (" + room + ")" };
 
   if (!hostId) {
     return { add: false, why: "the rent-farm holder has no stack yet, so there is no host to add one on" };
@@ -106,14 +132,25 @@ function decide({ cfg, snap, runway, hostId, hostStacks, addedLast24h, hostFreeM
     return {
       add: false,
       why: room + ", but the holder's stacks are on the web server itself",
+      reason: "local",
       blocked: "the holder's stacks are on the web server itself, where a stack is not added " +
         "automatically. Add one by hand, or set rentFarmAutoStackHost to a bot host.",
+    };
+  }
+  if (hostKnown === false) {
+    return {
+      add: false,
+      why: room + ', but "' + hostId + '" is not a bot host this server knows',
+      reason: "unknown-host",
+      blocked: 'the bot host "' + hostId + '" is not in this server\'s host list. Check ' +
+        "rentFarmAutoStackHost: it must be a host id, not a label.",
     };
   }
   if (Number(hostStacks) >= cfg.maxStacks) {
     return {
       add: false,
       why: room + ", but " + hostId + " already has " + hostStacks + " rental stacks",
+      reason: "max-stacks",
       blocked: hostId + " already has " + hostStacks + " rental stacks (limit " + cfg.maxStacks +
         ", rentFarmAutoStackMaxStacks).",
     };
@@ -125,6 +162,7 @@ function decide({ cfg, snap, runway, hostId, hostStacks, addedLast24h, hostFreeM
     return {
       add: false,
       why,
+      reason: "daily-limit",
       blocked: addedLast24h + " stack(s) were already added on " + hostId + " in the last 24 h " +
         "(limit " + cfg.maxPerDay + ", rentFarmAutoStackMaxPerDay). Sales are running ahead of that.",
     };
@@ -133,6 +171,7 @@ function decide({ cfg, snap, runway, hostId, hostStacks, addedLast24h, hostFreeM
     return {
       add: false,
       why: room + ", but " + (gate.reason || "the host's memory gate refuses a new container"),
+      reason: "memory",
       blocked: (gate.reason || hostId + " is short of memory") + ". Another bot host is needed.",
     };
   }
@@ -140,12 +179,23 @@ function decide({ cfg, snap, runway, hostId, hostStacks, addedLast24h, hostFreeM
     if (hostFreeMb === null || hostFreeMb === undefined || !Number.isFinite(Number(hostFreeMb))) {
       return { add: false, why: room + ", but " + hostId + "'s free memory could not be read this tick" };
     }
-    if (Number(hostFreeMb) < cfg.minHostFreeMb) {
+    // What the stacks that have not started yet will take once they fill, and
+    // the new one with them.
+    const waiting = Math.max(0, Math.floor(Number(unstarted) || 0));
+    const promised = (waiting + 1) * cfg.perStackMb;
+    if (Number(hostFreeMb) - promised < cfg.minHostFreeMb) {
+      const sum =
+        hostId + " has " + hostFreeMb + " MB of memory free" +
+        (promised
+          ? ", and " + (waiting ? waiting + " stack(s) not yet started plus " : "") +
+            "the new one will need about " + promised + " MB"
+          : "");
       return {
         add: false,
-        why: room + ", but " + hostId + " has only " + hostFreeMb + " MB of memory free",
-        blocked: hostId + " has only " + hostFreeMb + " MB of memory free (a new stack needs " +
-          cfg.minHostFreeMb + " MB, rentFarmAutoStackMinHostFreeMb). Another bot host is needed.",
+        why: room + ", but " + sum,
+        reason: "memory",
+        blocked: sum + " — that would leave less than the " + cfg.minHostFreeMb +
+          " MB that must stay free (rentFarmAutoStackMinHostFreeMb). Another bot host is needed.",
       };
     }
   }
@@ -156,9 +206,13 @@ function decide({ cfg, snap, runway, hostId, hostStacks, addedLast24h, hostFreeM
 // Reads and writes (injectable)
 // ---------------------------------------------------------------------------
 
-const BLOCKED_REMIND_MS = DAY_MS;
-const BLOCKED_ACTION = "rent_farm_stack_blocked";
-const ADDED_ACTION = "rent_farm_stack_added";
+function newestEventAt(filter) {
+  const SystemEvent = require("../models/SystemEvent");
+  return SystemEvent.findOne(filter, { at: 1 })
+    .sort({ at: -1 })
+    .lean()
+    .then((row) => (row && row.at ? new Date(row.at).getTime() : 0));
+}
 
 let deps = {};
 const REAL = {
@@ -176,33 +230,40 @@ const REAL = {
     if (!h || !h.botFile) return "";
     return String(h.botHost || "local");
   },
+  // Is this a host id the server can reach at all? No network: a table lookup.
+  hostKnown: (hostId) => !!require("./botHosts").resolveHost(hostId),
   // Stacks registered on the host since `since`, whoever made them: the row is
   // the thing that was created, so this cannot miss one the way an event could.
   addedSince: (hostId, since) =>
     require("../models/RenterBotStack").countDocuments({ host: hostId, createdAt: { $gte: new Date(since) } }),
   hostFreeMb: (hostId) => require("./hostCapacity").memAvailableMb(hostId),
   gate: (hostId) => require("./hostCapacity").newContainerAllowed(hostId),
-  // The two calls a person made by hand. Returns { host, file, container }.
+  // The two calls a person made by hand. Returns { host, file, container,
+  // capacity } — `capacity` is what the stack really holds: when the second
+  // call fails the stack still exists, with the registry's default.
   provision: async (hostId, capacity) => {
     const host = require("./botHosts").resolveHost(hostId);
     if (!host) throw new Error("unknown bot host " + hostId);
+    const stacks = require("./renterBotStacks");
     const made = await require("../routes/botConfigRoutes").provisionEmptyConfig(host);
-    const row = await require("./renterBotStacks").setStackCapacity(made.host, made.file, capacity);
-    if (!row) {
-      throw new Error(
-        made.host + "/" + made.file + " was created, but its capacity could not be set to " + capacity +
-          " — it holds the default until that is set on the Renters page",
-      );
+    let capacityError = "";
+    try {
+      const row = await stacks.setStackCapacity(made.host, made.file, capacity);
+      if (!row) capacityError = "its registry row was not found";
+    } catch (e) {
+      capacityError = String((e && e.message) || e);
     }
-    return made;
+    return {
+      host: made.host,
+      file: made.file,
+      container: made.container,
+      capacity: capacityError ? stacks.DEFAULT_CAPACITY : capacity,
+      capacityError,
+    };
   },
-  lastBlockedAt: async () => {
-    const SystemEvent = require("../models/SystemEvent");
-    const row = await SystemEvent.findOne({ category: "renter", action: BLOCKED_ACTION }, { at: 1 })
-      .sort({ at: -1 })
-      .lean();
-    return row && row.at ? new Date(row.at).getTime() : 0;
-  },
+  lastBlockedAt: (reason) =>
+    newestEventAt({ category: "renter", action: BLOCKED_ACTION, "meta.reason": reason }),
+  lastFailedAt: () => newestEventAt({ category: "renter", action: FAILED_ACTION }),
   logEvent: (e) => require("./systemLog").logEvent(e),
   send: (text) => require("./telegram").sendTelegram(text),
 };
@@ -210,11 +271,17 @@ function dep(name) {
   return Object.prototype.hasOwnProperty.call(deps, name) ? deps[name] : REAL[name];
 }
 
-async function say(text) {
+// true = the message reached a chat, or there is no chat to reach (Telegram
+// not set up: nothing to retry). false = it did not go; say it again later.
+async function deliver(text) {
   try {
-    await dep("send")(text);
+    const r = await dep("send")(text);
+    if (r && r.configured === false) return true;
+    if (r && typeof r.sent === "number") return r.sent > 0;
+    return true; // a helper that reports nothing: assume it went
   } catch (e) {
     console.error("rentFarmAutoStack telegram failed:", (e && e.message) || e);
+    return false;
   }
 }
 async function log(event) {
@@ -225,9 +292,12 @@ async function log(event) {
   }
 }
 
-// When this process last said "blocked": the event behind lastBlockedAt is
-// best-effort, and without this a failed write would repeat the page each tick.
-let blockedSaidAt = 0;
+// In-process memory. The events behind lastBlockedAt / lastFailedAt are
+// best-effort, so a failed write must not make a page or a retry repeat every
+// tick; and a restart must not lose them, which is what the events are for.
+const blockedSaid = new Map(); // reason -> ms it was last said (and taken)
+let failedAt = 0; // ms of this process's last failed add
+let shortStreak = 0; // ticks in a row the slots read short
 
 // One pass. `snap` = this tick's rentFarmCapacity.checkOnce result, `runway` =
 // its runwayCheck result (or null). Read-only unless a stack is added.
@@ -236,16 +306,52 @@ async function checkOnce({ snap = null, runway = null, notify = true } = {}) {
   if (!cfg.enabled) return { added: false, why: "off" };
 
   const hostId = cfg.host || (await dep("holderHost")());
-  const hostStacks = ((snap && snap.stacks) || []).filter((s) => String(s.host || "local") === String(hostId)).length;
+  const onHost = ((snap && snap.stacks) || []).filter((s) => String(s.host || "local") === String(hostId));
+  const hostStacks = onHost.length;
+  const unstarted = onHost.filter((s) => s.running === false && !Number(s.used)).length;
   const now = dep("now")();
+  let hostKnown = null;
+  if (hostId && String(hostId) !== "local") {
+    try {
+      hostKnown = !!(await dep("hostKnown")(hostId));
+    } catch {
+      hostKnown = null;
+    }
+  }
+  const ctx = { cfg, hostId, now, notify };
 
   // Ask the host for its memory only when a stack is wanted at all: this first
   // pass assumes plenty of it and nothing added yet.
   const first = decide({
-    cfg, snap, runway, hostId, hostStacks,
+    cfg, snap, runway, hostId, hostKnown, hostStacks, unstarted,
     addedLast24h: 0, hostFreeMb: Number.MAX_SAFE_INTEGER, gate: null,
   });
-  if (!first.add) return finish(first, { cfg, hostId, now, notify });
+  if (!first.add) {
+    // Only a reading that says "there is room" ends a run of short ones; a
+    // tick that could not be judged neither counts nor clears it.
+    if (first.enough) shortStreak = 0;
+    return finish(first, ctx);
+  }
+
+  shortStreak++;
+  if (shortStreak < CONFIRM_TICKS) {
+    return { added: false, why: first.why + " — confirming on the next reading before adding" };
+  }
+
+  // A failed add is not tried again at once.
+  let lastFail = failedAt;
+  try {
+    lastFail = Math.max(lastFail, (await dep("lastFailedAt")()) || 0);
+  } catch {
+    /* unknown: fall back to what this process remembers */
+  }
+  if (lastFail && now - lastFail < RETRY_AFTER_FAIL_MS) {
+    return {
+      added: false,
+      why: "the last attempt to add a stack failed " + Math.max(1, Math.round((now - lastFail) / 60000)) +
+        " min ago — the next try is " + Math.round(RETRY_AFTER_FAIL_MS / HOUR_MS) + " h after it",
+    };
+  }
 
   const [addedLast24h, hostFreeMb, gate] = await Promise.all([
     dep("addedSince")(hostId, now - DAY_MS),
@@ -256,68 +362,108 @@ async function checkOnce({ snap = null, runway = null, notify = true } = {}) {
       .then(() => dep("gate")(hostId))
       .catch(() => null),
   ]);
-  const d = decide({ cfg, snap, runway, hostId, hostStacks, addedLast24h, hostFreeMb, gate });
-  if (!d.add) return finish(d, { cfg, hostId, now, notify });
+  const d = decide({ cfg, snap, runway, hostId, hostKnown, hostStacks, unstarted, addedLast24h, hostFreeMb, gate });
+  if (!d.add) return finish(d, ctx);
 
   let made;
   try {
     made = await dep("provision")(hostId, cfg.capacity);
   } catch (e) {
     const msg = String((e && e.message) || e).slice(0, 300);
+    failedAt = now;
     console.error("rentFarmAutoStack: could not add a stack on " + hostId + ": " + msg);
+    await log({
+      category: "renter",
+      action: FAILED_ACTION,
+      actor: "rentFarmAutoStack",
+      severity: "warn",
+      subject: String(hostId),
+      detail: msg,
+    });
     return finish(
-      { add: false, why: "adding a stack failed: " + msg, blocked: "adding a stack on " + hostId + " failed: " + msg },
-      { cfg, hostId, now, notify },
+      {
+        add: false,
+        why: "adding a stack failed: " + msg,
+        reason: "add-failed",
+        blocked: "adding a stack on " + hostId + " failed: " + msg + " The next try is in " +
+          Math.round(RETRY_AFTER_FAIL_MS / HOUR_MS) + " h.",
+      },
+      ctx,
     );
   }
 
+  const slots = Number(made.capacity) || cfg.capacity;
   const freeBefore = Number(snap.stackFree != null ? snap.stackFree : snap.totalFree) || 0;
   const days = runway && Number.isFinite(runway.slotDays) ? runway.slotDays : null;
   const rate = runway && Number.isFinite(runway.netSlotsPerDay) ? runway.netSlotsPerDay : null;
   const detail =
-    made.host + "/" + made.file + " (" + cfg.capacity + " slots) — free slots were " + freeBefore +
+    made.host + "/" + made.file + " (" + slots + " slots) — free slots were " + freeBefore +
     (days !== null ? ", about " + round1(days) + " day(s)" + (rate ? " at ~" + rate + " a day" : "") : "") +
-    "; now " + (freeBefore + cfg.capacity);
-  console.log("rentFarmAutoStack: added " + detail);
+    "; now " + (freeBefore + slots);
+  // The stack exists either way; a capacity that did not take is said with it.
+  const capNote = made.capacityError
+    ? " ⚠️ Its capacity could not be set to " + cfg.capacity + " (" + String(made.capacityError).slice(0, 120) +
+      "): it holds " + slots + " until that is set on the Renters page."
+    : "";
+  console.log("rentFarmAutoStack: added " + detail + capNote);
   await log({
     category: "renter",
     action: ADDED_ACTION,
     actor: "rentFarmAutoStack",
+    severity: made.capacityError ? "warn" : "info",
     subject: made.host + "/" + made.file,
     host: made.host,
     container: made.container || "",
-    count: cfg.capacity,
-    detail,
+    count: slots,
+    detail: (detail + capNote).slice(0, 480),
   });
   if (notify) {
-    await say(
+    await deliver(
       "➕ Rent-farm: rental stack " + detail + ". It was added automatically and starts with " +
-        "its first order. (Switch: autoFarm.rentFarmAutoStack)",
+        "its first order." + capNote + " (Switch: autoFarm.rentFarmAutoStack)",
     );
   }
-  return { added: true, why: d.why, host: made.host, file: made.file, container: made.container, capacity: cfg.capacity };
+  return {
+    added: true,
+    why: d.why,
+    host: made.host,
+    file: made.file,
+    container: made.container,
+    capacity: slots,
+    ...(made.capacityError ? { capacityError: made.capacityError } : {}),
+  };
 }
 
-// Not added. A reason the owner has to act on is said once a day.
-async function finish(d, { cfg, hostId, now, notify }) {
+// Not added. A reason the owner has to act on is said once a day per reason —
+// and counts as said only once Telegram took it.
+async function finish(d, { hostId, now, notify }) {
   const out = { added: false, why: d.why };
   if (!d.blocked) return out;
   out.blocked = d.blocked;
+  const reason = d.reason || "other";
+  out.reason = reason;
   if (!notify) return out;
-  if (blockedSaidAt && now - blockedSaidAt < BLOCKED_REMIND_MS) return out;
+  const here = blockedSaid.get(reason) || 0;
+  if (here && now - here < BLOCKED_REMIND_MS) return out;
   let last = 0;
   try {
-    last = (await dep("lastBlockedAt")()) || 0;
+    last = (await dep("lastBlockedAt")(reason)) || 0;
   } catch {
     last = 0;
   }
   if (last && now - last < BLOCKED_REMIND_MS) {
-    blockedSaidAt = last;
+    blockedSaid.set(reason, last);
     return out;
   }
-  blockedSaidAt = now;
-  out.paged = true;
   console.error("rentFarmAutoStack: a stack is needed but was not added — " + d.blocked);
+  const taken = await deliver(
+    "⚠️ Rent-farm needs another rental stack and none was added: " + d.blocked +
+      "\n\n(" + d.why + ". The automatic add keeps checking every 30 minutes; this " +
+      "reminder repeats once a day while it lasts.)",
+  );
+  if (!taken) return out; // not said: the next tick says it
+  blockedSaid.set(reason, now);
+  out.paged = true;
   await log({
     category: "renter",
     action: BLOCKED_ACTION,
@@ -325,12 +471,8 @@ async function finish(d, { cfg, hostId, now, notify }) {
     severity: "warn",
     subject: String(hostId || ""),
     detail: (d.why + " | " + d.blocked).slice(0, 480),
+    meta: { reason },
   });
-  await say(
-    "⚠️ Rent-farm needs another rental stack and none was added: " + d.blocked +
-      "\n\n(" + d.why + ". The automatic add keeps trying every 30 minutes and this " +
-      "reminder repeats once a day while it lasts.)",
-  );
   return out;
 }
 
@@ -340,12 +482,17 @@ module.exports = {
   config,
   DEFAULTS,
   URGENT_DAYS,
+  CONFIRM_TICKS,
+  RETRY_AFTER_FAIL_MS,
   // testing seams
   __setDeps: (d) => {
     deps = { ...deps, ...(d || {}) };
   },
+  __real: REAL,
   _reset: () => {
     deps = {};
-    blockedSaidAt = 0;
+    blockedSaid.clear();
+    failedAt = 0;
+    shortStreak = 0;
   },
 };

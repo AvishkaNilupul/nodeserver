@@ -35,6 +35,7 @@ function world({ authMs = SIGNED_IN, now = SIGNED_IN + DAY } = {}) {
     cookie: cookieFor(authMs),
     af: {},
     events: [],
+    unreadableAt: 0,
     sent: [],
     reply: { configured: true, sent: 1, failed: 0 },
     restart() {
@@ -52,6 +53,10 @@ function world({ authMs = SIGNED_IN, now = SIGNED_IN + DAY } = {}) {
       lastSeenAuth: async () => (w.events.length ? w.events[w.events.length - 1].authTime : null),
       record: async (action, authTime, stage) => {
         w.events.push({ action, authTime, stage });
+      },
+      lastUnreadableAt: async () => w.unreadableAt,
+      recordUnreadable: async () => {
+        w.unreadableAt = w.now;
       },
       send: async (text) => {
         w.sent.push(text);
@@ -262,15 +267,13 @@ test("a pasted cookie that is already past its limit says so", () => {
   assert.match(text, /already past its 30-day limit/);
 });
 
-test("switched off, unset or unreadable: silent, and never a throw", async () => {
+test("switched off, unset or unreadable settings: silent, and never a throw", async () => {
   const w = world({ now: LIMIT - DAY });
   w.af = { eldoradoLoginReminder: false };
   assert.deepEqual(await watch.check(), { skipped: "off" });
   w.af = {};
   w.cookie = "";
   assert.deepEqual(await watch.check(), { skipped: "not configured" });
-  w.cookie = "cf_clearance=abc; __Host-XSRF-TOKEN=x";
-  assert.deepEqual(await watch.check(), { skipped: "no sign-in time in the stored cookie" });
   watch.__setDeps({
     cookie: () => {
       throw new Error("settings.json is damaged");
@@ -281,6 +284,72 @@ test("switched off, unset or unreadable: silent, and never a throw", async () =>
   assert.deepEqual(w.events, []);
 });
 
+test("REGRESSION: a stored cookie whose sign-in time cannot be read is said — once a week, not kept to the log", async () => {
+  // No reminder can ever fire for such a cookie, and the owner would go on
+  // believing he will be warned.
+  const w = world({ now: LIMIT - DAY });
+  w.cookie = "cf_clearance=abc; __Host-XSRF-TOKEN=x; __Host-EldoradoIdToken=opaque-not-a-jwt";
+  const r = await watch.check();
+  assert.deepEqual(r, { skipped: "no sign-in time in the stored cookie", sent: ["unreadable"] });
+  assert.equal(w.sent.length, 1);
+  assert.match(w.sent[0], /no readable sign-in time, so nothing can warn before the 30-day limit/);
+  assert.deepEqual(w.events, [], "no stage is recorded for a login that could not be read");
+
+  for (let i = 0; i < 4; i++) {
+    w.now += 30 * 60 * 1000;
+    w.restart();
+    assert.deepEqual(await watch.check(), { skipped: "no sign-in time in the stored cookie" });
+  }
+  assert.equal(w.sent.length, 1, "not every tick, and not after every restart");
+  w.now += 7 * DAY;
+  await watch.check();
+  assert.equal(w.sent.length, 2, "again a week later while it lasts");
+
+  // Not taken by Telegram = not said: the next tick says it.
+  const w2 = world({ now: LIMIT - DAY });
+  w2.cookie = "__Host-XSRF-TOKEN=x";
+  w2.reply = { configured: true, sent: 0, failed: 1 };
+  await watch.check();
+  assert.equal(w2.unreadableAt, 0);
+  w2.reply = { configured: true, sent: 1, failed: 0 };
+  await watch.check();
+  assert.equal(w2.sent.length, 2);
+  assert.equal(w2.unreadableAt, w2.now);
+});
+
+test("the unreadable-cookie notice does not repeat every tick when it cannot be recorded", async () => {
+  const w = world({ now: LIMIT - DAY });
+  w.cookie = "__Host-XSRF-TOKEN=x";
+  watch.__setDeps({
+    recordUnreadable: async () => {
+      throw new Error("mongo is down");
+    },
+  });
+  for (let i = 0; i < 4; i++) {
+    await watch.check();
+    w.now += 30 * 60 * 1000;
+  }
+  assert.equal(w.sent.length, 1, "this process remembers that it said it");
+});
+
+test("REGRESSION: going back to an older cookie and forward again is confirmed every time", async () => {
+  const A = SIGNED_IN;
+  const B = SIGNED_IN + 3 * DAY;
+  const w = world({ authMs: A, now: B + HOUR });
+  await watch.check(); // first look at A
+  const paste = async (auth) => {
+    w.cookie = cookieFor(auth);
+    w.now += 10 * 60 * 1000;
+    const r = await watch.check();
+    await watch.check(); // the next tick says nothing more
+    return r.sent;
+  };
+  assert.deepEqual(await paste(B), ["new-login"]);
+  assert.deepEqual(await paste(A), ["new-login"]);
+  assert.deepEqual(await paste(B), ["new-login"], "the same process had confirmed B before — it still says so now");
+  assert.equal(w.sent.length, 3);
+});
+
 test("the reminder has no way to call Eldorado", () => {
   const src = fs.readFileSync(path.join(__dirname, "..", "utils", "eldoradoSessionWatch.js"), "utf8");
   const required = [...src.matchAll(/require\(\s*["']([^"']+)["']\s*\)/g)].map((m) => m[1]).sort();
@@ -289,4 +358,14 @@ test("the reminder has no way to call Eldorado", () => {
     ["../models/SystemEvent", "./secretBox", "./settings", "./telegram"],
     "no marketplace client and no HTTP library: a login check that calls Eldorado can spend the session",
   );
+  // Nor any way round a require: no computed require, no global HTTP client.
+  const code = src
+    .split("\n")
+    .filter((l) => !/^\s*\/\//.test(l))
+    .join("\n");
+  assert.equal((code.match(/\brequire\(/g) || []).length, required.length, "every require names its module literally");
+  assert.doesNotMatch(code, /\bfetch\s*\(|XMLHttpRequest|WebSocket|\bimport\s*\(|child_process|\beval\s*\(|process\.binding/);
+  assert.doesNotMatch(code, /eldorado\.gg\/api|https?:\/\/[^\s"']*eldorado/i, "no Eldorado address to call");
+  // Nothing in it writes the stored session either.
+  assert.doesNotMatch(code, /setKeys|saveSettings|updateSettings|setAutoFarm|writeFile/);
 });
