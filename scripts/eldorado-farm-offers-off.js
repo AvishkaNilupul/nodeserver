@@ -7,6 +7,10 @@
 //   node scripts/eldorado-farm-offers-off.js --resume=off.json            # dry run
 //   node scripts/eldorado-farm-offers-off.js --resume=off.json --apply    # back on sale
 //
+// --resume takes any file with { "done": [offer ids] } and puts those offers
+// back on sale. A rent-farm offer in it is left paused unless --farm-too is
+// given as well: that is the one switch that returns a farming window to sale.
+//
 // Why it exists: Eldorado does not allow a service in an item category, and it
 // reads a farming window as a service ("an actual item / account with the
 // items ready" is what may be sold there). The owner, 2026-10-13: take every
@@ -62,9 +66,12 @@ function buildPlan(offers, farm, { also = new Set() } = {}) {
   return rows;
 }
 
-// The offers a --resume puts back: the ones the named run paused, and only
+// The offers a --resume puts back: the ones the named file lists, and only
 // while they are still Paused (an offer closed or deleted since is left).
-function buildResumePlan(offers, pausedIds) {
+// A rent-farm offer is NOT put back unless `farmToo` says so: the file may be
+// any list of offer ids (the item offers Eldorado paused with the account, for
+// one), and a farming window must never return to sale by riding along in it.
+function buildResumePlan(offers, pausedIds, farm, { farmToo = false } = {}) {
   const want = new Set((pausedIds || []).map(String));
   const rows = [];
   for (const raw of offers || []) {
@@ -73,7 +80,8 @@ function buildResumePlan(offers, pausedIds) {
     const title = String(o.offerTitle || "").trim();
     const state = String(o.offerState || "");
     const row = { id: String(o.id), title, game: gameOf(title), state, action: "skip", why: "" };
-    if (state === "Paused") row.action = "resume";
+    if (!farmToo && farm.FARM_TITLE.test(title)) row.why = "a rent-farm offer: off sale on purpose (--farm-too puts it back)";
+    else if (state === "Paused") row.action = "resume";
     else if (state === "Active") row.action = "already";
     else row.why = "offer is " + (state || "in an unknown state");
     rows.push(row);
@@ -186,8 +194,8 @@ async function main() {
     verb = "resume";
     want = "Active";
     const prior = JSON.parse(fs.readFileSync(resumeFile, "utf8"));
-    rows = buildResumePlan(offers, prior.done || []);
-    console.log("offers the run in " + resumeFile + " paused: " + (prior.done || []).length + " | found " + rows.length);
+    rows = buildResumePlan(offers, prior.done || [], farm, { farmToo: has("farm-too") });
+    console.log("offers named in " + resumeFile + ": " + (prior.done || []).length + " | found on the account " + rows.length);
   } else {
     rows = buildPlan(offers, farm, { also });
     // Everything that is NOT a rent-farm offer, by title, so a service offer
@@ -204,7 +212,7 @@ async function main() {
     }
   }
   const todo = rows.filter((r) => r.action === verb);
-  console.log("rent-farm offers " + rows.length + " | to " + verb + " " + todo.length +
+  console.log((resumeFile ? "offers in the plan " : "rent-farm offers ") + rows.length + " | to " + verb + " " + todo.length +
     " | already " + want.toLowerCase() + " " + rows.filter((r) => r.action === "already").length +
     " | left alone " + rows.filter((r) => r.action === "skip").length);
   const games = new Map();
@@ -252,9 +260,11 @@ async function main() {
     if (!out.stopped) {
       await sleep(3000);
       const after = await listAll();
-      const again = resumeFile ? buildResumePlan(after, out.done.map((r) => r.id)) : buildPlan(after, farm, { also });
+      const again = resumeFile
+        ? buildResumePlan(after, out.done.map((r) => r.id), farm, { farmToo: has("farm-too") })
+        : buildPlan(after, farm, { also });
       stillWrong = again.filter((r) => r.action === verb);
-      console.log("read back: rent-farm offers still to " + verb + " — " + stillWrong.length);
+      console.log("read back: offers still to " + verb + " — " + stillWrong.length);
       for (const r of stillWrong) console.log("  ! " + r.id + "  " + r.state + "  " + r.title);
     }
     await logEvent({
@@ -265,7 +275,8 @@ async function main() {
       subject: "eldorado",
       count: out.done.length,
       detail:
-        "operator-instructed " + verb + " of " + out.done.length + " of " + todo.length + " eldorado rent-farm offer(s)" +
+        "operator-instructed " + verb + " of " + out.done.length + " of " + todo.length +
+        (resumeFile ? " eldorado offer(s) named in " + require("path").basename(resumeFile) : " eldorado rent-farm offer(s)") +
         (verb === "pause" ? " — " + WHY : "") +
         (out.failed.length ? "; " + out.failed.length + " NOT done" : "") +
         (out.stopped ? "; stopped: " + out.stopped : ""),

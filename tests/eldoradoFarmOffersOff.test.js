@@ -67,8 +67,21 @@ test("a resume puts back only what the run paused, and only while it is still Pa
     offer("c", FARM("Rust", "30 Days"), "Active"),
     offer("d", FARM("Rust", "2 Years"), "Closed"),
   ];
-  const got = Object.fromEntries(buildResumePlan(offers, ["a", "c", "d", "gone"]).map((r) => [r.id, r.action]));
+  const got = Object.fromEntries(buildResumePlan(offers, ["a", "c", "d", "gone"], farm, { farmToo: true }).map((r) => [r.id, r.action]));
   assert.deepEqual(got, { a: "resume", c: "already", d: "skip" });
+});
+
+test("a resume never puts a rent-farm offer back unless it is told to", () => {
+  const offers = [
+    offer("farm", FARM("Rust", "120 Days"), "Paused"),
+    offer("pack", "Rust Twitch Drops Automatic Farming 120 Days PACK OF 5 ACCOUNTS", "Paused"),
+    offer("item", "Rust Twitch Drops (4 Items) — Skin + Door", "Paused"),
+  ];
+  const plain = buildResumePlan(offers, ["farm", "pack", "item"], farm);
+  assert.deepEqual(Object.fromEntries(plain.map((r) => [r.id, r.action])), { farm: "skip", pack: "skip", item: "resume" });
+  assert.match(plain.find((r) => r.id === "farm").why, /rent-farm offer/);
+  const told = buildResumePlan(offers, ["farm", "pack", "item"], farm, { farmToo: true });
+  assert.deepEqual(Object.fromEntries(told.map((r) => [r.id, r.action])), { farm: "resume", pack: "resume", item: "resume" });
 });
 
 test("a pause counts only when Eldorado shows the offer Paused", async () => {
@@ -143,7 +156,7 @@ test("a lapsed token is waited out, not treated as a failure", async () => {
 
 test("a resume goes through the same rules, towards Active", async () => {
   const states = { __to: "Active", a: "Paused", b: "Paused" };
-  const rows = buildResumePlan([offer("a", FARM("Rust", "1 Year"), "Paused"), offer("b", FARM("Rust", "30 Days"), "Paused")], ["a"]);
+  const rows = buildResumePlan([offer("a", FARM("Rust", "1 Year"), "Paused"), offer("b", FARM("Rust", "30 Days"), "Paused")], ["a"], farm, { farmToo: true });
   const f = io(states);
   const out = await applyPlan(rows, "resume", "Active", f);
   assert.deepEqual(out.done.map((r) => r.id), ["a"]);
