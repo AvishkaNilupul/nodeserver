@@ -95,10 +95,21 @@ test("a sale that landed after the plan keeps its account: the units are read ag
   assert.equal(out.released, 1);
 });
 
+test("G2G's lists trail a delist by a few seconds: the status is asked again before giving up", async () => {
+  const rows = { G1: row({ units: [free("a")] }) };
+  let reads = 0;
+  const io = fakeIo({ rows, statusAfterDelist: () => (++reads < 3 ? "unreadable (404)" : "delisted") });
+  const out = await retire(plans(rows), io, { gapMs: 5, statusTries: 4, statusWaitMs: 7 });
+  assert.equal(reads, 3);
+  assert.deepEqual(io.slept, [7, 7]);
+  assert.deepEqual(io.calls, ["delist G1", "close G1", "release a of S1", "pull a from G1"]);
+  assert.equal(out.done.length, 1);
+});
+
 test("an offer G2G still shows on sale is not closed and nothing is handed back", async () => {
   const rows = { G1: row({ units: [free("a")] }) };
   const io = fakeIo({ rows, statusAfterDelist: () => "live" });
-  const out = await retire(plans(rows), io, { gapMs: 5 });
+  const out = await retire(plans(rows), io, { gapMs: 5, statusTries: 2, statusWaitMs: 1 });
   assert.deepEqual(io.calls, ["delist G1"]);
   assert.match(out.failed[0].error, /still shows it "live"/);
   assert.equal(out.released, 0);

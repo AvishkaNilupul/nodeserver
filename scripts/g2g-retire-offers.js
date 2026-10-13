@@ -64,7 +64,7 @@ function planRow(row, { allowSold = false, pendingOfferIds = new Set() } = {}) {
 // closeRow(id, note), freshRow(id), release(accountIds, setId), pullUnits(id,
 // accountIds), sleep(ms), log(line) } — the real calls in main(), fakes in
 // tests/g2gRetireOffers.test.js.
-async function retire(plans, io, { why = "", gapMs = 2500 } = {}) {
+async function retire(plans, io, { why = "", gapMs = 2500, statusTries = 6, statusWaitMs = 4000 } = {}) {
   const todo = plans.filter((p) => p.action === "retire");
   const out = { done: [], failed: [], released: 0, stopped: "" };
   let streak = 0;
@@ -72,7 +72,14 @@ async function retire(plans, io, { why = "", gapMs = 2500 } = {}) {
     const p = todo[i];
     try {
       await io.delist(p.id);
-      const st = await io.status(p.id);
+      // G2G's lists trail a status change by a few seconds: an offer just
+      // delisted is in neither the live nor the delisted list for a moment.
+      let st = "";
+      for (let t = 1; t <= statusTries; t++) {
+        st = await io.status(p.id);
+        if (st === "delisted") break;
+        if (t < statusTries) await io.sleep(statusWaitMs);
+      }
       if (st !== "delisted") throw new Error('G2G still shows it "' + st + '" after the delist');
       const closed = await io.closeRow(p.id, why);
       if (!closed) throw new Error("delisted on G2G, but the row was no longer active — left as it is, look at it by hand");
