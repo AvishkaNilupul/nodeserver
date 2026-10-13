@@ -150,3 +150,15 @@ test("one offer per game per term it may be sold for; a title already on the acc
   ]);
   assert.equal(plan[0].brand.brandId, "b1");
 });
+
+test("--terms narrows a run and never adds a term a game may not be sold for", () => {
+  const resolved = [
+    { game: "Rust", brand: { brandId: "b1" }, shape: {} },
+    { game: "Warframe", brand: { brandId: "b2" }, shape: {} },
+  ];
+  const short = (plan) => plan.map((p) => p.game + " " + p.tier.days);
+  assert.deepEqual(short(planFor(resolved, new Set(), [730])), ["Rust 730", "Warframe 730"]);
+  // Rust is not sold for 30 days, so asking for 30 gives Warframe only
+  assert.deepEqual(short(planFor(resolved, new Set(), [30])), ["Warframe 30"]);
+  assert.equal(planFor(resolved, new Set(), []).length, 9);
+});

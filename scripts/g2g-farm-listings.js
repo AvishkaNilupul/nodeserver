@@ -5,6 +5,7 @@
 //   node scripts/g2g-farm-listings.js                    # dry run
 //   node scripts/g2g-farm-listings.js --apply
 //   node scripts/g2g-farm-listings.js --games="Rust,Warframe" --apply
+//   node scripts/g2g-farm-listings.js --games="Rust" --terms=730 --apply   # one offer first
 //   node scripts/g2g-farm-listings.js --limit=5 --apply
 //
 // Sibling of scripts/pa-farm-listings.js and eldorado-farm-listings.js. Two
@@ -55,6 +56,11 @@ const MIN_TASKS = parseInt(val("--min-tasks", "3"), 10) || 3;
 const DAYS_BACK = parseInt(val("--days-back", "90"), 10) || 90;
 const LIMIT = parseInt(val("--limit", "0"), 10) || 0;
 const DELAY_MS = parseInt(val("--delay", "4000"), 10) || 4000;
+// --terms=30,730 keeps only those terms (in days) of what a game may be sold for.
+const TERMS = String(val("--terms", "") || "")
+  .split(",")
+  .map((x) => parseInt(x, 10))
+  .filter((n) => n > 0);
 
 // Terms and prices. The title term and the description term both come from
 // here so they cannot drift apart — a live Eldorado R6 listing once sold a
@@ -131,11 +137,13 @@ async function farmedGames() {
 }
 
 // Pure. One row per game per term it may be sold for; `skip` when that title
-// is already on the account (`existing`: lower-cased titles).
-function planFor(resolved, existing) {
+// is already on the account (`existing`: lower-cased titles). `terms` (days)
+// narrows the run; it never adds a term the game may not be sold for.
+function planFor(resolved, existing, terms = []) {
   const plan = [];
   for (const r of resolved) {
     for (const t of tiersFor(r.game)) {
+      if (terms.length && !terms.includes(t.days)) continue;
       const ti = title(r.game, t);
       plan.push({ ...r, tier: t, title: ti, skip: existing.has(ti.trim().toLowerCase()) });
     }
@@ -196,8 +204,18 @@ async function main() {
     if (APPLY) throw e;
   }
 
-  const plan = planFor(resolved, existing);
+  const plan = planFor(resolved, existing, TERMS);
   const todo = plan.filter((p) => !p.skip);
+
+  // The delivery method G2G files the offer under, read once per game: the
+  // first one the product allows, which is what g2gPublish would pick on every
+  // single create (one more call each) when it is not told.
+  const delivery = new Map();
+  for (const brandId of new Set(todo.map((p) => p.brand.brandId))) {
+    const st = await mp.g2gProductSettings(mp.G2G_ITEMS_SERVICE, brandId).catch((e) => ({ delivery: [], why: e.message }));
+    delivery.set(brandId, st.delivery.slice(0, 1));
+    if (!st.delivery.length) console.log("note: no delivery method read for " + brandId + (st.why ? " (" + st.why + ")" : ""));
+  }
   console.log(
     "games=" + games.length + "  usable=" + resolved.length +
       "  skipped-game=" + unusable.length + "  planned=" + plan.length +
@@ -207,9 +225,11 @@ async function main() {
     "stock=" + STOCK + "  prices=" + TIERS.map((t) => t.label + " $" + t.price).join(", "),
   );
   for (const r of resolved) {
+    const dm = (delivery.get(r.brand.brandId) || [])[0];
     console.log(
       "  " + r.game + ": " + tiersFor(r.game).map((t) => t.label).join(", ") + " — filed under " +
-        (r.shape.text || "the shelf of our own offer " + (r.shape.learnedFrom || "?")),
+        (r.shape.text || "the shelf of our own offer " + (r.shape.learnedFrom || "?")) +
+        (dm ? " — delivery: " + (dm.label || dm.code || dm.id) : ""),
     );
   }
   for (const [g, why] of unusable.slice(0, 15)) console.log("  skip " + g + ": " + why);
@@ -237,6 +257,7 @@ async function main() {
         priceUsd: p.tier.price,
         qty: STOCK,
         minQty: 1,
+        deliveryMethodIds: (delivery.get(p.brand.brandId) || []).map((d) => d.id),
       });
       ok++;
       console.log("ok   " + p.title + "  $" + p.tier.price + "  " + r.externalId);
