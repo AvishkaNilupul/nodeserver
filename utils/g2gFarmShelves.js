@@ -23,7 +23,9 @@
 // the table falls back to the connector's own rule, and an id G2G has since
 // retired makes the create fail loudly instead of filing the offer elsewhere.
 // Path of Exile 2's "Server" is the current league — move it when the league
-// changes.
+// changes. The Quinfall is not here on purpose: other sellers have offers in
+// it (Server: Chicago - US · Item Type: Others), but G2G answers our create
+// with 400 "product is not found" (2026-10-13), so there is nothing to file.
 const FARM_SHELVES = {
   // Rust — Platform: PC · Item Type: Twitch Drops
   lgc_game_24849: {
@@ -146,15 +148,6 @@ const FARM_SHELVES = {
     game: "Hunt: Showdown 1896",
     relationId: "f1ecdb7f-b23f-4253-a39c-c2fd19eb6fa5",
     fields: [
-    ],
-  },
-  // The Quinfall — Server: Chicago - US · Item Type: Others
-  lgc_game_33779: {
-    game: "The Quinfall",
-    relationId: "cc82c6ab-55e9-4fa8-9a9b-5e57bb0f3c66",
-    fields: [
-      { collection: "lgc_33779_dropdown_13", dataset: "lgc_33779_dropdown_13_61004", label: "Server", value: "Chicago - US" },
-      { collection: "7d70554a", dataset: "11e8fb6c", label: "Item Type", value: "Others" },
     ],
   },
   // Palia — Server: Main Server · Item Type: Others

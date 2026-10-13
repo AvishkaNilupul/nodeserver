@@ -93,7 +93,6 @@ const SHORT_TERM_GAMES = new Set(
     "Dead by Daylight",
     "THE FINALS",
     "Halo Infinite",
-    "The Quinfall",
     "Palia",
   ].map((g) => g.toLowerCase()),
 );
