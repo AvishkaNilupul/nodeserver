@@ -4,7 +4,7 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
 
-const { compare, lines } = require("../scripts/rentfarm-sales-compare");
+const { compare, lines, verdict } = require("../scripts/rentfarm-sales-compare");
 const { parseLadder, gameList } = require("../scripts/reprice-eldorado-farm");
 
 const AT = "2026-01-31T04:00:00Z";
@@ -63,4 +63,14 @@ test("a test still running is compared per day, not total against total", () => 
 test("a quantity that is missing counts as one account", () => {
   const r = run([{ createdAt: new Date(at + H), game: "Rust", days: 30, state: "delivered" }]);
   assert.deepEqual([r.after.accounts, r.after.revenue], [1, 2.5]);
+});
+
+test("the one-line comparison refuses to judge a few hours", () => {
+  const week = [];
+  for (let i = 0; i < 14; i++) week.push(row(-(i + 0.5) * 12 * H, "Rust", 30));
+  assert.match(verdict(run(week, { now: at + 5 * H })), /too early to compare/);
+  assert.match(verdict(run([row(H, "Rust", 30)])), /nothing to compare against/);
+  const r = run(week.concat([row(H, "Rust", 30), row(2 * H, "Rust", 30), row(30 * H, "Rust", 30)]), { now: at + 2 * D });
+  // 2 a day before ($4), 1.5 a day after ($3.75)
+  assert.equal(verdict(r), "per day, after vs before: accounts -25 % · list revenue -6 %");
 });

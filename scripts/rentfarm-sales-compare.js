@@ -67,6 +67,16 @@ function lines(label, w) {
   ];
 }
 
+// The one-line comparison, per day. A few hours of sales say nothing — one
+// busy evening is a third of a day's orders — so under a day it says so.
+function verdict(r) {
+  if (!(r.before.accountsPerDay > 0)) return "nothing sold in the days before — nothing to compare against";
+  if (r.after.spanDays < 1) return "under a day since the change — too early to compare";
+  const pct = (a, b) => (b > 0 ? (a >= b ? "+" : "") + ((a / b - 1) * 100).toFixed(0) + " %" : "n/a");
+  return "per day, after vs before: accounts " + pct(r.after.accountsPerDay, r.before.accountsPerDay) +
+    " · list revenue " + pct(r.after.revenuePerDay, r.before.revenuePerDay);
+}
+
 async function main() {
   const args = process.argv.slice(2);
   const val = (f, d = "") => {
@@ -96,10 +106,7 @@ async function main() {
   console.log(market + " rent-farm, " + days + " days each side of " + at.toISOString().slice(0, 16) + "Z\n");
   console.log(lines("BEFORE", r.before).join("\n") + "\n");
   console.log(lines("AFTER ", r.after).join("\n") + "\n");
-  if (r.before.accountsPerDay > 0 && r.after.spanDays > 0) {
-    const pct = (a, b) => (b > 0 ? ((a / b - 1) * 100 >= 0 ? "+" : "") + ((a / b - 1) * 100).toFixed(0) + " %" : "n/a");
-    console.log("per day, after vs before: accounts " + pct(r.after.accountsPerDay, r.before.accountsPerDay) + " · list revenue " + pct(r.after.revenuePerDay, r.before.revenuePerDay));
-  }
+  console.log(verdict(r));
   return 0;
 }
 
@@ -112,4 +119,4 @@ if (require.main === module) {
     });
 }
 
-module.exports = { compare, lines };
+module.exports = { compare, lines, verdict };
