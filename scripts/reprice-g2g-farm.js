@@ -142,20 +142,40 @@ async function main() {
   const pa = require("../utils/playerauctionsFarmService");
   const { logEvent } = require("../utils/systemLog");
 
+  // The account's offer list answers with the offers on sale only, and without
+  // their stored quantity. So: the delisted ones are asked for by name, and
+  // when a stock is being set each rent-farm offer is read in full first.
   const offers = await mp.g2gListOffers({ pageSize: 100, maxPages: 10 });
+  const seen = new Set(offers.map((o) => String(o.offerId)));
+  const delisted = await mp.g2gListOffers({ pageSize: 100, maxPages: 10, status: mp.G2G_STATUS.DELISTED }).catch((e) => {
+    console.log("note: the delisted offers could not be listed (" + e.message + ") — only offers on sale are covered");
+    return [];
+  });
+  for (const o of delisted) if (!seen.has(String(o.offerId))) offers.push(o);
+  if (stock > 0) {
+    for (const o of offers.filter((o) => farm.FARM_TITLE.test(String(o.title || "")) && !Number.isFinite(Number(o.actualQty)))) {
+      const full = await mp.g2gGetOffer(o.offerId).catch(() => null);
+      if (full && Number.isFinite(Number(full.actual_qty))) o.actualQty = Number(full.actual_qty);
+      await sleep(600);
+    }
+  }
   const rows = planG2g(
     offers,
     { ladder, expect, except: gameList(val("except")), only: gameList(val("only")), limit: parseInt(val("limit", "0"), 10) || 0, stock },
     { FARM_TITLE: farm.FARM_TITLE, termToDays: pa.termToDays },
   );
   const todo = rows.filter((r) => r.action === "reprice" || r.action === "stock");
-  console.log("offers on the account " + offers.length + " | rent-farm offers " + rows.length +
+  console.log("offers on the account " + offers.length + " (" + delisted.length + " delisted) | rent-farm offers " + rows.length +
     " | to change " + todo.length + " (price " + rows.filter((r) => r.action === "reprice").length +
     ", stock only " + rows.filter((r) => r.action === "stock").length + ")" +
     " | already there " + rows.filter((r) => r.action === "already").length +
     " | left alone " + rows.filter((r) => r.action === "skip").length);
   for (const s of summary(rows)) console.log("  " + String(s.days).padStart(3) + " days  " + money(s.from) + " -> " + money(s.to) + "   x" + s.n);
-  if (stock) console.log("  stock topped up to " + stock + " on " + rows.filter((r) => r.stockTo !== null).length + " offer(s)");
+  if (stock) {
+    const unknown = rows.filter((r) => r.action !== "skip" && r.stockFrom === null).length;
+    console.log("  stock topped up to " + stock + " on " + rows.filter((r) => r.stockTo !== null).length + " offer(s)" +
+      (unknown ? " — " + unknown + " offer(s) whose stock could not be read are left as they are" : ""));
+  }
   for (const r of todo) console.log("    " + r.id + "  " + r.state.padEnd(6) + " " + money(r.from) + (r.action === "reprice" ? " -> " + money(r.to) : "         ") + (r.stockTo !== null ? "  stock " + r.stockFrom + " -> " + r.stockTo : "") + "  " + r.title);
   const why = new Map();
   for (const r of rows.filter((r) => r.action === "skip")) why.set(r.why, (why.get(r.why) || []).concat(r));
