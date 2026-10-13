@@ -277,13 +277,17 @@ test("a token is only refreshed early when it is actually near expiry", async ()
 
 /* --------------------------- 4. offer updates --------------------------- */
 
-test("stock is written as actual_qty, and price as unit_price", async () => {
+test("stock is written as qty (G2G takes no other name on an update), and price as unit_price", async () => {
   const { mp, calls } = loadG2G({ respond: () => okBody({ offer_id: "G178" }) });
   await mp.g2gSetQuantity("G178", 7);
 
   assert.strictEqual(calls.length, 1);
   assert.strictEqual(calls[0].method, "put");
   assert.strictEqual(calls[0].url, "https://sls.g2g.com/offer/G178");
+  // The offer READS BACK as actual_qty, which is the name this used to send —
+  // and G2G answered 400 "no attributes to be updated" to it alone, and dropped
+  // it without a word next to a price (live, 2026-10-13). `qty` is what sets it.
+  assert.strictEqual(calls[0].body.qty, 7);
   assert.strictEqual(calls[0].body.actual_qty, 7);
   // available_qty is actual_qty minus what checkout is holding — derived, and
   // not settable. Writing it would either be ignored or fight the reservation.
@@ -294,6 +298,15 @@ test("stock is written as actual_qty, and price as unit_price", async () => {
   await priced.mp.g2gReprice("G178", 3.5);
   assert.strictEqual(priced.calls[0].body.unit_price, 3.5);
   assert.ok(!("actual_qty" in priced.calls[0].body), "a reprice touches price only");
+  assert.ok(!("qty" in priced.calls[0].body), "a reprice touches price only");
+
+  // one write may carry both, and then both must be in it
+  const both = loadG2G({ respond: () => okBody({ offer_id: "G178" }) });
+  await both.mp.g2gUpdateOffer("G178", { unitPrice: 3.99, stock: 20 });
+  assert.deepStrictEqual(
+    [both.calls[0].body.unit_price, both.calls[0].body.qty, both.calls[0].body.actual_qty],
+    [3.99, 20, 20],
+  );
 });
 
 test("a sold-out offer can be set to zero stock", async () => {
@@ -301,6 +314,7 @@ test("a sold-out offer can be set to zero stock", async () => {
   // would leave an empty offer advertising stock it cannot deliver.
   const { mp, calls } = loadG2G({ respond: () => okBody({ offer_id: "G178" }) });
   await mp.g2gSetQuantity("G178", 0);
+  assert.strictEqual(calls[0].body.qty, 0);
   assert.strictEqual(calls[0].body.actual_qty, 0);
 });
 

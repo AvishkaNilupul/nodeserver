@@ -3137,13 +3137,22 @@ async function g2gUpdateOffer(offerId, fields) {
     }
     body.unit_price = price;
   }
-  // Stock on a Game Items offer is actual_qty; available_qty is derived
-  // (actual minus whatever checkout is holding) and is not settable.
+  // Stock on a Game Items offer READS BACK as actual_qty, but an update only
+  // takes it as `qty`: a PUT carrying actual_qty alone is answered 400 "no
+  // attributes to be updated", and next to another field it is dropped without
+  // a word (the price landed, the stock did not — caught by a read-back on
+  // 2026-10-13; `qty` alone set it). Every caller of g2gSetQuantity swallows
+  // its error, so until then no quantity on the shelf had followed the stock:
+  // 89 of 92 live offers showed a wrong number, and an offer delisted at zero
+  // never came back, because this write, in front of its relist, threw. Both
+  // names are sent, as the create does. available_qty is derived (actual minus
+  // whatever checkout is holding) and is not settable.
   if (f.stock != null && f.stock !== "") {
     const qty = Number(f.stock);
     if (!Number.isFinite(qty) || qty < 0) {
       throw new Error("G2G needs a stock of 0 or more");
     }
+    body.qty = Math.round(qty);
     body.actual_qty = Math.round(qty);
   }
   if (f.title != null) body.title = String(f.title).slice(0, 128);

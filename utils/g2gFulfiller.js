@@ -1224,7 +1224,13 @@ async function realStockFor(row, listedElsewhere) {
   // A by-game offer has nothing it may sell (retired — see
   // eldoradoFulfiller.claimUnclaimedForGame): 0 takes it off sale.
   if (row.unclaimedGame) return 0;
-  if (row.set) {
+  // Only a row that CLAIMS its set at the sale (pickStock's autoClaimSet
+  // branch) is as deep as the archive. A row that merely carries a `set` but
+  // sells pre-reserved units — the auto-lister's G2G share, a bulk pack — can
+  // hand over those units and nothing else: counting the archive for it read
+  // 569 on an offer with one account behind it. It went unnoticed only because
+  // the quantity write never reached G2G (see g2gUpdateOffer).
+  if (row.autoClaimSet && row.set) {
     const DropSet = require("../models/DropSet");
     const { availableAccountsForSet } = require("../routes/shopRoutes");
     const { notListed } = require("./listedLogins");
@@ -1246,11 +1252,22 @@ async function realStockFor(row, listedElsewhere) {
 // other platforms — so a listing left at its published quantity oversells.
 // Counting must match how the CLAIMER counts, not the raw availability: an
 // account already attached to a live listing elsewhere is not sellable here.
+// The quantity this process last put on each offer. Most passes find most
+// offers unchanged, and repeating the number is one more write on the seller
+// login per offer per pass. So a number already written is not sent again —
+// except on every REASSERT_EVERY-th pass (6 hours), which writes them all in
+// case G2G's own counter drifted, and whenever an offer is being brought back
+// on sale. A restart forgets it, so the first pass after one writes them all.
+const lastQtyWritten = new Map();
+const REASSERT_EVERY = 24;
+let stockPasses = 0;
+
 async function syncStock() {
   const af = getAutoFarm() || {};
   if (!af.g2gAuto && !af.g2gAutoDeliver) return { skipped: "g2g is off" };
   if (af.g2gSyncStock === false) return { skipped: "g2gSyncStock is off" };
   const dryRun = af.g2gDeliverDryRun !== false;
+  const reassert = stockPasses++ % REASSERT_EVERY === 0;
 
   // Offer-backed rows carry origin:"manual" on purpose (contract B5, so that no
   // future repricer can touch owner-supplied stock), but pausing themselves when
@@ -1334,26 +1351,62 @@ async function syncStock() {
       changes.push({ offer: row.externalId, skipped: "no longer active" });
       continue;
     }
+    const offerKey = String(row.externalId);
     try {
       if (real <= 0) {
+        const again = !!row.autoPaused;
         await mp.g2gDelist(row.externalId);
         row.autoPaused = true;
         await row.save();
-        changes.push({ offer: row.externalId, delisted: true });
+        lastQtyWritten.delete(offerKey);
+        changes.push({ offer: row.externalId, delisted: true, ...(again ? { again: true } : {}) });
       } else {
-        await mp.g2gSetQuantity(row.externalId, real);
-        if (row.autoPaused && bulkLive) {
-          await mp.g2gRelist(row.externalId);
-          row.autoPaused = false;
-          await row.save();
+        const bringBack = !!(row.autoPaused && bulkLive);
+        if (!bringBack && !reassert && lastQtyWritten.get(offerKey) === real) {
+          changes.push({ offer: row.externalId, unchanged: real });
+        } else {
+          await mp.g2gSetQuantity(row.externalId, real);
+          lastQtyWritten.set(offerKey, real);
+          if (bringBack) {
+            await mp.g2gRelist(row.externalId);
+            row.autoPaused = false;
+            await row.save();
+          }
+          changes.push({ offer: row.externalId, set: real, ...(bringBack ? { relisted: true } : {}) });
         }
-        changes.push({ offer: row.externalId, set: real });
       }
     } catch (e) {
+      // Not known to be on the offer any more: the next pass writes it again.
+      lastQtyWritten.delete(offerKey);
       changes.push({ offer: row.externalId, error: e.message });
     }
   }
   return { checked: rows.length, changes, dryRun };
+}
+
+// What a pass did, said only when it did something or could not. The loop used
+// to drop the result, which is how a write G2G refused on every offer, every
+// pass, left no line anywhere for a month.
+function reportStockSync(r) {
+  const changes = (r && r.changes) || [];
+  const failed = changes.filter((c) => c && c.error);
+  const set = changes.filter((c) => c && c.set != null).length;
+  const relisted = changes.filter((c) => c && c.relisted).length;
+  const delisted = changes.filter((c) => c && c.delisted && !c.again).length;
+  if (set || relisted || delisted) {
+    console.log(
+      "g2g stock sync: " + set + " quantity write(s), " + relisted + " relisted, " +
+        delisted + " delisted, of " + r.checked + " offer(s)",
+    );
+  }
+  if (failed.length) {
+    console.error(
+      "g2g stock sync: " + failed.length + " of " + r.checked + " offer(s) could not be updated — " +
+        failed[0].offer + ": " + failed[0].error +
+        (failed.length > 1 ? " (+" + (failed.length - 1) + " more)" : ""),
+    );
+  }
+  return { set, relisted, delisted, failed: failed.length };
 }
 
 let started = false;
@@ -1377,7 +1430,7 @@ function start() {
   // Both loops self-guard on the autoFarm flags, so starting them
   // unconditionally is a no-op until the operator flips them on.
   loop(deliverPendingOrders, DELIVER_TICK_MS, 75 * 1000, "fulfiller");
-  loop(syncStock, STOCK_TICK_MS, 6 * 60 * 1000, "stock sync");
+  loop(async () => reportStockSync(await syncStock()), STOCK_TICK_MS, 6 * 60 * 1000, "stock sync");
   loop(sweepConfirmedFarmOrders, CONFIRM_SWEEP_MS, 4 * 60 * 1000, "farm confirm sweep");
   loop(sweepDeliveryProofs, PROOF_SWEEP_MS, 3 * 60 * 1000, "proof sweep");
 }
@@ -1567,6 +1620,11 @@ module.exports = {
   confirmOnG2g,
   realStockFor,
   syncStock,
+  reportStockSync,
+  _resetStockState: () => {
+    lastQtyWritten.clear();
+    stockPasses = 0;
+  },
   sweepDeliveryProofs,
   _resetProofState: () => proofState.clear(),
 };
