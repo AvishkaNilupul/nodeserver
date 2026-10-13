@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // Publish the "Twitch Drops Automatic Farming" service listings on G2G —
-// one offer per game per term (120 / 180 / 365 days).
+// one offer per game per term (30 days to 2 years; see TIERS and tiersFor).
 //
 //   node scripts/g2g-farm-listings.js                    # dry run
 //   node scripts/g2g-farm-listings.js --apply
@@ -17,7 +17,9 @@
 //  2. **The shape gate.** Some products demand attributes (Platform, Server,
 //     Item Type) that cannot be inferred, and a create without them is
 //     rejected. Each brand's shape is resolved ONCE up front so an unlistable
-//     game is reported instead of costing three failed writes.
+//     game is reported instead of costing three failed writes. A game with a
+//     hand-checked shelf (utils/g2gFarmShelves) uses that; any other game
+//     copies one of our own offers, and has none to copy until we list it once.
 //
 // These offers deliberately carry NO MarketplaceListing row: a rent-farm sale
 // is fulfilled by provisioning a pool account, not from stock, and
@@ -32,6 +34,7 @@ const mongoose = require("mongoose");
 
 const mp = require("../utils/marketplaces");
 const { brandForGame } = require("../utils/g2gGames");
+const { farmShelfForBrand } = require("../utils/g2gFarmShelves");
 const { connectFirstOffer, GUARANTEE_ONCE_CONNECTED } = require("../utils/farmHandover");
 
 const args = process.argv.slice(2);
@@ -42,10 +45,12 @@ const val = (f, d) => {
 };
 
 const APPLY = has("--apply");
-// Every rent-farm sale burns a PRISTINE pool account for 120-365 days, and the
+// Every rent-farm sale burns a PRISTINE pool account for the whole term, and the
 // pool is the hard ceiling — those accounts do not come back quickly. Advertise
-// a real number, not a vanity one; raise it with --stock once the pool deepens.
-const STOCK = parseInt(val("--stock", "5"), 10) || 5;
+// a real number, not a vanity one. Nothing refills a farm offer on G2G (it has
+// no listing row for the stock sync to follow), so the number set here only
+// goes down with sales: 5 left a selling offer two sales from empty.
+const STOCK = parseInt(val("--stock", "20"), 10) || 20;
 const MIN_TASKS = parseInt(val("--min-tasks", "3"), 10) || 3;
 const DAYS_BACK = parseInt(val("--days-back", "90"), 10) || 90;
 const LIMIT = parseInt(val("--limit", "0"), 10) || 0;
@@ -53,12 +58,43 @@ const DELAY_MS = parseInt(val("--delay", "4000"), 10) || 4000;
 
 // Terms and prices. The title term and the description term both come from
 // here so they cannot drift apart — a live Eldorado R6 listing once sold a
-// 180-day term while its description promised 120.
+// 180-day term while its description promised 120. The prices are the
+// Eldorado ladder (scripts/eldorado-farm-listings.js): the same window should
+// not be cheaper on one market than the other. Was 3 / 4 / 7 until 2026-10-13;
+// offers already on sale are moved with scripts/reprice-g2g-farm.js.
 const TIERS = [
-  { days: 120, label: "120 Days", price: 3 },
-  { days: 180, label: "180 Days", price: 4 },
-  { days: 365, label: "1 Year", price: 7 },
+  { days: 30, label: "30 Days", price: 2.49 },
+  { days: 120, label: "120 Days", price: 3.99 },
+  { days: 180, label: "180 Days", price: 4.99 },
+  { days: 365, label: "1 Year", price: 8.99 },
+  { days: 730, label: "2 Years", price: 13.99 },
 ];
+
+// A 30-day window is only sold where the game's campaigns come close enough
+// together that the buyer sees one. A buyer who logs in to an empty account
+// opens a dispute within the hour: Rocket League (2-5 hour campaigns, up to 39
+// days apart) was 5 of 9 rent-farm disputes in one week on Eldorado. These are
+// the games whose longest gap between campaigns was 24 days or less in our
+// scanner's records (2026-07-06 to 2026-10-13). A game that is not named here
+// gets the longer terms only — the safe way to be wrong.
+const SHORT_TERM_GAMES = new Set(
+  [
+    "Marvel Rivals",
+    "Brawlhalla",
+    "Warframe",
+    "Albion Online",
+    "Black Desert",
+    "Dead by Daylight",
+    "THE FINALS",
+    "Halo Infinite",
+  ].map((g) => g.toLowerCase()),
+);
+const SHORT_TERM_DAYS = 120;
+
+function tiersFor(game) {
+  const short = SHORT_TERM_GAMES.has(String(game || "").trim().toLowerCase());
+  return TIERS.filter((t) => short || t.days >= SHORT_TERM_DAYS);
+}
 
 // Twitch-native stream gimmicks and non-games: farmable, but nobody buys a
 // farming service for them and they make the shop look padded.
@@ -94,6 +130,19 @@ async function farmedGames() {
   return rows.map((r) => r._id).filter((g) => g && !DENY.test(g));
 }
 
+// Pure. One row per game per term it may be sold for; `skip` when that title
+// is already on the account (`existing`: lower-cased titles).
+function planFor(resolved, existing) {
+  const plan = [];
+  for (const r of resolved) {
+    for (const t of tiersFor(r.game)) {
+      const ti = title(r.game, t);
+      plan.push({ ...r, tier: t, title: ti, skip: existing.has(ti.trim().toLowerCase()) });
+    }
+  }
+  return plan;
+}
+
 async function main() {
   await mongoose.connect(process.env.MONGO_URI || process.env.MONGODB_URI);
 
@@ -115,12 +164,15 @@ async function main() {
       continue;
     }
     if (!shapeCache.has(brand.brandId)) {
+      const shelf = farmShelfForBrand(brand.brandId);
       shapeCache.set(
         brand.brandId,
-        await mp
-          .g2gResolveOfferShape({ brandId: brand.brandId })
-          .then((s) => ({ ok: true, shape: s }))
-          .catch((e) => ({ ok: false, why: e.message })),
+        shelf
+          ? { ok: true, shape: shelf }
+          : await mp
+              .g2gResolveOfferShape({ brandId: brand.brandId })
+              .then((s) => ({ ok: true, shape: s }))
+              .catch((e) => ({ ok: false, why: e.message })),
       );
     }
     const s = shapeCache.get(brand.brandId);
@@ -144,13 +196,7 @@ async function main() {
     if (APPLY) throw e;
   }
 
-  const plan = [];
-  for (const r of resolved) {
-    for (const t of TIERS) {
-      const ti = title(r.game, t);
-      plan.push({ ...r, tier: t, title: ti, skip: existing.has(ti.trim().toLowerCase()) });
-    }
-  }
+  const plan = planFor(resolved, existing);
   const todo = plan.filter((p) => !p.skip);
   console.log(
     "games=" + games.length + "  usable=" + resolved.length +
@@ -160,13 +206,18 @@ async function main() {
   console.log(
     "stock=" + STOCK + "  prices=" + TIERS.map((t) => t.label + " $" + t.price).join(", "),
   );
+  for (const r of resolved) {
+    console.log(
+      "  " + r.game + ": " + tiersFor(r.game).map((t) => t.label).join(", ") + " — filed under " +
+        (r.shape.text || "the shelf of our own offer " + (r.shape.learnedFrom || "?")),
+    );
+  }
   for (const [g, why] of unusable.slice(0, 15)) console.log("  skip " + g + ": " + why);
   if (unusable.length > 15) console.log("  … and " + (unusable.length - 15) + " more skipped");
 
   if (!APPLY) {
     console.log("\nDRY RUN — nothing published. Re-run with --apply.\n");
-    for (const p of todo.slice(0, 12)) console.log("  would create: " + p.title + "  $" + p.tier.price);
-    if (todo.length > 12) console.log("  … and " + (todo.length - 12) + " more");
+    for (const p of todo) console.log("  would create: " + p.title + "  $" + p.tier.price);
     await mongoose.disconnect();
     return;
   }
@@ -199,7 +250,11 @@ async function main() {
   await mongoose.disconnect();
 }
 
-main().catch((e) => {
-  console.error(e);
-  process.exit(1);
-});
+if (require.main === module) {
+  main().catch((e) => {
+    console.error(e);
+    process.exit(1);
+  });
+}
+
+module.exports = { TIERS, SHORT_TERM_GAMES, tiersFor, title, description, planFor };
