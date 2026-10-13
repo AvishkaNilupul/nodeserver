@@ -5,7 +5,7 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
 
-const { toPlanOffer, planG2g, applyG2g } = require("../scripts/reprice-g2g-farm");
+const { toPlanOffer, planG2g, applyG2g, refusal } = require("../scripts/reprice-g2g-farm");
 const { parseLadder, gameList } = require("../scripts/reprice-eldorado-farm");
 const farmService = require("../utils/g2gFarmService");
 const pa = require("../utils/playerauctionsFarmService");
@@ -87,6 +87,23 @@ test("--limit counts the offers it would change, whatever the change", () => {
     { stock: 20, limit: 2 },
   );
   assert.deepEqual(brief(rows), { a: "already", b: "stock [stock 2->20]", c: "reprice [stock 5->20]", d: "skip: over the --limit" });
+});
+
+test("a run that would move a price is refused without --expect; a stock-only top-up is not", () => {
+  // The account holds old hand-made farm offers, delisted at $5 and $6. A
+  // top-up started without --expect took one of them for a row to reprice.
+  const offers = [
+    offer("old", "Albion online Twitch Drops Automatic farming 180 days", 5, { status: "delisted" }),
+    offer("new", T("Albion Online", "180 Days"), 4.99, { actualQty: 4 }),
+  ];
+  const blind = plan(offers, { stock: 20 });
+  assert.deepEqual(brief(blind), { new: "stock [stock 4->20]", old: "reprice [stock 5->20]" });
+  assert.match(refusal(blind, null), /^1 price\(s\) would change and no --expect was given/);
+  // the ladder as its own --expect: nothing is repriced, the old offer is left alone
+  const safe = plan(offers, { stock: 20, expect: NEW });
+  assert.deepEqual(brief(safe), { new: "stock [stock 4->20]", old: "skip: unexpected price $5.00 (expected $4.99)" });
+  assert.equal(refusal(safe, NEW), "");
+  assert.equal(refusal(plan([offer("a", T("Rust", "120 Days"), 3)], { expect: OLD }), OLD), "");
 });
 
 /* --------------------------------- the run -------------------------------- */

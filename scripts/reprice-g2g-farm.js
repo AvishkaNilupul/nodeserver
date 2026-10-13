@@ -14,6 +14,11 @@
 // refused without --force. Operator-instructed, never automatic; to undo, run
 // it again with the two ladders swapped.
 //
+// A run that would move a price needs --expect: the account also holds old
+// hand-made farm offers, delisted at their own prices ($5, $6), and without it
+// a stock top-up "repriced" one of them (2026-10-13; put back the same minute).
+// To top up stock only, give the ladder as its own --expect.
+//
 // --stock=N tops an offer up to N. A farm offer has no listing row, so the
 // stock sync never sees it and its quantity only goes down with sales; this is
 // the one place it is raised. It never lowers a quantity.
@@ -70,6 +75,15 @@ function planG2g(offers, { ladder, expect = null, except, only, limit = 0, stock
     }
   }
   return rows;
+}
+
+// Pure. Why an --apply must not start, or "" when it may.
+function refusal(rows, expect) {
+  const priced = rows.filter((r) => r.action === "reprice").length;
+  if (priced && !expect)
+    return priced + " price(s) would change and no --expect was given — name the prices the offers have now " +
+      "(for a stock-only top-up, give the ladder itself as --expect)";
+  return "";
 }
 
 // One PUT per offer carrying whatever changes, then the read-back. `io` is
@@ -186,6 +200,9 @@ async function main() {
   }
 
   let out = { done: [], failed: [], stopped: "", left: 0 };
+  const no = refusal(rows, expect);
+  if (no) console.log("\n  ⚠ " + no);
+  if (apply && no) throw new Error("not applied: " + no);
   if (!apply) {
     console.log("\nDRY RUN — nothing changed. Re-run with --apply.");
   } else if (todo.length) {
@@ -234,4 +251,4 @@ if (require.main === module) {
     });
 }
 
-module.exports = { toPlanOffer, planG2g, applyG2g, DEFAULTS };
+module.exports = { toPlanOffer, planG2g, applyG2g, refusal, DEFAULTS };
