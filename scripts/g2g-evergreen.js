@@ -206,6 +206,16 @@ async function main() {
         "operator ran the G2G evergreen plan: " + run.rewritten.length + " offer(s) rewritten in place, " + run.retired.length +
         " retired, " + run.published.length + " published" + (run.errors.length ? "; " + run.errors.length + " FAILED" : ""),
     }).catch(() => {});
+    // An order that slipped in between the first look and a delist is still
+    // delivered (delivery finds the row whatever its status) — it is said here
+    // so nobody is surprised by a sale on an offer that just came down.
+    try {
+      const gone = new Set(run.retired.map((r) => String(r.offerId)));
+      const late = (await d.mp.g2gPendingOrders()).filter((x) => x && gone.has(String(x.offerId)));
+      if (late.length) console.log("  ⚠ G2G lists a paid order on " + late.map((x) => x.offerId).join(", ") + " — watch that it is delivered");
+    } catch {
+      console.log("  note: G2G's paid orders could not be re-read after the run");
+    }
     // G2G's lists trail a change by a few seconds.
     await d.sleep(8000);
     audit = await auditShelf(d, MarketplaceListing);
