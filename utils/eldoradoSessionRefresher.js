@@ -35,6 +35,13 @@ function start() {
   // was down is renewed before the first publish or delivery is attempted.
   const t = setTimeout(tick, 30 * 1000);
   if (t.unref) t.unref();
+  // A refresh renews the session, never the 30 days a sign-in is good for.
+  // The reminder for that limit reads the stored cookie only and calls nothing.
+  try {
+    require("./eldoradoSessionWatch").start();
+  } catch (e) {
+    console.error("eldorado login reminder could not start:", e.message);
+  }
 }
 
 module.exports = { start };
