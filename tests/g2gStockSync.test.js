@@ -350,6 +350,17 @@ test("an offer moved to another bundle while the pass ran is left for the next p
   });
 });
 
+test("an offer moved to another set is left for the next pass even when nothing else about it changed", async () => {
+  // The same bundle under another set that has stock (utils/g2gEvergreen's
+  // re-point), read between the move and the relist: still "paused".
+  const bundle = row({ externalId: "G1", set: "S1", autoClaimSet: true, autoPaused: true });
+  const e = env({ rows: [bundle], archive: { S1: [], S2: ["a"] }, fresh: (r) => ({ ...reread(r), set: "S2" }) });
+  await run(e, async (g) => {
+    const out = await g.syncStock();
+    assert.deepEqual([taken(e), out.changes], [[], [{ offer: "G1", skipped: "changed during the pass" }]]);
+  });
+});
+
 test("an offer paused or resumed by somebody else while the pass ran is left for the next pass", async () => {
   const resumed = row({ externalId: "G1", set: "S1", autoPaused: true, units: [unit("a", true)] });
   const e = env({ rows: [resumed], fresh: (r) => ({ ...reread(r), autoPaused: false }) });
@@ -460,6 +471,48 @@ test("a paid order on an offer whose reserved accounts are all gone is an error,
   await run(e2, async (g) => {
     const out = await g.deliverOrder({ orderItemId: "ORD-3", offerId: "G2", purchasedQty: 2, deliveredQty: 0 }, { dryRun: false });
     assert.match(out.error, /has 1 free account\(s\) and the order needs 2/);
+  });
+});
+
+test("an order placed before its offer was rewritten to another bundle is held for a hand-over", async () => {
+  // utils/g2gEvergreen never rewrites an offer with a paid order showing — but
+  // G2G can show a payment late. The buyer paid for the old text; the row now
+  // delivers another bundle. No account is claimed for it, and the owner is told
+  // what the buyer paid for.
+  const rewrittenAt = Date.UTC(2026, 9, 13, 8, 0, 0);
+  const moved = row({ externalId: "G1", set: "S5", autoClaimSet: true, rebundledAt: new Date(rewrittenAt) });
+  const e = env({ rows: [moved], archive: { S5: ["a", "b"] } });
+  const claims = [];
+  e.stubs["../utils/eldoradoFulfiller"].claimAccountsForSet = async (...a) => (claims.push(a), []);
+  await run(e, async (g) => {
+    const order = (createdAt) => ({ orderItemId: "ORD-9", offerId: "G1", purchasedQty: 1, deliveredQty: 0, title: "Brawlhalla Twitch Drops (33 Items)", raw: { created_at: createdAt } });
+    const before = await g.deliverOrder(order(rewrittenAt - 60 * 1000), { dryRun: false });
+    assert.match(before.error, /^placed before this offer was rewritten to another bundle — the buyer paid for "Brawlhalla Twitch Drops \(33 Items\)": deliver that by hand, or refund it$/);
+    assert.deepEqual(claims, [], "no account is taken for it");
+    // an order placed after the rewrite bought the new text: delivered as ever
+    const after = await g.deliverOrder(order(rewrittenAt + 1000), { dryRun: false });
+    assert.equal(/placed before/.test(String(after.error || "")), false);
+    assert.equal(claims.length, 1);
+  });
+});
+
+test("only an archive offer that was really rewritten holds an order back", async () => {
+  await run(env(), async (g) => {
+    const at = Date.UTC(2026, 9, 13, 8, 0, 0);
+    const o = (created_at) => ({ title: "old text", raw: { created_at } });
+    const archive = { autoClaimSet: true, set: "S5", rebundledAt: new Date(at) };
+    assert.match(g.orderPredatesRewrite(archive, o(at - 1)), /placed before/);
+    assert.equal(g.orderPredatesRewrite(archive, o(at)), "");
+    assert.equal(g.orderPredatesRewrite(archive, o(at + 1)), "");
+    assert.match(g.orderPredatesRewrite(archive, o(Math.floor((at - 5000) / 1000))), /placed before/, "a time in seconds is read as one");
+    // never rewritten; no time on the order; a no-claim or reserved-units row
+    // (their own passes stamp rebundledAt for a fuller set, which over-delivers)
+    assert.equal(g.orderPredatesRewrite({ autoClaimSet: true, set: "S5", rebundledAt: null }, o(at - 1)), "");
+    assert.equal(g.orderPredatesRewrite(archive, { title: "t", raw: {} }), "");
+    assert.equal(g.orderPredatesRewrite(archive, { title: "t" }), "");
+    assert.equal(g.orderPredatesRewrite({ noclaimStock: true, set: "S5", rebundledAt: new Date(at) }, o(at - 1)), "");
+    assert.equal(g.orderPredatesRewrite({ set: "S5", units: [{}], rebundledAt: new Date(at) }, o(at - 1)), "");
+    assert.equal(g.orderPredatesRewrite(null, o(at - 1)), "");
   });
 });
 

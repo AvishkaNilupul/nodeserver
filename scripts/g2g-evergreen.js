@@ -87,18 +87,30 @@ function describe(a, titleOf = () => "") {
   return "RETIRE   " + a.offerId + "  " + (a.title || "") + " — " + a.why;
 }
 
-// Every row of ours that says "on sale" must be on G2G's live list, and every
-// row the sync paused on its delisted list. Read-only.
+// Our rows against G2G's live list, both ways. Read-only.
+//   - a row that says "on sale" must be live there; one the sync paused must not;
+//   - a live offer whose row is closed is on sale with nothing watching it.
+// (A live offer with no row at all is a rent-farm offer or one made by hand.)
 async function auditShelf(d, MarketplaceListing) {
-  const rows = await MarketplaceListing.find({ marketplace: "g2g", status: "active" }, { externalId: 1, title: 1, autoPaused: 1 }).lean();
-  const live = new Set((await d.mp.g2gListOffers({ pageSize: 100, maxPages: 10 })).map((o) => String(o.offerId)));
+  const rows = await MarketplaceListing.find({ marketplace: "g2g" }, { externalId: 1, title: 1, autoPaused: 1, status: 1, lastError: 1 }).lean();
+  const liveList = await d.mp.g2gListOffers({ pageSize: 100, maxPages: 10 });
+  const live = new Set(liveList.map((o) => String(o.offerId)));
   const wrong = [];
+  let active = 0;
   for (const r of rows) {
     const isLive = live.has(String(r.externalId));
-    if (!r.autoPaused && !isLive) wrong.push({ offerId: r.externalId, title: r.title, why: "our row says on sale, G2G does not list it live" });
-    if (r.autoPaused && isLive) wrong.push({ offerId: r.externalId, title: r.title, why: "our row says paused, G2G lists it live" });
+    if (r.status === "active") {
+      active++;
+      if (!r.autoPaused && !isLive) wrong.push({ offerId: r.externalId, title: r.title, why: "our row says on sale, G2G does not list it live" });
+      if (r.autoPaused && isLive) wrong.push({ offerId: r.externalId, title: r.title, why: "our row says paused, G2G lists it live" });
+    } else if (isLive) {
+      wrong.push({ offerId: r.externalId, title: r.title, why: "LIVE on G2G while our row is " + r.status + " — nothing watches its stock" });
+    }
+    if (r.status === "delisted" && String(r.lastError || "").startsWith("evergreen:")) {
+      wrong.push({ offerId: r.externalId, title: r.title, why: "closed by a rewrite: " + r.lastError });
+    }
   }
-  return { rows: rows.length, live: live.size, wrong };
+  return { rows: active, live: live.size, wrong };
 }
 
 async function main() {
@@ -122,12 +134,19 @@ async function main() {
     o.steps.rescue = false;
   }
 
+  // An offer put on sale — rewritten or published — has to be delivered and
+  // kept in step with stock, by the server. Taking offers down needs neither.
+  if (o.apply && !eg.g2gIsLive(d) && (o.steps.rescue || o.steps.upgrade || o.steps.publish)) {
+    console.log("note: G2G delivery or its stock sync is not live — nothing is rewritten or published in this run.\n");
+    o.steps.rescue = o.steps.upgrade = o.steps.publish = false;
+  }
+
   const games = await eg.readShelf(d, now);
   for (const name of [...o.games, ...o.add]) {
     const brand = d.brandForGame(name);
     if (!brand) throw new Error('"' + name + '" has no G2G brand (utils/g2gGames.js)');
     const key = String(brand.brandId);
-    if (!games.has(key)) games.set(key, { brandId: key, game: name, labels: new Set([name]), rows: [], docs: new Map() });
+    if (!games.has(key)) games.set(key, { brandId: key, game: name, labels: new Set([name]), rows: [], docs: new Map(), sets: new Map() });
   }
   const wanted = o.games.length ? new Set(o.games.map((n) => String(d.brandForGame(n).brandId))) : null;
   const listed = await d.listedLogins();
@@ -168,27 +187,35 @@ async function main() {
       " | publish " + count("publish") + " | offers after " + (before - count("retire") - all.filter((a) => a.absorb).length + count("publish")),
   );
 
-  const run = { rewritten: [], retired: [], published: [], skipped: [], errors: [] };
+  const run = { rewritten: [], retired: [], published: [], skipped: [], errors: [], parked: [], recovered: [] };
   let audit = null;
   if (!o.apply) {
     console.log("\nDRY RUN — nothing changed. Re-run with --apply.");
   } else if (all.length) {
     console.log("");
+    // A rewrite that an earlier run or the server left half done comes first.
+    run.recovered = await eg.recoverParked(d, Date.now());
+    for (const r of run.recovered) console.log("  " + (r.reopened ? "reopened " : "STILL CLOSED ") + r.offerId + ": " + r.why);
+    // Read once for the retires; a rewrite reads its own, at the last moment.
     const paid = await eg.paidOffers(d);
     let left = o.limit || Infinity;
     let streak = 0;
-    outer: for (const p of plans) {
-      for (const a of p.plan.actions) {
-        if (left <= 0) break outer;
-        left--;
-        const r = await eg.runActions(d, [a], p.setsById, { paid, listed, now: Date.now(), minStock: o.minStock }, { log: (l) => console.log("  " + l) });
-        for (const k of Object.keys(run)) run[k].push(...r[k].map((x) => ({ game: p.g.game, ...x })));
-        streak = r.errors.length ? streak + 1 : 0;
-        if (streak >= 3) {
-          console.log("\nSTOPPED: 3 failures in a row");
-          break outer;
-        }
-        await d.sleep(o.gapMs);
+    for (const p of plans) {
+      if (left <= 0) break;
+      const acts = p.plan.actions.slice(0, left);
+      if (!acts.length) continue;
+      left -= acts.length;
+      // One game's plan is one piece (runActions stops it when a step fails).
+      const r = await eg.runActions(d, acts, p.setsById, { paid, listed, now: Date.now(), minStock: o.minStock, gapMs: o.gapMs }, { log: (l) => console.log("  " + l) });
+      for (const k of ["rewritten", "retired", "published", "skipped", "errors", "parked"]) run[k].push(...r[k].map((x) => ({ game: p.g.game, ...x })));
+      if (r.parked.length) {
+        console.log("\nSTOPPED: an offer was left closed — look at it on G2G before anything else is run");
+        break;
+      }
+      streak = r.errors.length ? streak + 1 : 0;
+      if (streak >= 3) {
+        console.log("\nSTOPPED: 3 games in a row with a failure");
+        break;
       }
     }
     console.log(

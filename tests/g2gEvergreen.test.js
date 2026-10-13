@@ -10,7 +10,7 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 
 const eg = require("../utils/g2gEvergreen");
-const { parseArgs, describe } = require("../scripts/g2g-evergreen");
+const { parseArgs, describe, auditShelf } = require("../scripts/g2g-evergreen");
 
 const HOUR = 60 * 60 * 1000;
 const NOW = Date.UTC(2026, 9, 13, 6, 0, 0);
@@ -86,14 +86,20 @@ test("a bigger bundle contains a smaller one only when it holds every item in th
   assert.equal(eg.containsAll(items(3), []), false);
 });
 
-test("only an archive offer this system made is managed; every other shape is somebody else's", () => {
+test("only an archive offer this system made is managed; every other shape and origin is somebody else's", () => {
   const set = setOf("S1", items(3));
   const shapes = ["archive", "units", "noclaim", "bulk", "accountOffer"].map((shape) => {
     const f = fact(listing("G-" + shape, "S1", { shape, free: shape === "units" ? 2 : 0 }), set);
     return [f.shape, f.managed];
   });
   assert.deepEqual(shapes, [["archive", true], ["units", false], ["noclaim", false], ["bulk", false], ["accountOffer", false]]);
-  assert.equal(fact(listing("G-hand", "S1", { origin: "manual" }), set).managed, false);
+  // origin "auto" exactly: by hand, by another lister, or not said at all is not ours
+  for (const origin of ["manual", "unclaimed", ""]) {
+    assert.equal(fact(listing("G-o", "S1", { origin }), set).managed, false, origin);
+  }
+  const noOrigin = listing("G-o", "S1");
+  delete noOrigin.origin;
+  assert.equal(fact(noOrigin, set).managed, false);
   assert.equal(fact(listing("G-off", "S1", { status: "delisted" }), set).managed, false);
 });
 
@@ -105,20 +111,19 @@ test("a row's sales are the accounts a buyer was sent; one an order holds unsent
   assert.equal(delivered.sold, 1);
 });
 
-test("a bundle keeps the price it already has, and a rewritten offer never costs more than it did", () => {
-  const offer = { price: 2.33, size: 33 };
-  // the offer it is taken over from wins over the set
-  assert.equal(eg.priceFor(offer, { price: 1.5, size: 5 }, { price: 1 }, 1), 1);
-  assert.equal(eg.priceFor(offer, { price: 1.5, size: 5 }, null, 1), 1.5);
-  // priced higher than the offer was: capped at the offer's price
-  assert.equal(eg.priceFor(offer, { price: 3, size: 21 }, null, 1), 2.33);
-  // ...a bigger bundle too. One 38-item Halo set carries $6; the offer it
-  // would have replaced sells 22 items at $2.11.
-  assert.equal(eg.priceFor({ price: 2.11, size: 22 }, { price: 6, size: 38 }, null, 1), 2.11);
-  assert.equal(eg.priceFor({ price: 2.11, size: 22 }, { price: 2.49, size: 34 }, { price: 2.49 }, 1), 2.11);
-  // G2G's floor, and no price at all
-  assert.equal(eg.priceFor(offer, { price: 0.75, size: 4 }, null, 1), 1);
-  assert.equal(eg.priceFor(offer, { price: 0, size: 4 }, null, 1), 0);
+test("a bundle goes on an offer at the price it already has: its own offer's, else its set's, never under the floor", () => {
+  assert.equal(eg.priceFor({ price: 1.5 }, { price: 1 }, 1), 1);
+  assert.equal(eg.priceFor({ price: 1.5 }, null, 1), 1.5);
+  assert.equal(eg.priceFor({ price: 6 }, null, 1), 6, "it is not bent to the offer it goes on");
+  assert.equal(eg.priceFor({ price: 0.75 }, null, 1), 1);
+  assert.equal(eg.priceFor({ price: 0 }, null, 1), 0);
+});
+
+test("two descriptions are the same when their words are: G2G drops emoji and spacing, an item list it does not", () => {
+  const ours = "💎 Please check the item list carefully\n\n• Visor\n• Charm  x2";
+  assert.equal(eg.sameDescription(ours, " Please check the item list carefully\n• Visor\n• Charm x2"), true);
+  assert.equal(eg.sameDescription(ours, "💎 Please check the item list carefully\n\n• Visor"), false);
+  assert.equal(eg.sameDescription("", ""), true);
 });
 
 /* ------------------------------- the plan -------------------------------- */
@@ -130,7 +135,7 @@ test("an offer that has sold and ran out moves to the biggest bundle we can stil
   const rows = [fact(listing("G33", "S33", { sold: 14, paused: true, price: 2.33 }), s33, 0)];
   const plan = eg.planGame(rows, [cand(s5, 16), cand(s12, 6)], { rescue: true, floor: 1 });
   assert.deepEqual(brief(plan), ["rescue G33 -> S12 $1.84"]);
-  assert.deepEqual([plan.actions[0].fromSet, plan.actions[0].size, plan.actions[0].stock, plan.actions[0].title], ["S33", 12, 6, ""]);
+  assert.deepEqual([plan.actions[0].fromSet, plan.actions[0].size, plan.actions[0].stock, plan.actions[0].title, plan.actions[0].sameBundle], ["S33", 12, 6, "", false]);
 });
 
 test("the rescue leaves alone everything that does not need it", () => {
@@ -167,6 +172,39 @@ test("a never-sold offer that already sells that bundle is taken over: its text,
   assert.deepEqual(brief(plan), ["rescue G33 -> S5 $1 (takes over G5)"]);
   assert.equal(plan.actions[0].title, "Brawlhalla Twitch Drops (5 Items) — Artemis");
   assert.equal(plan.actions[0].description, "description of G5");
+});
+
+test("a bundle that costs more than the offer does is not moved to: it is named, and left to the owner", () => {
+  // One 38-item Halo set carries $6; the offer it would have gone on sells at
+  // $2.11. Selling 38 items for $2.11, or the offer for $6, is not this file's call.
+  const s22 = setOf("S22", items(22));
+  const s38 = setOf("S38", items(38, "a"), { price: 6 });
+  const s9 = setOf("S9", items(9, "b"), { price: 1.5 });
+  const rows = () => [fact(listing("G22", "S22", { sold: 3, paused: true, price: 2.11 }), s22, 0)];
+  const plan = eg.planGame(rows(), [cand(s38, 21), cand(s9, 12)], { rescue: true, floor: 1 });
+  assert.deepEqual(brief(plan), ["rescue G22 -> S9 $1.5"]);
+  assert.match(plan.notes[0].why, /a bigger bundle \(38 items\) costs \$6, more than this offer's \$2\.11 — left to the owner/);
+  // nothing within its price: it stays off sale, and the owner is told which price is his to set
+  const none = eg.planGame(rows(), [cand(s38, 21)], { rescue: true, floor: 1 });
+  assert.deepEqual(brief(none), []);
+  assert.match(none.notes[0].why, /every bundle it could move to costs more than it does \(\$2\.11; the biggest: 38 items at \$6\)/);
+  // a bundle at exactly the offer's price is within it
+  assert.deepEqual(brief(eg.planGame(rows(), [cand(setOf("SE", items(30, "e"), { price: 2.11 }), 9)], { rescue: true, floor: 1 })), ["rescue G22 -> SE $2.11"]);
+  // the price that counts is the one the bundle is SOLD at: a never-sold offer of it at $2 makes it affordable
+  const twin = [...rows(), fact(listing("G38", "S38", { price: 2 }), s38)];
+  assert.deepEqual(brief(eg.planGame(twin, [cand(s38, 21)], { rescue: true, floor: 1 })), ["rescue G22 -> S38 $2 (takes over G38)"]);
+});
+
+test("the same bundle under another set that still has accounts: only the row moves, the text stays", () => {
+  // The catalog's set is tied to the accounts it was built from; when those
+  // are gone, a campaign's set of the same items may still be full.
+  const scoped = setOf("SC", items(14), { accountScopeIds: ["a"] });
+  const open = setOf("SO", items(14));
+  const smaller = setOf("S5", items(5, "m"), { price: 1 });
+  const rows = [fact(listing("G14", "SC", { sold: 2, paused: true, price: 1.95, title: "Halo (14 Items)" }), scoped, 0)];
+  const plan = eg.planGame(rows, [cand(smaller, 40), cand(open, 9)], { rescue: true, floor: 1 });
+  assert.deepEqual(brief(plan), ["rescue G14 -> SO $1.95"]);
+  assert.deepEqual([plan.actions[0].sameBundle, plan.actions[0].title, plan.actions[0].absorb], [true, "Halo (14 Items)", ""]);
 });
 
 test("a bundle that is on the shelf already is never given to a second offer", () => {
@@ -215,15 +253,19 @@ test("a bundle with too few accounts behind it, or no price, is not moved to", (
   assert.deepEqual(brief(eg.planGame(rows(), [thin, free, ok], { rescue: true, floor: 1, minStock: 2 })), ["rescue G33 -> S20 $2"]);
 });
 
-test("only the best seller moves up, and only to a bigger bundle that holds everything it sells", () => {
+test("only the best seller moves up, and only to a bigger bundle that holds everything it sells, at no more than its price", () => {
   const s22 = setOf("S22", items(22), { price: 2.11 });
   const s14 = setOf("S14", items(14), { price: 1.95 });
   const s34 = setOf("S34", items(34), { price: 2.49 });
-  const other = setOf("SX", items(40, "x"), { price: 3 }); // bigger, but another set of items
-  // G22 has 10 accounts behind it now.
-  const rows = (stock = 10) => [fact(listing("G22", "S22", { sold: 3, price: 2.11 }), s22, stock), fact(listing("G14", "S14", { sold: 2, price: 1.95 }), s14), fact(listing("G34", "S34", { price: 2.49 }), s34)];
+  const other = setOf("SX", items(40, "x"), { price: 1 }); // bigger and cheap, but another set of items
+  // G22 has 10 accounts behind it now; the 34-item bundle is on sale at $2.11 as a never-sold offer.
+  const rows = (stock = 10, p34 = 2.11) => [fact(listing("G22", "S22", { sold: 3, price: 2.11 }), s22, stock), fact(listing("G14", "S14", { sold: 2, price: 1.95 }), s14), fact(listing("G34", "S34", { price: p34 }), s34)];
   const plan = eg.planGame(rows(), [cand(other, 30), cand(s34, 18), cand(s22, 10), cand(s14, 4)], { upgrade: true, floor: 1 });
-  assert.deepEqual(brief(plan), ["upgrade G22 -> S34 $2.11 (takes over G34)"], "more items, at the price it had");
+  assert.deepEqual(brief(plan), ["upgrade G22 -> S34 $2.11 (takes over G34)"]);
+  // sold at more than the offer costs: not moved, and the owner is told the price that is his
+  const dear = eg.planGame(rows(10, 2.49), [cand(s34, 18)], { upgrade: true, floor: 1 });
+  assert.deepEqual(brief(dear), []);
+  assert.match(dear.notes[0].why, /it could carry 34 items instead of 22, at \$2\.49 against its \$2\.11 — a price for the owner to set/);
   // never onto a thinner shelf, and not when its own stock is unknown
   assert.deepEqual(brief(eg.planGame(rows(), [cand(s34, 9)], { upgrade: true, floor: 1 })), []);
   assert.deepEqual(brief(eg.planGame(rows(null), [cand(s34, 18)], { upgrade: true, floor: 1 })), []);
@@ -234,7 +276,7 @@ test("only the best seller moves up, and only to a bigger bundle that holds ever
   paused[0] = fact(listing("G22", "S22", { sold: 3, paused: true }), s22, 5);
   assert.deepEqual(brief(eg.planGame(paused, [cand(s34, 18)], { upgrade: true, floor: 1 })), []);
   const mid = rows();
-  mid[0] = fact(listing("G22", "S22", { sold: 3, mid: true }), s22, 10);
+  mid[0] = fact(listing("G22", "S22", { sold: 3, mid: true, price: 2.11 }), s22, 10);
   assert.deepEqual(brief(eg.planGame(mid, [cand(s34, 18)], { upgrade: true, floor: 1 })), []);
 });
 
@@ -244,7 +286,7 @@ test("the full plan for a game with selling offers: they stay, the biggest bundl
   const rows = [
     fact(listing("G22", "S22", { sold: 3 }), s.S22, 10),
     fact(listing("G14", "S14", { sold: 2 }), s.S14),
-    fact(listing("G34", "S34", { price: 2.7 }), s.S34),
+    fact(listing("G34", "S34"), s.S34),
     fact(listing("G33", "S33"), s.S33),
     fact(listing("G21", "S21"), s.S21),
     fact(listing("G10", "S10"), s.S10),
@@ -290,12 +332,54 @@ test("a game is never left with nothing because its biggest bundle has no offer 
   assert.deepEqual(brief(eg.planGame(rows, cands, { ...ALL, publish: true, floor: 1 })), ["publish S4 $2", "retire GA", "retire GB"]);
 });
 
+test("a game is never left with nothing on sale, whatever stands behind its offers", () => {
+  // Nothing with the minimum behind it: both offers would have gone, 4 and 3
+  // accounts with them. The bigger one stays.
+  const s8 = setOf("S8", items(8));
+  const s3 = setOf("S3", items(3, "a"));
+  const rows = [fact(listing("G3", "S3"), s3), fact(listing("G8", "S8"), s8), fact(listing("G0", "S3", { paused: true }), s3)];
+  const thin = eg.planGame(rows, [cand(s8, 4), cand(s3, 3)], { ...ALL, floor: 1 });
+  assert.deepEqual(brief(thin), ["retire G3", "retire G0"]);
+  // retire asked for by itself: the same
+  assert.deepEqual(brief(eg.planGame(rows, [], { retire: true, floor: 1 })), ["retire G3", "retire G0"]);
+  // a reserved share with one account left, or a no-claim copy, is not what keeps a game on the shelf
+  const share = [...rows, fact(listing("GU", "S9", { shape: "units", free: 1 }), setOf("S9", items(40, "u"))), fact(listing("GN", "SN", { shape: "noclaim" }), setOf("SN", items(50, "n")))];
+  assert.deepEqual(brief(eg.planGame(share, [cand(s8, 4)], { ...ALL, floor: 1 })), ["retire G3", "retire G0"]);
+  // an offer WITH sales that is selling is: then the never-sold ones may all go
+  const sells = [...rows, fact(listing("GS", "S2", { sold: 1 }), setOf("S2", items(2, "s")))];
+  assert.deepEqual(brief(eg.planGame(sells, [], { ...ALL, floor: 1 })), ["retire G3", "retire G8", "retire G0"]);
+  // ...but not when that offer is itself off sale with nothing behind it
+  const dead = [...rows, fact(listing("GS", "S2", { sold: 1, paused: true }), setOf("S2", items(2, "s")), 0)];
+  assert.deepEqual(brief(eg.planGame(dead, [], { ...ALL, floor: 1 })), ["retire G3", "retire G0"]);
+});
+
+test("an offer that is off sale is never the one that is kept", () => {
+  // Its bundle has stock under another set — but THIS offer's set is empty and
+  // it never sold: keeping it would keep nothing on sale.
+  const scoped = setOf("SC", items(20), { accountScopeIds: ["a"] });
+  const open = setOf("SO", items(20));
+  const s6 = setOf("S6", items(6, "a"));
+  const rows = [fact(listing("G20", "SC", { paused: true }), scoped), fact(listing("G6", "S6"), s6)];
+  const plan = eg.planGame(rows, [cand(open, 9), cand(s6, 30)], { ...ALL, floor: 1 });
+  assert.deepEqual(brief(plan), ["retire G20"]);
+  assert.match(plan.notes.find((n) => n.offerId === "G6").why, /kept/);
+});
+
+test("nothing is retired when a bundle on the shelf could not be counted", () => {
+  const s15 = setOf("S15", items(15));
+  const s10 = setOf("S10", items(10, "a"));
+  const rows = [fact(listing("G10", "S10"), s10), fact(listing("G15", "S15"), s15)];
+  const plan = eg.planGame(rows, [cand(s10, 43)], { ...ALL, floor: 1, incomplete: true });
+  assert.deepEqual(brief(plan), []);
+  assert.match(plan.notes[plan.notes.length - 1].why, /could not be counted — nothing is retired this time/);
+});
+
 test("when a kept offer already carries a bundle that big, no never-sold offer is kept", () => {
   const s35 = setOf("S35", items(35));
   const s14 = setOf("S14", items(14, "a"));
   const s11 = setOf("S11", items(11, "b"));
   const rows = [fact(listing("G35", "S35", { sold: 1 }), s35), fact(listing("G14", "S14", { sold: 6 }), s14), fact(listing("G11", "S11"), s11), fact(listing("G14b", "S14"), s14)];
-  const plan = eg.planGame(rows, [cand(s35, 3), cand(s14, 64), cand(s11, 57)], { ...ALL, floor: 1 });
+  const plan = eg.planGame(rows, [cand(s35, 5), cand(s14, 64), cand(s11, 57)], { ...ALL, floor: 1 });
   assert.deepEqual(brief(plan), ["retire G11", "retire G14b"]);
   assert.deepEqual(plan.actions.map((a) => a.why), ["never sold", "another offer already sells this bundle"]);
 });
@@ -322,22 +406,34 @@ test("a game with no offer at all gets its biggest bundle only when publishing i
   // the operator's price, and never under the market's floor
   assert.deepEqual(brief(eg.planGame([], cands, { publish: true, floor: 1, publishPrice: 1 })), ["publish S36 $1"]);
   assert.deepEqual(brief(eg.planGame([], cands, { publish: true, floor: 1, publishPrice: 0.5 })), ["publish S36 $1"]);
-  // a bundle that big is on the shelf already: nothing to publish
+  // that very bundle is on the shelf already (a reserved share of it): nothing to publish
   const has = [fact(listing("G36", "S36", { shape: "units", free: 4 }), s36)];
-  assert.deepEqual(brief(eg.planGame(has, cands, { publish: true, floor: 1 })), []);
+  assert.deepEqual(brief(eg.planGame(has, [cand(s36, 22)], { publish: true, floor: 1 })), []);
 });
 
 /* ------------------------------ a fake world ----------------------------- */
 
 // rows / sets by id, the stock each set can deliver, and G2G's own view of each
-// offer ({ status, title, price, qty }). `hooks` break one call at a time.
-function world({ rows = [], sets = [], stock = {}, af = {}, paid = [], hooks = {} } = {}) {
+// offer ({ status, title, description, price, qty, sold, ratings }). `hooks`
+// break one call at a time.
+function world({ rows = [], sets = [], stock = {}, af = {}, paid = [], hooks = {}, noClaim = [] } = {}) {
   const calls = [];
-  const g2g = new Map(rows.map((r) => [r.externalId, { status: r.status === "active" && !r.autoPaused ? "live" : "delisted", title: r.title, description: r.description, price: r.price, qty: 5 }]));
+  const g2g = new Map(rows.map((r) => [r.externalId, { status: r.status === "active" && !r.autoPaused ? "live" : "delisted", title: r.title, description: r.description, price: r.price, qty: 5, sold: 0, ratings: 0 }]));
   const byId = (id) => rows.find((r) => String(r._id) === String(id));
   const match = (r, q) =>
-    Object.entries(q).every(([k, v]) => (v && typeof v === "object" && v.$in ? v.$in.map(String).includes(String(r[k])) : String(r[k] ?? "") === String(v ?? "")));
-  const lean = (v) => ({ lean: async () => (v == null ? v : JSON.parse(JSON.stringify(v))) });
+    Object.entries(q).every(([k, v]) =>
+      v instanceof RegExp
+        ? v.test(String(r[k] ?? ""))
+        : v && typeof v === "object" && v.$in
+          ? v.$in.map(String).includes(String(r[k]))
+          : String(r[k] ?? "") === String(v ?? ""),
+    );
+  const lean = (v) => {
+    const p = Promise.resolve(v == null ? v : JSON.parse(JSON.stringify(v)));
+    p.lean = () => p;
+    return p;
+  };
+  const SHOWN = ["status", "set", "price", "autoPaused", "qtyTarget"];
   const MarketplaceListing = {
     find: (q) => lean(rows.filter((r) => match(r, q))),
     findOne: (q) => lean(rows.find((r) => match(r, q)) || null),
@@ -350,7 +446,7 @@ function world({ rows = [], sets = [], stock = {}, af = {}, paid = [], hooks = {
       const r = rows.find((x) => match(x, q));
       if (!r) return { modifiedCount: 0 };
       Object.assign(r, u.$set || {});
-      calls.push("row " + r.externalId + " " + JSON.stringify(Object.fromEntries(Object.entries(u.$set || {}).filter(([k]) => ["set", "status", "autoPaused", "price", "qtyTarget"].includes(k)))));
+      calls.push("row " + r.externalId + " " + JSON.stringify(Object.fromEntries(Object.entries(u.$set || {}).filter(([k]) => SHOWN.includes(k)))));
       return { modifiedCount: 1 };
     },
     create: async (doc) => {
@@ -371,17 +467,19 @@ function world({ rows = [], sets = [], stock = {}, af = {}, paid = [], hooks = {
     g2gGetOffer: async (id) => {
       const o = g2g.get(id);
       if (!o || o.status !== "live") throw notFound();
-      return { status: "live", title: o.title, description: o.description, unit_price: o.price, actual_qty: o.qty };
+      return { status: "live", title: o.title, description: o.description, unit_price: o.price, actual_qty: o.qty, total_success_order: o.sold, total_rating: o.ratings };
     },
-    g2gListOffers: async ({ status } = {}) =>
-      [...g2g.entries()].filter(([, o]) => o.status === (status || "live")).map(([offerId, o]) => ({ offerId, title: o.title, unitPrice: o.price, status: o.status })),
+    g2gListOffers: async ({ status } = {}) => {
+      if (hooks.list) await hooks.list(status);
+      return [...g2g.entries()].filter(([, o]) => o.status === (status || "live")).map(([offerId, o]) => ({ offerId, title: o.title, unitPrice: o.price, status: o.status }));
+    },
     g2gUpdateOffer: async (id, f) => {
       calls.push("update " + id + " " + JSON.stringify(f));
       if (hooks.update) await hooks.update(id, f, g2g);
       const o = g2g.get(id);
       if (hooks.dropUpdate && hooks.dropUpdate(id, f)) return;
       if (f.title != null) o.title = f.title;
-      if (f.description != null) o.description = f.description;
+      if (f.description != null) o.description = hooks.storeDescription ? hooks.storeDescription(f.description) : f.description;
       if (f.unitPrice != null) o.price = f.unitPrice;
     },
     g2gSetQuantity: async (id, n) => {
@@ -390,6 +488,7 @@ function world({ rows = [], sets = [], stock = {}, af = {}, paid = [], hooks = {
       g2g.get(id).qty = n;
     },
     g2gDelist: async (id) => {
+      if (hooks.delist) await hooks.delist(id);
       calls.push("delist " + id);
       if (!(hooks.stayLive && hooks.stayLive(id))) g2g.get(id).status = "delisted";
     },
@@ -405,7 +504,7 @@ function world({ rows = [], sets = [], stock = {}, af = {}, paid = [], hooks = {
     },
     g2gPublish: async (o) => {
       const id = "GNEW" + (g2g.size + 1);
-      g2g.set(id, { status: "live", title: o.title, description: o.description, price: o.priceUsd, qty: o.qty });
+      g2g.set(id, { status: "live", title: o.title, description: o.description, price: o.priceUsd, qty: o.qty, sold: 0, ratings: 0 });
       calls.push("publish " + id + " $" + o.priceUsd + " x" + o.qty + " " + o.brandId);
       return { externalId: id, url: "https://g2g/" + id };
     },
@@ -418,9 +517,11 @@ function world({ rows = [], sets = [], stock = {}, af = {}, paid = [], hooks = {
     mp,
     floor: 1,
     brandForGame: (game) => (game ? { brandId: "brand:" + String(game).toLowerCase() } : null),
+    isNoClaimGame: (game) => noClaim.includes(game),
     stockForSets: async (list) => new Map(list.map((s) => [String(s._id), { stock: stock[String(s._id)] || 0 }])),
     availableAccountsForSet: async (set) => {
       counted.push(String(set._id));
+      if (hooks.count) await hooks.count(String(set._id));
       return Array.from({ length: stock[String(set._id)] || 0 }, (_, k) => ({ login: "acc" + k }));
     },
     listedLogins: async () => new Set(),
@@ -456,93 +557,166 @@ function brawlhalla(extra = {}) {
   ];
   return world({ rows, sets: [s33, s5], stock: { S33: 0, S5: 16 }, ...extra });
 }
-const rescue = (over = {}) => ({ type: "rewrite", kind: "rescue", offerId: "G33", rowId: "", fromSet: "S33", fromTitle: "Brawlhalla Twitch Drops (33 Items)", fromPrice: 2.33, toSet: "S5", title: "", description: "", price: 1.25, size: 5, stock: 16, absorb: "", ...over });
+// A planned rescue of G33 onto the 5-item bundle, as planGame hands it over.
+const rescue = (over = {}) => ({ type: "rewrite", kind: "rescue", sameBundle: false, offerId: "G33", rowId: "", fromSet: "S33", fromTitle: "Brawlhalla Twitch Drops (33 Items)", fromPrice: 2.33, toSet: "S5", sig: eg.itemsSignature(bItems(5, "m")), title: "", description: "", price: 1.25, size: 5, stock: 16, absorb: "", ...over });
+const CTX = { listed: new Set(), now: NOW };
+const state = (w, id) => [w.row(id).status, w.row(id).set, w.row(id).autoPaused, w.g2g.get(id).status, w.g2g.get(id).title, w.g2g.get(id).price];
+const OLD = ["active", "S33", true, "delisted", "Brawlhalla Twitch Drops (33 Items)", 2.33];
 
 /* ------------------------------ the rewrite ------------------------------ */
 
-test("a rescue rewrites the offer while it is off sale, reads it back, moves the row, and only then relists", async () => {
+test("a rescue parks the row, rewrites the offer while it is off sale, reads it back, moves the row, and only then relists", async () => {
   const w = brawlhalla();
-  const r = await eg.rewriteOffer(w.d, rescue(), w.sets[1], { paid: new Set(), listed: new Set(), now: NOW });
+  const r = await eg.rewriteOffer(w.d, rescue(), w.sets[1], CTX);
   assert.deepEqual(w.calls, [
+    'row G33 {"status":"delisted"}',
     'update G33 {"title":"Brawlhalla Twitch Drops (5 Items)","description":"house copy for S5","unitPrice":1.25}',
-    'row G33 {"set":"S5","price":1.25,"autoPaused":true}',
+    'row G33 {"status":"active","set":"S5","price":1.25,"autoPaused":true}',
     "quantity G33 16",
     "relist G33",
     'row G33 {"autoPaused":false,"qtyTarget":16}',
   ]);
   assert.deepEqual([r.rewritten, r.relisted, r.stock, r.price, r.title], [true, true, 16, 1.25, "Brawlhalla Twitch Drops (5 Items)"]);
   const row = w.row("G33");
-  assert.deepEqual([row.set, row.title, row.price, row.autoPaused, row.status], ["S5", "Brawlhalla Twitch Drops (5 Items)", 1.25, false, "active"]);
+  assert.deepEqual([row.set, row.title, row.price, row.autoPaused, row.status, row.lastError], ["S5", "Brawlhalla Twitch Drops (5 Items)", 1.25, false, "active", ""]);
+  assert.equal(new Date(row.rebundledAt).getTime(), NOW, "delivery reads this to hold an order placed on the old text");
   assert.equal(row.units.length, 14, "the receipts of its 14 sales stay on the row");
   assert.match(row.note, /evergreen 2026-10-13 06:00Z: rescue from set S33 \(\$2\.33\)/);
-  assert.deepEqual(w.g2g.get("G33"), { status: "live", title: "Brawlhalla Twitch Drops (5 Items)", description: "house copy for S5", price: 1.25, qty: 16 });
+  assert.deepEqual(w.g2g.get("G33"), { status: "live", title: "Brawlhalla Twitch Drops (5 Items)", description: "house copy for S5", price: 1.25, qty: 16, sold: 0, ratings: 0 });
+});
+
+test("while its text is being rewritten the row is closed, so nothing can relist it or write it", async () => {
+  // The stock sync, the Listings page and a second copy of this code all look
+  // for an ACTIVE row. A parked row is none of theirs for these seconds.
+  let during = null;
+  const w = brawlhalla({ hooks: { update: (id, f, g2g) => (during = during || { status: w.row("G33").status, lastError: w.row("G33").lastError, set: w.row("G33").set, onG2g: g2g.get(id).status }) } });
+  await eg.rewriteOffer(w.d, rescue(), w.sets[1], CTX);
+  assert.deepEqual([during.status, during.set, during.onG2g], ["delisted", "S33", "delisted"]);
+  assert.match(during.lastError, /^evergreen: rewriting — 2026-10-13T06:00:00\.000Z -> set S5$/);
 });
 
 test("a rescue touches nothing when the offer is not what the plan saw", async () => {
-  const go = async (change, ctx = {}) => {
-    const w = brawlhalla();
+  const go = async (change, ctx = {}, extra = {}) => {
+    const w = brawlhalla(extra);
+    const planned = w.sets[1]; // the set as the plan read it
     change(w);
-    const r = await eg.rewriteOffer(w.d, rescue(), w.sets[1], { paid: new Set(), listed: new Set(), now: NOW, ...ctx });
+    const r = await eg.rewriteOffer(w.d, rescue(), planned, { ...CTX, ...ctx });
     assert.deepEqual(w.calls, [], "no write for: " + (r.skipped || r.error));
     return r.skipped || r.error;
   };
   assert.match(await go((w) => (w.g2g.get("G33").status = "live")), /G2G shows it live — left for the stock sync/);
-  assert.match(await go(() => {}, { paid: new Set(["G33"]) }), /a paid order is waiting/);
+  assert.match(await go(() => {}, {}, { paid: ["G33"] }), /a paid order is waiting on this offer/);
+  assert.match(await go(() => {}, {}, { hooks: { pending: () => { throw new Error("HTTP 503"); } } }), /could not read G2G's paid orders \(HTTP 503\)/);
   assert.match(await go((w) => w.row("G33").units.push(midUnit())), /mid hand-over/);
   assert.match(await go((w) => (w.row("G33").set = "S9")), /moved to another set since the plan/);
   assert.match(await go((w) => (w.row("G33").autoPaused = false)), /back on sale since the plan/);
   assert.match(await go((w) => (w.row("G33").status = "delisted")), /row is delisted/);
-  assert.match(await go((w) => (w.row("G33").origin = "manual")), /not an offer this file may rewrite/);
-  assert.match(await go((w) => Object.assign(w.row("G33"), { autoClaimSet: false, noclaimStock: true })), /may rewrite \(noclaim\)/);
+  assert.match(await go((w) => (w.row("G33").origin = "manual")), /not an offer this file may rewrite \(archive, origin manual\)/);
+  assert.match(await go((w) => Object.assign(w.row("G33"), { autoClaimSet: false, noclaimStock: true })), /may rewrite \(noclaim/);
+  // the bundle's set was edited since the plan was made: it is another bundle now
+  assert.match(await go((w) => w.sets[1].items.pop()), /the bundle's set changed since the plan/);
+  assert.match(await go((w) => w.sets.pop()), /the bundle's set changed since the plan/); // deleted
+  assert.match((await eg.rewriteOffer(brawlhalla().d, rescue(), null, CTX)).error, /the target set is gone/);
+  // G2G cannot be read: nothing is assumed
+  assert.match(await go(() => {}, {}, { hooks: { list: () => { throw new Error("HTTP 502"); } } }), /G2G shows it unreadable \(HTTP 502\)/);
+});
+
+test("an offer the owner edited on G2G is his: a title that is not ours, or a price he lowered under the bundle's", async () => {
+  // Neither g2g.com nor the Listings price box writes our row.
+  const w = brawlhalla();
+  w.g2g.get("G33").title = "BRAWLHALLA ALL DROPS — best price";
+  assert.match((await eg.rewriteOffer(w.d, rescue(), w.sets[1], CTX)).skipped, /its title on G2G is not the one on our row — edited by hand, left alone/);
+  const w2 = brawlhalla();
+  w2.g2g.get("G33").price = 1.1; // the row still says $2.33
+  assert.match((await eg.rewriteOffer(w2.d, rescue(), w2.sets[1], CTX)).skipped, /the offer costs \$1\.1 on G2G, less than this bundle's \$1\.25 — a price for the owner to set/);
+  assert.deepEqual([w.calls, w2.calls], [[], []]);
+  // a price he RAISED is the price an undo puts back, not the row's
+  const w3 = brawlhalla({ hooks: { dropUpdate: (id, f) => f.title === "Brawlhalla Twitch Drops (5 Items)" } });
+  w3.g2g.get("G33").price = 3.49;
+  await eg.rewriteOffer(w3.d, rescue(), w3.sets[1], CTX);
+  assert.equal(w3.g2g.get("G33").price, 3.49);
 });
 
 test("an offer that is on sale is taken down before a word of it changes", async () => {
   const s22 = setOf("S22", items(22), { price: 2.11 });
-  const s34 = setOf("S34", items(34), { price: 2.49 });
-  const w = world({ rows: [listing("G22", "S22", { sold: 3, price: 2.11 })], sets: [s22, s34], stock: { S22: 10, S34: 18 } });
-  const action = { type: "rewrite", kind: "upgrade", offerId: "G22", fromSet: "S22", toSet: "S34", title: "", description: "", price: 2.49, size: 34, stock: 18 };
-  const r = await eg.rewriteOffer(w.d, action, s34, { paid: new Set(), listed: new Set(), now: NOW });
-  assert.deepEqual(w.calls.slice(0, 2), ["delist G22", 'update G22 {"title":"Halo Infinite Twitch Drops (34 Items)","description":"house copy for S34","unitPrice":2.49}']);
+  const s34 = setOf("S34", items(34), { price: 2.11 });
+  const mk = (extra = {}) => world({ rows: [listing("G22", "S22", { sold: 3, price: 2.11, title: "Halo (22 Items)" })], sets: [s22, s34], stock: { S22: 10, S34: 18 }, ...extra });
+  const action = { type: "rewrite", kind: "upgrade", offerId: "G22", fromSet: "S22", toSet: "S34", title: "", description: "", price: 2.11, size: 34, stock: 18 };
+  const w = mk();
+  const r = await eg.rewriteOffer(w.d, action, s34, CTX);
+  assert.deepEqual(w.calls.slice(0, 3), ['row G22 {"status":"delisted"}', "delist G22", 'update G22 {"title":"Halo Infinite Twitch Drops (34 Items)","description":"house copy for S34","unitPrice":2.11}']);
   assert.deepEqual([r.rewritten, r.relisted, r.stock], [true, true, 18]);
-  assert.deepEqual([w.row("G22").set, w.g2g.get("G22").status], ["S34", "live"]);
+  assert.deepEqual([w.row("G22").set, w.row("G22").status, w.g2g.get("G22").status], ["S34", "active", "live"]);
   assert.match(w.row("G22").note, /evergreen .*: upgrade from set S22/);
-  // G2G keeps showing it live: nothing is rewritten
-  const w2 = world({ rows: [listing("G22", "S22", { sold: 3 })], sets: [s22, s34], stock: { S34: 18 }, hooks: { stayLive: () => true } });
-  const r2 = await eg.rewriteOffer(w2.d, action, s34, { paid: new Set(), listed: new Set() });
-  assert.match(r2.error, /could not take it off sale first/);
-  assert.deepEqual(w2.calls, ["delist G22"]);
-  assert.equal(w2.row("G22").set, "S22");
+  // G2G keeps showing it live: nothing is rewritten, and the row is as it was
+  const w2 = mk({ hooks: { stayLive: () => true } });
+  const r2 = await eg.rewriteOffer(w2.d, action, s34, CTX);
+  assert.match(r2.error, /could not take it off sale first — nothing is changed: the offer has its old text/);
+  assert.deepEqual([w2.row("G22").set, w2.row("G22").status, w2.row("G22").autoPaused, w2.g2g.get("G22").title], ["S22", "active", false, "Halo (22 Items)"]);
+  assert.equal(w2.calls.some((c) => c.startsWith("update")), false);
+  // paused by the owner on G2G (our row still says on sale): not this file's to bring back
+  const w3 = mk();
+  w3.g2g.get("G22").status = "delisted";
+  assert.match((await eg.rewriteOffer(w3.d, action, s34, CTX)).skipped, /G2G shows it delisted, not on sale — left alone/);
+  assert.deepEqual(w3.calls, []);
 });
 
-test("a rewrite G2G refuses leaves the offer off sale on its old bundle, old text confirmed", async () => {
-  let first = true;
-  const w = brawlhalla({
-    hooks: {
-      update: () => {
-        if (first) {
-          first = false;
-          throw new Error("G2G update offer failed (HTTP 400): bad title");
-        }
-      },
-    },
+test("an order that lands as an offer is taken down for an upgrade puts it straight back, untouched", async () => {
+  const s22 = setOf("S22", items(22), { price: 2.11 });
+  const s34 = setOf("S34", items(34), { price: 2.11 });
+  let reads = 0;
+  const w = world({
+    rows: [listing("G22", "S22", { sold: 3, price: 2.11, title: "Halo (22 Items)" })],
+    sets: [s22, s34],
+    stock: { S22: 10, S34: 18 },
+    hooks: { pending: () => (++reads === 1 ? [] : [{ offerId: "G22" }]) }, // nothing at the first look, one after the delist
   });
-  const r = await eg.rewriteOffer(w.d, rescue(), w.sets[1], { paid: new Set(), listed: new Set() });
-  assert.match(r.error, /G2G refused the rewrite \(G2G update offer failed \(HTTP 400\): bad title\) — the old text was put back/);
-  const row = w.row("G33");
-  assert.deepEqual([row.set, row.status, row.autoPaused, w.g2g.get("G33").status, w.g2g.get("G33").title], ["S33", "active", true, "delisted", "Brawlhalla Twitch Drops (33 Items)"]);
+  const r = await eg.rewriteOffer(w.d, { type: "rewrite", kind: "upgrade", offerId: "G22", fromSet: "S22", toSet: "S34", price: 2.11 }, s34, CTX);
+  assert.match(r.skipped, /a paid order arrived as it was taken down — back on sale, untouched/);
+  assert.deepEqual(w.calls, ['row G22 {"status":"delisted"}', "delist G22", "relist G22", 'row G22 {"status":"active","autoPaused":false}']);
+  assert.deepEqual([w.row("G22").set, w.g2g.get("G22").title, w.g2g.get("G22").status], ["S22", "Halo (22 Items)", "live"]);
+});
+
+test("a rewrite G2G refuses changes nothing: the offer keeps its text and the row is reopened", async () => {
+  // Refused outright — and a refusal of the put-back too must not close a row
+  // whose offer never changed.
+  const w = brawlhalla({ hooks: { update: () => { throw new Error("G2G update offer failed (HTTP 400): bad title"); } } });
+  const r = await eg.rewriteOffer(w.d, rescue(), w.sets[1], CTX);
+  assert.match(r.error, /the rewrite failed \(G2G update offer failed \(HTTP 400\): bad title\) — nothing is changed: the offer has its old text/);
+  assert.equal(r.parked, undefined);
+  assert.deepEqual(state(w, "G33"), OLD);
+  assert.equal(w.row("G33").lastError, "");
+  assert.equal(w.calls.filter((c) => c.startsWith("update")).length, 1, "the old text was read, not written again");
   assert.equal(w.calls.some((c) => c.startsWith("relist") || c.startsWith("quantity")), false);
 });
 
-test("a rewrite that does not show on G2G is undone; when even that cannot be confirmed the row is closed", async () => {
-  // G2G answers 200 and keeps the old text (it does that to fields it does not take).
-  const w = brawlhalla({ hooks: { dropUpdate: () => true } });
-  const r = await eg.rewriteOffer(w.d, rescue(), w.sets[1], { paid: new Set(), listed: new Set() });
-  assert.match(r.error, /the new title and price did not show on G2G — the old text was put back/);
-  assert.deepEqual([w.row("G33").set, w.row("G33").status], ["S33", "active"]);
-  assert.equal(w.d.slept.length, 5, "it asked G2G six times before giving up");
-  // The new text landed half-way and the old one cannot be put back: nothing may relist it.
+test("a rewrite that only half shows on G2G is undone, and the undo is read back", async () => {
+  // The title took, the price did not.
   let n = 0;
-  const w2 = brawlhalla({
+  const w = brawlhalla({ hooks: { dropUpdate: (id, f) => ++n === 1 && false, update: (id, f, g2g) => { if (n === 0) { g2g.get(id).title = f.title; } }, } });
+  w.d.mp.g2gUpdateOffer = (() => {
+    const real = w.d.mp.g2gUpdateOffer;
+    let first = true;
+    return async (id, f) => {
+      if (first) {
+        first = false;
+        w.calls.push("update " + id + " " + JSON.stringify(f));
+        w.g2g.get(id).title = f.title; // ...and nothing else
+        return;
+      }
+      return real(id, f);
+    };
+  })();
+  const r = await eg.rewriteOffer(w.d, rescue(), w.sets[1], CTX);
+  assert.match(r.error, /the new title and price did not show on G2G — nothing is changed: the offer has its old text/);
+  assert.deepEqual(state(w, "G33"), OLD);
+  assert.equal(w.calls.filter((c) => c.startsWith("update")).length, 2, "one rewrite, one put-back");
+  assert.ok(w.d.slept.length >= 5, "it asked G2G six times before giving up on the new text");
+});
+
+test("when the old text cannot be confirmed back, the row stays closed and says so", async () => {
+  let n = 0;
+  const w = brawlhalla({
     hooks: {
       update: (id, f, g2g) => {
         if (++n === 1) g2g.get(id).title = f.title; // the title took, the price did not
@@ -551,62 +725,154 @@ test("a rewrite that does not show on G2G is undone; when even that cannot be co
       dropUpdate: () => true,
     },
   });
-  const r2 = await eg.rewriteOffer(w2.d, rescue(), w2.sets[1], { paid: new Set(), listed: new Set() });
-  assert.match(r2.error, /could NOT be confirmed back: the row is closed/);
-  assert.deepEqual([w2.row("G33").status, w2.row("G33").set, w2.g2g.get("G33").status], ["delisted", "S33", "delisted"]);
-  assert.match(w2.row("G33").lastError, /check the offer's text on G2G before relisting/);
+  const r = await eg.rewriteOffer(w.d, rescue(), w.sets[1], CTX);
+  assert.match(r.error, /could NOT be confirmed back: the row stays closed, check the offer on G2G by hand/);
+  assert.equal(r.parked, true);
+  assert.deepEqual([w.row("G33").status, w.row("G33").set, w.g2g.get("G33").status], ["delisted", "S33", "delisted"]);
+  assert.match(w.row("G33").lastError, /^evergreen: rewriting — /);
+});
+
+test("a read that fails after the new text was sent does not leave it there", async () => {
+  // The put landed; the read-back of it answers 502 for a while. Without an
+  // undo the offer would keep the 5-item text over a row that delivers the
+  // 33-item set, and come back on sale like that the day S33 had stock again.
+  let fail = 0;
+  const w = brawlhalla({ hooks: { list: () => { if (fail > 0) { fail--; throw new Error("G2G list offers failed (HTTP 502)"); } } } });
+  const real = w.d.mp.g2gUpdateOffer;
+  let sent = 0;
+  w.d.mp.g2gUpdateOffer = async (id, f) => {
+    await real(id, f);
+    if (++sent === 1) fail = 6; // every read of the new text fails; later reads work again
+  };
+  const r = await eg.rewriteOffer(w.d, rescue(), w.sets[1], CTX);
+  assert.match(r.error, /the new title and price did not show on G2G — nothing is changed: the offer has its old text/);
+  assert.deepEqual(state(w, "G33"), OLD);
 });
 
 test("a row that changed under the rewrite is not moved, and the offer gets its old text back", async () => {
-  const w = brawlhalla({
-    hooks: {
-      updateOne: (q) => (q.set === "S33" && !("autoPaused" in q) ? { modifiedCount: 0 } : null),
-    },
-  });
-  const r = await eg.rewriteOffer(w.d, rescue(), w.sets[1], { paid: new Set(), listed: new Set() });
-  assert.match(r.error, /the row changed while rewriting — the old text was put back/);
-  assert.deepEqual([w.row("G33").set, w.g2g.get("G33").title, w.g2g.get("G33").price, w.g2g.get("G33").status], ["S33", "Brawlhalla Twitch Drops (33 Items)", 2.33, "delisted"]);
+  const w = brawlhalla({ hooks: { updateOne: (q, u) => (u.$set && u.$set.set === "S5" ? { modifiedCount: 0 } : null) } });
+  const r = await eg.rewriteOffer(w.d, rescue(), w.sets[1], CTX);
+  assert.match(r.error, /the row changed while rewriting — nothing is changed: the offer has its old text/);
+  assert.deepEqual(state(w, "G33"), OLD);
+  // ...and a row somebody else changed before it could even be parked is simply left
+  const w2 = brawlhalla({ hooks: { updateOne: (q, u) => (u.$set && u.$set.status === "delisted" ? { modifiedCount: 0 } : null) } });
+  assert.match((await eg.rewriteOffer(w2.d, rescue(), w2.sets[1], CTX)).skipped, /the row changed since the plan/);
+  assert.deepEqual(w2.calls, []);
 });
 
 test("a relist that fails leaves text, price and row in step for the stock sync to finish", async () => {
-  const w = brawlhalla({
-    hooks: {
-      relist: () => {
-        throw new Error("G2G update offer failed (HTTP 502)");
-      },
-    },
-  });
-  const r = await eg.rewriteOffer(w.d, rescue(), w.sets[1], { paid: new Set(), listed: new Set() });
+  const w = brawlhalla({ hooks: { relist: () => { throw new Error("G2G update offer failed (HTTP 502)"); } } });
+  const r = await eg.rewriteOffer(w.d, rescue(), w.sets[1], CTX);
   assert.deepEqual([r.rewritten, r.relisted], [true, false]);
   assert.match(r.note, /the relist failed .* the stock sync brings it back/);
-  const row = w.row("G33");
-  assert.deepEqual([row.set, row.autoPaused, row.status, w.g2g.get("G33").status, w.g2g.get("G33").title], ["S5", true, "active", "delisted", "Brawlhalla Twitch Drops (5 Items)"]);
+  assert.deepEqual(state(w, "G33"), ["active", "S5", true, "delisted", "Brawlhalla Twitch Drops (5 Items)", 1.25]);
   // and a bundle nobody can deliver at this second is not put on sale at all
   const w2 = brawlhalla();
   w2.d.realStockFor = async () => 0;
-  const r2 = await eg.rewriteOffer(w2.d, rescue(), w2.sets[1], { paid: new Set(), listed: new Set() });
+  const r2 = await eg.rewriteOffer(w2.d, rescue(), w2.sets[1], CTX);
   assert.deepEqual([r2.rewritten, r2.relisted, w2.g2g.get("G33").status, w2.row("G33").autoPaused], [true, false, "delisted", true]);
+  // G2G does not show it on sale yet: paused, for the stock sync to relist — not closed
+  const w3 = brawlhalla({ hooks: { afterRelist: (id, g2g) => (g2g.get(id).status = "delisted") } });
+  const r3 = await eg.rewriteOffer(w3.d, rescue(), w3.sets[1], CTX);
+  assert.deepEqual([r3.rewritten, r3.relisted, w3.row("G33").status, w3.row("G33").autoPaused], [true, false, "active", true]);
+  assert.match(r3.note, /did not show it on sale yet/);
 });
 
-test("a live offer that does not show the new text after the relist comes down and is closed", async () => {
-  const w = brawlhalla({ hooks: { afterRelist: (id, g2g) => (g2g.get(id).title = "Brawlhalla Twitch Drops (33 Items)") } });
-  const r = await eg.rewriteOffer(w.d, rescue(), w.sets[1], { paid: new Set(), listed: new Set() });
-  assert.match(r.error, /the live title is not the new one after the relist — taken off sale and closed/);
+test("a row closed while its offer was being relisted does not leave the offer on sale", async () => {
+  // The owner's Delist button, in the second between the row's move and the relist.
+  const w = brawlhalla({ hooks: { relist: () => (w.row("G33").status = "delisted") } });
+  const r = await eg.rewriteOffer(w.d, rescue(), w.sets[1], CTX);
+  assert.deepEqual([r.rewritten, r.relisted], [true, false]);
+  assert.match(r.note, /its row changed during the relist — taken off sale again/);
   assert.deepEqual([w.g2g.get("G33").status, w.row("G33").status], ["delisted", "delisted"]);
 });
 
-test("the text of an offer that is taken over is used word for word", async () => {
+test("a live offer that does not read as its row delivers comes down and is closed — title, price or description", async () => {
+  const cases = {
+    "the live title is not the new one": (id, g2g) => (g2g.get(id).title = "Brawlhalla Twitch Drops (33 Items)"),
+    "the live price is not the new one": (id, g2g) => (g2g.get(id).price = 2.33),
+    "the live description is not the new one": (id, g2g) => (g2g.get(id).description = "description of G33"),
+  };
+  for (const [why, afterRelist] of Object.entries(cases)) {
+    const w = brawlhalla({ hooks: { afterRelist } });
+    const r = await eg.rewriteOffer(w.d, rescue(), w.sets[1], CTX);
+    assert.match(r.error, new RegExp(why + " after the relist — taken off sale, row closed; check it on G2G by hand"));
+    assert.equal(r.parked, true);
+    assert.deepEqual([w.g2g.get("G33").status, w.row("G33").status], ["delisted", "delisted"]);
+    assert.match(w.row("G33").lastError, /^evergreen: .* after a rewrite — check the offer on G2G before relisting$/);
+  }
+  // what G2G drops from a description (emoji) is not a difference
+  const w = brawlhalla({ hooks: { storeDescription: (t) => t.replace(/[^\x00-\x7f]/g, "") } });
+  w.d.text = () => ({ title: "Brawlhalla Twitch Drops (5 Items)", description: "💎 Check the list\n• Artemis ✔" });
+  assert.deepEqual((await eg.rewriteOffer(w.d, rescue(), w.sets[1], CTX)).relisted, true);
+});
+
+test("the text of an offer that is taken over is used word for word; a price that cannot be is refused first", async () => {
   const w = brawlhalla();
   const a = rescue({ title: "Brawlhalla Twitch Drops (5 Items) — Artemis", description: "description of G5", price: 1 });
-  await eg.rewriteOffer(w.d, a, w.sets[1], { paid: new Set(), listed: new Set() });
-  assert.equal(w.calls[0], 'update G33 {"title":"Brawlhalla Twitch Drops (5 Items) — Artemis","description":"description of G5","unitPrice":1}');
+  await eg.rewriteOffer(w.d, a, w.sets[1], CTX);
+  assert.equal(w.calls[1], 'update G33 {"title":"Brawlhalla Twitch Drops (5 Items) — Artemis","description":"description of G5","unitPrice":1}');
   // a price under the market's floor, or none, is refused before anything is sent
   for (const price of [0.5, 0]) {
     const w2 = brawlhalla();
-    const r = await eg.rewriteOffer(w2.d, rescue({ price }), w2.sets[1], { paid: new Set(), listed: new Set() });
+    const r = await eg.rewriteOffer(w2.d, rescue({ price }), w2.sets[1], CTX);
     assert.match(r.error, /no usable price/);
     assert.deepEqual(w2.calls, []);
   }
+  // and so is one above what the offer costs: this file never raises a price
+  const w3 = brawlhalla();
+  const r3 = await eg.rewriteOffer(w3.d, rescue({ price: 2.5 }), w3.sets[1], CTX);
+  assert.match(r3.skipped, /less than this bundle's \$2\.5 — a price for the owner to set/);
+  assert.deepEqual(w3.calls, []);
+});
+
+test("the same bundle under another set: the row moves and the offer is not rewritten at all", async () => {
+  const scoped = setOf("SC", bItems(14, "x"), { accountScopeIds: ["a"] });
+  const open = setOf("SO", bItems(14, "x"));
+  const w = world({ rows: [listing("G14", "SC", { sold: 2, paused: true, price: 1.95, title: "Brawlhalla (14 Items)" })], sets: [scoped, open], stock: { SC: 0, SO: 9 } });
+  const a = { type: "rewrite", kind: "rescue", sameBundle: true, offerId: "G14", fromSet: "SC", toSet: "SO", sig: eg.itemsSignature(open.items), title: "Brawlhalla (14 Items)", description: "description of G14", price: 1.95 };
+  const r = await eg.rewriteOffer(w.d, a, open, CTX);
+  assert.deepEqual(w.calls, ['row G14 {"status":"delisted"}', 'row G14 {"status":"active","set":"SO","price":1.95,"autoPaused":true}', "quantity G14 9", "relist G14", 'row G14 {"autoPaused":false,"qtyTarget":9}']);
+  assert.deepEqual([r.relisted, r.title, r.price, w.g2g.get("G14").title], [true, "Brawlhalla (14 Items)", 1.95, "Brawlhalla (14 Items)"]);
+});
+
+/* ------------------------- an interrupted rewrite ------------------------ */
+
+const parked = (w, id, minutesAgo, toSet = "S5") => Object.assign(w.row(id), { status: "delisted", lastError: eg.PARK_MARK + new Date(NOW - minutesAgo * 60000).toISOString() + " -> set " + toSet });
+
+test("a row a restart left parked is reopened on its old bundle once G2G shows its old text", async () => {
+  // Died before the new text was sent: nothing to put back.
+  const w = brawlhalla();
+  parked(w, "G33", 20);
+  const out = await eg.recoverParked(w.d, NOW);
+  assert.deepEqual(out.map((r) => [r.offerId, r.reopened]), [["G33", true]]);
+  assert.deepEqual(state(w, "G33"), OLD);
+  assert.deepEqual([w.row("G33").lastError, w.calls.filter((c) => c.startsWith("update")).length], ["", 0]);
+  // Died after the new text was sent: the old text goes back first, read back.
+  const w2 = brawlhalla();
+  parked(w2, "G33", 20);
+  Object.assign(w2.g2g.get("G33"), { title: "Brawlhalla Twitch Drops (5 Items)", price: 1.25 });
+  await eg.recoverParked(w2.d, NOW);
+  assert.deepEqual(state(w2, "G33"), OLD);
+  assert.equal(w2.calls[0], 'update G33 {"title":"Brawlhalla Twitch Drops (33 Items)","description":"description of G33","unitPrice":2.33}');
+});
+
+test("a row parked a moment ago is a rewrite in progress and is not touched; one whose text cannot be put back stays closed", async () => {
+  const w = brawlhalla();
+  parked(w, "G33", 2);
+  assert.deepEqual(await eg.recoverParked(w.d, NOW), []);
+  assert.equal(w.row("G33").status, "delisted");
+  const w2 = brawlhalla({ hooks: { update: () => { throw new Error("HTTP 500"); } } });
+  parked(w2, "G33", 20);
+  w2.g2g.get("G33").title = "Brawlhalla Twitch Drops (5 Items)";
+  const out = await eg.recoverParked(w2.d, NOW);
+  assert.deepEqual(out.map((r) => [r.reopened, r.why]), [[false, "its old text could not be put back on G2G"]]);
+  assert.equal(w2.row("G33").status, "delisted");
+  // a retired row, or one closed for another reason, is never "recovered"
+  const w3 = brawlhalla();
+  Object.assign(w3.row("G33"), { status: "delisted", lastError: "" });
+  Object.assign(w3.row("G5"), { status: "delisted", lastError: "evergreen: the live title is not the new one after a rewrite — check the offer on G2G before relisting" });
+  assert.deepEqual(await eg.recoverParked(w3.d, NOW), []);
 });
 
 /* ---------------------------- retire / publish --------------------------- */
@@ -622,23 +888,35 @@ test("a never-sold offer is delisted, read back, and only then is its row closed
   const r2 = await eg.retireOffer(w2.d, "G5", "never sold", { paid: new Set() });
   assert.match(r2.error, /G2G still shows it "live" after the delist/);
   assert.equal(w2.row("G5").status, "active");
+  // already off sale (the sync paused it): no second delist, the row is closed
+  const w3 = brawlhalla();
+  Object.assign(w3.row("G5"), { autoPaused: true });
+  w3.g2g.get("G5").status = "delisted";
+  assert.deepEqual(await eg.retireOffer(w3.d, "G5", "never sold", { paid: new Set() }), { retired: true });
+  assert.deepEqual(w3.calls, ['row G5 {"status":"delisted","autoPaused":false}']);
 });
 
-test("what must not be retired is refused before G2G is asked anything", async () => {
-  const go = async (offerId, change, ctx = {}) => {
-    const w = brawlhalla();
+test("what must not be retired is refused before G2G is told anything", async () => {
+  const go = async (offerId, change, ctx = { paid: new Set() }, extra = {}) => {
+    const w = brawlhalla(extra);
     change(w);
-    const r = await eg.retireOffer(w.d, offerId, "never sold", { paid: new Set(), ...ctx });
+    const r = await eg.retireOffer(w.d, offerId, "never sold", ctx);
     assert.deepEqual(w.calls, []);
     return r.skipped || r.error;
   };
   assert.match(await go("G33", () => {}), /it has sold 14 — kept/);
-  assert.match(await go("G5", (w) => Object.assign(w.row("G5"), { autoClaimSet: false, units: [freeUnit(1)] })), /may retire \(units\)/);
-  assert.match(await go("G5", (w) => (w.row("G5").origin = "manual")), /may retire/);
+  assert.match(await go("G5", (w) => Object.assign(w.row("G5"), { autoClaimSet: false, units: [freeUnit(1)] })), /may retire \(units/);
+  assert.match(await go("G5", (w) => (w.row("G5").origin = "manual")), /may retire \(archive, origin manual\)/);
   assert.match(await go("G5", (w) => w.row("G5").units.push(midUnit())), /mid hand-over/);
   assert.match(await go("G5", () => {}, { paid: new Set(["G5"]) }), /paid order/);
   assert.match(await go("G5", (w) => (w.row("G5").status = "delisted")), /already delisted/);
   assert.match(await go("GX", () => {}), /no listing row/);
+  // with no list of paid orders handed in, it reads them itself — and stops when it cannot
+  assert.match(await go("G5", () => {}, {}, { paid: ["G5"] }), /paid order/);
+  assert.match(await go("G5", () => {}, {}, { hooks: { pending: () => { throw new Error("HTTP 503"); } } }), /could not read G2G's paid orders/);
+  // G2G's OWN record of the offer: a sale or a rating we have no receipt for
+  assert.match(await go("G5", (w) => (w.g2g.get("G5").sold = 2)), /G2G itself shows 2 sale\(s\) and 0 rating\(s\) on it — kept/);
+  assert.match(await go("G5", (w) => (w.g2g.get("G5").ratings = 1)), /G2G itself shows 0 sale\(s\) and 1 rating\(s\) on it — kept/);
 });
 
 test("a published bundle gets the row that lets it be stock-checked and delivered", async () => {
@@ -658,13 +936,18 @@ test("a published bundle gets the row that lets it be stock-checked and delivere
   const rb = await eg.publishOffer(bad.d, { price: 1 }, s36, { listed: new Set() });
   assert.match(rb.error, /published as GNEW1 but its row could not be saved \(E11000\) — taken off sale/);
   assert.equal(bad.g2g.get("GNEW1").status, "delisted");
+  // a no-claim game's drops are sold unclaimed, from the no-claim farm: never an archive offer
+  const cod = setOf("SCOD", items(6, "c", "Call of Duty"), { price: 2 });
+  const nc = world({ sets: [cod], stock: { SCOD: 40 }, noClaim: ["Call of Duty"] });
+  assert.match((await eg.publishOffer(nc.d, { price: 2 }, cod, { listed: new Set() })).skipped, /Call of Duty is a no-claim game/);
+  assert.deepEqual(nc.calls, []);
 });
 
 test("the offer a rewrite takes over comes down only once the rewritten one is selling", async () => {
   const w = brawlhalla();
   const a = rescue({ title: "Brawlhalla Twitch Drops (5 Items) — Artemis", description: "description of G5", price: 1, absorb: "G5" });
   const lines = [];
-  const out = await eg.runActions(w.d, [a], new Map([["S5", w.sets[1]]]), { paid: new Set(), listed: new Set(), now: NOW }, { log: (l) => lines.push(l) });
+  const out = await eg.runActions(w.d, [a], new Map([["S5", w.sets[1]]]), CTX, { log: (l) => lines.push(l) });
   assert.deepEqual([out.rewritten.length, out.retired.map((r) => r.offerId), out.errors.length], [1, ["G5"], 0]);
   assert.deepEqual([w.g2g.get("G33").status, w.g2g.get("G5").status, w.row("G5").status], ["live", "delisted", "delisted"]);
   assert.ok(w.calls.indexOf("relist G33") < w.calls.indexOf("delist G5"));
@@ -672,12 +955,37 @@ test("the offer a rewrite takes over comes down only once the rewritten one is s
   assert.match(w.row("G5").note, /its bundle moved to offer G33/);
   // not relisted: the taken-over offer is the bundle's only one, and stays
   const w2 = brawlhalla({ hooks: { relist: () => { throw new Error("502"); } } });
-  const out2 = await eg.runActions(w2.d, [a], new Map([["S5", w2.sets[1]]]), { paid: new Set(), listed: new Set() });
+  const out2 = await eg.runActions(w2.d, [a], new Map([["S5", w2.sets[1]]]), CTX);
   assert.deepEqual([out2.rewritten.length, out2.retired.length, w2.g2g.get("G5").status], [1, 0, "live"]);
   assert.match(out2.skipped[0].why, /left on sale until G33 is back/);
 });
 
+test("a game's plan is one piece: when its rewrite does not go through, its retires are not done", async () => {
+  // "rescue G33 onto S9; retire G5" — with the rescue refused, retiring G5
+  // would leave the game with nothing on sale.
+  const w = brawlhalla({ paid: ["G33"] });
+  const plan = [rescue(), { type: "retire", offerId: "G5", why: "never sold", title: "t" }];
+  const out = await eg.runActions(w.d, plan, new Map([["S5", w.sets[1]]]), CTX);
+  assert.deepEqual(w.calls, []);
+  assert.deepEqual(out.skipped.map((s) => [s.offerId, s.why]), [["G33", "a paid order is waiting on this offer"], ["G5", "not done: the rewrite before it did not go through"]]);
+  assert.equal(w.g2g.get("G5").status, "live");
+  // an offer left closed stops the run there and then
+  const w2 = brawlhalla({ hooks: { afterRelist: (id, g2g) => (g2g.get(id).price = 9) } });
+  const out2 = await eg.runActions(w2.d, plan, new Map([["S5", w2.sets[1]]]), CTX);
+  assert.deepEqual([out2.parked.map((p) => p.offerId), out2.retired.length, w2.g2g.get("G5").status], [["G33"], 0, "live"]);
+  // a retire that is refused does not stop the retires after it
+  const w3 = brawlhalla();
+  w3.g2g.get("G5").sold = 1;
+  const out3 = await eg.runActions(w3.d, [{ type: "retire", offerId: "G5", why: "never sold" }, { type: "retire", offerId: "GX", why: "never sold" }], new Map(), { ...CTX, paid: new Set() });
+  assert.deepEqual([out3.skipped.length, out3.errors.length], [1, 1]);
+});
+
 /* ----------------------------- the server pass --------------------------- */
+
+const fresh = () => {
+  eg._state.rested.clear();
+  eg._state.lastSummary = "";
+};
 
 test("the pass is off until switched on, and off while G2G orders are not really delivered", async () => {
   const off = async (af) => {
@@ -688,29 +996,31 @@ test("the pass is off until switched on, and off while G2G orders are not really
   };
   assert.match(await off({ g2gEvergreen: false }), /switched off \(autoFarm\.g2gEvergreen\)/);
   assert.match(await off({ g2gEvergreen: undefined }), /switched off/);
+  assert.match(await off({ g2gEvergreen: "true" }), /switched off/);
   assert.match(await off({ g2gDeliverDryRun: true }), /delivery or its stock sync is not live/);
   assert.match(await off({ g2gAutoDeliver: false }), /not live/);
   assert.match(await off({ g2gSyncStock: false }), /not live/);
 });
 
 test("the pass brings a sold-out offer back on the bundle we can deliver, and says so once", async () => {
-  eg._state.rested.clear();
+  fresh();
   const w = brawlhalla();
   const out = await eg.evergreenPass({ deps: w.d, now: NOW });
   assert.deepEqual(w.calls, [
+    'row G33 {"status":"delisted"}',
     'update G33 {"title":"Brawlhalla Twitch Drops (5 Items) — Artemis","description":"description of G5","unitPrice":1}',
-    'row G33 {"set":"S5","price":1,"autoPaused":true}',
+    'row G33 {"status":"active","set":"S5","price":1,"autoPaused":true}',
     "quantity G33 16",
     "relist G33",
     'row G33 {"autoPaused":false,"qtyTarget":16}',
     "delist G5",
     'row G5 {"status":"delisted","autoPaused":false}',
   ]);
-  assert.deepEqual([out.rewritten.length, out.retired.length, out.errors.length], [1, 1, 0]);
+  assert.deepEqual([out.rewritten.length, out.retired.length, out.errors.length, out.parked.length], [1, 1, 0, 0]);
   assert.equal(out.log.length, 2);
   assert.equal(w.d.telegrams.length, 1);
-  assert.match(w.d.telegrams[0], /G2G offer back on sale with another bundle[\s\S]*Brawlhalla Twitch Drops \(5 Items\) — Artemis\n\$1 · 16 in stock · offer G33\n\(was: Brawlhalla Twitch Drops \(33 Items\) — sold out\)/);
-  assert.deepEqual([w.d.events[0].action, w.d.events[0].meta.fromSet, w.d.events[0].meta.toSet, w.d.events[0].meta.absorbed], ["g2g_offer_rewritten", "S33", "S5", "G5"]);
+  assert.match(w.d.telegrams[0], /G2G offer moved to another bundle[\s\S]*Brawlhalla Twitch Drops \(5 Items\) — Artemis\n\$1 · 16 in stock, on sale · offer G33\n\(was: Brawlhalla Twitch Drops \(33 Items\) \$2\.33 — sold out\)/);
+  assert.deepEqual([w.d.events[0].action, w.d.events[0].meta.fromSet, w.d.events[0].meta.toSet, w.d.events[0].meta.absorbed, w.d.events[0].meta.relisted], ["g2g_offer_rewritten", "S33", "S5", "G5", true]);
   // the next pass finds a selling offer and does nothing
   w.calls.length = 0;
   const again = await eg.evergreenPass({ deps: w.d, now: NOW + 15 * 60 * 1000 });
@@ -718,61 +1028,109 @@ test("the pass brings a sold-out offer back on the bundle we can deliver, and sa
 });
 
 test("a game with nothing to move to is counted once, then left alone for six hours", async () => {
-  eg._state.rested.clear();
-  eg._state.lastSummary = "";
+  fresh();
   const s33 = setOf("S33", bItems(33, "x"));
   const s2 = setOf("S2", bItems(2, "m"));
   const w = world({ rows: [listing("G33", "S33", { sold: 14, paused: true })], sets: [s33, s2], stock: { S33: 0, S2: 2 } });
   const first = await eg.evergreenPass({ deps: w.d, now: NOW });
   assert.deepEqual(w.calls, []);
   assert.match(first.log[0], /skip Brawlhalla G33: no other bundle of this game has 5\+ accounts/);
-  const stockReads = w.d.slept.length;
   let asked = 0;
   w.d.stockForSets = async () => (asked++, new Map());
   const second = await eg.evergreenPass({ deps: w.d, now: NOW + 15 * 60 * 1000 });
-  assert.deepEqual([asked, second.log, w.d.slept.length], [0, [], stockReads]);
+  assert.deepEqual([asked, second.log], [0, []]);
   await eg.evergreenPass({ deps: w.d, now: NOW + 6 * HOUR + 1 });
   assert.equal(asked, 1);
 });
 
-test("a pass rewrites at most two offers, and none when G2G's paid orders cannot be read", async () => {
-  eg._state.rested.clear();
+test("a pass rewrites at most two offers, and a rewrite that was refused does not use up a turn or come back every 15 minutes", async () => {
+  fresh();
   const sets = [setOf("S30", bItems(30, "x")), setOf("S20", bItems(20, "y")), setOf("S10", bItems(10, "z")), setOf("SA", bItems(6, "a")), setOf("SB", bItems(5, "b")), setOf("SC", bItems(4, "c"))];
-  const mk = (hooks) =>
+  const mk = (extra) =>
     world({
       rows: [listing("G30", "S30", { sold: 9, paused: true }), listing("G20", "S20", { sold: 5, paused: true }), listing("G10", "S10", { sold: 2, paused: true })],
       sets,
       stock: { SA: 9, SB: 9, SC: 9 },
-      hooks,
+      ...extra,
     });
   const w = mk();
   const out = await eg.evergreenPass({ deps: w.d, now: NOW });
   assert.deepEqual(out.rewritten.map((x) => [x.offerId, x.toSet]), [["G30", "SA"], ["G20", "SB"]]);
   assert.equal(w.row("G10").set, "S10");
-  eg._state.rested.clear();
-  const blind = mk({ pending: () => { throw new Error("G2G orders failed (HTTP 503)"); } });
-  const none = await eg.evergreenPass({ deps: blind.d, now: NOW });
-  assert.deepEqual(blind.calls, []);
-  assert.match(none.errors[0].why, /could not read G2G's paid orders: G2G orders failed \(HTTP 503\)/);
+  // the third one follows on the next pass
+  const next = await eg.evergreenPass({ deps: w.d, now: NOW + 15 * 60 * 1000 });
+  assert.deepEqual(next.rewritten.map((x) => [x.offerId, x.toSet]), [["G10", "SC"]]);
+  // a paid order waiting on an offer: the game's plan stops there, and the game rests an hour
+  fresh();
+  const busy = mk({ paid: ["G30"] });
+  const one = await eg.evergreenPass({ deps: busy.d, now: NOW });
+  assert.deepEqual([one.rewritten.length, busy.calls], [0, []]);
+  assert.match(one.skipped.find((s) => s.offerId === "G30").why, /a paid order is waiting on this offer/);
+  let planned = 0;
+  busy.d.stockForSets = async (l) => (planned++, new Map(l.map((s) => [String(s._id), { stock: 9 }])));
+  await eg.evergreenPass({ deps: busy.d, now: NOW + 15 * 60 * 1000 });
+  assert.equal(planned, 0, "not asked again 15 minutes later");
+  await eg.evergreenPass({ deps: busy.d, now: NOW + HOUR + 1 });
+  assert.equal(planned, 1);
 });
 
-test("the pass never moves an offer onto a bundle that a paid order's offer is waiting on, and skips other games' bundles", async () => {
-  eg._state.rested.clear();
-  // a Halo bundle with plenty of stock is not a Brawlhalla bundle
+test("an offer left closed pages the owner, and the pass moves nothing else until it is looked at", async () => {
+  fresh();
+  const rows = [listing("G33", "S33", { sold: 14, paused: true, title: "Brawlhalla (33 Items)" }), listing("H22", "SH", { sold: 3, paused: true, title: "Halo (22 Items)" })];
+  const sets = [setOf("S33", bItems(33, "x")), setOf("S5", bItems(5, "m")), setOf("SH", items(22)), setOf("SH9", items(9, "h"))];
+  const w = world({ rows, sets, stock: { S5: 16, SH9: 12 }, hooks: { afterRelist: (id, g2g) => (g2g.get(id).price = 9) } });
+  const out = await eg.evergreenPass({ deps: w.d, now: NOW });
+  assert.deepEqual([out.parked.length, out.rewritten.length], [1, 0]);
+  assert.equal(w.d.telegrams.length, 1);
+  assert.match(w.d.telegrams[0], /an offer is OFF SALE after a rewrite that could not be finished or undone[\s\S]*the live price is not the new one[\s\S]*No other offer is rewritten until then/);
+  const touched = new Set(w.calls.filter((c) => c.startsWith("update")).map((c) => c.split(" ")[1]));
+  assert.equal(touched.size, 1, "the second game's offer was not started");
+});
+
+test("the pass first puts back what an earlier rewrite left half done", async () => {
+  fresh();
+  const w = brawlhalla();
+  parked(w, "G33", 30);
+  Object.assign(w.g2g.get("G33"), { title: "Brawlhalla Twitch Drops (5 Items)", price: 1.25 });
+  const out = await eg.evergreenPass({ deps: w.d, now: NOW });
+  assert.deepEqual(out.recovered.map((r) => [r.offerId, r.reopened]), [["G33", true]]);
+  assert.match(out.log[0], /^reopened G33: an interrupted rewrite — put back on its old bundle$/);
+  // The old text went back first...
+  assert.equal(w.calls[0], 'update G33 {"title":"Brawlhalla Twitch Drops (33 Items)","description":"description of G33","unitPrice":2.33}');
+  assert.equal(w.calls[1], 'row G33 {"status":"active","autoPaused":true}');
+  // ...and the same pass then did the rescue properly, start to finish.
+  assert.deepEqual([out.rewritten.length, w.row("G33").status, w.row("G33").set, w.row("G33").autoPaused, w.g2g.get("G33").status, w.g2g.get("G33").title], [1, "active", "S5", false, "live", "Brawlhalla Twitch Drops (5 Items) — Artemis"]);
+});
+
+test("the pass skips other games' bundles, no-claim sets and unpriced ones; a paid order's offer is left for the fulfiller", async () => {
+  fresh();
   const s33 = setOf("S33", bItems(33, "x"));
   const halo = setOf("SH", items(40), { price: 2 });
   const mixed = setOf("SM", [...bItems(8, "q"), ...items(2)]);
   const noclaim = setOf("SN", bItems(10, "n"), { stockSource: "noclaim" });
   const unpriced = setOf("SU", bItems(9, "u"), { price: 0, minPriceUsd: 0 });
-  const w = world({ rows: [listing("G33", "S33", { sold: 14, paused: true })], sets: [s33, halo, mixed, noclaim, unpriced], stock: { SH: 50, SM: 50, SN: 50, SU: 50 }, paid: [] });
+  const w = world({ rows: [listing("G33", "S33", { sold: 14, paused: true })], sets: [s33, halo, mixed, noclaim, unpriced], stock: { SH: 50, SM: 50, SN: 50, SU: 50 } });
   const out = await eg.evergreenPass({ deps: w.d, now: NOW });
   assert.deepEqual([w.calls, out.rewritten.length], [[], 0]);
-  // a paid order on the offer itself: left for the fulfiller
-  eg._state.rested.clear();
+  fresh();
   const w2 = brawlhalla({ paid: ["G33"] });
   const out2 = await eg.evergreenPass({ deps: w2.d, now: NOW });
   assert.deepEqual(w2.calls, []);
   assert.match(out2.skipped.find((s) => s.offerId === "G33").why, /a paid order is waiting on this offer/);
+  // a no-claim game is never planned at all
+  fresh();
+  const w3 = brawlhalla({ noClaim: [B] });
+  const out3 = await eg.evergreenPass({ deps: w3.d, now: NOW });
+  assert.deepEqual(w3.calls, []);
+  assert.match(out3.skipped[0].why, /Brawlhalla is a no-claim game/);
+});
+
+test("a flagship whose own bundle could not be counted is not moved: a failed read is not an empty shelf", async () => {
+  fresh();
+  const w = brawlhalla({ hooks: { count: (id) => { if (id === "S33") throw new Error("mongo timeout"); } } });
+  const out = await eg.evergreenPass({ deps: w.d, now: NOW });
+  assert.deepEqual(w.calls, []);
+  assert.match(out.skipped.find((s) => s.offerId === "G33").why, /its stock could not be counted/);
 });
 
 test("the exact count leaves out accounts that are on a live listing elsewhere", async () => {
@@ -782,8 +1140,8 @@ test("the exact count leaves out accounts that are on a live listing elsewhere",
   const w = world({ rows: [listing("G33", "S33", { sold: 14, paused: true })], sets: [s33, s9, s5], stock: { S9: 6, S5: 16 } });
   // three of the six accounts that hold the 9-item bundle are listed elsewhere
   const listed = new Set(["acc0", "acc1", "acc2"]);
-  const cands = await eg.candidateSets(w.d, B, { labels: [B], onG2g: new Set(), listed, want: 5, minStock: 5 });
-  assert.deepEqual(cands.map((c) => [c.setId, c.stock]), [["S5", 13]]);
+  const { cands, incomplete } = await eg.candidateSets(w.d, B, { labels: [B], onG2g: new Set(), listed, want: 5, minStock: 5 });
+  assert.deepEqual([cands.map((c) => [c.setId, c.stock]), incomplete], [[["S5", 13]], false]);
   assert.deepEqual(w.counted, ["S9", "S5"], "the biggest is counted first");
 });
 
@@ -796,12 +1154,27 @@ test("a bundle written down as several sets is one bundle: the set most accounts
   const open = setOf("SO", bItems(34, "x"), { createdAt: new Date(NOW - 50 * 24 * HOUR) });
   const onlyScoped = setOf("S9", bItems(9, "a"), { accountScopeLogins: ["x"] });
   const w = world({ sets: [scoped, open, onlyScoped], stock: { SC: 18, SO: 25, S9: 7 } });
-  const cands = await eg.candidateSets(w.d, B, { labels: [B], onG2g: new Set(["SC"]), listed: new Set(), want: 5, minStock: 5 });
-  assert.deepEqual(cands.map((c) => [c.setId, c.stock]), [["SO", 25], ["S9", 7]]);
+  const ids = async (wd, onG2g) => (await eg.candidateSets(wd, B, { labels: [B], onG2g: new Set(onG2g), listed: new Set(), want: 5, minStock: 5 })).cands.map((c) => [c.setId, c.stock]);
+  assert.deepEqual(await ids(w.d, ["SC"]), [["SO", 25], ["S9", 7]]);
   // equal stock: the one an offer of ours already carries, then the newest
   const w2 = world({ sets: [scoped, open], stock: { SC: 18, SO: 18 } });
-  assert.deepEqual((await eg.candidateSets(w2.d, B, { labels: [B], onG2g: new Set(["SC"]), listed: new Set(), want: 5, minStock: 5 })).map((c) => c.setId), ["SC"]);
-  assert.deepEqual((await eg.candidateSets(w2.d, B, { labels: [B], onG2g: new Set(), listed: new Set(), want: 5, minStock: 5 })).map((c) => c.setId), ["SC"]);
+  assert.deepEqual(await ids(w2.d, ["SO"]), [["SO", 18]]);
+  assert.deepEqual(await ids(w2.d, []), [["SC", 18]]);
+});
+
+test("a bundle one of our offers carries is always counted, and one that cannot be is said", async () => {
+  // 30 bundles bigger than the one on our shelf: the limit on exact counts
+  // must not be what calls our own offer's bundle empty.
+  const big = Array.from({ length: 30 }, (_, k) => setOf("SB" + k, bItems(40 + k, "b" + k)));
+  const ours = setOf("SOURS", bItems(6, "o"));
+  const stock = Object.fromEntries([...big.map((s) => [s._id, 9]), ["SOURS", 12]]);
+  const w = world({ sets: [...big, ours], stock });
+  const { cands } = await eg.candidateSets(w.d, B, { labels: [B], onG2g: new Set(["SOURS"]), listed: new Set(), want: 3, minStock: 5 });
+  assert.ok(cands.some((c) => c.setId === "SOURS"), "ours is among them");
+  assert.equal(w.counted.filter((id) => id !== "SOURS").length, 3, "the rest stop at what was asked for");
+  // its count failing is not "nothing behind it"
+  const w2 = world({ sets: [ours], stock, hooks: { count: () => { throw new Error("mongo timeout"); } } });
+  assert.deepEqual(await eg.candidateSets(w2.d, B, { labels: [B], onG2g: new Set(["SOURS"]), listed: new Set(), want: 3, minStock: 5 }), { cands: [], incomplete: true });
 });
 
 /* --------------------------------- the tool ------------------------------ */
@@ -827,4 +1200,25 @@ test("a plan line names the offer, both bundles and both prices", () => {
   assert.match(line, /^RESCUE  G33  Brawlhalla \(33 Items\) \$2\.33\n +-> Brawlhalla \(5 Items\) \$1  \(5 items, 16 accounts\)\n +takes over the bundle of G5, which comes down$/);
   assert.equal(describe({ type: "retire", offerId: "G1", title: "Halo (1 Item)", why: "never sold" }), "RETIRE   G1  Halo (1 Item) — never sold");
   assert.equal(describe({ type: "publish", toSet: "S36", price: 1, size: 36, stock: 22 }, () => "Rust (36 Items)"), "PUBLISH  Rust (36 Items) $1  (36 items, 22 accounts)");
+});
+
+test("the shelf check reads both ways: a row that says on sale, and an offer on sale with nothing watching it", async () => {
+  const rows = [
+    { externalId: "A", title: "on sale, live", status: "active", autoPaused: false },
+    { externalId: "B", title: "on sale, not live", status: "active", autoPaused: false },
+    { externalId: "C", title: "paused, live", status: "active", autoPaused: true },
+    { externalId: "D", title: "paused, off", status: "active", autoPaused: true },
+    { externalId: "E", title: "retired, off", status: "delisted", autoPaused: false },
+    { externalId: "F", title: "retired, LIVE", status: "delisted", autoPaused: false },
+    { externalId: "G", title: "left closed", status: "delisted", lastError: eg.PARK_MARK + "2026-10-13T06:00:00.000Z -> set S5" },
+  ];
+  const d = { mp: { g2gListOffers: async () => ["A", "C", "F", "FARM1"].map((offerId) => ({ offerId })) } };
+  const out = await auditShelf(d, { find: () => ({ lean: async () => rows }) });
+  assert.deepEqual([out.rows, out.live], [4, 4]);
+  assert.deepEqual(out.wrong.map((w) => [w.offerId, w.why.slice(0, 34)]), [
+    ["B", "our row says on sale, G2G does not"],
+    ["C", "our row says paused, G2G lists it "],
+    ["F", "LIVE on G2G while our row is delis"],
+    ["G", "closed by a rewrite: evergreen: re"],
+  ]);
 });

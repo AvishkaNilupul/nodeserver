@@ -455,6 +455,26 @@ async function pickStock(listing, order, { dryRun }) {
   return null; // no stock source at all -> caller decides (manual listing)
 }
 
+// utils/g2gEvergreen rewrites a sold-out archive offer to another bundle and
+// stamps the row with the time (`rebundledAt`). It never does so while a paid
+// order shows on the offer — but G2G can show a payment late, after that
+// look. An order PLACED before the rewrite paid for the old text and would be
+// handed the new bundle as if it were the same thing: it is held for a
+// hand-over instead (an error pages), with what the buyer paid for. Returns
+// that refusal, or "" for every order that may be delivered — which is every
+// order on a row that was never rewritten, and every order placed since.
+function orderPredatesRewrite(listing, order) {
+  if (!listing || !(listing.autoClaimSet && listing.set) || !listing.rebundledAt) return "";
+  let placed = Number(order && order.raw && order.raw.created_at) || 0;
+  if (placed > 0 && placed < 1e11) placed *= 1000; // seconds, should G2G ever send them
+  const rewritten = new Date(listing.rebundledAt).getTime();
+  if (!placed || !Number.isFinite(rewritten) || placed >= rewritten) return "";
+  return (
+    "placed before this offer was rewritten to another bundle — the buyer paid for \"" +
+    String((order && order.title) || "").slice(0, 110) + "\": deliver that by hand, or refund it"
+  );
+}
+
 // Deliver one paid order. Returns a short result the tick can log directly.
 async function deliverOrder(order, { dryRun }) {
   const orderId = String(order.orderItemId || "");
@@ -622,6 +642,11 @@ async function deliverOrder(order, { dryRun }) {
   // The accounts this order takes: `qty` on an ordinary row, qty × N on a bulk
   // pack row (PACKS-2 §2). G2G itself is only ever told units (confirmOnG2g).
   const want = accountsForOrder(listing, qty);
+  // No account is picked for an order that paid for a text this offer no
+  // longer carries (see orderPredatesRewrite).
+  const oldText = orderPredatesRewrite(listing, order);
+  if (oldText) return { orderId, error: oldText };
+
   const stock = await pickStock(listing, order, { dryRun });
   if (stock === null) {
     // A bulk pack row (docs/bulk-packs/FIXES-1.md L5) is never a hand-filled
@@ -1718,6 +1743,7 @@ module.exports = {
   syncStock,
   reportStockSync,
   runEvergreen,
+  orderPredatesRewrite,
   _resetStockState: () => {
     lastQtyWritten.clear();
     stockPasses = 0;
