@@ -38,13 +38,14 @@
 //     and anything made by hand are never rewritten or retired here. Neither
 //     is an offer whose title on G2G is no longer the one on our row (edited
 //     by hand), nor one G2G itself shows a sale or a rating on (retire).
-//   - An offer is rewritten while it is OFF sale, with its row PARKED (closed)
-//     so that nothing can relist it meanwhile; the new text and price are read
-//     back from G2G, and only then does the row follow. So nobody can pay for
-//     the old text and be handed the new bundle — not after a throw, a crash
-//     or a restart half-way either: recoverParked() puts such a row back on
-//     its old bundle, and when the old text cannot be confirmed the row stays
-//     closed and the owner is paged.
+//   - An offer is rewritten while it is OFF sale, with its row MARKED so that
+//     the stock sync and every other writer leave it alone; the new text and
+//     price are read back from G2G, and only then does the row follow. So
+//     nobody can pay for the old text and be handed the new bundle — not
+//     after a throw, a crash or a restart half-way either: recoverParked()
+//     puts the row's own text back, and when that cannot be confirmed the
+//     offer is STOPPED (off sale), the owner is paged, and nothing else is
+//     rewritten until a human has looked.
 //   - Never while a paid order waits on the offer or a unit of its row is mid
 //     hand-over. An order that only shows up afterwards is held for a hand-over
 //     by delivery itself (g2gFulfiller.orderPredatesRewrite, off `rebundledAt`).
@@ -69,18 +70,36 @@ const MAX_GAMES_PER_PASS = 3;
 const MAX_EXACT_COUNTS = 25;
 // G2G's lists trail a status change by a few seconds.
 const STATUS_TRIES = 6;
+// The delisted list was measured 10-20 s behind a text write (2026-10-13): a
+// rewrite is given this many reads before it is called "not landed".
+const TEXT_TRIES = 12;
 const STATUS_WAIT_MS = 4000;
 const NOTE_MAX = 1000;
 // G2G caps a quantity nowhere we know of; an archive offer advertises at most this.
 const MAX_QTY = 200;
 // A game whose rewrite was refused or failed is left alone this long.
 const RETRY_REST_MS = 60 * 60 * 1000;
-// On the lastError of a row that is parked (status "delisted") for the seconds
-// a rewrite takes: "<mark><ISO time> -> set <id>". See rewriteOffer.
-const PARK_MARK = "evergreen: rewriting — ";
+// A row this file is working on, or has stopped on, says so in `lastError`:
+//   "evergreen: rewriting — <ISO time> | was $<price on G2G> | -> set <id>"
+//        MARKED for the seconds a rewrite takes (see rewriteOffer)
+//   "evergreen: STOPPED — <why>"
+//        a rewrite could not be finished or undone: off sale until a human
+//        has looked (scripts/g2g-evergreen.js --reopen=<offer>)
+// The row stays ACTIVE either way — its receipts keep its sold accounts out of
+// every other listing's reach (utils/listedLogins reads active rows) — and the
+// stock sync leaves any row carrying "evergreen: " alone (g2gFulfiller).
+const MARK = "evergreen: ";
+const PARK_MARK = MARK + "rewriting — ";
+const STOP_MARK = MARK + "STOPPED — ";
+const MARK_RE = /^evergreen: /;
 const PARK_RE = /^evergreen: rewriting — /;
-// A parked row older than this was left by a rewrite that never finished.
+const STOP_RE = /^evergreen: STOPPED — /;
+// A rewriting mark older than this was left by a rewrite that never finished.
 const PARK_STALE_MS = 10 * 60 * 1000;
+// An event bundle's set (utils/autoFarmBundles): an active row on it tells the
+// auto-lister "this event's bundle is selling" on every market, so no offer is
+// ever moved onto one.
+const EVENT_BUNDLE = "autofarm-bundle";
 
 const state = { running: false, lastRun: null, lastSummary: "", rested: new Map() };
 
@@ -190,6 +209,9 @@ function rowFacts(row, set, now = Date.now()) {
     sold: units.filter((u) => unitState(u) === "sold").length,
     lastSoldAt,
     mid: units.some((u) => unitState(u) === "mid"),
+    // Being rewritten, or stopped on: nothing is planned for it, and the bundle
+    // it carries stays its own.
+    busy: MARK_RE.test(str(row && row.lastError)),
     paused: !!(row && row.autoPaused),
     pausedMs: Math.max(0, now - timeOf(row && row.updatedAt)),
     // Filled in by the caller for a paused row it wants judged: how many
@@ -244,8 +266,10 @@ function planGame(rows, sets, opts = {}) {
   const notes = [];
   const note = (r, why) => notes.push({ offerId: r ? r.offerId : "", title: r ? r.title : "", why });
 
-  const managed = (rows || []).filter((r) => r.managed);
-  const others = (rows || []).filter((r) => !r.managed);
+  // A row that is being rewritten, or was stopped on, is nobody's to plan:
+  // it counts as somebody else's offer, and its bundle stays its own.
+  const managed = (rows || []).filter((r) => r.managed && !r.busy);
+  const others = (rows || []).filter((r) => !r.managed || r.busy);
   const flagships = managed
     .filter((r) => r.sold > 0)
     .sort((a, b) => b.sold - a.sold || b.lastSoldAt - a.lastSoldAt || a.offerId.localeCompare(b.offerId));
@@ -257,7 +281,7 @@ function planGame(rows, sets, opts = {}) {
   // itself, so its bundle counts as on the shelf too.)
   const onShelf = new Map();
   for (const r of [...flagships, ...others]) {
-    if ((!r.paused || r.stock > 0) && r.sig && !onShelf.has(r.sig)) onShelf.set(r.sig, r);
+    if ((!r.paused || r.stock > 0 || r.busy) && r.sig && !onShelf.has(r.sig)) onShelf.set(r.sig, r);
   }
   const candidates = (sets || [])
     .filter((s) => s && s.sig && s.stock >= minStock && s.price > 0)
@@ -278,10 +302,14 @@ function planGame(rows, sets, opts = {}) {
       fromPrice: offer.price,
       toSet: pick.setId,
       sig: pick.sig,
-      // The text the bundle is already sold under, when it has an offer.
-      title: sameBundle ? offer.title : twin ? twin.title : "",
-      description: sameBundle ? offer.description : twin ? twin.description : "",
-      price: sameBundle ? offer.price : priceFor(pick, twin, floor),
+      // The text the bundle is already sold under, when it has an offer with
+      // one (a row with no stored description gets the house copy instead).
+      title: sameBundle ? offer.title : twin && twin.description ? twin.title : "",
+      description: sameBundle ? offer.description : twin && twin.description ? twin.description : "",
+      // A rescue takes the bundle's own price. An upgrade and a same-bundle
+      // move leave the offer's price where it is.
+      price: sameBundle || kind === "upgrade" ? offer.price : priceFor(pick, twin, floor),
+      bundlePrice: sameBundle ? offer.price : priceFor(pick, twin, floor),
       size: pick.size,
       stock: pick.stock,
       absorb: twin ? twin.offerId : "",
@@ -310,7 +338,7 @@ function planGame(rows, sets, opts = {}) {
       }
       // The same bundle, written down as another set that still has accounts
       // behind it: the offer stays word for word what it is.
-      const same = candidates.find((s) => s.sig === f.sig && s.setId !== f.setId);
+      const same = onShelf.has(f.sig) ? null : candidates.find((s) => s.sig === f.sig && s.setId !== f.setId);
       if (same) {
         give(f, same, "rescue", true);
         continue;
@@ -368,8 +396,12 @@ function planGame(rows, sets, opts = {}) {
     // big: with `publish`, an offer is made for it (unless a never-sold one
     // already sells it, which is then kept); without, the never-sold offer on
     // sale with the biggest deliverable bundle is kept.
+    // An offer still on sale with NOTHING behind it is about to be paused by
+    // the sync: it is not what keeps the game on the shelf. One whose stock
+    // could not be counted may be — so nothing is retired on a guess.
     const movedTo = (f) => actions.some((a) => a.type === "rewrite" && a.offerId === f.offerId);
-    const selling = flagships.filter((f) => !f.paused || f.stock > 0 || movedTo(f));
+    const selling = flagships.filter((f) => movedTo(f) || f.stock > 0 || (!f.paused && f.stock == null));
+    const unknown = flagships.some((f) => !movedTo(f) && !f.paused && f.stock == null);
     let shelfMax = 0;
     for (const f of selling) shelfMax = Math.max(shelfMax, sizeOnShelf(f, actions));
     const open = candidates.filter((s) => !onShelf.has(s.sig) && s.size > shelfMax);
@@ -377,7 +409,9 @@ function planGame(rows, sets, opts = {}) {
     const best = open[0] || null;
     let keep = null;
     let published = false;
-    if (best && (opts.keepBest || opts.publish)) {
+    // (Retiring implies keeping: "take the never-sold offers down" never means
+    // "take the game's biggest bundle down with them".)
+    if (best && (opts.keepBest || opts.publish || opts.retire)) {
       keep = carrier(best);
       if (!keep && opts.publish) {
         const price = round2(Math.max(floor, Number(opts.publishPrice) > 0 ? Number(opts.publishPrice) : best.price));
@@ -400,7 +434,7 @@ function planGame(rows, sets, opts = {}) {
           .filter((r) => !r.paused && !absorbed.has(r.offerId))
           .sort((a, b) => b.size - a.size || a.offerId.localeCompare(b.offerId))[0] || null;
     }
-    if (opts.retire && opts.incomplete) {
+    if (opts.retire && (opts.incomplete || unknown)) {
       note(null, "a bundle on the shelf could not be counted — nothing is retired this time");
     } else if (opts.retire) {
       for (const r of never) {
@@ -421,7 +455,7 @@ function planGame(rows, sets, opts = {}) {
           why: onShelf.has(r.sig)
             ? "another offer already sells this bundle"
             : r.paused
-              ? "never sold, and nothing left to deliver"
+              ? "never sold, and off sale"
               : "never sold",
         });
       }
@@ -536,11 +570,11 @@ async function candidateSets(d, game, { labels, onG2g, listed, want, minStock })
   const found = await d.DropSet.find(
     { "items.game": { $in: names.map((n) => new RegExp("^" + escapeRe(n) + "$", "i")) } },
     // The account scope is part of a set's stock: both counts below read it.
-    { name: 1, items: 1, coverGame: 1, price: 1, minPriceUsd: 1, stockSource: 1, accountScopeLogins: 1, accountScopeIds: 1, createdAt: 1 },
+    { name: 1, items: 1, coverGame: 1, price: 1, minPriceUsd: 1, stockSource: 1, sourceType: 1, accountScopeLogins: 1, accountScopeIds: 1, createdAt: 1 },
   ).lean();
   let cands = [];
   for (const s of found || []) {
-    if (!s || s.stockSource === "noclaim") continue;
+    if (!s || s.stockSource === "noclaim" || s.sourceType === EVENT_BUNDLE) continue;
     const items = (s.items || []).filter(Boolean);
     if (!items.length) continue;
     // Every item of this game — a mixed "everything" account is another product.
@@ -647,15 +681,19 @@ async function offerOnG2g(d, offerId) {
 }
 
 // Ask until G2G shows what `ok` wants, a few seconds apart. Never throws.
-async function waitFor(d, offerId, ok) {
+// NOTE what a read can prove. G2G's lists trail a write, so a read that shows
+// what was just WRITTEN is proof the write landed, and a read that still shows
+// the value from before proves nothing at all.
+async function waitFor(d, offerId, ok, tries = STATUS_TRIES) {
   let seen = null;
-  for (let t = 1; t <= STATUS_TRIES; t++) {
+  for (let t = 1; t <= tries; t++) {
     seen = await offerOnG2g(d, offerId);
     if (ok(seen)) return { ok: true, seen };
-    if (t < STATUS_TRIES) await d.sleep(STATUS_WAIT_MS);
+    if (t < tries) await d.sleep(STATUS_WAIT_MS);
   }
   return { ok: false, seen };
 }
+const readable = (x) => !!x && (x.status === "live" || x.status === "delisted");
 
 const sameTitle = (a, b) => str(a).trim().slice(0, 128) === str(b).trim().slice(0, 128);
 const samePrice = (a, b) => Math.abs(Number(a) - Number(b)) < PRICE_EPS;
@@ -689,6 +727,7 @@ async function retireOffer(d, offerId, why, ctx = {}) {
   if (row.status !== "active") return { skipped: "row is already " + row.status };
   const f = rowFacts(row, null);
   if (!f.managed) return { skipped: "not an offer this file may retire (" + f.shape + ", origin " + (str(row.origin) || "none") + ")" };
+  if (f.busy) return { skipped: "it is being rewritten, or was stopped on" };
   if (f.sold) return { skipped: "it has sold " + f.sold + " — kept" };
   if (f.mid) return { skipped: "an order is mid hand-over on it" };
   let paid = ctx.paid;
@@ -732,15 +771,14 @@ async function retireOffer(d, offerId, why, ctx = {}) {
 // Rewrite one offer to another bundle. The order below IS the safety property.
 //   action — a planGame "rewrite"; set — the DropSet it moves to
 // Returns { rewritten:true, relisted, stock, title, price } or { skipped } /
-// { error, parked? } — `parked`: the row was left closed and needs a human.
+// { error, parked? } — `parked`: the row was left STOPPED and needs a human.
 //
-// While the rewrite runs the row is PARKED: status "delisted" with PARK_MARK in
-// lastError. A parked row is in nobody's query — the stock sync cannot relist
-// it, a second writer's compare-and-set misses it — and delivery still finds
-// it. So a crash, a restart or a throw between "new text sent" and "row moved"
-// leaves an offer that is off sale with a closed row, never one that can come
-// back on sale carrying a text its row cannot deliver. recoverParked() puts
-// such a row back at the start of the next pass.
+// For as long as it runs the row carries the rewriting MARK. The stock sync
+// leaves a marked row alone and every write here is a compare-and-set on the
+// mark, so nothing else can relist the offer or move the row in between — and
+// a crash or a restart half-way leaves a marked row, which recoverParked()
+// puts back on its old text at the next pass. The mark comes off in the very
+// last write, after the live offer has been read.
 async function rewriteOffer(d, action, set, ctx = {}) {
   const offerId = str(action.offerId);
   const now = ctx.now || Date.now();
@@ -751,6 +789,7 @@ async function rewriteOffer(d, action, set, ctx = {}) {
   const upgrade = action.kind !== "rescue";
   if (row.status !== "active") return { skipped: "row is " + row.status };
   if (!f.managed) return { skipped: "not an offer this file may rewrite (" + f.shape + ", origin " + (str(row.origin) || "none") + ")" };
+  if (f.busy) return { skipped: "it is being rewritten, or was stopped on: " + str(row.lastError).slice(0, 80) };
   if (str(row.set) !== str(action.fromSet)) return { skipped: "the row moved to another set since the plan" };
   if (f.mid) return { skipped: "an order is mid hand-over on it" };
   if (!upgrade && !row.autoPaused) return { skipped: "back on sale since the plan" };
@@ -776,16 +815,21 @@ async function rewriteOffer(d, action, set, ctx = {}) {
   const game = setGame(target);
   const text = action.sameBundle
     ? { title: row.title, description: old.description }
-    : action.title
+    : action.title && action.description
       ? { title: action.title, description: action.description }
       : d.text(target, game);
   const title = str(text.title).trim().slice(0, 128);
   const description = str(text.description || text.title);
-  const price = action.sameBundle ? priceNow : round2(action.price);
+  // An upgrade and a same-bundle move leave the price where it is: more items,
+  // or the same ones, for what the offer costs now.
+  const price = action.sameBundle || upgrade ? priceNow : round2(action.price);
   if (!title) return { error: "no title for the new bundle" };
   if (!(price > 0) || price < (Number(d.floor) || 0)) return { error: "no usable price for the new bundle" };
-  if (price > priceNow + PRICE_EPS) {
-    return { skipped: "the offer costs $" + priceNow + " on G2G, less than this bundle's $" + price + " — a price for the owner to set" };
+  // The bundle's own price must be within what the offer costs on G2G NOW (a
+  // same-bundle move has no other price to compare).
+  const own = round2(action.bundlePrice != null ? action.bundlePrice : action.price);
+  if (!action.sameBundle && own > priceNow + PRICE_EPS) {
+    return { skipped: "the offer costs $" + priceNow + " on G2G, less than this bundle's $" + own + " — a price for the owner to set" };
   }
 
   // Paid orders, read NOW: an order that came in since the plan was made.
@@ -797,28 +841,40 @@ async function rewriteOffer(d, action, set, ctx = {}) {
   }
   if (paid.has(offerId)) return { skipped: "a paid order is waiting on this offer" };
 
-  // 1. Park the row.
-  const marker = PARK_MARK + new Date(now).toISOString() + " -> set " + str(target._id);
-  const parked = await d.MarketplaceListing.updateOne(
-    { _id: row._id, set: row.set, status: "active", autoPaused: !!row.autoPaused },
-    { $set: { status: "delisted", lastError: marker } },
+  // 1. Mark the row. The time is this second's, not the pass's: it is what
+  //    tells a rewrite in progress from one that died.
+  const marker = PARK_MARK + new Date(Date.now()).toISOString() + " | was $" + priceNow + " | -> set " + str(target._id);
+  const marked = await d.MarketplaceListing.updateOne(
+    { _id: row._id, set: row.set, status: "active", autoPaused: !!row.autoPaused, lastError: str(row.lastError) },
+    { $set: { lastError: marker } },
   );
-  if (!parked || parked.modifiedCount !== 1) return { skipped: "the row changed since the plan" };
-  // Give the row back as it was (`autoPaused` says who relists it).
-  const unpark = async (autoPaused) => {
-    const r = await d.MarketplaceListing.updateOne(
-      { _id: row._id, status: "delisted", lastError: marker },
-      { $set: { status: "active", lastError: "", autoPaused } },
-    ).catch(() => null);
+  if (!marked || marked.modifiedCount !== 1) return { skipped: "the row changed since the plan" };
+  const mine = { _id: row._id, status: "active", lastError: marker };
+  // Take the mark off (with whatever else the row must say), if it is still ours.
+  const clear = async (extra) => {
+    const r = await d.MarketplaceListing.updateOne(mine, { $set: { lastError: "", ...extra } }).catch(() => null);
     return !!(r && r.modifiedCount === 1);
   };
-  // Leave nothing half done: the old text is back on G2G (read first — when it
-  // never changed there is nothing to put back), then the row. When the old
-  // text cannot be CONFIRMED, the row stays parked and a human is told.
+  // Leave the row STOPPED: off sale until a human has looked.
+  const stop = async (why) => {
+    await d.MarketplaceListing.updateOne(mine, { $set: { lastError: (STOP_MARK + why).slice(0, 400), autoPaused: true } }).catch(() => {});
+    return { error: why, parked: true };
+  };
+
+  // Leave nothing half done. What a read can prove decides how:
+  //   - no text was sent: G2G still holds the old text, and a read confirms it;
+  //   - a text WAS sent (it may have landed even if the call threw): a read
+  //     that shows the old text proves nothing, because the list trails the
+  //     write. The old text is written again, and only that write coming back
+  //     AND the read agreeing counts as restored.
+  let sent = false;
   const undo = async (error) => {
     let s = await offerOnG2g(d, offerId);
-    let restored = (s.status === "live" || s.status === "delisted") && sameTitle(s.title, old.title) && samePrice(s.price, old.price);
-    if (!restored && (s.status === "live" || s.status === "delisted")) {
+    let restored = false;
+    if (!sent) {
+      restored = readable(s) && sameTitle(s.title, old.title) && samePrice(s.price, old.price);
+    } else if (readable(s)) {
+      let wrote = false;
       try {
         // Never a word changed on an offer that is on sale.
         if (s.status === "live") {
@@ -826,21 +882,22 @@ async function rewriteOffer(d, action, set, ctx = {}) {
           await waitFor(d, offerId, (x) => x.status === "delisted");
         }
         await d.mp.g2gUpdateOffer(offerId, { title: old.title.slice(0, 128), description: old.description, unitPrice: old.price });
+        wrote = true;
       } catch {
-        /* judged by the read below */
+        wrote = false;
       }
-      const back = await waitFor(d, offerId, (x) => (x.status === "live" || x.status === "delisted") && sameTitle(x.title, old.title) && samePrice(x.price, old.price));
-      restored = back.ok;
-      s = back.seen;
+      if (wrote) {
+        const back = await waitFor(d, offerId, (x) => readable(x) && sameTitle(x.title, old.title) && samePrice(x.price, old.price), TEXT_TRIES);
+        restored = back.ok;
+        s = back.seen;
+      }
     }
-    if (restored) {
-      // On sale and untouched: exactly as before. Off sale: handed to the
-      // stock sync, which counts the row's own bundle before it relists.
-      const given = await unpark(s.status === "live" ? false : true);
-      if (given) return { error: error + " — nothing is changed: the offer has its old text" + (upgrade && s.status !== "live" ? ", the stock sync relists it" : "") };
-      return { error: error + " — the offer has its old text, but its row could not be reopened", parked: true };
-    }
-    return { error: error + " — the old text could NOT be confirmed back: the row stays closed, check the offer on G2G by hand", parked: true };
+    if (!restored) return stop(error + " — and the old text could NOT be confirmed back: check the offer on G2G by hand");
+    // On sale and untouched: exactly as before. Off sale: handed to the stock
+    // sync, which counts the row's own bundle before it relists.
+    const given = await clear({ autoPaused: s.status !== "live" });
+    if (!given) return { error: error + " — the offer has its old text, but its row was changed by someone else meanwhile: look at it", parked: true };
+    return { error: error + " — nothing is changed: the offer has its old text" + (upgrade && s.status !== "live" ? ", and the stock sync relists it" : "") };
   };
 
   let moved = false;
@@ -854,47 +911,55 @@ async function rewriteOffer(d, action, set, ctx = {}) {
       if ((await paidOffers(d)).has(offerId)) {
         await d.mp.g2gRelist(offerId);
         await waitFor(d, offerId, (x) => x.status === "live");
-        return (await unpark(false))
+        return (await clear({ autoPaused: false }))
           ? { skipped: "a paid order arrived as it was taken down — back on sale, untouched" }
-          : { error: "a paid order arrived as it was taken down; it is back on sale but its row could not be reopened", parked: true };
+          : { error: "a paid order arrived as it was taken down; it is back on sale, but its row was changed by someone else meanwhile: look at it", parked: true };
       }
     }
     // 3. The new text and price, read back from G2G.
     if (!action.sameBundle) {
+      sent = true;
       await d.mp.g2gUpdateOffer(offerId, { title, description, unitPrice: price });
-      const took = await waitFor(d, offerId, (x) => x.status === "delisted" && sameTitle(x.title, title) && samePrice(x.price, price));
+      const took = await waitFor(d, offerId, (x) => x.status === "delisted" && sameTitle(x.title, title) && samePrice(x.price, price), TEXT_TRIES);
       if (!took.ok) return await undo("the new title and price did not show on G2G");
     }
-    // 4. Only now the row follows — and comes back from its parking — in one
-    //    compare-and-set. `rebundledAt` is what delivery reads to hold an order
-    //    that was placed on the old text (g2gFulfiller.orderPredatesRewrite).
+    // 4. Only now the row follows. The mark stays on: the stock sync is still
+    //    kept out until the live offer has been read. `rebundledAt` is what
+    //    delivery reads to hold an order placed on the old text — stamped only
+    //    when the new bundle is another one (a rescue): an upgrade hands over
+    //    everything the old text promised, a same-bundle move changes nothing.
     const stamp = new Date(now).toISOString().slice(0, 16).replace("T", " ") + "Z";
     const cas = await d.MarketplaceListing.updateOne(
-      { _id: row._id, status: "delisted", lastError: marker, set: row.set },
+      { ...mine, set: row.set },
       {
         $set: {
-          status: "active",
           set: target._id,
           title,
           description,
           price,
           autoPaused: true,
-          rebundledAt: new Date(now),
-          lastError: "",
-          note: keepNewest(str(row.note) + " — evergreen " + stamp + ": " + action.kind + " from set " + str(row.set) + " ($" + old.price + ")"),
+          ...(upgrade || action.sameBundle ? {} : { rebundledAt: new Date(now) }),
+          note: keepNewest(str(row.note) + " — evergreen " + stamp + ": " + action.kind + (action.sameBundle ? " (same bundle)" : "") + " from set " + str(row.set) + " ($" + old.price + ")"),
         },
       },
     );
-    if (!cas || cas.modifiedCount !== 1) return await undo("the row changed while rewriting");
-    moved = true;
+    moved = !!(cas && cas.modifiedCount === 1);
   } catch (e) {
+    // A write that threw may still have landed: the row itself says.
+    const at = await d.MarketplaceListing.findById(row._id).lean().catch(() => null);
+    moved = !!(at && str(at.set) === str(target._id) && at.lastError === marker);
     if (!moved) return undo("the rewrite failed (" + str(e && e.message) + ")");
-    throw e;
   }
+  if (!moved) return undo("the row changed while rewriting");
 
-  // 5. Back on sale the way the stock sync resumes its own pauses. From here
-  //    text, price and row agree and the row reads "paused by the sync", so
-  //    whatever fails, the next stock sync finishes the job.
+  // 5. Back on sale. Text, price and row agree from here on, so whatever
+  //    fails the mark comes off with the row reading "paused by the sync",
+  //    and the next stock sync finishes the job.
+  const done = { rewritten: true, title, price, stock: 0, relisted: false };
+  const later = async (note) => {
+    if (await clear({ autoPaused: true })) return { ...done, note };
+    return { error: "rewritten, but its row was changed by someone else before it could be relisted: look at it", parked: true };
+  };
   const fresh = await d.MarketplaceListing.findById(row._id).lean().catch(() => null);
   let stock = null;
   try {
@@ -902,98 +967,131 @@ async function rewriteOffer(d, action, set, ctx = {}) {
   } catch {
     stock = null;
   }
-  const done = { rewritten: true, title, price, stock: stock > 0 ? stock : 0, relisted: false };
-  if (!(stock > 0)) return { ...done, note: "no stock counted yet — the stock sync brings it back" };
+  if (!(stock > 0)) return later("no stock counted yet — the stock sync brings it back");
+  done.stock = stock;
   try {
     await d.mp.g2gSetQuantity(offerId, stock);
     await d.mp.g2gRelist(offerId);
   } catch (e) {
-    return { ...done, note: "the relist failed (" + str(e && e.message) + ") — the stock sync brings it back" };
+    return later("the relist failed (" + str(e && e.message) + ") — the stock sync brings it back");
   }
-  const on = await d.MarketplaceListing.updateOne(
-    { _id: row._id, status: "active", set: target._id, autoPaused: true },
-    { $set: { autoPaused: false, qtyTarget: stock } },
-  ).catch(() => null);
-  if (!on || on.modifiedCount !== 1) {
-    // Closed or changed in these seconds (the owner's delist): an offer must
-    // not stay on sale over a row that says otherwise.
-    const down = await d.mp.g2gDelist(offerId).then(() => true, () => false);
-    return down
-      ? { ...done, note: "its row changed during the relist — taken off sale again" }
-      : { error: "its row changed during the relist and the offer could NOT be taken off sale again — check it on G2G", parked: true };
-  }
-  // 6. What buyers see now.
+  // 6. What buyers see now: the live offer, read directly.
   const live = await waitFor(d, offerId, (x) => x.status === "live");
-  if (!live.ok) {
-    // Not shown as live yet: handed to the stock sync, which relists a paused
-    // row by itself.
-    await d.MarketplaceListing.updateOne({ _id: row._id, status: "active", set: target._id }, { $set: { autoPaused: true } }).catch(() => {});
-    return { ...done, note: "G2G did not show it on sale yet — the stock sync relists it" };
-  }
-  const wrong = !sameTitle(live.seen.title, title)
-    ? "the live title is not the new one"
-    : !samePrice(live.seen.price, price)
-      ? "the live price is not the new one"
-      : !sameDescription(live.seen.description, description)
-        ? "the live description is not the new one"
-        : "";
+  if (!live.ok) return later("G2G did not show it on sale yet — the stock sync relists it");
+  const wrong = action.sameBundle
+    ? ""
+    : !sameTitle(live.seen.title, title)
+      ? "the live title is not the new one"
+      : !samePrice(live.seen.price, price)
+        ? "the live price is not the new one"
+        : !sameDescription(live.seen.description, description)
+          ? "the live description is not the new one"
+          : "";
   if (wrong) {
     // A live offer that reads differently from what its row delivers comes
-    // down and stays down: closed, the one state nothing relists.
+    // down, and the row is STOPPED.
     const down = await d.mp.g2gDelist(offerId).then(() => true, () => false);
-    const closed = await d.MarketplaceListing.updateOne(
-      { _id: row._id },
-      { $set: { status: "delisted", autoPaused: false, lastError: "evergreen: " + wrong + " after a rewrite — check the offer on G2G before relisting" } },
-    ).then((r) => !!(r && r.modifiedCount === 1), () => false);
-    return {
-      error: wrong + " after the relist — " + (down ? "taken off sale" : "it could NOT be taken off sale") + (closed ? ", row closed" : ", and its row could not be closed") + "; check it on G2G by hand",
-      parked: true,
-    };
+    return stop(wrong + " after the relist — " + (down ? "taken off sale" : "and it could NOT be taken off sale: delist it on G2G now"));
   }
-  return { ...done, relisted: true };
+  // 7. The mark comes off: the row is an ordinary selling row again.
+  if (await clear({ autoPaused: false, qtyTarget: stock })) return { ...done, relisted: true };
+  // Somebody changed the row in these seconds (the owner's Delist clears the
+  // mark and closes it): an offer must not stay on sale over a closed row.
+  const at = await d.MarketplaceListing.findById(row._id).lean().catch(() => null);
+  if (at && at.status === "active" && str(at.set) === str(target._id) && !MARK_RE.test(str(at.lastError))) {
+    return { ...done, relisted: !at.autoPaused, note: at.autoPaused ? "paused again by someone else" : undefined };
+  }
+  const down = await d.mp.g2gDelist(offerId).then(() => true, () => false);
+  return down
+    ? { ...done, note: "its row was closed during the relist — taken off sale again" }
+    : { error: "its row was closed during the relist and the offer could NOT be taken off sale again — delist it on G2G now", parked: true };
 }
 
-// Rows a rewrite left parked — a crash, a restart, a failure it could not
-// undo. For each one older than PARK_STALE_MS: when G2G shows the row's own
-// (old) text, or takes it back, the row is reopened as "paused by the sync";
-// otherwise it stays closed and is reported. Returns [{ offerId, reopened,
-// why }].
+// The price G2G showed before a rewrite, as its mark recorded it (0 = unknown).
+function priceInMark(mark) {
+  const m = /\| was \$([0-9.]+) \|/.exec(str(mark));
+  return m ? Number(m[1]) || 0 : 0;
+}
+
+// Rows a rewrite left MARKED — a crash, a restart — and older than
+// PARK_STALE_MS. The row's own text is what its set delivers (the row moves
+// only after the text did), so that text is sent again and read back; then the
+// mark comes off and the row reads "paused by the sync". A price the owner had
+// raised is not written down. What cannot be confirmed becomes STOPPED.
+// Returns [{ offerId, reopened, why }].
 async function recoverParked(d, now = Date.now()) {
-  const rows = await d.MarketplaceListing.find({ marketplace: "g2g", status: "delisted", lastError: PARK_RE }).lean();
+  const rows = await d.MarketplaceListing.find({ marketplace: "g2g", status: "active", lastError: PARK_RE }).lean();
   const out = [];
   for (const row of rows || []) {
     const at = timeOf(str(row.lastError).slice(PARK_MARK.length).split(" ")[0]);
     if (at && now - at < PARK_STALE_MS) continue; // a rewrite may be running
     const offerId = str(row.externalId);
-    const ok = (x) => (x.status === "live" || x.status === "delisted") && sameTitle(x.title, row.title) && samePrice(x.price, row.price);
-    let seen = await offerOnG2g(d, offerId);
-    if (seen.status !== "live" && seen.status !== "delisted") {
-      out.push({ offerId, title: str(row.title), reopened: false, why: "G2G shows it " + seen.status });
+    const mine = { _id: row._id, status: "active", lastError: row.lastError };
+    const price = Math.max(Number(row.price) || 0, priceInMark(row.lastError));
+    const title = str(row.title);
+    const ok = (x) => readable(x) && sameTitle(x.title, title) && samePrice(x.price, price);
+    const stop = async (why) => {
+      await d.MarketplaceListing.updateOne(mine, { $set: { lastError: (STOP_MARK + why).slice(0, 400), autoPaused: true } }).catch(() => {});
+      out.push({ offerId, title, reopened: false, why });
+    };
+    const seen = await offerOnG2g(d, offerId);
+    if (!readable(seen)) {
+      out.push({ offerId, title, reopened: false, why: "G2G shows it " + seen.status + " — tried again next pass" });
       continue;
     }
-    if (!ok(seen)) {
-      try {
-        if (seen.status === "live") {
-          await d.mp.g2gDelist(offerId);
-          await waitFor(d, offerId, (x) => x.status === "delisted");
-        }
-        await d.mp.g2gUpdateOffer(offerId, { title: str(row.title).slice(0, 128), description: str(row.description || row.title), unitPrice: row.price });
-      } catch {
-        /* judged by the read below */
+    if (seen.status === "live") {
+      // It died before anything was taken down (the take-down comes before
+      // any text): on sale as it was, when it still reads as its row.
+      if (sameTitle(seen.title, title)) {
+        const r = await d.MarketplaceListing.updateOne(mine, { $set: { lastError: "", autoPaused: false } }).catch(() => null);
+        out.push({ offerId, title, reopened: !!(r && r.modifiedCount === 1), why: "an interrupted rewrite that had not started — still on sale, untouched" });
+      } else {
+        await d.mp.g2gDelist(offerId).catch(() => {});
+        await stop("an interrupted rewrite left it ON SALE with a text that is not its row's — taken off sale: check it on G2G");
       }
-      seen = (await waitFor(d, offerId, ok)).seen;
-    }
-    if (!ok(seen)) {
-      out.push({ offerId, title: str(row.title), reopened: false, why: "its old text could not be put back on G2G" });
       continue;
     }
-    const r = await d.MarketplaceListing.updateOne(
-      { _id: row._id, status: "delisted", lastError: row.lastError },
-      { $set: { status: "active", lastError: "", autoPaused: seen.status !== "live" } },
-    ).catch(() => null);
-    out.push({ offerId, title: str(row.title), reopened: !!(r && r.modifiedCount === 1), why: "an interrupted rewrite — put back on its old bundle" });
+    let wrote = false;
+    try {
+      await d.mp.g2gUpdateOffer(offerId, { title: title.slice(0, 128), description: str(row.description || row.title), unitPrice: price });
+      wrote = true;
+    } catch {
+      wrote = false;
+    }
+    const back = wrote ? await waitFor(d, offerId, ok, TEXT_TRIES) : { ok: false };
+    if (!back.ok) {
+      await stop("an interrupted rewrite: its row's text could not be put back on G2G — check the offer by hand");
+      continue;
+    }
+    const r = await d.MarketplaceListing.updateOne(mine, { $set: { lastError: "", autoPaused: true } }).catch(() => null);
+    out.push({ offerId, title, reopened: !!(r && r.modifiedCount === 1), why: "an interrupted rewrite — its row's text is back on G2G, the stock sync relists it" });
   }
   return out;
+}
+
+// Rows left STOPPED: [{ offerId, title, why }]. Read-only.
+async function stoppedRows(d) {
+  const rows = await d.MarketplaceListing.find({ marketplace: "g2g", status: "active", lastError: STOP_RE }).lean();
+  return (rows || []).map((r) => ({ offerId: str(r.externalId), title: str(r.title), why: str(r.lastError).slice(STOP_MARK.length) }));
+}
+
+// A human has looked at a STOPPED offer: take the stop off, so the stock sync
+// counts it and relists it. Only when G2G shows the row's own title — the
+// offer must say what the row delivers before it may sell again.
+async function reopenStopped(d, offerId) {
+  const row = await d.MarketplaceListing.findOne({ marketplace: "g2g", externalId: offerId }).lean();
+  if (!row) return { error: "no listing row" };
+  if (row.status !== "active" || !STOP_RE.test(str(row.lastError))) return { skipped: "not a stopped row (" + row.status + (row.lastError ? ", " + str(row.lastError).slice(0, 60) : "") + ")" };
+  const seen = await offerOnG2g(d, offerId);
+  if (!readable(seen)) return { error: "G2G shows it " + seen.status };
+  if (!sameTitle(seen.title, row.title)) {
+    return { error: 'G2G shows the title "' + seen.title + '", the row delivers "' + row.title + '" — put the row\'s title, description and price on the offer first' };
+  }
+  const r = await d.MarketplaceListing.updateOne(
+    { _id: row._id, status: "active", lastError: row.lastError },
+    { $set: { lastError: "", autoPaused: seen.status !== "live" } },
+  );
+  return r && r.modifiedCount === 1 ? { reopened: true, onSale: seen.status === "live" } : { error: "the row changed meanwhile" };
 }
 
 // Make the offer for a bundle that has none (operator plan only), with the row
@@ -1149,13 +1247,13 @@ async function planFor(d, g, { steps, listed, now, publishPrice, minStock = MIN_
   const flagships = rows
     .filter((r) => r.managed && r.sold > 0)
     .sort((a, b) => b.sold - a.sold || b.lastSoldAt - a.lastSoldAt || a.offerId.localeCompare(b.offerId));
-  // A paused offer that has sold: is its own bundle really gone?
-  for (const f of flagships) if (f.paused) f.stock = await ownStock(f);
-  // The best seller's own stock: an upgrade never moves it to a thinner shelf.
-  const top = flagships[0];
-  if (steps.upgrade && top && !top.paused) top.stock = await ownStock(top);
-  const needy = flagships.filter((r) => r.paused && r.stock === 0).length;
   const wide = !!(steps.upgrade || steps.keepBest || steps.retire || steps.publish);
+  // A paused offer that has sold: is its own bundle really gone? And, for a
+  // plan that keeps, retires or upgrades: what stands behind the ones on sale
+  // (an upgrade never moves to a thinner shelf; an offer about to be paused
+  // is not what keeps a game on the shelf).
+  for (const f of flagships) if (!f.busy && (f.paused || wide)) f.stock = await ownStock(f);
+  const needy = flagships.filter((r) => !r.busy && r.paused && r.stock === 0).length;
   let found = { cands: [], incomplete: false };
   if (needy || wide) {
     found = await candidateSets(d, g.game, {
@@ -1184,31 +1282,53 @@ function page(d, text) {
   }
 }
 
+// When a STOPPED offer was last paged about (process-local: a restart saying
+// it once more is right).
+const pagedAt = new Map();
+const PAGE_AGAIN_MS = 6 * 60 * 60 * 1000;
+
 async function evergreenPass(opts = {}) {
   if (state.running) return { skipped: "already running", log: [] };
   const d = opts.deps || realDeps();
   const now = opts.now || Date.now();
   const af = (d.settings.getAutoFarm && d.settings.getAutoFarm()) || {};
-  if (af.g2gEvergreen !== true) return { skipped: "switched off (autoFarm.g2gEvergreen)", log: [] };
-  // An offer put back on sale must be delivered and kept in step with stock.
-  if (!g2gIsLive(d)) return { skipped: "G2G delivery or its stock sync is not live", log: [] };
   state.running = true;
-  const out = { at: new Date(now), rewritten: [], retired: [], skipped: [], errors: [], parked: [], recovered: [], log: [] };
+  const out = { at: new Date(now), rewritten: [], retired: [], skipped: [], errors: [], parked: [], recovered: [], stopped: [], log: [] };
   try {
-    // First, anything an earlier rewrite left half done.
+    // First — and whatever the switch says — what an earlier rewrite (the
+    // server's, or the operator tool's) left half done, and what is waiting
+    // for a human.
     try {
       out.recovered = await recoverParked(d, now);
+      out.stopped = await stoppedRows(d);
     } catch (e) {
       out.errors.push({ game: "", why: "could not look for interrupted rewrites: " + str(e && e.message) });
     }
-    for (const r of out.recovered) {
-      out.log.push((r.reopened ? "reopened " : "STILL CLOSED ") + r.offerId + ": " + r.why);
-      if (!r.reopened) out.parked.push({ game: "", offerId: r.offerId, why: r.why });
+    for (const r of out.recovered) out.log.push((r.reopened ? "reopened " : "STOPPED ") + r.offerId + ": " + r.why);
+    const fresh = out.stopped.filter((x) => now - (pagedAt.get(x.offerId) || 0) >= PAGE_AGAIN_MS);
+    if (fresh.length) {
+      for (const x of fresh) pagedAt.set(x.offerId, now);
+      page(
+        d,
+        "⚠️ G2G: an offer is OFF SALE after a rewrite that could not be finished or undone\n\n" +
+          out.stopped.map((x) => x.title + "\noffer " + x.offerId + " — " + x.why).join("\n\n") +
+          "\n\nIt stays off sale, and no other offer is rewritten, until it has been looked at: check its title, description and price on G2G, then run  node scripts/g2g-evergreen.js --reopen=<offer>  (or tell Claude).",
+      );
+    }
+    if (af.g2gEvergreen !== true) return { ...out, skipped: "switched off (autoFarm.g2gEvergreen)" };
+    // An offer put back on sale must be delivered and kept in step with stock.
+    if (!g2gIsLive(d)) return { ...out, skipped: "G2G delivery or its stock sync is not live" };
+    if (out.stopped.length) {
+      const line = "nothing rewritten: " + out.stopped.length + " offer(s) stopped and waiting to be looked at (" + out.stopped.map((x) => x.offerId).join(", ") + ")";
+      if (line !== state.lastSummary) out.log.push(line);
+      state.lastSummary = line;
+      state.lastRun = out;
+      return out;
     }
 
     const games = await readShelf(d, now);
     const waiting = [...games.values()].filter((g) =>
-      g.rows.some((r) => r.managed && r.sold > 0 && r.paused && !r.mid && r.pausedMs >= MIN_PAUSED_MS),
+      g.rows.some((r) => r.managed && !r.busy && r.sold > 0 && r.paused && !r.mid && r.pausedMs >= MIN_PAUSED_MS),
     );
     let listed = null;
     let left = MAX_REWRITES_PER_PASS;
@@ -1280,15 +1400,16 @@ async function evergreenPass(opts = {}) {
             .join("\n\n"),
       );
     }
-    // A row left closed is the one outcome that needs a human, so it is said
-    // every time it is found — and the pass stops moving offers until it is
-    // looked at (see the loop's `out.parked.length`).
+    // An offer stopped in THIS pass is said at once; from the next pass on it
+    // is found by stoppedRows() above, which is also what keeps every other
+    // offer from being rewritten until a human has looked.
     if (out.parked.length) {
+      for (const x of out.parked) pagedAt.set(x.offerId, now);
       page(
         d,
         "⚠️ G2G: an offer is OFF SALE after a rewrite that could not be finished or undone\n\n" +
           out.parked.map((x) => "offer " + x.offerId + " — " + x.why).join("\n") +
-          "\n\nCheck its text on G2G, then relist it from the Listings page. No other offer is rewritten until then.",
+          "\n\nIt stays off sale, and no other offer is rewritten, until it has been looked at: check its title, description and price on G2G, then run  node scripts/g2g-evergreen.js --reopen=<offer>  (or tell Claude).",
       );
     }
     // Skips and errors are said once per change, not every 15 minutes.
@@ -1318,6 +1439,8 @@ module.exports = {
   MAX_REWRITES_PER_PASS,
   MAX_GAMES_PER_PASS,
   PARK_MARK,
+  STOP_MARK,
+  MARK_RE,
   // pure, tested
   itemsSignature,
   containsAll,
@@ -1339,6 +1462,8 @@ module.exports = {
   retireOffer,
   rewriteOffer,
   recoverParked,
+  stoppedRows,
+  reopenStopped,
   publishOffer,
   runActions,
   // the server pass

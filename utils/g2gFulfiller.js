@@ -1317,6 +1317,10 @@ function sellsOwnUnits(row) {
 // nothing else would send it. A restart forgets the memory, so the first pass
 // after one writes them all. The same pass is the only one that repeats the
 // delist of an offer this sync already took off sale.
+// What utils/g2gEvergreen writes into lastError of a row it is rewriting, or
+// has stopped on (its MARK). Spelled here too so the sync does not have to load
+// that module to keep its hands off such a row.
+const EVERGREEN_MARK = /^evergreen: /;
 const lastQtyWritten = new Map();
 const REASSERT_EVERY = 4;
 let stockPasses = 0;
@@ -1356,6 +1360,13 @@ async function syncStock() {
   const listedElsewhere = await loginsOnActiveListings();
   const changes = [];
   for (const row of rows) {
+    // An offer utils/g2gEvergreen is rewriting, or has stopped on, is not this
+    // pass's: relisting it over a text its row cannot deliver is the one
+    // thing that file's whole order of steps exists to prevent.
+    if (EVERGREEN_MARK.test(String(row.lastError || ""))) {
+      changes.push({ offer: row.externalId, skipped: "held by the evergreen pass" });
+      continue;
+    }
     let real = null;
     try {
       real = await realStockFor(row, listedElsewhere);
@@ -1407,7 +1418,7 @@ async function syncStock() {
     try {
       stillActive = await MarketplaceListing.findOne(
         { _id: row._id, status: "active" },
-        { _id: 1, units: 1, set: 1, autoPaused: 1 },
+        { _id: 1, units: 1, set: 1, autoPaused: 1, lastError: 1 },
       );
     } catch {
       stillActive = null;
@@ -1423,7 +1434,8 @@ async function syncStock() {
     // it is selling. The next pass reads it as it is now.
     if (
       String(stillActive.set || "") !== String(row.set || "") ||
-      !!stillActive.autoPaused !== !!row.autoPaused
+      !!stillActive.autoPaused !== !!row.autoPaused ||
+      EVERGREEN_MARK.test(String(stillActive.lastError || ""))
     ) {
       changes.push({ offer: row.externalId, skipped: "changed during the pass" });
       continue;
@@ -1512,7 +1524,13 @@ function reportStockSync(r) {
 // once the switch is on, so the module is not even loaded while it is off.
 async function runEvergreen() {
   try {
-    if ((getAutoFarm() || {}).g2gEvergreen !== true) return null;
+    // Switched off, there is still one thing to do: a rewrite the operator
+    // tool (or an earlier switched-on spell) left half done must be put back.
+    // A cheap look first, so the module stays unloaded when there is none.
+    if ((getAutoFarm() || {}).g2gEvergreen !== true) {
+      const held = await MarketplaceListing.exists({ marketplace: "g2g", status: "active", lastError: EVERGREEN_MARK });
+      if (!held) return null;
+    }
     const r = await require("./g2gEvergreen").evergreenPass();
     for (const line of (r && r.log) || []) console.log("g2g evergreen: " + line);
     return r;

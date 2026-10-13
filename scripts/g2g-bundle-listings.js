@@ -92,8 +92,16 @@ async function main() {
   // What is already on G2G *from this system*. Matching on set id alone is not
   // enough — different ids can hold identical items — so the item signature is
   // carried too.
+  // ...and what was taken OFF it on purpose. scripts/g2g-evergreen.js and
+  // scripts/g2g-retire-offers.js retire an offer by closing its row with
+  // "retired <date>" in the note (55 never-sold bundles on 2026-10-13: one
+  // offer per game is the shelf now). Counting only active rows, the next
+  // --apply here would publish every one of them again.
   const already = await MarketplaceListing.find(
-    { marketplace: "g2g", status: "active" },
+    {
+      marketplace: "g2g",
+      $or: [{ status: "active" }, { status: "delisted", note: /retired \d{4}-\d{2}-\d{2}/ }],
+    },
     { set: 1 },
   ).lean();
   const liveSets = new Set(already.map((r) => String(r.set)));

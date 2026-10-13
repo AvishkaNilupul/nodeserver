@@ -69,7 +69,7 @@ const unit = (login, sold = false) => ({ login, orderId: sold ? "order-" + login
 // logins on a live listing somewhere, which a claim would skip.
 // `fresh(row)` is what a re-read of the row returns just before the write (by
 // default the row itself): a sale that lands while a pass is running shows there.
-function env({ rows = [], archive = {}, listed = [], af = {}, failSet = () => false, fresh = (r) => r } = {}) {
+function env({ rows = [], archive = {}, listed = [], af = {}, failSet = () => false, fresh = (r) => r, held = false } = {}) {
   const calls = [];
   const mp = {
     g2gSetQuantity: spy(async (id, n) => {
@@ -89,6 +89,8 @@ function env({ rows = [], archive = {}, listed = [], af = {}, failSet = () => fa
   const stubs = {
     "../models/MarketplaceListing": {
       find: () => chain(),
+      // "is any G2G row held by the evergreen pass?" (runEvergreen's cheap look)
+      exists: async () => (held ? { _id: "x" } : null),
       findOne: async (q) => {
         if (q.externalId) return rows.find((r) => r.externalId === q.externalId) || null;
         const r = rows.find((r) => String(r._id) === String(q._id) && r.status === "active");
@@ -126,7 +128,7 @@ function env({ rows = [], archive = {}, listed = [], af = {}, failSet = () => fa
   return { stubs, mp, calls, archiveReads };
 }
 // What the sync's re-read of a row brings back (the fields it projects).
-const reread = (r) => ({ _id: r._id, set: r.set, autoPaused: r.autoPaused, units: r.units });
+const reread = (r) => ({ _id: r._id, set: r.set, autoPaused: r.autoPaused, units: r.units, lastError: r.lastError });
 const run = (e, fn) => withStubbed("../utils/g2gFulfiller", e.stubs, fn);
 const taken = (e) => e.calls.splice(0);
 
@@ -361,6 +363,37 @@ test("an offer moved to another set is left for the next pass even when nothing 
   });
 });
 
+test("an offer the evergreen pass is rewriting, or has stopped on, is not the stock sync's to touch", async () => {
+  // utils/g2gEvergreen marks the row for as long as it works on it: the text
+  // on G2G and the row's set do not agree for those seconds, and a relist in
+  // between is the one thing its whole order of steps is there to prevent. A
+  // STOPPED row stays off sale until a human has looked.
+  const marks = ["evergreen: rewriting — 2026-10-13T06:00:00.000Z | was $2.33 | -> set S5", "evergreen: STOPPED — the live price is not the new one"];
+  for (const lastError of marks) {
+    // its own bundle has stock again: an unmarked row would be relisted here
+    const held = row({ externalId: "G1", set: "S1", autoClaimSet: true, autoPaused: true, lastError });
+    const e = env({ rows: [held], archive: { S1: ["a", "b"] } });
+    await run(e, async (g) => {
+      const out = await g.syncStock();
+      assert.deepEqual([taken(e), out.changes, held.saves], [[], [{ offer: "G1", skipped: "held by the evergreen pass" }], 0]);
+    });
+    // marked after the pass had read it
+    const late = row({ externalId: "G2", set: "S1", autoClaimSet: true, autoPaused: true });
+    const e2 = env({ rows: [late], archive: { S1: ["a", "b"] }, fresh: (r) => ({ ...reread(r), lastError }) });
+    await run(e2, async (g) => {
+      const out = await g.syncStock();
+      assert.deepEqual([taken(e2), out.changes], [[], [{ offer: "G2", skipped: "changed during the pass" }]]);
+    });
+  }
+  // any other error text on a row is not a mark
+  const plain = row({ externalId: "G3", set: "S1", autoClaimSet: true, autoPaused: true, lastError: "G2G update offer failed (HTTP 500)" });
+  const e3 = env({ rows: [plain], archive: { S1: ["a", "b"] } });
+  await run(e3, async (g) => {
+    await g.syncStock();
+    assert.deepEqual(taken(e3), ["set G1 2".replace("G1", "G3"), "relist G3"]);
+  });
+});
+
 test("an offer paused or resumed by somebody else while the pass ran is left for the next pass", async () => {
   const resumed = row({ externalId: "G1", set: "S1", autoPaused: true, units: [unit("a", true)] });
   const e = env({ rows: [resumed], fresh: (r) => ({ ...reread(r), autoPaused: false }) });
@@ -496,7 +529,7 @@ test("an order placed before its offer was rewritten to another bundle is held f
   });
 });
 
-test("the evergreen pass rides the stock tick only once its switch is on, and its failure never breaks the tick", async () => {
+test("the evergreen pass rides the stock tick once its switch is on — or when a rewrite was left half done — and its failure never breaks the tick", async () => {
   const passes = [];
   const lines = [];
   const realLog = console.log;
@@ -504,11 +537,18 @@ test("the evergreen pass rides the stock tick only once its switch is on, and it
   console.log = (l) => lines.push("out: " + l);
   console.error = (...l) => lines.push("err: " + l.join(" "));
   try {
-    for (const [af, fail] of [[{}, false], [{ g2gEvergreen: false }, false], [{ g2gEvergreen: true }, false], [{ g2gEvergreen: true }, true]]) {
-      const e = env({ af });
+    const cases = [
+      [{}, false, false],
+      [{ g2gEvergreen: false }, false, false],
+      [{ g2gEvergreen: false }, true, false], // switched off, but a row is held: it must be put back
+      [{ g2gEvergreen: true }, false, false],
+      [{ g2gEvergreen: true }, false, true],
+    ];
+    for (const [af, held, fail] of cases) {
+      const e = env({ af, held });
       e.stubs["../utils/g2gEvergreen"] = {
         evergreenPass: async () => {
-          passes.push(JSON.stringify(af));
+          passes.push(JSON.stringify(af) + (held ? " held" : ""));
           if (fail) throw new Error("boom");
           return { log: ["rewrote G33 (rescue): a -> b"] };
         },
@@ -519,8 +559,8 @@ test("the evergreen pass rides the stock tick only once its switch is on, and it
     console.log = realLog;
     console.error = realErr;
   }
-  assert.deepEqual(passes, ['{"g2gEvergreen":true}', '{"g2gEvergreen":true}'], "not even loaded while the switch is off");
-  assert.deepEqual(lines, ["out: g2g evergreen: rewrote G33 (rescue): a -> b", "err: g2g evergreen error: boom"]);
+  assert.deepEqual(passes, ['{"g2gEvergreen":false} held', '{"g2gEvergreen":true}', '{"g2gEvergreen":true}'], "not even loaded while the switch is off and nothing is held");
+  assert.deepEqual(lines, ["out: g2g evergreen: rewrote G33 (rescue): a -> b", "out: g2g evergreen: rewrote G33 (rescue): a -> b", "err: g2g evergreen error: boom"]);
 });
 
 test("only an archive offer that was really rewritten holds an order back", async () => {

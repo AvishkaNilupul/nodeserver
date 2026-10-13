@@ -5,6 +5,7 @@
 //   node scripts/g2g-evergreen.js                       # the plan, every game
 //   node scripts/g2g-evergreen.js --games="Halo Infinite,Rust" --publish
 //   node scripts/g2g-evergreen.js --add=Rust --publish   # every game + Rust
+//   node scripts/g2g-evergreen.js --reopen=G179...       # after looking at a STOPPED offer
 //   node scripts/g2g-evergreen.js --only=retire --apply --out=run.json
 //
 // Operator-instructed. The rules live in utils/g2gEvergreen.js (read its
@@ -70,6 +71,7 @@ function parseArgs(argv) {
     limit: parseInt(val("limit", ""), 10) || 0,
     gapMs: parseInt(val("gap", ""), 10) || 2500,
     out: val("out"),
+    reopen: val("reopen"),
     actor: val("actor", "g2g-evergreen"),
   };
 }
@@ -99,15 +101,14 @@ async function auditShelf(d, MarketplaceListing) {
   let active = 0;
   for (const r of rows) {
     const isLive = live.has(String(r.externalId));
+    const held = String(r.lastError || "").startsWith("evergreen: ");
     if (r.status === "active") {
       active++;
-      if (!r.autoPaused && !isLive) wrong.push({ offerId: r.externalId, title: r.title, why: "our row says on sale, G2G does not list it live" });
-      if (r.autoPaused && isLive) wrong.push({ offerId: r.externalId, title: r.title, why: "our row says paused, G2G lists it live" });
+      if (held) wrong.push({ offerId: r.externalId, title: r.title, why: "held by a rewrite (" + (isLive ? "LIVE" : "off sale") + "): " + r.lastError });
+      else if (!r.autoPaused && !isLive) wrong.push({ offerId: r.externalId, title: r.title, why: "our row says on sale, G2G does not list it live" });
+      else if (r.autoPaused && isLive) wrong.push({ offerId: r.externalId, title: r.title, why: "our row says paused, G2G lists it live" });
     } else if (isLive) {
       wrong.push({ offerId: r.externalId, title: r.title, why: "LIVE on G2G while our row is " + r.status + " — nothing watches its stock" });
-    }
-    if (r.status === "delisted" && String(r.lastError || "").startsWith("evergreen:")) {
-      wrong.push({ offerId: r.externalId, title: r.title, why: "closed by a rewrite: " + r.lastError });
     }
   }
   return { rows: active, live: live.size, wrong };
@@ -125,6 +126,23 @@ async function main() {
   await mongoose.connect(process.env.MONGO_URI || process.env.MONGODB_URI);
   const d = eg.realDeps();
   const now = Date.now();
+
+  // --reopen: a human has looked at a STOPPED offer and its text is right.
+  if (o.reopen) {
+    const r = await eg.reopenStopped(d, o.reopen);
+    console.log(r.reopened ? "reopened " + o.reopen + (r.onSale ? " — it is on sale" : " — the stock sync counts it and relists it") : "NOT reopened: " + (r.error || r.skipped));
+    await mongoose.disconnect();
+    return r.reopened ? 0 : 2;
+  }
+  // What a rewrite left behind is said in every run, and — when this run may
+  // write — put back before anything is planned.
+  if (o.apply) for (const r of await eg.recoverParked(d, now)) console.log((r.reopened ? "reopened " : "STOPPED ") + r.offerId + ": " + r.why);
+  const stopped = await eg.stoppedRows(d);
+  for (const x of stopped) console.log("⚠ STOPPED " + x.offerId + "  " + x.title.slice(0, 70) + " — " + x.why);
+  if (stopped.length && o.apply && (o.steps.rescue || o.steps.upgrade)) {
+    console.log("note: nothing is rewritten while an offer is stopped — look at it, then --reopen=<offer>.\n");
+    o.steps.rescue = o.steps.upgrade = false;
+  }
 
   // Rescues are the server's once its switch is on: two writers of one offer
   // is the one thing every rule here is built to avoid.
@@ -193,9 +211,6 @@ async function main() {
     console.log("\nDRY RUN — nothing changed. Re-run with --apply.");
   } else if (all.length) {
     console.log("");
-    // A rewrite that an earlier run or the server left half done comes first.
-    run.recovered = await eg.recoverParked(d, Date.now());
-    for (const r of run.recovered) console.log("  " + (r.reopened ? "reopened " : "STILL CLOSED ") + r.offerId + ": " + r.why);
     // Read once for the retires; a rewrite reads its own, at the last moment.
     const paid = await eg.paidOffers(d);
     let left = o.limit || Infinity;
@@ -209,7 +224,7 @@ async function main() {
       const r = await eg.runActions(d, acts, p.setsById, { paid, listed, now: Date.now(), minStock: o.minStock, gapMs: o.gapMs }, { log: (l) => console.log("  " + l) });
       for (const k of ["rewritten", "retired", "published", "skipped", "errors", "parked"]) run[k].push(...r[k].map((x) => ({ game: p.g.game, ...x })));
       if (r.parked.length) {
-        console.log("\nSTOPPED: an offer was left closed — look at it on G2G before anything else is run");
+        console.log("\nSTOPPED: an offer was left stopped — look at it on G2G before anything else is run");
         break;
       }
       streak = r.errors.length ? streak + 1 : 0;
