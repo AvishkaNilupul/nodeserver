@@ -157,7 +157,17 @@ async function main() {
       plans,
       {
         delist: (id) => mp.g2gDelist(id),
-        status: async (id) => String(((await mp.g2gGetOffer(id)) || {}).status || ""),
+        // G2G answers 404 "Data was not found" when asked for an offer that is
+        // off sale, so a delisted offer cannot be read back by its id: the
+        // account's delisted list is where it shows.
+        status: async (id) => {
+          try {
+            return String(((await mp.g2gGetOffer(id)) || {}).status || "");
+          } catch (e) {
+            const off = await mp.g2gListOffers({ pageSize: 100, maxPages: 10, status: mp.G2G_STATUS.DELISTED });
+            return off.some((o) => String(o.offerId) === String(id)) ? "delisted" : "unreadable (" + e.message + ")";
+          }
+        },
         closeRow: async (id) => {
           const row = await MarketplaceListing.findOne({ marketplace: "g2g", externalId: id, status: "active" }, { note: 1 }).lean();
           if (!row) return false;
