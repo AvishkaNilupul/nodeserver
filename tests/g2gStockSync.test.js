@@ -394,6 +394,16 @@ test("an offer the evergreen pass is rewriting, or has stopped on, is not the st
   });
 });
 
+test("the Listings delist route does not write its own error over the evergreen mark", () => {
+  // routes/marketplaceRoutes.js: a delist G2G refuses stores the refusal in
+  // lastError — which is also where the mark lives. A STOPPED row that lost
+  // its mark that way is active, unmarked and paused: the stock sync would
+  // relist it over a text nobody confirmed. (A check of the source: the route
+  // is not driven here.)
+  const src = require("fs").readFileSync(require.resolve("../routes/marketplaceRoutes.js"), "utf8");
+  assert.match(src, /if \(!outcome\) \{[\s\S]{0,420}if \(!\/\^evergreen: \/\.test\(String\(row\.lastError \|\| ""\)\)\) \{\s+row\.lastError = err\.message\.slice\(0, 400\);\s+\}\s+await row\.save\(\);/);
+});
+
 test("an offer paused or resumed by somebody else while the pass ran is left for the next pass", async () => {
   const resumed = row({ externalId: "G1", set: "S1", autoPaused: true, units: [unit("a", true)] });
   const e = env({ rows: [resumed], fresh: (r) => ({ ...reread(r), autoPaused: false }) });
@@ -567,19 +577,42 @@ test("only an archive offer that was really rewritten holds an order back", asyn
   await run(env(), async (g) => {
     const at = Date.UTC(2026, 9, 13, 8, 0, 0);
     const o = (created_at) => ({ title: "old text", raw: { created_at } });
-    const archive = { autoClaimSet: true, set: "S5", rebundledAt: new Date(at) };
+    const archive = { autoClaimSet: true, set: "S5", title: "new text", rebundledAt: new Date(at) };
     assert.match(g.orderPredatesRewrite(archive, o(at - 1)), /placed before/);
     assert.equal(g.orderPredatesRewrite(archive, o(at)), "");
     assert.equal(g.orderPredatesRewrite(archive, o(at + 1)), "");
-    assert.match(g.orderPredatesRewrite(archive, o(Math.floor((at - 5000) / 1000))), /placed before/, "a time in seconds is read as one");
-    // never rewritten; no time on the order; a no-claim or reserved-units row
-    // (their own passes stamp rebundledAt for a fuller set, which over-delivers)
-    assert.equal(g.orderPredatesRewrite({ autoClaimSet: true, set: "S5", rebundledAt: null }, o(at - 1)), "");
-    assert.equal(g.orderPredatesRewrite(archive, { title: "t", raw: {} }), "");
-    assert.equal(g.orderPredatesRewrite(archive, { title: "t" }), "");
+    // never rewritten: every order is delivered, whatever it carries
+    for (const order of [o(at - 1), { title: "t", raw: {} }, { title: "t" }, null]) {
+      assert.equal(g.orderPredatesRewrite({ autoClaimSet: true, set: "S5", rebundledAt: null }, order), "");
+    }
+    // a no-claim or reserved-units row (their own passes stamp rebundledAt for
+    // a FULLER set, which over-delivers): not this guard's
     assert.equal(g.orderPredatesRewrite({ noclaimStock: true, set: "S5", rebundledAt: new Date(at) }, o(at - 1)), "");
     assert.equal(g.orderPredatesRewrite({ set: "S5", units: [{}], rebundledAt: new Date(at) }, o(at - 1)), "");
     assert.equal(g.orderPredatesRewrite(null, o(at - 1)), "");
+  });
+});
+
+test("an order's time is read however G2G writes it, and an order with none is not delivered on a guess", async () => {
+  await run(env(), async (g) => {
+    const at = Date.UTC(2026, 9, 13, 8, 0, 0);
+    const archive = { autoClaimSet: true, set: "S5", title: "new text", rebundledAt: new Date(at) };
+    // epoch ms (what G2G sends: read off a live order 2026-10-13), a numeric string, seconds, an ISO date
+    assert.equal(g.orderPlacedAt({ raw: { created_at: 1791802782435 } }), 1791802782435);
+    assert.equal(g.orderPlacedAt({ raw: { created_at: "1791802782435" } }), 1791802782435);
+    assert.equal(g.orderPlacedAt({ raw: { created_at: 1791802782 } }), 1791802782000);
+    assert.equal(g.orderPlacedAt({ raw: { created_at: "2026-10-13T07:59:00.000Z" } }), at - 60000);
+    // no time field: the 13 digits G2G's order ids begin with are the same instant
+    assert.equal(g.orderPlacedAt({ orderItemId: "1788804161980Y02Q-1", raw: {} }), 1788804161980);
+    assert.equal(g.orderPlacedAt({ orderId: "1788804161980Y02Q" }), 1788804161980);
+    // nothing readable
+    for (const order of [{ raw: {} }, { raw: { created_at: "soon" } }, { orderItemId: "ORD-9", raw: { created_at: 12 } }, {}, null]) assert.equal(g.orderPlacedAt(order), 0);
+    // on an offer that WAS rewritten, such an order is held — with both texts, so a human can tell
+    const held = g.orderPredatesRewrite(archive, { title: "old text", orderItemId: "ORD-9", raw: {} });
+    assert.match(held, /^this offer was rewritten to another bundle and the order's time could not be read — check it is for "new text" \(the order says "old text"\), then deliver it by hand$/);
+    // an id that carries the time settles it either way
+    assert.equal(g.orderPredatesRewrite(archive, { title: "t", orderItemId: String(at + 5000) + "ABCD-1", raw: {} }), "");
+    assert.match(g.orderPredatesRewrite(archive, { title: "t", orderItemId: String(at - 5000) + "ABCD-1", raw: {} }), /^placed before/);
   });
 });
 

@@ -258,8 +258,8 @@ async function main() {
     } catch {
       console.log("  note: G2G's paid orders could not be re-read after the run");
     }
-    // G2G's lists trail a change by a few seconds.
-    await d.sleep(8000);
+    // G2G's lists trail a change by 10-20 seconds.
+    await d.sleep(25000);
     audit = await auditShelf(d, MarketplaceListing);
     console.log("\nshelf check: " + audit.rows + " active row(s), " + audit.live + " live on G2G (rent-farm offers included), " + audit.wrong.length + " that disagree");
     for (const w of audit.wrong) console.log("  ⚠ " + w.offerId + "  " + w.why + "  " + String(w.title).slice(0, 70));

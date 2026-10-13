@@ -465,14 +465,47 @@ async function pickStock(listing, order, { dryRun }) {
 // order on a row that was never rewritten, and every order placed since.
 function orderPredatesRewrite(listing, order) {
   if (!listing || !(listing.autoClaimSet && listing.set) || !listing.rebundledAt) return "";
-  let placed = Number(order && order.raw && order.raw.created_at) || 0;
-  if (placed > 0 && placed < 1e11) placed *= 1000; // seconds, should G2G ever send them
   const rewritten = new Date(listing.rebundledAt).getTime();
-  if (!placed || !Number.isFinite(rewritten) || placed >= rewritten) return "";
+  if (!Number.isFinite(rewritten)) return "";
+  const placed = orderPlacedAt(order);
+  if (placed && placed >= rewritten) return "";
+  const paidFor = String((order && order.title) || "").slice(0, 110);
+  // No readable time on an order for an offer that WAS rewritten: it cannot be
+  // shown to be newer than the rewrite, so it is not delivered on a guess.
+  if (!placed) {
+    return (
+      "this offer was rewritten to another bundle and the order's time could not be read — check it is for \"" +
+      String(listing.title || "").slice(0, 110) + "\" (the order says \"" + paidFor + "\"), then deliver it by hand"
+    );
+  }
   return (
     "placed before this offer was rewritten to another bundle — the buyer paid for \"" +
-    String((order && order.title) || "").slice(0, 110) + "\": deliver that by hand, or refund it"
+    paidFor + "\": deliver that by hand, or refund it"
   );
+}
+
+// When an order was placed, in ms (0 = unreadable). G2G's order row carries
+// `created_at` as epoch ms (read off a live order 2026-10-13); a numeric
+// string, a time in seconds and an ISO date are read too, and failing all of
+// them the 13 digits G2G's order ids begin with, which are the same instant.
+function orderPlacedAt(order) {
+  const raw = (order && order.raw) || {};
+  const ms = (v) => {
+    if (v == null || v === "") return 0;
+    let n = typeof v === "number" ? v : /^\d+(\.\d+)?$/.test(String(v).trim()) ? Number(v) : new Date(v).getTime();
+    if (!Number.isFinite(n) || n <= 0) return 0;
+    if (n < 1e11) n *= 1000; // seconds
+    return n > 1e12 && n < 4e12 ? n : 0;
+  };
+  for (const v of [raw.created_at, raw.createdAt, raw.payment_success_at]) {
+    const t = ms(v);
+    if (t) return t;
+  }
+  for (const id of [order && order.orderItemId, order && order.orderId, raw.order_id]) {
+    const m = /^(\d{13})/.exec(String(id || ""));
+    if (m && ms(m[1])) return ms(m[1]);
+  }
+  return 0;
 }
 
 // Deliver one paid order. Returns a short result the tick can log directly.
@@ -1764,6 +1797,7 @@ module.exports = {
   reportStockSync,
   runEvergreen,
   orderPredatesRewrite,
+  orderPlacedAt,
   _resetStockState: () => {
     lastQtyWritten.clear();
     stockPasses = 0;

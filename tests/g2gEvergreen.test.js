@@ -765,11 +765,12 @@ test("a rewrite G2G refuses outright leaves the offer as it was, and its row reo
 });
 
 test("when the old text cannot be written back and confirmed, the offer is STOPPED: off sale until a human has looked", async () => {
-  // G2G refuses every write: nothing can be proved about what it holds.
-  const w = brawlhalla({ hooks: { update: () => { throw new Error("G2G update offer failed (HTTP 500)"); } } });
+  // G2G refuses the rewrite, then fails on the put-back: nothing can be proved about what it holds.
+  let calls = 0;
+  const w = brawlhalla({ hooks: { update: () => { throw new Error(++calls === 1 ? "G2G update offer failed (HTTP 400): bad title" : "G2G update offer failed (HTTP 500)"); } } });
   const r = await eg.rewriteOffer(w.d, rescue(), w.sets[1], CTX);
   assert.match(r.error, /and the old text could NOT be confirmed back: check the offer on G2G by hand$/);
-  assert.equal(r.parked, true);
+  assert.deepEqual([r.parked, r.stopped], [true, true]);
   const row = w.row("G33");
   assert.deepEqual([row.status, row.set, row.autoPaused, w.g2g.get("G33").status], ["active", "S33", true, "delisted"]);
   assert.match(row.lastError, /^evergreen: STOPPED — the rewrite failed/);
@@ -782,7 +783,8 @@ test("when the old text cannot be written back and confirmed, the offer is STOPP
 });
 
 test("a read that fails after the new text was sent does not leave it there", async () => {
-  // The put landed; every read of it answers 502 for a while.
+  // The put landed; every read of it answers 502 for a while. The undo waits
+  // until G2G can be read again, writes the old text back and reads THAT.
   let fail = 0;
   const w = brawlhalla({ hooks: { list: () => { if (fail > 0) { fail--; throw new Error("G2G list offers failed (HTTP 502)"); } } } });
   const real = w.d.mp.g2gUpdateOffer;
@@ -792,11 +794,48 @@ test("a read that fails after the new text was sent does not leave it there", as
     if (++sent === 1) fail = 13; // the whole read-back of the new text, and the undo's first look
   };
   const r = await eg.rewriteOffer(w.d, rescue(), w.sets[1], CTX);
-  assert.match(r.error, /the new title and price did not show on G2G/);
-  // G2G could not be read when the undo began: nothing can be proved, so it is stopped — not reopened on a guess
-  assert.equal(r.parked, true);
-  assert.match(w.row("G33").lastError, /^evergreen: STOPPED/);
-  assert.equal(w.g2g.get("G33").status, "delisted");
+  assert.match(r.error, /the new title and price did not show on G2G — nothing is changed: the offer has its old text$/);
+  assert.deepEqual([state(w, "G33"), w.row("G33").lastError, sent], [OLD, "", 2]);
+  // ...and when G2G cannot be read at all, nothing is reopened on a guess: stopped
+  const dark = brawlhalla();
+  const real2 = dark.d.mp.g2gUpdateOffer;
+  let blind = false;
+  dark.d.mp.g2gUpdateOffer = async (id, f) => (await real2(id, f), (blind = true));
+  dark.d.mp.g2gListOffers = (() => {
+    const list = dark.d.mp.g2gListOffers;
+    return async (q) => {
+      if (blind) throw new Error("G2G list offers failed (HTTP 502)");
+      return list(q);
+    };
+  })();
+  const r2 = await eg.rewriteOffer(dark.d, rescue(), dark.sets[1], CTX);
+  assert.deepEqual([r2.parked, r2.stopped, dark.g2g.get("G33").status], [true, true, "delisted"]);
+  assert.match(dark.row("G33").lastError, /^evergreen: STOPPED — the new title and price did not show on G2G — and the old text could NOT be confirmed back/);
+});
+
+test("a rewrite G2G never answered is not undone on the spot: it may still land", async () => {
+  // A timeout. The put may arrive after a put-back of the old text, and a read
+  // would agree with either order. So the row is left marked — off sale, in
+  // nobody's reach — and its text is put back ten minutes later, when nothing
+  // can still be on its way.
+  let n = 0;
+  const w = brawlhalla({ hooks: { update: (id, f, g2g) => { if (++n === 1) { g2g.get(id).title = f.title; g2g.get(id).price = f.unitPrice; throw new Error("timeout of 30000ms exceeded"); } } } });
+  const r = await eg.rewriteOffer(w.d, rescue(), w.sets[1], CTX);
+  assert.match(r.error, /G2G did not answer the rewrite \(timeout of 30000ms exceeded\) — left off sale and marked; its old text is put back at the next pass$/);
+  assert.equal(r.parked, undefined);
+  assert.equal(w.calls.filter((c) => c.startsWith("update")).length, 1, "no put-back was raced against it");
+  assert.deepEqual([w.row("G33").status, w.row("G33").set, w.g2g.get("G33").status], ["active", "S33", "delisted"]);
+  assert.match(w.row("G33").lastError, /^evergreen: rewriting — /);
+  // nothing touches it for ten minutes; then the row's own text goes back, read back
+  assert.deepEqual(await eg.recoverParked(w.d, Date.now() + 5 * 60 * 1000), []);
+  const out = await eg.recoverParked(w.d, Date.now() + 11 * 60 * 1000);
+  assert.deepEqual(out.map((x) => x.reopened), [true]);
+  assert.deepEqual([state(w, "G33"), w.row("G33").lastError], [OLD, ""]);
+  // a plain refusal (4xx) is an answer: undone at once
+  let m = 0;
+  const w2 = brawlhalla({ hooks: { update: () => { if (++m === 1) throw Object.assign(new Error("G2G update offer failed"), { status: 422 }); } } });
+  assert.match((await eg.rewriteOffer(w2.d, rescue(), w2.sets[1], CTX)).error, /nothing is changed: the offer has its old text$/);
+  assert.equal(w2.row("G33").lastError, "");
 });
 
 test("a row that somebody else changed under the rewrite is not moved; the offer gets its old text back", async () => {
@@ -804,8 +843,8 @@ test("a row that somebody else changed under the rewrite is not moved; the offer
   // the row and clears the mark.
   const w = brawlhalla({ hooks: { update: (id, f) => { if (f.title === "Brawlhalla Twitch Drops (5 Items)") Object.assign(w.row("G33"), { status: "delisted", lastError: "" }); } } });
   const r = await eg.rewriteOffer(w.d, rescue(), w.sets[1], CTX);
-  assert.match(r.error, /the row changed while rewriting — the offer has its old text, but its row was changed by someone else meanwhile: look at it$/);
-  assert.equal(r.parked, true);
+  assert.match(r.error, /the row changed while rewriting — the offer has its old text; its row was changed by someone else meanwhile and is left as they made it$/);
+  assert.equal(r.parked, undefined, "closed by its owner: nothing to reopen, nothing relists it");
   assert.deepEqual([w.row("G33").status, w.row("G33").set, w.g2g.get("G33").status, w.g2g.get("G33").title, w.g2g.get("G33").price], ["delisted", "S33", "delisted", "Brawlhalla Twitch Drops (33 Items)", 2.33]);
   // ...and a row changed before it could even be marked is simply left
   const w2 = brawlhalla({ hooks: { updateOne: (q, u) => (u.$set && String(u.$set.lastError || "").startsWith(eg.PARK_MARK) ? { modifiedCount: 0 } : null) } });
@@ -880,6 +919,49 @@ test("a live offer that does not read as its row delivers comes down and is STOP
   assert.deepEqual((await eg.rewriteOffer(w.d, rescue(), w.sets[1], CTX)).relisted, true);
 });
 
+test("a stop is written even when someone else has overwritten the mark — and said when it could not be", async () => {
+  // The Listings Delist button, refused by G2G, used to write its error text
+  // over the mark: the row was then active, unmarked and paused — exactly what
+  // the stock sync relists.
+  const w = brawlhalla({ hooks: { afterRelist: (id, g2g) => { g2g.get(id).price = 9; w.row("G33").lastError = "G2G update offer failed (HTTP 502)"; } } });
+  const r = await eg.rewriteOffer(w.d, rescue(), w.sets[1], CTX);
+  assert.deepEqual([r.parked, r.stopped], [true, true]);
+  assert.match(w.row("G33").lastError, /^evergreen: STOPPED — the live price is not the new one/);
+  // closed by its owner meanwhile: nothing relists a closed row, and the result says the stop is not on it
+  const w2 = brawlhalla({ hooks: { afterRelist: (id, g2g) => { g2g.get(id).price = 9; Object.assign(w2.row("G33"), { status: "delisted", lastError: "" }); } } });
+  const r2 = await eg.rewriteOffer(w2.d, rescue(), w2.sets[1], CTX);
+  assert.deepEqual([r2.parked, r2.stopped, w2.row("G33").lastError, w2.g2g.get("G33").status], [true, false, "", "delisted"]);
+  assert.match(r2.error, /its row is closed, or could not be written: look at it/);
+});
+
+test("a row someone else took before the relist is not put on sale by this rewrite", async () => {
+  // Another process recovering a slow rewrite, or the owner's Delist, between
+  // the row's move and the relist: the mark is no longer this rewrite's.
+  const w = brawlhalla();
+  const real = w.d.MarketplaceListing.updateOne;
+  w.d.MarketplaceListing.updateOne = async (q, u) => {
+    const r = await real(q, u);
+    if (u.$set && u.$set.set === "S5") w.row("G33").lastError = ""; // taken right after the move
+    return r;
+  };
+  const r = await eg.rewriteOffer(w.d, rescue(), w.sets[1], CTX);
+  assert.deepEqual([r.rewritten, r.relisted, w.g2g.get("G33").status], [true, false, "delisted"]);
+  assert.match(r.note, /changed by someone else before the relist — left off sale/);
+  assert.equal(w.calls.some((c) => c.startsWith("relist") || c.startsWith("quantity")), false);
+});
+
+test("only \"not found\" means off sale: a direct read that fails any other way proves nothing", async () => {
+  // G2G's delisted list trails a relist, so it can still carry an offer that
+  // is on sale. A 502 on the direct read must not fall back to it.
+  const w = brawlhalla();
+  w.d.mp.g2gGetOffer = async () => { throw Object.assign(new Error("G2G get offer failed (HTTP 502)"), { status: 502 }); };
+  w.d.mp.g2gListOffers = async () => [{ offerId: "G5", title: "Brawlhalla Twitch Drops (5 Items) — Artemis", unitPrice: 1 }]; // stale: G5 is live
+  assert.deepEqual(await eg.offerOnG2g(w.d, "G5"), { status: "unreadable (G2G get offer failed (HTTP 502))" });
+  const r = await eg.retireOffer(w.d, "G5", "never sold", { paid: new Set() });
+  assert.match(r.error, /G2G shows it unreadable/);
+  assert.deepEqual([w.calls, w.row("G5").status], [[], "active"]);
+});
+
 test("the text of an offer that is taken over is used word for word; a price that cannot be is refused first", async () => {
   const w = brawlhalla();
   const a = rescue({ title: "Brawlhalla Twitch Drops (5 Items) — Artemis", description: "description of G5", price: 1 });
@@ -941,17 +1023,25 @@ test("a row a restart left marked gets its own text back on G2G, read back, and 
   Object.assign(w3.row("G33"), { set: "S5", title: "Brawlhalla Twitch Drops (5 Items)", description: "house copy for S5", price: 1.25 });
   marked(w3, "G33", 20);
   await eg.recoverParked(w3.d, NOW);
-  assert.equal(w3.calls[0], 'update G33 {"title":"Brawlhalla Twitch Drops (5 Items)","description":"house copy for S5","unitPrice":2.33}');
+  assert.equal(w3.calls[0], 'update G33 {"title":"Brawlhalla Twitch Drops (5 Items)","description":"house copy for S5","unitPrice":1.25}', "the new bundle at ITS price, not the old offer's");
   assert.deepEqual([w3.row("G33").set, w3.row("G33").autoPaused, w3.row("G33").lastError], ["S5", true, ""]);
 });
 
-test("recovery never writes a price down: what G2G showed before the rewrite is in the mark", async () => {
+test("recovery puts back the price G2G showed before the rewrite, not our row's copy of it", async () => {
+  // The owner can raise or lower a price on G2G without our row knowing.
+  for (const his of [3.49, 1.1]) {
+    const w = brawlhalla();
+    marked(w, "G33", 20, his); // our row says $2.33
+    w.g2g.get("G33").price = his;
+    await eg.recoverParked(w.d, NOW);
+    assert.match(w.calls[0], new RegExp('"unitPrice":' + String(his).replace(".", "\\.") + "\\}$"));
+    assert.equal(w.g2g.get("G33").price, his);
+  }
+  // a mark with no price in it: the row's
   const w = brawlhalla();
-  marked(w, "G33", 20, 3.49); // the owner had raised it to $3.49; our row says $2.33
-  w.g2g.get("G33").price = 3.49;
+  Object.assign(w.row("G33"), { lastError: eg.PARK_MARK + new Date(NOW - 20 * 60000).toISOString() + " -> set S5" });
   await eg.recoverParked(w.d, NOW);
-  assert.match(w.calls[0], /"unitPrice":3\.49\}$/);
-  assert.equal(w.g2g.get("G33").price, 3.49);
+  assert.match(w.calls[0], /"unitPrice":2\.33\}$/);
 });
 
 test("a mark a moment old is a rewrite in progress; an upgrade that died before its take-down is still on sale; what cannot be confirmed is STOPPED", async () => {
@@ -982,9 +1072,13 @@ test("a stopped offer is reopened only by a human, and only when G2G shows what 
   Object.assign(w.row("G33"), { lastError: eg.STOP_MARK + "the live price is not the new one after the relist — taken off sale" });
   assert.deepEqual(await eg.stoppedRows(w.d), [{ offerId: "G33", title: "Brawlhalla Twitch Drops (33 Items)", why: "the live price is not the new one after the relist — taken off sale" }]);
   w.g2g.get("G33").title = "Brawlhalla Twitch Drops (5 Items)";
-  assert.match((await eg.reopenStopped(w.d, "G33")).error, /G2G shows the title "Brawlhalla Twitch Drops \(5 Items\)", the row delivers "Brawlhalla Twitch Drops \(33 Items\)"/);
+  assert.match((await eg.reopenStopped(w.d, "G33")).error, /G2G shows "Brawlhalla Twitch Drops \(5 Items\)" at \$2\.33, the row delivers "Brawlhalla Twitch Drops \(33 Items\)" at \$2\.33/);
   assert.match(w.row("G33").lastError, /^evergreen: STOPPED/);
   w.g2g.get("G33").title = "Brawlhalla Twitch Drops (33 Items)";
+  // the right title at the wrong price is not "what its row delivers" either
+  w.g2g.get("G33").price = 1.25;
+  assert.match((await eg.reopenStopped(w.d, "G33")).error, /at \$1\.25, the row delivers .* at \$2\.33/);
+  w.g2g.get("G33").price = 2.33;
   assert.deepEqual(await eg.reopenStopped(w.d, "G33"), { reopened: true, onSale: false });
   assert.deepEqual([w.row("G33").lastError, w.row("G33").autoPaused, w.row("G33").status], ["", true, "active"]);
   // not a stopped row: left alone
@@ -1224,6 +1318,27 @@ test("a stopped offer pages the owner, and no pass rewrites anything else until 
   fresh();
   const after = await eg.evergreenPass({ deps: w.d, now: NOW + 8 * HOUR });
   assert.deepEqual(after.rewritten.map((x) => x.offerId), [otherId]);
+});
+
+test("a stopped offer that is still on sale is taken down every pass; and when the rows cannot be read, nothing is rewritten", async () => {
+  fresh();
+  const w = brawlhalla();
+  Object.assign(w.row("G5"), { lastError: eg.STOP_MARK + "the live price is not the new one after the relist — and it could NOT be taken off sale" });
+  const out = await eg.evergreenPass({ deps: w.d, now: NOW });
+  assert.deepEqual([w.calls, w.g2g.get("G5").status, out.rewritten.length], [["delist G5"], "delisted", 0]);
+  assert.match(out.log[0], /^took down G5: stopped, and G2G showed it on sale$/);
+  // not knowing whether an offer is stopped is a reason to rewrite nothing
+  fresh();
+  const blind = brawlhalla();
+  const find = blind.d.MarketplaceListing.find;
+  let n = 0;
+  blind.d.MarketplaceListing.find = (q) => {
+    if (q.lastError && ++n === 1) throw new Error("mongo timeout");
+    return find(q);
+  };
+  const res = await eg.evergreenPass({ deps: blind.d, now: NOW });
+  assert.match(res.skipped, /could not read the rows a rewrite left behind — nothing rewritten/);
+  assert.deepEqual(blind.calls, []);
 });
 
 test("what an earlier rewrite left half done is put back first — whatever the switch says", async () => {

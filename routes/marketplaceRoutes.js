@@ -1796,7 +1796,13 @@ router.delete(
           }
         }
         if (!outcome) {
-          row.lastError = err.message.slice(0, 400);
+          // A G2G row utils/g2gEvergreen has stopped on, or is rewriting, keeps
+          // that mark in lastError: it is what holds the stock sync off an
+          // offer whose text nobody has confirmed. The refusal still goes
+          // back to whoever clicked.
+          if (!/^evergreen: /.test(String(row.lastError || ""))) {
+            row.lastError = err.message.slice(0, 400);
+          }
           await row.save();
           return res.json({ success: false, message: err.message });
         }
