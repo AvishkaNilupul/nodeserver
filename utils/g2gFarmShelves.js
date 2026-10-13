@@ -148,6 +148,33 @@ const FARM_SHELVES = {
     fields: [
     ],
   },
+  // The Quinfall — Server: Chicago - US · Item Type: Others
+  lgc_game_33779: {
+    game: "The Quinfall",
+    relationId: "cc82c6ab-55e9-4fa8-9a9b-5e57bb0f3c66",
+    fields: [
+      { collection: "lgc_33779_dropdown_13", dataset: "lgc_33779_dropdown_13_61004", label: "Server", value: "Chicago - US" },
+      { collection: "7d70554a", dataset: "11e8fb6c", label: "Item Type", value: "Others" },
+    ],
+  },
+  // Palia — Server: Main Server · Item Type: Others
+  lgc_game_32001: {
+    game: "Palia",
+    relationId: "2ef6df64-22ec-4efa-af64-2ee97f8ba1ea",
+    fields: [
+      { collection: "lgc_32001_server", dataset: "lgc_32001_server_47945", label: "Server", value: "Main Server" },
+      { collection: "65a25804", dataset: "9b54d896", label: "Item Type", value: "Others" },
+    ],
+  },
+  // Arena Breakout: Infinite — Platform: PC · Item Type: Others
+  lgc_game_33715: {
+    game: "Arena Breakout: Infinite",
+    relationId: "a7cfc09e-5ce7-4750-a6b6-c951240d99ec",
+    fields: [
+      { collection: "lgc_33715_platform", dataset: "lgc_33715_platform_51750", label: "Platform", value: "PC" },
+      { collection: "08b42c15", dataset: "bd9f92c6", label: "Item Type", value: "Others" },
+    ],
+  },
 };
 
 // The shape g2gPublish takes: { relationId, attributes, collectionTree }, plus
