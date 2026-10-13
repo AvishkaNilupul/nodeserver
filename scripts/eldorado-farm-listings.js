@@ -38,10 +38,13 @@ const LIMIT = parseInt(val("--limit", "0"), 10) || 0;
 const DELAY_MS = parseInt(val("--delay", "2500"), 10) || 2500;
 
 // Terms and their prices. Title term and description term both come from here.
+// The prices follow the live ladder: when the owner moves it (the offers already
+// on sale are moved with scripts/reprice-eldorado-farm.js) move it here too, or
+// the next gap-fill publishes at the old price. Was 3 / 4 / 7 until 2026-10-13.
 const TIERS = [
-  { days: 120, label: "120 Days", price: 3 },
-  { days: 180, label: "180 Days", price: 4 },
-  { days: 365, label: "1 Year", price: 7 },
+  { days: 120, label: "120 Days", price: 3.99 },
+  { days: 180, label: "180 Days", price: 4.99 },
+  { days: 365, label: "1 Year", price: 8.99 },
 ];
 
 // Twitch-native stream gimmicks and non-games: farmable, but nobody buys a
