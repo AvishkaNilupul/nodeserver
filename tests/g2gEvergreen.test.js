@@ -138,8 +138,13 @@ test("the rescue leaves alone everything that does not need it", () => {
   const other = cand(setOf("S5", items(5, "m")), 10);
   const plan = (row, stock) => eg.planGame([fact(row, set, stock)], [other], { rescue: true, floor: 1 });
   const why = (p) => (p.notes[0] || {}).why || "";
-  // on sale; paused but its own bundle has stock again (the sync relists it)
-  assert.deepEqual(brief(plan(listing("G1", "S9", { sold: 2 }), null)), []);
+  // on sale — even when its count just reached zero and the sync has not
+  // paused it yet: that pause is the sync's to make, and the plan says nothing
+  for (const stock of [null, 0, 4]) {
+    const onSale = plan(listing("G1", "S9", { sold: 2 }), stock);
+    assert.deepEqual([brief(onSale), onSale.notes], [[], []]);
+  }
+  // paused, but its own bundle has stock again (the sync relists it)
   assert.deepEqual(brief(plan(listing("G1", "S9", { sold: 2, paused: true }), 4)), []);
   // could not be counted; an order mid hand-over; only just paused
   assert.match(why(plan(listing("G1", "S9", { sold: 2, paused: true }), null)), /could not be counted/);

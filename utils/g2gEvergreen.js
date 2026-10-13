@@ -234,7 +234,6 @@ function planGame(rows, sets, opts = {}) {
   const candidates = (sets || [])
     .filter((s) => s && s.sig && s.stock >= minStock && s.price > 0)
     .sort(bySize);
-  const claimed = new Set(); // signatures given out by this plan
   const absorbed = new Set(); // never-sold offers a rewrite takes over
   const twinOf = (sig) => never.find((r) => r.sig === sig && !r.mid && !absorbed.has(r.offerId)) || null;
   const give = (offer, pick, kind) => {
@@ -258,7 +257,7 @@ function planGame(rows, sets, opts = {}) {
       absorb: twin ? twin.offerId : "",
       absorbRowId: twin ? twin.rowId : "",
     });
-    claimed.add(pick.sig);
+    // The bundle is on the shelf from here on: no later pick may take it.
     if (onShelf.get(offer.sig) === offer) onShelf.delete(offer.sig);
     onShelf.set(pick.sig, offer);
     if (twin) absorbed.add(twin.offerId);
@@ -280,7 +279,7 @@ function planGame(rows, sets, opts = {}) {
         note(f, "off sale for under " + Math.round(minPausedMs / 60000) + " min");
         continue;
       }
-      const pick = candidates.find((s) => s.sig !== f.sig && !onShelf.has(s.sig) && !claimed.has(s.sig));
+      const pick = candidates.find((s) => s.sig !== f.sig && !onShelf.has(s.sig));
       if (!pick) {
         note(f, "no other bundle of this game has " + minStock + "+ accounts behind it");
         continue;
@@ -301,7 +300,6 @@ function planGame(rows, sets, opts = {}) {
           s.stock >= top.stock &&
           s.sig !== top.sig &&
           !onShelf.has(s.sig) &&
-          !claimed.has(s.sig) &&
           containsAll(s.items, top.items),
       );
       if (pick) give(top, pick, "upgrade");
@@ -316,7 +314,7 @@ function planGame(rows, sets, opts = {}) {
     // kept — a game is never left with nothing for want of the perfect one.
     let shelfMax = 0;
     for (const r of onShelf.values()) shelfMax = Math.max(shelfMax, sizeOnShelf(r, actions));
-    const open = candidates.filter((s) => !claimed.has(s.sig) && !onShelf.has(s.sig) && s.size > shelfMax);
+    const open = candidates.filter((s) => !onShelf.has(s.sig) && s.size > shelfMax);
     const carrier = (c) => never.find((r) => r.sig === c.sig && !absorbed.has(r.offerId)) || null;
     const best = open[0] || null;
     let keep = null;
@@ -325,7 +323,6 @@ function planGame(rows, sets, opts = {}) {
       if (!keep && opts.publish) {
         const price = round2(Math.max(floor, Number(opts.publishPrice) > 0 ? Number(opts.publishPrice) : best.price));
         actions.push({ type: "publish", toSet: best.setId, name: best.name, price, size: best.size, stock: best.stock });
-        claimed.add(best.sig);
       } else if (!keep) {
         note(null, "the biggest bundle we can deliver (" + best.size + " items, " + best.stock + " accounts) has no offer");
         for (const c of open) {
