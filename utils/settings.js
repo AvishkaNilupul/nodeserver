@@ -355,6 +355,18 @@ const AUTO_FARM_DEFAULTS = {
   // reserves against actual_qty during checkout, so a stale count sells
   // accounts that are already gone.
   g2gSyncStock: true,
+  // The least a NEW auto-farm bundle must hold to be given a G2G share, per
+  // game: { "<game label>": <number of items> }. Empty = every game takes a
+  // share. On G2G a fresh 2-5 item set of Rocket League, Marvel Rivals or
+  // Tarkov sits under 25-160 item accounts sold at the same price, and each
+  // share keeps its accounts reserved for a market that does not sell them.
+  // Read through g2gMinItemsFor().
+  g2gMinItems: {},
+  // Evergreen offers (utils/g2gEvergreen.js): a G2G bundle offer that HAS SOLD
+  // and ran out of stock is rewritten in place to the biggest bundle of its
+  // game we can still deliver, so its sold count and its rating stay on the
+  // shelf instead of dying with the bundle. OFF until switched on.
+  g2gEvergreen: false,
   // RAM saver (Raspberry Pi): pack new accounts into free seats of already-
   // running auto-bots (per-account FavouriteGames) before creating another
   // container, and delete a bot's container+compose service once its campaign
@@ -1469,6 +1481,22 @@ function isReuseOnlyGame(game) {
   return list.some((x) => normGameName(x) === g);
 }
 
+// The least a new auto-farm bundle of `game` must hold to be given a G2G share
+// (autoFarm.g2gMinItems); 0 when the game has no minimum. Matched on the exact
+// normalised label, like isReuseOnlyGame, and read fresh each call.
+function g2gMinItemsFor(game) {
+  const map = getAutoFarm().g2gMinItems;
+  if (!map || typeof map !== "object" || Array.isArray(map)) return 0;
+  const g = normGameName(game);
+  if (!g) return 0;
+  for (const k of Object.keys(map)) {
+    if (normGameName(k) !== g) continue;
+    const n = Math.floor(Number(map[k]));
+    return Number.isFinite(n) && n > 0 ? n : 0;
+  }
+  return 0;
+}
+
 // Stream-gate master switch + the opted-in game map, read fresh each call so a
 // live settings edit takes effect without a restart (the maxAutoBots pattern).
 function getStreamGate() {
@@ -2017,6 +2045,7 @@ module.exports = {
   normGameName,
   isNoClaimGame,
   isReuseOnlyGame,
+  g2gMinItemsFor,
   getStreamGate,
   streamGatedGameEntry,
   isStreamGatedGame,

@@ -1155,6 +1155,22 @@ async function publishEldoradoShare({
 // account is already paying for one such guess, with nine Rainbow Six Siege
 // bundles filed under "Rainbow Six Mobile" where no drops buyer will ever see
 // them.
+// Why a bundle gets no G2G share, or "" when it may have one. A game can carry
+// a minimum size there (autoFarm.g2gMinItems, owner 2026-10-13): G2G's buyers
+// of Rocket League, Marvel Rivals and Tarkov drops are offered 25-160 item
+// accounts at the price of our fresh 2-5 item set, so a share there only keeps
+// its accounts reserved away from the markets that do sell them. The count is
+// the one the title shows ("(3 Items)").
+function g2gBundleTooSmall(game, items) {
+  const min = settings.g2gMinItemsFor(game);
+  const n = (items || []).length;
+  if (!(min > 0) || n >= min) return "";
+  return (
+    "under G2G's minimum of " + min + " items for " + game +
+    " (this bundle has " + n + ")"
+  );
+}
+
 async function publishG2gShare({
   set,
   title,
@@ -1442,7 +1458,14 @@ async function retryMissingSecondaries(task) {
       !!(await mp.zeusxResolveCategory(task.game).catch(() => null));
     if (mapped) targets.push("zeusx");
   }
-  if (g2gMissing && af.g2gAuto && brandForGame(task.game)) targets.push("g2g");
+  if (
+    g2gMissing &&
+    af.g2gAuto &&
+    brandForGame(task.game) &&
+    !g2gBundleTooSmall(task.game, set.items || [])
+  ) {
+    targets.push("g2g");
+  }
   if (eldoradoMissing) targets.push("eldorado");
   if (!targets.length) return null;
 
@@ -2013,7 +2036,11 @@ async function listActivatedTask(taskId, { dryRun = false } = {}) {
   // under the game's own brand and there is no catch-all bucket, so a game
   // with no hand-checked brand must never take a share of the accounts —
   // it would burn them on a publish that is guaranteed to throw.
-  const g2gEnabled = !!af.g2gAuto && !!brandForGame(task.game);
+  // ...and a game can have a minimum bundle size there (autoFarm.g2gMinItems):
+  // a bundle under it takes no share, so its accounts go to the other markets.
+  const g2gTooSmall = g2gBundleTooSmall(task.game, items);
+  const g2gEnabled =
+    !!af.g2gAuto && !!brandForGame(task.game) && !g2gTooSmall;
   const marketOrder = ["gameflip"];
   if (platiEnabled) marketOrder.push("plati");
   if (ggselCategoryId && ggselTakesNewStock(af)) marketOrder.push("ggsel");
@@ -2267,6 +2294,8 @@ async function listActivatedTask(taskId, { dryRun = false } = {}) {
       }
     } else if (!af.g2gAuto) {
       g2g.error = "G2G auto-listing is switched off";
+    } else if (g2gTooSmall) {
+      g2g.error = g2gTooSmall;
     } else if (!g2gEnabled) {
       g2g.error = "no G2G brand for " + task.game;
     } else {
@@ -3511,6 +3540,7 @@ module.exports = {
   publishEldoradoShare,
   publishPlayerAuctionsShare,
   publishG2gShare,
+  g2gBundleTooSmall,
   listActivatedTask,
   listStackedBundle,
   listEventBundle,

@@ -125,6 +125,8 @@ function env({ rows = [], archive = {}, listed = [], af = {}, failSet = () => fa
   };
   return { stubs, mp, calls, archiveReads };
 }
+// What the sync's re-read of a row brings back (the fields it projects).
+const reread = (r) => ({ _id: r._id, set: r.set, autoPaused: r.autoPaused, units: r.units });
 const run = (e, fn) => withStubbed("../utils/g2gFulfiller", e.stubs, fn);
 const taken = (e) => e.calls.splice(0);
 
@@ -298,7 +300,7 @@ test("a unit sold while the pass was running is not written back onto the shelf"
   // one can take a while to count. By the time the pass gets here a buyer has
   // been sent account "b" — the copy read at the top still calls it free.
   const share = row({ externalId: "G1", set: "S1", units: [unit("a"), unit("b")] });
-  const e = env({ rows: [share], fresh: (r) => ({ _id: r._id, units: [unit("a"), unit("b", true)] }) });
+  const e = env({ rows: [share], fresh: (r) => ({ ...reread(r), units: [unit("a"), unit("b", true)] }) });
   await run(e, async (g) => {
     const out = await g.syncStock();
     assert.deepEqual(taken(e), ["set G1 1"]);
@@ -306,7 +308,7 @@ test("a unit sold while the pass was running is not written back onto the shelf"
   });
   // and when the last one went, the offer comes off sale instead of staying on at 1
   const last = row({ externalId: "G2", set: "S1", units: [unit("a")] });
-  const e2 = env({ rows: [last], fresh: (r) => ({ _id: r._id, units: [unit("a", true)] }) });
+  const e2 = env({ rows: [last], fresh: (r) => ({ ...reread(r), units: [unit("a", true)] }) });
   await run(e2, async (g) => {
     await g.syncStock();
     assert.deepEqual(taken(e2), ["delist G2"]);
@@ -315,7 +317,7 @@ test("a unit sold while the pass was running is not written back onto the shelf"
 
 test("a row that claims its set at the sale keeps the archive count; the fresh units are not used for it", async () => {
   const bundle = row({ externalId: "G1", set: "S1", autoClaimSet: true, units: [unit("old", true)] });
-  const e = env({ rows: [bundle], archive: { S1: ["a", "b", "c"] }, fresh: (r) => ({ _id: r._id, units: [] }) });
+  const e = env({ rows: [bundle], archive: { S1: ["a", "b", "c"] }, fresh: (r) => ({ ...reread(r), units: [] }) });
   await run(e, async (g) => {
     await g.syncStock();
     assert.deepEqual(taken(e), ["set G1 3"]);
@@ -330,6 +332,37 @@ test("a row delisted by somebody else since the pass began is not written", asyn
     const out = await g.syncStock();
     assert.deepEqual(taken(e), []);
     assert.deepEqual(out.changes, [{ offer: "G1", skipped: "no longer active" }]);
+  });
+});
+
+test("an offer moved to another bundle while the pass ran is left for the next pass", async () => {
+  // utils/g2gEvergreen rewrites a sold-out offer to another bundle and relists
+  // it. A pass that read the row before that still holds the OLD bundle's
+  // count — zero — and would take the offer straight off sale again, leaving
+  // a row that says "on sale" over an offer nobody can buy.
+  const bundle = row({ externalId: "G1", set: "S1", autoClaimSet: true, autoPaused: true });
+  const e = env({ rows: [bundle], archive: { S1: [], S2: ["a", "b", "c"] }, fresh: (r) => ({ ...reread(r), set: "S2", autoPaused: false }) });
+  await run(e, async (g) => {
+    const out = await g.syncStock(); // the first pass: the one that repeats a delist
+    assert.deepEqual(taken(e), []);
+    assert.deepEqual(out.changes, [{ offer: "G1", skipped: "changed during the pass" }]);
+    assert.equal(bundle.saves, 0);
+  });
+});
+
+test("an offer paused or resumed by somebody else while the pass ran is left for the next pass", async () => {
+  const resumed = row({ externalId: "G1", set: "S1", autoPaused: true, units: [unit("a", true)] });
+  const e = env({ rows: [resumed], fresh: (r) => ({ ...reread(r), autoPaused: false }) });
+  await run(e, async (g) => {
+    const out = await g.syncStock();
+    assert.deepEqual(taken(e), []);
+    assert.deepEqual(out.changes, [{ offer: "G1", skipped: "changed during the pass" }]);
+  });
+  const paused = row({ externalId: "G2", set: "S1", units: [unit("a")] });
+  const e2 = env({ rows: [paused], fresh: (r) => ({ ...reread(r), autoPaused: true }) });
+  await run(e2, async (g) => {
+    await g.syncStock();
+    assert.deepEqual(taken(e2), []);
   });
 });
 

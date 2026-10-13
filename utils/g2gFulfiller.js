@@ -1380,12 +1380,27 @@ async function syncStock() {
     // fails proves nothing: the row waits for the next pass.
     let stillActive = null;
     try {
-      stillActive = await MarketplaceListing.findOne({ _id: row._id, status: "active" }, { _id: 1, units: 1 });
+      stillActive = await MarketplaceListing.findOne(
+        { _id: row._id, status: "active" },
+        { _id: 1, units: 1, set: 1, autoPaused: 1 },
+      );
     } catch {
       stillActive = null;
     }
     if (!stillActive) {
       changes.push({ offer: row.externalId, skipped: "no longer active" });
+      continue;
+    }
+    // ...or the offer was moved to another bundle, or paused or resumed, by
+    // someone else (utils/g2gEvergreen rewrites an offer in place; the Listings
+    // page relists). `real` above is the OLD bundle's count: acting on it would
+    // take a freshly relisted offer off sale again, with a row that still says
+    // it is selling. The next pass reads it as it is now.
+    if (
+      String(stillActive.set || "") !== String(row.set || "") ||
+      !!stillActive.autoPaused !== !!row.autoPaused
+    ) {
+      changes.push({ offer: row.externalId, skipped: "changed during the pass" });
       continue;
     }
     // A row that sells its own units is counted again from this fresh copy.
@@ -1466,6 +1481,20 @@ function reportStockSync(r) {
   return { set, relisted, delisted, failed: failed.length, uncounted };
 }
 
+// Offers that sold out are rewritten to a bundle we can still deliver
+// (utils/g2gEvergreen.js; its own switch, autoFarm.g2gEvergreen). Required
+// here, at call time: that module counts stock through this one.
+async function runEvergreen() {
+  try {
+    const r = await require("./g2gEvergreen").evergreenPass();
+    for (const line of (r && r.log) || []) console.log("g2g evergreen: " + line);
+    return r;
+  } catch (e) {
+    console.error("g2g evergreen error:", e.message);
+    return null;
+  }
+}
+
 let started = false;
 
 function start() {
@@ -1487,7 +1516,17 @@ function start() {
   // Both loops self-guard on the autoFarm flags, so starting them
   // unconditionally is a no-op until the operator flips them on.
   loop(deliverPendingOrders, DELIVER_TICK_MS, 75 * 1000, "fulfiller");
-  loop(async () => reportStockSync(await syncStock()), STOCK_TICK_MS, 6 * 60 * 1000, "stock sync");
+  // The evergreen pass rides the stock tick, after the sync and never beside
+  // it, so the two cannot write one offer at the same time.
+  loop(
+    async () => {
+      reportStockSync(await syncStock());
+      await runEvergreen();
+    },
+    STOCK_TICK_MS,
+    6 * 60 * 1000,
+    "stock sync",
+  );
   loop(sweepConfirmedFarmOrders, CONFIRM_SWEEP_MS, 4 * 60 * 1000, "farm confirm sweep");
   loop(sweepDeliveryProofs, PROOF_SWEEP_MS, 3 * 60 * 1000, "proof sweep");
 }
@@ -1678,6 +1717,7 @@ module.exports = {
   realStockFor,
   syncStock,
   reportStockSync,
+  runEvergreen,
   _resetStockState: () => {
     lastQtyWritten.clear();
     stockPasses = 0;
