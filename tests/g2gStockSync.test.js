@@ -496,6 +496,33 @@ test("an order placed before its offer was rewritten to another bundle is held f
   });
 });
 
+test("the evergreen pass rides the stock tick only once its switch is on, and its failure never breaks the tick", async () => {
+  const passes = [];
+  const lines = [];
+  const realLog = console.log;
+  const realErr = console.error;
+  console.log = (l) => lines.push("out: " + l);
+  console.error = (...l) => lines.push("err: " + l.join(" "));
+  try {
+    for (const [af, fail] of [[{}, false], [{ g2gEvergreen: false }, false], [{ g2gEvergreen: true }, false], [{ g2gEvergreen: true }, true]]) {
+      const e = env({ af });
+      e.stubs["../utils/g2gEvergreen"] = {
+        evergreenPass: async () => {
+          passes.push(JSON.stringify(af));
+          if (fail) throw new Error("boom");
+          return { log: ["rewrote G33 (rescue): a -> b"] };
+        },
+      };
+      await run(e, (g) => g.runEvergreen());
+    }
+  } finally {
+    console.log = realLog;
+    console.error = realErr;
+  }
+  assert.deepEqual(passes, ['{"g2gEvergreen":true}', '{"g2gEvergreen":true}'], "not even loaded while the switch is off");
+  assert.deepEqual(lines, ["out: g2g evergreen: rewrote G33 (rescue): a -> b", "err: g2g evergreen error: boom"]);
+});
+
 test("only an archive offer that was really rewritten holds an order back", async () => {
   await run(env(), async (g) => {
     const at = Date.UTC(2026, 9, 13, 8, 0, 0);

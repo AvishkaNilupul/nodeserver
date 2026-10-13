@@ -1508,9 +1508,11 @@ function reportStockSync(r) {
 
 // Offers that sold out are rewritten to a bundle we can still deliver
 // (utils/g2gEvergreen.js; its own switch, autoFarm.g2gEvergreen). Required
-// here, at call time: that module counts stock through this one.
+// here, at call time: that module counts stock through this one — and only
+// once the switch is on, so the module is not even loaded while it is off.
 async function runEvergreen() {
   try {
+    if ((getAutoFarm() || {}).g2gEvergreen !== true) return null;
     const r = await require("./g2gEvergreen").evergreenPass();
     for (const line of (r && r.log) || []) console.log("g2g evergreen: " + line);
     return r;

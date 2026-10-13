@@ -1113,9 +1113,9 @@ async function runActions(d, actions, setsById, ctx, { only = null, log = () => 
     out[r.error ? "errors" : "skipped"].push(entry);
     if (r.parked) out.parked.push(entry);
     log((r.error ? "FAILED " : "skipped ") + a.type + " " + (a.offerId || a.toSet) + ": " + entry.why);
+    // A retire that is refused changes nothing for the ones after it; a
+    // rewrite or a publish that did not go through changes the whole plan.
     if (a.type !== "retire") broken = "the " + a.type + " before it did not go through";
-    // An offer left closed needs a human before anything else is touched.
-    if (r.parked) break;
   }
   return out;
 }
