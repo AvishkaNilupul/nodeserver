@@ -597,6 +597,20 @@ async function tickOnce({ timeoutMs = CHECK_TIMEOUT_MS } = {}) {
     out.capacity = cap;
     out.dead = await guarded("dead-stack check", () => deadStacksCheck({ options }), timeoutMs);
     if (cap.value) out.runway = await guarded("runway check", () => runwayCheck({ snap: cap.value }), timeoutMs);
+    // Adds a rental stack by itself while the slots are short, from this
+    // tick's own readings (utils/rentFarmAutoStack — does nothing unless
+    // autoFarm.rentFarmAutoStack is on).
+    if (cap.value) {
+      out.autoStack = await guarded(
+        "automatic stack add",
+        () =>
+          require("./rentFarmAutoStack").checkOnce({
+            snap: cap.value,
+            runway: (out.runway && out.runway.value) || null,
+          }),
+        timeoutMs,
+      );
+    }
   }
   // Ledger vs configs (dead tokens, not farming, farming past the end,
   // doubles, wrong game, orphans) — gated to at most hourly inside.
