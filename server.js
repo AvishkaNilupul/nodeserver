@@ -84,6 +84,11 @@ const g2gSessionRefresher = require("./utils/g2gSessionRefresher");
 const g2gFulfiller = require("./utils/g2gFulfiller");
 const playerauctionsSessionWatch = require("./utils/playerauctionsSessionWatch");
 const playerauctionsRoutes = require("./routes/playerauctionsRoutes");
+// SOOP drops farm service (docs/SOOP-FARM.md); started after MongoDB connects.
+const soopFarm = require("./utils/soopFarm");
+// Auto-renewer for SOOP cookies — replays Twitch OAuth from stored jars on
+// a periodic sweep, plus reactive-on-fail from inside soopFarm.checkAccount().
+const soopCookieRefresher = require("./utils/soopCookieRefresher");
 const marketplaceGuardian = require("./utils/marketplaceGuardian");
 const primeWatcher = require("./utils/primeWatcher");
 const campaignWatcher = require("./utils/campaignWatcher");
@@ -112,6 +117,7 @@ const activityRoutes = require("./routes/activityRoutes");
 const systemHealthRoutes = require("./routes/systemHealthRoutes");
 const marketplaceConsoleRoutes = require("./routes/marketplaceConsoleRoutes");
 const priceTrackerRoutes = require("./routes/priceTrackerRoutes");
+const soopRoutes = require("./routes/soopRoutes");
 const fleetSnapshot = require("./utils/fleetSnapshot");
 const auditRequest = require("./middleware/auditRequest");
 
@@ -638,6 +644,13 @@ app.get("/price-tracker.html", requireSuperadmin, enforce2fa, (req, res) => {
   res.sendFile(path.join(__dirname, "public", "price-tracker.html"));
 });
 
+// SOOP drops farm (docs/SOOP-FARM.md) — superadmin-only. The page holds live
+// SOOP cookies server-side, so it is gated before static and never cached.
+app.get("/soop.html", requireSuperadmin, enforce2fa, (req, res) => {
+  res.set("Cache-Control", "no-store");
+  res.sendFile(path.join(__dirname, "public", "soop.html"));
+});
+
 app.use(express.static(path.join(__dirname, "public")));
 
 // =========================
@@ -703,6 +716,10 @@ app.use(enforce2fa, marketplaceConsoleRoutes);
 // items, whether lower prices sell more, and what a listing should cost. READ-ONLY
 // — it never writes and never calls a marketplace. Every route is superadmin + 2FA.
 app.use(enforce2fa, priceTrackerRoutes.real());
+// SOOP drops farm: accounts, campaigns, bots, inventory, Twitch cookie
+// hand-off, auto-renew. Routes inside self-guard with requireSuperadmin OR
+// a shared harvest-key header (for the Tampermonkey hybrid harvester).
+app.use(enforce2fa, soopRoutes);
 app.use(enforce2fa, marketplaceRoutes);
 // Account listings (docs/ACCOUNT-LISTINGS-CONTRACT.md): owner-supplied account
 // stock. Mounted after marketplaceRoutes because it shares that tab's publish
@@ -934,6 +951,15 @@ mongoose
     // Twitch follow-bot: resumes any pending/running follow job that was
     // in flight when the server last stopped (see utils/twitchFollowRunner).
     twitchFollowRunner.start();
+    // SOOP drops farm (docs/SOOP-FARM.md): resumes any bot that was running
+    // when the process last stopped. Inert until an account is imported and a
+    // bot is started from the SOOP page.
+    soopFarm.start();
+    // Periodic auto-renew sweep: picks up SOOP accounts whose cookies have
+    // died (status drops_rejected/not_logged_in) and have a linked
+    // TwitchWebCookie, re-mints via Twitch OAuth, writes back to Mongo.
+    // Reactive-on-fail is wired directly into soopFarm.checkAccount().
+    soopCookieRefresher.start();
   })
   .catch((err) => {
     console.error("MongoDB connection error:", err.message);
