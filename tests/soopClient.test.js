@@ -165,22 +165,30 @@ test("privateInfo reports a logged-out reply instead of throwing", async () => {
   assert.equal(t.calls[0].headers.origin, "https://play.sooplive.com");
 });
 
-test("campaigns() pages until an empty page and tags each row with the filter", async () => {
-  const t = fakeTransport((url, opt, n) => ({
-    result: 1,
-    data: n <= 3 ? [{ dropsIdx: `d${n}`, title: `T${n}` }] : [],
-  }));
+// SOOP's event list as the real server pages it (measured 2026-10-13):
+// `prePageNo` rows starting at row (pageNo - 1) * prePageNo, and the size of
+// the whole list. `count: false` leaves the size out.
+function eventList(lists, { count = true } = {}) {
+  return (url, opt) => {
+    const { filter, pageNo, prePageNo } = JSON.parse(opt.body);
+    const all = lists[filter] || [];
+    const from = (pageNo - 1) * prePageNo;
+    const data = all.slice(from, from + prePageNo).map((dropsIdx) => ({ dropsIdx, title: `T${dropsIdx}` }));
+    return count ? { result: 1, totalCount: all.length, data } : { result: 1, data };
+  };
+}
+const ids = (n, prefix = "d") => Array.from({ length: n }, (_, i) => `${prefix}${i}`);
+
+test("campaigns() asks for the list the way the site does and tags each row with the filter", async () => {
+  const t = fakeTransport(eventList({ scheduled: ["d1", "d2", "d3"] }));
   const rows = await client(t).campaigns("scheduled");
   assert.deepEqual(rows, [
-    { dropsIdx: "d1", title: "T1", filter: "scheduled" },
-    { dropsIdx: "d2", title: "T2", filter: "scheduled" },
-    { dropsIdx: "d3", title: "T3", filter: "scheduled" },
+    { dropsIdx: "d1", title: "Td1", filter: "scheduled" },
+    { dropsIdx: "d2", title: "Td2", filter: "scheduled" },
+    { dropsIdx: "d3", title: "Td3", filter: "scheduled" },
   ]);
-  assert.equal(t.calls.length, 4);
-  assert.deepEqual(
-    t.calls.map((c) => JSON.parse(c.body)),
-    [1, 2, 3, 4].map((p) => ({ filter: "scheduled", gameIdx: "all", prePageNo: p, pageNo: p })),
-  );
+  assert.equal(t.calls.length, 1, "SOOP's count says the list is complete: no second request");
+  assert.deepEqual(JSON.parse(t.calls[0].body), { filter: "scheduled", gameIdx: "all", pageNo: 1, prePageNo: 200 });
   const [req] = t.calls;
   assert.equal(req.url, "https://drops.sooplive.com/api/get_drops_event_list.php");
   assert.equal(req.method, "POST");
@@ -189,33 +197,147 @@ test("campaigns() pages until an empty page and tags each row with the filter", 
   assert.match(req.headers.referer, /^https:\/\/drops\.sooplive\.com\//);
 });
 
-test("campaigns() defaults to progress and stops at the 80-page cap", async () => {
-  const t = fakeTransport((url, opt, n) => ({ result: 1, data: [{ dropsIdx: `d${n}` }] }));
+// 2026-10-13: the reader sent the page number as the page size too. SOOP
+// answered with rows 0, 2-3 and 6-8 of its ten running campaigns; the Overwatch
+// one sat at row 4, so the farm took it for delisted.
+test("campaigns() returns every row of SOOP's list, in SOOP's order", async () => {
+  for (const n of [1, 10, 62, 200]) {
+    const all = ids(n);
+    const t = fakeTransport(eventList({ progress: all }));
+    const rows = await client(t).campaigns("progress");
+    assert.deepEqual(rows.map((r) => r.dropsIdx), all, `${n} campaigns`);
+    assert.equal(t.calls.length, 1, `${n} campaigns: one request`);
+  }
+});
+
+test("campaigns() goes on to the next page until SOOP's count is reached", async () => {
+  const all = ids(450);
+  const t = fakeTransport(eventList({ progress: all }));
   const rows = await client(t).campaigns();
-  assert.equal(t.calls.length, 80);
-  assert.equal(rows.length, 80);
+  assert.deepEqual(rows.map((r) => r.dropsIdx), all);
+  assert.deepEqual(
+    t.calls.map((c) => JSON.parse(c.body)),
+    [1, 2, 3].map((pageNo) => ({ filter: "progress", gameIdx: "all", pageNo, prePageNo: 200 })),
+  );
+  // The count may arrive as a string, and a row listed on two pages (the list
+  // moved between the reads) is one campaign: the count is of campaigns.
+  const pages = [["a", "b"], ["b", "c"], ["x"]];
+  const moved = fakeTransport((url, opt, n) => ({ result: 1, totalCount: "3", data: pages[n - 1].map((dropsIdx) => ({ dropsIdx })) }));
+  assert.deepEqual((await client(moved).campaigns()).map((r) => r.dropsIdx), ["a", "b", "c"]);
+  assert.equal(moved.calls.length, 2);
+  // Two rows read are not two campaigns read: the second campaign is on the next page.
+  const twice = [["a", "a"], ["b"]];
+  const dup = fakeTransport((url, opt, n) => ({ result: 1, totalCount: 2, data: (twice[n - 1] || []).map((dropsIdx) => ({ dropsIdx })) }));
+  assert.deepEqual((await client(dup).campaigns()).map((r) => r.dropsIdx), ["a", "b"]);
+  assert.equal(dup.calls.length, 2);
+});
+
+// "Not in the list" is acted on as "SOOP delisted it", so a list that is known
+// to be incomplete must never be handed back as if it were the list.
+test("campaigns() refuses a read that falls short of SOOP's own count", async () => {
+  const short = { code: "API", message: /came back short: \d+ of \d+/ };
+  // the count says ten, the data is missing or is not a list
+  for (const data of [null, {}, []]) {
+    await assert.rejects(client(fakeTransport(() => ({ result: 1, totalCount: 10, data }))).campaigns(), short);
+  }
+  // five rows, then nothing, of ten
+  const half = fakeTransport((url, opt, n) => ({ result: 1, totalCount: 10, data: n === 1 ? ids(5).map((dropsIdx) => ({ dropsIdx })) : [] }));
+  await assert.rejects(client(half).campaigns(), { code: "API", message: /5 of 10/ });
+  assert.equal(half.calls.length, 2);
+  // a server that ignores the page number: the same 200 rows for ever, of 300
+  const stuck = fakeTransport(() => ({ result: 1, totalCount: 300, data: ids(200).map((dropsIdx) => ({ dropsIdx })) }));
+  await assert.rejects(client(stuck).campaigns(), { code: "API", message: /200 of 300/ });
+  assert.equal(stuck.calls.length, 10, "it stops at the page cap");
+  // the same campaign listed twice is not a short read: every row SOOP counts was handed over
+  const twin = fakeTransport((url, opt, n) => ({ result: 1, totalCount: 3, data: n === 1 ? [{ dropsIdx: "a" }, { dropsIdx: "a" }, { dropsIdx: "b" }] : [] }));
+  assert.deepEqual((await client(twin).campaigns()).map((r) => r.dropsIdx), ["a", "b"]);
+  // …also when that only shows on the last page the cap allows (nine full pages, one row twice, then nothing)
+  const nine = fakeTransport((url, opt, n) => ({
+    result: 1,
+    totalCount: 1800,
+    data: n <= 9 ? ids(200, `p${n}-`).map((dropsIdx, i) => ({ dropsIdx: n === 9 && i === 199 ? "p1-0" : dropsIdx })) : [],
+  }));
+  assert.equal((await client(nine).campaigns()).length, 1799);
+  assert.equal(nine.calls.length, 10);
+  // a row that is not a row is passed over; it does not cost the list
+  const junk = fakeTransport((url, opt, n) => ({ result: 1, totalCount: 3, data: n === 1 ? [{ dropsIdx: "a" }, null, { dropsIdx: "b" }] : [] }));
+  assert.deepEqual((await client(junk).campaigns()).map((r) => r.dropsIdx), ["a", "b"]);
+  // a row keeps the filter SOOP gave it; only an untagged row takes the list's name
+  const own = fakeTransport(() => ({ result: 1, totalCount: 2, data: [{ dropsIdx: "a", filter: "scheduled" }, { dropsIdx: "b" }] }));
+  assert.deepEqual((await client(own).campaigns("progress")).map((r) => r.filter), ["scheduled", "progress"]);
+});
+
+test("campaigns() without a count from SOOP ends at the first empty page", async () => {
+  const all = ids(10);
+  const t = fakeTransport(eventList({ scheduled: all }, { count: false }));
+  const rows = await client(t).campaigns("scheduled");
+  assert.deepEqual(rows.map((r) => r.dropsIdx), all);
+  assert.deepEqual(t.calls.map((c) => JSON.parse(c.body).pageNo), [1, 2]);
+  // Nothing listed is what SOOP sends for it (measured 2026-10-13): an empty
+  // array and a count of "0". A reply with no list in it is not that.
+  const none = fakeTransport(() => ({ result: 1, message: "SUCCESS", totalCount: "0", data: [] }));
+  assert.deepEqual(await client(none).campaigns(), []);
+  assert.equal(none.calls.length, 1);
+  for (const data of [null, {}, undefined, "x"]) {
+    const noList = fakeTransport(() => ({ result: 1, totalCount: "0", data }));
+    await assert.rejects(client(noList).campaigns(), { code: "API", message: /came back short/ });
+    assert.equal(noList.calls.length, 1);
+  }
+  // A page that carries no count does not undo the count of the page before it.
+  const lost = fakeTransport((url, opt, n) => ({ result: 1, ...(n === 1 ? { totalCount: 300 } : {}), data: ids(n === 1 ? 200 : 100, `p${n}-`).map((dropsIdx) => ({ dropsIdx })) }));
+  assert.equal((await client(lost).campaigns()).length, 300);
+  assert.equal(lost.calls.length, 2, "the count of 300 still ends the read");
+});
+
+test("campaigns() defaults to progress and stops at the 10-page cap", async () => {
+  // Full pages for ever and no count: the cap is what ends the read.
+  const t = fakeTransport((url, opt, n) => ({ result: 1, data: ids(200, `p${n}-`).map((dropsIdx) => ({ dropsIdx })) }));
+  const rows = await client(t).campaigns();
+  assert.equal(t.calls.length, 10);
+  assert.equal(rows.length, 2000);
   assert.equal(rows[0].filter, "progress");
 });
 
 test("campaignsAll() merges progress and scheduled without duplicates", async () => {
-  const lists = { progress: ["a", "b"], scheduled: ["b", "c"] };
-  const t = fakeTransport((url, opt) => {
-    const { filter, pageNo } = JSON.parse(opt.body);
-    const id = lists[filter][pageNo - 1];
-    return { result: 1, data: id ? [{ dropsIdx: id }] : [] };
-  });
+  const t = fakeTransport(eventList({ progress: ["a", "b"], scheduled: ["b", "c"] }));
   const rows = await client(t).campaignsAll();
   assert.deepEqual(rows.map((r) => r.dropsIdx), ["a", "b", "c"]);
   assert.equal(rows.find((r) => r.dropsIdx === "c").filter, "scheduled");
+  assert.deepEqual(t.calls.map((c) => JSON.parse(c.body).filter), ["progress", "scheduled"], "one request a list");
 });
 
-test("campaignsAll() keeps one list when the other fails and rethrows when both do", async () => {
-  const half = fakeTransport((url, opt) => {
-    const { filter, pageNo } = JSON.parse(opt.body);
-    if (filter === "scheduled") return { result: 0, message: "busy" };
-    return { result: 1, data: pageNo === 1 ? [{ dropsIdx: "a" }] : [] };
-  });
-  assert.deepEqual((await client(half).campaignsAll()).map((r) => r.dropsIdx), ["a"]);
+test("campaignsAll() keeps one list when the other fails, names the one it could not read, and rethrows when both fail", async () => {
+  const lists = eventList({ progress: ["a"], scheduled: ["s"] });
+  const failing = (bad) =>
+    fakeTransport((url, opt) => (JSON.parse(opt.body).filter === bad ? { result: 0, message: "busy" } : lists(url, opt)));
+  const whole = await client(fakeTransport(lists)).campaignsAll();
+  assert.deepEqual(whole.map((r) => r.dropsIdx), ["a", "s"]);
+  assert.equal(whole.unread, undefined, "both lists were read");
+
+  const noScheduled = await client(failing("scheduled")).campaignsAll();
+  assert.deepEqual(noScheduled.map((r) => r.dropsIdx), ["a"]);
+  assert.deepEqual(noScheduled.unread, ["scheduled"]);
+  // The running list is the one that matters most: its campaigns are not in
+  // the rows, and the result says why — it does not say they are gone.
+  const noProgress = await client(failing("progress")).campaignsAll();
+  assert.deepEqual(noProgress.map((r) => r.dropsIdx), ["s"]);
+  assert.deepEqual(noProgress.unread, ["progress"]);
+  assert.ok(Array.isArray(noProgress), "still a plain list of rows");
+  assert.match(noProgress.unreadWhy, /^progress: busy$/, "and why, for the log");
+  // A list that came back short of its own count was not read whole either:
+  // it is named, and the rows it did hand over are not thrown away.
+  const shortProgress = fakeTransport((url, opt) =>
+    JSON.parse(opt.body).filter === "progress" ? { result: 1, totalCount: 4, data: [{ dropsIdx: "a" }] } : lists(url, opt),
+  );
+  const partial = await client(shortProgress).campaignsAll();
+  assert.deepEqual(partial.map((r) => `${r.dropsIdx}:${r.filter}`), ["a:progress", "s:scheduled"]);
+  assert.deepEqual(partial.unread, ["progress"]);
+  assert.equal(partial.unreadWhy, "progress: 1 of 4 campaigns handed over");
+  // Neither list handed over anything it could vouch for: nothing to act on, and both are named.
+  const noLists = await client(fakeTransport(() => ({ result: 1, data: null }))).campaignsAll();
+  assert.deepEqual([...noLists], []);
+  assert.deepEqual(noLists.unread, ["progress", "scheduled"]);
+
   const dead = fakeTransport(() => ({ result: -1, message: "login" }));
   await assert.rejects(client(dead).campaignsAll(), { code: "AUTH" });
 });

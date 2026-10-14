@@ -24,8 +24,8 @@ up to `7eb67df`). What changed and why is in "What v1 got wrong" at the end.
   guaranteed campaign of that game as each goes live, never finishes on its own),
   or everything guaranteed. An account is in at most one active bot. Bots and
   per-campaign progress survive a restart.
-- **Campaigns** — read from SOOP in English, grouped by game, remembered after
-  SOOP delists them mid-broadcast so a bot can keep farming.
+- **Campaigns** — read from SOOP in English, grouped by game, and remembered
+  once SOOP stops listing them, so a bot can still look one up.
 - **Inventory** — every account's earned rewards synced into the database and
   shown per game and item, with expiry warnings. Reward codes are stored
   encrypted and only shown on an explicit, logged "reveal".
@@ -175,15 +175,119 @@ once and refreshes a list older than 5 minutes in the background.
 
 ## Delisted campaigns
 
-SOOP drops campaigns from its list before and during broadcasts: on 2026-10-07
-Delta Force Rise Series Day 1 vanished from the list 17 hours before its start.
-Every kind of bot therefore also considers remembered campaigns that SOOP no
-longer lists, **while their window is open** (`farmable()` in `utils/soopFarm.js`,
+Every kind of bot also considers remembered campaigns that SOOP no longer
+lists, **while their window is open** (`farmable()` in `utils/soopFarm.js`,
 from two minutes before the start until the end). A delisted campaign has no
-live flag, so the worker simply tries its channels; listed-and-live campaigns
-are always preferred over one whose state is a guess, and the 3-minute
-cool-down keeps a delisted campaign with nobody on air from being probed
-constantly. Until this fix only a bot pinned to one campaign did this.
+live flag, so the worker looks at its channels — and joins one unless its
+stream says it carries no drops (see "Drops-enabled streams" below).
+Listed-and-live campaigns are always preferred over one whose state is a
+guess, and the 3-minute cool-down keeps a delisted campaign with nobody to join
+from being probed constantly.
+
+How often SOOP really delists a running campaign is **not known**. This section
+was written on the belief that it does so "before and during broadcasts" (Delta
+Force Rise Series Day 1 "vanished from the list 17 hours before its start" on
+2026-10-07). On 2026-10-13 the farm's own reader turned out to be skipping
+about half of SOOP's list, which looks exactly like that from the inside, so
+those sightings prove nothing either way. The rule is kept for the case that
+SOOP does. It is not free: in that state every account wakes about every five
+minutes and looks at the campaign's channels (simulated for 29 accounts and a
+seven-channel campaign: 2,000 to 2,700 player-info reads and 300 to 400
+mission reads an hour, and no socket). With the list read whole it should be
+rare.
+
+## The campaign list was read wrongly (found 2026-10-13)
+
+Found from 29 "Not earning — Joined, but SOOP is not counting minutes" alerts.
+Measured on production between 15:28 and 15:51 UTC:
+
+- **The reader asked for "page p of p rows".** `get_drops_event_list.php` takes
+  `pageNo` and `prePageNo`, and `prePageNo` is the page SIZE (the site itself
+  sends 20 or 200 in it for this list). v1 sent the page number in both,
+  believing the list came one event a page, and v2 kept the shape. SOOP answers
+  such a request with rows 0, then 2-3, then 6-8, 12-15, 20-24 … and nothing in
+  between. Asked that way it returned 6 of the 10 running campaigns (rows 0,
+  2, 3, 6, 7, 8; the fourth page was empty, which ended the read); asked the
+  site's way (`pageNo: 1, prePageNo: 200`) it returned all 10 with
+  `totalCount: 10`, and all 62 scheduled ones. The farm's own last scan had
+  seen 6 running and 34 scheduled — what the arithmetic gives. (The 10-04
+  probe's recording fits the same pattern: 6 running rows are 1+2+3.)
+- **A campaign in a skipped row looked delisted**, and went in and out of view
+  as the list's order changed. The Overwatch campaign (OWCS Korea Stage 3
+  W3&4, `13787`) sat at row 4: listed by SOOP, not live. The farm took it for
+  delisted, so for "state unknown, try its channels".
+- **Its channel list includes co-streamers.** Two of them were on air playing
+  ranked games; the official channel was off air. Their player info said
+  `IS_DROPS: 0` and so did the category listing (0 of 31 Overwatch streams
+  carried drops). From 09:08 UTC all 29 accounts joined one of them 725 times
+  by 15:28 — three minutes each, then the 2 / 5 / 10 / 15-minute back-off —
+  and were counted nothing. Before 09:08, with no co-streamer on air, the same
+  mistake showed as "Campaign is live but no channel is on air yet" 2,345
+  times since 10-12 14:41: sessions that started, found nobody on air and went
+  back to sleep, for every account every few minutes.
+- **What it cost.** No Overwatch watch time: SOOP had no Overwatch broadcast
+  on. Of the three other running campaigns hidden at 15:32, none was one the
+  bot farms (two were not watch-time campaigns, one needs a linked game
+  account); what was hidden at other hours of the day was not checked. The nine guaranteed
+  campaigns that ended since the farm started had all been seen by the farm at
+  some point. The logins were all accepted and the Sri Lanka egress was up.
+  What it did cost was 29 accounts appearing and leaving together on a small
+  stream, every quarter of an hour, for more than six hours.
+
+What changed, each part pinned by tests that fail without it:
+
+- **`utils/soopClient.js` reads the whole list**: pages of 200, as the site's
+  own full-list view does, until SOOP's `totalCount` campaigns are read.
+  Measured through the tunnel: 2.2 s for the running list (12 KB) and 3.1 s for
+  the scheduled one (55 KB) — one scan is 2 requests instead of 13. A read is
+  **short** when SOOP hands over fewer rows than it counts, when the page cap
+  is reached without them, or when a reply has no list in it (an empty list is
+  an empty array with a count of "0", measured). `campaigns()` throws on a
+  short read; `campaignsAll()` keeps the rows that did come and names the list
+  in `unread` (why, in `unreadWhy`).
+- **A list that was not read whole says nothing about what it did not hand
+  over.** The two lists are two requests, and one lost request used to turn
+  every running campaign into a "delisted" one until the next scan.
+  `utils/soop/campaignStore.js` now keeps the campaigns such a list held
+  exactly as they were last read, for ten minutes from when SOOP last really
+  listed them — the tolerance a wholly failed scan gets (the two can follow
+  each other, so the outside bound is about twenty). The panel's "campaign
+  list could not be refreshed" alert shows meanwhile, and the server log gets
+  one line when a list stops being read whole and one when it is again
+  (`[soop] campaign store: the progress list was not read whole — …`).
+- **A short read is asked for again at once** through the next login
+  (`_scan` in `utils/soopFarm.js`, up to three logins as for a failed read);
+  of several short reads, one that read the running list is kept.
+- **`pickChannel()` in `utils/soopWorker.js` reads the stream's own flag before
+  joining.** See the next section.
+
+Found by the reviews of this change and fixed with it, though older:
+
+- **A session's second dropped socket ended it.** The count of "looks with
+  nothing to farm" was never reset by a stretch that was being counted, so the
+  second time a session's socket closed — however many hours after the first —
+  it ended as "idle" and the account sat out the 3-minute cool-down instead of
+  one 30-second retry (simulated on the old code: 49 / 45 / 43 / 39 minutes
+  earned in 50 with one to four interruptions). A stretch in which minutes
+  were counted now resets the count.
+
+Tests: `tests/soopClient.test.js` (a list paged as the real server pages it),
+`tests/soopCampaignStore.test.js`, `tests/soopWorker.test.js`, and the
+end-to-end cases in `tests/soopFarm.test.js`.
+
+What the list rule does **not** cover:
+
+- **After a restart there is no last read to keep.** If the very first scan of
+  a new process is short, the campaigns of the unread list are delisted until
+  the next whole read.
+- **After the tolerance** a campaign of a list that still cannot be read is
+  delisted like any other, and is then joined only on a stream that does not
+  say "no drops".
+- **A broadcast that starts while the running list is unread** is noticed at
+  the next whole read, not before. The old code took the short read for a
+  delisting and tried the channels at once (simulated: about two minutes an
+  account for one lost request at exactly that look, less or the other way
+  round in the other cases).
 
 ## Drops-enabled streams and start times
 
@@ -199,6 +303,45 @@ met (Dokkaebi World launch drops, any stream in category `00360141`):
   That campaign was flagged live from 03:51 KST with a start of 11:00 KST.
   Nothing is counted before the start, so a campaign is not farmable until two
   minutes before its `startAt`, whatever the flag says.
+
+And a third, learned on 2026-10-13 from a campaign with a channel list:
+
+- **A stream's own player info says it too**: `IS_DROPS` in the `CHANNEL`
+  object of `player_live_api.php`, which answers without a cookie. Read once,
+  at 15:32–15:36 UTC: `1` (a number) on six streams the category listing
+  marked `is_drops`, `0` on the two co-streamers, one of which had been joined
+  725 times and counted nothing. A channel of a campaign being on air therefore
+  proves nothing — a co-streamer has broadcasts of their own.
+- **The rule** (`pickChannel`, `carriesDrops`): of the campaign's channels on
+  air, the first whose stream carries drops — or does not say — is joined. One
+  that says it carries none is joined only when nothing better is on air AND
+  SOOP itself lists the campaign as live; then it is the first such stream,
+  which is the one the farm joined before it read the flag. A campaign that
+  left SOOP's list is never joined on a stream that says it has no drops. A
+  value other than SOOP's `1` / `0` counts as "does not say".
+- **Not yet seen:** `IS_DROPS` on an official channel while its campaign is
+  being counted (no such broadcast was on). That is why a stream saying "no
+  drops" is still joined when SOOP calls the campaign live: should the flag
+  ever be `0` on a counted stream, the farm is on it as long as its last read
+  of SOOP's list says the campaign is live — not once the campaign counts as
+  delisted (see what the list rule does not cover, above). Read the flag on
+  `owesports` during the next OWCS broadcast; if it is `1` while minutes count,
+  that exception can go.
+- **When a counter stays flat** the panel now adds "(the stream says it carries
+  no drops)" if the joined stream said so. Then it is the stream. Without it
+  the two old causes remain (see "Two measurement traps" above).
+
+Known limits, none of them new:
+
+- `IS_DROPS` says that a stream carries drops, not whose. A listed co-streamer
+  running another event's drops looks the same as one carrying this campaign's.
+- Every account looks at the channels itself (29 accounts × up to 12 channels
+  at a wake); the "nobody to join" note is shared for 90 s, a look in flight
+  is not. A note reached by passing over a stream that said "no drops" stops
+  binding the moment SOOP lists the campaign as live.
+- For a campaign SOOP lists, the farm waits for SOOP's `live` flag. A campaign
+  that used to sit in a skipped row was tried regardless; if `live` ever
+  trails a counted broadcast, that head start is gone.
 
 ## Priority game
 
@@ -335,6 +478,17 @@ before the restart.
    whether an Overwatch reward really is a code, and where it redeems, which is
    still the open question that decides if buyers can use it.
 4. Eight accounts on one address all keep earning.
+5. (Since the 2026-10-14 change.) While a campaign's minutes are counting, read
+   `IS_DROPS` on its official channel (`player_live_api.php`, no cookie
+   needed). It has only ever been read on category streams and on streams
+   that were counted nothing. If it is `1`, the exception "a stream that says
+   no drops is still joined when SOOP calls the campaign live" in
+   `pickChannel` can go.
+6. `pm2 logs redeemer | grep "was not read whole"`. A line now and then is a
+   lost request. A line that is never followed by "both lists read whole
+   again" means SOOP's reply no longer matches what was measured — its count
+   against the rows it hands over, or what an empty list looks like — and the
+   reason is in the line.
 
 ## Deploy record
 

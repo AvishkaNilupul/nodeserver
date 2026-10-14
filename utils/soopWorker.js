@@ -45,10 +45,30 @@ const goalOf = (camp, target) => {
   return target === "first" ? steps[0] : steps[steps.length - 1];
 };
 
+// What a broadcast's own player info says about drops: true it carries them,
+// false it does not, null it does not say — a reply without the field, or a
+// value never seen from SOOP (1 and 0 are what it sends), which is not read as
+// a "no".
+function carriesDrops(info) {
+  const v = info ? info.IS_DROPS : null;
+  if (v === true || v === false) return v;
+  const s = v === undefined || v === null ? "" : String(v).trim().toLowerCase();
+  if (s === "1" || s === "y") return true;
+  if (s === "0" || s === "n") return false;
+  return null;
+}
+
 async function pickChannel(client, camp, now) {
   const key = String(camp.dropsIdx);
+  // SOOP itself calling the campaign live is evidence that it is being
+  // broadcast; for a campaign that left its list there is none.
+  const listedLive = camp.live === true && camp.filter !== "unlisted";
   const memo = channelMemo.get(key);
-  if (memo && memo.noneAt && now() - memo.noneAt < MEMO_NONE_MS) return null;
+  // "Nobody to join" stands for 90 s for every account. Not, though, when it
+  // was reached by passing over a stream that said "no drops" and SOOP has
+  // since listed the campaign as live: that stream is then to be joined.
+  const noted = memo && memo.noneAt && now() - memo.noneAt < MEMO_NONE_MS;
+  if (noted && !(listedLive && memo.passedOver)) return null;
 
   let order;
   if (camp.categoryWide) {
@@ -62,15 +82,29 @@ async function pickChannel(client, camp, now) {
     ];
   }
   // The on-air flags go stale on remembered campaigns, so every candidate is
-  // checked for real before a socket is opened on it.
+  // checked for real before a socket is opened on it. Being on air is not
+  // enough: a listed co-streamer can be live with a stream of their own, and
+  // SOOP counts nothing there. On 2026-10-13, with no Overwatch broadcast on,
+  // 29 accounts joined such a stream 725 times in six hours and earned nothing;
+  // its player info, when read, said IS_DROPS 0. So a stream that carries drops
+  // wins, and one that says it does not is joined only when SOOP itself lists
+  // the campaign as live (the first such stream, which is the one that was
+  // joined before this rule) — never on the guess that a delisted campaign is.
+  let dropsOff = null;
   for (const bj of [...new Set(order)].slice(0, 12)) {
     const info = await client.liveInfo(bj).catch(() => null);
-    if (info && info.RESULT === 1) {
+    if (!info || info.RESULT !== 1) continue;
+    if (carriesDrops(info) !== false) {
       channelMemo.set(key, { bj, at: now() });
       return bj;
     }
+    if (!dropsOff) dropsOff = bj;
   }
-  channelMemo.set(key, { noneAt: now() });
+  if (dropsOff && listedLive) {
+    channelMemo.set(key, { bj: dropsOff, at: now() });
+    return dropsOff;
+  }
+  channelMemo.set(key, { noneAt: now(), passedOver: Boolean(dropsOff) });
   return null;
 }
 
@@ -187,7 +221,12 @@ async function runSession(opts) {
       const channel = await pickChannel(client, camp, clock.now).catch(() => null);
       if (channel) return { camp, channel };
     }
-    return { wait: "Campaign is live but no channel is on air yet", camp: live[0] };
+    // Only a listed campaign is known to be live; a delisted one was a guess.
+    const wait =
+      live[0].filter === "unlisted"
+        ? "Not on SOOP's list right now, and no channel is carrying its drops"
+        : "Campaign is live but no channel is on air yet";
+    return { wait, camp: live[0] };
   }
 
   // While farming something else: has a campaign of the priority game gone
@@ -237,6 +276,7 @@ async function runSession(opts) {
     let ch = await client.liveInfo(channel).catch(() => null);
     if (!ch || ch.RESULT !== 1) return { retry: "the stream went off air" };
     ch = (await client.liveInfo(channel, String(ch.BNO)).catch(() => null)) || ch;
+    const saysNoDrops = carriesDrops(ch) === false;
 
     emit({ k: "state", state: "starting", detail: "Joining " + channel, ...base, minutes: last });
     const bridge = client.openBridge(channel, ch, {});
@@ -270,9 +310,8 @@ async function runSession(opts) {
         } catch (e) {
           if (isAuthError(e)) return { auth: e.message };
           if (++unreadable >= T.readFailures) {
-            return isEgressError(e)
-              ? { egress: e.message }
-              : { retry: "progress unreadable: " + e.message };
+            const left = isEgressError(e) ? { egress: e.message } : { retry: "progress unreadable: " + e.message };
+            return { ...left, everCredited };
           }
           continue;
         }
@@ -298,9 +337,9 @@ async function runSession(opts) {
         if (done) return { done: true, minutes: mins, goal };
         const first = await priorityLive(client, camp);
         if (first) return { switchTo: first };
-        if (bridge.closed) return { retry: "the viewer socket closed" };
+        if (bridge.closed) return { retry: "the viewer socket closed", everCredited };
         if (flat >= T.flatPolls) {
-          return { notCrediting: true, minutes: mins, everCredited };
+          return { notCrediting: true, minutes: mins, everCredited, saysNoDrops };
         }
       }
       return { retry: "stopped" };
@@ -367,7 +406,11 @@ async function runSession(opts) {
     const out = await farm(client, camp, channel);
     if (stopped()) break;
     if (out.auth) return end("auth", out.auth);
-    if (out.done || out.notCrediting || out.switchTo) idle = 0; // it got as far as watching
+    // It got as far as watching — or, when it left on a closed socket or an
+    // unreadable counter, as far as being counted. Without the second half a
+    // session's SECOND dropped socket, hours after the first, ended it as
+    // "idle" and cost the 3-minute cool-down instead of one retry.
+    if (out.done || out.notCrediting || out.switchTo || out.everCredited) idle = 0;
     if (out.switchTo) {
       emit({
         k: "switch",
@@ -392,7 +435,9 @@ async function runSession(opts) {
       emit({
         k: "state",
         state: "backoff",
-        detail: `Joined, but SOOP is not counting minutes — retrying in ${Math.round(ms / 60000)} min`,
+        detail:
+          `Joined, but SOOP is not counting minutes${out.saysNoDrops ? " (the stream says it carries no drops)" : ""}` +
+          ` — retrying in ${Math.round(ms / 60000)} min`,
         ...ref,
         minutes: out.minutes,
         credited: false,
@@ -413,4 +458,4 @@ async function runSession(opts) {
   return end("stopped");
 }
 
-module.exports = { runSession, sleep, goalOf, pickChannel, DEFAULT_TIMINGS, channelMemo };
+module.exports = { runSession, sleep, goalOf, pickChannel, carriesDrops, DEFAULT_TIMINGS, channelMemo };

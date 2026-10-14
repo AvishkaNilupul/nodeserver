@@ -366,3 +366,158 @@ test("setGameName / setTranslation persist, apply to cached rows and survive a r
   await assert.rejects(next.setGameName("", "x"), /gameNo/);
   await assert.rejects(next.setTranslation("   ", "x"), /source/);
 });
+
+// ---- a list the scan could not read ------------------------------------------
+//
+// SOOP's campaigns come as two lists (running, scheduled), one request each. On
+// 2026-10-13 the farm was found treating "not in what I read" as "SOOP delisted
+// it" — and one lost request is enough to not read a list.
+
+// A scan result as the client hands it over when a list did not answer.
+const partial = (rows, ...unread) => Object.assign([...rows], { unread });
+const scheduled = (dropsIdx) => raw(dropsIdx, { filter: "scheduled", live: false });
+const shape = (list) => list.map((c) => `${c.dropsIdx}:${c.filter}:${c.live}`);
+
+test("a list that could not be read keeps its campaigns as they were last read, for as long as a failed scan is tolerated", async () => {
+  const { store, clock, saved } = harness();
+  const scan = scanner([raw("a"), scheduled("s")]);
+  await store.list({ scan });
+  await saved();
+  const listedAt = iso((await row("a")).seenAt);
+
+  clock.t += TTL + 1;
+  scan.rows = partial([scheduled("s")], "progress"); // the running list did not answer
+  assert.deepEqual(shape(await store.list({ scan })), ["s:scheduled:false", "a:progress:true"]);
+  await saved();
+  assert.equal((await store.get("a")).filter, "progress", "not taken for delisted");
+  assert.deepEqual(store.all().map((c) => c.dropsIdx), ["s", "a"], "and listed once");
+  let a = await row("a");
+  assert.equal(a.live, true, "the database is not told it stopped");
+  assert.equal(iso(a.seenAt), listedAt, "nor that SOOP listed it just now");
+  assert.deepEqual({ ok: store.lastScan().ok, count: store.lastScan().count }, { ok: false, count: 2 });
+  assert.match(store.lastScan().error, /progress list could not be read/);
+
+  // Still unread five minutes on: the tolerance runs from when SOOP last
+  // really listed the campaign, not from the last scan that carried it over.
+  clock.t += STALE / 2;
+  assert.deepEqual(shape(await store.list({ scan })), ["s:scheduled:false", "a:progress:true"]);
+  clock.t += STALE / 2;
+  assert.deepEqual(shape(await store.list({ scan })), ["s:scheduled:false"], "after ten minutes its state is no longer known");
+  await saved();
+  assert.equal((await store.get("a")).filter, "unlisted");
+  a = await row("a");
+  assert.equal(a.live, false);
+  assert.equal(iso(a.seenAt), listedAt);
+
+  // The list answers again: everything is as SOOP says.
+  clock.t += TTL + 1;
+  scan.rows = [raw("a", { live: false }), scheduled("s")];
+  assert.deepEqual(shape(await store.list({ scan })), ["a:progress:false", "s:scheduled:false"]);
+  assert.deepEqual({ ok: store.lastScan().ok, error: store.lastScan().error }, { ok: true, error: null });
+});
+
+test("only the list that could not be read is spared: what left a list that was read is delisted", async () => {
+  const { store, clock, saved } = harness();
+  const scan = scanner([raw("a"), raw("b"), scheduled("s")]);
+  await store.list({ scan });
+
+  clock.t += TTL + 1;
+  scan.rows = partial([raw("b")], "scheduled"); // the running list was read, and "a" is not in it
+  assert.deepEqual(shape(await store.list({ scan })), ["b:progress:true", "s:scheduled:false"]);
+  await saved();
+  assert.equal((await store.get("a")).filter, "unlisted", "SOOP really stopped listing it");
+  assert.equal((await row("a")).live, false);
+  assert.equal((await store.get("s")).filter, "scheduled");
+});
+
+test("a campaign that moved to a list that was read is taken from there, once", async () => {
+  const { store, clock, saved } = harness();
+  const scan = scanner([scheduled("x"), scheduled("s")]);
+  await store.list({ scan });
+
+  clock.t += TTL + 1;
+  scan.rows = partial([raw("x")], "scheduled"); // it started: now in the running list, live
+  assert.deepEqual(shape(await store.list({ scan })), ["x:progress:true", "s:scheduled:false"]);
+  await saved();
+  const x = await row("x");
+  assert.deepEqual({ live: x.live, filter: x.filter }, { live: true, filter: "progress" });
+});
+
+test("a list that came back short: what it handed over is taken fresh, what it did not is kept as last read", async () => {
+  const { store, clock, saved } = harness();
+  const scan = scanner([raw("a"), raw("b"), scheduled("s")]);
+  await store.list({ scan });
+  await saved();
+  const listedAt = iso((await row("b")).seenAt);
+
+  // The running list says it holds two campaigns and hands over one, with news in it.
+  clock.t += TTL + 1;
+  scan.rows = partial([raw("a", { live: false }), scheduled("s")], "progress");
+  assert.deepEqual(shape(await store.list({ scan })), ["a:progress:false", "s:scheduled:false", "b:progress:true"]);
+  await saved();
+  assert.equal((await row("a")).live, false, "the row that came is believed");
+  assert.notEqual(iso((await row("a")).seenAt), listedAt);
+  assert.equal(iso((await row("b")).seenAt), listedAt, "the one that did not come is neither refreshed nor dropped");
+
+  // It goes on like that: only the missing campaign runs out of tolerance.
+  clock.t += STALE;
+  assert.deepEqual(shape(await store.list({ scan })), ["a:progress:false", "s:scheduled:false"]);
+  assert.equal((await store.get("b")).filter, "unlisted");
+});
+
+test("a partly read scan is cached like any other, and the tolerance ends exactly at its limit", async (t) => {
+  // The server log is the only place that says WHY a campaign was carried over:
+  // one line when a list stops being read whole, one when it is again.
+  const logged = [];
+  t.mock.method(console, "error", (...a) => logged.push(a.join(" ")));
+  const { store, clock } = harness();
+  const scan = scanner([raw("a"), scheduled("s")]);
+  await store.list({ scan }); // "a" listed at t0
+  const t0 = clock.t;
+  assert.deepEqual(logged, [], "a whole read says nothing");
+
+  scan.rows = Object.assign(partial([scheduled("s")], "progress"), { unreadWhy: "progress: timeout after 20000 ms" });
+  clock.t = t0 + TTL;
+  await store.list({ scan });
+  assert.equal(scan.calls, 2);
+  clock.t += TTL - 1;
+  await store.list({ scan });
+  assert.equal(scan.calls, 2, "not asked again inside the cache time: a list that fails must not be hammered");
+
+  clock.t = t0 + STALE - 1;
+  assert.deepEqual(shape(await store.list({ scan })), ["s:scheduled:false", "a:progress:true"], "one millisecond inside the tolerance");
+  clock.t = t0 + STALE + TTL; // (the scan above is cached for TTL; the next one is past the limit)
+  assert.deepEqual(shape(await store.list({ scan })), ["s:scheduled:false"]);
+  assert.equal(logged.length, 1, "three short scans, one line");
+  assert.match(logged[0], /^\[soop\] campaign store: the progress list was not read whole — progress: timeout after 20000 ms$/);
+  assert.match(store.lastScan().error, /progress list could not be read \(progress: timeout after 20000 ms\)/);
+  scan.rows = [raw("a"), scheduled("s")];
+  clock.t += TTL;
+  await store.list({ scan });
+  assert.deepEqual(logged.slice(1), ["[soop] campaign store: both lists read whole again"]);
+  const edge = harness();
+  const again = scanner([raw("a"), scheduled("s")]);
+  await edge.store.list({ scan: again });
+  again.rows = partial([scheduled("s")], "progress");
+  edge.clock.t += STALE; // exactly at the limit is outside it
+  assert.deepEqual(shape(await edge.store.list({ scan: again })), ["s:scheduled:false"]);
+});
+
+test("after a restart there is no last read to keep; a result without `unread` is a whole one", async () => {
+  const first = harness();
+  await first.store.list({ scan: scanner([raw("a"), scheduled("s")]) });
+  await first.saved();
+
+  // A new process: it remembers "a" from the database, but has read no list yet.
+  const { store, clock } = harness();
+  await store.load();
+  clock.t += 30000;
+  const scan = scanner(partial([scheduled("s")], "progress")); // and its very first scan is short
+  assert.deepEqual(shape(await store.list({ scan })), ["s:scheduled:false"]);
+  assert.equal((await store.get("a")).filter, "unlisted", "a known limit: the running campaign is not carried over");
+  assert.equal(store.lastScan().ok, false);
+
+  const whole = harness();
+  assert.deepEqual(shape(await whole.store.list({ scan: scanner([raw("a")]) })), ["a:progress:true"]);
+  assert.equal(whole.store.lastScan().ok, true);
+});

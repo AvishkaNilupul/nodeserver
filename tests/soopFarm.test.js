@@ -296,6 +296,7 @@ test("joined but not credited backs off, says so, and frees the socket", async (
   }, "back-off state");
   assert.equal(s.view.credited, false);
   assert.match(s.view.detail, /not counting minutes/);
+  assert.doesNotMatch(s.view.detail, /carries no drops/, "the stream itself says it carries drops: the cause is elsewhere");
   assert.equal(bridgesOf("acc1").length, 0, "socket released while backing off");
   const state = await farm.stateView();
   assert.ok(state.alerts.some((x) => x.kind === "not-crediting" && x.accountId === "acc1"));
@@ -450,6 +451,7 @@ test("an everything bot still farms a campaign SOOP dropped from its list, but o
   assert.equal(world.bridges().length, 0, "nothing on air yet");
 
   world.setLive(gone.dropsIdx, true); // the broadcast starts; the campaign stays delisted
+  world.setLive(over.dropsIdx, true); // so does the ended one's: only its window keeps it out
   world.setOnAir("df1", true);
   world.setOnAir("old1", true);
   require("../utils/soopWorker").channelMemo.clear();
@@ -460,6 +462,242 @@ test("an everything bot still farms a campaign SOOP dropped from its list, but o
   await sleep(120);
   assert.ok(!world.bridges().some((b) => b.channel === "old1"), "a delisted campaign past its end is never tried");
   assert.equal(world.calls().openBridge, 1);
+});
+
+// 2026-10-13: with no Overwatch broadcast on, 29 accounts joined a listed
+// co-streamer's ranked games 725 times in six hours and were counted nothing.
+test("a delisted campaign is not joined on a co-streamer's own stream, only on the broadcast that carries its drops", async () => {
+  await fresh({ timings: { ...FAST, parkCooldownMs: 60000 } });
+  const { channelMemo } = require("../utils/soopWorker");
+  channelMemo.clear();
+  // The co-streamer comes first in the list, so the old "first channel on air" rule would take it.
+  const camp = world.addCampaign({ gameNo: "12", live: false, itemList: [2], broadIdList: ["costream", "official"] });
+  await addAccount("acc1");
+  await farm.campaignsView({ force: true }); // remembered while SOOP still lists it
+  world.delist(camp.dropsIdx);
+  world.setOnAir("costream", true); // on air with a stream of their own; nothing is being broadcast
+  await sleep(30); // let the 15 ms campaign cache of this test expire
+  await farm.createBot({ mode: "auto", codesOnly: true, priorityGameNo: "12", accountIds: ["acc1"] });
+
+  await until(() => !farm.sessions.has("acc1") && farm.sleep.has("acc1") && farm.sleep.get("acc1").coolUntil > Date.now(), "looked, found nothing to join, went to sleep");
+  let state = await farm.stateView();
+  assert.equal(state.accounts[0].session.state, "sleeping");
+  assert.match(state.accounts[0].session.detail, /no channel is carrying its drops/);
+  for (let i = 0; i < 4; i++) {
+    world.advance(1);
+    await sleep(35);
+  }
+  assert.equal(world.calls().openBridge, 0, "no socket is opened on a stream that carries no drops");
+  state = await farm.stateView();
+  assert.ok(!state.alerts.some((x) => x.kind === "not-crediting"), "and nothing is reported as not earning");
+
+  // The broadcast starts on the official channel; the co-streamer plays on,
+  // still with a stream of their own (no drops, nothing counted).
+  world.setDrops("costream", false);
+  world.setLive(camp.dropsIdx, true);
+  world.setOnAir("official", true);
+  channelMemo.clear(); // (the "nobody to join" note lasts 90 s)
+  farm.sleep.forEach((z) => { z.coolUntil = 0; });
+  await sleep(30);
+  await farm._reconcile({ force: true });
+  const joined = new Set();
+  const note = () => world.bridges().forEach((b) => joined.add(b.channel));
+  await watch(() => (note(), (farm.progress.get("acc1") || {})[camp.dropsIdx]?.done), "farmed on the official broadcast");
+  assert.deepEqual([...joined], ["official"]);
+  assert.equal(world.calls().openBridge, 1, "one socket in all, on the stream that carries the drops");
+});
+
+// What production relies on between broadcasts: SOOP lists the campaign, says
+// it is not live, and that is the end of it — whoever of its channels is on air.
+test("a listed campaign that is not live is left alone while one of its channels streams something else", async () => {
+  await fresh();
+  const camp = world.addCampaign({ gameNo: "12", live: false, itemList: [60], broadIdList: ["official", "costream"] });
+  world.setDrops("costream", false);
+  world.setOnAir("costream", true);
+  await addAccount("acc1");
+  await farm.campaignsView({ force: true });
+  await farm.createBot({ mode: "auto", codesOnly: true, priorityGameNo: "12", accountIds: ["acc1"] });
+  await sleep(120);
+  for (let i = 0; i < 3; i++) await farm._reconcile({ force: true });
+  await sleep(60);
+
+  assert.equal(farm.sessions.size, 0, "no session is started for it");
+  assert.equal(world.calls().openBridge, 0);
+  assert.equal(world.calls().liveInfo, 0, "its channels are not even looked at");
+  const acc = (await farm.stateView()).accounts[0];
+  assert.equal(acc.session.state, "sleeping");
+  assert.equal(String(acc.session.dropsIdx), String(camp.dropsIdx));
+  assert.match(acc.session.detail, /not live right now/);
+});
+
+test("a flat counter on a stream that says it carries no drops says so", async () => {
+  await fresh({ timings: { ...FAST, backoffMs: [30000] } });
+  // SOOP lists the campaign as live, but the only channel on air has a stream of its own.
+  const camp = world.addCampaign({ gameNo: "12", live: true, itemList: [60], broadIdList: ["official", "costream"] });
+  world.setOnAir("official", false);
+  world.setDrops("costream", false);
+  await addAccount("acc1");
+  await farm.campaignsView({ force: true });
+  const { bot } = await farm.createBot({ mode: "campaign", dropsIdx: camp.dropsIdx, accountIds: ["acc1"] });
+  await until(() => bridgesOf("acc1").length === 1, "joined, on SOOP's word that the campaign is live");
+  assert.equal(bridgesOf("acc1")[0].channel, "costream");
+  for (let i = 0; i < 6; i++) {
+    world.advance(1);
+    await sleep(25);
+  }
+  const s = await until(() => {
+    const x = farm.sessions.get("acc1");
+    return x && x.view.state === "backoff" ? x : null;
+  }, "back-off state");
+  assert.match(s.view.detail, /not counting minutes \(the stream says it carries no drops\) — retrying in 1 min/);
+  await farm.stopBot(bot.id);
+});
+
+// One lost request is enough to not read a list. Before 2026-10-14 that turned
+// every running campaign into a "delisted" one for a minute.
+test("a list that could not be read changes nothing: a running campaign is not taken for delisted", async () => {
+  await fresh();
+  const camp = world.addCampaign({ gameNo: "12", live: false, itemList: [60], broadIdList: ["official", "costream"] });
+  world.addCampaign({ gameNo: "12", filter: "scheduled", itemList: [60], broadIdList: ["later"] }); // the list that does answer
+  world.setOnAir("costream", true);
+  await addAccount("acc1");
+  await farm.campaignsView({ force: true });
+  await farm.createBot({ mode: "auto", codesOnly: true, priorityGameNo: "12", accountIds: ["acc1"] });
+  await sleep(60);
+  const scans = world.calls().campaignsAll;
+
+  world.failList("progress"); // the request for the running list is lost
+  for (let i = 0; i < 3; i++) {
+    await sleep(30); // (the 15 ms campaign cache of this test expires)
+    await farm._reconcile({ force: true });
+  }
+  assert.ok(world.calls().campaignsAll > scans, "the list was asked for again");
+  assert.equal(farm.sessions.size, 0, "no session is started for it");
+  assert.equal(world.calls().liveInfo, 0, "its channels are not looked at");
+  assert.equal(world.calls().openBridge, 0);
+  const view = await farm.campaignsView();
+  assert.equal(view.campaigns.find((c) => c.dropsIdx === camp.dropsIdx).filter, "progress", "still listed, as it was last read");
+  assert.equal(view.scan.ok, false, "and the panel is told the list could not be read");
+  const state = await farm.stateView();
+  assert.ok(state.alerts.some((x) => x.kind === "scan"), "as an alert on the Overview");
+  assert.match(state.accounts[0].session.detail, /not live right now/);
+
+  world.failList("progress", false);
+  await sleep(30);
+  await farm._reconcile({ force: true });
+  assert.equal((await farm.campaignsView()).scan.ok, true);
+});
+
+// Not seen on the real site, and the reason the rule has an exception: if a
+// stream SOOP counts ever said "no drops", the farm must still be on it.
+test("SOOP calling a campaign live outweighs a stream's own flag: it is joined, earns, and is rejoined while the list cannot be read", async () => {
+  await fresh();
+  const camp = world.addCampaign({ gameNo: "12", live: true, itemList: [500], broadIdList: ["official"] });
+  world.addCampaign({ gameNo: "12", filter: "scheduled", itemList: [60], broadIdList: ["later"] }); // the list that does answer
+  world.setDropsFlag("official", 0); // counted by SOOP, but its player info says it carries no drops
+  await addAccount("acc1");
+  await farm.campaignsView({ force: true });
+  await farm.createBot({ mode: "auto", codesOnly: true, priorityGameNo: "12", accountIds: ["acc1"] });
+  const minutes = () => (farm.progress.get("acc1") || {})[camp.dropsIdx]?.minutes || 0;
+  await watch(() => minutes() >= 2, "joined and earning although the stream says no drops");
+  assert.equal(world.calls().openBridge, 1);
+
+  // The running list stops answering and the broadcast restarts (every socket
+  // closes): the campaign is still what SOOP last said it was — live.
+  world.failList("progress");
+  await sleep(30); // (the 15 ms campaign cache of this test expires)
+  world.setOnAir("official", false);
+  world.setOnAir("official", true);
+  await until(() => world.calls().openBridge === 2, "rejoined while the list could not be read");
+  const view = await farm.campaignsView();
+  assert.equal(view.scan.ok, false, "the list really was unreadable at the time");
+  assert.equal(view.campaigns.find((c) => c.dropsIdx === camp.dropsIdx).filter, "progress");
+  const had = minutes();
+  await watch(() => minutes() >= had + 3, "and earning again");
+});
+
+test("a list one login could not read whole is asked for again through the next login", async () => {
+  await fresh();
+  const camp = world.addCampaign({ gameNo: "12", live: false, itemList: [60], broadIdList: ["official"] });
+  world.addCampaign({ gameNo: "12", filter: "scheduled", itemList: [60], broadIdList: ["later"] });
+  await addAccount("acc1");
+  await addAccount("acc2");
+  await farm.campaignsView({ force: true });
+  const asked = world.calls().campaignsAll;
+
+  world.failList("progress", 1); // one lost request
+  let view = await farm.campaignsView({ force: true });
+  assert.equal(world.calls().campaignsAll, asked + 2, "the second login was asked");
+  assert.equal(view.scan.ok, true, "and what the farm holds is a whole read");
+  assert.equal(view.campaigns.find((c) => c.dropsIdx === camp.dropsIdx).filter, "progress");
+
+  world.failList("progress", 2); // lost for both logins: the short read stands, and is said to be short
+  view = await farm.campaignsView({ force: true });
+  assert.equal(world.calls().campaignsAll, asked + 4);
+  assert.equal(view.scan.ok, false);
+  assert.equal(view.campaigns.find((c) => c.dropsIdx === camp.dropsIdx).filter, "progress", "the campaign is kept as last read");
+});
+
+test("of several short reads, one that read the running list is kept", async () => {
+  await fresh();
+  const running = world.addCampaign({ gameNo: "12", live: true, itemList: [60], broadIdList: ["official"] });
+  const later = world.addCampaign({ gameNo: "12", filter: "scheduled", itemList: [60], broadIdList: ["later"] });
+  for (const id of ["acc1", "acc2", "acc3"]) await addAccount(id);
+  await farm.campaignsView({ force: true });
+
+  // Three logins, three short reads: only the second one got the running list.
+  const short = (row, unread) => Object.assign([{ ...row }], { unread: [unread] });
+  const answers = [short(later, "progress"), short({ ...running, live: false }, "scheduled"), short(later, "progress")];
+  let asked = 0;
+  farm.setClientFactory((cookies, o) => ({ ...world.clientFor(cookies, o), campaignsAll: async () => answers[asked++ % answers.length] }));
+  farm.clients.clear();
+  const view = await farm.campaignsView({ force: true });
+  assert.equal(asked, 3, "every login was tried");
+  assert.match(farm.store.lastScan().error, /scheduled list could not be read/);
+  assert.equal(view.campaigns.find((c) => c.dropsIdx === running.dropsIdx).live, false, "the running list's news was taken");
+  assert.equal(view.campaigns.find((c) => c.dropsIdx === later.dropsIdx).filter, "scheduled", "and the scheduled campaign kept as last read");
+});
+
+// Found by review, older than the incident: `idle` counted every retry of a
+// session's life, so the second dropped socket — however many counted hours
+// after the first — ended the session and cost the 3-minute cool-down.
+test("a session that is being counted is not ended by its second dropped socket", async () => {
+  await fresh({ timings: { ...FAST, parkCooldownMs: 60000 } });
+  const camp = world.addCampaign({ gameNo: "12", live: true, itemList: [500], broadIdList: ["official"] });
+  await addAccount("acc1");
+  await farm.campaignsView({ force: true });
+  await farm.createBot({ mode: "auto", codesOnly: true, priorityGameNo: "12", accountIds: ["acc1"] });
+  const minutes = () => (farm.progress.get("acc1") || {})[camp.dropsIdx]?.minutes || 0;
+  let had = 0;
+  for (const sockets of [2, 3, 4]) {
+    await watch(() => minutes() >= had + 2, "being counted");
+    had = minutes();
+    world.setOnAir("official", false); // the broadcast restarts: SOOP closes every socket
+    world.setOnAir("official", true);
+    await until(() => world.calls().openBridge === sockets, `rejoined after drop ${sockets - 1}`);
+    assert.ok(farm.sessions.has("acc1") && !farm.sleep.has("acc1"), "the session went on; the account was not put to sleep");
+  }
+});
+
+test("a counter that went unreadable after counted minutes costs one look, not the session", async () => {
+  await fresh({ timings: { ...FAST, idleMs: 400, parkCooldownMs: 60000 } });
+  const camp = world.addCampaign({ gameNo: "12", live: true, itemList: [500], broadIdList: ["official"] });
+  await addAccount("acc1");
+  await farm.campaignsView({ force: true });
+  await farm.createBot({ mode: "auto", codesOnly: true, priorityGameNo: "12", accountIds: ["acc1"] });
+  const minutes = () => (farm.progress.get("acc1") || {})[camp.dropsIdx]?.minutes || 0;
+  await watch(() => minutes() >= 2, "being counted");
+  world.setOnAir("official", false); // one dropped socket earlier in the session's life
+  world.setOnAir("official", true);
+  await until(() => world.calls().openBridge === 2, "rejoined after the drop");
+  const had = minutes();
+  await watch(() => minutes() >= had + 2, "being counted again");
+
+  world.setEgress({ down: true }); // the tunnel blips: the counter cannot be read
+  await until(() => /Egress problem/.test(farm.sessions.get("acc1")?.view.detail || ""), "left the socket on the unreadable counter");
+  world.setEgress({ down: false }); // …and is back before the next look
+  await until(() => world.calls().openBridge === 3, "looked again and rejoined");
+  assert.ok(farm.sessions.has("acc1") && !farm.sleep.has("acc1"), "the session went on; the account was not put to sleep");
 });
 
 test("a campaign SOOP flags live before its start time is not farmed until the window opens", async () => {

@@ -397,14 +397,22 @@ class SoopFarm {
     const start = this.scanCursor++ % eligible.length;
     const order = [...eligible.slice(start), ...eligible.slice(0, start)].slice(0, 3);
     let lastErr;
+    let partial = null;
     for (const id of order) {
       try {
-        return await (await this.ensureClient(id)).campaignsAll();
+        const rows = await (await this.ensureClient(id)).campaignsAll();
+        // A list one login could not read whole is asked for again through the
+        // next: a lost request is not SOOP's state, and the next scan is a
+        // minute away. Of the short results, one that read the running list
+        // is kept over one that did not.
+        if (!rows.unread || !rows.unread.length) return rows;
+        if (!partial || (partial.unread.includes("progress") && !rows.unread.includes("progress"))) partial = rows;
       } catch (e) {
         lastErr = e;
         if (isAuthError(e)) this.health.check(id).catch(() => {});
       }
     }
+    if (partial) return partial;
     throw lastErr;
   }
 

@@ -5,7 +5,12 @@
 // farm: watch time is credited only through a joined bridge on an on-air channel
 // of a LIVE campaign, from a country SOOP pays in, when the claimed country is
 // the one the connection is seen from (§4). A delisted campaign leaves the
-// event list but its missions keep counting, as on the real site.
+// event list but its missions keep counting (whether the real site ever does
+// that mid-broadcast is not known; the farm's old list reader made it look so).
+// A stream says whether it carries drops (`IS_DROPS` in its player info), and a
+// listed channel can be on air with a broadcast of its own that carries none
+// (world.setDrops). world.setDropsFlag makes a stream SAY something other than
+// the truth, and world.failList makes one of the two campaign lists unreadable.
 const crypto = require("crypto");
 const { SoopError } = require("../../utils/soop/errors");
 const { creditStatus } = require("../../utils/soop/geo");
@@ -32,6 +37,7 @@ function createFakeSoop({ now = Date.now, rewards = false } = {}) {
   const tickets = new Map(); // AuthTicket value -> id
   const campaigns = new Map(); // dropsIdx -> raw row (insertion order = list order)
   const delisted = new Set();
+  const unreadable = new Map(); // "progress" / "scheduled" -> how many more reads of it get no answer
   const channels = new Map(); // id -> { id, nick, onAir, cateNo, bno }
   const open = []; // bridges that are not closed
   const egress = { country: null, down: false };
@@ -47,7 +53,7 @@ function createFakeSoop({ now = Date.now, rewards = false } = {}) {
     const key = String(id);
     let ch = channels.get(key);
     if (!ch) {
-      ch = { id: key, nick: key, onAir: false, cateNo: null, bno: null };
+      ch = { id: key, nick: key, onAir: false, cateNo: null, bno: null, dropsOff: false, says: null };
       channels.set(key, ch);
     }
     if (patch.nick) ch.nick = String(patch.nick);
@@ -72,6 +78,10 @@ function createFakeSoop({ now = Date.now, rewards = false } = {}) {
     row.broadIdList.length
       ? row.broadIdList.some((x) => x.userId === ch.id)
       : Boolean(row.cateNo) && ch.cateNo === row.cateNo;
+
+  // What the stream's player info says, and what `advance` credits by.
+  const carries = (ch) =>
+    !ch.dropsOff && [...campaigns.values()].some((row) => row.live && covers(row, ch));
 
   const world = {
     addAccount({ id, nick, country = "LK", loggedIn = true } = {}) {
@@ -163,6 +173,27 @@ function createFakeSoop({ now = Date.now, rewards = false } = {}) {
       }
     },
 
+    // `false`: whenever the channel is on air it is with a stream of its own —
+    // its player info says IS_DROPS 0 and nobody watching it is credited.
+    setDrops(channelId, on = true) {
+      channel(channelId).dropsOff = on === false;
+    },
+
+    // What the stream's player info SAYS (1 / 0), whatever is really counted;
+    // null goes back to the truth. Never observed on the real site: it is here
+    // so the tests can show the farm does not depend on the flag being right.
+    setDropsFlag(channelId, value = null) {
+      channel(channelId).says = value;
+    },
+
+    // One of SOOP's two campaign lists ("progress" / "scheduled") stops
+    // answering — for good, or for the next `on` reads when a number is given —
+    // or with `false` answers again: a lost request, not a delisting.
+    failList(filter, on = true) {
+      if (on === false || on === 0) unreadable.delete(filter);
+      else unreadable.set(filter, on === true ? Infinity : Number(on));
+    },
+
     delist(dropsIdx) {
       const key = String(dropsIdx);
       if (campaigns.has(key)) delisted.add(key);
@@ -248,7 +279,7 @@ function createFakeSoop({ now = Date.now, rewards = false } = {}) {
       for (const b of open) {
         const acct = accounts.get(b.id);
         const ch = channels.get(b.channel);
-        if (!b.state.joined || !acct || !acct.loggedIn || !ch || !ch.onAir) continue;
+        if (!b.state.joined || !acct || !acct.loggedIn || !ch || !ch.onAir || ch.dropsOff) continue;
         const country = seenCountry(acct);
         if (b.claimedCountry !== country || creditStatus(country) !== "yes") continue;
         for (const row of campaigns.values()) {
@@ -304,6 +335,13 @@ function createFakeSoop({ now = Date.now, rewards = false } = {}) {
         [...campaigns.values()]
           .filter((r) => r.filter === filter && !delisted.has(r.dropsIdx))
           .map((r) => ({ ...clone(r), filter }));
+      // Does this read of the list get no answer? (Counts a limited outage down.)
+      const lost = (filter) => {
+        const left = unreadable.get(filter);
+        if (!left) return false;
+        if (left !== Infinity) unreadable.set(filter, left - 1);
+        return true;
+      };
 
       async function privateInfo() {
         enter("privateInfo", false);
@@ -374,11 +412,21 @@ function createFakeSoop({ now = Date.now, rewards = false } = {}) {
         },
         async campaigns(filter = "progress") {
           enter("campaigns", false);
+          if (lost(filter)) throw new SoopError(`fake SOOP: the ${filter} list did not answer`, { code: "TIMEOUT" });
           return listed(filter);
         },
+        // Like the real client: a list that did not answer is named in `unread`,
+        // and with nothing at all to hand over the failure is thrown.
         async campaignsAll() {
           enter("campaignsAll", false);
-          return [...listed("progress"), ...listed("scheduled")];
+          const unread = ["progress", "scheduled"].filter(lost);
+          const rows = ["progress", "scheduled"].filter((f) => !unread.includes(f)).flatMap(listed);
+          if (unread.length && !rows.length) throw new SoopError(`fake SOOP: the ${unread[0]} list did not answer`, { code: "TIMEOUT" });
+          if (unread.length) {
+            rows.unread = unread;
+            rows.unreadWhy = unread.map((f) => `${f}: fake SOOP did not answer`).join("; ");
+          }
+          return rows;
         },
         async liveInfo(bj) {
           enter("liveInfo", false);
@@ -388,6 +436,7 @@ function createFakeSoop({ now = Date.now, rewards = false } = {}) {
           return {
             ...{ RESULT: 1, BJID: ch.id, BJNICK: ch.nick, BNO: ch.bno },
             ...{ CATE: ch.cateNo || "00130000", FTK: `fake-ftk-${ch.id}`, ...gates },
+            IS_DROPS: ch.says ?? (carries(ch) ? 1 : 0),
           };
         },
         async categoryChannels(cateNo, limit = 5) {

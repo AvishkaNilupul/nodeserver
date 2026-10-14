@@ -214,8 +214,18 @@ client = {
   rest use `https://play.sooplive.com`.
 - A reply with `result !== 1`: `result === -1` or a message matching `LOGIN_RE`
   → throw `AUTH`; anything else → `API` with SOOP's message.
-- `campaigns()` keeps v1's request shape (`{ filter, gameIdx: "all", prePageNo: p, pageNo: p }`,
-  one event per page, stop on an empty page), page cap 80.
+- `campaigns()` pages the list as the site does (§19):
+  `{ filter, gameIdx: "all", pageNo: p, prePageNo: 200 }` until SOOP's
+  `totalCount` campaigns are read, or the first empty page when a reply has no
+  count; page cap 10. `prePageNo` is the page SIZE. A short read (§19) →
+  throw `API` ("came back short"). (v1's shape, kept until this was found on
+  2026-10-13, sent the page number in both fields and read about half the
+  list.)
+- `campaignsAll()` returns the rows both lists handed over. A list that threw,
+  or came back short, is named in `rows.unread` (an array of filter names on
+  the returned array; absent when both were read whole), with the reasons in
+  `rows.unreadWhy` (one string). The rows a short list did hand over are in
+  the result. Nothing handed over and a list that threw → rethrow that error.
 - `openBridge`: v1 handshake, except the JOINLOG fields `geo_cc`, `join_cc`,
   `geo_rc` come from `geo.get(() => privateInfo().country)`. If that throws, the
   socket is closed, `state.error = "geo"` and `onEvent("error:geo")` fires — it
@@ -413,6 +423,9 @@ createFakeSoop({ now = Date.now } = {}) -> world
 world.addAccount({ id, nick, country = "LK", loggedIn = true }) -> cookies   // [{ name: "AuthTicket", value }]
 world.addCampaign(partialRaw) -> raw       // sensible defaults; fields as in _soop-probe/events.json
 world.setLive(dropsIdx, bool), world.setOnAir(channelId, bool), world.delist(dropsIdx)
+world.setDrops(channelId, bool)            // false: whenever it is on air it is with a stream of its own — IS_DROPS 0, nothing credited (§19)
+world.setDropsFlag(channelId, 1|0|null)    // what its player info SAYS, whatever is counted; null = the truth again
+world.failList("progress"|"scheduled", true|false|n) // that list stops answering (for good, or for the next n reads): campaignsAll() names it in `unread`
 world.logout(id), world.setEgress({ country, down })
 world.addInventory(id, rawItem, division)
 world.advance(minutes)                     // credits `minutes` to every account holding a joined bridge on an
@@ -836,3 +849,72 @@ and no other.
   its first claim), `noCode` (claimed, no code to show), and `authOnClaim` /
   `refuseOnClaim` / `httpOnClaim` ("log in", a refusal, or an unreadable reply
   for that reward only).
+
+## 19. The whole list is read, and only a stream that carries drops is joined (added 2026-10-14)
+
+From the 2026-10-13 incident (docs/SOOP-FARM.md, "The campaign list was read
+wrongly (found 2026-10-13)"). The aim behind all of it: **"not in the list"
+should only ever mean that SOOP does not list it** — the store marks such a
+campaign `unlisted`, and the farm acts on that. It holds except in the two
+cases named under "the store" below.
+
+- **The client reads a list whole or says it did not.**
+  `get_drops_event_list.php` takes `pageNo` and `prePageNo`, and `prePageNo`
+  is the page size: the reply holds `prePageNo` rows from row
+  `(pageNo - 1) * prePageNo`, plus `totalCount` (a string). The client asks
+  for pages of 200 (what the site's own full-list view sends) until
+  `totalCount` distinct campaigns are read, or an empty page. The read is
+  **short** when fewer ROWS came than `totalCount`, when the page cap (10) was
+  reached without `totalCount` campaigns, or when a reply's `data` is not an
+  array (an empty list is `data: []` with `totalCount: "0"`). The same
+  campaign listed twice is not short. A row that is not an object is passed
+  over.
+  - `client.campaigns(filter)` → the rows, or throws `API` on a short read.
+  - `client.campaignsAll()` → every row handed over; a list that threw or was
+    short is named in `rows.unread`, with `rows.unreadWhy`.
+- **`_scan()` in `utils/soopFarm.js`** asks the next login (three at most, as
+  after a thrown error) when a result has `unread`; a whole result is returned
+  at once, else the first short one — or a later one that read "progress" when
+  the first did not.
+- **The store does not demote what it could not look at.** In `remember()`,
+  rows handed over are taken fresh, whatever `unread` says. Then, for each
+  list named in `unread`, a campaign whose last record carries that `filter`
+  and which was in the scan before is carried over unchanged — its record
+  (`live`, `seenAt`, `lastLiveAt`) is not written — while
+  `now - seenAt < staleOkMs` (10 min, counted from when SOOP last listed it).
+  After a partly read scan `lastScan()` is `{ ok: false, error, count }`,
+  which the panel shows as the "campaign list could not be refreshed" alert;
+  the scan is cached for `ttlMs` like any other; one log line is written when
+  the set of unread lists changes. Not covered: the first scan after a
+  restart (nothing is in memory to carry), and a list unread for longer than
+  the tolerance (a wholly failed scan after a partly read one serves the
+  carried campaigns for its own `staleOkMs`, so about twice that at most).
+- **`pickChannel(client, camp, now)` reads each candidate's player info and
+  looks at `IS_DROPS`** (`carriesDrops(info)` → `true` for 1 / "1" / true /
+  "Y", `false` for 0 / "0" / false / "N", `null` for anything else or no field):
+  1. the first candidate on air that carries drops, or does not say, is joined;
+  2. a candidate on air that says it carries none is joined only when nothing
+     better is on air AND SOOP itself lists the campaign as live
+     (`camp.live === true`, `camp.filter !== "unlisted"`) — the first such
+     candidate in the order, i.e. the stream that was joined before this rule;
+  3. otherwise nothing is joined and the "nobody to join" note is kept for
+     90 s. A note reached by passing over a stream under rule 2's "no" does
+     not bind a caller for whom SOOP lists the campaign as live.
+  A campaign that left SOOP's list is therefore never joined on a stream that
+  says it has no drops. The memo of the last joined channel is tried first but
+  does not outrank rule 1. At most 12 candidates are looked at, as before.
+- **A stretch that was counted is not an idle look.** `farm()` reports
+  `everCredited` when it leaves on a closed socket or an unreadable counter,
+  and the session's idle count (`parkAfterIdle`) is reset by it, as it is by
+  done / not-crediting / switch.
+- Sentences: a delisted campaign with nothing to join waits with "Not on SOOP's
+  list right now, and no channel is carrying its drops"; a flat counter on a
+  stream that said it carries none reads "Joined, but SOOP is not counting
+  minutes (the stream says it carries no drops) — retrying in N min".
+- Fake SOOP: `liveInfo` carries `IS_DROPS` (1 while a live campaign covers the
+  on-air channel). `world.setDrops(channelId, false)` makes a channel's stream
+  one of its own (IS_DROPS 0, credited nothing) — `setOnAir` is still what
+  puts it on air. `world.setDropsFlag` separates what a stream says from what
+  is counted, and `world.failList` makes a list unreadable; `campaignsAll()`
+  then answers as the real client does (`unread`, or a throw when nothing at
+  all could be handed over).

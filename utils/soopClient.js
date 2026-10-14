@@ -22,7 +22,14 @@ const UA =
 const DROPS = "https://drops.sooplive.com";
 const PLAY = "https://play.sooplive.com";
 const BRIDGE_URL = "wss://bridge.sooplive.com/Websocket";
-const CAMPAIGN_PAGE_CAP = 80;
+// `prePageNo` is the page SIZE: the site itself sends 20 or 200 in it for this
+// list. Found 2026-10-13: the reader had always sent the page number in both
+// fields ("page p of p rows"), which SOOP answers with rows 0, 2-3, 6-8, 12-15 …
+// and nothing in between — 6 of its 10 running campaigns that day. A campaign
+// in a skipped slot looked delisted, and came and went as the list's order
+// changed.
+const CAMPAIGN_PAGE_SIZE = 200;
+const CAMPAIGN_PAGE_CAP = 10;
 // 20 rows a page. v1 stopped at 5 pages, which silently truncated a division
 // above 100 items; the loop still ends at SOOP's own totalCount.
 const INVENTORY_PAGE_CAP = 25;
@@ -194,34 +201,79 @@ function makeClient(cookies, {
     return (ok(j, "mission list").data || []).map(normalizeMission);
   }
 
-  // One event per page; the list ends at the first empty page.
-  async function campaigns(filter = "progress") {
-    const seen = [];
-    for (let p = 1; p <= CAMPAIGN_PAGE_CAP; p++) {
-      const body = { filter, gameIdx: "all", prePageNo: p, pageNo: p };
+  // One list, paged as the site pages it, as far as it could be read. It ends
+  // at SOOP's own totalCount, or at the first empty page when a reply carries
+  // none. `short` says the rows are not the whole list: fewer rows than SOOP
+  // says there are, page after page up to the cap without the campaigns it
+  // counts, or a reply with no list in it (an empty list is an empty array,
+  // with a count of 0). The same campaign listed twice is not short: every
+  // row was handed over.
+  async function readList(filter) {
+    const seen = new Map();
+    let total = 0;
+    let read = 0; // rows handed over; `seen` is the campaigns among them
+    let listed = true;
+    let p = 1;
+    for (; p <= CAMPAIGN_PAGE_CAP; p++) {
+      const body = { filter, gameIdx: "all", pageNo: p, prePageNo: CAMPAIGN_PAGE_SIZE };
       const j = await postJson("/api/get_drops_event_list.php", "/", body);
-      const rows = ok(j, "campaign list").data || [];
-      if (!rows.length) break;
-      seen.push(...rows);
+      const data = ok(j, "campaign list").data;
+      total = Number(j.totalCount) || total;
+      if (!Array.isArray(data)) {
+        listed = false;
+        break;
+      }
+      read += data.length;
+      for (const e of data) {
+        if (e && typeof e === "object") seen.set(e.dropsIdx, { ...e, filter: e.filter || filter });
+      }
+      if (!data.length || (total && seen.size >= total)) break;
     }
-    const tagged = seen.map((e) => [e.dropsIdx, { ...e, filter: e.filter || filter }]);
-    return [...new Map(tagged).values()];
+    const short = !listed || read < total || (seen.size < total && p > CAMPAIGN_PAGE_CAP);
+    return { rows: [...seen.values()], short, total };
+  }
+
+  // The whole list or an error, never a shorter list: what is missing from the
+  // list is taken for delisted.
+  async function campaigns(filter = "progress") {
+    const { rows, short, total } = await readList(filter);
+    if (short) {
+      throw new SoopError(`campaign list came back short: ${rows.length} of ${total || "?"}`, { code: "API" });
+    }
+    return rows;
   }
 
   // progress = running/ended-listing, scheduled = announced but not started.
   // One list failing does not hide the other; both failing rethrows the first.
+  // A list that was not read whole is named in `unread` on the result (and
+  // why, in `unreadWhy`), so that "not among these rows" is never taken for
+  // "not on SOOP's list". The rows it did hand over are still in the result.
   async function campaignsAll() {
     const out = [];
+    const unread = [];
+    const why = [];
     let firstErr = null;
     for (const f of ["progress", "scheduled"]) {
       try {
-        out.push(...(await campaigns(f)));
+        const { rows, short, total } = await readList(f);
+        out.push(...rows);
+        if (short) {
+          unread.push(f);
+          why.push(`${f}: ${rows.length} of ${total || "?"} campaigns handed over`);
+        }
       } catch (e) {
+        unread.push(f);
+        why.push(`${f}: ${(e && e.message) || "no answer"}`);
         if (!firstErr) firstErr = e;
       }
     }
     if (!out.length && firstErr) throw firstErr;
-    return [...new Map(out.map((e) => [e.dropsIdx, e])).values()];
+    const rows = [...new Map(out.map((e) => [e.dropsIdx, e])).values()];
+    if (unread.length) {
+      rows.unread = unread;
+      rows.unreadWhy = why.join("; ");
+    }
+    return rows;
   }
 
   async function liveInfo(bj, bno = "") {

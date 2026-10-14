@@ -1,9 +1,10 @@
 // SOOP farm — campaign store (docs/SOOP-FARM-CONTRACT.md §8).
 //
 // The campaign list is the same for every account, so the whole farm shares
-// one cached scan. SOOP also drops an event from its list mid-broadcast, so
-// every campaign ever seen is remembered (memory + the SoopCampaign
-// collection) and can still be looked up by id as filter "unlisted".
+// one cached scan. Every campaign ever seen is remembered (memory + the
+// SoopCampaign collection) and can still be looked up by id as filter
+// "unlisted" once SOOP stops listing it. "Stopped listing" must be SOOP's
+// doing: a list the scan could not read says nothing about its campaigns.
 //
 // What is stored is SOOP's raw text and raw lists, never the normalised shape:
 // a Campaign is rebuilt through normalize.js on demand, so a glossary change,
@@ -41,6 +42,7 @@ function createCampaignStore({
   let inflight = null;
   let saving = Promise.resolve(); // tail of the campaign write queue
   let scanInfo = { at: null, ok: false, error: null, count: 0 };
+  let unreadNote = ""; // which lists the last scan could not read whole, as logged
 
   const opts = (filter) => ({ overrides: translations, gameOverrides: gameNames, filter });
 
@@ -149,20 +151,37 @@ function createCampaignStore({
     const keep = [];
     const list = [];
     const ops = [];
-    for (const raw of raws) {
-      if (!raw || str(raw.dropsIdx) === "") continue;
+    // `fresh`: SOOP listed it in this scan. Otherwise it is carried over from
+    // the scan before, and its record stands exactly as it was last read.
+    const take = (raw, fresh) => {
+      if (!raw || str(raw.dropsIdx) === "") return;
       const c = safely("listed row", () => normalizeCampaign(raw, opts()));
-      if (!c || !c.dropsIdx || seen.has(c.dropsIdx)) continue;
+      if (!c || !c.dropsIdx || seen.has(c.dropsIdx)) return;
       seen.add(c.dropsIdx);
+      keep.push(raw);
+      list.push(c);
+      if (!fresh) return;
       const rec = toRecord(raw, c, at, known.get(c.dropsIdx));
       known.set(c.dropsIdx, rec);
       scanned.add(c.dropsIdx);
-      keep.push(raw);
-      list.push(c);
       // `lastLiveAt` is only written while live, so the last time survives.
       const { dropsIdx, lastLiveAt, ...set } = rec;
       if (rec.live) set.lastLiveAt = lastLiveAt;
       ops.push({ updateOne: { filter: { dropsIdx }, update: { $set: set }, upsert: true } });
+    };
+    for (const raw of raws) take(raw, true);
+    // A list the scan could not read whole (`unread`, named by the client)
+    // says nothing about the campaigns it did not hand over. Those it held
+    // when it was last read stay listed as they were — for as long as a wholly
+    // failed scan is tolerated, counted from when SOOP last really listed
+    // them. Without this one lost request turned every running campaign into a
+    // "delisted" one. Rows the list did hand over were taken fresh above.
+    const unread = new Set(arr(raws.unread).map(str));
+    if (unread.size) {
+      for (const raw of good.raws) {
+        const rec = raw ? known.get(str(raw.dropsIdx)) : null;
+        if (rec && unread.has(rec.filter) && at - ms(rec.seenAt) < staleOkMs) take(raw, false);
+      }
     }
     // v1 never cleared `live`: a campaign that left the list stayed "live" for
     // good. SOOP not reporting it at all is the same as reporting it not live.
@@ -206,7 +225,21 @@ function createCampaignStore({
     }
     const at = now();
     const list = remember(raws, at);
-    scanInfo = { at: new Date(at), ok: true, error: null, count: list.length };
+    const unread = arr(raws.unread).map(str).join(" and ");
+    const why = str(raws.unreadWhy).slice(0, 300);
+    // One line when a list stops being read whole and one when it is again,
+    // not one a scan: nothing else records why a campaign was carried over.
+    if (unread !== unreadNote) {
+      unreadNote = unread;
+      console.error(
+        unread
+          ? `[soop] campaign store: the ${unread} list was not read whole${why ? ` — ${why}` : ""}`
+          : "[soop] campaign store: both lists read whole again",
+      );
+    }
+    scanInfo = unread
+      ? { at: new Date(at), ok: false, error: `SOOP's ${unread} list could not be read${why ? ` (${why})` : ""}`, count: list.length }
+      : { at: new Date(at), ok: true, error: null, count: list.length };
     return list;
   }
 

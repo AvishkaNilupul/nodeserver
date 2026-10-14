@@ -128,6 +128,56 @@ test("advance credits a joined bridge on an on-air channel of a live campaign", 
   assert.deepEqual(await client.missions(), [{ dropsIdx: "100", minutes: 7, items }]);
 });
 
+test("a stream says whether it carries drops, and one that carries none credits nothing", async () => {
+  const { world, client } = setup();
+  assert.equal((await client.liveInfo("owcs")).IS_DROPS, 1, "on air on a live campaign");
+  world.setLive("100", false);
+  assert.equal((await client.liveInfo("owcs")).IS_DROPS, 0, "on air, but the campaign is not being broadcast");
+  world.setLive("100", true);
+
+  // A listed co-streamer goes on air with a stream of their own.
+  world.addCampaign({ dropsIdx: "101", live: true, broadIdList: ["owcs", "costream"], itemList: [15] });
+  world.setDrops("costream", false);
+  world.setOnAir("costream", true);
+  const info = await client.liveInfo("costream");
+  assert.equal(info.RESULT, 1, "it is on air");
+  assert.equal(info.IS_DROPS, 0);
+  const bridge = await join(client, "costream");
+  assert.equal(bridge.joined, true, "and can be joined");
+  assert.deepEqual(world.advance(10), [], "but nobody watching it is credited");
+  assert.equal(await minutes(client, "101"), 0);
+
+  world.setDrops("costream", true); // they switch to the event broadcast
+  assert.equal((await client.liveInfo("costream")).IS_DROPS, 1);
+  assert.deepEqual(world.advance(2), [{ id: "acc1", dropsIdx: "101", minutes: 2 }]);
+});
+
+test("a campaign list that does not answer is named, like the real client names it", async () => {
+  const { world, client } = setup();
+  world.addCampaign({ dropsIdx: "200", filter: "scheduled", broadIdList: ["later"] });
+  const ids = (rows) => rows.map((r) => r.dropsIdx);
+  assert.equal((await client.campaignsAll()).unread, undefined, "both lists answer");
+
+  world.failList("progress");
+  const rows = await client.campaignsAll();
+  assert.deepEqual(ids(rows), ["200"]);
+  assert.deepEqual(rows.unread, ["progress"]);
+  assert.match(rows.unreadWhy, /^progress: /);
+  await assert.rejects(client.campaigns("progress"), { code: "TIMEOUT" });
+  assert.deepEqual(ids(await client.campaigns("scheduled")), ["200"]);
+  // With nothing at all to hand over the real client throws the failure; so does this one.
+  world.failList("scheduled");
+  await assert.rejects(client.campaignsAll(), { code: "TIMEOUT" });
+  world.failList("scheduled", false);
+  world.failList("progress", false);
+  assert.deepEqual(ids(await client.campaignsAll()), ["100", "200"]);
+
+  world.failList("progress", 2); // the next two reads of it only
+  assert.deepEqual((await client.campaignsAll()).unread, ["progress"]);
+  assert.deepEqual((await client.campaignsAll()).unread, ["progress"]);
+  assert.equal((await client.campaignsAll()).unread, undefined);
+});
+
 test("advance credits nothing without a bridge, off air, or when the campaign is not live", async () => {
   const { world, client } = setup();
   world.advance(10);
