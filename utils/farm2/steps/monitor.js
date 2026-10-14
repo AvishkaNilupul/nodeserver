@@ -169,6 +169,9 @@ async function monitorLane(lane, { jobs, shadow, cache = null }) {
     .lean();
   for (const t of ended) {
     if (report.postEventChecked >= POST_EVENT_MAX_PER_RUN) break;
+    // Nothing to queue for a game kept out of the auto-lister (publishNeeds),
+    // so it is not verified either, and does not use up this run's checks.
+    if (!publishStep.publishNeeds(t).needsPrimary) continue;
     const id = String(t._id);
     const last = postEventChecked.get(id) || 0;
     if (Date.now() - last < POST_EVENT_CHECK_MS) continue;

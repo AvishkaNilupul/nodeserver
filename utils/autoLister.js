@@ -90,6 +90,41 @@ function platiOffReason(af) {
   return "Plati seller account is blocked — nothing is listed there";
 }
 
+// ---- Games the owner keeps out of the auto-lister ----
+// autoFarm.autoListSkipGames, empty by default. A game on it gets nothing NEW
+// from this file: no listing for a freshly farmed bundle, no stacked or event
+// bundle, no extra share on a market it is missing, no stock top-up. What is
+// already listed is left exactly as it is — it sells, expires or is taken down
+// like any other listing.
+//
+// It is the whole auto-lister and not "Gameflip only" on purpose. Gameflip is
+// the market every auto-listing is built on: its listing id is what
+// `task.listing.externalId` holds, that id being set is what "listed" means to
+// the farmer, the lane engine and the Auto-farm tab, and it is where stock that
+// finishes farming later goes (the relist chain, the refill, the post-event
+// release). A bundle listed everywhere BUT Gameflip was built and reviewed on
+// 2026-10-14: nothing could be sold twice, but accounts that completed the
+// bundle after the first publish were never listed anywhere.
+//
+// Exact normalised label, the way reuseOnlyGames matches: a substring test
+// would let "Rust" take "Rustler".
+function autoListSkippedFor(game, af) {
+  const list = af && af.autoListSkipGames;
+  if (!Array.isArray(list) || !list.length) return false;
+  const g = settings.normGameName(game);
+  if (!g) return false;
+  return list.some((x) => settings.normGameName(x) === g);
+}
+
+// What such a task shows where a listing error would be.
+function autoListSkipNote(game) {
+  return (
+    "not listed: " +
+    game +
+    " is kept out of the auto-lister (autoFarm.autoListSkipGames)"
+  );
+}
+
 /* --------------------------- campaign details --------------------------- */
 
 // Normalise a label for placeholder comparison, keeping letters/digits of ANY
@@ -1389,6 +1424,9 @@ async function eldoradoShareMissing(L) {
 // accounts not attached to any active listing. Title/description/price come
 // from the stored Gameflip listing row so all markets stay identical.
 async function retryMissingSecondaries(task) {
+  // A share on a market the task is missing is a NEW listing: none for a game
+  // kept out of the auto-lister.
+  if (autoListSkippedFor(task.game, settings.getAutoFarm())) return null;
   const L = task.listing || {};
   // A Plati share is only "missing" while Plati can take new stock: switched
   // off or blocked, every task would otherwise look incomplete and retry it
@@ -1690,6 +1728,10 @@ async function listingIsLive(marketplace, externalId) {
 async function refillMarkets(task, { perMarketStock = 3 } = {}) {
   const L = task.listing || {};
   if (!L.externalId) return null; // not listed yet — nothing to refill
+  // No top-up for a game kept out of the auto-lister — and above all no
+  // "target raised": running out of spare accounts must not make the farmer
+  // farm MORE of a game the owner has stopped listing.
+  if (autoListSkippedFor(task.game, settings.getAutoFarm())) return null;
   const actions = [];
   const per = Math.max(1, Number(perMarketStock) || 3);
 
@@ -1907,6 +1949,20 @@ async function listActivatedTask(taskId, { dryRun = false } = {}) {
     task.listing = undefined;
     task.wouldList = undefined;
     await task.save();
+  }
+  // The owner keeps this game out of the auto-lister. Before anything is read
+  // from Twitch, picked or reserved: nothing is published on any market and the
+  // accounts stay in stock. The task says why — written once, not on every
+  // sweep (this runs each tick for as long as the task is unlisted).
+  if (autoListSkippedFor(task.game, settings.getAutoFarm())) {
+    const note = autoListSkipNote(task.game);
+    if (!dryRun && !(task.listing && task.listing.error === note)) {
+      task.listing = task.listing || {};
+      task.listing.error = note;
+      task.wouldList = undefined;
+      await task.save();
+    }
+    return { skipped: "game is kept out of the auto-lister", waiting: true };
   }
   const items = await campaignItems(
     task.campaignId,
@@ -2618,6 +2674,11 @@ async function listEventBundle(task, { dryRun = false, plan = null } = {}) {
 }
 
 async function publishEventBundleFor(task, plan, dryRun) {
+  // No new bundle for a game kept out of the auto-lister; this is also the
+  // door the event-bundle sweep comes through.
+  if (autoListSkippedFor(task.game, settings.getAutoFarm())) {
+    return { skipped: "game is kept out of the auto-lister" };
+  }
   // The bundle has to be strictly bigger than what this event ALREADY sells,
   // or it is the same listing published twice.
   //
@@ -2825,6 +2886,11 @@ async function listStackedBundle(taskId, { dryRun = false } = {}) {
   // The solo listing goes first — it anchors the current event's stock split.
   if (!task.listing || !task.listing.externalId) {
     return { skipped: "no solo listing yet" };
+  }
+  // No new bundle for a game kept out of the auto-lister, even when its solo
+  // listing went up before the game joined the list.
+  if (autoListSkippedFor(task.game, settings.getAutoFarm())) {
+    return { skipped: "game is kept out of the auto-lister" };
   }
 
   // Event bundles come first. A game's campaigns are WAVES of an event, and
@@ -3556,6 +3622,9 @@ module.exports = {
   retryMissingSecondaries,
   eldoradoShareMissing,
   isAutoOwned,
+  // The owner's no-auto-listing list (autoFarm.autoListSkipGames).
+  autoListSkippedFor,
+  autoListSkipNote,
   // exported for tests
   dealShares,
   platiTakesNewStock,

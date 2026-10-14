@@ -362,6 +362,14 @@ const AUTO_FARM_DEFAULTS = {
   // share keeps its accounts reserved for a market that does not sell them.
   // Read through g2gMinItemsFor().
   g2gMinItems: {},
+  // Games the auto-lister does not list: ["<game label>", ...]. Empty = every
+  // farmed bundle is listed, as always. A NEW bundle of a game on the list is
+  // published on no market and its accounts stay in stock; whatever is already
+  // listed is left exactly as it is (utils/autoLister.js, autoListSkippedFor).
+  // For games no market buys: a listing there is a shelf slot, a watched
+  // listing and an account baked into it, for nothing. Matched on the exact
+  // normalised label, like reuseOnlyGames.
+  autoListSkipGames: [],
   // Evergreen offers (utils/g2gEvergreen.js): a G2G bundle offer that HAS SOLD
   // and ran out of stock is rewritten in place to the biggest bundle of its
   // game we can still deliver, so its sold count and its rating stay on the

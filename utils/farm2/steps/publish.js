@@ -162,6 +162,16 @@ async function publishSecondaries({ taskId, shadow, lane }) {
 // Which publish work does this task still need? Used by the monitor step to
 // decide what to enqueue, so jobs are only created when there is real work.
 function publishNeeds(task) {
+  // A game the owner keeps out of the auto-lister (autoFarm.autoListSkipGames)
+  // needs no publish work. listActivatedTask would only answer "skipped" to a
+  // primary job on every cycle — a job row and a holdings check each time, for
+  // as long as the task lives — and a secondaries job would publish nothing.
+  if (
+    task &&
+    lister().autoListSkippedFor(task.game, require("../../settings").getAutoFarm())
+  ) {
+    return { needsPrimary: false, needsSecondaries: false };
+  }
   const L = (task && task.listing) || {};
   const needsPrimary = !L.externalId;
   const needsSecondaries =

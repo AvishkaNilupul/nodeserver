@@ -113,6 +113,54 @@ test("a completed, unlisted task with deliverable stock is queued for a post-eve
   assert.equal(await FarmJob.countDocuments({ lane: game, kind: "publish" }), 1);
 });
 
+test("a game kept out of the auto-lister queues no publish work — active or completed", async () => {
+  // autoFarm.autoListSkipGames: listActivatedTask would answer "skipped" to
+  // every primary job, so the lane must not queue one per task per cycle.
+  const settings = require("../utils/settings");
+  const game = "Skipped Lane Game";
+  await AutoFarmTask.deleteMany({ game });
+  await FarmJob.deleteMany({ lane: game });
+  monitorStep._postEventChecked.clear();
+  const active = await AutoFarmTask.create({
+    game,
+    campaignId: "sk-live",
+    campaignName: "Live sk-live",
+    decision: "farm",
+    status: "active",
+    assignedAccounts: ["a1", "a2"],
+    campaignEndAt: new Date(Date.now() + 5 * 864e5),
+  });
+  await completedTask(game, "sk-ended");
+
+  const realAf = settings.getAutoFarm;
+  settings.getAutoFarm = () => ({ ...realAf.call(settings), autoListSkipGames: ["skipped   lane-game"] });
+  try {
+    const r = await monitorStep.monitorLane(liveLane(game), { jobs, shadow: false, cache: new Map() });
+    assert.equal(r.active, 1);
+    assert.equal(r.listable, 1, "still reported as holding deliverable stock");
+    assert.equal(r.queuedPrimary, 0);
+    assert.equal(r.queuedSecondaries, 0);
+    assert.equal(r.postEventChecked, 0, "a completed task of that game is not even verified");
+    assert.equal(r.postEventQueued, 0);
+    assert.equal(await FarmJob.countDocuments({ lane: game }), 0);
+    assert.deepEqual(publishStep.publishNeeds(active.toObject()), { needsPrimary: false, needsSecondaries: false });
+    // a task of that game listed earlier gets no new share either
+    assert.deepEqual(publishStep.publishNeeds({ game, listing: { externalId: "gf1" } }), { needsPrimary: false, needsSecondaries: false });
+    // another game is untouched by the list
+    assert.deepEqual(publishStep.publishNeeds({ game: "Some Other Game", listing: {} }), { needsPrimary: true, needsSecondaries: false });
+  } finally {
+    settings.getAutoFarm = realAf;
+  }
+
+  // Off the list: both tasks are queued, as before.
+  monitorStep._postEventChecked.clear();
+  const r2 = await monitorStep.monitorLane(liveLane(game), { jobs, shadow: false, cache: new Map() });
+  assert.equal(r2.queuedPrimary, 1);
+  assert.equal(r2.postEventChecked, 1);
+  assert.equal(r2.postEventQueued, 1);
+  assert.equal(await FarmJob.countDocuments({ lane: game, kind: "publish", market: "primary" }), 2);
+});
+
 test("a SHADOW lane reports the finding and queues nothing", async () => {
   const game = "Post Event Shadow Game";
   await AutoFarmTask.deleteMany({ game });
