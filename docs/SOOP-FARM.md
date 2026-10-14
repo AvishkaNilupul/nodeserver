@@ -623,7 +623,32 @@ can use up their four looks and then wait for the next three-hourly pass. Steps
 reached after the tunnel is back are not affected: each is followed by its own
 read.
 
-Fingerprint the SOOP files against `5e71873` next time.
+**2026-10-14 01:03 UTC — the whole campaign list, and the stream's own drops
+flag** ("The campaign list was read wrongly (found 2026-10-13)" above). Four
+files by targeted copy: `utils/soopClient.js` `1aa489ab`→`2808a001`,
+`utils/soopWorker.js` `9736639c`→`fce56a52`, `utils/soop/campaignStore.js`
+`ba688bfc`→`fde83f86`, `utils/soopFarm.js` `8126df85`→`2463dcc0` — the bytes of
+`origin/fix/soop-campaign-list-paging` `faa757a`, cut from
+`origin/feat/soop-auto-claim` `4c20aed`, which production held for all four.
+Backup `_deploy_backup_20261014010327_soop-list-paging`; pm2 restart 58 at
+01:03:28Z (0 unstable), 41 minutes after an allocator pass, with no login
+earning.
+
+Seen live after it: the first list read saw 70 campaigns (9 running, 61
+scheduled) where the last read before the restart had seen 39 (6 and 33); the
+Overwatch campaign was listed as not live and nothing was joined; no "was not
+read whole" line; the sweep eight minutes after the restart read all 29 logins.
+Dokkaebi World week 2 opened at 02:00:00Z. Every login had looked at 01:58:35Z,
+found no stream carrying its drops yet and gone to sleep; all 29 joined a
+stream of the category at 02:04:44Z and had 4 minutes counted by 02:08:05Z.
+(The 4 min 44 s between the start and the join is the look-early, sleep,
+cool-down sequence, which is older than this change.)
+
+By the time of the deploy the joins that started all this had stopped by
+themselves, at 2026-10-13 19:11Z after 1,102 of them: the old reader happened
+to see the campaign again, or the co-streamer went off air — not checked which.
+
+Fingerprint the SOOP files against `faa757a` next time.
 
 ## What v1 got wrong (fixed here, each pinned by a test in `tests/soopFarm.test.js`)
 
