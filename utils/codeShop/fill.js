@@ -22,6 +22,7 @@ const ObjectId = mongoose.Types.ObjectId;
 const REAL_MODELS = {
   CodeStock: () => require("../../models/CodeStock"),
   CodeProduct: () => require("../../models/CodeProduct"),
+  SoopAccount: () => require("../../models/SoopAccount"),
 };
 
 function modelOf(deps, name) {
@@ -88,9 +89,13 @@ function createFill(deps = {}) {
     if (!slotKeys.length) return out;
 
     // Only rows with a real hash: units.build checks every code against it.
-    const free = await M("CodeStock")
-      .find({ state: "in_stock", slotKey: { $in: slotKeys }, codeHash: { $gt: "" } }, { slotKey: 1, useBy: 1, earnedAt: 1 })
-      .lean();
+    // Never a code of a farm login that was sold: its buyer can see (and
+    // redeem) that login's inventory. Ingest holds those rows on its next pass;
+    // until then a pulled or dissolved unit may have put them back in stock.
+    const soldLogins = (await M("SoopAccount").find({ sold: true }, { loginId: 1 }).lean()).map((a) => a.loginId);
+    const stockQuery = { state: "in_stock", slotKey: { $in: slotKeys }, codeHash: { $gt: "" } };
+    if (soldLogins.length) stockQuery.loginId = { $nin: soldLogins };
+    const free = await M("CodeStock").find(stockQuery, { slotKey: 1, useBy: 1, earnedAt: 1 }).lean();
     const { plans } = planUnits({
       products: products.map((p) => ({
         id: p._id,

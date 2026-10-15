@@ -294,3 +294,21 @@ test("fill: many fills racing over a small shelf still never share a code", asyn
   await assertLedgerMatchesUnits([p]);
   assert.equal((await unitsOf(p)).length, 5);
 });
+
+test("fill: codes of a farm login that was sold are never bundled", async () => {
+  const SoopAccount = require("../models/SoopAccount");
+  const { fill } = fillWith();
+  const p = await product("SoldLogin", ["s:A"]);
+  const codes = await seedMany("s:A", 5); // logins login-1 … login-0 by seq % 5
+  const rows = await CodeStock.find({ _id: { $in: codes.map((c) => c.id) } }).lean();
+  const soldLogin = rows[0].loginId;
+  await SoopAccount.create({ loginId: soldLogin, sold: true });
+  try {
+    const res = await fill.run();
+    assert.equal(res.built, 4);
+    const left = await CodeStock.find({ _id: { $in: codes.map((c) => c.id) }, state: "in_stock" }).lean();
+    assert.deepEqual(left.map((r) => r.loginId), [soldLogin]);
+  } finally {
+    await SoopAccount.deleteMany({});
+  }
+});
