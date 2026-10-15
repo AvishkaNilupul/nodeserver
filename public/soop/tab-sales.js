@@ -264,7 +264,7 @@
       id: "overview", label: "Overview",
       render(root) {
         const t = (v.t = {
-          inStock: ui.stat("In stock", "–"), onSale: ui.stat("On sale", "–"), inVault: ui.stat("In a GGSel vault", "–"), sold: ui.stat("Sold", "–"),
+          inStock: ui.stat("In stock", "–"), onSale: ui.stat("On sale", "–"), inVault: ui.stat("In a market vault", "–"), sold: ui.stat("Sold", "–"),
           expiring: ui.stat("Expiring", "–"), held: ui.stat("Held", "–"), drafts: ui.stat("Drafts", "–"),
           d1: ui.stat("Last 24 h", "–"), d7: ui.stat("Last 7 days", "–"), d30: ui.stat("Last 30 days", "–"), all: ui.stat("All time", "–"),
         });
@@ -291,7 +291,7 @@
         const ready = products.filter((p) => isReady(p, minUnits)).length;
         t.inStock.set(n("inStock"), "free codes, not in a bundle");
         t.onSale.set(n("onSale"), "codes in bundles on sale", s.onSale ? "ok" : null);
-        t.inVault.set(n("inVault"), "codes handed to GGSel");
+        t.inVault.set(n("inVault"), "codes handed to a market vault");
         t.sold.set(n("sold"), s.dead ? fmt.num(s.dead) + " reported dead after sale" : "codes sold", null);
         t.expiring.set(n("expiring"), s.expired ? fmt.num(s.expired) + " already expired" : "taken off sale near their use-by", s.expiring ? "warn" : null);
         t.held.set(n("held"), s.held ? "need checking before they can sell" : "nothing held", s.held ? "warn" : null);
@@ -314,7 +314,6 @@
         const mk = cfg.markets || {};
         fill(v.modes,
           ui.badge("Eldorado " + (mk.eldorado ? "on" : "off"), mk.eldorado ? "ok" : null),
-          ui.badge("GGSel " + (mk.ggsel ? "on" : "off"), mk.ggsel ? "ok" : null),
           ui.badge(cfg.autoPublish ? "Ready drafts publish by themselves" : "Drafts wait for your approval", cfg.autoPublish ? "warn" : null));
         const tick = st.lastTick;
         v.tick.textContent = tick && tick.at

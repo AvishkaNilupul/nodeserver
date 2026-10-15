@@ -561,7 +561,11 @@ test("stock(): games -> campaign groups -> slots, counts, labels and next use-by
 
 test("stock(): the held list names the login, the slot label and the problem", async () => {
   const { held } = await viewsWith().stock();
-  for (const h of held) assert.deepEqual(Object.keys(h).sort(), ["label", "loginId", "problem"]);
+  for (const h of held) {
+    assert.deepEqual(Object.keys(h).sort(), ["id", "label", "loginId", "problem", "releasable"]);
+    assert.match(h.id, /^[0-9a-f]{24}$/);
+    assert.equal(h.releasable, /stored code is missing or changed|its stock row is gone|its code was shown in the farm panel/.test(h.problem));
+  }
   const want = ledger
     .filter((r) => r.state === "held")
     .map((r) => ({ loginId: r.loginId, label: r.slotKey === SLOT.A ? "Tea Player Icon" : "KR Exclusive Skin", problem: r.problem }));

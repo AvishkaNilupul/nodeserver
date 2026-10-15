@@ -28,6 +28,7 @@ const OBJECT_ID_HEX = /^[0-9a-f]{24}$/i;
 const ObjectId = mongoose.Types.ObjectId;
 
 const STATES = ["in_stock", "in_unit", "sold", "expiring", "expired", "held", "dead"];
+const RELEASABLE_RE = /stored code is missing or changed|its stock row is gone|its code was shown in the farm panel/i;
 const UNIT_STATUSES = ["available", "fed", "sold", "removed"];
 const SOLD_STATES = ["sold", "dead"];
 const STATUS_RANK = { draft: 0, active: 1, paused: 2, retired: 3 };
@@ -641,6 +642,9 @@ function createViews(deps = {}) {
       }));
 
     const held = heldRows.map((r) => ({
+      id: String(r._id),
+      // Only these can be released by the owner (utils/codeShop/held.js decides).
+      releasable: RELEASABLE_RE.test(str(r.problem)),
       loginId: str(r.loginId),
       label: labelFor(r.slotKey, r, labels, cfg),
       problem: str(r.problem),
