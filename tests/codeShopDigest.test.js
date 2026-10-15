@@ -221,6 +221,8 @@ function row(fields = {}) {
     gameName: "Overwatch",
     createdAt: new Date(NOW - 5 * DAY),
     ...fields,
+    // the digest counts "earned" by the farm's own time
+    earnedAt: fields.earnedAt || fields.createdAt || new Date(NOW - 5 * DAY),
   };
 }
 
@@ -234,7 +236,7 @@ test("collectDigest counts realistic ledger rows", async () => {
 
   const [u1, u2, u3, u4, u5, u6, u7] = Array.from({ length: 7 }, () => new ObjectId());
   await CodeStock.insertMany([
-    // earned within 24 h (by createdAt): 3 Overwatch, 2 Delta Force; one old row
+    // earned within 24 h (by earnedAt): 3 Overwatch, 2 Delta Force; one old row
     row({ state: "in_stock", createdAt: new Date(NOW - 2 * HOUR) }),
     row({ state: "in_stock", createdAt: new Date(NOW - 23 * HOUR) }),
     row({ state: "in_unit", unit: u3, product: p1._id, unitStatus: "available", createdAt: new Date(NOW - HOUR), useBy: new Date(NOW + 2 * DAY) }),
@@ -447,4 +449,10 @@ test("a config that throws on get falls back to the defaults (sends from 03:00 U
   assert.deepEqual(await digest.run(), { sent: false });
   const later = createDigest({ models: MODELS, config, events: fakeEvents(), telegram, now: () => at(3) });
   assert.equal((await later.run()).sent, true);
+});
+
+test("collectDigest: codes the shop saw today but the farm earned long ago are not 'earned (24 h)'", async () => {
+  await CodeStock.insertMany([row({ createdAt: new Date(NOW - HOUR), earnedAt: new Date(NOW - 9 * DAY) })]);
+  const d = await collectDigest({ models: MODELS, config: fakeConfig() }, NOW);
+  assert.deepEqual(d.earned, []);
 });

@@ -158,7 +158,9 @@ async function collectDigest(deps = {}, now) {
   const [earnedRows, soldRows, saleRows, drafts, held, inStock, loginsDown] = await Promise.all([
     // A ledger row is created when its code was stored, which is what
     // "earned" means to the shop (inventory sentAt can be days earlier).
-    CodeStock.find({ createdAt: { $gt: since, $lte: at } }, { gameNo: 1, gameName: 1 }).lean(),
+    // By when the farm earned the code, not when the shop first saw it: the
+    // first pass after a deploy would otherwise call every old code "new".
+    CodeStock.find({ earnedAt: { $gt: since, $lte: at } }, { gameNo: 1, gameName: 1 }).lean(),
     // Replacement codes handed to a buyer after a dead code are not a sale.
     CodeStock.find(
       { state: { $in: ["sold", "dead"] }, soldAt: { $gt: since, $lte: at }, market: { $ne: "replacement" } },
