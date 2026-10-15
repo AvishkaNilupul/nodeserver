@@ -25,12 +25,13 @@ const CodeProduct = require("../models/CodeProduct");
 const SuppliedAccount = require("../models/SuppliedAccount");
 const MarketplaceListing = require("../models/MarketplaceListing");
 const AccountOffer = require("../models/AccountOffer");
-const { createReconcile, WHY, NOTE_VAULT } = require("../utils/codeShop/reconcile");
+const SoopAccount = require("../models/SoopAccount");
+const { createReconcile, WHY, NOTE_VAULT, NOTE_SOLD_LOGIN } = require("../utils/codeShop/reconcile");
 
 const ObjectId = mongoose.Types.ObjectId;
 const HOUR = 3600 * 1000;
 const DAY = 24 * HOUR;
-const ALL = [CodeStock, CodeProduct, SuppliedAccount, MarketplaceListing, AccountOffer];
+const ALL = [CodeStock, CodeProduct, SuppliedAccount, MarketplaceListing, AccountOffer, SoopAccount];
 
 let mem;
 
@@ -659,4 +660,225 @@ test("a second run over the same ledger changes nothing", async () => {
     { sold: 0, back: 0, held: 0, fed: 0, released: 0, expiring: 0, expired: 0, errors: 0 },
   );
   assert.equal(afterSnap, before, "not one field (not even updatedAt) moved");
+});
+
+// ------------------------------------------------------------ sold farm logins
+//
+// A farm login marked sold belongs to a buyer, who can see and redeem every
+// code still in its inventory: none of them may stay on sale.
+
+async function soldLogin(loginId) {
+  await SoopAccount.create({ loginId, sold: true });
+}
+
+test("sold login: an available unit holding its code is pulled; that login's rows held, the other logins' rows back in stock", async () => {
+  const { offer, product } = await shop();
+  await soldLogin("farm-sold-1");
+  await SoopAccount.create({ loginId: "farm-ok-1", sold: false });
+  const unit = await unitOf(offer);
+  const rows = await rowsIn({ unit, product, offer, n: 3, useBy: new Date(Date.now() + 20 * DAY) }, [
+    { loginId: "farm-sold-1" },
+    { loginId: "farm-ok-1" },
+    { loginId: "farm-ok-2" },
+  ]);
+  // Same product, no code of the sold login: stays on sale.
+  const clean = await unitOf(offer);
+  const cleanRows = await rowsIn({ unit: clean, product, offer, n: 2 });
+
+  const { rec } = reconcileWith();
+  const out = await rec.run();
+
+  assert.equal(out.soldLoginPulled, 1);
+  assert.equal(out.held, 1);
+  assert.equal(out.back, 2);
+  const u = await SuppliedAccount.findById(unit._id).lean();
+  assert.equal(u.status, "removed");
+  assert.equal(u.note, NOTE_SOLD_LOGIN);
+  assert.equal(u.note, "code unit — a farm login in it was sold");
+
+  const [sold, ok1, ok2] = await ledger(rows);
+  assert.equal(sold.state, "held");
+  assert.equal(sold.problem, "its farm login was sold");
+  assert.equal(String(sold.unit), String(unit._id), "a held row keeps the pointer to its unit");
+  assert.deepEqual([lastHistory(sold).from, lastHistory(sold).to], ["in_unit", "held"]);
+  for (const r of [ok1, ok2]) {
+    assert.equal(r.state, "in_stock");
+    assert.equal(r.unit, null);
+    assert.equal(r.product, null);
+    assert.equal(r.offer, null);
+    assert.equal(r.unitStatus, "");
+    assert.equal(r.problem, "");
+    assert.deepEqual([lastHistory(r).from, lastHistory(r).to], ["in_unit", "in_stock"]);
+  }
+  assert.equal((await SuppliedAccount.findById(clean._id).lean()).status, "available");
+  for (const r of await ledger(cleanRows)) assert.equal(r.state, "in_unit");
+
+  // Nothing left to do on the next pass.
+  const again = await rec.run();
+  assert.deepEqual([again.soldLoginPulled, again.held, again.back], [0, 0, 0]);
+});
+
+test("sold login in a unit that was ever in a vault: pulled, and the other logins' rows are held too", async () => {
+  const { offer, product } = await shop();
+  await soldLogin("farm-sold-2");
+  const unit = await unitOf(offer);
+  const rows = await rowsIn({ unit, product, offer, n: 2, wasFed: true }, [{ loginId: "farm-sold-2" }, { loginId: "farm-ok-3" }]);
+
+  const out = await reconcileWith().rec.run();
+
+  assert.equal(out.soldLoginPulled, 1);
+  assert.equal(out.held, 2);
+  assert.equal(out.back, 0);
+  const [sold, other] = await ledger(rows);
+  assert.equal(sold.problem, WHY.soldLogin);
+  assert.equal(other.state, "held");
+  assert.equal(other.problem, WHY.vaultBack);
+});
+
+test("sold login: a lost pull changes nothing", async () => {
+  const { offer, product } = await shop();
+  await soldLogin("farm-sold-3");
+  const unit = await unitOf(offer);
+  const rows = await rowsIn({ unit, product, offer, n: 2, unitStatus: "" }, [{ loginId: "farm-sold-3" }, { loginId: "farm-ok-4" }]);
+  const calls = [];
+  const { rec } = reconcileWith({
+    units: {
+      pull: async (id, opts) => {
+        calls.push({ id: String(id), note: opts && opts.note });
+        return false;
+      },
+    },
+  });
+
+  const out = await rec.run();
+
+  assert.deepEqual(calls, [{ id: String(unit._id), note: NOTE_SOLD_LOGIN }]);
+  assert.equal(out.soldLoginPulled, 0);
+  assert.equal(out.held, 0);
+  assert.equal(out.back, 0);
+  assert.equal((await SuppliedAccount.findById(unit._id).lean()).status, "available");
+  for (const r of await ledger(rows)) {
+    assert.equal(r.state, "in_unit");
+    assert.equal(r.unitStatus, "", "the unit is left for the next pass, untouched");
+    assert.equal(r.history.length, 0);
+  }
+});
+
+test("sold login in a fed unit: one warn event (stamped), deduped across runs; nothing else changes", async () => {
+  const { offer, product } = await shop({ name: "Vault bundle" });
+  await soldLogin("farm-sold-4");
+  const unit = await unitOf(offer, { status: "fed", market: "ggsel", fedAt: new Date() });
+  const rows = await rowsIn({ unit, product, offer, n: 2, unitStatus: "fed", wasFed: true }, [{ loginId: "farm-sold-4" }, { loginId: "farm-ok-5" }]);
+  const events = fakeEvents();
+  const calls = [];
+  const units = {
+    pull: async () => {
+      calls.push(1);
+      return true;
+    },
+  };
+
+  const first = await createReconcile({ now: () => Date.now(), events, config: fakeConfig(), units }).run();
+  const second = await createReconcile({ now: () => Date.now(), events, config: fakeConfig(), units }).run();
+
+  assert.equal(first.soldLoginWarned, 1);
+  assert.equal(second.soldLoginWarned, 0);
+  assert.equal(calls.length, 0, "a vault unit is never pulled from here");
+  const warns = events.logs.filter((e) => e.kind === "sold-login-vault");
+  assert.equal(warns.length, 1);
+  assert.equal(warns[0].level, "warn");
+  assert.equal(String(warns[0].product), String(product._id));
+  assert.match(warns[0].msg, /Vault bundle bundle in a platform vault holds codes of a farm login that was sold/);
+  assert.equal(warns[0].data.codes, 1);
+  assert.equal(await events.has("sold-login-vault:" + String(unit._id)), true);
+  assert.equal((await SuppliedAccount.findById(unit._id).lean()).status, "fed");
+  for (const r of await ledger(rows)) {
+    assert.equal(r.state, "in_unit");
+    assert.equal(r.problem, "");
+    assert.equal(r.history.length, 0);
+  }
+});
+
+test("sold login in a sold unit: no pull, no warning, no hold (the sale is mirrored as usual)", async () => {
+  const { offer, product } = await shop();
+  await soldLogin("farm-sold-5");
+  const unit = await unitOf(offer, { status: "sold", market: "eldorado", orderId: "order-s", soldAt: new Date() });
+  const rows = await rowsIn({ unit, product, offer, n: 2 }, [{ loginId: "farm-sold-5" }, { loginId: "farm-ok-6" }]);
+  const calls = [];
+  const { rec, events } = reconcileWith({
+    units: {
+      pull: async () => {
+        calls.push(1);
+        return true;
+      },
+    },
+  });
+
+  const out = await rec.run();
+
+  assert.equal(calls.length, 0);
+  assert.equal(out.soldLoginPulled, 0);
+  assert.equal(out.soldLoginWarned, 0);
+  assert.equal(out.held, 0);
+  assert.equal((await SuppliedAccount.findById(unit._id).lean()).status, "sold");
+  for (const r of await ledger(rows)) assert.equal(r.state, "sold");
+  assert.equal(events.logs.filter((e) => e.kind === "sold-login-vault").length, 0);
+});
+
+test("sold login in a removed unit: its code is held instead of going back to stock", async () => {
+  const { offer, product } = await shop();
+  await soldLogin("farm-sold-6");
+  const unit = await unitOf(offer, { status: "removed" });
+  const rows = await rowsIn({ unit, product, offer, n: 2, useBy: new Date(Date.now() + 20 * DAY) }, [{ loginId: "farm-sold-6" }, { loginId: "farm-ok-7" }]);
+
+  const out = await reconcileWith().rec.run();
+
+  assert.equal(out.held, 1);
+  assert.equal(out.back, 1);
+  const [sold, ok] = await ledger(rows);
+  assert.equal(sold.state, "held");
+  assert.equal(sold.problem, WHY.soldLogin);
+  assert.equal(ok.state, "in_stock");
+});
+
+test("no sold logins: no query beyond the one SoopAccount read", async () => {
+  const counted = (name, Model, calls) => {
+    const w = {};
+    for (const m of ["find", "findOne", "updateOne", "updateMany", "aggregate", "countDocuments", "exists"]) {
+      w[m] = (...a) => {
+        calls.push(name + "." + m);
+        return Model[m](...a);
+      };
+    }
+    return w;
+  };
+  const modelsWith = (calls) => ({
+    CodeStock: counted("CodeStock", CodeStock, calls),
+    CodeProduct: counted("CodeProduct", CodeProduct, calls),
+    SuppliedAccount: counted("SuppliedAccount", SuppliedAccount, calls),
+    MarketplaceListing: counted("MarketplaceListing", MarketplaceListing, calls),
+    SoopAccount: counted("SoopAccount", SoopAccount, calls),
+  });
+  const { offer, product } = await shop();
+  const unit = await unitOf(offer);
+  await rowsIn({ unit, product, offer, n: 2 }, [{ loginId: "farm-ok-8" }, { loginId: "farm-ok-9" }]);
+  await SoopAccount.create({ loginId: "farm-ok-8", sold: false });
+  const units = {
+    pull: async () => {
+      throw new Error("must not pull");
+    },
+  };
+
+  const calls = [];
+  const out = await reconcileWith({ models: modelsWith(calls), units }).rec.run();
+
+  assert.equal(out.errors, 0);
+  assert.deepEqual(calls, [
+    "SoopAccount.find", // the one read
+    "CodeStock.find",
+    "SuppliedAccount.find",
+    "CodeProduct.find",
+    "CodeStock.aggregate",
+    "CodeProduct.find",
+  ]);
 });

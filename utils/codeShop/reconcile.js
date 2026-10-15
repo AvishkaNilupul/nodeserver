@@ -12,7 +12,12 @@
 // - a removed unit's codes go back to free stock only when nothing on it says
 //   it ever left the shelf through a market. A release clears those marks
 //   (utils/suppliedStock.releaseClaim); a removal does not, so a vault unit
-//   taken down by listingDetach still carries them.
+//   taken down by listingDetach still carries them;
+// - a farm login marked sold (SoopAccount.sold) belongs to a buyer who can see
+//   and redeem every code still in its inventory, so a unit on sale holding
+//   one of its codes is pulled: that login's codes are held, the other
+//   logins' codes go back to stock. A vault unit cannot be pulled from here,
+//   so the owner is warned once instead.
 //
 // Every write is guarded: ledger rows by their unit AND the state they were
 // read in, units by the status they were read in. A change that lands between
@@ -29,6 +34,7 @@ const HISTORY_MAX = 20;
 const MISSING_GRACE_MS = 10 * 60 * 1000;
 
 const NOTE_VAULT = "code unit — came back from a platform vault";
+const NOTE_SOLD_LOGIN = "code unit — a farm login in it was sold";
 
 const WHY = {
   missing: "its stock row is gone",
@@ -43,6 +49,8 @@ const WHY = {
   removed: "unit removed",
   removedLead: "unit removed; its codes stop working within the lead time",
   removedPast: "unit removed after its codes stopped working",
+  soldLogin: "its farm login was sold",
+  soldLoginOther: "its unit was pulled: another farm login in it was sold",
 };
 
 // Factories, not values: a test that passes its own models never loads these.
@@ -51,6 +59,7 @@ const REAL_MODELS = {
   CodeProduct: () => require("../../models/CodeProduct"),
   SuppliedAccount: () => require("../../models/SuppliedAccount"),
   MarketplaceListing: () => require("../../models/MarketplaceListing"),
+  SoopAccount: () => require("../../models/SoopAccount"),
 };
 
 function modelOf(deps, name) {
@@ -151,14 +160,29 @@ function createReconcile(deps = {}) {
 
   async function run() {
     const CodeStock = M("CodeStock");
-    const out = { checked: 0, sold: 0, back: 0, held: 0, fed: 0, released: 0, expiring: 0, expired: 0, errors: 0 };
+    const out = {
+      checked: 0,
+      sold: 0,
+      back: 0,
+      held: 0,
+      fed: 0,
+      released: 0,
+      expiring: 0,
+      expired: 0,
+      errors: 0,
+      soldLoginPulled: 0,
+      soldLoginWarned: 0,
+    };
     const now = clock();
     const leadMs = leadMsOf(await effectiveConfig());
+    // Read first, so no row of a sold login can go back to stock this pass.
+    const soldLogins = await soldLoginIds();
 
     const rows = await CodeStock.find(
       { state: { $in: ["in_unit", "sold"] }, unit: { $ne: null } },
       {
         _id: 1,
+        loginId: 1,
         state: 1,
         unit: 1,
         product: 1,
@@ -204,13 +228,16 @@ function createReconcile(deps = {}) {
 
       const productIds = [...new Set(rows.map((r) => text(r.product)).filter(Boolean))];
       const products = productIds.length
-        ? await M("CodeProduct").find({ _id: { $in: productIds } }, { _id: 1, slots: 1, pricing: 1 }).lean()
+        ? await M("CodeProduct").find({ _id: { $in: productIds } }, { _id: 1, name: 1, slots: 1, pricing: 1 }).lean()
         : [];
       const productById = new Map(products.map((p) => [String(p._id), p]));
 
-      const ctx = { now, leadMs, out, productById, prices: new Map() };
+      const ctx = { now, leadMs, out, productById, prices: new Map(), soldLogins, settled: new Set() };
+      // Detection uses the rows already read: no sold login, no extra query.
+      if (soldLogins.size) await soldLoginPass(ctx, byUnit, unitById);
       for (const [key, group] of byUnit) {
         out.checked += 1;
+        if (ctx.settled.has(key)) continue;
         try {
           await settleUnit(ctx, group.id, group.rows, unitById.get(key) || null);
         } catch (err) {
@@ -247,6 +274,93 @@ function createReconcile(deps = {}) {
       });
     }
     return out;
+  }
+
+  async function soldLoginIds() {
+    const rows = await M("SoopAccount").find({ sold: true }, { loginId: 1 }).lean();
+    return new Set((rows || []).map((r) => text(r.loginId)).filter(Boolean));
+  }
+
+  // Units holding a code of a sold farm login. Runs before the per-unit pass;
+  // a unit it pulls (or tried to pull) is settled here, not there.
+  async function soldLoginPass(ctx, byUnit, unitById) {
+    const { out, soldLogins } = ctx;
+    for (const [key, group] of byUnit) {
+      const hit = group.rows.some((r) => r.state === "in_unit" && soldLogins.has(text(r.loginId)));
+      if (!hit) continue;
+      const unit = unitById.get(key);
+      // Missing: the per-unit pass holds its rows. Sold / removed: not on sale.
+      if (!unit) continue;
+      try {
+        if (unit.status === "available") {
+          ctx.settled.add(key);
+          // Lost = the unit moved on (sold, fed, removed) in between; the next
+          // pass reads it again.
+          if (!(await pull(group.id, { note: NOTE_SOLD_LOGIN }))) continue;
+          out.soldLoginPulled += 1;
+          await splitPulled(ctx, group.id, group.rows, unit);
+        } else if (unit.status === "fed") {
+          await warnSoldLoginVault(ctx, key, group.rows);
+        }
+      } catch (err) {
+        ctx.settled.add(key);
+        out.errors += 1;
+        await note({
+          level: "error",
+          kind: "reconcile",
+          product: (group.rows[0] && group.rows[0].product) || null,
+          msg: "Taking a bundle with a sold farm login off sale failed: " + text(err && err.message).slice(0, 200),
+          data: { unit: key },
+        });
+      }
+    }
+  }
+
+  // The rows of a unit pulled for a sold login. That login's codes are held;
+  // the others go back to stock unless the unit was ever in a vault (or
+  // delivered), when nothing in it can be proven unsold. A "sold" row of an
+  // available unit is a released sale, so it is split the same way.
+  async function splitPulled(ctx, unitId, rows, unit) {
+    const { out, soldLogins } = ctx;
+    const vault = rowsWereFed(rows) || !!unit.fedAt || !!text(unit.contentId);
+    const risky = vault || !!unit.deliveredAt;
+    const riskyWhy = vault ? WHY.vaultBack : WHY.deliveredBack;
+    const ids = (list) => list.map((r) => r._id);
+    for (const from of ["in_unit", "sold"]) {
+      const list = rows.filter((r) => r.state === from);
+      const ofLogin = list.filter((r) => soldLogins.has(text(r.loginId)));
+      const others = list.filter((r) => !soldLogins.has(text(r.loginId)));
+      out.held += await move(ctx, unitId, ids(ofLogin), from, "held", WHY.soldLogin, { problem: WHY.soldLogin, unitStatus: "removed" });
+      if (risky) {
+        out.held += await move(ctx, unitId, ids(others), from, "held", riskyWhy, { problem: riskyWhy, unitStatus: "removed" });
+        continue;
+      }
+      const back = { unit: null, product: null, offer: null, unitStatus: "" };
+      if (from === "sold") Object.assign(back, { soldAt: null, market: "", orderId: "", saleUsd: 0 });
+      out.back += await move(ctx, unitId, ids(others), from, "in_stock", WHY.soldLoginOther, back);
+    }
+  }
+
+  // A vault unit cannot be pulled from here: the owner is told once per unit.
+  async function warnSoldLoginVault(ctx, key, rows) {
+    const events = deps.events;
+    if (!events || typeof events.stamp !== "function") return; // no way to say it only once
+    const productId = (rows[0] && rows[0].product) || null;
+    const product = ctx.productById.get(text(productId));
+    const name = (product && text(product.name)) || "code";
+    const msg = `A ${name} bundle in a platform vault holds codes of a farm login that was sold: take it down by hand`;
+    let fresh = false;
+    try {
+      fresh = (await events.stamp("sold-login-vault:" + key, { kind: "sold-login-vault", msg })) === true;
+    } catch (err) {
+      // Unknown whether it was said before: try again next pass rather than guess.
+      await note({ level: "error", kind: "sold-login-vault", product: productId, msg: "Could not record a sold-login vault warning: " + text(err && err.message).slice(0, 200) });
+      return;
+    }
+    if (!fresh) return;
+    ctx.out.soldLoginWarned += 1;
+    const codes = rows.filter((r) => r.state === "in_unit" && ctx.soldLogins.has(text(r.loginId))).length;
+    await note({ level: "warn", kind: "sold-login-vault", product: productId, msg, data: { unit: key, codes } });
   }
 
   // Move the given rows of one unit from `from` to `to`. Only rows still in
@@ -381,7 +495,11 @@ function createReconcile(deps = {}) {
       out.expired += await move(ctx, unitId, ids(groups.expiredPast), "in_unit", "expired", WHY.removedPast, off);
       out.expiring += await move(ctx, unitId, ids(groups.expiringPulled), "in_unit", "expiring", WHY.pulled, off);
       out.expiring += await move(ctx, unitId, ids(groups.expiringLead), "in_unit", "expiring", WHY.removedLead, off);
-      out.back += await move(ctx, unitId, ids(groups.back), "in_unit", "in_stock", WHY.removed, {
+      // A sold login's codes never go back to stock: its buyer can redeem them.
+      const ofSoldLogin = groups.back.filter((r) => ctx.soldLogins.has(text(r.loginId)));
+      const back = groups.back.filter((r) => !ctx.soldLogins.has(text(r.loginId)));
+      out.held += await move(ctx, unitId, ids(ofSoldLogin), "in_unit", "held", WHY.soldLogin, { problem: WHY.soldLogin, unitStatus: "removed" });
+      out.back += await move(ctx, unitId, ids(back), "in_unit", "in_stock", WHY.removed, {
         unit: null,
         product: null,
         offer: null,
@@ -443,5 +561,6 @@ module.exports = {
   hasMarketMarks,
   WHY,
   NOTE_VAULT,
+  NOTE_SOLD_LOGIN,
   MISSING_GRACE_MS,
 };
