@@ -725,19 +725,22 @@ class SoopFarm {
     const v = s.view;
     const camp = v.dropsIdx ? this.store.all().find((c) => String(c.dropsIdx) === String(v.dropsIdx)) : null;
     const hold = camp && (camp.live || camp.filter === "unlisted");
+    // One reading of the clock, so the cool-down is exact (a tick between two
+    // readings made "no cool-down" come out as 1 ms).
+    const t = this.clock.now();
     let cool = 0;
     if (hold) {
-      cool = this._startWindow(camp, this.clock.now())
+      cool = this._startWindow(camp, t)
         ? this.timings.parkCooldownStartMs ?? PARK_COOLDOWN_START_MS
         : this.timings.parkCooldownMs ?? PARK_COOLDOWN_MS;
     }
     this.sleep.set(s.id, {
-      at: new Date(this.clock.now()),
+      at: new Date(t),
       detail: detail || "Nothing to farm right now",
       dropsIdx: v.dropsIdx,
       title: v.title,
       goal: v.goal,
-      coolUntil: this.clock.now() + cool,
+      coolUntil: t + cool,
     });
     if (!this.sessions.has(s.id)) this.clients.delete(s.id);
     this.activity.add({ kind: "session", accountId: s.id, botId: s.botId, dropsIdx: v.dropsIdx, msg: `${s.id} went to sleep: ${detail || "nothing to farm"}` });
