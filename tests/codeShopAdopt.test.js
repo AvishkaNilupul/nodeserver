@@ -34,6 +34,7 @@ const secretBox = require("../utils/secretBox");
 const slots = require("../utils/codeShop/slots");
 const { createIngest } = require("../utils/codeShop/ingest");
 const { createAdopt } = require("../utils/codeShop/adopt");
+const { createForeignGuard, foreignProblem } = require("../utils/codeShop/foreign");
 
 const ObjectId = mongoose.Types.ObjectId;
 const BSON = mongoose.mongo.BSON;
@@ -326,6 +327,7 @@ test("dry run: a correct report, and nothing at all is written", async () => {
     slots: LABELS.map((label, i) => ({ label, slotKey: want[i] })),
     byStatus: { available: 2, fed: 0, sold: 1, removed: 1 },
     toLink: 12,
+    fromGuard: 0,
     alreadyLinked: 0,
     removedToHold: 0,
     productId: null,
@@ -585,6 +587,59 @@ test("a code taken out of stock between the check and the write: the rest stays 
   assert.deepEqual(await unitBytes(), unitsBefore);
   assert.ok(events.logs.some((e) => e.kind === "adopt" && e.level === "error"));
   assertNoCode(res, events.logs);
+});
+
+test("after the foreign-stock guard held a live offer's codes, adopt links them; a code held for another listing is refused", async () => {
+  const { offer, codes, units } = await liveOffer();
+  // A second hand-made listing that also lists one of unit a's codes, newer.
+  const other = await offerOf({ title: "Another hand-made listing" });
+  const dup = await unitOf(other, unitText([codes.a.icon], [LABELS[0]]));
+
+  const guard = createForeignGuard({ secret: secretBox, now: () => NOW, events: fakeEvents(), telegram: { send: async () => {} } });
+  const swept = await guard.run();
+  assert.equal(swept.held, 12, "units a, b and c (sold); the removed unit d is not read");
+  for (const [login, unit] of [["a", units.ua], ["b", units.ub], ["c", units.uc]]) {
+    for (const code of lineCodes(codes[login])) assert.equal((await rowOf(code)).problem, foreignProblem(unit._id));
+  }
+  for (const code of lineCodes(codes.d)) assert.equal((await rowOf(code)).state, "in_stock");
+
+  // The other listing's copy of a.icon was held for unit a (the older row).
+  const { adopter, events } = makeAdopt();
+  const refused = await adopter.adopt(other._id);
+  assert.equal(refused.ok, false);
+  assert.deepEqual(kinds(refused), ["not_in_stock"]);
+  assert.equal(refused.details[0].unitId, String(dup._id));
+  assert.match(refused.problems[0], /in a stock row of another listing/);
+
+  const dry = await adopter.adopt(offer._id);
+  assert.equal(dry.ok, true, JSON.stringify(dry.problems));
+  assert.equal(dry.report.toLink, 12);
+  assert.equal(dry.report.fromGuard, 12);
+
+  const unitsBefore = await unitBytes();
+  const res = await adopter.adopt(offer._id, { apply: true, actor: "owner" });
+  assert.equal(res.ok, true, JSON.stringify(res.problems));
+  assert.equal(res.linked, 12);
+  assert.deepEqual(res.shortfall, []);
+  assert.deepEqual(await unitBytes(), unitsBefore);
+  for (const [login, unit, state] of [["a", units.ua, "in_unit"], ["b", units.ub, "in_unit"], ["c", units.uc, "sold"]]) {
+    for (const code of lineCodes(codes[login])) {
+      const row = await rowOf(code);
+      assert.equal(row.state, state, login);
+      assert.equal(String(row.unit), String(unit._id));
+      assert.equal(String(row.product), res.productId);
+      assert.equal(row.problem, "", "the guard's reason is cleared once linked");
+      assert.ok(row.history.some((h) => h.from === "held" && h.to === "in_unit" && h.why === "adopted"));
+    }
+  }
+  assert.equal((await rowOf(codes.c.icon)).saleUsd, 1);
+
+  // Adopted units are ours now: the guard no longer reads them.
+  const after = await guard.run();
+  assert.equal(after.held, 0);
+  assert.equal(after.scanned, 1, "only the other listing's row is still foreign");
+  assert.equal(after.conflicts, 1, "its copy of a.icon is now a conflict with our unit");
+  assertNoCode(swept, refused, dry, res, after, events.logs);
 });
 
 // ── problems: nothing is written ────────────────────────────────────────────

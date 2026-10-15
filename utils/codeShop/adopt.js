@@ -10,7 +10,9 @@
 //
 // What adopt writes, and nothing else:
 // - ledger rows: the status-guarded `in_stock -> in_unit` link of each unit's
-//   codes (a row already linked to exactly that unit is left as it is), and
+//   codes (a row already linked to exactly that unit is left as it is; a row
+//   the foreign-stock guard held BECAUSE it sits in that very unit links the
+//   same way, `held -> in_unit`, guarded by that exact problem), and
 //   `in_stock -> held` for the codes of a removed unit that carries the marks
 //   of having gone out through a market (it may have reached a buyer);
 // - one CodeProduct owning the offer (an existing one is reused).
@@ -24,6 +26,7 @@
 
 const mongoose = require("mongoose");
 const slotsLib = require("./slots");
+const { foreignProblem } = require("./foreign");
 
 const ObjectId = mongoose.Types.ObjectId;
 const OBJECT_ID_HEX = /^[0-9a-f]{24}$/i;
@@ -281,16 +284,17 @@ function createAdopt(deps = {}) {
       ? await leanOf(
           M("CodeStock")
             .find({ codeHash: { $in: [...hashes] } })
-            .select("_id codeHash state unit product offer slotKey groupKey gameNo gameName nameRaw image campaignTitle"),
+            .select("_id codeHash state problem unit product offer slotKey groupKey gameNo gameName nameRaw image campaignTitle"),
         )
       : [];
     const rowByHash = new Map((rows || []).map((r) => [r.codeHash, r]));
 
     // Every line: its ledger row, and whether it is free, already ours, or not.
     let alreadyLinked = 0;
-    const toLink = new Map(); // unitId -> [row ids]
+    let fromGuard = 0;
+    const toLink = new Map(); // unitId -> { in_stock: [row ids], held: [row ids] }
     for (const { unit, lines } of parsed) {
-      const ids = [];
+      const ids = { in_stock: [], held: [] };
       lines.forEach((l, i) => {
         const row = rowByHash.get(l.hash);
         l.row = row || null;
@@ -304,19 +308,27 @@ function createAdopt(deps = {}) {
           return;
         }
         if (row.state === "in_stock" && !row.unit) {
-          ids.push(row._id);
+          ids.in_stock.push(row._id);
           return;
         }
+        // Held by the foreign-stock guard because it sits in THIS unit: free
+        // for this unit and no other.
+        if (row.state === "held" && text(row.problem) === foreignProblem(unit._id)) {
+          ids.held.push(row._id);
+          fromGuard += 1;
+          return;
+        }
+        const why = row.state === "held" && text(row.problem) ? ` (${text(row.problem)})` : "";
         problems.push({
           kind: row.unit ? "in_other_unit" : "not_in_stock",
           msg: row.unit
             ? `unit ${text(unit.login)} line ${i + 1}: this code is already in another unit (${row.state})`
-            : `unit ${text(unit.login)} line ${i + 1}: this code is ${row.state}, not in stock`,
+            : `unit ${text(unit.login)} line ${i + 1}: this code is ${row.state}${why}, not in stock`,
           state: text(row.state),
           ...at,
         });
       });
-      if (ids.length) toLink.set(String(unit._id), ids);
+      if (ids.in_stock.length || ids.held.length) toLink.set(String(unit._id), ids);
     }
 
     // Every unit must have the same number of lines, and line N the same slot.
@@ -433,7 +445,7 @@ function createAdopt(deps = {}) {
     }
 
     const codes = parsed.reduce((n, p) => n + p.lines.length, 0);
-    const linkCount = [...toLink.values()].reduce((n, ids) => n + ids.length, 0);
+    const linkCount = [...toLink.values()].reduce((n, ids) => n + ids.in_stock.length + ids.held.length, 0);
     const report = {
       offerId: String(id),
       title: text(offer.title),
@@ -442,6 +454,7 @@ function createAdopt(deps = {}) {
       slots: slots.map((s) => ({ label: s.label, slotKey: s.slotKey })),
       byStatus,
       toLink: linkCount,
+      fromGuard,
       alreadyLinked,
       removedToHold: toHold.length,
       productId: product ? String(product._id) : null,
@@ -462,22 +475,34 @@ function createAdopt(deps = {}) {
     const shortfall = [];
     for (const { unit } of parsed) {
       const ids = toLink.get(String(unit._id));
-      if (!ids || !ids.length) continue;
-      const $set = { state: "in_unit", unit: unit._id, product: productId, offer: id, unitStatus: unit.status };
+      if (!ids) continue;
+      const base = { state: "in_unit", unit: unit._id, product: productId, offer: id, unitStatus: unit.status };
       // A vault can hand its copy out without telling us: keep the mark.
-      if (unit.status === "fed") $set.wasFed = true;
-      const res = await CodeStock.updateMany(
-        { _id: { $in: ids }, state: "in_stock", unit: null },
-        {
-          $set,
-          $push: { history: { $each: [{ at, from: "in_stock", to: "in_unit", why: WHY_ADOPTED }], $slice: -HISTORY_MAX } },
-        },
-      );
-      const won = (res && res.modifiedCount) || 0;
+      if (unit.status === "fed") base.wasFed = true;
+      // Each guarded by the state it was read in: free stock with no unit, or
+      // held by the foreign-stock guard for exactly this unit.
+      const writes = [
+        { list: ids.in_stock, from: "in_stock", filter: { state: "in_stock", unit: null }, $set: base },
+        { list: ids.held, from: "held", filter: { state: "held", problem: foreignProblem(unit._id) }, $set: { ...base, problem: "" } },
+      ];
+      let want = 0;
+      let won = 0;
+      for (const w of writes) {
+        if (!w.list.length) continue;
+        want += w.list.length;
+        const res = await CodeStock.updateMany(
+          { _id: { $in: w.list }, ...w.filter },
+          {
+            $set: w.$set,
+            $push: { history: { $each: [{ at, from: w.from, to: "in_unit", why: WHY_ADOPTED }], $slice: -HISTORY_MAX } },
+          },
+        );
+        won += (res && res.modifiedCount) || 0;
+      }
       linked += won;
-      // Lost rows moved out of stock between the check and the write. The
-      // rows that won ARE in this live unit, so they stay linked.
-      if (won < ids.length) shortfall.push({ unitId: String(unit._id), login: text(unit.login), missed: ids.length - won });
+      // Lost rows moved on between the check and the write. The rows that won
+      // ARE in this live unit, so they stay linked.
+      if (won < want) shortfall.push({ unitId: String(unit._id), login: text(unit.login), missed: want - won });
     }
 
     // A crashed earlier apply may have linked rows to a product id it never
