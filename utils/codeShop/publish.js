@@ -155,7 +155,7 @@ function createPublisher(deps = {}) {
 
   // --- approve ----------------------------------------------------------------
 
-  async function approve(id, { actor = "", rebalance = false, publish = true } = {}) {
+  async function approveNow(id, { actor = "", rebalance = false, publish = true } = {}) {
     const product = await loadProduct(id);
     if (!product) return { ok: false, problems: ["product not found"] };
     const approvable = product.status === "draft" || product.status === "paused";
@@ -261,7 +261,7 @@ function createPublisher(deps = {}) {
       data: { built, dissolved, actor: str(actor) },
     });
 
-    const published = publish ? await publishProduct(product._id, { actor }) : null;
+    const published = publish ? await publishNow(product._id, { actor }) : null;
     return { ok: true, product: await loadProduct(product._id), built, dissolved, fill: filled, publish: published };
   }
 
@@ -469,6 +469,15 @@ function createPublisher(deps = {}) {
     } catch (err) {
       await log({ level: "warn", kind: "publish", product: product._id, msg: "GGSel bundles not marked as in the vault: " + errText(err) });
     }
+    // The ledger learns it now, not at the next reconcile: a vault unit that
+    // is released back to "available" before that pass must still read as
+    // once-fed (it may already be sold on GGSel). Written even when markFed
+    // failed above — the codes are in the vault either way.
+    try {
+      await CodeStock().updateMany({ unit: { $in: ids }, state: "in_unit" }, { $set: { unitStatus: "fed", wasFed: true } });
+    } catch (err) {
+      await log({ level: "warn", kind: "publish", product: product._id, msg: "GGSel codes not marked as in the vault in the ledger: " + errText(err) });
+    }
     return { market: "ggsel", ok: true, externalId, url: str(made.url), listingId: String(row._id), quantity: texts.length };
   }
 
@@ -503,7 +512,7 @@ function createPublisher(deps = {}) {
   // -> { results: [{ market, ok, skipped?, externalId?, url?, listingId?, error? }], error? }
   // `ok` is true only for a listing created by this call; a skip is ok:false
   // with `skipped` (nothing went wrong, nothing went up either).
-  async function publishProduct(id, { actor = "" } = {}) {
+  async function publishNow(id, { actor = "" } = {}) {
     const product = await loadProduct(id);
     if (!product) return { results: [], error: "product not found" };
     if (product.status !== "active" || !product.offer) {
@@ -614,7 +623,7 @@ function createPublisher(deps = {}) {
 
   const GGSEL_BY_HAND = "GGSel listings are not taken down here: delist them from the Listings page, which empties the vault";
 
-  async function pause(id, { actor = "" } = {}) {
+  async function pauseNow(id, { actor = "" } = {}) {
     const product = await loadProduct(id);
     if (!product) return { ok: false, error: "product not found" };
     if (product.status !== "active" && product.status !== "paused") {
@@ -643,7 +652,7 @@ function createPublisher(deps = {}) {
     };
   }
 
-  async function resume(id, { actor = "" } = {}) {
+  async function resumeNow(id, { actor = "" } = {}) {
     const product = await loadProduct(id);
     if (!product) return { ok: false, error: "product not found" };
     if (product.status !== "paused") {
@@ -658,11 +667,11 @@ function createPublisher(deps = {}) {
     );
     if (!(Number(res && res.modifiedCount) > 0)) return { ok: false, error: "the product changed; try again" };
     await log({ kind: "resume", product: product._id, msg: "Resumed " + str(product.name), data: { actor: str(actor) } });
-    const published = await publishProduct(product._id, { actor });
+    const published = await publishNow(product._id, { actor });
     return { ok: true, product: await loadProduct(product._id), publish: published };
   }
 
-  async function retire(id, { actor = "" } = {}) {
+  async function retireNow(id, { actor = "" } = {}) {
     const product = await loadProduct(id);
     if (!product) return { ok: false, error: "product not found" };
     if (product.status === "retired") return { ok: true, already: true, product };
@@ -674,7 +683,7 @@ function createPublisher(deps = {}) {
 
     let paused = null;
     if (product.status === "active" || product.status === "paused") {
-      paused = await pause(product._id, { actor });
+      paused = await pauseNow(product._id, { actor });
       if (!paused.ok) {
         const why = (paused.errors || []).join("; ") || paused.error || "the Eldorado listings could not be taken down";
         return { ok: false, error: "not retired: " + why, pause: paused };
@@ -706,7 +715,49 @@ function createPublisher(deps = {}) {
     return { ok: true, product: await loadProduct(product._id), dissolved, pause: paused };
   }
 
-  return { problems, approve, publishProduct, pause, resume, retire };
+  // --- one product at a time ---------------------------------------------------
+
+  // The scheduler and the HTTP routes share ONE publisher, so two writers can
+  // reach the same product at once — and "already live" is a read, not a
+  // lock: two publishes racing it would both put an Eldorado offer up. Every
+  // public action on a product therefore waits for the one before it on the
+  // SAME product id; other products run in parallel. Internal calls (approve
+  // -> publish, resume -> publish, retire -> pause) use the *Now functions
+  // directly: they already hold the product's turn, and waiting on it again
+  // would wait forever.
+  const chains = new Map(); // String(productId) -> tail promise (never rejects)
+
+  function keyOf(id) {
+    const v = id && typeof id === "object" && id._id ? id._id : id;
+    return str(v);
+  }
+
+  function serial(id, fn) {
+    const key = keyOf(id);
+    const prev = chains.get(key) || Promise.resolve();
+    // `prev` never rejects (see `tail`), so a failed action never jams the chain.
+    const run = prev.then(() => fn());
+    const tail = run.then(
+      () => {},
+      () => {},
+    );
+    chains.set(key, tail);
+    tail.then(() => {
+      if (chains.get(key) === tail) chains.delete(key);
+    });
+    return run;
+  }
+
+  return {
+    problems,
+    approve: (id, opts) => serial(id, () => approveNow(id, opts)),
+    publishProduct: (id, opts) => serial(id, () => publishNow(id, opts)),
+    pause: (id, opts) => serial(id, () => pauseNow(id, opts)),
+    resume: (id, opts) => serial(id, () => resumeNow(id, opts)),
+    retire: (id, opts) => serial(id, () => retireNow(id, opts)),
+    // How many products have an action running or waiting (tests, health).
+    busy: () => chains.size,
+  };
 }
 
 module.exports = { createPublisher, ALLOWED_MARKETS, ELDORADO_MIN_USD, OFFER_LIMIT_MSG, HELD_IN_VAULT, priceOf };

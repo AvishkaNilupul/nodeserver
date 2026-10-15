@@ -73,6 +73,7 @@ function harness(opts = {}) {
     async eldoradoPublish(args) {
       calls.push(["eldoradoPublish", args]);
       assert.ok(fs.existsSync(args.coverImagePath), "the cover exists while Eldorado reads it");
+      if (opts.eldoradoGate) await opts.eldoradoGate(args);
       if (opts.eldoradoPublishError) throw opts.eldoradoPublishError;
       return { externalId: "eld-" + ++seq, url: "https://eldorado.example.test/o/" + seq };
     },
@@ -127,6 +128,7 @@ function harness(opts = {}) {
     },
     async markFed(ids, o) {
       calls.push(["markFed", ids.map(String), o]);
+      if (opts.markFedError) throw opts.markFedError;
       return ids.length;
     },
     deliveryText(c, offer) {
@@ -687,6 +689,52 @@ test("publish ggsel: claim, publish with the texts, row with units, then markFed
   assertClean(h);
 });
 
+test("publish ggsel: the ledger learns at once that the codes are in the vault", async () => {
+  const p = await ggselProduct();
+  const claimed = claimedUnits(2);
+  const other = new mongoose.Types.ObjectId();
+  const base = { product: p._id, offer: p.offer, unitStatus: "available" };
+  await CodeStock.insertMany([
+    { ...base, loginId: "l1", itemKey: "i1", state: "in_unit", unit: claimed[0].ledgerId },
+    { ...base, loginId: "l2", itemKey: "i2", state: "in_unit", unit: claimed[0].ledgerId, unitStatus: "sold" },
+    { ...base, loginId: "l3", itemKey: "i3", state: "in_unit", unit: claimed[1].ledgerId },
+    { ...base, loginId: "l4", itemKey: "i4", state: "held", unit: claimed[1].ledgerId, problem: "same code as another stored code" },
+    { ...base, loginId: "l5", itemKey: "i5", state: "in_unit", unit: other },
+  ]);
+  const h = harness({ claimed });
+  const out = await h.pub.publishProduct(p._id);
+  assert.equal(out.results[0].ok, true);
+
+  const rows = await CodeStock.find({}).lean();
+  const by = Object.fromEntries(rows.map((r) => [r.loginId, r]));
+  for (const k of ["l1", "l2", "l3"]) {
+    assert.equal(by[k].state, "in_unit", k + " keeps its state");
+    assert.equal(by[k].unitStatus, "fed", k);
+    assert.equal(by[k].wasFed, true, k);
+    assert.deepEqual(by[k].history, [], k + " gets no history entry");
+  }
+  assert.equal(by.l4.state, "held");
+  assert.equal(by.l4.unitStatus, "available", "only in_unit rows are touched");
+  assert.equal(by.l4.wasFed, false);
+  assert.equal(by.l5.unitStatus, "available", "another unit is untouched");
+  assert.equal(by.l5.wasFed, false);
+  assertClean(h);
+});
+
+test("publish ggsel: the ledger is marked fed even when markFed fails", async () => {
+  const p = await ggselProduct();
+  const claimed = claimedUnits(1);
+  await CodeStock.create({ loginId: "l1", itemKey: "i1", state: "in_unit", unit: claimed[0].ledgerId, product: p._id, unitStatus: "sold" });
+  const h = harness({ claimed, markFedError: new Error("ledger busy") });
+  const out = await h.pub.publishProduct(p._id);
+  assert.equal(out.results[0].ok, true, "the listing is up and has its row");
+  const row = await CodeStock.findOne({ loginId: "l1" }).lean();
+  assert.equal(row.unitStatus, "fed");
+  assert.equal(row.wasFed, true);
+  assert.ok(h.events.some((e) => e.level === "warn" && /not marked as in the vault/.test(e.msg)));
+  assertClean(h);
+});
+
 test("publish ggsel: the vault size caps the claim", async () => {
   const p = await ggselProduct({ ggsel: { vaultSize: 2 } });
   const h = harness({ shelf: 9, claimed: claimedUnits(9) });
@@ -963,5 +1011,110 @@ test("retire: a draft retires without touching any market", async () => {
   assert.equal(res.ok, true);
   assert.equal(res.product.status, "retired");
   assert.equal(h.calls.length, 0);
+  assertClean(h);
+});
+
+// --- one product at a time ---------------------------------------------------------------
+
+async function waitFor(cond, what) {
+  for (let i = 0; i < 500; i += 1) {
+    if (cond()) return;
+    await new Promise((r) => setImmediate(r));
+  }
+  assert.fail("timed out waiting for " + what);
+}
+
+const settle = () => new Promise((r) => setImmediate(r));
+
+test("serial: two concurrent publishes of one product put up exactly one Eldorado offer", async () => {
+  const p = await activeProduct();
+  let release;
+  const gate = new Promise((r) => (release = r));
+  const h = harness({ eldoradoGate: () => gate });
+  // One caller holds the ObjectId, the other its string: the same product.
+  const a = h.pub.publishProduct(p._id);
+  const b = h.pub.publishProduct(String(p._id));
+  await waitFor(() => h.named("eldoradoPublish").length === 1, "the first publish to reach Eldorado");
+  await settle();
+  assert.equal(h.named("shelfFor").length, 1, "the second publish waits for the first");
+  assert.equal(h.pub.busy(), 1);
+  release();
+  const [ra, rb] = await Promise.all([a, b]);
+  assert.equal(ra.results[0].ok, true);
+  assert.deepEqual(rb.results, [{ market: "eldorado", ok: false, skipped: "already live" }]);
+  assert.equal(h.named("eldoradoPublish").length, 1);
+  assert.equal(await MarketplaceListing.countDocuments({ marketplace: "eldorado", status: "active" }), 1);
+  await settle();
+  assert.equal(h.pub.busy(), 0, "a finished chain is forgotten");
+  assertClean(h);
+});
+
+test("serial: different products publish in parallel", async () => {
+  const p1 = await activeProduct({ name: "one" });
+  const p2 = await activeProduct({ name: "two" });
+  let arrived = 0;
+  let open;
+  const both = new Promise((r) => (open = r));
+  const h = harness({
+    // Each publish waits until BOTH are inside Eldorado's call: only possible
+    // if the two products are not queued behind each other.
+    eldoradoGate: async () => {
+      arrived += 1;
+      if (arrived === 2) open();
+      let timer;
+      const late = new Promise((_, rej) => (timer = setTimeout(() => rej(new Error("products were serialised")), 2000)));
+      try {
+        await Promise.race([both, late]);
+      } finally {
+        clearTimeout(timer);
+      }
+    },
+  });
+  const [r1, r2] = await Promise.all([h.pub.publishProduct(p1._id), h.pub.publishProduct(p2._id)]);
+  assert.equal(r1.results[0].ok, true, JSON.stringify(r1));
+  assert.equal(r2.results[0].ok, true, JSON.stringify(r2));
+  assert.equal(h.named("eldoradoPublish").length, 2);
+  assertClean(h);
+});
+
+test("serial: a failed action does not jam the product's chain", async () => {
+  const p = await activeProduct();
+  const h = harness();
+  const real = h.deps.config.get;
+  let reads = 0;
+  h.deps.config.get = async () => {
+    reads += 1;
+    if (reads === 1) throw new Error("config down");
+    return real();
+  };
+  const a = h.pub.publishProduct(p._id);
+  const b = h.pub.publishProduct(p._id);
+  await assert.rejects(a, /config down/);
+  const rb = await b;
+  assert.equal(rb.results[0].ok, true, JSON.stringify(rb));
+  await settle();
+  assert.equal(h.pub.busy(), 0);
+  assertClean(h);
+});
+
+test("serial: a pause queued behind a publish takes down the offer that publish put up", async () => {
+  const p = await activeProduct();
+  let release;
+  const gate = new Promise((r) => (release = r));
+  const h = harness({ eldoradoGate: () => gate });
+  const a = h.pub.publishProduct(p._id);
+  const b = h.pub.pause(p._id);
+  await waitFor(() => h.named("eldoradoPublish").length === 1, "the publish to reach Eldorado");
+  await settle();
+  assert.equal(h.named("eldoradoDelist").length, 0, "the pause waits");
+  release();
+  const ra = await a;
+  const rb = await b;
+  assert.equal(ra.results[0].ok, true);
+  assert.equal(rb.ok, true);
+  assert.equal(rb.delisted, 1);
+  assert.deepEqual(h.named("eldoradoDelist").map((c) => c[1]), [ra.results[0].externalId]);
+  assert.equal(await MarketplaceListing.countDocuments({ status: "active" }), 0);
+  assert.equal((await CodeProduct.findById(p._id).lean()).status, "paused");
   assertClean(h);
 });
