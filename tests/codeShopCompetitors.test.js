@@ -33,12 +33,12 @@ const slots = (...labels) => labels.map((label, i) => ({ slotKey: "s" + i, label
 
 // --- queriesFor ---------------------------------------------------------------
 
-test("queriesFor: the two longest labels and '<game> codes'", () => {
+test("queriesFor: the two longest labels and the game's name", () => {
   const product = { slots: slots("Moon Spray", "Sun Tea Player Icon", "Star Banner", "Ana") };
   assert.deepEqual(queriesFor(product, { displayName: "Overwatch 2" }), [
     "Sun Tea Player Icon",
     "Star Banner",
-    "Overwatch 2 codes",
+    "Overwatch 2",
   ]);
 });
 
@@ -47,11 +47,11 @@ test("queriesFor: equal lengths keep slot order; blanks and duplicates are dropp
   assert.deepEqual(queriesFor(product, { displayName: "Delta Force" }), [
     "Aaaa Bbbb",
     "Cccc Dddd",
-    "Delta Force codes",
+    "Delta Force",
   ]);
   assert.deepEqual(queriesFor({ slots: slots("One Label") }, null), ["One Label"]);
   assert.deepEqual(queriesFor({ slots: [] }, { displayName: "" }), []);
-  assert.deepEqual(queriesFor({}, { displayName: "Overwatch 2" }), ["Overwatch 2 codes"]);
+  assert.deepEqual(queriesFor({}, { displayName: "Overwatch 2" }), ["Overwatch 2"]);
 });
 
 test("queriesFor: saved queries win over the defaults", () => {

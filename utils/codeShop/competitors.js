@@ -53,7 +53,10 @@ function cleanText(v) {
 }
 
 // The owner's pinned queries when there are any; else up to 3:
-// the two longest slot labels (ties keep slot order) and "<game> codes".
+// the two longest slot labels (ties keep slot order) and the game's name on
+// its own. The search is already inside Eldorado's "Twitch Drops" category,
+// where most sellers of these items list them as Twitch drops, not as codes:
+// "<game> codes" found only the few titles that say "codes".
 // Duplicates (ignoring case and punctuation) are dropped.
 function queriesFor(product, guide) {
   const p = product || {};
@@ -79,7 +82,7 @@ function queriesFor(product, guide) {
     add(x.label);
   }
   const displayName = cleanText(guide && guide.displayName);
-  if (displayName) add(displayName + " codes");
+  if (displayName) add(displayName);
   return out.slice(0, MAX_QUERIES);
 }
 

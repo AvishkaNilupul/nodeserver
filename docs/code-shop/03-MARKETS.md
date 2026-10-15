@@ -99,7 +99,8 @@ vault must be emptied from the Listings page) â€” the result says so. Product â†
 `scoreOffer(title, labels)`, `parseSearch(json)`.
 
 - `queriesFor`: `product.competitors.queries` if set; else up to 3 queries: the
-  two longest labels and `displayName + " codes"`.
+  two longest labels and `displayName` alone (the search is inside Eldorado's
+  Twitch Drops category, where rivals list these items as Twitch drops).
 - Request: `GET https://www.eldorado.gg/api/v1/item-management/offers?gameId=235&category=CustomItem&pageIndex=N&pageSize=50&searchQuery=<q>`
   with `accept: application/json` and a browser user-agent, through `deps.fetch`;
   pages 1..3 while a page has 50 results; `deps.sleep(1500)` between requests.
