@@ -267,3 +267,25 @@ html.s-lock,html.s-lock body{overflow:hidden;}
 }
 @media (pointer:coarse){.s-btn{min-height:38px;}.s-btn.is-sm{min-height:32px;}.s-btn.is-icon{width:38px;}.s-btn.is-sm.is-icon{width:32px;}.s-chip{min-height:34px;}.s-menu-item{min-height:40px;}}
 @media (prefers-reduced-motion:reduce){*,*::before,*::after{animation-duration:.01ms !important;animation-iteration-count:1 !important;transition-duration:.01ms !important;scroll-behavior:auto !important;}}
+
+/* ---- Sales tab ---- (tab-sales.js + sales-*.js: the code shop, docs/code-shop/04-OPS.md).
+   Everything is scoped `s-sales-*`; the tab's root carries `s-sales`. */
+.s-sales .s-input[aria-invalid="true"],.s-sales .s-textarea[aria-invalid="true"]{border-color:var(--s-err);box-shadow:0 0 0 1px var(--s-err);}
+.s-sales-json{margin:0;max-height:260px;overflow:auto;padding:8px 10px;border:1px solid var(--line);border-radius:8px;background:var(--surface-2);font:12px/1.45 var(--s-mono);white-space:pre-wrap;overflow-wrap:anywhere;}
+.s-sales-fields{display:grid;gap:12px;grid-template-columns:repeat(auto-fill,minmax(min(100%,170px),1fr));}
+.s-sales-wide{grid-column:1/-1;}
+.s-sales-indent{padding-left:24px;}
+.s-sales-num{width:88px;flex:none;}
+.s-sales-select{width:auto;max-width:240px;}
+.s-sales-lines{min-height:96px;}
+.s-sales-savebar{position:sticky;bottom:12px;z-index:5;}
+.s-sales-savebar>.s-card{box-shadow:var(--s-shadow);}
+.s-sales-game{flex-wrap:wrap;align-items:flex-end;}
+.s-sales-game-id{width:150px;}
+.s-sales-game>.s-field{flex:1 1 170px;}
+.s-sales-game>.s-check{min-height:34px;}
+.s-sales-game>.s-help{flex-basis:100%;}
+.s-sales-adopt+.s-sales-adopt{padding-top:12px;border-top:1px solid var(--line);}
+.s-sales-problems{margin:0;padding-left:18px;}
+.s-sales-runout>*{flex:1 1 100%;min-width:0;}
+@media (max-width:768px){.s-sales-game-id{width:100%;}.s-sales-select{max-width:none;flex:1 1 140px;}}
