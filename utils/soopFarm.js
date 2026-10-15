@@ -114,6 +114,7 @@ class SoopFarm {
     this.primed = new Set(); // accounts whose mission counters were read once this boot
     this.primeChain = Promise.resolve();
     this.nextWatchAt = 0;
+    this.waking = null; // the wake in flight, settled (see _watch in ./soop/farmBots.js)
     this.timers = [];
     this.invTimers = new Map();
     this.plainReads = Promise.resolve();
@@ -252,19 +253,25 @@ class SoopFarm {
   // One or many Cookie-Editor exports. Each is proven logged in before it is stored.
   async importAccounts(text) {
     const results = [];
+    const createdIds = [];
     const parts = splitCookieExports(String(text || ""));
     for (let i = 0; i < parts.length; i++) {
       if (i) await this.clock.sleep(IMPORT_PACE_MS);
       try {
-        results.push({ ok: true, ...(await this._importOne(parts[i])) });
+        const { created, ...r } = await this._importOne(parts[i]);
+        if (created) createdIds.push(r.id);
+        results.push({ ok: true, ...r });
       } catch (e) {
         results.push({ ok: false, id: null, nick: null, country: null, error: e.message });
       }
     }
     this.accountsCache = null;
     await this._reconcile({ force: true });
-    // Never fails the import: _autoJoin reports its own trouble.
-    await this._autoJoin(results.filter((r) => r.ok && r.id).map((r) => r.id));
+    // Only logins this import created: a re-import (a fresh cookie for a login
+    // that already existed) never puts one in a bot, so a login the owner keeps
+    // out of every bot stays out. Never fails the import: _autoJoin reports
+    // its own trouble.
+    await this._autoJoin(createdIds);
     return results;
   }
 
@@ -276,7 +283,10 @@ class SoopFarm {
     const id = String(info.loginId || "").trim();
     if (!id) throw new Error("SOOP did not return a login id for this cookie");
     if (info.country) this.egressCountry = info.country;
-    await SoopAccount.findOneAndUpdate(
+    // `before`: the row as it was ahead of this upsert, null when the upsert
+    // created it. One atomic read, so two imports of the same new login cannot
+    // both count it as new (loginId is unique).
+    const before = await SoopAccount.findOneAndUpdate(
       { loginId: id },
       {
         $set: {
@@ -289,8 +299,10 @@ class SoopFarm {
           deadAt: null,
         },
       },
-      { upsert: true, returnDocument: "after" },
-    );
+      { upsert: true, returnDocument: "before" },
+    )
+      .select("_id")
+      .lean();
     // Swap, never delete: a running session picks the new login up on its next loop.
     this.clients.set(id, this.clientFactory(cookies, { id }));
     if (!this.progress.has(id)) this.progress.set(id, {});
@@ -302,7 +314,7 @@ class SoopFarm {
     // the import does not wait for SOOP's inventory.
     // `force`: what an earlier login was refused is tried again with this one.
     if (this.autoInventory) this.autoClaim.account(id, { sync: true, force: true }).catch(() => {});
-    return { id, nick: info.nick || null, country: info.country || null };
+    return { id, nick: info.nick || null, country: info.country || null, created: !before };
   }
 
   async checkAccounts(ids) {

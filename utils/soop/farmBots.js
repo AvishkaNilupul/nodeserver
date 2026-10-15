@@ -89,14 +89,37 @@ module.exports = {
   // the accounts that have work. Also covers a restart, a cookie re-import, an
   // un-sold, and a session that ended on a passing error.
   async _reconcile({ force = false } = {}) {
-    const active = [...this.bots.values()].filter((b) => b.active);
-    if (active.length && (force || this.clock.now() >= this.nextWatchAt)) await this._wake(active);
+    await this._watch(force);
     if (!force && Date.now() - (this.invTotalsAt || 0) < TOTALS_MS - TOTALS_SLACK_MS) return;
     this.invTotalsAt = Date.now();
     this.invTotals = await this.inventory
       .summary()
       .then((s) => s.totals)
       .catch(() => this.invTotals);
+  },
+
+  // One wake at a time. The timer ticks every 30 s and a wake behind a slow
+  // campaign list (SOOP through the Pi) can take longer than that: a tick that
+  // finds one still running leaves it be (that wake sets nextWatchAt when it
+  // ends). A forced call (an import, a bot change, a restart) waits for it,
+  // then wakes once more with what changed meanwhile. Two wakes never overlap,
+  // so _accountDone and _maybeFinish never run twice for the same look.
+  async _watch(force) {
+    if (this.waking && !force) return;
+    while (this.waking) await this.waking;
+    const active = [...this.bots.values()].filter((b) => b.active);
+    if (!active.length || !(force || this.clock.now() >= this.nextWatchAt)) return;
+    const run = this._wake(active);
+    const settled = run.then(
+      () => {},
+      () => {},
+    );
+    this.waking = settled; // set before any await: the next caller sees it
+    try {
+      await run;
+    } finally {
+      if (this.waking === settled) this.waking = null;
+    }
   },
 
   async _wake(active) {

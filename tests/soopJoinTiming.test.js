@@ -192,3 +192,139 @@ test("end to end: the same park on a campaign that started yesterday still waits
   await fresh();
   near(await parkOnQuietStart(-86400e3), 180000, "a day after the start");
 });
+
+// ---- one wake at a time --------------------------------------------------------
+
+// The timer ticks every 30 s; a wake behind a slow campaign list (SOOP read
+// through the Pi) can take longer. Call this once the accounts, campaigns and
+// bots are in place: the next list read waits for release(), the next look is
+// due, and every wake is logged with how many ran at once.
+function slowNextWake() {
+  const proto = Object.getPrototypeOf(farm);
+  let release;
+  const gate = new Promise((r) => (release = r));
+  let slow = true;
+  farm.farmable = async function () {
+    if (slow) {
+      slow = false;
+      await gate;
+    }
+    return proto.farmable.call(this);
+  };
+  const log = [];
+  let running = 0;
+  let most = 0;
+  farm._wake = async function (active) {
+    running++;
+    most = Math.max(most, running);
+    log.push("start " + active.length);
+    try {
+      return await proto._wake.call(this, active);
+    } finally {
+      running--;
+      log.push("end");
+    }
+  };
+  farm.nextWatchAt = 0;
+  return {
+    release,
+    log,
+    most: () => most,
+    restore() {
+      delete farm.farmable;
+      delete farm._wake;
+    },
+  };
+}
+
+// An auto bot on a campaign that started a day ago and is not live: each wake
+// reads the list and puts acc1 back to sleep.
+async function sleepingBot() {
+  await addAccount("acc1");
+  world.addCampaign({ live: false, itemList: [60] });
+  await farm.campaignsView({ force: true });
+  const made = await farm.createBot({ mode: "auto", accountIds: ["acc1"] });
+  assert.equal(made.ok, true, made.error);
+  return made.bot;
+}
+
+test("a tick that finds a slow wake still running wakes nothing itself; the running wake sets the next look", async () => {
+  await fresh();
+  await sleepingBot();
+  const w = slowNextWake();
+  try {
+    let firstDone = false;
+    const first = farm._reconcile().then(() => (firstDone = true));
+    await until(() => w.log.length === 1, "the first wake started");
+    await farm._reconcile(); // the next tick, while the first wake waits on the list
+    assert.equal(firstDone, false, "the first wake is still running");
+    assert.deepEqual(w.log, ["start 1"], "the tick started no wake of its own");
+
+    w.release();
+    await first;
+    assert.deepEqual(w.log, ["start 1", "end"], "one wake in all");
+    assert.equal(w.most(), 1);
+    assert.equal(farm.waking, null);
+    // nextWatchAt as before: set by the wake that ran, and a tick before it wakes nothing.
+    assert.ok(farm.nextWatchAt > Date.now() + 60000, `next look in ${farm.nextWatchAt - Date.now()} ms`);
+    await farm._reconcile();
+    assert.deepEqual(w.log, ["start 1", "end"], "not due yet");
+  } finally {
+    w.release();
+    w.restore();
+  }
+});
+
+test("a forced reconcile during a slow wake waits for it, then wakes once more", async () => {
+  await fresh();
+  await sleepingBot();
+  const w = slowNextWake();
+  try {
+    const first = farm._reconcile();
+    await until(() => w.log.length === 1, "the first wake started");
+    let forcedDone = false;
+    const forced = farm._reconcile({ force: true }).then(() => (forcedDone = true));
+    await sleep(60);
+    assert.deepEqual(w.log, ["start 1"], "no second wake beside the first");
+    assert.equal(forcedDone, false, "the forced call is waiting");
+
+    w.release();
+    await Promise.all([first, forced]);
+    assert.deepEqual(w.log, ["start 1", "end", "start 1", "end"], "its own wake, after the first had ended");
+    assert.equal(w.most(), 1);
+    assert.equal(farm.waking, null);
+  } finally {
+    w.release();
+    w.restore();
+  }
+});
+
+test("a bot created during a slow wake is woken by the wake that follows it, never beside it", async () => {
+  await fresh();
+  await sleepingBot();
+  await addAccount("acc2");
+  const camp = world.addCampaign({ live: true, itemList: [60, 120] });
+  await farm.campaignsView({ force: true });
+  const w = slowNextWake();
+  try {
+    const first = farm._reconcile();
+    await until(() => w.log.length === 1, "the first wake started");
+    // createBot ends in a forced reconcile: the same wait, then a wake that sees the new bot.
+    let made = null;
+    const creating = farm.createBot({ mode: "campaign", dropsIdx: camp.dropsIdx, accountIds: ["acc2"] }).then((r) => (made = r));
+    await sleep(60);
+    assert.equal(made, null, "createBot waits for the running wake");
+    assert.equal(farm.sessions.has("acc2"), false);
+    assert.deepEqual(w.log, ["start 1"]);
+
+    w.release();
+    await Promise.all([first, creating]);
+    assert.equal(made.ok, true, made.error);
+    assert.deepEqual(w.log, ["start 1", "end", "start 2", "end"], "the second wake had both bots");
+    assert.equal(w.most(), 1);
+    assert.equal(farm.sessions.has("acc2"), true, "acc2 joined on the wake after");
+  } finally {
+    w.release();
+    w.restore();
+  }
+});

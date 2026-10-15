@@ -267,6 +267,43 @@ test("a sold login is left out, and a refusal or a crash never fails the import"
   assert.deepEqual((await docOf(joiner.id)).accountIds, ["j1", "n3"]);
 });
 
+test("only a login this import created joins: an existing login in no bot, re-imported, stays out", async () => {
+  await fresh();
+  // "kept" and "pulled" exist before any autoJoin bot does; both can farm.
+  await importIds("j1", "kept", "pulled");
+  const joiner = await makeBot({ name: "Joiner", accountIds: ["j1", "pulled"], autoJoin: true });
+  // The owner takes "pulled" out of the bot on purpose.
+  const out = await farm.updateBot(joiner.id, { removeIds: ["pulled"] });
+  assert.equal(out.ok, true, out.error);
+  assert.equal(inAnyBot("pulled"), false);
+
+  // A fresh cookie for each: imported fine, and neither goes in a bot.
+  for (const id of ["kept", "pulled"]) {
+    const [r] = await reimport(id);
+    assert.equal(r.ok, true, r.error);
+    assert.equal(inAnyBot(id), false, id + " stays out of every bot");
+  }
+  assert.deepEqual((await docOf(joiner.id)).accountIds, ["j1"]);
+  assert.equal(joinRows(joiner.id).length, 0, "no auto-join row");
+
+  // One paste of a re-import and a brand-new login: only the new one joins.
+  const results = await farm.importAccounts(
+    [JSON.stringify(world.addAccount({ id: "kept" })), JSON.stringify(world.addAccount({ id: "brandnew" }))].join("\n"),
+  );
+  assert.deepEqual(results.map((r) => [r.id, r.ok]), [["kept", true], ["brandnew", true]]);
+  // The import result keeps its contract shape: `created` stays internal.
+  for (const r of results) assert.equal("created" in r, false, JSON.stringify(r));
+  assert.deepEqual((await docOf(joiner.id)).accountIds, ["j1", "brandnew"]);
+  assert.equal(inAnyBot("kept"), false);
+  const rows = joinRows(joiner.id);
+  assert.equal(rows.length, 1);
+  assert.match(rows[0].msg, /1 new login\(s\) joined the bot "Joiner" automatically: brandnew$/);
+
+  // _importOne itself says which is which.
+  assert.equal((await farm._importOne(JSON.stringify(world.addAccount({ id: "kept" })))).created, false);
+  assert.equal((await farm._importOne(JSON.stringify(world.addAccount({ id: "another" })))).created, true);
+});
+
 test("accountView carries the cookie-renewal fields, and the state view reads them from the account row", async () => {
   const at = new Date("2026-10-14T03:00:00Z");
   const full = views.accountView({ loginId: "x", status: "ok", twitchLogin: "tw_user", renewedAt: at, renewError: "oauth: denied" }, {});
