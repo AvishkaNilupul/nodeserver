@@ -27,6 +27,7 @@ const NOW = Date.parse("2026-10-15T12:00:00Z");
 
 const ORDER = [
   "ingest",
+  "foreign",
   "reconcile",
   "expiry",
   "claimAlert",
@@ -40,6 +41,7 @@ const ORDER = [
   "farmPriority",
   "adoptable",
 ];
+const GUARDED = ["fill", "plan", "publishPending", "autoPublish"];
 
 // --- fakes ---------------------------------------------------------------------
 
@@ -148,6 +150,7 @@ function harness(opts = {}) {
       },
     },
     ingest: runner("ingest", { scanned: 0, added: 0 }),
+    foreign: runner("foreign", { checked: 0, held: 0 }),
     reconcile: runner("reconcile"),
     expiry: runner("expiry"),
     claimAlert: runner("claimAlert"),
@@ -241,6 +244,7 @@ test("modules: exactly the contract's set, built once from one shared deps, noth
     "config",
     "events",
     "ingest",
+    "foreign",
     "reconcile",
     "expiry",
     "units",
@@ -261,6 +265,7 @@ test("modules: exactly the contract's set, built once from one shared deps, noth
     config: ["get", "set", "forget"],
     events: ["log", "recent", "stamp", "has"],
     ingest: ["run"],
+    foreign: ["run"],
     reconcile: ["run"],
     expiry: ["run"],
     units: ["build", "dissolve", "pull"],
@@ -327,6 +332,7 @@ test("tick: every step in the contract's order", async () => {
   assert.deepEqual(Object.keys(rec.steps), ORDER);
   assert.deepEqual(h.calls, [
     "ingest",
+    "foreign",
     "reconcile",
     "expiry",
     "claimAlert",
@@ -368,7 +374,7 @@ test("tick: a failing step is recorded and logged, and every later step still ru
   assert.deepEqual(rec.steps.reconcile, { error: "database went away" });
   assert.deepEqual(rec.steps.digest, { error: "sync throw" });
   assert.deepEqual(Object.keys(rec.steps), ORDER);
-  assert.deepEqual(h.calls, ["ingest", "expiry", "claimAlert", "fill", "planner", "pricing", "farmPriority", "adopt.candidates"]);
+  assert.deepEqual(h.calls, ["ingest", "foreign", "expiry", "claimAlert", "fill", "planner", "pricing", "farmPriority", "adopt.candidates"]);
   const errors = h.logs.filter((e) => e.level === "error" && e.kind === "tick");
   assert.equal(errors.length, 2);
   assert.match(errors[0].msg, /reconcile failed: database went away/);
@@ -387,7 +393,8 @@ test("tick: a module that cannot be built becomes a stub that fails its step, no
   await assert.rejects(h.svc.modules.ingest.run(), (err) => err.status === 503 && /ingest module did not load: broken file/.test(err.message));
   const rec = await h.svc.tick();
   assert.match(rec.steps.ingest.error, /did not load: broken file/);
-  assert.equal(h.calls[0], "reconcile");
+  assert.equal(h.calls[0], "foreign");
+  assert.equal(h.calls[1], "reconcile");
 });
 
 test("tick: a factory hook gets the shared deps", () => {
@@ -453,7 +460,7 @@ test("runStep waits for a running tick instead of running on top of it", async (
   assert.deepEqual(h.calls, []);
   gate.resolve();
   await Promise.all([t, s]);
-  assert.deepEqual(h.calls.slice(-2), ["adopt.candidates", "fill"], "the manual fill ran after the whole tick");
+  assert.deepEqual(h.calls.slice(-3), ["adopt.candidates", "foreign", "fill"], "the manual fill (guard first) ran after the whole tick");
   assert.equal(h.calls.filter((c) => c === "fill").length, 2);
 });
 
@@ -485,6 +492,99 @@ test("tick: models are init()ed before the first step; a failed init is retried,
   // once it worked it is never asked again
   await h.svc.tick();
   for (const m of ["CodeProduct", "CodeShopConfig", "CodeShopEvent"]) assert.equal(h.models[m].inits, 1, m);
+});
+
+// --- foreign guard ------------------------------------------------------------------
+
+test("foreign: when the guard fails, fill, plan, publishPending and autoPublish are skipped for that tick only", async () => {
+  let failForeign = true;
+  const h = harness({
+    cfg: { autoPublish: true },
+    products: [product("p1"), product("d1", { status: "draft", offer: null, proposed: { units: 5 } })],
+    shelf: { "of-p1": 2 },
+    modules: {
+      foreign: {
+        run: async () => {
+          h.calls.push("foreign");
+          if (failForeign) throw new Error("could not read the stock rows");
+          return { checked: 3, held: 0 };
+        },
+      },
+    },
+  });
+  const r1 = await h.svc.tick();
+  assert.deepEqual(Object.keys(r1.steps), ORDER);
+  assert.deepEqual(r1.steps.foreign, { error: "could not read the stock rows" });
+  for (const s of GUARDED) assert.deepEqual(r1.steps[s], { skipped: "foreign guard failed" }, s);
+  assert.deepEqual(h.calls, ["ingest", "foreign", "reconcile", "expiry", "claimAlert", "pricing", "scan:p1", "digest", "farmPriority", "adopt.candidates"]);
+  assert.deepEqual(h.published, []);
+  assert.deepEqual(h.approved, []);
+  assert.ok(h.logs.some((e) => e.level === "error" && /foreign failed: could not read the stock rows/.test(e.msg)));
+
+  // The next tick decides for itself.
+  failForeign = false;
+  h.calls.length = 0;
+  h.clock.now += 5 * MIN;
+  const r2 = await h.svc.tick();
+  assert.deepEqual(r2.steps.foreign, { checked: 3, held: 0 });
+  assert.deepEqual(h.calls.slice(0, 8), ["ingest", "foreign", "reconcile", "expiry", "claimAlert", "fill", "planner", "publish:p1"]);
+  assert.ok(h.calls.includes("approve:d1"));
+});
+
+test("foreign: a guard module that cannot be built keeps the guarded steps off", async () => {
+  const h = harness({
+    modules: { foreign: undefined },
+    factories: {
+      foreign: () => {
+        throw new Error("broken file");
+      },
+    },
+    products: [product("p1")],
+    shelf: { "of-p1": 2 },
+  });
+  const rec = await h.svc.tick();
+  assert.match(rec.steps.foreign.error, /foreign module did not load/);
+  for (const s of GUARDED) assert.deepEqual(rec.steps[s], { skipped: "foreign guard failed" }, s);
+  assert.equal(h.calls.includes("fill"), false);
+  assert.deepEqual(h.published, []);
+});
+
+test("foreign: runStep('foreign') runs the guard alone; a guarded step asked for by hand runs the guard first", async () => {
+  const h = harness();
+  const r = await h.svc.runStep("foreign");
+  assert.deepEqual(h.calls, ["foreign"]);
+  assert.deepEqual(r.steps, { foreign: { checked: 0, held: 0 } });
+
+  h.calls.length = 0;
+  for (const s of GUARDED) {
+    const rec = await h.svc.runStep(s);
+    assert.deepEqual(Object.keys(rec.steps), ["foreign", s], s);
+  }
+  assert.deepEqual(h.calls, ["foreign", "fill", "foreign", "planner", "foreign", "foreign"]);
+
+  h.calls.length = 0;
+  await h.svc.runStep("reconcile");
+  assert.deepEqual(h.calls, ["reconcile"], "an unguarded step does not run the guard");
+});
+
+test("foreign: a guarded step asked for by hand is skipped when the guard fails", async () => {
+  const h = harness({
+    modules: {
+      foreign: {
+        run: async () => {
+          throw new Error("guard down");
+        },
+      },
+    },
+    products: [product("p1")],
+    shelf: { "of-p1": 2 },
+  });
+  const r1 = await h.svc.runStep("fill");
+  assert.deepEqual(r1.steps, { foreign: { error: "guard down" }, fill: { skipped: "foreign guard failed" } });
+  const r2 = await h.svc.runStep("publishPending");
+  assert.deepEqual(r2.steps.publishPending, { skipped: "foreign guard failed" });
+  assert.equal(h.calls.includes("fill"), false);
+  assert.deepEqual(h.published, []);
 });
 
 // --- gates ---------------------------------------------------------------------------
@@ -748,7 +848,7 @@ test("runStep: a failing step comes back recorded, not thrown", async () => {
     },
   });
   const r = await h.svc.runStep("fill");
-  assert.deepEqual(r.steps, { fill: { error: "no luck" } });
+  assert.deepEqual(r.steps, { foreign: { checked: 0, held: 0 }, fill: { error: "no luck" } });
 });
 
 // --- start / stop -----------------------------------------------------------------------------
@@ -891,6 +991,7 @@ test("a timer tick where every step fails still resolves with a record", async (
   const h = harness({
     modules: {
       ingest: boom,
+      foreign: boom,
       reconcile: boom,
       expiry: boom,
       claimAlert: boom,
@@ -904,7 +1005,10 @@ test("a timer tick where every step fails still resolves with a record", async (
     },
   });
   const rec = await h.svc.tick();
-  for (const s of ORDER) assert.ok(rec.steps[s].error, s);
+  for (const s of ORDER) {
+    if (GUARDED.includes(s)) assert.deepEqual(rec.steps[s], { skipped: "foreign guard failed" }, s);
+    else assert.ok(rec.steps[s].error, s);
+  }
 });
 
 // --- real Mongo: the service's own queries and the real modules' wiring ------------------

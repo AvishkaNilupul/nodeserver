@@ -40,10 +40,13 @@ const DEFAULT_SCAN_HOURS = 12;
 const ALLOWED_MARKETS = ["eldorado", "ggsel"];
 const ERROR_MAX = 300;
 
-// The tick, in the contract's order; "adoptable" (the panel's count of
-// hand-made offers that could be adopted) rides at the end.
+// The tick, in the contract's order; "foreign" (the guard against codes that
+// already sit in another listing's stock) runs right after ingest, and
+// "adoptable" (the panel's count of hand-made offers that could be adopted)
+// rides at the end.
 const STEPS = Object.freeze([
   "ingest",
+  "foreign",
   "reconcile",
   "expiry",
   "claimAlert",
@@ -58,12 +61,18 @@ const STEPS = Object.freeze([
   "adoptable",
 ]);
 const STEP_SET = new Set(STEPS);
+// Steps that put free codes into bundles, drafts or listings. They run only
+// after the foreign guard succeeded in the same run: a code that is already on
+// sale in a stock row the shop does not own must never reach them.
+const GUARDED_STEPS = new Set(["fill", "plan", "publishPending", "autoPublish"]);
+const FOREIGN_FAILED = "foreign guard failed";
 
 // The modules, in the order `modules` lists them.
 const MODULE_NAMES = Object.freeze([
   "config",
   "events",
   "ingest",
+  "foreign",
   "reconcile",
   "expiry",
   "units",
@@ -86,6 +95,7 @@ const SURFACE = {
   config: ["get", "set", "forget"],
   events: ["log", "recent", "stamp", "has"],
   ingest: ["run"],
+  foreign: ["run"],
   reconcile: ["run"],
   expiry: ["run"],
   units: ["build", "dissolve", "pull"],
@@ -228,6 +238,7 @@ function createService(overrides = {}) {
     events: () => require("./events").createEvents({ model: givenModel("CodeShopEvent"), now }),
     units: (d) => require("./units").createUnits(d),
     ingest: (d) => require("./ingest").createIngest(d),
+    foreign: (d) => require("./foreign").createForeignGuard(d),
     reconcile: (d) => require("./reconcile").createReconcile(d),
     expiry: (d) => require("./expiry").createExpiry(d),
     fill: (d) => require("./fill").createFill(d),
@@ -251,6 +262,7 @@ function createService(overrides = {}) {
     "events",
     "units",
     "ingest",
+    "foreign",
     "reconcile",
     "expiry",
     "fill",
@@ -528,6 +540,7 @@ function createService(overrides = {}) {
 
   const HANDLERS = {
     ingest: () => modules.ingest.run(),
+    foreign: () => modules.foreign.run(),
     reconcile: () => modules.reconcile.run(),
     expiry: () => modules.expiry.run(),
     claimAlert: () => modules.claimAlert.run(),
@@ -550,7 +563,10 @@ function createService(overrides = {}) {
 
   let currentStep = "";
 
-  // Never rejects. -> { at, ms, steps: { name: summary | { error } } }
+  // Never rejects. -> { at, ms, steps: { name: summary | { error } | { skipped } } }
+  // A guarded step runs only when the foreign guard succeeded earlier in the
+  // SAME run (the tick runs it right after ingest; a manual guarded step runs
+  // it first), so the rule holds without any state carried between runs.
   async function runSteps(names, { force = false } = {}) {
     const started = now();
     const steps = {};
@@ -561,11 +577,17 @@ function createService(overrides = {}) {
       await note({ level: "error", kind: "tick", msg: "Code shop did not run: its models are not ready (" + errText(err) + ")" });
       return { at: new Date(started), ms: Math.max(0, now() - started), steps };
     }
+    let foreignOk = false;
     for (const name of names) {
+      if (GUARDED_STEPS.has(name) && !foreignOk) {
+        steps[name] = { skipped: FOREIGN_FAILED };
+        continue;
+      }
       currentStep = name;
       try {
         const r = await HANDLERS[name]({ force });
         steps[name] = r === undefined ? null : r;
+        if (name === "foreign") foreignOk = true;
       } catch (err) {
         steps[name] = { error: errText(err) };
         await note({ level: "error", kind: "tick", msg: "Code shop step " + name + " failed: " + errText(err), data: { step: name } });
@@ -622,7 +644,10 @@ function createService(overrides = {}) {
       err.status = 400;
       throw err;
     }
-    return exclusive(() => runSteps([key], { force: true }));
+    // fill / plan / publishPending / autoPublish asked for by hand run the
+    // foreign guard first, as a tick does: the record then holds both.
+    const names = GUARDED_STEPS.has(key) ? ["foreign", key] : [key];
+    return exclusive(() => runSteps(names, { force: true }));
   }
 
   // --- timers ------------------------------------------------------------------------
