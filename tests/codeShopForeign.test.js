@@ -12,6 +12,9 @@
 // - a code that is in one of OUR units and also in a foreign row is a
 //   conflict: one error event and one Telegram line per pair, once, and
 //   nothing changes;
+// - a held code goes back to stock only when its stock row let it go (gone,
+//   or removed with no market mark), and never in a run that cannot read the
+//   stock rows;
 // - an unchanged row is decrypted once per process; a changed one again;
 // - the guard never writes a SuppliedAccount, and never outputs a code.
 //
@@ -196,7 +199,7 @@ test("both formats: a bare code, code lines, and codes in `extra` are held, nami
   const { guard, events, telegram } = makeGuard();
   const res = await guard.run();
 
-  assert.deepEqual(res, { scanned: 5, decrypted: 5, held: 7, conflicts: 0 });
+  assert.deepEqual(res, { scanned: 5, decrypted: 5, held: 7, conflicts: 0, released: 0 });
   const want = [
     [bare, s1],
     [line1, s2],
@@ -242,7 +245,7 @@ test("our units and removed rows are not foreign; in_stock and expiring rows are
 
   const { guard, events } = makeGuard();
   const res = await guard.run();
-  assert.deepEqual(res, { scanned: 1, decrypted: 1, held: 2, conflicts: 0 });
+  assert.deepEqual(res, { scanned: 1, decrypted: 1, held: 2, conflicts: 0, released: 0 });
 
   assert.equal((await rowOf(ourCode)).state, "in_unit");
   assert.equal((await rowOf(strayInOurs)).state, "in_stock", "our own unit is never read as foreign");
@@ -297,7 +300,7 @@ test("conflict: a code in one of our units AND in a foreign row is reported once
   assert.equal(events.logs.filter((e) => e.kind === "foreign-conflict").length, 1, "one 'alert failed' error");
 
   const res = await guard.run();
-  assert.deepEqual(res, { scanned: 1, decrypted: 0, held: 0, conflicts: 2 });
+  assert.deepEqual(res, { scanned: 1, decrypted: 0, held: 0, conflicts: 2, released: 0 });
   assert.equal(telegram.sent.length, 1, "one Telegram message");
   const lines = telegram.sent[0].split("\n");
   assert.equal(lines.length, 2, "one line per pair");
@@ -334,7 +337,7 @@ test("cache: an unchanged row is decrypted once; a changed row is read again", a
   assert.ok(calls > 0);
 
   const second = await guard.run();
-  assert.deepEqual(second, { scanned: 2, decrypted: 0, held: 0, conflicts: 0 });
+  assert.deepEqual(second, { scanned: 2, decrypted: 0, held: 0, conflicts: 0, released: 0 });
   assert.equal(secret.calls, calls, "no decrypt for an unchanged row");
 
   // The owner edits one row: a new code goes in.
@@ -362,4 +365,128 @@ test("a row that becomes one of our units, or leaves sale, drops out of the scan
   await SuppliedAccount.updateOne({ _id: s._id }, { $set: { status: "available" } });
   await ledgerRow(newCode(), { state: "in_unit", unit: s._id });
   assert.equal((await guard.run()).scanned, 0);
+});
+
+// ── release: a held code goes back when its listing lets it go ──────────────
+
+const MARKS = {
+  fedAt: () => new Date(NOW - DAY),
+  contentId: () => "content-1",
+  deliveredAt: () => new Date(NOW - DAY),
+  soldAt: () => new Date(NOW - DAY),
+  orderId: () => "order-test-1",
+  market: () => "ggsel",
+  listing: () => new mongoose.Types.ObjectId(),
+};
+
+// A code the guard held for this stock row (as a previous run would leave it).
+async function heldFor(supplied, fields = {}) {
+  const code = newCode();
+  const problem = foreignProblem(supplied._id);
+  await ledgerRow(code, {
+    state: "held",
+    problem,
+    history: [{ at: new Date(NOW - DAY), from: "in_stock", to: "held", why: problem }],
+    ...fields,
+  });
+  return code;
+}
+
+test("release: a stock row removed with no market mark, or gone, lets its codes back into stock", async () => {
+  const offer = await offerOf();
+  const removed = await stockRow(offer, "taken down", { status: "removed" });
+  const gone = await stockRow(offer, "deleted");
+  const c1 = await heldFor(removed);
+  const c2 = await heldFor(removed, { unit: new mongoose.Types.ObjectId(), unitStatus: "removed" });
+  const c3 = await heldFor(gone);
+  await SuppliedAccount.deleteOne({ _id: gone._id });
+  const before = await unitBytes();
+
+  const { guard, events } = makeGuard();
+  const res = await guard.run();
+  assert.deepEqual(res, { scanned: 0, decrypted: 0, held: 0, conflicts: 0, released: 3 });
+  for (const code of [c1, c2, c3]) {
+    const row = await rowOf(code);
+    assert.equal(row.state, "in_stock");
+    assert.equal(row.problem, "");
+    assert.equal(row.unit, null, "free stock points at no unit");
+    assert.equal(row.unitStatus, "");
+    const h = row.history.at(-1);
+    assert.deepEqual({ from: h.from, to: h.to, why: h.why }, { from: "held", to: "in_stock", why: "its other listing let it go" });
+  }
+  assert.deepEqual(await unitBytes(), before);
+  assert.equal(events.logs.filter((e) => e.kind === "foreign-stock" && e.level === "info").length, 1);
+  assert.deepEqual(await guard.run(), { scanned: 0, decrypted: 0, held: 0, conflicts: 0, released: 0 }, "once");
+  assertNoCode(res, events.logs);
+});
+
+test("release: removed WITH any market mark, or still on sale / in a vault / sold, stays held", async () => {
+  const offer = await offerOf();
+  const stay = [];
+  for (const [mark, value] of Object.entries(MARKS)) {
+    const s = await stockRow(offer, "removed after a market took it", { status: "removed", [mark]: value() });
+    stay.push([mark, await heldFor(s)]);
+  }
+  for (const status of ["available", "fed", "sold"]) {
+    const s = await stockRow(offer, "still out there", { status });
+    stay.push([status, await heldFor(s)]);
+  }
+  // A row held for another reason is never touched.
+  const other = await stockRow(offer, "x", { status: "removed" });
+  const dup = newCode();
+  await ledgerRow(dup, { state: "held", problem: "same code as another stored code" });
+  // A row whose stock row went but which left "held" meanwhile is not moved.
+  const sold = newCode();
+  await ledgerRow(sold, { state: "sold", problem: foreignProblem(other._id) });
+  const ledgerBefore = await CodeStock.find({}).sort({ _id: 1 }).lean();
+
+  const { guard } = makeGuard();
+  const res = await guard.run();
+  assert.equal(res.released, 0);
+  for (const [why, code] of stay) assert.equal((await rowOf(code)).state, "held", why);
+  assert.deepEqual(await CodeStock.find({}).sort({ _id: 1 }).lean(), ledgerBefore, "nothing moved");
+});
+
+test("release: when the stock rows cannot be read, nothing is released that run", async () => {
+  const offer = await offerOf();
+  const removed = await stockRow(offer, "taken down", { status: "removed" });
+  const code = await heldFor(removed);
+  let failing = true;
+  const Flaky = new Proxy(SuppliedAccount, {
+    get(target, prop) {
+      if (prop === "find") {
+        return (filter, projection, ...rest) => {
+          // The release read asks for the market marks.
+          if (failing && projection && projection.fedAt) throw new Error("connection reset");
+          return target.find(filter, projection, ...rest);
+        };
+      }
+      const v = target[prop];
+      return typeof v === "function" ? v.bind(target) : v;
+    },
+  });
+  const { guard, events } = makeGuard({ models: { SuppliedAccount: Flaky } });
+  const res = await guard.run();
+  assert.equal(res.released, 0);
+  assert.equal((await rowOf(code)).state, "held");
+  assert.ok(events.logs.some((e) => e.kind === "foreign-stock" && e.level === "warn" && /no held code is released/.test(e.msg)));
+
+  failing = false;
+  assert.equal((await guard.run()).released, 1, "released once the rows can be read");
+  assert.equal((await rowOf(code)).state, "in_stock");
+});
+
+test("release: a code let go by one listing but sitting in another is held again for that one, same run", async () => {
+  const offer = await offerOf();
+  const removed = await stockRow(offer, "taken down", { status: "removed" });
+  const code = await heldFor(removed);
+  const live = await stockRow(offer, `1) Reward = ${code}`);
+  const { guard } = makeGuard();
+  const res = await guard.run();
+  assert.deepEqual(res, { scanned: 1, decrypted: 1, held: 1, conflicts: 0, released: 1 });
+  const row = await rowOf(code);
+  assert.equal(row.state, "held");
+  assert.equal(row.problem, foreignProblem(live._id));
+  assert.deepEqual(row.history.slice(-2).map((h) => [h.from, h.to]), [["held", "in_stock"], ["in_stock", "held"]]);
+  assertNoCode(res);
 });

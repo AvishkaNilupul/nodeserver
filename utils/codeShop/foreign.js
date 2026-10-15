@@ -15,6 +15,12 @@
 //   cannot settle by itself: one error event and one Telegram line per pair,
 //   once (stamp `foreign-conflict:<suppliedId>:<ledgerId>`). Nothing changes.
 //
+// A held code goes back to stock once its stock row lets it go: the row is
+// gone, or it was removed without any mark of having gone out through a
+// market (it never reached a buyer). Removed WITH marks, or still on sale, in
+// a vault or sold: it stays held. If the stock rows cannot be read, nothing is
+// released that run.
+//
 // A row is decrypted once per process until its updatedAt moves; the cache
 // keeps only hashes. Never a code or a token in a log, event, message or
 // return value. This module writes ledger rows only — never a SuppliedAccount.
@@ -27,6 +33,9 @@ const LIVE_STATUSES = ["available", "fed", "sold"];
 const FREE_STATES = ["in_stock", "expiring"];
 const OURS_STATES = ["in_unit", "sold"];
 const TOKEN_SPLIT = /[\s=:,;|]+/;
+const PROBLEM_PREFIX = "in a stock row of another listing (";
+const PROBLEM_RE = /^in a stock row of another listing \(([0-9a-f]{24})\)$/;
+const WHY_RELEASED = "its other listing let it go";
 
 // Factories, not values: a test that passes its own models never loads these.
 const REAL_MODELS = {
@@ -60,6 +69,19 @@ function chunks(list, size) {
 // row the code sits in. Keep the wording exact.
 function foreignProblem(suppliedId) {
   return `in a stock row of another listing (${text(suppliedId)})`;
+}
+
+// Marks a market leaves on a stock row that went out through it (a vault
+// hand-off, a claim, a delivery). `listing` too: a market took the row.
+function hasMarketMarks(row) {
+  return !!(
+    row &&
+    (row.fedAt || row.soldAt || row.deliveredAt || text(row.market) || row.listing || text(row.contentId) || text(row.orderId))
+  );
+}
+
+function escapeRe(s) {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 // Hashes of everything in a stock row that could be a code: each field whole
@@ -101,7 +123,7 @@ function createForeignGuard(deps = {}) {
 
   async function runOnce() {
     const at = new Date(clock());
-    const out = { scanned: 0, decrypted: 0, held: 0, conflicts: 0 };
+    const out = { scanned: 0, decrypted: 0, held: 0, conflicts: 0, released: 0 };
     const SuppliedAccount = M("SuppliedAccount");
     const CodeStock = M("CodeStock");
 
@@ -129,6 +151,10 @@ function createForeignGuard(deps = {}) {
         out.decrypted += 1;
       }
     }
+
+    // Before the ledger is read for matching: a code let go by one listing
+    // but sitting in another is held again for that one in this same run.
+    out.released = await releaseLetGo(at);
 
     const ledger = await CodeStock.find({ codeHash: { $gt: "" } }, { codeHash: 1, state: 1, unit: 1 }).lean();
     const byHash = new Map(ledger.map((r) => [r.codeHash, r]));
@@ -189,6 +215,72 @@ function createForeignGuard(deps = {}) {
     out.conflicts = conflicts.length;
     if (conflicts.length) await alertConflicts(conflicts);
     return out;
+  }
+
+  // Held rows whose stock row is gone, or removed without a market mark, go
+  // back to stock. Any read error: nothing is released this run.
+  async function releaseLetGo(at) {
+    const CodeStock = M("CodeStock");
+    const held = new Map(); // stock row id -> [ledger row ids]
+    const rows = [];
+    try {
+      const list = await CodeStock.find(
+        { state: "held", problem: { $regex: "^" + escapeRe(PROBLEM_PREFIX) } },
+        { _id: 1, problem: 1 },
+      ).lean();
+      for (const r of list) {
+        const m = PROBLEM_RE.exec(text(r.problem));
+        if (!m) continue;
+        if (!held.has(m[1])) held.set(m[1], []);
+        held.get(m[1]).push(r._id);
+      }
+      if (!held.size) return 0;
+      for (const part of chunks([...held.keys()], BATCH)) {
+        const found = await M("SuppliedAccount")
+          .find(
+            { _id: { $in: part } },
+            { _id: 1, status: 1, fedAt: 1, contentId: 1, deliveredAt: 1, soldAt: 1, orderId: 1, market: 1, listing: 1 },
+          )
+          .lean();
+        if (!Array.isArray(found)) throw new Error("stock rows came back unreadable");
+        rows.push(...found);
+      }
+    } catch (err) {
+      await note({
+        level: "warn",
+        kind: "foreign-stock",
+        msg: "Could not read the other listings' stock rows; no held code is released this run: " + text(err && err.message).slice(0, 200),
+      });
+      return 0;
+    }
+
+    const byId = new Map(rows.map((r) => [String(r._id), r]));
+    let released = 0;
+    const letGo = [];
+    for (const [sid, ids] of held) {
+      const row = byId.get(sid);
+      const free = !row || (row.status === "removed" && !hasMarketMarks(row));
+      if (!free) continue;
+      const res = await CodeStock.updateMany(
+        { _id: { $in: ids }, state: "held", problem: foreignProblem(sid) },
+        {
+          $set: { state: "in_stock", problem: "", unit: null, product: null, offer: null, unitStatus: "" },
+          $push: { history: { $each: [{ at, from: "held", to: "in_stock", why: WHY_RELEASED }], $slice: -HISTORY_MAX } },
+        },
+      );
+      const n = (res && res.modifiedCount) || 0;
+      if (n) letGo.push({ supplied: sid, gone: !row, codes: n });
+      released += n;
+    }
+    if (released) {
+      await note({
+        level: "info",
+        kind: "foreign-stock",
+        msg: `${released} held code(s) back in stock: ${letGo.length} other listing stock row(s) were taken down unsold`,
+        data: { released, rows: letGo.slice(0, 50) },
+      });
+    }
+    return released;
   }
 
   // One error event and one Telegram line per (stock row, ledger row) pair,
