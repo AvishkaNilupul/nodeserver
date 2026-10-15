@@ -123,6 +123,7 @@ const systemHealthRoutes = require("./routes/systemHealthRoutes");
 const marketplaceConsoleRoutes = require("./routes/marketplaceConsoleRoutes");
 const priceTrackerRoutes = require("./routes/priceTrackerRoutes");
 const soopRoutes = require("./routes/soopRoutes");
+const codeShopRoutes = require("./routes/codeShopRoutes");
 const fleetSnapshot = require("./utils/fleetSnapshot");
 const auditRequest = require("./middleware/auditRequest");
 
@@ -752,6 +753,9 @@ app.use(enforce2fa, priceTrackerRoutes.real());
 // SOOP drops farm: accounts, campaigns, bots and inventory. Every route inside
 // self-guards with requireSuperadmin; enforce2fa gates it behind 2FA.
 app.use(enforce2fa, soopRoutes);
+// Code shop (docs/code-shop/): stored reward codes as marketplace stock. Every
+// route inside self-guards with requireSuperadmin; the service loads on first use.
+app.use(enforce2fa, codeShopRoutes.router);
 app.use(enforce2fa, marketplaceRoutes);
 // Account listings (docs/ACCOUNT-LISTINGS-CONTRACT.md): owner-supplied account
 // stock. Mounted after marketplaceRoutes because it shares that tab's publish
@@ -1004,6 +1008,15 @@ mongoose
     // cookies. Inert until a SoopAccount has a twitchLogin linked AND a
     // matching TwitchWebCookie row exists.
     soopCookieRefresher.start();
+    // Code shop (docs/code-shop/04-OPS.md): one tick every 5 min, inert while
+    // CODE_SHOP=0. A failure to start only logs; the rest of the server runs on.
+    try {
+      Promise.resolve(require("./utils/codeShop/service").service.start()).catch((err) =>
+        console.error("[code-shop] service did not start:", err && err.message),
+      );
+    } catch (err) {
+      console.error("[code-shop] service did not start:", err && err.message);
+    }
   })
   .catch((err) => {
     console.error("MongoDB connection error:", err.message);
