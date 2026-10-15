@@ -2,8 +2,12 @@
 //
 // The settings decide whether the shop publishes, which markets it may touch
 // and which buyer words it refuses, so the things that must hold are:
-// - no document (or an unreadable one) means DEFAULTS, which ship dark — the
-//   scheduler reads this every tick and a DB blip must never throw out of it;
+// - no document means DEFAULTS, which ship dark; an unreadable one before any
+//   good read means SAFE_DEFAULTS (every switch that writes stock or talks to a
+//   market off) — the scheduler reads this every tick and a DB blip must never
+//   throw out of it;
+// - GGSel is not used for codes (05-REVIEW-FIXES.md, R1): `markets.ggsel: true`
+//   is refused, and a value stored before that reads as false;
 // - a patch changes only what it names (deep merge; lists replace whole), and
 //   two writers changing different settings never undo each other;
 // - a bad patch is refused before anything is written (status 400), above all
@@ -18,7 +22,7 @@ const assert = require("node:assert/strict");
 const mongoose = require("mongoose");
 const { MongoMemoryServer } = require("mongodb-memory-server");
 
-const { DEFAULTS, createConfig, validatePatch, deepMerge } = require("../utils/codeShop/config");
+const { DEFAULTS, SAFE_DEFAULTS, GGSEL_REFUSED, createConfig, validatePatch, deepMerge } = require("../utils/codeShop/config");
 
 const TestConfig =
   mongoose.models.TestCodeShopConfig ||
@@ -167,14 +171,14 @@ test("concurrent writers on different settings never undo each other (first writ
     a.set({ autoDraft: false }),
     b.set({ digest: { lastSentDay: "2026-10-15" } }),
     a.set({ farmPriority: { lastChangeAt: clock } }),
-    b.set({ markets: { ggsel: true } }),
+    b.set({ markets: { eldorado: false } }),
   ]);
   const c = await fresh().get();
   assert.equal(c.autoDraft, false);
   assert.equal(c.digest.lastSentDay, "2026-10-15");
   assert.equal(c.digest.hourUtc, DEFAULTS.digest.hourUtc);
   assert.equal(c.farmPriority.lastChangeAt.getTime(), clock);
-  assert.deepEqual(c.markets, { eldorado: true, ggsel: true });
+  assert.deepEqual(c.markets, { eldorado: false, ggsel: false });
   assert.equal(await TestConfig.countDocuments(), 1);
 });
 
@@ -221,19 +225,65 @@ test("set() clears the memo and returns the new effective config", async () => {
   assert.equal((await cfg.get()).autoDraft, false);
 });
 
-test("a DB error never throws: DEFAULTS when nothing was read yet", async (t) => {
+test("a DB error never throws: SAFE_DEFAULTS when nothing was read yet", async (t) => {
   const errors = t.mock.method(console, "error", () => {});
 
   const throwsSync = createConfig({ model: { findOne() { throw new Error("db down"); } }, now });
-  assert.deepEqual(await throwsSync.get(), DEFAULTS);
+  assert.deepEqual(await throwsSync.get(), SAFE_DEFAULTS);
 
   const rejects = createConfig({
     model: { findOne: () => ({ lean: () => Promise.reject(new Error("db down")) }) },
     now,
   });
-  assert.deepEqual(await rejects.get(), DEFAULTS);
-  assert.deepEqual(await rejects.get({ fresh: true }), DEFAULTS);
+  const c = await rejects.get();
+  assert.deepEqual(c, SAFE_DEFAULTS);
+  assert.notEqual(c, SAFE_DEFAULTS, "a copy");
+  assert.notEqual(c.markets, SAFE_DEFAULTS.markets);
+  assert.deepEqual(await rejects.get({ fresh: true }), SAFE_DEFAULTS);
   assert.ok(errors.mock.callCount() >= 1);
+  assert.match(errors.mock.calls[0].arguments[0], /safe defaults/);
+});
+
+test("SAFE_DEFAULTS: every switch that writes stock or talks to a market is off; expiryGuard stays on", () => {
+  assert.equal(SAFE_DEFAULTS.autoBuildUnits, false);
+  assert.equal(SAFE_DEFAULTS.autoDraft, false);
+  assert.equal(SAFE_DEFAULTS.autoPublish, false);
+  assert.deepEqual(SAFE_DEFAULTS.markets, { eldorado: false, ggsel: false });
+  assert.equal(SAFE_DEFAULTS.farmPriority.enabled, false);
+  assert.equal(SAFE_DEFAULTS.digest.enabled, false);
+  assert.equal(SAFE_DEFAULTS.claimAlert.enabled, false);
+  assert.equal(SAFE_DEFAULTS.competitorScan.enabled, false);
+  assert.equal(SAFE_DEFAULTS.expiryGuard, true);
+  // Everything else is the ordinary default.
+  assert.equal(SAFE_DEFAULTS.expiryLeadHours, DEFAULTS.expiryLeadHours);
+  assert.deepEqual(SAFE_DEFAULTS.games, DEFAULTS.games);
+  assert.deepEqual(SAFE_DEFAULTS.sourceWords, DEFAULTS.sourceWords);
+  assert.deepEqual(SAFE_DEFAULTS.pricing, DEFAULTS.pricing);
+  assert.ok(Object.isFrozen(SAFE_DEFAULTS));
+  assert.ok(Object.isFrozen(SAFE_DEFAULTS.markets));
+  // The good-read defaults are unchanged by R8.
+  assert.equal(DEFAULTS.autoBuildUnits, true);
+  assert.equal(DEFAULTS.markets.eldorado, true);
+});
+
+test("GGSel: a value stored before R1 reads as off; set() refuses to switch it on and writes nothing", async () => {
+  await TestConfig.create({ key: "main", data: { markets: { ggsel: true }, autoDraft: false } });
+  const cfg = fresh();
+  const c = await cfg.get();
+  assert.deepEqual(c.markets, { eldorado: true, ggsel: false });
+  assert.equal(c.autoDraft, false, "the rest of the stored settings still count");
+
+  await assert.rejects(cfg.set({ markets: { ggsel: true } }), (err) => {
+    assert.equal(err.status, 400);
+    assert.deepEqual(err.errors, ["markets.ggsel: " + GGSEL_REFUSED]);
+    return true;
+  });
+  const after = await cfg.set({ markets: { ggsel: false } });
+  assert.deepEqual(after.markets, { eldorado: true, ggsel: false });
+  // A broken stored `markets` still reads as the defaults with GGSel off.
+  await TestConfig.updateOne({ key: "main" }, { $set: { "data.markets": "eldorado" } });
+  cfg.forget();
+  assert.deepEqual((await cfg.get()).markets, { eldorado: true, ggsel: false });
 });
 
 test("a DB error never throws: the last good config is kept (after memo expiry and forget())", async (t) => {
@@ -375,9 +425,14 @@ test("validatePatch: clearance steps are a list of complete { days, cutPct }", (
   assertOk({ pricing: { clearanceSteps: [] } });
 });
 
-test("validatePatch: markets may only be eldorado and ggsel, as booleans", () => {
-  assertOk({ markets: { ggsel: true } });
+test("validatePatch: markets may only be eldorado and ggsel, as booleans; GGSel only off", () => {
+  assertOk({ markets: { eldorado: true } });
   assertOk({ markets: { eldorado: false, ggsel: false } });
+  const ggsel = errorsOf({ markets: { ggsel: true } });
+  assert.deepEqual(ggsel, ["markets.ggsel: " + GGSEL_REFUSED]);
+  assert.match(GGSEL_REFUSED, /^GGSel is not used for codes yet: it never reports which code it sold, so a code could be sold twice$/);
+  assertBad({ markets: { eldorado: true, ggsel: true } }, "markets.ggsel");
+  assertBad({ markets: { ggsel: "true" } }, "markets.ggsel");
   for (const m of ["gameflip", "plati", "digiseller", "g2g", "playerauctions", "Eldorado"]) {
     const errs = errorsOf({ markets: { [m]: true } });
     assert.equal(errs.length, 1);

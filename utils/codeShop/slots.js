@@ -14,7 +14,6 @@ const { parseKst } = require("../soop/normalize");
 const NON_ASCII_RE = /[^\t\n\r\x20-\x7E]/u;
 
 const sha1 = (s) => crypto.createHash("sha1").update(s, "utf8").digest("hex");
-const sha256 = (s) => crypto.createHash("sha256").update(s, "utf8").digest("hex");
 // null/undefined read as "" so a missing value never hashes as the word "null".
 const text = (v) => (v === undefined || v === null ? "" : String(v));
 
@@ -25,10 +24,27 @@ function toMs(v) {
   return Number.isFinite(ms) ? ms : null;
 }
 
-// Always a 64-hex digest, even for an empty code, so a missing code can never
-// equal a ledger row's empty codeHash.
+// The HMAC key: sha256("code-shop:" + CRED_SECRET), as raw bytes. Rebuilt
+// only when the secret changes (tests set their own).
+let hashKey = { secret: null, key: null };
+function codeHashKey() {
+  const secret = process.env.CRED_SECRET || "";
+  // No fallback (not even SESSION_SECRET): a hash under another key would
+  // match nothing in the ledger, and one code could then be stored twice.
+  if (!secret) throw new Error("CRED_SECRET must be set: the code shop fingerprints codes with it");
+  if (hashKey.secret !== secret) {
+    hashKey = { secret, key: crypto.createHash("sha256").update("code-shop:" + secret, "utf8").digest() };
+  }
+  return hashKey.key;
+}
+
+// A code's fingerprint: HMAC-SHA256 keyed from CRED_SECRET, never a bare
+// sha256 — the ledger (and a backup of it) must not let anyone confirm a
+// guessed code. Always a 64-hex digest, even for an empty code, so a missing
+// code can never equal a ledger row's empty codeHash. Throws when CRED_SECRET
+// is not set.
 function hashCode(code) {
-  return sha256(text(code).trim());
+  return crypto.createHmac("sha256", codeHashKey()).update(text(code).trim(), "utf8").digest("hex");
 }
 
 // "25:4-4-5-4-4": total length (dashes included), then each dash group's size.

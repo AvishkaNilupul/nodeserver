@@ -10,6 +10,8 @@
 //   the candidate back in stock and returns nothing.
 // - A CODE ABOUT TO DIE. Candidates inside the expiry lead are never used.
 // - A CODE IN A LOG. Events carry labels and shapes only.
+// - R7 (05-REVIEW-FIXES.md): only a code marked dead is replaced, never with a
+//   code of a sold farm login, and at most 30 replacements an hour (429).
 //
 // Real Mongo via mongodb-memory-server: the guarded updates are the thing under
 // test. All codes are made up.
@@ -23,9 +25,10 @@ const { MongoMemoryServer } = require("mongodb-memory-server");
 const CodeStock = require("../models/CodeStock");
 const CodeProduct = require("../models/CodeProduct");
 const SoopInventoryItem = require("../models/SoopInventoryItem");
+const SoopAccount = require("../models/SoopAccount");
 const { encrypt } = require("../utils/secretBox");
 const { hashCode, codeShape } = require("../utils/codeShop/slots");
-const { createAfterSale, slotIndexes } = require("../utils/codeShop/afterSale");
+const { createAfterSale, slotIndexes, REPLACE_MAX_PER_HOUR } = require("../utils/codeShop/afterSale");
 
 const ObjectId = mongoose.Types.ObjectId;
 const HOUR = 3600 * 1000;
@@ -37,7 +40,7 @@ let mem;
 test.before(async () => {
   mem = await MongoMemoryServer.create();
   await mongoose.connect(mem.getUri("codeshopaftersale"));
-  await Promise.all([CodeStock, CodeProduct, SoopInventoryItem].map((m) => m.init()));
+  await Promise.all([CodeStock, CodeProduct, SoopInventoryItem, SoopAccount].map((m) => m.init()));
 });
 
 test.after(async () => {
@@ -46,7 +49,7 @@ test.after(async () => {
 });
 
 test.beforeEach(async () => {
-  await Promise.all([CodeStock, CodeProduct, SoopInventoryItem].map((m) => m.deleteMany({})));
+  await Promise.all([CodeStock, CodeProduct, SoopInventoryItem, SoopAccount].map((m) => m.deleteMany({})));
 });
 
 // Every code this file makes, so any output can be checked for a leak.
@@ -63,8 +66,14 @@ function fakeConfig(value = { expiryLeadHours: 36 }) {
 
 function afterSaleWith(opts = {}) {
   const events = opts.events || fakeEvents();
-  const svc = createAfterSale({ events, config: opts.config || fakeConfig(), now: () => opts.now || NOW });
-  return { events, svc };
+  const clock = { t: opts.now || NOW };
+  const svc = createAfterSale({
+    events,
+    config: opts.config || fakeConfig(),
+    now: () => clock.t,
+    ...(opts.maxReplacementsPerHour === undefined ? {} : { maxReplacementsPerHour: opts.maxReplacementsPerHour }),
+  });
+  return { events, svc, clock };
 }
 
 function assertNoCode(value) {
@@ -143,6 +152,9 @@ async function soldUnit(prod, opts = {}) {
   }
   return { unit, rows };
 }
+
+// A sold unit whose codes the owner already marked dead (what replace needs).
+const deadUnit = (prod, opts = {}) => soldUnit(prod, { ...opts, state: "dead" });
 
 const lean = (id) => CodeStock.findById(id).lean();
 
@@ -342,7 +354,7 @@ test("replace: hands out a checked code from stock, marks both rows, logs no cod
 test("replace: a code already replaced is refused, and cannot be re-reported", async () => {
   const { svc } = afterSaleWith();
   const p = await product(["d:A"]);
-  const u = await soldUnit(p);
+  const u = await deadUnit(p);
   await seedRow("d:A");
   const spare = await seedRow("d:A");
   await svc.replace(String(u.unit), { slot: 0 });
@@ -365,8 +377,8 @@ test("replace: refuses a code that is not sold", async () => {
 test("replace: the same slot wins over a same-name code, and the name match is the fallback", async () => {
   const { svc } = afterSaleWith();
   const p = await product(["s:A"]);
-  const u1 = await soldUnit(p);
-  const u2 = await soldUnit(p);
+  const u1 = await deadUnit(p);
+  const u2 = await deadUnit(p);
   // Same game and reward name, another campaign's slot, sooner use-by.
   const sameName = await seedRow("other:A", { nameRaw: "name-of-s:A", useBy: new Date(NOW + 3 * DAY) });
   const sameSlot = await seedRow("s:A", { useBy: new Date(NOW + 9 * DAY) });
@@ -382,7 +394,7 @@ test("replace: oldest use-by first, undated codes last, codes inside the lead sk
   const { svc } = afterSaleWith({ config: fakeConfig({ expiryLeadHours: 36 }) });
   const p = await product(["o:A"]);
   const units = [];
-  for (let i = 0; i < 3; i++) units.push(await soldUnit(p));
+  for (let i = 0; i < 3; i++) units.push(await deadUnit(p));
   const undated = await seedRow("o:A", { useBy: null });
   const late = await seedRow("o:A", { useBy: new Date(NOW + 20 * DAY) });
   const insideLead = await seedRow("o:A", { useBy: new Date(NOW + 30 * HOUR) });
@@ -394,7 +406,7 @@ test("replace: oldest use-by first, undated codes last, codes inside the lead sk
   assert.equal((await lean(insideLead.id)).state, "in_stock", "a code inside the lead is never handed out");
 
   // Only the lead-time code is left: no replacement.
-  const last = await soldUnit(p);
+  const last = await deadUnit(p);
   await rejects(svc.replace(String(last.unit), { slot: 0 }), 409, /No usable/);
   assert.equal((await lean(insideLead.id)).state, "in_stock");
 });
@@ -402,7 +414,7 @@ test("replace: oldest use-by first, undated codes last, codes inside the lead sk
 test("replace: no candidate in stock is an error and changes nothing", async () => {
   const { svc } = afterSaleWith();
   const p = await product(["e:A"]);
-  const u = await soldUnit(p);
+  const u = await deadUnit(p);
   // Not in stock, so not candidates.
   await seedRow("e:A", { state: "held" });
   await seedRow("e:A", { state: "expiring" });
@@ -417,7 +429,7 @@ test("replace: no candidate in stock is an error and changes nothing", async () 
 test("replace: a code that fails its hash check goes back to stock and nothing is returned", async () => {
   const { svc, events } = afterSaleWith();
   const p = await product(["m:A"]);
-  const u = await soldUnit(p);
+  const u = await deadUnit(p);
   const bad = await seedRow("m:A", { storedCode: "FAKE-9999-NOT-THE-SAME" });
   ALL_CODES.push("FAKE-9999-NOT-THE-SAME");
 
@@ -446,7 +458,7 @@ test("replace: concurrent calls for different codes never hand out the same code
   const { svc, events } = afterSaleWith();
   const p = await product(["c:A"]);
   const units = [];
-  for (let i = 0; i < 5; i++) units.push(await soldUnit(p));
+  for (let i = 0; i < 5; i++) units.push(await deadUnit(p));
   const cands = [];
   for (let i = 0; i < 3; i++) cands.push(await seedRow("c:A", { useBy: new Date(NOW + (5 + i) * DAY) }));
 
@@ -474,7 +486,7 @@ test("replace: concurrent calls for different codes never hand out the same code
 test("replace: concurrent calls for the SAME code hand out one code; the other candidate stays in stock", async () => {
   const { svc } = afterSaleWith();
   const p = await product(["t:A"]);
-  const u = await soldUnit(p);
+  const u = await deadUnit(p);
   const a = await seedRow("t:A", { useBy: new Date(NOW + 4 * DAY) });
   const b = await seedRow("t:A", { useBy: new Date(NOW + 5 * DAY) });
 
@@ -516,7 +528,7 @@ test("replace: two calls that both checked a code race on the original; the lose
   const events = fakeEvents();
   const svc = createAfterSale({ events, config: fakeConfig(), now: () => NOW, models: { CodeStock: Held } });
   const p = await product(["w:A"]);
-  const u = await soldUnit(p);
+  const u = await deadUnit(p);
   const a = await seedRow("w:A", { useBy: new Date(NOW + 4 * DAY) });
   const b = await seedRow("w:A", { useBy: new Date(NOW + 5 * DAY) });
 
@@ -539,4 +551,119 @@ test("replace: two calls that both checked a code race on the original; the lose
   assert.equal(String((await lean(u.rows[0].id)).after.ref), String(handed._id));
   assertNoCode(events.logs);
   assertNoCode(lost[0].reason.message);
+});
+
+// ------------------------------------------------------------------- R7
+
+test("replace: a sold code that is not marked dead is refused (mark it dead first); nothing leaves stock", async () => {
+  const { svc } = afterSaleWith();
+  const p = await product(["k:A"]);
+  const u = await soldUnit(p);
+  const cand = await seedRow("k:A");
+  await rejects(svc.replace(String(u.unit), { slot: 0 }), 409, /Mark the code dead first/);
+  assert.equal((await lean(cand.id)).state, "in_stock");
+  assert.equal((await lean(u.rows[0].id)).after.status, "");
+
+  // Marked dead: now it can be replaced.
+  await svc.report(String(u.unit), { slot: 0, status: "dead" });
+  assert.equal((await svc.replace(String(u.unit), { slot: 0 })).code, cand.code);
+});
+
+test("replace: a code reported working again while a replacement is found keeps the replacement in stock", async () => {
+  // Right before the original is marked replaced, the owner reports it OK.
+  const Racy = new Proxy(CodeStock, {
+    get(target, prop) {
+      if (prop === "updateOne") {
+        return async (filter, update) => {
+          if (filter && filter.state === "dead" && filter["after.status"]) {
+            await target.updateOne({ _id: filter._id }, { $set: { state: "sold", "after.status": "ok" } });
+          }
+          return target.updateOne(filter, update);
+        };
+      }
+      const v = Reflect.get(target, prop);
+      return typeof v === "function" ? v.bind(target) : v;
+    },
+  });
+  const events = fakeEvents();
+  const svc = createAfterSale({ events, config: fakeConfig(), now: () => NOW, models: { CodeStock: Racy } });
+  const p = await product(["y:A"]);
+  const u = await deadUnit(p);
+  const cand = await seedRow("y:A");
+  await assert.rejects(svc.replace(String(u.unit), { slot: 0 }), (e) => {
+    assert.equal(e.status, 409);
+    assert.ok(!("code" in e), "no code with the refusal");
+    return true;
+  });
+  const c = await lean(cand.id);
+  assert.equal(c.state, "in_stock", "the candidate went back, unreturned");
+  assert.equal(c.after.status, "");
+  const o = await lean(u.rows[0].id);
+  assert.equal(o.state, "sold");
+  assert.equal(o.after.status, "ok");
+  assertNoCode(events.logs);
+});
+
+test("replace: never a code of a farm login that was sold", async () => {
+  const { svc } = afterSaleWith();
+  const p = await product(["l:A"]);
+  const u1 = await deadUnit(p);
+  const u2 = await deadUnit(p);
+  // The sold login's code would be picked first (sooner use-by).
+  const ofSold = await seedRow("l:A", { loginId: "farm-sold", useBy: new Date(NOW + 3 * DAY) });
+  const sameNameOfSold = await seedRow("other:A", { loginId: "farm-sold", nameRaw: "name-of-l:A", useBy: new Date(NOW + 3 * DAY) });
+  const ok = await seedRow("l:A", { loginId: "farm-kept", useBy: new Date(NOW + 9 * DAY) });
+  await SoopAccount.create({ loginId: "farm-sold", sold: true });
+  await SoopAccount.create({ loginId: "farm-kept", sold: false });
+
+  assert.equal((await svc.replace(String(u1.unit), { slot: 0 })).code, ok.code);
+  await rejects(svc.replace(String(u2.unit), { slot: 0 }), 409, /No usable/);
+  assert.equal((await lean(ofSold.id)).state, "in_stock");
+  assert.equal((await lean(sameNameOfSold.id)).state, "in_stock");
+});
+
+test("replace: at most 30 an hour per instance (429 after); a call that hands nothing out does not count", async () => {
+  assert.equal(REPLACE_MAX_PER_HOUR, 30);
+  const { svc, clock } = afterSaleWith();
+  const p = await product(["z:A"]);
+  const units = [];
+  for (let i = 0; i < 32; i++) units.push(await deadUnit(p));
+  for (let i = 0; i < 30; i++) await seedRow("z:A", { useBy: new Date(NOW + (5 + i) * HOUR + 2 * DAY) });
+
+  // A refusal before any stock exists for it does not use the allowance.
+  const empty = await product(["none:A"]);
+  const lonely = await deadUnit(empty);
+  await rejects(svc.replace(String(lonely.unit), { slot: 0 }), 409, /No usable/);
+
+  for (let i = 0; i < 30; i++) await svc.replace(String(units[i].unit), { slot: 0 });
+  const spare = await seedRow("z:A", { useBy: new Date(NOW + 10 * DAY) });
+  await rejects(svc.replace(String(units[30].unit), { slot: 0 }), 429, /At most 30 replacement codes an hour/);
+  assert.equal((await lean(spare.id)).state, "in_stock", "a refused call takes nothing");
+  const untouched = await lean(units[30].rows[0].id);
+  assert.equal(untouched.state, "dead");
+  assert.equal(untouched.after.status, "", "not marked replaced");
+
+  // An hour after the first ones, the allowance is back.
+  clock.t = NOW + HOUR + 1;
+  assert.equal((await svc.replace(String(units[30].unit), { slot: 0 })).code, spare.code);
+});
+
+test("replace: the hourly cap holds for calls at once, and per instance", async () => {
+  const { svc } = afterSaleWith({ maxReplacementsPerHour: 2 });
+  const p = await product(["w2:A"]);
+  const units = [];
+  for (let i = 0; i < 4; i++) units.push(await deadUnit(p));
+  for (let i = 0; i < 4; i++) await seedRow("w2:A", { useBy: new Date(NOW + (5 + i) * DAY) });
+
+  const results = await Promise.allSettled(units.map((u) => svc.replace(String(u.unit), { slot: 0 })));
+  assert.equal(results.filter((r) => r.status === "fulfilled").length, 2);
+  const refused = results.filter((r) => r.status === "rejected");
+  assert.equal(refused.length, 2);
+  assert.ok(refused.every((r) => r.reason.status === 429));
+  assert.equal(await CodeStock.countDocuments({ market: "replacement" }), 2);
+
+  // Another instance (another process) has its own allowance.
+  const other = afterSaleWith({ maxReplacementsPerHour: 2 }).svc;
+  const left = units.filter((_, k) => results[k].status === "rejected");
+  assert.ok((await other.replace(String(left[0].unit), { slot: 0 })).code);
 });

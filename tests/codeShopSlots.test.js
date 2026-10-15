@@ -1,5 +1,7 @@
 // Code shop — slot identity (docs/code-shop/02-ENGINE.md, "slots.js"). Pure:
 // every value here is made up (no real codes, campaigns or logins).
+process.env.CRED_SECRET ||= "code-shop-slots-test";
+
 const test = require("node:test");
 const assert = require("node:assert/strict");
 const crypto = require("node:crypto");
@@ -19,6 +21,10 @@ const {
 
 const sha1 = (s) => crypto.createHash("sha1").update(s).digest("hex");
 const sha256 = (s) => crypto.createHash("sha256").update(s).digest("hex");
+// The definition from docs/code-shop/05-REVIEW-FIXES.md (R8), written out once
+// here so the test pins it; every other test uses slots.hashCode itself.
+const hmacOf = (s, secret = process.env.CRED_SECRET) =>
+  crypto.createHmac("sha256", crypto.createHash("sha256").update("code-shop:" + secret).digest()).update(s).digest("hex");
 const iso = (d) => (d ? d.toISOString() : null);
 
 /* -------------------------------- parseKst -------------------------------- */
@@ -39,9 +45,9 @@ test("parseKst reads YYYY-MM-DD HH:mm:ss as Korea time (UTC+9)", () => {
 
 /* -------------------------------- hashCode -------------------------------- */
 
-test("hashCode is the sha256 hex of the trimmed code", () => {
-  assert.equal(hashCode("ABCD-EFGH-1234"), sha256("ABCD-EFGH-1234"));
-  assert.equal(hashCode("  ABCD-EFGH-1234 \n"), sha256("ABCD-EFGH-1234"));
+test("hashCode is the HMAC-SHA256 of the trimmed code, keyed by sha256(\"code-shop:\" + CRED_SECRET)", () => {
+  assert.equal(hashCode("ABCD-EFGH-1234"), hmacOf("ABCD-EFGH-1234"));
+  assert.equal(hashCode("  ABCD-EFGH-1234 \n"), hmacOf("ABCD-EFGH-1234"));
   assert.equal(hashCode("\tABCD-EFGH-1234"), hashCode("ABCD-EFGH-1234"));
   assert.match(hashCode("X"), /^[0-9a-f]{64}$/);
   assert.notEqual(hashCode("ABCD-EFGH-1234"), hashCode("ABCD-EFGH-1235"));
@@ -49,11 +55,34 @@ test("hashCode is the sha256 hex of the trimmed code", () => {
   assert.notEqual(hashCode("abcd"), hashCode("ABCD"));
 });
 
+test("hashCode is never a bare sha256 of the code", () => {
+  assert.notEqual(hashCode("ABCD-EFGH-1234"), sha256("ABCD-EFGH-1234"));
+  assert.notEqual(hashCode(""), sha256(""));
+});
+
 test("hashCode reads a number as text and never returns an empty hash", () => {
-  assert.equal(hashCode(12345), sha256("12345"));
-  assert.equal(hashCode(null), sha256(""));
-  assert.equal(hashCode(undefined), sha256(""));
-  assert.notEqual(hashCode(null), sha256("null"));
+  assert.equal(hashCode(12345), hmacOf("12345"));
+  assert.equal(hashCode(null), hmacOf(""));
+  assert.equal(hashCode(undefined), hmacOf(""));
+  assert.match(hashCode(null), /^[0-9a-f]{64}$/);
+  assert.notEqual(hashCode(null), hmacOf("null"));
+});
+
+test("hashCode follows CRED_SECRET and throws without it", (t) => {
+  const saved = process.env.CRED_SECRET;
+  t.after(() => {
+    process.env.CRED_SECRET = saved;
+  });
+  const before = hashCode("ABCD-EFGH-1234");
+  process.env.CRED_SECRET = "another-secret";
+  assert.equal(hashCode("ABCD-EFGH-1234"), hmacOf("ABCD-EFGH-1234", "another-secret"));
+  assert.notEqual(hashCode("ABCD-EFGH-1234"), before, "another key, another fingerprint");
+  delete process.env.CRED_SECRET;
+  assert.throws(() => hashCode("ABCD-EFGH-1234"), /CRED_SECRET must be set/);
+  process.env.CRED_SECRET = "";
+  assert.throws(() => hashCode("ABCD-EFGH-1234"), /CRED_SECRET must be set/);
+  process.env.CRED_SECRET = saved;
+  assert.equal(hashCode("ABCD-EFGH-1234"), before);
 });
 
 /* -------------------------------- codeShape ------------------------------- */

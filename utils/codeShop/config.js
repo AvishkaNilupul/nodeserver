@@ -6,7 +6,11 @@
 //
 // Reads are memoised for `memoMs` and NEVER throw: the scheduler calls get() on
 // every tick, and a database blip must not stop a tick — it falls back to the
-// last config it read, or to DEFAULTS (which ship dark).
+// last config it read, or, before any good read, to SAFE_DEFAULTS: every
+// switch that writes stock or talks to a market off (05-REVIEW-FIXES.md, R8).
+//
+// GGSel is not used for codes (R1): validatePatch refuses `markets.ggsel: true`
+// and the effective config always reads it as false.
 //
 // Writes go through validatePatch and are applied as one atomic $set of the
 // patch's leaves ("data.digest.lastSentDay", ...), not a read-modify-write of
@@ -17,6 +21,7 @@ const KEY = "main";
 const BLOCKED_KEYS = new Set(["__proto__", "constructor", "prototype"]);
 const GAME_KEY = /^\d+$/;
 const MARKETS = ["eldorado", "ggsel"];
+const GGSEL_REFUSED = "GGSel is not used for codes yet: it never reports which code it sold, so a code could be sold twice";
 
 // Upper bounds (inclusive) by setting name; every number is also finite and >= 0.
 const RANGES = {
@@ -65,6 +70,23 @@ const DEFAULTS = deepFreeze({
   digest: { enabled: true, hourUtc: 3, lastSentDay: "" },
   farmPriority: { enabled: false, botIds: [], minHoursBetween: 6, lastChangeAt: null },
 });
+
+// What get() hands out before it has ever read the settings: nothing that
+// writes stock, publishes, reprices, reads a market or sends a summary runs
+// on a guess. expiryGuard stays on — it only ever takes stock OFF sale.
+const SAFE_DEFAULTS = deepFreeze(
+  deepMerge(DEFAULTS, {
+    autoBuildUnits: false,
+    autoDraft: false,
+    autoPublish: false,
+    expiryGuard: true,
+    markets: { eldorado: false, ggsel: false },
+    competitorScan: { enabled: false },
+    claimAlert: { enabled: false },
+    digest: { enabled: false },
+    farmPriority: { enabled: false },
+  }),
+);
 
 // Shape of one `games` entry and one `pricing.clearanceSteps` element.
 const GAME_SHAPE = { sell: false, marketGame: "", displayName: "" };
@@ -193,6 +215,10 @@ function checkSteps(v, path, errors) {
 }
 
 function checkValue(v, def, path, name, errors) {
+  if (path === "markets.ggsel" && v === true) {
+    errors.push(`${path}: ${GGSEL_REFUSED}`);
+    return;
+  }
   if (path === "games") return checkGames(v, path, errors);
   if (path === "pricing.clearanceSteps") return checkSteps(v, path, errors);
   if (path === "sourceWords") return checkStringList(v, path, errors, { regex: true });
@@ -253,6 +279,15 @@ function flattenInto(patch, shape, prefix, out) {
   return out;
 }
 
+// The config a stored document makes: DEFAULTS under the owner's changes,
+// with GGSel off whatever was stored before R1.
+function effective(data) {
+  const value = deepMerge(DEFAULTS, data);
+  if (!isPlainObject(value.markets)) value.markets = deepMerge(DEFAULTS.markets, null);
+  value.markets.ggsel = false;
+  return value;
+}
+
 function createConfig({ model, now = Date.now, memoMs = 30000 } = {}) {
   // Resolved on first use so a test can pass its own model and the real one
   // never has to load.
@@ -276,7 +311,7 @@ function createConfig({ model, now = Date.now, memoMs = 30000 } = {}) {
     const gen = generation;
     try {
       const doc = await leanOf(getModel().findOne({ key: KEY }));
-      const value = deepMerge(DEFAULTS, doc && doc.data);
+      const value = effective(doc && doc.data);
       if (gen === generation) return remember(value);
       lastGood = value;
       return value;
@@ -284,9 +319,9 @@ function createConfig({ model, now = Date.now, memoMs = 30000 } = {}) {
       // One line per memo window, not one per caller, while the DB is down.
       if (t - lastErrorLogAt >= ttl) {
         lastErrorLogAt = t;
-        console.error("[code-shop] config read failed, using " + (lastGood ? "last good" : "defaults") + ": " + (err && err.message));
+        console.error("[code-shop] config read failed, using " + (lastGood ? "last good" : "safe defaults (every switch off)") + ": " + (err && err.message));
       }
-      return lastGood || deepMerge(DEFAULTS, null);
+      return lastGood || deepMerge(SAFE_DEFAULTS, null);
     }
   }
 
@@ -320,10 +355,10 @@ function createConfig({ model, now = Date.now, memoMs = 30000 } = {}) {
       }
     }
     forget();
-    return remember(deepMerge(DEFAULTS, doc && doc.data));
+    return remember(effective(doc && doc.data));
   }
 
   return { get, set, forget };
 }
 
-module.exports = { DEFAULTS, createConfig, validatePatch, deepMerge };
+module.exports = { DEFAULTS, SAFE_DEFAULTS, GGSEL_REFUSED, createConfig, validatePatch, deepMerge };

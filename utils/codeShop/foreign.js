@@ -6,14 +6,16 @@
 // fill could put that code into one of our bundles and it would sell twice.
 //
 // Every SuppliedAccount row that is on sale, in a vault or sold
-// (available | fed | sold) and is not one of our units (no ledger row points
-// at it) is decrypted (password and extra), cut into tokens, and each token
-// hashed and looked up in the ledger:
+// (available | fed | sold), or removed but carrying the marks of having gone
+// out through a market, and is not one of our units (no ledger row points at
+// it) is decrypted (password, extra, login, email, clientSecret), cut into
+// tokens, and each token hashed and looked up in the ledger:
 // - a free row (in_stock / expiring) is held, with a problem that names the
 //   stock row, so adopt.js can link it once that listing is adopted;
 // - a row already in one of OUR units (in_unit / sold) is a conflict the shop
 //   cannot settle by itself: one error event and one Telegram line per pair,
-//   once (stamp `foreign-conflict:<suppliedId>:<ledgerId>`). Nothing changes.
+//   once (stamp `foreign-conflict:<suppliedId>:<ledgerId>`), the message cut
+//   at 15 lines + "+ N more". Nothing changes.
 //
 // A held code goes back to stock once its stock row lets it go: the row is
 // gone, or it was removed without any mark of having gone out through a
@@ -24,6 +26,9 @@
 // A row is decrypted once per process until its updatedAt moves; the cache
 // keeps only hashes. Never a code or a token in a log, event, message or
 // return value. This module writes ledger rows only — never a SuppliedAccount.
+//
+// `stockRowsHolding(hash, deps)` runs the same check for ONE code over every
+// stock row, any status, ours included (held.js asks it before a release).
 
 const slots = require("./slots");
 
@@ -33,6 +38,11 @@ const LIVE_STATUSES = ["available", "fed", "sold"];
 const FREE_STATES = ["in_stock", "expiring"];
 const OURS_STATES = ["in_unit", "sold"];
 const TOKEN_SPLIT = /[\s=:,;|]+/;
+// Every field of a stock row that can hold a code. login is plain text;
+// secretBox.decrypt hands a value it did not encrypt back as it is.
+const CODE_FIELDS = ["password", "extra", "login", "email", "clientSecret"];
+const READ_FIELDS = { _id: 1, offer: 1, status: 1, updatedAt: 1, password: 1, extra: 1, login: 1, email: 1, clientSecret: 1 };
+const TELEGRAM_MAX_LINES = 15;
 const PROBLEM_PREFIX = "in a stock row of another listing (";
 const PROBLEM_RE = /^in a stock row of another listing \(([0-9a-f]{24})\)$/;
 const WHY_RELEASED = "its other listing let it go";
@@ -80,6 +90,21 @@ function hasMarketMarks(row) {
   );
 }
 
+// The same marks as a Mongo filter: a removed row that matches went out
+// through a market and may have reached a buyer, so it is still read.
+const MARKED_FILTER = {
+  $or: [
+    { fedAt: { $ne: null } },
+    { soldAt: { $ne: null } },
+    { deliveredAt: { $ne: null } },
+    { market: { $nin: ["", null] } },
+    { listing: { $ne: null } },
+    { contentId: { $nin: ["", null] } },
+    { orderId: { $nin: ["", null] } },
+  ],
+};
+const SCAN_FILTER = { $or: [{ status: { $in: LIVE_STATUSES } }, { status: "removed", ...MARKED_FILTER }] };
+
 function escapeRe(s) {
   return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
@@ -88,7 +113,9 @@ function escapeRe(s) {
 // (trimmed) and each token. The plaintext never leaves this function.
 function hashesOf(secret, row) {
   const out = new Set();
-  for (const field of [row.password, row.extra]) {
+  for (const name of CODE_FIELDS) {
+    const field = row[name];
+    if (field === undefined || field === null || field === "") continue;
     let plain = "";
     try {
       plain = text(secret.decrypt(text(field)));
@@ -129,7 +156,7 @@ function createForeignGuard(deps = {}) {
 
     // Stock rows first, then which of them are ours: a unit units.build
     // finishes in between is then already known as ours.
-    const listed = await SuppliedAccount.find({ status: { $in: LIVE_STATUSES } }, { _id: 1, offer: 1, status: 1, updatedAt: 1 })
+    const listed = await SuppliedAccount.find(SCAN_FILTER, { _id: 1, offer: 1, status: 1, updatedAt: 1 })
       .sort({ _id: 1 })
       .lean();
     const ours = new Set((await CodeStock.distinct("unit", { unit: { $ne: null } })).map(String));
@@ -144,7 +171,7 @@ function createForeignGuard(deps = {}) {
       return !c || c.updatedAt !== msOf(r.updatedAt);
     });
     for (const part of chunks(stale, BATCH)) {
-      const docs = await SuppliedAccount.find({ _id: { $in: part.map((r) => r._id) } }, { _id: 1, password: 1, extra: 1, updatedAt: 1 }).lean();
+      const docs = await SuppliedAccount.find({ _id: { $in: part.map((r) => r._id) } }, READ_FIELDS).lean();
       for (const d of docs) {
         // The version actually read: a change after this read shows next run.
         cache.set(String(d._id), { updatedAt: msOf(d.updatedAt), hashes: hashesOf(secret, d) });
@@ -324,7 +351,7 @@ function createForeignGuard(deps = {}) {
     const telegram = deps.telegram;
     if (telegram && typeof telegram.send === "function") {
       try {
-        await telegram.send(fresh.map((c) => c.line).join("\n"));
+        await telegram.send(telegramText(fresh.map((c) => c.line)));
       } catch (err) {
         await note({
           level: "error",
@@ -367,4 +394,37 @@ function createForeignGuard(deps = {}) {
   return { run };
 }
 
-module.exports = { createForeignGuard, foreignProblem };
+// At most 15 lines; the rest are counted (each one is in the activity log).
+function telegramText(lines) {
+  if (lines.length <= TELEGRAM_MAX_LINES) return lines.join("\n");
+  return [...lines.slice(0, TELEGRAM_MAX_LINES), `+ ${lines.length - TELEGRAM_MAX_LINES} more`].join("\n");
+}
+
+// The stock rows (ANY status, our own units included) that hold this code
+// hash in any field, as [{ _id, offer, status }], oldest first. Read in _id
+// batches with the guard's own tokeniser. Throws when the rows cannot be read:
+// the caller must then treat the code as possibly listed. Never returns,
+// logs or keeps a code.
+async function stockRowsHolding(hash, deps = {}) {
+  const want = text(hash);
+  if (!want) return [];
+  const SuppliedAccount = modelOf(deps, "SuppliedAccount");
+  const secret = deps.secret || require("../secretBox");
+  const out = [];
+  let after = null;
+  for (;;) {
+    const docs = await SuppliedAccount.find(after === null ? {} : { _id: { $gt: after } }, READ_FIELDS)
+      .sort({ _id: 1 })
+      .limit(BATCH)
+      .lean();
+    if (!Array.isArray(docs)) throw new Error("stock rows came back unreadable");
+    for (const d of docs) {
+      if (hashesOf(secret, d).includes(want)) out.push({ _id: d._id, offer: d.offer || null, status: text(d.status) });
+    }
+    if (docs.length < BATCH) break;
+    after = docs[docs.length - 1]._id;
+  }
+  return out;
+}
+
+module.exports = { createForeignGuard, foreignProblem, stockRowsHolding, hashesOf, hasMarketMarks, TELEGRAM_MAX_LINES };

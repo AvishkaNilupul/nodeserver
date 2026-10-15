@@ -6,9 +6,13 @@
 // - a reward's slot = campaign + name + its order within that login, so the
 //   same reward from two logins shares a slot and two copies of one reward
 //   name in one campaign do not;
-// - a code already in a unit keeps its group/slot, and ingest never changes
-//   state, unit or codeHash of an existing row (the one exception: a farm login
-//   that was sold has its free codes held — a buyer can see them now);
+// - a code already in a unit keeps its group/slot, and ingest changes state,
+//   unit or codeHash of an existing row only for the documented reasons: a farm
+//   login that was sold has its free codes held (a buyer can see them now), and
+//   R9 (05-REVIEW-FIXES.md) — a stored code that changed re-keys a free row or
+//   pulls the unit on sale that holds the old one, a use-by that moved beyond
+//   the lead brings an expiring/expired row back, and a code shown in the farm
+//   panel is held;
 // - the same code stored twice sells once: the later copy is held;
 // - no plaintext code in anything ingest returns, logs or writes.
 //
@@ -25,9 +29,12 @@ const CodeStock = require("../models/CodeStock");
 const SoopInventoryItem = require("../models/SoopInventoryItem");
 const SoopCampaign = require("../models/SoopCampaign");
 const SoopAccount = require("../models/SoopAccount");
+const SoopActivity = require("../models/SoopActivity");
+const SuppliedAccount = require("../models/SuppliedAccount");
 const secretBox = require("../utils/secretBox");
 const slots = require("../utils/codeShop/slots");
 const { createIngest } = require("../utils/codeShop/ingest");
+const { releasedWhy } = require("../utils/codeShop/held");
 
 const NOW = Date.parse("2026-10-15T00:00:00Z");
 const DAY = 24 * 60 * 60 * 1000;
@@ -44,7 +51,7 @@ test.before(async () => {
   mem = await MongoMemoryServer.create();
   await mongoose.connect(mem.getUri("codeshopingest"));
   // The duplicate guards are indexes: they must be built, not just declared.
-  await Promise.all([CodeStock.init(), SoopInventoryItem.init(), SoopCampaign.init(), SoopAccount.init()]);
+  await Promise.all([CodeStock.init(), SoopInventoryItem.init(), SoopCampaign.init(), SoopAccount.init(), SuppliedAccount.init()]);
 });
 
 test.after(async () => {
@@ -53,7 +60,7 @@ test.after(async () => {
 });
 
 async function reset() {
-  await Promise.all([CodeStock, SoopInventoryItem, SoopCampaign, SoopAccount].map((m) => m.deleteMany({})));
+  await Promise.all([CodeStock, SoopInventoryItem, SoopCampaign, SoopAccount, SoopActivity, SuppliedAccount].map((m) => m.deleteMany({})));
 }
 
 // Every code handed out in this file, so the leak scan can look for each one.
@@ -199,7 +206,7 @@ test("first run: every stored code gets one ledger row with its campaign, slot a
 
   const { ingest, events } = makeIngest();
   const res = await ingest.run();
-  assert.deepEqual(res, { scanned: 6, added: 6, updated: 0, held: 0, skipped: 0 });
+  assert.deepEqual(res, { scanned: 6, added: 6, updated: 0, held: 0, skipped: 0, rehashed: 0, revived: 0 });
 
   const r1 = await ledgerOf("farm-a", "a1");
   const r2 = await ledgerOf("farm-a", "a2");
@@ -271,7 +278,7 @@ test("first run: every stored code gets one ledger row with its campaign, slot a
   // Second run: nothing to do, nothing written, no event.
   const before = await allLedger();
   const again = await ingest.run();
-  assert.deepEqual(again, { scanned: 6, added: 0, updated: 0, held: 0, skipped: 0 });
+  assert.deepEqual(again, { scanned: 6, added: 0, updated: 0, held: 0, skipped: 0, rehashed: 0, revived: 0 });
   assert.deepEqual(await allLedger(), before);
   assert.equal(events.calls.length, 1);
 
@@ -284,7 +291,7 @@ test("nothing stored: zero counts and no event", async () => {
   await SoopInventoryItem.create({ loginId: "farm-a", key: "x1", kind: "code", hasCode: false });
   await SoopInventoryItem.create({ loginId: "farm-a", key: "x2", kind: "link", hasCode: true, codeEnc: secretBox.encrypt("https://example.test/redeem") });
   const { ingest, events } = makeIngest();
-  assert.deepEqual(await ingest.run(), { scanned: 0, added: 0, updated: 0, held: 0, skipped: 0 });
+  assert.deepEqual(await ingest.run(), { scanned: 0, added: 0, updated: 0, held: 0, skipped: 0, rehashed: 0, revived: 0 });
   assert.equal(events.calls.length, 0);
   assert.equal(await CodeStock.countDocuments(), 0);
 });
@@ -321,7 +328,7 @@ test("refresh: metadata follows the inventory; state, unit and codeHash never mo
   await CodeStock.updateOne({ _id: u0._id }, { $set: { state: "in_unit", unit: unitId, unitStatus: "available" } });
 
   // Now the campaign is known, the glossary improved, the use-by moved, and
-  // SOOP re-listed s1 under a new id — and its stored code changed.
+  // SOOP re-listed s1 under a new id — and its stored code changed (R9).
   await SoopCampaign.create({
     dropsIdx: "3003",
     title: "Late Event EN",
@@ -345,7 +352,7 @@ test("refresh: metadata follows the inventory; state, unit and codeHash never mo
   );
 
   const res = await ingest.run();
-  assert.deepEqual(res, { scanned: 2, added: 0, updated: 2, held: 0, skipped: 0 });
+  assert.deepEqual(res, { scanned: 2, added: 0, updated: 2, held: 0, skipped: 0, rehashed: 1, revived: 0 });
 
   const s1 = await ledgerOf("farm-a", "s1");
   assert.equal(String(s1.itemId), String(s2.doc._id));
@@ -358,12 +365,16 @@ test("refresh: metadata follows the inventory; state, unit and codeHash never mo
   // in_stock: it moves to the campaign's group and slot.
   assert.equal(s1.groupKey, "12:3003");
   assert.equal(s1.slotKey, slots.slotKeyOf("12:3003", "스프레이", 1));
-  // ...but never its state or hash (the ledger keeps the code it first read).
+  // Free stock follows the code the farm holds now (R9); the state stays.
   assert.equal(s1.state, "in_stock");
-  assert.equal(s1.codeHash, s0.codeHash);
-  assert.notEqual(s1.codeHash, slots.hashCode(s2.code));
-  assert.equal(s1.codeShape, s0.codeShape);
-  assert.deepEqual(s1.history, s0.history);
+  assert.equal(s1.codeHash, slots.hashCode(s2.code));
+  assert.notEqual(s1.codeHash, s0.codeHash);
+  assert.equal(s1.codeShape, slots.codeShape(s2.code));
+  assert.equal(s1.history.length, 2);
+  assert.deepEqual(
+    { from: s1.history[1].from, to: s1.history[1].to, why: s1.history[1].why },
+    { from: "in_stock", to: "in_stock", why: "its stored code changed (the reward was re-issued)" },
+  );
 
   const u1 = await ledgerOf("farm-a", "u1");
   assert.equal(u1.name, "Title (better)");
@@ -380,7 +391,7 @@ test("refresh: metadata follows the inventory; state, unit and codeHash never mo
 
   // And settled again.
   const before = await allLedger();
-  assert.deepEqual(await ingest.run(), { scanned: 2, added: 0, updated: 0, held: 0, skipped: 0 });
+  assert.deepEqual(await ingest.run(), { scanned: 2, added: 0, updated: 0, held: 0, skipped: 0, rehashed: 0, revived: 0 });
   assert.deepEqual(await allLedger(), before);
   assertNoPlaintext(res, before);
 });
@@ -395,8 +406,8 @@ test("a code that reads as empty is skipped, every run, and never gets a row", a
   await invRow({ loginId: "farm-a", key: "good" });
   const { ingest, events } = makeIngest();
 
-  assert.deepEqual(await ingest.run(), { scanned: 4, added: 1, updated: 0, held: 0, skipped: 3 });
-  assert.deepEqual(await ingest.run(), { scanned: 4, added: 0, updated: 0, held: 0, skipped: 3 });
+  assert.deepEqual(await ingest.run(), { scanned: 4, added: 1, updated: 0, held: 0, skipped: 3, rehashed: 0, revived: 0 });
+  assert.deepEqual(await ingest.run(), { scanned: 4, added: 0, updated: 0, held: 0, skipped: 3, rehashed: 0, revived: 0 });
   const rows = await allLedger();
   assert.deepEqual(rows.map((r) => r.itemKey), ["good"]);
   assert.equal(events.calls.length, 1);
@@ -413,7 +424,7 @@ test("a decrypt that throws is a skip, not a failed run", async () => {
       },
     },
   });
-  assert.deepEqual(await ingest.run(), { scanned: 1, added: 0, updated: 0, held: 0, skipped: 1 });
+  assert.deepEqual(await ingest.run(), { scanned: 1, added: 0, updated: 0, held: 0, skipped: 1, rehashed: 0, revived: 0 });
   assert.equal(await CodeStock.countDocuments(), 0);
 });
 
@@ -425,7 +436,7 @@ test("the same code on two rows: the earlier sells, the later is held without a 
   const { ingest, events } = makeIngest();
 
   const res = await ingest.run();
-  assert.deepEqual(res, { scanned: 2, added: 1, updated: 0, held: 1, skipped: 0 });
+  assert.deepEqual(res, { scanned: 2, added: 1, updated: 0, held: 1, skipped: 0, rehashed: 0, revived: 0 });
 
   const early = await ledgerOf("farm-a", "early");
   const late = await ledgerOf("farm-b", "late");
@@ -443,7 +454,7 @@ test("the same code on two rows: the earlier sells, the later is held without a 
   // A later copy against a code already in the ledger (the index catches it).
   await invRow({ loginId: "farm-c", key: "later", code, sentAt: new Date(NOW - 1000) });
   const res2 = await ingest.run();
-  assert.deepEqual(res2, { scanned: 3, added: 0, updated: 0, held: 1, skipped: 0 });
+  assert.deepEqual(res2, { scanned: 3, added: 0, updated: 0, held: 1, skipped: 0, rehashed: 0, revived: 0 });
   const later = await ledgerOf("farm-c", "later");
   assert.equal(later.state, "held");
   assert.equal(later.codeHash, "");
@@ -451,7 +462,7 @@ test("the same code on two rows: the earlier sells, the later is held without a 
 
   // Held rows are existing rows from now on: nothing more happens.
   const before = await allLedger();
-  assert.deepEqual(await ingest.run(), { scanned: 3, added: 0, updated: 0, held: 0, skipped: 0 });
+  assert.deepEqual(await ingest.run(), { scanned: 3, added: 0, updated: 0, held: 0, skipped: 0, rehashed: 0, revived: 0 });
   assert.deepEqual(await allLedger(), before);
   assert.equal(events.calls.length, 1); // only the run that added a code
   assertNoPlaintext(res, res2, events.calls, before);
@@ -467,7 +478,7 @@ test("a code past its use-by is stored as expired", async () => {
   await invRow({ loginId: "farm-a", key: "fresh", useExpDate: "2026-10-15 09:00:01" });
   const { ingest, events } = makeIngest();
 
-  assert.deepEqual(await ingest.run(), { scanned: 3, added: 3, updated: 0, held: 0, skipped: 0 });
+  assert.deepEqual(await ingest.run(), { scanned: 3, added: 3, updated: 0, held: 0, skipped: 0, rehashed: 0, revived: 0 });
   assert.equal((await ledgerOf("farm-a", "old")).state, "expired");
   assert.equal((await ledgerOf("farm-a", "edge")).state, "expired");
   assert.equal((await ledgerOf("farm-a", "fresh")).state, "in_stock");
@@ -500,7 +511,7 @@ test("a sold farm login: its codes are not ingested and its free ones are held",
   await SoopInventoryItem.updateOne({ loginId: "farm-s", key: "free" }, { $set: { name: "Renamed" } });
 
   const res = await ingest.run();
-  assert.deepEqual(res, { scanned: 4, added: 0, updated: 0, held: 1, skipped: 3 });
+  assert.deepEqual(res, { scanned: 4, added: 0, updated: 0, held: 1, skipped: 3, rehashed: 0, revived: 0 });
 
   const free = await ledgerOf("farm-s", "free");
   assert.equal(free.state, "held");
@@ -520,7 +531,7 @@ test("a sold farm login: its codes are not ingested and its free ones are held",
   assert.equal(events.calls.length, 1, "no event without a new code");
 
   // Held stays held.
-  assert.deepEqual(await ingest.run(), { scanned: 4, added: 0, updated: 0, held: 0, skipped: 3 });
+  assert.deepEqual(await ingest.run(), { scanned: 4, added: 0, updated: 0, held: 0, skipped: 3, rehashed: 0, revived: 0 });
   assert.equal((await ledgerOf("farm-s", "free")).state, "held");
 });
 
@@ -552,7 +563,7 @@ test("another writer stored the same identity first: that row is skipped, the re
   const { ingest, events } = makeIngest({ models: { CodeStock: model } });
 
   const res = await ingest.run();
-  assert.deepEqual(res, { scanned: 2, added: 1, updated: 0, held: 0, skipped: 1 });
+  assert.deepEqual(res, { scanned: 2, added: 1, updated: 0, held: 0, skipped: 1, rehashed: 0, revived: 0 });
   assert.equal(await CodeStock.countDocuments(), 2);
   assert.equal((await ledgerOf("farm-a", "r2")).state, "in_stock");
   assert.equal(events.calls[0].msg, "1 new code in stock");
@@ -566,10 +577,321 @@ test("another writer stored the same code under another identity first: ours is 
   const { ingest } = makeIngest({ models: { CodeStock: model } });
 
   const res = await ingest.run();
-  assert.deepEqual(res, { scanned: 2, added: 1, updated: 0, held: 1, skipped: 0 });
+  assert.deepEqual(res, { scanned: 2, added: 1, updated: 0, held: 1, skipped: 0, rehashed: 0, revived: 0 });
   const h1 = await ledgerOf("farm-a", "h1");
   assert.equal(h1.state, "held");
   assert.equal(h1.codeHash, "");
   assert.equal(h1.problem, "same code as another stored code");
   assert.equal((await ledgerOf("farm-a", "h2")).state, "in_stock");
+});
+
+// ── R9: a stored code that changed ──────────────────────────────────────────
+
+// Events that stamp like the real ones (once per key).
+function stampingEvents() {
+  const calls = [];
+  const stamps = new Set();
+  return {
+    calls,
+    stamps,
+    async log(e) {
+      calls.push(e);
+      return true;
+    },
+    async stamp(key) {
+      if (stamps.has(key)) return false;
+      stamps.add(key);
+      return true;
+    },
+    async has(key) {
+      return stamps.has(key);
+    },
+  };
+}
+
+// The farm re-claimed the reward: the same inventory row now holds another code.
+async function reissue(loginId, key) {
+  const code = newCode();
+  await SoopInventoryItem.updateOne({ loginId, key }, { $set: { codeEnc: secretBox.encrypt(code) } });
+  return code;
+}
+
+async function unitDoc(fields = {}) {
+  return SuppliedAccount.create({
+    offer: new mongoose.Types.ObjectId(),
+    login: "cs-unit-" + ++keySeq,
+    password: secretBox.encrypt("1) A = X"),
+    status: "available",
+    ...fields,
+  });
+}
+
+async function intoUnit(loginId, itemKey, unit, extra = {}) {
+  await CodeStock.updateOne(
+    { loginId, itemKey },
+    { $set: { state: "in_unit", unit: unit._id, product: new mongoose.Types.ObjectId(), offer: unit.offer, unitStatus: unit.status, ...extra } },
+  );
+}
+
+test("changed code: free rows (in_stock, expiring, expired, held for a failed code check) follow the new code", async () => {
+  await reset();
+  // f2 stops working within the lead (36 h), f3 has stopped: they stay where they are.
+  const useBy = { f2: "2026-10-15 20:00:00", f3: "2026-10-14 08:00:00" };
+  for (const k of ["f1", "f2", "f3", "f4", "f5"]) await invRow({ loginId: "farm-a", key: k, nameRaw: "n-" + k, useExpDate: useBy[k] });
+  const { ingest } = makeIngest();
+  assert.equal((await ingest.run()).added, 5);
+  await CodeStock.updateOne({ itemKey: "f2" }, { $set: { state: "expiring" } });
+  await CodeStock.updateOne({ itemKey: "f3" }, { $set: { state: "expired" } });
+  await CodeStock.updateOne({ itemKey: "f4" }, { $set: { state: "held", problem: "stored code is missing or changed" } });
+  await CodeStock.updateOne({ itemKey: "f5" }, { $set: { state: "held", problem: "same code as another stored code" } });
+  const old5 = await ledgerOf("farm-a", "f5");
+  const fresh = {};
+  for (const k of ["f1", "f2", "f3", "f4", "f5"]) fresh[k] = await reissue("farm-a", k);
+
+  const res = await ingest.run();
+  assert.equal(res.rehashed, 4);
+  for (const k of ["f1", "f2", "f3", "f4"]) {
+    const r = await ledgerOf("farm-a", k);
+    assert.equal(r.codeHash, slots.hashCode(fresh[k]), k);
+    assert.equal(r.history.at(-1).why, "its stored code changed (the reward was re-issued)", k);
+  }
+  assert.equal((await ledgerOf("farm-a", "f1")).state, "in_stock");
+  assert.equal((await ledgerOf("farm-a", "f2")).state, "expiring");
+  assert.equal((await ledgerOf("farm-a", "f3")).state, "expired");
+  assert.equal((await ledgerOf("farm-a", "f4")).state, "held", "still held: the owner releases it");
+  const f5 = await ledgerOf("farm-a", "f5");
+  assert.equal(f5.codeHash, old5.codeHash, "held for another reason: unchanged");
+  assert.equal(f5.state, "held");
+
+  // Settled: the next run rehashes nothing (and decrypts nothing new).
+  const again = await ingest.run();
+  assert.equal(again.rehashed, 0);
+  assertNoPlaintext(res, again, await allLedger());
+});
+
+test("changed code: an in_unit row of a unit on sale pulls the unit; its other codes go back to stock", async () => {
+  await reset();
+  for (const k of ["u1", "u2", "u3"]) await invRow({ loginId: "farm-a", key: k, nameRaw: "n-" + k });
+  const events = stampingEvents();
+  const ingest = createIngest({ secret: secretBox, now: () => NOW, events });
+  await ingest.run();
+  const unit = await unitDoc();
+  for (const k of ["u1", "u2", "u3"]) await intoUnit("farm-a", k, unit);
+  const fresh = await reissue("farm-a", "u2");
+  const before = await ledgerOf("farm-a", "u1");
+
+  const res = await ingest.run();
+  assert.equal(res.rehashed, 1);
+  const u = await SuppliedAccount.findById(unit._id).lean();
+  assert.equal(u.status, "removed");
+  assert.equal(u.note, "code unit — a stored code in it changed");
+  assert.equal(u.password, unit.password, "the unit's text is never rewritten");
+
+  const changed = await ledgerOf("farm-a", "u2");
+  assert.equal(changed.state, "in_stock");
+  assert.equal(changed.unit, null);
+  assert.equal(changed.product, null);
+  assert.equal(changed.codeHash, slots.hashCode(fresh));
+  assert.deepEqual([changed.history.at(-1).from, changed.history.at(-1).to], ["in_unit", "in_stock"]);
+  for (const k of ["u1", "u3"]) {
+    const r = await ledgerOf("farm-a", k);
+    assert.equal(r.state, "in_stock", k);
+    assert.equal(r.unit, null, k);
+    assert.equal(r.unitStatus, "", k);
+    assert.equal(r.history.at(-1).why, "its unit was pulled: another code in it changed", k);
+  }
+  assert.equal((await ledgerOf("farm-a", "u1")).codeHash, before.codeHash, "an unchanged code keeps its fingerprint");
+  assert.ok(events.calls.some((e) => e.kind === "code-changed" && e.level === "warn"));
+  assertNoPlaintext(res, events.calls);
+});
+
+test("changed code: a unit in a vault, delivered, sold or already pulled is not touched; told once", async () => {
+  await reset();
+  for (const k of ["v1", "d1", "s1", "x1", "g1"]) await invRow({ loginId: "farm-a", key: k, nameRaw: "n-" + k });
+  const events = stampingEvents();
+  const ingest = createIngest({ secret: secretBox, now: () => NOW, events });
+  await ingest.run();
+  const vault = await unitDoc({ status: "fed", market: "ggsel", fedAt: new Date(NOW - DAY) });
+  const delivered = await unitDoc({ deliveredAt: new Date(NOW - DAY) });
+  const soldUnit = await unitDoc({ status: "sold" });
+  const wasFed = await unitDoc();
+  await intoUnit("farm-a", "v1", vault, { wasFed: true });
+  await intoUnit("farm-a", "d1", delivered);
+  await intoUnit("farm-a", "x1", wasFed, { wasFed: true });
+  await CodeStock.updateOne({ itemKey: "s1" }, { $set: { state: "sold", unit: soldUnit._id, unitStatus: "sold" } });
+  // A unit that is gone.
+  await intoUnit("farm-a", "g1", { _id: new mongoose.Types.ObjectId(), offer: null, status: "available" });
+  for (const k of ["v1", "d1", "s1", "x1", "g1"]) await reissue("farm-a", k);
+  const ledgerBefore = await allLedger();
+  const unitsBefore = await SuppliedAccount.find({}).sort({ _id: 1 }).lean();
+
+  const res = await ingest.run();
+  assert.equal(res.rehashed, 0);
+  assert.deepEqual(await allLedger(), ledgerBefore, "no ledger row moves");
+  assert.deepEqual(await SuppliedAccount.find({}).sort({ _id: 1 }).lean(), unitsBefore, "no unit is pulled");
+  const told = events.calls.filter((e) => e.kind === "code-changed");
+  assert.equal(told.length, 5);
+  assert.ok(told.some((e) => /its buyer has the old code/.test(e.msg)));
+  assert.ok(told.filter((e) => /the bundle still holds the old code/.test(e.msg)).length === 4);
+
+  await ingest.run();
+  assert.equal(events.calls.filter((e) => e.kind === "code-changed").length, 5, "told once per row and new code");
+  assertNoPlaintext(res, events.calls);
+});
+
+test("changed code: a new code already in the ledger makes the row a held duplicate", async () => {
+  await reset();
+  const shared = newCode();
+  await invRow({ loginId: "farm-a", key: "k1", nameRaw: "n1" });
+  await invRow({ loginId: "farm-b", key: "k2", nameRaw: "n2", code: shared });
+  const { ingest } = makeIngest();
+  await ingest.run();
+  await SoopInventoryItem.updateOne({ loginId: "farm-a", key: "k1" }, { $set: { codeEnc: secretBox.encrypt(shared) } });
+
+  const res = await ingest.run();
+  assert.equal(res.held, 1);
+  assert.equal(res.rehashed, 0);
+  const k1 = await ledgerOf("farm-a", "k1");
+  assert.equal(k1.state, "held");
+  assert.equal(k1.problem, "same code as another stored code");
+  assert.equal(k1.codeHash, "");
+  assert.equal((await ledgerOf("farm-b", "k2")).codeHash, slots.hashCode(shared));
+});
+
+test("an unchanged stored code is decrypted once per process, a changed one again", async () => {
+  await reset();
+  for (const k of ["c1", "c2"]) await invRow({ loginId: "farm-a", key: k, nameRaw: "n-" + k });
+  let calls = 0;
+  const counting = {
+    decrypt(v) {
+      calls += 1;
+      return secretBox.decrypt(v);
+    },
+  };
+  const { ingest } = makeIngest({ secret: counting });
+  await ingest.run();
+  assert.equal(calls, 2, "new rows");
+  await ingest.run();
+  assert.equal(calls, 4, "first look at the existing rows in this process");
+  await ingest.run();
+  assert.equal(calls, 4, "unchanged ciphertext: no decrypt");
+  await reissue("farm-a", "c1");
+  assert.equal((await ingest.run()).rehashed, 1);
+  assert.equal(calls, 5);
+});
+
+// ── R9: use-by moved beyond the lead ────────────────────────────────────────
+
+test("expiring / expired rows whose use-by moved beyond the lead go back to stock; never a vault row or a sold login's", async () => {
+  await reset();
+  // Lead is 36 h (default). NOW = 2026-10-15T00:00Z.
+  for (const k of ["e1", "e2", "e3", "e4", "e5", "e6"]) await invRow({ loginId: k === "e5" ? "farm-s" : "farm-a", key: k, nameRaw: "n-" + k });
+  await SoopAccount.create({ loginId: "farm-s", sold: false });
+  const { ingest, events } = makeIngest();
+  await ingest.run();
+  const unit = new mongoose.Types.ObjectId();
+  await CodeStock.updateOne({ itemKey: "e1" }, { $set: { state: "expiring" } });
+  await CodeStock.updateOne({ itemKey: "e2" }, { $set: { state: "expired", unit, unitStatus: "removed", product: new mongoose.Types.ObjectId() } });
+  await CodeStock.updateOne({ itemKey: "e3" }, { $set: { state: "expiring", wasFed: true } });
+  await CodeStock.updateOne({ itemKey: "e4" }, { $set: { state: "expiring" } });
+  await CodeStock.updateOne({ itemKey: "e5" }, { $set: { state: "expiring" } });
+  await CodeStock.updateOne({ itemKey: "e6" }, { $set: { state: "expiring" } });
+  // e1, e2, e3, e5: the farm says the code is good for weeks; e4: within the lead.
+  for (const k of ["e1", "e2", "e3", "e5"]) await SoopInventoryItem.updateOne({ key: k }, { $set: { "raw.useExpDate": "2026-11-30 23:59:00" } });
+  await SoopInventoryItem.updateOne({ key: "e4" }, { $set: { "raw.useExpDate": "2026-10-16 09:00:00" } });
+  // e6 keeps its use-by (2026-10-22): already beyond the lead.
+  // farm-s is sold now: its rows never come back on sale.
+  await SoopAccount.updateOne({ loginId: "farm-s" }, { $set: { sold: true } });
+
+  const res = await ingest.run();
+  assert.equal(res.revived, 3);
+  for (const k of ["e1", "e2", "e6"]) {
+    const r = await ledgerOf("farm-a", k);
+    assert.equal(r.state, "in_stock", k);
+    assert.equal(r.unit, null, k);
+    assert.equal(r.product, null, k);
+    assert.equal(r.unitStatus, "", k);
+    assert.equal(r.history.at(-1).why, "its use-by moved beyond the lead time", k);
+  }
+  assert.equal((await ledgerOf("farm-a", "e3")).state, "expiring", "was in a vault: never back");
+  assert.equal((await ledgerOf("farm-a", "e4")).state, "expiring", "still within the lead");
+  assert.equal((await ledgerOf("farm-s", "e5")).state, "expiring", "a sold login's row is never revived");
+  assert.ok(events.calls.some((e) => /back in stock: their use-by moved/.test(e.msg)));
+  assert.equal((await ingest.run()).revived, 0, "once");
+});
+
+test("revival uses the configured lead", async () => {
+  await reset();
+  await invRow({ loginId: "farm-a", key: "l1", useExpDate: "2026-10-20 09:00:00" }); // 5 days out
+  const config = { get: async () => ({ expiryLeadHours: 24 * 7 }) };
+  const { ingest } = makeIngest({ config });
+  await ingest.run();
+  await CodeStock.updateOne({ itemKey: "l1" }, { $set: { state: "expiring" } });
+  assert.equal((await ingest.run()).revived, 0, "5 days is inside a 7-day lead");
+  const short = makeIngest({ config: { get: async () => ({ expiryLeadHours: 24 }) } });
+  assert.equal((await short.ingest.run()).revived, 1);
+});
+
+// ── R9: a code shown in the farm panel ──────────────────────────────────────
+
+async function revealed(itemId, at) {
+  await SoopActivity.create({ at: new Date(at), kind: "reveal", msg: "owner revealed the code of inventory item " + itemId, data: { itemId: String(itemId), admin: "owner" } });
+}
+
+test("a free code revealed in the farm panel is held; a code in a unit is left to its bundle", async () => {
+  await reset();
+  const a = await invRow({ loginId: "farm-a", key: "r1", nameRaw: "n1" });
+  const b = await invRow({ loginId: "farm-a", key: "r2", nameRaw: "n2" });
+  const c = await invRow({ loginId: "farm-a", key: "r3", nameRaw: "n3" });
+  const { ingest, events } = makeIngest();
+  await ingest.run();
+  const unit = await unitDoc();
+  await intoUnit("farm-a", "r2", unit);
+  await revealed(a.doc._id, NOW - 1000);
+  await revealed(b.doc._id, NOW - 1000);
+  // Other activity and a malformed id are ignored.
+  await SoopActivity.create({ at: new Date(NOW), kind: "claim", data: { itemId: String(c.doc._id) } });
+  await SoopActivity.create({ at: new Date(NOW), kind: "reveal", data: { itemId: "not-an-id" } });
+
+  const res = await ingest.run();
+  assert.equal(res.held, 1);
+  const r1 = await ledgerOf("farm-a", "r1");
+  assert.equal(r1.state, "held");
+  assert.equal(r1.problem, "its code was shown in the farm panel");
+  assert.deepEqual([r1.history.at(-1).from, r1.history.at(-1).to], ["in_stock", "held"]);
+  assert.equal((await ledgerOf("farm-a", "r2")).state, "in_unit");
+  assert.equal((await ledgerOf("farm-a", "r3")).state, "in_stock");
+  assert.ok(events.calls.some((e) => e.kind === "code-held" && e.level === "warn"));
+  assert.equal((await ingest.run()).held, 0, "held once");
+});
+
+test("a code the owner released after its reveal stays in stock; a newer reveal holds it again", async () => {
+  await reset();
+  const a = await invRow({ loginId: "farm-a", key: "v1" });
+  const { ingest } = makeIngest();
+  await ingest.run();
+  await revealed(a.doc._id, NOW - 5000);
+  // As held.js leaves it: released for exactly this, after the reveal.
+  await CodeStock.updateOne(
+    { itemKey: "v1" },
+    { $push: { history: { at: new Date(NOW - 1000), from: "held", to: "in_stock", why: releasedWhy("its code was shown in the farm panel") } } },
+  );
+  assert.equal((await ingest.run()).held, 0);
+  assert.equal((await ledgerOf("farm-a", "v1")).state, "in_stock");
+
+  // A release for another problem vouches for nothing about a reveal.
+  const b = await invRow({ loginId: "farm-a", key: "v2", nameRaw: "other" });
+  await ingest.run();
+  await revealed(b.doc._id, NOW - 5000);
+  await CodeStock.updateOne(
+    { itemKey: "v2" },
+    { $push: { history: { at: new Date(NOW - 1000), from: "held", to: "in_stock", why: releasedWhy("its stock row is gone") } } },
+  );
+  assert.equal((await ingest.run()).held, 1);
+  assert.equal((await ledgerOf("farm-a", "v2")).problem, "its code was shown in the farm panel");
+
+  // Shown again after the release: held again.
+  await revealed(a.doc._id, NOW);
+  assert.equal((await ingest.run()).held, 1);
+  assert.equal((await ledgerOf("farm-a", "v1")).state, "held");
 });

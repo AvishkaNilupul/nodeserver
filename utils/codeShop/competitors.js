@@ -12,6 +12,11 @@
 // the scan and keeps the previous one — a half-read market would make the
 // lowest price look higher (or lower) than it is.
 //
+// Only a same-set offer that has stock (qty >= 1) and asks at least 30 % of
+// our base price counts towards lowestSameSetUsd (05-REVIEW-FIXES.md, R8): an
+// empty or bait-priced listing must not drag our price down. Every matching
+// offer is still listed in `offers`.
+//
 // Our own offers are never competitors: undercutting ourselves would walk the
 // price down to the floor one cent per run. They are recognised by seller id
 // (config.ownEldoradoUserIds) AND by offer id (any MarketplaceListing row we
@@ -28,6 +33,7 @@ const PACE_MS = 1500;
 const TIMEOUT_MS = 20000;
 const TOP_OFFERS = 15;
 const SAME_SET_SCORE = 0.8;
+const MIN_PRICE_SHARE = 0.3;
 const MIN_WORD = 4;
 const USER_AGENT =
   "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 " +
@@ -142,6 +148,18 @@ function searchUrl(query, pageIndex) {
     "&pageSize=" + PAGE_SIZE +
     "&searchQuery=" + encodeURIComponent(query)
   );
+}
+
+// Does this same-set offer count as a price to follow? It must have stock,
+// and (when our base price is known) ask at least 30 % of it.
+function countsForLowest(offer, basePriceUsd) {
+  if (!offer || !offer.sameSet) return false;
+  if (!(Number(offer.qty) >= 1)) return false;
+  const price = Number(offer.priceUsd);
+  if (!Number.isFinite(price) || price <= 0) return false;
+  const base = Number(basePriceUsd);
+  if (Number.isFinite(base) && base > 0 && price < base * MIN_PRICE_SHARE) return false;
+  return true;
 }
 
 // Best score first, then cheapest, then id so the order is stable.
@@ -267,7 +285,17 @@ function createCompetitors(deps = {}) {
       scored.push({ id: o.id, title: o.title.slice(0, 300), priceUsd: o.priceUsd, qty: o.qty, score, sameSet });
     }
     scored.sort(byScoreThenPrice);
-    const same = scored.filter((o) => o.sameSet).map((o) => o.priceUsd);
+    // Our base price; a caller that passed a product without its pricing gets it read.
+    let base = product.pricing ? product.pricing.priceUsd : undefined;
+    if (base === undefined) {
+      try {
+        const doc = await leanOf(getModels().CodeProduct.findById(id).select("pricing"));
+        base = doc && doc.pricing ? doc.pricing.priceUsd : null;
+      } catch (err) {
+        return keepOld("could not read our base price (" + err.message + ")");
+      }
+    }
+    const same = scored.filter((o) => countsForLowest(o, base)).map((o) => o.priceUsd);
     // `queries` keeps only what the owner pinned: the words worked out from
     // the labels are not stored, so a renamed slot changes the next search.
     const pinned = product.competitors && Array.isArray(product.competitors.queries) ? product.competitors.queries : [];
@@ -284,7 +312,7 @@ function createCompetitors(deps = {}) {
       product: id,
       msg:
         "Scanned Eldorado for " + name + ": " + scored.length + " matching offers, " +
-        same.length + " with the same set" +
+        same.length + " with the same set that count" +
         (result.lowestSameSetUsd === null ? "" : ", lowest $" + result.lowestSameSetUsd.toFixed(2)),
       data: { requests, matching: scored.length, sameSet: same.length, lowestSameSetUsd: result.lowestSameSetUsd },
     });
@@ -301,7 +329,9 @@ module.exports = {
   parseSearch,
   normalise,
   searchUrl,
+  countsForLowest,
   SAME_SET_SCORE,
+  MIN_PRICE_SHARE,
   PAGE_SIZE,
   MAX_PAGES,
   PACE_MS,

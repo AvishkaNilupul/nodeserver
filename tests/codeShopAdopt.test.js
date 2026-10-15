@@ -11,6 +11,10 @@
 //   vouch for (unreadable unit, unknown code, a code already elsewhere, units
 //   that disagree) is a problem, and a problem means nothing is written;
 // - a second apply changes nothing;
+// - an offer still listed on a market other than Eldorado (any listing row
+//   that is not delisted or removed) is refused (05-REVIEW-FIXES.md, R1);
+// - the product keeps the offer's own cover texts and takes the defaults for
+//   the ones the offer lacks (R4);
 // - no code in anything adopt returns or logs.
 //
 // Real Mongo via mongodb-memory-server, real ingest and reconcile. Codes,
@@ -194,7 +198,8 @@ async function ingestNow() {
 }
 
 // The standard live offer: farm-a / farm-b units on sale, farm-c sold on
-// Eldorado, farm-d removed by hand.
+// Eldorado, farm-d removed by hand. Its old GGSel and Gameflip listings are
+// gone (only Eldorado may still list it).
 async function liveOffer(offerFields = {}) {
   await campaign();
   const a = await farmLogin("farm-a");
@@ -214,7 +219,7 @@ async function liveOffer(offerFields = {}) {
   const ud = await unitOf(offer, unitText(lineCodes(d)), { status: "removed", note: "taken down by hand" });
   await listing(offer, "eldorado", "active", 4);
   await listing(offer, "ggsel", "delisted", 4);
-  await listing(offer, "gameflip", "active", 4);
+  await listing(offer, "gameflip", "removed", 4);
   await ingestNow();
   return { offer, codes: { a, b, c, d }, units: { ua, ub, uc, ud } };
 }
@@ -374,7 +379,7 @@ test("apply: links every code to its unit, settles the sold one, creates the pro
   assert.equal(product.pricing.mode, "fixed");
   assert.equal(product.pricing.priceUsd, 4);
   assert.equal(product.pricing.floorUsd, 0.5, "floor is never under 0.5");
-  assert.deepEqual(product.markets, ["eldorado"], "active eldorado/ggsel listings only");
+  assert.deepEqual(product.markets, ["eldorado"], "an active Eldorado listing only");
   assert.equal(product.approvedBy, "owner");
   assert.equal(product.approvedAt.getTime(), NOW);
   assert.deepEqual(
@@ -393,6 +398,8 @@ test("apply: links every code to its unit, settles the sold one, creates the pro
       coverBullets: offer.coverBullets,
     },
   );
+  // The offer has no cover title: the default for its game fills it.
+  assert.equal(product.texts.coverTitle, "Overwatch 2 Code Bundle");
   const keys = ["icon", "spray", "ticket1", "ticket2"];
   const ledgerA = await Promise.all(keys.map((k) => rowOf(codes.a[k])));
   assert.deepEqual(
@@ -454,8 +461,9 @@ test("apply: fed units keep the vault mark; a removed unit that went out through
   const ue = await unitOf(offer, unitText(lineCodes(e)), { status: "fed", market: "ggsel", fedAt: new Date(NOW - DAY), contentId: "content-1" });
   await unitOf(offer, unitText(lineCodes(f)), { status: "removed", market: "ggsel", fedAt: new Date(NOW - 3 * DAY) });
   await listing(offer, "eldorado", "active");
-  await listing(offer, "ggsel", "active");
-  await listing(offer, "digiseller", "active");
+  // Taken down before the adopt (R1): a listing still up elsewhere is refused.
+  await listing(offer, "ggsel", "delisted");
+  await listing(offer, "digiseller", "removed");
   await ingestNow();
   const unitsBefore = await unitBytes();
   const { adopter, events } = makeAdopt();
@@ -472,7 +480,7 @@ test("apply: fed units keep the vault mark; a removed unit that went out through
   assert.deepEqual(await unitBytes(), unitsBefore);
 
   const product = await CodeProduct.findById(res.productId).lean();
-  assert.deepEqual(product.markets, ["eldorado", "ggsel"]);
+  assert.deepEqual(product.markets, ["eldorado"]);
   assert.equal(product.pricing.floorUsd, 1.25);
 
   for (const code of lineCodes(e)) {
@@ -769,6 +777,70 @@ test("duplicate labels: two lines with the same label are two slots; two codes o
   await ingestNow();
   const refused = await assertRefused(twice, ["duplicate_slot"]);
   assert.equal(refused.details[0].line, 4);
+});
+
+test("problem: the offer is still listed on another market (active, paused or any status but delisted / removed)", async () => {
+  const { offer } = await liveOffer();
+  await listing(offer, "ggsel", "active");
+  await MarketplaceListing.insertMany([
+    { accountOffer: offer._id, marketplace: "gameflip", externalId: "ext-paused", status: "active", autoPaused: true, price: 4, origin: "manual" },
+    { accountOffer: offer._id, marketplace: "g2g", externalId: "ext-error", status: "error", price: 4, origin: "manual" },
+    { accountOffer: offer._id, marketplace: "playerauctions", externalId: "ext-sold", status: "sold", price: 4, origin: "manual" },
+    { accountOffer: offer._id, marketplace: "ggsel", externalId: "ext-second", status: "active", price: 4, origin: "manual" },
+  ]);
+  const res = await assertRefused(offer, ["other_market", "other_market", "other_market", "other_market"]);
+  assert.deepEqual(res.details.map((d) => d.market).sort(), ["g2g", "gameflip", "ggsel", "playerauctions"]);
+  assert.ok(res.problems.every((m) => /^the offer is also listed on \w+:/.test(m)));
+  assert.ok(res.problems.some((m) => m.includes("also listed on ggsel")));
+  assert.ok(res.report, "the report still comes back");
+});
+
+test("an Eldorado listing in any status, and other markets' delisted / removed rows, do not stop an adopt", async () => {
+  const { offer } = await liveOffer();
+  await listing(offer, "eldorado", "delisted");
+  await listing(offer, "eldorado", "error");
+  await listing(offer, "g2g", "delisted");
+  const { adopter } = makeAdopt();
+  const res = await adopter.adopt(offer._id, { apply: true });
+  assert.equal(res.ok, true, JSON.stringify(res.problems));
+});
+
+test("cover texts: the offer's own are kept; empty ones are filled from the defaults for the labels and game", async () => {
+  await campaign();
+  const a = await farmLogin("farm-a");
+  const offer = await offerOf({ coverServiceText: "", coverBullets: [] });
+  await unitOf(offer, unitText(lineCodes(a)));
+  await listing(offer, "eldorado", "active");
+  await ingestNow();
+  const config = { get: async () => ({ games: { "12": { sell: true, displayName: "Overwatch Two", marketGame: "Overwatch" } } }) };
+  const { adopter } = makeAdopt({ config });
+  const res = await adopter.adopt(offer._id, { apply: true, actor: "owner" });
+  assert.equal(res.ok, true, JSON.stringify(res.problems));
+  const product = await CodeProduct.findById(res.productId).lean();
+  assert.deepEqual(
+    { coverTitle: product.texts.coverTitle, coverServiceText: product.texts.coverServiceText, coverBullets: product.texts.coverBullets },
+    {
+      coverTitle: "Overwatch Two Code Bundle",
+      coverServiceText: "4 Redeem Codes",
+      coverBullets: ["Instant Automatic Delivery", "4 Codes - One of Each", "Redeem on Your Own Account"],
+    },
+  );
+  // Never the offer's buyer-facing texts: those stay exactly as they are on sale.
+  assert.equal(product.texts.title, offer.title);
+  assert.equal(product.texts.description, offer.description);
+  assert.equal(product.texts.deliveryTemplate, offer.deliveryTemplate);
+
+  // Only blank bullets count as none; a set cover service text is kept.
+  const b = await farmLogin("farm-b");
+  const own = await offerOf({ title: "Own cover", coverServiceText: "Four Codes", coverBullets: ["  ", ""] });
+  await unitOf(own, unitText(lineCodes(b)));
+  await ingestNow();
+  const res2 = await makeAdopt().adopter.adopt(own._id, { apply: true });
+  assert.equal(res2.ok, true, JSON.stringify(res2.problems));
+  const p2 = await CodeProduct.findById(res2.productId).lean();
+  assert.equal(p2.texts.coverServiceText, "Four Codes");
+  assert.equal(p2.texts.coverTitle, "Overwatch 2 Code Bundle");
+  assert.deepEqual(p2.texts.coverBullets, ["Instant Automatic Delivery", "4 Codes - One of Each", "Redeem on Your Own Account"]);
 });
 
 test("problem: a unit on sale that carries delivery marks (the shop would have to take it off sale)", async () => {

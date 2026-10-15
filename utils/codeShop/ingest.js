@@ -10,11 +10,24 @@
 //
 // What ingest may change on a row that already exists: its metadata, and its
 // group/slot only while it is still in_stock (a code already in a unit keeps
-// the slot it was sold under). Never state, unit or codeHash — with one
-// exception from the contract: an in_stock row of a farm login that was sold
-// (the login now belongs to a buyer, who can see its inventory) becomes held.
+// the slot it was sold under). State, unit and codeHash move only for these
+// (contract + docs/code-shop/05-REVIEW-FIXES.md, R9):
+// - an in_stock row of a farm login that was sold (the login now belongs to a
+//   buyer, who can see its inventory) becomes held;
+// - the farm's stored code changed (it re-claimed a re-issued reward): a free
+//   row (in_stock / expiring / expired, or held only because its code check
+//   failed) takes the new fingerprint; an in_unit row whose unit is on sale
+//   pulls that unit (its other codes go back to stock) and then takes it; a
+//   row anywhere else (sold, dead, in a vault, ...) only gets an event, once;
+// - an expiring / expired row whose use-by moved beyond the lead time goes
+//   back to in_stock (never one that was in a platform vault);
+// - an in_stock row whose inventory item was revealed in the farm panel
+//   (SoopActivity kind "reveal") becomes held, unless the owner released it
+//   for exactly that after the reveal (held.js).
 
+const crypto = require("node:crypto");
 const slots = require("./slots");
+const { PROBLEMS: HELD_PROBLEMS, releasedWhy } = require("./held");
 
 // Bounded writes: one ledger read and at most this many writes per round trip.
 const BATCH = 500;
@@ -23,14 +36,28 @@ const BATCH = 500;
 const DROPS_NAME_MAX = 200;
 const SOLD_PROBLEM = "its farm login was sold";
 const DUP_PROBLEM = "same code as another stored code";
+const REVEALED_PROBLEM = HELD_PROBLEMS.revealed;
 const HISTORY_MAX = 20;
+const HOUR_MS = 60 * 60 * 1000;
+const DEFAULT_LEAD_HOURS = 36;
+const OBJECT_ID_HEX = /^[0-9a-f]{24}$/i;
+// Free rows: no buyer can have their code, so a changed code just re-keys them.
+const FREE_STATES = ["in_stock", "expiring", "expired"];
+const WHY = {
+  rehashed: "its stored code changed (the reward was re-issued)",
+  pulledOther: "its unit was pulled: another code in it changed",
+  pulledSelf: "its unit was pulled: its stored code changed (the reward was re-issued)",
+  revived: "its use-by moved beyond the lead time",
+};
+const PULL_NOTE = "code unit — a stored code in it changed";
 
-// codeEnc is read only to decrypt a NEW identity's code; nothing else in the
-// raw / claim objects is needed.
+// codeEnc is read to decrypt a NEW identity's code, and an existing one's when
+// its ciphertext changed (R9); nothing else in the raw / claim objects is needed.
 const INV_FIELDS =
   "loginId key gameNo gameName name nameRaw image sentAt division expiresAt raw.useExpDate claim.dropsName codeEnc";
 const LEDGER_FIELDS =
-  "loginId itemKey state itemId gameName name image campaignTitle campaignIdx campaignEndAt useBy groupKey slotKey";
+  "loginId itemKey state itemId gameName name image campaignTitle campaignIdx campaignEndAt useBy groupKey slotKey " +
+  "codeHash codeShape unit unitStatus wasFed problem";
 const CAMPAIGN_FIELDS = "dropsIdx title titleRaw startDate endDate gameNo";
 
 const text = (v) => (v === undefined || v === null ? "" : String(v));
@@ -107,6 +134,14 @@ function writeErrorsOf(err) {
   });
 }
 
+// A lead that is missing or unreadable falls back to the default, never to 0.
+function leadHoursOf(v) {
+  const n = Number(v);
+  return v !== null && v !== undefined && v !== "" && Number.isFinite(n) && n >= 0 ? n : DEFAULT_LEAD_HOURS;
+}
+
+const historyPush = (at, from, to, why) => ({ $each: [{ at, from, to, why }], $slice: -HISTORY_MAX });
+
 function createIngest(deps = {}) {
   const models = deps.models || {};
   // Resolved on first use so a test can pass its own models and the real ones
@@ -115,6 +150,25 @@ function createIngest(deps = {}) {
   const secret = deps.secret || require("../secretBox");
   const now = typeof deps.now === "function" ? deps.now : Date.now;
   const events = deps.events || null;
+  let config = deps.config || null;
+  const configOf = () => config || (config = require("./config").createConfig({ model: models.CodeShopConfig, now }));
+  let puller = null;
+  const pull = (unitId, opts) => (puller || (puller = require("./reconcile").pullerOf(deps)))(unitId, opts);
+
+  // identity -> { enc: digest of the ciphertext, code: { hash, shape } | null }
+  // of the last code read for it, so a code is decrypted again only when the
+  // stored ciphertext changes. Digests and fingerprints only.
+  const codeCache = new Map();
+  // "Told once" for changed codes when events cannot stamp.
+  const toldChanged = new Set();
+
+  async function note(entry) {
+    try {
+      if (events && typeof events.log === "function") await events.log(entry);
+    } catch {
+      // the activity log is best-effort
+    }
+  }
 
   // Unordered insert. -> { ok: [doc], dup: [doc] }: dup = refused by a unique
   // index. Any other failure is thrown (rows that did go in stay; the next run
@@ -299,6 +353,18 @@ function createIngest(deps = {}) {
     return { hash: slots.hashCode(code), shape: slots.codeShape(code) };
   }
 
+  // The fingerprint of the code the farm holds now for an existing row, or
+  // null when it cannot be read (unreadable is never "changed").
+  function currentCode(row) {
+    const id = identityOf(row.loginId, row.itemKey);
+    const enc = crypto.createHash("sha1").update(text(row.codeEnc), "utf8").digest("base64");
+    const hit = codeCache.get(id);
+    if (hit && hit.enc === enc) return hit.code;
+    const code = readCode(row);
+    codeCache.set(id, { enc, code });
+    return code;
+  }
+
   async function batchRun(batch, ctx) {
     const { out, at, nowMs, seen, tally } = ctx;
     const CodeStock = model("CodeStock");
@@ -322,6 +388,12 @@ function createIngest(deps = {}) {
       }
       const op = updateOf(cur, row);
       if (op) updates.push(op);
+      // The farm may hold another code for this reward now (re-claimed).
+      if (text(cur.codeHash)) {
+        const code = currentCode(row);
+        if (code && code.hash !== cur.codeHash) ctx.changed.push({ cur, hash: code.hash, shape: code.shape });
+      }
+      row.codeEnc = undefined;
     }
     if (updates.length) {
       const res = await CodeStock.bulkWrite(updates, { ordered: false });
@@ -381,7 +453,7 @@ function createIngest(deps = {}) {
     const nowMs = msOf(now());
     if (nowMs === null) throw new TypeError("codeShop.ingest: deps.now() must return a time");
     const at = new Date(nowMs);
-    const out = { scanned: 0, added: 0, updated: 0, held: 0, skipped: 0 };
+    const out = { scanned: 0, added: 0, updated: 0, held: 0, skipped: 0, rehashed: 0, revived: 0 };
 
     const inventory = await leanOf(
       model("SoopInventoryItem").find({ kind: "code", hasCode: true }).select(INV_FIELDS),
@@ -432,8 +504,14 @@ function createIngest(deps = {}) {
       }
     }
 
-    const ctx = { out, at, nowMs, seen: new Set(), tally: { expired: 0, byGame: {} } };
+    const ctx = { out, at, nowMs, seen: new Set(), tally: { expired: 0, byGame: {} }, changed: [] };
     for (const batch of chunks(live, BATCH)) await batchRun(batch, ctx);
+    const scannedIds = new Set(live.map((r) => identityOf(r.loginId, r.itemKey)));
+    for (const id of codeCache.keys()) if (!scannedIds.has(id)) codeCache.delete(id);
+
+    if (ctx.changed.length) await settleChanged(ctx.changed, at, out);
+    out.revived = await revive(at, nowMs, sold);
+    out.held += await holdRevealed(at);
 
     if (out.added > 0 && events && typeof events.log === "function") {
       const { expired, byGame } = ctx.tally;
@@ -455,6 +533,221 @@ function createIngest(deps = {}) {
       }
     }
     return out;
+  }
+
+  // ── R9: a stored code that changed ───────────────────────────────────────
+
+  // Row -> the new fingerprint, guarded by the state and fingerprint it was
+  // read with (and `guard`). A new code that another row already holds makes
+  // this row a held duplicate instead. -> "rehashed" | "duplicate" | "lost".
+  async function rekey(c, from, at, guard = {}, $set = {}, why = WHY.rehashed) {
+    const CodeStock = model("CodeStock");
+    const filter = { _id: c.cur._id, state: from, codeHash: c.cur.codeHash, ...guard };
+    try {
+      const res = await CodeStock.updateMany(filter, {
+        $set: { codeHash: c.hash, codeShape: c.shape, ...$set },
+        $push: { history: historyPush(at, from, $set.state || from, why) },
+      });
+      return (res && res.modifiedCount) === 1 ? "rehashed" : "lost";
+    } catch (err) {
+      if (!isDuplicateKey(err && err.code)) throw err;
+      const res = await CodeStock.updateMany(filter, {
+        $set: { ...$set, state: "held", problem: DUP_PROBLEM, codeHash: "", codeShape: c.shape },
+        $push: { history: historyPush(at, from, "held", DUP_PROBLEM) },
+      });
+      return (res && res.modifiedCount) === 1 ? "duplicate" : "lost";
+    }
+  }
+
+  // Once per (row, new code): a stamp when the events can stamp, else once
+  // per process.
+  async function tellChanged(c, msg, level = "warn") {
+    const key = `code-changed:${String(c.cur._id)}:${c.hash.slice(0, 16)}`;
+    let fresh = false;
+    if (events && typeof events.stamp === "function") {
+      try {
+        fresh = (await events.stamp(key, { kind: "code-changed", msg })) === true;
+      } catch {
+        fresh = !toldChanged.has(key);
+      }
+    } else {
+      fresh = !toldChanged.has(key);
+    }
+    toldChanged.add(key);
+    if (!fresh) return;
+    await note({
+      level,
+      kind: "code-changed",
+      product: c.cur.product || null,
+      msg,
+      data: { row: String(c.cur._id), state: text(c.cur.state), unit: c.cur.unit ? String(c.cur.unit) : null, oldShape: text(c.cur.codeShape), newShape: c.shape },
+    });
+  }
+
+  const nameOf = (c) => text(c.cur.name) || "a reward";
+
+  async function settleChanged(changed, at, out) {
+    const byUnit = new Map();
+    for (const c of changed) {
+      const { state, problem } = c.cur;
+      if (FREE_STATES.includes(state) || (state === "held" && text(problem) === HELD_PROBLEMS.codeCheck)) {
+        const r = await rekey(c, state, at);
+        if (r === "rehashed") out.rehashed += 1;
+        if (r === "duplicate") out.held += 1;
+        if (r !== "lost") {
+          await note({
+            level: r === "duplicate" ? "warn" : "info",
+            kind: "code-changed",
+            msg:
+              `The farm's stored code for ${nameOf(c)} changed (${text(c.cur.codeShape)} -> ${c.shape}); ` +
+              (r === "duplicate" ? "the new code is already in stock under another row, so this one is held" : "the ledger follows the new code"),
+            data: { row: String(c.cur._id), state },
+          });
+        }
+        continue;
+      }
+      if (state === "in_unit" && c.cur.unit) {
+        const k = String(c.cur.unit);
+        if (!byUnit.has(k)) byUnit.set(k, { unit: c.cur.unit, list: [] });
+        byUnit.get(k).list.push(c);
+        continue;
+      }
+      const sold = state === "sold" || state === "dead";
+      await tellChanged(
+        c,
+        `The farm's stored code for ${nameOf(c)} changed (${text(c.cur.codeShape)} -> ${c.shape}) while it was ${state}` +
+          (sold ? ": its buyer has the old code — check it still works" : ": nothing was changed"),
+      );
+    }
+    for (const { unit, list } of byUnit.values()) await settleChangedUnit(unit, list, at, out);
+  }
+
+  // An in_unit row's code changed: the unit's buyer text holds the OLD code.
+  // Only a unit on sale with no vault or delivery mark is pulled here; any
+  // other unit is left to reconcile (it holds what may have gone out).
+  async function settleChangedUnit(unitId, list, at, out) {
+    const CodeStock = model("CodeStock");
+    const unit = await leanOf(model("SuppliedAccount").findById(unitId).select("status fedAt contentId deliveredAt"));
+    const rows = (await leanOf(CodeStock.find({ unit: unitId }).select("_id state wasFed unitStatus"))) || [];
+    const marked = !!unit && !!(unit.fedAt || text(unit.contentId) || unit.deliveredAt);
+    const wasFed = rows.some((r) => r.wasFed === true || r.unitStatus === "fed");
+    const pullable = !!unit && unit.status === "available" && !marked && !wasFed;
+    const won = pullable ? await pull(unitId, { note: PULL_NOTE }) : false;
+    if (!won) {
+      for (const c of list) {
+        await tellChanged(
+          c,
+          `The farm's stored code for ${nameOf(c)} changed (${text(c.cur.codeShape)} -> ${c.shape}) while it is in a bundle that ` +
+            (unit ? `is ${text(unit.status) || "unknown"}${marked || wasFed ? " and went through a market" : ""}` : "is gone") +
+            ": the bundle still holds the old code",
+        );
+      }
+      return;
+    }
+    const changedIds = new Set(list.map((c) => String(c.cur._id)));
+    const others = rows.filter((r) => r.state === "in_unit" && !changedIds.has(String(r._id))).map((r) => r._id);
+    const free = { unit: null, product: null, offer: null, unitStatus: "" };
+    if (others.length) {
+      await CodeStock.updateMany(
+        { _id: { $in: others }, unit: unitId, state: "in_unit" },
+        { $set: { state: "in_stock", ...free }, $push: { history: historyPush(at, "in_unit", "in_stock", WHY.pulledOther) } },
+      );
+    }
+    let rehashed = 0;
+    for (const c of list) {
+      const r = await rekey(c, "in_unit", at, { unit: unitId }, { state: "in_stock", ...free }, WHY.pulledSelf);
+      if (r === "rehashed") rehashed += 1;
+      if (r === "duplicate") out.held += 1;
+    }
+    out.rehashed += rehashed;
+    await note({
+      level: "warn",
+      kind: "code-changed",
+      msg: `Took a bundle off sale: ${list.length} of its stored code(s) changed (the reward was re-issued); its codes are back in stock`,
+      data: { unit: String(unitId), changed: list.length, rehashed, back: others.length },
+    });
+  }
+
+  // ── R9: use-by moved beyond the lead ─────────────────────────────────────
+
+  async function revive(at, nowMs, sold) {
+    const cfg = (await configOf().get()) || {};
+    const horizon = new Date(nowMs + leadHoursOf(cfg.expiryLeadHours) * HOUR_MS);
+    const CodeStock = model("CodeStock");
+    let n = 0;
+    for (const from of ["expiring", "expired"]) {
+      const filter = { state: from, useBy: { $gt: horizon }, wasFed: { $ne: true } };
+      if (sold.size) filter.loginId = { $nin: [...sold] };
+      const res = await CodeStock.updateMany(filter, {
+        $set: { state: "in_stock", unit: null, product: null, offer: null, unitStatus: "" },
+        $push: { history: historyPush(at, from, "in_stock", WHY.revived) },
+      });
+      n += (res && res.modifiedCount) || 0;
+    }
+    if (n) {
+      await note({ level: "info", kind: "ingest", msg: `${n} code(s) back in stock: their use-by moved beyond the lead time`, data: { revived: n } });
+    }
+    return n;
+  }
+
+  // ── R9: a code shown in the farm panel ───────────────────────────────────
+
+  // When the owner last released this row for exactly "shown in the farm
+  // panel" (-Infinity when never): a reveal before that is vouched for.
+  function lastVouchMs(row) {
+    const why = releasedWhy(REVEALED_PROBLEM);
+    let best = -Infinity;
+    for (const h of Array.isArray(row.history) ? row.history : []) {
+      if (!h || h.why !== why) continue;
+      const ms = msOf(h.at);
+      if (ms !== null && ms > best) best = ms;
+    }
+    return best;
+  }
+
+  // The farm's activity log has no index on `kind`, only on `at` (its TTL):
+  // the first pass reads the whole 14 days once, every later pass only what
+  // was written since (minus a minute of slack), so a tick never scans the log.
+  const revealSeen = new Map(); // item id -> ms of its newest reveal
+  let revealReadTo = null; // ms the reveals have been read up to
+
+  async function holdRevealed(at) {
+    const nowMs = msOf(at);
+    const q = { kind: "reveal" };
+    if (revealReadTo !== null) q.at = { $gte: new Date(revealReadTo - 60e3) };
+    const reveals = (await leanOf(model("SoopActivity").find(q).select("at data.itemId"))) || [];
+    revealReadTo = nowMs === null ? Date.now() : nowMs;
+    for (const r of reveals) {
+      const id = text(r && r.data && r.data.itemId);
+      const ms = msOf(r && r.at);
+      if (!OBJECT_ID_HEX.test(id) || ms === null) continue;
+      if (!revealSeen.has(id) || ms > revealSeen.get(id)) revealSeen.set(id, ms);
+    }
+    // Forget what the log itself has forgotten (14 days), so the map stays small.
+    for (const [id, ms] of revealSeen) if (revealReadTo - ms > 15 * 86400e3) revealSeen.delete(id);
+    const lastReveal = revealSeen;
+    if (!lastReveal.size) return 0;
+    const CodeStock = model("CodeStock");
+    let held = 0;
+    for (const part of chunks([...lastReveal.keys()], BATCH)) {
+      const rows = (await leanOf(CodeStock.find({ state: "in_stock", itemId: { $in: part } }).select("_id itemId history"))) || [];
+      const hold = rows.filter((r) => lastReveal.get(text(r.itemId)) > lastVouchMs(r)).map((r) => r._id);
+      if (!hold.length) continue;
+      const res = await CodeStock.updateMany(
+        { _id: { $in: hold }, state: "in_stock" },
+        { $set: { state: "held", problem: REVEALED_PROBLEM }, $push: { history: historyPush(at, "in_stock", "held", REVEALED_PROBLEM) } },
+      );
+      held += (res && res.modifiedCount) || 0;
+    }
+    if (held) {
+      await note({
+        level: "warn",
+        kind: "code-held",
+        msg: `Held ${held} code(s) that were shown in the farm panel; release them from the Stock tab if they were never given out`,
+        data: { held },
+      });
+    }
+    return held;
   }
 
   // One run at a time per process: a second caller shares the running one.

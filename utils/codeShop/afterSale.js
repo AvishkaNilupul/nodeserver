@@ -3,8 +3,15 @@
 // sold, a buyer's "this code does not work", and a replacement code.
 //
 // replace() is the ONLY call in the code shop that hands a plaintext code out
-// of the server, so it is built around three rules:
+// of the server, so it is built around these rules (05-REVIEW-FIXES.md, R7):
 //
+// - Dead first. Only a code the owner marked dead (report "dead") is replaced;
+//   the original is marked "replaced" guarded by that state, so a report back
+//   to "ok" in between makes the replacement lose.
+// - Never a code a farm buyer can see: candidates of a farm login that was
+//   sold (SoopAccount.sold) are skipped.
+// - At most 30 replacements an hour per process (429 after), counted from the
+//   moment a call starts looking, so calls at once cannot overshoot.
 // - One code, one buyer. A replacement comes only from a ledger row THIS call
 //   moved in_stock -> sold (a status-guarded findOneAndUpdate), so two calls at
 //   once can never get the same code. The original is then marked "replaced"
@@ -37,6 +44,7 @@ const CANDIDATE_ROUNDS = 5;
 // this many failures in one call means something is wrong beyond one row.
 const MAX_READ_FAILURES = 3;
 const NOTE_MAX = 500;
+const REPLACE_MAX_PER_HOUR = 30;
 
 const ROW_FIELDS = {
   loginId: 1,
@@ -64,6 +72,7 @@ const REAL_MODELS = {
   CodeStock: () => require("../../models/CodeStock"),
   CodeProduct: () => require("../../models/CodeProduct"),
   SoopInventoryItem: () => require("../../models/SoopInventoryItem"),
+  SoopAccount: () => require("../../models/SoopAccount"),
 };
 
 function modelOf(deps, name) {
@@ -202,6 +211,9 @@ function createAfterSale(deps = {}) {
   let config = deps.config || null;
   let events = deps.events || null;
   const M = (name) => modelOf(deps, name);
+  const maxPerHour = Number.isInteger(deps.maxReplacementsPerHour) && deps.maxReplacementsPerHour >= 0 ? deps.maxReplacementsPerHour : REPLACE_MAX_PER_HOUR;
+  // Replacements this process handed out (or is handing out) in the last hour.
+  let recent = [];
 
   function configOf() {
     if (!config) {
@@ -471,12 +483,13 @@ function createAfterSale(deps = {}) {
     }
   }
 
-  // Original -> after "replaced". true only when this call made that change.
+  // Original -> after "replaced". true only when this call made that change;
+  // guarded by "dead", so a code reported working again meanwhile is not.
   async function markReplaced(orig, uid, row, at, by) {
     const CodeStock = M("CodeStock");
     try {
       const res = await CodeStock.updateOne(
-        { _id: orig._id, unit: uid, state: { $in: SOLD_STATES }, "after.status": { $ne: "replaced" } },
+        { _id: orig._id, unit: uid, state: "dead", "after.status": { $ne: "replaced" } },
         { $set: { "after.status": "replaced", "after.ref": row._id, "after.at": at, "after.by": by } },
       );
       return (res.modifiedCount || 0) === 1;
@@ -492,12 +505,40 @@ function createAfterSale(deps = {}) {
     }
   }
 
-  async function replace(unitId, { slot, actor } = {}) {
-    const { uid, row: orig, slot: i, label } = await rowAt(unitId, slot);
-    if (!SOLD_STATES.includes(orig.state)) throw fail(409, "Only a sold code can be replaced");
+  // A place in this hour's allowance, or a 429. Taken before the search so
+  // calls at once cannot overshoot; given back when nothing was handed out.
+  function takeAllowance(t) {
+    recent = recent.filter((e) => e.at > t - HOUR_MS);
+    if (recent.length >= maxPerHour) {
+      throw fail(429, `At most ${maxPerHour} replacement codes an hour; try again later`);
+    }
+    const entry = { at: t };
+    recent.push(entry);
+    return entry;
+  }
+  function giveBack(entry) {
+    recent = recent.filter((e) => e !== entry);
+  }
+
+  async function replace(unitId, opts = {}) {
+    const { uid, row: orig, slot: i, label } = await rowAt(unitId, opts.slot);
     if (orig.after && orig.after.status === "replaced") {
       throw fail(409, "A replacement was already handed out for this code");
     }
+    if (orig.state !== "dead") {
+      throw fail(409, SOLD_STATES.includes(orig.state) ? "Mark the code dead first: only a dead code gets a replacement" : "Only a sold code that was marked dead can be replaced");
+    }
+    const entry = takeAllowance(now());
+    try {
+      const out = await replaceDead({ uid, orig, i, label, actor: opts.actor });
+      return out;
+    } catch (err) {
+      giveBack(entry);
+      throw err;
+    }
+  }
+
+  async function replaceDead({ uid, orig, i, label, actor }) {
     const t = now();
     const at = new Date(t);
     const by = actorOf(actor);
@@ -505,11 +546,18 @@ function createAfterSale(deps = {}) {
     const cfg = (await configOf().get()) || {};
     const leadCut = new Date(t + leadHoursOf(cfg.expiryLeadHours) * HOUR_MS);
 
+    // Never a code of a farm login that was sold: its buyer can see (and
+    // redeem) that login's inventory.
+    const soldLogins = (await M("SoopAccount").find({ sold: true }, { loginId: 1 }).lean())
+      .map((a) => text(a && a.loginId))
+      .filter(Boolean);
+    const notSold = soldLogins.length ? { loginId: { $nin: soldLogins } } : {};
+
     // Same reward of the same campaign first, then the same reward name of the
     // same game (another campaign's copy of it).
     const matches = [];
-    if (text(orig.slotKey)) matches.push({ slotKey: text(orig.slotKey) });
-    if (text(orig.gameNo) && text(orig.nameRaw)) matches.push({ gameNo: text(orig.gameNo), nameRaw: text(orig.nameRaw) });
+    if (text(orig.slotKey)) matches.push({ slotKey: text(orig.slotKey), ...notSold });
+    if (text(orig.gameNo) && text(orig.nameRaw)) matches.push({ gameNo: text(orig.gameNo), nameRaw: text(orig.nameRaw), ...notSold });
 
     const tried = new Set();
     let readFailures = 0;
@@ -540,8 +588,8 @@ function createAfterSale(deps = {}) {
           }
 
           if (!(await markReplaced(orig, uid, row, at, by))) {
-            await putBack(row, orig, "the code was replaced by another request", productId);
-            throw fail(409, "A replacement was already handed out for this code");
+            await putBack(row, orig, "the code was replaced (or reported working) by another request", productId);
+            throw fail(409, "A replacement was already handed out for this code, or it is no longer marked dead");
           }
 
           const shape = text(row.codeShape) || codeShape(code);
@@ -563,4 +611,4 @@ function createAfterSale(deps = {}) {
   return { sold, report, replace };
 }
 
-module.exports = { createAfterSale, slotIndexes };
+module.exports = { createAfterSale, slotIndexes, REPLACE_MAX_PER_HOUR };

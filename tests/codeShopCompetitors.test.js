@@ -5,7 +5,9 @@
 // It must come only from offers that really sell the same set, never from one
 // of our own offers (undercutting ourselves walks the price to the floor one
 // cent per run), and never from a half-read market: a failed request keeps the
-// previous scan as it was.
+// previous scan as it was. And only from offers that have stock and ask at
+// least 30 % of our base price (05-REVIEW-FIXES.md, R8): an empty or
+// bait-priced listing must not drag our price down.
 //
 // The pure parts run plain. scan() runs against real Mongo (mongodb-memory-
 // server) with an injected fetch and sleep, so nothing here reaches the
@@ -23,6 +25,8 @@ const {
   queriesFor,
   scoreOffer,
   parseSearch,
+  countsForLowest,
+  MIN_PRICE_SHARE,
 } = require("../utils/codeShop/competitors");
 
 const slots = (...labels) => labels.map((label, i) => ({ slotKey: "s" + i, label }));
@@ -397,4 +401,52 @@ test("scan: loads the product by id too", async () => {
   const market = fakeMarket({ set: [[offer("x", FULL, 1.1)]] });
   const res = await harness(market).competitors.scan(String(p._id));
   assert.equal(res.lowestSameSetUsd, 1.1);
+});
+
+// ── R8: which same-set offers set the lowest price ─────────────────────────
+
+test("countsForLowest: same set, at least one in stock, at least 30 % of our base price", () => {
+  const o = (fields) => ({ sameSet: true, qty: 2, priceUsd: 1, ...fields });
+  assert.equal(MIN_PRICE_SHARE, 0.3);
+  assert.equal(countsForLowest(o({}), 2), true);
+  assert.equal(countsForLowest(o({ sameSet: false }), 2), false);
+  assert.equal(countsForLowest(o({ qty: 0 }), 2), false);
+  assert.equal(countsForLowest(o({ priceUsd: 0.6 }), 2), true, "exactly 30 % counts");
+  assert.equal(countsForLowest(o({ priceUsd: 0.59 }), 2), false);
+  assert.equal(countsForLowest(o({ priceUsd: null }), 2), false);
+  // No usable base price: only the stock rule applies.
+  assert.equal(countsForLowest(o({ priceUsd: 0.01 }), 0), true);
+  assert.equal(countsForLowest(o({ priceUsd: 0.01 }), null), true);
+});
+
+test("scan: an out-of-stock or bait-priced same-set offer is listed but does not set the lowest price", async () => {
+  const p = await product({ competitors: { queries: ["set"] }, pricing: { priceUsd: 4 } });
+  const market = fakeMarket({
+    set: [
+      [
+        offer("empty", FULL, 1.5, { qty: 0 }),
+        offer("bait", FULL, 1.19),
+        offer("floor", FULL, 1.2),
+        offer("real", FULL, 3.5),
+      ],
+    ],
+  });
+  const res = await harness(market).competitors.scan(p);
+  assert.deepEqual(res.offers.map((o) => o.id), ["bait", "floor", "empty", "real"]);
+  assert.equal(res.lowestSameSetUsd, 1.2, "30 % of $4 is $1.20: the first offer that counts");
+  const saved = await CodeProduct.findById(p._id).lean();
+  assert.equal(saved.competitors.lowestSameSetUsd, 1.2);
+
+  // Nothing that counts: no lowest price at all.
+  const q = await product({ competitors: { queries: ["set"] }, pricing: { priceUsd: 10 } });
+  const none = await harness(fakeMarket({ set: [[offer("cheap", FULL, 2.5), offer("gone", FULL, 4, { qty: 0 })]] })).competitors.scan(q);
+  assert.equal(none.offers.length, 2);
+  assert.equal(none.lowestSameSetUsd, null);
+});
+
+test("scan: a product passed without its pricing has its base price read", async () => {
+  const p = await product({ competitors: { queries: ["set"] }, pricing: { priceUsd: 5 } });
+  const partial = { _id: p._id, name: p.name, gameNo: p.gameNo, slots: p.slots, competitors: p.competitors };
+  const res = await harness(fakeMarket({ set: [[offer("bait", FULL, 1), offer("real", FULL, 2)]] })).competitors.scan(partial);
+  assert.equal(res.lowestSameSetUsd, 2);
 });

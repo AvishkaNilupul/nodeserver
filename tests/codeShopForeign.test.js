@@ -4,14 +4,17 @@
 // bundle it again and it would sell twice.
 //
 // What must hold:
-// - every stock row on sale / in a vault / sold that is not one of our units
-//   is read, whatever its format (a bare code, "N) Label = CODE" lines, a code
-//   in `extra`), and a free ledger row whose code is in it is held, naming
+// - every stock row on sale / in a vault / sold, or removed WITH a market mark,
+//   that is not one of our units is read, whatever its format (a bare code,
+//   "N) Label = CODE" lines, a code in `extra`, `login`, `email` or
+//   `clientSecret`), and a free ledger row whose code is in it is held, naming
 //   that stock row;
-// - our own units and removed rows are never read as foreign;
+// - our own units and rows removed without a market mark are never read as
+//   foreign;
 // - a code that is in one of OUR units and also in a foreign row is a
-//   conflict: one error event and one Telegram line per pair, once, and
-//   nothing changes;
+//   conflict: one error event and one Telegram line per pair, once (at most
+//   15 lines + "+ N more" per message), and nothing changes;
+// - stockRowsHolding(hash) finds one code in ANY stock row (held.js);
 // - a held code goes back to stock only when its stock row let it go (gone,
 //   or removed with no market mark), and never in a run that cannot read the
 //   stock rows;
@@ -32,7 +35,7 @@ const AccountOffer = require("../models/AccountOffer");
 const SuppliedAccount = require("../models/SuppliedAccount");
 const secretBox = require("../utils/secretBox");
 const slots = require("../utils/codeShop/slots");
-const { createForeignGuard, foreignProblem } = require("../utils/codeShop/foreign");
+const { createForeignGuard, foreignProblem, stockRowsHolding, TELEGRAM_MAX_LINES } = require("../utils/codeShop/foreign");
 
 const BSON = mongoose.mongo.BSON;
 const NOW = Date.parse("2026-10-15T00:00:00Z");
@@ -318,6 +321,140 @@ test("conflict: a code in one of our units AND in a foreign row is reported once
   assert.deepEqual(await CodeStock.find({}).sort({ _id: 1 }).lean(), before, "a conflict changes no ledger row");
   assert.deepEqual(await unitBytes(), unitsBefore, "and no stock row");
   assertNoCode(down, res, again, events.logs, telegram.sent);
+});
+
+test("login, email and clientSecret are read too (a code pasted into any field)", async () => {
+  const inLogin = newCode();
+  const inEmail = newCode();
+  const inSecret = newCode();
+  for (const c of [inLogin, inEmail, inSecret]) await ledgerRow(c);
+  const offer = await offerOf();
+  const s1 = await stockRow(offer, "pw-1", { login: inLogin });
+  const s2 = await stockRow(offer, "pw-2", { email: secretBox.encrypt(`buyer note: ${inEmail}`) });
+  const s3 = await stockRow(offer, "pw-3", { clientSecret: secretBox.encrypt(inSecret) });
+  const { guard, events } = makeGuard();
+  const res = await guard.run();
+  assert.deepEqual(res, { scanned: 3, decrypted: 3, held: 3, conflicts: 0, released: 0 });
+  assert.equal((await rowOf(inLogin)).problem, foreignProblem(s1._id));
+  assert.equal((await rowOf(inEmail)).problem, foreignProblem(s2._id));
+  assert.equal((await rowOf(inSecret)).problem, foreignProblem(s3._id));
+  assertNoCode(res, events.logs);
+});
+
+test("a row removed WITH a market mark is still read (it may have reached a buyer); without one it is not", async () => {
+  const offer = await offerOf();
+  const marked = {};
+  for (const [mark, value] of Object.entries(MARKS)) {
+    const code = newCode();
+    await ledgerRow(code);
+    marked[mark] = { code, row: await stockRow(offer, code, { status: "removed", [mark]: value() }) };
+  }
+  const clean = newCode();
+  await ledgerRow(clean);
+  await stockRow(offer, clean, { status: "removed", market: "", contentId: "", orderId: "" });
+  const before = await unitBytes();
+
+  const { guard, events } = makeGuard();
+  const res = await guard.run();
+  const n = Object.keys(MARKS).length;
+  assert.deepEqual(res, { scanned: n, decrypted: n, held: n, conflicts: 0, released: 0 });
+  for (const [mark, { code, row }] of Object.entries(marked)) {
+    const r = await rowOf(code);
+    assert.equal(r.state, "held", mark);
+    assert.equal(r.problem, foreignProblem(row._id), mark);
+  }
+  assert.equal((await rowOf(clean)).state, "in_stock", "removed with no mark: never reached a buyer, not read");
+  assert.deepEqual(await unitBytes(), before);
+
+  // A second run releases nothing: a removed row with a mark keeps its codes held.
+  const again = await guard.run();
+  assert.equal(again.released, 0);
+  assert.equal(again.held, 0);
+  assertNoCode(res, again, events.logs);
+});
+
+test("conflict alert: at most 15 lines per Telegram message, then \"+ N more\"; every pair still logged and stamped", async () => {
+  assert.equal(TELEGRAM_MAX_LINES, 15);
+  const offer = await offerOf("Shop offer");
+  const product = await CodeProduct.create({ name: "Big bundle", status: "active", offer: offer._id });
+  const ourUnit = await stockRow(offer, "ours");
+  const codes = [];
+  for (let i = 0; i < 18; i += 1) {
+    const code = newCode();
+    codes.push(code);
+    await ledgerRow(code, { state: "in_unit", unit: ourUnit._id, product: product._id, unitStatus: "available" });
+  }
+  const handMade = await offerOf("Hand-made listing");
+  await stockRow(handMade, codes.map((c, i) => `${i + 1}) Reward = ${c}`).join("\n"));
+
+  const { guard, events, telegram } = makeGuard();
+  const res = await guard.run();
+  assert.equal(res.conflicts, 18);
+  assert.equal(telegram.sent.length, 1);
+  const lines = telegram.sent[0].split("\n");
+  assert.equal(lines.length, 16);
+  assert.ok(lines.slice(0, 15).every((l) => l.startsWith("Code shop: a code in our Big bundle bundle")));
+  assert.equal(lines[15], "+ 3 more");
+  assert.equal(events.stamps.size, 18, "every pair is stamped: told once, in the log");
+  assert.equal(events.logs.filter((e) => e.kind === "foreign-conflict" && e.level === "error").length, 18);
+
+  // The next run has nothing new to tell.
+  await guard.run();
+  assert.equal(telegram.sent.length, 1, "nothing new to tell");
+  assertNoCode(res, events.logs, telegram.sent);
+});
+
+test("stockRowsHolding: one code in any stock row, any status, ours included; nothing for an unknown code", async () => {
+  const code = newCode();
+  const other = newCode();
+  const offer = await offerOf();
+  const a = await stockRow(offer, `1) Reward = ${code}`);
+  const b = await stockRow(offer, "x", { status: "removed", extra: secretBox.encrypt(code) });
+  const c = await stockRow(offer, "y", { status: "sold", login: code });
+  await stockRow(offer, other);
+  // One of our own units holding it counts too.
+  const ours = await stockRow(offer, code, { status: "fed" });
+  await ledgerRow(newCode(), { state: "in_unit", unit: ours._id });
+
+  const found = await stockRowsHolding(slots.hashCode(code), { secret: secretBox });
+  assert.deepEqual(found.map((r) => String(r._id)), [a, b, c, ours].map((r) => String(r._id)));
+  assert.deepEqual(found.map((r) => r.status), ["available", "removed", "sold", "fed"]);
+  assert.ok(found.every((r) => String(r.offer) === String(offer._id)));
+  assert.deepEqual(await stockRowsHolding(slots.hashCode(newCode()), { secret: secretBox }), []);
+  assert.deepEqual(await stockRowsHolding("", { secret: secretBox }), []);
+  assertNoCode(found);
+});
+
+test("stockRowsHolding: reads in batches past 500 rows, and throws when the rows cannot be read", async () => {
+  const code = newCode();
+  const offer = await offerOf();
+  const docs = [];
+  for (let i = 0; i < 520; i += 1) docs.push({ offer: offer._id, login: "bulk-" + i, loginLower: "bulk-" + i, password: "plain-" + i, status: "available" });
+  await SuppliedAccount.collection.insertMany(docs);
+  const last = await stockRow(offer, code);
+  let reads = 0;
+  const Counting = new Proxy(SuppliedAccount, {
+    get(target, prop) {
+      if (prop === "find") {
+        return (...a) => {
+          reads += 1;
+          return target.find(...a);
+        };
+      }
+      const v = target[prop];
+      return typeof v === "function" ? v.bind(target) : v;
+    },
+  });
+  const found = await stockRowsHolding(slots.hashCode(code), { secret: secretBox, models: { SuppliedAccount: Counting } });
+  assert.deepEqual(found.map((r) => String(r._id)), [String(last._id)]);
+  assert.equal(reads, 2);
+
+  const Broken = {
+    find() {
+      throw new Error("connection reset");
+    },
+  };
+  await assert.rejects(stockRowsHolding(slots.hashCode(code), { secret: secretBox, models: { SuppliedAccount: Broken } }), /connection reset/);
 });
 
 test("cache: an unchanged row is decrypted once; a changed row is read again", async () => {

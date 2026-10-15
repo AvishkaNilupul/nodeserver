@@ -13,7 +13,9 @@
 // 3. allocate.bestDraftSets over the free counts says which slot sets to offer;
 // 4. a set already owned by a non-retired product (any origin/status) gets no
 //    new draft — a non-edited draft just gets its `proposed` estimate refreshed;
-//    otherwise a draft is created, stamped once, and announced on Telegram;
+//    otherwise a draft is created, stamped once by its slot set
+//    (`draft:<slotSetHash>`, so a draft deleted and proposed again is not
+//    announced twice), and announced on Telegram;
 // 5. the group's auto drafts no longer proposed: deleted, or `stale` when the
 //    owner edited them.
 
@@ -25,8 +27,9 @@ const { DEFAULTS } = require("./config");
 
 const HOUR_MS = 60 * 60 * 1000;
 const DAY_MS = 24 * HOUR_MS;
-// Eldorado first: it is the market every draft is checked against first.
-const MARKET_ORDER = ["eldorado", "ggsel"];
+// Codes sell on Eldorado only (05-REVIEW-FIXES.md, R1): GGSel never says which
+// code it sold, so a draft never names it, whatever the settings say.
+const MARKET_ORDER = ["eldorado"];
 const ROW_FIELDS =
   "_id gameNo gameName groupKey slotKey nameRaw name image campaignTitle campaignEndAt earnedAt useBy state";
 
@@ -166,12 +169,13 @@ function createPlanner(deps = {}) {
   // draft row exists. Telegram is best-effort: a failed send never fails the run.
   async function announce(product, { units, why }) {
     const id = String(product._id);
+    const key = "draft:" + String(product.slotSetHash);
     const n = product.slots.length;
     const blank = product.slots.filter((s) => !s.label).length;
     const msg = `New draft "${product.name}" - ${n} code${n === 1 ? "" : "s"} per bundle, ${units} bundle${units === 1 ? "" : "s"} (${why})`;
     let fresh = false;
     try {
-      fresh = await getEvents().stamp("draft:" + id, { kind: "draft", msg });
+      fresh = await getEvents().stamp(key, { kind: "draft", msg });
     } catch (err) {
       console.error("[code-shop] planner: draft stamp failed for " + id + ": " + (err && err.message));
       return;

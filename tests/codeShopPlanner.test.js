@@ -103,8 +103,8 @@ function fakeEvents() {
     },
     async stamp(key) {
       if (stamps.has(key)) return false;
-      const id = String(key).replace(/^draft:/, "");
-      stamps.set(key, !!(await CodeProduct.exists({ _id: id })));
+      const slotSetHash = String(key).replace(/^draft:/, "");
+      stamps.set(key, !!(await CodeProduct.exists({ slotSetHash, status: "draft" })));
       return true;
     },
     async has(key) {
@@ -229,7 +229,7 @@ test("ended + grace: one full draft, slots in first-earned order, clean texts", 
   assert.deepEqual(checkBuyerText({ ...p.texts, labels: p.slots.map((s) => s.label) }), []);
 
   // Announced once, stamped only once the draft row existed.
-  assert.deepEqual([...events.stamps], [["draft:" + p._id, true]]);
+  assert.deepEqual([...events.stamps], [["draft:" + p.slotSetHash, true]]);
   assert.equal(telegram.sent.length, 1);
   assert.match(telegram.sent[0], /Overwatch 2 - Autumn Cup \(3 codes\)/);
   assert.match(telegram.sent[0], /6 bundles/);
@@ -242,7 +242,7 @@ test("a reward with no clean English name gets an empty label; the draft is stil
   const sourcey = await addSlot({ ...g, nameRaw: "spray-a", name: "SOOP Exclusive Spray", count: 5, earnedAt: NOW - 2 * DAY });
   const helmet = await addSlot({ ...g, nameRaw: "helmet", name: "Tactical Helmet", count: 5, earnedAt: NOW - DAY });
 
-  const { planner, telegram, events } = setup({ cfg: { markets: { eldorado: true, ggsel: true } } });
+  const { planner, telegram, events } = setup();
   const res = await planner.run();
   noErrors(events);
   assert.equal(res.created, 1);
@@ -251,20 +251,46 @@ test("a reward with no clean English name gets an empty label; the draft is stil
   assert.deepEqual(p.slots.map((s) => s.slotKey), [korean, sourcey, helmet]);
   assert.deepEqual(p.slots.map((s) => s.label), ["", "", "Tactical Helmet"]);
   assert.equal(p.marketGame, "Delta Force");
-  assert.deepEqual(p.markets, ["eldorado", "ggsel"]);
+  assert.deepEqual(p.markets, ["eldorado"]);
   // Nothing buyer-facing carries the raw names.
   assert.doesNotMatch(JSON.stringify(p.texts), /한국어|SOOP/);
   assert.equal(telegram.sent.length, 1);
   assert.match(telegram.sent[0], /2 rewards need an English label first/);
 });
 
-test("markets: only the enabled ones, eldorado first", async () => {
+test("markets: Eldorado when it is on; never GGSel, even from a stored setting (R1)", async () => {
   await reset();
   await addSlot({ nameRaw: "Prost Spray", count: 5 });
-  const { planner } = setup({ cfg: { markets: { eldorado: false, ggsel: true } } });
-  await planner.run();
-  const [p] = await drafts();
-  assert.deepEqual(p.markets, ["ggsel"]);
+  const on = setup({ cfg: { markets: { eldorado: true, ggsel: true } } });
+  await on.planner.run();
+  assert.deepEqual((await drafts())[0].markets, ["eldorado"]);
+
+  await reset();
+  await addSlot({ nameRaw: "Prost Spray", count: 5 });
+  const off = setup({ cfg: { markets: { eldorado: false, ggsel: true } } });
+  await off.planner.run();
+  assert.deepEqual((await drafts())[0].markets, []);
+});
+
+test("a draft deleted and proposed again is not announced twice: the stamp is its slot set", async () => {
+  await reset();
+  const a = await addSlot({ nameRaw: "Prost Spray", count: 10 });
+  const b = await addSlot({ nameRaw: "Banana Cat Spray", count: 10 });
+  const { planner, clock, telegram, events } = setup();
+  assert.equal((await planner.run()).created, 1);
+  const [first] = await drafts();
+  assert.equal(first.slotSetHash, slotSetHash([a, b]));
+  assert.deepEqual([...events.stamps.keys()], ["draft:" + slotSetHash([a, b])]);
+
+  // The owner deletes the draft; the planner proposes the same set again.
+  await CodeProduct.deleteOne({ _id: first._id });
+  clock.t = NOW + HOUR;
+  assert.equal((await planner.run()).created, 1);
+  const [second] = await drafts();
+  assert.notEqual(String(second._id), String(first._id), "a new draft row");
+  assert.equal(second.slotSetHash, first.slotSetHash);
+  assert.equal(telegram.sent.length, 1, "announced once for the set");
+  assert.equal(events.stamps.size, 1);
 });
 
 test("leftovers: 5 slots x29 + F x20 + G x15 -> full x15 and a 5-slot leftover x14", async () => {
@@ -467,7 +493,7 @@ test("a failed Telegram send never fails the run; the draft is still stamped", a
   const res = await planner.run();
   assert.equal(res.created, 1);
   const [p] = await drafts();
-  assert.deepEqual([...events.stamps], [["draft:" + p._id, true]]);
+  assert.deepEqual([...events.stamps], [["draft:" + p.slotSetHash, true]]);
   assert.equal(telegram.sent.length, 1);
   assert.ok(events.logs.some((l) => l.level === "warn" && l.kind === "telegram"));
   noErrors(events);

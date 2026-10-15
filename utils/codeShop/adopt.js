@@ -23,16 +23,25 @@
 // Any problem means nothing at all is written. Codes are decrypted only to
 // hash them; reports, problems and events carry labels, slot keys, counts and
 // masked shapes (`codeShape`) — never a code.
+//
+// The code shop sells on Eldorado only (05-REVIEW-FIXES.md, R1): an offer that
+// is still listed on any other market (a listing row that is not delisted or
+// removed — active, paused or anything else) is refused. An adopted product
+// keeps the offer's own cover texts; the ones the offer does not have come
+// from the defaults for its labels and game (R4).
 
 const mongoose = require("mongoose");
 const slotsLib = require("./slots");
 const { foreignProblem } = require("./foreign");
+const { defaultTexts } = require("./texts");
 
 const ObjectId = mongoose.Types.ObjectId;
 const OBJECT_ID_HEX = /^[0-9a-f]{24}$/i;
 const HISTORY_MAX = 20;
 const LINE_RE = /^\s*(\d+)\)\s*(.+?)\s*=\s*(\S+)\s*$/;
-const MARKETS = ["eldorado", "ggsel"];
+const MARKETS = ["eldorado"];
+// A listing row in any other status may still be live on its market.
+const GONE_LISTING = ["delisted", "removed"];
 const STATUSES = ["available", "fed", "sold", "removed"];
 const MIN_FLOOR_USD = 0.5;
 
@@ -130,6 +139,10 @@ function createAdopt(deps = {}) {
   };
   let ingest = deps.ingest || null;
   let reconcile = deps.reconcile || null;
+  let config = deps.config || null;
+  const configOf = () =>
+    config || (config = require("./config").createConfig({ model: deps.models && deps.models.CodeShopConfig, now: clock }));
+  const guideFor = typeof deps.guideFor === "function" ? deps.guideFor : require("./games").guideFor;
   const ingestOf = () => ingest || (ingest = require("./ingest").createIngest(deps));
   const reconcileOf = () => reconcile || (reconcile = require("./reconcile").createReconcile(deps));
 
@@ -232,6 +245,23 @@ function createAdopt(deps = {}) {
 
     const problems = [];
     const where = (u, extra = {}) => ({ unitId: String(u._id), login: text(u.login), ...extra });
+
+    // Still listed on a market the shop does not sell codes on (R1).
+    const elsewhere = await leanOf(
+      M("MarketplaceListing")
+        .find({ accountOffer: id, marketplace: { $nin: MARKETS }, status: { $nin: GONE_LISTING } })
+        .select("_id marketplace status")
+        .sort({ _id: 1 }),
+    );
+    const otherMarkets = [];
+    for (const l of elsewhere || []) if (!otherMarkets.includes(text(l.marketplace))) otherMarkets.push(text(l.marketplace));
+    for (const market of otherMarkets) {
+      problems.push({
+        kind: "other_market",
+        msg: `the offer is also listed on ${market}: the code shop sells codes on Eldorado only — take that listing down first`,
+        market,
+      });
+    }
 
     // Parse every unit on the shelf (or sold off it); removed ones only to
     // find codes that may have gone out through a market.
@@ -529,6 +559,13 @@ function createAdopt(deps = {}) {
       const markets = MARKETS.filter((m) => (listings || []).includes(m));
       const groupKeys = [];
       for (const r of ref) if (r && r.row.groupKey && !groupKeys.includes(r.row.groupKey)) groupKeys.push(r.row.groupKey);
+      // The offer's own cover texts when it has them; the defaults for its
+      // labels and game for the rest (an empty cover text would fall back to
+      // the farming-service cover).
+      const cfg = (await configOf().get()) || {};
+      const defaults = defaultTexts({ slots, guide: guideFor(first ? text(first.gameNo) : "", cfg), useBy: null, now });
+      const own = (v) => text(v).trim();
+      const ownBullets = Array.isArray(offer.coverBullets) ? offer.coverBullets.map(text).filter((b) => b.trim()) : [];
       await M("CodeProduct").create({
         _id: productId,
         name: text(offer.title),
@@ -546,9 +583,9 @@ function createAdopt(deps = {}) {
           title: text(offer.title),
           description: text(offer.description),
           deliveryTemplate: text(offer.deliveryTemplate),
-          coverTitle: "",
-          coverServiceText: text(offer.coverServiceText),
-          coverBullets: Array.isArray(offer.coverBullets) ? offer.coverBullets.map(text) : [],
+          coverTitle: own(offer.coverTitle) ? text(offer.coverTitle) : defaults.coverTitle,
+          coverServiceText: own(offer.coverServiceText) ? text(offer.coverServiceText) : defaults.coverServiceText,
+          coverBullets: ownBullets.length ? ownBullets : defaults.coverBullets,
         },
         pricing: {
           mode: "fixed",
