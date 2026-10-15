@@ -216,6 +216,7 @@ function competitorOfferView(o) {
     score: finiteOr(x.score, 0),
     sameSet: x.sameSet === true,
     matchedIn: x.matchedIn === "title" || x.matchedIn === "description" ? x.matchedIn : "",
+    form: x.form === "codes" || x.form === "account" || x.form === "unknown" ? x.form : "",
   };
 }
 

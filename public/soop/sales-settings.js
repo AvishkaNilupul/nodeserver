@@ -311,7 +311,7 @@
         stepsEditor(),
         el("div", { class: "s-sales-fields" },
           number(["pricing", "cooldownHours"], "Hours between changes", "per product"),
-          number(["pricing", "undercutUsd"], "Undercut by (USD)", "below the cheapest same-set offer", { step: 0.01 }))),
+          number(["pricing", "undercutUsd"], "Undercut by (USD)", "below the cheapest same-set code seller", { step: 0.01 }))),
       card("Competitor scan", "Reads Eldorado's public offers for the same set of items.",
         toggle(["competitorScan", "enabled"], "Scan competitors", null),
         number(["competitorScan", "everyHours"], "Scan each product every (hours)", null),

@@ -231,10 +231,10 @@
     else {
       const low = c.lowestSameSetUsd, ours = Number(pr.priceUsd);
       comp = el("div", { class: "s-stack is-tight" },
-        el("span", { class: "s-row" }, isNum(low) ? el("span", null, "Lowest same-set ", el("b", { class: "s-num" }, usd(low))) : el("span", null, "No same-set offer found"),
+        el("span", { class: "s-row" }, isNum(low) ? el("span", null, "Lowest same-set code seller ", el("b", { class: "s-num" }, usd(low))) : el("span", null, "No same-set code seller found"),
           el("span", { class: "s-muted s-small" }, plural(c.count || 0, "offer") + " · scanned " + fmt.ago(c.scannedAt)),
           c.count ? btn("View", "competitors", { tone: "ghost", icon: "eye", onClick: () => viewCompetitors(p) }) : null),
-        isNum(low) && isFinite(ours) && ours > Number(low) ? el("span", { class: "s-small s-warn" }, "Ours is " + usd(ours - Number(low)) + " above the lowest same-set offer") : null);
+        isNum(low) && isFinite(ours) && ours > Number(low) ? el("span", { class: "s-small s-warn" }, "Ours is " + usd(ours - Number(low)) + " above the lowest same-set code seller") : null);
     }
     rows.push(["Competitors", comp]);
     return kv(rows);
@@ -432,17 +432,18 @@
         { label: "Qty", align: "right", render: (o) => fmt.num(o.qty) },
         { label: "Match", align: "right", render: (o) => (isNum(o.score) ? fmt.pct(o.score, 1) : "–") },
         { label: "Named in", render: (o) => (o.matchedIn === "description" ? el("span", { class: "s-muted" }, "Description") : o.matchedIn === "title" ? "Title" : "–") },
+        { label: "Sells", render: (o) => (o.form === "codes" ? ui.badge("Codes", "ok") : o.form === "account" ? el("span", { class: "s-muted" }, "Twitch account") : o.form === "unknown" ? el("span", { class: "s-muted" }, "Unclear") : "–") },
         { label: "Same set", align: "center", render: (o) => (o.sameSet ? ui.badge("Same set", "ok") : el("span", { class: "s-muted" }, "No")) },
       ], rows });
     Soop.modal({ title: "Competitors — " + (d.name || "product"), size: "lg", actions: [{ label: "Close" }],
       body: el("div", { class: "s-stack" },
         kv([
           ["Our price", usd(ours)],
-          ["Lowest same-set", isNum(c.lowestSameSetUsd) ? usd(c.lowestSameSetUsd) : "None found"],
+          ["Lowest same-set code seller", isNum(c.lowestSameSetUsd) ? usd(c.lowestSameSetUsd) : "None found"],
           ["Scanned", c.scannedAt ? when(c.scannedAt) + " (" + fmt.ago(c.scannedAt) + ")" : "Never"],
           arr(c.queries).length ? ["Searched for", el("span", { class: "s-row" }, arr(c.queries).map((q) => ui.badge(q)))] : null,
         ]),
-        el("p", { class: "s-help", style: { margin: "0" } }, "Other sellers' Eldorado offers (ours are left out). Match = share of this bundle's rewards named in their title or description; 80% or more counts as the same set. Most sellers list these rewards as Twitch drops and name them only in the description."),
+        el("p", { class: "s-help", style: { margin: "0" } }, "Other sellers' Eldorado offers (ours are left out). Match = share of this bundle's rewards named in their title or description; 80% or more counts as the same set. Most sellers offer these rewards as a Twitch-drop account (log in, link, claim within about two weeks): a different product from a code, so only code sellers set the lowest price."),
         table) });
   }
   function merge() {
@@ -604,7 +605,7 @@
     // An adopted listing keeps the price its owner set (the server refuses Auto).
     if (adopted && mode.value !== "auto") { autoOpt.disabled = true; autoOpt.textContent = "Auto — not for an adopted listing"; }
     const clearance = check(pr.clearance, "Clearance: cut the price as the codes' last day comes closer");
-    const follow = check(pr.followCompetitors, "Follow competitors: stay just under the lowest same-set offer");
+    const follow = check(pr.followCompetitors, "Follow competitors: stay just under the lowest same-set code seller");
     const priceWarn = el("span", { class: "s-help s-warn", hidden: true });
     function syncPrice() {
       const auto = mode.value === "auto";

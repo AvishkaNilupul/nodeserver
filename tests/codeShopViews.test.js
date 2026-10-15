@@ -151,8 +151,8 @@ async function seedShop() {
       queries: ["tea player icon", "Overwatch 2 codes"],
       lowestSameSetUsd: 1.99,
       offers: [
-        { id: "off-1", title: "Tea set all codes", priceUsd: 1.99, qty: 4, score: 1, sameSet: true, matchedIn: "description" },
-        { id: "off-2", title: "Tea spray code", priceUsd: 0.7, qty: 10, score: 0.34, sameSet: false, matchedIn: "title" },
+        { id: "off-1", title: "Tea set all codes", priceUsd: 1.99, qty: 4, score: 1, sameSet: true, matchedIn: "description", form: "codes" },
+        { id: "off-2", title: "Tea spray code", priceUsd: 0.7, qty: 10, score: 0.34, sameSet: false, matchedIn: "title", form: "account" },
         { id: "off-3", title: "Tea bundle", priceUsd: 2.2, qty: 1, score: 0.67, sameSet: false },
       ],
     },
@@ -481,10 +481,10 @@ test("product(id): the list view plus texts, competitor offers and queries", asy
     ...listComp,
     queries: ["tea player icon", "Overwatch 2 codes"],
     offers: [
-      { id: "off-1", title: "Tea set all codes", priceUsd: 1.99, qty: 4, score: 1, sameSet: true, matchedIn: "description" },
-      { id: "off-2", title: "Tea spray code", priceUsd: 0.7, qty: 10, score: 0.34, sameSet: false, matchedIn: "title" },
-      // A row stored before the field existed reads as "".
-      { id: "off-3", title: "Tea bundle", priceUsd: 2.2, qty: 1, score: 0.67, sameSet: false, matchedIn: "" },
+      { id: "off-1", title: "Tea set all codes", priceUsd: 1.99, qty: 4, score: 1, sameSet: true, matchedIn: "description", form: "codes" },
+      { id: "off-2", title: "Tea spray code", priceUsd: 0.7, qty: 10, score: 0.34, sameSet: false, matchedIn: "title", form: "account" },
+      // A row stored before the fields existed reads them as "".
+      { id: "off-3", title: "Tea bundle", priceUsd: 2.2, qty: 1, score: 0.67, sameSet: false, matchedIn: "", form: "" },
     ],
   });
 

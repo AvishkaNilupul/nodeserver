@@ -105,3 +105,19 @@ process (429 after). The Sold tab enables "Get replacement code" only on dead co
 - An `in_stock` row whose inventory item was revealed in the farm panel
   (`SoopActivity {kind: "reveal", "data.itemId": <item id>}`) → `held` with
   problem "its code was shown in the farm panel".
+
+## R10. Only code sellers set our price (2026-10-16, owner's call)
+
+Nearly every rival on Eldorado sells these rewards as a Twitch-drop ACCOUNT:
+the buyer logs in, links the game account and claims within about two weeks.
+We sell redeem codes that last months (Overwatch: to Feb 2027) and need no
+account. The owner: "these are 2 different things". So:
+- `competitors.deliveryForm(title, description)` → `codes | account | unknown`
+  from the offer's own wording (negated account words such as "no Twitch
+  account or account linking needed" are cut out first; code words vs account
+  words, a tie is `unknown`). Measured on the live market 10-16: 69 of 71
+  rivals read as `account`, the only `codes` one was a starter-pack key (not
+  our set), our own three offers read as `codes`.
+- `countsForLowest` also requires `form === "codes"`, so `lowestSameSetUsd`
+  comes from code sellers only. Account and unknown offers stay listed with
+  their `form`; the panel shows a "Sells" column.

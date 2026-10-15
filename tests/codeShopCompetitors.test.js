@@ -25,6 +25,7 @@ const {
   queriesFor,
   scoreOffer,
   phrasesOf,
+  deliveryForm,
   parseSearch,
   countsForLowest,
   MIN_PRICE_SHARE,
@@ -175,6 +176,39 @@ test("phrasesOf: the label without '(...)' notes, and without 'player' / 'code' 
   assert.deepEqual(phrasesOf(null), []);
 });
 
+// --- deliveryForm -------------------------------------------------------------
+
+// Nearly every rival sells these rewards as a Twitch-drop ACCOUNT (log in,
+// link, claim within about two weeks); we sell redeem codes that last months.
+// Two different products: only a code seller may set our price (R10).
+
+test("deliveryForm: a code seller saying what it does NOT need is still a code seller", () => {
+  const ours =
+    "Code Bundle (5 redeem codes)\n- Redeem on your OWN Battle.net account - no account sharing, no login details needed\n" +
+    "- No Twitch account or account linking needed - you redeem the codes yourself\n- A code can be used only once";
+  assert.equal(deliveryForm("Space Game | 5 Codes Bundle | Redeem Codes", ours), "codes");
+  assert.equal(deliveryForm("Space Game codes", "Login is not required. Just redeem the code."), "codes");
+  assert.equal(deliveryForm("Space Game Starter Pack KEY", "Digital key, activate it on the store."), "codes");
+});
+
+test("deliveryForm: a Twitch-drop account offer is an account, even when it mentions a code", () => {
+  assert.equal(
+    deliveryForm(
+      "Space Game | 13 Twitch Drops Rewards",
+      "You get a Twitch account holding the drops. Log in, link your game account and claim every reward. " +
+        "Enter the code sent to the email if asked.",
+    ),
+    "account",
+  );
+  assert.equal(deliveryForm("TWITCH DROPS SPACE GAME | 6/6 ITEMS", ""), "account", "the title alone says Twitch drops");
+});
+
+test("deliveryForm: no wording either way, or a tie, is unknown", () => {
+  assert.equal(deliveryForm("Space Game | Rare Icons Bundle", ""), "unknown");
+  assert.equal(deliveryForm("", null), "unknown");
+  assert.equal(deliveryForm("Space Game code", "log in"), "unknown");
+});
+
 // --- parseSearch --------------------------------------------------------------
 
 test("parseSearch: USD price first, else a USD pricePerUnit, else null", () => {
@@ -252,7 +286,8 @@ function offer(id, title, price, extra = {}) {
       userId: extra.userId || "seller-" + id,
       pricePerUnitInUSD: price === null ? undefined : { amount: price },
       quantity: extra.qty === undefined ? 3 : extra.qty,
-      description: extra.description,
+      // A code seller unless the test says otherwise: only those set our price.
+      description: extra.description === undefined ? "Redeem codes, delivered at once." : extra.description,
     },
   };
 }
@@ -438,9 +473,9 @@ test("scan: a rival naming the set only in its description counts; the descripti
   const market = fakeMarket({
     set: [
       [
-        offer("drops-desc", "Space Game Twitch Drops | 19 Rewards", 0.8, { description: list }),
+        offer("drops-desc", "Space Game Code Bundle | 19 Rewards", 0.8, { description: "Redeem codes. " + list }),
         offer("title-full", FULL, 1.5),
-        offer("drops-loose", "Space Game Twitch Drops", 0.6, { description: "Moon Charm, Star Icon, Comet Banner" }),
+        offer("drops-loose", "Space Game Code Bundle", 0.6, { description: "Redeem codes: Moon Charm, Star Icon, Comet Banner" }),
       ],
     ],
   });
@@ -459,6 +494,42 @@ test("scan: a rival naming the set only in its description counts; the descripti
   const ev = h.logged.find((e) => e.kind === "competitors");
   assert.equal(ev.data.byDescription, 1);
   assert.match(ev.msg, /1 named in the description only/);
+});
+
+test("scan: only code sellers set the lowest price; Twitch-drop accounts and unclear offers are only listed (R10)", async () => {
+  const p = await product({ competitors: { queries: ["set"] }, pricing: { priceUsd: 1 } });
+  const accountText = "A Twitch account with the drops: log in, link your game account and claim. " + FULL;
+  const market = fakeMarket({
+    set: [
+      [
+        offer("acct-cheap", "Space Game Twitch Drops | 19 Rewards", 0.4, { description: accountText }),
+        offer("unclear", FULL, 0.5, { description: "" }),
+        offer("codes", FULL, 0.9),
+      ],
+    ],
+  });
+  const h = harness(market);
+  const res = await h.competitors.scan(p);
+
+  assert.deepEqual(
+    res.offers.map((o) => [o.id, o.sameSet, o.form]).sort(),
+    [
+      ["acct-cheap", true, "account"],
+      ["codes", true, "codes"],
+      ["unclear", true, "unknown"],
+    ],
+  );
+  assert.equal(res.lowestSameSetUsd, 0.9, "the cheaper account and unclear offers never set our price");
+  const saved = await CodeProduct.findById(p._id).lean();
+  assert.deepEqual(saved.competitors.offers.map((o) => o.form).sort(), ["account", "codes", "unknown"]);
+  const ev = h.logged.find((e) => e.kind === "competitors");
+  assert.deepEqual(ev.data.byForm, { codes: 1, account: 1, unknown: 1 });
+  assert.match(ev.msg, /they sell codes 1, Twitch accounts 1, unclear 1; 1 same-set code seller counts/);
+
+  // Only account sellers: nothing to follow.
+  const q = await product({ competitors: { queries: ["set"] }, pricing: { priceUsd: 1 } });
+  const res2 = await harness(fakeMarket({ set: [[offer("acct", FULL, 0.4, { description: accountText })]] })).competitors.scan(q);
+  assert.equal(res2.lowestSameSetUsd, null);
 });
 
 test("scan: a failed request keeps the old scan and logs a warning", async () => {
@@ -514,9 +585,12 @@ test("scan: loads the product by id too", async () => {
 // ── R8: which same-set offers set the lowest price ─────────────────────────
 
 test("countsForLowest: same set, at least one in stock, at least 30 % of our base price", () => {
-  const o = (fields) => ({ sameSet: true, qty: 2, priceUsd: 1, ...fields });
+  const o = (fields) => ({ sameSet: true, qty: 2, priceUsd: 1, form: "codes", ...fields });
   assert.equal(MIN_PRICE_SHARE, 0.3);
   assert.equal(countsForLowest(o({}), 2), true);
+  assert.equal(countsForLowest(o({ form: "account" }), 2), false, "a Twitch-drop account is another product");
+  assert.equal(countsForLowest(o({ form: "unknown" }), 2), false);
+  assert.equal(countsForLowest(o({ form: undefined }), 2), false);
   assert.equal(countsForLowest(o({ sameSet: false }), 2), false);
   assert.equal(countsForLowest(o({ qty: 0 }), 2), false);
   assert.equal(countsForLowest(o({ priceUsd: 0.6 }), 2), true, "exactly 30 % counts");

@@ -66,7 +66,7 @@ test("decidePrice: one undercut step under the cheapest same-set offer, never up
   const follow = { pricing: pricing({ followCompetitors: true }) };
   const r = decide(follow, 1.5);
   assert.equal(r.priceUsd, 1.49);
-  assert.match(r.reasons[0], /cheapest same-set offer \(\$1\.50\)/);
+  assert.match(r.reasons[0], /cheapest same-set code seller \(\$1\.50\)/);
   assert.equal(decide(follow, 2.5).priceUsd, 2, "a dearer competitor does not raise the price");
   assert.equal(decide(follow, 1.5, 0.05).priceUsd, 1.45);
   assert.equal(decide({ pricing: pricing() }, 1.5).priceUsd, 2, "followCompetitors off");

@@ -97,7 +97,7 @@ function decidePrice({ product, now, steps, undercutUsd, lowestSameSetUsd } = {}
     const target = lowest - (finite(undercutUsd) || 0);
     if (target < price) {
       price = target;
-      reasons.push("under the cheapest same-set offer (" + money(lowest) + ")");
+      reasons.push("under the cheapest same-set code seller (" + money(lowest) + ")");
     }
   }
 

@@ -27,6 +27,13 @@
 // empty or bait-priced listing must not drag our price down. Every matching
 // offer is still listed in `offers`.
 //
+// And only an offer that sells CODES (05-REVIEW-FIXES.md, R10): nearly every
+// rival sells these rewards as a Twitch-drop account (log in, link the game
+// account, claim within about two weeks), which is a different product from a
+// redeem code that lasts months and needs no account. deliveryForm() reads it
+// from the offer's wording; an offer it cannot place ("unknown") never sets
+// our price either.
+//
 // Our own offers are never competitors: undercutting ourselves would walk the
 // price down to the floor one cent per run. They are recognised by seller id
 // (config.ownEldoradoUserIds) AND by offer id (any MarketplaceListing row we
@@ -218,10 +225,55 @@ function searchUrl(query, pageIndex) {
   );
 }
 
-// Does this same-set offer count as a price to follow? It must have stock,
-// and (when our base price is known) ask at least 30 % of it.
+// --- delivery form ------------------------------------------------------------
+
+// Account words a code seller uses to say what is NOT needed ("No Twitch
+// account or account linking needed", "no login details needed") are cut out
+// before counting, so they never read as an account offer.
+const NEG_WORDS = "no|not|without|never|don'?t|doesn'?t|do not|does not";
+const ACCOUNT_TERMS =
+  "twitch account|account linking|account sharing|linking|linked|link|login details|login|log in|logging in|" +
+  "connect(?:ing|ed)?|password|e-?mail";
+const NEGATED_BEFORE = new RegExp(`\\b(?:${NEG_WORDS})\\b[^.\\n;,!?]{0,40}\\b(?:${ACCOUNT_TERMS})\\b`, "gi");
+const NEGATED_AFTER = new RegExp(
+  `\\b(?:${ACCOUNT_TERMS}|account)\\b[^.\\n;,!?]{0,20}\\b(?:not|never)\\s+(?:needed|required|necessary)\\b`,
+  "gi",
+);
+// "account" alone is no signal: a code seller says "redeem on your own account".
+const ACCOUNT_SIGNALS = [
+  /\btwitch accounts?\b/g,
+  /\blog ?in\b|\blogging in\b/g,
+  /\blink(?:s|ed|ing)?\b/g,
+  /\bconnect(?:s|ed|ing)?\b/g,
+  /\bclaim(?:s|ed|ing)?\b/g,
+  /\bpasswords?\b/g,
+  /\be-?mails?\b/g,
+  /\btwitch drops?\b/g,
+];
+const CODE_SIGNALS = [/\bredeem(?:able)? codes?\b/g, /\b(?:cd|game|gift|activation|digital) ?keys?\b/g, /\bcodes?\b/g];
+const FORMS = ["codes", "account", "unknown"];
+
+// What an offer delivers, from its own words: "codes" when code wording
+// outweighs account wording, "account" the other way round, "unknown" on a
+// tie (including no wording at all).
+function deliveryForm(title, description = "") {
+  const t = (String(title == null ? "" : title) + "\n" + String(description == null ? "" : description))
+    .toLowerCase()
+    .replace(NEGATED_BEFORE, " ")
+    .replace(NEGATED_AFTER, " ");
+  const count = (list) => list.reduce((n, re) => n + (t.match(re) || []).length, 0);
+  const account = count(ACCOUNT_SIGNALS);
+  const codes = count(CODE_SIGNALS);
+  if (codes > account) return "codes";
+  if (account > codes) return "account";
+  return "unknown";
+}
+
+// Does this same-set offer count as a price to follow? It must sell codes
+// (R10), have stock, and (when our base price is known) ask at least 30 % of it.
 function countsForLowest(offer, basePriceUsd) {
   if (!offer || !offer.sameSet) return false;
+  if (offer.form !== "codes") return false;
   if (!(Number(offer.qty) >= 1)) return false;
   const price = Number(offer.priceUsd);
   if (!Number.isFinite(price) || price <= 0) return false;
@@ -351,7 +403,8 @@ function createCompetitors(deps = {}) {
       // The description is read for matching only; it is never stored.
       const { score, sameSet, matchedIn } = scoreOffer(o.title, labels, o.description);
       if (score <= 0) continue;
-      scored.push({ id: o.id, title: o.title.slice(0, 300), priceUsd: o.priceUsd, qty: o.qty, score, sameSet, matchedIn });
+      const form = deliveryForm(o.title, o.description);
+      scored.push({ id: o.id, title: o.title.slice(0, 300), priceUsd: o.priceUsd, qty: o.qty, score, sameSet, matchedIn, form });
     }
     scored.sort(byScoreThenPrice);
     // Our base price; a caller that passed a product without its pricing gets it read.
@@ -366,6 +419,8 @@ function createCompetitors(deps = {}) {
     }
     const same = scored.filter((o) => countsForLowest(o, base)).map((o) => o.priceUsd);
     const byDescription = scored.filter((o) => o.matchedIn === "description").length;
+    const byForm = { codes: 0, account: 0, unknown: 0 };
+    for (const o of scored) byForm[o.form] += 1;
     // `queries` keeps only what the owner pinned: the words worked out from
     // the labels are not stored, so a renamed slot changes the next search.
     const pinned = product.competitors && Array.isArray(product.competitors.queries) ? product.competitors.queries : [];
@@ -382,13 +437,15 @@ function createCompetitors(deps = {}) {
       product: id,
       msg:
         "Scanned Eldorado for " + name + ": " + scored.length + " matching offers" +
-        (byDescription ? " (" + byDescription + " named in the description only)" : "") + ", " +
-        same.length + " with the same set that count" +
+        (byDescription ? " (" + byDescription + " named in the description only)" : "") +
+        "; they sell codes " + byForm.codes + ", Twitch accounts " + byForm.account + ", unclear " + byForm.unknown + "; " +
+        same.length + " same-set code " + (same.length === 1 ? "seller counts" : "sellers count") +
         (result.lowestSameSetUsd === null ? "" : ", lowest $" + result.lowestSameSetUsd.toFixed(2)),
       data: {
         requests,
         matching: scored.length,
         byDescription,
+        byForm,
         sameSet: same.length,
         lowestSameSetUsd: result.lowestSameSetUsd,
       },
@@ -404,6 +461,8 @@ module.exports = {
   queriesFor,
   scoreOffer,
   phrasesOf,
+  deliveryForm,
+  FORMS,
   parseSearch,
   normalise,
   searchUrl,

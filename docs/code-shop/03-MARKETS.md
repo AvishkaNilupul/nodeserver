@@ -96,7 +96,8 @@ vault must be emptied from the Listings page) — the result says so. Product �
 ## `utils/codeShop/competitors.js`
 
 `createCompetitors(deps)` → `{ scan(product) }`; pure `queriesFor(product, guide)`,
-`scoreOffer(title, labels, description)`, `phrasesOf(label)`, `parseSearch(json)`.
+`scoreOffer(title, labels, description)`, `phrasesOf(label)`, `deliveryForm(title, description)`,
+`countsForLowest(offer, basePriceUsd)`, `parseSearch(json)`.
 
 - `queriesFor`: `product.competitors.queries` if set; else up to 3 queries: the
   two longest labels and `displayName` alone (the search is inside Eldorado's
@@ -129,11 +130,24 @@ vault must be emptied from the Listings page) — the result says so. Product �
   Score = matches ÷ labels. `sameSet` = score ≥ 0.8. `matchedIn` = "title" when the
   title alone names every matched label, "description" when the description added
   any, "" when nothing matched.
+- `deliveryForm(title, description)` → `codes | account | unknown` (05-REVIEW-FIXES R10):
+  lower-case title + description; cut out negated account words first (a negation
+  — no / not / without / never / don't / doesn't — followed within the clause by
+  an account term, or an account term followed by "not needed / required");
+  then count code words (`redeem code(s)`, `cd/game/gift/activation/digital key`,
+  `code(s)`) against account words (`twitch account`, `log in`, `link…`,
+  `connect…`, `claim…`, `password`, `email`, `twitch drop(s)`; "account" alone is
+  not one). More code words → `codes`, more account words → `account`, a tie →
+  `unknown`.
+- `countsForLowest(offer, base)`: `sameSet`, `form === "codes"`, `qty >= 1`, and
+  (when `base` is known) `priceUsd >= 0.3 × base`. `lowestSameSetUsd` = the lowest
+  price of the offers that count, else null.
 - Store on the product: `competitors = { scannedAt, queries, offers: top 15 by score desc then price asc, lowestSameSetUsd }`,
-  each offer `{ id, title, priceUsd, qty, score, sameSet, matchedIn }` (a rival's
-  description is read, never stored). The event's `data.byDescription` counts the
-  offers named in a description only. A failed request → `events.log` warn, keep
-  the old scan.
+  each offer `{ id, title, priceUsd, qty, score, sameSet, matchedIn, form }` (a
+  rival's description is read, never stored). The event's `data` carries
+  `byDescription` (offers named in a description only) and `byForm`
+  (`{codes, account, unknown}`). A failed request → `events.log` warn, keep the
+  old scan.
 
 ## `utils/codeShop/pricing.js`
 

@@ -30,6 +30,8 @@ const competitorOfferSchema = new mongoose.Schema(
     sameSet: { type: Boolean, default: false },
     // Where its title-or-description match came from: "title" or "description".
     matchedIn: { type: String, default: "" },
+    // What it sells: "codes", "account" (a Twitch-drop account) or "unknown".
+    form: { type: String, default: "" },
   },
   { _id: false },
 );
