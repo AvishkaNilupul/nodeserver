@@ -370,6 +370,19 @@ const AUTO_FARM_DEFAULTS = {
   // listing and an account baked into it, for nothing. Matched on the exact
   // normalised label, like reuseOnlyGames.
   autoListSkipGames: [],
+  // Gameflip's category for every NEW listing (utils/gameflipAccountCategory.js).
+  // "UNKNOWN" = "Other", what every Gameflip listing has used so far.
+  // "ACCOUNT" = Game Accounts, where account listings belong — it needs
+  // Gameflip's approval (applied for 2026-10-15). Set before that approval,
+  // every Gameflip publish fails ("Your account is not eligible to publish this
+  // listing").
+  gameflipCategory: "UNKNOWN",
+  // Game Accounts only: send the game's upc ("GAME" + its Gameflip id) for a
+  // game Gameflip knows. false = tags only, if Gameflip ever refuses the upc.
+  gameflipAccountUpc: true,
+  // Game Accounts only: the platform a game's listings are filed under,
+  // { "<game label>": "crossplatform" }; every other game is "windows".
+  gameflipAccountPlatforms: {},
   // Evergreen offers (utils/g2gEvergreen.js): a G2G bundle offer that HAS SOLD
   // and ran out of stock is rewritten in place to the biggest bundle of its
   // game we can still deliver, so its sold count and its rating stay on the

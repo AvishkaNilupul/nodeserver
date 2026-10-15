@@ -340,6 +340,23 @@ test("eldorado and gameflip cannot miss, not even with no game at all", async ()
   }
 });
 
+test("gameflip's label says which category gameflipPublish files under, never a value", async () => {
+  // utils/gameflipAccountCategory.js: Game Accounts once Gameflip has approved
+  // the account and the owner set autoFarm.gameflipCategory = "ACCOUNT".
+  const off = await resolveCategory("gameflip", "Rust", {
+    deps: { settings: settingsWith({}) },
+  });
+  assert.strictEqual(off.label, "Gameflip digital goods");
+  assert.deepStrictEqual(off.value, {});
+  const on = await resolveCategory("gameflip", "Rust", {
+    deps: { settings: settingsWith({ gameflipCategory: "ACCOUNT" }) },
+  });
+  assert.strictEqual(on.ok, true);
+  assert.strictEqual(on.label, "Gameflip > Game Accounts");
+  assert.deepStrictEqual(on.value, {});
+  assert.strictEqual(on.source, "static");
+});
+
 test("an unknown marketplace is a miss, never a throw", async () => {
   const r = await resolveCategory("mercadolibre", "Rust", { deps: {} });
   assert.strictEqual(r.ok, false);

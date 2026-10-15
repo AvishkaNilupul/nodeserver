@@ -16,6 +16,7 @@ const otplib = require("otplib");
 const { loadSettings, saveSettings } = require("./settings");
 const { encrypt, decrypt } = require("./secretBox");
 const { gameflipGone } = require("./gameflipGone");
+const gameflipAccountCategory = require("./gameflipAccountCategory");
 
 // Which credential fields each marketplace needs.
 const FIELDS = {
@@ -284,6 +285,11 @@ async function gameflipPublish({
   priceUsd,
   imagePath,
   autoDeliverCode,
+  // Optional, for the Game Accounts category only: the game's label (else it
+  // is read off the title) and whether this is a farming window (else the
+  // title says so). Nothing else reads them.
+  game,
+  farm,
 }) {
   const keys = requireKeys("gameflip");
   const cents = Math.round(Number(priceUsd) * 100);
@@ -292,6 +298,16 @@ async function gameflipPublish({
   }
   const auto =
     typeof autoDeliverCode === "string" && autoDeliverCode.trim().length > 0;
+  // Game Accounts (autoFarm.gameflipCategory = "ACCOUNT", only once Gameflip
+  // has approved the account for it): the category, platform, tags and upc a
+  // listing there carries, laid over the body below. null while the switch is
+  // off — then the body is exactly what it always was.
+  const accountFields = gameflipAccountCategory.listingFields({
+    title,
+    game,
+    farm,
+    auto,
+  });
   let listingId;
   try {
     const r = await axios.post(
@@ -317,6 +333,7 @@ async function gameflipPublish({
         digital_fee_included: false,
         digital_deliverable: auto ? "code" : "transfer",
         tags: ["twitch", "drops"],
+        ...(accountFields || {}),
       },
       { headers: gfHeaders(keys), timeout: 30000 },
     );

@@ -413,15 +413,19 @@ const RESOLVERS = {
     });
   },
 
-  // Gameflip picks its category from the delivery mode, not the game
-  // (marketplaces.js:313 — an auto-delivered code MUST be UNKNOWN, because
-  // DIGITAL_INGAME there means a Steam bot trade). So this too cannot miss, and
+  // Gameflip picks its category itself, inside gameflipPublish: from the
+  // delivery mode (an auto-delivered code MUST NOT be DIGITAL_INGAME, which
+  // means a Steam bot trade there) and, once Gameflip has approved the account
+  // for it, from autoFarm.gameflipCategory = "ACCOUNT" (Game Accounts —
+  // utils/gameflipAccountCategory.js). So this too cannot miss, and
   // deliberately emits no value: overriding gameflipPublish's own choice from
-  // here would break auto-delivery.
-  async gameflip() {
+  // here would break auto-delivery. The label only says which of the two.
+  async gameflip(ctx) {
+    const account =
+      require("./gameflipAccountCategory").categoryOf(autoFarm(ctx)) === "ACCOUNT";
     return ok("gameflip", {
       value: {},
-      label: "Gameflip digital goods",
+      label: account ? "Gameflip > Game Accounts" : "Gameflip digital goods",
       source: "static",
     });
   },
