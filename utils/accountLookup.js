@@ -23,6 +23,8 @@ const BotAccount = require("../models/BotAccount");
 const AvailableAccount = require("../models/AvailableAccount");
 const UnclaimedAccount = require("../models/UnclaimedAccount");
 const SuppliedAccount = require("../models/SuppliedAccount");
+// "1) Label = CODE" lines: the shape of a code-bundle stock row.
+const CODE_LINES_RE = /^\s*\d+\)\s+.+?\s=\s*\S+\s*$/m;
 const RenterAccount = require("../models/RenterAccount");
 const EpicAccount = require("../models/EpicAccount");
 const { decrypt } = require("./secretBox");
@@ -225,6 +227,10 @@ async function lookupAccountByUsername(username, opts = {}) {
       .limit(PER_SOURCE_LIMIT)
       .lean();
     for (const r of rows) {
+      // A code-bundle stock row holds reward codes, not a login: its "password"
+      // is the buyer's codes and is never handed out through this lookup.
+      const password = safeDecrypt(r.password);
+      const codeBundle = r.note === "code unit" || CODE_LINES_RE.test(password);
       sources.push({
         source: "supplied",
         collection: "SuppliedAccount",
@@ -232,14 +238,16 @@ async function lookupAccountByUsername(username, opts = {}) {
         login: r.login || "",
         twitchId: "",
         tokenType: "twitch_client_secret",
-        clientToken: r.clientSecret || "",
+        clientToken: codeBundle ? "" : r.clientSecret || "",
         credentials: includeCredentials
-          ? {
-              username: r.login || "",
-              password: safeDecrypt(r.password),
-              email: safeDecrypt(r.email),
-              extra: r.extra || "",
-            }
+          ? codeBundle
+            ? { username: r.login || "", password: "", email: "", extra: "", withheld: "code bundle" }
+            : {
+                username: r.login || "",
+                password,
+                email: safeDecrypt(r.email),
+                extra: r.extra || "",
+              }
           : undefined,
         meta: {
           status: r.status || "",
