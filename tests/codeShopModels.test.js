@@ -431,6 +431,7 @@ test("CodeProduct: slots and competitor offers keep their shape without sub-ids"
           qty: 3,
           score: 0.9,
           sameSet: true,
+          matchedIn: "description",
         },
       ],
     },
@@ -458,6 +459,7 @@ test("CodeProduct: slots and competitor offers keep their shape without sub-ids"
     qty: 3,
     score: 0.9,
     sameSet: true,
+    matchedIn: "description",
   });
   assert.equal(doc.competitors.lowestSameSetUsd, 0.75);
   assert.equal(doc.proposed.units, 4);

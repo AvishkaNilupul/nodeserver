@@ -4,8 +4,18 @@
 //
 // Reads Eldorado's PUBLIC offer search (no login, no seller API) for a few
 // search words per product, scores every offer by how many of the product's
-// slot labels its title names, and stores the best matches plus the lowest
-// price of an offer that sells the same set. pricing.js reads that number.
+// slot labels its title or description names, and stores the best matches
+// plus the lowest price of an offer that sells the same set. pricing.js reads
+// that number.
+//
+// Most rivals list these rewards as Twitch drops and name them only in the
+// description ("19 Rewards" in the title, the list below it). The search
+// answer already carries each offer's full description, so reading it costs
+// no extra request. A description is a long list of OTHER rewards too, so it
+// is matched strictly: a label must appear there as a phrase (accents folded,
+// "player" / "code" and our own "(...)" notes optional), never as loose words
+// spread over the text — "Banana Cat Spray" must not match "Banana Cat Icon
+// ... Prost Spray". Titles keep the looser word rule as well.
 //
 // Read-only on the market, and paced: one request at a time with a pause
 // between them, at most 3 queries x 3 pages per scan. A failed request aborts
@@ -35,14 +45,24 @@ const TOP_OFFERS = 15;
 const SAME_SET_SCORE = 0.8;
 const MIN_PRICE_SHARE = 0.3;
 const MIN_WORD = 4;
+// A phrase shorter than this (spaces removed) is matched as whole words, so
+// "ana" never matches inside "banana".
+const MIN_COMPACT = 8;
+// Words rivals often leave out of a reward's name ("Sun Tea Icon" for our
+// "Sun Tea Player Icon"; "code" is ours, e.g. "(2nd code)").
+const OPTIONAL_WORDS = new Set(["player", "code", "codes"]);
+const MAX_DESCRIPTION = 5000;
 const USER_AGENT =
   "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 " +
   "(KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36";
 
 // --- pure ------------------------------------------------------------------
 
+// Lower case, accents folded ("Skål" -> "skal"), anything else -> one space.
 function normalise(text) {
   return String(text == null ? "" : text)
+    .normalize("NFKD")
+    .replace(/\p{M}+/gu, "")
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, " ")
     .trim();
@@ -86,9 +106,37 @@ function queriesFor(product, guide) {
   return out.slice(0, MAX_QUERIES);
 }
 
-// One label matches a title when the normalised title contains the whole
-// normalised label, or every word of the label that is >= 4 characters (and
-// the label has at least one such word: "Ana" must appear as it is).
+// The phrases a label may appear as, normalised: the label without our own
+// "(...)" notes, and that again without OPTIONAL_WORDS. Empty phrases dropped.
+function phrasesOf(label) {
+  const base = normalise(String(label == null ? "" : label).replace(/\([^)]*\)/g, " "));
+  const core = base
+    .split(" ")
+    .filter((w) => w && !OPTIONAL_WORDS.has(w))
+    .join(" ");
+  return [...new Set([base, core].filter(Boolean))];
+}
+
+// A text prepared once for phrase matching: spaced (" a b c ") and compact.
+function phraseText(text) {
+  const norm = normalise(text);
+  return { spaced: " " + norm + " ", compact: norm.replace(/ /g, "") };
+}
+
+// Strict rule: one of the label's phrases appears in the text. Spaces do not
+// count ("Loot Box" = "Lootbox", "Name Card" = "Namecard"), except for a short
+// phrase, which must stand as whole words.
+function phraseMatches(pt, label) {
+  return phrasesOf(label).some((ph) => {
+    const compact = ph.replace(/ /g, "");
+    if (compact.length >= MIN_COMPACT) return pt.compact.includes(compact);
+    return pt.spaced.includes(" " + ph + " ");
+  });
+}
+
+// Loose rule, titles only: the normalised title contains the whole normalised
+// label, or every word of the label that is >= 4 characters (and the label
+// has at least one such word: "Ana" must appear as it is).
 function labelMatches(normTitle, label) {
   const nl = normalise(label);
   if (!nl) return false;
@@ -98,14 +146,29 @@ function labelMatches(normTitle, label) {
 }
 
 // Score = labels matched / labels (labels that normalise to nothing are not
-// counted either way). sameSet = score >= 0.8.
-function scoreOffer(title, labels) {
+// counted either way). sameSet = score >= 0.8. A label matches in the title
+// (loose or strict rule) or in the description (strict rule only).
+// matchedIn: "title" when the title alone names every matched label,
+// "description" when the description added any, "" when nothing matched.
+function scoreOffer(title, labels, description = "") {
   const list = (Array.isArray(labels) ? labels : []).filter((l) => normalise(l));
-  if (!list.length) return { score: 0, sameSet: false, matches: 0 };
+  if (!list.length) return { score: 0, sameSet: false, matches: 0, matchedIn: "" };
   const nt = normalise(title);
-  const matches = list.filter((l) => labelMatches(nt, l)).length;
+  const tp = phraseText(title);
+  const dp = description ? phraseText(description) : null;
+  let inTitle = 0;
+  let matches = 0;
+  for (const l of list) {
+    if (labelMatches(nt, l) || phraseMatches(tp, l)) {
+      inTitle += 1;
+      matches += 1;
+    } else if (dp && phraseMatches(dp, l)) {
+      matches += 1;
+    }
+  }
   const score = matches / list.length;
-  return { score, sameSet: score >= SAME_SET_SCORE, matches };
+  const matchedIn = matches === 0 ? "" : matches === inTitle ? "title" : "description";
+  return { score, sameSet: score >= SAME_SET_SCORE, matches, matchedIn };
 }
 
 function positiveNumber(v) {
@@ -114,7 +177,8 @@ function positiveNumber(v) {
   return Number.isFinite(n) && n > 0 ? n : null;
 }
 
-// Eldorado search JSON -> [{ id, title, userId, priceUsd, qty }]. priceUsd is
+// Eldorado search JSON -> [{ id, title, description, userId, priceUsd, qty }].
+// description is the offer's own text (capped; "" when absent). priceUsd is
 // pricePerUnitInUSD.amount, else pricePerUnit.amount when that is in USD, else
 // null (a price we cannot read in dollars is not a price). Rows without an
 // offer id are dropped.
@@ -134,6 +198,7 @@ function parseSearch(json) {
     out.push({
       id,
       title: typeof o.offerTitle === "string" ? o.offerTitle : "",
+      description: typeof o.description === "string" ? o.description.slice(0, MAX_DESCRIPTION) : "",
       userId: o.userId === null || o.userId === undefined ? "" : String(o.userId),
       priceUsd,
       qty: Number.isFinite(qty) && qty > 0 ? qty : 0,
@@ -283,9 +348,10 @@ function createCompetitors(deps = {}) {
       if (ours.has(o.id) || (o.userId && ownUsers.has(o.userId))) continue;
       // An offer without a dollar price cannot guide a price.
       if (o.priceUsd === null) continue;
-      const { score, sameSet } = scoreOffer(o.title, labels);
+      // The description is read for matching only; it is never stored.
+      const { score, sameSet, matchedIn } = scoreOffer(o.title, labels, o.description);
       if (score <= 0) continue;
-      scored.push({ id: o.id, title: o.title.slice(0, 300), priceUsd: o.priceUsd, qty: o.qty, score, sameSet });
+      scored.push({ id: o.id, title: o.title.slice(0, 300), priceUsd: o.priceUsd, qty: o.qty, score, sameSet, matchedIn });
     }
     scored.sort(byScoreThenPrice);
     // Our base price; a caller that passed a product without its pricing gets it read.
@@ -299,6 +365,7 @@ function createCompetitors(deps = {}) {
       }
     }
     const same = scored.filter((o) => countsForLowest(o, base)).map((o) => o.priceUsd);
+    const byDescription = scored.filter((o) => o.matchedIn === "description").length;
     // `queries` keeps only what the owner pinned: the words worked out from
     // the labels are not stored, so a renamed slot changes the next search.
     const pinned = product.competitors && Array.isArray(product.competitors.queries) ? product.competitors.queries : [];
@@ -314,10 +381,17 @@ function createCompetitors(deps = {}) {
       kind: "competitors",
       product: id,
       msg:
-        "Scanned Eldorado for " + name + ": " + scored.length + " matching offers, " +
+        "Scanned Eldorado for " + name + ": " + scored.length + " matching offers" +
+        (byDescription ? " (" + byDescription + " named in the description only)" : "") + ", " +
         same.length + " with the same set that count" +
         (result.lowestSameSetUsd === null ? "" : ", lowest $" + result.lowestSameSetUsd.toFixed(2)),
-      data: { requests, matching: scored.length, sameSet: same.length, lowestSameSetUsd: result.lowestSameSetUsd },
+      data: {
+        requests,
+        matching: scored.length,
+        byDescription,
+        sameSet: same.length,
+        lowestSameSetUsd: result.lowestSameSetUsd,
+      },
     });
     return result;
   }
@@ -329,6 +403,7 @@ module.exports = {
   createCompetitors,
   queriesFor,
   scoreOffer,
+  phrasesOf,
   parseSearch,
   normalise,
   searchUrl,

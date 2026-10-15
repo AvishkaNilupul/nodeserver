@@ -24,6 +24,7 @@ const {
   createCompetitors,
   queriesFor,
   scoreOffer,
+  phrasesOf,
   parseSearch,
   countsForLowest,
   MIN_PRICE_SHARE,
@@ -72,6 +73,7 @@ test("scoreOffer: a label matches as a substring of the title", () => {
     score: 1,
     sameSet: true,
     matches: 1,
+    matchedIn: "title",
   });
 });
 
@@ -105,9 +107,72 @@ test("scoreOffer: score is the fraction of labels matched; sameSet needs 0.8", (
   const third = scoreOffer("Moon Spray", ["Moon Spray", "Star Banner", "Comet Charm"]);
   assert.equal(third.score, 1 / 3);
   assert.equal(third.sameSet, false);
-  assert.deepEqual(scoreOffer("anything", []), { score: 0, sameSet: false, matches: 0 });
-  assert.deepEqual(scoreOffer("anything", ["", "--"]), { score: 0, sameSet: false, matches: 0 });
+  assert.deepEqual(scoreOffer("anything", []), { score: 0, sameSet: false, matches: 0, matchedIn: "" });
+  assert.deepEqual(scoreOffer("anything", ["", "--"]), { score: 0, sameSet: false, matches: 0, matchedIn: "" });
   assert.equal(scoreOffer(null, ["Moon Spray"]).score, 0);
+  assert.equal(scoreOffer(null, ["Moon Spray"]).matchedIn, "");
+});
+
+// Most rivals list these rewards as Twitch drops: "19 Rewards" in the title,
+// the reward list only in the description.
+test("scoreOffer: a description names the rewards the title leaves out", () => {
+  const labels = ["Moon Spray", "Star Banner", "Comet Charm", "Nova Title", "Sun Icon"];
+  const r = scoreOffer("Space Game Twitch Drops | 19 Rewards", labels, "You get:\n- Moon Spray\n- Star Banner\n- Comet Charm\n- Nova Title");
+  assert.equal(r.score, 0.8);
+  assert.equal(r.sameSet, true);
+  assert.equal(r.matchedIn, "description");
+  // The title alone still decides when it names every matched label.
+  const t = scoreOffer("Moon Spray + Star Banner + Comet Charm + Nova Title + Sun Icon", labels, "Moon Spray and more");
+  assert.equal(t.score, 1);
+  assert.equal(t.matchedIn, "title");
+  // Title and description together.
+  const both = scoreOffer("Moon Spray + Star Banner", labels, "Also: Comet Charm, Nova Title, Sun Icon");
+  assert.equal(both.score, 1);
+  assert.equal(both.matchedIn, "description");
+  assert.equal(scoreOffer("Space Game Twitch Drops", labels, "").score, 0);
+});
+
+test("scoreOffer: in a description a label must appear as a phrase, never as loose words", () => {
+  // A description lists many OTHER rewards: the title's loose word rule would
+  // put "Banana Cat" and "Spray" of two different rewards together.
+  const desc = "Rewards: Banana Cat Icon - Prost Spray - Player Card - Sun Tea Icon";
+  assert.equal(scoreOffer("Twitch Drops", ["Banana Cat Spray"], desc).score, 0);
+  assert.equal(scoreOffer("Twitch Drops", ["Banana Cat Icon"], desc).score, 1);
+  assert.equal(scoreOffer("Twitch Drops", ["Protein Drink Player Icon"], desc).score, 0, "'player' and 'icon' alone are not a reward");
+  assert.equal(scoreOffer("Twitch Drops", ["Prost Spray"], "Spray: Prost").score, 0, "words out of order");
+  // The same words in a title still match by the loose rule.
+  assert.equal(scoreOffer("Banana Cat Icon + Prost Spray", ["Banana Cat Spray"]).score, 1);
+});
+
+test("scoreOffer: accents fold, 'player' / 'code' and our '(...)' notes are optional, spaces inside a name do not count", () => {
+  const m = (label, desc) => scoreOffer("Twitch Drops", [label], desc).score;
+  assert.equal(m("Skal Spray", "Skål Spray"), 1, "Skål = Skal");
+  assert.equal(m("Skål Spray", "skal sprays"), 1);
+  assert.equal(m("Sun Tea Player Icon", "Sun Tea Icon"), 1, "rivals drop 'Player'");
+  assert.equal(m("Sun Tea Player Icon", "SUN TEA PLAYER ICON"), 1);
+  assert.equal(m("Esports Loot Box", "1x Esports Lootbox"), 1);
+  assert.equal(m("Autumn Vibes Name Card", "Autumn Vibes Namecard"), 1);
+  assert.equal(m("Standard Issue Gear Ticket x1 (2nd code)", "Standard Issue Gear Ticket x1"), 1);
+  assert.equal(m("QBZ95-1 - Delta Force (weapon skin)", "QBZ95-1 - Delta Force skin"), 1);
+  // A count is part of the reward: x3 and x1 vouchers are different slots.
+  assert.equal(m("Logistics Voucher x3", "Logistics Voucher x1"), 0);
+  assert.equal(m("Logistics Voucher x3", "Logistics Voucher x3"), 1);
+});
+
+test("scoreOffer: a short phrase matches only as whole words", () => {
+  const m = (label, desc) => scoreOffer("Twitch Drops", [label], desc).score;
+  assert.equal(m("Ana", "Banana Cat Icon"), 0);
+  assert.equal(m("Ana", "Ana skin, Mei spray"), 1);
+  assert.equal(m("Sun Icon", "Sunset Icons"), 0);
+  assert.equal(m("Sun Icon", "a Sun Icon"), 1);
+});
+
+test("phrasesOf: the label without '(...)' notes, and without 'player' / 'code' too", () => {
+  assert.deepEqual(phrasesOf("Sun Tea Player Icon"), ["sun tea player icon", "sun tea icon"]);
+  assert.deepEqual(phrasesOf("Standard Issue Gear Ticket x1 (2nd code)"), ["standard issue gear ticket x1"]);
+  assert.deepEqual(phrasesOf("Skål Spray"), ["skal spray"]);
+  assert.deepEqual(phrasesOf("(note only)"), []);
+  assert.deepEqual(phrasesOf(null), []);
 });
 
 // --- parseSearch --------------------------------------------------------------
@@ -123,6 +188,7 @@ test("parseSearch: USD price first, else a USD pricePerUnit, else null", () => {
           pricePerUnitInUSD: { amount: 1.25 },
           pricePerUnit: { amount: 99, currency: "EUR" },
           quantity: 7,
+          description: "Moon Spray and Star Banner",
         },
       },
       { offer: { id: "o-2", offerTitle: "Second", userId: "u-2", pricePerUnit: { amount: 2.5, currency: "USD" }, quantity: 1 } },
@@ -134,11 +200,23 @@ test("parseSearch: USD price first, else a USD pricePerUnit, else null", () => {
     ],
   };
   assert.deepEqual(parseSearch(json), [
-    { id: "o-1", title: "First", userId: "u-1", priceUsd: 1.25, qty: 7 },
-    { id: "o-2", title: "Second", userId: "u-2", priceUsd: 2.5, qty: 1 },
-    { id: "o-3", title: "Third", userId: "u-3", priceUsd: null, qty: 2 },
-    { id: "4", title: "", userId: "", priceUsd: null, qty: 0 },
+    { id: "o-1", title: "First", description: "Moon Spray and Star Banner", userId: "u-1", priceUsd: 1.25, qty: 7 },
+    { id: "o-2", title: "Second", description: "", userId: "u-2", priceUsd: 2.5, qty: 1 },
+    { id: "o-3", title: "Third", description: "", userId: "u-3", priceUsd: null, qty: 2 },
+    { id: "4", title: "", description: "", userId: "", priceUsd: null, qty: 0 },
   ]);
+});
+
+test("parseSearch: a description that is not text is empty, a long one is capped", () => {
+  const long = "x".repeat(9000);
+  const out = parseSearch({
+    results: [
+      { offer: { id: "a", offerTitle: "A", description: { html: "no" } } },
+      { offer: { id: "b", offerTitle: "B", description: long } },
+    ],
+  });
+  assert.equal(out[0].description, "");
+  assert.equal(out[1].description.length, 5000);
 });
 
 test("parseSearch: anything that is not a results list is an empty list", () => {
@@ -174,6 +252,7 @@ function offer(id, title, price, extra = {}) {
       userId: extra.userId || "seller-" + id,
       pricePerUnitInUSD: price === null ? undefined : { amount: price },
       quantity: extra.qty === undefined ? 3 : extra.qty,
+      description: extra.description,
     },
   };
 }
@@ -351,6 +430,35 @@ test("scan: no same-set offer means lowestSameSetUsd is null", async () => {
   const res = await harness(market).competitors.scan(p);
   assert.deepEqual(res.offers.map((o) => o.id), ["partial"]);
   assert.equal(res.lowestSameSetUsd, null);
+});
+
+test("scan: a rival naming the set only in its description counts; the description is never stored", async () => {
+  const p = await product({ competitors: { queries: ["set"] }, pricing: { priceUsd: 1 } });
+  const list = "Rewards:\n- " + LABELS.join("\n- ");
+  const market = fakeMarket({
+    set: [
+      [
+        offer("drops-desc", "Space Game Twitch Drops | 19 Rewards", 0.8, { description: list }),
+        offer("title-full", FULL, 1.5),
+        offer("drops-loose", "Space Game Twitch Drops", 0.6, { description: "Moon Charm, Star Icon, Comet Banner" }),
+      ],
+    ],
+  });
+  const h = harness(market);
+  const res = await h.competitors.scan(p);
+
+  assert.deepEqual(res.offers.map((o) => [o.id, o.sameSet, o.matchedIn]), [
+    ["drops-desc", true, "description"],
+    ["title-full", true, "title"],
+  ]);
+  assert.equal(res.lowestSameSetUsd, 0.8, "the description-only rival is the lowest same-set price");
+
+  const saved = await CodeProduct.findById(p._id).lean();
+  assert.equal(saved.competitors.offers[0].matchedIn, "description");
+  assert.ok(!("description" in saved.competitors.offers[0]), "the rival's text is read, not kept");
+  const ev = h.logged.find((e) => e.kind === "competitors");
+  assert.equal(ev.data.byDescription, 1);
+  assert.match(ev.msg, /1 named in the description only/);
 });
 
 test("scan: a failed request keeps the old scan and logs a warning", async () => {

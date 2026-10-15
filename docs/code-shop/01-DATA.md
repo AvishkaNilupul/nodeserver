@@ -69,7 +69,7 @@ Timestamps on.
 | `markets` | [String] | `["eldorado"]` |
 | `ggsel` | `{vaultSize:Number}` | `{vaultSize:5}` |
 | `publish` | `{lastError:String, lastAttemptAt:Date}` | `{lastError:""}` |
-| `competitors` | `{scannedAt, queries:[String], lowestSameSetUsd:Number\|null, offers:[{id,title,priceUsd,qty,score,sameSet}]}` | `{offers:[]}` |
+| `competitors` | `{scannedAt, queries:[String], lowestSameSetUsd:Number\|null, offers:[{id,title,priceUsd,qty,score,sameSet,matchedIn}]}` | `{offers:[]}` |
 | `useBy` | Date | null — earliest `useBy` of its on-sale codes |
 | `proposed` | `{units:Number, at:Date}` | `{units:0}` — planner's estimate |
 | `approvedAt`, `approvedBy`, `retiredAt` | | null / "" |

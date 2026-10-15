@@ -28,6 +28,8 @@ const competitorOfferSchema = new mongoose.Schema(
     qty: { type: Number, default: 0 },
     score: { type: Number, default: 0 },
     sameSet: { type: Boolean, default: false },
+    // Where its title-or-description match came from: "title" or "description".
+    matchedIn: { type: String, default: "" },
   },
   { _id: false },
 );

@@ -96,7 +96,7 @@ vault must be emptied from the Listings page) — the result says so. Product �
 ## `utils/codeShop/competitors.js`
 
 `createCompetitors(deps)` → `{ scan(product) }`; pure `queriesFor(product, guide)`,
-`scoreOffer(title, labels)`, `parseSearch(json)`.
+`scoreOffer(title, labels, description)`, `phrasesOf(label)`, `parseSearch(json)`.
 
 - `queriesFor`: `product.competitors.queries` if set; else up to 3 queries: the
   two longest labels and `displayName` alone (the search is inside Eldorado's
@@ -104,17 +104,36 @@ vault must be emptied from the Listings page) — the result says so. Product �
 - Request: `GET https://www.eldorado.gg/api/v1/item-management/offers?gameId=235&category=CustomItem&pageIndex=N&pageSize=50&searchQuery=<q>`
   with `accept: application/json` and a browser user-agent, through `deps.fetch`;
   pages 1..3 while a page has 50 results; `deps.sleep(1500)` between requests.
-- `parseSearch(json)` → `[{ id, title, userId, priceUsd, qty }]` from `results[].offer`
-  (`id`, `offerTitle`, `userId`, `pricePerUnitInUSD.amount`, else `pricePerUnit.amount`
-  when its currency is USD, `quantity`).
+- `parseSearch(json)` → `[{ id, title, description, userId, priceUsd, qty }]` from `results[].offer`
+  (`id`, `offerTitle`, `description` (capped at 5,000 characters, "" when not text),
+  `userId`, `pricePerUnitInUSD.amount`, else `pricePerUnit.amount` when its currency
+  is USD, `quantity`). The search answer carries each offer's full description, so
+  reading it costs no extra request (checked 2026-10-16: 476–1,916 characters each).
 - Exclude our own: `userId` in `config.ownEldoradoUserIds`, or `id` equal to any
   of our `MarketplaceListing.externalId`.
-- `scoreOffer(title, labels)`: normalise (lowercase, non-alphanumerics → space,
-  collapse). A label matches when the normalised title contains the normalised
-  label, or contains every word of the label that is ≥ 4 letters (and at least
-  one such word). Score = matches ÷ labels. `sameSet` = score ≥ 0.8.
-- Store on the product: `competitors = { scannedAt, queries, offers: top 15 by score desc then price asc, lowestSameSetUsd }`.
-  A failed request → `events.log` warn, keep the old scan.
+- `scoreOffer(title, labels, description = "")`: normalise (accents folded, so
+  "Skål" = "skal"; lowercase; non-alphanumerics → space, collapse). Most rivals
+  list these rewards as Twitch drops with "19 Rewards" in the title and the list
+  only in the description, so a label matches:
+  - in the TITLE when the normalised title contains the normalised label, or every
+    word of the label that is ≥ 4 letters (and at least one such word), or by the
+    phrase rule below;
+  - in the DESCRIPTION by the phrase rule only. A description lists many other
+    rewards, and loose words would join two of them ("Banana Cat Icon … Prost
+    Spray" is not "Banana Cat Spray").
+  - Phrase rule: one of `phrasesOf(label)` (the label without our "(...)" notes,
+    and that again without "player" / "code" / "codes") appears in the text with
+    spaces ignored ("Loot Box" = "Lootbox"); a phrase under 8 letters must appear
+    as whole words ("Ana" is not in "banana"). Counts stay part of the name
+    ("x3" ≠ "x1").
+  Score = matches ÷ labels. `sameSet` = score ≥ 0.8. `matchedIn` = "title" when the
+  title alone names every matched label, "description" when the description added
+  any, "" when nothing matched.
+- Store on the product: `competitors = { scannedAt, queries, offers: top 15 by score desc then price asc, lowestSameSetUsd }`,
+  each offer `{ id, title, priceUsd, qty, score, sameSet, matchedIn }` (a rival's
+  description is read, never stored). The event's `data.byDescription` counts the
+  offers named in a description only. A failed request → `events.log` warn, keep
+  the old scan.
 
 ## `utils/codeShop/pricing.js`
 

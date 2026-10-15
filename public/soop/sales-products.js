@@ -431,6 +431,7 @@
         { label: "Price", align: "right", render: (o) => el("span", { class: o.sameSet && isNum(ours) && Number(o.priceUsd) < Number(ours) ? "s-num s-warn" : "s-num" }, usd(o.priceUsd)) },
         { label: "Qty", align: "right", render: (o) => fmt.num(o.qty) },
         { label: "Match", align: "right", render: (o) => (isNum(o.score) ? fmt.pct(o.score, 1) : "–") },
+        { label: "Named in", render: (o) => (o.matchedIn === "description" ? el("span", { class: "s-muted" }, "Description") : o.matchedIn === "title" ? "Title" : "–") },
         { label: "Same set", align: "center", render: (o) => (o.sameSet ? ui.badge("Same set", "ok") : el("span", { class: "s-muted" }, "No")) },
       ], rows });
     Soop.modal({ title: "Competitors — " + (d.name || "product"), size: "lg", actions: [{ label: "Close" }],
@@ -441,7 +442,7 @@
           ["Scanned", c.scannedAt ? when(c.scannedAt) + " (" + fmt.ago(c.scannedAt) + ")" : "Never"],
           arr(c.queries).length ? ["Searched for", el("span", { class: "s-row" }, arr(c.queries).map((q) => ui.badge(q)))] : null,
         ]),
-        el("p", { class: "s-help", style: { margin: "0" } }, "Other sellers' Eldorado offers (ours are left out). Match = share of this bundle's rewards named in their title; 80% or more counts as the same set."),
+        el("p", { class: "s-help", style: { margin: "0" } }, "Other sellers' Eldorado offers (ours are left out). Match = share of this bundle's rewards named in their title or description; 80% or more counts as the same set. Most sellers list these rewards as Twitch drops and name them only in the description."),
         table) });
   }
   function merge() {
