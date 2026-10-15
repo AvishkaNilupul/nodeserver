@@ -251,6 +251,12 @@ test("a farming window is Not Changeable; an account sold outright is Changeable
   assert.deepEqual(sold.slice(2), ["profile: Changeable", "password: Changeable", "email: Not Included"]);
 });
 
+test("its name normalisation is settings.normGameName, exactly", () => {
+  for (const n of ["Hunt: Showdown 1896", "  WORLD   OF-TANKS ", "Tom Clancy's The Division 2", "Pokémon GO", "Kirka.io", "THE FINALS", "", null, "⚡ 116x GOALS"]) {
+    assert.equal(gac.norm(n), settings.normGameName(n), String(n));
+  }
+});
+
 /* ------------------------------ the knobs ------------------------------- */
 
 test("upc: only for a game Gameflip knows, and off with gameflipAccountUpc false", () => {

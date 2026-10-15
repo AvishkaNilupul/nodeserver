@@ -29,7 +29,9 @@
 // "Do not change any data on the account you received, otherwise the automatic
 // farm will stop working" (utils/gameflipFarmService.js offerDescription), so a
 // window is "Not Changeable" where an account sold outright is "Changeable".
-const settings = require("./settings");
+// Nothing is required at load: marketplaces.js loads this module, and tests
+// that hand marketplaces.js a stand-in settings module (tests/g2g.test.js) must
+// still load it. Settings are read only when a listing is built.
 
 // [Gameflip game id, the game's title on Gameflip, other labels it goes by].
 // Harvested 2026-10-15 from ~1,900 live Game Accounts listings (public API):
@@ -238,8 +240,15 @@ const DEFAULT_PLATFORM = "windows";
 const FARM_RE = /\bautomatic farming\b/i;
 const TITLE_TAG_MAX = 60;
 
+// The same normalisation as settings.normGameName (case and punctuation
+// drift: "Hunt: Showdown 1896" == "hunt showdown 1896"), kept here so this
+// module needs nothing at load. tests/gameflipAccountCategory.test.js holds
+// the two together.
 function norm(s) {
-  return settings.normGameName(s);
+  return String(s || "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, " ")
+    .trim();
 }
 
 const BY_NAME = new Map();
@@ -308,7 +317,7 @@ function platformFor(names, af) {
 //   auto   the listing auto-delivers a code (the delivery itself is unchanged)
 //   af     optional: the auto-farm settings (read fresh when absent)
 function listingFields({ title, game, farm, auto, af } = {}) {
-  const cfg = af || settings.getAutoFarm();
+  const cfg = af || require("./settings").getAutoFarm();
   if (categoryOf(cfg) !== "ACCOUNT") return null;
   const g = resolveGame({ title, game });
   const isFarm = farm === true || (farm !== false && FARM_RE.test(String(title || "")));
@@ -335,6 +344,7 @@ function listingFields({ title, game, farm, auto, af } = {}) {
 
 module.exports = {
   listingFields,
+  norm,
   resolveGame,
   gameFromTitle,
   knownGame,
