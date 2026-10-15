@@ -156,6 +156,34 @@ test("the list matches a game by its exact normalised label, and is empty by def
   assert.equal(autoListSkippedFor("Rust", { autoListSkipGames: ["", null] }), false);
 });
 
+test('"*" on the list is every game, a new one and a blank label included', () => {
+  const { autoListSkippedFor } = autoLister;
+  const all = { autoListSkipGames: ["*"] };
+  assert.equal(autoListSkippedFor("World of Tanks", all), true);
+  assert.equal(autoListSkippedFor("A Game Nobody Has Farmed Yet", all), true);
+  assert.equal(autoListSkippedFor("", all), true);
+  assert.equal(autoListSkippedFor("Rust", { autoListSkipGames: ["Rust", " * "] }), true);
+  assert.equal(autoListSkippedFor("Rustler", { autoListSkipGames: ["Rust", " * "] }), true);
+  // only a lone "*" — never a label that merely contains one, nor junk entries
+  assert.equal(autoListSkippedFor("Rustler", { autoListSkipGames: ["Rust*"] }), false);
+  assert.equal(autoListSkippedFor("Rustler", { autoListSkipGames: ["Rust", null, 7, ["*"]] }), false);
+});
+
+test('"*": a fresh bundle of any game is not read, published or reserved', async () => {
+  AF = { autoListSkipGames: ["*"] };
+  const task = await seedTask(6);
+  const r = await autoLister.listActivatedTask(task._id);
+  assert.deepEqual(r, { skipped: "game is kept out of the auto-lister", waiting: true });
+  assert.deepEqual(calls, []);
+  assert.equal(await DropSet.countDocuments({}), 0);
+  assert.equal(await MarketplaceListing.countDocuments({}), 0);
+  assert.equal(await reserved(), 0);
+  const t = await fresh(task._id).lean();
+  assert.equal(t.listing.error, NOTE);
+  assert.ok(!t.listing.externalId);
+  AF = {};
+});
+
 test("the shipped default is an empty list", () => {
   // The real settings module, not the stub the other tests read through.
   assert.deepEqual(orig.getAutoFarm.call(settings).autoListSkipGames, []);

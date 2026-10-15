@@ -108,9 +108,16 @@ function platiOffReason(af) {
 //
 // Exact normalised label, the way reuseOnlyGames matches: a substring test
 // would let "Rust" take "Rustler".
+//
+// "*" on the list is every game, including one first farmed after the list was
+// written — the owner's pause of the whole auto-lister. Added 2026-10-15, when
+// every listing came off Gameflip while its Game Accounts approval is asked
+// for: the names alone left out the one or two new games the farm picks up a
+// day, and each of those would have opened a fresh Gameflip listing.
 function autoListSkippedFor(game, af) {
   const list = af && af.autoListSkipGames;
   if (!Array.isArray(list) || !list.length) return false;
+  if (list.some((x) => typeof x === "string" && x.trim() === "*")) return true;
   const g = settings.normGameName(game);
   if (!g) return false;
   return list.some((x) => settings.normGameName(x) === g);
