@@ -45,7 +45,7 @@
   function open(prefill) {
     if (openNow) return;
     prefill = prefill || {};
-    const w = { step: 1, mode: "game", gameNo: null, dropsIdx: null, how: "all", firstN: 5, picked: new Set(), target: "all", codesOnly: false, priorityGameNo: (((Soop.games || []).find((g) => /^overwatch/i.test(g.name || "")) || {}).gameNo) || "", name: "", q: "", sync: null, ids: [] };
+    const w = { step: 1, mode: "game", gameNo: null, dropsIdx: null, how: "all", firstN: 5, picked: new Set(), target: "all", codesOnly: false, autoJoin: false, priorityGameNo: (((Soop.games || []).find((g) => /^overwatch/i.test(g.name || "")) || {}).gameNo) || "", name: "", q: "", sync: null, ids: [] };
     if (prefill.create === "campaign" && prefill.dropsIdx) { w.mode = "campaign"; w.dropsIdx = String(prefill.dropsIdx); w.step = Soop.campaignById(w.dropsIdx) ? 3 : 2; }
     else if (prefill.create === "game" && prefill.gameNo) { w.mode = "game"; w.gameNo = String(prefill.gameNo); w.step = 3; }
 
@@ -157,6 +157,7 @@
       const drawSum = () => {
         const ids = w.ids;
         fill(sum, [["Farms", farms()], ["Accounts", count(ids.length, "account") + ": " + ids.slice(0, 6).join(", ") + (ids.length > 6 ? " and " + (ids.length - 6) + " more" : "")],
+          ["New logins", w.autoJoin ? "Join this bot automatically" : "Stay free until you add them"],
           ["Target", w.target === "first" ? "First step only" : "All steps"],
           ["Rewards", w.mode === "campaign" ? (c && c.needsLink ? "Need a linked game account" : "Arrive as codes") : w.codesOnly ? "Codes only — skips campaigns that need a linked game account" : "All guaranteed campaigns, linked-account ones too"],
           ["Name", w.name.trim() || autoName()]].map((r) => [el("dt", r[0]), el("dd", r[1])]));
@@ -178,6 +179,8 @@
           : el("div", { class: "s-stack is-tight" }, el("label", { class: "s-check" }, el("input", { type: "checkbox", checked: w.codesOnly, onChange: (e) => { w.codesOnly = e.target.checked; drawSum(); } }), el("b", "Codes only")),
             el("span", { class: "s-help" }, "Skips campaigns whose rewards need a linked game account, so every drop this bot earns is a code."),
             w.mode === "auto" ? priorityPicker() : null),
+        el("div", { class: "s-stack is-tight" }, el("label", { class: "s-check" }, el("input", { type: "checkbox", checked: w.autoJoin, onChange: (e) => { w.autoJoin = e.target.checked; drawSum(); } }), el("b", "New logins join this bot automatically")),
+          el("span", { class: "s-help" }, "Accounts you import later that are in no bot are added to this one while it is on. If several bots have this on, the oldest one gets them.")),
         el("label", { class: "s-field" }, "Bot name (optional)", name, el("span", { class: "s-help" }, "Left empty, the bot is named after what it farms.")),
         el("div", { class: "s-card" }, el("div", { class: "s-card-bd s-stack is-tight" }, el("p", { class: "s-eyebrow" }, "Summary — check before you create"), sum)));
     }
@@ -193,7 +196,7 @@
     }
     function create() {
       const ids = w.ids;
-      const payload = { name: w.name.trim(), mode: w.mode, accountIds: ids, target: w.target, codesOnly: w.mode !== "campaign" && w.codesOnly };
+      const payload = { name: w.name.trim(), mode: w.mode, accountIds: ids, target: w.target, codesOnly: w.mode !== "campaign" && w.codesOnly, autoJoin: w.autoJoin };
       if (w.mode === "auto" && w.priorityGameNo) payload.priorityGameNo = String(w.priorityGameNo);
       if (w.mode === "campaign") payload.dropsIdx = w.dropsIdx;
       if (w.mode === "game") payload.gameNo = w.gameNo;

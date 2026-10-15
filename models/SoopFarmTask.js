@@ -23,6 +23,9 @@ const soopFarmTaskSchema = new mongoose.Schema(
     // For "auto" bots: this game is farmed first, and accounts on anything else
     // switch to it as soon as one of its campaigns goes live.
     priorityGameNo: { type: String, default: "" },
+    // New logins join this bot by themselves: an import's logins that are in
+    // no bot are added to the oldest active bot with this set (soopFarm._autoJoin).
+    autoJoin: { type: Boolean, default: false },
     accountIds: { type: [String], default: [] },
     // Accounts that reached their goal (campaign mode).
     doneIds: { type: [String], default: [] },

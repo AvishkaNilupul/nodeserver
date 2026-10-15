@@ -10,7 +10,17 @@ const { goalOf } = require("../soopWorker");
 const WATCH_SOON_MS = 60000; // a campaign starts within 15 minutes
 const WATCH_ACTIVE_MS = 120000; // a campaign is inside its window, or something is farming
 const WATCH_IDLE_MS = 600000; // nothing can go live soon
+// Join on time: from START_LEAD_MS before a campaign's start to START_GRACE_MS
+// after it, look every WATCH_START_MS. The lead is the two minutes _verdict and
+// farmable already allow before a start.
+const WATCH_START_MS = 30000;
+const START_LEAD_MS = 120000;
+const START_GRACE_MS = 600000;
 const SOON_MS = 15 * 60000;
+// The timer ticks every 30 s (RECONCILE_MS in utils/soopFarm.js); the
+// inventory totals it also refreshes keep their one read a minute.
+const TOTALS_MS = 60000;
+const TOTALS_SLACK_MS = 5000; // interval drift must not skip a whole minute
 const time = (d) => (d ? new Date(d).getTime() : null);
 
 const MODES = new Set(["campaign", "game", "auto"]);
@@ -28,6 +38,7 @@ function fromDoc(d) {
     target: TARGETS.has(d.target) ? d.target : "all",
     codesOnly: !!d.codesOnly,
     priorityGameNo: d.priorityGameNo ? String(d.priorityGameNo) : null,
+    autoJoin: !!d.autoJoin,
     accountIds: (d.accountIds || []).slice(),
     doneIds: (d.doneIds || []).slice(),
     active: !!d.active,
@@ -80,6 +91,8 @@ module.exports = {
   async _reconcile({ force = false } = {}) {
     const active = [...this.bots.values()].filter((b) => b.active);
     if (active.length && (force || this.clock.now() >= this.nextWatchAt)) await this._wake(active);
+    if (!force && Date.now() - (this.invTotalsAt || 0) < TOTALS_MS - TOTALS_SLACK_MS) return;
+    this.invTotalsAt = Date.now();
     this.invTotals = await this.inventory
       .summary()
       .then((s) => s.totals)
@@ -166,20 +179,31 @@ module.exports = {
     };
   },
 
-  // Look often only when something can actually go live soon.
+  // Look often only when something can actually go live soon, and most often
+  // around a start, so accounts join within half a minute of the window opening.
   _cadence(cands, now) {
     let ms = WATCH_IDLE_MS;
     for (const c of cands) {
       const start = time(c.startAt);
       const end = time(c.endAt);
       if (end && end < now) continue;
-      if (start && start > now) {
+      if (this._startWindow(c, now)) {
+        ms = Math.min(ms, WATCH_START_MS);
+      } else if (start && start > now) {
         if (start - now <= SOON_MS) ms = Math.min(ms, WATCH_SOON_MS);
       } else {
         ms = Math.min(ms, WATCH_ACTIVE_MS);
       }
     }
     return ms;
+  },
+
+  // From two minutes before a campaign's start to ten minutes after it: the
+  // watcher looks every 30 s (_cadence) and a held campaign cools down for a
+  // minute, not three (soopFarm._parked), so accounts join on time.
+  _startWindow(c, now) {
+    const start = c ? time(c.startAt) : null;
+    return !!start && now >= start - START_LEAD_MS && now <= start + START_GRACE_MS;
   },
 
   _sleep(id, v) {
@@ -207,7 +231,7 @@ module.exports = {
     this.activity.add({ kind: "bot", botId: bot.id, msg: `Bot "${bot.name}" finished — every account reached its goal` });
   },
 
-  async createBot({ name, mode = "campaign", dropsIdx, gameNo, accountIds, target = "all", codesOnly = false, priorityGameNo } = {}) {
+  async createBot({ name, mode = "campaign", dropsIdx, gameNo, accountIds, target = "all", codesOnly = false, priorityGameNo, autoJoin = false } = {}) {
     if (!MODES.has(mode)) return fail("Choose what the bot should farm");
     if (!TARGETS.has(target)) return fail("Unknown target");
     const ids = uniq(accountIds);
@@ -240,6 +264,7 @@ module.exports = {
       target,
       codesOnly: !!codesOnly,
       priorityGameNo: mode === "auto" && priorityGameNo ? String(priorityGameNo) : "",
+      autoJoin: !!autoJoin,
       accountIds: ids,
       doneIds: [],
       active: true,
@@ -252,11 +277,13 @@ module.exports = {
     return { ok: true, bot: await this._viewBot(bot) };
   },
 
-  async updateBot(id, { name, target, addIds, removeIds, priorityGameNo } = {}) {
+  async updateBot(id, { name, target, addIds, removeIds, priorityGameNo, autoJoin } = {}) {
     const bot = this.bots.get(String(id));
     if (!bot) return fail("Unknown bot");
     const set = {};
     if (typeof name === "string" && name.trim()) set.name = name.trim().slice(0, 120);
+    // Only decides where future imports go: no session is touched for it.
+    if (typeof autoJoin === "boolean" && autoJoin !== !!bot.autoJoin) set.autoJoin = autoJoin;
     if (target != null) {
       if (!TARGETS.has(target)) return fail("Unknown target");
       set.target = target;
@@ -284,6 +311,46 @@ module.exports = {
     if (Object.keys(set).length) await this._saveBot(bot, set);
     if (bot.active) await this._reconcile({ force: true });
     return { ok: true, bot: await this._viewBot(bot) };
+  },
+
+  // After an import: the logins of `ids` that are in no bot — active or
+  // stopped — join the oldest active bot that asked for new logins. One
+  // activity row says what happened. Never throws: the import has already
+  // succeeded and must be reported as such.
+  async _autoJoin(ids) {
+    try {
+      const list = uniq(ids);
+      if (!list.length) return [];
+      const bots = [...this.bots.values()];
+      const bot = bots
+        .filter((b) => b.active && b.autoJoin)
+        .sort((a, b) => (time(a.createdAt) || 0) - (time(b.createdAt) || 0) || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))[0];
+      if (!bot) return [];
+      const taken = new Set(bots.flatMap((b) => b.accountIds));
+      const free = list.filter((x) => !taken.has(x));
+      if (!free.length) return [];
+      // A sold or logged-out login would make updateBot refuse the whole batch.
+      const rows = await SoopAccount.find({ loginId: { $in: free } }).select("loginId status sold").lean();
+      const ok = new Set(rows.filter(canFarm).map((r) => r.loginId));
+      const add = free.filter((x) => ok.has(x));
+      if (!add.length) return [];
+      const r = await this.updateBot(bot.id, { addIds: add });
+      if (!r || r.ok === false) {
+        this.activity.add({
+          level: "warn", kind: "bot", botId: bot.id,
+          msg: `New login(s) ${add.join(", ")} could not join the bot "${bot.name}" automatically: ${(r && r.error) || "refused"}`,
+        });
+        return [];
+      }
+      this.activity.add({
+        kind: "bot", botId: bot.id,
+        msg: `${add.length} new login(s) joined the bot "${bot.name}" automatically: ${add.join(", ")}`,
+      });
+      return add;
+    } catch (err) {
+      console.error("[soop] auto-join after import failed:", err.message);
+      return [];
+    }
   },
 
   async stopBot(id) {

@@ -205,6 +205,7 @@ route("post", "/bots/create", async ({ body }) => {
       target: text(body.target, "target", { max: 20 }),
       codesOnly: flag(body.codesOnly, "codesOnly"),
       priorityGameNo: text(body.priorityGameNo, "priorityGameNo", { max: 32 }),
+      autoJoin: flag(body.autoJoin, "autoJoin"),
     }),
   );
   return { bot };
@@ -219,6 +220,7 @@ route("post", "/bots/update", async ({ body }) => {
       addIds: idList(body.addIds, "addIds"),
       removeIds: idList(body.removeIds, "removeIds"),
       priorityGameNo: text(body.priorityGameNo, "priorityGameNo", { max: 32 }),
+      autoJoin: flag(body.autoJoin, "autoJoin"),
     }),
   );
   return { bot };

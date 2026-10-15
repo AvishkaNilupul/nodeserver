@@ -26,7 +26,11 @@ const { encrypt, decrypt } = require("./secretBox");
 const views = require("./soop/farmViews");
 
 const ACCOUNT_FIELDS = "-cookies -check -progress";
-const RECONCILE_MS = 60000;
+// The watcher's timer (was 60 s). It ticks this often so the 30-s look around
+// a campaign's start (WATCH_START_MS in ./soop/farmBots.js) is kept; a tick
+// wakes nothing until the look is due, and the inventory totals it refreshes
+// keep their one read a minute (TOTALS_MS there).
+const RECONCILE_MS = 30000;
 const PROGRESS_FLUSH_MS = 15000;
 const IMPORT_PACE_MS = 1500;
 const INVENTORY_AFTER_STEP_MS = 90000;
@@ -38,6 +42,9 @@ const PARK_AFTER_IDLE = 2;
 // After sleeping on a campaign SOOP still lists as live (no channel on air, or
 // a delisted one whose state cannot be known), wait this long before retrying.
 const PARK_COOLDOWN_MS = 180000;
+// The same, inside a campaign's start window (_startWindow in ./soop/farmBots.js):
+// channels come on air in the first minutes, and three minutes is a late join.
+const PARK_COOLDOWN_START_MS = 60000;
 // The panel refreshes the campaign list in the background once it is this old.
 const PAGE_SCAN_MS = 300000;
 const PRIME_PACE_MS = 3000;
@@ -99,6 +106,7 @@ class SoopFarm {
     this.dirty = new Map(); // "loginId dropsIdx" -> [loginId, dropsIdx]
     this.egressCountry = null;
     this.invTotals = null;
+    this.invTotalsAt = 0;
     this.accountsCache = null;
     this.scanCursor = 0;
     this.scanFailure = null;
@@ -255,6 +263,8 @@ class SoopFarm {
     }
     this.accountsCache = null;
     await this._reconcile({ force: true });
+    // Never fails the import: _autoJoin reports its own trouble.
+    await this._autoJoin(results.filter((r) => r.ok && r.id).map((r) => r.id));
     return results;
   }
 
@@ -703,7 +713,12 @@ class SoopFarm {
     const v = s.view;
     const camp = v.dropsIdx ? this.store.all().find((c) => String(c.dropsIdx) === String(v.dropsIdx)) : null;
     const hold = camp && (camp.live || camp.filter === "unlisted");
-    const cool = hold ? this.timings.parkCooldownMs ?? PARK_COOLDOWN_MS : 0;
+    let cool = 0;
+    if (hold) {
+      cool = this._startWindow(camp, this.clock.now())
+        ? this.timings.parkCooldownStartMs ?? PARK_COOLDOWN_START_MS
+        : this.timings.parkCooldownMs ?? PARK_COOLDOWN_MS;
+    }
     this.sleep.set(s.id, {
       at: new Date(this.clock.now()),
       detail: detail || "Nothing to farm right now",

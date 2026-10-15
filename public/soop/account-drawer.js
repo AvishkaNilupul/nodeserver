@@ -49,7 +49,7 @@
       if (!alive) return;
       const a = Soop.accountById(id);
       if (!a) {
-        if (headSig !== "gone") { headSig = "gone"; actions.hidden = true; put(head, el("div", { class: "s-note is-warn" }, ui.icon("alert"), el("span", "This account is no longer in the farm — it was deleted."))); put(nowBox); }
+        if (headSig !== "gone") { headSig = "gone"; actions.hidden = true; renewSec.hidden = true; put(head, el("div", { class: "s-note is-warn" }, ui.icon("alert"), el("span", "This account is no longer in the farm — it was deleted."))); put(nowBox); }
         return;
       }
       const bot = a.botId ? Soop.botById(a.botId) : null, st = statusOf(a), dead = !a.sold && a.status === DEAD;
@@ -78,6 +78,7 @@
             row("Added", time(a.createdAt)),
             row("Note", a.note || el("span", { class: "s-muted" }, "No note"))));
       }
+      paintRenew(a);
       const s = a.session, nsig = JSON.stringify([s, a.sold, a.status, bot && bot.state]);
       if (nsig !== nowSig) {
         nowSig = nsig;
@@ -119,6 +120,63 @@
       handle.close();
       Soop.toast("Deleted " + id, "ok");
       await Soop.refresh();
+    }
+
+    // ---- cookie renewal (the linked Twitch login signs it in to SOOP again) ------------
+    let renewSig = "", linkedAs = "", renewBusy = false;
+    const renewInfo = el("dl", { class: "s-kv" }), renewNote = el("span", { class: "s-muted s-small" });
+    const linkInput = el("input", { class: "s-input", placeholder: "Twitch login", autocomplete: "off", spellcheck: "false", "aria-label": "Twitch login that renews this cookie", style: { flex: "1 1 180px" },
+      onInput: () => paintRenewButtons(), onKeydown: (e) => { if (e.key === "Enter") { e.preventDefault(); linkBtn.click(); } } });
+    const linkBtn = ui.button("Save", { size: "sm", icon: "link", onClick: saveLink });
+    const renewBtn = ui.button("Renew now", { size: "sm", icon: "refresh", onClick: renewNow });
+    function paintRenew(a) {
+      const linked = a.twitchLogin || "", sig = JSON.stringify([linked, a.renewedAt, a.renewError, Math.floor(Date.now() / 60000)]);
+      if (sig !== renewSig) {
+        renewSig = sig;
+        put(renewInfo,
+          row("Twitch login", linked ? el("span", { class: "s-mono" }, linked) : el("span", { class: "s-muted" }, "Not linked")),
+          row("Last renewal", a.renewedAt ? time(a.renewedAt) : el("span", { class: "s-muted" }, "Never")),
+          a.renewError ? row("Last error", el("span", { class: "s-error" }, a.renewError)) : null);
+      }
+      if (linked !== linkedAs) { if (linkInput.value.trim() === linkedAs) linkInput.value = linked; linkedAs = linked; }   // never overwrite what the operator is typing
+      paintRenewButtons();
+    }
+    function paintRenewButtons() {
+      const a = Soop.accountById(id), linked = (a && a.twitchLogin) || "";
+      linkBtn.disabled = renewBusy || !a || linkInput.value.trim() === linked;
+      renewBtn.disabled = renewBusy || !a || !linked;
+      renewBtn.title = linked ? "Sign in to SOOP again through " + linked + " and store the new cookie" : "Link a Twitch login first";
+    }
+    // Both buttons stay disabled while either call runs; focus goes back where it was.
+    function lockRenew(note, work) {
+      const had = document.activeElement;
+      renewBusy = true; renewNote.textContent = note; paintRenewButtons();
+      return work().finally(() => {
+        renewBusy = false; renewNote.textContent = "";
+        if (!alive) return;
+        paintRenewButtons();
+        if (document.activeElement === document.body) (had && !had.disabled ? had : linkInput).focus({ preventScroll: true });
+      });
+    }
+    async function saveLink() {
+      const twitchLogin = linkInput.value.trim(), was = (Soop.accountById(id) || {}).twitchLogin || "";
+      if (!twitchLogin && was && !(await Soop.confirm({ title: "Unlink " + was + " from " + id + "?", danger: true, okLabel: "Unlink",
+        body: "This account's cookie is then no longer renewed by itself. To link it again, type the Twitch login and save." }))) return null;
+      return lockRenew("Saving…", () => Soop.api.post("/accounts/twitch-link", { id, twitchLogin }).then((j) => {
+        const now = (j && j.twitchLogin) || "";
+        if (alive && linkInput.value.trim() === twitchLogin) linkInput.value = now;
+        Soop.toast(now ? id + " now renews its cookie through the Twitch login " + now : id + " is no longer linked to a Twitch login", "ok");
+        return Soop.refresh();
+      }));
+    }
+    function renewNow() {
+      const linked = (Soop.accountById(id) || {}).twitchLogin || "";
+      return lockRenew("Signing in again through " + linked + "…", () => Soop.api.post("/accounts/renew", { id }).then((j) => {
+        const list = (j && j.results) || [], r = list.find((x) => String(x.id) === id) || list[0];
+        if (r && r.ok) Soop.toast("Renewed the cookie of " + id, "ok");
+        else Soop.toast("Could not renew the cookie of " + id + (r && (r.detail || r.reason) ? ": " + (r.detail || r.reason) : ""), "error");
+        return Promise.all([Soop.refresh(), loadActivity()]);
+      }));
     }
 
     // ---- inventory (fetched on open, on Refresh and after a sync) ------------------
@@ -173,9 +231,15 @@
     // ---- assemble -------------------------------------------------------------------
     const section = (title, extras, content) => el("section", { class: "s-stack is-tight" }, el("div", { class: "s-spread" }, el("p", { class: "s-eyebrow" }, title), el("span", { class: "s-row" }, extras)), content);
     const tabLink = (label, tab, params) => ui.button(label, { size: "sm", tone: "ghost", icon: "external", onClick: () => leave(tab, params) });
+    const renewSec = el("div", { class: "s-stack" },
+      section("Cookie renewal", [renewNote, renewBtn], el("div", { class: "s-stack is-tight" }, renewInfo,
+        el("div", { class: "s-field" }, el("span", "Linked Twitch login"), el("div", { class: "s-row" }, linkInput, linkBtn),
+          el("span", { class: "s-help" }, "When this login is logged out or refused by the drops site, the server signs in to SOOP again through this Twitch login and stores the new cookie. Leave the box empty and save to unlink.")))),
+      el("hr", { class: "s-divider" }));
     const body = el("div", { class: "s-stack" },
       actions, head, el("hr", { class: "s-divider" }),
       section("Doing now", null, nowBox), el("hr", { class: "s-divider" }),
+      renewSec,
       section("Inventory", [invNote, syncBtn, tabLink("Open in Inventory", "inventory", { account: id })], invBox), el("hr", { class: "s-divider" }),
       section("Recent activity", tabLink("All activity", "activity", { accountId: id }), actBox));
     const off = Soop.on("state", paint);

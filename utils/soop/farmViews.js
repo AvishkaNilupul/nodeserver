@@ -62,6 +62,10 @@ function accountView(a, { session, botId, sleep, minutes }) {
     createdAt: a.createdAt || null,
     cookieAt: a.cookieAt || a.createdAt || null,
     lastCheckedAt: a.lastCheckedAt || null,
+    // Cookie renewal through a linked Twitch login (soopFarm.renewAccount).
+    twitchLogin: a.twitchLogin || "",
+    renewedAt: a.renewedAt || null,
+    renewError: a.renewError || null,
     botId: botId || null,
     session: sessionView(session) || (botId && sleep && usable(a) ? sleepView(sleep, minutes) : null),
   };
@@ -116,6 +120,7 @@ function botView(bot, ctx) {
     codesOnly: !!bot.codesOnly,
     priorityGameNo: bot.priorityGameNo || null,
     priorityGameName: bot.priorityGameNo ? ctx.gameName(bot.priorityGameNo) : null,
+    autoJoin: !!bot.autoJoin,
     active: !!bot.active,
     state,
     createdAt: bot.createdAt || bot.startedAt || null,

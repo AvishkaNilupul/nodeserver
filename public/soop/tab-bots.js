@@ -16,6 +16,7 @@
   const BOT = { running: ["Running", "ok"], waiting: ["Waiting", "info"], sleeping: ["Sleeping", null], stopped: ["Stopped", null], finished: ["Finished", "ok"] };
   const SESSION = { starting: ["Joining", "info"], waiting: ["Waiting", null], sleeping: ["Sleeping", null], backoff: ["Not earning", "warn"], stopping: ["Stopping", null], error: ["Error", "error"] };
   const targetWords = (t) => (t === "first" ? "first step only" : "all steps");
+  const AUTO_HELP = "Accounts imported later that are in no bot are added to this bot while it is on. If several bots have this on, the oldest one gets them.";
   function farms(bot) {
     if (bot.mode === "campaign") return "Campaign: " + (bot.title || "#" + bot.dropsIdx);
     if (bot.mode === "game") return "Game: " + (bot.gameName || Soop.gameName(bot.gameNo)) + " — every guaranteed campaign";
@@ -56,6 +57,19 @@
   // ---------- Actions --------------------------------------------------------
   const stopBot = (b) => post("/bots/stop", { id: b.id }, 'Stopped "' + b.name + '" — resume it any time');
   const resumeBot = (b) => post("/bots/resume", { id: b.id }, 'Resumed "' + b.name + '"');
+  const setAutoJoin = (b, on) => post("/bots/update", { id: b.id, autoJoin: on }, on ? 'New logins now join "' + b.name + '" automatically' : 'New logins no longer join "' + b.name + '"');
+  // The card's auto-join box: locked while the call runs; the next paint puts it back if the call failed.
+  function toggleAutoJoin(c) {
+    const bot = Soop.botById(c.id), box = c.auto, on = box.checked, had = document.activeElement === box;
+    if (!bot) return;
+    c.autoBusy = true; box.disabled = true;
+    setAutoJoin(bot, on).catch(Soop.toast).then(() => {
+      c.autoBusy = false; box.disabled = false;
+      if (had && document.activeElement === document.body) box.focus({ preventScroll: true });
+      const b = Soop.botById(c.id);
+      if (b) paintCard(c, b);
+    });
+  }
   function renameBot(bot) {
     const save = () => {
       const name = input.value.trim();
@@ -167,19 +181,21 @@
     const tally = (key, tone) => el("span", { class: "s-row" }, ui.dot(tone), (c.n[key] = el("span")));
     c.title = el("h2", { class: "s-card-title s-grow s-trunc" });
     c.badge = el("span");
-    c.stop = ui.button("Stop", { size: "sm", icon: "stop", onClick: () => live() && stopBot(live()) });
+    c.autoTag = el("span", { hidden: true });
+    c.auto = el("input", { type: "checkbox", onChange: () => toggleAutoJoin(c) });
+    c.stop =ui.button("Stop", { size: "sm", icon: "stop", onClick: () => live() && stopBot(live()) });
     c.resume = ui.button("Resume", { size: "sm", icon: "play", tone: "primary", onClick: () => live() && resumeBot(live()) });
     c.what = el("span", { class: "s-grow" }); c.say = el("span", { class: "s-muted" });
     c.bar = ui.progress(0, 0); c.barText = el("span", { class: "s-small s-muted s-num s-nowrap" });
-    c.listNote = el("span", { class: "s-muted s-small" });
+    c.listNote = el("span", { class: "s-muted s-small s-grow" });
     c.listBtn = ui.button("Accounts", { size: "sm", tone: "ghost", icon: "chevron", onClick: () => { c.open = !c.open; if (live()) paintCard(c, live()); } });
     c.list = el("ul", { class: "s-list s-scroll", hidden: true });
     c.node = el("section", { class: "s-card", dataset: { bot: id } },
-      el("div", { class: "s-card-hd" }, c.title, c.badge, c.stop, c.resume, ui.menu(ui.button("", { icon: "more", size: "sm", title: "More actions for this bot" }), () => botMenu(id))),
+      el("div", { class: "s-card-hd" }, c.title, c.badge, c.autoTag, c.stop, c.resume, ui.menu(ui.button("", { icon: "more", size: "sm", title: "More actions for this bot" }), () => botMenu(id))),
       el("div", { class: "s-card-bd s-stack is-tight" }, el("div", { class: "s-row" }, ui.icon("gift"), c.what), c.say,
         el("div", { class: "s-row" }, el("span", { class: "s-grow" }, c.bar), c.barText),
         el("div", { class: "s-row s-small" }, tally("farming", "ok"), tally("waiting", null), tally("done", "info"), tally("error", "error"))),
-      el("div", { class: "s-card-ft" }, c.listBtn, c.listNote), c.list);
+      el("div", { class: "s-card-ft" }, c.listBtn, c.listNote, el("label", { class: "s-check s-small", title: AUTO_HELP }, c.auto, "New logins join this bot automatically")), c.list);
     return c;
   }
   function paintCard(c, bot) {
@@ -187,6 +203,13 @@
     c.node.className = "s-card" + (k.error ? " is-error" : bot.state === "running" ? " is-ok" : "");
     c.title.textContent = bot.name; c.title.title = bot.name;
     if (c.state !== bot.state) { fill(c.badge, ui.badge(words[0], words[1])); c.state = bot.state; }
+    const ak = bot.autoJoin ? (bot.active ? "on" : "idle") : "";
+    if (c.autoKey !== ak) {
+      c.autoKey = ak; c.autoTag.hidden = !ak;
+      c.autoTag.title = ak === "on" ? "New logins that are in no bot join this one" : "Auto-join is on, but new logins only join a bot that is on";
+      fill(c.autoTag, ak ? ui.badge("Auto-join", ak === "on" ? "info" : null) : null);
+    }
+    if (!c.autoBusy) c.auto.checked = !!bot.autoJoin;
     c.stop.hidden = !bot.active; c.resume.hidden = bot.active;
     c.what.textContent = farms(bot) + " · " + targetWords(bot.target) + (bot.codesOnly ? " · codes only" : "") + (bot.priorityGameName ? " · " + bot.priorityGameName + " first" : "");
     c.say.textContent = sentence(bot);
