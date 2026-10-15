@@ -65,6 +65,7 @@ const TABLE = [
   ["POST", "/api/code-shop/config"],
   ["POST", "/api/code-shop/run"],
   ["GET", "/api/code-shop/events"],
+  ["POST", "/api/code-shop/held/:id/release"],
 ];
 
 // ---- the fake service ---------------------------------------------------------
@@ -72,22 +73,69 @@ const TABLE = [
 const calls = [];
 let behave = {}; // module call name -> implementation for this test
 let cfgOver = {};
+let clock = NOW;
 const mpCalls = [];
 const mpFail = new Set();
+// service.exclusive: a real one-at-a-time queue, like the service's; a call made
+// while a queued job runs is recorded with queued: true.
+let queue = Promise.resolve();
+let queueDepth = 0;
+const heldBuilt = [];
 
 function rec(name, dflt) {
   return async (...args) => {
-    calls.push({ name, args });
+    calls.push({ name, args, queued: queueDepth > 0 });
     const fn = behave[name] || dflt;
     return fn ? fn(...args) : {};
   };
 }
 const callsOf = (name) => calls.filter((c) => c.name === name);
 
+function exclusive(fn) {
+  calls.push({ name: "service.exclusive", args: [] });
+  const run = queue.then(async () => {
+    queueDepth += 1;
+    try {
+      return await fn();
+    } finally {
+      queueDepth -= 1;
+    }
+  });
+  queue = run.then(
+    () => {},
+    () => {},
+  );
+  return run;
+}
+
+// The held-code releaser the router builds from the service's deps.
+const fakeHeld = {
+  release: rec("held.release", (rowId) => ({
+    row: {
+      _id: rowId,
+      loginId: "login-9",
+      slotKey: "12:100:aaaa:1",
+      name: "Sun Tea",
+      nameRaw: "Sun Tea",
+      codeHash: "hash-must-not-leave",
+      codeEnc: "enc-must-not-leave",
+      codeShape: "25:4-4-5-4-4",
+      state: "in_stock",
+      problem: "",
+      useBy: new Date(NOW + 5 * DAY),
+    },
+  })),
+};
+function createHeld(deps) {
+  heldBuilt.push(deps);
+  return fakeHeld;
+}
+
 const fakeService = {
+  exclusive,
   deps: {
     models: { CodeStock, CodeProduct, AccountOffer, MarketplaceListing },
-    now: () => NOW,
+    now: () => clock,
     guideFor,
     mp: () => ({
       eldoradoUpdateOffer: async (id, patch) => {
@@ -159,14 +207,14 @@ const logged = [];
 const realConsole = { log: console.log, warn: console.warn, error: console.error };
 let mem;
 
-function harness(admin) {
+function harness(admin, service = fakeService, opts = { createHeld }) {
   const app = express();
   app.use(express.json({ limit: "1mb" }));
   app.use((req, _res, next) => {
     req.session = admin ? { admin } : {};
     next();
   });
-  app.use(codeShopRoutes({ service: fakeService }));
+  app.use(codeShopRoutes({ service, ...opts }));
   const server = app.listen(0);
   return { server, url: `http://127.0.0.1:${server.address().port}` };
 }
@@ -216,6 +264,12 @@ test.before(async () => {
   servers.root = harness({ id: "a1", username: ROOT, role: "superadmin" });
   servers.anon = harness(null);
   servers.seller = harness({ id: "s1", username: "shop", role: "seller" });
+  // A service without the tick queue (an older build): queued actions must refuse.
+  const noQueue = { ...fakeService };
+  delete noQueue.exclusive;
+  servers.noQueue = harness({ id: "a1", username: ROOT, role: "superadmin" }, noQueue);
+  // No createHeld: the router builds utils/codeShop/held.js from the service's deps.
+  servers.realHeld = harness({ id: "a1", username: ROOT, role: "superadmin" }, fakeService, {});
 });
 
 test.after(async () => {
@@ -231,6 +285,7 @@ test.beforeEach(async () => {
   mpFail.clear();
   behave = {};
   cfgOver = {};
+  clock = NOW;
   await Promise.all([CodeStock.deleteMany({}), CodeProduct.deleteMany({}), AccountOffer.deleteMany({}), MarketplaceListing.deleteMany({})]);
 });
 
@@ -440,13 +495,14 @@ test("POST /products makes a manual custom draft from ledger slots of one game",
   assert.equal(ev.data.actor, ROOT);
 });
 
-test("POST /products takes a name and the enabled markets", async () => {
+test("POST /products takes a name and the enabled markets; GGSel is never picked (R1)", async () => {
+  // A stored config from before R1 may still say GGSel is on.
   cfgOver = { markets: { eldorado: true, ggsel: true } };
   const a = await addRows({ nameRaw: "Sun Tea Icon" });
   const r = ok(await post("/products", { slotKeys: [a], name: "  My bundle  " }));
   assert.equal(r.product.name, "My bundle");
   const p = await CodeProduct.findById(r.product.id).lean();
-  assert.deepEqual(p.markets, ["eldorado", "ggsel"]);
+  assert.deepEqual(p.markets, ["eldorado"]);
   assert.equal(p.slots.length, 1);
 });
 
@@ -499,7 +555,7 @@ test("POST /products/merge unions the drafts' slots, keeps first labels, deletes
   assert.equal(p.kind, "custom");
   assert.equal(p.status, "draft");
   assert.equal(p.edited, true);
-  assert.deepEqual(p.markets, ["eldorado", "ggsel"]);
+  assert.deepEqual(p.markets, ["eldorado"], "an old draft's GGSel pick is dropped (R1)");
   assert.deepEqual(p.groupKeys, ["12:100", "12:101"]);
   assert.equal(p.slotSetHash, slotSetHash(["12:100:a:1", "12:100:b:1", "12:100:c:1", "12:101:d:1"]));
   assert.match(p.texts.title, /4 Codes Bundle \| A1 \+ B1 \+ C2 \+ D3/);
@@ -540,7 +596,7 @@ test("POST /products/:id edits a draft: labels by stored order, then remove, the
   const k1 = "12:100:one:1";
   const k2 = "12:100:two:1";
   const k3 = "12:100:three:1";
-  const p = await addProduct({ slots: [slot(k1, "One"), slot(k2, "Two"), slot(k3, "Three")], stale: true });
+  const p = await addProduct({ slots: [slot(k1, "One"), slot(k2, "Two"), slot(k3, "Three")], stale: true, markets: ["ggsel"] });
   const r = ok(
     await post("/products/" + p._id, {
       name: "Renamed",
@@ -548,7 +604,7 @@ test("POST /products/:id edits a draft: labels by stored order, then remove, the
       labels: ["Uno", "Dos", "Tres"],
       removeSlots: [k2],
       slotOrder: [k3, k1],
-      markets: ["ggsel"],
+      markets: ["eldorado"],
       pricing: { priceUsd: 2.5, floorUsd: 1, clearance: true },
       texts: { title: "New title" },
     }),
@@ -563,7 +619,7 @@ test("POST /products/:id edits a draft: labels by stored order, then remove, the
   assert.equal(q.note, "for the weekend");
   assert.equal(q.edited, true);
   assert.equal(q.stale, false);
-  assert.deepEqual(q.markets, ["ggsel"]);
+  assert.deepEqual(q.markets, ["eldorado"]);
   assert.equal(q.pricing.priceUsd, 2.5);
   assert.equal(q.pricing.floorUsd, 1);
   assert.equal(q.pricing.mode, "fixed", "fields not sent stay");
@@ -594,6 +650,8 @@ test("POST /products/:id refuses bad draft edits with 400 and writes nothing", a
     [{ pricing: [] }, "pricing list"],
     [{ markets: ["gameflip"] }, "blocked market"],
     [{ markets: ["eldorado", "digiseller"] }, "blocked market 2"],
+    [{ markets: ["ggsel"] }, "GGSel (R1)"],
+    [{ markets: ["eldorado", "ggsel"] }, "GGSel beside Eldorado (R1)"],
     [{ markets: [] }, "no market"],
     [{ markets: "eldorado" }, "markets not a list"],
     [{ labels: ["Only one"] }, "labels count"],
@@ -655,8 +713,8 @@ test("POST /products/:id on an active product updates its offer and, with pushLi
   const o = await AccountOffer.findById(offer._id).lean();
   assert.equal(o.title, title);
   assert.equal(o.description, "Fresh text");
-  assert.equal(o.deliveryTemplate, p.texts.deliveryTemplate, "the product's delivery text");
-  assert.equal(o.coverServiceText, p.texts.coverServiceText);
+  assert.equal(o.deliveryTemplate, "Old:\n{password}", "a text not sent stays as the offer has it (R5)");
+  assert.equal(o.coverServiceText, "", "a text not sent stays as the offer has it (R5)");
   assert.deepEqual(o.coverBullets, ["Fast", "Safe"]);
   assert.equal(o.priceUsd, 3);
   assert.equal(o.minPriceUsd, 2);
@@ -908,4 +966,257 @@ test("POST /run runs one step and answers { result }", async () => {
     throw Object.assign(new Error("Unknown step: nope"), { status: 400 });
   };
   refused(await post("/run", { step: "nope" }), 400, "unknown step");
+});
+
+// ---- review fixes (docs/code-shop/05-REVIEW-FIXES.md) ----------------------------------
+
+const QUEUED_CALLS = ["publisher.approve", "publisher.publishProduct", "publisher.resume", "publisher.retire", "adopt.adopt", "held.release"];
+const QUEUED_ROUTES = [
+  [`/products/${GHOST_ID}/approve`, {}],
+  [`/products/${GHOST_ID}/publish`, {}],
+  [`/products/${GHOST_ID}/resume`, {}],
+  [`/products/${GHOST_ID}/retire`, {}],
+  ["/adopt", { offerId: GHOST_ID, apply: true }],
+  [`/held/${GHOST_ID}/release`, {}],
+];
+
+test("R1: a draft edit naming GGSel is refused with the reason, and nothing is written", async () => {
+  const p = await addProduct();
+  const before = await CodeProduct.findById(p._id).lean();
+  const r = refused(await post("/products/" + p._id, { markets: ["eldorado", "ggsel"] }), 400, "ggsel");
+  assert.equal(r.message, "GGSel is not used for codes yet: it never reports which code it sold, so a code could be sold twice");
+  assert.deepEqual(await CodeProduct.findById(p._id).lean(), before);
+});
+
+test("R3: approve, publish, resume, retire, adopt (apply) and held release run inside service.exclusive; pause and the adopt check do not", async () => {
+  for (const [path, body] of QUEUED_ROUTES) ok(await post(path, body), path);
+  for (const name of QUEUED_CALLS) {
+    const c = callsOf(name);
+    assert.equal(c.length, 1, name);
+    assert.equal(c[0].queued, true, name + " ran inside the tick queue");
+  }
+  assert.equal(callsOf("service.exclusive").length, QUEUED_ROUTES.length);
+  ok(await post(`/products/${GHOST_ID}/pause`));
+  ok(await post("/adopt", { offerId: GHOST_ID, apply: false }));
+  assert.equal(callsOf("publisher.pause")[0].queued, false);
+  assert.equal(callsOf("adopt.adopt")[1].queued, false, "a check only reads");
+  assert.equal(callsOf("service.exclusive").length, QUEUED_ROUTES.length);
+});
+
+test("R3: a queued action waits for the job ahead of it; a refusal comes back through the queue and the queue goes on", async () => {
+  let release;
+  const tick = exclusive(() => new Promise((resolve) => (release = resolve)));
+  const pending = post(`/products/${GHOST_ID}/approve`, { publish: true });
+  await new Promise((resolve) => setTimeout(resolve, 60));
+  assert.equal(callsOf("publisher.approve").length, 0, "approve waits for the running tick");
+  release("tick done");
+  assert.equal(await tick, "tick done");
+  ok(await pending, "approve after the tick");
+  assert.equal(callsOf("publisher.approve").length, 1);
+
+  behave["publisher.retire"] = () => {
+    throw Object.assign(new Error("Empty its GGSel vault first"), { status: 409 });
+  };
+  assert.match(refused(await post(`/products/${GHOST_ID}/retire`), 409, "retire refused").message, /GGSel vault/);
+  behave["publisher.resume"] = () => ({ ok: false, problems: ["title is empty"] });
+  refused(await post(`/products/${GHOST_ID}/resume`), 400, "resume refused");
+  delete behave["publisher.resume"];
+  ok(await post(`/products/${GHOST_ID}/resume`), "the queue goes on after a failed job");
+});
+
+test("R3: without service.exclusive the queued actions answer 503 and call nothing", async () => {
+  for (const [path, body] of QUEUED_ROUTES) {
+    const r = refused(await call("POST", "/api/code-shop" + path, body, "noQueue"), 503, path);
+    assert.match(r.message, /nothing was done/);
+  }
+  for (const name of QUEUED_CALLS) assert.equal(callsOf(name).length, 0, name);
+  ok(await call("POST", `/api/code-shop/products/${GHOST_ID}/pause`, {}, "noQueue"), "pause is not queued");
+  ok(await call("POST", "/api/code-shop/adopt", { offerId: GHOST_ID }, "noQueue"), "an adopt check is not queued");
+});
+
+test("R5: an active product's edit writes only the fields sent AND changed; the price goes live only when priceUsd changed", async () => {
+  const offer = await AccountOffer.create({ title: "Offer title", description: "Offer text", deliveryTemplate: "Offer:\n{password}", priceUsd: 4, minPriceUsd: 0.5 });
+  const p = await addProduct({ status: "active", offer: offer._id, origin: "manual", pricing: { mode: "fixed", priceUsd: 4, floorUsd: 0.5 } });
+  const row = await MarketplaceListing.create({
+    marketplace: "eldorado",
+    externalId: "E1",
+    accountOffer: offer._id,
+    status: "active",
+    title: "Live title",
+    description: "Live text",
+    price: 4.4,
+  });
+  const stored = p.toObject();
+  const r = ok(
+    await post("/products/" + p._id, {
+      name: stored.name,
+      texts: { title: stored.texts.title, description: "New text", coverBullets: [...stored.texts.coverBullets] },
+      pricing: { mode: "fixed", priceUsd: 4, floorUsd: 1, clearance: false },
+      pushLive: true,
+    }),
+  );
+  assert.deepEqual([...r.changed].sort(), ["pricing.floorUsd", "texts.description"]);
+  assert.deepEqual(r.sent, ["description"]);
+  assert.deepEqual(mpCalls, [{ id: "E1", patch: { description: "New text" } }], "no title, no price");
+  assert.deepEqual(r.live.map((x) => [x.externalId, x.ok]), [["E1", true]]);
+  const o = await AccountOffer.findById(offer._id).lean();
+  assert.deepEqual([o.title, o.description, o.deliveryTemplate, o.priceUsd, o.minPriceUsd], ["Offer title", "New text", "Offer:\n{password}", 4, 1]);
+  const l = await MarketplaceListing.findById(row._id).lean();
+  assert.deepEqual([l.title, l.description, l.price], ["Live title", "New text", 4.4], "the live price row is not touched");
+  const q = await CodeProduct.findById(p._id).lean();
+  assert.deepEqual([q.texts.description, q.pricing.floorUsd, q.pricing.priceUsd], ["New text", 1, 4]);
+  assert.deepEqual(callsOf("events.log").at(-1).args[0].data.fields.sort(), ["pricing.floorUsd", "texts.description"]);
+
+  // The price itself changes: now it is pushed, and only it.
+  mpCalls.length = 0;
+  const r2 = ok(await post("/products/" + p._id, { pricing: { priceUsd: 5 }, pushLive: true }));
+  assert.deepEqual(r2.sent, ["priceUsd"]);
+  assert.deepEqual(mpCalls, [{ id: "E1", patch: { priceUsd: 5 } }]);
+  assert.equal((await AccountOffer.findById(offer._id).lean()).priceUsd, 5);
+  assert.deepEqual(
+    (({ title, description, price }) => [title, description, price])(await MarketplaceListing.findById(row._id).lean()),
+    ["Live title", "New text", 5],
+  );
+
+  // Without pushLive nothing reaches Eldorado, whatever changed.
+  mpCalls.length = 0;
+  const r3 = ok(await post("/products/" + p._id, { texts: { title: "Overwatch 2 | 2 Codes Bundle | One + Two | New" }, pricing: { priceUsd: 6 } }));
+  assert.equal(r3.live, undefined);
+  assert.equal(mpCalls.length, 0);
+  const o3 = await AccountOffer.findById(offer._id).lean();
+  assert.deepEqual([o3.title, o3.priceUsd], ["Overwatch 2 | 2 Codes Bundle | One + Two | New", 6]);
+});
+
+test("R5: fields sent unchanged are 'Nothing to change' and write nothing; pushLive with only a floor change calls no market", async () => {
+  const offer = await AccountOffer.create({ title: "Offer title", priceUsd: 1, minPriceUsd: 0.5 });
+  const p = await addProduct({ status: "active", offer: offer._id, origin: "manual" });
+  await MarketplaceListing.create({ marketplace: "eldorado", externalId: "E1", accountOffer: offer._id, status: "active", title: "Live", price: 1 });
+  const stored = p.toObject();
+  const same = {
+    name: stored.name,
+    texts: stored.texts,
+    pricing: { mode: "fixed", priceUsd: 1, floorUsd: 0.5, clearance: false, followCompetitors: false },
+  };
+  const before = await CodeProduct.findById(p._id).lean();
+  assert.match(refused(await post("/products/" + p._id, same), 400, "all the same").message, /Nothing to change/);
+  assert.match(refused(await post("/products/" + p._id, { ...same, pushLive: true }), 400, "all the same, pushLive").message, /nothing is sent to Eldorado/);
+  assert.deepEqual(await CodeProduct.findById(p._id).lean(), before);
+  assert.equal(mpCalls.length, 0);
+  assert.equal((await AccountOffer.findById(offer._id).lean()).title, "Offer title");
+
+  const r = ok(await post("/products/" + p._id, { pricing: { priceUsd: 1, floorUsd: 0.75 }, pushLive: true }));
+  assert.equal(mpCalls.length, 0);
+  assert.deepEqual(r.live, []);
+  assert.deepEqual(r.sent, []);
+  assert.match(r.message, /Nothing was sent to Eldorado/);
+  const o = await AccountOffer.findById(offer._id).lean();
+  assert.deepEqual([o.priceUsd, o.minPriceUsd], [1, 0.75]);
+});
+
+test("R5: an adopted product cannot switch to auto pricing (400); a fixed-price edit is fine", async () => {
+  const offer = await AccountOffer.create({ title: "Hand-made", priceUsd: 2 });
+  const p = await addProduct({ status: "active", offer: offer._id, origin: "adopted", pricing: { mode: "fixed", priceUsd: 2, floorUsd: 0.5 } });
+  assert.match(refused(await post("/products/" + p._id, { pricing: { mode: "auto" } }), 400, "auto").message, /adopted/i);
+  refused(await post("/products/" + p._id, { pricing: { mode: "auto", followCompetitors: true, priceUsd: 3 }, pushLive: true }), 400, "auto and more");
+  const q = await CodeProduct.findById(p._id).lean();
+  assert.deepEqual([q.pricing.mode, q.pricing.priceUsd], ["fixed", 2]);
+  ok(await post("/products/" + p._id, { pricing: { mode: "fixed", priceUsd: 2.5 } }));
+  assert.equal((await CodeProduct.findById(p._id).lean()).pricing.priceUsd, 2.5);
+  assert.equal((await AccountOffer.findById(offer._id).lean()).priceUsd, 2.5);
+});
+
+test("R6: POST /held/:id/release releases through held.js inside the queue and answers { row } without the code's hash", async () => {
+  const id = "0123456789abcdef0123abcd";
+  const r = ok(await post(`/held/${id}/release`));
+  assert.deepEqual(callsOf("held.release")[0].args, [id, { actor: ROOT }]);
+  assert.equal(callsOf("held.release")[0].queued, true);
+  assert.equal(r.row.id, id);
+  assert.equal(r.row.state, "in_stock");
+  assert.equal(r.row.loginId, "login-9");
+  assert.equal(r.row.useBy, new Date(NOW + 5 * DAY).toISOString());
+  assert.ok(!/must-not-leave/.test(JSON.stringify(r)), "no hash or sealed code in the answer");
+  assert.ok(heldBuilt.includes(fakeService.deps), "built from the service's deps");
+  const built = heldBuilt.length;
+  // A bare row as the answer works too, and is cleaned the same way.
+  behave["held.release"] = (rowId) => ({ _id: rowId, state: "in_stock", codeHash: "hash-must-not-leave" });
+  const bare = ok(await post(`/held/${id}/release`));
+  assert.equal(bare.row.id, id);
+  assert.ok(!/must-not-leave/.test(JSON.stringify(bare)));
+  assert.equal(heldBuilt.length, built, "held.js is built once");
+
+  behave["held.release"] = () => {
+    throw Object.assign(new Error("Its code is in another listing's stock; it stays held"), { status: 409 });
+  };
+  assert.match(refused(await post(`/held/${id}/release`), 409, "stays held").message, /stays held/);
+  behave["held.release"] = () => {
+    throw Object.assign(new Error("No held code with that id"), { status: 404 });
+  };
+  refused(await post(`/held/${id}/release`), 404, "unknown");
+  refused(await post("/held/nope/release"), 400, "bad id");
+  assert.equal(callsOf("held.release").length, 4);
+});
+
+test("R8: CODE_SHOP=0 answers 503 on every route and calls nothing; sign-in is still checked first", async () => {
+  const before = process.env.CODE_SHOP;
+  process.env.CODE_SHOP = "0";
+  try {
+    for (const [method, path] of TABLE) {
+      const p = path.replace(":id", GHOST_ID);
+      const r = refused(await call(method, p, method === "POST" ? {} : undefined), 503, `${method} ${path}`);
+      assert.equal(r.message, "The code shop is switched off");
+    }
+    assert.equal((await call("GET", "/api/code-shop/state", undefined, "anon")).status, 401);
+  } finally {
+    if (before === undefined) delete process.env.CODE_SHOP;
+    else process.env.CODE_SHOP = before;
+  }
+  assert.equal(calls.length, 0);
+  ok(await get("/state"), "on again");
+});
+
+test("R8: a 401/403 from a market is answered as 502, never as a sign-out", async () => {
+  behave["publisher.pause"] = () => {
+    throw Object.assign(new Error("Eldorado: 401 Unauthorized"), { status: 401 });
+  };
+  const r = refused(await post(`/products/${GHOST_ID}/pause`), 502, "401");
+  assert.match(r.message, /Eldorado: 401 Unauthorized/);
+  assert.equal(r.marketStatus, 401);
+  behave["publisher.approve"] = () => {
+    throw Object.assign(new Error("GGSel: forbidden"), { status: 403 });
+  };
+  assert.equal(refused(await post(`/products/${GHOST_ID}/approve`), 502, "403 in the queue").marketStatus, 403);
+  const p = await addProduct();
+  behave["competitors.scan"] = () => {
+    throw Object.assign(new Error("Eldorado: 403"), { status: 403 });
+  };
+  refused(await post(`/products/${p._id}/scan`), 502, "scan 403");
+  behave["views.state"] = () => {
+    throw Object.assign(new Error("Eldorado: 401"), { status: 401 });
+  };
+  refused(await get("/state"), 502, "state 401");
+});
+
+test("R8: a product is scanned at most once per 10 minutes (429 + Retry-After); other products are not held up", async () => {
+  const p = await addProduct();
+  const q = await addProduct({ slots: [slot("12:100:cccc:1", "Three")] });
+  ok(await post(`/products/${p._id}/scan`));
+  clock = NOW + 4 * 60 * 1000;
+  const again = await post(`/products/${p._id}/scan`);
+  assert.match(refused(again, 429, "within 10 min").message, /again in 6 minutes/);
+  assert.equal(again.headers.get("retry-after"), "360");
+  ok(await post(`/products/${q._id}/scan`), "another product");
+  refused(await post(`/products/${GHOST_ID}/scan`), 404, "an unknown product is still 404");
+  clock = NOW + 10 * 60 * 1000;
+  ok(await post(`/products/${p._id}/scan`), "after 10 minutes");
+  assert.equal(callsOf("competitors.scan").length, 3);
+});
+
+test("R6: without a createHeld option the router uses utils/codeShop/held.js, built from the service's deps", async () => {
+  const realPost = (path) => call("POST", "/api/code-shop" + path, {}, "realHeld");
+  refused(await realPost(`/held/${GHOST_ID}/release`), 404, "no such row in the ledger");
+  await addRows({ nameRaw: "Sun Tea Icon", count: 1 });
+  const row = await CodeStock.findOne({}).lean();
+  refused(await realPost(`/held/${row._id}/release`), 409, "an in-stock row is not held");
+  assert.equal((await CodeStock.findById(row._id).lean()).state, "in_stock", "nothing written");
+  assert.equal(callsOf("service.exclusive").length, 2, "both ran in the queue");
 });

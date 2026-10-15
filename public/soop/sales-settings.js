@@ -292,9 +292,10 @@
         toggle(["autoPublish"], "Publish ready drafts without asking me", "A draft with no problems and enough stock goes on sale by itself. Off: each draft waits for you."),
         toggle(["expiryGuard"], "Take stock off sale before its codes stop working", null),
         number(["expiryLeadHours"], "Hours before the use-by date", "Bundles leave the shelf this long before their earliest code stops working (0–720).", { max: 720 })),
-      card("Markets", "Where approved products are published. The shop sells only on these two; every other market is refused.",
+      // GGSel has no switch here (docs/code-shop/05-REVIEW-FIXES.md, R1): the server refuses it.
+      card("Markets", "Where approved products are published. The shop sells codes only on Eldorado; every other market is refused.",
         toggle(["markets", "eldorado"], "Eldorado", null),
-        toggle(["markets", "ggsel"], "GGSel", "Also needs GGSel to be taking new stock. GGSel keeps its bundles in its own vault: a GGSel listing comes down from the Listings page.")),
+        el("span", { class: "s-help" }, "GGSel is not used for codes yet: it never reports which code it sold.")),
       gamesCard(),
       card("When a campaign is ready to list", "A campaign's codes are drafted once any one of these is true.",
         el("div", { class: "s-sales-fields" },
@@ -353,7 +354,6 @@
     if (invalid.size) { Soop.toast("Fix the marked fields first", "warn"); return null; }
     const risky = [];
     if (patch.autoPublish === true) risky.push("Auto-publish goes ON: a ready draft goes on sale by itself, without you.");
-    if (patch.markets && patch.markets.ggsel === true) risky.push("GGSel goes ON: approved products are also published there, into GGSel's vault.");
     if (patch.expiryGuard === false) risky.push("The expiry guard goes OFF: stock stays on sale until its codes stop working.");
     if (patch.farmPriority && patch.farmPriority.enabled === true) risky.push("Farm priority goes ON: the chosen bots' priority game changes by itself.");
     const ask = risky.length
@@ -407,8 +407,8 @@
     const out = el("div", { class: "s-stack is-tight" }), title = c.title || "Untitled listing";
     const failed = (applied) => (e) => fill(out, reportView(e.body || { ok: false, problems: [e.message] }, applied, e.message));
     const check = () => S.api.post("/adopt", { offerId: c.offerId, apply: false }).then((j) => fill(out, reportView(j, false)), failed(false));
-    const adopt = () => S.confirmAction("The shop takes over “" + title + "”: each of its codes is linked to the ledger and it becomes a product. Its price and its live listings are not changed.",
-      { title: "Adopt this listing?", okLabel: "Adopt listing" }).then((yes) => {
+    const adopt = () => S.confirmAction("From now on the shop adds new codes to this listing as bundles (when growing stock is on), takes bundles off sale before their codes stop working and tracks its sales. Its price and texts stay as they are.",
+      { title: "Adopt “" + title + "”?", okLabel: "Adopt listing" }).then((yes) => {
       if (!yes) return null;
       return S.api.post("/adopt", { offerId: c.offerId, apply: true }).then((j) => {
         fill(out, reportView(j, true));
@@ -446,7 +446,8 @@
         ui.button("", { icon: "refresh", tone: "ghost", size: "sm", title: "Look for listings again", onClick: loadCandidates })),
       el("div", { class: "s-card-bd s-stack" },
         el("span", { class: "s-small s-muted" }, "A code listing made by hand can be handed to the shop: each of its codes is matched to the farm's stored codes, so stock, use-by dates and sales are tracked from then on. "
-          + "Its price stays fixed and its live listings stay as they are. Check first — nothing is written until you adopt."),
+          + "The shop then adds new codes to it as bundles (when growing stock is on) and takes bundles off sale before their codes stop working; its price and texts stay as they are. "
+          + "A listing that is also up on another market than Eldorado cannot be adopted. Check first — nothing is written until you adopt."),
         v.adoptList));
   }
 

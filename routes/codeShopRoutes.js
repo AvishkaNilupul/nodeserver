@@ -12,6 +12,17 @@
 //
 // A reward code leaves through exactly ONE route — POST /units/:id/replace —
 // answered `Cache-Control: no-store`. Nothing here logs a request body.
+//
+// Review fixes (docs/code-shop/05-REVIEW-FIXES.md):
+// - R1: products are made and edited for Eldorado only; GGSel is refused.
+// - R3: approve, publish, resume, retire, adopt (apply) and held-release run in
+//   the service's tick queue (service.exclusive), never beside a tick.
+// - R5: an edit of an approved product sends the offer and the live Eldorado
+//   offers only the fields sent AND changed; a price only when priceUsd changed.
+// - R6: POST /held/:id/release hands a held code back to stock.
+// - R8: CODE_SHOP=0 answers 503 everywhere; a 401/403 from a market is a 502
+//   (a 401 to the browser would sign the owner out); a scan per product at
+//   most once per 10 minutes (429).
 const express = require("express");
 
 const { requireSuperadmin } = require("../middleware/auth");
@@ -25,10 +36,14 @@ const games = require("../utils/codeShop/games");
 const PREFIX = "/api/code-shop";
 const OBJECT_ID_RE = /^[a-f0-9]{24}$/i;
 const LEVELS = ["info", "warn", "error"];
-// The shop sells only here (Gameflip and Plati/Digiseller are blocked).
-const MARKETS = ["eldorado", "ggsel"];
+// The shop sells only here (Gameflip and Plati/Digiseller are blocked; GGSel is
+// not used for codes yet, R1).
+const MARKETS = ["eldorado"];
+const GGSEL_REFUSED = "GGSel is not used for codes yet: it never reports which code it sold, so a code could be sold twice";
 const MIN_USD = 0.5;
 const HOUR_MS = 3600 * 1000;
+const SCAN_EVERY_MS = 10 * 60 * 1000;
+const OFF_MESSAGE = "The code shop is switched off";
 const MAX_SLOTS = 50;
 const MAX_MERGE = 20;
 const MAX_LIMIT = 1000;
@@ -236,10 +251,53 @@ function checkPrice(pricing) {
   }
 }
 
+// R5: the fields of `patch` whose value differs from `stored` (texts or pricing),
+// each compared in the shape the schema stores it.
+function sameField(key, a, b) {
+  if (key === "coverBullets") {
+    const list = (v) => (Array.isArray(v) ? v.map(str) : []);
+    return JSON.stringify(list(a)) === JSON.stringify(list(b));
+  }
+  if (key === "priceUsd" || key === "floorUsd") {
+    const n = (v) => (v === undefined || v === null || v === "" || !Number.isFinite(Number(v)) ? null : cents(Number(v)));
+    return n(a) === n(b);
+  }
+  if (key === "clearance" || key === "followCompetitors") return !!a === !!b;
+  return str(a) === str(b);
+}
+function changedFields(patch, stored) {
+  const out = {};
+  const s = isPlain(stored) ? stored : {};
+  for (const [k, v] of Object.entries(patch || {})) {
+    if (!sameField(k, v, s[k])) out[k] = v;
+  }
+  return out;
+}
+
+// What a released stock row may show the browser: never codeHash or a code.
+function rowOut(r) {
+  if (!isPlain(r)) return null;
+  const at = (d) => (toMs(d) === null ? null : new Date(toMs(d)).toISOString());
+  return {
+    id: str(r._id || r.id),
+    loginId: str(r.loginId),
+    gameNo: str(r.gameNo),
+    gameName: str(r.gameName),
+    slotKey: str(r.slotKey),
+    name: str(r.name),
+    nameRaw: str(r.nameRaw),
+    codeShape: str(r.codeShape),
+    state: str(r.state),
+    problem: str(r.problem),
+    useBy: at(r.useBy),
+  };
+}
+
 function marketList(value) {
   if (!Array.isArray(value)) bad("markets must be a list");
   const out = [];
   for (const m of value) {
+    if (m === "ggsel") bad(GGSEL_REFUSED);
     if (typeof m !== "string" || !MARKETS.includes(m)) {
       bad("markets may only contain " + MARKETS.join(" and ") + " (got " + JSON.stringify(m).slice(0, 40) + ")");
     }
@@ -276,17 +334,44 @@ function refuseUnlessOk(r, lead = "") {
 
 // ---- the router ---------------------------------------------------------------
 
+const switchedOff = () => str(process.env.CODE_SHOP).trim() === "0";
+
 // `service` is the code shop service, or a function returning it (resolved on
 // every request, so mounting the router never loads the service).
-function createCodeShopRoutes({ service } = {}) {
+// `createHeld(deps)` builds the held-code releaser (utils/codeShop/held.js by
+// default; tests pass a fake).
+function createCodeShopRoutes({ service, createHeld } = {}) {
   if (!service) throw new TypeError("createCodeShopRoutes needs { service }");
   const router = express.Router();
+  const makeHeld = typeof createHeld === "function" ? createHeld : (deps) => require("../utils/codeShop/held").createHeld(deps);
 
   const svc = () => {
     const s = typeof service === "function" ? service() : service;
     if (!s || !s.modules) throw new HttpError(503, "The code shop is not running");
     return s;
   };
+  // R3: owner actions that can fill, publish or hand stock back run in the
+  // same queue as the ticks, so they never overlap one.
+  const exclusive = (fn) => {
+    const s = svc();
+    if (typeof s.exclusive !== "function") throw new HttpError(503, "The code shop queue is not available; nothing was done");
+    return s.exclusive(fn);
+  };
+  // R6: built on first use from the service's deps (rebuilt if the service changes).
+  let heldApi = null;
+  let heldOf = null;
+  const held = () => {
+    const s = svc();
+    if (!heldApi || heldOf !== s) {
+      const h = makeHeld(s.deps || {});
+      if (!h || typeof h.release !== "function") throw new HttpError(503, "The held-code module is not available");
+      heldApi = h;
+      heldOf = s;
+    }
+    return heldApi;
+  };
+  // R8: product id -> when its last scan was asked for (this process).
+  const scannedAt = new Map();
   const mod = (name) => {
     const m = svc().modules[name];
     if (!m) throw new HttpError(503, `The code shop ${name} module is not available`);
@@ -322,6 +407,8 @@ function createCodeShopRoutes({ service } = {}) {
   function route(method, path, handler) {
     const name = method.toUpperCase() + " " + path;
     router[method](PREFIX + path, requireSuperadmin, async (req, res) => {
+      // R8: CODE_SHOP=0 turns the API off as well as the ticks.
+      if (switchedOff()) return fail(res, 503, OFF_MESSAGE);
       try {
         const b = req.body;
         const body = isPlain(b) ? b : {};
@@ -334,13 +421,24 @@ function createCodeShopRoutes({ service } = {}) {
         return res.json(payload);
       } catch (err) {
         if (res.headersSent) return undefined;
-        const status = err && Number.isInteger(err.status) && err.status >= 400 && err.status <= 599 ? err.status : 0;
+        let status = err && Number.isInteger(err.status) && err.status >= 400 && err.status <= 599 ? err.status : 0;
         if (status) {
           const extra = err instanceof HttpError ? err.extra : null;
           const lists = {};
           if (!extra && Array.isArray(err.errors)) lists.errors = strList(err.errors);
           if (!extra && Array.isArray(err.problems)) lists.problems = strList(err.problems);
-          return fail(res, status, str(err.message) || "That could not be done", extra || lists);
+          let message = str(err.message) || "That could not be done";
+          // R8: a 401/403 here is a market refusing the shop, not the owner's
+          // session; passed on as is it would sign the owner out of the panel.
+          if (status === 401 || status === 403) {
+            lists.marketStatus = status;
+            message = "A marketplace refused the call (HTTP " + status + "): " + message;
+            status = 502;
+          }
+          if (status === 429 && Number.isFinite(err.retryAfterSec) && err.retryAfterSec > 0) {
+            res.set("Retry-After", String(Math.ceil(err.retryAfterSec)));
+          }
+          return fail(res, status, message, extra ? { ...extra, ...(lists.marketStatus ? { marketStatus: lists.marketStatus } : {}) } : lists);
         }
         // The message only: a request body is never logged.
         console.error(`[code-shop] ${name} error:`, err && err.message);
@@ -594,6 +692,10 @@ function createCodeShopRoutes({ service } = {}) {
     const pricing = { ...(p.pricing || {}), ...(pricingP || {}) };
     if (pricingP) checkPrice(pricing);
     if (name !== undefined && !name) bad("name cannot be empty");
+    // R5: an adopted listing keeps the price its owner set.
+    if (p.origin === "adopted" && pricingP && pricingP.mode === "auto") {
+      bad("An adopted product keeps a fixed price: it cannot switch to auto pricing");
+    }
 
     const $set = {};
     if (name !== undefined) $set.name = name;
@@ -655,12 +757,26 @@ function createCodeShopRoutes({ service } = {}) {
       if (body[k] !== undefined) bad(`${k} can only change on a draft (this product is ${p.status})`);
     }
     const pushLive = flag(body.pushLive, "pushLive") === true;
-    if (!Object.keys($set).length && !pushLive) bad("Nothing to change");
 
-    const texts = { ...(p.texts || {}), ...(textsP || {}) };
+    // R5: only what was sent AND differs from what is stored is written, to
+    // the product, its offer and (with pushLive) its live Eldorado offers; an
+    // unchanged price is never pushed. (The panel sends only the fields the
+    // owner touched, so a stale form value is not sent at all.)
+    const textsC = changedFields(textsP, p.texts);
+    const pricingC = changedFields(pricingP, p.pricing);
+    const live$set = {};
+    if (name !== undefined && name !== str(p.name)) live$set.name = name;
+    if (noteText !== undefined && noteText !== str(p.note)) live$set.note = noteText;
+    for (const [k, v] of Object.entries(textsC)) live$set["texts." + k] = v;
+    for (const [k, v] of Object.entries(pricingC)) live$set["pricing." + k] = v;
+    if (!Object.keys(live$set).length) {
+      bad(pushLive ? "Nothing to change: no field differs from what is saved, so nothing is sent to Eldorado" : "Nothing to change");
+    }
+
+    const texts = { ...(p.texts || {}), ...textsC };
     // These texts reach buyers without an approval step (the offer's delivery
     // message, and the live listing with pushLive): guard them now.
-    if (textsP || pushLive) {
+    if (Object.keys(textsC).length) {
       const cfg = await getConfig();
       const problems = checkBuyerText(
         { ...texts, labels: (Array.isArray(p.slots) ? p.slots : []).map((s) => str(s && s.label)) },
@@ -669,49 +785,50 @@ function createCodeShopRoutes({ service } = {}) {
       if (problems.length) bad("Not saved: " + problems.join("; "), { problems });
     }
 
-    if (Object.keys($set).length) {
-      const r = await model("CodeProduct").updateOne({ _id: p._id, status: { $in: ["active", "paused"] } }, { $set });
-      if (!r.matchedCount) throw new HttpError(409, "The product changed (it may have been retired); reload and try again");
+    const r = await model("CodeProduct").updateOne({ _id: p._id, status: { $in: ["active", "paused"] } }, { $set: live$set });
+    if (!r.matchedCount) throw new HttpError(409, "The product changed (it may have been retired); reload and try again");
+
+    const merged = { ...p, texts, pricing: { ...(p.pricing || {}), ...pricingC } };
+    const offerSet = {};
+    for (const k of ["title", "description", "deliveryTemplate", "coverServiceText"]) {
+      if (textsC[k] !== undefined) offerSet[k] = str(textsC[k]);
     }
-    const merged = { ...p, texts, pricing };
-    if (p.offer && (textsP || pricingP)) {
-      await model("AccountOffer").updateOne(
-        { _id: p.offer },
-        {
-          $set: {
-            title: str(texts.title),
-            description: str(texts.description),
-            deliveryTemplate: str(texts.deliveryTemplate),
-            coverServiceText: str(texts.coverServiceText),
-            coverBullets: Array.isArray(texts.coverBullets) ? texts.coverBullets.map(str) : [],
-            priceUsd: Number(pricing.priceUsd) || 0,
-            minPriceUsd: Number(pricing.floorUsd) || 0,
-          },
-        },
-      );
+    if (textsC.coverBullets !== undefined) offerSet.coverBullets = textsC.coverBullets.map(str);
+    if (pricingC.priceUsd !== undefined) offerSet.priceUsd = Number(pricingC.priceUsd) || 0;
+    if (pricingC.floorUsd !== undefined) offerSet.minPriceUsd = Number(pricingC.floorUsd) || 0;
+    if (p.offer && Object.keys(offerSet).length) {
+      await model("AccountOffer").updateOne({ _id: p.offer }, { $set: offerSet });
     }
 
+    // Eldorado gets the changed title and description, and a price only when
+    // pricing.priceUsd itself changed; anything not sent keeps its live value.
+    const patch = {};
+    if (textsC.title !== undefined) patch.title = str(texts.title);
+    if (textsC.description !== undefined) patch.description = str(texts.description);
+    if (pricingC.priceUsd !== undefined) patch.priceUsd = priceOf(merged);
+    const rowSet = {};
+    if (patch.title !== undefined) rowSet.title = patch.title;
+    if (patch.description !== undefined) rowSet.description = patch.description;
+    if (patch.priceUsd !== undefined) rowSet.price = patch.priceUsd;
+    const sendLive = pushLive && !!p.offer && Object.keys(patch).length > 0;
+
     const live = [];
-    if (pushLive && p.offer) {
+    if (sendLive) {
       const rows = await model("MarketplaceListing")
         .find({ accountOffer: p.offer, marketplace: "eldorado", status: "active" }, { _id: 1, externalId: 1 })
         .sort({ _id: 1 })
         .lean();
-      const patch = { title: str(texts.title), description: str(texts.description), priceUsd: priceOf(merged) };
       // One at a time: these are live offers.
       for (const row of rows) {
         const entry = { listingId: String(row._id), externalId: str(row.externalId) };
         try {
-          await mp().eldoradoUpdateOffer(row.externalId, patch);
+          await mp().eldoradoUpdateOffer(row.externalId, { ...patch });
         } catch (err) {
           live.push({ ...entry, ok: false, error: str(err && err.message).slice(0, 300) || "Eldorado refused the change" });
           continue;
         }
         try {
-          await model("MarketplaceListing").updateOne(
-            { _id: row._id },
-            { $set: { title: patch.title, description: patch.description, price: patch.priceUsd } },
-          );
+          await model("MarketplaceListing").updateOne({ _id: row._id }, { $set: rowSet });
           live.push({ ...entry, ok: true });
         } catch (err) {
           live.push({ ...entry, ok: false, error: "Eldorado was updated but the listing row was not: " + str(err && err.message).slice(0, 200) });
@@ -719,21 +836,27 @@ function createCodeShopRoutes({ service } = {}) {
       }
     }
     const failed = live.filter((x) => !x.ok);
-    const label = str($set.name || p.name);
+    const label = str(live$set.name || p.name);
+    const sent = Object.keys(patch);
     await note({
       level: failed.length ? "warn" : "info",
       kind: "edit",
       product: p._id,
       msg:
-        `${actor || "an admin"} edited "${label}"` +
-        (pushLive ? `; ${live.length - failed.length} of ${plural(live.length, "live Eldorado offer")} updated` : "") +
+        `${actor || "an admin"} edited "${label}" (${Object.keys(live$set).join(", ")})` +
+        (sendLive ? `; ${live.length - failed.length} of ${plural(live.length, "live Eldorado offer")} updated (${sent.join(", ")})` : "") +
         (failed.length ? ` (${failed.map((x) => x.externalId + ": " + x.error).join("; ")})` : ""),
-      data: { actor, pushLive, live: live.length, failed: failed.length },
+      data: { actor, pushLive, fields: Object.keys(live$set), sent, live: live.length, failed: failed.length },
     });
-    const out = { product: await productView(id) };
-    if (pushLive) out.live = live;
+    const out = { product: await productView(id), changed: Object.keys(live$set) };
+    if (pushLive) {
+      out.live = live;
+      out.sent = sent;
+    }
     if (failed.length) {
       out.message = `Saved, but ${plural(failed.length, "live Eldorado offer")} could not be updated: ${failed[0].error}`;
+    } else if (pushLive && !sent.length) {
+      out.message = "Saved. Nothing was sent to Eldorado: the title, description and price did not change";
     }
     return out;
   });
@@ -755,32 +878,53 @@ function createCodeShopRoutes({ service } = {}) {
     const id = objectId(params.id, "product id");
     const rebalance = flag(body.rebalance, "rebalance");
     const publish = flag(body.publish, "publish");
-    const r = await mod("publisher").approve(id, { actor, rebalance, publish });
+    const publisher = mod("publisher");
+    const r = await exclusive(() => publisher.approve(id, { actor, rebalance, publish }));
     refuseUnlessOk(r, "Not approved");
     return { ...(r || {}) };
   });
 
   route("post", "/products/:id/publish", async ({ params, actor }) => {
     const id = objectId(params.id, "product id");
-    const r = (await mod("publisher").publishProduct(id, { actor })) || {};
+    const publisher = mod("publisher");
+    const r = (await exclusive(() => publisher.publishProduct(id, { actor }))) || {};
     if (r.error && !(Array.isArray(r.results) && r.results.length)) {
       throw new HttpError(/\bnot found\b/i.test(r.error) ? 404 : 400, str(r.error), { results: [] });
     }
     return { ...r };
   });
 
+  // Pause only takes stock off sale; resume and retire can list or hand codes
+  // back, so they wait for the tick queue (R3).
+  const QUEUED = new Set(["resume", "retire"]);
   for (const action of ["pause", "resume", "retire"]) {
     route("post", `/products/:id/${action}`, async ({ params, actor }) => {
       const id = objectId(params.id, "product id");
-      const r = await mod("publisher")[action](id, { actor });
+      const publisher = mod("publisher");
+      const go = () => publisher[action](id, { actor });
+      const r = QUEUED.has(action) ? await exclusive(go) : await go();
       refuseUnlessOk(r);
       return { ...(r || {}) };
     });
   }
 
+  // R8: one scan per product per 10 minutes; each scan reads Eldorado.
   route("post", "/products/:id/scan", async ({ params }) => {
     const id = objectId(params.id, "product id");
     await loadProduct(id, { _id: 1 });
+    const t = now();
+    for (const [k, at] of scannedAt) if (t - at >= SCAN_EVERY_MS || at > t) scannedAt.delete(k);
+    const last = scannedAt.get(id);
+    if (last !== undefined) {
+      const waitMs = SCAN_EVERY_MS - (t - last);
+      const mins = Math.max(1, Math.ceil(waitMs / 60000));
+      const err = new HttpError(429, `This product was scanned less than 10 minutes ago; scan it again in ${plural(mins, "minute")}`, {
+        retryAfterSec: Math.ceil(waitMs / 1000),
+      });
+      err.retryAfterSec = Math.ceil(waitMs / 1000);
+      throw err;
+    }
+    scannedAt.set(id, t);
     return { competitors: await mod("competitors").scan(id) };
   });
 
@@ -826,10 +970,26 @@ function createCodeShopRoutes({ service } = {}) {
 
   route("get", "/adopt/candidates", async () => ({ candidates: await mod("adopt").candidates() }));
 
+  // A check (apply false) only reads; an adoption writes stock, so it waits
+  // for the tick queue (R3).
   route("post", "/adopt", async ({ body, actor }) => {
     const offerId = objectId(body.offerId, "offerId");
-    const apply = flag(body.apply, "apply");
-    return { ...((await mod("adopt").adopt(offerId, { apply: !!apply, actor })) || {}) };
+    const apply = flag(body.apply, "apply") === true;
+    const adopt = mod("adopt");
+    const go = () => adopt.adopt(offerId, { apply, actor });
+    return { ...((apply ? await exclusive(go) : await go()) || {}) };
+  });
+
+  // ---- held codes ---------------------------------------------------------------
+
+  // R6: the owner vouches that a held code was never given to anyone; held.js
+  // re-reads and re-checks it and refuses (with a status) what it cannot release.
+  route("post", "/held/:id/release", async ({ params, actor }) => {
+    const id = objectId(params.id, "stock row id");
+    const h = held();
+    const r = await exclusive(() => h.release(id, { actor }));
+    const row = isPlain(r) && isPlain(r.row) ? r.row : r;
+    return { row: rowOut(row) };
   });
 
   // ---- settings and engine --------------------------------------------------------

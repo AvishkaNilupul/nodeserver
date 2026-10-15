@@ -116,11 +116,45 @@
       });
       return { gameNo, name: g.gameName || g.name || "", groups };
     });
-    const held = list(s.held || (j && j.held)).map((h, i) => ({
-      key: i + "|" + (h.loginId || "") + "|" + (h.label || ""), loginId: String(h.loginId || ""),
-      label: String(h.label || h.name || h.nameRaw || ""), problem: String(h.problem || ""),
-    }));
+    const held = list(s.held || (j && j.held)).map((h, i) => {
+      const id = String(h.id || h._id || h.rowId || "");
+      return {
+        key: id || i + "|" + (h.loginId || "") + "|" + (h.label || ""), id, loginId: String(h.loginId || ""),
+        label: String(h.label || h.name || h.nameRaw || ""), problem: String(h.problem || ""),
+        releasable: h.releasable !== false,
+      };
+    });
     return { games, held };
+  }
+
+  // ---- held codes: the owner may hand one back to stock (R6) -----------------------
+  // The server re-reads the code, re-checks it and refuses what it cannot release.
+  const releasing = new Set();
+  function confirmRelease(h) {
+    const msg = "Release this code back to stock? Only if you are sure it was never given to anyone.";
+    const opts = { title: h.label ? "Release “" + h.label + "”?" : "Release a held code?", okLabel: "Release code", danger: true };
+    if (typeof S().confirmAction === "function") return Promise.resolve(S().confirmAction(msg, opts));
+    return Soop.confirm(Object.assign({ body: msg }, opts));
+  }
+  function releaseHeld(h) {
+    if (!h.id || releasing.has(h.id)) return null;
+    return confirmRelease(h).then((yes) => {
+      if (!yes) return null;
+      releasing.add(h.id);
+      return S().api.post("/held/" + encodeURIComponent(h.id) + "/release", {}).then((j) => {
+        const row = (j && j.row) || {};
+        const state = row.state && row.state !== "in_stock" ? " (now " + String(row.state).replace(/_/g, " ") + ")" : "";
+        Soop.toast((h.label ? "“" + h.label + "”" : "The code") + " is back in stock" + state, "ok");
+      }).then(() => { releasing.delete(h.id); refreshShop(); loadStock(); },
+        (e) => { releasing.delete(h.id); loadStock(); throw e; });
+    });
+  }
+  function releaseCell(h) {
+    const why = !h.id ? "The stock view sent no id for this code, so it cannot be released from here"
+      : !h.releasable ? "This code cannot be released: the shop keeps it held"
+        : "Put this code back in free stock — only if it was never given to anyone";
+    const b = ui.button("Release", { size: "sm", icon: "refresh", tone: "ghost", disabled: !h.id || !h.releasable, title: why, onClick: () => releaseHeld(h) });
+    return b.disabled ? el("span", { title: why }, b) : b;
   }
 
   function loadStock() {
@@ -325,7 +359,8 @@
     heldTable = ui.table({ key: "key", flush: true, maxHeight: "40vh", empty: "No code is held",
       columns: [{ label: "Login", render: (h) => loginLink(h.loginId) },
         { label: "Reward", render: (h) => el("span", { class: "s-trunc", title: h.label }, h.label || "–") },
-        { label: "Why it is held", wrap: true, render: (h) => h.problem || el("span", { class: "s-muted" }, "No reason recorded") }] });
+        { label: "Why it is held", wrap: true, render: (h) => h.problem || el("span", { class: "s-muted" }, "No reason recorded") },
+        { label: "", align: "right", render: releaseCell }] });
     root.append(el("div", { class: "s-stack" },
       el("div", { class: "s-toolbar" }, searchBox, chips, stampLine,
         ui.button("", { icon: "refresh", tone: "ghost", title: "Reload the stock", onClick: loadStock })),
@@ -333,7 +368,8 @@
       msgBox, cardsBox,
       (heldCard = el("section", { class: "s-card", hidden: true },
         el("div", { class: "s-card-hd" }, el("h2", { class: "s-card-title s-grow" }, "Held for checking"), heldBadge),
-        el("div", { class: "s-card-bd s-small s-muted" }, "Codes kept off sale because they could not be sold safely: released from a GGSel vault, a unit that went missing, or a duplicate code. They are never put back on sale by themselves."),
+        el("div", { class: "s-card-bd s-small s-muted" }, "Codes kept off sale because they could not be sold safely: released from a GGSel vault, a unit that went missing, a duplicate code, or a code shown in the farm panel. They are never put back on sale by themselves. "
+          + "Release puts one back in free stock: use it only when you are sure the code was never given to anyone. The shop checks the code again first and keeps it held if it cannot release it."),
         heldTable))));
     paintStock();
     loadStock();

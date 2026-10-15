@@ -9,8 +9,12 @@
   if (!window.Soop) return;
   const { el, ui, fmt } = Soop;
 
-  const MARKETS = ["eldorado", "ggsel"];
+  // The markets a product can be put on. GGSel is not used for codes yet
+  // (docs/code-shop/05-REVIEW-FIXES.md, R1); its name stays for old listings.
+  const MARKETS = ["eldorado"];
   const MARKET_NAME = { eldorado: "Eldorado", ggsel: "GGSel" };
+  const GGSEL_NOTE = "GGSel is not used for codes yet: it never reports which code it sold";
+  const TEXT_KEYS = ["title", "description", "deliveryTemplate", "coverTitle", "coverServiceText", "coverBullets"];
   const GROUPS = [
     { id: "draft", label: "Drafts", hint: "Not on sale yet: check the texts and price, then approve." },
     { id: "active", label: "Active", hint: "On sale; new codes become bundles by themselves." },
@@ -176,7 +180,8 @@
   }
   function marketsBlock(p) {
     const cm = cfgMarkets(), listings = arr(p.listings);
-    const names = arr(p.markets).slice();
+    // A market the shop no longer sells on shows only while a listing of it exists.
+    const names = arr(p.markets).filter((m) => MARKETS.indexOf(m) !== -1);
     listings.forEach((l) => { if (l.market && names.indexOf(l.market) === -1) names.push(l.market); });
     if (!names.length) return section("Markets", el("span", { class: "s-error s-small" }, "No market picked"));
     const rows = [];
@@ -205,7 +210,7 @@
     const u = p.units || {}, pr = p.pricing || {}, c = p.competitors || {}, rows = [];
     const bit = (n, label, strong) => el("span", null, el(strong ? "b" : "span", { class: "s-num" }, fmt.num(n || 0)), " " + label);
     if (p.status !== "draft" || u.available || u.sold) {
-      rows.push(["Bundles", el("span", { class: "s-row" }, bit(u.available, "available", true), bit(u.fed, "in a GGSel vault"), bit(u.sold, "sold"), bit(u.removed, "removed"))]);
+      rows.push(["Bundles", el("span", { class: "s-row" }, bit(u.available, "available", true), u.fed ? bit(u.fed, "in a GGSel vault") : null, bit(u.sold, "sold"), bit(u.removed, "removed"))]);
     }
     if (isNum(p.freeUnits)) rows.push([p.status === "draft" ? "Could build" : "Can add now", plural(p.freeUnits, "bundle") + " from free codes"]);
     const pro = p.proposed || {};
@@ -333,7 +338,8 @@
     const pub = check(true, "Publish now");
     const out = el("div", { hidden: true });
     const cm = cfgMarkets() || {};
-    const on = arr(p.markets).filter((m) => cm[m] !== false), off = arr(p.markets).filter((m) => cm[m] === false);
+    const picked = arr(p.markets).filter((m) => MARKETS.indexOf(m) !== -1);
+    const on = picked.filter((m) => cm[m] !== false), off = picked.filter((m) => cm[m] === false);
     const names = (list) => list.map((m) => MARKET_NAME[m] || m).join(" and ");
     const markets = on.length ? names(on) : "no market (every picked market is switched off in settings)";
     const body = el("div", { class: "s-stack" },
@@ -530,15 +536,18 @@
       model.length > 6 ? el("div", { class: "s-scroll" }, list) : list);
     return {
       node,
-      // labels[] follow the product's stored slot order (index i = slots[i]);
-      // slotOrder[] = the kept slot keys in their new order (sent only when it
-      // changed); removeSlots[] = slot keys to drop.
+      // labels[] follow the product's stored slot order (index i = slots[i]),
+      // all of them, sent only when one changed; slotOrder[] = the kept slot
+      // keys in their new order (sent only when it changed); removeSlots[] =
+      // slot keys to drop.
       collect() {
         if (!editable) return {};
         const byOrig = model.slice().sort((a, b) => a.orig - b.orig);
         const kept = model.filter((m) => !m.removed);
         if (!kept.length) throw new Error("A bundle needs at least one reward.");
-        const out = { labels: byOrig.map((m) => m.input.value.trim()) };
+        const out = {};
+        const labels = byOrig.map((m) => m.input.value.trim());
+        if (byOrig.some((m, i) => labels[i] !== String(m.label).trim())) out.labels = labels;
         if (keyed) {
           const order = kept.map((m) => m.key), before = byOrig.filter((m) => !m.removed).map((m) => m.key);
           if (order.join("\n") !== before.join("\n")) out.slotOrder = order;
@@ -579,16 +588,20 @@
       .then((yes) => (yes ? guard(d, () => S().api.post(path(d, "/texts/reset"), {}).then(() => S().api.get(path(d)))).then((j) => {
         if (j === false) return;
         fillTexts(((j && j.product) || j || {}).texts);
+        init.texts = snapshot().texts;          // the reset texts are saved already: not a change to send
         Soop.toast("Texts reset to the defaults", "ok");
       }) : null)) }) : null;
 
     const pr = d.pricing || {};
+    const adopted = d.origin === "adopted";
     const price = moneyField("Price per bundle (USD)", pr.priceUsd, "Eldorado's minimum is $0.50.");
     const floor = moneyField("Floor (USD)", pr.floorUsd, "Auto pricing never goes below this.");
+    const autoOpt = el("option", { value: "auto" }, "Auto — clearance and competitor rules may lower it");
     const mode = el("select", { class: "s-select", "aria-label": "Pricing mode" },
-      el("option", { value: "fixed" }, "Fixed — the shop never changes it"),
-      el("option", { value: "auto" }, "Auto — clearance and competitor rules may lower it"));
+      el("option", { value: "fixed" }, "Fixed — the shop never changes it"), autoOpt);
     mode.value = pr.mode === "auto" ? "auto" : "fixed";
+    // An adopted listing keeps the price its owner set (the server refuses Auto).
+    if (adopted && mode.value !== "auto") { autoOpt.disabled = true; autoOpt.textContent = "Auto — not for an adopted listing"; }
     const clearance = check(pr.clearance, "Clearance: cut the price as the codes' last day comes closer");
     const follow = check(pr.followCompetitors, "Follow competitors: stay just under the lowest same-set offer");
     const priceWarn = el("span", { class: "s-help s-warn", hidden: true });
@@ -609,19 +622,41 @@
     const pushLive = draft ? null : check(false, "Also update the live Eldorado offer");
     if (pushLive && !eldoLive) pushLive.input.disabled = true;
 
-    function collect() {
-      const out = {
+    // Only the fields the owner changed in this form are sent (R5): a value the
+    // form merely read back — a price the auto pricer has moved since, a text
+    // saved elsewhere — never goes to the server or to Eldorado.
+    function snapshot() {
+      return {
         name: name.value().trim(),
         texts: { title: title.value().trim(), description: desc.value(), deliveryTemplate: delivery.value(),
-          coverTitle: coverTitle.value().trim(), coverServiceText: coverService.value().trim(), coverBullets: lines(bullets.value()) },
-        pricing: { mode: mode.value, priceUsd: money(price.input.value, "The price"), floorUsd: money(floor.input.value, "The floor"),
-          clearance: clearance.input.checked, followCompetitors: follow.input.checked },
+          coverTitle: coverTitle.value().trim(), coverServiceText: coverService.value().trim(), coverBullets: lines(bullets.value()).join("\n") },
+        price: price.input.value.trim(), floor: floor.input.value.trim(), mode: mode.value,
+        clearance: clearance.input.checked, follow: follow.input.checked,
+        markets: mk.filter((x) => x.c.input.checked).map((x) => x.m).join(","),
       };
+    }
+    const init = snapshot();
+    function collect() {
+      const now = snapshot(), out = {}, texts = {}, pricing = {};
+      if (now.name !== init.name) {
+        if (!now.name) throw new Error("The name cannot be empty.");
+        out.name = now.name;
+      }
+      TEXT_KEYS.forEach((k) => { if (now.texts[k] !== init.texts[k]) texts[k] = k === "coverBullets" ? lines(bullets.value()) : now.texts[k]; });
+      if (Object.keys(texts).length) out.texts = texts;
+      if (now.price !== init.price) pricing.priceUsd = money(price.input.value, "The price");
+      if (now.floor !== init.floor) pricing.floorUsd = money(floor.input.value, "The floor");
+      if (now.mode !== init.mode) pricing.mode = now.mode;
+      if (now.clearance !== init.clearance) pricing.clearance = now.clearance;
+      if (now.follow !== init.follow) pricing.followCompetitors = now.follow;
+      if (Object.keys(pricing).length) out.pricing = pricing;
       if (draft) {
         Object.assign(out, slots.collect());
-        out.markets = mk.filter((x) => x.c.input.checked).map((x) => x.m);
-        if (!out.markets.length) throw new Error("Pick at least one market.");
-      } else out.pushLive = pushLive.input.checked;
+        if (now.markets !== init.markets) {
+          out.markets = mk.filter((x) => x.c.input.checked).map((x) => x.m);
+          if (!out.markets.length) throw new Error("Pick at least one market.");
+        }
+      } else if (pushLive.input.checked && Object.keys(out).length) out.pushLive = true;
       return out;
     }
     function fail(e) { showIn(err, note("error", String((e && e.message) || e))); throw e; }
@@ -629,6 +664,12 @@
       err.hidden = true;
       let body;
       try { body = collect(); } catch (e) { fail(e); }
+      if (!Object.keys(body).length) {
+        Soop.toast(pushLive && pushLive.input.checked
+          ? "Nothing changed, so nothing was sent to Eldorado: change the title, description or price to update the live offer"
+          : "Nothing to save: no field changed", "info");
+        return undefined;
+      }
       return guard(d, () => S().api.post(path(d), body)).then((j) => {
         if (j === false) return false;
         const np = (j && j.product) || null, left = np ? arr(np.problems).length : 0;
@@ -644,11 +685,12 @@
         draft ? el("span", { class: "s-help" }, "Reset builds fresh texts from the saved labels.") : null,
         title.node, desc.node, delivery.node, coverTitle.node, coverService.node, bullets.node),
       section("Price", price.node, floor.node, el("label", { class: "s-field" }, "Pricing mode", mode), clearance.node, follow.node,
-        el("span", { class: "s-help" }, "Clearance and competitor rules act only in Auto mode, and only on the Eldorado price."), priceWarn),
-      draft ? section("Markets", mk.map((x) => x.c.node), el("span", { class: "s-help" }, "The shop sells only on Eldorado and GGSel.")) : null,
+        el("span", { class: "s-help" }, "Clearance and competitor rules act only in Auto mode, and only on the Eldorado price."),
+        adopted ? el("span", { class: "s-help" }, "This product is an adopted listing: its price stays fixed, the shop never reprices it.") : null, priceWarn),
+      draft ? section("Markets", mk.map((x) => x.c.node), el("span", { class: "s-help" }, "The shop sells codes only on Eldorado. " + GGSEL_NOTE + ".")) : null,
       draft ? null : section("Live listing", pushLive.node,
         el("span", { class: "s-help" }, eldoLive
-          ? "Sends the new title, description and price to the live Eldorado offer. Without this, the change is saved to the product and its offer here, and the live listing keeps its current text and price."
+          ? "Sends what you changed here — the title, the description, the price — to the live Eldorado offer; what you did not change keeps its live value, and the price is sent only when you change it. Without this, the change is saved to the product and its offer here, and the live listing keeps its current text and price."
           : "There is no live Eldorado listing right now; the change is used the next time it is listed.")));
     Soop.drawer({ title: (draft ? "Edit draft — " : "Edit texts and price — ") + (d.name || "product"), size: "lg", sticky: true, body,
       actions: [{ label: "Cancel" }, { label: "Save", tone: "primary", icon: "check", onClick: save }] });

@@ -180,6 +180,12 @@
     const a = c.after || {}, af = a.status && a.status !== c.state ? AFTER[a.status] : null;
     const canAct = !!r.unitId && (c.state === "sold" || c.state === "dead");
     const replaced = a.status === "replaced";
+    // A replacement is only for a code marked dead first (R7); the server refuses any other.
+    const canReplace = c.state === "dead" && !replaced;
+    const replaceWhy = replaced ? "A replacement was already given for this code"
+      : c.state !== "dead" ? "Mark the code dead first"
+        : "Take a fresh code of the same reward from stock for this buyer";
+    const replaceBtn = canAct ? ui.button("Get replacement code", { size: "sm", icon: "gift", disabled: !canReplace, title: replaceWhy, onClick: () => replace(r, c) }) : null;
     return el("div", { class: "s-row" },
       el("b", codeName(c)),
       c.codeShape ? el("span", { class: "s-mono s-small s-muted", title: "Length and dash groups of the code. The code itself is not shown here." }, c.codeShape) : null,
@@ -189,9 +195,8 @@
       canAct ? (c.state === "dead"
         ? ui.button("Mark OK", { size: "sm", icon: "check", title: "Record that this code works after all", onClick: () => report(r, c, "ok") })
         : ui.button("Mark dead", { size: "sm", icon: "x", title: "Record that this code does not work", onClick: () => report(r, c, "dead") })) : null,
-      canAct ? ui.button("Get replacement code", { size: "sm", icon: "gift", disabled: replaced,
-        title: replaced ? "A replacement was already given for this code" : "Take a fresh code of the same reward from stock for this buyer",
-        onClick: () => replace(r, c) }) : null);
+      // A disabled button shows no tooltip in every browser: its wrapper carries it.
+      replaceBtn && !canReplace ? el("span", { title: replaceWhy }, replaceBtn) : replaceBtn);
   }
   const COLUMNS = [
     { label: "Sold", render: (r) => (r.soldAt ? el("span", { title: fmt.ago(r.soldAt) }, when(r.soldAt)) : el("span", { class: "s-muted" }, "–")) },
