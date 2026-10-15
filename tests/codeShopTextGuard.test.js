@@ -6,6 +6,7 @@ const assert = require("node:assert/strict");
 const {
   DEFAULT_SOURCE_WORDS,
   LIMITS,
+  COVER_FALLBACK,
   compileSourceWords,
   findSourceWord,
   checkBuyerText,
@@ -109,6 +110,8 @@ test("every problem is reported at once, in field order", () => {
     "title is empty",
     "description is 2001 characters (max 2000)",
     "delivery template has no {password} placeholder (the codes would never reach the buyer)",
+    "cover title is empty (the cover would fall back to the farming-service text)",
+    "cover service text is empty (the cover would fall back to the farming-service text)",
     "label 1 is empty",
     "cover has 5 bullets (max 4)",
   ]);
@@ -118,7 +121,28 @@ test("missing input reads as empty text", () => {
   const p = checkBuyerText();
   assert.ok(has(p, /^title is empty$/));
   assert.ok(has(p, /^delivery template has no \{password\}/));
-  assert.equal(p.length, 2);
+  assert.ok(has(p, /^cover title is empty/));
+  assert.ok(has(p, /^cover service text is empty/));
+  assert.equal(p.length, 4);
+});
+
+test("an empty or blank cover title / service text is a problem: the cover would show the farming-service text", () => {
+  assert.equal(COVER_FALLBACK, "the cover would fall back to the farming-service text");
+  for (const v of ["", "   ", "\n", undefined, null]) {
+    assert.deepEqual(checkBuyerText({ ...clean(), coverTitle: v }), [`cover title is empty (${COVER_FALLBACK})`], JSON.stringify(v));
+    assert.deepEqual(
+      checkBuyerText({ ...clean(), coverServiceText: v }),
+      [`cover service text is empty (${COVER_FALLBACK})`],
+      JSON.stringify(v),
+    );
+  }
+  // Both at once, in field order; an explicitly empty word list does not switch it off.
+  assert.deepEqual(checkBuyerText({ ...clean(), coverTitle: "", coverServiceText: "" }, { sourceWords: [] }), [
+    `cover title is empty (${COVER_FALLBACK})`,
+    `cover service text is empty (${COVER_FALLBACK})`,
+  ]);
+  // Bullets may still be empty: the cover simply shows none.
+  assert.deepEqual(checkBuyerText({ ...clean(), coverBullets: [] }), []);
 });
 
 /* ------------------------------ source words ----------------------------- */
@@ -309,7 +333,7 @@ test("findSourceWord gives the same answer every call with a global RegExp", () 
 });
 
 test("a label must stay one short line without '=' (unit lines are parsed back)", () => {
-  const base = { title: "T", description: "", deliveryTemplate: "{password}" };
+  const base = { title: "T", description: "", deliveryTemplate: "{password}", coverTitle: "C", coverServiceText: "S" };
   const p = (labels) => checkBuyerText({ ...base, labels }, { sourceWords: [] });
   assert.deepEqual(p(["Fine Label"]), []);
   assert.ok(p(["two\nlines"]).some((x) => /line break/.test(x)));

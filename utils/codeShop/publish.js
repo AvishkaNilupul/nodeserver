@@ -1,16 +1,19 @@
-// Code shop — approve, publish, take down (docs/code-shop/03-MARKETS.md, publish.js).
+// Code shop — approve, publish, take down (docs/code-shop/03-MARKETS.md, publish.js;
+// docs/code-shop/05-REVIEW-FIXES.md R1-R4 override the older contract).
 //
 // This is the one module of the code shop that creates REAL marketplace offers,
 // so every path below is written around one rule: a live offer must never exist
 // without the MarketplaceListing row that makes our fulfillers deliver it. A
 // row write that fails after the offer went live takes the offer straight back
-// down (Eldorado) or takes it down AND holds its codes out of stock (GGSel: the
-// codes already sit in GGSel's own vault, where nothing of ours can prove them
-// unsold).
+// down.
 //
-// Only Eldorado and GGSel are ever named here. Gameflip and Plati/Digiseller are
-// blocked by the owner, and the market list is checked against ALLOWED_MARKETS
-// before any marketplace call, whatever a product or the settings say.
+// Only Eldorado is ever published to (R1). GGSel never says which unit it sold,
+// a Listings-page delist hands its vault back as unsold, and the guardian tops
+// the vault up behind the shop's back — any of which can sell one code twice —
+// so a product naming GGSel is refused, and nothing here calls a GGSel
+// function. Gameflip and Plati/Digiseller are blocked by the owner. The market
+// list is checked against ALLOWED_MARKETS before any marketplace call, whatever
+// a product or the settings say.
 //
 // Nothing here prints, logs or returns a code: events and Telegram lines carry
 // names, counts and marketplace ids only.
@@ -18,15 +21,19 @@
 const fsp = require("fs/promises");
 const { checkBuyerText } = require("./textGuard");
 
-const ALLOWED_MARKETS = Object.freeze(["eldorado", "ggsel"]);
+const ALLOWED_MARKETS = Object.freeze(["eldorado"]);
 const ELDORADO_MIN_USD = 0.5;
-const DEFAULT_VAULT_SIZE = 5;
 
+const GGSEL_REFUSED = "GGSel is not used for codes yet: it never reports which code it sold, so a code could be sold twice";
 // Eldorado refuses a new offer once the category's active-offer quota is used.
 const OFFER_LIMIT_RE = /maximum of \d+ active offers|offer creation limits/i;
 const OFFER_LIMIT_MSG = "Eldorado's offer limit for this category is full";
-const HELD_IN_VAULT = "left in a GGSel vault by a failed publish";
+// A create call whose answer was lost may still have made the offer: the owner
+// looks before pressing Publish again (and the scheduler never retries it, R2).
+const UNKNOWN_OUTCOME = "the outcome is unknown: check Eldorado for an offer with this title before publishing again";
 const ROW_NOTE = "code shop";
+// publish.lastError is stored clipped to this; a repeat is compared clipped too.
+const LAST_ERROR_MAX = 1000;
 
 const errText = (err) => String((err && err.message) || err || "unknown error").slice(0, 400);
 const str = (v) => (v === undefined || v === null ? "" : String(v));
@@ -42,21 +49,21 @@ function priceOf(product) {
 function createPublisher(deps = {}) {
   const model = (name) => (deps.models && deps.models[name]) || require("../../models/" + name);
   const CodeProduct = () => model("CodeProduct");
-  const CodeStock = () => model("CodeStock");
   const AccountOffer = () => model("AccountOffer");
   const MarketplaceListing = () => model("MarketplaceListing");
 
   // Lazy, so a caller that only asks problems() never loads a marketplace.
   const mp = () => (typeof deps.mp === "function" ? deps.mp() : require("../marketplaces"));
   const stock = () => (typeof deps.stock === "function" ? deps.stock() : require("../suppliedStock"));
-  const category = () => (typeof deps.category === "function" ? deps.category() : require("../listingCategory"));
   let coverApi = deps.cover || null;
   const cover = () => coverApi || (coverApi = require("./cover").createCover(deps));
   let unitsApi = deps.units || null;
   const units = () => unitsApi || (unitsApi = require("./units").createUnits(deps));
   let fillApi = deps.fill || null;
   const fill = () => fillApi || (fillApi = require("./fill").createFill(deps));
-  const guideFor = deps.guideFor || require("./games").guideFor;
+  // Read at call time: the service puts its one guard on deps before any approve.
+  let foreignApi = null;
+  const foreign = () => deps.foreign || foreignApi || (foreignApi = require("./foreign").createForeignGuard(deps));
   const now = () => (typeof deps.now === "function" ? deps.now() : Date.now());
 
   async function getConfig() {
@@ -133,15 +140,20 @@ function createPublisher(deps = {}) {
       if (price < floor) out.push("price " + usd(price) + " is below its floor " + usd(floor));
     }
 
-    const markets = Array.isArray(p.markets) ? p.markets.map(str) : [];
-    const blocked = markets.filter((m) => !ALLOWED_MARKETS.includes(m));
+    const markets = [...new Set(Array.isArray(p.markets) ? p.markets.map(str) : [])];
+    // GGSel has its own refusal: it is a real market, just not a safe one for codes.
+    if (markets.includes("ggsel")) out.push(GGSEL_REFUSED);
+    const blocked = markets.filter((m) => m !== "ggsel" && !ALLOWED_MARKETS.includes(m));
     if (blocked.length) {
       out.push("market not allowed: " + blocked.join(", ") + " (the code shop sells only on " + ALLOWED_MARKETS.join(" and ") + ")");
     }
+    // The settings' own GGSel switch is ignored here: it can never make GGSel a
+    // code shop market (config.validatePatch refuses turning it on).
     const enabled = (cfg && cfg.markets) || {};
-    const live = markets.filter((m) => ALLOWED_MARKETS.includes(m) && enabled[m] === true);
-    if (!live.length) {
-      out.push(markets.length ? "none of its markets is switched on in the code shop settings" : "no market chosen");
+    const allowed = markets.filter((m) => ALLOWED_MARKETS.includes(m));
+    if (!markets.length) out.push("no market chosen");
+    else if (allowed.length && !allowed.some((m) => enabled[m] === true)) {
+      out.push("none of its markets is switched on in the code shop settings");
     }
 
     if (!str(p.marketGame).trim()) out.push("no marketplace game name");
@@ -220,7 +232,8 @@ function createPublisher(deps = {}) {
     }
 
     // Other active products of the same game that share a slot give their
-    // unsold bundles back, so the fill below can build this product too.
+    // unsold bundles back, so the fill below can build this product too. An
+    // adopted product's bundles are the owner's hand-made stock: never touched.
     let dissolved = 0;
     if (rebalance) {
       const keys = slots.map((s) => str(s && s.slotKey)).filter(Boolean);
@@ -229,6 +242,7 @@ function createPublisher(deps = {}) {
             .find({
               _id: { $ne: product._id },
               status: "active",
+              origin: { $ne: "adopted" },
               gameNo: product.gameNo,
               "slots.slotKey": { $in: keys },
             })
@@ -244,9 +258,43 @@ function createPublisher(deps = {}) {
       }
     }
 
+    // The foreign-stock guard runs before any code goes into a bundle (after
+    // the rebalance, so the codes it just freed are checked too). If it fails
+    // the product stays approved, but nothing is built or published: the next
+    // tick runs the guard again and does both.
+    let guard;
+    try {
+      const summary = await foreign().run();
+      guard = { ...(summary && typeof summary === "object" ? summary : {}), ok: true };
+    } catch (err) {
+      guard = { ok: false, error: errText(err) };
+    }
+
+    if (!guard.ok) {
+      const note = "Approved, but no bundles were built and nothing was published: the foreign-stock guard failed (" + guard.error + "); the next tick runs it again, then builds and publishes";
+      await log({
+        level: "warn",
+        kind: "approve",
+        product: product._id,
+        msg: "Approved " + str(product.name) + ", but no bundles were built: the foreign-stock guard failed (" + guard.error + ")",
+        data: { built: 0, dissolved, actor: str(actor) },
+      });
+      return {
+        ok: true,
+        product: await loadProduct(product._id),
+        built: 0,
+        dissolved,
+        foreign: guard,
+        fill: { built: 0, failed: 0, byProduct: {}, skipped: "foreign guard failed" },
+        publish: null,
+        note,
+      };
+    }
+
+    // Only this product: the other products' stock is the tick's business.
     let filled;
     try {
-      filled = await fill().run({ force: true });
+      filled = await fill().run({ force: true, productIds: [String(product._id)] });
     } catch (err) {
       filled = { built: 0, failed: 0, byProduct: {}, error: errText(err) };
       await log({ level: "warn", kind: "approve", product: product._id, msg: "Building bundles after approving " + str(product.name) + " failed: " + errText(err) });
@@ -262,31 +310,10 @@ function createPublisher(deps = {}) {
     });
 
     const published = publish ? await publishNow(product._id, { actor }) : null;
-    return { ok: true, product: await loadProduct(product._id), built, dissolved, fill: filled, publish: published };
+    return { ok: true, product: await loadProduct(product._id), built, dissolved, foreign: guard, fill: filled, publish: published };
   }
 
   // --- publish ----------------------------------------------------------------
-
-  // Rows of THIS product's units go to `held`: their codes may be in a platform
-  // vault, so nothing may ever put them back on sale.
-  async function holdUnitRows(unitIds, why) {
-    const at = new Date(now());
-    const rows = await CodeStock()
-      .find({ unit: { $in: unitIds }, state: { $nin: ["sold", "dead", "held"] } }, { _id: 1, state: 1 })
-      .lean();
-    let held = 0;
-    for (const r of rows) {
-      const res = await CodeStock().updateOne(
-        { _id: r._id, state: r.state },
-        {
-          $set: { state: "held", problem: why, wasFed: true },
-          $push: { history: { $each: [{ at, from: r.state, to: "held", why }], $slice: -20 } },
-        },
-      );
-      held += Number(res && res.modifiedCount) || 0;
-    }
-    return held;
-  }
 
   function rowBase(product, market, made, price) {
     const t = product.texts || {};
@@ -309,6 +336,15 @@ function createPublisher(deps = {}) {
     };
   }
 
+  // Eldorado answered and said no (a 4xx, or the offer quota): nothing was
+  // made. Anything else — a timeout, a dropped connection, a 5xx, an error
+  // with no answer at all — may have lost the answer to a create that worked.
+  function refusedOutright(err, msg) {
+    const status = Number((err && err.status) || (err && err.response && err.response.status));
+    if (status >= 400 && status < 500) return true;
+    return /\(HTTP 4\d\d\)/.test(msg);
+  }
+
   async function publishEldorado(product, { shelf, price, coverPath }) {
     const t = product.texts || {};
     const path = await coverPath();
@@ -325,11 +361,12 @@ function createPublisher(deps = {}) {
       });
     } catch (err) {
       const msg = errText(err);
-      return { market: "eldorado", ok: false, error: OFFER_LIMIT_RE.test(msg) ? OFFER_LIMIT_MSG : msg };
+      if (OFFER_LIMIT_RE.test(msg)) return { market: "eldorado", ok: false, error: OFFER_LIMIT_MSG };
+      return { market: "eldorado", ok: false, error: refusedOutright(err, msg) ? msg : msg + "; " + UNKNOWN_OUTCOME };
     }
     const externalId = str(made && made.externalId);
     if (!externalId) {
-      return { market: "eldorado", ok: false, error: "Eldorado answered without an offer id: check Eldorado for a new offer before publishing again" };
+      return { market: "eldorado", ok: false, error: "Eldorado answered without an offer id; " + UNKNOWN_OUTCOME };
     }
     try {
       const row = await MarketplaceListing().create(rowBase(product, "eldorado", made, price));
@@ -351,136 +388,7 @@ function createPublisher(deps = {}) {
     }
   }
 
-  async function publishGgsel(product, cfg, { shelf, price, coverPath }) {
-    if (!mp().ggselTakesNewStock()) return { market: "ggsel", ok: false, skipped: "GGSel takes no new stock" };
-    const res = await category().resolveCategory("ggsel", product.marketGame);
-    const categoryId = res && res.ok && res.value ? res.value.categoryId : null;
-    if (!categoryId) {
-      return { market: "ggsel", ok: false, error: "no GGSel category for " + str(product.marketGame) + (res && res.reason ? ": " + res.reason : "") };
-    }
-    // Before the claim: a cover that cannot be built then needs no hand-back.
-    const path = await coverPath();
-
-    const size = Math.floor(Number(product.ggsel && product.ggsel.vaultSize));
-    const vault = Number.isFinite(size) ? size : DEFAULT_VAULT_SIZE;
-    if (vault < 1) return { market: "ggsel", ok: false, skipped: "GGSel vault size is 0" };
-    const qty = Math.min(vault, shelf);
-
-    const claimed = (await stock().claimForListing(product.offer, qty, { market: "ggsel" })) || [];
-    if (!claimed.length) return { market: "ggsel", ok: false, skipped: "no bundle could be claimed" };
-    const ids = claimed.map((c) => c.ledgerId);
-    const handBack = async (error) => {
-      try {
-        await stock().releaseClaim(ids);
-        return { market: "ggsel", ok: false, error };
-      } catch (err) {
-        return { market: "ggsel", ok: false, error: error + " (and " + ids.length + " bundles could not be put back on the shelf: " + errText(err) + ")" };
-      }
-    };
-
-    // From here until GGSel answers, any failure hands the claim back: nothing
-    // has left our hands yet.
-    let texts;
-    try {
-      const offerDoc = await AccountOffer().findById(product.offer).lean();
-      if (!offerDoc) return handBack("the product's offer is missing");
-      texts = claimed.map((c) => str(stock().deliveryText(c, offerDoc)));
-    } catch (err) {
-      return handBack(errText(err));
-    }
-    // A unit with no codes would sell an empty message.
-    if (claimed.some((c, i) => !texts[i].trim() || !str(c && c.password).trim())) {
-      return handBack("a bundle has no delivery text; nothing was published");
-    }
-
-    const t = product.texts || {};
-    let made;
-    try {
-      const guide = guideFor(product.gameNo, cfg) || {};
-      made = await mp().ggselPublish({
-        title: t.title,
-        description: t.description,
-        priceUsd: price,
-        categoryId,
-        quantity: texts.length,
-        delivery: "auto",
-        instructions: guide.deliveryHelp,
-        coverImagePath: path,
-        products: texts,
-      });
-    } catch (err) {
-      return handBack(errText(err));
-    }
-
-    const externalId = str(made && made.externalId);
-    if (!externalId) {
-      // An offer may exist with our codes in its vault and we cannot name it.
-      const held = await holdUnitRows(ids, HELD_IN_VAULT);
-      return {
-        market: "ggsel",
-        ok: false,
-        error: "GGSel answered without an offer id: the codes may be in a GGSel vault, " + held + " codes held out of stock — check GGSel by hand",
-      };
-    }
-
-    let row;
-    try {
-      const at = new Date(now());
-      row = await MarketplaceListing().create({
-        ...rowBase(product, "ggsel", made, price),
-        autoDeliver: true,
-        qtyTarget: qty,
-        units: claimed.map((c) => ({
-          contentId: String(c.ledgerId),
-          accountId: "",
-          login: str(c.login),
-          addedAt: at,
-          deliveredAt: null,
-          orderId: "",
-        })),
-      });
-    } catch (err) {
-      // The codes are in GGSel's vault: pause the offer, KEEP the claim, and
-      // hold the codes — a vault release can never prove them unsold.
-      const why = errText(err);
-      let pulled = "";
-      try {
-        await mp().ggselDelist(externalId);
-        pulled = "the GGSel offer was paused";
-      } catch (err2) {
-        pulled = "the GGSel offer " + externalId + " could NOT be paused (" + errText(err2) + "): pause it on GGSel by hand";
-      }
-      let held = 0;
-      try {
-        held = await holdUnitRows(ids, HELD_IN_VAULT);
-      } catch (err3) {
-        console.error("[code-shop] GGSel codes not marked held: " + errText(err3));
-      }
-      return {
-        market: "ggsel",
-        ok: false,
-        externalId,
-        error: "listing row not saved (" + why + "); " + pulled + "; " + held + " codes held out of stock (they stay in its vault)",
-      };
-    }
-
-    try {
-      await stock().markFed(ids, { listing: row._id, market: "ggsel" });
-    } catch (err) {
-      await log({ level: "warn", kind: "publish", product: product._id, msg: "GGSel bundles not marked as in the vault: " + errText(err) });
-    }
-    // The ledger learns it now, not at the next reconcile: a vault unit that
-    // is released back to "available" before that pass must still read as
-    // once-fed (it may already be sold on GGSel). Written even when markFed
-    // failed above — the codes are in the vault either way.
-    try {
-      await CodeStock().updateMany({ unit: { $in: ids }, state: "in_unit" }, { $set: { unitStatus: "fed", wasFed: true } });
-    } catch (err) {
-      await log({ level: "warn", kind: "publish", product: product._id, msg: "GGSel codes not marked as in the vault in the ledger: " + errText(err) });
-    }
-    return { market: "ggsel", ok: true, externalId, url: str(made.url), listingId: String(row._id), quantity: texts.length };
-  }
-
+  // One event per market; Telegram is sent once per publish, by publishNow.
   async function reportMarket(product, r, actor) {
     const name = str(product.name);
     const msg = r.error
@@ -495,18 +403,26 @@ function createPublisher(deps = {}) {
       msg,
       data: { market: r.market, externalId: r.externalId || "", skipped: r.skipped || "", actor: str(actor) },
     });
-    if (r.error) await tell("Code shop: " + msg);
   }
+
+  const clip = (v) => str(v).slice(0, LAST_ERROR_MAX);
 
   async function stampPublish(product, lastError) {
     try {
       await CodeProduct().updateOne(
         { _id: product._id },
-        { $set: { "publish.lastError": str(lastError).slice(0, 1000), "publish.lastAttemptAt": new Date(now()) } },
+        { $set: { "publish.lastError": clip(lastError), "publish.lastAttemptAt": new Date(now()) } },
       );
     } catch (err) {
       console.error("[code-shop] publish result not saved: " + errText(err));
     }
+  }
+
+  // A failure is told once: the same error as the product's previous attempt
+  // (an owner pressing Publish again on a known problem) sends nothing.
+  async function tellFailure(previous, lastError, text) {
+    if (!lastError || clip(lastError) === clip(previous)) return;
+    await tell("Code shop: " + text);
   }
 
   // -> { results: [{ market, ok, skipped?, externalId?, url?, listingId?, error? }], error? }
@@ -518,13 +434,14 @@ function createPublisher(deps = {}) {
     if (product.status !== "active" || !product.offer) {
       return { results: [], error: "only an approved, active product is published (this one is " + product.status + ")" };
     }
+    const previous = str(product.publish && product.publish.lastError);
     const cfg = await getConfig();
     const found = problemsWith(product, cfg);
     if (found.length) {
       const error = "not published: " + found.join("; ");
       await stampPublish(product, error);
       await log({ level: "error", kind: "publish", product: product._id, msg: str(product.name) + " " + error });
-      await tell("Code shop: " + str(product.name) + " " + error);
+      await tellFailure(previous, error, str(product.name) + " " + error);
       return { results: [], error };
     }
 
@@ -546,7 +463,7 @@ function createPublisher(deps = {}) {
           r = { market, ok: false, skipped: "switched off in the code shop settings" };
         } else {
           try {
-            r = await publishOne(product, cfg, market, coverPath);
+            r = await publishOne(product, market, coverPath);
           } catch (err) {
             r = { market, ok: false, error: errText(err) };
           }
@@ -566,17 +483,18 @@ function createPublisher(deps = {}) {
       .map((r) => r.market + ": " + r.error)
       .join("; ");
     await stampPublish(product, lastError);
+    await tellFailure(previous, lastError, "Publishing " + str(product.name) + " failed: " + lastError);
     return { results };
   }
 
-  async function publishOne(product, cfg, market, coverPath) {
+  async function publishOne(product, market, coverPath) {
+    // Never anything but Eldorado, even if a caller got past the checks above.
+    if (market !== "eldorado") return { market, ok: false, skipped: "not a code shop market" };
     const live = await MarketplaceListing().exists({ accountOffer: product.offer, marketplace: market, status: "active" });
     if (live) return { market, ok: false, skipped: "already live" };
     const shelf = Number(await stock().shelfFor(product.offer)) || 0;
     if (shelf < 1) return { market, ok: false, skipped: "no stock yet" };
-    const ctx = { shelf, price: priceOf(product), coverPath };
-    if (market === "eldorado") return publishEldorado(product, ctx);
-    return publishGgsel(product, cfg, ctx);
+    return publishEldorado(product, { shelf, price: priceOf(product), coverPath });
   }
 
   // --- take down --------------------------------------------------------------
@@ -621,6 +539,9 @@ function createPublisher(deps = {}) {
     return MarketplaceListing().countDocuments({ accountOffer: product.offer, marketplace: market, status: "active" });
   }
 
+  // The shop never puts an offer on GGSel, but the Listings page can list any
+  // offer there by hand. Such a row is only COUNTED here (a database read, no
+  // GGSel call): pause says it is still live, retire refuses while it is.
   const GGSEL_BY_HAND = "GGSel listings are not taken down here: delist them from the Listings page, which empties the vault";
 
   async function pauseNow(id, { actor = "" } = {}) {
@@ -760,4 +681,12 @@ function createPublisher(deps = {}) {
   };
 }
 
-module.exports = { createPublisher, ALLOWED_MARKETS, ELDORADO_MIN_USD, OFFER_LIMIT_MSG, HELD_IN_VAULT, priceOf };
+module.exports = {
+  createPublisher,
+  ALLOWED_MARKETS,
+  ELDORADO_MIN_USD,
+  GGSEL_REFUSED,
+  OFFER_LIMIT_MSG,
+  UNKNOWN_OUTCOME,
+  priceOf,
+};

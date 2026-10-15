@@ -14,6 +14,7 @@
 const crypto = require("crypto");
 const fsp = require("fs/promises");
 const path = require("path");
+const { COVER_FALLBACK } = require("./textGuard");
 
 const PUBLIC_DIR = path.join(__dirname, "..", "..", "public");
 // The largest grid gridFor() hands out (6 x 3); rewards past it are cut.
@@ -40,6 +41,8 @@ function tileRef(image) {
   if (s.startsWith("/") && !s.startsWith("//")) return s;
   return "";
 }
+
+const isBlank = (v) => typeof v !== "string" || !v.trim();
 
 function fillerSvg(n) {
   const big = String(n);
@@ -78,11 +81,15 @@ function createCover(deps = {}) {
   }
 
   // -> path of the cover file (caller deletes it). Throws when no slot has an
-  // image: a cover of nothing but fillers says nothing about the product.
+  // image (a cover of nothing but fillers says nothing about the product), and
+  // when the cover title or service text is empty: the generator would put its
+  // farming-service default on a code bundle's picture.
   async function build(product) {
     const p = product || {};
     const slots = Array.isArray(p.slots) ? p.slots : [];
     const texts = p.texts || {};
+    if (isBlank(texts.coverTitle)) throw new Error("the cover title is empty: " + COVER_FALLBACK);
+    if (isBlank(texts.coverServiceText)) throw new Error("the cover service text is empty: " + COVER_FALLBACK);
     const n = slots.length;
     const { cols, rows } = gridFor(n);
     const total = cols * rows;

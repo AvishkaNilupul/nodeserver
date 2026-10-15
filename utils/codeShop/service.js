@@ -8,9 +8,11 @@
 //   fails is logged and recorded, the next step still runs, and a module whose
 //   file fails to load becomes a stub that answers every call with an error
 //   (the server keeps running, the panel shows why);
-// - never two ticks at once, and never a manual step on top of a tick: ticks
-//   and runStep() calls share one queue; a tick() asked for while one is
-//   queued or running gets that same promise back;
+// - never two ticks at once, and never a manual step or an owner's action on
+//   top of a tick: ticks, runStep() calls and exclusive(fn) share one queue; a
+//   tick() asked for while one is queued or running gets that same promise back;
+// - the scheduler never re-creates a listing: publishPending only puts up a
+//   product's first one per market (05-REVIEW-FIXES.md R2);
 // - start() never blocks startup: it returns at once and never rejects; the
 //   first tick waits for the shop's models to finish init() (their unique
 //   indexes are what keep one code in one unit).
@@ -29,15 +31,8 @@ const MINUTE_MS = 60 * 1000;
 const HOUR_MS = 60 * MINUTE_MS;
 const FIRST_TICK_MS = 90 * 1000;
 const TICK_MS = 5 * MINUTE_MS;
-// publishPending: retry spacing after an attempt, and after Eldorado said the
-// category's offer quota is full (that clears slowly; asking again every 30
-// min only adds failed calls).
-const RETRY_MS = 30 * MINUTE_MS;
-const OFFER_LIMIT_RETRY_MS = 6 * HOUR_MS;
-const OFFER_LIMIT_RE = /offer limit|maximum of \d+ active offers|offer creation limits/i;
 const ADOPTABLE_EVERY_MS = 30 * MINUTE_MS;
 const DEFAULT_SCAN_HOURS = 12;
-const ALLOWED_MARKETS = ["eldorado", "ggsel"];
 const ERROR_MAX = 300;
 
 // The tick, in the contract's order; "foreign" (the guard against codes that
@@ -368,75 +363,67 @@ function createService(overrides = {}) {
 
   // --- publishPending --------------------------------------------------------------
 
-  // Active products with a market (allowed + switched on) that has no active
-  // listing row, at least one bundle on the shelf, and no attempt in the last
-  // 30 min (6 h after Eldorado's offer quota refused it) -> publishProduct.
+  // The scheduler only ever puts up a product's FIRST listing on a market
+  // (05-REVIEW-FIXES.md R2). It publishes a market of an active product when:
+  // - the product was not adopted (an adopted offer's listings are the owner's);
+  // - its publish.lastError is empty (a failed or unsure attempt waits for the
+  //   owner's Publish button: a lost answer may have left an offer up);
+  // - the market is a code shop market and switched on;
+  // - the offer has NEVER had a MarketplaceListing on that market, whatever its
+  //   status (a delisted, sold or expired row is never re-created by itself);
+  // - at least one bundle is on the shelf.
+  // A product whose scheduled attempt failed is also never tried again by
+  // this process, in case the failure could not be written to lastError.
+  const autoFailed = new Set();
+
   async function publishPending() {
+    const { ALLOWED_MARKETS } = require("./publish");
     const out = { checked: 0, attempted: 0, published: 0, failed: 0, products: [] };
     const cfg = await getConfig();
     const enabled = cfg.markets || {};
-    const t = now();
 
-    const rows = (await leanOf(deps.models.CodeProduct.find({ status: "active" }, { name: 1, status: 1, offer: 1, markets: 1, publish: 1 }))) || [];
+    const rows =
+      (await leanOf(deps.models.CodeProduct.find({ status: "active" }, { name: 1, status: 1, offer: 1, markets: 1, publish: 1, origin: 1 }))) || [];
     const products = rows.filter((p) => p && p.status === "active" && p.offer);
     out.checked = products.length;
-    if (!products.length) return out;
-
-    let ggselOpen = null;
-    const ggselTakesStock = async () => {
-      if (ggselOpen === null) {
-        try {
-          const m = deps.mp();
-          ggselOpen = !!m && typeof m.ggselTakesNewStock === "function" && (await m.ggselTakesNewStock()) === true;
-        } catch (err) {
-          ggselOpen = false;
-          await note({ level: "warn", kind: "tick", msg: "Could not ask whether GGSel takes new stock: " + errText(err) });
-        }
-      }
-      return ggselOpen;
-    };
 
     const due = [];
     for (const p of products) {
+      if (text(p.origin) === "adopted") continue;
+      if (text(p.publish && p.publish.lastError).trim()) continue;
+      if (autoFailed.has(text(p._id))) continue;
       const markets = [...new Set((Array.isArray(p.markets) ? p.markets : []).map(text))].filter(
         (m) => ALLOWED_MARKETS.includes(m) && enabled[m] === true,
       );
-      if (!markets.length) continue;
-      const pub = p.publish || {};
-      const last = toMs(pub.lastAttemptAt);
-      const wait = OFFER_LIMIT_RE.test(text(pub.lastError)) ? OFFER_LIMIT_RETRY_MS : RETRY_MS;
-      if (last !== null && t - last < wait) continue;
-      due.push({ p, markets });
+      if (markets.length) due.push({ p, markets });
     }
     if (!due.length) return out;
 
-    const live = await leanOf(
-      deps.models.MarketplaceListing.find(
-        { accountOffer: { $in: due.map((d) => d.p.offer) }, status: "active" },
-        { accountOffer: 1, marketplace: 1 },
-      ),
+    // Every row of these offers, whatever its status: "ever had one" is the rule.
+    const had = await leanOf(
+      deps.models.MarketplaceListing.find({ accountOffer: { $in: due.map((d) => d.p.offer) } }, { accountOffer: 1, marketplace: 1 }),
     );
-    const liveKeys = new Set((live || []).map((r) => text(r.accountOffer) + "|" + text(r.marketplace)));
+    const hadKeys = new Set((had || []).map((r) => text(r.accountOffer) + "|" + text(r.marketplace)));
 
     for (const { p, markets } of due) {
       const name = text(p.name) || text(p._id);
+      let attempting = false;
       try {
-        const missing = [];
-        for (const m of markets) {
-          if (liveKeys.has(text(p.offer) + "|" + m)) continue;
-          if (m === "ggsel" && !(await ggselTakesStock())) continue;
-          missing.push(m);
-        }
+        const missing = markets.filter((m) => !hadKeys.has(text(p.offer) + "|" + m));
         if (!missing.length) continue;
         const shelf = Number(await deps.stock().shelfFor(p.offer)) || 0;
         if (shelf < 1) continue;
 
         out.attempted += 1;
+        attempting = true;
         const res = (await modules.publisher.publishProduct(p._id, { actor: "auto" })) || {};
         const results = Array.isArray(res.results) ? res.results : [];
         const ok = results.filter((r) => r && r.ok).length;
         out.published += ok;
-        if (res.error || results.some((r) => r && r.error)) out.failed += 1;
+        if (res.error || results.some((r) => r && r.error)) {
+          out.failed += 1;
+          autoFailed.add(text(p._id));
+        }
         out.products.push({
           id: text(p._id),
           name,
@@ -451,6 +438,8 @@ function createService(overrides = {}) {
         });
       } catch (err) {
         out.failed += 1;
+        // A publish that threw part-way is as unsure as one that failed.
+        if (attempting) autoFailed.add(text(p._id));
         out.products.push({ id: text(p._id), name, error: errText(err) });
         await note({ level: "warn", kind: "publish", product: p._id, msg: "Scheduled publish of " + name + " stopped: " + errText(err) });
       }
@@ -597,10 +586,15 @@ function createService(overrides = {}) {
     return { at: new Date(started), ms: Math.max(0, now() - started), steps };
   }
 
-  // Ticks and manual steps run one at a time, in the order asked.
+  // Ticks, manual steps and the owner's actions (the routes pass approve,
+  // publish, resume, retire, adopt and held-release through `exclusive`) run
+  // one at a time, in the order asked: an owner's approve never runs its fill
+  // or foreign guard on top of a tick's. -> fn()'s own result or rejection.
+  // `fn` must not call tick(), runStep() or exclusive(): it would wait on itself.
   let queue = Promise.resolve();
   function exclusive(fn) {
-    const run = queue.then(fn);
+    if (typeof fn !== "function") return Promise.reject(new TypeError("exclusive() needs a function"));
+    const run = queue.then(() => fn());
     queue = run.then(
       () => {},
       () => {},
@@ -741,6 +735,7 @@ function createService(overrides = {}) {
     stop,
     tick,
     runStep,
+    exclusive,
     modules,
     deps,
     lastTick: () => lastTickRecord,

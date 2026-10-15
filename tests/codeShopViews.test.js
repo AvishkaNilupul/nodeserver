@@ -447,9 +447,9 @@ test("state(): problems come from the injected publisher check when given", asyn
 });
 
 test("defaultProblems: no slots, then the buyer-text guard on texts and labels", () => {
-  const out = defaultProblems({ slots: [], texts: { title: "Fine title", deliveryTemplate: "{password}" } }, CFG);
+  const out = defaultProblems({ slots: [], texts: { title: "Fine title", deliveryTemplate: "{password}", coverTitle: "C", coverServiceText: "S" } }, CFG);
   assert.deepEqual(out, ["no slots: the bundle holds no codes"]);
-  const kr = defaultProblems({ slots: [{ slotKey: "s", label: "KR skin" }], texts: { title: "T", deliveryTemplate: "{password}" } }, CFG);
+  const kr = defaultProblems({ slots: [{ slotKey: "s", label: "KR skin" }], texts: { title: "T", deliveryTemplate: "{password}", coverTitle: "C", coverServiceText: "S" } }, CFG);
   assert.ok(kr.some((x) => /label 1 names where the codes come from/.test(x)), kr.join(" | "));
 });
 

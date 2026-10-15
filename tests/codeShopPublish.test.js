@@ -2,13 +2,15 @@
 //
 // This module creates REAL marketplace offers in production, so the tests pin
 // the failure paths as hard as the happy ones: a live offer must never be left
-// without its listing row, a GGSel vault that may hold our codes must leave
-// those codes held, and nothing may ever reach Gameflip or Plati/Digiseller.
+// without its listing row, an unsure outcome must say so, and nothing may ever
+// reach GGSel (R1 in docs/code-shop/05-REVIEW-FIXES.md), Gameflip or
+// Plati/Digiseller.
 //
 // Real Mongo (mongodb-memory-server) for the models; every marketplace, the
-// stock layer, the category resolver, the cover, units, fill and Telegram are
+// stock layer, the cover, units, fill, the foreign guard and Telegram are
 // fakes. The marketplace fake is a Proxy that records every member read, so a
-// test can prove no blocked market was even looked up. All values are made up.
+// test can prove no blocked market (GGSel included) was even looked up. All
+// values are made up.
 process.env.CRED_SECRET ||= "test";
 
 const test = require("node:test");
@@ -24,13 +26,14 @@ const CodeStock = require("../models/CodeStock");
 const AccountOffer = require("../models/AccountOffer");
 const MarketplaceListing = require("../models/MarketplaceListing");
 
-const { createPublisher, ALLOWED_MARKETS, ELDORADO_MIN_USD, OFFER_LIMIT_MSG, HELD_IN_VAULT } = require("../utils/codeShop/publish");
+const { createPublisher, ALLOWED_MARKETS, ELDORADO_MIN_USD, GGSEL_REFUSED, OFFER_LIMIT_MSG, UNKNOWN_OUTCOME } = require("../utils/codeShop/publish");
 const { DEFAULTS, deepMerge } = require("../utils/codeShop/config");
 const { guideFor } = require("../utils/codeShop/games");
 const { defaultTexts } = require("../utils/codeShop/texts");
 
 const NOW = Date.parse("2026-10-15T12:00:00Z");
-const BLOCKED = /gameflip|digiseller|plati/i;
+// GGSel is a real market, but never one for codes (R1): no member of it may be read.
+const BLOCKED = /gameflip|digiseller|plati|ggsel/i;
 
 let mem;
 let tmpDir;
@@ -62,12 +65,7 @@ function harness(opts = {}) {
   const events = [];
   const touched = new Set();
   const covers = [];
-  const state = {
-    shelf: opts.shelf ?? 4,
-    takesNewStock: opts.takesNewStock ?? true,
-    category: opts.category || { ok: true, value: { categoryId: 4242 }, reason: "" },
-    claimed: opts.claimed || null,
-  };
+  const state = { shelf: opts.shelf ?? 4 };
 
   const mpImpl = {
     async eldoradoPublish(args) {
@@ -75,23 +73,12 @@ function harness(opts = {}) {
       assert.ok(fs.existsSync(args.coverImagePath), "the cover exists while Eldorado reads it");
       if (opts.eldoradoGate) await opts.eldoradoGate(args);
       if (opts.eldoradoPublishError) throw opts.eldoradoPublishError;
+      if (opts.eldoradoAnswer) return opts.eldoradoAnswer;
       return { externalId: "eld-" + ++seq, url: "https://eldorado.example.test/o/" + seq };
     },
     async eldoradoDelist(id) {
       calls.push(["eldoradoDelist", id]);
       if (opts.eldoradoDelistError) throw opts.eldoradoDelistError;
-    },
-    async ggselPublish(args) {
-      calls.push(["ggselPublish", args]);
-      if (opts.ggselPublishError) throw opts.ggselPublishError;
-      return { externalId: String(900000 + ++seq), url: "https://ggsel.example.test/" + seq };
-    },
-    async ggselDelist(id) {
-      calls.push(["ggselDelist", id]);
-    },
-    ggselTakesNewStock() {
-      calls.push(["ggselTakesNewStock"]);
-      return state.takesNewStock;
     },
     delistOutcome(message) {
       const m = String(message || "").toLowerCase();
@@ -112,34 +99,20 @@ function harness(opts = {}) {
     },
   });
 
+  // Only the shelf count: claiming, vault feeding and delivery texts were
+  // GGSel's, and a call to any of them now fails the test.
   const stock = {
     async shelfFor(offer) {
       calls.push(["shelfFor", String(offer)]);
       return state.shelf;
     },
-    async claimForListing(offer, want, o) {
-      calls.push(["claimForListing", String(offer), want, o]);
-      const pool = state.claimed || [];
-      return pool.slice(0, want);
-    },
-    async releaseClaim(ids) {
-      calls.push(["releaseClaim", ids.map(String)]);
-      return ids.length;
-    },
-    async markFed(ids, o) {
-      calls.push(["markFed", ids.map(String), o]);
-      if (opts.markFedError) throw opts.markFedError;
-      return ids.length;
-    },
-    deliveryText(c, offer) {
-      return String(offer.deliveryTemplate || "").replace("{password}", c.password);
-    },
   };
 
-  const category = {
-    async resolveCategory(market, game) {
-      calls.push(["resolveCategory", market, game]);
-      return state.category;
+  const foreign = {
+    async run() {
+      calls.push(["foreignRun"]);
+      if (opts.foreignError) throw opts.foreignError;
+      return { scanned: 2, decrypted: 0, held: 1, conflicts: 0, released: 0 };
     },
   };
 
@@ -168,19 +141,22 @@ function harness(opts = {}) {
     },
   };
 
-  const cfg = deepMerge(DEFAULTS, { markets: { eldorado: true, ggsel: true }, ...(opts.config || {}) });
+  const cfg = deepMerge(DEFAULTS, { markets: { eldorado: true }, ...(opts.config || {}) });
 
   const deps = {
     models: { CodeProduct, CodeStock, AccountOffer, MarketplaceListing: opts.MarketplaceListing || MarketplaceListing },
     mp: () => mp,
     stock: () => stock,
-    category: () => category,
+    category: () => {
+      throw new Error("no category lookup: that was GGSel's");
+    },
     setImage: () => {
       throw new Error("setImage must not be used: the cover is faked");
     },
     cover,
     units,
     fill,
+    foreign,
     config: { get: async () => cfg },
     events: { log: async (e) => events.push(e) },
     telegram: { send: async (t) => sent.push(t) },
@@ -266,19 +242,14 @@ async function activeProduct(over = {}) {
   return CodeProduct.findById(p._id).lean();
 }
 
-function claimedUnits(n) {
-  return Array.from({ length: n }, (_, i) => ({
-    ledgerId: String(new mongoose.Types.ObjectId()),
-    login: "cs-abcdef-" + (i + 1),
-    password: "1) Sun Tea Player Icon = TEST-" + i + "\n2) Moon Spray = TEST-" + i + "B",
-  }));
-}
-
 // --- problems ----------------------------------------------------------------------
 
-test("exports the contract constants", () => {
-  assert.deepEqual([...ALLOWED_MARKETS], ["eldorado", "ggsel"]);
+test("exports the contract constants: Eldorado is the only code shop market", () => {
+  assert.deepEqual([...ALLOWED_MARKETS], ["eldorado"]);
+  assert.ok(Object.isFrozen(ALLOWED_MARKETS));
   assert.equal(ELDORADO_MIN_USD, 0.5);
+  assert.equal(GGSEL_REFUSED, "GGSel is not used for codes yet: it never reports which code it sold, so a code could be sold twice");
+  assert.match(UNKNOWN_OUTCOME, /check Eldorado for an offer with this title before publishing again/);
 });
 
 test("problems: a good product has none", async () => {
@@ -301,19 +272,37 @@ test("problems: each rule", async () => {
   await has(productDoc({ slots: [SLOTS[0], { ...SLOTS[1], label: "" }] }), /label 2 is empty/);
   await has(productDoc({ pricing: { priceUsd: 0.3, floorUsd: 0 } }), /below the \$0\.50 market minimum/);
   await has(productDoc({ pricing: { priceUsd: 2, floorUsd: 3 } }), /below its floor/);
-  await has(productDoc({ markets: ["eldorado", "gameflip"] }), /market not allowed: gameflip/);
+  await has(productDoc({ markets: ["eldorado", "gameflip"] }), /market not allowed: gameflip \(the code shop sells only on eldorado\)/);
   await has(productDoc({ markets: ["digiseller"] }), /market not allowed: digiseller/);
   await has(productDoc({ markets: [] }), /no market chosen/);
   await has(productDoc({ marketGame: "" }), /no marketplace game name/);
   await has(productDoc({ marketGame: "   " }), /no marketplace game name/);
+  const coverless = productDoc();
+  coverless.texts = { ...coverless.texts, coverTitle: "", coverServiceText: " " };
+  await has(coverless, /^cover title is empty \(the cover would fall back to the farming-service text\)$/);
+  await has(coverless, /^cover service text is empty/);
 
-  const off = harness({ config: { markets: { eldorado: false, ggsel: false } } });
-  const found = await off.pub.problems(productDoc({ markets: ["eldorado", "ggsel"] }));
-  assert.ok(found.some((p) => /none of its markets is switched on/.test(p)), JSON.stringify(found));
-  // One enabled market is enough.
-  const half = harness({ config: { markets: { eldorado: true, ggsel: false } } });
-  assert.deepEqual(await half.pub.problems(productDoc({ markets: ["eldorado", "ggsel"] })), []);
+  const off = harness({ config: { markets: { eldorado: false } } });
+  const found = await off.pub.problems(productDoc({ markets: ["eldorado"] }));
+  assert.deepEqual(found, ["none of its markets is switched on in the code shop settings"]);
   assertClean(h);
+  assertClean(off);
+});
+
+test("problems: a product naming GGSel is refused with the R1 message, whatever the settings say", async () => {
+  // A settings document that still says ggsel: true (written before R1) changes nothing.
+  for (const markets of [{ eldorado: true, ggsel: true }, { eldorado: true, ggsel: false }]) {
+    const h = harness({ config: { markets } });
+    assert.deepEqual(await h.pub.problems(productDoc({ markets: ["eldorado", "ggsel"] })), [GGSEL_REFUSED]);
+    assert.deepEqual(await h.pub.problems(productDoc({ markets: ["ggsel"] })), [GGSEL_REFUSED]);
+    assert.deepEqual(await h.pub.problems(productDoc({ markets: ["ggsel", "ggsel"] })), [GGSEL_REFUSED], "said once");
+    // ...and the settings' GGSel switch alone never makes a product publishable.
+    assert.deepEqual(await h.pub.problems(productDoc({ markets: ["eldorado"] })), []);
+    assertClean(h);
+  }
+  const off = harness({ config: { markets: { eldorado: false, ggsel: true } } });
+  assert.deepEqual(await off.pub.problems(productDoc({ markets: ["eldorado"] })), ["none of its markets is switched on in the code shop settings"]);
+  assertClean(off);
 });
 
 // --- approve ------------------------------------------------------------------------
@@ -350,7 +339,12 @@ test("approve: creates the active AccountOffer, activates the product, fills, pu
   assert.equal(after.approvedBy, "owner@example.test");
   assert.equal(after.edited, true);
 
-  assert.deepEqual(h.named("fillRun"), [["fillRun", { force: true }]]);
+  // The guard first, then a fill of THIS product only, then the publish.
+  assert.deepEqual(h.named("fillRun"), [["fillRun", { force: true, productIds: [String(p._id)] }]]);
+  const order = h.calls.map((c) => c[0]).filter((n) => ["foreignRun", "fillRun", "eldoradoPublish"].includes(n));
+  assert.deepEqual(order, ["foreignRun", "fillRun", "eldoradoPublish"]);
+  assert.deepEqual(res.foreign, { scanned: 2, decrypted: 0, held: 1, conflicts: 0, released: 0, ok: true });
+  assert.equal(res.note, undefined);
   // publish defaults on: the Eldorado offer went up from the shelf.
   assert.equal(h.named("eldoradoPublish").length, 1);
   assert.equal(res.publish.results[0].ok, true);
@@ -378,6 +372,64 @@ test("approve: refuses a product with problems and writes nothing", async () => 
   assert.equal(await AccountOffer.countDocuments({}), 0);
   assert.equal((await CodeProduct.findById(p._id).lean()).status, "draft");
   assert.equal(h.named("fillRun").length, 0);
+  assert.equal(h.named("foreignRun").length, 0);
+  assertClean(h);
+});
+
+test("approve: a draft naming GGSel is refused with the R1 message; no offer, no guard, no fill", async () => {
+  const p = await makeProduct({ markets: ["eldorado", "ggsel"] });
+  const h = harness({ config: { markets: { eldorado: true, ggsel: true } } });
+  const res = await h.pub.approve(p._id, { actor: "owner" });
+  assert.deepEqual(res, { ok: false, problems: [GGSEL_REFUSED] });
+  assert.equal(await AccountOffer.countDocuments({}), 0);
+  assert.equal((await CodeProduct.findById(p._id).lean()).status, "draft");
+  assert.equal(h.calls.length, 0);
+  assertClean(h);
+});
+
+test("approve: when the foreign guard fails the product is approved, but nothing is built or published", async () => {
+  const p = await makeProduct();
+  const overlap = await activeProduct({ name: "overlap", slots: [SLOTS[0]] });
+  const h = harness({ foreignError: new Error("could not read the stock rows") });
+  const res = await h.pub.approve(p._id, { actor: "owner", rebalance: true });
+  assert.equal(res.ok, true, JSON.stringify(res));
+  assert.equal(res.product.status, "active");
+  assert.ok(res.product.offer, "the offer exists: the next tick builds and publishes");
+  assert.deepEqual(res.foreign, { ok: false, error: "could not read the stock rows" });
+  assert.equal(res.built, 0);
+  assert.equal(res.publish, null);
+  assert.equal(res.fill.skipped, "foreign guard failed");
+  assert.match(res.note, /^Approved, but no bundles were built and nothing was published: the foreign-stock guard failed \(could not read the stock rows\)/);
+  assert.equal(h.named("fillRun").length, 0);
+  assert.equal(h.named("eldoradoPublish").length, 0);
+  assert.equal(h.named("coverBuild").length, 0);
+  // The rebalance ran before the guard (its freed codes are checked by it).
+  assert.deepEqual(h.named("dissolve").map((c) => c[1]), [String(overlap._id)]);
+  const order = h.calls.map((c) => c[0]).filter((n) => n === "dissolve" || n === "foreignRun");
+  assert.deepEqual(order, ["dissolve", "foreignRun"]);
+  assert.ok(h.events.some((e) => e.level === "warn" && e.kind === "approve" && /no bundles were built: the foreign-stock guard failed/.test(e.msg)));
+  assert.equal(await MarketplaceListing.countDocuments({}), 0);
+  // Approved for good: a second approve is refused.
+  assert.equal((await h.pub.approve(p._id)).ok, false);
+  assertClean(h);
+});
+
+test("approve: a guard module that failed to load counts as a failed guard", async () => {
+  const p = await makeProduct();
+  const h = harness();
+  h.deps.foreign = {
+    run: async () => {
+      const e = new Error("the code shop foreign module did not load: broken file");
+      e.status = 503;
+      throw e;
+    },
+  };
+  const res = await createPublisher(h.deps).approve(p._id);
+  assert.equal(res.ok, true);
+  assert.equal(res.foreign.ok, false);
+  assert.match(res.foreign.error, /did not load/);
+  assert.equal(h.named("fillRun").length, 0);
+  assert.equal(h.named("eldoradoPublish").length, 0);
   assertClean(h);
 });
 
@@ -400,6 +452,8 @@ test("approve: rebalance dissolves only overlapping, same-game, active products"
   await activeProduct({ name: "other game", gameNo: "200", marketGame: "Delta Force", slots: [SLOTS[1]] });
   await makeProduct({ name: "paused twin", status: "paused", slots: [SLOTS[1]] });
   await makeProduct({ name: "draft twin", slots: [SLOTS[0]] });
+  // The owner's hand-made offer, taken over: its bundles are never dissolved.
+  await activeProduct({ name: "adopted twin", origin: "adopted", slots: [SLOTS[0], SLOTS[1]] });
 
   const h = harness();
   const res = await h.pub.approve(p._id, { rebalance: true, publish: false });
@@ -409,9 +463,11 @@ test("approve: rebalance dissolves only overlapping, same-game, active products"
   assert.equal(dissolved[0][1], String(overlap._id));
   assert.deepEqual(dissolved[0][2], { reason: "moved to " + p.name });
   assert.equal(res.dissolved, 2);
-  // Rebalance runs before the fill, so the freed codes can be rebuilt.
-  const order = h.calls.map((c) => c[0]).filter((n) => n === "dissolve" || n === "fillRun");
-  assert.deepEqual(order, ["dissolve", "fillRun"]);
+  // Rebalance runs before the guard and the fill, so the freed codes are
+  // checked and can be rebuilt; the fill builds only the approved product.
+  const order = h.calls.map((c) => c[0]).filter((n) => ["dissolve", "foreignRun", "fillRun"].includes(n));
+  assert.deepEqual(order, ["dissolve", "foreignRun", "fillRun"]);
+  assert.deepEqual(h.named("fillRun")[0][1], { force: true, productIds: [String(p._id)] });
 
   const h2 = harness();
   const q = await makeProduct();
@@ -500,16 +556,13 @@ test("publish: skips a market that is already live, and one with no stock", asyn
   assertClean(empty);
 });
 
-test("publish: a market switched off in the settings is skipped without a call", async () => {
-  const p = await activeProduct({ markets: ["eldorado", "ggsel"] });
-  const h = harness({ config: { markets: { eldorado: true, ggsel: false } }, claimed: claimedUnits(2) });
+test("publish: a product whose only market is switched off is refused before any call", async () => {
+  const p = await activeProduct();
+  const h = harness({ config: { markets: { eldorado: false } } });
   const out = await h.pub.publishProduct(p._id);
-  assert.equal(out.results.length, 2);
-  assert.equal(out.results[0].ok, true);
-  assert.deepEqual(out.results[1], { market: "ggsel", ok: false, skipped: "switched off in the code shop settings" });
-  for (const name of ["ggselTakesNewStock", "resolveCategory", "claimForListing", "ggselPublish"]) {
-    assert.equal(h.named(name).length, 0, name + " must not run");
-  }
+  assert.deepEqual(out.results, []);
+  assert.equal(out.error, "not published: none of its markets is switched on in the code shop settings");
+  assert.equal(h.calls.length, 0);
   assertClean(h);
 });
 
@@ -591,265 +644,58 @@ test("publish eldorado: the offer-limit refusal is told in plain words", async (
 });
 
 test("publish: a cover that cannot be built fails the market, with nothing published", async () => {
-  const p = await activeProduct({ markets: ["eldorado", "ggsel"] });
-  const h = harness({ coverError: new Error("no item images for the cover"), claimed: claimedUnits(2) });
+  const p = await activeProduct();
+  const h = harness({ coverError: new Error("no item images for the cover") });
   const out = await h.pub.publishProduct(p._id);
-  assert.equal(out.results.length, 2);
-  for (const r of out.results) assert.match(r.error, /no item images/);
+  // Nothing was sent to Eldorado, so the outcome is known: no "check Eldorado".
+  assert.deepEqual(out.results, [{ market: "eldorado", ok: false, error: "no item images for the cover" }]);
   assert.equal(h.named("eldoradoPublish").length, 0);
-  assert.equal(h.named("claimForListing").length, 0, "no claim before the cover exists");
   assert.equal(h.named("coverBuild").length, 1, "built once per publish");
   assertClean(h);
 });
 
-// --- publishProduct: GGSel --------------------------------------------------------------
+// --- GGSel is never published to (R1) ------------------------------------------------------
 
-async function ggselProduct(over = {}) {
-  return activeProduct({ markets: ["ggsel"], ...over });
-}
-
-test("publish ggsel: GGSel taking no new stock skips it", async () => {
-  const p = await ggselProduct();
-  const h = harness({ takesNewStock: false, claimed: claimedUnits(2) });
-  const out = await h.pub.publishProduct(p._id);
-  assert.deepEqual(out.results, [{ market: "ggsel", ok: false, skipped: "GGSel takes no new stock" }]);
-  assert.equal(h.named("claimForListing").length, 0);
-  assert.equal(h.named("ggselPublish").length, 0);
-  assertClean(h);
-});
-
-test("publish ggsel: no category for the game is an error, nothing claimed", async () => {
-  const p = await ggselProduct();
-  const h = harness({ category: { ok: false, value: {}, reason: "no shelf for this game" }, claimed: claimedUnits(2) });
-  const out = await h.pub.publishProduct(p._id);
-  assert.equal(out.results[0].ok, false);
-  assert.match(out.results[0].error, /no GGSel category for Overwatch: no shelf for this game/);
-  assert.deepEqual(h.named("resolveCategory"), [["resolveCategory", "ggsel", "Overwatch"]]);
-  assert.equal(h.named("claimForListing").length, 0);
-  assert.equal(h.sent.length, 1);
-  assertClean(h);
-});
-
-test("publish ggsel: claim, publish with the texts, row with units, then markFed", async () => {
-  const p = await ggselProduct({ ggsel: { vaultSize: 5 } });
-  const claimed = claimedUnits(3);
-  const h = harness({ shelf: 3, claimed });
-  const out = await h.pub.publishProduct(p._id);
-  const r = out.results[0];
-  assert.equal(r.ok, true, JSON.stringify(r));
-
-  const [[, offerArg, want, claimOpts]] = h.named("claimForListing");
-  assert.equal(offerArg, String(p.offer));
-  assert.equal(want, 3, "min(vaultSize, shelf)");
-  assert.deepEqual(claimOpts, { market: "ggsel" });
-
-  const [[, args]] = h.named("ggselPublish");
-  assert.equal(args.title, p.texts.title);
-  assert.equal(args.description, p.texts.description);
-  assert.equal(args.priceUsd, 2.5);
-  assert.equal(args.categoryId, 4242);
-  assert.equal(args.quantity, 3);
-  assert.equal(args.delivery, "auto");
-  assert.equal(args.instructions, guideFor("12", DEFAULTS).deliveryHelp);
-  assert.equal(args.coverImagePath, h.covers[0]);
-  assert.equal(args.products.length, 3);
-  assert.ok(args.products[0].includes(claimed[0].password));
-  assert.ok(args.products[0].startsWith("Thank you for your order!"));
-
-  const row = await MarketplaceListing.findOne({}).lean();
-  assert.equal(row.marketplace, "ggsel");
-  assert.equal(row.externalId, r.externalId);
-  assert.equal(row.set, null);
-  assert.equal(row.origin, "manual");
-  assert.equal(row.accountId, "");
-  assert.equal(row.accountLogin, "");
-  assert.equal(row.autoDeliver, true);
-  assert.equal(row.qtyTarget, 3);
-  assert.equal(row.price, 2.5);
-  assert.equal(row.note, "code shop");
-  assert.equal(row.units.length, 3);
-  row.units.forEach((u, i) => {
-    assert.equal(u.contentId, claimed[i].ledgerId);
-    assert.equal(u.accountId, "");
-    assert.equal(u.login, claimed[i].login);
-    assert.equal(u.addedAt.getTime(), NOW);
-    assert.equal(u.deliveredAt, null);
-    assert.equal(u.orderId, "");
-  });
-
-  const fed = h.named("markFed");
-  assert.equal(fed.length, 1);
-  assert.deepEqual(fed[0][1], claimed.map((c) => c.ledgerId));
-  assert.equal(String(fed[0][2].listing), String(row._id));
-  assert.equal(fed[0][2].market, "ggsel");
-  assert.equal(h.named("releaseClaim").length, 0);
-  // Ordering: claim -> publish -> (row) -> markFed.
-  const order = h.calls.map((c) => c[0]).filter((n) => ["claimForListing", "ggselPublish", "markFed"].includes(n));
-  assert.deepEqual(order, ["claimForListing", "ggselPublish", "markFed"]);
-  assertClean(h);
-});
-
-test("publish ggsel: the ledger learns at once that the codes are in the vault", async () => {
-  const p = await ggselProduct();
-  const claimed = claimedUnits(2);
-  const other = new mongoose.Types.ObjectId();
-  const base = { product: p._id, offer: p.offer, unitStatus: "available" };
-  await CodeStock.insertMany([
-    { ...base, loginId: "l1", itemKey: "i1", state: "in_unit", unit: claimed[0].ledgerId },
-    { ...base, loginId: "l2", itemKey: "i2", state: "in_unit", unit: claimed[0].ledgerId, unitStatus: "sold" },
-    { ...base, loginId: "l3", itemKey: "i3", state: "in_unit", unit: claimed[1].ledgerId },
-    { ...base, loginId: "l4", itemKey: "i4", state: "held", unit: claimed[1].ledgerId, problem: "same code as another stored code" },
-    { ...base, loginId: "l5", itemKey: "i5", state: "in_unit", unit: other },
-  ]);
-  const h = harness({ claimed });
-  const out = await h.pub.publishProduct(p._id);
-  assert.equal(out.results[0].ok, true);
-
-  const rows = await CodeStock.find({}).lean();
-  const by = Object.fromEntries(rows.map((r) => [r.loginId, r]));
-  for (const k of ["l1", "l2", "l3"]) {
-    assert.equal(by[k].state, "in_unit", k + " keeps its state");
-    assert.equal(by[k].unitStatus, "fed", k);
-    assert.equal(by[k].wasFed, true, k);
-    assert.deepEqual(by[k].history, [], k + " gets no history entry");
-  }
-  assert.equal(by.l4.state, "held");
-  assert.equal(by.l4.unitStatus, "available", "only in_unit rows are touched");
-  assert.equal(by.l4.wasFed, false);
-  assert.equal(by.l5.unitStatus, "available", "another unit is untouched");
-  assert.equal(by.l5.wasFed, false);
-  assertClean(h);
-});
-
-test("publish ggsel: the ledger is marked fed even when markFed fails", async () => {
-  const p = await ggselProduct();
-  const claimed = claimedUnits(1);
-  await CodeStock.create({ loginId: "l1", itemKey: "i1", state: "in_unit", unit: claimed[0].ledgerId, product: p._id, unitStatus: "sold" });
-  const h = harness({ claimed, markFedError: new Error("ledger busy") });
-  const out = await h.pub.publishProduct(p._id);
-  assert.equal(out.results[0].ok, true, "the listing is up and has its row");
-  const row = await CodeStock.findOne({ loginId: "l1" }).lean();
-  assert.equal(row.unitStatus, "fed");
-  assert.equal(row.wasFed, true);
-  assert.ok(h.events.some((e) => e.level === "warn" && /not marked as in the vault/.test(e.msg)));
-  assertClean(h);
-});
-
-test("publish ggsel: the vault size caps the claim", async () => {
-  const p = await ggselProduct({ ggsel: { vaultSize: 2 } });
-  const h = harness({ shelf: 9, claimed: claimedUnits(9) });
-  await h.pub.publishProduct(p._id);
-  assert.equal(h.named("claimForListing")[0][2], 2);
-  assert.equal(h.named("ggselPublish")[0][1].quantity, 2);
-  assertClean(h);
-});
-
-test("publish ggsel: nothing claimed is a skip, not a publish", async () => {
-  const p = await ggselProduct();
-  const h = harness({ claimed: [] });
-  const out = await h.pub.publishProduct(p._id);
-  assert.equal(out.results[0].ok, false);
-  assert.ok(out.results[0].skipped);
-  assert.equal(h.named("ggselPublish").length, 0);
-  assertClean(h);
-});
-
-test("publish ggsel: an empty delivery text hands the claim back and publishes nothing", async () => {
-  const p = await ggselProduct();
-  const claimed = claimedUnits(2);
-  claimed[1].password = "";
-  const h = harness({ claimed });
-  const out = await h.pub.publishProduct(p._id);
-  assert.match(out.results[0].error, /no delivery text/);
-  assert.equal(h.named("ggselPublish").length, 0);
-  assert.deepEqual(h.named("releaseClaim"), [["releaseClaim", claimed.map((c) => c.ledgerId)]]);
-  assertClean(h);
-});
-
-test("publish ggsel: a throw while rendering the texts hands the claim back", async () => {
-  const p = await ggselProduct();
-  const claimed = claimedUnits(2);
-  const h = harness({ claimed });
-  h.deps.stock = () => ({
-    shelfFor: async () => 2,
-    claimForListing: async () => claimed,
-    releaseClaim: async (ids) => {
-      h.calls.push(["releaseClaim", ids.map(String)]);
-      return ids.length;
-    },
-    deliveryText: () => {
-      throw new Error("decrypt failed");
-    },
-  });
-  const pub = createPublisher(h.deps);
-  const out = await pub.publishProduct(p._id);
-  assert.match(out.results[0].error, /decrypt failed/);
-  assert.equal(h.named("ggselPublish").length, 0);
-  assert.deepEqual(h.named("releaseClaim"), [["releaseClaim", claimed.map((c) => c.ledgerId)]]);
-  assertClean(h);
-});
-
-test("publish ggsel: a publish that throws hands the claim back", async () => {
-  const p = await ggselProduct();
-  const claimed = claimedUnits(2);
-  const h = harness({ claimed, ggselPublishError: new Error("GGSel publish: 502") });
-  const out = await h.pub.publishProduct(p._id);
-  assert.equal(out.results[0].ok, false);
-  assert.match(out.results[0].error, /502/);
-  assert.deepEqual(h.named("releaseClaim"), [["releaseClaim", claimed.map((c) => c.ledgerId)]]);
-  assert.equal(h.named("markFed").length, 0);
+test("publish: a product naming GGSel is refused with the R1 message; nothing is published anywhere", async () => {
+  // The schema still accepts "ggsel" (it is a real market): an older product
+  // or a hand-made write can carry it.
+  const p = await activeProduct({ markets: ["eldorado", "ggsel"] });
+  const h = harness({ config: { markets: { eldorado: true, ggsel: true } } });
+  const out = await h.pub.publishProduct(p._id, { actor: "owner" });
+  assert.deepEqual(out.results, []);
+  assert.equal(out.error, "not published: " + GGSEL_REFUSED);
+  assert.equal(h.calls.length, 0, "no shelf read, no cover, no marketplace call");
   assert.equal(await MarketplaceListing.countDocuments({}), 0);
+  const after = await CodeProduct.findById(p._id).lean();
+  assert.equal(after.publish.lastError, "not published: " + GGSEL_REFUSED);
+  assert.equal(h.sent.length, 1);
+  assert.match(h.sent[0], /GGSel is not used for codes yet/);
+  assertClean(h);
+
+  const only = await activeProduct({ markets: ["ggsel"] });
+  const h2 = harness({ config: { markets: { eldorado: true, ggsel: true } } });
+  const out2 = await h2.pub.publishProduct(only._id);
+  assert.equal(out2.error, "not published: " + GGSEL_REFUSED);
+  assert.equal(h2.calls.length, 0);
+  assertClean(h2);
+});
+
+test("publish: resume of a product naming GGSel is refused before it goes active", async () => {
+  const p = await activeProduct({ markets: ["ggsel"] });
+  await CodeProduct.updateOne({ _id: p._id }, { $set: { status: "paused" } });
+  const h = harness({ config: { markets: { eldorado: true, ggsel: true } } });
+  const res = await h.pub.resume(p._id);
+  assert.deepEqual(res, { ok: false, problems: [GGSEL_REFUSED] });
+  assert.equal((await CodeProduct.findById(p._id).lean()).status, "paused");
+  assert.equal(h.calls.length, 0);
   assertClean(h);
 });
 
-test("publish ggsel: a failed row write pauses the offer, keeps the claim, holds the codes", async () => {
-  const p = await ggselProduct();
-  const claimed = claimedUnits(2);
-  // Ledger rows of the two claimed units, plus one of an unrelated unit.
-  const rows = [];
-  let k = 0;
-  for (const c of claimed) {
-    for (const s of SLOTS) {
-      rows.push({
-        loginId: "login-" + ++k,
-        itemKey: "item-" + k,
-        slotKey: s.slotKey,
-        state: "in_unit",
-        unit: c.ledgerId,
-        product: p._id,
-        offer: p.offer,
-        unitStatus: "sold",
-      });
-    }
-  }
-  const other = new mongoose.Types.ObjectId();
-  rows.push({ loginId: "login-x", itemKey: "item-x", state: "in_unit", unit: other, product: p._id });
-  await CodeStock.insertMany(rows);
-
-  const h = harness({ claimed, MarketplaceListing: failingCreate("write conflict") });
-  const out = await h.pub.publishProduct(p._id);
-  const r = out.results[0];
-  assert.equal(r.ok, false);
-  assert.match(r.error, /listing row not saved \(write conflict\); the GGSel offer was paused; 4 codes held/);
-
-  const [[, delistId]] = h.named("ggselDelist");
-  assert.equal(delistId, r.externalId);
-  assert.equal(h.named("releaseClaim").length, 0, "the claim is kept: the codes are in GGSel's vault");
-  assert.equal(h.named("markFed").length, 0);
-
-  const held = await CodeStock.find({ unit: { $in: claimed.map((c) => c.ledgerId) } }).lean();
-  assert.equal(held.length, 4);
-  for (const row of held) {
-    assert.equal(row.state, "held");
-    assert.equal(row.problem, HELD_IN_VAULT);
-    assert.equal(row.wasFed, true);
-    assert.equal(row.history.at(-1).from, "in_unit");
-    assert.equal(row.history.at(-1).to, "held");
-  }
-  const untouched = await CodeStock.findOne({ unit: other }).lean();
-  assert.equal(untouched.state, "in_unit");
-  assert.equal(h.sent.length, 1);
-  assertClean(h);
+test("publish: no code path reads a GGSel member of the marketplaces, nor the GGSel stock calls", () => {
+  // Static belt to the Proxy's braces: the module names no GGSel function.
+  const src = fs.readFileSync(path.join(__dirname, "..", "utils", "codeShop", "publish.js"), "utf8");
+  assert.doesNotMatch(src, /mp\(\)\.ggsel|ggselPublish|ggselDelist|ggselTakesNewStock/);
+  assert.doesNotMatch(src, /claimForListing|releaseClaim|markFed|resolveCategory/);
 });
 
 test("publish: lastError is set by a failure and cleared by the next clean run", async () => {
@@ -857,7 +703,7 @@ test("publish: lastError is set by a failure and cleared by the next clean run",
   const bad = harness({ eldoradoPublishError: new Error("Eldorado: upstream 500") });
   await bad.pub.publishProduct(p._id);
   let after = await CodeProduct.findById(p._id).lean();
-  assert.equal(after.publish.lastError, "eldorado: Eldorado: upstream 500");
+  assert.equal(after.publish.lastError, "eldorado: Eldorado: upstream 500; " + UNKNOWN_OUTCOME);
   assert.equal(after.publish.lastAttemptAt.getTime(), NOW);
   assert.ok(bad.events.some((e) => e.level === "error" && e.kind === "publish"));
 
@@ -869,8 +715,119 @@ test("publish: lastError is set by a failure and cleared by the next clean run",
   assertClean(good);
 });
 
+// --- unsure outcomes (R2) --------------------------------------------------------------------
+
+function httpError(message, status) {
+  const e = new Error(message);
+  if (status) e.status = status;
+  return e;
+}
+
+test("publish eldorado: an answer that may have been lost says to check Eldorado before publishing again", async () => {
+  const unsure = [
+    ["a timeout", Object.assign(new Error("timeout of 30000ms exceeded"), { code: "ECONNABORTED" })],
+    ["a dropped connection", Object.assign(new Error("socket hang up"), { code: "ECONNRESET" })],
+    ["a gateway error", httpError("Eldorado publish failed (HTTP 502): Bad Gateway", 502)],
+    ["a server error", httpError("Eldorado publish failed (HTTP 500)", 500)],
+    ["an error with no answer at all", new Error("something odd")],
+  ];
+  for (const [what, err] of unsure) {
+    const p = await activeProduct();
+    const h = harness({ eldoradoPublishError: err });
+    const out = await h.pub.publishProduct(p._id);
+    const r = out.results[0];
+    assert.equal(r.ok, false, what);
+    assert.equal(r.error, err.message + "; " + UNKNOWN_OUTCOME, what);
+    assert.match(r.error, /check Eldorado for an offer with this title before publishing again/, what);
+    const after = await CodeProduct.findById(p._id).lean();
+    assert.match(after.publish.lastError, /check Eldorado for an offer with this title/, what);
+    assert.equal(h.named("eldoradoDelist").length, 0, what + ": nothing known to take down");
+    assertClean(h);
+  }
+});
+
+test("publish eldorado: an answer without an offer id is unsure too", async () => {
+  const p = await activeProduct();
+  const h = harness({ eldoradoAnswer: { externalId: undefined, url: "" } });
+  const out = await h.pub.publishProduct(p._id);
+  assert.deepEqual(out.results, [{ market: "eldorado", ok: false, error: "Eldorado answered without an offer id; " + UNKNOWN_OUTCOME }]);
+  assert.equal(await MarketplaceListing.countDocuments({}), 0);
+  assertClean(h);
+});
+
+test("publish eldorado: a plain refusal from Eldorado (4xx) is not called unsure", async () => {
+  const refusals = [
+    httpError("Eldorado publish failed (HTTP 400): Title is too long", 400),
+    httpError("Eldorado publish failed (HTTP 422): bad price"), // status only in the text
+    httpError("Eldorado publish failed (HTTP 429): slow down", 429),
+  ];
+  for (const err of refusals) {
+    const p = await activeProduct();
+    const h = harness({ eldoradoPublishError: err });
+    const out = await h.pub.publishProduct(p._id);
+    assert.deepEqual(out.results, [{ market: "eldorado", ok: false, error: err.message }]);
+    assertClean(h);
+  }
+});
+
+// --- Telegram on publish failure (R4) ----------------------------------------------------------
+
+test("publish: a failure is told on Telegram only when its error differs from the previous lastError", async () => {
+  const p = await activeProduct();
+  const fail = (message, status) => harness({ eldoradoPublishError: httpError(message, status) });
+
+  const h1 = fail("Eldorado publish failed (HTTP 400): bad title", 400);
+  await h1.pub.publishProduct(p._id);
+  assert.equal(h1.sent.length, 1, "a new error is told");
+  assert.match(h1.sent[0], /^Code shop: Publishing .+ failed: eldorado: Eldorado publish failed \(HTTP 400\): bad title$/);
+
+  const h2 = fail("Eldorado publish failed (HTTP 400): bad title", 400);
+  await h2.pub.publishProduct(p._id);
+  assert.equal(h2.sent.length, 0, "the same error again is not");
+  assert.ok(h2.events.some((e) => e.level === "error" && e.kind === "publish"), "it is still logged");
+
+  const h3 = fail("Eldorado publish failed (HTTP 400): bad price", 400);
+  await h3.pub.publishProduct(p._id);
+  assert.equal(h3.sent.length, 1, "a different error is told");
+
+  // A clean run clears lastError, so the old error is news again afterwards.
+  const ok = harness();
+  await ok.pub.publishProduct(p._id);
+  assert.equal(ok.sent.length, 0);
+  await MarketplaceListing.deleteMany({});
+  const h4 = fail("Eldorado publish failed (HTTP 400): bad price", 400);
+  await h4.pub.publishProduct(p._id);
+  assert.equal(h4.sent.length, 1);
+  for (const h of [h1, h2, h3, ok, h4]) assertClean(h);
+});
+
+test("publish: a refused product (problems) is told once, not on every press", async () => {
+  const p = await activeProduct();
+  await CodeProduct.updateOne({ _id: p._id }, { $set: { "texts.coverTitle": "" } });
+  const h1 = harness();
+  const out1 = await h1.pub.publishProduct(p._id);
+  assert.match(out1.error, /^not published: cover title is empty/);
+  assert.equal(h1.sent.length, 1);
+  const h2 = harness();
+  await h2.pub.publishProduct(p._id);
+  assert.equal(h2.sent.length, 0);
+  assert.equal(h2.named("coverBuild").length, 0, "an empty cover text never reaches the cover");
+  for (const h of [h1, h2]) assertClean(h);
+});
+
+test("publish: a skip with no error sends nothing and leaves lastError empty", async () => {
+  const p = await activeProduct();
+  const h = harness({ shelf: 0 });
+  await h.pub.publishProduct(p._id);
+  assert.equal(h.sent.length, 0);
+  assert.equal((await CodeProduct.findById(p._id).lean()).publish.lastError, "");
+  assertClean(h);
+});
+
 // --- pause / resume / retire ---------------------------------------------------------------
 
+// Two Eldorado rows of the shop, and a GGSel row of the same offer made BY HAND
+// on the Listings page (the shop never publishes to GGSel).
 async function liveRows(p) {
   const base = { accountOffer: p.offer, status: "active", origin: "manual", note: "code shop" };
   const e1 = await MarketplaceListing.create({ ...base, marketplace: "eldorado", externalId: "eld-a" });
@@ -879,8 +836,8 @@ async function liveRows(p) {
   return { e1, e2, g };
 }
 
-test("pause: Eldorado rows are delisted and marked; GGSel rows are left to the Listings page", async () => {
-  const p = await activeProduct({ markets: ["eldorado", "ggsel"] });
+test("pause: Eldorado rows are delisted and marked; a hand-made GGSel row is left to the Listings page", async () => {
+  const p = await activeProduct();
   const { e1, e2, g } = await liveRows(p);
   const h = harness();
   const res = await h.pub.pause(p._id, { actor: "owner" });
@@ -892,7 +849,7 @@ test("pause: Eldorado rows are delisted and marked; GGSel rows are left to the L
     h.named("eldoradoDelist").map((c) => c[1]).sort(),
     ["eld-a", "eld-b"],
   );
-  assert.equal(h.named("ggselDelist").length, 0);
+  // assertClean proves no GGSel member was even looked up.
   assert.equal((await MarketplaceListing.findById(e1._id).lean()).status, "delisted");
   assert.equal((await MarketplaceListing.findById(e2._id).lean()).status, "delisted");
   assert.equal((await MarketplaceListing.findById(g._id).lean()).status, "active");
@@ -950,8 +907,8 @@ test("resume: back to active, then published", async () => {
   assertClean(h);
 });
 
-test("retire: refused while a GGSel row is live; nothing changes", async () => {
-  const p = await activeProduct({ markets: ["eldorado", "ggsel"] });
+test("retire: refused while a hand-made GGSel row is live; nothing changes", async () => {
+  const p = await activeProduct();
   const { e1 } = await liveRows(p);
   const h = harness();
   const res = await h.pub.retire(p._id);

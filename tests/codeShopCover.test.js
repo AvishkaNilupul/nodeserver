@@ -144,8 +144,30 @@ test("no item images at all: throws and renders nothing", async () => {
   const cover = createCover({ setImage: fake.setImage });
   await assert.rejects(cover.build(product(["", "", ""])), /no item images for the cover/);
   await assert.rejects(cover.build(product([])), /no item images for the cover/);
-  await assert.rejects(cover.build({}), /no item images for the cover/);
   assert.equal(fake.calls.length, 0);
+});
+
+test("an empty cover title or service text throws before anything is written or rendered", async () => {
+  const fake = fakeSetImage();
+  const cover = createCover({ setImage: fake.setImage });
+  // A missing image would need a filler tile: none may be written either.
+  const images = ["/a.png", ""];
+  for (const v of ["", "   ", undefined, null]) {
+    await assert.rejects(
+      cover.build(product(images, { coverTitle: v })),
+      /^Error: the cover title is empty: the cover would fall back to the farming-service text$/,
+      JSON.stringify(v),
+    );
+    await assert.rejects(
+      cover.build(product(images, { coverServiceText: v })),
+      /^Error: the cover service text is empty: the cover would fall back to the farming-service text$/,
+      JSON.stringify(v),
+    );
+  }
+  await assert.rejects(cover.build({}), /the cover title is empty/);
+  await assert.rejects(cover.build(null), /the cover title is empty/);
+  assert.equal(fake.calls.length, 0, "the generator never ran");
+  // afterEach checks no filler tile was left behind.
 });
 
 test("the filler is deleted even when the render throws", async () => {

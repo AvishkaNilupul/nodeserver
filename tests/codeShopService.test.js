@@ -19,7 +19,7 @@ const path = require("path");
 const serviceModule = require("../utils/codeShop/service");
 const { createService, STEPS } = serviceModule;
 const { DEFAULTS, deepMerge } = require("../utils/codeShop/config");
-const { OFFER_LIMIT_MSG } = require("../utils/codeShop/publish");
+const { OFFER_LIMIT_MSG, UNKNOWN_OUTCOME } = require("../utils/codeShop/publish");
 
 const MIN = 60 * 1000;
 const HOUR = 60 * MIN;
@@ -293,6 +293,7 @@ test("modules: exactly the contract's set, built once from one shared deps, noth
   for (const k of ["mp", "stock", "category", "setImage", "farm"]) assert.equal(typeof svc.deps[k], "function", k + " is lazy");
   assert.equal(typeof svc.deps.telegram.send, "function");
   assert.equal(svc.lastTick(), null);
+  for (const fn of ["start", "stop", "tick", "runStep", "exclusive", "lastTick"]) assert.equal(typeof svc[fn], "function", fn);
   // Models, marketplaces and the stock layer are only loaded when used.
   const root = path.join(__dirname, "..");
   for (const f of ["models/CodeStock.js", "models/CodeProduct.js", "models/SuppliedAccount.js", "utils/marketplaces.js", "utils/suppliedStock.js", "utils/soopFarm.js"]) {
@@ -680,39 +681,45 @@ test("scan: nothing when the competitor scan is switched off", async () => {
 
 // --- publishPending ----------------------------------------------------------------------
 
-test("publishPending: only active products with an allowed, enabled market that has no active row, stock, and no recent attempt", async () => {
+test("publishPending: only a product's FIRST listing per market, never adopted, never after a failed attempt", async () => {
   const h = harness({
-    cfg: { markets: { eldorado: true, ggsel: false } },
+    cfg: { markets: { eldorado: true } },
     products: [
       product("p1"), // due
       product("p2"), // live Eldorado row
       product("p3"), // empty shelf
-      product("p4", { markets: ["ggsel"] }), // GGSel switched off
-      product("p5", { publish: { lastAttemptAt: new Date(NOW - 10 * MIN), lastError: "" } }), // tried 10 min ago
-      product("p6", { publish: { lastAttemptAt: new Date(NOW - 2 * HOUR), lastError: "eldorado: " + OFFER_LIMIT_MSG } }), // offer limit: 6 h
-      product("p7", { publish: { lastAttemptAt: new Date(NOW - 7 * HOUR), lastError: "eldorado: " + OFFER_LIMIT_MSG } }), // due again
+      product("p4", { origin: "adopted" }), // the owner's hand-made offer
+      product("p5", { publish: { lastAttemptAt: new Date(NOW - 10 * MIN), lastError: "" } }), // a clean attempt 10 min ago: no spacing needed
+      product("p6", { publish: { lastAttemptAt: new Date(NOW - 7 * HOUR), lastError: "eldorado: " + OFFER_LIMIT_MSG } }), // a refusal waits for the owner
+      product("p7", { publish: { lastAttemptAt: new Date(NOW - 9 * 24 * HOUR), lastError: "eldorado: Eldorado publish failed; " + UNKNOWN_OUTCOME } }), // unsure: never retried
       product("p8", { status: "draft" }),
-      product("p9", { publish: { lastAttemptAt: new Date(NOW - 45 * MIN), lastError: "eldorado: HTTP 500" } }), // due again
+      product("p9", { publish: { lastAttemptAt: null, lastError: "  not published: no price set" } }),
       product("p10", { markets: ["gameflip"] }), // never a code shop market
       product("p11", { offer: null }), // never approved
-      product("p12"), // its only row is not active
+      product("p12"), // its only row was delisted: never re-created by the scheduler
       product("p13", { status: "paused" }),
-      product("p14", { publish: { lastAttemptAt: new Date(NOW - 29 * MIN), lastError: "" } }),
+      product("p14"), // its row sold out
+      product("p15", { origin: "manual" }), // due: only "adopted" is the owner's
+      product("p16", { origin: "auto", publish: {} }), // due: no lastError at all
+      product("p17"), // a GGSel row (made by hand on the Listings page) does not count for Eldorado
     ],
     listings: [
       { accountOffer: "of-p2", marketplace: "eldorado", status: "active" },
       { accountOffer: "of-p12", marketplace: "eldorado", status: "delisted" },
+      { accountOffer: "of-p14", marketplace: "eldorado", status: "sold" },
+      { accountOffer: "of-p17", marketplace: "ggsel", status: "active" },
     ],
-    shelf: { "of-p1": 2, "of-p2": 5, "of-p3": 0, "of-p4": 3, "of-p5": 3, "of-p6": 3, "of-p7": 1, "of-p9": 4, "of-p10": 3, "of-p12": 1, "of-p13": 3, "of-p14": 3 },
+    shelf: Object.fromEntries(["p1", "p2", "p4", "p5", "p6", "p7", "p9", "p10", "p12", "p13", "p14", "p15", "p16", "p17"].map((id) => ["of-" + id, 3])),
   });
   const r = await h.svc.runStep("publishPending");
   assert.deepEqual(
     h.published.map((p) => p.id),
-    ["p1", "p7", "p9", "p12"],
+    ["p1", "p5", "p15", "p16", "p17"],
   );
   for (const p of h.published) assert.deepEqual(p.opts, { actor: "auto" });
-  assert.equal(r.steps.publishPending.attempted, 4);
-  assert.equal(r.steps.publishPending.published, 4);
+  assert.equal(r.steps.publishPending.checked, 14, "active products with an offer");
+  assert.equal(r.steps.publishPending.attempted, 5);
+  assert.equal(r.steps.publishPending.published, 5);
   assert.equal(r.steps.publishPending.failed, 0);
   assert.deepEqual(r.steps.publishPending.products[0], {
     id: "p1",
@@ -720,29 +727,66 @@ test("publishPending: only active products with an allowed, enabled market that 
     markets: ["eldorado"],
     results: [{ market: "eldorado", ok: true }],
   });
+  // The "ever had one" read is not limited to active rows.
+  const q = h.models.MarketplaceListing.finds.at(-1).filter;
+  assert.equal(q.status, undefined);
+  assert.ok(q.accountOffer.$in.includes("of-p12"));
 });
 
-test("publishPending: GGSel only while it takes new stock; a market already live is not published again", async () => {
-  const setup = (ggselOpen) =>
-    harness({
-      ggselOpen,
-      cfg: { markets: { eldorado: true, ggsel: true } },
-      products: [product("g1", { markets: ["eldorado", "ggsel"] }), product("g2", { markets: ["eldorado", "ggsel"] })],
-      listings: [
-        { accountOffer: "of-g1", marketplace: "eldorado", status: "active" },
-        { accountOffer: "of-g2", marketplace: "eldorado", status: "active" },
-        { accountOffer: "of-g2", marketplace: "ggsel", status: "active" },
-      ],
-      shelf: { "of-g1": 3, "of-g2": 3 },
-    });
-  const open = setup(true);
-  const r = await open.svc.runStep("publishPending");
-  assert.deepEqual(open.published.map((p) => p.id), ["g1"]);
-  assert.deepEqual(r.steps.publishPending.products[0].markets, ["ggsel"]);
+test("publishPending: a GGSel product is never published, and no GGSel function is ever looked up", async () => {
+  const touched = [];
+  const mp = new Proxy(
+    {},
+    {
+      get(_, key) {
+        if (typeof key === "string") touched.push(key);
+        return () => {
+          throw new Error("no marketplace call from publishPending: " + String(key));
+        };
+      },
+    },
+  );
+  const h = harness({
+    // Even a settings document that still says ggsel: true (written before R1).
+    cfg: { markets: { eldorado: true, ggsel: true } },
+    products: [product("g1", { markets: ["ggsel"] }), product("g2", { markets: ["eldorado", "ggsel"] })],
+    shelf: { "of-g1": 3, "of-g2": 3 },
+    overrides: { mp: () => mp },
+  });
+  const r = await h.svc.runStep("publishPending");
+  // g2 is handed to the publisher for Eldorado only; the publisher itself refuses
+  // a product that names GGSel (tests/codeShopPublish.test.js).
+  assert.deepEqual(h.published.map((p) => p.id), ["g2"]);
+  assert.deepEqual(r.steps.publishPending.products[0].markets, ["eldorado"]);
+  assert.deepEqual(touched, []);
+});
 
-  const closed = setup(false);
-  await closed.svc.runStep("publishPending");
-  assert.deepEqual(closed.published, []);
+test("publishPending: a failed scheduled attempt is not retried by this process, even when its lastError was never saved", async () => {
+  let answer = { results: [{ market: "eldorado", ok: false, error: "Eldorado answered without an offer id; " + UNKNOWN_OUTCOME }] };
+  const h = harness({
+    products: [product("p1"), product("p2")],
+    shelf: { "of-p1": 2, "of-p2": 2 },
+    modules: {
+      publisher: {
+        problems: async () => [],
+        approve: async () => ({ ok: true }),
+        // The fake never writes lastError: as if that write had failed.
+        publishProduct: async (id) => {
+          h.published.push({ id });
+          return id === "p1" ? answer : { results: [], error: "not published: no price set" };
+        },
+      },
+    },
+  });
+  const r1 = await h.svc.runStep("publishPending");
+  assert.deepEqual(h.published.map((p) => p.id), ["p1", "p2"]);
+  assert.equal(r1.steps.publishPending.failed, 2);
+  assert.match(r1.steps.publishPending.products[0].results[0].error, /check Eldorado for an offer with this title before publishing again/);
+  answer = { results: [{ market: "eldorado", ok: true }] };
+  h.clock.now += 6 * HOUR;
+  const r2 = await h.svc.runStep("publishPending");
+  assert.deepEqual(h.published.map((p) => p.id), ["p1", "p2"], "nothing tried again");
+  assert.equal(r2.steps.publishPending.attempted, 0);
 });
 
 test("publishPending: one product's failure does not stop the others", async () => {
@@ -849,6 +893,92 @@ test("runStep: a failing step comes back recorded, not thrown", async () => {
   });
   const r = await h.svc.runStep("fill");
   assert.deepEqual(r.steps, { foreign: { checked: 0, held: 0 }, fill: { error: "no luck" } });
+});
+
+// --- exclusive -------------------------------------------------------------------------------
+
+test("exclusive: an owner's action waits for a running tick, and a tick waits for it; fn's own result comes back", async () => {
+  const gate = deferred();
+  const h = harness({
+    modules: {
+      ingest: {
+        run: async () => {
+          h.calls.push("ingest");
+          await gate.promise;
+          return {};
+        },
+      },
+    },
+  });
+  const t1 = h.svc.tick();
+  const action = deferred();
+  const x = h.svc.exclusive(async () => {
+    h.calls.push("owner:start");
+    await action.promise;
+    h.calls.push("owner:end");
+    return { ok: true, built: 3 };
+  });
+  await flush();
+  assert.deepEqual(h.calls, ["ingest"], "the action waits for the tick");
+  gate.resolve();
+  await t1;
+  await flush();
+  assert.equal(h.calls.at(-1), "owner:start");
+
+  // A tick (and a manual step) asked for now waits for the action to finish.
+  const t2 = h.svc.tick();
+  const s = h.svc.runStep("reconcile");
+  await flush();
+  assert.equal(h.calls.at(-1), "owner:start", "nothing runs on top of the action");
+  action.resolve();
+  assert.deepEqual(await x, { ok: true, built: 3 });
+  await Promise.all([t2, s]);
+  const after = h.calls.slice(h.calls.indexOf("owner:end"));
+  assert.equal(after[0], "owner:end");
+  assert.equal(after[1], "ingest", "the tick ran after the action");
+  assert.equal(after.at(-1), "reconcile", "then the manual step");
+});
+
+test("exclusive: rejects with fn's error (thrown or async) and the queue keeps going; a non-function is refused", async () => {
+  const h = harness();
+  await assert.rejects(
+    h.svc.exclusive(async () => {
+      throw new Error("approve went wrong");
+    }),
+    /approve went wrong/,
+  );
+  await assert.rejects(
+    h.svc.exclusive(() => {
+      throw new Error("sync throw");
+    }),
+    /sync throw/,
+  );
+  await assert.rejects(h.svc.exclusive("approve"), (err) => err instanceof TypeError);
+  await assert.rejects(h.svc.exclusive(), (err) => err instanceof TypeError);
+  assert.equal(await h.svc.exclusive(() => 7), 7, "a plain value works too");
+  const rec = await h.svc.tick();
+  assert.deepEqual(Object.keys(rec.steps), ORDER, "the queue is not jammed");
+});
+
+test("exclusive: actions run one at a time, in the order asked", async () => {
+  const h = harness();
+  const order = [];
+  const slow = deferred();
+  const a = h.svc.exclusive(async () => {
+    order.push("a:start");
+    await slow.promise;
+    order.push("a:end");
+    return "a";
+  });
+  const b = h.svc.exclusive(async () => {
+    order.push("b");
+    return "b";
+  });
+  await flush();
+  assert.deepEqual(order, ["a:start"]);
+  slow.resolve();
+  assert.deepEqual(await Promise.all([a, b]), ["a", "b"]);
+  assert.deepEqual(order, ["a:start", "a:end", "b"]);
 });
 
 // --- start / stop -----------------------------------------------------------------------------

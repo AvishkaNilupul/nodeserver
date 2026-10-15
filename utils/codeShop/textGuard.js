@@ -22,6 +22,11 @@ const DEFAULT_SOURCE_WORDS = Object.freeze([
 
 const LIMITS = Object.freeze({ title: 160, description: 2000, coverBullets: 4, label: 80 });
 
+// An empty cover text is not "no text": the promo generator and the offer's
+// own cover fill the gap with the farming-service wording, which is the wrong
+// product on a code bundle's picture.
+const COVER_FALLBACK = "the cover would fall back to the farming-service text";
+
 const NEVER = /(?!)/;
 const text = (v) => (v === undefined || v === null ? "" : String(v));
 
@@ -90,6 +95,8 @@ function checkBuyerText(texts = {}, { sourceWords } = {}) {
   if (!delivery.includes("{password}")) {
     problems.push("delivery template has no {password} placeholder (the codes would never reach the buyer)");
   }
+  if (!text(t.coverTitle).trim()) problems.push(`cover title is empty (${COVER_FALLBACK})`);
+  if (!text(t.coverServiceText).trim()) problems.push(`cover service text is empty (${COVER_FALLBACK})`);
   // A unit's text is one "N) Label = CODE" line per code, and adopt / after-sale
   // read it back with that shape: a label may not span lines or hold an "=".
   labels.forEach((l, i) => {
@@ -124,6 +131,7 @@ function checkBuyerText(texts = {}, { sourceWords } = {}) {
 module.exports = {
   DEFAULT_SOURCE_WORDS,
   LIMITS,
+  COVER_FALLBACK,
   compileSourceWords,
   findSourceWord,
   checkBuyerText,
