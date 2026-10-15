@@ -9,6 +9,8 @@
 const SoopAccount = require("../models/SoopAccount");
 const SoopFarmTask = require("../models/SoopFarmTask");
 const SoopInventoryItem = require("../models/SoopInventoryItem");
+const TwitchWebCookie = require("../models/TwitchWebCookie");
+const twitchOauth = require("./twitchOauthRefresher");
 const { makeClient, parseCookieInput, splitCookieExports, sharedGeo } = require("./soopClient");
 const { getTransport } = require("./soop/http");
 const { createCampaignStore } = require("./soop/campaignStore");
@@ -107,6 +109,9 @@ class SoopFarm {
     this.timers = [];
     this.invTimers = new Map();
     this.plainReads = Promise.resolve();
+    // Per-id guard against the periodic refresher and a manual kick stacking
+    // on the same account in flight. Members: SOOP loginId.
+    this.renewalsInFlight = new Set();
     this.store = createCampaignStore(opts.store || {});
     this.activity = createActivityLog();
     this.inventory = createInventoryService({
@@ -117,6 +122,11 @@ class SoopFarm {
       getClient: (id) => this.ensureClient(id),
       activity: this.activity,
       onDead: (id, reason) => this._onDead(id, reason),
+      // Instant renewal: a health check that just flipped a login to
+      // not_logged_in / drops_rejected kicks renewAccount immediately when
+      // the account has a Twitch jar linked. _maybeRenew is the gate that
+      // decides whether we have the data to try at all.
+      onRenewable: (id, reason) => this._maybeRenew(id, `health:${reason}`),
     });
     this.metrics = createMetrics();
     this.loginAlert = createLoginAlert({ activity: this.activity });
@@ -357,6 +367,139 @@ class SoopFarm {
     if (!doc || doc.status === "ok") return;
     await this.health.check(id);
     this.accountsCache = null;
+  }
+
+  // ---- Twitch -> SOOP cookie auto-renew -----------------------------------
+
+  // Gate for the reactive renewal hook (see createHealthService onRenewable):
+  // only fire renewAccount for an account that has a Twitch jar linked and
+  // is not retired. Fire-and-forget; renewAccount updates the row itself.
+  _maybeRenew(id, reason) {
+    SoopAccount.findOne({ loginId: id })
+      .select("twitchLogin sold")
+      .lean()
+      .then((doc) => {
+        if (!doc || doc.sold) return;
+        if (!doc.twitchLogin) return;
+        this.renewAccount(id, { reason }).catch((err) =>
+          console.error(`[soop] reactive renew ${id} failed: ${err.message}`),
+        );
+      })
+      .catch((err) => console.error(`[soop] _maybeRenew ${id}: ${err.message}`));
+  }
+
+  // Set / clear the Twitch login that drives auto-renew for one SOOP account.
+  // Returns the stored value (lowercased, trimmed), or null when the account
+  // id is unknown.
+  async setTwitchLogin(id, twitchLogin) {
+    const value = String(twitchLogin || "").trim().toLowerCase();
+    const r = await SoopAccount.updateOne(
+      { loginId: id },
+      { $set: { twitchLogin: value } },
+    );
+    this.accountsCache = null;
+    return r.matchedCount ? value : null;
+  }
+
+  // Replay SOOP's SNS OAuth hop via the Pi SOCKS tunnel (soop-socks.service),
+  // using the stored Twitch web-cookie jar for this account's linked Twitch
+  // login. The fresh SOOP cookie array replaces the stored one and the
+  // in-memory client is swapped so a running session picks the renewed
+  // credential up on its next loop. Errors are stamped onto renewError (never
+  // thrown); the health probe runs after a successful swap so the login
+  // alert's "accepted again" message fires.
+  async renewAccount(id, { reason = "unspecified" } = {}) {
+    if (!id) return { ok: false, reason: "bad_args" };
+    if (this.renewalsInFlight.has(id)) return { ok: false, reason: "already_in_flight" };
+    this.renewalsInFlight.add(id);
+    try {
+      await SoopAccount.updateOne(
+        { loginId: id },
+        { $set: { renewAttemptAt: new Date(), renewError: "" } },
+      );
+
+      const doc = await SoopAccount.findOne({ loginId: id })
+        .select("twitchLogin sold")
+        .lean();
+      if (!doc) {
+        await SoopAccount.updateOne({ loginId: id }, { $set: { renewError: "account not found" } });
+        return { ok: false, reason: "no_account" };
+      }
+      if (doc.sold) return { ok: false, reason: "sold" };
+
+      const twitchLogin = String(doc.twitchLogin || "").trim().toLowerCase();
+      if (!twitchLogin) {
+        await SoopAccount.updateOne({ loginId: id }, { $set: { renewError: "no twitchLogin linked" } });
+        return { ok: false, reason: "no_twitch_login" };
+      }
+
+      const web = await TwitchWebCookie.findOne({ twitchLogin }).lean();
+      if (!web || !web.cookies) {
+        await SoopAccount.updateOne(
+          { loginId: id },
+          { $set: { renewError: `no TwitchWebCookie for ${twitchLogin}` } },
+        );
+        return { ok: false, reason: "no_web_cookies", twitchLogin };
+      }
+
+      let twitchCookies;
+      try {
+        twitchCookies = JSON.parse(decrypt(web.cookies));
+      } catch (e) {
+        await SoopAccount.updateOne(
+          { loginId: id },
+          { $set: { renewError: "web cookies decrypt/parse failed" } },
+        );
+        return { ok: false, reason: "cookie_decrypt_fail", detail: e.message };
+      }
+
+      console.log(`[soop] renew ${id} via twitchLogin=${twitchLogin} (${reason})`);
+      const r = await twitchOauth.refreshSoopCookies({ soopId: id, twitchCookies });
+      if (!r.ok) {
+        await SoopAccount.updateOne(
+          { loginId: id },
+          { $set: { renewError: `${r.reason}: ${r.detail || ""}`.slice(0, 400) } },
+        );
+        console.warn(`[soop] renew ${id} failed: ${r.reason} ${r.detail || ""}`);
+        return r;
+      }
+
+      await SoopAccount.updateOne(
+        { loginId: id },
+        {
+          $set: {
+            cookies: encrypt(JSON.stringify(r.cookies)),
+            cookieAt: new Date(),
+            status: "untested",
+            deadAt: null,
+            lastError: "",
+            renewedAt: new Date(),
+            renewError: "",
+          },
+        },
+      );
+      this.clients.set(id, this.clientFactory(r.cookies, { id }));
+      this.accountsCache = null;
+      this.activity.add({
+        kind: "account",
+        accountId: id,
+        msg: `Renewed cookies for ${id} via Twitch (${reason})`,
+      });
+      await this.health.check(id, { fresh: true }).catch(() => {});
+      console.log(`[soop] renew ${id} OK (${r.cookieCount} cookies in ${r.took_ms}ms)`);
+      return { ok: true, cookieCount: r.cookieCount, took_ms: r.took_ms };
+    } catch (e) {
+      console.error(`[soop] renew ${id} crashed:`, e.message);
+      try {
+        await SoopAccount.updateOne(
+          { loginId: id },
+          { $set: { renewError: ("crash: " + e.message).slice(0, 400) } },
+        );
+      } catch {}
+      return { ok: false, reason: "exception", detail: e.message };
+    } finally {
+      this.renewalsInFlight.delete(id);
+    }
   }
 
   // ---- per-campaign progress ---------------------------------------------

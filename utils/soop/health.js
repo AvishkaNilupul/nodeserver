@@ -23,6 +23,10 @@ function createHealthService({
   getClient,
   activity,
   onDead,
+  // Fired on a transition into a dead-ish status (not_logged_in or
+  // drops_rejected). The handler decides whether to kick an auto-renewal; the
+  // health service never does more than one check at a time per account.
+  onRenewable,
   paceMs = 4000,
   everyMs = 6 * 3600 * 1000,
   now = Date.now,
@@ -49,6 +53,19 @@ function createHealthService({
       }
     } catch (err) {
       console.error("soop health onDead error:", err.message);
+    }
+  }
+
+  // Fire-and-forget: the handler is expected to run itself async.
+  function fireRenewable(id, reason) {
+    if (typeof onRenewable !== "function") return;
+    try {
+      const r = onRenewable(id, reason);
+      if (r && typeof r.catch === "function") {
+        r.catch((err) => console.error("soop health onRenewable error:", err.message));
+      }
+    } catch (err) {
+      console.error("soop health onRenewable error:", err.message);
     }
   }
 
@@ -110,10 +127,14 @@ function createHealthService({
       if (claim && claim.modifiedCount === 1) {
         note({ level: "error", accountId: id, msg: MSG_LOGGED_OUT });
         fireDead(id, "not_logged_in");
+        fireRenewable(id, "not_logged_in");
       }
     } else if (before.status !== status) {
       if (status === "ok") note({ accountId: id, msg: "Login check passed" });
-      else note({ level: "warn", accountId: id, msg: MSG_DROPS_REJECTED });
+      else {
+        note({ level: "warn", accountId: id, msg: MSG_DROPS_REJECTED });
+        fireRenewable(id, "drops_rejected");
+      }
     }
     return result;
   }

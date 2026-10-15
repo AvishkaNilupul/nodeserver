@@ -5,11 +5,14 @@
 // superadmin-only. Request bodies carry session cookies, so nothing here logs
 // one, and a reward code leaves through exactly one route — /inventory/reveal —
 // which records who asked for it.
+const crypto = require("node:crypto");
 const express = require("express");
 
 const { requireSuperadmin } = require("../middleware/auth");
 const farm = require("../utils/soopFarm");
 const { SoopError } = require("../utils/soop/errors");
+const TwitchWebCookie = require("../models/TwitchWebCookie");
+const { encrypt } = require("../utils/secretBox");
 
 const router = express.Router();
 
@@ -17,6 +20,40 @@ const MAX_LIST = 500;
 const MAX_COOKIE_BYTES = 2 * 1024 * 1024;
 const LEVELS = ["info", "warn", "error"];
 const OBJECT_ID_RE = /^[a-f0-9]{24}$/i;
+
+// Shared-secret auth for /accounts/save-twitch-cookies — the harvester
+// userscript running in a browser does not carry an admin session. The key
+// must be at least 32 characters long; anything shorter is treated as unset
+// and the endpoint falls through to superadmin.
+const HARVEST_KEY = (() => {
+  const k = String(process.env.SOOP_HARVEST_KEY || "").trim();
+  if (k && k.length < 32) {
+    console.warn("[soopRoutes] SOOP_HARVEST_KEY is set but under 32 chars — ignoring it");
+    return "";
+  }
+  return k;
+})();
+const HARVEST_KEY_BUF = HARVEST_KEY ? Buffer.from(HARVEST_KEY, "utf8") : null;
+
+function requireHarvestKey(req, res, next) {
+  if (!HARVEST_KEY_BUF) return requireSuperadmin(req, res, next);
+  const supplied =
+    String(req.headers["x-harvest-key"] || "") ||
+    String(req.headers["authorization"] || "").replace(/^Bearer\s+/i, "");
+  if (supplied) {
+    const a = Buffer.from(supplied, "utf8");
+    if (a.length === HARVEST_KEY_BUF.length && crypto.timingSafeEqual(a, HARVEST_KEY_BUF)) {
+      return next();
+    }
+  }
+  return res.status(401).json({ success: false, error: "bad or missing harvest key" });
+}
+
+function cookieExpiryDate(cookies, name) {
+  const c = (cookies || []).find((x) => x && x.name === name);
+  if (!c || !c.expirationDate) return null;
+  return new Date(c.expirationDate * 1000);
+}
 
 // SoopError codes -> what the operator reads. SOOP's own wording stays in the log.
 const UPSTREAM = new Map([
@@ -308,6 +345,113 @@ route("get", "/activity", ({ query }) => {
       botId: text(query.botId, "botId") || undefined,
     }),
   };
+});
+
+// ---- Twitch -> SOOP cookie auto-renew --------------------------------------
+
+// Harvester drop-off. Shape (same as the old emailnator-proxy endpoint it
+// replaces): { Login, cookies: [cookie-editor shape], source? }. password is
+// never sent and never stored — the OAuth replay re-mints SOOP cookies from
+// the twitch.tv jar alone. Shared-secret auth (SOOP_HARVEST_KEY) or
+// superadmin when the key is unset.
+router.post("/api/soop/accounts/save-twitch-cookies", requireHarvestKey, async (req, res) => {
+  try {
+    const b = req.body && typeof req.body === "object" ? req.body : {};
+    const login = String(b.Login || b.login || "").trim().toLowerCase();
+    if (!login) return fail(res, 400, "missing login");
+    if (!Array.isArray(b.cookies)) return fail(res, 400, "cookies must be an array");
+
+    const cookies = b.cookies.filter(
+      (c) =>
+        c &&
+        typeof c.name === "string" &&
+        c.value != null &&
+        /twitch\.tv/i.test(String(c.domain || "")),
+    );
+    if (!cookies.length) return fail(res, 400, "no twitch.tv cookies");
+
+    const names = new Set(cookies.map((c) => c.name));
+    if (!names.has("auth-token")) return fail(res, 400, "missing auth-token — login didn't complete?");
+    const shortLived = !names.has("persistent");
+
+    await TwitchWebCookie.findOneAndUpdate(
+      { twitchLogin: login },
+      {
+        $set: {
+          twitchLogin: login,
+          cookies: encrypt(JSON.stringify(cookies)),
+          cookieCount: cookies.length,
+          shortLived,
+          persistentExpiresAt: cookieExpiryDate(cookies, "persistent"),
+          authTokenExpiresAt: cookieExpiryDate(cookies, "auth-token"),
+          harvestedAt: new Date(),
+          source: String(b.source || ""),
+        },
+      },
+      { upsert: true, returnDocument: "after", setDefaultsOnInsert: true },
+    );
+    const total = await TwitchWebCookie.countDocuments();
+    res.set("Cache-Control", "no-store");
+    res.json({ success: true, login, cookieCount: cookies.length, shortLived, totalAccounts: total });
+  } catch (err) {
+    console.error("soop accounts save-twitch-cookies error:", err && err.message);
+    fail(res, 500, "Server error");
+  }
+});
+
+// Admin inventory of harvested Twitch cookies — the UI picker reads this to
+// show which SOOP accounts can be auto-renewed. No cookie plaintext leaves.
+route("get", "/accounts/twitch-cookies", async () => {
+  const rows = await TwitchWebCookie.find({})
+    .select("twitchLogin cookieCount shortLived persistentExpiresAt authTokenExpiresAt harvestedAt source")
+    .sort({ twitchLogin: 1 })
+    .lean();
+  const now = Date.now();
+  return {
+    count: rows.length,
+    accounts: rows.map((r) => ({
+      twitchLogin: r.twitchLogin,
+      cookieCount: r.cookieCount,
+      shortLived: !!r.shortLived,
+      persistentDaysLeft: r.persistentExpiresAt
+        ? +((r.persistentExpiresAt.getTime() - now) / 86400000).toFixed(1)
+        : null,
+      authTokenDaysLeft: r.authTokenExpiresAt
+        ? +((r.authTokenExpiresAt.getTime() - now) / 86400000).toFixed(1)
+        : null,
+      harvestedAt: r.harvestedAt,
+      source: r.source,
+    })),
+  };
+});
+
+// Set / clear the Twitch login that drives auto-renew for one SOOP account.
+// Empty string removes the mapping (auto-renew is skipped for that account).
+route("post", "/accounts/twitch-link", async ({ body }) => {
+  const id = text(body.id, "id", { required: true });
+  const twitchLogin = text(body.twitchLogin, "twitchLogin", { max: 60 });
+  if (twitchLogin === undefined) bad("twitchLogin is required (empty string clears)");
+  const value = await farm.setTwitchLogin(id, twitchLogin);
+  if (value === null) throw new HttpError(404, "Unknown account");
+  return { id, twitchLogin: value };
+});
+
+// Manual kick for auto-renew — one id or many. The periodic refresher does
+// this on its own every 3 h; this is the "I don't want to wait" button.
+route("post", "/accounts/renew", async ({ body }) => {
+  const ids = idList(body.ids, "ids");
+  const single = text(body.id, "id");
+  const list = ids.length ? ids : single ? [single] : [];
+  if (!list.length) bad("no account given");
+  const results = [];
+  for (const id of list) {
+    try {
+      results.push({ id, ...(await farm.renewAccount(id, { reason: "manual" })) });
+    } catch (e) {
+      results.push({ id, ok: false, reason: "exception", detail: e.message });
+    }
+  }
+  return { results };
 });
 
 module.exports = router;

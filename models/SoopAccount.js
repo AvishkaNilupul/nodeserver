@@ -32,6 +32,14 @@ const soopAccountSchema = new mongoose.Schema(
     // { [dropsIdx]: { minutes, max, goal, done, at } } — last known watch time
     // per campaign, so the panel has numbers while no session is running.
     progress: { type: mongoose.Schema.Types.Mixed, default: () => ({}) },
+    // The Twitch login this SOOP account signs in through. When this is set
+    // and the paired TwitchWebCookie row has a cookie jar, utils/
+    // soopCookieRefresher re-mints SOOP cookies through id.twitch.tv/oauth2
+    // automatically. Blank = never auto-renew this login.
+    twitchLogin: { type: String, default: "", index: true, lowercase: true, trim: true },
+    renewedAt: { type: Date, default: null },
+    renewAttemptAt: { type: Date, default: null },
+    renewError: { type: String, default: "" },
   },
   // minimize: false keeps an empty `progress` object on the stored row.
   { timestamps: true, minimize: false },

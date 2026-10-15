@@ -99,6 +99,7 @@ const noclaimWatcher = require("./utils/noclaimWatcher");
 const autoFarmer = require("./utils/autoFarmer");
 // SOOP drops farm service (docs/SOOP-FARM.md); started after MongoDB connects.
 const soopFarm = require("./utils/soopFarm");
+const soopCookieRefresher = require("./utils/soopCookieRefresher");
 // Publishes the auto-farm's listings; started below for its event-bundle sweep.
 const autoLister = require("./utils/autoLister");
 const autoFarmSnapshot = require("./utils/autoFarmSnapshot");
@@ -998,6 +999,11 @@ mongoose
     // when the process last stopped. Inert until an account is imported and a
     // bot is started from the SOOP page.
     soopFarm.start();
+    // SOOP cookie auto-renew: every 3 h, re-mint SOOP cookies for logins
+    // whose health probe failed, via the Pi SOCKS tunnel + stored Twitch web
+    // cookies. Inert until a SoopAccount has a twitchLogin linked AND a
+    // matching TwitchWebCookie row exists.
+    soopCookieRefresher.start();
   })
   .catch((err) => {
     console.error("MongoDB connection error:", err.message);
