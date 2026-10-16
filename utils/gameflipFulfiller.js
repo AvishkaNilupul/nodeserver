@@ -313,7 +313,14 @@ async function accountListingText(
     const setItems = (set.items || []).filter((i) => i.itemKey);
     const primaryGame = (setItems.find((i) => i.game) || {}).game || "";
     const rows = await DropLog.aggregate([
-      { $match: { account: accountId, connected: { $ne: true } } },
+      {
+        $match: {
+          account: accountId,
+          connected: { $ne: true },
+          // An expired drop can't be connected, so never advertise it.
+          ...require("./dropReservation").notExpiredMatch(),
+        },
+      },
       {
         $group: {
           _id: { key: "$itemKey", name: "$name", game: "$game" },

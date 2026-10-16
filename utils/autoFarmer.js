@@ -21,6 +21,8 @@ const marketResearch = require("./marketResearch");
 const hosts = require("./botHosts");
 const botFactory = require("./botFactory");
 const botWaker = require("./botWaker");
+const { withFileLock } = require("./fileLock");
+const farmOps = require("./farmOps");
 const mp = require("./marketplaces");
 const settings = require("./settings");
 const farmSizing = require("./farmSizing");
@@ -246,6 +248,56 @@ function progressBegin() {
 function progressEnd() {
   progressLog.finishedAt = new Date();
 }
+
+// One structural step of the janitor tick, as the only structural auto-farm
+// operation in progress (utils/farmOps — why is told there). A step that cannot
+// start because a farm is being placed, and still cannot after the wait, is
+// skipped for this tick and says so; it runs again on the next one.
+async function janitorStep(label, idle, fn) {
+  try {
+    return await farmOps.run(label, fn);
+  } catch (e) {
+    if (!farmOps.isBusy(e)) throw e;
+    progress(label + " skipped this tick: " + e.message + ".", "warn");
+    return idle;
+  }
+}
+
+// The structural steps as this tick calls them and as every other module gets
+// them (module.exports): each one alone, never while a farm is being placed or
+// another step is half-way through a repack or a clean-up. The functions
+// themselves, further down, are unchanged. A step called from inside another
+// (the reuse top-up placing fresh accounts) runs straight through.
+const structural = {
+  executeTask: (task, ctx, opts) =>
+    farmOps.run("placing " + ((task && task.game) || "a farm"), async () => {
+      // The plan is looked at again now that it is its turn. While it waited
+      // the same row may have been placed by the other engine, approved by
+      // hand (both take any "planned" row), ended or skipped — and placing it
+      // a second time claims a second set of accounts and overwrites the bots
+      // of the first. The reuse top-up (append) adds to a row that is active.
+      if (!(opts && opts.append) && task && task._id) {
+        const row = await AutoFarmTask.findById(task._id).select("status").lean();
+        if (!row || row.status !== "planned") {
+          progress(
+            "Not placing " + task.game + ": its plan is " + (row ? row.status : "gone") +
+              " by the time its turn came.",
+            "warn",
+          );
+          return { decision: task.decision, bots: [], accounts: 0, superseded: row ? row.status : "gone" };
+        }
+      }
+      return executeTask(task, ctx, opts);
+    }),
+  completeEndedTasks: () => janitorStep("Ending finished campaigns", 0, () => completeEndedTasks()),
+  backfillActiveTasks: (af, host, say) =>
+    janitorStep("Backfilling active farms", 0, () => backfillActiveTasks(af, host, say)),
+  reapRetiredBots: (af, host, say) =>
+    janitorStep("Reaping retired bots", 0, () => reapRetiredBots(af, host, say)),
+  expireStaleProbes: (af, say) => janitorStep("Probe stop-loss", 0, () => expireStaleProbes(af, say)),
+  repackAutoBots: (af, host, say) =>
+    janitorStep("Repacking auto bots", null, () => repackAutoBots(af, host, say)),
+};
 
 /* ------------------------------ helpers ------------------------------- */
 
@@ -763,6 +815,8 @@ async function archiveHoldersForCampaign(c, stash, owned) {
       game: c.game,
       connected: { $ne: true },
       soldAt: null,
+      // An expired drop covers no demand (utils/dropReservation.js).
+      ...require("./dropReservation").notExpiredMatch(),
     });
     return splitHolders(logins.filter(Boolean), stash, owned);
   } catch {
@@ -804,7 +858,13 @@ async function archiveHoldersByGame(games, stash, owned) {
   try {
     const rows = await DropLog.aggregate([
       {
-        $match: { game: { $in: list }, connected: { $ne: true }, soldAt: null },
+        $match: {
+          game: { $in: list },
+          connected: { $ne: true },
+          soldAt: null,
+          // An expired drop covers no demand (utils/dropReservation.js).
+          ...require("./dropReservation").notExpiredMatch(),
+        },
       },
       { $group: { _id: { game: "$game", login: "$login" } } },
       // One entry per (game, login) pair already exists after the first
@@ -2621,7 +2681,7 @@ async function processCampaign(c, ctx) {
     ) {
       try {
         reuseTask.plannedAccounts = topUp;
-        const r = await executeTask(reuseTask, ctx, { append: true });
+        const r = await structural.executeTask(reuseTask, ctx, { append: true });
         toppedUp = (r && r.accounts) || 0;
       } catch {
         /* reuse alone stands; fresh accounts can join on a later campaign */
@@ -2896,7 +2956,7 @@ async function processCampaign(c, ctx) {
     plannedAccounts: accounts,
     targetAccounts: wanted,
   });
-  return executeTask(task, ctx);
+  return structural.executeTask(task, ctx);
 }
 
 // Execute a planned task for real: claim pool accounts, create bot(s) on the
@@ -3707,53 +3767,63 @@ async function completeEndedTasks() {
         // per-account FavouriteGames edit farmControl.stopFarmingGame uses),
         // one write + one restart; co-tenants keep farming untouched.
         try {
-          const raw = await hosts.readFile(h, b.file);
-          const data = JSON.parse(raw);
-          const users =
-            data &&
-            data.TwitchSettings &&
-            Array.isArray(data.TwitchSettings.TwitchUsers)
-              ? data.TwitchSettings.TwitchUsers
-              : [];
-          let changed = 0;
-          for (const u of users) {
-            if (!u || !mine.has(String(u.Login || "").toLowerCase())) continue;
-            if (stillNeeded.has(String(u.Login || "").toLowerCase())) {
-              // The next wave of this game farms it — leave it armed.
-              if (u.Enabled !== false) {
-                stillEnabled.add(String(u.Login || "").toLowerCase());
+          // The read, the edit and the write are one step under the file's
+          // lock (utils/fileLock): a farm placed into this shared bot, or an
+          // account switched off in it, between this read and this write is
+          // otherwise overwritten by it.
+          const changed = await withFileLock(h, b.file, async () => {
+            const raw = await hosts.readFile(h, b.file);
+            const data = JSON.parse(raw);
+            const users =
+              data &&
+              data.TwitchSettings &&
+              Array.isArray(data.TwitchSettings.TwitchUsers)
+                ? data.TwitchSettings.TwitchUsers
+                : [];
+            let changed = 0;
+            for (const u of users) {
+              if (!u || !mine.has(String(u.Login || "").toLowerCase())) continue;
+              if (stillNeeded.has(String(u.Login || "").toLowerCase())) {
+                // The next wave of this game farms it — leave it armed.
+                if (u.Enabled !== false) {
+                  stillEnabled.add(String(u.Login || "").toLowerCase());
+                }
+                continue;
               }
-              continue;
-            }
-            const own = Array.isArray(u.FavouriteGames) ? u.FavouriteGames : [];
-            const next = own.filter(
-              (f) =>
-                String(f).trim().toLowerCase() !==
-                String(t.game).trim().toLowerCase(),
-            );
-            if (next.length === own.length) {
-              // Nothing removed — it never farmed this game here, so whatever
-              // it IS farming keeps running. Still deployed.
-              if (u.Enabled !== false) {
-                stillEnabled.add(String(u.Login || "").toLowerCase());
+              const own = Array.isArray(u.FavouriteGames) ? u.FavouriteGames : [];
+              const next = own.filter(
+                (f) =>
+                  String(f).trim().toLowerCase() !==
+                  String(t.game).trim().toLowerCase(),
+              );
+              if (next.length === own.length) {
+                // Nothing removed — it never farmed this game here, so whatever
+                // it IS farming keeps running. Still deployed.
+                if (u.Enabled !== false) {
+                  stillEnabled.add(String(u.Login || "").toLowerCase());
+                }
+                continue;
               }
-              continue;
+              u.FavouriteGames = next;
+              // An empty per-account list inherits the config-level games,
+              // which could resurrect the removed one — disable instead.
+              if (!next.length) u.Enabled = false;
+              // Games left over means this account is still farming here for a
+              // co-tenant task, so it must NOT go back to the pool.
+              else stillEnabled.add(String(u.Login || "").toLowerCase());
+              changed++;
             }
-            u.FavouriteGames = next;
-            // An empty per-account list inherits the config-level games,
-            // which could resurrect the removed one — disable instead.
-            if (!next.length) u.Enabled = false;
-            // Games left over means this account is still farming here for a
-            // co-tenant task, so it must NOT go back to the pool.
-            else stillEnabled.add(String(u.Login || "").toLowerCase());
-            changed++;
-          }
+            if (changed) {
+              await hosts.writeFileAtomic(
+                h,
+                b.file,
+                JSON.stringify(data, null, 2),
+                { prev: raw },
+              );
+            }
+            return changed;
+          });
           if (changed) {
-            await hosts.writeFileAtomic(
-              h,
-              b.file,
-              JSON.stringify(data, null, 2),
-            );
             // Reload the config only in a container that is RUNNING. A plain
             // `docker restart` starts a stopped one, so this woke a shared bot
             // botWaker had parked (the wake/park flap class, 2026-09-29); a
@@ -4346,7 +4416,7 @@ async function runOnce() {
     // Always tidy up ended campaigns first — this frees container slots that
     // this same tick can then hand to queued campaigns.
     progress("Checking for ended campaigns to clean up\u2026");
-    const completed = await completeEndedTasks();
+    const completed = await structural.completeEndedTasks();
     if (completed)
       progress("Cleaned up " + completed + " ended campaign task(s).");
     // Catch up any markup that failed on an earlier tick (dry runs never touch
@@ -4997,7 +5067,7 @@ async function runOnce() {
     // Backfill sweep: top up under-target tasks from whatever the pool has.
     if (!af.dryRun && hostOnline) {
       try {
-        const topped = await backfillActiveTasks(af, host, progress);
+        const topped = await structural.backfillActiveTasks(af, host, progress);
         if (topped) progress("Backfill added " + topped + " account(s) total.");
       } catch (e) {
         progress("Backfill failed: " + e.message, "warn");
@@ -5005,7 +5075,7 @@ async function runOnce() {
       // Retro-reaper: delete leftover containers from campaigns that ended
       // before bot retirement shipped (idempotent, skips shared bots).
       try {
-        const reaped = await reapRetiredBots(af, host, progress);
+        const reaped = await structural.reapRetiredBots(af, host, progress);
         if (reaped) progress("Reaped " + reaped + " leftover bot(s).");
       } catch (e) {
         progress("Reaper failed: " + e.message, "warn");
@@ -5020,16 +5090,33 @@ async function runOnce() {
       // Probe stop-loss (opt-in): give up a cold-start probe that has run
       // probeMaxDays with 0 real sales. No-op unless af.probeColdStart.
       try {
-        const gaveUp = await expireStaleProbes(af, progress);
+        const gaveUp = await structural.expireStaleProbes(af, progress);
         if (gaveUp) progress("Probe stop-loss: gave up on " + gaveUp + " probe(s).");
       } catch (e) {
         progress("Probe stop-loss failed: " + e.message, "warn");
       }
       // Repack sweep: merge half-empty auto containers back together.
       try {
-        await repackAutoBots(af, host, progress);
+        await structural.repackAutoBots(af, host, progress);
       } catch (e) {
         progress("Repack failed: " + e.message, "warn");
+      }
+      // Stranded-account sweep (opt-in): accounts a farm counts as deployed
+      // that sit switched off with nothing to explain it are switched back on
+      // (utils/armedAudit). No-op unless af.rearmStranded; the health board's
+      // fleet.armed check reports them either way.
+      if (af.rearmStranded === true) {
+        try {
+          const armed = require("./armedAudit");
+          const fixed = await janitorStep("Re-arming stranded accounts", null, async () =>
+            armed.rearm(await armed.audit(), { progress }),
+          );
+          if (fixed && fixed.rearmed) {
+            progress("Stranded-account sweep re-armed " + fixed.rearmed + " account(s).");
+          }
+        } catch (e) {
+          progress("Stranded-account sweep failed: " + e.message, "warn");
+        }
       }
     }
 
@@ -5999,18 +6086,20 @@ module.exports = {
   status,
   // Liveness hook for the health page (utils/systemHealth.js).
   loopStatus,
-  executeTask,
-  completeEndedTasks,
-  reapRetiredBots,
+  executeTask: structural.executeTask,
+  completeEndedTasks: structural.completeEndedTasks,
+  reapRetiredBots: structural.reapRetiredBots,
   recycleSoldOutAccounts,
   reapDeadTokenAssignments,
   expireStalePlans,
-  repackAutoBots,
+  repackAutoBots: structural.repackAutoBots,
   // For the pool's Unclaim route (routes/accountPoolRoutes.js), which refuses
   // to hand back an auto-farm account a buyer holds or a listing sells — the
   // same sold / connected / listed / leased check every recycle path uses.
   unrecyclableLogins,
   // exported for tests
+  expireStaleProbes: structural.expireStaleProbes,
+  backfillActiveTasks: structural.backfillActiveTasks,
   fairShare,
   demandAllocation,
   capForGame,

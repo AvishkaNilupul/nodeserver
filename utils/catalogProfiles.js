@@ -149,6 +149,8 @@ async function buildCatalogProfilePlan({
     connected: { $ne: true },
     soldAt: null,
     itemKey: { $ne: "" },
+    // Expired drops are not stock (utils/dropReservation.js).
+    ...require("./dropReservation").notExpiredMatch(),
   };
   // The split above was not enough. The per-account roll-up was still a SECOND
   // $group that $pushed every (itemKey, count) of every account into memory at

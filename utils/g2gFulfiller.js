@@ -447,8 +447,10 @@ async function pickStock(listing, order, { dryRun }) {
   }
 
   // Pre-reserved units (the shape publishG2gShare creates). A bulk pack row
-  // takes exactly its packs' accounts, never one more.
-  const free = undeliveredUnits(listing).filter((u) => !u.orderId);
+  // takes exactly its packs' accounts, never one more. A unit whose drops
+  // expired on Twitch since it was reserved is never handed over
+  // (freshFreeUnits); too few good ones is the "out of reserved stock" page.
+  const free = await freshFreeUnits(listing);
   if (free.length >= want) {
     return { picked: free.slice(0, want), source: "units", fromUnits: true };
   }
@@ -704,8 +706,8 @@ async function deliverOrder(order, { dryRun }) {
         orderId,
         error:
           "out of reserved stock: this offer has " +
-          undeliveredUnits(listing).filter((u) => !u.orderId).length +
-          " free account(s) and the order needs " + want +
+          (await freshFreeUnits(listing).catch(() => [])).length +
+          " deliverable account(s) (expired ones excluded) and the order needs " + want +
           " — deliver it by hand or refund it",
       };
     }
@@ -1315,12 +1317,23 @@ async function realStockFor(row, listedElsewhere) {
   }
   // A row whose stock is pre-reserved units: what is left is what nobody has
   // bought yet.
-  if ((row.units || []).length) return freeUnitCount(row);
+  if ((row.units || []).length) return (await freshFreeUnits(row)).length;
   return null;
 }
 
 function freeUnitCount(row) {
   return ((row && row.units) || []).filter((u) => !u.orderId && !u.deliveredAt).length;
+}
+
+// The free units that can still deliver the row's set: a pre-reserved unit is
+// never re-claimed, so its drops can have expired on Twitch while it sat on the
+// shelf (utils/dropReservation.js). Bulk pack rows and rows without a set are
+// left to their own rules and returned as they are. A DB error propagates —
+// syncStock reads a throw as "cannot tell", never as 0.
+async function freshFreeUnits(row) {
+  const free = ((row && row.units) || []).filter((u) => !u.orderId && !u.deliveredAt);
+  if (!free.length || !row.set || row.bulkOfferId) return free;
+  return require("./dropReservation").liveUnits(free, row.set);
 }
 
 // The rows realStockFor answers from their own units (its last branch).
@@ -1479,7 +1492,16 @@ async function syncStock() {
     // be written back onto the shelf — an offer advertising an account its
     // buyer already has. (Bulk rows are not in this pass; their own loop sets
     // their quantity.)
-    if (sellsOwnUnits(row) && !row.bulkOfferId) real = freeUnitCount(stillActive);
+    if (sellsOwnUnits(row) && !row.bulkOfferId) {
+      try {
+        real = (await freshFreeUnits(stillActive)).length;
+      } catch (e) {
+        // Cannot tell: leave this offer as it is, and let the rest of the pass
+        // (and the evergreen pass after it) run.
+        changes.push({ offer: row.externalId, error: "unit recount: " + e.message });
+        continue;
+      }
+    }
     const offerKey = String(row.externalId);
     try {
       if (real <= 0) {

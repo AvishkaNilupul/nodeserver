@@ -316,7 +316,8 @@ function aggregateForecast({ accounts, runtime, fallback = new Map(), campaigns 
 
 async function loadAvailableStock(accountIds) {
   if (!accountIds.length) return { items: [], games: [], accounts: 0 };
-  const match = { account: { $in: accountIds }, connected: { $ne: true }, soldAt: null };
+  // Expired drops are not stock (utils/dropReservation.js).
+  const match = { account: { $in: accountIds }, connected: { $ne: true }, soldAt: null, ...require("./dropReservation").notExpiredMatch() };
   const [items, games, accounts] = await Promise.all([
     DropLog.aggregate([
       { $match: match },

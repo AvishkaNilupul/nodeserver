@@ -362,6 +362,11 @@ const AUTO_FARM_DEFAULTS = {
   // share keeps its accounts reserved for a market that does not sell them.
   // Read through g2gMinItemsFor().
   g2gMinItems: {},
+  // Twitch removes a claimed drop 180-184 days after it was awarded, so a drop
+  // older than this many days is not sellable stock (utils/dropReservation.js
+  // AVAILABLE_DROP). Clamped 30..175; the gap to 180 is the buyer's time to
+  // connect it.
+  dropSellableMaxAgeDays: 170,
   // Games the auto-lister does not list: ["<game label>", ...]. Empty = every
   // farmed bundle is listed, as always. A NEW bundle of a game on the list is
   // published on no market and its accounts stay in stock; whatever is already

@@ -845,6 +845,8 @@ router.get(
                     $and: [
                       { $ne: ["$connected", true] },
                       { $eq: [{ $ifNull: ["$soldAt", null] }, null] },
+                      // expired on Twitch = not available (dropReservation)
+                      require("../utils/dropReservation").notExpiredExpr(),
                     ],
                   },
                   1,
@@ -1962,6 +1964,8 @@ router.get(
                           $and: [
                             { $eq: [{ $ifNull: ["$soldAt", null] }, null] },
                             { $ne: ["$connected", true] },
+                            // expired on Twitch = not open (dropReservation)
+                            require("../utils/dropReservation").notExpiredExpr(),
                           ],
                         },
                         1,
@@ -2754,6 +2758,8 @@ router.get(
             itemKey: { $in: keys },
             connected: { $ne: true },
             account: accountMatch,
+            // Expired drops are not stock (utils/dropReservation.js).
+            ...require("../utils/dropReservation").notExpiredMatch(),
           },
         },
         {
@@ -2865,6 +2871,8 @@ router.get(
             itemKey: { $in: keys },
             connected: { $ne: true },
             account: accountMatch,
+            // Expired drops are not stock (utils/dropReservation.js).
+            ...require("../utils/dropReservation").notExpiredMatch(),
           },
         },
         {

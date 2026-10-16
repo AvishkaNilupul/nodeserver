@@ -398,7 +398,13 @@ async function stockFor(listing, claim, supplied = suppliedDeps) {
     return (await unclaimedOnly(set, cands)).length;
   }
   if (listing.unclaimedGame) return 0;
-  return undeliveredUnits(listing).length;
+  // Expired units are not stock (utils/dropReservation.js).
+  return (
+    await require("./dropReservation").liveUnits(
+      undeliveredUnits(listing),
+      listing.set,
+    )
+  ).length;
 }
 
 // `supplied` is threaded through to stockFor only so an account-listing test
@@ -903,8 +909,13 @@ async function deliverOrder(order, { dryRun, supplied = suppliedDeps }) {
     return { orderId, delivered: qty, messages: sent, source: "dropset:" + set.name };
   }
 
-  // Pre-reserved units.
-  const free = undeliveredUnits(row).filter((u) => !u.orderId);
+  // Pre-reserved units. Never one whose drops expired on Twitch after it was
+  // reserved (utils/dropReservation.js): it stays on the row, and too few good
+  // units is the ordinary "not enough reserved stock" below.
+  const free = await require("./dropReservation").liveUnits(
+    undeliveredUnits(row).filter((u) => !u.orderId),
+    row.set,
+  );
   if (free.length < qty) {
     return {
       orderId,
@@ -1100,6 +1111,11 @@ async function deliverPendingOrders() {
             "playerauctions deliver " + id + " NOT delivered: " + r.skipped,
           );
         }
+      }
+      // A pre-reserved row short of good units (expired drops) is a PAID
+      // order that cannot ship: page it once, like a skip above.
+      if (r.error && /not enough reserved stock/i.test(r.error)) {
+        await alertUnfulfillable(order, r.error).catch(() => {});
       }
       if (r.error) console.error("playerauctions deliver " + id + ":", r.error);
       else if (r.dryRun)
