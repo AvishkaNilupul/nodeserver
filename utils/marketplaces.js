@@ -274,6 +274,20 @@ async function gfUploadPhoto(keys, listingId, imagePath) {
   );
 }
 
+// Nothing may go on sale on Gameflip until the owner says Gameflip approved the
+// Game Accounts category (owner, 2026-10-16: "prevent anything from getting
+// listed on gameflip untill we get the approval"). Every path that lists there
+// — auto-lister, unclaimed engine, rent-farm buffer, relist lane, bulk packs,
+// lots, the Listings page — creates the listing through gameflipPublish, so one
+// gate here stops them all. It refuses before any API call: nothing is created
+// on Gameflip, and each caller's ordinary failure path hands its stock back.
+// Read from the raw settings file on every call, so flipping the switch needs
+// no restart; a missing key means not frozen.
+function gameflipFrozen() {
+  const af = (loadSettings() || {}).autoFarm;
+  return !!(af && af.gameflipFrozen === true);
+}
+
 // Create a digital listing and put it on sale. Returns { externalId, url }.
 // When `autoDeliverCode` is set the listing is created as an auto-delivered
 // digital code: Gameflip stores the text and hands it to the buyer the moment
@@ -285,6 +299,12 @@ async function gameflipPublish({
   imagePath,
   autoDeliverCode,
 }) {
+  if (gameflipFrozen()) {
+    throw new Error(
+      "Gameflip is frozen until the Game Accounts approval — nothing may be listed there " +
+        "(switch autoFarm.gameflipFrozen)",
+    );
+  }
   const keys = requireKeys("gameflip");
   const cents = Math.round(Number(priceUsd) * 100);
   if (!Number.isFinite(cents) || cents < 75) {
@@ -6682,6 +6702,7 @@ module.exports = {
   gameflipTest,
   gameflipOwnerId,
   gameflipPublish,
+  gameflipFrozen,
   gameflipListingStatus,
   gameflipListingState,
   gameflipIsExpired,
