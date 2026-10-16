@@ -12,14 +12,14 @@
   const GROUPS = [["available", "Available — not claimed yet"], ["acquired", "Claimed"], ["expired", "Expired"]];
   const KIND = { code: "Code", link: "Link", ingame: "In-game item" };
   const LEVEL = { error: "error", warn: "warn" };
-  const statusOf = (a) => (a.sold ? [null, "Sold"] : STATUS[a.status] || [null, "Not checked yet"]);
+  const statusOf = (a) => (a.sold ? [null, "Handed over"] : STATUS[a.status] || [null, "Not checked yet"]);
   const sessionOf = (s) => (s.state === "farming" ? (s.credited === true ? ["ok", "Earning"] : ["info", "Watching"]) : SESSION[s.state] || [null, "Working"]);
   const time = (iso) => (iso ? fmt.when(iso) + " · " + fmt.ago(iso) : "–");
   const put = (node, ...kids) => { node.textContent = ""; node.append(...kids.flat(Infinity).filter((k) => k != null && k !== false)); return node; };
   const muted = (text) => el("p", { class: "s-muted", style: { margin: "0" } }, text);
   const row = (dt, dd) => [el("dt", dt), el("dd", dd)];
   function idleSentence(a, bot) {
-    if (a.sold) return "Sold — it is not farmed.";
+    if (a.sold) return "Handed over — someone else owns this SOOP account, so it is not farmed and its codes stay out of bundles.";
     if (a.status === DEAD) return "It cannot farm until its cookie is re-imported.";
     if (!bot) return "Idle — it is not in a bot. Add it to one on the Bots tab.";
     if (bot.state === "stopped") return "Idle — its bot is stopped.";
@@ -37,7 +37,7 @@
 
     // ---- header + what it is doing now (from Soop.state, redrawn only when they change) ----
     const head = el("div", { class: "s-stack" }), nowBox = el("div", { class: "s-stack is-tight" });
-    const soldBtn = ui.button("Mark sold", { size: "sm", icon: "check", onClick: toggleSold });
+    const soldBtn = ui.button("Mark handed over", { size: "sm", icon: "check", onClick: toggleSold });
     const syncBtn = ui.button("Sync", { size: "sm", icon: "refresh", onClick: sync });
     const actions = el("div", { class: "s-row" },
       ui.button("Re-check", { size: "sm", icon: "refresh", onClick: recheck }), soldBtn,
@@ -58,7 +58,7 @@
       if (sig !== headSig) {
         headSig = sig;
         handle.setTitle(a.nick ? id + " · " + a.nick : id);
-        soldBtn.lastChild.nodeValue = a.sold ? "Mark not sold" : "Mark sold";
+        soldBtn.lastChild.nodeValue = a.sold ? "Mark ours again" : "Mark handed over";
         syncBtn.disabled = dead; syncBtn.title = dead ? "Logged out — re-import its cookie first" : "Read this account's inventory from SOOP now";
         const trouble = !a.sold && a.status !== "ok" && a.status !== "untested";
         put(head,
@@ -98,11 +98,15 @@
     function recheck() {
       return Soop.api.post("/accounts/check", { ids: [id] }).then(() => { Soop.toast("Checking " + id + " — its status updates when the check finishes", "ok"); return Soop.refresh(); });
     }
-    function toggleSold() {
+    // "Sold" here means the SOOP account itself left us. We sell codes, not
+    // accounts: a login whose codes sold keeps farming and fills new bundles.
+    async function toggleSold() {
       const a = Soop.accountById(id);
       if (!a) return null;
       const sold = !a.sold;
-      return Soop.api.post("/accounts/update", { id, sold }).then(Soop.refresh).then(() => { Soop.toast(sold ? id + " is marked sold — it is no longer farmed" : id + " is marked not sold", "ok"); });
+      if (sold && !(await Soop.confirm({ title: "Mark " + id + " as handed over?", danger: true, okLabel: "Mark handed over",
+        body: "Only for when someone else now owns this SOOP account. Selling its codes never needs this: a login whose codes were sold keeps farming, and its new codes go into new bundles. Handed over, it stops farming and its codes stay out of bundles." }))) return null;
+      return Soop.api.post("/accounts/update", { id, sold }).then(Soop.refresh).then(() => { Soop.toast(sold ? id + " is marked handed over — it is no longer farmed" : id + " is ours again — it farms again", "ok"); });
     }
     function editNote() {
       const a = Soop.accountById(id) || {};

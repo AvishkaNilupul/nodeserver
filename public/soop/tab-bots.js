@@ -27,7 +27,7 @@
     const a = Soop.accountById(id), s = a && a.botId === bot.id ? a.session : null;
     if (bot.doneIds.includes(id)) return { label: "Done", tone: "ok", detail: "Nothing left to earn for this bot" };
     if (!a) return { label: "Missing", tone: "error", detail: "This account was deleted — remove it from the bot" };
-    if (a.sold) return { label: "Sold", tone: "error", detail: "Marked sold, so it no longer farms" };
+    if (a.sold) return { label: "Handed over", tone: "error", detail: "Marked handed over (someone else owns it), so it no longer farms" };
     if (a.status === "not_logged_in") return { label: "Logged out", tone: "error", detail: "Logged out — re-import the cookie" };
     if (a.status === "drops_rejected" && !s) return { label: "Refused", tone: "error", detail: "The drops site refuses this login — re-import the cookie" };
     if (s) {

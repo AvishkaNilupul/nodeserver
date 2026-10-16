@@ -19,7 +19,7 @@
   const fill = (node, ...kids) => { node.textContent = ""; kids.flat(Infinity).forEach((k) => { if (k != null && k !== false) node.append(k); }); return node; };
   const count = (n, one) => fmt.num(n) + " " + one + (n === 1 ? "" : "s");
   // Why an account cannot join a new bot ("" = it can). The server enforces the same three rules.
-  const blocked = (a) => (a.sold ? "Sold" : a.status === "not_logged_in" ? "Logged out — re-import the cookie"
+  const blocked = (a) => (a.sold ? "Handed over" : a.status === "not_logged_in" ? "Logged out — re-import the cookie"
     : a.botId ? 'Already in the bot "' + ((Soop.botById(a.botId) || {}).name || "another bot") + '"' : "");
   const freeAccounts = () => (Soop.state.accounts || []).filter((a) => !blocked(a));
   const rewards = (c) => ((c.items || []).length ? c.items.map((i) => fmt.mins(i.minutes) + " " + i.name) : (c.steps || []).map(fmt.mins)).join(" · ");

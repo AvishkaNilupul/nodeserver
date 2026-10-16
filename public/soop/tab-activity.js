@@ -162,7 +162,7 @@
       return Soop.refresh();
     }) }), v.sc.el);
 
-    v.accOk = ui.stat("Logged in", "–"); v.accDead = ui.stat("Logged out", "–"); v.accSold = ui.stat("Sold", "–");
+    v.accOk = ui.stat("Logged in", "–"); v.accDead = ui.stat("Logged out", "–"); v.accSold = ui.stat("Handed over", "–");
     v.recheck = ui.button("Re-check all logins", { size: "sm", icon: "refresh", onClick: () => Soop.api.post("/accounts/check", { ids: [] }).then((j) => {
       Soop.toast("Checking " + plural(j.total, "account") + " — allow a few seconds for each", "ok");
       return Soop.refresh();

@@ -13,7 +13,7 @@
   const SESSION = { starting: ["info", "Joining"], waiting: [null, "Waiting"], sleeping: [null, "Sleeping"], backoff: ["warn", "Not earning"], stopping: [null, "Stopping"], error: ["error", "Error"] };
   const FROM_LINK = { ok: "ok", dead: "dead", sold: "sold", idle: "idle" };      // Soop.go("accounts", { status })
   const plural = (n, word) => fmt.num(n) + " " + word + (n === 1 ? "" : "s");
-  const statusOf = (a) => (a.sold ? [null, "Sold"] : STATUS[a.status] || [null, "Not checked yet"]);
+  const statusOf = (a) => (a.sold ? [null, "Handed over"] : STATUS[a.status] || [null, "Not checked yet"]);
   const sessionOf = (s) => (s.state === "farming" ? (s.credited === true ? ["ok", "Earning"] : ["info", "Watching"]) : SESSION[s.state] || [null, "Working"]);
   function bucket(a) {                           // which activity chip an account belongs to
     if (a.sold) return "sold";
@@ -21,7 +21,7 @@
     return lost(a) ? "dead" : "idle";
   }
   function idleSentence(a) {
-    if (a.sold) return "Sold — it is not farmed";
+    if (a.sold) return "Handed over — it is not farmed";
     if (lost(a)) return "Cannot farm until its cookie is re-imported";
     const bot = a.botId ? Soop.botById(a.botId) : null;
     if (!bot) return "Idle — not in a bot";
@@ -103,15 +103,18 @@
       return Soop.refresh();
     });
   }
+  // "Sold" here means the SOOP account itself left us; selling its codes never needs it.
   async function bulkSold(sold) {
     const ids = picked().filter((id) => { const a = Soop.accountById(id); return a && a.sold !== sold; });
+    if (sold && ids.length && !(await Soop.confirm({ title: "Mark " + plural(ids.length, "account") + " as handed over?", danger: true, okLabel: "Mark handed over",
+      body: "Only for when someone else now owns this SOOP account. Selling its codes never needs this: a login whose codes were sold keeps farming, and its new codes go into new bundles. Handed over, it stops farming and its codes stay out of bundles." }))) return;
     let failed = 0, why = "";
     for (const id of ids) {
       try { await Soop.api.post("/accounts/update", { id, sold }); } catch (e) { failed++; why = e.message; }
     }
     await Soop.refresh();
     const done = ids.length - failed;
-    if (done) Soop.toast("Marked " + plural(done, "account") + (sold ? " as sold — they are no longer farmed" : " as not sold"), "ok");
+    if (done) Soop.toast("Marked " + plural(done, "account") + (sold ? " as handed over — they are no longer farmed" : " as ours again — they farm again"), "ok");
     if (failed) throw new Error(plural(failed, "account") + " could not be changed: " + why);
   }
   async function bulkDelete() {
@@ -128,7 +131,7 @@
     await Soop.refresh();
   }
   function buildBulk() {
-    const count = el("b"), sell = ui.button("Mark sold", { size: "sm", icon: "check", onClick: () => bulkSold(true) }), unsell = ui.button("Mark not sold", { size: "sm", onClick: () => bulkSold(false) });
+    const count = el("b"), sell = ui.button("Mark handed over", { size: "sm", icon: "check", onClick: () => bulkSold(true) }), unsell = ui.button("Mark ours again", { size: "sm", onClick: () => bulkSold(false) });
     const bar = el("div", { class: "s-note s-row", style: { alignItems: "center" }, hidden: true, role: "region", "aria-label": "Actions for the selected accounts" }, count,
       ui.button("Re-check", { size: "sm", icon: "refresh", onClick: bulkCheck }), sell, unsell,
       ui.button("Delete", { size: "sm", tone: "danger", icon: "trash", onClick: bulkDelete }),
@@ -161,7 +164,7 @@
     if (sig === chipSig) return;
     chipSig = sig;
     chips.setOptions([{ value: "all", label: "All", count: n.all }, { value: "earning", label: "Earning", count: n.earning }, { value: "waiting", label: "Waiting", count: n.waiting },
-      { value: "idle", label: "Idle", count: n.idle }, { value: "dead", label: "Logged out", count: n.dead }, { value: "sold", label: "Sold", count: n.sold },
+      { value: "idle", label: "Idle", count: n.idle }, { value: "dead", label: "Logged out", count: n.dead }, { value: "sold", label: "Handed over", count: n.sold },
       filter === "ok" ? { value: "ok", label: "Logged in", count: n.ok } : null].filter(Boolean));   // "Logged in" only arrives through a link from another tab
   }
   function setFilter(v) { filter = v; chips.set(v); drawChips(); redraw(); }
