@@ -288,8 +288,15 @@ test("compileSourceWords skips bad sources and keeps the good ones", () => {
   assert.equal(findSourceWord("Korea", re), "Korea");
   assert.equal(findSourceWord("KR codes", re), "KR");
   assert.equal(findSourceWord("a", re), "a");
-  // The repeated group name could not be joined, so "b" is not a word.
-  assert.equal(findSourceWord("b", re), null);
+  // A repeated group name joins only where the engine allows duplicate named
+  // groups across alternatives (Node 22+); older engines skip "b".
+  let dupNames = true;
+  try {
+    new RegExp("(?:(?<n>a))|(?:(?<n>b))");
+  } catch {
+    dupNames = false;
+  }
+  assert.equal(findSourceWord("b", re), dupNames ? "b" : null);
   assert.equal(findSourceWord("( [a- *oops", re), "a");
   assert.equal(findSourceWord("nothing here", re), null);
 });
