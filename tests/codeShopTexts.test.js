@@ -238,7 +238,9 @@ test("no guide given falls back to the default guide", () => {
 test("defaultLabel: ASCII names without source words, else empty", () => {
   assert.equal(defaultLabel({ name: "Banana Cat Spray" }), "Banana Cat Spray");
   assert.equal(defaultLabel({ name: "  Kraken Spray  " }), "Kraken Spray", "\\bkr\\b is a word, not a prefix");
-  assert.equal(defaultLabel({ name: "Skål Spray" }), "");
+  assert.equal(defaultLabel({ name: "Skål Spray" }), "Skal Spray", "accents fold to ASCII");
+  assert.equal(defaultLabel({ name: "Café Crème Icon" }), "Cafe Creme Icon");
+  assert.equal(defaultLabel({ name: "Skål 물류" }), "", "a non-Latin letter still leaves it empty");
   assert.equal(defaultLabel({ name: "물류 증표*3" }), "");
   assert.equal(defaultLabel({ name: "SOOP Exclusive Icon" }), "");
   assert.equal(defaultLabel({ name: "KR Server Spray" }), "");

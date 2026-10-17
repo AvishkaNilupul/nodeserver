@@ -12,7 +12,10 @@
 // - ledger rows: the status-guarded `in_stock -> in_unit` link of each unit's
 //   codes (a row already linked to exactly that unit is left as it is; a row
 //   the foreign-stock guard held BECAUSE it sits in that very unit links the
-//   same way, `held -> in_unit`, guarded by that exact problem), and
+//   same way, `held -> in_unit`, guarded by that exact problem; so does a row
+//   held because its code was shown in the farm panel when the unit holding it
+//   is already SOLD: that code went to the buyer, the reveal changes nothing),
+//   and
 //   `in_stock -> held` for the codes of a removed unit that carries the marks
 //   of having gone out through a market (it may have reached a buyer);
 // - one CodeProduct owning the offer (an existing one is reused).
@@ -33,6 +36,7 @@
 const mongoose = require("mongoose");
 const slotsLib = require("./slots");
 const { foreignProblem } = require("./foreign");
+const { PROBLEMS: HELD_PROBLEMS } = require("./held");
 const { defaultTexts } = require("./texts");
 
 const ObjectId = mongoose.Types.ObjectId;
@@ -322,9 +326,10 @@ function createAdopt(deps = {}) {
     // Every line: its ledger row, and whether it is free, already ours, or not.
     let alreadyLinked = 0;
     let fromGuard = 0;
+    let fromSoldRevealed = 0;
     const toLink = new Map(); // unitId -> { in_stock: [row ids], held: [row ids] }
     for (const { unit, lines } of parsed) {
-      const ids = { in_stock: [], held: [] };
+      const ids = { in_stock: [], held: [], revealed: [] };
       lines.forEach((l, i) => {
         const row = rowByHash.get(l.hash);
         l.row = row || null;
@@ -348,6 +353,13 @@ function createAdopt(deps = {}) {
           fromGuard += 1;
           return;
         }
+        // Shown in the farm panel, but its unit is already sold: the buyer has
+        // it, so linking it only records the sale. A unit still on sale is refused.
+        if (row.state === "held" && text(row.problem) === HELD_PROBLEMS.revealed && text(unit.status) === "sold") {
+          ids.revealed.push(row._id);
+          fromSoldRevealed += 1;
+          return;
+        }
         const why = row.state === "held" && text(row.problem) ? ` (${text(row.problem)})` : "";
         problems.push({
           kind: row.unit ? "in_other_unit" : "not_in_stock",
@@ -358,7 +370,7 @@ function createAdopt(deps = {}) {
           ...at,
         });
       });
-      if (ids.in_stock.length || ids.held.length) toLink.set(String(unit._id), ids);
+      if (ids.in_stock.length || ids.held.length || ids.revealed.length) toLink.set(String(unit._id), ids);
     }
 
     // Every unit must have the same number of lines, and line N the same slot.
@@ -475,7 +487,7 @@ function createAdopt(deps = {}) {
     }
 
     const codes = parsed.reduce((n, p) => n + p.lines.length, 0);
-    const linkCount = [...toLink.values()].reduce((n, ids) => n + ids.in_stock.length + ids.held.length, 0);
+    const linkCount = [...toLink.values()].reduce((n, ids) => n + ids.in_stock.length + ids.held.length + ids.revealed.length, 0);
     const report = {
       offerId: String(id),
       title: text(offer.title),
@@ -485,6 +497,7 @@ function createAdopt(deps = {}) {
       byStatus,
       toLink: linkCount,
       fromGuard,
+      fromSoldRevealed,
       alreadyLinked,
       removedToHold: toHold.length,
       productId: product ? String(product._id) : null,
@@ -514,6 +527,7 @@ function createAdopt(deps = {}) {
       const writes = [
         { list: ids.in_stock, from: "in_stock", filter: { state: "in_stock", unit: null }, $set: base },
         { list: ids.held, from: "held", filter: { state: "held", problem: foreignProblem(unit._id) }, $set: { ...base, problem: "" } },
+        { list: ids.revealed, from: "held", filter: { state: "held", problem: HELD_PROBLEMS.revealed }, $set: { ...base, problem: "" } },
       ];
       let want = 0;
       let won = 0;

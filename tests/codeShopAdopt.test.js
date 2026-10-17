@@ -333,6 +333,7 @@ test("dry run: a correct report, and nothing at all is written", async () => {
     byStatus: { available: 2, fed: 0, sold: 1, removed: 1 },
     toLink: 12,
     fromGuard: 0,
+    fromSoldRevealed: 0,
     alreadyLinked: 0,
     removedToHold: 0,
     productId: null,
@@ -648,6 +649,34 @@ test("after the foreign-stock guard held a live offer's codes, adopt links them;
   assert.equal(after.scanned, 1, "only the other listing's row is still foreign");
   assert.equal(after.conflicts, 1, "its copy of a.icon is now a conflict with our unit");
   assertNoCode(swept, refused, dry, res, after, events.logs);
+});
+
+test("a code shown in the farm panel links when its unit is SOLD, and is refused when its unit is on sale", async () => {
+  const { offer, codes, units } = await liveOffer();
+  const REVEALED = "its code was shown in the farm panel";
+  // c is sold, a is still on sale: one revealed code in each.
+  for (const code of [codes.c.icon, codes.a.icon]) {
+    await CodeStock.updateOne({ codeHash: slots.hashCode(code) }, { $set: { state: "held", problem: REVEALED } });
+  }
+  const { adopter } = makeAdopt();
+  const refused = await adopter.adopt(offer._id);
+  assert.equal(refused.ok, false);
+  assert.deepEqual(kinds(refused), ["not_in_stock"]);
+  assert.equal(refused.details[0].unitId, String(units.ua._id), "only the on-sale unit's revealed code is a problem");
+
+  // The on-sale one is vouched for by hand; the sold one stays held for adopt.
+  await CodeStock.updateOne({ codeHash: slots.hashCode(codes.a.icon) }, { $set: { state: "in_stock", problem: "" } });
+  const dry = await adopter.adopt(offer._id);
+  assert.equal(dry.ok, true, JSON.stringify(dry.problems));
+  assert.equal(dry.report.fromSoldRevealed, 1);
+  const res = await adopter.adopt(offer._id, { apply: true, actor: "owner" });
+  assert.equal(res.ok, true, JSON.stringify(res.problems));
+  assert.deepEqual(res.shortfall, []);
+  const row = await rowOf(codes.c.icon);
+  assert.equal(row.state, "sold");
+  assert.equal(String(row.unit), String(units.uc._id));
+  assert.equal(row.problem, "");
+  assertNoCode(refused, dry, res);
 });
 
 // ── problems: nothing is written ────────────────────────────────────────────

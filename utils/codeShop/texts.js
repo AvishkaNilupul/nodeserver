@@ -81,8 +81,14 @@ function sourceWordRe(list) {
 // The label a slot gets by default: the reward's English name when it is
 // plain ASCII and says nothing about where it came from, else "" (the owner
 // writes one). `sourceWords` overrides the default list (e.g. the config's).
+// Latin letters with accents fold to plain ASCII ("Skål Spray" -> "Skal Spray",
+// the spelling the hand-made bundles already used); other scripts stay empty.
+function foldAccents(s) {
+  return s.normalize("NFKD").replace(/[\u0300-\u036f]/g, "");
+}
+
 function defaultLabel(row, { sourceWords } = {}) {
-  const name = row && typeof row.name === "string" ? row.name.trim() : "";
+  const name = row && typeof row.name === "string" ? foldAccents(row.name).trim() : "";
   if (!name || !LABEL_RE.test(name)) return "";
   const re = sourceWordRe(Array.isArray(sourceWords) ? sourceWords : defaultSourceWords());
   return re && re.test(name) ? "" : name;
