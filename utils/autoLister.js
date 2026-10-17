@@ -1121,6 +1121,25 @@ async function publishZeusxShare({
   };
 }
 
+// Eldorado bans a second offer for an item already listed, and two drop sets
+// with the same items render the same title — 11 such copies were on sale on
+// 2026-10-17. Compared without case, spacing or punctuation, so "3,000
+// Credits" and "3000 Credits" are the same title too.
+function eldoradoTitleKey(title) {
+  return String(title || "").toLowerCase().replace(/[^a-z0-9]+/g, "");
+}
+
+// The active Eldorado row (ours or the owner's) already selling this title.
+async function eldoradoSameTitleOnSale(title) {
+  const key = eldoradoTitleKey(title);
+  if (!key) return null;
+  const rows = await MarketplaceListing.find(
+    { marketplace: "eldorado", status: "active" },
+    { externalId: 1, title: 1 },
+  ).lean();
+  return rows.find((r) => eldoradoTitleKey(r.title) === key) || null;
+}
+
 // Eldorado share. One offer whose QUANTITY is the number of reserved accounts
 // — Eldorado's Twitch Drops category is multi-stock, so unlike ZeusX we do not
 // need a listing per account. The reserved accounts ride along as the row's
@@ -1142,6 +1161,14 @@ async function publishEldoradoShare({
     throw new Error(
       game + " is a no-claim game — sellable only from the unclaimed farm, " +
         "not the auto-farm's claimed archive",
+    );
+  }
+  // Before anything is reserved, so the accounts stay free for other markets.
+  const twin = await eldoradoSameTitleOnSale(title);
+  if (twin) {
+    throw new Error(
+      "same title already on sale on Eldorado (offer " + twin.externalId +
+        ") — a second offer for the same item breaks Eldorado's rules",
     );
   }
   accounts = await reserveAccountsForPublish(accounts, set, ELD_CLAIM_TAG);
@@ -3611,6 +3638,8 @@ module.exports = {
   // Exported so the no-claim guard on each is testable without driving a whole
   // auto-farm task through the lister.
   publishEldoradoShare,
+  eldoradoTitleKey,
+  eldoradoSameTitleOnSale,
   publishPlayerAuctionsShare,
   publishG2gShare,
   g2gBundleTooSmall,
