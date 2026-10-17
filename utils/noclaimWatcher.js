@@ -323,9 +323,125 @@ async function readBots() {
     `st=$(docker inspect -f '{{.State.StartedAt}}' "$c" 2>/dev/null); ` +
     `up=$(( $(date +%s) - $(date -d "$st" +%s 2>/dev/null || date +%s) )); ` +
     `v=$(docker logs --tail ${LOG_TAIL} "$c" 2>&1 | python3 -c ${hosts.shq(LOG_VERDICT_PY)} ${dir}/"$id"/Configuration/config.json "$st" 2>/dev/null); ` +
-    `[ -n "$v" ] || v="ERR|py"; echo "$id|$up|$v"; done; echo "LOGS_END"`;
+    `[ -n "$v" ] || v="ERR|py"; echo "$id|$up|$v"; done; echo "LOGS_END"; ` +
+    // The host's free RAM and what each running no-claim bot uses, for the
+    // start limit. `docker stats` with no ids lists EVERY container, so it only
+    // runs when a no-claim bot is up.
+    `echo "MEM_START"; awk '/MemAvailable/{print "avail|" int($2/1024)}' /proc/meminfo 2>/dev/null; ` +
+    `ids=$(docker ps -q --filter name=^/${CONTAINER_PREFIX} 2>/dev/null); ` +
+    `[ -n "$ids" ] && docker stats --no-stream --format '{{.Name}}|{{.MemUsage}}' $ids 2>/dev/null; echo "MEM_END"`;
   const { stdout } = await hosts.runShell(pi(), script, { timeout: 90000 });
-  return parseBots(stdout);
+  return { bots: parseBots(stdout), mem: parseHostMem(stdout) };
+}
+
+// "130.5MiB / 11.68GiB" → 130.5 (MB). Unknown → NaN.
+function memUsageMb(text) {
+  const m = String(text || "").trim().match(/^([\d.]+)\s*([KMG]i?B)/i);
+  if (!m) return NaN;
+  const n = Number(m[1]);
+  const u = m[2].toUpperCase();
+  return u.startsWith("G") ? n * 1024 : u.startsWith("K") ? n / 1024 : n;
+}
+
+// Pure parser for the MEM section: { availableMb (null = unknown), botMb: { id: MB } }.
+function parseHostMem(stdout) {
+  let section = false;
+  let availableMb = null;
+  const botMb = {};
+  for (const raw of String(stdout || "").split("\n")) {
+    const line = raw.trim();
+    if (line === "MEM_START") { section = true; continue; }
+    if (line === "MEM_END") { section = false; continue; }
+    if (!section || !line) continue;
+    const [name, val] = line.split("|");
+    if (name === "avail") {
+      const n = Number(val);
+      if (Number.isFinite(n) && n > 0) availableMb = n;
+    } else if (name.startsWith(CONTAINER_PREFIX)) {
+      const mb = memUsageMb(val);
+      if (Number.isFinite(mb)) botMb[name.slice(CONTAINER_PREFIX.length)] = mb;
+    }
+  }
+  return { availableMb, botMb };
+}
+
+// The start limit (owner, 2026-10-17: "when there is a live the RAM goes to the
+// max"). A live Overwatch broadcast used to cold-start every Overwatch bot in
+// the same tick, and the host ran out of memory. Now a pass starts only as many
+// bots as the host's free RAM can hold above a floor, and at most `perTick` at
+// a time, so the next pass measures the real cost before starting more. The
+// bots left out wait their turn: when a running bot finishes the campaign the
+// watcher stops it (the FINISHED rule) and its memory goes to the next one —
+// the first wave farms, then the second starts. Lowest bot id goes first.
+// Settings: autoFarm.noclaimStartLimit { enabled (default on), minFreeMb
+// (default autoFarm.hostMinFreeMb, else 1500), perBotMb (estimate floor, 450),
+// perTick (3), maxRunning (0 = no cap), shedBelowMb (600) }.
+const START_LIMIT_DEFAULTS = { perBotMb: 450, perTick: 3, maxRunning: 0, shedBelowMb: 600, minFreeMb: 1500 };
+
+function startLimitConfig(af = {}) {
+  const raw = (af && af.noclaimStartLimit) || {};
+  const num = (v, d) => {
+    const n = Number(v);
+    return v != null && v !== "" && Number.isFinite(n) && n >= 0 ? n : d;
+  };
+  return {
+    enabled: raw.enabled !== false,
+    minFreeMb: num(raw.minFreeMb, num(af && af.hostMinFreeMb, START_LIMIT_DEFAULTS.minFreeMb)),
+    perBotMb: num(raw.perBotMb, START_LIMIT_DEFAULTS.perBotMb),
+    perTick: Math.max(1, Math.floor(num(raw.perTick, START_LIMIT_DEFAULTS.perTick))),
+    maxRunning: Math.floor(num(raw.maxRunning, START_LIMIT_DEFAULTS.maxRunning)),
+    shedBelowMb: num(raw.shedBelowMb, START_LIMIT_DEFAULTS.shedBelowMb),
+  };
+}
+
+// PURE (unit-tested). Given decideActions' result, the bots and the host
+// memory read, return which starts go ahead now, which wait, and at most one
+// running bot to stop because the host is nearly out of memory.
+//   allowed = min(perTick, floor((free after this pass's stops - minFreeMb) /
+//             per-bot estimate), maxRunning - running after the stops)
+// The per-bot estimate is the larger of perBotMb and the biggest running
+// no-claim bot (a farming bot grows; an idle one reads low). Unknown free RAM
+// still ramps (perTick) — it never blocks farming outright.
+function limitStarts({ starts, stops = [], finished = [] }, bots, mem, cfg) {
+  const ordered = [...starts].sort((a, b) => (parseInt(a, 10) || 0) - (parseInt(b, 10) || 0));
+  if (!cfg || !cfg.enabled) return { go: ordered, wait: [], shed: null, estimateMb: null, reason: "" };
+  const botMb = (mem && mem.botMb) || {};
+  const leaving = new Set([...stops, ...finished].map(String));
+  const sizes = Object.values(botMb).filter((n) => Number.isFinite(n));
+  const estimateMb = Math.max(cfg.perBotMb, sizes.length ? Math.max(...sizes) : 0);
+  const runningAfter = bots.filter((b) => b.running && !leaving.has(String(b.id))).length;
+
+  let allowed = cfg.perTick;
+  let reason = "";
+  const avail = mem && Number.isFinite(mem.availableMb) ? mem.availableMb : null;
+  if (avail != null) {
+    let freed = 0;
+    for (const id of leaving) freed += Number.isFinite(botMb[id]) ? botMb[id] : 0;
+    const room = Math.floor((avail + freed - cfg.minFreeMb) / estimateMb);
+    if (room < allowed) {
+      allowed = Math.max(0, room);
+      reason = `${avail} MB free, keeping ${cfg.minFreeMb} MB spare at ~${Math.round(estimateMb)} MB a bot`;
+    }
+  }
+  if (cfg.maxRunning > 0 && cfg.maxRunning - runningAfter < allowed) {
+    allowed = Math.max(0, cfg.maxRunning - runningAfter);
+    reason = `${runningAfter} running, cap ${cfg.maxRunning}`;
+  }
+  const go = ordered.slice(0, allowed);
+  const wait = ordered.slice(allowed);
+  if (wait.length && !reason) reason = `at most ${cfg.perTick} start(s) per pass`;
+
+  // Nearly out of memory with nothing being stopped anyway: park the bot that
+  // started last (it resumes on a later pass when there is room again; Twitch
+  // keeps the watch progress).
+  let shed = null;
+  if (avail != null && avail < cfg.shedBelowMb && !leaving.size && !go.length) {
+    const up = bots
+      .filter((b) => b.running && !b.finishedNow && b.logVerdict)
+      .sort((a, b) => a.logVerdict.uptimeS - b.logVerdict.uptimeS);
+    if (up.length > 1) shed = up[0].id;
+  }
+  return { go, wait, shed, estimateMb, reason };
 }
 
 function parseMarker(text) {
@@ -544,8 +660,29 @@ async function runOnce() {
     counts.live = keys.filter((k) => verdict[k].live).length;
     counts.errors = keys.filter((k) => verdict[k].error).length;
 
-    const bots = await readBots();
-    const { starts, stops, finished } = decideActions(bots, verdict);
+    const { bots, mem } = await readBots();
+    const decided = decideActions(bots, verdict);
+    const { stops, finished } = decided;
+    const limit = limitStarts(decided, bots, mem, startLimitConfig(settings.getAutoFarm()));
+    const starts = limit.go;
+    if (limit.shed) stops.push(limit.shed);
+    state.startLimit = {
+      availableMb: mem.availableMb,
+      estimateMb: limit.estimateMb,
+      waiting: limit.wait,
+      shed: limit.shed,
+      reason: limit.reason,
+    };
+    // One line per pass that holds bots back, so "why isn't bot N farming?"
+    // has an answer in the pm2 log.
+    if (limit.wait.length || limit.shed) {
+      console.log(
+        "noclaimWatcher: start limit — starting " + (starts.join(",") || "none") +
+          ", waiting " + (limit.wait.join(",") || "none") +
+          (limit.shed ? ", parking " + limit.shed + " (low RAM)" : "") +
+          " | " + limit.reason,
+      );
+    }
     const now = Date.now();
     const markers = {};
     for (const id of finished) {
@@ -586,7 +723,10 @@ async function runOnce() {
         host: HOST_ID,
         container: containerFor(id),
         actor: "noclaim-watcher",
-        reason: "no live stream for this game — stopping to save RAM",
+        reason:
+          id === limit.shed
+            ? "host nearly out of RAM (" + mem.availableMb + " MB free) — parked, resumes when there is room"
+            : "no live stream for this game — stopping to save RAM",
       });
     }
     for (const id of starts) {
@@ -633,6 +773,7 @@ function status() {
     lastError: state.lastError,
     lastCounts: state.lastCounts,
     games: state.games,
+    startLimit: state.startLimit || null,
     tickMs: TICK_MS,
   };
 }
@@ -661,6 +802,10 @@ module.exports = {
   decideActions,
   resolveWithHysteresis,
   parseBots,
+  parseHostMem,
+  memUsageMb,
+  limitStarts,
+  startLimitConfig,
   finishedCovers,
   markerCampaignIds,
   LOG_VERDICT_PY,
