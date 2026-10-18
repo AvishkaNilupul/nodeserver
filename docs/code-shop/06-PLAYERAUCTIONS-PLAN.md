@@ -128,3 +128,55 @@ codes. Delta Force is not a PA candidate.
 4. **Loot boxes.** Sell them on PA despite the "already claimed on Twitch"
    caveat (and add that warning everywhere)?
 5. **Delta Force.** Leave it off PA (no code market there, short code life)?
+
+## Build contract (2026-10-18, the owner's go)
+
+Owner, same day: "put some on PA too … half half … proper price for there as
+well and also from now on make the autolister list there as well", and $5.00 a
+bundle. Decisions:
+
+- **C1. Market `playerauctions`** joins `publish.ALLOWED_MARKETS`, the config
+  `markets` switch (DEFAULTS and SAFE_DEFAULTS: off; the owner turns it on),
+  the `CodeProduct.markets` validator and the routes' market list. GGSel stays
+  refused exactly as before.
+- **C2. One PA price for every code bundle:** `config.pricing.playerauctionsUsd`,
+  default 5, refused below PA's $5 minimum. It is a fixed price (pricing.js
+  never touches PA); the Eldorado price is unchanged.
+- **C3. Half and half = the shared shelf (S4).** A product's one AccountOffer
+  backs its Eldorado and its PA listing; `suppliedStock.stockFor` gives each
+  listing floor(free / 2) (+1 for the lower id), and both stock syncs push that
+  share. Claims stay first-come-first-served on the whole shelf, so neither
+  market strands a paid order. A new PA listing is published with the share it
+  will have (`shareOfShelf(free, "", activeIds)`), never the whole shelf.
+- **C4. Publishing** (publish.js `publishPlayerAuctions`): game from
+  `playerauctionsResolveGame(marketGame)`; the item leaf is picked by the shop,
+  never a "Twitch Drops" root (codes are not Twitch drops): a root with a real
+  id, preferring its "Other …" leaf; title fitted to 150 characters by dropping
+  " | " parts from the end; the redeem guide (games.js howTo, then good-to-know
+  lines while they fit) in `instruction` (≤ 500); `itemsPerUnit` = slots,
+  `minUnitPerOrder` 1, the 20-minute delivery tier (or the game's fastest).
+  A live offer always gets its MarketplaceListing row (`rowBase`, marketplace
+  `playerauctions`, `qtyTarget` = the share); a row that cannot be saved
+  CANCELS the new offer. "Operated too frequent" is waited out once (25 s)
+  and tried again. An answer that may have been lost says "check
+  PlayerAuctions for an offer with this title before publishing again" (R2).
+- **C5. One PA publish per tick.** PA throttles writes (`PA_WRITE_GAP_MS`
+  25 s) and nothing spaces them centrally, so `publishPending` puts up at most
+  one PA listing per 5-minute tick.
+- **C6. Pause / retire take PA down too:** each active PA row is hidden
+  (`playerauctionsHide`, reversible) and marked `delisted`; resume publishes a
+  fresh PA offer, as it does on Eldorado. Retire = pause, then dissolve.
+- **C7. The auto-lister lists there too:** new drafts take every allowed market
+  switched on (planner `marketsOf`, routes `enabledMarkets`), so with the
+  switch on a draft is approved onto Eldorado AND PA. R2 is unchanged: the
+  scheduler never publishes an adopted product and never re-creates a listing.
+- **C8. PA delivery of a code unit** (playerauctionsFulfiller
+  `suppliedMessages`): when the offer's template does not fit 300 characters
+  and every line of a unit is a code line (`N) Label = CODE`), the template is
+  rendered around `{password}`: its opening, the code lines packed into as few
+  messages as fit, then its closing help, each message ≤ 300; several units in
+  one order are numbered ("Bundle 1 of 2"). Any other unit keeps today's path.
+  Never the Twitch-account house copy for a code unit.
+
+Out of scope now: a per-product PA price, a PA competitor scan, Delta Force on
+PA (no code market there; its codes stop working within two weeks).
