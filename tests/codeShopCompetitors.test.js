@@ -203,6 +203,61 @@ test("deliveryForm: a Twitch-drop account offer is an account, even when it ment
   assert.equal(deliveryForm("TWITCH DROPS SPACE GAME | 6/6 ITEMS", ""), "account", "the title alone says Twitch drops");
 });
 
+// 2026-10-18: a real code bundle on another market said once that the buyer
+// "receives the codes", but also "linked to your account", "claimed on
+// Twitch" and "claim the items" — three account words to one code word, so it
+// read as an account offer and could never have set our price.
+test("deliveryForm: an offer that says it hands over codes is a code seller, even when it says claim and linked", () => {
+  const bundle =
+    "Unlock every reward with one purchase: icons, sprays, name cards. Works on any platform you have linked to " +
+    "your game account. Boxes may not work if you already claimed them on Twitch or video sites. NOTE: no refunds " +
+    "after the customer receives the codes through our service. We are not responsible if you claim the items " +
+    "on the wrong account.";
+  assert.equal(deliveryForm("Space Game Mega-Bundle | 50 ITEMS | FAST DELIVERY", bundle), "codes");
+  for (const said of [
+    "Codes are delivered within 24 hours.",
+    "You will receive 6 unused redeem codes.",
+    "Enter the code on Battle.net to unlock it.",
+    "Delivery of the codes by chat right after payment.",
+    "The codes will be sent in the order chat.",
+  ]) {
+    assert.equal(deliveryForm("Space Game Sprays", "Claim them on your linked account. " + said), "codes", said);
+  }
+  assert.equal(deliveryForm("Space Game Skin (Enter Code on Blizzard Site - No Password)", ""), "codes", "the title alone says so");
+});
+
+test("deliveryForm: handing over an account (or its login) keeps an offer an account, whatever it says of codes", () => {
+  assert.equal(
+    deliveryForm("Space Game | 13 Twitch Drops", "You receive a Twitch account. Log in to the account, link and claim. Codes are delivered too."),
+    "account",
+  );
+  assert.equal(
+    deliveryForm("Space Game drops", "You get the account details (email and password); you will receive the codes for the login."),
+    "account",
+  );
+  assert.equal(deliveryForm("Space Game drops", "We send you an account. Log in; you receive 3 codes inside it and claim them."), "account");
+});
+
+test("deliveryForm: a login code from the email or 2FA is not the product", () => {
+  // Each would read as "codes are sent" or "receive the code" if login codes counted.
+  assert.equal(deliveryForm("Space Game Twitch Drops", "Log in and claim. The code is sent to your email when you log in."), "account");
+  assert.equal(deliveryForm("Space Game Twitch Drops", "Link your account. You will receive a verification code; claim the drops."), "account");
+  assert.equal(deliveryForm("Space Game Twitch Drops", "Claim the drops. The 2FA codes will be sent on request."), "account");
+  assert.equal(
+    deliveryForm("SPACE GAME | Twitch Drops | 19 Rewards", "Please redeem the drops within the first hour after delivery. Log in, link and claim."),
+    "account",
+    "redeeming drops is not redeeming a code",
+  );
+});
+
+test("deliveryForm: a statement does not run across lines", () => {
+  // "...FAST DELIVERY" ending one line and "Codes..." starting the next is not "delivery of codes".
+  assert.equal(
+    deliveryForm("SPACE GAME TWITCH DROPS | FAST DELIVERY", "Codes inside the drops are claimed by you after you log in and link."),
+    "account",
+  );
+});
+
 test("deliveryForm: no wording either way, or a tie, is unknown", () => {
   assert.equal(deliveryForm("Space Game | Rare Icons Bundle", ""), "unknown");
   assert.equal(deliveryForm("", null), "unknown");

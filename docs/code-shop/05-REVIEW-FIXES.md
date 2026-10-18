@@ -121,3 +121,22 @@ account. The owner: "these are 2 different things". So:
 - `countsForLowest` also requires `form === "codes"`, so `lowestSameSetUsd`
   comes from code sellers only. Account and unknown offers stay listed with
   their `form`; the panel shows a "Sells" column.
+
+## R11. A seller that says it hands over codes is a code seller (2026-10-18)
+
+A real code bundle on another market (every item of our Overwatch bundles and
+more, delivered as codes) said once that the buyer "receives the codes", but
+also "any platform you have linked to your account", "if you already claimed
+the boxes on Twitch" and "claim the items on the wrong account". Counted word
+against word it read as an account offer, so it could never have been our
+price to beat. Now:
+- login codes ("verification / 2FA / email … code", "the code sent to your
+  email") are cut out before anything is counted;
+- an explicit code-delivery statement makes the offer `codes`, unless the text
+  also states that an account (or its login) is handed over; then the word
+  count decides as before;
+- a statement is read within one line ("…FAST DELIVERY" closing the title and
+  "Codes…" opening the description is not one).
+Checked against 74 live offers that day (Eldorado, G2G, PlayerAuctions): that
+one offer changed from `account` to `codes`; every Eldorado and G2G rival stayed
+`account` and our own offers stayed `codes`.

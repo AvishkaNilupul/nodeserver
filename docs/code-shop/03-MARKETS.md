@@ -139,6 +139,13 @@ vault must be emptied from the Listings page) — the result says so. Product �
   `connect…`, `claim…`, `password`, `email`, `twitch drop(s)`; "account" alone is
   not one). More code words → `codes`, more account words → `account`, a tie →
   `unknown`.
+  Before counting (05-REVIEW-FIXES R11): login codes are cut out ("verification
+  / 2FA / email … code", "the code sent to your email"), and an offer that says
+  outright that the buyer is handed codes ("receives the codes", "codes are
+  delivered / sent", "delivery of the codes", "enter the code on Battle.net / in
+  game") is `codes` unless it also says the buyer is handed an account ("receive
+  a Twitch account", "account details", "email and password", "log in to the
+  account"). Each of these statements is read within one line.
 - `countsForLowest(offer, base)`: `sameSet`, `form === "codes"`, `qty >= 1`, and
   (when `base` is known) `priceUsd >= 0.3 × base`. `lowestSameSetUsd` = the lowest
   price of the offers that count, else null.

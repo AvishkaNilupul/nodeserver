@@ -253,15 +253,44 @@ const ACCOUNT_SIGNALS = [
 const CODE_SIGNALS = [/\bredeem(?:able)? codes?\b/g, /\b(?:cd|game|gift|activation|digital) ?keys?\b/g, /\bcodes?\b/g];
 const FORMS = ["codes", "account", "unknown"];
 
-// What an offer delivers, from its own words: "codes" when code wording
-// outweighs account wording, "account" the other way round, "unknown" on a
-// tie (including no wording at all).
+// A login code is not the product: an account seller writes "enter the code
+// sent to the email" or "the 2FA code". Cut out before anything is counted.
+const LOGIN_CODES = [
+  /\b(?:verification|verify|security|confirmation|log-?in|sign-?in|2fa|two-factor|auth(?:entication)?|otp|one-time|e-?mail|sms|access) codes?\b/g,
+  /\bcodes?\b[^.\n;!?]{0,30}\b(?:sent|send|sends|arrives?|arriving)\b[^.\n;!?]{0,20}\b(?:e-?mails?|inbox|phone|sms|mail)\b/g,
+  /\bcodes? from (?:the|your|our) (?:e-?mails?|inbox|mail|phone)\b/g,
+];
+// Saying outright that the buyer is handed codes. A code seller also writes
+// "claim the cosmetics", "for any platform linked to your account" or "if you
+// already claimed the box on Twitch" (a PlayerAuctions code bundle, 2026-10-18:
+// one "receives the codes" against three such words read as an account offer).
+const CODE_DELIVERY = [
+  /\breceiv(?:e|es|ed|ing)[ \t]+(?:(?:the|your|all|an?|\d+|[a-z]+)[ \t]+){0,3}codes?\b/g,
+  /\bcodes?[ \t]+(?:(?:will|would|shall)[ \t]+be[ \t]+|are[ \t]+|is[ \t]+|get[ \t]+|gets[ \t]+)?(?:delivered|sent)\b/g,
+  /\bdeliver(?:s|ed|ing|y)?[ \t]+(?:of[ \t]+)?(?:(?:the|your|all|\d+)[ \t]+){0,2}(?:redeem[ \t]+)?codes?\b/g,
+  /\benter[ \t]+(?:(?:the|each|your|this|a)[ \t]+)?codes?[ \t]+(?:on|at|in|into)[ \t]+(?:the[ \t]+|your[ \t]+)?(?:battle\.?net|blizzard|official|redeem|store|game)\b/g,
+];
+// Saying outright that the buyer is handed an account (or its login). Any of
+// these keeps an offer out of the "codes" shortcut above.
+const ACCOUNT_DELIVERY = [
+  /\b(?:receive|receives|received|get|gets|deliver(?:s|ed)?|send|sends|sent)[ \t]+(?:(?:a|an|the|your|our|fresh|new|you)[ \t]+){0,3}(?:twitch[ \t]+)?accounts?\b/g,
+  /\b(?:account|login|log-?in)[ \t]+(?:details|credentials|info(?:rmation)?|data)\b/g,
+  /\b(?:e-?mail|login|log-?in|user(?:name)?)\s*(?::|and|&|\+|\/)\s*pass(?:word)?s?\b/g,
+  /\blog ?in(?:to)?[ \t]+(?:to[ \t]+)?(?:the|this|our|that)[ \t]+(?:twitch[ \t]+)?accounts?\b/g,
+];
+
+// What an offer delivers, from its own words. Offers that say outright they
+// hand over codes, and nowhere that they hand over an account, are "codes".
+// Otherwise "codes" when code wording outweighs account wording, "account"
+// the other way round, "unknown" on a tie (including no wording at all).
 function deliveryForm(title, description = "") {
-  const t = (String(title == null ? "" : title) + "\n" + String(description == null ? "" : description))
+  let t = (String(title == null ? "" : title) + "\n" + String(description == null ? "" : description))
     .toLowerCase()
     .replace(NEGATED_BEFORE, " ")
     .replace(NEGATED_AFTER, " ");
+  for (const re of LOGIN_CODES) t = t.replace(re, " ");
   const count = (list) => list.reduce((n, re) => n + (t.match(re) || []).length, 0);
+  if (count(CODE_DELIVERY) > 0 && count(ACCOUNT_DELIVERY) === 0) return "codes";
   const account = count(ACCOUNT_SIGNALS);
   const codes = count(CODE_SIGNALS);
   if (codes > account) return "codes";
