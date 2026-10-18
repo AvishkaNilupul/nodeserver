@@ -38,7 +38,7 @@ const OBJECT_ID_RE = /^[a-f0-9]{24}$/i;
 const LEVELS = ["info", "warn", "error"];
 // The shop sells only here (Gameflip and Plati/Digiseller are blocked; GGSel is
 // not used for codes yet, R1).
-const MARKETS = ["eldorado"];
+const MARKETS = ["eldorado", "playerauctions"];
 const GGSEL_REFUSED = "GGSel is not used for codes yet: it never reports which code it sold, so a code could be sold twice";
 const MIN_USD = 0.5;
 const HOUR_MS = 3600 * 1000;
@@ -299,7 +299,7 @@ function marketList(value) {
   for (const m of value) {
     if (m === "ggsel") bad(GGSEL_REFUSED);
     if (typeof m !== "string" || !MARKETS.includes(m)) {
-      bad("markets may only contain " + MARKETS.join(" and ") + " (got " + JSON.stringify(m).slice(0, 40) + ")");
+      bad("markets may only contain " + MARKETS.join(", ") + " (got " + JSON.stringify(m).slice(0, 40) + ")");
     }
     if (!out.includes(m)) out.push(m);
   }

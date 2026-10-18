@@ -169,8 +169,42 @@ function defaultTexts({ slots, guide, useBy, now } = {}) {
   };
 }
 
+// A title for a market that allows fewer characters than ours (PlayerAuctions:
+// 150). Parts separated by " | " are dropped from the end while at least two
+// are left; only then is it cut, at a word.
+function fitTitle(title, max) {
+  let t = String(title || "").trim();
+  if (t.length <= max) return t;
+  const parts = t.split(" | ");
+  while (parts.length > 2 && parts.join(" | ").length > max) parts.pop();
+  t = parts.join(" | ");
+  if (t.length <= max) return t;
+  const cut = t.lastIndexOf(" ", max);
+  return t.slice(0, cut > 0 ? cut : max).replace(/[\s|+-]+$/, "");
+}
+
+// The redeem guide for a market's offer-instruction field (PlayerAuctions:
+// 500 characters, shown beside the order): the how-to lines, then good-to-know
+// lines while they fit. Plain lines from games.js, so nothing new to guard.
+function marketInstruction(guide, max) {
+  const g = guide || {};
+  const how = Array.isArray(g.howTo) ? g.howTo : [];
+  const good = Array.isArray(g.goodToKnow) ? g.goodToKnow : [];
+  const lines = ["HOW TO REDEEM", ...how];
+  let text = lines.join("\n");
+  if (text.length > max) return text.slice(0, max).replace(/\s+\S*$/, "");
+  for (const line of good) {
+    const next = text + "\n" + line;
+    if (next.length > max) break;
+    text = next;
+  }
+  return text;
+}
+
 module.exports = {
   defaultTexts,
+  fitTitle,
+  marketInstruction,
   redeemByText,
   defaultLabel,
   TITLE_MAX,

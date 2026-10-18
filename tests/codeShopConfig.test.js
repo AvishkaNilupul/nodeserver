@@ -178,7 +178,7 @@ test("concurrent writers on different settings never undo each other (first writ
   assert.equal(c.digest.lastSentDay, "2026-10-15");
   assert.equal(c.digest.hourUtc, DEFAULTS.digest.hourUtc);
   assert.equal(c.farmPriority.lastChangeAt.getTime(), clock);
-  assert.deepEqual(c.markets, { eldorado: false, ggsel: false });
+  assert.deepEqual(c.markets, { eldorado: false, ggsel: false, playerauctions: false });
   assert.equal(await TestConfig.countDocuments(), 1);
 });
 
@@ -248,7 +248,7 @@ test("SAFE_DEFAULTS: every switch that writes stock or talks to a market is off;
   assert.equal(SAFE_DEFAULTS.autoBuildUnits, false);
   assert.equal(SAFE_DEFAULTS.autoDraft, false);
   assert.equal(SAFE_DEFAULTS.autoPublish, false);
-  assert.deepEqual(SAFE_DEFAULTS.markets, { eldorado: false, ggsel: false });
+  assert.deepEqual(SAFE_DEFAULTS.markets, { eldorado: false, ggsel: false, playerauctions: false });
   assert.equal(SAFE_DEFAULTS.farmPriority.enabled, false);
   assert.equal(SAFE_DEFAULTS.digest.enabled, false);
   assert.equal(SAFE_DEFAULTS.claimAlert.enabled, false);
@@ -270,7 +270,7 @@ test("GGSel: a value stored before R1 reads as off; set() refuses to switch it o
   await TestConfig.create({ key: "main", data: { markets: { ggsel: true }, autoDraft: false } });
   const cfg = fresh();
   const c = await cfg.get();
-  assert.deepEqual(c.markets, { eldorado: true, ggsel: false });
+  assert.deepEqual(c.markets, { eldorado: true, ggsel: false, playerauctions: false });
   assert.equal(c.autoDraft, false, "the rest of the stored settings still count");
 
   await assert.rejects(cfg.set({ markets: { ggsel: true } }), (err) => {
@@ -279,11 +279,11 @@ test("GGSel: a value stored before R1 reads as off; set() refuses to switch it o
     return true;
   });
   const after = await cfg.set({ markets: { ggsel: false } });
-  assert.deepEqual(after.markets, { eldorado: true, ggsel: false });
+  assert.deepEqual(after.markets, { eldorado: true, ggsel: false, playerauctions: false });
   // A broken stored `markets` still reads as the defaults with GGSel off.
   await TestConfig.updateOne({ key: "main" }, { $set: { "data.markets": "eldorado" } });
   cfg.forget();
-  assert.deepEqual((await cfg.get()).markets, { eldorado: true, ggsel: false });
+  assert.deepEqual((await cfg.get()).markets, { eldorado: true, ggsel: false, playerauctions: false });
 });
 
 test("a DB error never throws: the last good config is kept (after memo expiry and forget())", async (t) => {
@@ -416,6 +416,19 @@ test("validatePatch: hourUtc 0-23 (whole hours), expiryLeadHours 0-720, cutPct 0
   assertBad({ pricing: { clearanceSteps: [{ days: -1, cutPct: 10 }] } }, "pricing.clearanceSteps[0].days");
 });
 
+test("validatePatch: the PlayerAuctions price is never under its $5 minimum (and at most 500)", () => {
+  assert.equal(DEFAULTS.pricing.playerauctionsUsd, 5, "the default is the minimum");
+  assertOk({ pricing: { playerauctionsUsd: 5 } });
+  assertOk({ pricing: { playerauctionsUsd: 7.5 } });
+  assertOk({ pricing: { playerauctionsUsd: 500 } });
+  assertBad({ pricing: { playerauctionsUsd: 4.99 } }, "pricing.playerauctionsUsd");
+  assertBad({ pricing: { playerauctionsUsd: 1 } }, "pricing.playerauctionsUsd");
+  assertBad({ pricing: { playerauctionsUsd: 501 } }, "pricing.playerauctionsUsd");
+  assertBad({ pricing: { playerauctionsUsd: "5" } }, "pricing.playerauctionsUsd");
+  assert.match(errorsOf({ pricing: { playerauctionsUsd: 1 } })[0], /between 5 and 500/);
+  assert.equal(DEFAULTS.markets.playerauctions, false, "PlayerAuctions ships switched off");
+});
+
 test("validatePatch: clearance steps are a list of complete { days, cutPct }", () => {
   assertBad({ pricing: { clearanceSteps: { days: 1, cutPct: 5 } } }, "pricing.clearanceSteps");
   assertBad({ pricing: { clearanceSteps: [5] } }, "pricing.clearanceSteps[0]");
@@ -425,18 +438,22 @@ test("validatePatch: clearance steps are a list of complete { days, cutPct }", (
   assertOk({ pricing: { clearanceSteps: [] } });
 });
 
-test("validatePatch: markets may only be eldorado and ggsel, as booleans; GGSel only off", () => {
+test("validatePatch: markets may only be eldorado, ggsel and playerauctions, as booleans; GGSel only off", () => {
   assertOk({ markets: { eldorado: true } });
   assertOk({ markets: { eldorado: false, ggsel: false } });
+  // PlayerAuctions is a code shop market since 2026-10-18 (06-PLAYERAUCTIONS-PLAN.md C1).
+  assertOk({ markets: { playerauctions: true } });
+  assertOk({ markets: { playerauctions: false } });
+  assertBad({ markets: { playerauctions: "on" } }, "markets.playerauctions");
   const ggsel = errorsOf({ markets: { ggsel: true } });
   assert.deepEqual(ggsel, ["markets.ggsel: " + GGSEL_REFUSED]);
   assert.match(GGSEL_REFUSED, /^GGSel is not used for codes yet: it never reports which code it sold, so a code could be sold twice$/);
   assertBad({ markets: { eldorado: true, ggsel: true } }, "markets.ggsel");
   assertBad({ markets: { ggsel: "true" } }, "markets.ggsel");
-  for (const m of ["gameflip", "plati", "digiseller", "g2g", "playerauctions", "Eldorado"]) {
+  for (const m of ["gameflip", "plati", "digiseller", "g2g", "PlayerAuctions", "Eldorado"]) {
     const errs = errorsOf({ markets: { [m]: true } });
     assert.equal(errs.length, 1);
-    assert.match(errs[0], new RegExp("^markets\\." + m + ": only eldorado and ggsel"));
+    assert.match(errs[0], new RegExp("^markets\\." + m + ": only eldorado, ggsel, playerauctions"));
   }
   assertBad({ markets: ["eldorado"] }, "markets");
   assertBad({ markets: "eldorado" }, "markets");

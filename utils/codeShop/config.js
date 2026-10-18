@@ -10,7 +10,10 @@
 // switch that writes stock or talks to a market off (05-REVIEW-FIXES.md, R8).
 //
 // GGSel is not used for codes (R1): validatePatch refuses `markets.ggsel: true`
-// and the effective config always reads it as false.
+// and the effective config always reads it as false. PlayerAuctions is a code
+// shop market since 2026-10-18 (06-PLAYERAUCTIONS-PLAN.md), off by default, at
+// one fixed price for every bundle (`pricing.playerauctionsUsd`, never under
+// PlayerAuctions' own $5 minimum).
 //
 // Writes go through validatePatch and are applied as one atomic $set of the
 // patch's leaves ("data.digest.lastSentDay", ...), not a read-modify-write of
@@ -20,14 +23,18 @@
 const KEY = "main";
 const BLOCKED_KEYS = new Set(["__proto__", "constructor", "prototype"]);
 const GAME_KEY = /^\d+$/;
-const MARKETS = ["eldorado", "ggsel"];
+const MARKETS = ["eldorado", "ggsel", "playerauctions"];
 const GGSEL_REFUSED = "GGSel is not used for codes yet: it never reports which code it sold, so a code could be sold twice";
 
-// Upper bounds (inclusive) by setting name; every number is also finite and >= 0.
+// Bounds (inclusive) by setting name; every number is also finite and >= 0.
+// PlayerAuctions refuses a trade under $5 (price x units per order, and the
+// shop sells one unit per order).
+const PA_MIN_USD = 5;
 const RANGES = {
   hourUtc: { max: 23, int: true },
   expiryLeadHours: { max: 720 },
   cutPct: { max: 90 },
+  playerauctionsUsd: { min: PA_MIN_USD, max: 500 },
 };
 
 function deepFreeze(v) {
@@ -46,7 +53,7 @@ const DEFAULTS = deepFreeze({
   autoPublish: false, // publish a ready draft without the owner
   expiryGuard: true,
   expiryLeadHours: 36,
-  markets: { eldorado: true, ggsel: false },
+  markets: { eldorado: true, ggsel: false, playerauctions: false },
   games: {
     // gameNo -> { sell, marketGame, displayName }; unknown games do not sell
     "12": { sell: true, marketGame: "Overwatch", displayName: "Overwatch 2" },
@@ -62,6 +69,8 @@ const DEFAULTS = deepFreeze({
     ],
     cooldownHours: 6,
     undercutUsd: 0.01,
+    // PlayerAuctions: one fixed price for every bundle (06-PLAYERAUCTIONS-PLAN C2).
+    playerauctionsUsd: PA_MIN_USD,
   },
   competitorScan: { enabled: true, everyHours: 12 },
   ownEldoradoUserIds: [],
@@ -80,7 +89,7 @@ const SAFE_DEFAULTS = deepFreeze(
     autoDraft: false,
     autoPublish: false,
     expiryGuard: true,
-    markets: { eldorado: false, ggsel: false },
+    markets: { eldorado: false, ggsel: false, playerauctions: false },
     competitorScan: { enabled: false },
     claimAlert: { enabled: false },
     digest: { enabled: false },
@@ -143,7 +152,7 @@ function checkNumber(v, path, name, errors) {
   const r = RANGES[name];
   if (!r) return;
   if (r.int && !Number.isInteger(v)) errors.push(`${path}: must be a whole number`);
-  if (v > r.max) errors.push(`${path}: must be between 0 and ${r.max}`);
+  if (v > r.max || v < (r.min || 0)) errors.push(`${path}: must be between ${r.min || 0} and ${r.max}`);
 }
 
 function checkStringList(v, path, errors, { regex = false } = {}) {
@@ -171,7 +180,7 @@ function checkObject(value, shape, path, errors) {
   for (const k of Object.keys(value)) {
     const p = path ? `${path}.${k}` : k;
     if (BLOCKED_KEYS.has(k) || !hasOwn(shape, k)) {
-      errors.push(path === "markets" ? `${p}: only ${MARKETS.join(" and ")} can be set` : `${p}: unknown setting`);
+      errors.push(path === "markets" ? `${p}: only ${MARKETS.join(", ")} can be set` : `${p}: unknown setting`);
       continue;
     }
     checkValue(value[k], shape[k], p, k, errors);
@@ -361,4 +370,4 @@ function createConfig({ model, now = Date.now, memoMs = 30000 } = {}) {
   return { get, set, forget };
 }
 
-module.exports = { DEFAULTS, SAFE_DEFAULTS, GGSEL_REFUSED, createConfig, validatePatch, deepMerge };
+module.exports = { DEFAULTS, SAFE_DEFAULTS, GGSEL_REFUSED, PA_MIN_USD, createConfig, validatePatch, deepMerge };

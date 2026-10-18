@@ -91,7 +91,7 @@ const DEFAULTS = {
   autoPublish: false,     // publish a ready draft without the owner
   expiryGuard: true,
   expiryLeadHours: 36,
-  markets: { eldorado: true, ggsel: false },
+  markets: { eldorado: true, ggsel: false, playerauctions: false }, // PlayerAuctions: 06-PLAYERAUCTIONS-PLAN.md
   games: {
     // gameNo -> { sell, marketGame, displayName }; unknown games do not sell
     "12": { sell: true, marketGame: "Overwatch", displayName: "Overwatch 2" },
@@ -103,6 +103,7 @@ const DEFAULTS = {
     clearanceSteps: [ { days: 7, cutPct: 0 }, { days: 3, cutPct: 25 }, { days: 1, cutPct: 50 } ],
     cooldownHours: 6,
     undercutUsd: 0.01,
+    playerauctionsUsd: 5, // one fixed PlayerAuctions price for every bundle, never under 5
   },
   competitorScan: { enabled: true, everyHours: 12 },
   ownEldoradoUserIds: [],

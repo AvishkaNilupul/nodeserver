@@ -506,6 +506,17 @@ test("POST /products takes a name and the enabled markets; GGSel is never picked
   assert.equal(p.slots.length, 1);
 });
 
+test("POST /products names PlayerAuctions too when it is switched on (06 plan, C7)", async () => {
+  cfgOver = { markets: { eldorado: true, playerauctions: true } };
+  const a = await addRows({ nameRaw: "Sun Tea Icon" });
+  const r = ok(await post("/products", { slotKeys: [a] }));
+  assert.deepEqual((await CodeProduct.findById(r.product.id).lean()).markets, ["eldorado", "playerauctions"]);
+  // A draft's own market list may name it as well.
+  const edited = ok(await post("/products/" + r.product.id, { markets: ["playerauctions"] }));
+  assert.ok(edited);
+  assert.deepEqual((await CodeProduct.findById(r.product.id).lean()).markets, ["playerauctions"]);
+});
+
 test("POST /products refuses unknown slots, mixed games and bad input with 400", async () => {
   const a = await addRows({ nameRaw: "Sun Tea Icon" });
   const d = await addRows({ gameNo: "200", groupKey: "200:7", nameRaw: "Rifle Skin", gameName: "Delta Force" });

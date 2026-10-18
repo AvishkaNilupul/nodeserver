@@ -272,6 +272,21 @@ test("markets: Eldorado when it is on; never GGSel, even from a stored setting (
   assert.deepEqual((await drafts())[0].markets, []);
 });
 
+// "From now on make the auto-lister list there as well" (06 plan, C7).
+test("markets: a new draft names PlayerAuctions too once it is switched on, in a fixed order", async () => {
+  await reset();
+  await addSlot({ nameRaw: "Prost Spray", count: 5 });
+  const both = setup({ cfg: { markets: { eldorado: true, ggsel: true, playerauctions: true } } });
+  await both.planner.run();
+  assert.deepEqual((await drafts())[0].markets, ["eldorado", "playerauctions"]);
+
+  await reset();
+  await addSlot({ nameRaw: "Prost Spray", count: 5 });
+  const paOnly = setup({ cfg: { markets: { eldorado: false, playerauctions: true } } });
+  await paOnly.planner.run();
+  assert.deepEqual((await drafts())[0].markets, ["playerauctions"]);
+});
+
 test("a draft deleted and proposed again is not announced twice: the stamp is its slot set", async () => {
   await reset();
   const a = await addSlot({ nameRaw: "Prost Spray", count: 10 });

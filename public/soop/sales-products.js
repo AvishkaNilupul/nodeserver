@@ -11,14 +11,14 @@
 
   // The markets a product can be put on. GGSel is not used for codes yet
   // (docs/code-shop/05-REVIEW-FIXES.md, R1); its name stays for old listings.
-  const MARKETS = ["eldorado"];
-  const MARKET_NAME = { eldorado: "Eldorado", ggsel: "GGSel" };
+  const MARKETS = ["eldorado", "playerauctions"];
+  const MARKET_NAME = { eldorado: "Eldorado", playerauctions: "PlayerAuctions", ggsel: "GGSel" };
   const GGSEL_NOTE = "GGSel is not used for codes yet: it never reports which code it sold";
   const TEXT_KEYS = ["title", "description", "deliveryTemplate", "coverTitle", "coverServiceText", "coverBullets"];
   const GROUPS = [
     { id: "draft", label: "Drafts", hint: "Not on sale yet: check the texts and price, then approve." },
     { id: "active", label: "Active", hint: "On sale; new codes become bundles by themselves." },
-    { id: "paused", label: "Paused", hint: "Off Eldorado; Resume lists them again." },
+    { id: "paused", label: "Paused", hint: "Off sale; Resume lists them again." },
     { id: "retired", label: "Retired", hint: "Closed; their unsold codes went back to free stock." },
   ];
   const STATUS = { draft: ["Draft", "info"], active: ["Active", "ok"], paused: ["Paused", "warn"], retired: ["Retired", null] };
@@ -386,7 +386,7 @@
   function pause(p) {
     const gg = liveOn(p, "ggsel");
     return Soop.confirm({ title: "Pause " + (p.name || "this product") + "?", okLabel: "Pause product",
-      body: "Its Eldorado listing is taken down now and no new bundles are added. " +
+      body: "Its Eldorado and PlayerAuctions listings are taken down now and no new bundles are added. " +
         (gg ? "Its GGSel listing stays up: empty that vault from the Listings page if it should stop selling too. " : "") + "Resume lists it again." })
       .then((yes) => (yes ? guard(p, () => S().api.post(path(p, "/pause"), {})).then((j) => {
         if (j !== false) Soop.toast(say(j, "Paused " + (p.name || "the product") + (gg ? " — its GGSel listing is still up" : "")), gg ? "warn" : "ok");
@@ -405,7 +405,7 @@
     const gg = liveOn(p, "ggsel");
     return Soop.confirm({ title: "Retire " + (p.name || "this product") + "?", danger: true, okLabel: "Retire product",
       body: el("div", { class: "s-stack is-tight" },
-        el("p", { style: { margin: "0" } }, "Its Eldorado listing is taken down and its unsold bundles are taken apart; their codes go back to free stock. A retired product cannot be resumed."),
+        el("p", { style: { margin: "0" } }, "Its Eldorado and PlayerAuctions listings are taken down and its unsold bundles are taken apart; their codes go back to free stock. A retired product cannot be resumed."),
         gg ? note("warn", "It still has a live GGSel listing. Empty that vault from the Listings page first — the shop refuses to retire it until then.") : null) })
       .then((yes) => (yes ? guard(p, () => S().api.post(path(p, "/retire"), {})).then((j) => {
         if (j !== false) Soop.toast(say(j, "Retired " + (p.name || "the product")), "ok");

@@ -26,7 +26,18 @@ const CodeStock = require("../models/CodeStock");
 const AccountOffer = require("../models/AccountOffer");
 const MarketplaceListing = require("../models/MarketplaceListing");
 
-const { createPublisher, ALLOWED_MARKETS, ELDORADO_MIN_USD, GGSEL_REFUSED, OFFER_LIMIT_MSG, UNKNOWN_OUTCOME } = require("../utils/codeShop/publish");
+const {
+  createPublisher,
+  ALLOWED_MARKETS,
+  ELDORADO_MIN_USD,
+  GGSEL_REFUSED,
+  OFFER_LIMIT_MSG,
+  UNKNOWN_OUTCOME,
+  PA_UNKNOWN_OUTCOME,
+  paPriceOf,
+  codeItemLeaf,
+} = require("../utils/codeShop/publish");
+const { shareOfShelf, NON_SHARING_MARKETS } = require("../utils/suppliedStock");
 const { DEFAULTS, deepMerge } = require("../utils/codeShop/config");
 const { guideFor } = require("../utils/codeShop/games");
 const { defaultTexts } = require("../utils/codeShop/texts");
@@ -86,6 +97,38 @@ function harness(opts = {}) {
       if (/not found|must be active/.test(m)) return "gone";
       return "";
     },
+    // PlayerAuctions (06-PLAYERAUCTIONS-PLAN.md C4). The tree has a Twitch
+    // Drops root FIRST and a sentinel, as a real one may: neither may be used.
+    PA_DELIVERY: { min20: 5 },
+    async playerauctionsResolveGame(game) {
+      calls.push(["paResolveGame", game]);
+      return opts.paGame === undefined ? { gameId: 7097, gameName: "Overwatch" } : opts.paGame;
+    },
+    async playerauctionsItemCategories(gameId) {
+      calls.push(["paItemCategories", gameId]);
+      return (
+        opts.paTree || [
+          { id: 2010, name: "Twitch Drops", subCategorys: [{ id: 2011, name: "All Drops" }] },
+          { id: -1, name: "Others", subCategorys: [] },
+          { id: 1653, name: "Skins", subCategorys: [{ id: 7797, name: "Amazon Loot" }, { id: 8305, name: "Other Skins" }] },
+        ]
+      );
+    },
+    async playerauctionsPublish(args) {
+      calls.push(["paPublish", args]);
+      assert.ok(fs.existsSync(args.coverImagePath), "the cover exists while PlayerAuctions reads it");
+      const queued = (opts.paErrors || []).shift();
+      if (queued) throw queued;
+      return opts.paAnswer || { offerId: "9" + ++seq, id: "9" + seq, url: "https://pa.example.test/o/9" + seq };
+    },
+    async playerauctionsHide(id) {
+      calls.push(["paHide", id]);
+      if (opts.paHideError) throw opts.paHideError;
+    },
+    async playerauctionsCancelOffer(id) {
+      calls.push(["paCancel", id]);
+      if (opts.paCancelError) throw opts.paCancelError;
+    },
   };
   const mp = new Proxy(mpImpl, {
     get(target, key) {
@@ -106,6 +149,9 @@ function harness(opts = {}) {
       calls.push(["shelfFor", String(offer)]);
       return state.shelf;
     },
+    // The real S4 rule (pure): how one shelf is split between live listings.
+    shareOfShelf,
+    NON_SHARING_MARKETS,
   };
 
   const foreign = {
@@ -161,6 +207,7 @@ function harness(opts = {}) {
     events: { log: async (e) => events.push(e) },
     telegram: { send: async (t) => sent.push(t) },
     now: () => NOW,
+    sleep: async (ms) => calls.push(["sleep", ms]),
     guideFor,
   };
   return {
@@ -244,8 +291,9 @@ async function activeProduct(over = {}) {
 
 // --- problems ----------------------------------------------------------------------
 
-test("exports the contract constants: Eldorado is the only code shop market", () => {
-  assert.deepEqual([...ALLOWED_MARKETS], ["eldorado"]);
+test("exports the contract constants: Eldorado and PlayerAuctions are the code shop markets", () => {
+  // PlayerAuctions since 2026-10-18 (06-PLAYERAUCTIONS-PLAN.md C1); GGSel never (R1).
+  assert.deepEqual([...ALLOWED_MARKETS], ["eldorado", "playerauctions"]);
   assert.ok(Object.isFrozen(ALLOWED_MARKETS));
   assert.equal(ELDORADO_MIN_USD, 0.5);
   assert.equal(GGSEL_REFUSED, "GGSel is not used for codes yet: it never reports which code it sold, so a code could be sold twice");
@@ -272,7 +320,7 @@ test("problems: each rule", async () => {
   await has(productDoc({ slots: [SLOTS[0], { ...SLOTS[1], label: "" }] }), /label 2 is empty/);
   await has(productDoc({ pricing: { priceUsd: 0.3, floorUsd: 0 } }), /below the \$0\.50 market minimum/);
   await has(productDoc({ pricing: { priceUsd: 2, floorUsd: 3 } }), /below its floor/);
-  await has(productDoc({ markets: ["eldorado", "gameflip"] }), /market not allowed: gameflip \(the code shop sells only on eldorado\)/);
+  await has(productDoc({ markets: ["eldorado", "gameflip"] }), /market not allowed: gameflip \(the code shop sells only on eldorado and playerauctions\)/);
   await has(productDoc({ markets: ["digiseller"] }), /market not allowed: digiseller/);
   await has(productDoc({ markets: [] }), /no market chosen/);
   await has(productDoc({ marketGame: "" }), /no marketplace game name/);
@@ -822,6 +870,164 @@ test("publish: a skip with no error sends nothing and leaves lastError empty", a
   assert.equal(h.sent.length, 0);
   assert.equal((await CodeProduct.findById(p._id).lean()).publish.lastError, "");
   assertClean(h);
+});
+
+// --- PlayerAuctions (06-PLAYERAUCTIONS-PLAN.md, build contract) -------------------------------
+
+const PA_CONFIG = { markets: { eldorado: true, playerauctions: true } };
+const LONG_TITLE =
+  "Space Game 2 | Drops 5 Codes Bundle | Banana Cat + Prost + Purrfect Afternoon + Skal Sprays + Autumn Vibes Name Card | Battle.net Codes | Instant Delivery";
+
+// An active product already live on Eldorado, now also naming PlayerAuctions.
+async function liveOnEldorado(over = {}) {
+  const p = await activeProduct({ markets: ["eldorado", "playerauctions"], ...over });
+  const eld = await MarketplaceListing.create({ accountOffer: p.offer, marketplace: "eldorado", externalId: "eld-live", status: "active", origin: "manual", note: "code shop" });
+  return { p, eld };
+}
+
+test("codeItemLeaf: never a Twitch Drops root or leaf, never a sentinel; an 'Other ...' leaf first", () => {
+  const tree = [
+    { id: 2010, name: "Twitch Drops", subCategorys: [{ id: 2011, name: "Other" }] },
+    { id: -1, name: "Others", subCategorys: [] },
+    { id: 1653, name: "Skins", subCategorys: [{ id: 7797, name: "Amazon Loot" }, { id: 8305, name: "Other Skins" }] },
+  ];
+  assert.deepEqual(codeItemLeaf(tree), { rootItem: 1653, itemId: 8305, itemPath: "1653|8305", name: "Skins > Other Skins" });
+  assert.equal(codeItemLeaf([{ id: 3, name: "Gear", subCategorys: [{ id: 4, name: "Helmets" }] }]).itemPath, "3|4", "else the first leaf");
+  assert.equal(codeItemLeaf([{ id: 5, name: "Coins", subCategorys: [] }]).itemPath, "5|5", "a root with no leaf is its own leaf");
+  assert.equal(codeItemLeaf([{ id: 6, name: "Skins", subCategorys: [{ id: 7, name: "Twitch Drops" }] }]).itemPath, "6|6", "a Twitch Drops leaf is skipped too");
+  assert.equal(codeItemLeaf([tree[0], tree[1]]), null, "nothing but Twitch Drops and a sentinel: no leaf");
+  assert.equal(codeItemLeaf(null), null);
+});
+
+test("paPriceOf: the settings' one price, never under PlayerAuctions' $5 minimum", () => {
+  assert.equal(paPriceOf(DEFAULTS), 5);
+  assert.equal(paPriceOf(deepMerge(DEFAULTS, { pricing: { playerauctionsUsd: 6.499 } })), 6.5);
+  assert.equal(paPriceOf(deepMerge(DEFAULTS, { pricing: { playerauctionsUsd: 1 } })), 5);
+  assert.equal(paPriceOf({}), 5);
+});
+
+test("publish: PlayerAuctions gets its half of the shelf, at $5, filed as codes, with a 150-character title and the redeem guide", async () => {
+  const { p } = await liveOnEldorado({ texts: { ...productDoc().texts, title: LONG_TITLE } });
+  const h = harness({ shelf: 19, config: PA_CONFIG });
+  const res = await h.pub.publishProduct(p._id, { actor: "auto" });
+  assert.deepEqual(res.results.map((r) => [r.market, r.ok, r.skipped || r.error || ""]), [
+    ["eldorado", false, "already live"],
+    ["playerauctions", true, ""],
+  ]);
+  const [[, args]] = h.named("paPublish");
+  assert.equal(args.totalUnit, 9, "19 on one shelf: Eldorado keeps 10, PlayerAuctions 9");
+  assert.equal(args.priceUsd, 5);
+  assert.equal(args.minUnitPerOrder, 1);
+  assert.equal(args.itemsPerUnit, SLOTS.length);
+  assert.equal(args.gameId, 7097);
+  assert.equal(args.itemPath, "1653|8305", "Skins > Other Skins, never the Twitch Drops root");
+  assert.equal(args.deliveryGuarantee, 5);
+  assert.ok(args.title.length <= 150 && LONG_TITLE.startsWith(args.title), "the title is cut to fit, from the end");
+  assert.equal(args.description, p.texts.description);
+  assert.match(args.instruction, /^HOW TO REDEEM\n1\. /);
+  assert.ok(args.instruction.length <= 500);
+  const row = await MarketplaceListing.findOne({ accountOffer: p.offer, marketplace: "playerauctions" }).lean();
+  assert.equal(row.status, "active");
+  assert.equal(row.externalId, res.results[1].externalId);
+  assert.equal(row.price, 5);
+  assert.equal(row.qtyTarget, 9);
+  assert.equal(row.title, args.title);
+  assert.equal(row.note, "code shop");
+  assert.equal(String(row.accountOffer), String(p.offer));
+  assert.equal((await CodeProduct.findById(p._id).lean()).publish.lastError, "");
+  assertClean(h);
+});
+
+test("publish: PlayerAuctions' write throttle is waited out once (25 s) and the publish tried again", async () => {
+  const { p } = await liveOnEldorado();
+  const throttle = Object.assign(new Error("PlayerAuctions publish failed (code 1): Operated too frequent"), { __pa: true, paCode: 1, retryable: true });
+  const h = harness({ config: PA_CONFIG, paErrors: [throttle] });
+  const res = await h.pub.publishProduct(p._id);
+  assert.equal(res.results[1].ok, true);
+  assert.equal(h.named("paPublish").length, 2);
+  assert.deepEqual(h.named("sleep"), [["sleep", 25000]]);
+  assertClean(h);
+});
+
+test("publish: a PlayerAuctions refusal says so plainly; a lost answer says to check PlayerAuctions first", async () => {
+  const { p } = await liveOnEldorado();
+  const refused = Object.assign(new Error("PlayerAuctions publish failed (code 2): Title is invalid"), { __pa: true, paCode: 2, retryable: false });
+  const h = harness({ config: PA_CONFIG, paErrors: [refused] });
+  const r1 = (await h.pub.publishProduct(p._id)).results[1];
+  assert.equal(r1.ok, false);
+  assert.equal(r1.error, "PlayerAuctions publish failed (code 2): Title is invalid");
+  assert.equal(await MarketplaceListing.countDocuments({ marketplace: "playerauctions" }), 0);
+
+  const lost = Object.assign(new Error("PlayerAuctions publish failed: socket hang up"), { __pa: true, status: undefined });
+  const h2 = harness({ config: PA_CONFIG, paErrors: [lost] });
+  const r2 = (await h2.pub.publishProduct(p._id)).results[1];
+  assert.equal(r2.ok, false);
+  assert.ok(r2.error.endsWith(PA_UNKNOWN_OUTCOME), r2.error);
+  assert.match(PA_UNKNOWN_OUTCOME, /check PlayerAuctions for an offer with this title before publishing again/);
+  const noId = harness({ config: PA_CONFIG, paAnswer: { url: "x" } });
+  assert.match((await noId.pub.publishProduct(p._id)).results[1].error, /without an offer id/);
+  assertClean(h);
+  assertClean(h2);
+});
+
+test("publish: a PlayerAuctions offer whose row cannot be saved is cancelled at once", async () => {
+  const { p } = await liveOnEldorado();
+  const h = harness({ config: PA_CONFIG, MarketplaceListing: failingCreate() });
+  const r = (await h.pub.publishProduct(p._id)).results[1];
+  assert.equal(r.ok, false);
+  assert.match(r.error, /listing row not saved \(listing write refused\); the new PlayerAuctions offer was cancelled/);
+  assert.deepEqual(h.named("paCancel").map((c) => c[1]), [r.externalId]);
+
+  const h2 = harness({ config: PA_CONFIG, MarketplaceListing: failingCreate(), paCancelError: new Error("503") });
+  assert.match((await h2.pub.publishProduct(p._id)).results[1].error, /could NOT be cancelled \(503\): cancel it on PlayerAuctions by hand/);
+  assertClean(h);
+  assertClean(h2);
+});
+
+test("publish: no PlayerAuctions listing without a share of its own, without the switch, or without a game or leaf", async () => {
+  const { p } = await liveOnEldorado();
+  const one = harness({ shelf: 1, config: PA_CONFIG });
+  assert.equal((await one.pub.publishProduct(p._id)).results[1].skipped, "no stock left for another market yet");
+  assert.equal(one.named("paPublish").length, 0);
+
+  const off = harness({ config: { markets: { eldorado: true, playerauctions: false } } });
+  assert.equal((await off.pub.publishProduct(p._id)).results[1].skipped, "switched off in the code shop settings");
+
+  const noGame = harness({ config: PA_CONFIG, paGame: null });
+  assert.match((await noGame.pub.publishProduct(p._id)).results[1].error, /PlayerAuctions has no game called Overwatch/);
+  const noLeaf = harness({ config: PA_CONFIG, paTree: [{ id: 2010, name: "Twitch Drops", subCategorys: [] }] });
+  assert.match((await noLeaf.pub.publishProduct(p._id)).results[1].error, /no item category to file codes under/);
+  for (const h of [one, off, noGame, noLeaf]) {
+    assert.equal(h.named("paPublish").length, 0);
+    assertClean(h);
+  }
+});
+
+test("pause: PlayerAuctions rows are hidden and marked delisted too; a failed hide keeps the row and reports", async () => {
+  const p = await activeProduct({ markets: ["eldorado", "playerauctions"] });
+  const base = { accountOffer: p.offer, status: "active", origin: "manual", note: "code shop" };
+  const e = await MarketplaceListing.create({ ...base, marketplace: "eldorado", externalId: "eld-a" });
+  const pa = await MarketplaceListing.create({ ...base, marketplace: "playerauctions", externalId: "9001" });
+  const h = harness({ config: PA_CONFIG });
+  const res = await h.pub.pause(p._id, { actor: "owner" });
+  assert.equal(res.ok, true);
+  assert.equal(res.delisted, 2);
+  assert.deepEqual(h.named("paHide").map((c) => c[1]), ["9001"]);
+  assert.equal((await MarketplaceListing.findById(e._id).lean()).status, "delisted");
+  const paRow = await MarketplaceListing.findById(pa._id).lean();
+  assert.equal(paRow.status, "delisted");
+  assert.match(paRow.note, /hidden by the code shop/);
+  assert.ok(h.events.some((ev) => /1 Eldorado and 1 PlayerAuctions listing\(s\) taken down/.test(ev.msg)));
+
+  await CodeProduct.updateOne({ _id: p._id }, { $set: { status: "active" } });
+  const stuck = await MarketplaceListing.create({ ...base, marketplace: "playerauctions", externalId: "9002" });
+  const h2 = harness({ config: PA_CONFIG, paHideError: new Error("PlayerAuctions hide offer failed (HTTP 503)") });
+  const res2 = await h2.pub.pause(p._id);
+  assert.equal(res2.ok, false);
+  assert.match(res2.errors[0], /PlayerAuctions offer 9002: PlayerAuctions hide offer failed \(HTTP 503\)/);
+  assert.equal((await MarketplaceListing.findById(stuck._id).lean()).status, "active");
+  assertClean(h);
+  assertClean(h2);
 });
 
 // --- pause / resume / retire ---------------------------------------------------------------

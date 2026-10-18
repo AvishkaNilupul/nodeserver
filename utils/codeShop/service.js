@@ -374,6 +374,9 @@ function createService(overrides = {}) {
   // - at least one bundle is on the shelf.
   // A product whose scheduled attempt failed is also never tried again by
   // this process, in case the failure could not be written to lastError.
+  // At most ONE product goes up on PlayerAuctions per run: it throttles writes
+  // (about 25 s apart) and nothing spaces them centrally (06 plan, C5); the
+  // rest wait for the next tick, five minutes on.
   const autoFailed = new Set();
 
   async function publishPending() {
@@ -405,14 +408,17 @@ function createService(overrides = {}) {
     );
     const hadKeys = new Set((had || []).map((r) => text(r.accountOffer) + "|" + text(r.marketplace)));
 
+    let paThisRun = false;
     for (const { p, markets } of due) {
       const name = text(p.name) || text(p._id);
       let attempting = false;
       try {
         const missing = markets.filter((m) => !hadKeys.has(text(p.offer) + "|" + m));
         if (!missing.length) continue;
+        if (missing.includes("playerauctions") && paThisRun) continue;
         const shelf = Number(await deps.stock().shelfFor(p.offer)) || 0;
         if (shelf < 1) continue;
+        if (missing.includes("playerauctions")) paThisRun = true;
 
         out.attempted += 1;
         attempting = true;

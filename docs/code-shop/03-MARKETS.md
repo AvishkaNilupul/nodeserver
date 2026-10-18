@@ -41,7 +41,9 @@ got units ("Added N bundles to <name>").
 ## `utils/codeShop/publish.js`
 
 `createPublisher(deps)` → `{ problems(product), approve(id, opts), publishProduct(id, opts), pause(id, opts), resume(id, opts), retire(id, opts) }`.
-`ALLOWED_MARKETS = ["eldorado", "ggsel"]`; `ELDORADO_MIN_USD = 0.5`.
+`ALLOWED_MARKETS = ["eldorado", "playerauctions"]` (GGSel refused, R1; PlayerAuctions
+since 2026-10-18: publish, share of the shelf, pause/retire and delivery are in
+06-PLAYERAUCTIONS-PLAN.md, "Build contract" C1–C8); `ELDORADO_MIN_USD = 0.5`.
 
 `problems(product)` → [String]: no slots; duplicate slotKeys; `checkBuyerText`
 problems (sourceWords from config); price below `ELDORADO_MIN_USD` or below

@@ -140,3 +140,13 @@ price to beat. Now:
 Checked against 74 live offers that day (Eldorado, G2G, PlayerAuctions): that
 one offer changed from `account` to `codes`; every Eldorado and G2G rival stayed
 `account` and our own offers stayed `codes`.
+
+## R12. PlayerAuctions is a code shop market (2026-10-18, owner's go)
+
+`ALLOWED_MARKETS` = Eldorado and PlayerAuctions. PlayerAuctions claims each
+order's units at the moment of sale (no vault), so R1's reason does not apply.
+One fixed price for every bundle (`pricing.playerauctionsUsd`, at least $5);
+the stock is shared with Eldorado (each shows half, S4); the item leaf is never
+"Twitch Drops"; titles fit 150 characters; at most one PlayerAuctions publish a
+tick; pause hides PlayerAuctions rows; a code unit is delivered in messages of
+at most 300 characters. Contract: 06-PLAYERAUCTIONS-PLAN.md, C1–C8.

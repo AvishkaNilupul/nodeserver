@@ -733,6 +733,38 @@ test("publishPending: only a product's FIRST listing per market, never adopted, 
   assert.ok(q.accountOffer.$in.includes("of-p12"));
 });
 
+// PlayerAuctions throttles writes (about 25 s apart) and nothing spaces them
+// centrally, so a run puts at most ONE product up there (06 plan, C5).
+test("publishPending: at most one product goes up on PlayerAuctions per run; Eldorado-only ones are not held back", async () => {
+  const h = harness({
+    cfg: { markets: { eldorado: true, playerauctions: true } },
+    products: [
+      product("a1", { markets: ["eldorado", "playerauctions"] }), // live on Eldorado: PlayerAuctions due
+      product("a2", { markets: ["eldorado", "playerauctions"] }), // same: waits for the next run
+      product("a3", { markets: ["eldorado"] }), // Eldorado only: due as ever
+      product("a4", { markets: ["eldorado", "playerauctions"] }), // empty shelf: does not use up the run's PlayerAuctions turn
+    ],
+    listings: [
+      { accountOffer: "of-a1", marketplace: "eldorado", status: "active" },
+      { accountOffer: "of-a2", marketplace: "eldorado", status: "active" },
+      { accountOffer: "of-a4", marketplace: "eldorado", status: "active" },
+    ],
+    shelf: { "of-a1": 6, "of-a2": 6, "of-a3": 2, "of-a4": 0 },
+  });
+  const r1 = await h.svc.runStep("publishPending");
+  assert.deepEqual(h.published.map((p) => p.id), ["a1", "a3"]);
+  assert.deepEqual(r1.steps.publishPending.products.map((p) => [p.id, p.markets]), [
+    ["a1", ["playerauctions"]],
+    ["a3", ["eldorado"]],
+  ]);
+  // The next run: a1 now has its PlayerAuctions row, so a2 takes the turn.
+  h.models.MarketplaceListing.docs.push({ accountOffer: "of-a1", marketplace: "playerauctions", status: "active" });
+  h.models.MarketplaceListing.docs.push({ accountOffer: "of-a3", marketplace: "eldorado", status: "active" });
+  h.clock.now += 5 * MIN;
+  await h.svc.runStep("publishPending");
+  assert.deepEqual(h.published.map((p) => p.id), ["a1", "a3", "a2"]);
+});
+
 test("publishPending: a GGSel product is never published, and no GGSel function is ever looked up", async () => {
   const touched = [];
   const mp = new Proxy(

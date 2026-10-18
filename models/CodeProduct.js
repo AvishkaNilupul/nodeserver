@@ -6,8 +6,9 @@ const mongoose = require("mongoose");
 // says which code sits in which unit.
 //
 // `markets` is refused in the schema, not just in publish.js: Gameflip and
-// Plati/Digiseller are blocked, so the code shop may only ever name these two.
-const MARKETS = ["eldorado", "ggsel"];
+// Plati/Digiseller are blocked, so the code shop may only ever name these.
+// (GGSel is still refused by publish.js and the routes: R1.)
+const MARKETS = ["eldorado", "ggsel", "playerauctions"];
 
 const slotSchema = new mongoose.Schema(
   {

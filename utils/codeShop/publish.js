@@ -7,7 +7,9 @@
 // row write that fails after the offer went live takes the offer straight back
 // down.
 //
-// Only Eldorado is ever published to (R1). GGSel never says which unit it sold,
+// Eldorado and PlayerAuctions are published to (06-PLAYERAUCTIONS-PLAN.md C1:
+// PlayerAuctions claims each order's units at the moment of sale and has no
+// vault, so a sale is always tied to its unit). GGSel never says which unit it sold,
 // a Listings-page delist hands its vault back as unsold, and the guardian tops
 // the vault up behind the shop's back — any of which can sell one code twice —
 // so a product naming GGSel is refused, and nothing here calls a GGSel
@@ -21,8 +23,17 @@
 const fsp = require("fs/promises");
 const { checkBuyerText } = require("./textGuard");
 
-const ALLOWED_MARKETS = Object.freeze(["eldorado"]);
+const ALLOWED_MARKETS = Object.freeze(["eldorado", "playerauctions"]);
 const ELDORADO_MIN_USD = 0.5;
+// PlayerAuctions (06-PLAYERAUCTIONS-PLAN.md C2-C4): one fixed price for every
+// bundle from the settings, never under its $5 minimum; titles of at most 150
+// characters; the redeem guide in the 500-character offer instruction.
+const PA_MIN_USD = 5;
+const PA_TITLE_MAX = 150;
+const PA_INSTRUCTION_MAX = 500;
+// PlayerAuctions throttles writes ("Operated too frequent", code 1): waited out once.
+const PA_WRITE_GAP_MS = 25000;
+const PA_UNKNOWN_OUTCOME = "the outcome is unknown: check PlayerAuctions for an offer with this title before publishing again";
 
 const GGSEL_REFUSED = "GGSel is not used for codes yet: it never reports which code it sold, so a code could be sold twice";
 // Eldorado refuses a new offer once the category's active-offer quota is used.
@@ -46,6 +57,41 @@ function priceOf(product) {
   return Math.round(raw * 100) / 100;
 }
 
+// The PlayerAuctions price: the settings' one price for every bundle, never
+// under PlayerAuctions' minimum.
+function paPriceOf(cfg) {
+  const set = Number(cfg && cfg.pricing && cfg.pricing.playerauctionsUsd);
+  const raw = Math.max(Number.isFinite(set) ? set : 0, PA_MIN_USD);
+  return Math.round(raw * 100) / 100;
+}
+
+// The item leaf a code bundle is filed under on PlayerAuctions. Never a root
+// named for Twitch drops (these are redeem codes, not Twitch drops) and never a
+// sentinel row (id <= 0: PlayerAuctions refuses it). A cosmetic-looking root
+// first, then its "Other ..." leaf, else its first leaf. null = none fits.
+function codeItemLeaf(tree) {
+  const roots = (Array.isArray(tree) ? tree : []).filter(
+    (r) => r && Number(r.id) > 0 && !/twitch\s*drops?/i.test(str(r.name)),
+  );
+  const ranked = [
+    ...roots.filter((r) => /skin|cosmetic|item|other/i.test(str(r.name))),
+    ...roots.filter((r) => !/skin|cosmetic|item|other/i.test(str(r.name))),
+  ];
+  for (const root of ranked) {
+    const subs = (Array.isArray(root.subCategorys) ? root.subCategorys : []).filter(
+      (x) => x && Number(x.id) > 0 && !/twitch\s*drops?/i.test(str(x.name)),
+    );
+    const sub = subs.find((x) => /^\s*(other|misc|general|any)/i.test(str(x.name))) || subs[0] || null;
+    return {
+      rootItem: root.id,
+      itemId: sub ? sub.id : root.id,
+      itemPath: root.id + "|" + (sub ? sub.id : root.id),
+      name: str(root.name) + (sub ? " > " + str(sub.name) : ""),
+    };
+  }
+  return null;
+}
+
 function createPublisher(deps = {}) {
   const model = (name) => (deps.models && deps.models[name]) || require("../../models/" + name);
   const CodeProduct = () => model("CodeProduct");
@@ -65,6 +111,8 @@ function createPublisher(deps = {}) {
   let foreignApi = null;
   const foreign = () => deps.foreign || foreignApi || (foreignApi = require("./foreign").createForeignGuard(deps));
   const now = () => (typeof deps.now === "function" ? deps.now() : Date.now());
+  const sleep = (ms) => (typeof deps.sleep === "function" ? deps.sleep(ms) : new Promise((r) => setTimeout(r, ms)));
+  const guideFor = (gameNo, cfg) => (deps.guideFor || require("./games").guideFor)(gameNo, cfg);
 
   async function getConfig() {
     if (deps.config && typeof deps.config.get === "function") return deps.config.get();
@@ -388,6 +436,77 @@ function createPublisher(deps = {}) {
     }
   }
 
+  // PlayerAuctions (06-PLAYERAUCTIONS-PLAN.md C3/C4). The offer starts with
+  // the share of the shelf it will have once its row exists; both stock syncs
+  // keep the shares right afterwards.
+  async function publishPlayerAuctions(product, { share, price, coverPath, cfg }) {
+    const market = "playerauctions";
+    const t = product.texts || {};
+    const m = mp();
+    const game = await m.playerauctionsResolveGame(product.marketGame);
+    if (!game || !game.gameId) return { market, ok: false, error: "PlayerAuctions has no game called " + str(product.marketGame) };
+    const leaf = codeItemLeaf(await m.playerauctionsItemCategories(game.gameId));
+    if (!leaf) return { market, ok: false, error: "PlayerAuctions has no item category to file codes under for " + str(game.gameName || product.marketGame) };
+    const { fitTitle, marketInstruction } = require("./texts");
+    const title = fitTitle(t.title, PA_TITLE_MAX);
+    const slots = Array.isArray(product.slots) ? product.slots : [];
+    const opts = {
+      gameId: game.gameId,
+      itemPath: leaf.itemPath,
+      rootItem: leaf.rootItem,
+      itemId: leaf.itemId,
+      title,
+      description: t.description,
+      instruction: marketInstruction(guideFor(product.gameNo, cfg), PA_INSTRUCTION_MAX),
+      priceUsd: price,
+      itemsPerUnit: slots.length || 1,
+      totalUnit: share,
+      minUnitPerOrder: 1,
+      deliveryGuarantee: m.PA_DELIVERY && m.PA_DELIVERY.min20,
+      coverImagePath: await coverPath(),
+    };
+    let made;
+    try {
+      try {
+        made = await m.playerauctionsPublish(opts);
+      } catch (err) {
+        // The write throttle said no: nothing was made. Wait it out once.
+        if (!(err && err.retryable)) throw err;
+        await sleep(PA_WRITE_GAP_MS);
+        made = await m.playerauctionsPublish(opts);
+      }
+    } catch (err) {
+      const msg = errText(err);
+      // PlayerAuctions said no (isSuccess false, or a 4xx): nothing was made.
+      const refused = (err && err.paCode !== undefined) || (Number(err && err.status) >= 400 && Number(err && err.status) < 500);
+      return { market, ok: false, error: refused ? msg : msg + "; " + PA_UNKNOWN_OUTCOME };
+    }
+    const externalId = str(made && (made.offerId || made.id));
+    if (!externalId) return { market, ok: false, error: "PlayerAuctions answered without an offer id; " + PA_UNKNOWN_OUTCOME };
+    try {
+      const row = await MarketplaceListing().create({
+        ...rowBase(product, market, { externalId, url: made.url }, price),
+        title,
+        qtyTarget: share,
+      });
+      return { market, ok: true, externalId, url: str(made.url), listingId: String(row._id), quantity: share, category: leaf.name };
+    } catch (err) {
+      // A live offer with no row is an order nobody delivers: cancel it.
+      const why = errText(err);
+      try {
+        await m.playerauctionsCancelOffer(externalId);
+        return { market, ok: false, externalId, error: "listing row not saved (" + why + "); the new PlayerAuctions offer was cancelled" };
+      } catch (err2) {
+        return {
+          market,
+          ok: false,
+          externalId,
+          error: "listing row not saved (" + why + ") and the new PlayerAuctions offer " + externalId + " could NOT be cancelled (" + errText(err2) + "): cancel it on PlayerAuctions by hand",
+        };
+      }
+    }
+  }
+
   // One event per market; Telegram is sent once per publish, by publishNow.
   async function reportMarket(product, r, actor) {
     const name = str(product.name);
@@ -463,7 +582,7 @@ function createPublisher(deps = {}) {
           r = { market, ok: false, skipped: "switched off in the code shop settings" };
         } else {
           try {
-            r = await publishOne(product, market, coverPath);
+            r = await publishOne(product, market, coverPath, cfg);
           } catch (err) {
             r = { market, ok: false, error: errText(err) };
           }
@@ -487,14 +606,26 @@ function createPublisher(deps = {}) {
     return { results };
   }
 
-  async function publishOne(product, market, coverPath) {
-    // Never anything but Eldorado, even if a caller got past the checks above.
-    if (market !== "eldorado") return { market, ok: false, skipped: "not a code shop market" };
+  async function publishOne(product, market, coverPath, cfg) {
+    // Never anything but a code shop market, even if a caller got past the checks above.
+    if (!ALLOWED_MARKETS.includes(market)) return { market, ok: false, skipped: "not a code shop market" };
     const live = await MarketplaceListing().exists({ accountOffer: product.offer, marketplace: market, status: "active" });
     if (live) return { market, ok: false, skipped: "already live" };
     const shelf = Number(await stock().shelfFor(product.offer)) || 0;
     if (shelf < 1) return { market, ok: false, skipped: "no stock yet" };
-    return publishEldorado(product, { shelf, price: priceOf(product), coverPath });
+    if (market === "eldorado") return publishEldorado(product, { shelf, price: priceOf(product), coverPath });
+    // The share this new listing will have of the one shelf (S4): it is not a
+    // row yet, so it counts as the last sharer and takes the smallest share.
+    const st = stock();
+    const sharers = await MarketplaceListing()
+      .find(
+        { accountOffer: product.offer, status: "active", marketplace: { $nin: st.NON_SHARING_MARKETS || ["zeusx"] } },
+        { _id: 1 },
+      )
+      .lean();
+    const share = Number(st.shareOfShelf(shelf, "", (sharers || []).map((r) => String(r._id)))) || 0;
+    if (share < 1) return { market, ok: false, skipped: "no stock left for another market yet" };
+    return publishPlayerAuctions(product, { share, price: paPriceOf(cfg), coverPath, cfg });
   }
 
   // --- take down --------------------------------------------------------------
@@ -534,6 +665,34 @@ function createPublisher(deps = {}) {
     return out;
   }
 
+  // PlayerAuctions rows (C6): hidden (reversible on PlayerAuctions' side) and
+  // marked delisted; a resume publishes a fresh offer, as on Eldorado.
+  async function takeDownPlayerAuctions(product) {
+    const out = { delisted: 0, errors: [] };
+    if (!product.offer) return out;
+    const rows = await MarketplaceListing()
+      .find({ accountOffer: product.offer, marketplace: "playerauctions", status: "active" })
+      .lean();
+    for (const row of rows) {
+      try {
+        await mp().playerauctionsHide(row.externalId);
+      } catch (err) {
+        const msg = errText(err);
+        out.errors.push("PlayerAuctions offer " + row.externalId + ": " + msg);
+        await MarketplaceListing()
+          .updateOne({ _id: row._id }, { $set: { lastError: msg } })
+          .catch(() => {});
+        continue;
+      }
+      const res = await MarketplaceListing().updateOne(
+        { _id: row._id, status: "active" },
+        { $set: { status: "delisted", lastError: "", note: (str(row.note) ? str(row.note) + " " : "") + "hidden by the code shop" } },
+      );
+      out.delisted += Number(res && res.modifiedCount) || 0;
+    }
+    return out;
+  }
+
   async function countActive(product, market) {
     if (!product.offer) return 0;
     return MarketplaceListing().countDocuments({ accountOffer: product.offer, marketplace: market, status: "active" });
@@ -550,15 +709,19 @@ function createPublisher(deps = {}) {
     if (product.status !== "active" && product.status !== "paused") {
       return { ok: false, error: "a " + product.status + " product cannot be paused" };
     }
-    const down = await takeDownEldorado(product);
+    const eld = await takeDownEldorado(product);
+    const pa = await takeDownPlayerAuctions(product);
+    const down = { delisted: eld.delisted + pa.delisted, errors: [...eld.errors, ...pa.errors] };
     await CodeProduct().updateOne({ _id: product._id, status: { $in: ["active", "paused"] } }, { $set: { status: "paused" } });
     const ggselLive = await countActive(product, "ggsel");
     const msg =
       "Paused " +
       str(product.name) +
       ": " +
-      down.delisted +
-      " Eldorado listing(s) taken down" +
+      eld.delisted +
+      " Eldorado and " +
+      pa.delisted +
+      " PlayerAuctions listing(s) taken down" +
       (down.errors.length ? ", " + down.errors.length + " could not be: " + down.errors.join("; ") : "") +
       (ggselLive ? "; " + ggselLive + " GGSel listing(s) still live" : "");
     await log({ level: down.errors.length ? "error" : "info", kind: "pause", product: product._id, msg, data: { actor: str(actor) } });
@@ -606,7 +769,7 @@ function createPublisher(deps = {}) {
     if (product.status === "active" || product.status === "paused") {
       paused = await pauseNow(product._id, { actor });
       if (!paused.ok) {
-        const why = (paused.errors || []).join("; ") || paused.error || "the Eldorado listings could not be taken down";
+        const why = (paused.errors || []).join("; ") || paused.error || "the listings could not be taken down";
         return { ok: false, error: "not retired: " + why, pause: paused };
       }
       // A publish that raced the check above could have put one up since.
@@ -688,5 +851,10 @@ module.exports = {
   GGSEL_REFUSED,
   OFFER_LIMIT_MSG,
   UNKNOWN_OUTCOME,
+  PA_MIN_USD,
+  PA_TITLE_MAX,
+  PA_UNKNOWN_OUTCOME,
   priceOf,
+  paPriceOf,
+  codeItemLeaf,
 };

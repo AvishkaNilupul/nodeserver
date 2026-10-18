@@ -27,9 +27,10 @@ const { DEFAULTS } = require("./config");
 
 const HOUR_MS = 60 * 60 * 1000;
 const DAY_MS = 24 * HOUR_MS;
-// Codes sell on Eldorado only (05-REVIEW-FIXES.md, R1): GGSel never says which
-// code it sold, so a draft never names it, whatever the settings say.
-const MARKET_ORDER = ["eldorado"];
+// Codes sell on Eldorado and PlayerAuctions (06-PLAYERAUCTIONS-PLAN.md C7):
+// a draft names every one of them that is switched on. GGSel never says which
+// code it sold (05-REVIEW-FIXES.md, R1), so a draft never names it.
+const MARKET_ORDER = ["eldorado", "playerauctions"];
 const ROW_FIELDS =
   "_id gameNo gameName groupKey slotKey nameRaw name image campaignTitle campaignEndAt earnedAt useBy state";
 
