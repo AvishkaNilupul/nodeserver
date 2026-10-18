@@ -429,6 +429,22 @@ test("validatePatch: the PlayerAuctions price is never under its $5 minimum (and
   assert.equal(DEFAULTS.markets.playerauctions, false, "PlayerAuctions ships switched off");
 });
 
+test("playerauctionsGames: Overwatch only by default; a list of game numbers; marketsForGame drops PlayerAuctions for any other game", () => {
+  const { paAllowsGame, marketsForGame } = require("../utils/codeShop/config");
+  assert.deepEqual(DEFAULTS.playerauctionsGames, ["12"]);
+  assertOk({ playerauctionsGames: ["12", "200"] });
+  assertOk({ playerauctionsGames: [] });
+  assertBad({ playerauctionsGames: ["Overwatch"] }, "playerauctionsGames[0]");
+  assertBad({ playerauctionsGames: "12" }, "playerauctionsGames");
+  assert.equal(paAllowsGame(DEFAULTS, "12"), true);
+  assert.equal(paAllowsGame(DEFAULTS, 12), true);
+  assert.equal(paAllowsGame(DEFAULTS, "200"), false, "Delta Force stays off PlayerAuctions");
+  assert.equal(paAllowsGame(DEFAULTS, null), false);
+  assert.deepEqual(marketsForGame(["eldorado", "playerauctions"], "12", DEFAULTS), ["eldorado", "playerauctions"]);
+  assert.deepEqual(marketsForGame(["eldorado", "playerauctions"], "200", DEFAULTS), ["eldorado"]);
+  assert.deepEqual(marketsForGame(null, "12", DEFAULTS), []);
+});
+
 test("validatePatch: clearance steps are a list of complete { days, cutPct }", () => {
   assertBad({ pricing: { clearanceSteps: { days: 1, cutPct: 5 } } }, "pricing.clearanceSteps");
   assertBad({ pricing: { clearanceSteps: [5] } }, "pricing.clearanceSteps[0]");

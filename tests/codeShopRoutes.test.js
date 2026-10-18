@@ -515,6 +515,11 @@ test("POST /products names PlayerAuctions too when it is switched on (06 plan, C
   const edited = ok(await post("/products/" + r.product.id, { markets: ["playerauctions"] }));
   assert.ok(edited);
   assert.deepEqual((await CodeProduct.findById(r.product.id).lean()).markets, ["playerauctions"]);
+  // A game not on playerauctionsGames is drafted without it.
+  cfgOver = { markets: { eldorado: true, playerauctions: true }, playerauctionsGames: [] };
+  const b = await addRows({ nameRaw: "Moon Spray" });
+  const r2 = ok(await post("/products", { slotKeys: [b] }));
+  assert.deepEqual((await CodeProduct.findById(r2.product.id).lean()).markets, ["eldorado"]);
 });
 
 test("POST /products refuses unknown slots, mixed games and bad input with 400", async () => {

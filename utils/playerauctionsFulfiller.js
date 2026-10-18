@@ -236,8 +236,10 @@ function suppliedMessages(stock, accounts, offer) {
 const CODE_LINE_RE = /^\s*\d+\)\s*.+?\s*=\s*\S+\s*$/;
 const PASSWORD_SLOT = "{password}";
 
-function codeUnitMessages(stock, accounts, offer) {
+function codeUnitMessages(stock, accounts, rawOffer) {
   const limit = copy.LIMIT;
+  // deliverOrder hands in a Mongoose document: spread, its fields would be lost.
+  const offer = rawOffer && typeof rawOffer.toObject === "function" ? rawOffer.toObject() : rawOffer;
   const template = String((offer && offer.deliveryTemplate) || "");
   const at = template.indexOf(PASSWORD_SLOT);
   if (!accounts.length || at < 0) return null;
@@ -500,6 +502,10 @@ async function syncStock(listing, supplied = suppliedDeps) {
   const af = getAutoFarm() || {};
   if (af.playerauctionsSyncStock === false) return null;
   const left = await stockFor(listing, undefined, supplied);
+  // A quantity update REPLACES the offer, and a replaced offer is on sale
+  // again. The row may have been taken down (the code shop's pause hides it
+  // and marks it delisted) since the caller read it: then nothing is pushed.
+  if (!(await stillActive(listing))) return null;
   try {
     const r = await mp.playerauctionsSetQuantity(listing.externalId, left);
     if (r && r.replaced && r.offerId) {
@@ -511,6 +517,19 @@ async function syncStock(listing, supplied = suppliedDeps) {
   } catch (e) {
     console.error("playerauctions stock sync:", e.message);
     return null;
+  }
+}
+
+// Is the listing row still active right now? A row that cannot be re-read is
+// treated as not active: pushing stock to an offer we meant to take down is the
+// one direction that can sell what is gone.
+async function stillActive(listing) {
+  if (!listing || !listing._id) return true; // not a stored row (a caller's own object): as before
+  try {
+    return !!(await MarketplaceListing.exists({ _id: listing._id, status: "active" }));
+  } catch (e) {
+    console.error("playerauctions stock sync re-check:", e.message);
+    return false;
   }
 }
 
@@ -567,6 +586,8 @@ async function syncUnclaimedStock({ dryRun = false } = {}) {
     }
     if (!offer) continue;
     const advertised = Number(offer.totalUnit);
+    // Taken down (the code shop's pause) since the rows were read: leave it alone.
+    if (!dryRun && !(await stillActive(row))) continue;
 
     if (real <= 0) {
       // Nothing to sell. Hide rather than set quantity 0 — a zero-stock offer

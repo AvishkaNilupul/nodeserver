@@ -34,6 +34,8 @@ const PA_INSTRUCTION_MAX = 500;
 // PlayerAuctions throttles writes ("Operated too frequent", code 1): waited out once.
 const PA_WRITE_GAP_MS = 25000;
 const PA_UNKNOWN_OUTCOME = "the outcome is unknown: check PlayerAuctions for an offer with this title before publishing again";
+// A hide refused because the offer is no longer on sale at all: nothing to take down.
+const PA_GONE_RE = /not found|does ?n.?t exist|no longer exists?|has been (cancell?ed|removed|deleted|closed)|is (cancell?ed|expired|closed|removed)|already (hidden|cancell?ed|closed)/i;
 
 const GGSEL_REFUSED = "GGSel is not used for codes yet: it never reports which code it sold, so a code could be sold twice";
 // Eldorado refuses a new offer once the category's active-offer quota is used.
@@ -66,17 +68,23 @@ function paPriceOf(cfg) {
 }
 
 // The item leaf a code bundle is filed under on PlayerAuctions. Never a root
-// named for Twitch drops (these are redeem codes, not Twitch drops) and never a
-// sentinel row (id <= 0: PlayerAuctions refuses it). A cosmetic-looking root
-// first, then its "Other ..." leaf, else its first leaf. null = none fits.
+// named for Twitch drops (these are redeem codes, not Twitch drops), never a
+// sentinel row (id <= 0: PlayerAuctions refuses it), never a currency or
+// hard-goods root (utils/marketplaces.js PA_ROOT_DENY), and only a cosmetic
+// root, best first; its "Other ..." leaf, else its first leaf. null = none fits:
+// better no listing than a misfiled one.
+const PA_ROOT_DENY = /^(vc|gold|coin|credit|currenc|cash|silver|gem|token|ore|crystal|powder|twine|material|mechanical)/i;
+const PA_ROOT_PREFER = [/skin|cosmetic/i, /coating|armou?r/i, /bundle|pack/i, /outfit|emote|spray|charm|banner|icon/i, /weapon/i, /^\s*(other|misc|items?)\b/i];
 function codeItemLeaf(tree) {
-  const roots = (Array.isArray(tree) ? tree : []).filter(
-    (r) => r && Number(r.id) > 0 && !/twitch\s*drops?/i.test(str(r.name)),
-  );
-  const ranked = [
-    ...roots.filter((r) => /skin|cosmetic|item|other/i.test(str(r.name))),
-    ...roots.filter((r) => !/skin|cosmetic|item|other/i.test(str(r.name))),
-  ];
+  const rank = (name) => {
+    const n = str(name).trim();
+    if (/twitch\s*drops?/i.test(n) || PA_ROOT_DENY.test(n)) return -1;
+    const i = PA_ROOT_PREFER.findIndex((re) => re.test(n));
+    return i;
+  };
+  const ranked = (Array.isArray(tree) ? tree : [])
+    .filter((r) => r && Number(r.id) > 0 && rank(r.name) >= 0)
+    .sort((a, b) => rank(a.name) - rank(b.name));
   for (const root of ranked) {
     const subs = (Array.isArray(root.subCategorys) ? root.subCategorys : []).filter(
       (x) => x && Number(x.id) > 0 && !/twitch\s*drops?/i.test(str(x.name)),
@@ -436,6 +444,66 @@ function createPublisher(deps = {}) {
     }
   }
 
+  // The title as sent: PlayerAuctions shows it folded (a "|" may read "-").
+  const titleSent = (title) => " (title sent: " + JSON.stringify(str(title)) + ")";
+
+  // Why PlayerAuctions would not deliver an order right now ("" = it would).
+  // A live offer whose orders nobody delivers is money taken (06 plan, review).
+  function paDeliveryProblem() {
+    let af;
+    let al;
+    try {
+      af = (typeof deps.autoFarm === "function" ? deps.autoFarm() : require("../settings").getAutoFarm()) || {};
+      al =
+        (typeof deps.accountListingSettings === "function"
+          ? deps.accountListingSettings()
+          : require("../settings").getAccountListingSettings()) || {};
+    } catch (err) {
+      return "its delivery settings could not be read (" + errText(err) + ")";
+    }
+    if (af.playerauctionsAutoDeliver !== true) return "PlayerAuctions auto-delivery is off (autoFarm.playerauctionsAutoDeliver)";
+    if (af.playerauctionsDeliverDryRun !== false) return "PlayerAuctions delivery is a dry run (autoFarm.playerauctionsDeliverDryRun)";
+    if (af.playerauctionsSyncStock === false) return "PlayerAuctions stock sync is off (autoFarm.playerauctionsSyncStock)";
+    if (!al.enabled || !al.autoDeliver) return "account-listing delivery is off in the settings";
+    return "";
+  }
+
+  // Each listing of one shelf advertises its share (S4). After one market's
+  // listing goes up, the OTHER market's live listings are given their new,
+  // smaller share at once rather than at their next stock sync (Eldorado 15
+  // min, PlayerAuctions 30): until then both together would advertise more
+  // than the shelf holds. Never the listing just made (a PlayerAuctions write
+  // right after its create would hit the write throttle). Best effort: a failed
+  // push is logged and the market's own sync corrects it.
+  async function pushShares(product, justMade) {
+    const other = justMade === "playerauctions" ? "eldorado" : "playerauctions";
+    let rows;
+    try {
+      rows = await MarketplaceListing().find({ accountOffer: product.offer, marketplace: other, status: "active" });
+    } catch (err) {
+      await log({ level: "warn", kind: "publish", product: product._id, msg: "Could not read the " + other + " listings to share the stock: " + errText(err) });
+      return;
+    }
+    for (const row of rows || []) {
+      try {
+        if (other === "eldorado") {
+          const q = Number(await stock().stockFor(typeof row.toObject === "function" ? row.toObject() : row)) || 0;
+          await mp().eldoradoSetQuantity(row.externalId, q);
+        } else {
+          const sync = typeof deps.paSyncStock === "function" ? deps.paSyncStock : require("../playerauctionsFulfiller").syncStock;
+          await sync(row);
+        }
+      } catch (err) {
+        await log({
+          level: "warn",
+          kind: "publish",
+          product: product._id,
+          msg: "The " + other + " offer " + str(row.externalId) + " still shows its old stock (" + errText(err) + "); its stock sync corrects it",
+        });
+      }
+    }
+  }
+
   // PlayerAuctions (06-PLAYERAUCTIONS-PLAN.md C3/C4). The offer starts with
   // the share of the shelf it will have once its row exists; both stock syncs
   // keep the shares right afterwards.
@@ -479,10 +547,10 @@ function createPublisher(deps = {}) {
       const msg = errText(err);
       // PlayerAuctions said no (isSuccess false, or a 4xx): nothing was made.
       const refused = (err && err.paCode !== undefined) || (Number(err && err.status) >= 400 && Number(err && err.status) < 500);
-      return { market, ok: false, error: refused ? msg : msg + "; " + PA_UNKNOWN_OUTCOME };
+      return { market, ok: false, error: refused ? msg : msg + "; " + PA_UNKNOWN_OUTCOME + titleSent(title) };
     }
     const externalId = str(made && (made.offerId || made.id));
-    if (!externalId) return { market, ok: false, error: "PlayerAuctions answered without an offer id; " + PA_UNKNOWN_OUTCOME };
+    if (!externalId) return { market, ok: false, error: "PlayerAuctions answered without an offer id; " + PA_UNKNOWN_OUTCOME + titleSent(title) };
     try {
       const row = await MarketplaceListing().create({
         ...rowBase(product, market, { externalId, url: made.url }, price),
@@ -547,7 +615,10 @@ function createPublisher(deps = {}) {
   // -> { results: [{ market, ok, skipped?, externalId?, url?, listingId?, error? }], error? }
   // `ok` is true only for a listing created by this call; a skip is ok:false
   // with `skipped` (nothing went wrong, nothing went up either).
-  async function publishNow(id, { actor = "" } = {}) {
+  // `markets` (the scheduler's list of markets a product never had a listing
+  // on): only those are published, never another market whose listing was
+  // taken down (R2). Absent: every market of the product, as before.
+  async function publishNow(id, { actor = "", markets = null } = {}) {
     const product = await loadProduct(id);
     if (!product) return { results: [], error: "product not found" };
     if (product.status !== "active" || !product.offer) {
@@ -570,11 +641,11 @@ function createPublisher(deps = {}) {
     let coverJob = null;
     const coverPath = () => coverJob || (coverJob = Promise.resolve().then(() => cover().build(product)));
     try {
-      const seen = new Set();
-      for (const raw of Array.isArray(product.markets) ? product.markets : []) {
-        const market = str(raw);
-        if (seen.has(market)) continue;
-        seen.add(market);
+      const only = Array.isArray(markets) ? new Set(markets.map(str)) : null;
+      const named = [...new Set((Array.isArray(product.markets) ? product.markets : []).map(str))].filter((m) => !only || only.has(m));
+      // Eldorado first: a PlayerAuctions listing then starts with its share beside it (S4).
+      const ordered = [...ALLOWED_MARKETS.filter((m) => named.includes(m)), ...named.filter((m) => !ALLOWED_MARKETS.includes(m))];
+      for (const market of ordered) {
         let r;
         if (!ALLOWED_MARKETS.includes(market)) {
           r = { market, ok: false, skipped: "not a code shop market" };
@@ -611,11 +682,19 @@ function createPublisher(deps = {}) {
     if (!ALLOWED_MARKETS.includes(market)) return { market, ok: false, skipped: "not a code shop market" };
     const live = await MarketplaceListing().exists({ accountOffer: product.offer, marketplace: market, status: "active" });
     if (live) return { market, ok: false, skipped: "already live" };
+    if (market === "playerauctions") {
+      // Checked before any PlayerAuctions call (06 plan, review).
+      if (!require("./config").paAllowsGame(cfg, product.gameNo)) {
+        return { market, ok: false, error: "PlayerAuctions is not used for this game's codes (settings: playerauctionsGames)" };
+      }
+      const why = paDeliveryProblem();
+      if (why) return { market, ok: false, error: "not published on PlayerAuctions, it would not deliver: " + why };
+    }
     const shelf = Number(await stock().shelfFor(product.offer)) || 0;
     if (shelf < 1) return { market, ok: false, skipped: "no stock yet" };
-    if (market === "eldorado") return publishEldorado(product, { shelf, price: priceOf(product), coverPath });
     // The share this new listing will have of the one shelf (S4): it is not a
     // row yet, so it counts as the last sharer and takes the smallest share.
+    // Alone on the shelf it is the whole shelf, as before.
     const st = stock();
     const sharers = await MarketplaceListing()
       .find(
@@ -625,7 +704,12 @@ function createPublisher(deps = {}) {
       .lean();
     const share = Number(st.shareOfShelf(shelf, "", (sharers || []).map((r) => String(r._id)))) || 0;
     if (share < 1) return { market, ok: false, skipped: "no stock left for another market yet" };
-    return publishPlayerAuctions(product, { share, price: paPriceOf(cfg), coverPath, cfg });
+    const r =
+      market === "eldorado"
+        ? await publishEldorado(product, { shelf: share, price: priceOf(product), coverPath })
+        : await publishPlayerAuctions(product, { share, price: paPriceOf(cfg), coverPath, cfg });
+    if (r && r.ok && (sharers || []).length) await pushShares(product, market);
+    return r;
   }
 
   // --- take down --------------------------------------------------------------
@@ -674,19 +758,31 @@ function createPublisher(deps = {}) {
       .find({ accountOffer: product.offer, marketplace: "playerauctions", status: "active" })
       .lean();
     for (const row of rows) {
+      let note = "hidden by the code shop";
       try {
-        await mp().playerauctionsHide(row.externalId);
+        try {
+          await mp().playerauctionsHide(row.externalId);
+        } catch (err) {
+          // The write throttle said no: nothing changed. Wait it out once.
+          if (!(err && err.retryable)) throw err;
+          await sleep(PA_WRITE_GAP_MS);
+          await mp().playerauctionsHide(row.externalId);
+        }
       } catch (err) {
         const msg = errText(err);
-        out.errors.push("PlayerAuctions offer " + row.externalId + ": " + msg);
-        await MarketplaceListing()
-          .updateOne({ _id: row._id }, { $set: { lastError: msg } })
-          .catch(() => {});
-        continue;
+        // Already off sale (cancelled by hand, ended, gone): the goal is met.
+        if (!PA_GONE_RE.test(msg)) {
+          out.errors.push("PlayerAuctions offer " + row.externalId + ": " + msg);
+          await MarketplaceListing()
+            .updateOne({ _id: row._id }, { $set: { lastError: msg } })
+            .catch(() => {});
+          continue;
+        }
+        note = "gone from the marketplace";
       }
       const res = await MarketplaceListing().updateOne(
         { _id: row._id, status: "active" },
-        { $set: { status: "delisted", lastError: "", note: (str(row.note) ? str(row.note) + " " : "") + "hidden by the code shop" } },
+        { $set: { status: "delisted", lastError: "", note: (str(row.note) ? str(row.note) + " " : "") + note } },
       );
       out.delisted += Number(res && res.modifiedCount) || 0;
     }

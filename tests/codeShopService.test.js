@@ -716,7 +716,8 @@ test("publishPending: only a product's FIRST listing per market, never adopted, 
     h.published.map((p) => p.id),
     ["p1", "p5", "p15", "p16", "p17"],
   );
-  for (const p of h.published) assert.deepEqual(p.opts, { actor: "auto" });
+  // Only the markets each product never had a listing on (R2; the review's blocker, 2026-10-18).
+  for (const p of h.published) assert.deepEqual(p.opts, { actor: "auto", markets: ["eldorado"] });
   assert.equal(r.steps.publishPending.checked, 14, "active products with an offer");
   assert.equal(r.steps.publishPending.attempted, 5);
   assert.equal(r.steps.publishPending.published, 5);
@@ -753,6 +754,7 @@ test("publishPending: at most one product goes up on PlayerAuctions per run; Eld
   });
   const r1 = await h.svc.runStep("publishPending");
   assert.deepEqual(h.published.map((p) => p.id), ["a1", "a3"]);
+  assert.deepEqual(h.published[0].opts, { actor: "auto", markets: ["playerauctions"] }, "Eldorado is live: only PlayerAuctions is asked for");
   assert.deepEqual(r1.steps.publishPending.products.map((p) => [p.id, p.markets]), [
     ["a1", ["playerauctions"]],
     ["a3", ["eldorado"]],
@@ -1238,7 +1240,7 @@ test("real models: an empty tick runs every real step cleanly; publishPending an
         return { lowestSameSetUsd: null };
       };
       const r1 = await svc.runStep("publishPending");
-      assert.deepEqual(published, [{ id: String(a._id), o: { actor: "auto" } }]);
+      assert.deepEqual(published, [{ id: String(a._id), o: { actor: "auto", markets: ["eldorado"] } }]);
       assert.equal(r1.steps.publishPending.checked, 2);
       const r2 = await svc.runStep("scan");
       assert.deepEqual(scanned, [String(a._id)], "never scanned beats scanned 30 h ago");

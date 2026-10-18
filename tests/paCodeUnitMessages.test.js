@@ -96,3 +96,46 @@ test("a password with one line that is not a code line is not treated as a code 
   const tpl = offer(SHOP_TEMPLATE.replace("Thank you", "Thank you " + "z".repeat(300)));
   assert.deepEqual(suppliedMessages(stock, [mixed], tpl), copy.deliveryMessages([mixed], { kind: "bundle" }));
 });
+
+// The review of 2026-10-18: deliverOrder hands suppliedMessages a Mongoose
+// document, whose fields a spread does not carry, so {title} and {game}
+// came out blank in a code unit's messages.
+test("a Mongoose-document offer still fills {title} and {game}", () => {
+  const plain = offer("Hi {title} ({game}):\n{password}\n\n" + HELP);
+  const doc = { toObject: () => ({ ...plain }) }; // a spread of this carries nothing
+  const messages = suppliedMessages(stock, [unit(6, SIX)], doc);
+  assert.match(messages[0], /^Hi Space Game \| 6 Codes Bundle \(Space Game\):\n1\) /);
+});
+
+// The review of 2026-10-18: the stock sync read its rows once, then a quantity
+// update (which REPLACES the offer, back on sale) could rebuild an offer the
+// code shop had just hidden and marked delisted.
+test("syncStock pushes nothing to a row that is no longer active", async () => {
+  const ful = require("../utils/playerauctionsFulfiller");
+  const mp = require("../utils/marketplaces");
+  const ML = require("../models/MarketplaceListing");
+  const calls = [];
+  const saved = { set: mp.playerauctionsSetQuantity, exists: ML.exists };
+  mp.playerauctionsSetQuantity = async (...a) => {
+    calls.push(a);
+    return {};
+  };
+  const row = { _id: "6ad000000000000000000aa1", accountOffer: "6ad000000000000000000bb1", externalId: "9001", save: async () => {} };
+  const supplied = () => ({ stock: { stockFor: async () => 5 } });
+  try {
+    ML.exists = async () => null; // delisted since it was read
+    assert.equal(await ful.syncStock(row, supplied), null);
+    assert.equal(calls.length, 0);
+    ML.exists = async () => {
+      throw new Error("db down");
+    };
+    assert.equal(await ful.syncStock(row, supplied), null, "a row that cannot be re-read is not pushed");
+    assert.equal(calls.length, 0);
+    ML.exists = async () => ({ _id: row._id });
+    assert.equal(await ful.syncStock(row, supplied), 5);
+    assert.deepEqual(calls, [["9001", 5]]);
+  } finally {
+    mp.playerauctionsSetQuantity = saved.set;
+    ML.exists = saved.exists;
+  }
+});

@@ -123,7 +123,13 @@ function harness(opts = {}) {
     },
     async playerauctionsHide(id) {
       calls.push(["paHide", id]);
+      const queued = (opts.paHideErrors || []).shift();
+      if (queued) throw queued;
       if (opts.paHideError) throw opts.paHideError;
+    },
+    async eldoradoSetQuantity(id, q) {
+      calls.push(["eldoradoSetQuantity", id, q]);
+      if (opts.eldoradoSetQuantityError) throw opts.eldoradoSetQuantityError;
     },
     async playerauctionsCancelOffer(id) {
       calls.push(["paCancel", id]);
@@ -152,6 +158,11 @@ function harness(opts = {}) {
     // The real S4 rule (pure): how one shelf is split between live listings.
     shareOfShelf,
     NON_SHARING_MARKETS,
+    // One listing's share of the shelf, from the real active rows (S4).
+    async stockFor(row) {
+      const ids = (await MarketplaceListing.find({ accountOffer: row.accountOffer, status: "active" }, { _id: 1 }).lean()).map((r) => String(r._id));
+      return shareOfShelf(state.shelf, String(row._id), ids);
+    },
   };
 
   const foreign = {
@@ -209,6 +220,13 @@ function harness(opts = {}) {
     now: () => NOW,
     sleep: async (ms) => calls.push(["sleep", ms]),
     guideFor,
+    // PlayerAuctions would deliver (the fulfiller's switches): on unless a test says otherwise.
+    autoFarm: () => opts.autoFarm || { playerauctionsAutoDeliver: true, playerauctionsDeliverDryRun: false, playerauctionsSyncStock: true },
+    accountListingSettings: () => opts.accountListings || { enabled: true, autoDeliver: true },
+    paSyncStock: async (row) => {
+      calls.push(["paSyncStock", String(row.externalId)]);
+      if (opts.paSyncError) throw opts.paSyncError;
+    },
   };
   return {
     deps,
@@ -892,9 +910,13 @@ test("codeItemLeaf: never a Twitch Drops root or leaf, never a sentinel; an 'Oth
     { id: 1653, name: "Skins", subCategorys: [{ id: 7797, name: "Amazon Loot" }, { id: 8305, name: "Other Skins" }] },
   ];
   assert.deepEqual(codeItemLeaf(tree), { rootItem: 1653, itemId: 8305, itemPath: "1653|8305", name: "Skins > Other Skins" });
-  assert.equal(codeItemLeaf([{ id: 3, name: "Gear", subCategorys: [{ id: 4, name: "Helmets" }] }]).itemPath, "3|4", "else the first leaf");
-  assert.equal(codeItemLeaf([{ id: 5, name: "Coins", subCategorys: [] }]).itemPath, "5|5", "a root with no leaf is its own leaf");
+  assert.equal(codeItemLeaf([{ id: 3, name: "Spray Packs", subCategorys: [{ id: 4, name: "Helmets" }] }]).itemPath, "3|4", "else the first leaf");
+  assert.equal(codeItemLeaf([{ id: 5, name: "Bundles", subCategorys: [] }]).itemPath, "5|5", "a root with no leaf is its own leaf");
   assert.equal(codeItemLeaf([{ id: 6, name: "Skins", subCategorys: [{ id: 7, name: "Twitch Drops" }] }]).itemPath, "6|6", "a Twitch Drops leaf is skipped too");
+  // A currency or hard-goods root, or one that is not cosmetic at all, is refused (review, 2026-10-18).
+  assert.equal(codeItemLeaf([{ id: 8, name: "Coins", subCategorys: [{ id: 9, name: "Other" }] }]), null, "currency");
+  assert.equal(codeItemLeaf([{ id: 10, name: "Gold", subCategorys: [] }, { id: 11, name: "Boosting Service", subCategorys: [] }]), null, "currency / service");
+  assert.equal(codeItemLeaf([{ id: 12, name: "Coins", subCategorys: [] }, { id: 13, name: "Skins", subCategorys: [] }]).itemPath, "13|13", "the cosmetic root wins");
   assert.equal(codeItemLeaf([tree[0], tree[1]]), null, "nothing but Twitch Drops and a sentinel: no leaf");
   assert.equal(codeItemLeaf(null), null);
 });
@@ -935,7 +957,102 @@ test("publish: PlayerAuctions gets its half of the shelf, at $5, filed as codes,
   assert.equal(row.note, "code shop");
   assert.equal(String(row.accountOffer), String(p.offer));
   assert.equal((await CodeProduct.findById(p._id).lean()).publish.lastError, "");
+  // Eldorado is given its new share at once, not at its next stock sync: 10 + 9 = 19.
+  assert.deepEqual(h.named("eldoradoSetQuantity"), [["eldoradoSetQuantity", "eld-live", 10]]);
+  assert.equal(h.named("paSyncStock").length, 0, "the PlayerAuctions offer just made is not written again");
   assertClean(h);
+});
+
+// The review's blocker (2026-10-18): the scheduler names the markets a product
+// never had a listing on; a market whose listing was taken down is never put
+// back up with them.
+test("publish: with `markets`, only those are published; a delisted Eldorado listing stays down", async () => {
+  const p = await activeProduct({ markets: ["eldorado", "playerauctions"] });
+  await MarketplaceListing.create({ accountOffer: p.offer, marketplace: "eldorado", externalId: "eld-old", status: "delisted", origin: "manual", note: "code shop" });
+  const h = harness({ shelf: 6, config: PA_CONFIG });
+  const res = await h.pub.publishProduct(p._id, { actor: "auto", markets: ["playerauctions"] });
+  assert.deepEqual(res.results.map((r) => [r.market, r.ok]), [["playerauctions", true]]);
+  assert.equal(h.named("eldoradoPublish").length, 0, "no new Eldorado offer");
+  assert.equal(h.named("paPublish")[0][1].totalUnit, 6, "alone on the shelf: the whole shelf");
+  assert.equal(await MarketplaceListing.countDocuments({ marketplace: "eldorado", status: "active" }), 0);
+  assertClean(h);
+});
+
+test("publish: both markets in one call go Eldorado first, and Eldorado is then cut to its share", async () => {
+  const p = await activeProduct({ markets: ["playerauctions", "eldorado"] });
+  const h = harness({ shelf: 7, config: PA_CONFIG });
+  const res = await h.pub.publishProduct(p._id);
+  assert.deepEqual(res.results.map((r) => [r.market, r.ok]), [["eldorado", true], ["playerauctions", true]], "Eldorado first, whatever the product's order");
+  assert.equal(h.named("eldoradoPublish")[0][1].quantity, 7, "alone at first: the whole shelf");
+  assert.equal(h.named("paPublish")[0][1].totalUnit, 3, "the second listing's share");
+  const eld = await MarketplaceListing.findOne({ accountOffer: p.offer, marketplace: "eldorado" }).lean();
+  assert.deepEqual(h.named("eldoradoSetQuantity"), [["eldoradoSetQuantity", eld.externalId, 4]], "4 + 3 = 7: never more than the shelf");
+  assertClean(h);
+});
+
+test("publish: Eldorado put up again while PlayerAuctions is live gives PlayerAuctions its new share at once", async () => {
+  const p = await activeProduct({ markets: ["eldorado", "playerauctions"] });
+  await MarketplaceListing.create({ accountOffer: p.offer, marketplace: "playerauctions", externalId: "9007", status: "active", origin: "manual", note: "code shop" });
+  const h = harness({ shelf: 8, config: PA_CONFIG });
+  const res = await h.pub.publishProduct(p._id, { markets: ["eldorado"] });
+  assert.equal(res.results[0].ok, true);
+  assert.equal(h.named("eldoradoPublish")[0][1].quantity, 4, "its share beside the live PlayerAuctions listing");
+  assert.deepEqual(h.named("paSyncStock"), [["paSyncStock", "9007"]]);
+  // A failed push is a warning, never a failed publish.
+  const p2 = await activeProduct({ markets: ["eldorado", "playerauctions"] });
+  await MarketplaceListing.create({ accountOffer: p2.offer, marketplace: "playerauctions", externalId: "9008", status: "active", origin: "manual", note: "code shop" });
+  const h2 = harness({ shelf: 8, config: PA_CONFIG, paSyncError: new Error("PlayerAuctions set quantity failed (code 1): Operated too frequent") });
+  const r2 = await h2.pub.publishProduct(p2._id, { markets: ["eldorado"] });
+  assert.equal(r2.results[0].ok, true);
+  assert.ok(h2.events.some((e) => e.level === "warn" && /still shows its old stock/.test(e.msg)));
+  assertClean(h);
+  assertClean(h2);
+});
+
+test("publish: PlayerAuctions is refused before any PlayerAuctions call for a game not allowed there, or while it would not deliver", async () => {
+  const df = await activeProduct({ gameNo: "200", gameName: "Delta Force", marketGame: "Delta Force", markets: ["eldorado", "playerauctions"] });
+  await MarketplaceListing.create({ accountOffer: df.offer, marketplace: "eldorado", externalId: "eld-df", status: "active", origin: "manual", note: "code shop" });
+  const h = harness({ config: PA_CONFIG });
+  assert.match((await h.pub.publishProduct(df._id)).results[1].error, /PlayerAuctions is not used for this game's codes/);
+  const { p } = await liveOnEldorado();
+  for (const [autoFarm, accountListings, why] of [
+    [{ playerauctionsAutoDeliver: false, playerauctionsDeliverDryRun: false }, null, /auto-delivery is off/],
+    [{ playerauctionsAutoDeliver: true }, null, /a dry run/],
+    [{ playerauctionsAutoDeliver: true, playerauctionsDeliverDryRun: false, playerauctionsSyncStock: false }, null, /stock sync is off/],
+    [null, { enabled: true, autoDeliver: false }, /account-listing delivery is off/],
+  ]) {
+    const off = harness({ config: PA_CONFIG, autoFarm: autoFarm || undefined, accountListings: accountListings || undefined });
+    const r = (await off.pub.publishProduct(p._id)).results[1];
+    assert.match(r.error, /it would not deliver/);
+    assert.match(r.error, why);
+    assert.equal(off.named("paResolveGame").length + off.named("paPublish").length, 0, "no PlayerAuctions call at all");
+    assertClean(off);
+  }
+  assertClean(h);
+});
+
+test("pause: a PlayerAuctions offer already gone counts as taken down; the write throttle is waited out once", async () => {
+  const p = await activeProduct({ markets: ["eldorado", "playerauctions"] });
+  const base = { accountOffer: p.offer, status: "active", origin: "manual", note: "code shop" };
+  const gone = await MarketplaceListing.create({ ...base, marketplace: "playerauctions", externalId: "9101" });
+  const h = harness({ config: PA_CONFIG, paHideError: new Error("PlayerAuctions hide offer failed (code 5): Offer not found") });
+  const res = await h.pub.pause(p._id);
+  assert.equal(res.ok, true);
+  const row = await MarketplaceListing.findById(gone._id).lean();
+  assert.equal(row.status, "delisted");
+  assert.match(row.note, /gone from the marketplace/);
+
+  await CodeProduct.updateOne({ _id: p._id }, { $set: { status: "active" } });
+  const busy = await MarketplaceListing.create({ ...base, marketplace: "playerauctions", externalId: "9102" });
+  const throttle = Object.assign(new Error("PlayerAuctions hide offer failed (code 1): Operated too frequent"), { __pa: true, paCode: 1, retryable: true });
+  const h2 = harness({ config: PA_CONFIG, paHideErrors: [throttle] });
+  const res2 = await h2.pub.pause(p._id);
+  assert.equal(res2.ok, true);
+  assert.deepEqual(h2.named("paHide").map((c) => c[1]), ["9102", "9102"]);
+  assert.deepEqual(h2.named("sleep"), [["sleep", 25000]]);
+  assert.equal((await MarketplaceListing.findById(busy._id).lean()).status, "delisted");
+  assertClean(h);
+  assertClean(h2);
 });
 
 test("publish: PlayerAuctions' write throttle is waited out once (25 s) and the publish tried again", async () => {
@@ -962,7 +1079,8 @@ test("publish: a PlayerAuctions refusal says so plainly; a lost answer says to c
   const h2 = harness({ config: PA_CONFIG, paErrors: [lost] });
   const r2 = (await h2.pub.publishProduct(p._id)).results[1];
   assert.equal(r2.ok, false);
-  assert.ok(r2.error.endsWith(PA_UNKNOWN_OUTCOME), r2.error);
+  assert.ok(r2.error.includes(PA_UNKNOWN_OUTCOME), r2.error);
+  assert.match(r2.error, /\(title sent: "Overwatch 2 \| 2 Codes Bundle \|/, "the exact title, so the owner can find it");
   assert.match(PA_UNKNOWN_OUTCOME, /check PlayerAuctions for an offer with this title before publishing again/);
   const noId = harness({ config: PA_CONFIG, paAnswer: { url: "x" } });
   assert.match((await noId.pub.publishProduct(p._id)).results[1].error, /without an offer id/);

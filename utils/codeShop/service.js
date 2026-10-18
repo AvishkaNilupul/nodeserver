@@ -422,7 +422,9 @@ function createService(overrides = {}) {
 
         out.attempted += 1;
         attempting = true;
-        const res = (await modules.publisher.publishProduct(p._id, { actor: "auto" })) || {};
+        // Only the missing markets: a market whose listing was taken down is
+        // never put back up by the scheduler (R2), whatever else is missing.
+        const res = (await modules.publisher.publishProduct(p._id, { actor: "auto", markets: missing })) || {};
         const results = Array.isArray(res.results) ? res.results : [];
         const ok = results.filter((r) => r && r.ok).length;
         out.published += ok;

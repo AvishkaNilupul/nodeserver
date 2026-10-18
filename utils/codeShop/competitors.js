@@ -256,7 +256,8 @@ const FORMS = ["codes", "account", "unknown"];
 // A login code is not the product: an account seller writes "enter the code
 // sent to the email" or "the 2FA code". Cut out before anything is counted.
 const LOGIN_CODES = [
-  /\b(?:verification|verify|security|confirmation|log-?in|sign-?in|2fa|two-factor|auth(?:entication)?|otp|one-time|e-?mail|sms|access) codes?\b/g,
+  /\b(?:verification|verify|security|confirmation|log-?in|sign-?in|2fa|two-factor|auth(?:entication)?|otp|one-time|e-?mail|sms|access|(?:steam[ \t]+)?guard) codes?\b/g,
+  /\bcodes?[ \t]+(?:to|for)[ \t]+(?:the[ \t]+)?(?:log ?in|login|sign[ -]?in|logging in|signing in)\b/g,
   /\bcodes?\b[^.\n;!?]{0,30}\b(?:sent|send|sends|arrives?|arriving)\b[^.\n;!?]{0,20}\b(?:e-?mails?|inbox|phone|sms|mail)\b/g,
   /\bcodes? from (?:the|your|our) (?:e-?mails?|inbox|mail|phone)\b/g,
 ];
@@ -273,16 +274,21 @@ const CODE_DELIVERY = [
 // Saying outright that the buyer is handed an account (or its login). Any of
 // these keeps an offer out of the "codes" shortcut above.
 const ACCOUNT_DELIVERY = [
+  // "Account delivered within minutes", "the account will be sent in chat".
+  /\baccounts?[ \t]+(?:(?:will|would|shall)[ \t]+be[ \t]+|is[ \t]+|are[ \t]+|gets?[ \t]+)?(?:delivered|sent|given|provided|handed)\b/g,
+  // "Upon receiving the account", "after getting your account".
+  /\b(?:receiving|getting)[ \t]+(?:(?:the|an?|your)[ \t]+)?(?:twitch[ \t]+)?accounts?\b/g,
   /\b(?:receive|receives|received|get|gets|deliver(?:s|ed)?|send|sends|sent)[ \t]+(?:(?:a|an|the|your|our|fresh|new|you)[ \t]+){0,3}(?:twitch[ \t]+)?accounts?\b/g,
   /\b(?:account|login|log-?in)[ \t]+(?:details|credentials|info(?:rmation)?|data)\b/g,
   /\b(?:e-?mail|login|log-?in|user(?:name)?)\s*(?::|and|&|\+|\/)\s*pass(?:word)?s?\b/g,
   /\blog ?in(?:to)?[ \t]+(?:to[ \t]+)?(?:the|this|our|that)[ \t]+(?:twitch[ \t]+)?accounts?\b/g,
 ];
 
-// What an offer delivers, from its own words. Offers that say outright they
-// hand over codes, and nowhere that they hand over an account, are "codes".
-// Otherwise "codes" when code wording outweighs account wording, "account"
-// the other way round, "unknown" on a tie (including no wording at all).
+// What an offer delivers, from its own words. One that says it hands over an
+// account (or its login) is "account". One that says outright it hands over
+// codes, with a title that does not sell an account or Twitch drops, is
+// "codes". Otherwise "codes" when code wording outweighs account wording,
+// "account" the other way round, "unknown" on a tie (including no wording).
 function deliveryForm(title, description = "") {
   let t = (String(title == null ? "" : title) + "\n" + String(description == null ? "" : description))
     .toLowerCase()
@@ -290,7 +296,12 @@ function deliveryForm(title, description = "") {
     .replace(NEGATED_AFTER, " ");
   for (const re of LOGIN_CODES) t = t.replace(re, " ");
   const count = (list) => list.reduce((n, re) => n + (t.match(re) || []).length, 0);
-  if (count(CODE_DELIVERY) > 0 && count(ACCOUNT_DELIVERY) === 0) return "codes";
+  // Handing over an account (or its login) makes it an account offer, whatever
+  // it says of codes: such a seller must never set our price.
+  if (count(ACCOUNT_DELIVERY) > 0) return "account";
+  // A title that sells an account or Twitch drops never takes the shortcut.
+  const titleSaysAccount = /\baccounts?\b|\btwitch drops?\b/i.test(String(title == null ? "" : title));
+  if (!titleSaysAccount && count(CODE_DELIVERY) > 0) return "codes";
   const account = count(ACCOUNT_SIGNALS);
   const codes = count(CODE_SIGNALS);
   if (codes > account) return "codes";

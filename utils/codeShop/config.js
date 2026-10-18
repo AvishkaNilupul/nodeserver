@@ -72,6 +72,10 @@ const DEFAULTS = deepFreeze({
     // PlayerAuctions: one fixed price for every bundle (06-PLAYERAUCTIONS-PLAN C2).
     playerauctionsUsd: PA_MIN_USD,
   },
+  // The games whose codes may sell on PlayerAuctions (06 plan, review): Overwatch.
+  // Delta Force codes stop working within two weeks and PlayerAuctions has no
+  // code market for them.
+  playerauctionsGames: ["12"],
   competitorScan: { enabled: true, everyHours: 12 },
   ownEldoradoUserIds: [],
   sourceWords: ["soop", "afreeca", "korea", "\\bkr\\b", "translated", "official [^.\\n]*event", "stage\\s*\\d", "kakao"],
@@ -231,6 +235,11 @@ function checkValue(v, def, path, name, errors) {
   if (path === "games") return checkGames(v, path, errors);
   if (path === "pricing.clearanceSteps") return checkSteps(v, path, errors);
   if (path === "sourceWords") return checkStringList(v, path, errors, { regex: true });
+  if (path === "playerauctionsGames") {
+    checkStringList(v, path, errors);
+    if (Array.isArray(v)) v.forEach((g, i) => typeof g === "string" && g && !GAME_KEY.test(g) && errors.push(`${path}[${i}]: must be a game number (digits only)`));
+    return;
+  }
   if (Array.isArray(def)) return checkStringList(v, path, errors); // ownEldoradoUserIds, farmPriority.botIds
   if (def === null) {
     // farmPriority.lastChangeAt: a moment (Date, epoch ms or date text) or null
@@ -370,4 +379,15 @@ function createConfig({ model, now = Date.now, memoMs = 30000 } = {}) {
   return { get, set, forget };
 }
 
-module.exports = { DEFAULTS, SAFE_DEFAULTS, GGSEL_REFUSED, PA_MIN_USD, createConfig, validatePatch, deepMerge };
+// May this game's codes sell on PlayerAuctions? (settings: playerauctionsGames)
+function paAllowsGame(cfg, gameNo) {
+  const list = cfg && Array.isArray(cfg.playerauctionsGames) ? cfg.playerauctionsGames.map(String) : [];
+  return gameNo !== undefined && gameNo !== null && list.includes(String(gameNo));
+}
+
+// A product's markets for its game: PlayerAuctions only for a game allowed there.
+function marketsForGame(markets, gameNo, cfg) {
+  return (Array.isArray(markets) ? markets : []).filter((m) => m !== "playerauctions" || paAllowsGame(cfg, gameNo));
+}
+
+module.exports = { DEFAULTS, SAFE_DEFAULTS, GGSEL_REFUSED, PA_MIN_USD, createConfig, validatePatch, deepMerge, paAllowsGame, marketsForGame };

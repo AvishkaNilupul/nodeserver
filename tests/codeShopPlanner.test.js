@@ -285,6 +285,13 @@ test("markets: a new draft names PlayerAuctions too once it is switched on, in a
   const paOnly = setup({ cfg: { markets: { eldorado: false, playerauctions: true } } });
   await paOnly.planner.run();
   assert.deepEqual((await drafts())[0].markets, ["playerauctions"]);
+
+  // A game not on playerauctionsGames never gets it: Delta Force codes die in two weeks.
+  await reset();
+  await addSlot({ nameRaw: "Prost Spray", count: 5 });
+  const notOw = setup({ cfg: { markets: { eldorado: true, playerauctions: true }, playerauctionsGames: ["200"] } });
+  await notOw.planner.run();
+  assert.deepEqual((await drafts())[0].markets, ["eldorado"]);
 });
 
 test("a draft deleted and proposed again is not announced twice: the stamp is its slot set", async () => {

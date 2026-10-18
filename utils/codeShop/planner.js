@@ -23,7 +23,7 @@ const { freeCounts, bestDraftSets } = require("./allocate");
 const { slotSetHash } = require("./slots");
 const { defaultLabel, defaultTexts } = require("./texts");
 const { guideFor } = require("./games");
-const { DEFAULTS } = require("./config");
+const { DEFAULTS, marketsForGame } = require("./config");
 
 const HOUR_MS = 60 * 60 * 1000;
 const DAY_MS = 24 * HOUR_MS;
@@ -257,7 +257,8 @@ function createPlanner(deps = {}) {
         stale: false,
         texts: defaultTexts({ slots, guide, useBy: useBy === null ? null : new Date(useBy), now: ctx.now }),
         pricing: { mode: "fixed", priceUsd: 1, floorUsd: 0.5, clearance: false, followCompetitors: false },
-        markets: ctx.markets,
+        // PlayerAuctions only for a game allowed there (Overwatch, not Delta Force).
+        markets: marketsForGame(ctx.markets, g.gameNo, cfg),
         proposed: { units, at },
       });
       out.created += 1;

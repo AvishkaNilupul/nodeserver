@@ -547,7 +547,8 @@ function createCodeShopRoutes({ service, createHeld } = {}) {
       stale: false,
       texts: defaultTexts({ slots, guide, useBy, now: now() }),
       pricing: { mode: "fixed", priceUsd: 1, floorUsd: 0.5, clearance: false, followCompetitors: false },
-      markets,
+      // PlayerAuctions only for a game allowed there (Overwatch, not Delta Force).
+      markets: require("../utils/codeShop/config").marketsForGame(markets, gameNo, cfg),
     });
     await note({
       kind: "draft",

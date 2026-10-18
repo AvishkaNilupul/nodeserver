@@ -238,6 +238,27 @@ test("deliveryForm: handing over an account (or its login) keeps an offer an acc
   assert.equal(deliveryForm("Space Game drops", "We send you an account. Log in; you receive 3 codes inside it and claim them."), "account");
 });
 
+// The independent review of 2026-10-18 found account sellers that the first
+// cut of R11 read as code sellers: the account was handed over in the passive
+// or "-ing" form, and the code was a login (guard) code.
+test("deliveryForm: an offer that hands over an account is an account offer, in every form", () => {
+  for (const d of [
+    "Account delivered within minutes. If the store asks, the guard code will be sent to you in chat.",
+    "Upon receiving the account, enter the code on the official site to finish.",
+    "Account will be sent in chat, you will receive the code to log in.",
+    "After getting your account, codes are delivered too.",
+    "The accounts are provided right after payment; redeem codes inside.",
+  ]) {
+    assert.equal(deliveryForm("Space Game drops", d), "account", d);
+  }
+  // Only "codes" can set our price; "unknown" is as safe as "account" here.
+  assert.notEqual(
+    deliveryForm("Space Game Twitch Drops Account | 13 items", "You will receive the codes for the 13 items."),
+    "codes",
+    "a title that sells an account or Twitch drops never takes the code shortcut",
+  );
+});
+
 test("deliveryForm: a login code from the email or 2FA is not the product", () => {
   // Each would read as "codes are sent" or "receive the code" if login codes counted.
   assert.equal(deliveryForm("Space Game Twitch Drops", "Log in and claim. The code is sent to your email when you log in."), "account");

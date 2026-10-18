@@ -122,6 +122,13 @@ function fakeListingModel(rows, { count = 1 } = {}) {
       calls.countDocuments.push(q);
       return count;
     },
+    // The PlayerAuctions stock sync re-reads a row before it pushes (a row the
+    // code shop hid since the sweep read it is left alone): the rows here stay
+    // as they are, so an "active" row is still active.
+    async exists(q) {
+      const row = rows.find((r) => String(r._id) === String(q && q._id));
+      return row && (!q.status || (row.status || "active") === q.status) ? { _id: row._id } : null;
+    },
   };
 }
 
