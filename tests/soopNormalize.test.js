@@ -10,6 +10,7 @@ const i18n = require("../utils/soop/i18n");
 const {
   parseKst,
   stepsOf,
+  categoriesOf,
   normalizeCampaign,
   normalizeMission,
   normalizeInventoryItem,
@@ -144,7 +145,7 @@ test("normalizeCampaign: a realistic raw row", () => {
   assert.equal(c.rewardKind, "ingame", "the kind of the majority of items");
 
   assert.deepEqual(Object.keys(c).sort(), [
-    "cateName", "cateNo", "categoryWide", "channels", "dropsIdx", "endAt", "filter", "gameName",
+    "cateName", "cateNo", "cateNos", "categoryWide", "channels", "dropsIdx", "endAt", "filter", "gameName",
     "gameNo", "giveCon", "guaranteed", "image", "items", "live", "needsLink", "provider",
     "rewardKind", "startAt", "steps", "title", "titleRaw",
   ]);
@@ -205,6 +206,50 @@ test("normalizeCampaign: category-wide, raffle and sparse rows", () => {
 
   const bogus = normalizeCampaign({ ...raw, filter: "whatever" });
   assert.equal(bogus.filter, "unlisted");
+});
+
+// SOOP's list since 2026-10-15 (read on production 10-18): no `cateNo` /
+// `cateName` on the row; the category sits in `cateList`, beside two new
+// `cateGroup*` fields. Eternal Return's KEL days are listed exactly like this.
+const rawCateListCampaign = () => {
+  const { cateNo, cateName, ...rest } = rawCampaign();
+  return {
+    ...rest,
+    dropsIdx: "13951", title: "[10/18]2026 KEL 서킷 4 1주 차 - 2일 차", gameNo: "18", giveCon: "term", ingameGiveYn: "N",
+    typeNm: null, broadIdList: [], cateGroupNo: null, cateGroupName: null,
+    cateList: [{ cateNo: "00040120", cateName: "이터널 리턴", cateImg: "https://img/er.png", cateImgMo: "https://img/er-m.png" }],
+  };
+};
+
+test("categoriesOf: the old top-level field, the new cateList, both, neither", () => {
+  assert.deepEqual(categoriesOf(rawCampaign()), [{ no: "00040019", name: "오버워치" }]);
+  assert.deepEqual(categoriesOf(rawCateListCampaign()), [{ no: "00040120", name: "이터널 리턴" }]);
+  const both = { ...rawCampaign(), cateList: [{ cateNo: "00040019", cateName: "오버워치" }, { cateNo: "00040120", cateName: "이터널 리턴" }] };
+  assert.deepEqual(categoriesOf(both), [{ no: "00040019", name: "오버워치" }, { no: "00040120", name: "이터널 리턴" }], "the old field first, no repeat");
+  const junk = { cateList: [null, "x", {}, { cateNo: "" }, { cateNo: 40120, cateName: null }] };
+  assert.deepEqual(categoriesOf(junk), [{ no: "40120", name: "" }], "only entries with a category number count");
+  for (const v of [{}, null, undefined, { cateList: "00040120" }, { cateNo: null, cateList: [] }]) assert.deepEqual(categoriesOf(v), []);
+});
+
+test("normalizeCampaign: a category given only in cateList is category-wide (SOOP since 2026-10-15)", () => {
+  const c = normalizeCampaign(rawCateListCampaign(), { filter: "progress" });
+  assert.deepEqual(pick(c, "categoryWide cateNo cateNos channels"), {
+    categoryWide: true, cateNo: "00040120", cateNos: ["00040120"], channels: [],
+  });
+  assert.equal(c.cateName, i18n.translate("이터널 리턴"), "the category name comes from cateList too");
+
+  const two = normalizeCampaign({ ...rawCateListCampaign(), cateList: [{ cateNo: "00040120" }, { cateNo: "00040121" }] });
+  assert.deepEqual(pick(two, "categoryWide cateNo cateNos"), { categoryWide: true, cateNo: "00040120", cateNos: ["00040120", "00040121"] });
+
+  const named = normalizeCampaign({ ...rawCateListCampaign(), broadIdList: [{ userId: "er-official", onAir: true }] });
+  assert.equal(named.categoryWide, false, "a channel list still means it is not category-wide");
+  assert.equal(named.cateNo, "00040120");
+
+  const none = normalizeCampaign({ ...rawCateListCampaign(), cateList: [] });
+  assert.deepEqual(pick(none, "categoryWide cateNo cateNos cateName"), { categoryWide: false, cateNo: null, cateNos: [], cateName: "" });
+
+  const old = normalizeCampaign({ ...rawCampaign(), broadIdList: [] });
+  assert.deepEqual(pick(old, "categoryWide cateNo cateNos"), { categoryWide: true, cateNo: "00040019", cateNos: ["00040019"] }, "the old shape reads as before");
 });
 
 test("normalizeCampaign: an empty or missing row still has the full shape", () => {

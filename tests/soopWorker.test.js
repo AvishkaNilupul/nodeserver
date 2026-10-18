@@ -17,18 +17,22 @@ const UNSTATED = { RESULT: 1 }; // an older reply shape
 const OFF_AIR = { RESULT: 0 };
 
 // streams: { [channel]: player info | Error }; a channel not named is off air.
+// category: the channels of any category asked, or { [cateNo]: channels }.
 function stubClient(streams, { category = [] } = {}) {
   const asked = [];
+  const cates = [];
   return {
     asked,
+    cates,
     async liveInfo(bj) {
       asked.push(bj);
       const s = streams[bj];
       if (s instanceof Error) throw s;
       return s || OFF_AIR;
     },
-    async categoryChannels() {
-      return category;
+    async categoryChannels(cateNo) {
+      cates.push(cateNo);
+      return Array.isArray(category) ? category : category[cateNo] || [];
     },
   };
 }
@@ -142,6 +146,21 @@ test("a category-wide campaign joins a stream of its category that carries drops
   const client = stubClient({ s1: NO_DROPS, s2: DROPS }, { category: ["s1", "s2"] });
   assert.equal(await pickChannel(client, camp, now), "s2");
   assert.deepEqual(client.asked, ["s1", "s2"]);
+});
+
+test("a campaign in several categories asks each of them, in SOOP's order", async () => {
+  // SOOP's cateList (since 2026-10-15) can name more than one category.
+  const camp = { dropsIdx: "13951", live: true, filter: "progress", categoryWide: true, cateNo: "00040120", cateNos: ["00040120", "00040121"], channels: [] };
+  const client = stubClient({ er2: DROPS }, { category: { "00040120": ["er1"], "00040121": ["er2"] } });
+  assert.equal(await pickChannel(client, camp, now), "er2");
+  assert.deepEqual(client.cates, ["00040120", "00040121"]);
+  assert.deepEqual(client.asked, ["er1", "er2"]);
+
+  channelMemo.clear();
+  const old = stubClient({ s1: DROPS }, { category: { "00360141": ["s1"] } });
+  const remembered = { dropsIdx: "13897", live: true, filter: "progress", categoryWide: true, cateNo: "00360141", channels: [] };
+  assert.equal(await pickChannel(old, remembered, now), "s1", "a campaign with no cateNos falls back to its cateNo");
+  assert.deepEqual(old.cates, ["00360141"]);
 });
 
 test("the channel joined last is looked at first", async () => {

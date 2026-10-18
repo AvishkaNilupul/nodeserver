@@ -13,7 +13,7 @@
 const SoopCampaign = require("../../models/SoopCampaign");
 const SoopGame = require("../../models/SoopGame");
 const SoopTranslation = require("../../models/SoopTranslation");
-const { normalizeCampaign } = require("./normalize");
+const { normalizeCampaign, categoriesOf } = require("./normalize");
 
 const KST_MS = 9 * 60 * 60 * 1000;
 const MAX_SOURCE = 500;
@@ -49,6 +49,9 @@ function createCampaignStore({
   // ---- stored row <-> Campaign --------------------------------------------
 
   function toRecord(raw, c, at, prev) {
+    // The first category, wherever SOOP put it (normalize.categoriesOf): a
+    // remembered campaign is rebuilt from these two fields alone.
+    const cate = categoriesOf(raw)[0] || { no: "", name: "" };
     return {
       dropsIdx: c.dropsIdx,
       title: c.title,
@@ -56,8 +59,8 @@ function createCampaignStore({
       image: strOrNull(raw.image),
       giveCon: str(raw.giveCon),
       gameNo: strOrNull(raw.gameNo),
-      cateName: str(raw.cateName),
-      cateNo: str(raw.cateNo),
+      cateName: str(raw.cateName) || cate.name,
+      cateNo: cate.no,
       ingameGiveYn: str(raw.ingameGiveYn),
       typeNm: strOrNull(raw.typeNm),
       live: c.live,

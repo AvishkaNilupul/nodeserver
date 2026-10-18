@@ -437,6 +437,27 @@ test("an everything bot farms other games but drops them for the priority game t
   assert.equal((await botState(bot.id)).priorityGameName, "Overwatch");
 });
 
+// 2026-10-17/18: SOOP had moved a campaign's category into `cateList` (no
+// `cateNo` on the row any more). Read only the old field, Eternal Return's KEL
+// days, which list no channels, read as "live but no channel is on air yet"
+// while the official stream was on air with drops, and 29 logins slept
+// through both days.
+test("a category-wide campaign that SOOP lists with cateList is farmed on a stream of its category", async () => {
+  await fresh();
+  world.useCateList();
+  const camp = world.addCampaign({ gameNo: "18", live: true, itemList: [2], cateNo: "00040120", cateChannels: ["er-official"] });
+  const [listedRow] = await world.clientFor(world.addAccount({ id: "peek" })).campaigns("progress");
+  assert.equal(listedRow.cateNo, undefined, "the fake answers in SOOP's new shape");
+  assert.deepEqual(listedRow.cateList.map((c) => c.cateNo), ["00040120"]);
+
+  await addAccount("acc1");
+  await farm.campaignsView({ force: true });
+  await farm.createBot({ mode: "auto", codesOnly: true, priorityGameNo: "12", accountIds: ["acc1"] });
+  await watch(() => (farm.progress.get("acc1") || {})[camp.dropsIdx]?.done, "farmed on a stream of its category");
+  assert.ok(world.calls().openBridge >= 1);
+  assert.doesNotMatch(farm.activity.recent({ limit: 50 }).map((e) => e.msg).join(" | "), /no channel is on air/);
+});
+
 test("an everything bot still farms a campaign SOOP dropped from its list, but only inside its window", async () => {
   await fresh();
   const kstStr = (ms) => new Date(ms + 9 * 3600e3).toISOString().replace("T", " ").slice(0, 19);

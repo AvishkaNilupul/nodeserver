@@ -290,6 +290,36 @@ test("a v1 row is rebuilt from its raw fields, and its late dates are rewritten 
   assert.equal(iso((await next.get("13337")).startAt), START_ISO, "corrected once, not twice");
 });
 
+test("a category given only in SOOP's cateList (since 2026-10-15) is listed category-wide, stored, and remembered", async () => {
+  const { store, saved } = harness();
+  const { cateNo, cateName, ...rest } = raw("13951");
+  const now = { ...rest, broadIdList: [], cateGroupNo: null, cateGroupName: null, cateList: [{ cateNo: "00040120", cateName: "Echo", cateImg: null }] };
+  const [listed] = await store.list({ scan: scanner([now]) });
+  await saved();
+  assert.equal(listed.categoryWide, true, "no channel list + a category in cateList = any stream of that category");
+  assert.equal(listed.cateNo, "00040120");
+  assert.deepEqual(listed.cateNos, ["00040120"]);
+  assert.equal(listed.gameName, "Echo", "the game name falls back to the category name, as it did before");
+
+  const doc = await row("13951");
+  assert.equal(doc.cateNo, "00040120");
+  assert.equal(doc.cateName, "Echo");
+
+  const next = harness().store;
+  await next.load();
+  const remembered = await next.get("13951");
+  assert.equal(remembered.filter, "unlisted");
+  assert.equal(remembered.categoryWide, true, "a remembered campaign keeps its category");
+  assert.equal(remembered.cateNo, "00040120");
+
+  // The old shape is stored exactly as before.
+  await store.list({ scan: scanner([raw("13337", { broadIdList: [] })]), force: true });
+  await saved();
+  const old = await row("13337");
+  assert.equal(old.cateNo, "00049001");
+  assert.equal(old.cateName, "Bravo");
+});
+
 test("games() counts campaigns per game, most live first, then by name", async (t) => {
   const { store, clock, saved } = harness();
   const game = (gameNo, cateName, over) => ({ gameNo, cateName, cateNo: `0004${gameNo}`, ...over });

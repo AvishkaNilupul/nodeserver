@@ -72,7 +72,10 @@ async function pickChannel(client, camp, now) {
 
   let order;
   if (camp.categoryWide) {
-    order = await client.categoryChannels(camp.cateNo, 5);
+    // SOOP's cateList can name more than one category; each is asked in turn.
+    const cates = Array.isArray(camp.cateNos) && camp.cateNos.length ? camp.cateNos : [camp.cateNo];
+    order = [];
+    for (const no of cates.slice(0, 3)) order.push(...((await client.categoryChannels(no, 5)) || []));
   } else {
     const list = camp.channels || [];
     order = [

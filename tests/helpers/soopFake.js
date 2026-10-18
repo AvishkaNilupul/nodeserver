@@ -37,6 +37,9 @@ function createFakeSoop({ now = Date.now, rewards = false } = {}) {
   const tickets = new Map(); // AuthTicket value -> id
   const campaigns = new Map(); // dropsIdx -> raw row (insertion order = list order)
   const delisted = new Set();
+  // world.useCateList(): list rows as SOOP has sent them since 2026-10-15 — the
+  // category in `cateList: [{ cateNo, cateName }]`, no top-level `cateNo`.
+  let cateListShape = false;
   const unreadable = new Map(); // "progress" / "scheduled" -> how many more reads of it get no answer
   const channels = new Map(); // id -> { id, nick, onAir, cateNo, bno }
   const open = []; // bridges that are not closed
@@ -194,6 +197,10 @@ function createFakeSoop({ now = Date.now, rewards = false } = {}) {
       else unreadable.set(filter, on === true ? Infinity : Number(on));
     },
 
+    useCateList(on = true) {
+      cateListShape = on !== false;
+    },
+
     delist(dropsIdx) {
       const key = String(dropsIdx);
       if (campaigns.has(key)) delisted.add(key);
@@ -331,10 +338,16 @@ function createFakeSoop({ now = Date.now, rewards = false } = {}) {
           throw new SoopError("Please log in to continue.", { code: "AUTH" });
         }
       };
+      const shaped = (row) => {
+        if (!cateListShape) return row;
+        const { cateNo, cateName, ...rest } = row;
+        const cateList = cateNo ? [{ cateNo, cateName: cateName || "", cateImg: null, cateImgMo: null }] : [];
+        return { ...rest, cateGroupNo: null, cateGroupName: null, cateList };
+      };
       const listed = (filter) =>
         [...campaigns.values()]
           .filter((r) => r.filter === filter && !delisted.has(r.dropsIdx))
-          .map((r) => ({ ...clone(r), filter }));
+          .map((r) => shaped({ ...clone(r), filter }));
       // Does this read of the list get no answer? (Counts a limited outage down.)
       const lost = (filter) => {
         const left = unreadable.get(filter);

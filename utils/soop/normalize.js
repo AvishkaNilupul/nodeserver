@@ -76,10 +76,30 @@ function majorityKind(items) {
   return best;
 }
 
+// The categories a campaign counts in, first one first: [{ no, name }]. SOOP
+// moved them between 2026-10-14 18:28Z and 10-15 04:58Z: a row carried
+// `cateNo` / `cateName`, now it carries `cateList: [{ cateNo, cateName, … }]`
+// and no `cateNo` at all. Read only the old field, a campaign with no channel
+// list looked like one with no stream to watch, and none of them was farmed
+// (Eternal Return's KEL days of 10-17 and 10-18 with their official stream on
+// air). Both shapes are read; the old field comes first when both are there.
+function categoriesOf(raw) {
+  const r = raw || {};
+  const out = [];
+  const add = (no, name) => {
+    if (present(no) && !out.some((c) => c.no === String(no))) out.push({ no: String(no), name: str(name) });
+  };
+  add(r.cateNo, r.cateName);
+  for (const c of Array.isArray(r.cateList) ? r.cateList : []) if (c && typeof c === "object") add(c.cateNo, c.cateName);
+  return out;
+}
+
 function normalizeCampaign(raw, { overrides, gameOverrides, filter } = {}) {
   const r = raw || {};
   const gameNo = strOrNull(r.gameNo);
-  const cateNo = strOrNull(r.cateNo);
+  const cates = categoriesOf(r);
+  const cateNo = cates.length ? cates[0].no : null;
+  const cateNameRaw = present(r.cateName) ? str(r.cateName) : cates.length ? cates[0].name : "";
   const provider = strOrNull(r.typeNm);
   const giveCon = str(r.giveCon);
   const wanted = filter || r.filter;
@@ -105,7 +125,7 @@ function normalizeCampaign(raw, { overrides, gameOverrides, filter } = {}) {
     titleRaw: str(r.title),
     image: strOrNull(r.image),
     gameNo,
-    gameName: gameName(gameNo, { cateName: r.cateName, typeNm: r.typeNm, overrides: gameOverrides }),
+    gameName: gameName(gameNo, { cateName: cateNameRaw, typeNm: r.typeNm, overrides: gameOverrides }),
     giveCon,
     guaranteed: giveCon === "term",
     live: r.live === true,
@@ -114,7 +134,8 @@ function normalizeCampaign(raw, { overrides, gameOverrides, filter } = {}) {
     endAt: parseKst(r.endDate),
     categoryWide: channels.length === 0 && cateNo !== null,
     cateNo,
-    cateName: translate(str(r.cateName), { overrides }),
+    cateNos: cates.map((c) => c.no),
+    cateName: translate(cateNameRaw, { overrides }),
     channels,
     items,
     steps: stepsOf({ items }),
@@ -193,6 +214,7 @@ function normalizeInventoryItem(raw, division) {
 module.exports = {
   parseKst,
   stepsOf,
+  categoriesOf,
   normalizeCampaign,
   normalizeMission,
   normalizeInventoryItem,
