@@ -13,9 +13,123 @@ const BotAccount = require("../models/BotAccount");
 const DropLog = require("../models/DropLog");
 const SaleSignal = require("../models/SaleSignal");
 
-// Aggregation/query fragment for a drop that is available to sell: not redeemed
-// and not reserved. Spread into a $match alongside the itemKey filter.
-const AVAILABLE_DROP = { connected: { $ne: true }, soldAt: null };
+// Twitch drops EXPIRE. A claimed drop leaves the account's inventory 180-184
+// days after it was awarded (measured on prod 2026-10-16: 229 vanished drops,
+// min 180 d, max 184 d; no visible drop older than 183 d). The scanner never
+// deletes a row, so a vanished drop stays `state: "connect"` in the archive
+// forever. Selling it ships an account whose items the buyer cannot connect:
+// G2G order 1791908798608A036-1 got a 35-item Sea of Thieves bundle whose last
+// drops had gone 11 h before the sale ("already redeemed, only other games").
+//
+// So a drop is only sellable while it is younger than the cutoff below, which
+// leaves the buyer time to connect it before Twitch removes it. Configurable as
+// autoFarm.dropSellableMaxAgeDays (clamped 30..175). A drop with no awardedAt
+// is kept: `$not: {$lt}` matches null/missing, so an unknown age never removes
+// stock silently.
+const DEFAULT_SELLABLE_MAX_AGE_DAYS = 170;
+const SELLABLE_AGE_CACHE_MS = 60 * 1000;
+let sellableAgeCache = { at: 0, days: DEFAULT_SELLABLE_MAX_AGE_DAYS };
+
+function sellableMaxAgeDays() {
+  const now = Date.now();
+  if (now - sellableAgeCache.at < SELLABLE_AGE_CACHE_MS) {
+    return sellableAgeCache.days;
+  }
+  let days = DEFAULT_SELLABLE_MAX_AGE_DAYS;
+  try {
+    // Lazy: settings.js is large and must not load at require time here.
+    const raw = Number(
+      require("./settings").getAutoFarm().dropSellableMaxAgeDays,
+    );
+    if (Number.isFinite(raw) && raw > 0) {
+      days = Math.min(175, Math.max(30, Math.floor(raw)));
+    }
+  } catch {
+    /* unreadable settings: keep the default, never stop selling outright */
+  }
+  sellableAgeCache = { at: now, days };
+  return days;
+}
+
+// The same condition as an aggregation EXPRESSION, for $cond tallies that
+// count every row but must not call an expired drop "available".
+function notExpiredExpr() {
+  return {
+    $and: [
+      {
+        $or: [
+          { $eq: [{ $ifNull: ["$awardedAt", null] }, null] },
+          { $gte: ["$awardedAt", sellableAwardCutoff()] },
+        ],
+      },
+      {
+        $not: [
+          {
+            $regexMatch: {
+              input: { $ifNull: ["$name", ""] },
+              regex: EXPIRED_NAME.source,
+              options: "i",
+            },
+          },
+        ],
+      },
+    ],
+  };
+}
+
+// Tests only: forget the cached setting so the next read sees a new value.
+function _resetSellableAgeCache() {
+  sellableAgeCache = { at: 0, days: DEFAULT_SELLABLE_MAX_AGE_DAYS };
+}
+
+// The oldest awardedAt that is still sellable.
+function sellableAwardCutoff(nowMs = Date.now()) {
+  return new Date(nowMs - sellableMaxAgeDays() * 86400000);
+}
+
+// Plain-JS twin of the age part of AVAILABLE_DROP, for code that already has
+// the row in hand.
+function isExpiredDrop(drop, nowMs = Date.now()) {
+  if (drop && EXPIRED_NAME.test(String(drop.name || ""))) return true;
+  const at = drop && drop.awardedAt ? new Date(drop.awardedAt).getTime() : NaN;
+  if (!Number.isFinite(at)) return false;
+  return at < sellableAwardCutoff(nowMs).getTime();
+}
+
+// A publisher can also kill a reward early by renaming the drop on Twitch: NBA
+// 2K27's "NBA 2K27 x Nike Ja 4" became "Nike Ja Expired" two weeks after it
+// was awarded (72 copies in the archive on 2026-10-16), and an Eldorado unit
+// was still offering it. The scanner re-keys a renamed drop, so the set stops
+// matching it and nothing noticed. A drop Twitch shows as expired is never
+// sellable, whatever its age.
+const EXPIRED_NAME = /\bexpired\b/i;
+
+// Aggregation/query fragment for a drop that is available to sell: not redeemed,
+// not reserved, not past the expiry cutoff and not renamed "Expired". Spread into a $match alongside
+// the itemKey filter. `awardedAt` is a GETTER, so every spread
+// ({ ...AVAILABLE_DROP }) takes the cutoff as of that moment; a plain value
+// would freeze the cutoff at process start.
+const AVAILABLE_DROP = {
+  connected: { $ne: true },
+  soldAt: null,
+  name: { $not: EXPIRED_NAME },
+};
+Object.defineProperty(AVAILABLE_DROP, "awardedAt", {
+  enumerable: true,
+  get() {
+    return { $not: { $lt: sellableAwardCutoff() } };
+  },
+});
+Object.freeze(AVAILABLE_DROP);
+
+// The same age condition on its own, for hand-written matches that cannot
+// spread AVAILABLE_DROP (they filter `connected` differently).
+function notExpiredMatch() {
+  return {
+    awardedAt: { $not: { $lt: sellableAwardCutoff() } },
+    name: { $not: EXPIRED_NAME },
+  };
+}
 
 function setKeys(set) {
   return [...new Set((set.items || []).map((i) => i.itemKey).filter(Boolean))];
@@ -112,6 +226,96 @@ async function reserveSetOnAccount(accountId, set, opts = {}) {
   return true;
 }
 
+// Pre-reserved units (an auto-lister share's units[]) are handed over later
+// without going back through a claim, so the expiry cutoff above never sees
+// them. This answers, for a set, which of these accounts can no longer deliver
+// it BECAUSE OF EXPIRY: some item of the set has copies on the account, none of
+// them is both unconnected and younger than the cutoff, and at least one is an
+// unconnected copy that aged out. Deliberately narrow — an item with no archive
+// row at all (renamed key, no-claim stock) or only redeemed copies is NOT
+// judged here: that is not proof of expiry, and refusing those units would
+// stop deliveries this check knows nothing about. Reservation (soldAt) is
+// ignored on purpose — a unit's drops are reserved by design. Returns a Set of
+// String(accountId). A DB error propagates: an unreadable account must never
+// read as a bad one.
+async function expiredUnitAccounts(accountIds, set) {
+  const keys = setKeys(set || {});
+  const ids = [
+    ...new Set(
+      (accountIds || [])
+        .map((x) => String(x || ""))
+        .filter((x) => /^[a-f0-9]{24}$/i.test(x)),
+    ),
+  ];
+  const out = new Set();
+  if (!keys.length || !ids.length) return out;
+  const cutoff = sellableAwardCutoff();
+  const fresh = {
+    $or: [
+      { $eq: [{ $ifNull: ["$awardedAt", null] }, null] },
+      { $gte: ["$awardedAt", cutoff] },
+    ],
+  };
+  // Only a copy this unit could actually ship counts as live: reserved for
+  // THIS set, or not reserved at all. A fresh copy held for another buyer must
+  // not vouch for an expired one. Expired copies count whoever holds them —
+  // a unit reserved under an older set id (the row was rewritten) is still
+  // this unit.
+  const mine = set && set._id
+    ? {
+        $or: [
+          { $eq: [{ $ifNull: ["$soldAt", null] }, null] },
+          { $eq: ["$soldSetId", String(set._id)] },
+        ],
+      }
+    : true;
+  const rows = await DropLog.aggregate([
+    {
+      $match: {
+        account: { $in: ids.map((x) => new DropLog.base.Types.ObjectId(x)) },
+        itemKey: { $in: keys },
+        connected: { $ne: true },
+      },
+    },
+    {
+      $group: {
+        _id: { a: "$account", k: "$itemKey" },
+        live: { $sum: { $cond: [{ $and: [fresh, mine] }, 1, 0] } },
+        aged: { $sum: { $cond: [fresh, 0, 1] } },
+      },
+    },
+    // an item with no live copy, where at least one copy aged out
+    { $match: { live: 0, aged: { $gt: 0 } } },
+    { $group: { _id: "$_id.a" } },
+  ]);
+  for (const r of rows) out.add(String(r._id));
+  // A drop reserved for THIS set that Twitch now shows as "Expired". Its key
+  // changed with the rename, so the item match above cannot see it.
+  if (set && set._id) {
+    const renamed = await DropLog.distinct("account", {
+      account: { $in: ids.map((x) => new DropLog.base.Types.ObjectId(x)) },
+      soldSetId: String(set._id),
+      connected: { $ne: true },
+      name: EXPIRED_NAME,
+    });
+    for (const a of renamed) out.add(String(a));
+  }
+  return out;
+}
+
+// The units of a row that can still deliver its set: everything but the
+// expired ones (expiredUnitAccounts). A row with no set, or whose set is gone,
+// is returned unchanged — nothing here can judge it.
+async function liveUnits(units, setId) {
+  const list = units || [];
+  if (!list.length || !setId) return list;
+  const set = await require("../models/DropSet").findById(setId).lean();
+  if (!set) return list;
+  const bad = await expiredUnitAccounts(list.map((u) => u.accountId), set);
+  if (!bad.size) return list;
+  return list.filter((u) => !bad.has(String(u.accountId)));
+}
+
 function emptyReservation() {
   return {
     soldAt: null,
@@ -190,6 +394,15 @@ async function releaseByBulkOrder(soldBulkOrderId) {
 
 module.exports = {
   AVAILABLE_DROP,
+  DEFAULT_SELLABLE_MAX_AGE_DAYS,
+  sellableMaxAgeDays,
+  sellableAwardCutoff,
+  isExpiredDrop,
+  notExpiredMatch,
+  notExpiredExpr,
+  expiredUnitAccounts,
+  liveUnits,
+  _resetSellableAgeCache,
   setKeys,
   reserveSetOnAccount,
   releaseAccountsForTag,
