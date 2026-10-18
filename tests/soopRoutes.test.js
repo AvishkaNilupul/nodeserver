@@ -50,6 +50,12 @@ const TABLE = [
   ["POST", "/api/soop/inventory/claim"],
   ["GET", "/api/soop/inventory/export.csv"],
   ["GET", "/api/soop/activity"],
+  // Cookie auto-renew (2026-10-15). save-twitch-cookies takes a harvest key
+  // when SOOP_HARVEST_KEY is set; unset (as here) it is superadmin-only.
+  ["POST", "/api/soop/accounts/save-twitch-cookies"],
+  ["GET", "/api/soop/accounts/twitch-cookies"],
+  ["POST", "/api/soop/accounts/twitch-link"],
+  ["POST", "/api/soop/accounts/renew"],
 ];
 const CODE = "SOOP-CODE-SENTINEL-9XQ7";
 const GHOST_ID = "0123456789abcdef01234567";
