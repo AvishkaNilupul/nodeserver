@@ -216,7 +216,93 @@ function suppliedMessages(stock, accounts, offer) {
   } catch (e) {
     console.error("playerauctions supplied delivery text:", e.message);
   }
+  // A code-shop unit is split around its codes, never sent as a login.
+  try {
+    const coded = codeUnitMessages(stock, accounts, offer);
+    if (coded) return coded;
+  } catch (e) {
+    console.error("playerauctions code unit delivery text:", e.message);
+  }
   return copy.deliveryMessages(accounts, { kind: "bundle" });
+}
+
+// A code-shop unit (utils/codeShop/units.js) holds one code per line of its
+// "password": "1) Label = CODE". Six of them already fill PlayerAuctions'
+// 300 characters, and the house copy would hand them over as
+// "Login: … / Password: …" with a Twitch claim guide. So the offer's own
+// template is rendered around {password}: its opening, the code lines packed
+// into as few messages as fit, then its closing help. null = not a code unit
+// (or nothing that can be split), and the caller keeps its old path.
+const CODE_LINE_RE = /^\s*\d+\)\s*.+?\s*=\s*\S+\s*$/;
+const PASSWORD_SLOT = "{password}";
+
+function codeUnitMessages(stock, accounts, offer) {
+  const limit = copy.LIMIT;
+  const template = String((offer && offer.deliveryTemplate) || "");
+  const at = template.indexOf(PASSWORD_SLOT);
+  if (!accounts.length || at < 0) return null;
+  // deliveryText decrypts and fills the placeholders; a blank part is never
+  // handed to it, because a blank template means its default one.
+  const render = (a, part) => (part.trim() ? String(stock.deliveryText(a, { ...offer, deliveryTemplate: part }) || "").trim() : "");
+  const head = template.slice(0, at);
+  const tail = template.slice(at + PASSWORD_SLOT.length);
+  const out = [];
+  for (let i = 0; i < accounts.length; i++) {
+    const a = accounts[i];
+    const lines = render(a, PASSWORD_SLOT)
+      .split(/\r?\n/)
+      .map((l) => l.trim())
+      .filter(Boolean);
+    if (!lines.length || !lines.every((l) => CODE_LINE_RE.test(l))) return null;
+    const opening = [accounts.length > 1 ? "Bundle " + (i + 1) + " of " + accounts.length : "", render(a, head)]
+      .filter(Boolean)
+      .join("\n");
+    const packed = packLines([...splitLong(opening, limit), ...lines], limit);
+    if (!packed) return null;
+    out.push(...packed);
+    const help = render(a, tail);
+    // The help is the same for every unit of the order: once, after the last.
+    if (help && i === accounts.length - 1) {
+      const helpParts = packLines(splitLong(help, limit), limit);
+      if (!helpParts) return null;
+      out.push(...helpParts);
+    }
+  }
+  return out.length && out.every((m) => m.length <= limit) ? out : null;
+}
+
+// Lines into as few messages of at most `limit` characters as they fit,
+// in order. null when one line alone is longer than the limit.
+function packLines(lines, limit) {
+  const out = [];
+  let cur = "";
+  for (const line of lines) {
+    if (line.length > limit) return null;
+    const next = cur ? cur + "\n" + line : line;
+    if (next.length <= limit) cur = next;
+    else {
+      out.push(cur);
+      cur = line;
+    }
+  }
+  if (cur) out.push(cur);
+  return out;
+}
+
+// A text as lines, each line cut at word boundaries to at most `limit`.
+function splitLong(text, limit) {
+  const out = [];
+  for (const raw of String(text || "").split(/\r?\n/)) {
+    let line = raw.trim();
+    while (line.length > limit) {
+      const cut = line.lastIndexOf(" ", limit);
+      const at = cut > 0 ? cut : limit;
+      out.push(line.slice(0, at).trim());
+      line = line.slice(at).trim();
+    }
+    if (line) out.push(line);
+  }
+  return out;
 }
 
 // A no-claim row hands over accounts whose drops are still UNCLAIMED, so its
