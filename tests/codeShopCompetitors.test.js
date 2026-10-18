@@ -244,12 +244,18 @@ test("deliveryForm: handing over an account (or its login) keeps an offer an acc
 test("deliveryForm: an offer that hands over an account is an account offer, in every form", () => {
   for (const d of [
     "Account delivered within minutes. If the store asks, the guard code will be sent to you in chat.",
-    "Upon receiving the account, enter the code on the official site to finish.",
     "Account will be sent in chat, you will receive the code to log in.",
-    "After getting your account, codes are delivered too.",
     "The accounts are provided right after payment; redeem codes inside.",
+    "You get the account details (email and password); redeem codes inside.",
   ]) {
     assert.equal(deliveryForm("Space Game drops", d), "account", d);
+  }
+  // Softer account wording never lets an offer through as a code seller (review 2).
+  for (const d of [
+    "Upon receiving the account, enter the code on the official site to finish.",
+    "After getting your account, codes are delivered too.",
+  ]) {
+    assert.notEqual(deliveryForm("Space Game drops", d), "codes", d);
   }
   // Only "codes" can set our price; "unknown" is as safe as "account" here.
   assert.notEqual(
@@ -257,6 +263,18 @@ test("deliveryForm: an offer that hands over an account is an account offer, in 
     "codes",
     "a title that sells an account or Twitch drops never takes the code shortcut",
   );
+});
+
+// Review 2 (2026-10-18): the first cut of the account rule also turned real
+// code sellers into account offers.
+test("deliveryForm: a code seller talking about the buyer's own account is still a code seller", () => {
+  for (const d of [
+    "No account details needed. You will receive the codes in chat.",
+    "You get the account-bound cosmetic codes right after payment.",
+    "Works on any platform linked to your account. No refunds after the customer receives the codes.",
+  ]) {
+    assert.equal(deliveryForm("Space Game items", d), "codes", d);
+  }
 });
 
 test("deliveryForm: a login code from the email or 2FA is not the product", () => {

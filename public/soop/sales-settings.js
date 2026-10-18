@@ -297,6 +297,7 @@
         toggle(["markets", "eldorado"], "Eldorado", null),
         toggle(["markets", "playerauctions"], "PlayerAuctions", "Each bundle's stock is shared: each market shows half, and either can sell from all of it."),
         number(["pricing", "playerauctionsUsd"], "PlayerAuctions price (USD)", "One price for every bundle there; PlayerAuctions' minimum is $5.", { step: 0.01, min: 5, max: 500 }),
+        lines(["playerauctionsGames"], "Games sold on PlayerAuctions", "Game numbers, one per line (12 = Overwatch). Codes of any other game are never listed there.", (g) => (/^\d+$/.test(g) ? "" : "Not a game number")),
         el("span", { class: "s-help" }, "GGSel is not used for codes yet: it never reports which code it sold.")),
       gamesCard(),
       card("When a campaign is ready to list", "A campaign's codes are drafted once any one of these is true.",

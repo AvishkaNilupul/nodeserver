@@ -232,16 +232,25 @@ function searchUrl(query, pageIndex) {
 // before counting, so they never read as an account offer.
 const NEG_WORDS = "no|not|without|never|don'?t|doesn'?t|do not|does not";
 const ACCOUNT_TERMS =
-  "twitch account|account linking|account sharing|linking|linked|link|login details|login|log in|logging in|" +
-  "connect(?:ing|ed)?|password|e-?mail";
+  "twitch account|account linking|account sharing|account details|account info(?:rmation)?|account credentials|" +
+  "linking|linked|link|login details|login|log in|logging in|connect(?:ing|ed)?|password|e-?mail";
 const NEGATED_BEFORE = new RegExp(`\\b(?:${NEG_WORDS})\\b[^.\\n;,!?]{0,40}\\b(?:${ACCOUNT_TERMS})\\b`, "gi");
 const NEGATED_AFTER = new RegExp(
   `\\b(?:${ACCOUNT_TERMS}|account)\\b[^.\\n;,!?]{0,20}\\b(?:not|never)\\s+(?:needed|required|necessary)\\b`,
   "gi",
 );
 // "account" alone is no signal: a code seller says "redeem on your own account".
+// Phrases about getting into an account. Counted as account wording and they
+// block the "codes" shortcut, but they do not make an offer an account offer
+// by themselves (review 2, 2026-10-18): a code seller also writes "log in to
+// the account you want the items on" or "no risk of getting your account banned".
+const ACCOUNT_SOFT = [
+  /\b(?:receiving|getting)[ \t]+(?:(?:the|an?|your)[ \t]+)?(?:twitch[ \t]+)?accounts?\b(?!-)/g,
+  /\blog ?in(?:to)?[ \t]+(?:to[ \t]+)?(?:the|this|our|that)[ \t]+(?:twitch[ \t]+)?accounts?\b(?!-)/g,
+];
 const ACCOUNT_SIGNALS = [
   /\btwitch accounts?\b/g,
+  ...ACCOUNT_SOFT,
   /\blog ?in\b|\blogging in\b/g,
   /\blink(?:s|ed|ing)?\b/g,
   /\bconnect(?:s|ed|ing)?\b/g,
@@ -275,13 +284,10 @@ const CODE_DELIVERY = [
 // these keeps an offer out of the "codes" shortcut above.
 const ACCOUNT_DELIVERY = [
   // "Account delivered within minutes", "the account will be sent in chat".
-  /\baccounts?[ \t]+(?:(?:will|would|shall)[ \t]+be[ \t]+|is[ \t]+|are[ \t]+|gets?[ \t]+)?(?:delivered|sent|given|provided|handed)\b/g,
-  // "Upon receiving the account", "after getting your account".
-  /\b(?:receiving|getting)[ \t]+(?:(?:the|an?|your)[ \t]+)?(?:twitch[ \t]+)?accounts?\b/g,
-  /\b(?:receive|receives|received|get|gets|deliver(?:s|ed)?|send|sends|sent)[ \t]+(?:(?:a|an|the|your|our|fresh|new|you)[ \t]+){0,3}(?:twitch[ \t]+)?accounts?\b/g,
+  /\baccounts?(?!-)[ \t]+(?:(?:will|would|shall)[ \t]+be[ \t]+|is[ \t]+|are[ \t]+|gets?[ \t]+)?(?:delivered|sent|given|provided|handed)\b/g,
+  /\b(?:receive|receives|received|get|gets|deliver(?:s|ed)?|send|sends|sent)[ \t]+(?:(?:a|an|the|your|our|fresh|new|you)[ \t]+){0,3}(?:twitch[ \t]+)?accounts?\b(?!-)/g,
   /\b(?:account|login|log-?in)[ \t]+(?:details|credentials|info(?:rmation)?|data)\b/g,
   /\b(?:e-?mail|login|log-?in|user(?:name)?)\s*(?::|and|&|\+|\/)\s*pass(?:word)?s?\b/g,
-  /\blog ?in(?:to)?[ \t]+(?:to[ \t]+)?(?:the|this|our|that)[ \t]+(?:twitch[ \t]+)?accounts?\b/g,
 ];
 
 // What an offer delivers, from its own words. One that says it hands over an
@@ -301,7 +307,7 @@ function deliveryForm(title, description = "") {
   if (count(ACCOUNT_DELIVERY) > 0) return "account";
   // A title that sells an account or Twitch drops never takes the shortcut.
   const titleSaysAccount = /\baccounts?\b|\btwitch drops?\b/i.test(String(title == null ? "" : title));
-  if (!titleSaysAccount && count(CODE_DELIVERY) > 0) return "codes";
+  if (!titleSaysAccount && count(CODE_DELIVERY) > 0 && count(ACCOUNT_SOFT) === 0) return "codes";
   const account = count(ACCOUNT_SIGNALS);
   const codes = count(CODE_SIGNALS);
   if (codes > account) return "codes";

@@ -34,8 +34,12 @@ const PA_INSTRUCTION_MAX = 500;
 // PlayerAuctions throttles writes ("Operated too frequent", code 1): waited out once.
 const PA_WRITE_GAP_MS = 25000;
 const PA_UNKNOWN_OUTCOME = "the outcome is unknown: check PlayerAuctions for an offer with this title before publishing again";
-// A hide refused because the offer is no longer on sale at all: nothing to take down.
-const PA_GONE_RE = /not found|does ?n.?t exist|no longer exists?|has been (cancell?ed|removed|deleted|closed)|is (cancell?ed|expired|closed|removed)|already (hidden|cancell?ed|closed)/i;
+// A hide refused because the offer itself is no longer on sale: nothing to take
+// down. Only PlayerAuctions' own answer about the OFFER counts (err.paCode is
+// set, and the words name the offer): an HTTP error page, an expired session or
+// a closed seller account is never read as "gone" (review, 2026-10-18), or a
+// live offer would be marked delisted and left selling with no stock sync.
+const PA_GONE_RE = /\boffers?\b[^.;\n]{0,30}\b(?:not found|does ?n.?t exist|no longer exists?|(?:has been |is |was )?(?:cancell?ed|removed|deleted|closed|expired|already hidden))\b|\b(?:not found|does ?n.?t exist)\b[^.;\n]{0,20}\boffers?\b/i;
 
 const GGSEL_REFUSED = "GGSel is not used for codes yet: it never reports which code it sold, so a code could be sold twice";
 // Eldorado refuses a new offer once the category's active-offer quota is used.
@@ -488,7 +492,8 @@ function createPublisher(deps = {}) {
       try {
         if (other === "eldorado") {
           const q = Number(await stock().stockFor(typeof row.toObject === "function" ? row.toObject() : row)) || 0;
-          await mp().eldoradoSetQuantity(row.externalId, q);
+          // 0 is left to the Eldorado stock sync, which pauses rather than pushes 0.
+          if (q >= 1) await mp().eldoradoSetQuantity(row.externalId, q);
         } else {
           const sync = typeof deps.paSyncStock === "function" ? deps.paSyncStock : require("../playerauctionsFulfiller").syncStock;
           await sync(row);
@@ -771,7 +776,10 @@ function createPublisher(deps = {}) {
       } catch (err) {
         const msg = errText(err);
         // Already off sale (cancelled by hand, ended, gone): the goal is met.
-        if (!PA_GONE_RE.test(msg)) {
+        // Only PlayerAuctions' own words count, never our "... offer failed" label.
+        const said = msg.replace(/^[^:]*?failed(?: \((?:code|HTTP)[^)]*\))?:\s*/i, "");
+        const gone = err && err.paCode !== undefined && err.paCode !== 1 && PA_GONE_RE.test(said);
+        if (!gone) {
           out.errors.push("PlayerAuctions offer " + row.externalId + ": " + msg);
           await MarketplaceListing()
             .updateOne({ _id: row._id }, { $set: { lastError: msg } })

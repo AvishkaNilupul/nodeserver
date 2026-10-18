@@ -119,6 +119,7 @@ function harness(opts = {}) {
       assert.ok(fs.existsSync(args.coverImagePath), "the cover exists while PlayerAuctions reads it");
       const queued = (opts.paErrors || []).shift();
       if (queued) throw queued;
+      if (opts.afterPaPublish) opts.afterPaPublish(state);
       return opts.paAnswer || { offerId: "9" + ++seq, id: "9" + seq, url: "https://pa.example.test/o/9" + seq };
     },
     async playerauctionsHide(id) {
@@ -1031,11 +1032,43 @@ test("publish: PlayerAuctions is refused before any PlayerAuctions call for a ga
   assertClean(h);
 });
 
+// Review 2 (2026-10-18): only PlayerAuctions' own answer about the OFFER means
+// "gone"; an error page, an expired session or a closed seller account never
+// does, or a live offer would be marked delisted and left selling.
+test("pause: an HTTP error page or a closed seller account is never read as a gone offer", async () => {
+  const p = await activeProduct({ markets: ["eldorado", "playerauctions"] });
+  const base = { accountOffer: p.offer, status: "active", origin: "manual", note: "code shop" };
+  for (const err of [
+    Object.assign(new Error("PlayerAuctions hide offer failed (HTTP 404): <title>404 Not Found</title>"), { __pa: true, status: 404 }),
+    Object.assign(new Error("PlayerAuctions hide offer failed (HTTP 401): The token is expired"), { __pa: true, status: 401 }),
+    Object.assign(new Error("PlayerAuctions hide offer failed (code 3): Your seller account is closed"), { __pa: true, paCode: 3 }),
+  ]) {
+    await CodeProduct.updateOne({ _id: p._id }, { $set: { status: "active" } });
+    const row = await MarketplaceListing.create({ ...base, marketplace: "playerauctions", externalId: "93" + ++seq });
+    const h = harness({ config: PA_CONFIG, paHideError: err });
+    const res = await h.pub.pause(p._id);
+    assert.equal(res.ok, false, err.message);
+    assert.equal((await MarketplaceListing.findById(row._id).lean()).status, "active", "the row stays live: " + err.message);
+    await MarketplaceListing.updateOne({ _id: row._id }, { $set: { status: "delisted" } });
+    assertClean(h);
+  }
+});
+
+test("publish: Eldorado is never pushed a quantity of 0 (its stock sync pauses instead)", async () => {
+  const { p } = await liveOnEldorado();
+  const h = harness({ shelf: 4, config: PA_CONFIG, afterPaPublish: (st) => (st.shelf = 0) });
+  const r = (await h.pub.publishProduct(p._id)).results[1];
+  assert.equal(r.ok, true);
+  assert.equal(h.named("eldoradoSetQuantity").length, 0);
+  assertClean(h);
+});
+
 test("pause: a PlayerAuctions offer already gone counts as taken down; the write throttle is waited out once", async () => {
   const p = await activeProduct({ markets: ["eldorado", "playerauctions"] });
   const base = { accountOffer: p.offer, status: "active", origin: "manual", note: "code shop" };
   const gone = await MarketplaceListing.create({ ...base, marketplace: "playerauctions", externalId: "9101" });
-  const h = harness({ config: PA_CONFIG, paHideError: new Error("PlayerAuctions hide offer failed (code 5): Offer not found") });
+  const notFound = Object.assign(new Error("PlayerAuctions hide offer failed (code 5): Offer not found"), { __pa: true, paCode: 5 });
+  const h = harness({ config: PA_CONFIG, paHideError: notFound });
   const res = await h.pub.pause(p._id);
   assert.equal(res.ok, true);
   const row = await MarketplaceListing.findById(gone._id).lean();

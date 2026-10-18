@@ -523,14 +523,19 @@ async function syncStock(listing, supplied = suppliedDeps) {
 // Is the listing row still active right now? A row that cannot be re-read is
 // treated as not active: pushing stock to an offer we meant to take down is the
 // one direction that can sell what is gone.
-async function stillActive(listing) {
+// true / false, or null when the row could not be re-read.
+async function activeState(listing) {
   if (!listing || !listing._id) return true; // not a stored row (a caller's own object): as before
   try {
     return !!(await MarketplaceListing.exists({ _id: listing._id, status: "active" }));
   } catch (e) {
     console.error("playerauctions stock sync re-check:", e.message);
-    return false;
+    return null;
   }
+}
+
+async function stillActive(listing) {
+  return (await activeState(listing)) === true;
 }
 
 // Keep every unclaimed-backed offer's advertised stock equal to what the
@@ -586,8 +591,11 @@ async function syncUnclaimedStock({ dryRun = false } = {}) {
     }
     if (!offer) continue;
     const advertised = Number(offer.totalUnit);
-    // Taken down (the code shop's pause) since the rows were read: leave it alone.
-    if (!dryRun && !(await stillActive(row))) continue;
+    // Taken down (the code shop's pause) since the rows were read: leave it
+    // alone. Unknown (the re-read failed): only a hide may still happen below,
+    // which is the direction that can never sell what is gone.
+    const state = dryRun ? true : await activeState(row);
+    if (state === false) continue;
 
     if (real <= 0) {
       // Nothing to sell. Hide rather than set quantity 0 — a zero-stock offer
@@ -614,6 +622,8 @@ async function syncUnclaimedStock({ dryRun = false } = {}) {
       }
       continue;
     }
+    // Showing it again or pushing a quantity needs the row to be known active.
+    if (state !== true) continue;
     // Only bring back what WE hid — never override a deliberate pause.
     if (row.autoPaused) {
       changes.push({ offerId: row.externalId, title: row.title, action: "display (" + real + " back in stock)" });
