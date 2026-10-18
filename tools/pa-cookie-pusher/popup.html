@@ -13,8 +13,13 @@
       }
       h1 {
         font-size: 14px;
-        margin: 0 0 10px;
+        margin: 0 0 4px;
         color: #fff;
+      }
+      p.lede {
+        margin: 0 0 10px;
+        color: #7f8a9c;
+        font-size: 12px;
       }
       label {
         display: block;
@@ -22,7 +27,8 @@
         color: #a8b0bd;
         font-size: 12px;
       }
-      input {
+      input[type="text"],
+      input[type="password"] {
         width: 100%;
         box-sizing: border-box;
         padding: 7px 8px;
@@ -31,6 +37,17 @@
         background: #1b2130;
         color: #e8e8ea;
         font: inherit;
+      }
+      .check {
+        display: flex;
+        align-items: center;
+        gap: 7px;
+        margin: 9px 0 0;
+        color: #c4ccd8;
+        font-size: 12px;
+      }
+      .check input {
+        margin: 0;
       }
       .row {
         display: flex;
@@ -62,7 +79,8 @@
         color: #a8b0bd;
         font-weight: 500;
       }
-      #status {
+      #status,
+      #last {
         margin-top: 12px;
         padding: 9px 10px;
         border-radius: 8px;
@@ -70,23 +88,26 @@
         white-space: pre-wrap;
         display: none;
       }
-      #status.ok {
+      #status.ok,
+      #last.ok {
         display: block;
         background: #16351f;
         color: #baf5c8;
       }
-      #status.err {
+      #status.err,
+      #last.err {
         display: block;
         background: #3a1a1a;
         color: #f6bcbc;
       }
-      #status.info {
+      #status.info,
+      #last.info {
         display: block;
         background: #1b2130;
         color: #a8b0bd;
       }
       details {
-        margin-top: 10px;
+        margin-top: 12px;
       }
       summary {
         color: #7f8a9c;
@@ -97,8 +118,17 @@
   </head>
   <body>
     <h1>PlayerAuctions → redeemer</h1>
+    <p class="lede">
+      Auto-push is on: just sign in at member.playerauctions.com and the new
+      session installs itself. The buttons below are a manual fallback.
+    </p>
 
-    <button id="push" class="primary" disabled>Grab &amp; push to server</button>
+    <div id="last"></div>
+
+    <div class="row">
+      <button id="check">Check this device</button>
+      <button id="push" class="primary" disabled>Grab &amp; push now</button>
+    </div>
 
     <div id="status"></div>
 
@@ -109,11 +139,22 @@
       <label for="secret">Install secret</label>
       <input id="secret" type="password" placeholder="(from the server)" />
       <button id="save" class="save">Save settings</button>
+
+      <label class="check">
+        <input id="autoPush" type="checkbox" />
+        Auto-push the moment I sign in
+      </label>
+      <label class="check">
+        <input id="closeTabs" type="checkbox" />
+        Close PlayerAuctions tabs after pushing (keeps the server the only session)
+      </label>
+
       <div class="row">
         <button id="copy">Copy cookie header</button>
       </div>
     </details>
 
+    <script src="logic.js"></script>
     <script src="popup.js"></script>
   </body>
 </html>

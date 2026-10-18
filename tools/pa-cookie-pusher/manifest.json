@@ -1,11 +1,17 @@
 {
   "manifest_version": 3,
   "name": "PA Cookie Pusher",
-  "version": "1.0.0",
-  "description": "One click: grab the signed-in PlayerAuctions session cookie and install it on the redeemer server, so auto-delivery never goes dark.",
+  "version": "1.2.0",
+  "description": "Auto-installs the signed-in PlayerAuctions session cookie on the redeemer server the moment you log in, so auto-delivery never goes dark. No copy-paste, no button. Works in Chrome/Edge and in Orion on iPhone.",
   "permissions": ["cookies", "storage"],
-  "host_permissions": ["https://*.playerauctions.com/*"],
+  "host_permissions": [
+    "https://*.playerauctions.com/*",
+    "https://redeemhub.lets.game/*"
+  ],
   "optional_host_permissions": ["https://*/*", "http://*/*"],
+  "background": {
+    "service_worker": "background.js"
+  },
   "action": {
     "default_popup": "popup.html",
     "default_title": "PA Cookie Pusher"

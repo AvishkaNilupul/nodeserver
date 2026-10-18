@@ -60,14 +60,15 @@ function secretVerdict(provided) {
   }
 }
 
-// The extension fetches cross-origin from a chrome-extension:// origin. With
-// host permissions the browser skips CORS, but reflecting the extension origin
-// makes the call work regardless of how the extension is packaged, and never
-// opens the route to an ordinary web page (only chrome-extension origins are
-// reflected).
+// The extension fetches cross-origin from an extension origin. With host
+// permissions the browser skips CORS, but reflecting the extension origin makes
+// the call work regardless of how the extension is packaged, and never opens
+// the route to an ordinary web page — only browser-extension scheme origins are
+// reflected (chrome-extension:// for Chrome/Edge, moz-extension:// for Firefox,
+// safari-web-extension:// for Safari / Orion on iPhone), never http(s).
 function applyExtensionCors(req, res) {
   const origin = req.headers.origin || "";
-  if (/^chrome-extension:\/\//.test(origin)) {
+  if (/^(chrome-extension|moz-extension|safari-web-extension|safari-extension):\/\//.test(origin)) {
     res.set("Access-Control-Allow-Origin", origin);
     res.set("Vary", "Origin");
     res.set("Access-Control-Allow-Headers", "content-type, x-pa-install-secret");
