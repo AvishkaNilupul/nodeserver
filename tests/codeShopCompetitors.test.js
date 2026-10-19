@@ -28,6 +28,7 @@ const {
   deliveryForm,
   parseSearch,
   countsForLowest,
+  accountContext,
   MIN_PRICE_SHARE,
 } = require("../utils/codeShop/competitors");
 
@@ -725,4 +726,88 @@ test("scan: a product passed without its pricing has its base price read", async
   const partial = { _id: p._id, name: p.name, gameNo: p.gameNo, slots: p.slots, competitors: p.competitors };
   const res = await harness(fakeMarket({ set: [[offer("bait", FULL, 1), offer("real", FULL, 2)]] })).competitors.scan(partial);
   assert.equal(res.lowestSameSetUsd, 2);
+});
+
+// ── R13: same-set Twitch-account offers, as context only ───────────────────
+
+test("accountContext: same-set account offers with stock and a price, whatever the price (R13)", () => {
+  const o = (fields) => ({ sameSet: true, form: "account", qty: 5, priceUsd: 0.5, ...fields });
+  assert.deepEqual(accountContext([]), { count: 0, qty: 0, lowestUsd: null });
+  assert.deepEqual(accountContext(null), { count: 0, qty: 0, lowestUsd: null });
+  assert.deepEqual(
+    accountContext([
+      o({}),
+      o({ priceUsd: 0.09, qty: 258 }),
+      // Far under 30 % of any base price: still what a buyer sees, so it counts.
+      o({ priceUsd: 0.01, qty: 1 }),
+      o({ form: "codes", priceUsd: 0.05 }),
+      o({ form: "unknown", priceUsd: 0.05 }),
+      o({ sameSet: false, priceUsd: 0.05 }),
+      o({ qty: 0, priceUsd: 0.02 }),
+      o({ priceUsd: null }),
+      o({ priceUsd: 0 }),
+      null,
+    ]),
+    { count: 3, qty: 264, lowestUsd: 0.01 },
+  );
+});
+
+test("scan: same-set Twitch-account offers are summed up as context, never as our price (R13)", async () => {
+  const p = await product({ competitors: { queries: ["set"] }, pricing: { priceUsd: 1 } });
+  const accountText = "A Twitch account with the drops: log in, link your game account and claim. " + FULL;
+  const acct = (id, price, qty) => offer(id, "Space Game Twitch Drops | 19 Rewards", price, { description: accountText, qty });
+  // 18 of them: more than the 15 offers stored, so the sum must come from all.
+  const many = Array.from({ length: 18 }, (_, i) => acct("acct-" + i, 0.5 + i * 0.1, 10));
+  const market = fakeMarket({
+    set: [
+      [
+        ...many,
+        acct("acct-cheap", 0.09, 258),
+        acct("acct-empty", 0.05, 0),
+        offer("acct-partial", "Space Game Twitch Drops", 0.05, { description: "A Twitch account: log in and claim. Moon Spray, Star Banner" }),
+        offer("unclear", FULL, 0.06, { description: "" }),
+        offer("codes", FULL, 0.9),
+      ],
+    ],
+  });
+  const h = harness(market);
+  const res = await h.competitors.scan(p);
+
+  assert.deepEqual(res.accounts, { count: 19, qty: 18 * 10 + 258, lowestUsd: 0.09 });
+  assert.equal(res.lowestSameSetUsd, 0.9, "only the code seller sets our price");
+  assert.equal(res.offers.length, 15);
+  const saved = await CodeProduct.findById(p._id).lean();
+  assert.deepEqual(saved.competitors.accounts, { count: 19, qty: 438, lowestUsd: 0.09 });
+  assert.equal(saved.competitors.lowestSameSetUsd, 0.9);
+  const ev = h.logged.find((e) => e.kind === "competitors");
+  assert.deepEqual(ev.data.accounts, { count: 19, qty: 438, lowestUsd: 0.09 });
+  assert.match(ev.msg, /; the same set as Twitch accounts: 19 offers, 438 in stock, from \$0\.09 \(another product, not our price\)$/);
+
+  // No account offer at all: an all-zero summary, and the message says nothing of it.
+  const q = await product({ competitors: { queries: ["set"] }, pricing: { priceUsd: 1 } });
+  const h2 = harness(fakeMarket({ set: [[offer("codes-only", FULL, 1.2)]] }));
+  const res2 = await h2.competitors.scan(q);
+  assert.deepEqual(res2.accounts, { count: 0, qty: 0, lowestUsd: null });
+  assert.equal(res2.lowestSameSetUsd, 1.2);
+  assert.doesNotMatch(h2.logged.find((e) => e.kind === "competitors").msg, /as Twitch accounts/);
+});
+
+test("scan: a product never scanned has no account summary; a failed scan keeps the old one", async () => {
+  const fresh = await product();
+  assert.equal((await CodeProduct.findById(fresh._id).lean()).competitors.accounts, null, "unknown, not zero");
+
+  const old = {
+    scannedAt: new Date(NOW - 86400000),
+    queries: ["set"],
+    lowestSameSetUsd: null,
+    accounts: { count: 2, qty: 5, lowestUsd: 0.3 },
+    offers: [],
+  };
+  const p = await product({ competitors: old });
+  const market = fakeMarket({}, { fail: () => () => reply({ error: "boom" }, 500) });
+  const res = await harness(market).competitors.scan(p);
+  assert.equal(res.accounts.count, 2);
+  const saved = await CodeProduct.findById(p._id).lean();
+  assert.deepEqual(saved.competitors.accounts, { count: 2, qty: 5, lowestUsd: 0.3 });
+  assert.equal(saved.competitors.scannedAt.getTime(), old.scannedAt.getTime());
 });

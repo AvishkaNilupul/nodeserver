@@ -234,10 +234,16 @@
         el("span", { class: "s-row" }, isNum(low) ? el("span", null, "Lowest same-set code seller ", el("b", { class: "s-num" }, usd(low))) : el("span", null, "No same-set code seller found"),
           el("span", { class: "s-muted s-small" }, plural(c.count || 0, "offer") + " · scanned " + fmt.ago(c.scannedAt)),
           c.count ? btn("View", "competitors", { tone: "ghost", icon: "eye", onClick: () => viewCompetitors(p) }) : null),
-        isNum(low) && isFinite(ours) && ours > Number(low) ? el("span", { class: "s-small s-warn" }, "Ours is " + usd(ours - Number(low)) + " above the lowest same-set code seller") : null);
+        isNum(low) && isFinite(ours) && ours > Number(low) ? el("span", { class: "s-small s-warn" }, "Ours is " + usd(ours - Number(low)) + " above the lowest same-set code seller") : null,
+        c.accounts && c.accounts.count ? el("span", { class: "s-muted s-small" }, "Same rewards as Twitch accounts: " + accountsText(c.accounts)) : null);
     }
     rows.push(["Competitors", comp]);
     return kv(rows);
+  }
+  // Same-set Twitch-account offers (R13): what buyers see next to our codes.
+  // Another product (log in, link, claim), so it is shown, never followed.
+  function accountsText(a) {
+    return plural(a.count, "offer") + " from " + usd(a.lowestUsd) + ", " + fmt.num(a.qty || 0) + " in stock (another product, not our price)";
   }
   function btn(label, act, opts) {
     const b = ui.button(label, Object.assign({ size: "sm" }, opts));
@@ -428,7 +434,8 @@
     const table = ui.table({ key: "_k", maxHeight: "50vh", empty: c.scannedAt ? "No matching offers found" : "Not scanned yet",
       columns: [
         { label: "Offer", wrap: true, render: (o) => o.title || "–" },
-        { label: "Price", align: "right", render: (o) => el("span", { class: o.sameSet && isNum(ours) && Number(o.priceUsd) < Number(ours) ? "s-num s-warn" : "s-num" }, usd(o.priceUsd)) },
+        // Orange only for a same-set CODE seller under our price: a Twitch account is not our price (R10, R13).
+        { label: "Price", align: "right", render: (o) => el("span", { class: o.sameSet && o.form === "codes" && isNum(ours) && Number(o.priceUsd) < Number(ours) ? "s-num s-warn" : "s-num" }, usd(o.priceUsd)) },
         { label: "Qty", align: "right", render: (o) => fmt.num(o.qty) },
         { label: "Match", align: "right", render: (o) => (isNum(o.score) ? fmt.pct(o.score, 1) : "–") },
         { label: "Named in", render: (o) => (o.matchedIn === "description" ? el("span", { class: "s-muted" }, "Description") : o.matchedIn === "title" ? "Title" : "–") },
@@ -440,10 +447,11 @@
         kv([
           ["Our price", usd(ours)],
           ["Lowest same-set code seller", isNum(c.lowestSameSetUsd) ? usd(c.lowestSameSetUsd) : "None found"],
+          c.accounts ? ["Same rewards as Twitch accounts", c.accounts.count ? accountsText(c.accounts) : "None found"] : null,
           ["Scanned", c.scannedAt ? when(c.scannedAt) + " (" + fmt.ago(c.scannedAt) + ")" : "Never"],
           arr(c.queries).length ? ["Searched for", el("span", { class: "s-row" }, arr(c.queries).map((q) => ui.badge(q)))] : null,
         ]),
-        el("p", { class: "s-help", style: { margin: "0" } }, "Other sellers' Eldorado offers (ours are left out). Match = share of this bundle's rewards named in their title or description; 80% or more counts as the same set. Most sellers offer these rewards as a Twitch-drop account (log in, link, claim within about two weeks): a different product from a code, so only code sellers set the lowest price."),
+        el("p", { class: "s-help", style: { margin: "0" } }, "Other sellers' Eldorado offers (ours are left out). Match = share of this bundle's rewards named in their title or description; 80% or more counts as the same set. Most sellers offer these rewards as a Twitch-drop account (log in, link, claim within about two weeks): a different product from a code, so only code sellers set the lowest price, and only a cheaper code seller's price shows in orange. The Twitch-account line counts them for context."),
         table) });
   }
   function merge() {

@@ -151,12 +151,22 @@ vault must be emptied from the Listings page) — the result says so. Product �
 - `countsForLowest(offer, base)`: `sameSet`, `form === "codes"`, `qty >= 1`, and
   (when `base` is known) `priceUsd >= 0.3 × base`. `lowestSameSetUsd` = the lowest
   price of the offers that count, else null.
-- Store on the product: `competitors = { scannedAt, queries, offers: top 15 by score desc then price asc, lowestSameSetUsd }`,
+- `accountContext(offers)` (05-REVIEW-FIXES R13) → `{ count, qty, lowestUsd }`
+  over the same-set offers whose `form === "account"`, with `qty >= 1` and a
+  price above 0: how many, their stock added up, the cheapest (`null` when
+  none). Every price counts — this is what a buyer sees next to our codes, not
+  a price to follow, so the 30 % rule does not apply. Code sellers and
+  `unknown` offers are left out. Read by the panel only; `pricing.js` never
+  sees it.
+- Store on the product: `competitors = { scannedAt, queries, offers: top 15 by score desc then price asc, lowestSameSetUsd, accounts }`,
   each offer `{ id, title, priceUsd, qty, score, sameSet, matchedIn, form }` (a
-  rival's description is read, never stored). The event's `data` carries
-  `byDescription` (offers named in a description only) and `byForm`
-  (`{codes, account, unknown}`). A failed request → `events.log` warn, keep the
-  old scan.
+  rival's description is read, never stored); `accounts` is worked out from
+  EVERY scored offer, not just the 15 stored, and is `null` on a product no
+  scan has counted it for. The event's `data` carries `byDescription` (offers
+  named in a description only), `byForm` (`{codes, account, unknown}`) and
+  `accounts`; its message ends "the same set as Twitch accounts: N offers, Q in
+  stock, from $X (another product, not our price)" when there are any. A
+  failed request → `events.log` warn, keep the old scan.
 
 ## `utils/codeShop/pricing.js`
 

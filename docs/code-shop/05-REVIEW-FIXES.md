@@ -150,3 +150,24 @@ the stock is shared with Eldorado (each shows half, S4); the item leaf is never
 "Twitch Drops"; titles fit 150 characters; at most one PlayerAuctions publish a
 tick; pause hides PlayerAuctions rows; a code unit is delivered in messages of
 at most 300 characters. Contract: 06-PLAYERAUCTIONS-PLAN.md, C1–C8.
+
+## R13. Twitch-account offers are context, never our price (2026-10-19, owner's call)
+
+A market check found that every rival offer naming all the items of our
+Overwatch bundles sold a Twitch-drop account, many of them far below our
+price. The owner: codes are a different product — redeem only, no account to
+link, no link cooldown, and they keep for months — so code bundles stay priced
+as their own product and R10 stands: only code sellers set our price. What he
+does want is to see that market, and to see when its stock runs out. So:
+- `competitors.accountContext(offers)` → `{ count, qty, lowestUsd }` of the
+  same-set offers whose form is `account` (stock ≥ 1, a price above 0; every
+  price counts, the R8 bait rule is for prices we follow). `scan()` works it out
+  over every scored offer and stores it as `competitors.accounts` (event `data`
+  and message too). `lowestSameSetUsd` and `pricing.js` are unchanged.
+- `CodeProduct.competitors.accounts` defaults to `null`: a product scanned
+  before this change reads "not counted yet", never "none".
+- The panel prints one line under Competitors and one row in the competitor
+  list: "Same rewards as Twitch accounts: N offers from $X, Q in stock (another
+  product, not our price)". In that list a price turns orange only for a
+  same-set CODE seller under our price; before, a cheaper Twitch account did
+  too, which read as "we are undercut".

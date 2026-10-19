@@ -337,7 +337,8 @@ test("state(): products, retired included, exact view shape and values", async (
       { market: "eldorado", externalId: "eld-live-1", url: "https://eldorado.example.test/o/live", price: 2.5, status: "active", autoPaused: false, lastError: "" },
       { market: "ggsel", externalId: "gg-live-1", url: "https://ggsel.example.test/p/1", price: 2.5, status: "active", autoPaused: true, lastError: "vault low" },
     ],
-    competitors: { scannedAt: at(-3 * HOUR), lowestSameSetUsd: 1.99, count: 3 },
+    // Scanned before R13: the Twitch-account summary is unknown, not zero.
+    competitors: { scannedAt: at(-3 * HOUR), lowestSameSetUsd: 1.99, count: 3, accounts: null },
     publish: { lastError: "", lastAttemptAt: at(-HOUR) },
     problems: [],
   });
@@ -352,7 +353,7 @@ test("state(): products, retired included, exact view shape and values", async (
   assert.deepEqual(p2.listings, []);
   assert.deepEqual(p2.proposed, { units: 4, at: at(-HOUR) });
   assert.equal(p2.useBy, null);
-  assert.deepEqual(p2.competitors, { scannedAt: null, lowestSameSetUsd: null, count: 0 });
+  assert.deepEqual(p2.competitors, { scannedAt: null, lowestSameSetUsd: null, count: 0, accounts: null });
   assert.deepEqual(p2.pricing, { mode: "fixed", priceUsd: 1, floorUsd: 0.5, clearance: false, followCompetitors: false, lastChangeAt: null, lastReason: "" });
   assert.ok(p2.problems.includes("label 2 is empty"), p2.problems.join(" | "));
   assert.ok(p2.problems.some((x) => /description names where the codes come from/.test(x)), p2.problems.join(" | "));
@@ -492,6 +493,29 @@ test("product(id): the list view plus texts, competitor offers and queries", asy
   const retired = await views.product(shop.p3._id);
   assert.equal(retired.product.status, "retired");
   assert.deepEqual(retired.product.competitors.offers, []);
+});
+
+test("state() and product(id): the last scan's Twitch-account summary, as stored (R13)", async () => {
+  await CodeProduct.updateOne({ _id: shop.p1._id }, { $set: { "competitors.accounts": { count: 37, qty: 12345, lowestUsd: 0.09 } } });
+  try {
+    const views = viewsWith();
+    const list = byId((await views.state()).products, shop.p1._id);
+    assert.deepEqual(list.competitors, {
+      scannedAt: at(-3 * HOUR),
+      lowestSameSetUsd: 1.99,
+      count: 3,
+      accounts: { count: 37, qty: 12345, lowestUsd: 0.09 },
+    });
+    const one = await views.product(String(shop.p1._id));
+    assert.deepEqual(one.product.competitors.accounts, { count: 37, qty: 12345, lowestUsd: 0.09 });
+
+    // Counted, none found: zeros and no price — not the same as "not counted yet".
+    await CodeProduct.updateOne({ _id: shop.p1._id }, { $set: { "competitors.accounts": { count: 0, qty: 0, lowestUsd: null } } });
+    const none = byId((await views.state()).products, shop.p1._id);
+    assert.deepEqual(none.competitors.accounts, { count: 0, qty: 0, lowestUsd: null });
+  } finally {
+    await CodeProduct.updateOne({ _id: shop.p1._id }, { $set: { "competitors.accounts": null } });
+  }
 });
 
 test("product(id): an unknown or malformed id is a 404", async () => {

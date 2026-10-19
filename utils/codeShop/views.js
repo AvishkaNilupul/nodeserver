@@ -206,6 +206,17 @@ function pickListings(rows) {
   return out.map(listingView);
 }
 
+// The last scan's same-set Twitch-account offers (R13), or null when no scan
+// has counted them yet: unknown is not "none".
+function accountContextView(a) {
+  if (!a || typeof a !== "object") return null;
+  return {
+    count: finiteOr(a.count, 0),
+    qty: finiteOr(a.qty, 0),
+    lowestUsd: finiteOr(a.lowestUsd, null),
+  };
+}
+
 function competitorOfferView(o) {
   const x = o || {};
   return {
@@ -275,6 +286,7 @@ function createViews(deps = {}) {
     else {
       $project["competitors.scannedAt"] = 1;
       $project["competitors.lowestSameSetUsd"] = 1;
+      $project["competitors.accounts"] = 1;
     }
     return [{ $match: match }, { $project }];
   }
@@ -385,6 +397,7 @@ function createViews(deps = {}) {
           scannedAt: dateOr(c.scannedAt),
           lowestSameSetUsd: finiteOr(c.lowestSameSetUsd, null),
           count: finiteOr(p.competitorCount, 0),
+          accounts: accountContextView(c.accounts),
         },
         publish: { lastError: str(publish.lastError), lastAttemptAt: dateOr(publish.lastAttemptAt) },
         problems: await problemsOf(p, cfg),

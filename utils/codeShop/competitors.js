@@ -34,6 +34,12 @@
 // from the offer's wording; an offer it cannot place ("unknown") never sets
 // our price either.
 //
+// The same-set Twitch-account offers are still worth seeing, as market
+// context (05-REVIEW-FIXES.md, R13): `accounts` sums them up — how many, how
+// much stock, the cheapest — so the panel can show what buyers see next to our
+// codes, and when that stock runs out. It is never a price to follow: the
+// owner keeps codes priced as their own product (redeem only, no link).
+//
 // Our own offers are never competitors: undercutting ourselves would walk the
 // price down to the floor one cent per run. They are recognised by seller id
 // (config.ownEldoradoUserIds) AND by offer id (any MarketplaceListing row we
@@ -328,6 +334,27 @@ function countsForLowest(offer, basePriceUsd) {
   return true;
 }
 
+// The same-set offers that sell a Twitch-drop account, summed up (R13):
+// { count, qty (their stock together), lowestUsd } over offers with stock and
+// a price. Every one counts, whatever its price — this is what a buyer sees,
+// not a price to follow, so the R8 bait rule does not apply. Code sellers and
+// unclear offers are left out.
+function accountContext(offers) {
+  let count = 0;
+  let qty = 0;
+  let lowestUsd = null;
+  for (const o of Array.isArray(offers) ? offers : []) {
+    if (!o || !o.sameSet || o.form !== "account") continue;
+    const stock = Number(o.qty);
+    const price = Number(o.priceUsd);
+    if (!(stock >= 1) || !Number.isFinite(price) || price <= 0) continue;
+    count += 1;
+    qty += stock;
+    if (lowestUsd === null || price < lowestUsd) lowestUsd = price;
+  }
+  return { count, qty, lowestUsd };
+}
+
 // Best score first, then cheapest, then id so the order is stable.
 function byScoreThenPrice(a, b) {
   return b.score - a.score || a.priceUsd - b.priceUsd || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0);
@@ -467,6 +494,8 @@ function createCompetitors(deps = {}) {
     const byDescription = scored.filter((o) => o.matchedIn === "description").length;
     const byForm = { codes: 0, account: 0, unknown: 0 };
     for (const o of scored) byForm[o.form] += 1;
+    // Over every scored offer, not just the top 15 that are stored.
+    const accounts = accountContext(scored);
     // `queries` keeps only what the owner pinned: the words worked out from
     // the labels are not stored, so a renamed slot changes the next search.
     const pinned = product.competitors && Array.isArray(product.competitors.queries) ? product.competitors.queries : [];
@@ -474,6 +503,7 @@ function createCompetitors(deps = {}) {
       scannedAt: new Date(now()),
       queries: pinned,
       lowestSameSetUsd: same.length ? Math.min(...same) : null,
+      accounts,
       offers: scored.slice(0, TOP_OFFERS),
     };
 
@@ -486,7 +516,11 @@ function createCompetitors(deps = {}) {
         (byDescription ? " (" + byDescription + " named in the description only)" : "") +
         "; they sell codes " + byForm.codes + ", Twitch accounts " + byForm.account + ", unclear " + byForm.unknown + "; " +
         same.length + " same-set code " + (same.length === 1 ? "seller counts" : "sellers count") +
-        (result.lowestSameSetUsd === null ? "" : ", lowest $" + result.lowestSameSetUsd.toFixed(2)),
+        (result.lowestSameSetUsd === null ? "" : ", lowest $" + result.lowestSameSetUsd.toFixed(2)) +
+        (accounts.count
+          ? "; the same set as Twitch accounts: " + accounts.count + (accounts.count === 1 ? " offer, " : " offers, ") +
+            accounts.qty + " in stock, from $" + accounts.lowestUsd.toFixed(2) + " (another product, not our price)"
+          : ""),
       data: {
         requests,
         matching: scored.length,
@@ -494,6 +528,7 @@ function createCompetitors(deps = {}) {
         byForm,
         sameSet: same.length,
         lowestSameSetUsd: result.lowestSameSetUsd,
+        accounts,
       },
     });
     return result;
@@ -513,6 +548,7 @@ module.exports = {
   normalise,
   searchUrl,
   countsForLowest,
+  accountContext,
   SAME_SET_SCORE,
   MIN_PRICE_SHARE,
   PAGE_SIZE,

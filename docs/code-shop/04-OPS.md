@@ -66,7 +66,7 @@ Off unless `config.farmPriority.enabled` and `botIds` non-empty; also waits
   `summary = { inStock, onSale, inVault, sold, expiring, expired, held, dead, drafts, revenue: { d1, d7, d30, all } }`
   (onSale/inVault = rows `in_unit` by `unitStatus`; revenue = Σ `saleUsd` of
   `sold`+`dead` rows by `soldAt`), and `products` = every non-retired product:
-  `{ id, name, status, origin, kind, gameNo, gameName, slots: [{label, image}], units: {available, fed, sold, removed}, freeUnits (what fill could still build now), proposed, useBy, pricing, markets, listings: [{ market, externalId, url, price, status, autoPaused, lastError }], competitors: { scannedAt, lowestSameSetUsd, count }, publish, problems }`.
+  `{ id, name, status, origin, kind, gameNo, gameName, slots: [{label, image}], units: {available, fed, sold, removed}, freeUnits (what fill could still build now), proposed, useBy, pricing, markets, listings: [{ market, externalId, url, price, status, autoPaused, lastError }], competitors: { scannedAt, lowestSameSetUsd, count, accounts: { count, qty, lowestUsd } | null }, publish, problems }`.
 - `product(id)` → the same plus `texts`, full `competitors.offers` and slot keys.
 - `stock()` → by game → group → slot: `{ label, nameRaw, image, counts: {in_stock, in_unit, sold, expiring, expired, held, dead}, nextUseBy }`, plus a `held` list `[{ loginId, label, problem }]`.
 - `logins()` → per loginId `{ codes, inStock, onSale, sold, usd, lastEarnedAt }`.

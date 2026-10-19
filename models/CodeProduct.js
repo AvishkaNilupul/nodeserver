@@ -37,6 +37,18 @@ const competitorOfferSchema = new mongoose.Schema(
   { _id: false },
 );
 
+// The same-set rivals that sell a Twitch-drop ACCOUNT, as the last scan counted
+// them: market context for the panel, never a price to follow (R13).
+const accountContextSchema = new mongoose.Schema(
+  {
+    count: { type: Number, default: 0 },
+    // Their stock, added up.
+    qty: { type: Number, default: 0 },
+    lowestUsd: { type: Number, default: null },
+  },
+  { _id: false },
+);
+
 const codeProductSchema = new mongoose.Schema(
   {
     name: { type: String, default: "" },
@@ -123,6 +135,8 @@ const codeProductSchema = new mongoose.Schema(
       scannedAt: { type: Date, default: null },
       queries: { type: [String], default: [] },
       lowestSameSetUsd: { type: Number, default: null },
+      // null until a scan has counted them (scans before R13 did not).
+      accounts: { type: accountContextSchema, default: null },
       offers: { type: [competitorOfferSchema], default: [] },
     },
 
