@@ -171,3 +171,8 @@ does want is to see that market, and to see when its stock runs out. So:
   product, not our price)". In that list a price turns orange only for a
   same-set CODE seller under our price; before, a cheaper Twitch account did
   too, which read as "we are undercut".
+- LIVE since 2026-10-19 05:22:53 UTC (targeted copy of the four runtime files,
+  backup `_deploy_backup_20261019052252_code-shop-account-context` with its
+  `manifest.txt`; rollback = copy them back + restart). Checked live the same
+  minute: one scan of a 4-code Overwatch bundle stored the account summary,
+  `lowestSameSetUsd` stayed null (no code seller) and the fixed price untouched.
