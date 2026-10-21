@@ -20,6 +20,9 @@
 //   ... add --apply to write. Without it, nothing is written.
 //   ... --json <path> dumps the full per-row classification for auditing.
 //   ... --only repoint,retire,renter limits WHICH categories --apply writes.
+//   ... --allow-stock-release lets --apply go ahead even when the recycler
+//       would hand an account holding sellable unclaimed stock to the pool
+//       (see "WHAT THE RECYCLER DOES NEXT" below). Without it --apply refuses.
 //
 // WHAT IT WRITES (only ever these three fields)
 //   * live somewhere  -> repoint host/configFile/container (+ enabled, to match
@@ -54,12 +57,14 @@ const fleet = require(path.join(APP, "utils", "noclaimFleet"));
 const BotAccount = require(path.join(APP, "models", "BotAccount"));
 const UnclaimedAccount = require(path.join(APP, "models", "UnclaimedAccount"));
 const RenterBotStack = require(path.join(APP, "models", "RenterBotStack"));
+const { chooseHome } = require(path.join(APP, "utils", "botAccountMirror"));
 
 const arg = (n, d) => {
   const i = process.argv.indexOf("--" + n);
   return i > -1 && process.argv[i + 1] ? process.argv[i + 1] : d;
 };
 const APPLY = process.argv.includes("--apply");
+const ALLOW_STOCK_RELEASE = process.argv.includes("--allow-stock-release");
 const LEDGER_HOST = arg("host", "pi");
 const JSON_OUT = arg("json", "");
 const ONLY = arg("only", "").split(",").map((x) => x.trim()).filter(Boolean);
@@ -170,19 +175,13 @@ async function indexNoClaimFleet(index) {
   return bots;
 }
 
-// Pick the entry that decides where an account really lives: an enabled copy
-// beats a disabled one (a disabled entry is retirement residue — 237 such
-// duplicates exist across this fleet). Two ENABLED copies is a dupeGuard-class
-// problem, not a bookkeeping one, so those rows are reported and left alone —
-// and that check spans renter stacks too, which is how an operator bot and a
-// renter's bot farming the same token gets caught.
-function chooseHome(hits) {
-  const on = hits.filter((h) => h.enabled);
-  if (on.length > 1) return { conflict: true, hits: on };
-  // No enabled copy anywhere: an operator config still decides over a renter
-  // stack, because only the operator side owns these fields.
-  return { conflict: false, home: on[0] || hits.find((h) => !h.renter) || hits[0] };
-}
+// Which entry decides where an account really lives is
+// utils/botAccountMirror.chooseHome: an enabled copy beats a disabled one (a
+// disabled entry is retirement residue — 237 such duplicates existed across
+// this fleet), and two ENABLED copies is a dupeGuard-class problem, reported
+// and left alone. That check spans renter stacks too, which is how an operator
+// bot and a renter's bot farming the same token gets caught. "Sync from bots"
+// (routes/dropArchiveRoutes runSync) uses the same rule.
 
 // Container state per host, so the report can say whether the config a row
 // points at is actually RUNNING. "exists" is not enough: `docker ps -a` lists
@@ -206,6 +205,104 @@ async function indexContainerStates() {
     if (ps === null) return "unknown";
     const c = ps[container];
     return c ? c.state : "absent";
+  };
+}
+
+// --- What the recycler does next --------------------------------------------
+//
+// The retro-reaper (utils/autoFarmer.reapRetiredBots) keeps a completed task's
+// account claimed for as long as BotAccount says it is enabled. So switching a
+// stale `enabled` off is not just bookkeeping: on the next auto-farm tick that
+// pass may hand the account back to the pool. Measured on prod 2026-10-21 for
+// the 823 stale rows on the shared auto bots: 0 released today, 90 after the
+// correction, none of them holding sellable unclaimed stock.
+//
+// The pass's own rules decide (retroRecycleLogins, unrecyclableLogins and
+// recyclableClaimQuery, all from autoFarmer), so this cannot drift from it.
+// Rows this write switches ON (an account found live in a no-claim bot) count
+// as enabled afterwards: they are kept claimed, never released.
+async function recyclerPrediction({ offIds, onLogins }) {
+  const autoFarmer = require(path.join(APP, "utils", "autoFarmer"));
+  const AutoFarmTask = require(path.join(APP, "models", "AutoFarmTask"));
+  const AvailableAccount = require(path.join(APP, "models", "AvailableAccount"));
+  const NoclaimHolding = require(path.join(APP, "models", "NoclaimHolding"));
+  const lc = (v) => String(v || "").toLowerCase();
+
+  const done = await AutoFarmTask.find(
+    { status: "completed", "bots.0": { $exists: true } },
+    { assignedAccounts: 1 },
+  ).lean();
+  const logins = [];
+  for (const t of done) for (const u of t.assignedAccounts || []) logins.push(String(u));
+  if (!logins.length) return summarizeRelease({ releasedNow: [], releasedAfter: [], readyIds: [], holdings: [] });
+
+  const unrecyclable = await autoFarmer.unrecyclableLogins(logins);
+  const activeAssigned = new Set();
+  for (const t of await AutoFarmTask.find({ status: "active" }, { assignedAccounts: 1 }).lean()) {
+    for (const u of t.assignedAccounts || []) activeAssigned.add(lc(u));
+  }
+  const enabledRows = await BotAccount.find({ login: { $in: logins }, enabled: true }, { login: 1 }).lean();
+  const enabledNow = new Set(enabledRows.map((r) => lc(r.login)));
+  const enabledAfter = new Set(enabledRows.filter((r) => !offIds.has(String(r._id))).map((r) => lc(r.login)));
+  for (const l of onLogins) enabledAfter.add(lc(l));
+
+  const fields = { usernameLower: 1, claimedNote: 1, unclaimedDropCount: 1 };
+  const releasedBy = (enabled) =>
+    AvailableAccount.find(
+      autoFarmer.recyclableClaimQuery(
+        autoFarmer.retroRecycleLogins(logins, { unrecyclable, activeAssigned, enabled }),
+      ),
+      fields,
+    ).lean();
+  const [releasedNow, releasedAfter] = await Promise.all([releasedBy(enabledNow), releasedBy(enabledAfter)]);
+  const ids = releasedAfter.map((r) => r._id);
+  // Would the released row then sit in the READY pool every claim path draws
+  // from? Asked with the engine's own query, the status swapped for the one the
+  // row has now (the release is what makes it "available").
+  const readyIds = ids.length
+    ? (await AvailableAccount.find({ ...autoFarmer.readyPoolQuery(), status: "claimed", _id: { $in: ids } }, { _id: 1 }).lean()).map((r) => r._id)
+    : [];
+  const holdings = ids.length
+    ? await NoclaimHolding.find(
+        { loginLower: { $in: releasedAfter.map((r) => r.usernameLower) } },
+        { loginLower: 1, sellableCount: 1, inConfig: 1 },
+      ).lean()
+    : [];
+  return summarizeRelease({ releasedNow, releasedAfter, readyIds, holdings });
+}
+
+// Pure. What the accounts released by the correction (released after, not
+// already released today) hold, and which of them are at risk: a row that
+// would land in the ready pool while its holding snapshot says it has SELLABLE
+// unclaimed stock. The ready pool feeds auto-farm, farm2, renters and
+// rent-farm buyers, and a claiming bot destroys no-claim-game stock within a
+// minute — utils/poolStock exists because that already happened once. A row
+// with unclaimedDropCount > 0 is NOT at risk: readyPoolQuery refuses it and the
+// pool check holds it as stock, which is the designed path for recycled stock.
+function summarizeRelease({ releasedNow, releasedAfter, readyIds, holdings }) {
+  const nowSet = new Set((releasedNow || []).map((r) => r.usernameLower));
+  const ready = new Set((readyIds || []).map(String));
+  const hold = new Map((holdings || []).map((h) => [String(h.loginLower), h]));
+  const released = (releasedAfter || [])
+    .filter((r) => !nowSet.has(r.usernameLower))
+    .map((r) => {
+      const h = hold.get(r.usernameLower);
+      const sellable = !!(h && h.inConfig !== false && Number(h.sellableCount) > 0);
+      const isReady = ready.has(String(r._id));
+      return {
+        login: r.usernameLower,
+        note: String(r.claimedNote || ""),
+        ready: isReady,
+        unclaimed: Number(r.unclaimedDropCount) > 0,
+        sellable,
+        atRisk: isReady && sellable,
+      };
+    });
+  return {
+    releasedNow: (releasedNow || []).length,
+    releasedAfter: (releasedAfter || []).length,
+    released,
+    atRisk: released.filter((r) => r.atRisk),
   };
 }
 
@@ -307,14 +404,43 @@ async function main() {
   if (total !== rows.length) throw new Error(`conservation check failed: ${total} classified vs ${rows.length} rows`);
   p(`conservation ok: ${total} == ${rows.length}`);
 
+  // The flags this run would write, as the recycler will see them afterwards.
+  const offIds = new Set();
+  const onLogins = new Set();
+  for (const it of writes("repoint") ? cat.repoint : []) {
+    if (it.from.enabled && !it.to.enabled) offIds.add(it._id);
+    if (!it.from.enabled && it.to.enabled) onLogins.add(it.login);
+  }
+  for (const it of [...(writes("retire") ? cat.retire : []), ...(writes("renter") ? cat.renterHeld : [])]) {
+    if (it.from.enabled) offIds.add(it._id);
+  }
+  console.log("\n== WHAT THE RECYCLER DOES NEXT (read-only prediction) ==");
+  p(`flags switched off by this run: ${offIds.size}, switched on: ${onLogins.size}`);
+  const pred = await recyclerPrediction({ offIds, onLogins });
+  p(`retro-reaper releases on its next pass, as things are: ${pred.releasedNow}`);
+  p(`retro-reaper releases on its next pass, after this run: ${pred.releasedAfter}  (${pred.released.length} newly)`);
+  p(`  of the newly released: ${pred.released.filter((r) => r.ready).length} land in the ready pool, ` +
+    `${pred.released.filter((r) => r.unclaimed).length} hold unclaimed drops (kept out; the pool check holds them as stock), ` +
+    `${pred.released.filter((r) => r.sellable).length} have a sellable holding snapshot`);
+  for (const [k, n] of tally(pred.released, (r) => r.note.replace(/:.*/, ":") || "(no note)")) p(`     ${String(n).padStart(4)}  pool note ${k}`);
+  p(`  AT RISK (ready pool + sellable stock): ${pred.atRisk.length}${pred.atRisk.length ? "  <-- --apply refuses without --allow-stock-release" : ""}`);
+  for (const r of pred.atRisk.slice(0, 20)) p(`       ${r.login}  (${r.note})`);
+
   if (JSON_OUT) {
-    fs.writeFileSync(JSON_OUT, JSON.stringify(cat, null, 2));
+    fs.writeFileSync(JSON_OUT, JSON.stringify({ ...cat, recycler: pred }, null, 2));
     p(`full classification written to ${JSON_OUT}`);
   }
 
   if (!APPLY) {
     console.log("\n   DRY RUN — no changes made (pass --apply)");
     return;
+  }
+
+  if (pred.atRisk.length && !ALLOW_STOCK_RELEASE) {
+    throw new Error(
+      `${pred.atRisk.length} account(s) holding sellable unclaimed stock would be released into the ready pool — ` +
+        "nothing written. Re-run with --allow-stock-release only after checking them.",
+    );
   }
 
   console.log("\n== APPLYING ==");
@@ -350,6 +476,10 @@ async function main() {
   p(`host="${LEDGER_HOST}" soldAt:null enabled with a container left: ${left}`);
 }
 
-main()
-  .then(() => mongoose.disconnect())
-  .catch((e) => { console.error("FAILED:", e.message); process.exitCode = 1; return mongoose.disconnect(); });
+if (require.main === module) {
+  main()
+    .then(() => mongoose.disconnect())
+    .catch((e) => { console.error("FAILED:", e.message); process.exitCode = 1; return mongoose.disconnect(); });
+}
+
+module.exports = { summarizeRelease };
