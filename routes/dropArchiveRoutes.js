@@ -38,6 +38,7 @@ const { logEvent, actorFromReq } = require("../utils/systemLog");
 // DropLog.soldToUsername. A drop carrying one is attached to a live
 // listing, not sold to anyone yet.
 const { MARKET_CLAIM_TAGS } = require("../utils/marketClaimTags");
+const { chooseHome } = require("../utils/botAccountMirror");
 
 const router = express.Router();
 
@@ -1156,6 +1157,38 @@ let lastDuplicates = null;
 // the deploy paste (botConfigRoutes) and the pool import mirror too, not just
 // this manual sync.
 
+// Which config entry a synced BotAccount row should name, for one token, given
+// every copy the walk found. Pure; the rules are utils/botAccountMirror's
+// chooseHome (scripts/reconcile-host-ledger.js uses the same one):
+//   * the ENABLED copy wins. The walk used to upsert file by file, so the last
+//     file read won — a token retired (disabled) in config_44 and live in
+//     config_42 was recorded as disabled in config_44, and the retro-reaper,
+//     which keeps an account claimed only while BotAccount says enabled, could
+//     then hand a running account back to the pool.
+//   * two enabled copies are a conflict: reported as a duplicate, not written.
+//   * a renter stack is never an operator home. Renting REQUIRES the operator
+//     placement to be empty (dedupeAccounts blocks on a non-empty configFile and
+//     the renter pool picker reads it as "deployed"), so the walk writing renter
+//     configs into BotAccount broke re-adding those accounts. An existing row
+//     is cleared instead, as scripts/reconcile-host-ledger.js does; none is
+//     created.
+//   * this walk does not read the no-claim fleet, so a DISABLED operator copy
+//     never overwrites a row that names a no-claim bot: fleetIntegrity switches
+//     off a no-claim account that lands in a regular config, and that disabled
+//     copy says nothing about the no-claim bot it really farms in.
+// Returns { write: entry }, { clear: true } or { skip: "conflict" | "noclaim" }.
+function syncPlacement(hits, existingContainer) {
+  const pick = chooseHome(hits);
+  if (pick.conflict) return { skip: "conflict" };
+  const home = pick.home;
+  if (!home) return { skip: "conflict" };
+  if (home.renter) return { clear: true };
+  if (!home.enabled && /^noclaim-bot-/i.test(String(existingContainer || ""))) {
+    return { skip: "noclaim" };
+  }
+  return { write: home };
+}
+
 async function runSync() {
   let found = 0;
   let inserted = 0;
@@ -1164,6 +1197,17 @@ async function runSync() {
   const offlineHosts = [];
   // clientSecret -> every (host, file) it was seen in during this walk.
   const occurrences = new Map();
+  // clientSecret -> every config entry it was seen in, with what a placement
+  // write needs. Written once per token after the walk (syncPlacement).
+  const copies = new Map();
+  const skipped = { conflict: 0, noclaim: 0 };
+  let renterCleared = 0;
+  const RenterBotStack = require("../models/RenterBotStack");
+  const renterFiles = new Set(
+    (await RenterBotStack.find({}, { host: 1, file: 1 }).lean()).map(
+      (s) => s.host + "/" + s.file,
+    ),
+  );
 
   // Sync across every managed host (the local server plus any remote hosts),
   // so accounts running on a Raspberry Pi etc. are tracked too. A host that's
@@ -1202,8 +1246,7 @@ async function runSync() {
       filesRead++;
       const users =
         (data.TwitchSettings && data.TwitchSettings.TwitchUsers) || [];
-      // One bulk upsert per config file instead of a round trip per account.
-      const ops = [];
+      const renter = renterFiles.has(host.id + "/" + file);
       for (const u of users) {
         const token =
           typeof u.ClientSecret === "string" ? u.ClientSecret.trim() : "";
@@ -1216,30 +1259,73 @@ async function runSync() {
           login: u.Login || "",
           enabled: u.Enabled !== false,
         });
-        ops.push({
-          updateOne: {
-            filter: { clientSecret: token },
-            update: {
-              $set: {
-                login: u.Login || "",
-                twitchId: u.Id == null ? "" : String(u.Id),
-                uniqueId: u.UniqueId || "",
-                configFile: file,
-                container: containerForFile(file),
-                host: host.id,
-                enabled: u.Enabled !== false,
-              },
-            },
-            upsert: true,
-          },
+        if (!copies.has(token)) copies.set(token, []);
+        copies.get(token).push({
+          host: host.id,
+          file,
+          renter,
+          enabled: u.Enabled !== false,
+          login: u.Login || "",
+          twitchId: u.Id == null ? "" : String(u.Id),
+          uniqueId: u.UniqueId || "",
         });
       }
-      if (ops.length) {
-        const r = await BotAccount.bulkWrite(ops, { ordered: false });
-        inserted += r.upsertedCount || 0;
-        updated += r.modifiedCount || 0;
-      }
     }
+  }
+
+  // One placement per token, chosen from every copy the walk saw.
+  const tokens = [...copies.keys()];
+  const existing = new Map();
+  for (let i = 0; i < tokens.length; i += 1000) {
+    const rows = await BotAccount.find(
+      { clientSecret: { $in: tokens.slice(i, i + 1000) } },
+      { clientSecret: 1, container: 1 },
+    ).lean();
+    for (const r of rows) existing.set(r.clientSecret, r.container || "");
+  }
+  const ops = [];
+  for (const [token, hits] of copies) {
+    const placement = syncPlacement(hits, existing.get(token));
+    if (placement.clear) {
+      if (!existing.has(token)) continue;
+      renterCleared++;
+      ops.push({
+        updateOne: {
+          filter: { clientSecret: token },
+          update: { $set: { configFile: "", container: "", enabled: false } },
+        },
+      });
+      continue;
+    }
+    if (placement.skip) {
+      skipped[placement.skip]++;
+      continue;
+    }
+    const home = placement.write;
+    ops.push({
+      updateOne: {
+        filter: { clientSecret: token },
+        update: {
+          $set: {
+            login: home.login,
+            twitchId: home.twitchId,
+            uniqueId: home.uniqueId,
+            configFile: home.file,
+            container: containerForFile(home.file),
+            host: home.host,
+            enabled: home.enabled,
+          },
+        },
+        upsert: true,
+      },
+    });
+  }
+  for (let i = 0; i < ops.length; i += 1000) {
+    const r = await BotAccount.bulkWrite(ops.slice(i, i + 1000), {
+      ordered: false,
+    });
+    inserted += r.upsertedCount || 0;
+    updated += r.modifiedCount || 0;
   }
 
   // Any account recorded against a host we successfully read this pass, but
@@ -1291,6 +1377,10 @@ async function runSync() {
     poolClaimed,
     offlineHosts,
     duplicateAccounts: lastDuplicates.length,
+    // Tokens whose row was left as it is, and rows of accounts a renter stack
+    // holds whose operator placement was cleared (see syncPlacement).
+    leftAlone: skipped,
+    renterCleared,
   };
 }
 
@@ -2981,3 +3071,5 @@ router.bustTargets = bustTargets;
 // and edits no-claim sets) whose change must show on the Listings page at once.
 router.bustSetsCache = () => bustDropCache(["sets:"]);
 module.exports = router;
+module.exports.syncPlacement = syncPlacement;
+module.exports.runSync = runSync;
