@@ -1,8 +1,8 @@
 # BotAccount.enabled drift — fix and backlog correction
 
 Branch `fix/botaccount-enabled-drift`, cut from `origin/fix/drop-expiry` (`cfeebc6`).
-Written 2026-10-21. **Not deployed, and the backlog is not corrected.** Both
-steps wait for the owner's OK.
+Written 2026-10-21. **DEPLOYED 2026-10-21 01:51Z and the backlog was corrected
+on all three hosts, both with the owner's OK.** See "Deploy record" at the end.
 
 ## What was wrong
 
@@ -128,3 +128,44 @@ which only affects page counts: the recycler never takes a sold account.
   read last, and it writes renter-stack placements.
 - Lower the reaper's guards to "fix" the counts. The `enabled` guard is what
   stops a running account from being recycled.
+
+## Deploy record (2026-10-21)
+
+- **01:51Z**: 5 files copied (prod blobs matched the "before" column exactly).
+  - Backup: `_deploy_backup_20261021015059_botaccount-drift/` on prod.
+  - Load test passed, then `pm2 restart redeemer`: online, 0 unstable
+    restarts, MongoDB connected.
+  - Logged-out probes: APIs and `/bots.html` return 401, `/account-pool.html`
+    returns 200.
+- **01:52Z**: `reconcile-host-ledger.js --host contabo --apply`.
+  - 706 rows written; read-back found 0 mismatches.
+- **01:53Z**: the next auto-farm tick logged "Retro-recycled 90 account(s) to
+  the pool", exactly as the dry run predicted.
+  - Ready pool went from 1,450 to 1,539 (+89; the 1 with unclaimed drops was
+    kept out).
+  - 90 `retro-reaper` PoolUsageEvents were recorded.
+  - Engine lastError was empty.
+- **~02:00Z**: `--host local` (332 rows) and `--host pi` (36 rows) applied, with
+  0 releases predicted.
+  - The local run threw "read-back mismatch" on 181 rows. That was a false
+    alarm: every one was written as intended, and the old check used
+    `soldAt !== null` while those rows have no soldAt field. Fixed in `237a03b`
+    (`readBackMismatch`, script blob `02502fa4`, deployed, no restart needed).
+- **After**: dry runs for contabo, local and pi all show 0 wrong pointers,
+  0 wrong flags and 0 ghosts, with 0 accounts left for the recycler.
+- **Side effect, expected and correct**: 202 rows now name the no-claim bot their
+  account really farms in.
+  - The auto-farm's "sellable" check (`autofarmStock.factsFor`, "in a no-claim
+    bot") now skips them. Before, a stale auto-farm pointer could let both
+    farms sell the same account.
+  - 17 of those logins sit on 6 active auto-farm tasks, so those tasks may be
+    topped up by at most 17 accounts in total.
+- **Left on purpose**: rows with `soldAt` set keep their stale `enabled` flag
+  (the script never touches delivery history). Nothing that decides anything
+  reads that flag on a sold row: the recycler, the twitch-follow tool and the
+  sellable check all skip sold accounts. Per-container counts that include
+  sold rows still over-count (x44: 201 rows "on" vs 95 in the config).
+- **Undo**: the full from/to of every row is in
+  `reconcile-{contabo,local,pi}-applied.json` (mode 600) inside the backup dir.
+  Code rollback = copy the originals back from the backup dir, delete
+  `utils/botAccountMirror.js`, then `pm2 restart redeemer`.
