@@ -58,6 +58,24 @@ test("a six-code unit goes out as several messages of at most 300 characters, ev
   assert.equal(messages[messages.length - 1], HELP, "the redeem help comes last, on its own");
 });
 
+test("the shop's default template with the event and redeem-by note still fits 300 per message", () => {
+  const { defaultTexts } = require("../utils/codeShop/texts");
+  const { guideFor } = require("../utils/codeShop/games");
+  const guide = guideFor("12", {});
+  const t = defaultTexts({
+    slots: SIX.map((label, i) => ({ slotKey: "k" + i, label })),
+    guide,
+    useBy: "2027-02-28T14:59:00Z",
+    now: Date.parse("2026-10-21T00:00:00Z"),
+    eventStarts: [new Date("2026-10-11T08:00:00Z")],
+  });
+  const units = [unit(1, SIX), unit(2, SIX)];
+  const messages = suppliedMessages(stock, units, { ...offer(t.deliveryTemplate), title: t.title });
+  assertDelivers(messages, units);
+  assert.match(messages[0], /^Bundle 1 of 2\nThank you for your order! Your Overwatch 2 code bundle \(event 11 October 2026, redeem by 27 February 2027\):\n1\) /);
+  assert.equal(messages[messages.length - 1], guide.deliveryHelp);
+});
+
 test("two units in one order are numbered, and the help is sent once, after the last", () => {
   const units = [unit(1, SIX), unit(2, SIX)];
   const messages = suppliedMessages(stock, units, offer(SHOP_TEMPLATE));

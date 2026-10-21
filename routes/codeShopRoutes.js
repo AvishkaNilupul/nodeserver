@@ -29,6 +29,7 @@ const { requireSuperadmin } = require("../middleware/auth");
 const { slotSetHash } = require("../utils/codeShop/slots");
 const { defaultLabel, defaultTexts } = require("../utils/codeShop/texts");
 const { checkBuyerText } = require("../utils/codeShop/textGuard");
+const { eventStarts } = require("../utils/codeShop/eventDates");
 const { DEFAULTS, deepMerge } = require("../utils/codeShop/config");
 const { priceOf } = require("../utils/codeShop/publish");
 const games = require("../utils/codeShop/games");
@@ -457,6 +458,11 @@ function createCodeShopRoutes({ service, createHeld } = {}) {
 
   const productView = async (id) => (await mod("views").product(id)).product;
 
+  // The start dates of the events a product's codes come from (buyer texts
+  // name an event by its date only).
+  const eventStartsOf = (groupKeys) =>
+    eventStarts({ SoopCampaign: model("SoopCampaign"), CodeStock: model("CodeStock") }, groupKeys);
+
   const sourceWordsOf = (cfg) => (Array.isArray(cfg.sourceWords) ? cfg.sourceWords : DEFAULTS.sourceWords);
   const enabledMarkets = (cfg) => MARKETS.filter((m) => cfg.markets && cfg.markets[m] === true);
 
@@ -527,6 +533,7 @@ function createCodeShopRoutes({ service, createHeld } = {}) {
     const guide = guideFor(gameNo, cfg);
     const keys = slots.map((s) => s.slotKey);
     const useBy = await freeUseBy(keys, cfg);
+    const starts = await eventStartsOf(groupKeys);
     const n = slots.length;
     const titles = [...new Set(slots.map((s) => s.campaignTitle).filter(Boolean))];
     const display = gameName || guide.displayName;
@@ -545,7 +552,7 @@ function createCodeShopRoutes({ service, createHeld } = {}) {
       kind: "custom",
       edited: true,
       stale: false,
-      texts: defaultTexts({ slots, guide, useBy, now: now() }),
+      texts: defaultTexts({ slots, guide, useBy, now: now(), eventStarts: starts }),
       pricing: { mode: "fixed", priceUsd: 1, floorUsd: 0.5, clearance: false, followCompetitors: false },
       // PlayerAuctions only for a game allowed there (Overwatch, not Delta Force).
       markets: require("../utils/codeShop/config").marketsForGame(markets, gameNo, cfg),
@@ -937,7 +944,8 @@ function createCodeShopRoutes({ service, createHeld } = {}) {
     const cfg = await getConfig();
     const slots = Array.isArray(p.slots) ? p.slots : [];
     const useBy = await freeUseBy(slots.map((s) => str(s && s.slotKey)), cfg);
-    const texts = defaultTexts({ slots, guide: guideFor(p.gameNo, cfg), useBy, now: now() });
+    const starts = await eventStartsOf(Array.isArray(p.groupKeys) ? p.groupKeys : []);
+    const texts = defaultTexts({ slots, guide: guideFor(p.gameNo, cfg), useBy, now: now(), eventStarts: starts });
     const r = await model("CodeProduct").updateOne({ _id: p._id, status: "draft", offer: null }, { $set: { texts } });
     if (!r.matchedCount) throw new HttpError(409, "The draft changed (it may have been approved); reload and try again");
     await note({ kind: "edit", product: p._id, msg: `${actor || "an admin"} reset the texts of "${str(p.name)}"`, data: { actor } });

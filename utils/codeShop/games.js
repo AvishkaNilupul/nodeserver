@@ -5,7 +5,8 @@
 //
 // Every line is plain ASCII and says only what the buyer gets and how to
 // redeem it — never where the codes come from (no platform, country, region
-// or event name). The text guard refuses anything else at publish time.
+// or event title). The text guard refuses anything else at publish time.
+// texts.js adds the event's start date and the once-per-account rule itself.
 //
 // Lines are printed exactly as written (numbering and "- " bullets included).
 // Good-to-know lines are dropped from the END when a description runs over
@@ -26,7 +27,6 @@ const GUIDES = {
       "- One code = one reward, for one Battle.net account. A code can be used only once.",
       "- Any problem? Message us in the order chat before leaving feedback and we will sort it out quickly.",
       "- Please redeem soon after purchase.",
-      "- Want the bundle on several accounts? Buy one bundle per account.",
     ],
     deliveryHelp:
       "Redeem each code at https://battle.net/redeem (sign in, enter the code with the dashes, confirm). Each code works once, on one Battle.net account. Any problem? Reply here and we will help.",

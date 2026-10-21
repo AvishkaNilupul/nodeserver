@@ -4,16 +4,28 @@
 // product from its slots and its game's guide (games.js). No database, no
 // network, no logging. The owner may edit any of it before approving; the
 // text guard checks the result at publish time.
+//
+// Every text names the event the codes come from by its START DATE only
+// (eventDates.js) and says how long the codes stay valid: a reward of one
+// event redeems once per account, so a buyer must be able to tell which of
+// our bundles share an event. Nothing says where the codes come from.
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 const TITLE_MAX = 160;
 const DESCRIPTION_MAX = 2000;
-// A use-by date further away than this is not worth a line in the listing.
+// A use-by date at most this far away reads as a warning ("REDEEM BY ...");
+// a later one as a promise ("VALID UNTIL ...").
 const REDEEM_BY_WINDOW_MS = 60 * DAY_MS;
 const MONTHS = [
   "January", "February", "March", "April", "May", "June",
   "July", "August", "September", "October", "November", "December",
 ];
+const MONTHS_SHORT = MONTHS.map((m) => m.slice(0, 3));
+// More event dates than this print as a range ("8 to 20 October 2026").
+const EVENT_LIST_MAX = 3;
+// A reward a buyer may think stacks (a box, a pack): named in the
+// once-per-account line so nobody buys two expecting two.
+const STACKABLE_RE = /\b(?:loot\s*box(?:es)?|box(?:es)?|crates?|chests?|capsules?|packs?|packages?)\b/i;
 
 // The default source words (01-DATA.md, config DEFAULTS.sourceWords). Used
 // only when ./config cannot be loaded at call time.
@@ -45,6 +57,51 @@ function redeemByText(useBy) {
   if (ms == null) return "";
   const d = new Date(ms - DAY_MS);
   return `${d.getUTCDate()} ${MONTHS[d.getUTCMonth()]} ${d.getUTCFullYear()}`;
+}
+
+// Event dates as buyer text. One UTC calendar day per event, oldest first;
+// the month is printed after the last day of each month, the year after the
+// last day of each year:
+//   long:  "11 October 2026", "8, 9 and 10 October 2026", "30 September and 2 October 2026"
+//   short: "11 Oct 2026",     "8, 9, 10 Oct 2026",        "30 Sep, 2 Oct 2026"
+// More than EVENT_LIST_MAX days: the first and last ("8 to 20 October 2026" /
+// "8-20 Oct 2026"). Nothing known -> "".
+// Unique UTC calendar days of `dates`, oldest first: [{ y, m, d }].
+function eventDays(dates) {
+  const seen = new Set();
+  const days = [];
+  for (const v of Array.isArray(dates) ? dates : dates == null ? [] : [dates]) {
+    const ms = toMs(v);
+    if (ms == null) continue;
+    const t = new Date(ms);
+    const day = { y: t.getUTCFullYear(), m: t.getUTCMonth(), d: t.getUTCDate() };
+    const key = `${day.y}-${day.m}-${day.d}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    days.push(day);
+  }
+  return days.sort((a, b) => a.y - b.y || a.m - b.m || a.d - b.d);
+}
+
+function eventDatesText(dates, { short = false } = {}) {
+  const days = eventDays(dates);
+  if (!days.length) return "";
+  const names = short ? MONTHS_SHORT : MONTHS;
+  const render = (list) =>
+    list.map((x, i) => {
+      const next = list[i + 1];
+      let out = String(x.d);
+      if (!next || next.m !== x.m || next.y !== x.y) out += " " + names[x.m];
+      if (!next || next.y !== x.y) out += " " + x.y;
+      return out;
+    });
+  if (days.length > EVENT_LIST_MAX) {
+    const [a, b] = render([days[0], days[days.length - 1]]);
+    return short ? `${a}-${b}` : `${a} to ${b}`;
+  }
+  const parts = render(days);
+  if (parts.length === 1 || short) return parts.join(", ");
+  return parts.slice(0, -1).join(", ") + " and " + parts[parts.length - 1];
 }
 
 function defaultSourceWords() {
@@ -94,12 +151,14 @@ function defaultLabel(row, { sourceWords } = {}) {
   return re && re.test(name) ? "" : name;
 }
 
-function buildTitle(display, labels) {
+// The event part sits right after the game and the count: a market with a
+// shorter title (fitTitle) drops parts from the END, so it keeps this one.
+function buildTitle(display, labels, eventPart = "") {
   const n = labels.length;
   const parts = (seg) =>
     (n === 1
-      ? [display, seg, "Redeem Code", "Instant Auto Delivery"]
-      : [display, `${n} Codes Bundle`, seg, "Redeem Codes", "Instant Auto Delivery"]
+      ? [display, eventPart, seg, "Redeem Code", "Instant Auto Delivery"]
+      : [display, `${n} Codes Bundle`, eventPart, seg, "Redeem Codes", "Instant Auto Delivery"]
     ).filter(Boolean).join(" | ");
   // Too long: drop labels from the end and say there is more.
   for (let k = n; k >= 1; k--) {
@@ -112,16 +171,45 @@ function buildTitle(display, labels) {
   return bare.length <= TITLE_MAX ? bare : bare.slice(0, TITLE_MAX).trimEnd();
 }
 
-function buildDescription({ display, labels, guide, redeemBy }) {
+// The once-per-account line names a box or pack reward when there is one.
+function stackableNote(labels) {
+  const hits = labels.filter((l) => STACKABLE_RE.test(l));
+  if (!hits.length) return "";
+  return hits.length === 1 ? ` - that includes the ${hits[0]}` : " - that includes boxes and packs";
+}
+
+function buildDescription({ display, labels, guide, redeemBy, validUntil, eventLong, eventCount }) {
   const n = labels.length;
   const one = n === 1;
   const head = [`${display} - Code Bundle (${n} redeem ${one ? "code" : "codes"})`, ""];
-  if (redeemBy) {
-    head.push(`REDEEM BY ${redeemBy} - the ${one ? "code stops" : "codes stop"} working after that date.`, "");
+  const facts = [];
+  if (eventLong) {
+    facts.push(
+      eventCount > 1
+        ? `EVENTS: ${eventLong} - each code is from one of these events.`
+        : `EVENT: ${eventLong} - ${one ? "the code is" : "every code in this bundle is"} from this event.`,
+    );
   }
+  const stops = `the ${one ? "code stops" : "codes stop"} working after that date.`;
+  if (redeemBy) facts.push(`REDEEM BY ${redeemBy} - ${stops}`);
+  else if (validUntil) facts.push(`VALID UNTIL ${validUntil} - ${stops}`);
+  if (facts.length) head.push(...facts, "");
   head.push(one ? "YOU RECEIVE 1 UNUSED REDEEM CODE:" : `YOU RECEIVE ${n} UNUSED REDEEM CODES - ONE OF EACH:`);
   for (const label of labels) head.push(`- ${label}`);
+  const already = !eventLong
+    ? "- Already have one of these rewards? A reward the account already has will not be added again."
+    : eventCount > 1
+      ? "- Already have a bundle from any of these events? Compare the reward lists: a reward the account already has will not be added again."
+      : `- Already have a bundle from the event of ${eventLong}? Compare the reward lists: a reward the account already has will not be added again.`;
   head.push(
+    "",
+    "ONE OF EACH REWARD PER ACCOUNT",
+    `- A reward from one event can be redeemed only once per ${guide.accountWord} account${stackableNote(labels)}. ` +
+      "Two codes for the same reward will not both work on one account.",
+    already,
+    one
+      ? "- Want this reward on more than one account? Buy one code per account."
+      : "- Want these rewards on more than one account? Buy one bundle per account.",
     "",
     one ? "- 1 unit = 1 redeem code" : `- This is a bundle: 1 unit = all ${n} codes`,
     "- Instant automatic delivery in the order chat, 24/7",
@@ -142,22 +230,35 @@ function buildDescription({ display, labels, guide, redeemBy }) {
 }
 
 // The default texts of a product. `now` (ms or Date, default the clock)
-// decides whether the use-by date is close enough to print.
-function defaultTexts({ slots, guide, useBy, now } = {}) {
+// decides whether the use-by date reads as a warning or a promise.
+// `eventStarts`: the start dates of the event(s) its codes come from
+// (eventDates.eventStarts); none -> no event is named.
+function defaultTexts({ slots, guide, useBy, now, eventStarts } = {}) {
   const g = guide || require("./games").GUIDES.default;
   const labels = (Array.isArray(slots) ? slots : []).map((s) => String((s && s.label) || "").trim());
   const n = labels.length;
   const display = String(g.displayName || "").trim();
   const nowMs = toMs(now) ?? Date.now();
   const useByMs = toMs(useBy);
-  const redeemBy = useByMs != null && useByMs - nowMs <= REDEEM_BY_WINDOW_MS ? redeemByText(useByMs) : "";
+  const useByText = useByMs != null ? redeemByText(useByMs) : "";
+  const near = useByMs != null && useByMs - nowMs <= REDEEM_BY_WINDOW_MS;
+  const redeemBy = near ? useByText : "";
+  const validUntil = near ? "" : useByText;
+  const eventCount = eventDays(eventStarts).length;
+  const eventLong = eventDatesText(eventStarts);
+  const eventShort = eventDatesText(eventStarts, { short: true });
+  const eventPart = eventShort ? `${eventCount > 1 ? "Events" : "Event"} ${eventShort}` : "";
+  const notes = [
+    eventLong ? `${eventCount > 1 ? "events" : "event"} ${eventLong}` : "",
+    useByText ? `redeem by ${useByText}` : "",
+  ].filter(Boolean);
 
   return {
-    title: buildTitle(display, labels),
-    description: buildDescription({ display, labels, guide: g, redeemBy }),
+    title: buildTitle(display, labels, eventPart),
+    description: buildDescription({ display, labels, guide: g, redeemBy, validUntil, eventLong, eventCount }),
     deliveryTemplate:
       `Thank you for your order! Your ${display} code bundle` +
-      (redeemBy ? ` (redeem by ${redeemBy})` : "") +
+      (notes.length ? ` (${notes.join(", ")})` : "") +
       `:\n{password}\n\n${g.deliveryHelp}`,
     coverTitle: `${display} Code Bundle`,
     coverServiceText: `${n} Redeem Code${n > 1 ? "s" : ""}`,
@@ -203,6 +304,7 @@ function marketInstruction(guide, max) {
 
 module.exports = {
   defaultTexts,
+  eventDatesText,
   fitTitle,
   marketInstruction,
   redeemByText,

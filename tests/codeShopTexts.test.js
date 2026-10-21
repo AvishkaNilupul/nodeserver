@@ -1,12 +1,13 @@
 // utils/codeShop/texts.js + games.js: default buyer texts of a code product.
 // Titles fit 160 chars (labels dropped from the end, " + more"), descriptions
-// fit 2000 (good-to-know lines dropped first), the redeem-by date shows only
-// when it is near, and nothing generated is non-ASCII or names a code source.
+// fit 2000 (good-to-know lines dropped first), the use-by date reads REDEEM BY
+// when near and VALID UNTIL when far, the event is named by its start date
+// only, and nothing generated is non-ASCII or names a code source.
 const test = require("node:test");
 const assert = require("node:assert/strict");
 const Module = require("node:module");
 
-const { defaultTexts, redeemByText, defaultLabel } = require("../utils/codeShop/texts");
+const { defaultTexts, redeemByText, defaultLabel, eventDatesText, fitTitle } = require("../utils/codeShop/texts");
 const { GUIDES, guideFor } = require("../utils/codeShop/games");
 
 const DAY = 24 * 60 * 60 * 1000;
@@ -153,24 +154,133 @@ test("redeemByText: the UTC date of useBy minus 24 hours", () => {
   assert.equal(redeemByText("not a date"), "");
 });
 
-test("REDEEM BY line only when useBy is within 60 days", () => {
+test("use-by: REDEEM BY within 60 days, VALID UNTIL beyond; the delivery note names it either way", () => {
   const two = slots("Prost Spray", "Skal Spray");
   const near = defaultTexts({ slots: two, guide: ow(), useBy: "2026-10-22T14:59:00Z", now: NOW });
   assert.ok(near.description.split("\n").includes(
     "REDEEM BY 21 October 2026 - the codes stop working after that date.",
   ));
+  assert.ok(!near.description.includes("VALID UNTIL"));
   const edge = defaultTexts({ slots: two, guide: ow(), useBy: NOW + 60 * DAY, now: NOW });
   assert.ok(edge.description.includes("REDEEM BY "), "exactly 60 days is within");
 
-  const far = defaultTexts({ slots: two, guide: ow(), useBy: NOW + 61 * DAY, now: NOW });
+  const far = defaultTexts({ slots: two, guide: ow(), useBy: "2027-02-28T14:59:00Z", now: NOW });
   assert.ok(!far.description.includes("REDEEM BY"));
-  assert.ok(!far.deliveryTemplate.includes("redeem by"));
+  assert.ok(far.description.split("\n").includes(
+    "VALID UNTIL 27 February 2027 - the codes stop working after that date.",
+  ));
+  assert.ok(far.deliveryTemplate.includes("(redeem by 27 February 2027)"));
+
+  const one = defaultTexts({ slots: slots("Prost Spray"), guide: ow(), useBy: "2027-02-28T14:59:00Z", now: NOW });
+  assert.ok(one.description.includes("VALID UNTIL 27 February 2027 - the code stops working after that date."));
+
   const none = defaultTexts({ slots: two, guide: ow(), useBy: null, now: NOW });
-  assert.ok(!none.description.includes("REDEEM BY"));
+  assert.ok(!none.description.includes("REDEEM BY") && !none.description.includes("VALID UNTIL"));
   assert.ok(!none.deliveryTemplate.includes("redeem by"));
 });
 
+// --- the event -------------------------------------------------------------
+
+const W1 = new Date("2026-10-02T08:00:00Z");
+const W2 = new Date("2026-10-11T08:00:00Z");
+
+test("eventDatesText: one date, a short list, months and years, a long range", () => {
+  assert.equal(eventDatesText([W2]), "11 October 2026");
+  assert.equal(eventDatesText([W2], { short: true }), "11 Oct 2026");
+  assert.equal(eventDatesText(W2), "11 October 2026", "a single date is fine too");
+  const days = ["2026-10-10T09:00:00Z", "2026-10-08T06:00:00Z", "2026-10-09T06:00:00Z"];
+  assert.equal(eventDatesText(days), "8, 9 and 10 October 2026", "oldest first");
+  assert.equal(eventDatesText(days, { short: true }), "8, 9, 10 Oct 2026");
+  assert.equal(eventDatesText(["2026-09-30T10:00:00Z", "2026-10-02T10:00:00Z"]), "30 September and 2 October 2026");
+  assert.equal(eventDatesText(["2026-12-30T10:00:00Z", "2027-01-02T10:00:00Z"], { short: true }), "30 Dec 2026, 2 Jan 2027");
+  const five = [1, 3, 5, 8, 20].map((d) => `2026-10-${String(d).padStart(2, "0")}T10:00:00Z`);
+  assert.equal(eventDatesText(five), "1 to 20 October 2026");
+  assert.equal(eventDatesText(five, { short: true }), "1-20 Oct 2026");
+  assert.equal(eventDatesText(["2026-10-11T01:00:00Z", "2026-10-11T23:00:00Z"]), "11 October 2026", "one day, one event date");
+  for (const nothing of [[], null, undefined, ["not a date"], [null]]) assert.equal(eventDatesText(nothing), "");
+});
+
+test("title: the event sits after the count, and a 150-char market keeps it", () => {
+  const six = slots("Prost Spray", "Purrfect Afternoon Spray", "Skal Spray", "Banana Cat Spray", "Banana Cat Icon", "Esports Loot Box");
+  const t = defaultTexts({ slots: six, guide: ow(), now: NOW, eventStarts: [W2] });
+  assert.ok(t.title.startsWith("Overwatch 2 | 6 Codes Bundle | Event 11 Oct 2026 | Prost Spray + "), t.title);
+  assert.ok(t.title.length <= 160);
+  assert.ok(fitTitle(t.title, 150).includes("| Event 11 Oct 2026 |"));
+  assert.ok(fitTitle(t.title, 60).includes("Event 11 Oct 2026"), "kept while parts are dropped from the end");
+
+  const single = defaultTexts({ slots: slots("Logistics Voucher x1"), guide: df(), now: NOW, eventStarts: [W2] });
+  assert.equal(single.title, "Delta Force | Event 11 Oct 2026 | Logistics Voucher x1 | Redeem Code | Instant Auto Delivery");
+
+  const many = defaultTexts({ slots: slots("A Ticket", "B Ticket"), guide: df(), now: NOW, eventStarts: ["2026-10-08T06:00Z", "2026-10-09T06:00Z"] });
+  assert.ok(many.title.startsWith("Delta Force | 2 Codes Bundle | Events 8, 9 Oct 2026 | "), many.title);
+
+  const plain = defaultTexts({ slots: six, guide: ow(), now: NOW });
+  assert.ok(!plain.title.includes("Event"), "no event known: no event part");
+});
+
+test("description: the EVENT line, then the once-per-account block that never gets cut", () => {
+  const labels = ["Prost Spray", "Banana Cat Icon", "Esports Loot Box"];
+  const t = defaultTexts({ slots: slots(...labels), guide: ow(), useBy: "2027-02-28T14:59:00Z", now: NOW, eventStarts: [W2] });
+  const lines = t.description.split("\n");
+  assert.deepEqual(lines.slice(0, 5), [
+    "Overwatch 2 - Code Bundle (3 redeem codes)",
+    "",
+    "EVENT: 11 October 2026 - every code in this bundle is from this event.",
+    "VALID UNTIL 27 February 2027 - the codes stop working after that date.",
+    "",
+  ]);
+  const at = lines.indexOf("ONE OF EACH REWARD PER ACCOUNT");
+  assert.ok(at > lines.indexOf("- Esports Loot Box"), "after the reward list");
+  assert.deepEqual(lines.slice(at + 1, at + 4), [
+    "- A reward from one event can be redeemed only once per Battle.net account - that includes the Esports Loot Box. " +
+      "Two codes for the same reward will not both work on one account.",
+    "- Already have a bundle from the event of 11 October 2026? Compare the reward lists: a reward the account already has will not be added again.",
+    "- Want these rewards on more than one account? Buy one bundle per account.",
+  ]);
+  assert.ok(at < lines.indexOf("HOW TO REDEEM"));
+
+  // Squeezed to the limit: good-to-know lines go, this block stays.
+  const tight = defaultTexts({
+    slots: slots(...labels),
+    guide: { ...ow(), goodToKnow: ["- " + "z".repeat(1500), "- " + "w".repeat(400)] },
+    now: NOW,
+    eventStarts: [W2],
+  });
+  assert.ok(tight.description.length <= 2000);
+  assert.ok(tight.description.includes("ONE OF EACH REWARD PER ACCOUNT"));
+  assert.ok(tight.description.includes("Buy one bundle per account."));
+});
+
+test("description: several events, one code, no event, and the box/pack note", () => {
+  const multi = defaultTexts({ slots: slots("A Ticket", "B Ticket"), guide: df(), now: NOW, eventStarts: ["2026-10-08T06:00Z", "2026-10-09T06:00Z", "2026-10-10T09:00Z"] });
+  assert.ok(multi.description.includes("\nEVENTS: 8, 9 and 10 October 2026 - each code is from one of these events.\n"));
+  assert.ok(multi.description.includes("- Already have a bundle from any of these events? "));
+  assert.ok(multi.description.includes("once per Delta Force account. Two codes"), "no box or pack: no note");
+
+  const one = defaultTexts({ slots: slots("Fireworks Lucky Pack x1"), guide: df(), now: NOW, eventStarts: [W1] });
+  assert.ok(one.description.includes("\nEVENT: 2 October 2026 - the code is from this event.\n"));
+  assert.ok(one.description.includes("once per Delta Force account - that includes the Fireworks Lucky Pack x1. "));
+  assert.ok(one.description.includes("- Want this reward on more than one account? Buy one code per account."));
+
+  const boxes = defaultTexts({ slots: slots("Esports Loot Box", "Gold Crate"), guide: ow(), now: NOW });
+  assert.ok(boxes.description.includes("once per Battle.net account - that includes boxes and packs. "));
+  assert.ok(!boxes.description.includes("EVENT"), "no event known: no EVENT line");
+  assert.ok(boxes.description.includes("- Already have one of these rewards? A reward the account already has will not be added again."));
+  const boxer = defaultTexts({ slots: slots("Boxer Spray"), guide: ow(), now: NOW }).description;
+  assert.ok(boxer.includes("once per Battle.net account. Two codes"), "a word that only contains 'box' is not a box");
+});
+
 // --- delivery + cover ------------------------------------------------------
+
+test("delivery template: the event and the redeem-by date in one note", () => {
+  const t = defaultTexts({ slots: slots("Prost Spray", "Skal Spray"), guide: ow(), useBy: "2027-02-28T14:59:00Z", now: NOW, eventStarts: [W2] });
+  assert.equal(
+    t.deliveryTemplate,
+    "Thank you for your order! Your Overwatch 2 code bundle (event 11 October 2026, redeem by 27 February 2027):\n{password}\n\n" + ow().deliveryHelp,
+  );
+  const noDate = defaultTexts({ slots: slots("Prost Spray"), guide: ow(), now: NOW, eventStarts: [W1, W2] });
+  assert.ok(noDate.deliveryTemplate.startsWith("Thank you for your order! Your Overwatch 2 code bundle (events 2 and 11 October 2026):\n{password}"));
+});
 
 test("delivery template: {password}, the redeem-by note and the guide's help", () => {
   const g = df();
@@ -220,7 +330,12 @@ test("every generated text is ASCII and free of source words (all guides)", () =
     const g = key === "default" ? GUIDES.default : guideFor(key, {});
     for (const s of sets) {
       for (const useBy of [null, NOW + 2 * DAY, NOW + 90 * DAY]) {
-        assertTextsClean(defaultTexts({ slots: s, guide: g, useBy, now: NOW }), `${key}/${s.length}/${useBy}`);
+        for (const eventStarts of [[], [W2], [W1, W2, "2026-10-20T00:00Z", "2026-11-03T00:00Z"]]) {
+          const t = defaultTexts({ slots: s, guide: g, useBy, now: NOW, eventStarts });
+          const where = `${key}/${s.length}/${useBy}/${eventStarts.length}`;
+          assertTextsClean(t, where);
+          assert.ok(t.title.length <= 160 && t.description.length <= 2000, where + " fits");
+        }
       }
     }
   }

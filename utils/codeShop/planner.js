@@ -22,6 +22,7 @@
 const { freeCounts, bestDraftSets } = require("./allocate");
 const { slotSetHash } = require("./slots");
 const { defaultLabel, defaultTexts } = require("./texts");
+const { eventStarts } = require("./eventDates");
 const { guideFor } = require("./games");
 const { DEFAULTS, marketsForGame } = require("./config");
 
@@ -149,6 +150,7 @@ function createPlanner(deps = {}) {
   const models = deps.models || {};
   const CodeStock = () => models.CodeStock || require("../../models/CodeStock");
   const CodeProduct = () => models.CodeProduct || require("../../models/CodeProduct");
+  const SoopCampaign = () => models.SoopCampaign || require("../../models/SoopCampaign");
   const clock = typeof deps.now === "function" ? deps.now : Date.now;
   // Resolved on first use so a test's fakes never load the real ones.
   let config = deps.config || null;
@@ -242,6 +244,7 @@ function createPlanner(deps = {}) {
       }
       const guide = guideFor(g.gameNo, cfg);
       const n = slots.length;
+      const starts = await eventStarts({ SoopCampaign: SoopCampaign(), CodeStock: CodeStock() }, [g.groupKey]);
       const product = await Product.create({
         name: `${g.gameName || guide.displayName} - ${g.campaignTitle} (${n} code${n === 1 ? "" : "s"})`,
         gameNo: g.gameNo,
@@ -255,7 +258,7 @@ function createPlanner(deps = {}) {
         kind: set.slotKeys.length === g.slots.size ? "full" : "leftover",
         edited: false,
         stale: false,
-        texts: defaultTexts({ slots, guide, useBy: useBy === null ? null : new Date(useBy), now: ctx.now }),
+        texts: defaultTexts({ slots, guide, useBy: useBy === null ? null : new Date(useBy), now: ctx.now, eventStarts: starts }),
         pricing: { mode: "fixed", priceUsd: 1, floorUsd: 0.5, clearance: false, followCompetitors: false },
         // PlayerAuctions only for a game allowed there (Overwatch, not Delta Force).
         markets: marketsForGame(ctx.markets, g.gameNo, cfg),

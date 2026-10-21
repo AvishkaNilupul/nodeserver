@@ -176,3 +176,21 @@ does want is to see that market, and to see when its stock runs out. So:
   `manifest.txt`; rollback = copy them back + restart). Checked live the same
   minute: one scan of a 4-code Overwatch bundle stored the account summary,
   `lowestSameSetUsd` stayed null (no code seller) and the fixed price untouched.
+
+## R14. Name the event, show how long the codes last (2026-10-21, owner's ask)
+
+Buyers took two bundles of one event for one account and expected every code to
+work; a reward of one event redeems once per account (loot boxes too). Owner:
+show the event so a buyer can tell our bundles apart, add the expiry, and never
+reveal where the codes come from. So:
+- `eventDates.eventStarts` dates each product's event(s) by the campaign's
+  start (fallback: the group's first earned code). Buyer texts carry the DATE
+  only ("Event 11 Oct 2026"), never the campaign title.
+- `texts.defaultTexts({ eventStarts })` puts the event in the title (right after
+  the count, so a 150-character market keeps it), an `EVENT:` line and an
+  uncuttable `ONE OF EACH REWARD PER ACCOUNT` block in the description, and the
+  event in the delivery note. The use-by now always shows: `REDEEM BY` within
+  60 days, `VALID UNTIL` after that (and `redeem by` in the delivery note).
+- The planner, a custom draft and "reset texts" pass the dates. Live products
+  keep their saved texts until they are edited (the edit route pushes title and
+  description to Eldorado; PlayerAuctions offers change only by cancel + new id).

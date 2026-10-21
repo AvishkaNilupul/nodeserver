@@ -485,9 +485,12 @@ test("POST /products makes a manual custom draft from ledger slots of one game",
     guide: guideFor("12", deepMerge(DEFAULTS, {})),
     useBy: new Date(NOW + 10 * DAY),
     now: NOW,
+    // No campaign row: dated by the group's first earned code (Moon Spray).
+    eventStarts: [new Date(NOW - 5 * DAY)],
   });
   assert.deepEqual({ ...p.texts }, expected);
   assert.match(p.texts.description, /REDEEM BY/);
+  assert.match(p.texts.description, /^EVENT: /m);
 
   const ev = callsOf("events.log")[0].args[0];
   assert.equal(ev.kind, "draft");

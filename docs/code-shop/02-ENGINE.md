@@ -162,21 +162,37 @@ All lines plain ASCII and free of source words.
 
 ## `utils/codeShop/texts.js` (pure)
 
-`defaultTexts({ slots, guide, useBy })` → `{ title, description, deliveryTemplate, coverTitle, coverServiceText, coverBullets }`;
+`defaultTexts({ slots, guide, useBy, now, eventStarts })` → `{ title, description, deliveryTemplate, coverTitle, coverServiceText, coverBullets }`;
 `redeemByText(useBy)` → e.g. `"21 October 2026"` = UTC date of `useBy − 24 h`;
+`eventDatesText(dates, { short })` → `"11 October 2026"` / `"8, 9 and 10 October 2026"`
+(short: `"11 Oct 2026"` / `"8, 9, 10 Oct 2026"`; more than 3 dates → first to last);
 `defaultLabel(row)` → `row.name` when it is ASCII and has no source word, else `""`.
 
-- n = slots, labels = slot labels.
-- title: n > 1 → `${display} | ${n} Codes Bundle | ${labels.join(" + ")} | Redeem Codes | Instant Auto Delivery`;
-  n = 1 → `${display} | ${label} | Redeem Code | Instant Auto Delivery`. Over 160
-  chars → drop labels from the end, add `" + more"`, until it fits.
-- description: `${display} - Code Bundle (${n} redeem codes)`; when `useBy` is
-  within 60 days a line `REDEEM BY ${redeemBy} - the codes stop working after that date.`;
-  `YOU RECEIVE ${n} UNUSED REDEEM CODES - ONE OF EACH:` + `- label` lines; the
-  bundle/delivery/own-account bullets; `HOW TO REDEEM` + howTo; `GOOD TO KNOW` +
-  goodToKnow. Over 2000 → drop good-to-know lines from the end.
+**The event (R14).** A reward of one event redeems once per account, so every
+text names the event by its START DATE only — `eventStarts` comes from
+`eventDates.eventStarts({ SoopCampaign, CodeStock }, product.groupKeys)`:
+the campaign's `startDate` (a v1 row, no `titleRaw`, nine hours back, as in
+`campaignStore.js`), else the group's first `earnedAt` over all its ledger rows.
+The campaign TITLE is never used in buyer text (it names the platform, region
+and stage).
+
+- n = slots, labels = slot labels, E = `Event ${short}` (`Events …` for several; left out when unknown).
+- title: n > 1 → `${display} | ${n} Codes Bundle | E | ${labels.join(" + ")} | Redeem Codes | Instant Auto Delivery`;
+  n = 1 → `${display} | E | ${label} | Redeem Code | Instant Auto Delivery`. Over 160
+  chars → drop labels from the end, add `" + more"`, until it fits. E sits
+  early so `fitTitle` (PlayerAuctions, 150) keeps it.
+- description: `${display} - Code Bundle (${n} redeem codes)`; then
+  `EVENT: ${long} - every code in this bundle is from this event.` (or `EVENTS: …`);
+  then the use-by: within 60 days `REDEEM BY ${date} - the codes stop working after that date.`,
+  later `VALID UNTIL ${date} - the codes stop working after that date.`;
+  `YOU RECEIVE ${n} UNUSED REDEEM CODES - ONE OF EACH:` + `- label` lines;
+  `ONE OF EACH REWARD PER ACCOUNT` (once per account — naming a box/pack label
+  when there is one; compare lists with other bundles of the same event; one
+  bundle per account); the bundle/delivery/own-account bullets; `HOW TO REDEEM`
+  + howTo; `GOOD TO KNOW` + goodToKnow. Over 2000 → drop good-to-know lines
+  from the end (the per-account block is never dropped).
 - deliveryTemplate: `Thank you for your order! Your ${display} code bundle` +
-  (redeem by → ` (redeem by ${redeemBy})`) + `:\n{password}\n\n${deliveryHelp}`.
+  ` (event ${long}, redeem by ${date})` (each part only when known) + `:\n{password}\n\n${deliveryHelp}`.
 - cover: `${display} Code Bundle`, `${n} Redeem Code${n>1?"s":""}`, bullets
   `["Instant Automatic Delivery", "${n} Codes - One of Each" (n>1) | "1 Redeem Code", "Redeem on Your Own Account"]`.
 

@@ -38,6 +38,7 @@ place that knows which code sits in which unit.
 | `utils/codeShop/expiry.js` | Pull stock before its use-by date |
 | `utils/codeShop/games.js` | Per-game buyer guides (defaults) |
 | `utils/codeShop/texts.js` | Pure: default title/description/delivery/cover |
+| `utils/codeShop/eventDates.js` | Start date of the event(s) a product's codes come from (R14) |
 | `utils/codeShop/planner.js` | Draft products from free stock |
 | `utils/codeShop/adopt.js` | Take over an existing hand-made code offer |
 | `utils/codeShop/cover.js` | Cover image for a product |

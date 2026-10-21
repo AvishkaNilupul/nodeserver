@@ -20,6 +20,7 @@ const { MongoMemoryServer } = require("mongodb-memory-server");
 
 const CodeStock = require("../models/CodeStock");
 const CodeProduct = require("../models/CodeProduct");
+const SoopCampaign = require("../models/SoopCampaign");
 const { createPlanner } = require("../utils/codeShop/planner");
 const { DEFAULTS, deepMerge } = require("../utils/codeShop/config");
 const { slotKeyOf, slotSetHash } = require("../utils/codeShop/slots");
@@ -34,7 +35,7 @@ let mem;
 test.before(async () => {
   mem = await MongoMemoryServer.create();
   await mongoose.connect(mem.getUri("codeshopplanner"));
-  await Promise.all([CodeStock.init(), CodeProduct.init()]);
+  await Promise.all([CodeStock.init(), CodeProduct.init(), SoopCampaign.init()]);
 });
 
 test.after(async () => {
@@ -221,7 +222,10 @@ test("ended + grace: one full draft, slots in first-earned order, clean texts", 
   );
 
   // Texts: present, built for these labels, and they pass the buyer-text guard.
-  assert.ok(p.texts.title.startsWith("Overwatch 2 | 3 Codes Bundle | Autumn Vibes Name Card + Prost Spray + Banana Cat Spray"));
+  // No campaign row: the event is dated by the group's first earned code, sold
+  // ones included (NOW - 6 days = 9 October).
+  assert.ok(p.texts.title.startsWith("Overwatch 2 | 3 Codes Bundle | Event 9 Oct 2026 | Autumn Vibes Name Card + Prost Spray + Banana Cat Spray"), p.texts.title);
+  assert.match(p.texts.description, /^EVENT: 9 October 2026 - /m);
   assert.match(p.texts.description, /REDEEM BY /); // use-by is 20 days out
   assert.match(p.texts.deliveryTemplate, /\{password\}/);
   assert.equal(p.texts.coverTitle, "Overwatch 2 Code Bundle");
@@ -233,6 +237,36 @@ test("ended + grace: one full draft, slots in first-earned order, clean texts", 
   assert.equal(telegram.sent.length, 1);
   assert.match(telegram.sent[0], /Overwatch 2 - Autumn Cup \(3 codes\)/);
   assert.match(telegram.sent[0], /6 bundles/);
+});
+
+test("the event is dated by its campaign's start; the campaign title never reaches a buyer", async () => {
+  await reset();
+  await SoopCampaign.deleteMany({});
+  await SoopCampaign.create({
+    dropsIdx: "300",
+    gameNo: "12",
+    title: "Autumn Cup Stage 9 Item Drops (W3&4)",
+    titleRaw: "x",
+    startDate: new Date("2026-10-11T08:00:00Z"),
+    endDate: new Date(NOW - 5 * HOUR),
+  });
+  const g = { groupKey: "12:300", campaignTitle: "Autumn Cup Stage 9 Item Drops (W3&4)" };
+  await addSlot({ ...g, nameRaw: "a", name: "Prost Spray", count: 4, earnedAt: NOW - 3 * DAY });
+  await addSlot({ ...g, nameRaw: "b", name: "Esports Loot Box", count: 4, earnedAt: NOW - 2 * DAY });
+
+  const { planner, events } = setup();
+  await planner.run();
+  noErrors(events);
+  const [p] = await drafts();
+  assert.ok(p.texts.title.startsWith("Overwatch 2 | 2 Codes Bundle | Event 11 Oct 2026 | "), p.texts.title);
+  assert.match(p.texts.description, /^EVENT: 11 October 2026 - /m);
+  assert.match(p.texts.description, /that includes the Esports Loot Box\./);
+  assert.match(p.texts.deliveryTemplate, /\(event 11 October 2026, redeem by /);
+  for (const k of ["title", "description", "deliveryTemplate", "coverTitle", "coverServiceText"]) {
+    assert.doesNotMatch(p.texts[k], /cup|stage|W3/i, k + " keeps the campaign title out");
+  }
+  assert.deepEqual(checkBuyerText({ ...p.texts, labels: p.slots.map((s) => s.label) }), []);
+  await SoopCampaign.deleteMany({});
 });
 
 test("a reward with no clean English name gets an empty label; the draft is still made", async () => {
