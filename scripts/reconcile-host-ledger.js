@@ -306,6 +306,23 @@ function summarizeRelease({ releasedNow, releasedAfter, readyIds, holdings }) {
   };
 }
 
+// Pure. Does a row read back after --apply differ from what was written? The
+// ledger was selected with `soldAt: null`, which in MongoDB also matches a row
+// with NO soldAt field — so "not sold" is `soldAt == null`, never a strict
+// `!== null`. The strict test flagged every field-less row as a mismatch
+// (181 of 332 on host "local", 2026-10-21) although all of them were written
+// exactly as intended.
+function readBackMismatch(r, to) {
+  const okHost = to.host === undefined ? true : r.host === to.host;
+  return (
+    !okHost ||
+    (r.configFile || "") !== to.configFile ||
+    (r.container || "") !== to.container ||
+    !!r.enabled !== to.enabled ||
+    r.soldAt != null
+  );
+}
+
 async function main() {
   await mongoose.connect(process.env.MONGODB_URI || process.env.MONGO_URI);
   console.log(`== reconcile BotAccount rows on host "${LEDGER_HOST}"   APPLY=${APPLY}`);
@@ -466,9 +483,7 @@ async function main() {
   const want = new Map(written.map((i) => [i._id, i]));
   for (const r of check) {
     const w = want.get(String(r._id));
-    const to = w.to;
-    const okHost = to.host === undefined ? true : r.host === to.host;
-    if (!okHost || (r.configFile || "") !== to.configFile || (r.container || "") !== to.container || !!r.enabled !== to.enabled || r.soldAt !== null) bad++;
+    if (readBackMismatch(r, w.to)) bad++;
   }
   p(`read-back: ${check.length} rows checked, ${bad} mismatched`);
   if (bad) throw new Error("read-back mismatch — inspect before doing anything else");
@@ -482,4 +497,4 @@ if (require.main === module) {
     .catch((e) => { console.error("FAILED:", e.message); process.exitCode = 1; return mongoose.disconnect(); });
 }
 
-module.exports = { summarizeRelease };
+module.exports = { summarizeRelease, readBackMismatch };

@@ -311,3 +311,16 @@ test("Sync from bots records the live copy, clears renter-held rows, spares no-c
   assert.equal(r.renterCleared, 1);
   assert.equal(r.filesRead, 4);
 });
+
+test("reconcile read-back: a row with no soldAt field is not a mismatch", () => {
+  const { readBackMismatch } = require("../scripts/reconcile-host-ledger");
+  const to = { host: "local", configFile: "", container: "", enabled: false };
+  const row = { host: "local", configFile: "", container: "", enabled: false };
+  assert.equal(readBackMismatch({ ...row }, to), false, "soldAt absent");
+  assert.equal(readBackMismatch({ ...row, soldAt: null }, to), false, "soldAt null");
+  assert.equal(readBackMismatch({ ...row, soldAt: new Date() }, to), true, "sold since — report it");
+  assert.equal(readBackMismatch({ ...row, enabled: true }, to), true);
+  assert.equal(readBackMismatch({ ...row, container: "twitchbotx9" }, to), true);
+  // a retire write names no host: any host reads back fine
+  assert.equal(readBackMismatch({ ...row, host: "pi" }, { configFile: "", container: "", enabled: false }), false);
+});
