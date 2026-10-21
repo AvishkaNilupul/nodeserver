@@ -45,7 +45,7 @@ const { recordAutoFarmEvent } = require("./autoFarmEventLog");
 const { farmableCampaigns } = require("./campaignFarmability");
 
 // Keep these in lock-step with routes/noclaimFarmRoutes.js — same Pi dir + names.
-const HOST_ID = "contabo";
+const { HOST_ID } = require("./noclaimHost"); // the no-claim farm's bot host (.env NOCLAIM_HOST_ID)
 const BASE = "/home/ubuntu/twitchbot-noclaim";
 const BOTS_DIR = BASE + "/bots";
 const CONTAINER_PREFIX = "noclaim-bot-";
@@ -509,7 +509,7 @@ function parseBots(stdout) {
 function pi() {
   const host = hosts.resolveHost(HOST_ID);
   if (!host) {
-    const e = new Error(`Pi host "${HOST_ID}" is not configured.`);
+    const e = new Error(`No-claim host "${HOST_ID}" is not configured.`);
     e.status = 503;
     throw e;
   }

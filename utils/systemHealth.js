@@ -532,10 +532,10 @@ const FARM_LOOPS = [
   },
 ];
 
-// The no-claim feeder builds every bot on Contabo (docs/LIVE-FIXES-1003.md §A2
-// names the host; utils/noclaimWatcher and utils/unclaimedAutoList carry the
-// same constant).
-const NOCLAIM_HOST_ID = "contabo";
+// The no-claim feeder builds every bot on one host, named once in
+// utils/noclaimHost (.env NOCLAIM_HOST_ID; noclaimFleet, noclaimWatcher and
+// unclaimedAutoList read the same value).
+const { HOST_ID: NOCLAIM_HOST_ID } = require("./noclaimHost"); // .env NOCLAIM_HOST_ID
 // utils/settings' shipped default for autoFarm.hostMinFreeMb (§1), used only
 // when the setting is missing or not a number.
 const HOST_MIN_FREE_MB_DEFAULT = 1500;
@@ -947,7 +947,7 @@ function hostMinFreeMbOf(af) {
 // The host the auto-farm creates its containers on: autoFarm.hostId, or, when
 // that is blank, whatever the engine itself picks (autoFarmer.resolveFarmHost —
 // "the first ssh host"), so this watches the machine the gate is asked about
-// rather than a second guess at it. Production sets hostId "contabo".
+// rather than a second guess at it. Production sets hostId "contabo2" (since 2026-10-21).
 function farmHostIdOf(ctx, af) {
   const set = String((af && af.hostId) || "").trim();
   if (set) return set;

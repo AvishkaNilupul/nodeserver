@@ -42,7 +42,7 @@ const pristineReserve = () => require("./pristineReserve");
 const hostCapacity = () => require("./hostCapacity");
 
 // --- Sandbox constants (all on the Pi, separate from the managed bot dir) ----
-const HOST_ID = "contabo";
+const { HOST_ID } = require("./noclaimHost"); // the no-claim farm's bot host (.env NOCLAIM_HOST_ID)
 const BASE = "/home/ubuntu/twitchbot-noclaim";
 const SRC_DIR = BASE + "/src";
 const BOTS_DIR = BASE + "/bots"; // bots/<id>/Configuration/config.json + logs
@@ -89,7 +89,7 @@ const MAX_UNREADABLE_PER_CALL = 10;
 function pi() {
   const host = hosts.resolveHost(HOST_ID);
   if (!host) {
-    const e = new Error(`Pi host "${HOST_ID}" is not configured.`);
+    const e = new Error(`No-claim host "${HOST_ID}" is not configured.`);
     e.status = 503;
     throw e;
   }
@@ -102,7 +102,7 @@ async function sh(script, { timeout = 30000, input } = {}) {
     return (stdout || "").trim();
   } catch (err) {
     if (err && err.unreachable) {
-      const e = new Error("Raspberry Pi is unreachable over SSH.");
+      const e = new Error("The no-claim host (" + HOST_ID + ") is unreachable over SSH.");
       e.status = 503;
       throw e;
     }
