@@ -56,6 +56,8 @@ const TABLE = [
   ["GET", "/api/soop/accounts/twitch-cookies"],
   ["POST", "/api/soop/accounts/twitch-link"],
   ["POST", "/api/soop/accounts/renew"],
+  // The page's "Twitch logins" dialog (2026-10-21).
+  ["POST", "/api/soop/accounts/twitch-cookies/import"],
 ];
 const CODE = "SOOP-CODE-SENTINEL-9XQ7";
 const GHOST_ID = "0123456789abcdef01234567";
@@ -195,6 +197,10 @@ test("bad input is refused with 400 and a readable message", async () => {
     ["/inventory/reveal", { itemId: "not-an-id" }],
     ["/inventory/claim", {}],
     ["/inventory/claim", { itemId: "not-an-id" }],
+    ["/accounts/twitch-cookies/import", {}],
+    ["/accounts/twitch-cookies/import", { cookies: "login=x" }],
+    ["/accounts/twitch-cookies/import", { cookies: [] }],
+    ["/accounts/twitch-cookies/import", { login: ["x"] }],
   ];
   for (const [path, body] of cases) {
     refused(await post(path, body), 400, `POST ${path} ${JSON.stringify(body).slice(0, 60)}`);
@@ -429,6 +435,73 @@ test("the activity log can be filtered", async () => {
   const mine = await get("/activity?accountId=acc1&level=info");
   assert.ok(mine.json.entries.length > 0);
   assert.ok(mine.json.entries.every((e) => e.accountId === "acc1" && e.level === "info"));
+});
+
+test("the Twitch-logins dialog stores a jar, links it, and refuses a wrong one", async () => {
+  const AUTH = "auth-token-sentinel-ZZ1";
+  const PERSIST = "persistent-sentinel-ZZ2";
+  const day = 86400;
+  const now = Math.floor(Date.now() / 1000);
+  const jar = (login, { auth = true, persistent = true, loginCookie = true } = {}) =>
+    [
+      loginCookie ? { domain: ".twitch.tv", name: "login", value: login } : null,
+      auth ? { domain: ".twitch.tv", name: "auth-token", value: AUTH, expirationDate: now + 30 * day } : null,
+      persistent ? { domain: ".twitch.tv", name: "persistent", value: PERSIST, expirationDate: now + 300 * day } : null,
+      { domain: ".twitch.tv", name: "unique_id", value: "uid-1" },
+      { domain: ".sooplive.com", name: "AuthTicket", value: "should-be-dropped" }, // not a twitch.tv cookie
+    ].filter(Boolean);
+
+  // Store a jar and link it to acc1 in one call.
+  const first = await post("/accounts/twitch-cookies/import", { cookies: jar("gamerone"), soopId: "acc1", capturedAt: new Date().toISOString() });
+  assert.equal(first.status, 200, first.text);
+  assert.equal(first.json.login, "gamerone");
+  assert.equal(first.json.saved.replaced, false);
+  assert.equal(first.json.saved.cookieCount, 4, "only twitch.tv cookies are kept");
+  assert.equal(first.json.saved.shortLived, false);
+  assert.ok(first.json.saved.persistentDaysLeft > 299 && first.json.saved.persistentDaysLeft <= 300);
+  assert.equal(first.json.link.state, "linked");
+  assert.equal(first.json.link.soopId, "acc1");
+  assert.equal((await SoopAccount.findOne({ loginId: "acc1" }).lean()).twitchLogin, "gamerone");
+  assert.ok(!first.text.includes(AUTH) && !first.text.includes(PERSIST), "the import reply echoed a cookie value");
+
+  // The stored jar shows up in the inventory, by login, with no value.
+  const inv = await get("/accounts/twitch-cookies");
+  const row = inv.json.accounts.find((a) => a.twitchLogin === "gamerone");
+  assert.ok(row && row.cookieCount === 4 && row.shortLived === false);
+  assert.ok(!inv.text.includes(AUTH) && !inv.text.includes(PERSIST));
+
+  // The login read from the jar wins; a mismatched `login` field is refused.
+  refused(await post("/accounts/twitch-cookies/import", { cookies: jar("gamerone"), login: "someoneelse" }), 400, "login mismatch");
+
+  // A jar with no auth-token, or none signed in, is refused before saving.
+  refused(await post("/accounts/twitch-cookies/import", { cookies: jar("nofinish", { auth: false }) }), 400, "no auth-token");
+  refused(await post("/accounts/twitch-cookies/import", { cookies: jar("", { loginCookie: false }) }), 400, "no login cookie");
+
+  // Re-import replaces the jar (short-lived this time) without re-linking.
+  const again = await post("/accounts/twitch-cookies/import", { cookies: jar("gamerone", { persistent: false }), soopId: "acc1" });
+  assert.equal(again.json.saved.replaced, true);
+  assert.equal(again.json.saved.shortLived, true);
+  assert.equal(again.json.link.state, "already");
+
+  // acc1 is taken: linking gamerone to acc2 is refused, and so is giving acc1 a second login.
+  await post("/accounts/twitch-cookies/import", { cookies: jar("gamertwo"), login: "gamertwo" }); // store a second jar, no link
+  const taken = await post("/accounts/twitch-cookies/import", { login: "gamerone", soopId: "acc2" });
+  assert.equal(taken.json.link.state, "taken");
+  assert.equal(taken.json.link.other, "acc1");
+  const conflict = await post("/accounts/twitch-cookies/import", { login: "gamertwo", soopId: "acc1" });
+  assert.equal(conflict.json.link.state, "conflict");
+  assert.equal(conflict.json.link.other, "gamerone");
+  assert.equal((await SoopAccount.findOne({ loginId: "acc1" }).lean()).twitchLogin, "gamerone", "a conflict left the link alone");
+
+  // Link-only for a login with no stored jar is refused; for one with a jar it links.
+  refused(await post("/accounts/twitch-cookies/import", { login: "neverstored", soopId: "acc2" }), 400, "link-only, no jar");
+  const linkOnly = await post("/accounts/twitch-cookies/import", { login: "gamertwo", soopId: "acc2" });
+  assert.equal(linkOnly.json.saved, null);
+  assert.equal(linkOnly.json.link.state, "linked");
+
+  // Clean up so the account/link state does not bleed into later tests.
+  await post("/accounts/twitch-link", { id: "acc1", twitchLogin: "" });
+  await post("/accounts/twitch-link", { id: "acc2", twitchLogin: "" });
 });
 
 test("no read route and no log line carries a cookie value or a reward code", async () => {

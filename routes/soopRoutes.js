@@ -13,11 +13,13 @@ const farm = require("../utils/soopFarm");
 const { SoopError } = require("../utils/soop/errors");
 const TwitchWebCookie = require("../models/TwitchWebCookie");
 const { encrypt } = require("../utils/secretBox");
+const twitchJar = require("../utils/soop/twitchJar");
 
 const router = express.Router();
 
 const MAX_LIST = 500;
 const MAX_COOKIE_BYTES = 2 * 1024 * 1024;
+const MAX_JAR = 100; // cookies in one Twitch login's jar (twitch.tv sets about 15)
 const LEVELS = ["info", "warn", "error"];
 const OBJECT_ID_RE = /^[a-f0-9]{24}$/i;
 
@@ -436,6 +438,49 @@ route("post", "/accounts/twitch-link", async ({ body }) => {
   const value = await farm.setTwitchLogin(id, twitchLogin);
   if (value === null) throw new HttpError(404, "Unknown account");
   return { id, twitchLogin: value };
+});
+
+// The SOOP page's "Twitch logins" dialog, one Twitch login per request:
+//   { cookies: [twitch.tv cookies], login?, soopId?, capturedAt?, source? }
+// stores that login's cookies and links it to the SOOP account `soopId`.
+// Without `cookies` it only links cookies stored before. The login is read
+// from the jar's own `login` cookie; a file that names another login is
+// refused. A link is never overwritten (utils/soop/twitchJar.js linkJar).
+route("post", "/accounts/twitch-cookies/import", async ({ body }) => {
+  const named = (text(body.login, "login", { max: 60 }) || "").toLowerCase();
+  const soopId = text(body.soopId, "soopId", { max: 100 }) || "";
+  let login = named;
+  let saved = null;
+  if (body.cookies !== undefined && body.cookies !== null) {
+    if (!Array.isArray(body.cookies)) bad("cookies must be a list");
+    if (body.cookies.length > MAX_JAR) bad(`cookies can hold ${MAX_JAR} entries at most`);
+    const cookies = twitchJar.twitchCookies(body.cookies);
+    if (!cookies.length) bad("No twitch.tv cookie in it — save the cookies while signed in on twitch.tv");
+    const own = twitchJar.loginOf(cookies);
+    if (own && named && own !== named) bad(`These cookies are signed in as ${own}, not ${named}`);
+    login = own || named;
+    if (!login) bad("Could not tell which Twitch login these cookies are for — the login cookie is missing");
+    if (!twitchJar.LOGIN_RE.test(login)) bad(`${login} is not a Twitch login name`);
+    const jar = twitchJar.describe(cookies);
+    if (!jar.hasAuthToken) bad("No auth-token cookie — the Twitch sign-in had not finished when these were saved");
+    const at = Date.parse(text(body.capturedAt, "capturedAt", { max: 40 }) || "");
+    const harvestedAt = Number.isFinite(at) && at <= Date.now() + 60000 ? new Date(at) : new Date();
+    const source = text(body.source, "source", { max: 200 }) || "SOOP page import";
+    const r = await twitchJar.saveJar({ login, cookies, harvestedAt, source });
+    saved = {
+      replaced: !r.created,
+      cookieCount: r.cookieCount,
+      shortLived: r.shortLived,
+      persistentDaysLeft: twitchJar.daysLeft(r.persistentExpiresAt),
+      authTokenDaysLeft: twitchJar.daysLeft(r.authTokenExpiresAt),
+    };
+  } else {
+    if (!login) bad("login is required");
+    if (!twitchJar.LOGIN_RE.test(login)) bad(`${login} is not a Twitch login name`);
+    if (!(await TwitchWebCookie.exists({ twitchLogin: login }))) bad(`No Twitch cookies are stored for ${login} — import its cookie file`);
+  }
+  const link = await twitchJar.linkJar({ login, soopId }, (id, value) => farm.setTwitchLogin(id, value));
+  return { login, saved, link };
 });
 
 // Manual kick for auto-renew — one id or many. The periodic refresher does

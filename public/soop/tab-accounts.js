@@ -33,7 +33,7 @@
   let filter = "all", query = "", chips, search, table, bulk, emptyBox, emptyMode = "", chipSig = "";
 
   // ---- the drawer and the import dialog (separate files, each loaded once) -----
-  const PARTS = { _accountDrawer: ["/soop/account-drawer.js", "The account panel"], _accountImport: ["/soop/account-import.js", "The import dialog"] };
+  const PARTS = { _accountDrawer: ["/soop/account-drawer.js", "The account panel"], _accountImport: ["/soop/account-import.js", "The import dialog"], _twitchLogins: ["/soop/twitch-logins.js", "The Twitch-logins dialog"] };
   const loading = {};
   function part(key) {                           // resolves with Soop[key] once its file has run
     if (!loading[key]) loading[key] = new Promise((resolve, reject) => {
@@ -50,6 +50,7 @@
     }).catch(Soop.toast);
   }
   const openImport = () => part("_accountImport").then((dialog) => dialog.open()).catch(Soop.toast);
+  const openTwitchLogins = () => part("_twitchLogins").then((dialog) => dialog.open()).catch(Soop.toast);
   // Loaded up front: the drawer so a row opens at once, the dialog because it also takes files dropped on the page.
   Object.keys(PARTS).forEach((key) => part(key).catch(() => {}));
 
@@ -177,7 +178,9 @@
       bulk = buildBulk();
       emptyBox = el("div");
       table = ui.table({ key: "id", select: true, columns, rows: [], empty: emptyBox, onRow: (a) => openDrawer(a.id), onSelect: () => bulk.sync() });
-      root.append(el("div", { class: "s-toolbar" }, search, chips, el("span", { class: "s-grow" }), ui.button("Import accounts", { tone: "primary", icon: "upload", onClick: openImport })),
+      root.append(el("div", { class: "s-toolbar" }, search, chips, el("span", { class: "s-grow" }),
+        ui.button("Twitch logins", { icon: "refresh", title: "Import the Twitch cookies that renew SOOP logins automatically", onClick: openTwitchLogins }),
+        ui.button("Import accounts", { tone: "primary", icon: "upload", onClick: openImport })),
         el("div", { class: "s-stack" }, bulk, table));
     },
     update() { drawChips(); redraw(); },
@@ -188,6 +191,7 @@
     if (id !== "accounts") return;
     if (params.status) setFilter(FROM_LINK[params.status] || "all");
     if (params.import) openImport();
+    if (params.twitch) openTwitchLogins();
     if (params.id) openDrawer(params.id);
   });
 })();
