@@ -171,21 +171,35 @@ function buildTitle(display, labels, eventPart = "") {
   return bare.length <= TITLE_MAX ? bare : bare.slice(0, TITLE_MAX).trimEnd();
 }
 
-// The once-per-account line names a box or pack reward when there is one.
+// The once-per-account line names a box or pack reward when there is one, and
+// a second line says what a buyer sees when the account already got it: the
+// redeem page answers "not eligible" (a buyer's own words, 2026-10-19).
 function stackableNote(labels) {
   const hits = labels.filter((l) => STACKABLE_RE.test(l));
   if (!hits.length) return "";
   return hits.length === 1 ? ` - that includes the ${hits[0]}` : " - that includes boxes and packs";
 }
 
+function stackableLine(labels, accountWord) {
+  const hits = labels.filter((l) => STACKABLE_RE.test(l));
+  if (!hits.length) return "";
+  const what = hits.length === 1 ? `this event's ${hits[0]}` : "one of this event's boxes or packs";
+  return `- If this ${accountWord} account already got ${what} (from another bundle or any other way), that code will be refused as not eligible.`;
+}
+
+// Lines that may go, in this order, when the description is still over the
+// limit after every good-to-know line went (a very large bundle). The
+// once-per-account rule itself always stays.
+const OPTIONAL_LINES = ["already", "more", "delivery", "own"];
+
 function buildDescription({ display, labels, guide, redeemBy, validUntil, eventLong, eventCount }) {
   const n = labels.length;
   const one = n === 1;
-  const head = [`${display} - Code Bundle (${n} redeem ${one ? "code" : "codes"})`, ""];
+  const many = eventCount > 1;
   const facts = [];
   if (eventLong) {
     facts.push(
-      eventCount > 1
+      many
         ? `EVENTS: ${eventLong} - each code is from one of these events.`
         : `EVENT: ${eventLong} - ${one ? "the code is" : "every code in this bundle is"} from this event.`,
     );
@@ -193,37 +207,56 @@ function buildDescription({ display, labels, guide, redeemBy, validUntil, eventL
   const stops = `the ${one ? "code stops" : "codes stop"} working after that date.`;
   if (redeemBy) facts.push(`REDEEM BY ${redeemBy} - ${stops}`);
   else if (validUntil) facts.push(`VALID UNTIL ${validUntil} - ${stops}`);
-  if (facts.length) head.push(...facts, "");
-  head.push(one ? "YOU RECEIVE 1 UNUSED REDEEM CODE:" : `YOU RECEIVE ${n} UNUSED REDEEM CODES - ONE OF EACH:`);
-  for (const label of labels) head.push(`- ${label}`);
-  const already = !eventLong
-    ? "- Already have one of these rewards? A reward the account already has will not be added again."
-    : eventCount > 1
-      ? "- Already have a bundle from any of these events? Compare the reward lists: a reward the account already has will not be added again."
-      : `- Already have a bundle from the event of ${eventLong}? Compare the reward lists: a reward the account already has will not be added again.`;
-  head.push(
+  const optional = {
+    already: !eventLong
+      ? "- Already have one of these rewards? A reward the account already has will not be added again."
+      : many
+        ? "- Already have a bundle from any of these events? Compare the reward lists: a reward the account already has will not be added again."
+        : `- Already have a bundle from the event of ${eventLong}? Compare the reward lists: a reward the account already has will not be added again.`,
+    more: one
+      ? "- Want this reward on more than one account? Buy one code per account."
+      : "- Want these rewards on more than one account? Buy one bundle per account.",
+    delivery: "- Instant automatic delivery in the order chat, 24/7",
+    own: `- Redeem on your OWN ${guide.accountWord} account - no account sharing, no login details needed`,
+  };
+  const dropped = new Set();
+  const opt = (k) => (dropped.has(k) ? [] : [optional[k]]);
+  const headLines = () => [
+    `${display} - Code Bundle (${n} redeem ${one ? "code" : "codes"})`,
+    "",
+    ...(facts.length ? [...facts, ""] : []),
+    one ? "YOU RECEIVE 1 UNUSED REDEEM CODE:" : `YOU RECEIVE ${n} UNUSED REDEEM CODES - ONE OF EACH:`,
+    ...labels.map((label) => `- ${label}`),
     "",
     "ONE OF EACH REWARD PER ACCOUNT",
     `- A reward from one event can be redeemed only once per ${guide.accountWord} account${stackableNote(labels)}. ` +
       "Two codes for the same reward will not both work on one account.",
-    already,
-    one
-      ? "- Want this reward on more than one account? Buy one code per account."
-      : "- Want these rewards on more than one account? Buy one bundle per account.",
+    ...[stackableLine(labels, guide.accountWord)].filter(Boolean),
+    ...opt("already"),
+    ...opt("more"),
     "",
     one ? "- 1 unit = 1 redeem code" : `- This is a bundle: 1 unit = all ${n} codes`,
-    "- Instant automatic delivery in the order chat, 24/7",
-    `- Redeem on your OWN ${guide.accountWord} account - no account sharing, no login details needed`,
+    ...opt("delivery"),
+    ...opt("own"),
     "",
     "HOW TO REDEEM",
     ...guide.howTo,
-  );
+  ];
   const good = [...guide.goodToKnow];
-  const render = () => (good.length ? [...head, "", "GOOD TO KNOW", ...good] : head).join("\n");
+  const render = () => {
+    const head = headLines();
+    return (good.length ? [...head, "", "GOOD TO KNOW", ...good] : head).join("\n");
+  };
   let text = render();
-  // Over the limit: the good-to-know lines go first, from the end.
+  // Over the limit: the good-to-know lines go first, from the end; then the
+  // optional lines above. Still over -> returned as is (the text guard refuses it).
   while (text.length > DESCRIPTION_MAX && good.length) {
     good.pop();
+    text = render();
+  }
+  for (const k of OPTIONAL_LINES) {
+    if (text.length <= DESCRIPTION_MAX) break;
+    dropped.add(k);
     text = render();
   }
   return text;
@@ -231,8 +264,8 @@ function buildDescription({ display, labels, guide, redeemBy, validUntil, eventL
 
 // The default texts of a product. `now` (ms or Date, default the clock)
 // decides whether the use-by date reads as a warning or a promise.
-// `eventStarts`: the start dates of the event(s) its codes come from
-// (eventDates.eventStarts); none -> no event is named.
+// `eventStarts`: one entry per event its codes come from (eventDates.eventStarts:
+// a Date, or null when unknown); no date at all -> no event is named.
 function defaultTexts({ slots, guide, useBy, now, eventStarts } = {}) {
   const g = guide || require("./games").GUIDES.default;
   const labels = (Array.isArray(slots) ? slots : []).map((s) => String((s && s.label) || "").trim());
@@ -244,9 +277,12 @@ function defaultTexts({ slots, guide, useBy, now, eventStarts } = {}) {
   const near = useByMs != null && useByMs - nowMs <= REDEEM_BY_WINDOW_MS;
   const redeemBy = near ? useByText : "";
   const validUntil = near ? "" : useByText;
-  const eventCount = eventDays(eventStarts).length;
-  const eventLong = eventDatesText(eventStarts);
-  const eventShort = eventDatesText(eventStarts, { short: true });
+  // One entry per event (eventDates.eventStarts): a Date, or null when that
+  // event has none. Two events on one day are still two events.
+  const events = Array.isArray(eventStarts) ? eventStarts : eventStarts == null ? [] : [eventStarts];
+  const eventLong = eventDatesText(events);
+  const eventShort = eventDatesText(events, { short: true });
+  const eventCount = eventLong ? Math.max(events.length, eventDays(events).length) : 0;
   const eventPart = eventShort ? `${eventCount > 1 ? "Events" : "Event"} ${eventShort}` : "";
   const notes = [
     eventLong ? `${eventCount > 1 ? "events" : "event"} ${eventLong}` : "",

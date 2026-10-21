@@ -53,24 +53,38 @@ test("eventStarts: campaign start dates, oldest first, one per group", async () 
   assert.equal(stock.calls.length, 0, "every group had a campaign row");
 });
 
-test("eventStarts: a group with no campaign row is dated by its first earned code", async () => {
+const iso = (list) => list.map((d) => (d === null ? null : d.toISOString()));
+
+test("eventStarts: a group with no campaign row is dated by its first earned code; ':none' is no event", async () => {
   const camps = fakeCampaigns([{ dropsIdx: "1", startDate: new Date("2026-10-08T06:00:00Z") }]); // v1 row
-  const stock = fakeStock({ "200:2": "2026-10-09T07:00:00Z", "12:nabc123": "2026-10-05T01:00:00Z" });
+  const stock = fakeStock({ "200:2": "2026-10-09T07:00:00Z", "12:nabc123": "2026-10-05T01:00:00Z", "12:none": "2026-10-01T00:00:00Z" });
   const out = await eventStarts({ SoopCampaign: camps, CodeStock: stock }, ["200:1", "200:2", "12:nabc123", "12:none"]);
-  assert.deepEqual(out.map((d) => d.toISOString()), [
+  assert.deepEqual(iso(out), [
     "2026-10-05T01:00:00.000Z", // hashed-title group: no campaign to read
     "2026-10-07T21:00:00.000Z", // v1 row, nine hours back
     "2026-10-09T07:00:00.000Z", // campaign row missing
+    null, // "12:none": every campaign-less code of the game, not one event
   ]);
   assert.deepEqual(camps.calls[0].query.dropsIdx.$in.sort(), ["1", "2"], "only numeric groups are looked up");
-  assert.deepEqual(stock.calls[0][0].$match.groupKey.$in.sort(), ["12:nabc123", "12:none", "200:2"]);
+  assert.deepEqual(stock.calls[0][0].$match.groupKey.$in.sort(), ["12:nabc123", "200:2"], "':none' is never dated");
 });
 
-test("eventStarts: nothing to read -> [], and a missing model is skipped", async () => {
+test("eventStarts: one entry per event, even when two start the same day", async () => {
+  const camps = fakeCampaigns([
+    { dropsIdx: "7", startDate: new Date("2026-10-11T08:00:00Z"), titleRaw: "" },
+    { dropsIdx: "8", startDate: new Date("2026-10-11T08:00:00Z"), titleRaw: "" },
+  ]);
+  const out = await eventStarts({ SoopCampaign: camps }, ["12:7", "12:8"]);
+  assert.equal(out.length, 2);
+  assert.deepEqual(iso(out), ["2026-10-11T08:00:00.000Z", "2026-10-11T08:00:00.000Z"]);
+});
+
+test("eventStarts: nothing to read -> [], an unknown group -> null, a missing model is skipped", async () => {
   assert.deepEqual(await eventStarts({}, []), []);
   assert.deepEqual(await eventStarts({}, null), []);
-  assert.deepEqual(await eventStarts(null, ["12:5"]), []);
+  assert.deepEqual(await eventStarts(null, ["12:5"]), [null]);
+  assert.deepEqual(await eventStarts({}, ["12:none", "12:none"]), [null], "a repeated group counts once");
   const stock = fakeStock({ "12:5": "2026-10-01T00:00:00Z" });
   const out = await eventStarts({ CodeStock: stock }, ["12:5"]);
-  assert.deepEqual(out.map((d) => d.toISOString()), ["2026-10-01T00:00:00.000Z"]);
+  assert.deepEqual(iso(out), ["2026-10-01T00:00:00.000Z"]);
 });

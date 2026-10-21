@@ -10,12 +10,14 @@
 // One event = one campaign group (slots.groupKeyOf: "<gameNo>:<campaignIdx>").
 // Its date is the campaign's startDate; a group with no campaign row falls back
 // to the earliest earnedAt of its ledger rows (every state, so it does not move
-// as stock sells).
+// as stock sells). "<gameNo>:none" holds every code that matched no campaign:
+// it is not one event, so it never gets a date.
 
 const KST_MS = 9 * 60 * 60 * 1000;
 // "<gameNo>:<digits>" — groups named by a hashed title ("12:n…") or "12:none"
 // have no campaign row to read.
 const IDX_RE = /^[^:]*:(\d+)$/;
+const NO_EVENT_RE = /^[^:]*:none$/;
 
 const text = (v) => (v === undefined || v === null ? "" : String(v));
 const leanOf = (q) => (q && typeof q.lean === "function" ? q.lean() : q);
@@ -37,11 +39,14 @@ function campaignStartMs(doc) {
 }
 
 // models: { SoopCampaign, CodeStock } (either may be missing: that source is skipped).
-// -> [Date], one per group with a known date, oldest first.
+// -> one entry per distinct group: its start Date, or null when it has none
+// (dates oldest first, nulls last). The length is the number of events, so a
+// caller never calls two events "this event" because they share a day.
 async function eventStarts(models, groupKeys) {
   const { SoopCampaign, CodeStock } = models || {};
-  const keys = [...new Set((Array.isArray(groupKeys) ? groupKeys : []).map(text).filter(Boolean))];
-  if (!keys.length) return [];
+  const all = [...new Set((Array.isArray(groupKeys) ? groupKeys : []).map(text).filter(Boolean))];
+  if (!all.length) return [];
+  const keys = all.filter((k) => !NO_EVENT_RE.test(k));
 
   const startOf = new Map(); // groupKey -> ms
   const idxOf = new Map();
@@ -72,7 +77,8 @@ async function eventStarts(models, groupKeys) {
     }
   }
 
-  return [...startOf.values()].sort((a, b) => a - b).map((ms) => new Date(ms));
+  const known = [...startOf.values()].sort((a, b) => a - b).map((ms) => new Date(ms));
+  return [...known, ...Array(all.length - known.length).fill(null)];
 }
 
 module.exports = { eventStarts, campaignStartMs };

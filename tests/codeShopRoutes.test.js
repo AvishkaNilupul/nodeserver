@@ -876,10 +876,19 @@ test("POST /scan answers { competitors }; an unknown product is 404 without a sc
 
 test("POST /texts/reset rebuilds a draft's default texts from its saved labels; not on an active product", async () => {
   const p = await addProduct({ texts: { title: "Mangled", description: "x", deliveryTemplate: "no placeholder" } });
+  // A sold code of the product's group dates its event (no campaign row here).
+  await addRows({ groupKey: "12:100", nameRaw: "Old Reward", earnedAt: NOW - 4 * DAY, state: "sold", count: 1 });
   const r = ok(await post(`/products/${p._id}/texts/reset`));
   const q = await CodeProduct.findById(p._id).lean();
-  const expected = defaultTexts({ slots: q.slots, guide: guideFor("12", deepMerge(DEFAULTS, {})), useBy: null, now: NOW });
+  const expected = defaultTexts({
+    slots: q.slots,
+    guide: guideFor("12", deepMerge(DEFAULTS, {})),
+    useBy: null,
+    now: NOW,
+    eventStarts: [new Date(NOW - 4 * DAY)],
+  });
   assert.deepEqual({ ...q.texts }, expected);
+  assert.match(q.texts.title, /\| Event \d+ \w{3} 2026 \|/);
   assert.equal(r.product.texts.title, expected.title);
   const live = await addProduct({ status: "active", offer: new mongoose.Types.ObjectId() });
   refused(await post(`/products/${live._id}/texts/reset`), 409, "active");

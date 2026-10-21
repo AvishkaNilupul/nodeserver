@@ -245,12 +245,12 @@ test("the event is dated by its campaign's start; the campaign title never reach
   await SoopCampaign.create({
     dropsIdx: "300",
     gameNo: "12",
-    title: "Autumn Cup Stage 9 Item Drops (W3&4)",
+    title: "Autumn Cup Stage 9 Item Drops (Part B)",
     titleRaw: "x",
     startDate: new Date("2026-10-11T08:00:00Z"),
     endDate: new Date(NOW - 5 * HOUR),
   });
-  const g = { groupKey: "12:300", campaignTitle: "Autumn Cup Stage 9 Item Drops (W3&4)" };
+  const g = { groupKey: "12:300", campaignTitle: "Autumn Cup Stage 9 Item Drops (Part B)" };
   await addSlot({ ...g, nameRaw: "a", name: "Prost Spray", count: 4, earnedAt: NOW - 3 * DAY });
   await addSlot({ ...g, nameRaw: "b", name: "Esports Loot Box", count: 4, earnedAt: NOW - 2 * DAY });
 
@@ -263,9 +263,24 @@ test("the event is dated by its campaign's start; the campaign title never reach
   assert.match(p.texts.description, /that includes the Esports Loot Box\./);
   assert.match(p.texts.deliveryTemplate, /\(event 11 October 2026, redeem by /);
   for (const k of ["title", "description", "deliveryTemplate", "coverTitle", "coverServiceText"]) {
-    assert.doesNotMatch(p.texts[k], /cup|stage|W3/i, k + " keeps the campaign title out");
+    assert.doesNotMatch(p.texts[k], /cup|stage|part b/i, k + " keeps the campaign title out");
   }
   assert.deepEqual(checkBuyerText({ ...p.texts, labels: p.slots.map((s) => s.label) }), []);
+  await SoopCampaign.deleteMany({});
+});
+
+test("a v1 campaign row (no titleRaw, stored nine hours late) is dated by its real start", async () => {
+  await reset();
+  await SoopCampaign.deleteMany({});
+  // Written the v1 way, straight to the collection: the model would add titleRaw "".
+  // Stored 12 Oct 05:00 = really 11 Oct 20:00 UTC.
+  await SoopCampaign.collection.insertOne({ dropsIdx: "301", gameNo: "12", title: "Cup", startDate: new Date("2026-10-12T05:00:00Z"), endDate: new Date(NOW - 5 * HOUR) });
+  await addSlot({ groupKey: "12:301", nameRaw: "c", name: "Moon Spray", count: 4, earnedAt: NOW - 3 * DAY });
+  const { planner, events } = setup();
+  await planner.run();
+  noErrors(events);
+  const [p] = await drafts();
+  assert.ok(p.texts.title.startsWith("Overwatch 2 | Event 11 Oct 2026 | Moon Spray | "), p.texts.title);
   await SoopCampaign.deleteMany({});
 });
 

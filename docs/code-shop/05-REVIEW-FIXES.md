@@ -194,3 +194,9 @@ reveal where the codes come from. So:
 - The planner, a custom draft and "reset texts" pass the dates. Live products
   keep their saved texts until they are edited (the edit route pushes title and
   description to Eldorado; PlayerAuctions offers change only by cancel + new id).
+- Review fixes before the deploy: one entry per event (two events on one day,
+  or one without a date, read "EVENTS", never "this event"); `"<game>:none"`
+  is never dated; a very large bundle drops optional lines after the
+  good-to-know ones; a bundle with a box or pack says that a box the account
+  already got is refused as "not eligible" (a PlayerAuctions buyer's words on
+  2026-10-19, order of a 6-code bundle).

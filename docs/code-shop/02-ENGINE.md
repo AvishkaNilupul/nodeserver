@@ -171,10 +171,12 @@ All lines plain ASCII and free of source words.
 **The event (R14).** A reward of one event redeems once per account, so every
 text names the event by its START DATE only — `eventStarts` comes from
 `eventDates.eventStarts({ SoopCampaign, CodeStock }, product.groupKeys)`:
-the campaign's `startDate` (a v1 row, no `titleRaw`, nine hours back, as in
-`campaignStore.js`), else the group's first `earnedAt` over all its ledger rows.
-The campaign TITLE is never used in buyer text (it names the platform, region
-and stage).
+one entry per group — the campaign's `startDate` (a v1 row, no `titleRaw`,
+nine hours back, as in `campaignStore.js`), else the group's first `earnedAt`
+over all its ledger rows, else `null`; `"<game>:none"` (every campaign-less
+code) is always `null`. Events are COUNTED by entries, not by dates: two events
+on one day read "EVENTS". No date at all → no event is named. The campaign
+TITLE is never used in buyer text (it names the platform, region and stage).
 
 - n = slots, labels = slot labels, E = `Event ${short}` (`Events …` for several; left out when unknown).
 - title: n > 1 → `${display} | ${n} Codes Bundle | E | ${labels.join(" + ")} | Redeem Codes | Instant Auto Delivery`;
@@ -187,10 +189,12 @@ and stage).
   later `VALID UNTIL ${date} - the codes stop working after that date.`;
   `YOU RECEIVE ${n} UNUSED REDEEM CODES - ONE OF EACH:` + `- label` lines;
   `ONE OF EACH REWARD PER ACCOUNT` (once per account — naming a box/pack label
-  when there is one; compare lists with other bundles of the same event; one
-  bundle per account); the bundle/delivery/own-account bullets; `HOW TO REDEEM`
-  + howTo; `GOOD TO KNOW` + goodToKnow. Over 2000 → drop good-to-know lines
-  from the end (the per-account block is never dropped).
+  when there is one, plus "a box the account already got is refused as not
+  eligible"; compare lists with other bundles of the same event; one bundle per
+  account); the bundle/delivery/own-account bullets; `HOW TO REDEEM` + howTo;
+  `GOOD TO KNOW` + goodToKnow. Over 2000 → drop good-to-know lines from the
+  end, then the optional lines (already-have, more-accounts, delivery,
+  own-account); the once-per-account rule and the box line are never dropped.
 - deliveryTemplate: `Thank you for your order! Your ${display} code bundle` +
   ` (event ${long}, redeem by ${date})` (each part only when known) + `:\n{password}\n\n${deliveryHelp}`.
 - cover: `${display} Code Bundle`, `${n} Redeem Code${n>1?"s":""}`, bullets

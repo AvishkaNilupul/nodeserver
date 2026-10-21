@@ -231,9 +231,10 @@ test("description: the EVENT line, then the once-per-account block that never ge
   ]);
   const at = lines.indexOf("ONE OF EACH REWARD PER ACCOUNT");
   assert.ok(at > lines.indexOf("- Esports Loot Box"), "after the reward list");
-  assert.deepEqual(lines.slice(at + 1, at + 4), [
+  assert.deepEqual(lines.slice(at + 1, at + 5), [
     "- A reward from one event can be redeemed only once per Battle.net account - that includes the Esports Loot Box. " +
       "Two codes for the same reward will not both work on one account.",
+    "- If this Battle.net account already got this event's Esports Loot Box (from another bundle or any other way), that code will be refused as not eligible.",
     "- Already have a bundle from the event of 11 October 2026? Compare the reward lists: a reward the account already has will not be added again.",
     "- Want these rewards on more than one account? Buy one bundle per account.",
   ]);
@@ -251,11 +252,47 @@ test("description: the EVENT line, then the once-per-account block that never ge
   assert.ok(tight.description.includes("Buy one bundle per account."));
 });
 
+test("events are counted, not dates: two events on one day, an event with no date", () => {
+  const sameDay = defaultTexts({ slots: slots("A Spray", "B Spray"), guide: ow(), now: NOW, eventStarts: [W2, new Date(W2)] });
+  assert.ok(sameDay.title.includes("| Events 11 Oct 2026 |"), sameDay.title);
+  assert.ok(sameDay.description.includes("\nEVENTS: 11 October 2026 - each code is from one of these events.\n"));
+  assert.ok(sameDay.deliveryTemplate.includes("(events 11 October 2026)"));
+
+  const oneUnknown = defaultTexts({ slots: slots("A Spray", "B Spray"), guide: ow(), now: NOW, eventStarts: [W2, null] });
+  assert.ok(oneUnknown.description.includes("\nEVENTS: 11 October 2026 - each code is from one of these events.\n"));
+  assert.ok(oneUnknown.description.includes("- Already have a bundle from any of these events? "));
+
+  const unknown = defaultTexts({ slots: slots("A Spray", "B Spray"), guide: ow(), now: NOW, eventStarts: [null] });
+  assert.ok(!unknown.description.includes("EVENT") && !unknown.title.includes("Event"), "no date at all: no event named");
+  assert.ok(unknown.description.includes("- Already have one of these rewards? "));
+});
+
+test("title: a 160-char title cut to PlayerAuctions' 150 keeps the event", () => {
+  const four = slots("Prost Spray", "Purrfect Afternoon Spray", "Skal Spray", "Banana Cat Spray");
+  const t = defaultTexts({ slots: four, guide: ow(), now: NOW, eventStarts: [W2] });
+  assert.equal(t.title.length, 160, t.title);
+  const pa = fitTitle(t.title, 150);
+  assert.ok(pa.length <= 150);
+  assert.equal(pa, "Overwatch 2 | 4 Codes Bundle | Event 11 Oct 2026 | Prost Spray + Purrfect Afternoon Spray + Skal Spray + Banana Cat Spray | Redeem Codes");
+});
+
+test("description: a very large bundle drops optional lines, never the per-account rule", () => {
+  const labels = Array.from({ length: 30 }, (_, i) => `Reward number ${String(i + 1).padStart(2, "0")} with a long name x`);
+  const t = defaultTexts({ slots: slots(...labels), guide: ow(), useBy: "2027-02-28T14:59:00Z", now: NOW, eventStarts: [W2] });
+  assert.ok(t.description.length <= 2000, `fits: ${t.description.length}`);
+  for (const l of labels) assert.ok(t.description.includes(`- ${l}\n`), "every reward is still listed");
+  assert.ok(t.description.includes("ONE OF EACH REWARD PER ACCOUNT\n- A reward from one event can be redeemed only once per Battle.net account."));
+  assert.ok(t.description.includes("HOW TO REDEEM"));
+  assert.ok(!t.description.includes("GOOD TO KNOW"), "good-to-know lines went first");
+  assert.ok(!t.description.includes("- Already have a bundle"), "then the optional lines, first one first");
+});
+
 test("description: several events, one code, no event, and the box/pack note", () => {
   const multi = defaultTexts({ slots: slots("A Ticket", "B Ticket"), guide: df(), now: NOW, eventStarts: ["2026-10-08T06:00Z", "2026-10-09T06:00Z", "2026-10-10T09:00Z"] });
   assert.ok(multi.description.includes("\nEVENTS: 8, 9 and 10 October 2026 - each code is from one of these events.\n"));
   assert.ok(multi.description.includes("- Already have a bundle from any of these events? "));
   assert.ok(multi.description.includes("once per Delta Force account. Two codes"), "no box or pack: no note");
+  assert.ok(!multi.description.includes("not eligible"), "no box or pack: no eligibility line");
 
   const one = defaultTexts({ slots: slots("Fireworks Lucky Pack x1"), guide: df(), now: NOW, eventStarts: [W1] });
   assert.ok(one.description.includes("\nEVENT: 2 October 2026 - the code is from this event.\n"));
@@ -264,6 +301,7 @@ test("description: several events, one code, no event, and the box/pack note", (
 
   const boxes = defaultTexts({ slots: slots("Esports Loot Box", "Gold Crate"), guide: ow(), now: NOW });
   assert.ok(boxes.description.includes("once per Battle.net account - that includes boxes and packs. "));
+  assert.ok(boxes.description.includes("- If this Battle.net account already got one of this event's boxes or packs (from another bundle or any other way), that code will be refused as not eligible."));
   assert.ok(!boxes.description.includes("EVENT"), "no event known: no EVENT line");
   assert.ok(boxes.description.includes("- Already have one of these rewards? A reward the account already has will not be added again."));
   const boxer = defaultTexts({ slots: slots("Boxer Spray"), guide: ow(), now: NOW }).description;
