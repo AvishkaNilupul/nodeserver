@@ -12,6 +12,7 @@
 
 const hosts = require("./botHosts");
 const { withFileLock } = require("./fileLock");
+const { mirrorDisabled } = require("./botAccountMirror");
 const AuditFinding = require("../models/AuditFinding");
 
 // Log each stop as an already-resolved finding so it shows up as activity on
@@ -334,6 +335,9 @@ async function stopFarmingGame(acc, game) {
   if (edit.result) return owed ? { ...edit.result, reason: edit.result.reason + owed } : edit.result;
   const { next, disabled } = edit;
   handled.add(memoKey);
+  // The config now says this account is off; so must its BotAccount mirror
+  // (utils/botAccountMirror) — the retro-reaper and the seat counts read it.
+  if (disabled) await mirrorDisabled(hostId, file, [acc.clientSecret]).catch(() => 0);
 
   // Reload only this account's container; the rest of the fleet is untouched.
   const container = String(acc.container || "").trim();

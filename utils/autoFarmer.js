@@ -22,6 +22,7 @@ const hosts = require("./botHosts");
 const botFactory = require("./botFactory");
 const botWaker = require("./botWaker");
 const { withFileLock } = require("./fileLock");
+const { mirrorDisabled } = require("./botAccountMirror");
 const farmOps = require("./farmOps");
 const mp = require("./marketplaces");
 const settings = require("./settings");
@@ -3303,6 +3304,19 @@ async function executeTask(task, ctx, { append = false } = {}) {
   return { bots, accounts: deployed.length };
 }
 
+// The retro-reaper's choice, pure: which of the completed tasks' logins go back
+// to the pool. `unrecyclable`, `activeAssigned` and `enabled` are Sets of
+// lowercased logins. Kept separate so scripts/reconcile-host-ledger.js can say
+// what a BotAccount correction will make this pass release BEFORE it writes —
+// the `enabled` guard below reads BotAccount, so correcting a stale flag
+// changes this pass's answer.
+function retroRecycleLogins(logins, { unrecyclable, activeAssigned, enabled }) {
+  return (logins || []).filter((u) => {
+    const l = String(u).toLowerCase();
+    return !unrecyclable.has(l) && !activeAssigned.has(l) && !enabled.has(l);
+  });
+}
+
 // Retire the bots of tasks whose campaign has ended.
 // - SHARED containers (other active tasks also farm there) survive: only
 //   this task's accounts get the game removed from their per-account
@@ -3394,10 +3408,10 @@ async function reapRetiredBots(af, host, progress) {
         { status: "active" },
         { assignedAccounts: 1 },
       ).lean();
-      const stillFarming = new Set();
+      const activeAssigned = new Set();
       for (const t of activeRows) {
         for (const u of t.assignedAccounts || []) {
-          stillFarming.add(String(u).toLowerCase());
+          activeAssigned.add(String(u).toLowerCase());
         }
       }
       const BotAccount = require("../models/BotAccount");
@@ -3405,12 +3419,14 @@ async function reapRetiredBots(af, host, progress) {
         { login: { $in: logins }, enabled: true },
         { login: 1 },
       ).lean();
-      for (const r of enabledRows) {
-        stillFarming.add(String(r.login || "").toLowerCase());
-      }
-      const back = logins.filter(
-        (u) => !sold.has(u.toLowerCase()) && !stillFarming.has(u.toLowerCase()),
+      const enabled = new Set(
+        enabledRows.map((r) => String(r.login || "").toLowerCase()),
       );
+      const back = retroRecycleLogins(logins, {
+        unrecyclable: sold,
+        activeAssigned,
+        enabled,
+      });
       if (back.length) {
         // Auto-farm's own claims only — see recyclableClaimQuery. This pass
         // re-reads every completed task on every tick, so anything it wrongly
@@ -3766,6 +3782,9 @@ async function completeEndedTasks() {
         // Shared: switch only THIS task's accounts off the ended game (same
         // per-account FavouriteGames edit farmControl.stopFarmingGame uses),
         // one write + one restart; co-tenants keep farming untouched.
+        // Tokens this edit switches off, mirrored into BotAccount once the
+        // write has landed (utils/botAccountMirror).
+        const switchedOff = [];
         try {
           // The read, the edit and the write are one step under the file's
           // lock (utils/fileLock): a farm placed into this shared bot, or an
@@ -3807,7 +3826,10 @@ async function completeEndedTasks() {
               u.FavouriteGames = next;
               // An empty per-account list inherits the config-level games,
               // which could resurrect the removed one — disable instead.
-              if (!next.length) u.Enabled = false;
+              if (!next.length) {
+                u.Enabled = false;
+                if (u.ClientSecret) switchedOff.push(u.ClientSecret);
+              }
               // Games left over means this account is still farming here for a
               // co-tenant task, so it must NOT go back to the pool.
               else stillEnabled.add(String(u.Login || "").toLowerCase());
@@ -3830,6 +3852,12 @@ async function completeEndedTasks() {
             // stopped container reads the trimmed config when it next starts.
             await restartIfRunning(h, b.container).catch(() => {});
             trimmed.push(b.container + " (" + changed + " acct)");
+            // The config now says these accounts are off; a mirror left
+            // enabled keeps them claimed in the pool for good (the retro-reaper
+            // reads it) and inflates every seat count.
+            if (switchedOff.length) {
+              await mirrorDisabled(h.id, b.file, switchedOff).catch(() => 0);
+            }
           }
         } catch {
           /* config unreadable — leave the shared bot alone */
@@ -6097,6 +6125,7 @@ module.exports = {
   // to hand back an auto-farm account a buyer holds or a listing sells — the
   // same sold / connected / listed / leased check every recycle path uses.
   unrecyclableLogins,
+  retroRecycleLogins,
   // exported for tests
   expireStaleProbes: structural.expireStaleProbes,
   backfillActiveTasks: structural.backfillActiveTasks,
