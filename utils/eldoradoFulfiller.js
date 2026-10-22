@@ -1263,6 +1263,39 @@ async function syncBundleStock({ dryRun = false } = {}) {
     }
     if (!offer) continue;
 
+    // A no-claim claim-at-sale offer that buyers emptied: Eldorado CLOSES an
+    // offer at quantity 0, and neither branch below looks at a Closed one, so
+    // it stayed off sale for good (R6 c847f2c2, 2026-10-19..22). The row is
+    // "active" and the farm keeps refilling its set, so:
+    //  - stock back -> reopen it (edit carries the quantity, then resume);
+    //  - still empty -> mark it paused-for-stock like the branch below, so the
+    //    offer rotation can move it to a bundle the farm holds, and the
+    //    listing reconcile leaves it alone instead of booking it sold.
+    if (row.noclaimStock && !row.bulkOfferId && offer.offerState === "Closed") {
+      if (real > 0) {
+        changes.push({ title: row.title, action: "reopen (sold out, " + real + " back in stock)" });
+        if (!dryRun) {
+          try {
+            await mp.eldoradoUpdateOffer(row.externalId, { quantity: real });
+            await mp.eldoradoRelist(row.externalId);
+            row.autoPaused = false;
+            row.lastError = "";
+            row.qtyTarget = real;
+            await row.save();
+          } catch (e) {
+            console.error("eldorado reopen of sold-out " + row.externalId + ":", e.message);
+          }
+        }
+      } else if (!row.autoPaused) {
+        changes.push({ title: row.title, action: "sold out — left for the offer rotation" });
+        if (!dryRun) {
+          row.autoPaused = true;
+          row.lastError = "paused: no claimable stock";
+          await row.save();
+        }
+      }
+      continue;
+    }
     if (real <= 0 && offer.offerState === "Active") {
       changes.push({ title: row.title, action: "pause (no claimable stock)" });
       if (!dryRun) {

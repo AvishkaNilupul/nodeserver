@@ -375,13 +375,20 @@ async function targetSet(d, items, { game, price, fromSet, now, tag, note }) {
   return { set: typeof doc.toObject === "function" ? doc.toObject() : doc, created: true };
 }
 
+// Eldorado states a rotation may rewrite: "Paused" (the stock sync took it off
+// sale) and "Closed" (buyers took the last unit; Eldorado closes an offer at
+// quantity 0). A sold-out R6 offer sat Closed for days with nothing to bring it
+// back (2026-10-19..22) — the farm held a newer bundle the whole time.
+const REWRITABLE_STATES = new Set(["Paused", "Closed"]);
+
 // Rewrite one paused offer and move its row. Returns { rotated:true, stock } or
 // { skipped } / { error }. The order below IS the safety property.
 async function rotateRow(d, row, ctx) {
   const ext = str(row.externalId);
   const live = await d.mp.eldoradoOffer(ext);
   if (!live) return { error: "offer unreadable on Eldorado" };
-  if (live.offerState !== "Paused") return { skipped: "offer is " + (live.offerState || "?") + " on Eldorado" };
+  if (!REWRITABLE_STATES.has(live.offerState)) return { skipped: "offer is " + (live.offerState || "?") + " on Eldorado" };
+  const closed = live.offerState === "Closed";
   const priceBefore = Number(live.pricePerUnit && live.pricePerUnit.amount);
 
   // 1. Text + cover while paused. Price and quantity are left as they are.
@@ -390,6 +397,9 @@ async function rotateRow(d, row, ctx) {
     description: ctx.description,
     mainOfferImage: ctx.image,
     offerImages: [],
+    // Eldorado refuses any edit of a Closed offer at quantity 0 ("Quantity of
+    // 0 is too low"). 1 keeps it Closed — nobody can buy until the resume below.
+    ...(closed ? { quantity: 1 } : {}),
   });
   if (!updated || str(updated.offerTitle) !== ctx.title.slice(0, 160)) {
     return { error: "the new title did not take on Eldorado — row left on its old set" };
@@ -435,12 +445,15 @@ async function rotateRow(d, row, ctx) {
   const moved = await d.MarketplaceListing.findById(row._id).lean();
   const stock = pk.quantityFor(d, ctx.pack, await d.ncs.stockForListing(moved));
   if (stock > 0) {
+    // A Closed offer takes its stock through the edit call, which is also the
+    // way round the per-offer quota on the quantity endpoint.
+    if (closed) await d.mp.eldoradoUpdateOffer(ext, { quantity: stock });
     await d.mp.eldoradoRelist(ext);
     await d.MarketplaceListing.updateOne(
       { _id: row._id, set: ctx.set._id },
       { $set: { autoPaused: false, lastError: "", qtyTarget: stock } },
     );
-    await d.mp.eldoradoSetQuantity(ext, stock);
+    if (!closed) await d.mp.eldoradoSetQuantity(ext, stock);
   }
   return { rotated: true, stock };
 }
@@ -583,7 +596,7 @@ async function rotationPass(opts = {}) {
           out.errors.push({ set: setId, label, externalId: str(r.externalId), error: "offer read: " + e.message });
           continue;
         }
-        if (live && live.offerState === "Paused") paused.push(r);
+        if (live && REWRITABLE_STATES.has(live.offerState)) paused.push(r);
         else {
           out.skipped.push({
             set: setId,
@@ -717,6 +730,7 @@ function status() {
 module.exports = {
   // constants
   PAUSED_ERROR,
+  REWRITABLE_STATES,
   MIN_PAUSED_MS,
   RECENT_SALE_MS,
   RECENT_CAMPAIGN_MS,
