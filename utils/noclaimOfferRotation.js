@@ -19,9 +19,12 @@
 //
 //   - Only rows the stock sync paused (autoPaused + its exact error). A pause
 //     the owner made (autoPaused:false) is never touched.
-//   - Only when NO account holds the old bundle any more (covering 0). Zero
-//     free stock while accounts still cover it is contention, and a new bundle
-//     cannot fix that.
+//   - A live no-claim bulk pack on the set moves with it, keeping its pack
+//     title, pack cover and pack-counted quantity (utils/noclaimOfferPack).
+//     Any other bulk row is left alone.
+//   - Only when no FREE account holds the old bundle any more, and the free
+//     farm holds a different one. Free accounts all sold or reserved is
+//     contention, and a new bundle cannot fix that.
 //   - Only offers that delivered an order in the last 7 days: an offer that has
 //     been dead for a week is not brought back at an old price.
 //   - Never while a paid order waits on the offer.
@@ -33,6 +36,7 @@
 //   - Kill switch: autoFarm.noclaimRotateOffers === false.
 
 const settings = require("./settings");
+const pk = require("./noclaimOfferPack");
 
 const PAUSED_ERROR = "paused: no claimable stock";
 const MIN_PAUSED_MS = 30 * 60 * 1000;
@@ -132,7 +136,6 @@ function rowSkipReason(row, now = Date.now()) {
   if (row.status !== "active") return "row is " + (row.status || "?");
   if (row.autoPaused !== true) return "not paused by the stock sync";
   if (str(row.lastError) !== PAUSED_ERROR) return "paused for another reason";
-  if (row.bulkOfferId) return "bulk pack row";
   if (!row.set) return "no set";
   if (now - timeOf(row.updatedAt) < MIN_PAUSED_MS) return "paused under 30 min ago";
   return "";
@@ -266,7 +269,9 @@ function realDeps() {
         description: ual.listingDescription(game, drops, "eldorado", cls),
       };
     },
-    buildCover: (set) => require("./setImage").buildSetGridImage(set),
+    // showTotal: a bundle with several copies of an item says its real size
+    // on the cover ("11 ITEMS"), not just one numbered tile per distinct item.
+    buildCover: (set) => require("./setImage").buildSetGridImage(set, { showTotal: true }),
     unlink: (p) => {
       try {
         require("fs").unlinkSync(p);
@@ -295,6 +300,32 @@ function setGameNorms(set) {
   return [...out];
 }
 
+// The expiry leads (utils/noclaimHoldings, "EXPIRY"), shared with the grow
+// pass. A drop leaves the accounts seven days after its campaign ends, so:
+//   sellLeadMs   — an offer must be covered this far ahead to stay on sale
+//                  (what the stock sync counts)
+//   bundleLeadMs — a bundle is only BUILT from copies that last this long, a
+//                  margin past the sell lead, so a rewrite is not paused again
+//                  by the next sync
+// Both 0 when the rules are off or the holdings module predates them.
+function expiryLeads(d) {
+  const nh = d && d.nh;
+  const exp = nh && typeof nh.expirySettings === "function" ? nh.expirySettings() : null;
+  if (!exp || !exp.on) return { sellLeadMs: 0, bundleLeadMs: 0 };
+  return {
+    sellLeadMs: Number(exp.sellLeadMs) || 0,
+    bundleLeadMs: Number(exp.bundleLeadMs) || 0,
+  };
+}
+
+// The snapshot's holdings with their items as they will stand at `atMs` — what
+// the pickers build a bundle from.
+function holdingsAt(d, base, atMs) {
+  const nh = d && d.nh;
+  if (nh && typeof nh.durableHoldings === "function") return nh.durableHoldings(base, atMs) || [];
+  return (base && base.holdings) || [];
+}
+
 // ---------------------------------------------------------------------------
 // One pass
 // ---------------------------------------------------------------------------
@@ -303,7 +334,10 @@ function setGameNorms(set) {
 // or another offer's) is reused, so a retried or parallel rotation never mints
 // a second copy; otherwise a new one is made with the fields
 // POST /noclaim-stock/sets writes.
-async function targetSet(d, items, { game, price, fromSet, now }) {
+//
+// `tag` and `note` let the grow pass (utils/noclaimOfferGrow) make its sets
+// through the same door; left out, they read as a rotation's.
+async function targetSet(d, items, { game, price, fromSet, now, tag, note }) {
   const sig = itemsSignature(items);
   const recent = await d.DropSet.find(
     { stockSource: "noclaim", createdAt: { $gte: new Date(now - REUSE_SET_MS) } },
@@ -318,10 +352,11 @@ async function targetSet(d, items, { game, price, fromSet, now }) {
     }
   }
   const doc = await d.DropSet.create({
-    name: (game + " — " + bundleLabel(items) + " · Eldorado (auto-rotated)").slice(0, 200),
+    name: (game + " — " + bundleLabel(items) + " · Eldorado (" + (tag || "auto-rotated") + ")").slice(0, 200),
     note:
+      note ||
       "Made " + new Date(now).toISOString().slice(0, 10) + " by the no-claim offer rotation: set " +
-      String(fromSet._id) + " (" + bundleLabel(fromSet.items) + ") had expired off every account.",
+        String(fromSet._id) + " (" + bundleLabel(fromSet.items) + ") had expired off every account.",
     price: Number(price) > 0 ? Number(price) : 0,
     items: items.map((i) => ({ itemKey: i.itemKey, name: i.name, game: i.game, image: i.image, qty: i.qty })),
     stockSource: "noclaim",
@@ -387,9 +422,18 @@ async function rotateRow(d, row, ctx) {
     return { error: "the row changed while rotating — left for the next pass" };
   }
 
-  // 3. Back on sale exactly the way syncBundleStock resumes its own pauses.
+  if (ctx.pack) {
+    try {
+      await pk.recordOnOffer(d, ctx.pack, ctx.set, ctx);
+    } catch {
+      /* the bulk dashboard's copy of the text is display only */
+    }
+  }
+
+  // 3. Back on sale exactly the way syncBundleStock resumes its own pauses. A
+  // pack row counts whole packs; under one pack it stays paused for the sync.
   const moved = await d.MarketplaceListing.findById(row._id).lean();
-  const stock = await d.ncs.stockForListing(moved);
+  const stock = pk.quantityFor(d, ctx.pack, await d.ncs.stockForListing(moved));
   if (stock > 0) {
     await d.mp.eldoradoRelist(ext);
     await d.MarketplaceListing.updateOne(
@@ -419,8 +463,19 @@ async function rotationPass(opts = {}) {
       autoPaused: true,
     }).lean();
     const bySet = new Map();
+    const packs = new Map(); // row id -> { offer, n } for live no-claim pack rows
     for (const r of rows || []) {
       if (rowSkipReason(r, now)) continue;
+      if (pk.isPackRow(r)) {
+        let p;
+        try {
+          p = await pk.packFor(d, r);
+        } catch (e) {
+          p = { skip: e.message };
+        }
+        if (p.skip) continue; // not a live no-claim pack: left exactly as it is
+        packs.set(String(r._id), p);
+      }
       const k = String(r.set);
       (bySet.get(k) || bySet.set(k, []).get(k)).push(r);
     }
@@ -429,6 +484,7 @@ async function rotationPass(opts = {}) {
     let paidOffers = null;
     let setsDone = 0;
     let rowsLeft = MAX_ROWS_PER_PASS;
+    const leads = expiryLeads(d);
     for (const [setId, group] of bySet) {
       if (setsDone >= MAX_SETS_PER_PASS || rowsLeft <= 0) break;
       const set = await d.DropSet.findById(setId).lean();
@@ -438,11 +494,23 @@ async function rotationPass(opts = {}) {
         skip("not a no-claim set");
         continue;
       }
-      const st = await d.ncs.stockForSet(set);
-      if (st.covering > 0) {
-        // Accounts still hold it: the sync resumes it when one frees up.
+      // Counted the way the stock sync counts what the offer may advertise:
+      // on the copies still there a sell lead from now (expiryLeads). The sync
+      // pauses an offer a day BEFORE a wave leaves its accounts; asked about
+      // today's copies this would answer "still held" and leave it paused
+      // until they were really gone.
+      const st = await d.ncs.stockForSet(set, { leadMs: leads.sellLeadMs });
+      if (st.free > 0 || st.stale > 0) {
+        // A free account still holds it (or did at its last read): the sync
+        // resumes the offer by itself.
         continue;
       }
+      // No free account holds the bundle any more. When accounts that are NOT
+      // free still do (sold, or on another listing), this used to be left as
+      // contention for good — but an offer grown to a bigger bundle
+      // (utils/noclaimOfferGrow) lands exactly here when the extra drops
+      // expire. The picker below settles it: fewer than MIN_ACCOUNTS free
+      // accounts, or the same bundle again, is real contention and is skipped.
       out.stale++;
       const lastSale = Math.max(0, ...group.map(lastDeliveredAt));
       if (now - lastSale > RECENT_SALE_MS) {
@@ -453,8 +521,11 @@ async function rotationPass(opts = {}) {
       const game = setGame(set);
       if (!base) base = await d.nh.snapshotBase();
       const norms = setGameNorms(set);
+      // Built from the copies that outlast the bundle lead, so the new text is
+      // not one the next expiry takes straight back off sale.
+      const lasting = holdingsAt(d, base, now + leads.bundleLeadMs);
       const names = new Set();
-      for (const h of (base && base.holdings) || []) {
+      for (const h of lasting) {
         for (const it of (h && h.items) || []) {
           if (it && it.campaign && sameGame(it.game, game)) names.add(str(it.campaign).trim());
         }
@@ -469,7 +540,7 @@ async function rotationPass(opts = {}) {
           )
         : new Map();
       const pick = pickRotationBundle({
-        holdings: (base && base.holdings) || [],
+        holdings: lasting,
         isFree: (h) => d.nh.freeReason(h, base, norms) === "",
         isFresh: (h) => d.nh.isFresh(h, base, now),
         game,
@@ -547,8 +618,17 @@ async function rotationPass(opts = {}) {
         rowsLeft--;
         const ext = str(row.externalId);
         let r;
+        let rowCtx = ctx;
         try {
-          r = await rotateRow(d, row, ctx);
+          const pack = packs.get(String(row._id));
+          if (pack) {
+            // The pack's own title, description and cover, under its offer's lock.
+            rowCtx = { ...ctx, ...(await pk.packCopy(d, pack, ctx.set, ctx, game)), pack };
+            const locked = await pk.withLock(d, pack, () => rotateRow(d, row, rowCtx));
+            r = locked.ran ? locked.value : { skipped: "the bulk offer is busy — left for the next pass" };
+          } else {
+            r = await rotateRow(d, row, ctx);
+          }
         } catch (e) {
           r = { error: e.message };
         }
@@ -557,7 +637,7 @@ async function rotationPass(opts = {}) {
             externalId: ext,
             price: row.price,
             from: bundleLabel(set.items),
-            to: ctx.title,
+            to: rowCtx.title,
             set: String(ctx.set._id),
             newSet: ctx.created,
             stock: r.stock,
@@ -574,7 +654,7 @@ async function rotationPass(opts = {}) {
               game,
               count: r.stock,
               detail:
-                "Eldorado offer switched to the bundle the farm holds now: " + ctx.title +
+                "Eldorado offer switched to the bundle the farm holds now: " + rowCtx.title +
                 " ($" + row.price + ", " + r.stock + " in stock) — " + bundleLabel(set.items) +
                 " had expired off every account",
               meta: { fromSet: setId, toSet: String(ctx.set._id), newSet: ctx.created },
@@ -656,4 +736,13 @@ module.exports = {
   rotationPass,
   rotateRow,
   status,
+  // shared with utils/noclaimOfferGrow
+  keyOfItem,
+  copiesOf,
+  setGame,
+  setGameNorms,
+  targetSet,
+  realDeps,
+  expiryLeads,
+  holdingsAt,
 };
