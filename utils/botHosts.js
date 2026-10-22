@@ -539,15 +539,90 @@ async function exists(host, file) {
 // Write `text` to <dir>/<file> atomically (temp file + rename), keeping a .bak
 // copy of any previous version — matching the local behaviour the routes relied
 // on before, but for either transport.
-async function writeFileAtomic(host, file, text) {
-  await writeFileRaw(host, file, text);
-  // An account may only be enabled in one config per host — strip stale copies
-  // left in sibling configs (utils/dupeGuard.js).
+//
+// `opts.prev` is what the file held just before this write, for a caller that
+// has just read it under the file's lock: a string, or null for a file that
+// did not exist. Left out, it is read here. The single-home guard needs it to
+// tell an account this write switched ON from one that was already on.
+async function writeFileAtomic(host, file, text, opts) {
+  // One account, one bot (utils/fleetIntegrity.js, 2026-10-06): an entry for an
+  // account that sits in a no-claim bot is written switched OFF, whoever asked.
+  // Every bot configured here claims drops, and a claimed drop is no-claim
+  // stock destroyed. The guard never throws and never blocks the write.
+  let integrity = null;
   try {
-    const guard = require("./dupeGuard");
-    await guard.enforceSingleHome(module.exports, host, file, text);
+    integrity = require("./fleetIntegrity");
+    text = await integrity.guardManagedWrite(host, file, text);
+  } catch (e) {
+    console.error("[botHosts] one-home guard error: " + e.message);
+  }
+  const written = () => {
+    try {
+      if (integrity) integrity.forget("managed");
+    } catch {
+      /* a cache that is not dropped only ages out a minute later */
+    }
+  };
+  // An account may only be enabled in one config per host — strip stale copies
+  // left in sibling configs (utils/dupeGuard.js). The heal rewrites OTHER
+  // files under their own locks; called from inside a file lock it runs once
+  // that lock is released, not before this returns.
+  let guard = null;
+  try {
+    guard = require("./dupeGuard");
   } catch (e) {
     console.error("[botHosts] dupe guard error: " + e.message);
+  }
+  const fileLock = require("./fileLock");
+  const guarded =
+    !!guard &&
+    typeof guard.noteWrite === "function" &&
+    typeof fileLock.afterUnlock === "function" &&
+    guard.watches(host, file);
+  if (!guarded) {
+    // Not a bot config, a heal's own rewrite of a sibling, or this file
+    // running beside a dupeGuard.js / fileLock.js from before 2026-10-11.
+    await writeFileRaw(host, file, text);
+    written();
+    try {
+      if (guard) await guard.enforceSingleHome(module.exports, host, file, text);
+    } catch (e) {
+      console.error("[botHosts] dupe guard error: " + e.message);
+    }
+    return;
+  }
+  // What the file held, the write, and the note of what the write switched on
+  // are ONE step under the file's lock — straight through for a caller that
+  // already holds it. A heal stripping an account from this file cannot fall
+  // between the look and the write: it would have been written back as an
+  // account "that was already here", which nothing then removes.
+  await fileLock.withFileLock(host, file, async () => {
+    const prev = opts && "prev" in opts ? opts.prev : await previousText(host, file);
+    await writeFileRaw(host, file, text);
+    written();
+    try {
+      const write = guard.noteWrite(host, file, text, prev);
+      await guard.enforceSingleHome(module.exports, host, file, text, write);
+    } catch (e) {
+      console.error("[botHosts] dupe guard error: " + e.message);
+    }
+  });
+}
+// What (host, file) holds right now, asked once: its text, null when there is
+// no such file, undefined when that cannot be learned. Never throws — the
+// write that follows is attempted either way, exactly as it always was.
+async function previousText(host, file) {
+  try {
+    if (host.transport === "local") {
+      return await fsp.readFile(path.join(host.dir, file), "utf8");
+    }
+    const { stdout } = await sshRun(host, "cat -- " + shq(remotePath(host, file)), {
+      timeout: SHORT_TIMEOUT,
+    });
+    return stdout;
+  } catch (e) {
+    const gone = e && (e.code === "ENOENT" || /No such file/i.test(e.stderr || e.message || ""));
+    return gone ? null : undefined;
   }
 }
 async function writeFileRaw(host, file, text) {
@@ -724,8 +799,88 @@ async function dockerPs(host) {
   return states;
 }
 
+// ----------------------------------------------------------------------------
+// Container-start observers
+// ----------------------------------------------------------------------------
+
+// `docker restart` STARTS a stopped container, and many paths use it only to
+// make a bot reload an edited config — which is how parked bots were woken
+// about daily for weeks with nothing recording who did it (2026-09, the
+// contabo twitchbotx8/x19/x11 wake/park flap). Every start made through this
+// module is reported to these observers with the code path that asked for it;
+// utils/botWaker.js registers one so a parked bot that anything other than the
+// waker starts is recorded with its starter. Observers run inline, must be
+// cheap and synchronous, and one that throws is ignored.
+const startObservers = [];
+
+function onContainerStart(fn) {
+  if (typeof fn === "function" && !startObservers.includes(fn)) {
+    startObservers.push(fn);
+  }
+}
+
+const APP_ROOT = path.resolve(__dirname, "..");
+
+// The first `max` frames of `stack` outside this file, innermost first, as
+// "fn (utils/x.js:12) < caller (utils/y.js:34)". "" when there are none.
+function callerFrames(stack, max = 2) {
+  const out = [];
+  for (const line of String(stack || "").split("\n").slice(1)) {
+    const m = /^\s*at (?:async )?(?:(.+?) \()?(.+?):(\d+):\d+\)?\s*$/.exec(line);
+    if (!m || m[2] === __filename || m[2].startsWith("node:")) continue;
+    const file = path.isAbsolute(m[2]) ? path.relative(APP_ROOT, m[2]) : m[2];
+    out.push((m[1] ? m[1] + " " : "") + "(" + file + ":" + m[3] + ")");
+    if (out.length >= max) break;
+  }
+  return out.join(" < ");
+}
+
+function notifyStart(host, action, container, caller) {
+  for (const fn of startObservers) {
+    try {
+      fn({ hostId: host.id, action, container, caller });
+    } catch {
+      /* an observer must never break a docker operation */
+    }
+  }
+}
+
+// One "should this container run?" change at a time per container, within this
+// process (2026-10-03). A park holds it from its restart-policy change to the
+// end of its stop (botWaker, stopIfNoAccounts); farmControl.restartIfRunning
+// holds it across its check-and-restart. Without it a restart decided while a
+// park's stop was still in flight (the container still reads "running" until
+// it exits) started the bot again the moment the stop landed — `docker
+// restart` STARTS a stopped container. Callers wait in order; a failed step
+// never wedges the next.
+const containerLocks = new Map();
+
+function withContainerLock(host, container, fn) {
+  const key = String((host && host.id) || "") + "|" + String(container || "");
+  const run = (containerLocks.get(key) || Promise.resolve()).then(() => fn());
+  const tail = run.catch(() => {});
+  containerLocks.set(key, tail);
+  tail.then(() => {
+    if (containerLocks.get(key) === tail) containerLocks.delete(key);
+  });
+  return run;
+}
+
 // Run a single-container docker verb (restart/start/stop/rm -f).
-async function dockerContainer(host, action, container) {
+// opts.notAStart — a restart of a container the caller has just seen RUNNING
+// (a config reload) starts nothing, so it is not reported to the observers.
+async function dockerContainer(host, action, container, opts = {}) {
+  const starts =
+    (action === "start" || action === "restart") && !(opts && opts.notAStart);
+  // Captured before the first await, while the caller is still on the stack.
+  const caller =
+    starts && startObservers.length ? callerFrames(new Error().stack) : "";
+  const out = await containerVerb(host, action, container);
+  if (starts) notifyStart(host, action, container, caller);
+  return out;
+}
+
+async function containerVerb(host, action, container) {
   if (isNative(host)) {
     return (await botctl(host, [action, container])).trim();
   }
@@ -881,7 +1036,16 @@ async function dockerStats(host) {
   return out;
 }
 
+// `compose up -d` starts a stopped service too, so it reports like a start
+// (see onContainerStart).
 async function composeUp(host, container) {
+  const caller = startObservers.length ? callerFrames(new Error().stack) : "";
+  const out = await composeUpService(host, container);
+  notifyStart(host, "compose up", container, caller);
+  return out;
+}
+
+async function composeUpService(host, container) {
   if (isNative(host)) {
     return (
       await botctl(host, ["start", container], { timeout: 120000 })
@@ -942,9 +1106,33 @@ async function readMeta(name) {
     throw e;
   }
 }
+
+// Written to a unique temp file, fsynced, then renamed over the old one, so a
+// reader only ever sees a whole file (2026-10-03). A plain writeFile truncates
+// first, so a read in between could get "" or half the JSON — which botWaker's
+// park registry reads as "nothing parked": farm2's execute step would then
+// start parked bots, and a park recorded from that read would write a
+// registry holding only itself (every bot parked before it never woken again).
+let metaSeq = 0;
 async function writeMeta(name, text) {
   await fsp.mkdir(SNAPSHOT_DIR, { recursive: true });
-  await fsp.writeFile(path.join(SNAPSHOT_DIR, name), text, "utf8");
+  const full = path.join(SNAPSHOT_DIR, name);
+  const tmp =
+    full + ".tmp-" + process.pid + "-" + ++metaSeq + "-" +
+    crypto.randomBytes(3).toString("hex");
+  let fh = null;
+  try {
+    fh = await fsp.open(tmp, "w");
+    await fh.writeFile(text, "utf8");
+    await fh.sync();
+    await fh.close();
+    fh = null;
+    await fsp.rename(tmp, full);
+  } catch (e) {
+    if (fh) await fh.close().catch(() => {});
+    await fsp.unlink(tmp).catch(() => {});
+    throw e;
+  }
 }
 
 // Best-effort "what is this container farming right now", parsed from the tail
@@ -1022,23 +1210,47 @@ async function setRestartPolicy(host, container, policy) {
 // call site. If the container is currently running, stops it and clears its
 // restart policy so it can't come back — including across a host reboot —
 // until accounts are added again (see restoreRestartPolicy).
-async function stopIfNoAccounts(host, file, container) {
+//
+// Returns { stopped, empty, state } (2026-10-03), so a caller about to restart
+// the bot can refuse: a bot must never be restarted when its config is empty
+// or when that cannot be told.
+//   empty — the config holds no ENABLED account; null when it cannot be read.
+//   state — the container's docker state as found, read only for a config
+//           with no accounts at all (to decide the stop): "missing" when there
+//           is no such container, "unknown" when `docker ps` failed; null when
+//           it was not read. A failed `docker ps` is never "not running".
+// It stops only a running bot whose config has no accounts at all (as before)
+// — or, with opts.noneEnabled, one whose accounts are all disabled: what a
+// config editor wants after its edit (farmControl.reloadConfig), since such a
+// bot must not be restarted either.
+async function stopIfNoAccounts(host, file, container, { noneEnabled = false } = {}) {
   let data;
   try {
     data = JSON.parse(await readFile(host, file));
   } catch {
-    return { stopped: false };
+    return { stopped: false, empty: null, state: null };
   }
-  const users = (data.TwitchSettings && data.TwitchSettings.TwitchUsers) || [];
-  if (users.length > 0) return { stopped: false };
+  const list = data && data.TwitchSettings && data.TwitchSettings.TwitchUsers;
+  const users = Array.isArray(list) ? list : [];
+  const empty = users.filter((u) => u && u.Enabled !== false).length === 0;
+  if (users.length > 0 && !(noneEnabled && empty)) return { stopped: false, empty, state: null };
 
-  const states = await dockerPs(host).catch(() => ({}));
-  const running = states[container] && states[container].state === "running";
-  if (!running) return { stopped: false };
+  let states;
+  try {
+    states = await dockerPs(host);
+  } catch {
+    return { stopped: false, empty: true, state: "unknown" };
+  }
+  const state = (states[container] && states[container].state) || "missing";
+  if (state !== "running") return { stopped: false, empty: true, state };
 
-  await setRestartPolicy(host, container, "no").catch(() => {});
-  await dockerContainer(host, "stop", container).catch(() => {});
-  return { stopped: true };
+  // Under the container's lock, like a park (see withContainerLock): a
+  // restart-if-running that arrives mid-stop must not start an empty bot.
+  await withContainerLock(host, container, async () => {
+    await setRestartPolicy(host, container, "no").catch(() => {});
+    await dockerContainer(host, "stop", container).catch(() => {});
+  });
+  return { stopped: true, empty: true, state };
 }
 
 // Re-enable normal crash/reboot auto-restart once a bot has accounts again —
@@ -1065,6 +1277,9 @@ module.exports = {
   composeWrite,
   dockerPs,
   dockerContainer,
+  onContainerStart,
+  withContainerLock,
+  callerFrames,
   dockerLogs,
   dockerStats,
   hostStats,

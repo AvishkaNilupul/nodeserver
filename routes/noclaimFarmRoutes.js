@@ -64,7 +64,6 @@ const {
   configPath,
   markerPath,
   operatorMarkerPath,
-  readyPoolQuery,
 } = fleet;
 
 // buildSetGridImage writes the cover to a temp file (it's built to feed the
@@ -179,16 +178,22 @@ router.post(
 
 // ---------------------------------------------------------------------------
 // Pool availability (cheap count for the create form).
+//
+// The same count a create checks itself against (noclaimFleet.spendable,
+// 2026-10-03): only rows with a sellable password and no committed no-claim
+// ledger, minus the pristine reserve rent-farm orders need. The form used to
+// count every ready row, so it offered accounts the create would then refuse.
+// `?game=` adds that game's already-sold exclusion, as the create does.
 // ---------------------------------------------------------------------------
 router.get("/api/noclaim-farm/pool", requireSuperadmin, async (req, res) => {
   try {
-    const ready = await AvailableAccount.countDocuments(readyPoolQuery());
-    const reserve = settings.getAutoFarm().poolReserve || 0;
+    const s = await fleet.spendable(String(req.query.game || "").trim());
     res.json({
       success: true,
-      ready,
-      reserve,
-      spendable: Math.max(0, ready - reserve),
+      ready: s.ready,
+      reserve: s.reserve,
+      spendable: s.spendable,
+      pristineHeld: s.pristineHeld || 0,
     });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
@@ -288,8 +293,23 @@ router.post("/api/noclaim-farm/bots", requireSuperadmin, async (req, res) => {
       game: game || "",
       count: out.claimed,
       detail:
-        "no-claim bot " + out.id + " created with " + out.claimed + " account(s)",
+        "no-claim bot " + out.id + " created with " + out.claimed + " account(s)" +
+        (out.provisionError ? " — its container did not start: " + out.provisionError : ""),
     });
+    // The config write landed but the container launch failed: the accounts are
+    // in that bot's config and stay claimed (releasing them would double-home
+    // them), so say so instead of reporting a clean create.
+    if (out.provisionError) {
+      return res.json({
+        success: true,
+        id: out.id,
+        claimed: out.claimed,
+        provisionError: out.provisionError,
+        message:
+          `Bot ${out.id} got ${out.claimed} account(s), but its container did not start (${out.provisionError}). ` +
+          `The accounts stay with bot ${out.id}; the feeder builds no other bot for this game until it runs — check provision.log on the bot host.`,
+      });
+    }
     res.json({
       success: true,
       id: out.id,
@@ -362,6 +382,32 @@ router.post(
           message: `Already farming in no-claim bot(s) ${inBots.join(", ")} — remove it there first.`,
         });
 
+      // Nor may it be enabled in a regular bot: one account, one bot. Asked
+      // here, before the pool row is fenced, so a refusal changes nothing.
+      try {
+        await fleet.assertNotInManagedBot([{ username, clientSecret }]);
+      } catch (e) {
+        return res
+          .status(e.status || 503)
+          .json({ success: false, message: e.message || String(e) });
+      }
+
+      // A personal bot is a container like any other: the same cap and host-RAM
+      // gate as every create (noclaimFleet.newContainerGate, 2026-10-03).
+      let gate;
+      try {
+        gate = await fleet.newContainerGate();
+      } catch (e) {
+        return res.status(503).json({
+          success: false,
+          message: `Could not check whether a new container is allowed (${e.message || e}).`,
+        });
+      }
+      if (!gate.ok)
+        return res
+          .status(409)
+          .json({ success: false, message: `Not creating a no-claim bot: ${gate.reason}.` });
+
       if (await fleet.provisionBusy())
         return res.status(409).json({
           success: false,
@@ -394,8 +440,15 @@ router.post(
         fenced = true;
       }
 
+      // Marked personal BEFORE its config exists (2026-10-03). A config-only
+      // bot with no marker is what the fleet allocator reads as a stuck
+      // provision — counted as that game's stock, and no new bot is built for
+      // the game until it is fixed — so a launch that fails must never leave
+      // one behind. With the marker first, the worst case is a marked bot
+      // without a container, which the allocator ignores like any personal bot.
       const id = await fleet.nextBotId();
-      await fleet.createBotFromAccounts(
+      await fleet.setPersonal(id, true);
+      await fleet.writeBotConfig(
         id,
         [
           {
@@ -406,7 +459,12 @@ router.post(
         ],
         game,
       );
-      await fleet.setPersonal(id, true);
+      let provisionError = "";
+      try {
+        await fleet.launchProvision(id, 1, game);
+      } catch (e) {
+        provisionError = (e && e.message) || String(e);
+      }
 
       logEvent({
         category: "noclaim",
@@ -414,7 +472,9 @@ router.post(
         actor: actorFromReq(req),
         subject: containerFor(id),
         game,
-        detail: "personal no-claim bot " + id + " for " + username,
+        detail:
+          "personal no-claim bot " + id + " for " + username +
+          (provisionError ? " — its container did not start: " + provisionError : ""),
       });
       res.json({
         success: true,
@@ -423,7 +483,12 @@ router.post(
         game,
         account: username,
         fenced,
-        message: `Personal bot ${id} created for ${username} — farming ${game}, building on the host.`,
+        ...(provisionError ? { provisionError } : {}),
+        message: provisionError
+          ? `Personal bot ${id} was written for ${username}, but its container did not start ` +
+            `(${provisionError}). It is marked as yours, so the farm leaves it alone — check ` +
+            "provision.log on the bot host, then Restart it — Restart rebuilds its container."
+          : `Personal bot ${id} created for ${username} — farming ${game}, building on the host.`,
       });
     } catch (err) {
       res
@@ -960,9 +1025,9 @@ router.post(
     try {
       const id = String(req.params.id).replace(/[^0-9]/g, "");
       if (!id) return res.status(400).json({ success: false, message: "bad id" });
-      // `docker restart` errors if the container doesn't exist; surface that
-      // clearly rather than silently swallowing it, so the UI can tell the
-      // operator to re-create the bot (its container may have been removed).
+      // `docker restart` errors if the container doesn't exist; then the
+      // container is rebuilt from the bot's config (below) rather than the
+      // operator being told to re-create a bot they may not be able to release.
       // Clear both auto-power markers: a manual Restart means the operator is
       // taking control, so the watcher manages this bot fresh from here (neither
       // "parked by me" nor "operator-off" applies once they restart it).
@@ -971,12 +1036,49 @@ router.post(
           `docker restart ${hosts.shq(containerFor(id))} 2>&1 || echo "__ERR__"`,
         { timeout: 40000 },
       );
-      if (out.includes("__ERR__"))
-        return res.status(409).json({
-          success: false,
-          message:
-            "No container to restart — it may have been removed. Release and re-create the bot.",
-        });
+      if (out.includes("__ERR__")) {
+        // No container to restart: rebuild it from the bot's config
+        // (2026-10-03). A bot whose container is gone is stuck — the farm builds
+        // no other bot for its game — and Release refuses while any of its
+        // accounts is on sale, so this is the one way the page can fix it. The
+        // same launch as a create, under the same cap, RAM gate and lock.
+        try {
+          const rb = await fleet.rebuildMissingContainer(id);
+          logEvent({
+            category: "noclaim",
+            action: "bot_container_rebuilt",
+            actor: actorFromReq(req),
+            subject: containerFor(id),
+            game: rb.game,
+            count: rb.accounts,
+            detail: `rebuilt the missing container of no-claim bot ${id} from its config (${rb.accounts} account(s))`,
+          });
+          return res.json({
+            success: true,
+            rebuilt: true,
+            game: rb.game,
+            accounts: rb.accounts,
+            message:
+              `Bot ${id} had no container — rebuilding it from its config (${rb.accounts} account(s)). ` +
+              "It starts in a minute or two; provision.log on the bot host shows how it went.",
+          });
+        } catch (e) {
+          if (e && e.code === "no_config")
+            return res.status(409).json({
+              success: false,
+              message:
+                "No container to restart, and no config to rebuild one from — Release the bot.",
+            });
+          if (e && e.code === "container_exists")
+            return res.status(409).json({
+              success: false,
+              message:
+                "Its container exists but would not restart: " +
+                String(out).replace("__ERR__", "").trim().slice(0, 300),
+            });
+          return res.status(e.status || 500).json({ success: false, message: e.message });
+        }
+      }
       logEvent({
         category: "noclaim",
         action: "bot_restarted",
