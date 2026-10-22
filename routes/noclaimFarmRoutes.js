@@ -38,6 +38,7 @@ const { decrypt } = require("../utils/secretBox");
 const { recordPoolUsage } = require("../utils/poolUsageLog");
 const { logEvent, actorFromReq } = require("../utils/systemLog");
 const noclaimWatcher = require("../utils/noclaimWatcher");
+const noclaimOrganizer = require("../utils/noclaimOrganizer");
 const unclaimedAutoList = require("../utils/unclaimedAutoList");
 const { lookupAccountByUsername } = require("../utils/accountLookup");
 
@@ -140,6 +141,52 @@ router.post("/api/noclaim-farm/auto", requireSuperadmin, async (req, res) => {
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
   }
+});
+
+// ---------------------------------------------------------------------------
+// Auto-organize (utils/noclaimOrganizer.js): keeps each game's shared bots at
+// no more than `size` accounts, evenly, and merges the bots a game no longer
+// needs (RAM saver). It also runs on its own after every hourly fleet-sizing
+// pass while switched on. "My own" bots and bots you stopped are never touched.
+//   GET  ?preview=1  settings + last result (+ a dry-run plan: reads, never writes)
+//   POST /settings   { enabled, size }
+//   POST /run        organize now, whatever the switch says (runs in the
+//                    background; poll GET until status.running is false)
+// ---------------------------------------------------------------------------
+router.get("/api/noclaim-farm/organize", requireSuperadmin, async (req, res) => {
+  try {
+    const preview = req.query.preview === "1" ? await noclaimOrganizer.organize({ dryRun: true }) : null;
+    res.json({ success: true, status: noclaimOrganizer.status(), preview });
+  } catch (err) {
+    res.status(err.status || 500).json({ success: false, message: err.message });
+  }
+});
+
+router.post("/api/noclaim-farm/organize/settings", requireSuperadmin, async (req, res) => {
+  try {
+    const cur = settings.getAutoFarm().noclaimOrganize;
+    const next = { ...(cur && typeof cur === "object" ? cur : {}) };
+    if (req.body && "enabled" in req.body) next.enabled = !!req.body.enabled;
+    if (req.body && "size" in req.body) {
+      const n = Math.floor(Number(req.body.size));
+      if (!Number.isFinite(n) || n < 10 || n > MAX_PER_BOT)
+        return res.status(400).json({ success: false, message: `size must be 10..${MAX_PER_BOT}` });
+      next.size = n;
+    }
+    await settings.setAutoFarm({ noclaimOrganize: next }, { actor: actorFromReq(req) });
+    res.json({ success: true, config: noclaimOrganizer.config() });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+router.post("/api/noclaim-farm/organize/run", requireSuperadmin, (req, res) => {
+  if (noclaimOrganizer.status().running)
+    return res.status(409).json({ success: false, message: "The organizer is already running." });
+  noclaimOrganizer
+    .organize({ dryRun: false, force: true, actor: actorFromReq(req) })
+    .catch((e) => console.error("noclaimOrganizer run:", e && e.message));
+  res.json({ success: true, started: true });
 });
 
 // ---------------------------------------------------------------------------

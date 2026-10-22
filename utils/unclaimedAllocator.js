@@ -41,6 +41,7 @@ const farmSizing = require("./farmSizing");
 const fleet = require("./noclaimFleet");
 const { logEvent } = require("./systemLog");
 const { sendTelegram } = require("./telegram");
+const organizer = require("./noclaimOrganizer");
 
 const MIN_TICK_MS = 5 * 60000;
 
@@ -137,6 +138,7 @@ async function plan({ days = 30, withFleet = true } = {}) {
   const botsByGame = new Map(); // key -> { all, usable, stuck: [bot] }
   const roomBots = new Map();
   if (fleetState) {
+    const perBotCap = organizer.botCap();
     for (const b of fleetState.bots) {
       const key = farmDemand.bucketFor(b.game);
       if (!key) continue;
@@ -153,7 +155,9 @@ async function plan({ days = 30, withFleet = true } = {}) {
       if (why) continue;
       tally.usable++;
       assigned.set(key, (assigned.get(key) || 0) + b.accounts);
-      const room = Math.max(0, fleet.MAX_PER_BOT - b.accounts);
+      // The organizer's size when it is on (utils/noclaimOrganizer.js), so a
+      // top-up never fills a bot past what the organizer packs it to.
+      const room = Math.max(0, perBotCap - b.accounts);
       if (room > 0) {
         (roomBots.get(key) || roomBots.set(key, []).get(key)).push({
           id: b.id,
@@ -681,7 +685,7 @@ async function apply(input = {}) {
           try {
             const out = await fleet.createBot({
               game: (g.fleet && g.fleet.botGame) || g.label,
-              count: Math.min(left, fleet.MAX_PER_BOT),
+              count: Math.min(left, organizer.botCap()),
               actor,
             });
             r.createdBot = out;
@@ -732,7 +736,7 @@ async function apply(input = {}) {
       if (sim > 0) {
         const blocked = await createBlockReason(g, p);
         if (blocked) r.createBlocked = blocked;
-        else r.plannedCreate = Math.min(sim, fleet.MAX_PER_BOT);
+        else r.plannedCreate = Math.min(sim, organizer.botCap());
       }
     }
 
@@ -795,6 +799,19 @@ async function apply(input = {}) {
 // Scheduler
 // ---------------------------------------------------------------------------
 
+// The bot organizer rides on this pass (utils/noclaimOrganizer.js): after any
+// top-ups it packs each game's shared bots back to its size and merges the bots
+// a game no longer needs. It has its own switch (autoFarm.noclaimOrganize), runs
+// inside this pass so it never overlaps a top-up, and never throws into the loop.
+async function organizeAfterPass() {
+  try {
+    const r = await organizer.runAuto();
+    if (r && r.error) console.error("unclaimedAllocator: organizer — " + r.error);
+  } catch (e) {
+    console.error("unclaimedAllocator: organizer — " + ((e && e.message) || e));
+  }
+}
+
 // One pass. Measures always; acts only when the operator has turned auto-sizing
 // on. Measuring unconditionally is the point — the panel and the history are
 // worth having whether or not anything is allowed to act on them.
@@ -837,7 +854,7 @@ async function runOnce({ force = false } = {}) {
         p.budget,
     );
 
-    if (!cfg.autoSize && !force) return { planned: true, applied: false, plan: p };
+    if (!cfg.autoSize && !force) return await organizeAfterPass().then(() => ({ planned: true, applied: false, plan: p }));
     const applied = await apply({ plan: p, actor: force ? "operator" : "allocator" });
     if (applied && !applied.skipped) {
       console.log(
@@ -860,6 +877,7 @@ async function runOnce({ force = false } = {}) {
     } else if (applied && applied.skipped) {
       console.log("unclaimedAllocator: apply skipped — " + applied.skipped);
     }
+    await organizeAfterPass();
     return { planned: true, applied: true, plan: p, result: applied };
   } catch (e) {
     state.lastError = e.message || String(e);
