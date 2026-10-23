@@ -15,10 +15,11 @@
 const ChzzkAccount = require("../models/ChzzkAccount");
 const ChzzkCampaign = require("../models/ChzzkCampaign");
 const ChzzkReward = require("../models/ChzzkReward");
+const ChzzkActivity = require("../models/ChzzkActivity");
 const { encrypt, decrypt } = require("./secretBox");
 const settings = require("./settings");
 const telegram = require("./telegram");
-const activityStore = require("./chzzk/activity");
+const { createActivity } = require("./chzzk/activity");
 const {
   parseImport, toHeader, deviceIdOf,
 } = require("./chzzk/cookies");
@@ -63,7 +64,7 @@ class Farm {
       Account: deps.Account || ChzzkAccount,
       Campaign: deps.Campaign || ChzzkCampaign,
       Reward: deps.Reward || ChzzkReward,
-      activity: deps.activity || activityStore,
+      activity: deps.activity || createActivity({ model: ChzzkActivity }),
       makeClient: deps.makeClient || makeClient,
       runSession: deps.runSession || runSession,
       createCollector: deps.createCollector || createCollector,
