@@ -532,11 +532,13 @@ class Farm {
     const id = String(accountDoc._id);
     const controller = new AbortController();
     // Seed the per-session "done" set from the account's persisted progress so
-    // the worker's pickCampaign skips campaigns we already finished.
+    // the worker's pickCampaign skips campaigns we already finished. Only a
+    // VERIFIED mark counts: v1 (before 2026-10-23 PM) wrote done:true for
+    // campaigns that had never been credited, so those are re-checked.
     const doneSet = new Set();
     const progress = accountDoc.progress || {};
     for (const [no, p] of Object.entries(progress)) {
-      if (p && p.done) doneSet.add(Number(no));
+      if (p && p.done && p.verified) doneSet.add(Number(no));
     }
     const campaignsStore = this._campaignsStoreFor(id, doneSet);
     const client = this._clientFor(accountDoc);
@@ -551,6 +553,7 @@ class Farm {
       onEvent: (view) => this._onWorkerEvent(id, view),
       onProgress: (p) => this._onWorkerProgress(id, p),
       onEarned: () => this._onWorkerEarned(id),
+      onLog: (e) => this._onWorkerLog(id, e),
       signal: controller.signal,
     }).then((res) => {
       if (res && res.reason === "auth") {
@@ -564,7 +567,7 @@ class Farm {
       this.workers.delete(id);
     });
 
-    this.workers.set(id, { controller, promise, since, current });
+    this.workers.set(id, { controller, promise, since, current, doneSet });
   }
 
   _onWorkerEvent(id, view) {
@@ -574,11 +577,31 @@ class Farm {
     this.deps.Account.updateOne({ _id: id }, { $set: { current: view, lastHeartbeatAt: new Date(this.deps.now()) } }).catch(() => {});
   }
 
+  // One write per progress read. Dotted fields, so a verified mark written by
+  // markFarmed is never replaced by a later read of the same campaign.
   _onWorkerProgress(id, p) {
-    this.deps.Account.updateOne(
-      { _id: id },
-      { $set: { [`progress.${p.campaignNo}`]: { minutes: p.minutes, at: new Date(this.deps.now()), done: !!p.done } } }
-    ).catch(() => {});
+    const no = Number(p && p.campaignNo);
+    if (!no) return;
+    const key = `progress.${no}`;
+    const set = {
+      [`${key}.minutes`]: Number(p.minutes) || 0,
+      [`${key}.at`]: new Date(this.deps.now()),
+      [`${key}.next`]: p.next == null ? null : Number(p.next),
+      [`${key}.rewards`]: p.states && typeof p.states === "object" ? p.states : {},
+    };
+    if (!p.done) set[`${key}.done`] = false;
+    this.deps.Account.updateOne({ _id: id }, { $set: set }).catch(() => {});
+  }
+
+  _onWorkerLog(id, e) {
+    if (!e || !e.msg) return;
+    this.deps.activity.add({
+      level: e.level || "info",
+      kind: e.kind || "worker",
+      accountId: String(id),
+      campaignNo: e.campaignNo,
+      msg: String(e.msg).slice(0, 400),
+    });
   }
 
   _onWorkerEarned(id) {
@@ -616,12 +639,16 @@ class Farm {
         };
       },
       isDone: (_accId, no) => doneSet.has(Number(no)),
-      markFarmed: (accId, no) => {
+      // The worker calls this only once progress.js has seen every code
+      // reward earned in CHZZK's own lists, so the mark is "verified".
+      markFarmed: (accId, no, info = {}) => {
         doneSet.add(Number(no));
-        this.deps.Account.updateOne(
-          { _id: String(accId) },
-          { $set: { [`progress.${no}.done`]: true, [`progress.${no}.at`]: new Date(this.deps.now()) } }
-        ).catch(() => {});
+        const key = `progress.${Number(no)}`;
+        const at = new Date(this.deps.now());
+        const set = { [`${key}.done`]: true, [`${key}.verified`]: true, [`${key}.doneAt`]: at, [`${key}.at`]: at, [`${key}.next`]: null };
+        if (typeof info.minutes === "number") set[`${key}.minutes`] = info.minutes;
+        if (info.states && typeof info.states === "object") set[`${key}.rewards`] = info.states;
+        this.deps.Account.updateOne({ _id: String(accId) }, { $set: set }).catch(() => {});
       },
     };
   }

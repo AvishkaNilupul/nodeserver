@@ -277,6 +277,9 @@ function createFakeChzzk({
         const c = campsByNo.get(no);
         if (!c) continue;
         const m = mins(clientKey, no);
+        // Real CHZZK (measured 2026-10-23): a campaign is not listed here at
+        // all until it has credited the first whole minute.
+        if (Math.floor(m) < 1) continue;
         for (const r of c.rewardList) {
           if (!CODE_TYPES.has(r.rewardType)) continue;
           const earnKey = clientKey + "|" + num(r.rewardNo);

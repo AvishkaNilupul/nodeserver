@@ -189,11 +189,11 @@ test("happy path: WATCH_STARTED, growing accumWatchMinutes, markFarmed, exactly 
 
   assert.ok(progress.length >= 1, "onProgress fired at least once");
   const p = progress[progress.length - 1];
-  for (const k of ["campaignNo", "rewardNo", "minutes", "done"]) {
+  for (const k of ["campaignNo", "minutes", "states", "done", "next"]) {
     assert.ok(k in p, `onProgress payload has ${k}`);
   }
   assert.equal(p.campaignNo, 99);
-  assert.equal(p.rewardNo, 1);
+  assert.equal(p.states[1], "claimed");
   assert.equal(p.done, true);
 
   // Challenges show increasing accumWatchMinutes across reads.
