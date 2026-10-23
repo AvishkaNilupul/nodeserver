@@ -1,0 +1,798 @@
+// Singleton orchestrator for the CHZZK drops farm. Public API matches
+// docs/CHZZK-FARM.md §10. Owns:
+//   - egress health probe (CHZZK_PROXY_URL tunnel + credited country)
+//   - campaign discovery (categories/live walk → ChzzkCampaign rows)
+//   - per-account login checks (userStatus → status + unusableSince)
+//   - codes-collector sweep (claims → GET /coupon-code → encrypted store)
+//   - login-alert pass (one Telegram per batch; "accepted again" on recovery)
+//   - worker supervisor (one runSession per eligible account)
+//
+// Never persists or returns cookie/code plaintext. Reads the master switch
+// `autoFarm.chzzkFarm` from utils/settings (unset/unreadable = ON);
+// `CHZZK_FARM=0` env disables at startup. Egress fails CLOSED: unknown
+// country or unreachable tunnel = no logged-in call is sent.
+
+const ChzzkAccount = require("../models/ChzzkAccount");
+const ChzzkCampaign = require("../models/ChzzkCampaign");
+const ChzzkReward = require("../models/ChzzkReward");
+const { encrypt, decrypt } = require("./secretBox");
+const settings = require("./settings");
+const telegram = require("./telegram");
+const activityStore = require("./chzzk/activity");
+const {
+  parseImport, toHeader, deviceIdOf,
+} = require("./chzzk/cookies");
+const {
+  campaignFromApi, isCampaignFarmable, isFarmableReward,
+} = require("./chzzk/normalize");
+const { makeClient } = require("./chzzk/client");
+const { createCollector } = require("./chzzk/codes");
+const { getTransport } = require("./chzzk/http");
+const { runSession, AbortError } = require("./chzzk/worker");
+const { isAuthError, isEgressError } = require("./chzzk/errors");
+
+const DEFAULTS = {
+  egressStartMs: 1_000,
+  egressIntervalMs: 30 * 60_000,
+  discoveryStartMs: 20_000,
+  discoveryIntervalMs: 20 * 60_000,
+  loginStartMs: 2 * 60_000,
+  loginIntervalMs: 6 * 60 * 60_000,
+  codesStartMs: 8 * 60_000,
+  codesIntervalMs: 3 * 60 * 60_000,
+  alertStartMs: 10_000,
+  alertIntervalMs: 60_000,
+  supervisorIntervalMs: 30_000,
+  switchCacheMs: 30_000,
+  countriesEnv: "CHZZK_COUNTRIES",
+  countriesDefault: "JP,KR,FR", // JP+KR measured 2026-10-23; FR (Contabo) measured same day
+  pickStreamMemoMs: 5 * 60_000, // top-5 picks refreshed every 5 min
+  streamFanout: 5,              // top N streams a campaign spreads across
+  alertWaitMs: 5 * 60_000,
+  alertQuietMs: 2 * 60_000,
+  alertMaxWaitMs: 15 * 60_000,
+  alertRetryMs: 3 * 60_000,
+  cookieImportCap: 90 * 1024,
+};
+
+const SHORT_HASH = (h) => (h ? String(h).slice(0, 8) : "");
+
+class Farm {
+  constructor(deps = {}) {
+    this.deps = {
+      Account: deps.Account || ChzzkAccount,
+      Campaign: deps.Campaign || ChzzkCampaign,
+      Reward: deps.Reward || ChzzkReward,
+      activity: deps.activity || activityStore,
+      makeClient: deps.makeClient || makeClient,
+      runSession: deps.runSession || runSession,
+      createCollector: deps.createCollector || createCollector,
+      transport: deps.transport || null,
+      transportFactory: deps.transportFactory || getTransport,
+      settings: deps.settings || settings,
+      telegram: deps.telegram || telegram,
+      now: deps.now || (() => Date.now()),
+      timers: deps.timers || realTimers,
+    };
+    this.timings = { ...DEFAULTS, ...(deps.timings || {}) };
+    this.started = false;
+    this.transport = null;
+    this.workers = new Map(); // accountId -> { controller, promise, since }
+    this.pickMemo = new Map(); // campaignNo -> { pickedAt, streams, cursor }
+    this.timerHandles = [];
+    this.state = {
+      egress: { via: "none", country: "", ok: false, at: 0, error: "" },
+    };
+    this._switchCache = { on: null, readAt: 0 };
+    this.collector = null;
+  }
+
+  // Idempotent. Timers unref so the process can exit cleanly in tests.
+  start() {
+    if (this.started) return;
+    this.started = true;
+    this.transport = this.deps.transport || this.deps.transportFactory();
+    this.collector = this.deps.createCollector({
+      Account: this.deps.Account,
+      Reward: this.deps.Reward,
+      activity: this.deps.activity,
+      clientFor: (acc) => this._clientFor(acc),
+    });
+    this._schedule("egress", this.timings.egressStartMs, this.timings.egressIntervalMs, () => this._checkEgress());
+    this._schedule("discovery", this.timings.discoveryStartMs, this.timings.discoveryIntervalMs, () => this.refreshCampaigns().catch(() => {}));
+    this._schedule("login", this.timings.loginStartMs, this.timings.loginIntervalMs, () => this.checkAccounts().catch(() => {}));
+    this._schedule("codes", this.timings.codesStartMs, this.timings.codesIntervalMs, () => this._codesSweep());
+    this._schedule("alert", this.timings.alertStartMs, this.timings.alertIntervalMs, () => this._alertPass());
+    this._schedule("supervisor", this.timings.supervisorIntervalMs, this.timings.supervisorIntervalMs, () => this._supervise());
+  }
+
+  async stop() {
+    for (const h of this.timerHandles) try { this.deps.timers.clear(h); } catch (_e) {}
+    this.timerHandles = [];
+    const promises = [];
+    for (const [, w] of this.workers) {
+      try { w.controller.abort(); } catch (_e) {}
+      promises.push(w.promise.catch(() => {}));
+    }
+    this.workers.clear();
+    await Promise.all(promises);
+    this.started = false;
+  }
+
+  // ========== Switch ==========
+
+  _readSwitch() {
+    const t = this.deps.now();
+    if (process.env.CHZZK_FARM === "0") return false;
+    if (this._switchCache.on !== null && t - this._switchCache.readAt < this.timings.switchCacheMs) {
+      return this._switchCache.on;
+    }
+    let on = true;
+    try {
+      const af = this.deps.settings.getAutoFarm();
+      if (af && typeof af.chzzkFarm === "boolean") on = af.chzzkFarm;
+    } catch (_e) { on = true; }
+    this._switchCache = { on, readAt: t };
+    return on;
+  }
+
+  async setSwitch(on, actor) {
+    const next = !!on;
+    try {
+      await this.deps.settings.setAutoFarm({ chzzkFarm: next }, { actor: actor || "system" });
+      this._switchCache = { on: next, readAt: this.deps.now() };
+    } catch (e) {
+      this.deps.activity.add({ level: "error", kind: "switch", msg: `switch write failed: ${short(e)}` });
+    }
+    return { on: next };
+  }
+
+  // ========== Egress ==========
+
+  async _checkEgress() {
+    const client = this.deps.makeClient({ cookies: null, deviceId: "", transport: this.transport });
+    let via = "none";
+    try { via = this.transport.describe(); } catch (_e) {}
+    const countriesAllowed = String(process.env[this.timings.countriesEnv] || this.timings.countriesDefault)
+      .split(",").map((s) => s.trim().toUpperCase()).filter(Boolean);
+
+    try {
+      if (!this.transport.ready) {
+        this._setEgress({ via, country: "", ok: false, error: "transport not ready" });
+        return;
+      }
+      const country = await client.egressCountry();
+      const ok = !!(country && countriesAllowed.includes(country.toUpperCase()));
+      this._setEgress({
+        via, country: country || "",
+        ok,
+        error: ok ? "" : country ? `country ${country} not credited` : "ipinfo unreachable",
+      });
+    } catch (e) {
+      this._setEgress({ via, country: "", ok: false, error: short(e) });
+    }
+  }
+
+  _setEgress(next) {
+    const prev = this.state.egress;
+    this.state.egress = { ...prev, ...next, at: this.deps.now() };
+    if (prev.ok !== next.ok) {
+      this.deps.activity.add({
+        level: next.ok ? "info" : "warn",
+        kind: "egress",
+        msg: next.ok ? `Egress ok (${next.country} via ${next.via})` : `Egress not ok: ${next.error}`,
+      });
+    }
+  }
+
+  // ========== Clients ==========
+
+  _clientFor(accountDoc) {
+    let cookies = [];
+    try { cookies = JSON.parse(decrypt(accountDoc.cookies)); }
+    catch (_e) { cookies = []; }
+    const deviceId = accountDoc.deviceId || deviceIdOf(cookies) || "";
+    return this.deps.makeClient({ cookies, deviceId, transport: this.transport });
+  }
+
+  // ========== Account import / check ==========
+
+  async importAccounts(text) {
+    if (typeof text !== "string") return [];
+    if (text.length > this.timings.cookieImportCap) {
+      return [{ ok: false, error: "import too large" }];
+    }
+    const { jars, errors } = parseImport(text);
+    const results = [];
+    for (const err of errors) results.push({ ok: false, error: err });
+    for (const jar of jars) {
+      const r = await this._importOne(jar);
+      results.push(r);
+    }
+    return results;
+  }
+
+  async _importOne(jar) {
+    const deviceId = deviceIdOf(jar) || "";
+    const client = this.deps.makeClient({ cookies: jar, deviceId, transport: this.transport });
+    let who;
+    try {
+      who = await client.userStatus();
+    } catch (e) {
+      if (isAuthError(e)) return { ok: false, error: "Jar is logged out" };
+      if (isEgressError(e)) return { ok: false, error: `Egress: ${short(e)}` };
+      return { ok: false, error: short(e) };
+    }
+    if (!who || !who.userIdHash) return { ok: false, error: "No userIdHash in getUserStatus" };
+    const nickname = String(who.nickname || "").slice(0, 120);
+    const penalties = Array.isArray(who.penalties) ? who.penalties.length : 0;
+    const cookiesEnc = encrypt(JSON.stringify(jar));
+    const now = this.deps.now();
+
+    const prev = await this.deps.Account.findOne({ userIdHash: who.userIdHash }).lean();
+    const created = !prev;
+    // Clear only `unusableSince` here — leaving `unusableAlertAt` for the
+    // alert pass to flip into "accepted again" and clear in one shot. See
+    // `_checkOne` for the same reasoning.
+    await this.deps.Account.updateOne(
+      { userIdHash: who.userIdHash },
+      {
+        $set: {
+          userIdHash: who.userIdHash,
+          nickname,
+          cookies: cookiesEnc,
+          cookieAt: new Date(now),
+          deviceId,
+          status: "ok",
+          lastError: "",
+          lastCheckedAt: new Date(now),
+          penalties,
+          unusableSince: null,
+        },
+      },
+      { upsert: true }
+    );
+    this.deps.activity.add({
+      level: "info", kind: "import",
+      accountId: who.userIdHash,
+      msg: created
+        ? `Imported "${nickname}" (${SHORT_HASH(who.userIdHash)})`
+        : `Re-imported "${nickname}" (${SHORT_HASH(who.userIdHash)})`,
+    });
+    return { ok: true, created, nickname, userIdHash8: SHORT_HASH(who.userIdHash) };
+  }
+
+  async checkAccounts(ids = []) {
+    const q = Array.isArray(ids) && ids.length
+      ? { _id: { $in: ids } }
+      : { sold: { $ne: true } };
+    const rows = await this.deps.Account.find(q).lean();
+    for (const row of rows) {
+      await this._checkOne(row).catch(() => {});
+    }
+    return { total: rows.length };
+  }
+
+  async _checkOne(row) {
+    const client = this._clientFor(row);
+    let status = row.status || "untested";
+    let lastError = "";
+    try {
+      const who = await client.userStatus();
+      if (who && who.loggedIn !== false) status = "ok";
+      else { status = "not_logged_in"; lastError = "loggedIn:false"; }
+    } catch (e) {
+      if (isAuthError(e)) { status = "not_logged_in"; lastError = short(e); }
+      else if (isEgressError(e)) { lastError = short(e); /* leave status */ }
+      else { lastError = short(e); }
+    }
+    const update = {
+      status,
+      lastError,
+      lastCheckedAt: new Date(this.deps.now()),
+    };
+    if (status === "ok") {
+      // Clear the "first-seen-down" stamp; leave `unusableAlertAt` for the
+      // alert pass to notice (so it can send "accepted again" and only then
+      // clear the stamp). If we cleared both here the recovery message would
+      // never fire — _alertPass has no other hook into "this one is back".
+      update.unusableSince = null;
+    } else if (!row.unusableSince) {
+      update.unusableSince = new Date(this.deps.now());
+    }
+    await this.deps.Account.updateOne({ _id: row._id }, { $set: update });
+  }
+
+  async updateAccount(id, patch = {}) {
+    const set = {};
+    if (typeof patch.sold === "boolean") set.sold = patch.sold;
+    if (typeof patch.paused === "boolean") set.paused = patch.paused;
+    if (typeof patch.note === "string") set.note = String(patch.note).slice(0, 500);
+    if (!Object.keys(set).length) return false;
+    const r = await this.deps.Account.updateOne({ _id: id }, { $set: set });
+    return !!r && (r.matchedCount || r.n || 0) > 0;
+  }
+
+  async deleteAccounts(ids) {
+    if (!Array.isArray(ids) || !ids.length) return { deleted: 0, keptCodes: 0 };
+    const idSet = ids.map(String);
+    // Keep Reward rows that hold a code; drop codeless rows along with the account.
+    const keptCodes = await this.deps.Reward.countDocuments({ accountId: { $in: idSet }, hasCode: true });
+    await this.deps.Reward.deleteMany({ accountId: { $in: idSet }, hasCode: { $ne: true } });
+    const del = await this.deps.Account.deleteMany({ _id: { $in: idSet } });
+    for (const id of idSet) {
+      const w = this.workers.get(String(id));
+      if (w) { try { w.controller.abort(); } catch (_e) {} this.workers.delete(String(id)); }
+    }
+    return { deleted: del.deletedCount || 0, keptCodes };
+  }
+
+  // ========== Campaigns ==========
+
+  async campaignsView() {
+    const list = await this.deps.Campaign.find({}).lean();
+    const now = this.deps.now();
+    const earned = await this.deps.Reward.aggregate([
+      { $group: { _id: "$rewardNo", claimed: { $sum: 1 } } },
+    ]);
+    const earnedByReward = new Map(earned.map((r) => [r._id, r.claimed]));
+    const campaigns = list.map((c) => ({
+      campaignNo: c.campaignNo,
+      title: c.title,
+      categoryType: c.categoryType,
+      categoryId: c.categoryId,
+      categoryValue: c.categoryValue,
+      state: c.state,
+      startAt: c.startAt,
+      endAt: c.endAt,
+      imageUrl: c.imageUrl,
+      enabled: c.enabled !== false,
+      source: c.source,
+      needsLink: !!c.needsLink,
+      lastSeenAt: c.lastSeenAt,
+      refreshedAt: c.refreshedAt,
+      farmable: isCampaignFarmable(c, now) && !c.needsLink && c.enabled !== false,
+      rewards: (c.rewards || []).map((r) => ({
+        rewardNo: r.rewardNo,
+        title: r.title,
+        rewardType: r.rewardType,
+        minutes: r.minutes,
+        remaining: r.remaining,
+        imageUrl: r.imageUrl,
+        earned: earnedByReward.get(r.rewardNo) || 0,
+      })),
+    }));
+    return { campaigns };
+  }
+
+  async refreshCampaigns() {
+    if (!this.state.egress.ok) return { found: 0, updated: 0, skipped: "egress" };
+    const client = this.deps.makeClient({ cookies: null, deviceId: "", transport: this.transport });
+    let found = 0, updated = 0;
+    let next = null, pages = 0;
+    const seenCampaigns = new Set();
+    try {
+      do {
+        const page = await client.categoriesLive(next);
+        pages++;
+        for (const row of page.rows || []) {
+          const nos = Array.isArray(row.dropsCampaignNos) ? row.dropsCampaignNos : [];
+          for (const no of nos) {
+            if (seenCampaigns.has(no)) continue;
+            seenCampaigns.add(no);
+            found++;
+            try {
+              const content = await client.campaign(no);
+              const camp = campaignFromApi(content || {});
+              await this._upsertCampaign(camp, "scan");
+              updated++;
+            } catch (_e) { /* skip */ }
+          }
+        }
+        next = page.next || null;
+      } while (next && pages < 40);
+    } catch (e) {
+      this.deps.activity.add({ level: "warn", kind: "discovery", msg: `Discovery stopped: ${short(e)}` });
+    }
+    return { found, updated };
+  }
+
+  async addCampaign(no) {
+    const n = Number(no);
+    if (!Number.isFinite(n) || n <= 0) return { ok: false, error: "bad campaignNo" };
+    if (!this.state.egress.ok) return { ok: false, error: "egress not ready" };
+    const client = this.deps.makeClient({ cookies: null, deviceId: "", transport: this.transport });
+    try {
+      const content = await client.campaign(n);
+      const camp = campaignFromApi(content || {});
+      await this._upsertCampaign(camp, "manual");
+      return { ok: true, campaign: camp };
+    } catch (e) {
+      return { ok: false, error: short(e) };
+    }
+  }
+
+  async _upsertCampaign(camp, source) {
+    const now = this.deps.now();
+    const prev = await this.deps.Campaign.findOne({ campaignNo: camp.campaignNo }).lean();
+    const set = {
+      campaignNo: camp.campaignNo,
+      title: camp.title,
+      categoryType: camp.categoryType,
+      categoryId: camp.categoryId,
+      categoryValue: camp.categoryValue,
+      imageUrl: camp.imageUrl,
+      state: camp.state,
+      startAt: camp.startAt,
+      endAt: camp.endAt,
+      needsLink: !!camp.needsLink,
+      guide: camp.guide,
+      rewards: camp.rewards,
+      refreshedAt: new Date(now),
+      lastSeenAt: new Date(now),
+    };
+    if (!prev) {
+      set.enabled = true;
+      set.source = source || "scan";
+    } else if (source === "manual" && prev.source !== "manual") {
+      set.source = "manual";
+    }
+    await this.deps.Campaign.updateOne({ campaignNo: camp.campaignNo }, { $set: set }, { upsert: true });
+  }
+
+  async setCampaignEnabled(no, on) {
+    const r = await this.deps.Campaign.updateOne({ campaignNo: Number(no) }, { $set: { enabled: !!on } });
+    return !!r && (r.matchedCount || r.n || 0) > 0;
+  }
+
+  // ========== Rewards / codes ==========
+
+  async rewardsView({ accountId, campaignNo } = {}) {
+    const q = {};
+    if (accountId) q.accountId = String(accountId);
+    if (campaignNo != null) q.campaignNo = Number(campaignNo);
+    const rows = await this.deps.Reward.find(q).sort({ earnedAt: -1 }).limit(500).lean();
+    const rewards = rows.map((r) => ({
+      id: String(r._id),
+      accountId: r.accountId,
+      userIdHash: SHORT_HASH(r.userIdHash),
+      campaignNo: r.campaignNo,
+      rewardNo: r.rewardNo,
+      title: r.title,
+      rewardType: r.rewardType,
+      categoryId: r.categoryId,
+      campaignTitle: r.campaignTitle,
+      state: r.state,
+      hasCode: !!r.hasCode,
+      earnedAt: r.earnedAt,
+      codeEndAt: r.codeEndAt,
+      tries: r.tries || 0,
+      lastError: r.lastError || "",
+      revealedAt: r.revealedAt,
+      revealedBy: r.revealedBy,
+    }));
+    return { rewards };
+  }
+
+  async revealCode(rewardId, who) {
+    return this.collector ? this.collector.reveal(rewardId, who || "unknown") : null;
+  }
+
+  async collectNow(ids) {
+    const list = Array.isArray(ids) && ids.length
+      ? ids.map(String)
+      : await this._eligibleAccountIds();
+    this.collector && this.collector.sweep(list).catch(() => {});
+    return { queued: list.length };
+  }
+
+  // ========== Codes sweep ==========
+
+  async _codesSweep() {
+    if (!this.state.egress.ok || !this.collector) return;
+    const ids = await this._eligibleAccountIds();
+    this.collector.sweep(ids).catch(() => {});
+  }
+
+  async _eligibleAccountIds() {
+    const rows = await this.deps.Account.find({
+      sold: { $ne: true },
+      paused: { $ne: true },
+      status: { $in: ["ok", "untested"] },
+    }).select("_id").lean();
+    return rows.map((r) => String(r._id));
+  }
+
+  // ========== Supervisor + workers ==========
+
+  async _supervise() {
+    if (!this._readSwitch() || !this.state.egress.ok) {
+      for (const [, w] of this.workers) try { w.controller.abort(); } catch (_e) {}
+      this.workers.clear();
+      return;
+    }
+    const live = await this.deps.Account.find({
+      sold: { $ne: true },
+      paused: { $ne: true },
+      status: { $in: ["ok", "untested"] },
+    }).lean();
+    const alive = new Set(live.map((a) => String(a._id)));
+    for (const [id, w] of this.workers) {
+      if (!alive.has(id)) { try { w.controller.abort(); } catch (_e) {} this.workers.delete(id); }
+    }
+    for (const acc of live) {
+      const id = String(acc._id);
+      if (this.workers.has(id)) continue;
+      this._spawnWorker(acc);
+    }
+  }
+
+  _spawnWorker(accountDoc) {
+    const id = String(accountDoc._id);
+    const controller = new AbortController();
+    // Seed the per-session "done" set from the account's persisted progress so
+    // the worker's pickCampaign skips campaigns we already finished.
+    const doneSet = new Set();
+    const progress = accountDoc.progress || {};
+    for (const [no, p] of Object.entries(progress)) {
+      if (p && p.done) doneSet.add(Number(no));
+    }
+    const campaignsStore = this._campaignsStoreFor(id, doneSet);
+    const client = this._clientFor(accountDoc);
+    const since = this.deps.now();
+    const current = { state: "waiting", campaignNo: 0, title: "", channelId: "", channelName: "", since, minutes: 0, note: "spawning" };
+
+    const promise = this.deps.runSession({
+      account: accountDoc,
+      client,
+      campaigns: campaignsStore,
+      pickStream: (camp, acc) => this._pickStream(camp, acc),
+      onEvent: (view) => this._onWorkerEvent(id, view),
+      onProgress: (p) => this._onWorkerProgress(id, p),
+      onEarned: () => this._onWorkerEarned(id),
+      signal: controller.signal,
+    }).then((res) => {
+      if (res && res.reason === "auth") {
+        this.deps.Account.updateOne({ _id: id }, { $set: { status: "not_logged_in", lastError: "worker:auth", unusableSince: this.deps.now() } }).catch(() => {});
+      }
+    }).catch((e) => {
+      if (!(e instanceof AbortError)) {
+        this.deps.activity.add({ level: "error", kind: "worker", accountId: id, msg: `worker crashed: ${short(e)}` });
+      }
+    }).finally(() => {
+      this.workers.delete(id);
+    });
+
+    this.workers.set(id, { controller, promise, since, current });
+  }
+
+  _onWorkerEvent(id, view) {
+    const w = this.workers.get(id);
+    if (!w) return;
+    w.current = view;
+    this.deps.Account.updateOne({ _id: id }, { $set: { current: view, lastHeartbeatAt: new Date(this.deps.now()) } }).catch(() => {});
+  }
+
+  _onWorkerProgress(id, p) {
+    this.deps.Account.updateOne(
+      { _id: id },
+      { $set: { [`progress.${p.campaignNo}`]: { minutes: p.minutes, at: new Date(this.deps.now()), done: !!p.done } } }
+    ).catch(() => {});
+  }
+
+  _onWorkerEarned(id) {
+    if (!this.collector) return;
+    this.collector.collect(id, { reason: "worker" }).catch(() => {});
+  }
+
+  _campaignsStoreFor(accountId, doneSet = new Set()) {
+    return {
+      list: async () => {
+        const rows = await this.deps.Campaign.find({ enabled: { $ne: false } }).lean();
+        return rows.map((c) => ({
+          campaignNo: c.campaignNo,
+          title: c.title,
+          categoryType: c.categoryType,
+          categoryId: c.categoryId,
+          state: c.state,
+          startAt: c.startAt,
+          endAt: c.endAt,
+          needsLink: !!c.needsLink,
+          enabled: c.enabled !== false,
+          rewards: (c.rewards || []).map((r) => ({ ...r })),
+        }));
+      },
+      campaign: async (no) => {
+        const c = await this.deps.Campaign.findOne({ campaignNo: Number(no) }).lean();
+        if (!c) return null;
+        return {
+          campaignNo: c.campaignNo,
+          title: c.title,
+          endAt: c.endAt,
+          needsLink: !!c.needsLink,
+          enabled: c.enabled !== false,
+          rewards: (c.rewards || []).map((r) => ({ ...r })),
+        };
+      },
+      isDone: (_accId, no) => doneSet.has(Number(no)),
+      markFarmed: (accId, no) => {
+        doneSet.add(Number(no));
+        this.deps.Account.updateOne(
+          { _id: String(accId) },
+          { $set: { [`progress.${no}.done`]: true, [`progress.${no}.at`]: new Date(this.deps.now()) } }
+        ).catch(() => {});
+      },
+    };
+  }
+
+  // Shared pick-stream memo: top-N by viewers, cursor rotates per campaign so
+  // multiple accounts spread across the top-N instead of piling on #1.
+  async _pickStream(camp, account) {
+    const id = camp.campaignNo;
+    const now = this.deps.now();
+    let memo = this.pickMemo.get(id);
+    if (!memo || now - memo.pickedAt >= this.timings.pickStreamMemoMs) {
+      const streams = await this._fetchTopStreams(camp);
+      memo = { pickedAt: now, streams, cursor: 0 };
+      this.pickMemo.set(id, memo);
+    }
+    if (!memo.streams.length) return null;
+    const n = Math.min(this.timings.streamFanout, memo.streams.length);
+    const pick = memo.streams[memo.cursor % n];
+    memo.cursor = (memo.cursor + 1) % n;
+    return pick;
+  }
+
+  async _fetchTopStreams(camp) {
+    const client = this.deps.makeClient({ cookies: null, deviceId: "", transport: this.transport });
+    try {
+      const list = await client.dropsLives(camp.categoryType, camp.categoryId, camp.campaignNo, { size: this.timings.streamFanout });
+      return (list || []).filter((l) => !l.adult && !l.paid && !l.watchParty)
+        .slice(0, this.timings.streamFanout);
+    } catch (_e) { return []; }
+  }
+
+  // ========== Login alerts (Telegram) ==========
+
+  async _alertPass() {
+    const unusable = await this.deps.Account.find({
+      sold: { $ne: true },
+      status: { $in: ["not_logged_in"] },
+    }).lean();
+    const now = this.deps.now();
+    const batch = [];
+    for (const row of unusable) {
+      const since = row.unusableSince ? +new Date(row.unusableSince) : now;
+      const age = now - since;
+      if (!row.unusableAlertAt && age >= this.timings.alertWaitMs) batch.push(row);
+      else if (row.unusableAlertAt && now - +new Date(row.unusableAlertAt) >= this.timings.alertRetryMs && age >= this.timings.alertWaitMs) batch.push(row);
+    }
+    if (batch.length) {
+      const quietAll = batch.every((r) => now - (+new Date(r.unusableSince || now)) >= this.timings.alertQuietMs);
+      const maxWaitHit = batch.some((r) => now - (+new Date(r.unusableSince || now)) >= this.timings.alertMaxWaitMs);
+      if (quietAll || maxWaitHit) {
+        const names = batch.map((r) => `${r.nickname || SHORT_HASH(r.userIdHash)}`).join(", ");
+        const text = `CHZZK logins down (${batch.length}): ${names}`;
+        try {
+          await this.deps.telegram.sendTelegram(text);
+          const ids = batch.map((r) => r._id);
+          await this.deps.Account.updateMany({ _id: { $in: ids } }, { $set: { unusableAlertAt: new Date(now) } });
+          this.deps.activity.add({ level: "warn", kind: "alert", msg: text });
+        } catch (_e) { /* swallow — retry next pass */ }
+      }
+    }
+
+    // Recovery: any account whose unusableAlertAt was stamped but is now ok →
+    // send "accepted again" when NO account is still unusable, then clear the stamp.
+    const stillDown = await this.deps.Account.countDocuments({
+      sold: { $ne: true }, status: "not_logged_in",
+    });
+    if (!stillDown) {
+      const stamped = await this.deps.Account.find({ unusableAlertAt: { $ne: null } }).lean();
+      if (stamped.length) {
+        try {
+          await this.deps.telegram.sendTelegram(`CHZZK logins accepted again (${stamped.length})`);
+          const ids = stamped.map((r) => r._id);
+          await this.deps.Account.updateMany(
+            { _id: { $in: ids } },
+            { $set: { unusableSince: null, unusableAlertAt: null } }
+          );
+          this.deps.activity.add({ level: "info", kind: "alert", msg: `CHZZK logins accepted again (${stamped.length})` });
+        } catch (_e) { /* retry next pass */ }
+      }
+    }
+  }
+
+  // ========== Activity view ==========
+
+  async activityView({ limit = 100, accountId } = {}) {
+    const entries = await this.deps.activity.list({ limit: Math.min(500, Math.max(1, limit)), accountId });
+    return { entries };
+  }
+
+  // ========== Totals / state view ==========
+
+  async stateView() {
+    const [accounts, campaigns, codes] = await Promise.all([
+      this.deps.Account.find({}).lean(),
+      this.deps.Campaign.countDocuments({}),
+      this.deps.Reward.countDocuments({ hasCode: true }),
+    ]);
+    const now = this.deps.now();
+    const watching = Array.from(this.workers.values()).filter((w) => w.current && w.current.state === "watching").length;
+    const totals = {
+      accounts: accounts.length,
+      ok: accounts.filter((a) => a.status === "ok").length,
+      loggedOut: accounts.filter((a) => a.status === "not_logged_in").length,
+      watching,
+      codes,
+      campaigns,
+    };
+    const list = accounts.map((a) => {
+      const w = this.workers.get(String(a._id));
+      return {
+        id: String(a._id),
+        nickname: a.nickname || "",
+        userIdHash: SHORT_HASH(a.userIdHash),
+        status: a.status || "untested",
+        lastError: a.lastError || "",
+        cookieAt: a.cookieAt,
+        lastCheckedAt: a.lastCheckedAt,
+        sold: !!a.sold,
+        paused: !!a.paused,
+        note: a.note || "",
+        current: (w && w.current) || a.current || null,
+        progress: a.progress || {},
+        codes: 0, // filled below if needed
+      };
+    });
+    // Count codes per account (one query, grouped)
+    const grouped = await this.deps.Reward.aggregate([
+      { $match: { hasCode: true } },
+      { $group: { _id: "$accountId", n: { $sum: 1 } } },
+    ]);
+    const codesByAcc = new Map(grouped.map((r) => [String(r._id), r.n]));
+    for (const row of list) row.codes = codesByAcc.get(row.id) || 0;
+    return {
+      switch: { on: this._readSwitch() },
+      egress: this.state.egress,
+      totals,
+      accounts: list,
+    };
+  }
+
+  // ========== Internal helpers ==========
+
+  _schedule(name, startMs, intervalMs, fn) {
+    const run = () => {
+      try {
+        const r = fn();
+        if (r && typeof r.then === "function") r.catch((e) => this.deps.activity.add({ level: "error", kind: name, msg: short(e) }));
+      } catch (e) { this.deps.activity.add({ level: "error", kind: name, msg: short(e) }); }
+    };
+    const first = this.deps.timers.set(() => {
+      run();
+      const h = this.deps.timers.interval(run, intervalMs);
+      this.timerHandles.push(h);
+    }, startMs);
+    this.timerHandles.push(first);
+  }
+}
+
+function short(e) {
+  if (!e) return "";
+  const m = (e && (e.code ? `${e.code}: ` : "")) + (e.message || String(e));
+  return m.length > 200 ? m.slice(0, 200) : m;
+}
+
+const realTimers = {
+  set: (fn, ms) => { const t = setTimeout(fn, ms); if (t && t.unref) t.unref(); return t; },
+  interval: (fn, ms) => { const t = setInterval(fn, ms); if (t && t.unref) t.unref(); return t; },
+  clear: (h) => { if (!h) return; try { clearTimeout(h); } catch (_e) {} try { clearInterval(h); } catch (_e) {} },
+};
+
+// Singleton — matches the SOOP farm's export shape.
+const farm = new Farm();
+module.exports = farm;
+module.exports.Farm = Farm;
+module.exports.DEFAULTS = DEFAULTS;

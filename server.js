@@ -100,6 +100,8 @@ const autoFarmer = require("./utils/autoFarmer");
 // SOOP drops farm service (docs/SOOP-FARM.md); started after MongoDB connects.
 const soopFarm = require("./utils/soopFarm");
 const soopCookieRefresher = require("./utils/soopCookieRefresher");
+// CHZZK drops farm (docs/CHZZK-FARM.md); singleton started after MongoDB connects.
+const chzzkFarm = require("./utils/chzzkFarm");
 // Publishes the auto-farm's listings; started below for its event-bundle sweep.
 const autoLister = require("./utils/autoLister");
 const autoFarmSnapshot = require("./utils/autoFarmSnapshot");
@@ -123,6 +125,7 @@ const systemHealthRoutes = require("./routes/systemHealthRoutes");
 const marketplaceConsoleRoutes = require("./routes/marketplaceConsoleRoutes");
 const priceTrackerRoutes = require("./routes/priceTrackerRoutes");
 const soopRoutes = require("./routes/soopRoutes");
+const chzzkRoutes = require("./routes/chzzkRoutes");
 const codeShopRoutes = require("./routes/codeShopRoutes");
 const fleetSnapshot = require("./utils/fleetSnapshot");
 const auditRequest = require("./middleware/auditRequest");
@@ -676,6 +679,13 @@ app.get("/soop.html", requireSuperadmin, enforce2fa, (req, res) => {
   res.sendFile(path.join(__dirname, "public", "soop.html"));
 });
 
+// CHZZK drops farm (docs/CHZZK-FARM.md) — superadmin-only. Holds live Naver
+// cookies server-side; gated before static and never cached.
+app.get("/chzzk.html", requireSuperadmin, enforce2fa, (req, res) => {
+  res.set("Cache-Control", "no-store");
+  res.sendFile(path.join(__dirname, "public", "chzzk.html"));
+});
+
 app.use(express.static(path.join(__dirname, "public")));
 
 // =========================
@@ -753,6 +763,8 @@ app.use(enforce2fa, priceTrackerRoutes.real());
 // SOOP drops farm: accounts, campaigns, bots and inventory. Every route inside
 // self-guards with requireSuperadmin; enforce2fa gates it behind 2FA.
 app.use(enforce2fa, soopRoutes);
+// CHZZK drops farm: accounts, campaigns, rewards. Same guard pattern.
+app.use(enforce2fa, chzzkRoutes);
 // Code shop (docs/code-shop/): stored reward codes as marketplace stock. Every
 // route inside self-guards with requireSuperadmin; the service loads on first use.
 app.use(enforce2fa, codeShopRoutes.router);
@@ -1003,6 +1015,10 @@ mongoose
     // when the process last stopped. Inert until an account is imported and a
     // bot is started from the SOOP page.
     soopFarm.start();
+    // CHZZK drops farm (docs/CHZZK-FARM.md): HTTP-only watch heartbeats +
+    // auto-read coupon codes. Inert until a Naver login is imported and the
+    // switch autoFarm.chzzkFarm is on (default true).
+    chzzkFarm.start();
     // SOOP cookie auto-renew: every 3 h, re-mint SOOP cookies for logins
     // whose health probe failed, via the Pi SOCKS tunnel + stored Twitch web
     // cookies. Inert until a SoopAccount has a twitchLogin linked AND a

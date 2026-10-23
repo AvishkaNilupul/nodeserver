@@ -287,6 +287,12 @@
           icon: ICONS.soop,
           superOnly: true,
         },
+        {
+          href: "/chzzk.html",
+          label: "CHZZK farm",
+          icon: ICONS.soop,
+          superOnly: true,
+        },
       ],
     },
     {
