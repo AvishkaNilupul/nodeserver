@@ -21,6 +21,7 @@ const DEFAULTS = {
   egressWaitMs: 30_000,        // back off when the tunnel is unreachable
   streamBackoffMs: 30 * 60_000, // a bad stream rests this long
   campaignBackoffMs: 30 * 60_000, // three bad streams in a row
+  noStreamBackoffMs: 10 * 60_000, // no usable live stream at all: look again sooner
   precheckMs: 10 * 60_000,     // reuse a campaign's progress read this long
   noCreditReads: 3,            // consecutive flat reads = not crediting
   badStreamsPerCampaign: 3,    // strike-out threshold
@@ -65,7 +66,8 @@ const mins = (ms) => Math.max(0, Math.round(ms / 60_000));
  * - client    : §6 client.
  * - campaigns : { list(), campaign(no), markFarmed(accountId, no, info), isDone(accountId, no) }
  *               info = { minutes, states } — markFarmed means VERIFIED done.
- * - pickStream(camp, account) -> { channelId, channelName? } | null
+ * - pickStream(camp, account, { avoid }) -> { channelId, channelName? } | null
+ *   avoid = Set of channelIds this worker has resting; the farm skips them.
  * - onEvent(current) — current = { state, campaignNo, title, channelId,
  *   channelName, since, minutes, needed, watched, credited, note }.
  * - onProgress({ campaignNo, minutes, states, done, next }) — once per read.
@@ -117,7 +119,7 @@ async function runSession(opts) {
 
       const stream = await selectStream(camp);
       if (!stream) {
-        bumpCampaignBad(camp, "no live stream to watch");
+        bumpCampaignBad(camp, "no live stream to watch", T.noStreamBackoffMs);
         continue;
       }
 
@@ -209,8 +211,10 @@ async function runSession(opts) {
   async function selectStream(camp) {
     const now = nowOf(clock);
     let s;
+    const avoid = new Set();
+    for (const [id, until] of streamBad) if (until > now) avoid.add(id);
     try {
-      s = await pickStream(camp, account);
+      s = await pickStream(camp, account, { avoid });
     } catch (e) {
       if (isAuthError(e)) throw e;
       if (isEgressError(e)) {
@@ -398,14 +402,14 @@ async function runSession(opts) {
     streamBad.set(id, nowOf(clock) + T.streamBackoffMs);
   }
 
-  function bumpCampaignBad(camp, why) {
+  function bumpCampaignBad(camp, why, restMs = T.campaignBackoffMs) {
     const no = camp.campaignNo;
     const streak = (campaignBadStreak.get(no) || 0) + 1;
     campaignBadStreak.set(no, streak);
     if (streak >= T.badStreamsPerCampaign) {
-      campaignBad.set(no, nowOf(clock) + T.campaignBackoffMs);
+      campaignBad.set(no, nowOf(clock) + restMs);
       campaignBadStreak.set(no, 0);
-      log("info", "farm", camp, `Resting "${camp.title}" for ${mins(T.campaignBackoffMs)} min: ${why}`);
+      log("info", "farm", camp, `Resting "${camp.title}" for ${mins(restMs)} min: ${why}`);
     }
   }
 

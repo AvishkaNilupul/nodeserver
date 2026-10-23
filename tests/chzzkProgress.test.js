@@ -248,3 +248,60 @@ test("farm: only a verified done mark is trusted; markFarmed writes one; logs la
   assert.equal(e.accountId, String(acc._id));
   assert.equal(e.campaignNo, 1981);
 });
+
+test("farm _pickStream: a resting stream is skipped; when none is usable the list is read again (≤ once a minute)", async () => {
+  let t = 1_000_000;
+  let lives = [{ channelId: "A", channelName: "a" }];
+  let reads = 0;
+  const farm = new Farm({
+    activity: { add() {}, async list() { return []; } },
+    settings: { getAutoFarm: () => ({}), async setAutoFarm() {} },
+    telegram: { sendTelegram: async () => true },
+    timers: { set: () => 0, interval: () => 0, clear() {} },
+    transport: { ready: true, describe: () => "test" },
+    makeClient: () => ({ async dropsLives() { reads++; return lives.map((l) => ({ ...l })); } }),
+    createCollector: () => ({ collect: async () => ({}), sweep: async () => [], reveal: async () => null, pending: () => 0 }),
+    now: () => t,
+  });
+  const camp = { campaignNo: 1954, categoryType: "GAME", categoryId: "OVERWATCH" };
+  assert.equal((await farm._pickStream(camp, {})).channelId, "A");
+  assert.equal(reads, 1);
+  lives = [{ channelId: "B", channelName: "b" }];
+  t += 30_000;
+  assert.equal(await farm._pickStream(camp, {}, { avoid: new Set(["A"]) }), null, "list is 30 s old: no re-read yet");
+  assert.equal(reads, 1);
+  t += 31_000;
+  assert.equal((await farm._pickStream(camp, {}, { avoid: new Set(["A"]) })).channelId, "B", "re-read finds the new stream");
+  assert.equal(reads, 2);
+});
+
+test("worker: tells pickStream which streams rest; no stream at all rests the campaign 10 min, not 30", async () => {
+  const clock = makeClock();
+  const fake = createFakeChzzk({
+    now: () => clock.t, minutesPerBeat: 10,
+    campaigns: [rawCamp([{ rewardNo: 1, title: "A", rewardType: "CODE_FIRST_COME", conditionForMinutes: 500, codeRemainingCount: 100 }])],
+    lives: [live("A")],
+  });
+  const store = makeStore([storeCamp([reward(1, 500)])]);
+  const avoids = [];
+  const logs = [];
+  const ac = new AbortController();
+  let closedOnce = false;
+  await worker.runSession({
+    account, client: fake.clientFor("acc1"), campaigns: store,
+    pickStream: (_c, _a, opts) => {
+      avoids.push([...(opts && opts.avoid) || []]);
+      return opts && opts.avoid && opts.avoid.has("A") ? null : { channelId: "A", channelName: "ch-A" };
+    },
+    onEvent: (e) => {
+      if (e.state === "watching" && !closedOnce) { closedOnce = true; fake.setLive("A", { status: "CLOSE" }); }
+      if (e.state === "idle") ac.abort();
+    },
+    onLog: (e) => logs.push(e.msg),
+    signal: ac.signal, clock, timings: { ...TIMINGS, noStreamBackoffMs: 600_000, campaignBackoffMs: 1_800_000 },
+  });
+  assert.deepEqual(avoids[0], [], "nothing rests at first");
+  assert.ok(avoids.slice(1).every((a) => a.includes("A")), "the ended stream is passed as avoid");
+  assert.ok(logs.some((m) => /^Left ch-A .*stream ended/.test(m)));
+  assert.ok(logs.some((m) => /^Resting "KEL Finals" for 10 min: no live stream to watch/.test(m)));
+});

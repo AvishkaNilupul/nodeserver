@@ -48,8 +48,10 @@ const DEFAULTS = {
   switchCacheMs: 30_000,
   countriesEnv: "CHZZK_COUNTRIES",
   countriesDefault: "JP,KR,FR", // JP+KR measured 2026-10-23; FR (Contabo) measured same day
-  pickStreamMemoMs: 5 * 60_000, // top-5 picks refreshed every 5 min
-  streamFanout: 5,              // top N streams a campaign spreads across
+  pickStreamMemoMs: 5 * 60_000, // stream list refreshed every 5 min
+  pickStreamRetryMs: 60_000,    // ...or after 1 min when every listed stream is off-limits
+  streamFanout: 5,              // top N usable streams a campaign spreads across
+  streamListSize: 20,           // how many drops lives to ask CHZZK for
   alertWaitMs: 5 * 60_000,
   alertQuietMs: 2 * 60_000,
   alertMaxWaitMs: 15 * 60_000,
@@ -547,7 +549,7 @@ class Farm {
       account: accountDoc,
       client,
       campaigns: campaignsStore,
-      pickStream: (camp, acc) => this._pickStream(camp, acc),
+      pickStream: (camp, acc, opts) => this._pickStream(camp, acc, opts),
       onEvent: (view) => this._onWorkerEvent(id, view),
       onProgress: (p) => this._onWorkerProgress(id, p),
       onEarned: () => this._onWorkerEarned(id),
@@ -651,30 +653,39 @@ class Farm {
     };
   }
 
-  // Shared pick-stream memo: top-N by viewers, cursor rotates per campaign so
-  // multiple accounts spread across the top-N instead of piling on #1.
-  async _pickStream(camp, account) {
+  // Shared pick-stream memo: streams by viewers, cursor rotates per campaign
+  // so several accounts spread across the top N instead of piling on #1.
+  // `avoid` = channelIds the asking worker has resting (a stream that ended
+  // or did not credit). When nothing listed is usable the list is read again
+  // (at most once a minute): a stream ending must not rest the campaign
+  // while other streams carry it (seen 2026-10-23 on Overwatch).
+  async _pickStream(camp, account, { avoid } = {}) {
     const id = camp.campaignNo;
     const now = this.deps.now();
+    const skip = avoid instanceof Set ? avoid : new Set(avoid || []);
     let memo = this.pickMemo.get(id);
-    if (!memo || now - memo.pickedAt >= this.timings.pickStreamMemoMs) {
-      const streams = await this._fetchTopStreams(camp);
-      memo = { pickedAt: now, streams, cursor: 0 };
+    const refetch = async () => {
+      memo = { pickedAt: this.deps.now(), streams: await this._fetchTopStreams(camp), cursor: 0 };
       this.pickMemo.set(id, memo);
+    };
+    if (!memo || now - memo.pickedAt >= this.timings.pickStreamMemoMs) await refetch();
+    let usable = memo.streams.filter((s) => !skip.has(s.channelId));
+    if (!usable.length && now - memo.pickedAt >= this.timings.pickStreamRetryMs) {
+      await refetch();
+      usable = memo.streams.filter((s) => !skip.has(s.channelId));
     }
-    if (!memo.streams.length) return null;
-    const n = Math.min(this.timings.streamFanout, memo.streams.length);
-    const pick = memo.streams[memo.cursor % n];
-    memo.cursor = (memo.cursor + 1) % n;
+    if (!usable.length) return null;
+    const n = Math.min(this.timings.streamFanout, usable.length);
+    const pick = usable[memo.cursor % n];
+    memo.cursor = (memo.cursor + 1) % this.timings.streamFanout;
     return pick;
   }
 
   async _fetchTopStreams(camp) {
     const client = this.deps.makeClient({ cookies: null, deviceId: "", transport: this.transport });
     try {
-      const list = await client.dropsLives(camp.categoryType, camp.categoryId, camp.campaignNo, { size: this.timings.streamFanout });
-      return (list || []).filter((l) => !l.adult && !l.paid && !l.watchParty)
-        .slice(0, this.timings.streamFanout);
+      const list = await client.dropsLives(camp.categoryType, camp.categoryId, camp.campaignNo, { size: this.timings.streamListSize });
+      return (list || []).filter((l) => !l.adult && !l.paid && !l.watchParty);
     } catch (_e) { return []; }
   }
 
