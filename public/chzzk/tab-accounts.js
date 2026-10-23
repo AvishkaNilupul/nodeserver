@@ -117,7 +117,7 @@
     if (!a.running) return el("span", { class: "s-muted" }, a.why || "Not running");
     if (!c) return el("span", { class: "s-muted" }, "Starting…");
     if (c.state !== "watching") return el("span", { class: "s-muted" }, (c.state === "waiting" ? "Waiting" : "Idle") + (c.note ? " — " + c.note : ""));
-    const stuck = c.watched >= 6 && !c.credited;
+    const stuck = c.watched >= 6 && c.credited === 0;
     return el("span", { class: "s-stack is-tight" },
       el("span", { class: "s-row" }, ui.dot("ok", "Watching"), el("b", gameOf(c.campaignNo) || c.title || "Campaign #" + c.campaignNo), c.channelName ? el("span", { class: "s-muted" }, c.channelName) : null),
       el("span", { class: "s-small s-num" + (stuck ? " s-warn" : " s-muted"), title: "CHZZK credited " + (c.credited || 0) + " of the " + (c.watched || 0) + " minutes watched on this stream" },
@@ -262,7 +262,7 @@
       if (sig === nowSig) return;
       nowSig = sig;
       if (!a.running || !c) { put(nowBox, muted(a.running ? "Starting…" : a.why || "Not running")); return; }
-      const camp = campOf(c.campaignNo), watching = c.state === "watching", stuck = watching && c.watched >= 6 && !c.credited;
+      const camp = campOf(c.campaignNo), watching = c.state === "watching", stuck = watching && c.watched >= 6 && c.credited === 0;
       const label = watching ? "Watching" : c.state === "waiting" ? "Waiting" : "Idle";
       put(nowBox,
         el("div", { class: "s-row" }, ui.dot(watching ? "ok" : null, label), el("b", label), c.note && el("span", { class: "s-muted" }, c.note)),
@@ -315,9 +315,11 @@
     // codes: keyed rows so a revealed code is not wiped by a reload
     const codeList = el("ul", { class: "s-list" }), codeBox = el("div", { class: "s-stack is-tight" }, muted("Loading codes…")), codeNote = el("span", { class: "s-muted s-small" });
     let codeRows = new Map();
+    let codesSeq = 0;
     function loadCodes() {
+      const seq = ++codesSeq; // an older answer must not land on top of a newer list
       return Chzzk.api.get("/rewards?accountId=" + encodeURIComponent(realId)).then((j) => {
-        if (!alive) return;
+        if (!alive || seq !== codesSeq) return;
         const list = j.rewards || [], next = new Map();
         list.forEach((r) => { const k = [r.id, r.state, r.hasCode].join("|"); next.set(k, codeRows.get(k) || codeRow(r)); });
         codeRows = next;
@@ -327,7 +329,7 @@
         const nodes = Array.from(next.values()), kids = codeList.children;
         if (nodes.length !== kids.length || nodes.some((n, i) => kids[i] !== n)) put(codeList, nodes);
         if (codeList.parentNode !== codeBox) put(codeBox, codeList);
-      }, (e) => { if (alive) put(codeBox, errNote("The codes could not be loaded: " + e.message)); });
+      }, (e) => { if (alive && seq === codesSeq) put(codeBox, errNote("The codes could not be loaded: " + e.message)); });
     }
     const collectBtn = ui.button("Collect codes now", { size: "sm", icon: "download", onClick: () => Chzzk.api.post("/rewards/collect", { ids: [realId] }).then((j) => {
       Chzzk.toast(j.queued ? "Reading this login's codes from CHZZK — they show here once read" : "This login has nothing to collect right now", j.queued ? "ok" : "info");

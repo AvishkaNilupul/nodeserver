@@ -276,14 +276,19 @@ class Farm {
     };
   }
 
-  async checkAccounts(ids = []) {
+  // `background` (the panel's "Check"): answer with the count at once and
+  // check one login after another behind it, so many logins never hold the
+  // HTTP request past the proxy timeout.
+  async checkAccounts(ids = [], { background = false } = {}) {
     const q = Array.isArray(ids) && ids.length
-      ? { _id: { $in: ids } }
+      ? { _id: { $in: ids.map(String).filter((id) => OBJECT_ID.test(id)) } }
       : { sold: { $ne: true } };
     const rows = await this.deps.Account.find(q).lean();
-    for (const row of rows) {
-      await this._checkOne(row).catch(() => {});
-    }
+    const run = async () => {
+      for (const row of rows) await this._checkOne(row).catch(() => {});
+    };
+    if (background) run().catch(() => {});
+    else await run();
     return { total: rows.length };
   }
 

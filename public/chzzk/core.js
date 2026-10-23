@@ -115,7 +115,11 @@
     var url = path.indexOf("/api/") === 0 ? path : API + (path.charAt(0) === "/" ? "" : "/") + path;
     var opts = { method: method, credentials: "same-origin", headers: { accept: "application/json" } };
     if (method === "POST") { opts.headers["content-type"] = "application/json"; opts.body = JSON.stringify(body || {}); }
+    // A hung request must fail (and count toward the connection banner), not freeze polling.
+    var ctl = typeof AbortController === "function" ? new AbortController() : null, guard = 0;
+    if (ctl) { opts.signal = ctl.signal; guard = setTimeout(function () { ctl.abort(); }, 20000); }
     return fetch(url, opts).then(function (r) {
+      clearTimeout(guard);
       if (r.status === 401 || r.status === 403) {
         if (!gone) { gone = true; window.location.href = "/admin-login.html"; }
         throw fail("You are signed out — taking you to the login page", r.status);
@@ -124,7 +128,7 @@
         if (!r.ok || !j || j.success === false) throw fail((j && (j.message || j.error)) || "The server answered with an error (HTTP " + r.status + ")", r.status);
         return j;
       });
-    }, function () { throw fail("Could not reach the server — check the connection", 0); });
+    }, function () { clearTimeout(guard); throw fail("Could not reach the server — check the connection", 0); });
   }
   var api = { get: function (path) { return request("GET", path); }, post: function (path, body) { return request("POST", path, body); } };
 
@@ -134,19 +138,26 @@
     return m;
   }
   var idx = { acc: indexBy(), camp: indexBy() };
-  var fails = 0, stateBusy = null, campBusy = null, stateTimer = 0, campTimer = 0, stateGen = 0, campAt = 0, campSeq = 0, campShown = 0;
+  var fails = 0, stateBusy = null, campBusy = null, stateTimer = 0, campTimer = 0, stateGen = 0, campAt = 0, campSeq = 0, campShown = 0, stateSeq = 0, stateShown = 0;
 
-  function loadState() {
-    if (stateBusy) return stateBusy;
-    stateBusy = api.get("/state").then(function (j) {
-      stateBusy = null; fails = 0;
+  // `fresh` (after an action) skips joining a request already in flight, which
+  // may predate the action; the sequence number stops that older answer from
+  // repainting over the newer one.
+  function loadState(fresh) {
+    if (stateBusy && !fresh) return stateBusy;
+    var seq = ++stateSeq;
+    var p = stateBusy = api.get("/state").then(function (j) {
+      if (stateBusy === p) stateBusy = null;
+      fails = 0;
+      if (seq < stateShown) return Chzzk.state;
+      stateShown = seq;
       var t = Date.parse(j.now) - Date.now();
       skew = isFinite(t) && Math.abs(t) > 5000 ? t : 0;
       Chzzk.state = j; idx.acc = indexBy(j.accounts, "id");
       banner(false); repaint(); emit("state", j);
       return j;
-    }, function (e) { stateBusy = null; fails++; if (fails >= FAIL_LIMIT && !gone) banner(true); throw e; });
-    return stateBusy;
+    }, function (e) { if (stateBusy === p) stateBusy = null; fails++; if (fails >= FAIL_LIMIT && !gone) banner(true); throw e; });
+    return p;
   }
   // `fresh` skips joining a request already in flight (it may predate a rescan);
   // the sequence number stops that older answer from landing on top of the new one.
@@ -698,7 +709,7 @@
 
   // ---------- Public surface ---------------------------------------------------
   Chzzk.api = api;
-  Chzzk.refresh = function () { return loadState().catch(function () { return null; }); };
+  Chzzk.refresh = function () { return loadState(true).catch(function () { return null; }); };
   Chzzk.refreshCampaigns = function () { return loadCampaigns(true).catch(function () { return null; }); };
   Chzzk.on = on; Chzzk.registerTab = registerTab; Chzzk.go = go; Chzzk.el = el;
   Chzzk.toast = toast; Chzzk.confirm = confirmBox; Chzzk.modal = modal; Chzzk.drawer = drawer; Chzzk.fmt = fmt;

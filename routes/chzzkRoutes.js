@@ -150,7 +150,7 @@ route("post", "/accounts/import", async ({ body }) => {
 
 // Empty list = every account that is not sold. Runs in the background.
 route("post", "/accounts/check", async ({ body }) => {
-  const { total } = await router.farm.checkAccounts(idList(body.ids, "ids"));
+  const { total } = await router.farm.checkAccounts(idList(body.ids, "ids"), { background: true });
   return { total };
 });
 

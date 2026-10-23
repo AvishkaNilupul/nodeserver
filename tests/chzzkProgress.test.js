@@ -403,3 +403,25 @@ test("worker: a progress list that keeps failing leaves the stream; a stop mid-w
   assert.equal(res.reason, "abort");
   assert.equal(fake2.calls.filter((c) => c.method === "watchEvent" && c.args[0].type === "WATCH_ENDED").length, 1, "WATCH_ENDED sent after a stop during the egress wait");
 });
+
+test("farm: checkAccounts in the background answers with the count before the checks run", async () => {
+  await ChzzkAccount.deleteMany({});
+  await ChzzkAccount.create({ userIdHash: "h-bg", nickname: "bg", cookies: encrypt("[]"), status: "ok" });
+  let started = 0;
+  let release;
+  const gate = new Promise((r) => { release = r; });
+  const farm = new Farm({
+    activity: { add() {}, async list() { return []; } },
+    settings: { getAutoFarm: () => ({}), async setAutoFarm() {} },
+    telegram: { sendTelegram: async () => true },
+    timers: { set: () => 0, interval: () => 0, clear() {} },
+    transport: { ready: true, describe: () => "test" },
+    makeClient: () => ({ async userStatus() { started++; await gate; return { loggedIn: true, userIdHash: "h-bg" }; } }),
+    createCollector: () => ({ collect: async () => ({}), sweep: async () => [], reveal: async () => null, pending: () => 0 }),
+  });
+  const r = await farm.checkAccounts([], { background: true });
+  assert.equal(r.total, 1);
+  assert.equal(started, 1, "the check has started");
+  assert.deepEqual(await farm.checkAccounts(["not-an-id"]), { total: 0 }, "a malformed id is skipped, not a cast error");
+  release();
+});

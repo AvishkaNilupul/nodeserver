@@ -284,7 +284,8 @@
         const fresh = find(k);
         d.gone.hidden = !!fresh;
         if (fresh) d.c = fresh;
-        const sig = JSON.stringify(Object.assign({}, d.c, { logins: null }));
+        // Scan times change every scan; tickDrawer shows them, so they must not rebuild the drawer.
+        const sig = JSON.stringify(Object.assign({}, d.c, { logins: null, lastSeenAt: null, refreshedAt: null }));
         if (sig !== d.sig) { d.sig = sig; paintDrawer(d); if (d.handle) d.handle.setTitle(titleOf(d.c)); }
       }
       tickDrawer(d);

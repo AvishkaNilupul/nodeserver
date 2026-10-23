@@ -186,6 +186,7 @@ test("POST /accounts/check passes ids and returns total", withServer(
     const checkCalls = stub.calls.filter((c) => c.name === "checkAccounts");
     assert.equal(checkCalls.length, 2);
     assert.deepEqual(checkCalls[0].args[0], ["a", "b"]);
+    assert.deepEqual(checkCalls[0].args[1], { background: true }, "the route never waits for the checks");
   },
 ));
 
