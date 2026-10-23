@@ -26,6 +26,7 @@ const { hashCode } = require("./slots");
 
 const ObjectId = mongoose.Types.ObjectId;
 const HISTORY_MAX = 20;
+const sources = require("./sources");
 const HELD_PROBLEM = "stored code is missing or changed";
 const OBJECT_ID_HEX = /^[0-9a-f]{24}$/i;
 
@@ -187,18 +188,16 @@ function createUnits(deps = {}) {
     }
 
     // 3. The codes themselves, each checked against the hash taken at ingest.
-    const inv = await M("SoopInventoryItem")
-      .find({ $or: ordered.map((r) => ({ loginId: r.loginId, key: r.itemKey })) }, { loginId: 1, key: 1, codeEnc: 1 })
-      .lean();
-    const invBy = new Map(inv.map((x) => [JSON.stringify([text(x.loginId), text(x.key)]), x]));
+    // Either farm's stored ciphertext (sources.js: SOOP inventory or CHZZK reward).
+    const encBy = await sources.encOf(deps, ordered);
     const codes = [];
     const bad = [];
     for (const r of ordered) {
-      const x = invBy.get(JSON.stringify([text(r.loginId), text(r.itemKey)]));
+      const enc = encBy.get(sources.idKey(r.loginId, r.itemKey));
       let code = "";
-      if (x) {
+      if (enc !== undefined) {
         try {
-          code = text(secret.decrypt(text(x.codeEnc))).trim();
+          code = text(secret.decrypt(text(enc))).trim();
         } catch {
           code = "";
         }

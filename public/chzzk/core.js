@@ -599,12 +599,21 @@
   var REVEAL_MS = 60000, reveals = [], revealing = [];   // on screen { cell, hide } / being fetched { cell, p }
   function holdsReveal(node) { return reveals.concat(revealing).some(function (r) { return node.contains(r.cell); }); }
   function sweepReveals() { reveals.slice().forEach(function (r) { if (!doc.contains(r.cell)) r.hide(); }); }
-  function revealButton(rewardId, cell) {
-    return button("Reveal", { size: "sm", icon: "eye", title: "Show this code for 60 seconds", onClick: function () { return reveal(rewardId, cell); } });
+  function revealButton(rewardId, cell, opts) {
+    return button("Reveal", { size: "sm", icon: "eye", title: "Show this code for 60 seconds", onClick: function () { return reveal(rewardId, cell, opts); } });
   }
+  // A code the code shop has on sale or already sold must not also be handed
+  // out by hand: ask first (opts.shop is the reward row's `shop` state).
+  var SHOP_ASK = { in_unit: "is on sale in the code shop", sold: "was sold in the code shop", dead: "was sold in the code shop" };
   // Resolves true once the code is shown, false otherwise (a failure is already toasted); never rejects.
-  function reveal(rewardId, cell) {
+  function reveal(rewardId, cell, opts) {
     if (!(cell instanceof Node)) return Promise.resolve(false);
+    var ask = opts && SHOP_ASK[opts.shop];
+    if (ask && !(opts && opts.confirmed)) {
+      return confirmBox({ title: "Show a code the shop is selling?", danger: true, okLabel: "Show it anyway",
+        body: "This code " + ask + ". Showing it is fine for checking a buyer's problem, but never give it to anyone else: it would be sold twice." })
+        .then(function (yes) { return yes ? reveal(rewardId, cell, { shop: opts.shop, confirmed: true }) : false; });
+    }
     var busy = revealing.filter(function (r) { return r.cell === cell; })[0];
     if (busy) return busy.p;
     var job = { cell: cell, p: null };
@@ -613,13 +622,13 @@
       done();
       if (!doc.contains(cell)) return false;             // the row or drawer went away while we asked
       if (!j || j.code == null || j.code === "") throw fail("No code is stored for this reward", 404);
-      showCode(rewardId, cell, String(j.code));
+      showCode(rewardId, cell, String(j.code), opts && { shop: opts.shop });
       return true;
     }).catch(function (e) { done(); toast(e); return false; });
     revealing.push(job);
     return job.p;
   }
-  function showCode(rewardId, cell, code) {
+  function showCode(rewardId, cell, code, opts) {
     reveals.slice().forEach(function (r) { r.hide(); });
     var a = doc.activeElement, focusHere = !a || a === doc.body || cell.contains(a);
     var until = Date.now() + REVEAL_MS, timer = 0, live = { cell: cell, hide: hide };
@@ -636,7 +645,7 @@
       if (i === -1) return;
       reveals.splice(i, 1); clearInterval(timer);
       field.textContent = "";                            // drop the text itself, not only its place in the page
-      var refocus = cell.contains(doc.activeElement), again = revealButton(rewardId, cell);
+      var refocus = cell.contains(doc.activeElement), again = revealButton(rewardId, cell, opts);
       fill(cell, again);
       if (refocus) again.focus({ preventScroll: true });
     }

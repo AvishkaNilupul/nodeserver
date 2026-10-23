@@ -155,7 +155,11 @@ function campaignView(c, { earnedByReward, accounts = [], now }) {
   };
 }
 
-function rewardView(r, { accountsById, campaignsByNo }) {
+// Code shop ledger state -> what the CHZZK panel says about it.
+const SHOP_WORDS = { in_stock: "in stock", in_unit: "on sale", sold: "sold", held: "held", expiring: "taken off sale", expired: "expired", dead: "reported dead" };
+const shopKey = (r) => `${r.accountId}|${r.rewardNo}`;
+
+function rewardView(r, { accountsById, campaignsByNo, shopOf }) {
   const acc = accountsById.get(String(r.accountId));
   const camp = campaignsByNo.get(Number(r.campaignNo));
   return {
@@ -180,12 +184,15 @@ function rewardView(r, { accountsById, campaignsByNo }) {
     lastError: r.lastError || "",
     revealedAt: r.revealedAt || null,
     revealedBy: r.revealedBy || "",
+    // "" when the code shop has no row for it (not ingested yet, or no shop).
+    shop: (shopOf && shopOf.get(shopKey(r))) || "",
+    shopWord: SHOP_WORDS[(shopOf && shopOf.get(shopKey(r))) || ""] || "",
   };
 }
 
 // Stock: one line per reward kind. "fresh" = stored and never revealed —
 // the codes nobody has seen yet (what could be sold later).
-function stockView(rows, { campaignsByNo, now }) {
+function stockView(rows, { campaignsByNo, now, shopOf }) {
   const groups = new Map();
   for (const r of rows) {
     if (r.state === "in_app") continue;
@@ -199,11 +206,15 @@ function stockView(rows, { campaignsByNo, now }) {
         campaignTitle: r.campaignTitle || (camp && camp.title) || "",
         title: r.title || "", rewardType: r.rewardType || "",
         stored: 0, fresh: 0, revealed: 0, waiting: 0, expired: 0,
+        onSale: 0, sold: 0,
         useBy: null, lastEarnedAt: null,
       };
       groups.set(key, g);
     }
     const end = ms(r.codeEndAt);
+    const shop = shopOf ? shopOf.get(shopKey(r)) : "";
+    if (shop === "in_unit") g.onSale++;
+    if (shop === "sold" || shop === "dead") g.sold++;
     if (r.hasCode) {
       g.stored++;
       if (end != null && end <= now) g.expired++;
@@ -219,9 +230,9 @@ function stockView(rows, { campaignsByNo, now }) {
   const stock = [...groups.values()].sort((a, b) =>
     String(a.game).localeCompare(String(b.game)) || a.campaignNo - b.campaignNo || a.rewardNo - b.rewardNo);
   const totals = stock.reduce((t, g) => {
-    for (const k of ["stored", "fresh", "revealed", "waiting", "expired"]) t[k] += g[k];
+    for (const k of ["stored", "fresh", "revealed", "waiting", "expired", "onSale", "sold"]) t[k] += g[k];
     return t;
-  }, { stored: 0, fresh: 0, revealed: 0, waiting: 0, expired: 0 });
+  }, { stored: 0, fresh: 0, revealed: 0, waiting: 0, expired: 0, onSale: 0, sold: 0 });
   return { stock, totals };
 }
 

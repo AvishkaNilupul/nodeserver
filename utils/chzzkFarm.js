@@ -76,6 +76,9 @@ class Farm {
       transportFactory: deps.transportFactory || getTransport,
       settings: deps.settings || settings,
       telegram: deps.telegram || telegram,
+      // The code shop's ledger, read only to say whether a code is on sale or
+      // sold there (utils/codeShop/sources.js keys CHZZK codes "chzzk:<id>"/"r<no>").
+      CodeStock: deps.CodeStock === undefined ? null : deps.CodeStock,
       now: deps.now || (() => Date.now()),
       timers: deps.timers || realTimers,
     };
@@ -467,17 +470,35 @@ class Farm {
     ]);
     const accountsById = new Map(accs.map((a) => [String(a._id), a]));
     const campaignsByNo = new Map(camps.map((c) => [Number(c.campaignNo), c]));
-    return { rewards: rows.map((r) => views.rewardView(r, { accountsById, campaignsByNo })) };
+    const shopOf = await this._shopStates(rows.filter((r) => r.hasCode));
+    return { rewards: rows.map((r) => views.rewardView(r, { accountsById, campaignsByNo, shopOf })) };
+  }
+
+  // Map("<accountId>|<rewardNo>" -> code shop ledger state) for these reward
+  // rows; empty when the code shop is not there or cannot be read.
+  async _shopStates(rows) {
+    const out = new Map();
+    if (!rows || !rows.length) return out;
+    try {
+      const Stock = this.deps.CodeStock || require("../models/CodeStock");
+      const list = await Stock.find({
+        loginId: { $in: [...new Set(rows.map((r) => "chzzk:" + r.accountId))] },
+        itemKey: { $in: [...new Set(rows.map((r) => "r" + r.rewardNo))] },
+      }).select("loginId itemKey state").lean();
+      for (const x of list || []) out.set(`${String(x.loginId).slice(6)}|${String(x.itemKey).slice(1)}`, x.state);
+    } catch (_e) { /* no shop info: the panel shows none */ }
+    return out;
   }
 
   // Codes on hand, one line per reward kind. Never reads codeEnc.
   async stockView() {
     const [rows, camps] = await Promise.all([
-      this.deps.Reward.find({}).select("campaignNo rewardNo title rewardType categoryId campaignTitle state hasCode earnedAt codeEndAt revealedAt").lean(),
+      this.deps.Reward.find({}).select("accountId campaignNo rewardNo title rewardType categoryId campaignTitle state hasCode earnedAt codeEndAt revealedAt").lean(),
       this.deps.Campaign.find({}).select("campaignNo title categoryValue").lean(),
     ]);
     const campaignsByNo = new Map(camps.map((c) => [Number(c.campaignNo), c]));
-    return views.stockView(rows, { campaignsByNo, now: this.deps.now() });
+    const shopOf = await this._shopStates(rows.filter((r) => r.hasCode));
+    return views.stockView(rows, { campaignsByNo, now: this.deps.now(), shopOf });
   }
 
   async revealCode(rewardId, who) {

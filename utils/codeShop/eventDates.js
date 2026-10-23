@@ -18,6 +18,8 @@ const KST_MS = 9 * 60 * 60 * 1000;
 // have no campaign row to read.
 const IDX_RE = /^[^:]*:(\d+)$/;
 const NO_EVENT_RE = /^[^:]*:none$/;
+// "<gameNo>:chzzk-<campaignNo>" — a CHZZK campaign (sources.js); its startAt is UTC.
+const CHZZK_RE = /^[^:]*:chzzk-(\d+)$/;
 
 const text = (v) => (v === undefined || v === null ? "" : String(v));
 const leanOf = (q) => (q && typeof q.lean === "function" ? q.lean() : q);
@@ -38,12 +40,12 @@ function campaignStartMs(doc) {
   return Object.prototype.hasOwnProperty.call(doc, "titleRaw") ? ms : ms - KST_MS;
 }
 
-// models: { SoopCampaign, CodeStock } (either may be missing: that source is skipped).
+// models: { SoopCampaign, ChzzkCampaign, CodeStock } (any may be missing: that source is skipped).
 // -> one entry per distinct group: its start Date, or null when it has none
 // (dates oldest first, nulls last). The length is the number of events, so a
 // caller never calls two events "this event" because they share a day.
 async function eventStarts(models, groupKeys) {
-  const { SoopCampaign, CodeStock } = models || {};
+  const { SoopCampaign, ChzzkCampaign, CodeStock } = models || {};
   const all = [...new Set((Array.isArray(groupKeys) ? groupKeys : []).map(text).filter(Boolean))];
   if (!all.length) return [];
   const keys = all.filter((k) => !NO_EVENT_RE.test(k));
@@ -61,6 +63,20 @@ async function eventStarts(models, groupKeys) {
     const byIdx = new Map((docs || []).map((d) => [text(d.dropsIdx), campaignStartMs(d)]));
     for (const [k, idx] of idxOf) {
       const ms = byIdx.get(idx);
+      if (ms !== undefined && ms !== null) startOf.set(k, ms);
+    }
+  }
+
+  const chzzkOf = new Map();
+  for (const k of keys) {
+    const m = CHZZK_RE.exec(k);
+    if (m) chzzkOf.set(k, Number(m[1]));
+  }
+  if (chzzkOf.size && ChzzkCampaign) {
+    const docs = await leanOf(ChzzkCampaign.find({ campaignNo: { $in: [...new Set(chzzkOf.values())] } }, "campaignNo startAt"));
+    const byNo = new Map((docs || []).map((d) => [Number(d.campaignNo), toMs(d.startAt)]));
+    for (const [k, no] of chzzkOf) {
+      const ms = byNo.get(no);
       if (ms !== undefined && ms !== null) startOf.set(k, ms);
     }
   }

@@ -18,6 +18,8 @@ const DEFAULT_SOURCE_WORDS = Object.freeze([
   "official [^.\\n]*event",
   "stage\\s*\\d",
   "kakao",
+  "chzzk",
+  "naver",
 ]);
 
 const LIMITS = Object.freeze({ title: 160, description: 2000, coverBullets: 4, label: 80 });

@@ -461,7 +461,7 @@ function createCodeShopRoutes({ service, createHeld } = {}) {
   // The start dates of the events a product's codes come from (buyer texts
   // name an event by its date only).
   const eventStartsOf = (groupKeys) =>
-    eventStarts({ SoopCampaign: model("SoopCampaign"), CodeStock: model("CodeStock") }, groupKeys);
+    eventStarts({ SoopCampaign: model("SoopCampaign"), ChzzkCampaign: model("ChzzkCampaign"), CodeStock: model("CodeStock") }, groupKeys);
 
   const sourceWordsOf = (cfg) => (Array.isArray(cfg.sourceWords) ? cfg.sourceWords : DEFAULTS.sourceWords);
   const enabledMarkets = (cfg) => MARKETS.filter((m) => cfg.markets && cfg.markets[m] === true);

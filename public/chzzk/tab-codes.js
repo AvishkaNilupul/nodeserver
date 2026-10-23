@@ -78,9 +78,12 @@
     const st = STATES[r.state] || { label: r.state || "Unknown", tone: null };
     // Who revealed it sits under the badge (one column less, so Reveal stays on screen).
     if (r.state !== "earned") {
-      if (!r.hasCode || !r.revealedAt) return ui.badge(st.label, st.tone);
-      return el("div", { class: "s-stack is-tight", style: { alignItems: "flex-start" } }, ui.badge(st.label, st.tone),
-        el("span", { class: "s-small s-muted s-nowrap", title: fmt.when(r.revealedAt) }, "revealed " + fmt.ago(r.revealedAt) + (r.revealedBy ? " by " + r.revealedBy : "")));
+      const shopLine = r.shopWord
+        ? el("span", { class: (r.shop === "in_unit" || r.shop === "sold" ? "s-strong" : "s-muted") + " s-small s-nowrap" }, "shop: " + r.shopWord)
+        : null;
+      if (!r.hasCode || (!r.revealedAt && !shopLine)) return ui.badge(st.label, st.tone);
+      return el("div", { class: "s-stack is-tight", style: { alignItems: "flex-start" } }, ui.badge(st.label, st.tone), shopLine,
+        r.revealedAt ? el("span", { class: "s-small s-muted s-nowrap", title: fmt.when(r.revealedAt) }, "revealed " + fmt.ago(r.revealedAt) + (r.revealedBy ? " by " + r.revealedBy : "")) : null);
     }
     const bits = [], next = Date.parse(r.nextTryAt);
     if (r.tries) bits.push("tried " + plural(r.tries, "time"));
@@ -90,13 +93,16 @@
       el("span", { class: "s-small s-muted" }, bits.length ? bits.join(" · ") : "code not read yet"));
   }
   // The cell is ours; Chzzk.reveal fills it and puts a Reveal button back after 60 s.
+  // shopNow: reward id -> its latest code shop state (the cell outlives a row's data).
+  const shopNow = new Map();
   function codeCell(r) {
     if (!r.hasCode) return el("span", { class: "s-muted s-small" }, r.state === "in_app" ? "In-game reward" : "Not read yet");
     const id = String(r.id);
+    shopNow.set(id, r.shop || "");
     if (cells.has(id)) return cells.get(id);
     const cell = el("span", { class: "s-row", dataset: { stop: "1" } });
     cell.append(ui.button("Reveal", { size: "sm", icon: "eye", title: "Show this code for 60 seconds — the reveal is recorded",
-      onClick: () => Chzzk.reveal(r.id, cell) }));
+      onClick: () => Chzzk.reveal(r.id, cell, { shop: shopNow.get(id) || "" }) }));
     cells.set(id, cell);
     return cell;
   }
@@ -151,11 +157,11 @@
     const rows = sortedStock();
     if (!rows.length) return;
     const head = ["Game", "Game on CHZZK", "Reward", "Type", "Campaign", "Campaign no", "Reward no",
-      "Fresh", "Revealed", "Waiting", "Use-by", "Last earned"];
+      "Fresh", "Revealed", "Waiting", "On sale in shop", "Sold in shop", "Use-by", "Last earned"];
     const lines = [head].concat(rows.map((s) => {
       const g = stockGame(s);
       return [g.name, g.raw, s.title || "", Chzzk.rewardType(s.rewardType), s.campaignTitle || "", s.campaignNo, s.rewardNo,
-        s.fresh || 0, s.revealed || 0, s.waiting || 0, s.useBy || "", s.lastEarnedAt || ""];
+        s.fresh || 0, s.revealed || 0, s.waiting || 0, s.onSale || 0, s.sold || 0, s.useBy || "", s.lastEarnedAt || ""];
     }));
     // BOM so a spreadsheet reads the Korean titles as UTF-8.
     const text = "﻿" + lines.map((l) => l.map(csvCell).join(",")).join("\r\n") + "\r\n";
@@ -198,6 +204,7 @@
     stats.revealed.set(n("revealed"), "shown at least once");
     stats.waiting.set(n("waiting"), "earned — code not read yet");
     stats.expired.set(n("expired"), "past their use-by date");
+    stats.shop.set(totals ? fmt.num((t.onSale || 0) + (t.sold || 0)) : "–", totals ? fmt.num(t.onSale || 0) + " on sale · " + fmt.num(t.sold || 0) + " sold" : "on sale or sold there", t.onSale ? "ok" : null);
     setStatus(stockStatus, !!stock, stockError, "the stock");
     stockTable.hidden = !stock;
     csvBtn.disabled = !stock || !stock.length;
@@ -230,7 +237,7 @@
     id: "codes", label: "Codes",
     render(root) {
       host = root;
-      stats = { fresh: ui.stat("Fresh", "–"), revealed: ui.stat("Revealed", "–"), waiting: ui.stat("Waiting", "–"), expired: ui.stat("Expired", "–") };
+      stats = { fresh: ui.stat("Fresh", "–"), revealed: ui.stat("Revealed", "–"), waiting: ui.stat("Waiting", "–"), expired: ui.stat("Expired", "–"), shop: ui.stat("In the code shop", "–") };
       stockStatus = statusBox();
       codesStatus = statusBox();
       csvBtn = ui.button("Download CSV", { size: "sm", icon: "download", disabled: true,
@@ -244,6 +251,7 @@
           { label: "Fresh", align: "right", render: (s) => count(s.fresh, "s-ok s-strong") },
           { label: "Revealed", align: "right", render: (s) => count(s.revealed) },
           { label: "Waiting", align: "right", render: (s) => count(s.waiting) },
+          { label: "In shop", align: "right", render: (s) => el("span", { title: fmt.num(s.onSale || 0) + " on sale, " + fmt.num(s.sold || 0) + " sold in the code shop" }, count((s.onSale || 0) + (s.sold || 0))) },
           { label: "Use-by", render: (s) => useBy(s.useBy) },
           { label: "Last earned", hide: "sm", render: (s) => ago(s.lastEarnedAt) },
         ] });
@@ -263,7 +271,7 @@
           { label: "Code", render: codeCell },
         ] });
       root.append(el("div", { class: "s-stack" },
-        el("div", { class: "s-stats" }, stats.fresh, stats.revealed, stats.waiting, stats.expired),
+        el("div", { class: "s-stats" }, stats.fresh, stats.revealed, stats.waiting, stats.expired, stats.shop),
         el("section", { class: "s-card" },
           el("div", { class: "s-card-hd" }, el("h2", { class: "s-card-title s-grow" }, "Stock by reward"), csvBtn),
           stockStatus.box, stockTable),

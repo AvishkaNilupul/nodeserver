@@ -28,6 +28,7 @@
 
 const mongoose = require("mongoose");
 const { hashCode, codeShape } = require("./slots");
+const sources = require("./sources");
 
 const ObjectId = mongoose.Types.ObjectId;
 const HOUR_MS = 3600 * 1000;
@@ -448,9 +449,9 @@ function createAfterSale(deps = {}) {
   // code ingest hashed.
   async function readCode(row) {
     try {
-      const inv = await M("SoopInventoryItem").findOne({ loginId: row.loginId, key: row.itemKey }, { codeEnc: 1 }).lean();
-      if (!inv) return "";
-      const code = text(secret.decrypt(text(inv.codeEnc))).trim();
+      const enc = await sources.encFor(deps, row);
+      if (enc === null) return "";
+      const code = text(secret.decrypt(text(enc))).trim();
       if (!code || !row.codeHash || hashCode(code) !== row.codeHash) return "";
       return code;
     } catch {
@@ -548,9 +549,7 @@ function createAfterSale(deps = {}) {
 
     // Never a code of a farm login that was sold: its buyer can see (and
     // redeem) that login's inventory.
-    const soldLogins = (await M("SoopAccount").find({ sold: true }, { loginId: 1 }).lean())
-      .map((a) => text(a && a.loginId))
-      .filter(Boolean);
+    const soldLogins = await sources.soldLoginIds(deps);
     const notSold = soldLogins.length ? { loginId: { $nin: soldLogins } } : {};
 
     // Same reward of the same campaign first, then the same reward name of the

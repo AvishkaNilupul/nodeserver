@@ -75,6 +75,7 @@ function modelOf(deps, name) {
 }
 
 const text = (v) => (v === undefined || v === null ? "" : String(v));
+const sources = require("./sources");
 
 function toObjectId(v) {
   const raw = v && typeof v === "object" && v._id ? v._id : v;
@@ -106,9 +107,9 @@ function createHeld(deps = {}) {
   async function codeStillMatches(row) {
     let plain = "";
     try {
-      const inv = await M("SoopInventoryItem").findOne({ loginId: row.loginId, key: row.itemKey }, { codeEnc: 1 }).lean();
-      if (!inv) return false;
-      plain = text(secret.decrypt(text(inv.codeEnc))).trim();
+      const enc = await sources.encFor(deps, row);
+      if (enc === null) return false;
+      plain = text(secret.decrypt(text(enc))).trim();
     } catch {
       return false;
     }
@@ -131,7 +132,7 @@ function createHeld(deps = {}) {
     if (row.wasFed === true) throw fail(409, "This code was in a platform vault, which may have sold it; it stays held");
     if (!text(row.codeHash)) throw fail(409, "This code has no fingerprint to check; it stays held");
 
-    if (await M("SoopAccount").exists({ loginId: text(row.loginId), sold: true })) {
+    if (await sources.isSoldLogin(deps, text(row.loginId))) {
       throw fail(409, "Its farm login was sold (its buyer can see the code); it stays held");
     }
     if (!(await codeStillMatches(row))) {

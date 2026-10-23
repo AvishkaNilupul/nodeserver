@@ -26,6 +26,7 @@
 // Nothing here reads or writes a code: rows carry hashes, units stay encrypted.
 
 const { DEFAULTS } = require("./config");
+const sources = require("./sources");
 
 const HOUR_MS = 60 * 60 * 1000;
 const HISTORY_MAX = 20;
@@ -277,8 +278,7 @@ function createReconcile(deps = {}) {
   }
 
   async function soldLoginIds() {
-    const rows = await M("SoopAccount").find({ sold: true }, { loginId: 1 }).lean();
-    return new Set((rows || []).map((r) => text(r.loginId)).filter(Boolean));
+    return new Set(await sources.soldLoginIds(deps));
   }
 
   // Units holding a code of a sold farm login. Runs before the per-unit pass;

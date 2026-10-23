@@ -12,6 +12,7 @@
 
 const mongoose = require("mongoose");
 const { planUnits } = require("./allocate");
+const sources = require("./sources");
 const { createUnits } = require("./units");
 
 const HOUR_MS = 3600 * 1000;
@@ -92,7 +93,7 @@ function createFill(deps = {}) {
     // Never a code of a farm login that was sold: its buyer can see (and
     // redeem) that login's inventory. Ingest holds those rows on its next pass;
     // until then a pulled or dissolved unit may have put them back in stock.
-    const soldLogins = (await M("SoopAccount").find({ sold: true }, { loginId: 1 }).lean()).map((a) => a.loginId);
+    const soldLogins = await sources.soldLoginIds(deps);
     const stockQuery = { state: "in_stock", slotKey: { $in: slotKeys }, codeHash: { $gt: "" } };
     if (soldLogins.length) stockQuery.loginId = { $nin: soldLogins };
     const free = await M("CodeStock").find(stockQuery, { slotKey: 1, useBy: 1, earnedAt: 1 }).lean();

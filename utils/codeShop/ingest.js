@@ -27,6 +27,7 @@
 
 const crypto = require("node:crypto");
 const slots = require("./slots");
+const sources = require("./sources");
 const { PROBLEMS: HELD_PROBLEMS, releasedWhy } = require("./held");
 
 // Bounded writes: one ledger read and at most this many writes per round trip.
@@ -210,9 +211,22 @@ function createIngest(deps = {}) {
     return found;
   }
 
+  // Both farms' sold logins (sources.js): a CHZZK login's codes sit under
+  // "chzzk:<account id>".
   async function soldLogins() {
-    const rows = await leanOf(model("SoopAccount").find({ sold: true }).select("loginId"));
-    return new Set((rows || []).map((r) => text(r.loginId)).filter(Boolean));
+    return new Set(await sources.soldLoginIds(deps));
+  }
+
+  // The CHZZK farm's stored codes as rows, unless the owner switched that
+  // source off. A CHZZK failure is logged and the SOOP rows still go through.
+  async function chzzkRows(cfg) {
+    if (cfg && cfg.sources && cfg.sources.chzzk === false) return [];
+    try {
+      return await sources.chzzkRows(deps);
+    } catch (err) {
+      await note({ level: "warn", kind: "ingest", msg: `CHZZK codes were not read this run: ${text(err && err.message).slice(0, 160)}` });
+      return [];
+    }
   }
 
   // A sold login belongs to a buyer now, and the buyer can open its inventory:
@@ -472,6 +486,11 @@ function createIngest(deps = {}) {
       row.campaignEndAt = c ? dateOf(c.endDate) : null;
       row.groupKey = slots.groupKeyOf({ gameNo: row.gameNo, campaignIdx: row.campaignIdx, campaignName: row.dropsName });
     }
+    // CHZZK rows arrive with their campaign already resolved ("chzzk-<no>"),
+    // so they never match a SOOP campaign or share a SOOP group or slot.
+    const chz = await chzzkRows((await configOf().get()) || {});
+    for (const r of chz) rows.push(r);
+    out.scanned = rows.length;
 
     // Oldest first, so of two rows holding the same code the earlier one is
     // the one that sells. Plain code-unit order: the same on every server.
@@ -725,7 +744,15 @@ function createIngest(deps = {}) {
     }
     // Forget what the log itself has forgotten (14 days), so the map stays small.
     for (const [id, ms] of revealSeen) if (revealReadTo - ms > 15 * 86400e3) revealSeen.delete(id);
-    const lastReveal = revealSeen;
+    // CHZZK keeps the reveal on the reward row itself (revealedAt), keyed by
+    // the same itemId the ledger holds; a failed read only skips it this run.
+    let chzReveals = new Map();
+    try {
+      chzReveals = await sources.chzzkReveals(deps);
+    } catch {
+      chzReveals = new Map();
+    }
+    const lastReveal = chzReveals.size ? new Map([...revealSeen, ...chzReveals]) : revealSeen;
     if (!lastReveal.size) return 0;
     const CodeStock = model("CodeStock");
     let held = 0;

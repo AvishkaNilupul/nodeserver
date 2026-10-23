@@ -58,7 +58,16 @@ const DEFAULTS = deepFreeze({
     // gameNo -> { sell, marketGame, displayName }; unknown games do not sell
     "12": { sell: true, marketGame: "Overwatch", displayName: "Overwatch 2" },
     "200": { sell: true, marketGame: "Delta Force", displayName: "Delta Force" },
+    // Games only the CHZZK farm earns codes for (utils/codeShop/sources.js).
+    // Listed so the owner can tick them; none sells until ticked.
+    "910001": { sell: false, marketGame: "Call of Duty", displayName: "Call of Duty: Modern Warfare 4" },
+    "910002": { sell: false, marketGame: "World of Warcraft", displayName: "World of Warcraft" },
+    "910003": { sell: false, marketGame: "Stella Sora", displayName: "Stella Sora" },
+    "910004": { sell: false, marketGame: "Once Human", displayName: "Once Human" },
+    "910005": { sell: false, marketGame: "FC Online", displayName: "FC Online" },
   },
+  // Where stored codes are read from. SOOP always; CHZZK can be switched off.
+  sources: { chzzk: true },
   ready: { graceHours: 4, stallHours: 24, earlyListDays: 7 },
   drafts: { minUnits: 3, maxPerGroup: 2, leftovers: true },
   pricing: {
@@ -78,7 +87,7 @@ const DEFAULTS = deepFreeze({
   playerauctionsGames: ["12"],
   competitorScan: { enabled: true, everyHours: 12 },
   ownEldoradoUserIds: [],
-  sourceWords: ["soop", "afreeca", "korea", "\\bkr\\b", "translated", "official [^.\\n]*event", "stage\\s*\\d", "kakao"],
+  sourceWords: ["soop", "afreeca", "korea", "\\bkr\\b", "translated", "official [^.\\n]*event", "stage\\s*\\d", "kakao", "chzzk", "naver"],
   claimAlert: { enabled: true, leadHours: 24 },
   digest: { enabled: true, hourUtc: 3, lastSentDay: "" },
   farmPriority: { enabled: false, botIds: [], minHoursBetween: 6, lastChangeAt: null },

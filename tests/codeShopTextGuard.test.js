@@ -184,9 +184,14 @@ test("one problem per field even when a field holds several source words", () =>
 test("the default word list is the contract's list", () => {
   assert.deepEqual(
     [...DEFAULT_SOURCE_WORDS],
-    ["soop", "afreeca", "korea", "\\bkr\\b", "translated", "official [^.\\n]*event", "stage\\s*\\d", "kakao"],
+    ["soop", "afreeca", "korea", "\\bkr\\b", "translated", "official [^.\\n]*event", "stage\\s*\\d", "kakao", "chzzk", "naver"],
   );
   assert.ok(Object.isFrozen(DEFAULT_SOURCE_WORDS));
+});
+
+test("the second farm's names are source words too (2026-10-23)", () => {
+  const re = compileSourceWords(DEFAULT_SOURCE_WORDS);
+  for (const t of ["CHZZK drops codes", "from Naver", "chzzk.naver.com"]) assert.ok(re.test(t), t);
 });
 
 test("the default word list catches region, event and translation wording", () => {

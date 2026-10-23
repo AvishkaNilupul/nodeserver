@@ -108,3 +108,14 @@ test("campaignView: a paused login is not counted as still to finish", () => {
   const v = views.campaignView(camp(), { accounts: [views.accountView(acc({ _id: "a1" }), ctx), views.accountView(acc({ _id: "a2", paused: true }), ctx)], now: NOW });
   assert.equal(v.logins.eligible, 1);
 });
+
+test("shop state: a code on sale or sold in the code shop is said so, and counted per reward", () => {
+  const shopOf = new Map([["a1|5089", "in_unit"], ["a2|5089", "sold"]]);
+  const r = (accountId, extra = {}) => ({ _id: "x" + accountId, accountId, rewardNo: 5089, campaignNo: 1954, hasCode: true, state: "stored", codeEndAt: new Date(NOW + 9 * 24 * H), ...extra });
+  const v = views.rewardView(r("a1"), { accountsById: new Map(), campaignsByNo: new Map(), shopOf });
+  assert.equal(v.shop, "in_unit");
+  assert.equal(v.shopWord, "on sale");
+  assert.equal(views.rewardView(r("a3"), { accountsById: new Map(), campaignsByNo: new Map(), shopOf }).shop, "");
+  const { stock, totals } = views.stockView([r("a1"), r("a2"), r("a3")], { campaignsByNo: new Map(), now: NOW, shopOf });
+  assert.deepEqual([stock[0].onSale, stock[0].sold, totals.onSale, totals.sold], [1, 1, 1, 1]);
+});

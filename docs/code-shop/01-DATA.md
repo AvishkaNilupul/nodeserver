@@ -107,7 +107,8 @@ const DEFAULTS = {
   },
   competitorScan: { enabled: true, everyHours: 12 },
   ownEldoradoUserIds: [],
-  sourceWords: [ "soop", "afreeca", "korea", "\\bkr\\b", "translated", "official [^.\\n]*event", "stage\\s*\\d", "kakao" ],
+  sourceWords: [ "soop", "afreeca", "korea", "\\bkr\\b", "translated", "official [^.\\n]*event", "stage\\s*\\d", "kakao", "chzzk", "naver" ],
+  sources: { chzzk: true }, // CHZZK reward codes join the ledger (07-CHZZK-SOURCE.md)
   claimAlert: { enabled: true, leadHours: 24 },
   digest: { enabled: true, hourUtc: 3, lastSentDay: "" },
   farmPriority: { enabled: false, botIds: [], minHoursBetween: 6, lastChangeAt: null },

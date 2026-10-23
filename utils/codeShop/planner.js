@@ -244,7 +244,7 @@ function createPlanner(deps = {}) {
       }
       const guide = guideFor(g.gameNo, cfg);
       const n = slots.length;
-      const starts = await eventStarts({ SoopCampaign: SoopCampaign(), CodeStock: CodeStock() }, [g.groupKey]);
+      const starts = await eventStarts({ SoopCampaign: SoopCampaign(), ChzzkCampaign: models.ChzzkCampaign, CodeStock: CodeStock() }, [g.groupKey]);
       const product = await Product.create({
         name: `${g.gameName || guide.displayName} - ${g.campaignTitle} (${n} code${n === 1 ? "" : "s"})`,
         gameNo: g.gameNo,

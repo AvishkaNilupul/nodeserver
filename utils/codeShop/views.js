@@ -14,6 +14,7 @@
 
 const mongoose = require("mongoose");
 const { checkBuyerText } = require("./textGuard");
+const sources = require("./sources");
 const { defaultLabel } = require("./texts");
 
 const HOUR_MS = 3600 * 1000;
@@ -299,7 +300,7 @@ function createViews(deps = {}) {
     const keys = [...new Set(slotKeys.filter(Boolean))];
     if (!keys.length) return out;
     const cutoff = new Date(now() + leadHoursOf(cfg.expiryLeadHours) * HOUR_MS);
-    const soldLogins = (await M("SoopAccount").find({ sold: true }, { _id: 0, loginId: 1 }).lean()).map((a) => a.loginId);
+    const soldLogins = await sources.soldLoginIds(deps);
     const $match = {
       state: "in_stock",
       slotKey: { $in: keys },
@@ -691,6 +692,7 @@ function createViews(deps = {}) {
         .find({ loginId: { $in: ids } }, { _id: 0, loginId: 1, nickname: 1 })
         .lean();
       for (const a of accounts) nicks.set(str(a.loginId), str(a.nickname));
+      for (const [id, nick] of await sources.chzzkNicknames(deps, ids)) nicks.set(id, nick);
     }
     const list = rows
       .map((r) => ({

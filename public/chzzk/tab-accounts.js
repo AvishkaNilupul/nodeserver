@@ -201,7 +201,7 @@
   }
   function codeRow(r) {
     const st = CODE_STATE[r.state] || [r.state || "–", null], cell = el("span");
-    if (r.hasCode) cell.append(ui.button("Reveal", { size: "sm", icon: "eye", onClick: () => Chzzk.reveal(r.id, cell) }));
+    if (r.hasCode) cell.append(ui.button("Reveal", { size: "sm", icon: "eye", onClick: () => Chzzk.reveal(r.id, cell, { shop: r.shop }) }));
     const retry = r.state === "earned" ? [r.lastError, r.nextTryAt ? "next try " + fmt.until(r.nextTryAt) : null].filter(Boolean).join(" · ") : "";
     return el("li", { class: "s-list-item", style: FLAT },
       el("div", { class: "s-grow s-stack is-tight" },
@@ -209,7 +209,8 @@
         el("span", { class: "s-muted s-small" }, [r.gameName || gameOf(r.campaignNo), r.campaignTitle, Chzzk.rewardType(r.rewardType)].filter(Boolean).join(" · ")),
         el("span", { class: "s-muted s-small" }, "Earned " + time(r.earnedAt) + (r.codeEndAt ? " · use by " + fmt.when(r.codeEndAt) : "")),
         retry && el("span", { class: "s-warn s-small" }, retry),
-        r.revealedAt && el("span", { class: "s-muted s-small" }, "Revealed " + fmt.ago(r.revealedAt) + (r.revealedBy ? " by " + r.revealedBy : ""))),
+        r.revealedAt && el("span", { class: "s-muted s-small" }, "Revealed " + fmt.ago(r.revealedAt) + (r.revealedBy ? " by " + r.revealedBy : "")),
+        r.shopWord && el("span", { class: r.shop === "in_unit" || r.shop === "sold" ? "s-strong s-small" : "s-muted s-small" }, "Code shop: " + r.shopWord)),
       ui.badge(st[0], st[1]), cell);
   }
 
