@@ -14,6 +14,20 @@ const ms = (d) => {
 const plural = (n, one, many) => `${n} ${n === 1 ? one : many || one + "s"}`;
 const isCode = (r) => CODE_TYPES.includes(r && r.rewardType);
 
+// English names for alert text; the panel's core.js keeps the same map.
+const GAME_NAMES = {
+  overwatch: "Overwatch", lost_ark: "Lost Ark", black_desert: "Black Desert",
+  call_of_duty_modern_warfare4: "Call of Duty: MW4", world_of_warcraft_midnight: "WoW: Midnight",
+  dokkaebi: "Dokkaebi World", once_human: "Once Human", stellasora: "Stella Sora",
+  wutheringwaves: "Wuthering Waves", arknights_endfield: "Arknights: Endfield", fifa_online4: "FC Online",
+};
+function gameName(categoryId, categoryValue) {
+  const id = String(categoryId || "");
+  if (GAME_NAMES[id.toLowerCase()]) return GAME_NAMES[id.toLowerCase()];
+  if (id) return id.replace(/_/g, " ").replace(/([a-z])([A-Z])/g, "$1 $2").replace(/\b\w/g, (ch) => ch.toUpperCase());
+  return categoryValue || "game";
+}
+
 // Why a campaign is not farmed, in the operator's words. "" when it is farmed.
 function campaignWhy(c, now) {
   if (!c) return "Unknown campaign";
@@ -90,7 +104,7 @@ function accountView(a, { worker, codes = 0, switchOn, egressOk, now }) {
 function campaignView(c, { earnedByReward, accounts = [], now }) {
   const why = campaignWhy(c, now);
   const no = String(c.campaignNo);
-  const eligible = accounts.filter((a) => a.status !== "not_logged_in" && !a.sold);
+  const eligible = accounts.filter((a) => a.status !== "not_logged_in" && !a.sold && !a.paused);
   const logins = [];
   let done = 0;
   let watching = 0;
@@ -236,7 +250,7 @@ function alerts({ switchOn, egress, accounts, campaigns, counts, now }) {
     const hours = Math.max(1, Math.round((end - now) / HOUR));
     out.push({
       level: "warn", kind: "ending", campaignNo: c.campaignNo,
-      msg: `"${c.title}" (${c.categoryValue || "game"}) ends in ${plural(hours, "hour")} — ${left.length} of ${plural(eligible.length, "login")} still to finish it (${c.maxMinutes} min needed).`,
+      msg: `${gameName(c.categoryId, c.categoryValue)}: "${c.title}" ends in ${plural(hours, "hour")} — ${left.length} of ${plural(eligible.length, "login")} still to finish it (${c.maxMinutes} min needed).`,
     });
   }
 
@@ -258,4 +272,4 @@ function alerts({ switchOn, egress, accounts, campaigns, counts, now }) {
   return out.sort((a, b) => rank[a.level] - rank[b.level]);
 }
 
-module.exports = { campaignWhy, progressView, accountView, campaignView, rewardView, stockView, alerts };
+module.exports = { gameName, campaignWhy, progressView, accountView, campaignView, rewardView, stockView, alerts };

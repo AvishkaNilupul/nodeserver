@@ -305,3 +305,31 @@ test("worker: tells pickStream which streams rest; no stream at all rests the ca
   assert.ok(logs.some((m) => /^Left ch-A .*stream ended/.test(m)));
   assert.ok(logs.some((m) => /^Resting "KEL Finals" for 10 min: no live stream to watch/.test(m)));
 });
+
+test("worker: strikes count in a row — a stream that credits clears them", async () => {
+  const clock = makeClock();
+  const fake = createFakeChzzk({
+    now: () => clock.t, minutesPerBeat: 1,
+    campaigns: [rawCamp([{ rewardNo: 1, title: "A", rewardType: "CODE_FIRST_COME", conditionForMinutes: 100000, codeRemainingCount: 100 }])],
+    lives: [live("G3"), ...["X1", "X2", "X4", "X5"].map((id) => ({ ...live(id), status: "CLOSE" }))],
+  });
+  const store = makeStore([storeCamp([reward(1, 100000)])]);
+  // bad, bad, good (credits, then ends), bad, bad, then "no stream" (a strike too).
+  const plan = ["X", "X", "G", "X", "X"];
+  let i = 0;
+  let restAt = null;
+  const ac = new AbortController();
+  await worker.runSession({
+    account, client: fake.clientFor("acc1"), campaigns: store,
+    pickStream: () => {
+      const ch = plan[i++];
+      if (!ch) { if (i > plan.length + 1) ac.abort(); return null; }
+      return { channelId: ch + i, channelName: "ch-" + ch };
+    },
+    onEvent: (e) => { if (e.state === "watching" && e.channelId === "G3" && e.credited >= 2) fake.setLive("G3", { status: "CLOSE" }); },
+    onLog: (e) => { if (/^Resting/.test(e.msg) && restAt === null) restAt = i; },
+    signal: ac.signal, clock, timings: TIMINGS,
+  });
+  // Without the reset the 3rd strike is the first X after G (pick 4).
+  assert.equal(restAt, plan.length + 1, "rested only at the 3rd strike in a row (X, X, no stream)");
+});

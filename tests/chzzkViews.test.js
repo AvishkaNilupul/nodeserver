@@ -81,7 +81,10 @@ test("alerts: egress, logged out, ending soon, session cookies — worst first",
   const list = views.alerts({ switchOn: true, egress: { ok: false, error: "tunnel down" }, accounts: [ok, dead], campaigns: [c], counts: { waiting: 0, expiringSoon: 0 }, now: NOW });
   assert.deepEqual(list.map((a) => a.kind), ["egress", "login", "ending", "cookie"]);
   assert.match(list[1].msg, /gone/);
-  assert.match(list[2].msg, /ends in 10 hours — 1 of 1 login still to finish it \(180 min needed\)/);
+  assert.match(list[2].msg, /^Overwatch: "OW" ends in 10 hours — 1 of 1 login still to finish it \(180 min needed\)/);
+  assert.equal(views.gameName("Call_of_Duty_Modern_Warfare4", "콜 오브 듀티"), "Call of Duty: MW4");
+  assert.equal(views.gameName("SomeNew_Game", ""), "Some New Game");
+  assert.equal(views.gameName("", "게임"), "게임");
   const off = views.alerts({ switchOn: false, egress: { ok: true }, accounts: [], campaigns: [], counts: {}, now: NOW });
   assert.equal(off[0].kind, "switch");
 });
@@ -98,4 +101,10 @@ test("loginInfo / parseImport infos: session vs persistent, values never echoed"
   assert.equal(parsed.jars.length, 3);
   assert.ok(!JSON.stringify(parsed.infos).includes("AAA"));
   assert.deepEqual(Object.keys(parsed.jars[0][0]).sort(), ["domain", "name", "value"], "jar shape unchanged");
+});
+
+test("campaignView: a paused login is not counted as still to finish", () => {
+  const ctx = { worker: null, switchOn: true, egressOk: true, now: NOW };
+  const v = views.campaignView(camp(), { accounts: [views.accountView(acc({ _id: "a1" }), ctx), views.accountView(acc({ _id: "a2", paused: true }), ctx)], now: NOW });
+  assert.equal(v.logins.eligible, 1);
 });

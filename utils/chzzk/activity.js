@@ -64,7 +64,9 @@ function createActivity({ model, cap = MEM_CAP, now = Date.now } = {}) {
 
   // Newest first. Falls back to the in-memory ring when Mongo is unreachable.
   async function list({ limit = 100, accountId } = {}) {
-    const max = Math.min(size, Math.max(1, Number(limit) || 100));
+    // Mongo answers up to 500 (the route's cap); only the in-memory fallback
+    // is limited to what the ring holds.
+    const max = Math.min(500, Math.max(1, Number(limit) || 100));
     try {
       const Mod = getModel();
       if (Mod && typeof Mod.find === "function") {

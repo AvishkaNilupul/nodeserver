@@ -1,275 +1,208 @@
 <!doctype html>
-<!-- CHZZK farm admin page shell. Containers only — rendering and polling live
-     in /chzzk/app.js. See docs/CHZZK-FARM.md §13 for the contract. -->
 <html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>CHZZK farm</title>
-<style>
-  :root {
-    --bg:       #0f1218;
-    --panel:    #171b24;
-    --panel-2:  #1f242f;
-    --border:   #2a3040;
-    --text:     #e6e9ef;
-    --muted:    #8a93a6;
-    --accent:   #7c5cff;
-    --accent-2: #5a3fe0;
-    --ok:       #3ddc84;
-    --warn:     #f6c453;
-    --err:      #ff5c7a;
-    --new:      #38bdf8;
-    --surface:   var(--panel);
-    --surface-2: var(--panel-2);
-    --line:      var(--border);
-    --ink:       var(--text);
-    font: 15px/1.45 -apple-system, "SF Pro Text", system-ui, sans-serif;
-  }
-  html, body { margin: 0; padding: 0; background: var(--bg); color: var(--text); }
-  body { height: 100vh; height: 100dvh; display: flex; overflow: hidden; }
-  .page { flex: 1; min-width: 0; overflow-y: auto; -webkit-overflow-scrolling: touch; }
-
-  /* Shared sidebar — admin-nav.js fills the links and adds a mobile drawer. */
-  .nav { width: 236px; background: var(--surface); border-right: 1px solid var(--line); display: flex; flex-direction: column; flex-shrink: 0; }
-  .nav .brand { display: flex; align-items: center; gap: 10px; padding: 18px 20px; border-bottom: 1px solid var(--line); }
-  .nav .brand .mark { width: 34px; height: 34px; border-radius: 10px; background: linear-gradient(135deg, #6366f1, var(--accent)); display: grid; place-items: center; box-shadow: 0 6px 14px rgba(79,70,229,0.32); }
-  .nav .brand b { font-size: 15px; font-weight: 700; line-height: 1.15; color: var(--ink); }
-  .nav .brand b span { display: block; font-size: 10.5px; color: var(--muted); font-weight: 500; }
-  .nav .links { padding: 12px; flex: 1; display: flex; flex-direction: column; gap: 4px; }
-  .nav .links a { display: flex; align-items: center; gap: 11px; padding: 11px 13px; border-radius: 10px; color: var(--muted); text-decoration: none; font-size: 14px; font-weight: 500; }
-  .nav .links a:hover { background: var(--surface-2); }
-  .nav .links a.active { background: rgba(124,92,255,0.18); color: var(--accent); font-weight: 600; }
-  .nav .me { border-top: 1px solid var(--line); padding: 14px; display: flex; align-items: center; gap: 10px; }
-  .nav .me .av { width: 36px; height: 36px; border-radius: 10px; background: linear-gradient(135deg,#34d399,#10b981); display: grid; place-items: center; color: #fff; font-weight: 700; font-size: 13px; flex-shrink: 0; }
-  .nav .me .who { line-height: 1.2; min-width: 0; }
-  .nav .me .who b { font-size: 13.5px; display: block; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 110px; color: var(--ink); }
-  .nav .me .who span { display: block; font-size: 11px; color: var(--muted); }
-  .nav .me .logout { margin-left: auto; width: 32px; height: 32px; border-radius: 9px; border: 1px solid var(--line); background: var(--surface); color: var(--muted); display: grid; place-items: center; cursor: pointer; }
-  .nav .me .logout:hover { color: var(--err); border-color: rgba(255,92,122,0.4); }
-
-  a { color: var(--accent); text-decoration: none; }
-  code, .mono { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: 13px; }
-
-  header {
-    padding: 18px 28px; display: flex; align-items: center; justify-content: space-between;
-    border-bottom: 1px solid var(--border); background: var(--panel); gap: 16px; flex-wrap: wrap;
-  }
-  header h1 { margin: 0; font-size: 18px; letter-spacing: 0.3px; }
-  header h1 span.dot { color: var(--accent); }
-  .head-right { display: flex; align-items: center; gap: 12px; margin-left: auto; flex-wrap: wrap; }
-
-  main { max-width: 1200px; margin: 0 auto; padding: 24px 28px 60px; }
-  .card { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 20px; margin-bottom: 20px; }
-  .card h2 { margin: 0 0 14px; font-size: 15px; color: var(--muted); font-weight: 500; letter-spacing: 0.4px; text-transform: uppercase; display: flex; align-items: center; gap: 10px; }
-  .card h2 .count { color: var(--muted); font-weight: 400; text-transform: none; letter-spacing: 0; }
-  .card h2 .spacer { flex: 1; }
-
-  /* Chips — status, egress, farmable, levels */
-  .chip { display: inline-flex; align-items: center; gap: 6px; padding: 4px 10px; border-radius: 999px; font-size: 12px; font-weight: 600; background: var(--panel-2); border: 1px solid var(--border); color: var(--muted); }
-  .chip.ok      { color: var(--ok);   border-color: rgba(61,220,132,0.4);  background: rgba(61,220,132,0.1); }
-  .chip.warn    { color: var(--warn); border-color: rgba(246,196,83,0.4);  background: rgba(246,196,83,0.1); }
-  .chip.err     { color: var(--err);  border-color: rgba(255,92,122,0.4);  background: rgba(255,92,122,0.1); }
-  .chip.new     { color: var(--new);  border-color: rgba(56,189,248,0.4);  background: rgba(56,189,248,0.1); }
-  .chip.off     { color: var(--muted); }
-
-  /* ON/OFF switch button */
-  .switch { padding: 8px 16px; border-radius: 8px; border: 1px solid var(--border); background: var(--panel-2); color: var(--muted); font: 600 13px inherit; cursor: pointer; letter-spacing: 0.3px; }
-  .switch.on  { background: rgba(61,220,132,0.15); color: var(--ok);  border-color: rgba(61,220,132,0.4); }
-  .switch.off { background: rgba(255,92,122,0.12); color: var(--err); border-color: rgba(255,92,122,0.4); }
-  .switch:disabled { opacity: 0.5; cursor: wait; }
-
-  /* Totals strip */
-  .totals { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 12px; }
-  .total { background: var(--panel-2); border: 1px solid var(--border); border-radius: 8px; padding: 14px 16px; }
-  .total .label { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: 0.4px; }
-  .total .n { font-size: 24px; font-weight: 700; color: var(--text); margin-top: 4px; }
-
-  /* Buttons */
-  button.primary { background: var(--accent); color: #fff; border: none; padding: 10px 18px; border-radius: 8px; font: 600 14px inherit; cursor: pointer; transition: background 0.15s; }
-  button.primary:hover:not(:disabled) { background: var(--accent-2); }
-  button.primary:disabled { opacity: 0.5; cursor: not-allowed; }
-  button.small { background: transparent; color: var(--muted); border: 1px solid var(--border); padding: 5px 10px; border-radius: 6px; font: 500 12px inherit; cursor: pointer; white-space: nowrap; }
-  button.small:hover:not(:disabled) { color: var(--text); border-color: var(--muted); }
-  button.small:disabled { opacity: 0.5; cursor: wait; }
-  button.small.danger { color: var(--err); border-color: rgba(255,92,122,0.3); }
-  button.small.danger:hover:not(:disabled) { background: rgba(255,92,122,0.1); }
-
-  /* Textarea / inputs */
-  textarea, input[type="text"], input[type="number"] {
-    background: var(--panel-2); border: 1px solid var(--border); color: var(--text);
-    padding: 10px 12px; border-radius: 8px; font: inherit; width: 100%;
-  }
-  textarea { min-height: 110px; resize: vertical; font-family: "SF Mono", Menlo, Consolas, monospace; font-size: 13px; }
-  .row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin-top: 10px; }
-  .row .grow { flex: 1; min-width: 160px; }
-  .import-note { color: var(--muted); font-size: 12px; margin-top: 10px; }
-  .import-results { margin-top: 14px; display: flex; flex-direction: column; gap: 4px; }
-  .import-results .line { font: 500 13px "SF Mono", Menlo, Consolas, monospace; padding: 4px 0; }
-  .import-results .ok  { color: var(--ok); }
-  .import-results .err { color: var(--err); }
-
-  /* Tables */
-  .table-wrap { overflow-x: auto; }
-  table { width: 100%; border-collapse: collapse; }
-  th, td { padding: 10px 12px; text-align: left; border-bottom: 1px solid var(--border); font-size: 13px; vertical-align: top; }
-  th { color: var(--muted); font-weight: 500; font-size: 11px; text-transform: uppercase; letter-spacing: 0.4px; }
-  tbody tr:hover { background: rgba(255,255,255,0.02); }
-  td .actions { display: flex; gap: 6px; flex-wrap: wrap; justify-content: flex-end; }
-  td .now { color: var(--muted); font-size: 12px; }
-  td .now b { color: var(--text); font-weight: 500; }
-  .empty { color: var(--muted); text-align: center; padding: 30px; font-style: italic; }
-
-  /* Codes table reveal row */
-  .code-cell { font-family: "SF Mono", Menlo, Consolas, monospace; font-weight: 600; color: var(--accent); display: inline-flex; align-items: center; gap: 8px; }
-  .code-cell .countdown { color: var(--muted); font-size: 11px; font-weight: 400; }
-
-  /* Activity list */
-  .activity { display: flex; flex-direction: column; gap: 6px; max-height: 440px; overflow-y: auto; }
-  .activity .entry { display: grid; grid-template-columns: 110px 70px 1fr; gap: 10px; padding: 6px 0; border-bottom: 1px dashed var(--border); font-size: 13px; }
-  .activity .at   { color: var(--muted); font-family: "SF Mono", Menlo, Consolas, monospace; font-size: 12px; }
-  .activity .lvl  { font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.4px; }
-  .activity .lvl.info  { color: var(--muted); }
-  .activity .lvl.warn  { color: var(--warn); }
-  .activity .lvl.error { color: var(--err); }
-  .activity .msg  { color: var(--text); overflow-wrap: anywhere; }
-
-  /* Toast */
-  .toast { position: fixed; bottom: 20px; right: 20px; background: var(--panel-2); border: 1px solid var(--border); padding: 12px 18px; border-radius: 8px; max-width: 400px; box-shadow: 0 4px 20px rgba(0,0,0,0.4); opacity: 0; transform: translateY(10px); transition: all 0.25s; z-index: 100; }
-  .toast.show { opacity: 1; transform: translateY(0); }
-  .toast.ok   { border-color: rgba(61,220,132,0.4); }
-  .toast.err  { border-color: rgba(255,92,122,0.4); }
-
-  *, *::before, *::after { box-sizing: border-box; }
-
-  /* Phone layout */
-  @media (max-width: 768px) {
-    header { padding: 14px 16px; }
-    main { padding: 16px 16px 40px; }
-    .card { padding: 16px; border-radius: 12px; margin-bottom: 16px; }
-    .totals { grid-template-columns: repeat(2, 1fr); }
-  }
-</style>
-</head>
-<body>
-
-<aside class="nav">
-  <div class="brand">
-    <div class="mark">
-      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M7 4h10l-1 7h-8L7 4z"></path><path d="M9 11v9"></path><path d="M15 11v9"></path><circle cx="12" cy="18" r="1.5" fill="#fff" stroke="none"></circle></svg>
-    </div>
-    <b>RedeemHub<span>CHZZK farm</span></b>
-  </div>
-  <div class="links">
-    <a class="active" href="/chzzk.html">
-      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="23 7 16 12 23 17 23 7"></polygon><rect x="1" y="5" width="15" height="14" rx="2" ry="2"></rect></svg>
-      CHZZK farm
-    </a>
-  </div>
-  <div class="me">
-    <div class="av" id="meInitial">A</div>
-    <div class="who">
-      <b id="meName">Admin</b>
-      <span id="meRole">Admin</span>
-    </div>
-    <button class="logout" id="logoutBtn" title="Log out">
-      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4M16 17l5-5-5-5M21 12H9"></path></svg>
-    </button>
-  </div>
-</aside>
-
-<div class="page">
-
-<header>
-  <h1>CHZZK<span class="dot">·</span>farm</h1>
-  <div class="head-right">
-    <span class="chip off" id="egressChip">egress: checking…</span>
-    <button class="switch" id="switchBtn" disabled>...</button>
-  </div>
-</header>
-
-<main>
-
-  <div class="card">
-    <h2>Totals</h2>
-    <div class="totals" id="totals">
-      <div class="total"><div class="label">Accounts</div><div class="n" id="t-accounts">—</div></div>
-      <div class="total"><div class="label">OK</div><div class="n" id="t-ok">—</div></div>
-      <div class="total"><div class="label">Logged out</div><div class="n" id="t-loggedout">—</div></div>
-      <div class="total"><div class="label">Watching now</div><div class="n" id="t-watching">—</div></div>
-      <div class="total"><div class="label">Codes stored</div><div class="n" id="t-codes">—</div></div>
-      <div class="total"><div class="label">Campaigns farmable</div><div class="n" id="t-campaigns">—</div></div>
-    </div>
-  </div>
-
-  <div class="card">
-    <h2>Import logins</h2>
-    <textarea id="importText" placeholder="Paste one or more Cookie-Editor exports (naver.com)"></textarea>
-    <div class="row">
-      <div class="import-note grow">
-        Cookies are stored encrypted. Each jar needs NID_AUT + NID_SES. Multiple exports can be
-        pasted at once, separated by whitespace.
+  <head>
+    <script>
+      (function () {
+        try {
+          if (localStorage.getItem("theme") === "dark")
+            document.documentElement.setAttribute("data-theme", "dark");
+        } catch (e) {}
+      })();
+    </script>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>CHZZK farm</title>
+    <!-- CHZZK farm v2 (docs/CHZZK-PANEL-V2.md). Tokens, sidebar shell and the
+         whole component kit live in chzzk.css; the kit is window.Chzzk from
+         core.js (public/soop/UI-KIT.md with Soop → Chzzk). -->
+    <link rel="stylesheet" href="/chzzk/chzzk.css" />
+  </head>
+  <body>
+    <aside class="nav">
+      <div class="brand">
+        <span class="mark">
+          <svg
+            width="18"
+            height="18"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="#fff"
+            stroke-width="2.2"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+          >
+            <polygon points="12 2 2 8.5 12 15 22 8.5 12 2"></polygon>
+            <path d="M2 8.5v7L12 22l10-6.5v-7"></path>
+          </svg>
+        </span>
+        <b>RedeemHub<span>Admin console</span></b>
       </div>
-      <button class="primary" id="importBtn">Import</button>
-    </div>
-    <div class="import-results" id="importResults"></div>
-  </div>
+      <nav class="links">
+        <a href="/admin.html"
+          ><svg
+            width="18"
+            height="18"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2"
+            stroke-linecap="round"
+          >
+            <path
+              d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"
+            ></path>
+          </svg>
+          Inbox</a
+        >
+        <a href="/orders"
+          ><svg
+            width="18"
+            height="18"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2"
+            stroke-linecap="round"
+          >
+            <rect x="3" y="4" width="18" height="16" rx="2"></rect>
+            <path d="M3 9h18M7 14h6"></path>
+          </svg>
+          Orders</a
+        >
+        <a href="/inventory"
+          ><svg
+            width="18"
+            height="18"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2"
+            stroke-linecap="round"
+          >
+            <path d="M20 7H4M16 3H8M6 11h12l-1 10H7z"></path>
+          </svg>
+          Inventory</a
+        >
+      </nav>
+      <div class="me">
+        <span class="av" id="meAvatar">--</span>
+        <div class="who">
+          <b id="meName">Admin</b><span id="meRole">Seller</span>
+        </div>
+        <button
+          class="logout"
+          data-theme-toggle
+          onclick="toggleTheme()"
+          title="Toggle dark mode"
+        >
+          <svg
+            class="t-moon"
+            width="16"
+            height="16"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+          >
+            <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"></path>
+          </svg>
+          <svg
+            class="t-sun"
+            style="display: none"
+            width="16"
+            height="16"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+          >
+            <circle cx="12" cy="12" r="4"></circle>
+            <path
+              d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M6.34 17.66l-1.41 1.41M19.07 4.93l-1.41 1.41"
+            ></path>
+          </svg>
+        </button>
+      </div>
+    </aside>
 
-  <div class="card">
-    <h2>Accounts <span class="count" id="accountsCount"></span></h2>
-    <div class="table-wrap" id="accountsTable"><div class="empty">Loading…</div></div>
-  </div>
+    <main class="s-main" id="chzzkMain">
+      <header class="s-head">
+        <div class="s-grow">
+          <h1>CHZZK farm</h1>
+          <p class="s-status" id="chzzkStatus">
+            <span class="s-dot is-muted" aria-hidden="true"></span>
+            <span>Connecting…</span>
+          </p>
+        </div>
+        <div class="s-head-actions">
+          <button
+            type="button"
+            class="s-btn is-icon"
+            id="chzzkMenuBtn"
+            aria-label="Farm actions"
+            title="Farm actions"
+          >
+            <svg class="s-icon" width="16" height="16" viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M4 12a1 1 0 1 0 2 0 1 1 0 1 0-2 0M11 12a1 1 0 1 0 2 0 1 1 0 1 0-2 0M18 12a1 1 0 1 0 2 0 1 1 0 1 0-2 0"></path>
+            </svg>
+          </button>
+        </div>
+      </header>
 
-  <div class="card">
-    <h2>
-      Campaigns
-      <span class="count" id="campaignsCount"></span>
-      <span class="spacer"></span>
-      <input type="number" id="addCampaignNo" placeholder="Add campaign #" min="1" style="width: 180px;">
-      <button class="small" id="addCampaignBtn">Add</button>
-      <button class="small" id="refreshCampaignsBtn">Refresh</button>
-    </h2>
-    <div class="table-wrap" id="campaignsTable"><div class="empty">Loading…</div></div>
-  </div>
+      <!-- Filled and shown by core.js after 3 failed /state polls. -->
+      <div class="s-banner" id="chzzkBanner" role="alert" hidden></div>
 
-  <div class="card">
-    <h2>Codes <span class="count" id="codesCount"></span></h2>
-    <div class="table-wrap" id="rewardsTable"><div class="empty">Loading…</div></div>
-  </div>
+      <!-- One button + one root per tab. A tab-*.js file claims its root with
+           Chzzk.registerTab({ id }); until then the root keeps its placeholder,
+           so a missing or broken tab file never takes the page down. -->
+      <div class="s-tabs" id="chzzkTabs" role="tablist" aria-label="CHZZK farm sections">
+        <button type="button" class="s-tab is-active" role="tab" id="tab-overview" data-tab="overview" aria-controls="panel-overview" aria-selected="true">
+          <span class="s-tab-label">Overview</span><span class="s-tab-badge" hidden></span>
+        </button>
+        <button type="button" class="s-tab" role="tab" id="tab-accounts" data-tab="accounts" aria-controls="panel-accounts" aria-selected="false" tabindex="-1">
+          <span class="s-tab-label">Accounts</span><span class="s-tab-badge" hidden></span>
+        </button>
+        <button type="button" class="s-tab" role="tab" id="tab-campaigns" data-tab="campaigns" aria-controls="panel-campaigns" aria-selected="false" tabindex="-1">
+          <span class="s-tab-label">Campaigns</span><span class="s-tab-badge" hidden></span>
+        </button>
+        <button type="button" class="s-tab" role="tab" id="tab-codes" data-tab="codes" aria-controls="panel-codes" aria-selected="false" tabindex="-1">
+          <span class="s-tab-label">Codes</span><span class="s-tab-badge" hidden></span>
+        </button>
+        <button type="button" class="s-tab" role="tab" id="tab-activity" data-tab="activity" aria-controls="panel-activity" aria-selected="false" tabindex="-1">
+          <span class="s-tab-label">Activity</span><span class="s-tab-badge" hidden></span>
+        </button>
+      </div>
 
-  <div class="card">
-    <h2>Activity</h2>
-    <div class="activity" id="activityList"><div class="empty">Loading…</div></div>
-  </div>
+      <section class="s-panel" id="panel-overview" role="tabpanel" aria-labelledby="tab-overview" data-tab-root="overview">
+        <p class="s-loading">Loading…</p>
+      </section>
+      <section class="s-panel" id="panel-accounts" role="tabpanel" aria-labelledby="tab-accounts" data-tab-root="accounts" hidden>
+        <p class="s-loading">Loading…</p>
+      </section>
+      <section class="s-panel" id="panel-campaigns" role="tabpanel" aria-labelledby="tab-campaigns" data-tab-root="campaigns" hidden>
+        <p class="s-loading">Loading…</p>
+      </section>
+      <section class="s-panel" id="panel-codes" role="tabpanel" aria-labelledby="tab-codes" data-tab-root="codes" hidden>
+        <p class="s-loading">Loading…</p>
+      </section>
+      <section class="s-panel" id="panel-activity" role="tabpanel" aria-labelledby="tab-activity" data-tab-root="activity" hidden>
+        <p class="s-loading">Loading…</p>
+      </section>
+    </main>
 
-</main>
-
-</div><!-- /.page -->
-
-<div class="toast" id="toast"></div>
-
-<script src="/admin-nav.js"></script>
-<script>
-// Sidebar user chip + logout. Same pattern as other admin pages.
-(function () {
-  var logoutBtn = document.getElementById("logoutBtn");
-  if (logoutBtn) {
-    logoutBtn.addEventListener("click", function () {
-      fetch("/admin-logout", { method: "POST", credentials: "same-origin" })
-        .finally(function () { window.location.href = "/admin-login.html"; });
-    });
-  }
-  fetch("/whoami", { credentials: "same-origin" }).then(function (r) {
-    return r.ok ? r.json() : null;
-  }).then(function (data) {
-    if (!data || !data.admin) return;
-    var name = data.admin.id || "Admin";
-    document.getElementById("meName").textContent = name;
-    document.getElementById("meInitial").textContent = (name[0] || "A").toUpperCase();
-  }).catch(function () {});
-})();
-</script>
-<script src="/chzzk/app.js"></script>
-
-</body>
+    <script src="/theme.js"></script>
+    <script src="/admin-nav.js"></script>
+    <script src="/chzzk/core.js"></script>
+    <script src="/chzzk/tab-overview.js"></script>
+    <script src="/chzzk/tab-accounts.js"></script>
+    <script src="/chzzk/tab-campaigns.js"></script>
+    <script src="/chzzk/tab-codes.js"></script>
+    <script src="/chzzk/tab-activity.js"></script>
+    <!-- Defines window.ChzzkImport and owns the page-wide file drop. -->
+    <script src="/chzzk/accounts-import.js"></script>
+  </body>
 </html>

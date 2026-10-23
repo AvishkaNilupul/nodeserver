@@ -341,6 +341,7 @@ async function runSession(opts) {
         lastMinutes = Math.max(lastMinutes, prog.minutes);
         lastFinished = Math.max(lastFinished, prog.finished);
         noCreditStreak = grew ? 0 : noCreditStreak + 1;
+        if (grew) campaignBadStreak.set(camp.campaignNo, 0); // strikes count in a row
 
         safeEmit(view(prog.minutes, noCreditStreak ? "no new minutes yet" : ""));
         try {

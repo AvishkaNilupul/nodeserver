@@ -207,6 +207,7 @@ class Farm {
       return [{ ok: false, error: "import too large" }];
     }
     const { jars, errors, infos = [] } = parseImport(text);
+    if (!jars.length && !errors.length) return [{ ok: false, error: "No cookie export found in that text" }];
     const results = [];
     for (const err of errors) results.push({ ok: false, error: err });
     for (let i = 0; i < jars.length; i++) {
