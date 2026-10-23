@@ -333,3 +333,73 @@ test("worker: strikes count in a row — a stream that credits clears them", asy
   // Without the reset the 3rd strike is the first X after G (pick 4).
   assert.equal(restAt, plan.length + 1, "rested only at the 3rd strike in a row (X, X, no stream)");
 });
+
+test("farm: a stopping worker never runs beside its replacement, nor deletes it", async () => {
+  await ChzzkAccount.deleteMany({});
+  const acc = await ChzzkAccount.create({ userIdHash: "h-race", nickname: "race", cookies: encrypt("[]"), status: "ok" });
+  const sessions = [];
+  const farm = new Farm({
+    activity: { add() {}, async list() { return []; } },
+    settings: { getAutoFarm: () => ({}), async setAutoFarm() {} },
+    telegram: { sendTelegram: async () => true },
+    timers: { set: () => 0, interval: () => 0, clear() {} },
+    transport: { ready: true, describe: () => "test" },
+    makeClient: () => ({}),
+    createCollector: () => ({ collect: async () => ({}), sweep: async () => [], reveal: async () => null, pending: () => 0 }),
+    // Each session ends only when the test lets it (a slow last request).
+    runSession: (opts) => new Promise((resolve) => { sessions.push({ opts, end: () => resolve({ reason: "abort" }) }); }),
+  });
+  farm.state.egress = { ok: true };
+  await farm._supervise();
+  assert.equal(sessions.length, 1);
+  const first = farm.workers.get(String(acc._id)).controller;
+  assert.equal(await farm.resetProgress(String(acc._id), 1954), true);
+  assert.equal(first.signal.aborted, true);
+  await farm._supervise();
+  assert.equal(sessions.length, 1, "no second worker while the first is still stopping");
+  sessions[0].end();
+  await new Promise((r) => setTimeout(r, 10));
+  await farm._supervise();
+  assert.equal(sessions.length, 2, "the replacement starts once the first has stopped");
+  sessions[0].opts.onEvent({ state: "watching", campaignNo: 1 });
+  assert.notEqual((farm.workers.get(String(acc._id)).current || {}).campaignNo, 1, "the old worker's last event is ignored");
+  assert.equal(await farm.resetProgress("not-an-id", 1), false, "a malformed id is unknown, not a server error");
+  assert.equal(await farm.updateAccount("not-an-id", { paused: true }), false);
+});
+
+test("worker: a progress list that keeps failing leaves the stream; a stop mid-wait still sends WATCH_ENDED", async () => {
+  const clock = makeClock();
+  const fake = createFakeChzzk({
+    now: () => clock.t, minutesPerBeat: 1,
+    campaigns: [rawCamp([{ rewardNo: 1, title: "A", rewardType: "CODE_FIRST_COME", conditionForMinutes: 100000, codeRemainingCount: 100 }])],
+    lives: [live("A")],
+  });
+  const store = makeStore([storeCamp([reward(1, 100000)])]);
+  const base = fake.clientFor("acc1");
+  let reads = 0;
+  const client = { ...base, async claims() { reads++; if (reads > 1) throw new (require("../utils/chzzk/errors").ChzzkError)("bad", { code: "API" }); return base.claims(); } };
+  const logs = [];
+  const ac = new AbortController();
+  await worker.runSession({
+    account, client, campaigns: store,
+    pickStream: () => ({ channelId: "A", channelName: "ch-A" }),
+    onEvent: (e) => { if (e.state === "idle") ac.abort(); },
+    onLog: (e) => logs.push(e.msg),
+    signal: ac.signal, clock, timings: TIMINGS,
+  });
+  assert.ok(logs.some((m) => /^Left ch-A .*progress lists did not answer/.test(m)), "left after repeated failed reads");
+
+  const clock2 = makeClock();
+  const fake2 = createFakeChzzk({ now: () => clock2.t, minutesPerBeat: 1, campaigns: [rawCamp([{ rewardNo: 1, title: "A", rewardType: "CODE_FIRST_COME", conditionForMinutes: 100000, codeRemainingCount: 100 }])], lives: [live("A")] });
+  const base2 = fake2.clientFor("acc1");
+  const ac2 = new AbortController();
+  let beats = 0;
+  const client2 = { ...base2, async watchEvent(a) {
+    if (a.type === "WATCH_CONTINUED" && ++beats === 2) { ac2.abort(); throw new (require("../utils/chzzk/errors").ChzzkError)("down", { code: "EGRESS" }); }
+    return base2.watchEvent(a);
+  } };
+  const res = await worker.runSession({ account, client: client2, campaigns: makeStore([storeCamp([reward(1, 100000)])]),
+    pickStream: () => ({ channelId: "A", channelName: "ch-A" }), signal: ac2.signal, clock: clock2, timings: TIMINGS });
+  assert.equal(res.reason, "abort");
+  assert.equal(fake2.calls.filter((c) => c.method === "watchEvent" && c.args[0].type === "WATCH_ENDED").length, 1, "WATCH_ENDED sent after a stop during the egress wait");
+});

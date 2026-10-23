@@ -60,6 +60,7 @@ const DEFAULTS = {
 };
 
 const SHORT_HASH = (h) => (h ? String(h).slice(0, 8) : "");
+const OBJECT_ID = /^[a-f0-9]{24}$/i;
 
 class Farm {
   constructor(deps = {}) {
@@ -82,6 +83,10 @@ class Farm {
     this.started = false;
     this.transport = null;
     this.workers = new Map(); // accountId -> { controller, promise, since }
+    // accountId -> promise of a worker that was told to stop but has not
+    // finished yet (its last request + WATCH_ENDED). No new worker starts for
+    // that login until it has, so one login never runs two workers.
+    this.stopping = new Map();
     this.pickMemo = new Map(); // campaignNo -> { pickedAt, streams, cursor }
     this.timerHandles = [];
     this.state = {
@@ -114,11 +119,8 @@ class Farm {
     for (const h of this.timerHandles) try { this.deps.timers.clear(h); } catch (_e) {}
     this.timerHandles = [];
     const promises = [];
-    for (const [, w] of this.workers) {
-      try { w.controller.abort(); } catch (_e) {}
-      promises.push(w.promise.catch(() => {}));
-    }
-    this.workers.clear();
+    for (const id of [...this.workers.keys()]) this._stopWorker(id);
+    for (const [, p] of this.stopping) promises.push(Promise.resolve(p).catch(() => {}));
     await Promise.all(promises);
     this.started = false;
   }
@@ -316,6 +318,7 @@ class Farm {
   }
 
   async updateAccount(id, patch = {}) {
+    if (!OBJECT_ID.test(String(id))) return false;
     const set = {};
     if (typeof patch.sold === "boolean") set.sold = patch.sold;
     if (typeof patch.paused === "boolean") set.paused = patch.paused;
@@ -330,12 +333,11 @@ class Farm {
   // re-checks the campaign against CHZZK's own lists.
   async resetProgress(id, campaignNo) {
     const no = Number(campaignNo);
-    if (!Number.isFinite(no) || no <= 0) return false;
+    if (!Number.isFinite(no) || no <= 0 || !OBJECT_ID.test(String(id))) return false;
     const r = await this.deps.Account.updateOne({ _id: id }, { $unset: { [`progress.${no}`]: "" } });
     const ok = !!r && (r.matchedCount || r.n || 0) > 0;
     if (!ok) return false;
-    const w = this.workers.get(String(id));
-    if (w) { try { w.controller.abort(); } catch (_e) {} this.workers.delete(String(id)); }
+    this._stopWorker(String(id));
     this.deps.activity.add({ level: "info", kind: "farm", accountId: String(id), campaignNo: no, msg: `Progress on campaign #${no} cleared by hand — it will be checked again` });
     return true;
   }
@@ -347,10 +349,7 @@ class Farm {
     const keptCodes = await this.deps.Reward.countDocuments({ accountId: { $in: idSet }, hasCode: true });
     await this.deps.Reward.deleteMany({ accountId: { $in: idSet }, hasCode: { $ne: true } });
     const del = await this.deps.Account.deleteMany({ _id: { $in: idSet } });
-    for (const id of idSet) {
-      const w = this.workers.get(String(id));
-      if (w) { try { w.controller.abort(); } catch (_e) {} this.workers.delete(String(id)); }
-    }
+    for (const id of idSet) this._stopWorker(String(id));
     return { deleted: del.deletedCount || 0, keptCodes };
   }
 
@@ -509,8 +508,7 @@ class Farm {
 
   async _supervise() {
     if (!this._readSwitch() || !this.state.egress.ok) {
-      for (const [, w] of this.workers) try { w.controller.abort(); } catch (_e) {}
-      this.workers.clear();
+      for (const id of [...this.workers.keys()]) this._stopWorker(id);
       return;
     }
     const live = await this.deps.Account.find({
@@ -519,14 +517,26 @@ class Farm {
       status: { $in: ["ok", "untested"] },
     }).lean();
     const alive = new Set(live.map((a) => String(a._id)));
-    for (const [id, w] of this.workers) {
-      if (!alive.has(id)) { try { w.controller.abort(); } catch (_e) {} this.workers.delete(id); }
+    for (const id of [...this.workers.keys()]) {
+      if (!alive.has(id)) this._stopWorker(id);
     }
     for (const acc of live) {
       const id = String(acc._id);
-      if (this.workers.has(id)) continue;
+      if (this.workers.has(id) || this.stopping.has(id)) continue;
       this._spawnWorker(acc);
     }
+  }
+
+  // Tell one worker to stop; it leaves the list now and sits in `stopping`
+  // until its promise settles (see the constructor).
+  _stopWorker(id) {
+    const w = this.workers.get(id);
+    if (!w) return;
+    try { w.controller.abort(); } catch (_e) {}
+    this.workers.delete(id);
+    const p = Promise.resolve(w.promise).catch(() => {});
+    this.stopping.set(id, p);
+    p.then(() => { if (this.stopping.get(id) === p) this.stopping.delete(id); });
   }
 
   _spawnWorker(accountDoc) {
@@ -551,7 +561,7 @@ class Farm {
       client,
       campaigns: campaignsStore,
       pickStream: (camp, acc, opts) => this._pickStream(camp, acc, opts),
-      onEvent: (view) => this._onWorkerEvent(id, view),
+      onEvent: (view) => this._onWorkerEvent(id, view, controller),
       onProgress: (p) => this._onWorkerProgress(id, p),
       onEarned: () => this._onWorkerEarned(id),
       onLog: (e) => this._onWorkerLog(id, e),
@@ -565,15 +575,17 @@ class Farm {
         this.deps.activity.add({ level: "error", kind: "worker", accountId: id, msg: `worker crashed: ${short(e)}` });
       }
     }).finally(() => {
-      this.workers.delete(id);
+      // Only remove our own entry: a newer worker may already hold this id.
+      const cur = this.workers.get(id);
+      if (cur && cur.controller === controller) this.workers.delete(id);
     });
 
     this.workers.set(id, { controller, promise, since, current, doneSet });
   }
 
-  _onWorkerEvent(id, view) {
+  _onWorkerEvent(id, view, controller) {
     const w = this.workers.get(id);
-    if (!w) return;
+    if (!w || (controller && w.controller !== controller)) return; // a stopped worker's last words
     w.current = view;
     this.deps.Account.updateOne({ _id: id }, { $set: { current: view, lastHeartbeatAt: new Date(this.deps.now()) } }).catch(() => {});
   }

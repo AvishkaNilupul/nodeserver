@@ -31,6 +31,7 @@ const DEFAULTS = {
 const LEFT_WHY = {
   "no-credit": "CHZZK did not credit any minutes",
   closed: "the stream ended or stopped counting for this campaign",
+  unread: "CHZZK's progress lists did not answer",
 };
 
 class AbortError extends Error {
@@ -310,7 +311,7 @@ async function runSession(opts) {
           if (Array.isArray(s.liveTokens) && s.liveTokens.length) liveTokens = s.liveTokens;
         } catch (e) {
           if (isAuthError(e)) { exit = "auth"; break; }
-          if (isEgressError(e)) { await sleep(T.egressWaitMs, signal, clock); continue; }
+          if (isEgressError(e)) { if (!(await pause(T.egressWaitMs))) { exit = "abort"; break; } continue; }
         }
       }
 
@@ -319,7 +320,7 @@ async function runSession(opts) {
         const res = await beat("WATCH_CONTINUED", { channelId, liveId, sessionId, openAt, awt, liveTokens });
         lastBeat = t;
         if (res === "auth") { exit = "auth"; break; }
-        if (res === "egress") { await sleep(T.egressWaitMs, signal, clock); continue; }
+        if (res === "egress") { if (!(await pause(T.egressWaitMs))) { exit = "abort"; break; } continue; }
       }
 
       if (t - lastChallenges >= T.challengesMs) {
@@ -331,8 +332,12 @@ async function runSession(opts) {
           prog = await readProgress({ ...camp, rewards: camp2.rewards || camp.rewards });
         } catch (e) {
           if (isAuthError(e)) { exit = "auth"; break; }
-          if (isEgressError(e)) { await sleep(T.egressWaitMs, signal, clock); continue; }
-          continue; // transient
+          if (isEgressError(e)) { if (!(await pause(T.egressWaitMs))) { exit = "abort"; break; } continue; }
+          // Any other failure counts as a flat read, so a list that keeps
+          // failing cannot keep this stream forever.
+          noCreditStreak++;
+          if (noCreditStreak >= T.noCreditReads) { exit = "unread"; break; }
+          continue;
         }
 
         const grew = prog.minutes > lastMinutes || prog.finished > lastFinished;
@@ -378,8 +383,16 @@ async function runSession(opts) {
         `Left ${channelName || channelId} after ${watched} min: ${LEFT_WHY[exit]} (${Math.max(0, lastMinutes - startMinutes)} min credited)`);
       markStreamBad(channelId);
       if (exit === "no-credit") bumpCampaignBad(camp, "streams did not credit minutes");
+      if (exit === "unread") bumpCampaignBad(camp, "CHZZK's progress lists did not answer");
     }
     return "retry";
+  }
+
+  // A wait inside a stream: false when the session was stopped meanwhile, so
+  // the caller can still send WATCH_ENDED instead of throwing out of the loop.
+  async function pause(ms) {
+    try { await sleep(ms, signal, clock); return true; }
+    catch (e) { if (e instanceof AbortError) return false; throw e; }
   }
 
   async function beat(type, { channelId, liveId, sessionId, openAt, awt, liveTokens }) {
