@@ -49,7 +49,8 @@ function makeClient({ cookies = null, deviceId = "", transport = getTransport() 
       "front-client-product-type": "web",
       "front-client-platform-type": "PC",
     };
-    if (dev) h["device-id"] = dev;
+    // The web player's header is literally "deviceId" (_chzzk-probe/HANDOFF.md §3).
+    if (dev) h.deviceid = dev;
     if (cookieHeader) h.cookie = cookieHeader;
     return h;
   }
@@ -83,6 +84,14 @@ function makeClient({ cookies = null, deviceId = "", transport = getTransport() 
     // 2xx without a body.code (watchEvent 200, polls, …): empty success.
     return null;
   }
+
+  // The player's polling calls carry these (seen in the probe that earned
+  // minutes, _chzzk-probe/watch.js); sent on live-status and watch-event.
+  const POLLING = {
+    "If-Modified-Since": "Mon, 26 Jul 1997 05:00:00 GMT",
+    "Cache-Control": "no-cache",
+    Pragma: "no-cache",
+  };
 
   // Send a CHZZK request with the standard header kit. `extra` adds endpoint-
   // specific headers (e.g. `scene` on watchEvent). An object body is sent as
@@ -185,21 +194,26 @@ function makeClient({ cookies = null, deviceId = "", transport = getTransport() 
     };
   }
 
+  // CHZZK's own field names (measured 2026-10-23): liveTokenList,
+  // krOnlyViewing, abroadCountry. v1 read liveTokens/krOnly/abroad, which do
+  // not exist, so every heartbeat went out with no tokens and was not
+  // credited. The old names stay as a fallback only.
   async function liveStatus(channelId) {
     const ch = str(channelId);
     const c =
       (await send(
         `${API}/polling/v3.1/channels/${encodeURIComponent(ch)}/live-status`,
-        { referer: `${HOME}/live/${ch}` },
+        { referer: `${HOME}/live/${ch}`, extra: POLLING },
       )) || {};
+    const tokens = Array.isArray(c.liveTokenList) ? c.liveTokenList : Array.isArray(c.liveTokens) ? c.liveTokens : [];
     return {
       status: str(c.status),
       dropsCampaignNo: num(c.dropsCampaignNo),
-      liveTokens: Array.isArray(c.liveTokens) ? c.liveTokens : [],
-      krOnly: !!c.krOnly,
+      liveTokens: tokens,
+      krOnly: !!(c.krOnlyViewing != null ? c.krOnlyViewing : c.krOnly),
       blindType: c.blindType == null ? null : str(c.blindType),
       adult: !!c.adult,
-      abroad: !!c.abroad,
+      abroad: !!(c.abroadCountry != null ? c.abroadCountry : c.abroad),
     };
   }
 
@@ -225,7 +239,8 @@ function makeClient({ cookies = null, deviceId = "", transport = getTransport() 
         sessionId: str(sessionId),
         duration: 30,
         positionAt: Number.isFinite(Number(positionAt)) ? Number(positionAt) : 0,
-        ...(awt ? { awt: str(awt) } : {}),
+        // awt = seconds watched this session, a number (the player omits it at 0).
+        ...(Number(awt) > 0 ? { awt: Math.round(Number(awt)) } : {}),
       },
       liveTokens: Array.isArray(liveTokens) ? liveTokens : [],
       autoPlay: false,
@@ -235,7 +250,7 @@ function makeClient({ cookies = null, deviceId = "", transport = getTransport() 
       method: "POST",
       body,
       referer: `${HOME}/live/${ch}`,
-      extra: { scene: "25", "content-type": "application/json" },
+      extra: { ...POLLING, scene: "25", "content-type": "application/json" },
     });
     return true;
   }

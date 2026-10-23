@@ -31,6 +31,7 @@ const { createCollector } = require("./chzzk/codes");
 const { getTransport } = require("./chzzk/http");
 const { runSession, AbortError } = require("./chzzk/worker");
 const { isAuthError, isEgressError } = require("./chzzk/errors");
+const views = require("./chzzk/views");
 
 const DEFAULTS = {
   egressStartMs: 1_000,
@@ -203,17 +204,17 @@ class Farm {
     if (text.length > this.timings.cookieImportCap) {
       return [{ ok: false, error: "import too large" }];
     }
-    const { jars, errors } = parseImport(text);
+    const { jars, errors, infos = [] } = parseImport(text);
     const results = [];
     for (const err of errors) results.push({ ok: false, error: err });
-    for (const jar of jars) {
-      const r = await this._importOne(jar);
+    for (let i = 0; i < jars.length; i++) {
+      const r = await this._importOne(jars[i], infos[i]);
       results.push(r);
     }
     return results;
   }
 
-  async _importOne(jar) {
+  async _importOne(jar, info) {
     const deviceId = deviceIdOf(jar) || "";
     const client = this.deps.makeClient({ cookies: jar, deviceId, transport: this.transport });
     let who;
@@ -249,18 +250,25 @@ class Farm {
           lastCheckedAt: new Date(now),
           penalties,
           unusableSince: null,
+          cookieKind: (info && info.kind) || "unknown",
+          cookieExpiresAt: (info && info.expiresAt) || null,
         },
       },
       { upsert: true }
     );
+    const saved = await this.deps.Account.findOne({ userIdHash: who.userIdHash }).select("_id").lean();
     this.deps.activity.add({
       level: "info", kind: "import",
-      accountId: who.userIdHash,
+      accountId: saved ? String(saved._id) : who.userIdHash,
       msg: created
         ? `Imported "${nickname}" (${SHORT_HASH(who.userIdHash)})`
         : `Re-imported "${nickname}" (${SHORT_HASH(who.userIdHash)})`,
     });
-    return { ok: true, created, nickname, userIdHash8: SHORT_HASH(who.userIdHash) };
+    return {
+      ok: true, created, nickname, userIdHash8: SHORT_HASH(who.userIdHash),
+      cookieKind: (info && info.kind) || "unknown",
+      cookieExpiresAt: (info && info.expiresAt) || null,
+    };
   }
 
   async checkAccounts(ids = []) {
@@ -314,6 +322,21 @@ class Farm {
     return !!r && (r.matchedCount || r.n || 0) > 0;
   }
 
+  // "Farm again": forget one campaign's progress on one login. The running
+  // worker is stopped so the supervisor starts a fresh one (≤ 30 s) that
+  // re-checks the campaign against CHZZK's own lists.
+  async resetProgress(id, campaignNo) {
+    const no = Number(campaignNo);
+    if (!Number.isFinite(no) || no <= 0) return false;
+    const r = await this.deps.Account.updateOne({ _id: id }, { $unset: { [`progress.${no}`]: "" } });
+    const ok = !!r && (r.matchedCount || r.n || 0) > 0;
+    if (!ok) return false;
+    const w = this.workers.get(String(id));
+    if (w) { try { w.controller.abort(); } catch (_e) {} this.workers.delete(String(id)); }
+    this.deps.activity.add({ level: "info", kind: "farm", accountId: String(id), campaignNo: no, msg: `Progress on campaign #${no} cleared by hand — it will be checked again` });
+    return true;
+  }
+
   async deleteAccounts(ids) {
     if (!Array.isArray(ids) || !ids.length) return { deleted: 0, keptCodes: 0 };
     const idSet = ids.map(String);
@@ -331,38 +354,16 @@ class Farm {
   // ========== Campaigns ==========
 
   async campaignsView() {
-    const list = await this.deps.Campaign.find({}).lean();
-    const now = this.deps.now();
-    const earned = await this.deps.Reward.aggregate([
-      { $group: { _id: "$rewardNo", claimed: { $sum: 1 } } },
+    const [list, accounts, earned] = await Promise.all([
+      this.deps.Campaign.find({}).lean(),
+      this._accountViews(),
+      this.deps.Reward.aggregate([{ $group: { _id: "$rewardNo", claimed: { $sum: 1 } } }]),
     ]);
+    const now = this.deps.now();
     const earnedByReward = new Map(earned.map((r) => [r._id, r.claimed]));
-    const campaigns = list.map((c) => ({
-      campaignNo: c.campaignNo,
-      title: c.title,
-      categoryType: c.categoryType,
-      categoryId: c.categoryId,
-      categoryValue: c.categoryValue,
-      state: c.state,
-      startAt: c.startAt,
-      endAt: c.endAt,
-      imageUrl: c.imageUrl,
-      enabled: c.enabled !== false,
-      source: c.source,
-      needsLink: !!c.needsLink,
-      lastSeenAt: c.lastSeenAt,
-      refreshedAt: c.refreshedAt,
-      farmable: isCampaignFarmable(c, now) && !c.needsLink && c.enabled !== false,
-      rewards: (c.rewards || []).map((r) => ({
-        rewardNo: r.rewardNo,
-        title: r.title,
-        rewardType: r.rewardType,
-        minutes: r.minutes,
-        remaining: r.remaining,
-        imageUrl: r.imageUrl,
-        earned: earnedByReward.get(r.rewardNo) || 0,
-      })),
-    }));
+    const campaigns = list
+      .map((c) => views.campaignView(c, { earnedByReward, accounts, now }))
+      .sort((a, b) => Number(b.farmable) - Number(a.farmable) || (+new Date(a.endAt || 0)) - (+new Date(b.endAt || 0)));
     return { campaigns };
   }
 
@@ -452,27 +453,24 @@ class Farm {
     const q = {};
     if (accountId) q.accountId = String(accountId);
     if (campaignNo != null) q.campaignNo = Number(campaignNo);
-    const rows = await this.deps.Reward.find(q).sort({ earnedAt: -1 }).limit(500).lean();
-    const rewards = rows.map((r) => ({
-      id: String(r._id),
-      accountId: r.accountId,
-      userIdHash: SHORT_HASH(r.userIdHash),
-      campaignNo: r.campaignNo,
-      rewardNo: r.rewardNo,
-      title: r.title,
-      rewardType: r.rewardType,
-      categoryId: r.categoryId,
-      campaignTitle: r.campaignTitle,
-      state: r.state,
-      hasCode: !!r.hasCode,
-      earnedAt: r.earnedAt,
-      codeEndAt: r.codeEndAt,
-      tries: r.tries || 0,
-      lastError: r.lastError || "",
-      revealedAt: r.revealedAt,
-      revealedBy: r.revealedBy,
-    }));
-    return { rewards };
+    const [rows, accs, camps] = await Promise.all([
+      this.deps.Reward.find(q).select("-codeEnc").sort({ earnedAt: -1 }).limit(500).lean(),
+      this.deps.Account.find({}).select("_id nickname").lean(),
+      this.deps.Campaign.find({}).select("campaignNo title categoryValue").lean(),
+    ]);
+    const accountsById = new Map(accs.map((a) => [String(a._id), a]));
+    const campaignsByNo = new Map(camps.map((c) => [Number(c.campaignNo), c]));
+    return { rewards: rows.map((r) => views.rewardView(r, { accountsById, campaignsByNo })) };
+  }
+
+  // Codes on hand, one line per reward kind. Never reads codeEnc.
+  async stockView() {
+    const [rows, camps] = await Promise.all([
+      this.deps.Reward.find({}).select("campaignNo rewardNo title rewardType categoryId campaignTitle state hasCode earnedAt codeEndAt revealedAt").lean(),
+      this.deps.Campaign.find({}).select("campaignNo title categoryValue").lean(),
+    ]);
+    const campaignsByNo = new Map(camps.map((c) => [Number(c.campaignNo), c]));
+    return views.stockView(rows, { campaignsByNo, now: this.deps.now() });
   }
 
   async revealCode(rewardId, who) {
@@ -740,51 +738,61 @@ class Farm {
 
   // ========== Totals / state view ==========
 
-  async stateView() {
-    const [accounts, campaigns, codes] = await Promise.all([
-      this.deps.Account.find({}).lean(),
-      this.deps.Campaign.countDocuments({}),
-      this.deps.Reward.countDocuments({ hasCode: true }),
-    ]);
-    const now = this.deps.now();
-    const watching = Array.from(this.workers.values()).filter((w) => w.current && w.current.state === "watching").length;
-    const totals = {
-      accounts: accounts.length,
-      ok: accounts.filter((a) => a.status === "ok").length,
-      loggedOut: accounts.filter((a) => a.status === "not_logged_in").length,
-      watching,
-      codes,
-      campaigns,
-    };
-    const list = accounts.map((a) => {
-      const w = this.workers.get(String(a._id));
-      return {
-        id: String(a._id),
-        nickname: a.nickname || "",
-        userIdHash: SHORT_HASH(a.userIdHash),
-        status: a.status || "untested",
-        lastError: a.lastError || "",
-        cookieAt: a.cookieAt,
-        lastCheckedAt: a.lastCheckedAt,
-        sold: !!a.sold,
-        paused: !!a.paused,
-        note: a.note || "",
-        current: (w && w.current) || a.current || null,
-        progress: a.progress || {},
-        codes: 0, // filled below if needed
-      };
-    });
-    // Count codes per account (one query, grouped)
-    const grouped = await this.deps.Reward.aggregate([
-      { $match: { hasCode: true } },
-      { $group: { _id: "$accountId", n: { $sum: 1 } } },
+  async _accountViews() {
+    const [accounts, grouped] = await Promise.all([
+      this.deps.Account.find({}).select("-cookies").lean(),
+      this.deps.Reward.aggregate([
+        { $match: { hasCode: true } },
+        { $group: { _id: "$accountId", n: { $sum: 1 } } },
+      ]),
     ]);
     const codesByAcc = new Map(grouped.map((r) => [String(r._id), r.n]));
-    for (const row of list) row.codes = codesByAcc.get(row.id) || 0;
+    const ctx = { switchOn: this._readSwitch(), egressOk: !!this.state.egress.ok, now: this.deps.now() };
+    return accounts.map((a) => views.accountView(a, {
+      ...ctx,
+      worker: this.workers.get(String(a._id)) || null,
+      codes: codesByAcc.get(String(a._id)) || 0,
+    }));
+  }
+
+  async stateView() {
+    const now = this.deps.now();
+    const DAY = 24 * 3600_000;
+    const [list, campRows, codes, fresh, today, waiting, expiringSoon] = await Promise.all([
+      this._accountViews(),
+      this.deps.Campaign.find({}).select("-guide").lean(),
+      this.deps.Reward.countDocuments({ hasCode: true }),
+      this.deps.Reward.countDocuments({ hasCode: true, revealedAt: null }),
+      this.deps.Reward.countDocuments({ hasCode: true, codeAt: { $gte: new Date(now - DAY) } }),
+      this.deps.Reward.countDocuments({ hasCode: { $ne: true }, state: "earned", tries: { $gt: 0 } }),
+      this.deps.Reward.countDocuments({ hasCode: true, revealedAt: null, codeEndAt: { $gt: new Date(now), $lt: new Date(now + 7 * DAY) } }),
+    ]);
+    const campaigns = campRows.map((c) => views.campaignView(c, { earnedByReward: null, accounts: list, now }));
+    const switchOn = this._readSwitch();
+    const totals = {
+      accounts: list.length,
+      ok: list.filter((a) => a.status === "ok").length,
+      loggedOut: list.filter((a) => a.status === "not_logged_in").length,
+      untested: list.filter((a) => a.status === "untested").length,
+      paused: list.filter((a) => a.paused).length,
+      sold: list.filter((a) => a.sold).length,
+      running: list.filter((a) => a.running).length,
+      watching: list.filter((a) => a.current && a.current.state === "watching").length,
+      codes,
+      codesFresh: fresh,
+      codesToday: today,
+      codesWaiting: waiting,
+      campaigns: campRows.length,
+      farmable: campaigns.filter((c) => c.farmable).length,
+    };
     return {
-      switch: { on: this._readSwitch() },
+      now: new Date(now),
+      started: !!this.started,
+      switch: { on: switchOn },
       egress: this.state.egress,
       totals,
+      alerts: views.alerts({ switchOn, egress: this.state.egress, accounts: list, campaigns, counts: { waiting, expiringSoon }, now }),
+      collector: { pending: this.collector && this.collector.pending ? this.collector.pending() : 0 },
       accounts: list,
     };
   }

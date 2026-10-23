@@ -40,6 +40,8 @@ function makeFarm(overrides = {}) {
     collectNow: () => ({ queued: 0 }),
     activityView: () => ({ entries: [] }),
     setSwitch: (on) => ({ on }),
+    resetProgress: () => true,
+    stockView: () => ({ stock: [], totals: { stored: 0, fresh: 0, revealed: 0, waiting: 0, expired: 0 } }),
   };
   const farm = { calls };
   for (const name of Object.keys(defaults)) {
@@ -111,6 +113,8 @@ const TABLE = [
   ["POST", "/api/chzzk/rewards/collect"],
   ["GET", "/api/chzzk/activity"],
   ["POST", "/api/chzzk/switch"],
+  ["POST", "/api/chzzk/accounts/reset-progress"],
+  ["GET", "/api/chzzk/stock"],
 ];
 
 test("every route refuses an anonymous caller (401)", withServer(makeFarm(), null, async ({ url, stub }) => {
@@ -429,3 +433,29 @@ test("Request body is never logged (even on error)", withServer(
     }
   },
 ));
+
+// --- v2 routes (docs/CHZZK-PANEL-V2.md) ---------------------------------------
+
+test("POST /accounts/reset-progress validates and calls farm.resetProgress", withServer(makeFarm(), SUPERADMIN, async ({ url, stub }) => {
+  let r = await call(url, "POST", "/api/chzzk/accounts/reset-progress", { id: "a1", campaignNo: 1954 });
+  assert.equal(r.status, 200);
+  assert.deepEqual(stub.calls.at(-1), { name: "resetProgress", args: ["a1", 1954] });
+  r = await call(url, "POST", "/api/chzzk/accounts/reset-progress", { id: "a1", campaignNo: "x" });
+  assert.equal(r.status, 400);
+  r = await call(url, "POST", "/api/chzzk/accounts/reset-progress", { campaignNo: 5 });
+  assert.equal(r.status, 400);
+}));
+
+test("POST /accounts/reset-progress answers 404 for an unknown account", withServer(makeFarm({ resetProgress: () => false }), SUPERADMIN, async ({ url }) => {
+  const r = await call(url, "POST", "/api/chzzk/accounts/reset-progress", { id: "nope", campaignNo: 7 });
+  assert.equal(r.status, 404);
+}));
+
+test("GET /stock returns farm.stockView() and never a code", withServer(makeFarm({
+  stockView: () => ({ stock: [{ campaignNo: 1, rewardNo: 2, stored: 3, fresh: 2 }], totals: { stored: 3 } }),
+}), SUPERADMIN, async ({ url }) => {
+  const r = await call(url, "GET", "/api/chzzk/stock");
+  assert.equal(r.status, 200);
+  assert.equal(r.json.stock[0].fresh, 2);
+  assert.ok(!/CHZZK-FAKE-CODE/.test(r.text));
+}));

@@ -41,6 +41,24 @@ function cleanJar(raw) {
   return out;
 }
 
+// How long the export says its login lasts, read from NID_AUT. Cookie-Editor
+// marks a cookie `session: true` or gives `expirationDate` (epoch seconds).
+// Values never leave this function.
+function loginInfo(raw) {
+  const aut = (Array.isArray(raw) ? raw : []).find((c) => isCookieLike(c) && c.name === "NID_AUT");
+  if (!aut) return { kind: "unknown", expiresAt: null };
+  const hasMeta = "session" in aut || "expirationDate" in aut || "expires" in aut;
+  if (!hasMeta) return { kind: "unknown", expiresAt: null };
+  let exp = null;
+  if (typeof aut.expirationDate === "number" && aut.expirationDate > 0) exp = aut.expirationDate * 1000;
+  else if (aut.expires != null && aut.expires !== "") {
+    const n = Number(aut.expires);
+    exp = Number.isFinite(n) ? (n < 1e12 ? n * 1000 : n) : Date.parse(String(aut.expires));
+  }
+  if (aut.session === true || !Number.isFinite(exp) || !exp) return { kind: "session", expiresAt: null };
+  return { kind: "persistent", expiresAt: new Date(exp) };
+}
+
 // Split a raw "Cookie:" header line into one jar.
 function fromHeaderLine(line) {
   const jar = [];
@@ -155,6 +173,7 @@ function parseImport(input) {
   }
 
   const jars = [];
+  const infos = []; // infos[i] describes jars[i]: { kind, expiresAt }
   rawJars.forEach((raw, idx) => {
     const cleaned = cleanJar(Array.isArray(raw) ? raw : []);
     const names = new Set(cleaned.map((c) => c.name));
@@ -165,9 +184,10 @@ function parseImport(input) {
       return;
     }
     jars.push(cleaned);
+    infos.push(loginInfo(raw));
   });
 
-  return { jars, errors };
+  return { jars, errors, infos };
 }
 
 function toHeader(jar) {
@@ -200,4 +220,4 @@ function sameLogin(a, b) {
   return va !== null && vb !== null && va === vb;
 }
 
-module.exports = { parseImport, toHeader, deviceIdOf, sameLogin, REQUIRED };
+module.exports = { parseImport, loginInfo, toHeader, deviceIdOf, sameLogin, REQUIRED };

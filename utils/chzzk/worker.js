@@ -15,7 +15,7 @@ const { progressOf } = require("./progress");
 
 const DEFAULTS = {
   heartbeatMs: 30_000,         // WATCH_CONTINUED cadence
-  statusMs: 60_000,            // live-status refresh (new tokens; close detect)
+  statusMs: 30_000,            // live-status before each beat (fresh tokens; close detect), as the probe did
   challengesMs: 180_000,       // progress read + "crediting?" check
   idlePollMs: 60_000,          // sleep while nothing is farmable
   egressWaitMs: 30_000,        // back off when the tunnel is unreachable

@@ -167,6 +167,15 @@ route("post", "/accounts/update", async ({ body }) => {
   return {};
 });
 
+// "Farm again": clear one campaign's progress on one login (a wrong done mark).
+route("post", "/accounts/reset-progress", async ({ body }) => {
+  const id = text(body.id, "id", { required: true });
+  const no = intIn(body.campaignNo, "campaignNo", { min: 1, max: MAX_CAMPAIGN_NO });
+  const ok = await router.farm.resetProgress(id, no);
+  if (!ok) throw new HttpError(404, "Unknown account");
+  return {};
+});
+
 // Reward rows with hasCode:true are kept (farm.deleteAccounts returns keptCodes).
 route("post", "/accounts/delete", async ({ body }) => {
   const { deleted, keptCodes } = await router.farm.deleteAccounts(
@@ -213,6 +222,9 @@ route("get", "/rewards", async ({ query }) => {
   });
   return router.farm.rewardsView({ accountId, campaignNo });
 });
+
+// Codes on hand per reward kind — counts and dates only, never a code.
+route("get", "/stock", async () => router.farm.stockView());
 
 // The one route that returns a code. 404 when the reward is unknown or has no
 // code. Response is no-store so the browser never caches the plaintext.

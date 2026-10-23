@@ -50,14 +50,14 @@ test("logged-in client sends UA, Accept, Origin, Referer, Front-Client, Device-I
   assert.equal(h.referer, "https://chzzk.naver.com/");
   assert.equal(h["front-client-product-type"], "web");
   assert.equal(h["front-client-platform-type"], "PC");
-  assert.equal(h["device-id"], "device-abc-123");
+  assert.equal(h["deviceid"], "device-abc-123");
   assert.equal(h.cookie, COOKIE_HEADER);
 });
 
 test("deviceId arg wins over the cookies' ba.uuid", async () => {
   const t = reply(() => okJson({ data: [] }));
   await makeClient({ cookies: COOKIES, deviceId: "override-xyz", transport: t }).categoriesLive();
-  assert.equal(t.calls[0].headers["device-id"], "override-xyz");
+  assert.equal(t.calls[0].headers["deviceid"], "override-xyz");
 });
 
 test("anonymous client sends no Cookie and no Device-Id, but keeps Front-Client", async () => {
@@ -65,7 +65,7 @@ test("anonymous client sends no Cookie and no Device-Id, but keeps Front-Client"
   await makeAnon(t).categoriesLive();
   const h = t.calls[0].headers;
   assert.equal("cookie" in h, false);
-  assert.equal("device-id" in h, false);
+  assert.equal("deviceid" in h, false);
   assert.equal(h["front-client-product-type"], "web");
   assert.equal(h["front-client-platform-type"], "PC");
 });
@@ -301,24 +301,33 @@ test("liveDetail: a nested channel object fills in a missing channelName", async
 
 // ----------------------------------------------------------------- liveStatus
 
-test("liveStatus: returns status / dropsCampaignNo / tokens / krOnly / blindType / adult / abroad", async () => {
+test("liveStatus: reads CHZZK's own field names (liveTokenList, krOnlyViewing, abroadCountry)", async () => {
+  // The shape of a real anonymous live-status read, 2026-10-23 (values made up).
   const content = {
     status: "OPEN", dropsCampaignNo: 99,
-    liveTokens: ["t1", "t2"],
-    krOnly: true, blindType: null, adult: false, abroad: false,
+    liveTokenList: ["t1", "t2"],
+    krOnlyViewing: true, blindType: null, adult: false, abroadCountry: true,
+    openDate: "2026-10-23 13:00:07",
   };
   const t = reply(() => okJson(content));
   const out = await makeLoggedIn(t).liveStatus("ch1");
   assert.deepEqual(out, {
     status: "OPEN", dropsCampaignNo: 99,
     liveTokens: ["t1", "t2"],
-    krOnly: true, blindType: null, adult: false, abroad: false,
+    krOnly: true, blindType: null, adult: false, abroad: true,
   });
   assert.equal(t.calls[0].url, `${API}/polling/v3.1/channels/ch1/live-status`);
+  assert.equal(t.calls[0].headers["Cache-Control"], "no-cache", "player polling headers");
+});
+
+test("liveStatus: the v1 field names still work as a fallback", async () => {
+  const t = reply(() => okJson({ status: "OPEN", liveTokens: ["x"], krOnly: true, abroad: true }));
+  const out = await makeLoggedIn(t).liveStatus("ch1");
+  assert.deepEqual([out.liveTokens, out.krOnly, out.abroad], [["x"], true, true]);
 });
 
 test("liveStatus: blindType strings are kept; non-array tokens become []", async () => {
-  const t = reply(() => okJson({ blindType: "ADULT", liveTokens: null }));
+  const t = reply(() => okJson({ blindType: "ADULT", liveTokenList: null }));
   const out = await makeLoggedIn(t).liveStatus("ch1");
   assert.equal(out.blindType, "ADULT");
   assert.deepEqual(out.liveTokens, []);
@@ -348,15 +357,17 @@ test("watchEvent: POST with scene:25, body shape, 200+code200 -> true", async ()
   });
 });
 
-test("watchEvent: awt is included only when truthy; non-array liveTokens default to []", async () => {
+test("watchEvent: awt is seconds watched, sent as a number, left out at 0; non-array liveTokens default to []", async () => {
   const t = reply(() => okJson(null));
   await makeLoggedIn(t).watchEvent({
     channelId: "ch", liveId: 1, type: "WATCH_CONTINUED", sessionId: "s",
-    positionAt: 60, awt: "awt-token", liveTokens: null,
+    positionAt: 60, awt: 90.4, liveTokens: null,
   });
   const req = t.calls[0];
-  assert.equal(req.body.payload.awt, "awt-token");
+  assert.equal(req.body.payload.awt, 90);
   assert.deepEqual(req.body.liveTokens, []);
+  await makeLoggedIn(t).watchEvent({ channelId: "ch", liveId: 1, type: "WATCH_STARTED", sessionId: "s", positionAt: 0, awt: 0 });
+  assert.ok(!("awt" in t.calls[1].body.payload), "no awt at 0, like the player");
 });
 
 test("watchEvent: 401 -> AUTH; a code!=200 body is API", async () => {
@@ -420,7 +431,7 @@ test("egressCountry: GET ipinfo through the transport, no CHZZK headers, no cook
   const req = t.calls[0];
   assert.equal(req.url, "https://ipinfo.io/json");
   assert.equal("cookie" in req.headers, false);
-  assert.equal("device-id" in req.headers, false);
+  assert.equal("deviceid" in req.headers, false);
   assert.equal("front-client-product-type" in req.headers, false);
   assert.equal("front-client-platform-type" in req.headers, false);
   assert.equal("origin" in req.headers, false);
