@@ -42,12 +42,19 @@
     if (v && typeof v === "object") return Object.keys(v).filter((k) => v[k] && typeof v[k] === "object").map((k) => Object.assign({ _k: k }, v[k]));
     return [];
   }
+  // A code from the CHZZK farm is held under "chzzk:<account id>" (utils/codeShop/sources.js).
+  const CHZZK = "chzzk:";
+  const isChzzk = (id) => String(id || "").indexOf(CHZZK) === 0;
   function who(id) {
+    if (isChzzk(id)) return "CHZZK login " + String(id).slice(-6);
     const a = Soop.accountById(id);
     return a && a.nick && a.nick !== String(id) ? a.nick + " (" + id + ")" : String(id);
   }
   function loginLink(id) {
     if (!id) return el("span", { class: "s-muted" }, "–");
+    if (isChzzk(id)) {
+      return el("a", { class: "s-link", href: "/chzzk.html#accounts?id=" + encodeURIComponent(String(id).slice(CHZZK.length)), title: "Open this login on the CHZZK farm page" }, who(id));
+    }
     return Soop.accountById(id)
       ? el("a", { class: "s-link", href: "#accounts?id=" + encodeURIComponent(id), title: "Open this login on the Accounts tab" }, who(id))
       : el("span", { title: "This login is no longer on the Accounts tab" }, String(id));
