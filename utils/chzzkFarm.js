@@ -350,15 +350,21 @@ class Farm {
     return true;
   }
 
+  // A SOLD login is never deleted: its buyer can read its coupons on CHZZK,
+  // and the code shop keeps its codes off sale only while the row says sold.
   async deleteAccounts(ids) {
-    if (!Array.isArray(ids) || !ids.length) return { deleted: 0, keptCodes: 0 };
-    const idSet = ids.map(String);
+    if (!Array.isArray(ids) || !ids.length) return { deleted: 0, keptCodes: 0, keptSold: 0 };
+    const asked = ids.map(String).filter((id) => OBJECT_ID.test(id));
+    const sold = await this.deps.Account.find({ _id: { $in: asked }, sold: true }).select("_id").lean();
+    const soldIds = new Set(sold.map((a) => String(a._id)));
+    const idSet = asked.filter((id) => !soldIds.has(id));
+    if (!idSet.length) return { deleted: 0, keptCodes: 0, keptSold: soldIds.size };
     // Keep Reward rows that hold a code; drop codeless rows along with the account.
     const keptCodes = await this.deps.Reward.countDocuments({ accountId: { $in: idSet }, hasCode: true });
     await this.deps.Reward.deleteMany({ accountId: { $in: idSet }, hasCode: { $ne: true } });
     const del = await this.deps.Account.deleteMany({ _id: { $in: idSet } });
     for (const id of idSet) this._stopWorker(String(id));
-    return { deleted: del.deletedCount || 0, keptCodes };
+    return { deleted: del.deletedCount || 0, keptCodes, keptSold: soldIds.size };
   }
 
   // ========== Campaigns ==========

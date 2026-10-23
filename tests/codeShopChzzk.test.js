@@ -278,3 +278,44 @@ test("planner: a CHZZK-only game is listed in the settings but never drafted unt
   await planner.run();
   assert.equal(await CodeProduct.countDocuments({}), 0, "not ticked: no draft");
 });
+
+// ------------------------------------------------------------------ review fixes (2026-10-23)
+
+test("a sold CHZZK login is never deleted, so its codes can never come back into stock", async () => {
+  const { Farm } = require("../utils/chzzkFarm");
+  const { acc: sold } = await seedChzzk({ sold: true, codes: { 5089: "CHZ-KEEP-0010" } });
+  const { acc: free } = await seedChzzk({ codes: { 5089: "CHZ-GONE-0011" } });
+  const farm = new Farm({ activity: { add() {}, async list() { return []; } }, settings: { getAutoFarm: () => ({}), async setAutoFarm() {} },
+    telegram: { sendTelegram: async () => true }, timers: { set: () => 0, interval: () => 0, clear() {} }, transport: { ready: true, describe: () => "t" },
+    makeClient: () => ({}), createCollector: () => ({ collect: async () => ({}), sweep: async () => [], reveal: async () => null, pending: () => 0 }) });
+  const res = await farm.deleteAccounts([String(sold._id), String(free._id)]);
+  assert.equal(res.deleted, 1);
+  assert.equal(res.keptSold, 1);
+  assert.ok(await ChzzkAccount.exists({ _id: sold._id }), "the sold login stays");
+  await createIngest({ secret: secretBox, now: () => NOW, events: fakeEvents(), config: staticConfig() }).run();
+  assert.equal(await CodeStock.countDocuments({ loginId: "chzzk:" + sold._id }), 0, "its code never entered stock");
+});
+
+test("a CHZZK code with no known use-by never enters the shop; the collector never wipes a known one", async () => {
+  const { rows } = await seedChzzk({ codes: { 5089: "CHZ-NOUSE-0012" } });
+  await ChzzkReward.updateOne({ _id: rows[0]._id }, { $set: { codeEndAt: null } });
+  await createIngest({ secret: secretBox, now: () => NOW, events: fakeEvents(), config: staticConfig() }).run();
+  assert.equal(await CodeStock.countDocuments({}), 0);
+
+  // The collector: a claim without codeEndDate keeps the stored date.
+  const { createCollector } = require("../utils/chzzk/codes");
+  const acc = await ChzzkAccount.findOne({}).lean();
+  await ChzzkReward.updateOne({ _id: rows[0]._id }, { $set: { codeEndAt: new Date(NOW + 9 * DAY) } });
+  const collector = createCollector({ Account: ChzzkAccount, Reward: ChzzkReward, activity: { add() {} }, gapMs: 0, sleep: async () => {},
+    clientFor: () => ({ claims: async () => [{ rewardNo: 5089, campaignNo: 1954, title: "Epic Box", rewardType: "CODE_FIRST_COME", fulfillmentState: "COMPLIED", createdDate: "2026-10-22 15:00:00" }], couponCode: async () => ({ codeNo: "1", code: "X" }) }) });
+  await collector.collect(String(acc._id), { reason: "test" });
+  assert.equal(+(await ChzzkReward.findById(rows[0]._id).lean()).codeEndAt, NOW + 9 * DAY, "the known use-by is kept");
+});
+
+test("a CHZZK reveal counts for 15 days, like SOOP's reveal log", async () => {
+  const { rows } = await seedChzzk({ codes: { 5089: "CHZ-OLD-0013" } });
+  await ChzzkReward.updateOne({ _id: rows[0]._id }, { $set: { revealedAt: new Date(NOW - 20 * DAY) } });
+  assert.equal((await sources.chzzkReveals({ now: () => NOW })).size, 0);
+  await ChzzkReward.updateOne({ _id: rows[0]._id }, { $set: { revealedAt: new Date(NOW - 2 * DAY) } });
+  assert.equal((await sources.chzzkReveals({ now: () => NOW })).size, 1);
+});

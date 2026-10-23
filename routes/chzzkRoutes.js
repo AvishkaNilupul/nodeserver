@@ -178,10 +178,10 @@ route("post", "/accounts/reset-progress", async ({ body }) => {
 
 // Reward rows with hasCode:true are kept (farm.deleteAccounts returns keptCodes).
 route("post", "/accounts/delete", async ({ body }) => {
-  const { deleted, keptCodes } = await router.farm.deleteAccounts(
+  const { deleted, keptCodes, keptSold = 0 } = await router.farm.deleteAccounts(
     idList(body.ids, "ids", { required: true }),
   );
-  return { deleted, keptCodes };
+  return { deleted, keptCodes, keptSold };
 });
 
 // ---- campaigns --------------------------------------------------------------

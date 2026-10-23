@@ -156,9 +156,11 @@ function createCollector({
       rewardType,
       categoryId: String(claim.categoryId || ""),
       campaignTitle,
-      earnedAt,
-      codeEndAt,
     };
+    // A date CHZZK did not send (or sent in a shape we cannot read) never
+    // wipes a known one: the code shop pulls stock by codeEndAt.
+    if (earnedAt) common.earnedAt = earnedAt;
+    if (codeEndAt) common.codeEndAt = codeEndAt;
 
     // First make sure the row exists.
     await R.updateOne(

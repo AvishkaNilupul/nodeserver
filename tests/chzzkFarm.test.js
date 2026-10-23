@@ -364,7 +364,7 @@ test("deleteAccounts: codeless rewards go, hasCode:true rewards stay", async () 
   });
 
   const result = await farm.deleteAccounts([String(a1._id), String(a2._id)]);
-  assert.deepEqual(result, { deleted: 2, keptCodes: 1 });
+  assert.deepEqual(result, { deleted: 2, keptCodes: 1, keptSold: 0 });
 
   assert.equal(await ChzzkAccount.countDocuments({}), 0, "accounts gone");
   assert.equal(

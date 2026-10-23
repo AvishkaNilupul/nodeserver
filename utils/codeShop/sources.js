@@ -160,6 +160,9 @@ async function chzzkRows(deps) {
   const rows = [];
   for (const r of rewards) {
     if (!text(r.accountId) || !Number.isFinite(Number(r.rewardNo))) continue;
+    // No known use-by: the expiry guard could never pull it, so it never
+    // enters the shop (CHZZK has sent one with every claim so far).
+    if (!r.codeEndAt || !Number.isFinite(new Date(r.codeEndAt).getTime())) continue;
     const camp = campOf.get(Number(r.campaignNo)) || {};
     const game = chzzkGame(camp.categoryId || r.categoryId, camp.categoryValue);
     const reward = (camp.rewards || []).find((x) => Number(x.rewardNo) === Number(r.rewardNo)) || {};
@@ -189,12 +192,17 @@ async function chzzkRows(deps) {
   return rows;
 }
 
-// Reward rows revealed in the CHZZK panel: Map(ChzzkReward _id -> ms).
+// Reward rows revealed in the CHZZK panel in the last 15 days: Map(ChzzkReward
+// _id -> ms). The same window SOOP's reveal log has, so a code the owner
+// released is not held again by an old reveal (ingest holds a new one within
+// a tick, long before it ages out).
+const REVEAL_WINDOW_MS = 15 * 86400e3;
 async function chzzkReveals(deps) {
   const Reward = chzzkModel(deps, "ChzzkReward");
   if (!Reward) return new Map();
+  const nowMs = deps && typeof deps.now === "function" ? Number(new Date(deps.now()).getTime()) : Date.now();
   const rows = await leanOf(
-    Reward.find({ hasCode: true, revealedAt: { $ne: null } }).select("_id revealedAt"),
+    Reward.find({ hasCode: true, revealedAt: { $gt: new Date(nowMs - REVEAL_WINDOW_MS) } }).select("_id revealedAt"),
   );
   const out = new Map();
   for (const r of rows || []) {

@@ -95,6 +95,8 @@
     if (table) table.clearSelection();
     const n = j.deleted || 0, kept = typeof j.keptCodes === "number" && j.keptCodes > 0 ? " — " + plural(j.keptCodes, "code") + " kept" : "";
     Chzzk.toast("Deleted " + (n === list.length ? plural(n, "login") : fmt.num(n) + " of " + plural(list.length, "login")) + kept, "ok");
+    // A sold login is kept on purpose: its buyer can read its codes, so the code shop must keep them off sale.
+    if (j.keptSold) Chzzk.toast("Kept " + plural(j.keptSold, "sold login") + " — a sold login is never deleted, so its codes are never sold again", "info");
     await Chzzk.refresh();
     return true;
   }
