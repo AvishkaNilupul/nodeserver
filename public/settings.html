@@ -332,6 +332,43 @@
         border-color: rgba(234, 88, 12, 0.4);
         color: #fdba74;
       }
+      .dev-list {
+        margin-bottom: 14px;
+      }
+      .dev-row {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+        padding: 12px 0;
+        border-top: 1px solid var(--line);
+      }
+      .dev-row:last-child {
+        border-bottom: 1px solid var(--line);
+      }
+      .dev-row b {
+        font-size: 14px;
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        flex-wrap: wrap;
+      }
+      .dev-row .meta {
+        color: var(--muted);
+        font-size: 12.5px;
+        margin-top: 3px;
+        line-height: 1.5;
+      }
+      .dev-row .btn {
+        padding: 8px 12px;
+        font-size: 13px;
+        flex: none;
+      }
+      .dev-empty {
+        color: var(--muted);
+        font-size: 13px;
+        padding: 4px 0 2px;
+      }
       .codebox {
         font-family: ui-monospace, Menlo, Consolas, monospace;
         font-size: 18px;
@@ -685,6 +722,26 @@
         </div>
       </div>
 
+      <!-- Remembered devices -->
+      <div class="card">
+        <h2>
+          Remembered devices
+          <span id="devBadge" class="badge off">None</span>
+        </h2>
+        <p class="hint">
+          A device where you ticked <b>Remember this device</b> at login opens
+          the panel without your password or 2FA code. It is forgotten when you
+          log out on it, remove it here, change your password, or leave it
+          unused for <span id="devIdleDays">90</span> days.
+        </p>
+        <div id="devList" class="dev-list">
+          <div class="dev-empty">Loading…</div>
+        </div>
+        <button class="btn danger hidden" id="devForgetAllBtn" type="button">
+          Forget all devices
+        </button>
+      </div>
+
       <!-- Telegram linking -->
       <div class="card">
         <h2>
@@ -1008,6 +1065,113 @@
         }
       });
 
+      // ---- Remembered devices ----
+      function fmtWhen(v) {
+        if (!v) return "—";
+        const d = new Date(v);
+        const mins = Math.round((Date.now() - d.getTime()) / 60000);
+        if (mins < 1) return "just now";
+        if (mins < 60) return mins + " min ago";
+        if (mins < 1440) return Math.round(mins / 60) + " h ago";
+        if (mins < 1440 * 14) return Math.round(mins / 1440) + " days ago";
+        return d.toLocaleDateString();
+      }
+
+      function renderDevices(devices) {
+        const list = $("devList");
+        list.textContent = "";
+        $("devBadge").textContent = devices.length
+          ? devices.length + (devices.length === 1 ? " device" : " devices")
+          : "None";
+        $("devBadge").className = "badge " + (devices.length ? "on" : "off");
+        $("devForgetAllBtn").classList.toggle("hidden", devices.length < 2);
+        if (!devices.length) {
+          const empty = document.createElement("div");
+          empty.className = "dev-empty";
+          empty.textContent =
+            "No remembered devices. Tick “Remember this device” when you log in on your phone.";
+          list.appendChild(empty);
+          return;
+        }
+        for (const d of devices) {
+          const row = document.createElement("div");
+          row.className = "dev-row";
+          const info = document.createElement("div");
+          const name = document.createElement("b");
+          name.textContent = d.label;
+          if (d.current) {
+            const tag = document.createElement("span");
+            tag.className = "badge on";
+            tag.textContent = "This device";
+            name.appendChild(tag);
+          }
+          const meta = document.createElement("div");
+          meta.className = "meta";
+          meta.textContent =
+            "Last used " +
+            fmtWhen(d.lastUsedAt) +
+            (d.lastIp ? " · " + d.lastIp : "") +
+            " · added " +
+            new Date(d.createdAt).toLocaleDateString();
+          info.appendChild(name);
+          info.appendChild(meta);
+          const btn = document.createElement("button");
+          btn.className = "btn danger";
+          btn.type = "button";
+          btn.textContent = "Remove";
+          btn.addEventListener("click", async () => {
+            if (
+              !confirm(
+                "Forget " +
+                  d.label +
+                  "? It will need your password and 2FA code next time.",
+              )
+            )
+              return;
+            try {
+              await api("POST", "/me/devices/" + d.id + "/remove");
+              showMsg("Device removed.", "ok");
+              loadDevices();
+            } catch (e) {
+              showMsg(e.message, "err");
+            }
+          });
+          row.appendChild(info);
+          row.appendChild(btn);
+          list.appendChild(row);
+        }
+      }
+
+      async function loadDevices() {
+        try {
+          const r = await api("GET", "/me/devices");
+          if (r.idleDays) $("devIdleDays").textContent = r.idleDays;
+          renderDevices(r.devices || []);
+        } catch (e) {
+          $("devList").textContent = "";
+          const err = document.createElement("div");
+          err.className = "dev-empty";
+          err.textContent = "Couldn't load devices: " + e.message;
+          $("devList").appendChild(err);
+        }
+      }
+
+      $("devForgetAllBtn").addEventListener("click", async () => {
+        if (
+          !confirm(
+            "Forget every remembered device, this one included? Each will need your password and 2FA code next time.",
+          )
+        )
+          return;
+        try {
+          await api("POST", "/me/devices/remove-all");
+          showMsg("All devices forgotten.", "ok");
+          loadDevices();
+        } catch (e) {
+          showMsg(e.message, "err");
+        }
+      });
+
       $("logoutBtn").addEventListener("click", async () => {
         try {
           await fetch("/admin-logout", {
@@ -1035,6 +1199,7 @@
           return;
         }
         load2faStatus();
+        loadDevices();
         loadStatus();
       })();
     </script>

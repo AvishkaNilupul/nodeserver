@@ -74,6 +74,8 @@ const twitchClaimRoutes = require("./routes/twitchClaimRoutes");
 const digitalOceanRoutes = require("./routes/digitalOceanRoutes");
 const twoFactorRoutes = require("./routes/twoFactorRoutes");
 const settingsRoutes = require("./routes/settingsRoutes");
+const trustedDeviceRoutes = require("./routes/trustedDeviceRoutes");
+const { restoreTrustedSession } = require("./utils/trustedDevices");
 const dropScanner = require("./utils/dropScanner");
 const renterDropScanner = require("./utils/renterDropScanner");
 const backup = require("./utils/backup");
@@ -226,6 +228,10 @@ const sessionMiddleware = session({
 app.use(sessionMiddleware);
 // Share the session with Socket.IO so admin sockets are authenticated.
 io.engine.use(sessionMiddleware);
+// A browser the admin ticked "Remember this device" on gets signed back in
+// here when its 12 h session has lapsed (utils/trustedDevices.js). Before the
+// rate limiter and every guarded route, so the restored session counts.
+app.use(restoreTrustedSession);
 
 // Site-wide rate limit: a blanket per-IP ceiling across every route, in front
 // of the stricter per-endpoint limiters. Mounted AFTER the session middleware
@@ -407,6 +413,8 @@ app.use(twoFactorRoutes);
 app.use(paSessionInstallRoutes);
 
 app.use(settingsRoutes);
+// Settings → Remembered devices (list / remove). Own devices only.
+app.use(trustedDeviceRoutes);
 app.use(enforce2fa, adminManageRoutes);
 
 // =========================

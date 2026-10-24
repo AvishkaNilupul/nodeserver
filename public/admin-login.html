@@ -173,6 +173,34 @@
       button:hover {
         transform: translateY(-1px);
       }
+      .remember {
+        display: flex;
+        align-items: flex-start;
+        gap: 10px;
+        margin: 2px 2px 12px;
+        cursor: pointer;
+        color: var(--ink);
+        font-size: 13.5px;
+        font-weight: 600;
+      }
+      .remember input {
+        width: 18px;
+        height: 18px;
+        padding: 0;
+        margin: 1px 0 0;
+        flex: none;
+        accent-color: var(--accent);
+        box-shadow: none;
+        cursor: pointer;
+      }
+      .remember small {
+        display: block;
+        margin-top: 2px;
+        color: var(--muted);
+        font-size: 12px;
+        font-weight: 400;
+        line-height: 1.45;
+      }
       #message {
         margin-top: 14px;
         text-align: center;
@@ -264,6 +292,17 @@
           />
         </div>
 
+        <label class="remember" for="remember">
+          <input type="checkbox" id="remember" />
+          <span
+            >Remember this device
+            <small
+              >Skip the password and 2FA code here next time. Only tick this on
+              your own phone or computer.</small
+            ></span
+          >
+        </label>
+
         <button onclick="login()">Access panel</button>
       </div>
 
@@ -290,9 +329,36 @@
     </div>
 
     <script>
+      // Where to go after signing in: the page that sent us here (?next=),
+      // only when it is a path on this site, else the inbox.
+      function nextUrl() {
+        try {
+          const n = new URLSearchParams(location.search).get("next") || "";
+          if (n.startsWith("/") && !n.startsWith("//") && !n.includes("\\")) {
+            const u = new URL(n, location.origin);
+            if (
+              u.origin === location.origin &&
+              !u.pathname.startsWith("/admin-login")
+            ) {
+              return u.pathname + u.search + u.hash;
+            }
+          }
+        } catch (e) {}
+        return "/admin.html";
+      }
+
+      // A remembered device is already signed in by the time this page
+      // loads — skip the form.
+      fetch("/whoami", { credentials: "same-origin" })
+        .then((r) => {
+          if (r.ok) location.replace(nextUrl());
+        })
+        .catch(() => {});
+
       async function login() {
         const username = document.getElementById("username").value.trim();
         const password = document.getElementById("password").value.trim();
+        const remember = document.getElementById("remember").checked;
         const message = document.getElementById("message");
 
         message.innerText = "";
@@ -302,7 +368,7 @@
             method: "POST",
             headers: { "Content-Type": "application/json" },
             credentials: "same-origin",
-            body: JSON.stringify({ username, password }),
+            body: JSON.stringify({ username, password, remember }),
           });
 
           const data = await res.json();
@@ -315,7 +381,7 @@
             } else if (data.mustEnroll) {
               window.location.href = "/settings.html";
             } else {
-              window.location.href = "/admin.html";
+              window.location.href = nextUrl();
             }
           } else {
             message.innerText = data.message || "Invalid password";
@@ -339,7 +405,7 @@
           });
           const data = await res.json();
           if (res.ok && data.success) {
-            window.location.href = "/admin.html";
+            window.location.href = nextUrl();
           } else {
             message.innerText = data.message || "Incorrect code";
           }

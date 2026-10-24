@@ -4,6 +4,7 @@ const bcrypt = require("bcrypt");
 const { loadAdmins } = require("../utils/admins");
 const settings = require("../utils/settings");
 const { loginLimiter } = require("../utils/rateLimit");
+const trustedDevices = require("../utils/trustedDevices");
 
 const router = express.Router();
 
@@ -45,6 +46,8 @@ router.post("/admin-login", loginLimiter, async (req, res) => {
   try {
     const password = req.body?.password;
     const username = req.body?.username;
+    // "Remember this device" box on the login page.
+    const remember = req.body?.remember === true;
 
     if (!password) {
       return res
@@ -86,6 +89,7 @@ router.post("/admin-login", loginLimiter, async (req, res) => {
         username: admin.username,
         role: admin.role === "superadmin" ? "superadmin" : "admin",
         at: Date.now(),
+        remember,
       };
       await saveSession(req);
       return res.json({ success: true, twofa: true });
@@ -97,6 +101,9 @@ router.post("/admin-login", loginLimiter, async (req, res) => {
       role: admin.role === "superadmin" ? "superadmin" : "admin",
       tfa: false,
     };
+    if (remember) {
+      await trustedDevices.rememberDevice(req, res, admin, { viaTotp: false });
+    }
     await saveSession(req);
 
     // When 2FA is mandatory site-wide but this admin hasn't set it up, let them
@@ -117,8 +124,10 @@ router.get("/whoami", requireAdmin, (req, res) => {
   res.json({ admin: req.session.admin });
 });
 
-// LOGOUT
-router.post("/admin-logout", (req, res) => {
+// LOGOUT — also forgets this browser if it was a remembered device, otherwise
+// the next page load would sign it straight back in.
+router.post("/admin-logout", async (req, res) => {
+  await trustedDevices.forgetCurrentDevice(req, res);
   req.session.destroy((err) => {
     if (err) {
       return res.status(500).json({ success: false });

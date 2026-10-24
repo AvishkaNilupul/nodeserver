@@ -11,6 +11,7 @@ const totp = require("../utils/totp");
 const settings = require("../utils/settings");
 const { requireAdmin, requireSuperadmin } = require("../middleware/auth");
 const { loginLimiter } = require("../utils/rateLimit");
+const trustedDevices = require("../utils/trustedDevices");
 
 const router = express.Router();
 
@@ -177,6 +178,10 @@ router.post("/admin-2fa", loginLimiter, async (req, res) => {
       role: admin.role === "superadmin" ? "superadmin" : "admin",
       tfa: true,
     };
+    // The "Remember this device" box was ticked on the password step.
+    if (pending.remember) {
+      await trustedDevices.rememberDevice(req, res, admin, { viaTotp: true });
+    }
     await saveSession(req);
     res.json({ success: true, usedBackupCode: backupIdx >= 0 });
   } catch (err) {
