@@ -297,6 +297,13 @@ function healthyDeps(over = {}) {
       SELLABLE_STATUSES: ["released", "skipped"],
     },
     unclaimedAutoList: { TICK_MS: 10 * MIN },
+    // The lister the server runs, with its in-memory last pass. The ledger
+    // above has no `listed` row, so autolist.running reads this instead of the
+    // DB stamp.
+    unclaimedAutoListLoaded: {
+      status: () => ({ running: false, lastRun: { at: ago(12 * MIN) } }),
+    },
+    uptimeMs: () => 6 * HOUR,
     marketplaces: {
       async gameflipListingIdsByStatus() {
         return new Set(["gf-live-1"]);
@@ -1205,4 +1212,150 @@ test("an unreadable offer list is unknown, never ok", async () => {
   assert.strictEqual(out.status, "unknown");
   assert.ok(out.threshold && out.threshold.length, "even an unknown states its threshold");
   assert.match(out.detail, /failure to measure/);
+});
+
+/* ========================================================================== *
+ * autolist.running when nothing is listed
+ * ========================================================================== */
+
+// The live shape on 2026-10-24: every unclaimed row had sold, so no row was
+// `listed`, and the newest DB stamp (left on a sold row) was hours old while the
+// lister kept running every 10 minutes. The check went red for hours on a
+// healthy loop.
+function idleLedger() {
+  return [
+    { status: "sold", game: "Brawlhalla", lastCheckedAt: ago(3 * HOUR + 20 * MIN) },
+    { status: "released", game: "Overwatch 2", lastCheckedAt: ago(5 * HOUR) },
+  ];
+}
+
+function listerAt(lastAt, running = false) {
+  return { status: () => ({ running, lastRun: lastAt ? { at: lastAt } : null }) };
+}
+
+test("REGRESSION 2026-10-24: nothing listed and an old stamp is not a dead lister", async () => {
+  const c = await runCheck(
+    "autolist.running",
+    healthyDeps({
+      UnclaimedAccount: fakeModel(idleLedger()),
+      unclaimedAutoListLoaded: listerAt(ago(4 * MIN)),
+      uptimeMs: () => 12 * HOUR,
+    }),
+  );
+  assert.strictEqual(c.status, "ok", c.summary);
+  assert.strictEqual(c.measured, "4m");
+  assert.match(c.summary, /Nothing is listed/);
+});
+
+test("nothing listed and no lister pass for over an hour still fails", async () => {
+  const c = await runCheck(
+    "autolist.running",
+    healthyDeps({
+      UnclaimedAccount: fakeModel(idleLedger()),
+      unclaimedAutoListLoaded: listerAt(ago(80 * MIN)),
+      uptimeMs: () => 12 * HOUR,
+    }),
+  );
+  assert.strictEqual(c.status, "fail");
+  assert.strictEqual(c.measured, "1h 20m");
+});
+
+test("nothing listed: just after a restart it is unknown until the first pass", async () => {
+  const c = await runCheck(
+    "autolist.running",
+    healthyDeps({
+      UnclaimedAccount: fakeModel(idleLedger()),
+      unclaimedAutoListLoaded: listerAt(null),
+      uptimeMs: () => 5 * MIN,
+    }),
+  );
+  assert.strictEqual(c.status, "unknown", "no pass yet is not proof of life");
+  assert.match(c.summary, /restarted 5m ago/);
+});
+
+test("nothing listed: no pass since a restart over an hour ago fails, and a pass from before it does not count", async () => {
+  const c = await runCheck(
+    "autolist.running",
+    healthyDeps({
+      UnclaimedAccount: fakeModel(idleLedger()),
+      // Older than the boot, so it can only have been carried over.
+      unclaimedAutoListLoaded: listerAt(ago(3 * HOUR)),
+      uptimeMs: () => 2 * HOUR,
+    }),
+  );
+  assert.strictEqual(c.status, "fail");
+  assert.match(c.summary, /since the restart 2h 0m ago/);
+});
+
+test("nothing listed and the lister not running in this process is unknown", async () => {
+  const c = await runCheck(
+    "autolist.running",
+    healthyDeps({
+      UnclaimedAccount: fakeModel(idleLedger()),
+      unclaimedAutoListLoaded: null,
+    }),
+  );
+  assert.strictEqual(c.status, "unknown");
+  assert.strictEqual(c.measured, null);
+});
+
+test("a lister whose status() throws is unknown, not a crash", async () => {
+  const c = await runCheck(
+    "autolist.running",
+    healthyDeps({
+      UnclaimedAccount: fakeModel(idleLedger()),
+      unclaimedAutoListLoaded: {
+        status() {
+          throw new Error("boom");
+        },
+      },
+    }),
+  );
+  assert.strictEqual(c.status, "unknown");
+});
+
+test("with rows listed the DB stamp still decides, whatever the lister's memory says", async () => {
+  const stale = await runCheck(
+    "autolist.running",
+    healthyDeps({
+      UnclaimedAccount: fakeModel([{ status: "listed", game: "Overwatch 2", lastCheckedAt: ago(2 * HOUR) }]),
+      unclaimedAutoListLoaded: listerAt(ago(1 * MIN)),
+    }),
+  );
+  assert.strictEqual(stale.status, "fail");
+  assert.strictEqual(stale.measured, "2h 0m");
+
+  const fresh = await runCheck(
+    "autolist.running",
+    healthyDeps({
+      UnclaimedAccount: fakeModel([{ status: "listed", game: "Overwatch 2", lastCheckedAt: ago(7 * MIN) }]),
+      unclaimedAutoListLoaded: null,
+    }),
+  );
+  assert.strictEqual(fresh.status, "ok");
+  assert.strictEqual(fresh.measured, "7m");
+});
+
+test("a switched-off lister still warns before anything is counted", async () => {
+  const c = await runCheck(
+    "autolist.running",
+    healthyDeps({
+      UnclaimedAccount: fakeModel(idleLedger()),
+      settings: { getAutoFarm: () => ({ unclaimedAutoList: true, unclaimedAutoListPaused: true }) },
+    }),
+  );
+  assert.strictEqual(c.status, "warn");
+  assert.match(c.summary, /paused/);
+});
+
+test("judgeIdleLister times a missing or carried-over pass from the boot", () => {
+  const j = health.judgeIdleLister;
+  const budgetMs = HOUR;
+  assert.strictEqual(j({ lastAt: ago(10 * MIN), uptimeMs: 5 * HOUR, now: NOW, budgetMs }).status, "ok");
+  assert.strictEqual(j({ lastAt: ago(61 * MIN), uptimeMs: 5 * HOUR, now: NOW, budgetMs }).status, "fail");
+  assert.strictEqual(j({ lastAt: null, uptimeMs: 30 * MIN, now: NOW, budgetMs }).status, "unknown");
+  assert.strictEqual(j({ lastAt: null, uptimeMs: 90 * MIN, now: NOW, budgetMs }).status, "fail");
+  assert.strictEqual(j({ lastAt: null, uptimeMs: null, now: NOW, budgetMs }).status, "unknown");
+  // Uptime unreadable but a pass on record: the pass is the evidence.
+  assert.strictEqual(j({ lastAt: ago(5 * MIN), uptimeMs: null, now: NOW, budgetMs }).status, "ok");
 });
