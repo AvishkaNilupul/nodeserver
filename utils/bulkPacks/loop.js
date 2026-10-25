@@ -1131,10 +1131,16 @@ async function deliveredAfterRelease(offer, e, orderId, at, opts, out) {
       result = "NOT re-reserved: its DropSet is missing";
     } else {
       try {
+        // Records a delivery that already happened, so the one-sale-per-game
+        // guard (utils/soldGameGuard.js) does not apply.
         rereserved = !!(await deps.dropReservation.reserveSetOnAccount(
           id,
           set,
-          { soldToUsername: offer.market, soldSetId: String(set._id) },
+          {
+            soldToUsername: offer.market,
+            soldSetId: String(set._id),
+            alreadyCommitted: true,
+          },
         ));
         result = rereserved
           ? "re-reserved for this set"

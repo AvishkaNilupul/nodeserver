@@ -292,9 +292,12 @@ async function fixReserve(f, listing) {
   // Clear any partial rows we already hold so the re-reserve is all-or-
   // nothing (reserveSetOnAccount only counts rows it stamped this instant).
   await releaseSetForAccounts([f.accountId], String(set._id), tag);
+  // The account is already on this listing: this records that commitment
+  // again, it is not a new sale (utils/soldGameGuard.js).
   const ok = await reserveSetOnAccount(f.accountId, set, {
     soldToUsername: tag,
     soldSetId: String(set._id),
+    alreadyCommitted: true,
   });
   if (ok) {
     return (

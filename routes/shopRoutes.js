@@ -240,6 +240,20 @@ async function availableAccountsForSet(set) {
   // is needed, then by fewest spare copies of the set's own items, then login.
   // (Was the reverse — most spare copies first — which deliberately picked the
   // fattest account and caused exactly that over-delivery.)
+  //
+  // One sale per game per account (utils/soldGameGuard.js): an account whose
+  // drops of this game are already committed to another set — sold, or on
+  // another listing — is not stock for this one, even though this set's own
+  // drops on it read as free. The first buyer's game link takes them all.
+  const taken = await require("../utils/soldGameGuard").sameGameTakenAccounts(
+    out.map((o) => o.accountId),
+    set,
+  );
+  if (taken.size) {
+    for (let i = out.length - 1; i >= 0; i--) {
+      if (taken.has(String(out[i].accountId))) out.splice(i, 1);
+    }
+  }
   const load = await connectableLoadForAccounts(out.map((o) => o.accountId));
   for (const o of out) o.connectableLoad = load.get(String(o.accountId)) || 0;
   out.sort(

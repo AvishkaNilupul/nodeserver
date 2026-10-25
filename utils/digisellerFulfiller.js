@@ -111,9 +111,12 @@ async function retireManualAccounts(accountLines, set) {
   ).lean();
   let n = 0;
   for (const a of accts) {
+    // Freezes accounts the owner already listed by hand, so the
+    // one-sale-per-game guard (utils/soldGameGuard.js) does not apply.
     const ok = await reserveSetOnAccount(a._id, set, {
       soldToUsername: DS_MANUAL_TAG,
       soldSetId: String(set._id),
+      alreadyCommitted: true,
     });
     if (ok) n++;
   }

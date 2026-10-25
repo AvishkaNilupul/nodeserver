@@ -762,12 +762,22 @@ async function pickDeliveryAccounts(task, max, items) {
   const twins = require("./accountTwins");
   const keys = [...new Set((items || []).map((i) => i && i.itemKey).filter(Boolean))];
   const gone = await twins.goneKeysFor(verified.map((a) => a.login), keys);
+  // One sale per game per account (utils/soldGameGuard.js). A SOLD row is not
+  // an active listing, so `used` above lets an account through the moment its
+  // last listing sells. Its other sets of the same game then read as free,
+  // although the buyer's game link takes those drops too. One account went on
+  // ZeusX six minutes after Gameflip delivered it for another MCOC set.
+  const sameGame = await require("./soldGameGuard").sameGameTakenAccounts(
+    verified.map((a) => a.accountId),
+    { items },
+  );
   const out = [];
   for (const acc of twins.onePerLogin(verified)) {
     if (out.length >= max) break;
     if (used.has(String(acc.login).toLowerCase())) continue;
     if (rented.has(String(acc.accountId))) continue;
     if (twins.hitsAny(gone.get(twins.loginKey(acc.login)), keys)) continue;
+    if (sameGame.has(String(acc.accountId))) continue;
     out.push(acc);
   }
   return out;

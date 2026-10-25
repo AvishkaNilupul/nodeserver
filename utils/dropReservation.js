@@ -13,6 +13,11 @@ const BotAccount = require("../models/BotAccount");
 const DropLog = require("../models/DropLog");
 const SaleSignal = require("../models/SaleSignal");
 
+// Lazy: soldGameGuard loads accountTwins and models on first use only.
+function soldGameGuard() {
+  return require("./soldGameGuard");
+}
+
 // Twitch drops EXPIRE. A claimed drop leaves the account's inventory 180-184
 // days after it was awarded (measured on prod 2026-10-16: 229 vanished drops,
 // min 180 d, max 184 d; no visible drop older than 183 d). The scanner never
@@ -141,6 +146,14 @@ function setKeys(set) {
 // rolled back and this returns false so the caller tries the next account —
 // preserving the "no two buyers get the same drops" guarantee at drop grain.
 // Returns true when the whole set is now reserved on the account.
+//
+// One sale per game per account (utils/soldGameGuard.js): an account whose
+// drops of one of the set's games are already committed elsewhere is refused,
+// so the caller moves on to its next candidate. opts.alreadyCommitted skips
+// that guard. Pass it ONLY when the call records a commitment that already
+// exists (a guardian re-reserve of an account already on its listing, a
+// delivery that already happened, accounts the owner listed by hand), never
+// for a new sale or listing.
 async function reserveSetOnAccount(accountId, set, opts = {}) {
   // A no-claim set's stock is the no-claim farm (utils/noclaimStock.js), never
   // the archive: reserving its items here would freeze claimed DropLog copies
@@ -148,6 +161,11 @@ async function reserveSetOnAccount(accountId, set, opts = {}) {
   if (set && set.stockSource === "noclaim") return false;
   const keys = setKeys(set);
   if (!keys.length) return false;
+  const guardGame = !opts.alreadyCommitted;
+  if (guardGame) {
+    const taken = await soldGameGuard().sameGameTakenAccounts([accountId], set);
+    if (taken.size) return false;
+  }
   const now = new Date();
   const stamp = {
     soldAt: now,
@@ -173,6 +191,30 @@ async function reserveSetOnAccount(accountId, set, opts = {}) {
       { $set: emptyReservation() },
     );
     return false;
+  }
+  // Did a concurrent claim commit ANOTHER set of the same game on this account
+  // between the check above and our stamp? Our own rows carry `now`; anything
+  // else of the game is foreign. Both sides of such a race may back out, and
+  // that is the safe direction: a lost sale, never a second buyer.
+  // An unreadable check is not a pass: undo the stamp, then report the error.
+  if (guardGame) {
+    let raced = null;
+    let raceErr = null;
+    try {
+      raced = await soldGameGuard().sameGameTakenAccounts([accountId], set, {
+        ignoreSoldAt: now,
+      });
+    } catch (e) {
+      raceErr = e;
+    }
+    if (raceErr || raced.size) {
+      await DropLog.updateMany(
+        { account: accountId, itemKey: { $in: keys }, soldAt: now },
+        { $set: emptyReservation() },
+      );
+      if (raceErr) throw raceErr;
+      return false;
+    }
   }
   // Shadow onto the account (first reservation wins) for display + rollback.
   await BotAccount.updateOne(
@@ -306,12 +348,20 @@ async function expiredUnitAccounts(accountIds, set) {
 // The units of a row that can still deliver its set: everything but the
 // expired ones (expiredUnitAccounts). A row with no set, or whose set is gone,
 // is returned unchanged — nothing here can judge it.
+//
+// Nor the ones whose game another market already sold or holds on the account
+// (utils/soldGameGuard.js, one sale per game per account): a unit reserved at
+// publish is handed over later without a new claim, so the commit-point guard
+// in reserveSetOnAccount never sees it again. An Eldorado offer held two units
+// whose game Gameflip had already delivered weeks earlier.
 async function liveUnits(units, setId) {
   const list = units || [];
   if (!list.length || !setId) return list;
   const set = await require("../models/DropSet").findById(setId).lean();
   if (!set) return list;
-  const bad = await expiredUnitAccounts(list.map((u) => u.accountId), set);
+  const ids = list.map((u) => u.accountId);
+  const bad = await expiredUnitAccounts(ids, set);
+  for (const id of await soldGameGuard().foreignHeldUnitAccounts(ids, set)) bad.add(id);
   if (!bad.size) return list;
   return list.filter((u) => !bad.has(String(u.accountId)));
 }
