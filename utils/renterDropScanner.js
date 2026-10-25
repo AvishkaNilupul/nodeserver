@@ -12,7 +12,7 @@
 const Renter = require("../models/Renter");
 const RenterAccount = require("../models/RenterAccount");
 const RenterDrop = require("../models/RenterDrop");
-const { fetchInventory, itemKeyFor } = require("./twitchInventory");
+const { fetchInventory, itemKeyFor, isPendingDrop } = require("./twitchInventory");
 const { cacheImage } = require("./imageCache");
 
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -156,16 +156,16 @@ async function scanAccount(acc) {
   // Farming-progress bookkeeping — the SAME definition of "pending" the
   // operator scanner uses (utils/dropScanner.js): work is outstanding only
   // while the drop still needs watch time, so required>0 and current<required.
-  // A claimed drop is already banked, and an event drop that arrives with
-  // required=0 is complete on arrival; counting either would make a finished
-  // account look permanently busy.
+  // A claimed drop is already banked, an event drop that arrives with
+  // required=0 is complete on arrival, and a drop of a campaign Twitch has
+  // ended (still listed in the inventory as "EXPIRED") can never complete;
+  // counting any of them would make a finished account look permanently busy.
+  // Both scanners call the one shared rule, twitchInventory.isPendingDrop.
   //
   // This is the only field that separates "this rent-farm account is watching a
   // stream right now" from "this rent-farm account is doing nothing" —
   // dropCount cannot, because it is monotonic and claimed-only.
-  const pending = (inProgress || []).filter(
-    (d) => !d.claimed && (d.required || 0) > 0 && (d.current || 0) < d.required,
-  );
+  const pending = (inProgress || []).filter(isPendingDrop);
   acc.inProgressCount = pending.length;
   acc.inProgressGames = [...new Set(pending.map((d) => d.game).filter(Boolean))];
   acc.farmingSnapshotAt = now;

@@ -286,6 +286,8 @@ function buildInProgress(inv) {
     // "https://twitch.tv/" is Twitch's own placeholder for "no link needed".
     const accountLinkURL = String(c.accountLinkURL || "");
     const campaignId = String(c.id || "");
+    // Twitch keeps ENDED campaigns in this list ("EXPIRED") — see isPendingDrop.
+    const campaignStatus = String(c.status || "");
     (c.timeBasedDrops || []).forEach((d) => {
       const self = d.self || {};
       const edge = (d.benefitEdges && d.benefitEdges[0]) || {};
@@ -310,11 +312,42 @@ function buildInProgress(inv) {
         connected,
         accountLinkURL,
         campaignId,
+        campaignStatus,
       });
     });
   });
   out.sort((a, b) => a.claimed - b.claimed || b.percent - a.percent);
   return out;
+}
+
+// Whether a buildInProgress drop belongs to a campaign Twitch has ENDED. The
+// Inventory keeps listing ended campaigns under dropCampaignsInProgress with
+// status "EXPIRED" for days, each unfinished drop frozen at the minutes it
+// reached — and no watching can ever add to it. Only an explicit "EXPIRED"
+// counts: a missing or unknown status is treated as live.
+function isEndedCampaign(d) {
+  return String((d && d.campaignStatus) || "").trim().toUpperCase() === "EXPIRED";
+}
+
+// The one definition of "this drop still needs watch time", shared by the
+// operator scanner (utils/dropScanner.js) and the renter scanner
+// (utils/renterDropScanner.js): unclaimed, with a real watch requirement it has
+// not reached yet, in a campaign that has not ended. A claimed drop is banked;
+// an event drop that arrives with required=0 is complete on arrival; a drop of
+// an ended campaign can never complete. Counting any of them made a finished
+// account look busy, and one such account keeps its whole bot from parking:
+// on 2026-10-25 contabo's twitchbot sat awake ~5 days with 0 of 99 accounts
+// watching, because each held a Warframe drop at 63/90 from an ended campaign.
+// Only the scanners' "work still left" bookkeeping uses this — callers that
+// read inProgress for unclaimed or finished drops still see every entry.
+function isPendingDrop(d) {
+  return (
+    !!d &&
+    !d.claimed &&
+    (d.required || 0) > 0 &&
+    (d.current || 0) < d.required &&
+    !isEndedCampaign(d)
+  );
 }
 
 // Fetch + parse one account's inventory.
@@ -514,4 +547,8 @@ module.exports = {
   // Shared so every writer stores the same normalised key — the archive's
   // aggregations group on the stored field and can't afford to recompute it.
   itemKeyFor,
+  // Shared so both scanners agree on what "still farming" means.
+  isPendingDrop,
+  isEndedCampaign,
+  __test: { buildInProgress },
 };

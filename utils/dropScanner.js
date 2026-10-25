@@ -36,7 +36,7 @@ const BotAccount = require("../models/BotAccount");
 const DropLog = require("../models/DropLog");
 const SaleSignal = require("../models/SaleSignal");
 const botHosts = require("./botHosts");
-const { fetchInventory, itemKeyFor } = require("./twitchInventory");
+const { fetchInventory, itemKeyFor, isPendingDrop } = require("./twitchInventory");
 const { cacheImage } = require("./imageCache");
 const accountState = require("./twitchAccountState");
 const suspendedAccounts = require("./suspendedAccounts");
@@ -640,10 +640,11 @@ async function scanAccount(acc, worker) {
   // with requiredMinutes=0 so they land complete instantly. Counting those kept
   // finished no-claim bots looking permanently "working", so they never parked
   // (this is exactly why twitchbotx20 read as farming when it was done). A drop
-  // is pending only while it still needs watch time: required>0 and current<required.
-  const pending = (inProgress || []).filter(
-    (d) => !d.claimed && (d.required || 0) > 0 && (d.current || 0) < d.required,
-  );
+  // is pending only while it still needs watch time: required>0 and current<required
+  // — and only while its campaign is live: Twitch keeps ENDED campaigns in the
+  // inventory (status "EXPIRED"), and one half-watched drop of one kept a bot
+  // awake for days farming nothing (twitchInventory.isPendingDrop, 2026-10-25).
+  const pending = (inProgress || []).filter(isPendingDrop);
   acc.inProgressCount = pending.length;
   acc.inProgressGames = [
     ...new Set(pending.map((d) => d.game).filter(Boolean)),
