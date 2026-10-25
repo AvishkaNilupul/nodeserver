@@ -890,6 +890,40 @@ test("autoPublish: a refused approval is counted, not thrown", async () => {
   assert.equal(r.steps.autoPublish.refused, 1);
 });
 
+test("autoPublish: a CHZZK draft needs drafts.minUnitsChzzk bundles, a SOOP draft drafts.minUnits", async () => {
+  const draft = (id, extra) => product(id, { status: "draft", offer: null, ...extra });
+  const h = harness({
+    cfg: { autoPublish: true, drafts: { minUnits: 3, minUnitsChzzk: 1 } },
+    products: [
+      draft("c1", { groupKeys: ["910004:chzzk-1982"], proposed: { units: 1 } }),
+      draft("s1", { groupKeys: ["12:500"], proposed: { units: 1 } }),
+      draft("c0", { groupKeys: ["910004:chzzk-1983"], proposed: { units: 0 } }),
+    ],
+  });
+  const r = await h.svc.runStep("autoPublish");
+  assert.deepEqual(h.approved, [{ id: "c1", opts: { actor: "auto" } }]);
+  assert.equal(r.steps.autoPublish.approved, 1);
+});
+
+test("autoPublish: a draft whose title is already on sale (offer or live product) waits for the owner", async () => {
+  const draft = (id, title, extra) => product(id, { status: "draft", offer: null, proposed: { units: 5 }, texts: { title }, ...extra });
+  const h = harness({
+    cfg: { autoPublish: true },
+    products: [
+      draft("d1", "Game | Same Title"),
+      draft("d2", "Game | Product Title"),
+      product("a1", { texts: { title: "Game | Product Title" } }),
+      draft("d3", "Game | Fresh Title"),
+    ],
+    listings: [{ marketplace: "eldorado", status: "active", title: "Game | Same Title", externalId: "eld-1" }],
+  });
+  const r = await h.svc.runStep("autoPublish");
+  assert.deepEqual(h.approved, [{ id: "d3", opts: { actor: "auto" } }]);
+  assert.equal(r.steps.autoPublish.refused, 2);
+  const why = r.steps.autoPublish.products.filter((p) => !p.approved).map((p) => p.problems[0]);
+  assert.deepEqual(why, ["same title as the live Eldorado offer eld-1", 'same title as the product "Bundle a1"']);
+});
+
 // --- runStep -------------------------------------------------------------------------------
 
 test("runStep: one step now; 'all' is a whole tick; an unknown name is a 400", async () => {

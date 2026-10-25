@@ -412,7 +412,8 @@ test("a game not marked sell is never drafted", async () => {
   await addSlot({ gameNo: "999", groupKey: "999:1", nameRaw: "Mystery Box", count: 10 });
   await addSlot({ gameNo: "12", groupKey: "12:500", nameRaw: "Prost Spray", count: 10 });
 
-  const { planner, telegram } = setup({ cfg: { games: { "12": { sell: false } } } });
+  // sellNewGames off: the settings' list alone decides (the "on" case has its own tests below).
+  const { planner, telegram } = setup({ cfg: { sellNewGames: false, games: { "12": { sell: false } } } });
   const res = await planner.run();
   assert.deepEqual(res, { groups: 0, created: 0, updated: 0, staled: 0, deleted: 0 });
   assert.equal(await CodeProduct.countDocuments(), 0);
@@ -573,4 +574,166 @@ test("a failed Telegram send never fails the run; the draft is still stamped", a
   clock.t = NOW + HOUR;
   await planner.run();
   assert.equal(telegram.sent.length, 1);
+});
+
+// --- autopilot (2026-10-25): labels, label repair, CHZZK minimum, new games ----------------
+
+function setupWith({ cfg = {}, fetch = null, telegram = fakeTelegram() } = {}) {
+  const clock = { t: NOW };
+  const sets = [];
+  const config = {
+    value: deepMerge(DEFAULTS, cfg),
+    get: async () => config.value,
+    set: async (patch, opts) => {
+      sets.push({ patch, opts });
+      config.value = deepMerge(config.value, patch);
+      return config.value;
+    },
+  };
+  const events = fakeEvents();
+  const planner = createPlanner({
+    models: { CodeStock, CodeProduct },
+    now: () => clock.t,
+    config,
+    events,
+    telegram,
+    ...(fetch ? { fetch } : {}),
+  });
+  return { planner, clock, config, events, telegram, sets };
+}
+
+const mtFetch = (map) => async (url) => {
+  const q = decodeURIComponent(String(url).split("&q=")[1] || "");
+  return { ok: true, json: async () => ({ responseData: { translatedText: map[q] || "" } }) };
+};
+
+test("autoLabels: a half-translated name gets its label from the glossary; off = empty as before", async () => {
+  await reset();
+  const g = { gameNo: "200", groupKey: "200:400", gameName: "Delta Force", campaignTitle: "Week Drops" };
+  await addSlot({ ...g, nameRaw: "가호 주머니 1개 (30분)", name: "Blessing Pouch x1 (30분)", count: 5 });
+  await addSlot({ ...g, nameRaw: "helmet", name: "Tactical Helmet", count: 5 });
+
+  const off = setupWith({ cfg: { autoLabels: false } });
+  await off.planner.run();
+  let [p] = await drafts();
+  assert.deepEqual(p.slots.map((s) => s.label).sort(), ["", "Tactical Helmet"]);
+
+  await reset();
+  await addSlot({ ...g, nameRaw: "가호 주머니 1개 (30분)", name: "Blessing Pouch x1 (30분)", count: 5 });
+  await addSlot({ ...g, nameRaw: "helmet", name: "Tactical Helmet", count: 5 });
+  const on = setupWith();
+  await on.planner.run();
+  [p] = await drafts();
+  assert.deepEqual(p.slots.map((s) => s.label).sort(), ["Blessing Pouch x1 (30 min)", "Tactical Helmet"]);
+  assert.deepEqual(checkBuyerText({ ...p.texts, labels: p.slots.map((s) => s.label) }, { sourceWords: DEFAULTS.sourceWords }), []);
+});
+
+test("autoLabels: a machine translation fills a name the glossary cannot", async () => {
+  await reset();
+  const g = { gameNo: "200", groupKey: "200:401", gameName: "Delta Force", campaignTitle: "Week Drops" };
+  await addSlot({ ...g, nameRaw: "시원한 여름 샌들", name: "시원한 여름 샌들", count: 4 });
+  const { planner, events } = setupWith({ fetch: mtFetch({ "시원한 여름 샌들": "Cool summer sandals" }) });
+  await planner.run();
+  noErrors(events);
+  const [p] = await drafts();
+  assert.deepEqual(p.slots.map((s) => s.label), ["Cool summer sandals"]);
+  assert.match(p.texts.title, /Cool summer sandals/);
+  assert.ok(events.logs.some((l) => l.kind === "label"));
+});
+
+test("label repair: a draft made without a label gets it later and new texts; an edited draft is never touched", async () => {
+  await reset();
+  const g = { gameNo: "200", groupKey: "200:402", gameName: "Delta Force", campaignTitle: "Week Drops" };
+  await addSlot({ ...g, nameRaw: "악몽의 밤 헤드웨어", name: "악몽의 밤 헤드웨어", count: 4 });
+  // First pass: the translator has nothing yet.
+  const first = setupWith({ fetch: mtFetch({}) });
+  await first.planner.run();
+  let [p] = await drafts();
+  assert.deepEqual(p.slots.map((s) => s.label), [""]);
+
+  // A later pass (new process, translator answers): the label and texts arrive.
+  const later = setupWith({ fetch: mtFetch({ "악몽의 밤 헤드웨어": "Nightmare night headwear" }) });
+  const res = await later.planner.run();
+  [p] = await drafts();
+  assert.equal(res.relabelled, 1);
+  assert.deepEqual(p.slots.map((s) => s.label), ["Nightmare night headwear"]);
+  assert.match(p.texts.title, /Nightmare night headwear/);
+  assert.equal(p.edited, false);
+
+  // The owner edits a blank-label draft: the planner leaves its slots alone.
+  await reset();
+  await addSlot({ ...g, nameRaw: "악몽의 밤 헤드웨어", name: "악몽의 밤 헤드웨어", count: 4 });
+  await setupWith({ fetch: mtFetch({}) }).planner.run();
+  await CodeProduct.updateOne({}, { $set: { edited: true, name: "mine" } });
+  await setupWith({ fetch: mtFetch({ "악몽의 밤 헤드웨어": "Nightmare night headwear" }) }).planner.run();
+  [p] = await drafts();
+  assert.deepEqual(p.slots.map((s) => s.label), [""]);
+  assert.equal(p.name, "mine");
+});
+
+test("CHZZK groups draft from one bundle; SOOP groups keep their minimum", async () => {
+  await reset();
+  await addSlot({ gameNo: "910004", groupKey: "910004:chzzk-1982", gameName: "Once Human", nameRaw: "Summer Sandals", count: 1 });
+  await addSlot({ gameNo: "910004", groupKey: "910004:chzzk-1982", gameName: "Once Human", nameRaw: "Night Headwear", count: 1 });
+  await addSlot({ gameNo: "12", groupKey: "12:500", nameRaw: "Lonely Spray", count: 1 });
+  const { planner } = setupWith({ cfg: { games: { "910004": { sell: true } } } });
+  const res = await planner.run();
+  assert.equal(res.created, 1);
+  const [p] = await drafts();
+  assert.deepEqual(p.groupKeys, ["910004:chzzk-1982"]);
+  assert.equal(p.proposed.units, 1);
+  assert.equal(p.slots.length, 2);
+});
+
+test("sellNewGames: a new game with an English name is added and drafted; a Korean-named one is added switched off, told once", async () => {
+  await reset();
+  await addSlot({ gameNo: "777", groupKey: "777:1", gameName: "Brand New Game", nameRaw: "Gold Crate", count: 5 });
+  await addSlot({ gameNo: "778", groupKey: "778:1", gameName: "새로운 게임", nameRaw: "Silver Crate", count: 5 });
+  const { planner, sets, telegram, config } = setupWith();
+  const res = await planner.run();
+  assert.equal(res.created, 1);
+  assert.equal(res.newGames, 2);
+  const [p] = await drafts();
+  assert.equal(p.gameNo, "777");
+  assert.equal(p.marketGame, "Brand New Game");
+  assert.match(p.texts.title, /^Brand New Game \|/);
+  assert.deepEqual(config.value.games["777"], { sell: true, marketGame: "Brand New Game", displayName: "Brand New Game" });
+  assert.equal(config.value.games["778"].sell, false);
+  assert.equal(sets.length, 2);
+  assert.equal(telegram.sent.filter((t) => /New game/.test(t)).length, 2);
+
+  // Next pass: both are known now; nothing is added or told again, the off one is not read.
+  const again = await planner.run();
+  assert.equal(again.newGames, undefined);
+  assert.equal(sets.length, 2);
+});
+
+test("sellNewGames off: a game the settings never named is not read; a game switched off by name never is", async () => {
+  await reset();
+  await addSlot({ gameNo: "777", groupKey: "777:1", gameName: "Brand New Game", nameRaw: "Gold Crate", count: 5 });
+  await addSlot({ gameNo: "910001", groupKey: "910001:chzzk-1", gameName: "Call of Duty", nameRaw: "Ghost Helmet", count: 5 });
+  const off = setupWith({ cfg: { sellNewGames: false } });
+  assert.equal((await off.planner.run()).created, 0);
+  const on = setupWith(); // 910001 is sell:false in DEFAULTS
+  const res = await on.planner.run();
+  const made = await drafts();
+  assert.deepEqual(made.map((p) => p.gameNo), ["777"]);
+  assert.equal(res.newGames, 1);
+});
+
+test("autoLabels: only rewards with a code still free to sell go to the translator", async () => {
+  await reset();
+  const g = { gameNo: "200", groupKey: "200:403", gameName: "Delta Force", campaignTitle: "Week Drops" };
+  await addSlot({ ...g, nameRaw: "팔린 보상품", name: "팔린 보상품", count: 4, state: "sold" });
+  await addSlot({ ...g, nameRaw: "남은 보상품", name: "남은 보상품", count: 4 });
+  const asked = [];
+  const fetch = async (url) => {
+    asked.push(decodeURIComponent(String(url).split("&q=")[1] || ""));
+    return { ok: true, json: async () => ({ responseData: { translatedText: "Spare Prize" } }) };
+  };
+  const { planner } = setupWith({ fetch });
+  await planner.run();
+  assert.deepEqual(asked, ["남은 보상품"]);
+  const [p] = await drafts();
+  assert.deepEqual(p.slots.map((s) => s.label), ["Spare Prize"]);
 });

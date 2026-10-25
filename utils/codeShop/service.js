@@ -460,6 +460,20 @@ function createService(overrides = {}) {
 
   // --- autoPublish -----------------------------------------------------------------
 
+  // The live offer or product already using this draft's title, or "".
+  async function titleTaken(p) {
+    const title = text(p && p.texts && p.texts.title).trim();
+    if (!title) return "";
+    const rows =
+      (await leanOf(deps.models.MarketplaceListing.find({ marketplace: "eldorado", status: "active", title }, { externalId: 1 }))) || [];
+    if (rows.length) return "the live Eldorado offer " + text(rows[0].externalId);
+    const others =
+      (await leanOf(
+        deps.models.CodeProduct.find({ _id: { $ne: p._id }, status: { $in: ["active", "paused"] }, "texts.title": title }, { name: 1 }),
+      )) || [];
+    return others.length ? 'the product "' + text(others[0].name) + '"' : "";
+  }
+
   // Only with config.autoPublish: drafts with no problems, enough proposed
   // bundles and still proposed by the planner -> approve (which publishes).
   async function autoPublish() {
@@ -467,6 +481,11 @@ function createService(overrides = {}) {
     if (cfg.autoPublish !== true) return { skipped: "auto-publish is off" };
     const minUnits = Number(cfg.drafts && cfg.drafts.minUnits);
     const need = Number.isFinite(minUnits) && minUnits >= 0 ? minUnits : 0;
+    // CHZZK drafts come from one or two logins (planner.js, drafts.minUnitsChzzk).
+    const chzzkMin = Number(cfg.drafts && cfg.drafts.minUnitsChzzk);
+    const needChzzk = Number.isFinite(chzzkMin) && chzzkMin >= 0 ? chzzkMin : need;
+    const needFor = (p) =>
+      (Array.isArray(p.groupKeys) ? p.groupKeys : []).some((k) => /:chzzk-/.test(text(k))) ? needChzzk : need;
     const out = { checked: 0, approved: 0, refused: 0, failed: 0, products: [] };
 
     const drafts = ((await leanOf(deps.models.CodeProduct.find({ status: "draft" }))) || []).filter(
@@ -476,11 +495,27 @@ function createService(overrides = {}) {
       out.checked += 1;
       if (p.stale === true) continue;
       const units = Number(p.proposed && p.proposed.units);
-      if (!(Number.isFinite(units) && units >= need)) continue;
+      if (!(Number.isFinite(units) && units >= needFor(p))) continue;
       const name = text(p.name) || text(p._id);
       try {
         const found = await modules.publisher.problems(p);
         if (!Array.isArray(found) || found.length) continue;
+        // Eldorado bans duplicate offers: a title already on sale (or owned by
+        // another live product) waits for the owner instead, told once.
+        const taken = await titleTaken(p);
+        if (taken) {
+          out.refused += 1;
+          out.products.push({ id: text(p._id), name, approved: false, problems: ["same title as " + taken] });
+          try {
+            await modules.events.stamp("dup-title:" + text(p._id), {
+              kind: "approve",
+              msg: `Not auto-published: "${name}" has the same title as ${taken}; change its title in the Sales tab`,
+            });
+          } catch {
+            /* told next tick */
+          }
+          continue;
+        }
         const res = (await modules.publisher.approve(p._id, { actor: "auto" })) || {};
         if (res.ok) {
           out.approved += 1;

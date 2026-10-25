@@ -51,6 +51,12 @@ const DEFAULTS = deepFreeze({
   autoBuildUnits: true, // grow stock of ACTIVE products from new codes
   autoDraft: true, // planner writes draft products
   autoPublish: false, // publish a ready draft without the owner
+  // Label a reward whose stored name is not clean English (glossary, then a
+  // machine translation; utils/codeShop/labels.js). Off = empty label, as before.
+  autoLabels: true,
+  // A game the settings never named is added by itself the first time it has
+  // a bundle to offer: selling when its name is clean English (planner.js).
+  sellNewGames: true,
   expiryGuard: true,
   expiryLeadHours: 36,
   markets: { eldorado: true, ggsel: false, playerauctions: false },
@@ -69,7 +75,8 @@ const DEFAULTS = deepFreeze({
   // Where stored codes are read from. SOOP always; CHZZK can be switched off.
   sources: { chzzk: true },
   ready: { graceHours: 4, stallHours: 24, earlyListDays: 7 },
-  drafts: { minUnits: 3, maxPerGroup: 2, leftovers: true },
+  // minUnitsChzzk: CHZZK groups come from one or two logins (07-CHZZK-SOURCE.md).
+  drafts: { minUnits: 3, maxPerGroup: 2, leftovers: true, minUnitsChzzk: 1 },
   pricing: {
     clearanceSteps: [
       { days: 7, cutPct: 0 },
@@ -101,6 +108,8 @@ const SAFE_DEFAULTS = deepFreeze(
     autoBuildUnits: false,
     autoDraft: false,
     autoPublish: false,
+    autoLabels: false,
+    sellNewGames: false,
     expiryGuard: true,
     markets: { eldorado: false, ggsel: false, playerauctions: false },
     competitorScan: { enabled: false },

@@ -18,6 +18,16 @@
 //    announced twice), and announced on Telegram;
 // 5. the group's auto drafts no longer proposed: deleted, or `stale` when the
 //    owner edited them.
+//
+// Autopilot (2026-10-25, owner: "make it fully automatic"):
+// - `autoLabels`: a reward whose stored name is not clean English gets a label
+//   from utils/codeShop/labels.js (glossary, then machine translation), and a
+//   draft the owner never edited gets labels it was missing filled in later;
+// - `sellNewGames`: a game the settings have never named is added to them by
+//   itself the first time it has a bundle to offer — selling when its name is
+//   clean English, switched off (and the owner told) when it is not;
+// - `drafts.minUnitsChzzk`: CHZZK groups come from one or two logins, so their
+//   drafts need fewer bundles than SOOP's.
 
 const { freeCounts, bestDraftSets } = require("./allocate");
 const { slotSetHash } = require("./slots");
@@ -25,6 +35,7 @@ const { defaultLabel, defaultTexts } = require("./texts");
 const { eventStarts } = require("./eventDates");
 const { guideFor } = require("./games");
 const { DEFAULTS, marketsForGame } = require("./config");
+const { createLabeler, cleanLabel } = require("./labels");
 
 const HOUR_MS = 60 * 60 * 1000;
 const DAY_MS = 24 * HOUR_MS;
@@ -81,6 +92,17 @@ function sellableGames(cfg) {
     .sort(cmpStr);
 }
 
+// CHZZK groups are "<gameNo>:chzzk-<campaign>" (docs/code-shop/07-CHZZK-SOURCE.md).
+function isChzzkGroup(groupKey) {
+  return /:chzzk-/.test(text(groupKey));
+}
+
+function minUnitsFor(groupKey, d) {
+  return isChzzkGroup(groupKey)
+    ? num(d.minUnitsChzzk, DEFAULTS.drafts.minUnitsChzzk)
+    : num(d.minUnits, DEFAULTS.drafts.minUnits);
+}
+
 function marketsOf(cfg) {
   const m = cfg && cfg.markets && typeof cfg.markets === "object" ? cfg.markets : {};
   return MARKET_ORDER.filter((k) => m[k] === true);
@@ -112,7 +134,7 @@ function summarize(groupKey, rows, { now, leadMs, sourceWords }) {
     if (!slotKey) continue;
     let s = g.slots.get(slotKey);
     if (!s) {
-      s = { slotKey, label: "", image: "", nameRaw: "", campaignTitle: "", firstEarnedAt: null, earliestFreeUseBy: null };
+      s = { slotKey, label: "", image: "", nameRaw: "", name: "", campaignTitle: "", firstEarnedAt: null, earliestFreeUseBy: null };
       g.slots.set(slotKey, s);
     }
     // Rows come oldest first, so the first value seen is the oldest row's.
@@ -120,6 +142,7 @@ function summarize(groupKey, rows, { now, leadMs, sourceWords }) {
     if (!s.label) s.label = defaultLabel(r, { sourceWords });
     if (!s.image) s.image = text(r.image);
     if (!s.nameRaw) s.nameRaw = text(r.nameRaw);
+    if (!s.name) s.name = text(r.name);
     if (!s.campaignTitle) s.campaignTitle = text(r.campaignTitle);
 
     if (r.state !== "in_stock") continue;
@@ -158,6 +181,12 @@ function createPlanner(deps = {}) {
   const getConfig = () => config || (config = require("./config").createConfig());
   const getEvents = () => events || (events = require("./events").createEvents());
   const telegram = deps.telegram || null;
+  // One labeler per planner, so a machine translation is asked for once per
+  // reward name per process. No `fetch` (tests) = offline steps only.
+  let labeler = deps.labeler || null;
+  const getLabeler = () =>
+    labeler ||
+    (labeler = createLabeler({ fetch: typeof deps.fetch === "function" ? deps.fetch : null, now: clock, log: (e) => log(e) }));
 
   async function log(entry) {
     try {
@@ -195,14 +224,71 @@ function createPlanner(deps = {}) {
     }
   }
 
+  // The texts a draft of these slots gets (the same inputs as at creation).
+  async function textsFor(slots, g, cfg, ctx) {
+    let useBy = null;
+    for (const s of slots) {
+      const m = g.slots.get(s.slotKey);
+      const u = m ? m.earliestFreeUseBy : null;
+      if (u !== null && u !== undefined && (useBy === null || u < useBy)) useBy = u;
+    }
+    const guide = guideFor(g.gameNo, cfg);
+    const starts = await eventStarts({ SoopCampaign: SoopCampaign(), ChzzkCampaign: models.ChzzkCampaign, CodeStock: CodeStock() }, [g.groupKey]);
+    return defaultTexts({ slots, guide, useBy: useBy === null ? null : new Date(useBy), now: ctx.now, eventStarts: starts });
+  }
+
+  // -> { slots, texts } when a blank label of this (non-edited) draft can be
+  // filled from the group's labels now, else null.
+  async function repairLabels(p, g, cfg, ctx) {
+    const slots = Array.isArray(p.slots) ? p.slots : [];
+    if (!slots.some((s) => !text(s && s.label))) return null;
+    let changed = false;
+    const next = slots.map((s) => {
+      if (text(s.label)) return s;
+      const label = text((g.slots.get(s.slotKey) || {}).label);
+      if (!label) return s;
+      changed = true;
+      return { ...s, label };
+    });
+    if (!changed) return null;
+    return { slots: next, texts: await textsFor(next, g, cfg, ctx) };
+  }
+
+  // Fill the blank labels of a ready group's slots (autoLabels) — only slots
+  // with a code still free to sell: an old group's sold or expired rewards need
+  // no label, and asking for them would spend the translator's daily quota.
+  async function labelGroup(g, cfg, ctx) {
+    if (cfg.autoLabels !== true) return;
+    const sourceWords = Array.isArray(cfg.sourceWords) ? cfg.sourceWords : DEFAULTS.sourceWords;
+    const free = new Set(
+      g.free.filter((f) => f.useBy === null || f.useBy - ctx.leadMs > ctx.now).map((f) => f.slotKey),
+    );
+    for (const s of g.slots.values()) {
+      if (s.label || !free.has(s.slotKey)) continue;
+      try {
+        const r = await getLabeler().labelOf({ name: s.name, nameRaw: s.nameRaw }, { sourceWords });
+        if (r && r.label) s.label = r.label;
+      } catch (err) {
+        await log({ level: "warn", kind: "label", msg: `No label for a reward of ${g.groupKey}: ${text(err && err.message)}` });
+      }
+    }
+  }
+
   async function planGroup(g, cfg, ctx, out) {
     const Product = CodeProduct();
     const d = (cfg && cfg.drafts) || {};
     const leftovers = d.leftovers !== false;
     const maxSets = leftovers ? Math.floor(num(d.maxPerGroup, DEFAULTS.drafts.maxPerGroup)) : 1;
     const counts = freeCounts(g.free, { now: ctx.now, leadMs: ctx.leadMs });
-    const sets = bestDraftSets(counts, { minUnits: num(d.minUnits, DEFAULTS.drafts.minUnits), maxSets });
+    const sets = bestDraftSets(counts, { minUnits: minUnitsFor(g.groupKey, d), maxSets });
     const at = new Date(ctx.now);
+
+    // A game the settings never named: added the first time it has a bundle to
+    // offer (sellNewGames). Off = its rows were never read, so never here.
+    if (sets.length && ctx.isNewGame(g.gameNo)) {
+      const entry = await ctx.registerGame(g);
+      if (!entry || entry.sell !== true) return;
+    }
 
     const proposed = new Set();
     for (const set of sets) {
@@ -212,16 +298,19 @@ function createPlanner(deps = {}) {
       const units = set.units;
 
       // Any non-retired product with this exact set already covers it.
-      const owners = await leanOf(Product.find({ slotSetHash: hash, status: { $ne: "retired" } }, "_id status edited stale"));
+      const owners = await leanOf(Product.find({ slotSetHash: hash, status: { $ne: "retired" } }, "_id status edited stale slots"));
       if (owners.length) {
         for (const p of owners) {
           if (p.status !== "draft") continue; // live products are never touched
           if (!p.edited) {
-            const r = await Product.updateOne(
-              { _id: p._id, status: "draft", edited: false },
-              { $set: { "proposed.units": units, "proposed.at": at, stale: false } },
-            );
+            const $set = { "proposed.units": units, "proposed.at": at, stale: false };
+            // A label this draft was made without, known now: fill it in and
+            // rebuild the texts it feeds (never on a draft the owner edited).
+            const repaired = await repairLabels(p, g, cfg, ctx);
+            if (repaired) Object.assign($set, repaired);
+            const r = await Product.updateOne({ _id: p._id, status: "draft", edited: false }, { $set });
             if (r.matchedCount) out.updated += 1;
+            if (r.matchedCount && repaired) ctx.extra.relabelled += 1;
           } else if (p.stale) {
             // Proposed again: only the planner's own flag changes, never the owner's edits.
             await Product.updateOne({ _id: p._id, status: "draft", stale: true }, { $set: { stale: false } });
@@ -287,6 +376,43 @@ function createPlanner(deps = {}) {
     }
   }
 
+  // A game the settings never named, the first time it has a bundle to offer.
+  // Its name becomes its title and Eldorado game when it is clean English (it
+  // then sells); otherwise it is added switched off and the owner is told once.
+  // -> the entry now in the settings (and in this pass's cfg).
+  async function registerGame(g, cfg, ctx) {
+    const no = text(g.gameNo);
+    const sourceWords = Array.isArray(cfg.sourceWords) ? cfg.sourceWords : DEFAULTS.sourceWords;
+    const name = cleanLabel(g.gameName, { sourceWords });
+    const entry = name ? { sell: true, marketGame: name, displayName: name } : { sell: false, marketGame: "", displayName: "" };
+    try {
+      const c = getConfig();
+      if (c && typeof c.set === "function") await c.set({ games: { [no]: entry } }, { actor: "code shop (new game)" });
+    } catch (err) {
+      await log({ level: "warn", kind: "planner", msg: `New game ${no} could not be saved to the settings: ${text(err && err.message)}` });
+    }
+    if (!cfg.games || typeof cfg.games !== "object") cfg.games = {};
+    cfg.games[no] = entry;
+    ctx.extra.newGames += 1;
+    const msg = name
+      ? `New game "${name}" (#${no}) now sells by itself; switch it off in Sales > Settings if it should not`
+      : `New game #${no}${g.gameName ? ` ("${text(g.gameName).slice(0, 60)}")` : ""} has codes but no English name; give it one in Sales > Settings to sell it`;
+    let fresh = true;
+    try {
+      fresh = await getEvents().stamp("new-game:" + no, { kind: "planner", msg });
+    } catch {
+      fresh = true;
+    }
+    if (fresh && telegram && typeof telegram.send === "function") {
+      try {
+        await telegram.send("Code shop: " + msg + ".");
+      } catch (err) {
+        await log({ level: "warn", kind: "telegram", msg: "New-game alert not sent: " + text(err && err.message) });
+      }
+    }
+    return entry;
+  }
+
   async function runOnce() {
     const out = { groups: 0, created: 0, updated: 0, staled: 0, deleted: 0 };
     const cfg = await getConfig().get();
@@ -294,17 +420,26 @@ function createPlanner(deps = {}) {
 
     const now = toMs(clock());
     if (now === null) throw new TypeError("codeShop.planner: `now` must return a time");
+    const known = cfg.games && typeof cfg.games === "object" ? cfg.games : {};
+    const sellNew = cfg.sellNewGames === true;
     const ctx = {
       now,
       leadMs: num(cfg.expiryLeadHours, DEFAULTS.expiryLeadHours) * HOUR_MS,
       markets: marketsOf(cfg),
+      extra: { relabelled: 0, newGames: 0 },
+      isNewGame: (gameNo) => sellNew && !Object.prototype.hasOwnProperty.call(known, text(gameNo)),
+      registerGame: (g) => registerGame(g, cfg, ctx),
     };
     const sourceWords = Array.isArray(cfg.sourceWords) ? cfg.sourceWords : DEFAULTS.sourceWords;
 
-    // Games not marked `sell` are never read, so never drafted.
+    // Games not marked `sell` are never read, so never drafted. With
+    // sellNewGames, games the settings never named are read too (registerGame
+    // decides on them); a game switched off by name stays unread.
     const games = sellableGames(cfg);
-    if (!games.length) return out;
-    const rows = await leanOf(CodeStock().find({ gameNo: { $in: games } }, ROW_FIELDS));
+    if (!games.length && !sellNew) return out;
+    const off = Object.keys(known).filter((k) => !(known[k] && known[k].sell === true));
+    const query = sellNew ? { gameNo: { $nin: off } } : { gameNo: { $in: games } };
+    const rows = await leanOf(CodeStock().find(query, ROW_FIELDS));
 
     const byGroup = new Map();
     for (const r of rows || []) {
@@ -320,12 +455,17 @@ function createPlanner(deps = {}) {
       if (!g.why) continue;
       out.groups += 1;
       try {
+        await labelGroup(g, cfg, ctx);
         await planGroup(g, cfg, ctx, out);
       } catch (err) {
         // One bad group must not stop the others.
         await log({ level: "error", kind: "planner", msg: `Planning ${key} failed: ${text(err && err.message)}` });
       }
     }
+
+    // Only when they happened, so a pass with nothing new reads as before.
+    if (ctx.extra.relabelled) out.relabelled = ctx.extra.relabelled;
+    if (ctx.extra.newGames) out.newGames = ctx.extra.newGames;
 
     if (out.deleted || out.staled) {
       await log({
