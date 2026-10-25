@@ -90,6 +90,48 @@ function platiOffReason(af) {
   return "Plati seller account is blocked — nothing is listed there";
 }
 
+// ---- Games the owner keeps out of the auto-lister ----
+// autoFarm.autoListSkipGames, empty by default. A game on it gets nothing NEW
+// from this file: no listing for a freshly farmed bundle, no stacked or event
+// bundle, no extra share on a market it is missing, no stock top-up. What is
+// already listed is left exactly as it is — it sells, expires or is taken down
+// like any other listing.
+//
+// It is the whole auto-lister and not "Gameflip only" on purpose. Gameflip is
+// the market every auto-listing is built on: its listing id is what
+// `task.listing.externalId` holds, that id being set is what "listed" means to
+// the farmer, the lane engine and the Auto-farm tab, and it is where stock that
+// finishes farming later goes (the relist chain, the refill, the post-event
+// release). A bundle listed everywhere BUT Gameflip was built and reviewed on
+// 2026-10-14: nothing could be sold twice, but accounts that completed the
+// bundle after the first publish were never listed anywhere.
+//
+// Exact normalised label, the way reuseOnlyGames matches: a substring test
+// would let "Rust" take "Rustler".
+//
+// "*" on the list is every game, including one first farmed after the list was
+// written — the owner's pause of the whole auto-lister. Added 2026-10-15, when
+// every listing came off Gameflip while its Game Accounts approval is asked
+// for: the names alone left out the one or two new games the farm picks up a
+// day, and each of those would have opened a fresh Gameflip listing.
+function autoListSkippedFor(game, af) {
+  const list = af && af.autoListSkipGames;
+  if (!Array.isArray(list) || !list.length) return false;
+  if (list.some((x) => typeof x === "string" && x.trim() === "*")) return true;
+  const g = settings.normGameName(game);
+  if (!g) return false;
+  return list.some((x) => settings.normGameName(x) === g);
+}
+
+// What such a task shows where a listing error would be.
+function autoListSkipNote(game) {
+  return (
+    "not listed: " +
+    game +
+    " is kept out of the auto-lister (autoFarm.autoListSkipGames)"
+  );
+}
+
 /* --------------------------- campaign details --------------------------- */
 
 // Normalise a label for placeholder comparison, keeping letters/digits of ANY
@@ -1079,6 +1121,25 @@ async function publishZeusxShare({
   };
 }
 
+// Eldorado bans a second offer for an item already listed, and two drop sets
+// with the same items render the same title — 11 such copies were on sale on
+// 2026-10-17. Compared without case, spacing or punctuation, so "3,000
+// Credits" and "3000 Credits" are the same title too.
+function eldoradoTitleKey(title) {
+  return String(title || "").toLowerCase().replace(/[^a-z0-9]+/g, "");
+}
+
+// The active Eldorado row (ours or the owner's) already selling this title.
+async function eldoradoSameTitleOnSale(title) {
+  const key = eldoradoTitleKey(title);
+  if (!key) return null;
+  const rows = await MarketplaceListing.find(
+    { marketplace: "eldorado", status: "active" },
+    { externalId: 1, title: 1 },
+  ).lean();
+  return rows.find((r) => eldoradoTitleKey(r.title) === key) || null;
+}
+
 // Eldorado share. One offer whose QUANTITY is the number of reserved accounts
 // — Eldorado's Twitch Drops category is multi-stock, so unlike ZeusX we do not
 // need a listing per account. The reserved accounts ride along as the row's
@@ -1100,6 +1161,14 @@ async function publishEldoradoShare({
     throw new Error(
       game + " is a no-claim game — sellable only from the unclaimed farm, " +
         "not the auto-farm's claimed archive",
+    );
+  }
+  // Before anything is reserved, so the accounts stay free for other markets.
+  const twin = await eldoradoSameTitleOnSale(title);
+  if (twin) {
+    throw new Error(
+      "same title already on sale on Eldorado (offer " + twin.externalId +
+        ") — a second offer for the same item breaks Eldorado's rules",
     );
   }
   accounts = await reserveAccountsForPublish(accounts, set, ELD_CLAIM_TAG);
@@ -1155,6 +1224,22 @@ async function publishEldoradoShare({
 // account is already paying for one such guess, with nine Rainbow Six Siege
 // bundles filed under "Rainbow Six Mobile" where no drops buyer will ever see
 // them.
+// Why a bundle gets no G2G share, or "" when it may have one. A game can carry
+// a minimum size there (autoFarm.g2gMinItems, owner 2026-10-13): G2G's buyers
+// of Rocket League, Marvel Rivals and Tarkov drops are offered 25-160 item
+// accounts at the price of our fresh 2-5 item set, so a share there only keeps
+// its accounts reserved away from the markets that do sell them. The count is
+// the one the title shows ("(3 Items)").
+function g2gBundleTooSmall(game, items) {
+  const min = settings.g2gMinItemsFor(game);
+  const n = (items || []).length;
+  if (!(min > 0) || n >= min) return "";
+  return (
+    "under G2G's minimum of " + min + " items for " + game +
+    " (this bundle has " + n + ")"
+  );
+}
+
 async function publishG2gShare({
   set,
   title,
@@ -1373,6 +1458,9 @@ async function eldoradoShareMissing(L) {
 // accounts not attached to any active listing. Title/description/price come
 // from the stored Gameflip listing row so all markets stay identical.
 async function retryMissingSecondaries(task) {
+  // A share on a market the task is missing is a NEW listing: none for a game
+  // kept out of the auto-lister.
+  if (autoListSkippedFor(task.game, settings.getAutoFarm())) return null;
   const L = task.listing || {};
   // A Plati share is only "missing" while Plati can take new stock: switched
   // off or blocked, every task would otherwise look incomplete and retry it
@@ -1442,7 +1530,14 @@ async function retryMissingSecondaries(task) {
       !!(await mp.zeusxResolveCategory(task.game).catch(() => null));
     if (mapped) targets.push("zeusx");
   }
-  if (g2gMissing && af.g2gAuto && brandForGame(task.game)) targets.push("g2g");
+  if (
+    g2gMissing &&
+    af.g2gAuto &&
+    brandForGame(task.game) &&
+    !g2gBundleTooSmall(task.game, set.items || [])
+  ) {
+    targets.push("g2g");
+  }
   if (eldoradoMissing) targets.push("eldorado");
   if (!targets.length) return null;
 
@@ -1667,6 +1762,10 @@ async function listingIsLive(marketplace, externalId) {
 async function refillMarkets(task, { perMarketStock = 3 } = {}) {
   const L = task.listing || {};
   if (!L.externalId) return null; // not listed yet — nothing to refill
+  // No top-up for a game kept out of the auto-lister — and above all no
+  // "target raised": running out of spare accounts must not make the farmer
+  // farm MORE of a game the owner has stopped listing.
+  if (autoListSkippedFor(task.game, settings.getAutoFarm())) return null;
   const actions = [];
   const per = Math.max(1, Number(perMarketStock) || 3);
 
@@ -1885,6 +1984,20 @@ async function listActivatedTask(taskId, { dryRun = false } = {}) {
     task.wouldList = undefined;
     await task.save();
   }
+  // The owner keeps this game out of the auto-lister. Before anything is read
+  // from Twitch, picked or reserved: nothing is published on any market and the
+  // accounts stay in stock. The task says why — written once, not on every
+  // sweep (this runs each tick for as long as the task is unlisted).
+  if (autoListSkippedFor(task.game, settings.getAutoFarm())) {
+    const note = autoListSkipNote(task.game);
+    if (!dryRun && !(task.listing && task.listing.error === note)) {
+      task.listing = task.listing || {};
+      task.listing.error = note;
+      task.wouldList = undefined;
+      await task.save();
+    }
+    return { skipped: "game is kept out of the auto-lister", waiting: true };
+  }
   const items = await campaignItems(
     task.campaignId,
     task.game,
@@ -2013,7 +2126,11 @@ async function listActivatedTask(taskId, { dryRun = false } = {}) {
   // under the game's own brand and there is no catch-all bucket, so a game
   // with no hand-checked brand must never take a share of the accounts —
   // it would burn them on a publish that is guaranteed to throw.
-  const g2gEnabled = !!af.g2gAuto && !!brandForGame(task.game);
+  // ...and a game can have a minimum bundle size there (autoFarm.g2gMinItems):
+  // a bundle under it takes no share, so its accounts go to the other markets.
+  const g2gTooSmall = g2gBundleTooSmall(task.game, items);
+  const g2gEnabled =
+    !!af.g2gAuto && !!brandForGame(task.game) && !g2gTooSmall;
   const marketOrder = ["gameflip"];
   if (platiEnabled) marketOrder.push("plati");
   if (ggselCategoryId && ggselTakesNewStock(af)) marketOrder.push("ggsel");
@@ -2267,6 +2384,8 @@ async function listActivatedTask(taskId, { dryRun = false } = {}) {
       }
     } else if (!af.g2gAuto) {
       g2g.error = "G2G auto-listing is switched off";
+    } else if (g2gTooSmall) {
+      g2g.error = g2gTooSmall;
     } else if (!g2gEnabled) {
       g2g.error = "no G2G brand for " + task.game;
     } else {
@@ -2589,6 +2708,11 @@ async function listEventBundle(task, { dryRun = false, plan = null } = {}) {
 }
 
 async function publishEventBundleFor(task, plan, dryRun) {
+  // No new bundle for a game kept out of the auto-lister; this is also the
+  // door the event-bundle sweep comes through.
+  if (autoListSkippedFor(task.game, settings.getAutoFarm())) {
+    return { skipped: "game is kept out of the auto-lister" };
+  }
   // The bundle has to be strictly bigger than what this event ALREADY sells,
   // or it is the same listing published twice.
   //
@@ -2796,6 +2920,11 @@ async function listStackedBundle(taskId, { dryRun = false } = {}) {
   // The solo listing goes first — it anchors the current event's stock split.
   if (!task.listing || !task.listing.externalId) {
     return { skipped: "no solo listing yet" };
+  }
+  // No new bundle for a game kept out of the auto-lister, even when its solo
+  // listing went up before the game joined the list.
+  if (autoListSkippedFor(task.game, settings.getAutoFarm())) {
+    return { skipped: "game is kept out of the auto-lister" };
   }
 
   // Event bundles come first. A game's campaigns are WAVES of an event, and
@@ -3509,8 +3638,11 @@ module.exports = {
   // Exported so the no-claim guard on each is testable without driving a whole
   // auto-farm task through the lister.
   publishEldoradoShare,
+  eldoradoTitleKey,
+  eldoradoSameTitleOnSale,
   publishPlayerAuctionsShare,
   publishG2gShare,
+  g2gBundleTooSmall,
   listActivatedTask,
   listStackedBundle,
   listEventBundle,
@@ -3526,6 +3658,9 @@ module.exports = {
   retryMissingSecondaries,
   eldoradoShareMissing,
   isAutoOwned,
+  // The owner's no-auto-listing list (autoFarm.autoListSkipGames).
+  autoListSkippedFor,
+  autoListSkipNote,
   // exported for tests
   dealShares,
   platiTakesNewStock,
