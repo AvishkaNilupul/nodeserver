@@ -57,6 +57,7 @@ const TABLE = [
   ["POST", "/api/code-shop/products/:id/texts/reset"],
   ["GET", "/api/code-shop/stock"],
   ["GET", "/api/code-shop/logins"],
+  ["GET", "/api/code-shop/board"],
   ["GET", "/api/code-shop/sold"],
   ["POST", "/api/code-shop/units/:id/report"],
   ["POST", "/api/code-shop/units/:id/replace"],

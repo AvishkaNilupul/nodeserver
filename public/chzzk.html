@@ -16,6 +16,8 @@
          whole component kit live in chzzk.css; the kit is window.Chzzk from
          core.js (public/soop/UI-KIT.md with Soop → Chzzk). -->
     <link rel="stylesheet" href="/chzzk/chzzk.css" />
+    <!-- The Listings tab (docs/code-shop/08-LISTINGS-BOARD.md), shared with /soop.html. -->
+    <link rel="stylesheet" href="/shop-board/board.css" />
   </head>
   <body>
     <aside class="nav">
@@ -172,6 +174,9 @@
         <button type="button" class="s-tab" role="tab" id="tab-codes" data-tab="codes" aria-controls="panel-codes" aria-selected="false" tabindex="-1">
           <span class="s-tab-label">Codes</span><span class="s-tab-badge" hidden></span>
         </button>
+        <button type="button" class="s-tab" role="tab" id="tab-listings" data-tab="listings" aria-controls="panel-listings" aria-selected="false" tabindex="-1">
+          <span class="s-tab-label">Listings</span><span class="s-tab-badge" hidden></span>
+        </button>
         <button type="button" class="s-tab" role="tab" id="tab-activity" data-tab="activity" aria-controls="panel-activity" aria-selected="false" tabindex="-1">
           <span class="s-tab-label">Activity</span><span class="s-tab-badge" hidden></span>
         </button>
@@ -189,6 +194,9 @@
       <section class="s-panel" id="panel-codes" role="tabpanel" aria-labelledby="tab-codes" data-tab-root="codes" hidden>
         <p class="s-loading">Loading…</p>
       </section>
+      <section class="s-panel" id="panel-listings" role="tabpanel" aria-labelledby="tab-listings" data-tab-root="listings" hidden>
+        <p class="s-loading">Loading…</p>
+      </section>
       <section class="s-panel" id="panel-activity" role="tabpanel" aria-labelledby="tab-activity" data-tab-root="activity" hidden>
         <p class="s-loading">Loading…</p>
       </section>
@@ -201,6 +209,9 @@
     <script src="/chzzk/tab-accounts.js"></script>
     <script src="/chzzk/tab-campaigns.js"></script>
     <script src="/chzzk/tab-codes.js"></script>
+    <!-- The Listings tab: board.js first, it defines window.ShopBoard. -->
+    <script src="/shop-board/board.js"></script>
+    <script src="/chzzk/tab-listings.js"></script>
     <script src="/chzzk/tab-activity.js"></script>
     <!-- Defines window.ChzzkImport and owns the page-wide file drop. -->
     <script src="/chzzk/accounts-import.js"></script>

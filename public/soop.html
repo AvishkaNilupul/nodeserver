@@ -15,6 +15,8 @@
     <!-- Tokens, sidebar shell and the whole component kit live in soop.css;
          everything SOOP-specific is under /soop/ (see /soop/UI-KIT.md). -->
     <link rel="stylesheet" href="/soop/soop.css" />
+    <!-- The Listings tab (docs/code-shop/08-LISTINGS-BOARD.md), shared with /chzzk.html. -->
+    <link rel="stylesheet" href="/shop-board/board.css" />
   </head>
   <body>
     <aside class="nav">
@@ -180,6 +182,9 @@
         <button type="button" class="s-tab" role="tab" id="tab-sales" data-tab="sales" aria-controls="panel-sales" aria-selected="false" tabindex="-1">
           <span class="s-tab-label">Sales</span><span class="s-tab-badge" hidden></span>
         </button>
+        <button type="button" class="s-tab" role="tab" id="tab-listings" data-tab="listings" aria-controls="panel-listings" aria-selected="false" tabindex="-1">
+          <span class="s-tab-label">Listings</span><span class="s-tab-badge" hidden></span>
+        </button>
       </div>
 
       <section class="s-panel" id="panel-overview" role="tabpanel" aria-labelledby="tab-overview" data-tab-root="overview">
@@ -203,6 +208,9 @@
       <section class="s-panel" id="panel-sales" role="tabpanel" aria-labelledby="tab-sales" data-tab-root="sales" hidden>
         <p class="s-loading">Loading…</p>
       </section>
+      <section class="s-panel" id="panel-listings" role="tabpanel" aria-labelledby="tab-listings" data-tab-root="listings" hidden>
+        <p class="s-loading">Loading…</p>
+      </section>
     </main>
 
     <script src="/theme.js"></script>
@@ -220,5 +228,8 @@
     <script src="/soop/sales-stock.js"></script>
     <script src="/soop/sales-sold.js"></script>
     <script src="/soop/sales-settings.js"></script>
+    <!-- The Listings tab: board.js first, it defines window.ShopBoard. -->
+    <script src="/shop-board/board.js"></script>
+    <script src="/soop/tab-listings.js"></script>
   </body>
 </html>

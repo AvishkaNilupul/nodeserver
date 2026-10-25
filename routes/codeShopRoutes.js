@@ -574,6 +574,23 @@ function createCodeShopRoutes({ service, createHeld } = {}) {
 
   route("get", "/logins", async () => ({ ...(await mod("views").logins()) }));
 
+  // The Listings board of the SOOP and CHZZK panels (08-LISTINGS-BOARD.md):
+  // read-only. Built once per service so its box-art cache lasts; `days`,
+  // `sales` and `tz` are clamped / checked by the board itself.
+  let boardApi = null;
+  let boardOf = null;
+  const board = () => {
+    const s = svc();
+    if (!boardApi || boardOf !== s) {
+      boardApi = require("../utils/codeShop/board").createBoard({ ...(s.deps || {}), config: s.modules.config || null });
+      boardOf = s;
+    }
+    return boardApi;
+  };
+  route("get", "/board", async ({ query }) => ({
+    ...(await board().build({ days: query.days, sales: query.sales, tz: query.tz })),
+  }));
+
   route("get", "/sold", async ({ query }) => {
     const limit = limitOf(query.limit, 100);
     const productId = optionalId(query.product, "product");

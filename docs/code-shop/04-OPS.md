@@ -112,6 +112,7 @@ and the module also exports a router built on the singleton.
 | POST | `/products/:id/scan` | | `competitors.scan` |
 | POST | `/products/:id/texts/reset` | | regenerate default texts (drafts) |
 | GET | `/stock` · `/logins` | | views |
+| GET | `/board` | `?days&sales&tz` | `board.build` (the Listings tab, 08-LISTINGS-BOARD.md) |
 | GET | `/sold` | `?limit&product` | `afterSale.sold` |
 | POST | `/units/:id/report` | `{ slot, status, note }` | `afterSale.report` |
 | POST | `/units/:id/replace` | `{ slot }` | `afterSale.replace` (sets `Cache-Control: no-store`) |
