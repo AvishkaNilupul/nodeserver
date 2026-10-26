@@ -270,6 +270,15 @@ async function advance({ order, orderId, listing, qty, dryRun }) {
         return hold(orderId, "a purchase needs checking");
       }
       r.trace = res.trace || [];
+      if (!res.ok && res.uncertain) {
+        // The purchase request went out and FunPay's answer does not say what
+        // happened: the money may be gone. Never retried, never "failed".
+        r.state = "needs_review";
+        r.reason = String(res.reason || "unclear FunPay answer").slice(0, 240) + " — FunPay may have charged; check your FunPay orders";
+        await r.save();
+        await pageRow(r, "needs_review", alertText(orderId, order, listing, source, "A FunPay purchase may or may not have gone through: " + r.reason + ".", "Check your FunPay purchases for this deal. If it was bought, enter the login on the FunPay Resale page; otherwise close it there."));
+        return hold(orderId, "a purchase needs checking");
+      }
       if (!res.ok) {
         r.state = "failed";
         r.reason = String(res.reason || "purchase refused").slice(0, 300);

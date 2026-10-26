@@ -26,13 +26,23 @@ const TIMEOUT_MS = 20000;
 
 // Accepts a Cookie header ("golden_key=…; PHPSESSID=…"), a browser-extension JSON
 // export ([{name,value,domain},…]), Netscape cookie-file lines, or a bare golden_key.
+// funpay.com or a subdomain of it — never a look-alike such as notfunpay.com.
+function isFunpayDomain(domain) {
+  const h = String(domain || "")
+    .trim()
+    .toLowerCase()
+    .replace(/^#httponly_/, "")
+    .replace(/^\./, "");
+  return h === "funpay.com" || h.endsWith(".funpay.com");
+}
+
 function parseCookieInput(input) {
   const text = String(input || "").trim();
   const jar = {};
   if (!text) return jar;
   const keep = (name, value, domain) => {
     if (!name || value == null) return;
-    if (domain && !/funpay\.com$/i.test(String(domain).replace(/^\./, ""))) return;
+    if (domain && !isFunpayDomain(domain)) return;
     jar[String(name).trim()] = String(value).trim();
   };
   if (/^[\[{]/.test(text)) {
@@ -47,8 +57,11 @@ function parseCookieInput(input) {
   }
   if (/\t/.test(text) && /funpay\.com/i.test(text)) {
     for (const line of text.split(/\r?\n/)) {
-      const f = line.split("\t");
-      if (f.length >= 7 && !line.startsWith("#")) keep(f[5], f[6], f[0]);
+      // curl marks HttpOnly cookies "#HttpOnly_<domain>" — a cookie, not a comment.
+      const raw = /^#HttpOnly_/i.test(line) ? line.slice("#HttpOnly_".length) : line;
+      if (raw.startsWith("#")) continue;
+      const f = raw.split("\t");
+      if (f.length >= 7) keep(f[5], f[6], f[0]);
     }
     return jar;
   }
@@ -102,6 +115,64 @@ function defaultTransport(req) {
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
+// https://funpay.com only — not http, not another host.
+function onFunpay(url) {
+  try {
+    const u = new URL(url);
+    return u.protocol === "https:" && u.hostname === "funpay.com";
+  } catch (_) {
+    return false;
+  }
+}
+function safeHost(url) {
+  try {
+    const u = new URL(url);
+    return u.protocol + "//" + u.hostname;
+  } catch (_) {
+    return "(bad url)";
+  }
+}
+function safeHostname(url) {
+  try {
+    return new URL(url).hostname;
+  } catch (_) {
+    return "(bad url)";
+  }
+}
+function safePath(url) {
+  try {
+    return new URL(url).pathname;
+  } catch (_) {
+    return null;
+  }
+}
+const isRedirect = (res) => res && res.status >= 300 && res.status < 400;
+// An order number from a URL on funpay.com: /orders/<ID>/ (en/ optional).
+function orderIdIn(url) {
+  if (!url || !onFunpay(url)) return null;
+  const m = /^\/(?:en\/)?orders\/([A-Z0-9]{6,12})\/?$/.exec(safePath(url) || "");
+  return m ? m[1] : null;
+}
+// "1.20", "1,20", "1 234.50" → number; anything else → null.
+function moneyOf(v) {
+  const s = String(v == null ? "" : v).replace(/[\s ]/g, "");
+  if (!/^\d+(?:[.,]\d+)?$/.test(s)) return null;
+  const n = Number(s.replace(",", "."));
+  return Number.isFinite(n) ? n : null;
+}
+// FunPay's price_guard: base64 "rub:92|usd:1.114|eur:0.993" → the usd figure.
+function guardUsdOf(b64) {
+  try {
+    for (const part of Buffer.from(String(b64), "base64").toString("utf8").split("|")) {
+      const [cy, v] = part.split(":");
+      if (cy === "usd" && Number.isFinite(Number(v)) && Number(v) > 0) return Number(v);
+    }
+  } catch (_) {
+    /* unreadable */
+  }
+  return null;
+}
+
 // A signed-in session. `cookies` is the parsed jar; `transport` is injectable for tests.
 function createSession({ cookies, transport = defaultTransport, gapMs = FUNPAY_GAP_MS, now = () => Date.now() } = {}) {
   const jar = { ...(cookies || {}) };
@@ -114,6 +185,9 @@ function createSession({ cookies, transport = defaultTransport, gapMs = FUNPAY_G
       if (wait > 0) await sleep(wait);
       lastAt = now();
       const url = /^https?:\/\//.test(pathOrUrl) ? pathOrUrl : BASE + pathOrUrl;
+      // The session cookies go to https://funpay.com and nowhere else, whatever a
+      // caller (or a redirect) asks for.
+      if (!onFunpay(url)) throw new Error("refusing to send the FunPay session to " + safeHost(url));
       const headers = { "User-Agent": UA, "Accept-Language": "en-US,en;q=0.9", Cookie: cookieHeader(jar) };
       let body;
       if (form) {
@@ -136,11 +210,11 @@ function createSession({ cookies, transport = defaultTransport, gapMs = FUNPAY_G
     return p;
   }
 
-  // Follow redirects that stay on funpay.com (GET only), at most 3 hops.
+  // Follow redirects that stay on https://funpay.com (GET only), at most 3 hops.
   async function get(path) {
     let res = await request("GET", path);
     for (let hop = 0; hop < 3 && res.status >= 300 && res.status < 400 && res.location; hop++) {
-      if (new URL(res.location).hostname !== "funpay.com") break;
+      if (!onFunpay(res.location)) break;
       res = await request("GET", res.location);
     }
     return res;
@@ -162,11 +236,27 @@ function createSession({ cookies, transport = defaultTransport, gapMs = FUNPAY_G
     return { status: res.status, order: res.status === 200 ? pages.parseOrderPage(res.html) : null };
   }
 
-  // Buys ONE unit. Returns { ok, orderId?, chargedUsd?, reason?, trace }.
+  // Buys ONE unit. Returns { ok, orderId?, chargedUsd?, reason?, uncertain?, trace }.
+  //
+  // `uncertain: true` on a stop means a purchase request had already been sent and
+  // its outcome cannot be told from FunPay's answer — FunPay may have taken the
+  // money. Callers must treat that as "check by hand", never as a refusal to retry.
+  // A stop before any purchase request, or a hand-off to an outside payment page
+  // (never followed, so no card is charged), is not uncertain.
   async function buyOne({ offerId, maxPriceUsd }) {
     const trace = [];
-    const step = (name, res, extra) => trace.push({ step: name, status: res ? res.status : null, path: res ? new URL(res.url).pathname : null, redirect: res && res.location ? new URL(res.location).hostname + new URL(res.location).pathname : null, ...extra });
-    const stop = (reason) => ({ ok: false, reason, trace });
+    const step = (name, res, extra) =>
+      trace.push({
+        step: name,
+        status: res ? res.status : null,
+        path: res ? safePath(res.url) : null,
+        redirect: res && res.location ? safeHostname(res.location) + safePath(res.location) : null,
+        ...extra,
+      });
+    const stop = (reason, extra = {}) => ({ ok: false, reason, trace, ...extra });
+    const max = Number(maxPriceUsd);
+    const offsite = (res) => !!(res.location && !onFunpay(res.location));
+    const OFFSITE = "FunPay sent the order to an outside payment page — stopped, nothing paid from a card";
 
     if (!(Number(maxPriceUsd) > 0)) return stop("no maximum price given");
     const page = await get(`/en/lots/offer?id=${encodeURIComponent(offerId)}`);
@@ -187,34 +277,58 @@ function createSession({ cookies, transport = defaultTransport, gapMs = FUNPAY_G
     const refer = `${BASE}/en/lots/offer?id=${encodeURIComponent(offerId)}`;
     const preview = await request("POST", offer.buyForm.action, { form: form1, referer: refer });
     step("preview", preview, { fields: Object.keys(form1) });
-    const offsite = (res) => res.location && new URL(res.location).hostname !== "funpay.com";
-    if (offsite(preview)) return stop("FunPay sent the order to an outside payment page — stopped, nothing paid from a card");
-    const orderFrom = (res) => {
-      const m = /\/orders\/([A-Z0-9]{6,12})\//.exec(res.location || "") || (res.status === 200 ? /\/orders\/([A-Z0-9]{6,12})\/?["']/.exec(res.html) : null);
-      return m ? m[1] : null;
-    };
-    let orderId = orderFrom(preview);
-    if (!orderId) {
-      // Preview page: a second form (same action, no preview flag) confirms the purchase.
-      const fm = /<form[^>]*action="(https:\/\/funpay\.com\/(?:en\/)?orders\/[^"]*)"[^>]*>([\s\S]*?)<\/form>/.exec(preview.html || "");
-      if (preview.status !== 200 || !fm) return stop("unexpected answer to the order preview — no confirm form");
-      const confirm = {};
-      for (const t of fm[2].match(/<input[^>]*>/g) || []) {
-        const name = /\bname="([^"]+)"/.exec(t);
-        const val = /\bvalue="([^"]*)"/.exec(t);
-        if (name) confirm[name[1]] = val ? pages.decodeEntities(val[1]) : "";
-      }
-      const sumM = /name="sum"[^>]*value="([\d.,]+)"/.exec(fm[2]);
-      const shownSum = sumM ? Number(sumM[1].replace(",", ".")) : null;
-      if (shownSum != null && shownSum > Number(maxPriceUsd) * 1.05) return stop(`confirm page asks ${shownSum}, above the maximum`);
-      delete confirm.preview;
-      const done = await request("POST", fm[1], { form: confirm, referer: preview.url });
-      step("confirm", done, { fields: Object.keys(confirm) });
-      if (offsite(done)) return stop("FunPay sent the order to an outside payment page — stopped, nothing paid from a card");
-      orderId = orderFrom(done);
-      if (!orderId) return stop(`no order number after confirming (HTTP ${done.status})`);
+    if (offsite(preview)) return stop(OFFSITE);
+
+    // The new order's number comes ONLY from where FunPay sends us (a redirect to
+    // /orders/<ID>/, or the URL we land on), never from links inside a page — a
+    // page can mention an earlier order.
+    let orderId = orderIdIn(preview.location);
+    let answer = preview;
+    if (!orderId && isRedirect(preview) && preview.location) {
+      answer = await get(preview.location);
+      step("preview-page", answer);
+      if (offsite(answer)) return stop(OFFSITE);
+      orderId = orderIdIn(answer.url) || orderIdIn(answer.location);
     }
-    return { ok: true, orderId, chargedUsd: guardUsd, trace };
+    if (orderId) return { ok: true, orderId, chargedUsd: guardUsd, trace };
+
+    // A page with a second form (same /orders/ action, no preview flag) confirms it.
+    const fm = /<form[^>]*action="(https:\/\/funpay\.com\/(?:en\/)?orders\/[^"]*)"[^>]*>([\s\S]*?)<\/form>/.exec(answer.html || "");
+    if (answer.status !== 200 || !fm) return stop("unexpected answer to the order preview — no confirm form", { uncertain: true });
+    const confirm = {};
+    for (const t of fm[2].match(/<input[^>]*>/g) || []) {
+      const name = /\bname="([^"]+)"/.exec(t);
+      const val = /\bvalue="([^"]*)"/.exec(t);
+      if (name) confirm[name[1]] = val ? pages.decodeEntities(val[1]) : "";
+    }
+    // Every price the confirm form states must be within the maximum, and it must
+    // state one — fail closed: an unreadable or missing price is a stop.
+    let confirmGuardUsd = null;
+    if (confirm.price_guard != null) {
+      confirmGuardUsd = guardUsdOf(confirm.price_guard);
+      if (confirmGuardUsd == null) return stop("confirm page price could not be read — stopped before paying");
+      if (confirmGuardUsd > max) return stop(`confirm page asks ${confirmGuardUsd}, above the maximum`);
+    }
+    let shownSum = null;
+    if (confirm.sum != null && String(confirm.sum).trim() !== "") {
+      shownSum = moneyOf(confirm.sum);
+      if (shownSum == null) return stop("confirm page total could not be read — stopped before paying");
+      if (shownSum > max * 1.05) return stop(`confirm page asks ${shownSum}, above the maximum`);
+    }
+    if (confirmGuardUsd == null && shownSum == null) return stop("confirm page shows no price — stopped before paying");
+    delete confirm.preview;
+    const done = await request("POST", fm[1], { form: confirm, referer: answer.url });
+    step("confirm", done, { fields: Object.keys(confirm) });
+    if (offsite(done)) return stop(OFFSITE);
+    orderId = orderIdIn(done.location);
+    if (!orderId && isRedirect(done) && done.location) {
+      const after = await get(done.location);
+      step("confirm-page", after);
+      orderId = orderIdIn(after.url) || orderIdIn(after.location);
+    }
+    if (!orderId) return stop(`no order number after confirming (HTTP ${done.status})`, { uncertain: true });
+    const charged = confirmGuardUsd != null ? confirmGuardUsd : shownSum != null ? Math.min(shownSum, guardUsd) : guardUsd;
+    return { ok: true, orderId, chargedUsd: charged, trace };
   }
 
   return { request, get, checkSession, readOffer, readOrder, buyOne, cookies: () => ({ ...jar }) };

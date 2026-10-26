@@ -226,6 +226,18 @@ test("a refused buy is 'failed', paged once, and not retried by itself", async (
   assert.equal(env.calls.pages.length, 1);
 });
 
+test("an uncertain stop (purchase sent, outcome unclear) is needs_review, never failed or retried", async () => {
+  const env = setup({ buy: () => ({ ok: false, uncertain: true, reason: "no order number after confirming (HTTP 200)", trace: [] }) });
+  const o = env.order();
+  const r1 = await run(env, o);
+  assert.match(r1.skipped, /needs checking/);
+  assert.equal(env.purchases[0].state, "needs_review");
+  assert.match(env.purchases[0].reason, /may have charged/);
+  await run(env, o);
+  assert.equal(env.calls.buy.length, 1);
+  assert.equal(env.calls.pages.length, 1);
+});
+
 test("slow seller: pages after the wait, gives up to needs_review after the limit", async () => {
   let delivered = false;
   const env = setup({ read: (id) => ({ status: 200, order: { orderId: id, secrets: delivered ? ["fakeuser_late : LatePass9"] : [] } }) });
