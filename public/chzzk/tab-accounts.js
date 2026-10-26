@@ -251,6 +251,7 @@
           kv("Cookie", el("span", { class: k[1] ? "s-" + k[1] : null }, l.kind === "persistent" ? "Stays signed in" : l.kind === "session" ? "Session only — ends when CHZZK ends the session" : "Unknown kind")),
           l.expiresAt && kv(Date.parse(l.expiresAt) < nowMs() ? "Expired" : "Expires", time(l.expiresAt)),
           kv("Imported", time(a.cookieAt)),
+          kv("Cookie renewed", l.renewedAt ? time(l.renewedAt) + " — " + plural(l.renewals || 0, "time") + " since import" : "Not yet"),
           kv(a.status === "ok" ? "Last OK check" : "Last check", a.lastCheckedAt ? time(a.lastCheckedAt) : "Never"),
           dead && l.deadSince && kv("Logged out", time(l.deadSince) + (l.livedDays != null ? " — lived " + (l.livedDays >= 1 ? plural(Math.round(l.livedDays), "day") : "under a day") : "")),
           !dead && a.lastError && kv("Last error", el("span", { class: "s-warn" }, a.lastError)),

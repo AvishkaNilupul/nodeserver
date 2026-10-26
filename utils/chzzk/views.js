@@ -93,6 +93,8 @@ function accountView(a, { worker, codes = 0, switchOn, egressOk, now }) {
     login: {
       kind: a.cookieKind || "unknown",
       expiresAt: a.cookieExpiresAt || null,
+      renewedAt: a.cookieRenewedAt || null,
+      renewals: Number(a.cookieRenewals) || 0,
       ageDays: imported != null ? Math.max(0, Math.floor((now - imported) / DAY)) : null,
       deadSince: dead != null ? new Date(dead) : null,
       livedDays: dead != null && imported != null ? Math.max(0, Math.round(((dead - imported) / DAY) * 10) / 10) : null,

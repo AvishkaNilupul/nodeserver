@@ -10,8 +10,8 @@
 // sent every login from the US server IP. Local tests opt into direct by
 // setting CHZZK_DIRECT=1 or passing direct:true.
 //
-// The transport does NOT judge status codes — it returns { status, json, text }
-// and client.js decides what to do with them.
+// The transport does NOT judge status codes — it returns { status, json, text,
+// headers } and client.js decides what to do with them.
 const https = require("https");
 const { ChzzkError } = require("./errors");
 
@@ -200,7 +200,9 @@ function createTransport({
                 // care about the status and the raw text (e.g. a 502 page).
               }
             }
-            finish(null, { status: res.statusCode, json, text });
+            // headers: client.js reads `set-cookie` from them, so a cookie
+            // Naver renews (NID_SES on getUserStatus) is kept, not dropped.
+            finish(null, { status: res.statusCode, json, text, headers: res.headers || {} });
           });
         });
         req.on("error", egress);

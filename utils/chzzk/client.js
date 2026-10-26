@@ -12,6 +12,7 @@
 const { ChzzkError } = require("./errors");
 const { getTransport } = require("./http");
 const { toHeader, deviceIdOf } = require("./cookies");
+const { createJarStore } = require("./jarStore");
 const { kst, liveRow } = require("./normalize");
 
 const API = "https://api.chzzk.naver.com";
@@ -31,10 +32,15 @@ const num = (v) => {
   return Number.isFinite(n) ? n : 0;
 };
 
-function makeClient({ cookies = null, deviceId = "", transport = getTransport() } = {}) {
-  const loggedIn = cookies != null;
-  const cookieHeader = loggedIn ? toHeader(cookies) : "";
-  const dev = String(deviceId || (loggedIn ? deviceIdOf(cookies) : ""));
+// `jar` (utils/chzzk/jarStore.js) is the login's shared cookie store; the farm
+// hands every client of one login the same one. Without it a logged-in client
+// keeps a private store built from `cookies`. Either way the Cookie header is
+// read from the store on every request, and every CHZZK answer's Set-Cookie
+// goes back into it (docs/CHZZK-COOKIE-KEEPALIVE.md).
+function makeClient({ cookies = null, jar = null, deviceId = "", transport = getTransport() } = {}) {
+  const store = jar || (cookies != null ? createJarStore({ cookies }) : null);
+  const loggedIn = store != null;
+  const dev = String(deviceId || (loggedIn ? deviceIdOf(store.cookies()) : ""));
 
   // The header kit every CHZZK endpoint (not ipinfo) carries. The browser's
   // web player sets these without exception; CHZZK refuses some endpoints
@@ -51,6 +57,7 @@ function makeClient({ cookies = null, deviceId = "", transport = getTransport() 
     };
     // The web player's header is literally "deviceId" (_chzzk-probe/HANDOFF.md §3).
     if (dev) h.deviceid = dev;
+    const cookieHeader = store ? toHeader(store.cookies()) : "";
     if (cookieHeader) h.cookie = cookieHeader;
     return h;
   }
@@ -99,8 +106,24 @@ function makeClient({ cookies = null, deviceId = "", transport = getTransport() 
   async function send(url, { method = "GET", body = null, referer = null, extra = null } = {}) {
     const headers = chzzkHeaders(referer);
     if (extra) Object.assign(headers, extra);
+    // The jar generation this request carries: if the login is imported
+    // again before the answer arrives, its Set-Cookie belongs to the old
+    // session and the store drops it.
+    const sentGen = store ? store.generation : 0;
     const res = await transport.request(url, { method, headers, body });
+    // Before judging: an answer that is about to throw may still carry a
+    // renewed cookie, and a browser would keep it.
+    keepCookies(url, res, sentGen);
     return judge(res);
+  }
+
+  function keepCookies(url, res, sentGen) {
+    if (!store || !res || !res.headers) return;
+    const lines = res.headers["set-cookie"];
+    if (!lines) return;
+    let host = "";
+    try { host = new URL(url).hostname; } catch (_e) { return; }
+    store.absorb(lines, host, sentGen);
   }
 
   // Logged-in-only calls refuse early on an anonymous client — no request

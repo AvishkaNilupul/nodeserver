@@ -18,6 +18,11 @@ const chzzkAccountSchema = new mongoose.Schema(
     // "unknown" (a raw header line, or imported before 2026-10-23 PM).
     cookieKind: { type: String, default: "unknown" },
     cookieExpiresAt: { type: Date, default: null },
+    // When the farm last saved a cookie Naver renewed (Set-Cookie, usually
+    // NID_SES on getUserStatus), and how many times since the import.
+    // Reset by every import (docs/CHZZK-COOKIE-KEEPALIVE.md).
+    cookieRenewedAt: { type: Date, default: null },
+    cookieRenewals: { type: Number, default: 0 },
     // The web client's deviceId (ba.uuid cookie value). Lets the worker send
     // the same deviceId CHZZK saw at import, so heartbeats look like one browser.
     deviceId: { type: String, default: "" },

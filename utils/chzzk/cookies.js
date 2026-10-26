@@ -220,4 +220,82 @@ function sameLogin(a, b) {
   return va !== null && vb !== null && va === vb;
 }
 
-module.exports = { parseImport, loginInfo, toHeader, deviceIdOf, sameLogin, REQUIRED };
+// ---------------------------------------------------------- Set-Cookie
+// docs/CHZZK-COOKIE-KEEPALIVE.md. Naver renews NID_SES through Set-Cookie on
+// getUserStatus; the farm keeps what Naver sends, like a browser would.
+
+const isNaver = (d) => d === "naver.com" || d.endsWith(".naver.com");
+
+// One Set-Cookie line -> { name, value, domain, deleted } or null.
+// `domain` is "" when the line names none (a host-only cookie).
+function parseSetCookie(line, now = Date.now()) {
+  if (typeof line !== "string") return null;
+  const parts = line.split(";");
+  const first = parts.shift() || "";
+  const eq = first.indexOf("=");
+  if (eq <= 0) return null;
+  const name = first.slice(0, eq).trim();
+  const value = first.slice(eq + 1).trim();
+  if (!name) return null;
+  let domain = "";
+  let maxAge = null;
+  let expires = null;
+  for (const p of parts) {
+    const i = p.indexOf("=");
+    const key = (i < 0 ? p : p.slice(0, i)).trim().toLowerCase();
+    const val = i < 0 ? "" : p.slice(i + 1).trim();
+    if (key === "domain") domain = sanitizeDomain(val).toLowerCase();
+    else if (key === "max-age" && /^-?\d+$/.test(val)) maxAge = Number(val);
+    else if (key === "expires") {
+      const t = Date.parse(val);
+      if (Number.isFinite(t)) expires = t;
+    }
+  }
+  // Max-Age wins over Expires (RFC 6265 §5.3).
+  const deleted = value === "" || (maxAge != null ? maxAge <= 0 : expires != null && expires <= now);
+  return { name, value, domain, deleted };
+}
+
+// Merge a response's Set-Cookie lines into a jar. Returns a NEW jar (the old
+// one is not touched) plus the names that changed and the names whose
+// deletion was refused. Rules:
+//   - only from a naver.com response host, and only cookies whose Domain (if
+//     any) is naver.com too;
+//   - the jar is flat (one cookie per name), so a name's value is replaced;
+//   - a deletion drops an ordinary cookie but is refused for NID_AUT/NID_SES:
+//     a dead login shows up as AUTH on the next call anyway.
+function mergeSetCookies(jar, lines, host, now = Date.now()) {
+  const base = Array.isArray(jar) ? jar.map((c) => ({ ...c })) : [];
+  const out = { jar: base, changed: [], ignored: [] };
+  const h = String(host || "").toLowerCase();
+  if (!isNaver(h)) return out;
+  const list = Array.isArray(lines) ? lines : lines ? [lines] : [];
+  for (const line of list) {
+    const c = parseSetCookie(line, now);
+    if (!c) continue;
+    if (c.domain && !isNaver(c.domain)) continue;
+    const at = out.jar.findIndex((x) => x && x.name === c.name);
+    if (c.deleted) {
+      if (REQUIRED.includes(c.name)) { out.ignored.push(c.name); continue; }
+      if (at >= 0) { out.jar.splice(at, 1); out.changed.push(c.name); }
+      continue;
+    }
+    const domain = c.domain || h;
+    if (at >= 0) {
+      if (out.jar[at].value === c.value) continue;
+      out.jar[at] = { ...out.jar[at], value: c.value };
+    } else {
+      out.jar.push({ name: c.name, value: c.value, domain });
+    }
+    out.changed.push(c.name);
+  }
+  // A clear line followed by a new value for the same name (one answer) is
+  // a renewal, not a refused deletion.
+  out.ignored = out.ignored.filter((n) => !out.changed.includes(n));
+  return out;
+}
+
+module.exports = {
+  parseImport, loginInfo, toHeader, deviceIdOf, sameLogin,
+  parseSetCookie, mergeSetCookies, REQUIRED,
+};

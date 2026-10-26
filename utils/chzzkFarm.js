@@ -29,6 +29,7 @@ const {
 const { makeClient } = require("./chzzk/client");
 const { createCollector } = require("./chzzk/codes");
 const { getTransport } = require("./chzzk/http");
+const { createJarStore } = require("./chzzk/jarStore");
 const { runSession, AbortError } = require("./chzzk/worker");
 const { isAuthError, isEgressError } = require("./chzzk/errors");
 const views = require("./chzzk/views");
@@ -40,6 +41,11 @@ const DEFAULTS = {
   discoveryIntervalMs: 20 * 60_000,
   loginStartMs: 2 * 60_000,
   loginIntervalMs: 6 * 60 * 60_000,
+  // Keep-warm: one getUserStatus per live login, so Naver keeps renewing its
+  // NID_SES (docs/CHZZK-COOKIE-KEEPALIVE.md "Why 30 minutes").
+  keepWarmStartMs: 30 * 60_000,
+  keepWarmIntervalMs: 30 * 60_000,
+  renewLogEveryMs: 6 * 60 * 60_000, // one "renewed" activity line per login per 6 h
   codesStartMs: 8 * 60_000,
   codesIntervalMs: 3 * 60 * 60_000,
   alertStartMs: 10_000,
@@ -91,6 +97,12 @@ class Farm {
     // that login until it has, so one login never runs two workers.
     this.stopping = new Map();
     this.pickMemo = new Map(); // campaignNo -> { pickedAt, streams, cursor }
+    // accountId -> jar store shared by every client of that login, so a
+    // cookie Naver renews on one call is sent by all of them next.
+    this.jars = new Map();
+    this._jarSaves = new Map();     // accountId -> tail of that login's save chain
+    this._renewLoggedAt = new Map(); // accountId -> when "renewed" was last logged
+    this._clearWarnedAt = new Map(); // accountId -> when "asked to clear" was last logged
     this.timerHandles = [];
     this.state = {
       egress: { via: "none", country: "", ok: false, at: 0, error: "" },
@@ -113,6 +125,7 @@ class Farm {
     this._schedule("egress", this.timings.egressStartMs, this.timings.egressIntervalMs, () => this._checkEgress());
     this._schedule("discovery", this.timings.discoveryStartMs, this.timings.discoveryIntervalMs, () => this.refreshCampaigns().catch(() => {}));
     this._schedule("login", this.timings.loginStartMs, this.timings.loginIntervalMs, () => this.checkAccounts().catch(() => {}));
+    this._schedule("keepwarm", this.timings.keepWarmStartMs, this.timings.keepWarmIntervalMs, () => this._keepWarm());
     this._schedule("codes", this.timings.codesStartMs, this.timings.codesIntervalMs, () => this._codesSweep());
     this._schedule("alert", this.timings.alertStartMs, this.timings.alertIntervalMs, () => this._alertPass());
     this._schedule("supervisor", this.timings.supervisorIntervalMs, this.timings.supervisorIntervalMs, () => this._supervise());
@@ -197,11 +210,108 @@ class Farm {
   // ========== Clients ==========
 
   _clientFor(accountDoc) {
-    let cookies = [];
-    try { cookies = JSON.parse(decrypt(accountDoc.cookies)); }
-    catch (_e) { cookies = []; }
+    const store = this._jarFor(accountDoc);
+    const cookies = store.cookies();
     const deviceId = accountDoc.deviceId || deviceIdOf(cookies) || "";
-    return this.deps.makeClient({ cookies, deviceId, transport: this.transport });
+    return this.deps.makeClient({ cookies, jar: store, deviceId, transport: this.transport });
+  }
+
+  // ========== Cookie keep-alive (docs/CHZZK-COOKIE-KEEPALIVE.md) ==========
+
+  // The login's shared store. Its generation is the row's cookieAt: a row
+  // with a newer one was imported again (maybe by a side process), so its
+  // jar replaces the store's; an equal or older row leaves the store alone,
+  // because the store may hold cookies renewed since that row was read.
+  _jarFor(doc) {
+    const id = String(doc._id);
+    const gen = msOf(doc.cookieAt);
+    const store = this.jars.get(id);
+    if (store && gen <= store.generation) return store;
+    const cookies = decryptJar(doc.cookies);
+    if (store) { store.replace(cookies, gen); return store; }
+    const fresh = createJarStore({
+      cookies, generation: gen, now: this.deps.now,
+      onChange: (ch) => this._onJarChange(id, ch),
+    });
+    this.jars.set(id, fresh);
+    return fresh;
+  }
+
+  _genOf(doc) {
+    return this._jarFor(doc).generation;
+  }
+
+  _onJarChange(id, { changed = [], ignored = [] } = {}) {
+    if (ignored.length) {
+      const now = this.deps.now();
+      const last = this._clearWarnedAt.get(id) || 0;
+      if (now - last >= this.timings.renewLogEveryMs) {
+        this._clearWarnedAt.set(id, now);
+        this.deps.activity.add({
+          level: "warn", kind: "cookie", accountId: id,
+          msg: `Naver asked to clear ${ignored.join(", ")} — the old value was kept; the next check shows whether the login still works`,
+        });
+      }
+    }
+    if (changed.length) this._queueJarSave(id, changed);
+  }
+
+  // Saves for one login run one after another, so an older jar never lands
+  // after a newer one.
+  _queueJarSave(id, changed) {
+    const prev = this._jarSaves.get(id) || Promise.resolve();
+    const next = prev.then(() => this._saveJar(id, changed)).catch((e) => {
+      this.deps.activity.add({ level: "warn", kind: "cookie", accountId: id, msg: `Could not save the renewed cookie: ${short(e)}` });
+    });
+    this._jarSaves.set(id, next);
+    next.then(() => { if (this._jarSaves.get(id) === next) this._jarSaves.delete(id); });
+    return next;
+  }
+
+  // Compare-and-set on cookieAt: if the row was imported again (or deleted)
+  // since the store was loaded, the renewed OLD jar must not overwrite it.
+  async _saveJar(id, changed) {
+    const store = this.jars.get(id);
+    if (!store) return;
+    const gen = store.generation;
+    const now = this.deps.now();
+    const r = await this.deps.Account.updateOne(
+      { _id: id, cookieAt: genDate(gen) },
+      {
+        $set: { cookies: encrypt(JSON.stringify(store.cookies())), cookieRenewedAt: new Date(now) },
+        $inc: { cookieRenewals: 1 },
+      },
+    );
+    if (!r || !(r.matchedCount || r.n || 0)) {
+      const row = await this.deps.Account.findOne({ _id: id }).select("cookies cookieAt").lean();
+      if (!row) { this.jars.delete(id); return; }
+      if (this.jars.get(id) === store && msOf(row.cookieAt) > store.generation) {
+        store.replace(decryptJar(row.cookies), msOf(row.cookieAt));
+      }
+      return;
+    }
+    const last = this._renewLoggedAt.get(id) || 0;
+    if (now - last >= this.timings.renewLogEveryMs) {
+      this._renewLoggedAt.set(id, now);
+      const who = await this.deps.Account.findOne({ _id: id }).select("nickname").lean().catch(() => null);
+      this.deps.activity.add({
+        level: "info", kind: "cookie", accountId: id,
+        msg: `Naver renewed the login cookie (${[...new Set(changed)].join(", ")}) on "${(who && who.nickname) || id}" — kept`,
+      });
+    }
+  }
+
+  // One getUserStatus per live login (through _checkOne, so status and
+  // alerts stay one code path). Fails closed like every logged-in call.
+  // Sold logins belong to their buyer and are never touched.
+  async _keepWarm() {
+    if (!this.state.egress.ok) return { checked: 0, skipped: "egress" };
+    const rows = await this.deps.Account.find({
+      sold: { $ne: true },
+      status: { $in: ["ok", "untested"] },
+    }).lean();
+    for (const row of rows) await this._checkOne(row).catch(() => {});
+    return { checked: rows.length };
   }
 
   // ========== Account import / check ==========
@@ -224,7 +334,10 @@ class Farm {
 
   async _importOne(jar, info) {
     const deviceId = deviceIdOf(jar) || "";
-    const client = this.deps.makeClient({ cookies: jar, deviceId, transport: this.transport });
+    // A private store: getUserStatus below already renews NID_SES, and the
+    // row must get the jar as it stands after that call.
+    const store = createJarStore({ cookies: jar, now: this.deps.now });
+    const client = this.deps.makeClient({ cookies: jar, jar: store, deviceId, transport: this.transport });
     let who;
     try {
       who = await client.userStatus();
@@ -236,7 +349,8 @@ class Farm {
     if (!who || !who.userIdHash) return { ok: false, error: "No userIdHash in getUserStatus" };
     const nickname = String(who.nickname || "").slice(0, 120);
     const penalties = Array.isArray(who.penalties) ? who.penalties.length : 0;
-    const cookiesEnc = encrypt(JSON.stringify(jar));
+    const kept = store.cookies();
+    const cookiesEnc = encrypt(JSON.stringify(kept));
     const now = this.deps.now();
 
     const prev = await this.deps.Account.findOne({ userIdHash: who.userIdHash }).lean();
@@ -260,11 +374,19 @@ class Farm {
           unusableSince: null,
           cookieKind: (info && info.kind) || "unknown",
           cookieExpiresAt: (info && info.expiresAt) || null,
+          cookieRenewedAt: null,
+          cookieRenewals: 0,
         },
       },
       { upsert: true }
     );
     const saved = await this.deps.Account.findOne({ userIdHash: who.userIdHash }).select("_id").lean();
+    // A running worker of this login switches to the imported jar at once.
+    const live = saved && this.jars.get(String(saved._id));
+    if (live) live.replace(kept, now);
+    // ...and a running worker restarts on it (the supervisor respawns it
+    // within 30 s), so nothing it learned from the old cookie carries over.
+    if (saved && !created) this._stopWorker(String(saved._id));
     this.deps.activity.add({
       level: "info", kind: "import",
       accountId: saved ? String(saved._id) : who.userIdHash,
@@ -297,6 +419,10 @@ class Farm {
 
   async _checkOne(row) {
     const client = this._clientFor(row);
+    // The jar generation this check is sent with. If the login is imported
+    // again while the answer is on its way, that answer is about the OLD
+    // cookie and must not touch the row (a stale 401 would flag a good login).
+    const sentGen = this._genOf(row);
     let status = row.status || "untested";
     let lastError = "";
     try {
@@ -322,7 +448,7 @@ class Farm {
     } else if (!row.unusableSince) {
       update.unusableSince = new Date(this.deps.now());
     }
-    await this.deps.Account.updateOne({ _id: row._id }, { $set: update });
+    await this.deps.Account.updateOne({ _id: row._id, cookieAt: genDate(sentGen) }, { $set: update });
   }
 
   async updateAccount(id, patch = {}) {
@@ -363,7 +489,7 @@ class Farm {
     const keptCodes = await this.deps.Reward.countDocuments({ accountId: { $in: idSet }, hasCode: true });
     await this.deps.Reward.deleteMany({ accountId: { $in: idSet }, hasCode: { $ne: true } });
     const del = await this.deps.Account.deleteMany({ _id: { $in: idSet } });
-    for (const id of idSet) this._stopWorker(String(id));
+    for (const id of idSet) { this._stopWorker(String(id)); this.jars.delete(String(id)); }
     return { deleted: del.deletedCount || 0, keptCodes, keptSold: soldIds.size };
   }
 
@@ -585,6 +711,7 @@ class Farm {
     }
     const campaignsStore = this._campaignsStoreFor(id, doneSet);
     const client = this._clientFor(accountDoc);
+    const spawnGen = this._genOf(accountDoc);
     const since = this.deps.now();
     const current = { state: "waiting", campaignNo: 0, title: "", channelId: "", channelName: "", since, minutes: 0, note: "spawning" };
 
@@ -599,8 +726,22 @@ class Farm {
       onLog: (e) => this._onWorkerLog(id, e),
       signal: controller.signal,
     }).then((res) => {
-      if (res && res.reason === "auth") {
-        this.deps.Account.updateOne({ _id: id }, { $set: { status: "not_logged_in", lastError: "worker:auth", unusableSince: this.deps.now() } }).catch(() => {});
+      if (res && res.reason === "auth" && !controller.signal.aborted) {
+        // Only when the row still holds the cookie this worker started with:
+        // after a re-import the worker's AUTH is about the old cookie, and the
+        // supervisor starts a new worker on the new one within 30 s.
+        this.deps.Account.updateOne(
+          { _id: id, cookieAt: genDate(spawnGen) },
+          { $set: { status: "not_logged_in", lastError: "worker:auth", unusableSince: this.deps.now() } },
+        ).then((r) => {
+          const hit = !!r && (r.matchedCount || r.n || 0) > 0;
+          this.deps.activity.add({
+            level: "warn", kind: "worker", accountId: id,
+            msg: hit
+              ? "Stopped watching: CHZZK says this login is logged out"
+              : "Stopped watching on a logged-out answer for the old cookie; the login was imported again, so it starts over with the new one",
+          });
+        }).catch(() => {});
       }
     }).catch((e) => {
       if (!(e instanceof AbortError)) {
@@ -869,6 +1010,24 @@ class Farm {
     }, startMs);
     this.timerHandles.push(first);
   }
+}
+
+function msOf(d) {
+  const t = d == null ? NaN : new Date(d).getTime();
+  return Number.isFinite(t) ? t : 0;
+}
+
+// The cookieAt value a generation stands for: 0 = a row imported before
+// cookieAt existed (null/missing — `cookieAt: null` matches both).
+function genDate(gen) {
+  return gen ? new Date(gen) : null;
+}
+
+function decryptJar(enc) {
+  try {
+    const jar = JSON.parse(decrypt(enc));
+    return Array.isArray(jar) ? jar : [];
+  } catch (_e) { return []; }
 }
 
 function short(e) {
