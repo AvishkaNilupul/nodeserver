@@ -529,6 +529,18 @@ async function deliverOrder(order, { dryRun, unitGapMs }) {
     };
   }
 
+  // FUNPAY RESALE (utils/funpayResale.js). This row's stock is bought on FunPay
+  // when the order lands, so it has no set, no units before its first sale and no
+  // ledger: it is routed here, above the account-listing branch and far above the
+  // "manual-delivery listing" skip and the reserved-units tail, either of which
+  // would read it as unshippable. The engine never throws, keeps its own state per
+  // order (it buys at most once per ordered unit) and pages by itself. Guarded on
+  // the field and required lazily, so every other row takes byte for byte the
+  // paths it took before this existed.
+  if (listing.funpaySource) {
+    return require("./funpayResale").deliverEldoradoOrder({ order, listing, qty, dryRun });
+  }
+
   // ACCOUNT LISTINGS (docs/ACCOUNT-LISTINGS-CONTRACT.md B5). The stock is the
   // exact list of accounts the owner pasted onto the offer, claimed one ledger
   // row per unit — no DropSet, no DropLog row, no reservation. The whole branch

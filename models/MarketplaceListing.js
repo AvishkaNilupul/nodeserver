@@ -20,7 +20,7 @@ const marketplaceListingSchema = new mongoose.Schema(
       // case: it KEEPS its set (a DropSet with stockSource "noclaim"), so the
       // set stays required for it.
       required: function () {
-        return !this.unclaimedGame && !this.accountOffer;
+        return !this.unclaimedGame && !this.accountOffer && !this.funpaySource;
       },
       index: true,
     },
@@ -192,6 +192,16 @@ const marketplaceListingSchema = new mongoose.Schema(
     accountOffer: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "AccountOffer",
+      default: null,
+      index: true,
+    },
+    // FunPay resale (utils/funpayResale.js): a fifth stock mode. The account is
+    // bought on FunPay when the order lands, so the row has no set, no ledger and
+    // no units until its first sale (each sale then appends one, like every other
+    // claim-at-sale path, so listedLogins sees the login).
+    funpaySource: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "FunpaySource",
       default: null,
       index: true,
     },

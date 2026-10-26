@@ -21,6 +21,9 @@ const funpayPurchaseSchema = new mongoose.Schema(
     state: { type: String, enum: STATES, default: "new" },
     funpayOrderId: { type: String, default: "" },
     chargedUsd: { type: Number, default: 0 },
+    // The ceiling this attempt was allowed to pay; an attempt whose outcome is
+    // unknown counts against the 24 h cap at this amount.
+    maxPriceUsd: { type: Number, default: 0 },
     // Plain Twitch login (the same thing listing units[].login holds).
     login: { type: String, default: "" },
     // secretBox(JSON {username, password, token?}) — never logged or returned in lists.
