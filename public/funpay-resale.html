@@ -1,0 +1,1331 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+<script>(function(){try{if(localStorage.getItem('theme')==='dark')document.documentElement.setAttribute('data-theme','dark');}catch(e){}})();</script>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<title>FunPay resale | RedeemHub</title>
+<style>
+  :root{--bg:#f6f7fb;--surface:#ffffff;--surface-2:#f8fafc;--line:#e7eaf0;--ink:#0f172a;--muted:#6b7280;--accent:#4f46e5;--accent2:#6366f1;--green:#059669;--red:#dc2626;--yellow:#b45309;}
+  html[data-theme="dark"]{--bg:#0e1014;--surface:#161a22;--surface-2:#1e232e;--line:#2a3140;--ink:#e8ebf2;--muted:#9aa3b4;--green:#34d399;--red:#f87171;--yellow:#fbbf24;color-scheme:dark;}
+  html[data-theme="dark"] .nav .links a.active{background:rgba(99,102,241,0.20);}
+  html[data-theme="dark"] .pill.s-ok{background:rgba(52,211,153,.14);}
+  html[data-theme="dark"] .pill.s-warn{background:rgba(251,191,36,.14);}
+  html[data-theme="dark"] .pill.s-fail{background:rgba(248,113,113,.14);}
+  html[data-theme="dark"] .pill.s-unknown{background:rgba(154,163,180,.12);}
+  html[data-theme="dark"] .pill.s-info{background:rgba(99,102,241,.18);}
+  * { margin:0; padding:0; box-sizing:border-box; }
+  body { font-family:"Inter","Segoe UI",Tahoma,sans-serif; background:var(--bg); color:var(--ink); height:100vh; display:flex; overflow:hidden; }
+
+  .nav { width:236px; background:var(--surface); border-right:1px solid var(--line); display:flex; flex-direction:column; flex-shrink:0; }
+  .nav .brand { display:flex; align-items:center; gap:10px; padding:18px 20px; border-bottom:1px solid var(--line); }
+  .nav .brand .mark { width:34px; height:34px; border-radius:10px; background:linear-gradient(135deg,var(--accent2),var(--accent)); display:grid; place-items:center; box-shadow:0 6px 14px rgba(79,70,229,0.32); }
+  .nav .brand b { font-size:15px; font-weight:700; line-height:1.15; }
+  .nav .brand b span { display:block; font-size:10.5px; color:var(--muted); font-weight:500; }
+  .nav .links { padding:12px; flex:1; display:flex; flex-direction:column; gap:4px; overflow-y:auto; }
+  .nav .links a { display:flex; align-items:center; gap:11px; padding:11px 13px; border-radius:10px; color:var(--muted); text-decoration:none; font-size:14px; font-weight:500; }
+  .nav .links a:hover { background:var(--surface-2); }
+  .nav .links a.active { background:#eef2ff; color:var(--accent); font-weight:600; }
+  .nav .me { border-top:1px solid var(--line); padding:14px; display:flex; align-items:center; gap:10px; }
+  .nav .me .av { width:36px; height:36px; border-radius:10px; background:linear-gradient(135deg,#34d399,#10b981); display:grid; place-items:center; color:#fff; font-weight:700; font-size:13px; flex-shrink:0; }
+  .nav .me .who { line-height:1.2; min-width:0; }
+  .nav .me .who b { font-size:13.5px; display:block; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; max-width:84px; }
+  .nav .me .who span { display:block; font-size:11px; color:var(--muted); }
+  .nav .me .actions { margin-left:auto; display:flex; gap:6px; }
+  .nav .me .logout { width:32px; height:32px; border-radius:9px; border:1px solid var(--line); background:var(--surface); color:var(--muted); display:grid; place-items:center; cursor:pointer; }
+
+  .page { flex:1; overflow-y:auto; padding:26px 30px 64px; min-width:0; -webkit-overflow-scrolling:touch; }
+  h1 { font-size:22px; font-weight:800; }
+  .sub { color:var(--muted); font-size:13.5px; margin-top:4px; line-height:1.45; }
+  .head { display:flex; align-items:flex-start; gap:18px; flex-wrap:wrap; margin:0 0 18px; }
+  .head-actions { margin-left:auto; display:flex; gap:8px; align-items:center; }
+
+  button { border:1px solid var(--line); border-radius:9px; background:var(--surface); color:var(--ink); padding:9px 14px; cursor:pointer; font:inherit; font-size:13.5px; }
+  button:hover { border-color:var(--accent); }
+  button.primary { color:#fff; border-color:var(--accent); background:var(--accent); }
+  button:disabled { opacity:.5; cursor:not-allowed; }
+  a.plain { color:var(--accent); text-decoration:none; }
+
+  .pill { display:inline-flex; align-items:center; gap:5px; border-radius:999px; padding:3px 9px; font-size:11px; font-weight:700; border:1px solid transparent; white-space:nowrap; }
+  .pill.s-ok { color:var(--green); background:#ecfdf5; }
+  .pill.s-warn { color:var(--yellow); background:#fffbeb; }
+  .pill.s-fail { color:var(--red); background:#fef2f2; }
+  .pill.s-unknown { color:var(--muted); background:#f3f4f6; border-style:dashed; border-color:var(--line); }
+  .pill.s-info { color:var(--accent); background:#eef2ff; }
+
+  .mono { font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:11.5px; }
+  .empty { text-align:center; color:var(--muted); font-size:13.5px; padding:34px 16px; background:var(--surface); border:1px dashed var(--line); border-radius:12px; line-height:1.5; }
+  .scroll { overflow-x:auto; -webkit-overflow-scrolling:touch; }
+  .chips { display:flex; flex-wrap:wrap; gap:6px; margin-top:7px; }
+  .good { color:var(--green); } .bad { color:var(--red); }
+
+  /* Modal: the price tracker's bottom sheet, centred on desktop. Above the
+     mobile top bar (z 160) so nothing behind it stays clickable. */
+  .sheet { position:fixed; inset:0; background:rgba(15,23,42,.55); display:none; z-index:170; align-items:flex-end; justify-content:center; }
+  .sheet.on { display:flex; }
+  .sheet .inner { background:var(--surface); width:100%; max-width:620px; max-height:86vh; border-radius:16px 16px 0 0; display:flex; flex-direction:column; }
+  .sheet .sh { padding:15px 17px; border-bottom:1px solid var(--line); display:flex; align-items:center; gap:10px; }
+  .sheet .sh b { font-size:15px; font-weight:750; min-width:0; word-break:break-word; }
+  .sheet .sb { padding:15px 17px calc(24px + env(safe-area-inset-bottom)); overflow-y:auto; }
+  .sheet.small .inner { max-width:440px; }
+
+  @media (max-width:768px) {
+    .page { padding:14px 14px calc(72px + env(safe-area-inset-bottom)); }
+    h1 { font-size:19px; }
+    .sub { font-size:12.5px; }
+    .head-actions { width:100%; }
+    .head-actions button { flex:1; padding:11px 14px; }
+  }
+
+  /* ------------------------------ funpay resale ------------------------------ */
+  .page { overflow-x:hidden; }
+  .muted { color:var(--muted); }
+  .upd { font-size:12px; color:var(--muted); white-space:nowrap; }
+  .statusbar { display:grid; grid-template-columns:repeat(auto-fill,minmax(168px,1fr)); gap:8px; margin:0 0 16px; }
+  .schip { background:var(--surface); border:1px solid var(--line); border-left:4px solid var(--line); border-radius:10px; padding:8px 11px; min-width:0; }
+  .schip span { display:block; font-size:11px; color:var(--muted); }
+  .schip b { display:block; font-size:13.5px; font-weight:700; line-height:1.3; word-break:break-word; }
+  .schip.ok { border-left-color:var(--green); }
+  .schip.warn { border-left-color:var(--yellow); }
+  .schip.fail { border-left-color:var(--red); }
+  .schip.info { border-left-color:var(--accent2); }
+
+  .card { background:var(--surface); border:1px solid var(--line); border-radius:14px; padding:16px 18px; margin:0 0 16px; min-width:0; }
+  .card-h { display:flex; align-items:center; gap:10px; flex-wrap:wrap; }
+  .card h2 { font-size:16px; font-weight:750; }
+  .hint { font-size:12.5px; color:var(--muted); line-height:1.5; margin:5px 0 12px; }
+  .state-line { margin:8px 0 12px; font-size:12.5px; }
+
+  .fgrid { display:grid; grid-template-columns:repeat(auto-fill,minmax(210px,1fr)); gap:12px 14px; }
+  .field { min-width:0; }
+  .field.wide { grid-column:1 / -1; }
+  .field label { display:block; font-size:12px; font-weight:650; color:var(--muted); margin-bottom:5px; }
+  .field input, .field select, .field textarea { width:100%; border:1px solid var(--line); background:var(--surface); color:var(--ink); border-radius:9px; padding:9px 11px; font:inherit; font-size:13.5px; min-width:0; }
+  .field textarea { resize:vertical; line-height:1.45; }
+  .field textarea.mono { font-size:12px; }
+  .field .help { font-size:11.5px; color:var(--muted); margin-top:4px; line-height:1.45; }
+  .btnrow { display:flex; gap:8px; flex-wrap:wrap; align-items:center; margin-top:12px; }
+  img.cover { display:block; max-width:180px; max-height:120px; object-fit:cover; border-radius:8px; border:1px solid var(--line); margin-top:8px; }
+
+  .msg { position:relative; font-size:12.5px; line-height:1.45; border-radius:8px; padding:8px 10px; margin-top:8px; word-break:break-word; }
+  .msg.err { color:var(--red); background:rgba(220,38,38,.07); }
+  .msg.ok { color:var(--green); background:rgba(5,150,105,.08); }
+  .msg.info { color:var(--muted); background:var(--surface-2); border:1px dashed var(--line); }
+  .msg .x { position:absolute; top:3px; right:3px; border:0; background:none; color:inherit; padding:2px 7px; font-size:15px; line-height:1; }
+  .msg.dismissable { padding-right:30px; }
+
+  table.tbl { width:100%; border-collapse:collapse; font-size:12.5px; }
+  table.tbl th { text-align:left; color:var(--muted); font-weight:650; font-size:11px; padding:8px 9px; background:var(--surface-2); white-space:nowrap; }
+  table.tbl td { padding:10px 9px; border-top:1px solid var(--line); vertical-align:top; line-height:1.4; }
+  table.tbl td small { display:block; color:var(--muted); font-size:11px; line-height:1.4; margin-top:3px; }
+  table.tbl td .t { font-weight:650; font-size:13px; word-break:break-word; }
+  table.tbl td.num { white-space:nowrap; }
+  table.tbl td.risk { background:rgba(220,38,38,.06); color:var(--red); }
+  table.tbl td.risk small, table.tbl td.risk a.plain { color:var(--red); }
+  table.tbl td.reason { max-width:260px; word-break:break-word; }
+  table.deals { min-width:1060px; }
+  table.purch { min-width:880px; }
+  table.tbl tr.note td { border-top:0; padding-top:0; }
+  /* Pinned to the left edge of the scroll box, so an action's result stays in
+     view however far the table is scrolled sideways on a phone. */
+  table.tbl tr.note .msg { position:sticky; left:0; max-width:min(760px, calc(100vw - 80px)); margin-top:0; }
+  .clip { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; max-width:220px; }
+  .btns { display:flex; flex-wrap:wrap; gap:6px; margin-top:6px; }
+  td.acts .btns { margin-top:0; width:176px; }
+  button.sm { padding:6px 10px; font-size:12.5px; border-radius:8px; white-space:nowrap; }
+  button.danger { color:var(--red); }
+  button.danger:hover { border-color:var(--red); }
+  /* A disabled button shows no tooltip in some browsers: the wrapper carries it. */
+  .tip { display:inline-flex; }
+  .tip button:disabled { pointer-events:none; }
+  .inl { display:flex; align-items:center; gap:5px; }
+  .inl input { width:76px; border:1px solid var(--line); background:var(--surface); color:var(--ink); border-radius:8px; padding:6px 8px; font:inherit; font-size:12.5px; }
+  details.comp { margin-top:5px; }
+  details.comp summary { cursor:pointer; color:var(--accent); font-size:11.5px; }
+  details.comp .cl { margin-top:5px; display:flex; flex-direction:column; gap:3px; }
+  details.comp .cl div { font-size:11.5px; color:var(--muted); white-space:nowrap; }
+
+  .switch { position:relative; display:inline-flex; align-items:center; gap:8px; cursor:pointer; font-size:13px; user-select:none; }
+  .switch input { position:absolute; opacity:0; width:1px; height:1px; }
+  .switch .tr { width:36px; height:20px; border-radius:999px; background:var(--line); position:relative; flex-shrink:0; transition:background .15s; }
+  .switch .tr::after { content:""; position:absolute; top:2px; left:2px; width:16px; height:16px; border-radius:50%; background:#fff; box-shadow:0 1px 2px rgba(0,0,0,.25); transition:transform .15s; }
+  .switch input:checked + .tr { background:var(--green); }
+  .switch input:checked + .tr::after { transform:translateX(16px); }
+  .switch input:focus-visible + .tr { outline:2px solid var(--accent); outline-offset:2px; }
+  .switch input:disabled + .tr { opacity:.45; }
+  .switch.dis { cursor:not-allowed; color:var(--muted); }
+  .swlist { display:flex; flex-direction:column; gap:12px; margin:4px 0 16px; }
+  .swf .help { font-size:11.5px; color:var(--muted); margin:3px 0 0 44px; line-height:1.45; }
+
+  .cred { display:grid; grid-template-columns:76px minmax(0,1fr) auto; gap:8px; align-items:center; padding:9px 0; border-bottom:1px solid var(--line); }
+  .cred span { font-size:12px; color:var(--muted); font-weight:650; }
+  .cred code { font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:13px; background:var(--surface-2); border-radius:6px; padding:6px 8px; word-break:break-all; user-select:all; }
+
+  @media (min-width:769px) {
+    .sheet { align-items:center; padding:24px; }
+    .sheet .inner { border-radius:16px; max-height:90vh; }
+  }
+  @media (max-width:768px) {
+    .card { padding:14px; border-radius:12px; }
+    .statusbar { grid-template-columns:repeat(2,minmax(0,1fr)); }
+    .fgrid { grid-template-columns:minmax(0,1fr); }
+    .btnrow button { flex:1 1 auto; padding:11px 14px; }
+    button.sm { padding:8px 11px; }
+    .head-actions .upd { flex:0 0 auto; }
+  }
+</style>
+</head>
+
+<body>
+  <aside class="nav">
+    <div class="brand">
+      <span class="mark"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polygon points="12 2 2 8.5 12 15 22 8.5 12 2"></polygon></svg></span>
+      <b>RedeemHub<span>Admin console</span></b>
+    </div>
+    <nav class="links"></nav>
+    <div class="me">
+      <div class="av" id="meAvatar">--</div>
+      <div class="who"><b id="meName">Admin</b><span id="meRole">...</span></div>
+      <div class="actions">
+        <button class="logout" data-theme-toggle onclick="toggleTheme()" title="Toggle dark mode" aria-pressed="false">☾</button>
+        <button class="logout" id="logoutBtn" title="Log out">⎋</button>
+      </div>
+    </div>
+  </aside>
+
+  <main class="page" id="page">
+    <div class="head">
+      <div><h1>FunPay resale</h1>
+        <div class="sub">Accounts bought on FunPay and resold on Eldorado. The watcher only reads public prices. Money is spent only by <b>Buy 1 now</b> or by auto-buy, and auto-buy stays locked until one Buy 1 now test has worked.</div></div>
+      <div class="head-actions"><span class="upd" id="updatedAt"></span><button type="button" id="reloadBtn">Reload</button></div>
+    </div>
+    <div id="topMsg"></div>
+
+    <!-- 1. Status -->
+    <div class="statusbar" id="chips"><div class="schip"><span>Status</span><b>Loading…</b></div></div>
+
+    <!-- 2. FunPay login -->
+    <section class="card" id="loginCard">
+      <div class="card-h"><h2>FunPay login</h2></div>
+      <div class="state-line" id="loginState">Loading…</div>
+      <div class="field">
+        <label for="cookieText">Paste your FunPay cookies</label>
+        <textarea id="cookieText" class="mono" rows="3" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="golden_key value, or the JSON from a cookie-export extension"></textarea>
+        <div class="help">In Chrome, sign in at funpay.com → open DevTools (F12) → Application → Cookies → https://funpay.com → copy the value of <b>golden_key</b> and paste it here. Or paste the JSON a cookie-export extension gives you (a Cookie header or a cookies.txt also works). It is stored encrypted and never shown again.</div>
+      </div>
+      <div class="btnrow">
+        <button type="button" class="primary" id="sessSave">Save &amp; check</button>
+        <button type="button" id="sessCheck" disabled>Check again</button>
+        <button type="button" class="danger" id="sessRemove" disabled>Remove</button>
+      </div>
+      <div id="sessMsg"></div>
+    </section>
+
+    <!-- 3. Deals -->
+    <section class="card" id="dealsCard">
+      <div class="card-h"><h2>Deals</h2><span class="muted" id="dealsCount"></span></div>
+      <p class="hint">Each deal is one FunPay offer we resell on Eldorado. Suggested price = the lowest active same-set Eldorado offer − $0.01; profit = suggested price after the Eldorado fee, minus the FunPay price. A linked listing is paused automatically while its source is down.</p>
+      <div id="dealsMsg"></div>
+      <div id="deals"><div class="empty">Loading…</div></div>
+    </section>
+
+    <!-- 4. Add deal -->
+    <section class="card" id="addCard">
+      <h2>Add a deal</h2>
+      <p class="hint">Adding a deal buys nothing. The watcher reads its price, seller and the same-set Eldorado offers on its next run (or press Refresh on its row).</p>
+      <form id="addForm" autocomplete="off">
+        <div class="fgrid">
+          <div class="field"><label for="addOffer">FunPay offer URL or id</label><input id="addOffer" required placeholder="https://funpay.com/en/lots/offer?id=…"></div>
+          <div class="field"><label for="addLabel">Label</label><input id="addLabel" maxlength="80" placeholder="Your short name for it"></div>
+          <div class="field"><label for="addMax">Max buy price ($)</label><input id="addMax" type="number" min="0" max="50" step="0.01" inputmode="decimal" placeholder="0 = never buy"></div>
+          <div class="field"><label for="addQty">Listing quantity</label><input id="addQty" type="number" min="1" max="100" step="1" value="5"><div class="help">The watcher keeps the linked Eldorado offer at this quantity.</div></div>
+          <div class="field"><label for="addGame">Eldorado game</label><input id="addGame" maxlength="80" value="Rocket League"></div>
+          <div class="field wide"><label for="addComp">Same-set Eldorado offers</label><textarea id="addComp" class="mono" rows="3" placeholder="One per line: an Eldorado offer id, or an Eldorado link with offerId=…"></textarea><div class="help">Other sellers' offers with exactly the same items. Their lowest active price sets the suggested price.</div></div>
+          <div class="field wide"><label for="addItems">What the buyer gets</label><textarea id="addItems" rows="5" maxlength="4000" placeholder="One item per line"></textarea><div class="help">Your own wording, one item per line. It becomes the listing title and description, so never name FunPay or the seller.</div></div>
+        </div>
+        <div class="btnrow"><button type="submit" class="primary" id="addGo">Add deal</button></div>
+        <div id="addMsg"></div>
+      </form>
+    </section>
+
+    <!-- 5. Purchases -->
+    <section class="card" id="purchasesCard">
+      <div class="card-h"><h2>Purchases</h2><span class="muted">newest 50</span></div>
+      <p class="hint">A purchase is written down before any money is spent. One left in “buying” (we cannot tell whether FunPay took the money) is never bought again automatically: it becomes “needs review”.</p>
+      <div id="purchases"><div class="empty">Loading…</div></div>
+    </section>
+
+    <!-- 6. Limits & switches -->
+    <section class="card" id="limitsCard">
+      <div class="card-h"><h2>Limits &amp; switches</h2><span class="muted" id="limitsState"></span></div>
+      <p class="hint">Apply to every deal. Each deal also has its own max buy price and auto-buy switch.</p>
+      <form id="limitsForm" autocomplete="off">
+        <div class="swlist" id="limitsSwitches"></div>
+        <div class="fgrid" id="limitsFields"></div>
+        <div class="btnrow"><button type="submit" class="primary" id="limitsSave" disabled>Save</button><button type="button" id="limitsDiscard" hidden>Discard changes</button></div>
+        <div id="limitsMsg"></div>
+      </form>
+    </section>
+  </main>
+
+  <div class="sheet" id="sheet"><div class="inner">
+    <div class="sh"><b id="sheetTitle"></b><button type="button" style="margin-left:auto" id="sheetClose">Close</button></div>
+    <div class="sb" id="sheetBody"></div>
+  </div></div>
+
+  <div class="sheet small" id="credSheet"><div class="inner">
+    <div class="sh"><b>Login</b><button type="button" style="margin-left:auto" id="credClose">Close</button></div>
+    <div class="sb" id="credBody"></div>
+  </div></div>
+
+  <script src="/theme.js"></script>
+  <script src="/admin-nav.js"></script>
+  <script>
+  (function () {
+    "use strict";
+    // Everything rendered here is marketplace-supplied text (offer titles, seller
+    // names, order ids). One unescaped value is an XSS hole on a superadmin page.
+    function esc(v) {
+      return String(v == null ? "" : v)
+        .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;").replace(/'/g, "&#39;");
+    }
+    function num(v) { return v == null || v === "" || !isFinite(Number(v)) ? null : Number(v); }
+    function money(n) { n = num(n); return n == null ? "—" : "$" + n.toFixed(2); }
+    function ago(d) {
+      if (!d) return "never";
+      var t = new Date(d).getTime();
+      if (!isFinite(t)) return "never";
+      var s = Math.max(0, (Date.now() - t) / 1000);
+      if (s < 3600) return Math.max(1, Math.round(s / 60)) + " min ago";
+      if (s < 86400) return Math.round(s / 3600) + " h ago";
+      return Math.round(s / 86400) + " d ago";
+    }
+    function stamp(d) { var t = d ? new Date(d) : null; return t && isFinite(t.getTime()) ? t.toLocaleString() : ""; }
+    async function api(path, opts) {
+      opts = opts || {};
+      var init = { method: opts.method || "GET", credentials: "same-origin", headers: { Accept: "application/json" } };
+      if (opts.body !== undefined) {
+        init.headers["Content-Type"] = "application/json";
+        init.body = JSON.stringify(opts.body);
+      }
+      var r = await fetch(path, init);
+      if (r.status === 401 || r.status === 403) throw new Error("Not signed in as a superadmin with 2FA.");
+      var j = await r.json().catch(function () { return null; });
+      if (!r.ok || !j || j.success === false) {
+        var err = new Error((j && (j.error || j.message)) || "HTTP " + r.status);
+        err.status = r.status;
+        err.body = j;
+        throw err;
+      }
+      return j;
+    }
+
+    /* ------------------------------ constants ------------------------------ */
+    var P = "/api/funpay-resale";
+    var POLL_MS = 60000;
+    var LOCK_TIP = "Do one Buy 1 now test first";
+    var DEFAULT_COVER = "/listing-default-cover.png";
+    // §10 of the contract, word for word: listing descriptions AND the delivery message.
+    var GUIDE = [
+      "How to get your items:",
+      "1. Before anything else, check that your Epic Games account can link a NEW Twitch account:",
+      "   https://www.epicgames.com/help/wizards/w4 (Epic allows one change every 365 days).",
+      "2. Log in to twitch.tv with the account you received.",
+      "3. Open Twitch Settings → Connections and connect your Epic Games account.",
+      "4. The items arrive in Rocket League within minutes (sometimes up to 24 hours). Restart the game.",
+      "Twitch only shows drops from the last 6 months in its inventory — older ones are still delivered",
+      "when you link. Please link within the first hour. Any problem: message me here before opening a",
+      "dispute — I reply fast.",
+    ].join("\n");
+    var DELIVERY = [["Minute20", "20 minutes"], ["Hour1", "1 hour"], ["Hour3", "3 hours"], ["Hour12", "12 hours"], ["Day1", "1 day"]];
+    var STATES = {
+      new: ["s-unknown", "new"],
+      waiting_chat: ["s-info", "waiting for the chat"],
+      buying: ["s-warn", "buying"],
+      bought: ["s-info", "bought, waiting for the seller"],
+      received: ["s-ok", "login received"],
+      delivered: ["s-ok", "delivered"],
+      failed: ["s-fail", "failed"],
+      needs_review: ["s-fail", "needs review"],
+    };
+    // Owner-editable keys of the settings block (§4), with the server's clamps.
+    var NUMS = [
+      { k: "watchMinutes", l: "Watch every (minutes)", min: 10, max: 240, step: 1, h: "How often the watcher reads FunPay and the same-set Eldorado offers." },
+      { k: "perUnitMaxUsd", l: "Max price per unit ($)", min: 0.05, max: 50, step: 0.01, h: "Never pays more than this for one account, whatever a deal's own max says." },
+      { k: "dailyCapUsd", l: "Spend cap, rolling 24 h ($)", min: 0, max: 500, step: 0.01, h: "0 = never buy." },
+      { k: "maxBuysPerHour", l: "Max buys per hour", min: 1, max: 60, step: 1, h: "" },
+      { k: "maxUnitsPerOrder", l: "Max units per Eldorado order", min: 1, max: 10, step: 1, h: "The largest order auto-buy handles." },
+      { k: "minProfitUsd", l: "Min profit per unit ($)", min: 0, max: 20, step: 0.01, h: "Auto-buy skips a deal earning less than this." },
+      { k: "eldoradoFeePct", l: "Eldorado fee (%)", min: 0, max: 40, step: 0.1, h: "Used for the profit estimate." },
+      { k: "sellerWaitMinutes", l: "Wait for the seller (minutes)", min: 2, max: 240, step: 1, h: "How long to wait for the FunPay seller's auto-delivery." },
+      { k: "giveUpHours", l: "Give up after (hours)", min: 1, max: 168, step: 1, h: "When to stop working on an order." },
+    ];
+    var BOOLS = [
+      { k: "watchEnabled", l: "Watcher on", h: "Reads public FunPay and Eldorado data on the schedule below. Buys nothing." },
+      { k: "autoBuy", l: "Auto-buy (all deals)", h: "When an Eldorado order arrives for a linked listing whose deal has auto-buy on, buy it on FunPay, paid from your FunPay balance." },
+      { k: "dryRun", l: "Dry run: buy nothing", h: "On: auto-buy only works out what it would buy and send; no money is spent. Off: real FunPay purchases." },
+      { k: "pauseListingWhenSourceDown", l: "Pause the Eldorado listing while its FunPay source is down", h: "Down = missing on FunPay, no auto-delivery, price above the max buy, seller rating below 4.5, or no max buy set." },
+    ];
+
+    /* -------------------------------- state -------------------------------- */
+    var st = null;            // the last GET /state body
+    var srcById = {};
+    var lastLoadAt = 0;
+    var busy = {};            // "<id>:<action>" → true while that request runs
+    var notes = {};           // "s:<sourceId>" / "p:<purchaseId>" → { kind, content: html | fn }
+    var drafts = {};          // sourceId → max-buy text typed but not saved yet
+    var openComp = {};        // sourceId → competitor list expanded
+    var pendingDeals = false; // a re-render waiting for the owner to leave an input
+    var limitsDirty = false;
+    var sheetTok = 0;
+
+    function $(id) { return document.getElementById(id); }
+    function S() { return (st && st.settings) || {}; }
+    function enc(v) { return encodeURIComponent(String(v)); }
+    function commissioned() { return !!S().commissioned; }
+    function pill(cls, text, title) { return '<span class="pill ' + cls + '"' + (title ? ' title="' + esc(title) + '"' : "") + ">" + esc(text) + "</span>"; }
+    function ext(href, text) { return '<a class="plain" target="_blank" rel="noopener noreferrer" href="' + esc(href) + '">' + esc(text) + " ↗</a>"; }
+    function offerUrl(id) { return "https://funpay.com/en/lots/offer?id=" + enc(id); }
+    function userUrl(id) { return "https://funpay.com/en/users/" + enc(id) + "/"; }
+    function orderUrl(id) { return "https://funpay.com/en/orders/" + enc(id) + "/"; }
+    function safeUrl(u) { u = String(u || ""); return /^https:\/\//i.test(u) ? u : ""; }
+    function dealName(s) { return s.label || s.title || "offer " + s.offerId; }
+    function fmtInt(n) { return (num(n) || 0).toLocaleString("en-US"); }
+    function brief(o) { try { return JSON.stringify(o).slice(0, 300); } catch (e) { return ""; } }
+    function itemLines(text) {
+      return String(text || "").split(/\r?\n/).map(function (l) { return l.replace(/^\s*[-•*·]\s*/, "").trim(); }).filter(Boolean);
+    }
+    function say(el, kind, html) { el.innerHTML = html ? '<div class="msg ' + kind + '">' + html + "</div>" : ""; }
+    function field(id, label, control, help, wide) {
+      return '<div class="field' + (wide ? " wide" : "") + '"><label for="' + id + '">' + esc(label) + "</label>" + control +
+        (help ? '<div class="help">' + help + "</div>" : "") + "</div>";
+    }
+    function statePill(state) { var m = STATES[state] || ["s-unknown", state || "—"]; return pill(m[0], m[1], state); }
+    function purchaseById(id) {
+      var list = (st && st.purchases) || [];
+      for (var i = 0; i < list.length; i++) if (String(list[i]._id) === String(id)) return list[i];
+      return null;
+    }
+    function closedByOwner(p) { return /^closed by owner/i.test(p.reason || ""); }
+    function needsLook(p) { return p.state === "needs_review" || (p.state === "failed" && !closedByOwner(p)); }
+    // A button that knows whether its own request is still running.
+    function btn(act, id, label, o) {
+      o = o || {};
+      var running = !!busy[id + ":" + act];
+      var b = '<button type="button" class="sm' + (o.cls ? " " + o.cls : "") + '" data-act="' + act + '" data-id="' + esc(id) + '"' +
+        (o.disabled || running ? " disabled" : "") + ">" + esc(running ? o.busyLabel || "Working…" : label) + "</button>";
+      return o.title ? '<span class="tip" title="' + esc(o.title) + '">' + b + "</span>" : b;
+    }
+
+    /* ------------------------------- loading ------------------------------- */
+    var loading = null, again = false;
+    function load() {
+      if (loading) { again = true; return loading; }
+      loading = (async function () {
+        try {
+          var j = await api(P + "/state");
+          st = j;
+          srcById = {};
+          (j.sources || []).forEach(function (s) { srcById[String(s._id)] = s; });
+          lastLoadAt = Date.now();
+          say($("topMsg"), "", "");
+          renderAll();
+        } catch (e) {
+          say($("topMsg"), "err", "Could not load: " + esc(e.message));
+          if (!st) {
+            $("chips").innerHTML = "";
+            $("loginState").textContent = "Not loaded.";
+            $("deals").innerHTML = $("purchases").innerHTML = '<div class="empty">Not loaded. Press Reload to try again.</div>';
+          }
+        } finally {
+          loading = null;
+          if (again) { again = false; load(); }
+        }
+      })();
+      return loading;
+    }
+    function renderAll() {
+      renderChips();
+      renderLogin();
+      renderDeals();
+      renderPurchases();
+      fillLimits();
+      $("updatedAt").textContent = "updated " + new Date(lastLoadAt).toLocaleTimeString();
+    }
+
+    /* ---------------------------- 1. status chips --------------------------- */
+    function chip(kind, label, value, title) {
+      return '<div class="schip ' + kind + '"' + (title ? ' title="' + esc(title) + '"' : "") + "><span>" + esc(label) + "</span><b>" + esc(value) + "</b></div>";
+    }
+    // lastResult is {sources, reads, paused[], resumed[], problems[]} or {ok:false, error}.
+    function watcherSummary(res) {
+      if (!res) return "";
+      if (res.error) return "Last run failed: " + res.error;
+      if (res.skipped) return "Last run skipped: " + res.skipped;
+      var n = function (a) { return Array.isArray(a) ? a.length : 0; };
+      if (res.sources == null) return "Last result: " + brief(res);
+      return "Last run: " + res.sources + " deals, " + (res.reads || 0) + " reads, paused " + n(res.paused) + ", resumed " + n(res.resumed) + "." +
+        (n(res.problems) ? " Problems: " + res.problems.join("; ") : "");
+    }
+    function watcherChip(s, w) {
+      var every = "Every " + (s.watchMinutes || "?") + " min. ";
+      if (!s.watchEnabled) return chip("", "Watcher", "off", "Switch it on under Limits & switches.");
+      if (w.running) return chip("info", "Watcher", "running now", every);
+      var res = w.lastResult, problems = res && Array.isArray(res.problems) ? res.problems.length : 0;
+      var kind = res && res.error ? "fail" : problems ? "warn" : w.lastRunAt ? "ok" : "";
+      return chip(kind, "Watcher", "last run " + ago(w.lastRunAt) + (res && res.error ? " · failed" : problems ? " · " + problems + " problem" + (problems === 1 ? "" : "s") : ""),
+        every + watcherSummary(res));
+    }
+    function loginChip(s) {
+      if (!s.sessionConfigured) return chip("", "FunPay login", "not set");
+      if (!s.sessionCheckedAt) return chip("", "FunPay login", "saved, not checked yet");
+      if (s.sessionOk) return chip("ok", "FunPay login", (s.sessionUser || "signed in") + " · checked " + ago(s.sessionCheckedAt));
+      return chip("fail", "FunPay login", "expired · checked " + ago(s.sessionCheckedAt), s.sessionError || "");
+    }
+    function renderChips() {
+      var s = S(), w = (st && st.watcher) || {};
+      var spent = num(st && st.spent24h) || 0, cap = num(s.dailyCapUsd) || 0;
+      var buys = num(st && st.buys1h) || 0, perHour = num(s.maxBuysPerHour) || 0;
+      var bal = num(s.balanceUsd);
+      var look = ((st && st.purchases) || []).filter(needsLook).length;
+      var out = [
+        watcherChip(s, w),
+        chip(s.autoBuy ? (s.dryRun ? "info" : "warn") : "", "Auto-buy", s.autoBuy ? "on" : "off", s.commissioned ? "" : LOCK_TIP),
+        s.dryRun ? chip("info", "Dry run", "on: buys nothing") : chip("warn", "Dry run", "off: real purchases"),
+        s.commissioned ? chip("ok", "Commissioned", "yes · " + ago(s.commissionedAt)) : chip("warn", "Commissioned", "not yet: do one Buy 1 now"),
+        loginChip(s),
+        chip(bal == null ? "" : bal < (num(s.perUnitMaxUsd) || 0) ? "warn" : "ok", "FunPay balance", bal == null ? "unknown" : money(bal) + " · " + ago(s.balanceSeenAt)),
+        chip(cap <= 0 ? "warn" : spent >= cap ? "fail" : "ok", "Spent 24 h / cap", money(spent) + " / " + money(cap), cap <= 0 ? "A cap of $0 means nothing is ever bought." : ""),
+        chip(perHour && buys >= perHour ? "fail" : "ok", "Buys last hour", buys + " / " + (perHour || "?")),
+      ];
+      if (look) out.push(chip("fail", "Purchases", look + (look === 1 ? " needs" : " need") + " a look"));
+      $("chips").innerHTML = out.join("");
+    }
+
+    /* ---------------------------- 2. FunPay login --------------------------- */
+    function renderLogin() {
+      var s = S(), html;
+      if (!s.sessionConfigured) {
+        html = pill("s-unknown", "not set") + ' <span class="muted">Paste your cookies below so the page can buy as you.</span>';
+      } else if (s.sessionOk) {
+        html = pill("s-ok", "signed in as " + (s.sessionUser || "?")) + ' <span class="muted">checked ' + esc(ago(s.sessionCheckedAt)) + "</span>";
+      } else {
+        html = pill("s-fail", s.sessionCheckedAt ? "expired or signed out" : "saved, not checked yet") +
+          (s.sessionCheckedAt ? ' <span class="muted">checked ' + esc(ago(s.sessionCheckedAt)) + "</span>" : "") +
+          (s.sessionError ? '<div class="msg err">' + esc(s.sessionError) + "</div>" : "");
+      }
+      $("loginState").innerHTML = html;
+      $("sessCheck").disabled = !s.sessionConfigured || !!busy.sessCheck;
+      $("sessRemove").disabled = !s.sessionConfigured || !!busy.sessRemove;
+    }
+    // Shared by the buttons outside the tables: one request at a time, the
+    // outcome under the button, and a reload afterwards.
+    async function runPlain(key, button, busyLabel, msgEl, fn) {
+      if (busy[key]) return;
+      busy[key] = true;
+      var label = button.textContent;
+      button.disabled = true;
+      button.textContent = busyLabel;
+      say(msgEl, "", "");
+      try { await fn(); }
+      catch (e) { say(msgEl, "err", esc(e.message)); }
+      finally {
+        delete busy[key];
+        button.disabled = false;
+        button.textContent = label;
+        load();
+      }
+    }
+    $("sessSave").onclick = function () {
+      var box = $("cookieText");
+      if (!box.value.trim()) return say($("sessMsg"), "err", "Paste your FunPay cookies first.");
+      runPlain("sessSave", $("sessSave"), "Checking…", $("sessMsg"), async function () {
+        var j = await api(P + "/session", { method: "POST", body: { cookies: box.value } });
+        var r = j.result || j;
+        if (r.ok === false) throw new Error(r.error || "FunPay did not accept these cookies. Nothing was saved.");
+        box.value = "";
+        say($("sessMsg"), "ok", "Saved. Signed in to FunPay as <b>" + esc(r.user || "?") + "</b>.");
+      });
+    };
+    $("sessCheck").onclick = function () {
+      runPlain("sessCheck", $("sessCheck"), "Checking…", $("sessMsg"), async function () {
+        var j = await api(P + "/session/check", { method: "POST" });
+        var r = j.result || j;
+        if (r.ok === false) throw new Error("Not signed in: " + (r.error || "FunPay refused the saved login. Paste fresh cookies."));
+        say($("sessMsg"), "ok", "Signed in as <b>" + esc(r.user || "?") + "</b>" + (num(r.balanceUsd) != null ? " · balance " + money(r.balanceUsd) : "") + ".");
+      });
+    };
+    $("sessRemove").onclick = function () {
+      if (!window.confirm("Remove the saved FunPay login?\n\nNothing can be bought until you paste it again.")) return;
+      runPlain("sessRemove", $("sessRemove"), "Removing…", $("sessMsg"), async function () {
+        await api(P + "/session", { method: "DELETE" });
+        say($("sessMsg"), "ok", "Removed.");
+      });
+    };
+
+    /* -------------------------------- 3. deals ------------------------------ */
+    function setNote(key, kind, content) { notes[key] = { kind: kind, content: content }; rerender(key); }
+    function rerender(key) { if (/^s:/.test(key)) renderDeals(); else if (/^p:/.test(key)) renderPurchases(); }
+    function noteRow(key, cols) {
+      var n = notes[key];
+      if (!n) return "";
+      var html = typeof n.content === "function" ? n.content() : n.content;
+      return '<tr class="note"><td colspan="' + cols + '"><div class="msg dismissable ' + n.kind + '">' + html +
+        '<button type="button" class="x" data-dismiss="' + esc(key) + '" title="Dismiss" aria-label="Dismiss">×</button></div></td></tr>';
+    }
+    // Every table action: one request per button, the outcome in a line under
+    // the row, then a reload (every action changes what /state says).
+    async function run(key, noteKey, fn) {
+      if (busy[key]) return;
+      busy[key] = true;
+      rerender(noteKey);
+      try { await fn(); }
+      catch (e) { setNote(noteKey, "err", esc(e.message)); }
+      finally { delete busy[key]; rerender(noteKey); load(); }
+    }
+    function editingInside(el) {
+      var a = document.activeElement;
+      return !!(a && el.contains(a) && a.tagName === "INPUT" && a.type !== "checkbox");
+    }
+    // The watcher's "source down" test (§7.6), shown so a paused listing explains itself.
+    function downReasons(s) {
+      var out = [];
+      if (s.missingSince) out.push("missing on FunPay since " + ago(s.missingSince));
+      if (s.seenAt && !s.autoDelivery) out.push("no auto-delivery");
+      if (!(num(s.maxBuyPriceUsd) > 0)) out.push("max buy not set");
+      else if (num(s.priceUsd) != null && s.priceUsd > s.maxBuyPriceUsd) out.push("price above max buy");
+      if (num(s.sellerRating) != null && s.sellerRating < 4.5) out.push("seller rating below 4.5");
+      return out;
+    }
+    function dealCell(s) {
+      var items = itemLines(s.itemsText), down = downReasons(s);
+      var downTip = "Source down" + (S().pauseListingWhenSourceDown ? ": a linked listing is paused while this lasts" : " (auto-pause is off)");
+      return '<b class="t">' + esc(dealName(s)) + "</b>" +
+        "<small>" + ext(offerUrl(s.offerId), "FunPay offer " + s.offerId) + "</small>" +
+        (s.title && s.label ? '<small class="clip" title="' + esc(s.title) + '">' + esc(s.title) + "</small>" : "") +
+        "<small>" + esc(s.game || "Rocket League") + " · " + items.length + (items.length === 1 ? " item" : " items") + " · read " + esc(ago(s.watchedAt)) + "</small>" +
+        (!s.seenAt || down.length ? '<div class="chips">' + (s.seenAt ? "" : pill("s-unknown", "not read from FunPay yet")) +
+          down.map(function (r) { return pill("s-fail", r, downTip); }).join("") + "</div>" : "") +
+        (s.lastError ? '<div class="msg err">' + esc(s.lastError) + "</div>" : "");
+    }
+    function sellerTd(s) {
+      var rating = num(s.sellerRating), low = num(s.sellerRecentLow) || 0;
+      var risky = low > 0 || (rating != null && rating < 4.5);
+      var name = s.sellerName || (s.sellerId ? "seller " + s.sellerId : "—");
+      return '<td class="' + (risky ? "risk" : "") + '"><b class="t">' + (s.sellerId ? ext(userUrl(s.sellerId), name) : esc(name)) + "</b>" +
+        "<small>★ " + (rating == null ? "—" : rating.toFixed(1)) + " · " + fmtInt(s.sellerReviews) + " reviews</small>" +
+        (low > 0 ? "<small><b>" + low + " low (≤3★)</b> among the newest reviews</small>" : "") +
+        '<div class="chips">' + pill(s.online ? "s-ok" : "s-unknown", s.online ? "online" : "offline") +
+        pill(s.autoDelivery ? "s-ok" : "s-fail", s.autoDelivery ? "auto-delivery" : "no auto-delivery") + "</div>" +
+        (s.sellerCheckedAt ? "<small>profile read " + esc(ago(s.sellerCheckedAt)) + "</small>" : "") + "</td>";
+    }
+    function funpayCell(s) {
+      return '<b class="t">' + money(s.priceUsd) + "</b><small>" + (s.seenAt ? "seen " + esc(ago(s.seenAt)) : "not read yet") + "</small>";
+    }
+    function maxBuyCell(s) {
+      var id = String(s._id), draft = drafts[id] != null;
+      var v = draft ? drafts[id] : num(s.maxBuyPriceUsd) == null ? "" : Number(s.maxBuyPriceUsd).toFixed(2);
+      return '<div class="inl">$<input type="number" min="0" max="50" step="0.01" inputmode="decimal" data-max="' + esc(id) + '" value="' + esc(v) + '" aria-label="Max buy price in USD">' +
+        btn("saveMax", id, "Save", { busyLabel: "Saving…", disabled: !draft }) + "</div><small>0 = never buy</small>";
+    }
+    function isActiveComp(c) { return String(c.state || "").toLowerCase() === "active"; }
+    function byPrice(a, b) {
+      var x = num(a.priceUsd), y = num(b.priceUsd);
+      return (x == null ? Infinity : x) - (y == null ? Infinity : y);
+    }
+    function competitorCell(s) {
+      var id = String(s._id);
+      var comps = Array.isArray(s.competitors) ? s.competitors : [];
+      var ids = Array.isArray(s.competitorOfferIds) ? s.competitorOfferIds : [];
+      if (!ids.length && !comps.length) return "<small>No same-set offers yet. Use Edit to add Eldorado offer ids.</small>";
+      var low = comps.filter(function (c) { return isActiveComp(c) && num(c.priceUsd) != null; }).sort(byPrice)[0];
+      var sold = comps.reduce(function (a, c) { return a + (num(c.sold24h) || 0); }, 0);
+      var head = low
+        ? '<b class="t">' + money(low.priceUsd) + '</b> <span class="muted">' + esc(low.seller || "?") + "</span>" +
+          "<small>stock " + esc(low.quantity == null ? "?" : low.quantity) + " · sold 24 h " + (num(low.sold24h) || 0) + "</small>"
+        : '<b class="t">' + money(s.lowestCompetitorUsd) + "</b><small>" + (comps.length ? "no active offer" : "not read yet") + "</small>";
+      var list = comps.length
+        ? '<details class="comp" data-comp="' + esc(id) + '"' + (openComp[id] ? " open" : "") + "><summary>All " + comps.length + " offers</summary><div class=\"cl\">" +
+          comps.slice().sort(byPrice).map(function (c) {
+            return "<div>" + esc(c.seller || "?") + " · " + money(c.priceUsd) + " · stock " + esc(c.quantity == null ? "?" : c.quantity) +
+              " · sold 24 h " + (num(c.sold24h) || 0) + (isActiveComp(c) ? "" : " · " + esc(c.state || "state unknown")) + "</div>";
+          }).join("") + "</div></details>"
+        : "";
+      return head + "<small>" + ids.length + " watched · " + sold + " sold in 24 h in all</small>" + list;
+    }
+    function profitCell(s) {
+      var p = num(s.estProfitUsd);
+      return p == null ? "—" : '<b class="' + (p > 0 ? "good" : "bad") + '">' + money(p) + "</b>";
+    }
+    function newListingBtns(id) {
+      return btn("create", id, "Create listing", { cls: "primary", busyLabel: "Publishing…", disabled: !commissioned(), title: commissioned() ? "" : LOCK_TIP }) +
+        btn("link", id, "Link", { busyLabel: "Linking…" });
+    }
+    function listingCell(s) {
+      var id = String(s._id), L = s.linkedListing;
+      if (!L) return '<small>Not on Eldorado yet.</small><div class="btns">' + newListingBtns(id) + "</div>";
+      var url = safeUrl(L.url), name = L.title || L.externalId || "listing", active = L.status === "active";
+      var status = L.autoPaused ? pill("s-warn", "paused automatically") : active ? pill("s-ok", "on sale") : pill("s-unknown", L.status || "unknown");
+      // A deal holds one ACTIVE listing; once that one has ended a new one can be made or linked.
+      return '<b class="t">' + (url ? ext(url, name) : esc(name)) + "</b>" +
+        "<small>" + money(L.price) + ' · <span class="mono">' + esc(L.externalId) + "</span></small>" +
+        '<div class="chips">' + status + "</div>" +
+        (L.lastError ? '<small class="' + (L.autoPaused ? "" : "bad") + '">' + esc(L.lastError) + "</small>" : "") +
+        '<div class="btns">' + (active ? "" : newListingBtns(id)) + btn("unlink", id, "Unlink", { busyLabel: "Unlinking…" }) + "</div>";
+    }
+    function autoBuyCell(s) {
+      var id = String(s._id), s0 = S(), ok = commissioned(), running = !!busy[id + ":autoBuy"];
+      var tip = !ok ? LOCK_TIP : s.autoBuy && !s0.autoBuy ? "The global auto-buy switch (Limits & switches) is off" : "";
+      return '<label class="switch' + (ok ? "" : " dis") + '"' + (tip ? ' title="' + esc(tip) + '"' : "") + ">" +
+        '<input type="checkbox" data-autobuy="' + esc(id) + '"' + (s.autoBuy ? " checked" : "") + (!ok || running ? " disabled" : "") + ' aria-label="Auto-buy this deal">' +
+        '<span class="tr"></span><span>' + (s.autoBuy ? "on" : "off") + "</span></label>" +
+        (!ok ? "<small>locked: do one Buy 1 now</small>" : s.autoBuy && !s0.autoBuy ? "<small>global switch off</small>" : s.autoBuy && s0.dryRun ? "<small>dry run</small>" : "");
+    }
+    function actionsCell(s) {
+      var id = String(s._id), s0 = S();
+      var noSession = s0.sessionConfigured ? "" : "Save your FunPay login first";
+      var buyTip = !(num(s.maxBuyPriceUsd) > 0) ? "Set a max buy price first" : noSession;
+      return '<div class="btns">' +
+        btn("refresh", id, "Refresh", { busyLabel: "Refreshing…" }) +
+        btn("test", id, "Test", { busyLabel: "Testing…", disabled: !!noSession, title: noSession }) +
+        btn("buy", id, "Buy 1 now", { cls: "primary", busyLabel: "Buying…", disabled: !!buyTip, title: buyTip }) +
+        btn("edit", id, "Edit") +
+        btn("remove", id, "Remove", { cls: "danger", busyLabel: "Removing…" }) + "</div>";
+    }
+    function dealRows(s) {
+      var id = String(s._id);
+      return "<tr><td>" + dealCell(s) + "</td>" + sellerTd(s) +
+        '<td class="num">' + funpayCell(s) + "</td>" +
+        "<td>" + maxBuyCell(s) + "</td>" +
+        "<td>" + competitorCell(s) + "</td>" +
+        '<td class="num">' + money(s.suggestedPriceUsd) + "</td>" +
+        '<td class="num">' + profitCell(s) + "</td>" +
+        "<td>" + listingCell(s) + "</td>" +
+        "<td>" + autoBuyCell(s) + "</td>" +
+        '<td class="acts">' + actionsCell(s) + "</td></tr>" + noteRow("s:" + id, 10);
+    }
+    function renderDeals() {
+      var el = $("deals");
+      // Never yank an input out from under the owner's cursor: wait until they leave it.
+      if (editingInside(el)) { pendingDeals = true; return; }
+      pendingDeals = false;
+      var list = (st && st.sources) || [];
+      $("dealsCount").textContent = list.length ? list.length + (list.length === 1 ? " deal" : " deals") : "";
+      if (!list.length) { el.innerHTML = '<div class="empty">' + (st ? "No deals yet. Add one below." : "Loading…") + "</div>"; return; }
+      el.innerHTML = '<div class="scroll"><table class="tbl deals"><thead><tr>' +
+        ["Deal", "Seller", "FunPay", "Max buy", "Eldorado, same set (lowest)", "Suggested", "Profit / unit", "Listing", "Auto-buy", ""]
+          .map(function (h) { return "<th>" + esc(h) + "</th>"; }).join("") +
+        "</tr></thead><tbody>" + list.map(dealRows).join("") + "</tbody></table></div>";
+    }
+
+    function refreshSource(s) {
+      var id = String(s._id), k = "s:" + id;
+      run(id + ":refresh", k, async function () {
+        setNote(k, "info", "Reading FunPay and the same-set Eldorado offers for this deal…");
+        var j = await api(P + "/sources/" + enc(id) + "/refresh", { method: "POST" });
+        var r = j.result || j;
+        if (r && r.skipped) setNote(k, "info", "Not refreshed: " + esc(r.skipped) + ". Try again in a minute.");
+        else setNote(k, "ok", "Refreshed at " + esc(new Date().toLocaleTimeString()) + ".");
+      });
+    }
+    function testSource(s) {
+      var id = String(s._id), k = "s:" + id;
+      run(id + ":test", k, async function () {
+        var j = await api(P + "/sources/" + enc(id) + "/test", { method: "POST" });
+        var r = j.result || j;
+        if (r.ok) {
+          setNote(k, "ok", "Test passed. Signed in as <b>" + esc(r.user || "?") + "</b> · FunPay price " + money(r.priceUsd) +
+            " · balance " + money(r.balanceUsd) + " · buy form " + (r.buyFormFound ? "found" : "<b>not found</b>") + ". Nothing was bought.");
+        } else {
+          setNote(k, "err", "Test failed: " + esc(r.reason || r.error || "no reason given") +
+            (r.signedIn === false ? " (not signed in: save your FunPay login again)" : "") + ". Nothing was bought.");
+        }
+      });
+    }
+    function buyResultHtml(r) {
+      var p = purchaseById(r.purchaseId) || {};
+      var state = r.state || p.state || "", reason = r.reason || p.reason || "";
+      var oid = r.funpayOrderId || r.orderId || p.funpayOrderId || "";
+      var charged = num(r.chargedUsd) || num(p.chargedUsd) || 0;
+      return "<b>Buy 1 now:</b> " + (state ? statePill(state) : esc(r.ok ? "done" : "not completed")) +
+        (reason ? " " + esc(reason) : "") +
+        (oid ? " · " + ext(orderUrl(oid), "FunPay order " + oid) : "") +
+        (charged > 0 ? " · charged " + money(charged) : "") +
+        (state === "received" && r.purchaseId ? ' <button type="button" class="sm" data-reveal="' + esc(r.purchaseId) + '">Show login</button>' : "") +
+        (state === "received" && commissioned() ? " Auto-buy can be switched on now." : "");
+    }
+    function buyOne(s) {
+      var id = String(s._id), k = "s:" + id, s0 = S(), max = num(s.maxBuyPriceUsd) || 0;
+      if (!(max > 0)) return setNote(k, "err", "Set a max buy price first.");
+      var lines = [
+        "Buy 1 now: " + dealName(s),
+        "",
+        "FunPay price now: " + money(s.priceUsd),
+        "Max price: " + money(max) + ", paid from your FunPay balance" + (num(s0.balanceUsd) != null ? " (" + money(s0.balanceUsd) + " when last seen)" : "") + ".",
+      ];
+      if (num(s.priceUsd) != null && s.priceUsd > max) lines.push("", "The FunPay price is above your max price, so the buy will be refused.");
+      if (num(s0.perUnitMaxUsd) != null && max > s0.perUnitMaxUsd) lines.push("", "Your max price is above the per-unit limit (" + money(s0.perUnitMaxUsd) + "), so the buy will be refused.");
+      lines.push("", "This is a real purchase. Continue?");
+      if (!window.confirm(lines.join("\n"))) return;
+      run(id + ":buy", k, async function () {
+        setNote(k, "info", "Buying on FunPay, then waiting for the seller's auto-delivery (about a minute)…");
+        var r;
+        try {
+          var j = await api(P + "/sources/" + enc(id) + "/buy", { method: "POST", body: { confirmMaxUsd: s.maxBuyPriceUsd } });
+          r = j.result || j;
+        } catch (e) {
+          // A refusal that still names a purchase row is a result to show, not just an error.
+          if (!e.body || !(e.body.state || e.body.purchaseId)) throw e;
+          r = Object.assign({ ok: false }, e.body, { reason: e.body.reason || e.body.error });
+        }
+        setNote(k, r.ok ? (r.state === "received" ? "ok" : "info") : "err", function () { return buyResultHtml(r); });
+      });
+    }
+
+    function itemTitle(s, items) {
+      var base = (s.game || "Rocket League") + " Twitch Drops";
+      if (!items.length) return base;
+      var t = base + " (" + items.length + (items.length === 1 ? " Item" : " Items") + ") — " + items.slice(0, 2).join(", ");
+      return t.length <= 150 ? t : t.slice(0, 149).replace(/[\s,—-]+$/, "") + "…";
+    }
+    // §1: buyer text never names FunPay or the seller.
+    function buyerTextProblem(s, text) {
+      var t = String(text || "").toLowerCase(), seller = String(s.sellerName || "").trim().toLowerCase();
+      if (t.indexOf("funpay") >= 0) return "The buyer text mentions FunPay. Take it out.";
+      if (seller.length >= 3) {
+        var safe = seller.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+        if (new RegExp("(^|[^a-z0-9])" + safe + "([^a-z0-9]|$)").test(t)) return "The buyer text names the FunPay seller. Take it out.";
+      }
+      return "";
+    }
+    function openCreate(s) {
+      var id = String(s._id), items = itemLines(s.itemsText), text = String(s.itemsText || "").trim();
+      var warn = [];
+      if (!(num(s.maxBuyPriceUsd) > 0)) warn.push("This deal has no max buy price, so publishing is refused: an order could not be bought. Set one first.");
+      if (!items.length) warn.push("This deal has no items text yet. Edit the deal first, or write the items into the description.");
+      if (num(s.suggestedPriceUsd) == null) warn.push("No suggested price yet (no active same-set offer read). Set the price yourself.");
+      var tok = openSheet("Create Eldorado listing: " + dealName(s),
+        (warn.length ? '<div class="msg info" style="margin:0 0 12px">' + warn.map(esc).join("<br>") + "</div>" : "") +
+        '<div class="fgrid">' +
+        field("clTitle", "Title", '<input id="clTitle" maxlength="150" value="' + esc(itemTitle(s, items)) + '">', '<span id="clTitleN"></span>', true) +
+        field("clDesc", "Description", '<textarea id="clDesc" rows="12">' + esc((text ? text + "\n\n" : "") + GUIDE) + "</textarea>",
+          '<span id="clDescN"></span> Buyers see this: never name FunPay or the seller.', true) +
+        field("clPrice", "Price per unit ($)", '<input id="clPrice" type="number" min="0.01" step="0.01" inputmode="decimal" value="' +
+          esc(num(s.suggestedPriceUsd) == null ? "" : Number(s.suggestedPriceUsd).toFixed(2)) + '">', '<span id="clProfit"></span>') +
+        field("clQty", "Quantity", '<input id="clQty" type="number" min="1" max="100" step="1" value="' + esc(num(s.listingQuantity) || 5) + '">',
+          "Also becomes the deal's listing quantity, which the watcher keeps the offer at.") +
+        field("clDelivery", "Guaranteed delivery", '<select id="clDelivery">' + DELIVERY.map(function (d) {
+          return '<option value="' + d[0] + '"' + (d[0] === "Hour1" ? " selected" : "") + ">" + d[1] + "</option>";
+        }).join("") + "</select>") +
+        field("clCover", "Cover image", '<select id="clCover"><option value="' + DEFAULT_COVER + '">Default cover</option></select>' +
+          '<img id="clCoverImg" class="cover" alt="" src="' + DEFAULT_COVER + '">', '<span id="clCoverN">Loading the drop images of this game…</span>') +
+        "</div>" +
+        '<div class="btnrow"><button type="button" class="primary" id="clGo">Publish on Eldorado</button><button type="button" id="clCancel">Cancel</button></div>' +
+        '<p class="hint">Publishing puts the offer on sale right away, linked to this deal.</p><div id="clMsg"></div>');
+      function counts() {
+        var tl = $("clTitle").value.length, dl = $("clDesc").value.length;
+        $("clTitleN").innerHTML = '<span class="' + (tl > 150 ? "bad" : "") + '">' + tl + " / 150 characters</span>";
+        $("clDescN").innerHTML = '<span class="' + (dl > 2000 ? "bad" : "") + '">' + dl + " / 2000 characters.</span>";
+        var price = num($("clPrice").value), cost = num(s.priceUsd), fee = num(S().eldoradoFeePct) || 0;
+        var keep = price != null && cost != null ? Math.round((price * (1 - fee / 100) - cost) * 100) / 100 : null;
+        $("clProfit").innerHTML = keep == null ? "" : 'Profit about <b class="' + (keep > 0 ? "good" : "bad") + '">' + money(keep) +
+          "</b> per unit after the " + esc(fee) + "% fee and the FunPay price " + money(cost) + ".";
+      }
+      ["clTitle", "clDesc", "clPrice"].forEach(function (k) { $(k).addEventListener("input", counts); });
+      counts();
+      $("clCover").onchange = function () { $("clCoverImg").src = $("clCover").value; };
+      $("clCancel").onclick = closeSheet;
+      $("clGo").onclick = function () { publishListing(s, tok); };
+      loadCovers(s, tok);
+    }
+    function loadCovers(s, tok) {
+      api(P + "/covers?game=" + enc(s.game || "Rocket League")).then(function (j) {
+        if (tok !== sheetTok) return;
+        var list = (Array.isArray(j) ? j : j.covers || j.items || []).filter(function (p) { return typeof p === "string" && /^\/(?!\/)/.test(p); });
+        if (list.indexOf(DEFAULT_COVER) < 0) list.unshift(DEFAULT_COVER);
+        var sel = $("clCover");
+        sel.innerHTML = list.map(function (p) {
+          return '<option value="' + esc(p) + '">' + esc(p === DEFAULT_COVER ? "Default cover" : p.split("/").pop()) + "</option>";
+        }).join("");
+        $("clCoverImg").src = sel.value;
+        var n = list.length - 1;
+        $("clCoverN").textContent = n ? n + " drop image" + (n === 1 ? "" : "s") + " of this game to choose from." : "No drop images for this game: the default cover is used.";
+      }).catch(function (e) {
+        if (tok !== sheetTok) return;
+        $("clCoverN").textContent = "Could not load covers (" + e.message + "). The default cover is used.";
+      });
+    }
+    async function publishListing(s, tok) {
+      var id = String(s._id), msg = $("clMsg"), go = $("clGo");
+      var body = {
+        title: $("clTitle").value.trim(),
+        description: $("clDesc").value.trim(),
+        priceUsd: num($("clPrice").value),
+        quantity: parseInt($("clQty").value, 10),
+        deliveryTime: $("clDelivery").value,
+        coverImage: $("clCover").value,
+      };
+      var bad = body.title.length < 10 ? "Write a title of at least 10 characters."
+        : body.title.length > 150 ? "The title is longer than 150 characters."
+        : body.description.length > 2000 ? "The description is longer than 2000 characters (Eldorado's limit)."
+        : !(body.priceUsd > 0) ? "Set a price above $0."
+        : !(body.quantity >= 1) ? "Set a quantity of at least 1."
+        : buyerTextProblem(s, body.title + "\n" + body.description);
+      if (bad) return say(msg, "err", esc(bad));
+      go.disabled = true;
+      go.textContent = "Publishing…";
+      say(msg, "", "");
+      busy[id + ":create"] = true;
+      renderDeals();
+      try {
+        var j = await api(P + "/sources/" + enc(id) + "/listing", { method: "POST", body: body });
+        var L = j.listing || j, url = safeUrl(L.url);
+        if (tok === sheetTok) closeSheet();
+        setNote("s:" + id, "ok", "Listed on Eldorado" + (url ? ": " + ext(url, L.title || body.title) : "."));
+      } catch (e) {
+        if (tok === sheetTok) {
+          say(msg, "err", esc(e.message));
+          go.disabled = false;
+          go.textContent = "Publish on Eldorado";
+        } else setNote("s:" + id, "err", "Create listing: " + esc(e.message));
+      } finally {
+        delete busy[id + ":create"];
+        renderDeals();
+        load();
+      }
+    }
+    function linkListing(s) {
+      var id = String(s._id), k = "s:" + id;
+      var raw = window.prompt("Link an existing Eldorado listing to \u201c" + dealName(s) + "\u201d.\n\nIt must be one of our Eldorado listings with no account set and no units in it.\n\nEldorado offer id (or a link with offerId=):", "");
+      if (raw == null) return;
+      raw = raw.trim();
+      if (!raw) return setNote(k, "err", "No offer id given.");
+      // The server reads the id out of the text (bare id or offerId= link) and says so when it can't.
+      run(id + ":link", k, async function () {
+        var j = await api(P + "/sources/" + enc(id) + "/link", { method: "POST", body: { externalId: raw } });
+        var L = j.listing || {};
+        setNote(k, "ok", "Linked " + (L.title ? "\u201c" + esc(L.title) + "\u201d" : 'Eldorado offer <span class="mono">' + esc(L.externalId || raw) + "</span>") + ".");
+      });
+    }
+    function unlinkListing(s) {
+      var id = String(s._id), k = "s:" + id, L = s.linkedListing || {};
+      if (!window.confirm("Unlink \u201c" + (L.title || L.externalId || "the listing") + "\u201d from \u201c" + dealName(s) + "\u201d?\n\nThe Eldorado listing itself is not changed; its orders are no longer bought on FunPay. Take it off sale first if it should stop selling.")) return;
+      run(id + ":unlink", k, async function () {
+        await api(P + "/sources/" + enc(id) + "/unlink", { method: "POST" });
+        setNote(k, "ok", "Unlinked.");
+      });
+    }
+    function openEdit(s) {
+      var id = String(s._id);
+      var tok = openSheet("Edit deal: " + dealName(s),
+        '<div class="fgrid">' +
+        field("edLabel", "Label", '<input id="edLabel" maxlength="80" value="' + esc(s.label) + '">') +
+        field("edGame", "Eldorado game", '<input id="edGame" maxlength="80" value="' + esc(s.game || "Rocket League") + '">') +
+        field("edMax", "Max buy price ($)", '<input id="edMax" type="number" min="0" max="50" step="0.01" inputmode="decimal" value="' +
+          esc(num(s.maxBuyPriceUsd) == null ? "" : s.maxBuyPriceUsd) + '">', "0 = never buy.") +
+        field("edQty", "Listing quantity", '<input id="edQty" type="number" min="1" max="100" step="1" value="' + esc(num(s.listingQuantity) || 5) + '">',
+          "The watcher keeps the linked Eldorado offer at this quantity.") +
+        field("edComp", "Same-set Eldorado offers", '<textarea id="edComp" class="mono" rows="4">' + esc((s.competitorOfferIds || []).join("\n")) + "</textarea>",
+          "One per line: an Eldorado offer id, or an Eldorado link with offerId=…", true) +
+        field("edItems", "What the buyer gets", '<textarea id="edItems" rows="6" maxlength="4000">' + esc(s.itemsText) + "</textarea>",
+          "One item per line. Used for the listing title and description.", true) +
+        "</div>" +
+        '<div class="btnrow"><button type="button" class="primary" id="edGo">Save</button><button type="button" id="edCancel">Cancel</button></div><div id="edMsg"></div>');
+      $("edCancel").onclick = closeSheet;
+      $("edGo").onclick = async function () {
+        var max = num($("edMax").value), qty = parseInt($("edQty").value, 10), go = $("edGo");
+        if (max == null || max < 0) return say($("edMsg"), "err", "Enter a max buy price (0 = never buy).");
+        if (!(qty >= 1)) return say($("edMsg"), "err", "The listing quantity must be at least 1.");
+        // Competitor ids go as typed: the server reads ids / offerId= links and names any line it can't.
+        var compText = $("edComp").value;
+        var compChanged = compText.trim().toLowerCase() !== (s.competitorOfferIds || []).join("\n").trim().toLowerCase();
+        var body = {
+          label: $("edLabel").value.trim(),
+          game: $("edGame").value.trim() || "Rocket League",
+          maxBuyPriceUsd: Math.round(max * 100) / 100,
+          listingQuantity: qty,
+          competitorOfferIds: compText,
+          itemsText: $("edItems").value,
+        };
+        go.disabled = true;
+        go.textContent = "Saving…";
+        try {
+          await api(P + "/sources/" + enc(id), { method: "PUT", body: body });
+          delete drafts[id];
+          if (tok === sheetTok) closeSheet();
+          setNote("s:" + id, "ok", "Saved." + (compChanged ? " Press Refresh to read the new same-set offers: the suggested price is unknown until then." : ""));
+        } catch (e) {
+          if (tok === sheetTok) { say($("edMsg"), "err", esc(e.message)); go.disabled = false; go.textContent = "Save"; }
+        } finally { load(); }
+      };
+    }
+    function removeSource(s) {
+      var id = String(s._id), k = "s:" + id;
+      if (!window.confirm("Remove the deal \u201c" + dealName(s) + "\u201d?\n\nIts watch data goes with it. A deal with an active Eldorado listing cannot be removed: unlink it first.")) return;
+      run(id + ":remove", k, async function () {
+        await api(P + "/sources/" + enc(id), { method: "DELETE" });
+        delete notes[k];
+        delete drafts[id];
+        say($("dealsMsg"), "ok", "Removed \u201c" + esc(dealName(s)) + "\u201d.");
+      });
+    }
+    function saveMax(s) {
+      var id = String(s._id), k = "s:" + id, v = drafts[id];
+      if (v == null) return;
+      var n = num(v);
+      if (n == null || n < 0) return setNote(k, "err", "Enter a price in USD (0 = never buy).");
+      var a = document.activeElement;
+      if (a && a.getAttribute && a.getAttribute("data-max") === id) a.blur();
+      run(id + ":saveMax", k, async function () {
+        await api(P + "/sources/" + enc(id), { method: "PUT", body: { maxBuyPriceUsd: Math.round(n * 100) / 100 } });
+        delete drafts[id];
+        setNote(k, "ok", "Max buy price set to " + money(n) + ".");
+      });
+    }
+    function toggleAutoBuy(s, input) {
+      var id = String(s._id), k = "s:" + id, on = input.checked;
+      if (on && !window.confirm("Auto-buy \u201c" + dealName(s) + "\u201d?\n\nWhen an Eldorado order arrives for its linked listing, each ordered unit is bought on FunPay (at most " +
+          money(s.maxBuyPriceUsd) + " each), paid from your FunPay balance, within your limits." +
+          (S().dryRun ? "\n\nDry run is on: nothing is bought until you turn it off." : ""))) {
+        input.checked = !on;
+        return;
+      }
+      var was = !!s.autoBuy;
+      s.autoBuy = on; // show the new position while the request runs; reverted if refused
+      run(id + ":autoBuy", k, async function () {
+        try { await api(P + "/sources/" + enc(id), { method: "PUT", body: { autoBuy: on } }); }
+        catch (e) { s.autoBuy = was; throw e; }
+        setNote(k, "ok", "Auto-buy " + (on ? "on" : "off") + " for this deal.");
+      });
+    }
+    var DEAL_ACTIONS = {
+      refresh: refreshSource, test: testSource, buy: buyOne, create: openCreate, link: linkListing,
+      unlink: unlinkListing, edit: openEdit, remove: removeSource, saveMax: saveMax,
+    };
+    (function wireDeals() {
+      var el = $("deals");
+      el.addEventListener("click", function (e) {
+        var x = e.target.closest("[data-dismiss]");
+        if (x) { delete notes[x.getAttribute("data-dismiss")]; renderDeals(); return; }
+        var rv = e.target.closest("[data-reveal]");
+        if (rv) { reveal(rv.getAttribute("data-reveal")); return; }
+        var b = e.target.closest("button[data-act]");
+        if (!b || b.disabled) return;
+        var s = srcById[b.getAttribute("data-id")], fn = DEAL_ACTIONS[b.getAttribute("data-act")];
+        if (s && fn) fn(s, b);
+      });
+      el.addEventListener("input", function (e) {
+        var id = e.target.getAttribute && e.target.getAttribute("data-max");
+        if (!id) return;
+        drafts[id] = e.target.value;
+        var b = e.target.closest(".inl").querySelector("button");
+        if (b && !busy[id + ":saveMax"]) b.disabled = false;
+      });
+      el.addEventListener("keydown", function (e) {
+        var id = e.key === "Enter" && e.target.getAttribute && e.target.getAttribute("data-max");
+        if (!id) return;
+        e.preventDefault();
+        if (srcById[id]) saveMax(srcById[id]);
+      });
+      el.addEventListener("change", function (e) {
+        var id = e.target.getAttribute && e.target.getAttribute("data-autobuy");
+        if (id && srcById[id]) toggleAutoBuy(srcById[id], e.target);
+      });
+      // A re-render held back while typing runs once the input is left, a beat
+      // later so the click that left it (e.g. on Save) still lands.
+      el.addEventListener("focusout", function () {
+        setTimeout(function () { if (pendingDeals) renderDeals(); }, 400);
+      });
+      el.addEventListener("toggle", function (e) {
+        var d = e.target;
+        if (d && d.tagName === "DETAILS" && d.getAttribute("data-comp")) openComp[d.getAttribute("data-comp")] = d.open;
+      }, true);
+    })();
+
+    /* ------------------------------ 4. add deal ----------------------------- */
+    $("addForm").addEventListener("submit", function (e) {
+      e.preventDefault();
+      var offer = $("addOffer").value.trim();
+      if (!offer) return say($("addMsg"), "err", "Paste the FunPay offer URL or id.");
+      var body = {
+        offer: offer,
+        label: $("addLabel").value.trim(),
+        itemsText: $("addItems").value,
+        competitorOfferIds: $("addComp").value, // read and checked by the server
+        game: $("addGame").value.trim() || "Rocket League",
+      };
+      var max = num($("addMax").value), qty = parseInt($("addQty").value, 10);
+      if (max != null) body.maxBuyPriceUsd = Math.round(max * 100) / 100;
+      if (qty >= 1) body.listingQuantity = qty;
+      runPlain("add", $("addGo"), "Adding…", $("addMsg"), async function () {
+        var j = await api(P + "/sources", { method: "POST", body: body });
+        var src = j.source || {};
+        $("addForm").reset();
+        say($("addMsg"), "ok", "Added" + (src.label || src.offerId ? " \u201c" + esc(src.label || src.offerId) + "\u201d" : "") +
+          ". Its prices appear after the next watcher run, or press Refresh on its row.");
+      });
+    });
+
+    /* ------------------------------ 5. purchases ---------------------------- */
+    function purchaseDeal(p) {
+      var sid = p.source && typeof p.source === "object" ? p.source._id || p.source.id : p.source;
+      var s = srcById[String(sid)];
+      if (s) return dealName(s);
+      if (p.source && typeof p.source === "object" && p.source.label) return p.source.label;
+      return p.offerId ? "offer " + p.offerId : "—";
+    }
+    function timesTitle(p) {
+      return [["created", p.createdAt], ["buying", p.buyingAt], ["bought", p.boughtAt], ["received", p.receivedAt], ["delivered", p.deliveredAt]]
+        .filter(function (x) { return x[1]; }).map(function (x) { return x[0] + " " + stamp(x[1]); }).join("\n");
+    }
+    function purchaseActions(p) {
+      var id = String(p._id), out = [];
+      var order = p.kind === "order";
+      if (p.login || p.state === "received" || p.state === "delivered") out.push(btn("reveal", id, "Show login", { busyLabel: "Opening…" }));
+      if (order && ["bought", "needs_review", "failed"].indexOf(p.state) >= 0) out.push(btn("credential", id, "Enter login"));
+      if (order && p.state === "failed") out.push(btn("retry", id, "Retry", { busyLabel: "Retrying…" }));
+      // "login received" is where a Buy 1 now test ends: nothing left to close there.
+      var finished = p.state === "delivered" || (!order && p.state === "received") || closedByOwner(p);
+      if (!finished) out.push(btn("close", id, "Close", { cls: "danger", busyLabel: "Closing…" }));
+      return '<div class="btns">' + out.join("") + "</div>";
+    }
+    function purchaseRows(p) {
+      var id = String(p._id);
+      return '<tr><td class="num" title="' + esc(timesTitle(p)) + '">' + esc(ago(p.createdAt)) + "</td>" +
+        "<td>" + esc(purchaseDeal(p)) + '<div class="chips">' + pill(p.kind === "manual" ? "s-info" : "s-unknown", p.kind === "manual" ? "Buy 1 now" : "Eldorado order") + "</div></td>" +
+        "<td>" + (p.eldoradoOrderId ? '<span class="mono">' + esc(p.eldoradoOrderId) + "</span><small>unit " + esc(p.unit) + "</small>" : "—") + "</td>" +
+        "<td>" + (p.funpayOrderId ? ext(orderUrl(p.funpayOrderId), p.funpayOrderId) : "—") + "</td>" +
+        '<td class="num">' + (num(p.chargedUsd) > 0 ? money(p.chargedUsd) : "—") + "</td>" +
+        "<td>" + statePill(p.state) + "</td>" +
+        '<td class="reason">' + esc(p.reason || "") + "</td>" +
+        '<td class="acts">' + purchaseActions(p) + "</td></tr>" + noteRow("p:" + id, 8);
+    }
+    function renderPurchases() {
+      var el = $("purchases"), list = (st && st.purchases) || [];
+      if (!list.length) { el.innerHTML = '<div class="empty">' + (st ? "No purchases yet." : "Loading…") + "</div>"; return; }
+      el.innerHTML = '<div class="scroll"><table class="tbl purch"><thead><tr>' +
+        ["Time", "Deal", "Eldorado order", "FunPay order", "Charged", "State", "Reason", ""].map(function (h) { return "<th>" + esc(h) + "</th>"; }).join("") +
+        "</tr></thead><tbody>" + list.map(purchaseRows).join("") + "</tbody></table></div>";
+    }
+    async function reveal(pid) {
+      var key = pid + ":reveal";
+      if (busy[key]) return;
+      busy[key] = true;
+      renderPurchases();
+      try {
+        var j = await api(P + "/purchases/" + enc(pid) + "/reveal", { method: "POST" });
+        openCreds(j.credentials && typeof j.credentials === "object" ? j.credentials : j);
+      } catch (e) {
+        openCreds(null, e.message);
+      } finally {
+        delete busy[key];
+        renderPurchases();
+        load();
+      }
+    }
+    function openCredential(p) {
+      var id = String(p._id);
+      var tok = openSheet("Enter the login by hand",
+        '<p class="hint" style="margin-top:0">For a purchase whose login the seller sent but the page could not read (copy it from the FunPay order chat). It is stored encrypted and the purchase becomes \u201clogin received\u201d, ready to be sent to the Eldorado buyer.</p>' +
+        '<div class="fgrid">' +
+        field("mcLogin", "Twitch login", '<input id="mcLogin" maxlength="64" autocomplete="off" autocapitalize="off" spellcheck="false">') +
+        field("mcPass", "Password", '<input id="mcPass" maxlength="128" autocomplete="off" autocapitalize="off" spellcheck="false">') +
+        "</div>" +
+        '<div class="btnrow"><button type="button" class="primary" id="mcGo">Save login</button><button type="button" id="mcCancel">Cancel</button></div><div id="mcMsg"></div>');
+      $("mcCancel").onclick = closeSheet;
+      $("mcGo").onclick = async function () {
+        var login = $("mcLogin").value.trim(), password = $("mcPass").value, go = $("mcGo");
+        if (!login || !password) return say($("mcMsg"), "err", "Enter both the login and the password.");
+        go.disabled = true;
+        go.textContent = "Saving…";
+        try {
+          await api(P + "/purchases/" + enc(id) + "/credential", { method: "POST", body: { login: login, password: password } });
+          if (tok === sheetTok) closeSheet();
+          setNote("p:" + id, "ok", "Login saved. The purchase is now \u201clogin received\u201d.");
+        } catch (e) {
+          if (tok === sheetTok) { say($("mcMsg"), "err", esc(e.message)); go.disabled = false; go.textContent = "Save login"; }
+        } finally { load(); }
+      };
+    }
+    var PURCHASE_ACTIONS = {
+      reveal: function (p) { reveal(String(p._id)); },
+      credential: openCredential,
+      retry: function (p) {
+        var id = String(p._id), k = "p:" + id;
+        if (!window.confirm("Retry this purchase?\n\nIt starts again from the beginning, so a new unit can be bought on FunPay, paid from your FunPay balance.")) return;
+        run(id + ":retry", k, async function () {
+          await api(P + "/purchases/" + enc(id) + "/retry", { method: "POST" });
+          setNote(k, "ok", "Back in the queue: auto-buy picks it up on its next pass.");
+        });
+      },
+      close: function (p) {
+        var id = String(p._id), k = "p:" + id;
+        var note = window.prompt("Close this purchase? It is marked failed and nothing more is done for it.\n\nNote (optional):", "");
+        if (note == null) return;
+        run(id + ":close", k, async function () {
+          await api(P + "/purchases/" + enc(id) + "/close", { method: "POST", body: { note: note.trim().slice(0, 200) } });
+          setNote(k, "ok", "Closed.");
+        });
+      },
+    };
+    $("purchases").addEventListener("click", function (e) {
+      var x = e.target.closest("[data-dismiss]");
+      if (x) { delete notes[x.getAttribute("data-dismiss")]; renderPurchases(); return; }
+      var b = e.target.closest("button[data-act]");
+      if (!b || b.disabled) return;
+      var p = purchaseById(b.getAttribute("data-id")), fn = PURCHASE_ACTIONS[b.getAttribute("data-act")];
+      if (p && fn) fn(p);
+    });
+
+    /* ------------------------------- modals --------------------------------- */
+    function openSheet(title, html) {
+      sheetTok++;
+      $("sheetTitle").textContent = title;
+      $("sheetBody").innerHTML = html;
+      $("sheet").classList.add("on");
+      return sheetTok;
+    }
+    // Clearing the body also drops anything typed into it (a hand-entered password).
+    function closeSheet() {
+      sheetTok++;
+      $("sheet").classList.remove("on");
+      $("sheetBody").innerHTML = "";
+    }
+    function copyText(v) {
+      if (navigator.clipboard && window.isSecureContext) return navigator.clipboard.writeText(v);
+      return new Promise(function (resolve, reject) {
+        var t = document.createElement("textarea");
+        t.value = v;
+        t.setAttribute("readonly", "");
+        t.style.position = "fixed";
+        t.style.opacity = "0";
+        document.body.appendChild(t);
+        t.select();
+        var ok = false;
+        try { ok = document.execCommand("copy"); } catch (e) { ok = false; }
+        document.body.removeChild(t);
+        if (ok) resolve(); else reject(new Error("copy failed"));
+      });
+    }
+    // The only place credentials are ever shown. Built with textContent, kept in
+    // no variable outside this box, and wiped when it closes.
+    function openCreds(c, error) {
+      var body = $("credBody");
+      body.innerHTML = "";
+      var rows = c ? [["Login", c.username], ["Password", c.password], ["Token", c.token]].filter(function (r) { return r[1] != null && r[1] !== ""; }) : [];
+      if (!rows.length) {
+        var m = document.createElement("div");
+        m.className = "msg err";
+        m.textContent = error ? "Could not show the login: " + error : "No login is stored for this purchase.";
+        body.appendChild(m);
+      }
+      rows.forEach(function (r) {
+        var value = String(r[1]);
+        var row = document.createElement("div");
+        row.className = "cred";
+        var label = document.createElement("span");
+        label.textContent = r[0];
+        var code = document.createElement("code");
+        code.textContent = value;
+        var b = document.createElement("button");
+        b.type = "button";
+        b.className = "sm";
+        b.textContent = "Copy";
+        b.onclick = function () {
+          copyText(value).then(function () { b.textContent = "Copied"; }, function () { b.textContent = "Copy failed"; });
+          setTimeout(function () { b.textContent = "Copy"; }, 1600);
+        };
+        row.appendChild(label);
+        row.appendChild(code);
+        row.appendChild(b);
+        body.appendChild(row);
+      });
+      if (rows.length) {
+        var h = document.createElement("p");
+        h.className = "hint";
+        h.textContent = "Cleared from the page when you close this box.";
+        body.appendChild(h);
+      }
+      $("credSheet").classList.add("on");
+    }
+    function closeCreds() {
+      $("credSheet").classList.remove("on");
+      $("credBody").innerHTML = "";
+    }
+    $("sheetClose").onclick = closeSheet;
+    $("credClose").onclick = closeCreds;
+    $("credSheet").addEventListener("click", function (e) { if (e.target === $("credSheet")) closeCreds(); });
+    document.addEventListener("keydown", function (e) {
+      if (e.key !== "Escape") return;
+      if ($("credSheet").classList.contains("on")) closeCreds();
+      else if ($("sheet").classList.contains("on")) closeSheet();
+    });
+
+    /* -------------------------- 6. limits & switches ------------------------ */
+    function buildLimits() {
+      $("limitsSwitches").innerHTML = BOOLS.map(function (f) {
+        return '<div class="swf"><label class="switch" id="limw_' + f.k + '"><input type="checkbox" id="lim_' + f.k + '"><span class="tr"></span><b>' + esc(f.l) + "</b></label>" +
+          '<div class="help" id="limh_' + f.k + '">' + esc(f.h) + "</div></div>";
+      }).join("");
+      $("limitsFields").innerHTML = NUMS.map(function (f) {
+        return field("lim_" + f.k, f.l, '<input id="lim_' + f.k + '" type="number" required min="' + f.min + '" max="' + f.max + '" step="' + f.step + '" inputmode="decimal">',
+          esc(f.h) + (f.h ? " " : "") + "Allowed " + f.min + " to " + f.max + ".");
+      }).join("");
+    }
+    function fillLimits() {
+      var s = S(), lock = !s.commissioned, w = $("limw_autoBuy");
+      $("lim_autoBuy").disabled = lock;
+      w.classList.toggle("dis", lock);
+      if (lock) w.title = LOCK_TIP; else w.removeAttribute("title");
+      var autoHelp = BOOLS.filter(function (f) { return f.k === "autoBuy"; })[0].h;
+      $("limh_autoBuy").textContent = autoHelp + (lock ? " Locked: " + LOCK_TIP.toLowerCase() + "." : "");
+      $("limitsSave").disabled = !st || !!busy.limits;
+      if (limitsDirty || !st) return;
+      NUMS.forEach(function (f) { $("lim_" + f.k).value = s[f.k] == null ? "" : String(s[f.k]); });
+      BOOLS.forEach(function (f) { $("lim_" + f.k).checked = !!s[f.k]; });
+    }
+    function setDirty(on) {
+      limitsDirty = on;
+      $("limitsState").textContent = on ? "unsaved changes" : "";
+      $("limitsDiscard").hidden = !on;
+    }
+    $("limitsForm").addEventListener("input", function () { setDirty(true); });
+    $("limitsForm").addEventListener("change", function () { setDirty(true); });
+    $("limitsDiscard").onclick = function () { setDirty(false); fillLimits(); say($("limitsMsg"), "", ""); };
+    $("limitsForm").addEventListener("submit", function (e) {
+      e.preventDefault();
+      if (!st) return;
+      var s = S(), body = {};
+      NUMS.forEach(function (f) { var v = num($("lim_" + f.k).value); if (v != null) body[f.k] = v; });
+      BOOLS.forEach(function (f) { if (f.k !== "autoBuy" || s.commissioned) body[f.k] = $("lim_" + f.k).checked; });
+      if (body.autoBuy === true && !s.autoBuy && !window.confirm("Switch auto-buy ON?\n\nWhen an Eldorado order arrives for a linked listing whose deal has auto-buy on, it is bought on FunPay, paid from your FunPay balance, within these limits." +
+          (body.dryRun === false ? "\n\nDry run is off: the purchases are real." : "\n\nDry run stays on, so nothing is bought yet."))) return;
+      if (body.dryRun === false && s.dryRun !== false && !window.confirm("Turn dry run OFF?\n\nAuto-buy then buys on FunPay for real, paid from your FunPay balance.")) return;
+      runPlain("limits", $("limitsSave"), "Saving…", $("limitsMsg"), async function () {
+        var j = await api(P + "/settings", { method: "PUT", body: body });
+        if (j.settings && st) st.settings = Object.assign({}, st.settings, j.settings);
+        setDirty(false);
+        fillLimits();
+        say($("limitsMsg"), "ok", "Saved. A value outside its allowed range is set to the nearest limit.");
+      });
+    });
+
+    /* -------------------------------- start --------------------------------- */
+    $("reloadBtn").onclick = function () { load(); };
+    $("logoutBtn").onclick = function () {
+      fetch("/admin-logout", { method: "POST", credentials: "same-origin" })
+        .finally(function () { window.location.href = "/admin-login.html"; });
+    };
+    buildLimits();
+    load();
+    // Poll while the tab is in view; catch up at once when it comes back after a while.
+    setInterval(function () { if (document.visibilityState === "visible") load(); }, POLL_MS);
+    document.addEventListener("visibilitychange", function () {
+      if (document.visibilityState === "visible" && Date.now() - lastLoadAt >= POLL_MS) load();
+    });
+  })();
+  </script>
+</body>
+</html>
