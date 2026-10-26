@@ -891,9 +891,13 @@ class Farm {
 
   // ========== Login alerts (Telegram) ==========
 
+  // A paused login is on hold by the owner, so it never raises a "down"
+  // alert and never counts for "accepted again". Its stamp is left alone:
+  // on Resume it alerts again if still down, or counts as recovered if ok.
   async _alertPass() {
     const unusable = await this.deps.Account.find({
       sold: { $ne: true },
+      paused: { $ne: true },
       status: { $in: ["not_logged_in"] },
     }).lean();
     const now = this.deps.now();
@@ -922,10 +926,12 @@ class Farm {
     // Recovery: any account whose unusableAlertAt was stamped but is now ok →
     // send "accepted again" when NO account is still unusable, then clear the stamp.
     const stillDown = await this.deps.Account.countDocuments({
-      sold: { $ne: true }, status: "not_logged_in",
+      sold: { $ne: true }, paused: { $ne: true }, status: "not_logged_in",
     });
     if (!stillDown) {
-      const stamped = await this.deps.Account.find({ unusableAlertAt: { $ne: null } }).lean();
+      const stamped = await this.deps.Account.find({
+        unusableAlertAt: { $ne: null }, paused: { $ne: true },
+      }).lean();
       if (stamped.length) {
         try {
           await this.deps.telegram.sendTelegram(`CHZZK logins accepted again (${stamped.length})`);

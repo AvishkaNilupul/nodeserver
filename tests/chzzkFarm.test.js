@@ -588,6 +588,47 @@ test("_alertPass sends batch once, no re-send next pass; recovery sends 'accepte
   assert.equal(after2.unusableAlertAt, null);
 });
 
+test("_alertPass stays quiet for paused logins; Resume brings the alert back", async () => {
+  const { farm, telegram } = buildFarm();
+  const hourAgo = new Date(Date.now() - 60 * MIN);
+  // Already alerted once, then paused by the owner (the 2026-10-27 case).
+  const { doc: held } = await seedAccount({
+    key: "HELD",
+    status: "not_logged_in",
+    nickname: "Held",
+    extra: { unusableSince: hourAgo, unusableAlertAt: hourAgo, paused: true, lastError: "AUTH" },
+  });
+  const { doc: fine } = await seedAccount({ key: "FINE", nickname: "Fine" });
+
+  // No "down" re-send, and no false "accepted again" while the held one is still logged out.
+  await farm._alertPass();
+  await farm._alertPass();
+  assert.equal(telegram.sent.length, 0, "paused login sends nothing");
+  const kept = await ChzzkAccount.findById(held._id).lean();
+  assert.ok(kept.unusableAlertAt instanceof Date, "stamp kept while paused");
+
+  // Another login going down still alerts, naming only that one.
+  await ChzzkAccount.updateOne(
+    { _id: fine._id },
+    { $set: { status: "not_logged_in", unusableSince: hourAgo } },
+  );
+  await farm._alertPass();
+  assert.equal(telegram.sent.length, 1);
+  assert.match(telegram.sent[0], /CHZZK logins down \(1\): Fine$/);
+
+  // It comes back: "accepted again" counts it alone, though the held one is still down.
+  await ChzzkAccount.updateOne({ _id: fine._id }, { $set: { status: "ok" } });
+  await farm._alertPass();
+  assert.equal(telegram.sent.length, 2);
+  assert.match(telegram.sent[1], /accepted again \(1\)/);
+
+  // Resume while still logged out: the alert comes back.
+  await ChzzkAccount.updateOne({ _id: held._id }, { $set: { paused: false } });
+  await farm._alertPass();
+  assert.equal(telegram.sent.length, 3);
+  assert.match(telegram.sent[2], /CHZZK logins down \(1\): Held$/);
+});
+
 // ---------- 12. stateView ----------
 
 test("stateView returns the §10 shape with 8-char userIdHash", async () => {
