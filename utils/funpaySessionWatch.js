@@ -21,22 +21,17 @@ const deps = {
   mp: () => require("./marketplaces"),
   notify: (text) => require("./telegram").sendTelegram(text),
   sessionFor: () => require("./funpayResale").sessionFor(),
+  downReason: (src) => require("./funpayResale").sourceDownReason(src),
   now: () => Date.now(),
 };
 
 const TICK_MS = 30 * 60 * 1000;
 const state = { alerted: false, lastCheckAt: null, lastResult: null, started: false };
 
-// The same "down" rule as the deal watcher (contract §7), or "" when healthy.
+// The engine's shared "down" rule, for the deal behind a listing.
 async function sourceDownReason(sourceId) {
   const src = await deps.Source().findById(sourceId);
-  if (!src) return "deal missing";
-  if (src.missingSince) return "offer gone";
-  if (!src.autoDelivery) return "seller turned auto-delivery off";
-  if (!(Number(src.maxBuyPriceUsd) > 0)) return "no max buy price";
-  if (src.priceUsd != null && Number(src.priceUsd) > Number(src.maxBuyPriceUsd)) return "price above the max";
-  if (src.sellerRating != null && Number(src.sellerRating) < 4.5) return "seller rating below 4.5";
-  return "";
+  return deps.downReason(src);
 }
 
 async function check() {
@@ -65,7 +60,7 @@ async function check() {
   });
 
   if (r.ok) {
-    const paused = await Listing.find({ marketplace: "eldorado", funpaySource: { $ne: null }, autoPaused: true, lastError: PAUSE_REASON });
+    const paused = await Listing.find({ marketplace: "eldorado", funpaySource: { $ne: null }, status: "active", autoPaused: true, lastError: PAUSE_REASON });
     let resumed = 0;
     for (const l of paused) {
       // A deal that is down itself stays paused, handed to the deal watcher

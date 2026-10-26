@@ -678,6 +678,8 @@ async function realisedSales(ctx) {
           updatedAt: { $gte: since },
           bulkOfferId: null,
           rentFarm: { $ne: true },
+          // FunPay resale rows are cost-plus resales, not what our bundles fetch.
+          funpaySource: null,
           marketplace: { $nin: UNIT_LEDGER_MARKETS },
         },
         { marketplace: 1, price: 1, title: 1 },
@@ -701,6 +703,7 @@ async function realisedSales(ctx) {
           price: { $gt: 0 },
           bulkOfferId: null,
           rentFarm: { $ne: true },
+          funpaySource: null,
           updatedAt: { $gte: since },
         },
         { marketplace: 1, price: 1, title: 1, "units.deliveredAt": 1, "units.orderId": 1 },
@@ -1930,6 +1933,8 @@ const CHECKS = [
           // A bulk pack row (docs/bulk-packs/FIXES-1.md R3-8): a Gameflip pack
           // is priced for N accounts, so the one-account ceiling says nothing.
           bulkOfferId: null,
+          // A FunPay resale row is priced from its FunPay cost, not our ceiling.
+          funpaySource: null,
         },
         {
           title: 1,
@@ -2080,6 +2085,7 @@ const CHECKS = [
           marketplace: { $in: [...ceilings.keys()] },
           // Bulk pack rows too, as in listings.overpriced (FIXES-1 R3-8).
           bulkOfferId: null,
+          funpaySource: null,
         },
         { title: 1, marketplace: 1, externalId: 1, url: 1, price: 1, origin: 1 },
       )

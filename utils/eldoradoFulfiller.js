@@ -1634,7 +1634,11 @@ async function deliverPaidOrders() {
         (await deliverOrder(order, { dryRun }));
       results.push(r);
       // Money is already taken on any of these; a human has to hear about it.
-      if ((r.error && alertsOperator(r.error)) || (r.skipped && alertsOperator(r.skipped))) {
+      // A FunPay resale result pages by itself (utils/funpayResale.js, once per
+      // purchase and reason), and its reason can quote FunPay ("…out of stock"):
+      // it must not page a second time from here.
+      const ownPager = /^funpay resale:/.test(String(r.error || r.skipped || ""));
+      if (!ownPager && ((r.error && alertsOperator(r.error)) || (r.skipped && alertsOperator(r.skipped)))) {
         const alerted = await alertUnfulfillable(order, r.error || r.skipped);
         // S3: the chain below prints only errors, dry runs and deliveries, so a
         // paid order parked by one of the account-listing kill switches left

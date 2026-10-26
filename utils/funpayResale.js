@@ -66,6 +66,48 @@ function buildDeliveryMessage(accounts) {
   return blocks.join("\n\n") + "\n\n" + BUYER_GUIDE;
 }
 
+// The "down" rule shared by the engine and both watchers: "" when the deal can be
+// bought, else why not.
+function sourceDownReason(src) {
+  if (!src) return "deal missing";
+  if (src.missingSince) return "offer gone";
+  if (!src.autoDelivery) return "seller turned auto-delivery off";
+  if (!(Number(src.maxBuyPriceUsd) > 0)) return "no max buy price";
+  if (src.priceUsd != null && Number(src.priceUsd) > Number(src.maxBuyPriceUsd)) return "price above the max";
+  if (src.sellerRating != null && Number(src.sellerRating) < 4.5) return "seller rating below 4.5";
+  return "";
+}
+
+// Keeps a FunPay-backed Eldorado offer on sale at the deal's target quantity.
+// Eldorado CLOSES an offer at quantity 0 (see the reopen in eldoradoFulfiller's
+// stock sync), so a Closed one is reopened the same way: the edit carries the
+// quantity, then resume. Only for a row that is active and not paused by us, and a
+// deal that is up; an offer someone paused on Eldorado itself is left alone.
+// Never throws.
+async function keepOfferStocked(listing, source) {
+  try {
+    if (!listing || listing.status !== "active" || listing.autoPaused) return { skipped: "listing not on sale by us" };
+    if (sourceDownReason(source)) return { skipped: "deal down" };
+    const want = Math.max(1, Math.min(100, parseInt(source.listingQuantity, 10) || 5));
+    const mp = deps.mp();
+    const offer = await mp.eldoradoOffer(listing.externalId);
+    if (!offer) return { skipped: "offer unreadable" };
+    if (offer.offerState === "Closed") {
+      await mp.eldoradoUpdateOffer(listing.externalId, { quantity: want });
+      await mp.eldoradoRelist(listing.externalId);
+      return { reopened: want };
+    }
+    if (offer.offerState === "Active" && Number(offer.quantity) < want) {
+      await mp.eldoradoSetQuantity(listing.externalId, want);
+      return { toppedUp: want };
+    }
+    return { ok: true };
+  } catch (e) {
+    console.error("funpay resale: keep offer stocked " + (listing && listing.externalId) + ":", e.message);
+    return { error: String(e.message || e) };
+  }
+}
+
 // One cached session per stored cookie jar.
 let cachedSession = null;
 function sessionFor() {
@@ -381,6 +423,9 @@ async function deliver({ order, orderId, listing, source, rows }) {
   );
   if (typeof listing.markModified === "function") listing.markModified("units");
   await listing.save();
+  // This sale may have taken the offer's last unit; put it back to the target now
+  // rather than leaving it closed until the next watcher pass.
+  await keepOfferStocked(listing, source);
   return { orderId, delivered: rows.length, source: "funpay:" + source.offerId };
 }
 
@@ -392,5 +437,7 @@ module.exports = {
   buysLastHour,
   sessionFor,
   unitSalePriceUsd,
+  sourceDownReason,
+  keepOfferStocked,
   deps,
 };

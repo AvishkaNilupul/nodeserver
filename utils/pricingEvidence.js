@@ -117,6 +117,9 @@ async function buildSnapshot() {
       price: { $gt: 0 },
       bulkOfferId: null,
       rentFarm: { $ne: true },
+      // FunPay resale rows sell an account bought elsewhere at a cost-plus price:
+      // never evidence for what our own bundles fetch.
+      funpaySource: null,
       updatedAt: { $gte: since },
     },
     { marketplace: 1, price: 1, title: 1, "units.deliveredAt": 1, "units.orderId": 1 },
@@ -191,6 +194,7 @@ async function buildSnapshot() {
       updatedAt: { $gte: since },
       bulkOfferId: null,
       rentFarm: { $ne: true },
+      funpaySource: null,
     },
     { marketplace: 1, price: 1, title: 1 },
   )

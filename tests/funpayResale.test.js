@@ -349,3 +349,42 @@ test("unitSalePriceUsd uses the lower of the order share and the list price", ()
   assert.equal(engine.unitSalePriceUsd({}, 1, 2.89), 2.89);
   assert.equal(engine.unitSalePriceUsd({ totalPrice: { amount: 5, currency: "EUR" } }, 1, 0), 0);
 });
+
+test("keepOfferStocked: reopens a Closed offer, tops up a low one, leaves paused or down ones alone", async () => {
+  const calls = [];
+  let offer = { offerState: "Closed", quantity: 0 };
+  engine.deps.mp = () => ({
+    eldoradoOffer: async () => offer,
+    eldoradoUpdateOffer: async (id, patch) => calls.push(["update", id, patch.quantity]),
+    eldoradoRelist: async (id) => calls.push(["relist", id]),
+    eldoradoSetQuantity: async (id, q) => calls.push(["qty", id, q]),
+  });
+  const src = { autoDelivery: true, maxBuyPriceUsd: 1.5, priceUsd: 1.2, sellerRating: 5, missingSince: null, listingQuantity: 4 };
+  const row = { externalId: "e1", status: "active", autoPaused: false };
+  assert.deepEqual(await engine.keepOfferStocked(row, src), { reopened: 4 });
+  assert.deepEqual(calls.splice(0), [["update", "e1", 4], ["relist", "e1"]]);
+  offer = { offerState: "Active", quantity: 1 };
+  assert.deepEqual(await engine.keepOfferStocked(row, src), { toppedUp: 4 });
+  assert.deepEqual(calls.splice(0), [["qty", "e1", 4]]);
+  offer = { offerState: "Active", quantity: 4 };
+  assert.deepEqual(await engine.keepOfferStocked(row, src), { ok: true });
+  offer = { offerState: "Paused", quantity: 0 };
+  assert.deepEqual(await engine.keepOfferStocked(row, src), { ok: true }, "paused on Eldorado by someone: left alone");
+  assert.equal((await engine.keepOfferStocked({ ...row, autoPaused: true }, src)).skipped, "listing not on sale by us");
+  assert.equal((await engine.keepOfferStocked({ ...row, status: "delisted" }, src)).skipped, "listing not on sale by us");
+  assert.equal((await engine.keepOfferStocked(row, { ...src, missingSince: new Date() })).skipped, "deal down");
+  assert.equal(calls.length, 0);
+  engine.deps.mp = () => ({ eldoradoOffer: async () => { throw new Error("eldorado 500"); } });
+  assert.equal((await engine.keepOfferStocked(row, src)).error, "eldorado 500");
+});
+
+test("sourceDownReason names each reason a deal cannot be bought", () => {
+  const ok = { autoDelivery: true, maxBuyPriceUsd: 1.5, priceUsd: 1.2, sellerRating: 4.9, missingSince: null };
+  assert.equal(engine.sourceDownReason(ok), "");
+  assert.equal(engine.sourceDownReason(null), "deal missing");
+  assert.equal(engine.sourceDownReason({ ...ok, missingSince: new Date() }), "offer gone");
+  assert.equal(engine.sourceDownReason({ ...ok, autoDelivery: false }), "seller turned auto-delivery off");
+  assert.equal(engine.sourceDownReason({ ...ok, maxBuyPriceUsd: 0 }), "no max buy price");
+  assert.equal(engine.sourceDownReason({ ...ok, priceUsd: 1.6 }), "price above the max");
+  assert.equal(engine.sourceDownReason({ ...ok, sellerRating: 4.3 }), "seller rating below 4.5");
+});

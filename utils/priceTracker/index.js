@@ -89,7 +89,9 @@ async function loadFromDb({ now = Date.now(), models = null } = {}) {
   const DropSet = (models && models.DropSet) || require("../../models/DropSet");
   const since = new Date(now - 365 * DAY);
   const listings = await MarketplaceListing.find(
-    { marketplace: { $in: MARKETS } },
+    // funpaySource: a FunPay resale row sells an account bought elsewhere at a
+    // cost-plus price — never a sale of our own stock for the tracker to learn from.
+    { marketplace: { $in: MARKETS }, funpaySource: null },
     {
       marketplace: 1, externalId: 1, origin: 1, title: 1, price: 1, status: 1, set: 1,
       unclaimedGame: 1, rentFarm: 1, bulkOfferId: 1, unitsSold: 1, createdAt: 1,

@@ -120,7 +120,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
     { marketplace: market, status: "active" },
     {
       externalId: 1, title: 1, price: 1, status: 1, origin: 1, lastError: 1,
-      autoPaused: 1, bulkOfferId: 1,
+      autoPaused: 1, bulkOfferId: 1, funpaySource: 1,
     },
   ).lean();
   // Two kinds of active row are off sale ON PURPOSE and stay "active" by design,
@@ -133,8 +133,10 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   //  - bulkOfferId: a bulk pack row, whose loop pauses and takes down its own
   //    offer (docs/bulk-packs/FIXES-1.md R3-8).
   // The eldorado.offers health check applies the same rule.
-  const ours = all.filter((r) => r.autoPaused || r.bulkOfferId);
-  const rows = all.filter((r) => !(r.autoPaused || r.bulkOfferId));
+  //  - funpaySource: a FunPay resale row, whose offer the FunPay watchers pause,
+  //    reopen and restock themselves (utils/funpayResale.js).
+  const ours = all.filter((r) => r.autoPaused || r.bulkOfferId || r.funpaySource);
+  const rows = all.filter((r) => !(r.autoPaused || r.bulkOfferId || r.funpaySource));
   console.log(
     market + ": " + all.length + " row(s) we call active" +
       (ours.length

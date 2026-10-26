@@ -25,6 +25,7 @@ function setup({ configured = true, answer, pauseOn = true, listings = [], sourc
       eldoradoRelist: async (id) => calls.relist.push(id),
     }),
     notify: async (t) => calls.pages.push(t),
+    downReason: (src) => require("../utils/funpayResale").sourceDownReason(src),
     sessionFor: () => (configured ? { checkSession: async () => (typeof answer === "function" ? answer() : answer) } : null),
   });
   watch.state.alerted = false;

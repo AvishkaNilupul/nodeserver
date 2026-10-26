@@ -105,3 +105,23 @@ test("a row without funpaySource never touches the engine", async () => {
   assert.equal(e.engine.deliverEldoradoOrder.calls.length, 0);
   assert.ok(out.skipped || out.error, "falls through to the existing paths");
 });
+
+test("a FunPay resale hold that quotes 'out of stock' is not paged again by the fulfiller", async () => {
+  const listing = { marketplace: "eldorado", externalId: "e-9", funpaySource: "SRC1", units: [] };
+  const e = env(listing, { orderId: "eo-1", skipped: "funpay resale: on hold — no buy form on the offer page (offer gone or out of stock)" });
+  const pages = [];
+  e.stubs["../utils/telegram"] = { sendTelegram: async (t) => pages.push(t) };
+  e.stubs["../utils/settings"] = { getAutoFarm: () => ({ eldoradoAutoDeliver: true, eldoradoDeliverDryRun: false }), getAccountListingSettings: () => ({ enabled: true, autoDeliver: true }) };
+  Object.assign(e.mp, {
+    keyStatus: () => ({ eldorado: { configured: true } }),
+    eldoradoEnsureFreshSession: async () => {},
+    eldoradoPaidOrders: async () => [order],
+  });
+  e.stubs["../utils/eldoradoFarmService"] = { deliverFarmOrder: async () => null };
+  e.stubs["../utils/intakeWatch"] = { record: async () => {}, ok: async () => {}, failed: async () => {} };
+  e.stubs["../utils/operatorFarm"] = { previewFreshAccounts: async () => ({ eligibleTotal: 99 }) };
+  const out = await withStubbed("../utils/eldoradoFulfiller", e.stubs, (f) => f.deliverPaidOrders());
+  assert.equal(out.orders, 1);
+  assert.match(out.results[0].skipped, /^funpay resale: on hold/);
+  assert.equal(pages.length, 0, "the engine already paged; no second 'cannot ship it' page");
+});

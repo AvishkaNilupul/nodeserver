@@ -43,7 +43,9 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   const rows = await MarketplaceListing.find(
     // bulkOfferId: null — a bulk pack is priced for N accounts and is never
     // repriced to a single-account price (docs/bulk-packs/CONTRACT.md).
-    { marketplace: "eldorado", status: "active", bulkOfferId: null, title: new RegExp("^" + esc + "\\b", "i") },
+    // funpaySource: null — a FunPay resale row is priced from its FunPay cost and is
+    // never repriced from here (a game-wide price could sell it below cost).
+    { marketplace: "eldorado", status: "active", bulkOfferId: null, funpaySource: null, title: new RegExp("^" + esc + "\\b", "i") },
     { externalId: 1, title: 1, price: 1, origin: 1, unclaimedGame: 1 },
   ).lean();
   const targets = rows.filter((r) => !/Automatic\s+Farming/i.test(r.title || ""));
