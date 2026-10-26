@@ -325,6 +325,10 @@ test("buildDeliveryMessage never names the source and skips broken accounts", ()
   assert.match(m, /^Username: a_user\nPassword: pw1234\n\nHow to get your items:/);
   assert.doesNotMatch(m, /funpay/i);
   assert.equal(engine.buildDeliveryMessage([]), "");
+  assert.match(
+    engine.buildDeliveryMessage([{ username: "b_user", password: "pw5678", token: "tok0123456789" }]),
+    /^Username: b_user\nPassword: pw5678\nToken \(only if Twitch asks for an email code\): tok0123456789\n\n/,
+  );
 });
 
 test("unitSalePriceUsd uses the lower of the order share and the list price", () => {

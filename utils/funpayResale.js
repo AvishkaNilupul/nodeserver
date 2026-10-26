@@ -54,7 +54,11 @@ const BUYER_GUIDE = [
 function buildDeliveryMessage(accounts) {
   const list = (Array.isArray(accounts) ? accounts : []).filter((a) => a && a.username && a.password);
   if (!list.length) return "";
-  const card = (a) => "Username: " + a.username + "\nPassword: " + a.password;
+  // A seller's 3rd field is the account's login token: it is what gets the buyer
+  // in when Twitch asks for an email code on a new device, so it is passed on.
+  const card = (a) =>
+    "Username: " + a.username + "\nPassword: " + a.password +
+    (a.token ? "\nToken (only if Twitch asks for an email code): " + a.token : "");
   const blocks =
     list.length === 1
       ? [card(list[0])]
