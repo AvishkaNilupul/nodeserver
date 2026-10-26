@@ -632,8 +632,8 @@ test("start is idempotent; stop aborts in-flight workers", async () => {
   const { farm } = buildFarm({ timers });
   farm.start();
   const n1 = timers.handles.size;
-  // 7 schedulers: egress, discovery, login, keepwarm, codes, alert, supervisor.
-  assert.equal(n1, 7);
+  // Egress, discovery, login, keepwarm, cookie-save, codes, alert, supervisor.
+  assert.equal(n1, 8);
   farm.start();
   assert.equal(timers.handles.size, n1, "second start() is a no-op");
 

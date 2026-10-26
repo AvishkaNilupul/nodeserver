@@ -247,6 +247,46 @@ test("farm: the running worker's client sends the cookie the login check renewed
   assert.equal(sesIn(t.calls.at(-1).cookie), "ses-new-1");
 });
 
+test("farm: a failed cookie save retries even when Naver repeats the same cookie", async () => {
+  const t = naverTransport();
+  const inner = t.request;
+  t.request = async (...args) => {
+    const res = await inner(...args);
+    if (String(args[0]).includes("getUserStatus")) {
+      res.headers["set-cookie"] = ["NID_SES=stable-renewal; Domain=.naver.com"];
+    }
+    return res;
+  };
+  let fail = true;
+  let attempts = 0;
+  const Account = new Proxy(ChzzkAccount, {
+    get(target, key) {
+      if (key === "updateOne") return async (filter, update, ...rest) => {
+        if (update.$inc && update.$inc.cookieRenewals) {
+          attempts++;
+          if (fail) throw new Error("temporary database outage");
+        }
+        return target.updateOne(filter, update, ...rest);
+      };
+      const value = target[key];
+      return typeof value === "function" ? value.bind(target) : value;
+    },
+  });
+  const { farm } = buildFarm({ transport: t, Account });
+  const doc = await seed();
+  await farm._checkOne(doc); await settled(farm);
+  assert.equal(farm._jarRetries.size, 1);
+  await farm._checkOne(doc); await settled(farm);
+  assert.equal(attempts, 1, "an unchanged cookie does not trigger another save");
+  fail = false;
+  const calls = t.calls.length;
+  await farm._retryJarSaves(); await settled(farm);
+  assert.equal(t.calls.length, calls, "retry makes no network request");
+  assert.equal(sesOf(await rowJar(doc._id)), "stable-renewal");
+  assert.equal(attempts, 2);
+  assert.equal(farm._jarRetries.size, 0);
+});
+
 test("farm: a re-import by a side process is never overwritten by the renewed old jar", async () => {
   const t = naverTransport();
   const { farm } = buildFarm({ transport: t });

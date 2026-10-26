@@ -45,6 +45,7 @@ const DEFAULTS = {
   // NID_SES (docs/CHZZK-COOKIE-KEEPALIVE.md "Why 30 minutes").
   keepWarmStartMs: 30 * 60_000,
   keepWarmIntervalMs: 30 * 60_000,
+  cookieSaveRetryMs: 60_000,
   renewLogEveryMs: 6 * 60 * 60_000, // one "renewed" activity line per login per 6 h
   codesStartMs: 8 * 60_000,
   codesIntervalMs: 3 * 60 * 60_000,
@@ -101,6 +102,7 @@ class Farm {
     // cookie Naver renews on one call is sent by all of them next.
     this.jars = new Map();
     this._jarSaves = new Map();     // accountId -> tail of that login's save chain
+    this._jarRetries = new Map();   // failed saves; retried without another Naver request
     this._renewLoggedAt = new Map(); // accountId -> when "renewed" was last logged
     this._clearWarnedAt = new Map(); // accountId -> when "asked to clear" was last logged
     this.timerHandles = [];
@@ -126,6 +128,7 @@ class Farm {
     this._schedule("discovery", this.timings.discoveryStartMs, this.timings.discoveryIntervalMs, () => this.refreshCampaigns().catch(() => {}));
     this._schedule("login", this.timings.loginStartMs, this.timings.loginIntervalMs, () => this.checkAccounts().catch(() => {}));
     this._schedule("keepwarm", this.timings.keepWarmStartMs, this.timings.keepWarmIntervalMs, () => this._keepWarm());
+    this._schedule("cookie-save", this.timings.cookieSaveRetryMs, this.timings.cookieSaveRetryMs, () => this._retryJarSaves());
     this._schedule("codes", this.timings.codesStartMs, this.timings.codesIntervalMs, () => this._codesSweep());
     this._schedule("alert", this.timings.alertStartMs, this.timings.alertIntervalMs, () => this._alertPass());
     this._schedule("supervisor", this.timings.supervisorIntervalMs, this.timings.supervisorIntervalMs, () => this._supervise());
@@ -138,6 +141,7 @@ class Farm {
     for (const id of [...this.workers.keys()]) this._stopWorker(id);
     for (const [, p] of this.stopping) promises.push(Promise.resolve(p).catch(() => {}));
     await Promise.all(promises);
+    await Promise.all([...this._jarSaves.values()]);
     this.started = false;
   }
 
@@ -260,12 +264,22 @@ class Farm {
   // after a newer one.
   _queueJarSave(id, changed) {
     const prev = this._jarSaves.get(id) || Promise.resolve();
-    const next = prev.then(() => this._saveJar(id, changed)).catch((e) => {
+    const next = prev.then(() => this._saveJar(id, changed)).then(() => {
+      this._jarRetries.delete(id);
+    }).catch((e) => {
+      this._jarRetries.set(id, changed);
       this.deps.activity.add({ level: "warn", kind: "cookie", accountId: id, msg: `Could not save the renewed cookie: ${short(e)}` });
     });
     this._jarSaves.set(id, next);
     next.then(() => { if (this._jarSaves.get(id) === next) this._jarSaves.delete(id); });
     return next;
+  }
+
+  async _retryJarSaves() {
+    for (const [id, changed] of [...this._jarRetries]) {
+      // An existing save will either clear the debt or leave it for next time.
+      if (!this._jarSaves.has(id)) await this._queueJarSave(id, changed);
+    }
   }
 
   // Compare-and-set on cookieAt: if the row was imported again (or deleted)
@@ -489,7 +503,7 @@ class Farm {
     const keptCodes = await this.deps.Reward.countDocuments({ accountId: { $in: idSet }, hasCode: true });
     await this.deps.Reward.deleteMany({ accountId: { $in: idSet }, hasCode: { $ne: true } });
     const del = await this.deps.Account.deleteMany({ _id: { $in: idSet } });
-    for (const id of idSet) { this._stopWorker(String(id)); this.jars.delete(String(id)); }
+    for (const id of idSet) { this._stopWorker(String(id)); this.jars.delete(String(id)); this._jarRetries.delete(String(id)); }
     return { deleted: del.deletedCount || 0, keptCodes, keptSold: soldIds.size };
   }
 

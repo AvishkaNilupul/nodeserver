@@ -66,6 +66,10 @@ login is found within 30 min instead of up to 6 h. It is not a proven cure.
      status ok/untested, call `userStatus` (through `_checkOne`, so status and
      alerts stay one code path). Skipped while egress is not ok (fails
      closed, like every other logged-in call). The 6 h full check stays.
+   - A failed cookie save stays queued and retries every minute, even when
+     later responses repeat the same cookie. Retries use the current shared
+     jar and the same import-generation guard; they make no Naver request.
+     Graceful shutdown waits for saves already in progress.
    - Activity: `Naver renewed the login cookie (NID_SES) on <nickname>` —
      cookie **names** only, never values.
 6. **Model**: `cookieRenewedAt: Date`, `cookieRenewals: Number`.
