@@ -616,12 +616,45 @@ const EPIC_AUTO_CLAIM_DEFAULTS = {
   dailyCap: 5,
 };
 
+// FunPay resale (utils/funpayResale.js, utils/funpayWatch.js). Buys an account on
+// FunPay when an Eldorado order lands for a linked listing and delivers it.
+// Ships dark: autoBuy off, dry run on, and autoBuy cannot be switched on until one
+// hand-made test purchase has worked end to end (`commissioned`). `session` is the
+// owner's FunPay cookie jar, secretBox ciphertext, readable only through
+// getFunpaySessionCookies — the getter below never hands it out.
+const FUNPAY_RESALE_DEFAULTS = {
+  watchEnabled: true,
+  watchMinutes: 30,
+  autoBuy: false,
+  dryRun: true,
+  commissioned: false,
+  commissionedAt: null,
+  perUnitMaxUsd: 3,
+  dailyCapUsd: 15,
+  maxBuysPerHour: 6,
+  maxUnitsPerOrder: 3,
+  minProfitUsd: 0.1,
+  eldoradoFeePct: 10,
+  sellerWaitMinutes: 15,
+  giveUpHours: 24,
+  pauseListingWhenSourceDown: true,
+  session: "",
+  sessionOk: false,
+  sessionUser: "",
+  sessionUserId: 0,
+  sessionCheckedAt: null,
+  sessionError: "",
+  balanceUsd: null,
+  balanceSeenAt: null,
+};
+
 const DEFAULTS = {
   require2fa: false,
   autoFarm: AUTO_FARM_DEFAULTS,
   accountListings: ACCOUNT_LISTING_DEFAULTS,
   noclaimShop: NOCLAIM_SHOP_DEFAULTS,
   epicAutoClaim: EPIC_AUTO_CLAIM_DEFAULTS,
+  funpayResale: FUNPAY_RESALE_DEFAULTS,
 };
 
 // ---------------------------------------------------------------------------
@@ -2046,9 +2079,167 @@ async function setEpicAutoClaim(patch, opts = {}) {
   return next;
 }
 
+// ---------------------------------------------------------------------------
+// FunPay resale block (FUNPAY_RESALE_DEFAULTS above)
+// ---------------------------------------------------------------------------
+// Owner-editable keys and their [min, max, integer?] clamps; booleans are typed.
+const FUNPAY_RESALE_NUMBERS = {
+  watchMinutes: [10, 240, true],
+  perUnitMaxUsd: [0.05, 50, false],
+  dailyCapUsd: [0, 500, false],
+  maxBuysPerHour: [1, 60, true],
+  maxUnitsPerOrder: [1, 10, true],
+  minProfitUsd: [0, 20, false],
+  eldoradoFeePct: [0, 40, false],
+  sellerWaitMinutes: [2, 240, true],
+  giveUpHours: [1, 168, true],
+};
+const FUNPAY_RESALE_BOOLS = ["watchEnabled", "autoBuy", "dryRun", "pauseListingWhenSourceDown"];
+
+function funpayResaleBlock(s) {
+  const cur = s && s.funpayResale && typeof s.funpayResale === "object" ? s.funpayResale : {};
+  return { ...FUNPAY_RESALE_DEFAULTS, ...cur };
+}
+
+// Never returns the cookie ciphertext: callers get `sessionConfigured` instead.
+function getFunpayResale() {
+  const out = funpayResaleBlock(loadSettings());
+  out.sessionConfigured = !!out.session;
+  delete out.session;
+  return out;
+}
+
+async function setFunpayResale(patch, opts = {}) {
+  const p = snapshotPatch(patch);
+  const clean = {};
+  for (const [k, [lo, hi, int]] of Object.entries(FUNPAY_RESALE_NUMBERS)) {
+    if (!hasOwn(p, k)) continue;
+    const n = Number(p[k]);
+    if (!Number.isFinite(n)) continue;
+    const v = Math.min(hi, Math.max(lo, n));
+    clean[k] = int ? Math.round(v) : Math.round(v * 100) / 100;
+  }
+  for (const k of FUNPAY_RESALE_BOOLS) if (typeof p[k] === "boolean") clean[k] = p[k];
+  let cur = {};
+  let next = null;
+  let refused = null;
+  await updateSettings((s) => {
+    cur = funpayResaleBlock(s);
+    if (clean.autoBuy === true && !cur.commissioned) {
+      refused = "finish a test purchase first (Buy 1 now) — auto-buy stays off until one works end to end";
+      return;
+    }
+    next = { ...cur, ...clean };
+    s.funpayResale = next;
+  });
+  if (refused) {
+    const err = new Error(refused);
+    err.code = "FUNPAY_NOT_COMMISSIONED";
+    throw err;
+  }
+  try {
+    const changed = {};
+    for (const k of Object.keys(clean)) {
+      if (JSON.stringify(cur[k]) !== JSON.stringify(next[k])) changed[k] = { from: cur[k], to: next[k] };
+    }
+    if (Object.keys(changed).length) {
+      require("./systemLog").logEvent({
+        category: "settings",
+        action: "funpay_resale_changed",
+        actor: opts.actor || "system",
+        subject: Object.keys(changed).join(","),
+        meta: changed,
+      });
+    }
+  } catch {
+    /* never block a settings write on its audit */
+  }
+  const out = { ...next, sessionConfigured: !!next.session };
+  delete out.session;
+  return out;
+}
+
+// The decrypted FunPay cookie jar ({} when none is stored or it cannot be read).
+function getFunpaySessionCookies() {
+  const enc = funpayResaleBlock(loadSettings()).session;
+  if (!enc) return {};
+  try {
+    const jar = JSON.parse(require("./secretBox").decrypt(enc) || "{}");
+    return jar && typeof jar === "object" && !Array.isArray(jar) ? jar : {};
+  } catch {
+    return {};
+  }
+}
+
+// Stores the jar encrypted; null clears it and resets the session status.
+async function setFunpaySessionCookies(jar, opts = {}) {
+  const enc = jar && Object.keys(jar).length ? require("./secretBox").encrypt(JSON.stringify(jar)) : "";
+  await updateSettings((s) => {
+    const cur = funpayResaleBlock(s);
+    const next = { ...cur, session: enc };
+    if (!enc) Object.assign(next, { sessionOk: false, sessionUser: "", sessionUserId: 0, sessionError: "", balanceUsd: null });
+    s.funpayResale = next;
+  });
+  try {
+    require("./systemLog").logEvent({
+      category: "settings",
+      action: enc ? "funpay_session_saved" : "funpay_session_removed",
+      actor: opts.actor || "system",
+      subject: "funpayResale.session",
+      meta: { configured: !!enc },
+    });
+  } catch {
+    /* never block a settings write on its audit */
+  }
+}
+
+// Status fields only (no audit line: this runs on every check).
+async function setFunpaySessionStatus({ ok, user, userId, error, balanceUsd } = {}) {
+  await updateSettings((s) => {
+    const cur = funpayResaleBlock(s);
+    const next = { ...cur, sessionOk: !!ok, sessionCheckedAt: new Date().toISOString(), sessionError: String(error || "").slice(0, 300) };
+    if (user !== undefined) next.sessionUser = String(user || "");
+    if (userId !== undefined) next.sessionUserId = Number(userId) || 0;
+    if (typeof balanceUsd === "number" && Number.isFinite(balanceUsd)) {
+      next.balanceUsd = Math.round(balanceUsd * 100) / 100;
+      next.balanceSeenAt = new Date().toISOString();
+    }
+    s.funpayResale = next;
+  });
+}
+
+async function markFunpayCommissioned(opts = {}) {
+  let was = false;
+  await updateSettings((s) => {
+    const cur = funpayResaleBlock(s);
+    was = !!cur.commissioned;
+    s.funpayResale = { ...cur, commissioned: true, commissionedAt: cur.commissionedAt || new Date().toISOString() };
+  });
+  if (!was) {
+    try {
+      require("./systemLog").logEvent({
+        category: "settings",
+        action: "funpay_resale_commissioned",
+        actor: opts.actor || "system",
+        subject: "funpayResale.commissioned",
+        meta: {},
+      });
+    } catch {
+      /* never block a settings write on its audit */
+    }
+  }
+}
+
 module.exports = {
   loadSettings,
   saveSettings,
+  getFunpayResale,
+  setFunpayResale,
+  getFunpaySessionCookies,
+  setFunpaySessionCookies,
+  setFunpaySessionStatus,
+  markFunpayCommissioned,
+  FUNPAY_RESALE_DEFAULTS,
   getRequire2fa,
   setRequire2fa,
   getAutoFarm,

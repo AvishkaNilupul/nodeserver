@@ -155,7 +155,12 @@ function parseOfferPage(html) {
     }
   }
   const seller = /<div class="media-user-name">\s*<a href="https:\/\/funpay\.com\/(?:en\/)?users\/(\d+)\/"[^>]*>([^<]+)<\/a>/.exec(h);
+  // The "back" link names the category: <a href=".../lots/<node>/" class="js-back-link">…<span class="inside">Name</span>
+  const back = /<a href="https:\/\/funpay\.com\/(?:en\/)?(lots|chips)\/(\d+)\/" class="js-back-link">[\s\S]*?<span class="inside">([^<]*)<\/span>/.exec(h);
   return {
+    node: back ? back[2] : null,
+    nodeKind: back ? back[1] : null,
+    category: back ? decodeEntities(back[3]).trim() : null,
     offerId: buyForm ? buyForm.fields.offer_id || null : null,
     csrfToken: app ? app.csrfToken : null,
     userId: app ? app.userId : 0,
