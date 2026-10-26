@@ -226,6 +226,12 @@
           superOnly: true,
         },
         {
+          href: "/funpay-resale.html",
+          label: "FunPay Resale",
+          icon: ICONS.listings,
+          superOnly: true,
+        },
+        {
           href: "/bulk-orders.html",
           label: "Bulk orders",
           icon: ICONS.bulkOrders,

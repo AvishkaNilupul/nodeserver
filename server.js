@@ -510,6 +510,13 @@ app.get("/playerauctions.html", requireSuperadmin, enforce2fa, (req, res) => {
   res.sendFile(path.join(__dirname, "public", "playerauctions.html"));
 });
 
+// FunPay resale console (utils/funpayResale.js): holds the FunPay login box and
+// the buy buttons, so it is superadmin + 2FA like the other money pages.
+app.get("/funpay-resale.html", requireSuperadmin, enforce2fa, (req, res) => {
+  res.set("Cache-Control", "no-store");
+  res.sendFile(path.join(__dirname, "public", "funpay-resale.html"));
+});
+
 app.get("/backup.html", requireSuperadmin, enforce2fa, (req, res) => {
   res.sendFile(path.join(__dirname, "public", "backup.html"));
 });
@@ -746,6 +753,13 @@ app.use(enforce2fa, noclaimFarmRoutes);
 // member.playerauctions.com in a browser — signing in there rotates the session
 // id and kills the server's copy, which is the one thing that stops delivery.
 app.use(enforce2fa, playerauctionsRoutes);
+// FunPay resale API (every route requireSuperadmin). Loaded guarded: a broken
+// optional module must never stop the server from starting.
+try {
+  app.use(enforce2fa, require("./routes/funpayResaleRoutes"));
+} catch (err) {
+  console.error("funpayResaleRoutes failed to load:", err.message);
+}
 app.use(enforce2fa, unclaimedAutoRoutes);
 // No-claim Shop listings (docs/NOCLAIM-SHOP-LISTINGS-CONTRACT.md): the Listings
 // page's No-claim picker, sets and stock. Every route inside is superadmin-only.
@@ -966,6 +980,14 @@ mongoose
       require("./utils/bulkPacks/loop").start();
     } catch (err) {
       console.error("bulkPacks loop failed to start:", err.message);
+    }
+    // FunPay resale watcher: public FunPay + Eldorado reads for the deals list,
+    // and the pause/resume of FunPay-backed listings. Buying happens only in the
+    // Eldorado fulfiller (and ships off). Guarded for the same crash-loop reason.
+    try {
+      require("./utils/funpayWatch").start();
+    } catch (err) {
+      console.error("funpayWatch failed to start:", err.message);
     }
     // No-claim fleet allocator: sizes each no-claim game's farming fleet and its
     // auto-list shelf from what the game actually sells. It MEASURES every pass
