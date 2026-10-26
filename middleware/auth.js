@@ -6,12 +6,22 @@ function wantsHtml(req) {
   return req.accepts(["json", "html"]) === "html";
 }
 
+// Send a signed-out browser to the login page, remembering the page it asked
+// for so the login page can return there (it only follows same-site paths).
+function loginRedirect(req) {
+  const url = String(req.originalUrl || "");
+  if (req.method !== "GET" || !url.startsWith("/") || url.startsWith("//")) {
+    return "/admin-login.html";
+  }
+  return "/admin-login.html?next=" + encodeURIComponent(url);
+}
+
 function requireAdmin(req, res, next) {
   if (req.session?.admin) {
     return next();
   }
   if (wantsHtml(req)) {
-    return res.redirect("/admin-login.html");
+    return res.redirect(loginRedirect(req));
   }
   return res.status(401).json({ success: false, message: "Unauthorized" });
 }
@@ -20,7 +30,7 @@ function requireSuperadmin(req, res, next) {
   const admin = req.session?.admin;
   if (!admin) {
     if (wantsHtml(req)) {
-      return res.redirect("/admin-login.html");
+      return res.redirect(loginRedirect(req));
     }
     return res.status(401).json({ success: false, message: "Unauthorized" });
   }

@@ -15,6 +15,7 @@ const otplib = require("otplib");
 
 const { loadSettings, saveSettings } = require("./settings");
 const { encrypt, decrypt } = require("./secretBox");
+const { gameflipGone } = require("./gameflipGone");
 
 // Which credential fields each marketplace needs.
 const FIELDS = {
@@ -273,6 +274,20 @@ async function gfUploadPhoto(keys, listingId, imagePath) {
   );
 }
 
+// Nothing may go on sale on Gameflip until the owner says Gameflip approved the
+// Game Accounts category (owner, 2026-10-16: "prevent anything from getting
+// listed on gameflip untill we get the approval"). Every path that lists there
+// — auto-lister, unclaimed engine, rent-farm buffer, relist lane, bulk packs,
+// lots, the Listings page — creates the listing through gameflipPublish, so one
+// gate here stops them all. It refuses before any API call: nothing is created
+// on Gameflip, and each caller's ordinary failure path hands its stock back.
+// Read from the raw settings file on every call, so flipping the switch needs
+// no restart; a missing key means not frozen.
+function gameflipFrozen() {
+  const af = (loadSettings() || {}).autoFarm;
+  return !!(af && af.gameflipFrozen === true);
+}
+
 // Create a digital listing and put it on sale. Returns { externalId, url }.
 // When `autoDeliverCode` is set the listing is created as an auto-delivered
 // digital code: Gameflip stores the text and hands it to the buyer the moment
@@ -284,6 +299,12 @@ async function gameflipPublish({
   imagePath,
   autoDeliverCode,
 }) {
+  if (gameflipFrozen()) {
+    throw new Error(
+      "Gameflip is frozen until the Game Accounts approval — nothing may be listed there " +
+        "(switch autoFarm.gameflipFrozen)",
+    );
+  }
   const keys = requireKeys("gameflip");
   const cents = Math.round(Number(priceUsd) * 100);
   if (!Number.isFinite(cents) || cents < 75) {
@@ -497,11 +518,12 @@ async function gameflipListingState(listingId) {
 // delete means it is already gone, which is the goal. `status` is the state the
 // caller just read, so a listing already off sale is not patched again.
 //
-// Success is only reported once a read-back answers 404. Under its limiter
-// Gameflip answers 200 to writes it never applies (gfTakeOffSale above exists
-// for that), and the caller hands the listing's account back on success — a
-// swallowed delete would leave that account behind a listing that still holds
-// its code.
+// Success is only reported once a read-back answers Gameflip's own 404. Under
+// its limiter Gameflip answers 200 to writes it never applies (gfTakeOffSale
+// above exists for that), and the caller hands the listing's account back on
+// success — a swallowed delete would leave that account behind a listing that
+// still holds its code. Returns { deleted, confirmed: true }; anything short
+// of that proof throws.
 async function gameflipEndListing(listingId, { status = "onsale" } = {}) {
   const keys = requireKeys("gameflip");
   const st = String(status || "");
@@ -525,26 +547,38 @@ async function gameflipEndListing(listingId, { status = "onsale" } = {}) {
       throw apiError("Gameflip end listing (off sale)", e);
     }
   }
+  // `deleted`: this call's delete went through (false: the delete itself
+  // answered 404, so the listing was most likely gone already).
+  let deleted = true;
   try {
     await axios.delete(GF_API + "/listing/" + listingId, {
       headers: gfHeaders(keys),
       timeout: 20000,
     });
   } catch (e) {
-    if (e && e.response && e.response.status === 404) return { deleted: false };
-    throw apiError("Gameflip end listing (delete)", e);
+    // A 404 on the delete is the DELETE's answer, not yet the listing's: it
+    // is read back like any other, so "ended" never rests on a call nobody
+    // checked (this used to return here, with nothing read).
+    if (!(e && e.response && e.response.status === 404)) {
+      throw apiError("Gameflip end listing (delete)", e);
+    }
+    deleted = false;
   }
   let still = "";
   try {
     still = (await gameflipListingStatus(listingId)) || "?";
   } catch (e) {
-    if (e && e.status === 404) return { deleted: true };
+    // Gameflip's OWN 404 for the listing (utils/gameflipGone: the status and
+    // its error envelope) — the one answer that says it is gone. `confirmed`
+    // tells a caller it need not ask again.
+    if (gameflipGone(e)) return { deleted, confirmed: true };
     throw apiError("Gameflip end listing (confirm)", e);
   }
-  // Deleted listings answer 404 (verified again 2026-10-01); a "deleted" status,
-  // should Gameflip ever answer one instead, is just as gone. Nothing broader:
-  // a status that might still hold the code must not read as deleted.
-  if (/^deleted$/i.test(String(still))) return { deleted: true };
+  // Deleted listings answer 404 (verified again 2026-10-01 and 2026-10-11); a
+  // "deleted" status, should Gameflip ever answer one instead, is just as
+  // gone. Nothing broader: a status that might still hold the code must not
+  // read as deleted.
+  if (/^deleted$/i.test(String(still))) return { deleted, confirmed: true };
   const err = new Error(
     "Gameflip end listing: " + listingId + ' still exists after the delete (status "' +
       still + '") — left as it is for the next pass',
@@ -1638,9 +1672,11 @@ function digisellerBlockState(now = Date.now()) {
 // Plati are not touched by this; it only gates what is added.
 function digisellerTakesNewStock() {
   if (dsBlocked) return false;
-  const s = loadSettings() || {};
-  const af = s.autoFarm && typeof s.autoFarm === "object" ? s.autoFarm : {};
-  return af.platiEnabled !== false;
+  // The MERGED block (getAutoFarm puts AUTO_FARM_DEFAULTS under the stored
+  // values). The raw block read a key it did not carry as "on", so a settings
+  // file written before platiEnabled existed never saw its default — off since
+  // 2026-10-03.
+  return require("./settings").getAutoFarm().platiEnabled !== false;
 }
 
 // Returns { stock, reason }: `stock` is the unit count, or null when it could
@@ -2660,9 +2696,9 @@ async function ggselFinalizeStock(offerId) {
 // products on one? Only while the owner's switch is on (settings
 // autoFarm.ggselEnabled). Offers already on GGSel are not touched by this.
 function ggselTakesNewStock() {
-  const s = loadSettings() || {};
-  const af = s.autoFarm && typeof s.autoFarm === "object" ? s.autoFarm : {};
-  return af.ggselEnabled !== false;
+  // The merged block, as digisellerTakesNewStock: a missing key reads as its
+  // default (on, for GGSel), never as whatever a raw read makes of undefined.
+  return require("./settings").getAutoFarm().ggselEnabled !== false;
 }
 
 async function ggselDelist(offerId) {
@@ -3121,13 +3157,22 @@ async function g2gUpdateOffer(offerId, fields) {
     }
     body.unit_price = price;
   }
-  // Stock on a Game Items offer is actual_qty; available_qty is derived
-  // (actual minus whatever checkout is holding) and is not settable.
+  // Stock on a Game Items offer READS BACK as actual_qty, but an update only
+  // takes it as `qty`: a PUT carrying actual_qty alone is answered 400 "no
+  // attributes to be updated", and next to another field it is dropped without
+  // a word (the price landed, the stock did not — caught by a read-back on
+  // 2026-10-13; `qty` alone set it). Every caller of g2gSetQuantity swallows
+  // its error, so until then no quantity on the shelf had followed the stock:
+  // 89 of 92 live offers showed a wrong number, and an offer delisted at zero
+  // never came back, because this write, in front of its relist, threw. Both
+  // names are sent, as the create does. available_qty is derived (actual minus
+  // whatever checkout is holding) and is not settable.
   if (f.stock != null && f.stock !== "") {
     const qty = Number(f.stock);
     if (!Number.isFinite(qty) || qty < 0) {
       throw new Error("G2G needs a stock of 0 or more");
     }
+    body.qty = Math.round(qty);
     body.actual_qty = Math.round(qty);
   }
   if (f.title != null) body.title = String(f.title).slice(0, 128);
@@ -5038,20 +5083,74 @@ async function eldoradoUpdateOffer(offerId, patch = {}) {
   return await eldoradoOffer(offerId);
 }
 
+// Eldorado's refusal of a quantity that sits under one of the offer's own
+// quantity-discount tiers: HTTP 400, "Invalid discount quantity of: 10. It
+// must be greater than 1 and less or equal to 9." (seen live 2026-10-10, on
+// create and on a quantity push alike). Raw axios error or one eldError made.
+function eldDiscountRefusal(e) {
+  const status = (e && e.response && e.response.status) || (e && e.status) || 0;
+  if (status !== 400) return false;
+  const body = e && e.response && e.response.data;
+  let text = "";
+  if (body && typeof body === "object" && Array.isArray(body.messages)) text = body.messages.join("; ");
+  else if (typeof body === "string") text = body;
+  return /Invalid discount quantity/i.test(text + " " + String((e && e.message) || ""));
+}
+
+// The quantity push, with its one known refusal handled. `io` is the four
+// calls it makes ({ put, read, update, fail } — the real ones below, fakes in
+// tests/eldoradoQuantityDiscount.test.js).
+//
+// An offer that sells with quantity discounts ("5 or more: 10 % off") cannot be
+// set BELOW its largest tier — and every caller of this push swallows the
+// error, so the offer simply went on advertising its old, higher quantity:
+// stock the farm no longer had, on sale. A tier nobody can reach any more is
+// worth nothing; the true quantity is worth a paid order. So on that refusal
+// the tiers above the new quantity are dropped and the quantity is set with
+// them, in the one details call that carries both. Anything else fails as it
+// always did. (Quantity 0 is not handled here: the offer is paused instead.)
+async function eldSetQuantityVia(io, offerId, quantity) {
+  const q = Math.max(0, parseInt(quantity, 10) || 0);
+  try {
+    await io.put(offerId, q);
+  } catch (e) {
+    if (!(q >= 1 && eldDiscountRefusal(e))) return io.fail(e);
+    const cur = await io.read(offerId);
+    const tiers = ((cur && cur.volumeDiscounts) || []).filter(
+      (t) => t && Number(t.quantity) > 1 && Number(t.quantity) <= q,
+    );
+    const after = await io.update(offerId, { quantity: q, volumeDiscounts: tiers });
+    if (!after || Number(after.quantity) !== q) {
+      const err = new Error(
+        "Eldorado set quantity failed: " + q + " did not take even with the quantity discounts above it removed",
+      );
+      err.__eld = true;
+      throw err;
+    }
+    console.log(
+      "eldorado offer " + offerId + ": quantity " + q + " is under a quantity-discount tier — kept " +
+        tiers.length + " of " + ((cur && cur.volumeDiscounts) || []).length + " tier(s) so the quantity could be set",
+    );
+  }
+  return q;
+}
+
 // Restock without rewriting the offer. The body is a BARE integer, not an
 // object — this is the lever the farm uses to keep stock in step.
 async function eldoradoSetQuantity(offerId, quantity) {
-  const q = Math.max(0, parseInt(quantity, 10) || 0);
-  try {
-    await eldRequest(
-      "PUT",
-      "/api/v1/item-management/me/offers/" + encodeURIComponent(offerId) + "/quantity",
-      { data: q },
-    );
-  } catch (e) {
-    eldError("Eldorado set quantity", e);
-  }
-  return q;
+  return eldSetQuantityVia(
+    {
+      put: (id, q) =>
+        eldRequest("PUT", "/api/v1/item-management/me/offers/" + encodeURIComponent(id) + "/quantity", {
+          data: q,
+        }),
+      read: (id) => eldoradoOffer(id),
+      update: (id, patch) => eldoradoUpdateOffer(id, patch),
+      fail: (e) => eldError("Eldorado set quantity", e),
+    },
+    offerId,
+    quantity,
+  );
 }
 
 async function eldoradoReprice(offerId, priceUsd) {
@@ -6603,6 +6702,7 @@ module.exports = {
   gameflipTest,
   gameflipOwnerId,
   gameflipPublish,
+  gameflipFrozen,
   gameflipListingStatus,
   gameflipListingState,
   gameflipIsExpired,
@@ -6723,6 +6823,8 @@ module.exports = {
   eldoradoOfferUrl,
   eldoradoUpdateOffer,
   eldoradoSetQuantity,
+  eldSetQuantityVia,
+  eldDiscountRefusal,
   eldoradoReprice,
   eldoradoDelist,
   eldoradoRelist,

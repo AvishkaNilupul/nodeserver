@@ -69,6 +69,9 @@
     epicAccounts:
       '<rect x="2" y="4" width="20" height="16" ' +
       'rx="2"></rect><path d="M2 10h20"></path><path d="M6 15h4"></path>',
+    soop:
+      '<circle cx="12" cy="12" r="10"></circle>' +
+      '<polygon points="10 8 16 12 10 16 10 8"></polygon>',
     backup:
       '<ellipse cx="12" cy="5" rx="9" ry="3"></ellipse>' +
       '<path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"></path>' +
@@ -229,6 +232,12 @@
           superOnly: true,
         },
         {
+          href: "/bulk-packs.html",
+          label: "Bulk packs",
+          icon: ICONS.bulkOrders,
+          superOnly: true,
+        },
+        {
           href: "/integrity.html",
           label: "Integrity",
           icon: ICONS.integrity,
@@ -263,6 +272,25 @@
           href: "/epic-accounts.html",
           label: "Epic accounts",
           icon: ICONS.epicAccounts,
+          superOnly: true,
+        },
+      ],
+    },
+    {
+      key: "soop",
+      label: "SOOP",
+      icon: ICONS.soop,
+      items: [
+        {
+          href: "/soop.html",
+          label: "SOOP farm",
+          icon: ICONS.soop,
+          superOnly: true,
+        },
+        {
+          href: "/chzzk.html",
+          label: "CHZZK farm",
+          icon: ICONS.soop,
           superOnly: true,
         },
       ],
