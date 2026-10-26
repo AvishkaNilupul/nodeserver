@@ -90,6 +90,9 @@ const REAL_DEPS = {
   // (its sessions, the last campaign scan, the egress), so like the loops above
   // this is the instance the server started and never a fresh, empty one.
   soopFarm: () => loadedModule("./soopFarm"),
+  // The auto-lister the server started, for its last pass (held in memory).
+  // autolist.running reads it only when no ledger row is `listed`.
+  unclaimedAutoListLoaded: () => loadedModule("./unclaimedAutoList"),
   // How long this process has been up. Those in-memory stamps start empty at
   // every restart, so the restart is where a loop's clock starts.
   uptimeMs: () => () => process.uptime() * 1000,
@@ -795,6 +798,104 @@ function judgeLoop({
   else if (ageMs <= warnMs) status = "warn";
   else status = "fail";
   return { ...out, status, ageMs, ranSinceStart, inGrace, startedAt, fromSince };
+}
+
+// The auto-lister's verdict when no ledger row is `listed`. Pure: the clock
+// and the process age are arguments.
+//
+// The DB stamp autolist.running normally reads is written only on listed rows,
+// so when everything has sold it stops moving while the lister keeps running.
+// That turned the check red on a healthy loop for hours (2026-10-24). With
+// nothing listed, the evidence is the lister's own last pass, timed from the
+// restart like judgeLoop: a stamp older than the boot can only be carried over,
+// and a loop with no pass since the boot is timed from the boot. So a restart
+// hides a dead lister for one budget at most. No pass yet inside that budget is
+// `unknown`, not `ok`.
+function judgeIdleLister({ lastAt, uptimeMs, now, budgetMs } = {}) {
+  const nowMs = now instanceof Date ? now.getTime() : Date.now();
+  const up = Number(uptimeMs);
+  const bootAt =
+    uptimeMs != null && Number.isFinite(up) && up >= 0 ? nowMs - up : null;
+  const last = stampMs(lastAt);
+  const ranSinceStart = last != null && (bootAt == null || last >= bootAt);
+  if (ranSinceStart) {
+    const ageMs = Math.max(0, nowMs - last);
+    return { status: ageMs > budgetMs ? "fail" : "ok", ageMs, ranSinceStart, bootAt };
+  }
+  if (bootAt == null) return { status: "unknown", ageMs: null, ranSinceStart, bootAt };
+  const ageMs = Math.max(0, nowMs - bootAt);
+  return { status: ageMs > budgetMs ? "fail" : "unknown", ageMs, ranSinceStart, bootAt };
+}
+
+// autolist.running when no ledger row is `listed`: reads the lister's last pass
+// from the copy the server runs. Any read problem is `unknown`, never a crash.
+async function idleListerVerdict(ctx, { lister, tickMs, budget, threshold }) {
+  const evidence =
+    "Nothing is listed, so no ledger row gets the DB stamp. The evidence is " +
+    "the lister's own last pass, held in memory by the server that runs it. " +
+    "Tick is " +
+    fmtAge(tickMs) +
+    "; " +
+    AUTOLIST_STALE_TICKS +
+    " missed ticks is the budget.";
+  let st = null;
+  try {
+    st = lister && typeof lister.status === "function" ? lister.status() : null;
+  } catch {
+    st = null;
+  }
+  if (!st) {
+    return {
+      status: "unknown",
+      measured: null,
+      threshold,
+      summary:
+        "Nothing is listed right now, and this run cannot see the lister's " +
+        "last pass (it is not inside the server that runs the lister)",
+      detail: evidence,
+    };
+  }
+  let up = null;
+  try {
+    const f = ctx.dep("uptimeMs");
+    const n = Number(typeof f === "function" ? f() : f);
+    up = Number.isFinite(n) && n >= 0 ? n : null;
+  } catch {
+    up = null;
+  }
+  const v = judgeIdleLister({
+    lastAt: st.lastRun && st.lastRun.at,
+    uptimeMs: up,
+    now: ctx.now(),
+    budgetMs: budget,
+  });
+  let summary;
+  if (v.ranSinceStart) {
+    summary =
+      "Nothing is listed right now; the lister's last pass started " +
+      fmtAge(v.ageMs) +
+      " ago";
+  } else if (v.status === "fail") {
+    summary =
+      "Nothing is listed, and no lister pass has finished since the restart " +
+      fmtAge(v.ageMs) +
+      " ago";
+  } else if (v.bootAt != null) {
+    summary =
+      "Nothing is listed, and the server restarted " +
+      fmtAge(v.ageMs) +
+      " ago — the lister's first pass is not proved yet";
+  } else {
+    summary = "Nothing is listed, and the lister has no pass on record in this process";
+  }
+  if (st.running) summary += " (a pass is running now)";
+  return {
+    status: v.status,
+    measured: fmtAge(v.ageMs),
+    threshold,
+    summary,
+    detail: evidence,
+  };
 }
 
 // An error a hook or the gate reports, as one short line: a string, or an
@@ -2639,6 +2740,15 @@ const CHECKS = [
     // writes to the DB on every row it touches. The module's own `lastRun` is
     // in-memory and resets on every restart, so it can only ever say "fine".
     async run(ctx) {
+      // Read the server's own copy of the lister FIRST: the TICK_MS read below
+      // loads the module, and a copy loaded by this check (a CLI run) has never
+      // run, so it would read as a dead lister.
+      let lister = null;
+      try {
+        lister = ctx.dep("unclaimedAutoListLoaded");
+      } catch {
+        lister = null;
+      }
       const UnclaimedAccount = ctx.dep("UnclaimedAccount");
       const config = ctx.dep("settings").getAutoFarm();
       const tickMs =
@@ -2660,34 +2770,21 @@ const CHECKS = [
           detail: "Nothing is broken; nothing is selling either.",
         };
       }
+      // The stamp is only written to rows the check pass actually walks, and it
+      // only walks `listed` ledgers. With none — everything sold or released —
+      // a perfectly healthy pass runs its full tick and writes nothing, so the
+      // newest stamp (left on a row that has since sold) just keeps ageing.
+      // Judging that stamp failed a healthy lister for hours on 2026-10-24.
+      // Crying wolf is how a monitor gets ignored, so with nothing listed the
+      // lister's own last pass is the evidence instead.
+      const listed = await UnclaimedAccount.countDocuments({ status: "listed" });
+      if (!listed) return idleListerVerdict(ctx, { lister, tickMs, budget, threshold });
       const row = await UnclaimedAccount.findOne(
         { lastCheckedAt: { $ne: null } },
         { lastCheckedAt: 1 },
       )
         .sort({ lastCheckedAt: -1 })
         .lean();
-      // The stamp is only written to rows the check pass actually walks, and it
-      // only walks `listed` ledgers. With none — everything sold or released —
-      // a perfectly healthy pass runs its full tick and writes nothing, and an
-      // hour later this would report `fail` on a loop that is working fine.
-      // Crying wolf is how a monitor gets ignored, so the absence of anything to
-      // stamp is `unknown`, not a fault.
-      if (!row) {
-        const listed = await UnclaimedAccount.countDocuments({ status: "listed" });
-        if (!listed) {
-          return {
-            status: "unknown",
-            measured: 0,
-            threshold,
-            summary:
-              "No listed ledger row exists, so the pass has nothing to stamp — " +
-              "the lister cannot be proved either way right now",
-            detail:
-              "Evidence is UnclaimedAccount.lastCheckedAt, which the check pass " +
-              "writes only on rows with status 'listed'.",
-          };
-        }
-      }
       const age = row ? ageMs(row.lastCheckedAt, ctx.now()) : null;
       return {
         status: statusForAge(age, budget),
@@ -3718,6 +3815,7 @@ module.exports = {
   CHECK_TIMEOUT_MS,
   // Farm loops + host RAM (docs/LIVE-FIXES-1003.md §A6).
   judgeLoop,
+  judgeIdleLister,
   stampMs,
   hookError,
   fmtClock,

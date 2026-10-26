@@ -41,7 +41,9 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
   const esc = game.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   const rows = await MarketplaceListing.find(
-    { marketplace: "eldorado", status: "active", title: new RegExp("^" + esc + "\\b", "i") },
+    // bulkOfferId: null — a bulk pack is priced for N accounts and is never
+    // repriced to a single-account price (docs/bulk-packs/CONTRACT.md).
+    { marketplace: "eldorado", status: "active", bulkOfferId: null, title: new RegExp("^" + esc + "\\b", "i") },
     { externalId: 1, title: 1, price: 1, origin: 1, unclaimedGame: 1 },
   ).lean();
   const targets = rows.filter((r) => !/Automatic\s+Farming/i.test(r.title || ""));

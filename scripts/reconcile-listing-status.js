@@ -116,11 +116,32 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   const ready = PREPARE[market] ? await PREPARE[market]() : null;
   const pace = PACE_MS[market] || 250;
 
-  const rows = await MarketplaceListing.find(
+  const all = await MarketplaceListing.find(
     { marketplace: market, status: "active" },
-    { externalId: 1, title: 1, price: 1, status: 1, origin: 1, lastError: 1 },
+    {
+      externalId: 1, title: 1, price: 1, status: 1, origin: 1, lastError: 1,
+      autoPaused: 1, bulkOfferId: 1,
+    },
   ).lean();
-  console.log(market + ": " + rows.length + " row(s) we call active\n");
+  // Two kinds of active row are off sale ON PURPOSE and stay "active" by design,
+  // so they are not drift and are never read or written here:
+  //  - autoPaused: a stock sync paused it at zero stock and resumes it when
+  //    stock returns (eldoradoFulfiller.syncBundleStock, the g2g and
+  //    PlayerAuctions fulfillers, unclaimedListingAudit). Delisting one takes it
+  //    out of that loop for good, since nothing resumes a delisted row: that is
+  //    how Eldorado 48a19c2e was delisted on 2026-09-09 and lost its management.
+  //  - bulkOfferId: a bulk pack row, whose loop pauses and takes down its own
+  //    offer (docs/bulk-packs/FIXES-1.md R3-8).
+  // The eldorado.offers health check applies the same rule.
+  const ours = all.filter((r) => r.autoPaused || r.bulkOfferId);
+  const rows = all.filter((r) => !(r.autoPaused || r.bulkOfferId));
+  console.log(
+    market + ": " + all.length + " row(s) we call active" +
+      (ours.length
+        ? ", " + ours.length + " of them paused by our own stock sync or bulk loop — not judged"
+        : "") +
+      "\n",
+  );
 
   const drift = [];
   const unreadable = [];
