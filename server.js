@@ -989,6 +989,13 @@ mongoose
     } catch (err) {
       console.error("funpayWatch failed to start:", err.message);
     }
+    // FunPay login watch: pages once and pauses FunPay-backed listings when the
+    // owner's FunPay login has expired, resumes its own pauses when it works again.
+    try {
+      require("./utils/funpaySessionWatch").start();
+    } catch (err) {
+      console.error("funpaySessionWatch failed to start:", err.message);
+    }
     // No-claim fleet allocator: sizes each no-claim game's farming fleet and its
     // auto-list shelf from what the game actually sells. It MEASURES every pass
     // (so the panel and the history exist either way) but only ACTS when
