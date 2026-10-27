@@ -17,8 +17,8 @@
   }
   async function signupApi(path, options) {
     let response;
-    try { response = await fetch(path, {credentials:'same-origin',cache:'no-store',...options}); }
-    catch { throw new Error('Cannot reach the signup server. Refresh this page on https://redeemhub.lets.game/epic-accounts.html and try again.'); }
+    try { const localToken=document.querySelector?.('meta[name="epic-local-token"]')?.content; response = await fetch(path, {credentials:'same-origin',cache:'no-store',...options,headers:{...(options?.headers||{}),...(localToken?{'X-Local-Token':localToken}:{})}}); }
+    catch { throw new Error('Cannot reach the local generator. Reopen http://127.0.0.1:4107/epic-accounts.html and check its background service.'); }
     const data = await response.json().catch(() => null);
     if (!response.ok || !data || data.success === false) throw new Error(data?.message || (response.status === 401 ? 'Sign in to the server again.' : 'Signup service unavailable (HTTP ' + response.status + ').'));
     return data;
@@ -27,7 +27,7 @@
     start.disabled = true;
     let reserved = false;
     try {
-      status.textContent = 'Checking signup service…';
+      status.textContent = 'Checking local generator…';
       await signupApi('/api/epic/signup/health');
       await extension('epicgen-ping', {}, 3000);
       status.textContent = 'Reserving an Outlook inbox…';
@@ -48,7 +48,7 @@
     const resume = document.getElementById(mode === 'login' ? 'signupRecover' : 'signupResume');
     resume.disabled = true; start.disabled = true;
     try {
-      status.textContent = 'Checking signup service…';
+      status.textContent = 'Checking local generator…';
       await signupApi('/api/epic/signup/health');
       await extension('epicgen-ping', {}, 3000);
       const recent = await signupApi('/api/epic/signup/recent?limit=1');
@@ -79,7 +79,7 @@
     const p = ev.data.payload;
     if (active && p.sessionId !== active) return;
     if (p.kind === 'verified') {
-      status.textContent = 'Epic account saved.' + (p.warning ? ' ' + p.warning : '');
+      status.textContent = 'Epic account saved locally.' + (p.warning ? ' ' + p.warning : '');
       active = null; start.disabled = false;
       if (typeof load === 'function') load();
     } else if (p.kind === 'failed') {

@@ -5,5 +5,5 @@ test('an unavailable server is explained before any Outlook reservation or exten
  vm.runInNewContext(fs.readFileSync(require.resolve('../public/epic-signup-panel.js'),'utf8'),{
   document:{getElementById:id=>nodes[id]},window:{addEventListener(){},postMessage(){extensionCalls++;}},fetch:async()=>{throw TypeError('Failed to fetch');},setTimeout,clearTimeout,location:{origin:'https://panel.test'},
  });
- await nodes.signupStart.click();assert.equal(extensionCalls,0);assert.match(nodes.signupStatus.textContent,/Cannot reach the signup server/);assert.equal(nodes.signupStart.disabled,false);
+ await nodes.signupStart.click();assert.equal(extensionCalls,0);assert.match(nodes.signupStatus.textContent,/Cannot reach the local generator/);assert.equal(nodes.signupStart.disabled,false);
 });

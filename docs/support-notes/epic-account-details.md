@@ -60,3 +60,14 @@ reservation. The former localhost:4107 address is a loopback-only shortcut to
 the authenticated production panel, run at login by a LaunchAgent. It exposes
 no local admin session or database. No new Epic account is created by service
 health/fixture tests.
+
+## Local-only generator — supersedes the hosted signup repair
+
+The generator now runs independently at 127.0.0.1:4107, with its own encrypted
+file vault and per-process UI token. No website session, production credentials
+or MongoDB is loaded by the runtime. The old redirect LaunchAgent is replaced
+by com.avishka.epic-account-generator. Server generation controls and route
+mount are removed; the previously requested hosted account-details and manual
+claim system remain. Local accounts are never uploaded automatically.
+
+See tools/epic-signup/README.md for startup, storage, recovery and backup.

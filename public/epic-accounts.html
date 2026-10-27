@@ -513,19 +513,6 @@
       </div>
 
       <div class="card">
-        <h2>Generate with extension</h2>
-        <p class="hint">Uses an Outlook inbox from your local mail pool. Keep the Outlook reader running on port 3999 and load extension version 1.3.0. Complete any captcha in the Epic tab. Only one signup runs at a time.</p>
-        <div class="row">
-          <button class="btn btn-primary" id="signupStart">Create Epic account</button>
-          <button class="btn" id="signupResume">Resume latest signup</button>
-          <button class="btn" id="signupRecover">Recover created account</button>
-          <button class="btn" id="signupCancel">Cancel signup</button>
-        </div>
-        <p class="hint"><label><input type="checkbox" id="signupProxy" /> Use residential proxy in a separate private window (close other private windows first)</label></p>
-        <p class="hint" id="signupStatus">Ready. Account credentials are stored encrypted.</p>
-      </div>
-
-      <div class="card">
         <h2>Accounts</h2>
         <p class="hint" id="statusLine">Loading…</p>
         <div class="row">
@@ -795,7 +782,6 @@
 
       load();
     </script>
-    <script src="/epic-signup-panel.js" defer></script>
     <script src="/epic-account-details.js" defer></script>
   </body>
 </html>
