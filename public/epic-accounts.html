@@ -12,6 +12,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Epic Accounts</title>
+    <link rel="stylesheet" href="/epic-account-details.css" />
     <style>
       :root {
         --bg: #f6f7fb;
@@ -494,8 +495,7 @@
             >this authorization link</a
           >
           and paste the <b>authorizationCode</b> value below (codes are
-          single-use and expire in ~5 minutes). No password or cookies are
-          stored — only an encrypted refresh token.
+          single-use and expire in ~5 minutes). This connects the account for library sync and claim links. Save its login details separately in the Account details tab.
         </p>
         <div class="row">
           <input
@@ -782,5 +782,6 @@
 
       load();
     </script>
+    <script src="/epic-account-details.js" defer></script>
   </body>
 </html>

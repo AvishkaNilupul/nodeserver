@@ -8,6 +8,12 @@ const epicAccountSchema = new mongoose.Schema(
     accountId: { type: String, required: true, unique: true, index: true },
     displayName: { type: String, default: "" },
     label: { type: String, default: "" },
+    email: { type: String, default: "" }, // encrypted
+    password: { type: String, default: "" }, // encrypted
+    totpSecret: { type: String, default: "" }, // encrypted
+    source: { type: String, default: "manual" },
+    accountDetails: { type: String, default: "" }, // encrypted profile JSON
+    detailsUpdatedAt: { type: Date, default: null },
     // Encrypted OAuth refresh token + its expiry (accounts need a fresh
     // authorization code once the refresh token expires, ~1 year).
     refreshToken: { type: String, default: "" },
