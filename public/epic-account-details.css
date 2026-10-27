@@ -9,3 +9,12 @@
 #epic-detail-account { max-width:100%; }
 #epic-detail-secrets { padding:12px; border:1px solid var(--line); border-radius:9px; }
 @media(max-width:700px) { .epic-detail-grid { grid-template-columns:1fr; } main { min-width:0; padding:20px 14px; } #epic-detail-form .row { align-items:stretch; } }
+@media(max-width:768px) {
+  .epic-tabs { gap:6px; margin-bottom:14px; }
+  .epic-tabs .btn { flex:1 1 0; }
+  #epic-details-panel .row > label { flex:1 1 100%; }
+  #epic-detail-account, #epic-detail-refresh, #epic-detail-form .row .btn { flex:1 1 100%; }
+  /* 16px text stops phones zooming in when a field is tapped. */
+  #epic-detail-account, .epic-detail-grid input, .epic-detail-notes textarea { font-size:16px; }
+  #epic-detail-games { padding-left:20px; }
+}

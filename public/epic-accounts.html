@@ -161,6 +161,8 @@
         flex: 1;
         padding: 30px 34px;
         max-width: 980px;
+        /* Lets main shrink to the screen; a wide table scrolls in its card. */
+        min-width: 0;
       }
       h1 {
         font-size: 22px;
@@ -329,6 +331,149 @@
       @keyframes sp {
         to {
           transform: rotate(360deg);
+        }
+      }
+
+      #list {
+        overflow-x: auto;
+        container: acclist / inline-size;
+      }
+      /* When the accounts list is narrow (phones, or a tablet with the
+         sidebar showing), each account becomes a stacked card. */
+      @container acclist (max-width: 640px) {
+        .acc-table,
+        .acc-table tbody,
+        .acc-table tr,
+        .acc-table td {
+          display: block;
+        }
+        .acc-table thead {
+          display: none;
+        }
+        .acc-table tr {
+          display: grid;
+          grid-template-columns: minmax(0, 3fr) minmax(0, 2fr);
+          gap: 12px 14px;
+          margin-top: 12px;
+          padding: 14px;
+          border: 1px solid var(--line);
+          border-radius: 12px;
+        }
+        .acc-table td {
+          padding: 0;
+          border: 0;
+          min-width: 0;
+          overflow-wrap: anywhere;
+        }
+        .acc-table td[data-label]::before {
+          content: attr(data-label);
+          display: block;
+          margin-bottom: 3px;
+          color: var(--muted);
+          font-size: 11px;
+          font-weight: 600;
+          letter-spacing: 0.03em;
+          text-transform: uppercase;
+        }
+        .acc-table .c-status,
+        .acc-table .c-value {
+          text-align: right;
+        }
+        .acc-table .c-missing,
+        .acc-table .c-acts,
+        .acc-table .c-status.has-err {
+          grid-column: 1 / -1;
+        }
+        .acc-table .c-status.has-err {
+          text-align: left;
+        }
+        .acc-table .c-missing > div {
+          display: flex;
+          align-items: center;
+          justify-content: space-between;
+          gap: 10px;
+        }
+        .acc-table .c-missing .btn {
+          flex: none;
+          white-space: nowrap;
+        }
+        .acc-table summary {
+          padding: 4px 0;
+        }
+        .acc-table .c-acts {
+          display: flex;
+          gap: 8px;
+          padding-top: 12px;
+          border-top: 1px solid var(--line);
+        }
+        .acc-table .c-acts .btn {
+          flex: 1 1 0;
+        }
+      }
+
+      @media (max-width: 768px) {
+        main {
+          padding: 20px 16px 32px;
+        }
+        h1 {
+          font-size: 20px;
+        }
+        .sub {
+          font-size: 13.5px;
+          margin-bottom: 16px;
+        }
+        .card {
+          padding: 16px;
+          margin-bottom: 14px;
+        }
+        .btn {
+          min-height: 42px;
+        }
+        .btn-sm {
+          min-height: 36px;
+          padding: 7px 12px;
+        }
+        /* 16px text stops phones zooming in when a field is tapped. */
+        #addLabel,
+        #addCode {
+          flex: 1 1 100%;
+          max-width: none !important;
+          padding: 11px 12px;
+          border-radius: 9px;
+          border: 1.5px solid var(--line);
+          background: var(--surface-2);
+          color: var(--ink);
+          font-size: 16px;
+        }
+        select {
+          font-size: 16px;
+        }
+        #btnAdd {
+          flex: 1 1 100%;
+        }
+        #btnSync,
+        #btnRefresh {
+          flex: 1 1 0;
+        }
+        /* admin-nav.js turns the sidebar into a slide-out menu under a top
+           bar. Start in that shape so the sidebar never flashes on load. */
+        body {
+          padding-top: 54px;
+        }
+        .nav {
+          position: fixed;
+          top: 0;
+          left: 0;
+          bottom: 0;
+          z-index: 200;
+          width: 264px;
+          height: auto;
+          transform: translateX(-100%);
+        }
+        /* The closed menu sits just off-screen; without this its shadow
+           shows as a grey strip down the left edge. */
+        .nav:not(.open) {
+          box-shadow: none;
         }
       }
     </style>
@@ -605,31 +750,33 @@
           return;
         }
         $("list").innerHTML =
-          "<table><thead><tr><th>Account</th><th>Status</th><th>Library</th><th>Value</th><th>Missing live games</th><th></th></tr></thead><tbody>" +
+          '<table class="acc-table"><thead><tr><th>Account</th><th>Status</th><th>Library</th><th>Value</th><th>Missing live games</th><th></th></tr></thead><tbody>' +
           accounts
             .map(function (a) {
               return (
                 "<tr" +
                 (a.sold ? ' style="opacity:.55"' : "") +
-                "><td><b>" +
+                '><td class="c-acct"><b>' +
                 esc(a.label || a.displayName || a.accountId) +
                 '</b><div class="muted">' +
                 esc(a.displayName) +
                 (a.sold ? " · SOLD" : "") +
-                "</div></td><td>" +
+                '</div></td><td class="c-status' +
+                (a.status !== "ok" && a.lastError ? " has-err" : "") +
+                '" data-label="Status">' +
                 (a.status === "ok"
                   ? '<b style="color:var(--green)">ok</b>'
                   : '<b style="color:var(--red)">needs login</b>' +
                     (a.lastError
                       ? '<div class="muted">' + esc(a.lastError) + "</div>"
                       : "")) +
-                "</td><td>" +
+                '</td><td class="c-lib" data-label="Library">' +
                 a.libraryCount +
                 ' game(s)<details><summary class="muted" style="cursor:pointer">show</summary>' +
                 libHtml(a) +
-                "</details></td><td>$" +
+                '</details></td><td class="c-value" data-label="Value">$' +
                 (a.libraryValueUsd || 0).toFixed(2) +
-                "</td><td>" +
+                '</td><td class="c-missing" data-label="Missing live games">' +
                 ((a.missingLive || []).length
                   ? a.missingLive
                       .map(function (m) {
@@ -645,7 +792,7 @@
                       })
                       .join("")
                   : '<span class="muted">none 🎉</span>') +
-                "</td><td>" +
+                '</td><td class="c-acts">' +
                 '<button class="btn btn-sm" onclick="toggleSold(\'' +
                 a._id +
                 "'," +
