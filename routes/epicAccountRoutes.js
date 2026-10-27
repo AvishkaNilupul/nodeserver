@@ -316,6 +316,7 @@ router.post(
   },
 );
 
+router.use(require("./epicSignupRoutes"));
 router.use(require("./epicAccountDetailsRoutes"));
 
 module.exports = router;
