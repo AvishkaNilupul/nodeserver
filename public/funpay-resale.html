@@ -1085,6 +1085,8 @@
       var order = p.kind === "order";
       if (p.login || p.state === "received" || p.state === "delivered") out.push(btn("reveal", id, "Show login", { busyLabel: "Opening…" }));
       if (order && ["bought", "needs_review", "failed"].indexOf(p.state) >= 0) out.push(btn("credential", id, "Enter login"));
+      // The seller was slower than the polling: read the FunPay order once more (buys nothing).
+      if (p.state === "bought" && p.funpayOrderId) out.push(btn("check", id, "Check again", { busyLabel: "Checking…" }));
       if (order && p.state === "failed") out.push(btn("retry", id, "Retry", { busyLabel: "Retrying…" }));
       // "login received" is where a Buy 1 now test ends: nothing left to close there.
       var finished = p.state === "delivered" || (!order && p.state === "received") || closedByOwner(p);
@@ -1158,6 +1160,15 @@
         run(id + ":retry", k, async function () {
           await api(P + "/purchases/" + enc(id) + "/retry", { method: "POST" });
           setNote(k, "ok", "Back in the queue: auto-buy picks it up on its next pass.");
+        });
+      },
+      check: function (p) {
+        var id = String(p._id), k = "p:" + id;
+        run(id + ":check", k, async function () {
+          var r = await api(P + "/purchases/" + enc(id) + "/check", { method: "POST" });
+          var res = (r && r.result) || r || {};
+          if (res.ok) setNote(k, "ok", "Login received" + (res.commissioned ? " — the test buy worked, auto-buy can now be switched on." : "."));
+          else setNote(k, res.state === "needs_review" ? "err" : "info", esc(res.reason || "Nothing new yet."));
         });
       },
       close: function (p) {
