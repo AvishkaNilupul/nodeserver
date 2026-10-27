@@ -5,10 +5,10 @@ const express=require('express');
 const {encrypt,decrypt}=require('../utils/secretBox');
 const id='a'.repeat(24);
 let stored={_id:id,accountId:'epic-id',displayName:'Example',label:'stock',refreshToken:encrypt('private-refresh-token'),email:encrypt('stock@example.com'),password:encrypt('old-password'),totpSecret:'',sold:true,libraryCount:1,library:[{title:'Owned Game'}],accountDetails:encrypt(JSON.stringify({notes:'private note',country:'CO'}))};
-let lastSet;
+let lastSet, rejectUpdate = false;
 function query(value){return{select(){return this;},lean:async()=>value};}
 const modelId=require.resolve('../models/EpicAccount');
-require.cache[modelId]={id:modelId,loaded:true,exports:{findById:got=>query(got===id?{...stored}:null),findOneAndUpdate:(_q,update,opts)=>{assert.equal(opts.returnDocument,'after');lastSet=update.$set;stored={...stored,...lastSet};return query(stored);}}};
+require.cache[modelId]={id:modelId,loaded:true,exports:{findById:got=>query(got===id?{...stored}:null),findOneAndUpdate:(_q,update,opts)=>{if(rejectUpdate)return query(null);assert.equal(opts.returnDocument,'after');lastSet=update.$set;stored={...stored,...lastSet};return query(stored);}}};
 const app=express();app.use(express.json());app.use((req,res,next)=>{const role=req.get('X-Test-Role');if(role)req.session={admin:{role}};next();});app.use(require('../routes/epicAccountDetailsRoutes'));
 let server,base;
 test.before(async()=>{server=app.listen(0,'127.0.0.1');await new Promise(r=>server.once('listening',r));base='http://127.0.0.1:'+server.address().port;});
@@ -43,4 +43,10 @@ test('rejects unsupported fields, malformed input and impossible recovery dates 
  assert.equal(JSON.stringify(stored),before);
  const bad=await fetch(base+'/api/epic/accounts/invalid/details',{headers:{'X-Test-Role':'superadmin'}});assert.equal(bad.status,400);
  const missing=await fetch(base+'/api/epic/accounts/'+('b'.repeat(24))+'/details',{headers:{'X-Test-Role':'superadmin'}});assert.equal(missing.status,404);
+});
+
+test('rejects stale-editor conflicts without changing any stored details',async()=>{
+ const before=JSON.stringify(stored);rejectUpdate=true;
+ try{assert.equal((await call('','PATCH',{notes:'stale edit'})).status,409);assert.equal(JSON.stringify(stored),before);}
+ finally{rejectUpdate=false;}
 });
