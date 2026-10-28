@@ -277,6 +277,31 @@
     </div>
   </div>
 
+  <!-- Auto-organize -->
+  <div class="panel">
+    <div class="hd"><b>Auto-organize bots</b> <span class="muted" style="margin-left:auto;">pack each game into as few bots as it needs to save RAM</span></div>
+    <div class="bd">
+      <div style="display:flex;gap:12px;align-items:center;flex-wrap:wrap;">
+        <label style="display:flex;gap:8px;align-items:center;cursor:pointer;font-weight:600;">
+          <input type="checkbox" id="orgToggle" style="width:18px;height:18px;cursor:pointer;" />
+          <span id="orgLabel">Off</span>
+        </label>
+        <span style="display:flex;gap:6px;align-items:center;font-size:13px;">accounts per bot
+          <input id="orgSize" type="number" min="10" max="70" value="50" style="width:78px;" />
+          <button class="btn ghost sm" id="orgSizeBtn" type="button">Save</button>
+        </span>
+        <button class="btn ghost sm" id="orgPreviewBtn" type="button">Preview</button>
+        <button class="btn primary sm" id="orgRunBtn" type="button">Organize now</button>
+        <span class="muted" id="orgState"></span>
+      </div>
+      <div class="tagrow" id="orgGames" style="margin-top:11px;"></div>
+      <div class="muted" id="orgLast" style="margin-top:8px;"></div>
+      <div class="muted" style="margin-top:8px;">
+        When on, after each hourly fleet-sizing pass every game's shared bots are packed evenly to at most this many accounts. Bots a game no longer needs are merged and retired; a game with more accounts than its bots can hold gets one more bot. It only acts when that saves a bot, a bot is over the size, or a bot farms nothing. Your <b>My own</b> bots and bots you <b>Stop</b> are never touched, no account is ever added from the pool, and every config is backed up first.
+      </div>
+    </div>
+  </div>
+
   <!-- Create -->
   <div class="panel">
     <div class="hd"><b>New no-claim bot</b> <span class="muted" id="poolNote" style="margin-left:auto;"></span></div>
@@ -965,7 +990,7 @@ $('mineAddBtn').onclick=async function(){
   }catch(e){ toast('Add failed: '+e.message); $('mineHint').textContent='Add failed: '+e.message; }
   finally{ this.disabled=false; }
 };
-$('refreshBtn').onclick=function(){ loadState(true); loadPool(); loadAuto(); loadSpentHistory(); };
+$('refreshBtn').onclick=function(){ loadState(true); loadPool(); loadAuto(); loadOrganize(); loadSpentHistory(); };
 $('expandAllBtn').onclick=function(){ setAllGroupsCollapsed(false); };
 $('collapseAllBtn').onclick=function(){ setAllGroupsCollapsed(true); };
 
@@ -1096,7 +1121,66 @@ $('autoToggle').onchange=async function(){
   finally{ this.disabled=false; }
 };
 
-(async function(){ await loadGames(); await loadPool(); await loadState(); await loadAuto(); await loadSpentHistory(); })();
+// --- auto-organize ---
+function orgGameTag(g){
+  var now=g.activeBots, need=g.needBots, txt;
+  if(!g.accounts) txt='no accounts';
+  else if(!g.due) txt=g.accounts+' accts · '+now+' bot'+(now===1?'':'s')+' · tidy';
+  else txt=g.accounts+' accts · '+now+' → '+need+' bots · '+g.moves+' to move'+(g.held?' · held: '+g.held:'');
+  var color=!g.due?'#16a34a':(g.held?'#b45309':'#4f46e5');
+  return '<span class="tag" style="border-color:'+color+';color:'+color+'" title="'+esc((g.reasons||[]).join('; '))+'">'+esc(g.label)+' · '+esc(txt)+'</span>';
+}
+var orgPoll=null;
+async function loadOrganize(preview){
+  try{
+    var j=await api('/api/noclaim-farm/organize'+(preview?'?preview=1':''));
+    var st=j.status||{}, c=st.config||{}, lr=st.lastResult;
+    $('orgToggle').checked=!!c.enabled; $('orgLabel').textContent=c.enabled?'On':'Off';
+    if(document.activeElement!==$('orgSize')) $('orgSize').value=c.size||50;
+    $('orgRunBtn').disabled=!!st.running;
+    var bits=[];
+    if(st.running) bits.push('organizing… (this can take a couple of minutes)');
+    else if(st.lastRun) bits.push('last run '+new Date(st.lastRun).toLocaleString());
+    if(st.lastError) bits.push('⚠ '+st.lastError);
+    $('orgState').textContent=bits.join(' · ');
+    var games=(j.preview&&j.preview.games)||(lr&&lr.games)||[];
+    if(j.preview&&j.preview.blocked) $('orgGames').innerHTML='<span class="chip warn">'+esc(j.preview.blocked)+'</span>';
+    else $('orgGames').innerHTML=games.length?games.map(orgGameTag).join(''):'<span class="muted">Press Preview to see what it would do.</span>';
+    var last='';
+    if(lr&&lr.acted){
+      last='Last change: '+(lr.results||[]).map(function(r){
+        return esc(r.label)+' — '+r.moved+' moved'+(r.created&&r.created.length?', new bot '+r.created.join(', '):'')+(r.retired&&r.retired.length?', retired bot '+r.retired.join(', '):'')+(r.parked&&r.parked.length?', parked bot '+r.parked.join(', '):'');
+      }).join(' · ')+((lr.errors||[]).length?' · ⚠ '+esc(lr.errors[0]):'');
+    }
+    $('orgLast').innerHTML=last;
+    clearTimeout(orgPoll);
+    if(st.running) orgPoll=setTimeout(function(){ loadOrganize(false); },5000);
+    else if(preview===false && lr && lr.acted) { loadState(true); }
+  }catch(e){ if(preview) toast('Preview failed: '+e.message); }
+}
+$('orgToggle').onchange=async function(){
+  var want=this.checked; this.disabled=true;
+  try{ var j=await api('/api/noclaim-farm/organize/settings',{method:'POST',body:JSON.stringify({enabled:want})});
+    $('orgLabel').textContent=j.config.enabled?'On':'Off';
+    toast('Auto-organize '+(j.config.enabled?'on — it runs after the next hourly pass':'off')+'.');
+  }catch(e){ this.checked=!want; toast('Failed: '+e.message); }
+  finally{ this.disabled=false; }
+};
+$('orgSizeBtn').onclick=async function(){
+  var n=parseInt($('orgSize').value,10);
+  try{ var j=await api('/api/noclaim-farm/organize/settings',{method:'POST',body:JSON.stringify({size:n})});
+    toast('Bots will hold at most '+j.config.size+' accounts.'); loadOrganize(true);
+  }catch(e){ toast('Failed: '+e.message); }
+};
+$('orgPreviewBtn').onclick=function(){ $('orgGames').innerHTML='<span class="muted">Reading every bot…</span>'; loadOrganize(true); };
+$('orgRunBtn').onclick=async function(){
+  if(!confirm('Organize the no-claim bots now? Running bots whose accounts change are restarted; parked bots stay parked.')) return;
+  this.disabled=true;
+  try{ await api('/api/noclaim-farm/organize/run',{method:'POST',body:'{}'}); toast('Organizing…'); setTimeout(function(){ loadOrganize(false); },1500); }
+  catch(e){ this.disabled=false; toast('Failed: '+e.message); }
+};
+
+(async function(){ await loadGames(); await loadPool(); await loadState(); await loadAuto(); await loadOrganize(); await loadSpentHistory(); })();
 </script>
 <script src="/admin-nav.js"></script>
 </body>
