@@ -14,7 +14,7 @@ const EpicAccount = require("../models/EpicAccount");
 const EpicFreebie = require("../models/EpicFreebie");
 const epic = require("./epicClient");
 const epicAutoClaim = require("./epicAutoClaim");
-const { decrypt, encrypt } = require("./secretBox");
+const { accountAccessToken } = require("./epicAccountToken");
 const { sendTelegram } = require("./telegram");
 
 const TICK_MS = 6 * 60 * 60 * 1000; // every 6 hours
@@ -32,15 +32,6 @@ const state = {
 const PING_COOLDOWN_MS = 3 * 24 * 60 * 60 * 1000;
 const pinged = new Map();
 
-async function refreshAccountToken(acc) {
-  const tok = await epic.refresh(decrypt(acc.refreshToken));
-  acc.refreshToken = encrypt(tok.refresh_token);
-  acc.refreshExpiresAt = tok.refresh_expires_at
-    ? new Date(tok.refresh_expires_at)
-    : null;
-  acc.displayName = tok.displayName || acc.displayName;
-  return tok.access_token;
-}
 
 function parsePrice(s) {
   const n = parseFloat(String(s || "").replace(/[^0-9.]/g, ""));
@@ -123,7 +114,7 @@ async function pingClaim(acc, freebie, accessToken) {
 // Sync one account and return the live freebies it still needs.
 async function processAccount(acc, liveFreebies, notify, priceByNamespace) {
   try {
-    const accessToken = await refreshAccountToken(acc);
+    const accessToken = await accountAccessToken(acc);
     await syncLibrary(acc, accessToken, priceByNamespace);
     acc.status = "ok";
     acc.lastError = "";
@@ -153,8 +144,6 @@ async function processAccount(acc, liveFreebies, notify, priceByNamespace) {
   } catch (err) {
     acc.lastError = err.message || String(err);
     if (err.epicCode && String(err.epicCode).indexOf("invalid_grant") !== -1) {
-      acc.status = "needs_login";
-    } else if (String(err.message || "").match(/refresh|expired|grant/i)) {
       acc.status = "needs_login";
     }
     return 0;

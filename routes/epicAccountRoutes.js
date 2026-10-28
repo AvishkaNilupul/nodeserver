@@ -5,6 +5,7 @@ const EpicAccount = require("../models/EpicAccount");
 const EpicFreebie = require("../models/EpicFreebie");
 const epic = require("../utils/epicClient");
 const epicClaimer = require("../utils/epicClaimer");
+const { accountAccessToken } = require("../utils/epicAccountToken");
 const epicAutoClaim = require("../utils/epicAutoClaim");
 const settings = require("../utils/settings");
 const { encrypt, decrypt } = require("../utils/secretBox");
@@ -215,14 +216,8 @@ router.post(
           .status(404)
           .json({ success: false, message: "Unknown offer" });
       }
-      const tok = await epic.refresh(decrypt(acc.refreshToken));
-      acc.refreshToken = encrypt(tok.refresh_token);
-      acc.refreshExpiresAt = tok.refresh_expires_at
-        ? new Date(tok.refresh_expires_at)
-        : null;
-      acc.status = "ok";
-      await acc.save();
-      const code = await epic.exchangeCode(tok.access_token);
+      const accessToken = await accountAccessToken(acc);
+      const code = await epic.exchangeCode(accessToken);
       res.json({
         success: true,
         url: epic.claimLink(code, freebie.namespace, freebie.offerId),
@@ -326,18 +321,12 @@ router.post(
           .status(404)
           .json({ success: false, message: "Unknown offer" });
       }
-      const tok = await epic.refresh(decrypt(acc.refreshToken));
-      acc.refreshToken = encrypt(tok.refresh_token);
-      acc.refreshExpiresAt = tok.refresh_expires_at
-        ? new Date(tok.refresh_expires_at)
-        : null;
-      acc.status = "ok";
-      await acc.save();
+      const accessToken = await accountAccessToken(acc);
       const cfg = settings.getEpicAutoClaim();
       const solverKey = cfg.captchaKey ? decrypt(cfg.captchaKey) : "";
       const captchaSolver = require("../utils/captchaSolver");
       const result = await epic.autoClaimFreebie(
-        tok.access_token,
+        accessToken,
         freebie.namespace,
         freebie.offerId,
         {

@@ -1038,7 +1038,10 @@
         }
       }
 
+      var pendingClaimLinks = new Set();
       window.claimNow = async function (id, offerId) {
+        if (pendingClaimLinks.has(id)) return;
+        pendingClaimLinks.add(id);
         try {
           var j = await api("/api/epic/accounts/" + id + "/claim-link", {
             method: "POST",
@@ -1050,6 +1053,8 @@
           );
         } catch (e) {
           toast("Claim link failed: " + e.message, true);
+        } finally {
+          pendingClaimLinks.delete(id);
         }
       };
 
