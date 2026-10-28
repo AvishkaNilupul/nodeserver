@@ -19,11 +19,13 @@ The installer replaces the old redirect service and starts
 node tools/epic-signup/local-app.cjs
 ```
 
-Keep the Outlook reader running on 127.0.0.1:3999 and Marketplace Filler 1.3.0
+Keep the Outlook reader running on 127.0.0.1:3999 and Marketplace Filler 1.4.0
 enabled in Chrome. Check extension verifies connectivity without reserving an
 inbox or opening Epic. Create Epic account reserves a local inbox and opens the
 signup wizard. The extension fills details and retrieves fresh Outlook OTPs;
-captchas and agreement screens can require manual actions. Resume/recovery
+the automatic submission checkbox enables registration Continue and Store EULA
+completion for that signup. Leave it unchecked for manual agreement review.
+Captcha challenges can still require attention. Resume/recovery
 reuse an interrupted signup's address and password.
 
 The app binds only to 127.0.0.1:4107. UI requests require the per-process token

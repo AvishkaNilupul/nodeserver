@@ -68,6 +68,43 @@ file vault and per-process UI token. No website session, production credentials
 or MongoDB is loaded by the runtime. The old redirect LaunchAgent is replaced
 by com.avishka.epic-account-generator. Server generation controls and route
 mount are removed; the previously requested hosted account-details and manual
-claim system remain. Local accounts are never uploaded automatically.
+claim system remain. Completed accounts save locally first, then upload through the encrypted durable
+SSH queue. Existing cloud credentials and inventory edits survive repeat uploads.
 
 See tools/epic-signup/README.md for startup, storage, recovery and backup.
+
+
+## Signup automation repair — 2026-10-28 JST
+
+Marketplace Filler 1.4.0 carries explicit per-signup automation flags from the
+local panel through the encrypted session and extension worker. The automatic
+submission checkbox enables the Terms checkbox, registration Continue, and Store
+EULA acceptance. The default remains manual agreement review. Resume uses the
+currently selected automation settings with the original account identity.
+
+Navigation waits now honor their deadline, skip hidden/disabled buttons, and
+allow three minutes for slow proxy transitions. A visible CAPTCHA pauses the
+navigation deadline for at most five minutes. Authentication-method review waits
+for its Confirm button to render. EULA readiness scrolls the agreement and waits
+for an enabled Accept button. A second email verification only reads mail newer
+than the code already delivered. An invalid/expired-code banner triggers a
+bounded fresh-email retry (at most three codes), and launcher email-MFA errors
+open normal sign-in once before requiring explicit recovery. Token capture
+reuses a single tab.
+
+Regression coverage includes bounded waits, CAPTCHA pause/resume, button
+readiness, automation propagation, fresh-mail cursors, capture-tab reuse, local
+vault persistence, cloud retry/idempotency, and encrypted account details.
+
+Five sequential residential-proxy rounds were completed. Earlier rounds exposed
+CAPTCHA timeout, slow-navigation/review readiness, and launcher email-MFA errors.
+The fifth exposed rejected-code retry and the console review's visible
+“Done linking” label (accessibility labels it Continue). These cases were fixed;
+the same fifth account was recovered with the corrected driver. No additional
+registration was created during recovery. CAPTCHA solving was operator-assisted;
+this test does not establish unattended CAPTCHA completion.
+
+All five saved locally and uploaded: ForwardApple8197, HollowStoat4793,
+RivalCrate1919, TangyIce5965, and OrotundCash1676. Direct server comparison found
+one row per account, status ok, matching email/password/profile, and decryptable
+encrypted credential, token and profile fields. Focused regression suite: 29/29.

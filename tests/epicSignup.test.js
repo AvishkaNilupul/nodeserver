@@ -5,6 +5,7 @@ const fs = require('node:fs');
 const { findEpicOtp } = require('../utils/epicMailOtp');
 const mailbox = require('../utils/epicMailbox');
 const since = new Date(Date.now() - 60000).toISOString();
+const otpReceivedAt = new Date(Date.now() + 60000).toISOString();
 const message = (over = {}) => ({ from: { emailAddress: { address: 'help@acct.epicgames.com' } },
   receivedDateTime: new Date().toISOString(), subject: 'Your security code: 123456', ...over });
 
@@ -50,7 +51,7 @@ function worker({ incognitoAllowed = true } = {}) {
     if (url.includes('/epic/proxy')) body = { ok: true, proxy: { scheme: 'http', host: 'proxy.test', port: 1234, username: 'user', password: 'proxy-secret' } };
     if (url.endsWith('/api/accounts')) body = [{ email: 'stock@outlook.com', uses: { epic: { status: 'fail' } } }];
     if (url.includes('/pool/pick')) body = { ok: true, email: 'stock@outlook.com' };
-    if (url.includes('/otp?')) body = { ok: true, code: '123456' };
+    if (url.includes('/otp?')) body = { ok: true, code: '123456', receivedAt: otpReceivedAt };
     if (url.includes('/from-extension')) body = { success: true, account: { _id: 'account' } };
     return { ok: true, json: async () => body };
   };
@@ -65,15 +66,19 @@ test('extension reserves Outlook once, binds tabs, polls locally, and saves with
   const picked = await w.send({ type: 'epicgen-allocate' });
   assert.equal(picked.mailbox.address, 'stock@outlook.com');
   assert.equal((await w.send({ type: 'epicgen-allocate' })).ok, false);
-  const s = { type: 'epicgen-drive', sessionId: 'session', bearer: 'secret', identity: { email: 'stock@outlook.com', password: 'pw' }, redirectUrl: 'https://www.epicgames.com/id/api/redirect?clientId=abc' };
+  const s = { type: 'epicgen-drive', sessionId: 'session', bearer: 'secret', identity: { email: 'stock@outlook.com', password: 'pw' }, automation: { autoSubmit: true, autoAcceptEula: true }, redirectUrl: 'https://www.epicgames.com/id/api/redirect?clientId=abc' };
   assert.equal((await w.send(s)).ok, true);
   const epic = (type, extra = {}, id = 10) => w.send({ type, sessionId: 'session', ...extra }, id, 'https://www.epicgames.com/id/register');
   assert.equal((await epic('epicgen-session-request', {}, 99)).ok, false);
   const session = await epic('epicgen-session-request');
   assert.equal(session.session.identity.email, 'stock@outlook.com');
   assert.equal(session.session.bearer, undefined);
+  assert.equal(session.session.automation.autoSubmit, true);
+  assert.equal(session.session.automation.autoAcceptEula, true);
   assert.equal((await epic('epicgen-open-redirect')).ok, false);
   assert.equal((await epic('epicgen-request-otp')).code, '123456');
+  await epic('epicgen-request-otp');
+  assert.ok(w.calls.some(c => String(c[0]).includes(encodeURIComponent(new Date(Date.parse(otpReceivedAt)+1).toISOString()))));
   assert.ok(w.calls.some(c => String(c[0]).includes('127.0.0.1:3999') && String(c[0]).includes('for=epic&since=')));
   assert.equal((await epic('epicgen-open-redirect')).ok, true);
   assert.equal((await epic('epicgen-authcode', { code: 'a'.repeat(32) }, 11)).ok, true);
@@ -131,13 +136,13 @@ test('resuming a consumed Epic inbox does not allocate another address', async (
   assert.ok(w.calls.some(c => String(c[0]).includes('/pool/release') && c[1].status === 'reserved'));
 });
 
-function signupDom(document, location = { pathname: '/id/register', hash: '', hostname: 'www.epicgames.com' }) {
+function signupDom(document, location = { pathname: '/id/register', hash: '', hostname: 'www.epicgames.com' }, overrides = {}) {
   const source = fs.readFileSync(require.resolve('../extension/epicnpc-filler/epic-signup.js'), 'utf8');
   const start = source.lastIndexOf('  (async function () {');
   const messages = [];
-  const context = { document, location, window: {}, console, setTimeout,
+  const context = { document, location, window: { getComputedStyle: () => ({ overflowY: 'auto' }) }, Event: class { constructor(type) {this.type=type;} }, console, setTimeout, ...overrides,
     chrome: { runtime: { sendMessage: (m, done) => { messages.push(m); done({ ok: true }); } } } };
-  vm.runInNewContext(source.slice(0, start) + 'globalThis.dom = { stepId, scrapeAuthCode };\n})();', context);
+  vm.runInNewContext(source.slice(0, start) + 'globalThis.dom = { stepId, scrapeAuthCode, clickContinueLike, waitForStepChange, clickAgreementAccept, clickReviewContinue };\n})();', context);
   return { ...context.dom, messages };
 }
 test('current Epic OTP boxes and successive login screens are recognized', () => {
@@ -170,4 +175,85 @@ test('new-account EULA correction opens the official review flow without accepti
   assert.equal(location.href, 'https://store.epicgames.com/en-US/');
   assert.equal(driver.messages.at(-1).status, 'awaiting_eula');
   assert.equal(driver.messages.some(m => m.type === 'epicgen-authcode'), false);
+});
+
+
+test('Continue ignores hidden and disabled matching buttons', () => {
+  let clicks = 0;
+  const button = (extra = {}) => ({ textContent: 'Continue', offsetParent: {}, disabled: false,
+    getAttribute: () => null, click: () => clicks++, ...extra });
+  const hidden = button({ offsetParent: null });
+  const disabled = button({ disabled: true });
+  const ready = button();
+  const document = { getElementById: () => disabled, querySelectorAll: () => [hidden, disabled, ready] };
+  assert.equal(signupDom(document).clickContinueLike(), true);
+  assert.equal(clicks, 1);
+  document.querySelectorAll = () => [hidden, disabled];
+  assert.equal(signupDom(document).clickContinueLike(), false);
+  assert.equal(clicks, 1);
+});
+
+test('stalled navigation returns after its deadline', async () => {
+  const document = { querySelectorAll: sel => sel.includes('iframe')?[]:Array(6).fill({}), querySelector: () => null, getElementById: () => null };
+  const started = Date.now();
+  assert.equal(await signupDom(document).waitForStepChange('otp', 1), 'otp');
+  assert.ok(Date.now() - started < 1500);
+});
+
+
+test('agreement readiness scrolls its document and accepts only an enabled button', () => {
+  let clicks=0,scrolls=0;
+  const panel={scrollHeight:1000,clientHeight:200,scrollTop:0,dispatchEvent:e=>{if(e.type==='scroll')scrolls++;}};
+  const accept={textContent:'Accept',offsetParent:{},disabled:true,getAttribute:()=>null,click:()=>clicks++};
+  const doc={querySelectorAll:sel=>sel==='button'?[accept]:[panel]};
+  const driver=signupDom(doc);
+  assert.equal(driver.clickAgreementAccept(),false);
+  assert.equal(panel.scrollTop,1000);assert.equal(scrolls,1);assert.equal(clicks,0);
+  accept.disabled=false;assert.equal(driver.clickAgreementAccept(),true);assert.equal(clicks,1);
+});
+
+
+test('visible captcha pauses the navigation deadline and resumes when dismissed', async () => {
+  let time=1000, checks=0;
+  const frame={offsetParent:{},getBoundingClientRect:()=>({height:300})};
+  const doc={querySelectorAll:sel=>sel.includes('iframe')?(++checks<4?[frame]:[]):sel.includes('code-input-')?Array(6).fill({}):[],querySelector:()=>null,getElementById:()=>null};
+  const driver=signupDom(doc,undefined,{Date:{now:()=>time},setTimeout:fn=>{time+=400;fn();}});
+  assert.equal(await driver.waitForStepChange('otp',1),'otp');
+  assert.equal(checks,4);
+  assert.equal(time,2600);
+});
+
+
+test('email MFA token error opens normal sign-in without submitting another registration', async () => {
+  const location={pathname:'/id/api/redirect',hash:'',hostname:'www.epicgames.com'};
+  const response={errorCode:'errors.com.epicgames.common.two_factor_authentication.required',metadata:{twoFactorMethod:'email'}};
+  const doc={body:{textContent:''},querySelector:()=>({textContent:JSON.stringify(response)}),getElementById:()=>({style:{}})};
+  const driver=signupDom(doc,location);await driver.scrapeAuthCode({});
+  assert.equal(location.href,'https://www.epicgames.com/id/login?lang=en-US');
+  assert.equal(driver.messages.at(-1).type,'epicgen-recover-auth');
+  assert.equal(driver.messages.some(m=>m.type==='epicgen-authcode'),false);
+});
+
+test('email authentication recovery is bound to a verified tab and attempted once', async () => {
+  const w=worker();await w.send({type:'epicgen-allocate'});
+  await w.send({type:'epicgen-drive',sessionId:'session',bearer:'secret',identity:{email:'stock@outlook.com'},redirectUrl:'https://www.epicgames.com/id/api/redirect'});
+  const epic=type=>w.send({type,sessionId:'session'},10,'https://www.epicgames.com/id/api/redirect');
+  assert.equal((await epic('epicgen-recover-auth')).ok,false);
+  await epic('epicgen-request-otp');assert.equal((await epic('epicgen-recover-auth')).ok,true);
+  assert.equal((await epic('epicgen-session-request')).session.login,true);
+  assert.equal((await epic('epicgen-recover-auth')).ok,false);
+});
+
+test('an explicit rejected-code banner ends the OTP wait immediately for retry',async()=>{
+ const doc={body:{textContent:'The security code is invalid or expired.'},querySelectorAll:sel=>sel.includes('code-input-')?Array(6).fill({}):[],querySelector:()=>null,getElementById:()=>null};
+ assert.equal(await signupDom(doc).waitForStepChange('otp',180000),'otp_invalid');
+});
+
+
+test('console review recognizes the visible Done linking label',()=>{
+ let clicked=0;
+ const button={innerText:'Done linking',textContent:'Done linking',offsetParent:{},disabled:false,getAttribute:()=>null,click:()=>clicked++};
+ const driver=signupDom({querySelectorAll:()=>[button]});
+ assert.equal(driver.clickReviewContinue('login_review_console'),true);assert.equal(clicked,1);
+ assert.equal(driver.clickReviewContinue('login_review_mfa'),false);
 });

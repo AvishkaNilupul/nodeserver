@@ -11,6 +11,7 @@
   }
 
   var sessionId = sessionIdFromHash();
+  var automation = {};
   // The worker binds sessions to tab IDs, surviving navigation without a hash.
 
   function sw(msg) {
@@ -44,9 +45,8 @@
   function setVal(el, val) {
     if (!el) return;
     var pr =
-      el.tagName === "TEXTAREA"
-        ? HTMLTextAreaElement.prototype
-        : HTMLInputElement.prototype;
+      el.tagName === "TEXTAREA" ? HTMLTextAreaElement.prototype :
+      el.tagName === "SELECT" ? HTMLSelectElement.prototype : HTMLInputElement.prototype;
     Object.getOwnPropertyDescriptor(pr, "value").set.call(el, String(val));
     el.dispatchEvent(new Event("input", { bubbles: true }));
     el.dispatchEvent(new Event("change", { bubbles: true }));
@@ -329,35 +329,68 @@
     return null;
   }
 
+  function visibleEnabled(button) {
+    return button && button.offsetParent !== null && !button.disabled && button.getAttribute('aria-disabled') !== 'true';
+  }
   function clickContinueLike() {
-    var b =
-      document.getElementById("continue") ||
-      Array.prototype.find.call(
-        document.querySelectorAll("button"),
-        function (btn) {
-          return /continue|create.*account|sign up|sign in|log in|register|verify|submit|next/i.test(
-            btn.textContent || "",
-          );
-        },
-      );
-    if (b && !b.disabled) {
-      b.click();
-      return true;
-    }
-    return false;
+    var direct = document.getElementById('continue');
+    var button = visibleEnabled(direct) ? direct : Array.prototype.find.call(document.querySelectorAll('button'), function(b) {
+      return visibleEnabled(b) && /^(continue|create(?: an)? account|sign up|sign in|log in|register|verify|submit|next)$/i.test((b.textContent || '').trim());
+    });
+    if (!button) return false;
+    button.click(); return true;
+  }
+  function prepareAgreement() {
+    Array.prototype.forEach.call(document.querySelectorAll('main, [role="dialog"], [role="document"], section, div'), function(el) {
+      if (el.scrollHeight > el.clientHeight + 20 && el.clientHeight > 80) {
+        var overflow = window.getComputedStyle(el).overflowY;
+        if (/auto|scroll/.test(overflow)) {el.scrollTop=el.scrollHeight;el.dispatchEvent(new Event('scroll',{bubbles:true}));}
+      }
+    });
+  }
+  function clickAgreementAccept() {
+    prepareAgreement();
+    var button=Array.prototype.find.call(document.querySelectorAll('button'),function(b){return visibleEnabled(b)&&/^(accept|i accept|i agree)$/i.test((b.textContent||'').trim());});
+    if(!button)return false;button.click();return true;
+  }
+
+  function clickReviewContinue(step) {
+    var pattern=step==='login_review_mfa'?/^confirm$/i:/^(continue|done linking)$/i;
+    var button=Array.prototype.find.call(document.querySelectorAll('button'),function(b){
+      return visibleEnabled(b)&&pattern.test((b.innerText||b.textContent||'').trim());
+    });
+    if(!button)return false;button.click();return true;
+  }
+
+  function captchaVisible() {
+    return Array.prototype.some.call(document.querySelectorAll('iframe[src*="hcaptcha"][src*="frame=challenge"], iframe[title*="challenge" i]'), function(frame) {
+      return frame.offsetParent !== null && frame.getBoundingClientRect().height > 80;
+    });
+  }
+
+  function otpRejected() {
+    return /security code is invalid or expired|(?:verification|security) code (?:is )?(?:incorrect|invalid|expired)/i.test(document.body ? document.body.textContent || '' : '');
   }
 
   async function waitForStepChange(fromStep, timeoutMs) {
     var deadline = Date.now() + (timeoutMs || 30000);
-    while (true) {
+    var challengeBudget = 5 * 60 * 1000;
+    while (Date.now() < deadline) {
       var s = stepId();
       if (s !== fromStep && s !== null) return s;
+      if (fromStep === "otp" && otpRejected()) return "otp_invalid";
       // Bail early on phone-verification.
       var phone = document.querySelector(
         'input[type="tel"][name*="phone" i], input[name="phoneNumber"]',
       );
       if (phone && phone.offsetParent !== null) return "sms_required";
+      var before = Date.now();
+      var challenge = captchaVisible();
       await sleep(400);
+      if (challenge && challengeBudget > 0) {
+        var paused = Math.min(Date.now() - before, challengeBudget);
+        deadline += paused; challengeBudget -= paused;
+      }
     }
     return fromStep;
   }
@@ -367,7 +400,7 @@
     var ok = await fillDob(id.dateOfBirth);
     if (!ok) throw new Error("DOB fill failed");
     await sleep(jitter(400, 800));
-    clickContinueLike();
+    await waitFor(clickContinueLike, 15000);
   }
 
   async function handleEmailStep(id) {
@@ -380,7 +413,7 @@
     await typeSlowly(emailInput, id.email);
     emailInput.dispatchEvent(new Event("blur", { bubbles: true }));
     await sleep(jitter(400, 800));
-    clickContinueLike();
+    await waitFor(clickContinueLike, 15000);
   }
 
   async function handleDetailsStep(id, loginMode) {
@@ -436,30 +469,27 @@
       if (!lbl && box.parentElement) {
         lbl = box.parentElement.textContent || "";
       }
-      if (/agree|accept|terms|privacy/i.test(lbl) && !box.checked) box.click();
+      if (automation.autoSubmit && /agree|accept|terms|privacy/i.test(lbl) && !box.checked) box.click();
     }
 
     await sleep(jitter(500, 900));
-    await sw({
-      type: "epicgen-status",
-      sessionId: sessionId,
-      status: "awaiting_captcha",
-    });
-    banner(
-      "Form filled ✓ — click the captcha (if shown), then click Continue yourself.",
-      "info",
-    );
-    // Don't auto-click Continue. hCaptcha tokens rotate every ~2 min and
-    // auto-clicking too fast tends to submit against a token Talon has
-    // already invalidated. Let LO click; that also gives hCaptcha's
-    // behavioral telemetry a real interaction to attest to.
-    //
-    // We just wait for the step to change (main loop handles that), while
-    // watching for the sms_required detour or a visible form error.
+    if (automation.autoSubmit) {
+      await sw({type:'epicgen-status',sessionId:sessionId,status:'submitting'});
+      banner('Submitting the completed registration…','info');
+      await waitFor(clickContinueLike,15000);
+    } else {
+      await sw({type:'epicgen-status',sessionId:sessionId,status:'awaiting_confirmation'});
+      banner('Details ready. Review the agreements and click Continue.','info');
+    }
     var lastErrText = "";
+    var submissionDeadline=Date.now()+120000;
+    var challengeBudget=300000,lastPoll=Date.now();
     while (true) {
       var s = stepId();
-      if (s === "otp" || s === "done") return;
+      if (s && s !== "details" && s !== "login_password") return;
+      var elapsed=Date.now()-lastPoll;lastPoll=Date.now();
+      if(captchaVisible()&&challengeBudget>0){var paused=Math.min(elapsed,challengeBudget);submissionDeadline+=paused;challengeBudget-=paused;}
+      if(automation.autoSubmit && Date.now()>submissionDeadline) throw new Error(lastErrText || "Registration did not advance after submission");
       var phone = document.querySelector(
         'input[type="tel"][name*="phone" i], input[name="phoneNumber"]',
       );
@@ -497,6 +527,8 @@
     banner("Waiting for the Epic code in Outlook…", "info");
     var resp;
     var deadline = Date.now() + 5 * 60 * 1000;
+    for (var attempt=0;attempt<3;attempt++) {
+    resp=null;
     while (Date.now() < deadline) {
       resp = await sw({ type: "epicgen-request-otp", sessionId: sessionId });
       if (!resp.ok) throw new Error("otp: " + (resp.error || "unknown"));
@@ -506,7 +538,7 @@
     }
     if (!resp || !/^\d{6}$/.test(String(resp.code || ""))) throw new Error("Outlook OTP timed out");
     var code = String(resp.code || "");
-    banner("OTP received — entering " + code, "info");
+    banner("Verification code received — entering it…", "info");
 
     var boxes = document.querySelectorAll('input[name^="code-input-"], input[maxlength="1"]');
     if (boxes.length >= 6) {
@@ -528,7 +560,20 @@
       if (one) await typeSlowly(one, code);
     }
     await sleep(jitter(600, 1200));
-    clickContinueLike();
+    await waitFor(clickContinueLike, 30000);
+    await sleep(1500);
+    var result = await waitForStepChange('otp', 180000);
+    if (result !== 'otp_invalid') {
+      if (result === 'otp') throw new Error('Email verification response timed out');
+      return;
+    }
+    if (attempt === 2) throw new Error('Epic rejected three fresh verification codes');
+    banner('Epic rejected the code. Requesting a fresh email…','info');
+    await waitFor(function () {
+      var resend=Array.prototype.find.call(document.querySelectorAll('a, button'),function(el){return visibleEnabled(el)&&/^resend (?:email|code)$/i.test((el.textContent||'').trim());});
+      if(!resend)return false;resend.click();return true;
+    }, 60000);
+    }
   }
 
   async function handleDone() {
@@ -543,6 +588,7 @@
 
   async function driveRegisterFlow(session) {
     var id = session.identity;
+    automation = session.automation || {};
     banner("Epic signup for " + id.email + " — starting…", "info");
     var lastStep = null;
     var startTs = Date.now();
@@ -570,18 +616,27 @@
         }
         if (step === "agreement") {
           await sw({ type: "epicgen-status", sessionId: sessionId, status: "awaiting_eula" });
-          banner("Epic requires its store agreement. Review it and choose Accept to finish token capture.", "info");
-          while (stepId() === "agreement") await sleep(500);
+          prepareAgreement();
+          if (automation.autoAcceptEula) {
+            banner('Completing the Epic Store agreement…','info');
+            await waitFor(clickAgreementAccept,30000);
+            await waitForStepChange('agreement',180000);
+          } else {
+            banner('Review the Epic Store agreement and choose Accept to finish saving.','info');
+            var manualStart=Date.now();
+            while (stepId() === 'agreement') await sleep(500);
+            startTs+=Date.now()-manualStart;
+          }
         }
         else if (step === "login_review_mfa" || step === "login_review_console") {
-          var confirm = Array.prototype.find.call(document.querySelectorAll('button'), function (b) {
-            return (step === 'login_review_mfa' ? /^confirm$/i : /^continue$/i).test((b.textContent || '').trim());
-          });
-          if (confirm && !confirm.disabled) confirm.click();
+          await waitFor(function () { return clickReviewContinue(step); }, 60000);
         }
         else if (step === "dob") await handleDobStep(id);
         else if (step === "email") await handleEmailStep(id);
-        else if (step === "details" || step === "login_password") await handleDetailsStep(id, session.login);
+        else if (step === "details" || step === "login_password") {
+          var detailsStart=Date.now();await handleDetailsStep(id,session.login);
+          if(!session.login&&!automation.autoSubmit)startTs+=Date.now()-detailsStart;
+        }
         else if (step === "otp") await handleOtpStep();
         else if (step === "done") {
           await handleDone();
@@ -598,9 +653,9 @@
       }
       lastStep = step;
       // Wait for the DOM to actually advance before the next dispatch.
-      var next = await waitForStepChange(step, 60000);
+      var next = await waitForStepChange(step, 180000);
       if (next === step) {
-        // 60s and nothing changed → likely form-validation error we can't see.
+        // The bounded wait expired; preserve the session for recovery.
         banner(
           "Stuck on " + step + " — check the form for a red error banner.",
           "err",
@@ -626,6 +681,7 @@
     var raw = document.body ? document.body.textContent || "" : "";
     var captureError = "";
     var correctiveAction = "";
+    var requiresEmailAuth = false;
     var code = await waitFor(function () {
       try {
         var pre = document.querySelector("pre");
@@ -633,6 +689,7 @@
         try {
           var response = JSON.parse(raw);
           if (response.errorCode) {
+            requiresEmailAuth = response.errorCode === "errors.com.epicgames.common.two_factor_authentication.required" && response.metadata && response.metadata.twoFactorMethod === "email";
             correctiveAction = response.metadata && response.metadata.correctiveAction || "";
             captureError = response.metadata && response.metadata.correctiveAction
               ? "Epic requires " + response.metadata.correctiveAction + " before it can issue a launcher token. The account is already created."
@@ -650,6 +707,13 @@
       location.href = "https://store.epicgames.com/en-US/";
       return;
     }
+    if (requiresEmailAuth) {
+      var recovery = await sw({type:'epicgen-recover-auth',sessionId:sessionId});
+      if (!recovery.ok) throw new Error(recovery.error || 'Email authentication recovery unavailable');
+      banner('Epic requires email authentication. Opening sign-in to complete it…','info');
+      location.href='https://www.epicgames.com/id/login?lang=en-US';
+      return;
+    }
     if (captureError) throw new Error(captureError);
     var resp = await sw({
       type: "epicgen-authcode",
@@ -657,7 +721,7 @@
       code: code,
     });
     if (resp.ok) {
-      banner("Account saved to nodeserver ✓", "ok");
+      banner("Account saved locally. Cloud upload is queued automatically.", "ok");
     } else {
       banner("Save failed: " + (resp.error || "unknown"), "err");
     }

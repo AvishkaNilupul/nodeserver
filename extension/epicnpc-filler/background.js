@@ -31,13 +31,13 @@ async function finish(s, status, detail = '') {
 }
 let mutationBusy = false;
 chrome.runtime.onMessage.addListener((msg, sender, respond) => {
-  const mutation = ['epicgen-allocate', 'epicgen-drive', 'epicgen-cancel'].includes(msg?.type);
+  const mutation = ['epicgen-allocate', 'epicgen-drive', 'epicgen-cancel', 'epicgen-open-redirect'].includes(msg?.type);
   if (mutation && mutationBusy) { respond({ ok: false, error: 'Signup operation already in progress' }); return false; }
   if (mutation) mutationBusy = true;
   (async () => {
     if (!msg?.type?.startsWith('epicgen-')) return { ok: false };
     const panel = isPanel(sender.tab?.url);
-    if (msg.type === 'epicgen-ping') return { ok: panel, version: '1.3.0' };
+    if (msg.type === 'epicgen-ping') return { ok: panel, version: '1.4.0' };
     if (msg.type === 'epicgen-allocate') {
       if (!panel) throw new Error('Open the Epic Accounts panel first');
       const stored = await chrome.storage.session.get([KEY, PENDING]);
@@ -86,7 +86,7 @@ chrome.runtime.onMessage.addListener((msg, sender, respond) => {
       if (stored[KEY] || pending?.adminTab !== sender.tab.id || pending.mailbox.address !== msg.identity?.email) throw new Error('Outlook reservation does not match this signup');
       const s = { sessionId: msg.sessionId, bearer: msg.bearer, identity: msg.identity,
         redirectUrl: msg.redirectUrl, nodeserverOrigin: new URL(sender.tab.url).origin,
-        adminTab: sender.tab.id, reservedAt: pending.mailbox.reservedAt, proxy: pending.proxy, tabs: [], login: Boolean(msg.login), otpDelivered: Boolean(msg.login) };
+        adminTab: sender.tab.id, reservedAt: pending.mailbox.reservedAt, proxy: pending.proxy, tabs: [], automation: {autoSubmit:msg.automation?.autoSubmit===true,autoAcceptEula:msg.automation?.autoAcceptEula===true}, login: Boolean(msg.login), otpDelivered: Boolean(msg.login) };
       if (!isEpic(s.redirectUrl)) throw new Error('Invalid Epic redirect URL');
       let tab;
       if (s.proxy) {
@@ -108,7 +108,7 @@ chrome.runtime.onMessage.addListener((msg, sender, respond) => {
     const { [KEY]: s } = await chrome.storage.session.get(KEY);
     if (!s || !isEpic(sender.tab?.url) || !s.tabs.includes(sender.tab.id)) throw new Error('No signup assigned to this Epic tab');
     if (msg.type !== 'epicgen-session-request' && msg.sessionId !== s.sessionId) throw new Error('Session mismatch');
-    if (msg.type === 'epicgen-session-request') return { ok: true, session: { sessionId: s.sessionId, identity: s.identity, login: s.login } };
+    if (msg.type === 'epicgen-session-request') return { ok: true, session: { sessionId: s.sessionId, identity: s.identity, login: s.login, automation:s.automation } };
     if (msg.type === 'epicgen-status') {
       await server(s, `/api/epic/signup/${s.sessionId}/status`, { status: msg.status, ...msg.extra });
       await relay(s, { kind: 'status', status: msg.status });
@@ -118,17 +118,30 @@ chrome.runtime.onMessage.addListener((msg, sender, respond) => {
       // One bounded read per message keeps the MV3 worker alive and lets
       // the content script retry without a five-minute message channel.
       try {
-        const hit = await local(`/api/accounts/${encodeURIComponent(s.identity.email)}/otp?for=epic&since=${encodeURIComponent(s.reservedAt)}&via=graph`);
+        const since = s.lastOtpReceivedAt && Number.isFinite(Date.parse(s.lastOtpReceivedAt))
+          ? new Date(Math.max(Date.parse(s.reservedAt), Date.parse(s.lastOtpReceivedAt) + 1)).toISOString() : s.reservedAt;
+        const hit = await local(`/api/accounts/${encodeURIComponent(s.identity.email)}/otp?for=epic&since=${encodeURIComponent(since)}&via=graph`);
+        if (hit.receivedAt && Number.isFinite(Date.parse(hit.receivedAt))) s.lastOtpReceivedAt = hit.receivedAt;
         s.otpDelivered = true;
         await chrome.storage.session.set({ [KEY]: s });
         return { ok: true, code: hit.code };
       } catch (e) { return { ok: true, waiting: true, error: e.message }; }
     }
+    if (msg.type === 'epicgen-recover-auth') {
+      if (!s.otpDelivered || (s.authRecoveries || 0) >= 1) throw new Error('Email authentication recovery already attempted. Recover this account from the panel.');
+      s.authRecoveries = (s.authRecoveries || 0) + 1; s.login = true;
+      await chrome.storage.session.set({ [KEY]: s });
+      return { ok: true };
+    }
     if (msg.type === 'epicgen-open-redirect') {
       if (!s.otpDelivered) throw new Error('No signup verification was completed. Sign out of the existing Epic account and start again.');
-      const tab = await chrome.tabs.create({ url: 'about:blank', active: false, ...(s.windowId ? { windowId: s.windowId } : {}) });
-      s.tabs.push(tab.id); await chrome.storage.session.set({ [KEY]: s });
-      await chrome.tabs.update(tab.id, { url: s.redirectUrl + '#epicgen=' + encodeURIComponent(s.sessionId) });
+      let captureId = s.captureTabId;
+      if (!captureId) {
+        const tab = await chrome.tabs.create({ url: 'about:blank', active: false, ...(s.windowId ? { windowId: s.windowId } : {}) });
+        captureId = tab.id; s.captureTabId = captureId; s.tabs.push(captureId);
+        await chrome.storage.session.set({ [KEY]: s });
+      }
+      await chrome.tabs.update(captureId, { url: s.redirectUrl + '#epicgen=' + encodeURIComponent(s.sessionId) });
       return { ok: true };
     }
     if (msg.type === 'epicgen-authcode') {

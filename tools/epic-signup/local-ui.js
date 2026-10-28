@@ -20,7 +20,7 @@
  $('localExtensionCheck').addEventListener('click',()=>{
   $('signupStatus').textContent='Checking Chrome extension…';
   const listener=event=>{if(event.source!==window||event.origin!==location.origin||event.data?.type!=='epicgen-ping-ack')return;clearTimeout(timer);window.removeEventListener('message',listener);$('signupStatus').textContent=event.data.ok?'Extension connected. Ready to create a local signup.':'Extension is unavailable.';};
-  const timer=setTimeout(()=>{window.removeEventListener('message',listener);$('signupStatus').textContent='Extension did not respond. Use Chrome with Marketplace Filler 1.3.0 enabled and refresh this local page.';},3000);
+  const timer=setTimeout(()=>{window.removeEventListener('message',listener);$('signupStatus').textContent='Extension did not respond. Use Chrome with Marketplace Filler 1.4.0 enabled and refresh this local page.';},3000);
   window.addEventListener('message',listener);window.postMessage({type:'epicgen-ping'},location.origin);
  });
  $('localCloudRetry').addEventListener('click',async()=>{try{await api('/api/local/cloud/retry','POST');$('signupStatus').textContent='Pending cloud uploads queued for retry.';load();}catch(e){$('signupStatus').textContent=e.message;}});

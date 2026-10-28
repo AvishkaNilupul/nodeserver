@@ -11,9 +11,9 @@ test('local signup persists encrypted accounts across restarts without any websi
 
  try{
   await boot();assert.equal((await call('/api/local/accounts',null,{ui:false})).status,403);assert.equal((await call('/api/local/accounts',null,{origin:'https://attacker.invalid'})).status,403);assert.equal((await call('/api/local/accounts',null,{host:'attacker.invalid'})).status,403);
-  const started=await call('/api/epic/signup/start',{mailbox:{address:'fixture@outlook.com',provider:'outlook-local',reservedAt:new Date().toISOString()}});assert.equal(started.status,200);const initial=started.data.session;
+  const started=await call('/api/epic/signup/start',{mailbox:{address:'fixture@outlook.com',provider:'outlook-local',reservedAt:new Date().toISOString()}});assert.equal(started.status,200);const initial=started.data.session;assert.equal(initial.automation.autoSubmit,false);assert.equal(initial.automation.autoAcceptEula,false);
   await new Promise(r=>server.close(r));await boot();
-  const resumed=await call('/api/epic/signup/'+initial.sessionId+'/resume',{});assert.equal(resumed.data.session.identity.password,initial.identity.password);const current=resumed.data.session;
+  const resumed=await call('/api/epic/signup/'+initial.sessionId+'/resume',{automation:{autoSubmit:true,autoAcceptEula:true}});assert.equal(resumed.data.session.identity.password,initial.identity.password);const current=resumed.data.session;assert.equal(current.automation.autoSubmit,true);assert.equal(current.automation.autoAcceptEula,true);
   const finish={sessionId:initial.sessionId,authorizationCode:'a'.repeat(32)};
   assert.equal((await call('/api/epic/accounts/from-extension',finish,{ui:false,bearer:initial.bearer})).status,401);
   assert.equal((await call('/api/epic/accounts/from-extension',finish,{ui:false,bearer:current.bearer})).status,502);assert.equal(instance.vault.data.accounts.length,0);

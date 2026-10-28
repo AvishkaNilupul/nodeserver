@@ -5,11 +5,11 @@
   let active = null;
   function extension(type, data = {}, timeout = 30000) {
     return new Promise((resolve, reject) => {
-      const timer = setTimeout(() => { window.removeEventListener('message', listener); reject(new Error('Extension did not respond. Reload version 1.3.0 at chrome://extensions, then refresh this page.')); }, timeout);
+      const timer = setTimeout(() => { window.removeEventListener('message', listener); reject(new Error('Extension did not respond. Reload version 1.4.0 at chrome://extensions, then refresh this page.')); }, timeout);
       function listener(ev) {
         if (ev.source !== window || ev.origin !== location.origin || ev.data?.type !== type + '-ack') return;
         clearTimeout(timer); window.removeEventListener('message', listener);
-        ev.data.ok ? resolve(ev.data.payload) : reject(new Error(ev.data.error || 'Extension request failed'));
+        ev.data.ok ? resolve(ev.data.payload) : reject(new Error(/context invalidated/i.test(ev.data.error || '') ? 'Extension was reloaded. Refresh this generator page to reconnect, then try again.' : ev.data.error || 'Extension request failed'));
       }
       window.addEventListener('message', listener);
       window.postMessage({ ...data, type }, location.origin);
@@ -29,12 +29,13 @@
     try {
       status.textContent = 'Checking local generator…';
       await signupApi('/api/epic/signup/health');
-      await extension('epicgen-ping', {}, 3000);
+      const ping=await extension('epicgen-ping', {}, 3000);
+      if(document.getElementById('signupAuto')?.checked && ping.version!=='1.4.0')throw Error('Reload extension version 1.4.0 before using automatic submission.');
       status.textContent = 'Reserving an Outlook inbox…';
       const { mailbox } = await extension('epicgen-allocate', { useProxy: document.getElementById('signupProxy').checked });
       reserved = true;
       status.textContent = 'Preparing signup for ' + mailbox.address + '…';
-      const body = await signupApi('/api/epic/signup/start', {method:'POST',headers:{'Content-Type':'application/json',Accept:'application/json'},body:JSON.stringify({mailbox})});
+      const body = await signupApi('/api/epic/signup/start', {method:'POST',headers:{'Content-Type':'application/json',Accept:'application/json'},body:JSON.stringify({mailbox,automation:{autoSubmit:!!document.getElementById('signupAuto')?.checked,autoAcceptEula:!!document.getElementById('signupAuto')?.checked}})});
       active = body.session.sessionId;
       await extension('epicgen-drive', body.session);
       status.textContent = 'Signup opened for ' + mailbox.address + '. Complete any captcha in the Epic tab; Outlook verification runs automatically.';
@@ -50,12 +51,13 @@
     try {
       status.textContent = 'Checking local generator…';
       await signupApi('/api/epic/signup/health');
-      await extension('epicgen-ping', {}, 3000);
+      const ping=await extension('epicgen-ping', {}, 3000);
+      if(document.getElementById('signupAuto')?.checked && ping.version!=='1.4.0')throw Error('Reload extension version 1.4.0 before using automatic submission.');
       const recent = await signupApi('/api/epic/signup/recent?limit=1');
       const last = recent.sessions?.[0];
       if (!last || last.status === 'verified') throw new Error('No interrupted signup to resume');
       const data = await signupApi('/api/epic/signup/' + encodeURIComponent(last.sessionId) + '/resume', {
-        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ mode }) });
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ mode,automation:{autoSubmit:!!document.getElementById('signupAuto')?.checked,autoAcceptEula:!!document.getElementById('signupAuto')?.checked} }) });
       await extension('epicgen-allocate', { useProxy: document.getElementById('signupProxy').checked, resumeMailbox: data.session.mailbox });
       active = data.session.sessionId;
       await extension('epicgen-drive', data.session);
