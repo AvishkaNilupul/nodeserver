@@ -161,16 +161,18 @@ async function setConfig(patch, actor) {
 // Stock: what can be sold
 // ---------------------------------------------------------------------------
 
+// The account's games, most valuable first (the title and the cover lead with
+// the game a buyer is most likely searching for), then by name.
 function gameTitles(acc) {
-  const seen = new Set();
-  const out = [];
+  const seen = new Map();
   for (const g of (acc && acc.library) || []) {
     const t = String((g && g.title) || "").trim();
-    if (!t || seen.has(t.toLowerCase())) continue;
-    seen.add(t.toLowerCase());
-    out.push(t);
+    if (!t) continue;
+    const k = t.toLowerCase();
+    const price = Number(g.priceUsd) || 0;
+    if (!seen.has(k) || seen.get(k).price < price) seen.set(k, { t, price });
   }
-  return out.sort((a, b) => a.localeCompare(b));
+  return [...seen.values()].sort((a, b) => b.price - a.price || a.t.localeCompare(b.t)).map((x) => x.t);
 }
 
 // Accounts with exactly the same games share a key (and so a listing).
@@ -516,6 +518,34 @@ async function vetAccounts(accountIds) {
 }
 
 // ---------------------------------------------------------------------------
+// Eldorado's permission to sell Epic accounts at all
+// ---------------------------------------------------------------------------
+
+// Epic Games accounts is one of Eldorado's "high-risk" categories; a seller
+// lists there only while Eldorado has switched allowHighRiskOffers on for
+// them. Read at most every 10 min (a create refusal re-reads it at once).
+const PERMISSION_CACHE_MS = 10 * 60 * 1000;
+let permissionCache = { at: 0, value: null };
+async function eldoradoPermission({ fresh = false } = {}) {
+  if (!fresh && permissionCache.value && Date.now() - permissionCache.at < PERMISSION_CACHE_MS) {
+    return permissionCache.value;
+  }
+  let value;
+  try {
+    value = { ...(await eld.epicPermission()), checkedAt: new Date() };
+  } catch (e) {
+    value = { canSell: null, error: (e && e.message) || String(e), checkedAt: new Date() };
+  }
+  permissionCache = { at: Date.now(), value };
+  return value;
+}
+
+const NO_PERMISSION_TEXT =
+  "Eldorado doesn't let this seller account list Epic Games accounts yet: it's one of Eldorado's high-risk " +
+  "categories and our account's “high-risk offers” permission is off. Ask Eldorado support to enable it; " +
+  "everything else is ready.";
+
+// ---------------------------------------------------------------------------
 // Listings
 // ---------------------------------------------------------------------------
 
@@ -544,7 +574,9 @@ async function previewListing(opts) {
   const mixed = vetted.some((v) => gameKey(v.titles) !== key);
   const cover = String(opts.coverUrl || "").trim() || (await coverUrlFor(games));
   const noPrice = opts.priceUsd == null || opts.priceUsd === "";
+  const permission = await eldoradoPermission();
   return {
+    permission,
     title: validTitle(opts.title || suggestTitle(games)),
     priceUsd: noPrice ? null : validPrice(opts.priceUsd),
     description: String(opts.description || suggestDescription(games, cfg.sessionDays)).slice(0, 2000),
@@ -563,6 +595,7 @@ async function previewListing(opts) {
     })),
     note: additionalInfoText(cfg.sessionDays),
     problems: [
+      ...(permission.canSell === false ? [NO_PERMISSION_TEXT] : []),
       ...(noPrice ? ["Set a price"] : []),
       ...(purl ? [] : ["PUBLIC_BASE_URL is not an https address, so the mail page link can't be built"]),
       ...(cover ? [] : ["No cover image found for these games. Paste an image link"]),
@@ -637,6 +670,11 @@ async function createListing(opts, actor) {
       listing.status = "active";
       await listing.save();
     } catch (e) {
+      // Eldorado's own refusal of the category: re-read the permission so the
+      // panel says so instead of the old cached answer.
+      if (/not eligible to place offers/i.test(String((e && e.message) || ""))) {
+        await eldoradoPermission({ fresh: true }).catch(() => {});
+      }
       if (!listing.externalId && listing.status !== "error") {
         // Nothing reached Eldorado: give the accounts back.
         await revokeSessions(minted, "unlisted");
@@ -1536,17 +1574,18 @@ async function overview({ withOthers = true } = {}) {
   const ctx = await stockContext();
   const stock = ctx.accounts.map((a) => stockRow(a, readinessOf(a, ctx)));
   const listings = await EpicListing.find({}).sort({ createdAt: -1 }).limit(50).lean();
-  const [sales, proxy, state] = await Promise.all([
+  const [sales, proxy, state, permission] = await Promise.all([
     salesView(),
     outlook.proxyHealth(),
     EpicSalesState.findById("main").lean(),
+    eldoradoPermission(),
   ]);
   return {
     config: { syncEnabled: ctx.cfg.syncEnabled, sessionDays: ctx.cfg.sessionDays, allowSharedInbox: ctx.cfg.allowSharedInbox },
     health: {
       providerUrl: providerUrl(),
       proxy: proxy ? { ok: true, inboxes: proxy.inboxes } : { ok: false },
-      eldorado: eldoradoLogin(),
+      eldorado: { ...eldoradoLogin(), permission, noPermissionText: NO_PERMISSION_TEXT },
       sync: {
         enabled: ctx.cfg.syncEnabled,
         lastTickAt: state && state.lastTickAt,
@@ -1650,5 +1689,14 @@ module.exports = {
   sizedEpicImage,
   mintPassword,
   parseEldDate,
-  _internals: { recordSale, scanOrders, readBack, markUnitSold, withLock },
+  _internals: {
+    recordSale,
+    scanOrders,
+    readBack,
+    markUnitSold,
+    withLock,
+    resetPermissionCache: () => {
+      permissionCache = { at: 0, value: null };
+    },
+  },
 };

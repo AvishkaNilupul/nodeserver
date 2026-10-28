@@ -23,9 +23,18 @@ test("gameKey ignores order, case and duplicates", () => {
   assert.equal(sales.gameKey([]), "");
 });
 
-test("gameTitles reads the library, de-duplicated and sorted", () => {
-  const acc = { library: [{ title: "Sker Ritual" }, { title: "Home - A Unique Horror Adventure" }, { title: "sker ritual" }, { title: "" }] };
-  assert.deepEqual(sales.gameTitles(acc), ["Home - A Unique Horror Adventure", "Sker Ritual"]);
+test("gameTitles reads the library, de-duplicated, most valuable game first", () => {
+  const acc = {
+    library: [
+      { title: "Home - A Unique Horror Adventure", priceUsd: 4.99 },
+      { title: "Sker Ritual", priceUsd: 24.99 },
+      { title: "sker ritual", priceUsd: 0 },
+      { title: "" },
+      { title: "Alpha Free" },
+    ],
+  };
+  assert.deepEqual(sales.gameTitles(acc), ["Sker Ritual", "Home - A Unique Horror Adventure", "Alpha Free"]);
+  assert.match(sales.suggestTitle(sales.gameTitles(acc).slice(0, 2)), /\| Sker Ritual \+ Home/);
 });
 
 test("titles stay within Eldorado's limits and never say full access or Automatic Farming", () => {

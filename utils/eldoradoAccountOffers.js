@@ -289,6 +289,40 @@ async function orderAccountDetails(orderId) {
   return entryList(r).map(fromEntry);
 }
 
+// Eldorado marks some game categories "high risk" (Epic Games accounts is
+// one: GET /library/highRiskGameCategories). A seller can only list there
+// while their payment profile says allowHighRiskOffers — a per-seller switch
+// Eldorado sets; being ID-verified is not enough. Without it every create
+// answers 400 "you are not eligible to place offers in this game".
+let highRiskCache = { at: 0, list: null };
+async function highRiskCategories() {
+  if (highRiskCache.list && Date.now() - highRiskCache.at < 6 * 60 * 60 * 1000) return highRiskCache.list;
+  const r = await call("Eldorado high-risk categories", "GET", "/api/library/highRiskGameCategories?locale=en-US");
+  const list = Array.isArray(r) ? r : (r && (r.games || r.results)) || [];
+  highRiskCache = { at: Date.now(), list };
+  return list;
+}
+
+async function epicPermission(gameId = EPIC_GAME_ID) {
+  const out = { canSell: null, allowHighRiskOffers: null, epicIsHighRisk: null, error: "" };
+  try {
+    const list = await highRiskCategories();
+    out.epicIsHighRisk = list.some((x) => String(x && x.gameId) === String(gameId) && x.category === CATEGORY);
+  } catch (e) {
+    out.error = e.message;
+  }
+  try {
+    const p = await call("Eldorado seller profile", "GET", "/api/userpayment/me");
+    const dto = (p && (p.userPaymentPrivateDTO || p)) || {};
+    if (typeof dto.allowHighRiskOffers === "boolean") out.allowHighRiskOffers = dto.allowHighRiskOffers;
+  } catch (e) {
+    out.error = (out.error ? out.error + "; " : "") + e.message;
+  }
+  if (out.epicIsHighRisk === false) out.canSell = true;
+  else if (out.epicIsHighRisk === true && out.allowHighRiskOffers != null) out.canSell = out.allowHighRiskOffers;
+  return out;
+}
+
 // Seller orders in each of the given states, newest first per state.
 async function ordersInStates(states, pageSize = 50) {
   const out = [];
@@ -315,6 +349,7 @@ module.exports = {
   myAccountOffers,
   orderAccountDetails,
   ordersInStates,
+  epicPermission,
   offerUrl,
   uploadImage: (p) => mp.eldoradoUploadImage(p),
   // pure, for tests

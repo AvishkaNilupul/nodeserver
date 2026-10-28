@@ -223,6 +223,18 @@
         (el.configured ? (el.expiresAt ? "Until " + esc(new Date(el.expiresAt).toLocaleString()) : "Signed in") : "Not configured") +
         '</div><div class="s">' + (el.expiresAt ? "Expires " + esc(until(el.expiresAt)) + ". Paste a fresh cookie before then." : "") + "</div></div>",
     );
+    const perm = el.permission || {};
+    cards.push(
+      '<div class="es-stat"><b>Eldorado permission</b><div class="v ' + (perm.canSell === true ? "ok" : perm.canSell === false ? "bad" : "") + '">' +
+        (perm.canSell === true ? "Can list Epic accounts" : perm.canSell === false ? "Epic accounts not allowed yet" : "Unknown") +
+        '</div><div class="s">' +
+        (perm.canSell === false
+          ? "Epic Games accounts is one of Eldorado's high-risk categories. Ask Eldorado support to enable “high-risk offers” for our seller account."
+          : perm.canSell === true
+            ? "Eldorado accepts our Epic account offers."
+            : esc(perm.error || "Not checked yet.")) +
+        "</div></div>",
+    );
     const sy = h.sync || {};
     cards.push(
       '<div class="es-stat"><b>Sale tracking</b><div class="v ' + (sy.enabled ? (sy.lastTickOk === false ? "bad" : "ok") : "bad") + '">' +
@@ -267,7 +279,9 @@
     const groups = data.groups || [];
     const counts = { ready: 0, listed: 0, sold: 0, blocked: 0 };
     for (const s of data.stock || []) counts[s.state] = (counts[s.state] || 0) + 1;
+    const perm = ((data.health || {}).eldorado || {}).permission || {};
     const head =
+      (perm.canSell === false ? '<div class="warn">' + esc(data.health.eldorado.noPermissionText || "Eldorado doesn't allow Epic account offers on this seller account yet.") + "</div>" : "") +
       '<div class="es-meta" style="margin:0 0 10px">' +
       [pill(counts.ready + " ready", "green"), pill(counts.listed + " on sale"), pill(counts.sold + " sold"), pill(counts.blocked + " can't sell", counts.blocked ? "amber" : "")].join(" ") +
       "</div>";

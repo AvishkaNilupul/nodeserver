@@ -70,6 +70,8 @@ function fakeEntries(list) {
   return list.map((e) => ({ ...e, id: e.id || "e" + ++ELD.seq }));
 }
 eld.uploadImage = async () => ({ smallImage: "s.png", largeImage: "l.png", originalSizeImage: "o.png" });
+let PERMISSION = { canSell: true, allowHighRiskOffers: true, epicIsHighRisk: true, error: "" };
+eld.epicPermission = async () => PERMISSION;
 eld.createAccountOffer = async (opts) => {
   const id = "00000000-0000-4000-8000-" + String(++ELD.seq).padStart(12, "0");
   ELD.offers.set(id, {
@@ -262,6 +264,25 @@ test("the overview says which accounts can be sold and why", async () => {
   // Nothing secret in the panel's payload.
   const body = JSON.stringify(j);
   assert.ok(!body.includes("EpicPw-"), "Epic passwords never reach the panel");
+});
+
+test("without Eldorado's high-risk permission nothing is created or minted", async () => {
+  PERMISSION = { canSell: false, allowHighRiskOffers: false, epicIsHighRisk: true, error: "" };
+  // The permission is cached for 10 minutes: start from a fresh read.
+  require("../utils/epicSales")._internals.resetPermissionCache();
+  const ids = [acc["gen-a"].id];
+  let r = await call("POST", "/api/epic/sales/preview", { accountIds: ids, priceUsd: 0.99 });
+  const j = await r.json();
+  assert.ok(j.preview.problems.some((p) => /high-risk/.test(p)), JSON.stringify(j.preview.problems));
+  r = await call("POST", "/api/epic/sales/listings", { accountIds: ids, priceUsd: 0.99, confirm: true });
+  assert.equal(r.status, 400);
+  assert.match((await r.json()).message, /high-risk/);
+  assert.equal(ELD.offers.size, 0);
+  assert.equal(await BuyerMailSession.countDocuments({}), 0, "no mail login minted for a listing that can't exist");
+  const ov = await (await call("GET", "/api/epic/sales/overview?others=0")).json();
+  assert.equal(ov.health.eldorado.permission.canSell, false);
+  PERMISSION = { canSell: true, allowHighRiskOffers: true, epicIsHighRisk: true, error: "" };
+  require("../utils/epicSales")._internals.resetPermissionCache();
 });
 
 test("preview needs a price and finds the cover art; create lists the accounts", async () => {
