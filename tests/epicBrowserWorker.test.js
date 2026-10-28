@@ -27,3 +27,8 @@ test('paid checkout cannot be submitted',async()=>{
 test('jobs require account identity and exact offer identifiers',()=>{
  assert.equal(validJob(job),true);assert.equal(validJob({...job,accountKey:'../shared'}),false);assert.equal(validJob({...job,offerId:''}),false);
 });
+
+test('explicit zero prices support currency codes without accepting paid amounts',()=>{
+ for(const price of ['RUB 0.00','EUR 0,00','JPY 0'])assert.equal(isFreeCheckout('This is free. '+price),true);
+ for(const price of ['RUB 0.01','USD 10.00','EUR 0,99'])assert.equal(isFreeCheckout('This is free. '+price),false);
+});

@@ -21,3 +21,14 @@ test('job is assigned once, matched by lease, and completed without exposing ser
  assert.equal(call(app,'POST /extension/result',extensionToken,{...assigned,status:'submitted'}).code,200);
  assert.equal(submitted.body.status,'submitted');
 });
+test('reconnection credentials are accepted only from server auth; completion returns only the code',()=>{
+ const {app,extensionToken}=createBridge({express:fakeExpress,token});
+ call(app,'GET /extension/status',extensionToken);
+ const recover={accountKey:'d'.repeat(32),displayName:'test',email:'test@example.com',password:'test-fixture'};
+ assert.equal(call(app,'POST /recover',extensionToken,recover).code,401);
+ const response=call(app,'POST /recover',token,recover);
+ const assigned=call(app,'GET /extension/next',extensionToken).body.job;
+ assert.equal(assigned.mode,'recover');
+ const result=call(app,'POST /extension/result',extensionToken,{id:assigned.id,lease:assigned.lease,status:'reauthorized',code:'e'.repeat(32)});
+ assert.equal(result.code,200);assert.equal(response.body.code,'e'.repeat(32));assert.equal(response.body.password,undefined);assert.equal(response.body.email,undefined);
+});

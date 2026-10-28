@@ -15,6 +15,7 @@
 const axios = require("axios");
 const epic = require("./epicClient");
 const { verifyClaimResult } = require("./epicClaimResult");
+const { accountAccessToken } = require("./epicAccountToken");
 const settings = require("./settings");
 const captchaSolver = require("./captchaSolver");
 const { decrypt } = require("./secretBox");
@@ -149,6 +150,7 @@ function retryPolicy(cfg) {
 // attempted=false means the caller should fall back to the Telegram tap.
 async function attemptAutoClaim(acc, freebie, accessToken, opts = {}) {
   if (acc.sold) return { attempted: false, status: "sold" };
+  if (acc.status === "needs_login") return { attempted: false, status: "needs_login" };
   const cfg = settings.getEpicAutoClaim();
   if (!cfg.enabled && !opts.manual) {
     return { attempted: false, status: "disabled" };
@@ -229,6 +231,16 @@ async function attemptAutoClaim(acc, freebie, accessToken, opts = {}) {
   if (["busy", "worker_unavailable"].includes(result.status)) {
     state.dayCounts[todayKey()] = Math.max(0, todayCount() - 1);
     return { attempted: false, ...result };
+  }
+  // A cached access token can work after the browser revoked its refresh grant.
+  try {
+    await accountAccessToken(acc, { forceRefresh: true });
+  } catch (err) {
+    if (err.epicCode === "invalid_grant") {
+      acc.status = "needs_login";
+      acc.lastError = err.message;
+      result.tokenNeedsLogin = true;
+    } else result.tokenVerificationPending = true;
   }
   const summary = {
     at: new Date(),

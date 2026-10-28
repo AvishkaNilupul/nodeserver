@@ -8,7 +8,7 @@ const { encrypt, decrypt } = require("./secretBox");
 function createTokenStore({ collection, refresh, encrypt, decrypt, now = Date.now,
   sleep = ms => new Promise(resolve => setTimeout(resolve, ms)) }) {
   const cache = new Map();
-  return async function accountAccessToken(account) {
+  return async function accountAccessToken(account, opts = {}) {
     const id = account._id;
     const owner = crypto.randomUUID();
     const deadline = now() + 25000;
@@ -27,7 +27,7 @@ function createTokenStore({ collection, refresh, encrypt, decrypt, now = Date.no
     const match = { _id: id, "tokenRefreshLease.owner": owner, refreshToken: row.refreshToken };
     try {
       const hit = cache.get(String(id));
-      if (hit && hit.refreshToken === row.refreshToken && hit.expiresAt > now()) return hit.accessToken;
+      if (!opts.forceRefresh && hit && hit.refreshToken === row.refreshToken && hit.expiresAt > now()) return hit.accessToken;
       const tok = await refresh(decrypt(row.refreshToken));
       if (!tok.access_token || !tok.refresh_token || (tok.account_id && tok.account_id !== row.accountId)) {
         throw new Error("Epic returned an incomplete or mismatched token bundle");

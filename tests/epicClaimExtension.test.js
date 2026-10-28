@@ -22,3 +22,10 @@ test('unassigned Epic tabs are untouched',async()=>assert.equal((await run('righ
 test('visible security checks are surfaced without clicking',async()=>{
  const r=await run('right-account One more step');assert.equal(r.clicks,0);assert.equal(r.reports[0].status,'needs_captcha');
 });
+
+test('zero prices in other currencies can be claimed',async()=>{
+ for(const price of ['RUB 0.00','EUR 0,00','JPY 0'])assert.equal((await run('right-account This is free. '+price)).clicks,1);
+});
+test('nonzero currency amounts cannot pass as free',async()=>{
+ for(const price of ['RUB 0.01','USD 10.00','EUR 0,99'])assert.equal((await run('right-account This is free. '+price)).clicks,0);
+});

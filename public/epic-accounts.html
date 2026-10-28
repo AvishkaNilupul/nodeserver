@@ -1042,17 +1042,21 @@
       window.claimNow = async function (id, offerId) {
         if (pendingClaimLinks.has(id)) return;
         pendingClaimLinks.add(id);
+        toast("Claim running on the Mac…");
         try {
-          var j = await api("/api/epic/accounts/" + id + "/claim-link", {
+          var j = await api("/api/epic/accounts/" + id + "/auto-claim", {
             method: "POST",
             body: JSON.stringify({ offerId: offerId }),
           });
-          window.open(j.url, "_blank");
-          toast(
-            "Checkout opened signed in as that account — place the free order there.",
-          );
+          var result = j.result || {};
+          if (!["claimed", "already_owned"].includes(result.status)) {
+            throw new Error(result.error || result.status || "Claim did not finish");
+          }
+          if (result.tokenNeedsLogin) throw new Error("Game claimed; account needs reconnection.");
+          toast(result.status === "already_owned" ? "Already in the library." : "Claimed and verified in the library.");
+          await load();
         } catch (e) {
-          toast("Claim link failed: " + e.message, true);
+          toast("Claim: " + e.message, true);
         } finally {
           pendingClaimLinks.delete(id);
         }

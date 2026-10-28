@@ -323,6 +323,16 @@ router.post(
       }
       const accessToken = await accountAccessToken(acc);
       const result = await epicAutoClaim.attemptAutoClaim(acc, freebie, accessToken, { manual: true });
+      if (["claimed", "already_owned"].includes(result.status) && !result.tokenNeedsLogin) {
+        try {
+          const prices = new Map((await EpicFreebie.find({}).lean()).map(f => [
+            f.namespace, parseFloat(String(f.originalPrice || "").replace(/[^0-9.]/g, "")) || 0,
+          ]));
+          await epicClaimer.syncLibrary(acc, await accountAccessToken(acc), prices);
+          acc.lastCheckedAt = new Date();
+          await acc.save();
+        } catch { result.librarySyncPending = true; }
+      }
       res.json({ success: true, result });
     } catch (err) {
       console.error("epic auto-claim error:", err.message);

@@ -55,3 +55,7 @@ test('concurrent fresh login cannot be overwritten by older refresh',async()=>{
   let s;s=setup(async()=>{s.row.refreshToken='fresh-login';return bundle();});
   await assert.rejects(s.get({_id:'one'}),/login changed/);assert.equal(s.row.refreshToken,'fresh-login');
 });
+
+test('forced verification rotates the refresh token even when access is cached',async()=>{
+ let calls=0;const s=setup(async()=>bundle(++calls));await s.get({_id:'one'});await s.get({_id:'one'},{forceRefresh:true});assert.equal(calls,2);assert.equal(s.row.refreshToken,'rotated2');
+});

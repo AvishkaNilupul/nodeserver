@@ -1,6 +1,6 @@
 (async()=>{
  if(window.__epicClaimCheckout)return;window.__epicClaimCheckout=true;
- const context=await chrome.runtime.sendMessage({type:'epicclaim-context'}).catch(()=>null);if(!context?.ok)return;
+ const context=await chrome.runtime.sendMessage({type:'epicclaim-context'}).catch(()=>null);if(!context?.ok||context.job?.mode==='recover')return;
  const job=context.job;let clicked=false,done=false;
  const report=async(status,error='')=>{if(done)return;done=true;await chrome.runtime.sendMessage({type:'epicclaim-result',status,error});};
  const visible=el=>!!el&&el.getBoundingClientRect().width>0&&el.getBoundingClientRect().height>0&&getComputedStyle(el).visibility!=='hidden';
@@ -19,7 +19,8 @@
   const button=[...document.querySelectorAll('button')].find(b=>/^add to library$/i.test(b.innerText.trim())&&visible(b)&&!b.disabled);
   if(!button)return;
   if(!text.includes(job.displayName))return report('error','Checkout account does not match assigned account');
-  if(!/this is free/i.test(text)||!/\$\s*0\.00\b/.test(text))return report('error','Checkout is not explicitly free');
+  const prices=[...text.matchAll(/(?:[$€£¥₽₹₩₺₴₫]|\b[A-Z]{3})\s*(\d+(?:[.,]\d+)?)/g)].map(m=>Number(m[1].replace(',','.')));
+  if(!/this is free/i.test(text)||!prices.length||prices.some(price=>price!==0))return report('error','Checkout is not explicitly free');
   clicked=true;button.click();
  },1000);
  setTimeout(()=>{clearInterval(timer);report(clicked?'submitted':'error',clicked?'Confirm ownership in library':'Checkout did not finish');},110000);

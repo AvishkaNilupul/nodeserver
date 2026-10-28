@@ -2,7 +2,8 @@
 const path = require('path');
 const crypto = require('crypto');
 function isFreeCheckout(text) {
-  return /this is free/i.test(text) && /\$\s*0\.00\b/.test(text);
+  const prices=[...text.matchAll(/(?:[$€£¥₽₹₩₺₴₫]|\b[A-Z]{3})\s*(\d+(?:[.,]\d+)?)/g)].map(m=>Number(m[1].replace(',','.')));
+  return /this is free/i.test(text) && prices.length>0 && prices.every(price=>price===0);
 }
 async function visibleChallenge(page) {
   if (await page.getByText(/one more step|please complete a security check/i).first().isVisible().catch(()=>false)) return true;

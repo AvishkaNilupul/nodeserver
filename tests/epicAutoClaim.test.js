@@ -61,6 +61,8 @@ const stub = {
 };
 require.cache[epicClientPath] = { exports: stub, loaded: true, id: epicClientPath };
 
+const accountTokenPath = require.resolve("../utils/epicAccountToken");
+require.cache[accountTokenPath] = {exports:{accountAccessToken:async()=>"tok"},loaded:true,id:accountTokenPath};
 const settings = require("../utils/settings");
 const epicAutoClaim = require("../utils/epicAutoClaim");
 

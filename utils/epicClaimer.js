@@ -114,7 +114,7 @@ async function pingClaim(acc, freebie, accessToken) {
 // Sync one account and return the live freebies it still needs.
 async function processAccount(acc, liveFreebies, notify, priceByNamespace) {
   try {
-    const accessToken = await accountAccessToken(acc);
+    let accessToken = await accountAccessToken(acc);
     await syncLibrary(acc, accessToken, priceByNamespace);
     acc.status = "ok";
     acc.lastError = "";
@@ -131,6 +131,8 @@ async function processAccount(acc, liveFreebies, notify, priceByNamespace) {
           f,
           accessToken,
         );
+        if (acc.status === "needs_login") break;
+        accessToken = await accountAccessToken(acc);
         if (
           (auto.attempted && auto.status === "claimed") || auto.status === "already_owned"
         ) {
@@ -232,4 +234,4 @@ function start() {
   if (t.unref) t.unref();
 }
 
-module.exports = { start, runOnce, status };
+module.exports = { start, runOnce, status, syncLibrary };
