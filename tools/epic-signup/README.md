@@ -19,7 +19,7 @@ The installer replaces the old redirect service and starts
 node tools/epic-signup/local-app.cjs
 ```
 
-Keep the Outlook reader running on 127.0.0.1:3999 and Marketplace Filler 1.4.0
+Keep the Outlook reader running on 127.0.0.1:3999 and Marketplace Filler 1.5.0
 enabled in Chrome. Check extension verifies connectivity without reserving an
 inbox or opening Epic. Create Epic account reserves a local inbox and opens the
 signup wizard. The extension fills details and retrieves fresh Outlook OTPs;
@@ -50,3 +50,43 @@ and executes tools/epic-signup/cloud-import.cjs on the cloud host. Payloads are
 sent through stdin, not command arguments or logs. The cloud encrypts credentials
 with its own key. This command has no HTTP endpoint and does not rotate tokens,
 reset sold state, overwrite existing rows, or trigger claims/notifications.
+
+## Optional YesCaptcha companion
+
+The official YesCaptcha Assistant can recognize and click hCaptcha images in
+the same Chrome/private signup window. It uses the existing YesCaptcha balance;
+returning a token alone does not establish that Epic accepted the challenge.
+
+Preparation (does not install or enable browser access):
+
+```
+node tools/epic-signup/prepare-yescaptcha.cjs /path/to/existing/nodeserver
+```
+
+This reads the existing encrypted local solver configuration only during setup,
+verifies the pinned official 1.4.9 package checksum, and writes the configured
+companion under the private EpicAccountGenerator application-support directory.
+The key stays outside the repository and local web page, with config.js mode 600.
+Existing companion folders are preserved instead of overwritten.
+
+Load the prepared directory through Chrome's Load unpacked control, enable its
+private-window access, and verify its settings before a live run. Recognition is
+restricted to HTTPS Epic domains, other CAPTCHA families are disabled, and the
+companion stops after eight recognition flows per page. This is a retry bound,
+not a global points budget. A zero balance or unsupported challenge must remain
+a visible interruption rather than being reported as a saved account.
+
+The prepared package has not yet been installed or tested against five new Epic
+signups: Chrome setup is waiting for the Mac to be unlocked. No new account or
+recognition charge was made while preparing it; the free balance check returned
+1,302 points. Remove this pending note only after live verification.
+
+## Interrupted security checks
+
+A visible registration challenge preserves the same signup and pauses the
+submission timeout. The banner reports that it is waiting for the security
+check. Epic service-unavailable errors stop the driver and suppress automatic
+resubmission. Use Recover created account for an account that already passed
+email verification; reuse its interrupted signup instead of creating another
+account or consuming another Outlook inbox. A completed challenge does not
+guarantee that Epic will accept the following authentication request.

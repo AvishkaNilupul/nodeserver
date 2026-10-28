@@ -37,7 +37,7 @@ chrome.runtime.onMessage.addListener((msg, sender, respond) => {
   (async () => {
     if (!msg?.type?.startsWith('epicgen-')) return { ok: false };
     const panel = isPanel(sender.tab?.url);
-    if (msg.type === 'epicgen-ping') return { ok: panel, version: '1.4.0' };
+    if (msg.type === 'epicgen-ping') return { ok: panel, version: '1.5.0' };
     if (msg.type === 'epicgen-allocate') {
       if (!panel) throw new Error('Open the Epic Accounts panel first');
       const stored = await chrome.storage.session.get([KEY, PENDING]);
@@ -127,6 +127,19 @@ chrome.runtime.onMessage.addListener((msg, sender, respond) => {
         return { ok: true, code: hit.code };
       } catch (e) { return { ok: true, waiting: true, error: e.message }; }
     }
+    if (msg.type === 'epicgen-retry-challenge') {
+      if ((s.challengeReloads || 0) >= 2) throw new Error('Epic rejected the CAPTCHA response after two refreshes. Recover this signup later.');
+      s.challengeReloads = (s.challengeReloads || 0) + 1;
+      if(new URL(sender.tab.url).pathname.startsWith('/id/login'))s.login=true;
+      await chrome.storage.session.set({ [KEY]: s });
+      return { ok: true };
+    }
+    if (msg.type === 'epicgen-reset-auth-context') {
+      if ((s.authContextResets || 0) >= 1) throw new Error('Epic login context recovery already attempted. Recover this signup later.');
+      s.authContextResets = (s.authContextResets || 0) + 1; s.login = true;
+      await chrome.storage.session.set({ [KEY]: s });
+      return { ok: true };
+    }
     if (msg.type === 'epicgen-recover-auth') {
       if (!s.otpDelivered || (s.authRecoveries || 0) >= 1) throw new Error('Email authentication recovery already attempted. Recover this account from the panel.');
       s.authRecoveries = (s.authRecoveries || 0) + 1; s.login = true;
@@ -157,6 +170,8 @@ chrome.runtime.onMessage.addListener((msg, sender, respond) => {
       return { ok: true, account: result.account };
     }
     if (msg.type === 'epicgen-abort') {
+      s.failureReason = msg.reason || 'Signup stopped';
+      await chrome.storage.session.set({ [KEY]: s });
       await server(s, `/api/epic/signup/${s.sessionId}/status`, { status: 'failed', lastError: msg.reason || 'Signup stopped' });
       try { await finish(s, 'fail', msg.reason); } catch {}
       await relay(s, { kind: 'failed', error: msg.reason });
@@ -184,9 +199,10 @@ chrome.webRequest.onAuthRequired.addListener((details, callback) => {
 chrome.windows.onRemoved.addListener(async windowId => {
   const { [KEY]: s } = await chrome.storage.session.get(KEY);
   if (!s || s.windowId !== windowId) return;
-  try { await server(s, `/api/epic/signup/${s.sessionId}/status`, { status: 'failed', lastError: 'Signup window closed' }); } catch {}
-  try { await finish(s, 'fail', 'Signup window closed'); } catch {}
-  await relay(s, { kind: 'failed', error: 'Signup window closed' });
+  const reason=s.failureReason || 'Signup window closed';
+  if(!s.failureReason) { try { await server(s, `/api/epic/signup/${s.sessionId}/status`, { status: 'failed', lastError: reason }); } catch {} }
+  try { await finish(s, 'fail', reason); } catch {}
+  await relay(s, { kind: 'failed', error: reason });
   await chrome.storage.session.remove(KEY);
 });
 

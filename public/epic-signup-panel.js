@@ -5,7 +5,7 @@
   let active = null;
   function extension(type, data = {}, timeout = 30000) {
     return new Promise((resolve, reject) => {
-      const timer = setTimeout(() => { window.removeEventListener('message', listener); reject(new Error('Extension did not respond. Reload version 1.4.0 at chrome://extensions, then refresh this page.')); }, timeout);
+      const timer = setTimeout(() => { window.removeEventListener('message', listener); reject(new Error('Extension did not respond. Reload version 1.5.0 at chrome://extensions, then refresh this page.')); }, timeout);
       function listener(ev) {
         if (ev.source !== window || ev.origin !== location.origin || ev.data?.type !== type + '-ack') return;
         clearTimeout(timer); window.removeEventListener('message', listener);
@@ -30,7 +30,7 @@
       status.textContent = 'Checking local generator…';
       await signupApi('/api/epic/signup/health');
       const ping=await extension('epicgen-ping', {}, 3000);
-      if(document.getElementById('signupAuto')?.checked && ping.version!=='1.4.0')throw Error('Reload extension version 1.4.0 before using automatic submission.');
+      if(document.getElementById('signupAuto')?.checked && ping.version!=='1.5.0')throw Error('Reload extension version 1.5.0 before using automatic submission.');
       status.textContent = 'Reserving an Outlook inbox…';
       const { mailbox } = await extension('epicgen-allocate', { useProxy: document.getElementById('signupProxy').checked });
       reserved = true;
@@ -52,9 +52,10 @@
       status.textContent = 'Checking local generator…';
       await signupApi('/api/epic/signup/health');
       const ping=await extension('epicgen-ping', {}, 3000);
-      if(document.getElementById('signupAuto')?.checked && ping.version!=='1.4.0')throw Error('Reload extension version 1.4.0 before using automatic submission.');
+      if(document.getElementById('signupAuto')?.checked && ping.version!=='1.5.0')throw Error('Reload extension version 1.5.0 before using automatic submission.');
       const recent = await signupApi('/api/epic/signup/recent?limit=1');
-      const last = recent.sessions?.[0];
+      const chosen=document.getElementById('signupSession')?.value;
+      const last = chosen ? recent.sessions?.find(s=>s.sessionId===chosen) : recent.sessions?.find(s=>s.status!=='verified');
       if (!last || last.status === 'verified') throw new Error('No interrupted signup to resume');
       const data = await signupApi('/api/epic/signup/' + encodeURIComponent(last.sessionId) + '/resume', {
         method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ mode,automation:{autoSubmit:!!document.getElementById('signupAuto')?.checked,autoAcceptEula:!!document.getElementById('signupAuto')?.checked} }) });

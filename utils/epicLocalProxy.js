@@ -16,8 +16,14 @@ function readProxy(env = process.env, filename = path.join(os.homedir(), 'epic-c
     throw new Error('Residential proxy configuration is missing RES_HOST, RES_PORT, RES_USER or RES_PASS in ~/epic-claim/.env');
   }
   const sessionId = require('crypto').randomBytes(8).toString('hex');
-  // ProxyScrape's existing sticky-session convention, used by the SOOP worker.
-  const sticky = username.replace(/-sessid-[a-z0-9]+/ig, '') + '-sessid-' + sessionId;
+  // Regular ProxyScrape uses -session- and -lifetime-, not -sessid-.
+  // https://docs.proxyscrape.com/proxies/residential/sticky-sessions
+  // Keep country/region targeting while replacing stale session parameters.
+  const proxyScrape = host.toLowerCase() === 'rp.scrapegw.com';
+  const base = proxyScrape
+    ? username.replace(/-(?:sessid|session)-[a-z0-9]+/ig, '').replace(/-lifetime-\d+/ig, '')
+    : username.replace(/-sessid-[a-z0-9]+/ig, '');
+  const sticky = base + (proxyScrape ? '-session-' + sessionId + '-lifetime-30' : '-sessid-' + sessionId);
   return { scheme: 'http', host, port, username: sticky, password };
 }
 module.exports = { readProxy };

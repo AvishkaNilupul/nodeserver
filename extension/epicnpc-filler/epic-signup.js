@@ -34,7 +34,7 @@
       el.style.cssText =
         "position:fixed;top:0;left:0;right:0;z-index:2147483647;" +
         "padding:12px 18px;font:600 14px system-ui,sans-serif;color:#fff;" +
-        "text-align:center;box-shadow:0 4px 16px rgba(0,0,0,.35);";
+        "text-align:center;pointer-events:none;box-shadow:0 4px 16px rgba(0,0,0,.35);";
       document.documentElement.appendChild(el);
     }
     el.style.background =
@@ -364,8 +364,68 @@
 
   function captchaVisible() {
     return Array.prototype.some.call(document.querySelectorAll('iframe[src*="hcaptcha"][src*="frame=challenge"], iframe[title*="challenge" i]'), function(frame) {
-      return frame.offsetParent !== null && frame.getBoundingClientRect().height > 80;
+      var box = frame.getBoundingClientRect();
+      var style = window.getComputedStyle(frame);
+      return box.width > 80 && box.height > 80 && style.display !== 'none' &&
+        style.visibility !== 'hidden' && Number(style.opacity) !== 0;
     });
+  }
+
+  function registrationWaitState(state, challenge, now) {
+    var elapsed = Math.max(0, now - state.lastPoll);
+    state.lastPoll = now;
+    if (challenge) {
+      state.waitingMs += elapsed;
+      state.challengeSeen = true;
+      return { status: 'awaiting_captcha', timedOut: false };
+    }
+    if (state.challengeSeen) {
+      // Give Epic a fresh response window after a human/companion completes
+      // the challenge. A long challenge must not consume submission time.
+      state.deadline = now + 120000;
+      state.challengeSeen = false;
+    }
+    return { status: 'submitting', timedOut: now > state.deadline };
+  }
+
+  function serviceUnavailable() {
+    return /service is temporarily unavailable|too many requests|please try again later/i.test(document.body ? document.body.textContent || '' : '');
+  }
+
+  function continueAfterChallenge(state,visible) {
+    if(typeof visible!=='boolean')visible=captchaVisible();
+    if(visible){state.seen=true;state.clearedAt=0;return false;}
+    if(!state.seen||state.clicks>=2||challengeRejected()||otpRejected()||serviceUnavailable())return false;
+    if(!state.clearedAt){state.clearedAt=Date.now();return false;}
+    if(Date.now()-state.clearedAt<1000)return false;
+    if(!clickContinueLike())return false;
+    state.seen=false;state.clicks++;return true;
+  }
+
+  function challengeRejected() {
+    return /incorrect response[\s\S]{0,100}refresh the page/i.test(document.body ? document.body.textContent || '' : '');
+  }
+  async function retryChallenge() {
+    var result=await sw({type:'epicgen-retry-challenge',sessionId:sessionId});
+    if(!result.ok)throw new Error(result.error||'CAPTCHA refresh limit reached');
+    await sw({type:'epicgen-status',sessionId:sessionId,status:'awaiting_captcha'});
+    banner('Epic rejected the challenge response. Refreshing it once more…','info');
+    if(/\/id\/login/i.test(location.pathname))location.href='https://accounts.epicgames.com/auth/logout';
+    else location.reload();
+  }
+  function clickResendCode() {
+    var resend=Array.prototype.find.call(document.querySelectorAll('a, button'),function(el){return visibleEnabled(el)&&/^resend (?:email|code)$/i.test((el.innerText||el.textContent||'').trim());});
+    if(!resend)return false;resend.click();return true;
+  }
+
+  function authContextRejected() {
+    return /\/id\/login\/mfa/i.test(location.pathname)&&/\bemail is invalid\b/i.test(document.body ? document.body.textContent || '' : '');
+  }
+  async function resetAuthContext() {
+    var result=await sw({type:'epicgen-reset-auth-context',sessionId:sessionId});
+    if(!result.ok)throw new Error(result.error||'Login context recovery unavailable');
+    banner('Restarting the incomplete Epic sign-in session…','info');
+    location.href='https://accounts.epicgames.com/auth/logout';
   }
 
   function otpRejected() {
@@ -375,9 +435,13 @@
   async function waitForStepChange(fromStep, timeoutMs) {
     var deadline = Date.now() + (timeoutMs || 30000);
     var challengeBudget = 5 * 60 * 1000;
+    var challengeState={seen:false,clearedAt:0,clicks:0};
     while (Date.now() < deadline) {
+      if (serviceUnavailable()) throw new Error("Epic is temporarily unavailable. This signup is preserved; recover the same account later.");
       var s = stepId();
       if (s !== fromStep && s !== null) return s;
+      if (challengeRejected()) return "challenge_rejected";
+      if (authContextRejected()) return "auth_context_rejected";
       if (fromStep === "otp" && otpRejected()) return "otp_invalid";
       // Bail early on phone-verification.
       var phone = document.querySelector(
@@ -386,6 +450,7 @@
       if (phone && phone.offsetParent !== null) return "sms_required";
       var before = Date.now();
       var challenge = captchaVisible();
+      continueAfterChallenge(challengeState,challenge);
       await sleep(400);
       if (challenge && challengeBudget > 0) {
         var paused = Math.min(Date.now() - before, challengeBudget);
@@ -482,14 +547,23 @@
       banner('Details ready. Review the agreements and click Continue.','info');
     }
     var lastErrText = "";
-    var submissionDeadline=Date.now()+120000;
-    var challengeBudget=300000,lastPoll=Date.now();
+    var waitState={deadline:Date.now()+120000,lastPoll:Date.now(),waitingMs:0,challengeSeen:false};
+    var reportedWaitStatus="";
+    var challengeState={seen:false,clearedAt:0,clicks:0};
     while (true) {
       var s = stepId();
-      if (s && s !== "details" && s !== "login_password") return;
-      var elapsed=Date.now()-lastPoll;lastPoll=Date.now();
-      if(captchaVisible()&&challengeBudget>0){var paused=Math.min(elapsed,challengeBudget);submissionDeadline+=paused;challengeBudget-=paused;}
-      if(automation.autoSubmit && Date.now()>submissionDeadline) throw new Error(lastErrText || "Registration did not advance after submission");
+      if (s && s !== "details" && s !== "login_password") return {waitingMs:waitState.waitingMs};
+      if(serviceUnavailable())throw new Error("Epic is temporarily unavailable. This signup is preserved; recover the same account later.");
+      if(challengeRejected())throw new Error("captcha_reload_required");
+      var challenge = captchaVisible();
+      continueAfterChallenge(challengeState, challenge);
+      var wait = registrationWaitState(waitState, challenge, Date.now());
+      if (wait.status !== reportedWaitStatus && (challenge || reportedWaitStatus)) {
+        reportedWaitStatus = wait.status;
+        await sw({type:'epicgen-status',sessionId:sessionId,status:challenge?'awaiting_captcha':automation.autoSubmit?'submitting':'awaiting_confirmation'});
+        banner(challenge ? 'Waiting for Epic’s security check. Complete the challenge in this tab; this signup is preserved.' : 'Security check closed. Waiting for Epic to continue…', 'info');
+      }
+      if(automation.autoSubmit && wait.timedOut) throw new Error(lastErrText || "Epic did not finish registration after the security check. Recover this same signup; do not reserve another inbox.");
       var phone = document.querySelector(
         'input[type="tel"][name*="phone" i], input[name="phoneNumber"]',
       );
@@ -529,10 +603,12 @@
     var deadline = Date.now() + 5 * 60 * 1000;
     for (var attempt=0;attempt<3;attempt++) {
     resp=null;
+    var mailPollStarted=Date.now(),resent=false;
     while (Date.now() < deadline) {
       resp = await sw({ type: "epicgen-request-otp", sessionId: sessionId });
       if (!resp.ok) throw new Error("otp: " + (resp.error || "unknown"));
       if (resp.code) break;
+      if(!resent&&Date.now()-mailPollStarted>30000&&clickResendCode())resent=true;
       banner("Waiting for Outlook: " + (resp.error || "email has not arrived"), "info");
       await sleep(3000);
     }
@@ -563,16 +639,15 @@
     await waitFor(clickContinueLike, 30000);
     await sleep(1500);
     var result = await waitForStepChange('otp', 180000);
+    if (result === 'challenge_rejected') throw new Error('captcha_reload_required');
+    if (result === 'auth_context_rejected') throw new Error('auth_context_reset_required');
     if (result !== 'otp_invalid') {
       if (result === 'otp') throw new Error('Email verification response timed out');
       return;
     }
     if (attempt === 2) throw new Error('Epic rejected three fresh verification codes');
     banner('Epic rejected the code. Requesting a fresh email…','info');
-    await waitFor(function () {
-      var resend=Array.prototype.find.call(document.querySelectorAll('a, button'),function(el){return visibleEnabled(el)&&/^resend (?:email|code)$/i.test((el.textContent||'').trim());});
-      if(!resend)return false;resend.click();return true;
-    }, 60000);
+    await waitFor(clickResendCode, 60000);
     }
   }
 
@@ -601,6 +676,7 @@
       }
       console.log("epicgen step ->", step);
       try {
+        if(serviceUnavailable())throw new Error("Epic is temporarily unavailable. This signup is preserved; recover the same account later.");
         if (step === "sms_required") {
           banner(
             "Epic asked for phone verification — aborting. Try again from a different IP later.",
@@ -634,8 +710,10 @@
         else if (step === "dob") await handleDobStep(id);
         else if (step === "email") await handleEmailStep(id);
         else if (step === "details" || step === "login_password") {
-          var detailsStart=Date.now();await handleDetailsStep(id,session.login);
+          var detailsStart=Date.now();
+          var detailsResult=await handleDetailsStep(id,session.login);
           if(!session.login&&!automation.autoSubmit)startTs+=Date.now()-detailsStart;
+          else if(detailsResult)startTs+=detailsResult.waitingMs||0;
         }
         else if (step === "otp") await handleOtpStep();
         else if (step === "done") {
@@ -643,6 +721,8 @@
           return;
         }
       } catch (err) {
+        if(err.message==='captcha_reload_required'){await retryChallenge();return;}
+        if(err.message==='auth_context_reset_required'){await resetAuthContext();return;}
         banner("Step " + step + " failed: " + err.message, "err");
         await sw({
           type: "epicgen-abort",
@@ -654,6 +734,8 @@
       lastStep = step;
       // Wait for the DOM to actually advance before the next dispatch.
       var next = await waitForStepChange(step, 180000);
+      if(next==='challenge_rejected'){await retryChallenge();return;}
+      if(next==='auth_context_rejected'){await resetAuthContext();return;}
       if (next === step) {
         // The bounded wait expired; preserve the session for recovery.
         banner(
@@ -711,7 +793,7 @@
       var recovery = await sw({type:'epicgen-recover-auth',sessionId:sessionId});
       if (!recovery.ok) throw new Error(recovery.error || 'Email authentication recovery unavailable');
       banner('Epic requires email authentication. Opening sign-in to complete it…','info');
-      location.href='https://www.epicgames.com/id/login?lang=en-US';
+      location.href='https://accounts.epicgames.com/auth/logout';
       return;
     }
     if (captureError) throw new Error(captureError);

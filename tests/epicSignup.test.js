@@ -142,7 +142,7 @@ function signupDom(document, location = { pathname: '/id/register', hash: '', ho
   const messages = [];
   const context = { document, location, window: { getComputedStyle: () => ({ overflowY: 'auto' }) }, Event: class { constructor(type) {this.type=type;} }, console, setTimeout, ...overrides,
     chrome: { runtime: { sendMessage: (m, done) => { messages.push(m); done({ ok: true }); } } } };
-  vm.runInNewContext(source.slice(0, start) + 'globalThis.dom = { stepId, scrapeAuthCode, clickContinueLike, waitForStepChange, clickAgreementAccept, clickReviewContinue };\n})();', context);
+  vm.runInNewContext(source.slice(0, start) + 'globalThis.dom = { stepId, scrapeAuthCode, clickContinueLike, waitForStepChange, clickAgreementAccept, clickReviewContinue, continueAfterChallenge };\n})();', context);
   return { ...context.dom, messages };
 }
 test('current Epic OTP boxes and successive login screens are recognized', () => {
@@ -215,7 +215,7 @@ test('agreement readiness scrolls its document and accepts only an enabled butto
 
 test('visible captcha pauses the navigation deadline and resumes when dismissed', async () => {
   let time=1000, checks=0;
-  const frame={offsetParent:{},getBoundingClientRect:()=>({height:300})};
+  const frame={offsetParent:null,getBoundingClientRect:()=>({width:400,height:300})};
   const doc={querySelectorAll:sel=>sel.includes('iframe')?(++checks<4?[frame]:[]):sel.includes('code-input-')?Array(6).fill({}):[],querySelector:()=>null,getElementById:()=>null};
   const driver=signupDom(doc,undefined,{Date:{now:()=>time},setTimeout:fn=>{time+=400;fn();}});
   assert.equal(await driver.waitForStepChange('otp',1),'otp');
@@ -229,7 +229,7 @@ test('email MFA token error opens normal sign-in without submitting another regi
   const response={errorCode:'errors.com.epicgames.common.two_factor_authentication.required',metadata:{twoFactorMethod:'email'}};
   const doc={body:{textContent:''},querySelector:()=>({textContent:JSON.stringify(response)}),getElementById:()=>({style:{}})};
   const driver=signupDom(doc,location);await driver.scrapeAuthCode({});
-  assert.equal(location.href,'https://www.epicgames.com/id/login?lang=en-US');
+  assert.equal(location.href,'https://accounts.epicgames.com/auth/logout');
   assert.equal(driver.messages.at(-1).type,'epicgen-recover-auth');
   assert.equal(driver.messages.some(m=>m.type==='epicgen-authcode'),false);
 });
@@ -256,4 +256,59 @@ test('console review recognizes the visible Done linking label',()=>{
  const driver=signupDom({querySelectorAll:()=>[button]});
  assert.equal(driver.clickReviewContinue('login_review_console'),true);assert.equal(clicked,1);
  assert.equal(driver.clickReviewContinue('login_review_mfa'),false);
+});
+
+test('Epic challenge handoff rejection is distinguished from an invalid email code',async()=>{
+ const doc={body:{textContent:'Incorrect response. Please refresh the page.'},querySelectorAll:sel=>sel.includes('code-input-')?Array(6).fill({}):[],querySelector:()=>null,getElementById:()=>null};
+ assert.equal(await signupDom(doc).waitForStepChange('otp',180000),'challenge_rejected');
+});
+test('challenge refresh is bound to the signup tab and stops after two attempts',async()=>{
+ const w=worker();await w.send({type:'epicgen-allocate'});
+ await w.send({type:'epicgen-drive',sessionId:'session',bearer:'secret',identity:{email:'stock@outlook.com'},redirectUrl:'https://www.epicgames.com/id/api/redirect'});
+ const retry=id=>w.send({type:'epicgen-retry-challenge',sessionId:'session'},id,'https://www.epicgames.com/id/login/mfa');
+ assert.equal((await retry(99)).ok,false);assert.equal((await retry(10)).ok,true);assert.equal((await retry(10)).ok,true);assert.equal((await retry(10)).ok,false);
+});
+
+
+test('a cleared captcha resumes the same ready form once after settling',()=>{
+ let time=1000,clicks=0;
+ const button={textContent:'Continue',offsetParent:{},disabled:false,getAttribute:()=>null,click:()=>clicks++};
+ const doc={body:{textContent:''},getElementById:()=>button,querySelectorAll:()=>[]};
+ const driver=signupDom(doc,undefined,{Date:{now:()=>time}}),state={seen:false,clearedAt:0,clicks:0};
+ assert.equal(driver.continueAfterChallenge(state,true),false);
+ assert.equal(driver.continueAfterChallenge(state,false),false);time+=1001;
+ assert.equal(driver.continueAfterChallenge(state,false),true);
+ assert.equal(driver.continueAfterChallenge(state,false),false);assert.equal(clicks,1);
+ doc.body.textContent='Incorrect response. Please refresh the page.';
+ driver.continueAfterChallenge(state,true);time+=1001;assert.equal(driver.continueAfterChallenge(state,false),false);
+});
+
+test('closing a failed proxy window preserves its original diagnostic',async()=>{
+ const w=worker();await w.send({type:'epicgen-allocate',useProxy:true});
+ await w.send({type:'epicgen-drive',sessionId:'session',bearer:'secret',identity:{email:'stock@outlook.com'},redirectUrl:'https://www.epicgames.com/id/api/redirect'});
+ await w.send({type:'epicgen-abort',sessionId:'session',reason:'CAPTCHA handoff rejected'},10,'https://www.epicgames.com/id/register');
+ await w.removed(100);
+ const statuses=w.calls.filter(c=>String(c[0]).endsWith('/status'));
+ assert.equal(statuses.length,1);assert.equal(statuses[0][1].lastError,'CAPTCHA handoff rejected');
+ assert.equal(w.storage['epicgen.active'],undefined);
+});
+
+
+test('MFA with a missing email context restarts login rather than retrying the code',async()=>{
+ const doc={body:{textContent:'email is invalid'},querySelectorAll:sel=>sel.includes('code-input-')?Array(6).fill({}):[],querySelector:()=>null,getElementById:()=>null};
+ const driver=signupDom(doc,{pathname:'/id/login/mfa',hash:'',hostname:'www.epicgames.com'});
+ assert.equal(await driver.waitForStepChange('otp',180000),'auth_context_rejected');
+});
+test('login context reset is bounded independently from CAPTCHA refresh',async()=>{
+ const w=worker();await w.send({type:'epicgen-allocate'});
+ await w.send({type:'epicgen-drive',sessionId:'session',bearer:'secret',identity:{email:'stock@outlook.com'},redirectUrl:'https://www.epicgames.com/id/api/redirect'});
+ const reset=id=>w.send({type:'epicgen-reset-auth-context',sessionId:'session'},id,'https://www.epicgames.com/id/login/mfa');
+ assert.equal((await reset(99)).ok,false);assert.equal((await reset(10)).ok,true);assert.equal((await reset(10)).ok,false);
+});
+
+test('ProxyScrape uses documented session and lifetime fields while retaining country',()=>{
+ const {readProxy}=require('../utils/epicLocalProxy');
+ const p=readProxy({RES_HOST:'rp.scrapegw.com',RES_PORT:'6060',RES_USER:'user-country-jp-sessid-old-session-old-lifetime-5',RES_PASS:'secret'},'/private/tmp/no-epic-test-proxy-config');
+ assert.match(p.username,/^user-country-jp-session-[a-f0-9]{16}-lifetime-30$/);
+ assert.equal(p.username.includes('-sessid-'),false);
 });
