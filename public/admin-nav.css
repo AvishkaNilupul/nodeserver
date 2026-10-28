@@ -1,0 +1,33 @@
+/* Phone menu: the sidebar's closed state, ready from the first frame.
+ *
+ * At 768px and below, admin-nav.js turns the sidebar into a slide-out drawer,
+ * but the script only runs once the page has loaded. Until then a phone drew
+ * the sidebar inside the page and then slid it away. These rules put it
+ * straight into the closed drawer instead. They copy admin-nav.js's own drawer
+ * rules, which take over once it runs.
+ *
+ * Link this file LAST in <head>: it has to come after the page's own .nav
+ * rules, the same place admin-nav.js puts its style.
+ * The PlayerAuctions page links this file too but has no sidebar, so nothing
+ * here may apply to a page without a .nav.
+ */
+@media (max-width: 768px) {
+  /* Room for the 54px top bar admin-nav.js adds. :where keeps this as weak as
+     a plain "body" rule, so a page that clears it (embedded pages) still wins. */
+  body:where(:has(.nav)) {
+    padding-top: 54px;
+  }
+  .nav {
+    position: fixed;
+    top: 0;
+    left: 0;
+    bottom: 0;
+    z-index: 200;
+    width: 264px;
+    /* Fill the screen from top to bottom. A page's own 100vh is taller than
+       the visible screen on iPhones, which hid the bottom of the drawer. */
+    height: auto;
+    min-height: 0;
+    transform: translateX(-100%);
+  }
+}
