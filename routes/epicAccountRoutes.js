@@ -322,23 +322,7 @@ router.post(
           .json({ success: false, message: "Unknown offer" });
       }
       const accessToken = await accountAccessToken(acc);
-      const cfg = settings.getEpicAutoClaim();
-      const solverKey = cfg.captchaKey ? decrypt(cfg.captchaKey) : "";
-      const captchaSolver = require("../utils/captchaSolver");
-      const result = await epic.autoClaimFreebie(
-        accessToken,
-        freebie.namespace,
-        freebie.offerId,
-        {
-          solveCaptcha: solverKey
-            ? () =>
-                captchaSolver.solveHCaptcha({
-                  provider: cfg.captchaProvider || "",
-                  apiKey: solverKey,
-                })
-            : null,
-        },
-      );
+      const result = await epicAutoClaim.attemptAutoClaim(acc, freebie, accessToken, { manual: true });
       res.json({ success: true, result });
     } catch (err) {
       console.error("epic auto-claim error:", err.message);

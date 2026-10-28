@@ -14,6 +14,7 @@
 // how you get the whole account pool suspended in one wave).
 const axios = require("axios");
 const epic = require("./epicClient");
+const { verifyClaimResult } = require("./epicClaimResult");
 const settings = require("./settings");
 const captchaSolver = require("./captchaSolver");
 const { decrypt } = require("./secretBox");
@@ -27,7 +28,7 @@ const { decrypt } = require("./secretBox");
 const WORKER_URL = process.env.EPIC_CLAIM_WORKER_URL || "";
 const WORKER_TOKEN = process.env.EPIC_CLAIM_WORKER_TOKEN || "";
 
-async function callWorker({ accessToken, namespace, offerId, capSolverKey, jobId, accountKey }) {
+async function callWorker({ accessToken, namespace, offerId, capSolverKey, jobId, accountKey, displayName }) {
   const code = await epic.exchangeCode(accessToken);
   const res = await axios.post(
     WORKER_URL.replace(/\/$/, "") + "/claim",
@@ -38,6 +39,7 @@ async function callWorker({ accessToken, namespace, offerId, capSolverKey, jobId
       capSolverKey,
       jobId,
       accountKey,
+      displayName,
     },
     {
       headers: { Authorization: "Bearer " + WORKER_TOKEN },
@@ -47,7 +49,7 @@ async function callWorker({ accessToken, namespace, offerId, capSolverKey, jobId
   );
   if (res.status !== 200) {
     return {
-      status: "error",
+      status: res.status === 409 ? "busy" : res.status === 503 ? "worker_unavailable" : "error",
       error: "worker HTTP " + res.status + ": " + JSON.stringify(res.data).slice(0, 200),
     };
   }
@@ -145,9 +147,10 @@ function retryPolicy(cfg) {
 // The one entry point the claimer calls. Returns:
 //   { attempted, status, error?, orderId? }
 // attempted=false means the caller should fall back to the Telegram tap.
-async function attemptAutoClaim(acc, freebie, accessToken) {
+async function attemptAutoClaim(acc, freebie, accessToken, opts = {}) {
+  if (acc.sold) return { attempted: false, status: "sold" };
   const cfg = settings.getEpicAutoClaim();
-  if (!cfg.enabled) {
+  if (!cfg.enabled && !opts.manual) {
     return { attempted: false, status: "disabled" };
   }
   // Per-account cool-down. Any prior attempt on any offer counts — Epic
@@ -155,7 +158,7 @@ async function attemptAutoClaim(acc, freebie, accessToken) {
   // heavy giveaway week.
   const cooldownMs = Math.max(0, cfg.perAccountCooldownH) * 3600000;
   const lastAt = acc.lastAutoClaimAt ? new Date(acc.lastAutoClaimAt).getTime() : 0;
-  if (cooldownMs && lastAt && Date.now() - lastAt < cooldownMs) {
+  if (!opts.manual && cooldownMs && lastAt && Date.now() - lastAt < cooldownMs) {
     return { attempted: false, status: "cooldown" };
   }
   // Per-(account, offer) gate: a pair that already went through is done; a
@@ -167,19 +170,26 @@ async function attemptAutoClaim(acc, freebie, accessToken) {
       return { attempted: false, status: "already_tried" };
     }
     const policy = retryPolicy(cfg);
-    if (prior.length >= policy.maxAttemptsPerOffer) {
+    if (!opts.manual && prior.length >= policy.maxAttemptsPerOffer) {
       return { attempted: false, status: "retries_exhausted" };
     }
     const lastTryAt = Math.max(
       ...prior.map((e) => new Date(e.at).getTime() || 0),
     );
-    if (Date.now() - lastTryAt < policy.retryAfterH * 3600000) {
+    if (!opts.manual && Date.now() - lastTryAt < policy.retryAfterH * 3600000) {
       return { attempted: false, status: "retry_wait" };
     }
   }
   // Fleet daily cap — one confirmed OR failed attempt burns one slot.
   if (cfg.dailyCap && todayCount() >= cfg.dailyCap) {
     return { attempted: false, status: "daily_cap" };
+  }
+
+  try {
+    const library = await epic.getLibraryRecords(accessToken);
+    if (library.some(g => g.namespace === freebie.namespace)) return { attempted: false, status: "already_owned" };
+  } catch {
+    return { attempted: false, status: "library_unavailable" };
   }
 
   const solverKey = cfg.captchaKey ? decrypt(cfg.captchaKey) : "";
@@ -202,6 +212,7 @@ async function attemptAutoClaim(acc, freebie, accessToken) {
         capSolverKey: solverKey,
         jobId: acc.accountId.slice(0, 6) + "-" + Date.now(),
         accountKey: acc.accountId,
+        displayName: acc.displayName,
       });
     } else {
       result = await epic.autoClaimFreebie(
@@ -213,6 +224,11 @@ async function attemptAutoClaim(acc, freebie, accessToken) {
     }
   } catch (err) {
     result = { status: "error", error: err.message || String(err) };
+  }
+  result = await verifyClaimResult(result, freebie.namespace, () => epic.getLibraryRecords(accessToken));
+  if (["busy", "worker_unavailable"].includes(result.status)) {
+    state.dayCounts[todayKey()] = Math.max(0, todayCount() - 1);
+    return { attempted: false, ...result };
   }
   const summary = {
     at: new Date(),

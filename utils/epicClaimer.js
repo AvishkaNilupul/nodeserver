@@ -132,8 +132,7 @@ async function processAccount(acc, liveFreebies, notify, priceByNamespace) {
           accessToken,
         );
         if (
-          auto.attempted &&
-          (auto.status === "claimed" || auto.status === "already_owned")
+          (auto.attempted && auto.status === "claimed") || auto.status === "already_owned"
         ) {
           continue;
         }
