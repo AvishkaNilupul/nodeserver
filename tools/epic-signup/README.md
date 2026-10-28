@@ -1,8 +1,8 @@
 # Local Epic account generator
 
 Open http://127.0.0.1:4107/epic-accounts.html in Chrome. This is a standalone
-local app: no RedeemHub website, admin login, MongoDB, server database or
-production configuration is needed. It uses installed Node dependencies,
+local app: no RedeemHub website login, admin login, local MongoDB or
+production configuration is loaded by the signup runtime. Cloud uploads use the existing local SSH deployment key. It uses installed Node dependencies,
 local source files, the existing Chrome extension and local Outlook reader.
 Internet access to Epic, Outlook and the optional proxy provider is required.
 
@@ -37,8 +37,14 @@ Data lives in ~/Library/Application Support/EpicAccountGenerator/:
 key. Directory permissions are 700 and files 600. Back up both together;
 restoring only the vault without the key cannot recover it. Save uses an atomic
 file replacement. Damaged/missing-key vaults fail closed instead of resetting.
-No account is uploaded to the server automatically.
+Completed accounts now upload to the cloud automatically. A durable queue retries while cloud access is unavailable; local signup and local credentials remain available. The table shows Queued, Uploading or Uploaded, with a manual retry button. Existing cloud rows are never overwritten by repeat uploads.
 
 `import-backup.cjs BACKUP_JSON LEGACY_ENV [ENCRYPTED_PROFILE]` supports a one-time
 local import of the older encrypted test-account backup. It preserves the source
 and re-encrypts into the local vault. Runtime does not need the legacy env file.
+
+Cloud transport uses the existing SSH key at ~/.ssh/claude_prod_deploy_ed25519
+and executes tools/epic-signup/cloud-import.cjs on the cloud host. Payloads are
+sent through stdin, not command arguments or logs. The cloud encrypts credentials
+with its own key. This command has no HTTP endpoint and does not rotate tokens,
+reset sold state, overwrite existing rows, or trigger claims/notifications.

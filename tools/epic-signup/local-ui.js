@@ -13,8 +13,8 @@
  }
  async function load(){
   try{const data=await api('/api/local/accounts');$('localAccounts').replaceChildren();if(!data.accounts.length){$('localAccounts').textContent='No local accounts saved yet.';return;}
-   const table=document.createElement('table'),head=document.createElement('tr');for(const title of ['Account','Email','Saved','Details']){const cell=document.createElement('th');cell.textContent=title;head.append(cell);}table.append(head);
-   for(const a of data.accounts){const tr=document.createElement('tr');for(const value of [a.displayName||a.accountId,a.email,new Date(a.createdAt).toLocaleString()]){const td=document.createElement('td');td.textContent=value||'—';tr.append(td);}const td=document.createElement('td'),button=document.createElement('button');button.textContent='Show details';button.addEventListener('click',()=>reveal(a._id));td.append(button);tr.append(td);table.append(tr);}$('localAccounts').append(table);
+   const table=document.createElement('table'),head=document.createElement('tr');for(const title of ['Account','Email','Saved','Cloud','Details']){const cell=document.createElement('th');cell.textContent=title;head.append(cell);}table.append(head);
+   for(const a of data.accounts){const tr=document.createElement('tr');for(const value of [a.displayName||a.accountId,a.email,new Date(a.createdAt).toLocaleString()]){const td=document.createElement('td');td.textContent=value||'—';tr.append(td);}const cloudCell=document.createElement('td');cloudCell.textContent=a.cloud?.state==='uploaded'?'Uploaded':a.cloud?.state==='uploading'?'Uploading…':a.cloud?.state==='pending'?'Queued for upload':'Not queued';if(a.cloud?.state==='uploaded'&&a.cloud.cloudId){const link=document.createElement('a');link.textContent='Uploaded';link.href='https://redeemhub.lets.game/epic-accounts.html#details?account='+encodeURIComponent(a.cloud.cloudId);link.target='_blank';link.rel='noopener';cloudCell.replaceChildren(link);}if(a.cloud?.lastError){const note=document.createElement('small');note.textContent=a.cloud.lastError;cloudCell.append(note);}tr.append(cloudCell);const td=document.createElement('td'),button=document.createElement('button');button.textContent='Show details';button.addEventListener('click',()=>reveal(a._id));td.append(button);tr.append(td);table.append(tr);}$('localAccounts').append(table);
   }catch(e){$('localAccounts').textContent=e.message;}
  }
  $('localExtensionCheck').addEventListener('click',()=>{
@@ -23,8 +23,10 @@
   const timer=setTimeout(()=>{window.removeEventListener('message',listener);$('signupStatus').textContent='Extension did not respond. Use Chrome with Marketplace Filler 1.3.0 enabled and refresh this local page.';},3000);
   window.addEventListener('message',listener);window.postMessage({type:'epicgen-ping'},location.origin);
  });
+ $('localCloudRetry').addEventListener('click',async()=>{try{await api('/api/local/cloud/retry','POST');$('signupStatus').textContent='Pending cloud uploads queued for retry.';load();}catch(e){$('signupStatus').textContent=e.message;}});
+ setInterval(()=>{if(!document.hidden&&$('localCredentials').hidden)load();},15000);
  window.load=load;$('localRefresh').addEventListener('click',load);$('localHide').addEventListener('click',hide);
  $('localCopy').addEventListener('click',async()=>{try{await navigator.clipboard.writeText($('localSecretText').textContent);$('signupStatus').textContent='Local login details copied.';}catch{$('signupStatus').textContent='Clipboard unavailable. Select the revealed details to copy.';}});
  document.addEventListener('visibilitychange',()=>{if(document.hidden)hide();});
- api('/api/local/status').then(s=>{$('localStatus').textContent='Encrypted local vault ready · Outlook reader '+(s.mailReady?'connected':'unavailable on port 3999')+' · Proxy '+(s.proxyReady?'configured':'not configured');}).catch(e=>{$('localStatus').textContent=e.message;});load();
+ api('/api/local/status').then(s=>{$('localStatus').textContent='Encrypted local vault ready · Outlook reader '+(s.mailReady?'connected':'unavailable on port 3999')+' · Proxy '+(s.proxyReady?'configured':'not configured')+' · Cloud upload '+(s.cloudEnabled?'enabled':'disabled');}).catch(e=>{$('localStatus').textContent=e.message;});load();
 })();
