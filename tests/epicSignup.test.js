@@ -273,10 +273,11 @@ test('challenge refresh is bound to the signup tab and stops after two attempts'
 test('a cleared captcha resumes the same ready form once after settling',()=>{
  let time=1000,clicks=0;
  const button={textContent:'Continue',offsetParent:{},disabled:false,getAttribute:()=>null,click:()=>clicks++};
- const doc={body:{textContent:''},getElementById:()=>button,querySelectorAll:()=>[]};
+ const doc={body:{textContent:''},getElementById:()=>button,querySelectorAll:selector=>selector.includes('textarea')?[{value:'completed-response'}]:[]};
  const driver=signupDom(doc,undefined,{Date:{now:()=>time}}),state={seen:false,clearedAt:0,clicks:0};
  assert.equal(driver.continueAfterChallenge(state,true),false);
  assert.equal(driver.continueAfterChallenge(state,false),false);time+=1001;
+ assert.equal(driver.continueAfterChallenge(state,false),false);assert.equal(clicks,0);time+=2000;
  assert.equal(driver.continueAfterChallenge(state,false),true);
  assert.equal(driver.continueAfterChallenge(state,false),false);assert.equal(clicks,1);
  doc.body.textContent='Incorrect response. Please refresh the page.';

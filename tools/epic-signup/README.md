@@ -90,3 +90,14 @@ resubmission. Use Recover created account for an account that already passed
 email verification; reuse its interrupted signup instead of creating another
 account or consuming another Outlook inbox. A completed challenge does not
 guarantee that Epic will accept the following authentication request.
+
+Navigation waits for sign-in and email verification also exclude visible
+challenge time, and restart the response window after the challenge closes.
+The overall flow budget excludes those waits. Form resubmission waits three
+seconds after a challenge closes and remains bounded. An explicitly rejected
+email code requests a fresh code with its own five-minute delivery window.
+
+Closing a challenge without the SDK form response does not resubmit the form.
+An insufficient-authentication error on the Store agreement uses the same
+bounded normal-sign-in recovery as an invalid MFA context. Storefront hidden
+error templates are excluded from authentication failure detection.

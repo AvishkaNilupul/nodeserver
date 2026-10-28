@@ -12,6 +12,7 @@
 
   var sessionId = sessionIdFromHash();
   var automation = {};
+  var navigationChallengeMs = 0;
   // The worker binds sessions to tab IDs, surviving navigation without a hash.
 
   function sw(msg) {
@@ -382,14 +383,19 @@
     if (state.challengeSeen) {
       // Give Epic a fresh response window after a human/companion completes
       // the challenge. A long challenge must not consume submission time.
-      state.deadline = now + 120000;
+      state.deadline = now + (state.responseMs || 120000);
       state.challengeSeen = false;
     }
     return { status: 'submitting', timedOut: now > state.deadline };
   }
 
   function serviceUnavailable() {
-    return /service is temporarily unavailable|too many requests|please try again later/i.test(document.body ? document.body.textContent || '' : '');
+    // Storefronts include hidden error templates even on successful sign-in.
+    // Only the authentication form's rendered message is a signup failure.
+    if(!/\/id\/(?:login|register)(?:\/|$)/i.test(location.pathname || ''))return false;
+    var body=document.body;
+    var text=body ? (typeof body.innerText==='string'?body.innerText:body.textContent||'') : '';
+    return /service is temporarily unavailable|too many requests|please try again later/i.test(text);
   }
 
   function continueAfterChallenge(state,visible) {
@@ -397,7 +403,11 @@
     if(visible){state.seen=true;state.clearedAt=0;return false;}
     if(!state.seen||state.clicks>=2||challengeRejected()||otpRejected()||serviceUnavailable())return false;
     if(!state.clearedAt){state.clearedAt=Date.now();return false;}
-    if(Date.now()-state.clearedAt<1000)return false;
+    if(Date.now()-state.clearedAt<3000)return false;
+    // Closing/cancelling the dialog is not a completed security check.
+    // Only resume when the SDK has delivered its normal form response.
+    var completed=Array.prototype.some.call(document.querySelectorAll('textarea[name="h-captcha-response"], textarea[name="g-recaptcha-response"]'),function(field){return Boolean(String(field.value||'').trim());});
+    if(!completed)return false;
     if(!clickContinueLike())return false;
     state.seen=false;state.clicks++;return true;
   }
@@ -419,7 +429,9 @@
   }
 
   function authContextRejected() {
-    return /\/id\/login\/mfa/i.test(location.pathname)&&/\bemail is invalid\b/i.test(document.body ? document.body.textContent || '' : '');
+    var text=document.body ? document.body.textContent || '' : '';
+    return (/\/id\/login\/mfa/i.test(location.pathname)&&/\bemail is invalid\b/i.test(text)) ||
+      (/\/correction\/eula/i.test(location.pathname)&&/insufficient user authentication/i.test(text));
   }
   async function resetAuthContext() {
     var result=await sw({type:'epicgen-reset-auth-context',sessionId:sessionId});
@@ -433,10 +445,11 @@
   }
 
   async function waitForStepChange(fromStep, timeoutMs) {
-    var deadline = Date.now() + (timeoutMs || 30000);
-    var challengeBudget = 5 * 60 * 1000;
+    var responseMs = timeoutMs || 30000;
+    var waitState={deadline:Date.now()+responseMs,lastPoll:Date.now(),responseMs:responseMs,waitingMs:0,challengeSeen:false};
     var challengeState={seen:false,clearedAt:0,clicks:0};
-    while (Date.now() < deadline) {
+    var reportedChallenge=false;
+    while (Date.now() < waitState.deadline) {
       if (serviceUnavailable()) throw new Error("Epic is temporarily unavailable. This signup is preserved; recover the same account later.");
       var s = stepId();
       if (s !== fromStep && s !== null) return s;
@@ -448,13 +461,20 @@
         'input[type="tel"][name*="phone" i], input[name="phoneNumber"]',
       );
       if (phone && phone.offsetParent !== null) return "sms_required";
-      var before = Date.now();
       var challenge = captchaVisible();
+      registrationWaitState(waitState,challenge,Date.now());
+      if(sessionId && challenge !== reportedChallenge) {
+        reportedChallenge=challenge;
+        await sw({type:'epicgen-status',sessionId:sessionId,status:challenge?'awaiting_captcha':fromStep==='otp'?'awaiting_otp':'submitting'});
+        banner(challenge?'Waiting for Epic’s security check. This signup is preserved.':'Security check closed. Waiting for Epic’s response…','info');
+      }
       continueAfterChallenge(challengeState,challenge);
+      var before = Date.now();
       await sleep(400);
-      if (challenge && challengeBudget > 0) {
-        var paused = Math.min(Date.now() - before, challengeBudget);
-        deadline += paused; challengeBudget -= paused;
+      if (challenge) {
+        var paused = Math.max(0,Date.now()-before);
+        waitState.deadline += paused;
+        navigationChallengeMs += paused;
       }
     }
     return fromStep;
@@ -600,8 +620,10 @@
     });
     banner("Waiting for the Epic code in Outlook…", "info");
     var resp;
-    var deadline = Date.now() + 5 * 60 * 1000;
     for (var attempt=0;attempt<3;attempt++) {
+    // Each explicitly requested fresh email gets its own delivery window.
+    // Time spent solving the preceding challenge must not consume it.
+    var deadline = Date.now() + 5 * 60 * 1000;
     resp=null;
     var mailPollStarted=Date.now(),resent=false;
     while (Date.now() < deadline) {
@@ -667,8 +689,9 @@
     banner("Epic signup for " + id.email + " — starting…", "info");
     var lastStep = null;
     var startTs = Date.now();
+    var navigationChallengeStart = navigationChallengeMs;
     var maxMs = 10 * 60 * 1000;
-    while (Date.now() - startTs < maxMs) {
+    while (Date.now() - startTs - (navigationChallengeMs-navigationChallengeStart) < maxMs) {
       var step = stepId();
       if (step === lastStep || step === null) {
         await sleep(500);
@@ -700,7 +723,10 @@
           } else {
             banner('Review the Epic Store agreement and choose Accept to finish saving.','info');
             var manualStart=Date.now();
-            while (stepId() === 'agreement') await sleep(500);
+            while (stepId() === 'agreement') {
+              if(authContextRejected())throw new Error('auth_context_reset_required');
+              await sleep(500);
+            }
             startTs+=Date.now()-manualStart;
           }
         }
