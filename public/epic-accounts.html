@@ -12,6 +12,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Epic Accounts</title>
+    <link rel="stylesheet" href="/epic-account-details.css" />
     <style>
       :root {
         --bg: #f6f7fb;
@@ -160,6 +161,8 @@
         flex: 1;
         padding: 30px 34px;
         max-width: 980px;
+        /* Lets main shrink to the screen; a wide table scrolls in its card. */
+        min-width: 0;
       }
       h1 {
         font-size: 22px;
@@ -330,6 +333,266 @@
           transform: rotate(360deg);
         }
       }
+
+      #list {
+        overflow-x: auto;
+        container: acclist / inline-size;
+      }
+      /* When the accounts list is narrow (phones, or a tablet with the
+         sidebar showing), each account becomes a stacked card. */
+      @container acclist (max-width: 640px) {
+        .acc-table,
+        .acc-table tbody,
+        .acc-table tr,
+        .acc-table td {
+          display: block;
+        }
+        .acc-table thead {
+          display: none;
+        }
+        .acc-table tr {
+          display: grid;
+          grid-template-columns: minmax(0, 3fr) minmax(0, 2fr);
+          gap: 12px 14px;
+          margin-top: 12px;
+          padding: 14px;
+          border: 1px solid var(--line);
+          border-radius: 12px;
+        }
+        .acc-table td {
+          padding: 0;
+          border: 0;
+          min-width: 0;
+          overflow-wrap: anywhere;
+        }
+        .acc-table td[data-label]::before {
+          content: attr(data-label);
+          display: block;
+          margin-bottom: 3px;
+          color: var(--muted);
+          font-size: 11px;
+          font-weight: 600;
+          letter-spacing: 0.03em;
+          text-transform: uppercase;
+        }
+        .acc-table .c-status,
+        .acc-table .c-value {
+          text-align: right;
+        }
+        .acc-table .c-missing,
+        .acc-table .c-acts,
+        .acc-table .c-status.has-err {
+          grid-column: 1 / -1;
+        }
+        .acc-table .c-status.has-err {
+          text-align: left;
+        }
+        .acc-table .c-missing > div {
+          display: flex;
+          align-items: center;
+          justify-content: space-between;
+          gap: 10px;
+        }
+        .acc-table .c-missing .btn {
+          flex: none;
+          white-space: nowrap;
+        }
+        .acc-table summary {
+          padding: 4px 0;
+        }
+        .acc-table .c-acts {
+          display: flex;
+          gap: 8px;
+          padding-top: 12px;
+          border-top: 1px solid var(--line);
+        }
+        .acc-table .c-acts .btn {
+          flex: 1 1 0;
+        }
+      }
+
+      @media (max-width: 768px) {
+        main {
+          padding: 20px 16px 32px;
+        }
+        h1 {
+          font-size: 20px;
+        }
+        .sub {
+          font-size: 13.5px;
+          margin-bottom: 16px;
+        }
+        .card {
+          padding: 16px;
+          margin-bottom: 14px;
+        }
+        .btn {
+          min-height: 42px;
+        }
+        .btn-sm {
+          min-height: 36px;
+          padding: 7px 12px;
+        }
+        /* 16px text stops phones zooming in when a field is tapped. */
+        #addLabel,
+        #addCode {
+          flex: 1 1 100%;
+          max-width: none !important;
+          padding: 11px 12px;
+          border-radius: 9px;
+          border: 1.5px solid var(--line);
+          background: var(--surface-2);
+          color: var(--ink);
+          font-size: 16px;
+        }
+        select {
+          font-size: 16px;
+        }
+        #btnAdd {
+          flex: 1 1 100%;
+        }
+        #btnSync,
+        #btnRefresh {
+          flex: 1 1 0;
+        }
+        /* admin-nav.js turns the sidebar into a slide-out menu under a top
+           bar. Start in that shape so the sidebar never flashes on load. */
+        body {
+          padding-top: 54px;
+        }
+        .nav {
+          position: fixed;
+          top: 0;
+          left: 0;
+          bottom: 0;
+          z-index: 200;
+          width: 264px;
+          height: auto;
+          transform: translateX(-100%);
+        }
+        /* The closed menu sits just off-screen; without this its shadow
+           shows as a grey strip down the left edge. */
+        .nav:not(.open) {
+          box-shadow: none;
+        }
+      }
+      /* Buyer-session modal (Deliver + Sessions buttons). Kept inline so this
+         page stays single-file like the rest of the admin console. */
+      .modal-wrap {
+        position: fixed;
+        inset: 0;
+        background: rgba(15, 23, 42, 0.5);
+        z-index: 200;
+        display: none;
+        align-items: center;
+        justify-content: center;
+        padding: 20px;
+      }
+      .modal-wrap.show {
+        display: flex;
+      }
+      .modal {
+        background: var(--surface);
+        border: 1px solid var(--line);
+        border-radius: 14px;
+        padding: 22px;
+        max-width: 640px;
+        width: 100%;
+        max-height: 90vh;
+        overflow: auto;
+        box-shadow: 0 20px 60px rgba(0, 0, 0, 0.25);
+      }
+      .modal h3 {
+        margin: 0 0 4px;
+        font-size: 17px;
+      }
+      .modal .modal-sub {
+        color: var(--muted);
+        font-size: 13px;
+        margin-bottom: 14px;
+      }
+      .modal label {
+        display: block;
+        font-size: 11.5px;
+        font-weight: 700;
+        color: var(--muted);
+        text-transform: uppercase;
+        letter-spacing: 0.04em;
+        margin: 10px 0 4px;
+      }
+      .modal input,
+      .modal select,
+      .modal textarea {
+        width: 100%;
+        padding: 9px 11px;
+        border-radius: 9px;
+        border: 1.5px solid var(--line);
+        background: var(--surface-2);
+        color: var(--ink);
+        font: 13.5px -apple-system, system-ui, "Segoe UI", sans-serif;
+      }
+      .modal textarea {
+        min-height: 160px;
+        font-family: ui-monospace, "SF Mono", Menlo, monospace;
+        font-size: 12.5px;
+        resize: vertical;
+      }
+      .modal .modal-actions {
+        margin-top: 16px;
+        display: flex;
+        gap: 8px;
+        justify-content: flex-end;
+        flex-wrap: wrap;
+      }
+      .modal .creds {
+        background: var(--surface-2);
+        border: 1px solid var(--line);
+        border-radius: 10px;
+        padding: 12px 14px;
+        margin-top: 10px;
+        font-family: ui-monospace, "SF Mono", Menlo, monospace;
+        font-size: 13px;
+      }
+      .modal .creds b {
+        color: var(--muted);
+        font-weight: 600;
+        display: inline-block;
+        min-width: 90px;
+      }
+      .modal .warn {
+        margin: 10px 0 0;
+      }
+      .sess-row {
+        display: grid;
+        grid-template-columns: 1fr 1fr auto;
+        gap: 8px;
+        padding: 10px 0;
+        border-bottom: 1px solid var(--line);
+        font-size: 12.5px;
+        align-items: center;
+      }
+      .sess-row:last-child {
+        border-bottom: none;
+      }
+      .sess-row .pill {
+        display: inline-block;
+        padding: 2px 8px;
+        border-radius: 999px;
+        font-size: 11px;
+        font-weight: 700;
+      }
+      .pill-live {
+        background: rgba(5, 150, 105, 0.15);
+        color: var(--green);
+      }
+      .pill-revoked {
+        background: rgba(220, 38, 38, 0.12);
+        color: var(--red);
+      }
+      .pill-expired {
+        background: var(--surface-2);
+        color: var(--muted);
+      }
     </style>
   </head>
   <body>
@@ -494,8 +757,7 @@
             >this authorization link</a
           >
           and paste the <b>authorizationCode</b> value below (codes are
-          single-use and expire in ~5 minutes). No password or cookies are
-          stored — only an encrypted refresh token.
+          single-use and expire in ~5 minutes). This connects the account for library sync and claim links. Save its login details separately in the Account details tab.
         </p>
         <div class="row">
           <input
@@ -522,6 +784,72 @@
         <div id="list"><div class="muted">Loading…</div></div>
       </div>
     </main>
+
+    <div class="modal-wrap" id="deliverModal">
+      <div class="modal">
+        <h3>Deliver buyer mail access</h3>
+        <div class="modal-sub" id="deliverSub">
+          Mints a time-boxed BuyerMailSession for this Epic account. The buyer
+          signs in at <code>/mail/</code> and sees only mail from Epic received
+          after this moment. The password shown here is one-shot — copy it.
+        </div>
+        <div id="deliverForm">
+          <label>Marketplace</label>
+          <select id="dMarketplace">
+            <option value="">(none)</option>
+            <option value="eldorado">Eldorado</option>
+            <option value="playerauctions">PlayerAuctions</option>
+            <option value="g2g">G2G</option>
+            <option value="ggsel">GGSel</option>
+            <option value="zeusx">ZeusX</option>
+            <option value="manual">Manual / other</option>
+          </select>
+          <label>Order reference</label>
+          <input id="dOrderRef" placeholder="e.g. 16603127" />
+          <label>Access window (days, 1–14)</label>
+          <input id="dDays" type="number" min="1" max="14" value="7" />
+          <label>Note (internal only)</label>
+          <input id="dNote" placeholder="optional" />
+          <label
+            ><input type="checkbox" id="dForce" style="width: auto; margin-right: 6px" />
+            Force even if inbox is shared (dangerous)</label
+          >
+          <div class="modal-actions">
+            <button class="btn" onclick="closeModal('deliverModal')">Cancel</button>
+            <button class="btn btn-primary" id="dMintBtn">Mint delivery</button>
+          </div>
+        </div>
+        <div id="deliverResult" style="display: none">
+          <div class="warn">
+            Copy this now — the password is only shown once. If the modal closes
+            without copying you'll need to mint a fresh session.
+          </div>
+          <div class="creds">
+            <div><b>Login:</b> <span id="rLogin"></span></div>
+            <div><b>Email:</b> <span id="rEmail"></span></div>
+            <div><b>Password:</b> <span id="rPassword"></span></div>
+            <div><b>Expires:</b> <span id="rExpires"></span></div>
+          </div>
+          <label>Delivery message (ready to paste)</label>
+          <textarea id="rTemplate" readonly></textarea>
+          <div class="modal-actions">
+            <button class="btn" onclick="closeModal('deliverModal')">Close</button>
+            <button class="btn btn-primary" id="rCopyBtn">Copy message</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="modal-wrap" id="sessionsModal">
+      <div class="modal">
+        <h3>Buyer sessions</h3>
+        <div class="modal-sub" id="sessionsSub">Last 25 sessions.</div>
+        <div id="sessionsList"><div class="muted">Loading…</div></div>
+        <div class="modal-actions">
+          <button class="btn" onclick="closeModal('sessionsModal')">Close</button>
+        </div>
+      </div>
+    </div>
 
     <div class="toast" id="toast"></div>
 
@@ -605,31 +933,33 @@
           return;
         }
         $("list").innerHTML =
-          "<table><thead><tr><th>Account</th><th>Status</th><th>Library</th><th>Value</th><th>Missing live games</th><th></th></tr></thead><tbody>" +
+          '<table class="acc-table"><thead><tr><th>Account</th><th>Status</th><th>Library</th><th>Value</th><th>Missing live games</th><th></th></tr></thead><tbody>' +
           accounts
             .map(function (a) {
               return (
                 "<tr" +
                 (a.sold ? ' style="opacity:.55"' : "") +
-                "><td><b>" +
+                '><td class="c-acct"><b>' +
                 esc(a.label || a.displayName || a.accountId) +
                 '</b><div class="muted">' +
                 esc(a.displayName) +
                 (a.sold ? " · SOLD" : "") +
-                "</div></td><td>" +
+                '</div></td><td class="c-status' +
+                (a.status !== "ok" && a.lastError ? " has-err" : "") +
+                '" data-label="Status">' +
                 (a.status === "ok"
                   ? '<b style="color:var(--green)">ok</b>'
                   : '<b style="color:var(--red)">needs login</b>' +
                     (a.lastError
                       ? '<div class="muted">' + esc(a.lastError) + "</div>"
                       : "")) +
-                "</td><td>" +
+                '</td><td class="c-lib" data-label="Library">' +
                 a.libraryCount +
                 ' game(s)<details><summary class="muted" style="cursor:pointer">show</summary>' +
                 libHtml(a) +
-                "</details></td><td>$" +
+                '</details></td><td class="c-value" data-label="Value">$' +
                 (a.libraryValueUsd || 0).toFixed(2) +
-                "</td><td>" +
+                '</td><td class="c-missing" data-label="Missing live games">' +
                 ((a.missingLive || []).length
                   ? a.missingLive
                       .map(function (m) {
@@ -645,7 +975,19 @@
                       })
                       .join("")
                   : '<span class="muted">none 🎉</span>') +
-                "</td><td>" +
+                '</td><td class="c-acts">' +
+                (a.sold
+                  ? ""
+                  : '<button class="btn btn-sm btn-primary" onclick="openDeliver(\'' +
+                    a._id +
+                    "','" +
+                    esc(a.label || a.displayName || a.accountId) +
+                    "')\">Deliver</button> ") +
+                '<button class="btn btn-sm" onclick="openSessions(\'' +
+                a._id +
+                "','" +
+                esc(a.label || a.displayName || a.accountId) +
+                "')\">Sessions</button> " +
                 '<button class="btn btn-sm" onclick="toggleSold(\'' +
                 a._id +
                 "'," +
@@ -732,6 +1074,176 @@
         }
       };
 
+      // --- Buyer mail delivery flow -----------------------------------------
+      var deliverState = { accountId: "", label: "" };
+
+      function openModal(id) {
+        $(id).classList.add("show");
+      }
+      window.closeModal = function (id) {
+        $(id).classList.remove("show");
+      };
+
+      window.openDeliver = function (accountId, label) {
+        deliverState = { accountId: accountId, label: label };
+        $("deliverSub").innerHTML =
+          "Minting access for <b>" +
+          esc(label) +
+          "</b>. The buyer signs in at <code>/mail/</code> and sees only mail from Epic received after this moment. The password shown here is one-shot — copy it.";
+        $("deliverForm").style.display = "";
+        $("deliverResult").style.display = "none";
+        $("dMarketplace").value = "";
+        $("dOrderRef").value = "";
+        $("dDays").value = "7";
+        $("dNote").value = "";
+        $("dForce").checked = false;
+        openModal("deliverModal");
+      };
+
+      $("dMintBtn").addEventListener("click", async function () {
+        var b = this;
+        b.disabled = true;
+        b.innerHTML = '<span class="spin"></span>Minting…';
+        try {
+          var j = await api(
+            "/api/epic/accounts/" + deliverState.accountId + "/buyer-session",
+            {
+              method: "POST",
+              body: JSON.stringify({
+                marketplace: $("dMarketplace").value || "",
+                orderRef: $("dOrderRef").value.trim(),
+                days: Number($("dDays").value) || 7,
+                note: $("dNote").value.trim(),
+                force: $("dForce").checked,
+              }),
+            },
+          );
+          $("rLogin").textContent = j.loginUrl;
+          $("rEmail").textContent = j.session.inboxAddress;
+          $("rPassword").textContent = j.buyerPassword;
+          $("rExpires").textContent = new Date(
+            j.session.expiresAt,
+          ).toLocaleString();
+          $("rTemplate").value = j.deliveryTemplate;
+          $("deliverForm").style.display = "none";
+          $("deliverResult").style.display = "";
+          toast("Session minted — copy the password now.");
+        } catch (e) {
+          toast(e.message, true);
+        }
+        b.disabled = false;
+        b.textContent = "Mint delivery";
+      });
+
+      $("rCopyBtn").addEventListener("click", async function () {
+        try {
+          await navigator.clipboard.writeText($("rTemplate").value);
+          toast("Delivery message copied.");
+        } catch (e) {
+          $("rTemplate").select();
+          document.execCommand("copy");
+          toast("Delivery message copied.");
+        }
+      });
+
+      // --- Sessions list ----------------------------------------------------
+      var sessionsState = { accountId: "", label: "" };
+
+      window.openSessions = async function (accountId, label) {
+        sessionsState = { accountId: accountId, label: label };
+        $("sessionsSub").innerHTML =
+          "Last 25 sessions for <b>" + esc(label) + "</b>.";
+        $("sessionsList").innerHTML = '<div class="muted">Loading…</div>';
+        openModal("sessionsModal");
+        try {
+          var j = await api(
+            "/api/epic/accounts/" + accountId + "/buyer-sessions",
+          );
+          renderSessions(j.sessions || []);
+        } catch (e) {
+          $("sessionsList").innerHTML =
+            '<div class="muted">Failed to load: ' + esc(e.message) + "</div>";
+        }
+      };
+
+      function sessionPill(s) {
+        var now = Date.now();
+        if (s.revokedAt)
+          return (
+            '<span class="pill pill-revoked">revoked' +
+            (s.revokedReason ? " · " + esc(s.revokedReason) : "") +
+            "</span>"
+          );
+        if (s.expiresAt && new Date(s.expiresAt).getTime() <= now)
+          return '<span class="pill pill-expired">expired</span>';
+        return '<span class="pill pill-live">live</span>';
+      }
+
+      function renderSessions(rows) {
+        if (!rows.length) {
+          $("sessionsList").innerHTML =
+            '<div class="muted">No sessions yet for this account.</div>';
+          return;
+        }
+        $("sessionsList").innerHTML = rows
+          .map(function (s) {
+            var views = s.viewCount
+              ? s.viewCount +
+                " view(s) · last " +
+                (s.lastViewAt
+                  ? new Date(s.lastViewAt).toLocaleString()
+                  : "—")
+              : "never viewed";
+            var meta =
+              (s.marketplace ? esc(s.marketplace) : "manual") +
+              (s.orderRef ? " · " + esc(s.orderRef) : "");
+            return (
+              '<div class="sess-row"><div><b>' +
+              esc(s.inboxAddress) +
+              "</b><div class='muted'>" +
+              meta +
+              " · created " +
+              new Date(s.createdAt).toLocaleString() +
+              " · expires " +
+              new Date(s.expiresAt).toLocaleString() +
+              "</div><div class='muted'>" +
+              views +
+              "</div></div><div>" +
+              sessionPill(s) +
+              "</div><div>" +
+              (s.revokedAt
+                ? ""
+                : '<button class="btn btn-sm btn-danger" onclick="revokeSession(\'' +
+                  s.id +
+                  "')\">Revoke</button>") +
+              "</div></div>"
+            );
+          })
+          .join("");
+      }
+
+      window.revokeSession = async function (sessionId) {
+        if (!confirm("Revoke this buyer session? The buyer loses mail access.")) return;
+        try {
+          await api("/api/epic/buyer-sessions/" + sessionId + "/revoke", {
+            method: "POST",
+            body: JSON.stringify({ reason: "manual" }),
+          });
+          toast("Session revoked.");
+          if (sessionsState.accountId)
+            openSessions(sessionsState.accountId, sessionsState.label);
+        } catch (e) {
+          toast(e.message, true);
+        }
+      };
+
+      // Close modals on backdrop click.
+      ["deliverModal", "sessionsModal"].forEach(function (id) {
+        $(id).addEventListener("click", function (e) {
+          if (e.target === this) closeModal(id);
+        });
+      });
+
       $("btnAdd").addEventListener("click", async function () {
         var code = $("addCode").value.trim();
         var m = code.match(/[0-9a-f]{32}/i);
@@ -782,5 +1294,6 @@
 
       load();
     </script>
+    <script src="/epic-account-details.js" defer></script>
   </body>
 </html>

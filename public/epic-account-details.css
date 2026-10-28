@@ -1,0 +1,20 @@
+.epic-tabs { display:flex; gap:8px; margin-bottom:18px; }
+#epic-details-panel [hidden], #epic-claims-panel[hidden], #epic-details-panel[hidden] { display:none !important; }
+.epic-detail-grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:14px; margin:16px 0; }
+.epic-detail-grid label, .epic-detail-notes { display:flex; flex-direction:column; gap:6px; font-size:13px; color:var(--muted); }
+.epic-detail-grid input, .epic-detail-notes textarea { width:100%; min-width:0; padding:10px 11px; border:1px solid var(--line); border-radius:8px; background:var(--surface-2); color:var(--ink); font:inherit; }
+.epic-detail-notes { margin:16px 0; }
+#epic-detail-summary { overflow-wrap:anywhere; }
+#epic-detail-status { margin-top:14px; }
+#epic-detail-account { max-width:100%; }
+#epic-detail-secrets { padding:12px; border:1px solid var(--line); border-radius:9px; }
+@media(max-width:700px) { .epic-detail-grid { grid-template-columns:1fr; } main { min-width:0; padding:20px 14px; } #epic-detail-form .row { align-items:stretch; } }
+@media(max-width:768px) {
+  .epic-tabs { gap:6px; margin-bottom:14px; }
+  .epic-tabs .btn { flex:1 1 0; }
+  #epic-details-panel .row > label { flex:1 1 100%; }
+  #epic-detail-account, #epic-detail-refresh, #epic-detail-form .row .btn { flex:1 1 100%; }
+  /* 16px text stops phones zooming in when a field is tapped. */
+  #epic-detail-account, .epic-detail-grid input, .epic-detail-notes textarea { font-size:16px; }
+  #epic-detail-games { padding-left:20px; }
+}

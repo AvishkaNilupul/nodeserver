@@ -8,8 +8,41 @@ const epicClaimer = require("../utils/epicClaimer");
 const epicAutoClaim = require("../utils/epicAutoClaim");
 const settings = require("../utils/settings");
 const { encrypt, decrypt } = require("../utils/secretBox");
+const crypto = require("crypto");
+const bcrypt = require("bcrypt");
+
+const BuyerMailSession = require("../models/BuyerMailSession");
+const outlookProxy = require("../utils/outlookGraphReader");
 
 const router = express.Router();
+
+// How long a buyer-mail session lives on the server. The design in
+// project_epic_store_el9in_scan_1028 is ~5-7 days; we pick 7 and let the
+// admin pass {days} to override per-order.
+const DEFAULT_BUYER_SESSION_DAYS = 7;
+const MAX_BUYER_SESSION_DAYS = 14;
+const BUYER_PASSWORD_BYTES = 10; // → 16-char base64url, easy to paste
+
+// Pick-and-say random password. base64url with "-" / "_" / "=" trimmed so a
+// buyer can read it over chat without "is that a dash or underscore" games.
+function mintBuyerPassword() {
+  const alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789";
+  const bytes = crypto.randomBytes(16);
+  let out = "";
+  for (let i = 0; i < 16; i++) out += alphabet[bytes[i] % alphabet.length];
+  return out;
+}
+
+function publicLoginUrl(req) {
+  const envUrl = (process.env.PUBLIC_BASE_URL || "").replace(/\/+$/, "");
+  if (envUrl) return envUrl + "/mail/";
+  const proto = (req.headers["x-forwarded-proto"] || req.protocol || "http")
+    .toString()
+    .split(",")[0]
+    .trim();
+  const host = req.headers["x-forwarded-host"] || req.headers.host;
+  return `${proto}://${host}/mail/`;
+}
 
 function publicAccount(a, liveFreebies) {
   const owned = new Set(
@@ -315,5 +348,204 @@ router.post(
     }
   },
 );
+
+// Mint a BuyerMailSession for a given Epic account. The response carries the
+// plaintext password EXACTLY ONCE (we only store the bcrypt hash), so the
+// operator must copy it into the delivery message right away. See
+// project_epic_store_el9in_scan_1028 for the design.
+//
+// Guards:
+//   - EpicAccount must exist, carry an email+password, not be marked sold.
+//   - The Mac Outlook proxy must know about the inbox (its ledger says it is
+//     NOT shared with any other site). The proxy is the authoritative "safe
+//     to hand to a buyer" check — see utils/outlookGraphReader.
+//   - Any still-live BuyerMailSession for this inbox is revoked first
+//     (reason=replaced), so a prior buyer loses access.
+router.post(
+  "/api/epic/accounts/:id/buyer-session",
+  requireSuperadmin,
+  async (req, res) => {
+    try {
+      const acct = await EpicAccount.findById(req.params.id);
+      if (!acct) {
+        return res.status(404).json({ success: false, message: "Account not found" });
+      }
+      if (acct.sold) {
+        return res.status(400).json({ success: false, message: "Account is marked sold" });
+      }
+      const email = acct.email ? decrypt(acct.email) : "";
+      if (!email) {
+        return res
+          .status(400)
+          .json({ success: false, message: "Account has no stored email (not sellable)" });
+      }
+      if (!acct.password) {
+        return res
+          .status(400)
+          .json({ success: false, message: "Account has no stored password (not sellable)" });
+      }
+      // The Outlook refresh-token fleet lives on the owner's Mac, so prod
+      // consults the reverse-tunnelled proxy for both "is this inbox known?"
+      // and "is it safe to hand over?" (not shared with any other site).
+      let check;
+      try {
+        check = await outlookProxy.checkInbox(email);
+      } catch (err) {
+        return res.status(502).json({
+          success: false,
+          message:
+            err.code === "proxy_unconfigured"
+              ? "Outlook mail proxy not configured on this server. Set OUTLOOK_PROXY_URL / OUTLOOK_PROXY_TOKEN."
+              : "Mac mail proxy did not respond: " + (err.message || "error"),
+        });
+      }
+      if (check.status && check.status !== "live" && check.status !== "unknown") {
+        return res.status(400).json({
+          success: false,
+          message: "Mail account status=" + check.status,
+        });
+      }
+      if (!check.sellable && !req.body?.force) {
+        return res.status(400).json({
+          success: false,
+          message:
+            check.sharedWith.length
+              ? "This inbox is already used for: " +
+                check.sharedWith.join(", ") +
+                ". Pass {force:true} to override, but you will be handing a SOOP recovery address to the buyer."
+              : "Proxy refused this inbox (not sellable). Add it to scripts/outlooks.txt on the Mac first, or pass {force:true}.",
+          sharedWith: check.sharedWith,
+        });
+      }
+
+      // Revoke any still-live sessions for the same inbox so only one buyer
+      // can ever read it at a time.
+      await BuyerMailSession.updateMany(
+        {
+          inboxAddress: email.toLowerCase(),
+          revokedAt: null,
+          expiresAt: { $gt: new Date() },
+        },
+        { $set: { revokedAt: new Date(), revokedReason: "replaced" } },
+      );
+
+      const days = Math.min(
+        MAX_BUYER_SESSION_DAYS,
+        Math.max(1, Number(req.body?.days) || DEFAULT_BUYER_SESSION_DAYS),
+      );
+      const password = mintBuyerPassword();
+      const passwordHash = await bcrypt.hash(password, 10);
+      const expiresAt = new Date(Date.now() + days * 24 * 3600 * 1000);
+      const session = await BuyerMailSession.create({
+        epicAccountId: acct._id,
+        inboxAddress: email.toLowerCase(),
+        passwordHash,
+        expiresAt,
+        marketplace: String(req.body?.marketplace || "").toLowerCase(),
+        orderRef: String(req.body?.orderRef || ""),
+        createdByUserId: String(req.user?.id || req.session?.user?.id || ""),
+        note: String(req.body?.note || ""),
+      });
+
+      const loginUrl = publicLoginUrl(req);
+      const deliveryTemplate =
+        `Thanks for your order! Your Epic account access:\n\n` +
+        `Login: ${loginUrl}\n` +
+        `Email: ${email}\n` +
+        `Password: ${password}\n\n` +
+        `IMPORTANT: this password is for OUR mail viewer only — not for Epic ` +
+        `or Microsoft/Outlook. Sign in there to receive any email codes Epic ` +
+        `sends to the account.\n\n` +
+        `Please change the email on the Epic account to your own as soon as ` +
+        `possible. Access to this viewer closes in ${days} days, or sooner ` +
+        `if you change the Epic email.`;
+
+      return res.json({
+        success: true,
+        session: {
+          id: String(session._id),
+          inboxAddress: session.inboxAddress,
+          expiresAt: session.expiresAt,
+          marketplace: session.marketplace,
+          orderRef: session.orderRef,
+        },
+        buyerPassword: password, // ONLY TIME we return this
+        loginUrl,
+        deliveryTemplate,
+      });
+    } catch (err) {
+      console.error("[epic/buyer-session] mint failed", err);
+      return res
+        .status(500)
+        .json({ success: false, message: err.message || "Mint failed" });
+    }
+  },
+);
+
+// List sessions for one account — purely for the admin UI, so operator can
+// see "did this buyer log in?" and "has anything already been revoked?".
+router.get(
+  "/api/epic/accounts/:id/buyer-sessions",
+  requireSuperadmin,
+  async (req, res) => {
+    try {
+      const rows = await BuyerMailSession.find({ epicAccountId: req.params.id })
+        .sort({ createdAt: -1 })
+        .limit(25)
+        .lean();
+      return res.json({
+        success: true,
+        sessions: rows.map((r) => ({
+          id: String(r._id),
+          inboxAddress: r.inboxAddress,
+          createdAt: r.createdAt,
+          expiresAt: r.expiresAt,
+          revokedAt: r.revokedAt,
+          revokedReason: r.revokedReason,
+          marketplace: r.marketplace,
+          orderRef: r.orderRef,
+          firstViewAt: r.firstViewAt,
+          lastViewAt: r.lastViewAt,
+          viewCount: r.viewCount,
+          note: r.note,
+        })),
+      });
+    } catch (err) {
+      return res
+        .status(500)
+        .json({ success: false, message: err.message || "List failed" });
+    }
+  },
+);
+
+// Revoke a specific session — operator uses this when a buyer reports a lost
+// password, when email-change is detected manually, or when a refund kicks in.
+router.post(
+  "/api/epic/buyer-sessions/:sessionId/revoke",
+  requireSuperadmin,
+  async (req, res) => {
+    try {
+      const reason = String(req.body?.reason || "manual");
+      const allowed = ["manual", "email_changed", "expired", "replaced"];
+      const final = allowed.includes(reason) ? reason : "manual";
+      const row = await BuyerMailSession.findByIdAndUpdate(
+        req.params.sessionId,
+        { $set: { revokedAt: new Date(), revokedReason: final } },
+        { returnDocument: "after" },
+      );
+      if (!row) {
+        return res.status(404).json({ success: false, message: "Session not found" });
+      }
+      return res.json({ success: true, revokedAt: row.revokedAt, revokedReason: row.revokedReason });
+    } catch (err) {
+      return res
+        .status(500)
+        .json({ success: false, message: err.message || "Revoke failed" });
+    }
+  },
+);
+
+
+router.use(require("./epicAccountDetailsRoutes"));
 
 module.exports = router;

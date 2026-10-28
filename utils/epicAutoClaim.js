@@ -113,9 +113,33 @@ async function recordAccountOutcome(acc, offerId, status, extra) {
   }
 }
 
-function lastAttemptForOffer(acc, offerId) {
+// A failed attempt is retried on a later tick. Talon decides per session
+// whether to show its captcha (the 2026-10-08 drop went through clean on
+// both accounts; on 2026-10-15 all four tries hit it), so a pair that hit
+// the captcha at drop time gets more tries later in the giveaway week.
+// 17 h lands on every third 6-hourly claimer tick (~18 h apart), so each
+// retry falls at a different time of day. Both can be overridden in the
+// epicAutoClaim settings block (retryAfterH, maxAttemptsPerOffer).
+const RETRY_AFTER_H = 17;
+const MAX_ATTEMPTS_PER_OFFER = 5;
+// Outcomes that end it for an (account, offer) pair — never retried.
+const FINAL_STATUSES = new Set(["claimed", "already_owned"]);
+
+function attemptsForOffer(acc, offerId) {
   const log = Array.isArray(acc.autoClaimLog) ? acc.autoClaimLog : [];
-  return log.find((e) => e && e.offerId === offerId) || null;
+  return log.filter((e) => e && e.offerId === offerId);
+}
+
+function retryPolicy(cfg) {
+  const num = (v, d) =>
+    v == null || v === "" || !Number.isFinite(Number(v)) ? d : Number(v);
+  return {
+    retryAfterH: Math.max(0, num(cfg.retryAfterH, RETRY_AFTER_H)),
+    maxAttemptsPerOffer: Math.max(
+      1,
+      Math.floor(num(cfg.maxAttemptsPerOffer, MAX_ATTEMPTS_PER_OFFER)),
+    ),
+  };
 }
 
 // The one entry point the claimer calls. Returns:
@@ -134,10 +158,25 @@ async function attemptAutoClaim(acc, freebie, accessToken) {
   if (cooldownMs && lastAt && Date.now() - lastAt < cooldownMs) {
     return { attempted: false, status: "cooldown" };
   }
-  // Skip if we already tried THIS offer on THIS account (successful or
-  // failed) — the next tick will pick it up if it needs a retry.
-  const prior = lastAttemptForOffer(acc, freebie.offerId);
-  if (prior) return { attempted: false, status: "already_tried" };
+  // Per-(account, offer) gate: a pair that already went through is done; a
+  // failed one is retried once retryAfterH has passed since its last try,
+  // up to maxAttemptsPerOffer tries in all.
+  const prior = attemptsForOffer(acc, freebie.offerId);
+  if (prior.length) {
+    if (prior.some((e) => FINAL_STATUSES.has(e.status))) {
+      return { attempted: false, status: "already_tried" };
+    }
+    const policy = retryPolicy(cfg);
+    if (prior.length >= policy.maxAttemptsPerOffer) {
+      return { attempted: false, status: "retries_exhausted" };
+    }
+    const lastTryAt = Math.max(
+      ...prior.map((e) => new Date(e.at).getTime() || 0),
+    );
+    if (Date.now() - lastTryAt < policy.retryAfterH * 3600000) {
+      return { attempted: false, status: "retry_wait" };
+    }
+  }
   // Fleet daily cap — one confirmed OR failed attempt burns one slot.
   if (cfg.dailyCap && todayCount() >= cfg.dailyCap) {
     return { attempted: false, status: "daily_cap" };
@@ -201,6 +240,7 @@ function getStatus() {
     captchaKeyConfigured: !!cfg.captchaKey,
     perAccountCooldownH: cfg.perAccountCooldownH,
     dailyCap: cfg.dailyCap,
+    ...retryPolicy(cfg),
     todayCount: todayCount(),
     recent: state.recent.slice(0, 20),
   };

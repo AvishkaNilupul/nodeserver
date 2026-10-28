@@ -93,6 +93,10 @@ const playerauctionsRoutes = require("./routes/playerauctionsRoutes");
 // before the admin auth cascade, because the browser extension that calls it has
 // no admin session. See routes/paSessionInstallRoutes.js.
 const paSessionInstallRoutes = require("./routes/paSessionInstallRoutes");
+// Buyer-facing Epic mail viewer at /mail. Its own one-shot cookie carries the
+// BuyerMailSession id; the admin cascade never sees it. See
+// routes/buyerMailRoutes.js and project_epic_store_el9in_scan_1028.md.
+const buyerMailRoutes = require("./routes/buyerMailRoutes");
 const marketplaceGuardian = require("./utils/marketplaceGuardian");
 const primeWatcher = require("./utils/primeWatcher");
 const campaignWatcher = require("./utils/campaignWatcher");
@@ -411,6 +415,9 @@ app.use(twoFactorRoutes);
 // where the browser extension (which carries no admin session) can reach it.
 // Off entirely until a secret is set (404 otherwise).
 app.use(paSessionInstallRoutes);
+// Buyer-facing Epic mail viewer. Lives under /mail with its own cookie auth;
+// mounted here so the admin cascade below never sees these requests.
+app.use(buyerMailRoutes);
 
 app.use(settingsRoutes);
 // Settings → Remembered devices (list / remove). Own devices only.
@@ -1028,6 +1035,11 @@ mongoose
     // Epic accounts: refreshes stock-account tokens, re-syncs libraries and
     // sends one-tap claim links when live giveaways are missing.
     epicClaimer.start();
+    // Buyer-mail viewer housekeeping: stamps expired BuyerMailSession rows and
+    // auto-revokes any that see an "Epic email changed" mail land in the old
+    // inbox (buyer has moved the account to their own address — viewer no
+    // longer needs to be reachable). See utils/buyerSessionWatcher.js.
+    require("./utils/buyerSessionWatcher").start();
     // Renters: stop the bots of renters whose lease just expired (the
     // requireRenter middleware already blocks their dashboard access, but this
     // makes farming actually halt without waiting for a manual suspend).
