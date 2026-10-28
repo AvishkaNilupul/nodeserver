@@ -1040,6 +1040,11 @@ mongoose
     // inbox (buyer has moved the account to their own address — viewer no
     // longer needs to be reachable). See utils/buyerSessionWatcher.js.
     require("./utils/buyerSessionWatcher").start();
+    // Epic account sales: records Eldorado sales of the instant-delivery Epic
+    // listings, keeps their offers alive, and watches the Mac mail proxy while
+    // buyers depend on it. Reads Eldorado only while a listing is live; off
+    // from the Listings & sales tab. See utils/epicSales.js.
+    require("./utils/epicSales").start();
     // Renters: stop the bots of renters whose lease just expired (the
     // requireRenter middleware already blocks their dashboard access, but this
     // makes farming actually halt without waiting for a manual suspend).

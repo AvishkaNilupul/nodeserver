@@ -88,3 +88,8 @@ tools/pump-paper-bot/runs/
 # PlayerAuctions cross-process refresh lock (see utils/marketplaces.js)
 utils/.playerauctions-refresh.lock
 utils/.playerauctions-refresh.stamp
+
+# Outlook inbox pool and which inboxes our other sites use (addresses,
+# refresh tokens, SOOP usernames). Never commit: the repository is public.
+scripts/outlooks.txt
+scripts/mail-usage.json

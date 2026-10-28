@@ -120,7 +120,10 @@ function isSecureRequest(req) {
 // handler should 302 back to /mail/.
 async function currentSession(req) {
   const sid = parseCookie(req, COOKIE_NAME);
-  if (!sid || !/^[a-f0-9]{32,64}$/i.test(sid)) return null;
+  // The cookie carries the session's Mongo ObjectId: 24 hex characters. (The
+  // first version accepted only 32-64, so every signed-in buyer was sent
+  // straight back to the login page.)
+  if (!sid || !/^[a-f0-9]{24}$/i.test(sid)) return null;
   const session = await BuyerMailSession.findOne({ _id: sid }).catch(() => null);
   if (!session || !session.isLive()) return null;
   const acct = await EpicAccount.findById(session.epicAccountId)
@@ -182,7 +185,7 @@ function loginPage({ error, email }) {
     title: "Mail viewer",
     body: `
       <h1>Mail viewer</h1>
-      <div class="sub">Sign in with the email address and password from your delivery note.</div>
+      <div class="sub">Sign in with the email login and email password from your order.</div>
       <div class="card">
         <form method="POST" action="/mail/login">
           <label for="email">Email address</label>
@@ -310,7 +313,9 @@ router.get("/mail/inbox", async (req, res) => {
   const ctx = await currentSession(req);
   if (!ctx) return res.redirect(302, "/mail/");
   const { session, epicAccount } = ctx;
-  const sinceIso = new Date(session.createdAt).toISOString();
+  // Only mail from after the purchase (or, for a listing whose sale has not
+  // been recorded yet, after the listing) — see BuyerMailSession.mailCutoff.
+  const sinceIso = BuyerMailSession.mailCutoff(session).toISOString();
   let messages = [];
   let error = "";
   try {
@@ -344,6 +349,12 @@ router.get("/mail/message/:id", async (req, res) => {
       inboxAddress: session.inboxAddress,
       messageId: req.params.id,
     });
+    // Same cutoff as the inbox list: an older Epic message (from before this
+    // buyer's purchase) is not theirs, even when its id is known.
+    const at = Date.parse((message && message.receivedDateTime) || "");
+    if (!Number.isFinite(at) || at < BuyerMailSession.mailCutoff(session).getTime()) {
+      return res.redirect(302, "/mail/inbox");
+    }
     await markView(session);
     return res
       .set("Cache-Control", "no-store")

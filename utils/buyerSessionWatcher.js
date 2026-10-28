@@ -59,12 +59,13 @@ async function sweepLiveSessions({ now = new Date(), logger = console } = {}) {
   let checked = 0;
   let revoked = 0;
   const errors = [];
+  const revokedRows = [];
   for (const row of rows) {
     checked++;
     try {
       const { messages } = await outlook.readEpicMailFor({
         inboxAddress: row.inboxAddress,
-        sinceIso: new Date(row.createdAt).toISOString(),
+        sinceIso: BuyerMailSession.mailCutoff(row).toISOString(),
         top: 20,
       });
       const hit = detectsEmailChange(messages);
@@ -79,6 +80,7 @@ async function sweepLiveSessions({ now = new Date(), logger = console } = {}) {
         },
       );
       revoked++;
+      revokedRows.push({ id: String(row._id), stage: row.stage || "", listingId: row.listingId || null });
       logger.log(
         "[buyerSessionWatcher] revoked",
         String(row._id),
@@ -87,6 +89,16 @@ async function sweepLiveSessions({ now = new Date(), logger = console } = {}) {
       );
     } catch (err) {
       errors.push({ id: String(row._id), msg: err && err.message });
+    }
+  }
+  // A LISTED session should never see its email change: that means a buyer
+  // already has the account and the sale sync has not recorded it yet, or
+  // someone else is in the account. The sales module records / pages it.
+  if (revokedRows.some((r) => r.stage === "listed")) {
+    try {
+      await require("./epicSales").onListedEmailChanged(revokedRows.filter((r) => r.stage === "listed"));
+    } catch (err) {
+      logger.warn("[buyerSessionWatcher] listed email-change hand-off failed", err && err.message);
     }
   }
   return { checked, revoked, errors };

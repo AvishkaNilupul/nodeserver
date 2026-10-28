@@ -57,9 +57,26 @@ const buyerMailSessionSchema = new mongoose.Schema(
     revokedAt: { type: Date, default: null, index: true },
     revokedReason: {
       type: String,
-      enum: ["", "manual", "email_changed", "expired", "replaced"],
+      enum: ["", "manual", "email_changed", "expired", "replaced", "unlisted", "refunded"],
       default: "",
     },
+
+    // Where the session is in a sale (utils/epicSales.js):
+    //   "listed" — minted when the account was put on an instant-delivery
+    //              listing. Its password sits in the marketplace's delivery
+    //              entry, so the buyer has it the moment they pay. No expiry
+    //              clock yet (expiresAt is far out).
+    //   "sold"   — the sale was seen: soldAt is set and expiresAt = soldAt +
+    //              the access window.
+    //   ""       — minted by hand at delivery time (the Deliver button):
+    //              already a sold session, created at the sale.
+    stage: { type: String, enum: ["", "listed", "sold"], default: "", index: true },
+    // The buyer password, encrypted (utils/secretBox) — only kept for listed
+    // sessions, whose password has to be re-sent whenever the listing's stock
+    // is rewritten. The bcrypt hash above is still what /mail/login checks.
+    passwordEnc: { type: String, default: "" },
+    listingId: { type: mongoose.Schema.Types.ObjectId, ref: "EpicListing", default: null, index: true },
+    soldAt: { type: Date, default: null },
 
     // Delivery bookkeeping — operator records which marketplace order spawned
     // this session so a complaint later can be traced to one row.
@@ -88,5 +105,18 @@ buyerMailSessionSchema.methods.isLive = function isLive(now) {
   if (this.revokedAt) return false;
   return this.expiresAt instanceof Date && this.expiresAt.getTime() > t.getTime();
 };
+
+// The earliest mail the buyer may see: mail from before their purchase is
+// never theirs. A listed session whose sale has not been recorded yet falls
+// back to its creation (the listing time).
+function mailCutoff(row) {
+  const t = (row && (row.soldAt || row.createdAt)) || null;
+  const d = t ? new Date(t) : null;
+  return d && Number.isFinite(d.getTime()) ? d : new Date(0);
+}
+buyerMailSessionSchema.methods.mailCutoff = function () {
+  return mailCutoff(this);
+};
+buyerMailSessionSchema.statics.mailCutoff = mailCutoff;
 
 module.exports = mongoose.model("BuyerMailSession", buyerMailSessionSchema);

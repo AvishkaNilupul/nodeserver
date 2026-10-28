@@ -6889,4 +6889,8 @@ module.exports = {
   // exported for tests: the TalkJS internal-id derivations the chat send relies on
   eldInternalId,
   eldNymId,
+  // The signed-in Eldorado request (cookie jar, CSRF header, refresh-and-retry
+  // on 401). utils/eldoradoAccountOffers.js uses it for the Account category
+  // (Epic Games accounts), which has its own endpoints.
+  eldRequest,
 };

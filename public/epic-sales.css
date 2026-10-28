@@ -1,0 +1,275 @@
+/* Listings & sales tab on /epic-accounts.html (public/epic-sales.js).
+   Uses the page's own tokens (--surface, --line, --muted, --accent, --green,
+   --red) so light and dark mode follow the page. */
+#epic-sales-panel .es-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
+  gap: 12px;
+}
+#epic-sales-panel .es-stat {
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 12px 14px;
+  background: var(--surface-2);
+  min-width: 0;
+}
+#epic-sales-panel .es-stat b {
+  display: block;
+  font-size: 11.5px;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  color: var(--muted);
+  margin-bottom: 4px;
+}
+#epic-sales-panel .es-stat .v {
+  font-size: 14px;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+#epic-sales-panel .es-stat .s {
+  font-size: 12.5px;
+  color: var(--muted);
+  margin-top: 3px;
+  overflow-wrap: anywhere;
+}
+#epic-sales-panel .ok {
+  color: var(--green);
+}
+#epic-sales-panel .bad {
+  color: var(--red);
+}
+#epic-sales-panel .es-pill {
+  display: inline-block;
+  padding: 2px 9px;
+  border-radius: 999px;
+  font-size: 11.5px;
+  font-weight: 700;
+  background: var(--surface-2);
+  color: var(--muted);
+  border: 1px solid var(--line);
+  white-space: nowrap;
+}
+#epic-sales-panel .es-pill.green {
+  color: var(--green);
+  border-color: rgba(5, 150, 105, 0.35);
+  background: rgba(5, 150, 105, 0.1);
+}
+#epic-sales-panel .es-pill.red {
+  color: var(--red);
+  border-color: rgba(220, 38, 38, 0.35);
+  background: rgba(220, 38, 38, 0.08);
+}
+#epic-sales-panel .es-pill.amber {
+  color: #b45309;
+  border-color: rgba(217, 119, 6, 0.35);
+  background: rgba(217, 119, 6, 0.1);
+}
+html[data-theme="dark"] #epic-sales-panel .es-pill.amber {
+  color: #fbbf24;
+}
+#epic-sales-panel .es-list {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+#epic-sales-panel .es-item {
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 14px;
+  min-width: 0;
+}
+#epic-sales-panel .es-item-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  align-items: flex-start;
+  flex-wrap: wrap;
+}
+#epic-sales-panel .es-item-title {
+  font-weight: 650;
+  font-size: 14px;
+  overflow-wrap: anywhere;
+  min-width: 0;
+  flex: 1 1 260px;
+}
+#epic-sales-panel .es-meta {
+  color: var(--muted);
+  font-size: 12.5px;
+  margin-top: 5px;
+  overflow-wrap: anywhere;
+}
+#epic-sales-panel .es-actions {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+  margin-top: 10px;
+}
+#epic-sales-panel .es-units {
+  margin: 10px 0 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+#epic-sales-panel .es-units li {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  padding: 7px 10px;
+  border-radius: 9px;
+  background: var(--surface-2);
+  flex-wrap: wrap;
+}
+#epic-sales-panel .es-units li span {
+  overflow-wrap: anywhere;
+  min-width: 0;
+}
+#epic-sales-panel .es-err {
+  color: var(--red);
+  font-size: 12.5px;
+  margin-top: 6px;
+  overflow-wrap: anywhere;
+}
+#epic-sales-panel .es-reasons {
+  margin: 4px 0 0;
+  padding-left: 16px;
+  font-size: 12.5px;
+  color: var(--muted);
+}
+#epic-sales-panel .es-reasons li.block {
+  color: var(--red);
+}
+#epic-sales-panel .es-table-wrap {
+  overflow-x: auto;
+}
+#epic-sales-panel .es-table td,
+#epic-sales-panel .es-table th {
+  vertical-align: top;
+}
+#epic-sales-panel .es-switch {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  font-size: 13px;
+}
+#epic-sales-panel .es-switch input {
+  width: 18px;
+  height: 18px;
+}
+#epic-sales-panel .es-settings {
+  display: flex;
+  gap: 14px 22px;
+  flex-wrap: wrap;
+  align-items: center;
+  margin-top: 14px;
+}
+.es-modal .es-market {
+  margin-top: 8px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 8px 10px;
+  font-size: 12.5px;
+  max-height: 180px;
+  overflow: auto;
+}
+.es-modal .es-market div {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 3px 0;
+  border-bottom: 1px dashed var(--line);
+}
+.es-modal .es-market div:last-child {
+  border-bottom: none;
+}
+.es-modal .es-market span:first-child {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+.es-modal .es-check {
+  display: flex;
+  gap: 8px;
+  align-items: flex-start;
+  text-transform: none;
+  letter-spacing: 0;
+  font-weight: 500;
+  font-size: 13px;
+  color: var(--ink);
+}
+.es-modal .es-check input {
+  width: auto;
+  margin-top: 2px;
+}
+.es-modal .es-cover {
+  margin-top: 8px;
+  max-width: 100%;
+  max-height: 140px;
+  border-radius: 8px;
+  border: 1px solid var(--line);
+  display: block;
+}
+.es-modal .es-preview {
+  margin-top: 12px;
+  font-size: 13px;
+}
+.es-modal .es-preview pre {
+  white-space: pre-wrap;
+  background: var(--surface-2);
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  padding: 10px;
+  font-size: 12.5px;
+  max-height: 220px;
+  overflow: auto;
+}
+.es-modal .es-acc-list {
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 6px 10px;
+  max-height: 200px;
+  overflow: auto;
+}
+@media (max-width: 768px) {
+  #epic-sales-panel .es-actions .btn {
+    flex: 1 1 auto;
+  }
+  #epic-sales-panel .es-table thead {
+    display: none;
+  }
+  #epic-sales-panel .es-table,
+  #epic-sales-panel .es-table tbody,
+  #epic-sales-panel .es-table tr,
+  #epic-sales-panel .es-table td {
+    display: block;
+    width: 100%;
+  }
+  #epic-sales-panel .es-table tr {
+    border: 1px solid var(--line);
+    border-radius: 12px;
+    padding: 10px 12px;
+    margin-bottom: 10px;
+  }
+  #epic-sales-panel .es-table td {
+    border: 0;
+    padding: 4px 0;
+  }
+  #epic-sales-panel .es-table td[data-label]::before {
+    content: attr(data-label);
+    display: block;
+    color: var(--muted);
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+  }
+  .es-modal input,
+  .es-modal select,
+  .es-modal textarea {
+    font-size: 16px;
+  }
+}

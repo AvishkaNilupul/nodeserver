@@ -146,6 +146,18 @@ router.patch("/api/epic/accounts/:id", requireSuperadmin, async (req, res) => {
   try {
     const upd = {};
     if (typeof req.body.sold === "boolean") upd.sold = req.body.sold;
+    // An account on a live instant-delivery listing is sold BY Eldorado; a
+    // hand-made "sold" here would leave it on sale there too.
+    if (upd.sold === true) {
+      const listed = await require("../utils/epicSales").listingForAccount(req.params.id);
+      if (listed) {
+        return res.status(409).json({
+          success: false,
+          message:
+            "This account is on sale in “" + listed.title + "”. Remove it from that listing first (Listings & sales tab).",
+        });
+      }
+    }
     if (typeof req.body.label === "string") upd.label = req.body.label.trim();
     const acc = await EpicAccount.findByIdAndUpdate(
       req.params.id,
@@ -379,14 +391,28 @@ router.post(
           .status(400)
           .json({ success: false, message: "Account has no stored email (not sellable)" });
       }
-      if (!acct.password) {
+      const epicPassword = acct.password ? decrypt(acct.password) : "";
+      if (!epicPassword) {
         return res
           .status(400)
           .json({ success: false, message: "Account has no stored password (not sellable)" });
       }
+      const epicSales = require("../utils/epicSales");
+      // On a live instant-delivery listing, Eldorado sells it: a hand-made
+      // delivery here would sell the same account twice.
+      const listed = await epicSales.listingForAccount(acct._id);
+      if (listed) {
+        return res.status(409).json({
+          success: false,
+          message: "This account is on sale in “" + listed.title + "”. Remove it from that listing first (Listings & sales tab).",
+        });
+      }
       // The Outlook refresh-token fleet lives on the owner's Mac, so prod
       // consults the reverse-tunnelled proxy for both "is this inbox known?"
-      // and "is it safe to hand over?" (not shared with any other site).
+      // and "is it safe to hand over?". The rule is the one the listings use
+      // (utils/epicSales inboxVerdict): the account's own "epic" use never
+      // counts, an inbox shared with SOOP is allowed while that switch is on
+      // (the buyer only ever sees Epic's mail), anything else needs force.
       let check;
       try {
         check = await outlookProxy.checkInbox(email);
@@ -399,22 +425,14 @@ router.post(
               : "Mac mail proxy did not respond: " + (err.message || "error"),
         });
       }
-      if (check.status && check.status !== "live" && check.status !== "unknown") {
-        return res.status(400).json({
-          success: false,
-          message: "Mail account status=" + check.status,
-        });
-      }
-      if (!check.sellable && !req.body?.force) {
+      const verdict = epicSales.inboxVerdict(check, await epicSales.getConfig());
+      if (!verdict.ok && !(req.body?.force && verdict.code === "shared")) {
         return res.status(400).json({
           success: false,
           message:
-            check.sharedWith.length
-              ? "This inbox is already used for: " +
-                check.sharedWith.join(", ") +
-                ". Pass {force:true} to override, but you will be handing a SOOP recovery address to the buyer."
-              : "Proxy refused this inbox (not sellable). Add it to scripts/outlooks.txt on the Mac first, or pass {force:true}.",
-          sharedWith: check.sharedWith,
+            verdict.text +
+            (verdict.code === "shared" ? ". Tick “force” to hand it over anyway." : ""),
+          sharedWith: verdict.shared || [],
         });
       }
 
@@ -448,17 +466,22 @@ router.post(
       });
 
       const loginUrl = publicLoginUrl(req);
+      // Everything the buyer needs in one message: the Epic login itself, and
+      // the mail page for the codes Epic sends while they take it over.
       const deliveryTemplate =
-        `Thanks for your order! Your Epic account access:\n\n` +
-        `Login: ${loginUrl}\n` +
-        `Email: ${email}\n` +
-        `Password: ${password}\n\n` +
-        `IMPORTANT: this password is for OUR mail viewer only — not for Epic ` +
-        `or Microsoft/Outlook. Sign in there to receive any email codes Epic ` +
-        `sends to the account.\n\n` +
-        `Please change the email on the Epic account to your own as soon as ` +
-        `possible. Access to this viewer closes in ${days} days, or sooner ` +
-        `if you change the Epic email.`;
+        `Thanks for your order! Here is your Epic Games account:\n\n` +
+        `Epic login (email): ${email}\n` +
+        `Epic password: ${epicPassword}\n\n` +
+        `Epic emails (security codes, verification links):\n` +
+        `Mail page: ${loginUrl}\n` +
+        `Email login: ${email}\n` +
+        `Email password: ${password}\n\n` +
+        `The email password only opens the mail page — it is not the Epic ` +
+        `password. The mail page shows the emails Epic sends to this account ` +
+        `for ${days} days.\n\n` +
+        `Please change the account email to your own right after you log in ` +
+        `(epicgames.com > Account > Personal details). The mail page closes ` +
+        `then, or after ${days} days.`;
 
       return res.json({
         success: true,
@@ -547,5 +570,7 @@ router.post(
 
 
 router.use(require("./epicAccountDetailsRoutes"));
+// Listings & sales tab (Eldorado instant-delivery listings, sale records).
+router.use(require("./epicSalesRoutes"));
 
 module.exports = router;

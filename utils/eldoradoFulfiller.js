@@ -496,6 +496,19 @@ function settledWithin(promises, ms) {
   ]).finally(() => clearTimeout(timer));
 }
 
+// Whether an offer id is one of the Epic account listings. A failed lookup
+// answers false, so the order falls back to the "no listing row" page.
+async function isEpicAccountOffer(offerId) {
+  const id = String(offerId || "");
+  if (!id) return false;
+  try {
+    const EpicListing = require("../models/EpicListing");
+    return !!(await EpicListing.exists({ market: "eldorado", externalId: id }));
+  } catch {
+    return false;
+  }
+}
+
 // Deliver one paid order. Returns a short result describing what happened so
 // the tick can log it without re-deriving anything. `unitGapMs` is the pause
 // between the unit messages of a long account-listing delivery; only a test
@@ -509,8 +522,15 @@ async function deliverOrder(order, { dryRun, unitGapMs }) {
     marketplace: "eldorado",
     externalId: offerId,
   });
-  if (!listing)
+  if (!listing) {
+    // An Epic Games account offer (utils/epicSales.js) has no listing row on
+    // purpose: Eldorado hands the account over itself from the entries stored
+    // on the offer, and the Epic sale sync records the sale. Nothing to send.
+    if (await isEpicAccountOffer(offerId)) {
+      return { orderId, skipped: "Epic account offer, delivered by Eldorado itself" };
+    }
     return { orderId, skipped: "no listing row for offer " + offerId };
+  }
 
   // Already handled: some unit carries this order id.
   if ((listing.units || []).some((u) => u.orderId === orderId)) {
