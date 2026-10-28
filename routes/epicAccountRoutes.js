@@ -197,40 +197,15 @@ router.post("/api/epic/accounts/sync", requireSuperadmin, async (req, res) => {
   }
 });
 
-// Fresh one-tap claim link for a specific account + offer (used by the tab's
-// "Claim" buttons; the link logs the browser into that account).
+// Retire launcher-backed browser links, including calls from stale phone pages.
+// Replacing a shared Epic web session can revoke the launcher refresh grant.
 router.post(
   "/api/epic/accounts/:id/claim-link",
   requireSuperadmin,
-  async (req, res) => {
-    try {
-      const acc = await EpicAccount.findById(req.params.id);
-      if (!acc) {
-        return res.status(404).json({ success: false, message: "Not found" });
-      }
-      const freebie = await EpicFreebie.findOne({
-        offerId: String(req.body.offerId || ""),
-      }).lean();
-      if (!freebie) {
-        return res
-          .status(404)
-          .json({ success: false, message: "Unknown offer" });
-      }
-      const accessToken = await accountAccessToken(acc);
-      const code = await epic.exchangeCode(accessToken);
-      res.json({
-        success: true,
-        url: epic.claimLink(code, freebie.namespace, freebie.offerId),
-        expiresInSeconds: 299,
-      });
-    } catch (err) {
-      console.error("epic claim link error:", err.message);
-      res.status(500).json({
-        success: false,
-        message: err.message || "Could not create claim link",
-      });
-    }
-  },
+  (_req, res) => res.status(409).json({
+    success: false,
+    message: "Reload the Epic accounts page. Claim now runs on the Mac with isolated sessions.",
+  }),
 );
 
 // ---- Auto-claim controls -------------------------------------------------

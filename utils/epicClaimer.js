@@ -91,20 +91,16 @@ async function pingClaim(acc, freebie, accessToken) {
   const key = acc.accountId + "|" + freebie.offerId;
   const last = pinged.get(key);
   if (last && Date.now() - last < PING_COOLDOWN_MS) return false;
-  let link = freebie.url;
-  try {
-    const code = await epic.exchangeCode(accessToken);
-    link = epic.claimLink(code, freebie.namespace, freebie.offerId);
-  } catch {
-    // fall back to the plain store link if the exchange code fails
-  }
+  // External shared browsers must not receive launcher-backed exchange links.
+  const panelBase = String(process.env.PUBLIC_BASE_URL || "").replace(/\/+$/, "");
+  const link = panelBase ? panelBase + "/epic-accounts.html" : freebie.url;
   await sendTelegram(
     "🎁 Epic claim needed — " +
       freebie.title +
       (freebie.originalPrice ? " (worth " + freebie.originalPrice + ")" : "") +
       "\nAccount: " +
       (acc.label || acc.displayName || acc.accountId) +
-      "\nTap within 5 min (logs into the account and opens checkout):\n" +
+      "\nUse Claim on the Epic accounts page (runs through the isolated Mac worker).\n" +
       link,
   );
   pinged.set(key, Date.now());
