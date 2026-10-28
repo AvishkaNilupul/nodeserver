@@ -32,12 +32,14 @@ const botUpdateRoutes = require("./routes/botUpdateRoutes");
 const botHealthRoutes = require("./routes/botHealthRoutes");
 const noclaimFarmRoutes = require("./routes/noclaimFarmRoutes");
 const unclaimedAutoRoutes = require("./routes/unclaimedAutoRoutes");
+const discordFarmRoutes = require("./routes/discordFarmRoutes");
 const farmSizingRoutes = require("./routes/farmSizingRoutes");
 const unclaimedAutoList = require("./utils/unclaimedAutoList");
 const unclaimedAllocator = require("./utils/unclaimedAllocator");
 const botHealthMonitor = require("./utils/botHealthMonitor");
 const accountPoolChecker = require("./utils/accountPoolChecker");
 const dropArchiveRoutes = require("./routes/dropArchiveRoutes");
+const accountApiRoutes = require("./routes/accountApiRoutes");
 const accountPoolRoutes = require("./routes/accountPoolRoutes");
 const spentAccountsRoutes = require("./routes/spentAccountsRoutes");
 const autoFarmRoutes = require("./routes/autoFarmRoutes");
@@ -84,17 +86,23 @@ const g2gSessionRefresher = require("./utils/g2gSessionRefresher");
 const g2gFulfiller = require("./utils/g2gFulfiller");
 const playerauctionsSessionWatch = require("./utils/playerauctionsSessionWatch");
 const playerauctionsRoutes = require("./routes/playerauctionsRoutes");
-// SOOP drops farm service (docs/SOOP-FARM.md); started after MongoDB connects.
-const soopFarm = require("./utils/soopFarm");
-// Auto-renewer for SOOP cookies — replays Twitch OAuth from stored jars on
-// a periodic sweep, plus reactive-on-fail from inside soopFarm.checkAccount().
-const soopCookieRefresher = require("./utils/soopCookieRefresher");
+// Token-gated (NOT session/2fa gated) one-click cookie hand-off — mounted early,
+// before the admin auth cascade, because the browser extension that calls it has
+// no admin session. See routes/paSessionInstallRoutes.js.
+const paSessionInstallRoutes = require("./routes/paSessionInstallRoutes");
+// Buyer-facing Epic mail viewer at /mail. Its own one-shot cookie carries the
+// BuyerMailSession id; the admin cascade never sees it. See
+// routes/buyerMailRoutes.js and project_epic_store_el9in_scan_1028.md.
+const buyerMailRoutes = require("./routes/buyerMailRoutes");
 const marketplaceGuardian = require("./utils/marketplaceGuardian");
 const primeWatcher = require("./utils/primeWatcher");
 const campaignWatcher = require("./utils/campaignWatcher");
 const streamScout = require("./utils/streamScout");
 const noclaimWatcher = require("./utils/noclaimWatcher");
 const autoFarmer = require("./utils/autoFarmer");
+// SOOP drops farm service (docs/SOOP-FARM.md); started after MongoDB connects.
+const soopFarm = require("./utils/soopFarm");
+const soopCookieRefresher = require("./utils/soopCookieRefresher");
 // Publishes the auto-farm's listings; started below for its event-bundle sweep.
 const autoLister = require("./utils/autoLister");
 const autoFarmSnapshot = require("./utils/autoFarmSnapshot");
@@ -382,6 +390,15 @@ app.use(adminAuthRoutes);
 // 2FA setup + login second step. Mounted before the enforcement guard so an
 // admin who hasn't enrolled yet can still reach these to set it up.
 app.use(twoFactorRoutes);
+// One-click PlayerAuctions cookie hand-off. Gated by its own shared secret, not
+// the admin session, so it is mounted here — ahead of the enforce2fa cascade —
+// where the browser extension (which carries no admin session) can reach it.
+// Off entirely until a secret is set (404 otherwise).
+app.use(paSessionInstallRoutes);
+// Buyer-facing Epic mail viewer. Lives under /mail with its own cookie auth;
+// mounted here so the admin cascade below never sees these requests.
+app.use(buyerMailRoutes);
+
 // Per-admin self-service settings (e.g. linking a personal Telegram chat).
 // Each route guards with requireAdmin; kept out of the 2FA enforcement gate so
 // it stays reachable like the security page.
@@ -651,6 +668,11 @@ app.get("/soop.html", requireSuperadmin, enforce2fa, (req, res) => {
   res.sendFile(path.join(__dirname, "public", "soop.html"));
 });
 
+// Keep the raw Discord HTML behind the same guard and CSP as its canonical page.
+app.get("/discord-farm.html", requireSuperadmin, enforce2fa, (req, res) => {
+  res.redirect("/admin/discord-farm");
+});
+
 app.use(express.static(path.join(__dirname, "public")));
 
 // =========================
@@ -686,6 +708,12 @@ app.use(enforce2fa, renterAdminRoutes);
 app.use(resellerAuthRoutes);
 app.use(resellerRoutes);
 app.use(enforce2fa, resellerAdminRoutes);
+// External account API (docs/ACCOUNT-API.md): a machine-to-machine
+// bearer-token realm that resolves a username to its client token across every
+// account source. Mounted BEFORE the blanket requireAdmin cascade — it presents
+// a static token, not a session, so the session guard would otherwise 401 it.
+// Every route inside self-guards with requireApiToken.
+app.use(accountApiRoutes);
 app.use(requireAdmin, enforce2fa, itemRoutes);
 app.use(requireAdmin, enforce2fa, inventoryRoutes);
 app.use(requireAdmin, enforce2fa, orderRoutes);
@@ -698,6 +726,11 @@ app.use(enforce2fa, noclaimFarmRoutes);
 // id and kills the server's copy, which is the one thing that stops delivery.
 app.use(enforce2fa, playerauctionsRoutes);
 app.use(enforce2fa, unclaimedAutoRoutes);
+// Discord Farm — admin page + ingest + queue + human-in-the-loop claim.
+// Operator pastes a Discord session token (one-time per account), server
+// auto-completes video quests, operator solves one hCaptcha per claim in
+// our page. Zero Discord logins needed in the operator's browser.
+app.use(enforce2fa, discordFarmRoutes);
 // Fleet sizing: how many accounts each game should farm, and how many of them
 // should be on sale. Reads are always available; the one endpoint that spends
 // accounts dry-runs unless explicitly told to apply.
@@ -716,9 +749,8 @@ app.use(enforce2fa, marketplaceConsoleRoutes);
 // items, whether lower prices sell more, and what a listing should cost. READ-ONLY
 // — it never writes and never calls a marketplace. Every route is superadmin + 2FA.
 app.use(enforce2fa, priceTrackerRoutes.real());
-// SOOP drops farm: accounts, campaigns, bots, inventory, Twitch cookie
-// hand-off, auto-renew. Routes inside self-guard with requireSuperadmin OR
-// a shared harvest-key header (for the Tampermonkey hybrid harvester).
+// SOOP drops farm: accounts, campaigns, bots and inventory. Every route inside
+// self-guards with requireSuperadmin; enforce2fa gates it behind 2FA.
 app.use(enforce2fa, soopRoutes);
 app.use(enforce2fa, marketplaceRoutes);
 // Account listings (docs/ACCOUNT-LISTINGS-CONTRACT.md): owner-supplied account
@@ -931,6 +963,11 @@ mongoose
     // Epic accounts: refreshes stock-account tokens, re-syncs libraries and
     // sends one-tap claim links when live giveaways are missing.
     epicClaimer.start();
+    // Buyer-mail viewer housekeeping: stamps expired BuyerMailSession rows and
+    // auto-revokes any that see an "Epic email changed" mail land in the old
+    // inbox (buyer has moved the account to their own address — viewer no
+    // longer needs to be reachable). See utils/buyerSessionWatcher.js.
+    require("./utils/buyerSessionWatcher").start();
     // Renters: stop the bots of renters whose lease just expired (the
     // requireRenter middleware already blocks their dashboard access, but this
     // makes farming actually halt without waiting for a manual suspend).
