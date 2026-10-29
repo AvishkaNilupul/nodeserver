@@ -155,7 +155,7 @@ test('current Epic OTP boxes and successive login screens are recognized', () =>
 });
 test('authorization capture reads JSON from pre without grabbing unrelated account IDs', async () => {
   const code = 'b'.repeat(32);
-  const banner = { style: {}, textContent: '' };
+  const banner = { style: {}, dataset: {}, textContent: '' };
   const document = { body: { textContent: 'Pretty-print {"accountId":"' + 'a'.repeat(32) + '"}' },
     querySelector: () => ({ textContent: JSON.stringify({ accountId: 'a'.repeat(32), authorizationCode: code }) }),
     getElementById: () => banner };
@@ -166,7 +166,7 @@ test('authorization capture reads JSON from pre without grabbing unrelated accou
 
 test('new-account EULA correction opens the official review flow without accepting it', async () => {
   const location = { pathname: '/id/api/redirect', hash: '', hostname: 'www.epicgames.com' };
-  const banner = { style: {}, textContent: '' };
+  const banner = { style: {}, dataset: {}, textContent: '' };
   const document = { body: { textContent: '' },
     querySelector: () => ({ textContent: JSON.stringify({ errorCode: 'errors.com.epicgames.oauth.corrective_action_required', metadata: { correctiveAction: 'EULA_ACCEPTANCE' } }) }),
     getElementById: () => banner };
@@ -227,7 +227,7 @@ test('visible captcha pauses the navigation deadline and resumes when dismissed'
 test('email MFA token error opens normal sign-in without submitting another registration', async () => {
   const location={pathname:'/id/api/redirect',hash:'',hostname:'www.epicgames.com'};
   const response={errorCode:'errors.com.epicgames.common.two_factor_authentication.required',metadata:{twoFactorMethod:'email'}};
-  const doc={body:{textContent:''},querySelector:()=>({textContent:JSON.stringify(response)}),getElementById:()=>({style:{}})};
+  const doc={body:{textContent:''},querySelector:()=>({textContent:JSON.stringify(response)}),getElementById:()=>({style:{},dataset:{}})};
   const driver=signupDom(doc,location);await driver.scrapeAuthCode({});
   assert.equal(location.href,'https://accounts.epicgames.com/auth/logout');
   assert.equal(driver.messages.at(-1).type,'epicgen-recover-auth');
@@ -312,4 +312,16 @@ test('ProxyScrape uses documented session and lifetime fields while retaining co
  const p=readProxy({RES_HOST:'rp.scrapegw.com',RES_PORT:'6060',RES_USER:'user-country-jp-sessid-old-session-old-lifetime-5',RES_PASS:'secret'},'/private/tmp/no-epic-test-proxy-config');
  assert.match(p.username,/^user-country-jp-session-[a-f0-9]{16}-lifetime-30$/);
  assert.equal(p.username.includes('-sessid-'),false);
+});
+
+
+test('explicit retry reuses the assigned identity and cannot reset another tab',async()=>{
+ const w=worker();await w.send({type:'epicgen-allocate'});
+ await w.send({type:'epicgen-drive',sessionId:'session',bearer:'secret',identity:{email:'stock@outlook.com',password:'pw'},redirectUrl:'https://www.epicgames.com/id/api/redirect?clientId=abc'});
+ w.storage['epicgen.active'].challengeReloads=2;
+ const send=(id)=>w.send({type:'epicgen-resume-current',sessionId:'session'},id,'https://www.epicgames.com/id/register');
+ assert.equal((await send(99)).ok,false);assert.equal(w.storage['epicgen.active'].challengeReloads,2);
+ assert.equal((await send(10)).ok,true);assert.equal(w.storage['epicgen.active'].challengeReloads,0);
+ assert.equal(w.storage['epicgen.active'].identity.email,'stock@outlook.com');
+ assert.equal(w.calls.filter(c=>String(c[0]).includes('/pool/pick')).length,1);
 });

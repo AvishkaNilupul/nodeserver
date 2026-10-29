@@ -127,6 +127,14 @@ chrome.runtime.onMessage.addListener((msg, sender, respond) => {
         return { ok: true, code: hit.code };
       } catch (e) { return { ok: true, waiting: true, error: e.message }; }
     }
+    if (msg.type === 'epicgen-resume-current') {
+      // Explicit operator retry in the assigned tab; never reserve another inbox.
+      s.challengeReloads = 0; s.failureReason = '';
+      await chrome.storage.session.set({ [KEY]: s });
+      await server(s, `/api/epic/signup/${s.sessionId}/status`, { status: 'wizard_open', lastError: '' });
+      await relay(s, { kind: 'status', status: 'wizard_open' });
+      return { ok: true };
+    }
     if (msg.type === 'epicgen-retry-challenge') {
       if ((s.challengeReloads || 0) >= 2) throw new Error('Epic rejected the CAPTCHA response after two refreshes. Recover this signup later.');
       s.challengeReloads = (s.challengeReloads || 0) + 1;

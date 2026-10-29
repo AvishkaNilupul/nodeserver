@@ -41,6 +41,28 @@
     el.style.background =
       kind === "err" ? "#c0392b" : kind === "ok" ? "#1f9d55" : "#1e6bd3";
     el.textContent = text;
+    el.dataset.kind = kind;
+  }
+
+  function showRetry(session) {
+    var host=document.getElementById('epicgen-banner');
+    if(!host||host.dataset.kind!=='err'||document.getElementById('epicgen-retry'))return;
+    var button=document.createElement('button');
+    button.id='epicgen-retry';button.textContent='Retry this signup';
+    button.style.cssText='pointer-events:auto;margin-left:14px;padding:6px 12px;cursor:pointer';
+    button.addEventListener('click',async function(){
+      button.disabled=true;
+      try {
+        var resumed=await sw({type:'epicgen-resume-current',sessionId:sessionId});
+        if(!resumed.ok)throw new Error(resumed.error||'Could not resume this signup');
+        var step=stepId();
+        // Request a new email explicitly before consuming a newer OTP.
+        if(step==='otp')await waitFor(clickResendCode,60000);
+        if(step==='details'||step==='login_password')location.reload();
+        else {host.textContent='Resuming the same signup…';await driveRegisterFlow(session);showRetry(session);}
+      } catch(err) {banner('Retry paused: '+err.message,'err');showRetry(session);}
+    });
+    host.appendChild(button);
   }
 
   function setVal(el, val) {
@@ -389,12 +411,16 @@
     return { status: 'submitting', timedOut: now > state.deadline };
   }
 
+  function renderedPageText() {
+    var body=document.body;
+    return body ? (typeof body.innerText==='string'?body.innerText:body.textContent||'') : '';
+  }
+
   function serviceUnavailable() {
     // Storefronts include hidden error templates even on successful sign-in.
     // Only the authentication form's rendered message is a signup failure.
     if(!/\/id\/(?:login|register)(?:\/|$)/i.test(location.pathname || ''))return false;
-    var body=document.body;
-    var text=body ? (typeof body.innerText==='string'?body.innerText:body.textContent||'') : '';
+    var text=renderedPageText();
     return /service is temporarily unavailable|too many requests|please try again later/i.test(text);
   }
 
@@ -413,7 +439,7 @@
   }
 
   function challengeRejected() {
-    return /incorrect response[\s\S]{0,100}refresh the page/i.test(document.body ? document.body.textContent || '' : '');
+    return /incorrect response[\s\S]{0,100}refresh the page/i.test(renderedPageText());
   }
   async function retryChallenge() {
     var result=await sw({type:'epicgen-retry-challenge',sessionId:sessionId});
@@ -429,7 +455,7 @@
   }
 
   function authContextRejected() {
-    var text=document.body ? document.body.textContent || '' : '';
+    var text=renderedPageText();
     return (/\/id\/login\/mfa/i.test(location.pathname)&&/\bemail is invalid\b/i.test(text)) ||
       (/\/correction\/eula/i.test(location.pathname)&&/insufficient user authentication/i.test(text));
   }
@@ -455,7 +481,7 @@
   }
 
   function otpRejected() {
-    return /security code is invalid or expired|(?:verification|security) code (?:is )?(?:incorrect|invalid|expired)/i.test(document.body ? document.body.textContent || '' : '');
+    return /security code is invalid or expired|(?:verification|security) code (?:is )?(?:incorrect|invalid|expired)/i.test(renderedPageText());
   }
 
   async function waitForStepChange(fromStep, timeoutMs) {
@@ -611,11 +637,13 @@
       );
       var errText = "";
       for (var ei = 0; ei < errNodes.length; ei++) {
-        var t = String(errNodes[ei].textContent || "").trim();
+        if (!visibleEnabled(errNodes[ei])) continue;
+        var t = String(errNodes[ei].innerText || errNodes[ei].textContent || "").trim();
         if (t) {
           errText += (errText ? " · " : "") + t;
         }
       }
+      if (!errText) lastErrText = "";
       if (errText && errText !== lastErrText) {
         console.warn("epicgen form error:", errText);
         banner("Epic error: " + errText, "err");
@@ -859,6 +887,7 @@
         await scrapeAuthCode(s.session);
       } else {
         await driveRegisterFlow(s.session);
+        showRetry(s.session);
       }
     } catch (err) {
       banner("Signup error: " + (err && err.message), "err");
@@ -867,6 +896,7 @@
         sessionId: sessionId,
         reason: err && err.message,
       });
+      showRetry(s.session);
     }
   })();
 })();

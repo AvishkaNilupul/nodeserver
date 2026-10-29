@@ -67,3 +67,25 @@ test('agreement context refreshes at most once before normal sign-in recovery',(
  assert.equal(context.api.refreshAgreementContext(),true);assert.equal(context.api.refreshAgreementContext(),false);assert.equal(reloads,1);
  context.location.pathname='/id/login/mfa';assert.equal(context.api.refreshAgreementContext(),false);
 });
+
+
+test('hidden rejection templates cannot override the rendered signup state',async()=>{
+ const source=fs.readFileSync(require.resolve('../extension/epicnpc-filler/epic-signup.js'),'utf8');
+ const start=source.lastIndexOf('  (async function () {');
+ const body={innerText:'Check your inbox',textContent:'Incorrect response. Please refresh the page. The security code is invalid or expired. Insufficient User Authentication'};
+ const context={location:{hash:'',pathname:'/id/login/correction/eula'},document:{body},window:{},chrome:{}};
+ vm.runInNewContext(source.slice(0,start)+'globalThis.api={challengeRejected,otpRejected,authContextRejected};})();',context);
+ for(const name of ['challengeRejected','otpRejected','authContextRejected'])assert.equal(context.api[name](),false);
+ body.innerText='Incorrect response. Please refresh the page.';assert.equal(context.api.challengeRejected(),true);
+ body.innerText='The security code is invalid or expired.';assert.equal(context.api.otpRejected(),true);
+});
+
+test('a stopped signup offers an explicit same-session retry without a new inbox',async()=>{
+ const source=fs.readFileSync(require.resolve('../extension/epicnpc-filler/epic-signup.js'),'utf8');
+ const start=source.lastIndexOf('  (async function () {');let button,reloads=0;const messages=[];
+ const host={dataset:{kind:'err'},appendChild(el){button=el;}};
+ const context={location:{hash:'#epicgen=same-session',reload(){reloads++;}},document:{getElementById:id=>id==='epicgen-banner'?host:button,createElement:()=>({style:{},addEventListener(type,fn){this.click=fn;}})},chrome:{runtime:{sendMessage:(msg,reply)=>{messages.push(msg);reply({ok:true});}}}};
+ vm.runInNewContext(source.slice(0,start)+"stepId=()=> 'details';globalThis.api={showRetry};})();",context);
+ context.api.showRetry({identity:{email:'same@outlook.com'}});assert.equal(button.textContent,'Retry this signup');
+ await button.click();assert.equal(reloads,1);assert.equal(messages.length,1);assert.equal(messages[0].type,'epicgen-resume-current');assert.equal(messages[0].sessionId,'same-session');
+});

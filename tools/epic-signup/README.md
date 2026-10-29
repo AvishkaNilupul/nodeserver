@@ -101,3 +101,14 @@ Closing a challenge without the SDK form response does not resubmit the form.
 An insufficient-authentication error on the Store agreement uses the same
 bounded normal-sign-in recovery as an invalid MFA context. Storefront hidden
 error templates are excluded from authentication failure detection.
+
+
+### Recovering a rejected security check
+
+A stopped signup now offers **Retry this signup** in its red banner. This is an
+explicit retry of the existing session, identity, and assigned tab; it does not
+reserve a new Outlook address. The normal automatic challenge reloads remain
+capped at two. The retry button resets that challenge budget only when clicked.
+At an email-code step it requests a fresh email before retrying. Hidden page
+error templates are excluded from CAPTCHA, OTP, and authentication rejection
+checks. The extension still cannot guarantee Epic will accept a challenge.
