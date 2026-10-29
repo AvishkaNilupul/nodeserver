@@ -366,7 +366,7 @@ async function linkOffer(opts, actor) {
   if (!games.length) throw userError("Pick the games every account delivered for this offer must own");
   let offer;
   try {
-    offer = await mp.g2gGetOffer(offerId);
+    offer = await mp.g2gGetOwnOffer(offerId);
   } catch (e) {
     throw userError("G2G didn't return that offer: " + ((e && e.message) || e));
   }
@@ -975,7 +975,7 @@ async function stockCounts(offerId, offer) {
   const stats = await mp.g2gStockStats(offerId).catch(() => null);
   const s = stats && Number.isFinite(Number(stats.active_inventory)) ? Number(stats.active_inventory) : null;
   let o = offer;
-  if (!o) o = await mp.g2gGetOffer(offerId).catch(() => null);
+  if (!o) o = await mp.g2gGetOwnOffer(offerId).catch(() => null);
   const q = o ? Number(o.actual_qty != null ? o.actual_qty : o.available_qty) : NaN;
   return { stats: s, qty: Number.isFinite(q) ? q : null };
 }
@@ -992,7 +992,7 @@ function countOf(c) {
 // The link with its mode as G2G shows it now (switching the offer on g2g.com
 // is all it takes). Returns [link, offer].
 async function refreshMode(link) {
-  const offer = await mp.g2gGetOffer(link.offerId);
+  const offer = await mp.g2gGetOwnOffer(link.offerId);
   const mode = modeOf(offer);
   if (mode && mode !== (link.mode || "order")) {
     await EpicSalesState.updateOne({ _id: "main", "g2gOffers.offerId": link.offerId }, { $set: { "g2gOffers.$.mode": mode } });
@@ -1040,7 +1040,7 @@ async function loadStock(link, { offer = null } = {}) {
   if (!link || link.mode !== "instant") return { skipped: "not an Instant offer" };
   if (link.enabled === false) return { skipped: "automatic delivery is off for this offer" };
   return withKeyLock("load:" + link.offerId, async () => {
-    const o = offer || (await mp.g2gGetOffer(link.offerId));
+    const o = offer || (await mp.g2gGetOwnOffer(link.offerId));
     if (modeOf(o) !== "instant") return { skipped: "the offer is not on Auto delivery on G2G" };
     const confirmed = await confirmLoading(link, o);
 

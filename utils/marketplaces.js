@@ -3141,6 +3141,19 @@ async function g2gGetOffer(offerId) {
   });
 }
 
+// Our own offer as the seller's pages read it: also when it is out of stock
+// or inactive, where g2gGetOffer answers 404 (and its callers rely on that 404
+// meaning "off sale", so it stays as it is). G2G's upload page sends exactly
+// these flags. Verified 2026-10-29 on an Auto-delivery offer with no stock yet:
+// plain read 4041, flagged read 200.
+async function g2gGetOwnOffer(offerId) {
+  if (!offerId) throw new Error("G2G offer_id is required");
+  return g2gRequest("get", "/offer/" + encodeURIComponent(offerId), {
+    params: { include_inactive: 1, include_out_of_stock: 1, include_inv_form_file: 1 },
+    what: "G2G get own offer",
+  });
+}
+
 // Partial update. G2G's PUT /offer/{id} wants the fields it is changing; send
 // only what the caller asked for so an unrelated field is never clobbered.
 async function g2gUpdateOffer(offerId, fields) {
@@ -6853,6 +6866,7 @@ module.exports = {
   g2gSubmitOrderAccounts,
   g2gUploadStock,
   g2gStockStats,
+  g2gGetOwnOffer,
   g2gSellerId,
   g2gChatProfile,
   g2gOpenDmChannel,

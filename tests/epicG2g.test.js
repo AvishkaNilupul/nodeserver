@@ -134,7 +134,7 @@ mp.g2gSubmitOrderAccounts = async (id, rows) => {
   }
   return { order_item_id: id, upload_requested_at: Date.now() };
 };
-mp.g2gGetOffer = async (id) => ({ offer_id: id, service_id: g2g.GAME_ACCOUNTS_SERVICE, brand_id: "lgc_game_33228", title: "Sker Ritual + Home", delivery_speed: "manual", ...G.offer });
+mp.g2gGetOwnOffer = async (id) => ({ offer_id: id, service_id: g2g.GAME_ACCOUNTS_SERVICE, brand_id: "lgc_game_33228", title: "Sker Ritual + Home", delivery_speed: "manual", ...G.offer });
 mp.g2gSetQuantity = async (id, qty) => {
   G.qtyWrites.push(qty);
   G.offer.actual_qty = qty;
@@ -481,11 +481,11 @@ test("after an unexpected error the order is held: paged once, never sent by its
 });
 
 test("linking refuses an offer outside Game Accounts or with a delivery setting we don't know", async () => {
-  const real = mp.g2gGetOffer;
-  mp.g2gGetOffer = async (id) => ({ offer_id: id, service_id: "0765978e-3fdf-48b4-bed3-184823aa439e", delivery_speed: "manual" });
+  const real = mp.g2gGetOwnOffer;
+  mp.g2gGetOwnOffer = async (id) => ({ offer_id: id, service_id: "0765978e-3fdf-48b4-bed3-184823aa439e", delivery_speed: "manual" });
   await assert.rejects(g2g.linkOffer({ offerId: "G1793242175124XX", games: BOTH }), /Game Accounts/);
-  mp.g2gGetOffer = async (id) => ({ offer_id: id, service_id: g2g.GAME_ACCOUNTS_SERVICE, delivery_speed: "carrier pigeon" });
+  mp.g2gGetOwnOffer = async (id) => ({ offer_id: id, service_id: g2g.GAME_ACCOUNTS_SERVICE, delivery_speed: "carrier pigeon" });
   await assert.rejects(g2g.linkOffer({ offerId: "G1793242175124XX", games: BOTH }), /unknown delivery setting/);
   await assert.rejects(g2g.linkOffer({ offerId: "nope", games: BOTH }), /offer number/);
-  mp.g2gGetOffer = real;
+  mp.g2gGetOwnOffer = real;
 });

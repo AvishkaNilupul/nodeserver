@@ -83,7 +83,7 @@ function parseRow(line) {
   return out;
 }
 mp.g2gFormTemplate = async () => TEMPLATE;
-mp.g2gGetOffer = async (id) => ({
+mp.g2gGetOwnOffer = async (id) => ({
   offer_id: id,
   service_id: g2g.GAME_ACCOUNTS_SERVICE,
   brand_id: "lgc_game_33228",
