@@ -313,19 +313,29 @@
       b.addEventListener("click", () => openCreate(groups[Number(b.dataset.group)])),
     );
     $("es-groups").querySelectorAll("[data-g2g-group]").forEach((b) =>
-      b.addEventListener("click", () => linkG2g(groups[Number(b.dataset.g2gGroup)], b)),
+      b.addEventListener("click", () => linkG2g(groups[Number(b.dataset.g2gGroup)])),
     );
   }
 
   // ---- G2G ------------------------------------------------------------------
-  async function linkG2g(group, b) {
-    const offerId = prompt(
-      "Make the offer on g2g.com first (Game Accounts → the game, Manual delivery), then paste its offer number here (it starts with G, e.g. G1793242175124IO).\n\n" +
-        "Every buyer of that offer will get one account that owns: " + group.games.join(" + "),
-    );
-    if (!offerId) return;
-    return busy(b, async () => {
-      await post("/api/epic/sales/g2g/link", { offerId: offerId.trim(), gameKey: group.gameKey });
+  let g2gGroup = null;
+  function linkG2g(group) {
+    g2gGroup = group;
+    $("es-g-sub").textContent =
+      "Make the offer on g2g.com first (Game Accounts → the game, Manual delivery), then paste its offer number. " +
+      "Every buyer of that offer gets one account that owns: " + group.games.join(" + ") + ".";
+    $("es-g-offer").value = "";
+    $("es-g-days").value = "14";
+    openModal("es-g2g-modal");
+    setTimeout(() => $("es-g-offer").focus(), 50);
+  }
+
+  async function saveG2gLink() {
+    const offerId = $("es-g-offer").value.trim();
+    if (!offerId) return say("Paste the G2G offer number first.", true);
+    return busy($("es-g-save"), async () => {
+      await post("/api/epic/sales/g2g/link", { offerId, gameKey: g2gGroup && g2gGroup.gameKey, sessionDays: Number($("es-g-days").value) });
+      closeModal("es-g2g-modal");
       say("Linked. Orders on it are delivered automatically.");
       await load();
     });
@@ -698,6 +708,21 @@
           </div>
         </div>
       </div>
+      <div class="modal-wrap es-modal" id="es-g2g-modal">
+        <div class="modal">
+          <h3>Sell on G2G</h3>
+          <div class="modal-sub" id="es-g-sub"></div>
+          <label for="es-g-offer">G2G offer number</label>
+          <input id="es-g-offer" placeholder="G1793242175124IO" autocomplete="off" spellcheck="false">
+          <label for="es-g-days">Mail page open for</label>
+          <select id="es-g-days">${[1, 2, 3, 5, 7, 10, 14].map((d) => '<option value="' + d + '">' + d + " day" + (d > 1 ? "s" : "") + "</option>").join("")}</select>
+          <div class="hint">G2G asks account sellers to cover the account for at least 14 days.</div>
+          <div class="modal-actions">
+            <button class="btn" type="button" data-close="es-g2g-modal">Cancel</button>
+            <button class="btn btn-primary" type="button" id="es-g-save">Link and deliver automatically</button>
+          </div>
+        </div>
+      </div>
       <div class="modal-wrap es-modal" id="es-access-modal">
         <div class="modal">
           <h3 id="es-access-title">New mail page password</h3>
@@ -724,6 +749,10 @@
     $("es-c-cover").addEventListener("change", showCover);
     $("es-a-save").addEventListener("click", saveAdd);
     $("es-t-save").addEventListener("click", saveText);
+    $("es-g-save").addEventListener("click", saveG2gLink);
+    $("es-g-offer").addEventListener("keydown", (e) => {
+      if (e.key === "Enter") saveG2gLink();
+    });
     $("es-access-copy").addEventListener("click", async () => {
       try {
         await navigator.clipboard.writeText($("es-access-text").value);
