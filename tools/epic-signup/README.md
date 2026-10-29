@@ -112,3 +112,11 @@ capped at two. The retry button resets that challenge budget only when clicked.
 At an email-code step it requests a fresh email before retrying. Hidden page
 error templates are excluded from CAPTCHA, OTP, and authentication rejection
 checks. The extension still cannot guarantee Epic will accept a challenge.
+
+
+Every signup now uses a dedicated private window, including normal-connection
+signups with the proxy unchecked. Chrome shares cookies between private windows,
+so the worker requires other private windows to be closed before reserving an
+inbox. Token capture stays in that same window. Successful saves close it; failed
+signups stay open for recovery. This avoids reusing a previous account's Store
+or accounts.epicgames.com session without calling Epic's logout endpoint.

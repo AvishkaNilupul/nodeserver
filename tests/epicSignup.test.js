@@ -29,11 +29,11 @@ test('server accepts only recent local Outlook reservations', () => {
   }
 });
 
-function worker({ incognitoAllowed = true } = {}) {
+function worker({ incognitoAllowed = true, existingPrivate = false } = {}) {
   const storage = {}; const calls = []; let listener; let auth; let removed; let nextTab = 10;
   const chrome = {
     extension: { isAllowedIncognitoAccess: async () => incognitoAllowed },
-    windows: { getAll: async () => [], create: async () => ({ id: 100, tabs: [{ id: nextTab++ }] }),
+    windows: { getAll: async () => existingPrivate ? [{id: 99, incognito: true}] : [], create: async data => {calls.push(['window',data]);return { id: 100, tabs: [{ id: nextTab++ }] };},
       remove: async id => calls.push(['close-window', id]), onRemoved: { addListener: fn => removed = fn } },
     proxy: { settings: { get: async () => ({ levelOfControl: 'controllable_by_this_extension' }), set: async data => calls.push(['proxy', data]) } },
     webRequest: { onAuthRequired: { addListener: fn => auth = fn }, onCompleted: { addListener: () => {} }, onErrorOccurred: { addListener: () => {} } },
@@ -324,4 +324,23 @@ test('explicit retry reuses the assigned identity and cannot reset another tab',
  assert.equal((await send(10)).ok,true);assert.equal(w.storage['epicgen.active'].challengeReloads,0);
  assert.equal(w.storage['epicgen.active'].identity.email,'stock@outlook.com');
  assert.equal(w.calls.filter(c=>String(c[0]).includes('/pool/pick')).length,1);
+});
+
+test('normal-connection signups isolate cookies and keep capture in the same private window', async () => {
+ const w=worker(); await w.send({type:'epicgen-allocate'});
+ assert.equal((await w.send({type:'epicgen-drive',sessionId:'isolated',bearer:'bearer',identity:{email:'stock@outlook.com'},redirectUrl:'https://www.epicgames.com/id/api/redirect'})).ok,true);
+ assert.equal(w.calls.find(c=>c[0]==='window')[1].incognito,true);
+ assert.equal(w.calls.some(c=>c[0]==='proxy'),false);
+ assert.equal(w.storage['epicgen.active'].windowId,100);
+ await w.send({type:'epicgen-request-otp',sessionId:'isolated'},10,'https://www.epicgames.com/id/register');
+ await w.send({type:'epicgen-open-redirect',sessionId:'isolated'},10,'https://www.epicgames.com/id/register');
+ assert.equal(w.calls.find(c=>c[0]==='tab')[1].windowId,100);
+ await w.send({type:'epicgen-authcode',sessionId:'isolated',code:'a'.repeat(32)},11,'https://www.epicgames.com/id/api/redirect');
+ assert.ok(w.calls.some(c=>c[0]==='close-window'&&c[1]===100));
+});
+test('isolation prerequisites fail before consuming or resuming any inbox',async()=>{
+ for(const options of [{incognitoAllowed:false},{existingPrivate:true}]) {
+  const w=worker(options);assert.equal((await w.send({type:'epicgen-allocate'})).ok,false);
+  assert.equal(w.calls.length,0);assert.equal(w.storage['epicgen.pending'],undefined);
+ }
 });

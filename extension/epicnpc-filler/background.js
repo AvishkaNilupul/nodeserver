@@ -42,10 +42,11 @@ chrome.runtime.onMessage.addListener((msg, sender, respond) => {
       if (!panel) throw new Error('Open the Epic Accounts panel first');
       const stored = await chrome.storage.session.get([KEY, PENDING]);
       if (stored[KEY] || stored[PENDING]) throw new Error('A signup or reservation is already active. Finish or cancel it first.');
+      // Every signup gets a clean cookie jar, independently of proxy choice.
+      if (!await chrome.extension.isAllowedIncognitoAccess()) throw new Error('Enable Allow in Incognito for this extension at chrome://extensions to isolate this signup.');
+      if ((await chrome.windows.getAll()).some(w => w.incognito)) throw new Error('Close other private Chrome windows before starting an isolated signup.');
       let proxy = null;
       if (msg.useProxy) {
-        if (!await chrome.extension.isAllowedIncognitoAccess()) throw new Error('Enable Allow in Incognito for this extension at chrome://extensions to use the proxy.');
-        if ((await chrome.windows.getAll()).some(w => w.incognito)) throw new Error('Close other private Chrome windows before starting a proxied signup.');
         const current = await chrome.proxy.settings.get({ incognito: true });
         if (current.levelOfControl === 'controlled_by_other_extensions' || current.levelOfControl === 'not_controllable') throw new Error('Another extension or Chrome policy controls the proxy.');
         proxy = (await local('/api/epic/proxy')).proxy;
@@ -88,17 +89,18 @@ chrome.runtime.onMessage.addListener((msg, sender, respond) => {
         redirectUrl: msg.redirectUrl, nodeserverOrigin: new URL(sender.tab.url).origin,
         adminTab: sender.tab.id, reservedAt: pending.mailbox.reservedAt, proxy: pending.proxy, tabs: [], automation: {autoSubmit:msg.automation?.autoSubmit===true,autoAcceptEula:msg.automation?.autoAcceptEula===true}, login: Boolean(msg.login), otpDelivered: Boolean(msg.login) };
       if (!isEpic(s.redirectUrl)) throw new Error('Invalid Epic redirect URL');
-      let tab;
+      // Chrome private windows share one jar: reject an existing private window.
+      if (!await chrome.extension.isAllowedIncognitoAccess()) throw new Error('Enable Allow in Incognito for this extension before continuing.');
+      if ((await chrome.windows.getAll()).some(w => w.incognito)) throw new Error('Close other private Chrome windows before starting an isolated signup.');
+      const win = await chrome.windows.create({ url: 'about:blank', incognito: true });
+      s.windowId = win.id; const tab = win.tabs[0];
       if (s.proxy) {
-        if ((await chrome.windows.getAll()).some(w => w.incognito)) throw new Error('Close other private Chrome windows before starting a proxied signup.');
-        const win = await chrome.windows.create({ url: 'about:blank', incognito: true });
-        s.windowId = win.id; tab = win.tabs[0];
         try {
           await chrome.proxy.settings.set({ scope: 'incognito_session_only', value: {
             mode: 'fixed_servers', rules: { singleProxy: { scheme: s.proxy.scheme, host: s.proxy.host, port: s.proxy.port }, bypassList: ['localhost', '127.0.0.1'] },
           } });
         } catch (e) { await chrome.windows.remove(win.id); throw e; }
-      } else tab = await chrome.tabs.create({ url: 'about:blank' });
+      }
       s.tabs.push(tab.id);
       await chrome.storage.session.set({ [KEY]: s });
       await chrome.storage.session.remove(PENDING);
