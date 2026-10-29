@@ -275,6 +275,53 @@ router.post(
   },
 );
 
+// Both manual entry points use the same verified claim and library refresh.
+async function claimAndSync(acc, freebie) {
+  const accessToken = await accountAccessToken(acc);
+  const result = await epicAutoClaim.attemptAutoClaim(acc, freebie, accessToken, { manual: true });
+  if (["claimed", "already_owned"].includes(result.status) && !result.tokenNeedsLogin) {
+    try {
+      const prices = new Map((await EpicFreebie.find({}).lean()).map(f => [
+        f.namespace, parseFloat(String(f.originalPrice || "").replace(/[^0-9.]/g, "")) || 0,
+      ]));
+      await epicClaimer.syncLibrary(acc, await accountAccessToken(acc), prices);
+      acc.lastCheckedAt = new Date();
+      await acc.save();
+    } catch { result.librarySyncPending = true; }
+  }
+  return result;
+}
+const {createClaimBatch, planClaims, eligible, live} = require("../utils/epicClaimBatch");
+let manualClaimRunning = false;
+const claimBatch = createClaimBatch({
+  plan: async () => {
+    const [accounts, offers] = await Promise.all([
+      EpicAccount.find({sold: {$ne: true}, status: "ok"}).sort({createdAt: 1}).lean(),
+      EpicFreebie.find({active: true, upcoming: false}).lean(),
+    ]);
+    return planClaims(accounts, offers);
+  },
+  execute: async job => {
+    const acc = await EpicAccount.findById(job.accountId);
+    const offer = await EpicFreebie.findOne({offerId: job.offerId}).lean();
+    // Recheck immediately before each checkout: accounts can be sold while queued.
+    if (!eligible(acc) || !live(offer)) return {status: "skipped"};
+    if ((acc.library || []).some(game => game.namespace === offer.namespace)) return {status: "already_owned"};
+    return claimAndSync(acc, offer);
+  },
+});
+router.get("/api/epic/claims/batch", requireSuperadmin, (_req, res) => {
+  res.json({success: true, batch: claimBatch.status()});
+});
+router.post("/api/epic/claims/batch", requireSuperadmin, async (_req, res) => {
+  if (manualClaimRunning) return res.status(409).json({success: false, message: "Wait for the current single claim to finish"});
+  try { res.status(202).json({success: true, batch: await claimBatch.start()}); }
+  catch { res.status(500).json({success: false, message: "Could not prepare the claim batch"}); }
+});
+router.post("/api/epic/claims/batch/stop", requireSuperadmin, (_req, res) => {
+  res.json({success: true, batch: claimBatch.stop()});
+});
+
 // Manual one-off: try the direct-API auto-claim RIGHT NOW for one
 // (account, offer). Bypasses the enabled flag — this is the operator-driven
 // path from the Epic tab's "Auto-claim" button — but still respects the fact
@@ -283,6 +330,8 @@ router.post(
   "/api/epic/accounts/:id/auto-claim",
   requireSuperadmin,
   async (req, res) => {
+    if (claimBatch.isActive() || manualClaimRunning) return res.status(409).json({success: false, message: "Claims are already running on the Mac"});
+    manualClaimRunning = true;
     try {
       const acc = await EpicAccount.findById(req.params.id);
       if (!acc) {
@@ -296,18 +345,7 @@ router.post(
           .status(404)
           .json({ success: false, message: "Unknown offer" });
       }
-      const accessToken = await accountAccessToken(acc);
-      const result = await epicAutoClaim.attemptAutoClaim(acc, freebie, accessToken, { manual: true });
-      if (["claimed", "already_owned"].includes(result.status) && !result.tokenNeedsLogin) {
-        try {
-          const prices = new Map((await EpicFreebie.find({}).lean()).map(f => [
-            f.namespace, parseFloat(String(f.originalPrice || "").replace(/[^0-9.]/g, "")) || 0,
-          ]));
-          await epicClaimer.syncLibrary(acc, await accountAccessToken(acc), prices);
-          acc.lastCheckedAt = new Date();
-          await acc.save();
-        } catch { result.librarySyncPending = true; }
-      }
+      const result = await claimAndSync(acc, freebie);
       res.json({ success: true, result });
     } catch (err) {
       console.error("epic auto-claim error:", err.message);
@@ -315,7 +353,7 @@ router.post(
         success: false,
         message: err.message || "Auto-claim failed",
       });
-    }
+    } finally { manualClaimRunning = false; }
   },
 );
 

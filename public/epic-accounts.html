@@ -743,11 +743,10 @@
     <main>
       <h1>Epic accounts</h1>
       <div class="sub">
-        Stock Epic Games accounts for weekly free-game bundles. Tokens last ~1
-        year, libraries re-sync every 6 hours, and when a giveaway goes live
-        every account that's missing it gets a one-tap claim link in Telegram
-        (the link signs into that account and opens checkout — the final click
-        stays with you because Epic captcha-gates orders).
+        Claim missing free games on your Mac from this page, including from your
+        phone. Use Claim all missing to process eligible accounts one at a time.
+        Keep the Mac awake and Chrome open with Epic Claim Helper connected.
+        Visible security checks pause the batch for attention on the Mac.
       </div>
 
       <div class="card">
@@ -781,7 +780,10 @@
         <div class="row">
           <button class="btn btn-primary" id="btnSync">Sync all now</button>
           <button class="btn" id="btnRefresh">Refresh</button>
+          <button class="btn btn-primary" id="btnClaimAll">Claim all missing</button>
+          <button class="btn" id="btnStopClaims" hidden>Stop after current</button>
         </div>
+        <div id="claimBatchProgress" class="hint" aria-live="polite"></div>
         <div id="list"><div class="muted">Loading…</div></div>
       </div>
     </main>
@@ -856,6 +858,7 @@
 
     <script src="/theme.js"></script>
     <script src="/admin-nav.js"></script>
+    <script src="/epic-claim-batch.js"></script>
     <script>
       var $ = function (id) {
         return document.getElementById(id);
@@ -1301,6 +1304,7 @@
         load();
       });
       $("btnRefresh").addEventListener("click", load);
+      initEpicClaimBatch({api: api, load: load, toast: toast});
 
       load();
     </script>

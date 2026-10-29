@@ -19,3 +19,21 @@ Run `node tools/epic-claim-worker/reconnect-local.cjs` on the Mac to reconnect e
 Phone Claim buttons now call the verified worker endpoint and refresh the target account’s library. Old phone pages receive HTTP 409 from the retired `claim-link` endpoint with a reload instruction; Telegram claim reminders no longer mint launcher-backed login links. After every worker attempt, the orchestrator forces a real refresh-grant check rather than trusting cached library access. A revoked grant is marked for reconnection even when the game was successfully claimed.
 
 2026-10-28 completion: all 13 unsold accounts held both current giveaways, all 13 refresh grants passed from a fresh process after the monitored claims, and scheduled claims were restored. Seven accounts were reconnected using their existing credentials and fresh email codes.
+
+
+## Claim all missing
+
+The server Epic Accounts page has a **Claim all missing** button. It snapshots
+current missing live offers for unsold accounts with status `ok`, then processes
+that queue serially using the existing verified manual-claim path. Each item
+rechecks current sold/login/offer state before checkout. Double taps join the
+running batch; individual manual claims cannot overlap that batch. The browser
+bridge still arbitrates scheduler contention.
+
+The server owns execution, so closing the phone page does not stop the queue.
+Reopening the page restores progress through GET `/api/epic/claims/batch`.
+A security challenge, unavailable Mac, busy worker, or daily cap pauses the queue.
+After resolving it, press Claim all missing again to replan remaining ownership.
+Stop after current lets an in-flight checkout finish and leaves later jobs alone.
+Batch progress is process-local: a server restart ends the queue; press the
+button again to recheck remaining games. Results contain no account credentials.

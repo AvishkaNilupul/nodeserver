@@ -1,0 +1,30 @@
+const test=require('node:test'),assert=require('node:assert/strict'),vm=require('node:vm'),fs=require('node:fs');
+const real=require('../utils/epicClaimBatch');
+function setup() {
+  const source=fs.readFileSync(require.resolve('../routes/epicAccountRoutes'),'utf8');
+  const code=source.slice(source.indexOf('// Both manual entry points'),source.indexOf('// Manual one-off:'));
+  const a={_id:'a',status:'ok',displayName:'A',library:[],save:async()=>{}};
+  const f={offerId:'offer',namespace:'game',active:true,upcoming:false};
+  let current=a,run,claims=0,syncs=0; const routes=[],auth=()=>{};
+  const context={Date,Map,Promise,String,parseFloat,manualClaimRunning:false,requireSuperadmin:auth,
+    router:{get:(...r)=>routes.push(r),post:(...r)=>routes.push(r)},
+    EpicAccount:{find:()=>({sort:()=>({lean:async()=>[a]})}),findById:async()=>current},
+    EpicFreebie:{find:()=>({lean:async()=>[f]}),findOne:()=>({lean:async()=>f})},
+    accountAccessToken:async()=>{assert.equal(current.sold,undefined);return 'access';},
+    epicAutoClaim:{attemptAutoClaim:async(a,f,t,o)=>{assert.equal(o.manual,true);claims++;return {status:'claimed'};}},
+    epicClaimer:{syncLibrary:async()=>syncs++},
+    require:()=>({...real,createClaimBatch:deps=>real.createClaimBatch({...deps,schedule:f=>run=f})})};
+  vm.runInNewContext(code+'globalThis.batch=claimBatch;',context);
+  return {routes,auth,batch:context.batch,run:()=>run(),sold:()=>current={...a,sold:true},expire:()=>f.endDate=new Date(1),claims:()=>claims,syncs:()=>syncs};
+}
+test('batch endpoints require the existing superadmin session',()=>{
+  const s=setup();assert.equal(s.routes.length,3);for(const route of s.routes)assert.equal(route[1],s.auth);
+});
+test('an account sold or an offer expired after queue planning cannot reach checkout',async()=>{
+  for(const change of ['sold','expire']){const s=setup();await s.batch.start();s[change]();await s.run();
+    assert.equal(s.claims(),0);assert.equal(s.batch.status().jobs[0].state,'skipped');}
+});
+test('batch uses verified single-claim orchestration and refreshes the library',async()=>{
+  const s=setup();await s.batch.start();await s.run();assert.equal(s.claims(),1);assert.equal(s.syncs(),1);
+  assert.equal(s.batch.status().jobs[0].state,'claimed');
+});
