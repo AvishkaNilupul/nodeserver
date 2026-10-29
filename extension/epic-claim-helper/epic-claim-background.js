@@ -52,7 +52,8 @@ chrome.runtime.onMessage.addListener((msg,sender,respond)=>{
    const {[CLAIM_STATE]:c}=await chrome.storage.local.get(CLAIM_STATE);
    await claimFetch(c,'/extension/result',{id:active.job.id,lease:active.job.lease,status:msg.status,error:msg.error,...(msg.status==='reauthorized'?{code:msg.code}:{})});
    await chrome.storage.session.remove(CLAIM_JOB);
-   if(['submitted','already_owned','reauthorized'].includes(msg.status))await chrome.tabs.remove(active.tabId).catch(()=>{});
+   if(msg.status==='submitted')setTimeout(()=>chrome.tabs.remove(active.tabId).catch(()=>{}),15000);
+   else if(['already_owned','reauthorized'].includes(msg.status))await chrome.tabs.remove(active.tabId).catch(()=>{});
    return {ok:true};
   }
   return {ok:false};

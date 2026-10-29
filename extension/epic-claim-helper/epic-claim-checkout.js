@@ -1,7 +1,7 @@
 (async()=>{
  if(window.__epicClaimCheckout)return;window.__epicClaimCheckout=true;
  const context=await chrome.runtime.sendMessage({type:'epicclaim-context'}).catch(()=>null);if(!context?.ok||context.job?.mode==='recover')return;
- const job=context.job;let clicked=false,done=false;
+ const job=context.job;let clicked=false,done=false,emptyReceiptAt=0;
  const report=async(status,error='')=>{if(done)return;done=true;await chrome.runtime.sendMessage({type:'epicclaim-result',status,error});};
  const visible=el=>!!el&&el.getBoundingClientRect().width>0&&el.getBoundingClientRect().height>0&&getComputedStyle(el).visibility!=='hidden';
  const timer=setInterval(async()=>{
@@ -14,7 +14,13 @@
   if(/you already own|already in your library/i.test(text))return report('already_owned');
   if(/one more step|please complete a security check/i.test(text))return report('needs_captcha','Complete the visible security check in the claim tab');
   if(clicked){
-   if(location.hash===''||location.hash==='#'||/^#\/receipt/.test(location.hash)||/thanks for your order|successfully added|order is complete/i.test(text))return report('submitted');
+   if(/^#\/receipt/.test(location.hash)||/thanks for your order|successfully added|order is complete/i.test(text))return report('submitted');
+   // The router also clears its hash while the order request is still pending.
+   // A stable empty receipt is completion; a transient hash change is not.
+   if((location.hash===''||location.hash==='#')&&!text.trim()){
+    if(!emptyReceiptAt)emptyReceiptAt=Date.now();
+    if(Date.now()-emptyReceiptAt>=5000)return report('submitted');
+   }else emptyReceiptAt=0;
    return;
   }
   const button=[...document.querySelectorAll('button')].find(b=>/^add to library$/i.test(b.innerText.trim())&&visible(b)&&!b.disabled);
@@ -28,5 +34,5 @@
   if(!/this is free/i.test(text)||!prices.length||prices.some(price=>price!==0))return report('error','Checkout is not explicitly free');
   clicked=true;button.click();
  },1000);
- setTimeout(()=>{clearInterval(timer);report(clicked?'submitted':'error',clicked?'Confirm ownership in library':'Checkout did not finish');},110000);
+ setTimeout(()=>{clearInterval(timer);report('error',clicked?'Checkout did not confirm completion; verify library':'Checkout did not finish');},110000);
 })();
