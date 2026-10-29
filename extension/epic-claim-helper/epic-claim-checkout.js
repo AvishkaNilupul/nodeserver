@@ -1,7 +1,7 @@
 (async()=>{
  if(window.__epicClaimCheckout)return;window.__epicClaimCheckout=true;
  const context=await chrome.runtime.sendMessage({type:'epicclaim-context'}).catch(()=>null);if(!context?.ok||context.job?.mode==='recover')return;
- const job=context.job;let clicked=false,done=false,emptyReceiptAt=0;
+ const job=context.job;let clicked=false,done=false,emptyReceiptAt=0,lastClickAt=0,clickAttempts=0;
  const report=async(status,error='')=>{if(done)return;done=true;await chrome.runtime.sendMessage({type:'epicclaim-result',status,error});};
  const visible=el=>!!el&&el.getBoundingClientRect().width>0&&el.getBoundingClientRect().height>0&&getComputedStyle(el).visibility!=='hidden';
  const timer=setInterval(async()=>{
@@ -21,7 +21,9 @@
     if(!emptyReceiptAt)emptyReceiptAt=Date.now();
     if(Date.now()-emptyReceiptAt>=5000)return report('submitted');
    }else emptyReceiptAt=0;
-   return;
+   const retryButton=[...document.querySelectorAll('button')].find(b=>/^add to library$/i.test(b.innerText.trim())&&visible(b)&&!b.disabled);
+   if(clickAttempts<3&&Date.now()-lastClickAt>=10000&&retryButton)clicked=false;
+   else return;
   }
   const button=[...document.querySelectorAll('button')].find(b=>/^add to library$/i.test(b.innerText.trim())&&visible(b)&&!b.disabled);
   if(!button){
@@ -32,7 +34,7 @@
   if(!text.includes(job.displayName))return report('error','Checkout account does not match assigned account');
   const prices=[...text.matchAll(/(?:[$€£¥₽₹₩₺₴₫]|\b[A-Z]{3})\s*(\d+(?:[.,]\d+)?)/g)].map(m=>Number(m[1].replace(',','.')));
   if(!/this is free/i.test(text)||!prices.length||prices.some(price=>price!==0))return report('error','Checkout is not explicitly free');
-  clicked=true;button.click();
+  clicked=true;lastClickAt=Date.now();clickAttempts++;button.click();
  },1000);
  setTimeout(()=>{clearInterval(timer);report('error',clicked?'Checkout did not confirm completion; verify library':'Checkout did not finish');},110000);
 })();

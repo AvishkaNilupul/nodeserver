@@ -46,3 +46,10 @@ test('a cleared hash with the checkout still visible is not an order confirmatio
  await vm.runInNewContext(source,{window:{},Date,location,URLSearchParams,document:{body:{innerText:'right-account This is free. $0.00'},querySelectorAll:()=>[button]},getComputedStyle:()=>({visibility:'visible'}),setInterval:f=>(tick=f,1),clearInterval(){},setTimeout:f=>timeout=f,chrome:{runtime:{sendMessage:async m=>m.type==='epicclaim-context'?{ok:true,job:{namespace:'game',offerId:'offer',displayName:'right-account'}}:(reports.push(m),{ok:true})}}});
  await tick();await tick();assert.equal(clicks,1);assert.equal(reports.length,0);await timeout();assert.equal(reports[0].status,'error');
 });
+
+test('an enabled free checkout retries a missed initial click after ten seconds',async()=>{
+ let tick,clock=1000,clicks=0;const reports=[],location={hostname:'store.epicgames.com',pathname:'/purchase',search:'?offers=1-game-offer',hash:'#/free-checkout'};
+ const button={innerText:'Add to library',disabled:false,getBoundingClientRect:()=>({width:1,height:1}),click(){if(++clicks===2)location.hash='#/receipt';}};
+ await vm.runInNewContext(fs.readFileSync(require.resolve('../extension/epic-claim-helper/epic-claim-checkout.js'),'utf8'),{window:{},Date:{now:()=>clock},location,URLSearchParams,document:{body:{innerText:'right-account This is free. $0.00'},querySelectorAll:()=>[button]},getComputedStyle:()=>({visibility:'visible'}),setInterval:f=>(tick=f,1),clearInterval(){},setTimeout(){},chrome:{runtime:{sendMessage:async m=>m.type==='epicclaim-context'?{ok:true,job:{namespace:'game',offerId:'offer',displayName:'right-account'}}:(reports.push(m),{ok:true})}}});
+ await tick();clock+=9000;await tick();assert.equal(clicks,1);clock+=1000;await tick();await tick();assert.equal(clicks,2);assert.equal(reports[0].status,'submitted');
+});
