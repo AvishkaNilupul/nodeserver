@@ -3761,6 +3761,54 @@ async function g2gSubmitOrderAccounts(orderItemId, rows) {
   });
 }
 
+// Load accounts into an Auto-delivery ("Instant") offer's own stock, the way
+// G2G's upload page does for account services (offer-upload-stock chunk, read
+// 2026-10-29): the rows (same form fields and CSV as above, one per account)
+// are stored with POST /inventory/softpin, then imported by POST
+// /inventory/job. Neither asks for the authenticator code (only viewing or
+// deleting stock does). The import runs in the background (its page waits on
+// Firebase), so read the offer's stock afterwards to see it land.
+// `offer` is g2gGetOffer's payload (offer_id, relation_id, brand_id, service_id).
+async function g2gUploadStock(offer, csv) {
+  const o = offer || {};
+  if (!o.offer_id || !o.service_id) throw new Error("G2G stock upload needs the offer");
+  const text = String(csv || "");
+  if (!text.trim()) throw new Error("G2G stock upload: nothing to upload");
+  const seller = g2gSellerId();
+  await g2gRequest("post", "/inventory/softpin", {
+    body: { offer_id: o.offer_id, softpin: text, seller_id: seller },
+    what: "G2G stock upload",
+    timeout: 60000,
+  });
+  return g2gRequest("post", "/inventory/job", {
+    body: {
+      offer_id: o.offer_id,
+      relation_id: o.relation_id,
+      seller_id: seller,
+      file_type: "csv",
+      files: [o.offer_id + "/" + o.offer_id + ".csv"],
+      brand_id: o.brand_id,
+      service_id: o.service_id,
+    },
+    what: "G2G stock import",
+    timeout: 60000,
+  });
+}
+
+// { active_inventory, sold_inventory, expired_inventory, report, updated_at }
+// for an offer's own stock. 404 ("Data was not found") = no stock ever loaded.
+async function g2gStockStats(offerId) {
+  try {
+    return await g2gRequest("get", "/inventory/my_inv_stats", {
+      params: { seller_id: g2gSellerId(), offer_id: String(offerId || "") },
+      what: "G2G stock stats",
+    });
+  } catch (e) {
+    if (e.status === 404 || /not\s*found/i.test(e.message)) return null;
+    throw e;
+  }
+}
+
 // ---- chat ---------------------------------------------------------
 
 // Create-or-fetch our own SendBird chat profile. The POST (unlike the GET at
@@ -6803,6 +6851,8 @@ module.exports = {
   g2gDeliveryProofs,
   g2gFormTemplate,
   g2gSubmitOrderAccounts,
+  g2gUploadStock,
+  g2gStockStats,
   g2gSellerId,
   g2gChatProfile,
   g2gOpenDmChannel,

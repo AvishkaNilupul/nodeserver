@@ -23,8 +23,14 @@ const epicSalesStateSchema = new mongoose.Schema(
       {
         _id: false,
         offerId: { type: String, required: true },
+        // "order" = G2G Manual delivery (we fill the form on each order);
+        // "instant" = G2G Auto delivery from the stock we load (EpicG2gUnit).
+        mode: { type: String, default: "order" },
         serviceId: { type: String, default: "" },
         brandId: { type: String, default: "" },
+        relationId: { type: String, default: "" },
+        lastStockLoadAt: { type: Date, default: null },
+        lastSaleScanAt: { type: Date, default: null },
         title: { type: String, default: "" },
         games: [{ type: String }],
         gameKey: { type: String, default: "" },

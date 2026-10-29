@@ -36,6 +36,7 @@ const bcrypt = require("bcrypt");
 const EpicAccount = require("../models/EpicAccount");
 const EpicSale = require("../models/EpicSale");
 const EpicSalesState = require("../models/EpicSalesState");
+const EpicG2gUnit = require("../models/EpicG2gUnit");
 const BuyerMailSession = require("../models/BuyerMailSession");
 const { encrypt, decrypt } = require("./secretBox");
 const sales = require("./epicSales");
@@ -51,8 +52,15 @@ const RESUBMIT_AFTER_MS = 10 * 60 * 1000;
 const PAGE_AFTER_MS = 25 * 60 * 1000;
 const REPAGE_MS = 3 * 60 * 60 * 1000;
 const TEMPLATE_CACHE_MS = 6 * 60 * 60 * 1000;
-const SWEEP_MS = 10 * 60 * 1000;
+const SWEEP_MS = Number(process.env.EPIC_G2G_SWEEP_MS) || 3 * 60 * 1000;
 const SWEEP_AFTER_MS = 15 * 60 * 1000;
+// Instant offers
+const INSTANT_STUCK_MS = 15 * 60 * 1000;
+const LOAD_CONFIRM_POLLS = 12;
+const LOAD_PAGE_AFTER_MS = 20 * 60 * 1000;
+const MAX_LOAD_PER_PASS = 50;
+const SCAN_PAGES = 2;
+const SCAN_STATUSES = ["preparing", "delivering", "completed"];
 
 function userError(message, status = 400) {
   const e = new Error(message);
@@ -292,6 +300,17 @@ async function linkFor(offerId) {
   return (await links()).find((l) => String(l.offerId) === id) || null;
 }
 
+// How a G2G offer delivers: "order" = Manual delivery, we fill the account form
+// on each paid order; "instant" = Auto delivery, G2G hands out the rows we
+// loaded into its stock. Read off the offer each sweep, so switching it on
+// g2g.com is all it takes.
+function modeOf(offer) {
+  const s = String((offer && offer.delivery_speed) || "").toLowerCase();
+  if (s === "manual") return "order";
+  if (s === "instant") return "instant";
+  return "";
+}
+
 function ownsAll(titles, games) {
   const have = new Set((titles || []).map((t) => String(t).trim().toLowerCase()));
   return (games || []).every((g) => have.has(String(g).trim().toLowerCase()));
@@ -355,15 +374,16 @@ async function linkOffer(opts, actor) {
   if (String(offer.service_id) !== GAME_ACCOUNTS_SERVICE) {
     throw userError("That offer is not in G2G's Game Accounts category");
   }
-  if (String(offer.delivery_speed || "") !== "manual") {
-    throw userError("That offer uses G2G's own stock delivery. Set it to Manual delivery on G2G first");
-  }
+  const mode = modeOf(offer);
+  if (!mode) throw userError("G2G reports an unknown delivery setting for that offer (" + offer.delivery_speed + ")");
   checkTemplate(await formTemplate(offer.service_id, offer.brand_id));
   const days = Math.min(14, Math.max(1, Math.round(Number(o.sessionDays) || DEFAULT_DAYS)));
   const row = {
     offerId,
+    mode,
     serviceId: String(offer.service_id),
     brandId: String(offer.brand_id || ""),
+    relationId: String(offer.relation_id || ""),
     title: String(offer.title || o.title || "").slice(0, 200),
     games,
     gameKey: sales.gameKey(games),
@@ -399,6 +419,14 @@ async function setLink(offerId, patch) {
 
 async function unlinkOffer(offerId) {
   const id = String(offerId || "");
+  const stocked = await EpicG2gUnit.countDocuments({ offerId: id, state: { $in: ["loading", "listed"] } });
+  if (stocked) {
+    throw userError(
+      stocked + " account(s) are in this offer's G2G stock, and their sales are only recorded while it is linked. " +
+        "Switch the offer back to Manual delivery on G2G (it asks you to empty the stock first), then unlink.",
+      409,
+    );
+  }
   const open = await EpicSale.countDocuments({
     market: "g2g",
     offerId: id,
@@ -667,6 +695,20 @@ async function handleOrder(order, link, { dryRun }) {
   const qty = Math.max(1, Number(order.purchasedQty) || 1);
   const out = (state) => ({ orderId: id, skipped: "Epic account order: " + state });
 
+  if (link.mode === "instant") {
+    // G2G hands out our stock by itself. A paid order still waiting here
+    // means it could not (out of stock?): say so once it has waited a while.
+    const waited = Date.now() - orderPlacedAt(order).getTime();
+    if (waited > INSTANT_STUCK_MS) {
+      await pageOnce(
+        "stuck:" + id,
+        "G2G order " + id + " on the Instant Epic offer has waited " + Math.round(waited / 60000) +
+          " min and G2G has not handed out an account (out of stock?). Open the order on G2G and deliver or refund it.",
+      );
+    }
+    return out("Instant offer: G2G delivers it from our stock");
+  }
+
   if (!link.enabled) {
     await pageOnce(
       "off:" + id,
@@ -892,14 +934,411 @@ async function proofFor(orderItemId) {
   if (!dbConnected()) return null;
   const sale = await EpicSale.findOne({ orderId: saleIdFor(orderItemId), market: "g2g", deliveredAt: { $ne: null } }).lean();
   if (!sale) return null;
+  const instant = sale.matchedBy === "g2g-stock";
   return {
     listing: null,
     units: [],
     accounts: (sale.accounts || []).length || 1,
     sentAt: sale.deliveredAt,
-    method: "Submitted in the account form on the G2G order page",
-    banner: "The Epic Games account details were submitted in the account form on the G2G order page for this order.",
+    method: instant ? "Delivered instantly by G2G from the offer's stock" : "Submitted in the account form on the G2G order page",
+    banner: instant
+      ? "G2G delivered the Epic Games account details to the buyer from this offer's stock at the moment of payment."
+      : "The Epic Games account details were submitted in the account form on the G2G order page for this order.",
   };
+}
+
+// ---------------------------------------------------------------------------
+// Instant offers: our accounts inside G2G's own stock
+// ---------------------------------------------------------------------------
+
+const keyLocks = new Map();
+function withKeyLock(key, fn) {
+  const prev = keyLocks.get(key) || Promise.resolve();
+  const run = prev.then(fn, fn);
+  const tail = run.catch(() => {});
+  keyLocks.set(key, tail);
+  tail.then(() => {
+    if (keyLocks.get(key) === tail) keyLocks.delete(key);
+  });
+  return run;
+}
+
+function sessionDaysOf(link) {
+  return Math.min(14, Math.max(1, Number(link && link.sessionDays) || DEFAULT_DAYS));
+}
+
+// What G2G says is in this offer's stock, from both places it says it: the
+// stock stats (null = no stock was ever loaded, or the read failed) and the
+// offer's own quantity (which can still hold the old Manual number right after
+// the switch, so it only counts when it moves).
+async function stockCounts(offerId, offer) {
+  const stats = await mp.g2gStockStats(offerId).catch(() => null);
+  const s = stats && Number.isFinite(Number(stats.active_inventory)) ? Number(stats.active_inventory) : null;
+  let o = offer;
+  if (!o) o = await mp.g2gGetOffer(offerId).catch(() => null);
+  const q = o ? Number(o.actual_qty != null ? o.actual_qty : o.available_qty) : NaN;
+  return { stats: s, qty: Number.isFinite(q) ? q : null };
+}
+
+function grewBy(before, after, n) {
+  if (after.stats != null && after.stats >= (before.stats || 0) + n) return true;
+  return after.qty != null && before.qty != null && after.qty >= before.qty + n;
+}
+
+function countOf(c) {
+  return c.stats != null ? c.stats : c.qty;
+}
+
+// The link with its mode as G2G shows it now (switching the offer on g2g.com
+// is all it takes). Returns [link, offer].
+async function refreshMode(link) {
+  const offer = await mp.g2gGetOffer(link.offerId);
+  const mode = modeOf(offer);
+  if (mode && mode !== (link.mode || "order")) {
+    await EpicSalesState.updateOne({ _id: "main", "g2gOffers.offerId": link.offerId }, { $set: { "g2gOffers.$.mode": mode } });
+    let released = 0;
+    if (mode === "order") released = await releaseStock(link, "offer switched back to Manual delivery on G2G");
+    await notify(
+      mode === "instant"
+        ? "G2G offer " + link.offerId + " is on Auto delivery (Instant) now. Its ready Epic accounts are being loaded into its G2G stock."
+        : "G2G offer " + link.offerId + " is back on Manual delivery: each order is filled in by the server again." +
+            (released ? " " + released + " account(s) that were in its G2G stock are back on the shelf." : ""),
+    );
+    return [{ ...link, mode }, offer, { changed: true, released }];
+  }
+  return [link, offer, { changed: false, released: 0 }];
+}
+
+function refOf(inv) {
+  return String((inv && (inv.upload_reference || inv.account_id || inv.reference)) || "").trim().toLowerCase();
+}
+
+async function mintStockSession(acc, email, offerId) {
+  const now = new Date();
+  const password = sales.mintPassword();
+  const row = await BuyerMailSession.create({
+    epicAccountId: acc._id,
+    inboxAddress: email,
+    passwordHash: await bcrypt.hash(password, 10),
+    // Kept while the row waits in G2G's stock, so it can be sent again.
+    passwordEnc: encrypt(password),
+    // No clock until it sells (the sale scan sets soldAt + sessionDays).
+    expiresAt: new Date(now.getTime() + 365 * DAY_MS),
+    stage: "listed",
+    marketplace: "g2g",
+    note: "G2G stock " + offerId,
+  });
+  return { row, password };
+}
+
+const formFailures = new Map(); // accountId -> time (skip for a while)
+
+// Load every ready account that owns the offer's games into its G2G stock.
+// Units sent earlier and not yet confirmed are checked first; units whose
+// upload never went out are sent again.
+async function loadStock(link, { offer = null } = {}) {
+  if (!link || link.mode !== "instant") return { skipped: "not an Instant offer" };
+  if (link.enabled === false) return { skipped: "automatic delivery is off for this offer" };
+  return withKeyLock("load:" + link.offerId, async () => {
+    const o = offer || (await mp.g2gGetOffer(link.offerId));
+    if (modeOf(o) !== "instant") return { skipped: "the offer is not on Auto delivery on G2G" };
+    const confirmed = await confirmLoading(link, o);
+
+    const { ready: cached } = await readyAccounts(link, { fresh: false });
+    let candidates = cached.filter((c) => !(Date.now() - (formFailures.get(String(c.acc._id)) || 0) < 6 * 3600 * 1000));
+    if (candidates.length) {
+      // Re-check the inboxes for real before anything goes into G2G's stock.
+      const { ready } = await readyAccounts(link, { fresh: true });
+      const ok = new Set(ready.map((r) => String(r.acc._id)));
+      candidates = candidates.filter((c) => ok.has(String(c.acc._id)));
+    }
+    const retry = await EpicG2gUnit.find({ offerId: link.offerId, state: "loading", uploadedAt: null });
+    if (!candidates.length && !retry.length) return { loaded: 0, confirmed };
+
+    const template = await formTemplate(link.serviceId || GAME_ACCOUNTS_SERVICE, link.brandId);
+    const dobFormat = dobFormatOf(template);
+    const days = sessionDaysOf(link);
+    const rows = [];
+    const unitIds = [];
+    const addRow = async (unit, acc, password) => {
+      try {
+        rows.push(buildRow(template, rowData(acc, password, days, dobFormat)));
+        unitIds.push(unit._id);
+      } catch (e) {
+        formFailures.set(String(acc._id), Date.now());
+        await EpicG2gUnit.updateOne(
+          { _id: unit._id },
+          { $set: { state: "removed", removedAt: new Date(), removedReason: "form: " + String(e.message || e).slice(0, 200) } },
+        );
+        if (unit.sessionId) {
+          await BuyerMailSession.updateOne({ _id: unit.sessionId }, { $set: { revokedAt: new Date(), revokedReason: "unlisted", passwordEnc: "" } });
+        }
+      }
+    };
+    for (const u of retry) {
+      const acc = await EpicAccount.findById(u.epicAccountId).lean();
+      const s = u.sessionId ? await BuyerMailSession.findById(u.sessionId).lean() : null;
+      const pw = dec(s && s.passwordEnc);
+      if (acc && pw) await addRow(u, acc, pw);
+    }
+    for (const cand of candidates.slice(0, MAX_LOAD_PER_PASS)) {
+      let unit;
+      try {
+        unit = await EpicG2gUnit.create({
+          offerId: link.offerId,
+          epicAccountId: cand.acc._id,
+          login: cand.email,
+          label: labelOf(cand.acc),
+          state: "loading",
+        });
+      } catch (e) {
+        if (e && e.code === 11000) continue; // already in some G2G stock
+        throw e;
+      }
+      const { row, password } = await mintStockSession(cand.acc, cand.email, link.offerId);
+      await EpicG2gUnit.updateOne({ _id: unit._id }, { $set: { sessionId: row._id } });
+      unit.sessionId = row._id;
+      await addRow(unit, cand.acc, password);
+    }
+    if (!rows.length) return { loaded: 0, confirmed };
+
+    const before = await stockCounts(link.offerId, o).catch(() => ({ stats: null, qty: null }));
+    await mp.g2gUploadStock(o, rows.join(""));
+    await EpicG2gUnit.updateMany({ _id: { $in: unitIds } }, { $set: { uploadedAt: new Date() } });
+    await EpicSalesState.updateOne(
+      { _id: "main", "g2gOffers.offerId": link.offerId },
+      { $set: { "g2gOffers.$.lastStockLoadAt": new Date() } },
+    );
+    // G2G imports in the background: watch the stock number grow.
+    for (let i = 0; i < LOAD_CONFIRM_POLLS; i++) {
+      await sleep(CONFIRM_GAP_MS);
+      const after = await stockCounts(link.offerId).catch(() => null);
+      if (after && grewBy(before, after, rows.length)) {
+        const n = countOf(after);
+        await EpicG2gUnit.updateMany({ _id: { $in: unitIds }, state: "loading" }, { $set: { state: "listed", listedAt: new Date() } });
+        await recordStock(link.offerId, n);
+        await notify(
+          "G2G Instant offer " + link.offerId + ": " + rows.length + " Epic account" + (rows.length > 1 ? "s" : "") +
+            " loaded into its stock (" + n + " in stock now). Buyers get them the moment they pay.",
+        );
+        return { loaded: rows.length, confirmed: true, stock: n };
+      }
+    }
+    return { loaded: rows.length, confirmed: false };
+  });
+}
+
+async function recordStock(offerId, n) {
+  await EpicSalesState.updateOne(
+    { _id: "main", "g2gOffers.offerId": offerId },
+    { $set: { "g2gOffers.$.lastStock": n, "g2gOffers.$.lastStockSyncAt": new Date() } },
+  );
+}
+
+// Units sent to G2G but not seen in its stock yet: G2G's stock count says
+// whether they all landed (sold ones are already moved out by the sale scan).
+async function confirmLoading(link, offer) {
+  const loading = await EpicG2gUnit.find({ offerId: link.offerId, state: "loading", uploadedAt: { $ne: null } }).lean();
+  if (!loading.length) return 0;
+  const listed = await EpicG2gUnit.countDocuments({ offerId: link.offerId, state: "listed" });
+  const c = await stockCounts(link.offerId, offer).catch(() => null);
+  // Only G2G's stock stats can confirm here: the offer's quantity may still be
+  // the old Manual number and would "confirm" rows G2G never took.
+  const n = c ? c.stats : null;
+  if (n != null && n >= listed + loading.length) {
+    await EpicG2gUnit.updateMany({ _id: { $in: loading.map((u) => u._id) }, state: "loading" }, { $set: { state: "listed", listedAt: new Date() } });
+    await recordStock(link.offerId, n);
+    return loading.length;
+  }
+  const oldest = Math.min(...loading.map((u) => new Date(u.uploadedAt).getTime()));
+  if (Date.now() - oldest > LOAD_PAGE_AFTER_MS) {
+    await pageOnce(
+      "load:" + link.offerId,
+      "⚠️ G2G Instant offer " + link.offerId + ": " + loading.length + " Epic account(s) were sent to its stock " +
+        Math.round((Date.now() - oldest) / 60000) + " min ago, but G2G shows " + (n == null ? "no stock count" : n + " in stock") + " (expected " +
+        (listed + loading.length) + "). Open the offer's stock on G2G and check what it took. Those accounts stay " +
+        "set aside meanwhile, so nothing is sold twice.",
+    );
+  }
+  return 0;
+}
+
+// Orders on an Instant offer never wait for us: G2G delivered them already.
+// Each one says which stock row went out (Account ID = the Epic email).
+async function scanInstantSales(link) {
+  if (!link || link.mode !== "instant") return { skipped: "not an Instant offer" };
+  return withKeyLock("scan:" + link.offerId, async () => {
+    const since = link.linkedAt ? new Date(link.linkedAt).getTime() - DAY_MS : Date.now() - 7 * DAY_MS;
+    const seen = new Map();
+    for (const status of SCAN_STATUSES) {
+      for (let page = 1; page <= SCAN_PAGES; page++) {
+        let rows;
+        try {
+          rows = await mp.g2gOrders({ page, pageSize: 30, status });
+        } catch {
+          break;
+        }
+        for (const o of rows || []) if (String(o.offerId) === String(link.offerId)) seen.set(String(o.orderItemId), o);
+        if (!rows || rows.length < 30) break;
+      }
+    }
+    let recorded = 0;
+    for (const order of seen.values()) {
+      if (orderPlacedAt(order).getTime() < since) continue;
+      if (await EpicSale.exists({ orderId: saleIdFor(order.orderItemId) })) continue;
+      if (await recordInstantOrder(link, order)) recorded++;
+    }
+    await EpicSalesState.updateOne(
+      { _id: "main", "g2gOffers.offerId": link.offerId },
+      { $set: { "g2gOffers.$.lastSaleScanAt": new Date() } },
+    );
+    return { orders: seen.size, recorded };
+  });
+}
+
+async function recordInstantOrder(link, order) {
+  const id = String(order.orderItemId || "");
+  let item;
+  try {
+    item = await mp.g2gOrder(id);
+  } catch {
+    return false;
+  }
+  const refs = [...new Set((Array.isArray(item && item.order_inventories) ? item.order_inventories : []).map(refOf).filter(Boolean))];
+  if (!refs.length) {
+    if (cancelledOrRefunded(item)) return false; // nothing was handed out
+    if (Date.now() - orderPlacedAt(order).getTime() > INSTANT_STUCK_MS) {
+      await pageOnce(
+        "noref:" + id,
+        "G2G order " + id + " on the Instant Epic offer shows no delivered Account ID after " +
+          Math.round((Date.now() - orderPlacedAt(order).getTime()) / 60000) + " min. Open the order on G2G: if it shows an " +
+          "Account ID, tell me which; if not, deliver or refund it there.",
+      );
+    }
+    return false;
+  }
+  const units = await EpicG2gUnit.find({ offerId: link.offerId, login: { $in: refs } });
+  const byLogin = new Map();
+  for (const u of units) {
+    const cur = byLogin.get(u.login);
+    // Prefer the live unit when an account was loaded more than once.
+    if (!cur || (cur.state !== "listed" && cur.state !== "loading")) byLogin.set(u.login, u);
+  }
+  const matched = refs.map((r) => byLogin.get(r)).filter(Boolean);
+  const unknown = refs.filter((r) => !byLogin.has(r));
+  const placed = orderPlacedAt(order);
+  const days = sessionDaysOf(link);
+  let sale;
+  try {
+    sale = await EpicSale.create({
+      market: "g2g",
+      orderId: saleIdFor(id),
+      offerId: String(link.offerId),
+      title: String(order.title || link.title || "").slice(0, 300),
+      priceUsd: Number(order.amount) || 0,
+      quantity: Math.max(1, Number(order.purchasedQty) || refs.length),
+      buyerUsername: String(order.buyerId || ""),
+      orderState: String((item && item.order_item_status) || ""),
+      orderCreatedAt: placed,
+      matchedBy: "g2g-stock",
+      deliveredAt: placed,
+      accounts: matched.map((u) => ({ epicAccountId: u.epicAccountId, sessionId: u.sessionId, label: u.label, login: u.login })),
+      needsAttention: unknown.length > 0,
+      note: unknown.length ? "G2G handed out Account ID(s) we have no record of: " + unknown.join(", ") : "",
+    });
+  } catch (e) {
+    if (e && e.code === 11000) return false;
+    throw e;
+  }
+  const flagged = matched.filter((u) => u.state === "removed");
+  for (const u of matched) {
+    await EpicG2gUnit.updateOne({ _id: u._id }, { $set: { state: "sold", soldAt: placed, orderId: id } });
+    await EpicAccount.updateOne({ _id: u.epicAccountId }, { $set: { sold: true } });
+    if (u.sessionId) {
+      // The stored login becomes the buyer's: open `days` from the purchase.
+      // One already closed (the buyer changed the email first) stays closed.
+      await BuyerMailSession.updateOne(
+        { _id: u.sessionId },
+        {
+          $set: {
+            stage: "sold",
+            soldAt: placed,
+            expiresAt: new Date(placed.getTime() + days * DAY_MS),
+            passwordEnc: "",
+            orderRef: id,
+          },
+        },
+      );
+    }
+  }
+  const names = matched.map((u) => u.label).join(", ");
+  await notify(
+    "✅ G2G sold instantly: Epic account " + (names || "?") + " ($" + (Number(order.amount) || 0).toFixed(2) +
+      ", order " + id + "). G2G gave the buyer the login; the mail page is open " + days + " days from the purchase.",
+  );
+  if (unknown.length || flagged.length) {
+    await notify(
+      "⚠️ G2G order " + id + " needs a look: " +
+        (unknown.length ? "it handed out Account ID(s) we have no record of (" + unknown.join(", ") + "). " : "") +
+        (flagged.length ? "It sold " + flagged.map((u) => u.label).join(", ") + ", which had been flagged (" + flagged.map((u) => u.removedReason).join("; ") + "). " : "") +
+        "Check the order on G2G.",
+    );
+  }
+  try {
+    require("./systemLog")
+      .logEvent({ category: "marketplace", action: "epic_g2g_instant_sale", actor: "epic-g2g", subject: sale.orderId, detail: "Epic account(s) " + names + " sold from G2G stock" })
+      .catch(() => {});
+  } catch {
+    /* diagnostics only */
+  }
+  return true;
+}
+
+// The watcher closed a stored (still unsold) login because Epic says the email
+// changed. Either a buyer got it and the scan has not caught up, or someone
+// else is in the account.
+async function onStockEmailChanged(rows) {
+  for (const r of rows || []) {
+    const unit = await EpicG2gUnit.findOne({ sessionId: r.id });
+    if (!unit) continue;
+    const link = await linkFor(unit.offerId);
+    if (link) await scanInstantSales(link).catch(() => {});
+    const fresh = await EpicG2gUnit.findById(unit._id).lean();
+    if (!fresh || fresh.state === "sold") continue; // a buyer: normal
+    const r2 = await EpicG2gUnit.updateOne(
+      { _id: unit._id, state: { $in: ["loading", "listed"] } },
+      { $set: { state: "removed", removedAt: new Date(), removedReason: "email changed with no G2G order" } },
+    );
+    if (!r2.modifiedCount) continue;
+    // Out of every sale path until a person has looked.
+    await EpicAccount.updateOne({ _id: unit.epicAccountId }, { $set: { sold: true } });
+    await notify(
+      "⚠️ Epic account " + unit.label + " in the G2G stock of offer " + unit.offerId + " had its email changed, and no G2G " +
+        "order shows it sold. Someone else may be in this account.\n\nRemove it from G2G's stock so nobody buys it: g2g.com → " +
+        "Manage offer → this offer → Manage stock → search Account ID " + unit.login + " → delete (G2G asks for your " +
+        "6-digit code). It is marked sold here so nothing else sells it.",
+    );
+  }
+}
+
+// The offer left Instant on G2G (back to Manual): G2G only allows that once
+// its stock is empty, so our stored rows are gone. Put the accounts back.
+async function releaseStock(link, why) {
+  const units = await EpicG2gUnit.find({ offerId: link.offerId, state: { $in: ["loading", "listed"] } });
+  if (!units.length) return 0;
+  const now = new Date();
+  await EpicG2gUnit.updateMany(
+    { _id: { $in: units.map((u) => u._id) } },
+    { $set: { state: "removed", removedAt: now, removedReason: why } },
+  );
+  const sess = units.map((u) => u.sessionId).filter(Boolean);
+  if (sess.length) {
+    await BuyerMailSession.updateMany(
+      { _id: { $in: sess }, revokedAt: null, stage: "listed" },
+      { $set: { revokedAt: now, revokedReason: "unlisted", passwordEnc: "" } },
+    );
+  }
+  return units.length;
 }
 
 // The details of a sale for a hand delivery (or a buyer who asks again).
@@ -994,23 +1433,49 @@ async function sweep({ now = Date.now() } = {}) {
         notes.push(id + ": delivered");
       }
     }
-    // The offer's stock number follows the accounts ready for it. Never while
-    // one of its orders is being delivered.
-    const linked = (await links()).filter((l) => l.syncStock !== false);
-    if (linked.length) {
-      const ctx = await sales.stockContext({ fresh: false });
-      for (const link of linked) {
+    const all = await links();
+    let ctx = null;
+    for (const stored of all) {
+      // Switching the offer between Manual and Auto delivery on g2g.com is
+      // all it takes: follow it.
+      let link;
+      let offer;
+      try {
+        let info;
+        [link, offer, info] = await refreshMode(stored);
+        if (info.changed) notes.push(link.offerId + ": now " + link.mode + (info.released ? ", " + info.released + " stock account(s) back on the shelf" : ""));
+      } catch (e) {
+        notes.push(stored.offerId + ": offer unreadable");
+        continue;
+      }
+      if (!offer) continue;
+      if (link.mode === "instant") {
+        // Sales first (they move sold rows out of the stock count), then stock.
+        try {
+          const s = await scanInstantSales(link);
+          if (s && s.recorded) notes.push(link.offerId + ": " + s.recorded + " instant sale(s)");
+        } catch (e) {
+          notes.push(link.offerId + ": sale scan failed (" + ((e && e.message) || e) + ")");
+        }
+        if (link.enabled !== false) {
+          try {
+            const r = await loadStock(link, { offer });
+            if (r && r.loaded) notes.push(link.offerId + ": loaded " + r.loaded + (r.confirmed ? "" : " (not confirmed yet)"));
+          } catch (e) {
+            notes.push(link.offerId + ": stock load failed (" + ((e && e.message) || e) + ")");
+          }
+        }
+        continue;
+      }
+      // Manual offers: the stock number follows the accounts ready for it,
+      // never while one of its orders is being delivered.
+      if (link.syncStock === false) continue;
+      {
         const busy = await EpicSale.countDocuments({ market: "g2g", offerId: link.offerId, deliveredAt: null, releasedAt: null });
         if (busy) continue;
+        if (!ctx) ctx = await sales.stockContext({ fresh: false });
         const want = stockCount(link, ctx);
-        let offer;
-        try {
-          offer = await mp.g2gGetOffer(link.offerId);
-        } catch (e) {
-          notes.push(link.offerId + ": offer unreadable");
-          continue;
-        }
-        if (!offer || Number(offer.reserved_qty) > 0) continue;
+        if (Number(offer.reserved_qty) > 0) continue;
         const have = Number(offer.actual_qty);
         if (Number.isFinite(have) && have !== want) {
           try {
@@ -1057,10 +1522,20 @@ function stop() {
 // For the panel (epicSales.overview).
 async function panelView(ctx) {
   const list = await links();
+  const counts = await EpicG2gUnit.aggregate([
+    { $match: { offerId: { $in: list.map((l) => l.offerId) } } },
+    { $group: { _id: { offerId: "$offerId", state: "$state" }, n: { $sum: 1 } } },
+  ]);
+  const unitsOf = (offerId) => {
+    const out = { loading: 0, listed: 0, sold: 0, removed: 0 };
+    for (const c of counts) if (c._id.offerId === offerId) out[c._id.state] = c.n;
+    return out;
+  };
   return {
     siteUrl: siteUrl(),
     offers: list.map((l) => ({
       offerId: l.offerId,
+      mode: l.mode || "order",
       url: mp.g2gOfferUrl ? mp.g2gOfferUrl(l.offerId) : "",
       title: l.title,
       games: l.games || [],
@@ -1069,6 +1544,9 @@ async function panelView(ctx) {
       syncStock: l.syncStock !== false,
       lastStock: l.lastStock,
       lastStockSyncAt: l.lastStockSyncAt,
+      lastStockLoadAt: l.lastStockLoadAt,
+      lastSaleScanAt: l.lastSaleScanAt,
+      units: unitsOf(l.offerId),
       ready: ctx ? stockCount(l, ctx) : null,
       linkedAt: l.linkedAt,
     })),
@@ -1086,6 +1564,22 @@ module.exports = {
   start,
   stop,
   panelView,
+  // Instant (G2G Auto delivery) offers
+  loadStock: async (offerId) => {
+    const stored = await linkFor(offerId);
+    if (!stored) throw userError("That G2G offer isn't linked", 404);
+    const [link, offer] = await refreshMode(stored);
+    if (link.mode !== "instant") return { skipped: "The offer is on Manual delivery on G2G. Switch it to Auto delivery there first." };
+    return loadStock(link, { offer });
+  },
+  scanInstantSales: async (offerId) => {
+    const stored = await linkFor(offerId);
+    if (!stored) throw userError("That G2G offer isn't linked", 404);
+    const [link] = await refreshMode(stored);
+    return scanInstantSales(link);
+  },
+  onStockEmailChanged,
+  modeOf,
   // pure, for tests
   csvRow,
   buildRow,

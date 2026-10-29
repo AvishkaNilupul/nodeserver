@@ -480,12 +480,12 @@ test("after an unexpected error the order is held: paged once, never sent by its
   assert.ok(sent.some((t) => /done by hand/.test(t)));
 });
 
-test("linking refuses an offer that isn't a manual-delivery Game Accounts offer", async () => {
+test("linking refuses an offer outside Game Accounts or with a delivery setting we don't know", async () => {
   const real = mp.g2gGetOffer;
   mp.g2gGetOffer = async (id) => ({ offer_id: id, service_id: "0765978e-3fdf-48b4-bed3-184823aa439e", delivery_speed: "manual" });
   await assert.rejects(g2g.linkOffer({ offerId: "G1793242175124XX", games: BOTH }), /Game Accounts/);
-  mp.g2gGetOffer = async (id) => ({ offer_id: id, service_id: g2g.GAME_ACCOUNTS_SERVICE, delivery_speed: "instant" });
-  await assert.rejects(g2g.linkOffer({ offerId: "G1793242175124XX", games: BOTH }), /Manual delivery/);
+  mp.g2gGetOffer = async (id) => ({ offer_id: id, service_id: g2g.GAME_ACCOUNTS_SERVICE, delivery_speed: "carrier pigeon" });
+  await assert.rejects(g2g.linkOffer({ offerId: "G1793242175124XX", games: BOTH }), /unknown delivery setting/);
   await assert.rejects(g2g.linkOffer({ offerId: "nope", games: BOTH }), /offer number/);
   mp.g2gGetOffer = real;
 });

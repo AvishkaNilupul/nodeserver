@@ -201,6 +201,20 @@ router.post(
   handle(async (req) => g2g().unlinkOffer(req.params.offerId)),
 );
 
+// Instant offers: load ready accounts into the offer's G2G stock now / look
+// for new sales now (both also run by themselves every few minutes).
+router.post(
+  "/api/epic/sales/g2g/:offerId/load",
+  requireSuperadmin,
+  handle(async (req) => ({ result: await g2g().loadStock(req.params.offerId) })),
+);
+
+router.post(
+  "/api/epic/sales/g2g/:offerId/scan",
+  requireSuperadmin,
+  handle(async (req) => ({ result: await g2g().scanInstantSales(req.params.offerId) })),
+);
+
 router.post(
   "/api/epic/sales/g2g/sales/:orderId/details",
   requireSuperadmin,

@@ -298,6 +298,11 @@ async function stockContext({ fresh = false, accountIds = null } = {}) {
       }
     }
   }
+  // Accounts loaded into a G2G offer's own stock (utils/epicG2g) are on sale
+  // there: nothing else may sell them.
+  for (const u of await g2gStockUnits()) {
+    listingByAccount.set(String(u.epicAccountId), g2gListingRef(u));
+  }
   const checks = new Map();
   const toCheck = [];
   for (const a of accounts) {
@@ -1364,7 +1369,18 @@ function stop() {
 // Epic's "email changed" mail: a buyer has it (the sale is not recorded yet),
 // or someone else got in. Page, and run the sale sync soon.
 async function onListedEmailChanged(rows) {
-  for (const r of rows || []) {
+  // A listed login with no Eldorado listing belongs to G2G stock.
+  const g2gRows = (rows || []).filter((r) => !r.listingId);
+  if (g2gRows.length) {
+    try {
+      await require("./epicG2g").onStockEmailChanged(g2gRows);
+    } catch (e) {
+      console.error("[epicSales] G2G email-change hand-off:", (e && e.message) || e);
+    }
+  }
+  rows = (rows || []).filter((r) => r.listingId);
+  if (!rows.length) return;
+  for (const r of rows) {
     const listing = r.listingId ? await EpicListing.findById(r.listingId).lean() : null;
     const unit = listing && (listing.accounts || []).find((u) => String(u.sessionId) === String(r.id));
     await notify(
@@ -1652,9 +1668,29 @@ async function marketCheck(query) {
 
 // The live listing an account sits on, or null. Used by the manual Deliver
 // and Mark sold paths so a listed account can't be sold twice.
+// G2G stock units (loading or listed). Required lazily: the model is new and
+// this module must keep loading on a server that does not have it yet.
+async function g2gStockUnits(query = {}) {
+  let EpicG2gUnit;
+  try {
+    EpicG2gUnit = require("../models/EpicG2gUnit");
+  } catch {
+    return [];
+  }
+  return EpicG2gUnit.find({ ...query, state: { $in: ["loading", "listed"] } })
+    .select("epicAccountId offerId state")
+    .lean();
+}
+
+function g2gListingRef(u) {
+  return { id: "g2g:" + u.offerId, title: "G2G stock (offer " + u.offerId + ")", status: "active", market: "g2g" };
+}
+
 async function listingForAccount(accountId) {
   const id = String(accountId || "");
   if (!/^[a-f\d]{24}$/i.test(id)) return null;
+  const inG2g = await g2gStockUnits({ epicAccountId: new (require("mongoose").Types.ObjectId)(id) });
+  if (inG2g.length) return g2gListingRef(inG2g[0]);
   const l = await EpicListing.findOne({
     status: { $in: [...LIVE_LISTING, "draft", "error"] },
     accounts: { $elemMatch: { epicAccountId: new (require("mongoose").Types.ObjectId)(id), state: "listed" } },

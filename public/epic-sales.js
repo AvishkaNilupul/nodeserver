@@ -356,20 +356,45 @@
       '<div class="es-list">' +
       offers
         .map((o) => {
-          const pills = [
-            o.enabled ? pill("automatic delivery on", "green") : pill("automatic delivery off", "amber"),
-            pill((o.ready == null ? "?" : o.ready) + " ready", o.ready ? "green" : "red"),
-            pill("mail page " + o.sessionDays + " days"),
-            o.syncStock ? pill("stock synced" + (o.lastStock != null ? " (" + o.lastStock + ")" : "")) : pill("stock by hand"),
-          ];
+          const instant = o.mode === "instant";
+          const u = o.units || {};
+          const pills = instant
+            ? [
+                pill("Instant (G2G Auto delivery)", "green"),
+                pill((u.listed || 0) + " in G2G stock", u.listed ? "green" : "red"),
+                u.loading ? pill(u.loading + " loading", "amber") : "",
+                pill((u.sold || 0) + " sold"),
+                pill((o.ready == null ? "?" : o.ready) + " more ready"),
+                pill("mail page " + o.sessionDays + " days"),
+                o.enabled ? "" : pill("loading new stock is off", "amber"),
+              ]
+            : [
+                pill("Manual delivery, filled in by the server", o.enabled ? "green" : ""),
+                o.enabled ? "" : pill("automatic delivery off", "amber"),
+                pill((o.ready == null ? "?" : o.ready) + " ready", o.ready ? "green" : "red"),
+                pill("mail page " + o.sessionDays + " days"),
+                o.syncStock ? pill("stock synced" + (o.lastStock != null ? " (" + o.lastStock + ")" : "")) : pill("stock by hand"),
+              ];
+          const meta = instant
+            ? (o.lastSaleScanAt ? " · sales checked " + esc(ago(o.lastSaleScanAt)) : "") +
+              (o.lastStockLoadAt ? " · stock last loaded " + esc(ago(o.lastStockLoadAt)) : "")
+            : o.lastStockSyncAt
+              ? " · stock last set " + esc(ago(o.lastStockSyncAt))
+              : "";
+          const actions = instant
+            ? '<button class="btn btn-sm" type="button" data-g2g-act="load" data-id="' + esc(o.offerId) + '">Load ready accounts now</button>' +
+              '<button class="btn btn-sm" type="button" data-g2g-act="scan" data-id="' + esc(o.offerId) + '">Check sales now</button>' +
+              '<button class="btn btn-sm" type="button" data-g2g-act="' + (o.enabled ? "off" : "on") + '" data-id="' + esc(o.offerId) + '">' + (o.enabled ? "Stop loading new stock" : "Load new stock again") + "</button>"
+            : '<button class="btn btn-sm" type="button" data-g2g-act="' + (o.enabled ? "off" : "on") + '" data-id="' + esc(o.offerId) + '">' + (o.enabled ? "Turn automatic delivery off" : "Turn automatic delivery on") + "</button>" +
+              '<button class="btn btn-sm" type="button" data-g2g-act="' + (o.syncStock ? "stock-off" : "stock-on") + '" data-id="' + esc(o.offerId) + '">' + (o.syncStock ? "Stop syncing stock" : "Sync stock") + "</button>";
           return (
-            '<div class="es-item"><div class="es-item-head"><div class="es-item-title">' + esc(o.title || o.offerId) + "</div><div>" + pills.join(" ") + "</div></div>" +
-            '<div class="es-meta">Offer ' + esc(o.offerId) + " · games: " + esc((o.games || []).join(" + ")) +
-            (o.lastStockSyncAt ? " · stock last set " + esc(ago(o.lastStockSyncAt)) : "") + "</div>" +
+            '<div class="es-item"><div class="es-item-head"><div class="es-item-title">' + esc(o.title || o.offerId) + "</div><div>" + pills.filter(Boolean).join(" ") + "</div></div>" +
+            '<div class="es-meta">Offer ' + esc(o.offerId) + " · games: " + esc((o.games || []).join(" + ")) + meta + "</div>" +
+            (instant
+              ? '<div class="es-meta">G2G hands a stored account to each buyer the moment they pay; the server records which one and starts its mail page. To pull an account out of G2G\'s stock, use Manage stock on g2g.com (it asks for your 6-digit code).</div>'
+              : "") +
             (g.siteUrl ? "" : '<div class="es-err">PUBLIC_BASE_URL is not set, so the delivery note can\'t name the mail page.</div>') +
-            '<div class="es-actions">' +
-            '<button class="btn btn-sm" type="button" data-g2g-act="' + (o.enabled ? "off" : "on") + '" data-id="' + esc(o.offerId) + '">' + (o.enabled ? "Turn automatic delivery off" : "Turn automatic delivery on") + "</button>" +
-            '<button class="btn btn-sm" type="button" data-g2g-act="' + (o.syncStock ? "stock-off" : "stock-on") + '" data-id="' + esc(o.offerId) + '">' + (o.syncStock ? "Stop syncing stock" : "Sync stock") + "</button>" +
+            '<div class="es-actions">' + actions +
             '<button class="btn btn-sm" type="button" data-g2g-act="unlink" data-id="' + esc(o.offerId) + '">Unlink</button>' +
             "</div></div>"
           );
@@ -384,6 +409,22 @@
     if (act === "unlink") {
       if (!confirm("Unlink this G2G offer? Its orders will page you to deliver by hand instead. The offer stays on G2G.")) return;
       return busy(b, async () => { await post(url + "/unlink"); say("Unlinked."); await load(); });
+    }
+    if (act === "load") {
+      return busy(b, async () => {
+        const j = await post(url + "/load");
+        const r = j.result || {};
+        say(r.skipped ? r.skipped : r.loaded ? r.loaded + " account(s) sent to G2G" + (r.confirmed ? " and in stock now." : ", waiting for G2G to show them.") : "Nothing new to load.");
+        await load();
+      });
+    }
+    if (act === "scan") {
+      return busy(b, async () => {
+        const j = await post(url + "/scan");
+        const r = j.result || {};
+        say(r.skipped ? r.skipped : r.recorded ? r.recorded + " new sale(s) recorded." : "No new sales.");
+        await load();
+      });
     }
     const patch = { on: { enabled: true }, off: { enabled: false }, "stock-on": { syncStock: true }, "stock-off": { syncStock: false } }[act];
     if (!patch) return;
@@ -588,7 +629,15 @@
             '<td data-label="Listing">' + pill(isG2g ? "G2G" : "Eldorado") + " " + esc(s.title) +
             (isG2g
               ? '<div class="muted">' +
-                (s.deliveredAt ? "delivered " + esc(ago(s.deliveredAt)) : s.releasedAt ? "cancelled, account back on the shelf" : s.submittedAt ? "sent to G2G, waiting for it to confirm" : "being delivered") +
+                (s.matchedBy === "g2g-stock"
+                  ? "sold instantly from G2G stock " + esc(ago(s.deliveredAt))
+                  : s.deliveredAt
+                    ? "delivered " + esc(ago(s.deliveredAt))
+                    : s.releasedAt
+                      ? "cancelled, account back on the shelf"
+                      : s.submittedAt
+                        ? "sent to G2G, waiting for it to confirm"
+                        : "being delivered") +
                 "</div>"
               : "") +
             "</td>" +
