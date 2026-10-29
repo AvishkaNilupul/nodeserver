@@ -109,8 +109,8 @@ function unitsForOrder(listing, orderId) {
 // platforms do not (the "if this event is still running" hedge in particular is
 // load-bearing: a sold no-claim account keeps farming only until the operator
 // runs the spent scan).
-function g2gDeliveryCode(login, password) {
-  return eld.eldoradoDeliveryCode(login, password);
+function g2gDeliveryCode(login, password, opts = {}) {
+  return eld.eldoradoDeliveryCode(login, password, opts);
 }
 
 // The AccountOffer behind an account listing (contract B5), or null for every
@@ -140,8 +140,10 @@ async function offerForListing(listing) {
 //
 // `c` is always the plain object unit() builds, never a Mongoose sub-document —
 // which is the whole reason unit() exists; see the note above it.
-function deliveryBlock(c, offer) {
-  if (!offer) return g2gDeliveryCode(c.login, c.password);
+// `unclaimed` (a no-claim row) picks the guide for drops that are still
+// unclaimed — connect first, then claim (eldoradoUnclaimedGuide).
+function deliveryBlock(c, offer, opts = {}) {
+  if (!offer) return g2gDeliveryCode(c.login, c.password, opts);
   return require("./suppliedStock").deliveryText(c, offer);
 }
 
@@ -445,12 +447,67 @@ async function pickStock(listing, order, { dryRun }) {
   }
 
   // Pre-reserved units (the shape publishG2gShare creates). A bulk pack row
-  // takes exactly its packs' accounts, never one more.
-  const free = undeliveredUnits(listing).filter((u) => !u.orderId);
+  // takes exactly its packs' accounts, never one more. A unit whose drops
+  // expired on Twitch since it was reserved is never handed over
+  // (freshFreeUnits); too few good ones is the "out of reserved stock" page.
+  const free = await freshFreeUnits(listing);
   if (free.length >= want) {
     return { picked: free.slice(0, want), source: "units", fromUnits: true };
   }
   return null; // no stock source at all -> caller decides (manual listing)
+}
+
+// utils/g2gEvergreen rewrites a sold-out archive offer to another bundle and
+// stamps the row with the time (`rebundledAt`). It never does so while a paid
+// order shows on the offer — but G2G can show a payment late, after that
+// look. An order PLACED before the rewrite paid for the old text and would be
+// handed the new bundle as if it were the same thing: it is held for a
+// hand-over instead (an error pages), with what the buyer paid for. Returns
+// that refusal, or "" for every order that may be delivered — which is every
+// order on a row that was never rewritten, and every order placed since.
+function orderPredatesRewrite(listing, order) {
+  if (!listing || !(listing.autoClaimSet && listing.set) || !listing.rebundledAt) return "";
+  const rewritten = new Date(listing.rebundledAt).getTime();
+  if (!Number.isFinite(rewritten)) return "";
+  const placed = orderPlacedAt(order);
+  if (placed && placed >= rewritten) return "";
+  const paidFor = String((order && order.title) || "").slice(0, 110);
+  // No readable time on an order for an offer that WAS rewritten: it cannot be
+  // shown to be newer than the rewrite, so it is not delivered on a guess.
+  if (!placed) {
+    return (
+      "this offer was rewritten to another bundle and the order's time could not be read — check it is for \"" +
+      String(listing.title || "").slice(0, 110) + "\" (the order says \"" + paidFor + "\"), then deliver it by hand"
+    );
+  }
+  return (
+    "placed before this offer was rewritten to another bundle — the buyer paid for \"" +
+    paidFor + "\": deliver that by hand, or refund it"
+  );
+}
+
+// When an order was placed, in ms (0 = unreadable). G2G's order row carries
+// `created_at` as epoch ms (read off a live order 2026-10-13); a numeric
+// string, a time in seconds and an ISO date are read too, and failing all of
+// them the 13 digits G2G's order ids begin with, which are the same instant.
+function orderPlacedAt(order) {
+  const raw = (order && order.raw) || {};
+  const ms = (v) => {
+    if (v == null || v === "") return 0;
+    let n = typeof v === "number" ? v : /^\d+(\.\d+)?$/.test(String(v).trim()) ? Number(v) : new Date(v).getTime();
+    if (!Number.isFinite(n) || n <= 0) return 0;
+    if (n < 1e11) n *= 1000; // seconds
+    return n > 1e12 && n < 4e12 ? n : 0;
+  };
+  for (const v of [raw.created_at, raw.createdAt, raw.payment_success_at]) {
+    const t = ms(v);
+    if (t) return t;
+  }
+  for (const id of [order && order.orderItemId, order && order.orderId, raw.order_id]) {
+    const m = /^(\d{13})/.exec(String(id || ""));
+    if (m && ms(m[1])) return ms(m[1]);
+  }
+  return 0;
 }
 
 // Deliver one paid order. Returns a short result the tick can log directly.
@@ -571,7 +628,9 @@ async function deliverOrder(order, { dryRun }) {
           error: "the listing's AccountOffer is gone — cannot render the hand-over",
         };
       }
-      const retryBlocks = retryCreds.map((c) => deliveryBlock(c, retryOffer));
+      const retryBlocks = retryCreds.map((c) =>
+        deliveryBlock(c, retryOffer, { unclaimed: !!listing.noclaimStock }),
+      );
       if (retryOffer && retryBlocks.some((b) => !String(b || "").trim())) {
         return { orderId, error: "delivery text rendered empty for this offer" };
       }
@@ -618,6 +677,11 @@ async function deliverOrder(order, { dryRun }) {
   // The accounts this order takes: `qty` on an ordinary row, qty × N on a bulk
   // pack row (PACKS-2 §2). G2G itself is only ever told units (confirmOnG2g).
   const want = accountsForOrder(listing, qty);
+  // No account is picked for an order that paid for a text this offer no
+  // longer carries (see orderPredatesRewrite).
+  const oldText = orderPredatesRewrite(listing, order);
+  if (oldText) return { orderId, error: oldText };
+
   const stock = await pickStock(listing, order, { dryRun });
   if (stock === null) {
     // A bulk pack row (docs/bulk-packs/FIXES-1.md L5) is never a hand-filled
@@ -631,6 +695,20 @@ async function deliverOrder(order, { dryRun }) {
           undeliveredUnits(listing).filter((u) => !u.orderId).length +
           " of " + want + ") — restock the offer, then this order will " +
           "deliver on the next tick",
+      };
+    }
+    // A row that sells its own reserved units and has too few free is not a
+    // hand-filled listing either: this is a PAID order with nothing to ship.
+    // It used to fall through to the quiet skip below, whose words ("no
+    // reserved units") were not even true of it, and nobody was told.
+    if ((listing.units || []).length) {
+      return {
+        orderId,
+        error:
+          "out of reserved stock: this offer has " +
+          (await freshFreeUnits(listing).catch(() => [])).length +
+          " deliverable account(s) (expired ones excluded) and the order needs " + want +
+          " — deliver it by hand or refund it",
       };
     }
     // Neither a stock source nor a reserved unit: this is a service listing
@@ -716,7 +794,9 @@ async function deliverOrder(order, { dryRun }) {
       error: "the listing's AccountOffer is gone — released, not shipped",
     };
   }
-  const blocks = creds.map((c) => deliveryBlock(c, offer));
+  const blocks = creds.map((c) =>
+    deliveryBlock(c, offer, { unclaimed: !!listing.noclaimStock }),
+  );
   // An empty render followed by a delivered stamp is the "Username: undefined"
   // incident with nothing at all in it. eldoradoFulfiller refuses the same way
   // (:403); only offer-backed rows are checked, because g2gDeliveryCode cannot
@@ -1218,7 +1298,15 @@ async function realStockFor(row, listedElsewhere) {
   // A by-game offer has nothing it may sell (retired — see
   // eldoradoFulfiller.claimUnclaimedForGame): 0 takes it off sale.
   if (row.unclaimedGame) return 0;
-  if (row.set) {
+  // Only a row that CLAIMS its set at the sale (pickStock's autoClaimSet
+  // branch) is as deep as the archive. A row that merely carries a `set` but
+  // sells pre-reserved units — the auto-lister's G2G share — can hand over
+  // those units and nothing else: counting the archive for it read 569 on an
+  // offer with one account behind it. It went unnoticed only because the
+  // quantity write never reached G2G (see g2gUpdateOffer). A row with a `set`
+  // and neither is "cannot tell" below, as a row with no stock source always
+  // was: delivery cannot fill it, and no number is guessed for it.
+  if (row.autoClaimSet && row.set) {
     const DropSet = require("../models/DropSet");
     const { availableAccountsForSet } = require("../routes/shopRoutes");
     const { notListed } = require("./listedLogins");
@@ -1229,10 +1317,35 @@ async function realStockFor(row, listedElsewhere) {
   }
   // A row whose stock is pre-reserved units: what is left is what nobody has
   // bought yet.
-  if ((row.units || []).length) {
-    return (row.units || []).filter((u) => !u.orderId && !u.deliveredAt).length;
-  }
+  if ((row.units || []).length) return (await freshFreeUnits(row)).length;
   return null;
+}
+
+function freeUnitCount(row) {
+  return ((row && row.units) || []).filter((u) => !u.orderId && !u.deliveredAt).length;
+}
+
+// The free units that can still deliver the row's set: a pre-reserved unit is
+// never re-claimed, so its drops can have expired on Twitch while it sat on the
+// shelf (utils/dropReservation.js). Bulk pack rows and rows without a set are
+// left to their own rules and returned as they are. A DB error propagates —
+// syncStock reads a throw as "cannot tell", never as 0.
+async function freshFreeUnits(row) {
+  const free = ((row && row.units) || []).filter((u) => !u.orderId && !u.deliveredAt);
+  if (!free.length || !row.set || row.bulkOfferId) return free;
+  return require("./dropReservation").liveUnits(free, row.set);
+}
+
+// The rows realStockFor answers from their own units (its last branch).
+function sellsOwnUnits(row) {
+  return !!(
+    row &&
+    !row.accountOffer &&
+    !row.noclaimStock &&
+    !row.unclaimedGame &&
+    !(row.autoClaimSet && row.set) &&
+    (row.units || []).length
+  );
 }
 
 // Advertise only what a delivery could really claim. Stock moves without any
@@ -1240,11 +1353,30 @@ async function realStockFor(row, listedElsewhere) {
 // other platforms — so a listing left at its published quantity oversells.
 // Counting must match how the CLAIMER counts, not the raw availability: an
 // account already attached to a live listing elsewhere is not sellable here.
+// The quantity this process last put on each offer. Most passes find most
+// offers unchanged, and repeating the number is one more write on the seller
+// login per offer per pass. So a number already written is not sent again —
+// except on every REASSERT_EVERY-th pass (once an hour), which writes them
+// all, and whenever an offer is being brought back on sale. The hourly pass is
+// what catches a number G2G moved by itself (it gives stock back on a
+// cancelled order) or somebody edited by hand: our own count did not move, so
+// nothing else would send it. A restart forgets the memory, so the first pass
+// after one writes them all. The same pass is the only one that repeats the
+// delist of an offer this sync already took off sale.
+// What utils/g2gEvergreen writes into lastError of a row it is rewriting, or
+// has stopped on (its MARK). Spelled here too so the sync does not have to load
+// that module to keep its hands off such a row.
+const EVERGREEN_MARK = /^evergreen: /;
+const lastQtyWritten = new Map();
+const REASSERT_EVERY = 4;
+let stockPasses = 0;
+
 async function syncStock() {
   const af = getAutoFarm() || {};
   if (!af.g2gAuto && !af.g2gAutoDeliver) return { skipped: "g2g is off" };
   if (af.g2gSyncStock === false) return { skipped: "g2gSyncStock is off" };
   const dryRun = af.g2gDeliverDryRun !== false;
+  const reassert = stockPasses++ % REASSERT_EVERY === 0;
 
   // Offer-backed rows carry origin:"manual" on purpose (contract B5, so that no
   // future repricer can touch owner-supplied stock), but pausing themselves when
@@ -1274,6 +1406,13 @@ async function syncStock() {
   const listedElsewhere = await loginsOnActiveListings();
   const changes = [];
   for (const row of rows) {
+    // An offer utils/g2gEvergreen is rewriting, or has stopped on, is not this
+    // pass's: relisting it over a text its row cannot deliver is the one
+    // thing that file's whole order of steps exists to prevent.
+    if (EVERGREEN_MARK.test(String(row.lastError || ""))) {
+      changes.push({ offer: row.externalId, skipped: "held by the evergreen pass" });
+      continue;
+    }
     let real = null;
     try {
       real = await realStockFor(row, listedElsewhere);
@@ -1282,7 +1421,10 @@ async function syncStock() {
     }
     // null means "could not tell". Never write a guess into a live offer —
     // advertising 0 by accident takes a working listing off sale.
-    if (real == null) continue;
+    if (real == null) {
+      changes.push({ offer: row.externalId, uncounted: true });
+      continue;
+    }
     // A bulk pack row (docs/bulk-packs/FIXES-1.md R3-3): below its offer's
     // minimum order nothing can be bought, so it counts as empty and is
     // delisted like one; and a bulk offer that is not "live" (owner pause,
@@ -1313,26 +1455,144 @@ async function syncStock() {
       changes.push({ offer: row.externalId, wouldSet: real });
       continue;
     }
+    // The rows were read at the top of the pass, and a delist can have landed
+    // since — the owner's, or the auto-lister taking a copy down
+    // (utils/autofarmOffers.sweepCopies). Writing from the stale copy would put
+    // a delisted offer back on sale with no pass left to watch it. A read that
+    // fails proves nothing: the row waits for the next pass.
+    let stillActive = null;
+    try {
+      stillActive = await MarketplaceListing.findOne(
+        { _id: row._id, status: "active" },
+        { _id: 1, units: 1, set: 1, autoPaused: 1, lastError: 1 },
+      );
+    } catch {
+      stillActive = null;
+    }
+    if (!stillActive) {
+      changes.push({ offer: row.externalId, skipped: "no longer active" });
+      continue;
+    }
+    // ...or the offer was moved to another bundle, or paused or resumed, by
+    // someone else (utils/g2gEvergreen rewrites an offer in place; the Listings
+    // page relists). `real` above is the OLD bundle's count: acting on it would
+    // take a freshly relisted offer off sale again, with a row that still says
+    // it is selling. The next pass reads it as it is now.
+    if (
+      String(stillActive.set || "") !== String(row.set || "") ||
+      !!stillActive.autoPaused !== !!row.autoPaused ||
+      EVERGREEN_MARK.test(String(stillActive.lastError || ""))
+    ) {
+      changes.push({ offer: row.externalId, skipped: "changed during the pass" });
+      continue;
+    }
+    // A row that sells its own units is counted again from this fresh copy.
+    // The pass can be minutes old by the time it reaches a row (every archive
+    // row before it is a count of its own), and a unit sold in that time would
+    // be written back onto the shelf — an offer advertising an account its
+    // buyer already has. (Bulk rows are not in this pass; their own loop sets
+    // their quantity.)
+    if (sellsOwnUnits(row) && !row.bulkOfferId) {
+      try {
+        real = (await freshFreeUnits(stillActive)).length;
+      } catch (e) {
+        // Cannot tell: leave this offer as it is, and let the rest of the pass
+        // (and the evergreen pass after it) run.
+        changes.push({ offer: row.externalId, error: "unit recount: " + e.message });
+        continue;
+      }
+    }
+    const offerKey = String(row.externalId);
     try {
       if (real <= 0) {
-        await mp.g2gDelist(row.externalId);
-        row.autoPaused = true;
-        await row.save();
-        changes.push({ offer: row.externalId, delisted: true });
-      } else {
-        await mp.g2gSetQuantity(row.externalId, real);
-        if (row.autoPaused && bulkLive) {
-          await mp.g2gRelist(row.externalId);
-          row.autoPaused = false;
+        const again = !!row.autoPaused;
+        lastQtyWritten.delete(offerKey);
+        if (again && !reassert) {
+          // Already off sale by this sync's own hand: said once an hour, not
+          // on every pass for every sold-out offer there will ever be.
+          changes.push({ offer: row.externalId, unchanged: 0 });
+        } else {
+          await mp.g2gDelist(row.externalId);
+          row.autoPaused = true;
           await row.save();
+          changes.push({ offer: row.externalId, delisted: true, ...(again ? { again: true } : {}) });
         }
-        changes.push({ offer: row.externalId, set: real });
+      } else {
+        const bringBack = !!(row.autoPaused && bulkLive);
+        if (!bringBack && !reassert && lastQtyWritten.get(offerKey) === real) {
+          changes.push({ offer: row.externalId, unchanged: real });
+        } else {
+          await mp.g2gSetQuantity(row.externalId, real);
+          lastQtyWritten.set(offerKey, real);
+          if (bringBack) {
+            await mp.g2gRelist(row.externalId);
+            row.autoPaused = false;
+            await row.save();
+          }
+          changes.push({ offer: row.externalId, set: real, ...(bringBack ? { relisted: true } : {}) });
+        }
       }
     } catch (e) {
+      // Not known to be on the offer any more: the next pass writes it again.
+      lastQtyWritten.delete(offerKey);
       changes.push({ offer: row.externalId, error: e.message });
     }
   }
   return { checked: rows.length, changes, dryRun };
+}
+
+// What a pass did, said only when it did something or could not. The loop used
+// to drop the result, which is how a write G2G refused on every offer, every
+// pass, left no line anywhere for a month.
+function reportStockSync(r) {
+  const changes = (r && r.changes) || [];
+  const failed = changes.filter((c) => c && c.error);
+  const set = changes.filter((c) => c && c.set != null).length;
+  const relisted = changes.filter((c) => c && c.relisted).length;
+  const delisted = changes.filter((c) => c && c.delisted && !c.again).length;
+  const uncounted = changes.filter((c) => c && c.uncounted).length;
+  if (set || relisted || delisted) {
+    console.log(
+      "g2g stock sync: " + set + " quantity write(s), " + relisted + " relisted, " +
+        delisted + " delisted, of " + r.checked + " offer(s)" +
+        (uncounted ? " (" + uncounted + " could not be counted)" : ""),
+    );
+  }
+  // Every count failing is a broken read, not an empty shelf: nothing was
+  // written, and saying nothing would look exactly like a quiet healthy pass.
+  if (uncounted && uncounted === r.checked) {
+    console.error("g2g stock sync: could not count any of " + r.checked + " offer(s) — nothing was written");
+  }
+  if (failed.length) {
+    console.error(
+      "g2g stock sync: " + failed.length + " of " + r.checked + " offer(s) could not be updated — " +
+        failed[0].offer + ": " + failed[0].error +
+        (failed.length > 1 ? " (+" + (failed.length - 1) + " more)" : ""),
+    );
+  }
+  return { set, relisted, delisted, failed: failed.length, uncounted };
+}
+
+// Offers that sold out are rewritten to a bundle we can still deliver
+// (utils/g2gEvergreen.js; its own switch, autoFarm.g2gEvergreen). Required
+// here, at call time: that module counts stock through this one — and only
+// once the switch is on, so the module is not even loaded while it is off.
+async function runEvergreen() {
+  try {
+    // Switched off, there is still one thing to do: a rewrite the operator
+    // tool (or an earlier switched-on spell) left half done must be put back.
+    // A cheap look first, so the module stays unloaded when there is none.
+    if ((getAutoFarm() || {}).g2gEvergreen !== true) {
+      const held = await MarketplaceListing.exists({ marketplace: "g2g", status: "active", lastError: EVERGREEN_MARK });
+      if (!held) return null;
+    }
+    const r = await require("./g2gEvergreen").evergreenPass();
+    for (const line of (r && r.log) || []) console.log("g2g evergreen: " + line);
+    return r;
+  } catch (e) {
+    console.error("g2g evergreen error:", e.message);
+    return null;
+  }
 }
 
 let started = false;
@@ -1356,7 +1616,17 @@ function start() {
   // Both loops self-guard on the autoFarm flags, so starting them
   // unconditionally is a no-op until the operator flips them on.
   loop(deliverPendingOrders, DELIVER_TICK_MS, 75 * 1000, "fulfiller");
-  loop(syncStock, STOCK_TICK_MS, 6 * 60 * 1000, "stock sync");
+  // The evergreen pass rides the stock tick, after the sync and never beside
+  // it, so the two cannot write one offer at the same time.
+  loop(
+    async () => {
+      reportStockSync(await syncStock());
+      await runEvergreen();
+    },
+    STOCK_TICK_MS,
+    6 * 60 * 1000,
+    "stock sync",
+  );
   loop(sweepConfirmedFarmOrders, CONFIRM_SWEEP_MS, 4 * 60 * 1000, "farm confirm sweep");
   loop(sweepDeliveryProofs, PROOF_SWEEP_MS, 3 * 60 * 1000, "proof sweep");
 }
@@ -1546,6 +1816,14 @@ module.exports = {
   confirmOnG2g,
   realStockFor,
   syncStock,
+  reportStockSync,
+  runEvergreen,
+  orderPredatesRewrite,
+  orderPlacedAt,
+  _resetStockState: () => {
+    lastQtyWritten.clear();
+    stockPasses = 0;
+  },
   sweepDeliveryProofs,
   _resetProofState: () => proofState.clear(),
 };
