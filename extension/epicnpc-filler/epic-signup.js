@@ -433,7 +433,21 @@
     return (/\/id\/login\/mfa/i.test(location.pathname)&&/\bemail is invalid\b/i.test(text)) ||
       (/\/correction\/eula/i.test(location.pathname)&&/insufficient user authentication/i.test(text));
   }
+  function refreshAgreementContext() {
+    if(!/\/correction\/eula/i.test(location.pathname))return false;
+    try {
+      var key='epicgen.agreement-refresh.'+sessionId;
+      if(sessionStorage.getItem(key)==='1')return false;
+      sessionStorage.setItem(key,'1');
+      location.reload();
+      return true;
+    } catch(e) { return false; }
+  }
+
   async function resetAuthContext() {
+    // Registration can reach Store review before its auth context settles.
+    // Refresh that review once before requiring a full normal sign-in.
+    if(refreshAgreementContext())return;
     var result=await sw({type:'epicgen-reset-auth-context',sessionId:sessionId});
     if(!result.ok)throw new Error(result.error||'Login context recovery unavailable');
     banner('Restarting the incomplete Epic sign-in session…','info');

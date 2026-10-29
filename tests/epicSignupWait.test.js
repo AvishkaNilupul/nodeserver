@@ -58,3 +58,12 @@ test('storefront error templates do not stop successful authorization handoff',(
 test('dismissing a challenge without its SDK response does not resubmit',()=>{
  assert.equal(driver().continueAfterChallenge({seen:true,clearedAt:1,clicks:0},false),false);
 });
+
+test('agreement context refreshes at most once before normal sign-in recovery',()=>{
+ const source=fs.readFileSync(require.resolve('../extension/epicnpc-filler/epic-signup.js'),'utf8');
+ const start=source.lastIndexOf('  (async function () {');const values=new Map();let reloads=0;
+ const context={location:{hash:'#epicgen=test-session',pathname:'/id/login/correction/eula',reload(){reloads++;}},sessionStorage:{getItem:k=>values.get(k),setItem:(k,v)=>values.set(k,v)}};
+ vm.runInNewContext(source.slice(0,start)+'globalThis.api={refreshAgreementContext};})();',context);
+ assert.equal(context.api.refreshAgreementContext(),true);assert.equal(context.api.refreshAgreementContext(),false);assert.equal(reloads,1);
+ context.location.pathname='/id/login/mfa';assert.equal(context.api.refreshAgreementContext(),false);
+});
