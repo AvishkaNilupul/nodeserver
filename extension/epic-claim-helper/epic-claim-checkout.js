@@ -2,7 +2,11 @@
  if(window.__epicClaimCheckout)return;window.__epicClaimCheckout=true;
  const context=await chrome.runtime.sendMessage({type:'epicclaim-context'}).catch(()=>null);if(!context?.ok||context.job?.mode==='recover')return;
  const job=context.job;let clicked=false,done=false,emptyReceiptAt=0,lastClickAt=0,clickAttempts=0;
- const report=async(status,error='')=>{if(done)return;done=true;await chrome.runtime.sendMessage({type:'epicclaim-result',status,error});};
+ const report=async(status,error='',extra={})=>{if(done)return;done=true;await chrome.runtime.sendMessage({type:'epicclaim-result',status,error,...extra});};
+ window.addEventListener('message',event=>{
+  if(event.source!==window||event.origin!==location.origin||event.data?.source!=='epic-claim-network'||event.data.status!==429)return;
+  report('rate_limited','Epic returned HTTP 429; the claim queue is paused',{retryAfterSeconds:Number(event.data.retryAfterSeconds)||0});
+ });
  const visible=el=>!!el&&el.getBoundingClientRect().width>0&&el.getBoundingClientRect().height>0&&getComputedStyle(el).visibility!=='hidden';
  const timer=setInterval(async()=>{
   if(done){clearInterval(timer);return;}

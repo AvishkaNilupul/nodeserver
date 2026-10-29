@@ -93,3 +93,6 @@ utils/.playerauctions-refresh.stamp
 # refresh tokens, SOOP usernames). Never commit: the repository is public.
 scripts/outlooks.txt
 scripts/mail-usage.json
+
+# Shared Epic worker cooldown (runtime state, contains no credentials)
+_epic_claim_backoff.json*

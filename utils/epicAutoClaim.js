@@ -13,6 +13,7 @@
 // hundreds of confirms at Epic during a Mega Sale week (which is exactly
 // how you get the whole account pool suspended in one wave).
 const axios = require("axios");
+const rateBackoff = require("./epicClaimBackoff");
 const {offerState} = require("./epicOfferWindow");
 let claimRunning = false;
 const epic = require("./epicClient");
@@ -161,6 +162,8 @@ async function runClaim(acc, freebie, accessToken, opts) {
   if (window !== "live") return { attempted: false, status: window, error: "This giveaway is " + window };
   if (acc.sold) return { attempted: false, status: "sold" };
   if (acc.status === "needs_login") return { attempted: false, status: "needs_login" };
+  const retryAt = rateBackoff.until();
+  if (retryAt) return {attempted:false,status:"rate_limited",retryAt:new Date(retryAt).toISOString(),error:"Epic checkout is cooling down after HTTP 429"};
   const cfg = settings.getEpicAutoClaim();
   if (!cfg.enabled && !opts.manual) {
     return { attempted: false, status: "disabled" };
@@ -241,8 +244,12 @@ async function runClaim(acc, freebie, accessToken, opts) {
   } catch (err) {
     result = { status: WORKER_URL && ["ECONNREFUSED", "ECONNRESET", "ETIMEDOUT", "ECONNABORTED", "EHOSTUNREACH", "ENOTFOUND", "EPIPE"].includes(err.code) ? "worker_unavailable" : "error", error: err.message || String(err) };
   }
+  if (result.status === "rate_limited") {
+    try { result.retryAt = new Date(rateBackoff.block(result.retryAfterSeconds)).toISOString(); }
+    catch { result.error = "Epic rate limited claims; could not persist cooldown, check server storage"; }
+  }
   result = await verifyClaimResult(result, freebie.namespace, () => epic.getLibraryRecords(accessToken));
-  if (["busy", "worker_unavailable"].includes(result.status)) {
+  if (["busy", "worker_unavailable", "rate_limited"].includes(result.status)) {
     state.dayCounts[attemptDay] = Math.max(0, (state.dayCounts[attemptDay] || 0) - 1);
     return { attempted: false, ...result };
   }
@@ -284,6 +291,7 @@ function getStatus() {
     dailyCap: cfg.dailyCap,
     ...retryPolicy(cfg),
     todayCount: todayCount(),
+    rateLimitedUntil: rateBackoff.until() ? new Date(rateBackoff.until()).toISOString() : null,
     recent: state.recent.slice(0, 20),
   };
 }

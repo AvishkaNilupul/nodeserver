@@ -2,7 +2,7 @@ const test=require('node:test'),assert=require('node:assert/strict'),vm=require(
 async function run(text,{assigned=true,offer='1-game-offer',buttonText='Add to library'}={}) {
  let tick,clicks=0;const reports=[];const location={hostname:'store.epicgames.com',pathname:'/purchase',search:'?offers='+offer,hash:'#/free-checkout'};
  const button={innerText:buttonText,disabled:false,getBoundingClientRect:()=>({width:100,height:30}),click(){clicks++;location.hash='#/receipt';}};
- const context={window:{},location,URLSearchParams,document:{body:{innerText:text},querySelectorAll:()=>[button]},getComputedStyle:()=>({visibility:'visible'}),setInterval:fn=>{tick=fn;return 1;},clearInterval:()=>{},setTimeout:()=>{},chrome:{runtime:{sendMessage:async msg=>{
+ const context={window:{addEventListener(){}},location,URLSearchParams,document:{body:{innerText:text},querySelectorAll:()=>[button]},getComputedStyle:()=>({visibility:'visible'}),setInterval:fn=>{tick=fn;return 1;},clearInterval:()=>{},setTimeout:()=>{},chrome:{runtime:{sendMessage:async msg=>{
   if(msg.type==='epicclaim-context')return {ok:assigned,job:{namespace:'game',offerId:'offer',displayName:'right-account'}};
   reports.push(msg);return {ok:true};
  }}}};
@@ -43,13 +43,22 @@ test('a cleared hash with the checkout still visible is not an order confirmatio
  const source=fs.readFileSync(require.resolve('../extension/epic-claim-helper/epic-claim-checkout.js'),'utf8');
  let tick,timeout,clicks=0;const reports=[],location={hostname:'store.epicgames.com',pathname:'/purchase',search:'?offers=1-game-offer',hash:'#/free-checkout'};
  const button={innerText:'Add to library',disabled:false,getBoundingClientRect:()=>({width:1,height:1}),click(){clicks++;location.hash='#';}};
- await vm.runInNewContext(source,{window:{},Date,location,URLSearchParams,document:{body:{innerText:'right-account This is free. $0.00'},querySelectorAll:()=>[button]},getComputedStyle:()=>({visibility:'visible'}),setInterval:f=>(tick=f,1),clearInterval(){},setTimeout:f=>timeout=f,chrome:{runtime:{sendMessage:async m=>m.type==='epicclaim-context'?{ok:true,job:{namespace:'game',offerId:'offer',displayName:'right-account'}}:(reports.push(m),{ok:true})}}});
+ await vm.runInNewContext(source,{window:{addEventListener(){}},Date,location,URLSearchParams,document:{body:{innerText:'right-account This is free. $0.00'},querySelectorAll:()=>[button]},getComputedStyle:()=>({visibility:'visible'}),setInterval:f=>(tick=f,1),clearInterval(){},setTimeout:f=>timeout=f,chrome:{runtime:{sendMessage:async m=>m.type==='epicclaim-context'?{ok:true,job:{namespace:'game',offerId:'offer',displayName:'right-account'}}:(reports.push(m),{ok:true})}}});
  await tick();await tick();assert.equal(clicks,1);assert.equal(reports.length,0);await timeout();assert.equal(reports[0].status,'error');
 });
 
 test('an enabled free checkout retries a missed initial click after ten seconds',async()=>{
  let tick,clock=1000,clicks=0;const reports=[],location={hostname:'store.epicgames.com',pathname:'/purchase',search:'?offers=1-game-offer',hash:'#/free-checkout'};
  const button={innerText:'Add to library',disabled:false,getBoundingClientRect:()=>({width:1,height:1}),click(){if(++clicks===2)location.hash='#/receipt';}};
- await vm.runInNewContext(fs.readFileSync(require.resolve('../extension/epic-claim-helper/epic-claim-checkout.js'),'utf8'),{window:{},Date:{now:()=>clock},location,URLSearchParams,document:{body:{innerText:'right-account This is free. $0.00'},querySelectorAll:()=>[button]},getComputedStyle:()=>({visibility:'visible'}),setInterval:f=>(tick=f,1),clearInterval(){},setTimeout(){},chrome:{runtime:{sendMessage:async m=>m.type==='epicclaim-context'?{ok:true,job:{namespace:'game',offerId:'offer',displayName:'right-account'}}:(reports.push(m),{ok:true})}}});
+ await vm.runInNewContext(fs.readFileSync(require.resolve('../extension/epic-claim-helper/epic-claim-checkout.js'),'utf8'),{window:{addEventListener(){}},Date:{now:()=>clock},location,URLSearchParams,document:{body:{innerText:'right-account This is free. $0.00'},querySelectorAll:()=>[button]},getComputedStyle:()=>({visibility:'visible'}),setInterval:f=>(tick=f,1),clearInterval(){},setTimeout(){},chrome:{runtime:{sendMessage:async m=>m.type==='epicclaim-context'?{ok:true,job:{namespace:'game',offerId:'offer',displayName:'right-account'}}:(reports.push(m),{ok:true})}}});
  await tick();clock+=9000;await tick();assert.equal(clicks,1);clock+=1000;await tick();await tick();assert.equal(clicks,2);assert.equal(reports[0].status,'submitted');
+});
+
+test('a real checkout 429 signal stops clicks and reports the retry delay',async()=>{
+ let listener,tick,clicks=0;const reports=[],origin='https://store.epicgames.com';const win={addEventListener:(name,f)=>listener=f};
+ const button={innerText:'Add to library',disabled:false,getBoundingClientRect:()=>({width:1,height:1}),click:()=>clicks++};
+ await vm.runInNewContext(fs.readFileSync(require.resolve('../extension/epic-claim-helper/epic-claim-checkout.js'),'utf8'),{window:win,Date,location:{origin,hostname:'store.epicgames.com',pathname:'/purchase',search:'?offers=1-game-offer',hash:'#/free-checkout'},URLSearchParams,document:{body:{innerText:'right-account This is free. $0.00'},querySelectorAll:()=>[button]},getComputedStyle:()=>({visibility:'visible'}),setInterval:f=>(tick=f,1),clearInterval(){},setTimeout(){},chrome:{runtime:{sendMessage:async m=>m.type==='epicclaim-context'?{ok:true,job:{namespace:'game',offerId:'offer',displayName:'right-account'}}:(reports.push(m),{ok:true})}}});
+ listener({source:{},origin,data:{source:'epic-claim-network',status:429}});assert.equal(reports.length,0);
+ listener({source:win,origin,data:{source:'epic-claim-network',status:429,retryAfterSeconds:120}});await tick();
+ assert.equal(clicks,0);assert.equal(reports[0].status,'rate_limited');assert.equal(reports[0].retryAfterSeconds,120);
 });

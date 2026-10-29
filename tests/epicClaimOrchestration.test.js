@@ -4,6 +4,7 @@ function setup({ownedAfter=false,alreadyOwned=false,worker='submitted',enabled=t
  const epic={getLibraryRecords:async()=>++reads===1?(alreadyOwned?[{namespace:'game'}]:[]):(ownedAfter?[{namespace:'game'}]:[]),autoClaimFreebie:async()=>{purchases++;return {status:worker};}};
  vm.runInNewContext(fs.readFileSync(require.resolve('../utils/epicAutoClaim'),'utf8'),{module,exports:module.exports,process:{env:{}},Buffer,Date,Map,Set,console,require:name=>{
  if(name==='./epicOfferWindow')return require('../utils/epicOfferWindow');
+ if(name==='./epicClaimBackoff')return {until:()=>0,block:()=>Date.now()+60000};
  if(name==='axios')return {};
  if(name==='./epicClient')return epic;
  if(name==='./epicAccountToken')return {accountAccessToken:async()=>{if(revokedAfter){const e=Error('Login revoked');e.epicCode='invalid_grant';throw e;}return 'fresh';}};

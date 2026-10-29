@@ -23,7 +23,7 @@ test('repeated starts join one detached serial queue and public state is isolate
   await run();assert.equal(max,1);assert.equal(batch.status().completed,2);assert.equal(batch.status().state,'complete');
 });
 test('captcha and unavailable Mac pause before the next account', async () => {
-  for(const status of ['needs_captcha','worker_unavailable','busy','daily_cap']) {
+  for(const status of ['needs_captcha','worker_unavailable','busy','daily_cap','rate_limited']) {
     let run,calls=0;const batch=createClaimBatch({plan:async()=>jobs(),schedule:f=>run=f,
       execute:async()=>{calls++;return {status,error:'Needs attention'};}});
     await batch.start();await run();assert.equal(calls,1);assert.equal(batch.status().state,'paused');

@@ -48,3 +48,24 @@ silently before planning; that refresh sends no Telegram messages or extra claim
 The watcher polls at most every 15 minutes and schedules known start/end boundaries.
 Concurrent claim calls share one process-level lock; a worker transport outage
 returns unavailable without consuming retry history or a daily-cap slot.
+
+## Checkout completion and HTTP 429
+
+A blank route during purchase is not a receipt. The helper waits for explicit
+completion or a stable empty receipt, leaves submitted tabs alive briefly, and
+ownership verification allows delayed entitlement propagation. An unchanged,
+enabled free checkout can retry its initial click at most three times, rechecking
+identity and zero price each time. Regional blocks and paid checkouts report
+explicit failures instead of silently waiting for a timeout.
+
+The full-fleet test on 2026-10-30 JST confirmed ten current-game entitlements,
+two explicit Russian-region blocks, then HTTP 429 from v2 confirm-order in
+Chrome's console. A free checkout can remain visible after this server response.
+The helper's page-world metadata observer reports that response without reading
+request headers or bodies. This uses Chrome's declarative content-script world
+support: https://developer.chrome.com/docs/extensions/reference/manifest/content-scripts.
+A 429 pauses the whole queue and persists a shared server cooldown in the ignored
+`_epic_claim_backoff.json`. It honors Retry-After where available, otherwise waits
+six hours (a fallback, not a promise about Epic's reset time). Cooldown survives
+restarts, applies to manual claims too, and does not consume per-account retry
+history or the daily cap. No region or account settings are changed.

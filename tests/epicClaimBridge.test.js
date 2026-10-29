@@ -34,7 +34,7 @@ test('reconnection credentials are accepted only from server auth; completion re
 });
 
 test('explicit regional and paid-checkout failures finish the assigned job',()=>{
- for(const status of ['region_unavailable','not_free']){
+ for(const status of ['region_unavailable','not_free','rate_limited']){
   const {app,extensionToken}=createBridge({express:fakeExpress,token});call(app,'GET /extension/status',extensionToken);
   const response=call(app,'POST /claim',token,job),assigned=call(app,'GET /extension/next',extensionToken).body.job;
   assert.equal(call(app,'POST /extension/result',extensionToken,{...assigned,status,error:'Checkout unavailable'}).code,200);

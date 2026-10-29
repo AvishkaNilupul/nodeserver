@@ -41,7 +41,7 @@ function createClaimBatch({plan, execute, schedule = setImmediate}) {
         job.state = result.status || 'error';
         job.message = String(result.error || '').slice(0, 300);
         if (result.tokenNeedsLogin) job.message = 'Account needs reconnection';
-        if (['needs_captcha', 'worker_unavailable', 'busy', 'daily_cap'].includes(job.state)) {
+        if (['needs_captcha', 'worker_unavailable', 'busy', 'daily_cap', 'rate_limited'].includes(job.state)) {
           batch.state = 'paused'; batch.reason = job.message || job.state; break;
         }
         if (!['claimed', 'already_owned', 'skipped', 'error'].includes(job.state)) {
