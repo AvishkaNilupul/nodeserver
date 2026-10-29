@@ -1477,6 +1477,10 @@ async function salesView(limit = 100) {
   const now = Date.now();
   return rows.map((r) => ({
     orderId: r.orderId,
+    market: r.market || "eldorado",
+    submittedAt: r.submittedAt || null,
+    deliveredAt: r.deliveredAt || null,
+    releasedAt: r.releasedAt || null,
     offerId: r.offerId,
     listingId: r.listingId ? String(r.listingId) : "",
     title: r.title,
@@ -1574,11 +1578,16 @@ async function overview({ withOthers = true } = {}) {
   const ctx = await stockContext();
   const stock = ctx.accounts.map((a) => stockRow(a, readinessOf(a, ctx)));
   const listings = await EpicListing.find({}).sort({ createdAt: -1 }).limit(50).lean();
-  const [sales, proxy, state, permission] = await Promise.all([
+  const [sales, proxy, state, permission, g2g] = await Promise.all([
     salesView(),
     outlook.proxyHealth(),
     EpicSalesState.findById("main").lean(),
     eldoradoPermission(),
+    // G2G offers delivered by utils/epicG2g. Loaded here, not at the top:
+    // that module requires this one.
+    Promise.resolve()
+      .then(() => require("./epicG2g").panelView(ctx))
+      .catch((e) => ({ error: (e && e.message) || String(e), offers: [] })),
   ]);
   return {
     config: { syncEnabled: ctx.cfg.syncEnabled, sessionDays: ctx.cfg.sessionDays, allowSharedInbox: ctx.cfg.allowSharedInbox },
@@ -1599,6 +1608,7 @@ async function overview({ withOthers = true } = {}) {
     groups: groupsOf(stock, ctx.cfg),
     listings: listings.map(listingView),
     sales,
+    g2g,
     others: withOthers ? await otherEpicOffers(listings) : { offers: [] },
   };
 }
@@ -1677,6 +1687,8 @@ module.exports = {
   inboxVerdict,
   onListedEmailChanged,
   providerUrl,
+  // utils/epicG2g picks its accounts with the same readiness rules.
+  stockContext,
   // pure, for tests
   gameTitles,
   gameKey,

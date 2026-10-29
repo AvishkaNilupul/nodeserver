@@ -33,6 +33,18 @@ const epicSaleSchema = new mongoose.Schema(
     needsAttention: { type: Boolean, default: false, index: true },
     note: { type: String, default: "" },
     lastCheckedAt: { type: Date, default: null },
+    // G2G (utils/epicG2g): we deliver these ourselves through the order page.
+    // submittedAt = the account form was sent; deliveredAt = G2G's order shows
+    // it delivered. releasedAt = the order was cancelled before delivery and
+    // the accounts went back on the shelf.
+    submittedAt: { type: Date, default: null },
+    submitCount: { type: Number, default: 0 },
+    deliveredAt: { type: Date, default: null },
+    alertedAt: { type: Date, default: null },
+    releasedAt: { type: Date, default: null },
+    // Automatic delivery stopped for this order after an unexpected error: the
+    // owner was paged to deliver it by hand, so nothing is sent by itself.
+    held: { type: Boolean, default: false },
   },
   { timestamps: true },
 );

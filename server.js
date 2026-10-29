@@ -1045,6 +1045,10 @@ mongoose
     // buyers depend on it. Reads Eldorado only while a listing is live; off
     // from the Listings & sales tab. See utils/epicSales.js.
     require("./utils/epicSales").start();
+    // Epic accounts on G2G: the G2G fulfiller delivers their orders through
+    // utils/epicG2g; this sweep catches cancelled orders (accounts back on the
+    // shelf) and keeps the linked offers' stock numbers right.
+    require("./utils/epicG2g").start();
     // Renters: stop the bots of renters whose lease just expired (the
     // requireRenter middleware already blocks their dashboard access, but this
     // makes farming actually halt without waiting for a manual suspend).

@@ -16,6 +16,29 @@ const epicSalesStateSchema = new mongoose.Schema(
     // accounts. The buyer only ever sees mail from Epic on the mail page, never
     // the inbox itself, so listing them is allowed unless this is switched off.
     allowSharedInbox: { type: Boolean, default: true },
+    // G2G offers whose orders utils/epicG2g delivers by itself, through the
+    // order page's account form. The offer itself is made by hand on g2g.com;
+    // linking it names the games every delivered account must own.
+    g2gOffers: [
+      {
+        _id: false,
+        offerId: { type: String, required: true },
+        serviceId: { type: String, default: "" },
+        brandId: { type: String, default: "" },
+        title: { type: String, default: "" },
+        games: [{ type: String }],
+        gameKey: { type: String, default: "" },
+        enabled: { type: Boolean, default: true },
+        // Mail page window for this market (G2G asks sellers for >= 14 days).
+        sessionDays: { type: Number, default: 14 },
+        // Keep the offer's stock number equal to the accounts ready to deliver.
+        syncStock: { type: Boolean, default: true },
+        lastStockSyncAt: { type: Date, default: null },
+        lastStock: { type: Number, default: null },
+        linkedAt: { type: Date, default: null },
+        linkedBy: { type: String, default: "" },
+      },
+    ],
     lastTickAt: { type: Date, default: null },
     lastTickOk: { type: Boolean, default: true },
     lastTickNote: { type: String, default: "" },

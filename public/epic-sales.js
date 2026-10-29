@@ -100,6 +100,7 @@
         </div>
       </div>
       <div class="card"><h2>Ready to list</h2><p class="hint">Accounts that can go on sale now, grouped by the games they own. An account sits on one listing at a time, so it can never be sold twice.</p><div id="es-groups"></div></div>
+      <div class="card"><h2>G2G (automatic delivery)</h2><p class="hint">G2G offers you made on g2g.com and linked here. When a buyer pays, the server picks a ready account that owns the offer's games, opens its mail page, and fills G2G's account form on the order page (the way G2G wants accounts delivered, never the chat). If it can't, Telegram tells you what to do.</p><div id="es-g2g"></div></div>
       <div class="card"><h2>Listings</h2><div id="es-listings"></div></div>
       <div class="card"><h2>Sales</h2><div id="es-sales"></div></div>
       <div class="card"><h2>All accounts</h2><p class="hint">Why each account can or can't be sold right now.</p><div id="es-stock"></div></div>
@@ -196,6 +197,7 @@
     renderHealth();
     renderSettings();
     renderGroups();
+    renderG2g();
     renderListings();
     renderSales();
     renderStock();
@@ -251,7 +253,7 @@
       '<label class="es-switch"><input type="checkbox" id="es-cfg-sync"' + (c.syncEnabled ? " checked" : "") + "> Track sales automatically</label>" +
       '<label class="es-switch">Mail page open for <select id="es-cfg-days">' +
       days.map((d) => '<option value="' + d + '"' + (d === c.sessionDays ? " selected" : "") + ">" + d + " day" + (d > 1 ? "s" : "") + "</option>").join("") +
-      "</select> after a sale</label>" +
+      "</select> after an Eldorado sale (G2G offers have their own, below)</label>" +
       '<label class="es-switch" title="Buyers only ever see Epic\'s emails on the mail page, never the inbox itself."><input type="checkbox" id="es-cfg-shared"' +
       (c.allowSharedInbox ? " checked" : "") + "> Sell accounts whose inbox is shared with SOOP</label>";
     const save = async (patch) => {
@@ -301,7 +303,8 @@
             '</div><div>' + pill(g.count + " account" + (g.count > 1 ? "s" : ""), "green") + "</div></div>" +
             '<div class="es-meta">' + esc(g.accounts.map((a) => a.label).join(", ")) + "</div>" +
             (warn.length ? '<ul class="es-reasons">' + warn.map((w) => "<li>" + esc(w) + "</li>").join("") + "</ul>" : "") +
-            '<div class="es-actions"><button class="btn btn-sm btn-primary" type="button" data-group="' + i + '">List on Eldorado</button></div></div>'
+            '<div class="es-actions"><button class="btn btn-sm btn-primary" type="button" data-group="' + i + '">List on Eldorado</button>' +
+            '<button class="btn btn-sm" type="button" data-g2g-group="' + i + '">Sell on G2G</button></div></div>'
           );
         })
         .join("") +
@@ -309,6 +312,89 @@
     $("es-groups").querySelectorAll("[data-group]").forEach((b) =>
       b.addEventListener("click", () => openCreate(groups[Number(b.dataset.group)])),
     );
+    $("es-groups").querySelectorAll("[data-g2g-group]").forEach((b) =>
+      b.addEventListener("click", () => linkG2g(groups[Number(b.dataset.g2gGroup)], b)),
+    );
+  }
+
+  // ---- G2G ------------------------------------------------------------------
+  async function linkG2g(group, b) {
+    const offerId = prompt(
+      "Make the offer on g2g.com first (Game Accounts → the game, Manual delivery), then paste its offer number here (it starts with G, e.g. G1793242175124IO).\n\n" +
+        "Every buyer of that offer will get one account that owns: " + group.games.join(" + "),
+    );
+    if (!offerId) return;
+    return busy(b, async () => {
+      await post("/api/epic/sales/g2g/link", { offerId: offerId.trim(), gameKey: group.gameKey });
+      say("Linked. Orders on it are delivered automatically.");
+      await load();
+    });
+  }
+
+  function renderG2g() {
+    const g = data.g2g || {};
+    const offers = g.offers || [];
+    if (g.error) {
+      $("es-g2g").innerHTML = '<div class="es-err">' + esc(g.error) + "</div>";
+      return;
+    }
+    if (!offers.length) {
+      $("es-g2g").innerHTML = '<div class="muted">No G2G offer linked. Use “Sell on G2G” on a group above.</div>';
+      return;
+    }
+    $("es-g2g").innerHTML =
+      '<div class="es-list">' +
+      offers
+        .map((o) => {
+          const pills = [
+            o.enabled ? pill("automatic delivery on", "green") : pill("automatic delivery off", "amber"),
+            pill((o.ready == null ? "?" : o.ready) + " ready", o.ready ? "green" : "red"),
+            pill("mail page " + o.sessionDays + " days"),
+            o.syncStock ? pill("stock synced" + (o.lastStock != null ? " (" + o.lastStock + ")" : "")) : pill("stock by hand"),
+          ];
+          return (
+            '<div class="es-item"><div class="es-item-head"><div class="es-item-title">' + esc(o.title || o.offerId) + "</div><div>" + pills.join(" ") + "</div></div>" +
+            '<div class="es-meta">Offer ' + esc(o.offerId) + " · games: " + esc((o.games || []).join(" + ")) +
+            (o.lastStockSyncAt ? " · stock last set " + esc(ago(o.lastStockSyncAt)) : "") + "</div>" +
+            (g.siteUrl ? "" : '<div class="es-err">PUBLIC_BASE_URL is not set, so the delivery note can\'t name the mail page.</div>') +
+            '<div class="es-actions">' +
+            '<button class="btn btn-sm" type="button" data-g2g-act="' + (o.enabled ? "off" : "on") + '" data-id="' + esc(o.offerId) + '">' + (o.enabled ? "Turn automatic delivery off" : "Turn automatic delivery on") + "</button>" +
+            '<button class="btn btn-sm" type="button" data-g2g-act="' + (o.syncStock ? "stock-off" : "stock-on") + '" data-id="' + esc(o.offerId) + '">' + (o.syncStock ? "Stop syncing stock" : "Sync stock") + "</button>" +
+            '<button class="btn btn-sm" type="button" data-g2g-act="unlink" data-id="' + esc(o.offerId) + '">Unlink</button>' +
+            "</div></div>"
+          );
+        })
+        .join("") +
+      "</div>";
+    $("es-g2g").querySelectorAll("[data-g2g-act]").forEach((b) => b.addEventListener("click", () => g2gAction(b.dataset.g2gAct, b.dataset.id, b)));
+  }
+
+  async function g2gAction(act, id, b) {
+    const url = "/api/epic/sales/g2g/" + encodeURIComponent(id);
+    if (act === "unlink") {
+      if (!confirm("Unlink this G2G offer? Its orders will page you to deliver by hand instead. The offer stays on G2G.")) return;
+      return busy(b, async () => { await post(url + "/unlink"); say("Unlinked."); await load(); });
+    }
+    const patch = { on: { enabled: true }, off: { enabled: false }, "stock-on": { syncStock: true }, "stock-off": { syncStock: false } }[act];
+    if (!patch) return;
+    return busy(b, async () => { await post(url + "/settings", patch); say("Saved."); await load(); });
+  }
+
+  async function g2gDetails(orderId, b) {
+    if (!confirm("Show this order's delivery details (Epic password included)? Paste them only into the account form on the G2G order page, never the chat.")) return;
+    return busy(b, async () => {
+      const j = await post("/api/epic/sales/g2g/sales/" + encodeURIComponent(orderId) + "/details", {});
+      const d = j.details || {};
+      $("es-access-text").value = (d.accounts || [])
+        .map((a) => a.fields.map((f) => f[0] + ": " + f[1]).join("\n"))
+        .join("\n\n-----\n\n");
+      $("es-access-title").textContent = "Delivery details for G2G order " + d.orderId;
+      $("es-access-warn").textContent = d.delivered
+        ? "G2G already shows this order delivered. A new mail page password was made because the old one is never stored; give it to the buyer only if they ask, in the account form."
+        : "Fill these into the account form on the G2G order page (Account ID, Password, …). Never paste them into the chat.";
+      openModal("es-access-modal");
+      await load();
+    });
   }
 
   function statusPill(s) {
@@ -478,21 +564,36 @@
               return st + ' <span class="muted">' + (m.viewCount ? "opened " + m.viewCount + "×, last " + esc(ago(m.lastViewAt)) : "not opened yet") + "</span>";
             })
             .join("<br>");
-          const stTone = /disputed|canceled/i.test(s.orderState) ? "red" : /completed/i.test(s.orderState) ? "green" : "";
+          const stTone = /disputed|cancel/i.test(s.orderState) ? "red" : /completed|delivered/i.test(s.orderState) ? "green" : "";
+          const isG2g = s.market === "g2g";
+          const action = isG2g
+            ? s.accounts.length
+              ? '<button class="btn btn-sm" type="button" data-g2g-details="' + esc(s.orderId) + '">Show delivery details</button>'
+              : ""
+            : s.accounts.length
+              ? '<button class="btn btn-sm" type="button" data-resend="' + esc(s.orderId) + '">New mail password</button>'
+              : "";
           return (
             "<tr" + (s.needsAttention ? ' style="background:rgba(220,38,38,.06)"' : "") + '><td data-label="When">' + esc(when(s.orderCreatedAt)) + "</td>" +
-            '<td data-label="Listing">' + esc(s.title) + "</td>" +
+            '<td data-label="Listing">' + pill(isG2g ? "G2G" : "Eldorado") + " " + esc(s.title) +
+            (isG2g
+              ? '<div class="muted">' +
+                (s.deliveredAt ? "delivered " + esc(ago(s.deliveredAt)) : s.releasedAt ? "cancelled, account back on the shelf" : s.submittedAt ? "sent to G2G, waiting for it to confirm" : "being delivered") +
+                "</div>"
+              : "") +
+            "</td>" +
             '<td data-label="Account">' + (s.accounts.length ? esc(s.accounts.map((a) => a.label).join(", ")) : '<span class="bad">not matched</span>') + "</td>" +
             '<td data-label="Order">' + pill(s.orderState || "?", stTone) + " " + esc(money(s.priceUsd)) +
             '<div class="muted">' + esc(s.orderId) + (s.buyerUsername ? " · " + esc(s.buyerUsername) : "") + "</div>" +
             (s.note ? '<div class="es-err">' + esc(s.note) + "</div>" : "") + "</td>" +
             '<td data-label="Mail page">' + mail + "</td>" +
-            '<td data-label="">' + (s.accounts.length ? '<button class="btn btn-sm" type="button" data-resend="' + esc(s.orderId) + '">New mail password</button>' : "") + "</td></tr>"
+            '<td data-label="">' + action + "</td></tr>"
           );
         })
         .join("") +
       "</tbody></table></div>";
     $("es-sales").querySelectorAll("[data-resend]").forEach((b) => b.addEventListener("click", () => resend(b.dataset.resend, b)));
+    $("es-sales").querySelectorAll("[data-g2g-details]").forEach((b) => b.addEventListener("click", () => g2gDetails(b.dataset.g2gDetails, b)));
   }
 
   async function resend(orderId, b) {
@@ -500,6 +601,8 @@
     return busy(b, async () => {
       const j = await post("/api/epic/sales/sales/" + encodeURIComponent(orderId) + "/resend", {});
       $("es-access-text").value = j.access.message;
+      $("es-access-title").textContent = "New mail page password";
+      $("es-access-warn").textContent = "Copy this now. The password is shown only once. Send it to the buyer in the Eldorado order chat.";
       openModal("es-access-modal");
       await load();
     });
@@ -597,8 +700,8 @@
       </div>
       <div class="modal-wrap es-modal" id="es-access-modal">
         <div class="modal">
-          <h3>New mail page password</h3>
-          <div class="warn">Copy this now. The password is shown only once. Send it to the buyer in the Eldorado order chat.</div>
+          <h3 id="es-access-title">New mail page password</h3>
+          <div class="warn" id="es-access-warn">Copy this now. The password is shown only once. Send it to the buyer in the Eldorado order chat.</div>
           <textarea id="es-access-text" readonly></textarea>
           <div class="modal-actions">
             <button class="btn" type="button" data-close="es-access-modal">Close</button>

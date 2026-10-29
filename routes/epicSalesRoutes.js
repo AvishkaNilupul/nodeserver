@@ -156,4 +156,55 @@ router.post(
   handle(async (req) => ({ access: await sales.resendAccess(req.params.orderId, actorOf(req), (req.body || {}).days) })),
 );
 
+// ---- G2G: offers made by hand on g2g.com, delivered by utils/epicG2g -------
+
+function g2g() {
+  return require("../utils/epicG2g");
+}
+
+router.post(
+  "/api/epic/sales/g2g/link",
+  requireSuperadmin,
+  handle(async (req) => {
+    const b = req.body || {};
+    return {
+      offer: await g2g().linkOffer(
+        {
+          offerId: String(b.offerId || ""),
+          gameKey: b.gameKey != null ? String(b.gameKey) : "",
+          games: Array.isArray(b.games) ? b.games.map(String) : [],
+          sessionDays: b.sessionDays,
+          enabled: b.enabled !== false,
+        },
+        actorOf(req),
+      ),
+    };
+  }),
+);
+
+router.post(
+  "/api/epic/sales/g2g/:offerId/settings",
+  requireSuperadmin,
+  handle(async (req) => {
+    const b = req.body || {};
+    const patch = {};
+    if (typeof b.enabled === "boolean") patch.enabled = b.enabled;
+    if (typeof b.syncStock === "boolean") patch.syncStock = b.syncStock;
+    if (b.sessionDays != null) patch.sessionDays = b.sessionDays;
+    return { offer: await g2g().setLink(req.params.offerId, patch) };
+  }),
+);
+
+router.post(
+  "/api/epic/sales/g2g/:offerId/unlink",
+  requireSuperadmin,
+  handle(async (req) => g2g().unlinkOffer(req.params.offerId)),
+);
+
+router.post(
+  "/api/epic/sales/g2g/sales/:orderId/details",
+  requireSuperadmin,
+  handle(async (req) => ({ details: await g2g().deliveryDetails(req.params.orderId) })),
+);
+
 module.exports = router;

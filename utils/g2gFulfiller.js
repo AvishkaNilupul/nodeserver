@@ -1144,8 +1144,11 @@ async function deliverPendingOrders() {
       // handing over archive stock — it has no stock source at all, so the
       // bundle path would park it as "manual-delivery listing" forever.
       // deliverFarmOrder returns null for anything that is not a rent-farm
-      // order, which is what routes the rest to the bundle path.
+      // order, which is what routes the rest to the bundle path. An order on
+      // a linked Epic Games account offer goes first to utils/epicG2g, which
+      // delivers through the order page's account form (null = not one).
       r =
+        (await epicAccountOrder(order, { dryRun })) ||
         (await farmService.deliverFarmOrder(order, { dryRun })) ||
         (await deliverOrder(order, { dryRun }));
     } catch (e) {
@@ -1662,7 +1665,32 @@ async function sweepConfirmedFarmOrders() {
 // count on G2G is the record.
 const proofState = new Map(); // orderItemId -> { tries, nextAt, done, paged }
 
+// Epic Games account offers (utils/epicG2g). Loaded lazily and fenced: if that
+// module cannot load, the order falls through to the paths below, whose
+// "no listing row" page still reaches the owner.
+async function epicAccountOrder(order, opts) {
+  let mod;
+  try {
+    mod = require("./epicG2g");
+  } catch (e) {
+    console.error("g2g fulfiller: epicG2g unavailable:", e.message);
+    return null;
+  }
+  return mod.deliverOrder(order, opts);
+}
+
+async function epicProofFor(orderItemId) {
+  try {
+    return await require("./epicG2g").proofFor(orderItemId);
+  } catch {
+    return null;
+  }
+}
+
 async function sentByUs(orderItemId) {
+  // An Epic account delivered through the order page's account form.
+  const epic = await epicProofFor(orderItemId);
+  if (epic) return epic;
   const listing = await MarketplaceListing.findOne({ marketplace: "g2g", "units.orderId": orderItemId });
   const units = listing ? unitsForOrder(listing, orderItemId).filter((u) => u.messagedAt) : [];
   if (units.length) {
@@ -1752,8 +1780,8 @@ async function sweepDeliveryProofs({ now = Date.now() } = {}) {
         when: ours.sentAt ? new Date(ours.sentAt) : new Date(now),
         sellerName: G2G_SELLER_NAME,
         market: "G2G",
-        method: "Sent to the buyer in the G2G chat",
-        banner: "The account credentials were sent to the buyer in the G2G chat for this order.",
+        method: ours.method || "Sent to the buyer in the G2G chat",
+        banner: ours.banner || "The account credentials were sent to the buyer in the G2G chat for this order.",
       });
       await mp.g2gUploadDeliveryProof(id, png);
       out.uploaded++;

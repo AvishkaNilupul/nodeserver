@@ -3721,6 +3721,46 @@ async function g2gDeliveryProofs(orderItemId) {
   }
 }
 
+// ---- Game Accounts: the account form on the order page --------------
+//
+// A Game Accounts offer with MANUAL delivery is delivered through the order
+// page itself: the seller fills the brand's account form and G2G shows it to
+// the buyer (www.g2g.com seller-order-item + g-order-item-stocks-seller chunks,
+// read 2026-10-29: "Submit account" -> INVENTORY.CREATE). It is open once the
+// order is "delivering" (start_deliver, then mark_as_delivering).
+//
+// The form's fields, in sort_order. Section/header rows carry no input_field.
+async function g2gFormTemplate(serviceId, brandId) {
+  if (!serviceId || !brandId) throw new Error("G2G form template needs service and brand");
+  const p = await g2gRequest(
+    "get",
+    "/offer/form_template/service/" + encodeURIComponent(serviceId) + "/brand/" + encodeURIComponent(brandId),
+    { what: "G2G account form" },
+  );
+  return (p && p.results) || [];
+}
+
+// Submit accounts for a paid order: one CSV row per account, the values of the
+// form's input fields in sort_order (G2G's page builds it with csv-string's
+// stringify). G2G answers AT ONCE with { order_item_id, upload_requested_at }
+// and checks the rows in a background job — verified 2026-10-29: a made-up
+// order id gets the same 200. So the answer is not a delivery: read the order
+// back (g2gOrder -> delivered_qty / order_inventories) before calling it done.
+async function g2gSubmitOrderAccounts(orderItemId, rows) {
+  if (!orderItemId) throw new Error("G2G order_item_id is required");
+  const list = (rows || []).map(String).filter((r) => r.trim());
+  if (!list.length) throw new Error("G2G submit: no account rows");
+  return g2gRequest("post", "/inventory", {
+    body: {
+      order_item_id: String(orderItemId),
+      inventories: list.map((content) => ({ content })),
+      seller_id: g2gSellerId(),
+    },
+    what: "G2G submit account",
+    timeout: 60000,
+  });
+}
+
 // ---- chat ---------------------------------------------------------
 
 // Create-or-fetch our own SendBird chat profile. The POST (unlike the GET at
@@ -6761,6 +6801,8 @@ module.exports = {
   g2gUploadDeliveryProof,
   g2gDeliveries,
   g2gDeliveryProofs,
+  g2gFormTemplate,
+  g2gSubmitOrderAccounts,
   g2gSellerId,
   g2gChatProfile,
   g2gOpenDmChannel,
