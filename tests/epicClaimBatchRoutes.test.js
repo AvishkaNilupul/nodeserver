@@ -13,7 +13,7 @@ function setup() {
     accountAccessToken:async()=>{assert.equal(current.sold,undefined);return 'access';},
     epicAutoClaim:{attemptAutoClaim:async(a,f,t,o)=>{assert.equal(o.manual,true);claims++;return {status:'claimed'};}},
     epicClaimer:{syncLibrary:async()=>syncs++},
-    require:()=>({...real,createClaimBatch:deps=>real.createClaimBatch({...deps,schedule:f=>run=f})})};
+    require:name=>name.includes('epicWatcher')?{refreshIfStale:async()=>{}}:({...real,createClaimBatch:deps=>real.createClaimBatch({...deps,schedule:f=>run=f})})};
   vm.runInNewContext(code+'globalThis.batch=claimBatch;',context);
   return {routes,auth,batch:context.batch,run:()=>run(),sold:()=>current={...a,sold:true},expire:()=>f.endDate=new Date(1),claims:()=>claims,syncs:()=>syncs};
 }

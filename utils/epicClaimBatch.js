@@ -3,11 +3,7 @@ const crypto = require('crypto');
 function eligible(account) {
   return account && !account.sold && account.status === 'ok';
 }
-function live(offer, now = Date.now()) {
-  return offer && offer.active && !offer.upcoming &&
-    (!offer.startDate || new Date(offer.startDate).getTime() <= now) &&
-    (!offer.endDate || new Date(offer.endDate).getTime() > now);
-}
+const {live} = require('./epicOfferWindow');
 function planClaims(accounts, offers, now = Date.now()) {
   const jobs = [], seen = new Set();
   for (const account of accounts.filter(eligible)) {

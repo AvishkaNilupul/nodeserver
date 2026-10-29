@@ -3,6 +3,7 @@ function setup({ownedAfter=false,alreadyOwned=false,worker='submitted',enabled=t
  let reads=0,purchases=0;const module={exports:{}};
  const epic={getLibraryRecords:async()=>++reads===1?(alreadyOwned?[{namespace:'game'}]:[]):(ownedAfter?[{namespace:'game'}]:[]),autoClaimFreebie:async()=>{purchases++;return {status:worker};}};
  vm.runInNewContext(fs.readFileSync(require.resolve('../utils/epicAutoClaim'),'utf8'),{module,exports:module.exports,process:{env:{}},Buffer,Date,Map,Set,console,require:name=>{
+ if(name==='./epicOfferWindow')return require('../utils/epicOfferWindow');
  if(name==='axios')return {};
  if(name==='./epicClient')return epic;
  if(name==='./epicAccountToken')return {accountAccessToken:async()=>{if(revokedAfter){const e=Error('Login revoked');e.epicCode='invalid_grant';throw e;}return 'fresh';}};
@@ -12,7 +13,7 @@ function setup({ownedAfter=false,alreadyOwned=false,worker='submitted',enabled=t
  if(name==='./secretBox')return {decrypt:v=>v};throw Error(name);
  }});
  const a={accountId:'a'.repeat(32),sold,autoClaimLog:[],save:async()=>{}};
- return {run:opts=>module.exports.attemptAutoClaim(a,{namespace:'game',offerId:'offer'},'access',opts),a,purchases:()=>purchases};
+ return {run:(opts,offer={})=>module.exports.attemptAutoClaim(a,{namespace:'game',offerId:'offer',...offer},'access',opts),a,purchases:()=>purchases};
 }
 test('a submitted checkout is only logged claimed after library verification',async()=>{
  const s=setup({ownedAfter:true});const result=await s.run();assert.equal(result.status,'claimed');assert.equal(s.a.autoClaimCount,1);assert.equal(s.a.autoClaimLog[0].status,'claimed');
@@ -27,4 +28,10 @@ test('manual control respects sold accounts and can bypass disabled scheduler',a
 
 test('a working library access token cannot hide a revoked refresh token',async()=>{
  const s=setup({ownedAfter:true,revokedAfter:true});const result=await s.run();assert.equal(result.status,'claimed');assert.equal(result.tokenNeedsLogin,true);assert.equal(s.a.status,'needs_login');
+});
+
+test('expired and future giveaways cannot reach checkout through the manual path',async()=>{
+ for(const offer of [{endDate:new Date(1)},{startDate:new Date(Date.now()+60000)},{active:false}]) {
+  const s=setup();const r=await s.run({manual:true},offer);assert.equal(r.attempted,false);assert.equal(s.purchases(),0);
+ }
 });

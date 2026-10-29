@@ -13,12 +13,14 @@ const FEED_URL =
 const UA =
   "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) " +
   "Chrome/126.0.0.0 Safari/537.36";
-const TICK_MS = 6 * 60 * 60 * 1000; // every 6 hours
+const TICK_MS = 15 * 60 * 1000; // fallback poll; known boundaries are scheduled exactly
 
 const state = {
   started: false,
   running: false,
   lastRun: null,
+  lastSuccessAt: null,
+  nextRunAt: null,
   lastError: "",
   lastCounts: { live: 0, upcoming: 0, new: 0, wentLive: 0 },
 };
@@ -29,7 +31,7 @@ function freeWindow(list) {
     for (const w of (block && block.promotionalOffers) || []) {
       const pct =
         w && w.discountSetting && w.discountSetting.discountPercentage;
-      if (pct === 0) return w;
+      if (pct === 0 && (!w.endDate || new Date(w.endDate).getTime() > Date.now())) return w;
     }
   }
   return null;
@@ -74,7 +76,7 @@ function normalize(el) {
       "",
     startDate: w.startDate ? new Date(w.startDate) : null,
     endDate: w.endDate ? new Date(w.endDate) : null,
-    upcoming: !cur,
+    upcoming: w.startDate ? new Date(w.startDate).getTime() > Date.now() : !cur,
   };
 }
 
@@ -88,8 +90,8 @@ async function fetchFreebies() {
       r.data.data &&
       r.data.data.Catalog &&
       r.data.data.Catalog.searchStore &&
-      r.data.data.Catalog.searchStore.elements) ||
-    [];
+      r.data.data.Catalog.searchStore.elements);
+  if (!Array.isArray(els)) throw new Error("Epic giveaway feed returned an invalid catalog");
   return els.map(normalize).filter(Boolean);
 }
 
@@ -98,11 +100,38 @@ function fmtWindow(o) {
   return f(o.startDate) + " → " + f(o.endDate);
 }
 
-async function runOnce() {
-  if (state.running) return state.lastCounts;
+let inFlight = null;
+let timer = null;
+function nextDelay(offers, now = Date.now()) {
+  const boundaries = offers.flatMap(o => [o.startDate, o.endDate]).filter(Boolean)
+    .map(d => new Date(d).getTime()).filter(t => Number.isFinite(t) && t > now);
+  return Math.max(1000, Math.min(TICK_MS, ...boundaries.map(t => t - now + 1000)));
+}
+function scheduleNext(offers = []) {
+  if (!state.started) return;
+  if (timer) clearTimeout(timer);
+  const delay = nextDelay(offers);
+  state.nextRunAt = new Date(Date.now() + delay);
+  timer = setTimeout(() => runOnce().catch(err => console.error("epicWatcher error:", err.message)), delay);
+  if (timer.unref) timer.unref();
+}
+function runOnce(opts = {}) {
+  if (inFlight) return inFlight;
+  inFlight = performRunOnce(opts).finally(() => { inFlight = null; });
+  return inFlight;
+}
+async function refreshIfStale(opts = {}) {
+  if (inFlight) return inFlight;
+  if (state.lastSuccessAt && Date.now() - state.lastSuccessAt.getTime() < 60000) return state.lastCounts;
+  return runOnce(opts);
+}
+async function performRunOnce(opts) {
+  const notify = opts.notify !== false;
+  let fetched = [];
   state.running = true;
   try {
     const offers = await fetchFreebies();
+    fetched = offers;
     const now = new Date();
     const seeding = (await EpicFreebie.estimatedDocumentCount()) === 0;
     const seenIds = new Set();
@@ -129,7 +158,7 @@ async function runOnce() {
       { $set: { active: false } },
     );
 
-    for (const o of seeding ? [] : fresh) {
+    for (const o of !notify || seeding ? [] : fresh) {
       await sendTelegram(
         "🕹 Epic free game " +
           (o.upcoming ? "announced" : "LIVE now") +
@@ -151,7 +180,7 @@ async function runOnce() {
       ).catch(() => {});
     }
 
-    for (const o of seeding ? [] : wentLive) {
+    for (const o of !notify || seeding ? [] : wentLive) {
       await sendTelegram(
         "🕹 Epic free game is LIVE — " +
           o.title +
@@ -166,7 +195,7 @@ async function runOnce() {
       ).catch(() => {});
     }
 
-    if (seeding && fresh.length) {
+    if (notify && seeding && fresh.length) {
       // Suppress the "new/live" ping for the initial catalog, but only mark
       // liveNotifiedAt on offers already live — an "upcoming" one must keep
       // it unset so its future upcoming -> live transition still alerts.
@@ -194,11 +223,12 @@ async function runOnce() {
     };
     // A giveaway just went live (or a brand-new one appeared already live):
     // kick the account claimer so claim links go out immediately.
-    if (!seeding && (wentLive.length || fresh.some((o) => !o.upcoming))) {
+    if (notify && !seeding && (wentLive.length || fresh.some((o) => !o.upcoming))) {
       const epicClaimer = require("./epicClaimer");
       epicClaimer.runOnce().catch(() => {});
     }
     state.lastError = "";
+    state.lastSuccessAt = new Date();
     return state.lastCounts;
   } catch (err) {
     state.lastError = err.message || String(err);
@@ -206,6 +236,7 @@ async function runOnce() {
   } finally {
     state.lastRun = new Date();
     state.running = false;
+    scheduleNext(fetched);
   }
 }
 
@@ -216,23 +247,16 @@ function status() {
     lastError: state.lastError,
     lastCounts: state.lastCounts,
     intervalHours: TICK_MS / 3600000,
+    lastSuccessAt: state.lastSuccessAt,
+    nextRunAt: state.nextRunAt,
   };
 }
 
 function start() {
   if (state.started) return;
   state.started = true;
-  const tick = async () => {
-    try {
-      await runOnce();
-    } catch (err) {
-      console.error("epicWatcher error:", err.message);
-    }
-    const t = setTimeout(tick, TICK_MS);
-    if (t.unref) t.unref();
-  };
-  const t = setTimeout(tick, 50000);
-  if (t.unref) t.unref();
+  timer = setTimeout(() => runOnce().catch(err => console.error("epicWatcher error:", err.message)), 50000);
+  if (timer.unref) timer.unref();
 }
 
-module.exports = { start, runOnce, status };
+module.exports = { start, runOnce, refreshIfStale, status, nextDelay, normalize };

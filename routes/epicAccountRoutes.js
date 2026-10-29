@@ -49,7 +49,7 @@ function publicAccount(a, liveFreebies) {
   const owned = new Set(
     (a.library || []).map((g) => g.namespace).filter(Boolean),
   );
-  const missing = (liveFreebies || []).filter((f) => !owned.has(f.namespace));
+  const missing = (liveFreebies || []).filter((f) => live(f) && !owned.has(f.namespace));
   return {
     _id: a._id,
     accountId: a.accountId,
@@ -79,7 +79,7 @@ router.get("/api/epic/accounts", requireSuperadmin, async (req, res) => {
   try {
     const [accounts, liveFreebies] = await Promise.all([
       EpicAccount.find({}).sort({ createdAt: 1 }).lean(),
-      EpicFreebie.find({ active: true, upcoming: false }).lean(),
+      EpicFreebie.find({ active: true }).lean(),
     ]);
     res.json({
       success: true,
@@ -277,6 +277,8 @@ router.post(
 
 // Both manual entry points use the same verified claim and library refresh.
 async function claimAndSync(acc, freebie) {
+  if (!eligible(acc)) return {attempted: false, status: "skipped", error: "Account is sold or needs reconnection"};
+  if (!live(freebie)) return {attempted: false, status: "skipped", error: "Giveaway is not currently live"};
   const accessToken = await accountAccessToken(acc);
   const result = await epicAutoClaim.attemptAutoClaim(acc, freebie, accessToken, { manual: true });
   if (["claimed", "already_owned"].includes(result.status) && !result.tokenNeedsLogin) {
@@ -295,9 +297,10 @@ const {createClaimBatch, planClaims, eligible, live} = require("../utils/epicCla
 let manualClaimRunning = false;
 const claimBatch = createClaimBatch({
   plan: async () => {
+    await require("../utils/epicWatcher").refreshIfStale({notify: false});
     const [accounts, offers] = await Promise.all([
       EpicAccount.find({sold: {$ne: true}, status: "ok"}).sort({createdAt: 1}).lean(),
-      EpicFreebie.find({active: true, upcoming: false}).lean(),
+      EpicFreebie.find({active: true}).lean(),
     ]);
     return planClaims(accounts, offers);
   },

@@ -17,6 +17,8 @@ const epicAutoClaim = require("./epicAutoClaim");
 const { accountAccessToken } = require("./epicAccountToken");
 const { sendTelegram } = require("./telegram");
 
+const {live} = require("./epicOfferWindow");
+
 const TICK_MS = 6 * 60 * 60 * 1000; // every 6 hours
 
 const state = {
@@ -114,7 +116,7 @@ async function processAccount(acc, liveFreebies, notify, priceByNamespace) {
     await syncLibrary(acc, accessToken, priceByNamespace);
     acc.status = "ok";
     acc.lastError = "";
-    const missing = liveFreebies.filter((f) => !ownsOffer(acc, f));
+    const missing = liveFreebies.filter((f) => live(f) && !ownsOffer(acc, f));
     if (notify && !acc.sold) {
       for (const f of missing) {
         // Try the direct-API auto-claim first. If it succeeded — or if it
@@ -158,7 +160,6 @@ async function runOnce(opts) {
     const accounts = await EpicAccount.find({});
     const liveFreebies = await EpicFreebie.find({
       active: true,
-      upcoming: false,
     }).lean();
     const allFreebies = await EpicFreebie.find({}).lean();
     const priceByNamespace = new Map(

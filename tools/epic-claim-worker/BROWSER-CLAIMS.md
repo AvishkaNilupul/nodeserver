@@ -37,3 +37,14 @@ After resolving it, press Claim all missing again to replan remaining ownership.
 Stop after current lets an in-flight checkout finish and leaves later jobs alone.
 Batch progress is process-local: a server restart ends the queue; press the
 button again to recheck remaining games. Results contain no account credentials.
+
+## Giveaway rollover
+
+All claim paths share `epicOfferWindow`: expired, future and inactive offers
+stop before checkout, including manual requests. Dates override stale upcoming
+flags once the recorded start time has arrived. Account-page missing games and
+scheduled claims use the same rule. Claim all refreshes stale giveaway data
+silently before planning; that refresh sends no Telegram messages or extra claims.
+The watcher polls at most every 15 minutes and schedules known start/end boundaries.
+Concurrent claim calls share one process-level lock; a worker transport outage
+returns unavailable without consuming retry history or a daily-cap slot.

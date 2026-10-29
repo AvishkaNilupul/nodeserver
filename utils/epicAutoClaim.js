@@ -13,6 +13,8 @@
 // hundreds of confirms at Epic during a Mega Sale week (which is exactly
 // how you get the whole account pool suspended in one wave).
 const axios = require("axios");
+const {offerState} = require("./epicOfferWindow");
+let claimRunning = false;
 const epic = require("./epicClient");
 const { verifyClaimResult } = require("./epicClaimResult");
 const { accountAccessToken } = require("./epicAccountToken");
@@ -149,6 +151,14 @@ function retryPolicy(cfg) {
 //   { attempted, status, error?, orderId? }
 // attempted=false means the caller should fall back to the Telegram tap.
 async function attemptAutoClaim(acc, freebie, accessToken, opts = {}) {
+  if (claimRunning) return { attempted: false, status: "busy", error: "A claim is already running" };
+  claimRunning = true;
+  try { return await runClaim(acc, freebie, accessToken, opts); }
+  finally { claimRunning = false; }
+}
+async function runClaim(acc, freebie, accessToken, opts) {
+  const window = offerState(freebie);
+  if (window !== "live") return { attempted: false, status: window, error: "This giveaway is " + window };
   if (acc.sold) return { attempted: false, status: "sold" };
   if (acc.status === "needs_login") return { attempted: false, status: "needs_login" };
   const cfg = settings.getEpicAutoClaim();
@@ -203,6 +213,10 @@ async function attemptAutoClaim(acc, freebie, accessToken, opts = {}) {
         })
     : null;
 
+  // Check again after the library request, which can span a giveaway deadline.
+  const currentWindow = offerState(freebie);
+  if (currentWindow !== "live") return { attempted: false, status: currentWindow };
+  const attemptDay = todayKey();
   bumpDayCount();
   let result;
   try {
@@ -225,11 +239,11 @@ async function attemptAutoClaim(acc, freebie, accessToken, opts = {}) {
       );
     }
   } catch (err) {
-    result = { status: "error", error: err.message || String(err) };
+    result = { status: WORKER_URL && ["ECONNREFUSED", "ECONNRESET", "ETIMEDOUT", "ECONNABORTED", "EHOSTUNREACH", "ENOTFOUND", "EPIPE"].includes(err.code) ? "worker_unavailable" : "error", error: err.message || String(err) };
   }
   result = await verifyClaimResult(result, freebie.namespace, () => epic.getLibraryRecords(accessToken));
   if (["busy", "worker_unavailable"].includes(result.status)) {
-    state.dayCounts[todayKey()] = Math.max(0, todayCount() - 1);
+    state.dayCounts[attemptDay] = Math.max(0, (state.dayCounts[attemptDay] || 0) - 1);
     return { attempted: false, ...result };
   }
   // A cached access token can work after the browser revoked its refresh grant.
