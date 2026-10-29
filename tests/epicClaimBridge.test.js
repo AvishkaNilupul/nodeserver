@@ -32,3 +32,12 @@ test('reconnection credentials are accepted only from server auth; completion re
  const result=call(app,'POST /extension/result',extensionToken,{id:assigned.id,lease:assigned.lease,status:'reauthorized',code:'e'.repeat(32)});
  assert.equal(result.code,200);assert.equal(response.body.code,'e'.repeat(32));assert.equal(response.body.password,undefined);assert.equal(response.body.email,undefined);
 });
+
+test('explicit regional and paid-checkout failures finish the assigned job',()=>{
+ for(const status of ['region_unavailable','not_free']){
+  const {app,extensionToken}=createBridge({express:fakeExpress,token});call(app,'GET /extension/status',extensionToken);
+  const response=call(app,'POST /claim',token,job),assigned=call(app,'GET /extension/next',extensionToken).body.job;
+  assert.equal(call(app,'POST /extension/result',extensionToken,{...assigned,status,error:'Checkout unavailable'}).code,200);
+  assert.equal(response.body.status,status);
+ }
+});

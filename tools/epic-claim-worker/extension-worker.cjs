@@ -34,7 +34,7 @@ function createBridge({express,token,now=Date.now,timeoutMs=150000}) {
  app.post('/extension/result',auth(extensionToken),(req,res)=>{
   lastSeen=now();const b=req.body;
   if(!current||b.id!==current.job.id||b.lease!==current.job.lease)return res.sendStatus(409);
-  if(!['submitted','already_owned','needs_captcha','session_failed','reauthorized','error'].includes(b.status))return res.sendStatus(400);
+  if(!['submitted','already_owned','needs_captcha','session_failed','reauthorized','region_unavailable','not_free','error'].includes(b.status))return res.sendStatus(400);
   if(b.status==='reauthorized'&&(current.job.mode!=='recover'||!(/^[a-f\d]{32}$/i).test(b.code||'')))return res.sendStatus(400);
   const finish=current.finish;current=null;finish({status:b.status,error:String(b.error||'').slice(0,300),...(b.status==='reauthorized'?{code:b.code}:{})});res.json({ok:true});
  });

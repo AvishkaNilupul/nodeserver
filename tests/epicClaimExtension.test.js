@@ -1,7 +1,7 @@
 const test=require('node:test'),assert=require('node:assert/strict'),vm=require('node:vm'),fs=require('node:fs');
-async function run(text,{assigned=true,offer='1-game-offer'}={}) {
+async function run(text,{assigned=true,offer='1-game-offer',buttonText='Add to library'}={}) {
  let tick,clicks=0;const reports=[];const location={hostname:'store.epicgames.com',pathname:'/purchase',search:'?offers='+offer,hash:'#/free-checkout'};
- const button={innerText:'Add to library',disabled:false,getBoundingClientRect:()=>({width:100,height:30}),click(){clicks++;location.hash='#';}};
+ const button={innerText:buttonText,disabled:false,getBoundingClientRect:()=>({width:100,height:30}),click(){clicks++;location.hash='#';}};
  const context={window:{},location,URLSearchParams,document:{body:{innerText:text},querySelectorAll:()=>[button]},getComputedStyle:()=>({visibility:'visible'}),setInterval:fn=>{tick=fn;return 1;},clearInterval:()=>{},setTimeout:()=>{},chrome:{runtime:{sendMessage:async msg=>{
   if(msg.type==='epicclaim-context')return {ok:assigned,job:{namespace:'game',offerId:'offer',displayName:'right-account'}};
   reports.push(msg);return {ok:true};
@@ -28,4 +28,12 @@ test('zero prices in other currencies can be claimed',async()=>{
 });
 test('nonzero currency amounts cannot pass as free',async()=>{
  for(const price of ['RUB 0.01','USD 10.00','EUR 0,99'])assert.equal((await run('right-account This is free. '+price)).clicks,0);
+});
+
+test('a regional purchase block is reported without clicking or waiting for timeout',async()=>{
+ const r=await run('This product isn’t available in your region');assert.equal(r.clicks,0);assert.equal(r.reports[0].status,'region_unavailable');
+});
+
+test('paid checkout without a free-claim button fails immediately without clicking',async()=>{
+ const r=await run('right-account Total ¥490',{buttonText:'Pay Now'});assert.equal(r.clicks,0);assert.equal(r.reports[0].status,'not_free');
 });

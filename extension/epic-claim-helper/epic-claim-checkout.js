@@ -10,6 +10,7 @@
   if(location.pathname.startsWith('/id/login'))return report('session_failed','Epic requested sign-in');
   if(location.hostname!=='store.epicgames.com'||location.pathname!=='/purchase')return;
   const offer=new URLSearchParams(location.search).get('offers');if(offer!=='1-'+job.namespace+'-'+job.offerId)return report('error','Checkout offer changed');
+  if(/(?:product|offer|game).{0,80}(?:not\s+available|isn.t\s+available|unavailable).{0,40}(?:region|country)|not available in your (?:region|country)/i.test(text))return report('region_unavailable','Epic says this product is not available in this account’s region');
   if(/you already own|already in your library/i.test(text))return report('already_owned');
   if(/one more step|please complete a security check/i.test(text))return report('needs_captcha','Complete the visible security check in the claim tab');
   if(clicked){
@@ -17,7 +18,11 @@
    return;
   }
   const button=[...document.querySelectorAll('button')].find(b=>/^add to library$/i.test(b.innerText.trim())&&visible(b)&&!b.disabled);
-  if(!button)return;
+  if(!button){
+   const paidTotal=[...document.querySelectorAll('button')].some(b=>/^pay now$/i.test(b.innerText.trim()));
+   if(paidTotal)return report('not_free','Epic is showing a paid checkout; no order was submitted');
+   return;
+  }
   if(!text.includes(job.displayName))return report('error','Checkout account does not match assigned account');
   const prices=[...text.matchAll(/(?:[$€£¥₽₹₩₺₴₫]|\b[A-Z]{3})\s*(\d+(?:[.,]\d+)?)/g)].map(m=>Number(m[1].replace(',','.')));
   if(!/this is free/i.test(text)||!prices.length||prices.some(price=>price!==0))return report('error','Checkout is not explicitly free');
