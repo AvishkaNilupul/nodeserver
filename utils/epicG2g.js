@@ -1044,7 +1044,10 @@ async function loadStock(link, opts = {}) {
   return sales._internals.withLock(() => loadStockLocked(link, opts));
 }
 
-async function loadStockLocked(link, { offer = null } = {}) {
+// `only`: a Set of EpicAccount ids that may be loaded (null = any ready
+// account). The Epic auto-distributor passes the accounts it placed here, and
+// an empty set from the sweep while it is on (retries/confirmations only).
+async function loadStockLocked(link, { offer = null, only = null } = {}) {
   if (!link || link.mode !== "instant") return { skipped: "not an Instant offer" };
   if (link.enabled === false) return { skipped: "automatic delivery is off for this offer" };
   return withKeyLock("load:" + link.offerId, async () => {
@@ -1054,6 +1057,7 @@ async function loadStockLocked(link, { offer = null } = {}) {
 
     const { ready: cached } = await readyAccounts(link, { fresh: false });
     let candidates = cached.filter((c) => !(Date.now() - (formFailures.get(String(c.acc._id)) || 0) < 6 * 3600 * 1000));
+    if (only) candidates = candidates.filter((c) => only.has(String(c.acc._id)));
     if (candidates.length) {
       // Re-check the inboxes for real before anything goes into G2G's stock.
       const { ready } = await readyAccounts(link, { fresh: true });
@@ -1467,7 +1471,10 @@ async function sweep({ now = Date.now() } = {}) {
         }
         if (link.enabled !== false) {
           try {
-            const r = await loadStock(link, { offer });
+            // While the Epic auto-distributor is on, it decides which accounts
+            // go here; the sweep then only retries/confirms units already sent.
+            const only = await require("./epicDistributor").g2gSweepOnly();
+            const r = await loadStock(link, { offer, only });
             if (r && r.loaded) notes.push(link.offerId + ": loaded " + r.loaded + (r.confirmed ? "" : " (not confirmed yet)"));
           } catch (e) {
             notes.push(link.offerId + ": stock load failed (" + ((e && e.message) || e) + ")");
@@ -1573,13 +1580,17 @@ module.exports = {
   stop,
   panelView,
   // Instant (G2G Auto delivery) offers
-  loadStock: async (offerId) => {
+  loadStock: async (offerId, opts = {}) => {
     const stored = await linkFor(offerId);
     if (!stored) throw userError("That G2G offer isn't linked", 404);
     const [link, offer] = await refreshMode(stored);
     if (link.mode !== "instant") return { skipped: "The offer is on Manual delivery on G2G. Switch it to Auto delivery there first." };
-    return loadStock(link, { offer });
+    // The panel's manual "Load stock" button passes nothing (any ready account);
+    // the distributor passes `only`.
+    return loadStock(link, { offer, only: opts.only || null });
   },
+  // Linked offers as stored (for the Epic auto-distributor).
+  instantLinks: () => links(),
   scanInstantSales: async (offerId) => {
     const stored = await linkFor(offerId);
     if (!stored) throw userError("That G2G offer isn't linked", 404);

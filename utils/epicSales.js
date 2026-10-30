@@ -1760,6 +1760,8 @@ module.exports = {
     readBack,
     markUnitSold,
     withLock,
+    // utils/epicDistributor asks before topping up an Eldorado listing.
+    eldoradoPermission,
     resetPermissionCache: () => {
       permissionCache = { at: 0, value: null };
     },

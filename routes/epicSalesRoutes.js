@@ -235,4 +235,28 @@ router.post("/api/epic/sales/playerauctions/:id/reconcile", requireSuperadmin,
   handle(async req => ({ unit: await pa().reconcile(req.params.id, String(req.body.offerId || "")) })));
 router.post("/api/epic/sales/playerauctions/:id/pause", requireSuperadmin,
   handle(async req => ({ unit: await pa().setPaused(req.params.id, req.body.paused !== false) })));
+
+// Epic auto-distributor (utils/epicDistributor, docs/EPIC-DISTRIBUTOR-CONTRACT.md).
+const dist = () => require("../utils/epicDistributor");
+router.get("/api/epic/sales/distributor", requireSuperadmin,
+  handle(async () => ({ distributor: await dist().view() })));
+router.post("/api/epic/sales/distributor/config", requireSuperadmin,
+  handle(async (req) => ({ distributor: await dist().setConfig(req.body || {}, actorOf(req)) })));
+router.post("/api/epic/sales/distributor/owner", requireSuperadmin,
+  handle(async (req) => ({ distributor: await dist().setOwner(req.body || {}, actorOf(req)) })));
+router.post("/api/epic/sales/distributor/preview", requireSuperadmin,
+  handle(async () => {
+    const r = await dist().run({ execute: false });
+    return { result: { skipped: r.skipped || "" }, distributor: await dist().view() };
+  }));
+router.post("/api/epic/sales/distributor/run", requireSuperadmin,
+  handle(async () => {
+    if ((await dist().mode()) !== "on") {
+      const e = new Error("Automatic listing is not on. Use Preview to see the plan.");
+      e.status = 400;
+      throw e;
+    }
+    const r = await dist().run({ execute: true });
+    return { result: { skipped: r.skipped || "", placed: r.placed || null, failed: r.failed || [] }, distributor: await dist().view() };
+  }));
 module.exports = router;

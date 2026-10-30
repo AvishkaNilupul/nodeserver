@@ -99,6 +99,7 @@
           <button class="btn" type="button" id="es-sync">Check Eldorado now</button>
         </div>
       </div>
+      <div class="card" id="es-dist-card"><h2>Auto-distribute new accounts</h2><p class="hint">Every 10 minutes this decides where each new sellable account goes: PlayerAuctions first (highest price), then an existing Eldorado listing for the same games, then G2G, each up to the limit you set. The rest waits in reserve and fills the next free slot. Accounts you added by hand are never listed automatically, and accounts with no games yet (or a game that is still free on Epic) wait.</p><div id="es-dist"><div class="muted">Loading…</div></div></div>
       <div class="card"><h2>Ready to list</h2><p class="hint">Accounts that can go on sale now, grouped by the games they own. An account sits on one listing at a time, so it can never be sold twice.</p><div id="es-groups"></div></div>
       <div class="card"><h2>G2G (automatic delivery)</h2><p class="hint">G2G offers you made on g2g.com and linked here. When a buyer pays, the server picks a ready account that owns the offer's games, opens its mail page, and fills G2G's account form on the order page (the way G2G wants accounts delivered, never the chat). If it can't, Telegram tells you what to do.</p><div id="es-g2g"></div></div>
       <div class="card"><h2>PlayerAuctions (instant delivery)</h2><p class="hint">One Epic account per native Account offer. Minimum $5, with 14-day buyer mail access and after-sale protection. Uses newly stocked accounts; accounts already in G2G stock stay there. Original-owner contact details are required by PlayerAuctions.</p><div id="es-pa"></div></div>
@@ -166,8 +167,12 @@
     if (loading) return;
     loading = true;
     try {
-      const j = await api("/api/epic/sales/overview");
+      const [j, d] = await Promise.all([
+        api("/api/epic/sales/overview"),
+        api("/api/epic/sales/distributor").catch((e) => ({ distributor: { error: e.message } })),
+      ]);
       data = j;
+      data.distributor = d.distributor;
       render();
       if (loud) say("Updated.");
     } catch (e) {
@@ -197,6 +202,7 @@
     if (!data) return;
     renderHealth();
     renderSettings();
+    renderDist();
     renderGroups();
     renderG2g();
     renderPa();
@@ -204,6 +210,212 @@
     renderSales();
     renderStock();
     renderOthers();
+  }
+
+  // ---- Auto-distribute card (utils/epicDistributor) ------------------------
+  const DIST_LABEL = { pa: "PlayerAuctions", eldorado: "Eldorado", g2g: "G2G", reserve: "Reserve", hold: "Waiting", skip: "Never auto" };
+  const DIST_TONE = { pa: "green", eldorado: "green", g2g: "green", reserve: "amber", hold: "", skip: "" };
+
+  // force=false (the 60 s refresh) leaves the card alone while you type in it.
+  function renderDist(force) {
+    const root = $("es-dist");
+    if (!root) return;
+    const a = document.activeElement;
+    if (!force && a && root.contains(a) && a.matches("input, select, textarea")) return;
+    const d = data.distributor;
+    if (!d || d.error) {
+      root.innerHTML = '<div class="es-err">Could not load: ' + esc((d && d.error) || "no data") + "</div>";
+      return;
+    }
+    const c = d.config || {};
+    const modes = [
+      ["off", "Off", "Does nothing."],
+      ["plan", "Plan only", "Shows where each account would go. Lists nothing."],
+      ["on", "On", "Lists new accounts automatically."],
+    ];
+    const lr = d.lastRun || {};
+    const plan = d.plan || [];
+    const count = (k) => plan.filter((r) => r.decision === k).length;
+    const outcome = (r) =>
+      r.outcome === "placed" ? " " + pill("listed", "green") : r.outcome === "failed" ? " " + pill("failed", "red") : r.outcome === "queued" ? " " + pill("next run", "amber") : "";
+    root.innerHTML =
+      '<div class="es-seg" role="radiogroup" aria-label="Automatic listing">' +
+      modes
+        .map(
+          ([k, t, h]) =>
+            '<button type="button" class="btn btn-sm' + (c.mode === k ? " btn-primary" : "") + '" role="radio" aria-checked="' + (c.mode === k) + '" data-dist-mode="' + k + '" title="' + esc(h) + '">' + esc(t) + "</button>",
+        )
+        .join("") +
+      '</div><p class="hint es-dist-mode">' + esc((modes.find((m) => m[0] === c.mode) || modes[1])[2]) + "</p>" +
+      '<div class="es-meta">Last run: ' + esc(ago(lr.at)) + (lr.mode === "on" ? " (listing on)" : "") +
+      (lr.note ? ' <span class="' + (lr.ok === false ? "bad" : "muted") + '">' + esc(lr.note) + "</span>" : "") +
+      (lr.placedAt ? ' <span class="muted">Last listed: ' + esc(ago(lr.placedAt)) + "</span>" : "") +
+      ' <span class="muted">Runs every ' + esc(d.runEveryMin || 10) + " min.</span></div>" +
+      '<div class="row es-actions" style="margin:10px 0"><button class="btn" id="es-dist-preview" type="button">Preview now</button>' +
+      (c.mode === "on" ? '<button class="btn btn-primary" id="es-dist-run" type="button">Run now</button>' : "") + "</div>" +
+      distMarkets(d.markets) +
+      '<h3>Limits</h3><form id="es-dist-cfg" class="es-dist-form">' +
+      '<fieldset><legend>PlayerAuctions</legend><label class="es-switch"><input type="checkbox" name="paOn"' + (c.pa && c.pa.enabled ? " checked" : "") + "> Use</label>" +
+      '<label>Offers live at once <input name="paMax" type="number" min="0" max="50" step="1" value="' + esc(c.pa && c.pa.maxLive) + '"></label>' +
+      '<label>Price (USD, min 5) <input name="paPrice" type="number" min="5" max="500" step="0.01" value="' + esc(c.pa && c.pa.priceUsd) + '"></label></fieldset>' +
+      '<fieldset><legend>Eldorado</legend><label class="es-switch"><input type="checkbox" name="eldOn"' + (c.eldorado && c.eldorado.enabled ? " checked" : "") + "> Use</label>" +
+      '<label>Accounts per listing <input name="eldMax" type="number" min="0" max="100" step="1" value="' + esc(c.eldorado && c.eldorado.maxPerListing) + '"></label></fieldset>' +
+      '<fieldset><legend>G2G</legend><label class="es-switch"><input type="checkbox" name="g2gOn"' + (c.g2g && c.g2g.enabled ? " checked" : "") + "> Use</label>" +
+      '<label>Stock per offer <input name="g2gMax" type="number" min="0" max="200" step="1" value="' + esc(c.g2g && c.g2g.maxStock) + '"></label></fieldset>' +
+      '<label class="es-switch"><input type="checkbox" name="holdFree"' + (c.holdWhileFree ? " checked" : "") + "> Wait while a game is still free on Epic</label>" +
+      '<div><button class="btn" type="submit">Save limits</button></div></form>' +
+      distOwner(d.owner) +
+      "<h3>Plan</h3>" +
+      (plan.length
+        ? '<p class="hint">' +
+          [["pa", "PlayerAuctions"], ["eldorado", "Eldorado"], ["g2g", "G2G"], ["reserve", "reserve"], ["hold", "waiting"], ["skip", "never auto"]]
+            .map(([k, t]) => count(k) + " " + t)
+            .join(" · ") +
+          "</p>" +
+          '<div class="es-table-wrap"><table class="es-table"><thead><tr><th>Account</th><th>Games</th><th>Goes to</th><th>Why</th></tr></thead><tbody>' +
+          plan
+            .map(
+              (r) =>
+                '<tr><td data-label="Account"><b>' + esc(r.label) + "</b></td>" +
+                '<td data-label="Games">' + (r.games && r.games.length ? esc(r.games.slice(0, 3).join(", ") + (r.games.length > 3 ? ", …" : "")) : '<span class="muted">none yet</span>') + "</td>" +
+                '<td data-label="Goes to">' + pill(DIST_LABEL[r.decision] || r.decision, DIST_TONE[r.decision]) + outcome(r) + "</td>" +
+                '<td data-label="Why" class="muted">' + esc(r.reason) + "</td></tr>",
+            )
+            .join("") +
+          "</tbody></table></div>"
+        : '<p class="muted">No plan yet. Press Preview now.</p>');
+
+    root.querySelectorAll("[data-dist-mode]").forEach((b) => {
+      b.onclick = async () => {
+        const mode = b.dataset.distMode;
+        if (mode === c.mode) return;
+        if (
+          mode === "on" &&
+          !confirm(
+            "Turn automatic listing on?\n\nEvery 10 minutes new sellable accounts are listed on PlayerAuctions (one new offer per run), added to a live Eldorado listing for the same games, or loaded into G2G stock, up to your limits. While it is on, G2G no longer loads every ready account by itself.",
+          )
+        )
+          return;
+        await distPost("/api/epic/sales/distributor/config", { mode, confirm: mode === "on" }, mode === "on" ? "Automatic listing is on." : "Saved.");
+      };
+    });
+    $("es-dist-preview").onclick = (e) => distAction(e.currentTarget, "/api/epic/sales/distributor/preview", "Plan updated. Nothing was listed.");
+    if ($("es-dist-run")) $("es-dist-run").onclick = (e) => distAction(e.currentTarget, "/api/epic/sales/distributor/run", null);
+    $("es-dist-cfg").onsubmit = async (e) => {
+      e.preventDefault();
+      const f = e.currentTarget.elements;
+      await distPost("/api/epic/sales/distributor/config", {
+        holdWhileFree: f.holdFree.checked,
+        pa: { enabled: f.paOn.checked, maxLive: Number(f.paMax.value), priceUsd: Number(f.paPrice.value) },
+        eldorado: { enabled: f.eldOn.checked, maxPerListing: Number(f.eldMax.value) },
+        g2g: { enabled: f.g2gOn.checked, maxStock: Number(f.g2gMax.value) },
+      }, "Limits saved.");
+    };
+    const of = $("es-dist-owner");
+    if (of) {
+      of.onsubmit = async (e) => {
+        e.preventDefault();
+        const f = e.currentTarget.elements;
+        await distPost("/api/epic/sales/distributor/owner", { phone: f.phone.value, city: f.city.value }, "Saved for PlayerAuctions.");
+      };
+    }
+    const change = $("es-dist-owner-change");
+    if (change) change.onclick = () => { data.distributor.owner = { saved: false, editing: true }; renderDist(true); };
+    const clear = $("es-dist-owner-clear");
+    if (clear) {
+      clear.onclick = async () => {
+        if (!confirm("Remove your saved phone and city? PlayerAuctions accounts will stop being listed automatically.")) return;
+        await distPost("/api/epic/sales/distributor/owner", { clear: true }, "Removed.");
+      };
+    }
+  }
+
+  function distMarkets(m) {
+    if (!m) return '<p class="muted">Markets are checked on the first run. Press Preview now.</p>';
+    const tone = (x) => (x && x.ok ? "green" : "amber");
+    const rows = [];
+    if (m.pa) {
+      rows.push(["PlayerAuctions", money(m.pa.priceUsd) + " each", m.pa.used + " / " + m.pa.cap + " offers", pill(m.pa.status || "?", tone(m.pa))]);
+    }
+    if (m.eldorado) {
+      const ls = m.eldorado.listings || [];
+      rows.push([
+        "Eldorado",
+        ls.length ? ls.map((l) => money(l.priceUsd)).join(", ") : "—",
+        ls.length ? ls.map((l) => esc(l.title) + ": " + l.used + " / " + l.cap).join("<br>") : "—",
+        pill(m.eldorado.status || "?", tone(m.eldorado)),
+      ]);
+    }
+    if (m.g2g) {
+      const os = m.g2g.offers || [];
+      rows.push([
+        "G2G",
+        "set on g2g.com",
+        os.length ? os.map((o) => esc(o.offerId) + ": " + o.used + " / " + o.cap).join("<br>") : "—",
+        pill(m.g2g.status || "?", tone(m.g2g)),
+      ]);
+    }
+    return (
+      '<div class="es-table-wrap"><table class="es-table"><thead><tr><th>Market</th><th>Price</th><th>In use</th><th>Status</th></tr></thead><tbody>' +
+      rows
+        .map((r) => '<tr><td data-label="Market"><b>' + r[0] + '</b></td><td data-label="Price">' + esc(r[1]) + '</td><td data-label="In use">' + r[2] + '</td><td data-label="Status">' + r[3] + "</td></tr>")
+        .join("") +
+      "</tbody></table></div>" +
+      '<p class="hint">A market above its limit keeps what it has; new accounts go elsewhere until it drops below.</p>'
+    );
+  }
+
+  function distOwner(o) {
+    const head =
+      '<h3>Your details for PlayerAuctions</h3><p class="hint">PlayerAuctions asks for the original owner’s contact on every account offer. Name, email and country come from each account’s own Epic registration. Phone and city are yours: they are used only on PlayerAuctions offers, stored encrypted, and never made up. Without them PlayerAuctions is skipped.</p>';
+    if (o && o.saved) {
+      return (
+        head +
+        '<div class="es-meta">Saved: phone ' + esc(o.phone) + ", " + esc(o.city) + (o.updatedAt ? ' <span class="muted">(' + esc(ago(o.updatedAt)) + ")</span>" : "") +
+        ' <button class="btn btn-sm" type="button" id="es-dist-owner-change">Change</button> <button class="btn btn-sm" type="button" id="es-dist-owner-clear">Remove</button></div>'
+      );
+    }
+    return (
+      head +
+      '<form id="es-dist-owner" class="es-dist-form"><label>Phone <input name="phone" type="tel" inputmode="tel" autocomplete="tel" required placeholder="digits, no +" maxlength="17"></label>' +
+      '<label>City <input name="city" autocomplete="address-level2" required maxlength="60"></label>' +
+      '<div><button class="btn" type="submit">Save</button></div></form>'
+    );
+  }
+
+  async function distPost(url, body, okText) {
+    try {
+      const j = await post(url, body);
+      if (j.distributor) data.distributor = j.distributor;
+      renderDist(true);
+      if (okText) say(okText);
+    } catch (e) {
+      say(e.message, true);
+      renderDist(true);
+    }
+  }
+
+  async function distAction(b, url, okText) {
+    b.disabled = true;
+    const label = b.textContent;
+    b.innerHTML = '<span class="spin"></span>Working…';
+    try {
+      const j = await post(url, {});
+      if (j.distributor) data.distributor = j.distributor;
+      const r = j.result || {};
+      if (r.skipped) say(r.skipped, true);
+      else if (okText) say(okText);
+      else {
+        const p = r.placed || {};
+        const n = (p.pa || 0) + (p.eldorado || 0) + (p.g2g || 0);
+        say(n ? "Listed " + n + " account(s)." + ((r.failed || []).length ? " Some failed: see the plan." : "") : (r.failed || []).length ? "Nothing listed: " + r.failed.join("; ") : "Nothing new to list.", !!(r.failed || []).length);
+      }
+      await load();
+    } catch (e) {
+      say(e.message, true);
+      b.disabled = false;
+      b.textContent = label;
+    }
   }
 
   function renderPa() {
@@ -246,7 +458,7 @@
       const fields = ["firstName", "lastName", "phone", "email", "city", "country"];
       const labels = { firstName: "Original owner's first name", lastName: "Original owner's last name", phone: "Owner phone", email: "Owner email", city: "Owner city", country: "Owner country" };
       modal.innerHTML = '<form class="modal"><h3>Sell on PlayerAuctions</h3><p>' + esc(p.games.join(" + ")) + '</p>' +
-        '<p class="hint">Instant delivery of this account and a 14-day mail-page login. Email change supported; the Outlook inbox password is never delivered. Enter the original owner information PlayerAuctions asks for. </p>' +
+        '<p class="hint">Instant delivery of this account and a 14-day mail-page login. Email change supported; the Outlook inbox password is never delivered. Enter the original owner information PlayerAuctions asks for. Name, email and country are the account\'s Epic registration; phone and city are your saved details from the Auto-distribute card (never the account\'s made-up sample phone).</p>' +
         '<label>Title<input name="title" maxlength="150" required value="' + esc(p.title) + '"></label>' +
         '<label>Price (USD)<input name="priceUsd" type="number" min="5" step="0.01" required value="5"></label>' +
         fields.map(k => '<label>' + labels[k] + '<input name="' + k + '" required ' + (k === "email" ? 'type="email"' : k === "phone" ? 'type="tel"' : '') + ' value="' + esc(p.original[k]) + '"></label>').join("") +

@@ -273,3 +273,60 @@ html[data-theme="dark"] #epic-sales-panel .es-pill.amber {
     font-size: 16px;
   }
 }
+
+/* Auto-distribute card (renderDist). */
+#epic-sales-panel .es-seg {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+#epic-sales-panel .es-dist-mode {
+  margin: 6px 0 8px;
+}
+/* Market statuses can be a sentence: let the badge wrap instead of clipping. */
+#epic-sales-panel #es-dist .es-pill {
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+#epic-sales-panel .es-dist-form {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px 18px;
+  align-items: flex-end;
+}
+#epic-sales-panel .es-dist-form fieldset {
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 8px 12px 10px;
+  margin: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 14px;
+  align-items: flex-end;
+  min-width: 0;
+}
+#epic-sales-panel .es-dist-form legend {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--muted);
+  padding: 0 4px;
+}
+#epic-sales-panel .es-dist-form label:not(.es-switch) {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 13px;
+}
+#epic-sales-panel .es-dist-form input[type="number"] {
+  width: 110px;
+}
+@media (max-width: 768px) {
+  #epic-sales-panel .es-dist-form fieldset,
+  #epic-sales-panel .es-dist-form label:not(.es-switch) {
+    width: 100%;
+  }
+  #epic-sales-panel .es-dist-form input {
+    width: 100%;
+    font-size: 16px;
+  }
+}

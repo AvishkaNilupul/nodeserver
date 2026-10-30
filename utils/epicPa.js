@@ -77,14 +77,19 @@ async function alert(unit, note) {
         note,
     );
 }
-function defaults(acc) {
+// Pre-filled original-owner details. Generated accounts carry a made-up sample
+// phone/address for internal use (contactSource "synthetic-internal"): those
+// must never reach PlayerAuctions, so phone and city come from the owner's
+// saved details (Epic auto-distributor card) or are left for the owner to type.
+function defaults(acc, owner = null) {
   const p = profile(acc);
+  const synthetic = p.contactSource === "synthetic-internal";
   return {
     firstName: p.firstName || "",
     lastName: p.lastName || "",
-    phone: p.phone || "",
+    phone: (owner && owner.phone) || (synthetic ? "" : p.phone || ""),
     email: decrypt(acc.email) || "",
-    city: p.city || "",
+    city: (owner && owner.city) || (synthetic ? "" : p.city || ""),
     country: p.country || "",
   };
 }
@@ -105,7 +110,8 @@ async function preview(accountId, opts = {}) {
     throw fail(
       "This account has two-factor authentication; remove it before listing for instant delivery",
     );
-  const original = opts.original || defaults(acc);
+  const original =
+    opts.original || defaults(acc, await require("./epicDistributor").savedOwner());
   const out = {
     accountId: String(acc._id),
     label: acc.label || acc.displayName || acc.accountId,
@@ -585,5 +591,5 @@ module.exports = {
   start,
   stop,
   onStockEmailChanged,
-  _internals: { loginOf, payment, recordOrder, eventDate, deliveryText },
+  _internals: { loginOf, payment, recordOrder, eventDate, deliveryText, defaults },
 };

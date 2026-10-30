@@ -1050,6 +1050,9 @@ mongoose
     // shelf) and keeps the linked offers' stock numbers right.
     require("./utils/epicG2g").start();
     require("./utils/epicPa").start();
+    // Places new sellable Epic accounts on PA / Eldorado / G2G (starts in
+    // "plan" mode: shows what it would do, lists nothing until switched on).
+    require("./utils/epicDistributor").start();
     // Renters: stop the bots of renters whose lease just expired (the
     // requireRenter middleware already blocks their dashboard access, but this
     // makes farming actually halt without waiting for a manual suspend).
