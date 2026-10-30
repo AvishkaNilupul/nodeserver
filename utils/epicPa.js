@@ -225,7 +225,8 @@ async function publish(accountId, opts, actor) {
       );
       return view(await Unit.findById(unit._id).lean());
     } catch (e) {
-      const rejected = !unit.offerId && e.__pa && e.paCode != null;
+      const rejected =
+        !unit.offerId && e.__pa && [1, 400].includes(Number(e.paCode));
       if (!unit.publishAttemptedAt || rejected) {
         if (unit.sessionId)
           await Session.updateOne(

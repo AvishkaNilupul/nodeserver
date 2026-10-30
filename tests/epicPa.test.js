@@ -42,7 +42,7 @@ pa.create = async (input) => {
   if (rejectCreate)
     throw Object.assign(new Error("throttled SECRET"), {
       __pa: true,
-      paCode: 1,
+      paCode: rejectCreate === true ? 1 : rejectCreate,
     });
   const id = String(1000 + ++seq);
   offers.set(id, {
@@ -321,4 +321,15 @@ test("a rejected read after a successful create never frees live credentials", a
   assert.equal((await Unit.findOne()).state, "error");
   assert.equal((await Session.findOne()).revokedAt, null);
   assert.equal(await Unit.countDocuments(), 1);
+});
+
+test("an unknown redirect response stays reserved for seller-offer reconciliation", async () => {
+  const a = await account();
+  rejectCreate = 301;
+  await assert.rejects(
+    epic.publish(String(a._id), { original: owner }, "test"),
+    /could not be confirmed/,
+  );
+  assert.equal((await Unit.findOne()).state, "error");
+  assert.equal((await Session.findOne()).revokedAt, null);
 });
