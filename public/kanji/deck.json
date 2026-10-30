@@ -1,0 +1,18 @@
+{
+  "about": "Kanji and words for /kanji/, in book order. Book: 留学生のための漢字の教科書 初級300. Readings are the ones the book teaches at that point. Edits made on the page stay in that browser.",
+  "kanji": [
+    { "no": 201, "kanji": "駅", "meanings": ["station"], "on": ["エキ"], "kun": [], "tags": ["Lesson 11"] },
+    { "no": 202, "kanji": "銀", "meanings": ["silver"], "on": ["ギン"], "kun": [], "tags": ["Lesson 11"] },
+    { "no": 203, "kanji": "病", "meanings": ["sick", "illness"], "on": ["ビョウ"], "kun": [], "tags": ["Lesson 11"] },
+    { "no": 204, "kanji": "院", "meanings": ["institution"], "on": ["イン"], "kun": [], "tags": ["Lesson 11"] }
+  ],
+  "words": [
+    { "word": "駅員", "reading": "えきいん", "meaning": "station staff", "tags": ["Lesson 11"] },
+    { "word": "銀行", "reading": "ぎんこう", "meaning": "bank", "tags": ["Lesson 11"] },
+    { "word": "病気", "reading": "びょうき", "meaning": "illness, sick", "tags": ["Lesson 11"] },
+    { "word": "病院", "reading": "びょういん", "meaning": "hospital", "tags": ["Lesson 11"] },
+    { "word": "大学院", "reading": "だいがくいん", "meaning": "graduate school", "tags": ["Lesson 11"] },
+    { "word": "入院する", "reading": "にゅういんする", "meaning": "to go into hospital", "tags": ["Lesson 11"] },
+    { "word": "退院する", "reading": "たいいんする", "meaning": "to leave hospital", "tags": ["Lesson 11"] }
+  ]
+}
