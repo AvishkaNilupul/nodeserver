@@ -282,7 +282,11 @@ async function eldoradoMarket(cfg, candidates) {
     m.status = "Switched off";
     return m;
   }
-  const live = await EpicListing.find({ status: { $in: ["active", "sold_out"] } }).lean();
+  // Only the Epic Games section: a Rocket League listing takes fresh accounts
+  // by hand, never ones the distributor places.
+  const live = (await EpicListing.find({ status: { $in: ["active", "sold_out"] } }).lean()).filter(
+    (l) => (l.section || "epic") === "epic",
+  );
   if (!live.length) {
     m.status = "No live Eldorado listing to add to (listings are made by hand)";
     return m;

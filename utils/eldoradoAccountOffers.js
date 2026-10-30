@@ -32,6 +32,47 @@ const mp = require("./marketplaces");
 
 const EPIC_GAME_ID = "108";
 const CATEGORY = "Account";
+
+// The Eldorado sections an Epic account offer can be filed under.
+//   epic           Epic Games › Accounts. A "high-risk" section: listing needs
+//                  Eldorado's per-seller permission (see epicPermission).
+//   rocket-league  Rocket League › Accounts, Device PC. Only for FRESH Epic
+//                  accounts (no games): Rocket League runs on an Epic account,
+//                  and this section sells new ones as "fresh RL accounts".
+//                  Not high-risk.
+// The Rocket League attribute ids and values were read from the section's
+// public offers, and the offerAttributes shape ({id, type, values}) from
+// Eldorado's own place-offer form (convertToOfferAttributes, 2026-10-30).
+// A fresh account is 0–299 credits, unranked, level 0–9, no title.
+const SECTIONS = {
+  epic: {
+    key: "epic",
+    name: "Epic Games accounts",
+    gameId: EPIC_GAME_ID,
+    tradeEnvironmentId: null,
+    offerAttributes: [],
+    seoAlias: "epic-games-accounts",
+  },
+  "rocket-league": {
+    key: "rocket-league",
+    name: "Rocket League accounts (PC)",
+    gameId: "1",
+    tradeEnvironmentId: "0", // Device: PC
+    offerAttributes: [
+      { id: "rl-credits", type: "Select", values: ["credits-0299"] },
+      { id: "rocket-league-current-rank", type: "Select", values: ["rank-unranked"] },
+      { id: "rocket-league-level", type: "Select", values: ["level-09"] },
+      { id: "rocket-league-tags-titles", type: "Select", values: ["tag-other"] },
+    ],
+    seoAlias: "rocket-league-accounts-for-sale",
+  },
+};
+
+function sectionOf(key) {
+  const s = SECTIONS[String(key || "epic")];
+  if (!s) throw new Error("Unknown Eldorado section: " + key);
+  return s;
+}
 // Field limits from Eldorado's form validators.
 const MAX_LOGIN = 100;
 const MAX_PASSWORD = 100;
@@ -151,7 +192,10 @@ function entryList(r) {
   return [];
 }
 
-function offerDto({ title, description, priceUsd, hasOriginalEmail, mainOfferImage, offerImages, entries, gameId }) {
+// `section` picks where the offer is filed. An edit MUST send the same section
+// the offer was created in, or Eldorado would be asked to move it.
+function offerDto({ title, description, priceUsd, hasOriginalEmail, mainOfferImage, offerImages, entries, section }) {
+  const sec = sectionOf(section);
   const t = clip(title, MAX_TITLE);
   if (t.length < MIN_TITLE) throw new Error("Eldorado: the title needs at least 5 characters");
   if (!mainOfferImage || !mainOfferImage.largeImage) {
@@ -161,10 +205,10 @@ function offerDto({ title, description, priceUsd, hasOriginalEmail, mainOfferIma
   if (!list.length) throw new Error("Eldorado: an instant-delivery offer needs at least one account");
   return {
     augmentedGame: {
-      gameId: String(gameId || EPIC_GAME_ID),
+      gameId: sec.gameId,
       category: CATEGORY,
-      tradeEnvironmentId: null,
-      offerAttributes: [],
+      tradeEnvironmentId: sec.tradeEnvironmentId,
+      offerAttributes: sec.offerAttributes.map((a) => ({ id: a.id, type: a.type, values: [...a.values] })),
     },
     details: {
       pricing: {
@@ -189,11 +233,11 @@ function offerIdOf(r) {
   return String(r.id || (r.offer && r.offer.id) || r.offerId || "");
 }
 
-// The public offer page. Eldorado's route is `:seoAlias/oa/:offerId`, and the
-// Epic Games Account category's alias is "epic-games-accounts".
-function offerUrl(offerId) {
+// The public offer page. Eldorado's route is `:seoAlias/oa/:offerId`; the
+// alias is the section's ("epic-games-accounts" for Epic Games accounts).
+function offerUrl(offerId, section) {
   if (!offerId) return "";
-  return "https://www.eldorado.gg/epic-games-accounts/oa/" + encodeURIComponent(offerId);
+  return "https://www.eldorado.gg/" + sectionOf(section).seoAlias + "/oa/" + encodeURIComponent(offerId);
 }
 
 // Create the offer. Returns { id, raw }. Eldorado has answered offer creates
@@ -204,7 +248,7 @@ async function createAccountOffer(opts) {
   const r = await call("Eldorado account offer create", "POST", "/api/flexibleOffers/account", { data: dto });
   let id = offerIdOf(r);
   if (!id) {
-    const mine = await myAccountOffers({ pageSize: 20 }).catch(() => []);
+    const mine = await myAccountOffers({ pageSize: 20, gameId: dto.augmentedGame.gameId }).catch(() => []);
     const hit = mine
       .filter((o) => String(o.offerTitle || "").trim() === dto.details.offerTitle)
       .sort((a, b) => String(b.createdDate || b.expireDate || "").localeCompare(String(a.createdDate || a.expireDate || "")))[0];
@@ -336,6 +380,8 @@ async function ordersInStates(states, pageSize = 50) {
 module.exports = {
   EPIC_GAME_ID,
   CATEGORY,
+  SECTIONS,
+  sectionOf,
   MIN_PRICE,
   MAX_ADDITIONAL_INFO,
   createAccountOffer,

@@ -330,3 +330,12 @@ html[data-theme="dark"] #epic-sales-panel .es-pill.amber {
     font-size: 16px;
   }
 }
+
+/* Help lines inside the listing windows and the Ready-to-list cards. */
+.es-modal .hint,
+.es-item .hint {
+  color: var(--muted);
+  font-size: 12.5px;
+  line-height: 1.45;
+  margin: 6px 0 4px;
+}

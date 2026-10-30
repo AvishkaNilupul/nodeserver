@@ -35,6 +35,10 @@ const listedAccountSchema = new mongoose.Schema(
 const epicListingSchema = new mongoose.Schema(
   {
     market: { type: String, default: "eldorado", index: true },
+    // Where on Eldorado the offer is filed: "epic" (Epic Games › Accounts) or
+    // "rocket-league" (Rocket League › Accounts, PC — fresh accounts only).
+    // Every edit of the offer must send the same section.
+    section: { type: String, enum: ["epic", "rocket-league"], default: "epic" },
     externalId: { type: String, default: "", index: true },
     url: { type: String, default: "" },
     // draft | active | paused | sold_out | removed | error

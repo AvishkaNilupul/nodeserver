@@ -577,6 +577,9 @@
             '</div><div>' + pill(g.count + " account" + (g.count > 1 ? "s" : ""), "green") + "</div></div>" +
             '<div class="es-meta">' + esc(g.accounts.map((a) => a.label).join(", ")) + "</div>" +
             (warn.length ? '<ul class="es-reasons">' + warn.map((w) => "<li>" + esc(w) + "</li>").join("") + "</ul>" : "") +
+            (g.rocketLeague
+              ? '<div class="hint">Fresh accounts can go in Eldorado\'s Rocket League section (PC). That section needs no special permission.</div>'
+              : "") +
             '<div class="es-actions"><button class="btn btn-sm btn-primary" type="button" data-group="' + i + '">List on Eldorado</button>' +
             '<button class="btn btn-sm" type="button" data-g2g-group="' + i + '">Sell on G2G</button></div></div>'
           );
@@ -779,6 +782,7 @@
         "</div><div>" + statusPill(l.status) + "</div></div>" +
         '<div class="es-meta">' +
         [
+          l.section && l.section !== "epic" ? "Section: " + l.sectionName : "",
           money(l.priceUsd) + " each",
           l.counts.listed + " on sale · " + l.counts.sold + " sold",
           r.offerState ? "Eldorado: " + r.offerState + (r.quantity != null ? " · qty " + r.quantity : "") : "",
@@ -993,6 +997,12 @@
         <div class="modal">
           <h3>List on Eldorado</h3>
           <div class="modal-sub">Instant delivery: every account below becomes one unit of stock. Eldorado gives each buyer one account's Epic login plus its mail page login.</div>
+          <label for="es-c-section">Where on Eldorado</label>
+          <select id="es-c-section">
+            <option value="epic">Epic Games accounts</option>
+            <option value="rocket-league">Rocket League accounts (PC): fresh accounts only</option>
+          </select>
+          <div class="hint" id="es-c-section-hint"></div>
           <label>Accounts</label><div class="es-acc-list" id="es-c-accounts"></div>
           <label for="es-c-title">Title</label><input id="es-c-title" maxlength="160">
           <label for="es-c-price">Price per account (USD)</label><input id="es-c-price" type="number" min="0.05" step="0.01" placeholder="e.g. 0.49">
@@ -1070,6 +1080,7 @@
       $(id).addEventListener("input", () => ($("es-c-publish").disabled = true)),
     );
     $("es-c-cover").addEventListener("change", showCover);
+    $("es-c-section").addEventListener("change", applySection);
     $("es-a-save").addEventListener("click", saveAdd);
     $("es-t-save").addEventListener("click", saveText);
     $("es-g-save").addEventListener("click", saveG2gLink);
@@ -1122,40 +1133,64 @@
     // Same game set first, then the rest.
     accountChecks($("es-c-accounts"), ready.filter((s) => ids.has(s._id)).concat(ready.filter((s) => !ids.has(s._id))), ids);
     $("es-c-accounts").querySelectorAll("input").forEach((i) => i.addEventListener("change", () => ($("es-c-publish").disabled = true)));
-    $("es-c-title").value = group.suggestedTitle;
+    // Fresh accounts default to the Rocket League section while Eldorado
+    // refuses the Epic Games one; accounts with games never go there.
+    const perm = ((data.health || {}).eldorado || {}).permission || {};
+    const sel = $("es-c-section");
+    sel.querySelector('option[value="rocket-league"]').disabled = !group.rocketLeague;
+    sel.value = group.rocketLeague && perm.canSell !== true ? "rocket-league" : "epic";
     $("es-c-price").value = "";
-    $("es-c-desc").value = group.suggestedDescription;
-    $("es-c-cover").value = "";
-    $("es-c-cover-img").hidden = true;
     $("es-c-orig").checked = false;
+    openModal("es-create-modal");
+    applySection();
+  }
+
+  // Fill the window for the chosen section: its suggested text, cover and
+  // market check.
+  function applySection() {
+    const group = createGroup;
+    const rl = $("es-c-section").value === "rocket-league";
+    const perm = ((data.health || {}).eldorado || {}).permission || {};
+    $("es-c-section-hint").textContent = rl
+      ? "Fresh accounts only (no games). Filed under Rocket League › Accounts, Device PC, unranked, level 0–9. Buyers get the same delivery as the Epic shelf."
+      : perm.canSell === false
+        ? "Eldorado doesn't allow this seller to list Epic Games accounts yet."
+        : "";
+    $("es-c-title").value = rl ? group.rocketLeague.title : group.suggestedTitle;
+    $("es-c-desc").value = rl ? group.rocketLeague.description : group.suggestedDescription;
+    $("es-c-cover").value = "";
     $("es-c-preview").innerHTML = "";
     $("es-c-publish").disabled = true;
-    openModal("es-create-modal");
-    market(group.games.slice(0, 2));
+    showCover();
+    if (rl) market(["fresh"], "rocket-league");
+    else market(group.games.slice(0, 2));
     // The cover the server would pick (freebie art) comes with the preview.
-    post("/api/epic/sales/preview", createBody())
-      .then((j) => {
-        if (!$("es-c-cover").value && j.preview.coverUrl) {
-          $("es-c-cover").value = j.preview.coverUrl;
-          showCover();
-        }
-      })
-      .catch(() => {});
+    if (!rl) {
+      post("/api/epic/sales/preview", createBody())
+        .then((j) => {
+          if (!$("es-c-cover").value && j.preview.coverUrl) {
+            $("es-c-cover").value = j.preview.coverUrl;
+            showCover();
+          }
+        })
+        .catch(() => {});
+    }
   }
 
   // Cheapest live offers for each of the listing's first games (or for any
   // Epic account when it has none) — the "lowest price for the same set" check.
-  async function market(games) {
+  async function market(games, section = "epic") {
     const box = $("es-c-market");
     const queries = games && games.length ? games : [""];
     box.innerHTML = '<span class="muted">Loading cheapest similar offers…</span>';
     const parts = [];
     for (const q of queries) {
       try {
-        const j = await api("/api/epic/sales/market?q=" + encodeURIComponent(q));
+        const j = await api("/api/epic/sales/market?q=" + encodeURIComponent(q) + "&section=" + encodeURIComponent(section));
         const m = j.market;
         parts.push(
-          '<div><b>Cheapest on Eldorado for “' + esc(m.query || "any Epic account") + "” (" + esc(m.total) + " offers)</b></div>" +
+          '<div><b>Cheapest on Eldorado for “' + esc(m.query || "any Epic account") + "”" +
+            (section !== "epic" ? " in " + esc(m.sectionName || section) : "") + " (" + esc(m.total) + " offers)</b></div>" +
             (m.offers.length
               ? m.offers
                   .slice(0, 6)
@@ -1177,8 +1212,12 @@
   function showCover() {
     const url = $("es-c-cover").value.trim();
     const img = $("es-c-cover-img");
+    const builtIn = !url && $("es-c-section").value === "rocket-league" && createGroup && createGroup.rocketLeague;
     if (/^https:\/\//i.test(url)) {
       img.src = url;
+      img.hidden = false;
+    } else if (builtIn) {
+      img.src = createGroup.rocketLeague.cover;
       img.hidden = false;
     } else img.hidden = true;
   }
@@ -1191,6 +1230,7 @@
       description: $("es-c-desc").value,
       coverUrl: $("es-c-cover").value.trim(),
       hasOriginalEmail: $("es-c-orig").checked,
+      section: $("es-c-section").value,
     };
   }
 
@@ -1205,7 +1245,7 @@
       const p = j.preview;
       const blocking = (p.problems || []).filter((x) => !/don't all own/.test(x));
       box.innerHTML =
-        "<b>" + esc(p.quantity) + " account(s) × " + esc(money(p.priceUsd)) + "</b> — " + esc(p.title) +
+        "<b>" + esc(p.quantity) + " account(s) × " + esc(money(p.priceUsd)) + "</b> in " + esc(p.sectionName || "Epic Games accounts") + " — " + esc(p.title) +
         (p.problems && p.problems.length ? '<ul class="es-reasons">' + p.problems.map((x) => '<li class="block">' + esc(x) + "</li>").join("") + "</ul>" : "") +
         '<div class="muted" style="margin-top:8px">Each buyer gets: Epic login + password · Email details: ' + esc(p.providerUrl) +
         " with its own password · this note:</div><pre>" + esc(p.note) + "</pre>" +
@@ -1216,7 +1256,8 @@
 
   async function publish() {
     const body = createBody();
-    if (!confirm("Publish this listing on Eldorado now?\n\n" + body.title + "\n" + body.accountIds.length + " account(s) × $" + Number(body.priceUsd).toFixed(2) + "\n\nIt goes on sale immediately.")) return;
+    const where = $("es-c-section").selectedOptions[0].textContent;
+    if (!confirm("Publish this listing on Eldorado now?\n\n" + where + "\n" + body.title + "\n" + body.accountIds.length + " account(s) × $" + Number(body.priceUsd).toFixed(2) + "\n\nIt goes on sale immediately.")) return;
     const b = $("es-c-publish");
     await busy(b, async () => {
       const j = await post("/api/epic/sales/listings", { ...body, confirm: true, allowMixed: true });
@@ -1229,7 +1270,9 @@
   let addListing = null;
   function openAdd(l) {
     addListing = l;
-    $("es-a-sub").textContent = "Adds stock to “" + l.title + "”. Only accounts that own the same games belong here.";
+    $("es-a-sub").textContent =
+      "Adds stock to “" + l.title + "”. " +
+      (l.section === "rocket-league" ? "Only fresh accounts (no games) belong here." : "Only accounts that own the same games belong here.");
     const same = new Set((l.games || []).map((g) => g.toLowerCase()).sort());
     const key = [...same].join("|");
     const ready = readyAccounts();

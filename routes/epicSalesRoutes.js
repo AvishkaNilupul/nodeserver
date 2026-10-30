@@ -47,6 +47,7 @@ function listingOpts(b) {
     hasOriginalEmail: b.hasOriginalEmail === true,
     coverUrl: b.coverUrl != null ? String(b.coverUrl) : "",
     allowMixed: b.allowMixed === true,
+    section: b.section != null ? String(b.section) : "epic",
   };
 }
 
@@ -59,7 +60,7 @@ router.get(
 router.get(
   "/api/epic/sales/market",
   requireSuperadmin,
-  handle(async (req) => ({ market: await sales.marketCheck(req.query.q || "") })),
+  handle(async (req) => ({ market: await sales.marketCheck(req.query.q || "", req.query.section || "epic") })),
 );
 
 router.post(

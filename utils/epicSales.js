@@ -350,19 +350,24 @@ function stockRow(acc, r) {
 // Listing text
 // ---------------------------------------------------------------------------
 
-function suggestTitle(titles) {
+function suggestTitle(titles, section = "epic") {
   const t = titles || [];
+  if (section === ROCKET_LEAGUE) return "Fresh Rocket League Account | PC Epic Games | Unranked | Email Codes Included | Instant";
   if (!t.length) return "Fresh Epic Games Account | No Games | Email Codes Included | Instant Delivery";
   const names = t.length <= 3 ? t.join(" + ") : t.slice(0, 3).join(" + ") + " + " + (t.length - 3) + " more";
   const full = "Epic Games Account | " + names + " | Email Codes Included | Instant";
   return full.length <= 160 ? full : full.slice(0, 157).replace(/\s+\S*$/, "") + "…";
 }
 
-function suggestDescription(titles, days) {
+function suggestDescription(titles, days, section = "epic") {
   const d = Math.max(1, Number(days) || DEFAULTS.sessionDays);
   const t = titles || [];
   const lines = [];
-  if (t.length) {
+  if (section === ROCKET_LEAGUE) {
+    lines.push("Fresh Rocket League account for PC (Epic Games).");
+    lines.push("A brand-new Epic Games account: Rocket League never played, level 0, unranked, no items, no credits.");
+    lines.push("Rocket League is free to play: sign in to the Epic Games Launcher with this account and install it.");
+  } else if (t.length) {
     lines.push("Epic Games account (PC) with " + (t.length === 1 ? "this game" : "these " + t.length + " games") + " in its library:");
     for (const g of t.slice(0, 40)) lines.push("• " + g);
     if (t.length > 40) lines.push("• … and " + (t.length - 40) + " more");
@@ -532,20 +537,47 @@ async function vetAccounts(accountIds) {
 // Epic Games accounts is one of Eldorado's "high-risk" categories; a seller
 // lists there only while Eldorado has switched allowHighRiskOffers on for
 // them. Read at most every 10 min (a create refusal re-reads it at once).
+// Each section is asked about its own game: Rocket League accounts is not a
+// high-risk section, so it needs no permission.
 const PERMISSION_CACHE_MS = 10 * 60 * 1000;
-let permissionCache = { at: 0, value: null };
-async function eldoradoPermission({ fresh = false } = {}) {
-  if (!fresh && permissionCache.value && Date.now() - permissionCache.at < PERMISSION_CACHE_MS) {
-    return permissionCache.value;
-  }
+const permissionCache = new Map(); // section -> { at, value }
+async function eldoradoPermission({ fresh = false, section = "epic" } = {}) {
+  const sec = eld.sectionOf(section);
+  const hit = permissionCache.get(sec.key);
+  if (!fresh && hit && Date.now() - hit.at < PERMISSION_CACHE_MS) return hit.value;
   let value;
   try {
-    value = { ...(await eld.epicPermission()), checkedAt: new Date() };
+    value = { ...(await eld.epicPermission(sec.gameId)), checkedAt: new Date() };
   } catch (e) {
     value = { canSell: null, error: (e && e.message) || String(e), checkedAt: new Date() };
   }
-  permissionCache = { at: Date.now(), value };
+  permissionCache.set(sec.key, { at: Date.now(), value });
   return value;
+}
+
+// The section a listing is filed under ("epic" for every listing made before
+// sections existed).
+function sectionKey(s) {
+  const k = String(s || "epic").trim();
+  if (!eld.SECTIONS[k]) throw userError("Unknown Eldorado section: " + k);
+  return k;
+}
+
+const ROCKET_LEAGUE = "rocket-league";
+// Our own cover for fresh Rocket League accounts (public/img, made for this).
+const RL_COVER_FILE = path.join(__dirname, "..", "public", "img", "epic-rocket-league-cover.png");
+const RL_COVER_PUBLIC = "/img/epic-rocket-league-cover.png";
+
+// The Rocket League section takes fresh accounts only: an account with games
+// is worth more on the Epic shelf, G2G or PlayerAuctions, and listing it as a
+// "fresh" account would describe it wrongly.
+function freshOnlyProblems(vetted) {
+  const withGames = vetted.filter((v) => v.titles.length);
+  if (!withGames.length) return [];
+  return [
+    "The Rocket League section is for fresh accounts only (no games). These have games: " +
+      withGames.map((v) => labelOf(v.acc) + " (" + v.titles.length + ")").join(", "),
+  ];
 }
 
 const NO_PERMISSION_TEXT =
@@ -574,25 +606,34 @@ function validTitle(t) {
 // What a create would send, minus every secret. The panel shows it before
 // the operator confirms.
 async function previewListing(opts) {
+  const section = sectionKey(opts.section);
+  const rl = section === ROCKET_LEAGUE;
   const { ctx, vetted } = await vetAccounts(opts.accountIds);
   const cfg = ctx.cfg;
   const purl = providerUrl();
   const games = vetted[0].titles;
   const key = gameKey(games);
-  const mixed = vetted.some((v) => gameKey(v.titles) !== key);
-  const cover = String(opts.coverUrl || "").trim() || (await coverUrlFor(games));
+  const mixed = !rl && vetted.some((v) => gameKey(v.titles) !== key);
+  const pasted = String(opts.coverUrl || "").trim();
+  const cover = pasted || (rl ? "" : await coverUrlFor(games));
+  // Rocket League listings fall back to our own cover file.
+  const builtInCover = !cover && rl && fs.existsSync(RL_COVER_FILE);
   const noPrice = opts.priceUsd == null || opts.priceUsd === "";
-  const permission = await eldoradoPermission();
+  const permission = await eldoradoPermission({ section });
   return {
+    section,
+    sectionName: eld.sectionOf(section).name,
     permission,
-    title: validTitle(opts.title || suggestTitle(games)),
+    title: validTitle(opts.title || suggestTitle(games, section)),
     priceUsd: noPrice ? null : validPrice(opts.priceUsd),
-    description: String(opts.description || suggestDescription(games, cfg.sessionDays)).slice(0, 2000),
+    description: String(opts.description || suggestDescription(games, cfg.sessionDays, section)).slice(0, 2000),
     hasOriginalEmail: !!opts.hasOriginalEmail,
     quantity: vetted.length,
-    games,
+    games: rl ? [] : games,
     mixedGames: mixed,
     coverUrl: cover,
+    coverPreview: builtInCover ? RL_COVER_PUBLIC : cover,
+    builtInCover,
     providerUrl: purl,
     sessionDays: cfg.sessionDays,
     units: vetted.map((v) => ({
@@ -604,9 +645,10 @@ async function previewListing(opts) {
     note: additionalInfoText(cfg.sessionDays),
     problems: [
       ...(permission.canSell === false ? [NO_PERMISSION_TEXT] : []),
+      ...(rl ? freshOnlyProblems(vetted) : []),
       ...(noPrice ? ["Set a price"] : []),
       ...(purl ? [] : ["PUBLIC_BASE_URL is not an https address, so the mail page link can't be built"]),
-      ...(cover ? [] : ["No cover image found for these games. Paste an image link"]),
+      ...(cover || builtInCover ? [] : ["No cover image found for these games. Paste an image link"]),
       ...(mixed ? ["These accounts don't all own the same games. The title and description list the first account's games"] : []),
     ],
   };
@@ -621,6 +663,7 @@ async function createListing(opts, actor) {
     const cfg = ctx.cfg;
     const listing = new EpicListing({
       market: "eldorado",
+      section: pv.section,
       status: "draft",
       title: pv.title,
       description: pv.description,
@@ -651,8 +694,9 @@ async function createListing(opts, actor) {
           entryFor({ email: v.email, epicPassword: v.epicPassword, mailPassword: password, purl: pv.providerUrl, days: cfg.sessionDays }),
         );
       }
-      const image = await uploadCover(pv.coverUrl);
+      const image = pv.builtInCover ? await eld.uploadImage(RL_COVER_FILE) : await uploadCover(pv.coverUrl);
       listing.mainOfferImage = image;
+      if (pv.builtInCover) listing.coverSource = RL_COVER_PUBLIC;
       await listing.save();
       const created = await eld.createAccountOffer({
         title: pv.title,
@@ -662,6 +706,7 @@ async function createListing(opts, actor) {
         mainOfferImage: image,
         offerImages: [],
         entries,
+        section: pv.section,
       });
       if (!created.id) {
         // On Eldorado, but its id could not be read: keep every session (the
@@ -674,14 +719,14 @@ async function createListing(opts, actor) {
         throw userError(listing.lastError, 502);
       }
       listing.externalId = created.id;
-      listing.url = eld.offerUrl(created.id);
+      listing.url = eld.offerUrl(created.id, pv.section);
       listing.status = "active";
       await listing.save();
     } catch (e) {
       // Eldorado's own refusal of the category: re-read the permission so the
       // panel says so instead of the old cached answer.
       if (/not eligible to place offers/i.test(String((e && e.message) || ""))) {
-        await eldoradoPermission({ fresh: true }).catch(() => {});
+        await eldoradoPermission({ fresh: true, section: pv.section }).catch(() => {});
       }
       if (!listing.externalId && listing.status !== "error") {
         // Nothing reached Eldorado: give the accounts back.
@@ -709,7 +754,7 @@ async function createListing(opts, actor) {
     }
     await listing.save();
     await notify(
-      "🟢 Epic listing is live on Eldorado: " + listing.title + " — $" + listing.priceUsd.toFixed(2) + " × " +
+      "🟢 Epic listing is live on Eldorado (" + pv.sectionName + "): " + listing.title + " — $" + listing.priceUsd.toFixed(2) + " × " +
         listing.accounts.length + " account(s).\n" + listing.url,
     );
     return listingView(listing.toObject());
@@ -800,6 +845,8 @@ function offerFields(listing, offer, patch = {}) {
     hasOriginalEmail: offer && offer.hasOriginalEmail != null ? !!offer.hasOriginalEmail : !!listing.hasOriginalEmail,
     mainOfferImage: (offer && offer.mainOfferImage && offer.mainOfferImage.largeImage && offer.mainOfferImage) || listing.mainOfferImage,
     offerImages: (offer && offer.offerImages) || [],
+    // Every rewrite keeps the offer in the section it was created in.
+    section: sectionKey(listing.section),
   };
 }
 
@@ -862,6 +909,10 @@ async function addAccounts(listingId, accountIds, actor) {
     const listing = await loadListing(listingId);
     requireLive(listing);
     const { ctx, vetted } = await vetAccounts(accountIds);
+    if (sectionKey(listing.section) === ROCKET_LEAGUE) {
+      const bad = freshOnlyProblems(vetted);
+      if (bad.length) throw userError(bad[0]);
+    }
     const cfg = ctx.cfg;
     const purl = providerUrl();
     const remote = await eld.getAccountEntries(listing.externalId);
@@ -1037,7 +1088,7 @@ async function linkOffer(listingId, offerId) {
     const id = String(offerId || "").trim();
     if (!/^[a-f\d-]{20,64}$/i.test(id)) throw userError("That doesn't look like an Eldorado offer id");
     listing.externalId = id;
-    listing.url = eld.offerUrl(id);
+    listing.url = eld.offerUrl(id, listing.section);
     listing.status = "active";
     await readBack(listing);
     listing.lastError = "";
@@ -1463,9 +1514,12 @@ function listingView(l) {
     hasEntry: !!u.entryId,
     removedReason: u.removedReason,
   }));
+  const sec = eld.SECTIONS[l.section || "epic"] || eld.SECTIONS.epic;
   return {
     _id: String(l._id),
     market: l.market,
+    section: sec.key,
+    sectionName: sec.name,
     externalId: l.externalId,
     url: l.url,
     status: l.status,
@@ -1547,6 +1601,16 @@ function groupsOf(rows, cfg) {
       count: g.accounts.length,
       suggestedTitle: suggestTitle(g.games),
       suggestedDescription: suggestDescription(g.games, cfg.sessionDays),
+      // Fresh accounts can also go in the Rocket League section.
+      ...(g.games.length
+        ? {}
+        : {
+            rocketLeague: {
+              title: suggestTitle([], ROCKET_LEAGUE),
+              description: suggestDescription([], cfg.sessionDays, ROCKET_LEAGUE),
+              cover: RL_COVER_PUBLIC,
+            },
+          }),
     }))
     .sort((a, b) => b.games.length - a.games.length || b.count - a.count);
 }
@@ -1639,12 +1703,14 @@ async function overview({ withOthers = true } = {}) {
 // Cheapest live Epic account offers on Eldorado matching a search, for the
 // "lowest price for the same set" check before pricing. Public read, cached.
 const marketCache = new Map();
-async function marketCheck(query) {
+async function marketCheck(query, section = "epic") {
+  const sec = eld.sectionOf(sectionKey(section));
   const q = String(query || "").trim().slice(0, 60);
-  const hit = marketCache.get(q.toLowerCase());
+  const cacheKey = sec.key + "|" + q.toLowerCase();
+  const hit = marketCache.get(cacheKey);
   if (hit && Date.now() - hit.at < MARKET_CACHE_MS) return hit.value;
   const qs = new URLSearchParams({
-    gameId: eld.EPIC_GAME_ID,
+    gameId: sec.gameId,
     category: "Account",
     searchQuery: q,
     pageIndex: "1",
@@ -1668,8 +1734,8 @@ async function marketCheck(query) {
       originalEmail: !!o.hasOriginalEmail,
     };
   });
-  const value = { query: q, total: (r.data && r.data.recordCount) || rows.length, offers: rows.slice(0, 10) };
-  marketCache.set(q.toLowerCase(), { at: Date.now(), value });
+  const value = { query: q, section: sec.key, sectionName: sec.name, total: (r.data && r.data.recordCount) || rows.length, offers: rows.slice(0, 10) };
+  marketCache.set(cacheKey, { at: Date.now(), value });
   return value;
 }
 
@@ -1762,8 +1828,6 @@ module.exports = {
     withLock,
     // utils/epicDistributor asks before topping up an Eldorado listing.
     eldoradoPermission,
-    resetPermissionCache: () => {
-      permissionCache = { at: 0, value: null };
-    },
+    resetPermissionCache: () => permissionCache.clear(),
   },
 };
