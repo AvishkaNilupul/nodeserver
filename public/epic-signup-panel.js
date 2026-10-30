@@ -32,10 +32,10 @@
       const ping=await extension('epicgen-ping', {}, 3000);
       if(document.getElementById('signupAuto')?.checked && ping.version!=='1.5.0')throw Error('Reload extension version 1.5.0 before using automatic submission.');
       status.textContent = 'Reserving an Outlook inbox…';
-      const { mailbox } = await extension('epicgen-allocate', { useProxy: document.getElementById('signupProxy').checked });
+      const { mailbox, creationLocation } = await extension('epicgen-allocate', { useProxy: document.getElementById('signupProxy').checked }, 60000);
       reserved = true;
       status.textContent = 'Preparing signup for ' + mailbox.address + '…';
-      const body = await signupApi('/api/epic/signup/start', {method:'POST',headers:{'Content-Type':'application/json',Accept:'application/json'},body:JSON.stringify({mailbox,automation:{autoSubmit:!!document.getElementById('signupAuto')?.checked,autoAcceptEula:!!document.getElementById('signupAuto')?.checked}})});
+      const body = await signupApi('/api/epic/signup/start', {method:'POST',headers:{'Content-Type':'application/json',Accept:'application/json'},body:JSON.stringify({mailbox,creationLocation,generateSampleContact:!!document.getElementById('signupSampleContact')?.checked,automation:{autoSubmit:!!document.getElementById('signupAuto')?.checked,autoAcceptEula:!!document.getElementById('signupAuto')?.checked}})});
       active = body.session.sessionId;
       await extension('epicgen-drive', body.session);
       status.textContent = 'Signup opened for ' + mailbox.address + '. Complete any captcha in the Epic tab; Outlook verification runs automatically.';

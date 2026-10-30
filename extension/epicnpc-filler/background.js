@@ -18,7 +18,7 @@ async function request(url, init = {}, timeout = 24000) {
   if (!res.ok || body.ok === false || body.success === false) throw new Error(body.message || body.error || `HTTP ${res.status}`);
   return body;
 }
-const local = (path, body) => request(MAIL + path, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body || {}) });
+const local = (path, body) => request(MAIL + path, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body || {}) }, path === '/api/epic/proxy' ? 30000 : 24000);
 const server = (s, path, body) => request(s.nodeserverOrigin + path, {
   method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + s.bearer }, body: JSON.stringify(body),
 });
@@ -63,7 +63,7 @@ chrome.runtime.onMessage.addListener((msg, sender, respond) => {
         mailbox = { address: row.email, provider: 'outlook-local', reservedAt: new Date().toISOString() };
       }
       await chrome.storage.session.set({ [PENDING]: { mailbox, proxy, adminTab: sender.tab.id } });
-      return { ok: true, mailbox };
+      return { ok: true, mailbox, creationLocation: proxy?.location || null };
     }
     if (msg.type === 'epicgen-cancel') {
       if (!panel) throw new Error('Open the Epic Accounts panel first');
@@ -112,7 +112,7 @@ chrome.runtime.onMessage.addListener((msg, sender, respond) => {
     if (msg.type !== 'epicgen-session-request' && msg.sessionId !== s.sessionId) throw new Error('Session mismatch');
     if (msg.type === 'epicgen-session-request') return { ok: true, session: { sessionId: s.sessionId, identity: s.identity, login: s.login, automation:s.automation } };
     if (msg.type === 'epicgen-status') {
-      await server(s, `/api/epic/signup/${s.sessionId}/status`, { status: msg.status, ...msg.extra });
+      await server(s, `/api/epic/signup/${s.sessionId}/status`, { status: msg.status, ...msg.extra, creationLocation:s.proxy?.location || null });
       await relay(s, { kind: 'status', status: msg.status });
       return { ok: true };
     }

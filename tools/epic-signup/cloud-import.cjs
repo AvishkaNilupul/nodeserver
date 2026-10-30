@@ -6,10 +6,7 @@ function validate(payload) {
     if(a[key]!==undefined&&(typeof a[key]!=='string'||a[key].length>max||a[key].includes('\0')||a[key].startsWith('enc:')))throw Error('Invalid credential field');
   }
   if(!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(a.email||'')||!a.password||!a.refreshToken)throw Error('Incomplete account');
-  const profile={};
-  for(const [key,max] of Object.entries({firstName:80,lastName:80,dateOfBirth:10,country:2,notes:4000})) {
-    const value=a.profile?.[key];if(value!==undefined&&(typeof value!=='string'||value.length>max))throw Error('Invalid profile');profile[key]=value||'';
-  }
+  const profile=require('../../utils/epicAccountLocation').cleanProfile(a.profile);
   return{...a,profile};
 }
 async function importAccount({payload,collection,encrypt,now=()=>new Date()}) {

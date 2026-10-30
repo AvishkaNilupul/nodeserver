@@ -50,3 +50,21 @@ test('rejects stale-editor conflicts without changing any stored details',async(
  try{assert.equal((await call('','PATCH',{notes:'stale edit'})).status,409);assert.equal(JSON.stringify(stored),before);}
  finally{rejectUpdate=false;}
 });
+
+test('sample contacts preserve stored credentials and creation provenance across edits',async()=>{
+ stored.accountDetails=encrypt(JSON.stringify({country:'JP',creationCountry:'JP',creationCountrySource:'recorded-account-country'}));
+ const token=stored.refreshToken,pass=stored.password;
+ const out=await call('/sample-contact','POST',{});assert.equal(out.status,200);assert.match(out.data.account.details.phone,/TEST-JP-/);assert.equal(out.data.account.details.contactSource,'synthetic-internal');
+ assert.equal((await call('/sample-contact','POST',{})).status,409);
+ await call('','PATCH',{notes:'keep location'});const p=JSON.parse(decrypt(stored.accountDetails));assert.equal(p.creationCountry,'JP');assert.equal(p.contactSource,'synthetic-internal');assert.equal(stored.refreshToken,token);assert.equal(stored.password,pass);
+ assert.equal((await call('','PATCH',{creationCountry:'US'})).status,400);
+});
+
+test('bulk location backfill only fills missing profile data and preserves sold accounts and tokens',async()=>{
+ const model=require('../models/EpicAccount');model.find=()=>query([stored]);
+ stored.accountDetails=encrypt(JSON.stringify({country:'JP',phone:'saved-phone',address:'saved-address'}));
+ const token=stored.refreshToken,password=stored.password;
+ const response=await fetch(base+'/api/epic/accounts/details/backfill-location',{method:'POST',headers:{'Content-Type':'application/json','X-Test-Role':'superadmin'},body:JSON.stringify({generateSamples:true})});
+ assert.equal(response.status,200);assert.equal((await response.json()).changed,1);
+ const p=JSON.parse(decrypt(stored.accountDetails));assert.equal(p.creationCountry,'JP');assert.equal(p.creationIp,'');assert.equal(p.phone,'saved-phone');assert.equal(p.address,'saved-address');assert.equal(stored.sold,true);assert.equal(stored.refreshToken,token);assert.equal(stored.password,password);
+});

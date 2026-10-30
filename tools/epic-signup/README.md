@@ -120,3 +120,9 @@ so the worker requires other private windows to be closed before reserving an
 inbox. Token capture stays in that same window. Successful saves close it; failed
 signups stay open for recovery. This avoids reusing a previous account's Store
 or accounts.epicgames.com session without calling Epic's logout endpoint.
+
+## Creation country and internal contact metadata
+
+Proxy setup verifies the sticky exit through HTTPS IP geolocation before reserving an inbox. Russian and unverified exits fail closed; untargeted/Russian ProxyScrape usernames target US. The checked location is recorded separately from Epic's account-country field and forwarded through local/cloud save. Geo lookup uses ipwho.is and sends no account credentials.
+
+Account details now shows creation country, its provenance and any recorded signup IP. Historical records can only inherit their saved account-country code; they never acquire an invented historical IP. Fill missing details for past accounts preserves existing fields with optimistic concurrency. Optional fictional contact samples are marked synthetic-internal and use non-dialable TEST identifiers and fictional addresses; these are internal metadata, not Epic profile updates or verified contact information.

@@ -17,7 +17,7 @@
       <div class="card">
         <h2>Account details</h2><p class="hint">Keep sign-in and recovery details with each account for sale preparation. Editing this record does not change the Epic login.</p>
         <div class="row"><label for="epic-detail-account">Account</label><select id="epic-detail-account"><option value="">Choose an account</option></select><button type="button" class="btn" id="epic-detail-refresh">Refresh accounts</button></div>
-        <p id="epic-detail-status" class="hint" role="status"></p>
+        <div class="row"><label><input type="checkbox" id="epic-detail-samples" /> Include fictional internal contact samples</label><button type="button" class="btn" id="epic-detail-backfill">Fill missing details for past accounts</button></div><p id="epic-detail-status" class="hint" role="status"></p>
       </div>
       <form id="epic-detail-form" class="card" hidden autocomplete="off">
         <h2 id="epic-detail-name"></h2><p class="hint" id="epic-detail-summary"></p>
@@ -27,11 +27,16 @@
           <label>First name<input name="firstName" maxlength="80" /></label>
           <label>Last name<input name="lastName" maxlength="80" /></label>
           <label>Date of birth<input name="dateOfBirth" type="date" min="1900-01-01" /></label>
-          <label>Country code<input name="country" maxlength="2" placeholder="e.g. CO" /></label>
+          <label>Epic account country<input name="country" maxlength="2" placeholder="e.g. CO" /></label>
+          <label>Creation country<input id="epic-creation-country" readonly /></label>
+          <label>Creation location source<input id="epic-creation-source" readonly /></label>
+          <label>Signup IP<input id="epic-creation-ip" readonly /></label>
+          <label>Phone / sample identifier<input name="phone" maxlength="80" /></label>
+          <label>Address<input name="address" maxlength="500" /></label>
           <label>Epic password<input name="password" type="password" maxlength="256" autocomplete="new-password" placeholder="Leave blank to keep saved password" /></label>
           <label>2FA setup key<input name="totpSecret" type="password" maxlength="256" autocomplete="new-password" placeholder="Leave blank to keep saved key" /></label>
         </div>
-        <label class="epic-detail-notes">Internal notes<textarea name="notes" maxlength="4000" rows="4"></textarea></label>
+        <p id="epic-contact-source" class="hint"></p><button type="button" class="btn" id="epic-detail-generate">Generate internal contact samples</button><label class="epic-detail-notes">Internal notes<textarea name="notes" maxlength="4000" rows="4"></textarea></label>
         <div class="row"><button class="btn btn-primary" id="epic-detail-save" type="submit">Save details</button><button type="button" class="btn" id="epic-detail-reveal">Show saved credentials</button><button type="button" class="btn" id="epic-detail-copy">Copy sale details</button></div>
         <div id="epic-detail-secrets" class="epic-detail-grid" hidden>
           <label>Saved Epic password<input id="epic-detail-saved-password" type="text" readonly autocomplete="off" /></label>
@@ -59,7 +64,11 @@
       $('epic-detail-name').textContent=a.displayName||a.label||a.accountId;
       $('epic-detail-summary').textContent=[a.sold?'SOLD':'Unsold',a.status==='ok'?'Login connected':'Needs login',a.libraryCount+' games',a.hasPassword?'Password saved':'Password missing','Source: '+a.source,'Epic ID: '+a.accountId].join(' · ');
       for(const key of ['label','email']) form.elements[key].value=a[key]||'';
-      for(const key of ['firstName','lastName','dateOfBirth','country','notes']) form.elements[key].value=a.details[key]||'';
+      for(const key of ['firstName','lastName','dateOfBirth','country','notes','phone','address']) form.elements[key].value=a.details[key]||'';
+      $('epic-creation-country').value=a.details.creationCountry||'Unknown';
+      $('epic-creation-source').value=a.details.creationCountrySource==='proxy-ip'?'Signup proxy IP checked':a.details.creationCountrySource?'Recorded account country; original IP unknown':'Not recorded';
+      $('epic-creation-ip').value=a.details.creationIp||'Not recorded';
+      $('epic-contact-source').textContent=a.details.contactSource==='synthetic-internal'?'Fictional internal samples. Not verified phone/address details.':a.details.contactSource==='manual'?'Manually entered contact details.':'';
       for(const key of ['password','totpSecret']) form.elements[key].value='';
       $('epic-detail-games').replaceChildren();
       for(const title of a.games.length?a.games:['No games recorded yet.']) {const li=document.createElement('li');li.textContent=title;$('epic-detail-games').append(li);}
@@ -125,6 +134,17 @@
         const text=rows.filter(([,v])=>v).map(([k,v])=>k+': '+v).join('\n')+'\nGames: '+(a.games.join(', ')||'No games recorded');
         await navigator.clipboard.writeText(text); status('Saved sale details copied.');
       } catch(e){status('Could not copy details. '+e.message,true);}
+    });
+    $('epic-detail-generate').addEventListener('click',async()=>{
+      if(!selected)return;
+      if(dirty){status('Save changes before generating samples.',true);return;}
+      const version=requestVersion;
+      try{const data=await request('/api/epic/accounts/'+selected._id+'/details/sample-contact',{method:'POST',body:'{}'});if(version===requestVersion)fill(data.account);}catch(e){status(e.message,true);}
+    });
+    $('epic-detail-backfill').addEventListener('click',async()=>{
+      if(dirty){status('Save changes before filling past account details.',true);return;}
+      const button=$('epic-detail-backfill');button.disabled=true;
+      try{const data=await request('/api/epic/accounts/details/backfill-location',{method:'POST',body:JSON.stringify({generateSamples:$('epic-detail-samples').checked})});await refresh();status('Updated '+data.changed+' account records; kept '+data.skipped+' unchanged.');}catch(e){status(e.message,true);}finally{button.disabled=false;}
     });
     $('epic-detail-refresh').addEventListener('click',refresh);
     function tab(details) {

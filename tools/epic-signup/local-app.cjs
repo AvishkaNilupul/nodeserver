@@ -3,6 +3,7 @@ const {LocalVault}=require('./local-vault.cjs');
 const {CloudSync,createSshUploader}=require('./cloud-sync.cjs');
 const identityFactory=require('../../utils/epicIdentityFactory'),mailboxProvider=require('../../utils/epicMailbox');
 const epic=require('../../utils/epicClient');
+const {cleanLocation,creationProfile,sampleContact}=require('../../utils/epicAccountLocation');
 const DEFAULT_DIR=path.join(os.homedir(),'Library','Application Support','EpicAccountGenerator');
 const digest=value=>crypto.createHash('sha256').update(value).digest('hex');
 function equal(a,b){return typeof a==='string'&&typeof b==='string'&&a.length===b.length&&crypto.timingSafeEqual(Buffer.from(a),Buffer.from(b));}
@@ -36,6 +37,7 @@ function createLocalApp({dataDir=DEFAULT_DIR,port=4107,cloudUploader=null,exchan
     try{proxyReady=!!require('../../utils/epicLocalProxy').readProxy();}catch{}
     res.json({success:true,mailReady,proxyReady,cloudEnabled:!!cloudSync});
   });
+  app.post('/api/local/accounts/backfill-location',ui,(_req,res)=>{let changed=0;for(const a of vault.data.accounts){const p=creationProfile(a.profile);if(JSON.stringify(a.profile)!==JSON.stringify(p)){a.profile=p;changed++;}}vault.save();res.json({success:true,changed});});
   app.get('/api/local/accounts',ui,(_req,res)=>res.json({success:true,accounts:vault.data.accounts.map(metadata)}));
   app.post('/api/local/cloud/retry',ui,(_req,res)=>{if(!cloudSync)return res.status(503).json({success:false,message:'Cloud upload is not configured'});for(const a of vault.data.accounts)cloudSync.enqueue(a,{force:true});cloudSync.wake();res.json({success:true});});
   app.post('/api/local/accounts/:id/reveal',ui,(req,res)=>{
@@ -45,7 +47,7 @@ function createLocalApp({dataDir=DEFAULT_DIR,port=4107,cloudUploader=null,exchan
   app.post('/api/epic/signup/start',ui,(req,res)=>{
     try {
       const box=mailboxProvider.allocate(req.body.mailbox),identity={...identityFactory.build(),email:box.address};
-      const token=crypto.randomBytes(32).toString('base64url'),s={sessionId:crypto.randomUUID(),bearerHash:digest(token),identity,automation:{autoSubmit:req.body.automation?.autoSubmit===true,autoAcceptEula:req.body.automation?.autoAcceptEula===true},status:'identity_ready',reservedAt:box.providerMeta.reservedAt,createdAt:new Date().toISOString(),expiresAt:new Date(Date.now()+86400000).toISOString()};
+      const token=crypto.randomBytes(32).toString('base64url'),s={sessionId:crypto.randomUUID(),bearerHash:digest(token),identity,generateSampleContact:req.body.generateSampleContact===true,creationLocation:cleanLocation(req.body.creationLocation),automation:{autoSubmit:req.body.automation?.autoSubmit===true,autoAcceptEula:req.body.automation?.autoAcceptEula===true},status:'identity_ready',reservedAt:box.providerMeta.reservedAt,createdAt:new Date().toISOString(),expiresAt:new Date(Date.now()+86400000).toISOString()};
       vault.data.sessions=vault.data.sessions.filter(s=>new Date(s.expiresAt)>new Date());vault.data.sessions.push(s);vault.save();res.json({success:true,session:response(s,token)});
     }catch{res.status(400).json({success:false,message:'Reserve a recent Outlook inbox through the extension first'});}
   });
@@ -59,6 +61,7 @@ function createLocalApp({dataDir=DEFAULT_DIR,port=4107,cloudUploader=null,exchan
   });
   app.post('/api/epic/signup/:sessionId/status',bearer,(req,res)=>{
     const s=req.signup;if(s.status==='verified'||!['wizard_open','awaiting_confirmation','submitting','awaiting_captcha','awaiting_otp','awaiting_eula','sms_required','throttled','failed'].includes(req.body.status))return res.status(400).json({success:false,message:'Invalid signup transition'});
+    try {if(req.body.creationLocation&&!s.creationLocation)s.creationLocation=cleanLocation(req.body.creationLocation);} catch{return res.status(400).json({success:false,message:'Invalid signup location'});}
     s.events=(s.events||[]).concat({at:new Date().toISOString(),status:req.body.status}).slice(-100);s.status=req.body.status;s.lastError=typeof req.body.lastError==='string'?req.body.lastError.slice(0,500):'';vault.save();res.json({success:true});
   });
   app.post('/api/epic/accounts/from-extension',bearer,async(req,res)=>{
@@ -72,7 +75,8 @@ function createLocalApp({dataDir=DEFAULT_DIR,port=4107,cloudUploader=null,exchan
       if(profile.email?.toLowerCase()!==s.identity.email.toLowerCase())throw Error('wrong-account');
       let a=vault.data.accounts.find(a=>a.accountId===token.account_id);
       if(!a){a={_id:crypto.randomBytes(12).toString('hex'),accountId:token.account_id,createdAt:new Date().toISOString()};vault.data.accounts.push(a);}
-      Object.assign(a,{displayName:token.displayName||s.identity.displayName,email:s.identity.email,password:s.identity.password,refreshToken:token.refresh_token,refreshExpiresAt:token.refresh_expires_at,source:'local-generator',status:'saved',profile:{firstName:s.identity.firstName,lastName:s.identity.lastName,dateOfBirth:s.identity.dateOfBirth,country:profile.country||s.identity.country}});
+      Object.assign(a,{displayName:token.displayName||s.identity.displayName,email:s.identity.email,password:s.identity.password,refreshToken:token.refresh_token,refreshExpiresAt:token.refresh_expires_at,source:'local-generator',status:'saved',profile:creationProfile({...(a.profile||{}),firstName:s.identity.firstName,lastName:s.identity.lastName,dateOfBirth:s.identity.dateOfBirth,country:profile.country||s.identity.country},s.creationLocation)});
+      if(s.generateSampleContact)a.profile=sampleContact(a.profile);
       s.verifiedAt=new Date().toISOString();s.status='verified';s.epicAccountId=a._id;s.lastError='';vault.save();if(cloudSync){cloudSync.enqueue(a);cloudSync.wake();}res.json({success:true,account:metadata(a)});
     }catch(e){s.lastError=e.message==='wrong-account'?'Epic signed into a different email address. Sign out and recover this signup.':'Could not finish Epic authorization. Recover this signup to try again.';s.status='failed';vault.save();res.status(502).json({success:false,message:s.lastError});}
     finally{busy.delete(s.sessionId);}
