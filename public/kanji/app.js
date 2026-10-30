@@ -109,7 +109,7 @@
     showReadingFront: false,
     autoSpeak: false,
     sessionSize: 20,
-    newPerDay: 15,
+    newPerDay: 25,
     font: "serif",
     theme: "auto",
     quizCount: 15,
@@ -286,25 +286,30 @@
     if (!a.note && b.note) a.note = b.note;
   }
   function dedupe(items) {
-    const byId = new Map();
+    const byBase = new Map(); // id -> every card with that spelling
     const out = [];
     items.forEach((it) => {
-      const prev = byId.get(it.id);
-      if (!prev) {
-        byId.set(it.id, it);
+      const list = byBase.get(it.id);
+      if (!list) {
+        byBase.set(it.id, [it]);
         out.push(it);
         return;
       }
-      // Same spelling, different reading (今日 きょう / こんにち): keep both cards.
-      if (it.type === "w" && prev.readings[0] && it.readings[0] && normReading(prev.readings[0]) !== normReading(it.readings[0])) {
-        let n = 2;
-        while (byId.has(it.id + "#" + n)) n++;
-        it.id += "#" + n;
-        byId.set(it.id, it);
+      if (it.type === "w") {
+        // Same spelling, different reading (一日 いちにち / ついたち): keep both cards;
+        // the same word listed again under another kanji merges into its card.
+        const r = it.readings[0] ? normReading(it.readings[0]) : "";
+        const match = list.find((p) => !r || !p.readings.length || p.readings.some((x) => normReading(x) === r));
+        if (match) {
+          mergeInto(match, it);
+          return;
+        }
+        it.id = it.id + "#" + (list.length + 1);
+        list.push(it);
         out.push(it);
         return;
       }
-      mergeInto(prev, it);
+      mergeInto(list[0], it);
     });
     return out;
   }
@@ -449,7 +454,7 @@
     Object.keys(custom.items).forEach((id) => {
       if (!baseIds.has(id)) items.push(Object.assign({}, custom.items[id]));
     });
-    const d = { items, kanji: [], words: [], byId: {}, byChar: {}, wordsByChar: {}, wordByText: {}, tags: [], baseIds };
+    const d = { items, kanji: [], words: [], byId: {}, byChar: {}, wordsByChar: {}, wordByText: {}, spelling: {}, tags: [], baseIds };
     const kIndex = {};
     items.forEach((it, i) => {
       it.order = i;
@@ -461,6 +466,7 @@
       } else {
         d.words.push(it);
         if (!d.wordByText[it.word]) d.wordByText[it.word] = it;
+        d.spelling[it.word] = (d.spelling[it.word] || 0) + 1;
         uniq(kanjiChars(it.word)).forEach((c) => (d.wordsByChar[c] = d.wordsByChar[c] || []).push(it));
       }
       it.tags.forEach((t) => d.tags.push(t));
@@ -480,6 +486,8 @@
   }
   const bySeq = (a, b) => a.pos - b.pos || (a.type === b.type ? 0 : a.type === "k" ? -1 : 1) || a.order - b.order;
   const meaningText = (it, n) => (it.meanings.slice(0, n || 3).join(", ") || "—");
+  // Another card is written the same way (一日 = いちにち or ついたち), so prompts show which one is meant.
+  const sharedSpelling = (it) => it.type === "w" && (D.spelling[it.word] || 0) > 1;
   const label = (it) => (it.type === "k" ? it.kanji : it.word);
   function fmtReading(r) {
     const i = r.indexOf(".");
@@ -857,7 +865,8 @@
       const n = Math.min(5, Array.from(it.word).length);
       body = showGlyph
         ? '<div class="word-glyph n' + n + '">' + esc(it.word) + "</div>" +
-          (!revealed && dir === "r" && settings.showReadingFront && it.readings.length ? '<div class="front-reading">' + esc(it.readings.join("・")) + "</div>" : "")
+          (!revealed && dir === "r" && settings.showReadingFront && it.readings.length ? '<div class="front-reading">' + esc(it.readings.join("・")) + "</div>" : "") +
+          (!revealed && dir === "r" && sharedSpelling(it) ? '<div class="prompt-sub">the one meaning “' + esc(meaningText(it, 2)) + "”</div>" : "")
         : '<div class="prompt-meaning">' + esc(meaningText(it, 4)) + "</div>" + (it.readings.length ? '<div class="prompt-sub">' + esc(it.readings.join("・")) + "</div>" : "");
       body += revealed ? wordAnswer(it) : hintHtml(it, dir);
     }
@@ -1236,18 +1245,21 @@
     },
     w2r(it) {
       if (!it.readings.length || !kanjiChars(it.word).length) return null;
-      const mine = new Set(it.readings.map(normReading));
+      // Readings of every card spelled like this one are right answers too, so never offer them as wrong ones.
+      const mine = new Set(D.words.filter((o) => o.word === it.word).flatMap((o) => o.readings).map(normReading));
       const c = D.words.filter((o) => o !== it && o.readings.length).map((o) => ({ v: o.readings[0], o })).filter((x) => !mine.has(normReading(x.v)));
       synthReadings(it).forEach((v) => {
         if (!mine.has(normReading(v))) c.push({ v, o: null, bonus: 2.2 });
       });
-      return mcq("w2r", it, "How do you read this word?", glyphPrompt(it.word), it.readings[0], c, fmtKana, "auto");
+      const hint = sharedSpelling(it) ? '<div class="muted" style="margin-top:4px">the one meaning “' + esc(meaningText(it, 2)) + "”</div>" : "";
+      return mcq("w2r", it, "How do you read this word?", glyphPrompt(it.word) + hint, it.readings[0], c, fmtKana, "auto");
     },
     w2m(it) {
       if (!it.meanings.length) return null;
       const ms = mset(it);
-      const c = D.words.filter((o) => o !== it && o.meanings.length && !overlaps(mset(o), ms)).map((o) => ({ v: meaningText(o, 3), o }));
-      return mcq("w2m", it, "What does this word mean?", glyphPrompt(it.word), meaningText(it, 3), c, fmtText, "list");
+      const c = D.words.filter((o) => o !== it && o.word !== it.word && o.meanings.length && !overlaps(mset(o), ms)).map((o) => ({ v: meaningText(o, 3), o }));
+      const hint = sharedSpelling(it) && it.readings.length ? '<div class="q-reading">' + esc(it.readings.join("・")) + "</div>" : "";
+      return mcq("w2m", it, "What does this word mean?", glyphPrompt(it.word) + hint, meaningText(it, 3), c, fmtText, "list");
     },
     m2w(it) {
       if (!it.meanings.length) return null;
@@ -1779,7 +1791,7 @@
       '<div class="set-group">' +
       '<div class="set-row col"><span class="lbl">Card front</span>' + seg("direction", [["recog", "Kanji first"], ["recall", "Meaning first"], ["mixed", "Mixed"]]) + "</div>" +
       '<div class="set-row col"><span class="lbl">Cards per session</span>' + seg("sessionSize", [[10, "10"], [20, "20"], [30, "30"], [0, "All"]]) + "</div>" +
-      '<div class="set-row col"><span class="lbl">New cards per day</span>' + seg("newPerDay", [[5, "5"], [10, "10"], [15, "15"], [25, "25"], [0, "All"]]) + "</div>" +
+      '<div class="set-row col"><span class="lbl">New cards per day</span>' + seg("newPerDay", [[10, "10"], [25, "25"], [50, "50"], [100, "100"], [0, "All"]]) + "</div>" +
       sw("showReadingFront", "Show the reading on word cards", "Kana under the word before you flip") +
       sw("autoSpeak", "Read aloud", "Says the reading when you flip or answer") +
       sw("quizAutoNext", "Quiz: next question after a right answer") +
