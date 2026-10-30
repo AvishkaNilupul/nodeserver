@@ -4,6 +4,7 @@ function setup(post){let blocked=0;const module={exports:{}},account={accountId:
  if(n==='./epicClaimBackoff')return {until:()=>blocked,block:()=>blocked=Date.now()+60000};
  if(n==='axios')return {post};
  if(n==='./epicOfferWindow')return require('../utils/epicOfferWindow');
+ if(n==='./epicRegion')return require('../utils/epicRegion');
  if(n==='./epicClient')return {exchangeCode:async()=> 'code',getLibraryRecords:async()=>[]};
  if(n==='./epicClaimResult')return {verifyClaimResult:async r=>r};
  if(n==='./epicAccountToken')return {accountAccessToken:async()=> 'access'};

@@ -1,14 +1,16 @@
 /* The server owns the queue; this page only starts it and displays progress. */
-window.initEpicClaimBatch = function ({api, load, toast}) {
+window.initEpicClaimBatch = function ({api, load, toast, pausedUntil}) {
   var start = document.getElementById('btnClaimAll');
   var stop = document.getElementById('btnStopClaims');
   var output = document.getElementById('claimBatchProgress');
   var last = '', polling = false, submitting = false;
   function draw(batch) {
     var active = ['preparing', 'running'].includes(batch.state);
-    start.disabled = active || submitting;
+    // Epic's HTTP 429 pause: every claim would stop at once, so wait it out.
+    var paused = !active && pausedUntil ? pausedUntil() : '';
+    start.disabled = active || submitting || !!paused;
     stop.hidden = !active;
-    start.textContent = active ? 'Claims running on Mac…' : 'Claim all missing';
+    start.textContent = active ? 'Claims running on Mac…' : paused ? 'Paused until ' + paused : 'Claim all missing';
     if (batch.state === 'idle') return;
     var names = {preparing: 'Preparing claims', running: 'Running on Mac', complete: 'Batch finished',
       stopped: 'Batch stopped', paused: 'Batch paused', error: 'Batch failed'};

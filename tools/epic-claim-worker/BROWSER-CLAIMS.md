@@ -69,3 +69,35 @@ A 429 pauses the whole queue and persists a shared server cooldown in the ignore
 six hours (a fallback, not a promise about Epic's reset time). Cooldown survives
 restarts, applies to manual claims too, and does not consume per-account retry
 history or the daily cap. No region or account settings are changed.
+
+Epic's limit outlasted that six-hour pause: one probe at 07:07 JST and another at
+13:28 JST on 2026-10-30 both got 429 again. So a 429 within 12 h of the last
+pause ending doubles the pause (6 h, 12 h, then 24 h at most). A pause file
+from before this rule counts as six hours. Once Epic answers a checkout normally
+(claimed, already owned, region refusal, not free), the next 429 starts again at
+six hours. While a pause is on, the page's Claim buttons and Claim all read
+"Paused until HH:MM" and are disabled, and the Claim all route refuses to start.
+
+Checkouts that reach Epic are also spaced at least 5 minutes apart
+(`EPIC_CHECKOUT_GAP_MIN`, 0 turns it off). The 2026-10-29 burst ran 17 checkouts
+in 27 minutes. A claim inside the gap answers `spacing` at once instead of holding
+the one-claim lock. The scheduler and Claim all wait it out and retry the same
+game, and the manual Claim button says when to try again. A busy or unreachable
+Mac worker never opened Epic's checkout, so it does not start the gap.
+
+## Region locks
+
+Some giveaways are not sold in some countries (2026-10-29: every RU account
+got "not available in your region" for Sorry We're Closed). The helper reports
+`region_unavailable` without submitting anything. That log entry is final: the
+pair is never retried, it gives its daily-cap slot back, and every other
+account from the same country is locked out of that giveaway too, in the
+scheduler, Claim all and the manual Claim button (`utils/epicRegion.js`).
+An account's country is its saved details' `creationCountry` (the signup
+proxy IP from the region detector), else its recorded `country`; accounts with
+no country are only locked by their own refusal. No Telegram ping is sent for
+a locked pair or during an HTTP 429 pause. The Epic Accounts page shows each
+account's country, lists locked games apart ("Region locked · RU") without a
+Claim button, shows each missing game's last try, and says when a 429 pause
+lifts. After a pause the scheduler runs again two minutes after it lifts
+instead of waiting for the next 6-hour tick.

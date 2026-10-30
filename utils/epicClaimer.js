@@ -16,18 +16,51 @@ const epic = require("./epicClient");
 const epicAutoClaim = require("./epicAutoClaim");
 const { accountAccessToken } = require("./epicAccountToken");
 const { sendTelegram } = require("./telegram");
+const rateBackoff = require("./epicClaimBackoff");
+const region = require("./epicRegion");
 
 const {live} = require("./epicOfferWindow");
 
 const TICK_MS = 6 * 60 * 60 * 1000; // every 6 hours
+// After an Epic HTTP 429 pause, run again this long after it lifts instead of
+// waiting out the rest of the 6-hour tick (a restart during the pause used to
+// push the next try up to 6 h past its end).
+const AFTER_PAUSE_MS = 2 * 60 * 1000;
 
 const state = {
   started: false,
   running: false,
   lastRun: null,
+  nextRunAt: null,
   lastError: "",
-  lastCounts: { accounts: 0, synced: 0, needsLogin: 0, pendingClaims: 0 },
+  lastCounts: { accounts: 0, synced: 0, needsLogin: 0, pendingClaims: 0, regionLocked: 0 },
 };
+
+// Outcomes where a Telegram "claim needed" ping can't help: the giveaway is
+// region-locked for this account, or Epic's 429 pause also blocks manual
+// claims and the claimer resumes on its own once it lifts.
+const NO_PING = new Set(["region_blocked", region.REFUSED, "rate_limited", "spacing"]);
+
+// The claim module answers "spacing" while the gap between two Epic
+// checkouts runs; a scheduled run waits it out and tries the same game again.
+const MAX_SPACING_WAITS = 20;
+const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+async function claimSpaced(acc, freebie, accessToken, opts) {
+  let auto;
+  for (let waits = 0; ; waits++) {
+    auto = await epicAutoClaim.attemptAutoClaim(acc, freebie, accessToken, opts);
+    if (auto.status !== "spacing" || waits >= MAX_SPACING_WAITS) return auto;
+    const until = new Date(auto.retryAt).getTime();
+    await wait(Math.max(1000, (Number.isFinite(until) ? until : 0) - Date.now() + 1000));
+    accessToken = await accountAccessToken(acc);
+  }
+}
+
+function nextDelay(now = Date.now()) {
+  const pausedUntil = rateBackoff.until();
+  if (!pausedUntil) return TICK_MS;
+  return Math.min(TICK_MS, Math.max(60000, pausedUntil - now + AFTER_PAUSE_MS));
+}
 
 // account+offer pairs already pinged this pass-cycle, so one live giveaway
 // doesn't ping the same account every 6h forever. Re-pings after 3 days.
@@ -109,14 +142,19 @@ async function pingClaim(acc, freebie, accessToken) {
   return true;
 }
 
-// Sync one account and return the live freebies it still needs.
-async function processAccount(acc, liveFreebies, notify, priceByNamespace) {
+// Sync one account and return { missing, regionLocked } counts for the live
+// freebies it still needs. blocked is the fleet's offerId -> refused-countries
+// map; a refusal seen here is added to it so later accounts skip that game.
+async function processAccount(acc, liveFreebies, notify, priceByNamespace, blocked = new Map()) {
+  const counts = { missing: 0, regionLocked: 0 };
   try {
     let accessToken = await accountAccessToken(acc);
     await syncLibrary(acc, accessToken, priceByNamespace);
     acc.status = "ok";
     acc.lastError = "";
-    const missing = liveFreebies.filter((f) => live(f) && !ownsOffer(acc, f));
+    const notOwned = liveFreebies.filter((f) => live(f) && !ownsOffer(acc, f));
+    const missing = notOwned.filter((f) => !region.regionBlock(acc, f, blocked));
+    counts.regionLocked = notOwned.length - missing.length;
     if (notify && !acc.sold) {
       for (const f of missing) {
         // Try the direct-API auto-claim first. If it succeeded — or if it
@@ -124,11 +162,12 @@ async function processAccount(acc, liveFreebies, notify, priceByNamespace) {
         // link for this offer. The library re-sync on the next tick will
         // confirm ownership landed. Only ping the operator when the auto
         // path is disabled, throttled, or actually failed.
-        const auto = await epicAutoClaim.attemptAutoClaim(
-          acc,
-          f,
-          accessToken,
-        );
+        const auto = await claimSpaced(acc, f, accessToken, { blocked });
+        if (auto.status === region.REFUSED) {
+          region.noteRefusal(blocked, acc, f.offerId);
+          counts.regionLocked++;
+        }
+        if (auto.status === "region_blocked") counts.regionLocked++;
         if (acc.status === "needs_login") break;
         accessToken = await accountAccessToken(acc);
         if (
@@ -136,16 +175,18 @@ async function processAccount(acc, liveFreebies, notify, priceByNamespace) {
         ) {
           continue;
         }
+        if (NO_PING.has(auto.status)) continue;
         await pingClaim(acc, f, accessToken);
       }
     }
-    return missing.length;
+    counts.missing = Math.max(0, notOwned.length - counts.regionLocked);
+    return counts;
   } catch (err) {
     acc.lastError = err.message || String(err);
     if (err.epicCode && String(err.epicCode).indexOf("invalid_grant") !== -1) {
       acc.status = "needs_login";
     }
-    return 0;
+    return counts;
   } finally {
     acc.lastCheckedAt = new Date();
     await acc.save().catch(() => {});
@@ -167,19 +208,23 @@ async function runOnce(opts) {
         .filter((f) => f.namespace)
         .map((f) => [f.namespace, parsePrice(f.originalPrice)]),
     );
+    const blocked = region.blockedCountries(accounts);
     let synced = 0;
     let needsLogin = 0;
     let pendingClaims = 0;
+    let regionLocked = 0;
     for (const acc of accounts) {
-      const missing = await processAccount(
+      const counts = await processAccount(
         acc,
         liveFreebies,
         notify,
         priceByNamespace,
+        blocked,
       );
       if (acc.status === "needs_login") needsLogin++;
       else synced++;
-      pendingClaims += missing;
+      pendingClaims += counts.missing;
+      regionLocked += counts.regionLocked;
     }
     if (needsLogin > 0 && notify) {
       await sendTelegram(
@@ -193,6 +238,7 @@ async function runOnce(opts) {
       synced,
       needsLogin,
       pendingClaims,
+      regionLocked,
     };
     state.lastError = "";
     return state.lastCounts;
@@ -209,6 +255,7 @@ function status() {
   return {
     running: state.running,
     lastRun: state.lastRun,
+    nextRunAt: state.nextRunAt,
     lastError: state.lastError,
     lastCounts: state.lastCounts,
     intervalHours: TICK_MS / 3600000,
@@ -218,17 +265,20 @@ function status() {
 function start() {
   if (state.started) return;
   state.started = true;
+  const schedule = (delay) => {
+    state.nextRunAt = new Date(Date.now() + delay);
+    const t = setTimeout(tick, delay);
+    if (t.unref) t.unref();
+  };
   const tick = async () => {
     try {
       await runOnce();
     } catch (err) {
       console.error("epicClaimer error:", err.message);
     }
-    const t = setTimeout(tick, TICK_MS);
-    if (t.unref) t.unref();
+    schedule(nextDelay());
   };
-  const t = setTimeout(tick, 70000);
-  if (t.unref) t.unref();
+  schedule(70000);
 }
 
-module.exports = { start, runOnce, status, syncLibrary };
+module.exports = { start, runOnce, status, syncLibrary, processAccount, nextDelay };

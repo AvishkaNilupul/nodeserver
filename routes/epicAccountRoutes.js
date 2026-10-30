@@ -7,6 +7,7 @@ const epic = require("../utils/epicClient");
 const epicClaimer = require("../utils/epicClaimer");
 const { accountAccessToken } = require("../utils/epicAccountToken");
 const epicAutoClaim = require("../utils/epicAutoClaim");
+const epicRegion = require("../utils/epicRegion");
 const settings = require("../utils/settings");
 const { encrypt, decrypt } = require("../utils/secretBox");
 const crypto = require("crypto");
@@ -45,11 +46,20 @@ function publicLoginUrl(req) {
   return `${proto}://${host}/mail/`;
 }
 
-function publicAccount(a, liveFreebies) {
+// Latest auto-claim attempt for one giveaway, without order ids.
+function lastTry(a, offerId) {
+  const e = (a.autoClaimLog || []).find((x) => x && x.offerId === offerId);
+  return e ? { at: e.at, status: e.status, error: String(e.error || "").slice(0, 160) } : null;
+}
+
+function publicAccount(a, liveFreebies, blocked) {
   const owned = new Set(
     (a.library || []).map((g) => g.namespace).filter(Boolean),
   );
-  const missing = (liveFreebies || []).filter((f) => live(f) && !owned.has(f.namespace));
+  const notOwned = (liveFreebies || []).filter((f) => live(f) && !owned.has(f.namespace));
+  const locks = new Map(notOwned.map((f) => [f.offerId, epicRegion.regionBlock(a, f, blocked)]));
+  const missing = notOwned.filter((f) => !locks.get(f.offerId));
+  const where = epicRegion.accountCountry(a);
   return {
     _id: a._id,
     accountId: a.accountId,
@@ -63,13 +73,26 @@ function publicAccount(a, liveFreebies) {
     libraryCount: a.libraryCount,
     libraryValueUsd: a.libraryValueUsd,
     sold: a.sold,
+    country: where.country,
+    countrySource: where.source,
     missingLive: missing.map((f) => ({
       offerId: f.offerId,
       title: f.title,
       namespace: f.namespace,
       originalPrice: f.originalPrice,
       endDate: f.endDate,
+      lastTry: lastTry(a, f.offerId),
     })),
+    // Live giveaways Epic won't sell in this account's country.
+    regionLocked: notOwned
+      .filter((f) => locks.get(f.offerId))
+      .map((f) => ({
+        offerId: f.offerId,
+        title: f.title,
+        originalPrice: f.originalPrice,
+        country: locks.get(f.offerId).country,
+        reason: locks.get(f.offerId).reason,
+      })),
     createdAt: a.createdAt,
   };
 }
@@ -81,9 +104,10 @@ router.get("/api/epic/accounts", requireSuperadmin, async (req, res) => {
       EpicAccount.find({}).sort({ createdAt: 1 }).lean(),
       EpicFreebie.find({ active: true }).lean(),
     ]);
+    const blocked = epicRegion.blockedCountries(accounts);
     res.json({
       success: true,
-      accounts: accounts.map((a) => publicAccount(a, liveFreebies)),
+      accounts: accounts.map((a) => publicAccount(a, liveFreebies, blocked)),
       redirectUrl: epic.REDIRECT_URL,
       status: epicClaimer.status(),
       autoClaim: epicAutoClaim.getStatus(),
@@ -279,8 +303,11 @@ router.post(
 async function claimAndSync(acc, freebie) {
   if (!eligible(acc)) return {attempted: false, status: "skipped", error: "Account is sold or needs reconnection"};
   if (!live(freebie)) return {attempted: false, status: "skipped", error: "Giveaway is not currently live"};
+  // Read fresh each time: a refusal earlier in a batch locks later accounts
+  // from the same country.
+  const blocked = await epicRegion.loadBlockedCountries(EpicAccount);
   const accessToken = await accountAccessToken(acc);
-  const result = await epicAutoClaim.attemptAutoClaim(acc, freebie, accessToken, { manual: true });
+  const result = await epicAutoClaim.attemptAutoClaim(acc, freebie, accessToken, { manual: true, blocked });
   if (["claimed", "already_owned"].includes(result.status) && !result.tokenNeedsLogin) {
     try {
       const prices = new Map((await EpicFreebie.find({}).lean()).map(f => [
@@ -302,7 +329,7 @@ const claimBatch = createClaimBatch({
       EpicAccount.find({sold: {$ne: true}, status: "ok"}).sort({createdAt: 1}).lean(),
       EpicFreebie.find({active: true}).lean(),
     ]);
-    return planClaims(accounts, offers);
+    return planClaims(accounts, offers, Date.now(), await epicRegion.loadBlockedCountries(EpicAccount));
   },
   execute: async job => {
     const acc = await EpicAccount.findById(job.accountId);
@@ -318,6 +345,12 @@ router.get("/api/epic/claims/batch", requireSuperadmin, (_req, res) => {
 });
 router.post("/api/epic/claims/batch", requireSuperadmin, async (_req, res) => {
   if (manualClaimRunning) return res.status(409).json({success: false, message: "Wait for the current single claim to finish"});
+  // Every job would stop at once on Epic's 429 pause; say so instead.
+  const pausedUntil = !claimBatch.isActive() && epicAutoClaim.getStatus().rateLimitedUntil;
+  if (pausedUntil) {
+    return res.status(409).json({success: false, rateLimitedUntil: pausedUntil,
+      message: "Epic is limiting checkouts (HTTP 429), so claims are paused. They resume on their own after the pause."});
+  }
   try { res.status(202).json({success: true, batch: await claimBatch.start()}); }
   catch { res.status(500).json({success: false, message: "Could not prepare the claim batch"}); }
 });

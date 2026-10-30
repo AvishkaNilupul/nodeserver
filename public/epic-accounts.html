@@ -594,6 +594,39 @@
         background: var(--surface-2);
         color: var(--muted);
       }
+      .cc {
+        display: inline-block;
+        margin-left: 6px;
+        padding: 0 6px;
+        border: 1px solid var(--line);
+        border-radius: 6px;
+        font-size: 11px;
+        font-weight: 700;
+        letter-spacing: 0.04em;
+        color: var(--muted);
+        vertical-align: 1px;
+      }
+      .game-row {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 10px;
+        margin: 3px 0;
+      }
+      .game-note {
+        display: block;
+        color: var(--muted);
+        font-size: 11.5px;
+      }
+      .region-lock {
+        color: var(--muted);
+      }
+      .region-lock b {
+        flex: none;
+        color: var(--red);
+        font-weight: 600;
+        white-space: nowrap;
+      }
     </style>
   </head>
   <body>
@@ -930,6 +963,88 @@
         );
       }
 
+      var countrySources = {
+        "proxy-ip": "signup IP",
+        "recorded-account-country": "account country",
+      };
+      function regionChip(a) {
+        if (!a.country) return "";
+        return (
+          '<span class="cc" title="Region: ' +
+          esc(a.country) +
+          " (from " +
+          esc(countrySources[a.countrySource] || a.countrySource || "account details") +
+          ')">' +
+          esc(a.country) +
+          "</span>"
+        );
+      }
+      function shortWhen(d) {
+        var t = new Date(d);
+        return isNaN(t)
+          ? ""
+          : t.toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
+      }
+      function lastTryHtml(t) {
+        if (!t) return "";
+        return (
+          '<span class="game-note">Last try ' +
+          esc(shortWhen(t.at)) +
+          ": " +
+          esc(String(t.status || "").replace(/_/g, " ")) +
+          (t.error ? " · " + esc(t.error) : "") +
+          "</span>"
+        );
+      }
+      // Set by load() from the server: Epic's HTTP 429 pause, if one is on.
+      var claimPausedUntil = null;
+      function whenLabel(d) {
+        var t = new Date(d), now = new Date();
+        if (isNaN(t)) return "";
+        return t.toDateString() === now.toDateString()
+          ? t.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })
+          : shortWhen(t);
+      }
+      // "" when claims may run, else the time Epic's pause ends.
+      function pauseLabel() {
+        return claimPausedUntil && new Date(claimPausedUntil) > new Date() ? whenLabel(claimPausedUntil) : "";
+      }
+      function missingHtml(a) {
+        var paused = pauseLabel();
+        var rows = (a.missingLive || []).map(function (m) {
+          return (
+            '<div class="game-row"><span>' +
+            esc(m.title) +
+            lastTryHtml(m.lastTry) +
+            "</span>" +
+            (paused
+              ? '<button class="btn btn-sm" disabled title="Epic answered HTTP 429. Claims resume on their own.">Paused until ' +
+                esc(paused) +
+                "</button>"
+              : '<button class="btn btn-sm" onclick="claimNow(\'' +
+                a._id +
+                "','" +
+                esc(m.offerId) +
+                "')\">Claim</button>") +
+            "</div>"
+          );
+        });
+        (a.regionLocked || []).forEach(function (m) {
+          rows.push(
+            '<div class="game-row region-lock"><span>' +
+            esc(m.title) +
+            '<span class="game-note">' +
+            (m.reason === "epic"
+              ? "Epic refused this account"
+              : "Epic refused another " + esc(m.country) + " account") +
+            "</span></span><b>Region locked" +
+            (m.country ? " · " + esc(m.country) : "") +
+            "</b></div>"
+          );
+        });
+        return rows.length ? rows.join("") : '<span class="muted">none 🎉</span>';
+      }
+
       function render() {
         if (!accounts.length) {
           $("list").innerHTML =
@@ -945,7 +1060,9 @@
                 (a.sold ? ' style="opacity:.55"' : "") +
                 '><td class="c-acct"><b>' +
                 esc(a.label || a.displayName || a.accountId) +
-                '</b><div class="muted">' +
+                "</b>" +
+                regionChip(a) +
+                '<div class="muted">' +
                 esc(a.displayName) +
                 (a.sold ? " · SOLD" : "") +
                 '</div></td><td class="c-status' +
@@ -964,21 +1081,7 @@
                 '</details></td><td class="c-value" data-label="Value">$' +
                 (a.libraryValueUsd || 0).toFixed(2) +
                 '</td><td class="c-missing" data-label="Missing live games">' +
-                ((a.missingLive || []).length
-                  ? a.missingLive
-                      .map(function (m) {
-                        return (
-                          '<div style="margin:2px 0">' +
-                          esc(m.title) +
-                          ' <button class="btn btn-sm" onclick="claimNow(\'' +
-                          a._id +
-                          "','" +
-                          esc(m.offerId) +
-                          "')\">Claim</button></div>"
-                        );
-                      })
-                      .join("")
-                  : '<span class="muted">none 🎉</span>') +
+                missingHtml(a) +
                 '</td><td class="c-acts">' +
                 (a.sold
                   ? ""
@@ -1009,32 +1112,55 @@
           "</tbody></table>";
       }
 
-      function renderStatus(st) {
+      function renderStatus(st, ac) {
         if (!st) return;
-        $("statusLine").textContent = st.lastRun
-          ? "Last sync " +
-            new Date(st.lastRun).toLocaleString() +
-            " — " +
-            st.lastCounts.accounts +
-            " account(s), " +
-            st.lastCounts.pendingClaims +
-            " pending claim(s)" +
-            (st.lastCounts.needsLogin
-              ? ", " + st.lastCounts.needsLogin + " need login"
-              : "") +
-            ". Auto-sync every " +
-            st.intervalHours +
-            "h."
-          : "Not synced yet — syncs every " + st.intervalHours + "h.";
+        var c = st.lastCounts || {};
+        var parts = [
+          st.lastRun
+            ? "Last sync " +
+              new Date(st.lastRun).toLocaleString() +
+              " — " +
+              c.accounts +
+              " account(s), " +
+              c.pendingClaims +
+              " pending claim(s)" +
+              (c.regionLocked ? ", " + c.regionLocked + " region-locked" : "") +
+              (c.needsLogin ? ", " + c.needsLogin + " need login" : "") +
+              "."
+            : "Not synced yet.",
+        ];
+        if (ac) {
+          parts.push(
+            ac.rateLimitedUntil
+              ? "Auto-claim paused: Epic answered HTTP 429; claims resume after " +
+                  shortWhen(ac.rateLimitedUntil) +
+                  "."
+              : ac.enabled
+                ? "Auto-claim on · " + (ac.todayCount || 0) + "/" + ac.dailyCap + " checkouts today."
+                : "Auto-claim off.",
+          );
+        }
+        parts.push(
+          st.nextRunAt
+            ? "Next run " + shortWhen(st.nextRunAt) + "."
+            : "Auto-sync every " + st.intervalHours + "h.",
+        );
+        $("statusLine").textContent = parts.join(" ");
       }
 
+      var pauseReload = null;
       async function load() {
         try {
           var j = await api("/api/epic/accounts");
           accounts = j.accounts || [];
           $("redirectLink").href = j.redirectUrl;
-          renderStatus(j.status);
+          claimPausedUntil = (j.autoClaim && j.autoClaim.rateLimitedUntil) || null;
+          renderStatus(j.status, j.autoClaim);
           render();
+          // Bring the Claim buttons back once Epic's pause ends.
+          clearTimeout(pauseReload);
+          var left = claimPausedUntil ? new Date(claimPausedUntil) - Date.now() : 0;
+          if (left > 0) pauseReload = setTimeout(load, Math.min(left + 5000, 2147483647));
         } catch (e) {
           $("list").innerHTML =
             '<div class="muted">Failed to load: ' + esc(e.message) + "</div>";
@@ -1052,6 +1178,16 @@
             body: JSON.stringify({ offerId: offerId }),
           });
           var result = j.result || {};
+          if (result.status === "rate_limited") {
+            claimPausedUntil = result.retryAt || claimPausedUntil;
+            await load();
+            throw new Error("Epic is limiting checkouts (HTTP 429). Claims resume on their own" +
+              (pauseLabel() ? " after " + pauseLabel() : "") + ".");
+          }
+          if (result.status === "spacing") {
+            throw new Error("Checkouts are spaced out to avoid Epic's limit. Try again after " +
+              whenLabel(result.retryAt) + ".");
+          }
           if (!["claimed", "already_owned"].includes(result.status)) {
             throw new Error(result.error || result.status || "Claim did not finish");
           }
@@ -1304,7 +1440,7 @@
         load();
       });
       $("btnRefresh").addEventListener("click", load);
-      initEpicClaimBatch({api: api, load: load, toast: toast});
+      initEpicClaimBatch({api: api, load: load, toast: toast, pausedUntil: pauseLabel});
 
       load();
     </script>

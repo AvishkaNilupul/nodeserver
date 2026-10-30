@@ -15,6 +15,7 @@
 const axios = require("axios");
 const rateBackoff = require("./epicClaimBackoff");
 const {offerState} = require("./epicOfferWindow");
+const region = require("./epicRegion");
 let claimRunning = false;
 const epic = require("./epicClient");
 const { verifyClaimResult } = require("./epicClaimResult");
@@ -66,7 +67,21 @@ const state = {
   // last N outcomes across the fleet for /status
   recent: [],
   startedAt: null,
+  // Earliest time the next checkout may reach Epic (see checkoutGapMs).
+  nextCheckoutAt: 0,
 };
+
+// Minimum gap between two checkouts that reach Epic. 2026-10-29: 17
+// checkouts in 27 minutes got Epic's HTTP 429 on confirm-order, and the
+// limit still held 13 h later. EPIC_CHECKOUT_GAP_MIN overrides (0 = off).
+const DEFAULT_CHECKOUT_GAP_MIN = 5;
+function checkoutGapMs() {
+  const raw = process.env.EPIC_CHECKOUT_GAP_MIN;
+  const min = raw == null || raw === "" || !Number.isFinite(Number(raw)) ? DEFAULT_CHECKOUT_GAP_MIN : Number(raw);
+  return Math.max(0, min) * 60000;
+}
+// Statuses that prove Epic's checkout answered normally (no 429).
+const EPIC_ANSWERED = new Set(["claimed", "already_owned", region.REFUSED, "not_free"]);
 
 function todayKey() {
   const d = new Date();
@@ -148,9 +163,19 @@ function retryPolicy(cfg) {
   };
 }
 
+function regionMessage(lock) {
+  const where = lock.country ? "in " + lock.country : "in this account's region";
+  return "Not available " + where + (lock.reason === "epic"
+    ? " (Epic refused this account)"
+    : " (Epic refused another " + lock.country + " account)");
+}
+
 // The one entry point the claimer calls. Returns:
 //   { attempted, status, error?, orderId? }
 // attempted=false means the caller should fall back to the Telegram tap.
+// opts.blocked is the fleet's offerId -> refused-countries map
+// (utils/epicRegion.blockedCountries); without it only this account's own
+// refusals lock a giveaway.
 async function attemptAutoClaim(acc, freebie, accessToken, opts = {}) {
   if (claimRunning) return { attempted: false, status: "busy", error: "A claim is already running" };
   claimRunning = true;
@@ -162,8 +187,14 @@ async function runClaim(acc, freebie, accessToken, opts) {
   if (window !== "live") return { attempted: false, status: window, error: "This giveaway is " + window };
   if (acc.sold) return { attempted: false, status: "sold" };
   if (acc.status === "needs_login") return { attempted: false, status: "needs_login" };
+  // Region locks are final, so they are checked before the 429 pause and the
+  // retry gates: Epic will refuse this checkout whatever the timing.
+  const lock = region.regionBlock(acc, freebie, opts.blocked);
+  if (lock) {
+    return { attempted: false, status: "region_blocked", country: lock.country, reason: lock.reason, error: regionMessage(lock) };
+  }
   const retryAt = rateBackoff.until();
-  if (retryAt) return {attempted:false,status:"rate_limited",retryAt:new Date(retryAt).toISOString(),error:"Epic checkout is cooling down after HTTP 429"};
+  if (retryAt) return {attempted:false,status:"rate_limited",retryAt:new Date(retryAt).toISOString(),error:"Epic is limiting checkouts (HTTP 429), so claims are paused"};
   const cfg = settings.getEpicAutoClaim();
   if (!cfg.enabled && !opts.manual) {
     return { attempted: false, status: "disabled" };
@@ -198,6 +229,17 @@ async function runClaim(acc, freebie, accessToken, opts) {
   // Fleet daily cap — one confirmed OR failed attempt burns one slot.
   if (cfg.dailyCap && todayCount() >= cfg.dailyCap) {
     return { attempted: false, status: "daily_cap" };
+  }
+  // Space checkouts out. This answers at once rather than waiting here, so
+  // the one-claim-at-a-time lock is never held through the gap: the
+  // scheduler and Claim all wait and retry, the Claim button says when.
+  if (Date.now() < state.nextCheckoutAt) {
+    return {
+      attempted: false,
+      status: "spacing",
+      retryAt: new Date(state.nextCheckoutAt).toISOString(),
+      error: "Waiting between Epic checkouts",
+    };
   }
 
   try {
@@ -244,6 +286,13 @@ async function runClaim(acc, freebie, accessToken, opts) {
   } catch (err) {
     result = { status: WORKER_URL && ["ECONNREFUSED", "ECONNRESET", "ETIMEDOUT", "ECONNABORTED", "EHOSTUNREACH", "ENOTFOUND", "EPIPE"].includes(err.code) ? "worker_unavailable" : "error", error: err.message || String(err) };
   }
+  // A busy or unreachable worker never opened Epic's checkout.
+  if (!["busy", "worker_unavailable"].includes(result.status)) {
+    state.nextCheckoutAt = Date.now() + checkoutGapMs();
+  }
+  if (EPIC_ANSWERED.has(result.status)) {
+    try { rateBackoff.settle(); } catch {}
+  }
   if (result.status === "rate_limited") {
     try { result.retryAt = new Date(rateBackoff.block(result.retryAfterSeconds)).toISOString(); }
     catch { result.error = "Epic rate limited claims; could not persist cooldown, check server storage"; }
@@ -252,6 +301,12 @@ async function runClaim(acc, freebie, accessToken, opts) {
   if (["busy", "worker_unavailable", "rate_limited"].includes(result.status)) {
     state.dayCounts[attemptDay] = Math.max(0, (state.dayCounts[attemptDay] || 0) - 1);
     return { attempted: false, ...result };
+  }
+  // A region refusal is reported before any order is submitted, so it gives
+  // the cap slot back. It is still logged: that entry is what locks the pair
+  // (and the account's country) for this giveaway from now on.
+  if (result.status === region.REFUSED) {
+    state.dayCounts[attemptDay] = Math.max(0, (state.dayCounts[attemptDay] || 0) - 1);
   }
   // A cached access token can work after the browser revoked its refresh grant.
   try {
@@ -292,6 +347,8 @@ function getStatus() {
     ...retryPolicy(cfg),
     todayCount: todayCount(),
     rateLimitedUntil: rateBackoff.until() ? new Date(rateBackoff.until()).toISOString() : null,
+    checkoutGapMin: checkoutGapMs() / 60000,
+    nextCheckoutAt: state.nextCheckoutAt > Date.now() ? new Date(state.nextCheckoutAt).toISOString() : null,
     recent: state.recent.slice(0, 20),
   };
 }
@@ -301,6 +358,7 @@ function _reset() {
   state.dayCounts = {};
   state.recent = [];
   state.startedAt = null;
+  state.nextCheckoutAt = 0;
 }
 
 module.exports = {

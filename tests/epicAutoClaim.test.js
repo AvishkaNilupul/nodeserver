@@ -6,6 +6,9 @@
 process.env.ADMIN_KEY = process.env.ADMIN_KEY || "test-admin-key";
 process.env.MONGO_URI = process.env.MONGO_URI || "mongodb://localhost/test";
 process.env.CRED_SECRET = process.env.CRED_SECRET || "test-cred-secret";
+// These tests run claims back to back; the checkout gap has its own tests
+// (tests/epicCheckoutPacing.test.js).
+process.env.EPIC_CHECKOUT_GAP_MIN = "0";
 
 const test = require("node:test");
 const assert = require("node:assert");
