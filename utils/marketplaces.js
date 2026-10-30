@@ -6421,8 +6421,10 @@ async function playerauctionsPublish(opts = {}) {
 // The seller ORDERS list carries no offerId field at all — only the order's
 // title and a link on the detail — so this is how an order is tied back to the
 // listing row that knows how to fulfil it.
+// Item offers end "/<id>i!<slug>/"; Account offers (Epic accounts) end
+// "/<id>a!<slug>/" — e.g. /epic-games-account/281344851a!epic-games-.../.
 function playerauctionsOfferIdFromUrl(url) {
-  const m = String(url || "").match(/\/(\d+)i!/);
+  const m = String(url || "").match(/\/(\d+)[a-z]!/i);
   return m ? m[1] : "";
 }
 

@@ -178,6 +178,13 @@ test("an order is tied back to its listing through the offer link", () => {
     ),
     "294684983",
   );
+  // Account offers (Epic accounts) use "a!" instead of "i!" — real public link.
+  assert.strictEqual(
+    mp.playerauctionsOfferIdFromUrl(
+      "https://www.playerauctions.com/epic-games-account/281344851a!epic-games-account-with--80-games/",
+    ),
+    "281344851",
+  );
   assert.strictEqual(mp.playerauctionsOfferIdFromUrl("not-an-offer-url"), "");
   assert.strictEqual(mp.playerauctionsOfferIdFromUrl(null), "");
 });

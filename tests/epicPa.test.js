@@ -87,7 +87,7 @@ function order(id, unit, login) {
           link:
             "https://www.playerauctions.com/epic-games-account/" +
             unit.offerId +
-            "i!test/",
+            "a!test/", // PA Account offers link as "<id>a!<slug>/"
         },
       },
       status: { orderStatus: "Delivery Pending Buyer Confirmation" },
