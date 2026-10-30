@@ -43,6 +43,10 @@ test("the Rocket League section files the offer under RL › Accounts, PC, fresh
   assert.deepEqual(byId["rocket-league-level"].values, ["level-09"]);
   assert.deepEqual(byId["rl-credits"].values, ["credits-0299"]);
   assert.deepEqual(byId["rocket-league-tags-titles"].values, ["tag-other"]);
+  // Eldorado requires the Numeric fields too ("Required attribute 'Credits' is not set").
+  assert.deepEqual(byId["rocket-league-credits-numeric"], { id: "rocket-league-credits-numeric", type: "Numeric", value: 0 });
+  assert.deepEqual(byId["rocket-league-level-numeric"], { id: "rocket-league-level-numeric", type: "Numeric", value: 0 });
+  assert.equal(dto.augmentedGame.offerAttributes.length, 6);
   // A copy each time: a caller can't change the shared definition.
   dto.augmentedGame.offerAttributes[0].values.push("x");
   assert.equal(eld.SECTIONS["rocket-league"].offerAttributes[0].values.length, 1);
@@ -238,7 +242,7 @@ test("every stock edit keeps the offer in the Rocket League section", async () =
   for (const dto of ELD.updates) {
     assert.equal(dto.augmentedGame.gameId, "1");
     assert.equal(dto.augmentedGame.tradeEnvironmentId, "0");
-    assert.equal(dto.augmentedGame.offerAttributes.length, 4);
+    assert.equal(dto.augmentedGame.offerAttributes.length, 6);
   }
   assert.equal(ELD.offers.get(offerId).entries.length, 3);
 });

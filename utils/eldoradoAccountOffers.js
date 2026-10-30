@@ -40,10 +40,14 @@ const CATEGORY = "Account";
 //                  accounts (no games): Rocket League runs on an Epic account,
 //                  and this section sells new ones as "fresh RL accounts".
 //                  Not high-risk.
-// The Rocket League attribute ids and values were read from the section's
-// public offers, and the offerAttributes shape ({id, type, values}) from
-// Eldorado's own place-offer form (convertToOfferAttributes, 2026-10-30).
-// A fresh account is 0–299 credits, unranked, level 0–9, no title.
+// The Rocket League attributes are the section's form fields
+// (GET /api/library/1/Account/attributes/offers — every one is required, the
+// Select ones AND the Numeric "Credits" (in thousands) and "Level"), in the
+// shape Eldorado's place-offer form sends ({id, type, values} for a Select,
+// {id, type, value} for a Numeric; convertToOfferAttributes, 2026-10-30).
+// A fresh account is 0 credits, unranked, level 0, no title. Eldorado
+// answered a create without the Numeric ones "Required attribute 'Credits'
+// is not set".
 const SECTIONS = {
   epic: {
     key: "epic",
@@ -60,8 +64,10 @@ const SECTIONS = {
     tradeEnvironmentId: "0", // Device: PC
     offerAttributes: [
       { id: "rl-credits", type: "Select", values: ["credits-0299"] },
+      { id: "rocket-league-credits-numeric", type: "Numeric", value: 0 },
       { id: "rocket-league-current-rank", type: "Select", values: ["rank-unranked"] },
       { id: "rocket-league-level", type: "Select", values: ["level-09"] },
+      { id: "rocket-league-level-numeric", type: "Numeric", value: 0 },
       { id: "rocket-league-tags-titles", type: "Select", values: ["tag-other"] },
     ],
     seoAlias: "rocket-league-accounts-for-sale",
@@ -208,7 +214,9 @@ function offerDto({ title, description, priceUsd, hasOriginalEmail, mainOfferIma
       gameId: sec.gameId,
       category: CATEGORY,
       tradeEnvironmentId: sec.tradeEnvironmentId,
-      offerAttributes: sec.offerAttributes.map((a) => ({ id: a.id, type: a.type, values: [...a.values] })),
+      offerAttributes: sec.offerAttributes.map((a) =>
+        a.type === "Numeric" ? { id: a.id, type: a.type, value: a.value } : { id: a.id, type: a.type, values: [...a.values] },
+      ),
     },
     details: {
       pricing: {
