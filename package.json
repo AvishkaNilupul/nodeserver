@@ -34,7 +34,8 @@
     "sharp": "0.35.2",
     "socket.io": "^4.8.3",
     "validator": "^13.15.35",
-    "https-proxy-agent": "^5.0.1"
+    "https-proxy-agent": "^5.0.1",
+    "libphonenumber-js": "1.13.15"
   },
   "devDependencies": {
     "@eslint/js": "^9.39.4",

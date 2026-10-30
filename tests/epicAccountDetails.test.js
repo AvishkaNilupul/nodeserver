@@ -54,7 +54,7 @@ test('rejects stale-editor conflicts without changing any stored details',async(
 test('sample contacts preserve stored credentials and creation provenance across edits',async()=>{
  stored.accountDetails=encrypt(JSON.stringify({country:'JP',creationCountry:'JP',creationCountrySource:'recorded-account-country'}));
  const token=stored.refreshToken,pass=stored.password;
- const out=await call('/sample-contact','POST',{});assert.equal(out.status,200);assert.match(out.data.account.details.phone,/TEST-JP-/);assert.equal(out.data.account.details.contactSource,'synthetic-internal');
+ const out=await call('/sample-contact','POST',{});assert.equal(out.status,200);assert.match(out.data.account.details.phone,/^\+81\d+$/);assert.equal(out.data.account.details.contactSource,'synthetic-internal');
  assert.equal((await call('/sample-contact','POST',{})).status,409);
  await call('','PATCH',{notes:'keep location'});const p=JSON.parse(decrypt(stored.accountDetails));assert.equal(p.creationCountry,'JP');assert.equal(p.contactSource,'synthetic-internal');assert.equal(stored.refreshToken,token);assert.equal(stored.password,pass);
  assert.equal((await call('','PATCH',{creationCountry:'US'})).status,400);

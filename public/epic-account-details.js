@@ -31,7 +31,7 @@
           <label>Creation country<input id="epic-creation-country" readonly /></label>
           <label>Creation location source<input id="epic-creation-source" readonly /></label>
           <label>Signup IP<input id="epic-creation-ip" readonly /></label>
-          <label>Phone / sample identifier<input name="phone" maxlength="80" /></label>
+          <label>Phone number (internal)<input name="phone" maxlength="80" /></label>
           <label>Address<input name="address" maxlength="500" /></label>
           <label>Epic password<input name="password" type="password" maxlength="256" autocomplete="new-password" placeholder="Leave blank to keep saved password" /></label>
           <label>2FA setup key<input name="totpSecret" type="password" maxlength="256" autocomplete="new-password" placeholder="Leave blank to keep saved key" /></label>

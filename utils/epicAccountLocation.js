@@ -29,11 +29,27 @@ function creationProfile(value,location=null) {
   }
   return profile;
 }
+function randomPhone(country) {
+  const {getExampleNumber,parsePhoneNumberFromString}=require('libphonenumber-js/max');
+  const examples=require('libphonenumber-js/mobile/examples');
+  const example=getExampleNumber(country,examples);
+  if(!example)throw Error('No phone-number format is available for '+country);
+  const prefix=example.nationalNumber.slice(0,4),size=example.nationalNumber.length-prefix.length;
+  for(let attempt=0;attempt<200;attempt++){
+    const suffix=Array.from({length:size},()=>crypto.randomInt(0,10)).join('');
+    const candidate=parsePhoneNumberFromString('+'+example.countryCallingCode+prefix+suffix);
+    if(candidate?.country===country&&candidate.isValid()&&candidate.number!==example.number)return candidate.number;
+  }
+  throw Error('Could not generate a matching phone-number format for '+country);
+}
 function sampleContact(value) {
   const profile=creationProfile(value),country=profile.creationCountry||profile.country;
-  if(!country||profile.phone||profile.address)return profile;
-  const suffix=crypto.randomBytes(4).toString('hex').toUpperCase();
-  // Deliberately non-dialable identifiers. No third party's phone/address is used.
-  return {...profile,phone:'TEST-'+country+'-'+suffix,address:crypto.randomInt(1,1000)+' Example Test Street, '+(profile.creationCity?profile.creationCity+', ':'')+country+' (fictional)',contactCountry:country,contactSource:'synthetic-internal'};
+  if(!country)return profile;
+  // Upgrade only our old synthetic identifiers. Never overwrite manual contacts.
+  if(profile.contactSource==='synthetic-internal'&&/^TEST-[A-Z]{2}-[A-F0-9]{8}$/.test(profile.phone)) {
+    return {...profile,phone:randomPhone(country),contactCountry:country};
+  }
+  if(profile.phone||profile.address)return profile;
+  return {...profile,phone:randomPhone(country),address:crypto.randomInt(1,1000)+' Example Test Street, '+(profile.creationCity?profile.creationCity+', ':'')+country+' (fictional)',contactCountry:country,contactSource:'synthetic-internal'};
 }
-module.exports={fields,cleanProfile,cleanLocation,creationProfile,sampleContact};
+module.exports={fields,cleanProfile,cleanLocation,creationProfile,sampleContact,randomPhone};

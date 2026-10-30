@@ -21,6 +21,18 @@ test('historical account country is never presented as a measured creation IP',(
  assert.throws(()=>cleanLocation({...loc,country:'RU'}));assert.throws(()=>cleanLocation({...loc,ip:'not-ip'}));
 });
 test('sample generation is marked fictional, preserves manual contacts and does not invent unknown country',()=>{
- const first=sampleContact({country:'JP'}),again=sampleContact(first);assert.equal(first.contactSource,'synthetic-internal');assert.match(first.phone,/^TEST-JP-/);assert.match(first.address,/fictional/);assert.deepEqual(again,first);
+ const first=sampleContact({country:'JP'}),again=sampleContact(first);assert.equal(first.contactSource,'synthetic-internal');assert.match(first.phone,/^\+81\d+$/);assert.match(first.address,/fictional/);assert.deepEqual(again,first);
  assert.equal(sampleContact({phone:'existing',country:'JP'}).phone,'existing');assert.equal(sampleContact({}).phone,'');
+});
+
+test('random numbers match every recorded account country and old identifiers migrate idempotently',()=>{
+ const {randomPhone}=require('../utils/epicAccountLocation'),{parsePhoneNumberFromString}=require('libphonenumber-js/max');
+ for(const country of ['CO','JP','BD','GB','PE','US','AR','AE','RU','BR','KZ','TH']) {
+  const values=new Set();
+  for(let i=0;i<20;i++){const phone=randomPhone(country),parsed=parsePhoneNumberFromString(phone);assert.equal(parsed.country,country);assert.equal(parsed.isValid(),true);assert.match(phone,/^\+[1-9]\d{5,14}$/);values.add(phone);}
+  assert.ok(values.size>1);
+ }
+ const before={country:'US',phone:'TEST-US-8A73539D',address:'Keep this address',contactSource:'synthetic-internal'};
+ const migrated=sampleContact(before);assert.match(migrated.phone,/^\+1\d{10}$/);assert.equal(migrated.address,before.address);assert.deepEqual(sampleContact(migrated),migrated);
+ assert.equal(sampleContact({...before,contactSource:'manual'}).phone,before.phone);
 });
