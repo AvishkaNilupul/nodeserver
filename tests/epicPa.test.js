@@ -34,7 +34,6 @@ let db,
   seq = 0,
   creates = 0,
   timeout = false;
-rejectCreate = rejectRead = false;
 let rejectCreate = false,
   rejectRead = false;
 const offers = new Map();
@@ -119,6 +118,7 @@ test.after(async () => {
 test.beforeEach(async () => {
   for (const c of Object.values(mongoose.connection.collections))
     await c.deleteMany({});
+  rejectCreate = rejectRead = false;
   offers.clear();
   native.clear();
   timeout = false;
