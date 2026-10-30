@@ -39,6 +39,9 @@ const epicListingSchema = new mongoose.Schema(
     // "rocket-league" (Rocket League › Accounts, PC — fresh accounts only).
     // Every edit of the offer must send the same section.
     section: { type: String, enum: ["epic", "rocket-league"], default: "epic" },
+    // Rocket League listings hold accounts of ONE Epic country (two-letter
+    // code, "" = unknown); the title and cover name it.
+    region: { type: String, default: "" },
     externalId: { type: String, default: "", index: true },
     url: { type: String, default: "" },
     // draft | active | paused | sold_out | removed | error

@@ -127,9 +127,10 @@ let server;
 let base;
 const acc = {};
 
-async function mk(label, games) {
+async function mk(label, games, country = "") {
   const email = label + "@outlook.com";
   const a = await EpicAccount.create({
+    accountDetails: country ? encrypt(JSON.stringify({ firstName: "A", country, contactSource: "synthetic-internal" })) : undefined,
     accountId: "acc-" + label,
     displayName: label,
     label,
@@ -156,10 +157,12 @@ test.before(async () => {
   server = app.listen(0, "127.0.0.1");
   await new Promise((r) => server.once("listening", r));
   base = "http://127.0.0.1:" + server.address().port;
-  await mk("fresh-1", []);
-  await mk("fresh-2", []);
-  await mk("fresh-3", []);
-  await mk("rich", ["Sker Ritual", "Home - A Unique Horror Adventure"]);
+  await mk("fresh-1", [], "JP");
+  await mk("fresh-2", [], "JP");
+  await mk("fresh-3", [], "JP");
+  await mk("fresh-us", [], "US");
+  await mk("fresh-nowhere", []);
+  await mk("rich", ["Sker Ritual", "Home - A Unique Horror Adventure"], "JP");
   sales._internals.resetPermissionCache();
 });
 
@@ -186,8 +189,36 @@ test("fresh accounts: the Epic Games section is refused, Rocket League is open",
   assert.equal(p.section, "rocket-league");
   assert.equal(p.permission.canSell, true);
   assert.equal(p.builtInCover, true, "our own cover is used when no link is pasted");
-  assert.equal(p.coverPreview, "/img/epic-rocket-league-cover.png");
-  assert.match(p.title, /Fresh Rocket League Account/);
+  assert.equal(p.region, "JP");
+  assert.equal(p.coverPreview, "/img/epic-rl-cover-jp.jpg", "the cover names the region");
+  assert.match(p.title, /^Fresh Rocket League Account \| Japan Region \|/);
+  assert.match(p.description, /Region: Japan \(the account's Epic Games country is JP\)/);
+});
+
+test("one region per Rocket League listing", async () => {
+  const r = await post("/api/epic/sales/preview", { accountIds: [acc["fresh-1"], acc["fresh-us"]], priceUsd: 1, section: "rocket-league" });
+  assert.ok(r.j.preview.problems.some((x) => /One region per Rocket League listing/.test(x) && /Japan \(1\)/.test(x) && /United States \(1\)/.test(x)), JSON.stringify(r.j.preview.problems));
+  const c = await post("/api/epic/sales/listings", { accountIds: [acc["fresh-1"], acc["fresh-us"]], priceUsd: 1, section: "rocket-league", confirm: true });
+  assert.equal(c.status, 400);
+  assert.equal(ELD.creates.length, 0);
+});
+
+test("an account with no known country gets the generic cover and no region", async () => {
+  const r = await post("/api/epic/sales/preview", { accountIds: [acc["fresh-nowhere"]], priceUsd: 1, section: "rocket-league" });
+  assert.deepEqual(r.j.preview.problems, []);
+  assert.equal(r.j.preview.region, "");
+  assert.equal(r.j.preview.coverPreview, "/img/epic-rl-cover.jpg");
+  assert.doesNotMatch(r.j.preview.title, /Region/);
+});
+
+test("the fresh accounts are offered one Rocket League listing per region", async () => {
+  const ctx = await sales.stockContext({ fresh: true });
+  const rows = ctx.accounts.map((a) => ({ _id: String(a._id), region: sales._internals.regionOf(a) }));
+  const fresh = [acc["fresh-1"], acc["fresh-2"], acc["fresh-us"]].map((_id) => ({ _id }));
+  const groups = sales._internals.rlRegionGroups(fresh, rows, { sessionDays: 14 });
+  assert.deepEqual(groups.map((g) => [g.region, g.count]), [["JP", 2], ["US", 1]]);
+  assert.equal(groups[1].cover, "/img/epic-rl-cover-us.jpg");
+  assert.match(groups[1].title, /United States Region/);
 });
 
 test("an account with games can't go in the Rocket League section", async () => {
@@ -212,6 +243,8 @@ test("create files the offer under Rocket League with our cover", async () => {
   listingId = r.j.listing._id;
   assert.equal(r.j.listing.section, "rocket-league");
   assert.equal(r.j.listing.sectionName, "Rocket League accounts (PC)");
+  assert.equal(r.j.listing.region, "JP");
+  assert.equal(r.j.listing.regionName, "Japan");
   assert.match(r.j.listing.url, /rocket-league-accounts-for-sale\/oa\//);
   assert.equal(ELD.creates.length, 1);
   const dto = ELD.creates[0];
@@ -221,7 +254,7 @@ test("create files the offer under Rocket League with our cover", async () => {
   assert.equal(dto.details.pricing.quantity, 2);
   assert.equal(dto.details.hasOriginalEmail, false);
   assert.equal(ELD.uploads.length, 1);
-  assert.equal(path.basename(ELD.uploads[0]), "epic-rocket-league-cover.png");
+  assert.equal(path.basename(ELD.uploads[0]), "epic-rl-cover-jp.jpg");
   const row = await EpicListing.findById(listingId).lean();
   assert.equal(row.section, "rocket-league");
   assert.equal(row.gameKey, "", "never matches a game set, so the distributor can't pick it");
@@ -233,6 +266,9 @@ test("every stock edit keeps the offer in the Rocket League section", async () =
   let r = await post("/api/epic/sales/listings/" + listingId + "/accounts", { accountIds: [acc["rich"]] });
   assert.equal(r.status, 400);
   assert.match(r.j.message, /fresh accounts only/);
+  r = await post("/api/epic/sales/listings/" + listingId + "/accounts", { accountIds: [acc["fresh-us"]] });
+  assert.equal(r.status, 400);
+  assert.match(r.j.message, /This listing is for Japan\. Not the same region: fresh-us \(US\)/);
   assert.equal(ELD.updates.length, 0);
   r = await post("/api/epic/sales/listings/" + listingId + "/accounts", { accountIds: [acc["fresh-3"]] });
   assert.equal(r.status, 200, JSON.stringify(r.j));

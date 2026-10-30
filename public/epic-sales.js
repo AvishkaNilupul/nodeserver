@@ -783,6 +783,7 @@
         '<div class="es-meta">' +
         [
           l.section && l.section !== "epic" ? "Section: " + l.sectionName : "",
+          l.region ? "Region: " + l.regionName : "",
           money(l.priceUsd) + " each",
           l.counts.listed + " on sale · " + l.counts.sold + " sold",
           r.offerState ? "Eldorado: " + r.offerState + (r.quantity != null ? " · qty " + r.quantity : "") : "",
@@ -1003,6 +1004,11 @@
             <option value="rocket-league">Rocket League accounts (PC): fresh accounts only</option>
           </select>
           <div class="hint" id="es-c-section-hint"></div>
+          <div id="es-c-region-wrap" hidden>
+            <label for="es-c-region">Region</label>
+            <select id="es-c-region"></select>
+            <div class="hint">One region per listing. The title and cover name it.</div>
+          </div>
           <label>Accounts</label><div class="es-acc-list" id="es-c-accounts"></div>
           <label for="es-c-title">Title</label><input id="es-c-title" maxlength="160">
           <label for="es-c-price">Price per account (USD)</label><input id="es-c-price" type="number" min="0.05" step="0.01" placeholder="e.g. 0.49">
@@ -1081,6 +1087,7 @@
     );
     $("es-c-cover").addEventListener("change", showCover);
     $("es-c-section").addEventListener("change", applySection);
+    $("es-c-region").addEventListener("change", applyRegion);
     $("es-a-save").addEventListener("click", saveAdd);
     $("es-t-save").addEventListener("click", saveText);
     $("es-g-save").addEventListener("click", saveG2gLink);
@@ -1156,8 +1163,17 @@
       : perm.canSell === false
         ? "Eldorado doesn't allow this seller to list Epic Games accounts yet."
         : "";
-    $("es-c-title").value = rl ? group.rocketLeague.title : group.suggestedTitle;
-    $("es-c-desc").value = rl ? group.rocketLeague.description : group.suggestedDescription;
+    $("es-c-region-wrap").hidden = !rl;
+    if (rl) {
+      const regions = group.rocketLeague.regions || [];
+      $("es-c-region").innerHTML = regions
+        .map((r, i) => '<option value="' + i + '">' + esc(r.regionName || "Unknown country") + " — " + esc(r.count) + " account" + (r.count > 1 ? "s" : "") + "</option>")
+        .join("");
+      applyRegion();
+    } else {
+      $("es-c-title").value = group.suggestedTitle;
+      $("es-c-desc").value = group.suggestedDescription;
+    }
     $("es-c-cover").value = "";
     $("es-c-preview").innerHTML = "";
     $("es-c-publish").disabled = true;
@@ -1209,15 +1225,33 @@
     box.innerHTML = parts.join("");
   }
 
+  function currentRegion() {
+    const regions = (createGroup && createGroup.rocketLeague && createGroup.rocketLeague.regions) || [];
+    return regions[Number($("es-c-region").value) || 0] || null;
+  }
+
+  // Tick exactly the chosen region's accounts and fill its text and cover.
+  function applyRegion() {
+    const r = currentRegion();
+    if (!r) return;
+    const ids = new Set(r.accountIds);
+    $("es-c-accounts").querySelectorAll("input[type=checkbox]").forEach((i) => (i.checked = ids.has(i.value)));
+    $("es-c-title").value = r.title;
+    $("es-c-desc").value = r.description;
+    $("es-c-preview").innerHTML = "";
+    $("es-c-publish").disabled = true;
+    showCover();
+  }
+
   function showCover() {
     const url = $("es-c-cover").value.trim();
     const img = $("es-c-cover-img");
-    const builtIn = !url && $("es-c-section").value === "rocket-league" && createGroup && createGroup.rocketLeague;
+    const region = !url && $("es-c-section").value === "rocket-league" ? currentRegion() : null;
     if (/^https:\/\//i.test(url)) {
       img.src = url;
       img.hidden = false;
-    } else if (builtIn) {
-      img.src = createGroup.rocketLeague.cover;
+    } else if (region) {
+      img.src = region.cover;
       img.hidden = false;
     } else img.hidden = true;
   }
@@ -1272,11 +1306,17 @@
     addListing = l;
     $("es-a-sub").textContent =
       "Adds stock to “" + l.title + "”. " +
-      (l.section === "rocket-league" ? "Only fresh accounts (no games) belong here." : "Only accounts that own the same games belong here.");
+      (l.section === "rocket-league"
+        ? "Only fresh accounts (no games) from " + (l.regionName || "the same region") + " belong here."
+        : "Only accounts that own the same games belong here.");
     const same = new Set((l.games || []).map((g) => g.toLowerCase()).sort());
     const key = [...same].join("|");
     const ready = readyAccounts();
-    const sameRows = ready.filter((s) => s.games.map((g) => g.toLowerCase()).sort().join("|") === key);
+    const sameRows = ready.filter(
+      (s) =>
+        s.games.map((g) => g.toLowerCase()).sort().join("|") === key &&
+        (l.section !== "rocket-league" || (s.region || "") === (l.region || "")),
+    );
     accountChecks($("es-a-accounts"), sameRows, new Set(sameRows.map((s) => s._id)));
     openModal("es-add-modal");
   }

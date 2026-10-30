@@ -45,6 +45,7 @@ const BuyerMailSession = require("../models/BuyerMailSession");
 const { encrypt, decrypt } = require("./secretBox");
 const outlook = require("./outlookGraphReader");
 const eld = require("./eldoradoAccountOffers");
+const epicRegion = require("./epicRegion");
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 const LISTED_SESSION_MS = 365 * DAY_MS;
@@ -342,6 +343,7 @@ function stockRow(acc, r) {
     warnings: r.warnings,
     listing: r.listing,
     sharedWith: (r.inbox && r.inbox.shared) || [],
+    region: regionOf(acc),
     createdAt: acc.createdAt,
   };
 }
@@ -350,21 +352,44 @@ function stockRow(acc, r) {
 // Listing text
 // ---------------------------------------------------------------------------
 
-function suggestTitle(titles, section = "epic") {
+// The account's Epic country (utils/epicRegion: the detected signup country,
+// else the recorded one), "" when unknown. Shown to buyers as the region.
+function regionOf(acc) {
+  return epicRegion.accountCountry(acc).country || "";
+}
+
+function regionName(cc) {
+  if (!cc) return "";
+  try {
+    return new Intl.DisplayNames(["en"], { type: "region" }).of(cc) || cc;
+  } catch {
+    return cc;
+  }
+}
+
+function suggestTitle(titles, section = "epic", region = "") {
   const t = titles || [];
-  if (section === ROCKET_LEAGUE) return "Fresh Rocket League Account | PC Epic Games | Unranked | Email Codes Included | Instant";
+  if (section === ROCKET_LEAGUE) {
+    return (
+      "Fresh Rocket League Account | " + (region ? regionName(region) + " Region | " : "") +
+      "PC Epic Games | Unranked | Email Codes Included | Instant"
+    );
+  }
   if (!t.length) return "Fresh Epic Games Account | No Games | Email Codes Included | Instant Delivery";
   const names = t.length <= 3 ? t.join(" + ") : t.slice(0, 3).join(" + ") + " + " + (t.length - 3) + " more";
   const full = "Epic Games Account | " + names + " | Email Codes Included | Instant";
   return full.length <= 160 ? full : full.slice(0, 157).replace(/\s+\S*$/, "") + "…";
 }
 
-function suggestDescription(titles, days, section = "epic") {
+function suggestDescription(titles, days, section = "epic", region = "") {
   const d = Math.max(1, Number(days) || DEFAULTS.sessionDays);
   const t = titles || [];
   const lines = [];
   if (section === ROCKET_LEAGUE) {
     lines.push("Fresh Rocket League account for PC (Epic Games).");
+    if (region) {
+      lines.push("Region: " + regionName(region) + " (the account's Epic Games country is " + region + ").");
+    }
     lines.push("A brand-new Epic Games account: Rocket League never played, level 0, unranked, no items, no credits.");
     lines.push("Rocket League is free to play: sign in to the Epic Games Launcher with this account and install it.");
   } else if (t.length) {
@@ -564,9 +589,38 @@ function sectionKey(s) {
 }
 
 const ROCKET_LEAGUE = "rocket-league";
-// Our own cover for fresh Rocket League accounts (public/img, made for this).
-const RL_COVER_FILE = path.join(__dirname, "..", "public", "img", "epic-rocket-league-cover.png");
-const RL_COVER_PUBLIC = "/img/epic-rocket-league-cover.png";
+// Our own covers for fresh Rocket League accounts (scripts/make-epic-rl-covers.js):
+// square, one per country (public/img/epic-rl-cover-<cc>.jpg), and a generic
+// one for a country we have no cover for.
+const IMG_DIR = path.join(__dirname, "..", "public", "img");
+function rlCover(region) {
+  const cc = String(region || "").toLowerCase();
+  if (/^[a-z]{2}$/.test(cc) && fs.existsSync(path.join(IMG_DIR, "epic-rl-cover-" + cc + ".jpg"))) {
+    return { file: path.join(IMG_DIR, "epic-rl-cover-" + cc + ".jpg"), public: "/img/epic-rl-cover-" + cc + ".jpg" };
+  }
+  return { file: path.join(IMG_DIR, "epic-rl-cover.jpg"), public: "/img/epic-rl-cover.jpg" };
+}
+
+// A Rocket League listing holds accounts of ONE region, so its title, text
+// and cover can name it. "" = country unknown.
+function regionsOf(vetted) {
+  const m = new Map();
+  for (const v of vetted) {
+    const cc = regionOf(v.acc);
+    m.set(cc, (m.get(cc) || 0) + 1);
+  }
+  return [...m.entries()].sort((a, b) => b[1] - a[1]);
+}
+
+function oneRegionProblems(vetted) {
+  const regions = regionsOf(vetted);
+  if (regions.length <= 1) return [];
+  return [
+    "One region per Rocket League listing. These accounts are from: " +
+      regions.map(([cc, n]) => (cc ? regionName(cc) : "unknown country") + " (" + n + ")").join(", ") +
+      ". Make one listing per region.",
+  ];
+}
 
 // The Rocket League section takes fresh accounts only: an account with games
 // is worth more on the Epic shelf, G2G or PlayerAuctions, and listing it as a
@@ -614,25 +668,28 @@ async function previewListing(opts) {
   const games = vetted[0].titles;
   const key = gameKey(games);
   const mixed = !rl && vetted.some((v) => gameKey(v.titles) !== key);
+  const region = rl ? (regionsOf(vetted)[0] || [""])[0] : "";
   const pasted = String(opts.coverUrl || "").trim();
   const cover = pasted || (rl ? "" : await coverUrlFor(games));
-  // Rocket League listings fall back to our own cover file.
-  const builtInCover = !cover && rl && fs.existsSync(RL_COVER_FILE);
+  // Rocket League listings fall back to our own cover for the region.
+  const builtInCover = !cover && rl && fs.existsSync(rlCover(region).file);
   const noPrice = opts.priceUsd == null || opts.priceUsd === "";
   const permission = await eldoradoPermission({ section });
   return {
     section,
     sectionName: eld.sectionOf(section).name,
     permission,
-    title: validTitle(opts.title || suggestTitle(games, section)),
+    region,
+    regionName: regionName(region),
+    title: validTitle(opts.title || suggestTitle(games, section, region)),
     priceUsd: noPrice ? null : validPrice(opts.priceUsd),
-    description: String(opts.description || suggestDescription(games, cfg.sessionDays, section)).slice(0, 2000),
+    description: String(opts.description || suggestDescription(games, cfg.sessionDays, section, region)).slice(0, 2000),
     hasOriginalEmail: !!opts.hasOriginalEmail,
     quantity: vetted.length,
     games: rl ? [] : games,
     mixedGames: mixed,
     coverUrl: cover,
-    coverPreview: builtInCover ? RL_COVER_PUBLIC : cover,
+    coverPreview: builtInCover ? rlCover(region).public : cover,
     builtInCover,
     providerUrl: purl,
     sessionDays: cfg.sessionDays,
@@ -646,6 +703,7 @@ async function previewListing(opts) {
     problems: [
       ...(permission.canSell === false ? [NO_PERMISSION_TEXT] : []),
       ...(rl ? freshOnlyProblems(vetted) : []),
+      ...(rl ? oneRegionProblems(vetted) : []),
       ...(noPrice ? ["Set a price"] : []),
       ...(purl ? [] : ["PUBLIC_BASE_URL is not an https address, so the mail page link can't be built"]),
       ...(cover || builtInCover ? [] : ["No cover image found for these games. Paste an image link"]),
@@ -664,6 +722,7 @@ async function createListing(opts, actor) {
     const listing = new EpicListing({
       market: "eldorado",
       section: pv.section,
+      region: pv.region,
       status: "draft",
       title: pv.title,
       description: pv.description,
@@ -694,9 +753,10 @@ async function createListing(opts, actor) {
           entryFor({ email: v.email, epicPassword: v.epicPassword, mailPassword: password, purl: pv.providerUrl, days: cfg.sessionDays }),
         );
       }
-      const image = pv.builtInCover ? await eld.uploadImage(RL_COVER_FILE) : await uploadCover(pv.coverUrl);
+      const builtIn = pv.builtInCover ? rlCover(pv.region) : null;
+      const image = builtIn ? await eld.uploadImage(builtIn.file) : await uploadCover(pv.coverUrl);
       listing.mainOfferImage = image;
-      if (pv.builtInCover) listing.coverSource = RL_COVER_PUBLIC;
+      if (builtIn) listing.coverSource = builtIn.public;
       await listing.save();
       const created = await eld.createAccountOffer({
         title: pv.title,
@@ -912,6 +972,13 @@ async function addAccounts(listingId, accountIds, actor) {
     if (sectionKey(listing.section) === ROCKET_LEAGUE) {
       const bad = freshOnlyProblems(vetted);
       if (bad.length) throw userError(bad[0]);
+      const other = vetted.filter((v) => regionOf(v.acc) !== (listing.region || ""));
+      if (other.length) {
+        throw userError(
+          "This listing is for " + (listing.region ? regionName(listing.region) : "accounts of unknown country") +
+            ". Not the same region: " + other.map((v) => labelOf(v.acc) + " (" + (regionOf(v.acc) || "?") + ")").join(", "),
+        );
+      }
     }
     const cfg = ctx.cfg;
     const purl = providerUrl();
@@ -1520,6 +1587,8 @@ function listingView(l) {
     market: l.market,
     section: sec.key,
     sectionName: sec.name,
+    region: l.region || "",
+    regionName: regionName(l.region || ""),
     externalId: l.externalId,
     url: l.url,
     status: l.status,
@@ -1587,6 +1656,29 @@ async function salesView(limit = 100) {
   }));
 }
 
+// The fresh accounts split by region, biggest first: each is one Rocket
+// League listing.
+function rlRegionGroups(accounts, rows, cfg) {
+  const regionById = new Map(rows.map((r) => [r._id, r.region || ""]));
+  const m = new Map();
+  for (const a of accounts) {
+    const cc = regionById.get(a._id) || "";
+    if (!m.has(cc)) m.set(cc, []);
+    m.get(cc).push(a._id);
+  }
+  return [...m.entries()]
+    .sort((a, b) => b[1].length - a[1].length)
+    .map(([cc, ids]) => ({
+      region: cc,
+      regionName: regionName(cc),
+      count: ids.length,
+      accountIds: ids,
+      title: suggestTitle([], ROCKET_LEAGUE, cc),
+      description: suggestDescription([], cfg.sessionDays, ROCKET_LEAGUE, cc),
+      cover: rlCover(cc).public,
+    }));
+}
+
 function groupsOf(rows, cfg) {
   const m = new Map();
   for (const r of rows) {
@@ -1606,9 +1698,7 @@ function groupsOf(rows, cfg) {
         ? {}
         : {
             rocketLeague: {
-              title: suggestTitle([], ROCKET_LEAGUE),
-              description: suggestDescription([], cfg.sessionDays, ROCKET_LEAGUE),
-              cover: RL_COVER_PUBLIC,
+              regions: rlRegionGroups(g.accounts, rows, cfg),
             },
           }),
     }))
@@ -1829,5 +1919,7 @@ module.exports = {
     // utils/epicDistributor asks before topping up an Eldorado listing.
     eldoradoPermission,
     resetPermissionCache: () => permissionCache.clear(),
+    rlRegionGroups,
+    regionOf,
   },
 };
