@@ -6433,6 +6433,13 @@ function paOfferIdOf(created) {
   return String(created.offerId || created.id || "");
 }
 
+// Native Account offers share the same session/refresh lock as Item offers.
+async function playerauctionsAccountRequest(method, path, body) {
+  const base = method === "GET" && path.startsWith("/Order/") ? PA_ORDER_API : PA_OFFER_API;
+  if (method === "GET") return paGet(base, path, "PlayerAuctions account read");
+  return paSend(method, base, path, body, "PlayerAuctions account offer");
+}
+
 async function playerauctionsOffer(offerId) {
   return await paGet(
     PA_OFFER_API,
@@ -6960,6 +6967,7 @@ module.exports = {
   playerauctionsResolveDelivery,
   playerauctionsPublish,
   playerauctionsOffer,
+  playerauctionsAccountRequest,
   playerauctionsOfferUrl,
   playerauctionsOfferIdFromUrl,
   paSanitizeTitle,

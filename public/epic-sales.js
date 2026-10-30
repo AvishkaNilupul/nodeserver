@@ -91,7 +91,7 @@
     panel.innerHTML = `
       <div class="card">
         <h2>Listings &amp; sales</h2>
-        <p class="hint">Epic accounts on sale on Eldorado with instant delivery. When a buyer pays, Eldorado shows them the Epic login and a login for our mail page right away, with nothing sent by chat. The mail page shows only the emails Epic sends to that account, from the purchase on, for the number of days set below. It closes early when the buyer changes the account's email.</p>
+        <p class="hint">Epic accounts on Eldorado, G2G and PlayerAuctions with instant delivery. When a buyer pays, the marketplace shows them the Epic login and a login for our mail page. The mail page shows only the emails Epic sends to that account, from the purchase on, for the number of days set below. It closes early when the buyer changes the account's email.</p>
         <div class="es-grid" id="es-health"><div class="muted">Loading…</div></div>
         <div class="es-settings" id="es-settings"></div>
         <div class="row" style="margin-top:12px">
@@ -101,6 +101,7 @@
       </div>
       <div class="card"><h2>Ready to list</h2><p class="hint">Accounts that can go on sale now, grouped by the games they own. An account sits on one listing at a time, so it can never be sold twice.</p><div id="es-groups"></div></div>
       <div class="card"><h2>G2G (automatic delivery)</h2><p class="hint">G2G offers you made on g2g.com and linked here. When a buyer pays, the server picks a ready account that owns the offer's games, opens its mail page, and fills G2G's account form on the order page (the way G2G wants accounts delivered, never the chat). If it can't, Telegram tells you what to do.</p><div id="es-g2g"></div></div>
+      <div class="card"><h2>PlayerAuctions (instant delivery)</h2><p class="hint">One Epic account per native Account offer. Minimum $5, with 14-day buyer mail access and after-sale protection. Uses newly stocked accounts; accounts already in G2G stock stay there. Original-owner contact details are required by PlayerAuctions.</p><div id="es-pa"></div></div>
       <div class="card"><h2>Listings</h2><div id="es-listings"></div></div>
       <div class="card"><h2>Sales</h2><div id="es-sales"></div></div>
       <div class="card"><h2>All accounts</h2><p class="hint">Why each account can or can't be sold right now.</p><div id="es-stock"></div></div>
@@ -198,10 +199,71 @@
     renderSettings();
     renderGroups();
     renderG2g();
+    renderPa();
     renderListings();
     renderSales();
     renderStock();
     renderOthers();
+  }
+
+  function renderPa() {
+    const root = $("es-pa");
+    if (!root) return;
+    const ready = (data.stock || []).filter(a => a.state === "ready" && a.games?.length);
+    const units = data.playerauctions?.units || [];
+    root.innerHTML = '<div class="row"><button class="btn" id="es-pa-check">Check PlayerAuctions sales</button></div>' +
+      (ready.length ? '<h3>Ready accounts</h3>' + ready.map(a => '<div class="es-meta">' + esc(a.label) + ' - ' + esc(a.games.join(", ")) +
+        ' <button class="btn btn-sm" data-pa-list="' + esc(a._id) + '">Sell on PlayerAuctions</button></div>').join("") :
+        '<p class="muted">No unlisted accounts with games are ready. Empty accounts appear here after games are claimed and their libraries are synced.</p>') +
+      (units.length ? '<h3>PlayerAuctions offers</h3>' + units.map(u => '<div class="es-meta">' + pill(u.state, u.state === "error" ? "red" : "") + ' ' +
+        (u.url ? '<a href="' + esc(u.url) + '" target="_blank" rel="noopener">' + esc(u.title) + '</a>' : esc(u.title)) + ' - ' + money(u.priceUsd) +
+        (u.note ? '<div class="es-err">' + esc(u.note) + '</div>' : '') +
+        (["listed", "paused"].includes(u.state) ? ' <button class="btn btn-sm" data-pa-pause="' + esc(u.id) + '" data-pa-paused="' + (u.state !== "paused") + '">' + (u.state === "paused" ? "Resume" : "Pause") + '</button>' : '') +
+        (u.state === "error" || u.state === "loading" ? '<form class="row" data-pa-reconcile="' + esc(u.id) + '"><label>Existing PA offer ID <input name="offerId" inputmode="numeric" pattern="[0-9]+" required></label><button class="btn" type="submit">Verify and link</button></form>' : '') + '</div>').join("") : '<p class="muted">No Epic accounts published on PlayerAuctions yet.</p>');
+    $("es-pa-check").onclick = async event => {
+      const b = event.currentTarget; b.disabled = true;
+      try { const j = await post("/api/epic/sales/playerauctions/sync"); say("Checked " + (j.result.checked || 0) + " account order(s)."); await load(); }
+      catch (e) { say(e.message, true); } finally { b.disabled = false; }
+    };
+    root.querySelectorAll("[data-pa-list]").forEach(b => b.onclick = () => paForm(b.dataset.paList));
+    root.querySelectorAll("[data-pa-pause]").forEach(b => b.onclick = async () => {
+      b.disabled = true;
+      try { await post("/api/epic/sales/playerauctions/" + b.dataset.paPause + "/pause", { paused: b.dataset.paPaused === "true" }); await load(); }
+      catch (e) { say(e.message, true); } finally { b.disabled = false; }
+    });
+    root.querySelectorAll("[data-pa-reconcile]").forEach(form => form.onsubmit = async event => {
+      event.preventDefault(); const b = form.querySelector("button"); b.disabled = true;
+      try { await post("/api/epic/sales/playerauctions/" + form.dataset.paReconcile + "/reconcile", { offerId: form.elements.offerId.value }); await load(); }
+      catch (e) { say(e.message, true); } finally { b.disabled = false; }
+    });
+  }
+
+  async function paForm(accountId) {
+    try {
+      const { preview: p } = await post("/api/epic/sales/playerauctions/preview", { accountId });
+      $("es-pa-modal")?.remove();
+      const modal = document.createElement("div"); modal.id = "es-pa-modal"; modal.className = "modal-wrap es-modal show";
+      const fields = ["firstName", "lastName", "phone", "email", "city", "country"];
+      const labels = { firstName: "Original owner's first name", lastName: "Original owner's last name", phone: "Owner phone", email: "Owner email", city: "Owner city", country: "Owner country" };
+      modal.innerHTML = '<form class="modal"><h3>Sell on PlayerAuctions</h3><p>' + esc(p.games.join(" + ")) + '</p>' +
+        '<p class="hint">Instant delivery of this account and a 14-day mail-page login. Email change supported; the Outlook inbox password is never delivered. Enter the original owner information PlayerAuctions asks for. </p>' +
+        '<label>Title<input name="title" maxlength="150" required value="' + esc(p.title) + '"></label>' +
+        '<label>Price (USD)<input name="priceUsd" type="number" min="5" step="0.01" required value="5"></label>' +
+        fields.map(k => '<label>' + labels[k] + '<input name="' + k + '" required ' + (k === "email" ? 'type="email"' : k === "phone" ? 'type="tel"' : '') + ' value="' + esc(p.original[k]) + '"></label>').join("") +
+        '<p class="hint">The current owner is the original owner. After-sale protection: 14 days. PlayerAuctions receives these details with the account.</p>' +
+        '<div class="es-err" role="alert" id="es-pa-error"></div><div class="modal-actions"><button class="btn" type="button" data-cancel>Cancel</button><button class="btn btn-primary" type="submit">Publish with instant delivery</button></div></form>';
+      document.body.append(modal); modal.querySelector("[data-cancel]").onclick = () => modal.remove();
+      const form = modal.querySelector("form");
+      form.onsubmit = async event => {
+        event.preventDefault(); const b = form.querySelector('[type="submit"]'); b.disabled = true;
+        const original = Object.fromEntries(fields.map(k => [k, form.elements[k].value]));
+        try {
+          await post("/api/epic/sales/playerauctions/publish", { accountId, title: form.elements.title.value, priceUsd: Number(form.elements.priceUsd.value), original, confirm: true });
+          modal.remove(); say("PlayerAuctions instant-delivery offer is live."); await load();
+        } catch (e) { $("es-pa-error").textContent = e.message; b.disabled = false; }
+      };
+      form.elements.title.focus();
+    } catch (e) { say(e.message, true); }
   }
 
   function renderHealth() {
@@ -250,7 +312,7 @@
     const c = data.config || {};
     const days = [1, 2, 3, 5, 7, 10, 14];
     $("es-settings").innerHTML =
-      '<label class="es-switch"><input type="checkbox" id="es-cfg-sync"' + (c.syncEnabled ? " checked" : "") + "> Track sales automatically</label>" +
+      '<label class="es-switch"><input type="checkbox" id="es-cfg-sync"' + (c.syncEnabled ? " checked" : "") + "> Track Eldorado sales automatically</label>" +
       '<label class="es-switch">Mail page open for <select id="es-cfg-days">' +
       days.map((d) => '<option value="' + d + '"' + (d === c.sessionDays ? " selected" : "") + ">" + d + " day" + (d > 1 ? "s" : "") + "</option>").join("") +
       "</select> after an Eldorado sale (G2G offers have their own, below)</label>" +
@@ -596,7 +658,7 @@
   function renderSales() {
     const rows = data.sales || [];
     if (!rows.length) {
-      $("es-sales").innerHTML = '<div class="muted">No sales yet. They appear here within a few minutes of an Eldorado order.</div>';
+      $("es-sales").innerHTML = '<div class="muted">No sales yet. They appear here within a few minutes of a marketplace order.</div>';
       return;
     }
     $("es-sales").innerHTML =
@@ -626,7 +688,7 @@
               : "";
           return (
             "<tr" + (s.needsAttention ? ' style="background:rgba(220,38,38,.06)"' : "") + '><td data-label="When">' + esc(when(s.orderCreatedAt)) + "</td>" +
-            '<td data-label="Listing">' + pill(isG2g ? "G2G" : "Eldorado") + " " + esc(s.title) +
+            '<td data-label="Listing">' + pill(isG2g ? "G2G" : s.market === "playerauctions" ? "PlayerAuctions" : "Eldorado") + " " + esc(s.title) +
             (isG2g
               ? '<div class="muted">' +
                 (s.matchedBy === "g2g-stock"

@@ -303,6 +303,9 @@ async function stockContext({ fresh = false, accountIds = null } = {}) {
   for (const u of await g2gStockUnits()) {
     listingByAccount.set(String(u.epicAccountId), g2gListingRef(u));
   }
+  for (const u of await paStockUnits()) {
+    listingByAccount.set(String(u.epicAccountId), paListingRef(u));
+  }
   const checks = new Map();
   const toCheck = [];
   for (const a of accounts) {
@@ -1369,8 +1372,10 @@ function stop() {
 // Epic's "email changed" mail: a buyer has it (the sale is not recorded yet),
 // or someone else got in. Page, and run the sale sync soon.
 async function onListedEmailChanged(rows) {
-  // A listed login with no Eldorado listing belongs to G2G stock.
-  const g2gRows = (rows || []).filter((r) => !r.listingId);
+  // Stock mail sessions have no Eldorado listing ID. Hand them to each
+  // market by session ID so an email change cannot release a live account.
+  await require("./epicPa").onStockEmailChanged(rows);
+  const g2gRows = (rows || []).filter((r) => !r.listingId && r.marketplace !== "playerauctions");
   if (g2gRows.length) {
     try {
       await require("./epicG2g").onStockEmailChanged(g2gRows);
@@ -1419,7 +1424,7 @@ async function resendAccess(orderId, actor, days) {
       stage: "sold",
       soldAt: now,
       listingId: sale.listingId,
-      marketplace: "eldorado",
+      marketplace: sale.market || "eldorado",
       orderRef: sale.orderId,
       createdByUserId: String(actor || ""),
       note: "re-sent access",
@@ -1594,7 +1599,7 @@ async function overview({ withOthers = true } = {}) {
   const ctx = await stockContext();
   const stock = ctx.accounts.map((a) => stockRow(a, readinessOf(a, ctx)));
   const listings = await EpicListing.find({}).sort({ createdAt: -1 }).limit(50).lean();
-  const [sales, proxy, state, permission, g2g] = await Promise.all([
+  const [sales, proxy, state, permission, g2g, playerauctions] = await Promise.all([
     salesView(),
     outlook.proxyHealth(),
     EpicSalesState.findById("main").lean(),
@@ -1604,6 +1609,7 @@ async function overview({ withOthers = true } = {}) {
     Promise.resolve()
       .then(() => require("./epicG2g").panelView(ctx))
       .catch((e) => ({ error: (e && e.message) || String(e), offers: [] })),
+    require("./epicPa").overview(),
   ]);
   return {
     config: { syncEnabled: ctx.cfg.syncEnabled, sessionDays: ctx.cfg.sessionDays, allowSharedInbox: ctx.cfg.allowSharedInbox },
@@ -1625,6 +1631,7 @@ async function overview({ withOthers = true } = {}) {
     listings: listings.map(listingView),
     sales,
     g2g,
+    playerauctions,
     others: withOthers ? await otherEpicOffers(listings) : { offers: [] },
   };
 }
@@ -1686,9 +1693,19 @@ function g2gListingRef(u) {
   return { id: "g2g:" + u.offerId, title: "G2G stock (offer " + u.offerId + ")", status: "active", market: "g2g" };
 }
 
+async function paStockUnits(query = {}) {
+  return require("../models/EpicPaUnit").find({ ...query, state: { $ne: "sold" } })
+    .select("epicAccountId offerId state").lean();
+}
+function paListingRef(u) {
+  return { id: "pa:" + (u.offerId || u._id), title: "PlayerAuctions Epic stock", status: u.state, market: "playerauctions" };
+}
+
 async function listingForAccount(accountId) {
   const id = String(accountId || "");
   if (!/^[a-f\d]{24}$/i.test(id)) return null;
+  const inPa = await paStockUnits({ epicAccountId: new (require("mongoose").Types.ObjectId)(id) });
+  if (inPa.length) return paListingRef(inPa[0]);
   const inG2g = await g2gStockUnits({ epicAccountId: new (require("mongoose").Types.ObjectId)(id) });
   if (inG2g.length) return g2gListingRef(inG2g[0]);
   const l = await EpicListing.findOne({

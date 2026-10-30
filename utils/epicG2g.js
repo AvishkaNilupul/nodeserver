@@ -537,6 +537,10 @@ function orderPlacedAt(order) {
 // after it is written into the sale (and taken back out if someone else sold
 // it in between). Returns the reloaded sale.
 async function reserveAccounts(sale, link, need) {
+  return sales._internals.withLock(() => reserveAccountsLocked(sale, link, need));
+}
+
+async function reserveAccountsLocked(sale, link, need) {
   const already = (sale.accounts || []).map((a) => a.epicAccountId);
   if (already.length) {
     // A restart between "written into the sale" and "marked sold" leaves the
@@ -1036,7 +1040,11 @@ const formFailures = new Map(); // accountId -> time (skip for a while)
 // Load every ready account that owns the offer's games into its G2G stock.
 // Units sent earlier and not yet confirmed are checked first; units whose
 // upload never went out are sent again.
-async function loadStock(link, { offer = null } = {}) {
+async function loadStock(link, opts = {}) {
+  return sales._internals.withLock(() => loadStockLocked(link, opts));
+}
+
+async function loadStockLocked(link, { offer = null } = {}) {
   if (!link || link.mode !== "instant") return { skipped: "not an Instant offer" };
   if (link.enabled === false) return { skipped: "automatic delivery is off for this offer" };
   return withKeyLock("load:" + link.offerId, async () => {

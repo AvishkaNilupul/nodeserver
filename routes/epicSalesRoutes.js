@@ -221,4 +221,18 @@ router.post(
   handle(async (req) => ({ details: await g2g().deliveryDetails(req.params.orderId) })),
 );
 
+const pa = () => require("../utils/epicPa");
+router.post("/api/epic/sales/playerauctions/preview", requireSuperadmin,
+  handle(async req => ({ preview: await pa().preview(String(req.body.accountId || ""), req.body) })));
+router.post("/api/epic/sales/playerauctions/publish", requireSuperadmin,
+  handle(async req => {
+    if (req.body.confirm !== true) { const e = new Error("Publishing needs confirm: true"); e.status = 400; throw e; }
+    return { unit: await pa().publish(String(req.body.accountId || ""), req.body, actorOf(req)) };
+  }));
+router.post("/api/epic/sales/playerauctions/sync", requireSuperadmin,
+  handle(async () => ({ result: await pa().tick() })));
+router.post("/api/epic/sales/playerauctions/:id/reconcile", requireSuperadmin,
+  handle(async req => ({ unit: await pa().reconcile(req.params.id, String(req.body.offerId || "")) })));
+router.post("/api/epic/sales/playerauctions/:id/pause", requireSuperadmin,
+  handle(async req => ({ unit: await pa().setPaused(req.params.id, req.body.paused !== false) })));
 module.exports = router;

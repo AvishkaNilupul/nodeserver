@@ -664,6 +664,9 @@ async function deliverOrder(order, { dryRun, supplied = suppliedDeps }) {
         order.detail.orderInfo.offerInfo &&
         order.detail.orderInfo.offerInfo.link,
     );
+  if (/epic games/i.test(offerTitle) && await require("./epicPa").ownsOrder(order)) {
+    return { skipped: "Epic account uses PlayerAuctions native instant delivery" };
+  }
   let row =
     offerId &&
     (await MarketplaceListing.findOne({

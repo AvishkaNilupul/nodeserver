@@ -1049,6 +1049,7 @@ mongoose
     // utils/epicG2g; this sweep catches cancelled orders (accounts back on the
     // shelf) and keeps the linked offers' stock numbers right.
     require("./utils/epicG2g").start();
+    require("./utils/epicPa").start();
     // Renters: stop the bots of renters whose lease just expired (the
     // requireRenter middleware already blocks their dashboard access, but this
     // makes farming actually halt without waiting for a manual suspend).
