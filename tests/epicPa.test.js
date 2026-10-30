@@ -34,9 +34,17 @@ let db,
   seq = 0,
   creates = 0,
   timeout = false;
+rejectCreate = rejectRead = false;
+let rejectCreate = false,
+  rejectRead = false;
 const offers = new Map();
 pa.create = async (input) => {
   creates++;
+  if (rejectCreate)
+    throw Object.assign(new Error("throttled SECRET"), {
+      __pa: true,
+      paCode: 1,
+    });
   const id = String(1000 + ++seq);
   offers.set(id, {
     gameId: 9310,
@@ -46,7 +54,11 @@ pa.create = async (input) => {
   if (timeout) throw new Error("timeout with password SECRET");
   return id;
 };
-pa.read = async (id) => offers.get(String(id));
+pa.read = async (id) => {
+  if (rejectRead)
+    throw Object.assign(new Error("read failed"), { __pa: true, paCode: 400 });
+  return offers.get(String(id));
+};
 const native = new Map();
 pa.orderAccount = async (id) => native.get(String(id));
 let hides = 0,
@@ -280,4 +292,33 @@ test("PA order scan matches offer IDs and does not use duplicate titles as a del
   mp.playerauctionsOrderDetail = async () => o.detail;
   assert.equal((await epic.tick()).checked, 1);
   assert.equal(await Sale.countDocuments(), 1);
+});
+
+test("a definite publish rejection frees the reservation and revokes its mail login", async () => {
+  const a = await account();
+  rejectCreate = true;
+  await assert.rejects(
+    epic.publish(String(a._id), { original: owner }, "test"),
+    /26 seconds/,
+  );
+  assert.equal(await Unit.countDocuments(), 0);
+  const session = await Session.findOne();
+  assert.ok(session.revokedAt);
+  assert.equal(session.passwordEnc, "");
+  rejectCreate = false;
+  assert.equal(
+    (await epic.publish(String(a._id), { original: owner }, "test")).state,
+    "listed",
+  );
+});
+test("a rejected read after a successful create never frees live credentials", async () => {
+  const a = await account();
+  rejectRead = true;
+  await assert.rejects(
+    epic.publish(String(a._id), { original: owner }, "test"),
+    /could not be confirmed/,
+  );
+  assert.equal((await Unit.findOne()).state, "error");
+  assert.equal((await Session.findOne()).revokedAt, null);
+  assert.equal(await Unit.countDocuments(), 1);
 });

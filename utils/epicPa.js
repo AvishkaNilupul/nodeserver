@@ -225,7 +225,8 @@ async function publish(accountId, opts, actor) {
       );
       return view(await Unit.findById(unit._id).lean());
     } catch (e) {
-      if (!unit.publishAttemptedAt) {
+      const rejected = !unit.offerId && e.__pa && e.paCode != null;
+      if (!unit.publishAttemptedAt || rejected) {
         if (unit.sessionId)
           await Session.updateOne(
             { _id: unit.sessionId },
@@ -247,9 +248,15 @@ async function publish(accountId, opts, actor) {
         await alert(unit, unit.note);
       }
       throw fail(
-        unit.publishAttemptedAt
-          ? unit.note
-          : "Could not prepare buyer mail access",
+        rejected
+          ? e.paCode === 1
+            ? "PlayerAuctions is throttling writes. Wait 26 seconds and try again."
+            : "PlayerAuctions rejected the account offer (code " +
+              String(e.paCode) +
+              "). Review the owner details and seller offer requirements before retrying."
+          : unit.publishAttemptedAt
+            ? unit.note
+            : "Could not prepare buyer mail access",
       );
     }
   });
@@ -260,6 +267,8 @@ async function matchesSession(unit, offer) {
   const instruction = String(offer?.autoDelivery?.instruction || "");
   return (
     !!pw &&
+    !session.revokedAt &&
+    session.stage === "listed" &&
     instruction.includes(pw) &&
     instruction.includes(sales.providerUrl()) &&
     instruction.includes(session.inboxAddress)
