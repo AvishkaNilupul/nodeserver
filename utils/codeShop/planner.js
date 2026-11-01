@@ -31,7 +31,7 @@
 
 const { freeCounts, bestDraftSets } = require("./allocate");
 const { slotSetHash } = require("./slots");
-const { defaultLabel, defaultTexts } = require("./texts");
+const { defaultLabel, defaultTexts, rewardLabels } = require("./texts");
 const { eventStarts } = require("./eventDates");
 const { guideFor } = require("./games");
 const { DEFAULTS, marketsForGame } = require("./config");
@@ -274,6 +274,20 @@ function createPlanner(deps = {}) {
     }
   }
 
+  // Repeated rewards get numbers and box/pack rewards name their event
+  // (texts.rewardLabels), decided once per ready group so every bundle of the
+  // event names a reward the same way. Runs after labelGroup: a reward still
+  // without a name stays blank.
+  async function finishLabels(g) {
+    // Nothing free = nothing to draft: no read for an old, sold-out group.
+    if (!g.free.length) return;
+    const metas = [...g.slots.values()].sort(slotOrder);
+    if (!metas.some((s) => s.label)) return;
+    const starts = await eventStarts({ SoopCampaign: SoopCampaign(), ChzzkCampaign: models.ChzzkCampaign, CodeStock: CodeStock() }, [g.groupKey]);
+    const labels = rewardLabels(metas, { eventStart: Array.isArray(starts) && starts.length ? starts[0] : null });
+    for (const s of metas) if (labels.has(s.slotKey)) s.label = labels.get(s.slotKey);
+  }
+
   async function planGroup(g, cfg, ctx, out) {
     const Product = CodeProduct();
     const d = (cfg && cfg.drafts) || {};
@@ -456,6 +470,7 @@ function createPlanner(deps = {}) {
       out.groups += 1;
       try {
         await labelGroup(g, cfg, ctx);
+        await finishLabels(g);
         await planGroup(g, cfg, ctx, out);
       } catch (err) {
         // One bad group must not stop the others.

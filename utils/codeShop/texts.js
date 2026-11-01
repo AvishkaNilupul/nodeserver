@@ -151,6 +151,48 @@ function defaultLabel(row, { sourceWords } = {}) {
   return re && re.test(name) ? "" : name;
 }
 
+// Labels of one event's rewards, decided once for the whole group so every
+// bundle of the event names a reward the same way (owner 2026-11-01: an event
+// with three "1 Esports Loot Box" rewards read as one reward three times, and
+// "when lootboxes are showing put which event this is from"):
+// - a box/pack label loses a leading "1 " ("1 Esports Loot Box" -> "Esports Loot Box");
+// - a label two or more rewards share is numbered in earned order: "#1", "#2", "#3";
+// - a box/pack label names its event by start date: "(Event 30 Oct 2026)" —
+//   the date only, never the campaign title (it names the source).
+// `slots`: [{ slotKey, label }] in earned order; `eventStart`: Date/ms or null.
+// -> Map(slotKey -> label). A blank label stays blank (it still needs a name),
+// and a label that would pass LIMIT_LABEL keeps fewer of the additions.
+const LIMIT_LABEL = 80;
+const LEADING_ONE_RE = /^1\s+(?=\S)/;
+const EVENT_SUFFIX_RE = /\s*\(Events? [^()]*\)$/;
+
+function rewardLabels(slots, { eventStart = null } = {}) {
+  const list = (Array.isArray(slots) ? slots : []).filter((s) => s && s.slotKey);
+  const base = list.map((s) => {
+    const l = String(s.label || "").trim();
+    return STACKABLE_RE.test(l) ? l.replace(LEADING_ONE_RE, "") : l;
+  });
+  const total = new Map();
+  for (const b of base) if (b) total.set(b.toLowerCase(), (total.get(b.toLowerCase()) || 0) + 1);
+  const seen = new Map();
+  const event = eventDatesText(eventStart == null ? [] : [eventStart], { short: true });
+  const out = new Map();
+  list.forEach((s, i) => {
+    const b = base[i];
+    if (!b) {
+      out.set(s.slotKey, "");
+      return;
+    }
+    const k = b.toLowerCase();
+    const nth = (seen.get(k) || 0) + 1;
+    seen.set(k, nth);
+    const numbered = total.get(k) > 1 ? `${b} #${nth}` : b;
+    const full = event && STACKABLE_RE.test(b) ? `${numbered} (Event ${event})` : numbered;
+    out.set(s.slotKey, [full, numbered, b].find((l) => l.length <= LIMIT_LABEL) || b);
+  });
+  return out;
+}
+
 // The event part sits right after the game and the count: a market with a
 // shorter title (fitTitle) drops parts from the END, so it keeps this one.
 function buildTitle(display, labels, eventPart = "") {
@@ -289,8 +331,12 @@ function defaultTexts({ slots, guide, useBy, now, eventStarts } = {}) {
     useByText ? `redeem by ${useByText}` : "",
   ].filter(Boolean);
 
+  // The title names the event once up front, so a box label's own
+  // "(Event ...)" (rewardLabels) is left out of it to save room.
+  const titleLabels = eventPart ? labels.map((l) => l.replace(EVENT_SUFFIX_RE, "")) : labels;
+
   return {
-    title: buildTitle(display, labels, eventPart),
+    title: buildTitle(display, titleLabels, eventPart),
     description: buildDescription({ display, labels, guide: g, redeemBy, validUntil, eventLong, eventCount }),
     deliveryTemplate:
       `Thank you for your order! Your ${display} code bundle` +
@@ -345,6 +391,7 @@ module.exports = {
   marketInstruction,
   redeemByText,
   defaultLabel,
+  rewardLabels,
   TITLE_MAX,
   DESCRIPTION_MAX,
   REDEEM_BY_WINDOW_MS,

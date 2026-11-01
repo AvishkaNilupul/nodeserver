@@ -249,7 +249,7 @@ test("planner: CHZZK Overwatch codes become a DRAFT for the owner — nothing is
   assert.equal(d.status, "draft", "never active without the owner");
   assert.equal(d.gameNo, "12");
   assert.deepEqual(d.groupKeys, ["12:chzzk-1954"]);
-  assert.equal(d.slots[0].label, "Epic Box");
+  assert.equal(d.slots[0].label, "Epic Box (Event 20 Oct 2026)", "a box names its event (2026-11-01)");
   assert.equal(await SuppliedAccount.countDocuments({}), 0, "no bundle was built");
   assert.equal(await CodeStock.countDocuments({ state: "in_stock" }), 3, "the codes stay in stock");
   const t = d.texts || {};

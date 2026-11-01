@@ -7,7 +7,7 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 const Module = require("node:module");
 
-const { defaultTexts, redeemByText, defaultLabel, eventDatesText, fitTitle } = require("../utils/codeShop/texts");
+const { defaultTexts, redeemByText, defaultLabel, eventDatesText, fitTitle, rewardLabels } = require("../utils/codeShop/texts");
 const { GUIDES, guideFor } = require("../utils/codeShop/games");
 
 const DAY = 24 * 60 * 60 * 1000;
@@ -475,4 +475,75 @@ test("guideFor returns a copy: editing it never changes the shared guides", () =
   assert.equal(again.howTo.length, GUIDES["12"].howTo.length);
   assert.ok(again.goodToKnow.length > 0);
   assert.ok(Object.isFrozen(GUIDES) && Object.isFrozen(GUIDES["12"].howTo));
+});
+
+// --- rewardLabels (owner 2026-11-01: three identical loot-box lines; name the event on boxes) ---
+
+const labelsOf = (slots, opts) => [...rewardLabels(slots, opts).values()];
+
+test("rewardLabels: a repeated reward is numbered in the given order; a box drops its leading 1 and names the event", () => {
+  const slots = [
+    { slotKey: "a", label: "Candle Spray" },
+    { slotKey: "b", label: "1 Esports Loot Box" },
+    { slotKey: "c", label: "Sombra Skin" },
+    { slotKey: "d", label: "1 esports loot box" },
+    { slotKey: "e", label: "1 Esports Loot Box" },
+  ];
+  assert.deepEqual(labelsOf(slots, { eventStart: new Date("2026-10-30T07:30:00Z") }), [
+    "Candle Spray",
+    "Esports Loot Box #1 (Event 30 Oct 2026)",
+    "Sombra Skin",
+    "esports loot box #2 (Event 30 Oct 2026)",
+    "Esports Loot Box #3 (Event 30 Oct 2026)",
+  ]);
+  for (const l of labelsOf(slots, { eventStart: Date.parse("2026-10-30T07:30:00Z") })) assertClean(l, "label");
+});
+
+test("rewardLabels: no event date -> numbers only; a single box keeps no number; non-boxes keep a leading 1", () => {
+  assert.deepEqual(
+    labelsOf([
+      { slotKey: "a", label: "1 Esports Loot Box" },
+      { slotKey: "b", label: "1 Hour XP Boost" },
+      { slotKey: "c", label: "Prost Spray" },
+      { slotKey: "d", label: "Prost Spray" },
+    ]),
+    ["Esports Loot Box", "1 Hour XP Boost", "Prost Spray #1", "Prost Spray #2"],
+  );
+  assert.deepEqual(labelsOf([{ slotKey: "a", label: "Weapon Pack" }], { eventStart: Date.parse("2026-10-11T08:00:00Z") }), [
+    "Weapon Pack (Event 11 Oct 2026)",
+  ]);
+});
+
+test("rewardLabels: a blank label stays blank; a label never passes 80 characters; slots without a key are skipped", () => {
+  const long = "Legendary " + "Very ".repeat(12) + "Long Loot Box"; // 83 chars
+  const near = "A ".repeat(32) + "Loot Box"; // 72 chars: the number fits, the event does not
+  const out = rewardLabels(
+    [
+      { slotKey: "a", label: "" },
+      { slotKey: "b", label: near },
+      { slotKey: "c", label: near },
+      { label: "Loot Box" },
+      { slotKey: "d", label: long },
+    ],
+    { eventStart: Date.parse("2026-10-30T00:00:00Z") },
+  );
+  assert.deepEqual([...out.keys()], ["a", "b", "c", "d"]);
+  assert.equal(out.get("a"), "");
+  assert.equal(out.get("b"), near + " #1");
+  assert.equal(out.get("c"), near + " #2");
+  assert.equal(out.get("d"), long, "already over the limit: left as it was (the text guard reports it)");
+  for (const k of ["b", "c"]) assert.ok(out.get(k).length <= 80);
+});
+
+test("defaultTexts: a label's own (Event ...) is left out of the title when the title names the event; kept in the description", () => {
+  const slots = [{ label: "Candle Spray" }, { label: "Esports Loot Box #1 (Event 30 Oct 2026)" }];
+  const withEvent = defaultTexts({ slots, guide: GUIDES["12"], useBy: NOW + 120 * DAY, now: NOW, eventStarts: [new Date("2026-10-30T07:30:00Z")] });
+  assert.equal(
+    withEvent.title,
+    "Overwatch 2 | 2 Codes Bundle | Event 30 Oct 2026 | Candle Spray + Esports Loot Box #1 | Redeem Codes | Instant Auto Delivery",
+  );
+  assert.match(withEvent.description, /^- Esports Loot Box #1 \(Event 30 Oct 2026\)$/m);
+  // No event known for the title: the label is shown whole.
+  const noEvent = defaultTexts({ slots, guide: GUIDES["12"], useBy: NOW + 120 * DAY, now: NOW });
+  assert.match(noEvent.title, /Esports Loot Box #1 \(Event 30 Oct 2026\)/);
 });

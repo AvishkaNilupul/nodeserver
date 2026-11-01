@@ -63,8 +63,9 @@ async function addSlot({
   campaignEndAt = NOW - 5 * HOUR,
   campaignTitle = "Autumn Cup",
   gameName = "Overwatch 2",
+  ordinal = 1,
 }) {
-  const slotKey = slotKeyOf(groupKey, nameRaw, 1);
+  const slotKey = slotKeyOf(groupKey, nameRaw, ordinal);
   const rows = [];
   for (let i = 0; i < count; i++) {
     seq += 1;
@@ -260,12 +261,65 @@ test("the event is dated by its campaign's start; the campaign title never reach
   const [p] = await drafts();
   assert.ok(p.texts.title.startsWith("Overwatch 2 | 2 Codes Bundle | Event 11 Oct 2026 | "), p.texts.title);
   assert.match(p.texts.description, /^EVENT: 11 October 2026 - /m);
-  assert.match(p.texts.description, /that includes the Esports Loot Box\./);
+  // A box names its event in its own label (owner 2026-11-01); the title says it once.
+  assert.deepEqual(p.slots.map((s) => s.label), ["Prost Spray", "Esports Loot Box (Event 11 Oct 2026)"]);
+  assert.match(p.texts.description, /that includes the Esports Loot Box \(Event 11 Oct 2026\)\./);
+  assert.doesNotMatch(p.texts.title, /\(Event/);
   assert.match(p.texts.deliveryTemplate, /\(event 11 October 2026, redeem by /);
   for (const k of ["title", "description", "deliveryTemplate", "coverTitle", "coverServiceText"]) {
     assert.doesNotMatch(p.texts[k], /cup|stage|part b/i, k + " keeps the campaign title out");
   }
   assert.deepEqual(checkBuyerText({ ...p.texts, labels: p.slots.map((s) => s.label) }), []);
+  await SoopCampaign.deleteMany({});
+});
+
+test("an event giving the same box three times: numbered in earned order, each names the event; every bundle reads the same", async () => {
+  await reset();
+  await SoopCampaign.deleteMany({});
+  await SoopCampaign.create({
+    dropsIdx: "302",
+    gameNo: "12",
+    title: "Winter Cup Item Drops",
+    titleRaw: "y",
+    startDate: new Date("2026-10-30T07:30:00Z"),
+    endDate: new Date(NOW - 5 * HOUR),
+  });
+  const g = { groupKey: "12:302", campaignTitle: "Winter Cup Item Drops" };
+  await addSlot({ ...g, nameRaw: "spray", name: "Candle Spray", count: 6, earnedAt: NOW - 4 * DAY });
+  await addSlot({ ...g, nameRaw: "box", name: "1 Esports Loot Box", count: 6, earnedAt: NOW - 3 * DAY, ordinal: 1 });
+  await addSlot({ ...g, nameRaw: "card", name: "Lantern Name Card", count: 6, earnedAt: NOW - 3 * DAY + HOUR });
+  // Ordinal 3 earned before ordinal 2 in this data: numbers follow the earned order.
+  await addSlot({ ...g, nameRaw: "box", name: "1 Esports Loot Box", count: 6, earnedAt: NOW - 2 * DAY + HOUR, ordinal: 2 });
+  await addSlot({ ...g, nameRaw: "box", name: "1 Esports Loot Box", count: 3, earnedAt: NOW - 2 * DAY, ordinal: 3 });
+  // Not a box: keeps its "1 ", gets no number and no event.
+  await addSlot({ ...g, nameRaw: "pack", name: "1 Hour XP Boost", count: 6, earnedAt: NOW - DAY });
+
+  const { planner, events } = setup();
+  await planner.run();
+  noErrors(events);
+  const all = await drafts();
+  assert.equal(all.length, 2, "a full set (3 of each) and the leftover");
+  const full = all.find((p) => p.kind === "full");
+  assert.deepEqual(full.slots.map((s) => s.label), [
+    "Candle Spray",
+    "Esports Loot Box #1 (Event 30 Oct 2026)",
+    "Lantern Name Card",
+    "Esports Loot Box #2 (Event 30 Oct 2026)",
+    "Esports Loot Box #3 (Event 30 Oct 2026)",
+    "1 Hour XP Boost",
+  ]);
+  const left = all.find((p) => p.kind === "leftover");
+  // The leftover bundle names the same rewards the same way.
+  for (const s of left.slots) {
+    assert.equal(s.label, full.slots.find((f) => f.slotKey === s.slotKey).label, s.slotKey);
+  }
+  assert.ok(full.texts.title.startsWith("Overwatch 2 | 6 Codes Bundle | Event 30 Oct 2026 | Candle Spray + Esports Loot Box #1 + "), full.texts.title);
+  assert.doesNotMatch(full.texts.title, /\(Event/);
+  assert.match(full.texts.description, /^- Esports Loot Box #3 \(Event 30 Oct 2026\)$/m);
+  for (const p of all) {
+    assert.deepEqual(checkBuyerText({ ...p.texts, labels: p.slots.map((s) => s.label) }, { sourceWords: DEFAULTS.sourceWords }), [], p.kind);
+    assert.doesNotMatch(p.texts.description + p.texts.title, /winter cup/i);
+  }
   await SoopCampaign.deleteMany({});
 });
 
