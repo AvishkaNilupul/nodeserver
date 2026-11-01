@@ -68,6 +68,7 @@ const primeRoutes = require("./routes/primeRoutes");
 const radarRoutes = require("./routes/radarRoutes");
 const bannedRoutes = require("./routes/bannedRoutes");
 const epicAccountRoutes = require("./routes/epicAccountRoutes");
+const steamAccountRoutes = require("./routes/steamAccountRoutes");
 const twitchFollowRoutes = require("./routes/twitchFollowRoutes");
 const twitchFollowRunner = require("./utils/twitchFollowRunner");
 const twitchClaimRoutes = require("./routes/twitchClaimRoutes");
@@ -562,6 +563,12 @@ app.get("/epic-accounts.html", requireSuperadmin, enforce2fa, (req, res) => {
   res.sendFile(path.join(__dirname, "public", "epic-accounts.html"));
 });
 
+// Steam accounts (superadmin only) — accounts made by the Mac generator,
+// games loaded onto them, region checks, stage. docs/STEAM-ACCOUNTS.md.
+app.get("/steam-accounts.html", requireSuperadmin, enforce2fa, (req, res) => {
+  res.sendFile(path.join(__dirname, "public", "steam-accounts.html"));
+});
+
 // Shop listings manager (superadmin only) — build/publish manual listings.
 app.get("/listings.html", requireSuperadmin, enforce2fa, (req, res) => {
   res.sendFile(path.join(__dirname, "public", "listings.html"));
@@ -812,6 +819,7 @@ app.use(enforce2fa, primeRoutes);
 app.use(enforce2fa, radarRoutes);
 app.use(enforce2fa, bannedRoutes);
 app.use(enforce2fa, epicAccountRoutes);
+app.use(enforce2fa, steamAccountRoutes);
 app.use(enforce2fa, twitchFollowRoutes);
 // Drop-claim race UI (public/twitch-claim.html): port of the CLI spammer that
 // fires N parallel DropsPage_ClaimDropRewards mutations at one dropInstanceID

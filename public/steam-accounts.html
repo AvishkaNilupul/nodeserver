@@ -1,0 +1,236 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <script>
+      (function () {
+        try {
+          if (localStorage.getItem("theme") === "dark")
+            document.documentElement.setAttribute("data-theme", "dark");
+        } catch (e) {}
+      })();
+    </script>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Steam Accounts</title>
+    <!-- Contract: docs/STEAM-ACCOUNTS.md. ?v= keeps a reload from mixing old and new files. -->
+    <link rel="stylesheet" href="/steam-accounts.css?v=20261101" />
+    <link rel="stylesheet" href="/admin-nav.css" />
+  </head>
+  <body>
+    <aside class="nav">
+      <div class="brand">
+        <span class="mark"
+          ><svg
+            width="18"
+            height="18"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="#fff"
+            stroke-width="2.2"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+          >
+            <polygon points="12 2 2 8.5 12 15 22 8.5 12 2"></polygon>
+            <path d="M2 8.5v7L12 22l10-6.5v-7"></path></svg
+        ></span>
+        <b>RedeemHub<span>Admin console</span></b>
+      </div>
+      <nav class="links">
+        <a href="/admin.html"
+          ><svg
+            width="18"
+            height="18"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2"
+            stroke-linecap="round"
+          >
+            <path
+              d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"
+            ></path>
+          </svg>
+          Inbox</a
+        >
+        <a href="/orders"
+          ><svg
+            width="18"
+            height="18"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2"
+            stroke-linecap="round"
+          >
+            <rect x="3" y="4" width="18" height="16" rx="2"></rect>
+            <path d="M3 9h18M7 14h6"></path>
+          </svg>
+          Orders</a
+        >
+        <a href="/inventory"
+          ><svg
+            width="18"
+            height="18"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2"
+            stroke-linecap="round"
+          >
+            <path d="M20 7H4M16 3H8M6 11h12l-1 10H7z"></path>
+          </svg>
+          Inventory</a
+        >
+        <a href="/bots.html"
+          ><svg
+            width="18"
+            height="18"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+          >
+            <rect x="4" y="8" width="16" height="12" rx="2"></rect>
+            <path d="M12 8V5M9 3h6M9 14h.01M15 14h.01M2 13h2M20 13h2"></path>
+          </svg>
+          Bots</a
+        >
+        <a href="/twitch-follows.html"
+          ><svg
+            width="18"
+            height="18"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+          >
+            <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"></path>
+            <circle cx="12" cy="7" r="4"></circle></svg
+          >
+          Twitch follows</a
+        >
+      </nav>
+      <div class="me">
+        <span class="av" id="meAvatar">--</span>
+        <div class="who">
+          <b id="meName">Admin</b><span id="meRole">Seller</span>
+        </div>
+        <button
+          class="themebtn"
+          data-theme-toggle
+          onclick="toggleTheme()"
+          title="Toggle dark mode"
+          aria-pressed="false"
+        >
+          <svg
+            class="t-moon"
+            width="16"
+            height="16"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+          >
+            <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"></path>
+          </svg>
+          <svg
+            class="t-sun"
+            style="display: none"
+            width="16"
+            height="16"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+          >
+            <circle cx="12" cy="12" r="4"></circle>
+            <path
+              d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M6.34 17.66l-1.41 1.41M19.07 4.93l-1.41 1.41"
+            ></path>
+          </svg>
+        </button>
+      </div>
+    </aside>
+
+    <main class="st-main">
+      <header class="st-head">
+        <div>
+          <h1>Steam accounts</h1>
+          <p>Accounts made by the Steam generator on your Mac. Load games onto them, check each store region, then list them for sale.</p>
+        </div>
+        <div class="st-head-actions">
+          <button type="button" class="btn btn-sm" id="btnRefresh">Refresh</button>
+        </div>
+      </header>
+
+      <div class="st-stats" id="stats" aria-live="polite"></div>
+
+      <section class="st-card" aria-labelledby="accTitle">
+        <div class="st-card-hd">
+          <h2 class="st-card-title" id="accTitle">Accounts</h2>
+          <span class="st-card-meta" id="accCount"></span>
+        </div>
+        <div class="st-card-bd">
+          <div class="st-toolbar">
+            <label class="st-search">
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><circle cx="11" cy="11" r="7"></circle><path d="m20 20-3.5-3.5"></path></svg>
+              <input type="search" id="accSearch" placeholder="Search accounts or games" aria-label="Search accounts or games" autocomplete="off" />
+            </label>
+            <div class="st-chips" id="accFilters" role="group" aria-label="Show"></div>
+            <div class="st-toolbar-end">
+            <select id="accRegion" aria-label="Region"></select>
+            <select id="accSort" aria-label="Sort accounts">
+              <option value="newest">Newest first</option>
+              <option value="oldest">Oldest first</option>
+              <option value="games">Most games first</option>
+              <option value="value">Most valuable first</option>
+              <option value="region">By region</option>
+            </select>
+            </div>
+          </div>
+          <div id="list"><div class="st-empty">Loading accounts…</div></div>
+        </div>
+      </section>
+
+      <section class="st-card">
+        <div class="st-card-bd">
+          <details class="st-help">
+            <summary>How accounts get here, and what to check before selling</summary>
+            <div class="st-help-body">
+              <div>
+                <h3>How accounts get here</h3>
+                <ol>
+                  <li>Make accounts in the Steam generator on your Mac (127.0.0.1:4108).</li>
+                  <li>Each finished account uploads here by itself. If the server can't be reached, the Mac keeps it and tries again.</li>
+                  <li>Uploading again never overwrites anything you changed on this page.</li>
+                </ol>
+              </div>
+              <div>
+                <h3>Before you list an account</h3>
+                <ul>
+                  <li>Add the games that are on it, with their store price.</li>
+                  <li>Check the store region in Steam and set it here. The signup country is not proof of the store region.</li>
+                  <li>Set the stage to On sale when it is listed, and Sold when it sells, so it is never sold twice.</li>
+                </ul>
+              </div>
+            </div>
+          </details>
+        </div>
+      </section>
+    </main>
+
+    <div class="toast" id="toast" role="status"></div>
+
+    <script src="/theme.js"></script>
+    <script src="/admin-nav.js"></script>
+    <script src="/steam-accounts.js?v=20261101"></script>
+  </body>
+</html>

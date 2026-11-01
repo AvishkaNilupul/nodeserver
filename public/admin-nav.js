@@ -69,6 +69,11 @@
     epicAccounts:
       '<rect x="2" y="4" width="20" height="16" ' +
       'rx="2"></rect><path d="M2 10h20"></path><path d="M6 15h4"></path>',
+    steamAccounts:
+      '<circle cx="12" cy="12" r="10"></circle>' +
+      '<circle cx="15.5" cy="9.5" r="2.5"></circle>' +
+      '<circle cx="8.5" cy="15" r="1.8"></circle>' +
+      '<path d="M10.1 14.1l3.4-2.9"></path>',
     soop:
       '<circle cx="12" cy="12" r="10"></circle>' +
       '<polygon points="10 8 16 12 10 16 10 8"></polygon>',
@@ -278,6 +283,12 @@
           href: "/epic-accounts.html",
           label: "Epic accounts",
           icon: ICONS.epicAccounts,
+          superOnly: true,
+        },
+        {
+          href: "/steam-accounts.html",
+          label: "Steam accounts",
+          icon: ICONS.steamAccounts,
           superOnly: true,
         },
       ],
