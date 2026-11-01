@@ -58,6 +58,7 @@ let uploads; // [{offerId, csv}]
 let stock; // offerId -> active count
 let g2gOrders; // [{order, item}]
 let createCalls;
+let updateCalls;
 let failCreate;
 let failUpload;
 let rejectRows; // G2G answers the upload but its importer refuses the rows
@@ -71,11 +72,24 @@ const fakeMp = {
     createCalls.push(opts);
     if (failCreate) throw new Error(failCreate);
     const id = "G" + (1793000000000 + ++seq) + "AB";
-    g2gOffers.set(id, { offer_id: id, service_id: opts.serviceId, brand_id: opts.brandId, relation_id: opts.relationId, title: opts.title, delivery_speed: "instant" });
+    g2gOffers.set(id, {
+      offer_id: id,
+      service_id: opts.serviceId,
+      brand_id: opts.brandId,
+      relation_id: opts.relationId,
+      title: opts.title,
+      delivery_speed: "instant",
+      offer_attributes: opts.offerAttributes.map((a) => ({ ...a, value: String(a.value) })),
+    });
     return { offer: g2gOffers.get(id), offerId: id, url: "https://www.g2g.com/offer/" + id };
   },
   async g2gGetOwnOffer(id) {
     return g2gOffers.get(id);
+  },
+  async g2gUpdateOffer(id, fields) {
+    updateCalls.push({ id, fields });
+    if (fields.offerAttributes) g2gOffers.get(id).offer_attributes = fields.offerAttributes.map((a) => ({ ...a, value: String(a.value) }));
+    return { externalId: id };
   },
   async g2gUploadStock(offer, csv) {
     if (failUpload) throw new Error(failUpload);
@@ -184,6 +198,7 @@ test.beforeEach(async () => {
   stock = new Map();
   g2gOrders = [];
   createCalls = [];
+  updateCalls = [];
   failCreate = null;
   failUpload = null;
   rejectRows = false;
@@ -215,12 +230,19 @@ test("a country's G2G offer is created once, shaped like the live Epic Instant o
   assert.equal(c.relationId, g2g.RELATION);
   assert.equal(c.priceUsd, 1);
   assert.equal(c.minQty, 1);
-  assert.deepEqual(c.offerAttributes, [{ collection_id: "b7811700", dataset_id: "a5be43d2", value: "4 or below", is_subscription: false }]);
+  assert.deepEqual(c.offerAttributes, [
+    { collection_id: "b7811700", dataset_id: "a5be43d2", value: "4 or below", is_subscription: false },
+    { collection_id: "33e42e40", value: 0, is_subscription: false },
+    { collection_id: "294cea68", value: "Japan", is_subscription: false },
+  ]);
   assert.match(c.title, /^\[Steam\] Japan Region \| Fresh New Account/);
   assert.ok(c.title.length <= 128);
   assert.ok(c.description.includes(sales._internal.REGION_WARNING), "owner's warning in the G2G description");
   assert.equal(link.region, "JP");
   assert.equal(link.sessionDays, 14);
+  assert.equal(link.countrySet, true, "Steam Country set at creation");
+  await g2g.sweep();
+  assert.equal(updateCalls.length, 0, "nothing to fix on a new offer");
   const again = await g2g.createRegionOffer("JP", "tester");
   assert.equal(again.offerId, link.offerId);
   assert.equal(createCalls.length, 1, "never a second offer for the same country");
@@ -469,4 +491,26 @@ test("an offer G2G blocks with an old failed upload pages the owner with the fix
   failUpload = "G2G stock import failed (HTTP 409): Data already exists: Duplicated offer_id: " + link.offerId;
   await assert.rejects(g2g.loadAccounts(link, [String(b._id)]), /Upload more/);
   assert.equal((await SteamAccount.findById(b._id)).stage, "stock");
+});
+
+test("offers made before the Steam Country filter get it once, keeping their other attributes", async () => {
+  const link = await g2g.createRegionOffer("TR");
+  // As G2G held the first live offers: country blank, link not marked.
+  g2gOffers.get(link.offerId).offer_attributes = [
+    { collection_id: "b7811700", dataset_id: "a5be43d2", value: "4 or below", is_subscription: false },
+    { collection_id: "33e42e40", value: "0", is_subscription: false },
+    { collection_id: "294cea68", value: "", is_subscription: false },
+  ];
+  await SteamSalesState.updateOne({ _id: "main", "g2gOffers.offerId": link.offerId }, { $set: { "g2gOffers.$.countrySet": false } });
+  await g2g.sweep();
+  assert.equal(updateCalls.length, 1);
+  const attrs = g2gOffers.get(link.offerId).offer_attributes;
+  assert.equal(attrs.find((a) => a.collection_id === "294cea68").value, "Turkey", "plain English name buyers search");
+  assert.equal(attrs.find((a) => a.collection_id === "b7811700").dataset_id, "a5be43d2", "Games Owned kept");
+  assert.equal(attrs.find((a) => a.collection_id === "33e42e40").value, "0", "Steam Age kept");
+  assert.equal(attrs.length, 3);
+  const st = await SteamSalesState.findById("main").lean();
+  assert.equal(st.g2gOffers.find((l) => l.offerId === link.offerId).countrySet, true);
+  await g2g.sweep();
+  assert.equal(updateCalls.length, 1, "set once, never again");
 });

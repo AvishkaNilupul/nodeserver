@@ -43,6 +43,12 @@ const BRAND = "lgc_game_20647"; // Steam Accounts
 const RELATION = "5af4ff27-6f89-4f5f-97f9-f703e51cc4e4";
 // The brand's one required attribute. Empty accounts own no games.
 const GAMES_OWNED = Object.freeze({ collection_id: "b7811700", dataset_id: "a5be43d2", value: "4 or below", is_subscription: false });
+// Two optional free-value attributes buyers filter by: "Steam Age" (years) and
+// "Steam Country" (other sellers write plain English names: "Turkey" 35,
+// "Argentina" 29, "Global" 47 on 2026-11-01).
+const STEAM_AGE = "33e42e40";
+const STEAM_COUNTRY = "294cea68";
+const COUNTRY_LABEL = { TR: "Turkey", US: "United States", GB: "United Kingdom", KR: "South Korea", RU: "Russia", HK: "Hong Kong" };
 const DAY_MS = 24 * 60 * 60 * 1000;
 const DEFAULT_DAYS = 14;
 const DEFAULT_PRICE = 1;
@@ -184,6 +190,50 @@ function noteText(days) {
   ).slice(0, NOTE_MAX);
 }
 
+// The "Steam Country" value for a region: plain English, as buyers search it.
+function countryLabel(cc) {
+  const c = String(cc || "").toUpperCase();
+  return COUNTRY_LABEL[c] || plain(S.regionName(c)) || c;
+}
+
+function attributesFor(cc) {
+  return [
+    { ...GAMES_OWNED },
+    { collection_id: STEAM_AGE, value: 0, is_subscription: false },
+    { collection_id: STEAM_COUNTRY, value: countryLabel(cc), is_subscription: false },
+  ];
+}
+
+// The offer's attributes as G2G holds them, with Steam Country set to the
+// link's country (everything else kept as read).
+function withCountry(current, cc) {
+  const out = (current || []).filter((a) => a && a.collection_id !== STEAM_COUNTRY).map((a) => {
+    const x = { collection_id: a.collection_id, value: a.value, is_subscription: !!a.is_subscription };
+    if (a.dataset_id) x.dataset_id = a.dataset_id;
+    return x;
+  });
+  if (!out.some((a) => a.collection_id === GAMES_OWNED.collection_id)) out.unshift({ ...GAMES_OWNED });
+  out.push({ collection_id: STEAM_COUNTRY, value: countryLabel(cc), is_subscription: false });
+  return out;
+}
+
+// Once per link: fill in the "Steam Country" filter (offers made before it
+// was set, or whose value differs). Read back before calling it done.
+async function setCountry(link) {
+  if (link.countrySet) return false;
+  const offer = await deps.mp.g2gGetOwnOffer(link.offerId);
+  const want = countryLabel(link.region);
+  const have = ((offer && offer.offer_attributes) || []).find((a) => a && a.collection_id === STEAM_COUNTRY);
+  if (!have || String(have.value) !== want) {
+    await deps.mp.g2gUpdateOffer(link.offerId, { offerAttributes: withCountry(offer && offer.offer_attributes, link.region) });
+    const back = await deps.mp.g2gGetOwnOffer(link.offerId);
+    const now = ((back && back.offer_attributes) || []).find((a) => a && a.collection_id === STEAM_COUNTRY);
+    if (!now || String(now.value) !== want) throw new Error("G2G did not keep Steam Country = " + want);
+  }
+  await SteamSalesState.updateOne({ _id: "main", "g2gOffers.offerId": link.offerId }, { $set: { "g2gOffers.$.countrySet": true } });
+  return true;
+}
+
 // ---------------------------------------------------------------------------
 // Links (one offer per country)
 // ---------------------------------------------------------------------------
@@ -222,7 +272,7 @@ async function createRegionOffer(region, actor) {
       description: descriptionFor(cc, days),
       priceUsd: DEFAULT_PRICE,
       minQty: 1,
-      offerAttributes: [{ ...GAMES_OWNED }],
+      offerAttributes: attributesFor(cc),
       collectionTree: [GAMES_OWNED.collection_id],
     });
     const offer = r.offer || {};
@@ -244,6 +294,7 @@ async function createRegionOffer(region, actor) {
       enabled: true,
       createdAt: new Date(),
       createdBy: String(actor || ""),
+      countrySet: ((offer.offer_attributes || []).find((a) => a && a.collection_id === STEAM_COUNTRY) || {}).value === countryLabel(cc),
     };
     await SteamSalesState.updateOne({ _id: "main" }, { $push: { g2gOffers: row } }, { upsert: true });
     await deps.notify("🟢 G2G Steam offer created: " + row.title + " — $" + DEFAULT_PRICE.toFixed(2) + ", Instant.\nhttps://www.g2g.com/offer/" + r.offerId);
@@ -647,6 +698,11 @@ async function sweep() {
       } catch (e) {
         notes.push(link.region + ": stock check failed (" + ((e && e.message) || e) + ")");
       }
+      try {
+        if (await setCountry(link)) notes.push(link.region + ": Steam Country set");
+      } catch (e) {
+        notes.push(link.region + ": Steam Country not set (" + ((e && e.message) || e) + ")");
+      }
     }
   } finally {
     sweeping = false;
@@ -741,5 +797,5 @@ module.exports = {
     templateCache.value = null;
     paged.clear();
   },
-  _internal: { titleFor, descriptionFor, noteText, plain, saleIdFor, orderPlacedAt, NOTE_MAX },
+  _internal: { titleFor, descriptionFor, noteText, plain, saleIdFor, orderPlacedAt, NOTE_MAX, countryLabel, attributesFor, withCountry },
 };

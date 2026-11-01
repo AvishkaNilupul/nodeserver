@@ -3194,6 +3194,11 @@ async function g2gUpdateOffer(offerId, fields) {
   }
   if (f.status != null) body.status = String(f.status);
   if (f.minQty != null) body.min_qty = Math.max(1, Number(f.minQty) || 1);
+  // The COMPLETE attribute list (G2G replaces it): utils/steamG2g sets the
+  // "Steam Country" filter this way, keeping the other attributes as read.
+  if (Array.isArray(f.offerAttributes) && f.offerAttributes.length) {
+    body.offer_attributes = f.offerAttributes;
+  }
   if (!Object.keys(body).length) {
     throw new Error("G2G update: nothing to change");
   }

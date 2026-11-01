@@ -33,6 +33,7 @@ const steamSalesStateSchema = new mongoose.Schema(
         lastStockSyncAt: { type: Date, default: null },
         lastSaleScanAt: { type: Date, default: null },
         lastError: { type: String, default: "" },
+        countrySet: { type: Boolean, default: false }, // G2G "Steam Country" filter filled in
       },
     ],
     g2gLastSweepAt: { type: Date, default: null },
