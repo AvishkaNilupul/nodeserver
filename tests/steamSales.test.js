@@ -68,6 +68,9 @@ const fakeEld = {
     const o = offers.get(id);
     o.entries = opts.entries.map((e) => ({ ...e, id: e.id || "e" + ++seq }));
     o.section = opts.section;
+    o.title = opts.title;
+    o.description = opts.description;
+    o.price = opts.priceUsd;
     return true;
   },
   async pauseAccountOffer(id) {
@@ -396,4 +399,33 @@ test("an account on a live listing can't change stage by hand", async () => {
   } finally {
     await new Promise((r) => server.close(r));
   }
+});
+
+test("the owner's region warning is in every description, and a live offer's text can be refreshed with its stock intact", async () => {
+  const { REGION_WARNING, suggestDescription } = sales._internal;
+  assert.match(REGION_WARNING, /at least 1 month/);
+  assert.ok(suggestDescription("TR", 7).includes(REGION_WARNING));
+  assert.ok(suggestDescription("TR", 7).length <= 2000);
+
+  await account("tr_a", "TR");
+  await account("tr_b", "TR");
+  const l = await sales.createListing({ region: "TR" });
+  const offerId = l.url.split("/oa/")[1];
+  const before = offers.get(offerId).entries.map((e) => ({ id: e.id, login: e.accountLogin, pw: e.accountPassword, mail: e.emailPassword }));
+  offers.get(offerId).description = "old text without the warning";
+
+  const v = await sales.refreshDescription(l._id);
+  assert.equal(v.status, "active");
+  const after = offers.get(offerId);
+  assert.ok(after.description.includes(REGION_WARNING), "Eldorado got the new description");
+  assert.equal(after.title, l.title, "title kept");
+  assert.equal(after.section.gameId, "42", "still filed under Steam › Accounts");
+  assert.deepEqual(
+    after.entries.map((e) => ({ id: e.id, login: e.accountLogin, pw: e.accountPassword, mail: e.emailPassword })),
+    before,
+    "every stock entry written back unchanged (same ids, logins, passwords)",
+  );
+  assert.ok((await SteamListing.findById(l._id)).description.includes(REGION_WARNING));
+  await assert.rejects(sales.updateText(l._id, {}), /Nothing to change/);
+  await assert.rejects(sales.updateText(l._id, { description: "x".repeat(2001) }), /2000/);
 });

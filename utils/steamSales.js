@@ -283,11 +283,20 @@ function suggestTitle(region) {
   return ("Steam Account | " + regionName(region) + " Region | Fresh New | Email Codes Included | Instant Delivery").slice(0, 160);
 }
 
+// The owner's warning (2026-11-01), word for word, near the top of every
+// description: buying in the first month from another region gets the
+// account blocked by Steam.
+const REGION_WARNING =
+  "❗Account's regions on our accounts will differ from yours. Do not buy anything on the Steam Store for at least 1 month " +
+  "after getting it from us. If you buy something without waiting 1 month, Steam will block the account.";
+
 function suggestDescription(region, days) {
   const name = regionName(region);
   const d = Math.max(1, Number(days) || DEFAULTS.sessionDays);
   return [
     "Fresh, new Steam account made in " + name + " (" + region + "). No games on it.",
+    "",
+    REGION_WARNING,
     "",
     "Region: " + name + ". The account was created in " + name + ", so its Steam store region is " + name +
       ". Steam keeps that store region until the account buys something with a payment method from another country.",
@@ -752,6 +761,46 @@ async function removeAccount(listingId, accountId, actor) {
   });
 }
 
+// Change the offer's title and/or description. The stock is written back in
+// full (Eldorado's edit takes the whole offer), from a complete read only.
+async function updateText(listingId, { title, description } = {}) {
+  return withLock(async () => {
+    const listing = await loadListing(listingId);
+    requireLive(listing);
+    const patch = {};
+    if (title != null) {
+      const t = String(title).trim();
+      if (t.length < 5 || t.length > 160) throw userError("The title needs 5 to 160 characters");
+      patch.title = t;
+    }
+    if (description != null) {
+      const d = String(description);
+      if (d.length > 2000) throw userError("The description can be up to 2000 characters");
+      patch.description = d;
+    }
+    if (!Object.keys(patch).length) throw userError("Nothing to change");
+    const cfg = await getConfig();
+    const remote = await deps.eld.getAccountEntries(listing.externalId);
+    const offer = await deps.eld.getAccountOffer(listing.externalId);
+    const entries = await rebuildEntries(listing, remote, cfg, { offer });
+    if (!entries.length) throw userError("The offer has no stock left to keep");
+    await deps.eld.updateAccountOffer(listing.externalId, { ...offerFields(listing, offer, patch), entries });
+    if (patch.title) listing.title = patch.title;
+    if (patch.description != null) listing.description = patch.description;
+    await readBack(listing).catch(() => {});
+    await listing.save();
+    return listingView(listing.toObject());
+  });
+}
+
+// Rewrite a live listing's description from the current template (its own
+// region and the mail page window), keeping the title.
+async function refreshDescription(listingId) {
+  const listing = await loadListing(listingId);
+  const cfg = await getConfig();
+  return updateText(listingId, { description: suggestDescription(listing.region, cfg.sessionDays) });
+}
+
 async function setPrice(listingId, priceUsd) {
   return withLock(async () => {
     const listing = await loadListing(listingId);
@@ -1207,6 +1256,8 @@ module.exports = {
   createListing,
   addAccounts,
   removeAccount,
+  updateText,
+  refreshDescription,
   setPrice,
   pauseListing,
   resumeListing,
@@ -1220,5 +1271,5 @@ module.exports = {
     Object.assign(deps, over || {});
     inboxCache.clear();
   },
-  _internal: { suggestTitle, suggestDescription, additionalInfoText, entryFor, blockersOf, coverFor, regionName, stockReadable },
+  _internal: { REGION_WARNING, suggestTitle, suggestDescription, additionalInfoText, entryFor, blockersOf, coverFor, regionName, stockReadable },
 };
