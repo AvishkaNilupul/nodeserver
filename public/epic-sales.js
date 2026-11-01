@@ -7,10 +7,22 @@
   const esc = (s) =>
     String(s == null ? "" : s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
   let panel = null;
-  let tabBtn = null;
   let data = null;
   let refreshTimer = null;
   let loading = false;
+  // Which sub-section shows (docs/EPIC-PAGE-UI.md), and the list views inside them.
+  const SECTIONS = [
+    ["onsale", "On sale"],
+    ["sales", "Sales"],
+    ["ready", "Ready to list"],
+    ["dist", "Auto-distribute"],
+    ["stock", "All accounts"],
+    ["settings", "Settings"],
+  ];
+  let section = "onsale";
+  const view = { salesMarket: "all", salesLimit: 20, stockFilter: "all", stockQ: "", stockLimit: 25, planAll: false };
+  // Open/closed choices for folded blocks, so the 60 s refresh keeps them as they were.
+  const folds = new Map();
 
   async function api(url, opts) {
     const r = await fetch(url, {
@@ -57,123 +69,229 @@
   function money(n) {
     return n == null || !Number.isFinite(Number(n)) ? "—" : "$" + Number(n).toFixed(2);
   }
+  // Status badge from the page kit; the old tone names map onto its tones.
+  const TONES = { green: "is-ok", red: "is-error", amber: "is-warn" };
   function pill(text, tone) {
-    return '<span class="es-pill' + (tone ? " " + tone : "") + '">' + esc(text) + "</span>";
+    return '<span class="ep-badge' + (tone ? " " + (TONES[tone] || "is-" + tone) : "") + '">' + esc(text) + "</span>";
   }
+  function plural(n, one, many) {
+    return n + " " + (n === 1 ? one : many || one + "s");
+  }
+  // A folded block whose open state survives re-renders. key must be unique on the panel.
+  function fold(key, summary, body, openByDefault) {
+    const open = folds.has(key) ? folds.get(key) : !!openByDefault;
+    return '<details class="es-fold" data-fold="' + esc(key) + '"' + (open ? " open" : "") + "><summary>" + summary + "</summary>" + body + "</details>";
+  }
+  function bindFolds(root) {
+    root.querySelectorAll("details[data-fold]").forEach((d) =>
+      d.addEventListener("toggle", () => folds.set(d.dataset.fold, d.open)),
+    );
+  }
+  function help(text) {
+    return '<details class="ep-help"><summary>How this works</summary><p>' + text + "</p></details>";
+  }
+  function more(kind, shown, total, step) {
+    if (total <= shown) return "";
+    return (
+      '<div class="ep-more"><span>Showing ' + shown + " of " + total + '</span><button type="button" class="btn btn-sm" data-es-more="' +
+      kind + '">Show ' + Math.min(step, total - shown) + " more</button></div>"
+    );
+  }
+  const SEARCH_ICON =
+    '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><circle cx="11" cy="11" r="7"></circle><path d="m20 20-3.5-3.5"></path></svg>';
 
-  // ---- tab wiring ---------------------------------------------------------
+  // ---- panel, sub-sections, loading ------------------------------------------
+  // The panel root is static in epic-accounts.html; epic-tabs.js shows/hides it.
   function init() {
-    const main = document.querySelector("main");
-    if (!main || $("epic-sales-panel")) return;
-    let tabs = document.querySelector(".epic-tabs");
-    if (!tabs) {
-      tabs = document.createElement("div");
-      tabs.className = "epic-tabs";
-      tabs.setAttribute("role", "tablist");
-      main.insertBefore(tabs, main.querySelector(".card"));
-    }
-    tabBtn = document.createElement("button");
-    tabBtn.className = "btn";
-    tabBtn.id = "epic-sales-tab";
-    tabBtn.type = "button";
-    tabBtn.setAttribute("role", "tab");
-    tabBtn.setAttribute("aria-controls", "epic-sales-panel");
-    tabBtn.setAttribute("aria-selected", "false");
-    tabBtn.tabIndex = -1;
-    tabBtn.textContent = "Listings & sales";
-    tabs.append(tabBtn);
-
-    panel = document.createElement("section");
-    panel.id = "epic-sales-panel";
-    panel.setAttribute("role", "tabpanel");
-    panel.setAttribute("aria-labelledby", "epic-sales-tab");
-    panel.hidden = true;
+    panel = $("epic-sales-panel");
+    if (!panel || panel.dataset.ready) return;
+    panel.dataset.ready = "1";
     panel.innerHTML = `
-      <div class="card">
-        <h2>Listings &amp; sales</h2>
-        <p class="hint">Epic accounts on Eldorado, G2G and PlayerAuctions with instant delivery. When a buyer pays, the marketplace shows them the Epic login and a login for our mail page. The mail page shows only the emails Epic sends to that account, from the purchase on, for the number of days set below. It closes early when the buyer changes the account's email.</p>
-        <div class="es-grid" id="es-health"><div class="muted">Loading…</div></div>
-        <div class="es-settings" id="es-settings"></div>
-        <div class="row" style="margin-top:12px">
-          <button class="btn" type="button" id="es-refresh">Refresh</button>
-          <button class="btn" type="button" id="es-sync">Check Eldorado now</button>
+      <div class="ep-card">
+        <div class="ep-card-hd">
+          <h2 class="ep-card-title">Selling status</h2>
+          <span class="ep-card-meta" id="es-updated"></span>
+          <div class="ep-card-actions">
+            <button class="btn btn-sm" type="button" id="es-sync">Check Eldorado now</button>
+            <button class="btn btn-sm" type="button" id="es-refresh">Refresh</button>
+          </div>
+        </div>
+        <div class="ep-card-bd es-status-bd">
+          <div class="es-health" id="es-health"><div class="muted">Loading…</div></div>
+          ${help("Epic accounts on Eldorado, G2G and PlayerAuctions with instant delivery. When a buyer pays, the marketplace shows them the Epic login and a login for our mail page. The mail page shows only the emails Epic sends to that account, from the purchase on, for the number of days set in Settings. It closes early when the buyer changes the account's email.")}
         </div>
       </div>
-      <div class="card" id="es-dist-card"><h2>Auto-distribute new accounts</h2><p class="hint">Every 10 minutes this decides where each new sellable account goes: PlayerAuctions first (highest price), then an existing Eldorado listing for the same games, then G2G, each up to the limit you set. The rest waits in reserve and fills the next free slot. Accounts you added by hand are never listed automatically, and accounts with no games yet (or a game that is still free on Epic) wait.</p><div id="es-dist"><div class="muted">Loading…</div></div></div>
-      <div class="card"><h2>Ready to list</h2><p class="hint">Accounts that can go on sale now, grouped by the games they own. An account sits on one listing at a time, so it can never be sold twice.</p><div id="es-groups"></div></div>
-      <div class="card"><h2>G2G (automatic delivery)</h2><p class="hint">G2G offers you made on g2g.com and linked here. When a buyer pays, the server picks a ready account that owns the offer's games, opens its mail page, and fills G2G's account form on the order page (the way G2G wants accounts delivered, never the chat). If it can't, Telegram tells you what to do.</p><div id="es-g2g"></div></div>
-      <div class="card"><h2>PlayerAuctions (instant delivery)</h2><p class="hint">One Epic account per native Account offer. Minimum $5, with 14-day buyer mail access and after-sale protection. Uses newly stocked accounts; accounts already in G2G stock stay there. Original-owner contact details are required by PlayerAuctions.</p><div id="es-pa"></div></div>
-      <div class="card"><h2>Listings</h2><div id="es-listings"></div></div>
-      <div class="card"><h2>Sales</h2><div id="es-sales"></div></div>
-      <div class="card"><h2>All accounts</h2><p class="hint">Why each account can or can't be sold right now.</p><div id="es-stock"></div></div>
-      <div class="card" id="es-others-card" hidden><h2>Other Epic offers on your Eldorado account</h2><p class="hint">Epic account offers this page didn't create. They are not tracked here.</p><div id="es-others"></div></div>`;
-    main.append(panel);
+      <div class="ep-subnav" role="tablist" aria-label="Listings and sales sections">
+        ${SECTIONS.map(([k, t]) => '<button type="button" class="ep-subtab" role="tab" data-es-tab="' + k + '" aria-selected="false" tabindex="-1">' + t + ' <span class="ep-count" hidden></span></button>').join("")}
+      </div>
+      <div class="es-section" data-es-section="onsale" hidden>
+        <div class="ep-card">
+          <div class="ep-card-hd"><h2 class="ep-card-title">Eldorado</h2><span class="ep-card-meta" id="es-eld-meta"></span></div>
+          <div class="ep-card-bd">
+            <div id="es-listings"></div>
+            <div id="es-others-card" class="es-others" hidden>
+              <h3>Other Epic offers on your Eldorado account</h3>
+              <p class="hint">Epic account offers this page didn't create. They are not tracked here.</p>
+              <div id="es-others"></div>
+            </div>
+          </div>
+        </div>
+        <div class="ep-card">
+          <div class="ep-card-hd"><h2 class="ep-card-title">G2G</h2><span class="ep-card-meta" id="es-g2g-meta"></span></div>
+          <div class="ep-card-bd">${help("G2G offers you made on g2g.com and linked here. When a buyer pays, the server picks a ready account that owns the offer's games, opens its mail page, and fills G2G's account form on the order page (the way G2G wants accounts delivered, never the chat). If it can't, Telegram tells you what to do.")}<div id="es-g2g"></div></div>
+        </div>
+        <div class="ep-card">
+          <div class="ep-card-hd">
+            <h2 class="ep-card-title">PlayerAuctions</h2><span class="ep-card-meta" id="es-pa-meta"></span>
+            <div class="ep-card-actions"><button class="btn btn-sm" type="button" id="es-pa-check">Check PlayerAuctions sales</button></div>
+          </div>
+          <div class="ep-card-bd">${help("One Epic account per native Account offer. Minimum $5, with 14-day buyer mail access and after-sale protection. Uses newly stocked accounts; accounts already in G2G stock stay there. Original-owner contact details are required by PlayerAuctions.")}<div id="es-pa"></div></div>
+        </div>
+      </div>
+      <div class="es-section" data-es-section="sales" hidden>
+        <div class="ep-card">
+          <div class="ep-card-hd"><h2 class="ep-card-title">Sales</h2><span class="ep-card-meta" id="es-sales-meta"></span></div>
+          <div class="ep-card-bd"><div class="ep-toolbar es-toolbar"><div class="ep-chips" id="es-sales-chips" role="group" aria-label="Market"></div></div><div id="es-sales"></div></div>
+        </div>
+      </div>
+      <div class="es-section" data-es-section="ready" hidden>
+        <div class="ep-card">
+          <div class="ep-card-hd"><h2 class="ep-card-title">Ready to list</h2><span class="ep-card-meta" id="es-ready-meta"></span></div>
+          <div class="ep-card-bd"><p class="hint">Accounts that can go on sale now, grouped by the games they own. An account sits on one listing at a time, so it can never be sold twice.</p><div id="es-groups"></div></div>
+        </div>
+      </div>
+      <div class="es-section" data-es-section="dist" hidden>
+        <div class="ep-card" id="es-dist-card">
+          <div class="ep-card-hd"><h2 class="ep-card-title">Auto-distribute new accounts</h2><span class="ep-card-meta" id="es-dist-meta"></span></div>
+          <div class="ep-card-bd">${help("Every 10 minutes this decides where each new sellable account goes: PlayerAuctions first (highest price), then an existing Eldorado listing for the same games, then G2G, each up to the limit you set. The rest waits in reserve and fills the next free slot. Accounts you added by hand are never listed automatically, and accounts with no games yet (or a game that is still free on Epic) wait.")}<div id="es-dist"><div class="muted">Loading…</div></div></div>
+        </div>
+      </div>
+      <div class="es-section" data-es-section="stock" hidden>
+        <div class="ep-card">
+          <div class="ep-card-hd"><h2 class="ep-card-title">All accounts</h2><span class="ep-card-meta">Why each account can or can't be sold right now.</span></div>
+          <div class="ep-card-bd">
+            <div class="ep-toolbar es-toolbar">
+              <label class="ep-search">${SEARCH_ICON}<input type="search" id="es-stock-q" placeholder="Search accounts or games" aria-label="Search accounts or games" autocomplete="off" /></label>
+              <div class="ep-chips" id="es-stock-chips" role="group" aria-label="Show"></div>
+            </div>
+            <div id="es-stock"></div>
+          </div>
+        </div>
+      </div>
+      <div class="es-section" data-es-section="settings" hidden>
+        <div class="ep-card">
+          <div class="ep-card-hd"><h2 class="ep-card-title">Settings</h2></div>
+          <div class="ep-card-bd"><div class="es-settings" id="es-settings"></div></div>
+        </div>
+      </div>`;
     buildModals();
 
-    tabBtn.addEventListener("click", () => show(true));
     $("es-refresh").addEventListener("click", () => load(true));
     $("es-sync").addEventListener("click", syncNow);
+    $("es-pa-check").addEventListener("click", paCheck);
+    const nav = panel.querySelector(".ep-subnav");
+    nav.addEventListener("click", (e) => {
+      const b = e.target.closest("[data-es-tab]");
+      if (b) pick(b.dataset.esTab, true);
+    });
+    nav.addEventListener("keydown", (e) => {
+      const keys = SECTIONS.map((s) => s[0]);
+      const i = keys.indexOf(section);
+      const next = { ArrowRight: keys[(i + 1) % keys.length], ArrowLeft: keys[(i + keys.length - 1) % keys.length], Home: keys[0], End: keys[keys.length - 1] }[e.key];
+      if (!next) return;
+      e.preventDefault();
+      pick(next, true);
+      nav.querySelector('[data-es-tab="' + next + '"]').focus();
+    });
+    $("es-sales-chips").addEventListener("click", (e) => {
+      const b = e.target.closest("[data-market]");
+      if (!b) return;
+      view.salesMarket = b.dataset.market;
+      view.salesLimit = 20;
+      renderSales();
+    });
+    $("es-stock-chips").addEventListener("click", (e) => {
+      const b = e.target.closest("[data-stock]");
+      if (!b) return;
+      view.stockFilter = b.dataset.stock;
+      view.stockLimit = 25;
+      renderStock();
+    });
+    let typing = null;
+    $("es-stock-q").addEventListener("input", (e) => {
+      clearTimeout(typing);
+      typing = setTimeout(() => {
+        view.stockQ = e.target.value;
+        view.stockLimit = 25;
+        renderStock();
+      }, 150);
+    });
+    panel.addEventListener("click", (e) => {
+      const b = e.target.closest("[data-es-more]");
+      if (!b) return;
+      if (b.dataset.esMore === "sales") (view.salesLimit += 20), renderSales();
+      if (b.dataset.esMore === "stock") (view.stockLimit += 25), renderStock();
+    });
 
-    // The other two tabs belong to epic-account-details.js. Whenever one of
-    // their panels shows, this one hides.
-    const others = ["epic-claims-panel", "epic-details-panel"].map($).filter(Boolean);
-    const mo = new MutationObserver(() => {
-      if (!panel.hidden && others.some((p) => !p.hidden)) show(false);
-    });
-    others.forEach((p) => mo.observe(p, { attributes: true, attributeFilter: ["hidden"] }));
-    ["epic-claims-tab", "epic-details-tab"].forEach((id) => {
-      const b = $(id);
-      if (b) b.addEventListener("click", () => panel.hidden || show(false));
-    });
-    if (new URLSearchParams(location.search).get("tab") === "sales") show(true);
+    EpicTabs.on("sales", { show, hide });
   }
 
-  function show(on) {
-    if (!panel) return;
-    if (on) {
-      ["epic-claims-panel", "epic-details-panel"].forEach((id) => {
-        const p = $(id);
-        if (p) p.hidden = true;
-      });
-      ["epic-claims-tab", "epic-details-tab"].forEach((id) => {
-        const b = $(id);
-        if (!b) return;
-        b.setAttribute("aria-selected", "false");
-        b.classList.remove("btn-primary");
-        b.tabIndex = -1;
-      });
-      panel.hidden = false;
-      tabBtn.setAttribute("aria-selected", "true");
-      tabBtn.classList.add("btn-primary");
-      tabBtn.tabIndex = 0;
-      history.replaceState(null, "", location.pathname + "?tab=sales");
-      load();
-      clearInterval(refreshTimer);
-      refreshTimer = setInterval(() => {
-        if (!document.hidden && !document.querySelector(".es-modal.show")) load();
-      }, 60000);
-    } else {
-      panel.hidden = true;
-      tabBtn.setAttribute("aria-selected", "false");
-      tabBtn.classList.remove("btn-primary");
-      tabBtn.tabIndex = -1;
-      clearInterval(refreshTimer);
-      if (location.search) history.replaceState(null, "", location.pathname + location.hash);
+  // Data loads only while this tab shows. The 60 s refresh skips Eldorado's own
+  // offer list (?others=0) and keeps the last one; Refresh and actions read it all.
+  function show() {
+    const arg = EpicTabs.arg();
+    let want = arg;
+    if (!SECTIONS.some((s) => s[0] === want)) {
+      try {
+        want = localStorage.getItem("epic.sales.section") || "";
+      } catch (e) {
+        want = "";
+      }
+    }
+    pick(SECTIONS.some((s) => s[0] === want) ? want : "onsale", false);
+    load();
+    clearInterval(refreshTimer);
+    refreshTimer = setInterval(() => {
+      if (!document.hidden && !document.querySelector(".es-modal.show")) load(false, true);
+    }, 60000);
+  }
+  function hide() {
+    clearInterval(refreshTimer);
+    refreshTimer = null;
+  }
+
+  function pick(name, remember) {
+    section = name;
+    panel.querySelectorAll("[data-es-section]").forEach((s) => (s.hidden = s.dataset.esSection !== name));
+    panel.querySelectorAll("[data-es-tab]").forEach((b) => {
+      const on = b.dataset.esTab === name;
+      b.classList.toggle("is-active", on);
+      b.setAttribute("aria-selected", String(on));
+      b.tabIndex = on ? 0 : -1;
+    });
+    if (EpicTabs.current() === "sales") EpicTabs.setArg("/" + name);
+    if (remember) {
+      try {
+        localStorage.setItem("epic.sales.section", name);
+      } catch (e) {}
     }
   }
 
   // ---- data ---------------------------------------------------------------
-  async function load(loud) {
+  async function load(loud, light) {
     if (loading) return;
     loading = true;
+    light = !!(light && data);
     try {
       const [j, d] = await Promise.all([
-        api("/api/epic/sales/overview"),
+        api("/api/epic/sales/overview" + (light ? "?others=0" : "")),
         api("/api/epic/sales/distributor").catch((e) => ({ distributor: { error: e.message } })),
       ]);
+      if (light) j.others = data.others;
       data = j;
       data.distributor = d.distributor;
       render();
+      $("es-updated").textContent = "Updated " + new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
       if (loud) say("Updated.");
     } catch (e) {
       $("es-health").innerHTML = '<div class="es-err">Failed to load: ' + esc(e.message) + "</div>";
@@ -210,6 +328,39 @@
     renderSales();
     renderStock();
     renderOthers();
+    renderCounts();
+    bindFolds(panel);
+  }
+
+  function stockCounts() {
+    const c = { ready: 0, listed: 0, sold: 0, blocked: 0 };
+    for (const s of data.stock || []) c[s.state] = (c[s.state] || 0) + 1;
+    return c;
+  }
+  function setCount(name, text, tone) {
+    const el = panel.querySelector('[data-es-tab="' + name + '"] .ep-count');
+    if (!el) return;
+    el.textContent = text == null ? "" : String(text);
+    el.className = "ep-count" + (tone ? " is-" + tone : "");
+    el.hidden = !el.textContent;
+  }
+  // Sub-tab counts, and the main tab's badge: "!" when something buyers depend on
+  // is broken (Mac mail proxy, sale tracking, an Eldorado login about to expire).
+  function renderCounts() {
+    const c = stockCounts();
+    const sales = data.sales || [];
+    setCount("onsale", c.listed || "");
+    setCount("sales", sales.length || "", sales.some((s) => s.needsAttention) ? "error" : "");
+    setCount("ready", c.ready || "", c.ready ? "ok" : "");
+    const mode = ((data.distributor || {}).config || {}).mode;
+    setCount("dist", { off: "Off", plan: "Plan", on: "On" }[mode] || "", mode === "on" ? "ok" : mode === "plan" ? "accent" : "");
+    setCount("stock", (data.stock || []).length || "", c.blocked ? "warn" : "");
+    const h = data.health || {};
+    const el = h.eldorado || {};
+    const sy = h.sync || {};
+    const left = el.expiresAt ? new Date(el.expiresAt).getTime() - Date.now() : Infinity;
+    const broken = !(h.proxy || {}).ok || (sy.enabled && sy.lastTickOk === false) || left < 3 * 864e5;
+    EpicTabs.badge("sales", broken ? "!" : c.listed || "", broken ? "error" : "");
   }
 
   // ---- Auto-distribute card (utils/epicDistributor) ------------------------
@@ -253,8 +404,9 @@
       ' <span class="muted">Runs every ' + esc(d.runEveryMin || 10) + " min.</span></div>" +
       '<div class="row es-actions" style="margin:10px 0"><button class="btn" id="es-dist-preview" type="button">Preview now</button>' +
       (c.mode === "on" ? '<button class="btn btn-primary" id="es-dist-run" type="button">Run now</button>' : "") + "</div>" +
+      '<div class="ep-cols es-dist-cols"><div><h3>Markets</h3>' +
       distMarkets(d.markets) +
-      '<h3>Limits</h3><form id="es-dist-cfg" class="es-dist-form">' +
+      '</div><div><h3>Limits</h3><form id="es-dist-cfg" class="es-dist-form">' +
       '<fieldset><legend>PlayerAuctions</legend><label class="es-switch"><input type="checkbox" name="paOn"' + (c.pa && c.pa.enabled ? " checked" : "") + "> Use</label>" +
       '<label>Offers live at once <input name="paMax" type="number" min="0" max="50" step="1" value="' + esc(c.pa && c.pa.maxLive) + '"></label>' +
       '<label>Price (USD, min 5) <input name="paPrice" type="number" min="5" max="500" step="0.01" value="' + esc(c.pa && c.pa.priceUsd) + '"></label></fieldset>' +
@@ -263,7 +415,7 @@
       '<fieldset><legend>G2G</legend><label class="es-switch"><input type="checkbox" name="g2gOn"' + (c.g2g && c.g2g.enabled ? " checked" : "") + "> Use</label>" +
       '<label>Stock per offer <input name="g2gMax" type="number" min="0" max="200" step="1" value="' + esc(c.g2g && c.g2g.maxStock) + '"></label></fieldset>' +
       '<label class="es-switch"><input type="checkbox" name="holdFree"' + (c.holdWhileFree ? " checked" : "") + "> Wait while a game is still free on Epic</label>" +
-      '<div><button class="btn" type="submit">Save limits</button></div></form>' +
+      '<div><button class="btn" type="submit">Save limits</button></div></form></div></div>' +
       distOwner(d.owner) +
       "<h3>Plan</h3>" +
       (plan.length
@@ -272,8 +424,8 @@
             .map(([k, t]) => count(k) + " " + t)
             .join(" · ") +
           "</p>" +
-          '<div class="es-table-wrap"><table class="es-table"><thead><tr><th>Account</th><th>Games</th><th>Goes to</th><th>Why</th></tr></thead><tbody>' +
-          plan
+          '<div class="ep-table-wrap"><table class="ep-table es-table"><thead><tr><th>Account</th><th>Games</th><th>Goes to</th><th>Why</th></tr></thead><tbody>' +
+          (view.planAll ? plan : plan.slice(0, 10))
             .map(
               (r) =>
                 '<tr><td data-label="Account"><b>' + esc(r.label) + "</b></td>" +
@@ -282,8 +434,18 @@
                 '<td data-label="Why" class="muted">' + esc(r.reason) + "</td></tr>",
             )
             .join("") +
-          "</tbody></table></div>"
+          "</tbody></table></div>" +
+          (!view.planAll && plan.length > 10
+            ? '<div class="ep-more"><span>Showing 10 of ' + plan.length + '</span><button type="button" class="btn btn-sm" id="es-dist-plan-all">Show all ' + plan.length + "</button></div>"
+            : "")
         : '<p class="muted">No plan yet. Press Preview now.</p>');
+    const metaMode = { off: ["Off", ""], plan: ["Plan only", "accent"], on: ["On", "ok"] }[c.mode] || [c.mode || "?", ""];
+    $("es-dist-meta").innerHTML = pill(metaMode[0], metaMode[1]) + " · last run " + esc(ago(lr.at));
+    if ($("es-dist-plan-all"))
+      $("es-dist-plan-all").onclick = () => {
+        view.planAll = true;
+        renderDist(true);
+      };
 
     root.querySelectorAll("[data-dist-mode]").forEach((b) => {
       b.onclick = async () => {
@@ -356,7 +518,7 @@
       ]);
     }
     return (
-      '<div class="es-table-wrap"><table class="es-table"><thead><tr><th>Market</th><th>Price</th><th>In use</th><th>Status</th></tr></thead><tbody>' +
+      '<div class="ep-table-wrap"><table class="ep-table es-table"><thead><tr><th>Market</th><th>Price</th><th>In use</th><th>Status</th></tr></thead><tbody>' +
       rows
         .map((r) => '<tr><td data-label="Market"><b>' + r[0] + '</b></td><td data-label="Price">' + esc(r[1]) + '</td><td data-label="In use">' + r[2] + '</td><td data-label="Status">' + r[3] + "</td></tr>")
         .join("") +
@@ -418,25 +580,39 @@
     }
   }
 
+  async function paCheck(event) {
+    const b = event.currentTarget;
+    b.disabled = true;
+    try {
+      const j = await post("/api/epic/sales/playerauctions/sync");
+      say("Checked " + (j.result.checked || 0) + " account order(s).");
+      await load();
+    } catch (e) {
+      say(e.message, true);
+    } finally {
+      b.disabled = false;
+    }
+  }
+
   function renderPa() {
     const root = $("es-pa");
     if (!root) return;
     const ready = (data.stock || []).filter(a => a.state === "ready" && a.games?.length);
     const units = data.playerauctions?.units || [];
-    root.innerHTML = '<div class="row"><button class="btn" id="es-pa-check">Check PlayerAuctions sales</button></div>' +
-      (ready.length ? '<h3>Ready accounts</h3>' + ready.map(a => '<div class="es-meta">' + esc(a.label) + ' - ' + esc(a.games.join(", ")) +
-        ' <button class="btn btn-sm" data-pa-list="' + esc(a._id) + '">Sell on PlayerAuctions</button></div>').join("") :
-        '<p class="muted">No unlisted accounts with games are ready. Empty accounts appear here after games are claimed and their libraries are synced.</p>') +
-      (units.length ? '<h3>PlayerAuctions offers</h3>' + units.map(u => '<div class="es-meta">' + pill(u.state, u.state === "error" ? "red" : "") + ' ' +
-        (u.url ? '<a href="' + esc(u.url) + '" target="_blank" rel="noopener">' + esc(u.title) + '</a>' : esc(u.title)) + ' - ' + money(u.priceUsd) +
-        (u.note ? '<div class="es-err">' + esc(u.note) + '</div>' : '') +
-        (["listed", "paused"].includes(u.state) ? ' <button class="btn btn-sm" data-pa-pause="' + esc(u.id) + '" data-pa-paused="' + (u.state !== "paused") + '">' + (u.state === "paused" ? "Resume" : "Pause") + '</button>' : '') +
-        (u.state === "error" || u.state === "loading" ? '<form class="row" data-pa-reconcile="' + esc(u.id) + '"><label>Existing PA offer ID <input name="offerId" inputmode="numeric" pattern="[0-9]+" required></label><button class="btn" type="submit">Verify and link</button></form>' : '') + '</div>').join("") : '<p class="muted">No Epic accounts published on PlayerAuctions yet.</p>');
-    $("es-pa-check").onclick = async event => {
-      const b = event.currentTarget; b.disabled = true;
-      try { const j = await post("/api/epic/sales/playerauctions/sync"); say("Checked " + (j.result.checked || 0) + " account order(s)."); await load(); }
-      catch (e) { say(e.message, true); } finally { b.disabled = false; }
-    };
+    const live = units.filter(u => ["listed", "paused", "loading"].includes(u.state)).length;
+    $("es-pa-meta").textContent = plural(units.length, "offer") + (live !== units.length ? " · " + live + " live" : "") + " · " + ready.length + " ready";
+    const offers = units.length
+      ? '<ul class="es-units es-pa-units">' + units.map(u => '<li><span>' + pill(u.state, u.state === "error" ? "red" : u.state === "listed" ? "green" : "") + ' ' +
+          (u.url ? '<a href="' + esc(u.url) + '" target="_blank" rel="noopener">' + esc(u.title) + '</a>' : esc(u.title)) + ' <span class="muted">' + money(u.priceUsd) + '</span>' +
+          (u.note ? '<div class="es-err">' + esc(u.note) + '</div>' : '') + '</span>' +
+          (["listed", "paused"].includes(u.state) ? '<button class="btn btn-sm" data-pa-pause="' + esc(u.id) + '" data-pa-paused="' + (u.state !== "paused") + '">' + (u.state === "paused" ? "Resume" : "Pause") + '</button>' : '') +
+          (u.state === "error" || u.state === "loading" ? '<form class="row es-pa-link" data-pa-reconcile="' + esc(u.id) + '"><label>Existing PA offer ID <input name="offerId" inputmode="numeric" pattern="[0-9]+" required></label><button class="btn btn-sm" type="submit">Verify and link</button></form>' : '') + '</li>').join("") + '</ul>'
+      : '<div class="ep-empty"><b>No PlayerAuctions offers yet</b><span>Sell a ready account below, or let Auto-distribute do it.</span></div>';
+    const readyList = ready.length
+      ? '<ul class="es-units">' + ready.map(a => '<li><span><b>' + esc(a.label) + '</b> <span class="muted">' + esc(a.games.join(", ")) + '</span></span>' +
+          '<button class="btn btn-sm" data-pa-list="' + esc(a._id) + '">Sell on PlayerAuctions</button></li>').join("") + '</ul>'
+      : '<p class="muted">No unlisted accounts with games are ready. Empty accounts appear here after games are claimed and their libraries are synced.</p>';
+    root.innerHTML = offers + fold("pa-ready", plural(ready.length, "account") + " ready for PlayerAuctions", readyList, ready.length > 0 && ready.length <= 3);
     root.querySelectorAll("[data-pa-list]").forEach(b => b.onclick = () => paForm(b.dataset.paList));
     root.querySelectorAll("[data-pa-pause]").forEach(b => b.onclick = async () => {
       b.disabled = true;
@@ -483,7 +659,7 @@
     const cards = [];
     cards.push(
       '<div class="es-stat"><b>Mail page</b><div class="v">' +
-        (h.providerUrl ? '<a href="' + esc(h.providerUrl) + '" target="_blank" rel="noopener">' + esc(h.providerUrl) + "</a>" : '<span class="bad">Not set (PUBLIC_BASE_URL)</span>') +
+        (h.providerUrl ? '<a href="' + esc(h.providerUrl) + '" target="_blank" rel="noopener">' + esc(String(h.providerUrl).replace(/^https?:\/\//, "")) + "</a>" : '<span class="bad">Not set (PUBLIC_BASE_URL)</span>') +
         '</div><div class="s">Where buyers read Epic\'s codes.</div></div>',
     );
     const px = h.proxy || {};
@@ -496,16 +672,17 @@
     const left = el.expiresAt ? new Date(el.expiresAt).getTime() - Date.now() : NaN;
     cards.push(
       '<div class="es-stat"><b>Eldorado login</b><div class="v ' + (!el.configured || left < 3 * 864e5 ? "bad" : "ok") + '">' +
-        (el.configured ? (el.expiresAt ? "Until " + esc(new Date(el.expiresAt).toLocaleString()) : "Signed in") : "Not configured") +
+        (el.configured ? (el.expiresAt ? "Until " + esc(new Date(el.expiresAt).toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" })) : "Signed in") : "Not configured") +
         '</div><div class="s">' + (el.expiresAt ? "Expires " + esc(until(el.expiresAt)) + ". Paste a fresh cookie before then." : "") + "</div></div>",
     );
     const perm = el.permission || {};
     cards.push(
-      '<div class="es-stat"><b>Eldorado permission</b><div class="v ' + (perm.canSell === true ? "ok" : perm.canSell === false ? "bad" : "") + '">' +
+      '<div class="es-stat"' + (perm.canSell === false ? ' title="Epic Games accounts is one of Eldorado\'s high-risk categories. Ask Eldorado support to enable “high-risk offers” for our seller account."' : "") +
+        '><b>Eldorado permission</b><div class="v ' + (perm.canSell === true ? "ok" : perm.canSell === false ? "bad" : "") + '">' +
         (perm.canSell === true ? "Can list Epic accounts" : perm.canSell === false ? "Epic accounts not allowed yet" : "Unknown") +
         '</div><div class="s">' +
         (perm.canSell === false
-          ? "Epic Games accounts is one of Eldorado's high-risk categories. Ask Eldorado support to enable “high-risk offers” for our seller account."
+          ? "High-risk category: Eldorado support has to enable it for us. The Rocket League section works without it."
           : perm.canSell === true
             ? "Eldorado accepts our Epic account offers."
             : esc(perm.error || "Not checked yet.")) +
@@ -523,13 +700,17 @@
   function renderSettings() {
     const c = data.config || {};
     const days = [1, 2, 3, 5, 7, 10, 14];
+    const every = ((data.health || {}).sync || {}).everyMinutes || 5;
     $("es-settings").innerHTML =
-      '<label class="es-switch"><input type="checkbox" id="es-cfg-sync"' + (c.syncEnabled ? " checked" : "") + "> Track Eldorado sales automatically</label>" +
-      '<label class="es-switch">Mail page open for <select id="es-cfg-days">' +
+      '<div class="es-set-row"><label class="es-switch"><input type="checkbox" id="es-cfg-sync"' + (c.syncEnabled ? " checked" : "") + "> Track Eldorado sales automatically</label>" +
+      '<p class="hint">Checks Eldorado for new orders every ' + esc(every) + " minutes while a listing is live.</p></div>" +
+      '<div class="es-set-row"><label class="es-switch">Mail page open for <select id="es-cfg-days">' +
       days.map((d) => '<option value="' + d + '"' + (d === c.sessionDays ? " selected" : "") + ">" + d + " day" + (d > 1 ? "s" : "") + "</option>").join("") +
-      "</select> after an Eldorado sale (G2G offers have their own, below)</label>" +
-      '<label class="es-switch" title="Buyers only ever see Epic\'s emails on the mail page, never the inbox itself."><input type="checkbox" id="es-cfg-shared"' +
-      (c.allowSharedInbox ? " checked" : "") + "> Sell accounts whose inbox is shared with SOOP</label>";
+      "</select> after an Eldorado sale</label>" +
+      '<p class="hint">G2G offers keep the number of days chosen when each offer was linked.</p></div>' +
+      '<div class="es-set-row"><label class="es-switch"><input type="checkbox" id="es-cfg-shared"' +
+      (c.allowSharedInbox ? " checked" : "") + "> Sell accounts whose inbox is shared with SOOP</label>" +
+      '<p class="hint">Buyers only ever see Epic\'s emails on the mail page, never the inbox itself.</p></div>';
     const save = async (patch) => {
       try {
         await post("/api/epic/sales/config", patch);
@@ -553,29 +734,29 @@
 
   function renderGroups() {
     const groups = data.groups || [];
-    const counts = { ready: 0, listed: 0, sold: 0, blocked: 0 };
-    for (const s of data.stock || []) counts[s.state] = (counts[s.state] || 0) + 1;
+    const c = stockCounts();
     const perm = ((data.health || {}).eldorado || {}).permission || {};
+    $("es-ready-meta").textContent = c.ready ? plural(c.ready, "account") + " in " + plural(groups.length, "group") : "";
     const head =
-      (perm.canSell === false ? '<div class="warn">' + esc(data.health.eldorado.noPermissionText || "Eldorado doesn't allow Epic account offers on this seller account yet.") + "</div>" : "") +
-      '<div class="es-meta" style="margin:0 0 10px">' +
-      [pill(counts.ready + " ready", "green"), pill(counts.listed + " on sale"), pill(counts.sold + " sold"), pill(counts.blocked + " can't sell", counts.blocked ? "amber" : "")].join(" ") +
-      "</div>";
+      perm.canSell === false
+        ? '<div class="ep-note is-warn es-ready-note">' + esc(data.health.eldorado.noPermissionText || "Eldorado doesn't allow Epic account offers on this seller account yet.") + "</div>"
+        : "";
     if (!groups.length) {
-      $("es-groups").innerHTML = head + '<div class="muted">Nothing ready to list. See “All accounts” below for the reasons.</div>';
+      $("es-groups").innerHTML = head + '<div class="ep-empty"><b>Nothing ready to list</b><span>All accounts shows why each account can\'t be sold yet.</span></div>';
       return;
     }
     $("es-groups").innerHTML =
       head +
-      '<div class="es-list">' +
+      '<div class="ep-grid es-groups">' +
       groups
         .map((g, i) => {
           const warn = [...new Set(g.accounts.flatMap((a) => a.warnings || []))];
+          const labels = g.accounts.map((a) => a.label);
           return (
-            '<div class="es-item"><div class="es-item-head"><div class="es-item-title">' +
+            '<div class="es-item es-group"><div class="es-item-head"><div class="es-item-title">' +
             (g.games.length ? esc(g.games.join(" + ")) : "No games (fresh accounts)") +
-            '</div><div>' + pill(g.count + " account" + (g.count > 1 ? "s" : ""), "green") + "</div></div>" +
-            '<div class="es-meta">' + esc(g.accounts.map((a) => a.label).join(", ")) + "</div>" +
+            "</div><div>" + pill(plural(g.count, "account"), "green") + "</div></div>" +
+            '<div class="es-meta">' + esc(labels.slice(0, 6).join(", ")) + (labels.length > 6 ? " and " + (labels.length - 6) + " more" : "") + "</div>" +
             (warn.length ? '<ul class="es-reasons">' + warn.map((w) => "<li>" + esc(w) + "</li>").join("") + "</ul>" : "") +
             (g.rocketLeague
               ? '<div class="hint">Fresh accounts can go in Eldorado\'s Rocket League section (PC). That section needs no special permission.</div>'
@@ -621,12 +802,15 @@
   function renderG2g() {
     const g = data.g2g || {};
     const offers = g.offers || [];
+    const inStock = offers.reduce((n, o) => n + ((o.units || {}).listed || 0), 0);
+    const soldG2g = offers.reduce((n, o) => n + ((o.units || {}).sold || 0), 0);
+    $("es-g2g-meta").textContent = offers.length ? plural(offers.length, "offer") + " · " + inStock + " in G2G stock · " + soldG2g + " sold" : "";
     if (g.error) {
       $("es-g2g").innerHTML = '<div class="es-err">' + esc(g.error) + "</div>";
       return;
     }
     if (!offers.length) {
-      $("es-g2g").innerHTML = '<div class="muted">No G2G offer linked. Use “Sell on G2G” on a group above.</div>';
+      $("es-g2g").innerHTML = '<div class="ep-empty"><b>No G2G offer linked</b><span>Use “Sell on G2G” on a group in Ready to list.</span></div>';
       return;
     }
     $("es-g2g").innerHTML =
@@ -735,14 +919,17 @@
     const all = data.listings || [];
     const live = all.filter((l) => l.status !== "removed");
     const old = all.filter((l) => l.status === "removed");
+    const onSale = live.reduce((n, l) => n + ((l.counts || {}).listed || 0), 0);
+    const soldEld = all.reduce((n, l) => n + ((l.counts || {}).sold || 0), 0);
+    $("es-eld-meta").textContent = live.length ? plural(live.length, "listing") + " · " + onSale + " on sale · " + soldEld + " sold" : "";
     if (!all.length) {
-      $("es-listings").innerHTML = '<div class="muted">No Epic listings yet. Use “List on Eldorado” above.</div>';
+      $("es-listings").innerHTML = '<div class="ep-empty"><b>No Eldorado listings yet</b><span>Use “List on Eldorado” in Ready to list.</span></div>';
       return;
     }
     const block = (l) => {
       const r = l.remote || {};
       const units = (l.units || []).filter((u) => u.state !== "removed" || l.status === "removed");
-      const unitHtml = units.length
+      const unitList = units.length
         ? '<ul class="es-units">' +
           units
             .map(
@@ -764,6 +951,10 @@
             )
             .join("") +
           "</ul>"
+        : "";
+      // Folded: a listing can hold many accounts. Open when one left stock unmatched.
+      const unitHtml = unitList
+        ? fold("units-" + l._id, plural(units.length, "account") + " on this listing", unitList, units.some((u) => u.missingSince))
         : "";
       const isLive = ["active", "paused", "sold_out"].includes(l.status);
       const acts = [];
@@ -801,11 +992,8 @@
       );
     };
     $("es-listings").innerHTML =
-      '<div class="es-list">' + live.map(block).join("") + "</div>" +
-      (old.length
-        ? '<details style="margin-top:12px"><summary class="muted" style="cursor:pointer">' + old.length + " removed listing(s)</summary>" +
-          '<div class="es-list" style="margin-top:10px">' + old.map(block).join("") + "</div></details>"
-        : "");
+      (live.length ? '<div class="es-list">' + live.map(block).join("") + "</div>" : '<div class="ep-empty"><b>Nothing on sale on Eldorado</b><span>Use “List on Eldorado” in Ready to list.</span></div>') +
+      (old.length ? fold("removed-listings", plural(old.length, "removed listing"), '<div class="es-list">' + old.map(block).join("") + "</div>") : "");
     $("es-listings").querySelectorAll("[data-act]").forEach((b) => b.addEventListener("click", () => listingAction(b.dataset.act, b.dataset.id, b)));
     $("es-listings").querySelectorAll("[data-remove]").forEach((b) =>
       b.addEventListener("click", () => {
@@ -872,15 +1060,30 @@
     });
   }
 
+  const MARKETS = [["all", "All"], ["eldorado", "Eldorado"], ["g2g", "G2G"], ["playerauctions", "PlayerAuctions"]];
+  const marketOf = (s) => (s.market === "g2g" ? "g2g" : s.market === "playerauctions" ? "playerauctions" : "eldorado");
+
   function renderSales() {
-    const rows = data.sales || [];
-    if (!rows.length) {
-      $("es-sales").innerHTML = '<div class="muted">No sales yet. They appear here within a few minutes of a marketplace order.</div>';
+    const all = data.sales || [];
+    const attention = all.filter((s) => s.needsAttention).length;
+    $("es-sales-meta").textContent = all.length ? plural(all.length, "sale") + (attention ? " · " + attention + " need attention" : "") : "";
+    $("es-sales-chips").innerHTML = all.length
+      ? MARKETS.map(([k, t]) => {
+          const n = k === "all" ? all.length : all.filter((s) => marketOf(s) === k).length;
+          const on = view.salesMarket === k;
+          if (k !== "all" && !n && !on) return "";
+          return '<button type="button" class="ep-chip' + (on ? " is-on" : "") + '" data-market="' + k + '" aria-pressed="' + on + '">' + t + ' <span class="ep-chip-count">' + n + "</span></button>";
+        }).join("")
+      : "";
+    if (!all.length) {
+      $("es-sales").innerHTML = '<div class="ep-empty"><b>No sales yet</b><span>They appear here within a few minutes of a marketplace order.</span></div>';
       return;
     }
+    const rows = all.filter((s) => view.salesMarket === "all" || marketOf(s) === view.salesMarket);
     $("es-sales").innerHTML =
-      '<div class="es-table-wrap"><table class="es-table"><thead><tr><th>When</th><th>Listing</th><th>Account</th><th>Order</th><th>Mail page</th><th></th></tr></thead><tbody>' +
+      '<div class="ep-table-wrap"><table class="ep-table es-table"><thead><tr><th>When</th><th>Listing</th><th>Account</th><th>Order</th><th>Mail page</th><th></th></tr></thead><tbody>' +
       rows
+        .slice(0, view.salesLimit)
         .map((s) => {
           const mail = s.accounts
             .map((a) => {
@@ -904,7 +1107,7 @@
               ? '<button class="btn btn-sm" type="button" data-resend="' + esc(s.orderId) + '">New mail password</button>'
               : "";
           return (
-            "<tr" + (s.needsAttention ? ' style="background:rgba(220,38,38,.06)"' : "") + '><td data-label="When">' + esc(when(s.orderCreatedAt)) + "</td>" +
+            "<tr" + (s.needsAttention ? ' class="is-attn"' : "") + '><td data-label="When">' + esc(when(s.orderCreatedAt)) + "</td>" +
             '<td data-label="Listing">' + pill(isG2g ? "G2G" : s.market === "playerauctions" ? "PlayerAuctions" : "Eldorado") + " " + esc(s.title) +
             (isG2g
               ? '<div class="muted">' +
@@ -929,7 +1132,8 @@
           );
         })
         .join("") +
-      "</tbody></table></div>";
+      "</tbody></table></div>" +
+      more("sales", Math.min(view.salesLimit, rows.length), rows.length, 20);
     $("es-sales").querySelectorAll("[data-resend]").forEach((b) => b.addEventListener("click", () => resend(b.dataset.resend, b)));
     $("es-sales").querySelectorAll("[data-g2g-details]").forEach((b) => b.addEventListener("click", () => g2gDetails(b.dataset.g2gDetails, b)));
   }
@@ -946,17 +1150,36 @@
     });
   }
 
+  const STOCK_FILTERS = [["all", "All"], ["ready", "Ready"], ["listed", "On sale"], ["sold", "Sold"], ["blocked", "Can't sell"]];
+
   function renderStock() {
-    const rows = data.stock || [];
+    const all = data.stock || [];
+    $("es-stock-chips").innerHTML = STOCK_FILTERS.map(([k, t]) => {
+      const n = k === "all" ? all.length : all.filter((s) => s.state === k).length;
+      const on = view.stockFilter === k;
+      if (k !== "all" && !n && !on) return "";
+      return '<button type="button" class="ep-chip' + (on ? " is-on" : "") + '" data-stock="' + k + '" aria-pressed="' + on + '">' + t + ' <span class="ep-chip-count">' + n + "</span></button>";
+    }).join("");
+    if (!all.length) {
+      $("es-stock").innerHTML = '<div class="ep-empty"><b>No Epic accounts</b></div>';
+      return;
+    }
+    const q = view.stockQ.trim().toLowerCase();
+    const rows = all.filter(
+      (s) =>
+        (view.stockFilter === "all" || s.state === view.stockFilter) &&
+        (!q || [s.label, s.email, (s.games || []).join(" "), s.listing && s.listing.title].join(" ").toLowerCase().includes(q)),
+    );
     if (!rows.length) {
-      $("es-stock").innerHTML = '<div class="muted">No Epic accounts.</div>';
+      $("es-stock").innerHTML = '<div class="ep-empty"><b>No accounts match</b><span>Try another search or filter.</span></div>';
       return;
     }
     const tone = { ready: "green", listed: "", sold: "", blocked: "red" };
     const text = { ready: "ready", listed: "on sale", sold: "sold", blocked: "can't sell" };
     $("es-stock").innerHTML =
-      '<div class="es-table-wrap"><table class="es-table"><thead><tr><th>Account</th><th>Games</th><th>Status</th></tr></thead><tbody>' +
+      '<div class="ep-table-wrap"><table class="ep-table es-table"><thead><tr><th>Account</th><th>Games</th><th>Status</th></tr></thead><tbody>' +
       rows
+        .slice(0, view.stockLimit)
         .map((s) => {
           const reasons = (s.blockers || []).map((x) => '<li class="block">' + esc(x) + "</li>").concat((s.warnings || []).map((x) => "<li>" + esc(x) + "</li>"));
           return (
@@ -968,7 +1191,8 @@
           );
         })
         .join("") +
-      "</tbody></table></div>";
+      "</tbody></table></div>" +
+      more("stock", Math.min(view.stockLimit, rows.length), rows.length, 25);
   }
 
   function renderOthers() {

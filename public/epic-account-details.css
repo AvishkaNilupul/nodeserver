@@ -47,6 +47,8 @@
 }
 @media (max-width: 700px) {
   .epic-detail-grid { grid-template-columns: minmax(0, 1fr); }
+  /* On a phone the bar stays in place at the end of the form instead of covering it. */
+  .ed-savebar { position: static; box-shadow: none; }
   .ed-savebar .btn { flex: 1 1 auto; }
   .ed-status { flex-basis: 100%; text-align: left; }
   .ed-contact-row .btn { width: 100%; }

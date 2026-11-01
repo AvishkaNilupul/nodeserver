@@ -1,341 +1,120 @@
 /* Listings & sales tab on /epic-accounts.html (public/epic-sales.js).
-   Uses the page's own tokens (--surface, --line, --muted, --accent, --green,
-   --red) so light and dark mode follow the page. */
-#epic-sales-panel .es-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
-  gap: 12px;
-}
-#epic-sales-panel .es-stat {
-  border: 1px solid var(--line);
-  border-radius: 12px;
-  padding: 12px 14px;
-  background: var(--surface-2);
-  min-width: 0;
-}
-#epic-sales-panel .es-stat b {
-  display: block;
-  font-size: 11.5px;
-  text-transform: uppercase;
-  letter-spacing: 0.03em;
-  color: var(--muted);
-  margin-bottom: 4px;
-}
-#epic-sales-panel .es-stat .v {
-  font-size: 14px;
-  font-weight: 600;
-  overflow-wrap: anywhere;
-}
-#epic-sales-panel .es-stat .s {
-  font-size: 12.5px;
-  color: var(--muted);
-  margin-top: 3px;
-  overflow-wrap: anywhere;
-}
-#epic-sales-panel .ok {
-  color: var(--green);
-}
-#epic-sales-panel .bad {
-  color: var(--red);
-}
-#epic-sales-panel .es-pill {
-  display: inline-block;
-  padding: 2px 9px;
-  border-radius: 999px;
-  font-size: 11.5px;
-  font-weight: 700;
-  background: var(--surface-2);
-  color: var(--muted);
-  border: 1px solid var(--line);
-  white-space: nowrap;
-}
-#epic-sales-panel .es-pill.green {
-  color: var(--green);
-  border-color: rgba(5, 150, 105, 0.35);
-  background: rgba(5, 150, 105, 0.1);
-}
-#epic-sales-panel .es-pill.red {
-  color: var(--red);
-  border-color: rgba(220, 38, 38, 0.35);
-  background: rgba(220, 38, 38, 0.08);
-}
-#epic-sales-panel .es-pill.amber {
-  color: #b45309;
-  border-color: rgba(217, 119, 6, 0.35);
-  background: rgba(217, 119, 6, 0.1);
-}
-html[data-theme="dark"] #epic-sales-panel .es-pill.amber {
-  color: #fbbf24;
-}
-#epic-sales-panel .es-list {
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
-}
-#epic-sales-panel .es-item {
-  border: 1px solid var(--line);
-  border-radius: 12px;
-  padding: 14px;
-  min-width: 0;
-}
-#epic-sales-panel .es-item-head {
-  display: flex;
-  justify-content: space-between;
-  gap: 10px;
-  align-items: flex-start;
-  flex-wrap: wrap;
-}
-#epic-sales-panel .es-item-title {
-  font-weight: 650;
-  font-size: 14px;
-  overflow-wrap: anywhere;
-  min-width: 0;
-  flex: 1 1 260px;
-}
-#epic-sales-panel .es-meta {
-  color: var(--muted);
-  font-size: 12.5px;
-  margin-top: 5px;
-  overflow-wrap: anywhere;
-}
-#epic-sales-panel .es-actions {
-  display: flex;
-  gap: 6px;
-  flex-wrap: wrap;
-  margin-top: 10px;
-}
-#epic-sales-panel .es-units {
-  margin: 10px 0 0;
-  padding: 0;
-  list-style: none;
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-}
-#epic-sales-panel .es-units li {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  gap: 8px;
-  font-size: 13px;
-  padding: 7px 10px;
-  border-radius: 9px;
-  background: var(--surface-2);
-  flex-wrap: wrap;
-}
-#epic-sales-panel .es-units li span {
-  overflow-wrap: anywhere;
-  min-width: 0;
-}
-#epic-sales-panel .es-err {
-  color: var(--red);
-  font-size: 12.5px;
-  margin-top: 6px;
-  overflow-wrap: anywhere;
-}
-#epic-sales-panel .es-reasons {
-  margin: 4px 0 0;
-  padding-left: 16px;
-  font-size: 12.5px;
-  color: var(--muted);
-}
-#epic-sales-panel .es-reasons li.block {
-  color: var(--red);
-}
-#epic-sales-panel .es-table-wrap {
-  overflow-x: auto;
-}
-#epic-sales-panel .es-table td,
-#epic-sales-panel .es-table th {
-  vertical-align: top;
-}
-#epic-sales-panel .es-switch {
-  display: flex;
-  gap: 8px;
-  align-items: center;
-  font-size: 13px;
-}
-#epic-sales-panel .es-switch input {
-  width: 18px;
-  height: 18px;
-}
-#epic-sales-panel .es-settings {
-  display: flex;
-  gap: 14px 22px;
-  flex-wrap: wrap;
-  align-items: center;
-  margin-top: 14px;
-}
-.es-modal .es-market {
-  margin-top: 8px;
-  border: 1px solid var(--line);
-  border-radius: 10px;
-  padding: 8px 10px;
-  font-size: 12.5px;
-  max-height: 180px;
-  overflow: auto;
-}
-.es-modal .es-market div {
-  display: flex;
-  justify-content: space-between;
-  gap: 8px;
-  padding: 3px 0;
-  border-bottom: 1px dashed var(--line);
-}
-.es-modal .es-market div:last-child {
-  border-bottom: none;
-}
-.es-modal .es-market span:first-child {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  min-width: 0;
-}
-.es-modal .es-check {
-  display: flex;
-  gap: 8px;
-  align-items: flex-start;
-  text-transform: none;
-  letter-spacing: 0;
-  font-weight: 500;
-  font-size: 13px;
-  color: var(--ink);
-}
-.es-modal .es-check input {
-  width: auto;
-  margin-top: 2px;
-}
-.es-modal .es-cover {
-  margin-top: 8px;
-  max-width: 100%;
-  max-height: 140px;
-  border-radius: 8px;
-  border: 1px solid var(--line);
-  display: block;
-}
-.es-modal .es-preview {
-  margin-top: 12px;
-  font-size: 13px;
-}
-.es-modal .es-preview pre {
-  white-space: pre-wrap;
-  background: var(--surface-2);
-  border: 1px solid var(--line);
-  border-radius: 9px;
-  padding: 10px;
-  font-size: 12.5px;
-  max-height: 220px;
-  overflow: auto;
-}
-.es-modal .es-acc-list {
-  border: 1px solid var(--line);
-  border-radius: 10px;
-  padding: 6px 10px;
-  max-height: 200px;
-  overflow: auto;
-}
-@media (max-width: 768px) {
-  #epic-sales-panel .es-actions .btn {
-    flex: 1 1 auto;
-  }
-  #epic-sales-panel .es-table thead {
-    display: none;
-  }
-  #epic-sales-panel .es-table,
-  #epic-sales-panel .es-table tbody,
-  #epic-sales-panel .es-table tr,
-  #epic-sales-panel .es-table td {
-    display: block;
-    width: 100%;
-  }
-  #epic-sales-panel .es-table tr {
-    border: 1px solid var(--line);
-    border-radius: 12px;
-    padding: 10px 12px;
-    margin-bottom: 10px;
-  }
-  #epic-sales-panel .es-table td {
-    border: 0;
-    padding: 4px 0;
-  }
-  #epic-sales-panel .es-table td[data-label]::before {
-    content: attr(data-label);
-    display: block;
-    color: var(--muted);
-    font-size: 11px;
-    font-weight: 600;
-    text-transform: uppercase;
-    letter-spacing: 0.03em;
-  }
-  .es-modal input,
-  .es-modal select,
-  .es-modal textarea {
-    font-size: 16px;
-  }
-}
+   Composes the kit in epic-page.css (tokens, .ep-card, .ep-badge, .ep-table …);
+   this file only adds the tab's own pieces. */
+#epic-sales-panel .ok { color: var(--ep-ok); }
+#epic-sales-panel .bad { color: var(--ep-err); }
+#epic-sales-panel .es-section { display: flex; flex-direction: column; gap: 14px; min-width: 0; }
+#epic-sales-panel h3 { margin: 18px 0 8px; font-size: 11.5px; font-weight: 700; color: var(--muted); text-transform: uppercase; letter-spacing: 0.04em; }
+#epic-sales-panel .ep-card-bd > h3:first-child, #epic-sales-panel .ep-cols h3:first-child { margin-top: 0; }
 
-/* Auto-distribute card (renderDist). */
-#epic-sales-panel .es-seg {
-  display: flex;
-  gap: 6px;
-  flex-wrap: wrap;
-}
-#epic-sales-panel .es-dist-mode {
-  margin: 6px 0 8px;
-}
-/* Market statuses can be a sentence: let the badge wrap instead of clipping. */
-#epic-sales-panel #es-dist .es-pill {
-  white-space: normal;
-  overflow-wrap: anywhere;
-}
-#epic-sales-panel .es-dist-form {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 12px 18px;
-  align-items: flex-end;
-}
-#epic-sales-panel .es-dist-form fieldset {
-  border: 1px solid var(--line);
-  border-radius: 12px;
-  padding: 8px 12px 10px;
-  margin: 0;
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px 14px;
-  align-items: flex-end;
-  min-width: 0;
-}
-#epic-sales-panel .es-dist-form legend {
-  font-size: 12px;
-  font-weight: 600;
-  color: var(--muted);
-  padding: 0 4px;
-}
-#epic-sales-panel .es-dist-form label:not(.es-switch) {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  font-size: 13px;
-}
-#epic-sales-panel .es-dist-form input[type="number"] {
-  width: 110px;
-}
-@media (max-width: 768px) {
-  #epic-sales-panel .es-dist-form fieldset,
-  #epic-sales-panel .es-dist-form label:not(.es-switch) {
-    width: 100%;
-  }
-  #epic-sales-panel .es-dist-form input {
-    width: 100%;
-    font-size: 16px;
-  }
-}
+/* Selling status: five compact tiles; the value's dot shows ok / problem. */
+.es-status-bd { display: flex; flex-direction: column; gap: 12px; }
+#epic-sales-panel .es-health { display: grid; gap: 10px; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); }
+#epic-sales-panel .es-stat { min-width: 0; padding: 10px 12px; border: 1px solid var(--line); border-radius: 10px; background: var(--surface-2); }
+#epic-sales-panel .es-stat b { display: block; margin-bottom: 3px; color: var(--muted); font-size: 11px; font-weight: 700; letter-spacing: 0.04em; text-transform: uppercase; }
+#epic-sales-panel .es-stat .v { display: flex; align-items: baseline; gap: 7px; font-size: 13.5px; font-weight: 650; overflow-wrap: anywhere; }
+#epic-sales-panel .es-stat .v::before { content: ""; flex: none; width: 8px; height: 8px; border-radius: 50%; background: var(--muted); transform: translateY(-1px); }
+#epic-sales-panel .es-stat .v.ok::before { background: var(--green); }
+#epic-sales-panel .es-stat .v.bad::before { border-radius: 2px; background: var(--red); }
+#epic-sales-panel .es-stat .s { margin-top: 3px; color: var(--muted); font-size: 12px; line-height: 1.4; overflow-wrap: anywhere; }
+#epic-sales-panel .es-stat a { color: var(--ep-accent-ink); font-size: 12.5px; }
 
-/* Help lines inside the listing windows and the Ready-to-list cards. */
-.es-modal .hint,
-.es-item .hint {
-  color: var(--muted);
-  font-size: 12.5px;
-  line-height: 1.45;
-  margin: 6px 0 4px;
+/* Lists of listings, offers and groups. */
+#epic-sales-panel .es-list { display: flex; flex-direction: column; gap: 10px; }
+#epic-sales-panel .es-item { min-width: 0; padding: 12px 14px; border: 1px solid var(--line); border-radius: 12px; background: var(--surface); }
+#epic-sales-panel .es-item-head { display: flex; flex-wrap: wrap; align-items: flex-start; justify-content: space-between; gap: 6px 10px; }
+#epic-sales-panel .es-item-title { flex: 1 1 260px; min-width: 0; font-size: 14px; font-weight: 650; overflow-wrap: anywhere; }
+#epic-sales-panel .es-item-title a { color: inherit; text-decoration: underline; text-decoration-color: var(--line); text-underline-offset: 3px; }
+#epic-sales-panel .es-item-title a:hover { text-decoration-color: currentColor; }
+#epic-sales-panel .es-meta { margin-top: 5px; color: var(--muted); font-size: 12.5px; overflow-wrap: anywhere; }
+#epic-sales-panel .es-actions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
+#epic-sales-panel .es-units { display: flex; flex-direction: column; gap: 4px; margin: 8px 0 0; padding: 0; list-style: none; }
+#epic-sales-panel .es-units li { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 6px 8px; padding: 6px 10px; border-radius: 8px; background: var(--surface-2); font-size: 13px; }
+#epic-sales-panel .es-units li > span { min-width: 0; overflow-wrap: anywhere; }
+#epic-sales-panel .es-units a { text-decoration: underline; text-underline-offset: 2px; }
+#epic-sales-panel .es-err { margin-top: 6px; color: var(--ep-err); font-size: 12.5px; overflow-wrap: anywhere; }
+#epic-sales-panel .es-reasons { margin: 4px 0 0; padding-left: 16px; color: var(--muted); font-size: 12.5px; }
+#epic-sales-panel .es-reasons li.block { color: var(--ep-err); }
+#epic-sales-panel .es-groups .es-item { display: flex; flex-direction: column; height: 100%; }
+#epic-sales-panel .es-groups .es-actions { margin-top: auto; padding-top: 10px; }
+#epic-sales-panel .es-ready-note { margin-bottom: 12px; }
+#epic-sales-panel .es-pa-link { margin-top: 6px; }
+#epic-sales-panel .es-pa-link label { display: flex; align-items: center; gap: 6px; font-size: 12.5px; color: var(--muted); }
+#epic-sales-panel .es-pa-link input { width: 140px; }
+
+/* Folded blocks (accounts on a listing, removed listings, ready accounts). */
+#epic-sales-panel .es-fold { margin-top: 10px; }
+#epic-sales-panel .es-fold > summary { display: inline-flex; align-items: center; gap: 6px; color: var(--muted); font-size: 12.5px; font-weight: 600; cursor: pointer; list-style: none; user-select: none; }
+#epic-sales-panel .es-fold > summary::-webkit-details-marker { display: none; }
+#epic-sales-panel .es-fold > summary::before { content: ""; width: 6px; height: 6px; border-right: 2px solid currentColor; border-bottom: 2px solid currentColor; transform: rotate(-45deg); transition: transform 0.15s; }
+#epic-sales-panel .es-fold[open] > summary::before { transform: rotate(45deg); }
+#epic-sales-panel .es-fold > summary:hover { color: var(--ink); }
+#epic-sales-panel .es-fold > .es-list { margin-top: 10px; }
+#epic-sales-panel .es-others { margin-top: 18px; padding-top: 14px; border-top: 1px solid var(--line); }
+#epic-sales-panel .es-others h3 { margin-top: 0; }
+
+/* Toolbars and tables. */
+#epic-sales-panel .es-toolbar { margin-bottom: 12px; }
+#epic-sales-panel .es-toolbar:empty, #epic-sales-panel .es-toolbar:has(> .ep-chips:only-child:empty) { display: none; }
+#epic-sales-panel .es-table td { vertical-align: top; }
+#epic-sales-panel .es-table td .ep-badge { vertical-align: 0; }
+
+/* Settings rows. */
+#epic-sales-panel .es-settings { display: flex; flex-direction: column; }
+#epic-sales-panel .es-set-row { padding: 12px 0; border-top: 1px solid var(--line); }
+#epic-sales-panel .es-set-row:first-child { padding-top: 0; border-top: 0; }
+#epic-sales-panel .es-set-row:last-child { padding-bottom: 0; }
+#epic-sales-panel .es-set-row .hint { margin: 4px 0 0 26px; }
+#epic-sales-panel .es-switch { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; font-size: 13.5px; font-weight: 600; }
+#epic-sales-panel .es-switch input[type="checkbox"] { width: 18px; height: 18px; margin: 0; accent-color: var(--accent); }
+
+/* Auto-distribute. */
+#epic-sales-panel .es-seg { display: flex; flex-wrap: wrap; gap: 6px; }
+#epic-sales-panel .es-dist-mode { margin: 6px 0 8px; }
+#epic-sales-panel .es-dist-cols { margin-top: 16px; }
+#epic-sales-panel #es-dist .ep-badge { white-space: normal; overflow-wrap: anywhere; }
+#epic-sales-panel .es-dist-form { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 10px 14px; }
+#epic-sales-panel .es-dist-cols .es-dist-form fieldset { flex: 1 1 100%; }
+#epic-sales-panel .es-dist-form fieldset { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 8px 14px; min-width: 0; margin: 0; padding: 8px 12px 10px; border: 1px solid var(--line); border-radius: 10px; }
+#epic-sales-panel .es-dist-form legend { padding: 0 4px; color: var(--muted); font-size: 12px; font-weight: 650; }
+#epic-sales-panel .es-dist-form label:not(.es-switch) { display: flex; flex-direction: column; gap: 4px; font-size: 12.5px; color: var(--muted); font-weight: 600; }
+#epic-sales-panel .es-dist-form input[type="number"] { width: 110px; }
+
+/* Listing windows (the .modal itself is styled in epic-page.css). */
+.es-modal .es-market { margin-top: 8px; padding: 8px 10px; border: 1px solid var(--line); border-radius: 10px; font-size: 12.5px; max-height: 180px; overflow: auto; }
+.es-modal .es-market div { display: flex; justify-content: space-between; gap: 8px; padding: 3px 0; border-bottom: 1px dashed var(--line); }
+.es-modal .es-market div:last-child { border-bottom: none; }
+.es-modal .es-market span:first-child { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.es-modal .es-check { display: flex; align-items: flex-start; gap: 8px; color: var(--ink); font-size: 13px; font-weight: 500; letter-spacing: 0; text-transform: none; }
+.es-modal .es-check input { width: auto; min-height: 0; margin-top: 2px; }
+.es-modal .es-cover { display: block; max-width: 100%; max-height: 140px; margin-top: 8px; border: 1px solid var(--line); border-radius: 8px; }
+.es-modal .es-preview { margin-top: 12px; font-size: 13px; }
+.es-modal .es-preview pre { max-height: 220px; padding: 10px; overflow: auto; border: 1px solid var(--line); border-radius: 9px; background: var(--surface-2); font-size: 12.5px; white-space: pre-wrap; }
+.es-modal .es-acc-list { max-height: 200px; padding: 6px 10px; overflow: auto; border: 1px solid var(--line); border-radius: 10px; }
+.es-modal .es-reasons { margin: 4px 0 0; padding-left: 16px; color: var(--muted); font-size: 12.5px; }
+.es-modal .es-reasons li.block { color: var(--ep-err); }
+.es-modal .es-err { margin-top: 6px; color: var(--ep-err); font-size: 12.5px; }
+.es-modal .hint, .es-item .hint { margin: 6px 0 4px; color: var(--muted); font-size: 12.5px; line-height: 1.45; }
+
+@media (max-width: 768px) {
+  /* Status tiles: two columns, hints only where something is wrong. */
+  #epic-sales-panel .es-health { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+  #epic-sales-panel .es-stat { padding: 8px 10px; }
+  #epic-sales-panel .es-stat:first-child { grid-column: 1 / -1; }
+  #epic-sales-panel .es-stat .s { display: none; }
+  #epic-sales-panel .es-stat:has(.v.bad) { grid-column: 1 / -1; }
+  #epic-sales-panel .es-stat:has(.v.bad) .s { display: block; }
+  #epic-sales-panel .es-actions .btn { flex: 1 1 auto; }
+  #epic-sales-panel .es-table thead { display: none; }
+  #epic-sales-panel .es-table, #epic-sales-panel .es-table tbody, #epic-sales-panel .es-table tr, #epic-sales-panel .es-table td { display: block; width: 100%; }
+  #epic-sales-panel .ep-table-wrap { border: 0; background: none; }
+  #epic-sales-panel .es-table tr { margin-bottom: 10px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 12px; background: var(--surface); }
+  #epic-sales-panel .es-table tr.is-attn { border-color: var(--ep-err); }
+  #epic-sales-panel .es-table tr.is-attn > td:first-child { box-shadow: none; }
+  #epic-sales-panel .es-table td { padding: 4px 0; border: 0; }
+  #epic-sales-panel .es-table td[data-label]:not([data-label=""])::before { content: attr(data-label); display: block; color: var(--muted); font-size: 11px; font-weight: 650; letter-spacing: 0.04em; text-transform: uppercase; }
+  #epic-sales-panel .es-dist-form fieldset, #epic-sales-panel .es-dist-form label:not(.es-switch) { width: 100%; }
+  #epic-sales-panel .es-dist-form input { width: 100%; }
+  #epic-sales-panel .es-pa-link input { width: 100%; }
+  #epic-sales-panel .es-set-row .hint { margin-left: 0; }
 }
