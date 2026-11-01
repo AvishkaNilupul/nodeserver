@@ -46,6 +46,10 @@ const GAMES_OWNED = Object.freeze({ collection_id: "b7811700", dataset_id: "a5be
 // Two optional free-value attributes buyers filter by: "Steam Age" (years) and
 // "Steam Country" (other sellers write plain English names: "Turkey" 35,
 // "Argentina" 29, "Global" 47 on 2026-11-01).
+// We never send Steam Age. G2G fills it in as 0 by itself on a new offer, but
+// refuses any edit that sends a value under 1 ("Steam Age value must have min
+// value of 1", 2026-11-01), and our accounts are days old. Left out of an
+// edit, G2G keeps the value it has (checked live on the JP/AR/CO offers).
 const STEAM_AGE = "33e42e40";
 const STEAM_COUNTRY = "294cea68";
 const COUNTRY_LABEL = { TR: "Turkey", US: "United States", GB: "United Kingdom", KR: "South Korea", RU: "Russia", HK: "Hong Kong" };
@@ -197,17 +201,14 @@ function countryLabel(cc) {
 }
 
 function attributesFor(cc) {
-  return [
-    { ...GAMES_OWNED },
-    { collection_id: STEAM_AGE, value: 0, is_subscription: false },
-    { collection_id: STEAM_COUNTRY, value: countryLabel(cc), is_subscription: false },
-  ];
+  return [{ ...GAMES_OWNED }, { collection_id: STEAM_COUNTRY, value: countryLabel(cc), is_subscription: false }];
 }
 
 // The offer's attributes as G2G holds them, with Steam Country set to the
-// link's country (everything else kept as read).
+// link's country (everything else kept as read, except Steam Age: see above).
 function withCountry(current, cc) {
-  const out = (current || []).filter((a) => a && a.collection_id !== STEAM_COUNTRY).map((a) => {
+  const skip = new Set([STEAM_COUNTRY, STEAM_AGE]);
+  const out = (current || []).filter((a) => a && !skip.has(a.collection_id)).map((a) => {
     const x = { collection_id: a.collection_id, value: a.value, is_subscription: !!a.is_subscription };
     if (a.dataset_id) x.dataset_id = a.dataset_id;
     return x;

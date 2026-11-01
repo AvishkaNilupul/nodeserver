@@ -56,6 +56,10 @@ Eldorado or G2G"; "use the API system we already have, auto delivery as on Epic"
   live Epic Instant offer: `delivery_speed: "instant"`, `delivery_method_ids:
   ["instant_inventory"]`, the brand's one required attribute "Games Owned" = "4 or
   below" (empty accounts), $1, min 1, global. Links kept in `SteamSalesState.g2gOffers`.
+- "Steam Country" (`294cea68`) = the country in plain English ("Japan", "Turkey"), sent
+  at creation and filled in once by the sweep on older offers (`countrySet`). "Steam
+  Age" (`33e42e40`) is never sent: G2G sets it to 0 by itself, refuses an edit that
+  sends a value under 1, and keeps its value when an edit leaves it out.
 - Stock: rows in the brand's account form (Account ID = Steam account name, Password,
   Account Country = signup country, Account Email = the Outlook address, Email
   Password = a mail-page password, Additional Note = how to use the mail page + the
