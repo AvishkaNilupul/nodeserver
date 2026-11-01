@@ -200,3 +200,23 @@ reveal where the codes come from. So:
   good-to-know ones; a bundle with a box or pack says that a box the account
   already got is refused as "not eligible" (a PlayerAuctions buyer's words on
   2026-10-19, order of a 6-code bundle).
+
+## R15. Repeated rewards are numbered; a box names its event (2026-11-01, owner's ask)
+
+An event that gives the same reward three times ("1 Esports Loot Box" at 4, 14
+and 15 hours of watching) would have listed three identical lines next to "two
+codes for the same reward will not both work on one account" - a buyer reads
+that as two dead codes. Owner: number them, and "when lootboxes are showing put
+which event this is from". So `texts.rewardLabels`, run by the planner once per
+ready group (after the auto labels), so every bundle of the event reads the same:
+- a label two or more rewards of the group share gets `#1`, `#2`, `#3` in
+  earned order;
+- a box/pack label (same pattern as the once-per-account line) drops a leading
+  `1 ` and ends with `(Event 30 Oct 2026)` - the start date only, never the
+  campaign title; a label that would pass 80 characters keeps fewer additions;
+- the title already names the event, so `defaultTexts` leaves a label's own
+  `(Event ...)` out of the title; the description and the delivered code lines
+  keep it.
+Live products and edited drafts are untouched; existing drafts only get blank
+labels filled, as before. Deployed 2026-11-01 10:32Z (planner.js + texts.js),
+backup `_deploy_backup_20261101103232_code-shop-reward-labels` on prod.
