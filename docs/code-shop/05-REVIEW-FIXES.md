@@ -220,3 +220,12 @@ ready group (after the auto labels), so every bundle of the event reads the same
 Live products and edited drafts are untouched; existing drafts only get blank
 labels filled, as before. Deployed 2026-11-01 10:32Z (planner.js + texts.js),
 backup `_deploy_backup_20261101103232_code-shop-reward-labels` on prod.
+
+Same day, owner: "skins first" (only the first two sprays of the 10-code bundle
+fit in its title). `texts.titleItems` orders the TITLE's rewards: skins /
+outfits / costumes, then boxes / packs, then the rest in bundle order; a reward
+held more than once reads `3x Esports Loot Box`. A multi-code title gives up
+`Redeem Codes` (the "N Codes Bundle" part already says codes) only when that
+keeps one more reward in. The description and the delivered code lines keep
+the bundle order and every label whole. Deployed 2026-11-01 10:49Z (texts.js
+only), backup `_deploy_backup_20261101104939_code-shop-title-order`.
