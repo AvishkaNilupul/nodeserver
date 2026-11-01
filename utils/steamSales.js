@@ -189,7 +189,8 @@ async function checkInbox(email, { fresh = false } = {}) {
   let value;
   try {
     const c = await deps.outlook.checkInbox(key);
-    const uses = (c.sharedWith || []).map(String);
+    // `uses` is the full list (the proxy leaves "epic" out of sharedWith).
+    const uses = (c.uses || c.sharedWith || []).map(String);
     if (c.status !== "live") value = { ok: false, reason: "the Mac mail pool doesn't know this inbox" };
     else if (!uses.includes("steam")) value = { ok: false, reason: "the Mac mail pool has no Steam use recorded for this inbox" };
     else if (uses.some((u) => u !== "steam")) value = { ok: false, reason: "the inbox is also used for " + uses.filter((u) => u !== "steam").join(", ") };

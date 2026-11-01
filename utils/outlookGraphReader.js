@@ -114,6 +114,9 @@ async function checkInbox(inboxAddress) {
   return {
     sellable: !!data.sellable,
     sharedWith: Array.isArray(data.sharedWith) ? data.sharedWith : [],
+    // Every site on record for the inbox, its own one included (the Mac proxy
+    // leaves "epic" out of sharedWith). Absent from older proxies.
+    uses: Array.isArray(data.uses) ? data.uses : null,
     status: data.status || "unknown",
   };
 }
