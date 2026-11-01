@@ -447,3 +447,26 @@ test("a re-send that landed is confirmed, never released", async () => {
   assert.equal((await SteamG2gUnit.findOne({ steamAccountId: a._id })).state, "listed");
   assert.equal((await SteamAccount.findById(a._id)).stage, "listed");
 });
+
+test("an offer G2G blocks with an old failed upload pages the owner with the fix, and retries once cleared", async () => {
+  const a = await account("cl_b1", "CL");
+  const link = await g2g.createRegionOffer("CL");
+  rejectRows = true;
+  await g2g.loadAccounts(link, [String(a._id)]);
+  rejectRows = false;
+  failUpload = "G2G stock import failed (HTTP 409): Data already exists: Duplicated offer_id: " + link.offerId;
+  await SteamG2gUnit.updateOne({ steamAccountId: a._id }, { $set: { uploadedAt: new Date(Date.now() - 9 * 60000) } });
+  await g2g.sweep();
+  assert.ok(telegrams.some((t) => /Upload more/.test(t) && t.includes(link.offerId)), "owner told how to clear it");
+  assert.equal((await SteamG2gUnit.findOne({ steamAccountId: a._id })).state, "loading", "kept aside, not lost");
+  failUpload = null; // owner pressed Upload more
+  await g2g.sweep(); // re-send goes through
+  await g2g.sweep(); // confirmed
+  assert.equal((await SteamG2gUnit.findOne({ steamAccountId: a._id })).state, "listed");
+
+  // A fresh load on a blocked offer: accounts back, a clear message.
+  const b = await account("cl_b2", "CL");
+  failUpload = "G2G stock import failed (HTTP 409): Data already exists: Duplicated offer_id: " + link.offerId;
+  await assert.rejects(g2g.loadAccounts(link, [String(b._id)]), /Upload more/);
+  assert.equal((await SteamAccount.findById(b._id)).stage, "stock");
+});

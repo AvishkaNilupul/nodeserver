@@ -59,6 +59,16 @@ const SKIP_MS = 6 * 60 * 60 * 1000;
 // G2G's importer refused a 624-character note with an emoji (2026-11-01) and
 // took the same row with a 456-character plain one: notes stay plain and short.
 const NOTE_MAX = 480;
+// A FAILED import keeps blocking new ones on that offer ("409 Duplicated
+// offer_id") until "Upload more" is pressed on its Upload Accounts page
+// (seen live 2026-11-01; the button clears G2G's job marker, not via sls).
+const BLOCKED_RE = /Duplicated offer_id/i;
+function blockedHint(link) {
+  return (
+    "G2G is still holding a failed upload for the " + S.regionName(link.region) + " offer " + link.offerId +
+    ". Open https://www.g2g.com/offers/" + link.offerId + "/stock/upload and press \"Upload more\"; the server then retries by itself."
+  );
+}
 const STUCK_MS = 15 * 60 * 1000;
 const REPAGE_MS = 3 * 60 * 60 * 1000;
 const SWEEP_MS = Number(process.env.STEAM_G2G_SWEEP_MS) || 3 * 60 * 1000;
@@ -337,6 +347,7 @@ async function loadAccounts(link, accountIds, actor) {
     } catch (e) {
       // Not sent (or G2G refused it outright): give the accounts back.
       await undo(unitIds, sessionIds, reserved, "upload refused: " + ((e && e.message) || e));
+      if (BLOCKED_RE.test(String((e && e.message) || ""))) throw S.userError(blockedHint(link), 409);
       throw e;
     }
     // From here the rows may be in G2G's stock: the accounts stay reserved
@@ -397,7 +408,13 @@ async function confirmLoading(link) {
   const now = Date.now();
   const resend = loading.filter((u) => !(u.retries > 0) && now - new Date(u.uploadedAt).getTime() > RETRY_AFTER_MS);
   if (resend.length && noneLanded) {
-    await resendUnits(link, resend);
+    try {
+      await resendUnits(link, resend);
+    } catch (e) {
+      if (!BLOCKED_RE.test(String((e && e.message) || ""))) throw e;
+      // Retried on every sweep until the owner clears it; said once (3 h).
+      await pageOnce("blocked:" + link.offerId, "⚠️ " + blockedHint(link) + " (" + resend.length + " account(s) waiting, set aside meanwhile.)");
+    }
     return 0;
   }
   const refused = loading.filter((u) => u.retries > 0 && now - new Date(u.uploadedAt).getTime() > RELEASE_AFTER_MS);
