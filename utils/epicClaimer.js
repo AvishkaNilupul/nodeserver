@@ -26,6 +26,12 @@ const TICK_MS = 6 * 60 * 60 * 1000; // every 6 hours
 // waiting out the rest of the 6-hour tick (a restart during the pause used to
 // push the next try up to 6 h past its end).
 const AFTER_PAUSE_MS = 2 * 60 * 1000;
+// While the Mac can't take claims (screen locked, Chrome helper not checking
+// in, bridge busy or unreachable) it is asked again this often. 2026-11-01:
+// a locked Mac turned a whole 6-hour tick into 29 refused claims.
+const MAC_RETRY_MS = 15 * 60 * 1000;
+const MAC_ALERT_EVERY_MS = 6 * 60 * 60 * 1000;
+const MAC_DOWN = new Set(["worker_unavailable", "busy"]);
 
 const state = {
   started: false,
@@ -34,12 +40,16 @@ const state = {
   nextRunAt: null,
   lastError: "",
   lastCounts: { accounts: 0, synced: 0, needsLogin: 0, pendingClaims: 0, regionLocked: 0 },
+  // { since, reason, status, checkedAt } while the Mac can't take claims.
+  macDown: null,
+  macAlertAt: 0,
 };
 
 // Outcomes where a Telegram "claim needed" ping can't help: the giveaway is
-// region-locked for this account, or Epic's 429 pause also blocks manual
-// claims and the claimer resumes on its own once it lifts.
-const NO_PING = new Set(["region_blocked", region.REFUSED, "rate_limited", "spacing"]);
+// region-locked for this account, Epic's 429 pause also blocks manual
+// claims and the claimer resumes on its own once it lifts, or the Mac can't
+// take claims (one "waiting for the Mac" message covers every account).
+const NO_PING = new Set(["region_blocked", region.REFUSED, "rate_limited", "spacing", ...MAC_DOWN]);
 
 // The claim module answers "spacing" while the gap between two Epic
 // checkouts runs; a scheduled run waits it out and tries the same game again.
@@ -58,8 +68,29 @@ async function claimSpaced(acc, freebie, accessToken, opts) {
 
 function nextDelay(now = Date.now()) {
   const pausedUntil = rateBackoff.until();
-  if (!pausedUntil) return TICK_MS;
-  return Math.min(TICK_MS, Math.max(60000, pausedUntil - now + AFTER_PAUSE_MS));
+  if (pausedUntil) return Math.min(TICK_MS, Math.max(60000, pausedUntil - now + AFTER_PAUSE_MS));
+  return state.macDown ? MAC_RETRY_MS : TICK_MS;
+}
+
+// One message per Mac outage (repeated at most every 6 h), not one per account.
+async function alertMacDown(pending) {
+  if (state.macDown.quiet || Date.now() - state.macAlertAt < MAC_ALERT_EVERY_MS) return;
+  state.macAlertAt = Date.now();
+  await sendTelegram(
+    "⏸ Epic claims are waiting for the Mac: " + state.macDown.reason +
+      "\n" + pending + " claim(s) pending. They start on their own within 15 min once the Mac is ready.",
+  );
+}
+
+// Before a run while the Mac was down: ask it (one local HTTP call) instead of
+// re-syncing every account. True when it still can't take claims.
+async function macStillDown() {
+  if (!state.macDown || rateBackoff.until() || typeof epicAutoClaim.workerReady !== "function") return false;
+  const probe = await epicAutoClaim.workerReady();
+  state.macDown.checkedAt = new Date();
+  if (probe.ready) return false;
+  if (probe.reason) state.macDown.reason = probe.reason;
+  return true;
 }
 
 // account+offer pairs already pinged this pass-cycle, so one live giveaway
@@ -145,7 +176,9 @@ async function pingClaim(acc, freebie, accessToken) {
 // Sync one account and return { missing, regionLocked } counts for the live
 // freebies it still needs. blocked is the fleet's offerId -> refused-countries
 // map; a refusal seen here is added to it so later accounts skip that game.
-async function processAccount(acc, liveFreebies, notify, priceByNamespace, blocked = new Map()) {
+// run is shared by one pass over the fleet: once the Mac can't take a claim
+// (run.macDown), later accounts are only synced, not claimed.
+async function processAccount(acc, liveFreebies, notify, priceByNamespace, blocked = new Map(), run = {}) {
   const counts = { missing: 0, regionLocked: 0 };
   try {
     let accessToken = await accountAccessToken(acc);
@@ -157,12 +190,19 @@ async function processAccount(acc, liveFreebies, notify, priceByNamespace, block
     counts.regionLocked = notOwned.length - missing.length;
     if (notify && !acc.sold) {
       for (const f of missing) {
+        if (run.macDown) break;
         // Try the direct-API auto-claim first. If it succeeded — or if it
         // ran and got a definitive "already owned" — skip the Telegram tap
         // link for this offer. The library re-sync on the next tick will
         // confirm ownership landed. Only ping the operator when the auto
         // path is disabled, throttled, or actually failed.
         const auto = await claimSpaced(acc, f, accessToken, { blocked });
+        if (MAC_DOWN.has(auto.status)) {
+          // A claim this server is already running (Claim all, a manual
+          // Claim) pauses the run too, but the owner needs no message for it.
+          run.macDown = { status: auto.status, quiet: !!auto.local, reason: auto.error || (auto.status === "busy" ? "Mac is running another claim" : "Mac claim helper unavailable") };
+          break;
+        }
         if (auto.status === region.REFUSED) {
           region.noteRefusal(blocked, acc, f.offerId);
           counts.regionLocked++;
@@ -209,6 +249,7 @@ async function runOnce(opts) {
         .map((f) => [f.namespace, parsePrice(f.originalPrice)]),
     );
     const blocked = region.blockedCountries(accounts);
+    const run = {};
     let synced = 0;
     let needsLogin = 0;
     let pendingClaims = 0;
@@ -220,6 +261,7 @@ async function runOnce(opts) {
         notify,
         priceByNamespace,
         blocked,
+        run,
       );
       if (acc.status === "needs_login") needsLogin++;
       else synced++;
@@ -232,6 +274,16 @@ async function runOnce(opts) {
           needsLogin +
           " account(s) need a fresh login code — open the Epic accounts tab.",
       ).catch(() => {});
+    }
+    // Only a claiming run can tell whether the Mac is up again.
+    if (notify) {
+      if (run.macDown) {
+        state.macDown = { since: state.macDown ? state.macDown.since : new Date(), ...run.macDown, checkedAt: new Date() };
+        await alertMacDown(pendingClaims).catch(() => {});
+      } else {
+        state.macDown = null;
+        state.macAlertAt = 0;
+      }
     }
     state.lastCounts = {
       accounts: accounts.length,
@@ -259,6 +311,7 @@ function status() {
     lastError: state.lastError,
     lastCounts: state.lastCounts,
     intervalHours: TICK_MS / 3600000,
+    macDown: state.macDown,
   };
 }
 
@@ -271,14 +324,16 @@ function start() {
     if (t.unref) t.unref();
   };
   const tick = async () => {
+    let delay = 0;
     try {
-      await runOnce();
+      if (await macStillDown()) delay = MAC_RETRY_MS;
+      else await runOnce();
     } catch (err) {
       console.error("epicClaimer error:", err.message);
     }
-    schedule(nextDelay());
+    schedule(delay || nextDelay());
   };
   schedule(70000);
 }
 
-module.exports = { start, runOnce, status, syncLibrary, processAccount, nextDelay };
+module.exports = { start, runOnce, status, syncLibrary, processAccount, nextDelay, macStillDown };

@@ -53,12 +53,36 @@ async function callWorker({ accessToken, namespace, offerId, capSolverKey, jobId
     },
   );
   if (res.status !== 200) {
+    // The Mac bridge says why it refused ("Mac screen is locked; ..."); keep
+    // that wording for the page and Telegram.
+    const why = res.data && typeof res.data.error === "string" && res.data.error;
     return {
       status: res.status === 409 ? "busy" : res.status === 503 ? "worker_unavailable" : "error",
-      error: "worker HTTP " + res.status + ": " + JSON.stringify(res.data).slice(0, 200),
+      error: why ? why.slice(0, 300) : "worker HTTP " + res.status + ": " + JSON.stringify(res.data).slice(0, 200),
     };
   }
   return res.data;
+}
+
+// Whether the Mac bridge can take a claim now, asked without minting an
+// exchange code or touching Epic. Returns { ready, reason }.
+async function workerReady() {
+  if (!WORKER_URL || !WORKER_TOKEN) return { ready: true };
+  try {
+    const res = await axios.get(WORKER_URL.replace(/\/$/, "") + "/health", {
+      headers: { Authorization: "Bearer " + WORKER_TOKEN },
+      timeout: 10000,
+      validateStatus: () => true,
+    });
+    const h = res.status === 200 && res.data && typeof res.data === "object" ? res.data : null;
+    if (!h) return { ready: false, reason: "Mac claim bridge answered HTTP " + res.status };
+    // A bridge from before 2026-11-01 has no `ready` field.
+    const ready = typeof h.ready === "boolean" ? h.ready : !!h.connected && !h.busy;
+    if (ready) return { ready: true };
+    return { ready: false, reason: String(h.reason || (h.busy ? "Mac is running another claim" : "Chrome claim helper is not checking in")).slice(0, 200) };
+  } catch (err) {
+    return { ready: false, reason: "Mac claim bridge unreachable (" + (err.code || err.message || "error") + ")" };
+  }
 }
 
 const state = {
@@ -177,7 +201,9 @@ function regionMessage(lock) {
 // (utils/epicRegion.blockedCountries); without it only this account's own
 // refusals lock a giveaway.
 async function attemptAutoClaim(acc, freebie, accessToken, opts = {}) {
-  if (claimRunning) return { attempted: false, status: "busy", error: "A claim is already running" };
+  // local: this server is running another claim (manual or Claim all), as
+  // opposed to the Mac bridge answering busy.
+  if (claimRunning) return { attempted: false, status: "busy", local: true, error: "A claim is already running" };
   claimRunning = true;
   try { return await runClaim(acc, freebie, accessToken, opts); }
   finally { claimRunning = false; }
@@ -297,7 +323,11 @@ async function runClaim(acc, freebie, accessToken, opts) {
     try { result.retryAt = new Date(rateBackoff.block(result.retryAfterSeconds)).toISOString(); }
     catch { result.error = "Epic rate limited claims; could not persist cooldown, check server storage"; }
   }
-  result = await verifyClaimResult(result, freebie.namespace, () => epic.getLibraryRecords(accessToken));
+  // The Mac never opened a checkout, so there is no order to look for in the
+  // library (that check is six reads over ~12 s per refused account).
+  if (!["busy", "worker_unavailable"].includes(result.status)) {
+    result = await verifyClaimResult(result, freebie.namespace, () => epic.getLibraryRecords(accessToken));
+  }
   if (["busy", "worker_unavailable", "rate_limited"].includes(result.status)) {
     state.dayCounts[attemptDay] = Math.max(0, (state.dayCounts[attemptDay] || 0) - 1);
     return { attempted: false, ...result };
@@ -364,5 +394,6 @@ function _reset() {
 module.exports = {
   attemptAutoClaim,
   getStatus,
+  workerReady,
   _reset,
 };

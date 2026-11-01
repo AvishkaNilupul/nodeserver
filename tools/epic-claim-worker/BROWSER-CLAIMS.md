@@ -101,3 +101,34 @@ account's country, lists locked games apart ("Region locked · RU") without a
 Claim button, shows each missing game's last try, and says when a 429 pause
 lifts. After a pause the scheduler runs again two minutes after it lifts
 instead of waiting for the next 6-hour tick.
+
+## Locked screen, missed check-ins and the bridge's limits
+
+Claims need the Mac's screen unlocked. A locked screen hides every Chrome page
+and macOS throttles Chrome, so checkouts stall: on 2026-10-31 07:33–09:18 JST
+(screen locked since 01:31) all 15 scheduled claims ended "Browser checkout
+timed out", and on 2026-11-01 15:25 JST (locked at 15:21) all 29 were refused.
+Every claim with the screen unlocked went through. The bridge reads the lock
+from `ioreg` (`CGSSessionScreenIsLocked`, every 5 s) and refuses a claim at
+once with "Mac screen is locked; unlock it so Chrome can run claims", so a
+locked Mac no longer uses up tries (8 per game, 17 h apart) or daily-cap slots.
+`EPIC_CLAIM_ALLOW_LOCKED=1` in `~/epic-claim/.env` lets claims run while locked.
+
+The bridge also refuses when the helper hasn't checked in for 90 s, and
+withdraws a job nobody picks up within 60 s; both answer `worker_unavailable`
+with the reason. Once picked up, a claim has 180 s. The helper's page gives up
+120 s after the job starts and says where it stopped (page, whether Chrome
+hid it, clicks), and its stuck-tab check reports at 130–160 s, so its own
+reason reaches the server. Before this, the bridge's single 150 s limit
+included the up-to-30 s pickup and always cut the helper off: 19 of 19 stalls
+on prod read "Browser checkout timed out" with no reason. The bridge logs
+each job (queued, picked up, answered or timed out, and answers that came too
+late) to `~/Library/Logs/epic-claim-worker.log`, without codes or tokens.
+
+On the server, the first claim the Mac refuses (or a busy bridge) ends
+claiming for that run: the rest of the accounts are only synced, one Telegram
+message says why and how many claims wait (repeated at most every 6 h), and
+no per-account "claim needed" pings go out. The scheduler then asks the
+bridge's `/health` every 15 minutes, without touching Epic, and runs as soon
+as it is ready. A refused claim skips the library re-check, since no checkout
+opened. `epicClaimer.status().macDown` holds the reason while it lasts.

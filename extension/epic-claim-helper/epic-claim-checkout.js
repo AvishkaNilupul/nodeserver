@@ -2,6 +2,12 @@
  if(window.__epicClaimCheckout)return;window.__epicClaimCheckout=true;
  const context=await chrome.runtime.sendMessage({type:'epicclaim-context'}).catch(()=>null);if(!context?.ok||context.job?.mode==='recover')return;
  const job=context.job;let clicked=false,done=false,emptyReceiptAt=0,lastClickAt=0,clickAttempts=0;
+ // The job's deadline, not this page's load time: every page in the tab
+ // (exchange, then checkout) shares one budget that ends before the bridge's.
+ const deadline=Number(context.deadline)||Date.now()+110000;
+ // Where the checkout stopped, for the timeout message. No query string: the
+ // exchange page's query holds a login code.
+ const place=()=>location.hostname+location.pathname+(/^#\/[\w/-]{0,40}$/.test(location.hash||'')?location.hash:'')+(document.hidden?', page hidden by Chrome':'')+(clicked?', clicked '+clickAttempts+'x':'');
  const report=async(status,error='',extra={})=>{if(done)return;done=true;await chrome.runtime.sendMessage({type:'epicclaim-result',status,error,...extra});};
  window.addEventListener('message',event=>{
   if(event.source!==window||event.origin!==location.origin||event.data?.source!=='epic-claim-network'||event.data.status!==429)return;
@@ -40,5 +46,5 @@
   if(!/this is free/i.test(text)||!prices.length||prices.some(price=>price!==0))return report('error','Checkout is not explicitly free');
   clicked=true;lastClickAt=Date.now();clickAttempts++;button.click();
  },1000);
- setTimeout(()=>{clearInterval(timer);report('error',clicked?'Checkout did not confirm completion; verify library':'Checkout did not finish');},110000);
+ setTimeout(()=>{clearInterval(timer);report('error',(clicked?'Checkout did not confirm completion; verify library':'Checkout did not finish')+' ('+place()+')');},Math.max(5000,deadline-Date.now()));
 })();
