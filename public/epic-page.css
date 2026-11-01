@@ -167,7 +167,7 @@ code { font-family: var(--ep-mono); font-size: 12px; }
 .btn:disabled { opacity: 0.5; cursor: not-allowed; }
 .btn:disabled:hover { background: var(--surface); border-color: var(--ep-line-strong); }
 .btn-primary:disabled:hover { background: var(--accent); border-color: var(--accent); }
-input[type="text"], input[type="search"], input[type="number"], input[type="email"], input[type="tel"], input:not([type]), select, textarea {
+input[type="text"], input[type="search"], input[type="number"], input[type="email"], input[type="tel"], input[type="password"], input[type="date"], input[type="url"], input:not([type]), select, textarea {
   min-height: 34px; padding: 6px 10px; border: 1px solid var(--ep-line-strong); border-radius: 8px;
   background: var(--surface); color: var(--ink); font: inherit; font-size: 13px;
 }
@@ -334,7 +334,7 @@ html[data-theme="dark"] .toast { background: #273043; }
   .ep-stat-value { font-size: 19px; }
   .ep-stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   /* 16px text stops phones zooming in when a field is tapped. */
-  input[type="text"], input[type="search"], input[type="number"], input[type="email"], input[type="tel"], input:not([type]), select, textarea, .ep-search input { font-size: 16px; }
+  input[type="text"], input[type="search"], input[type="number"], input[type="email"], input[type="tel"], input[type="password"], input[type="date"], input[type="url"], input:not([type]), select, textarea, .ep-search input { font-size: 16px; }
   .modal-wrap { align-items: flex-end; padding: 0; }
   .modal { max-width: none; max-height: 92vh; max-height: 92dvh; border-radius: 14px 14px 0 0; padding: 18px 16px; }
   .modal .modal-actions .btn { flex: 1 1 auto; }

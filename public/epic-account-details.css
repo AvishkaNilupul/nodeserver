@@ -1,20 +1,53 @@
-.epic-tabs { display:flex; gap:8px; margin-bottom:18px; }
-#epic-details-panel [hidden], #epic-claims-panel[hidden], #epic-details-panel[hidden] { display:none !important; }
-.epic-detail-grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:14px; margin:16px 0; }
-.epic-detail-grid label, .epic-detail-notes { display:flex; flex-direction:column; gap:6px; font-size:13px; color:var(--muted); }
-.epic-detail-grid input, .epic-detail-notes textarea { width:100%; min-width:0; padding:10px 11px; border:1px solid var(--line); border-radius:8px; background:var(--surface-2); color:var(--ink); font:inherit; }
-.epic-detail-notes { margin:16px 0; }
-#epic-detail-summary { overflow-wrap:anywhere; }
-#epic-detail-status { margin-top:14px; }
-#epic-detail-account { max-width:100%; }
-#epic-detail-secrets { padding:12px; border:1px solid var(--line); border-radius:9px; }
-@media(max-width:700px) { .epic-detail-grid { grid-template-columns:1fr; } main { min-width:0; padding:20px 14px; } #epic-detail-form .row { align-items:stretch; } }
-@media(max-width:768px) {
-  .epic-tabs { gap:6px; margin-bottom:14px; }
-  .epic-tabs .btn { flex:1 1 0; }
-  #epic-details-panel .row > label { flex:1 1 100%; }
-  #epic-detail-account, #epic-detail-refresh, #epic-detail-form .row .btn { flex:1 1 100%; }
-  /* 16px text stops phones zooming in when a field is tapped. */
-  #epic-detail-account, .epic-detail-grid input, .epic-detail-notes textarea { font-size:16px; }
-  #epic-detail-games { padding-left:20px; }
+/* Account details tab (public/epic-account-details.js). Composes the kit in
+   epic-page.css: a searchable account list on the left, the form on the right. */
+.ed-layout { display: grid; grid-template-columns: 300px minmax(0, 1fr); gap: 14px; align-items: start; }
+/* Stays in view under the sticky tab bar while a long form scrolls. */
+.ed-side { position: sticky; top: 60px; }
+.ed-side-bd { display: flex; flex-direction: column; gap: 10px; padding: 12px; }
+.ed-side .ep-search { max-width: none; flex: none; }
+.ed-list { display: flex; flex-direction: column; gap: 2px; min-height: 140px; max-height: calc(100vh - 270px); margin: 0 -4px; padding: 0 4px; overflow: auto; }
+.ed-list .ep-empty { padding: 18px 8px; }
+.ed-item { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 1px 8px; width: 100%; padding: 8px 10px; border: 1px solid transparent; border-radius: 9px; background: none; color: var(--ink); font: inherit; text-align: left; cursor: pointer; }
+.ed-item:hover { background: var(--surface-2); }
+.ed-item.is-on { border-color: var(--accent); background: var(--ep-accent-soft); }
+.ed-item-name { display: flex; align-items: center; gap: 6px; min-width: 0; font-size: 13px; }
+.ed-item-name b { overflow: hidden; font-weight: 650; text-overflow: ellipsis; white-space: nowrap; }
+.ed-item-sub { grid-column: 1; overflow: hidden; color: var(--muted); font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
+.ed-item-tags { grid-column: 2; grid-row: 1 / span 2; align-self: center; display: flex; flex-direction: column; align-items: flex-end; gap: 3px; }
+.ed-tools > div { display: flex; flex-direction: column; align-items: flex-start; gap: 10px; }
+.ed-main { display: flex; flex-direction: column; gap: 10px; min-width: 0; }
+.ed-form-hd { align-items: flex-start; }
+.ed-title { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; min-width: 0; }
+.ed-title h2 { overflow-wrap: anywhere; }
+.ed-badges { display: flex; flex-wrap: wrap; gap: 5px; }
+#epic-detail-summary { flex-basis: 100%; margin: 0; overflow-wrap: anywhere; }
+.ed-sec + .ed-sec { margin-top: 18px; padding-top: 16px; border-top: 1px solid var(--line); }
+.ed-sec h3, .ed-after h3 { margin: 0 0 10px; color: var(--muted); font-size: 11.5px; font-weight: 700; letter-spacing: 0.04em; text-transform: uppercase; }
+.epic-detail-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px 14px; }
+.epic-detail-grid label, .epic-detail-notes { display: flex; flex-direction: column; gap: 5px; color: var(--muted); font-size: 12.5px; font-weight: 600; }
+.epic-detail-grid input, .epic-detail-notes textarea { width: 100%; min-width: 0; font-weight: 400; }
+.epic-detail-grid input[readonly] { background: var(--surface-2); color: var(--muted); }
+.ed-contact-row { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px 12px; margin-top: 10px; }
+.ed-contact-row .hint { margin: 0; }
+/* The save buttons stay at the bottom of the screen while the form is longer than it. */
+.ed-savebar { position: sticky; bottom: 0; z-index: 5; background: var(--surface); box-shadow: 0 -10px 18px -14px rgba(15, 23, 42, 0.35); }
+.ed-status { flex: 1 1 200px; margin: 0; color: var(--muted); font-size: 12.5px; text-align: right; overflow-wrap: anywhere; }
+.ed-status.ep-error, #epic-detail-empty-msg.ep-error { color: var(--ep-err); }
+.ed-after { border-top: 1px solid var(--line); }
+.ed-after .hint { margin: 0 0 14px; }
+#epic-detail-secrets { margin-bottom: 12px; padding: 12px; border: 1px solid var(--line); border-radius: 10px; background: var(--surface-2); }
+.ed-games { margin: 0; padding-left: 18px; columns: 2 220px; column-gap: 24px; font-size: 13px; }
+.ed-games li { padding: 2px 0; break-inside: avoid; }
+@media (max-width: 1000px) {
+  .ed-layout { grid-template-columns: minmax(0, 1fr); }
+  .ed-side { position: static; }
+  .ed-list { max-height: 300px; }
+  /* Room for the fixed top bar and the sticky tabs when the form is scrolled into view. */
+  #epic-detail-form { scroll-margin-top: 112px; }
+}
+@media (max-width: 700px) {
+  .epic-detail-grid { grid-template-columns: minmax(0, 1fr); }
+  .ed-savebar .btn { flex: 1 1 auto; }
+  .ed-status { flex-basis: 100%; text-align: left; }
+  .ed-contact-row .btn { width: 100%; }
 }
