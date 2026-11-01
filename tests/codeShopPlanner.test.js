@@ -795,3 +795,23 @@ test("autoLabels: only rewards with a code still free to sell go to the translat
   const [p] = await drafts();
   assert.deepEqual(p.slots.map((s) => s.label), ["Spare Prize"]);
 });
+
+test("store credit (a Nexon Cash coupon from an Overwatch stream) is never drafted; the game's own rewards still are", async () => {
+  await reset();
+  // CHZZK's "N Connector" event: Nexon Cash for watching an Overwatch stream.
+  await addSlot({ gameNo: "12", groupKey: "12:chzzk-2016", nameRaw: "넥슨캐시 3,000원", name: "넥슨캐시 3,000원", count: 1 });
+  // A mixed group: the voucher is left out, the spray is drafted alone.
+  await addSlot({ gameNo: "12", groupKey: "12:chzzk-2020", nameRaw: "Made Up Spray", count: 1 });
+  await addSlot({ gameNo: "12", groupKey: "12:chzzk-2020", nameRaw: "네이버 페이 5천원", name: "네이버 페이 5천원", count: 1 });
+  const { planner, events } = setupWith();
+  const res = await planner.run();
+  noErrors(events);
+  assert.equal(res.vouchers, 2);
+  assert.equal(res.created, 1);
+  const all = await drafts();
+  assert.equal(all.length, 1);
+  assert.deepEqual(all[0].groupKeys, ["12:chzzk-2020"]);
+  assert.deepEqual(all[0].slots.map((s) => s.nameRaw), ["Made Up Spray"]);
+  // The codes stay in the ledger, untouched.
+  assert.equal(await CodeStock.countDocuments({ state: "in_stock" }), 3);
+});

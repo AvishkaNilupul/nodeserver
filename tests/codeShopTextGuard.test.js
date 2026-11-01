@@ -352,3 +352,18 @@ test("a label must stay one short line without '=' (unit lines are parsed back)"
   assert.ok(p(["a = b"]).some((x) => /"="/.test(x)));
   assert.ok(p(["x".repeat(81)]).some((x) => /max 80/.test(x)));
 });
+
+/* ------------------------------ store credit ------------------------------ */
+
+test("store credit in a label or the title is refused (a Nexon Cash coupon is not an Overwatch reward)", () => {
+  const t = clean();
+  t.labels = ["Nexon Cash 3,000 KRW"];
+  t.title = "Overwatch 2 | Event 30 Oct 2026 | Nexon Cash 3,000 KRW | Redeem Code | Instant Auto Delivery";
+  const problems = checkBuyerText(t);
+  assert.ok(has(problems, /^title is store credit, not a game reward: "Nexon Cash"/), problems.join("\n"));
+  assert.ok(has(problems, /^label 1 is store credit, not a game reward: "Nexon Cash"/), problems.join("\n"));
+  // A gift card named only in the title is refused too.
+  const g = clean();
+  g.title = "Overwatch 2 | $5 Gift Card | Redeem Code";
+  assert.ok(has(checkBuyerText(g), /^title is store credit/));
+});

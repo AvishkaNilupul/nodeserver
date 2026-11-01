@@ -36,6 +36,7 @@ const { eventStarts } = require("./eventDates");
 const { guideFor } = require("./games");
 const { DEFAULTS, marketsForGame } = require("./config");
 const { createLabeler, cleanLabel } = require("./labels");
+const { isVoucher } = require("./vouchers");
 
 const HOUR_MS = 60 * 60 * 1000;
 const DAY_MS = 24 * HOUR_MS;
@@ -455,10 +456,17 @@ function createPlanner(deps = {}) {
     const query = sellNew ? { gameNo: { $nin: off } } : { gameNo: { $in: games } };
     const rows = await leanOf(CodeStock().find(query, ROW_FIELDS));
 
+    // Store credit (Nexon Cash, gift cards, …) is not a reward of the game its
+    // stream was on: never drafted. The codes stay in stock (vouchers.js).
+    let vouchers = 0;
     const byGroup = new Map();
     for (const r of rows || []) {
       const key = text(r.groupKey);
       if (!key) continue;
+      if (isVoucher(r.nameRaw, r.name)) {
+        vouchers += 1;
+        continue;
+      }
       if (!byGroup.has(key)) byGroup.set(key, []);
       byGroup.get(key).push(r);
     }
@@ -481,6 +489,7 @@ function createPlanner(deps = {}) {
     // Only when they happened, so a pass with nothing new reads as before.
     if (ctx.extra.relabelled) out.relabelled = ctx.extra.relabelled;
     if (ctx.extra.newGames) out.newGames = ctx.extra.newGames;
+    if (vouchers) out.vouchers = vouchers;
 
     if (out.deleted || out.staled) {
       await log({
