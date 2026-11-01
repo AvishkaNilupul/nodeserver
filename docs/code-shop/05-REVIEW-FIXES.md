@@ -229,3 +229,26 @@ held more than once reads `3x Esports Loot Box`. A multi-code title gives up
 keeps one more reward in. The description and the delivered code lines keep
 the bundle order and every label whole. Deployed 2026-11-01 10:49Z (texts.js
 only), backup `_deploy_backup_20261101104939_code-shop-title-order`.
+
+## R16. Store credit is never sold as a game's code (2026-11-02, owner: "fix them")
+
+CHZZK's "N Connector" event paid a Nexon Cash 3,000 KRW coupon for watching
+any of four streams (MapleStory, Overwatch, Mabinogi, Mabinogi Mobile). The
+ledger files a code under the game of its stream, so the autopilot listed the
+Overwatch copy on Eldorado as "Overwatch 2 | Event 30 Oct 2026 | Nexon Cash
+3,000 KRW" ($1, 1 unit, live 2026-11-01 15:09Z). No Overwatch account can use
+Nexon wallet credit, and "KRW" names the country.
+- `utils/codeShop/vouchers.js` (pure): store credit by name - Nexon Cash, Naver
+  Pay / points, gift cards and certificates, SOOP balloons, CHZZK cheese, won
+  or KRW amounts.
+- planner: a voucher row is never drafted (`out.vouchers` counts them); its
+  codes stay in stock and in the panel for the owner.
+- textGuard: a title or label naming store credit is a problem, so approve,
+  publish and resume refuse it too.
+Checked on prod first: of 73 reward names and 44 products, only that coupon and
+its product matched (one more voucher, "Naver Pay 5,000 won" from an ARC
+Raiders campaign, was not in the shop). Not re-filed under a game of its own:
+`sellNewGames` would have put that game on sale. Deployed 2026-11-01 15:43Z
+(planner.js, textGuard.js, new vouchers.js), backup
+`_deploy_backup_20261101154300_code-shop-vouchers` on prod; the product itself
+was paused through `publisher.pause` from a guarded side process.
