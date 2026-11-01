@@ -136,3 +136,16 @@ and reads completing after another request supersedes them are discarded. If a
 verification page has no matching window (including a resumed/reloaded page),
 the extension requests a fresh email before reading a code. No OTP value is
 written to the repository or diagnostic logs.
+
+## Sequential batches
+
+On the local generator page, enable automatic submission, choose **Accounts to make**
+(default 5, range 1–50), then **Start batch**. Settings are captured for the batch.
+Only a verified local save advances the queue; the previous private window is
+closed before completion is announced, with a five-second gap before the next
+signup. Cloud uploads continue independently. Security checks wait in the current
+Epic window. A failure or cleanup warning stops the batch and preserves the
+interrupted identity for recovery. **Stop after current** finishes the current
+account; **Cancel signup** cancels it and clears the remaining queue. Keep the
+generator page and Chrome open: refreshing or closing the page drops the queue,
+so it never silently starts more accounts after reopening.

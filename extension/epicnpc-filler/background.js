@@ -188,9 +188,13 @@ chrome.runtime.onMessage.addListener((msg, sender, respond) => {
       // remains consumed and prevents reuse of this address.
       let warning = '';
       try { await finish(s, 'ok'); } catch (e) { warning = e.message; }
-      await relay(s, { kind: 'verified', account: result.account, warning });
       await chrome.storage.session.remove(KEY);
-      if (s.windowId) await chrome.windows.remove(s.windowId).catch(() => {});
+      if (s.windowId) {
+        try { await chrome.windows.remove(s.windowId); }
+        catch { warning = warning || 'Account saved, but its private window could not close. Close it before the next signup.'; }
+      }
+      // Only announce completion once the next isolated signup can start.
+      await relay(s, { kind: 'verified', account: result.account, warning });
       return { ok: true, account: result.account };
     }
     if (msg.type === 'epicgen-abort') {
