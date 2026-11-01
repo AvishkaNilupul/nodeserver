@@ -392,6 +392,16 @@
       superOnly: true,
     },
     {
+      // Personal kanji study page (public/kanji/): its own phone-first app,
+      // no server routes, works offline.
+      href: "/kanji/",
+      label: "Kanji practice",
+      icon:
+        '<path d="M2 4h7a3 3 0 0 1 3 3v13a2 2 0 0 0-2-2H2z"></path>' +
+        '<path d="M22 4h-7a3 3 0 0 0-3 3v13a2 2 0 0 1 2-2h8z"></path>',
+      superOnly: false,
+    },
+    {
       href: "/settings.html",
       label: "Settings",
       icon: ICONS.settings,
