@@ -29,7 +29,7 @@ test('server accepts only recent local Outlook reservations', () => {
   }
 });
 
-function worker({ incognitoAllowed = true, existingPrivate = false } = {}) {
+function worker({ incognitoAllowed = true, existingPrivate = false, now=Date.now, otpResponse=null } = {}) {
   const storage = {}; const calls = []; let listener; let auth; let removed; let nextTab = 10;
   const chrome = {
     extension: { isAllowedIncognitoAccess: async () => incognitoAllowed },
@@ -51,11 +51,11 @@ function worker({ incognitoAllowed = true, existingPrivate = false } = {}) {
     if (url.includes('/epic/proxy')) body = { ok: true, proxy: { scheme: 'http', host: 'proxy.test', port: 1234, username: 'user', password: 'proxy-secret' } };
     if (url.endsWith('/api/accounts')) body = [{ email: 'stock@outlook.com', uses: { epic: { status: 'fail' } } }];
     if (url.includes('/pool/pick')) body = { ok: true, email: 'stock@outlook.com' };
-    if (url.includes('/otp?')) body = { ok: true, code: '123456', receivedAt: otpReceivedAt };
+    if (url.includes('/otp?')) body = otpResponse ? await otpResponse(url,init) : { ok: true, code: '123456', receivedAt: otpReceivedAt };
     if (url.includes('/from-extension')) body = { success: true, account: { _id: 'account' } };
     return { ok: true, json: async () => body };
   };
-  vm.runInNewContext(fs.readFileSync(require.resolve('../extension/epicnpc-filler/background.js'), 'utf8'), { chrome, fetch, URL, AbortSignal, setTimeout });
+  vm.runInNewContext(fs.readFileSync(require.resolve('../extension/epicnpc-filler/background.js'), 'utf8'), { chrome, fetch, URL, AbortSignal, setTimeout, Date:class extends Date {constructor(...args){super(...(args.length?args:[now()]));}static now(){return now();}} });
   const send = (msg, id = 1, url = 'https://panel.test/epic-accounts.html') => new Promise(resolve => listener(msg, { tab: { id, url } }, resolve));
   return { storage, calls, send, auth: d => new Promise(resolve => auth(d, resolve)), removed: id => removed(id) };
 }
@@ -68,7 +68,7 @@ test('extension reserves Outlook once, binds tabs, polls locally, and saves with
   assert.equal((await w.send({ type: 'epicgen-allocate' })).ok, false);
   const s = { type: 'epicgen-drive', sessionId: 'session', bearer: 'secret', identity: { email: 'stock@outlook.com', password: 'pw' }, automation: { autoSubmit: true, autoAcceptEula: true }, redirectUrl: 'https://www.epicgames.com/id/api/redirect?clientId=abc' };
   assert.equal((await w.send(s)).ok, true);
-  const epic = (type, extra = {}, id = 10) => w.send({ type, sessionId: 'session', ...extra }, id, 'https://www.epicgames.com/id/register');
+  const epic = (type, extra = {}, id = 10) => w.send({ type, sessionId: 'session', phase:'register', ...extra }, id, 'https://www.epicgames.com/id/register');
   assert.equal((await epic('epicgen-session-request', {}, 99)).ok, false);
   const session = await epic('epicgen-session-request');
   assert.equal(session.session.identity.email, 'stock@outlook.com');
@@ -76,6 +76,7 @@ test('extension reserves Outlook once, binds tabs, polls locally, and saves with
   assert.equal(session.session.automation.autoSubmit, true);
   assert.equal(session.session.automation.autoAcceptEula, true);
   assert.equal((await epic('epicgen-open-redirect')).ok, false);
+  await epic('epicgen-begin-otp');
   assert.equal((await epic('epicgen-request-otp')).code, '123456');
   await epic('epicgen-request-otp');
   assert.ok(w.calls.some(c => String(c[0]).includes(encodeURIComponent(new Date(Date.parse(otpReceivedAt)+1).toISOString()))));
@@ -237,9 +238,9 @@ test('email MFA token error opens normal sign-in without submitting another regi
 test('email authentication recovery is bound to a verified tab and attempted once', async () => {
   const w=worker();await w.send({type:'epicgen-allocate'});
   await w.send({type:'epicgen-drive',sessionId:'session',bearer:'secret',identity:{email:'stock@outlook.com'},redirectUrl:'https://www.epicgames.com/id/api/redirect'});
-  const epic=type=>w.send({type,sessionId:'session'},10,'https://www.epicgames.com/id/api/redirect');
+  const epic=type=>w.send({type,sessionId:'session',phase:'register'},10,'https://www.epicgames.com/id/api/redirect');
   assert.equal((await epic('epicgen-recover-auth')).ok,false);
-  await epic('epicgen-request-otp');assert.equal((await epic('epicgen-recover-auth')).ok,true);
+  await epic('epicgen-begin-otp');await epic('epicgen-request-otp');assert.equal((await epic('epicgen-recover-auth')).ok,true);
   assert.equal((await epic('epicgen-session-request')).session.login,true);
   assert.equal((await epic('epicgen-recover-auth')).ok,false);
 });
@@ -332,7 +333,8 @@ test('normal-connection signups isolate cookies and keep capture in the same pri
  assert.equal(w.calls.find(c=>c[0]==='window')[1].incognito,true);
  assert.equal(w.calls.some(c=>c[0]==='proxy'),false);
  assert.equal(w.storage['epicgen.active'].windowId,100);
- await w.send({type:'epicgen-request-otp',sessionId:'isolated'},10,'https://www.epicgames.com/id/register');
+ await w.send({type:'epicgen-begin-otp',sessionId:'isolated',phase:'register'},10,'https://www.epicgames.com/id/register');
+ await w.send({type:'epicgen-request-otp',sessionId:'isolated',phase:'register'},10,'https://www.epicgames.com/id/register');
  await w.send({type:'epicgen-open-redirect',sessionId:'isolated'},10,'https://www.epicgames.com/id/register');
  assert.equal(w.calls.find(c=>c[0]==='tab')[1].windowId,100);
  await w.send({type:'epicgen-authcode',sessionId:'isolated',code:'a'.repeat(32)},11,'https://www.epicgames.com/id/api/redirect');
@@ -343,4 +345,40 @@ test('isolation prerequisites fail before consuming or resuming any inbox',async
   const w=worker(options);assert.equal((await w.send({type:'epicgen-allocate'})).ok,false);
   assert.equal(w.calls.length,0);assert.equal(w.storage['epicgen.pending'],undefined);
  }
+});
+
+
+test('a later sign-in cannot select earlier unused signup mail or consumed message IDs',()=>{
+ const loginAt=new Date(Date.now()-10000).toISOString();
+ const old=message({id:'signup-resend',receivedDateTime:new Date(Date.now()-20000).toISOString(),subject:'Security code 111111'});
+ const fresh=message({id:'login-mail',subject:'Security code 222222'});
+ assert.equal(findEpicOtp([old],loginAt),null);
+ assert.equal(findEpicOtp([fresh,old],loginAt).code,'222222');
+ assert.equal(findEpicOtp([fresh,old],loginAt,['login-mail']),null);
+});
+test('worker binds codes to the current sign-in request and rejects stale mailbox responses',async()=>{
+ let now=Date.now(),reply={ok:true,code:'111111',receivedAt:new Date(now+1000).toISOString(),messageId:'signup-code'};
+ const w=worker({now:()=>now,otpResponse:async()=>reply});
+ await w.send({type:'epicgen-allocate'});
+ await w.send({type:'epicgen-drive',sessionId:'fresh',bearer:'test',identity:{email:'stock@outlook.com'},redirectUrl:'https://www.epicgames.com/id/api/redirect'});
+ const msg=(type,phase='register',id=10)=>w.send({type,sessionId:'fresh',phase},id,'https://www.epicgames.com/id/login/mfa');
+ assert.equal((await msg('epicgen-request-otp')).code,undefined);
+ await msg('epicgen-begin-otp');assert.equal((await msg('epicgen-request-otp')).code,'111111');
+ now+=60000;await msg('epicgen-begin-otp','login');
+ assert.equal((await msg('epicgen-request-otp','login')).code,undefined);
+ assert.equal((await msg('epicgen-request-otp','register')).code,undefined);
+ reply={ok:true,code:'222222',receivedAt:new Date(now+1000).toISOString(),messageId:'login-code'};
+ assert.equal((await msg('epicgen-request-otp','login')).code,'222222');
+ assert.equal((await msg('epicgen-request-otp','login')).code,undefined);
+ assert.equal((await msg('epicgen-otp-state','login',99)).ok,false);
+});
+test('an in-flight old email read cannot complete a replacement verification request',async()=>{
+ let finishRead,started;const reading=new Promise(resolve=>started=resolve);
+ const w=worker({otpResponse:async()=>{started();return new Promise(resolve=>finishRead=resolve);}});
+ await w.send({type:'epicgen-allocate'});
+ await w.send({type:'epicgen-drive',sessionId:'race',bearer:'test',identity:{email:'stock@outlook.com'},redirectUrl:'https://www.epicgames.com/id/api/redirect'});
+ const msg=type=>w.send({type,sessionId:'race',phase:'login'},10,'https://www.epicgames.com/id/login/mfa');
+ await msg('epicgen-begin-otp');const pending=msg('epicgen-request-otp');await reading;
+ await msg('epicgen-begin-otp');finishRead({ok:true,code:'111111',receivedAt:new Date().toISOString()});
+ const result=await pending;assert.equal(result.code,undefined);assert.equal(w.storage['epicgen.active'].lastOtpReceivedAt,undefined);
 });

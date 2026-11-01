@@ -41,7 +41,7 @@ test('an invalid code after a long challenge still reads a fresh email',async()=
  const start=source.lastIndexOf('  (async function () {');let now=1000,reads=0,responses=0;
  const boxes=Array.from({length:6},()=>({focus(){},dispatchEvent(){}}));
  const context={location:{hash:''},window:{},document:{querySelectorAll:()=>boxes},chrome:{},Date:{now:()=>now},KeyboardEvent:class{},advance:ms=>{now+=ms;},reply:()=>{responses++;now+=360000;return responses===1?'otp_invalid':'done';},read:()=>{reads++;return reads===1?'111111':'222222';}};
- const hooks=`sleep=async ms=>advance(ms);banner=()=>{};setVal=(el,v)=>{el.value=v;};clickResendCode=()=>true;waitFor=async fn=>true;waitForStepChange=async()=>reply();sw=async m=>m.type==='epicgen-request-otp'?{ok:true,code:read()}:{ok:true};globalThis.api={handleOtpStep};})();`;
+ const hooks=`sleep=async ms=>advance(ms);banner=()=>{};setVal=(el,v)=>{el.value=v;};requestFreshOtp=async()=>{};clickResendCode=()=>true;waitFor=async fn=>true;waitForStepChange=async()=>reply();sw=async m=>m.type==='epicgen-request-otp'?{ok:true,code:read()}:{ok:true};globalThis.api={handleOtpStep};})();`;
  vm.runInNewContext(source.slice(0,start)+hooks,context);
  await context.api.handleOtpStep();assert.equal(reads,2);assert.equal(boxes.map(b=>b.value).join(''),'222222');
 });

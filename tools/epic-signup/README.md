@@ -126,3 +126,13 @@ or accounts.epicgames.com session without calling Epic's logout endpoint.
 Proxy setup verifies the sticky exit through HTTPS IP geolocation before reserving an inbox. Russian and unverified exits fail closed; untargeted/Russian ProxyScrape usernames target US. The checked location is recorded separately from Epic's account-country field and forwarded through local/cloud save. Geo lookup uses ipwho.is and sends no account credentials.
 
 Account details now shows creation country, its provenance and any recorded signup IP. Historical records can only inherit their saved account-country code; they never acquire an invented historical IP. Fill missing details for past accounts preserves existing fields with optimistic concurrency. Optional fictional contact samples are marked synthetic-internal and use randomly generated country-formatted phone numbers and fictional addresses; these are internal metadata, not Epic profile updates or verified contact information.
+
+## Fresh email codes during token capture
+
+Each registration/sign-in submission and explicit resend opens its own OTP window
+before requesting the email. Code reads use that window's timestamp and phase,
+not the original Outlook reservation. Already-delivered message IDs are excluded,
+and reads completing after another request supersedes them are discarded. If a
+verification page has no matching window (including a resumed/reloaded page),
+the extension requests a fresh email before reading a code. No OTP value is
+written to the repository or diagnostic logs.

@@ -104,15 +104,30 @@ function markUsage(email, forPurpose, status, detail, extra) {
 
 // ----- Graph helpers -----
 
+// Some vendor sets (e.g. the Z2U batch added 2026-10-31) were consented for
+// Mail.Read + Mail.Send only, so asking for SCOPES fails with AADSTS70000.
+// `.default` asks for whatever the token was granted, which is enough to read.
+const FALLBACK_SCOPES = ["https://graph.microsoft.com/.default"];
+
 async function mintAccessToken(acct) {
   const pca = new PublicClientApplication({
     auth: { clientId: acct.clientId, authority: AUTHORITY },
   });
-  const result = await pca.acquireTokenByRefreshToken({
-    refreshToken: acct.refreshToken,
-    scopes: SCOPES,
-  });
-  return result.accessToken;
+  try {
+    const result = await pca.acquireTokenByRefreshToken({
+      refreshToken: acct.refreshToken,
+      scopes: SCOPES,
+    });
+    return result.accessToken;
+  } catch (err) {
+    const msg = String((err && (err.errorMessage || err.message)) || err);
+    if (!msg.includes("AADSTS70000")) throw err;
+    const result = await pca.acquireTokenByRefreshToken({
+      refreshToken: acct.refreshToken,
+      scopes: FALLBACK_SCOPES,
+    });
+    return result.accessToken;
+  }
 }
 
 async function listMessages(accessToken, top = 10) {
@@ -734,7 +749,7 @@ app.post("/api/accounts/:email/otp", async (req, res) => {
       );
       if (!data.ok) { errors.push(`${via}: ${data.error}`); continue; }
       if (req.query.for === "epic") {
-        const hit = findEpicOtp(data.messages || [], req.query.since);
+        const hit = findEpicOtp(data.messages || [], req.query.since, Array.isArray(req.body?.excludeMessageIds)?req.body.excludeMessageIds.filter(v=>typeof v==='string'&&v.length<=2048).slice(-30):[]);
         if (hit) return res.json({ ok: true, ...hit, source: via });
         errors.push(`${via}: no fresh Epic verification code`);
         continue;

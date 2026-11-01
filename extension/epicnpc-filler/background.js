@@ -116,18 +116,32 @@ chrome.runtime.onMessage.addListener((msg, sender, respond) => {
       await relay(s, { kind: 'status', status: msg.status });
       return { ok: true };
     }
+    if (msg.type === 'epicgen-begin-otp') {
+      if(!['register','login'].includes(msg.phase))throw Error('Invalid verification phase');
+      s.otpGeneration=(s.otpGeneration||0)+1;
+      s.otpWindow={id:s.otpGeneration,phase:msg.phase,tabId:sender.tab.id,requestedAt:new Date().toISOString()};
+      await chrome.storage.session.set({[KEY]:s});
+      return {ok:true};
+    }
+    if (msg.type === 'epicgen-otp-state') {
+      return {ok:true,ready:!!s.otpWindow&&s.otpWindow.tabId===sender.tab.id&&s.otpWindow.phase===msg.phase};
+    }
     if (msg.type === 'epicgen-request-otp') {
-      // One bounded read per message keeps the MV3 worker alive and lets
-      // the content script retry without a five-minute message channel.
+      // The current email request, not the inbox reservation, sets freshness.
+      const window=s.otpWindow;
+      if(!window||window.tabId!==sender.tab.id||window.phase!==msg.phase)return {ok:true,waiting:true,error:'Waiting for a fresh verification email request'};
       try {
-        const since = s.lastOtpReceivedAt && Number.isFinite(Date.parse(s.lastOtpReceivedAt))
-          ? new Date(Math.max(Date.parse(s.reservedAt), Date.parse(s.lastOtpReceivedAt) + 1)).toISOString() : s.reservedAt;
-        const hit = await local(`/api/accounts/${encodeURIComponent(s.identity.email)}/otp?for=epic&since=${encodeURIComponent(since)}&via=graph`);
-        if (hit.receivedAt && Number.isFinite(Date.parse(hit.receivedAt))) s.lastOtpReceivedAt = hit.receivedAt;
-        s.otpDelivered = true;
-        await chrome.storage.session.set({ [KEY]: s });
-        return { ok: true, code: hit.code };
-      } catch (e) { return { ok: true, waiting: true, error: e.message }; }
+        const since=new Date(Math.max(Date.parse(window.requestedAt),Date.parse(s.lastOtpReceivedAt||'')+1||0)).toISOString();
+        const hit=await local(`/api/accounts/${encodeURIComponent(s.identity.email)}/otp?for=epic&since=${encodeURIComponent(since)}&via=graph`,{excludeMessageIds:s.otpMessageIds||[]});
+        const current=(await chrome.storage.session.get(KEY))[KEY];
+        if(!current||current.sessionId!==s.sessionId||current.otpWindow?.id!==window.id)return {ok:true,waiting:true,error:'Verification request changed; waiting for its new email'};
+        if(!/^\d{6}$/.test(String(hit.code||''))||!Number.isFinite(Date.parse(hit.receivedAt))||Date.parse(hit.receivedAt)<Date.parse(since)||Date.parse(hit.receivedAt)>Date.now()+60000||(hit.messageId&&(current.otpMessageIds||[]).includes(hit.messageId)))return {ok:true,waiting:true,error:'No unused code for the current verification request'};
+        current.lastOtpReceivedAt=hit.receivedAt;
+        if(hit.messageId)current.otpMessageIds=[...(current.otpMessageIds||[]),hit.messageId].slice(-30);
+        current.otpDelivered=true;
+        await chrome.storage.session.set({[KEY]:current});
+        return {ok:true,code:hit.code};
+      }catch(e){return {ok:true,waiting:true,error:e.message};}
     }
     if (msg.type === 'epicgen-resume-current') {
       // Explicit operator retry in the assigned tab; never reserve another inbox.
@@ -146,13 +160,13 @@ chrome.runtime.onMessage.addListener((msg, sender, respond) => {
     }
     if (msg.type === 'epicgen-reset-auth-context') {
       if ((s.authContextResets || 0) >= 1) throw new Error('Epic login context recovery already attempted. Recover this signup later.');
-      s.authContextResets = (s.authContextResets || 0) + 1; s.login = true;
+      s.authContextResets = (s.authContextResets || 0) + 1; s.login = true; delete s.otpWindow;
       await chrome.storage.session.set({ [KEY]: s });
       return { ok: true };
     }
     if (msg.type === 'epicgen-recover-auth') {
       if (!s.otpDelivered || (s.authRecoveries || 0) >= 1) throw new Error('Email authentication recovery already attempted. Recover this account from the panel.');
-      s.authRecoveries = (s.authRecoveries || 0) + 1; s.login = true;
+      s.authRecoveries = (s.authRecoveries || 0) + 1; s.login = true; delete s.otpWindow;
       await chrome.storage.session.set({ [KEY]: s });
       return { ok: true };
     }

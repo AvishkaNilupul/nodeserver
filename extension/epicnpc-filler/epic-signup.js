@@ -57,7 +57,7 @@
         if(!resumed.ok)throw new Error(resumed.error||'Could not resume this signup');
         var step=stepId();
         // Request a new email explicitly before consuming a newer OTP.
-        if(step==='otp')await waitFor(clickResendCode,60000);
+        if(step==='otp')await requestFreshOtp();
         if(step==='details'||step==='login_password')location.reload();
         else {host.textContent='Resuming the same signup…';await driveRegisterFlow(session);showRetry(session);}
       } catch(err) {banner('Retry paused: '+err.message,'err');showRetry(session);}
@@ -449,9 +449,22 @@
     if(/\/id\/login/i.test(location.pathname))location.href='https://accounts.epicgames.com/auth/logout';
     else location.reload();
   }
+  function resendCodeReady() {
+    return Array.prototype.some.call(document.querySelectorAll('a, button'),function(el){return visibleEnabled(el)&&/^resend (?:email|code)$/i.test((el.innerText||el.textContent||'').trim());});
+  }
   function clickResendCode() {
     var resend=Array.prototype.find.call(document.querySelectorAll('a, button'),function(el){return visibleEnabled(el)&&/^resend (?:email|code)$/i.test((el.innerText||el.textContent||'').trim());});
     if(!resend)return false;resend.click();return true;
+  }
+  function otpPhase() {return /\/id\/login/i.test(location.pathname||'')?'login':'register';}
+  async function beginOtpRequest() {
+    var result=await sw({type:'epicgen-begin-otp',sessionId:sessionId,phase:otpPhase()});
+    if(!result.ok)throw Error(result.error||'Could not start a fresh verification request');
+  }
+  async function requestFreshOtp() {
+    await waitFor(resendCodeReady,60000);
+    await beginOtpRequest();
+    if(!clickResendCode())throw Error('Fresh email request is not ready');
   }
 
   function authContextRejected() {
@@ -574,6 +587,7 @@
 
     if (loginMode) {
       banner("Signing into the saved Epic account…", "info");
+      await beginOtpRequest();
       await waitFor(clickContinueLike, 15000);
       return;
     }
@@ -601,6 +615,7 @@
     if (automation.autoSubmit) {
       await sw({type:'epicgen-status',sessionId:sessionId,status:'submitting'});
       banner('Submitting the completed registration…','info');
+      await beginOtpRequest();
       await waitFor(clickContinueLike,15000);
     } else {
       await sw({type:'epicgen-status',sessionId:sessionId,status:'awaiting_confirmation'});
@@ -660,6 +675,8 @@
       sessionId: sessionId,
       status: "awaiting_otp",
     });
+    var scope=await sw({type:'epicgen-otp-state',sessionId:sessionId,phase:otpPhase()});
+    if(!scope.ready)await requestFreshOtp();
     banner("Waiting for the Epic code in Outlook…", "info");
     var resp;
     for (var attempt=0;attempt<3;attempt++) {
@@ -669,10 +686,10 @@
     resp=null;
     var mailPollStarted=Date.now(),resent=false;
     while (Date.now() < deadline) {
-      resp = await sw({ type: "epicgen-request-otp", sessionId: sessionId });
+      resp = await sw({ type: "epicgen-request-otp", sessionId: sessionId, phase:otpPhase() });
       if (!resp.ok) throw new Error("otp: " + (resp.error || "unknown"));
       if (resp.code) break;
-      if(!resent&&Date.now()-mailPollStarted>30000&&clickResendCode())resent=true;
+      if(!resent&&Date.now()-mailPollStarted>30000&&resendCodeReady()){await requestFreshOtp();resent=true;}
       banner("Waiting for Outlook: " + (resp.error || "email has not arrived"), "info");
       await sleep(3000);
     }
@@ -711,7 +728,7 @@
     }
     if (attempt === 2) throw new Error('Epic rejected three fresh verification codes');
     banner('Epic rejected the code. Requesting a fresh email…','info');
-    await waitFor(clickResendCode, 60000);
+    await requestFreshOtp();
     }
   }
 
