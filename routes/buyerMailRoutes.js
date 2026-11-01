@@ -20,6 +20,7 @@ const bcrypt = require("bcrypt");
 
 const BuyerMailSession = require("../models/BuyerMailSession");
 const EpicAccount = require("../models/EpicAccount");
+const SteamAccount = require("../models/SteamAccount");
 const outlook = require("../utils/outlookGraphReader");
 
 const router = express.Router();
@@ -126,6 +127,14 @@ async function currentSession(req) {
   if (!sid || !/^[a-f0-9]{24}$/i.test(sid)) return null;
   const session = await BuyerMailSession.findOne({ _id: sid }).catch(() => null);
   if (!session || !session.isLive()) return null;
+  if (session.kind === "steam") {
+    const steam = await SteamAccount.findById(session.steamAccountId)
+      .select("accountName stage")
+      .lean()
+      .catch(() => null);
+    if (!steam) return null;
+    return { session, epicAccount: null, steamAccount: steam };
+  }
   const acct = await EpicAccount.findById(session.epicAccountId)
     .select("accountId displayName sold")
     .lean()
@@ -197,14 +206,35 @@ function loginPage({ error, email }) {
         </form>
       </div>
       <div class="sub" style="margin-top:18px;">
-        This page shows mail from Epic Games only. Please change the Epic
-        account email to your own as soon as you sign in.
+        This page shows only the emails the game store (Epic Games or Steam)
+        sends to your account. Please change the account email to your own as
+        soon as you sign in.
       </div>
     `,
   });
 }
 
+// Wording per session kind: which store the page shows mail from, and where
+// the buyer changes the account's email.
+const KIND_TEXT = {
+  epic: {
+    store: "Epic Games",
+    account: "Epic",
+    changeUrl: "https://www.epicgames.com/account/personal",
+    changeLabel: "epicgames.com/account/personal",
+    empty: "No mail from Epic yet. Trigger a code or password reset on Epic and reload this page.",
+  },
+  steam: {
+    store: "Steam",
+    account: "Steam",
+    changeUrl: "https://store.steampowered.com/account/",
+    changeLabel: "store.steampowered.com/account",
+    empty: "No mail from Steam yet. Sign in to Steam (or ask for a code) and reload this page.",
+  },
+};
+
 function inboxPage({ session, epicAccount, messages, error }) {
+  const k = KIND_TEXT[session.kind === "steam" ? "steam" : "epic"];
   const items = messages
     .map(
       (m) => `
@@ -232,17 +262,17 @@ function inboxPage({ session, epicAccount, messages, error }) {
       <div class="row">
         <div>
           <h1>${escapeHtml(session.inboxAddress)}</h1>
-          <div class="sub">Access ends ${escapeHtml(expires)}. Change the Epic email on your account before then.</div>
+          <div class="sub">Access ends ${escapeHtml(expires)}. Change the ${k.account} email on your account before then.</div>
         </div>
         <form method="POST" action="/mail/logout"><button class="ghost" type="submit">Sign out</button></form>
       </div>
       <div class="notice">
         <b>Important:</b> after you have the first code or confirmation link, open
-        <a href="https://www.epicgames.com/account/personal" target="_blank" rel="noreferrer noopener">epicgames.com/account/personal</a>
-        and change the email address to your own. This viewer only shows mail from Epic Games and only mail received after your purchase — nothing else.
+        <a href="${k.changeUrl}" target="_blank" rel="noreferrer noopener">${k.changeLabel}</a>
+        and change the email address to your own. This viewer only shows mail from ${k.store} and only mail received after your purchase — nothing else.
       </div>
       ${error ? `<div class="err" style="margin:0 0 10px;">${escapeHtml(error)}</div>` : ""}
-      ${items || '<div class="empty">No mail from Epic yet. Trigger a code or password reset on Epic and reload this page.</div>'}
+      ${items || '<div class="empty">' + escapeHtml(k.empty) + "</div>"}
     `,
   });
 }
@@ -319,11 +349,12 @@ router.get("/mail/inbox", async (req, res) => {
   let messages = [];
   let error = "";
   try {
-    const r = await outlook.readEpicMailFor({
-      inboxAddress: session.inboxAddress,
-      sinceIso,
-      top: 20,
-    });
+    // Epic sessions keep the exact call they always made; only a Steam
+    // session asks for Steam's senders.
+    const r =
+      session.kind === "steam"
+        ? await outlook.readMailFor({ inboxAddress: session.inboxAddress, sinceIso, top: 20, kind: "steam" })
+        : await outlook.readEpicMailFor({ inboxAddress: session.inboxAddress, sinceIso, top: 20 });
     messages = r.messages;
   } catch (err) {
     error = "Mailbox unavailable right now. Please try again in a minute.";
@@ -345,10 +376,11 @@ router.get("/mail/message/:id", async (req, res) => {
   if (!ctx) return res.redirect(302, "/mail/");
   const { session } = ctx;
   try {
-    const message = await outlook.readOneMessage({
-      inboxAddress: session.inboxAddress,
-      messageId: req.params.id,
-    });
+    const message = await outlook.readOneMessage(
+      session.kind === "steam"
+        ? { inboxAddress: session.inboxAddress, messageId: req.params.id, kind: "steam" }
+        : { inboxAddress: session.inboxAddress, messageId: req.params.id },
+    );
     // Same cutoff as the inbox list: an older Epic message (from before this
     // buyer's purchase) is not theirs, even when its id is known.
     const at = Date.parse((message && message.receivedDateTime) || "");

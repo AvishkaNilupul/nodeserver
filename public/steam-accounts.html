@@ -13,7 +13,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Steam Accounts</title>
     <!-- Contract: docs/STEAM-ACCOUNTS.md. ?v= keeps a reload from mixing old and new files. -->
-    <link rel="stylesheet" href="/steam-accounts.css?v=20261101" />
+    <link rel="stylesheet" href="/steam-accounts.css?v=20261101b" />
     <link rel="stylesheet" href="/admin-nav.css" />
   </head>
   <body>
@@ -173,6 +173,17 @@
 
       <div class="st-stats" id="stats" aria-live="polite"></div>
 
+      <section class="st-card" aria-labelledby="sellTitle">
+        <div class="st-card-hd">
+          <h2 class="st-card-title" id="sellTitle">Selling on Eldorado</h2>
+          <span class="st-card-meta" id="sellMeta">Loading…</span>
+          <div class="sell-hd-actions">
+            <button type="button" class="btn btn-sm" id="sellSync" title="Read the Eldorado offers and orders now">Check now</button>
+          </div>
+        </div>
+        <div class="st-card-bd" id="sellBody"><div class="st-empty">Loading…</div></div>
+      </section>
+
       <section class="st-card" aria-labelledby="accTitle">
         <div class="st-card-hd">
           <h2 class="st-card-title" id="accTitle">Accounts</h2>
@@ -231,6 +242,7 @@
 
     <script src="/theme.js"></script>
     <script src="/admin-nav.js"></script>
-    <script src="/steam-accounts.js?v=20261101"></script>
+    <script src="/steam-accounts.js?v=20261101b"></script>
+    <script src="/steam-sales.js?v=20261101b"></script>
   </body>
 </html>

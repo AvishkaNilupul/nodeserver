@@ -9,6 +9,7 @@ const mongoose = require("mongoose");
 
 const { requireSuperadmin } = require("../middleware/auth");
 const SteamAccount = require("../models/SteamAccount");
+const SteamListing = require("../models/SteamListing");
 const { decrypt } = require("../utils/secretBox");
 
 const router = express.Router();
@@ -187,6 +188,21 @@ router.patch("/api/steam/accounts/:id", requireSuperadmin, async (req, res) => {
       set = buildUpdate(body, current);
     } catch (e) {
       return res.status(400).json({ success: false, message: e.message });
+    }
+    // An account on a live Eldorado listing is the sale engine's
+    // (utils/steamSales.js): a hand edit of its stage could put it on sale
+    // twice or hide a sale. Remove it from the listing first.
+    if ("stage" in set && set.stage !== current.stage) {
+      const onListing = await SteamListing.exists({
+        status: { $ne: "removed" },
+        accounts: { $elemMatch: { steamAccountId: current._id, state: "listed" } },
+      });
+      if (onListing) {
+        return res.status(409).json({
+          success: false,
+          message: "This account is on sale on Eldorado. Remove it from its listing (Selling on Eldorado) before changing its stage.",
+        });
+      }
     }
     if (!Object.keys(set).length) return res.status(400).json({ success: false, message: "Nothing to save" });
     const saved = await SteamAccount.findByIdAndUpdate(

@@ -69,6 +69,7 @@ const radarRoutes = require("./routes/radarRoutes");
 const bannedRoutes = require("./routes/bannedRoutes");
 const epicAccountRoutes = require("./routes/epicAccountRoutes");
 const steamAccountRoutes = require("./routes/steamAccountRoutes");
+const steamSalesRoutes = require("./routes/steamSalesRoutes");
 const twitchFollowRoutes = require("./routes/twitchFollowRoutes");
 const twitchFollowRunner = require("./utils/twitchFollowRunner");
 const twitchClaimRoutes = require("./routes/twitchClaimRoutes");
@@ -820,6 +821,7 @@ app.use(enforce2fa, radarRoutes);
 app.use(enforce2fa, bannedRoutes);
 app.use(enforce2fa, epicAccountRoutes);
 app.use(enforce2fa, steamAccountRoutes);
+app.use(enforce2fa, steamSalesRoutes);
 app.use(enforce2fa, twitchFollowRoutes);
 // Drop-claim race UI (public/twitch-claim.html): port of the CLI spammer that
 // fires N parallel DropsPage_ClaimDropRewards mutations at one dropInstanceID
@@ -1053,6 +1055,9 @@ mongoose
     // buyers depend on it. Reads Eldorado only while a listing is live; off
     // from the Listings & sales tab. See utils/epicSales.js.
     require("./utils/epicSales").start();
+    // Steam account sales (docs/STEAM-SALES.md): same sale sync for the Steam
+    // region offers. Reads Eldorado only while a Steam listing is live.
+    require("./utils/steamSales").start();
     // Epic accounts on G2G: the G2G fulfiller delivers their orders through
     // utils/epicG2g; this sweep catches cancelled orders (accounts back on the
     // shelf) and keeps the linked offers' stock numbers right.

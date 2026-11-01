@@ -676,6 +676,9 @@
     ? store("steam.accounts.filter")
     : "all";
   state.sort = store("steam.accounts.sort") || "newest";
+  // The selling card (steam-sales.js) reloads the list after it lists or
+  // removes accounts, since that changes their stage.
+  window.SteamAccountsPage = { reload: function () { return load(true); } };
   load();
   setInterval(function () {
     if (!document.hidden) load(true);

@@ -529,6 +529,10 @@ async function deliverOrder(order, { dryRun, unitGapMs }) {
     if (await isEpicAccountOffer(offerId)) {
       return { orderId, skipped: "Epic account offer, delivered by Eldorado itself" };
     }
+    // Same for a Steam account offer (utils/steamSales.js, docs/STEAM-SALES.md).
+    if (await require("./steamSales").isSteamOffer(offerId).catch(() => false)) {
+      return { orderId, skipped: "Steam account offer, delivered by Eldorado itself" };
+    }
     return { orderId, skipped: "no listing row for offer " + offerId };
   }
 

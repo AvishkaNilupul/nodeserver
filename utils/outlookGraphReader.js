@@ -27,12 +27,36 @@ const EPIC_SENDER_DOMAINS = [
   "em.epicgames.com",
 ];
 
-function isEpicSender(address) {
+// Steam sends its codes and account mail from noreply@steampowered.com
+// (docs/STEAM-SALES.md). A "steam" session sees ONLY these senders.
+const STEAM_SENDER_DOMAINS = ["steampowered.com"];
+
+function senderIn(domains, address) {
   if (!address) return false;
   const addr = String(address).toLowerCase();
-  return EPIC_SENDER_DOMAINS.some(
+  return domains.some(
     (d) => addr === d || addr.endsWith("@" + d) || addr.endsWith("." + d),
   );
+}
+
+function isEpicSender(address) {
+  return senderIn(EPIC_SENDER_DOMAINS, address);
+}
+
+function isSteamSender(address) {
+  return senderIn(STEAM_SENDER_DOMAINS, address);
+}
+
+// The allow-list for a session kind. Anything but "steam" is Epic, so every
+// row made before Steam existed keeps its exact old behaviour.
+function senderCheck(kind) {
+  return kind === "steam" ? isSteamSender : isEpicSender;
+}
+
+// The proxy body for a kind. Epic calls send exactly what they always sent;
+// only a Steam call adds kind, which the Mac proxy needs to switch lists.
+function withKind(body, kind) {
+  return kind === "steam" ? { ...body, kind: "steam" } : body;
 }
 
 function proxyConfig() {
@@ -94,13 +118,15 @@ async function checkInbox(inboxAddress) {
   };
 }
 
-// Fetch up to `top` recent Epic messages, filtered to receivedDateTime >=
-// sinceIso. The proxy already does this filter; we re-filter locally as
-// defence-in-depth and to normalise the shape.
-async function readEpicMailFor({ inboxAddress, sinceIso, top = 20 }) {
+// Fetch up to `top` recent messages from the kind's senders (Epic unless
+// kind is "steam"), filtered to receivedDateTime >= sinceIso. The proxy
+// already does this filter; we re-filter locally as defence-in-depth and to
+// normalise the shape.
+async function readMailFor({ inboxAddress, sinceIso, top = 20, kind = "epic" }) {
+  const allowed = senderCheck(kind);
   const data = await proxyCall(
     "/list",
-    { email: inboxAddress, sinceIso, top },
+    withKind({ email: inboxAddress, sinceIso, top }, kind),
     { timeout: 25000 },
   );
   if (!data || data.ok !== true) {
@@ -108,7 +134,7 @@ async function readEpicMailFor({ inboxAddress, sinceIso, top = 20 }) {
   }
   const sinceMs = Date.parse(sinceIso);
   const messages = (Array.isArray(data.messages) ? data.messages : [])
-    .filter((m) => isEpicSender(m?.from))
+    .filter((m) => allowed(m?.from))
     .filter((m) => {
       if (!Number.isFinite(sinceMs)) return true;
       const t = Date.parse(m?.receivedDateTime || "");
@@ -118,10 +144,15 @@ async function readEpicMailFor({ inboxAddress, sinceIso, top = 20 }) {
   return { messages, inboxAddress: data.inboxAddress || inboxAddress };
 }
 
-async function readOneMessage({ inboxAddress, messageId }) {
+// The Epic-only read every existing caller uses.
+async function readEpicMailFor({ inboxAddress, sinceIso, top = 20 }) {
+  return readMailFor({ inboxAddress, sinceIso, top, kind: "epic" });
+}
+
+async function readOneMessage({ inboxAddress, messageId, kind = "epic" }) {
   const data = await proxyCall(
     "/message",
-    { email: inboxAddress, id: messageId },
+    withKind({ email: inboxAddress, id: messageId }, kind),
     { timeout: 20000 },
   );
   if (!data || data.ok !== true) {
@@ -129,9 +160,9 @@ async function readOneMessage({ inboxAddress, messageId }) {
     if (data?.code === "not_found") err.code = "not_found";
     throw err;
   }
-  // Enforce the sender allow-list even if the proxy somehow returned a non-
-  // Epic message by id.
-  if (!isEpicSender(data?.message?.from)) {
+  // Enforce the sender allow-list even if the proxy somehow returned a
+  // message of another sender by id.
+  if (!senderCheck(kind)(data?.message?.from)) {
     const err = new Error("message not found");
     err.code = "not_found";
     throw err;
@@ -141,9 +172,12 @@ async function readOneMessage({ inboxAddress, messageId }) {
 
 module.exports = {
   isEpicSender,
+  isSteamSender,
+  readMailFor,
   readEpicMailFor,
   readOneMessage,
   checkInbox,
   proxyHealth,
   EPIC_SENDER_DOMAINS,
+  STEAM_SENDER_DOMAINS,
 };

@@ -17,13 +17,27 @@ const mongoose = require("mongoose");
 // and_proxies (why we can't just hand the inbox over).
 const buyerMailSessionSchema = new mongoose.Schema(
   {
+    // Which product the session delivers. "epic" (every row made before Steam
+    // existed) shows mail from Epic Games; "steam" shows mail from Steam
+    // (docs/STEAM-SALES.md). The mail page and the Mac proxy pick the sender
+    // allow-list from this, so a session can never read the other kind's mail.
+    kind: { type: String, enum: ["epic", "steam"], default: "epic", index: true },
     // The Epic account this session delivers. One EpicAccount can accumulate
     // several sessions over time (we don't force unique) — only the newest
     // non-revoked one is honored at /mail/login.
     epicAccountId: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "EpicAccount",
-      required: true,
+      required: function () {
+        return (this.kind || "epic") === "epic";
+      },
+      index: true,
+    },
+    // The Steam account a "steam" session delivers (utils/steamSales.js).
+    steamAccountId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "SteamAccount",
+      default: null,
       index: true,
     },
     // Optional pointer to a prod MailAccount row. Only populated when prod has
@@ -76,6 +90,9 @@ const buyerMailSessionSchema = new mongoose.Schema(
     // is rewritten. The bcrypt hash above is still what /mail/login checks.
     passwordEnc: { type: String, default: "" },
     listingId: { type: mongoose.Schema.Types.ObjectId, ref: "EpicListing", default: null, index: true },
+    // A "steam" session's listing (SteamListing). Kept apart from listingId so
+    // no Epic query by listing can ever match a Steam row.
+    steamListingId: { type: mongoose.Schema.Types.ObjectId, ref: "SteamListing", default: null, index: true },
     soldAt: { type: Date, default: null },
 
     // Delivery bookkeeping — operator records which marketplace order spawned

@@ -75,6 +75,9 @@ const SECTIONS = {
 };
 
 function sectionOf(key) {
+  // A caller may pass its own section object (Steam accounts does:
+  // utils/steamSales.js). The named SECTIONS above stay the Epic ones.
+  if (key && typeof key === "object" && key.gameId && key.seoAlias) return key;
   const s = SECTIONS[String(key || "epic")];
   if (!s) throw new Error("Unknown Eldorado section: " + key);
   return s;

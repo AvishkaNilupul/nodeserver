@@ -49,9 +49,13 @@ async function expirePastDue(now = new Date()) {
 }
 
 async function sweepLiveSessions({ now = new Date(), logger = console } = {}) {
+  // Epic sessions only. A Steam session is never closed early: Steam's
+  // "change email" mail carries the very code the buyer still needs, so it
+  // simply runs to its expiry (docs/STEAM-SALES.md).
   const rows = await BuyerMailSession.find({
     revokedAt: null,
     expiresAt: { $gt: now },
+    kind: { $ne: "steam" },
   })
     .limit(200) // cap one tick so a huge backlog can't melt the Graph quota
     .lean();
