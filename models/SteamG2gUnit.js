@@ -21,6 +21,7 @@ const steamG2gUnitSchema = new mongoose.Schema(
     // sold = a buyer got it; removed = taken off our books (see removedReason).
     state: { type: String, enum: ["loading", "listed", "sold", "removed"], default: "loading", index: true },
     uploadedAt: { type: Date, default: null },
+    retries: { type: Number, default: 0 }, // re-sends after G2G did not take the row
     listedAt: { type: Date, default: null },
     soldAt: { type: Date, default: null },
     orderId: { type: String, default: "" },

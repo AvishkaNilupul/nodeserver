@@ -60,6 +60,7 @@ let g2gOrders; // [{order, item}]
 let createCalls;
 let failCreate;
 let failUpload;
+let rejectRows; // G2G answers the upload but its importer refuses the rows
 let seq;
 const telegrams = [];
 const inboxUses = new Map();
@@ -79,6 +80,7 @@ const fakeMp = {
   async g2gUploadStock(offer, csv) {
     if (failUpload) throw new Error(failUpload);
     uploads.push({ offerId: offer.offer_id, csv });
+    if (rejectRows) return { ok: true };
     stock.set(offer.offer_id, (stock.get(offer.offer_id) || 0) + csv.split("\r\n").filter(Boolean).length);
     return { ok: true };
   },
@@ -184,6 +186,7 @@ test.beforeEach(async () => {
   createCalls = [];
   failCreate = null;
   failUpload = null;
+  rejectRows = false;
   seq = 0;
   telegrams.length = 0;
   inboxUses.clear();
@@ -249,7 +252,9 @@ test("loading a G2G offer: reserve, mail login, one form row per account, confir
   assert.match(cols[11], /https:\/\/shop\.example\.test ,/, "bare site, no path (G2G refuses paths)");
   assert.ok(!/example\.test\/mail/.test(cols[11]));
   assert.match(cols[11], /Steam account emails/);
-  assert.ok(cols[11].includes(sales._internal.REGION_WARNING));
+  assert.match(cols[11], /Do not buy anything on the Steam Store for 1 month/);
+  assert.ok(/^[\x00-\x7f]*$/.test(cols[11]), "plain ASCII note (G2G refused one with an emoji)");
+  assert.ok(cols[11].length <= g2g._internal.NOTE_MAX, "short note (G2G refused a 624-character one)");
 
   // Already listed: can't be loaded again, here or on Eldorado.
   await assert.rejects(g2g.loadAccounts(link, [String(a._id)]), /already on sale/);
@@ -390,4 +395,55 @@ test("an account in G2G stock can't change stage by hand", async () => {
   } finally {
     await new Promise((res) => server.close(res));
   }
+});
+
+test("rows G2G does not take are sent once more, then the accounts go back to stock and G2G is skipped for the country", async () => {
+  const a = await account("co_r1", "CO");
+  const link = await g2g.createRegionOffer("CO");
+  rejectRows = true;
+  const r = await g2g.loadAccounts(link, [String(a._id)]);
+  assert.equal(r.confirmed, false);
+  assert.equal(uploads.length, 1);
+  const unit = await SteamG2gUnit.findOne({ steamAccountId: a._id });
+  assert.equal(unit.state, "loading");
+
+  // Not yet time to retry: nothing happens.
+  await g2g.sweep();
+  assert.equal(uploads.length, 1);
+
+  // 9 min later, still not in G2G's stock: sent once more, same mail login.
+  await SteamG2gUnit.updateOne({ _id: unit._id }, { $set: { uploadedAt: new Date(Date.now() - 9 * 60000) } });
+  await g2g.sweep();
+  assert.equal(uploads.length, 2);
+  assert.equal((await SteamG2gUnit.findById(unit._id)).retries, 1);
+  assert.equal(parseRow(uploads[1].csv)[10], parseRow(uploads[0].csv)[10], "same mail-page password in the re-sent row");
+
+  // Still refused 13 min after the re-send: released, G2G skipped for CO.
+  await SteamG2gUnit.updateOne({ _id: unit._id }, { $set: { uploadedAt: new Date(Date.now() - 13 * 60000) } });
+  await g2g.sweep();
+  assert.equal(uploads.length, 2, "no third try");
+  assert.equal((await SteamG2gUnit.findById(unit._id)).state, "removed");
+  assert.equal((await SteamAccount.findById(a._id)).stage, "stock");
+  assert.ok((await BuyerMailSession.findById(unit.sessionId)).revokedAt);
+  const st = await SteamSalesState.findById("main").lean();
+  assert.ok(Number(st.distributorSkip["g2g|CO"]) > Date.now(), "G2G skipped for CO");
+  assert.ok(telegrams.some((t) => /did not take/.test(t)));
+
+  // The distributor now sends it to Eldorado.
+  const d = await distributor.run();
+  assert.equal(d.decisions[0].market, "eldorado");
+  assert.equal((await SteamAccount.findById(a._id)).stage, "listed");
+});
+
+test("a re-send that landed is confirmed, never released", async () => {
+  const a = await account("pe_r1", "PE");
+  const link = await g2g.createRegionOffer("PE");
+  rejectRows = true;
+  await g2g.loadAccounts(link, [String(a._id)]);
+  rejectRows = false;
+  await SteamG2gUnit.updateOne({ steamAccountId: a._id }, { $set: { uploadedAt: new Date(Date.now() - 9 * 60000) } });
+  await g2g.sweep(); // re-send lands (the fake counts it)
+  await g2g.sweep(); // confirmed from G2G's stock count
+  assert.equal((await SteamG2gUnit.findOne({ steamAccountId: a._id })).state, "listed");
+  assert.equal((await SteamAccount.findById(a._id)).stage, "listed");
 });

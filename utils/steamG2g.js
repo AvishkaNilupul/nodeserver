@@ -50,6 +50,15 @@ const TEMPLATE_CACHE_MS = 6 * 60 * 60 * 1000;
 const CONFIRM_POLLS = 12;
 const CONFIRM_GAP_MS = Number(process.env.STEAM_G2G_CONFIRM_GAP_MS) || 5000;
 const LOAD_PAGE_AFTER_MS = 20 * 60 * 1000;
+// An upload G2G has not taken after RETRY_AFTER is sent once more; still not
+// there RELEASE_AFTER after that = G2G refused it ("do not match required
+// format" on its upload page), and the accounts go back to stock.
+const RETRY_AFTER_MS = 8 * 60 * 1000;
+const RELEASE_AFTER_MS = 12 * 60 * 1000;
+const SKIP_MS = 6 * 60 * 60 * 1000;
+// G2G's importer refused a 624-character note with an emoji (2026-11-01) and
+// took the same row with a 456-character plain one: notes stay plain and short.
+const NOTE_MAX = 480;
 const STUCK_MS = 15 * 60 * 1000;
 const REPAGE_MS = 3 * 60 * 60 * 1000;
 const SWEEP_MS = Number(process.env.STEAM_G2G_SWEEP_MS) || 3 * 60 * 1000;
@@ -139,16 +148,30 @@ function descriptionFor(region, days) {
   ].join("\n");
 }
 
+// Plain ASCII: G2G's stock importer refuses rows it can't read ("Türkiye" →
+// "Turkiye"; anything else non-ASCII is dropped).
+function plain(s) {
+  return String(s == null ? "" : s)
+    .normalize("NFKD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/[\u2018\u2019]/g, "'")
+    .replace(/[\u201c\u201d]/g, '"')
+    .replace(/[^\x09\x0a\x0d\x20-\x7e]/g, "");
+}
+
 // The note stored with every row (G2G takes no link with a path in it, so it
 // names the bare site, whose front page has the "Steam account emails" button).
+// Short and plain (see NOTE_MAX); the owner's full warning is in the description.
 function noteText(days) {
-  return [
-    "Email Password is NOT an Outlook password. It signs in to our mail page, which shows the emails Steam sends to this account " +
-      "(Steam Guard and email change codes) for " + days + " days.",
-    "Mail page: " + siteUrl() + " , press \"Steam account emails\", then sign in with Account Email + Email Password.",
-    "Please change the account email to your own right after you log in (Steam > Account details > Change email).",
-    S.REGION_WARNING,
-  ].join("\n");
+  return plain(
+    [
+      "Email Password is NOT an Outlook password. It opens our mail page with the emails Steam sends to this account " +
+        "(Steam Guard and email change codes) for " + days + " days.",
+      "Mail page: " + siteUrl() + " , press \"Steam account emails\", sign in with Account Email + Email Password.",
+      "Change the account email to your own after logging in (Steam > Account details > Change email).",
+      "Do not buy anything on the Steam Store for 1 month, or Steam will block the account.",
+    ].join("\n"),
+  ).slice(0, NOTE_MAX);
 }
 
 // ---------------------------------------------------------------------------
@@ -293,7 +316,7 @@ async function loadAccounts(link, accountIds, actor) {
             mailPassword: password,
             firstName: "",
             lastName: "",
-            country: form.countryName(S.regionOf(v.acc)),
+            country: plain(form.countryName(S.regionOf(v.acc))),
             dob: "",
             note: noteText(days),
           }),
@@ -368,6 +391,20 @@ async function confirmLoading(link) {
     await recordStock(link.offerId, n);
     return loading.length;
   }
+  // Exactly the units already listed are in stock: none of the loading ones
+  // landed (an ambiguous count is never acted on, only paged).
+  const noneLanded = n == null ? listed === 0 : n === listed;
+  const now = Date.now();
+  const resend = loading.filter((u) => !(u.retries > 0) && now - new Date(u.uploadedAt).getTime() > RETRY_AFTER_MS);
+  if (resend.length && noneLanded) {
+    await resendUnits(link, resend);
+    return 0;
+  }
+  const refused = loading.filter((u) => u.retries > 0 && now - new Date(u.uploadedAt).getTime() > RELEASE_AFTER_MS);
+  if (refused.length && noneLanded && refused.length === loading.length) {
+    await releaseRefused(link, refused);
+    return 0;
+  }
   const oldest = Math.min(...loading.map((u) => new Date(u.uploadedAt).getTime()));
   if (Date.now() - oldest > LOAD_PAGE_AFTER_MS) {
     await pageOnce(
@@ -378,6 +415,70 @@ async function confirmLoading(link) {
     );
   }
   return 0;
+}
+
+// Send the rows of units G2G has not taken once more (same mail-page login).
+// Safe against doubles: G2G's Account ID is unique, so a row that did land is
+// refused the second time.
+async function resendUnits(link, units) {
+  return withKeyLock("offer:" + link.offerId, async () => {
+    const template = await formTemplate();
+    const form = deps.form();
+    const days = Math.min(14, Math.max(1, Number(link.sessionDays) || DEFAULT_DAYS));
+    const rows = [];
+    const ids = [];
+    for (const u of units) {
+      const acc = await SteamAccount.findById(u.steamAccountId).lean();
+      const sess = u.sessionId ? await BuyerMailSession.findById(u.sessionId).lean() : null;
+      const mailPassword = S.dec(sess && sess.passwordEnc);
+      const password = S.dec(acc && acc.password);
+      const email = S.dec(acc && acc.email).toLowerCase();
+      if (!acc || !mailPassword || !password || !email) continue;
+      rows.push(
+        form.buildRow(template, {
+          login: acc.accountName,
+          password,
+          email,
+          mailPassword,
+          firstName: "",
+          lastName: "",
+          country: plain(form.countryName(S.regionOf(acc))),
+          dob: "",
+          note: noteText(days),
+        }),
+      );
+      ids.push(u._id);
+    }
+    if (!rows.length) return 0;
+    const offer = await deps.mp.g2gGetOwnOffer(link.offerId);
+    await deps.mp.g2gUploadStock(offer, rows.join(""));
+    await SteamG2gUnit.updateMany({ _id: { $in: ids } }, { $set: { uploadedAt: new Date() }, $inc: { retries: 1 } });
+    return rows.length;
+  });
+}
+
+// G2G refused the rows twice: the accounts were never on sale there. Back to
+// stock, G2G skipped for this country for 6 h (the distributor sends the next
+// ones to Eldorado), and the owner is told.
+async function releaseRefused(link, units) {
+  const now = new Date();
+  await undo(
+    units.map((u) => u._id),
+    units.map((u) => u.sessionId).filter(Boolean),
+    units.map((u) => String(u.steamAccountId)),
+    "G2G did not take the row (twice)",
+  );
+  await SteamSalesState.updateOne(
+    { _id: "main" },
+    { $set: { ["distributorSkip.g2g|" + link.region]: now.getTime() + SKIP_MS } },
+    { upsert: true },
+  );
+  await pageOnce(
+    "refused:" + link.offerId,
+    "⚠️ G2G did not take " + units.length + " Steam account(s) into the " + S.regionName(link.region) + " offer " + link.offerId +
+      " (twice). They are back in stock; G2G is skipped for " + link.region + " for 6 h, so the distributor sends them to Eldorado. " +
+      "G2G's reason shows on the offer's Upload Accounts page right after an upload.",
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -623,5 +724,5 @@ module.exports = {
     templateCache.value = null;
     paged.clear();
   },
-  _internal: { titleFor, descriptionFor, noteText, saleIdFor, orderPlacedAt },
+  _internal: { titleFor, descriptionFor, noteText, plain, saleIdFor, orderPlacedAt, NOTE_MAX },
 };
