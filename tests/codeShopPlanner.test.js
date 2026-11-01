@@ -313,7 +313,11 @@ test("an event giving the same box three times: numbered in earned order, each n
   for (const s of left.slots) {
     assert.equal(s.label, full.slots.find((f) => f.slotKey === s.slotKey).label, s.slotKey);
   }
-  assert.ok(full.texts.title.startsWith("Overwatch 2 | 6 Codes Bundle | Event 30 Oct 2026 | Candle Spray + Esports Loot Box #1 + "), full.texts.title);
+  assert.equal(
+    full.texts.title,
+    // 163 characters with "Redeem Codes": that part goes so every reward stays.
+    "Overwatch 2 | 6 Codes Bundle | Event 30 Oct 2026 | 3x Esports Loot Box + Candle Spray + Lantern Name Card + 1 Hour XP Boost | Instant Auto Delivery",
+  );
   assert.doesNotMatch(full.texts.title, /\(Event/);
   assert.match(full.texts.description, /^- Esports Loot Box #3 \(Event 30 Oct 2026\)$/m);
   for (const p of all) {

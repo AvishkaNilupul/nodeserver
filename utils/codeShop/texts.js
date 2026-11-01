@@ -193,23 +193,62 @@ function rewardLabels(slots, { eventStart = null } = {}) {
   return out;
 }
 
+// The rewards as the title shows them (owner 2026-11-01: "skins first"):
+// skins, then boxes/packs, then the rest, each tier in the bundle's order. A
+// reward the bundle holds more than once (the numbered "Esports Loot Box #1",
+// "#2", "#3") is shown once as "3x Esports Loot Box". `dropEvent`: the title
+// names the event itself, so a label's own "(Event ...)" is left out.
+// Only the title changes: the description and the delivered code lines keep
+// the bundle's order and every label whole.
+const SKIN_RE = /\b(?:skins?|outfits?|costumes?)\b/i;
+const NUMBER_RE = /\s+#\d+(?=(?:\s*\(Events? [^()]*\))?$)/;
+
+function titleItems(labels, { dropEvent = false } = {}) {
+  const items = [];
+  const byKey = new Map();
+  for (const raw of labels) {
+    const label = dropEvent ? raw.replace(EVENT_SUFFIX_RE, "") : raw;
+    const base = label.replace(NUMBER_RE, "");
+    const key = base.toLowerCase();
+    const seen = byKey.get(key);
+    if (seen) {
+      seen.count += 1;
+      continue;
+    }
+    const item = { label, base, count: 1, at: items.length };
+    byKey.set(key, item);
+    items.push(item);
+  }
+  const tier = (l) => (SKIN_RE.test(l) ? 0 : STACKABLE_RE.test(l) ? 1 : 2);
+  return items
+    .sort((a, b) => tier(a.base) - tier(b.base) || a.at - b.at)
+    .map((it) => (it.count > 1 ? `${it.count}x ${it.base}` : it.label));
+}
+
 // The event part sits right after the game and the count: a market with a
 // shorter title (fitTitle) drops parts from the END, so it keeps this one.
-function buildTitle(display, labels, eventPart = "") {
-  const n = labels.length;
-  const parts = (seg) =>
-    (n === 1
-      ? [display, eventPart, seg, "Redeem Code", "Instant Auto Delivery"]
-      : [display, `${n} Codes Bundle`, eventPart, seg, "Redeem Codes", "Instant Auto Delivery"]
-    ).filter(Boolean).join(" | ");
-  // Too long: drop labels from the end and say there is more.
-  for (let k = n; k >= 1; k--) {
-    const seg = labels.slice(0, k).join(" + ") + (k < n ? " + more" : "");
-    const title = parts(seg);
-    if (title.length <= TITLE_MAX) return title;
+// `n` = codes in the bundle; `items` = the rewards as titleItems shows them.
+function buildTitle(display, items, eventPart = "", n = items.length) {
+  const join = (parts) => parts.filter(Boolean).join(" | ");
+  const shapes =
+    n === 1
+      ? [(seg) => [display, eventPart, seg, "Redeem Code", "Instant Auto Delivery"]]
+      : [
+          (seg) => [display, `${n} Codes Bundle`, eventPart, seg, "Redeem Codes", "Instant Auto Delivery"],
+          // "N Codes Bundle" already says codes: "Redeem Codes" goes before a reward does.
+          (seg) => [display, `${n} Codes Bundle`, eventPart, seg, "Instant Auto Delivery"],
+        ];
+  // Too long: drop rewards from the end and say there is more.
+  const m = items.length;
+  for (let k = m; k >= 1; k--) {
+    const seg = items.slice(0, k).join(" + ") + (k < m ? " + more" : "");
+    for (const shape of shapes) {
+      const title = join(shape(seg));
+      if (title.length <= TITLE_MAX) return title;
+    }
   }
-  // Not even one label fits: leave them all out (the description lists them).
-  const bare = parts("");
+  // Not even one reward fits: leave them all out (the description lists them).
+  const bare = join(shapes[0](""));
   return bare.length <= TITLE_MAX ? bare : bare.slice(0, TITLE_MAX).trimEnd();
 }
 
@@ -333,10 +372,10 @@ function defaultTexts({ slots, guide, useBy, now, eventStarts } = {}) {
 
   // The title names the event once up front, so a box label's own
   // "(Event ...)" (rewardLabels) is left out of it to save room.
-  const titleLabels = eventPart ? labels.map((l) => l.replace(EVENT_SUFFIX_RE, "")) : labels;
+  const items = titleItems(labels, { dropEvent: !!eventPart });
 
   return {
-    title: buildTitle(display, titleLabels, eventPart),
+    title: buildTitle(display, items, eventPart, n),
     description: buildDescription({ display, labels, guide: g, redeemBy, validUntil, eventLong, eventCount }),
     deliveryTemplate:
       `Thank you for your order! Your ${display} code bundle` +

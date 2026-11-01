@@ -57,23 +57,25 @@ test("title: a bundle lists every label when it fits", () => {
   );
 });
 
-test("title: over 160 chars drops labels from the end and adds ' + more'", () => {
+test("title: over 160 chars drops rewards from the end and adds ' + more' (boxes come first)", () => {
   const labels = [
     "Sun Tea Player Icon", "Protein Drink Player Icon", "Refreshing Spray",
     "Summer Sandcastle Spray", "Talon Strong Spray", "Esports Loot Box",
   ];
-  const full = `Overwatch 2 | 6 Codes Bundle | ${labels.join(" + ")} | Redeem Codes | Instant Auto Delivery`;
+  // Title order (2026-11-01): skins, then boxes/packs, then the rest in bundle order.
+  const ordered = ["Esports Loot Box", ...labels.slice(0, 5)];
+  const full = `Overwatch 2 | 6 Codes Bundle | ${ordered.join(" + ")} | Redeem Codes | Instant Auto Delivery`;
   assert.ok(full.length > 160, "the untrimmed title is too long");
 
   const { title } = defaultTexts({ slots: slots(...labels), guide: ow(), now: NOW });
   assert.ok(title.length <= 160, `fits: ${title.length}`);
-  assert.ok(title.startsWith("Overwatch 2 | 6 Codes Bundle | Sun Tea Player Icon + "));
-  assert.ok(title.endsWith(" + more | Redeem Codes | Instant Auto Delivery"));
-  assert.ok(!title.includes("Esports Loot Box"), "the last label is dropped first");
-  // As many labels as fit: one more would not.
+  assert.ok(title.startsWith("Overwatch 2 | 6 Codes Bundle | Esports Loot Box + Sun Tea Player Icon + "), title);
+  assert.ok(title.endsWith(" + more | Instant Auto Delivery"), title);
+  assert.ok(!title.includes("Talon Strong Spray"), "the last reward is dropped first");
+  // As many rewards as fit (with "Redeem Codes" given up first): one more would not.
   const kept = title.split(" | ")[2].replace(/ \+ more$/, "").split(" + ");
-  assert.deepEqual(kept, labels.slice(0, kept.length));
-  const oneMore = `Overwatch 2 | 6 Codes Bundle | ${labels.slice(0, kept.length + 1).join(" + ")} + more | Redeem Codes | Instant Auto Delivery`;
+  assert.deepEqual(kept, ordered.slice(0, kept.length));
+  const oneMore = `Overwatch 2 | 6 Codes Bundle | ${ordered.slice(0, kept.length + 1).join(" + ")} + more | Instant Auto Delivery`;
   assert.ok(oneMore.length > 160);
 });
 
@@ -203,7 +205,7 @@ test("eventDatesText: one date, a short list, months and years, a long range", (
 test("title: the event sits after the count, and a 150-char market keeps it", () => {
   const six = slots("Prost Spray", "Purrfect Afternoon Spray", "Skal Spray", "Banana Cat Spray", "Banana Cat Icon", "Esports Loot Box");
   const t = defaultTexts({ slots: six, guide: ow(), now: NOW, eventStarts: [W2] });
-  assert.ok(t.title.startsWith("Overwatch 2 | 6 Codes Bundle | Event 11 Oct 2026 | Prost Spray + "), t.title);
+  assert.ok(t.title.startsWith("Overwatch 2 | 6 Codes Bundle | Event 11 Oct 2026 | Esports Loot Box + Prost Spray + "), t.title);
   assert.ok(t.title.length <= 160);
   assert.ok(fitTitle(t.title, 150).includes("| Event 11 Oct 2026 |"));
   assert.ok(fitTitle(t.title, 60).includes("Event 11 Oct 2026"), "kept while parts are dropped from the end");
@@ -540,10 +542,37 @@ test("defaultTexts: a label's own (Event ...) is left out of the title when the 
   const withEvent = defaultTexts({ slots, guide: GUIDES["12"], useBy: NOW + 120 * DAY, now: NOW, eventStarts: [new Date("2026-10-30T07:30:00Z")] });
   assert.equal(
     withEvent.title,
-    "Overwatch 2 | 2 Codes Bundle | Event 30 Oct 2026 | Candle Spray + Esports Loot Box #1 | Redeem Codes | Instant Auto Delivery",
+    "Overwatch 2 | 2 Codes Bundle | Event 30 Oct 2026 | Esports Loot Box #1 + Candle Spray | Redeem Codes | Instant Auto Delivery",
   );
   assert.match(withEvent.description, /^- Esports Loot Box #1 \(Event 30 Oct 2026\)$/m);
   // No event known for the title: the label is shown whole.
   const noEvent = defaultTexts({ slots, guide: GUIDES["12"], useBy: NOW + 120 * DAY, now: NOW });
   assert.match(noEvent.title, /Esports Loot Box #1 \(Event 30 Oct 2026\)/);
+});
+
+test("title: skins first, then boxes (a repeated box shown once as '3x'), then the rest; the description keeps the bundle order", () => {
+  const labels = [
+    "Candle Spray", "Esports Loot Box #1 (Event 30 Oct 2026)", "Lantern Name Card",
+    "Home Sombra Skin", "Away Sombra Skin", "Esports Loot Box #2 (Event 30 Oct 2026)", "Esports Loot Box #3 (Event 30 Oct 2026)",
+  ];
+  const t = defaultTexts({ slots: slots(...labels), guide: ow(), useBy: NOW + 120 * DAY, now: NOW, eventStarts: [new Date("2026-10-30T07:30:00Z")] });
+  assert.equal(
+    t.title,
+    "Overwatch 2 | 7 Codes Bundle | Event 30 Oct 2026 | Home Sombra Skin + Away Sombra Skin + 3x Esports Loot Box + Candle Spray + more | Instant Auto Delivery",
+  );
+  assert.ok(t.title.length <= 160);
+  assert.ok(fitTitle(t.title, 150).includes("3x Esports Loot Box"), "PlayerAuctions keeps it too");
+  const listed = t.description.split("\n").filter((l) => l.startsWith("- ") && labels.includes(l.slice(2)));
+  assert.deepEqual(listed.map((l) => l.slice(2)), labels, "the description lists every code in bundle order");
+  assertClean(t.title, "title");
+});
+
+test("title: 'Redeem Codes' is given up only when a reward would otherwise be cut; a single code keeps 'Redeem Code'", () => {
+  const short = defaultTexts({ slots: slots("Prost Spray", "Esports Loot Box"), guide: ow(), now: NOW });
+  assert.equal(short.title, "Overwatch 2 | 2 Codes Bundle | Esports Loot Box + Prost Spray | Redeem Codes | Instant Auto Delivery");
+  const one = defaultTexts({ slots: slots("Esports Loot Box #3 (Event 30 Oct 2026)"), guide: ow(), now: NOW, eventStarts: [new Date("2026-10-30T07:30:00Z")] });
+  assert.equal(one.title, "Overwatch 2 | Event 30 Oct 2026 | Esports Loot Box #3 | Redeem Code | Instant Auto Delivery");
+  // Two copies of a label with no number (a hand-made bundle) also read "2x".
+  const twice = defaultTexts({ slots: slots("Gold Pack", "Gold Pack", "Moon Spray"), guide: ow(), now: NOW });
+  assert.equal(twice.title, "Overwatch 2 | 3 Codes Bundle | 2x Gold Pack + Moon Spray | Redeem Codes | Instant Auto Delivery");
 });
