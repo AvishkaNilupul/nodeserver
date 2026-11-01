@@ -13,6 +13,7 @@ const TwitchWebCookie = require("../models/TwitchWebCookie");
 const twitchOauth = require("./twitchOauthRefresher");
 const { makeClient, parseCookieInput, splitCookieExports, sharedGeo } = require("./soopClient");
 const { getTransport } = require("./soop/http");
+const { createEgressRouter } = require("./soop/egressRoute");
 const { createCampaignStore } = require("./soop/campaignStore");
 const { createActivityLog } = require("./soop/activity");
 const { createInventoryService } = require("./soop/inventory");
@@ -88,7 +89,11 @@ autoClaimSwitch.forget = () => {
 
 class SoopFarm {
   constructor() {
-    this.clientFactory = (cookies, o) => makeClient(cookies, o);
+    // Logins in SOOP_PROXY_ALT_LOGINS get the alternate egress; everyone else
+    // keeps makeClient's defaults (the SOOP_PROXY_URL transport).
+    this.egressRouter = createEgressRouter();
+    this.clientFactory = (cookies, o) =>
+      makeClient(cookies, { ...o, ...this.egressRouter.optionsFor(o && o.id) });
     this.clock = { now: Date.now, sleep };
     this.timings = {}; // worker timing overrides (tests)
     this.autoInventory = true;
@@ -166,6 +171,12 @@ class SoopFarm {
   async start() {
     if (this.started) return;
     this.started = true;
+    const alt = this.egressRouter.describe();
+    if (alt) {
+      console.log(
+        `[soop] ${alt.logins.length} login(s) leave through the alternate egress ${alt.via}: ${alt.logins.join(", ")}`,
+      );
+    }
     try {
       await this.store.load();
       await this._loadBots();
@@ -951,6 +962,7 @@ class SoopFarm {
       now: new Date(this.clock.now()).toISOString(),
       started: this.started,
       egress,
+      egressAlt: this.egressRouter.describe(),
       totals: views.totalsView(accounts, this.sessions, bots, (id) => !!botOf(id)),
       accounts: accounts.map((a) => {
         const z = this.sleep.get(a.loginId);
