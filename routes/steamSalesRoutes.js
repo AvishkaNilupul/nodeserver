@@ -5,6 +5,8 @@ const express = require("express");
 
 const { requireSuperadmin } = require("../middleware/auth");
 const sales = require("../utils/steamSales");
+const g2g = require("../utils/steamG2g");
+const distributor = require("../utils/steamDistributor");
 
 const router = express.Router();
 
@@ -30,7 +32,26 @@ function handle(fn) {
 
 const body = (req) => (req.body && typeof req.body === "object" ? req.body : {});
 
-router.get("/api/steam/sales/overview", requireSuperadmin, handle(async () => sales.overview()));
+router.get(
+  "/api/steam/sales/overview",
+  requireSuperadmin,
+  handle(async () => {
+    const [base, g2gOffers, dist] = await Promise.all([sales.overview(), g2g.panelView(), distributor.view()]);
+    return { ...base, g2gOffers, distributor: dist };
+  }),
+);
+
+// The distributor (docs/STEAM-SALES.md v2): on | plan | off, and run it now.
+router.patch(
+  "/api/steam/sales/distributor",
+  requireSuperadmin,
+  handle(async (req) => ({ distributor: await distributor.setMode(String(body(req).mode || ""), actor(req)) })),
+);
+
+router.post("/api/steam/sales/distribute", requireSuperadmin, handle(async () => ({ result: await distributor.run() })));
+
+// Read G2G now: sales on the Steam offers + stock confirmations.
+router.post("/api/steam/sales/g2g/sweep", requireSuperadmin, handle(async () => ({ result: await g2g.sweep() })));
 
 router.post(
   "/api/steam/sales/preview",

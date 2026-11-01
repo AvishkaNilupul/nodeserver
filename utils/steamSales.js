@@ -403,14 +403,14 @@ async function release(ids) {
 // Listings
 // ---------------------------------------------------------------------------
 
-async function previewListing({ region, priceUsd } = {}) {
+async function previewListing({ region, priceUsd, accountIds = null } = {}) {
   const cfg = await getConfig();
   const cc = String(region || "").toUpperCase();
   const purl = providerUrl();
   let vetted = [];
   const problems = [];
   try {
-    vetted = await vetAccounts({ region: cc });
+    vetted = await vetAccounts({ region: cc, accountIds });
   } catch (e) {
     problems.push(e.message);
   }
@@ -436,12 +436,14 @@ async function previewListing({ region, priceUsd } = {}) {
   };
 }
 
-async function createListing({ region, priceUsd } = {}, actor) {
+// `accountIds` (optional): list exactly these accounts (the distributor's
+// pick) instead of every ready account of the region.
+async function createListing({ region, priceUsd, accountIds = null } = {}, actor) {
   return withLock(async () => {
-    const pv = await previewListing({ region, priceUsd });
+    const pv = await previewListing({ region, priceUsd, accountIds });
     if (pv.problems.length) throw userError(pv.problems.join(" | "));
     const cfg = await getConfig();
-    const vetted = await vetAccounts({ region: pv.region });
+    const vetted = await vetAccounts({ region: pv.region, accountIds });
     const reserved = await reserve(vetted.map((v) => v.acc._id));
     const take = vetted.filter((v) => reserved.includes(String(v.acc._id)));
     if (!take.length) throw userError("Those accounts were just taken by another action. Refresh and try again.", 409);
@@ -1224,6 +1226,7 @@ async function overview() {
     blocked: stock.blocked,
     sales: sales.map((s) => ({
       _id: String(s._id),
+      market: s.market || "eldorado",
       orderId: s.orderId,
       title: s.title,
       region: s.region,
@@ -1266,6 +1269,23 @@ module.exports = {
   start,
   stop,
   isSteamOffer,
+  // shared with utils/steamG2g.js and utils/steamDistributor.js
+  _shared: {
+    LIVE_LISTING,
+    REGION_WARNING,
+    dec,
+    userError,
+    regionName,
+    regionOf,
+    mintPassword,
+    checkInbox,
+    blockersOf,
+    vetAccounts,
+    reserve,
+    release,
+    stockView,
+    providerUrl,
+  },
   // for tests
   _setDeps(over) {
     Object.assign(deps, over || {});

@@ -43,3 +43,39 @@ reference_steam_account_market_rules_1101.
   `/steam-accounts.html`, covers `public/img/steam-cover-<cc>.jpg`.
 - `eldoradoFulfiller`: an order on a Steam listing offer is skipped quietly.
 - `server.js`: `steamSales.start()`; nothing reaches Eldorado until a listing exists.
+
+# v2: G2G + the distributor (owner, 2026-11-01)
+
+Owner: "after the system is created I will add more accounts … the system decides
+Eldorado or G2G"; "use the API system we already have, auto delivery as on Epic".
+
+## G2G (utils/steamG2g.js, models/SteamG2gUnit.js)
+- One offer per country in G2G Game Accounts › Steam Accounts (service
+  `f6a1aba5-…`, brand `lgc_game_20647`, relation `5af4ff27-…`), created through the
+  seller API we already use (`POST /offer` draft + `PUT /offer/<id>`), shaped like the
+  live Epic Instant offer: `delivery_speed: "instant"`, `delivery_method_ids:
+  ["instant_inventory"]`, the brand's one required attribute "Games Owned" = "4 or
+  below" (empty accounts), $1, min 1, global. Links kept in `SteamSalesState.g2gOffers`.
+- Stock: rows in the brand's account form (Account ID = Steam account name, Password,
+  Account Country = signup country, Account Email = the Outlook address, Email
+  Password = a mail-page password, Additional Note = how to use the mail page + the
+  owner's region warning), uploaded with softpin + job, confirmed by G2G's stock stats.
+  G2G's note takes no link with a path: it names the bare site, whose front page now
+  has a "Steam account emails" button (→ /mail/).
+- Mail page window 14 days after the sale (G2G's minimum warranty for accounts).
+- Sales: G2G hands the row out itself; the sweep (3 min) reads our orders on the
+  linked offers, `order_inventories[].upload_reference` = the Account ID → unit sold,
+  account sold, mail session sold, `SteamSale` "g2g:<order item>" (unique).
+- g2gFulfiller skips orders on these offers quietly (pages if one waits > 15 min).
+
+## The distributor (utils/steamDistributor.js), every 5 min, mode on | plan | off
+- Takes ready stock accounts (same vet as listing: empty, signup country, password,
+  email, inbox used for Steam only). Never an account already on a market.
+- Per account, region R: the market whose R offer holds FEWER unsold accounts;
+  tie → the market with more Steam sales in the last 14 days; tie → G2G (empty
+  accounts sell there with volume, Eldorado's floor is $0.05).
+- A market whose offer for R can't be made/loaded right now is skipped for 6 h and
+  the account goes to the other one. Missing offers are created on the fly
+  (Eldorado region listing / G2G region offer).
+- At most 20 accounts per pass. "plan" records what it would do without doing it.
+- Ships ON (owner asked for automatic placement); the panel can switch it.

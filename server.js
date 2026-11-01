@@ -1058,6 +1058,10 @@ mongoose
     // Steam account sales (docs/STEAM-SALES.md): same sale sync for the Steam
     // region offers. Reads Eldorado only while a Steam listing is live.
     require("./utils/steamSales").start();
+    // Steam on G2G (Instant offers per country) + the distributor that decides
+    // Eldorado or G2G for each new Steam account. docs/STEAM-SALES.md (v2).
+    require("./utils/steamG2g").start();
+    require("./utils/steamDistributor").start();
     // Epic accounts on G2G: the G2G fulfiller delivers their orders through
     // utils/epicG2g; this sweep catches cancelled orders (accounts back on the
     // shelf) and keeps the linked offers' stock numbers right.

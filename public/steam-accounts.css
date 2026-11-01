@@ -261,3 +261,12 @@ html[data-theme="dark"] .toast { background: #273043; }
   .sell-table td { padding: 2px 0; border: 0; text-align: left !important; }
   .sell-actions { text-align: left; }
 }
+.sell-mkt { display: inline-block; padding: 0 7px; border-radius: 6px; font-size: 11px; font-weight: 700; letter-spacing: 0.02em; background: var(--st-muted-soft); color: var(--muted); line-height: 18px; }
+.sell-mkt.is-g2g { background: var(--st-warn-soft); color: var(--st-warn); }
+.sell-dist { margin: 6px 0 14px; padding: 12px 14px; border: 1px solid var(--line); border-radius: 12px; background: var(--surface-2); }
+.sell-dist .sell-h { margin-top: 0; }
+.sell-dist-row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; }
+.sell-dist-note { margin: 8px 0 4px; }
+.sell-last { margin: 6px 0 0; padding: 0; list-style: none; font-size: 13px; }
+.sell-last li { padding: 5px 0; border-bottom: 1px dashed var(--line); }
+.sell-last li:last-child { border-bottom: 0; }

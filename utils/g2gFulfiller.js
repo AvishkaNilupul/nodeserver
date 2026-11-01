@@ -1149,6 +1149,7 @@ async function deliverPendingOrders() {
       // delivers through the order page's account form (null = not one).
       r =
         (await epicAccountOrder(order, { dryRun })) ||
+        (await steamAccountOrder(order)) ||
         (await farmService.deliverFarmOrder(order, { dryRun })) ||
         (await deliverOrder(order, { dryRun }));
     } catch (e) {
@@ -1677,6 +1678,18 @@ async function epicAccountOrder(order, opts) {
     return null;
   }
   return mod.deliverOrder(order, opts);
+}
+
+// Steam account offers (utils/steamG2g, Instant): G2G hands the account over
+// from the stock we loaded, so these orders are only watched (null = not one).
+// Fenced like the Epic one: a load failure falls through to the paths below.
+async function steamAccountOrder(order) {
+  try {
+    return await require("./steamG2g").deliverOrder(order);
+  } catch (e) {
+    console.error("g2g fulfiller: steamG2g unavailable:", e.message);
+    return null;
+  }
 }
 
 async function epicProofFor(orderItemId) {

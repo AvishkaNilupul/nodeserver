@@ -10,6 +10,7 @@ const mongoose = require("mongoose");
 const { requireSuperadmin } = require("../middleware/auth");
 const SteamAccount = require("../models/SteamAccount");
 const SteamListing = require("../models/SteamListing");
+const SteamG2gUnit = require("../models/SteamG2gUnit");
 const { decrypt } = require("../utils/secretBox");
 
 const router = express.Router();
@@ -201,6 +202,13 @@ router.patch("/api/steam/accounts/:id", requireSuperadmin, async (req, res) => {
         return res.status(409).json({
           success: false,
           message: "This account is on sale on Eldorado. Remove it from its listing (Selling on Eldorado) before changing its stage.",
+        });
+      }
+      // Or sitting in a G2G offer's stock (utils/steamG2g.js).
+      if (await SteamG2gUnit.exists({ steamAccountId: current._id, state: { $in: ["loading", "listed"] } })) {
+        return res.status(409).json({
+          success: false,
+          message: "This account is in a G2G offer's stock. Remove it on G2G first; its stage can't change by hand while it's there.",
         });
       }
     }

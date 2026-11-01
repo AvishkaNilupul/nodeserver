@@ -3488,6 +3488,68 @@ async function g2gPublish({
   return { externalId: String(offerId), url: g2gOfferUrl(offerId) };
 }
 
+// Create a Game Accounts offer on Auto delivery ("Instant": G2G hands buyers
+// the rows loaded into its own stock with g2gUploadStock). Same two calls as
+// g2gPublish (POST = an empty draft shell, PUT = the content), with the
+// delivery fields our live Epic Instant offer carries: delivery_speed
+// "instant", delivery_method_ids ["instant_inventory"], no speed details and
+// no stock number (G2G counts the stock rows). The caller passes the brand's
+// required attributes. Read back with g2gGetOwnOffer: an Instant offer with no
+// stock answers 404 to the plain read. Used by utils/steamG2g.js.
+async function g2gCreateInstantAccountOffer({
+  serviceId,
+  brandId,
+  relationId,
+  title,
+  description,
+  priceUsd,
+  minQty,
+  offerAttributes,
+  collectionTree,
+}) {
+  const service = String(serviceId || "");
+  const brand = String(brandId || "");
+  if (!service || !brand || !relationId) throw new Error("G2G account offer needs service, brand and relation");
+  const price = Number(priceUsd);
+  const min = Math.max(1, Number(minQty) || 1);
+  if (!Number.isFinite(price) || price * min < G2G_MIN_PRICE) {
+    throw new Error("G2G needs price x minimum quantity of at least " + G2G_MIN_PRICE.toFixed(2));
+  }
+  if (!Array.isArray(offerAttributes) || !offerAttributes.length) throw new Error("G2G account offer needs its attributes");
+  const created = await g2gRequest("post", "/offer", {
+    body: { seller_id: g2gSellerId(), service_id: service, brand_id: brand },
+    what: "G2G create offer",
+  });
+  const offerId = created && (created.offer_id || created.id);
+  if (!offerId) throw new Error("G2G create: no offer id in response: " + JSON.stringify(created).slice(0, 300));
+  await g2gRequest("put", "/offer/" + encodeURIComponent(offerId), {
+    body: {
+      seller_id: g2gSellerId(),
+      service_id: service,
+      brand_id: brand,
+      relation_id: String(relationId),
+      offer_type: "public",
+      title: String(title || "").slice(0, 128),
+      description: String(description || title || "").slice(0, 5000),
+      currency: "USD",
+      unit_price: price,
+      min_qty: min,
+      low_stock_alert_qty: 0,
+      delivery_method_ids: ["instant_inventory"],
+      delivery_speed: "instant",
+      delivery_speed_details: [],
+      sales_territory_settings: { settings_type: "global", countries: [] },
+      offer_attributes: offerAttributes,
+      offer_title_collection_tree: Array.isArray(collectionTree) ? collectionTree : [],
+      status: G2G_STATUS.LIVE,
+    },
+    what: "G2G publish account offer",
+  });
+  const back = await g2gGetOwnOffer(offerId).catch(() => null);
+  if (!back || !back.title) throw new Error("G2G account offer " + offerId + " did not read back");
+  return { offer: back, offerId: String(offerId), url: g2gOfferUrl(offerId) };
+}
+
 // ---- orders -------------------------------------------------------
 
 // The cheap poll: one small call that says whether anything needs doing.
@@ -6851,6 +6913,7 @@ module.exports = {
   g2gListOffers,
   g2gGetOffer,
   g2gPublish,
+  g2gCreateInstantAccountOffer,
   g2gUpdateOffer,
   g2gReprice,
   g2gSetQuantity,
