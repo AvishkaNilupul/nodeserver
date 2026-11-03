@@ -80,14 +80,14 @@
   function journal(kind,e){
     if(location.hostname!=='nid.naver.com'||!/^\/(account\/signup\/|nidweb\/passkey\/)/.test(location.pathname))return;
     const el=e?.target?.closest?.('input,select,button,a,[role="option"],[role="checkbox"]');
-    const event={kind,page:location.href,target:el?el.tagName.toLowerCase()+'#'+(el.id||el.name||''):'page',label:el?describe(el)||el.textContent?.trim().slice(0,160):document.querySelector('main h2,h2,h1')?.textContent||document.title,inputType:el?.type||'',trusted:e?.isTrusted===true};
+    const event={kind,page:location.href,target:el?el.tagName.toLowerCase()+'#'+(el.id||el.name||''):'page',label:el?describe(el)||el.textContent?.trim().slice(0,160):(document.querySelector('main h2')||document.querySelector('h2')||document.querySelector('h1'))?.textContent||document.title,inputType:el?.type||'',trusted:e?.isTrusted===true};
     if(el&&'value'in el&&['input','change'].includes(kind))event.value='[entered '+String(el.value||'').length+' characters]';
     chrome.runtime.sendMessage({type:'log-event',event}).catch(()=>{});
   }
   document.addEventListener('click',e=>journal('click',e),true);
   document.addEventListener('change',e=>journal('change',e),true);
   let inputTimer;document.addEventListener('input',e=>{clearTimeout(inputTimer);inputTimer=setTimeout(()=>journal('input',e),250);},true);
-  let lastStep='';const recordStep=()=>{const step=location.pathname+' '+document.querySelector('main h2,h2,h1')?.textContent;if(step!==lastStep){lastStep=step;journal('step');}};
+  let lastStep='';const recordStep=()=>{const step=location.pathname+' '+(document.querySelector('main h2')||document.querySelector('h2')||document.querySelector('h1'))?.textContent;if(step!==lastStep){lastStep=step;journal('step');}};
   new MutationObserver(recordStep).observe(document.body,{childList:true,subtree:true});recordStep();
   let pending=false;setInterval(async()=>{if(pending)return;pending=true;try{await chrome.runtime.sendMessage({type:'tick'});}catch{}finally{pending=false;}},1000);
 })();

@@ -59,3 +59,14 @@ test('demonstration journal excludes credentials, SMS values and URL session tok
   assert.equal(e.value,'[redacted]');assert.ok(!JSON.stringify(e).includes('private'));
   const c=eventRecord('signup',{kind:'cookies-meta',cookies:[{name:'NID_SES',domain:'.naver.com',value:'private-cookie'}]});assert.ok(!JSON.stringify(c).includes('private-cookie'));
 });
+test('journal records changing signup step headings rather than the NAVER brand',()=>{
+  const events=[],heading={textContent:'Please enter your name'};let changed;
+  vm.runInNewContext(fs.readFileSync(path.join(__dirname,'../extension/chzzk-signup/content.js'),'utf8'),{
+    document:{body:{},addEventListener:()=>{},querySelector:s=>s==='main h2'||s==='h2'?heading:{textContent:'NAVER'},querySelectorAll:()=>[]},
+    location:{hostname:'nid.naver.com',pathname:'/account/signup/info',href:'https://nid.naver.com/account/signup/info?session=private'},
+    MutationObserver:class{constructor(fn){changed=fn;}observe(){}},setInterval:()=>{},
+    chrome:{runtime:{onMessage:{addListener:()=>{}},sendMessage:async m=>{events.push(m.event);}}}
+  });
+  heading.textContent='Please enter your date of birth';changed();
+  assert.deepEqual(events.map(e=>e.label),['Please enter your name','Please enter your date of birth']);
+});
