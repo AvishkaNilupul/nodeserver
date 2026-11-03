@@ -8,15 +8,15 @@
     listed: { label: "On sale", tone: "is-accent" },
     sold: { label: "Sold", tone: "is-ok" },
     problem: { label: "Needs attention", tone: "is-error" },
-    boosting: { label: "Boosting hours", tone: "is-warn" },
+    boosting: { label: "Reserved for farm", tone: "is-warn" },
   };
   var FILTERS = [
     { key: "all", label: "All" },
-    { key: "empty", label: "Empty" },
-    { key: "loaded", label: "Loaded" },
+    { key: "empty", label: "Available empty" },
+    { key: "loaded", label: "With games" },
     { key: "listed", label: "On sale" },
     { key: "sold", label: "Sold" },
-    { key: "boosting", label: "Boosting" },
+    { key: "boosting", label: "Farm reserved" },
     { key: "problem", label: "Needs attention" },
   ];
   var CODES = (
@@ -163,7 +163,7 @@
   // ---- Filters
   function matchesFilter(a, key) {
     if (key === "all") return true;
-    if (key === "empty") return !a.loaded && a.stage !== "sold" && a.stage !== "problem";
+    if (key === "empty") return !a.loaded && a.stage === "stock" && !a.boostedAt;
     if (key === "loaded") return a.loaded && a.stage !== "sold" && a.stage !== "problem";
     return a.stage === key;
   }
@@ -236,9 +236,9 @@
   }
 
   // ---- List
-  function stageBadge(stage) {
+  function stageBadge(stage, purpose) {
     var s = STAGES[stage] || STAGES.stock;
-    return '<span class="st-badge ' + s.tone + '">' + esc(s.label) + "</span>";
+    return '<span class="st-badge ' + s.tone + '">' + esc(stage === "boosting" ? purpose === "game" ? "Preparing game" : "Boosting hours" : s.label) + "</span>";
   }
   function regionCell(a) {
     var signup = a.signupCountry ? '<span><span class="cc" title="Signup country">' + esc(a.signupCountry) + "</span> " + esc(countryName(a.signupCountry)) + "</span>" : '<span class="st-muted">Signup country unknown</span>';
@@ -292,7 +292,7 @@
           '<td class="c-region">' + regionCell(a) + "</td>" +
           '<td class="c-games">' + gamesCell(a) + "</td>" +
           '<td class="c-value is-right st-num">' + (a.gameCount ? money(a.valueUsd) : "—") + "</td>" +
-          '<td class="c-stage">' + stageBadge(a.stage) + "</td></tr>",
+          '<td class="c-stage">' + stageBadge(a.stage, a.preparationPurpose) + "</td></tr>",
       );
       if (open) html.push('<tr class="acc-detail"><td colspan="6">' + detailHtml(a) + "</td></tr>");
     });
