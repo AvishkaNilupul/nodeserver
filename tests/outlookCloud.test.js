@@ -60,3 +60,25 @@ test('buyer reader retries a consent scope error with the vendor granted scopes'
   assert.equal(await context.accessTokenFor({email:'fixture@outlook.com',clientId:'fixture',refreshToken:'fixture'}),'test-access');
   assert.deepEqual(scopes,['offline_access Mail.ReadWrite User.Read','https://graph.microsoft.com/.default']);
 });
+
+test('Riot reserves only unused mail and remains exclusive to every other purpose', async t => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(),'outlook-riot-test-'));
+  t.after(() => fs.rmSync(dir,{recursive:true,force:true}));
+  const accounts = path.join(dir,'accounts.txt'), usage = path.join(dir,'usage.json');
+  fs.writeFileSync(accounts,['used','steam','free'].map(name => `${name}@outlook.com|password|refresh|client`).join('\n') + '\n');
+  fs.writeFileSync(usage,JSON.stringify({'used@outlook.com':{soop:{status:'ok'}},'steam@outlook.com':{steam:{status:'ok',exclusive:true}}}));
+  const child = spawn(process.execPath,[path.join(__dirname,'../scripts/mail-dashboard.js')],{
+    env:{...process.env,PORT:'43992',OUTLOOK_ACCOUNTS_FILE:accounts,OUTLOOK_USAGE_FILE:usage},stdio:['ignore','pipe','pipe']});
+  t.after(() => child.kill());
+  await new Promise((resolve,reject) => {child.stdout.once('data',resolve);child.once('exit',code => reject(Error('reader exited '+code)));child.stderr.once('data',d => reject(Error(String(d))));});
+  const base = 'http://127.0.0.1:43992';
+  const post = (route,body) => fetch(base+route,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(body)}).then(r=>r.json());
+  const caps = await fetch(base+'/api/pool/capabilities').then(r=>r.json());
+  assert.equal(caps.authority,'cloud');assert.ok(caps.exclusivePurposes.includes('riot'));
+  const results = await Promise.all([post('/api/pool/pick',{for:'riot'}),post('/api/pool/pick',{for:'riot'})]);
+  assert.equal(results.filter(r=>r.ok).length,1);assert.equal(results.find(r=>r.ok).email,'free@outlook.com');
+  await post('/api/pool/release',{email:'free@outlook.com',for:'riot',status:'ok'});
+  assert.equal(JSON.parse(fs.readFileSync(usage))['free@outlook.com'].riot.exclusive,true);
+  assert.equal((await post('/api/pool/pick',{for:'soop'})).ok,false);
+  assert.equal((await post('/api/pool/pick',{for:'epic'})).ok,false);
+});

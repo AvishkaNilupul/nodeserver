@@ -1,6 +1,6 @@
 # Cloud Outlook pool
 
-The cloud runtime is the single writer for registration reservations. Epic and Steam each require a completely unused inbox and retain exclusive ownership. Other purposes skip those inboxes. Never start a second dashboard against a copy of the ledger.
+The cloud runtime is the single writer for registration reservations. Epic, Steam and Riot each require a completely unused inbox and retain exclusive ownership. Other purposes skip those inboxes. Never start a second dashboard against a copy of the ledger.
 
 Runtime layout: `scripts/mail-dashboard.js`, `scripts/epic-mail-proxy.js`, `utils/epicMailOtp.js`, `utils/epicLocalProxy.js`, the dependencies in this directory's package.json, and ecosystem.config.cjs. Set OUTLOOK_RUNTIME_ROOT when using a location other than the ecosystem default. Install dependencies in the runtime root. Run the ecosystem with PM2 and save its process list.
 

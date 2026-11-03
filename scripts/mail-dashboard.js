@@ -172,7 +172,7 @@ function extractCodes(text) {
 }
 
 // Purposes that take an inbox nothing else uses and keep it to themselves.
-const EXCLUSIVE_PURPOSES = new Set(["epic", "steam"]);
+const EXCLUSIVE_PURPOSES = new Set(["epic", "steam", "riot"]);
 
 // ----- the HTML -----
 
