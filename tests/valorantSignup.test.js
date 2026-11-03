@@ -132,7 +132,7 @@ test('network observer ignores generic login and sends only minimized signup rec
   await window.fetch('/api/v1/login',{body:JSON.stringify({type:'auth',username:'fixture'})}); assert.equal(receipts.length,0);
   await window.fetch('/api/v1/login',{body:JSON.stringify(body)});
   assert.equal(requestedBody,JSON.stringify(body));
-  assert.deepEqual(receipts,[{requestType:'signup',username:'fixture',type:'success'}]);
+  assert.deepEqual(receipts,[{requestType:'signup',username:'fixture',type:'success',errorCode:null}]);
   assert.ok(!JSON.stringify(receipts).includes('secret')); assert.ok(!JSON.stringify(receipts).includes('private-token'));
 });
 

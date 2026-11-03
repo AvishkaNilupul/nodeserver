@@ -5,18 +5,20 @@ const path = require('path');
 const os = require('os');
 const {LocalVault} = require('../epic-signup/local-vault.cjs');
 const {createMail} = require('./mail.cjs');
+const {CloudSync,createUploader,loadCloudTarget} = require('./cloud-sync.cjs');
 const {countries, cleanCountry, expectedShard, prepareProxy, browserLocation} = require('./regions.cjs');
 const DEFAULT_DIR = path.join(os.homedir(), 'Library', 'Application Support', 'ValorantAccountGenerator');
 
-function createApp({dataDir = DEFAULT_DIR, port = 4110, mail = createMail(), prepare = prepareProxy} = {}) {
+function createApp({dataDir = DEFAULT_DIR, port = 4110, mail = createMail(), prepare = prepareProxy, cloudUploader = null} = {}) {
   const app = express(), vault = new LocalVault(dataDir), tickets = new Map();
   const token = crypto.randomBytes(32).toString('base64url');
+  const cloudSync = cloudUploader ? new CloudSync({vault,upload:cloudUploader}) : null;
   let starting = false, preparing = false;
   const active = () => vault.data.sessions.find(s => !['created', 'cancelled'].includes(s.status));
   const meta = s => ({id: s.id, email: s.email, username: s.username, requestedCountry: s.requestedCountry,
     proxyCountry: s.creationLocation.country, expectedShard: s.expectedShard, country: s.country,
     shard: s.shard, regionVerified: false, status: s.status, createdAt: s.createdAt,
-    completedAt: s.completedAt, mailPending: !!s.mailPending, stage: s.stage || 'reserved'});
+    completedAt: s.completedAt, mailPending: !!s.mailPending, stage: s.stage || 'reserved', cloud: s.cloud ? {state:s.cloud.state,cloudId:s.cloud.cloudId,lastError:s.cloud.lastError} : null});
   app.disable('x-powered-by');
   app.use((req,res,next) => {
     if (!['127.0.0.1:' + port, 'localhost:' + port].includes(req.get('host'))) return res.sendStatus(403);
@@ -135,7 +137,11 @@ function createApp({dataDir = DEFAULT_DIR, port = 4110, mail = createMail(), pre
   });
   app.use((err,_req,res,_next) => res.status(503).json({ok: false,
     error: /^(Choose a supported|Test the regional|Browser proxy|Resume must|The proxy exit|Cloud Outlook needs)/.test(err.message) ? err.message : 'Signup operation failed. Resume the same signup; its inbox stays reserved.'}));
-  return {app, vault, token};
+  return {app, vault, token, cloudSync};
 }
-if (require.main === module) createApp().app.listen(4110, '127.0.0.1', () => console.log('Valorant creator: http://127.0.0.1:4110'));
+if (require.main === module) {
+  const target=loadCloudTarget(DEFAULT_DIR);
+  const {app,cloudSync}=createApp({cloudUploader:target?createUploader(target):null});
+  app.listen(4110,'127.0.0.1',()=>{cloudSync?.start();console.log('Valorant creator: http://127.0.0.1:4110');});
+}
 module.exports = {createApp, DEFAULT_DIR};

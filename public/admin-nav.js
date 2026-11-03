@@ -292,6 +292,12 @@
           superOnly: true,
         },
         {
+          href: "/valorant-accounts.html",
+          label: "Valorant accounts",
+          icon: ICONS.steamAccounts,
+          superOnly: true,
+        },
+        {
           href: "/outlook/",
           label: "Outlook inboxes",
           icon: ICONS.epicAccounts,

@@ -69,6 +69,7 @@ const radarRoutes = require("./routes/radarRoutes");
 const bannedRoutes = require("./routes/bannedRoutes");
 const epicAccountRoutes = require("./routes/epicAccountRoutes");
 const steamAccountRoutes = require("./routes/steamAccountRoutes");
+const valorantAccountRoutes = require("./routes/valorantAccountRoutes");
 const steamSalesRoutes = require("./routes/steamSalesRoutes");
 const twitchFollowRoutes = require("./routes/twitchFollowRoutes");
 const twitchFollowRunner = require("./utils/twitchFollowRunner");
@@ -570,6 +571,10 @@ app.get("/steam-accounts.html", requireSuperadmin, enforce2fa, (req, res) => {
   res.sendFile(path.join(__dirname, "public", "steam-accounts.html"));
 });
 
+app.get("/valorant-accounts.html", requireSuperadmin, enforce2fa, (req, res) => {
+  res.sendFile(path.join(__dirname, "public", "valorant-accounts.html"));
+});
+
 // Shop listings manager (superadmin only) — build/publish manual listings.
 app.get("/listings.html", requireSuperadmin, enforce2fa, (req, res) => {
   res.sendFile(path.join(__dirname, "public", "listings.html"));
@@ -828,6 +833,7 @@ app.use(enforce2fa, radarRoutes);
 app.use(enforce2fa, bannedRoutes);
 app.use(enforce2fa, epicAccountRoutes);
 app.use(enforce2fa, steamAccountRoutes);
+app.use(enforce2fa, valorantAccountRoutes);
 app.use(enforce2fa, steamSalesRoutes);
 app.use(enforce2fa, twitchFollowRoutes);
 // Drop-claim race UI (public/twitch-claim.html): port of the CLI spammer that

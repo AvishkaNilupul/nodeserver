@@ -85,14 +85,15 @@ async function handle(message,sender){
   if(message.type==='riot-result') {
     const receipt=message.receipt;
     if(!receipt || !['signup','verification'].includes(receipt.requestType))return {ok:false};
+    if(receipt.type==='error') {
+      const code=/^[a-z0-9_-]{1,100}$/i.test(receipt.errorCode||'')?receipt.errorCode:'request rejected';
+      await chrome.storage.session.set({lastError:'Riot signup: '+code+'. Keep this identity to resume.'});return {ok:true};
+    }
     if(receipt.requestType==='signup') {
       if(receipt.username!==active.session.username)return {ok:false};
       if(['success','verification'].includes(receipt.type)) {
         active.signupObserved=true;await chrome.storage.session.set({active});
       }
-    }
-    if(receipt.type==='error') {
-      await chrome.storage.session.set({lastError:'Riot rejected the signup or verification. Keep this window and identity.'});return {ok:true};
     }
     if(receipt.type==='success' && active.signupObserved) {
       active.completionEvidence={source:'riot-signup-response',type:'success',username:active.session.username};

@@ -9,7 +9,8 @@
       const request = typeof body === 'string' ? JSON.parse(body) : null;
       if (!request || !['signup', 'verification'].includes(request.type)) return null;
       return {requestType: request.type, username: request.type === 'signup' ? request.username : null,
-        type: ['success', 'verification', 'error', 'signup'].includes(result.type) ? result.type : 'pending'};
+        type: ['success', 'verification', 'error', 'signup'].includes(result.type) ? result.type : 'pending',
+        errorCode: typeof result.error === 'string' && /^[a-z0-9_-]{1,100}$/i.test(result.error) ? result.error : null};
     } catch {return null;}
   }
   function notify(value) {
