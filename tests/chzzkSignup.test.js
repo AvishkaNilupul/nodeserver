@@ -38,6 +38,17 @@ test('SMS arrival prevents cancellation and replacement',async t=>{
   const f=fixture(t);await f.engine.number(f.s.id);f.orders.get(1).sms=[{code:'123456'}];
   await assert.rejects(f.engine.replace(f.s.id),/SMS already arrived/);assert.equal(f.s.order.id,1);assert.equal(f.bought(),1);
 });
+test('SMS arriving in the cancellation response remains assigned and blocks another purchase',async t=>{
+  const f=fixture(t);await f.engine.number(f.s.id);const order=f.provider.order;
+  f.provider.order=async(id,action)=>{if(action==='cancel')f.orders.get(id).sms=[{code:'654321'}];return order(id,action);};
+  await assert.rejects(f.engine.replace(f.s.id),/SMS already arrived/);
+  assert.equal(f.s.order.id,1);assert.equal(f.s.order.sms[0].code,'654321');await assert.rejects(f.engine.number(f.s.id),/received a code/);assert.equal(f.bought(),1);
+});
+test('cancellation response for a different order cannot clear the assigned number',async t=>{
+  const f=fixture(t);await f.engine.number(f.s.id);const order=f.provider.order;
+  f.provider.order=async(id,action)=>action==='cancel'?{...await order(id),id:999,status:'CANCELED'}:order(id);
+  await assert.rejects(f.engine.replace(f.s.id),/different order/);assert.equal(f.s.order.id,1);assert.equal(f.s.order.status,'PENDING');
+});
 test('ambiguous purchase persists across restart and reconciles without rebuying',async t=>{
   const f=fixture(t),buy=f.provider.buy;
   f.provider.buy=async(...a)=>{await buy(...a);throw new ProviderError('lost response',{ambiguous:true});};

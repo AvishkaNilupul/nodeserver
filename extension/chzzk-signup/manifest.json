@@ -1,5 +1,5 @@
 {
-  "manifest_version":3,"name":"CHZZK Signup — Local 5sim","version":"0.1.0",
+  "manifest_version":3,"name":"CHZZK Signup — Local 5sim","version":"0.1.4",
   "description":"Naver signup with encrypted local storage, 5sim SMS and CHZZK farm handoff.",
   "incognito":"spanning","permissions":["storage","tabs","cookies"],
   "host_permissions":["http://127.0.0.1/*","*://*.naver.com/*"],

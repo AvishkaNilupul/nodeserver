@@ -18,8 +18,9 @@ polls its SMS and fills the code. Complete visual challenges yourself. Unknown
 forms pause instead of submitting guesses. Resume preserves the same identity.
 If the helper cannot advance, fill the visible form manually and resume.
 
-No SMS after ten seconds closes Naver's verification popup, cancels the unused
-number, and retries in the same window. When Naver provides no
+No SMS after ten seconds cancels the unused number, closes Naver's verification
+popup after confirmation, and retries in the same window. A code arriving during
+cancellation stays assigned and is entered before the popup closes. When Naver provides no
 Back control, return to the number screen yourself, then Get / fill number.
 After every failure, selection switches to the cheapest different
 country. Default limits: ten numbers, 0.05 per number, 0.25 gross signup spend.
@@ -46,7 +47,7 @@ existing configured CHZZK egress and inserts new accounts without modifying
 existing accounts or their sold/paused state. Upload failures remain queued in
 the local vault. The farm supervisor discovers imported accounts normally.
 
-Tests: `node --test tests/chzzkSignup.test.js`. Tests use fake 5sim responses,
+Tests: `node --test tests/chzzkSignup.test.js tests/chzzkSignupExtension.test.js tests/chzzkSignupForms.test.js`. Tests use fake 5sim responses,
 temporary encrypted vaults and stub cloud models, without spending or contacting
 Naver/CHZZK. A real registration and earned drops are separate live checks.
 
@@ -74,3 +75,19 @@ and NID_SES were `secure:false`, so HTTPS-only host permission hid them from the
 cookies API even while Naver showed a working login. Cookie reads are bound to
 the assigned private store and include its partition key. Only the required
 Naver jar reaches the existing farm; credential values never reach the journal.
+
+The form helper handles the separate birthday screen and the demonstrated gender
+and country buttons. Country selection matches name and dialing prefix together,
+including Canada versus USA (+1). The SMS clock starts when the popup appears.
+If Naver never opens it within 15 seconds of Send Code, the helper pauses on the
+same assigned number so its message can be checked before explicitly replacing it.
+Naver's explicit invalid-phone message is allowed five seconds to settle before
+the unused order is cancelled and a different country is selected. Reloaded phone
+forms refill the existing assigned order; an already received SMS blocks replacement.
+The recommended Naver ID is preserved and bound from the completion page.
+
+Some new accounts require a separate Naver sign-in when first opening CHZZK.
+The helper follows CHZZK's login button and signs in using the saved account.
+Additional security challenges pause this handoff for completion in the same
+window. The signup's credentials remain in the encrypted local session throughout;
+it is counted as a saved farm account only after authenticated CHZZK verification.

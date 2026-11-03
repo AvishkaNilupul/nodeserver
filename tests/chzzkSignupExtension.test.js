@@ -1,23 +1,69 @@
 const test=require('node:test'),assert=require('node:assert/strict'),vm=require('node:vm'),fs=require('node:fs'),path=require('node:path');
-function browser({elapsed=10000,code=null}={}){
+function browser({elapsed=10000,code=null,replaceError=false,lateCode=null,sendOk=true,tabUrl='https://chzzk.naver.com/'}={}){
   const trace=[],clock=100000,store={active:{id:'signup-1',token:'token',tabId:7,windowId:3,number:{country:'canada'},sentAt:clock-elapsed,requestedAt:clock-elapsed-1000}};
   const page={smsPopup:true,phoneReady:true,terms:false,challenge:false,authenticated:false};
   const chrome={storage:{session:{get:async()=>structuredClone(store),set:async o=>Object.assign(store,structuredClone(o)),remove:async()=>{}},local:{set:async()=>{}}},
-    tabs:{update:async(_id,opts)=>{trace.push('navigate:'+opts.url);},sendMessage:async(_id,m)=>{trace.push('browser:'+m.type);if(m.type==='inspect')return{...page};if(m.type==='identity')return{ready:false};if(m.type==='back')page.smsPopup=false;return{ok:true};}},
+    tabs:{get:async()=>({url:tabUrl}),update:async(_id,opts)=>{trace.push('navigate:'+opts.url);},sendMessage:async(_id,m)=>{trace.push('browser:'+m.type);if(m.type==='inspect')return{...page};if(m.type==='identity')return{ready:false};if(m.type==='chzzk-status')return{ok:false};if(m.type==='send-sms')return{ok:sendOk};if(m.type==='back')page.smsPopup=false;return{ok:true};}},
     runtime:{onMessage:{addListener:()=>{}}},action:{onClicked:{addListener:()=>{}}}};
   const context=vm.createContext({chrome,URL,AbortSignal,Date:class extends Date{static now(){return clock;}},fetch:async(url,opts)=>{
     const action=url.split('/').at(-1);trace.push('api:'+action);
+    if(action==='replace'&&replaceError){code=lateCode;return{ok:false,json:async()=>({ok:false,error:'SMS already arrived.'})};}
     const data=action==='identity'?{identity:{username:'assigned'}}:action==='sms'?{result:{code,status:'RECEIVED'}}:action==='number'?{result:{phone:'+351555123456',prefix:'+351',country:'portugal'}}:{};
     return{ok:true,json:async()=>({ok:true,...data})};
   }});
   vm.runInContext(fs.readFileSync(path.join(__dirname,'../extension/chzzk-signup/background.js'),'utf8'),context);
   return{trace,store,page,tick:()=>vm.runInContext('handle({type:"tick"},{tab:{id:7,windowId:3,incognito:true}})',context),wrongSender:()=>vm.runInContext('handle({type:"tick"},{tab:{id:8,windowId:3,incognito:true}})',context)};
 }
-test('ten-second SMS expiry closes popup before cancellation, then reuses signup for a new number',async()=>{
+test('ten-second SMS expiry confirms cancellation, closes popup, and reuses signup for a new number',async()=>{
   const b=browser();await b.tick();
-  assert.ok(b.trace.indexOf('browser:back')<b.trace.indexOf('api:replace'));
+  assert.ok(b.trace.indexOf('api:replace')<b.trace.indexOf('browser:back'));
   assert.equal(b.store.active.id,'signup-1');assert.equal(b.store.active.number,null);assert.equal(b.page.smsPopup,false);
   await b.tick();assert.ok(b.trace.includes('api:number'));assert.equal(b.store.active.number.country,'portugal');assert.equal(b.store.active.id,'signup-1');
+});
+test('SMS arriving during cancellation is filled in the still-open popup',async()=>{
+  const b=browser({replaceError:true,lateCode:'123456'});await b.tick();
+  assert.equal(b.page.smsPopup,true);assert.equal(b.store.active.smsCode,'123456');assert.equal(b.store.active.smsFilled,true);assert.ok(!b.trace.includes('browser:back'));assert.ok(!b.trace.includes('api:number'));
+});
+test('resume after a confirmed cancellation finishes closing the popup without cancelling or polling again',async()=>{
+  const b=browser();b.store.active.replacing=true;await b.tick();
+  assert.equal(b.page.smsPopup,false);assert.equal(b.store.active.number,null);assert.ok(!b.trace.includes('api:replace'));assert.ok(!b.trace.includes('api:sms'));
+  await b.tick();assert.ok(b.trace.includes('api:number'));
+});
+test('a rejected SMS request stops after fifteen seconds without starting an SMS countdown',async()=>{
+  const b=browser({elapsed:16000});b.page.smsPopup=false;b.store.active.sentAt=null;
+  await assert.rejects(b.tick(),/did not open the SMS popup/);assert.ok(!b.trace.includes('api:replace'));assert.ok(!b.trace.includes('api:number'));
+});
+test('SMS countdown starts when the popup appears rather than when the number was bought',async()=>{
+  const b=browser({elapsed:30000});b.store.active.sentAt=null;await b.tick();
+  assert.equal(b.store.active.sentAt,100000);assert.ok(!b.trace.includes('api:replace'));
+});
+test('a visibly rejected phone number rotates after validation settles without pretending an SMS was sent',async()=>{
+  const b=browser({sendOk:false});Object.assign(b.page,{smsPopup:false,phoneRejected:true});Object.assign(b.store.active,{sentAt:null,requestedAt:null,sendBlockedAt:94000});
+  await b.tick();assert.ok(b.trace.includes('api:replace'));assert.equal(b.store.active.number,null);assert.ok(!b.trace.includes('api:number'));
+});
+test('a disabled Send Code without a known phone error does not spend another number',async()=>{
+  const b=browser({sendOk:false});b.page.smsPopup=false;Object.assign(b.store.active,{sentAt:null,requestedAt:null});
+  await b.tick();assert.ok(!b.trace.includes('api:replace'));assert.ok(!b.trace.includes('api:number'));
+});
+test('a reloaded empty phone form refills its assigned number through the durable engine',async()=>{
+  const b=browser();Object.assign(b.page,{phoneEmpty:true,smsPopup:false});await b.tick();
+  assert.ok(b.trace.indexOf('api:sms')<b.trace.indexOf('api:number'));assert.ok(b.trace.includes('browser:number'));assert.ok(!b.trace.includes('api:replace'));
+});
+test('a reloaded form with an already received SMS holds its number',async()=>{
+  const b=browser({code:'123456'});Object.assign(b.page,{phoneEmpty:true,smsPopup:false});
+  await assert.rejects(b.tick(),/received SMS before the page restarted/);assert.ok(!b.trace.includes('api:number'));assert.ok(!b.trace.includes('api:replace'));
+});
+test('fresh CHZZK session starts its sign-in route without declaring the account saved',async()=>{
+  const b=browser();b.store.active.captureCookies=[];await b.tick();
+  assert.ok(b.trace.includes('browser:chzzk-login'));assert.ok(!b.trace.includes('api:complete'));
+});
+test('Naver sign-in during handoff uses the saved identity once',async()=>{
+  const b=browser({tabUrl:'https://nid.naver.com/nidlogin.login'});b.store.active.captureCookies=[];await b.tick();await b.tick();
+  assert.equal(b.trace.filter(x=>x==='browser:naver-signin').length,1);assert.ok(!b.trace.includes('api:complete'));
+});
+test('Naver receipt challenge pauses the handoff without submitting credentials or a guessed answer',async()=>{
+  const b=browser({tabUrl:'https://nid.naver.com/nidlogin.login'});b.store.active.captureCookies=[];b.page.challenge=true;
+  await assert.rejects(b.tick(),/sign-in challenge/);assert.ok(!b.trace.includes('browser:naver-signin'));assert.ok(!b.trace.includes('api:complete'));
 });
 test('before ten seconds the order is polled without replacing it',async()=>{
   const b=browser({elapsed:9000});await b.tick();assert.ok(b.trace.includes('api:sms'));assert.ok(!b.trace.includes('api:replace'));

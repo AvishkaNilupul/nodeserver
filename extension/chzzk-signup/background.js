@@ -11,17 +11,23 @@ async function stage(s,message){await api(s,route(s,'stage'),{stage:message});}
 async function send(s,type,data={}){try{return await chrome.tabs.sendMessage(s.tabId,{type,...data});}catch{throw Error('Wait for the Naver page to finish loading, then Resume.');}}
 async function number(s){
   const page=await send(s,'inspect');if(!page.phoneReady)throw Error('Return to the phone-number screen in the same signup first.');
-  const r=await api(s,route(s,'number'));s.number=r.result;s.sentAt=null;s.requestedAt=null;await save(s);
+  const r=await api(s,route(s,'number'));s.number=r.result;s.sentAt=null;s.requestedAt=null;s.sendBlockedAt=null;await save(s);
   const filled=await send(s,'number',{number:s.number});if(!filled.ok)throw Error(filled.error);await stage(s,'Phone number filled');
   return r.result;
 }
 async function replace(s){
+  // Keep the popup available until cancellation is confirmed: an SMS can arrive
+  // between the timeout poll and 5sim's cancellation response.
+  if(!s.replacing){
+    try{await api(s,route(s,'replace'));}
+    catch(e){const received=await sms(s);if(received.code)return;throw e;}
+    s.replacing=true;await save(s);
+  }
   const page=await send(s,'inspect');
   if(page.smsPopup){const back=await send(s,'back');if(!back.ok)throw Error('Close the SMS popup before replacing this number.');}
-  await api(s,route(s,'replace'));
-  s.number=null;s.sentAt=null;s.requestedAt=null;s.smsCode=null;s.smsFilled=false;await save(s);
   const p=await send(s,'inspect');
   if(!p.phoneReady){const back=await send(s,'back');if(!back.ok)throw Error('Number cancelled. Go back to the phone-number screen in this window, then Get / fill number.');}
+  s.number=null;s.sentAt=null;s.requestedAt=null;s.smsCode=null;s.smsFilled=false;s.replacing=false;await save(s);
   await stage(s,'Changing number in the same signup');
 }
 async function sms(s){
@@ -52,14 +58,28 @@ async function cookiesFor(s){
 }
 async function tick(s){
   if(s.captureCookies){
-    const t=await chrome.tabs.get(s.tabId);if(new URL(t.url).hostname!=='chzzk.naver.com')return;
-    const who=await send(s,'chzzk-status');if(!who.ok)throw Error('Finish the CHZZK profile setup in this window, then Resume.');
+    const t=await chrome.tabs.get(s.tabId),url=new URL(t.url);
+    if(url.hostname==='nid.naver.com'&&url.pathname==='/nidlogin.login'){
+      const page=await send(s,'inspect');if(page.challenge)throw Error('Complete Naver’s sign-in challenge in this window, then Resume.');
+      if(!s.loginSubmittedAt){
+        const identity=(await api(s,route(s,'identity'))).identity;
+        const result=await send(s,'naver-signin',{identity});if(!result.ok)throw Error('Finish Naver sign-in in this window, then Resume.');
+        s.loginSubmittedAt=Date.now();await save(s);
+      }else if(Date.now()-s.loginSubmittedAt>=15000)throw Error('Check Naver’s sign-in message in this window, then Resume.');
+      return;
+    }
+    if(url.hostname!=='chzzk.naver.com')return;
+    const who=await send(s,'chzzk-status');if(!who.ok){
+      if(!s.chzzkLoginAt){const result=await send(s,'chzzk-login');if(result.ok){s.chzzkLoginAt=Date.now();await save(s);return;}}
+      throw Error('Finish the CHZZK profile setup in this window, then Resume.');
+    }
     await api(s,route(s,'sms'));
     await api(s,route(s,'complete'),{cookies:await cookiesFor(s),userIdHash:who.userIdHash,naverId:(await api(s,route(s,'identity'))).identity.username});
     // Account is durable before closing its private window.
     const id=s.windowId;await chrome.storage.session.remove('active');await chrome.windows.remove(id);return;
   }
   if(s.manual)return;
+  if(s.replacing){await replace(s);return;}
   const identity=(await api(s,route(s,'identity'))).identity;
   const p=await send(s,'inspect');
   if(p.signupReturn){await chrome.tabs.update(s.tabId,{url:p.signupReturn});return;}
@@ -67,12 +87,24 @@ async function tick(s){
   if(p.terms){await stage(s,'Waiting for Naver agreements in the signup window');return;}
   if(p.challenge){await stage(s,'Waiting for the browser challenge');return;}
   if(p.authenticated){await capture(s);return;}
+  if(p.phoneReady&&p.phoneEmpty&&s.number&&!p.smsPopup){
+    const received=await api(s,route(s,'sms'));
+    if(received.result.code)throw Error('This number received SMS before the page restarted. Finish verification in the same signup before replacing it.');
+    await number(s);return;
+  }
   const fill=await send(s,'identity',{identity});
   if(!s.number&&p.smsPopup){const closed=await send(s,'back');if(!closed.ok)throw Error('Close the old SMS popup, then Resume.');return;}
   if(s.requestedAt&&!s.sentAt&&p.smsPopup){s.sentAt=Date.now();await save(s);await stage(s,'Waiting for SMS (10 seconds)');}
+  if(s.requestedAt&&!s.sentAt&&Date.now()-s.requestedAt>=15000)throw Error('Naver did not open the SMS popup. Check its message, then replace the failed number or finish the browser challenge.');
   if(p.phoneReady&&!s.number){await number(s);return;}
   if(s.number&&!s.requestedAt&&p.phoneReady){
-    const sent=await send(s,'send-sms');if(sent.ok){s.requestedAt=Date.now();await save(s);await stage(s,'Waiting for Naver to accept the SMS request');}return;
+    const sent=await send(s,'send-sms');
+    if(sent.ok){s.requestedAt=Date.now();s.sendBlockedAt=null;await save(s);await stage(s,'Waiting for Naver to accept the SMS request');}
+    else if(p.phoneRejected){
+      if(!s.sendBlockedAt){s.sendBlockedAt=Date.now();await save(s);}
+      else if(Date.now()-s.sendBlockedAt>=5000){await stage(s,'Naver rejected the phone number; changing country');await replace(s);}
+    }
+    return;
   }
   if(s.sentAt&&!s.smsCode){
     const r=await sms(s);if(r.code)return;
@@ -95,7 +127,7 @@ async function handle(m,sender){
   if(!local||typeof m.token!=='string')return{ok:false,error:'Open the local CHZZK generator.'};
   if(m.type==='connect'){
     if(!await chrome.extension.isAllowedIncognitoAccess())throw Error('Enable Allow in Incognito for the CHZZK extension.');
-    return{ok:true};
+    return{ok:true,version:chrome.runtime.getManifest().version};
   }
   if(m.type==='open'||m.type==='resume'){
     let s=await load();if(s&&s.id!==m.sessionId)throw Error('Close the previous signup before opening another.');

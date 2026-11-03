@@ -16,11 +16,15 @@ session, go back to the number screen, change the number, and switch country on
 repeated failures. Cheapest first, not highest advertised delivery rate. Canada,
 Portugal and Netherlands have previously worked, but do not override price order.
 After ten seconds without SMS, close Naver's code popup and use the cheapest
-different country on every replacement (owner's revised instruction). Never
+different country on every replacement (owner's revised instruction).
 Prefer untried countries before revisiting a failed country, still cheapest first.
-rotate after an SMS code has arrived: resolve that signup first. Cancel unused
+Never rotate after an SMS code has arrived: resolve that signup first. Cancel unused
 orders and record confirmed terminal state before buying a replacement. An order
 that cannot be cancelled holds the signup until it expires or cancellation works.
+Keep the SMS popup open until cancellation is confirmed so a code arriving in
+the cancellation response can still be entered. Match country name and dialing
+prefix together: Canada and the USA share +1. A request that never opens Naver's
+SMS popup pauses after 15 seconds without buying or pretending SMS was sent.
 
 5sim token lives in the generator's settings.json outside git, mode 0600. Browser
 receives only the active identity, assigned number and that order's SMS code.

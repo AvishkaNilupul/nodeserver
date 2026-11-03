@@ -53,7 +53,7 @@ class Engine {
         if(e.code==='NO_STOCK')continue;
         throw e;
       }
-      this.adopt(s,order,chosen.prefix);
+      this.adopt(s,order,chosen.prefix);s.order.label=chosen.label;this.save();
       if(order.price>chosen.cost+1e-8)throw problem('Provider exceeded the price cap. Cancel this order before continuing.');
       return s.order;
     }
@@ -99,7 +99,9 @@ class Engine {
     if(s.order.sms?.length)throw problem('SMS already arrived. Use its code before changing the number.');
     if(!TERMINAL.has(s.order.status)) {
       const cancelled=await this.provider.order(s.order.id,'cancel');
+      if(cancelled.id!==s.order.id||cancelled.phone!==s.order.phone)throw problem('5sim returned a different order.');
       s.order={...s.order,...cancelled};this.save();
+      if(s.order.sms?.length)throw problem('SMS already arrived. Use its code before changing the number.');
       if(!TERMINAL.has(s.order.status))throw problem('Wait for cancellation or expiry before replacing the number.');
     }
     s.order=null;s.stage='Change the phone number in the same signup';this.save();
