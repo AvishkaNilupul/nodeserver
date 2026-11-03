@@ -1,0 +1,19 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="local-token" content="__TOKEN__"><title>Valorant Accounts</title><link rel="stylesheet" href="/style.css"></head>
+<body><main><p class="eyebrow">LOCAL ACCOUNT TOOLS</p><h1>Valorant Accounts</h1>
+<p>Create fresh Riot accounts by country. Each account gets its own cloud Outlook inbox. Credentials stay encrypted on this Mac.</p>
+<section><h2>Create an account</h2><p id="connection">Checking cloud Outlook…</p>
+<p id="extension">Connect the Valorant Signup extension in your testing profile.</p>
+<label for="country">Signup country</label><select id="country"></select>
+<p id="regionNote" class="hint"></p>
+<div class="actions"><button id="test">Test selected proxy</button><button id="connect">Connect extension</button><button id="start" disabled>Start signup</button><button id="resume" disabled>Resume signup</button></div>
+<p id="proxyResult" role="status"></p><p id="active"></p><p id="message" role="status"></p>
+<p class="hint">Start and Resume authorize filling the generated adult identity, accepting the required <a href="https://www.riotgames.com/en/terms-of-service" target="_blank" rel="noopener">Riot terms</a>, and creating the account. Optional marketing stays off. If Riot waits for a direct click, click its forward arrow once; the helper continues on the next screen. Complete a visual challenge in the signup window if shown.</p></section>
+<section><h2>Regional queue</h2><p>Create accounts sequentially with a separate inbox and private window for each. A failure stops the queue and keeps that identity available to resume.</p>
+<label for="regions">Countries</label><select id="regions" multiple size="8"></select>
+<label for="count">Accounts per country</label><input id="count" type="number" min="1" max="10" value="1">
+<div class="actions"><button id="queue" disabled>Start regional queue</button><button id="stop" disabled>Stop after current</button></div><p id="queueStatus">No queue running.</p></section>
+<section><h2>Saved accounts</h2><p>The expected shard follows the signup country. Residence country and actual VALORANT shard stay unverified until independently checked in Riot. New accounts have no verified game level and are not marked ranked ready.</p><div id="accounts"></div></section>
+<section><h2>TAceOfSpades reference</h2><p>Public offers checked 2026-11-04: AP, NA, EU, LATAM and Turkey. Their stock is hand leveled: levels 10–19 with ranked locked, and levels 20–30 or 50–70 advertised as ranked ready. This creator supplies fresh accounts for the next step.</p><a href="https://www.eldorado.gg/users/TAceOfSpades/shop/Account" target="_blank" rel="noopener">View reference seller</a></section>
+<footer>Close other private windows first. The residential exit is checked by the server and browser before reserving any inbox. Reloading this page stops the queue.</footer></main><script src="/ui.js"></script></body></html>

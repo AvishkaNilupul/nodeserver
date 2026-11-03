@@ -1,0 +1,9 @@
+if(location.origin==='http://127.0.0.1:4110' && location.pathname==='/') {
+  window.addEventListener('message',async event=>{
+    if(event.source!==window || event.origin!==location.origin || event.data?.channel!=='valorant-local-request')return;
+    const {id,type,token,country}=event.data;
+    if(!['connect','start','resume','status'].includes(type)||typeof id!=='string')return;
+    try {const result=await chrome.runtime.sendMessage({type,token,country});window.postMessage({channel:'valorant-local-response',id,result},location.origin);}
+    catch {window.postMessage({channel:'valorant-local-response',id,result:{ok:false,error:'Reload this page after enabling the Valorant extension'}},location.origin);}
+  });
+}

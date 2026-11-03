@@ -1,0 +1,17 @@
+{
+  "manifest_version": 3,
+  "name": "Valorant Signup — Cloud Outlook",
+  "version": "0.1.0",
+  "incognito": "spanning",
+  "description": "Regional Riot signup with exclusive cloud Outlook inboxes and encrypted local accounts.",
+  "permissions": ["storage", "tabs", "proxy", "webRequest", "webRequestAuthProvider"],
+  "host_permissions": ["http://127.0.0.1/*", "https://*.riotgames.com/*", "https://*.playvalorant.com/*", "https://*.hcaptcha.com/*", "https://lolstatic-a.akamaihd.net/*", "https://ipwho.is/*"],
+  "background": {"service_worker": "background.js"},
+  "action": {"default_title": "Open Valorant Creator"},
+  "content_scripts": [
+    {"matches": ["http://127.0.0.1/*"], "js": ["bridge.js"], "run_at": "document_idle"},
+    {"matches": ["https://ipwho.is/*"], "js": ["proxy-check.js"], "run_at": "document_idle"},
+    {"matches": ["https://authenticate.riotgames.com/*"], "js": ["observe.js"], "run_at": "document_start", "world": "MAIN"},
+    {"matches": ["https://authenticate.riotgames.com/*"], "js": ["flow.js", "content.js"], "run_at": "document_start"}
+  ]
+}
