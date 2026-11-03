@@ -48,3 +48,9 @@ joining/stopping one queue, cooldown/availability refusal, fixed HTTPS proxying,
 count-before-start and no automatic restart after checkout return. A live phone
 run on 2026-11-03 completed and verified its first claim automatically, then
 waited at the normal five-minute checkout gap.
+
+Phone helper 1.2.1.3 keeps the assigned job alive for its existing two-minute
+checkout budget during a visible security check. Completing the check lets
+it continue the same verified free checkout. An unresolved check still pauses
+at the deadline. The panel labels a running queue explicitly, shows a live
+spacing countdown and never automatically restarts a paused batch.

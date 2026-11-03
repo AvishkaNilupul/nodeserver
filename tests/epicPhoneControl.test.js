@@ -55,17 +55,19 @@ test('home shortcut shows count before automatic start; checkout return never st
   const fs=require('node:fs'),vm=require('node:vm');
   const html=fs.readFileSync(require('node:path').join(__dirname,'../extension/epic-claim-helper-android/phone/phone-panel.html'),'utf8');
   const script=html.match(/<script>([\s\S]*)<\/script>/)[1];
-  async function boot(pathname){
+  async function boot(pathname,initialState="idle"){
     const elements=new Map(),calls=[],intervals=[];
     const element=id=>{if(!elements.has(id))elements.set(id,{textContent:'',style:{},replaceChildren(){},append(){}});return elements.get(id)};
     let started=false;
     const context={URLSearchParams,AbortSignal,location:{pathname,search:''},history:{replaceState(){}},Date,
       document:{visibilityState:'visible',getElementById:element,createElement:()=>({append(){}}),addEventListener(){}},
       setInterval(fn,ms){intervals.push({fn,ms});return intervals.length},clearInterval(){},
-      fetch:async(url)=>{calls.push(url);if(url.endsWith('/start'))started=true;return {ok:true,json:async()=>url.endsWith('/visible')?{success:true}:{success:true,pending:9,accounts:9,games:[{title:'Free game',count:9}],worker:{ready:true},batch:{state:started?'running':'idle',total:started?9:0,completed:0}}}}};
+      fetch:async(url)=>{calls.push(url);if(url.endsWith('/start'))started=true;return {ok:true,json:async()=>url.endsWith('/visible')?{success:true}:{success:true,pending:9,accounts:9,games:[{title:'Free game',count:9}],worker:{ready:true},batch:{state:started?'running':initialState,total:started?9:0,completed:0}}}}};
     vm.runInNewContext(script,context);await new Promise(setImmediate);return {elements,calls,intervals};
   }
   const launch=await boot('/phone');assert.equal(launch.elements.get('count').textContent,9);assert.equal(launch.calls.some(x=>x.endsWith('/start')),false);
-  const countdown=launch.intervals.find(x=>x.ms===1000);assert.ok(countdown);for(let n=0;n<4;n++)countdown.fn();await new Promise(setImmediate);assert.equal(launch.calls.filter(x=>x.endsWith('/start')).length,1);
-  const returned=await boot('/connect');assert.equal(returned.intervals.some(x=>x.ms===1000),false);assert.equal(returned.calls.some(x=>x.endsWith('/start')),false);
+  const countdown=launch.intervals.filter(x=>x.ms===1000).at(-1);assert.ok(countdown);for(let n=0;n<4;n++)countdown.fn();await new Promise(setImmediate);assert.equal(launch.calls.filter(x=>x.endsWith('/start')).length,1);
+  assert.equal(launch.elements.get('start').textContent,'Queue is running');
+  const paused=await boot('/phone','paused');assert.equal(paused.intervals.filter(x=>x.ms===1000).length,1);assert.equal(paused.elements.get('start').textContent,'Continue claims');
+  const returned=await boot('/connect');assert.equal(returned.intervals.filter(x=>x.ms===1000).length,1);assert.equal(returned.calls.some(x=>x.endsWith('/start')),false);
 });
