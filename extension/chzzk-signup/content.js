@@ -48,6 +48,14 @@
       try{const r=await fetch('https://comm-api.game.naver.com/nng_main/v1/user/getUserStatus',{credentials:'include'}),j=await r.json();return{ok:r.ok&&j.content?.loggedIn===true&&!!j.content?.userIdHash,userIdHash:j.content?.userIdHash};}catch{return{ok:false};}
     }
     if(location.hostname!=='nid.naver.com'||!location.pathname.startsWith('/account/signup/'))return{ok:false};
+    if(m.type==='accept-terms'){
+      if(!inspect().terms)return{ok:false};
+      const required=[...document.querySelectorAll('input[type="checkbox"],[role="checkbox"]')].filter(e=>visible(e)&&/\[required\]|필수/i.test(describe(e)+' '+e.textContent)&&!/\[optional\]|선택/i.test(describe(e)+' '+e.textContent));
+      if(!required.length)return{ok:false};
+      let changed=false;
+      for(const e of required)if(!e.checked&&e.getAttribute('aria-checked')!=='true'){e.click();changed=true;}
+      return{ok:true,submitted:changed?false:click(/^(Confirm|확인)$/i)};
+    }
     if(m.type==='identity'){
       const i=m.identity;
       if(/Please enter your Naver ID/i.test(heading())){

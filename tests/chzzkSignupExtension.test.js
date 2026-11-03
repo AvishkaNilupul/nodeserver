@@ -79,6 +79,9 @@ test('unassigned tabs cannot poll, buy, or replace numbers',async()=>{
 test('manual demonstration mode never fills, submits, polls SMS, or buys',async()=>{
   const b=browser();b.store.active.manual=true;await b.tick();assert.deepEqual(b.trace,[]);
 });
+test('automatic signup accepts the required-terms screen before filling forms or buying SMS',async()=>{
+  const b=browser();b.page.terms=true;await b.tick();assert.ok(b.trace.includes('browser:accept-terms'));assert.ok(!b.trace.includes('browser:identity'));assert.ok(!b.trace.includes('api:number'));assert.ok(!b.trace.includes('api:sms'));
+});
 test('signup completion binds the Naver-issued ID before opening its authenticated home',async()=>{
   const b=browser();b.page.createdUsername='alex_morgan_248';await b.tick();assert.ok(b.trace.includes('api:account-name'));assert.ok(b.trace.includes('navigate:https://www.naver.com/'));assert.ok(!b.trace.includes('api:replace'));
 });

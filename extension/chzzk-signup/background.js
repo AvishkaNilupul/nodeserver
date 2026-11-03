@@ -112,7 +112,11 @@ async function tick(s){
   const p=await send(s,'inspect');
   if(p.signupReturn){await chrome.tabs.update(s.tabId,{url:p.signupReturn});return;}
   if(p.createdUsername){await api(s,route(s,'account-name'),{username:p.createdUsername});await chrome.tabs.update(s.tabId,{url:'https://www.naver.com/'});await stage(s,'Naver account created; verifying its login');return;}
-  if(p.terms){await stage(s,'Waiting for Naver agreements in the signup window');return;}
+  if(p.terms){
+    const terms=await send(s,'accept-terms');
+    if(!terms.ok)throw Error('Naver’s required agreement controls changed. Check this signup window.');
+    await stage(s,terms.submitted?'Required Naver agreements accepted':'Selecting required Naver agreements');return;
+  }
   if(p.challenge){await stage(s,'Waiting for the browser challenge');return;}
   if(p.authenticated){await capture(s);return;}
   if(p.phoneReady&&p.phoneEmpty&&s.number&&!p.smsPopup){

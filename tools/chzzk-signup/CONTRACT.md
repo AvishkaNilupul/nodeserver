@@ -46,7 +46,9 @@ Local list responses omit credentials, cookies and SMS. Extension accepts comman
 only from the exact local app page and reads cookies only from its assigned private
 store. It must see the assigned Naver login ID in Naver's authenticated profile
 before saving, then verify CHZZK userStatus. Unknown state pauses rather than
-declaring success. Agreements and visual challenges can be completed in the browser.
+declaring success. Automatic signup accepts the required Naver agreements (owner instruction
+2026-11-03); optional choices remain unchecked. Logged manual demonstration
+mode stays passive. Visual challenges can be completed in the browser.
 
 Save credentials and cookies locally before finishing the 5sim order. Durable
 upload queue feeds the existing farm over SSH/stdin; no public import endpoint.

@@ -19,15 +19,15 @@ the same exit and stops if its 25-minute verification lifetime expired.
 **Test residential proxy** performs the browser check without creating an account
 or buying a number. **Close helper session** clears stale browser credentials and
 recovery data even after a local signup has been removed. Reload the extension
-after updating it; Check extension displays the loaded version (0.2.0).
+after updating it; Check extension displays the loaded version (0.2.1).
 
 Set the 5sim token as `fiveSimToken` in `settings.json` inside
 `~/Library/Application Support/ChzzkAccountGenerator/`, permissions 0600.
 The supplied token has already been saved there; it is never part of source code.
 The UI reads current balance and live Naver prices without buying a number.
 
-Enter name and birthday and choose Create account. Complete required Naver
-agreements in the private signup window. The helper fills recognized identity
+Enter name and birthday and choose Create account. The helper accepts required Naver
+agreements automatically, leaving optional choices unchecked, and fills recognized identity
 and phone controls, buys the cheapest available Naver number within the cap,
 polls its SMS and fills the code. Complete visual challenges yourself. Unknown
 forms pause instead of submitting guesses. Resume preserves the same identity.

@@ -75,3 +75,13 @@ test('receipt security challenge blocks the sign-in helper from filling or submi
   const f=form({pathname:'/nidlogin.login',heading:'Please complete additional security verification'}),id=new f.Input({id:'id'}),pw=new f.Input({type:'password'}),submit=f.button({},'Sign in');
   assert.equal((await f.send({type:'naver-signin',identity})).ok,false);assert.equal(id.value,'');assert.equal(pw.value,'');assert.equal(submit.clicks,0);
 });
+test('terms automation selects required choices only and confirms on the next settled tick',async()=>{
+  const f=form({pathname:'/account/signup/term'}),required=f.button({role:'checkbox','aria-checked':'false'},'[Required] Terms of Service'),optional=f.button({role:'checkbox','aria-checked':'false'},'[Optional] Privacy Policy'),all=f.button({role:'checkbox','aria-checked':'false'},'Agree with all terms and conditions'),confirm=f.button({},'Confirm');
+  required.onClick=()=>{required.attrs['aria-checked']='true';};
+  const first=await f.send({type:'accept-terms'});assert.equal(first.ok,true);assert.equal(first.submitted,false);assert.equal(required.clicks,1);assert.equal(optional.clicks,0);assert.equal(all.clicks,0);assert.equal(confirm.clicks,0);
+  assert.equal((await f.send({type:'accept-terms'})).submitted,true);assert.equal(required.clicks,1);assert.equal(confirm.clicks,1);
+});
+test('unknown agreement layout does not select optional or blanket consent',async()=>{
+  const f=form({pathname:'/account/signup/term'}),optional=f.button({role:'checkbox'},'[Optional] Privacy Policy'),all=f.button({role:'checkbox'},'Agree with all terms and conditions'),confirm=f.button({},'Confirm');
+  assert.equal((await f.send({type:'accept-terms'})).ok,false);assert.equal(optional.clicks,0);assert.equal(all.clicks,0);assert.equal(confirm.clicks,0);
+});
