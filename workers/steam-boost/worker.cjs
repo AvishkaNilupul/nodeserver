@@ -24,7 +24,7 @@ class Worker {
   }
   async startOne(a) {
     const call = (path, fields = {}) => this.api(path, { ...fields, id: a.id, gen: a.gen });
-    const row = { assignment: a, started: this.now(), nextSettle: this.now() + 180000, resumeAt: 0, failed: false };
+    const row = { assignment: a, started: this.now(), nextSettle: null, resumeAt: 0, failed: false };
     const account = { id: a.id, username: a.accountName, country: a.country, password: '', email: '' };
     const booster = this.makeBooster({ account, games: a.games, licensed: a.licensed, proxy: this.proxy,
       // steam-user must not persist machine/login secrets on the worker disk.
@@ -47,6 +47,10 @@ class Worker {
     });
     row.booster = booster;
     booster.on('failed', () => { row.failed = true; });
+    // Time the first full window from actual play, after proxy/login/license work.
+    booster.on('state', state => {
+      if (state === 'playing' && row.nextSettle === null) row.nextSettle = this.now() + 20 * 60000;
+    });
     this.sessions.set(a.id, row);
     booster.start();
     this.lastLogin = this.now();
@@ -88,8 +92,8 @@ class Worker {
       if (b.running && b.steamID && b.ready) {
         if (row.resumeAt && now >= row.resumeAt) {
           await b.refreshPlaytime(); b.resume(); row.resumeAt = 0;
-          row.nextSettle = now + (row.assignment.purpose === 'game' ? 180000 : 7200000);
-        } else if (!row.resumeAt && now >= row.nextSettle) {
+          row.nextSettle = now + (row.assignment.purpose === 'game' ? 20 * 60000 : 7200000);
+        } else if (!row.resumeAt && row.nextSettle !== null && now >= row.nextSettle) {
           b.pause(); row.resumeAt = now + 90000;
         }
       }

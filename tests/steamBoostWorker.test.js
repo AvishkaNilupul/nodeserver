@@ -32,3 +32,20 @@ test('worker credentials and token operations carry assignment generation', asyn
 test('API client refuses a public endpoint for worker secrets', () => {
   assert.throws(() => createApi({ base: 'http://example.com/', token: 'a'.repeat(32) }), /loopback/);
 });
+
+test('first verification window starts after login and leaves twenty uninterrupted minutes', async () => {
+  let clock = 1000000;
+  class Playing extends Fake {
+    start() { this.running = true; }
+    login() { this.steamID = 's'; this.ready = true; this.emit('state', 'playing'); }
+    pause() { this.paused = true; }
+    resume() { this.paused = false; }
+    async refreshPlaytime() { return {}; }
+  }
+  const worker = new Worker({ now: () => clock, makeBooster: o => new Playing(o), api: async () => ({}) });
+  await worker.startOne({ id: 'a', gen: 1, games: [730], purpose: 'game' });
+  clock += 120000; const b = worker.sessions.get('a').booster; b.login();
+  clock += 19 * 60000; await worker.report(); assert.equal(b.paused, undefined);
+  clock += 60000; await worker.report(); assert.equal(b.paused, true);
+  clock += 90000; await worker.report(); assert.equal(b.paused, false);
+});
