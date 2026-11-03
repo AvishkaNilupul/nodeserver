@@ -322,15 +322,16 @@ async function claimAndSync(acc, freebie) {
 }
 const {createClaimBatch, planClaims, eligible, live} = require("../utils/epicClaimBatch");
 let manualClaimRunning = false;
-const claimBatch = createClaimBatch({
-  plan: async () => {
+async function planCurrentClaims() {
     await require("../utils/epicWatcher").refreshIfStale({notify: false});
     const [accounts, offers] = await Promise.all([
       EpicAccount.find({sold: {$ne: true}, status: "ok"}).sort({createdAt: 1}).lean(),
       EpicFreebie.find({active: true}).lean(),
     ]);
     return planClaims(accounts, offers, Date.now(), await epicRegion.loadBlockedCountries(EpicAccount));
-  },
+}
+const claimBatch = createClaimBatch({
+  plan: planCurrentClaims,
   execute: async job => {
     const acc = await EpicAccount.findById(job.accountId);
     const offer = await EpicFreebie.findOne({offerId: job.offerId}).lean();
@@ -340,6 +341,14 @@ const claimBatch = createClaimBatch({
     return claimAndSync(acc, offer);
   },
 });
+// A paired phone can only inspect and drive this same singleton queue.
+router.use(require("../utils/epicPhoneControl").createPhoneControl({
+  secret: process.env.EPIC_CLAIM_WORKER_TOKEN,
+  plan: planCurrentClaims, batch: claimBatch,
+  claimerStatus: () => epicAutoClaim.getStatus(),
+  workerReady: () => epicAutoClaim.workerReady(),
+  singleRunning: () => manualClaimRunning,
+}));
 router.get("/api/epic/claims/batch", requireSuperadmin, (_req, res) => {
   res.json({success: true, batch: claimBatch.status()});
 });
@@ -366,7 +375,7 @@ router.post(
   "/api/epic/accounts/:id/auto-claim",
   requireSuperadmin,
   async (req, res) => {
-    if (claimBatch.isActive() || manualClaimRunning) return res.status(409).json({success: false, message: "Claims are already running on the Mac"});
+    if (claimBatch.isActive() || manualClaimRunning) return res.status(409).json({success: false, message: "Claims are already running"});
     manualClaimRunning = true;
     try {
       const acc = await EpicAccount.findById(req.params.id);

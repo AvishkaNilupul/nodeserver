@@ -757,6 +757,12 @@ app.use(enforce2fa, resellerAdminRoutes);
 // a static token, not a session, so the session guard would otherwise 401 it.
 // Every route inside self-guards with requireApiToken.
 app.use(accountApiRoutes);
+// Paired-phone controls authenticate with their dedicated claim-only token.
+// Mount before blanket admin-session guards; the existing router owns one queue.
+app.use((req, res, next) => {
+  if (/^\/api\/epic\/phone(?:\/|$)/.test(req.path)) return epicAccountRoutes(req, res, next);
+  next();
+});
 app.use(requireAdmin, enforce2fa, itemRoutes);
 app.use(requireAdmin, enforce2fa, inventoryRoutes);
 app.use(requireAdmin, enforce2fa, orderRoutes);
