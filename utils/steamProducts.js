@@ -34,13 +34,24 @@ function section(p, fallback) {
 function text(p, region, regionName, emailText) {
   const name = nameOf(p.appId);
   const label = p.kind === 'boosted' ? `${p.minHours} Idle (Boosted) Hours` : 'Free Game Added';
+  const details = [
+    `• ${name} free version added and verified.`,
+    ...(p.appId === 730 ? ['• Non-Prime account.', '• No competitive rank, Premier access, skins or medals included.'] :
+      p.appId === 1172470 ? [
+        '• No Apex level, rank, skins, heirlooms or other progression included.',
+        '• An EA account is required to play and is not included. Link an eligible EA account of your own when launching the game.',
+      ] : ['• No paid edition, rank, skins, achievements or in-game progression included.',
+        '• A separate third-party game account is not included; use your own if the game requires one.']),
+    p.kind === 'boosted' ? `• At least ${p.minHours} hours recorded by Steam for ${name}. These are idle/boosted hours, not active gameplay.` :
+      '• A small amount of Steam-recorded idle playtime may be present.',
+    `• Signup country: ${regionName} (${region}). The finalized Steam Store country is not guaranteed.`,
+    "• Steam's $5 USD account limitation has not been removed.",
+  ];
   return {
     title: `${name} | Steam Account | ${label} | ${regionName} | Email Codes | Instant Delivery`.slice(0, 160),
     description: [
-      `Steam account with ${name}'s free-to-play license. Signup country: ${regionName} (${region}).`,
-      p.kind === 'boosted' ? `At least ${p.minHours} hours recorded by Steam for ${name}. These are idle/boosted hours, not active gameplay.` : 'Steam ownership was checked after adding the free game. A short idle session was used to verify it.',
-      'No paid edition, CS2 Prime, rank, skins, achievements or in-game progression is included. An EA or other third-party game account is not included; link your own if the game requires it.',
-      'The account has been logged out of our worker before being offered for sale. Store country has not been independently verified unless stated separately.',
+      `Receive one newly created Steam account with ${name} already added to its library. Your login details are delivered automatically on the Eldorado order page after payment.`,
+      ['ACCOUNT DETAILS', ...details].join('\n'),
       emailText,
     ].join('\n\n').slice(0, 2000),
   };

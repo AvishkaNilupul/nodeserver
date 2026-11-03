@@ -178,7 +178,7 @@ test("a region listing takes only that region's ready accounts and reserves them
   assert.deepEqual(pv.problems, []);
   assert.deepEqual(pv.accounts.map((a) => a.accountName).sort(), ["jp_one", "jp_two"]);
   assert.match(pv.title, /Japan Region/);
-  assert.match(pv.description, /Region: Japan/);
+  assert.match(pv.description, /Signup country: Japan/);
   assert.equal(pv.priceUsd, 1);
 
   const l = await sales.createListing({ region: "JP", priceUsd: 1 }, "tester");

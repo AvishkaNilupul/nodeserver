@@ -299,34 +299,43 @@ function suggestTitle(region) {
   return ("Steam Account | " + regionName(region) + " Region | Fresh New | Email Codes Included | Instant Delivery").slice(0, 160);
 }
 
-// The owner's warning (2026-11-01), word for word, near the top of every
-// description: buying in the first month from another region gets the
-// account blocked by Steam.
+// Owner's one-month purchase instruction, with the sales copy approved
+// 2026-11-04. Signup country does not establish finalized Store country.
 const REGION_WARNING =
-  "❗Account's regions on our accounts will differ from yours. Do not buy anything on the Steam Store for at least 1 month " +
-  "after getting it from us. If you buy something without waiting 1 month, Steam will block the account.";
+  "Please wait at least 1 month after receiving the account before making purchases on the Steam Store.";
+
+function descriptionFooter(days) {
+  const d = Math.max(1, Number(days) || DEFAULTS.sessionDays);
+  return [
+    "WHAT YOU RECEIVE",
+    "• Steam account username and password.",
+    "• Private mail-page login for Steam Guard and email-change codes.",
+    "• " + d + " days of access to Steam emails, starting from purchase.",
+    "",
+    "AFTER DELIVERY",
+    "Change the Steam password and linked email to your own. Use the private mail page to receive the email-change codes. " +
+      "The original email inbox itself is not included.",
+    "",
+    "PURCHASE NOTE",
+    REGION_WARNING,
+    "",
+    "Need help? Contact us through your Eldorado order.",
+  ].join("\n");
+}
 
 function suggestDescription(region, days) {
   const name = regionName(region);
-  const d = Math.max(1, Number(days) || DEFAULTS.sessionDays);
   return [
-    "Fresh, new Steam account made in " + name + " (" + region + "). No games on it.",
+    "Receive one newly created Steam account with no games added. Your login details are delivered automatically " +
+      "on the Eldorado order page after payment.",
     "",
-    REGION_WARNING,
+    "ACCOUNT DETAILS",
+    "• Signup country: " + name + " (" + region + ").",
+    "• No paid games included.",
+    "• Steam's $5 USD account limitation has not been removed.",
+    "• The finalized Steam Store country is not guaranteed.",
     "",
-    "Region: " + name + ". The account was created in " + name + ", so its Steam store region is " + name +
-      ". Steam keeps that store region until the account buys something with a payment method from another country.",
-    "",
-    "You get instantly on the order page:",
-    "- Steam account name and password.",
-    "- Email codes: the Email details open a private mail page that shows the emails Steam sends to this account " +
-      "(Steam Guard codes, email change codes), from your purchase on, for " + d + " days.",
-    "",
-    "The email inbox itself is not part of the sale: the mail page shows only Steam's emails. " +
-      "Please change the account email to your own right after you log in (Steam > Account details > Change email).",
-    "",
-    "Good to know: new Steam accounts are limited (no friends list, trading or market) until $5 is spent on Steam. " +
-      "That is Valve's rule for every new account.",
+    descriptionFooter(days),
   ].join("\n").slice(0, 2000);
 }
 
@@ -440,7 +449,7 @@ async function previewListing({ region, priceUsd, accountIds = null, ...rawProdu
   } catch (e) {
     problems.push(e.message);
   }
-  const copy = product.kind === "region" ? { title: suggestTitle(cc), description: suggestDescription(cc, cfg.sessionDays) } : products.text(product, cc, regionName(cc), additionalInfoText(cfg.sessionDays) + "\n" + REGION_WARNING);
+  const copy = product.kind === "region" ? { title: suggestTitle(cc), description: suggestDescription(cc, cfg.sessionDays) } : products.text(product, cc, regionName(cc), descriptionFooter(cfg.sessionDays));
   return {
     ...product,
     section: products.section(product, SECTION),
@@ -822,7 +831,7 @@ async function updateText(listingId, { title, description } = {}) {
 async function refreshDescription(listingId) {
   const listing = await loadListing(listingId);
   const cfg = await getConfig();
-  return updateText(listingId, { description: listing.kind === "region" ? suggestDescription(listing.region, cfg.sessionDays) : products.text(products.normalize(listing), listing.region, regionName(listing.region), additionalInfoText(cfg.sessionDays) + "\n" + REGION_WARNING).description });
+  return updateText(listingId, { description: listing.kind === "region" ? suggestDescription(listing.region, cfg.sessionDays) : products.text(products.normalize(listing), listing.region, regionName(listing.region), descriptionFooter(cfg.sessionDays)).description });
 }
 
 async function setPrice(listingId, priceUsd) {
