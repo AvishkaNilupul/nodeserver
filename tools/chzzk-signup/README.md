@@ -52,3 +52,25 @@ Naver/CHZZK. A real registration and earned drops are separate live checks.
 
 Protocol reference: <https://5sim.net/docs>. Existing farm contract:
 `docs/CHZZK-FARM.md`. Generator contract: `tools/chzzk-signup/CONTRACT.md`.
+
+## Logged manual demonstration
+
+Choose **Open logged manual signup** to start at Naver’s terms screen with the
+same private-window isolation and encrypted vault, but without automated filling,
+submission or number purchases. The assigned tab journals clicks, field changes,
+country options and navigation in the protected data directory’s
+`recordings/browser-events.jsonl`. Passwords/SMS values are excluded; field
+changes record character counts. 5sim order history supplies country, operator,
+price and SMS arrival timing independently.
+
+Naver currently issues its own login ID; bind the ID shown on the completed
+signup page before checking the authenticated home page. Passwords are 16
+characters. The optional passkey prompt carries the signup’s return destination.
+The protected local APIs `adopt-order` and `account-name` support a manual SMS
+handoff into that same signup without buying another number or resetting it.
+
+Chrome cookie access needs both Naver URL schemes: this live signup’s NID_AUT
+and NID_SES were `secure:false`, so HTTPS-only host permission hid them from the
+cookies API even while Naver showed a working login. Cookie reads are bound to
+the assigned private store and include its partition key. Only the required
+Naver jar reaches the existing farm; credential values never reach the journal.

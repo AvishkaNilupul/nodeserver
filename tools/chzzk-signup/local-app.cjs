@@ -28,10 +28,13 @@ function createApp({dataDir=DEFAULT_DIR,port=4109,provider,upload}={}){
   }catch(e){next(e);}});
   app.post('/api/start',async(req,res,next)=>{try{const s=await engine.exclusive(()=>engine.start(req.body));res.json({ok:true,session:summary(s)});}catch(e){next(e);}});
   app.post('/api/session/:id/identity',(req,res,next)=>{try{
-    const s=engine.current(req.params.id);res.json({ok:true,identity:{id:s.id,username:s.username,password:s.password,name:s.name,birthday:s.birthday}});
+    const s=engine.current(req.params.id);res.json({ok:true,identity:{id:s.id,username:s.username,password:s.password,name:s.name,birthday:s.birthday,manual:s.manual===true}});
   }catch(e){next(e);}});
   app.post('/api/session/:id/stage',(req,res,next)=>{try{const s=engine.current(req.params.id);s.stage=String(req.body.stage||'').slice(0,120);engine.save();res.json({ok:true});}catch(e){next(e);}});
   app.post('/api/session/:id/limits',async(req,res,next)=>{try{res.json({ok:true,session:await engine.limits(req.params.id,req.body)});}catch(e){next(e);}});
+  app.post('/api/session/:id/adopt-order',async(req,res,next)=>{try{res.json({ok:true,session:await engine.adoptExistingOrder(req.params.id,req.body.orderId)});}catch(e){next(e);}});
+  app.post('/api/session/:id/account-name',async(req,res,next)=>{try{res.json({ok:true,session:await engine.accountName(req.params.id,req.body.username)});}catch(e){next(e);}});
+  app.post('/api/session/:id/events',(req,res,next)=>{try{engine.current(req.params.id);require('./logger.cjs').appendEvent(dataDir,req.params.id,req.body);res.json({ok:true});}catch(e){next(e);}});
   for(const action of ['number','sms','replace','reconcile','cancel'])app.post('/api/session/:id/'+action,async(req,res,next)=>{try{
     const result=await engine[action](req.params.id);res.json({ok:true,result:action==='number'?{phone:result.phone,prefix:result.prefix,country:result.country,expires:result.expires}:result});
   }catch(e){next(e);}});

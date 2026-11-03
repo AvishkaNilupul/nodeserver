@@ -15,10 +15,15 @@
     const hasLogout=[...document.querySelectorAll('a,button')].some(e=>visible(e)&&/^(logout|log out|로그아웃)$/i.test(e.innerText.trim()));
     return hasLogout&&(!username||document.body.innerText.toLowerCase().includes(username.toLowerCase()+'@naver.com'));
   }
-  function inspect(){return{
+  function inspect(){let signupReturn=null;
+    if(location.hostname==='nid.naver.com'&&location.pathname==='/nidweb/passkey/bridge'&&new URL(location.href).searchParams.get('action')==='join'){
+      const target=new URL(new URL(location.href).searchParams.get('rurl')||'/',location.origin);if(target.origin===location.origin&&target.pathname==='/account/signup/complete')signupReturn=target.href;
+    }
+    return{
     terms:location.hostname==='nid.naver.com'&&/\/term(?:\?|$|\/)/.test(location.pathname),
     challenge:[...document.querySelectorAll('iframe')].some(e=>visible(e)&&/captcha|ncpt/.test(e.src))||!!find(/captcha|자동입력|보안문자/i),
-    phoneReady:!!phone()&&!!country(),authenticated:loggedIn(),smsPopup:/Please enter the verification code sent to/i.test(document.body.innerText),
+    phoneReady:!!phone()&&!!country(),authenticated:loggedIn(),smsPopup:/Please enter the verification code sent to/i.test(document.body.innerText),createdUsername:location.hostname==='nid.naver.com'&&location.pathname==='/account/signup/complete'?document.body.innerText.match(/Welcome,\s*([a-z][a-z0-9_-]{4,19})/i)?.[1]||null:null,
+    signupReturn,
   };}
   async function handle(m){
     if(m.type==='inspect')return inspect();
@@ -72,5 +77,17 @@
     return{ok:false};
   }
   chrome.runtime.onMessage.addListener((m,_sender,reply)=>{handle(m).then(reply).catch(()=>reply({ok:false,error:'Form changed. Resume this signup manually.'}));return true;});
+  function journal(kind,e){
+    if(location.hostname!=='nid.naver.com'||!/^\/(account\/signup\/|nidweb\/passkey\/)/.test(location.pathname))return;
+    const el=e?.target?.closest?.('input,select,button,a,[role="option"],[role="checkbox"]');
+    const event={kind,page:location.href,target:el?el.tagName.toLowerCase()+'#'+(el.id||el.name||''):'page',label:el?describe(el)||el.textContent?.trim().slice(0,160):document.querySelector('main h2,h2,h1')?.textContent||document.title,inputType:el?.type||'',trusted:e?.isTrusted===true};
+    if(el&&'value'in el&&['input','change'].includes(kind))event.value='[entered '+String(el.value||'').length+' characters]';
+    chrome.runtime.sendMessage({type:'log-event',event}).catch(()=>{});
+  }
+  document.addEventListener('click',e=>journal('click',e),true);
+  document.addEventListener('change',e=>journal('change',e),true);
+  let inputTimer;document.addEventListener('input',e=>{clearTimeout(inputTimer);inputTimer=setTimeout(()=>journal('input',e),250);},true);
+  let lastStep='';const recordStep=()=>{const step=location.pathname+' '+document.querySelector('main h2,h2,h1')?.textContent;if(step!==lastStep){lastStep=step;journal('step');}};
+  new MutationObserver(recordStep).observe(document.body,{childList:true,subtree:true});recordStep();
   let pending=false;setInterval(async()=>{if(pending)return;pending=true;try{await chrome.runtime.sendMessage({type:'tick'});}catch{}finally{pending=false;}},1000);
 })();

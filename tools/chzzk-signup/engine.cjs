@@ -16,14 +16,14 @@ class Engine {
     if(!Number.isFinite(maxPrice)||maxPrice<=0||maxPrice>1||!Number.isFinite(budget)||budget<s.spent||budget>5||!Number.isInteger(maxAttempts)||maxAttempts<s.attempts.length||maxAttempts>100)throw problem('Limits must cover purchases already made; maximum budget 5 and 100 attempts.');
     Object.assign(s,{maxPrice,budget,maxAttempts});this.save();return summary(s);
   });}
-  start({name,birthday,maxPrice=.05,maxAttempts=10,budget=.25}) {
+  start({name,birthday,maxPrice=.05,maxAttempts=10,budget=.25,manual=false}) {
     if(this.active())throw problem('Resume or cancel the existing signup first.');
     if(typeof name!=='string'||!name.trim()||name.length>80||!/^\d{8}$/.test(birthday||''))throw problem('Enter a name and date of birth (YYYYMMDD).');
     const year=Number(birthday.slice(0,4)),month=Number(birthday.slice(4,6)),day=Number(birthday.slice(6)),d=new Date(Date.UTC(year,month-1,day));
     if(year<1900||d.getUTCFullYear()!==year||d.getUTCMonth()!==month-1||d.getUTCDate()!==day||d.getTime()>=this.now())throw problem('Enter a valid date of birth.');
     if(!Number.isFinite(maxPrice)||maxPrice<=0||maxPrice>1||!Number.isInteger(maxAttempts)||maxAttempts<1||maxAttempts>10||!Number.isFinite(budget)||budget<maxPrice||budget>5)throw problem('Check price, attempt and signup budget limits.');
     const s={id:crypto.randomUUID(),username:'n'+crypto.randomBytes(7).toString('hex'),password:crypto.randomBytes(9).toString('base64url')+'aA7!',name:name.trim(),birthday,maxPrice,maxAttempts,budget,status:'signup',createdAt:new Date(this.now()).toISOString(),attempts:[],spent:0,order:null,purchaseIntent:null};
-    this.vault.data.sessions.push(s);this.save();return s;
+    s.manual=manual===true;this.vault.data.sessions.push(s);this.save();return s;
   }
   async refresh(s){
     if(!s.order)return null;
@@ -62,9 +62,26 @@ class Engine {
   adopt(s,order,prefix){
     s.order={...order,prefix};s.spent+=Number(order.price);s.attempts.push({id:order.id,country:order.country,price:order.price,at:new Date(this.now()).toISOString()});s.purchaseIntent=null;this.save();
   }
+  async adoptExistingOrder(id,orderId){return this.exclusive(async()=>{
+    const s=this.current(id);
+    if(s.purchaseIntent||s.order&&s.order.id!==Number(orderId))throw problem('Resolve the assigned number before attaching a manual order.');
+    const o=await this.provider.order(Number(orderId));
+    if(o.id!==Number(orderId)||o.product!=='naver'||!o.sms?.length||!/^\+\d{7,15}$/.test(o.phone||'')||!Number.isFinite(o.price)||Date.parse(o.created_at)<Date.parse(s.createdAt))throw problem('Choose this signup’s paid Naver order with a received SMS.');
+    const countries=await this.provider.countries(),prefixes=Object.keys(countries[o.country]?.prefix||{});
+    if(prefixes.length!==1||!o.phone.startsWith(prefixes[0]))throw problem('Could not verify the order’s country prefix.');
+    if(s.attempts.some(a=>a.id===o.id)){s.order={...o,prefix:prefixes[0]};this.save();}
+    else{this.adopt(s,o,prefixes[0]);s.attempts.at(-1).manual=true;this.save();}
+    return summary(s);
+  });}
+  accountName(id,username){return this.exclusive(()=>{
+    const s=this.current(id);
+    if(!/^[a-z][a-z0-9_-]{4,19}$/i.test(username||'')||!s.order?.sms?.length)throw problem('Verify the Naver-issued ID after SMS completion.');
+    if(s.naverIdObservedAt&&s.username!==username)throw problem('The verified Naver ID cannot change.');
+    s.username=username;s.naverIdObservedAt=new Date(this.now()).toISOString();this.save();return summary(s);
+  });}
   async reconcile(id){return this.exclusive(async()=>{
     const s=this.current(id),intent=s.purchaseIntent;if(!intent)return;
-    const history=await this.provider.history(),rows=Array.isArray(history)?history:history?.data;
+    const history=await this.provider.history(),rows=Array.isArray(history)?history:(history?.Data||history?.data);
     if(!Array.isArray(rows))throw problem('5sim order history is unavailable.');
     const matches=rows.filter(o=>o.product==='naver'&&o.country===intent.country&&Date.parse(o.created_at)>=intent.at-5000&&!s.attempts.some(a=>a.id===o.id));
     if(matches.length!==1)throw problem('Purchase is unresolved. Check 5sim history before continuing; no new number was bought.');

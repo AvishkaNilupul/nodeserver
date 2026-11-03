@@ -7,6 +7,7 @@ async function run(fn){if(busy)return;busy=true;document.querySelectorAll('butto
 const activeId=()=>{if(!state.active)throw Error('Start or resume a signup first.');return state.active.id;};
 $('connect').onclick=()=>run(async()=>{await extension('connect');$('connection').textContent='Extension ready';});
 $('start').onclick=()=>run(async()=>{await extension('connect');const r=await api('/start',{name:$('name').value,birthday:$('birthday').value.replaceAll('-',''),maxPrice:Number($('maxPrice').value),budget:Number($('budget').value)});await extension('open',{sessionId:r.session.id});});
+$('demo').onclick=()=>run(async()=>{await extension('connect');const r=await api('/start',{name:$('name').value||'Manual Demo',birthday:$('birthday').value.replaceAll('-','')||'19950102',maxPrice:Number($('maxPrice').value),budget:Number($('budget').value),manual:true});await extension('open',{sessionId:r.session.id});$('message').textContent='Manual demonstration: clicks and field changes are logged locally. The helper will not fill, submit, or buy numbers.';});
 for(const type of ['resume','number','sms','replace','save'])$(type).onclick=()=>run(()=>extension(type,{sessionId:activeId()}));
 $('reconcile').onclick=()=>run(()=>api('/session/'+activeId()+'/reconcile',{}));
 $('cancel').onclick=()=>run(async()=>{await api('/session/'+activeId()+'/cancel',{});await extension('close');});

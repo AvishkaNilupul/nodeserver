@@ -33,26 +33,37 @@ async function capture(s){
   const identity=(await api(s,route(s,'identity'))).identity;
   const page=await send(s,'authenticated',{username:identity.username});
   if(!page.ok)throw Error('Open Naver’s home page in the signup window after creation; it must show the assigned ID and a logout link.');
-  const stores=await chrome.cookies.getAllCookieStores(),store=stores.find(x=>x.tabIds.includes(s.tabId));
-  if(!store)throw Error('Private cookie store unavailable.');
-  const cookies=(await chrome.cookies.getAll({domain:'naver.com',storeId:store.id})).filter(c=>/^\.?naver\.com$/.test(c.domain));
-  if(!['NID_AUT','NID_SES'].every(n=>cookies.some(c=>c.name===n&&c.value)))throw Error('Naver login cookies are missing.');
+  const cookies=await cookiesFor(s);
+  await api(s,route(s,'events'),{kind:'cookies-meta',page:'https://www.naver.com/',cookies:cookies.map(c=>({name:c.name,domain:c.domain,httpOnly:c.httpOnly,secure:c.secure,session:c.session}))});
+  if(!['NID_AUT','NID_SES'].every(n=>cookies.some(c=>c.name===n&&c.value)))throw Error('Naver login cookies are missing. Found: '+cookies.map(c=>c.name).join(', '));
   // The service worker's fetch uses the regular store. Verify inside the assigned
   // private CHZZK tab instead, so a regular-window login cannot be saved by mistake.
   s.captureCookies=cookies;await save(s);
   await chrome.tabs.update(s.tabId,{url:'https://chzzk.naver.com/'});await stage(s,'Verifying CHZZK login');
+}
+async function cookiesFor(s){
+  const tab=await chrome.tabs.get(s.tabId);if(!tab.incognito||tab.windowId!==s.windowId)throw Error('The assigned private tab changed.');
+  const stores=await chrome.cookies.getAllCookieStores(),store=stores.find(x=>x.tabIds.includes(s.tabId));
+  if(!store)throw Error('Private cookie store unavailable.');
+  await api(s,route(s,'events'),{kind:'cookie-store',label:JSON.stringify({tabId:s.tabId,storeId:store.id,incognito:tab.incognito})});
+  let cookies=await chrome.cookies.getAll({domain:'naver.com',storeId:store.id});
+  if(chrome.cookies.getPartitionKey){const result=await chrome.cookies.getPartitionKey({tabId:s.tabId,frameId:0});if(result.partitionKey)cookies=cookies.concat(await chrome.cookies.getAll({domain:'naver.com',storeId:store.id,partitionKey:result.partitionKey}));}
+  const unique=new Map();for(const c of cookies)if(/(^|\.)naver\.com$/i.test(c.domain))unique.set(c.domain+'|'+c.path+'|'+c.name,c);return[...unique.values()];
 }
 async function tick(s){
   if(s.captureCookies){
     const t=await chrome.tabs.get(s.tabId);if(new URL(t.url).hostname!=='chzzk.naver.com')return;
     const who=await send(s,'chzzk-status');if(!who.ok)throw Error('Finish the CHZZK profile setup in this window, then Resume.');
     await api(s,route(s,'sms'));
-    await api(s,route(s,'complete'),{cookies:s.captureCookies,userIdHash:who.userIdHash,naverId:(await api(s,route(s,'identity'))).identity.username});
+    await api(s,route(s,'complete'),{cookies:await cookiesFor(s),userIdHash:who.userIdHash,naverId:(await api(s,route(s,'identity'))).identity.username});
     // Account is durable before closing its private window.
     const id=s.windowId;await chrome.storage.session.remove('active');await chrome.windows.remove(id);return;
   }
+  if(s.manual)return;
   const identity=(await api(s,route(s,'identity'))).identity;
   const p=await send(s,'inspect');
+  if(p.signupReturn){await chrome.tabs.update(s.tabId,{url:p.signupReturn});return;}
+  if(p.createdUsername){await api(s,route(s,'account-name'),{username:p.createdUsername});await chrome.tabs.update(s.tabId,{url:'https://www.naver.com/'});await stage(s,'Naver account created; verifying its login');return;}
   if(p.terms){await stage(s,'Waiting for Naver agreements in the signup window');return;}
   if(p.challenge){await stage(s,'Waiting for the browser challenge');return;}
   if(p.authenticated){await capture(s);return;}
@@ -72,6 +83,10 @@ async function tick(s){
 }
 async function handle(m,sender){
   const local=sender.tab?.url===BASE+'/';
+  if(m.type==='log-event'){
+    const s=await load();if(!s||sender.tab?.id!==s.tabId||sender.tab?.windowId!==s.windowId||!sender.tab.incognito)return{ok:false};
+    await api(s,route(s,'events'),m.event||{});return{ok:true};
+  }
   if(m.type==='tick'){
     const s=await load();if(!s||sender.tab?.id!==s.tabId||sender.tab?.windowId!==s.windowId||!sender.tab.incognito)return{ok:false};
     if(s.paused)return{ok:true};
@@ -102,7 +117,7 @@ async function handle(m,sender){
       const w=await chrome.windows.create({incognito:true,url:'https://nid.naver.com/account/signup/term?lang=en_US&realname=N'});
       s.windowId=w.id;s.tabId=w.tabs[0].id;
     }
-    s.token=m.token;s.paused=false;await save(s);await chrome.windows.update(s.windowId,{focused:true});return{ok:true};
+    s.token=m.token;s.paused=false;s.manual=(await api(s,route(s,'identity'))).identity.manual===true;await save(s);await chrome.windows.update(s.windowId,{focused:true});return{ok:true};
   }
   const s=await load();if(!s)throw Error('Resume the signup window first.');
   if(m.sessionId&&s.id!==m.sessionId)throw Error('Wrong signup.');s.token=m.token;
@@ -115,6 +130,7 @@ async function handle(m,sender){
   return{ok:true};
 }
 chrome.runtime.onMessage.addListener((m,sender,reply)=>{
+  if(m.type==='log-event'){handle(m,sender).then(reply).catch(()=>reply({ok:false}));return true;}
   if(busy){reply({ok:false,error:'Signup operation is running.'});return;}
   busy=true;handle(m,sender).then(reply).catch(async e=>{
     const s=await load();if(s&&m.type==='tick'){s.paused=true;await save(s);await stage(s,'Paused — '+(e.message||'resume signup')).catch(()=>{});}

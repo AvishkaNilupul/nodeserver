@@ -50,6 +50,16 @@ test('unresolved purchase never clears its intent or spends again',async t=>{
   const f=fixture(t);f.provider.buy=async()=>{throw new ProviderError('timeout',{ambiguous:true});};
   await assert.rejects(f.engine.number(f.s.id));await assert.rejects(f.engine.reconcile(f.s.id),/unresolved/);assert.ok(f.s.purchaseIntent);
 });
+test('reconciliation accepts the real 5sim Data history envelope',async t=>{
+  const f=fixture(t),buy=f.provider.buy;f.provider.buy=async(...a)=>{await buy(...a);throw new ProviderError('timeout',{ambiguous:true});};
+  await assert.rejects(f.engine.number(f.s.id));f.provider.history=async()=>({Data:[...f.orders.values()],Total:1});await f.engine.reconcile(f.s.id);assert.equal(f.s.order.id,1);
+});
+test('a manually completed SMS can be adopted without buying or resetting the signup',async t=>{
+  const f=fixture(t),o=await f.provider.buy('canada',.04);o.created_at=new Date(Date.now()+1000).toISOString();o.sms=[{code:'1234'}];f.orders.set(o.id,o);
+  await f.engine.adoptExistingOrder(f.s.id,o.id);assert.equal(f.bought(),1);assert.equal(f.s.attempts[0].manual,true);
+  await f.engine.accountName(f.s.id,'alex_morgan_248');assert.equal(f.s.username,'alex_morgan_248');
+  await assert.rejects(f.engine.accountName(f.s.id,'another_account'),/cannot change/);
+});
 test('failed cancellation holds the old order',async t=>{
   const f=fixture(t);await f.engine.number(f.s.id);f.provider.order=async()=>structuredClone(f.orders.get(1));
   await assert.rejects(f.engine.replace(f.s.id),/Wait for cancellation/);assert.equal(f.s.order.id,1);await f.engine.number(f.s.id);assert.equal(f.bought(),1);
