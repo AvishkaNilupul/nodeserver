@@ -3,7 +3,7 @@
 Open http://127.0.0.1:4107/epic-accounts.html in Chrome. This is a standalone
 local app: no RedeemHub website login, admin login, local MongoDB or
 production configuration is loaded by the signup runtime. Cloud uploads use the existing local SSH deployment key. It uses installed Node dependencies,
-local source files, the existing Chrome extension and local Outlook reader.
+local source files, the existing Chrome extension and the central cloud Outlook pool.
 Internet access to Epic, Outlook and the optional proxy provider is required.
 
 From the project directory on macOS:
@@ -19,9 +19,9 @@ The installer replaces the old redirect service and starts
 node tools/epic-signup/local-app.cjs
 ```
 
-Keep the Outlook reader running on 127.0.0.1:3999 and Marketplace Filler 1.5.0
+Keep the cloud mail SSH forwarder connected on 127.0.0.1:3999 and Marketplace Filler 1.5.0
 enabled in Chrome. Check extension verifies connectivity without reserving an
-inbox or opening Epic. Create Epic account reserves a local inbox and opens the
+inbox or opening Epic. Create Epic account reserves an exclusive cloud inbox and opens the
 signup wizard. The extension fills details and retrieves fresh Outlook OTPs;
 the automatic submission checkbox enables registration Continue and Store EULA
 completion for that signup. Leave it unchecked for manual agreement review.
@@ -149,3 +149,5 @@ interrupted identity for recovery. **Stop after current** finishes the current
 account; **Cancel signup** cancels it and clears the remaining queue. Keep the
 generator page and Chrome open: refreshing or closing the page drops the queue,
 so it never silently starts more accounts after reopening.
+
+The extension requires the pool to identify itself as the cloud authority before any inbox allocation. The loopback connection is only a private SSH transport; never start a local mail-dashboard writer. Residential proxy configuration is supplied by the cloud pool, including the current provider credentials. The proxy checkbox defaults on.

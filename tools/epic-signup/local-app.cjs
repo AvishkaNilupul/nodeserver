@@ -33,8 +33,8 @@ function createLocalApp({dataDir=DEFAULT_DIR,port=4107,cloudUploader=null,exchan
   app.get('/api/epic/signup/health',ui,(_req,res)=>res.json({success:true,provider:'outlook-local',mode:'local',extensionVersion:'1.5.0'}));
   app.get('/api/local/status',ui,async(_req,res)=>{
     let mailReady=false,proxyReady=false;
-    try{mailReady=(await require('axios').get('http://127.0.0.1:3999/',{timeout:3000})).status===200;}catch{}
-    try{proxyReady=!!require('../../utils/epicLocalProxy').readProxy();}catch{}
+    try{const {data}=await require('axios').get('http://127.0.0.1:3999/api/pool/capabilities',{timeout:3000,proxy:false});mailReady=data.authority==='cloud'&&data.exclusivePurposes?.includes('epic');proxyReady=mailReady&&data.proxyConfigured===true;}catch{}
+
     res.json({success:true,mailReady,proxyReady,cloudEnabled:!!cloudSync});
   });
   app.post('/api/local/accounts/backfill-location',ui,(_req,res)=>{let changed=0;for(const a of vault.data.accounts){const p=creationProfile(a.profile);if(JSON.stringify(a.profile)!==JSON.stringify(p)){a.profile=p;changed++;}}vault.save();res.json({success:true,changed});});

@@ -29,7 +29,7 @@ test('server accepts only recent local Outlook reservations', () => {
   }
 });
 
-function worker({ incognitoAllowed = true, existingPrivate = false, now=Date.now, otpResponse=null } = {}) {
+function worker({ incognitoAllowed = true, existingPrivate = false, now=Date.now, otpResponse=null, cloudAuthority="cloud" } = {}) {
   const storage = {}; const calls = []; let listener; let auth; let removed; let nextTab = 10;
   const chrome = {
     extension: { isAllowedIncognitoAccess: async () => incognitoAllowed },
@@ -48,6 +48,7 @@ function worker({ incognitoAllowed = true, existingPrivate = false, now=Date.now
   const fetch = async (url, init) => {
     calls.push([url, JSON.parse(init.body || '{}')]);
     let body = { success: true };
+    if (url.endsWith('/api/pool/capabilities')) body = { ok: true, authority:cloudAuthority, exclusivePurposes:['epic','steam'] };
     if (url.includes('/epic/proxy')) body = { ok: true, proxy: { scheme: 'http', host: 'proxy.test', port: 1234, username: 'user', password: 'proxy-secret' } };
     if (url.endsWith('/api/accounts')) body = [{ email: 'stock@outlook.com', uses: { epic: { status: 'fail' } } }];
     if (url.includes('/pool/pick')) body = { ok: true, email: 'stock@outlook.com' };
@@ -381,4 +382,10 @@ test('an in-flight old email read cannot complete a replacement verification req
  await msg('epicgen-begin-otp');const pending=msg('epicgen-request-otp');await reading;
  await msg('epicgen-begin-otp');finishRead({ok:true,code:'111111',receivedAt:new Date().toISOString()});
  const result=await pending;assert.equal(result.code,undefined);assert.equal(w.storage['epicgen.active'].lastOtpReceivedAt,undefined);
+});
+
+test('Epic refuses a legacy local pool before reserving any inbox', async()=>{
+ const w=worker({cloudAuthority:'local'});const result=await w.send({type:'epicgen-allocate'});
+ assert.equal(result.ok,false);assert.match(result.error,/cloud Outlook pool/);
+ assert.equal(w.calls.some(c=>String(c[0]).includes('/pool/pick')),false);
 });

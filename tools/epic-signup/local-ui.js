@@ -30,5 +30,5 @@
  window.load=load;$('localRefresh').addEventListener('click',load);$('localHide').addEventListener('click',hide);
  $('localCopy').addEventListener('click',async()=>{try{await navigator.clipboard.writeText($('localSecretText').textContent);$('signupStatus').textContent='Local login details copied.';}catch{$('signupStatus').textContent='Clipboard unavailable. Select the revealed details to copy.';}});
  document.addEventListener('visibilitychange',()=>{if(document.hidden)hide();});
- api('/api/local/status').then(s=>{$('localStatus').textContent='Encrypted local vault ready · Outlook reader '+(s.mailReady?'connected':'unavailable on port 3999')+' · Proxy '+(s.proxyReady?'configured':'not configured')+' · Cloud upload '+(s.cloudEnabled?'enabled':'disabled');}).catch(e=>{$('localStatus').textContent=e.message;});load();
+ api('/api/local/status').then(s=>{$('localStatus').textContent='Encrypted local vault ready · Cloud Outlook '+(s.mailReady?'connected':'disconnected; reconnect the cloud tunnel')+' · Proxy '+(s.proxyReady?'configured':'not configured')+' · Cloud upload '+(s.cloudEnabled?'enabled':'disabled');}).catch(e=>{$('localStatus').textContent=e.message;});load();
 })();

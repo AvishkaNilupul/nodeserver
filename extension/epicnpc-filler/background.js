@@ -1,4 +1,4 @@
-// Signup orchestration. Outlook stays on localhost; panel gets no mail tokens.
+// Signup orchestration. Loopback forwards to the cloud pool; panel gets no mail tokens.
 const MAIL = 'http://127.0.0.1:3999';
 const KEY = 'epicgen.active';
 const PENDING = 'epicgen.pending';
@@ -13,7 +13,7 @@ const isPanel = (url) => {
 async function request(url, init = {}, timeout = 24000) {
   let res;
   try { res = await fetch(url, { ...init, signal: AbortSignal.timeout(timeout) }); }
-  catch { throw new Error(url.startsWith(MAIL) ? 'Local Outlook reader unavailable. Start scripts/mail-dashboard.js on port 3999.' : 'Panel request failed or timed out'); }
+  catch { throw new Error(url.startsWith(MAIL) ? 'Cloud Outlook connection unavailable. Reconnect the cloud mail tunnel.' : 'Panel request failed or timed out'); }
   const body = await res.json();
   if (!res.ok || body.ok === false || body.success === false) throw new Error(body.message || body.error || `HTTP ${res.status}`);
   return body;
@@ -45,6 +45,8 @@ chrome.runtime.onMessage.addListener((msg, sender, respond) => {
       // Every signup gets a clean cookie jar, independently of proxy choice.
       if (!await chrome.extension.isAllowedIncognitoAccess()) throw new Error('Enable Allow in Incognito for this extension at chrome://extensions to isolate this signup.');
       if ((await chrome.windows.getAll()).some(w => w.incognito)) throw new Error('Close other private Chrome windows before starting an isolated signup.');
+      const capabilities = await request(MAIL + '/api/pool/capabilities');
+      if (capabilities.authority !== 'cloud' || !capabilities.exclusivePurposes?.includes('epic')) throw new Error('Connect the cloud Outlook pool before starting a signup.');
       let proxy = null;
       if (msg.useProxy) {
         const current = await chrome.proxy.settings.get({ incognito: true });

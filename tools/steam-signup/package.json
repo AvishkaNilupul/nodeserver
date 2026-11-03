@@ -1,0 +1,5 @@
+{
+  "name": "local-steam-signup",
+  "private": true,
+  "dependencies": { "steam-user": "5.3.0" }
+}

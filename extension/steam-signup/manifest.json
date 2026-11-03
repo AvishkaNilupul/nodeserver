@@ -1,0 +1,78 @@
+{
+  "manifest_version": 3,
+  "name": "Steam Signup \u2014 Local Outlook",
+  "version": "0.3.0",
+  "incognito": "spanning",
+  "description": "Local Steam signup helper with exclusive Outlook inboxes and encrypted local account storage.",
+  "permissions": [
+    "storage",
+    "tabs",
+    "proxy",
+    "webRequest",
+    "webRequestAuthProvider"
+  ],
+  "host_permissions": [
+    "http://127.0.0.1/*",
+    "https://*.steampowered.com/*",
+    "https://*.steamcommunity.com/*",
+    "https://*.steamstatic.com/*",
+    "https://*.hcaptcha.com/*",
+    "https://ipwho.is/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "action": {
+    "default_title": "Open Steam Generator"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "http://127.0.0.1/*"
+      ],
+      "js": [
+        "bridge.js"
+      ],
+      "run_at": "document_idle"
+    },
+    {
+      "matches": [
+        "https://store.steampowered.com/*"
+      ],
+      "js": [
+        "flow.js",
+        "content.js"
+      ],
+      "run_at": "document_idle"
+    },
+    {
+      "matches": [
+        "https://ipwho.is/*"
+      ],
+      "js": [
+        "proxy-check.js"
+      ],
+      "run_at": "document_idle"
+    },
+    {
+      "matches": [
+        "https://newassets.hcaptcha.com/captcha/*"
+      ],
+      "js": [
+        "captcha-checkbox.js"
+      ],
+      "run_at": "document_idle",
+      "all_frames": true
+    },
+    {
+      "matches": [
+        "https://store.steampowered.com/join/*"
+      ],
+      "js": [
+        "page-click.js"
+      ],
+      "run_at": "document_start",
+      "world": "MAIN"
+    }
+  ]
+}
