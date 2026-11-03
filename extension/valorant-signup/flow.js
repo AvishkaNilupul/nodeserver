@@ -1,16 +1,25 @@
 (function(root) {
-  function create({document, now = Date.now, visible = el => !!el && el.getClientRects().length > 0} = {}) {
+  function isVisible(el, document) {
+    if (!el || !el.getClientRects().length) return false;
+    for (let current=el; current?.nodeType===1; current=current.parentElement) {
+      if (current.hidden || current.getAttribute('aria-hidden')==='true') return false;
+      const style=document.defaultView?.getComputedStyle(current);
+      if (style && (style.display==='none' || style.visibility==='hidden' || Number(style.opacity)===0)) return false;
+    }
+    return true;
+  }
+  function create({document, autoSubmit = false, now = Date.now, visible = el => isVisible(el,document)} = {}) {
     const query = selector => [...document.querySelectorAll(selector)].find(visible);
     let lastKey = '', readyAt = 0, clickedKey = '', clickedAt = 0;
     function set(el, value) {
       if (!el || el.value === value) return;
+      el.focus?.();
       const prototype = el.tagName === 'SELECT' ? root.HTMLSelectElement?.prototype : root.HTMLInputElement?.prototype;
       const setter = prototype && Object.getOwnPropertyDescriptor(prototype, 'value')?.set;
       if (setter) setter.call(el, value); else el.value = value;
       const EventClass = document.defaultView?.Event || root.Event;
       el.dispatchEvent(new EventClass('input', {bubbles: true}));
       el.dispatchEvent(new EventClass('change', {bubbles: true}));
-      el.dispatchEvent(new EventClass('blur', {bubbles: true}));
     }
     function click(el) {
       el.scrollIntoView?.({block: 'center'}); el.focus?.(); el.click();
@@ -30,7 +39,8 @@
       if (email) {stage = 'email'; set(email, identity.email);}
       else if (date) {
         stage = 'birthdate'; const [year, month, day] = identity.birthDate.split('-');
-        const fields = [...date.querySelectorAll('input')].filter(visible);
+        const fields = [...date.querySelectorAll('input')].filter(el=>el.getClientRects().length>0);
+        fields[0]?.focus();
         const values = {YYYY: year, MM: month, DD: day};
         ready = fields.length === 3;
         for (const field of fields) {
@@ -65,6 +75,7 @@
       const agreement = query('input#tos-checkbox, input[name="tou_agree"]');
       if (agreement && !agreement.checked && !agreement.disabled) click(agreement);
       const button = query('[data-testid="btn-accept-tos"], [data-testid="btn-signup-submit"], [data-testid="btn-otp-submit"]');
+      if (!autoSubmit) return {stage};
       const key = stage + ':' + (button?.dataset?.testid || '');
       if (key !== lastKey) {lastKey = key; readyAt = now(); clickedKey = '';}
       if (clickedKey === key) return now() - clickedAt > 15000 ? {stage: 'needs-action'} : {stage: 'submitted'};
@@ -75,5 +86,5 @@
     }
     return {step, set};
   }
-  if (typeof module === 'object' && module.exports) module.exports = {create}; else root.ValorantSignupFlow = {create};
+  if (typeof module === 'object' && module.exports) module.exports = {create,isVisible}; else root.ValorantSignupFlow = {create};
 })(globalThis);

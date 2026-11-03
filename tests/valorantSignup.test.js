@@ -117,7 +117,7 @@ test('normal form progression fills assigned email and optional choices stay off
     if(selector.includes('[data-testid="btn-signup-submit"]'))return [button];
     if(selector.startsWith('input#newsletter'))return [optional]; return [];
   }};
-  const flow = create({document,now:()=>time,visible:()=>true});
+  const flow = create({document,autoSubmit:true,now:()=>time,visible:()=>true});
   flow.step({email:'fixture@outlook.com'}); assert.equal(input.value,'fixture@outlook.com'); assert.equal(optional.checked,false); assert.equal(clicks,0);
   time = 1300; flow.step({email:'fixture@outlook.com'}); flow.step({email:'fixture@outlook.com'}); assert.equal(clicks,1);
 });
@@ -142,7 +142,7 @@ test('six-box Riot email verification waits for mail then fills and submits the 
   const otp = {tagName:'DIV',querySelectorAll:()=>fields};
   const button = {dataset:{testid:'btn-otp-submit'},disabled:false,getAttribute(){return null;},click(){clicks++;}};
   const document = {querySelectorAll:selector=>selector.includes('[data-testid="otp-input"]')?[otp]:selector.includes('[data-testid="btn-otp-submit"]')?[button]:[]};
-  const flow = create({document,now:()=>time,visible:()=>true});
+  const flow = create({document,autoSubmit:true,now:()=>time,visible:()=>true});
   assert.equal(flow.step({}).stage,'verification');assert.equal(clicks,0);
   flow.step({},'123456');assert.equal(fields.map(f=>f.value).join(''),'123456');assert.equal(clicks,0);
   time = 1400;flow.step({},'123456');flow.step({},'123456');assert.equal(clicks,1);
@@ -157,4 +157,23 @@ test('proxy observation reads response pre even when another signup extension pr
   });
   await new Promise(resolve=>setImmediate(resolve));
   assert.equal(observation.type,'proxy-observed'); assert.equal(observation.location.country,'JP');
+});
+
+test('a closed cookie dialog with geometry is not treated as a visible blocker',()=>{
+  const {isVisible}=require('../extension/valorant-signup/flow.js');
+  const parent={nodeType:1,hidden:false,getAttribute:()=>null,parentElement:null};
+  const element={nodeType:1,hidden:false,getClientRects:()=>[{}],getAttribute:()=>null,parentElement:parent};
+  const document={defaultView:{getComputedStyle:el=>({display:'block',visibility:'visible',opacity:el===parent?'0':'1'})}};
+  assert.equal(isVisible(element,document),false);
+  parent.hidden=true;assert.equal(isVisible(element,{defaultView:{getComputedStyle:()=>({opacity:'1'})}}),false);
+  parent.hidden=false;assert.equal(isVisible(element,{defaultView:{getComputedStyle:()=>({opacity:'1'})}}),true);
+});
+
+test('default helper mode fills fields while leaving Continue for a direct browser action',()=>{
+  const {create}=require('../extension/valorant-signup/flow.js');let clicks=0;
+  const input={tagName:'INPUT',value:'',dispatchEvent(){}};
+  const button={click(){clicks++;},disabled:false};
+  const document={querySelectorAll:selector=>selector==='input[name="email_address"]'?[input]:selector.includes('btn-signup-submit')?[button]:[]};
+  const flow=create({document,visible:()=>true});flow.step({email:'fixture@outlook.com'});
+  assert.equal(input.value,'fixture@outlook.com');assert.equal(clicks,0);
 });

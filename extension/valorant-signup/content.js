@@ -19,7 +19,11 @@
         lastMail = Date.now(); const result = await send({type: 'verification'});
         if (result?.code) code = result.code;
       }
-    } catch { /* Keep the same identity; local UI reports extension/API failures. */ }
+    } catch (error) {
+      // Names and source locations diagnose helper failures without logging
+      // credentials, mailbox contents or complete API error objects.
+      console.warn('Valorant helper:',error.name,String(error.stack||'').split('\n').slice(1,3).join('\n'));
+    }
     finally {busy = false;}
   }
   setInterval(tick, 1000);
