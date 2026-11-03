@@ -1,0 +1,8 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>Discord Claim Bridge</title>
+<style>body{font:14px system-ui;width:320px;padding:16px;background:#10141c;color:#e8ebf2}h1{font-size:18px}p{line-height:1.5;color:#b1bac9}button,select{width:100%;margin:6px 0;padding:10px;background:#272c3a;color:inherit;border:1px solid #535b72;border-radius:6px}button{cursor:pointer}button:disabled{opacity:.5}#status{white-space:pre-wrap}</style></head>
+<body><h1>Discord Claim Bridge</h1>
+<p>Open your test account in Discord web. Connect refreshes that tab and reads its session for five minutes. Save sends it only to your selected Nodeserver, where it is encrypted.</p>
+<select id="target" aria-label="Nodeserver destination"><option value="https://redeemhub.lets.game">RedeemHub</option><option value="http://127.0.0.1:3000">Local development</option></select>
+<button id="connect">Connect this Discord tab</button><button id="save">Save account to Nodeserver</button><button id="clear">Forget captured session</button>
+<p id="status" role="status"></p><script src="popup.js"></script></body></html>

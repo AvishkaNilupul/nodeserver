@@ -218,6 +218,12 @@
           superOnly: true,
         },
         {
+          href: "/admin/discord-farm",
+          label: "Discord Farm",
+          icon: ICONS.bots,
+          superOnly: true,
+        },
+        {
           href: "/epic-accounts.html",
           label: "Epic accounts",
           icon: ICONS.epicAccounts,

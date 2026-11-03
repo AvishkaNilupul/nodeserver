@@ -1,4 +1,5 @@
 const express = require("express");
+const discordFarmRoutes = require("./routes/discordFarmRoutes");
 const http = require("http");
 const path = require("path");
 const crypto = require("crypto");
@@ -524,6 +525,10 @@ app.get("/reseller.html", requireReseller, (req, res) => {
   res.sendFile(path.join(__dirname, "public", "reseller.html"));
 });
 
+app.get("/discord-farm.html", requireSuperadmin, enforce2fa, (req, res) => {
+  res.redirect("/admin/discord-farm");
+});
+
 app.use(express.static(path.join(__dirname, "public")));
 
 // =========================
@@ -559,6 +564,8 @@ app.use(enforce2fa, renterAdminRoutes);
 app.use(resellerAuthRoutes);
 app.use(resellerRoutes);
 app.use(enforce2fa, resellerAdminRoutes);
+// Operator-only Discord intake, quest claims and encrypted code collection.
+app.use(enforce2fa, discordFarmRoutes);
 app.use(requireAdmin, enforce2fa, itemRoutes);
 app.use(requireAdmin, enforce2fa, inventoryRoutes);
 app.use(requireAdmin, enforce2fa, orderRoutes);

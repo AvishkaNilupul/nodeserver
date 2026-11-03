@@ -1,0 +1,288 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Discord Farm</title>
+  <!-- hCaptcha widget (loaded on demand when a Claim modal opens). The widget
+       accepts Enterprise rqdata via the data-rqdata attribute, which binds
+       the solve to Discord's challenge session. -->
+  <script src="https://js.hcaptcha.com/1/api.js?render=explicit&recaptchacompat=off" async defer></script>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { font-family: "Inter", "Segoe UI", Tahoma, sans-serif; background: #0e1014; color: #e8ebf2; padding: 24px; }
+    h1 { font-size: 20px; font-weight: 700; margin-bottom: 20px; }
+    h2 { font-size: 14px; font-weight: 600; margin: 24px 0 10px; color: #9aa3b4; text-transform: uppercase; letter-spacing: 0.5px; }
+    .card { background: #161a22; border: 1px solid #2a3140; border-radius: 10px; padding: 16px; margin-bottom: 16px; }
+    .row { display: grid; grid-template-columns: 1fr 1fr auto auto; gap: 12px; align-items: center; padding: 10px; border-bottom: 1px solid #2a3140; font-size: 13px; }
+    .row:last-child { border-bottom: none; }
+    .row .acc { color: #9aa3b4; font-size: 12px; }
+    .row .quest { font-weight: 600; }
+    .row .reward { color: #34d399; font-size: 12px; }
+    .btn { background: #4f46e5; color: white; border: 0; padding: 7px 14px; border-radius: 6px; font-weight: 600; cursor: pointer; font-size: 12px; }
+    .btn:hover { background: #6366f1; }
+    .btn:disabled { opacity: 0.5; cursor: not-allowed; }
+    .btn-small { background: #1e232e; color: #9aa3b4; border: 1px solid #2a3140; }
+    .btn-small:hover { color: #e8ebf2; border-color: #4f46e5; }
+    .btn-danger { background: #dc2626; }
+    .muted { color: #6b7280; font-size: 12px; }
+    .status { padding: 2px 8px; border-radius: 4px; font-size: 11px; font-weight: 600; }
+    .status-alive { background: rgba(52,211,153,0.14); color: #34d399; }
+    .status-error { background: rgba(248,113,113,0.14); color: #f87171; }
+    .toolbar { display: flex; gap: 8px; margin-bottom: 16px; }
+    .toolbar input, .toolbar select { background: #1e232e; border: 1px solid #2a3140; color: #e8ebf2; padding: 6px 10px; border-radius: 6px; font-size: 13px; min-width: 160px; }
+    form.ingest { display: grid; grid-template-columns: 1fr 1fr 1fr 1fr auto; gap: 8px; }
+    form.ingest textarea { grid-column: span 5; background: #1e232e; border: 1px solid #2a3140; color: #e8ebf2; padding: 8px; border-radius: 6px; font-family: monospace; font-size: 12px; min-height: 60px; }
+    form.ingest input { background: #1e232e; border: 1px solid #2a3140; color: #e8ebf2; padding: 7px 10px; border-radius: 6px; font-size: 13px; }
+    .modal-bg { display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.75); z-index: 100; align-items: center; justify-content: center; }
+    .modal-bg.open { display: flex; }
+    .modal { background: #161a22; border: 1px solid #2a3140; border-radius: 10px; padding: 24px; width: 400px; max-width: 90vw; }
+    .modal h3 { margin-bottom: 16px; font-size: 16px; }
+    .modal .meta { font-size: 12px; color: #9aa3b4; margin-bottom: 16px; }
+    #captcha-mount { margin: 16px 0; display: flex; justify-content: center; min-height: 80px; }
+    .modal .footer { display: flex; justify-content: flex-end; gap: 8px; margin-top: 16px; }
+    .log { font-family: monospace; font-size: 11px; color: #9aa3b4; max-height: 150px; overflow-y: auto; margin-top: 10px; padding: 8px; background: #0e1014; border-radius: 4px; }
+    .log .ok { color: #34d399; }
+    .log .err { color: #f87171; }
+    @media (max-width: 700px) { body { padding: 12px; } .row { grid-template-columns: 1fr; } form.ingest { grid-template-columns: 1fr; } form.ingest textarea { grid-column: 1; } }
+    .empty { padding: 20px; text-align: center; color: #6b7280; }
+  </style>
+</head>
+<body>
+  <h1>Discord Farm</h1>
+  <p class="muted" style="margin-bottom:16px"><a href="/bots.html">Back to bots</a> · For browser claims, use the same account in <a href="https://discord.com/quest-home" target="_blank" rel="noopener noreferrer">Discord Quests</a>, then Sync rewards here. Issued codes are collected into the vault below.</p>
+
+  <!-- INGEST -->
+  <div class="card">
+    <h2 style="margin-top:0">Ingest account</h2>
+    <p class="muted" style="margin-bottom:12px">Connect the signed-in test account with the Discord Claim Bridge extension, or paste its session token below. The account is verified before its encrypted session is saved.</p>
+    <form class="ingest" id="ingest-form">
+      <input name="email" placeholder="email (optional)" />
+      <input name="seller" placeholder="seller (e.g. FLOCKS)" />
+      <input name="marketplace" placeholder="marketplace (e.g. eldorado)" />
+      <input name="pricePaidUSD" placeholder="price USD" type="number" step="0.01" />
+      <button class="btn" type="submit">Ingest</button>
+      <textarea autocomplete="off" spellcheck="false" name="token" placeholder="paste the Discord session token here" required></textarea>
+    </form>
+    <div id="ingest-log" class="log" style="display:none"></div>
+  </div>
+
+  <div class="card">
+    <h2 style="margin-top:0">Code vault <span id="code-count"></span></h2>
+    <p class="muted" style="margin-bottom:12px">Only issued redemption codes appear here. Orbs and account-bound cosmetics are tracked in account history. Copying a code does not mark it sold or redeem it.</p>
+    <button class="btn btn-small" id="refresh-codes">Refresh codes</button>
+    <div id="codes"></div>
+    <div id="vault-log" class="log" style="display:none"></div>
+  </div>
+
+  <!-- ACCOUNTS -->
+  <div class="card">
+    <h2 style="margin-top:0">Accounts</h2>
+    <div id="accounts"></div>
+  </div>
+
+  <!-- QUEUE -->
+  <div class="card">
+    <h2 style="margin-top:0">Ready-to-claim queue</h2>
+    <div class="toolbar">
+      <button class="btn btn-small" onclick="refreshQueue()">Refresh queue</button>
+    </div>
+    <div id="queue"></div>
+  </div>
+
+  <!-- CAPTCHA MODAL -->
+  <div class="modal-bg" id="modal-bg">
+    <div class="modal">
+      <h3 id="modal-title">Claim quest</h3>
+      <div class="meta" id="modal-meta"></div>
+      <div id="captcha-mount"></div>
+      <div class="log" id="modal-log"></div>
+      <div class="footer">
+        <button class="btn btn-small" onclick="closeModal()">Cancel</button>
+      </div>
+    </div>
+  </div>
+
+<script>
+let current = null;
+let generation = 0;
+const base = "/admin/discord-farm";
+const byId = (id) => document.getElementById(id);
+const escapeHtml = (value) => String(value ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+function log(id, msg, cls) {
+  const el = byId(id), line = document.createElement("div");
+  el.style.display = "block";
+  line.textContent = msg;
+  line.className = cls || "";
+  el.appendChild(line);
+}
+async function api(path, body) {
+  const r = await fetch(base + path, { headers: { "Content-Type": "application/json", Accept: "application/json" },
+    ...(body === undefined ? {} : { method: "POST", body: JSON.stringify(body) }) });
+  const data = await r.json();
+  if (!r.ok) throw new Error(data.error || data.message || "HTTP " + r.status);
+  return data;
+}
+function action(label, fn) {
+  const button = document.createElement("button");
+  button.className = "btn btn-small";
+  button.textContent = label;
+  button.onclick = async () => {
+    button.disabled = true;
+    try { await fn(button); }
+    catch (e) { button.textContent = e.message; }
+    finally { button.disabled = false; }
+  };
+  return button;
+}
+async function refreshAccounts() {
+  const el = byId("accounts");
+  try {
+    const { accounts } = await api("/accounts");
+    el.replaceChildren();
+    if (!accounts.length) { el.textContent = "No accounts yet. Ingest one above."; return; }
+    for (const a of accounts) {
+      const row = document.createElement("div"); row.className = "row";
+      row.innerHTML = `<div><div class="quest">${escapeHtml(a.username || a.userId)}</div><div class="acc">${escapeHtml(a.email)}</div></div>
+        <div><span class="status status-${a.state === "alive" ? "alive" : "error"}">${escapeHtml(a.state)}</span> ${escapeHtml(a.seller)}</div>
+        <div class="muted">${Number(a.totals.questsCompleted) || 0} claimed · ${Number(a.totals.orbsClaimed) || 0} orbs · ${Number(a.totals.cosmeticsClaimed) || 0} cosmetics</div>`;
+      const controls = document.createElement("div");
+      controls.append(action("Probe", async () => { await api("/probe/" + a._id, {}); await refreshAccounts(); }));
+      controls.append(action("Sync rewards", async (btn) => {
+        btn.textContent = "Syncing…";
+        const result = await api("/sync/" + a._id, {});
+        btn.textContent = `${result.stored.length} codes collected, ${result.errors.length} errors`;
+        log("vault-log", `${a.username || a.userId}: ${result.stored.length} codes collected, ${result.errors.length} errors`, result.errors.length ? "err" : "ok");
+        for (const error of result.errors) log("vault-log", `${error.questId}: ${error.error}`, "err");
+        await Promise.all([refreshAccounts(), refreshQueue(), refreshCodes()]);
+      }));
+      controls.append(action("Auto-complete video quests", async (btn) => {
+        btn.textContent = "Running…";
+        const result = await api("/complete-pending/" + a._id, {});
+        btn.textContent = `${result.completed.length} processed, ${result.errors.length} errors`;
+        await refreshQueue();
+      }));
+      row.append(controls); el.append(row);
+      if (a.questLog?.length) {
+        const details = document.createElement("details"), title = document.createElement("summary");
+        title.textContent = "Quest history"; details.append(title);
+        for (const q of a.questLog) {
+          const line = document.createElement("div"); line.className = "muted";
+          line.textContent = `${q.questName || q.questId} · ${q.rewardName || ""} · ${q.claimedAt ? "claimed " + new Date(q.claimedAt).toLocaleString() : "pending"} · ${q.attempts} attempt(s)`;
+          details.append(line);
+        }
+        el.append(details);
+      }
+    }
+  } catch (e) { el.textContent = "Accounts: " + e.message; }
+}
+async function refreshQueue() {
+  const el = byId("queue"); el.textContent = "Loading…";
+  try {
+    const { queue, errors } = await api("/queue");
+    el.replaceChildren();
+    if (!queue.length) el.textContent = "No completed, unclaimed quests.";
+    for (const q of queue) {
+      const row = document.createElement("div"); row.className = "row";
+      row.innerHTML = `<div><div class="quest">${escapeHtml(q.questName)}</div><div class="acc">${escapeHtml(q.accountLabel)}</div></div>
+        <div class="reward">${escapeHtml(q.reward)} · ${q.rewardType === 1 ? "Code" : q.rewardType === 4 ? "Orbs" : "Account reward"}</div><div class="muted">Claim by ${escapeHtml((q.claimExpiresAt || q.expiresAt) ? new Date(q.claimExpiresAt || q.expiresAt).toLocaleString() : "—")}</div>`;
+      const controls = document.createElement("div"), browser = document.createElement("a");
+      browser.className = "btn btn-small"; browser.href = "https://discord.com/quest-home";
+      browser.target = "_blank"; browser.rel = "noopener noreferrer"; browser.textContent = "Open Discord";
+      controls.append(browser, action("Claim here", () => openClaim(q)));
+      row.append(controls); el.append(row);
+    }
+    for (const e of errors) {
+      const warning = document.createElement("div"); warning.className = "status-error";
+      warning.textContent = e.accountId + ": " + e.error; el.append(warning);
+    }
+  } catch (e) { el.textContent = "Queue: " + e.message; }
+}
+async function refreshCodes() {
+  const el = byId("codes");
+  try {
+    const { codes } = await api("/codes");
+    byId("code-count").textContent = `(${codes.length})`;
+    el.replaceChildren();
+    if (!codes.length) el.textContent = "No codes collected. Sync rewards after claiming in Discord.";
+    for (const code of codes) {
+      const row = document.createElement("div"); row.className = "row";
+      const text = document.createElement("div");
+      text.textContent = `${code.game || code.questName} · ${code.rewardName || "Reward code"}`;
+      const info = document.createElement("div"); info.className = "muted";
+      info.textContent = `Platform ${code.platform} · ${code.expiresAt ? "Redeem by " + new Date(code.expiresAt).toLocaleString() : "Redemption expiry not provided"}`;
+      row.append(text, info, action("Copy code", async (btn) => {
+        const value = await api("/codes/" + code._id);
+        try { await navigator.clipboard.writeText(value.code); btn.textContent = "Copied"; }
+        catch { const field = document.createElement("input"); field.readOnly = true; field.value = value.code; row.append(field); field.select(); btn.textContent = "Select and copy"; }
+      }));
+      el.append(row);
+    }
+  } catch (e) { el.textContent = "Code vault: " + e.message; }
+}
+function closeModal() {
+  generation++;
+  const previous = current; current = null;
+  if (previous?.widget != null && window.hcaptcha) window.hcaptcha.remove(previous.widget);
+  byId("modal-bg").classList.remove("open");
+  byId("captcha-mount").replaceChildren();
+}
+async function openClaim(q) {
+  closeModal();
+  const flow = { ...q, generation, widget: null, submitting: false };
+  current = flow;
+  byId("modal-title").textContent = "Claim: " + q.questName;
+  byId("modal-meta").textContent = "Reward: " + (q.reward || "");
+  byId("modal-log").replaceChildren();
+  byId("modal-bg").classList.add("open");
+  try {
+    const data = await api(`/trigger-captcha/${q.accountId}/${q.questId}`, {});
+    if (current !== flow) return;
+    if (data.alreadyClaimed) {
+      log("modal-log", "Claim recorded.", "ok");
+      if (data.codeError) log("modal-log", data.codeError, "err");
+      await Promise.all([refreshQueue(), refreshAccounts(), refreshCodes()]); return;
+    }
+    for (let n = 0; !window.hcaptcha && n < 40; n++) {
+      await new Promise((resolve) => setTimeout(resolve, 250));
+      if (current !== flow) return;
+    }
+    if (!window.hcaptcha) throw new Error("hCaptcha could not load. Close and retry.");
+    flow.widget = window.hcaptcha.render(byId("captcha-mount"), {
+      sitekey: data.sitekey,
+      callback: (token) => submitClaim(flow, token),
+      "expired-callback": () => current === flow && log("modal-log", "Challenge expired. Close and reopen Claim.", "err"),
+      "error-callback": () => current === flow && log("modal-log", "Challenge failed. Close and reopen Claim.", "err"),
+    });
+    if (data.rqdata) window.hcaptcha.setData(flow.widget, { rqdata: data.rqdata });
+    log("modal-log", "Solve the challenge above.");
+  } catch (e) { if (current === flow) log("modal-log", e.message, "err"); }
+}
+async function submitClaim(flow, token) {
+  if (current !== flow || flow.submitting) return;
+  flow.submitting = true;
+  try {
+    const data = await api(`/claim/${flow.accountId}/${flow.questId}`, { captchaKey: token });
+    if (current === flow) log("modal-log", "Claim recorded.", "ok");
+    if (current === flow && data.codeError) log("modal-log", data.codeError, "err");
+    await Promise.all([refreshQueue(), refreshAccounts(), refreshCodes()]);
+  } catch (e) { if (current === flow) log("modal-log", e.message, "err"); }
+}
+byId("ingest-form").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const button = e.target.querySelector("button"); button.disabled = true;
+  byId("ingest-log").replaceChildren();
+  try {
+    const data = await api("/ingest", Object.fromEntries(new FormData(e.target).entries()));
+    log("ingest-log", "Saved " + data.userId + " · " + data.state, "ok");
+    e.target.reset(); await Promise.all([refreshAccounts(), refreshQueue()]);
+  } catch (err) { log("ingest-log", err.message, "err"); }
+  finally { button.disabled = false; }
+});
+refreshAccounts();
+refreshQueue();
+refreshCodes();
+byId("refresh-codes").onclick = refreshCodes;
+</script>
+</body>
+</html>

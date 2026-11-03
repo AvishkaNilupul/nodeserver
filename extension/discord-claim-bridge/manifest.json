@@ -1,0 +1,10 @@
+{
+  "manifest_version": 3,
+  "name": "Discord Claim Bridge",
+  "version": "1.0.0",
+  "description": "Connect one signed-in Discord account to your Nodeserver code vault.",
+  "permissions": ["webRequest", "storage", "tabs"],
+  "host_permissions": ["https://discord.com/*", "https://redeemhub.lets.game/*", "http://127.0.0.1:3000/*"],
+  "background": { "service_worker": "background.js" },
+  "action": { "default_popup": "popup.html", "default_title": "Discord Claim Bridge" }
+}
