@@ -223,6 +223,7 @@
           icon: ICONS.epicAccounts,
           superOnly: true,
         },
+        { href: "/outlook/", label: "Outlook inboxes", icon: ICONS.epicAccounts, superOnly: true },
       ],
     },
     {

@@ -476,6 +476,7 @@ app.get("/marketplace.html", requireAdmin, enforce2fa, (req, res) => {
   res.sendFile(path.join(__dirname, "public", "marketplace.html"));
 });
 app.use("/marketplace", requireAdmin, enforce2fa, marketplaceProxy);
+app.use("/outlook", require("./routes/outlookDashboardRoutes"));
 
 // =========================
 // Shop (in-app bundle store, all admins)
