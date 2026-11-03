@@ -59,7 +59,11 @@ directory contains `host` and `remoteRoot`; never put it in git. It uses the
 existing deployment SSH key. Install `tools/chzzk-signup/cloud-import.cjs` on
 production before enabling uploads. The importer validates cookies through the
 existing configured CHZZK egress and inserts new accounts without modifying
-existing accounts or their sold/paused state. Upload failures remain queued in
+existing cookies or their sold/paused state. Uploads include the Naver username
+and password, encrypted on the server for future renewal; ordinary farm responses
+omit the password. An SSH-only credentials backfill can fill missing credentials
+on the exact original generator row without replacing existing credentials.
+Upload failures remain queued in
 the local vault. The farm supervisor discovers imported accounts normally.
 
 Tests: `node --test tests/chzzkSignup.test.js tests/chzzkSignupExtension.test.js tests/chzzkSignupForms.test.js tests/chzzkSignupProxy.test.js`. Tests use fake 5sim responses,

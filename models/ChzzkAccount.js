@@ -10,6 +10,11 @@ const chzzkAccountSchema = new mongoose.Schema(
     // Naver's stable per-login hash from getUserStatus. Required and unique.
     userIdHash: { type: String, required: true, unique: true, index: true },
     nickname: { type: String, default: "" },
+    // Renewal credentials. Password is encrypted with secretBox and excluded
+    // from ordinary queries; renewal tooling must explicitly select it.
+    loginUsername: { type: String, default: "" },
+    loginPasswordEnc: { type: String, default: "", select: false },
+    loginSavedAt: { type: Date, default: null },
     // Encrypted JSON array of { name, value, domain }.
     cookies: { type: String, default: "" },
     cookieAt: { type: Date, default: null },

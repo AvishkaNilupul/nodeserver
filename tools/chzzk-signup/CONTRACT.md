@@ -52,7 +52,13 @@ mode stays passive. Visual challenges can be completed in the browser.
 
 Save credentials and cookies locally before finishing the 5sim order. Durable
 upload queue feeds the existing farm over SSH/stdin; no public import endpoint.
-Cloud import verifies login via the configured farm egress, inserts only new
-accounts, and rejects existing users rather than changing sold/paused state.
+Cloud import verifies login via the configured farm egress and inserts only new
+cookie/state records. It also stores the Naver username and secretBox-encrypted
+password on the account for later renewal. Passwords are excluded from ordinary
+model queries and never appear in import responses or activity logs.
+The SSH-only credentials action backfills an existing generator account using
+its cloud ID, user hash and original local signup ID together. It fills empty
+credential fields only, accepts identical retries, refuses conflicting passwords,
+and cannot insert accounts or change cookies, sold/paused state or timestamps.
 Server-side cookie renewal remains the existing CHZZK farm's responsibility.
 Never claim a signup or farming success without live evidence.
