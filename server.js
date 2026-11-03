@@ -19,10 +19,12 @@ const {
   requireSuperadmin,
   enforce2fa,
 } = require("./middleware/auth");
+const { canonicalPath } = require("./middleware/canonicalPath");
 const adminAuthRoutes = require("./routes/adminAuthRoutes");
 const adminManageRoutes = require("./routes/adminManageRoutes");
 const redeemRoutes = require("./routes/redeemRoutes");
 const chatRoutes = require("./routes/chatRoutes");
+const aiChatRoutes = require("./routes/aiChatRoutes");
 const itemRoutes = require("./routes/itemRoutes");
 const inventoryRoutes = require("./routes/inventoryRoutes");
 const orderRoutes = require("./routes/orderRoutes");
@@ -30,16 +32,27 @@ const botConfigRoutes = require("./routes/botConfigRoutes");
 const botUpdateRoutes = require("./routes/botUpdateRoutes");
 const botHealthRoutes = require("./routes/botHealthRoutes");
 const noclaimFarmRoutes = require("./routes/noclaimFarmRoutes");
-const webbotFarmRoutes = require("./routes/webbotFarmRoutes");
+const unclaimedAutoRoutes = require("./routes/unclaimedAutoRoutes");
+const noclaimStockRoutes = require("./routes/noclaimStockRoutes");
+const farmSizingRoutes = require("./routes/farmSizingRoutes");
+const unclaimedAutoList = require("./utils/unclaimedAutoList");
+const unclaimedAllocator = require("./utils/unclaimedAllocator");
 const botHealthMonitor = require("./utils/botHealthMonitor");
+const accountPoolChecker = require("./utils/accountPoolChecker");
 const dropArchiveRoutes = require("./routes/dropArchiveRoutes");
+const accountApiRoutes = require("./routes/accountApiRoutes");
 const accountPoolRoutes = require("./routes/accountPoolRoutes");
+const spentAccountsRoutes = require("./routes/spentAccountsRoutes");
 const autoFarmRoutes = require("./routes/autoFarmRoutes");
+const farm2Routes = require("./routes/farm2Routes");
+const farm2 = require("./utils/farm2");
 const marketplaceRoutes = require("./routes/marketplaceRoutes");
+const accountListingRoutes = require("./routes/accountListingRoutes");
 const backupRoutes = require("./routes/backupRoutes");
 const shopRoutes = require("./routes/shopRoutes");
 const catalogRoutes = require("./routes/catalogRoutes");
 const bulkOrderRoutes = require("./routes/bulkOrderRoutes");
+const bulkPackRoutes = require("./routes/bulkPackRoutes");
 const renterAuthRoutes = require("./routes/renterAuthRoutes");
 const renterRoutes = require("./routes/renterRoutes");
 const renterAdminRoutes = require("./routes/renterAdminRoutes");
@@ -49,23 +62,56 @@ const { requireReseller } = require("./middleware/resellerAuth");
 const resellerRoutes = require("./routes/resellerRoutes");
 const resellerAdminRoutes = require("./routes/resellerAdminRoutes");
 const renterExpiry = require("./utils/renterExpiry");
+const rentFarmCapacity = require("./utils/rentFarmCapacity");
+const hostWatchdog = require("./utils/hostWatchdog");
 const primeRoutes = require("./routes/primeRoutes");
 const radarRoutes = require("./routes/radarRoutes");
 const bannedRoutes = require("./routes/bannedRoutes");
 const epicAccountRoutes = require("./routes/epicAccountRoutes");
+const steamAccountRoutes = require("./routes/steamAccountRoutes");
+const steamSalesRoutes = require("./routes/steamSalesRoutes");
 const twitchFollowRoutes = require("./routes/twitchFollowRoutes");
 const twitchFollowRunner = require("./utils/twitchFollowRunner");
+const twitchClaimRoutes = require("./routes/twitchClaimRoutes");
+const digitalOceanRoutes = require("./routes/digitalOceanRoutes");
 const twoFactorRoutes = require("./routes/twoFactorRoutes");
 const settingsRoutes = require("./routes/settingsRoutes");
+const trustedDeviceRoutes = require("./routes/trustedDeviceRoutes");
+const { restoreTrustedSession } = require("./utils/trustedDevices");
 const dropScanner = require("./utils/dropScanner");
 const renterDropScanner = require("./utils/renterDropScanner");
 const backup = require("./utils/backup");
 const gameflipFulfiller = require("./utils/gameflipFulfiller");
 const zeusxTokenRefresher = require("./utils/zeusxTokenRefresher");
+const eldoradoSessionRefresher = require("./utils/eldoradoSessionRefresher");
+const eldoradoFulfiller = require("./utils/eldoradoFulfiller");
+const playerauctionsSessionRefresher = require("./utils/playerauctionsSessionRefresher");
+const playerauctionsFulfiller = require("./utils/playerauctionsFulfiller");
+const g2gSessionRefresher = require("./utils/g2gSessionRefresher");
+const g2gFulfiller = require("./utils/g2gFulfiller");
+const playerauctionsSessionWatch = require("./utils/playerauctionsSessionWatch");
+const playerauctionsRoutes = require("./routes/playerauctionsRoutes");
+// Token-gated (NOT session/2fa gated) one-click cookie hand-off — mounted early,
+// before the admin auth cascade, because the browser extension that calls it has
+// no admin session. See routes/paSessionInstallRoutes.js.
+const paSessionInstallRoutes = require("./routes/paSessionInstallRoutes");
+// Buyer-facing Epic mail viewer at /mail. Its own one-shot cookie carries the
+// BuyerMailSession id; the admin cascade never sees it. See
+// routes/buyerMailRoutes.js and project_epic_store_el9in_scan_1028.md.
+const buyerMailRoutes = require("./routes/buyerMailRoutes");
 const marketplaceGuardian = require("./utils/marketplaceGuardian");
 const primeWatcher = require("./utils/primeWatcher");
 const campaignWatcher = require("./utils/campaignWatcher");
+const streamScout = require("./utils/streamScout");
+const noclaimWatcher = require("./utils/noclaimWatcher");
 const autoFarmer = require("./utils/autoFarmer");
+// SOOP drops farm service (docs/SOOP-FARM.md); started after MongoDB connects.
+const soopFarm = require("./utils/soopFarm");
+const soopCookieRefresher = require("./utils/soopCookieRefresher");
+// CHZZK drops farm (docs/CHZZK-FARM.md); singleton started after MongoDB connects.
+const chzzkFarm = require("./utils/chzzkFarm");
+// Publishes the auto-farm's listings; started below for its event-bundle sweep.
+const autoLister = require("./utils/autoLister");
 const autoFarmSnapshot = require("./utils/autoFarmSnapshot");
 const epicWatcher = require("./utils/epicWatcher");
 const epicClaimer = require("./utils/epicClaimer");
@@ -82,6 +128,15 @@ const {
   submitLimiter,
   uploadLimiter,
 } = require("./utils/rateLimit");
+const activityRoutes = require("./routes/activityRoutes");
+const systemHealthRoutes = require("./routes/systemHealthRoutes");
+const marketplaceConsoleRoutes = require("./routes/marketplaceConsoleRoutes");
+const priceTrackerRoutes = require("./routes/priceTrackerRoutes");
+const soopRoutes = require("./routes/soopRoutes");
+const chzzkRoutes = require("./routes/chzzkRoutes");
+const codeShopRoutes = require("./routes/codeShopRoutes");
+const fleetSnapshot = require("./utils/fleetSnapshot");
+const auditRequest = require("./middleware/auditRequest");
 
 const app = express();
 const server = http.createServer(app);
@@ -179,6 +234,10 @@ const sessionMiddleware = session({
 app.use(sessionMiddleware);
 // Share the session with Socket.IO so admin sockets are authenticated.
 io.engine.use(sessionMiddleware);
+// A browser the admin ticked "Remember this device" on gets signed back in
+// here when its 12 h session has lapsed (utils/trustedDevices.js). Before the
+// rate limiter and every guarded route, so the restored session counts.
+app.use(restoreTrustedSession);
 
 // Site-wide rate limit: a blanket per-IP ceiling across every route, in front
 // of the stricter per-endpoint limiters. Mounted AFTER the session middleware
@@ -187,6 +246,19 @@ io.engine.use(sessionMiddleware);
 // requests and shouldn't hit this ceiling. Anonymous IPs are still capped, and
 // Socket.IO is skipped so live chat isn't throttled.
 app.use(globalLimiter);
+
+// Route every request for a public/ file by that file's real name, BEFORE any
+// route: express.static decodes and normalises the URL, so without this a
+// re-spelt URL (/bulk%2Dorders.html, //bulk-orders.html) missed the guarded
+// page routes below and got the page from the static mount, signed out.
+app.use(canonicalPath(path.join(__dirname, "public")));
+
+// Audit every MUTATING request (who did what, where) into the unified activity
+// log. Mounted after the session middleware (so it can read the actor) and after
+// express.json (so it can summarize the body); it hooks res 'finish' and is
+// fire-and-forget, so it can never block or break a request. See
+// middleware/auditRequest.js + utils/systemLog.js.
+app.use(auditRequest);
 
 // =========================
 // Image upload (image types only)
@@ -340,7 +412,18 @@ app.use(twoFactorRoutes);
 // Per-admin self-service settings (e.g. linking a personal Telegram chat).
 // Each route guards with requireAdmin; kept out of the 2FA enforcement gate so
 // it stays reachable like the security page.
+// One-click PlayerAuctions cookie hand-off. Gated by its own shared secret, not
+// the admin session, so it is mounted here — ahead of the enforce2fa cascade —
+// where the browser extension (which carries no admin session) can reach it.
+// Off entirely until a secret is set (404 otherwise).
+app.use(paSessionInstallRoutes);
+// Buyer-facing Epic mail viewer. Lives under /mail with its own cookie auth;
+// mounted here so the admin cascade below never sees these requests.
+app.use(buyerMailRoutes);
+
 app.use(settingsRoutes);
+// Settings → Remembered devices (list / remove). Own devices only.
+app.use(trustedDeviceRoutes);
 app.use(enforce2fa, adminManageRoutes);
 
 // =========================
@@ -386,14 +469,61 @@ app.get("/bots.html", requireSuperadmin, enforce2fa, (req, res) => {
   res.sendFile(path.join(__dirname, "public", "bots.html"));
 });
 
-app.get("/noclaim-farm.html", requireSuperadmin, enforce2fa, (req, res) => {
-  res.sendFile(path.join(__dirname, "public", "noclaim-farm.html"));
+// DigitalOcean droplet creator (public/do-servers.html): spins up / lists /
+// destroys droplets that auto-deploy the twitch claim bot. Superadmin-only —
+// it spends real money and destroys infra, same tier as the Bots page.
+app.get("/do-servers.html", requireSuperadmin, enforce2fa, (req, res) => {
+  res.sendFile(path.join(__dirname, "public", "do-servers.html"));
 });
 
-// Web-token farm (superadmin only) — standalone TEST console for the
-// web-client-OAuth drop farmer, driven by the standalone WebBotAccount model.
-app.get("/webbot-farm.html", requireSuperadmin, enforce2fa, (req, res) => {
-  res.sendFile(path.join(__dirname, "public", "webbot-farm.html"));
+// Combined Unclaimed farms tab: auto-list panel + the two farm consoles
+// embedded as sections (?embed=1 hides each page's own sidebar).
+app.get("/unclaimed-farms.html", requireSuperadmin, enforce2fa, async (req, res) => {
+  try {
+    res.sendFile(path.join(__dirname, "public", "unclaimed-farms.html"));
+  } catch {
+    res.status(500).send("failed to read unclaimed-farms.html");
+  }
+});
+
+async function serveFarmPage(req, res, file) {
+  const fsp = require("fs/promises");
+  try {
+    const raw = await fsp.readFile(path.join(__dirname, "public", file), "utf8");
+    if (req.query.embed === "1") {
+      // Embed mode (inside the combined tab): hide the page's own sidebar —
+      // the wrapper page already renders the console nav.
+      res
+        .type("html")
+        .send(raw.replace('<aside class="nav"', '<aside class="nav" style="display:none"'));
+    } else {
+      res.type("html").send(raw);
+    }
+  } catch {
+    res.status(500).send("failed to read " + file);
+  }
+}
+
+app.get("/noclaim-farm.html", requireSuperadmin, enforce2fa, (req, res) => {
+  serveFarmPage(req, res, "noclaim-farm.html");
+});
+
+// Fleet sizing console. Gated like every other farm page — /farm2.html is
+// served by the blanket static mount and therefore has no auth on its shell,
+// which is not a pattern to copy.
+app.get("/farm-sizing.html", requireSuperadmin, enforce2fa, (req, res) => {
+  res.sendFile(path.join(__dirname, "public", "farm-sizing.html"));
+});
+
+app.get("/playerauctions.html", requireSuperadmin, enforce2fa, (req, res) => {
+  res.sendFile(path.join(__dirname, "public", "playerauctions.html"));
+});
+
+// FunPay resale console (utils/funpayResale.js): holds the FunPay login box and
+// the buy buttons, so it is superadmin + 2FA like the other money pages.
+app.get("/funpay-resale.html", requireSuperadmin, enforce2fa, (req, res) => {
+  res.set("Cache-Control", "no-store");
+  res.sendFile(path.join(__dirname, "public", "funpay-resale.html"));
 });
 
 app.get("/backup.html", requireSuperadmin, enforce2fa, (req, res) => {
@@ -402,6 +532,10 @@ app.get("/backup.html", requireSuperadmin, enforce2fa, (req, res) => {
 
 app.get("/drops-archive.html", requireSuperadmin, enforce2fa, (req, res) => {
   res.sendFile(path.join(__dirname, "public", "drops-archive.html"));
+});
+
+app.get("/spent-accounts.html", requireSuperadmin, enforce2fa, (req, res) => {
+  res.sendFile(path.join(__dirname, "public", "spent-accounts.html"));
 });
 
 // Marketplace integrity guard (superadmin only) — review queue for the
@@ -430,6 +564,12 @@ app.get("/epic-accounts.html", requireSuperadmin, enforce2fa, (req, res) => {
   res.sendFile(path.join(__dirname, "public", "epic-accounts.html"));
 });
 
+// Steam accounts (superadmin only) — accounts made by the Mac generator,
+// games loaded onto them, region checks, stage. docs/STEAM-ACCOUNTS.md.
+app.get("/steam-accounts.html", requireSuperadmin, enforce2fa, (req, res) => {
+  res.sendFile(path.join(__dirname, "public", "steam-accounts.html"));
+});
+
 // Shop listings manager (superadmin only) — build/publish manual listings.
 app.get("/listings.html", requireSuperadmin, enforce2fa, (req, res) => {
   res.sendFile(path.join(__dirname, "public", "listings.html"));
@@ -444,6 +584,13 @@ app.get("/research.html", requireSuperadmin, enforce2fa, (req, res) => {
 // health-check + auto-replace, and mint the buyer's inventory link.
 app.get("/bulk-orders.html", requireSuperadmin, enforce2fa, (req, res) => {
   res.sendFile(path.join(__dirname, "public", "bulk-orders.html"));
+});
+
+// Bulk packs (superadmin only) — proposes tiered bulk offers, publishes one only
+// when the owner clicks Send, then looks after the live ones
+// (docs/bulk-packs/CONTRACT.md). Gated here, before the static mount.
+app.get("/bulk-packs.html", requireSuperadmin, enforce2fa, (req, res) => {
+  res.sendFile(path.join(__dirname, "public", "bulk-packs.html"));
 });
 
 // Renters manager (superadmin only) — create renters, assign a bot slot, set
@@ -524,6 +671,51 @@ app.get("/reseller.html", requireReseller, (req, res) => {
   res.sendFile(path.join(__dirname, "public", "reseller.html"));
 });
 
+// The system-wide audit log is superadmin-only; gate the page before static
+// (its API is gated separately in activityRoutes).
+app.get("/activity.html", requireSuperadmin, enforce2fa, (req, res) => {
+  res.sendFile(path.join(__dirname, "public", "activity.html"));
+});
+
+// AI chatbot page — admin-only, so only the logged-in operator can spend the
+// provider key. Gated before static so an anonymous visitor is redirected to
+// the admin login rather than being served the page.
+app.get("/ai-chat.html", requireAdmin, enforce2fa, (req, res) => {
+  // Never let a browser serve a stale copy of the app shell — it changes often
+  // and a cached page can talk to a newer endpoint contract (and break).
+  res.set("Cache-Control", "no-store");
+  res.sendFile(path.join(__dirname, "public", "ai-chat.html"));
+});
+
+// Coworker Proposals inbox — superadmin-only, because approving a proposal can
+// run real actions through existing superadmin endpoints, in this operator's
+// own authenticated browser.
+app.get("/ai-proposals.html", requireSuperadmin, enforce2fa, (req, res) => {
+  res.set("Cache-Control", "no-store");
+  res.sendFile(path.join(__dirname, "public", "ai-proposals.html"));
+});
+
+// Price tracker page — superadmin-only, gated before static like /activity.html
+// (its API is gated per route inside routes/priceTrackerRoutes.js). Read-only.
+app.get("/price-tracker.html", requireSuperadmin, enforce2fa, (req, res) => {
+  res.set("Cache-Control", "no-store");
+  res.sendFile(path.join(__dirname, "public", "price-tracker.html"));
+});
+
+// SOOP drops farm (docs/SOOP-FARM.md) — superadmin-only. The page holds live
+// SOOP cookies server-side, so it is gated before static and never cached.
+app.get("/soop.html", requireSuperadmin, enforce2fa, (req, res) => {
+  res.set("Cache-Control", "no-store");
+  res.sendFile(path.join(__dirname, "public", "soop.html"));
+});
+
+// CHZZK drops farm (docs/CHZZK-FARM.md) — superadmin-only. Holds live Naver
+// cookies server-side; gated before static and never cached.
+app.get("/chzzk.html", requireSuperadmin, enforce2fa, (req, res) => {
+  res.set("Cache-Control", "no-store");
+  res.sendFile(path.join(__dirname, "public", "chzzk.html"));
+});
+
 app.use(express.static(path.join(__dirname, "public")));
 
 // =========================
@@ -559,6 +751,12 @@ app.use(enforce2fa, renterAdminRoutes);
 app.use(resellerAuthRoutes);
 app.use(resellerRoutes);
 app.use(enforce2fa, resellerAdminRoutes);
+// External account API (docs/ACCOUNT-API.md): a machine-to-machine
+// bearer-token realm that resolves a username to its client token across every
+// account source. Mounted BEFORE the blanket requireAdmin cascade — it presents
+// a static token, not a session, so the session guard would otherwise 401 it.
+// Every route inside self-guards with requireApiToken.
+app.use(accountApiRoutes);
 app.use(requireAdmin, enforce2fa, itemRoutes);
 app.use(requireAdmin, enforce2fa, inventoryRoutes);
 app.use(requireAdmin, enforce2fa, orderRoutes);
@@ -566,18 +764,75 @@ app.use(enforce2fa, botConfigRoutes);
 app.use(enforce2fa, botUpdateRoutes);
 app.use(enforce2fa, botHealthRoutes);
 app.use(enforce2fa, noclaimFarmRoutes);
-app.use(enforce2fa, webbotFarmRoutes);
+// Read-only PlayerAuctions console. It exists so the operator never has to open
+// member.playerauctions.com in a browser — signing in there rotates the session
+// id and kills the server's copy, which is the one thing that stops delivery.
+app.use(enforce2fa, playerauctionsRoutes);
+// FunPay resale API (every route requireSuperadmin). Loaded guarded: a broken
+// optional module must never stop the server from starting.
+try {
+  app.use(enforce2fa, require("./routes/funpayResaleRoutes"));
+} catch (err) {
+  console.error("funpayResaleRoutes failed to load:", err.message);
+}
+app.use(enforce2fa, unclaimedAutoRoutes);
+// No-claim Shop listings (docs/NOCLAIM-SHOP-LISTINGS-CONTRACT.md): the Listings
+// page's No-claim picker, sets and stock. Every route inside is superadmin-only.
+app.use(enforce2fa, noclaimStockRoutes);
+// Fleet sizing: how many accounts each game should farm, and how many of them
+// should be on sale. Reads are always available; the one endpoint that spends
+// accounts dry-runs unless explicitly told to apply.
+app.use(enforce2fa, farmSizingRoutes);
 app.use(enforce2fa, dropArchiveRoutes);
 app.use(enforce2fa, accountPoolRoutes);
+app.use(enforce2fa, spentAccountsRoutes);
 app.use(enforce2fa, autoFarmRoutes);
+app.use(enforce2fa, farm2Routes);
+app.use(enforce2fa, activityRoutes);
+// The health page: one read-only answer to "is everything working?", so nobody
+// has to re-check each marketplace by hand. Same admin cascade as /activity.
+app.use(enforce2fa, systemHealthRoutes);
+app.use(enforce2fa, marketplaceConsoleRoutes);
+// Price tracker (docs/PRICE-TRACKER-PLAN.md): what each market pays for the same
+// items, whether lower prices sell more, and what a listing should cost. READ-ONLY
+// — it never writes and never calls a marketplace. Every route is superadmin + 2FA.
+app.use(enforce2fa, priceTrackerRoutes.real());
+// SOOP drops farm: accounts, campaigns, bots and inventory. Every route inside
+// self-guards with requireSuperadmin; enforce2fa gates it behind 2FA.
+app.use(enforce2fa, soopRoutes);
+// CHZZK drops farm: accounts, campaigns, rewards. Same guard pattern.
+app.use(enforce2fa, chzzkRoutes);
+// Code shop (docs/code-shop/): stored reward codes as marketplace stock. Every
+// route inside self-guards with requireSuperadmin; the service loads on first use.
+app.use(enforce2fa, codeShopRoutes.router);
 app.use(enforce2fa, marketplaceRoutes);
+// Account listings (docs/ACCOUNT-LISTINGS-CONTRACT.md): owner-supplied account
+// stock. Mounted after marketplaceRoutes because it shares that tab's publish
+// modal, and every route inside is superadmin-only.
+app.use(enforce2fa, accountListingRoutes);
+// Bulk packs API (routes/bulkPackRoutes.js). No public routes, so it mounts
+// after the requireAdmin blanket; every route inside also self-guards with
+// requireSuperadmin.
+app.use(enforce2fa, bulkPackRoutes);
 app.use(enforce2fa, backupRoutes);
 app.use(enforce2fa, shopRoutes);
 app.use(enforce2fa, primeRoutes);
 app.use(enforce2fa, radarRoutes);
 app.use(enforce2fa, bannedRoutes);
 app.use(enforce2fa, epicAccountRoutes);
+app.use(enforce2fa, steamAccountRoutes);
+app.use(enforce2fa, steamSalesRoutes);
 app.use(enforce2fa, twitchFollowRoutes);
+// Drop-claim race UI (public/twitch-claim.html): port of the CLI spammer that
+// fires N parallel DropsPage_ClaimDropRewards mutations at one dropInstanceID
+// so Twitch's inventory service sees N distinct "devices" landing at once.
+// Each route self-guards with requireAdmin — enforce2fa gates it behind 2FA.
+app.use(enforce2fa, twitchClaimRoutes);
+// DigitalOcean droplet creator API (routes/digitalOceanRoutes.js). Each route
+// self-guards with requireSuperadmin; enforce2fa gates it behind 2FA.
+app.use(enforce2fa, digitalOceanRoutes);
+app.use(requireAdmin, enforce2fa, aiChatRoutes);
+
 // =========================
 // Socket.IO
 // =========================
@@ -606,11 +861,36 @@ mongoose
       .catch(() => {});
     server.listen(config.PORT, "0.0.0.0", () => {
       console.log(`Server started on http://0.0.0.0:${config.PORT}`);
-      catalogRoutes
-        .warmPublicCatalog()
-        .then(() => console.log("[catalog] public snapshot warmed"))
+      // Catalog v2 boot sequence: restore the persisted public snapshot so
+      // the storefront serves instantly, then rebuild it as before, then
+      // start the pre-order sync loop. Every step logs its own failure and
+      // never rejects, so a broken step can't take the others down.
+      Promise.resolve()
+        .then(() => catalogRoutes.restorePublicCatalog())
+        .then((restored) => {
+          if (restored) console.log("[catalog] snapshot restored");
+        })
         .catch((err) =>
-          console.error("[catalog] public snapshot warm failed:", err.message),
+          console.error("[catalog] snapshot restore failed:", err.message),
+        )
+        .then(() =>
+          catalogRoutes
+            .warmPublicCatalog()
+            .then(() => console.log("[catalog] public snapshot warmed"))
+            .catch((err) =>
+              console.error("[catalog] public snapshot warm failed:", err.message),
+            ),
+        )
+        .then(() => {
+          try {
+            catalogRoutes.startPreorderSyncLoop();
+            console.log("[catalog] preorder sync loop started");
+          } catch (err) {
+            console.error("[catalog] preorder sync loop failed to start:", err.message);
+          }
+        })
+        .catch((err) =>
+          console.error("[catalog] startup chain failed:", err.message),
         );
       // Prime the item inventory as soon as Mongo and HTTP are ready. Cold
       // archive aggregation takes tens of seconds on production-sized data, so
@@ -628,6 +908,12 @@ mongoose
     // something the bot can't handle) and pings Telegram — see
     // utils/botHealthMonitor.js.
     botHealthMonitor.start();
+    // Periodically re-verify pool accounts against Twitch. Until this ran, the
+    // pool was only ever checked on import or on an operator clicking Check —
+    // prod had 1,504 accounts unchecked for 30+ days while readyPoolQuery()
+    // still counted them as spendable supply, because a dead token keeps its
+    // last "ok" forever. See the sweep section in utils/accountPoolChecker.js.
+    accountPoolChecker.start();
     // Listen for admins confirming a Telegram link from inside the app's bot.
     // No-op when TG_TOKEN is unset.
     telegramBot.start();
@@ -640,6 +926,39 @@ mongoose
     // Keep the ZeusX seller token fresh from its (reusable) refresh token so the
     // auto-lister never dies on an expired token. No-op without ZeusX keys.
     zeusxTokenRefresher.start();
+    // Keep the Eldorado seller session alive (cookie auth, renewed in place via
+    // /authentication/refreshTokens) so the auto-lister and the delivery bot
+    // never die on a lapsed cookie. No-op without an Eldorado cookie.
+    eldoradoSessionRefresher.start();
+    // Eldorado auto-delivery: Eldorado has no credential vault for the Twitch
+    // Drops category, so paid orders are fulfilled by posting the login into the
+    // order's chat and marking it delivered. Self-guards on
+    // autoFarm.eldoradoAutoDeliver (and ships in dry-run until proven live).
+    eldoradoFulfiller.start();
+    // Same pair for PlayerAuctions. That account already carries 72 lifetime
+    // orders delivered by hand — one of them 7h27m after payment, past its
+    // 6-hour guarantee — so the delivery bot is closing a measured gap rather
+    // than opening a new market. Item offers there have no credential vault
+    // either ("Face to Face"), so the credential goes out as an order message
+    // and delivery is confirmed with a generated proof image, which the
+    // endpoint requires while the seller sits at level 0. Self-guards on
+    // autoFarm.playerauctionsAutoDeliver (and ships in dry-run until proven).
+    playerauctionsSessionRefresher.start();
+    playerauctionsFulfiller.start();
+    // PlayerAuctions allows ONE session per account, so the operator opening
+    // the site in a browser rotates the session id and invalidates the
+    // server's copy — unpreventable, and silent until a buyer is left waiting.
+    // This checks every 5 minutes and Telegrams once when it breaks.
+    playerauctionsSessionWatch.start();
+    // G2G. Every Twitch-Drops offer we sell there sits in Game Items, a
+    // MANUAL-delivery category with no code vault, so this drives G2G's own
+    // view-details -> delivering -> delivered-quantity state machine and hands
+    // the credential over in chat. The refresher keeps the pasted seller
+    // session alive (G2G access tokens are short-lived and mint from a stored
+    // refresh trio). Both self-guard on autoFarm.g2gAuto / g2gAutoDeliver and
+    // ship in dry-run, so this is a no-op until the operator flips them on.
+    g2gSessionRefresher.start();
+    g2gFulfiller.start();
     // Marketplace guardian: auto-feeds sold-down Plati/GGSel listings with
     // fresh accounts and flags cross-platform integrity issues for review.
     marketplaceGuardian.start();
@@ -649,22 +968,152 @@ mongoose
     // Drops radar: Twitch drop-campaign watcher (new farmable campaigns)
     // and Epic free-games watcher, both alerting via Telegram + the tab.
     campaignWatcher.start();
+    // Stream Scout: real-time "is a channel-locked drop watchable right now?"
+    // signal that lets botWaker park idle containers during broadcast gaps and
+    // wake them when a stream goes live. Self-guards on autoFarm.streamGate +
+    // streamGatedGames — a no-op (no Twitch calls) until a game is opted in.
+    streamScout.start();
+    // No-claim auto power: the same live/dark RAM saver as the Stream Scout, but
+    // for the standalone no-claim system's own containers (noclaim-bot-* on the
+    // Pi). Self-guards on autoFarm.noClaimStreamGate — no Twitch calls / no SSH
+    // until it is flipped on from the No-claim farming page.
+    noclaimWatcher.start();
+    // Unclaimed-farms auto-listing: lists + sells no-claim accounts, delists
+    // on expiry and returns all-expired accounts to the pool. Self-guards on
+    // autoFarm.unclaimedAutoList + the pause flag.
+    unclaimedAutoList.start();
+    // No-claim Shop listings: lifecycle pass + holdings sweep, self-guarded by
+    // settings.noclaimShop. Guarded here because this callback's catch is the
+    // "MongoDB connection error" exit — a broken optional module must never
+    // crash-loop the whole server.
+    try {
+      require("./utils/noclaimListings").start();
+    } catch (err) {
+      console.error("noclaimListings failed to start:", err.message);
+    }
+    // Bulk packs maintenance (maintains live offers; publishing needs autoFarm.bulkPacksEnabled)
+    // Guarded like noclaimListings above, for the same crash-loop reason.
+    try {
+      require("./utils/bulkPacks/loop").start();
+    } catch (err) {
+      console.error("bulkPacks loop failed to start:", err.message);
+    }
+    // FunPay resale watcher: public FunPay + Eldorado reads for the deals list,
+    // and the pause/resume of FunPay-backed listings. Buying happens only in the
+    // Eldorado fulfiller (and ships off). Guarded for the same crash-loop reason.
+    try {
+      require("./utils/funpayWatch").start();
+    } catch (err) {
+      console.error("funpayWatch failed to start:", err.message);
+    }
+    // FunPay login watch: pages once and pauses FunPay-backed listings when the
+    // owner's FunPay login has expired, resumes its own pauses when it works again.
+    try {
+      require("./utils/funpaySessionWatch").start();
+    } catch (err) {
+      console.error("funpaySessionWatch failed to start:", err.message);
+    }
+    // No-claim fleet allocator: sizes each no-claim game's farming fleet and its
+    // auto-list shelf from what the game actually sells. It MEASURES every pass
+    // (so the panel and the history exist either way) but only ACTS when
+    // autoFarm.noclaimAutoSize is on, which it is not by default.
+    unclaimedAllocator.start();
+    // Fleet metric history: a periodic snapshot of account / pool / listing
+    // counts so a future "the count dropped" question can be answered from data
+    // instead of guesswork. See utils/fleetSnapshot.js.
+    fleetSnapshot.start();
     epicWatcher.start();
     // Auto-farmer: turns new drop campaigns into running bots on the farm
     // host (or dry-run plans) - fully gated by the superadmin settings
     // switch, so starting it here is a no-op until it's enabled.
     autoFarmer.start();
+    // Event bundles: a game's farmed WAVES sold as ONE bundle
+    // (docs/AUTOFARM-BUNDLES-CONTRACT.md). It needs its own trigger because
+    // the auto-farmer's stacked-bundle sweep reads ACTIVE tasks only, while an
+    // event is worth bundling precisely once its waves have COMPLETED. Inert
+    // until autoFarm.enabled is on, and gated by autoFarm.autoFarmEventBundles.
+    autoLister.startEventBundleSweep();
     autoFarmSnapshot.start();
+    // Lane engine (utils/farm2/*): the reorganised farm + list pipeline — one
+    // isolated lane per game, a shared budget arbiter, and durable job rows
+    // instead of in-memory tick state. Doubly inert on a fresh deploy: it runs
+    // no cycles until autoFarm.farm2Enabled is turned on, and even then only
+    // acts on games that have a FarmLane row. A lane in "shadow" mode observes
+    // and compares without side effects; only a "live" lane takes its game off
+    // the legacy auto-farmer above.
+    farm2.start();
     // Epic accounts: refreshes stock-account tokens, re-syncs libraries and
     // sends one-tap claim links when live giveaways are missing.
     epicClaimer.start();
+    // Buyer-mail viewer housekeeping: stamps expired BuyerMailSession rows and
+    // auto-revokes any that see an "Epic email changed" mail land in the old
+    // inbox (buyer has moved the account to their own address — viewer no
+    // longer needs to be reachable). See utils/buyerSessionWatcher.js.
+    require("./utils/buyerSessionWatcher").start();
+    // Epic account sales: records Eldorado sales of the instant-delivery Epic
+    // listings, keeps their offers alive, and watches the Mac mail proxy while
+    // buyers depend on it. Reads Eldorado only while a listing is live; off
+    // from the Listings & sales tab. See utils/epicSales.js.
+    require("./utils/epicSales").start();
+    // Steam account sales (docs/STEAM-SALES.md): same sale sync for the Steam
+    // region offers. Reads Eldorado only while a Steam listing is live.
+    require("./utils/steamSales").start();
+    // Steam on G2G (Instant offers per country) + the distributor that decides
+    // Eldorado or G2G for each new Steam account. docs/STEAM-SALES.md (v2).
+    require("./utils/steamG2g").start();
+    require("./utils/steamDistributor").start();
+    require("./routes/steamBoostWorkerApi").start();
+    require("./utils/steamBoost").start();
+    // Epic accounts on G2G: the G2G fulfiller delivers their orders through
+    // utils/epicG2g; this sweep catches cancelled orders (accounts back on the
+    // shelf) and keeps the linked offers' stock numbers right.
+    require("./utils/epicG2g").start();
+    require("./utils/epicPa").start();
+    // Places new sellable Epic accounts on PA / Eldorado / G2G (starts in
+    // "plan" mode: shows what it would do, lists nothing until switched on).
+    require("./utils/epicDistributor").start();
     // Renters: stop the bots of renters whose lease just expired (the
     // requireRenter middleware already blocks their dashboard access, but this
     // makes farming actually halt without waiting for a manual suspend).
     renterExpiry.start();
+    // Rent-farm slots are the constraint that actually runs out — a paid
+    // "Automatic Farming" order needs a free slot in a bot config, not just a
+    // free pool account. Two orders were lost on 2026-09-08 while the pool
+    // reported 554 eligible and every stack was full. This says so in advance.
+    rentFarmCapacity.start();
+    // The bot hosts themselves: unreachable host, damaged container runtime
+    // (restored from the host's apt cache), and bots that died and Docker did
+    // not bring back. The Pi lost power on 2026-09-11 and nothing came back for
+    // five hours, silently, because every other monitor watches running bots.
+    hostWatchdog.start();
+    // Hourly read-only health run, so the answer to "is everything working?"
+    // is already waiting rather than being computed when someone finally asks.
+    systemHealthRoutes.start();
     // Twitch follow-bot: resumes any pending/running follow job that was
     // in flight when the server last stopped (see utils/twitchFollowRunner).
     twitchFollowRunner.start();
+    // SOOP drops farm (docs/SOOP-FARM.md): resumes any bot that was running
+    // when the process last stopped. Inert until an account is imported and a
+    // bot is started from the SOOP page.
+    soopFarm.start();
+    // CHZZK drops farm (docs/CHZZK-FARM.md): HTTP-only watch heartbeats +
+    // auto-read coupon codes. Inert until a Naver login is imported and the
+    // switch autoFarm.chzzkFarm is on (default true).
+    chzzkFarm.start();
+    // SOOP cookie auto-renew: every 3 h, re-mint SOOP cookies for logins
+    // whose health probe failed, via the Pi SOCKS tunnel + stored Twitch web
+    // cookies. Inert until a SoopAccount has a twitchLogin linked AND a
+    // matching TwitchWebCookie row exists.
+    soopCookieRefresher.start();
+    // Code shop (docs/code-shop/04-OPS.md): one tick every 5 min, inert while
+    // CODE_SHOP=0. A failure to start only logs; the rest of the server runs on.
+    try {
+      Promise.resolve(require("./utils/codeShop/service").service.start()).catch((err) =>
+        console.error("[code-shop] service did not start:", err && err.message),
+      );
+    } catch (err) {
+      console.error("[code-shop] service did not start:", err && err.message);
+    }
   })
   .catch((err) => {
     console.error("MongoDB connection error:", err.message);
