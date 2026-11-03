@@ -18,6 +18,7 @@ const BotAccount = require("../models/BotAccount");
 const { availableAccountsForSet } = require("../routes/shopRoutes");
 const { loginsOnActiveListings, notListed } = require("./listedLogins");
 const { decrypt } = require("./secretBox");
+const { TWITCH_CODE_TIP } = require("./twitchLoginTip");
 const {
   reserveSetOnAccount,
   releaseAccountsForTag,
@@ -57,10 +58,10 @@ function advertisedFor(listing, freeAccounts) {
 function eldoradoClaimGuide() {
   return (
     "HOW TO CLAIM\n" +
-    "1. Log in to this Twitch account and open " +
-    "https://www.twitch.tv/drops/inventory\n" +
-    '2. Scroll to the "Received" section at the bottom of the page.\n' +
-    '3. Click the purple "Connect" button under each item and follow the steps ' +
+    "1. Log in to this Twitch account. " + TWITCH_CODE_TIP + "\n" +
+    "2. Open https://www.twitch.tv/drops/inventory\n" +
+    '3. Scroll to the "Received" section at the bottom of the page.\n' +
+    '4. Click the purple "Connect" button under each item and follow the steps ' +
     "to link it to YOUR OWN game account.\n\n" +
     "KEEP IT LINKED\n" +
     "If this event is still running, more items can still land on this " +
@@ -87,12 +88,12 @@ function eldoradoClaimGuide() {
 function eldoradoUnclaimedGuide() {
   return (
     "HOW TO CLAIM\n" +
-    "1. Log in to this Twitch account and open " +
-    "https://www.twitch.tv/drops/inventory\n" +
-    "2. Your drops are waiting at the top of the page, all at 100%. First " +
+    "1. Log in to this Twitch account. " + TWITCH_CODE_TIP + "\n" +
+    "2. Open https://www.twitch.tv/drops/inventory\n" +
+    "3. Your drops are waiting at the top of the page, all at 100%. First " +
     'press "Connect" there and sign in with YOUR OWN game account — Twitch ' +
     "only lets a connected account claim.\n" +
-    '3. Then press "Claim Now" on each drop.\n\n' +
+    '4. Then press "Claim Now" on each drop.\n\n' +
     "CLAIM TODAY\n" +
     "Twitch removes unclaimed drops about 7 days after their event ends, and " +
     "that clock is already running — so please connect and claim them as soon " +
