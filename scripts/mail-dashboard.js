@@ -532,7 +532,9 @@ app.post("/api/epic/proxy", async (req, res) => {
 });
 
 app.get("/api/pool/capabilities", (_req, res) => {
-  res.json({ ok: true, exclusivePurposes: [...EXCLUSIVE_PURPOSES] });
+  let proxyConfigured = false;
+  try { proxyConfigured = !!require("../utils/epicLocalProxy").readProxy(); } catch {}
+  res.json({ ok: true, authority: "cloud", proxyConfigured, exclusivePurposes: [...EXCLUSIVE_PURPOSES] });
 });
 
 app.post("/api/pool/pick", (req, res) => {
